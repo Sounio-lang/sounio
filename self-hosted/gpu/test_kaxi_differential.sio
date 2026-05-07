@@ -1,0 +1,171 @@
+// self-hosted/gpu/test_kaxi_differential.sio — Differential validation driver
+//
+// Builds reference kernels, runs scalar + warp simulators, prints memory states
+// and standalone C code for each kernel. A shell script compiles the C code
+// with gcc and compares outputs.
+
+use gpu::kaxi_backend::*
+use gpu::kaxi_to_c::*
+
+fn emit_kernel_header(name: string) with IO {
+    println("")
+    println("---KERNEL ")
+    println(name)
+    println("---")
+}
+
+fn emit_sim_mem(state: KaxiSimState) with IO, Mut {
+    print("SIM_MEM:")
+    var i: i64 = 0
+    while i < 16 {
+        print(" ")
+        print_int(state.mem[i as usize])
+        i = i + 1
+    }
+    println("")
+}
+
+fn emit_warp_mem(warp: KaxiWarpState) with IO, Mut {
+    print("WARP_MEM:")
+    var i: i64 = 0
+    while i < 16 {
+        print(" ")
+        print_int(warp.mem[i as usize])
+        i = i + 1
+    }
+    println("")
+}
+
+fn emit_c_code(asm: KaxiAsmBuf, warp_size: i64) with IO, Mut, Panic, Div, Alloc {
+    let c = kaxi_transpile_to_c_standalone(asm, warp_size)
+    println("---C_CODE---")
+    println(c)
+    println("---C_CODE_END---")
+}
+
+fn check_mem_agree(scalar: KaxiSimState, warp: KaxiWarpState) -> bool with Mut {
+    var i: i64 = 0
+    while i < 16 {
+        if scalar.mem[i as usize] != warp.mem[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn run_kernel_vec_add() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("vec_add")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=0, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=10, seq=1")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=20, seq=2")
+    asm = kaxi_asm_push_line(asm, "add r3, r1, r2, var=+12.5%, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r3, addr=r0, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_code(asm, 1)
+    check_mem_agree(state, warp)
+}
+
+fn run_kernel_fma() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("fma")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=0, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=2, seq=1")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=3, seq=2")
+    asm = kaxi_asm_push_line(asm, "fma r3, r1, r2, var=+12.5%, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r3, addr=r0, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_code(asm, 1)
+    check_mem_agree(state, warp)
+}
+
+fn run_kernel_mul_div() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("mul_div")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=0, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=10, seq=1")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=20, seq=2")
+    asm = kaxi_asm_push_line(asm, "load_imm r3, imm=4, seq=3")
+    asm = kaxi_asm_push_line(asm, "mul r4, r1, r2, var=+62.5%, seq=4")
+    asm = kaxi_asm_push_line(asm, "div r5, r4, r3, var=+75%, seq=5")
+    asm = kaxi_asm_push_line(asm, "store_global r5, addr=r0, seq=6")
+    asm = kaxi_asm_push_line(asm, "ret seq=7")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_code(asm, 1)
+    check_mem_agree(state, warp)
+}
+
+fn run_kernel_multi_lane() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("multi_lane")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "get_tid r0, var=0%, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=10, seq=1")
+    asm = kaxi_asm_push_line(asm, "add r2, r0, r1, var=+12.5%, seq=2")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r0, seq=3")
+    asm = kaxi_asm_push_line(asm, "ret seq=4")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new_with_tid(0)
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_code(asm, 8)
+    state.mem[0] == warp.mem[0]
+}
+
+fn run_kernel_shared_memory() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("shared_memory")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=0, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=42, seq=1")
+    asm = kaxi_asm_push_line(asm, "store_shared r1, addr=r0, seq=2")
+    asm = kaxi_asm_push_line(asm, "load_shared r2, addr=r0, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r0, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_code(asm, 1)
+    check_mem_agree(state, warp)
+}
+
+pub fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var all_pass = true
+    if !run_kernel_vec_add() { println("FAIL vec_add mismatch"); all_pass = false }
+    if !run_kernel_fma() { println("FAIL fma mismatch"); all_pass = false }
+    if !run_kernel_mul_div() { println("FAIL mul_div mismatch"); all_pass = false }
+    if !run_kernel_multi_lane() { println("FAIL multi_lane mismatch"); all_pass = false }
+    if !run_kernel_shared_memory() { println("FAIL shared_memory mismatch"); all_pass = false }
+    if all_pass {
+        println("PASS differential_sim")
+    } else {
+        println("FAIL differential_sim")
+    }
+    0
+}

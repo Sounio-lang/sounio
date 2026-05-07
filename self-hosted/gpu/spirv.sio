@@ -829,7 +829,7 @@ fn spv_emit_composite_extract(buf: SpvBuf, type_id: i64, result_id: i64, composi
 // 4. spv_lower_single_op — lower one GPU IR opcode to SPIR-V
 // ============================================================================
 
-fn spv_lower_single_op(state: SpvCompileState, opcode: i64, dst_reg: i64, src_a_reg: i64, src_b_reg: i64, type_tag: i64) -> SpvCompileState with Mut, Panic, Div {
+fn spv_lower_single_op(state: SpvCompileState, opcode: i64, dst_reg: i64, src_a_reg: i64, src_b_reg: i64, type_tag: i64, imm: i64) -> SpvCompileState with Mut, Panic, Div {
     var s = state
     let tid = spv_type_id_for_tag(s.types, type_tag)
     let is_float = spv_is_float_tag(type_tag)
@@ -837,18 +837,20 @@ fn spv_lower_single_op(state: SpvCompileState, opcode: i64, dst_reg: i64, src_a_
 
     // GpuOpcode enum indices (matching kernel_ir.sio order)
     let GPU_OP_GET_TID: i64 = 0
+    let GPU_OP_MUL_IMM: i64 = 2
     let GPU_OP_ADD: i64 = 3
     let GPU_OP_SUB: i64 = 4
     let GPU_OP_MUL: i64 = 5
     let GPU_OP_DIV: i64 = 6
-    let GPU_OP_BARRIER_SYNC: i64 = 8
-    let GPU_OP_SHFL_DOWN: i64 = 9
-    let GPU_OP_LOAD_GLOBAL: i64 = 13
-    let GPU_OP_STORE_GLOBAL: i64 = 14
-    let GPU_OP_SETP_LT: i64 = 21
-    let GPU_OP_SETP_LE: i64 = 22
-    let GPU_OP_SETP_EQ: i64 = 23
-    let GPU_OP_SETP_GE: i64 = 24
+    let GPU_OP_BARRIER_SYNC: i64 = 9
+    let GPU_OP_SHFL_DOWN: i64 = 10
+    let GPU_OP_LOAD_PARAM: i64 = 13
+    let GPU_OP_LOAD_GLOBAL: i64 = 15
+    let GPU_OP_STORE_GLOBAL: i64 = 16
+    let GPU_OP_SETP_LT: i64 = 22
+    let GPU_OP_SETP_LE: i64 = 23
+    let GPU_OP_SETP_EQ: i64 = 24
+    let GPU_OP_SETP_GE: i64 = 25
 
     // ---- GpuAdd ----
     if opcode == GPU_OP_ADD {
@@ -907,6 +909,37 @@ fn spv_lower_single_op(state: SpvCompileState, opcode: i64, dst_reg: i64, src_a_
             s.buf = spv_emit_binary_op(s.buf, OP_SDIV, tid, result_id, src_a_id, src_b_id)
         } else {
             s.buf = spv_emit_binary_op(s.buf, OP_UDIV, tid, result_id, src_a_id, src_b_id)
+        }
+        s.reg_map = spv_reg_map_insert(s.reg_map, dst_reg, result_id)
+        return s
+    }
+
+    // ---- GpuLoadParam ----
+    // Map dst_reg to the SPIR-V ID of the parameter variable.
+    // The parameter variable ID is stored in param_var_ids[param_idx].
+    // For now, we encode param_idx in src_a_reg (the caller must set it).
+    if opcode == GPU_OP_LOAD_PARAM {
+        let param_idx = src_a_reg
+        if param_idx >= 0 && param_idx < 8 {
+            let var_id = s.param_var_ids[param_idx as usize]
+            s.reg_map = spv_reg_map_insert(s.reg_map, dst_reg, var_id)
+        }
+        return s
+    }
+
+    // ---- GpuMulImm ----
+    // Emit a constant with the immediate value, then multiply.
+    if opcode == GPU_OP_MUL_IMM {
+        let (ids_c, const_id) = spv_alloc_id(s.ids)
+        s.ids = ids_c
+        s.buf = spv_emit_constant_u32(s.buf, s.types.uint_id, const_id, imm)
+        let (ids_m, result_id) = spv_alloc_id(s.ids)
+        s.ids = ids_m
+        let src_a_id = spv_reg_map_lookup(s.reg_map, src_a_reg)
+        if is_float {
+            s.buf = spv_emit_binary_op(s.buf, OP_FMUL, tid, result_id, src_a_id, const_id)
+        } else {
+            s.buf = spv_emit_binary_op(s.buf, OP_IMUL, tid, result_id, src_a_id, const_id)
         }
         s.reg_map = spv_reg_map_insert(s.reg_map, dst_reg, result_id)
         return s
@@ -1026,7 +1059,7 @@ fn spv_lower_single_op(state: SpvCompileState, opcode: i64, dst_reg: i64, src_a_
 // 5. gpu_lower_to_spirv — full pipeline entry point
 // ============================================================================
 
-fn gpu_lower_to_spirv(kernel_name: string, param_count: i64, ops_opcodes: [i64; 256], ops_dst: [i64; 256], ops_src_a: [i64; 256], ops_src_b: [i64; 256], ops_type_tags: [i64; 256], ops_count: i64) -> SpvBuf with Mut, Panic, Div {
+fn gpu_lower_to_spirv(kernel_name: string, param_count: i64, ops_opcodes: [i64; 256], ops_dst: [i64; 256], ops_src_a: [i64; 256], ops_src_b: [i64; 256], ops_type_tags: [i64; 256], ops_imm: [i64; 256], ops_count: i64) -> SpvBuf with Mut, Panic, Div {
     var s = spv_compile_state_new()
 
     // We build the module body first, then prepend the header with the final ID bound.
@@ -1096,7 +1129,8 @@ fn gpu_lower_to_spirv(kernel_name: string, param_count: i64, ops_opcodes: [i64; 
                 ops_dst[oi as usize],
                 ops_src_a[oi as usize],
                 ops_src_b[oi as usize],
-                ops_type_tags[oi as usize]
+                ops_type_tags[oi as usize],
+                ops_imm[oi as usize]
             )
         }
         oi = oi + 1
@@ -1136,8 +1170,9 @@ fn spirv_self_check_magic() -> bool with Mut, Panic, Div {
     var src_a: [i64; 256] = [0; 256]
     var src_b: [i64; 256] = [0; 256]
     var tags: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
 
-    let buf = gpu_lower_to_spirv("test_kernel", 2, opcodes, dsts, src_a, src_b, tags, 0)
+    let buf = gpu_lower_to_spirv("test_kernel", 2, opcodes, dsts, src_a, src_b, tags, imm, 0)
 
     // Check magic number is first word
     let magic_ok = buf.words[0] == SPIRV_MAGIC
@@ -1158,6 +1193,7 @@ fn spirv_self_check_add_kernel() -> bool with Mut, Panic, Div {
     var src_a: [i64; 256] = [0; 256]
     var src_b: [i64; 256] = [0; 256]
     var tags: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
 
     opcodes[0] = 3   // GpuAdd
     dsts[0] = 2
@@ -1165,7 +1201,7 @@ fn spirv_self_check_add_kernel() -> bool with Mut, Panic, Div {
     src_b[0] = 1
     tags[0] = SPV_TAG_F32
 
-    let buf = gpu_lower_to_spirv("vec_add", 3, opcodes, dsts, src_a, src_b, tags, 1)
+    let buf = gpu_lower_to_spirv("vec_add", 3, opcodes, dsts, src_a, src_b, tags, imm, 1)
 
     // Must have SPIR-V magic
     let magic_ok = buf.words[0] == SPIRV_MAGIC
@@ -1181,12 +1217,13 @@ fn spirv_self_check_tid_kernel() -> bool with Mut, Panic, Div {
     var src_a: [i64; 256] = [0; 256]
     var src_b: [i64; 256] = [0; 256]
     var tags: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
 
     opcodes[0] = 0   // GpuGetTid
     dsts[0] = 0
     tags[0] = SPV_TAG_U32
 
-    let buf = gpu_lower_to_spirv("tid_test", 1, opcodes, dsts, src_a, src_b, tags, 1)
+    let buf = gpu_lower_to_spirv("tid_test", 1, opcodes, dsts, src_a, src_b, tags, imm, 1)
 
     // Must have SPIR-V magic and reasonable size
     let magic_ok = buf.words[0] == SPIRV_MAGIC
@@ -1222,6 +1259,7 @@ fn spirv_emit_vec_add_kernel() -> SpvBuf with Mut, Panic, Div {
     var src_a: [i64; 256] = [0; 256]
     var src_b: [i64; 256] = [0; 256]
     var tags: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
 
     opcodes[0] = 0   // GpuGetTid
     dsts[0] = 0
@@ -1233,7 +1271,7 @@ fn spirv_emit_vec_add_kernel() -> SpvBuf with Mut, Panic, Div {
     src_b[1] = 1
     tags[1] = SPV_TAG_F32
 
-    gpu_lower_to_spirv("vec_add", 3, opcodes, dsts, src_a, src_b, tags, 2)
+    gpu_lower_to_spirv("vec_add", 3, opcodes, dsts, src_a, src_b, tags, imm, 2)
 }
 
 fn spirv_emit_tid_kernel() -> SpvBuf with Mut, Panic, Div {
@@ -1242,12 +1280,65 @@ fn spirv_emit_tid_kernel() -> SpvBuf with Mut, Panic, Div {
     var src_a: [i64; 256] = [0; 256]
     var src_b: [i64; 256] = [0; 256]
     var tags: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
 
     opcodes[0] = 0   // GpuGetTid
     dsts[0] = 0
     tags[0] = SPV_TAG_U32
 
-    gpu_lower_to_spirv("tid_kernel", 1, opcodes, dsts, src_a, src_b, tags, 1)
+    gpu_lower_to_spirv("tid_kernel", 1, opcodes, dsts, src_a, src_b, tags, imm, 1)
+}
+
+fn spirv_self_check_mulimm_kernel() -> bool with Mut, Panic, Div {
+    // Build a kernel with one mul_imm op: dst=1, src_a=0, imm=4, u32
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var tags: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
+
+    opcodes[0] = 2    // GpuMulImm
+    dsts[0] = 1
+    src_a[0] = 0
+    imm[0] = 4
+    tags[0] = SPV_TAG_U32
+
+    let buf = gpu_lower_to_spirv("mulimm_test", 1, opcodes, dsts, src_a, src_b, tags, imm, 1)
+
+    let magic_ok = buf.words[0] == SPIRV_MAGIC
+    let size_ok = buf.word_count > 20
+    magic_ok && size_ok
+}
+
+fn spirv_self_check_loadparam_kernel() -> bool with Mut, Panic, Div {
+    // Build a kernel with one load_param op: dst=0, param_idx=0
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var tags: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
+
+    opcodes[0] = 13   // GpuLoadParam
+    dsts[0] = 0
+    src_a[0] = 0      // param_idx
+    tags[0] = SPV_TAG_U32
+
+    let buf = gpu_lower_to_spirv("loadparam_test", 1, opcodes, dsts, src_a, src_b, tags, imm, 1)
+
+    let magic_ok = buf.words[0] == SPIRV_MAGIC
+    let size_ok = buf.word_count > 20
+    magic_ok && size_ok
+}
+
+fn spirv_self_check() -> bool with Mut, Panic, Div {
+    let t1 = spirv_self_check_magic()
+    let t2 = spirv_self_check_add_kernel()
+    let t3 = spirv_self_check_tid_kernel()
+    let t4 = spirv_self_check_mulimm_kernel()
+    let t5 = spirv_self_check_loadparam_kernel()
+    t1 && t2 && t3 && t4 && t5
 }
 
 fn spirv_driver_self_check() -> bool with Mut, Panic, Div {

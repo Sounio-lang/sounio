@@ -2245,6 +2245,105 @@ fn hlir_kernels_to_metal(module: HlirModule) -> MetalBuf with Mut, Panic, Div, A
 
 // Extract all kernel functions and lower to CUDA Tile IR (MLIR dialect text).
 // Returns a TileBuf containing all kernels as cuda_tile.module blocks.
+// Map GpuOpcode enum variant → K-AXI numeric tag (matches gpu_lower_to_kaxi constants).
+fn gpu_opcode_to_kaxi_tag(op: GpuOpcode) -> i64 {
+    if op == GpuOpcode::GpuGetTid      { return GpuOpcodeGetTid }
+    if op == GpuOpcode::GpuCvt         { return GpuOpcodeCvt }
+    if op == GpuOpcode::GpuMulImm      { return GpuOpcodeMulImm }
+    if op == GpuOpcode::GpuAdd         { return GpuOpcodeAdd }
+    if op == GpuOpcode::GpuSub         { return GpuOpcodeSub }
+    if op == GpuOpcode::GpuMul         { return GpuOpcodeMul }
+    if op == GpuOpcode::GpuDiv         { return GpuOpcodeDiv }
+    if op == GpuOpcode::GpuMax         { return GpuOpcodeMax }
+    if op == GpuOpcode::GpuMin         { return GpuOpcodeMin }
+    if op == GpuOpcode::GpuAnd         { return GpuOpcodeAnd }
+    if op == GpuOpcode::GpuOr          { return GpuOpcodeOr }
+    if op == GpuOpcode::GpuXor         { return GpuOpcodeXor }
+    if op == GpuOpcode::GpuShl         { return GpuOpcodeShl }
+    if op == GpuOpcode::GpuLoadGlobal  { return GpuOpcodeLoadGlobal }
+    if op == GpuOpcode::GpuStoreGlobal { return GpuOpcodeStoreGlobal }
+    if op == GpuOpcode::GpuRet         { return GpuOpcodeRet }
+    if op == GpuOpcode::GpuFma         { return GpuOpcodeFma }
+    if op == GpuOpcode::GpuGetBid      { return GpuOpcodeGetBid }
+    if op == GpuOpcode::GpuGetNtid     { return GpuOpcodeGetNtid }
+    if op == GpuOpcode::GpuAddImm      { return GpuOpcodeAddImm }
+    if op == GpuOpcode::GpuBarrierSync { return GpuOpcodeBarrierSync }
+    if op == GpuOpcode::GpuSetpLt      { return GpuOpcodeSetpLt }
+    if op == GpuOpcode::GpuSetpLe      { return GpuOpcodeSetpLe }
+    if op == GpuOpcode::GpuSetpEq      { return GpuOpcodeSetpEq }
+    if op == GpuOpcode::GpuSetpGe      { return GpuOpcodeSetpGe }
+    if op == GpuOpcode::GpuSelp        { return GpuOpcodeSelp }
+    if op == GpuOpcode::GpuAtomicAdd   { return GpuOpcodeAtomicAdd }
+    if op == GpuOpcode::GpuAtomicSub   { return GpuOpcodeAtomicSub }
+    if op == GpuOpcode::GpuAtomicMin   { return GpuOpcodeAtomicMin }
+    if op == GpuOpcode::GpuAtomicMax   { return GpuOpcodeAtomicMax }
+    if op == GpuOpcode::GpuSqrt        { return GpuOpcodeSqrt }
+    if op == GpuOpcode::GpuAbs         { return GpuOpcodeAbs }
+    if op == GpuOpcode::GpuNeg         { return GpuOpcodeNeg }
+    if op == GpuOpcode::GpuSetpGt      { return GpuOpcodeSetpGt }
+    if op == GpuOpcode::GpuSetpNe      { return GpuOpcodeSetpNe }
+    if op == GpuOpcode::GpuLoadParam   { return GpuOpcodeLoadParam }
+    0
+}
+
+// Extract all kernel functions and lower to K-AXI epistemic assembly.
+// Returns a KaxiAsmBuf containing all kernels concatenated with separators.
+fn hlir_kernels_to_kaxi(module: HlirModule) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var combined = kaxi_asm_new()
+    let kcount = hlir_extract_kernel_count(module)
+    if kcount == 0 {
+        return combined
+    }
+    var ki: i64 = 0
+    while ki < kcount {
+        let fidx = hlir_get_kernel_index(module, ki)
+        if fidx >= 0 {
+            let func = module.functions[fidx as usize]
+            let gpu_kernel = hlir_function_to_gpu_kernel(func)
+
+            // Flatten GpuKernelIr ops into the flat arrays expected by gpu_lower_to_kaxi
+            var ops_opcodes: [i64; 256] = [0; 256]
+            var ops_dst:     [i64; 256] = [0; 256]
+            var ops_src_a:   [i64; 256] = [0; 256]
+            var ops_src_b:   [i64; 256] = [0; 256]
+            var ops_imm:     [i64; 256] = [0; 256]
+            var op_count: i64 = 0
+            while op_count < gpu_kernel.op_count && op_count < 256 {
+                let op = gpu_kernel.ops[op_count as usize]
+                let tag = gpu_opcode_to_kaxi_tag(op.opcode)
+                ops_opcodes[op_count as usize] = tag
+                ops_dst[op_count as usize]     = op.dst_reg
+                if op.opcode == GpuOpcode::GpuLoadGlobal {
+                    ops_src_a[op_count as usize] = op.addr_reg
+                    ops_src_b[op_count as usize] = 0
+                } else if op.opcode == GpuOpcode::GpuStoreGlobal {
+                    ops_src_a[op_count as usize] = op.src_reg
+                    ops_src_b[op_count as usize] = op.addr_reg
+                } else if op.opcode == GpuOpcode::GpuMulImm || op.opcode == GpuOpcode::GpuAddImm {
+                    ops_src_a[op_count as usize] = 0
+                    ops_src_b[op_count as usize] = 0
+                    ops_imm[op_count as usize]   = op.rhs_imm
+                } else if op.opcode == GpuOpcode::GpuLoadParam {
+                    ops_src_a[op_count as usize] = 0
+                    ops_src_b[op_count as usize] = 0
+                    ops_imm[op_count as usize]   = op.param_idx
+                } else {
+                    ops_src_a[op_count as usize] = op.lhs_reg
+                    ops_src_b[op_count as usize] = op.rhs_reg
+                }
+                op_count = op_count + 1
+            }
+
+            let kaxi = gpu_lower_to_kaxi(ops_opcodes, ops_dst, ops_src_a, ops_src_b, ops_imm, op_count)
+            combined = kaxi_asm_buf_append(combined, kaxi)
+        }
+        ki = ki + 1
+    }
+    combined
+}
+
+// Extract all kernel functions and lower to CUDA Tile IR (MLIR dialect text).
+// Returns a TileBuf containing all kernels as cuda_tile.module blocks.
 fn hlir_kernels_to_cuda_tile(module: HlirModule) -> TileBuf with Mut, Panic, Div, Alloc {
     var combined = tile_buf_new()
     let kcount = hlir_extract_kernel_count(module)

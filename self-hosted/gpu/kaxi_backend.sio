@@ -36,6 +36,13 @@ let KAXI_OP_SELP: i64 = 21
 let KAXI_OP_LOAD_SHARED: i64 = 22
 let KAXI_OP_STORE_SHARED: i64 = 23
 let KAXI_OP_NOP: i64 = 15
+let KAXI_OP_BRANCH: i64 = 24
+let KAXI_OP_RECONVERGE: i64 = 25
+let KAXI_OP_VOTE_BALLOT: i64 = 26
+let KAXI_OP_SHUFFLE_XOR: i64 = 27
+let KAXI_OP_WARP_REDUCE_ADD: i64 = 28
+
+let KAXI_WARP_SIZE: i64 = 8
 
 // GPU IR opcode constants (matching hlir_to_gpu.sio)
 let GPU_IR_GET_TID: i64 = 0
@@ -97,7 +104,7 @@ fn kaxi_variance_fma(v: i64) -> i64 {
 // Flag packing (matches kaxi_fabric_emitter.sio)
 // ============================================================================
 
-fn kaxi_flags_pack(op_kind: i64, success_inc: i64, failure_inc: i64, alpha_q8: i64) -> i64 {
+pub fn kaxi_flags_pack(op_kind: i64, success_inc: i64, failure_inc: i64, alpha_q8: i64) -> i64 {
     let op = op_kind & 0x1F
     let failure = (failure_inc & 0xFF) << 8
     let success = (success_inc & 0xFF) << 16
@@ -105,7 +112,7 @@ fn kaxi_flags_pack(op_kind: i64, success_inc: i64, failure_inc: i64, alpha_q8: i
     op | failure | success | alpha
 }
 
-fn kaxi_flags_unpack_op_kind(flags: i64) -> i64 {
+pub fn kaxi_flags_unpack_op_kind(flags: i64) -> i64 {
     flags & 0x1F
 }
 
@@ -125,7 +132,7 @@ struct KaxiTxnStream {
     count: i64,
 }
 
-fn kaxi_txn_stream_new() -> KaxiTxnStream {
+pub fn kaxi_txn_stream_new() -> KaxiTxnStream {
     KaxiTxnStream {
         value_bits: [0; 256],
         variance_bits: [0; 256],
@@ -165,14 +172,14 @@ struct KaxiAsmBuf {
     len: i64,
 }
 
-fn kaxi_asm_new() -> KaxiAsmBuf {
+pub fn kaxi_asm_new() -> KaxiAsmBuf {
     KaxiAsmBuf {
         data: [0; 16384],
         len: 0,
     }
 }
 
-fn kaxi_asm_push_byte(buf: KaxiAsmBuf, b: i8) -> KaxiAsmBuf with Mut, Panic {
+pub fn kaxi_asm_push_byte(buf: KaxiAsmBuf, b: i8) -> KaxiAsmBuf with Mut, Panic {
     var out = buf
     if out.len >= 0 && out.len < 16384 {
         out.data[out.len as usize] = b
@@ -181,7 +188,7 @@ fn kaxi_asm_push_byte(buf: KaxiAsmBuf, b: i8) -> KaxiAsmBuf with Mut, Panic {
     out
 }
 
-fn kaxi_asm_push_str(buf: KaxiAsmBuf, s: string) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+pub fn kaxi_asm_push_str(buf: KaxiAsmBuf, s: string) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
     var out = buf
     let n = str_len(s)
     var i: i64 = 0
@@ -212,7 +219,7 @@ fn kaxi_asm_buf_append(a: KaxiAsmBuf, b: KaxiAsmBuf) -> KaxiAsmBuf with Mut, Pan
     out
 }
 
-fn kaxi_asm_to_string(buf: KaxiAsmBuf) -> string with Mut, Panic, Div, Alloc {
+pub fn kaxi_asm_to_string(buf: KaxiAsmBuf) -> string with Mut, Panic, Div, Alloc {
     var s = ""
     var i: i64 = 0
     while i < buf.len {
@@ -226,9 +233,16 @@ fn kaxi_asm_to_string(buf: KaxiAsmBuf) -> string with Mut, Panic, Div, Alloc {
         else if ch == 46 { s = str_concat(s, ".") }
         else if ch == 59 { s = str_concat(s, ";") }
         else if ch == 95 { s = str_concat(s, "_") }
+        else if ch == 35 { s = str_concat(s, "#") }
         else if ch == 45 { s = str_concat(s, "-") }
+        else if ch == 60 { s = str_concat(s, "<") }
+        else if ch == 62 { s = str_concat(s, ">") }
         else if ch == 40 { s = str_concat(s, "(") }
         else if ch == 41 { s = str_concat(s, ")") }
+        else if ch == 91 { s = str_concat(s, "[") }
+        else if ch == 93 { s = str_concat(s, "]") }
+        else if ch == 123 { s = str_concat(s, "{") }
+        else if ch == 125 { s = str_concat(s, "}") }
         else if ch == 48 { s = str_concat(s, "0") }
         else if ch == 49 { s = str_concat(s, "1") }
         else if ch == 50 { s = str_concat(s, "2") }
@@ -769,6 +783,11 @@ fn kaxi_assemble(asm: KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Div, Alloc {
                     else if c0 == 114 && c1 == 101 && c2 == 116 { parse_ok = 1; opc = KAXI_OP_RET; dst = 0; src_a = 0; src_b = 0 }
                     else if c0 == 98 && c1 == 97 && c2 == 114 { parse_ok = 1; opc = KAXI_OP_BARRIER; dst = 0; src_a = 0; src_b = 0 }
                     else if c0 == 110 && c1 == 111 && c2 == 112 { parse_ok = 1; opc = KAXI_OP_NOP; dst = 0; src_a = 0; src_b = 0 }
+                    else if c0 == 98 && c1 == 114 && c2 == 97 && c3 == 110 && c4 == 99 && c5 == 104 { opc = KAXI_OP_BRANCH; parse_ok = 1 }
+                    else if c0 == 114 && c1 == 101 && c2 == 99 && c3 == 111 && c4 == 110 && c5 == 118 && c6 == 101 && c7 == 114 && c8 == 103 && c9 == 101 { parse_ok = 1; opc = KAXI_OP_RECONVERGE; dst = 0; src_a = 0; src_b = 0 }
+                    else if c0 == 118 && c1 == 111 && c2 == 116 && c3 == 101 && c4 == 46 && c5 == 98 { opc = KAXI_OP_VOTE_BALLOT; parse_ok = 1 }
+                    else if c0 == 115 && c1 == 104 && c2 == 117 && c3 == 102 && c4 == 102 && c5 == 108 && c6 == 101 && c7 == 46 && c8 == 120 { opc = KAXI_OP_SHUFFLE_XOR; parse_ok = 1 }
+                    else if c0 == 119 && c1 == 97 && c2 == 114 && c3 == 112 && c4 == 46 && c5 == 114 && c6 == 101 && c7 == 100 && c8 == 117 && c9 == 99 { opc = KAXI_OP_WARP_REDUCE_ADD; parse_ok = 1 }
                     // load_imm
                     else if c0 == 108 && c1 == 111 && c2 == 97 && c3 == 100 && c4 == 95 && c5 == 105 && c6 == 109 && c7 == 109 {
                         opc = KAXI_OP_LOAD_IMM
@@ -922,6 +941,30 @@ fn kaxi_assemble(asm: KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Div, Alloc {
                                     pos = pos + 1
                                 }
                             }
+                            else if asm.data[pos as usize] as i8 == 116 {
+                                // check for "target="
+                                if pos + 7 < end_pos && asm.data[(pos + 1) as usize] as i8 == 97
+                                                && asm.data[(pos + 2) as usize] as i8 == 114
+                                                && asm.data[(pos + 3) as usize] as i8 == 103
+                                                && asm.data[(pos + 4) as usize] as i8 == 101
+                                                && asm.data[(pos + 5) as usize] as i8 == 116
+                                                && asm.data[(pos + 6) as usize] as i8 == 61 {
+                                    pos = pos + 7
+                                    var num: i64 = 0
+                                    while pos < end_pos {
+                                        let ch = asm.data[pos as usize] as i8
+                                        if ch >= 48 && ch <= 57 {
+                                            num = num * 10 + (ch - 48) as i64
+                                            pos = pos + 1
+                                        } else {
+                                            break
+                                        }
+                                    }
+                                    if src_a < 0 { src_a = num } else { src_b = num }
+                                } else {
+                                    pos = pos + 1
+                                }
+                            }
                             else {
                                 pos = pos + 1
                             }
@@ -930,6 +973,10 @@ fn kaxi_assemble(asm: KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Div, Alloc {
                 }
 
                 if parse_ok == 1 && opc >= 0 {
+                    // BRANCH: if no fallthrough target, default to next instruction
+                    if opc == KAXI_OP_BRANCH && src_b < 0 {
+                        src_b = stream.count + 1
+                    }
                     let flags = kaxi_flags_pack(opc, 1, 0, 16)
                     let packed_dst = if dst < 0 { 0 } else { dst }
                     let packed_src_a = if src_a < 0 { 0 } else { src_a }
@@ -1027,6 +1074,312 @@ fn kaxi_sim_new_with_tid(tid: i64) -> KaxiSimState {
         arith_ops: 0,
         barriers: 0,
     }
+}
+
+// ============================================================================
+// K-AXI Warp-Level Simulator
+// ============================================================================
+
+struct KaxiWarpState {
+    // Per-lane register files (lane-major flat arrays)
+    reg_val: [i64; 512],   // 64 regs * 8 lanes
+    reg_var: [i64; 512],
+    reg_prov: [i64; 512],
+    reg_conf: [i64; 512],
+    pred: [bool; 64],       // 8 pred * 8 lanes
+    // Per-lane control state
+    active: [bool; 8],
+    pc: [i64; 8],
+    // Shared resources
+    mem: [i64; 1024],
+    shared_mem: [i64; 256],
+    // Reconvergence stack
+    reconverge_stack: [i64; 64],
+    stack_depth: i64,
+    cycle: i64,
+    // Perf counters
+    instr_count: i64,
+    mem_reads: i64,
+    mem_writes: i64,
+    arith_ops: i64,
+    barriers: i64,
+    divergent_branches: i64,
+    reconvergence_events: i64,
+}
+
+fn kaxi_warp_new() -> KaxiWarpState {
+    KaxiWarpState {
+        reg_val: [0; 512],
+        reg_var: [0; 512],
+        reg_prov: [0; 512],
+        reg_conf: [0xFFFFFFFF; 512],
+        pred: [false; 64],
+        active: [true; 8],
+        pc: [0; 8],
+        mem: [0; 1024],
+        shared_mem: [0; 256],
+        reconverge_stack: [0; 64],
+        stack_depth: 0,
+        cycle: 0,
+        instr_count: 0,
+        mem_reads: 0,
+        mem_writes: 0,
+        arith_ops: 0,
+        barriers: 0,
+        divergent_branches: 0,
+        reconvergence_events: 0,
+    }
+}
+
+fn kaxi_warp_exec(state: KaxiWarpState, stream: KaxiTxnStream) -> KaxiWarpState with IO, Mut, Panic {
+    var s = state
+    var done: bool = false
+    while !done {
+        // Find minimum PC among active lanes
+        var next_pc: i64 = -1
+        var lane: i64 = 0
+        while lane < KAXI_WARP_SIZE {
+            if s.active[lane as usize] {
+                if next_pc < 0 || s.pc[lane as usize] < next_pc {
+                    next_pc = s.pc[lane as usize]
+                }
+            }
+            lane = lane + 1
+        }
+        if next_pc < 0 || next_pc >= stream.count {
+            done = true
+        } else {
+            let raw_flags = stream.flags[next_pc as usize]
+            let opc = kaxi_flags_unpack_op_kind(raw_flags)
+            let value = stream.value_bits[next_pc as usize]
+            let dst = (value >> 32) & 0xFFFF
+            let src_a = (value >> 16) & 0xFFFF
+            let src_b = value & 0xFFFF
+            let pred_idx = (value >> 48) & 0xFF
+
+            // Count lanes at this PC
+            var lanes_here: i64 = 0
+            lane = 0
+            while lane < KAXI_WARP_SIZE {
+                if s.active[lane as usize] && s.pc[lane as usize] == next_pc {
+                    lanes_here = lanes_here + 1
+                }
+                lane = lane + 1
+            }
+
+            // Execute for all lanes at this PC
+            lane = 0
+            while lane < KAXI_WARP_SIZE {
+                if s.active[lane as usize] && s.pc[lane as usize] == next_pc {
+                    let base = lane * 64
+                    if opc == KAXI_OP_LOAD_IMM {
+                        s.reg_val[(base + dst) as usize] = src_a
+                    }
+                    else if opc == KAXI_OP_LOAD_PARAM {
+                        s.reg_val[(base + dst) as usize] = src_a
+                    }
+                    else if opc == KAXI_OP_LOAD_GLOBAL {
+                        let addr = s.reg_val[(base + src_a) as usize]
+                        if addr >= 0 && addr < 1024 {
+                            s.reg_val[(base + dst) as usize] = s.mem[addr as usize]
+                        }
+                        s.mem_reads = s.mem_reads + 1
+                    }
+                    else if opc == KAXI_OP_STORE_GLOBAL {
+                        let addr = s.reg_val[(base + src_a) as usize]
+                        if addr >= 0 && addr < 1024 {
+                            s.mem[addr as usize] = s.reg_val[(base + dst) as usize]
+                        }
+                        s.mem_writes = s.mem_writes + 1
+                    }
+                    else if opc == KAXI_OP_LOAD_SHARED {
+                        let addr = s.reg_val[(base + src_a) as usize]
+                        if addr >= 0 && addr < 256 {
+                            s.reg_val[(base + dst) as usize] = s.shared_mem[addr as usize]
+                        }
+                        s.mem_reads = s.mem_reads + 1
+                    }
+                    else if opc == KAXI_OP_STORE_SHARED {
+                        let addr = s.reg_val[(base + src_a) as usize]
+                        if addr >= 0 && addr < 256 {
+                            s.shared_mem[addr as usize] = s.reg_val[(base + dst) as usize]
+                        }
+                        s.mem_writes = s.mem_writes + 1
+                    }
+                    else if opc == KAXI_OP_ADD {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.reg_val[(base + dst) as usize] = v_a + v_b
+                        s.reg_var[(base + dst) as usize] = kaxi_variance_add(s.reg_var[(base + src_a) as usize])
+                        s.arith_ops = s.arith_ops + 1
+                    }
+                    else if opc == KAXI_OP_SUB {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.reg_val[(base + dst) as usize] = v_a - v_b
+                        s.reg_var[(base + dst) as usize] = kaxi_variance_add(s.reg_var[(base + src_a) as usize])
+                        s.arith_ops = s.arith_ops + 1
+                    }
+                    else if opc == KAXI_OP_MUL {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.reg_val[(base + dst) as usize] = v_a * v_b
+                        s.reg_var[(base + dst) as usize] = kaxi_variance_mul(s.reg_var[(base + src_a) as usize])
+                        s.arith_ops = s.arith_ops + 1
+                    }
+                    else if opc == KAXI_OP_DIV {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        if v_b != 0 {
+                            s.reg_val[(base + dst) as usize] = v_a / v_b
+                        }
+                        s.reg_var[(base + dst) as usize] = kaxi_variance_div(s.reg_var[(base + src_a) as usize])
+                        s.arith_ops = s.arith_ops + 1
+                    }
+                    else if opc == KAXI_OP_FMA {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.reg_val[(base + dst) as usize] = v_a * v_b + v_a
+                        s.reg_var[(base + dst) as usize] = kaxi_variance_fma(s.reg_var[(base + src_a) as usize])
+                        s.arith_ops = s.arith_ops + 1
+                    }
+                    else if opc == KAXI_OP_SETP_LT {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.pred[(lane * 8 + dst) as usize] = v_a < v_b
+                    }
+                    else if opc == KAXI_OP_SETP_LE {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.pred[(lane * 8 + dst) as usize] = v_a <= v_b
+                    }
+                    else if opc == KAXI_OP_SETP_EQ {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.pred[(lane * 8 + dst) as usize] = v_a == v_b
+                    }
+                    else if opc == KAXI_OP_SETP_GE {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.pred[(lane * 8 + dst) as usize] = v_a >= v_b
+                    }
+                    else if opc == KAXI_OP_SETP_GT {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.pred[(lane * 8 + dst) as usize] = v_a > v_b
+                    }
+                    else if opc == KAXI_OP_SETP_NE {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.pred[(lane * 8 + dst) as usize] = v_a != v_b
+                    }
+                    else if opc == KAXI_OP_SELP {
+                        let p_idx = pred_idx
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        if s.pred[(lane * 8 + p_idx) as usize] {
+                            s.reg_val[(base + dst) as usize] = v_a
+                        } else {
+                            s.reg_val[(base + dst) as usize] = v_b
+                        }
+                    }
+                    else if opc == KAXI_OP_PASS {
+                        s.reg_val[(base + dst) as usize] = lane
+                    }
+                    else if opc == KAXI_OP_GET_BID {
+                        s.reg_val[(base + dst) as usize] = 0
+                    }
+                    else if opc == KAXI_OP_GET_NTID {
+                        s.reg_val[(base + dst) as usize] = KAXI_WARP_SIZE
+                    }
+                    else if opc == KAXI_OP_BARRIER {
+                        s.barriers = s.barriers + 1
+                    }
+                    else if opc == KAXI_OP_BRANCH {
+                        let p_idx = dst
+                        let target_taken = src_a
+                        let target_fallthrough = src_b
+                        if s.pred[(lane * 8 + p_idx) as usize] {
+                            s.pc[lane as usize] = target_taken
+                        } else {
+                            s.pc[lane as usize] = target_fallthrough
+                        }
+                    }
+                    else if opc == KAXI_OP_RECONVERGE {
+                        s.reconvergence_events = s.reconvergence_events + 1
+                        s.pc[lane as usize] = s.pc[lane as usize] + 1
+                    }
+                    else if opc == KAXI_OP_VOTE_BALLOT {
+                        let p_idx = src_a
+                        var mask: i64 = 0
+                        var vl: i64 = 0
+                        while vl < KAXI_WARP_SIZE {
+                            if s.active[vl as usize] && s.pred[(vl * 8 + p_idx) as usize] {
+                                mask = mask | (1 << vl)
+                            }
+                            vl = vl + 1
+                        }
+                        s.reg_val[(base + dst) as usize] = mask
+                    }
+                    else if opc == KAXI_OP_SHUFFLE_XOR {
+                        let mask = src_b
+                        let src_lane = lane ^ mask
+                        if src_lane >= 0 && src_lane < KAXI_WARP_SIZE {
+                            let src_base = src_lane * 64
+                            s.reg_val[(base + dst) as usize] = s.reg_val[(src_base + src_a) as usize]
+                        }
+                    }
+                    else if opc == KAXI_OP_WARP_REDUCE_ADD {
+                        var sum: i64 = 0
+                        var vl: i64 = 0
+                        while vl < KAXI_WARP_SIZE {
+                            if s.active[vl as usize] {
+                                let vb = vl * 64
+                                sum = sum + s.reg_val[(vb + src_a) as usize]
+                            }
+                            vl = vl + 1
+                        }
+                        s.reg_val[(base + dst) as usize] = sum
+                    }
+                    else if opc == KAXI_OP_RET {
+                        s.active[lane as usize] = false
+                    }
+                    else if opc == KAXI_OP_NOP {
+                    }
+
+                    // Advance PC for non-branch instructions
+                    if opc != KAXI_OP_BRANCH && opc != KAXI_OP_RET {
+                        s.pc[lane as usize] = s.pc[lane as usize] + 1
+                    }
+
+                    s.instr_count = s.instr_count + 1
+                }
+                lane = lane + 1
+            }
+            s.cycle = s.cycle + 1
+        }
+    }
+    s
+}
+
+fn kaxi_warp_perf_report(state: KaxiWarpState) with IO {
+    println("K-AXI warp perf report:")
+    print("  instructions=")
+    print_int(state.instr_count)
+    print("  cycles=")
+    print_int(state.cycle)
+    print("  mem_reads=")
+    print_int(state.mem_reads)
+    print("  mem_writes=")
+    print_int(state.mem_writes)
+    print("  arith_ops=")
+    print_int(state.arith_ops)
+    print("  barriers=")
+    print_int(state.barriers)
+    print("  divergent_branches=")
+    print_int(state.divergent_branches)
+    print("  reconvergence_events=")
+    print_int(state.reconvergence_events)
 }
 
 fn kaxi_sim_exec(state: KaxiSimState, stream: KaxiTxnStream) -> KaxiSimState with IO, Mut, Panic {
@@ -1301,6 +1654,4 @@ fn kaxi_main() -> i32 with IO, Mut, Panic, Div, Alloc {
     }
 }
 
-fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
-    kaxi_main()
-}
+// Standalone entry point removed to avoid duplicate main when imported
