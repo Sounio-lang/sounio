@@ -98,6 +98,13 @@ for N in 256 1024; do
   PATTERN_FOR[mb_double_${N}]=mb_vec_double_f32
 done
 
+# 1024-element PBPK 4-step f32 convergence:
+#   per-thread C₀ = i+1, after 4 steps: C₄ = 0.0625*(i+1) + 4.6875
+#   formatted with awk %g (matches runner's %.6g output)
+EMEM_PBPK1024=$(seq 1 1024 | awk '{ printf "%s%g", (NR>1?",":""), $1*0.0625 + 4.6875 }')
+CASES+=("pbpk4_1024|f32|1|1024|1024|_seq_||${EMEM_PBPK1024}|")
+PATTERN_FOR[pbpk4_1024]=pbpk_4step
+
 # ----- build PTX for every case (locally, both basic + epistemic) -------
 echo "[0/3] generating ${#CASES[@]} PTX kernels"
 INDEX=0
