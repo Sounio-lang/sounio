@@ -124,6 +124,20 @@ PATTERN_FOR[pbpk_traj]=pbpk_traj_4step
 PATTERN_FOR[conf_gate]=conf_gate
 PATTERN_FOR[octonion]=octonion_assoc
 PATTERN_FOR[octonion_mul]=octonion_mul
+PATTERN_FOR[vec_min]=vec_min
+PATTERN_FOR[vec_max]=vec_max
+
+# Phase F: validate Phase E's new vec_min / vec_max opcodes on real L4.
+# Pattern computes y[tid] = op(x[tid], x[tid]) → output = input (identity);
+# epistemic variance lane uses additive propagation → var_out = 2·var_in.
+CASES+=(
+  "vec_max|basic|1|8|8|1,2,3,4,5,6,7,8||1,2,3,4,5,6,7,8|"
+  "vec_max|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|1,2,3,4,5,6,7,8|2,2,2,2,2,2,2,2"
+  "vec_max|f32|1|8|8|1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5||1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5|"
+  "vec_min|basic|1|8|8|1,2,3,4,5,6,7,8||1,2,3,4,5,6,7,8|"
+  "vec_min|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|1,2,3,4,5,6,7,8|2,2,2,2,2,2,2,2"
+  "vec_min|f32|1|8|8|1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5||1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5|"
+)
 
 # Sedenion zero-divisor: (e₁+e₁₀)·(e₅+e₁₄) = 0 on thread 0,
 # (e₀)·(e₀) = e₀ on thread 1. Witnesses non-trivial ZD in 𝕊.
