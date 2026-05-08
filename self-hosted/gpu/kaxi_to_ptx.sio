@@ -938,6 +938,26 @@ fn kaxi_lower_sqrt(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -
 // Phase R: sin/cos — first cross-coupled-variance unaries.
 // GUM: σ²(sin x) = cos²(x)·σ²(x); σ²(cos x) = sin²(x)·σ²(x).
 // Variance lane needs the COMPLEMENTARY trig function evaluated on src.
+// Phase S: rsqrt (1/√x) — third non-trivial-variance unary, cubic-divisive.
+// GUM: σ²(1/√x) ≈ ((-1/2)·x^(-3/2))²·σ²(x) = σ²(x) / (4·x³). Helper builds
+// 4·x³ = 4·src·src·src then divides src-variance by it. PTX-native sm_50.
+fn kaxi_lower_rsqrt(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    let src = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+    if dst < 0 || src < 0 { return "" }
+    if mode == 0 { return "" }
+    if mode == 1 { return "" }
+    if mode == 2 || mode == 3 {
+        return "    rsqrt.approx.f32 " + fr(dst) + ", " + fr(src) + ";\n"
+    }
+    // mode == 4: f32 rsqrt + variance σ²/(4·x³). 0f40800000 = f32 hex for 4.0.
+    return "    rsqrt.approx.f32 " + fr(dst) + ", " + fr(src) + ";\n"
+         + "    mul.rn.f32 %f256, " + fr(src) + ", " + fr(src) + ";\n"
+         + "    mul.rn.f32 %f256, %f256, " + fr(src) + ";\n"
+         + "    mul.rn.f32 %f256, %f256, 0f40800000;\n"
+         + "    div.rn.f32 " + fv(dst) + ", " + fv(src) + ", %f256;\n"
+}
+
 fn kaxi_lower_sin(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
     let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
     let src = ptx_parse_reg(asm, line_start, line_len, "r", 1)
@@ -990,6 +1010,7 @@ fn kaxi_lower_arith(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) 
     if c0 == 101 && c1 == 120 && c2 == 50 { return kaxi_lower_ex2(asm, line_start, line_len, mode) }
     if c0 == 115 && c1 == 105 && c2 == 110 { return kaxi_lower_sin(asm, line_start, line_len, mode) }
     if c0 == 99 && c1 == 111 && c2 == 115 { return kaxi_lower_cos(asm, line_start, line_len, mode) }
+    if c0 == 114 && c1 == 115 && c2 == 113 { return kaxi_lower_rsqrt(asm, line_start, line_len, mode) }
     ""
 }
 
