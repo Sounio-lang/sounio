@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Golden PTX gate for K-AXI→PTX transpilers — drift oracle for Phase C
+ulimit -s unlimited 2>/dev/null || true
 # (5-transpiler unification). Re-emits all (pattern × mode) combinations
 # and asserts byte-identical output vs. captured goldens at
 # tests/golden/kaxi_ptx/<mode>/<pattern>.{ptx,sha256,unsupported}.
