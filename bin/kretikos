@@ -2403,110 +2403,115 @@ PY
         RECOGNITION_BYTES="$(__kretikos_file_size "$RECOGNITION_OUT")" || exit 1
         KAXI_WITNESS_SHA="$(__kretikos_sha256 "$KAXI_WITNESS_OUT")" || exit 1
 
-        python3 - "$OUT" "$SOURCE_PATH" "$SOURCE_BYTES" "$SOURCE_SHA" \
-            "$CHECK_LOG" "$CHECK_BYTES" "$CHECK_SHA" \
-            "$RECOGNITION_OUT" "$RECOGNITION_BYTES" "$RECOGNITION_SHA" \
-            "$KAXI_WITNESS_OUT" "$KAXI_WITNESS_SHA" <<'PY'
-import json
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
+        # Compose kaxi-source-lowering JSON. Reads recognition and witness
+        # JSON files, validates 9 cross-conditions in shell, lifts nested
+        # sub-objects via validate-evidence --print-subtree, builds the
+        # final payload via json-emit + --raw-json.
+        __json_str_escape() { printf '%s' "$1" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g'; }
+        mapfile -t __rc_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$RECOGNITION_OUT" \
+            --print-or-empty status \
+            --print-or-empty profile_hint \
+            --print-or-empty fallback_path \
+            --print-or-empty source_lowered_to_kaxi \
+            --print-or-empty kaxi_pattern \
+            --print-or-empty recognized_pattern \
+            --print-or-empty runtime_rung)
+        RC_STATUS="${__rc_parts[0]}"
+        RC_PROFILE_HINT="${__rc_parts[1]}"
+        RC_FALLBACK_PATH="${__rc_parts[2]}"
+        RC_SOURCE_LOWERED="${__rc_parts[3]}"
+        RC_KAXI_PATTERN="${__rc_parts[4]}"
+        RC_RECOGNIZED_PATTERN="${__rc_parts[5]}"
+        RC_RUNTIME_RUNG="${__rc_parts[6]}"
+        RC_SEMANTIC_OPS_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$RECOGNITION_OUT" --print-subtree-or semantic_ops '[]')"
+        RC_CHECKS_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$RECOGNITION_OUT" --print-subtree-or checks '{}')"
+        mapfile -t __wt_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" \
+            --print-or-empty status \
+            --print-or-empty pattern \
+            --print-or-empty semantic_profile \
+            --print-or-empty assembly.seq_dense_zero_based \
+            --print-or-empty epistemic_lanes.store_global_count)
+        WT_STATUS="${__wt_parts[0]}"
+        WT_PATTERN="${__wt_parts[1]}"
+        WT_SEMANTIC_PROFILE="${__wt_parts[2]}"
+        WT_SEQ_DENSE="${__wt_parts[3]}"
+        WT_STORE_GLOBAL_COUNT="${__wt_parts[4]:-0}"
+        WT_ASSEMBLY_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" --print-subtree-or assembly '{}')"
+        WT_EPISTEMIC_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" --print-subtree-or epistemic_lanes '{}')"
 
-(
-    out_path,
-    source_path,
-    source_bytes,
-    source_sha,
-    check_log,
-    check_bytes,
-    check_sha,
-    recognition_path,
-    recognition_bytes,
-    recognition_sha,
-    kaxi_witness_path,
-    kaxi_witness_sha,
-) = sys.argv[1:]
+        __FAIL_ELEMS=()
+        if [[ "$RC_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "recognition_status_not_pass", "status": "%s"}' "$(__json_str_escape "$RC_STATUS")")")
+        fi
+        if [[ "$RC_PROFILE_HINT" != "none" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "profile_hint_not_none", "profile_hint": "%s"}' "$(__json_str_escape "$RC_PROFILE_HINT")")")
+        fi
+        if [[ "$RC_FALLBACK_PATH" != "none" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "fallback_path_not_none", "fallback_path": "%s"}' "$(__json_str_escape "$RC_FALLBACK_PATH")")")
+        fi
+        if [[ "$RC_SOURCE_LOWERED" != "true" ]]; then
+            __FAIL_ELEMS+=('{"kind": "source_not_lowered_to_kaxi"}')
+        fi
+        if [[ "$WT_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "kaxi_witness_status_not_pass", "status": "%s"}' "$(__json_str_escape "$WT_STATUS")")")
+        fi
+        if [[ "$WT_PATTERN" != "$RC_KAXI_PATTERN" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "kaxi_pattern_mismatch", "recognition": "%s", "witness": "%s"}' \
+                "$(__json_str_escape "$RC_KAXI_PATTERN")" "$(__json_str_escape "$WT_PATTERN")")")
+        fi
+        if [[ "$WT_SEQ_DENSE" != "true" ]]; then
+            __FAIL_ELEMS+=('{"kind": "kaxi_sequence_not_dense_zero_based"}')
+        fi
+        if [[ "$WT_STORE_GLOBAL_COUNT" -lt 1 ]] 2>/dev/null; then
+            __FAIL_ELEMS+=('{"kind": "lowered_source_requires_store_global"}')
+        fi
+        if [[ "$RC_KAXI_PATTERN" == "source_epistemic_dual_output_f32" && "$WT_STORE_GLOBAL_COUNT" -lt 2 ]] 2>/dev/null; then
+            __FAIL_ELEMS+=('{"kind": "lowered_epistemic_dual_source_requires_two_store_global_ops"}')
+        fi
+        if [[ ${#__FAIL_ELEMS[@]} -eq 0 ]]; then
+            FAILURES_ARRAY="[]"
+            STATUS_VAL="pass"
+        else
+            FAILURES_ARRAY="[$(IFS=,; echo "${__FAIL_ELEMS[*]}")]"
+            STATUS_VAL="fail"
+        fi
 
-recognition = json.loads(Path(recognition_path).read_text(encoding="utf-8"))
-witness_path = Path(kaxi_witness_path)
-witness = json.loads(witness_path.read_text(encoding="utf-8"))
-failures = []
-if recognition.get("status") != "pass":
-    failures.append({"kind": "recognition_status_not_pass", "status": recognition.get("status")})
-if recognition.get("profile_hint") != "none":
-    failures.append({"kind": "profile_hint_not_none", "profile_hint": recognition.get("profile_hint")})
-if recognition.get("fallback_path") != "none":
-    failures.append({"kind": "fallback_path_not_none", "fallback_path": recognition.get("fallback_path")})
-if not recognition.get("source_lowered_to_kaxi"):
-    failures.append({"kind": "source_not_lowered_to_kaxi"})
-if witness.get("status") != "pass":
-    failures.append({"kind": "kaxi_witness_status_not_pass", "status": witness.get("status")})
-if witness.get("pattern") != recognition.get("kaxi_pattern"):
-    failures.append({
-        "kind": "kaxi_pattern_mismatch",
-        "recognition": recognition.get("kaxi_pattern"),
-        "witness": witness.get("pattern"),
-    })
-if not witness.get("assembly", {}).get("seq_dense_zero_based"):
-    failures.append({"kind": "kaxi_sequence_not_dense_zero_based"})
-if witness.get("epistemic_lanes", {}).get("store_global_count", 0) < 1:
-    failures.append({"kind": "lowered_source_requires_store_global"})
-if recognition.get("kaxi_pattern") == "source_epistemic_dual_output_f32" and witness.get("epistemic_lanes", {}).get("store_global_count", 0) < 2:
-    failures.append({"kind": "lowered_epistemic_dual_source_requires_two_store_global_ops"})
+        # Sub-objects
+        SOURCE_OBJ="$(printf '{"path": "%s", "bytes": %s, "sha256": "%s", "check": {"status": "pass", "log_path": "%s", "bytes": %s, "sha256": "%s"}}' \
+            "$(__json_str_escape "$SOURCE_PATH")" "$SOURCE_BYTES" "$SOURCE_SHA" \
+            "$(__json_str_escape "$CHECK_LOG")" "$CHECK_BYTES" "$CHECK_SHA")"
 
-payload = {
-    "schema": "sounio.kretikos.kaxi-source-lowering.v1",
-    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "status": "pass" if not failures else "fail",
-    "source": {
-        "path": source_path,
-        "bytes": int(source_bytes),
-        "sha256": source_sha,
-        "check": {
-            "status": "pass",
-            "log_path": check_log,
-            "bytes": int(check_bytes),
-            "sha256": check_sha,
-        },
-    },
-    "lowering": {
-        "mode": "source_to_kaxi",
-        "source_lowered_to_kaxi": recognition.get("source_lowered_to_kaxi"),
-        "profile_hint": recognition.get("profile_hint"),
-        "fallback_path": recognition.get("fallback_path"),
-        "recognized_pattern": recognition.get("recognized_pattern"),
-        "kaxi_pattern": recognition.get("kaxi_pattern"),
-        "runtime_rung": recognition.get("runtime_rung"),
-        "semantic_ops": recognition.get("semantic_ops", []),
-        "recognition": {
-            "path": recognition_path,
-            "bytes": int(recognition_bytes),
-            "sha256": recognition_sha,
-            "checks": recognition.get("checks", {}),
-        },
-    },
-    "kaxi": {
-        "pattern": witness.get("pattern"),
-        "semantic_profile": witness.get("semantic_profile"),
-        "witness_path": str(witness_path),
-        "witness_sha256": kaxi_witness_sha,
-        "assembly": witness.get("assembly", {}),
-        "epistemic_lanes": witness.get("epistemic_lanes", {}),
-    },
-    "failures": failures,
-    "boundaries": [
-        "source_must_typecheck_before_kaxi_lowering",
-        "profile_directives_are_rejected_for_source_lowering",
-        "source_lowering_links_source_hash_to_kaxi_witness_hash",
-        "source_lowering_is_shape_limited_to_indexed_f32_or_f64_arithmetic",
-        "source_lowering_does_not_claim_general_gpu_backend_completeness",
-        "source_lowering_does_not_replace_slurm_cuda_runtime_authority",
-    ],
-}
-Path(out_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-if failures:
-    raise SystemExit(json.dumps(failures))
-PY
+        if [[ "$RC_SOURCE_LOWERED" == "true" ]]; then RC_SL_LIT="true"; else RC_SL_LIT="false"; fi
+        if [[ -z "$RC_RECOGNIZED_PATTERN" || "$RC_RECOGNIZED_PATTERN" == "null" ]]; then RP_LIT="null"; else RP_LIT="\"$(__json_str_escape "$RC_RECOGNIZED_PATTERN")\""; fi
+        if [[ -z "$RC_RUNTIME_RUNG" || "$RC_RUNTIME_RUNG" == "null" ]]; then RR_LIT="null"; else RR_LIT="\"$(__json_str_escape "$RC_RUNTIME_RUNG")\""; fi
+        LOWERING_OBJ="$(printf '{"mode": "source_to_kaxi", "source_lowered_to_kaxi": %s, "profile_hint": "%s", "fallback_path": "%s", "recognized_pattern": %s, "kaxi_pattern": "%s", "runtime_rung": %s, "semantic_ops": %s, "recognition": {"path": "%s", "bytes": %s, "sha256": "%s", "checks": %s}}' \
+            "$RC_SL_LIT" "$(__json_str_escape "$RC_PROFILE_HINT")" "$(__json_str_escape "$RC_FALLBACK_PATH")" \
+            "$RP_LIT" "$(__json_str_escape "$RC_KAXI_PATTERN")" "$RR_LIT" \
+            "$RC_SEMANTIC_OPS_JSON" \
+            "$(__json_str_escape "$RECOGNITION_OUT")" "$RECOGNITION_BYTES" "$RECOGNITION_SHA" \
+            "$RC_CHECKS_JSON")"
+
+        if [[ -z "$WT_SEMANTIC_PROFILE" || "$WT_SEMANTIC_PROFILE" == "null" ]]; then SEM_LIT="null"; else SEM_LIT="\"$(__json_str_escape "$WT_SEMANTIC_PROFILE")\""; fi
+        KAXI_OBJ="$(printf '{"pattern": "%s", "semantic_profile": %s, "witness_path": "%s", "witness_sha256": "%s", "assembly": %s, "epistemic_lanes": %s}' \
+            "$(__json_str_escape "$WT_PATTERN")" "$SEM_LIT" \
+            "$(__json_str_escape "$KAXI_WITNESS_OUT")" "$KAXI_WITNESS_SHA" \
+            "$WT_ASSEMBLY_JSON" "$WT_EPISTEMIC_JSON")"
+
+        GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        "$KRETIKOS_SELF" json-emit \
+            --array-strings "boundaries=source_must_typecheck_before_kaxi_lowering|profile_directives_are_rejected_for_source_lowering|source_lowering_links_source_hash_to_kaxi_witness_hash|source_lowering_is_shape_limited_to_indexed_f32_or_f64_arithmetic|source_lowering_does_not_claim_general_gpu_backend_completeness|source_lowering_does_not_replace_slurm_cuda_runtime_authority" \
+            --raw-json "failures=$FAILURES_ARRAY" \
+            --string "generated_at_utc=$GENERATED_AT_UTC" \
+            --raw-json "kaxi=$KAXI_OBJ" \
+            --raw-json "lowering=$LOWERING_OBJ" \
+            --string "schema=sounio.kretikos.kaxi-source-lowering.v1" \
+            --raw-json "source=$SOURCE_OBJ" \
+            --string "status=$STATUS_VAL" \
+            > "$OUT" || exit 1
+        if [[ "$STATUS_VAL" == "fail" ]]; then
+            echo "$FAILURES_ARRAY" >&2
+            exit 1
+        fi
 
         echo "kretikos: K-AXI source lowering emitted - $OUT"
         echo "kretikos: K-AXI source lowering pattern - source=$SOURCE_PATH recognized=$RECOGNIZED_PATTERN kaxi_pattern=$KAXI_PATTERN profile_hint=none fallback_path=none"
