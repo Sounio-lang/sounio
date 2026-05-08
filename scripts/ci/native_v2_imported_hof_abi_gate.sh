@@ -46,9 +46,8 @@ if [[ ! -f "$PROGRAM" || ! -f "$IMPORTED_MODULE" ]]; then
   exit 1
 fi
 
-if ! grep -q 'SOUNIO_IMPORTED_HOF_ABI_V1' "$PROGRAM" ||
-   ! grep -q 'SOUNIO_IMPORTED_HOF_ABI_V1' "$IMPORTED_MODULE"; then
-  echo "[native-v2-imported-hof-abi] FAIL: missing narrow HOF ABI v1 source marker" >&2
+if grep -R -q 'SOUNIO_IMPORTED_HOF_ABI_V1' "$PROGRAM" "$IMPORTED_MODULE" self-hosted/compiler/module_frontend.sio; then
+  echo "[native-v2-imported-hof-abi] FAIL: imported HOF path still depends on the retired source marker" >&2
   exit 1
 fi
 
@@ -166,8 +165,8 @@ payload = {
     "host_callback": "none",
     "imported_prebundle_native": False,
     "hof_abi_scope": "named_fn_refs_and_fn_typed_params_returns_no_captures",
-    "imported_body_lowering": "shape_specific_imported_hof_abi_v1_not_general_lowering",
-    "source_markers": 2,
+    "imported_body_lowering": "compact_imported_body_lowering_v1_no_source_marker",
+    "source_markers": 0,
     "artifact_dir": str(out_dir),
 }
 summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
