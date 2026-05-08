@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# C.0 closure: KaxiAsmBuf at 256 KB makes per-fn frames exceed the 8 MB
+# default Linux stack rlimit. Raise it for the ELF spawns below.
+ulimit -s unlimited 2>/dev/null || ulimit -s 65536 2>/dev/null || true
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
