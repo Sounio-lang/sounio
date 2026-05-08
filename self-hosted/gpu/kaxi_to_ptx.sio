@@ -1621,6 +1621,159 @@ fn kaxi_lower_arith(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) 
     ""
 }
 
+// ----- Phase C.2 batch 2: memory opcodes (load_global/imm/immf, store_global) -----
+
+fn kaxi_lower_load_global(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
+    if dst < 0 || addr < 0 { return "" }
+    if mode == 0 {
+        if kaxi_line_has_type_f64(asm, line_start, line_len) {
+            return ptx_addr_compute(addr) + "    ld.global.f64 " + fd(dst) + ", [%rd64];\n"
+        }
+        return ptx_addr_compute(addr) + "    ld.global.u64 " + rd(dst) + ", [%rd64];\n"
+    }
+    if mode == 1 {
+        // epistemic: dual-buffer u64 load (value + variance).
+        return "    mul.lo.u64 %rd64, " + rd(addr) + ", 8;\n"
+             + "    add.u64 %rd65, %rd96, %rd64;\n"
+             + "    ld.global.u64 " + rd(dst) + ", [%rd65];\n"
+             + "    add.u64 %rd65, %rd97, %rd64;\n"
+             + "    ld.global.u64 " + ev(dst) + ", [%rd65];\n"
+    }
+    if mode == 2 {
+        return ptx_addr_compute_f32(addr) + "    ld.global.f32 " + fr(dst) + ", [%rd64];\n"
+    }
+    if mode == 3 {
+        // f32_2c: buf= parameter selects %rd96 vs %rd97 base.
+        let buf = ptx_parse_buf(asm, line_start, line_len)
+        let base = if buf == 1 { "%rd97" } else { "%rd96" }
+        return "    mul.lo.u64 %rd64, " + rd(addr) + ", 4;\n"
+             + "    add.u64 %rd64, " + base + ", %rd64;\n"
+             + "    ld.global.f32 " + fr(dst) + ", [%rd64];\n"
+    }
+    // mode == 4: dual-buffer f32 load (value + variance).
+    return ptx_addr_compute_f32e(addr)
+         + "    add.u64 %rd65, %rd96, %rd64;\n"
+         + "    ld.global.f32 " + fr(dst) + ", [%rd65];\n"
+         + "    add.u64 %rd65, %rd97, %rd64;\n"
+         + "    ld.global.f32 " + fv(dst) + ", [%rd65];\n"
+}
+
+fn kaxi_lower_load_imm(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    let imm = ptx_parse_imm_after(asm, line_start, line_len, "imm=")
+    if dst < 0 { return "" }
+    if mode == 0 {
+        return "    mov.u64 " + rd(dst) + ", " + ptx_int_to_string(imm) + ";\n"
+    }
+    if mode == 1 {
+        return "    mov.u64 " + rd(dst) + ", " + ptx_int_to_string(imm) + ";\n"
+             + "    mov.u64 " + ev(dst) + ", 0;\n"
+    }
+    if mode == 2 || mode == 3 {
+        return "    mov.u64 " + rd(dst) + ", " + ptx_int_to_string(imm) + ";\n"
+             + "    mov.u32 %r2, " + ptx_int_to_string(imm) + ";\n"
+             + "    cvt.rn.f32.s32 " + fr(dst) + ", %r2;\n"
+    }
+    // mode == 4
+    return "    mov.u64 " + rd(dst) + ", " + ptx_int_to_string(imm) + ";\n"
+         + "    mov.u32 %r2, " + ptx_int_to_string(imm) + ";\n"
+         + "    cvt.rn.f32.s32 " + fr(dst) + ", %r2;\n"
+         + "    mov.f32 " + fv(dst) + ", 0f00000000;\n"
+}
+
+fn kaxi_lower_load_immf(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    // load_immf rD, fimm=HEX — only present in f32-family dialects (2/3/4).
+    if mode == 0 || mode == 1 { return "" }
+    let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    let hex = ptx_parse_fimm_hex(asm, line_start, line_len)
+    if dst < 0 || str_len(hex) != 8 { return "" }
+    if mode == 2 || mode == 3 {
+        return "    mov.f32 " + fr(dst) + ", 0f" + hex + ";\n"
+    }
+    // mode == 4: variance lane <- 0
+    return "    mov.f32 " + fr(dst) + ", 0f" + hex + ";\n"
+         + "    mov.f32 " + fv(dst) + ", 0f00000000;\n"
+}
+
+fn kaxi_lower_load(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    // dispatch on char-after-prefix: 'g'=global, 's'=shared (TODO, dialect-specific
+    // comment — fall back), else imm/immf based on char-8.
+    if line_len < 6 { return "" }
+    let c5 = asm.data[(line_start + 5) as usize] as i8
+    if c5 == 103 {
+        if line_len > 11 { return kaxi_lower_load_global(asm, line_start, line_len, mode) }
+        return ""
+    }
+    if c5 == 115 {
+        // load_shared: leave to per-dialect handler (TODO comment varies).
+        return ""
+    }
+    // load_imm or load_immf
+    if line_len > 8 && asm.data[(line_start + 8) as usize] as i8 == 102 {
+        return kaxi_lower_load_immf(asm, line_start, line_len, mode)
+    }
+    kaxi_lower_load_imm(asm, line_start, line_len, mode)
+}
+
+fn kaxi_lower_store_global(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    let src = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
+    if src < 0 || addr < 0 { return "" }
+    if mode == 0 {
+        if kaxi_line_has_type_f64(asm, line_start, line_len) {
+            return ptx_addr_compute(addr) + "    st.global.f64 [%rd64], " + fd(src) + ";\n"
+        }
+        return ptx_addr_compute(addr) + "    st.global.u64 [%rd64], " + rd(src) + ";\n"
+    }
+    if mode == 1 {
+        // epistemic: dual-buffer u64 store.
+        return "    mul.lo.u64 %rd64, " + rd(addr) + ", 8;\n"
+             + "    add.u64 %rd65, %rd96, %rd64;\n"
+             + "    st.global.u64 [%rd65], " + rd(src) + ";\n"
+             + "    add.u64 %rd65, %rd97, %rd64;\n"
+             + "    st.global.u64 [%rd65], " + ev(src) + ";\n"
+    }
+    if mode == 2 {
+        return ptx_addr_compute_f32(addr) + "    st.global.f32 [%rd64], " + fr(src) + ";\n"
+    }
+    if mode == 3 {
+        let buf = ptx_parse_buf(asm, line_start, line_len)
+        let base = if buf == 1 { "%rd97" } else { "%rd96" }
+        return "    mul.lo.u64 %rd64, " + rd(addr) + ", 4;\n"
+             + "    add.u64 %rd64, " + base + ", %rd64;\n"
+             + "    st.global.f32 [%rd64], " + fr(src) + ";\n"
+    }
+    // mode == 4: dual-buffer f32 store (value + variance).
+    return ptx_addr_compute_f32e(addr)
+         + "    add.u64 %rd65, %rd96, %rd64;\n"
+         + "    st.global.f32 [%rd65], " + fr(src) + ";\n"
+         + "    add.u64 %rd65, %rd97, %rd64;\n"
+         + "    st.global.f32 [%rd65], " + fv(src) + ";\n"
+}
+
+fn kaxi_lower_store(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    if line_len < 7 { return "" }
+    let c6 = asm.data[(line_start + 6) as usize] as i8
+    if c6 == 103 {
+        if line_len > 12 { return kaxi_lower_store_global(asm, line_start, line_len, mode) }
+        return ""
+    }
+    // store_shared TODO (dialect-specific comment) — fall back.
+    ""
+}
+
+fn kaxi_lower_mem(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    if line_len < 3 { return "" }
+    let c0 = asm.data[line_start as usize] as i8
+    let c1 = asm.data[(line_start + 1) as usize] as i8
+    let c2 = asm.data[(line_start + 2) as usize] as i8
+    if c0 == 108 && c1 == 111 && c2 == 97 { return kaxi_lower_load(asm, line_start, line_len, mode) }
+    if c0 == 115 && c1 == 116 && c2 == 111 { return kaxi_lower_store(asm, line_start, line_len, mode) }
+    ""
+}
+
 // ----- unified transpiler -------------------------------------------
 
 pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with Mut, Panic, Div, Alloc {
@@ -1696,11 +1849,14 @@ pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with 
             if line_len > 0 {
                 let first_char = asm.data[line_start as usize] as i8
                 if first_char != 59 && first_char != 0 {
-                    // Phase C.2: try opcode-first helpers (batch 1: arith);
-                    // fall back to old per-dialect handler for unmatched opcodes.
+                    // Phase C.2: try opcode-first helpers (batch 1: arith,
+                    // batch 2: mem); fall back to old per-dialect handler.
                     let p_arith = kaxi_lower_arith(asm, line_start, line_len, mode)
+                    let p_mem = if str_len(p_arith) > 0 { "" } else { kaxi_lower_mem(asm, line_start, line_len, mode) }
                     let p = if str_len(p_arith) > 0 {
                         p_arith
+                    } else if str_len(p_mem) > 0 {
+                        p_mem
                     } else if mode == 0 {
                         kaxi_transpile_line_to_ptx(asm, line_start, line_len)
                     } else if mode == 1 {
