@@ -134,6 +134,17 @@ PATTERN_FOR[vec_abs]=vec_abs
 PATTERN_FOR[vec_neg]=vec_neg
 PATTERN_FOR[vec_sqrt]=vec_sqrt
 PATTERN_FOR[vec_recip]=vec_recip
+PATTERN_FOR[vec_lg2]=vec_lg2
+PATTERN_FOR[vec_ex2]=vec_ex2
+
+# Phase P: log₂ / 2^x — PTX-native. Bit-exact value lane on power-of-2
+# inputs (lg2(2^k)=k; ex2(k)=2^k both exact f32). init_var=0 keeps
+# variance lane at 0 even though it scales by ln(2) — bit-exact without
+# modelling the irrational scaling.
+CASES+=(
+  "vec_lg2|f32|1|8|8|1,2,4,8,16,32,64,128||0,1,2,3,4,5,6,7|"
+  "vec_ex2|f32|1|8|8|0,1,2,3,4,5,6,7||1,2,4,8,16,32,64,128|"
+)
 
 # Phase O: 1/x with variance σ²/x⁴. Power-of-2 inputs → exact f32
 # values for both reciprocal and x⁴ → bit-exact comparison.
