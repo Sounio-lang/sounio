@@ -1418,6 +1418,35 @@ USAGE
         exit $?
         ;;
 
+    cubin-validate)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_cubin_validate.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-cubin-validate.XXXXXX")" || {
+            echo "error: failed to create temporary cubin-validate driver dir" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos cubin-validate <file.cubin>" >&2
+            echo "" >&2
+            echo "Validates ELF64 NVIDIA CUDA CUBIN structure (magic, class, e_machine)." >&2
+            echo "Prints e_machine on stdout (190 for NVIDIA CUDA) and exits 0 on pass." >&2
+            exit 2
+        fi
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile cubin-validate driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+        "$DRIVER_ELF" "$@"
+        exit $?
+        ;;
+
     kaxi-compile)
         DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_kaxi_compile.sio"
         OLD_UMASK="$(umask)"
@@ -3220,19 +3249,7 @@ PY
                 echo "kretikos: warning - file magic does not match NVIDIA CUDA: $magic" >&2
             fi
         fi
-        python3 - "$OUT" <<'PY' || {
-import struct
-import sys
-
-with open(sys.argv[1], "rb") as fh:
-    data = fh.read(64)
-
-if len(data) < 20 or data[0:4] != b"\x7fELF" or data[4] != 2:
-    raise SystemExit(1)
-
-if struct.unpack_from("<H", data, 18)[0] != 190:
-    raise SystemExit(1)
-PY
+        "$KRETIKOS_SELF" cubin-validate "$OUT" >/dev/null 2>&1 || {
             echo "kretikos: structural validation failed - CUBIN is not ELF64 CUDA (e_machine=190)" >&2
             exit 1
         }
@@ -3429,23 +3446,7 @@ PY
         PTX_VERSION="$(awk '/^\.version/ { print $2; exit }' "$PTX_OUT")"
         PTX_TARGET="$(awk '/^\.target/ { print $2; exit }' "$PTX_OUT")"
         CUBIN_MAGIC="$(file -b "$CUBIN_OUT" 2>/dev/null || echo "unknown")"
-        CUBIN_MACHINE="$(python3 - "$CUBIN_OUT" <<'PY'
-import struct
-import sys
-
-with open(sys.argv[1], "rb") as fh:
-    data = fh.read(64)
-
-if len(data) < 20 or data[0:4] != b"\x7fELF" or data[4] != 2:
-    raise SystemExit(1)
-
-machine = struct.unpack_from("<H", data, 18)[0]
-if machine != 190:
-    raise SystemExit(1)
-
-print(machine)
-PY
-        )" || {
+        CUBIN_MACHINE="$("$KRETIKOS_SELF" cubin-validate "$CUBIN_OUT" 2>/dev/null)" || {
             echo "kretikos: structural validation failed - CUBIN is not ELF64 CUDA (e_machine=190)" >&2
             exit 1
         }
