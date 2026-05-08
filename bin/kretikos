@@ -3205,28 +3205,30 @@ NF {
 }' > "$OUT"
 
         if [[ "$PATCH_CUBIN_SYMBOL" == "fma_to_div" ]]; then
-            python3 - "$OUT" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-data = path.read_bytes()
-replacements = [
-    (b".nv.info.sounio_bare_vec_fma_f32_sm80", b".nv.info.sounio_bare_vec_div_f32_sm80"),
-    (b".nv.constant0.sounio_bare_vec_fma_f32_sm80", b".nv.constant0.sounio_bare_vec_div_f32_sm80"),
-    (b".text.sounio_bare_vec_fma_f32_sm80", b".text.sounio_bare_vec_div_f32_sm80"),
-    (b"sounio_bare_vec_fma_f32_sm80", b"sounio_bare_vec_div_f32_sm80"),
-]
-for old, new in replacements:
-    if len(old) != len(new):
-        raise SystemExit("internal CUBIN patch length mismatch")
-    if old not in data:
-        raise SystemExit(f"internal CUBIN patch target missing: {old!r}")
-    data = data.replace(old, new)
-if b"sounio_bare_vec_fma_f32_sm80" in data:
-    raise SystemExit("internal CUBIN patch left stale fma symbol")
-path.write_bytes(data)
-PY
+            # Equal-length symbol byte-replacement on the CUBIN (fma → div).
+            # All replacement strings are ASCII and contain no LF bytes,
+            # so line-buffered sed is byte-safe for these substitutions.
+            # LC_ALL=C avoids any UTF-8 reinterpretation.
+            for __target in \
+                ".nv.info.sounio_bare_vec_fma_f32_sm80" \
+                ".nv.constant0.sounio_bare_vec_fma_f32_sm80" \
+                ".text.sounio_bare_vec_fma_f32_sm80" \
+                "sounio_bare_vec_fma_f32_sm80"; do
+                if ! LC_ALL=C grep -q "$__target" "$OUT"; then
+                    echo "error: internal CUBIN patch target missing: $__target" >&2
+                    exit 1
+                fi
+            done
+            LC_ALL=C sed -i \
+                -e 's|\.nv\.info\.sounio_bare_vec_fma_f32_sm80|.nv.info.sounio_bare_vec_div_f32_sm80|g' \
+                -e 's|\.nv\.constant0\.sounio_bare_vec_fma_f32_sm80|.nv.constant0.sounio_bare_vec_div_f32_sm80|g' \
+                -e 's|\.text\.sounio_bare_vec_fma_f32_sm80|.text.sounio_bare_vec_div_f32_sm80|g' \
+                -e 's|sounio_bare_vec_fma_f32_sm80|sounio_bare_vec_div_f32_sm80|g' \
+                "$OUT"
+            if LC_ALL=C grep -q "sounio_bare_vec_fma_f32_sm80" "$OUT"; then
+                echo "error: internal CUBIN patch left stale fma symbol" >&2
+                exit 1
+            fi
         fi
             ;;
         esac
