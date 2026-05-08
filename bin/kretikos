@@ -3025,45 +3025,76 @@ USAGE
 
         case "$KIND" in
             vec_add_f64|vec_sub_f64|vec_mul_f64|vec_div_f64|fma_f64)
-            python3 - "$ROOT_DIR/self-hosted/gpu/nvidia_bare.sio" "$OUT" "$KIND" <<'PY'
-from pathlib import Path
-import re
-import sys
-
-src, out_path, kind = sys.argv[1:]
-profiles = {
-    "vec_add_f64": ("gpu_bare_sm80_vec_add_f64", 49, 3112, b"sounio_bare_vec_add_f64_sm80"),
-    "vec_sub_f64": ("gpu_bare_sm80_vec_sub_f64", 49, 3112, b"sounio_bare_vec_sub_f64_sm80"),
-    "vec_mul_f64": ("gpu_bare_sm80_vec_mul_f64", 49, 3112, b"sounio_bare_vec_mul_f64_sm80"),
-    "vec_div_f64": ("gpu_bare_sm80_vec_div_f64", 81, 5160, b"sounio_bare_vec_div_f64_sm80"),
-    "fma_f64": ("gpu_bare_sm80_fma_f64", 49, 3112, b"sounio_bare_vec_fma_f64_sm80"),
-}
-try:
-    prefix, expected_chunks, expected_len, expected_symbol = profiles[kind]
-except KeyError:
-    raise SystemExit(f"unsupported f64 CUBIN chunk kind: {kind}")
-text = Path(src).read_text(encoding="utf-8")
-match = re.search(
-    rf"fn {prefix}_cubin_hex_chunk\(i: i64\) -> string \{{(.*?)\n\}}\n\nfn ",
-    text,
-    re.S,
-)
-if not match:
-    raise SystemExit(f"{kind} CUBIN chunk function not found")
-chunks = re.findall(r'"([0-9a-fA-F]+)"', match.group(1))
-if len(chunks) != expected_chunks:
-    raise SystemExit(f"expected {expected_chunks} {kind} CUBIN chunks, found {len(chunks)}")
-data = bytes.fromhex("".join(chunks))
-if len(data) != expected_len:
-    raise SystemExit(f"expected {expected_len} {kind} CUBIN bytes, found {len(data)}")
-if data[:4] != b"\x7fELF" or data[4] != 2:
-    raise SystemExit(f"{kind} CUBIN is not ELF64")
-if int.from_bytes(data[18:20], "little") != 190:
-    raise SystemExit(f"{kind} CUBIN e_machine is not NVIDIA CUDA")
-if expected_symbol not in data:
-    raise SystemExit(f"{kind} CUBIN symbol missing")
-Path(out_path).write_bytes(data)
-PY
+            # Phase 5.I (python-extermination): replace the f64-CUBIN
+            # source-chunk extractor heredoc with a shell pipeline that
+            # awk-extracts the per-kind chunk function body from
+            # self-hosted/gpu/nvidia_bare.sio, grep-extracts the quoted
+            # hex chunks, awk-converts hex to raw bytes, and validates
+            # length + ELF magic + e_machine + symbol presence.
+            #
+            # Invariants per kind (chunk count, byte length, embedded
+            # symbol) match the python heredoc 1:1.
+            case "$KIND" in
+                vec_add_f64) __f64_prefix="gpu_bare_sm80_vec_add_f64"; __f64_chunks=49;  __f64_len=3112; __f64_sym="sounio_bare_vec_add_f64_sm80" ;;
+                vec_sub_f64) __f64_prefix="gpu_bare_sm80_vec_sub_f64"; __f64_chunks=49;  __f64_len=3112; __f64_sym="sounio_bare_vec_sub_f64_sm80" ;;
+                vec_mul_f64) __f64_prefix="gpu_bare_sm80_vec_mul_f64"; __f64_chunks=49;  __f64_len=3112; __f64_sym="sounio_bare_vec_mul_f64_sm80" ;;
+                vec_div_f64) __f64_prefix="gpu_bare_sm80_vec_div_f64"; __f64_chunks=81;  __f64_len=5160; __f64_sym="sounio_bare_vec_div_f64_sm80" ;;
+                fma_f64)     __f64_prefix="gpu_bare_sm80_fma_f64";     __f64_chunks=49;  __f64_len=3112; __f64_sym="sounio_bare_vec_fma_f64_sm80" ;;
+            esac
+            __f64_src="$ROOT_DIR/self-hosted/gpu/nvidia_bare.sio"
+            __f64_fn_open="fn ${__f64_prefix}_cubin_hex_chunk(i: i64) -> string {"
+            # Extract the chunk-function body up to the first `^}` line.
+            __f64_body="$(awk -v open="$__f64_fn_open" '
+                $0 == open { in_fn=1; next }
+                in_fn && $0 == "}" { exit }
+                in_fn { print }
+            ' "$__f64_src")"
+            if [[ -z "$__f64_body" ]]; then
+                echo "error: $KIND CUBIN chunk function not found in $__f64_src" >&2
+                exit 1
+            fi
+            # Extract every quoted lowercase-hex literal in the body.
+            __f64_hex="$(printf '%s\n' "$__f64_body" | LC_ALL=C grep -oE '"[0-9a-fA-F]+"' | LC_ALL=C tr -d '"')"
+            __f64_actual_chunks="$(printf '%s\n' "$__f64_hex" | grep -c .)"
+            if [[ "$__f64_actual_chunks" != "$__f64_chunks" ]]; then
+                echo "error: expected $__f64_chunks $KIND CUBIN chunks, found $__f64_actual_chunks" >&2
+                exit 1
+            fi
+            # Concatenate hex chunks, then awk-convert hex pairs to raw
+            # bytes (mawk lacks strtonum, so use a literal nibble table).
+            printf '%s' "$__f64_hex" | LC_ALL=C tr -d '\n' | LC_ALL=C awk 'BEGIN { ORS="" }
+{
+    hex = tolower($0)
+    nibbles = "0123456789abcdef"
+    n = length(hex)
+    if (n % 2 != 0) { print "odd-length hex stream" > "/dev/stderr"; exit 1 }
+    for (i = 1; i <= n; i += 2) {
+        hi = index(nibbles, substr(hex, i, 1))   - 1
+        lo = index(nibbles, substr(hex, i+1, 1)) - 1
+        if (hi < 0 || lo < 0) { print "non-hex byte: " substr(hex,i,2) > "/dev/stderr"; exit 1 }
+        printf "%c", hi * 16 + lo
+    }
+}' > "$OUT" || exit 1
+            __f64_actual_len="$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null)"
+            if [[ "$__f64_actual_len" != "$__f64_len" ]]; then
+                echo "error: expected $__f64_len $KIND CUBIN bytes, found $__f64_actual_len" >&2
+                exit 1
+            fi
+            # ELF64 magic = 7f 45 4c 46 02; e_machine at offset 18..19 = 0xbe 0x00 (190 LE).
+            __f64_magic="$(LC_ALL=C dd if="$OUT" bs=1 count=5 status=none | LC_ALL=C od -An -v -tx1 | LC_ALL=C tr -d ' \n')"
+            if [[ "$__f64_magic" != "7f454c4602" ]]; then
+                echo "error: $KIND CUBIN is not ELF64 (magic=$__f64_magic)" >&2
+                exit 1
+            fi
+            __f64_emach="$(LC_ALL=C dd if="$OUT" bs=1 skip=18 count=2 status=none | LC_ALL=C od -An -v -tx1 | LC_ALL=C tr -d ' \n')"
+            if [[ "$__f64_emach" != "be00" ]]; then
+                echo "error: $KIND CUBIN e_machine is not NVIDIA CUDA (e_machine bytes=$__f64_emach)" >&2
+                exit 1
+            fi
+            if ! LC_ALL=C grep -aFq "$__f64_sym" "$OUT"; then
+                echo "error: $KIND CUBIN symbol missing: $__f64_sym" >&2
+                exit 1
+            fi
             ;;
             *)
         "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
