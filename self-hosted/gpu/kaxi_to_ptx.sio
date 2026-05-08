@@ -1426,3 +1426,124 @@ fn ptx_char_from_i64(n: i64) -> string with Mut, Panic {
     else if n == 56 { "8" }
     else { "9" }
 }
+
+// ============================================================
+// Phase C.1: unified PTX header dispatch
+// ============================================================
+//
+// PtxMode tag (passed as i64 to keep the lean_single self-host path
+// simple; struct-arg passing through the compiler chain is fragile):
+//   0 = default          (.f64,  single param_mem)
+//   1 = epistemic        (b64-only, dual param_mem/param_var)
+//   2 = f32              (.f32,  single param_mem)
+//   3 = f32_2c           (.f32,  dual param_a/param_b, half %f bank)
+//   4 = f32_epistemic    (.f32,  dual param_mem/param_var)
+//
+// Phase C.1 unifies only the header (param decls, register banks,
+// ld.param). Per-mode line handlers stay live; Phase C.2 collapses
+// them. Phase C.3 deletes the 5 old transpilers + this comment.
+// Drift oracle: `scripts/ci/kaxi_ptx_golden_gate.sh`.
+
+pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    var out: KaxiAsmBuf = kaxi_asm_new()
+    out = kaxi_asm_push_str(out, ".version 7.0\n")
+    out = kaxi_asm_push_str(out, ".target sm_50\n")
+    out = kaxi_asm_push_str(out, ".address_size 64\n\n")
+    out = kaxi_asm_push_str(out, ".visible .entry kaxi_kernel(\n")
+
+    // Param decls
+    if mode == 0 || mode == 2 {
+        out = kaxi_asm_push_str(out, "    .param .u64 param_mem\n")
+    } else if mode == 3 {
+        out = kaxi_asm_push_str(out, "    .param .u64 param_a,\n")
+        out = kaxi_asm_push_str(out, "    .param .u64 param_b\n")
+    } else {
+        // mode == 1 (epistemic) || mode == 4 (f32_epistemic)
+        out = kaxi_asm_push_str(out, "    .param .u64 param_mem,\n")
+        out = kaxi_asm_push_str(out, "    .param .u64 param_var\n")
+    }
+    out = kaxi_asm_push_str(out, ")\n{\n")
+
+    // Register banks. Order is byte-significant against goldens.
+    if mode == 0 {
+        out = kaxi_asm_push_str(out, "    .reg .b64 %rd<70>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .f64 %fd<70>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .b32 %r<8>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .pred %p<8>;\n\n")
+    } else if mode == 1 {
+        out = kaxi_asm_push_str(out, "    .reg .b64 %rd<128>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .b32 %r<8>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .pred %p<8>;\n\n")
+    } else if mode == 2 {
+        out = kaxi_asm_push_str(out, "    .reg .b64 %rd<128>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .b32 %r<8>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .f32 %f<128>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .pred %p<8>;\n\n")
+    } else if mode == 3 {
+        out = kaxi_asm_push_str(out, "    .reg .b64 %rd<128>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .b32 %r<8>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .f32 %f<70>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .pred %p<8>;\n\n")
+    } else {
+        // mode == 4
+        out = kaxi_asm_push_str(out, "    .reg .b64 %rd<128>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .b32 %r<8>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .f32 %f<128>;\n")
+        out = kaxi_asm_push_str(out, "    .reg .pred %p<8>;\n\n")
+    }
+
+    // ld.param — single-param modes use %rd63; dual-param modes %rd96/%rd97.
+    if mode == 0 || mode == 2 {
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd63, [param_mem];\n")
+    } else if mode == 3 {
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd96, [param_a];\n")
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd97, [param_b];\n")
+    } else {
+        // mode == 1 || mode == 4
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd96, [param_mem];\n")
+        out = kaxi_asm_push_str(out, "    ld.param.u64 %rd97, [param_var];\n")
+    }
+
+    // Loop — identical across all 5 transpilers; dispatches to the
+    // existing per-mode line handler (Phase C.2 collapses these).
+    var line_start: i64 = 0
+    var i: i64 = 0
+    var instr_idx: i64 = 0
+    while i <= asm.len {
+        let is_end = i == asm.len
+        let is_newline = if i < asm.len { asm.data[i as usize] as i8 == 10 } else { true }
+        if is_end || is_newline {
+            let line_len = i - line_start
+            if line_len > 0 {
+                let first_char = asm.data[line_start as usize] as i8
+                if first_char != 59 && first_char != 0 {
+                    let p = if mode == 0 {
+                        kaxi_transpile_line_to_ptx(asm, line_start, line_len)
+                    } else if mode == 1 {
+                        kaxi_transpile_line_to_ptx_epistemic(asm, line_start, line_len)
+                    } else if mode == 2 {
+                        kaxi_transpile_line_to_ptx_f32(asm, line_start, line_len)
+                    } else if mode == 3 {
+                        kaxi_transpile_line_to_ptx_f32_2c(asm, line_start, line_len)
+                    } else {
+                        kaxi_transpile_line_to_ptx_f32_epistemic(asm, line_start, line_len)
+                    }
+                    out = kaxi_asm_push_str(out, "L")
+                    out = kaxi_asm_push_str(out, ptx_int_to_string(instr_idx))
+                    out = kaxi_asm_push_str(out, ":\n")
+                    if str_len(p) > 0 {
+                        out = kaxi_asm_push_str(out, p)
+                    } else {
+                        out = kaxi_asm_push_str(out, "    // unhandled\n")
+                    }
+                    instr_idx = instr_idx + 1
+                }
+            }
+            line_start = i + 1
+        }
+        i = i + 1
+    }
+
+    out = kaxi_asm_push_str(out, "}\n")
+    kaxi_asm_to_string(out)
+}
