@@ -20,6 +20,7 @@
 #   kretikos kaxi-lowering-certificate <source.sio> -o <file.json> - braid source lowering, K-AXI, and runtime evidence
 #   kretikos kaxi-certificate <source.sio> -o <file.json> - braid source, K-AXI, and runtime bundle evidence
 #   kretikos kaxi-validate-evidence <file.json> [--expect PATH=VAL]... - pure-Sounio JSON evidence validator
+#   kretikos json-emit <flag>...                - pure-Sounio JSON aggregator (replaces python3 json.dump heredocs)
 #   kretikos emulate                            - run CPU emulation self-check
 #   kretikos emit-cubin <kind> -o <file.cubin>  - emit CUBIN template from in-tree emitter
 #   kretikos bundle [-o <dir>] [validation]     - emit PTX+CUBIN plus bundle manifest
@@ -1377,6 +1378,50 @@ PY
                 exit 1
             fi
         fi
+        ;;
+
+    json-emit)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_json_emit.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-json-emit.XXXXXX")" || {
+            echo "error: failed to create temporary json-emit driver dir" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        if [[ $# -lt 1 ]]; then
+            cat >&2 <<'USAGE'
+usage: kretikos json-emit <flag>... > out.json
+
+Pure-Sounio JSON aggregator (replaces python3 - <<PY ... json.dump
+heredocs in shell pipelines). Output goes to stdout.
+
+  --string PATH=VAL              string leaf
+  --int    PATH=VAL              integer leaf
+  --bool   PATH=true|false       boolean leaf
+  --null   PATH                  null literal leaf
+  --array-strings PATH=v1|v2|... array of strings (pipe-separated)
+  --string-if-nonempty PATH=VAL  string leaf, omitted if VAL empty
+
+PATH supports dotted nesting 1 level deep (source.path, etc.).
+Caller MUST emit prefixed keys contiguously (all source.* together).
+
+ISO timestamps come from the shell:
+  --string generated_at_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+USAGE
+            exit 2
+        fi
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile json-emit driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+        "$DRIVER_ELF" "$@"
+        exit $?
         ;;
 
     kaxi-validate-evidence)
