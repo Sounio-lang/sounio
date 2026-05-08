@@ -62,31 +62,16 @@ for item in "${lowering_cases[@]}"; do
   echo "kretikos_kaxi_lowering_gate: source-lowering label=$label source=$source"
   ./bin/kretikos kaxi-lower-source "$source" -o "$lowering_out" --asm-output "$asm_out" --kaxi-witness-output "$witness_out"
 
-  python3 - "$lowering_out" "$label" "$kaxi_pattern" "$recognized_pattern" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-obj = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-label, kaxi_pattern, recognized_pattern = sys.argv[2:]
-if obj.get("status") != "pass":
-    raise SystemExit(f"lowering_status_not_pass:{label}:{obj.get('status')}")
-lowering = obj.get("lowering", {})
-if lowering.get("profile_hint") != "none":
-    raise SystemExit(f"profile_hint_not_none:{label}:{lowering.get('profile_hint')}")
-if lowering.get("fallback_path") != "none":
-    raise SystemExit(f"fallback_path_not_none:{label}:{lowering.get('fallback_path')}")
-if lowering.get("kaxi_pattern") != kaxi_pattern:
-    raise SystemExit(f"kaxi_pattern_mismatch:{label}:{lowering.get('kaxi_pattern')} != {kaxi_pattern}")
-if lowering.get("recognized_pattern") != recognized_pattern:
-    raise SystemExit(f"recognized_pattern_mismatch:{label}:{lowering.get('recognized_pattern')} != {recognized_pattern}")
-if not lowering.get("source_lowered_to_kaxi"):
-    raise SystemExit(f"source_lowered_to_kaxi_not_true:{label}")
-store_count = obj.get("kaxi", {}).get("epistemic_lanes", {}).get("store_global_count", 0)
-required_stores = 2 if kaxi_pattern == "source_epistemic_dual_output_f32" else 1
-if store_count < required_stores:
-    raise SystemExit(f"store_global_count_missing:{label}")
-PY
+  required_stores=1
+  [[ "$kaxi_pattern" == "source_epistemic_dual_output_f32" ]] && required_stores=2
+  ./bin/kretikos kaxi-validate-evidence "$lowering_out" \
+    --expect "status=pass" \
+    --expect "lowering.profile_hint=none" \
+    --expect "lowering.fallback_path=none" \
+    --expect "lowering.kaxi_pattern=$kaxi_pattern" \
+    --expect "lowering.recognized_pattern=$recognized_pattern" \
+    --expect "lowering.source_lowered_to_kaxi=true" \
+    --expect "kaxi.epistemic_lanes.store_global_count>=$required_stores"
 done
 
 echo "kretikos_kaxi_lowering_gate: lowering-certificate label=epistemic_dual_output_f32"
@@ -96,33 +81,16 @@ echo "kretikos_kaxi_lowering_gate: lowering-certificate label=epistemic_dual_out
   --work-dir "$LOWERING_CERTIFICATE_WORK" \
   --force
 
-python3 - "$LOWERING_CERTIFICATE" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-obj = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-if obj.get("status") != "pass":
-    raise SystemExit(f"lowering_certificate_status_not_pass:{obj.get('status')}:{obj.get('failures')}")
-if obj.get("schema") != "sounio.kretikos.kaxi-lowering-certificate.v1":
-    raise SystemExit(f"lowering_certificate_schema_mismatch:{obj.get('schema')}")
-lowering = obj.get("lowering", {})
-if lowering.get("profile_hint") != "none":
-    raise SystemExit(f"lowering_certificate_profile_hint_not_none:{lowering.get('profile_hint')}")
-if lowering.get("fallback_path") != "none":
-    raise SystemExit(f"lowering_certificate_fallback_path_not_none:{lowering.get('fallback_path')}")
-if lowering.get("recognized_pattern") != "indexed_f32_epistemic_dual_output":
-    raise SystemExit(f"lowering_certificate_recognized_pattern_mismatch:{lowering.get('recognized_pattern')}")
-if lowering.get("kaxi_pattern") != "source_epistemic_dual_output_f32":
-    raise SystemExit(f"lowering_certificate_kaxi_pattern_mismatch:{lowering.get('kaxi_pattern')}")
-if obj.get("profile", {}).get("name") != "epistemic_dual_output_f32":
-    raise SystemExit(f"lowering_certificate_profile_mismatch:{obj.get('profile', {}).get('name')}")
-runtime = obj.get("runtime", {}).get("runtime_validation", {})
-if runtime.get("rung") != "epistemic_dual_output_f32":
-    raise SystemExit(f"lowering_certificate_runtime_rung_mismatch:{runtime.get('rung')}")
-if obj.get("kaxi", {}).get("epistemic_lanes", {}).get("store_global_count", 0) < 2:
-    raise SystemExit("lowering_certificate_dual_store_count_missing")
-PY
+./bin/kretikos kaxi-validate-evidence "$LOWERING_CERTIFICATE" \
+  --expect "status=pass" \
+  --expect "schema=sounio.kretikos.kaxi-lowering-certificate.v1" \
+  --expect "lowering.profile_hint=none" \
+  --expect "lowering.fallback_path=none" \
+  --expect "lowering.recognized_pattern=indexed_f32_epistemic_dual_output" \
+  --expect "lowering.kaxi_pattern=source_epistemic_dual_output_f32" \
+  --expect "profile.name=epistemic_dual_output_f32" \
+  --expect "runtime.runtime_validation.rung=epistemic_dual_output_f32" \
+  --expect "kaxi.epistemic_lanes.store_global_count>=2"
 
 echo "kretikos_kaxi_lowering_gate: lowering-certificate label=knowledge_dual_output_f32"
 ./bin/kretikos kaxi-lowering-certificate \
@@ -131,33 +99,16 @@ echo "kretikos_kaxi_lowering_gate: lowering-certificate label=knowledge_dual_out
   --work-dir "$KNOWLEDGE_LOWERING_CERTIFICATE_WORK" \
   --force
 
-python3 - "$KNOWLEDGE_LOWERING_CERTIFICATE" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-obj = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-if obj.get("status") != "pass":
-    raise SystemExit(f"knowledge_lowering_certificate_status_not_pass:{obj.get('status')}:{obj.get('failures')}")
-if obj.get("schema") != "sounio.kretikos.kaxi-lowering-certificate.v1":
-    raise SystemExit(f"knowledge_lowering_certificate_schema_mismatch:{obj.get('schema')}")
-lowering = obj.get("lowering", {})
-if lowering.get("profile_hint") != "none":
-    raise SystemExit(f"knowledge_lowering_certificate_profile_hint_not_none:{lowering.get('profile_hint')}")
-if lowering.get("fallback_path") != "none":
-    raise SystemExit(f"knowledge_lowering_certificate_fallback_path_not_none:{lowering.get('fallback_path')}")
-if lowering.get("recognized_pattern") != "indexed_f32_knowledge_dual_output":
-    raise SystemExit(f"knowledge_lowering_certificate_recognized_pattern_mismatch:{lowering.get('recognized_pattern')}")
-if lowering.get("kaxi_pattern") != "source_epistemic_dual_output_f32":
-    raise SystemExit(f"knowledge_lowering_certificate_kaxi_pattern_mismatch:{lowering.get('kaxi_pattern')}")
-if obj.get("profile", {}).get("name") != "epistemic_dual_output_f32":
-    raise SystemExit(f"knowledge_lowering_certificate_profile_mismatch:{obj.get('profile', {}).get('name')}")
-runtime = obj.get("runtime", {}).get("runtime_validation", {})
-if runtime.get("rung") != "epistemic_dual_output_f32":
-    raise SystemExit(f"knowledge_lowering_certificate_runtime_rung_mismatch:{runtime.get('rung')}")
-if obj.get("kaxi", {}).get("epistemic_lanes", {}).get("store_global_count", 0) < 2:
-    raise SystemExit("knowledge_lowering_certificate_dual_store_count_missing")
-PY
+./bin/kretikos kaxi-validate-evidence "$KNOWLEDGE_LOWERING_CERTIFICATE" \
+  --expect "status=pass" \
+  --expect "schema=sounio.kretikos.kaxi-lowering-certificate.v1" \
+  --expect "lowering.profile_hint=none" \
+  --expect "lowering.fallback_path=none" \
+  --expect "lowering.recognized_pattern=indexed_f32_knowledge_dual_output" \
+  --expect "lowering.kaxi_pattern=source_epistemic_dual_output_f32" \
+  --expect "profile.name=epistemic_dual_output_f32" \
+  --expect "runtime.runtime_validation.rung=epistemic_dual_output_f32" \
+  --expect "kaxi.epistemic_lanes.store_global_count>=2"
 
 echo "kretikos_kaxi_lowering_gate: negative profile-directive rejection source=$PROFILE_SOURCE"
 if ./bin/kretikos kaxi-lower-source "$PROFILE_SOURCE" -o "$OUT_DIR/profile_directive_negative.json" >"$NEGATIVE_STDOUT" 2>"$NEGATIVE_STDERR"; then
