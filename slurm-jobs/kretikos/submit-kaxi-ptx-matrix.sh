@@ -133,6 +133,15 @@ PATTERN_FOR[vec_max]=vec_max
 PATTERN_FOR[vec_abs]=vec_abs
 PATTERN_FOR[vec_neg]=vec_neg
 PATTERN_FOR[vec_sqrt]=vec_sqrt
+PATTERN_FOR[vec_recip]=vec_recip
+
+# Phase O: 1/x with variance σ²/x⁴. Power-of-2 inputs → exact f32
+# values for both reciprocal and x⁴ → bit-exact comparison.
+# init_var = 1; expected var_out = 1 / x⁴ → exact f32.
+CASES+=(
+  "vec_recip|f32|1|8|8|1,2,4,8,16,32,64,128||1,0.5,0.25,0.125,0.0625,0.03125,0.015625,0.0078125|"
+  "vec_recip|f32e|1|8|8|1,2,4,8,16,32,64,128|1,1,1,1,1,1,1,1|1,0.5,0.25,0.125,0.0625,0.03125,0.015625,0.0078125|1,0.0625,0.00390625,0.000244141,1.52588e-05,9.53674e-07,5.96046e-08,3.72529e-09"
+)
 
 # Phase N: sqrt with non-trivial variance lane. σ²(√x) = σ²/(4x).
 # All inputs chosen as exact f32 perfect squares (powers of 2 squared)

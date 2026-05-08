@@ -92,6 +92,30 @@ pub fn kaxi_emit_vec_neg_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
     gpu_lower_to_kaxi(opcodes, dsts, src_a, src_b, imm, 5)
 }
 
+pub fn kaxi_emit_vec_recip_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    // Phase O demo pattern: y[tid] = 1 / x[tid].
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
+
+    opcodes[0] = GPU_IR_GET_TID
+    dsts[0] = 0
+    opcodes[1] = GPU_IR_LOAD_GLOBAL
+    dsts[1] = 1
+    src_a[1] = 0
+    opcodes[2] = GPU_IR_RECIP
+    dsts[2] = 2
+    src_a[2] = 1
+    opcodes[3] = GPU_IR_STORE_GLOBAL
+    src_a[3] = 2
+    src_b[3] = 0
+    opcodes[4] = GPU_IR_RET
+
+    gpu_lower_to_kaxi(opcodes, dsts, src_a, src_b, imm, 5)
+}
+
 pub fn kaxi_emit_vec_sqrt_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
     // Phase N demo pattern: y[tid] = sqrt(x[tid]).
     var opcodes: [i64; 256] = [0; 256]
@@ -1537,16 +1561,17 @@ pub fn kaxi_emit_sedenion_mul_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
 //   mem[base+0..7]    = a (input)
 //   mem[base+8..15]   = b (input)
 //   mem[base+16..23]  = c (input)
-//   mem[N_THREADS*24] = atomic sum slot (init 0, kernel atomic-adds ‖[a,b,c]‖²)
+//   mem[total_threads*24]                    = atomic sum slot (init 0)
+//   mem[total_threads*24 + 1 + gid]          = per-thread norm² (for p95)
 //
-// IMPORTANT: the atomic-destination address is HARDCODED at emit time for
-// the N=8 connectomics demo (56 threads → slot at mem[1344]). For other
-// thread counts, regenerate the kernel with the right offset, OR upgrade
-// this emitter to read N from a kernel parameter (deferred).
+// total_threads is derived AT RUNTIME from nctaid*ntid (Phase O), so the
+// kernel scales to any launch geometry without re-emitting. base address
+// uses gid = bid*ntid + tid so the kernel handles multi-block grids.
 //
 // Mirrors octonion_associator's 4-mul-inlined structure with two changes:
 //   • per-output-k: skip store_global; instead compute out_k², accumulate in r127.
-//   • after k-loop: atomic_addf r127 → mem[1344].
+//   • after k-loop: atomic_addf r127 → mem[total_threads*24] AND
+//     store_global r127 → mem[total_threads*24 + 1 + gid] (per-thread).
 //
 // Op count: ~660 (Phase L) + 16 (mul+add per k×8) + 3 (atomic dst+atomic+ret-tweak)
 // ≈ 680 K-AXI ops → ~52 KB f32 PTX.
@@ -1572,14 +1597,21 @@ pub fn kaxi_emit_octonion_assoc_norm_sum_asm() -> KaxiAsmBuf with Mut, Panic, Di
         1, 1, 1,-1,-1, 1, 1,-1,  1,-1, 1, 1,-1,-1, 1, 1
     ]
 
-    // r0=tid, r1=24, r2=base, r9=0.0f, r127=0.0f (norm² accumulator).
+    // Multi-block addressing: gid = bid*ntid + tid, base = gid*24.
+    // r0=tid, r1=24, r2=gid*24 (base), r3=bid, r4=ntid, r5=nctaid,
+    // r6=bid*ntid, r7=gid, r9=0.0f, r127=0.0f (norm² accumulator).
     buf = kaxi_asm_push_line(buf, "get_tid r0, var=0%, seq=0")
     buf = kaxi_asm_push_line(buf, "load_imm r1, imm=24, seq=1")
-    buf = kaxi_asm_push_line(buf, "mul r2, r0, r1, var=+0%, seq=2")
-    buf = kaxi_asm_push_line(buf, "load_immf r9, fimm=00000000, seq=3")
-    buf = kaxi_asm_push_line(buf, "add r127, r9, r9, var=+0%, seq=4")
+    buf = kaxi_asm_push_line(buf, "load_immf r9, fimm=00000000, seq=2")
+    buf = kaxi_asm_push_line(buf, "add r127, r9, r9, var=+0%, seq=3")
+    buf = kaxi_asm_push_line(buf, "get_bid r3, var=0%, seq=4")
+    buf = kaxi_asm_push_line(buf, "get_ntid r4, var=0%, seq=5")
+    buf = kaxi_asm_push_line(buf, "get_nctaid r5, var=0%, seq=6")
+    buf = kaxi_asm_push_line(buf, "mul r6, r3, r4, var=+0%, seq=7")
+    buf = kaxi_asm_push_line(buf, "add r7, r6, r0, var=+0%, seq=8")
+    buf = kaxi_asm_push_line(buf, "mul r2, r7, r1, var=+0%, seq=9")
 
-    var seq: i64 = 5
+    var seq: i64 = 10
 
     // Load 24 inputs: a→r50..r57, b→r58..r65, c→r66..r73.
     var i: i64 = 0
@@ -1722,12 +1754,21 @@ pub fn kaxi_emit_octonion_assoc_norm_sum_asm() -> KaxiAsmBuf with Mut, Panic, Di
         k = k + 1
     }
 
-    // Atomic-add r127 to mem[1344] (= 56 threads × 24 words for the N=8 demo).
-    // NB: regs ≥ r128 are out of f32-preamble range (%f<128>); reuse r10
-    // (free after the input-load loop above) for the address imm.
-    buf = kaxi_asm_push_line(buf, "load_imm r10, imm=1344, seq=" + ptx_int_to_string(seq))
-    buf = kaxi_asm_push_line(buf, "atomic_addf r11, addr=r10, src=r127, seq=" + ptx_int_to_string(seq + 1))
-    seq = seq + 2
+    // Runtime atomic-dest: total_threads = nctaid*ntid (r5*r4); atomic slot
+    // is at mem[total_threads*24]. NB: regs ≥ r128 are out of f32-preamble
+    // range (%f<128>); r8/r10/r12/r13/r14 are all under r128 and free here
+    // (input-load loop only used r10..r33 as scratch and they're dead now).
+    buf = kaxi_asm_push_line(buf, "mul r8, r5, r4, var=+0%, seq=" + ptx_int_to_string(seq))
+    buf = kaxi_asm_push_line(buf, "mul r10, r8, r1, var=+0%, seq=" + ptx_int_to_string(seq + 1))
+    buf = kaxi_asm_push_line(buf, "atomic_addf r11, addr=r10, src=r127, seq=" + ptx_int_to_string(seq + 2))
+    // Per-thread output for host-side p95: write this thread's r127 to
+    // mem[total_threads*24 + 1 + gid]. Atomic gives mean instantly; the
+    // per-thread slab lets the host sort and pick p95 without a GPU sort.
+    buf = kaxi_asm_push_line(buf, "load_imm r12, imm=1, seq=" + ptx_int_to_string(seq + 3))
+    buf = kaxi_asm_push_line(buf, "add r13, r10, r12, var=+0%, seq=" + ptx_int_to_string(seq + 4))
+    buf = kaxi_asm_push_line(buf, "add r14, r13, r7, var=+0%, seq=" + ptx_int_to_string(seq + 5))
+    buf = kaxi_asm_push_line(buf, "store_global r127, addr=r14, seq=" + ptx_int_to_string(seq + 6))
+    seq = seq + 7
 
     buf = kaxi_asm_push_line(buf, "ret seq=" + ptx_int_to_string(seq))
     buf = kaxi_asm_push_line(buf, "")
@@ -2565,6 +2606,8 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
         buf = kaxi_emit_vec_neg_asm()
     } else if str_eq(pattern, "vec_sqrt") {
         buf = kaxi_emit_vec_sqrt_asm()
+    } else if str_eq(pattern, "vec_recip") {
+        buf = kaxi_emit_vec_recip_asm()
     } else if str_eq(pattern, "source_vec_add_f64") {
         buf = kaxi_emit_source_vec_add_f64_asm()
     } else if str_eq(pattern, "source_vec_sub_f64") {

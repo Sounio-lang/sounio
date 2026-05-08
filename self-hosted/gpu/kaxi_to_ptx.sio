@@ -838,6 +838,30 @@ fn kaxi_lower_neg(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) ->
     kaxi_lower_unary(asm, line_start, line_len, mode, "neg.s64", "neg.f64", "neg.f32")
 }
 
+// Phase O: recip (1/x) — second non-trivial-variance unary.
+// GUM: σ²(1/x) ≈ (∂(1/x)/∂x)² · σ²(x) = σ²(x) / x⁴. Helper computes x²,
+// squares it for x⁴, divides src-variance by x⁴. Same modes as sqrt.
+fn kaxi_lower_recip(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    let src = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+    if dst < 0 || src < 0 { return "" }
+    if mode == 0 {
+        if kaxi_line_has_type_f64(asm, line_start, line_len) {
+            return "    rcp.rn.f64 " + fd(dst) + ", " + fd(src) + ";\n"
+        }
+        return ""
+    }
+    if mode == 1 { return "" }
+    if mode == 2 || mode == 3 {
+        return "    rcp.approx.f32 " + fr(dst) + ", " + fr(src) + ";\n"
+    }
+    // mode == 4: f32 recip + variance σ²/x⁴.
+    return "    rcp.approx.f32 " + fr(dst) + ", " + fr(src) + ";\n"
+         + "    mul.rn.f32 %f256, " + fr(src) + ", " + fr(src) + ";\n"
+         + "    mul.rn.f32 %f256, %f256, %f256;\n"
+         + "    div.rn.f32 " + fv(dst) + ", " + fv(src) + ", %f256;\n"
+}
+
 // Phase N: sqrt — first opcode whose variance lane is *non-trivial*.
 // GUM: σ²(√x) ≈ (∂√x/∂x)² · σ²(x) = σ²(x) / (4x). Helper computes 4·src
 // then divides src-variance by it. Default-mode u64 not supported (no
@@ -882,6 +906,7 @@ fn kaxi_lower_arith(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) 
     if c0 == 97 && c1 == 98 && c2 == 115 { return kaxi_lower_abs(asm, line_start, line_len, mode) }
     if c0 == 110 && c1 == 101 && c2 == 103 { return kaxi_lower_neg(asm, line_start, line_len, mode) }
     if c0 == 115 && c1 == 113 && c2 == 114 { return kaxi_lower_sqrt(asm, line_start, line_len, mode) }
+    if c0 == 114 && c1 == 99 && c2 == 112 { return kaxi_lower_recip(asm, line_start, line_len, mode) }
     ""
 }
 
