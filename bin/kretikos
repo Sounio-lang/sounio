@@ -474,19 +474,12 @@ case "$CMD" in
             --string "source.sha256=$SOURCE_SHA" \
             --string "status=profiled" \
             > "$SOURCE_MANIFEST" || exit 1
-        runtime_summary="$(python3 - "$OUT_DIR/kretikos_bundle.v1.json" <<'PY'
-import json
-import sys
-obj = json.load(open(sys.argv[1], encoding="utf-8"))
-runtime = obj.get("runtime_validation") or {}
-print("{}/{} rung={} kernel={}".format(
-    runtime.get("status"),
-    runtime.get("reason"),
-    runtime.get("rung"),
-    runtime.get("kernel"),
-))
-PY
-        )"
+        mapfile -t __runtime_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$OUT_DIR/kretikos_bundle.v1.json" \
+            --print runtime_validation.status \
+            --print runtime_validation.reason \
+            --print runtime_validation.rung \
+            --print runtime_validation.kernel)
+        runtime_summary="${__runtime_parts[0]}/${__runtime_parts[1]} rung=${__runtime_parts[2]} kernel=${__runtime_parts[3]}"
         echo "kretikos: source profile manifest - $SOURCE_MANIFEST"
         echo "kretikos: source runtime validation - $runtime_summary"
         ;;
@@ -592,64 +585,94 @@ PY
             set -e
             total=$((total + 1))
 
+            __kretikos_corpus_extract() {
+                local _src="$1"; local _profile_default="$2"; local _runtime_default="$3"
+                local _profile_kind _runtime_backed _ptx_pattern
+                local _r_status _r_reason _r_rung _r_kernel _r_dev _r_cc_major _r_cc_minor
+                if [[ -f "$_src" ]]; then
+                    mapfile -t __row_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$_src" \
+                        --print-or-empty profile_kind \
+                        --print-or-empty runtime_backed \
+                        --print-or-empty ptx_pattern \
+                        --print-or-empty runtime_validation.status \
+                        --print-or-empty runtime_validation.reason \
+                        --print-or-empty runtime_validation.rung \
+                        --print-or-empty runtime_validation.kernel \
+                        --print-or-empty runtime_validation.device_name \
+                        --print-or-empty runtime_validation.cc_major \
+                        --print-or-empty runtime_validation.cc_minor)
+                    _profile_kind="${__row_parts[0]:-$_profile_default}"
+                    _runtime_backed="${__row_parts[1]:-$_runtime_default}"
+                    _ptx_pattern="${__row_parts[2]}"
+                    _r_status="${__row_parts[3]}"
+                    _r_reason="${__row_parts[4]}"
+                    _r_rung="${__row_parts[5]}"
+                    _r_kernel="${__row_parts[6]}"
+                    _r_dev="${__row_parts[7]}"
+                    _r_cc_major="${__row_parts[8]}"
+                    _r_cc_minor="${__row_parts[9]}"
+                else
+                    _profile_kind="$_profile_default"
+                    _runtime_backed="$_runtime_default"
+                fi
+                # Coerce JSON null/true/false to Python repr (compat with prior TSV format).
+                case "$_profile_kind" in null) _profile_kind="" ;; esac
+                case "$_runtime_backed" in true) _runtime_backed="True" ;; false) _runtime_backed="False" ;; null) _runtime_backed="" ;; esac
+                case "$_ptx_pattern" in null) _ptx_pattern="" ;; esac
+                case "$_r_status" in null) _r_status="" ;; esac
+                case "$_r_reason" in null) _r_reason="" ;; esac
+                case "$_r_rung" in null) _r_rung="" ;; esac
+                case "$_r_kernel" in null) _r_kernel="" ;; esac
+                case "$_r_dev" in null) _r_dev="" ;; esac
+                case "$_r_cc_major" in null) _r_cc_major="" ;; esac
+                case "$_r_cc_minor" in null) _r_cc_minor="" ;; esac
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+                    "$label" "$SRC" "$case_rc" \
+                    "$_profile_kind" "$_runtime_backed" "$_ptx_pattern" \
+                    "$_r_status" "$_r_reason" "$_r_rung" "$_r_kernel" \
+                    "$_r_dev" "$_r_cc_major" "$_r_cc_minor" "$CASE_DIR"
+            }
+
             if [[ -f "$CASE_DIR/kretikos_bundle.v1.json" ]]; then
-                row="$(python3 - "$label" "$SRC" "$case_rc" "$CASE_DIR" "$CASE_DIR/kretikos_bundle.v1.json" "$CASE_DIR/kretikos_source_profile.v1.json" <<'PY'
-import json
-import os
-import sys
-
-label, source, rc, case_dir, bundle_path, source_profile_path = sys.argv[1:]
-obj = json.load(open(bundle_path, encoding="utf-8"))
-source_profile = {}
-if os.path.exists(source_profile_path):
-    source_profile = json.load(open(source_profile_path, encoding="utf-8"))
-runtime = obj.get("runtime_validation") or {}
-fields = [
-    label,
-    source,
-    rc,
-    source_profile.get("profile_kind", "runtime_backed"),
-    source_profile.get("runtime_backed", True),
-    source_profile.get("ptx_pattern"),
-    runtime.get("status"),
-    runtime.get("reason"),
-    runtime.get("rung"),
-    runtime.get("kernel"),
-    runtime.get("device_name"),
-    runtime.get("cc_major"),
-    runtime.get("cc_minor"),
-    case_dir,
-]
-print("\t".join("" if value is None else str(value) for value in fields))
-PY
-                )"
+                # Bundle-derived row: get profile metadata from source profile (with
+                # Python's default of profile_kind=runtime_backed, runtime_backed=True),
+                # but runtime fields from the bundle.
+                mapfile -t __sp_parts < <(
+                    if [[ -f "$CASE_DIR/kretikos_source_profile.v1.json" ]]; then
+                        "$KRETIKOS_SELF" kaxi-validate-evidence "$CASE_DIR/kretikos_source_profile.v1.json" \
+                            --print-or-empty profile_kind \
+                            --print-or-empty runtime_backed \
+                            --print-or-empty ptx_pattern
+                    else
+                        printf '\n\n\n'
+                    fi
+                )
+                _sp_profile_kind="${__sp_parts[0]:-runtime_backed}"
+                _sp_runtime_backed="${__sp_parts[1]:-true}"
+                _sp_ptx_pattern="${__sp_parts[2]}"
+                mapfile -t __rt_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$CASE_DIR/kretikos_bundle.v1.json" \
+                    --print-or-empty runtime_validation.status \
+                    --print-or-empty runtime_validation.reason \
+                    --print-or-empty runtime_validation.rung \
+                    --print-or-empty runtime_validation.kernel \
+                    --print-or-empty runtime_validation.device_name \
+                    --print-or-empty runtime_validation.cc_major \
+                    --print-or-empty runtime_validation.cc_minor)
+                # Coerce JSON null/true/false to Python repr.
+                case "$_sp_profile_kind" in null) _sp_profile_kind="" ;; esac
+                case "$_sp_runtime_backed" in true) _sp_runtime_backed="True" ;; false) _sp_runtime_backed="False" ;; null) _sp_runtime_backed="" ;; esac
+                case "$_sp_ptx_pattern" in null) _sp_ptx_pattern="" ;; esac
+                for __i in 0 1 2 3 4 5 6; do
+                    case "${__rt_parts[$__i]}" in null) __rt_parts[$__i]="" ;; esac
+                done
+                row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+                    "$label" "$SRC" "$case_rc" \
+                    "$_sp_profile_kind" "$_sp_runtime_backed" "$_sp_ptx_pattern" \
+                    "${__rt_parts[0]}" "${__rt_parts[1]}" "${__rt_parts[2]}" "${__rt_parts[3]}" \
+                    "${__rt_parts[4]}" "${__rt_parts[5]}" "${__rt_parts[6]}" "$CASE_DIR")"
             elif [[ -f "$CASE_DIR/kretikos_source_profile.v1.json" ]]; then
-                row="$(python3 - "$label" "$SRC" "$case_rc" "$CASE_DIR" "$CASE_DIR/kretikos_source_profile.v1.json" <<'PY'
-import json
-import sys
-
-label, source, rc, case_dir, source_profile_path = sys.argv[1:]
-obj = json.load(open(source_profile_path, encoding="utf-8"))
-runtime = obj.get("runtime_validation") or {}
-fields = [
-    label,
-    source,
-    rc,
-    obj.get("profile_kind"),
-    obj.get("runtime_backed"),
-    obj.get("ptx_pattern"),
-    runtime.get("status"),
-    runtime.get("reason"),
-    runtime.get("rung"),
-    runtime.get("kernel"),
-    runtime.get("device_name"),
-    runtime.get("cc_major"),
-    runtime.get("cc_minor"),
-    case_dir,
-]
-print("\t".join("" if value is None else str(value) for value in fields))
-PY
-                )"
+                # No bundle — derive everything (incl. runtime fields) from source profile.
+                row="$(__kretikos_corpus_extract "$CASE_DIR/kretikos_source_profile.v1.json" "" "")"
             else
                 row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$label" "$SRC" "$case_rc" "" "" "" "fail" "bundle_manifest_missing" "" "" "" "" "" "$CASE_DIR")"
             fi
@@ -1380,6 +1403,9 @@ USAGE
             echo "  PATH=null  leaf JSON literal null" >&2
             echo "  PATH=N     leaf integer-equal to N (when N parses as int)" >&2
             echo "  PATH=str   leaf JSON string body equals str" >&2
+            echo "Print modes:" >&2
+            echo "  --print PATH           print leaf value (fails if path missing)" >&2
+            echo "  --print-or-empty PATH  print leaf value or empty line if missing" >&2
             exit 2
         fi
 
