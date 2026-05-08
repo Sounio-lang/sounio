@@ -45,6 +45,16 @@ DIFF_LOG="$OUT_DIR/kaxi_differential.out"
 cat "$DIFF_LOG"
 grep -q "PASS differential_validation" "$DIFF_LOG"
 
+echo "kretikos_kaxi_gate: fuzz-validation"
+FUZZ_LOG="$OUT_DIR/kaxi_fuzz.out"
+"$ROOT_DIR/scripts/dev/run_kaxi_fuzz.sh" >"$FUZZ_LOG" 2>&1 || {
+  cat "$FUZZ_LOG"
+  echo "kretikos_kaxi_gate: fuzz-validation FAILED"
+  exit 1
+}
+cat "$FUZZ_LOG"
+grep -q "PASS fuzz_validation" "$FUZZ_LOG"
+
 patterns=(
   exit_only
   vec_add
@@ -54,6 +64,8 @@ patterns=(
   fma
   epistemic_elementwise_f32
   epistemic_dual_output_f32
+  octonion_assoc
+  octonion_mul
 )
 
 for pattern in "${patterns[@]}"; do
@@ -90,6 +102,10 @@ grep -q "store_global r" "$OUT_DIR/epistemic_elementwise_f32.kaxi"
 grep -q "add r" "$OUT_DIR/epistemic_dual_output_f32.kaxi"
 grep -q "mul r" "$OUT_DIR/epistemic_dual_output_f32.kaxi"
 grep -q "store_global r" "$OUT_DIR/epistemic_dual_output_f32.kaxi"
+grep -q "mul r" "$OUT_DIR/octonion_assoc.kaxi"
+grep -q "store_global r" "$OUT_DIR/octonion_assoc.kaxi"
+grep -q "sub r" "$OUT_DIR/octonion_mul.kaxi"
+grep -q "store_global r" "$OUT_DIR/octonion_mul.kaxi"
 
 source_witnesses=(
   "vec_add_f32:examples/kretikos/real_vec_add.sio"
