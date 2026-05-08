@@ -58,6 +58,7 @@ CASES=(
   "source_vec_sub_f64|f64|1|8|8|1.25,2.5,3.75,4.5,5.25,6.5,7.75,8.125||0,0,0,0,0,0,0,0|"
   "source_vec_mul_f64|f64|1|8|8|1.25,2.5,3.75,4.5,5.25,6.5,7.75,8.125||1.5625,6.25,14.0625,20.25,27.5625,42.25,60.0625,66.015625|"
   "source_vec_div_f64|f64|1|8|8|1.25,2.5,3.75,4.5,5.25,6.5,7.75,8.125||1,1,1,1,1,1,1,1|"
+  "source_fma_f64|f64|1|8|8|1.25,2.5,3.75,4.5,5.25,6.5,7.75,8.125||2.8125,8.75,17.8125,24.75,32.8125,48.75,67.8125,74.140625|"
   "vec_add|basic|1|8|8|1,2,3,4,5,6,7,8||2,4,6,8,10,12,14,16|"
   "vec_add|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|2,4,6,8,10,12,14,16|2,2,2,2,2,2,2,2"
   "vec_sub|basic|1|8|8|1,2,3,4,5,6,7,8||0,0,0,0,0,0,0,0|"
@@ -102,6 +103,7 @@ PATTERN_FOR[source_vec_add_f64]=source_vec_add_f64
 PATTERN_FOR[source_vec_sub_f64]=source_vec_sub_f64
 PATTERN_FOR[source_vec_mul_f64]=source_vec_mul_f64
 PATTERN_FOR[source_vec_div_f64]=source_vec_div_f64
+PATTERN_FOR[source_fma_f64]=source_fma_f64
 PATTERN_FOR[vec_sub]=source_vec_sub_f32
 PATTERN_FOR[vec_mul]=source_vec_mul_f32
 PATTERN_FOR[vec_div]=source_vec_div_f32

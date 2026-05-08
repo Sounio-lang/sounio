@@ -66,6 +66,7 @@ patterns=(
   source_vec_sub_f64
   source_vec_mul_f64
   source_vec_div_f64
+  source_fma_f64
   epistemic_elementwise_f32
   epistemic_dual_output_f32
   octonion_assoc
@@ -113,6 +114,10 @@ grep -q "store_global r" "$OUT_DIR/source_vec_mul_f64.kaxi"
 grep -q "div r" "$OUT_DIR/source_vec_div_f64.kaxi"
 grep -q "type=f64" "$OUT_DIR/source_vec_div_f64.kaxi"
 grep -q "store_global r" "$OUT_DIR/source_vec_div_f64.kaxi"
+grep -q "mul r" "$OUT_DIR/source_fma_f64.kaxi"
+grep -q "add r" "$OUT_DIR/source_fma_f64.kaxi"
+grep -q "type=f64" "$OUT_DIR/source_fma_f64.kaxi"
+grep -q "store_global r" "$OUT_DIR/source_fma_f64.kaxi"
 grep -q "fma r" "$OUT_DIR/epistemic_elementwise_f32.kaxi"
 grep -q "store_global r" "$OUT_DIR/epistemic_elementwise_f32.kaxi"
 grep -q "add r" "$OUT_DIR/epistemic_dual_output_f32.kaxi"
