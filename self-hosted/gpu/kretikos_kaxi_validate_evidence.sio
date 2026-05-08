@@ -386,7 +386,32 @@ fn ev_check_one(buf: &EvidenceBuf, spec: string) -> bool with IO, Mut, Panic, Di
         return true
     }
 
-    // opc.op == 2 (=) — string, integer, true, false, or null.
+    // opc.op == 2 (=) — string, integer, true, false, null, or any:set.
+    //
+    // any:val1|val2|val3 — leaf matches one of pipe-separated values
+    // (each chunk is compared as a string body or as integer).
+    if exp_len > 4 && ev_lit_eq(spec, exp_start, "any:") {
+        let set_start = exp_start + 4
+        let set_len = exp_len - 4
+        var chunk_start: i64 = set_start
+        var i_set: i64 = 0
+        while i_set <= set_len {
+            let at_end = i_set == set_len
+            let is_pipe = !at_end && str_char_at(spec, set_start + i_set) == 124
+            if at_end || is_pipe {
+                let chunk_off = chunk_start
+                let chunk_len = (set_start + i_set) - chunk_start
+                if ev_chunk_matches_leaf(buf, leaf, spec, chunk_off, chunk_len) {
+                    return true
+                }
+                chunk_start = set_start + i_set + 1
+            }
+            i_set = i_set + 1
+        }
+        ev_emit_mismatch(spec, buf, leaf)
+        return false
+    }
+
     if exp_len == 4 && ev_lit_eq(spec, exp_start, "true") {
         if buf.data[leaf as usize] == 116 && ev_match_at(buf, leaf, "true") { return true }
         ev_emit_mismatch(spec, buf, leaf)
@@ -458,6 +483,72 @@ fn ev_walk_path_prefix(buf: &EvidenceBuf, spec: string, path_end: i64) -> i64 wi
         i = i + 1
     }
     0 - 1
+}
+
+// True if `leaf` matches the chunk at spec[chunk_off..chunk_off+chunk_len].
+// Chunk is treated as: integer if it parses as int and leaf is JSON number;
+// otherwise as a string body compared against leaf JSON string.
+fn ev_chunk_matches_leaf(buf: &EvidenceBuf, leaf: i64,
+                         spec: string, chunk_off: i64, chunk_len: i64) -> bool with Mut, Panic, Div {
+    let leaf_byte = buf.data[leaf as usize]
+    let as_int = ev_str_slice_to_int(spec, chunk_off, chunk_len)
+    if as_int.ok && leaf_byte != 34 {
+        let scan = ev_scan_int(buf, leaf)
+        if scan.ok && scan.value == as_int.value { return true }
+        return false
+    }
+    if leaf_byte != 34 { return false }
+    ev_str_eq_at(buf, leaf, spec, chunk_off, chunk_len)
+}
+
+// Print the JSON leaf value at path `path` to stdout. Strings are printed
+// without surrounding quotes (so shell can capture them directly).
+// Returns true if path resolved.
+fn ev_print_one(buf: &EvidenceBuf, path: string) -> bool with IO, Mut, Panic, Div, Alloc {
+    let plen = str_len(path)
+    let leaf = ev_walk_path_prefix(buf, path, plen)
+    if leaf < 0 { return false }
+    let c = buf.data[leaf as usize]
+    var asm = kaxi_asm_new()
+    if c == 34 {
+        // String: print body bytes between quotes (no escape decoding for now).
+        var p = leaf + 1
+        while p < buf.len {
+            let b = buf.data[p as usize]
+            if b == 34 { break }
+            if b == 92 {
+                // Pass-through escape pair raw — adequate for evidence-stage paths.
+                if p + 1 < buf.len {
+                    asm = kaxi_asm_push_byte(asm, buf.data[(p + 1) as usize])
+                    p = p + 2
+                } else { p = p + 1 }
+            } else {
+                asm = kaxi_asm_push_byte(asm, b)
+                p = p + 1
+            }
+        }
+    } else if c == 116 || c == 102 || c == 110 {
+        // true / false / null literal — print first 4 or 5 bytes verbatim.
+        let n: i64 = if c == 102 { 5 } else { 4 }
+        var i: i64 = 0
+        while i < n && (leaf + i) < buf.len {
+            asm = kaxi_asm_push_byte(asm, buf.data[(leaf + i) as usize])
+            i = i + 1
+        }
+    } else {
+        // Number / bare value — copy bytes until terminator.
+        var p = leaf
+        while p < buf.len {
+            let b = buf.data[p as usize]
+            if b == 44 || b == 125 || b == 93 || b == 32 || b == 10 || b == 13 || b == 9 { break }
+            asm = kaxi_asm_push_byte(asm, b)
+            p = p + 1
+        }
+    }
+    let s = kaxi_asm_to_string(asm)
+    print(s)
+    println("")
+    true
 }
 
 fn ev_lit_eq(spec: string, start: i64, lit: string) -> bool with Mut, Panic, Div {
@@ -564,6 +655,18 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
             if !ok { fail = fail + 1 }
             checked = checked + 1
             i = i + 2
+        } else if str_eq(a, "--print") {
+            if i + 1 >= argc {
+                println("validate-evidence: --print requires PATH")
+                return 2
+            }
+            let p = get_arg(i + 1)
+            if !ev_print_one(&buf, p) {
+                print("validate-evidence: PATH NOT FOUND: ")
+                println(p)
+                return 1
+            }
+            i = i + 2
         } else {
             print("validate-evidence: unknown argument ")
             println(a)
@@ -579,8 +682,10 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
         println(" checks failed")
         return 1
     }
-    print("validate-evidence: PASS ")
-    ev_print_i64(checked)
-    println(" checks")
+    if checked > 0 {
+        print("validate-evidence: PASS ")
+        ev_print_i64(checked)
+        println(" checks")
+    }
     0
 }
