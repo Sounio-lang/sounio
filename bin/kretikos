@@ -682,35 +682,44 @@ case "$CMD" in
             fi
         done <"$MANIFEST"
 
-        python3 - "$CORPUS_JSON" "$MANIFEST" "$SUMMARY_TSV" "$total" "$failed" <<'PY'
-import csv
-import json
-import sys
-from datetime import datetime, timezone
-
-out, manifest, summary_tsv, total, failed = sys.argv[1:]
-with open(summary_tsv, encoding="utf-8") as fh:
-    rows = list(csv.DictReader(fh, delimiter="\t"))
-payload = {
-    "schema": "sounio.kretikos.source-corpus.v1",
-    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "manifest": manifest,
-    "summary_tsv": "kretikos_source_corpus.tsv",
-    "total": int(total),
-    "failed": int(failed),
-    "status": "pass" if int(failed) == 0 else "fail",
-    "cases": rows,
-    "boundaries": [
-        "corpus_contains_supported_source_profiles_only",
-        "each_source_must_typecheck_before_profile_selection",
-        "runtime_validation_applies_per_selected_profile",
-        "does_not_claim_arbitrary_sounio_gpu_lowering",
-    ],
-}
-with open(out, "w", encoding="utf-8") as fh:
-    json.dump(payload, fh, indent=2, sort_keys=True)
-    fh.write("\n")
-PY
+        # Convert TSV rows to a JSON array of objects via awk; the array
+        # is then injected into the corpus manifest via json-emit's
+        # `--raw-json`. Header row drives field names; values are
+        # JSON-escaped.
+        CASES_JSON="$(awk -F'\t' '
+            NR==1 {
+                for (i=1; i<=NF; i++) header[i]=$i
+                ncols=NF
+                printf "["
+                next
+            }
+            {
+                if (NR>2) printf ", "
+                printf "{"
+                for (i=1; i<=ncols; i++) {
+                    if (i>1) printf ", "
+                    v = $i
+                    gsub(/\\/, "\\\\", v)
+                    gsub(/"/, "\\\"", v)
+                    printf "\"%s\": \"%s\"", header[i], v
+                }
+                printf "}"
+            }
+            END { printf "]" }
+        ' "$SUMMARY_TSV")"
+        STATUS_VAL="$([[ "$failed" -eq 0 ]] && echo pass || echo fail)"
+        GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        "$KRETIKOS_SELF" json-emit \
+            --array-strings "boundaries=corpus_contains_supported_source_profiles_only|each_source_must_typecheck_before_profile_selection|runtime_validation_applies_per_selected_profile|does_not_claim_arbitrary_sounio_gpu_lowering" \
+            --raw-json "cases=$CASES_JSON" \
+            --int "failed=$failed" \
+            --string "generated_at_utc=$GENERATED_AT_UTC" \
+            --string "manifest=$MANIFEST" \
+            --string "schema=sounio.kretikos.source-corpus.v1" \
+            --string "status=$STATUS_VAL" \
+            --string "summary_tsv=kretikos_source_corpus.tsv" \
+            --int "total=$total" \
+            > "$CORPUS_JSON" || exit 1
 
         echo "kretikos: source corpus summary - $SUMMARY_TSV"
         echo "kretikos: source corpus manifest - $CORPUS_JSON"
@@ -1361,6 +1370,7 @@ heredocs in shell pipelines). Output goes to stdout.
   --null   PATH                  null literal leaf
   --array-strings PATH=v1|v2|... array of strings (pipe-separated)
   --string-if-nonempty PATH=VAL  string leaf, omitted if VAL empty
+  --raw-json PATH=JSON           pre-formatted JSON value (verbatim)
 
 PATH supports dotted nesting 1 level deep (source.path, etc.).
 Caller MUST emit prefixed keys contiguously (all source.* together).
