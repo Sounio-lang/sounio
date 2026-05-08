@@ -19,140 +19,23 @@
 use gpu::kaxi_backend::*
 
 pub fn kaxi_transpile_line_to_ptx(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
+    // Phase C.3: post-C.2 only the dialect-specific TODO comments
+    // (load_shared / store_shared) and the predicate/control/warp-op
+    // branches (setp/selp/bra/rec/vote/shuffle/warp) are reachable here.
+    // arith / mem / get / ret / nop / bar are handled by the per-opcode
+    // helpers in unified before this fallback.
+    if line_len < 3 { return "" }
     let c0 = asm.data[line_start as usize] as i8
     let c1 = if line_len > 1 { asm.data[(line_start + 1) as usize] as i8 } else { 0 }
     let c2 = if line_len > 2 { asm.data[(line_start + 2) as usize] as i8 } else { 0 }
     let c3 = if line_len > 3 { asm.data[(line_start + 3) as usize] as i8 } else { 0 }
-
-    if c0 == 97 && c1 == 100 && c2 == 100 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            if kaxi_line_has_type_f64(asm, line_start, line_len) {
-                return ptx_binop_f64("add.f64", dst, src_a, src_b)
-            }
-            return ptx_binop("add.u64", dst, src_a, src_b)
-        }
+    if c0 == 108 && c1 == 111 && c2 == 97 && line_len > 11 && asm.data[(line_start + 5) as usize] as i8 == 115 {
+        return "    // TODO load_shared\n"
     }
-    else if c0 == 115 && c1 == 117 && c2 == 98 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            if kaxi_line_has_type_f64(asm, line_start, line_len) {
-                return ptx_binop_f64("sub.f64", dst, src_a, src_b)
-            }
-            return ptx_binop("sub.u64", dst, src_a, src_b)
-        }
+    if c0 == 115 && c1 == 116 && c2 == 111 && line_len > 12 && asm.data[(line_start + 6) as usize] as i8 == 115 {
+        return "    // TODO store_shared\n"
     }
-    else if c0 == 109 && c1 == 117 && c2 == 108 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            if kaxi_line_has_type_f64(asm, line_start, line_len) {
-                return ptx_binop_f64("mul.f64", dst, src_a, src_b)
-            }
-            return ptx_binop("mul.lo.u64", dst, src_a, src_b)
-        }
-    }
-    else if c0 == 100 && c1 == 105 && c2 == 118 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            if kaxi_line_has_type_f64(asm, line_start, line_len) {
-                return ptx_binop_f64("div.rn.f64", dst, src_a, src_b)
-            }
-            return ptx_binop("div.u64", dst, src_a, src_b)
-        }
-    }
-    else if c0 == 102 && c1 == 109 && c2 == 97 {
-        // fma: dst = a*b + a (matches kaxi_to_c semantics)
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            if kaxi_line_has_type_f64(asm, line_start, line_len) {
-                return "    mul.f64 " + fd(65) + ", " + fd(src_a) + ", " + fd(src_b) + ";\n"
-                     + "    add.f64 " + fd(dst) + ", " + fd(65) + ", " + fd(src_a) + ";\n"
-            }
-            return "    mul.lo.u64 %rd64, " + rd(src_a) + ", " + rd(src_b) + ";\n"
-                 + "    add.u64 " + rd(dst) + ", %rd64, " + rd(src_a) + ";\n"
-        }
-    }
-    else if c0 == 108 && c1 == 111 && c2 == 97 {
-        if line_len > 11 && asm.data[(line_start + 5) as usize] as i8 == 103 {
-            // load_global
-            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
-            if dst >= 0 && addr >= 0 {
-                if kaxi_line_has_type_f64(asm, line_start, line_len) {
-                    return ptx_addr_compute(addr)
-                         + "    ld.global.f64 " + fd(dst) + ", [%rd64];\n"
-                }
-                return ptx_addr_compute(addr)
-                     + "    ld.global.u64 " + rd(dst) + ", [%rd64];\n"
-            }
-        }
-        else if line_len > 11 && asm.data[(line_start + 5) as usize] as i8 == 115 {
-            // load_shared — TODO: requires .shared declaration
-            return "    // TODO load_shared\n"
-        }
-        else {
-            // load_imm rD, imm=N
-            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let imm = ptx_parse_imm_after(asm, line_start, line_len, "imm=")
-            if dst >= 0 {
-                return "    mov.u64 " + rd(dst) + ", " + ptx_int_to_string(imm) + ";\n"
-            }
-        }
-    }
-    else if c0 == 115 && c1 == 116 && c2 == 111 {
-        // store_global / store_shared
-        if line_len > 12 && asm.data[(line_start + 6) as usize] as i8 == 103 {
-            let src = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
-            if src >= 0 && addr >= 0 {
-                if kaxi_line_has_type_f64(asm, line_start, line_len) {
-                    return ptx_addr_compute(addr)
-                         + "    st.global.f64 [%rd64], " + fd(src) + ";\n"
-                }
-                return ptx_addr_compute(addr)
-                     + "    st.global.u64 [%rd64], " + rd(src) + ";\n"
-            }
-        }
-        else if line_len > 12 && asm.data[(line_start + 6) as usize] as i8 == 115 {
-            return "    // TODO store_shared\n"
-        }
-    }
-    else if c0 == 103 && c1 == 101 && c2 == 116 {
-        // get_tid / get_bid / get_ntid — dispatch on char-after-underscore (pos 4)
-        let kind = if line_len > 4 { asm.data[(line_start + 4) as usize] as i8 } else { 116 }
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        if dst >= 0 {
-            if kind == 98 {
-                return "    mov.u32 %r1, %ctaid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-            }
-            else if kind == 110 {
-                return "    mov.u32 %r1, %ntid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-            }
-            else {
-                return "    mov.u32 %r1, %tid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-            }
-        }
-    }
-    else if c0 == 114 && c1 == 101 && c2 == 116 {
-        return "    ret;\n"
-    }
-    else if c0 == 98 && c1 == 97 && c2 == 114 {
-        return "    bar.sync 0;\n"
-    }
-    else if c0 == 115 && c1 == 101 && c2 == 116 && c3 == 112 {
+    if c0 == 115 && c1 == 101 && c2 == 116 && c3 == 112 {
         let cmp = ptx_parse_setp_cmp(asm, line_start, line_len)
         let dst = ptx_parse_reg(asm, line_start, line_len, "p", 0)
         let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 0)
@@ -161,7 +44,7 @@ pub fn kaxi_transpile_line_to_ptx(asm: KaxiAsmBuf, line_start: i64, line_len: i6
             return "    setp." + cmp + ".u64 " + pp(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
         }
     }
-    else if c0 == 115 && c1 == 101 && c2 == 108 && c3 == 112 {
+    if c0 == 115 && c1 == 101 && c2 == 108 && c3 == 112 {
         let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
         let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
         let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
@@ -170,21 +53,15 @@ pub fn kaxi_transpile_line_to_ptx(asm: KaxiAsmBuf, line_start: i64, line_len: i6
             return "    selp.b64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ", " + pp(pred) + ";\n"
         }
     }
-    else if c0 == 110 && c1 == 111 && c2 == 112 {
-        return "    // nop\n"
-    }
-    else if c0 == 98 && c1 == 114 && c2 == 97 {
+    if c0 == 98 && c1 == 114 && c2 == 97 {
         let pred_idx = ptx_parse_reg(asm, line_start, line_len, "p", 0)
         let target = ptx_parse_imm_after(asm, line_start, line_len, "target=")
         if pred_idx >= 0 && target >= 0 {
             return "    @" + pp(pred_idx) + " bra L" + ptx_int_to_string(target) + ";\n"
         }
     }
-    else if c0 == 114 && c1 == 101 && c2 == 99 {
-        return "    // reconverge\n"
-    }
-    else if c0 == 118 && c1 == 111 && c2 == 116 {
-        // vote.b dst, pP
+    if c0 == 114 && c1 == 101 && c2 == 99 { return "    // reconverge\n" }
+    if c0 == 118 && c1 == 111 && c2 == 116 {
         let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
         let src_a = ptx_parse_reg(asm, line_start, line_len, "p", 0)
         if dst >= 0 && src_a >= 0 {
@@ -192,8 +69,7 @@ pub fn kaxi_transpile_line_to_ptx(asm: KaxiAsmBuf, line_start: i64, line_len: i6
                  + "    cvt.u64.u32 " + rd(dst) + ", %r2;\n"
         }
     }
-    else if c0 == 115 && c1 == 104 && c2 == 117 {
-        // shuffle.x dst, src, imm=N
+    if c0 == 115 && c1 == 104 && c2 == 117 {
         let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
         let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
         let imm = ptx_parse_imm_after(asm, line_start, line_len, "imm=")
@@ -203,8 +79,7 @@ pub fn kaxi_transpile_line_to_ptx(asm: KaxiAsmBuf, line_start: i64, line_len: i6
                  + "    cvt.u64.u32 " + rd(dst) + ", %r3;\n"
         }
     }
-    else if c0 == 119 && c1 == 97 && c2 == 114 {
-        // warp.reduce dst, src — five-step bfly reduction (sum across warp)
+    if c0 == 119 && c1 == 97 && c2 == 114 {
         let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
         let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
         if dst >= 0 && src_a >= 0 {
@@ -223,7 +98,6 @@ pub fn kaxi_transpile_line_to_ptx(asm: KaxiAsmBuf, line_start: i64, line_len: i6
             return s
         }
     }
-
     ""
 }
 
@@ -311,153 +185,28 @@ fn ev(idx: i64) -> string with Mut, Panic, Div {
 }
 
 pub fn kaxi_transpile_line_to_ptx_epistemic(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
+    // Phase C.3: post-C.2 only load_shared/store_shared TODOs and
+    // bra/setp/rec are reachable here.
+    if line_len < 3 { return "" }
     let c0 = asm.data[line_start as usize] as i8
     let c1 = if line_len > 1 { asm.data[(line_start + 1) as usize] as i8 } else { 0 }
     let c2 = if line_len > 2 { asm.data[(line_start + 2) as usize] as i8 } else { 0 }
     let c3 = if line_len > 3 { asm.data[(line_start + 3) as usize] as i8 } else { 0 }
-
-    if c0 == 97 && c1 == 100 && c2 == 100 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    add.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
-                 + "    add.u64 " + ev(dst) + ", " + ev(src_a) + ", " + ev(src_b) + ";\n"
-        }
+    if c0 == 108 && c1 == 111 && c2 == 97 && line_len > 11 && asm.data[(line_start + 5) as usize] as i8 == 115 {
+        return "    // TODO load_shared (epistemic)\n"
     }
-    else if c0 == 115 && c1 == 117 && c2 == 98 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    sub.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
-                 + "    add.u64 " + ev(dst) + ", " + ev(src_a) + ", " + ev(src_b) + ";\n"
-        }
+    if c0 == 115 && c1 == 116 && c2 == 111 && line_len > 12 && asm.data[(line_start + 6) as usize] as i8 == 115 {
+        return "    // TODO store_shared (epistemic)\n"
     }
-    else if c0 == 109 && c1 == 117 && c2 == 108 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            var s: string = "    mul.lo.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
-            if src_a == src_b {
-                // X²: σ²(X²) ≈ 4·X²·σ²(X)
-                s = s + "    mul.lo.u64 %rd64, " + rd(src_a) + ", " + rd(src_a) + ";\n"
-                s = s + "    mul.lo.u64 %rd64, %rd64, " + ev(src_a) + ";\n"
-                s = s + "    shl.b64 " + ev(dst) + ", %rd64, 2;\n"
-            } else {
-                // independent: a²σ²(b) + b²σ²(a)
-                s = s + "    mul.lo.u64 %rd64, " + rd(src_a) + ", " + rd(src_a) + ";\n"
-                s = s + "    mul.lo.u64 %rd64, %rd64, " + ev(src_b) + ";\n"
-                s = s + "    mul.lo.u64 %rd65, " + rd(src_b) + ", " + rd(src_b) + ";\n"
-                s = s + "    mul.lo.u64 %rd65, %rd65, " + ev(src_a) + ";\n"
-                s = s + "    add.u64 " + ev(dst) + ", %rd64, %rd65;\n"
-            }
-            return s
-        }
-    }
-    else if c0 == 100 && c1 == 105 && c2 == 118 {
-        // div: conservative — variances add (treats as independent linear approximation)
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    div.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
-                 + "    add.u64 " + ev(dst) + ", " + ev(src_a) + ", " + ev(src_b) + ";\n"
-        }
-    }
-    else if c0 == 102 && c1 == 109 && c2 == 97 {
-        // fma: a*b + a — conservative variance propagation
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    mul.lo.u64 %rd64, " + rd(src_a) + ", " + rd(src_b) + ";\n"
-                 + "    add.u64 " + rd(dst) + ", %rd64, " + rd(src_a) + ";\n"
-                 + "    add.u64 " + ev(dst) + ", " + ev(src_a) + ", " + ev(src_b) + ";\n"
-        }
-    }
-    else if c0 == 108 && c1 == 111 && c2 == 97 {
-        if line_len > 11 && asm.data[(line_start + 5) as usize] as i8 == 103 {
-            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
-            if dst >= 0 && addr >= 0 {
-                return "    mul.lo.u64 %rd64, " + rd(addr) + ", 8;\n"
-                     + "    add.u64 %rd65, %rd96, %rd64;\n"
-                     + "    ld.global.u64 " + rd(dst) + ", [%rd65];\n"
-                     + "    add.u64 %rd65, %rd97, %rd64;\n"
-                     + "    ld.global.u64 " + ev(dst) + ", [%rd65];\n"
-            }
-        }
-        else if line_len > 11 && asm.data[(line_start + 5) as usize] as i8 == 115 {
-            return "    // TODO load_shared (epistemic)\n"
-        }
-        else {
-            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let imm = ptx_parse_imm_after(asm, line_start, line_len, "imm=")
-            if dst >= 0 {
-                return "    mov.u64 " + rd(dst) + ", " + ptx_int_to_string(imm) + ";\n"
-                     + "    mov.u64 " + ev(dst) + ", 0;\n"
-            }
-        }
-    }
-    else if c0 == 115 && c1 == 116 && c2 == 111 {
-        if line_len > 12 && asm.data[(line_start + 6) as usize] as i8 == 103 {
-            let src = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
-            if src >= 0 && addr >= 0 {
-                return "    mul.lo.u64 %rd64, " + rd(addr) + ", 8;\n"
-                     + "    add.u64 %rd65, %rd96, %rd64;\n"
-                     + "    st.global.u64 [%rd65], " + rd(src) + ";\n"
-                     + "    add.u64 %rd65, %rd97, %rd64;\n"
-                     + "    st.global.u64 [%rd65], " + ev(src) + ";\n"
-            }
-        }
-        else if line_len > 12 && asm.data[(line_start + 6) as usize] as i8 == 115 {
-            return "    // TODO store_shared (epistemic)\n"
-        }
-    }
-    else if c0 == 103 && c1 == 101 && c2 == 116 {
-        let kind = if line_len > 4 { asm.data[(line_start + 4) as usize] as i8 } else { 116 }
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        if dst >= 0 {
-            if kind == 98 {
-                return "    mov.u32 %r1, %ctaid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-                     + "    mov.u64 " + ev(dst) + ", 0;\n"
-            }
-            else if kind == 110 {
-                return "    mov.u32 %r1, %ntid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-                     + "    mov.u64 " + ev(dst) + ", 0;\n"
-            }
-            else {
-                return "    mov.u32 %r1, %tid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-                     + "    mov.u64 " + ev(dst) + ", 0;\n"
-            }
-        }
-    }
-    else if c0 == 114 && c1 == 101 && c2 == 116 {
-        return "    ret;\n"
-    }
-    else if c0 == 110 && c1 == 111 && c2 == 112 {
-        return "    // nop\n"
-    }
-    else if c0 == 114 && c1 == 101 && c2 == 99 {
-        return "    // reconverge\n"
-    }
-    else if c0 == 98 && c1 == 97 && c2 == 114 {
-        return "    bar.sync 0;\n"
-    }
-    else if c0 == 98 && c1 == 114 && c2 == 97 {
+    if c0 == 114 && c1 == 101 && c2 == 99 { return "    // reconverge\n" }
+    if c0 == 98 && c1 == 114 && c2 == 97 {
         let pred_idx = ptx_parse_reg(asm, line_start, line_len, "p", 0)
         let target = ptx_parse_imm_after(asm, line_start, line_len, "target=")
         if pred_idx >= 0 && target >= 0 {
             return "    @" + pp(pred_idx) + " bra L" + ptx_int_to_string(target) + ";\n"
         }
     }
-    else if c0 == 115 && c1 == 101 && c2 == 116 && c3 == 112 {
+    if c0 == 115 && c1 == 101 && c2 == 116 && c3 == 112 {
         let cmp = ptx_parse_setp_cmp(asm, line_start, line_len)
         let dst = ptx_parse_reg(asm, line_start, line_len, "p", 0)
         let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 0)
@@ -466,7 +215,6 @@ pub fn kaxi_transpile_line_to_ptx_epistemic(asm: KaxiAsmBuf, line_start: i64, li
             return "    setp." + cmp + ".u64 " + pp(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
         }
     }
-
     ""
 }
 
@@ -495,118 +243,12 @@ fn ptx_addr_compute_f32(addr_reg: i64) -> string with Mut, Panic, Div, Alloc {
 }
 
 pub fn kaxi_transpile_line_to_ptx_f32(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
+    // Phase C.3: post-C.2 only atomic_addf / setp / selp are reachable here.
+    if line_len < 3 { return "" }
     let c0 = asm.data[line_start as usize] as i8
     let c1 = if line_len > 1 { asm.data[(line_start + 1) as usize] as i8 } else { 0 }
     let c2 = if line_len > 2 { asm.data[(line_start + 2) as usize] as i8 } else { 0 }
-
-    // Dual-bank arithmetic: emit BOTH integer and f32 versions for add/sub/mul
-    // so the result can be used as either an address (%rdN) or a value (%fN).
-    // ptxas DCEs the unused bank.
-    if c0 == 97 && c1 == 100 && c2 == 100 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    add.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
-                 + "    add.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
-        }
-    }
-    else if c0 == 115 && c1 == 117 && c2 == 98 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    sub.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
-                 + "    sub.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
-        }
-    }
-    else if c0 == 109 && c1 == 117 && c2 == 108 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    mul.lo.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
-                 + "    mul.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
-        }
-    }
-    else if c0 == 100 && c1 == 105 && c2 == 118 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    div.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
-        }
-    }
-    else if c0 == 102 && c1 == 109 && c2 == 97 {
-        // fma: dst = a*b + a (matches u64/c semantics)
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    fma.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + fr(src_a) + ";\n"
-        }
-    }
-    else if c0 == 108 && c1 == 111 && c2 == 97 {
-        if line_len > 11 && asm.data[(line_start + 5) as usize] as i8 == 103 {
-            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
-            if dst >= 0 && addr >= 0 {
-                return ptx_addr_compute_f32(addr)
-                     + "    ld.global.f32 " + fr(dst) + ", [%rd64];\n"
-            }
-        }
-        else if line_len > 8 && asm.data[(line_start + 8) as usize] as i8 == 102 {
-            // load_immf rD, fimm=HEX  — f32 hex literal
-            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let hex = ptx_parse_fimm_hex(asm, line_start, line_len)
-            if dst >= 0 && str_len(hex) == 8 {
-                return "    mov.f32 " + fr(dst) + ", 0f" + hex + ";\n"
-            }
-        }
-        else {
-            // load_imm rD, imm=N  — integer immediate as f32 (cvt)
-            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let imm = ptx_parse_imm_after(asm, line_start, line_len, "imm=")
-            if dst >= 0 {
-                return "    mov.u64 " + rd(dst) + ", " + ptx_int_to_string(imm) + ";\n"
-                     + "    mov.u32 %r2, " + ptx_int_to_string(imm) + ";\n"
-                     + "    cvt.rn.f32.s32 " + fr(dst) + ", %r2;\n"
-            }
-        }
-    }
-    else if c0 == 115 && c1 == 116 && c2 == 111 {
-        if line_len > 12 && asm.data[(line_start + 6) as usize] as i8 == 103 {
-            let src = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
-            if src >= 0 && addr >= 0 {
-                return ptx_addr_compute_f32(addr)
-                     + "    st.global.f32 [%rd64], " + fr(src) + ";\n"
-            }
-        }
-    }
-    else if c0 == 103 && c1 == 101 && c2 == 116 {
-        let kind = if line_len > 4 { asm.data[(line_start + 4) as usize] as i8 } else { 116 }
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        if dst >= 0 {
-            if kind == 98 {
-                return "    mov.u32 %r1, %ctaid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-                     + "    cvt.rn.f32.u32 " + fr(dst) + ", %r1;\n"
-            }
-            else if kind == 110 {
-                return "    mov.u32 %r1, %ntid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-                     + "    cvt.rn.f32.u32 " + fr(dst) + ", %r1;\n"
-            }
-            else {
-                return "    mov.u32 %r1, %tid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-                     + "    cvt.rn.f32.u32 " + fr(dst) + ", %r1;\n"
-            }
-        }
-    }
-    else if c0 == 97 && c1 == 116 && c2 == 111 {
-        // atomic_addf rD, addr=rA, src=rS → atom.global.add.f32
+    if c0 == 97 && c1 == 116 && c2 == 111 {
         let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
         let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
         let src = ptx_parse_reg_after(asm, line_start, line_len, "src=r")
@@ -615,8 +257,7 @@ pub fn kaxi_transpile_line_to_ptx_f32(asm: KaxiAsmBuf, line_start: i64, line_len
                  + "    atom.global.add.f32 " + fr(dst) + ", [%rd64], " + fr(src) + ";\n"
         }
     }
-    else if c0 == 115 && c1 == 101 && c2 == 116 {
-        // setp.cmp pD, rA, rB → setp.cmp.f32  (K-AXI op is "setp", c3='p'=112)
+    if c0 == 115 && c1 == 101 && c2 == 116 {
         let cmp = ptx_parse_setp_cmp(asm, line_start, line_len)
         let dst = ptx_parse_reg(asm, line_start, line_len, "p", 0)
         let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 0)
@@ -625,8 +266,7 @@ pub fn kaxi_transpile_line_to_ptx_f32(asm: KaxiAsmBuf, line_start: i64, line_len
             return "    setp." + cmp + ".f32 " + pp(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
         }
     }
-    else if c0 == 115 && c1 == 101 && c2 == 108 {
-        // selp rD, rA, rB, pred=pP → selp.f32
+    if c0 == 115 && c1 == 101 && c2 == 108 {
         let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
         let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
         let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
@@ -635,13 +275,6 @@ pub fn kaxi_transpile_line_to_ptx_f32(asm: KaxiAsmBuf, line_start: i64, line_len
             return "    selp.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + pp(pred) + ";\n"
         }
     }
-    else if c0 == 114 && c1 == 101 && c2 == 116 {
-        return "    ret;\n"
-    }
-    else if c0 == 110 && c1 == 111 && c2 == 112 {
-        return "    // nop\n"
-    }
-
     ""
 }
 
@@ -652,119 +285,12 @@ pub fn kaxi_transpile_line_to_ptx_f32(asm: KaxiAsmBuf, line_start: i64, line_len
 // ---------------------------------------------------------------------------
 
 pub fn kaxi_transpile_line_to_ptx_f32_2c(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
+    // Phase C.3: post-C.2 only atomic_addf is reachable here.
+    if line_len < 3 { return "" }
     let c0 = asm.data[line_start as usize] as i8
     let c1 = if line_len > 1 { asm.data[(line_start + 1) as usize] as i8 } else { 0 }
     let c2 = if line_len > 2 { asm.data[(line_start + 2) as usize] as i8 } else { 0 }
-
-    // Dual-bank arithmetic — see kaxi_transpile_line_to_ptx_f32 for rationale.
-    if c0 == 97 && c1 == 100 && c2 == 100 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    add.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
-                 + "    add.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
-        }
-    }
-    else if c0 == 115 && c1 == 117 && c2 == 98 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    sub.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
-                 + "    sub.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
-        }
-    }
-    else if c0 == 109 && c1 == 117 && c2 == 108 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    mul.lo.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
-                 + "    mul.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
-        }
-    }
-    else if c0 == 100 && c1 == 105 && c2 == 118 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    div.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
-        }
-    }
-    else if c0 == 102 && c1 == 109 && c2 == 97 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    fma.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + fr(src_a) + ";\n"
-        }
-    }
-    else if c0 == 108 && c1 == 111 && c2 == 97 {
-        if line_len > 11 && asm.data[(line_start + 5) as usize] as i8 == 103 {
-            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
-            let buf = ptx_parse_buf(asm, line_start, line_len)
-            let base = if buf == 1 { "%rd97" } else { "%rd96" }
-            if dst >= 0 && addr >= 0 {
-                return "    mul.lo.u64 %rd64, " + rd(addr) + ", 4;\n"
-                     + "    add.u64 %rd64, " + base + ", %rd64;\n"
-                     + "    ld.global.f32 " + fr(dst) + ", [%rd64];\n"
-            }
-        }
-        else if line_len > 8 && asm.data[(line_start + 8) as usize] as i8 == 102 {
-            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let hex = ptx_parse_fimm_hex(asm, line_start, line_len)
-            if dst >= 0 && str_len(hex) == 8 {
-                return "    mov.f32 " + fr(dst) + ", 0f" + hex + ";\n"
-            }
-        }
-        else {
-            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let imm = ptx_parse_imm_after(asm, line_start, line_len, "imm=")
-            if dst >= 0 {
-                return "    mov.u64 " + rd(dst) + ", " + ptx_int_to_string(imm) + ";\n"
-                     + "    mov.u32 %r2, " + ptx_int_to_string(imm) + ";\n"
-                     + "    cvt.rn.f32.s32 " + fr(dst) + ", %r2;\n"
-            }
-        }
-    }
-    else if c0 == 115 && c1 == 116 && c2 == 111 {
-        if line_len > 12 && asm.data[(line_start + 6) as usize] as i8 == 103 {
-            let src = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
-            let buf = ptx_parse_buf(asm, line_start, line_len)
-            let base = if buf == 1 { "%rd97" } else { "%rd96" }
-            if src >= 0 && addr >= 0 {
-                return "    mul.lo.u64 %rd64, " + rd(addr) + ", 4;\n"
-                     + "    add.u64 %rd64, " + base + ", %rd64;\n"
-                     + "    st.global.f32 [%rd64], " + fr(src) + ";\n"
-            }
-        }
-    }
-    else if c0 == 103 && c1 == 101 && c2 == 116 {
-        let kind = if line_len > 4 { asm.data[(line_start + 4) as usize] as i8 } else { 116 }
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        if dst >= 0 {
-            if kind == 98 {
-                return "    mov.u32 %r1, %ctaid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-                     + "    cvt.rn.f32.u32 " + fr(dst) + ", %r1;\n"
-            }
-            else if kind == 110 {
-                return "    mov.u32 %r1, %ntid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-                     + "    cvt.rn.f32.u32 " + fr(dst) + ", %r1;\n"
-            }
-            else {
-                return "    mov.u32 %r1, %tid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-                     + "    cvt.rn.f32.u32 " + fr(dst) + ", %r1;\n"
-            }
-        }
-    }
-    else if c0 == 97 && c1 == 116 && c2 == 111 {
-        // atomic_addf rD, addr=rA, src=rS  → atom.global.add.f32
+    if c0 == 97 && c1 == 116 && c2 == 111 {
         let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
         let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
         let src = ptx_parse_reg_after(asm, line_start, line_len, "src=r")
@@ -773,13 +299,6 @@ pub fn kaxi_transpile_line_to_ptx_f32_2c(asm: KaxiAsmBuf, line_start: i64, line_
                  + "    atom.global.add.f32 " + fr(dst) + ", [%rd64], " + fr(src) + ";\n"
         }
     }
-    else if c0 == 114 && c1 == 101 && c2 == 116 {
-        return "    ret;\n"
-    }
-    else if c0 == 110 && c1 == 111 && c2 == 112 {
-        return "    // nop\n"
-    }
-
     ""
 }
 
@@ -814,151 +333,9 @@ fn ptx_addr_compute_f32e(addr_reg: i64) -> string with Mut, Panic, Div, Alloc {
 }
 
 pub fn kaxi_transpile_line_to_ptx_f32_epistemic(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
-    let c0 = asm.data[line_start as usize] as i8
-    let c1 = if line_len > 1 { asm.data[(line_start + 1) as usize] as i8 } else { 0 }
-    let c2 = if line_len > 2 { asm.data[(line_start + 2) as usize] as i8 } else { 0 }
-
-    if c0 == 97 && c1 == 100 && c2 == 100 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    add.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
-                 + "    add.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
-                 + "    add.rn.f32 " + fv(dst) + ", " + fv(src_a) + ", " + fv(src_b) + ";\n"
-        }
-    }
-    else if c0 == 115 && c1 == 117 && c2 == 98 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    sub.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
-                 + "    sub.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
-                 + "    add.rn.f32 " + fv(dst) + ", " + fv(src_a) + ", " + fv(src_b) + ";\n"
-        }
-    }
-    else if c0 == 109 && c1 == 117 && c2 == 108 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            var s: string = "    mul.lo.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
-            s = s + "    mul.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
-            if src_a == src_b {
-                // X²: σ²(X²) = 4·X²·σ²(X)
-                s = s + "    mul.rn.f32 %f64, " + fr(src_a) + ", " + fr(src_a) + ";\n"
-                s = s + "    mul.rn.f32 %f64, %f64, " + fv(src_a) + ";\n"
-                s = s + "    add.rn.f32 %f65, %f64, %f64;\n"
-                s = s + "    add.rn.f32 " + fv(dst) + ", %f65, %f65;\n"
-            } else {
-                // independent: a²σ²(b) + b²σ²(a)
-                s = s + "    mul.rn.f32 %f64, " + fr(src_a) + ", " + fr(src_a) + ";\n"
-                s = s + "    mul.rn.f32 %f64, %f64, " + fv(src_b) + ";\n"
-                s = s + "    mul.rn.f32 %f65, " + fr(src_b) + ", " + fr(src_b) + ";\n"
-                s = s + "    mul.rn.f32 %f65, %f65, " + fv(src_a) + ";\n"
-                s = s + "    add.rn.f32 " + fv(dst) + ", %f64, %f65;\n"
-            }
-            return s
-        }
-    }
-    else if c0 == 100 && c1 == 105 && c2 == 118 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    div.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
-                 + "    add.rn.f32 " + fv(dst) + ", " + fv(src_a) + ", " + fv(src_b) + ";\n"
-        }
-    }
-    else if c0 == 102 && c1 == 109 && c2 == 97 {
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
-        let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
-        if dst >= 0 && src_a >= 0 && src_b >= 0 {
-            return "    fma.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + fr(src_a) + ";\n"
-                 + "    add.rn.f32 " + fv(dst) + ", " + fv(src_a) + ", " + fv(src_b) + ";\n"
-        }
-    }
-    else if c0 == 108 && c1 == 111 && c2 == 97 {
-        if line_len > 11 && asm.data[(line_start + 5) as usize] as i8 == 103 {
-            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
-            if dst >= 0 && addr >= 0 {
-                return ptx_addr_compute_f32e(addr)
-                     + "    add.u64 %rd65, %rd96, %rd64;\n"
-                     + "    ld.global.f32 " + fr(dst) + ", [%rd65];\n"
-                     + "    add.u64 %rd65, %rd97, %rd64;\n"
-                     + "    ld.global.f32 " + fv(dst) + ", [%rd65];\n"
-            }
-        }
-        else if line_len > 8 && asm.data[(line_start + 8) as usize] as i8 == 102 {
-            // load_immf rD, fimm=HEX  — f32 hex literal, variance ← 0
-            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let hex = ptx_parse_fimm_hex(asm, line_start, line_len)
-            if dst >= 0 && str_len(hex) == 8 {
-                return "    mov.f32 " + fr(dst) + ", 0f" + hex + ";\n"
-                     + "    mov.f32 " + fv(dst) + ", 0f00000000;\n"
-            }
-        }
-        else {
-            // load_imm rD, imm=N — set value to N (as f32) and variance to 0
-            let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let imm = ptx_parse_imm_after(asm, line_start, line_len, "imm=")
-            if dst >= 0 {
-                return "    mov.u64 " + rd(dst) + ", " + ptx_int_to_string(imm) + ";\n"
-                     + "    mov.u32 %r2, " + ptx_int_to_string(imm) + ";\n"
-                     + "    cvt.rn.f32.s32 " + fr(dst) + ", %r2;\n"
-                     + "    mov.f32 " + fv(dst) + ", 0f00000000;\n"
-            }
-        }
-    }
-    else if c0 == 115 && c1 == 116 && c2 == 111 {
-        if line_len > 12 && asm.data[(line_start + 6) as usize] as i8 == 103 {
-            let src = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-            let addr = ptx_parse_reg_after(asm, line_start, line_len, "addr=r")
-            if src >= 0 && addr >= 0 {
-                return ptx_addr_compute_f32e(addr)
-                     + "    add.u64 %rd65, %rd96, %rd64;\n"
-                     + "    st.global.f32 [%rd65], " + fr(src) + ";\n"
-                     + "    add.u64 %rd65, %rd97, %rd64;\n"
-                     + "    st.global.f32 [%rd65], " + fv(src) + ";\n"
-            }
-        }
-    }
-    else if c0 == 103 && c1 == 101 && c2 == 116 {
-        let kind = if line_len > 4 { asm.data[(line_start + 4) as usize] as i8 } else { 116 }
-        let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
-        if dst >= 0 {
-            let zero_var = "    mov.f32 " + fv(dst) + ", 0f00000000;\n"
-            let val_f32 = "    cvt.rn.f32.u32 " + fr(dst) + ", %r1;\n"
-            if kind == 98 {
-                return "    mov.u32 %r1, %ctaid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-                     + val_f32
-                     + zero_var
-            }
-            else if kind == 110 {
-                return "    mov.u32 %r1, %ntid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-                     + val_f32
-                     + zero_var
-            }
-            else {
-                return "    mov.u32 %r1, %tid.x;\n"
-                     + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
-                     + val_f32
-                     + zero_var
-            }
-        }
-    }
-    else if c0 == 114 && c1 == 101 && c2 == 116 {
-        return "    ret;\n"
-    }
-    else if c0 == 110 && c1 == 111 && c2 == 112 {
-        return "    // nop\n"
-    }
-
+    // Phase C.3: all 10 branches (add/sub/mul/div/fma/load/store/get/ret/nop)
+    // extracted into per-opcode helpers in C.2. Fully unreachable; stub kept
+    // as the unified dispatcher needs the symbol resolvable.
     ""
 }
 
@@ -1478,8 +855,12 @@ fn kaxi_lower_load(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -
         // load_shared: leave to per-dialect handler (TODO comment varies).
         return ""
     }
-    // load_imm or load_immf
-    if line_len > 8 && asm.data[(line_start + 8) as usize] as i8 == 102 {
+    // load_imm or load_immf. In default/epistemic (modes 0/1) the old
+    // per-dialect handlers had no `load_immf` branch — they fell through to
+    // `load_imm`, which (by accident-of-parsing) finds "imm=" inside "fimm=N"
+    // and parses N as integer. Replicate that so C.3 can stub the old
+    // handlers without breaking byte-identity.
+    if line_len > 8 && asm.data[(line_start + 8) as usize] as i8 == 102 && mode >= 2 {
         return kaxi_lower_load_immf(asm, line_start, line_len, mode)
     }
     kaxi_lower_load_imm(asm, line_start, line_len, mode)
