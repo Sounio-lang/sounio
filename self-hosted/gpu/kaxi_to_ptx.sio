@@ -753,6 +753,41 @@ fn kaxi_lower_fma(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) ->
          + "    add.rn.f32 " + fv(dst) + ", " + fv(src_a) + ", " + fv(src_b) + ";\n"
 }
 
+// Phase E: min/max — same shape as add but with PTX `min.*` / `max.*`.
+// Variance lane uses additive propagation (conservative, matches sub/div
+// behaviour: σ²(min(a,b)) ≤ σ²(a)+σ²(b) for independent inputs).
+fn kaxi_lower_min_max(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64, op: string) -> string with Mut, Panic, Div, Alloc {
+    let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+    let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
+    if dst < 0 || src_a < 0 || src_b < 0 { return "" }
+    if mode == 0 {
+        if kaxi_line_has_type_f64(asm, line_start, line_len) {
+            return ptx_binop_f64(op + ".f64", dst, src_a, src_b)
+        }
+        return ptx_binop(op + ".u64", dst, src_a, src_b)
+    }
+    if mode == 1 {
+        return "    " + op + ".u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
+             + "    add.u64 " + ev(dst) + ", " + ev(src_a) + ", " + ev(src_b) + ";\n"
+    }
+    if mode == 2 || mode == 3 {
+        return "    " + op + ".u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
+             + "    " + op + ".f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+    }
+    return "    " + op + ".u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
+         + "    " + op + ".f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+         + "    add.rn.f32 " + fv(dst) + ", " + fv(src_a) + ", " + fv(src_b) + ";\n"
+}
+
+fn kaxi_lower_min(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    kaxi_lower_min_max(asm, line_start, line_len, mode, "min")
+}
+
+fn kaxi_lower_max(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    kaxi_lower_min_max(asm, line_start, line_len, mode, "max")
+}
+
 fn kaxi_lower_arith(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
     if line_len < 3 { return "" }
     let c0 = asm.data[line_start as usize] as i8
@@ -763,6 +798,8 @@ fn kaxi_lower_arith(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) 
     if c0 == 109 && c1 == 117 && c2 == 108 { return kaxi_lower_mul(asm, line_start, line_len, mode) }
     if c0 == 100 && c1 == 105 && c2 == 118 { return kaxi_lower_div(asm, line_start, line_len, mode) }
     if c0 == 102 && c1 == 109 && c2 == 97 { return kaxi_lower_fma(asm, line_start, line_len, mode) }
+    if c0 == 109 && c1 == 105 && c2 == 110 { return kaxi_lower_min(asm, line_start, line_len, mode) }
+    if c0 == 109 && c1 == 97 && c2 == 120 { return kaxi_lower_max(asm, line_start, line_len, mode) }
     ""
 }
 
