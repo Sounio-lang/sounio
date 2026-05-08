@@ -11,8 +11,50 @@ Start here for parallel Sounio work:
 Current operational notes:
 
 - Active workspace: `/workspace/sounio`.
-- Safe branch: `integration/sounio-dev-ready-base`.
-- Do not trust stale Beagle branch metadata that says `main`.
+- Current upstream merge target: `origin/main`.
+- Historical safe branch: `integration/sounio-dev-ready-base`. Treat it as
+  stale/divergent unless the human explicitly revives it; do not broad-merge
+  it into current work.
+- Do not trust stale Beagle branch metadata without checking `git status -sb`
+  and `git rev-parse --short HEAD origin/main`.
+- Three-agent coordination for this window:
+  - Claude A is the integration shepherd. Claude A owns final merge authority,
+    branch race checks, blocker classification, and pushes to `main`.
+  - Claude B is the implementation worker. Claude B owns one compiler lane at a
+    time; current candidate lane is the locked worktree commit
+    `93ddd0e5 compiler: fold imported else-if chains at import time`.
+  - Codex is support implementer/reviewer. Codex may inspect, validate, prepare
+    handoffs, or implement explicitly assigned scoped tasks, but should not push
+    `main` unless Claude A or the human delegates that merge step.
+- Coordination protocol:
+  - Before editing, announce `CLAIM <files>`.
+  - After committing, aborting, or handing off, announce `RELEASE <files>`.
+  - If two agents need the same file, Claude A decides the order.
+  - Treat `self-hosted/compiler/module_frontend.sio`,
+    `self-hosted/compiler/native_compile_driver.sio`, compiler resolver
+    scripts, `bin/souc`, `.claude/settings.local.json`, and CI workflow files
+    as serialized surfaces even under soft coordination.
+- Current known worktree posture:
+  - `/workspace/sounio` is the active main worktree. Leave any existing local
+    dirt alone unless explicitly assigned.
+  - `/workspace/sounio-native-v2-fnref-calls`,
+    `/workspace/sounio-native-v2-hof-lock`, and
+    `/workspace/sounio-native-v2-imported-hof-abi` are stale/read-only evidence
+    worktrees. `git cherry -v origin/main <branch>` showed only `-` entries
+    for these branches on 2026-05-08, so their patches appear represented on
+    `origin/main`; Claude A should approve any worktree/branch deletion.
+  - `/workspace/sounio/.claude/worktrees/agent-a04d29d914b22568f` is the locked
+    Claude worker lane for imported else-if folding. `git cherry -v origin/main
+    worktree-agent-a04d29d914b22568f` showed one live `+` commit:
+    `93ddd0e5 compiler: fold imported else-if chains at import time`.
+- Current dirty-state warning:
+  - `.claude/settings.local.json` is locally modified; do not touch it.
+  - `scripts/ci/kretikos_kaxi_lowering_gate.sh` is locally modified in the main
+    worktree as of 2026-05-08; classify ownership before touching KAXI gate
+    files.
+  - `scripts/ci/kretikos_f64_runtime_gate.sh` is locally modified in the main
+    worktree as of 2026-05-08; classify ownership before touching Kretikos
+    runtime gate files.
 - During orchestration setup, a local modification was observed in
   `self-hosted/compiler/lean_single.sio`. Verify current `git status` before
   touching it; if modified, do not overwrite or revert it without explicit user
