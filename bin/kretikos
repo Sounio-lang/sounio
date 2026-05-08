@@ -1591,231 +1591,306 @@ USAGE
             exit 1
         }
 
-        python3 - "$PATTERN" "$ASM_OUT" "$OUT" "$LOG_OUT" <<'PY'
-import hashlib
-import json
-import re
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
+        # Phase 5.F (python-extermination): the witness recognizer used to be
+        # a python heredoc that parsed the .kaxi assembly with a regex. We now
+        # delegate the assembly parsing to a pure-Sounio driver
+        # (kretikos_kaxi_asm_summary.sio) and compose the witness JSON via the
+        # existing json-emit + kaxi-validate-evidence primitives.
+        SUMMARY_DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_kaxi_asm_summary.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        SUMMARY_DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-kaxi-witness.XXXXXX")" || {
+            echo "error: failed to create temporary witness driver dir" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        SUMMARY_DRIVER_ELF="$SUMMARY_DRIVER_DIR/asm-summary.elf"
+        SUMMARY_JSON="$SUMMARY_DRIVER_DIR/summary.json"
+        trap 'rm -rf "$SUMMARY_DRIVER_DIR"' EXIT INT TERM
+        "$SOUC_BIN" "$SUMMARY_DRIVER_SRC" "$SUMMARY_DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile kaxi-asm-summary driver" >&2
+            exit 1
+        }
+        chmod +x "$SUMMARY_DRIVER_ELF"
+        "$SUMMARY_DRIVER_ELF" "$ASM_OUT" > "$SUMMARY_JSON" || {
+            echo "error: kaxi-asm-summary driver failed for $ASM_OUT" >&2
+            exit 1
+        }
 
-pattern, asm_path, out_path, log_path = sys.argv[1:]
-asm = Path(asm_path)
-out = Path(out_path)
-log = Path(log_path)
-text = asm.read_text(encoding="utf-8")
-raw_lines = text.splitlines()
-instructions = [line.strip() for line in raw_lines if line.strip() and not line.lstrip().startswith(";")]
-opcodes = [line.split()[0] for line in instructions]
-seqs = []
-for line in instructions:
-    match = re.search(r"seq=([0-9]+)", line)
-    if match:
-        seqs.append(int(match.group(1)))
+        # Lift scalars from the summary in one batched call.
+        mapfile -t __ws_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$SUMMARY_JSON" \
+            --print-or-empty instruction_count \
+            --print-or-empty seq_dense_zero_based \
+            --print-or-empty store_global_count \
+            --print-or-empty variance_annotation_count \
+            --print-or-empty first_add_first \
+            --print-or-empty first_add_second \
+            --print-or-empty first_sub \
+            --print-or-empty first_mul \
+            --print-or-empty first_div \
+            --print-or-empty first_fma \
+            --print-or-empty first_store_global)
+        WS_INST_COUNT="${__ws_parts[0]:-0}"
+        WS_SEQ_DENSE="${__ws_parts[1]:-false}"
+        WS_SG_COUNT="${__ws_parts[2]:-0}"
+        WS_VAR_COUNT="${__ws_parts[3]:-0}"
+        WS_FIRST_ADD_FIRST="${__ws_parts[4]:-}"
+        WS_FIRST_ADD_SECOND="${__ws_parts[5]:-}"
+        WS_FIRST_SUB="${__ws_parts[6]:-}"
+        WS_FIRST_MUL="${__ws_parts[7]:-}"
+        WS_FIRST_DIV="${__ws_parts[8]:-}"
+        WS_FIRST_FMA="${__ws_parts[9]:-}"
+        WS_FIRST_STORE_GLOBAL="${__ws_parts[10]:-}"
+        WS_OPCODES_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$SUMMARY_JSON" --print-subtree-or opcodes '[]')"
+        WS_SEQS_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$SUMMARY_JSON" --print-subtree-or seqs '[]')"
 
-def contains(prefix):
-    return any(line.startswith(prefix) for line in instructions)
+        # Per-pattern semantic profile + required/forbidden opcode lists. Mirrors
+        # the `expectations` dict that used to live in the python heredoc.
+        WS_SEMANTIC=""
+        WS_REQUIRED=""
+        WS_FORBIDDEN=""
+        case "$PATTERN" in
+            exit_only)
+                WS_SEMANTIC="control_minimal"
+                WS_REQUIRED="ret"
+                WS_FORBIDDEN="add sub mul div fma store_global"
+                ;;
+            vec_add)
+                WS_SEMANTIC="value_lane_add"
+                WS_REQUIRED="get_tid add ret"
+                ;;
+            vec_sub)
+                WS_SEMANTIC="value_lane_sub"
+                WS_REQUIRED="get_tid sub ret"
+                ;;
+            vec_mul)
+                WS_SEMANTIC="value_lane_mul"
+                WS_REQUIRED="get_tid mul ret"
+                ;;
+            vec_div)
+                WS_SEMANTIC="value_lane_div"
+                WS_REQUIRED="get_tid div ret"
+                ;;
+            fma)
+                WS_SEMANTIC="value_lane_fma"
+                WS_REQUIRED="get_tid fma ret"
+                ;;
+            source_vec_add_f32)
+                WS_SEMANTIC="lowered_indexed_f32_vector_add"
+                WS_REQUIRED="get_tid load_global add store_global ret"
+                ;;
+            source_vec_sub_f32)
+                WS_SEMANTIC="lowered_indexed_f32_vector_sub"
+                WS_REQUIRED="get_tid load_global sub store_global ret"
+                ;;
+            source_vec_mul_f32)
+                WS_SEMANTIC="lowered_indexed_f32_vector_mul"
+                WS_REQUIRED="get_tid load_global mul store_global ret"
+                ;;
+            source_vec_div_f32)
+                WS_SEMANTIC="lowered_indexed_f32_vector_div"
+                WS_REQUIRED="get_tid load_global div store_global ret"
+                ;;
+            source_fma_f32)
+                WS_SEMANTIC="lowered_indexed_f32_affine_mad"
+                WS_REQUIRED="get_tid load_global mul add store_global ret"
+                ;;
+            source_epistemic_dual_output_f32)
+                WS_SEMANTIC="lowered_epistemic_dual_value_uncertainty_outputs"
+                WS_REQUIRED="get_tid load_global add mul store_global ret"
+                ;;
+            epistemic_elementwise_f32)
+                WS_SEMANTIC="value_with_epsilon_lane"
+                WS_REQUIRED="get_tid load_global fma store_global ret"
+                ;;
+            epistemic_dual_output_f32)
+                WS_SEMANTIC="separate_value_and_uncertainty_outputs"
+                WS_REQUIRED="get_tid load_global add mul store_global ret"
+                ;;
+            octonion_assoc)
+                WS_SEMANTIC="octonion_associator_non_associative_f32"
+                WS_REQUIRED="get_tid load_global mul add store_global ret"
+                ;;
+            octonion_mul)
+                WS_SEMANTIC="full_octonion_product_f32"
+                WS_REQUIRED="get_tid load_global mul add sub store_global ret"
+                ;;
+            source_vec_add_f64)
+                WS_SEMANTIC="lowered_indexed_f64_vector_add"
+                WS_REQUIRED="get_tid load_global add store_global ret"
+                ;;
+            source_vec_sub_f64)
+                WS_SEMANTIC="lowered_indexed_f64_vector_sub"
+                WS_REQUIRED="get_tid load_global sub store_global ret"
+                ;;
+            source_vec_mul_f64)
+                WS_SEMANTIC="lowered_indexed_f64_vector_mul"
+                WS_REQUIRED="get_tid load_global mul store_global ret"
+                ;;
+            source_vec_div_f64)
+                WS_SEMANTIC="lowered_indexed_f64_vector_div"
+                WS_REQUIRED="get_tid load_global div store_global ret"
+                ;;
+            source_fma_f64)
+                WS_SEMANTIC="lowered_indexed_f64_affine_mad"
+                WS_REQUIRED="get_tid load_global mul add store_global ret"
+                ;;
+            *)
+                echo "error: kaxi-witness recognizer has no spec for pattern '$PATTERN'" >&2
+                exit 1
+                ;;
+        esac
 
-def count(prefix):
-    return sum(1 for line in instructions if line.startswith(prefix))
+        # JSON-escape helper for a free-text string (assembly lines). K-AXI
+        # assembly never contains '"' or '\' but guard for completeness.
+        __ws_json_escape() {
+            printf '%s' "$1" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g'
+        }
 
-expectations = {
-    "exit_only": {
-        "required": ["ret"],
-        "forbidden": ["add", "sub", "mul", "div", "fma", "store_global"],
-        "semantic": "control_minimal",
-    },
-    "vec_add": {
-        "required": ["get_tid", "add", "ret"],
-        "forbidden": [],
-        "semantic": "value_lane_add",
-    },
-    "vec_sub": {
-        "required": ["get_tid", "sub", "ret"],
-        "forbidden": [],
-        "semantic": "value_lane_sub",
-    },
-    "vec_mul": {
-        "required": ["get_tid", "mul", "ret"],
-        "forbidden": [],
-        "semantic": "value_lane_mul",
-    },
-    "vec_div": {
-        "required": ["get_tid", "div", "ret"],
-        "forbidden": [],
-        "semantic": "value_lane_div",
-    },
-    "fma": {
-        "required": ["get_tid", "fma", "ret"],
-        "forbidden": [],
-        "semantic": "value_lane_fma",
-    },
-    "source_vec_add_f32": {
-        "required": ["get_tid", "load_global", "add", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "lowered_indexed_f32_vector_add",
-    },
-    "source_vec_sub_f32": {
-        "required": ["get_tid", "load_global", "sub", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "lowered_indexed_f32_vector_sub",
-    },
-    "source_vec_mul_f32": {
-        "required": ["get_tid", "load_global", "mul", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "lowered_indexed_f32_vector_mul",
-    },
-    "source_vec_div_f32": {
-        "required": ["get_tid", "load_global", "div", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "lowered_indexed_f32_vector_div",
-    },
-    "source_fma_f32": {
-        "required": ["get_tid", "load_global", "mul", "add", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "lowered_indexed_f32_affine_mad",
-    },
-    "source_epistemic_dual_output_f32": {
-        "required": ["get_tid", "load_global", "add", "mul", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "lowered_epistemic_dual_value_uncertainty_outputs",
-    },
-    "epistemic_elementwise_f32": {
-        "required": ["get_tid", "load_global", "fma", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "value_with_epsilon_lane",
-    },
-    "epistemic_dual_output_f32": {
-        "required": ["get_tid", "load_global", "add", "mul", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "separate_value_and_uncertainty_outputs",
-    },
-    "octonion_assoc": {
-        "required": ["get_tid", "load_global", "mul", "add", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "octonion_associator_non_associative_f32",
-    },
-    "octonion_mul": {
-        "required": ["get_tid", "load_global", "mul", "add", "sub", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "full_octonion_product_f32",
-    },
-    "source_vec_add_f64": {
-        "required": ["get_tid", "load_global", "add", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "lowered_indexed_f64_vector_add",
-    },
-    "source_vec_sub_f64": {
-        "required": ["get_tid", "load_global", "sub", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "lowered_indexed_f64_vector_sub",
-    },
-    "source_vec_mul_f64": {
-        "required": ["get_tid", "load_global", "mul", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "lowered_indexed_f64_vector_mul",
-    },
-    "source_vec_div_f64": {
-        "required": ["get_tid", "load_global", "div", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "lowered_indexed_f64_vector_div",
-    },
-    "source_fma_f64": {
-        "required": ["get_tid", "load_global", "mul", "add", "store_global", "ret"],
-        "forbidden": [],
-        "semantic": "lowered_indexed_f64_affine_mad",
-    },
-}
-spec = expectations[pattern]
-missing = [name for name in spec["required"] if not contains(name)]
-forbidden_present = [name for name in spec["forbidden"] if contains(name)]
-seq_monotonic = seqs == list(range(len(seqs)))
-variance_lines = [line for line in instructions if "var=+" in line or "var=0%" in line]
-stores = [line for line in instructions if line.startswith("store_global")]
-value_lane = ""
-uncertainty_lane = ""
-if pattern == "epistemic_dual_output_f32":
-    value_lane = next((line for line in instructions if line.startswith("add ")), "")
-    uncertainty_lane = next((line for line in instructions if line.startswith("mul ")), "")
-elif pattern == "epistemic_elementwise_f32":
-    value_lane = next((line for line in instructions if line.startswith("fma ")), "")
-elif pattern == "source_vec_add_f64":
-    value_lane = next((line for line in instructions if line.startswith("add ")), "")
-elif pattern == "source_vec_sub_f64":
-    value_lane = next((line for line in instructions if line.startswith("sub ")), "")
-elif pattern == "source_vec_mul_f64":
-    value_lane = next((line for line in instructions if line.startswith("mul ")), "")
-elif pattern == "source_vec_div_f64":
-    value_lane = next((line for line in instructions if line.startswith("div ")), "")
-elif pattern == "source_fma_f64":
-    value_lane = next((line for line in instructions if line.startswith("add ")), "")
-elif pattern == "source_vec_add_f32":
-    value_lane = next((line for line in instructions if line.startswith("add ")), "")
-elif pattern == "source_vec_sub_f32":
-    value_lane = next((line for line in instructions if line.startswith("sub ")), "")
-elif pattern == "source_vec_mul_f32":
-    value_lane = next((line for line in instructions if line.startswith("mul ")), "")
-elif pattern == "source_vec_div_f32":
-    value_lane = next((line for line in instructions if line.startswith("div ")), "")
-elif pattern == "source_fma_f32":
-    value_lane = next((line for line in instructions if line.startswith("add ")), "")
-elif pattern == "source_epistemic_dual_output_f32":
-    add_lines = [line for line in instructions if line.startswith("add ")]
-    value_lane = add_lines[0] if add_lines else ""
-    uncertainty_lane = add_lines[1] if len(add_lines) > 1 else next((line for line in instructions if line.startswith("mul ")), "")
-elif pattern in {"vec_add", "vec_sub", "vec_mul", "vec_div", "fma"}:
-    value_lane = next((line for line in instructions if line.startswith(spec["required"][1] + " ")), "")
-elif pattern in {"octonion_assoc", "octonion_mul"}:
-    value_lane = next((line for line in instructions if line.startswith("store_global ")), "")
+        # Build the failures array. Insertion order matches the python recognizer.
+        __WS_FAIL_ELEMS=()
 
-failures = []
-if missing:
-    failures.append({"kind": "missing_required_opcode", "opcodes": missing})
-if forbidden_present:
-    failures.append({"kind": "forbidden_opcode_present", "opcodes": forbidden_present})
-if not seq_monotonic:
-    failures.append({"kind": "sequence_not_dense_zero_based", "seqs": seqs})
-if pattern.startswith("epistemic_") and not variance_lines:
-    failures.append({"kind": "missing_variance_annotations"})
-if pattern == "epistemic_dual_output_f32" and len(stores) < 2:
-    failures.append({"kind": "dual_output_requires_two_store_global_ops", "stores": stores})
-if pattern == "source_epistemic_dual_output_f32" and len(stores) < 2:
-    failures.append({"kind": "dual_output_requires_two_store_global_ops", "stores": stores})
+        __WS_MISSING=()
+        for op in $WS_REQUIRED; do
+            if ! grep -qF "\"$op\"" <<<"$WS_OPCODES_JSON"; then
+                __WS_MISSING+=("\"$op\"")
+            fi
+        done
+        if [[ ${#__WS_MISSING[@]} -gt 0 ]]; then
+            old_ifs="$IFS"; IFS=','
+            __m="${__WS_MISSING[*]}"
+            IFS="$old_ifs"
+            __WS_FAIL_ELEMS+=("{\"kind\": \"missing_required_opcode\", \"opcodes\": [$__m]}")
+        fi
 
-payload = {
-    "schema": "sounio.kretikos.kaxi-witness.v1",
-    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "status": "pass" if not failures else "fail",
-    "pattern": pattern,
-    "semantic_profile": spec["semantic"],
-    "assembly": {
-        "path": str(asm),
-        "bytes": asm.stat().st_size,
-        "sha256": hashlib.sha256(asm.read_bytes()).hexdigest(),
-        "instruction_count": len(instructions),
-        "opcodes": opcodes,
-        "seqs": seqs,
-        "seq_dense_zero_based": seq_monotonic,
-        "variance_annotation_count": len(variance_lines),
-    },
-    "epistemic_lanes": {
-        "value_lane_instruction": value_lane,
-        "uncertainty_lane_instruction": uncertainty_lane,
-        "store_global_count": len(stores),
-    },
-    "emitter_log": str(log),
-    "failures": failures,
-    "boundaries": [
-        "witness_is_profile_level_for_explicit_kretikos_patterns",
-        "witness_proves_kaxi_assembly_shape_and_dense_sequence_numbers",
-        "witness_does_not_claim_arbitrary_sounio_gpu_lowering",
-        "witness_does_not_replace_slurm_cuda_runtime_authority",
-    ],
-}
-out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-if failures:
-    raise SystemExit(json.dumps(failures))
-PY
+        __WS_FORB=()
+        for op in $WS_FORBIDDEN; do
+            if grep -qF "\"$op\"" <<<"$WS_OPCODES_JSON"; then
+                __WS_FORB+=("\"$op\"")
+            fi
+        done
+        if [[ ${#__WS_FORB[@]} -gt 0 ]]; then
+            old_ifs="$IFS"; IFS=','
+            __m="${__WS_FORB[*]}"
+            IFS="$old_ifs"
+            __WS_FAIL_ELEMS+=("{\"kind\": \"forbidden_opcode_present\", \"opcodes\": [$__m]}")
+        fi
+
+        if [[ "$WS_SEQ_DENSE" != "true" ]]; then
+            __WS_FAIL_ELEMS+=("{\"kind\": \"sequence_not_dense_zero_based\", \"seqs\": $WS_SEQS_JSON}")
+        fi
+
+        case "$PATTERN" in
+            epistemic_*)
+                if [[ "${WS_VAR_COUNT:-0}" -eq 0 ]]; then
+                    __WS_FAIL_ELEMS+=('{"kind": "missing_variance_annotations"}')
+                fi
+                ;;
+        esac
+
+        if [[ "$PATTERN" == "epistemic_dual_output_f32" || "$PATTERN" == "source_epistemic_dual_output_f32" ]]; then
+            if [[ "${WS_SG_COUNT:-0}" -lt 2 ]]; then
+                if [[ "${WS_SG_COUNT:-0}" -ge 1 && -n "$WS_FIRST_STORE_GLOBAL" ]]; then
+                    __WS_STORES_JSON="[\"$(__ws_json_escape "$WS_FIRST_STORE_GLOBAL")\"]"
+                else
+                    __WS_STORES_JSON="[]"
+                fi
+                __WS_FAIL_ELEMS+=("{\"kind\": \"dual_output_requires_two_store_global_ops\", \"stores\": $__WS_STORES_JSON}")
+            fi
+        fi
+
+        if [[ ${#__WS_FAIL_ELEMS[@]} -eq 0 ]]; then
+            WS_FAILURES_JSON="[]"
+            WS_STATUS="pass"
+        else
+            old_ifs="$IFS"; IFS=','
+            WS_FAILURES_JSON="[${__WS_FAIL_ELEMS[*]}]"
+            IFS="$old_ifs"
+            WS_STATUS="fail"
+        fi
+
+        # Per-pattern lane extraction.
+        WS_VALUE_LANE=""
+        WS_UNC_LANE=""
+        case "$PATTERN" in
+            epistemic_dual_output_f32)
+                WS_VALUE_LANE="$WS_FIRST_ADD_FIRST"
+                WS_UNC_LANE="$WS_FIRST_MUL"
+                ;;
+            epistemic_elementwise_f32)
+                WS_VALUE_LANE="$WS_FIRST_FMA"
+                ;;
+            source_epistemic_dual_output_f32)
+                WS_VALUE_LANE="$WS_FIRST_ADD_FIRST"
+                if [[ -n "$WS_FIRST_ADD_SECOND" ]]; then
+                    WS_UNC_LANE="$WS_FIRST_ADD_SECOND"
+                else
+                    WS_UNC_LANE="$WS_FIRST_MUL"
+                fi
+                ;;
+            source_vec_add_f64|source_vec_add_f32|source_fma_f64|source_fma_f32)
+                WS_VALUE_LANE="$WS_FIRST_ADD_FIRST"
+                ;;
+            source_vec_sub_f64|source_vec_sub_f32)
+                WS_VALUE_LANE="$WS_FIRST_SUB"
+                ;;
+            source_vec_mul_f64|source_vec_mul_f32)
+                WS_VALUE_LANE="$WS_FIRST_MUL"
+                ;;
+            source_vec_div_f64|source_vec_div_f32)
+                WS_VALUE_LANE="$WS_FIRST_DIV"
+                ;;
+            vec_add)
+                WS_VALUE_LANE="$WS_FIRST_ADD_FIRST"
+                ;;
+            vec_sub)
+                WS_VALUE_LANE="$WS_FIRST_SUB"
+                ;;
+            vec_mul)
+                WS_VALUE_LANE="$WS_FIRST_MUL"
+                ;;
+            vec_div)
+                WS_VALUE_LANE="$WS_FIRST_DIV"
+                ;;
+            fma)
+                WS_VALUE_LANE="$WS_FIRST_FMA"
+                ;;
+            octonion_assoc|octonion_mul)
+                WS_VALUE_LANE="$WS_FIRST_STORE_GLOBAL"
+                ;;
+        esac
+
+        WS_ASM_BYTES="$(__kretikos_file_size "$ASM_OUT")" || exit 1
+        WS_ASM_SHA="$(__kretikos_sha256 "$ASM_OUT")" || exit 1
+        WS_GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+        "$KRETIKOS_SELF" json-emit \
+            --int "assembly.bytes=$WS_ASM_BYTES" \
+            --int "assembly.instruction_count=$WS_INST_COUNT" \
+            --raw-json "assembly.opcodes=$WS_OPCODES_JSON" \
+            --string "assembly.path=$ASM_OUT" \
+            --bool "assembly.seq_dense_zero_based=$WS_SEQ_DENSE" \
+            --raw-json "assembly.seqs=$WS_SEQS_JSON" \
+            --string "assembly.sha256=$WS_ASM_SHA" \
+            --int "assembly.variance_annotation_count=$WS_VAR_COUNT" \
+            --array-strings "boundaries=witness_is_profile_level_for_explicit_kretikos_patterns|witness_proves_kaxi_assembly_shape_and_dense_sequence_numbers|witness_does_not_claim_arbitrary_sounio_gpu_lowering|witness_does_not_replace_slurm_cuda_runtime_authority" \
+            --string "emitter_log=$LOG_OUT" \
+            --int "epistemic_lanes.store_global_count=$WS_SG_COUNT" \
+            --string "epistemic_lanes.uncertainty_lane_instruction=$WS_UNC_LANE" \
+            --string "epistemic_lanes.value_lane_instruction=$WS_VALUE_LANE" \
+            --raw-json "failures=$WS_FAILURES_JSON" \
+            --string "generated_at_utc=$WS_GENERATED_AT" \
+            --string "pattern=$PATTERN" \
+            --string "schema=sounio.kretikos.kaxi-witness.v1" \
+            --string "semantic_profile=$WS_SEMANTIC" \
+            --string "status=$WS_STATUS" \
+            > "$OUT" || exit 1
+
+        if [[ "$WS_STATUS" == "fail" ]]; then
+            echo "$WS_FAILURES_JSON" >&2
+            exit 1
+        fi
+
 
         echo "kretikos: K-AXI witness emitted - $OUT"
         echo "kretikos: K-AXI witness assembly - $ASM_OUT"
