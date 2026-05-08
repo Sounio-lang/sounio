@@ -50,8 +50,11 @@ mkdir -p "${STAGE_DIR}"
 # ----- declare cases as parallel arrays ---------------------------------
 # (name|mode|blocks|threads|mem-words|init-mem|init-var|expected-mem|expected-var)
 # init-mem of "_seq_" means seed mem with [1..mem-words] sequence (test multi-block).
-# mode: basic | epistemic | f32   (f32 → uses --f32 lowering, --type f32 runner)
+# mode: basic | epistemic | f32 | f64
+#   f32 → uses --f32 lowering, --type f32 runner
+#   f64 → uses typed K-AXI metadata with the basic lowering, --type f64 runner
 CASES=(
+  "source_vec_add_f64|f64|1|8|8|1.25,2.5,3.75,4.5,5.25,6.5,7.75,8.125||2.5,5,7.5,9,10.5,13,15.5,16.25|"
   "vec_add|basic|1|8|8|1,2,3,4,5,6,7,8||2,4,6,8,10,12,14,16|"
   "vec_add|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|2,4,6,8,10,12,14,16|2,2,2,2,2,2,2,2"
   "vec_sub|basic|1|8|8|1,2,3,4,5,6,7,8||0,0,0,0,0,0,0,0|"
@@ -92,6 +95,7 @@ CASES=(
 # Map short names → kretikos pattern names
 declare -A PATTERN_FOR
 PATTERN_FOR[vec_add]=source_vec_add_f32
+PATTERN_FOR[source_vec_add_f64]=source_vec_add_f64
 PATTERN_FOR[vec_sub]=source_vec_sub_f32
 PATTERN_FOR[vec_mul]=source_vec_mul_f32
 PATTERN_FOR[vec_div]=source_vec_div_f32
@@ -278,6 +282,7 @@ while IFS='|' read -r idx name mode blocks threads mw imem ivar emem evar; do
   ARGS=("case_${idx}.ptx" --blocks "$blocks" --threads "$threads" --mem-words "$mw")
   [[ "$mode" == "epistemic" ]] && ARGS+=(--epistemic)
   [[ "$mode" == "f32" ]] && ARGS+=(--type f32)
+  [[ "$mode" == "f64" ]] && ARGS+=(--type f64)
   [[ "$mode" == "f32e" ]] && ARGS+=(--epistemic --type f32)
   [[ "$mode" == "f32_2c" ]] && ARGS+=(--epistemic --type f32)
   if [[ "$imem" == "_seq_" ]]; then

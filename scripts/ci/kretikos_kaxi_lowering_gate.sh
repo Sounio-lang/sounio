@@ -17,6 +17,7 @@ KNOWLEDGE_LOWERING_CERTIFICATE="$OUT_DIR/knowledge_dual_output_f32.kaxi-lowering
 KNOWLEDGE_LOWERING_CERTIFICATE_WORK="$OUT_DIR/knowledge_dual_output_f32.lowering-certificate.d"
 
 lowering_cases=(
+  "vec_add_f64|examples/kretikos/lower_vec_add_f64.sio|source_vec_add_f64|indexed_f64_vector_add|add"
   "vec_add_f32|examples/kretikos/lower_vec_add_f32.sio|source_vec_add_f32|indexed_f32_vector_add|add"
   "vec_sub_f32|examples/kretikos/lower_vec_sub_f32.sio|source_vec_sub_f32|indexed_f32_vector_sub|sub"
   "vec_mul_f32|examples/kretikos/lower_vec_mul_f32.sio|source_vec_mul_f32|indexed_f32_vector_mul|mul"
