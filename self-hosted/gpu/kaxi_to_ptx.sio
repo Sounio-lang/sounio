@@ -840,12 +840,14 @@ fn kaxi_lower_load_global(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode:
         return ptx_addr_compute_f32(addr) + "    ld.global.f32 " + fr(dst) + ", [%rd64];\n"
     }
     if mode == 3 {
-        // f32_2c: buf= parameter selects %rd96 vs %rd97 base.
+        // f32_2c: buf= parameter selects %rd258 vs %rd259 base.
+        // Phase K: scratch %rd256, base %rd258/%rd259 (was %rd64 + %rd96/97
+        // — same conflict shape Phase I fixed for variance modes).
         let buf = ptx_parse_buf(asm, line_start, line_len)
-        let base = if buf == 1 { "%rd97" } else { "%rd96" }
-        return "    mul.lo.u64 %rd64, " + rd(addr) + ", 4;\n"
-             + "    add.u64 %rd64, " + base + ", %rd64;\n"
-             + "    ld.global.f32 " + fr(dst) + ", [%rd64];\n"
+        let base = if buf == 1 { "%rd259" } else { "%rd258" }
+        return "    mul.lo.u64 %rd256, " + rd(addr) + ", 4;\n"
+             + "    add.u64 %rd256, " + base + ", %rd256;\n"
+             + "    ld.global.f32 " + fr(dst) + ", [%rd256];\n"
     }
     // mode == 4: dual-buffer f32 load (value + variance).
     // Phase I: scratch %rd256/%rd257, base %rd258/%rd259.
@@ -940,11 +942,12 @@ fn kaxi_lower_store_global(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode
         return ptx_addr_compute_f32(addr) + "    st.global.f32 [%rd64], " + fr(src) + ";\n"
     }
     if mode == 3 {
+        // Phase K: scratch %rd256, base %rd258/%rd259.
         let buf = ptx_parse_buf(asm, line_start, line_len)
-        let base = if buf == 1 { "%rd97" } else { "%rd96" }
-        return "    mul.lo.u64 %rd64, " + rd(addr) + ", 4;\n"
-             + "    add.u64 %rd64, " + base + ", %rd64;\n"
-             + "    st.global.f32 [%rd64], " + fr(src) + ";\n"
+        let base = if buf == 1 { "%rd259" } else { "%rd258" }
+        return "    mul.lo.u64 %rd256, " + rd(addr) + ", 4;\n"
+             + "    add.u64 %rd256, " + base + ", %rd256;\n"
+             + "    st.global.f32 [%rd256], " + fr(src) + ";\n"
     }
     // mode == 4: dual-buffer f32 store (value + variance).
     // Phase I: scratch %rd256/%rd257, base %rd258/%rd259.
@@ -1069,9 +1072,11 @@ pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with 
         out = out + "    .reg .f32 %f<128>;\n"
         out = out + "    .reg .pred %p<8>;\n\n"
     } else if mode == 3 {
-        out = out + "    .reg .b64 %rd<128>;\n"
+        // Phase K: bank up to 260 to make room for scratch+base above
+        // the value-lane region (was %rd<128> + %f<70>).
+        out = out + "    .reg .b64 %rd<260>;\n"
         out = out + "    .reg .b32 %r<8>;\n"
-        out = out + "    .reg .f32 %f<70>;\n"
+        out = out + "    .reg .f32 %f<260>;\n"
         out = out + "    .reg .pred %p<8>;\n\n"
     } else {
         // mode == 4 (f32_epistemic) — Phase I bank-up
@@ -1085,8 +1090,9 @@ pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with 
     if mode == 0 || mode == 2 {
         out = out + "    ld.param.u64 %rd63, [param_mem];\n"
     } else if mode == 3 {
-        out = out + "    ld.param.u64 %rd96, [param_a];\n"
-        out = out + "    ld.param.u64 %rd97, [param_b];\n"
+        // Phase K: base ptrs at %rd258/%rd259 (was %rd96/%rd97).
+        out = out + "    ld.param.u64 %rd258, [param_a];\n"
+        out = out + "    ld.param.u64 %rd259, [param_b];\n"
     } else {
         // mode == 1 || mode == 4 — Phase I: base ptrs at %rd258/%rd259.
         out = out + "    ld.param.u64 %rd258, [param_mem];\n"
