@@ -1429,6 +1429,7 @@ fn ptx_char_from_i64(n: i64) -> string with Mut, Panic {
 
 // ============================================================
 // Phase C.1: unified PTX header dispatch
+// Phase C.2: opcode-first decomposition (batch 1: arithmetic)
 // ============================================================
 //
 // PtxMode tag (passed as i64 to keep the lean_single self-host path
@@ -1439,10 +1440,188 @@ fn ptx_char_from_i64(n: i64) -> string with Mut, Panic {
 //   3 = f32_2c           (.f32,  dual param_a/param_b, half %f bank)
 //   4 = f32_epistemic    (.f32,  dual param_mem/param_var)
 //
-// Phase C.1 unifies only the header (param decls, register banks,
-// ld.param). Per-mode line handlers stay live; Phase C.2 collapses
-// them. Phase C.3 deletes the 5 old transpilers + this comment.
-// Drift oracle: `scripts/ci/kaxi_ptx_golden_gate.sh`.
+// Phase C.1 unified the header (param decls, register banks, ld.param).
+// Phase C.2 decomposes each K-AXI opcode into a single helper that
+// handles all 5 dialects internally. Empirically the 5 line handlers
+// have *different opcode sets* (18/14/13/11/10 dispatch arms), so a
+// per-dialect line handler is the wrong unit; the per-opcode helper is.
+//
+// Drift oracle: `scripts/ci/kaxi_ptx_golden_gate.sh` — gates every
+// commit byte-exact across all 185 (pattern × mode) combinations.
+
+// ----- Phase C.2 batch 1: arithmetic opcodes ------------------------
+
+fn kaxi_lower_add(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+    let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
+    if dst < 0 || src_a < 0 || src_b < 0 { return "" }
+    if mode == 0 {
+        if kaxi_line_has_type_f64(asm, line_start, line_len) {
+            return ptx_binop_f64("add.f64", dst, src_a, src_b)
+        }
+        return ptx_binop("add.u64", dst, src_a, src_b)
+    }
+    if mode == 1 {
+        return "    add.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
+             + "    add.u64 " + ev(dst) + ", " + ev(src_a) + ", " + ev(src_b) + ";\n"
+    }
+    if mode == 2 || mode == 3 {
+        return "    add.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
+             + "    add.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+    }
+    // mode == 4 (f32_epistemic): dual-bank value + variance lane (variance adds).
+    return "    add.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
+         + "    add.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+         + "    add.rn.f32 " + fv(dst) + ", " + fv(src_a) + ", " + fv(src_b) + ";\n"
+}
+
+fn kaxi_lower_sub(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+    let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
+    if dst < 0 || src_a < 0 || src_b < 0 { return "" }
+    if mode == 0 {
+        if kaxi_line_has_type_f64(asm, line_start, line_len) {
+            return ptx_binop_f64("sub.f64", dst, src_a, src_b)
+        }
+        return ptx_binop("sub.u64", dst, src_a, src_b)
+    }
+    if mode == 1 {
+        // variance still ADDS (independent linear approximation).
+        return "    sub.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
+             + "    add.u64 " + ev(dst) + ", " + ev(src_a) + ", " + ev(src_b) + ";\n"
+    }
+    if mode == 2 || mode == 3 {
+        return "    sub.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
+             + "    sub.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+    }
+    // mode == 4: variance lane adds.
+    return "    sub.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
+         + "    sub.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+         + "    add.rn.f32 " + fv(dst) + ", " + fv(src_a) + ", " + fv(src_b) + ";\n"
+}
+
+fn kaxi_lower_mul(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+    let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
+    if dst < 0 || src_a < 0 || src_b < 0 { return "" }
+    if mode == 0 {
+        if kaxi_line_has_type_f64(asm, line_start, line_len) {
+            return ptx_binop_f64("mul.f64", dst, src_a, src_b)
+        }
+        return ptx_binop("mul.lo.u64", dst, src_a, src_b)
+    }
+    if mode == 1 {
+        // epistemic mul: σ²(a·b) — special X² case when src_a == src_b.
+        var s: string = "    mul.lo.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
+        if src_a == src_b {
+            // X²: σ²(X²) ≈ 4·X²·σ²(X)
+            s = s + "    mul.lo.u64 %rd64, " + rd(src_a) + ", " + rd(src_a) + ";\n"
+            s = s + "    mul.lo.u64 %rd64, %rd64, " + ev(src_a) + ";\n"
+            s = s + "    shl.b64 " + ev(dst) + ", %rd64, 2;\n"
+        } else {
+            // independent: a²σ²(b) + b²σ²(a)
+            s = s + "    mul.lo.u64 %rd64, " + rd(src_a) + ", " + rd(src_a) + ";\n"
+            s = s + "    mul.lo.u64 %rd64, %rd64, " + ev(src_b) + ";\n"
+            s = s + "    mul.lo.u64 %rd65, " + rd(src_b) + ", " + rd(src_b) + ";\n"
+            s = s + "    mul.lo.u64 %rd65, %rd65, " + ev(src_a) + ";\n"
+            s = s + "    add.u64 " + ev(dst) + ", %rd64, %rd65;\n"
+        }
+        return s
+    }
+    if mode == 2 || mode == 3 {
+        return "    mul.lo.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
+             + "    mul.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+    }
+    // mode == 4: f32 value lane + f32 variance lane (with X² case).
+    var s: string = "    mul.lo.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
+    s = s + "    mul.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+    if src_a == src_b {
+        // X²: σ²(X²) = 4·X²·σ²(X)
+        s = s + "    mul.rn.f32 %f64, " + fr(src_a) + ", " + fr(src_a) + ";\n"
+        s = s + "    mul.rn.f32 %f64, %f64, " + fv(src_a) + ";\n"
+        s = s + "    add.rn.f32 %f65, %f64, %f64;\n"
+        s = s + "    add.rn.f32 " + fv(dst) + ", %f65, %f65;\n"
+    } else {
+        // independent: a²σ²(b) + b²σ²(a)
+        s = s + "    mul.rn.f32 %f64, " + fr(src_a) + ", " + fr(src_a) + ";\n"
+        s = s + "    mul.rn.f32 %f64, %f64, " + fv(src_b) + ";\n"
+        s = s + "    mul.rn.f32 %f65, " + fr(src_b) + ", " + fr(src_b) + ";\n"
+        s = s + "    mul.rn.f32 %f65, %f65, " + fv(src_a) + ";\n"
+        s = s + "    add.rn.f32 " + fv(dst) + ", %f64, %f65;\n"
+    }
+    s
+}
+
+fn kaxi_lower_div(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+    let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
+    if dst < 0 || src_a < 0 || src_b < 0 { return "" }
+    if mode == 0 {
+        if kaxi_line_has_type_f64(asm, line_start, line_len) {
+            return ptx_binop_f64("div.rn.f64", dst, src_a, src_b)
+        }
+        return ptx_binop("div.u64", dst, src_a, src_b)
+    }
+    if mode == 1 {
+        // div: conservative — variances add (independent linear approximation).
+        return "    div.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
+             + "    add.u64 " + ev(dst) + ", " + ev(src_a) + ", " + ev(src_b) + ";\n"
+    }
+    if mode == 2 || mode == 3 {
+        // f32 only — no u64 lane for div in f32 dialects.
+        return "    div.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+    }
+    // mode == 4: f32 div + variance lane (additive).
+    return "    div.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
+         + "    add.rn.f32 " + fv(dst) + ", " + fv(src_a) + ", " + fv(src_b) + ";\n"
+}
+
+fn kaxi_lower_fma(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    // K-AXI fma: dst = src_a * src_b + src_a (matches kaxi_to_c semantics).
+    let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+    let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
+    if dst < 0 || src_a < 0 || src_b < 0 { return "" }
+    if mode == 0 {
+        if kaxi_line_has_type_f64(asm, line_start, line_len) {
+            return "    mul.f64 " + fd(65) + ", " + fd(src_a) + ", " + fd(src_b) + ";\n"
+                 + "    add.f64 " + fd(dst) + ", " + fd(65) + ", " + fd(src_a) + ";\n"
+        }
+        return "    mul.lo.u64 %rd64, " + rd(src_a) + ", " + rd(src_b) + ";\n"
+             + "    add.u64 " + rd(dst) + ", %rd64, " + rd(src_a) + ";\n"
+    }
+    if mode == 1 {
+        // u64 fma + variance (additive).
+        return "    mul.lo.u64 %rd64, " + rd(src_a) + ", " + rd(src_b) + ";\n"
+             + "    add.u64 " + rd(dst) + ", %rd64, " + rd(src_a) + ";\n"
+             + "    add.u64 " + ev(dst) + ", " + ev(src_a) + ", " + ev(src_b) + ";\n"
+    }
+    if mode == 2 || mode == 3 {
+        return "    fma.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + fr(src_a) + ";\n"
+    }
+    // mode == 4: fma + variance lane (additive).
+    return "    fma.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + fr(src_a) + ";\n"
+         + "    add.rn.f32 " + fv(dst) + ", " + fv(src_a) + ", " + fv(src_b) + ";\n"
+}
+
+fn kaxi_lower_arith(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    if line_len < 3 { return "" }
+    let c0 = asm.data[line_start as usize] as i8
+    let c1 = asm.data[(line_start + 1) as usize] as i8
+    let c2 = asm.data[(line_start + 2) as usize] as i8
+    if c0 == 97 && c1 == 100 && c2 == 100 { return kaxi_lower_add(asm, line_start, line_len, mode) }
+    if c0 == 115 && c1 == 117 && c2 == 98 { return kaxi_lower_sub(asm, line_start, line_len, mode) }
+    if c0 == 109 && c1 == 117 && c2 == 108 { return kaxi_lower_mul(asm, line_start, line_len, mode) }
+    if c0 == 100 && c1 == 105 && c2 == 118 { return kaxi_lower_div(asm, line_start, line_len, mode) }
+    if c0 == 102 && c1 == 109 && c2 == 97 { return kaxi_lower_fma(asm, line_start, line_len, mode) }
+    ""
+}
+
+// ----- unified transpiler -------------------------------------------
 
 pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with Mut, Panic, Div, Alloc {
     var out: KaxiAsmBuf = kaxi_asm_new()
@@ -1517,7 +1696,12 @@ pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with 
             if line_len > 0 {
                 let first_char = asm.data[line_start as usize] as i8
                 if first_char != 59 && first_char != 0 {
-                    let p = if mode == 0 {
+                    // Phase C.2: try opcode-first helpers (batch 1: arith);
+                    // fall back to old per-dialect handler for unmatched opcodes.
+                    let p_arith = kaxi_lower_arith(asm, line_start, line_len, mode)
+                    let p = if str_len(p_arith) > 0 {
+                        p_arith
+                    } else if mode == 0 {
                         kaxi_transpile_line_to_ptx(asm, line_start, line_len)
                     } else if mode == 1 {
                         kaxi_transpile_line_to_ptx_epistemic(asm, line_start, line_len)
