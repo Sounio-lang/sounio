@@ -42,19 +42,27 @@ EXPECTED=""
 EXPECTED_VAR=""
 INIT_MEM=""
 INIT_VAR=""
+INIT_FILE=""
+INIT_VAR_FILE=""
+BLOCKS=""
 shift 2>/dev/null || true
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --epistemic) EPISTEMIC=1; shift ;;
     --threads) THREADS="$2"; shift 2 ;;
+    --blocks) BLOCKS="$2"; shift 2 ;;
     --mem-words) MEM_WORDS="$2"; shift 2 ;;
     --expected) EXPECTED="$2"; shift 2 ;;
     --expected-var) EXPECTED_VAR="$2"; shift 2 ;;
     --init-mem) INIT_MEM="$2"; shift 2 ;;
     --init-var) INIT_VAR="$2"; shift 2 ;;
+    --init-file) INIT_FILE="$2"; shift 2 ;;
+    --init-var-file) INIT_VAR_FILE="$2"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 <pattern> [--epistemic] [--threads N] [--mem-words W]" >&2
-      echo "       [--init-mem CSV] [--init-var CSV] [--expected MEM] [--expected-var VAR]" >&2
+      echo "usage: $0 <pattern> [--epistemic] [--threads N] [--blocks B] [--mem-words W]" >&2
+      echo "       [--init-mem CSV] [--init-var CSV] [--init-file PATH] [--init-var-file PATH]" >&2
+      echo "       [--expected MEM] [--expected-var VAR]" >&2
+      echo "  --init-file: raw binary init image (mem_words * elem bytes), used when CSV would exceed ARG_MAX" >&2
       exit 0 ;;
     *) echo "error: unknown arg: $1" >&2; exit 1 ;;
   esac
@@ -99,6 +107,14 @@ cp "${LOCAL_PTX}" "${STAGE_DIR}/kernel.ptx"
 cc -O2 "${ROOT_DIR}/scripts/gpu/kaxi_ptx_runner.c" -ldl -o "${STAGE_DIR}/runner"
 [[ -n "${EXPECTED}" ]] && echo "${EXPECTED}" > "${STAGE_DIR}/expected.mem"
 [[ -n "${EXPECTED_VAR}" ]] && echo "${EXPECTED_VAR}" > "${STAGE_DIR}/expected.var"
+if [[ -n "${INIT_FILE}" ]]; then
+  [[ -f "${INIT_FILE}" ]] || { echo "error: --init-file ${INIT_FILE} not found" >&2; exit 1; }
+  cp "${INIT_FILE}" "${STAGE_DIR}/init.mem.bin"
+fi
+if [[ -n "${INIT_VAR_FILE}" ]]; then
+  [[ -f "${INIT_VAR_FILE}" ]] || { echo "error: --init-var-file ${INIT_VAR_FILE} not found" >&2; exit 1; }
+  cp "${INIT_VAR_FILE}" "${STAGE_DIR}/init.var.bin"
+fi
 tar -C "${STAGE_DIR}" -czf "${LOCAL_TARBALL}" .
 PAYLOAD_B64="$(base64 -w 0 "${LOCAL_TARBALL}" 2>/dev/null || base64 "${LOCAL_TARBALL}" | tr -d '\n')"
 
@@ -108,6 +124,12 @@ INIT_MEM_FLAG=""
 [[ -n "$INIT_MEM" ]] && INIT_MEM_FLAG="--init-mem ${INIT_MEM// /,}"
 INIT_VAR_FLAG=""
 [[ -n "$INIT_VAR" ]] && INIT_VAR_FLAG="--init-var ${INIT_VAR// /,}"
+INIT_FILE_FLAG=""
+[[ -n "$INIT_FILE" ]] && INIT_FILE_FLAG="--init-file init.mem.bin"
+INIT_VAR_FILE_FLAG=""
+[[ -n "$INIT_VAR_FILE" ]] && INIT_VAR_FILE_FLAG="--init-var-file init.var.bin"
+BLOCKS_FLAG=""
+[[ -n "$BLOCKS" ]] && BLOCKS_FLAG="--blocks ${BLOCKS}"
 
 cat > "${LOCAL_SBATCH}" <<EOF
 #!/usr/bin/env bash
@@ -147,7 +169,7 @@ export PATH="/usr/local/cuda/bin:/usr/bin:/bin:/usr/sbin:/sbin:\${PATH:-}"
 mark "kaxi_launch=running phase=run"
 {
   echo "host=\$(hostname)"; echo "job=\${SLURM_JOB_ID:-?}"
-  ./runner kernel.ptx --threads ${THREADS} --mem-words ${MEM_WORDS} ${EPISTEMIC_FLAG} ${INIT_MEM_FLAG} ${INIT_VAR_FLAG}
+  ./runner kernel.ptx --threads ${THREADS} ${BLOCKS_FLAG} --mem-words ${MEM_WORDS} ${EPISTEMIC_FLAG} ${INIT_MEM_FLAG} ${INIT_VAR_FLAG} ${INIT_FILE_FLAG} ${INIT_VAR_FILE_FLAG}
 } >"\${LOG}" 2>&1
 status_line="\$(grep '^sounio_kaxi_runtime' "\${LOG}" | tail -1 || true)"
 mem_line="\$(grep '^MEM:' "\${LOG}" | tail -1 || true)"

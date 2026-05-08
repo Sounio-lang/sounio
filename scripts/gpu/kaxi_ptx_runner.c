@@ -14,6 +14,12 @@
 //   kaxi_ptx_runner <ptx_or_cubin> [--kernel NAME] [--mode basic|epistemic]
 //                                  [--threads T] [--mem-words W]
 //                                  [--init-mem v0,v1,...] [--init-var v0,v1,...]
+//                                  [--init-file PATH]      [--init-var-file PATH]
+//
+// --init-file / --init-var-file read RAW binary device-image bytes
+// (mem_words * sizeof(elem)) directly from disk — required when the
+// inline CSV form would exceed ARG_MAX (e.g. 1.3M-thread connectomics
+// sweep, ~125 MB f32 input). Takes precedence over --init-mem if both set.
 //
 // Defaults: kernel=kaxi_kernel, mode=basic, threads=1, mem-words=16,
 //           init-mem=zeros, init-var=zeros.
@@ -128,6 +134,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "usage: %s <ptx_or_cubin> [--kernel NAME] [--mode basic|epistemic]\n", argv[0]);
         fprintf(stderr, "                          [--threads T] [--mem-words W]\n");
         fprintf(stderr, "                          [--init-mem v0,v1,...] [--init-var v0,v1,...]\n");
+        fprintf(stderr, "                          [--init-file PATH] [--init-var-file PATH]\n");
         return 2;
     }
 
@@ -140,6 +147,8 @@ int main(int argc, char **argv) {
     int mem_words = 16;
     const char *init_mem_csv = NULL;
     const char *init_var_csv = NULL;
+    const char *init_mem_file = NULL;
+    const char *init_var_file = NULL;
     int verify_init_seq = 0;  // if set, init mem to [1..mem_words] before launch
     int print_count = -1;     // override print count (default = mem_words)
 
@@ -153,6 +162,8 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--mem-words") == 0 && i + 1 < argc) { mem_words = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--init-mem") == 0 && i + 1 < argc) { init_mem_csv = argv[++i]; }
         else if (strcmp(argv[i], "--init-var") == 0 && i + 1 < argc) { init_var_csv = argv[++i]; }
+        else if (strcmp(argv[i], "--init-file") == 0 && i + 1 < argc) { init_mem_file = argv[++i]; }
+        else if (strcmp(argv[i], "--init-var-file") == 0 && i + 1 < argc) { init_var_file = argv[++i]; }
         else if (strcmp(argv[i], "--init-seq") == 0) { verify_init_seq = 1; }
         else if (strcmp(argv[i], "--print-count") == 0 && i + 1 < argc) { print_count = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--epistemic") == 0) { epistemic = 1; }
@@ -167,8 +178,8 @@ int main(int argc, char **argv) {
     }
     if (print_count < 0) print_count = mem_words;
     if (print_count > mem_words) print_count = mem_words;
-    if (mem_words < 1 || mem_words > 65536) {
-        fprintf(stderr, "mem-words out of range (1..65536)\n"); return 2;
+    if (mem_words < 1 || mem_words > (1 << 28)) {
+        fprintf(stderr, "mem-words out of range (1..2^28)\n"); return 2;
     }
     if (threads < 1 || threads > 1024) {
         fprintf(stderr, "threads out of range\n"); return 2;
@@ -241,7 +252,17 @@ int main(int argc, char **argv) {
     if (rc != 0) { emit_status("fail", "cuMemAlloc_failed", "cuMemAlloc(mem)", rc); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
     cuMemsetD8(d_mem, 0, bytes);
 
-    if (init_mem_csv) {
+    if (init_mem_file) {
+        FILE *f = fopen(init_mem_file, "rb");
+        if (!f) { emit_status("fail", "init_file_open_failed", "fopen(init_mem)", 0); cuMemFree(d_mem); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+        void *host = malloc(bytes);
+        if (!host) { fclose(f); emit_status("fail", "init_file_malloc_failed", "malloc(init_mem)", 0); cuMemFree(d_mem); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+        size_t got = fread(host, 1, bytes, f);
+        fclose(f);
+        if (got != bytes) { free(host); emit_status("fail", "init_file_short_read", "fread(init_mem)", (int)got); cuMemFree(d_mem); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+        cuMemcpyHtoD(d_mem, host, bytes);
+        free(host);
+    } else if (init_mem_csv) {
         if (value_type == 1) {
             float *host = (float *)calloc(mem_words, sizeof(float));
             parse_csv_f32(init_mem_csv, host, mem_words);
@@ -281,7 +302,17 @@ int main(int argc, char **argv) {
         rc = cuMemAlloc(&d_var, bytes);
         if (rc != 0) { emit_status("fail", "cuMemAlloc_failed", "cuMemAlloc(var)", rc); cuMemFree(d_mem); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
         cuMemsetD8(d_var, 0, bytes);
-        if (init_var_csv) {
+        if (init_var_file) {
+            FILE *f = fopen(init_var_file, "rb");
+            if (!f) { emit_status("fail", "init_file_open_failed", "fopen(init_var)", 0); cuMemFree(d_mem); cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            void *host = malloc(bytes);
+            if (!host) { fclose(f); emit_status("fail", "init_file_malloc_failed", "malloc(init_var)", 0); cuMemFree(d_mem); cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            size_t got = fread(host, 1, bytes, f);
+            fclose(f);
+            if (got != bytes) { free(host); emit_status("fail", "init_file_short_read", "fread(init_var)", (int)got); cuMemFree(d_mem); cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            cuMemcpyHtoD(d_var, host, bytes);
+            free(host);
+        } else if (init_var_csv) {
             if (value_type == 1) {
                 float *host = (float *)calloc(mem_words, sizeof(float));
                 parse_csv_f32(init_var_csv, host, mem_words);
