@@ -1803,6 +1803,26 @@ fn kaxi_lower_special(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64
     ""
 }
 
+// ----- Phase C.2 batch 4: trivial 1-liners (ret/nop/bar) -----
+//
+// `ret` and `nop` are byte-identical across all 5 dialects; `bar.sync 0`
+// is only present in default + epistemic. Mode-INDEPENDENT for ret/nop
+// — no per-mode lane fan-out needed (these don't carry value/variance).
+
+fn kaxi_lower_simple(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    if line_len < 3 { return "" }
+    let c0 = asm.data[line_start as usize] as i8
+    let c1 = asm.data[(line_start + 1) as usize] as i8
+    let c2 = asm.data[(line_start + 2) as usize] as i8
+    if c0 == 114 && c1 == 101 && c2 == 116 { return "    ret;\n" }
+    if c0 == 110 && c1 == 111 && c2 == 112 { return "    // nop\n" }
+    if c0 == 98 && c1 == 97 && c2 == 114 {
+        if mode == 0 || mode == 1 { return "    bar.sync 0;\n" }
+        return ""
+    }
+    ""
+}
+
 // ----- unified transpiler -------------------------------------------
 
 pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with Mut, Panic, Div, Alloc {
@@ -1879,17 +1899,20 @@ pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with 
                 let first_char = asm.data[line_start as usize] as i8
                 if first_char != 59 && first_char != 0 {
                     // Phase C.2: try opcode-first helpers (batch 1: arith,
-                    // batch 2: mem, batch 3: special-regs); fall back to
-                    // old per-dialect handler for unmatched opcodes.
+                    // batch 2: mem, batch 3: special-regs, batch 4: simple);
+                    // fall back to old per-dialect handler for the rest.
                     let p_arith = kaxi_lower_arith(asm, line_start, line_len, mode)
                     let p_mem = if str_len(p_arith) > 0 { "" } else { kaxi_lower_mem(asm, line_start, line_len, mode) }
                     let p_spec = if str_len(p_arith) > 0 || str_len(p_mem) > 0 { "" } else { kaxi_lower_special(asm, line_start, line_len, mode) }
+                    let p_simple = if str_len(p_arith) > 0 || str_len(p_mem) > 0 || str_len(p_spec) > 0 { "" } else { kaxi_lower_simple(asm, line_start, line_len, mode) }
                     let p = if str_len(p_arith) > 0 {
                         p_arith
                     } else if str_len(p_mem) > 0 {
                         p_mem
                     } else if str_len(p_spec) > 0 {
                         p_spec
+                    } else if str_len(p_simple) > 0 {
+                        p_simple
                     } else if mode == 0 {
                         kaxi_transpile_line_to_ptx(asm, line_start, line_len)
                     } else if mode == 1 {
