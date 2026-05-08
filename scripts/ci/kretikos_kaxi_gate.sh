@@ -285,4 +285,8 @@ payload = {
 gate_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
+echo ""
+echo "--- kaxi_ptx golden drift oracle (Phase C) ---"
+bash "$ROOT_DIR/scripts/ci/kaxi_ptx_golden_gate.sh"
+
 echo "kretikos_kaxi_gate: PASS out=$OUT_DIR"
