@@ -113,6 +113,21 @@ PATTERN_FOR[conf_gate]=conf_gate
 PATTERN_FOR[octonion]=octonion_assoc
 PATTERN_FOR[octonion_mul]=octonion_mul
 
+# Sedenion zero-divisor: (e₁+e₁₀)·(e₅+e₁₄) = 0 on thread 0,
+# (e₀)·(e₀) = e₀ on thread 1. Witnesses non-trivial ZD in 𝕊.
+SEDZD_INIT=$(python3 -c "
+m=[0.0]*96
+m[1]=1; m[10]=1; m[16+5]=1; m[16+14]=1
+m[48+0]=1; m[48+16+0]=1
+print(','.join(f'{int(x) if x==int(x) else x:g}' for x in m))")
+SEDZD_EXP=$(python3 -c "
+m=[0.0]*96
+m[1]=1; m[10]=1; m[16+5]=1; m[16+14]=1
+m[48+0]=1; m[48+16+0]=1; m[48+32+0]=1
+print(','.join(f'{int(x) if x==int(x) else x:g}' for x in m))")
+CASES+=("sedenion_mul|f32|1|2|96|${SEDZD_INIT}||${SEDZD_EXP}|")
+PATTERN_FOR[sedenion_mul]=sedenion_mul
+
 # Programmatically generate large multi-block cases (256, 1024 elements).
 # Each writes mem[i] = 2*(i+1).
 for N in 256 1024; do
