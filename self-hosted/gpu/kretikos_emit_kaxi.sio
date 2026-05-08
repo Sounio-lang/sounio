@@ -1455,6 +1455,263 @@ pub fn kaxi_emit_sedenion_mul_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
     buf
 }
 
+// Sedenion associator [a,b,c] = (a·b)·c − a·(b·c) — per-thread, 16-component.
+//
+// Closes the loop from the existing octonion_associator (𝕆) into 𝕊, the
+// first algebra in the Cayley-Dickson chain to admit non-trivial zero
+// divisors. Sedenion associators carry both non-associativity AND ZD
+// structure, so this kernel is the GPU-native primitive for the
+// connectomics + Sedenion Mandelbrot Hessian work.
+//
+// Memory layout (f32 mode, 96 words per thread, base = tid * 96):
+//   mem[base+ 0..15] = a (input)
+//   mem[base+16..31] = b (input)
+//   mem[base+32..47] = c (input)
+//   mem[base+48..63] = t_ab scratch (Phase 1 writes; Phase 3 reads, then
+//                                    overwrites with t1)
+//   mem[base+64..79] = t_bc scratch (Phase 2 writes; Phase 4 reads, then
+//                                    overwrites with t2)
+//   mem[base+80..95] = out (final sub+store loop)
+//
+// We can't hold both t1 and t2 simultaneously in registers (would need
+// %f<154>+, exceeds the f32-mode preamble's %f<128>). Memory spill of
+// the 4 intermediate sedenion products is the right tradeoff.
+//
+// Phase structure:
+//   Phase 1: V=(a,b)     · → mem[+48]   (t_ab)
+//   Phase 2: V=(b,c)     · → mem[+64]   (t_bc)
+//   Phase 3: V=(t_ab,c)  · → mem[+48]   (overwrites — t1)
+//   Phase 4: V=(a,t_bc)  · → mem[+64]   (overwrites — t2)
+//   Phase 5: out[k] = mem[+48+k] − mem[+64+k] for k in 0..15
+//
+// Each Phase 1–4 is one full sedenion product (~660 ops); Phase 5 is
+// 16 × (3 loads + 1 sub + 1 store) ≈ 80 ops. Total ~2680 K-AXI ops →
+// ~30 KB f32 PTX, comfortably inside 64 KB KaxiAsmBuf.
+
+struct SedPhaseState {
+    buf: KaxiAsmBuf,
+    seq: i64,
+}
+
+// Emit one full sedenion product as a self-contained phase. Loads V[0..31]
+// from (mem[base+a_off..a_off+15], mem[base+b_off..b_off+15]), computes the
+// 16 output components via the same 256-entry CD-derived table as
+// kaxi_emit_sedenion_mul_asm, and stores them to mem[base+dst_off..dst_off+15].
+//
+// Caller's responsibilities:
+//   - r2 must hold base = tid * 96 (or whatever the caller's stride is)
+//   - r9 must hold 0.0f
+//   - tables oct_ai/oct_bj/oct_sg must encode the 64-entry octonion table
+//   - state.seq is treated as a free monotonic counter
+//
+// Register usage (within the phase, all freed at phase exit):
+//   r74..r105 : V[0..31] = (a, b)
+//   r108      : product temp
+//   r109/r110 : ping-pong accumulator
+//   r106/r107 : per-output store-address scratch
+//   r112/r113 : per-input load-address scratch (avoids %rd63 reservation)
+fn kaxi_emit_sedenion_phase(
+    state_in: SedPhaseState,
+    a_off: i64,
+    b_off: i64,
+    dst_off: i64,
+    oct_ai: &[i64; 64],
+    oct_bj: &[i64; 64],
+    oct_sg: &[i64; 64]
+) -> SedPhaseState with Mut, Panic, Div, Alloc {
+    var state = state_in
+
+    // Load V[0..31] = (a₀..a₁₅, b₀..b₁₅) into r74..r105.
+    var i: i64 = 0
+    while i < 32 {
+        let r_val = 74 + i
+        let mem_off = if i < 16 { a_off + i } else { b_off + (i - 16) }
+        state.buf = kaxi_asm_push_line(state.buf, "load_imm r112, imm=" + ptx_int_to_string(mem_off) + "")
+        state.buf = kaxi_asm_push_line(state.buf, "add r113, r2, r112")
+        state.buf = kaxi_asm_push_line(state.buf, "load_global r" + ptx_int_to_string(r_val) + ", addr=r113")
+        state.seq = state.seq + 3
+        i = i + 1
+    }
+
+    // Compute c[0..15] = signed sum of 16 V[l]·V[r] products each.
+    // Identical entry-derivation to sedenion_mul (CD doubling unrolled).
+    var o: i64 = 0
+    while o < 16 {
+        // Output address: base + dst_off + o.
+        state.buf = kaxi_asm_push_line(state.buf, "load_imm r106, imm=" + ptx_int_to_string(dst_off + o) + "")
+        state.buf = kaxi_asm_push_line(state.buf, "add r107, r2, r106")
+        state.seq = state.seq + 2
+
+        var t: i64 = 0
+        var r_acc: i64 = 109
+        var r_next: i64 = 110
+        var first: bool = true
+        while t < 16 {
+            let half: i64 = t / 8
+            let t8: i64 = t - half * 8
+            var l_idx: i64 = 0
+            var r_idx: i64 = 0
+            var sg: i64 = 1
+            if o < 8 {
+                let row = o * 8 + t8
+                let oai = oct_ai[row as usize]
+                let obj = oct_bj[row as usize]
+                let osg = oct_sg[row as usize]
+                if half == 0 {
+                    l_idx = oai
+                    r_idx = 16 + obj
+                    sg = osg
+                } else {
+                    l_idx = 16 + 8 + oai
+                    r_idx = 8 + obj
+                    if oai == 0 {
+                        sg = 0 - osg
+                    } else {
+                        sg = osg
+                    }
+                }
+            } else {
+                let kk = o - 8
+                let row = kk * 8 + t8
+                let oai = oct_ai[row as usize]
+                let obj = oct_bj[row as usize]
+                let osg = oct_sg[row as usize]
+                if half == 0 {
+                    l_idx = 16 + 8 + oai
+                    r_idx = obj
+                    sg = osg
+                } else {
+                    l_idx = 8 + oai
+                    r_idx = 16 + obj
+                    if obj == 0 {
+                        sg = osg
+                    } else {
+                        sg = 0 - osg
+                    }
+                }
+            }
+            let r_l = 74 + l_idx
+            let r_r = 74 + r_idx
+            state.buf = kaxi_asm_push_line(state.buf, "mul r108, r" + ptx_int_to_string(r_l) + ", r" + ptx_int_to_string(r_r) + "")
+            state.seq = state.seq + 1
+            if first {
+                if sg > 0 {
+                    state.buf = kaxi_asm_push_line(state.buf, "add r" + ptx_int_to_string(r_acc) + ", r108, r9")
+                } else {
+                    state.buf = kaxi_asm_push_line(state.buf, "sub r" + ptx_int_to_string(r_acc) + ", r9, r108")
+                }
+                state.seq = state.seq + 1
+                first = false
+            } else {
+                if sg > 0 {
+                    state.buf = kaxi_asm_push_line(state.buf, "add r" + ptx_int_to_string(r_next) + ", r" + ptx_int_to_string(r_acc) + ", r108")
+                } else {
+                    state.buf = kaxi_asm_push_line(state.buf, "sub r" + ptx_int_to_string(r_next) + ", r" + ptx_int_to_string(r_acc) + ", r108")
+                }
+                state.seq = state.seq + 1
+                let tmp_reg = r_acc
+                r_acc = r_next
+                r_next = tmp_reg
+            }
+            t = t + 1
+        }
+
+        state.buf = kaxi_asm_push_line(state.buf, "store_global r" + ptx_int_to_string(r_acc) + ", addr=r107")
+        state.seq = state.seq + 1
+        o = o + 1
+    }
+
+    state
+}
+
+pub fn kaxi_emit_sedenion_associator_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var buf: KaxiAsmBuf = kaxi_asm_new()
+    buf = kaxi_asm_push_line(buf, "; K-AXI epistemic kernel assembly")
+    buf = kaxi_asm_push_line(buf, "; Auto-generated by kaxi_emit_sedenion_associator_asm()")
+    buf = kaxi_asm_push_line(buf, "")
+
+    // Octonion sign table — same as sedenion_mul / octonion_mul.
+    let oct_ai: [i64; 64] = [
+        0,1,2,3,4,5,6,7,
+        0,1,2,3,4,5,6,7,
+        0,1,2,3,4,5,6,7,
+        0,1,2,3,4,5,6,7,
+        0,1,2,3,4,5,6,7,
+        0,1,2,3,4,5,6,7,
+        0,1,2,3,4,5,6,7,
+        0,1,2,3,4,5,6,7
+    ]
+    let oct_bj: [i64; 64] = [
+        0,1,2,3,4,5,6,7,
+        1,0,3,2,5,4,7,6,
+        2,3,0,1,6,7,4,5,
+        3,2,1,0,7,6,5,4,
+        4,5,6,7,0,1,2,3,
+        5,4,7,6,1,0,3,2,
+        6,7,4,5,2,3,0,1,
+        7,6,5,4,3,2,1,0
+    ]
+    let oct_sg: [i64; 64] = [
+        1,-1,-1,-1,-1,-1,-1,-1,
+        1, 1, 1,-1, 1,-1,-1, 1,
+        1,-1, 1, 1, 1, 1,-1,-1,
+        1, 1,-1, 1, 1,-1, 1,-1,
+        1,-1,-1,-1, 1, 1, 1, 1,
+        1, 1,-1, 1,-1, 1,-1, 1,
+        1, 1, 1,-1,-1, 1, 1,-1,
+        1,-1, 1, 1,-1,-1, 1, 1
+    ]
+
+    // Setup: r0=tid, r2=base=tid*96, r9=0.0f.
+    buf = kaxi_asm_push_line(buf, "get_tid r0, var=0%, seq=0")
+    buf = kaxi_asm_push_line(buf, "load_imm r1, imm=96, seq=1")
+    buf = kaxi_asm_push_line(buf, "mul r2, r0, r1, var=+0%, seq=2")
+    buf = kaxi_asm_push_line(buf, "load_immf r9, fimm=00000000, seq=3")
+
+    var state: SedPhaseState = SedPhaseState { buf: buf, seq: 4 }
+
+    // Phase 1: t_ab = a · b → mem[+48..63]
+    state = kaxi_emit_sedenion_phase(state, 0, 16, 48, &oct_ai, &oct_bj, &oct_sg)
+    // Phase 2: t_bc = b · c → mem[+64..79]
+    state = kaxi_emit_sedenion_phase(state, 16, 32, 64, &oct_ai, &oct_bj, &oct_sg)
+    // Phase 3: t1 = t_ab · c → mem[+48..63] (overwrites t_ab; we're done with it)
+    state = kaxi_emit_sedenion_phase(state, 48, 32, 48, &oct_ai, &oct_bj, &oct_sg)
+    // Phase 4: t2 = a · t_bc → mem[+64..79] (overwrites t_bc)
+    state = kaxi_emit_sedenion_phase(state, 0, 64, 64, &oct_ai, &oct_bj, &oct_sg)
+
+    buf = state.buf
+    var seq = state.seq
+
+    // Phase 5: out[k] = t1[k] − t2[k], stored to mem[base+80+k].
+    // Free regs after sedenion_mul phases: anything below r74 (V regs are
+    // overwritten between phases, so by here they're scratch). Use r10..r12
+    // for t1[k]/t2[k]/diff. r112/r113 for load addr; r106/r107 for store addr.
+    var k: i64 = 0
+    while k < 16 {
+        // load t1[k] from mem[base+48+k] → r10
+        buf = kaxi_asm_push_line(buf, "load_imm r112, imm=" + ptx_int_to_string(48 + k) + "")
+        buf = kaxi_asm_push_line(buf, "add r113, r2, r112")
+        buf = kaxi_asm_push_line(buf, "load_global r10, addr=r113")
+        // load t2[k] from mem[base+64+k] → r11
+        buf = kaxi_asm_push_line(buf, "load_imm r112, imm=" + ptx_int_to_string(64 + k) + "")
+        buf = kaxi_asm_push_line(buf, "add r113, r2, r112")
+        buf = kaxi_asm_push_line(buf, "load_global r11, addr=r113")
+        // diff
+        buf = kaxi_asm_push_line(buf, "sub r12, r10, r11")
+        // store at mem[base+80+k]
+        buf = kaxi_asm_push_line(buf, "load_imm r106, imm=" + ptx_int_to_string(80 + k) + "")
+        buf = kaxi_asm_push_line(buf, "add r107, r2, r106")
+        buf = kaxi_asm_push_line(buf, "store_global r12, addr=r107")
+        seq = seq + 10
+        k = k + 1
+    }
+
+    buf = kaxi_asm_push_line(buf, "ret seq=" + ptx_int_to_string(seq))
+    buf = kaxi_asm_push_line(buf, "")
+    buf = kaxi_asm_push_line(buf, "; end")
+    buf
+}
+
 // Confidence-gate kernel — runtime expression of compile-time-confidence-gate.
 // Reads σ²(C) from memory, compares against threshold (1.5), writes 1.0 if
 // within budget, 0.0 if exceeded. The first concrete demonstration of a
@@ -2094,6 +2351,8 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
         buf = kaxi_emit_octonion_associator_asm()
     } else if str_eq(pattern, "sedenion_mul") {
         buf = kaxi_emit_sedenion_mul_asm()
+    } else if str_eq(pattern, "sedenion_associator") {
+        buf = kaxi_emit_sedenion_associator_asm()
     } else if str_eq(pattern, "self-check") {
         let ok = kaxi_self_check()
         if ok {
