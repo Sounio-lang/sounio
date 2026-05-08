@@ -1924,86 +1924,72 @@ PY
         CHECK_BYTES="$(__kretikos_file_size "$CHECK_LOG")" || exit 1
         KAXI_WITNESS_SHA="$(__kretikos_sha256 "$KAXI_WITNESS_OUT")" || exit 1
 
-        python3 - "$OUT" "$SOURCE_PATH" "$SOURCE_BYTES" "$SOURCE_SHA" \
-            "$CHECK_LOG" "$CHECK_BYTES" "$CHECK_SHA" \
-            "$PROFILE" "$CUBIN_KIND" "$RUNTIME_RUNG" "$KERNEL_NAME" "$RUNTIME_BACKED" "$KAXI_PATTERN" \
-            "$KAXI_WITNESS_OUT" "$KAXI_WITNESS_SHA" <<'PY'
-import json
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-
-(
-    out_path,
-    source_path,
-    source_bytes,
-    source_sha,
-    check_log,
-    check_bytes,
-    check_sha,
-    profile,
-    cubin_kind,
-    runtime_rung,
-    kernel_name,
-    runtime_backed,
-    kaxi_pattern,
-    kaxi_witness_path,
-    kaxi_witness_sha,
-) = sys.argv[1:]
-
-witness_path = Path(kaxi_witness_path)
-witness = json.loads(witness_path.read_text(encoding="utf-8"))
-failures = []
-if witness.get("status") != "pass":
-    failures.append({"kind": "kaxi_witness_status_not_pass", "status": witness.get("status")})
-if witness.get("failures"):
-    failures.append({"kind": "kaxi_witness_failures", "failures": witness.get("failures")})
-if not witness.get("assembly", {}).get("seq_dense_zero_based"):
-    failures.append({"kind": "kaxi_sequence_not_dense_zero_based"})
-
-payload = {
-    "schema": "sounio.kretikos.kaxi-source-witness.v1",
-    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "status": "pass" if not failures else "fail",
-    "source": {
-        "path": source_path,
-        "bytes": int(source_bytes),
-        "sha256": source_sha,
-        "check": {
-            "status": "pass",
-            "log_path": check_log,
-            "bytes": int(check_bytes),
-            "sha256": check_sha,
-        },
-    },
-    "profile": {
-        "name": profile,
-        "runtime_backed": runtime_backed == "1",
-        "cubin_kind": cubin_kind,
-        "runtime_rung": runtime_rung,
-        "kernel": kernel_name,
-    },
-    "kaxi": {
-        "pattern": kaxi_pattern,
-        "semantic_profile": witness.get("semantic_profile"),
-        "witness_path": str(witness_path),
-        "witness_sha256": kaxi_witness_sha,
-        "assembly": witness.get("assembly", {}),
-        "epistemic_lanes": witness.get("epistemic_lanes", {}),
-    },
-    "failures": failures,
-    "boundaries": [
-        "source_must_typecheck_before_kaxi_profile_selection",
-        "source_profile_selection_is_explicit_or_shape_limited",
-        "source_witness_links_source_hash_to_kaxi_witness_hash",
-        "source_witness_does_not_claim_arbitrary_sounio_gpu_lowering",
-        "source_witness_does_not_replace_slurm_cuda_runtime_authority",
-    ],
-}
-Path(out_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-if failures:
-    raise SystemExit(json.dumps(failures))
-PY
+        # Compose kaxi-source-witness JSON via json-emit + --raw-json,
+        # using validate-evidence --print-subtree to lift assembly /
+        # epistemic_lanes / failures sub-objects from the witness file.
+        __json_str_escape() { printf '%s' "$1" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g'; }
+        mapfile -t __wt_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" \
+            --print-or-empty status \
+            --print-or-empty semantic_profile \
+            --print-or-empty assembly.seq_dense_zero_based)
+        WT_STATUS="${__wt_parts[0]}"
+        WT_SEMANTIC_PROFILE="${__wt_parts[1]}"
+        WT_SEQ_DENSE="${__wt_parts[2]}"
+        # Subtree captures may span multiple lines; use $(...) per call.
+        WT_FAILURES_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" --print-subtree-or failures '[]')"
+        WT_ASSEMBLY_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" --print-subtree-or assembly '{}')"
+        WT_EPISTEMIC_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" --print-subtree-or epistemic_lanes '{}')"
+        # Build failures array element-by-element.
+        __FAIL_ELEMS=()
+        if [[ "$WT_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "kaxi_witness_status_not_pass", "status": "%s"}' "$(__json_str_escape "$WT_STATUS")")")
+        fi
+        if [[ "$WT_FAILURES_JSON" != "[]" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "kaxi_witness_failures", "failures": %s}' "$WT_FAILURES_JSON")")
+        fi
+        if [[ "$WT_SEQ_DENSE" != "true" ]]; then
+            __FAIL_ELEMS+=('{"kind": "kaxi_sequence_not_dense_zero_based"}')
+        fi
+        if [[ ${#__FAIL_ELEMS[@]} -eq 0 ]]; then
+            FAILURES_ARRAY="[]"
+            STATUS_VAL="pass"
+        else
+            FAILURES_ARRAY="[$(IFS=,; echo "${__FAIL_ELEMS[*]}")]"
+            STATUS_VAL="fail"
+        fi
+        RB_LITERAL="$([[ "$RUNTIME_BACKED" == "1" ]] && echo true || echo false)"
+        SOURCE_OBJ="$(printf '{"path": "%s", "bytes": %s, "sha256": "%s", "check": {"status": "pass", "log_path": "%s", "bytes": %s, "sha256": "%s"}}' \
+            "$(__json_str_escape "$SOURCE_PATH")" "$SOURCE_BYTES" "$SOURCE_SHA" \
+            "$(__json_str_escape "$CHECK_LOG")" "$CHECK_BYTES" "$CHECK_SHA")"
+        PROFILE_OBJ="$(printf '{"name": "%s", "runtime_backed": %s, "cubin_kind": "%s", "runtime_rung": "%s", "kernel": "%s"}' \
+            "$(__json_str_escape "$PROFILE")" "$RB_LITERAL" \
+            "$(__json_str_escape "$CUBIN_KIND")" "$(__json_str_escape "$RUNTIME_RUNG")" \
+            "$(__json_str_escape "$KERNEL_NAME")")"
+        # If semantic_profile was missing/null in the witness, emit JSON null.
+        if [[ -z "$WT_SEMANTIC_PROFILE" || "$WT_SEMANTIC_PROFILE" == "null" ]]; then
+            SEMANTIC_LIT="null"
+        else
+            SEMANTIC_LIT="\"$(__json_str_escape "$WT_SEMANTIC_PROFILE")\""
+        fi
+        KAXI_OBJ="$(printf '{"pattern": "%s", "semantic_profile": %s, "witness_path": "%s", "witness_sha256": "%s", "assembly": %s, "epistemic_lanes": %s}' \
+            "$(__json_str_escape "$KAXI_PATTERN")" "$SEMANTIC_LIT" \
+            "$(__json_str_escape "$KAXI_WITNESS_OUT")" "$KAXI_WITNESS_SHA" \
+            "$WT_ASSEMBLY_JSON" "$WT_EPISTEMIC_JSON")"
+        GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        "$KRETIKOS_SELF" json-emit \
+            --array-strings "boundaries=source_must_typecheck_before_kaxi_profile_selection|source_profile_selection_is_explicit_or_shape_limited|source_witness_links_source_hash_to_kaxi_witness_hash|source_witness_does_not_claim_arbitrary_sounio_gpu_lowering|source_witness_does_not_replace_slurm_cuda_runtime_authority" \
+            --raw-json "failures=$FAILURES_ARRAY" \
+            --string "generated_at_utc=$GENERATED_AT_UTC" \
+            --raw-json "kaxi=$KAXI_OBJ" \
+            --raw-json "profile=$PROFILE_OBJ" \
+            --string "schema=sounio.kretikos.kaxi-source-witness.v1" \
+            --raw-json "source=$SOURCE_OBJ" \
+            --string "status=$STATUS_VAL" \
+            > "$OUT" || exit 1
+        if [[ "$STATUS_VAL" == "fail" ]]; then
+            echo "$FAILURES_ARRAY" >&2
+            exit 1
+        fi
 
         echo "kretikos: K-AXI source witness emitted - $OUT"
         echo "kretikos: K-AXI source witness profile - source=$SOURCE_PATH profile=$PROFILE kaxi_pattern=$KAXI_PATTERN"

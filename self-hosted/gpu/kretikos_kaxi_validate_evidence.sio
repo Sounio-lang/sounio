@@ -551,6 +551,44 @@ fn ev_print_one(buf: &EvidenceBuf, path: string) -> bool with IO, Mut, Panic, Di
     true
 }
 
+// Print the JSON value at `path` verbatim (object/array/string/number/
+// literal). Used to embed sub-trees of one JSON document inside a
+// larger one composed by `kretikos json-emit --raw-json`. Returns true
+// if path resolved.
+fn ev_print_subtree(buf: &EvidenceBuf, path: string) -> bool with IO, Mut, Panic, Div, Alloc {
+    let plen = str_len(path)
+    let leaf = ev_walk_path_prefix(buf, path, plen)
+    if leaf < 0 { return false }
+    let c = buf.data[leaf as usize]
+    var end: i64 = leaf
+    if c == 123 || c == 91 {
+        let m = ev_match_brace(buf, leaf)
+        if m < 0 { return false }
+        end = m
+    } else if c == 34 {
+        let after = ev_skip_string(buf, leaf)
+        if after < 0 { return false }
+        end = after - 1
+    } else {
+        var p = leaf
+        while p < buf.len {
+            let b = buf.data[p as usize]
+            if b == 44 || b == 125 || b == 93 || b == 32 || b == 10 || b == 13 || b == 9 { break }
+            p = p + 1
+        }
+        end = p - 1
+    }
+    var asm = kaxi_asm_new()
+    var i = leaf
+    while i <= end {
+        asm = kaxi_asm_push_byte(asm, buf.data[i as usize])
+        i = i + 1
+    }
+    print(kaxi_asm_to_string(asm))
+    println("")
+    true
+}
+
 fn ev_lit_eq(spec: string, start: i64, lit: string) -> bool with Mut, Panic, Div {
     let n = str_len(lit)
     var i: i64 = 0
@@ -677,6 +715,32 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
                 println("")
             }
             i = i + 2
+        } else if str_eq(a, "--print-subtree") {
+            if i + 1 >= argc {
+                println("validate-evidence: --print-subtree requires PATH")
+                return 2
+            }
+            let p = get_arg(i + 1)
+            if !ev_print_subtree(&buf, p) {
+                print("validate-evidence: PATH NOT FOUND: ")
+                println(p)
+                return 1
+            }
+            i = i + 2
+        } else if str_eq(a, "--print-subtree-or") {
+            // --print-subtree-or PATH FALLBACK_JSON: print subtree at PATH
+            // or FALLBACK_JSON if PATH is missing. Useful for embedding
+            // optional sub-objects.
+            if i + 2 >= argc {
+                println("validate-evidence: --print-subtree-or requires PATH FALLBACK")
+                return 2
+            }
+            let p = get_arg(i + 1)
+            let fallback = get_arg(i + 2)
+            if !ev_print_subtree(&buf, p) {
+                println(fallback)
+            }
+            i = i + 3
         } else {
             print("validate-evidence: unknown argument ")
             println(a)
