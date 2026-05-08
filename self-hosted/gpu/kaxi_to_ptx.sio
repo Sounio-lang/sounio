@@ -803,6 +803,41 @@ fn kaxi_lower_max(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) ->
     kaxi_lower_min_max(asm, line_start, line_len, mode, "max")
 }
 
+// Phase M: unary opcodes (abs, neg). Variance lane is COPIED from src
+// (sign change / abs preserves σ² for the deterministic affine portion;
+// near-zero discontinuity ignored — same conservative stance as min/max).
+fn kaxi_lower_unary(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64, op_int: string, op_f64: string, op_f32: string) -> string with Mut, Panic, Div, Alloc {
+    let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    let src = ptx_parse_reg(asm, line_start, line_len, "r", 1)
+    if dst < 0 || src < 0 { return "" }
+    if mode == 0 {
+        if kaxi_line_has_type_f64(asm, line_start, line_len) {
+            return "    " + op_f64 + " " + fd(dst) + ", " + fd(src) + ";\n"
+        }
+        return "    " + op_int + " " + rd(dst) + ", " + rd(src) + ";\n"
+    }
+    if mode == 1 {
+        return "    " + op_int + " " + rd(dst) + ", " + rd(src) + ";\n"
+             + "    mov.u64 " + ev(dst) + ", " + ev(src) + ";\n"
+    }
+    if mode == 2 || mode == 3 {
+        return "    " + op_int + " " + rd(dst) + ", " + rd(src) + ";\n"
+             + "    " + op_f32 + " " + fr(dst) + ", " + fr(src) + ";\n"
+    }
+    // mode == 4: f32 value lane + f32 variance lane (variance copied).
+    return "    " + op_int + " " + rd(dst) + ", " + rd(src) + ";\n"
+         + "    " + op_f32 + " " + fr(dst) + ", " + fr(src) + ";\n"
+         + "    mov.f32 " + fv(dst) + ", " + fv(src) + ";\n"
+}
+
+fn kaxi_lower_abs(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    kaxi_lower_unary(asm, line_start, line_len, mode, "abs.s64", "abs.f64", "abs.f32")
+}
+
+fn kaxi_lower_neg(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    kaxi_lower_unary(asm, line_start, line_len, mode, "neg.s64", "neg.f64", "neg.f32")
+}
+
 fn kaxi_lower_arith(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
     if line_len < 3 { return "" }
     let c0 = asm.data[line_start as usize] as i8
@@ -815,6 +850,8 @@ fn kaxi_lower_arith(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) 
     if c0 == 102 && c1 == 109 && c2 == 97 { return kaxi_lower_fma(asm, line_start, line_len, mode) }
     if c0 == 109 && c1 == 105 && c2 == 110 { return kaxi_lower_min(asm, line_start, line_len, mode) }
     if c0 == 109 && c1 == 97 && c2 == 120 { return kaxi_lower_max(asm, line_start, line_len, mode) }
+    if c0 == 97 && c1 == 98 && c2 == 115 { return kaxi_lower_abs(asm, line_start, line_len, mode) }
+    if c0 == 110 && c1 == 101 && c2 == 103 { return kaxi_lower_neg(asm, line_start, line_len, mode) }
     ""
 }
 
@@ -985,11 +1022,16 @@ fn kaxi_lower_mem(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) ->
 // ----- Phase C.2 batch 3: special registers (get_tid/get_bid/get_ntid) -----
 
 fn kaxi_lower_get(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
-    // K-AXI form: get_t / get_b / get_n  (char-4 selects the special register).
+    // K-AXI form: get_t / get_b / get_nt / get_nc  (char-4 selects the special
+    // register; for char-4='n' char-5 disambiguates ntid vs nctaid).
     let kind = if line_len > 4 { asm.data[(line_start + 4) as usize] as i8 } else { 116 }
+    let kind5 = if line_len > 5 { asm.data[(line_start + 5) as usize] as i8 } else { 0 }
     let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
     if dst < 0 { return "" }
-    let sreg = if kind == 98 { "%ctaid.x" } else if kind == 110 { "%ntid.x" } else { "%tid.x" }
+    let sreg = if kind == 98 { "%ctaid.x" }
+        else if kind == 110 && kind5 == 99 { "%nctaid.x" }
+        else if kind == 110 { "%ntid.x" }
+        else { "%tid.x" }
     let head = "    mov.u32 %r1, " + sreg + ";\n"
              + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
     if mode == 0 { return head }

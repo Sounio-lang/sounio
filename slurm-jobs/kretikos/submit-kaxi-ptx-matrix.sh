@@ -130,6 +130,20 @@ PATTERN_FOR[octonion_mul]=octonion_mul
 PATTERN_FOR[octonion_associator]=octonion_associator
 PATTERN_FOR[vec_min]=vec_min
 PATTERN_FOR[vec_max]=vec_max
+PATTERN_FOR[vec_abs]=vec_abs
+PATTERN_FOR[vec_neg]=vec_neg
+
+# Phase M: unary opcodes abs / neg. Exercise actual sign-flip work
+# (negative inputs for abs, positive for neg). Variance lane is COPIED
+# from src by kaxi_lower_unary, so var_out == var_in.
+CASES+=(
+  "vec_abs|basic|1|8|8|-1,-2,-3,-4,-5,-6,-7,-8||1,2,3,4,5,6,7,8|"
+  "vec_abs|epistemic|1|8|8|-1,-2,-3,-4,-5,-6,-7,-8|1,1,1,1,1,1,1,1|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1"
+  "vec_abs|f32|1|8|8|-1.5,-2.5,-3.5,-4.5,-5.5,-6.5,-7.5,-8.5||1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5|"
+  "vec_neg|basic|1|8|8|1,2,3,4,5,6,7,8||-1,-2,-3,-4,-5,-6,-7,-8|"
+  "vec_neg|epistemic|1|8|8|1,2,3,4,5,6,7,8|2,2,2,2,2,2,2,2|-1,-2,-3,-4,-5,-6,-7,-8|2,2,2,2,2,2,2,2"
+  "vec_neg|f32|1|8|8|1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5||-1.5,-2.5,-3.5,-4.5,-5.5,-6.5,-7.5,-8.5|"
+)
 
 # Phase F: validate Phase E's new vec_min / vec_max opcodes on real L4.
 # Pattern computes y[tid] = op(x[tid], x[tid]) → output = input (identity);
