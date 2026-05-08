@@ -132,6 +132,17 @@ PATTERN_FOR[vec_min]=vec_min
 PATTERN_FOR[vec_max]=vec_max
 PATTERN_FOR[vec_abs]=vec_abs
 PATTERN_FOR[vec_neg]=vec_neg
+PATTERN_FOR[vec_sqrt]=vec_sqrt
+
+# Phase N: sqrt with non-trivial variance lane. σ²(√x) = σ²/(4x).
+# All inputs chosen as exact f32 perfect squares (powers of 2 squared)
+# so sqrt.approx.f32 produces bit-exact results vs the analytic reference.
+# In f32e mode init_var=4 → expected_var = 4/(4·x) = 1/x, with each x
+# also a power of 2 → exact f32 representation throughout.
+CASES+=(
+  "vec_sqrt|f32|1|8|8|1,4,9,16,25,36,49,64||1,2,3,4,5,6,7,8|"
+  "vec_sqrt|f32e|1|8|8|1,4,16,64,256,1024,4096,16384|4,4,4,4,4,4,4,4|1,2,4,8,16,32,64,128|1,0.25,0.0625,0.015625,0.00390625,0.000976562,0.000244141,6.10352e-05"
+)
 
 # Phase M: unary opcodes abs / neg. Exercise actual sign-flip work
 # (negative inputs for abs, positive for neg). Variance lane is COPIED

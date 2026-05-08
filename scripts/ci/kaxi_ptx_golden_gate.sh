@@ -23,7 +23,7 @@ fi
 
 PATTERNS=(
     exit_only
-    vec_add vec_sub vec_mul vec_div vec_min vec_max vec_abs vec_neg fma
+    vec_add vec_sub vec_mul vec_div vec_min vec_max vec_abs vec_neg vec_sqrt fma
     source_vec_add_f64 source_vec_sub_f64 source_vec_mul_f64 source_vec_div_f64 source_fma_f64
     source_vec_add_f32 source_vec_sub_f32 source_vec_mul_f32 source_vec_div_f32 source_fma_f32
     source_epistemic_dual_output_f32 epistemic_elementwise_f32 epistemic_dual_output_f32
