@@ -208,6 +208,16 @@ SMOKE_COHORT=(
   # fix) and stage1 must compile this file successfully, so any future
   # change that re-breaks find_fn_lbrace fails the gate immediately.
   "examples/native/hof_param_signature.sio"
+  # First-class fn-ref call witness: named function values, fn-typed params,
+  # local fn-ref variables, returned fn refs, and indirect calls must survive
+  # the generated stage1 driver.
+  "examples/native/hof_fn_ref_call.sio"
+  # Non-capturing closure literals lower to generated fn refs and must survive
+  # baseline + stage1 compile/run parity.
+  "examples/native/hof_closure_literal.sio"
+  # Science-shaped higher-order corpus: integration, root scan, and optimizer
+  # scan through function references.
+  "examples/native/hof_science_kernel.sio"
 )
 
 printf '[native-v2-driver-self] stage1-smoke timeout=%ss cohort=%d\n' \
