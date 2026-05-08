@@ -1774,6 +1774,35 @@ fn kaxi_lower_mem(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) ->
     ""
 }
 
+// ----- Phase C.2 batch 3: special registers (get_tid/get_bid/get_ntid) -----
+
+fn kaxi_lower_get(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    // K-AXI form: get_t / get_b / get_n  (char-4 selects the special register).
+    let kind = if line_len > 4 { asm.data[(line_start + 4) as usize] as i8 } else { 116 }
+    let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
+    if dst < 0 { return "" }
+    let sreg = if kind == 98 { "%ctaid.x" } else if kind == 110 { "%ntid.x" } else { "%tid.x" }
+    let head = "    mov.u32 %r1, " + sreg + ";\n"
+             + "    cvt.u64.u32 " + rd(dst) + ", %r1;\n"
+    if mode == 0 { return head }
+    if mode == 1 { return head + "    mov.u64 " + ev(dst) + ", 0;\n" }
+    if mode == 2 || mode == 3 {
+        return head + "    cvt.rn.f32.u32 " + fr(dst) + ", %r1;\n"
+    }
+    // mode == 4: f32 value lane + zero variance lane.
+    head + "    cvt.rn.f32.u32 " + fr(dst) + ", %r1;\n"
+         + "    mov.f32 " + fv(dst) + ", 0f00000000;\n"
+}
+
+fn kaxi_lower_special(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
+    if line_len < 3 { return "" }
+    let c0 = asm.data[line_start as usize] as i8
+    let c1 = asm.data[(line_start + 1) as usize] as i8
+    let c2 = asm.data[(line_start + 2) as usize] as i8
+    if c0 == 103 && c1 == 101 && c2 == 116 { return kaxi_lower_get(asm, line_start, line_len, mode) }
+    ""
+}
+
 // ----- unified transpiler -------------------------------------------
 
 pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with Mut, Panic, Div, Alloc {
@@ -1850,13 +1879,17 @@ pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with 
                 let first_char = asm.data[line_start as usize] as i8
                 if first_char != 59 && first_char != 0 {
                     // Phase C.2: try opcode-first helpers (batch 1: arith,
-                    // batch 2: mem); fall back to old per-dialect handler.
+                    // batch 2: mem, batch 3: special-regs); fall back to
+                    // old per-dialect handler for unmatched opcodes.
                     let p_arith = kaxi_lower_arith(asm, line_start, line_len, mode)
                     let p_mem = if str_len(p_arith) > 0 { "" } else { kaxi_lower_mem(asm, line_start, line_len, mode) }
+                    let p_spec = if str_len(p_arith) > 0 || str_len(p_mem) > 0 { "" } else { kaxi_lower_special(asm, line_start, line_len, mode) }
                     let p = if str_len(p_arith) > 0 {
                         p_arith
                     } else if str_len(p_mem) > 0 {
                         p_mem
+                    } else if str_len(p_spec) > 0 {
+                        p_spec
                     } else if mode == 0 {
                         kaxi_transpile_line_to_ptx(asm, line_start, line_len)
                     } else if mode == 1 {
