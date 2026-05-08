@@ -2611,183 +2611,254 @@ PY
             exit 1
         }
 
-        python3 - "$OUT" "$SRC" "$WORK_DIR" "$SOURCE_LOWERING" "$KAXI_WITNESS" "$KAXI_ASM" \
-            "$RUNTIME_DIR/kretikos_source_profile.v1.json" "$RUNTIME_DIR/kretikos_bundle.v1.json" "$RUN_SOURCE_LOG" "$RUNTIME_MODE" <<'PY'
-import hashlib
-import json
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
+        # Compose kaxi-lowering-certificate JSON. Reads up to 4 JSON files
+        # (source_lowering, kaxi_witness, runtime_profile, bundle), runs
+        # 14 cross-validation checks, embeds nested sub-objects via
+        # validate-evidence --print-subtree, assembles via json-emit.
+        __json_str_escape() { printf '%s' "$1" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g'; }
+        __file_record_json() {
+            local _p="$1"
+            if [[ -f "$_p" ]]; then
+                local _b _s
+                _b="$(__kretikos_file_size "$_p")" || return 0
+                _s="$(__kretikos_sha256 "$_p")" || return 0
+                printf '{"path": "%s", "bytes": %s, "sha256": "%s"}' "$(__json_str_escape "$_p")" "$_b" "$_s"
+            else
+                printf 'null'
+            fi
+        }
+        __scalar_or_null() {
+            # Wrap a scalar string as JSON: empty/null → JSON null,
+            # else "escaped string".
+            local _v="$1"
+            if [[ -z "$_v" || "$_v" == "null" ]]; then
+                printf 'null'
+            else
+                printf '"%s"' "$(__json_str_escape "$_v")"
+            fi
+        }
+        __bool_or_null() {
+            case "$1" in
+                true) printf 'true' ;;
+                false) printf 'false' ;;
+                *) printf 'null' ;;
+            esac
+        }
 
-(
-    out_path,
-    source_arg,
-    work_dir,
-    source_lowering_path,
-    kaxi_witness_path,
-    kaxi_asm_path,
-    runtime_profile_path,
-    bundle_path,
-    run_source_log_path,
-    runtime_mode,
-) = sys.argv[1:]
+        RUNTIME_PROFILE_PATH="$RUNTIME_DIR/kretikos_source_profile.v1.json"
+        BUNDLE_PATH="$RUNTIME_DIR/kretikos_bundle.v1.json"
 
-def read_json(path):
-    p = Path(path)
-    if not p.is_file():
-        return None
-    return json.loads(p.read_text(encoding="utf-8"))
+        # ---- source_lowering scalars + subtrees ----
+        SL_STATUS=""; SL_PROFILE_HINT=""; SL_FALLBACK_PATH=""
+        SL_SOURCE_LOWERED=""; SL_KAXI_PATTERN=""; SL_RUNTIME_RUNG=""
+        SL_SOURCE_SHA=""
+        SL_LOWERING_JSON='{}'; SL_KAXI_JSON='{}'; SL_SOURCE_JSON='null'
+        SL_INNER_KAXI_PATTERN=""
+        if [[ -f "$SOURCE_LOWERING" ]]; then
+            mapfile -t __sl_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$SOURCE_LOWERING" \
+                --print-or-empty status \
+                --print-or-empty lowering.profile_hint \
+                --print-or-empty lowering.fallback_path \
+                --print-or-empty lowering.source_lowered_to_kaxi \
+                --print-or-empty lowering.kaxi_pattern \
+                --print-or-empty lowering.runtime_rung \
+                --print-or-empty source.sha256 \
+                --print-or-empty kaxi.pattern)
+            SL_STATUS="${__sl_parts[0]}"
+            SL_PROFILE_HINT="${__sl_parts[1]}"
+            SL_FALLBACK_PATH="${__sl_parts[2]}"
+            SL_SOURCE_LOWERED="${__sl_parts[3]}"
+            SL_KAXI_PATTERN="${__sl_parts[4]}"
+            SL_RUNTIME_RUNG="${__sl_parts[5]}"
+            SL_SOURCE_SHA="${__sl_parts[6]}"
+            SL_INNER_KAXI_PATTERN="${__sl_parts[7]}"
+            SL_LOWERING_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$SOURCE_LOWERING" --print-subtree-or lowering '{}')"
+            SL_KAXI_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$SOURCE_LOWERING" --print-subtree-or kaxi '{}')"
+            SL_SOURCE_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$SOURCE_LOWERING" --print-subtree-or source 'null')"
+        fi
 
-def file_record(path):
-    p = Path(path)
-    if not p.is_file():
-        return None
-    data = p.read_bytes()
-    return {
-        "path": str(p),
-        "bytes": p.stat().st_size,
-        "sha256": hashlib.sha256(data).hexdigest(),
-    }
+        # ---- kaxi_witness scalars + assembly subtree ----
+        KW_STATUS=""; KW_PATTERN=""; KW_SEQ_DENSE=""; KW_STORE_COUNT="0"
+        if [[ -f "$KAXI_WITNESS" ]]; then
+            mapfile -t __kw_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS" \
+                --print-or-empty status \
+                --print-or-empty pattern \
+                --print-or-empty assembly.seq_dense_zero_based \
+                --print-or-empty epistemic_lanes.store_global_count)
+            KW_STATUS="${__kw_parts[0]}"
+            KW_PATTERN="${__kw_parts[1]}"
+            KW_SEQ_DENSE="${__kw_parts[2]}"
+            KW_STORE_COUNT="${__kw_parts[3]:-0}"
+        fi
 
-source_lowering = read_json(source_lowering_path)
-kaxi_witness = read_json(kaxi_witness_path)
-runtime_profile = read_json(runtime_profile_path)
-bundle = read_json(bundle_path)
-runtime_validation = (bundle or {}).get("runtime_validation") or {}
-lowering = (source_lowering or {}).get("lowering") or {}
-kaxi = (source_lowering or {}).get("kaxi") or {}
+        # ---- runtime_profile scalars + full subtree ----
+        RP_PROFILE=""; RP_PROFILE_KIND=""; RP_RUNTIME_BACKED=""
+        RP_CUBIN_KIND=""; RP_RUNTIME_RUNG=""; RP_KERNEL=""
+        RP_SOURCE_SHA=""
+        RP_FULL_JSON='null'
+        if [[ -f "$RUNTIME_PROFILE_PATH" ]]; then
+            mapfile -t __rp_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$RUNTIME_PROFILE_PATH" \
+                --print-or-empty profile \
+                --print-or-empty profile_kind \
+                --print-or-empty runtime_backed \
+                --print-or-empty cubin_kind \
+                --print-or-empty runtime_rung \
+                --print-or-empty kernel \
+                --print-or-empty source.sha256)
+            RP_PROFILE="${__rp_parts[0]}"
+            RP_PROFILE_KIND="${__rp_parts[1]}"
+            RP_RUNTIME_BACKED="${__rp_parts[2]}"
+            RP_CUBIN_KIND="${__rp_parts[3]}"
+            RP_RUNTIME_RUNG="${__rp_parts[4]}"
+            RP_KERNEL="${__rp_parts[5]}"
+            RP_SOURCE_SHA="${__rp_parts[6]}"
+            # Embed the entire profile JSON as the runtime.source_profile field.
+            RP_FULL_JSON="$(cat "$RUNTIME_PROFILE_PATH")"
+        fi
 
-failures = []
-if source_lowering is None:
-    failures.append({"kind": "missing_source_lowering", "path": source_lowering_path})
-elif source_lowering.get("status") != "pass":
-    failures.append({"kind": "source_lowering_not_pass", "status": source_lowering.get("status")})
+        # ---- bundle scalars + nested subtrees ----
+        BD_STATUS=""; BD_RV_STATUS=""; BD_RV_REASON=""; BD_RV_RUNG=""; BD_RV_KERNEL=""
+        BD_RV_JSON='{}'; BD_SC_JSON='null'; BD_AR_JSON='null'; BD_TV_JSON='null'
+        if [[ -f "$BUNDLE_PATH" ]]; then
+            mapfile -t __bd_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" \
+                --print-or-empty status \
+                --print-or-empty runtime_validation.status \
+                --print-or-empty runtime_validation.reason \
+                --print-or-empty runtime_validation.rung \
+                --print-or-empty runtime_validation.kernel)
+            BD_STATUS="${__bd_parts[0]}"
+            BD_RV_STATUS="${__bd_parts[1]}"
+            BD_RV_REASON="${__bd_parts[2]}"
+            BD_RV_RUNG="${__bd_parts[3]}"
+            BD_RV_KERNEL="${__bd_parts[4]}"
+            BD_RV_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" --print-subtree-or runtime_validation '{}')"
+            BD_SC_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" --print-subtree-or structural_checks 'null')"
+            BD_AR_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" --print-subtree-or artifacts 'null')"
+            BD_TV_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" --print-subtree-or toolchain_validation 'null')"
+        fi
 
-if kaxi_witness is None:
-    failures.append({"kind": "missing_kaxi_witness", "path": kaxi_witness_path})
-elif kaxi_witness.get("status") != "pass":
-    failures.append({"kind": "kaxi_witness_not_pass", "status": kaxi_witness.get("status")})
+        # ---- failures ----
+        __FAIL_ELEMS=()
+        if [[ ! -f "$SOURCE_LOWERING" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "missing_source_lowering", "path": "%s"}' "$(__json_str_escape "$SOURCE_LOWERING")")")
+        elif [[ "$SL_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "source_lowering_not_pass", "status": "%s"}' "$(__json_str_escape "$SL_STATUS")")")
+        fi
+        if [[ ! -f "$KAXI_WITNESS" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "missing_kaxi_witness", "path": "%s"}' "$(__json_str_escape "$KAXI_WITNESS")")")
+        elif [[ "$KW_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "kaxi_witness_not_pass", "status": "%s"}' "$(__json_str_escape "$KW_STATUS")")")
+        fi
+        if [[ ! -f "$RUNTIME_PROFILE_PATH" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "missing_runtime_source_profile", "path": "%s"}' "$(__json_str_escape "$RUNTIME_PROFILE_PATH")")")
+        fi
+        if [[ ! -f "$BUNDLE_PATH" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "missing_runtime_bundle", "path": "%s"}' "$(__json_str_escape "$BUNDLE_PATH")")")
+        fi
+        if [[ -f "$SOURCE_LOWERING" ]]; then
+            if [[ "$SL_PROFILE_HINT" != "none" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "profile_hint_not_none", "profile_hint": "%s"}' "$(__json_str_escape "$SL_PROFILE_HINT")")")
+            fi
+            if [[ "$SL_FALLBACK_PATH" != "none" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "fallback_path_not_none", "fallback_path": "%s"}' "$(__json_str_escape "$SL_FALLBACK_PATH")")")
+            fi
+            if [[ "$SL_SOURCE_LOWERED" != "true" ]]; then
+                __FAIL_ELEMS+=('{"kind": "source_not_lowered_to_kaxi"}')
+            fi
+            if [[ "$SL_INNER_KAXI_PATTERN" != "$SL_KAXI_PATTERN" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "lowering_kaxi_pattern_mismatch", "lowering": "%s", "kaxi": "%s"}' \
+                    "$(__json_str_escape "$SL_KAXI_PATTERN")" "$(__json_str_escape "$SL_INNER_KAXI_PATTERN")")")
+            fi
+        fi
+        if [[ -f "$KAXI_WITNESS" && -f "$SOURCE_LOWERING" ]]; then
+            if [[ "$KW_PATTERN" != "$SL_KAXI_PATTERN" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "witness_pattern_mismatch", "lowering": "%s", "witness": "%s"}' \
+                    "$(__json_str_escape "$SL_KAXI_PATTERN")" "$(__json_str_escape "$KW_PATTERN")")")
+            fi
+            if [[ "$KW_SEQ_DENSE" != "true" ]]; then
+                __FAIL_ELEMS+=('{"kind": "kaxi_sequence_not_dense_zero_based"}')
+            fi
+            if [[ "$SL_KAXI_PATTERN" == "source_epistemic_dual_output_f32" && "$KW_STORE_COUNT" -lt 2 ]] 2>/dev/null; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "dual_lowering_requires_two_store_global_ops", "store_global_count": %s}' "$KW_STORE_COUNT")")
+            fi
+        fi
+        if [[ -f "$SOURCE_LOWERING" && -f "$RUNTIME_PROFILE_PATH" ]]; then
+            if [[ "$SL_SOURCE_SHA" != "$RP_SOURCE_SHA" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "source_hash_mismatch", "lowering_source_sha256": %s, "runtime_source_sha256": %s}' \
+                    "$(__scalar_or_null "$SL_SOURCE_SHA")" "$(__scalar_or_null "$RP_SOURCE_SHA")")")
+            fi
+            if [[ "$SL_RUNTIME_RUNG" != "$RP_PROFILE" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "runtime_profile_mismatch", "lowering_runtime_rung": %s, "runtime_profile": %s}' \
+                    "$(__scalar_or_null "$SL_RUNTIME_RUNG")" "$(__scalar_or_null "$RP_PROFILE")")")
+            fi
+        fi
+        if [[ -f "$SOURCE_LOWERING" && -f "$BUNDLE_PATH" ]]; then
+            if [[ "$SL_RUNTIME_RUNG" != "$BD_RV_RUNG" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "runtime_rung_mismatch", "lowering_runtime_rung": %s, "bundle_rung": %s}' \
+                    "$(__scalar_or_null "$SL_RUNTIME_RUNG")" "$(__scalar_or_null "$BD_RV_RUNG")")")
+            fi
+            if [[ -f "$RUNTIME_PROFILE_PATH" && "$RP_KERNEL" != "$BD_RV_KERNEL" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "runtime_kernel_mismatch", "runtime_profile_kernel": %s, "bundle_kernel": %s}' \
+                    "$(__scalar_or_null "$RP_KERNEL")" "$(__scalar_or_null "$BD_RV_KERNEL")")")
+            fi
+        fi
+        if [[ "$RUNTIME_MODE" == "required" && "$BD_RV_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "runtime_required_but_not_pass", "status": %s, "reason": %s}' \
+                "$(__scalar_or_null "$BD_RV_STATUS")" "$(__scalar_or_null "$BD_RV_REASON")")")
+        fi
+        if [[ ${#__FAIL_ELEMS[@]} -eq 0 ]]; then
+            FAILURES_ARRAY="[]"
+            STATUS_VAL="pass"
+        else
+            FAILURES_ARRAY="[$(IFS=,; echo "${__FAIL_ELEMS[*]}")]"
+            STATUS_VAL="fail"
+        fi
 
-if runtime_profile is None:
-    failures.append({"kind": "missing_runtime_source_profile", "path": runtime_profile_path})
-if bundle is None:
-    failures.append({"kind": "missing_runtime_bundle", "path": bundle_path})
+        # ---- composed sub-objects ----
+        PROFILE_OBJ="$(printf '{"name": %s, "profile_kind": %s, "runtime_backed": %s, "cubin_kind": %s, "runtime_rung": %s, "kernel": %s}' \
+            "$(__scalar_or_null "$RP_PROFILE")" \
+            "$(__scalar_or_null "$RP_PROFILE_KIND")" \
+            "$(__bool_or_null "$RP_RUNTIME_BACKED")" \
+            "$(__scalar_or_null "$RP_CUBIN_KIND")" \
+            "$(__scalar_or_null "$RP_RUNTIME_RUNG")" \
+            "$(__scalar_or_null "$RP_KERNEL")")"
+        BUNDLE_STATUS_LIT="$(__scalar_or_null "$BD_STATUS")"
+        RUNTIME_OBJ="$(printf '{"mode": "%s", "source_profile": %s, "bundle_status": %s, "structural_checks": %s, "artifacts": %s, "runtime_validation": %s, "toolchain_validation": %s}' \
+            "$(__json_str_escape "$RUNTIME_MODE")" \
+            "$RP_FULL_JSON" \
+            "$BUNDLE_STATUS_LIT" \
+            "$BD_SC_JSON" \
+            "$BD_AR_JSON" \
+            "$BD_RV_JSON" \
+            "$BD_TV_JSON")"
+        AR_OBJ="$(printf '{"source_lowering": %s, "kaxi_witness": %s, "kaxi_assembly": %s, "runtime_source_profile": %s, "runtime_bundle": %s, "run_source_log": %s}' \
+            "$(__file_record_json "$SOURCE_LOWERING")" \
+            "$(__file_record_json "$KAXI_WITNESS")" \
+            "$(__file_record_json "$KAXI_ASM")" \
+            "$(__file_record_json "$RUNTIME_PROFILE_PATH")" \
+            "$(__file_record_json "$BUNDLE_PATH")" \
+            "$(__file_record_json "$RUN_SOURCE_LOG")")"
 
-if source_lowering:
-    if lowering.get("profile_hint") != "none":
-        failures.append({"kind": "profile_hint_not_none", "profile_hint": lowering.get("profile_hint")})
-    if lowering.get("fallback_path") != "none":
-        failures.append({"kind": "fallback_path_not_none", "fallback_path": lowering.get("fallback_path")})
-    if not lowering.get("source_lowered_to_kaxi"):
-        failures.append({"kind": "source_not_lowered_to_kaxi"})
-    if kaxi.get("pattern") != lowering.get("kaxi_pattern"):
-        failures.append({
-            "kind": "lowering_kaxi_pattern_mismatch",
-            "lowering": lowering.get("kaxi_pattern"),
-            "kaxi": kaxi.get("pattern"),
-        })
-
-if kaxi_witness and source_lowering:
-    if kaxi_witness.get("pattern") != lowering.get("kaxi_pattern"):
-        failures.append({
-            "kind": "witness_pattern_mismatch",
-            "lowering": lowering.get("kaxi_pattern"),
-            "witness": kaxi_witness.get("pattern"),
-        })
-    if not kaxi_witness.get("assembly", {}).get("seq_dense_zero_based"):
-        failures.append({"kind": "kaxi_sequence_not_dense_zero_based"})
-    if lowering.get("kaxi_pattern") == "source_epistemic_dual_output_f32":
-        store_count = kaxi_witness.get("epistemic_lanes", {}).get("store_global_count", 0)
-        if store_count < 2:
-            failures.append({"kind": "dual_lowering_requires_two_store_global_ops", "store_global_count": store_count})
-
-if source_lowering and runtime_profile:
-    source_a = source_lowering.get("source") or {}
-    source_b = runtime_profile.get("source") or {}
-    if source_a.get("sha256") != source_b.get("sha256"):
-        failures.append({
-            "kind": "source_hash_mismatch",
-            "lowering_source_sha256": source_a.get("sha256"),
-            "runtime_source_sha256": source_b.get("sha256"),
-        })
-    if lowering.get("runtime_rung") != runtime_profile.get("profile"):
-        failures.append({
-            "kind": "runtime_profile_mismatch",
-            "lowering_runtime_rung": lowering.get("runtime_rung"),
-            "runtime_profile": runtime_profile.get("profile"),
-        })
-
-if source_lowering and bundle:
-    if lowering.get("runtime_rung") != runtime_validation.get("rung"):
-        failures.append({
-            "kind": "runtime_rung_mismatch",
-            "lowering_runtime_rung": lowering.get("runtime_rung"),
-            "bundle_rung": runtime_validation.get("rung"),
-        })
-    if runtime_profile and runtime_profile.get("kernel") != runtime_validation.get("kernel"):
-        failures.append({
-            "kind": "runtime_kernel_mismatch",
-            "runtime_profile_kernel": runtime_profile.get("kernel"),
-            "bundle_kernel": runtime_validation.get("kernel"),
-        })
-
-if runtime_mode == "required" and runtime_validation.get("status") != "pass":
-    failures.append({
-        "kind": "runtime_required_but_not_pass",
-        "status": runtime_validation.get("status"),
-        "reason": runtime_validation.get("reason"),
-    })
-
-payload = {
-    "schema": "sounio.kretikos.kaxi-lowering-certificate.v1",
-    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "status": "pass" if not failures else "fail",
-    "source": (source_lowering or {}).get("source"),
-    "profile": {
-        "name": (runtime_profile or {}).get("profile"),
-        "profile_kind": (runtime_profile or {}).get("profile_kind"),
-        "runtime_backed": (runtime_profile or {}).get("runtime_backed"),
-        "cubin_kind": (runtime_profile or {}).get("cubin_kind"),
-        "runtime_rung": (runtime_profile or {}).get("runtime_rung"),
-        "kernel": (runtime_profile or {}).get("kernel"),
-    },
-    "lowering": lowering,
-    "kaxi": kaxi,
-    "runtime": {
-        "mode": runtime_mode,
-        "source_profile": runtime_profile,
-        "bundle_status": (bundle or {}).get("status"),
-        "structural_checks": (bundle or {}).get("structural_checks"),
-        "artifacts": (bundle or {}).get("artifacts"),
-        "runtime_validation": runtime_validation,
-        "toolchain_validation": (bundle or {}).get("toolchain_validation"),
-    },
-    "artifact_records": {
-        "source_lowering": file_record(source_lowering_path),
-        "kaxi_witness": file_record(kaxi_witness_path),
-        "kaxi_assembly": file_record(kaxi_asm_path),
-        "runtime_source_profile": file_record(runtime_profile_path),
-        "runtime_bundle": file_record(bundle_path),
-        "run_source_log": file_record(run_source_log_path),
-    },
-    "work_dir": work_dir,
-    "source_arg": source_arg,
-    "failures": failures,
-    "boundaries": [
-        "certificate_braids_checked_source_lowering_kaxi_witness_and_runtime_bundle_hashes",
-        "source_must_typecheck_before_source_lowering_and_profile_selection",
-        "profile_hint_must_be_absent_for_source_lowering_certificate",
-        "kaxi_evidence_is_shape_limited_source_lowering_not_general_gpu_lowering",
-        "runtime_validation_applies_to_selected_predefined_cubin_rung_only",
-        "local_cuda_not_run_is_classified_and_slurm_remains_runtime_authority",
-        "certificate_does_not_claim_first_class_knowledge_generic_lowering",
-        "certificate_does_not_claim_general_gpu_backend_completeness",
-    ],
-}
-Path(out_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-if failures:
-    raise SystemExit(json.dumps(failures))
-PY
+        GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        "$KRETIKOS_SELF" json-emit \
+            --raw-json "artifact_records=$AR_OBJ" \
+            --array-strings "boundaries=certificate_braids_checked_source_lowering_kaxi_witness_and_runtime_bundle_hashes|source_must_typecheck_before_source_lowering_and_profile_selection|profile_hint_must_be_absent_for_source_lowering_certificate|kaxi_evidence_is_shape_limited_source_lowering_not_general_gpu_lowering|runtime_validation_applies_to_selected_predefined_cubin_rung_only|local_cuda_not_run_is_classified_and_slurm_remains_runtime_authority|certificate_does_not_claim_first_class_knowledge_generic_lowering|certificate_does_not_claim_general_gpu_backend_completeness" \
+            --raw-json "failures=$FAILURES_ARRAY" \
+            --string "generated_at_utc=$GENERATED_AT_UTC" \
+            --raw-json "kaxi=$SL_KAXI_JSON" \
+            --raw-json "lowering=$SL_LOWERING_JSON" \
+            --raw-json "profile=$PROFILE_OBJ" \
+            --raw-json "runtime=$RUNTIME_OBJ" \
+            --string "schema=sounio.kretikos.kaxi-lowering-certificate.v1" \
+            --raw-json "source=$SL_SOURCE_JSON" \
+            --string "source_arg=$SRC" \
+            --string "status=$STATUS_VAL" \
+            --string "work_dir=$WORK_DIR" \
+            > "$OUT" || exit 1
+        if [[ "$STATUS_VAL" == "fail" ]]; then
+            echo "$FAILURES_ARRAY" >&2
+            exit 1
+        fi
 
         echo "kretikos: K-AXI lowering certificate emitted - $OUT"
         echo "kretikos: K-AXI lowering certificate work dir - $WORK_DIR"
