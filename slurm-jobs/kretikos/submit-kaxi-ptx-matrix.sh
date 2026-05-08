@@ -159,6 +159,16 @@ CASES+=("sedenion_mul|f32|1|2|96|${SEDZD_INIT}||${SEDZD_EXP}|")
 SEDZD_VAR_ZERO=$(python3 -c "print(','.join(['0']*96))")
 CASES+=("sedenion_mul|epistemic|1|2|96|${SEDZD_INIT}|${SEDZD_VAR_ZERO}|${SEDZD_EXP}|${SEDZD_VAR_ZERO}")
 CASES+=("sedenion_mul|f32e|1|2|96|${SEDZD_INIT}|${SEDZD_VAR_ZERO}|${SEDZD_EXP}|${SEDZD_VAR_ZERO}")
+
+# Phase J: octonion_mul in variance modes — gives the octonion-connectomics
+# research line a GUM-propagating GPU primitive. Inputs are 8-vector basis
+# elements; outputs are the 8-component product. With init_var=0, var stays
+# 0 through every mul (zero · anything = zero). Same mem expected as f32.
+OCT_INIT="1,2,3,4,5,6,7,8,9,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0"
+OCT_EXP="1,2,3,4,5,6,7,8,9,1,0,0,0,0,0,0,7,19,31,33,51,49,55,79,0,1,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,1,0,0,0,0"
+OCT_VAR_ZERO=$(python3 -c "print(','.join(['0']*48))")
+CASES+=("octonion_mul|epistemic|1|2|48|${OCT_INIT}|${OCT_VAR_ZERO}|${OCT_EXP}|${OCT_VAR_ZERO}")
+CASES+=("octonion_mul|f32e|1|2|48|${OCT_INIT}|${OCT_VAR_ZERO}|${OCT_EXP}|${OCT_VAR_ZERO}")
 PATTERN_FOR[sedenion_mul]=sedenion_mul
 
 # Programmatically generate large multi-block cases (256, 1024 elements).
