@@ -180,23 +180,15 @@ fn kaxi_line_has_type_f64(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> bo
 //   load_global rD, addr=rA : σ²(rD) ← var_mem[rA]
 //   store_global rD, addr=rA: var_mem[rA] ← σ²(rD)
 
-// Phase H discovery (2026-05-08, Slurm job 1371): the +32 offset is
-// only conflict-free when K-AXI rD < 32. For sedenion_mul (rD up to
-// ~113) the variance lane (ev(D) = %rd(D+32)) overlaps the value
-// lane (rd(D')) at D' = D+32, corrupting state. Plus scratch
-// %rd64/65 collides with K-AXI r64/r65, and base ptr %rd96/97 with
-// r96/r97. L4 matrix exposed this: vec_*/pbpk*/x4_* (small kernels)
-// pass, sedenion_mul epistemic + f32e fail value/var checks.
-//
-// Drift oracle still PASSES byte-identity at 195/195 because the
-// emitter is deterministic; the fault is that the emitted PTX is
-// semantically wrong for big variance kernels. Phase G unblocked
-// emit (heap-string output past 64K cap); Phase I will re-segment
-// the variance mode register file: value 0..127, variance 128..255,
-// scratch+base 256+. That requires recapturing all variance-mode
-// goldens and is left as a dedicated session.
+// Phase I (2026-05-08): re-segmented register file for variance modes
+// (epistemic + f32_epistemic). Value lane lives at %rd0..%rd127,
+// variance at %rd128..%rd255, scratch at %rd256/%rd257, dual-buffer
+// base ptrs at %rd258/%rd259. Same shape for %f in f32_epistemic.
+// This unblocks sedenion_mul (K-AXI rD up to ~113) which Phase H
+// discovered was producing wrong values due to value/variance lane
+// overlap and scratch/base collisions when rD ≥ 32.
 fn ev(idx: i64) -> string with Mut, Panic, Div {
-    "%rd" + ptx_int_to_string(idx + 32)
+    "%rd" + ptx_int_to_string(idx + 128)
 }
 
 pub fn kaxi_transpile_line_to_ptx_epistemic(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
@@ -340,11 +332,13 @@ pub fn kaxi_transpile_line_to_ptx_f32_2c(asm: KaxiAsmBuf, line_start: i64, line_
 //   store_global            param_var[rA] ← σ²(rD)
 
 fn fv(idx: i64) -> string with Mut, Panic, Div {
-    "%f" + ptx_int_to_string(idx + 32)
+    // Phase I: variance lane offset 32 → 128 (see ev()).
+    "%f" + ptx_int_to_string(idx + 128)
 }
 
 fn ptx_addr_compute_f32e(addr_reg: i64) -> string with Mut, Panic, Div, Alloc {
-    "    mul.lo.u64 %rd64, " + rd(addr_reg) + ", 4;\n"
+    // Phase I: scratch moved out of value-lane region (was %rd64).
+    "    mul.lo.u64 %rd256, " + rd(addr_reg) + ", 4;\n"
 }
 
 pub fn kaxi_transpile_line_to_ptx_f32_epistemic(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
@@ -675,19 +669,21 @@ fn kaxi_lower_mul(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) ->
     }
     if mode == 1 {
         // epistemic mul: σ²(a·b) — special X² case when src_a == src_b.
+        // Phase I: scratch %rd256/%rd257 (was %rd64/%rd65, conflicted
+        // with K-AXI rD ∈ {64,65} in big kernels).
         var s: string = "    mul.lo.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
         if src_a == src_b {
             // X²: σ²(X²) ≈ 4·X²·σ²(X)
-            s = s + "    mul.lo.u64 %rd64, " + rd(src_a) + ", " + rd(src_a) + ";\n"
-            s = s + "    mul.lo.u64 %rd64, %rd64, " + ev(src_a) + ";\n"
-            s = s + "    shl.b64 " + ev(dst) + ", %rd64, 2;\n"
+            s = s + "    mul.lo.u64 %rd256, " + rd(src_a) + ", " + rd(src_a) + ";\n"
+            s = s + "    mul.lo.u64 %rd256, %rd256, " + ev(src_a) + ";\n"
+            s = s + "    shl.b64 " + ev(dst) + ", %rd256, 2;\n"
         } else {
             // independent: a²σ²(b) + b²σ²(a)
-            s = s + "    mul.lo.u64 %rd64, " + rd(src_a) + ", " + rd(src_a) + ";\n"
-            s = s + "    mul.lo.u64 %rd64, %rd64, " + ev(src_b) + ";\n"
-            s = s + "    mul.lo.u64 %rd65, " + rd(src_b) + ", " + rd(src_b) + ";\n"
-            s = s + "    mul.lo.u64 %rd65, %rd65, " + ev(src_a) + ";\n"
-            s = s + "    add.u64 " + ev(dst) + ", %rd64, %rd65;\n"
+            s = s + "    mul.lo.u64 %rd256, " + rd(src_a) + ", " + rd(src_a) + ";\n"
+            s = s + "    mul.lo.u64 %rd256, %rd256, " + ev(src_b) + ";\n"
+            s = s + "    mul.lo.u64 %rd257, " + rd(src_b) + ", " + rd(src_b) + ";\n"
+            s = s + "    mul.lo.u64 %rd257, %rd257, " + ev(src_a) + ";\n"
+            s = s + "    add.u64 " + ev(dst) + ", %rd256, %rd257;\n"
         }
         return s
     }
@@ -696,21 +692,22 @@ fn kaxi_lower_mul(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) ->
              + "    mul.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
     }
     // mode == 4: f32 value lane + f32 variance lane (with X² case).
+    // Phase I: scratch %f256/%f257 (was %f64/%f65).
     var s: string = "    mul.lo.u64 " + rd(dst) + ", " + rd(src_a) + ", " + rd(src_b) + ";\n"
     s = s + "    mul.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ";\n"
     if src_a == src_b {
         // X²: σ²(X²) = 4·X²·σ²(X)
-        s = s + "    mul.rn.f32 %f64, " + fr(src_a) + ", " + fr(src_a) + ";\n"
-        s = s + "    mul.rn.f32 %f64, %f64, " + fv(src_a) + ";\n"
-        s = s + "    add.rn.f32 %f65, %f64, %f64;\n"
-        s = s + "    add.rn.f32 " + fv(dst) + ", %f65, %f65;\n"
+        s = s + "    mul.rn.f32 %f256, " + fr(src_a) + ", " + fr(src_a) + ";\n"
+        s = s + "    mul.rn.f32 %f256, %f256, " + fv(src_a) + ";\n"
+        s = s + "    add.rn.f32 %f257, %f256, %f256;\n"
+        s = s + "    add.rn.f32 " + fv(dst) + ", %f257, %f257;\n"
     } else {
         // independent: a²σ²(b) + b²σ²(a)
-        s = s + "    mul.rn.f32 %f64, " + fr(src_a) + ", " + fr(src_a) + ";\n"
-        s = s + "    mul.rn.f32 %f64, %f64, " + fv(src_b) + ";\n"
-        s = s + "    mul.rn.f32 %f65, " + fr(src_b) + ", " + fr(src_b) + ";\n"
-        s = s + "    mul.rn.f32 %f65, %f65, " + fv(src_a) + ";\n"
-        s = s + "    add.rn.f32 " + fv(dst) + ", %f64, %f65;\n"
+        s = s + "    mul.rn.f32 %f256, " + fr(src_a) + ", " + fr(src_a) + ";\n"
+        s = s + "    mul.rn.f32 %f256, %f256, " + fv(src_b) + ";\n"
+        s = s + "    mul.rn.f32 %f257, " + fr(src_b) + ", " + fr(src_b) + ";\n"
+        s = s + "    mul.rn.f32 %f257, %f257, " + fv(src_a) + ";\n"
+        s = s + "    add.rn.f32 " + fv(dst) + ", %f256, %f257;\n"
     }
     s
 }
@@ -832,11 +829,12 @@ fn kaxi_lower_load_global(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode:
     }
     if mode == 1 {
         // epistemic: dual-buffer u64 load (value + variance).
-        return "    mul.lo.u64 %rd64, " + rd(addr) + ", 8;\n"
-             + "    add.u64 %rd65, %rd96, %rd64;\n"
-             + "    ld.global.u64 " + rd(dst) + ", [%rd65];\n"
-             + "    add.u64 %rd65, %rd97, %rd64;\n"
-             + "    ld.global.u64 " + ev(dst) + ", [%rd65];\n"
+        // Phase I: scratch %rd256/%rd257, base %rd258/%rd259.
+        return "    mul.lo.u64 %rd256, " + rd(addr) + ", 8;\n"
+             + "    add.u64 %rd257, %rd258, %rd256;\n"
+             + "    ld.global.u64 " + rd(dst) + ", [%rd257];\n"
+             + "    add.u64 %rd257, %rd259, %rd256;\n"
+             + "    ld.global.u64 " + ev(dst) + ", [%rd257];\n"
     }
     if mode == 2 {
         return ptx_addr_compute_f32(addr) + "    ld.global.f32 " + fr(dst) + ", [%rd64];\n"
@@ -850,11 +848,12 @@ fn kaxi_lower_load_global(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode:
              + "    ld.global.f32 " + fr(dst) + ", [%rd64];\n"
     }
     // mode == 4: dual-buffer f32 load (value + variance).
+    // Phase I: scratch %rd256/%rd257, base %rd258/%rd259.
     return ptx_addr_compute_f32e(addr)
-         + "    add.u64 %rd65, %rd96, %rd64;\n"
-         + "    ld.global.f32 " + fr(dst) + ", [%rd65];\n"
-         + "    add.u64 %rd65, %rd97, %rd64;\n"
-         + "    ld.global.f32 " + fv(dst) + ", [%rd65];\n"
+         + "    add.u64 %rd257, %rd258, %rd256;\n"
+         + "    ld.global.f32 " + fr(dst) + ", [%rd257];\n"
+         + "    add.u64 %rd257, %rd259, %rd256;\n"
+         + "    ld.global.f32 " + fv(dst) + ", [%rd257];\n"
 }
 
 fn kaxi_lower_load_imm(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
@@ -930,11 +929,12 @@ fn kaxi_lower_store_global(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode
     }
     if mode == 1 {
         // epistemic: dual-buffer u64 store.
-        return "    mul.lo.u64 %rd64, " + rd(addr) + ", 8;\n"
-             + "    add.u64 %rd65, %rd96, %rd64;\n"
-             + "    st.global.u64 [%rd65], " + rd(src) + ";\n"
-             + "    add.u64 %rd65, %rd97, %rd64;\n"
-             + "    st.global.u64 [%rd65], " + ev(src) + ";\n"
+        // Phase I: scratch %rd256/%rd257, base %rd258/%rd259.
+        return "    mul.lo.u64 %rd256, " + rd(addr) + ", 8;\n"
+             + "    add.u64 %rd257, %rd258, %rd256;\n"
+             + "    st.global.u64 [%rd257], " + rd(src) + ";\n"
+             + "    add.u64 %rd257, %rd259, %rd256;\n"
+             + "    st.global.u64 [%rd257], " + ev(src) + ";\n"
     }
     if mode == 2 {
         return ptx_addr_compute_f32(addr) + "    st.global.f32 [%rd64], " + fr(src) + ";\n"
@@ -947,11 +947,12 @@ fn kaxi_lower_store_global(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode
              + "    st.global.f32 [%rd64], " + fr(src) + ";\n"
     }
     // mode == 4: dual-buffer f32 store (value + variance).
+    // Phase I: scratch %rd256/%rd257, base %rd258/%rd259.
     return ptx_addr_compute_f32e(addr)
-         + "    add.u64 %rd65, %rd96, %rd64;\n"
-         + "    st.global.f32 [%rd65], " + fr(src) + ";\n"
-         + "    add.u64 %rd65, %rd97, %rd64;\n"
-         + "    st.global.f32 [%rd65], " + fv(src) + ";\n"
+         + "    add.u64 %rd257, %rd258, %rd256;\n"
+         + "    st.global.f32 [%rd257], " + fr(src) + ";\n"
+         + "    add.u64 %rd257, %rd259, %rd256;\n"
+         + "    st.global.f32 [%rd257], " + fv(src) + ";\n"
 }
 
 fn kaxi_lower_store(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
@@ -1057,7 +1058,9 @@ pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with 
         out = out + "    .reg .b32 %r<8>;\n"
         out = out + "    .reg .pred %p<8>;\n\n"
     } else if mode == 1 {
-        out = out + "    .reg .b64 %rd<128>;\n"
+        // Phase I: bank up to 260 (value 0..127, variance 128..255,
+        // scratch 256/257, base 258/259).
+        out = out + "    .reg .b64 %rd<260>;\n"
         out = out + "    .reg .b32 %r<8>;\n"
         out = out + "    .reg .pred %p<8>;\n\n"
     } else if mode == 2 {
@@ -1071,10 +1074,10 @@ pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with 
         out = out + "    .reg .f32 %f<70>;\n"
         out = out + "    .reg .pred %p<8>;\n\n"
     } else {
-        // mode == 4
-        out = out + "    .reg .b64 %rd<128>;\n"
+        // mode == 4 (f32_epistemic) — Phase I bank-up
+        out = out + "    .reg .b64 %rd<260>;\n"
         out = out + "    .reg .b32 %r<8>;\n"
-        out = out + "    .reg .f32 %f<128>;\n"
+        out = out + "    .reg .f32 %f<260>;\n"
         out = out + "    .reg .pred %p<8>;\n\n"
     }
 
@@ -1085,9 +1088,9 @@ pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with 
         out = out + "    ld.param.u64 %rd96, [param_a];\n"
         out = out + "    ld.param.u64 %rd97, [param_b];\n"
     } else {
-        // mode == 1 || mode == 4
-        out = out + "    ld.param.u64 %rd96, [param_mem];\n"
-        out = out + "    ld.param.u64 %rd97, [param_var];\n"
+        // mode == 1 || mode == 4 — Phase I: base ptrs at %rd258/%rd259.
+        out = out + "    ld.param.u64 %rd258, [param_mem];\n"
+        out = out + "    ld.param.u64 %rd259, [param_var];\n"
     }
 
     // Loop — identical across all 5 transpilers; dispatches to the

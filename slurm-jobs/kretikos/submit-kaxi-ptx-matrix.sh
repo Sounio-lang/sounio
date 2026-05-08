@@ -152,6 +152,13 @@ m[1]=1; m[10]=1; m[16+5]=1; m[16+14]=1
 m[48+0]=1; m[48+16+0]=1; m[48+32+0]=1
 print(','.join(f'{int(x) if x==int(x) else x:g}' for x in m))")
 CASES+=("sedenion_mul|f32|1|2|96|${SEDZD_INIT}||${SEDZD_EXP}|")
+
+# Phase I: re-segmented variance register file (value 0..127, variance
+# 128..255, scratch %rd256/%rd257, base %rd258/%rd259) unblocks the
+# big-kernel variance modes that Phase H surfaced as broken.
+SEDZD_VAR_ZERO=$(python3 -c "print(','.join(['0']*96))")
+CASES+=("sedenion_mul|epistemic|1|2|96|${SEDZD_INIT}|${SEDZD_VAR_ZERO}|${SEDZD_EXP}|${SEDZD_VAR_ZERO}")
+CASES+=("sedenion_mul|f32e|1|2|96|${SEDZD_INIT}|${SEDZD_VAR_ZERO}|${SEDZD_EXP}|${SEDZD_VAR_ZERO}")
 PATTERN_FOR[sedenion_mul]=sedenion_mul
 
 # Programmatically generate large multi-block cases (256, 1024 elements).
