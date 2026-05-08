@@ -17,7 +17,7 @@
 #   source_epistemic_dual_output_f32     basic         mem=8·init²
 #   source_epistemic_dual_output_f32     epistemic     mem=8·init², var=64·init² (X² delta-method)
 #
-# Reports "kaxi_matrix passed=N/12 failed=..." via Slurm Comment.
+# Reports "kaxi_matrix passed=N/TOTAL failed=..." via Slurm Comment.
 
 set -euo pipefail
 
@@ -55,6 +55,9 @@ mkdir -p "${STAGE_DIR}"
 #   f64 → uses typed K-AXI metadata with the basic lowering, --type f64 runner
 CASES=(
   "source_vec_add_f64|f64|1|8|8|1.25,2.5,3.75,4.5,5.25,6.5,7.75,8.125||2.5,5,7.5,9,10.5,13,15.5,16.25|"
+  "source_vec_sub_f64|f64|1|8|8|1.25,2.5,3.75,4.5,5.25,6.5,7.75,8.125||0,0,0,0,0,0,0,0|"
+  "source_vec_mul_f64|f64|1|8|8|1.25,2.5,3.75,4.5,5.25,6.5,7.75,8.125||1.5625,6.25,14.0625,20.25,27.5625,42.25,60.0625,66.015625|"
+  "source_vec_div_f64|f64|1|8|8|1.25,2.5,3.75,4.5,5.25,6.5,7.75,8.125||1,1,1,1,1,1,1,1|"
   "vec_add|basic|1|8|8|1,2,3,4,5,6,7,8||2,4,6,8,10,12,14,16|"
   "vec_add|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|2,4,6,8,10,12,14,16|2,2,2,2,2,2,2,2"
   "vec_sub|basic|1|8|8|1,2,3,4,5,6,7,8||0,0,0,0,0,0,0,0|"
@@ -96,6 +99,9 @@ CASES=(
 declare -A PATTERN_FOR
 PATTERN_FOR[vec_add]=source_vec_add_f32
 PATTERN_FOR[source_vec_add_f64]=source_vec_add_f64
+PATTERN_FOR[source_vec_sub_f64]=source_vec_sub_f64
+PATTERN_FOR[source_vec_mul_f64]=source_vec_mul_f64
+PATTERN_FOR[source_vec_div_f64]=source_vec_div_f64
 PATTERN_FOR[vec_sub]=source_vec_sub_f32
 PATTERN_FOR[vec_mul]=source_vec_mul_f32
 PATTERN_FOR[vec_div]=source_vec_div_f32
