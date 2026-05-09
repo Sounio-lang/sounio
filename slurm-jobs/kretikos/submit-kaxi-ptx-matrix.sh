@@ -226,6 +226,22 @@ PATTERN_FOR[sedenion_mul]=sedenion_mul
 CASES+=("sedenion_associator|f32|1|2|192|0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0||0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0|")
 PATTERN_FOR[sedenion_associator]=sedenion_associator
 
+# sedenion_sqr: per-thread z² in 𝕊 with X² GUM variance rule.
+# Layout: 32 words/thread (16 z input + 16 z² output).
+# T0: z=e₀ (identity) → z²=e₀. T1: z=e₁ → z²=−e₀.
+# These two threads exercise component positions 0 and 1 of the input array,
+# covering the diagonal variance rule (z[i]·z[i] same-reg X² path).
+SEDSQR_INIT="1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
+SEDSQR_EXP="1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
+CASES+=("sedenion_sqr|f32|1|2|64|${SEDSQR_INIT}||${SEDSQR_EXP}|")
+PATTERN_FOR[sedenion_sqr]=sedenion_sqr
+
+# sedenion_sqr_mb: same fixture with blocks=2, threads_per_block=1 so each
+# thread is on a different block — exercises gid = bid*ntid+tid addressing.
+# bit-exact vs sedenion_sqr (same input/output arrays, different block layout).
+CASES+=("sedenion_sqr_mb|f32|2|1|64|${SEDSQR_INIT}||${SEDSQR_EXP}|")
+PATTERN_FOR[sedenion_sqr_mb]=sedenion_sqr_mb
+
 # Connectome N=8 demo: 56 triples (i<j<k from 0..7), each thread runs
 # the existing octonion_associator kernel on a basis-vector triple. Tests the
 # Fano partition: 21 e_0-triples (identity) + 7 Fano basis triples + 28 non-Fano
