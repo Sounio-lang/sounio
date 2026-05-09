@@ -90,3 +90,21 @@ Each entry is a markdown table row. New entries go at the **top** (most-recent f
 | 2026-05-05 | Codex | math-review | xai (Grok 4.1) | `test_bbb_mass_balance.sio` | NO_MATHEMATICAL_CONTENT_TO_REVIEW: reviewer classified the new BBB coupled brain-compartment mass-balance smoke as physical sanity-test scaffolding without a non-trivial derivation to review. Local `check` and `run` passed with `BBB_MASS_BALANCE_OK`. Raw transcript: `/tmp/llm-offload-WM8hsu`. | (pending) |
 | 2026-05-05 | Codex | math-review | xai (Grok 4.1) | `test_mass_balance.sio` | CONFIRMED: reviewer accepted the systemic 14-compartment PBPK mass-balance smoke: initial dose arithmetic, explicit 14-compartment total-mass calculation, non-negativity, dose-bound, 1% monotonic jitter allowance, late elimination, and nonzero residual checks. Local `check` and `run` passed with `MASS_BALANCE_OK`. Raw transcript: `/tmp/llm-offload-F0mVQR`. | (pending) |
 | 2026-05-05 | Codex | math-review | xai (Grok 4.1) | `test_directional_perturbation.sio` | CONFIRMED: reviewer accepted the final qualitative PBPK parameter-response smoke after removing the non-robust `q_brain` claim and weakening hepatic clearance to any AUC decrease. Approved claims: hepatic clearance decreases AUC, `kp_brain` increases brain final concentration, `kp_liver` increases liver final concentration, and renal clearance decreases AUC. Local `check` and `run` passed with `DIRECTIONAL_PERTURBATION_OK`. Raw transcript: `/tmp/llm-offload-fYKyue`. | (pending) |
+
+---
+## 2026-05-09 — sedenion FD Hessian stencil (Phase B)
+
+**Task**: math-review | **Provider**: Grok 4.1 (xai)
+**Trigger file**: /tmp/hessian_math_review.md
+
+**Result summary**:
+- [OK] 4-point central FD stencil H[i][j]=(f₊₊−f₊₋−f₋₊+f₋₋)/(4h²) — correct
+- [OK] Diagonal i=j collapses to (f(z+2h·eᵢ)−2f(z)+f(z−2h·eᵢ))/(4h²) — correct
+- [OK] Analytic H[1][1]=16, H[0][0]=8 for z=e₁+e₂ — correct
+- [OK] f32 H[1][1]≈8 (½×) due to (z₁+2h)² dropping 4h² — confirmed correct reasoning
+- [OK] f32 H[0][0]≈16 (2×) if z²[0] loses 4h² correction — correct assuming empirical loss
+- [WRONG] Documentation typo in review prompt: wrote (2h)e₀+(1+2h)e₁+e₂ for H[1][1] perturb; should be (0)e₀+(1+2h)e₁+e₂. Script is correct; review doc had transcription error.
+- [OVERREACH] The 4e-6 correction loss in f32 (-2+4e-6 → -2.0) is NOT expected from ULP analysis (4e-6 ≈ 17 ULPs at magnitude 2). Grok attributes it to kernel computation order: negative terms accumulated first (-z₁²-z₂²=-2), then z₀²=4e-6 added—possibly via FMA contraction or computation order that loses the small addend. Script comment updated to reflect this.
+
+**Action**: Updated validation comments in `scripts/dev/run_epistemic_sedenion_hessian_kaxi.sh`.
+No commit blocker — findings are documentation/precision artifacts, not formula errors.
