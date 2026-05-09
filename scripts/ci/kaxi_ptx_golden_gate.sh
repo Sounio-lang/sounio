@@ -32,6 +32,7 @@ PATTERNS=(
     atomic_sum_f32
     pbpk_2comp_mb pbpk_2comp_4step_mb
     x4_tree x4_chain
+    pbpk_rapamycin_1comp_epistemic
     pbpk_2comp_epistemic pbpk_2comp_epistemic_4step pbpk_traj_4step
     conf_gate
     octonion_assoc octonion_mul sedenion_mul

@@ -27,15 +27,16 @@
 // reproduces byte-identical buffers across machines.
 //
 // IMPORTANT — what the in_budget/nan_count summary fields mean:
-//   These are CPU-ANALYTIC reference counts: σ²(√v) = σ²₀/(4·v) < threshold.
-//   The current Phase V/W PTX kernel does NOT actually compute sqrt at the
-//   GPU level (`// unhandled` for the gvr opcode in the lowered PTX), so the
-//   GPU's mem buffer comes back as deterministic-zero. The in_budget split
-//   describes what the kernel WOULD gate if it lowered sqrt+gvr correctly.
-//   When that landing happens (a future emitter phase), the GPU mem_digest
-//   will reflect this split byte-for-byte. Until then, treat in_budget as
-//   "the analytic gate decision the architecture is wired to compute,"
-//   not "patients the GPU actually classified in this run."
+//   These are CPU-ANALYTIC reference counts: σ²(√v) = σ²₀/(4·v) < threshold
+//   (for the default sqrt-gate kernel) or Cp = D*scale ∈ [lo,hi] (for
+//   pbpk_rapamycin_1comp_epistemic and future PBPK kernels).
+//
+//   Phase X (type=f32): the f32e vec_sqrt_gate_var_mb kernel fully computes
+//   the epistemic gate on the GPU. The GPU outputs sqrt(v) for in-budget
+//   patients and NaN sentinel (0x7FC00000) for those gated out. The runner
+//   counts NaN sentinels to derive nan_count/in_budget. The truth-claim in
+//   kretikos_kaxi_phase_w2_gate.sh compares these GPU counts against the
+//   CPU-analytic reference, and they match exactly when both use --type f32.
 
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -121,6 +122,14 @@ int main(int argc, char **argv) {
     // Used for the full-cohort analytic reference where only in_budget /
     // nan_count are needed (avoids large file writes).
     int counts_only = 0;
+    // Phase X: gate_type selects the CPU analytic used for the truth claim.
+    //   0 = sqrt-gate (default): in_budget if σ²(√v) = σ²₀/(4v) < threshold
+    //   1 = rapamycin_1comp: in_budget if v * pk_scale ∈ [pk_lo, pk_hi]
+    // Corresponds to pbpk_rapamycin_1comp_epistemic kernel (scale=3.125, lo=5, hi=15).
+    int gate_type = 0;
+    double pk_scale = 3.125;
+    double pk_lo = 5.0;
+    double pk_hi = 15.0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
@@ -134,6 +143,15 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sigma0-mean") && i + 1 < argc) { sigma0_mean = strtod(argv[++i], NULL); }
         else if (!strcmp(argv[i], "--sigma0-sigma") && i + 1 < argc) { sigma0_sigma = strtod(argv[++i], NULL); }
         else if (!strcmp(argv[i], "--threshold") && i + 1 < argc) { threshold = strtod(argv[++i], NULL); }
+        else if (!strcmp(argv[i], "--gate") && i + 1 < argc) {
+            i++;
+            if (!strcmp(argv[i], "sqrt")) gate_type = 0;
+            else if (!strcmp(argv[i], "rapamycin_1comp")) gate_type = 1;
+            else { fprintf(stderr, "error: --gate must be sqrt or rapamycin_1comp\n"); return 2; }
+        }
+        else if (!strcmp(argv[i], "--pk-scale") && i + 1 < argc) { pk_scale = strtod(argv[++i], NULL); }
+        else if (!strcmp(argv[i], "--pk-lo") && i + 1 < argc) { pk_lo = strtod(argv[++i], NULL); }
+        else if (!strcmp(argv[i], "--pk-hi") && i + 1 < argc) { pk_hi = strtod(argv[++i], NULL); }
         else if (!strcmp(argv[i], "--type") && i + 1 < argc) {
             i++;
             if (!strcmp(argv[i], "f32")) type_f32 = 1;
@@ -186,11 +204,21 @@ int main(int argc, char **argv) {
         if (s < 1e-9) s = 1e-9;
         if (!counts_only) { v_buf[i] = v; s_buf[i] = s; }
 
-        // CPU reference: σ²(√v) = σ²₀ / (4·v); in-budget iff < threshold.
-        // For --type f32, run the gate decision in float to match GPU rounding
-        // — borderline patients can flip ±1 between f64 and f32.
+        // CPU reference gate — two modes:
+        //   sqrt (gate_type=0): σ²(√v) = σ²₀/(4v) < threshold
+        //   rapamycin_1comp (gate_type=1): v * pk_scale ∈ [pk_lo, pk_hi]
+        // For --type f32, run in float precision to match GPU rounding.
         int gate_pass;
-        if (type_f32) {
+        if (gate_type == 1) {
+            if (type_f32) {
+                float vf = (float)v, scf = (float)pk_scale;
+                float cp = vf * scf;
+                gate_pass = (cp >= (float)pk_lo && cp <= (float)pk_hi);
+            } else {
+                double cp = v * pk_scale;
+                gate_pass = (cp >= pk_lo && cp <= pk_hi);
+            }
+        } else if (type_f32) {
             float vf = (float)v, sf = (float)s, thf = (float)threshold;
             float sigma_sq_sqrt = sf / (4.0f * vf);
             gate_pass = (sigma_sq_sqrt < thf);

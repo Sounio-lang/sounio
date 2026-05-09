@@ -191,6 +191,10 @@ int main(int argc, char **argv) {
     long cohort_size = 0;     // if > 0 override mem_words and enter streamed path
     int n_streams = 0;        // if > 0 use this many CUDA streams (else default-stream)
     int n_chunks = 0;         // if > 0 number of chunks; else cohort/threads (1 launch/chunk per Phase V shape)
+    // Phase X: after D2H, count f32 values in mem[0..cohort_size-1] that fall
+    // in [classify_low, classify_high]. Reports in_window + out_of_window in PHX line.
+    float classify_low = 0.0f, classify_high = 0.0f;
+    int classify_window = 0;
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--kernel") == 0 && i + 1 < argc) { kname = argv[++i]; }
@@ -209,6 +213,13 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--cohort-size") == 0 && i + 1 < argc) { cohort_size = strtol(argv[++i], NULL, 10); }
         else if (strcmp(argv[i], "--streams") == 0 && i + 1 < argc) { n_streams = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--chunks") == 0 && i + 1 < argc) { n_chunks = atoi(argv[++i]); }
+        else if (strcmp(argv[i], "--classify-window") == 0 && i + 1 < argc) {
+            i++;
+            if (sscanf(argv[i], "%f,%f", &classify_low, &classify_high) != 2) {
+                fprintf(stderr, "--classify-window requires LOW,HIGH (e.g. 0.4,2.5)\n"); return 2;
+            }
+            classify_window = 1;
+        }
         else if (strcmp(argv[i], "--epistemic") == 0) { epistemic = 1; }
         else if (strcmp(argv[i], "--type") == 0 && i + 1 < argc) {
             i++;
@@ -634,12 +645,24 @@ int main(int argc, char **argv) {
             nan_count = nc;
             in_budget = (long)cohort_size - nc;
         }
+        // Phase X: optional therapeutic-window classification on f32 output.
+        long in_window = -1, out_of_window = -1;
+        if (classify_window && value_type == 1) {
+            const float *m = (const float *)h_mem;
+            long iw = 0;
+            for (long i = 0; i < (long)cohort_size; i++) {
+                if (m[i] >= classify_low && m[i] <= classify_high) iw++;
+            }
+            in_window = iw;
+            out_of_window = (long)cohort_size - iw;
+        }
         printf("PHW cohort=%ld streams=%d chunks_run=%ld wall_us=%ld "
                "mem_digest=%016llx var_digest=%016llx "
-               "nan_count=%ld in_budget=%ld\n",
+               "nan_count=%ld in_budget=%ld "
+               "in_window=%ld out_of_window=%ld\n",
                (long)cohort_size, n_streams, stream_chunks_run, stream_wall_us,
                (unsigned long long)mem_digest, (unsigned long long)var_digest,
-               nan_count, in_budget);
+               nan_count, in_budget, in_window, out_of_window);
     }
 
     if (phase_w1_async) {
