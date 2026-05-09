@@ -922,8 +922,18 @@ fn kaxi_lower_sqrt(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -
         return ""
     }
     if mode == 1 {
-        // Epistemic u64-only — sqrt would need u64↔f64 round-trip. Skip.
-        return ""
+        // Phase W.C: epistemic u64 sqrt via f64 round-trip. PTX has no native
+        // u64 sqrt; cvt to f64, sqrt.rn.f64, cvt back. Variance σ²(√x) =
+        // σ²(x) / (4·x) computed in f64 then rounded back to u64.
+        // 0d4010000000000000 = IEEE 754 f64 hex of 4.0.
+        return "    cvt.rn.f64.u64 %fd0, " + rd(src) + ";\n"
+             + "    sqrt.rn.f64 %fd0, %fd0;\n"
+             + "    cvt.rni.u64.f64 " + rd(dst) + ", %fd0;\n"
+             + "    cvt.rn.f64.u64 %fd1, " + ev(src) + ";\n"
+             + "    cvt.rn.f64.u64 %fd2, " + rd(src) + ";\n"
+             + "    mul.rn.f64 %fd2, %fd2, 0d4010000000000000;\n"
+             + "    div.rn.f64 %fd1, %fd1, %fd2;\n"
+             + "    cvt.rni.u64.f64 " + ev(dst) + ", %fd1;\n"
     }
     if mode == 2 || mode == 3 {
         return "    sqrt.approx.f32 " + fr(dst) + ", " + fr(src) + ";\n"
@@ -992,13 +1002,18 @@ fn kaxi_lower_cos(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) ->
 
 // Phase U: getvar — copy variance lane of src into value lane of dst.
 // GUM: σ²(dst) = 0 (the moved variance is now a measured fact, not propagated).
-// Mode 4 only — variance lanes don't exist in modes 0/2/3, and mode 1 is
-// u64-only (no clean f32 variance lane). Enables compute-then-gate pipelines
-// where the kernel computes σ² internally then compares it to a threshold.
+// Modes 1 and 4 carry a variance lane; modes 0/2/3 don't and return "".
+// Phase W.C: mode-1 u64 path added; mode-4 f32 path unchanged. Enables
+// compute-then-gate pipelines where the kernel computes σ² internally then
+// compares it to a threshold.
 fn kaxi_lower_getvar(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
     let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
     let src = ptx_parse_reg(asm, line_start, line_len, "r", 1)
     if dst < 0 || src < 0 { return "" }
+    if mode == 1 {
+        return "    mov.u64 " + rd(dst) + ", " + ev(src) + ";\n"
+             + "    mov.u64 " + ev(dst) + ", 0;\n"
+    }
     if mode != 4 { return "" }
     return "    mov.f32 " + fr(dst) + ", " + fv(src) + ";\n"
          + "    mov.f32 " + fv(dst) + ", 0f00000000;\n"
@@ -1315,7 +1330,9 @@ pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with 
     } else if mode == 1 {
         // Phase I: bank up to 260 (value 0..127, variance 128..255,
         // scratch 256/257, base 258/259).
+        // Phase W.C: %fd<8> scratch for u64↔f64 sqrt round-trip.
         out = out + "    .reg .b64 %rd<260>;\n"
+        out = out + "    .reg .f64 %fd<8>;\n"
         out = out + "    .reg .b32 %r<8>;\n"
         out = out + "    .reg .pred %p<8>;\n\n"
     } else if mode == 2 {
