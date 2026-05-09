@@ -581,10 +581,28 @@ int main(int argc, char **argv) {
         // Digest only the cohort range; ignore thread-alignment padding.
         uint64_t mem_digest = fnv1a64(h_mem, cohort_bytes);
         uint64_t var_digest = epistemic ? fnv1a64(h_var, cohort_bytes) : 0;
+        // Phase X.1: count NaN sentinels (f32 quiet-NaN = 0x7FC00000) in the
+        // GPU's output buffer for the f32 dialect. This is the runtime count
+        // of patients the GPU's compute-then-gate kernel marked as outside
+        // budget. The complement (cohort - nan_count) is the in-budget count.
+        // For other dialects the counts are reported as -1 (n/a).
+        long nan_count = -1, in_budget = -1;
+        if (value_type == 1) {
+            const uint32_t SENTINEL = 0x7FC00000u;
+            const uint32_t *m = (const uint32_t *)h_mem;
+            long nc = 0;
+            for (long i = 0; i < (long)cohort_size; i++) {
+                if (m[i] == SENTINEL) nc++;
+            }
+            nan_count = nc;
+            in_budget = (long)cohort_size - nc;
+        }
         printf("PHW cohort=%ld streams=%d chunks_run=%ld wall_us=%ld "
-               "mem_digest=%016llx var_digest=%016llx\n",
+               "mem_digest=%016llx var_digest=%016llx "
+               "nan_count=%ld in_budget=%ld\n",
                (long)cohort_size, n_streams, stream_chunks_run, stream_wall_us,
-               (unsigned long long)mem_digest, (unsigned long long)var_digest);
+               (unsigned long long)mem_digest, (unsigned long long)var_digest,
+               nan_count, in_budget);
     }
 
     if (phase_w1_async) {

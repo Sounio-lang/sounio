@@ -101,6 +101,10 @@ int main(int argc, char **argv) {
     double sigma0_mean = 3.0;
     double sigma0_sigma = 1.0;
     double threshold = 1.0;
+    // Phase X.1: --type f32 emits 4-byte float per slot to match the f32e
+    // PTX kernel's element stride. Default is f64 (8-byte) for backward
+    // compatibility with Phase W gate's epistemic-u64 path.
+    int type_f32 = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
@@ -112,13 +116,20 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sigma0-mean") && i + 1 < argc) { sigma0_mean = strtod(argv[++i], NULL); }
         else if (!strcmp(argv[i], "--sigma0-sigma") && i + 1 < argc) { sigma0_sigma = strtod(argv[++i], NULL); }
         else if (!strcmp(argv[i], "--threshold") && i + 1 < argc) { threshold = strtod(argv[++i], NULL); }
+        else if (!strcmp(argv[i], "--type") && i + 1 < argc) {
+            i++;
+            if (!strcmp(argv[i], "f32")) type_f32 = 1;
+            else if (!strcmp(argv[i], "f64")) type_f32 = 0;
+            else { fprintf(stderr, "error: --type must be f32 or f64\n"); return 2; }
+        }
         else { fprintf(stderr, "error: unknown arg: %s\n", argv[i]); usage(argv[0]); return 2; }
     }
     if (!out_dir || cohort <= 0) { usage(argv[0]); return 2; }
 
-    size_t bytes = (size_t)cohort * sizeof(uint64_t);
-    double *v_buf = (double *)malloc(bytes);
-    double *s_buf = (double *)malloc(bytes);
+    size_t elem = type_f32 ? sizeof(float) : sizeof(double);
+    size_t bytes = (size_t)cohort * elem;
+    double *v_buf = (double *)malloc((size_t)cohort * sizeof(double));
+    double *s_buf = (double *)malloc((size_t)cohort * sizeof(double));
     if (!v_buf || !s_buf) { fprintf(stderr, "error: malloc(%zu) failed\n", bytes); return 1; }
 
     // FNV-1a 64-bit accumulators for output digests
@@ -140,9 +151,18 @@ int main(int argc, char **argv) {
         v_buf[i] = v;
         s_buf[i] = s;
 
-        // CPU reference: σ²(√v) = σ²₀ / (4·v); in-budget iff < threshold
-        double sigma_sq_sqrt = s / (4.0 * v);
-        int gate_pass = (sigma_sq_sqrt < threshold);
+        // CPU reference: σ²(√v) = σ²₀ / (4·v); in-budget iff < threshold.
+        // For --type f32, run the gate decision in float to match GPU rounding
+        // — borderline patients can flip ±1 between f64 and f32.
+        int gate_pass;
+        if (type_f32) {
+            float vf = (float)v, sf = (float)s, thf = (float)threshold;
+            float sigma_sq_sqrt = sf / (4.0f * vf);
+            gate_pass = (sigma_sq_sqrt < thf);
+        } else {
+            double sigma_sq_sqrt = s / (4.0 * v);
+            gate_pass = (sigma_sq_sqrt < threshold);
+        }
         if (gate_pass) in_budget++; else nan_count++;
 
         // Roll digests over the input buffers (verification compares input
@@ -154,13 +174,24 @@ int main(int argc, char **argv) {
         var_digest ^= s_bits; var_digest *= 0x100000001b3ULL;
     }
 
+    // Convert to f32 if requested (GPU dialect = f32e PTX).
+    void *v_out = v_buf, *s_out = s_buf;
+    float *vf_buf = NULL, *sf_buf = NULL;
+    if (type_f32) {
+        vf_buf = (float *)malloc((size_t)cohort * sizeof(float));
+        sf_buf = (float *)malloc((size_t)cohort * sizeof(float));
+        if (!vf_buf || !sf_buf) { fprintf(stderr, "error: f32 buffer malloc\n"); return 1; }
+        for (long i = 0; i < cohort; i++) { vf_buf[i] = (float)v_buf[i]; sf_buf[i] = (float)s_buf[i]; }
+        v_out = vf_buf; s_out = sf_buf;
+    }
+
     char path[2048];
     snprintf(path, sizeof(path), "%s/init.mem.bin", out_dir);
-    if (write_all(path, v_buf, bytes) != 0) {
+    if (write_all(path, v_out, bytes) != 0) {
         fprintf(stderr, "error: write %s: %s\n", path, strerror(errno)); return 1;
     }
     snprintf(path, sizeof(path), "%s/init.var.bin", out_dir);
-    if (write_all(path, s_buf, bytes) != 0) {
+    if (write_all(path, s_out, bytes) != 0) {
         fprintf(stderr, "error: write %s: %s\n", path, strerror(errno)); return 1;
     }
     snprintf(path, sizeof(path), "%s/expected.summary", out_dir);
@@ -169,6 +200,7 @@ int main(int argc, char **argv) {
     fprintf(fs,
         "cohort=%ld\n"
         "seed=%llu\n"
+        "type=%s\n"
         "in_budget=%ld\n"
         "nan_count=%ld\n"
         "input_mem_digest=%016llx\n"
@@ -180,6 +212,7 @@ int main(int argc, char **argv) {
         "sigma0_sigma=%.17g\n",
         cohort,
         (unsigned long long)seed,
+        type_f32 ? "f32" : "f64",
         in_budget, nan_count,
         (unsigned long long)mem_digest,
         (unsigned long long)var_digest,
@@ -187,11 +220,14 @@ int main(int argc, char **argv) {
     fclose(fs);
 
     fprintf(stdout,
-        "kaxi_pbpk_sampler: cohort=%ld seed=%llu in_budget=%ld nan_count=%ld "
+        "kaxi_pbpk_sampler: cohort=%ld seed=%llu type=%s in_budget=%ld nan_count=%ld "
         "mem_digest=%016llx var_digest=%016llx\n",
-        cohort, (unsigned long long)seed, in_budget, nan_count,
+        cohort, (unsigned long long)seed, type_f32 ? "f32" : "f64",
+        in_budget, nan_count,
         (unsigned long long)mem_digest, (unsigned long long)var_digest);
 
     free(v_buf); free(s_buf);
+    if (vf_buf) free(vf_buf);
+    if (sf_buf) free(sf_buf);
     return 0;
 }

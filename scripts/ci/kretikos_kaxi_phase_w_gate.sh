@@ -42,7 +42,13 @@ fi
 PHW_COHORT="${PHW_COHORT:-1000000}"
 PHW_THREADS="${PHW_THREADS:-32}"
 PHW_SEED="${PHW_SEED:-42}"
-PHW_PTX="${PHW_PTX:-${ROOT_DIR}/tests/golden/kaxi_ptx/epistemic/vec_sqrt_gate_var_mb.ptx}"
+# Phase X.1: default to the f32e PTX variant (real f32 sqrt + GUM σ²
+# propagation in lowered PTX) so the gate verifies per-patient PK gate
+# decisions against the sampler's analytic prediction. Override to the
+# epistemic-u64 variant via env if the integer-dialect path is wanted.
+PHW_TYPE="${PHW_TYPE:-f32}"
+PHW_DIALECT="${PHW_DIALECT:-f32e}"   # f32e | epistemic | f32 | f32_2c | default
+PHW_PTX="${PHW_PTX:-${ROOT_DIR}/tests/golden/kaxi_ptx/${PHW_DIALECT}/vec_sqrt_gate_var_mb.ptx}"
 PHW_STAGE_DIR="${PHW_STAGE_DIR:-$(mktemp -d /tmp/phase_w_gate.XXXXXX)}"
 # Wall-clock ceiling for the worst-observed config (streams×chunks=1024). On
 # RTX A5000 the 1M-patient run lands at ~28 ms; ceiling is set generously to
@@ -71,8 +77,11 @@ echo "[1/5] building sampler + runner"
 cc -O2 -Wall "${ROOT_DIR}/scripts/gpu/kaxi_pbpk_sampler.c" -lm -o "${PHW_STAGE_DIR}/sampler"
 cc -O2 -Wall "${ROOT_DIR}/scripts/gpu/kaxi_ptx_runner.c"   -ldl -o "${PHW_STAGE_DIR}/runner"
 
-echo "[2/5] sampling cohort=${PHW_COHORT} seed=${PHW_SEED}"
-"${PHW_STAGE_DIR}/sampler" --out-dir "${PHW_STAGE_DIR}" --cohort "${PHW_COHORT}" --seed "${PHW_SEED}" >/dev/null
+echo "[2/5] sampling cohort=${PHW_COHORT} seed=${PHW_SEED} type=${PHW_TYPE}"
+"${PHW_STAGE_DIR}/sampler" --out-dir "${PHW_STAGE_DIR}" --cohort "${PHW_COHORT}" --seed "${PHW_SEED}" --type "${PHW_TYPE}" >/dev/null
+expected_in_budget="$(grep '^in_budget=' "${PHW_STAGE_DIR}/expected.summary" | cut -d= -f2)"
+expected_nan="$(grep '^nan_count=' "${PHW_STAGE_DIR}/expected.summary" | cut -d= -f2)"
+echo "  analytic reference: in_budget=${expected_in_budget} nan_count=${expected_nan}"
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "kretikos_kaxi_phase_w_gate: SKIPPED (nvidia-smi missing — slurm path not auto-invoked here)"
@@ -83,7 +92,7 @@ if ! "${PHW_STAGE_DIR}/runner" >/dev/null 2>&1; then : ; fi  # warm dlopen
 run_one() {
   local streams="$1" chunks="$2"
   "${PHW_STAGE_DIR}/runner" "${PHW_PTX}" \
-    --kernel kaxi_kernel --epistemic --type f64 \
+    --kernel kaxi_kernel --epistemic --type "${PHW_TYPE}" \
     --cohort-size "${PHW_COHORT}" --threads "${PHW_THREADS}" \
     --streams "${streams}" --chunks "${chunks}" \
     --init-file "${PHW_STAGE_DIR}/init.mem.bin" \
@@ -94,9 +103,9 @@ run_one() {
 # init.{mem,var}.bin produced just-in-time by the sampler.
 run_at_cohort() {
   local cohort="$1" streams="$2" chunks="$3" out_dir="$4"
-  "${PHW_STAGE_DIR}/sampler" --out-dir "${out_dir}" --cohort "${cohort}" --seed "${PHW_SEED}" >/dev/null
+  "${PHW_STAGE_DIR}/sampler" --out-dir "${out_dir}" --cohort "${cohort}" --seed "${PHW_SEED}" --type "${PHW_TYPE}" >/dev/null
   "${PHW_STAGE_DIR}/runner" "${PHW_PTX}" \
-    --kernel kaxi_kernel --epistemic --type f64 \
+    --kernel kaxi_kernel --epistemic --type "${PHW_TYPE}" \
     --cohort-size "${cohort}" --threads "${PHW_THREADS}" \
     --streams "${streams}" --chunks "${chunks}" \
     --init-file "${out_dir}/init.mem.bin" \
@@ -109,17 +118,36 @@ extract_digest() {
 extract_wall() {
   echo "$1" | grep '^PHW' | tail -1 | sed -n 's/.*wall_us=\([0-9]*\).*/\1/p'
 }
+extract_nan() {
+  echo "$1" | grep '^PHW' | tail -1 | sed -n 's/.*nan_count=\([0-9-]*\).*/\1/p'
+}
+extract_in_budget() {
+  echo "$1" | grep '^PHW' | tail -1 | sed -n 's/.*in_budget=\([0-9-]*\).*/\1/p'
+}
 
 echo "[3/5] reference run (streams=1 chunks=64)"
 ref_out="$(run_one 1 64)"
 ref_dig="$(extract_digest "${ref_out}")"
 ref_wall="$(extract_wall "${ref_out}")"
+ref_nan="$(extract_nan "${ref_out}")"
+ref_in_budget="$(extract_in_budget "${ref_out}")"
 if [[ -z "${ref_dig}" ]]; then
   echo "kretikos_kaxi_phase_w_gate: FAIL — reference run produced no PHW line"
   echo "${ref_out}"
   exit 1
 fi
-echo "  reference: mem_digest=${ref_dig} wall_us=${ref_wall}"
+echo "  reference: mem_digest=${ref_dig} wall_us=${ref_wall} gpu_nan=${ref_nan} gpu_in_budget=${ref_in_budget}"
+
+# Phase X.1: per-patient truth-claim verification (only meaningful for f32 dialect)
+truth_fail=0
+if [[ "${PHW_TYPE}" == "f32" && "${ref_nan}" != "-1" ]]; then
+  if [[ "${ref_nan}" == "${expected_nan}" && "${ref_in_budget}" == "${expected_in_budget}" ]]; then
+    echo "  truth-claim: GPU == analytic (per-patient gate decisions match exactly)"
+  else
+    echo "  truth-claim FAIL: GPU nan=${ref_nan}/in=${ref_in_budget} vs analytic nan=${expected_nan}/in=${expected_in_budget}"
+    truth_fail=1
+  fi
+fi
 
 echo "[4/5] streamed equivalence matrix"
 fail=0
@@ -200,7 +228,7 @@ if [[ -n "${PHW_COHORT_SWEEP}" ]]; then
   done
 fi
 
-if [[ "${fail}" -ne 0 || "${wall_fail}" -ne 0 || "${sweep_fail}" -ne 0 ]]; then
+if [[ "${fail}" -ne 0 || "${wall_fail}" -ne 0 || "${sweep_fail}" -ne 0 || "${truth_fail}" -ne 0 ]]; then
   echo "kretikos_kaxi_phase_w_gate: FAIL"
   exit 1
 fi
