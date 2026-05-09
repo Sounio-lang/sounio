@@ -123,6 +123,20 @@ static int parse_csv_i64(const char *s, int64_t *out, int max) {
     return n;
 }
 
+static int parse_csv_i32(const char *s, int32_t *out, int max) {
+    int n = 0;
+    const char *p = s;
+    while (*p && n < max) {
+        char *end = NULL;
+        long v = strtol(p, &end, 10);
+        if (end == p) break;
+        out[n++] = (int32_t)v;
+        p = end;
+        while (*p == ',' || *p == ' ') p++;
+    }
+    return n;
+}
+
 static int parse_csv_f32(const char *s, float *out, int max) {
     int n = 0;
     const char *p = s;
@@ -163,7 +177,7 @@ int main(int argc, char **argv) {
     const char *path = argv[1];
     const char *kname = "kaxi_kernel";
     int epistemic = 0;
-    int value_type = 0;       // 0 = i64, 1 = f32, 2 = f64
+    int value_type = 0;       // 0 = i64, 1 = f32, 2 = f64, 3 = i32
     unsigned int threads = 1;
     unsigned int blocks = 1;
     int mem_words = 16;
@@ -177,6 +191,10 @@ int main(int argc, char **argv) {
     long cohort_size = 0;     // if > 0 override mem_words and enter streamed path
     int n_streams = 0;        // if > 0 use this many CUDA streams (else default-stream)
     int n_chunks = 0;         // if > 0 number of chunks; else cohort/threads (1 launch/chunk per Phase V shape)
+    // Phase X: after D2H, count f32 values in mem[0..cohort_size-1] that fall
+    // in [classify_low, classify_high]. Reports in_window + out_of_window in PHX line.
+    float classify_low = 0.0f, classify_high = 0.0f;
+    int classify_window = 0;
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--kernel") == 0 && i + 1 < argc) { kname = argv[++i]; }
@@ -195,27 +213,36 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--cohort-size") == 0 && i + 1 < argc) { cohort_size = strtol(argv[++i], NULL, 10); }
         else if (strcmp(argv[i], "--streams") == 0 && i + 1 < argc) { n_streams = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--chunks") == 0 && i + 1 < argc) { n_chunks = atoi(argv[++i]); }
+        else if (strcmp(argv[i], "--classify-window") == 0 && i + 1 < argc) {
+            i++;
+            if (sscanf(argv[i], "%f,%f", &classify_low, &classify_high) != 2) {
+                fprintf(stderr, "--classify-window requires LOW,HIGH (e.g. 0.4,2.5)\n"); return 2;
+            }
+            classify_window = 1;
+        }
         else if (strcmp(argv[i], "--epistemic") == 0) { epistemic = 1; }
         else if (strcmp(argv[i], "--type") == 0 && i + 1 < argc) {
             i++;
             if (strcmp(argv[i], "f32") == 0) value_type = 1;
             else if (strcmp(argv[i], "f64") == 0) value_type = 2;
             else if (strcmp(argv[i], "i64") == 0) value_type = 0;
+            else if (strcmp(argv[i], "i32") == 0) value_type = 3;
             else { fprintf(stderr, "unknown --type: %s\n", argv[i]); return 2; }
         }
         else { fprintf(stderr, "unknown arg: %s\n", argv[i]); return 2; }
     }
     // Phase W: --cohort-size overrides mem_words for streamed multi-launch.
     if (cohort_size > 0) {
-        if (cohort_size < 1 || cohort_size > (1L << 28)) {
-            fprintf(stderr, "cohort-size out of range (1..2^28)\n"); return 2;
+        if (cohort_size < 1 || cohort_size > 2000000000L) {
+            fprintf(stderr, "cohort-size out of range (1..2000000000)\n"); return 2;
         }
         mem_words = (int)cohort_size;
         if (print_count < 0) print_count = 16;   // sanity-print first 16 only
     }
     if (print_count < 0) print_count = mem_words;
     if (print_count > mem_words) print_count = mem_words;
-    if (mem_words < 1 || mem_words > (1 << 28)) {
+    // --mem-words small-scale cap only applies when not using --cohort-size.
+    if (cohort_size == 0 && (mem_words < 1 || mem_words > (1 << 28))) {
         fprintf(stderr, "mem-words out of range (1..2^28)\n"); return 2;
     }
     if (threads < 1 || threads > 1024) {
@@ -286,7 +313,7 @@ int main(int argc, char **argv) {
     rc = cuModuleGetFunction(&fn, mod, kname);
     if (rc != 0) { emit_status("fail", "cuModuleGetFunction_rejected", "cuModuleGetFunction", rc); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
 
-    size_t elem = value_type == 1 ? sizeof(float) : (value_type == 2 ? sizeof(double) : sizeof(int64_t));
+    size_t elem = value_type == 1 ? sizeof(float) : (value_type == 2 ? sizeof(double) : (value_type == 3 ? sizeof(int32_t) : sizeof(int64_t)));
     // Phase W: when streamed, pad allocation so chunk launches with grid =
     // ceil(chunk_words / threads) never overshoot device buffers. Digest is
     // taken only over the first cohort_size words; the trailing pad slots are
@@ -328,6 +355,11 @@ int main(int argc, char **argv) {
             parse_csv_f64(init_mem_csv, host, mem_words);
             cuMemcpyHtoD(d_mem, host, bytes);
             free(host);
+        } else if (value_type == 3) {
+            int32_t *host = (int32_t *)calloc(mem_words, sizeof(int32_t));
+            parse_csv_i32(init_mem_csv, host, mem_words);
+            cuMemcpyHtoD(d_mem, host, bytes);
+            free(host);
         } else {
             int64_t *host = (int64_t *)calloc(mem_words, sizeof(int64_t));
             parse_csv_i64(init_mem_csv, host, mem_words);
@@ -343,6 +375,11 @@ int main(int argc, char **argv) {
         } else if (value_type == 2) {
             double *host = (double *)calloc(mem_words, sizeof(double));
             for (int k = 0; k < mem_words; k++) host[k] = (double)(k + 1);
+            cuMemcpyHtoD(d_mem, host, bytes);
+            free(host);
+        } else if (value_type == 3) {
+            int32_t *host = (int32_t *)calloc(mem_words, sizeof(int32_t));
+            for (int k = 0; k < mem_words; k++) host[k] = k + 1;
             cuMemcpyHtoD(d_mem, host, bytes);
             free(host);
         } else {
@@ -376,6 +413,11 @@ int main(int argc, char **argv) {
             } else if (value_type == 2) {
                 double *host = (double *)calloc(mem_words, sizeof(double));
                 parse_csv_f64(init_var_csv, host, mem_words);
+                cuMemcpyHtoD(d_var, host, bytes);
+                free(host);
+            } else if (value_type == 3) {
+                int32_t *host = (int32_t *)calloc(mem_words, sizeof(int32_t));
+                parse_csv_i32(init_var_csv, host, mem_words);
                 cuMemcpyHtoD(d_var, host, bytes);
                 free(host);
             } else {
@@ -556,6 +598,9 @@ int main(int argc, char **argv) {
     } else if (value_type == 2) {
         double *m = (double *)h_mem;
         for (int i = 0; i < print_count; i++) printf(" %.12g", m[i]);
+    } else if (value_type == 3) {
+        int32_t *m = (int32_t *)h_mem;
+        for (int i = 0; i < print_count; i++) printf(" %d", m[i]);
     } else {
         int64_t *m = (int64_t *)h_mem;
         for (int i = 0; i < print_count; i++) printf(" %lld", (long long)m[i]);
@@ -569,6 +614,9 @@ int main(int argc, char **argv) {
         } else if (value_type == 2) {
             double *v = (double *)h_var;
             for (int i = 0; i < print_count; i++) printf(" %.12g", v[i]);
+        } else if (value_type == 3) {
+            int32_t *v = (int32_t *)h_var;
+            for (int i = 0; i < print_count; i++) printf(" %d", v[i]);
         } else {
             int64_t *v = (int64_t *)h_var;
             for (int i = 0; i < print_count; i++) printf(" %lld", (long long)v[i]);
@@ -581,10 +629,40 @@ int main(int argc, char **argv) {
         // Digest only the cohort range; ignore thread-alignment padding.
         uint64_t mem_digest = fnv1a64(h_mem, cohort_bytes);
         uint64_t var_digest = epistemic ? fnv1a64(h_var, cohort_bytes) : 0;
+        // Phase X.1: count NaN sentinels (f32 quiet-NaN = 0x7FC00000) in the
+        // GPU's output buffer for the f32 dialect. This is the runtime count
+        // of patients the GPU's compute-then-gate kernel marked as outside
+        // budget. The complement (cohort - nan_count) is the in-budget count.
+        // For other dialects the counts are reported as -1 (n/a).
+        long nan_count = -1, in_budget = -1;
+        if (value_type == 1) {
+            const uint32_t SENTINEL = 0x7FC00000u;
+            const uint32_t *m = (const uint32_t *)h_mem;
+            long nc = 0;
+            for (long i = 0; i < (long)cohort_size; i++) {
+                if (m[i] == SENTINEL) nc++;
+            }
+            nan_count = nc;
+            in_budget = (long)cohort_size - nc;
+        }
+        // Phase X: optional therapeutic-window classification on f32 output.
+        long in_window = -1, out_of_window = -1;
+        if (classify_window && value_type == 1) {
+            const float *m = (const float *)h_mem;
+            long iw = 0;
+            for (long i = 0; i < (long)cohort_size; i++) {
+                if (m[i] >= classify_low && m[i] <= classify_high) iw++;
+            }
+            in_window = iw;
+            out_of_window = (long)cohort_size - iw;
+        }
         printf("PHW cohort=%ld streams=%d chunks_run=%ld wall_us=%ld "
-               "mem_digest=%016llx var_digest=%016llx\n",
+               "mem_digest=%016llx var_digest=%016llx "
+               "nan_count=%ld in_budget=%ld "
+               "in_window=%ld out_of_window=%ld\n",
                (long)cohort_size, n_streams, stream_chunks_run, stream_wall_us,
-               (unsigned long long)mem_digest, (unsigned long long)var_digest);
+               (unsigned long long)mem_digest, (unsigned long long)var_digest,
+               nan_count, in_budget, in_window, out_of_window);
     }
 
     if (phase_w1_async) {

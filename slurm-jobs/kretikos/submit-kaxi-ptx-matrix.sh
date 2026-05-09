@@ -59,15 +59,19 @@ CASES=(
   "source_vec_mul_f64|f64|1|8|8|1.25,2.5,3.75,4.5,5.25,6.5,7.75,8.125||1.5625,6.25,14.0625,20.25,27.5625,42.25,60.0625,66.015625|"
   "source_vec_div_f64|f64|1|8|8|1.25,2.5,3.75,4.5,5.25,6.5,7.75,8.125||1,1,1,1,1,1,1,1|"
   "source_fma_f64|f64|1|8|8|1.25,2.5,3.75,4.5,5.25,6.5,7.75,8.125||2.8125,8.75,17.8125,24.75,32.8125,48.75,67.8125,74.140625|"
-  "vec_add|basic|1|8|8|1,2,3,4,5,6,7,8||2,4,6,8,10,12,14,16|"
+  "source_vec_add_f32|typed_f32|1|8|8|1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5||3,5,7,9,11,13,15,17|"
+  "source_vec_mul_f32|typed_f32|1|8|8|1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5||2.25,6.25,12.25,20.25,30.25,42.25,56.25,72.25|"
+  "source_vec_add_i32|typed_i32|1|8|8|1,2,3,4,5,6,7,8||2,4,6,8,10,12,14,16|"
+  "source_vec_mul_i32|typed_i32|1|8|8|1,2,3,4,5,6,7,8||1,4,9,16,25,36,49,64|"
+  "vec_add|typed_f32|1|8|8|1,2,3,4,5,6,7,8||2,4,6,8,10,12,14,16|"
   "vec_add|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|2,4,6,8,10,12,14,16|2,2,2,2,2,2,2,2"
-  "vec_sub|basic|1|8|8|1,2,3,4,5,6,7,8||0,0,0,0,0,0,0,0|"
+  "vec_sub|typed_f32|1|8|8|1,2,3,4,5,6,7,8||0,0,0,0,0,0,0,0|"
   "vec_sub|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|0,0,0,0,0,0,0,0|2,2,2,2,2,2,2,2"
-  "vec_mul|basic|1|8|8|1,2,3,4,5,6,7,8||1,4,9,16,25,36,49,64|"
+  "vec_mul|typed_f32|1|8|8|1,2,3,4,5,6,7,8||1,4,9,16,25,36,49,64|"
   "vec_mul|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|1,4,9,16,25,36,49,64|2,8,18,32,50,72,98,128"
-  "vec_div|basic|1|8|8|1,2,3,4,5,6,7,8||1,1,1,1,1,1,1,1|"
+  "vec_div|typed_f32|1|8|8|1,2,3,4,5,6,7,8||1,1,1,1,1,1,1,1|"
   "vec_div|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|1,1,1,1,1,1,1,1|2,2,2,2,2,2,2,2"
-  "fma|basic|1|8|8|1,2,3,4,5,6,7,8||2,6,12,20,30,42,56,72|"
+  "fma|typed_f32|1|8|8|1,2,3,4,5,6,7,8||2,6,12,20,30,42,56,72|"
   "fma|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|2,6,12,20,30,42,56,72|3,9,19,33,51,73,99,129"
   "edo|basic|1|8|8|1,2,3,4,5,6,7,8||8,32,72,128,200,288,392,512|"
   "edo|epistemic|1|8|8|1,2,3,4,5,6,7,8|1,1,1,1,1,1,1,1|8,32,72,128,200,288,392,512|64,256,576,1024,1600,2304,3136,4096"
@@ -109,6 +113,10 @@ PATTERN_FOR[vec_sub]=source_vec_sub_f32
 PATTERN_FOR[vec_mul]=source_vec_mul_f32
 PATTERN_FOR[vec_div]=source_vec_div_f32
 PATTERN_FOR[fma]=source_fma_f32
+PATTERN_FOR[source_vec_add_f32]=source_vec_add_f32
+PATTERN_FOR[source_vec_mul_f32]=source_vec_mul_f32
+PATTERN_FOR[source_vec_add_i32]=source_vec_add_i32
+PATTERN_FOR[source_vec_mul_i32]=source_vec_mul_i32
 PATTERN_FOR[edo]=source_epistemic_dual_output_f32
 PATTERN_FOR[mb_double]=mb_vec_double_f32
 PATTERN_FOR[pbpk]=pbpk_euler
@@ -225,6 +233,22 @@ PATTERN_FOR[sedenion_mul]=sedenion_mul
 # CPU oracle path verified via stdlib::algebra::sedenion::sed_associator.
 CASES+=("sedenion_associator|f32|1|2|192|0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0||0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0|")
 PATTERN_FOR[sedenion_associator]=sedenion_associator
+
+# sedenion_sqr: per-thread z² in 𝕊 with X² GUM variance rule.
+# Layout: 32 words/thread (16 z input + 16 z² output).
+# T0: z=e₀ (identity) → z²=e₀. T1: z=e₁ → z²=−e₀.
+# These two threads exercise component positions 0 and 1 of the input array,
+# covering the diagonal variance rule (z[i]·z[i] same-reg X² path).
+SEDSQR_INIT="1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
+SEDSQR_EXP="1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
+CASES+=("sedenion_sqr|f32|1|2|64|${SEDSQR_INIT}||${SEDSQR_EXP}|")
+PATTERN_FOR[sedenion_sqr]=sedenion_sqr
+
+# sedenion_sqr_mb: same fixture with blocks=2, threads_per_block=1 so each
+# thread is on a different block — exercises gid = bid*ntid+tid addressing.
+# bit-exact vs sedenion_sqr (same input/output arrays, different block layout).
+CASES+=("sedenion_sqr_mb|f32|2|1|64|${SEDSQR_INIT}||${SEDSQR_EXP}|")
+PATTERN_FOR[sedenion_sqr_mb]=sedenion_sqr_mb
 
 # Connectome N=8 demo: 56 triples (i<j<k from 0..7), each thread runs
 # the existing octonion_associator kernel on a basis-vector triple. Tests the
@@ -413,6 +437,8 @@ while IFS='|' read -r idx name mode blocks threads mw imem ivar emem evar; do
   [[ "$mode" == "f64" ]] && ARGS+=(--type f64)
   [[ "$mode" == "f32e" ]] && ARGS+=(--epistemic --type f32)
   [[ "$mode" == "f32_2c" ]] && ARGS+=(--epistemic --type f32)
+  [[ "$mode" == "typed_f32" ]] && ARGS+=(--type f32)
+  [[ "$mode" == "typed_i32" ]] && ARGS+=(--type i32)
   if [[ "$imem" == "_seq_" ]]; then
     ARGS+=(--init-seq)
   elif [[ -n "$imem" ]]; then
@@ -447,6 +473,16 @@ done < cases.tsv
 echo "kaxi_matrix passed=${PASSED}/${TOTAL} failed=${FAILED_LIST%,}"
 SHELL_EOF
 chmod +x "${STAGE_DIR}/run_cases.sh"
+
+# RUN_LOCAL=1: skip Slurm entirely, run on the local GPU directly.
+if [[ "${RUN_LOCAL:-0}" == "1" ]]; then
+  echo "[2/3] local GPU run (RUN_LOCAL=1)"
+  cd "${STAGE_DIR}"
+  export PATH="/usr/local/cuda/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+  ./run_cases.sh 2>&1
+  cd "${ROOT_DIR}"
+  exit $?
+fi
 
 echo "[2/3] packaging"
 tar -C "${STAGE_DIR}" -czf "${LOCAL_TARBALL}" .
