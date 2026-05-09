@@ -77,18 +77,24 @@ static void usage(const char *prog) {
     fprintf(stderr,
         "usage: %s --out-dir DIR --cohort N [options]\n"
         "  --out-dir DIR        directory for init.mem.bin, init.var.bin, expected.summary\n"
-        "  --cohort N           number of patients (must be > 0)\n"
+        "  --cohort N           TOTAL cohort size (across all shards, must be > 0)\n"
         "  --seed N             PRNG seed (default 42)\n"
+        "  --shard-index K      shard to generate (0-based, default 0)\n"
+        "  --shard-count S      total number of shards (default 1 = no sharding)\n"
         "  --mean-dose F        log-normal location for v (default 2.0)\n"
         "  --dose-sigma F       log-normal scale for v (default 0.30)\n"
         "  --sigma0-mean F      mean of prior variance σ²₀ (default 0.50)\n"
         "  --sigma0-sigma F     stddev of σ²₀ across cohort (default 0.15)\n"
         "  --threshold F        gate threshold on σ²(sqrt) (default 1.0, matches Phase V)\n"
         "\n"
+        "Sharding: --shard-index K --shard-count S generates patients [K*floor(N/S),\n"
+        "  (K+1)*floor(N/S)) with exact PRNG skip-ahead — byte-identical to slicing\n"
+        "  the full cohort. Last shard absorbs any remainder.\n"
+        "\n"
         "Outputs (raw binary, little-endian):\n"
-        "  init.mem.bin   N × 8 bytes (f64 v reinterpret)\n"
-        "  init.var.bin   N × 8 bytes (f64 σ²₀ reinterpret)\n"
-        "  expected.summary    text: cohort, in_budget, nan_count, mem_digest, var_digest\n",
+        "  init.mem.bin   shard_patients × elem bytes\n"
+        "  init.var.bin   shard_patients × elem bytes\n"
+        "  expected.summary    text: cohort, shard, in_budget, nan_count, digests\n",
         prog);
 }
 
@@ -105,12 +111,20 @@ int main(int argc, char **argv) {
     // PTX kernel's element stride. Default is f64 (8-byte) for backward
     // compatibility with Phase W gate's epistemic-u64 path.
     int type_f32 = 0;
+    // Phase W.2: deterministic shard decomposition. shard_index K with
+    // shard_count S generates patients [patient_start, patient_end) via
+    // splitmix64 skip-ahead: state = seed + patient_start*4*INC (mod 2^64).
+    // The factor 4 = 2 uniforms per Box-Muller call × 2 calls per patient.
+    long shard_index = 0;
+    long shard_count = 1;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
         else if (!strcmp(argv[i], "--out-dir") && i + 1 < argc) { out_dir = argv[++i]; }
         else if (!strcmp(argv[i], "--cohort") && i + 1 < argc) { cohort = strtol(argv[++i], NULL, 10); }
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) { seed = strtoull(argv[++i], NULL, 10); }
+        else if (!strcmp(argv[i], "--shard-index") && i + 1 < argc) { shard_index = strtol(argv[++i], NULL, 10); }
+        else if (!strcmp(argv[i], "--shard-count") && i + 1 < argc) { shard_count = strtol(argv[++i], NULL, 10); }
         else if (!strcmp(argv[i], "--mean-dose") && i + 1 < argc) { mean_dose = strtod(argv[++i], NULL); }
         else if (!strcmp(argv[i], "--dose-sigma") && i + 1 < argc) { dose_sigma = strtod(argv[++i], NULL); }
         else if (!strcmp(argv[i], "--sigma0-mean") && i + 1 < argc) { sigma0_mean = strtod(argv[++i], NULL); }
@@ -125,11 +139,21 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "error: unknown arg: %s\n", argv[i]); usage(argv[0]); return 2; }
     }
     if (!out_dir || cohort <= 0) { usage(argv[0]); return 2; }
+    if (shard_count < 1 || shard_index < 0 || shard_index >= shard_count) {
+        fprintf(stderr, "error: shard_index=%ld must be in [0, shard_count=%ld)\n", shard_index, shard_count);
+        return 2;
+    }
+
+    // Shard range: last shard absorbs remainder so all shards cover exactly cohort patients.
+    long shard_size = cohort / shard_count;
+    long patient_start = shard_index * shard_size;
+    long patient_end   = (shard_index == shard_count - 1) ? cohort : patient_start + shard_size;
+    long shard_patients = patient_end - patient_start;
 
     size_t elem = type_f32 ? sizeof(float) : sizeof(double);
-    size_t bytes = (size_t)cohort * elem;
-    double *v_buf = (double *)malloc((size_t)cohort * sizeof(double));
-    double *s_buf = (double *)malloc((size_t)cohort * sizeof(double));
+    size_t bytes = (size_t)shard_patients * elem;
+    double *v_buf = (double *)malloc((size_t)shard_patients * sizeof(double));
+    double *s_buf = (double *)malloc((size_t)shard_patients * sizeof(double));
     if (!v_buf || !s_buf) { fprintf(stderr, "error: malloc(%zu) failed\n", bytes); return 1; }
 
     // FNV-1a 64-bit accumulators for output digests
@@ -138,9 +162,13 @@ int main(int argc, char **argv) {
     long in_budget = 0;
     long nan_count = 0;
 
-    uint64_t state = seed;
+    // Advance PRNG to patient_start. Each patient consumes exactly 4 splitmix64
+    // steps (2 for z1 via next_normal, 2 for z2). State after N steps from
+    // seed S is S + N*INC (mod 2^64) — linear in N, so skip-ahead is O(1).
+    static const uint64_t SPLITMIX_INC = 0x9E3779B97F4A7C15ULL;
+    uint64_t state = seed + (uint64_t)patient_start * 4ULL * SPLITMIX_INC;
     const double ln_mean = log(mean_dose);
-    for (long i = 0; i < cohort; i++) {
+    for (long i = 0; i < shard_patients; i++) {
         double z1 = next_normal(&state);
         double z2 = next_normal(&state);
         // dose: log-normal sample around mean_dose with log-sigma dose_sigma
@@ -178,10 +206,10 @@ int main(int argc, char **argv) {
     void *v_out = v_buf, *s_out = s_buf;
     float *vf_buf = NULL, *sf_buf = NULL;
     if (type_f32) {
-        vf_buf = (float *)malloc((size_t)cohort * sizeof(float));
-        sf_buf = (float *)malloc((size_t)cohort * sizeof(float));
+        vf_buf = (float *)malloc((size_t)shard_patients * sizeof(float));
+        sf_buf = (float *)malloc((size_t)shard_patients * sizeof(float));
         if (!vf_buf || !sf_buf) { fprintf(stderr, "error: f32 buffer malloc\n"); return 1; }
-        for (long i = 0; i < cohort; i++) { vf_buf[i] = (float)v_buf[i]; sf_buf[i] = (float)s_buf[i]; }
+        for (long i = 0; i < shard_patients; i++) { vf_buf[i] = (float)v_buf[i]; sf_buf[i] = (float)s_buf[i]; }
         v_out = vf_buf; s_out = sf_buf;
     }
 
@@ -201,6 +229,11 @@ int main(int argc, char **argv) {
         "cohort=%ld\n"
         "seed=%llu\n"
         "type=%s\n"
+        "shard_index=%ld\n"
+        "shard_count=%ld\n"
+        "patient_start=%ld\n"
+        "patient_end=%ld\n"
+        "shard_patients=%ld\n"
         "in_budget=%ld\n"
         "nan_count=%ld\n"
         "input_mem_digest=%016llx\n"
@@ -213,6 +246,8 @@ int main(int argc, char **argv) {
         cohort,
         (unsigned long long)seed,
         type_f32 ? "f32" : "f64",
+        shard_index, shard_count,
+        patient_start, patient_end, shard_patients,
         in_budget, nan_count,
         (unsigned long long)mem_digest,
         (unsigned long long)var_digest,
@@ -220,9 +255,12 @@ int main(int argc, char **argv) {
     fclose(fs);
 
     fprintf(stdout,
-        "kaxi_pbpk_sampler: cohort=%ld seed=%llu type=%s in_budget=%ld nan_count=%ld "
+        "kaxi_pbpk_sampler: cohort=%ld seed=%llu type=%s "
+        "shard=%ld/%ld patients=%ld..%ld "
+        "in_budget=%ld nan_count=%ld "
         "mem_digest=%016llx var_digest=%016llx\n",
         cohort, (unsigned long long)seed, type_f32 ? "f32" : "f64",
+        shard_index, shard_count, patient_start, patient_end,
         in_budget, nan_count,
         (unsigned long long)mem_digest, (unsigned long long)var_digest);
 
