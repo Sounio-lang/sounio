@@ -310,32 +310,8 @@ PATTERN_FOR[pbpk2c_mb]=pbpk_2comp_mb
 # Multi-block 4-step coupled 2-compartment at 1024 threads (32×32):
 # Expected computed via per-thread f32 simulation of the EXACT op sequence
 # the kernel executes (so f32 rounding matches bit-exactly).
-EMEM_2C4MB=$(python3 -c "
-import struct
-def step(c1, c2, k_in=1.0, k12=0.5, k21=0.25, dt=0.5):
-    def f32(x): return struct.unpack('f', struct.pack('f', x))[0]
-    kc1=f32(k12*c1); kc2=f32(k21*c2); di=f32(k_in-kc1); d1=f32(di+kc2)
-    dd=f32(dt*d1); c1n=f32(c1+dd); df=f32(kc1-kc2); ddf=f32(dt*df); c2n=f32(c2+ddf)
-    return c1n, c2n
-out=[]
-for i in range(1024):
-    c1,c2 = float(i+1), 0.0
-    for _ in range(4): c1,c2 = step(c1,c2)
-    out.append(f'{c1:g}')
-print(','.join(out))")
-EVAR_2C4MB=$(python3 -c "
-import struct
-def step(c1, c2, k_in=1.0, k12=0.5, k21=0.25, dt=0.5):
-    def f32(x): return struct.unpack('f', struct.pack('f', x))[0]
-    kc1=f32(k12*c1); kc2=f32(k21*c2); di=f32(k_in-kc1); d1=f32(di+kc2)
-    dd=f32(dt*d1); c1n=f32(c1+dd); df=f32(kc1-kc2); ddf=f32(dt*df); c2n=f32(c2+ddf)
-    return c1n, c2n
-out=[]
-for i in range(1024):
-    c1,c2 = float(i+1), 0.0
-    for _ in range(4): c1,c2 = step(c1,c2)
-    out.append(f'{c2:g}')
-print(','.join(out))")
+EMEM_2C4MB=$(cat "${ROOT_DIR}/tests/golden/kretikos_pbpk_expected/emem_2c4mb.txt")
+EVAR_2C4MB=$(cat "${ROOT_DIR}/tests/golden/kretikos_pbpk_expected/evar_2c4mb.txt")
 INIT_2C4MB_C2=$(seq 1 1024 | awk '{ printf "%s0", (NR>1?",":"") }')
 CASES+=("pbpk2c4_mb|f32_2c|32|32|1024|_seq_|${INIT_2C4MB_C2}|${EMEM_2C4MB}|${EVAR_2C4MB}")
 PATTERN_FOR[pbpk2c4_mb]=pbpk_2comp_4step_mb
@@ -344,50 +320,8 @@ PATTERN_FOR[pbpk2c4_mb]=pbpk_2comp_4step_mb
 # coupled-ODE with full GUM. Per-thread C₁_0 = tid+1, C₂_0 = 0,
 # σ²(C₁)=1, σ²(C₂)=0. Single block of 1024 threads; mem layout is
 # [C₁(1024) | C₂(1024)] = 2048 slots. ntid=1024 used for C₂ offset.
-EMEM_2CE4_1024=$(python3 -c "
-import struct
-def f32(x): return struct.unpack('f', struct.pack('f', x))[0]
-def step(c1, vc1, c2, vc2):
-    k_in,k12,k21,dt = 1.0,0.5,0.25,0.5
-    kc1=f32(k12*c1); vkc1=f32(f32(k12*k12)*vc1)
-    kc2=f32(k21*c2); vkc2=f32(f32(k21*k21)*vc2)
-    di=f32(k_in-kc1); vdi=vkc1
-    d1=f32(di+kc2); vd1=f32(vdi+vkc2)
-    dd=f32(dt*d1); vdd=f32(f32(dt*dt)*vd1)
-    c1n=f32(c1+dd); vc1n=f32(vc1+vdd)
-    df=f32(kc1-kc2); vdf=f32(vkc1+vkc2)
-    ddf=f32(dt*df); vddf=f32(f32(dt*dt)*vdf)
-    c2n=f32(c2+ddf); vc2n=f32(vc2+vddf)
-    return c1n, vc1n, c2n, vc2n
-c1s,c2s = [], []
-for tid in range(1024):
-    c1,c2 = float(tid+1), 0.0; vc1,vc2 = 1.0, 0.0
-    for _ in range(4):
-        c1,vc1,c2,vc2 = step(c1,vc1,c2,vc2)
-    c1s.append(f'{c1:g}'); c2s.append(f'{c2:g}')
-print(','.join(c1s + c2s))")
-EVAR_2CE4_1024=$(python3 -c "
-import struct
-def f32(x): return struct.unpack('f', struct.pack('f', x))[0]
-def step(c1, vc1, c2, vc2):
-    k_in,k12,k21,dt = 1.0,0.5,0.25,0.5
-    kc1=f32(k12*c1); vkc1=f32(f32(k12*k12)*vc1)
-    kc2=f32(k21*c2); vkc2=f32(f32(k21*k21)*vc2)
-    di=f32(k_in-kc1); vdi=vkc1
-    d1=f32(di+kc2); vd1=f32(vdi+vkc2)
-    dd=f32(dt*d1); vdd=f32(f32(dt*dt)*vd1)
-    c1n=f32(c1+dd); vc1n=f32(vc1+vdd)
-    df=f32(kc1-kc2); vdf=f32(vkc1+vkc2)
-    ddf=f32(dt*df); vddf=f32(f32(dt*dt)*vdf)
-    c2n=f32(c2+ddf); vc2n=f32(vc2+vddf)
-    return c1n, vc1n, c2n, vc2n
-v1s,v2s = [], []
-for tid in range(1024):
-    c1,c2 = float(tid+1), 0.0; vc1,vc2 = 1.0, 0.0
-    for _ in range(4):
-        c1,vc1,c2,vc2 = step(c1,vc1,c2,vc2)
-    v1s.append(f'{vc1:g}'); v2s.append(f'{vc2:g}')
-print(','.join(v1s + v2s))")
+EMEM_2CE4_1024=$(cat "${ROOT_DIR}/tests/golden/kretikos_pbpk_expected/emem_2ce4_1024.txt")
+EVAR_2CE4_1024=$(cat "${ROOT_DIR}/tests/golden/kretikos_pbpk_expected/evar_2ce4_1024.txt")
 # Init mem: [tid+1 for tid 0..1023, then zeros for C2]
 INIT_C1_C2=$(seq 1 1024 | awk '{ printf "%s%d", (NR>1?",":""), $1 }')$(seq 1 1024 | awk '{ printf ",0" }')
 # Init var: [1 × 1024 for vC1, 0 × 1024 for vC2]
