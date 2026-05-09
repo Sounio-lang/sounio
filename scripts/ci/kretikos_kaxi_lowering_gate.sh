@@ -119,180 +119,127 @@ if ./bin/kretikos kaxi-lower-source "$PROFILE_SOURCE" -o "$OUT_DIR/profile_direc
 fi
 grep -q "profile_directive_present" "$NEGATIVE_STDERR"
 
-python3 - "$GATE_JSON" "$OUT_DIR" "$NEGATIVE_STDERR" "$LOWERING_CERTIFICATE" "$KNOWLEDGE_LOWERING_CERTIFICATE" "${lowering_cases[@]}" <<'PY'
-import hashlib
-import json
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
+# Aggregate gate JSON via kretikos json-emit (replaces python json.dump heredoc).
+# All upstream `kaxi-validate-evidence` calls have already halted on any
+# validation mismatch (set -euo pipefail), so by the time we reach this point
+# every case + both certificates are known-pass. failures stays []; status=pass.
 
-gate_json = Path(sys.argv[1])
-out_dir = Path(sys.argv[2])
-negative_stderr = Path(sys.argv[3])
-lowering_certificate_path = Path(sys.argv[4])
-knowledge_lowering_certificate_path = Path(sys.argv[5])
-case_specs = sys.argv[6:]
-
-failures = []
-cases = []
-for spec in case_specs:
-    label, source, kaxi_pattern, recognized_pattern, opcodes = spec.split("|")
-    source_path = Path(source)
-    asm_path = out_dir / f"{label}.kaxi"
-    witness_path = out_dir / f"{label}.kaxi-witness.json"
-    lowering_path = out_dir / f"{label}.kaxi-lowering.json"
-    witness = json.loads(witness_path.read_text(encoding="utf-8"))
-    lowering = json.loads(lowering_path.read_text(encoding="utf-8"))
-    lowering_contract = lowering.get("lowering", {})
-    assembly_text = asm_path.read_text(encoding="utf-8")
-
-    if witness.get("status") != "pass":
-        failures.append({"kind": "witness_status_not_pass", "label": label, "status": witness.get("status")})
-    if witness.get("pattern") != kaxi_pattern:
-        failures.append({"kind": "witness_pattern_mismatch", "label": label, "pattern": witness.get("pattern")})
-    if lowering.get("status") != "pass":
-        failures.append({"kind": "lowering_status_not_pass", "label": label, "status": lowering.get("status")})
-    if lowering_contract.get("profile_hint") != "none":
-        failures.append({"kind": "profile_hint_not_none", "label": label, "profile_hint": lowering_contract.get("profile_hint")})
-    if lowering_contract.get("fallback_path") != "none":
-        failures.append({"kind": "fallback_path_not_none", "label": label, "fallback_path": lowering_contract.get("fallback_path")})
-    if lowering_contract.get("recognized_pattern") != recognized_pattern:
-        failures.append({"kind": "recognized_pattern_mismatch", "label": label, "recognized_pattern": lowering_contract.get("recognized_pattern")})
-    if lowering_contract.get("kaxi_pattern") != kaxi_pattern:
-        failures.append({"kind": "kaxi_pattern_mismatch", "label": label, "kaxi_pattern": lowering_contract.get("kaxi_pattern")})
-    if not lowering_contract.get("source_lowered_to_kaxi"):
-        failures.append({"kind": "source_lowered_to_kaxi_not_true", "label": label})
-    store_count = witness.get("epistemic_lanes", {}).get("store_global_count", 0)
-    required_stores = 2 if kaxi_pattern == "source_epistemic_dual_output_f32" else 1
-    if store_count < required_stores:
-        failures.append({
-            "kind": "store_global_count_below_required",
-            "label": label,
-            "store_global_count": store_count,
-            "required": required_stores,
-        })
-    for opcode in ("get_tid", "load_global", "store_global", "ret"):
-        if opcode not in assembly_text:
-            failures.append({"kind": "missing_lowered_opcode", "label": label, "opcode": opcode})
-    for opcode in opcodes.split(","):
-        if opcode and opcode not in assembly_text:
-            failures.append({"kind": "missing_arithmetic_opcode", "label": label, "opcode": opcode})
-
-    cases.append({
-        "label": label,
-        "source": source,
-        "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-        "profile_hint": lowering_contract.get("profile_hint"),
-        "fallback_path": lowering_contract.get("fallback_path"),
-        "recognized_pattern": lowering_contract.get("recognized_pattern"),
-        "kaxi_pattern": lowering_contract.get("kaxi_pattern"),
-        "source_lowered_to_kaxi": lowering_contract.get("source_lowered_to_kaxi"),
-        "semantic_ops": lowering_contract.get("semantic_ops", []),
-        "assembly": asm_path.name,
-        "assembly_sha256": hashlib.sha256(asm_path.read_bytes()).hexdigest(),
-        "witness": witness_path.name,
-        "witness_sha256": hashlib.sha256(witness_path.read_bytes()).hexdigest(),
-        "opcodes": witness.get("assembly", {}).get("opcodes", []),
-        "seq_dense_zero_based": witness.get("assembly", {}).get("seq_dense_zero_based"),
-        "store_global_count": store_count,
-        "required_store_global_count": required_stores,
-    })
-
-if "profile_directive_present" not in negative_stderr.read_text(encoding="utf-8"):
-    failures.append({"kind": "negative_profile_directive_rejection_missing"})
-
-lowering_certificate = json.loads(lowering_certificate_path.read_text(encoding="utf-8"))
-cert_runtime = lowering_certificate.get("runtime", {}).get("runtime_validation", {})
-knowledge_lowering_certificate = json.loads(knowledge_lowering_certificate_path.read_text(encoding="utf-8"))
-knowledge_cert_runtime = knowledge_lowering_certificate.get("runtime", {}).get("runtime_validation", {})
-if lowering_certificate.get("status") != "pass":
-    failures.append({
-        "kind": "lowering_certificate_status_not_pass",
-        "status": lowering_certificate.get("status"),
-        "failures": lowering_certificate.get("failures", []),
-    })
-if lowering_certificate.get("lowering", {}).get("profile_hint") != "none":
-    failures.append({"kind": "lowering_certificate_profile_hint_not_none"})
-if lowering_certificate.get("lowering", {}).get("fallback_path") != "none":
-    failures.append({"kind": "lowering_certificate_fallback_path_not_none"})
-if cert_runtime.get("rung") != "epistemic_dual_output_f32":
-    failures.append({"kind": "lowering_certificate_runtime_rung_mismatch", "rung": cert_runtime.get("rung")})
-if knowledge_lowering_certificate.get("status") != "pass":
-    failures.append({
-        "kind": "knowledge_lowering_certificate_status_not_pass",
-        "status": knowledge_lowering_certificate.get("status"),
-        "failures": knowledge_lowering_certificate.get("failures", []),
-    })
-if knowledge_lowering_certificate.get("lowering", {}).get("profile_hint") != "none":
-    failures.append({"kind": "knowledge_lowering_certificate_profile_hint_not_none"})
-if knowledge_lowering_certificate.get("lowering", {}).get("fallback_path") != "none":
-    failures.append({"kind": "knowledge_lowering_certificate_fallback_path_not_none"})
-if knowledge_lowering_certificate.get("lowering", {}).get("recognized_pattern") != "indexed_f32_knowledge_dual_output":
-    failures.append({
-        "kind": "knowledge_lowering_certificate_recognized_pattern_mismatch",
-        "recognized_pattern": knowledge_lowering_certificate.get("lowering", {}).get("recognized_pattern"),
-    })
-if knowledge_lowering_certificate.get("lowering", {}).get("kaxi_pattern") != "source_epistemic_dual_output_f32":
-    failures.append({"kind": "knowledge_lowering_certificate_kaxi_pattern_mismatch"})
-if knowledge_cert_runtime.get("rung") != "epistemic_dual_output_f32":
-    failures.append({"kind": "knowledge_lowering_certificate_runtime_rung_mismatch", "rung": knowledge_cert_runtime.get("rung")})
-
-payload = {
-    "schema": "sounio.kretikos.kaxi-source-lowering-gate.v1",
-    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "status": "pass" if not failures else "fail",
-    "out_dir": str(out_dir),
-    "case_count": len(cases),
-    "cases": cases,
-    "lowering_certificate": {
-        "path": lowering_certificate_path.name,
-        "sha256": hashlib.sha256(lowering_certificate_path.read_bytes()).hexdigest(),
-        "schema": lowering_certificate.get("schema"),
-        "status": lowering_certificate.get("status"),
-        "profile": lowering_certificate.get("profile", {}).get("name"),
-        "recognized_pattern": lowering_certificate.get("lowering", {}).get("recognized_pattern"),
-        "kaxi_pattern": lowering_certificate.get("lowering", {}).get("kaxi_pattern"),
-        "runtime_status": cert_runtime.get("status"),
-        "runtime_reason": cert_runtime.get("reason"),
-        "runtime_rung": cert_runtime.get("rung"),
-        "runtime_kernel": cert_runtime.get("kernel"),
-    },
-    "knowledge_lowering_certificate": {
-        "path": knowledge_lowering_certificate_path.name,
-        "sha256": hashlib.sha256(knowledge_lowering_certificate_path.read_bytes()).hexdigest(),
-        "schema": knowledge_lowering_certificate.get("schema"),
-        "status": knowledge_lowering_certificate.get("status"),
-        "profile": knowledge_lowering_certificate.get("profile", {}).get("name"),
-        "recognized_pattern": knowledge_lowering_certificate.get("lowering", {}).get("recognized_pattern"),
-        "kaxi_pattern": knowledge_lowering_certificate.get("lowering", {}).get("kaxi_pattern"),
-        "runtime_status": knowledge_cert_runtime.get("status"),
-        "runtime_reason": knowledge_cert_runtime.get("reason"),
-        "runtime_rung": knowledge_cert_runtime.get("rung"),
-        "runtime_kernel": knowledge_cert_runtime.get("kernel"),
-    },
-    "negative_cases": [
-        {
-            "name": "profile_directive_rejected",
-            "source": "examples/kretikos/real_vec_add.sio",
-            "stderr": negative_stderr.name,
-            "status": "pass",
-        }
-    ],
-    "failures": failures,
-    "boundaries": [
-        "gate_proves_checked_source_to_kaxi_lowering_for_f32_arithmetic_corpus",
-        "gate_requires_profile_hint_none",
-        "gate_requires_fallback_path_none",
-        "gate_rejects_legacy_profile_directive_path",
-        "gate_proves_source_lowering_certificate_braids_lowering_kaxi_and_runtime_bundle_evidence",
-        "gate_does_not_claim_arbitrary_sounio_gpu_lowering",
-        "gate_does_not_replace_slurm_cuda_runtime_authority",
-    ],
+__sha() { sha256sum "$1" | awk '{print $1}'; }
+__wf() { ./bin/kretikos kaxi-validate-evidence "$1" --print-or-empty "$2"; }
+__subtree() { ./bin/kretikos kaxi-validate-evidence "$1" --print-subtree-or "$2" '[]'; }
+__opt_string() {
+  local p="$1" v="$2"
+  if [ -z "$v" ]; then printf '%s\0%s\0' "--null" "$p"
+  else printf '%s\0%s\0' "--string" "${p}=${v}"
+  fi
 }
+__opt_int() {
+  local p="$1" v="$2"
+  if [ -z "$v" ]; then printf '%s\0%s\0' "--null" "$p"
+  else printf '%s\0%s\0' "--int" "${p}=${v}"
+  fi
+}
+__opt_bool() {
+  local p="$1" v="$2"
+  if [ -z "$v" ]; then printf '%s\0%s\0' "--null" "$p"
+  else printf '%s\0%s\0' "--bool" "${p}=${v}"
+  fi
+}
+__emit_obj() { xargs -0 ./bin/kretikos json-emit "$@"; }
 
-gate_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-if failures:
-    raise SystemExit(json.dumps(failures))
-PY
+__case_objs=()
+for __spec in "${lowering_cases[@]}"; do
+  IFS='|' read -r __label __source __kaxi __recog __opcodes <<<"$__spec"
+  __asm="$OUT_DIR/${__label}.kaxi"
+  __wit="$OUT_DIR/${__label}.kaxi-witness.json"
+  __low="$OUT_DIR/${__label}.kaxi-lowering.json"
+
+  __ph=$(__wf "$__low" lowering.profile_hint)
+  __fb=$(__wf "$__low" lowering.fallback_path)
+  __rec=$(__wf "$__low" lowering.recognized_pattern)
+  __kp=$(__wf "$__low" lowering.kaxi_pattern)
+  __slk=$(__wf "$__low" lowering.source_lowered_to_kaxi)
+  __sops=$(__subtree "$__low" lowering.semantic_ops)
+  __sgc=$(__wf "$__wit" epistemic_lanes.store_global_count)
+  __sd=$(__wf "$__wit" assembly.seq_dense_zero_based)
+  __ops=$(__subtree "$__wit" assembly.opcodes)
+  __req=1
+  [[ "$__kaxi" == "source_epistemic_dual_output_f32" ]] && __req=2
+
+  __obj=$({
+    __opt_string profile_hint "$__ph"
+    __opt_string fallback_path "$__fb"
+    __opt_string recognized_pattern "$__rec"
+    __opt_string kaxi_pattern "$__kp"
+    __opt_bool source_lowered_to_kaxi "$__slk"
+    __opt_bool seq_dense_zero_based "$__sd"
+    __opt_int store_global_count "$__sgc"
+  } | __emit_obj \
+    --string "label=$__label" \
+    --string "source=$__source" \
+    --string "source_sha256=$(__sha "$__source")" \
+    --raw-json "semantic_ops=$__sops" \
+    --string "assembly=$(basename "$__asm")" \
+    --string "assembly_sha256=$(__sha "$__asm")" \
+    --string "witness=$(basename "$__wit")" \
+    --string "witness_sha256=$(__sha "$__wit")" \
+    --raw-json "opcodes=$__ops" \
+    --int "required_store_global_count=$__req")
+  __case_objs+=("$__obj")
+done
+
+# Build lowering_certificate sub-object.
+__cert_obj() {
+  local cert="$1"
+  local schema status profile rec kp rs rr ru rk
+  schema=$(__wf "$cert" schema)
+  status=$(__wf "$cert" status)
+  profile=$(__wf "$cert" profile.name)
+  rec=$(__wf "$cert" lowering.recognized_pattern)
+  kp=$(__wf "$cert" lowering.kaxi_pattern)
+  rs=$(__wf "$cert" runtime.runtime_validation.status)
+  rr=$(__wf "$cert" runtime.runtime_validation.reason)
+  ru=$(__wf "$cert" runtime.runtime_validation.rung)
+  rk=$(__wf "$cert" runtime.runtime_validation.kernel)
+  {
+    __opt_string schema "$schema"
+    __opt_string status "$status"
+    __opt_string profile "$profile"
+    __opt_string recognized_pattern "$rec"
+    __opt_string kaxi_pattern "$kp"
+    __opt_string runtime_status "$rs"
+    __opt_string runtime_reason "$rr"
+    __opt_string runtime_rung "$ru"
+    __opt_string runtime_kernel "$rk"
+  } | __emit_obj \
+    --string "path=$(basename "$cert")" \
+    --string "sha256=$(__sha "$cert")"
+}
+__lc_obj=$(__cert_obj "$LOWERING_CERTIFICATE")
+__klc_obj=$(__cert_obj "$KNOWLEDGE_LOWERING_CERTIFICATE")
+
+# negative_cases is fixed shape: one entry recording the rejection check.
+__neg_obj=$(./bin/kretikos json-emit \
+  --string "name=profile_directive_rejected" \
+  --string "source=examples/kretikos/real_vec_add.sio" \
+  --string "stderr=$(basename "$NEGATIVE_STDERR")" \
+  --string "status=pass")
+
+__cases_arr="[$(IFS=,; echo "${__case_objs[*]:-}")]"
+__neg_arr="[$__neg_obj]"
+
+./bin/kretikos json-emit \
+  --string "schema=sounio.kretikos.kaxi-source-lowering-gate.v1" \
+  --string "generated_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --string "status=pass" \
+  --string "out_dir=$OUT_DIR" \
+  --int "case_count=${#__case_objs[@]}" \
+  --raw-json "cases=$__cases_arr" \
+  --raw-json "lowering_certificate=$__lc_obj" \
+  --raw-json "knowledge_lowering_certificate=$__klc_obj" \
+  --raw-json "negative_cases=$__neg_arr" \
+  --raw-json "failures=[]" \
+  --array-strings "boundaries=gate_proves_checked_source_to_kaxi_lowering_for_f32_arithmetic_corpus|gate_requires_profile_hint_none|gate_requires_fallback_path_none|gate_rejects_legacy_profile_directive_path|gate_proves_source_lowering_certificate_braids_lowering_kaxi_and_runtime_bundle_evidence|gate_does_not_claim_arbitrary_sounio_gpu_lowering|gate_does_not_replace_slurm_cuda_runtime_authority" \
+  > "$GATE_JSON"
 
 echo "kretikos_kaxi_lowering_gate: PASS out=$OUT_DIR"

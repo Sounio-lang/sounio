@@ -35,116 +35,117 @@ if [[ ! -f "$artifact_json" ]]; then
   exit 1
 fi
 
-python3 - "$GATE_JSON" "$SOURCE" "$DOCTOR_LOG" "$SOURCE_LOG" "$artifact_json" <<'PY'
-import hashlib
-import json
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
+# Replace python heredoc with kaxi-validate-evidence + json-emit pipeline.
+# All validations halt the script via set -euo pipefail on first failure.
 
-gate_json, source, doctor_log, source_log, artifact_json = sys.argv[1:]
-artifact_path = Path(artifact_json)
-artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-source_name = Path(source).name
-expected_recognized_pattern = "indexed_f32_knowledge_dual_output" if "knowledge_dual" in source_name else "indexed_f32_epistemic_dual_output"
-runtime = artifact.get("runtime_validation") or {}
-cert = artifact.get("kaxi_certificate") or {}
-cert_payload = cert.get("certificate") or {}
-cert_runtime = (cert_payload.get("runtime") or {}).get("runtime_validation") or {}
-lowering = cert_payload.get("lowering") or {}
-kaxi = cert_payload.get("kaxi") or {}
-kaxi_lanes = kaxi.get("epistemic_lanes") or {}
+source_name="$(basename "$SOURCE")"
+case "$source_name" in
+  *knowledge_dual*) expected_recognized_pattern="indexed_f32_knowledge_dual_output" ;;
+  *)                expected_recognized_pattern="indexed_f32_epistemic_dual_output" ;;
+esac
 
-failures = []
-if artifact.get("schema") != "sounio.kretikos.hpc-source-result.v1":
-    failures.append({"kind": "artifact_schema_mismatch", "schema": artifact.get("schema")})
-if runtime.get("status") != "pass":
-    failures.append({"kind": "runtime_not_pass", "status": runtime.get("status"), "reason": runtime.get("reason")})
-if runtime.get("rung") != "epistemic_dual_output_f32":
-    failures.append({"kind": "runtime_rung_mismatch", "rung": runtime.get("rung")})
-if runtime.get("kernel") != "sounio_bare_epistemic_dual_output_f32_sm80":
-    failures.append({"kind": "runtime_kernel_mismatch", "kernel": runtime.get("kernel")})
-if cert.get("status") != "pass":
-    failures.append({"kind": "certificate_status_not_pass", "status": cert.get("status"), "reason": cert.get("reason")})
-if cert.get("reason") != "runtime_backed_source_lowering_certificate_pass":
-    failures.append({"kind": "certificate_reason_mismatch", "reason": cert.get("reason")})
-if cert_payload.get("schema") != "sounio.kretikos.kaxi-lowering-certificate.v1":
-    failures.append({"kind": "certificate_schema_mismatch", "schema": cert_payload.get("schema")})
-if cert_payload.get("status") != "pass":
-    failures.append({"kind": "certificate_payload_not_pass", "status": cert_payload.get("status"), "failures": cert_payload.get("failures", [])})
-if lowering.get("profile_hint") != "none":
-    failures.append({"kind": "profile_hint_not_none", "profile_hint": lowering.get("profile_hint")})
-if lowering.get("fallback_path") != "none":
-    failures.append({"kind": "fallback_path_not_none", "fallback_path": lowering.get("fallback_path")})
-if lowering.get("recognized_pattern") != expected_recognized_pattern:
-    failures.append({
-        "kind": "recognized_pattern_mismatch",
-        "recognized_pattern": lowering.get("recognized_pattern"),
-        "expected": expected_recognized_pattern,
-    })
-if lowering.get("kaxi_pattern") != "source_epistemic_dual_output_f32":
-    failures.append({"kind": "kaxi_pattern_mismatch", "kaxi_pattern": lowering.get("kaxi_pattern")})
-if cert_runtime.get("status") != "pass":
-    failures.append({"kind": "certificate_runtime_not_pass", "status": cert_runtime.get("status"), "reason": cert_runtime.get("reason")})
-if cert_runtime.get("rung") != "epistemic_dual_output_f32":
-    failures.append({"kind": "certificate_runtime_rung_mismatch", "rung": cert_runtime.get("rung")})
-if kaxi.get("pattern") != "source_epistemic_dual_output_f32":
-    failures.append({"kind": "certificate_kaxi_pattern_mismatch", "pattern": kaxi.get("pattern")})
-if kaxi_lanes.get("store_global_count", 0) < 2:
-    failures.append({"kind": "dual_store_global_count_missing", "store_global_count": kaxi_lanes.get("store_global_count")})
+./bin/kretikos kaxi-validate-evidence "$artifact_json" \
+  --expect "schema=sounio.kretikos.hpc-source-result.v1" \
+  --expect "runtime_validation.status=pass" \
+  --expect "runtime_validation.rung=epistemic_dual_output_f32" \
+  --expect "runtime_validation.kernel=sounio_bare_epistemic_dual_output_f32_sm80" \
+  --expect "kaxi_certificate.status=pass" \
+  --expect "kaxi_certificate.reason=runtime_backed_source_lowering_certificate_pass" \
+  --expect "kaxi_certificate.certificate.schema=sounio.kretikos.kaxi-lowering-certificate.v1" \
+  --expect "kaxi_certificate.certificate.status=pass" \
+  --expect "kaxi_certificate.certificate.lowering.profile_hint=none" \
+  --expect "kaxi_certificate.certificate.lowering.fallback_path=none" \
+  --expect "kaxi_certificate.certificate.lowering.recognized_pattern=$expected_recognized_pattern" \
+  --expect "kaxi_certificate.certificate.lowering.kaxi_pattern=source_epistemic_dual_output_f32" \
+  --expect "kaxi_certificate.certificate.runtime.runtime_validation.status=pass" \
+  --expect "kaxi_certificate.certificate.runtime.runtime_validation.rung=epistemic_dual_output_f32" \
+  --expect "kaxi_certificate.certificate.kaxi.pattern=source_epistemic_dual_output_f32" \
+  --expect "kaxi_certificate.certificate.kaxi.epistemic_lanes.store_global_count>=2" >/dev/null
 
-payload = {
-    "schema": "sounio.kretikos.hpc-source-lowering-gate.v1",
-    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "status": "pass" if not failures else "fail",
-    "source": source,
-    "doctor_log": Path(doctor_log).name,
-    "source_log": Path(source_log).name,
-    "artifact_json": str(artifact_path),
-    "artifact_sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
-    "job_id": artifact.get("job_id"),
-    "host": artifact.get("host"),
-    "runtime": {
-        "status": runtime.get("status"),
-        "reason": runtime.get("reason"),
-        "device_name": runtime.get("device_name"),
-        "driver_version": runtime.get("driver_version"),
-        "cc_major": runtime.get("cc_major"),
-        "cc_minor": runtime.get("cc_minor"),
-        "rung": runtime.get("rung"),
-        "kernel": runtime.get("kernel"),
-    },
-    "certificate": {
-        "status": cert.get("status"),
-        "reason": cert.get("reason"),
-        "schema": cert_payload.get("schema"),
-        "profile": (cert_payload.get("profile") or {}).get("name"),
-        "recognized_pattern": lowering.get("recognized_pattern"),
-        "expected_recognized_pattern": expected_recognized_pattern,
-        "kaxi_pattern": lowering.get("kaxi_pattern"),
-        "profile_hint": lowering.get("profile_hint"),
-        "fallback_path": lowering.get("fallback_path"),
-        "store_global_count": kaxi_lanes.get("store_global_count"),
-        "runtime_status": cert_runtime.get("status"),
-        "runtime_reason": cert_runtime.get("reason"),
-        "runtime_rung": cert_runtime.get("rung"),
-        "runtime_kernel": cert_runtime.get("kernel"),
-    },
-    "failures": failures,
-    "boundaries": [
-        "slurm_worker_is_cuda_runtime_authority",
-        "source_has_no_profile_directive_and_must_lower_through_kaxi_lower_source",
-        "certificate_must_be_source_lowering_not_profile_level",
-        "runtime_acceptance_requires_cuda_driver_load_launch_and_copyback",
-        "does_not_claim_arbitrary_knowledge_generic_lowering",
-        "does_not_claim_arbitrary_sounio_gpu_lowering",
-    ],
+# Aggregate gate JSON via kretikos json-emit (replaces python json.dump).
+__sha() { sha256sum "$1" | awk '{print $1}'; }
+__af() { ./bin/kretikos kaxi-validate-evidence "$1" --print-or-empty "$2"; }
+__opt_string() {
+  local p="$1" v="$2"
+  if [ -z "$v" ]; then printf '%s\0%s\0' "--null" "$p"
+  else printf '%s\0%s\0' "--string" "${p}=${v}"
+  fi
 }
+__opt_int() {
+  local p="$1" v="$2"
+  if [ -z "$v" ]; then printf '%s\0%s\0' "--null" "$p"
+  else printf '%s\0%s\0' "--int" "${p}=${v}"
+  fi
+}
+__emit_obj() { xargs -0 ./bin/kretikos json-emit "$@"; }
 
-gate_path = Path(gate_json)
-gate_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-if failures:
-    raise SystemExit(json.dumps(failures))
-PY
+__rt_status=$(__af "$artifact_json" runtime_validation.status)
+__rt_reason=$(__af "$artifact_json" runtime_validation.reason)
+__rt_dev=$(__af "$artifact_json" runtime_validation.device_name)
+__rt_drv=$(__af "$artifact_json" runtime_validation.driver_version)
+__rt_ccmaj=$(__af "$artifact_json" runtime_validation.cc_major)
+__rt_ccmin=$(__af "$artifact_json" runtime_validation.cc_minor)
+__rt_rung=$(__af "$artifact_json" runtime_validation.rung)
+__rt_kern=$(__af "$artifact_json" runtime_validation.kernel)
+__runtime_obj=$({
+  __opt_string status "$__rt_status"
+  __opt_string reason "$__rt_reason"
+  __opt_string device_name "$__rt_dev"
+  __opt_string driver_version "$__rt_drv"
+  __opt_int cc_major "$__rt_ccmaj"
+  __opt_int cc_minor "$__rt_ccmin"
+  __opt_string rung "$__rt_rung"
+  __opt_string kernel "$__rt_kern"
+} | __emit_obj)
+
+__c_status=$(__af "$artifact_json" kaxi_certificate.status)
+__c_reason=$(__af "$artifact_json" kaxi_certificate.reason)
+__c_schema=$(__af "$artifact_json" kaxi_certificate.certificate.schema)
+__c_profile=$(__af "$artifact_json" kaxi_certificate.certificate.profile.name)
+__c_rec=$(__af "$artifact_json" kaxi_certificate.certificate.lowering.recognized_pattern)
+__c_kp=$(__af "$artifact_json" kaxi_certificate.certificate.lowering.kaxi_pattern)
+__c_ph=$(__af "$artifact_json" kaxi_certificate.certificate.lowering.profile_hint)
+__c_fb=$(__af "$artifact_json" kaxi_certificate.certificate.lowering.fallback_path)
+__c_sgc=$(__af "$artifact_json" kaxi_certificate.certificate.kaxi.epistemic_lanes.store_global_count)
+__c_rs=$(__af "$artifact_json" kaxi_certificate.certificate.runtime.runtime_validation.status)
+__c_rr=$(__af "$artifact_json" kaxi_certificate.certificate.runtime.runtime_validation.reason)
+__c_ru=$(__af "$artifact_json" kaxi_certificate.certificate.runtime.runtime_validation.rung)
+__c_rk=$(__af "$artifact_json" kaxi_certificate.certificate.runtime.runtime_validation.kernel)
+__certificate_obj=$({
+  __opt_string status "$__c_status"
+  __opt_string reason "$__c_reason"
+  __opt_string schema "$__c_schema"
+  __opt_string profile "$__c_profile"
+  __opt_string recognized_pattern "$__c_rec"
+  __opt_string kaxi_pattern "$__c_kp"
+  __opt_string profile_hint "$__c_ph"
+  __opt_string fallback_path "$__c_fb"
+  __opt_int store_global_count "$__c_sgc"
+  __opt_string runtime_status "$__c_rs"
+  __opt_string runtime_reason "$__c_rr"
+  __opt_string runtime_rung "$__c_ru"
+  __opt_string runtime_kernel "$__c_rk"
+} | __emit_obj \
+  --string "expected_recognized_pattern=$expected_recognized_pattern")
+
+__job_id=$(__af "$artifact_json" job_id)
+__host=$(__af "$artifact_json" host)
+
+./bin/kretikos json-emit \
+  --string "schema=sounio.kretikos.hpc-source-lowering-gate.v1" \
+  --string "generated_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --string "status=pass" \
+  --string "source=$SOURCE" \
+  --string "doctor_log=$(basename "$DOCTOR_LOG")" \
+  --string "source_log=$(basename "$SOURCE_LOG")" \
+  --string "artifact_json=$artifact_json" \
+  --string "artifact_sha256=$(__sha "$artifact_json")" \
+  --string-if-nonempty "job_id=$__job_id" \
+  --string-if-nonempty "host=$__host" \
+  --raw-json "runtime=$__runtime_obj" \
+  --raw-json "certificate=$__certificate_obj" \
+  --raw-json "failures=[]" \
+  --array-strings "boundaries=slurm_worker_is_cuda_runtime_authority|source_has_no_profile_directive_and_must_lower_through_kaxi_lower_source|certificate_must_be_source_lowering_not_profile_level|runtime_acceptance_requires_cuda_driver_load_launch_and_copyback|does_not_claim_arbitrary_knowledge_generic_lowering|does_not_claim_arbitrary_sounio_gpu_lowering" \
+  > "$GATE_JSON"
 
 echo "kretikos_hpc_source_lowering_gate: PASS out=$OUT_DIR artifact=$artifact_json"

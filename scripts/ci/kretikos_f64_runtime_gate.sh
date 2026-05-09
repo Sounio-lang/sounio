@@ -35,57 +35,37 @@ for row in "${CASES[@]}"; do
   grep -Fq "st.global.f64" "$case_dir/$profile.ptx"
 
   ./bin/kretikos emit-cubin "$profile" -o "$case_dir/$profile.cubin" >"$case_dir/emit_cubin.out" 2>"$case_dir/emit_cubin.err"
-  python3 - "$case_dir/$profile.cubin" "$profile" "$cubin_size" "$kernel" <<'PY'
-import struct
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-profile = sys.argv[2]
-expected_size = int(sys.argv[3])
-kernel = sys.argv[4].encode()
-data = path.read_bytes()
-if len(data) != expected_size:
-    raise SystemExit(f"unexpected {profile} CUBIN size: {len(data)}")
-if data[:4] != b"\x7fELF":
-    raise SystemExit(f"{profile} CUBIN is not ELF")
-machine = struct.unpack_from("<H", data, 18)[0]
-if machine != 190:
-    raise SystemExit(f"{profile} CUBIN e_machine mismatch: {machine}")
-if kernel not in data:
-    raise SystemExit(f"{profile} CUBIN kernel symbol missing")
-PY
+  # CUBIN structural checks (replaces python struct.unpack heredoc):
+  #   - kretikos cubin-validate: ELF64 magic + e_machine == 190
+  #   - file size matches expected
+  #   - kernel symbol byte sequence present in cubin
+  ./bin/kretikos cubin-validate "$case_dir/$profile.cubin" >/dev/null
+  __actual_size=$(stat -c %s "$case_dir/$profile.cubin")
+  [ "$__actual_size" = "$cubin_size" ] || {
+    echo "unexpected $profile CUBIN size: $__actual_size (want $cubin_size)" >&2
+    exit 1
+  }
+  grep -aFq "$kernel" "$case_dir/$profile.cubin" || {
+    echo "$profile CUBIN kernel symbol missing" >&2
+    exit 1
+  }
 
   ./bin/kretikos run-source "$source" -o "$case_dir/source" --force --validate-runtime >"$case_dir/run_source.out" 2>"$case_dir/run_source.err"
-  python3 - "$case_dir/source/kretikos_bundle.v1.json" "$case_dir/source/kretikos_source_profile.v1.json" "$profile" "$kernel" "$pass_reason" <<'PY'
-import json
-import sys
-
-bundle = json.load(open(sys.argv[1], encoding="utf-8"))
-source = json.load(open(sys.argv[2], encoding="utf-8"))
-profile = sys.argv[3]
-kernel = sys.argv[4]
-pass_reason = sys.argv[5]
-runtime = bundle.get("runtime_validation") or {}
-if source.get("profile") != profile:
-    raise SystemExit("source profile mismatch")
-if source.get("runtime_backed") is not True:
-    raise SystemExit(f"{profile} must be runtime-backed")
-if source.get("runtime_rung") != profile:
-    raise SystemExit("runtime rung mismatch")
-if source.get("kernel") != kernel:
-    raise SystemExit("kernel mismatch")
-if runtime.get("rung") != profile:
-    raise SystemExit("bundle runtime rung mismatch")
-if runtime.get("kernel") != kernel:
-    raise SystemExit("bundle runtime kernel mismatch")
-status = runtime.get("status")
-reason = runtime.get("reason")
-if status not in {"pass", "not_run"}:
-    raise SystemExit(f"unexpected runtime status: {status}/{reason}")
-if status == "pass" and reason != pass_reason:
-    raise SystemExit(f"unexpected runtime pass reason: {reason}")
-PY
+  # Bundle + source-profile validation (replaces python json.load heredoc).
+  ./bin/kretikos kaxi-validate-evidence "$case_dir/source/kretikos_source_profile.v1.json" \
+    --expect "profile=$profile" \
+    --expect "runtime_backed=true" \
+    --expect "runtime_rung=$profile" \
+    --expect "kernel=$kernel" >/dev/null
+  ./bin/kretikos kaxi-validate-evidence "$case_dir/source/kretikos_bundle.v1.json" \
+    --expect "runtime_validation.rung=$profile" \
+    --expect "runtime_validation.kernel=$kernel" \
+    --expect "runtime_validation.status=any:pass|not_run" >/dev/null
+  __runtime_status=$(./bin/kretikos kaxi-validate-evidence "$case_dir/source/kretikos_bundle.v1.json" --print-or-empty runtime_validation.status)
+  if [ "$__runtime_status" = "pass" ]; then
+    ./bin/kretikos kaxi-validate-evidence "$case_dir/source/kretikos_bundle.v1.json" \
+      --expect "runtime_validation.reason=$pass_reason" >/dev/null
+  fi
 done
 
 echo "kretikos_f64_runtime_gate: PASS out=$OUT_DIR cases=${#CASES[@]}"
