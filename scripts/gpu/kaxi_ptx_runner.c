@@ -123,6 +123,20 @@ static int parse_csv_i64(const char *s, int64_t *out, int max) {
     return n;
 }
 
+static int parse_csv_i32(const char *s, int32_t *out, int max) {
+    int n = 0;
+    const char *p = s;
+    while (*p && n < max) {
+        char *end = NULL;
+        long v = strtol(p, &end, 10);
+        if (end == p) break;
+        out[n++] = (int32_t)v;
+        p = end;
+        while (*p == ',' || *p == ' ') p++;
+    }
+    return n;
+}
+
 static int parse_csv_f32(const char *s, float *out, int max) {
     int n = 0;
     const char *p = s;
@@ -163,7 +177,7 @@ int main(int argc, char **argv) {
     const char *path = argv[1];
     const char *kname = "kaxi_kernel";
     int epistemic = 0;
-    int value_type = 0;       // 0 = i64, 1 = f32, 2 = f64
+    int value_type = 0;       // 0 = i64, 1 = f32, 2 = f64, 3 = i32
     unsigned int threads = 1;
     unsigned int blocks = 1;
     int mem_words = 16;
@@ -201,14 +215,15 @@ int main(int argc, char **argv) {
             if (strcmp(argv[i], "f32") == 0) value_type = 1;
             else if (strcmp(argv[i], "f64") == 0) value_type = 2;
             else if (strcmp(argv[i], "i64") == 0) value_type = 0;
+            else if (strcmp(argv[i], "i32") == 0) value_type = 3;
             else { fprintf(stderr, "unknown --type: %s\n", argv[i]); return 2; }
         }
         else { fprintf(stderr, "unknown arg: %s\n", argv[i]); return 2; }
     }
     // Phase W: --cohort-size overrides mem_words for streamed multi-launch.
     if (cohort_size > 0) {
-        if (cohort_size < 1 || cohort_size > (1L << 28)) {
-            fprintf(stderr, "cohort-size out of range (1..2^28)\n"); return 2;
+        if (cohort_size < 1 || cohort_size > 2000000000L) {
+            fprintf(stderr, "cohort-size out of range (1..2000000000)\n"); return 2;
         }
         mem_words = (int)cohort_size;
         if (print_count < 0) print_count = 16;   // sanity-print first 16 only
@@ -286,7 +301,7 @@ int main(int argc, char **argv) {
     rc = cuModuleGetFunction(&fn, mod, kname);
     if (rc != 0) { emit_status("fail", "cuModuleGetFunction_rejected", "cuModuleGetFunction", rc); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
 
-    size_t elem = value_type == 1 ? sizeof(float) : (value_type == 2 ? sizeof(double) : sizeof(int64_t));
+    size_t elem = value_type == 1 ? sizeof(float) : (value_type == 2 ? sizeof(double) : (value_type == 3 ? sizeof(int32_t) : sizeof(int64_t)));
     // Phase W: when streamed, pad allocation so chunk launches with grid =
     // ceil(chunk_words / threads) never overshoot device buffers. Digest is
     // taken only over the first cohort_size words; the trailing pad slots are
@@ -328,6 +343,11 @@ int main(int argc, char **argv) {
             parse_csv_f64(init_mem_csv, host, mem_words);
             cuMemcpyHtoD(d_mem, host, bytes);
             free(host);
+        } else if (value_type == 3) {
+            int32_t *host = (int32_t *)calloc(mem_words, sizeof(int32_t));
+            parse_csv_i32(init_mem_csv, host, mem_words);
+            cuMemcpyHtoD(d_mem, host, bytes);
+            free(host);
         } else {
             int64_t *host = (int64_t *)calloc(mem_words, sizeof(int64_t));
             parse_csv_i64(init_mem_csv, host, mem_words);
@@ -343,6 +363,11 @@ int main(int argc, char **argv) {
         } else if (value_type == 2) {
             double *host = (double *)calloc(mem_words, sizeof(double));
             for (int k = 0; k < mem_words; k++) host[k] = (double)(k + 1);
+            cuMemcpyHtoD(d_mem, host, bytes);
+            free(host);
+        } else if (value_type == 3) {
+            int32_t *host = (int32_t *)calloc(mem_words, sizeof(int32_t));
+            for (int k = 0; k < mem_words; k++) host[k] = k + 1;
             cuMemcpyHtoD(d_mem, host, bytes);
             free(host);
         } else {
@@ -376,6 +401,11 @@ int main(int argc, char **argv) {
             } else if (value_type == 2) {
                 double *host = (double *)calloc(mem_words, sizeof(double));
                 parse_csv_f64(init_var_csv, host, mem_words);
+                cuMemcpyHtoD(d_var, host, bytes);
+                free(host);
+            } else if (value_type == 3) {
+                int32_t *host = (int32_t *)calloc(mem_words, sizeof(int32_t));
+                parse_csv_i32(init_var_csv, host, mem_words);
                 cuMemcpyHtoD(d_var, host, bytes);
                 free(host);
             } else {
@@ -556,6 +586,9 @@ int main(int argc, char **argv) {
     } else if (value_type == 2) {
         double *m = (double *)h_mem;
         for (int i = 0; i < print_count; i++) printf(" %.12g", m[i]);
+    } else if (value_type == 3) {
+        int32_t *m = (int32_t *)h_mem;
+        for (int i = 0; i < print_count; i++) printf(" %d", m[i]);
     } else {
         int64_t *m = (int64_t *)h_mem;
         for (int i = 0; i < print_count; i++) printf(" %lld", (long long)m[i]);
@@ -569,6 +602,9 @@ int main(int argc, char **argv) {
         } else if (value_type == 2) {
             double *v = (double *)h_var;
             for (int i = 0; i < print_count; i++) printf(" %.12g", v[i]);
+        } else if (value_type == 3) {
+            int32_t *v = (int32_t *)h_var;
+            for (int i = 0; i < print_count; i++) printf(" %d", v[i]);
         } else {
             int64_t *v = (int64_t *)h_var;
             for (int i = 0; i < print_count; i++) printf(" %lld", (long long)v[i]);
