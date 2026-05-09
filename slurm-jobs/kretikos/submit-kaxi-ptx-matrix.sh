@@ -198,22 +198,20 @@ CASES+=(
 
 # Sedenion zero-divisor: (e₁+e₁₀)·(e₅+e₁₄) = 0 on thread 0,
 # (e₀)·(e₀) = e₀ on thread 1. Witnesses non-trivial ZD in 𝕊.
-SEDZD_INIT=$(python3 -c "
-m=[0.0]*96
-m[1]=1; m[10]=1; m[16+5]=1; m[16+14]=1
-m[48+0]=1; m[48+16+0]=1
-print(','.join(f'{int(x) if x==int(x) else x:g}' for x in m))")
-SEDZD_EXP=$(python3 -c "
-m=[0.0]*96
-m[1]=1; m[10]=1; m[16+5]=1; m[16+14]=1
-m[48+0]=1; m[48+16+0]=1; m[48+32+0]=1
-print(','.join(f'{int(x) if x==int(x) else x:g}' for x in m))")
+SEDZD_INIT=$(LC_ALL=C awk 'BEGIN{
+  split("1 10 21 30 48 64", a, " "); for(k in a) ones[a[k]]=1;
+  for(i=0;i<96;i++) printf "%s%d", (i?",":""), (i in ones ? 1 : 0);
+}')
+SEDZD_EXP=$(LC_ALL=C awk 'BEGIN{
+  split("1 10 21 30 48 64 80", a, " "); for(k in a) ones[a[k]]=1;
+  for(i=0;i<96;i++) printf "%s%d", (i?",":""), (i in ones ? 1 : 0);
+}')
 CASES+=("sedenion_mul|f32|1|2|96|${SEDZD_INIT}||${SEDZD_EXP}|")
 
 # Phase I: re-segmented variance register file (value 0..127, variance
 # 128..255, scratch %rd256/%rd257, base %rd258/%rd259) unblocks the
 # big-kernel variance modes that Phase H surfaced as broken.
-SEDZD_VAR_ZERO=$(python3 -c "print(','.join(['0']*96))")
+SEDZD_VAR_ZERO=$(LC_ALL=C awk 'BEGIN{ for(i=0;i<96;i++) printf "%s0", (i?",":"") }')
 CASES+=("sedenion_mul|epistemic|1|2|96|${SEDZD_INIT}|${SEDZD_VAR_ZERO}|${SEDZD_EXP}|${SEDZD_VAR_ZERO}")
 CASES+=("sedenion_mul|f32e|1|2|96|${SEDZD_INIT}|${SEDZD_VAR_ZERO}|${SEDZD_EXP}|${SEDZD_VAR_ZERO}")
 
@@ -223,7 +221,7 @@ CASES+=("sedenion_mul|f32e|1|2|96|${SEDZD_INIT}|${SEDZD_VAR_ZERO}|${SEDZD_EXP}|$
 # 0 through every mul (zero · anything = zero). Same mem expected as f32.
 OCT_INIT="1,2,3,4,5,6,7,8,9,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0"
 OCT_EXP="1,2,3,4,5,6,7,8,9,1,0,0,0,0,0,0,7,19,31,33,51,49,55,79,0,1,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,1,0,0,0,0"
-OCT_VAR_ZERO=$(python3 -c "print(','.join(['0']*48))")
+OCT_VAR_ZERO=$(LC_ALL=C awk 'BEGIN{ for(i=0;i<48;i++) printf "%s0", (i?",":"") }')
 CASES+=("octonion_mul|epistemic|1|2|48|${OCT_INIT}|${OCT_VAR_ZERO}|${OCT_EXP}|${OCT_VAR_ZERO}")
 CASES+=("octonion_mul|f32e|1|2|48|${OCT_INIT}|${OCT_VAR_ZERO}|${OCT_EXP}|${OCT_VAR_ZERO}")
 PATTERN_FOR[sedenion_mul]=sedenion_mul
