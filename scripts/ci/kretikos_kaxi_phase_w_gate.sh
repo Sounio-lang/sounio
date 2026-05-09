@@ -48,6 +48,13 @@ PHW_STAGE_DIR="${PHW_STAGE_DIR:-$(mktemp -d /tmp/phase_w_gate.XXXXXX)}"
 # RTX A5000 the 1M-patient run lands at ~28 ms; ceiling is set generously to
 # catch ≥2× regressions in launch overhead without flapping on cluster jitter.
 PHW_WALL_CEILING_US="${PHW_WALL_CEILING_US:-60000}"
+# Phase W.1: optional cohort sweep. Empty disables the sweep (default).
+# Set e.g. "1000000 10000000 100000000" to record the throughput curve.
+PHW_COHORT_SWEEP="${PHW_COHORT_SWEEP:-}"
+# Phase W.1: cohort size at/above which streams=4 wall MUST beat streams=1.
+# Below this threshold, the sweep records but does not assert (launches
+# dominate; the H2D-overlap win lives at larger cohort sizes).
+PHW_REQUIRE_SPEEDUP_AT="${PHW_REQUIRE_SPEEDUP_AT:-100000000}"
 
 if [[ ! -f "${PHW_PTX}" ]]; then
   echo "kretikos_kaxi_phase_w_gate: FAIL — PTX missing: ${PHW_PTX}"
@@ -81,6 +88,19 @@ run_one() {
     --streams "${streams}" --chunks "${chunks}" \
     --init-file "${PHW_STAGE_DIR}/init.mem.bin" \
     --init-var-file "${PHW_STAGE_DIR}/init.var.bin" 2>&1
+}
+
+# Phase W.1 sweep helper: sample at the given cohort using its own
+# init.{mem,var}.bin produced just-in-time by the sampler.
+run_at_cohort() {
+  local cohort="$1" streams="$2" chunks="$3" out_dir="$4"
+  "${PHW_STAGE_DIR}/sampler" --out-dir "${out_dir}" --cohort "${cohort}" --seed "${PHW_SEED}" >/dev/null
+  "${PHW_STAGE_DIR}/runner" "${PHW_PTX}" \
+    --kernel kaxi_kernel --epistemic --type f64 \
+    --cohort-size "${cohort}" --threads "${PHW_THREADS}" \
+    --streams "${streams}" --chunks "${chunks}" \
+    --init-file "${out_dir}/init.mem.bin" \
+    --init-var-file "${out_dir}/init.var.bin" 2>&1
 }
 
 extract_digest() {
@@ -138,7 +158,49 @@ if [[ "${max_wall}" -gt "${PHW_WALL_CEILING_US}" ]]; then
   wall_fail=1
 fi
 
-if [[ "${fail}" -ne 0 || "${wall_fail}" -ne 0 ]]; then
+# ---------- Phase W.1: cohort sweep + concurrent-throughput assertion ----------
+sweep_fail=0
+if [[ -n "${PHW_COHORT_SWEEP}" ]]; then
+  echo ""
+  echo "[Phase W.1] cohort sweep — pinned async H2D throughput curve"
+  echo "  threshold for required speedup: cohort >= ${PHW_REQUIRE_SPEEDUP_AT}"
+  for cohort in ${PHW_COHORT_SWEEP}; do
+    sweep_dir="${PHW_STAGE_DIR}/sweep_${cohort}"
+    mkdir -p "${sweep_dir}"
+    seq_out="$(run_at_cohort "${cohort}" 1 64 "${sweep_dir}")"
+    seq_dig="$(extract_digest "${seq_out}")"
+    seq_wall="$(extract_wall "${seq_out}")"
+    par_out="$(run_at_cohort "${cohort}" 4 64 "${sweep_dir}")"
+    par_dig="$(extract_digest "${par_out}")"
+    par_wall="$(extract_wall "${par_out}")"
+    if [[ -z "${seq_dig}" || -z "${par_dig}" ]]; then
+      echo "  cohort=${cohort} FAIL — missing PHW line (seq_dig=${seq_dig:-EMPTY} par_dig=${par_dig:-EMPTY})"
+      sweep_fail=$((sweep_fail + 1))
+      continue
+    fi
+    # Speedup as integer × 100 to avoid bash float math.
+    if [[ "${par_wall}" -gt 0 ]]; then
+      speedup_x100=$(( seq_wall * 100 / par_wall ))
+    else
+      speedup_x100=0
+    fi
+    speedup_int=$(( speedup_x100 / 100 ))
+    speedup_frac=$(( speedup_x100 % 100 ))
+    note="ok"
+    if [[ "${seq_dig}" != "${par_dig}" ]]; then
+      note="DIGEST_MISMATCH"
+      sweep_fail=$((sweep_fail + 1))
+    fi
+    if [[ "${cohort}" -ge "${PHW_REQUIRE_SPEEDUP_AT}" && "${speedup_x100}" -le 100 ]]; then
+      note="${note}|SPEEDUP_FAIL(<=1.00)"
+      sweep_fail=$((sweep_fail + 1))
+    fi
+    printf "  cohort=%d streams=1_us=%d streams=4_us=%d speedup=%d.%02dx %s\n" \
+      "${cohort}" "${seq_wall}" "${par_wall}" "${speedup_int}" "${speedup_frac}" "${note}"
+  done
+fi
+
+if [[ "${fail}" -ne 0 || "${wall_fail}" -ne 0 || "${sweep_fail}" -ne 0 ]]; then
   echo "kretikos_kaxi_phase_w_gate: FAIL"
   exit 1
 fi

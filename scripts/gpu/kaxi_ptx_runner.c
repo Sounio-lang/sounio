@@ -297,12 +297,17 @@ int main(int argc, char **argv) {
     }
     size_t bytes = (size_t)alloc_words * elem;
     size_t cohort_bytes = (size_t)mem_words * elem;  // for digest scoping
+    // Phase W.1: when streamed, we route inputs through pinned host memory
+    // and do async H2D per chunk inside the stream loop instead of one big
+    // sync H2D up front. This is the only way streams genuinely overlap
+    // with H2D/D2H.
+    int phase_w1_async = (cohort_size > 0 && n_streams >= 1);
     CUdeviceptr d_mem = 0, d_var = 0;
     rc = cuMemAlloc(&d_mem, bytes);
     if (rc != 0) { emit_status("fail", "cuMemAlloc_failed", "cuMemAlloc(mem)", rc); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
     cuMemsetD8(d_mem, 0, bytes);
 
-    if (init_mem_file) {
+    if (!phase_w1_async && init_mem_file) {
         FILE *f = fopen(init_mem_file, "rb");
         if (!f) { emit_status("fail", "init_file_open_failed", "fopen(init_mem)", 0); cuMemFree(d_mem); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
         void *host = calloc(1, bytes);  // zeroed; pad slots (alloc_words - mem_words) stay 0
@@ -312,7 +317,7 @@ int main(int argc, char **argv) {
         if (got != cohort_bytes) { free(host); emit_status("fail", "init_file_short_read", "fread(init_mem)", (int)got); cuMemFree(d_mem); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
         cuMemcpyHtoD(d_mem, host, bytes);
         free(host);
-    } else if (init_mem_csv) {
+    } else if (!phase_w1_async && init_mem_csv) {
         if (value_type == 1) {
             float *host = (float *)calloc(mem_words, sizeof(float));
             parse_csv_f32(init_mem_csv, host, mem_words);
@@ -329,7 +334,7 @@ int main(int argc, char **argv) {
             cuMemcpyHtoD(d_mem, host, bytes);
             free(host);
         }
-    } else if (verify_init_seq) {
+    } else if (!phase_w1_async && verify_init_seq) {
         if (value_type == 1) {
             float *host = (float *)calloc(mem_words, sizeof(float));
             for (int k = 0; k < mem_words; k++) host[k] = (float)(k + 1);
@@ -352,7 +357,7 @@ int main(int argc, char **argv) {
         rc = cuMemAlloc(&d_var, bytes);
         if (rc != 0) { emit_status("fail", "cuMemAlloc_failed", "cuMemAlloc(var)", rc); cuMemFree(d_mem); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
         cuMemsetD8(d_var, 0, bytes);
-        if (init_var_file) {
+        if (!phase_w1_async && init_var_file) {
             FILE *f = fopen(init_var_file, "rb");
             if (!f) { emit_status("fail", "init_file_open_failed", "fopen(init_var)", 0); cuMemFree(d_mem); cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
             void *host = calloc(1, bytes);  // pad slots stay 0
@@ -362,7 +367,7 @@ int main(int argc, char **argv) {
             if (got != cohort_bytes) { free(host); emit_status("fail", "init_file_short_read", "fread(init_var)", (int)got); cuMemFree(d_mem); cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
             cuMemcpyHtoD(d_var, host, bytes);
             free(host);
-        } else if (init_var_csv) {
+        } else if (!phase_w1_async && init_var_csv) {
             if (value_type == 1) {
                 float *host = (float *)calloc(mem_words, sizeof(float));
                 parse_csv_f32(init_var_csv, host, mem_words);
@@ -386,21 +391,65 @@ int main(int argc, char **argv) {
     args[0] = &d_mem;
     args[1] = epistemic ? (void *)&d_var : NULL;
 
-    void *h_mem = calloc((size_t)alloc_words, elem);
-    void *h_var = epistemic ? calloc((size_t)alloc_words, elem) : NULL;
+    // h_mem / h_var allocation strategy:
+    //   Phase V (single-launch): plain calloc, freed with free().
+    //   Phase W.1 (streamed): pinned via cuMemHostAlloc, freed with cuMemFreeHost.
+    //   The pinned path also reads init files DIRECTLY into the pinned region,
+    //   so no separate sync H2D up front — the stream loop does H2D async.
+    void *h_mem = NULL;
+    void *h_var = NULL;
     long stream_wall_us = 0;
     long stream_chunks_run = 0;
+    cuMemHostAlloc_t cuMemHostAlloc = NULL;
+    cuMemFreeHost_t  cuMemFreeHost  = NULL;
+    cuMemcpyHtoDAsync_t cuMemcpyHtoDAsync = NULL;
 
     if (cohort_size > 0 && n_streams >= 1) {
-        // ---- Phase W: streamed multi-launch over a clinical-scale cohort ----
+        // ---- Phase W.1: streamed multi-launch w/ pinned-host async H2D ----
         cuStreamCreate_t cuStreamCreate = (cuStreamCreate_t)dlsym(lib, "cuStreamCreate");
         cuStreamDestroy_t cuStreamDestroy = (cuStreamDestroy_t)dlsym(lib, "cuStreamDestroy");
         cuStreamSynchronize_t cuStreamSynchronize = (cuStreamSynchronize_t)dlsym(lib, "cuStreamSynchronize");
         cuMemcpyDtoHAsync_t cuMemcpyDtoHAsync = (cuMemcpyDtoHAsync_t)dlsym(lib, "cuMemcpyDtoHAsync");
-        if (!cuStreamCreate || !cuStreamDestroy || !cuStreamSynchronize || !cuMemcpyDtoHAsync) {
-            emit_status("fail", "cuda_stream_symbols_missing", "dlsym(streams)", 0);
-            free(h_mem); if (h_var) free(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var);
+        cuMemHostAlloc = (cuMemHostAlloc_t)dlsym(lib, "cuMemHostAlloc");
+        cuMemFreeHost  = (cuMemFreeHost_t) dlsym(lib, "cuMemFreeHost");
+        cuMemcpyHtoDAsync = (cuMemcpyHtoDAsync_t)dlsym(lib, "cuMemcpyHtoDAsync");
+        if (!cuStreamCreate || !cuStreamDestroy || !cuStreamSynchronize || !cuMemcpyDtoHAsync
+            || !cuMemHostAlloc || !cuMemFreeHost || !cuMemcpyHtoDAsync) {
+            emit_status("fail", "cuda_stream_symbols_missing", "dlsym(streams+pinned)", 0);
+            cuMemFree(d_mem); if (d_var) cuMemFree(d_var);
             cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1;
+        }
+        // Allocate pinned host I/O buffers.
+        rc = cuMemHostAlloc(&h_mem, bytes, 0);
+        if (rc != 0) {
+            emit_status("fail", "cuMemHostAlloc_failed", "cuMemHostAlloc(mem)", rc);
+            cuMemFree(d_mem); if (d_var) cuMemFree(d_var);
+            cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1;
+        }
+        memset(h_mem, 0, bytes);
+        if (epistemic) {
+            rc = cuMemHostAlloc(&h_var, bytes, 0);
+            if (rc != 0) {
+                emit_status("fail", "cuMemHostAlloc_failed", "cuMemHostAlloc(var)", rc);
+                cuMemFreeHost(h_mem); cuMemFree(d_mem); if (d_var) cuMemFree(d_var);
+                cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1;
+            }
+            memset(h_var, 0, bytes);
+        }
+        // Read init files DIRECTLY into pinned buffers (no extra copy).
+        if (init_mem_file) {
+            FILE *f = fopen(init_mem_file, "rb");
+            if (!f) { emit_status("fail", "init_file_open_failed", "fopen(init_mem)", 0); cuMemFreeHost(h_mem); if (h_var) cuMemFreeHost(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            size_t got = fread(h_mem, 1, cohort_bytes, f);
+            fclose(f);
+            if (got != cohort_bytes) { emit_status("fail", "init_file_short_read", "fread(init_mem)", (int)got); cuMemFreeHost(h_mem); if (h_var) cuMemFreeHost(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+        }
+        if (epistemic && init_var_file) {
+            FILE *f = fopen(init_var_file, "rb");
+            if (!f) { emit_status("fail", "init_file_open_failed", "fopen(init_var)", 0); cuMemFreeHost(h_mem); cuMemFreeHost(h_var); cuMemFree(d_mem); cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            size_t got = fread(h_var, 1, cohort_bytes, f);
+            fclose(f);
+            if (got != cohort_bytes) { emit_status("fail", "init_file_short_read", "fread(init_var)", (int)got); cuMemFreeHost(h_mem); cuMemFreeHost(h_var); cuMemFree(d_mem); cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
         }
         int chunks_req = (n_chunks > 0) ? n_chunks : (n_streams * 4);
         if (chunks_req > mem_words) chunks_req = mem_words;
@@ -415,7 +464,7 @@ int main(int argc, char **argv) {
         CUstream *streams = (CUstream *)calloc((size_t)n_streams, sizeof(CUstream));
         for (int s = 0; s < n_streams; s++) {
             rc = cuStreamCreate(&streams[s], 0);
-            if (rc != 0) { emit_status("fail", "cuStreamCreate_failed", "cuStreamCreate", rc); free(streams); free(h_mem); if (h_var) free(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            if (rc != 0) { emit_status("fail", "cuStreamCreate_failed", "cuStreamCreate", rc); free(streams); cuMemFreeHost(h_mem); if (h_var) cuMemFreeHost(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
         }
 
         struct timespec t0, t1;
@@ -438,20 +487,30 @@ int main(int argc, char **argv) {
             CUdeviceptr d_var_c = epistemic ? (d_var + off_bytes) : 0;
             void *args_c[2]; args_c[0] = &d_mem_c; args_c[1] = epistemic ? (void *)&d_var_c : NULL;
 
+            // Phase W.1: per-chunk async H2D from pinned host. Stream s
+            // serializes (H2D s_c → launch s_c → D2H s_c) but stream s+1
+            // can run its H2D concurrently on a separate copy engine.
+            rc = cuMemcpyHtoDAsync(d_mem_c, (const char *)h_mem + off_bytes, this_bytes, streams[s]);
+            if (rc != 0) { emit_status("fail", "cuMemcpyHtoDAsync_failed", "cuMemcpyHtoDAsync(mem)", rc); for (int x = 0; x < n_streams; x++) cuStreamDestroy(streams[x]); free(streams); cuMemFreeHost(h_mem); if (h_var) cuMemFreeHost(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            if (epistemic) {
+                rc = cuMemcpyHtoDAsync(d_var_c, (const char *)h_var + off_bytes, this_bytes, streams[s]);
+                if (rc != 0) { emit_status("fail", "cuMemcpyHtoDAsync_failed", "cuMemcpyHtoDAsync(var)", rc); for (int x = 0; x < n_streams; x++) cuStreamDestroy(streams[x]); free(streams); cuMemFreeHost(h_mem); cuMemFreeHost(h_var); cuMemFree(d_mem); cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            }
+
             rc = cuLaunchKernel(fn, blocks_this, 1, 1, threads, 1, 1, 0, (void *)streams[s], args_c, NULL);
-            if (rc != 0) { emit_status("fail", "cuLaunchKernel_rejected", "cuLaunchKernel(streamed)", rc); for (int x = 0; x < n_streams; x++) cuStreamDestroy(streams[x]); free(streams); free(h_mem); if (h_var) free(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            if (rc != 0) { emit_status("fail", "cuLaunchKernel_rejected", "cuLaunchKernel(streamed)", rc); for (int x = 0; x < n_streams; x++) cuStreamDestroy(streams[x]); free(streams); cuMemFreeHost(h_mem); if (h_var) cuMemFreeHost(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
 
             rc = cuMemcpyDtoHAsync((char *)h_mem + off_bytes, d_mem_c, this_bytes, streams[s]);
-            if (rc != 0) { emit_status("fail", "cuMemcpyDtoHAsync_failed", "cuMemcpyDtoHAsync(mem)", rc); for (int x = 0; x < n_streams; x++) cuStreamDestroy(streams[x]); free(streams); free(h_mem); if (h_var) free(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            if (rc != 0) { emit_status("fail", "cuMemcpyDtoHAsync_failed", "cuMemcpyDtoHAsync(mem)", rc); for (int x = 0; x < n_streams; x++) cuStreamDestroy(streams[x]); free(streams); cuMemFreeHost(h_mem); if (h_var) cuMemFreeHost(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
             if (epistemic) {
                 rc = cuMemcpyDtoHAsync((char *)h_var + off_bytes, d_var_c, this_bytes, streams[s]);
-                if (rc != 0) { emit_status("fail", "cuMemcpyDtoHAsync_failed", "cuMemcpyDtoHAsync(var)", rc); for (int x = 0; x < n_streams; x++) cuStreamDestroy(streams[x]); free(streams); free(h_mem); if (h_var) free(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+                if (rc != 0) { emit_status("fail", "cuMemcpyDtoHAsync_failed", "cuMemcpyDtoHAsync(var)", rc); for (int x = 0; x < n_streams; x++) cuStreamDestroy(streams[x]); free(streams); cuMemFreeHost(h_mem); cuMemFreeHost(h_var); cuMemFree(d_mem); cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
             }
             stream_chunks_run++;
         }
         for (int s = 0; s < n_streams; s++) {
             rc = cuStreamSynchronize(streams[s]);
-            if (rc != 0) { emit_status("fail", "cuStreamSynchronize_failed", "cuStreamSynchronize", rc); for (int x = 0; x < n_streams; x++) cuStreamDestroy(streams[x]); free(streams); free(h_mem); if (h_var) free(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            if (rc != 0) { emit_status("fail", "cuStreamSynchronize_failed", "cuStreamSynchronize", rc); for (int x = 0; x < n_streams; x++) cuStreamDestroy(streams[x]); free(streams); cuMemFreeHost(h_mem); if (h_var) cuMemFreeHost(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
         }
         clock_gettime(CLOCK_MONOTONIC, &t1);
         stream_wall_us = (long)((t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000L);
@@ -460,6 +519,15 @@ int main(int argc, char **argv) {
         free(streams);
     } else {
         // ---- Phase V (and earlier): single default-stream launch ----
+        h_mem = calloc((size_t)alloc_words, elem);
+        h_var = epistemic ? calloc((size_t)alloc_words, elem) : NULL;
+        if (!h_mem || (epistemic && !h_var)) {
+            emit_status("fail", "host_alloc_failed", "calloc(h_mem|h_var)", 0);
+            if (h_mem) free(h_mem);
+            if (h_var) free(h_var);
+            cuMemFree(d_mem); if (d_var) cuMemFree(d_var);
+            cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1;
+        }
         rc = cuLaunchKernel(fn,
             /*grid*/ blocks, 1, 1,
             /*block*/ threads, 1, 1,
@@ -519,7 +587,13 @@ int main(int argc, char **argv) {
                (unsigned long long)mem_digest, (unsigned long long)var_digest);
     }
 
-    free(h_mem); if (h_var) free(h_var);
+    if (phase_w1_async) {
+        if (h_mem && cuMemFreeHost) cuMemFreeHost(h_mem);
+        if (h_var && cuMemFreeHost) cuMemFreeHost(h_var);
+    } else {
+        if (h_mem) free(h_mem);
+        if (h_var) free(h_var);
+    }
     cuMemFree(d_mem); if (d_var) cuMemFree(d_var);
     cuModuleUnload(mod);
     cuCtxDestroy(ctx);
