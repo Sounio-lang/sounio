@@ -230,7 +230,8 @@ int main(int argc, char **argv) {
     }
     if (print_count < 0) print_count = mem_words;
     if (print_count > mem_words) print_count = mem_words;
-    if (mem_words < 1 || mem_words > (1 << 28)) {
+    // --mem-words small-scale cap only applies when not using --cohort-size.
+    if (cohort_size == 0 && (mem_words < 1 || mem_words > (1 << 28))) {
         fprintf(stderr, "mem-words out of range (1..2^28)\n"); return 2;
     }
     if (threads < 1 || threads > 1024) {

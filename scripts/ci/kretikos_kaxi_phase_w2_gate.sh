@@ -97,7 +97,8 @@ WORKER_CTR="${PHW2_WORKER_CTR:-worker}"
 
 # ---------- [1/5] build local binaries ----------
 
-STAGE_DIR="${PHW2_STAGE_DIR:-$(mktemp -d /tmp/phase_w2_gate.XXXXXX)}"
+mkdir -p /workspace/tmp
+STAGE_DIR="${PHW2_STAGE_DIR:-$(mktemp -d /workspace/tmp/phase_w2_gate.XXXXXX)}"
 mkdir -p "${STAGE_DIR}/shard0"
 
 echo "[1/5] building local sampler + runner"
@@ -134,14 +135,15 @@ if ! echo "${remote_build_out}" | grep -q 'BUILD_OK'; then
 fi
 echo "  remote build: OK"
 
-# ---------- [3/5] CPU analytic reference (full cohort) ----------
+# ---------- [3/5] CPU analytic reference (counts-only, no file I/O) ----------
 
-echo "[3/5] CPU analytic reference (full cohort=${PHW2_COHORT})"
+echo "[3/5] CPU analytic reference (full cohort=${PHW2_COHORT}, counts-only)"
+mkdir -p "${STAGE_DIR}/ref"
 "${STAGE_DIR}/sampler" \
-  --out-dir "${STAGE_DIR}" \
-  --cohort "${PHW2_COHORT}" --seed "${PHW2_SEED}" --type "${PHW2_TYPE}" >/dev/null
-ref_in_budget="$(grep '^in_budget=' "${STAGE_DIR}/expected.summary" | cut -d= -f2)"
-ref_nan_count="$(grep '^nan_count=' "${STAGE_DIR}/expected.summary" | cut -d= -f2)"
+  --out-dir "${STAGE_DIR}/ref" \
+  --cohort "${PHW2_COHORT}" --seed "${PHW2_SEED}" --type "${PHW2_TYPE}" --counts-only >/dev/null
+ref_in_budget="$(grep '^in_budget=' "${STAGE_DIR}/ref/expected.summary" | cut -d= -f2)"
+ref_nan_count="$(grep '^nan_count=' "${STAGE_DIR}/ref/expected.summary" | cut -d= -f2)"
 echo "  analytic: in_budget=${ref_in_budget} nan_count=${ref_nan_count}"
 
 # ---------- [4/5] concurrent GPU shards ----------
@@ -171,19 +173,22 @@ SHARD0_PID=$!
 # Shard 1: RTX A5000 (remote r740), patients [cohort/2, cohort)
 SHARD1_OUT="${STAGE_DIR}/shard1_out.txt"
 {
+  # Use /workspace/compiler-remote on the A5000 worker for shard 1 files.
   REMOTE_SHARD1_CMD="
-    mkdir -p /tmp/phw2_shard1 && \
+    mkdir -p /workspace/compiler-remote/tmp/phw2_shard1 && \
     /tmp/phw2_remote_sampler \
-      --out-dir /tmp/phw2_shard1 \
+      --out-dir /workspace/compiler-remote/tmp/phw2_shard1 \
       --cohort '${PHW2_COHORT}' --seed '${PHW2_SEED}' --type '${PHW2_TYPE}' \
       --shard-index 1 --shard-count 2 >/dev/null && \
-    shard1_patients=\$(grep '^shard_patients=' /tmp/phw2_shard1/expected.summary | cut -d= -f2) && \
+    echo 'SHARD1_EXPECTED_IN_BUDGET='$(grep '^in_budget=' /workspace/compiler-remote/tmp/phw2_shard1/expected.summary | cut -d= -f2) && \
+    echo 'SHARD1_EXPECTED_NAN_COUNT='$(grep '^nan_count=' /workspace/compiler-remote/tmp/phw2_shard1/expected.summary | cut -d= -f2) && \
+    shard1_patients=\$(grep '^shard_patients=' /workspace/compiler-remote/tmp/phw2_shard1/expected.summary | cut -d= -f2) && \
     /tmp/phw2_remote_runner /tmp/phw2_kernel.ptx \
       --kernel kaxi_kernel --epistemic --type '${PHW2_TYPE}' \
       --cohort-size \"\${shard1_patients}\" --threads '${PHW2_THREADS}' \
       --streams '${PHW2_STREAMS}' --chunks '${PHW2_CHUNKS}' \
-      --init-file /tmp/phw2_shard1/init.mem.bin \
-      --init-var-file /tmp/phw2_shard1/init.var.bin
+      --init-file /workspace/compiler-remote/tmp/phw2_shard1/init.mem.bin \
+      --init-var-file /workspace/compiler-remote/tmp/phw2_shard1/init.var.bin
   "
   "${WORKER_SCRIPT}" "${REMOTE_SHARD1_CMD}"
 } > "${SHARD1_OUT}" 2>&1 &

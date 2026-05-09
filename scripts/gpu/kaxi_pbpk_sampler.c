@@ -117,6 +117,10 @@ int main(int argc, char **argv) {
     // The factor 4 = 2 uniforms per Box-Muller call × 2 calls per patient.
     long shard_index = 0;
     long shard_count = 1;
+    // Phase W.2: --counts-only skips writing init.mem.bin / init.var.bin.
+    // Used for the full-cohort analytic reference where only in_budget /
+    // nan_count are needed (avoids large file writes).
+    int counts_only = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
@@ -136,6 +140,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[i], "f64")) type_f32 = 0;
             else { fprintf(stderr, "error: --type must be f32 or f64\n"); return 2; }
         }
+        else if (!strcmp(argv[i], "--counts-only")) { counts_only = 1; }
         else { fprintf(stderr, "error: unknown arg: %s\n", argv[i]); usage(argv[0]); return 2; }
     }
     if (!out_dir || cohort <= 0) { usage(argv[0]); return 2; }
@@ -152,9 +157,12 @@ int main(int argc, char **argv) {
 
     size_t elem = type_f32 ? sizeof(float) : sizeof(double);
     size_t bytes = (size_t)shard_patients * elem;
-    double *v_buf = (double *)malloc((size_t)shard_patients * sizeof(double));
-    double *s_buf = (double *)malloc((size_t)shard_patients * sizeof(double));
-    if (!v_buf || !s_buf) { fprintf(stderr, "error: malloc(%zu) failed\n", bytes); return 1; }
+    // --counts-only: skip buffer allocation; loop streams without storage.
+    double *v_buf = counts_only ? NULL : (double *)malloc((size_t)shard_patients * sizeof(double));
+    double *s_buf = counts_only ? NULL : (double *)malloc((size_t)shard_patients * sizeof(double));
+    if (!counts_only && (!v_buf || !s_buf)) {
+        fprintf(stderr, "error: malloc(%zu) failed\n", bytes); return 1;
+    }
 
     // FNV-1a 64-bit accumulators for output digests
     uint64_t mem_digest = 0xcbf29ce484222325ULL;
@@ -176,8 +184,7 @@ int main(int argc, char **argv) {
         // σ²₀: truncated normal at 0 (positive variance) around sigma0_mean
         double s = sigma0_mean + sigma0_sigma * z2;
         if (s < 1e-9) s = 1e-9;
-        v_buf[i] = v;
-        s_buf[i] = s;
+        if (!counts_only) { v_buf[i] = v; s_buf[i] = s; }
 
         // CPU reference: σ²(√v) = σ²₀ / (4·v); in-budget iff < threshold.
         // For --type f32, run the gate decision in float to match GPU rounding
@@ -193,34 +200,36 @@ int main(int argc, char **argv) {
         }
         if (gate_pass) in_budget++; else nan_count++;
 
-        // Roll digests over the input buffers (verification compares input
-        // determinism, not GPU output — actual GPU output is digested in the
-        // runner and compared cross-stream / cross-launch).
-        uint64_t v_bits, s_bits;
-        memcpy(&v_bits, &v, 8); memcpy(&s_bits, &s, 8);
-        mem_digest ^= v_bits; mem_digest *= 0x100000001b3ULL;
-        var_digest ^= s_bits; var_digest *= 0x100000001b3ULL;
+        // Roll digests (skipped in counts-only mode — no output buffers).
+        if (!counts_only) {
+            uint64_t v_bits, s_bits;
+            memcpy(&v_bits, &v, 8); memcpy(&s_bits, &s, 8);
+            mem_digest ^= v_bits; mem_digest *= 0x100000001b3ULL;
+            var_digest ^= s_bits; var_digest *= 0x100000001b3ULL;
+        }
     }
 
-    // Convert to f32 if requested (GPU dialect = f32e PTX).
+    // Convert to f32 and write init files — skipped in --counts-only mode.
+    char path[2048];
     void *v_out = v_buf, *s_out = s_buf;
     float *vf_buf = NULL, *sf_buf = NULL;
-    if (type_f32) {
-        vf_buf = (float *)malloc((size_t)shard_patients * sizeof(float));
-        sf_buf = (float *)malloc((size_t)shard_patients * sizeof(float));
-        if (!vf_buf || !sf_buf) { fprintf(stderr, "error: f32 buffer malloc\n"); return 1; }
-        for (long i = 0; i < shard_patients; i++) { vf_buf[i] = (float)v_buf[i]; sf_buf[i] = (float)s_buf[i]; }
-        v_out = vf_buf; s_out = sf_buf;
-    }
-
-    char path[2048];
-    snprintf(path, sizeof(path), "%s/init.mem.bin", out_dir);
-    if (write_all(path, v_out, bytes) != 0) {
-        fprintf(stderr, "error: write %s: %s\n", path, strerror(errno)); return 1;
-    }
-    snprintf(path, sizeof(path), "%s/init.var.bin", out_dir);
-    if (write_all(path, s_out, bytes) != 0) {
-        fprintf(stderr, "error: write %s: %s\n", path, strerror(errno)); return 1;
+    if (!counts_only) {
+        if (type_f32) {
+            vf_buf = (float *)malloc((size_t)shard_patients * sizeof(float));
+            sf_buf = (float *)malloc((size_t)shard_patients * sizeof(float));
+            if (!vf_buf || !sf_buf) { fprintf(stderr, "error: f32 buffer malloc\n"); return 1; }
+            for (long i = 0; i < shard_patients; i++) { vf_buf[i] = (float)v_buf[i]; sf_buf[i] = (float)s_buf[i]; }
+            v_out = vf_buf; s_out = sf_buf;
+        }
+        char path2[2048];
+        snprintf(path2, sizeof(path2), "%s/init.mem.bin", out_dir);
+        if (write_all(path2, v_out, bytes) != 0) {
+            fprintf(stderr, "error: write %s: %s\n", path2, strerror(errno)); return 1;
+        }
+        snprintf(path2, sizeof(path2), "%s/init.var.bin", out_dir);
+        if (write_all(path2, s_out, bytes) != 0) {
+            fprintf(stderr, "error: write %s: %s\n", path2, strerror(errno)); return 1;
+        }
     }
     snprintf(path, sizeof(path), "%s/expected.summary", out_dir);
     FILE *fs = fopen(path, "w");
