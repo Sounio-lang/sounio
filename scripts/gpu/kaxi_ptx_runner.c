@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <math.h>
 
 typedef int CUdevice;
 typedef void *CUcontext;
@@ -195,6 +196,9 @@ int main(int argc, char **argv) {
     // in [classify_low, classify_high]. Reports in_window + out_of_window in PHX line.
     float classify_low = 0.0f, classify_high = 0.0f;
     int classify_window = 0;
+    // Phase Y: 4-buffer GUM mode (C1, C2, V11, V22). Single-launch only.
+    int gum_mode = 0;
+    const char *init_v11_file = NULL, *init_v22_file = NULL;
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--kernel") == 0 && i + 1 < argc) { kname = argv[++i]; }
@@ -221,6 +225,9 @@ int main(int argc, char **argv) {
             classify_window = 1;
         }
         else if (strcmp(argv[i], "--epistemic") == 0) { epistemic = 1; }
+        else if (strcmp(argv[i], "--gum") == 0) { gum_mode = 1; epistemic = 1; }
+        else if (strcmp(argv[i], "--init-v11-file") == 0 && i + 1 < argc) { init_v11_file = argv[++i]; }
+        else if (strcmp(argv[i], "--init-v22-file") == 0 && i + 1 < argc) { init_v22_file = argv[++i]; }
         else if (strcmp(argv[i], "--type") == 0 && i + 1 < argc) {
             i++;
             if (strcmp(argv[i], "f32") == 0) value_type = 1;
@@ -329,7 +336,13 @@ int main(int argc, char **argv) {
     // sync H2D up front. This is the only way streams genuinely overlap
     // with H2D/D2H.
     int phase_w1_async = (cohort_size > 0 && n_streams >= 1);
+    // Phase Y: GUM mode requires single-launch (no streaming).
+    if (gum_mode && phase_w1_async) {
+        fprintf(stderr, "error: --gum is incompatible with --streams (use single-launch)\n");
+        cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 2;
+    }
     CUdeviceptr d_mem = 0, d_var = 0;
+    CUdeviceptr d_v11 = 0, d_v22 = 0;  // Phase Y GUM extra buffers
     rc = cuMemAlloc(&d_mem, bytes);
     if (rc != 0) { emit_status("fail", "cuMemAlloc_failed", "cuMemAlloc(mem)", rc); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
     cuMemsetD8(d_mem, 0, bytes);
@@ -429,9 +442,42 @@ int main(int argc, char **argv) {
         }
     }
 
-    void *args[2];
+    // Phase Y: allocate and load V11/V22 GUM buffers.
+    if (gum_mode) {
+        rc = cuMemAlloc(&d_v11, bytes);
+        if (rc != 0) { emit_status("fail","cuMemAlloc_failed","cuMemAlloc(v11)",rc); cuMemFree(d_mem); cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+        cuMemsetD8(d_v11, 0, bytes);
+        rc = cuMemAlloc(&d_v22, bytes);
+        if (rc != 0) { emit_status("fail","cuMemAlloc_failed","cuMemAlloc(v22)",rc); cuMemFree(d_mem); cuMemFree(d_var); cuMemFree(d_v11); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+        cuMemsetD8(d_v22, 0, bytes);
+
+        // Load V11 init file
+        if (init_v11_file) {
+            FILE *f = fopen(init_v11_file, "rb");
+            if (!f) { emit_status("fail","init_file_open_failed","fopen(init_v11)",0); cuMemFree(d_mem); cuMemFree(d_var); cuMemFree(d_v11); cuMemFree(d_v22); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            void *host = calloc(1, bytes);
+            if (!host) { fclose(f); emit_status("fail","init_file_malloc_failed","malloc(v11)",0); cuMemFree(d_mem); cuMemFree(d_var); cuMemFree(d_v11); cuMemFree(d_v22); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            size_t got = fread(host, 1, cohort_bytes, f); fclose(f);
+            if (got != cohort_bytes) { free(host); emit_status("fail","init_file_short_read","fread(v11)",(int)got); cuMemFree(d_mem); cuMemFree(d_var); cuMemFree(d_v11); cuMemFree(d_v22); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            cuMemcpyHtoD(d_v11, host, bytes); free(host);
+        }
+        // Load V22 init file
+        if (init_v22_file) {
+            FILE *f = fopen(init_v22_file, "rb");
+            if (!f) { emit_status("fail","init_file_open_failed","fopen(init_v22)",0); cuMemFree(d_mem); cuMemFree(d_var); cuMemFree(d_v11); cuMemFree(d_v22); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            void *host = calloc(1, bytes);
+            if (!host) { fclose(f); emit_status("fail","init_file_malloc_failed","malloc(v22)",0); cuMemFree(d_mem); cuMemFree(d_var); cuMemFree(d_v11); cuMemFree(d_v22); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            size_t got = fread(host, 1, cohort_bytes, f); fclose(f);
+            if (got != cohort_bytes) { free(host); emit_status("fail","init_file_short_read","fread(v22)",(int)got); cuMemFree(d_mem); cuMemFree(d_var); cuMemFree(d_v11); cuMemFree(d_v22); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            cuMemcpyHtoD(d_v22, host, bytes); free(host);
+        }
+    }
+
+    void *args[4];
     args[0] = &d_mem;
     args[1] = epistemic ? (void *)&d_var : NULL;
+    args[2] = gum_mode ? (void *)&d_v11 : NULL;
+    args[3] = gum_mode ? (void *)&d_v22 : NULL;
 
     // h_mem / h_var allocation strategy:
     //   Phase V (single-launch): plain calloc, freed with free().
@@ -568,25 +614,63 @@ int main(int argc, char **argv) {
             if (h_mem) free(h_mem);
             if (h_var) free(h_var);
             cuMemFree(d_mem); if (d_var) cuMemFree(d_var);
+            if (d_v11) cuMemFree(d_v11);
+            if (d_v22) cuMemFree(d_v22);
             cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1;
         }
+        // Phase Y GUM: host read-back buffers for V11 and V22 final state.
+        void *h_v11 = gum_mode ? calloc((size_t)alloc_words, elem) : NULL;
+        void *h_v22 = gum_mode ? calloc((size_t)alloc_words, elem) : NULL;
+        if (gum_mode && (!h_v11 || !h_v22)) {
+            emit_status("fail","host_alloc_failed","calloc(h_v11|h_v22)",0);
+            free(h_mem); if (h_var) free(h_var); if (h_v11) free(h_v11); if (h_v22) free(h_v22);
+            cuMemFree(d_mem); cuMemFree(d_var); cuMemFree(d_v11); cuMemFree(d_v22);
+            cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1;
+        }
+
         rc = cuLaunchKernel(fn,
             /*grid*/ blocks, 1, 1,
             /*block*/ threads, 1, 1,
             /*shmem*/ 0,
             /*stream*/ NULL,
-            args, NULL);
-        if (rc != 0) { emit_status("fail", "cuLaunchKernel_rejected", "cuLaunchKernel", rc); free(h_mem); if (h_var) free(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            args, NULL);  // kernel reads args[0..1] or args[0..3] per its param count
+        if (rc != 0) { emit_status("fail", "cuLaunchKernel_rejected", "cuLaunchKernel", rc); free(h_mem); if (h_var) free(h_var); if (h_v11) free(h_v11); if (h_v22) free(h_v22); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); if (d_v11) cuMemFree(d_v11); if (d_v22) cuMemFree(d_v22); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
 
         rc = cuCtxSynchronize();
-        if (rc != 0) { emit_status("fail", "cuCtxSynchronize_failed", "cuCtxSynchronize", rc); free(h_mem); if (h_var) free(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+        if (rc != 0) { emit_status("fail", "cuCtxSynchronize_failed", "cuCtxSynchronize", rc); free(h_mem); if (h_var) free(h_var); if (h_v11) free(h_v11); if (h_v22) free(h_v22); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); if (d_v11) cuMemFree(d_v11); if (d_v22) cuMemFree(d_v22); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
 
         rc = cuMemcpyDtoH(h_mem, d_mem, bytes);
-        if (rc != 0) { emit_status("fail", "cuMemcpyDtoH_failed", "cuMemcpyDtoH(mem)", rc); free(h_mem); if (h_var) free(h_var); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+        if (rc != 0) { emit_status("fail", "cuMemcpyDtoH_failed", "cuMemcpyDtoH(mem)", rc); free(h_mem); if (h_var) free(h_var); if (h_v11) free(h_v11); if (h_v22) free(h_v22); cuMemFree(d_mem); if (d_var) cuMemFree(d_var); if (d_v11) cuMemFree(d_v11); if (d_v22) cuMemFree(d_v22); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
         if (epistemic) {
             rc = cuMemcpyDtoH(h_var, d_var, bytes);
-            if (rc != 0) { emit_status("fail", "cuMemcpyDtoH_failed", "cuMemcpyDtoH(var)", rc); free(h_mem); free(h_var); cuMemFree(d_mem); cuMemFree(d_var); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            if (rc != 0) { emit_status("fail", "cuMemcpyDtoH_failed", "cuMemcpyDtoH(var)", rc); free(h_mem); free(h_var); if (h_v11) free(h_v11); if (h_v22) free(h_v22); cuMemFree(d_mem); cuMemFree(d_var); if (d_v11) cuMemFree(d_v11); if (d_v22) cuMemFree(d_v22); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
         }
+        if (gum_mode) {
+            rc = cuMemcpyDtoH(h_v11, d_v11, bytes);
+            if (rc != 0) { emit_status("fail","cuMemcpyDtoH_failed","cuMemcpyDtoH(v11)",rc); free(h_mem); free(h_var); free(h_v11); free(h_v22); cuMemFree(d_mem); cuMemFree(d_var); cuMemFree(d_v11); cuMemFree(d_v22); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+            rc = cuMemcpyDtoH(h_v22, d_v22, bytes);
+            if (rc != 0) { emit_status("fail","cuMemcpyDtoH_failed","cuMemcpyDtoH(v22)",rc); free(h_mem); free(h_var); free(h_v11); free(h_v22); cuMemFree(d_mem); cuMemFree(d_var); cuMemFree(d_v11); cuMemFree(d_v22); cuModuleUnload(mod); cuCtxDestroy(ctx); free(img); return 1; }
+        }
+
+        // Phase Y: emit GUM stats before freeing.
+        if (gum_mode && cohort_size > 0 && value_type == 1) {
+            const float *c1f = (const float *)h_mem;
+            const float *v11f = (const float *)h_v11;
+            uint64_t c1_dig  = fnv1a64(h_mem,  cohort_bytes);
+            uint64_t v11_dig = fnv1a64(h_v11, cohort_bytes);
+            double sum_v11 = 0.0;
+            for (long i = 0; i < (long)cohort_size; i++) sum_v11 += (double)v11f[i];
+            double mean_v11 = sum_v11 / (double)cohort_size;
+            double mean_u_b = sqrt(mean_v11 > 0.0 ? mean_v11 : 0.0);
+            printf("PHY cohort=%ld c1_digest=%016llx v11_digest=%016llx "
+                   "mean_u_b=%.6g u95_k2=%.6g\n",
+                   (long)cohort_size,
+                   (unsigned long long)c1_dig, (unsigned long long)v11_dig,
+                   mean_u_b, 2.0 * mean_u_b);
+            (void)c1f;  // digest covers it
+        }
+
+        free(h_v11); free(h_v22);
     }
 
     emit_status("pass", "launch_pass", "cuMemcpyDtoH", 0);
@@ -673,6 +757,8 @@ int main(int argc, char **argv) {
         if (h_var) free(h_var);
     }
     cuMemFree(d_mem); if (d_var) cuMemFree(d_var);
+    if (d_v11) cuMemFree(d_v11);
+    if (d_v22) cuMemFree(d_v22);
     cuModuleUnload(mod);
     cuCtxDestroy(ctx);
     free(img);
