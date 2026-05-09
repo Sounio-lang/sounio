@@ -86,19 +86,9 @@ for pattern in "${patterns[@]}"; do
   cat "$log"
   grep -q "K-AXI epistemic kernel assembly" "$out"
   grep -q "ret seq=" "$out"
-  python3 - "$witness" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-obj = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-if obj.get("status") != "pass":
-    raise SystemExit(f"witness_status_not_pass:{obj.get('status')}")
-if not obj.get("assembly", {}).get("seq_dense_zero_based"):
-    raise SystemExit("witness_sequence_not_dense_zero_based")
-if obj.get("failures"):
-    raise SystemExit(f"witness_failures:{obj['failures']}")
-PY
+  ./bin/kretikos kaxi-validate-evidence "$witness" \
+      --expect "status=pass" \
+      --expect "assembly.seq_dense_zero_based=true"
 done
 
 grep -q "add r" "$OUT_DIR/vec_add.kaxi"
@@ -140,6 +130,11 @@ source_witnesses=(
   "fma_f32:examples/kretikos/real_fma_f32.sio"
   "epistemic_elementwise_f32:examples/kretikos/real_epistemic_elementwise.sio"
   "epistemic_dual_output_f32:examples/kretikos/real_epistemic_dual_output.sio"
+  "vec_add_f64:examples/kretikos/real_vec_add_f64.sio"
+  "vec_sub_f64:examples/kretikos/real_vec_sub_f64.sio"
+  "vec_mul_f64:examples/kretikos/real_vec_mul_f64.sio"
+  "vec_div_f64:examples/kretikos/real_vec_div_f64.sio"
+  "fma_f64:examples/kretikos/real_fma_f64.sio"
 )
 
 for item in "${source_witnesses[@]}"; do
@@ -150,20 +145,9 @@ for item in "${source_witnesses[@]}"; do
   echo "kretikos_kaxi_gate: source-witness label=$label source=$src witness=$source_witness"
   ./bin/kretikos kaxi-source-witness "$src" -o "$source_witness" >"$source_log" 2>&1
   cat "$source_log"
-  python3 - "$source_witness" "$label" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-obj = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-label = sys.argv[2]
-if obj.get("status") != "pass":
-    raise SystemExit(f"source_witness_status_not_pass:{obj.get('status')}")
-if obj.get("profile", {}).get("name") != label:
-    raise SystemExit(f"source_witness_profile_mismatch:{obj.get('profile', {}).get('name')} != {label}")
-if obj.get("failures"):
-    raise SystemExit(f"source_witness_failures:{obj['failures']}")
-PY
+  ./bin/kretikos kaxi-validate-evidence "$source_witness" \
+      --expect "status=pass" \
+      --expect "profile.name=$label"
 done
 
 for item in "${source_witnesses[@]}"; do
@@ -175,119 +159,113 @@ for item in "${source_witnesses[@]}"; do
   echo "kretikos_kaxi_gate: certificate label=$label source=$src certificate=$certificate"
   ./bin/kretikos kaxi-certificate "$src" -o "$certificate" --work-dir "$cert_work" --force >"$cert_log" 2>&1
   cat "$cert_log"
-  python3 - "$certificate" "$label" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-obj = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-label = sys.argv[2]
-if obj.get("status") != "pass":
-    raise SystemExit(f"certificate_status_not_pass:{obj.get('status')}")
-if obj.get("profile", {}).get("name") != label:
-    raise SystemExit(f"certificate_profile_mismatch:{obj.get('profile', {}).get('name')} != {label}")
-if obj.get("failures"):
-    raise SystemExit(f"certificate_failures:{obj['failures']}")
-runtime = obj.get("runtime", {}).get("runtime_validation", {})
-if runtime.get("rung") != label:
-    raise SystemExit(f"certificate_runtime_rung_mismatch:{runtime.get('rung')} != {label}")
-PY
+  ./bin/kretikos kaxi-validate-evidence "$certificate" \
+      --expect "status=pass" \
+      --expect "profile.name=$label" \
+      --expect "runtime.runtime_validation.rung=$label"
 done
 
-python3 - "$GATE_JSON" "$OUT_DIR" "$SELF_CHECK_LOG" "${patterns[@]}" <<'PY'
-import hashlib
-import json
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
+# ── gate JSON aggregation (replaces python3 heredoc) ──────────────────────
+__gate_sha256() { sha256sum "$1" 2>/dev/null | cut -c1-64 || echo ""; }
+__gate_file_size() { stat -c%s "$1" 2>/dev/null || wc -c < "$1" 2>/dev/null || echo 0; }
+__null_or_str() { local v="$1"; if [[ -z "$v" || "$v" == "null" ]]; then echo "null"; else printf '"%s"' "$v"; fi; }
+__null_or_num() { local v="$1"; if [[ -z "$v" || "$v" == "null" ]]; then echo "null"; else echo "$v"; fi; }
 
-gate_json = Path(sys.argv[1])
-out_dir = Path(sys.argv[2])
-self_check_log = Path(sys.argv[3])
-patterns = sys.argv[4:]
+CASES_JSON="$(
+  {
+    for pattern in "${patterns[@]}"; do
+      path="$OUT_DIR/${pattern}.kaxi"
+      witness_path="$OUT_DIR/${pattern}.kaxi-witness.json"
+      artifact="$(basename "$path")"
+      witness_name="$(basename "$witness_path")"
+      sha256="$(__gate_sha256 "$path")"
+      wsha256="$(__gate_sha256 "$witness_path")"
+      bytes="$(__gate_file_size "$path")"
+      instr_count="$(awk '!/^;/ && NF' "$path" | wc -l)"
+      has_add="$(grep -qF "add r" "$path" 2>/dev/null && echo true || echo false)"
+      has_div="$(grep -qF "div r" "$path" 2>/dev/null && echo true || echo false)"
+      has_fma="$(grep -qF "fma r" "$path" 2>/dev/null && echo true || echo false)"
+      has_mul="$(grep -qF "mul r" "$path" 2>/dev/null && echo true || echo false)"
+      has_store_global="$(grep -qF "store_global r" "$path" 2>/dev/null && echo true || echo false)"
+      has_sub="$(grep -qF "sub r" "$path" 2>/dev/null && echo true || echo false)"
+      if grep -qF "var=+" "$path" 2>/dev/null || grep -qF "var=0%" "$path" 2>/dev/null; then
+        has_variance=true
+      else
+        has_variance=false
+      fi
+      mapfile -t __wf < <(./bin/kretikos kaxi-validate-evidence "$witness_path" \
+          --print-or-empty semantic_profile \
+          --print-or-empty assembly.seq_dense_zero_based \
+          --print-or-empty epistemic_lanes.store_global_count)
+      sp_lit="$(__null_or_str "${__wf[0]:-}")"
+      seq_lit="${__wf[1]:-null}"
+      sc_lit="$(__null_or_num "${__wf[2]:-}")"
+      printf '{"artifact":"%s","bytes":%s,"has_add":%s,"has_div":%s,"has_fma":%s,"has_mul":%s,"has_store_global":%s,"has_sub":%s,"has_variance_annotation":%s,"instruction_count":%s,"pattern":"%s","semantic_profile":%s,"seq_dense_zero_based":%s,"sha256":"%s","store_global_count":%s,"witness":"%s","witness_sha256":"%s"}\n' \
+          "$artifact" "$bytes" \
+          "$has_add" "$has_div" "$has_fma" "$has_mul" "$has_store_global" "$has_sub" "$has_variance" \
+          "$instr_count" "$pattern" "$sp_lit" "$seq_lit" "$sha256" "$sc_lit" \
+          "$witness_name" "$wsha256"
+    done
+  } | ./bin/kretikos json-emit-array
+)"
 
-cases = []
-for pattern in patterns:
-    path = out_dir / f"{pattern}.kaxi"
-    witness_path = out_dir / f"{pattern}.kaxi-witness.json"
-    text = path.read_text(encoding="utf-8")
-    witness = json.loads(witness_path.read_text(encoding="utf-8"))
-    lines = [line for line in text.splitlines() if line and not line.startswith(";")]
-    cases.append({
-        "pattern": pattern,
-        "artifact": path.name,
-        "witness": witness_path.name,
-        "witness_sha256": hashlib.sha256(witness_path.read_bytes()).hexdigest(),
-        "bytes": path.stat().st_size,
-        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "instruction_count": len(lines),
-        "semantic_profile": witness.get("semantic_profile"),
-        "seq_dense_zero_based": witness.get("assembly", {}).get("seq_dense_zero_based"),
-        "store_global_count": witness.get("epistemic_lanes", {}).get("store_global_count"),
-        "has_add": "add r" in text,
-        "has_sub": "sub r" in text,
-        "has_mul": "mul r" in text,
-        "has_div": "div r" in text,
-        "has_fma": "fma r" in text,
-        "has_store_global": "store_global r" in text,
-        "has_variance_annotation": "var=+" in text or "var=0%" in text,
-    })
+SOURCE_CASES_JSON="$(
+  {
+    for f in $(ls "$OUT_DIR"/*.kaxi-source-witness.json 2>/dev/null | sort); do
+      wname="$(basename "$f")"
+      wsha256="$(__gate_sha256 "$f")"
+      mapfile -t __sp < <(./bin/kretikos kaxi-validate-evidence "$f" \
+          --print-or-empty kaxi.pattern \
+          --print-or-empty kaxi.semantic_profile \
+          --print-or-empty profile.name \
+          --print-or-empty source.path \
+          --print-or-empty source.sha256 \
+          --print-or-empty status)
+      sp_lit="$(__null_or_str "${__sp[1]:-}")"
+      printf '{"kaxi_pattern":"%s","profile":"%s","semantic_profile":%s,"source":"%s","source_sha256":"%s","status":"%s","witness":"%s","witness_sha256":"%s"}\n' \
+          "${__sp[0]:-}" "${__sp[2]:-}" "$sp_lit" "${__sp[3]:-}" "${__sp[4]:-}" "${__sp[5]:-}" \
+          "$wname" "$wsha256"
+    done
+  } | ./bin/kretikos json-emit-array
+)"
 
-source_cases = []
-for source_path in sorted(out_dir.glob("*.kaxi-source-witness.json")):
-    obj = json.loads(source_path.read_text(encoding="utf-8"))
-    source_cases.append({
-        "witness": source_path.name,
-        "witness_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-        "source": obj.get("source", {}).get("path"),
-        "source_sha256": obj.get("source", {}).get("sha256"),
-        "profile": obj.get("profile", {}).get("name"),
-        "kaxi_pattern": obj.get("kaxi", {}).get("pattern"),
-        "semantic_profile": obj.get("kaxi", {}).get("semantic_profile"),
-        "status": obj.get("status"),
-    })
+CERTIFICATE_CASES_JSON="$(
+  {
+    for f in $(ls "$OUT_DIR"/*.kaxi-certificate.json 2>/dev/null | sort); do
+      cname="$(basename "$f")"
+      csha256="$(__gate_sha256 "$f")"
+      mapfile -t __cp < <(./bin/kretikos kaxi-validate-evidence "$f" \
+          --print-or-empty kaxi.pattern \
+          --print-or-empty kaxi.semantic_profile \
+          --print-or-empty profile.name \
+          --print-or-empty runtime.runtime_validation.kernel \
+          --print-or-empty runtime.runtime_validation.reason \
+          --print-or-empty runtime.runtime_validation.rung \
+          --print-or-empty runtime.runtime_validation.status \
+          --print-or-empty source.path \
+          --print-or-empty source.sha256 \
+          --print-or-empty status)
+      sp_lit="$(__null_or_str "${__cp[1]:-}")"
+      printf '{"certificate":"%s","certificate_sha256":"%s","kaxi_pattern":"%s","profile":"%s","runtime_kernel":%s,"runtime_reason":%s,"runtime_rung":%s,"runtime_status":%s,"semantic_profile":%s,"source":"%s","source_sha256":"%s","status":"%s"}\n' \
+          "$cname" "$csha256" "${__cp[0]:-}" "${__cp[2]:-}" \
+          "$(__null_or_str "${__cp[3]:-}")" "$(__null_or_str "${__cp[4]:-}")" \
+          "$(__null_or_str "${__cp[5]:-}")" "$(__null_or_str "${__cp[6]:-}")" \
+          "$sp_lit" "${__cp[7]:-}" "${__cp[8]:-}" "${__cp[9]:-}"
+    done
+  } | ./bin/kretikos json-emit-array
+)"
 
-certificate_cases = []
-for cert_path in sorted(out_dir.glob("*.kaxi-certificate.json")):
-    obj = json.loads(cert_path.read_text(encoding="utf-8"))
-    runtime = obj.get("runtime", {}).get("runtime_validation", {})
-    certificate_cases.append({
-        "certificate": cert_path.name,
-        "certificate_sha256": hashlib.sha256(cert_path.read_bytes()).hexdigest(),
-        "source": obj.get("source", {}).get("path"),
-        "source_sha256": obj.get("source", {}).get("sha256"),
-        "profile": obj.get("profile", {}).get("name"),
-        "kaxi_pattern": obj.get("kaxi", {}).get("pattern"),
-        "semantic_profile": obj.get("kaxi", {}).get("semantic_profile"),
-        "runtime_status": runtime.get("status"),
-        "runtime_reason": runtime.get("reason"),
-        "runtime_rung": runtime.get("rung"),
-        "runtime_kernel": runtime.get("kernel"),
-        "status": obj.get("status"),
-    })
-
-payload = {
-    "schema": "sounio.kretikos.kaxi-gate.v1",
-    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "status": "pass",
-    "self_check_log": self_check_log.name,
-    "cases": cases,
-    "source_cases": source_cases,
-    "certificate_cases": certificate_cases,
-    "boundaries": [
-        "kaxi_is_sounio_owned_epistemic_gpu_assembly",
-        "gate_proves_self_hosted_emitter_compiles_and_emits_structural_artifacts",
-        "gate_proves_kaxi_witness_json_for_each_profile",
-        "gate_proves_checked_source_to_kaxi_witness_link_for_supported_profiles",
-        "gate_proves_kaxi_certificate_braids_source_kaxi_and_runtime_bundle_evidence",
-        "gate_proves_profile_level_lowering_for_explicit_kretikos_kaxi_profiles",
-        "gate_does_not_claim_arbitrary_sounio_gpu_lowering",
-        "gate_does_not_replace_slurm_cuda_runtime_authority",
-    ],
-}
-
-gate_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
+GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+./bin/kretikos json-emit \
+    --array-strings "boundaries=kaxi_is_sounio_owned_epistemic_gpu_assembly|gate_proves_self_hosted_emitter_compiles_and_emits_structural_artifacts|gate_proves_kaxi_witness_json_for_each_profile|gate_proves_checked_source_to_kaxi_witness_link_for_supported_profiles|gate_proves_kaxi_certificate_braids_source_kaxi_and_runtime_bundle_evidence|gate_proves_profile_level_lowering_for_explicit_kretikos_kaxi_profiles|gate_does_not_claim_arbitrary_sounio_gpu_lowering|gate_does_not_replace_slurm_cuda_runtime_authority" \
+    --raw-json "cases=$CASES_JSON" \
+    --raw-json "certificate_cases=$CERTIFICATE_CASES_JSON" \
+    --string "generated_at_utc=$GENERATED_AT_UTC" \
+    --string "schema=sounio.kretikos.kaxi-gate.v1" \
+    --string "self_check_log=$(basename "$SELF_CHECK_LOG")" \
+    --raw-json "source_cases=$SOURCE_CASES_JSON" \
+    --string "status=pass" \
+    > "$GATE_JSON" || exit 1
 
 echo ""
 echo "--- kaxi_ptx golden drift oracle (Phase C) ---"
