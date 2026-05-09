@@ -45,6 +45,11 @@ INIT_VAR=""
 INIT_FILE=""
 INIT_VAR_FILE=""
 BLOCKS=""
+TYPE_FLAG=""
+COHORT_SIZE=""   # Phase W: streamed clinical-scale cohort
+N_STREAMS=""     # Phase W: # concurrent CUDA streams (>=1 enables streamed path)
+N_CHUNKS=""      # Phase W: # chunks across the cohort
+EXPECTED_DIGEST=""  # Phase W: expected mem_digest (16 hex chars) for cohort run
 shift 2>/dev/null || true
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -58,11 +63,18 @@ while [[ $# -gt 0 ]]; do
     --init-var) INIT_VAR="$2"; shift 2 ;;
     --init-file) INIT_FILE="$2"; shift 2 ;;
     --init-var-file) INIT_VAR_FILE="$2"; shift 2 ;;
+    --type) TYPE_FLAG="$2"; shift 2 ;;
+    --cohort-size) COHORT_SIZE="$2"; shift 2 ;;
+    --streams) N_STREAMS="$2"; shift 2 ;;
+    --chunks) N_CHUNKS="$2"; shift 2 ;;
+    --expected-digest) EXPECTED_DIGEST="$2"; shift 2 ;;
     -h|--help)
       echo "usage: $0 <pattern> [--epistemic] [--threads N] [--blocks B] [--mem-words W]" >&2
       echo "       [--init-mem CSV] [--init-var CSV] [--init-file PATH] [--init-var-file PATH]" >&2
-      echo "       [--expected MEM] [--expected-var VAR]" >&2
+      echo "       [--expected MEM] [--expected-var VAR] [--type i64|f32|f64]" >&2
+      echo "       [--cohort-size N] [--streams N] [--chunks K] [--expected-digest HEX]" >&2
       echo "  --init-file: raw binary init image (mem_words * elem bytes), used when CSV would exceed ARG_MAX" >&2
+      echo "  --cohort-size: Phase W streamed multi-launch over an N-patient cohort" >&2
       exit 0 ;;
     *) echo "error: unknown arg: $1" >&2; exit 1 ;;
   esac
@@ -107,6 +119,7 @@ cp "${LOCAL_PTX}" "${STAGE_DIR}/kernel.ptx"
 cc -O2 "${ROOT_DIR}/scripts/gpu/kaxi_ptx_runner.c" -ldl -o "${STAGE_DIR}/runner"
 [[ -n "${EXPECTED}" ]] && echo "${EXPECTED}" > "${STAGE_DIR}/expected.mem"
 [[ -n "${EXPECTED_VAR}" ]] && echo "${EXPECTED_VAR}" > "${STAGE_DIR}/expected.var"
+[[ -n "${EXPECTED_DIGEST}" ]] && echo "${EXPECTED_DIGEST}" > "${STAGE_DIR}/expected.digest"
 if [[ -n "${INIT_FILE}" ]]; then
   [[ -f "${INIT_FILE}" ]] || { echo "error: --init-file ${INIT_FILE} not found" >&2; exit 1; }
   cp "${INIT_FILE}" "${STAGE_DIR}/init.mem.bin"
@@ -130,6 +143,14 @@ INIT_VAR_FILE_FLAG=""
 [[ -n "$INIT_VAR_FILE" ]] && INIT_VAR_FILE_FLAG="--init-var-file init.var.bin"
 BLOCKS_FLAG=""
 [[ -n "$BLOCKS" ]] && BLOCKS_FLAG="--blocks ${BLOCKS}"
+TYPE_FLAGSTR=""
+[[ -n "$TYPE_FLAG" ]] && TYPE_FLAGSTR="--type ${TYPE_FLAG}"
+COHORT_FLAG=""
+[[ -n "$COHORT_SIZE" ]] && COHORT_FLAG="--cohort-size ${COHORT_SIZE}"
+STREAMS_FLAG=""
+[[ -n "$N_STREAMS" ]] && STREAMS_FLAG="--streams ${N_STREAMS}"
+CHUNKS_FLAG=""
+[[ -n "$N_CHUNKS" ]] && CHUNKS_FLAG="--chunks ${N_CHUNKS}"
 
 cat > "${LOCAL_SBATCH}" <<EOF
 #!/usr/bin/env bash
@@ -169,13 +190,15 @@ export PATH="/usr/local/cuda/bin:/usr/bin:/bin:/usr/sbin:/sbin:\${PATH:-}"
 mark "kaxi_launch=running phase=run"
 {
   echo "host=\$(hostname)"; echo "job=\${SLURM_JOB_ID:-?}"
-  ./runner kernel.ptx --threads ${THREADS} ${BLOCKS_FLAG} --mem-words ${MEM_WORDS} ${EPISTEMIC_FLAG} ${INIT_MEM_FLAG} ${INIT_VAR_FLAG} ${INIT_FILE_FLAG} ${INIT_VAR_FILE_FLAG}
+  ./runner kernel.ptx --threads ${THREADS} ${BLOCKS_FLAG} --mem-words ${MEM_WORDS} ${EPISTEMIC_FLAG} ${INIT_MEM_FLAG} ${INIT_VAR_FLAG} ${INIT_FILE_FLAG} ${INIT_VAR_FILE_FLAG} ${TYPE_FLAGSTR} ${COHORT_FLAG} ${STREAMS_FLAG} ${CHUNKS_FLAG}
 } >"\${LOG}" 2>&1
 status_line="\$(grep '^sounio_kaxi_runtime' "\${LOG}" | tail -1 || true)"
 mem_line="\$(grep '^MEM:' "\${LOG}" | tail -1 || true)"
 var_line="\$(grep '^VAR:' "\${LOG}" | tail -1 || true)"
+phw_line="\$(grep '^PHW' "\${LOG}" | tail -1 || true)"
 diff_mem="not_compared"
 diff_var="not_compared"
+diff_digest="not_compared"
 if [[ -f expected.mem ]]; then
   exp="\$(cat expected.mem | tr -d '\r\n')"
   got="\$(echo "\${mem_line#MEM:}" | xargs | tr ' ' ',')"
@@ -190,7 +213,14 @@ if [[ -f expected.var ]]; then
   if [[ "\${got}" == "\${exp_norm}" ]]; then diff_var="var_match"
   else diff_var="var_mismatch:got=\${got}|exp=\${exp_norm}"; fi
 fi
-short="\$(echo "\${status_line} mem=\${mem_line#MEM:} var=\${var_line#VAR:} diff_mem=\${diff_mem} diff_var=\${diff_var}" | tr -cd '[:alnum:]_./:=,; -' | cut -c1-700)"
+# Phase W: digest equivalence is the correctness anchor for streamed runs.
+if [[ -f expected.digest ]]; then
+  exp_dig="\$(tr -d '\r\n' < expected.digest)"
+  got_dig="\$(echo "\${phw_line}" | sed -n 's/.*mem_digest=\([0-9a-f]*\).*/\1/p')"
+  if [[ -n "\${got_dig}" && "\${got_dig}" == "\${exp_dig}" ]]; then diff_digest="digest_match=\${got_dig}"
+  else diff_digest="digest_mismatch:got=\${got_dig}|exp=\${exp_dig}"; fi
+fi
+short="\$(echo "\${status_line} \${phw_line} diff_mem=\${diff_mem} diff_var=\${diff_var} diff_digest=\${diff_digest}" | tr -cd '[:alnum:]_./:=,; -' | cut -c1-700)"
 mark "kaxi_launch \${short}"
 EOF
 
