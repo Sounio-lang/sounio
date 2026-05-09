@@ -464,6 +464,16 @@ echo "kaxi_matrix passed=${PASSED}/${TOTAL} failed=${FAILED_LIST%,}"
 SHELL_EOF
 chmod +x "${STAGE_DIR}/run_cases.sh"
 
+# RUN_LOCAL=1: skip Slurm entirely, run on the local GPU directly.
+if [[ "${RUN_LOCAL:-0}" == "1" ]]; then
+  echo "[2/3] local GPU run (RUN_LOCAL=1)"
+  cd "${STAGE_DIR}"
+  export PATH="/usr/local/cuda/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+  ./run_cases.sh 2>&1
+  cd "${ROOT_DIR}"
+  exit $?
+fi
+
 echo "[2/3] packaging"
 tar -C "${STAGE_DIR}" -czf "${LOCAL_TARBALL}" .
 PAYLOAD_B64="$(base64 -w 0 "${LOCAL_TARBALL}" 2>/dev/null || base64 "${LOCAL_TARBALL}" | tr -d '\n')"
