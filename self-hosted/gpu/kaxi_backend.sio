@@ -363,6 +363,95 @@ fn kaxi_asm_buf_contains(buf: KaxiAsmBuf, needle: string) -> bool with Mut, Pani
 }
 
 // ============================================================================
+// Confidence-budget header — Phase J epistemic-PTX
+//
+// Each kernel may declare a compile-time confidence budget on a header line:
+//
+//     ; conf_budget=<int 0..1000>
+//
+// 1000 = max-confidence (default when absent), 0 = no-confidence (refused
+// under any positive policy threshold). The K-AXI → PTX driver consults this
+// against a `--min-conf=<N>` policy and *refuses to lower the kernel body*
+// when budget < min_conf. Compile-time, not runtime — the genuine novelty:
+// the GPU never sees a kernel whose epistemic budget is below policy.
+// ============================================================================
+
+pub fn kaxi_asm_push_conf_budget(buf: KaxiAsmBuf, budget: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "; conf_budget=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(budget))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+// Scans the assembly buffer for the literal "; conf_budget=" and parses the
+// integer that follows. Returns 1000 (max confidence) when the header is
+// absent — keeps existing kernels backward-compatible with confidence gating.
+pub fn kaxi_asm_get_conf_budget(buf: KaxiAsmBuf) -> i64 with Mut, Panic, Div {
+    // Pattern: "; conf_budget=" — bytes: ';'=59 ' '=32 'c'=99 'o'=111 'n'=110
+    //   'f'=102 '_'=95 'b'=98 'u'=117 'd'=100 'g'=103 'e'=101 't'=116 '='=61
+    let pat_len: i64 = 14
+    if buf.len < pat_len { return 1000 }
+    var i: i64 = 0
+    while i <= buf.len - pat_len {
+        if buf.data[i as usize] as i8 == 59
+           && buf.data[(i + 1) as usize] as i8 == 32
+           && buf.data[(i + 2) as usize] as i8 == 99
+           && buf.data[(i + 3) as usize] as i8 == 111
+           && buf.data[(i + 4) as usize] as i8 == 110
+           && buf.data[(i + 5) as usize] as i8 == 102
+           && buf.data[(i + 6) as usize] as i8 == 95
+           && buf.data[(i + 7) as usize] as i8 == 98
+           && buf.data[(i + 8) as usize] as i8 == 117
+           && buf.data[(i + 9) as usize] as i8 == 100
+           && buf.data[(i + 10) as usize] as i8 == 103
+           && buf.data[(i + 11) as usize] as i8 == 101
+           && buf.data[(i + 12) as usize] as i8 == 116
+           && buf.data[(i + 13) as usize] as i8 == 61 {
+            // Parse decimal digits after '='
+            var p: i64 = i + pat_len
+            var n: i64 = 0
+            var any: bool = false
+            while p < buf.len {
+                let c = buf.data[p as usize] as i64
+                if c >= 48 && c <= 57 {
+                    n = n * 10 + (c - 48)
+                    any = true
+                    p = p + 1
+                } else {
+                    break
+                }
+            }
+            if any { return n }
+            return 1000
+        }
+        i = i + 1
+    }
+    1000
+}
+
+// True when budget >= min_conf. min_conf <= 0 disables the gate (returns true).
+pub fn kaxi_check_conf_policy(buf: KaxiAsmBuf, min_conf: i64) -> bool with Mut, Panic, Div {
+    if min_conf <= 0 { return true }
+    let budget = kaxi_asm_get_conf_budget(buf)
+    budget >= min_conf
+}
+
+// Build the refusal-PTX header used in place of the kernel body when the
+// emit-time confidence policy fails. Output is valid (empty) PTX with a
+// machine-readable comment that downstream tools can grep for.
+pub fn kaxi_conf_reject_ptx(budget: i64, min_conf: i64) -> string with Mut, Panic, Div, Alloc {
+    var s: string = ".version 7.0\n.target sm_50\n.address_size 64\n\n"
+    s = str_concat(s, "// CONF_REJECT: budget=")
+    s = str_concat(s, kaxi_i64_to_string(budget))
+    s = str_concat(s, " < min_conf=")
+    s = str_concat(s, kaxi_i64_to_string(min_conf))
+    s = str_concat(s, " — kernel refused at K-AXI->PTX emit time.\n")
+    s = str_concat(s, "// No .entry emitted; downstream ptxas must not be invoked.\n")
+    s
+}
+
+// ============================================================================
 // GPU IR -> K-AXI lowerer (parallel arrays input, matching cpu_ir_interpreter.sio)
 // ============================================================================
 
@@ -545,14 +634,20 @@ fn kaxi_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
         return str_concat(tens, ones)
     }
     if n < 1000 {
+        // Bug fix (Phase J): the prior recursive form used kaxi_i64_to_string(n % 100)
+        // which dropped a digit when n % 100 < 10 (e.g. 300 → "3" + "0" = "30").
+        // Build all three digits explicitly with zero-padding semantics.
         let hundreds = kaxi_digit_to_string(n / 100)
-        let rest = kaxi_i64_to_string(n % 100)
-        return str_concat(hundreds, rest)
+        let tens = kaxi_digit_to_string((n / 10) % 10)
+        let ones = kaxi_digit_to_string(n % 10)
+        return str_concat(str_concat(hundreds, tens), ones)
     }
     if n < 10000 {
         let thousands = kaxi_digit_to_string(n / 1000)
-        let rest = kaxi_i64_to_string(n % 1000)
-        return str_concat(thousands, rest)
+        let hundreds = kaxi_digit_to_string((n / 100) % 10)
+        let tens = kaxi_digit_to_string((n / 10) % 10)
+        let ones = kaxi_digit_to_string(n % 10)
+        return str_concat(str_concat(str_concat(thousands, hundreds), tens), ones)
     }
     "?"
 }

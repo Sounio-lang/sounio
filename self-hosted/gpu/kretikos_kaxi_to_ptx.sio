@@ -29,11 +29,17 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
     var f32_epistemic: bool = false
     var f32_2c: bool = false
     var f32_gum: bool = false
+    // Phase J epistemic-PTX gate: integer 0..1000. 0 disables the gate.
+    var min_conf: i64 = 0
+    var expect_min_conf_value: bool = false
 
     var i: i64 = 0
     while i < argc {
         let a = get_arg(i)
-        if str_eq(a, "--epistemic") {
+        if expect_min_conf_value {
+            min_conf = kaxi_parse_decimal_string(a)
+            expect_min_conf_value = false
+        } else if str_eq(a, "--epistemic") {
             epistemic = true
         } else if str_eq(a, "epistemic") {
             epistemic = true
@@ -53,6 +59,8 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
             f32_mode = true
         } else if str_eq(a, "f32") {
             f32_mode = true
+        } else if str_eq(a, "--min-conf") {
+            expect_min_conf_value = true
         } else if str_eq(pattern, "") {
             pattern = a
         }
@@ -167,6 +175,10 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
         buf = kaxi_emit_pbpk_traj_4step_asm()
     } else if str_eq(pattern, "conf_gate") {
         buf = kaxi_emit_conf_gate_asm()
+    } else if str_eq(pattern, "conf_pass_demo") {
+        buf = kaxi_emit_conf_pass_demo_asm()
+    } else if str_eq(pattern, "conf_reject_demo") {
+        buf = kaxi_emit_conf_reject_demo_asm()
     } else if str_eq(pattern, "octonion_assoc") {
         buf = kaxi_emit_octonion_assoc_asm()
     } else if str_eq(pattern, "octonion_mul") {
@@ -207,7 +219,40 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
     } else {
         0
     }
+    // Phase J epistemic-PTX gate. When --min-conf > 0, scan the assembly
+    // buffer for a `; conf_budget=<N>` header. If budget < min_conf, refuse
+    // to lower the kernel body — the GPU never sees a kernel whose declared
+    // confidence is below policy. First compile-time confidence enforcement
+    // at GPU code-emission time.
+    if min_conf > 0 {
+        if !kaxi_check_conf_policy(buf, min_conf) {
+            let budget = kaxi_asm_get_conf_budget(buf)
+            print(kaxi_conf_reject_ptx(budget, min_conf))
+            return 0
+        }
+    }
+
     let ptx = kaxi_transpile_to_ptx_unified(buf, mode_id)
     print(ptx)
     0
+}
+
+// Decimal-string → i64 for the --min-conf <N> argument. Returns 0 on bad input.
+fn kaxi_parse_decimal_string(s: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(s)
+    if n <= 0 { return 0 }
+    var i: i64 = 0
+    var v: i64 = 0
+    var any: bool = false
+    while i < n {
+        let c = str_char_at(s, i) as i64
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48)
+            any = true
+        } else {
+            return if any { v } else { 0 }
+        }
+        i = i + 1
+    }
+    if any { v } else { 0 }
 }
