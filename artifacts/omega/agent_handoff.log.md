@@ -560,3 +560,32 @@ checks:
   - validator path resolution: $ROOT_DIR/../bin/kretikos resolves correctly; positive + negative tests both correct
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+lane: 7
+time_utc: 2026-05-10T17:42:00Z
+files:
+  - scripts/selfhost/selfhost_cycle_gate.sh
+intent: Lane 7 follow-up — kill 4 python heredocs in selfhost_cycle_gate.sh: manifest_key extractor (line 50, json.load["key_id"]), run_with_timeout fallback (line 88, identical to #108), independence-contract schema validator (line 131, identical to #108), cycle_digest extractor (line 158, validates stage1==stage2 + prints 3 KEY=VALUE lines).
+status: lock-acquired
+
+---
+
+agent: claude
+lane: 7
+time_utc: 2026-05-10T17:48:00Z
+files:
+  - scripts/selfhost/selfhost_cycle_gate.sh
+intent: Lane 7 RELEASE — killed all 4 python heredocs in selfhost_cycle_gate.sh. (1) manifest_key extractor -> kaxi-validate-evidence --print-or-empty "key_id". (2) run_with_timeout fallback -> perl alarm (same as #108). (3) independence-contract schema validator -> kaxi-validate-evidence --expect (same as #108). (4) cycle_digest extractor (most complex: stage1==stage2 assertion, missing-field check, deterministic bool->1/0 conversion, 3-line KEY=VALUE output) -> 4× kaxi-validate-evidence --print-or-empty + bash assertions + manual bool conversion to match python's "1 if deterministic else 0".
+checks:
+  - bash -n scripts/selfhost/selfhost_cycle_gate.sh: rc=0
+  - python3 count: 4 -> 0
+  - extract_cycle_digest isolation tests (3 cases):
+    - happy path: 3 lines printed correctly, rc=0
+    - missing field: error message + rc=1 (matches python SystemExit)
+    - non-deterministic: error with stage1=/stage2= + rc=1 (matches python)
+  - kaxi-validate-evidence --print and --print-or-empty smoke-tested with bool, int, string field reads
+commit: pending
+status: lock-released
