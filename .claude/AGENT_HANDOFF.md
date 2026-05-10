@@ -1,5 +1,70 @@
 # Claude Code Agent Handoff
 
+## 6-Agent Lane Activation — 2026-05-10T13:35Z
+
+**Authority**: human-approved at 2026-05-10 (this commit).
+**Companion docs**: `.claude/coordination/6_lane_assignment.md` (full
+matrix), `.claude/PARALLEL_BLOCKER_CONTRACT.md` (blocker shape).
+
+**Active lanes** (see companion doc for file-set + build target details):
+
+| # | Lane                          | Owner       | Branch                              | Worktree                                  |
+|---|-------------------------------|-------------|-------------------------------------|-------------------------------------------|
+| 1 | golden-recapture              | Claude #1   | `coord/lane-1-golden-recapture`     | `/workspace/sounio-lane-1-goldens`        |
+| 2 | dissertation-evidence         | Codex #1    | `coord/lane-2-dissertation-evidence`| `/workspace/sounio-lane-2-dissertation`   |
+| 3 | paper-168-cohomological       | Claude #2   | `coord/lane-3-paper-168`            | `/workspace/sounio-lane-3-paper168`       |
+| 4 | nv2-compiler-hardening        | Codex #2    | `coord/lane-4-nv2-hardening`        | `/workspace/sounio-lane-4-nv2`            |
+| 5 | python-extermination phase 5  | Codex #3    | `coord/lane-5-phase5-recognizer`    | `/workspace/sounio-lane-5-phase5`         |
+| 6 | integration-shepherd (merge)  | Claude A    | `main`                              | `/workspace/sounio` (canonical)           |
+
+**Out-of-scope lanes** (continue independent, NOT part of the 6):
+- `garden/above-stars` (existing, separate)
+- `cursor/quaternionic-ssm-88c0` (existing remote, Cursor agent)
+- `worktree-agent-a04d29d914b22568f` (locked Claude worker, imported else-if folding)
+
+**Merge order when multiple lanes are PR-ready**: 1 → 4 → 5 → 2 → 3.
+Lane 4 must serialize against Lane 1 on `bin/souc-linux-x86_64`.
+Lanes 2/3/5 are file-disjoint and may land in any order.
+
+**Live CLAIMs / RELEASEs** (most recent first):
+
+```text
+LANE-1 CLAIM 2026-05-10T13:35Z claude-1 tests/golden/kaxi_ptx/** bin/souc-linux-x86_64{,.sha256,.sig}
+  blocker: BLK-20260510-lane1-golden-drift  severity:B1  class:gate-regression
+  evidence: kaxi_ptx_golden_gate.sh = 209/52 FAIL/57 MISSING vs 318 nominal
+  next-command: bash scripts/ci/kaxi_ptx_capture.sh && bash scripts/ci/kaxi_ptx_golden_gate.sh
+```
+
+**Open Blocker (lane 1, currently being worked)**:
+
+```text
+Blocker-ID: BLK-20260510-lane1-golden-drift
+Status: owned
+Severity: B1
+Class: gate-regression
+Owner: Claude #1
+Lane: 1 (golden-recapture)
+Worktree: /workspace/sounio-lane-1-goldens (will be created)
+Branch: coord/lane-1-golden-recapture
+Evidence: tests/golden/kaxi_ptx/default/exit_only.ptx golden last touched
+  3f3af0cd (Phase L, 2026-05-08) declares `.reg .b32 %r<8>`, but current
+  `bin/souc` against current `self-hosted/gpu/kaxi_to_ptx.sio` produces
+  `.reg .b32 %r<260>` and `.reg .f32 %f<260>`. 38 commits to
+  kaxi_to_ptx.sio between Phase L and HEAD did not regenerate goldens.
+Reproduction: bash scripts/ci/kaxi_ptx_golden_gate.sh in any worktree
+  off origin/main HEAD (8a1a6fa2). Result: PASS=209 FAIL=52 MISSING=57.
+Next-Command: bash scripts/ci/kaxi_ptx_capture.sh && bash scripts/ci/kaxi_ptx_golden_gate.sh
+Acceptance: kaxi_ptx_golden_gate.sh rc=0, output line "FAIL: 0", "MISSING: 0"
+Evidence-Level: E3 (gate-bound)
+```
+
+**Per-lane init**: each agent runs the checklist in
+`.claude/coordination/6_lane_assignment.md#per-lane-initialization-checklist`
+on session start. Branch flips to verify via
+`git branch --show-current` before any edit.
+
+---
+
 ## Session summary (2026-05-10, Claude #1)
 
 - Phase J wired into umbrella as `cbe6716e` (compile-time confidence gate,
