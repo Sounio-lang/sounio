@@ -141,6 +141,22 @@ run_lean_single_fixed_point() {
   append_gate_row "$gate" "$rc" "$gate_dir" "-" "$log_path"
 }
 
+# Phase J: compile-time confidence enforcement (dissertation contribution #2).
+# No GPU required -- pure K-AXI→PTX policy check. ~1s.
+run_phase_j() {
+  local gate="phase_j_conf_gate"
+  local gate_dir="$OUT_DIR/$gate"
+  local log_path="$LOG_DIR/$gate.log"
+
+  mkdir -p "$gate_dir"
+  echo "[native-v2-cpu-compiler] running $gate"
+  set +e
+  bash scripts/ci/kretikos_kaxi_phase_j_gate.sh >"$log_path" 2>&1
+  local rc=$?
+  set -e
+  append_gate_row "$gate" "$rc" "$gate_dir" "-" "$log_path"
+}
+
 # Phase Y: real GUM variance propagation through 2-comp PBPK ODE on local GPU.
 # Self-skips when libcuda is absent -- safe to call on CPU-only boxes.
 # Kept at 10M patients (~30s) which is the gate's regression-grade default.
@@ -210,10 +226,11 @@ run_f64_ladder
 run_gum_primitives
 run_semantic_hardening
 run_lean_single_fixed_point
+run_phase_j
 run_phase_y
 
 if emit_summary_json; then
-  echo "[native-v2-cpu-compiler] PASS: driver self-compile, science spine, f64 ladder, GUM primitives, semantic hardening, lean_single fixed-point, phase_y_gum_pbpk"
+  echo "[native-v2-cpu-compiler] PASS: driver self-compile, science spine, f64 ladder, GUM primitives, semantic hardening, lean_single fixed-point, phase_j_conf_gate, phase_y_gum_pbpk"
   echo "[native-v2-cpu-compiler] summary=$SUMMARY_JSON"
 else
   echo "[native-v2-cpu-compiler] FAIL: see summary=$SUMMARY_JSON" >&2
