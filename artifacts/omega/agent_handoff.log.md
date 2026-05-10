@@ -762,6 +762,38 @@ status: lock-acquired
 
 ---
 
+agent: codex
+lane: 4
+time_utc: 2026-05-10T20:28:36Z
+files:
+  - self-hosted/compiler/native_compile_driver.sio
+intent: Lane 4 CLAIM/RELEASE - native-v2 hardening for scalar refinement-typed function parameters. Refreshed from origin/main@e6a247dd, kept tests/run-pass read-only, and reduced the current run-pass parity inventory by lowering parameter refinements as their inner scalar runtime type in the N-v2 driver while leaving predicate enforcement to the existing frontend/typecheck path.
+worktree: /workspace/sounio-lane-4-nv2
+branch: coord/lane-4-nv2-hardening
+checks:
+  - bin/souc check self-hosted/compiler/native_compile_driver.sio (rc=0)
+  - baseline inventory /tmp/lane4-parity-inventory-20260510T203929Z: corpus=410 ok=147 nv2_compile=188 nv2_run=70 a_only=1 both_fail=4 a_fail=0
+  - targeted inventory /tmp/lane4-refinement-inventory-20260510T204417Z: corpus=8 ok=8 nv2_compile=0 nv2_run=0
+  - post inventory /tmp/lane4-parity-post-20260510T204428Z: corpus=410 ok=155 nv2_compile=180 nv2_run=70 a_only=1 both_fail=4 a_fail=0
+  - xAI offload review /tmp/llm-offload-07bTJ1: CAUGHT_BUG - replaced positional refinement type probe with brace-local inner binder/type scan
+  - post-xAI targeted inventory /tmp/lane4-refinement-inventory-post-xai-20260510T220243Z: corpus=8 ok=8 nv2_compile=0 nv2_run=0
+  - post-xAI full inventory /tmp/lane4-parity-post-xai-20260510T220257Z: corpus=410 ok=155 nv2_compile=180 nv2_run=70 a_only=1 both_fail=4 a_fail=0
+  - bash scripts/ci/native_v2_serious_track_gate.sh (rc=0)
+  - bash scripts/ci/lean_single_fixed_point_gate.sh (rc=0; fixed-point md5=1c89bbde4db02b708febd46fb5448520)
+  - SOUNIO_NATIVE_V2_CPU_COMPILER_DIR=/tmp/lane4-post-umbrella-20260510T204612Z bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (rc=0; shell fallback used for aggregator)
+  - post-xAI full umbrella attempt /tmp/lane4-post-xai-umbrella-20260510T234331Z: native-v2 subgates rc=0, phase_y_gum_pbpk rc=1 due local CUDA cuInit_failed cuda_result=304
+  - SOUNIO_KAXI_PHASE_Y_GATE_SKIP=1 SOUNIO_NATIVE_V2_CPU_COMPILER_DIR=/tmp/lane4-post-xai-umbrella-skip-phase-y-20260510T235309Z bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (rc=0; shell fallback used for aggregator; Phase Y explicitly skipped because local CUDA device admission failed)
+  - post-rebase direct Phase Y GPU retry /tmp/lane4-phase-y-gpu-retry-20260511T094129Z: rc=0; device=NVIDIA RTX 4000 Ada Generation cc=8.9; TC-1/TC-2/TC-3 PASS
+  - post-rebase full GPU umbrella /tmp/lane4-post-rebase-umbrella-gpu-20260511T102012Z: rc=0; all 12 rows PASS including phase_y_gum_pbpk rc=0; shell fallback used for aggregator
+  - git diff --check (rc=0)
+commit: 3c6a46cc (pushed to origin/coord/lane-4-nv2-hardening; PR #129)
+status: lock-released
+blocker-closed:
+  Blocker-ID: BLK-20260510-lane4-publish-auth
+  closed: 2026-05-11 — gh auth live, pushed from workspace container
+
+---
+
 agent: claude
 lane: 3
 time_utc: 2026-05-10T23:35:00Z

@@ -122,3 +122,10 @@ No commit blocker — findings are documentation/precision artifacts, not formul
 | Date | Agent | Task | Provider | Target | Outcome | Note |
 |------|-------|------|----------|--------|---------|------|
 | 2026-05-10 | Claude Opus 4.7 | fan-out | n/a | `docs/dissertation/dossier_template.md` | WAIVED | Structural section skeleton (§1-§9 headings + placeholder rows) for the regulatory dossier renderer in `scripts/dissertation/dossier_generator.sio`. Contains no novel claims, no derivations, no clinical assertions — every concrete value/derivation is sourced from upstream artifacts already gated in main: Phase Y (`benchmarks/pbpk/gum_budget.csv`, commit 2b6b5b1a), Phase J (`scripts/ci/kretikos_kaxi_phase_j_gate.sh`, commit cbe6716e), and `stdlib/darwin_pbpk/validation/rapamycin_clinical.sio` (Lane 2). The template's §6 Hessian section is forward-compatible-only; it explicitly emits "_(Hessian budget not available in this run.)_" until Lane 8a lands. Functional test: `bash scripts/ci/dissertation_dossier_gate.sh` PASS=5 FAIL=0 rc=0; smoke test stdout bytewise-matches committed golden snapshot. Pre-publication review by Demetrios's pharmacologist advisor recommended before any actual regulatory submission. |
+
+---
+## 2026-05-10 — Lane 4 native-v2 refinement parameters
+
+| Date | Agent | Task | Provider | Target | Outcome | Note |
+|------|-------|------|----------|--------|---------|------|
+| 2026-05-10 | Codex | review | xai (Grok 4.1) | `self-hosted/compiler/native_compile_driver.sio` Lane 4 diff | CAUGHT_BUG then fixed | Reviewer flagged that refinement parameter lowering detected `f64` via a brittle positional token probe. Fixed by scanning inside the refinement braces for the inner `name: Type` binder up to `|`, accepting only `i32`, `i64`, and `f64`, and preserving the unsupported-refinement diagnostic for malformed/non-scalar cases. Post-fix targeted inventory: `/tmp/lane4-refinement-inventory-post-xai-20260510T220243Z` (8/8 ok). Post-fix full inventory: `/tmp/lane4-parity-post-xai-20260510T220257Z` (`ok=155`, `nv2_compile=180`). Raw transcript: `/tmp/llm-offload-07bTJ1/`. |
