@@ -117,56 +117,32 @@ if [[ "$runtime_rc" -ne 42 ]]; then
   exit 1
 fi
 
-python3 - "$SUMMARY_JSON" "$SOUC_BIN" "$PROGRAM" "$MODULE" "$ELF" "$OUT_DIR" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-from datetime import datetime, timezone
+# Pure-bash summary JSON emitter (replaces python3 hashlib + json.dump heredoc).
+elf_sha="$(sha256sum "$ELF" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$ELF" | awk '{print $1}')"
+ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-summary_path = pathlib.Path(sys.argv[1])
-souc_bin = sys.argv[2]
-program = sys.argv[3]
-module = sys.argv[4]
-elf = pathlib.Path(sys.argv[5])
-out_dir = pathlib.Path(sys.argv[6])
-
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-payload = {
-    "schema": "sounio.native_v2_imported_captured_closure_boundary.v1",
-    "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    "status": "pass",
-    "compiler_resolved": souc_bin,
-    "compiler_entrypoint": "self-hosted/compiler/lean.sio",
-    "target": "x86_64-linux",
-    "program": program,
-    "imported_module": module,
-    "native_elf": str(elf),
-    "native_elf_sha256": sha256(elf),
-    "runtime_exit": 42,
-    "functions": 3,
-    "fallback_path": "none",
-    "host_callback": "none",
-    "imported_prebundle_native": False,
-    "scope": "single_i64_capture_imported_factory_only",
-    "captured_closure_environments": True,
-    "capture_lowering": "shape_specialized_i64_factory_no_heap_env",
-    "unsupported": [
-        "general_heap_closure_env",
-        "linear_captures",
-        "epistemic_captures",
-        "multi_capture_envs",
-    ],
-    "artifact_dir": str(out_dir),
-}
-summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
+"$ROOT_DIR/bin/kretikos" json-emit \
+  --string "artifact_dir=$OUT_DIR" \
+  --string "capture_lowering=shape_specialized_i64_factory_no_heap_env" \
+  --bool   "captured_closure_environments=true" \
+  --string "compiler_entrypoint=self-hosted/compiler/lean.sio" \
+  --string "compiler_resolved=$SOUC_BIN" \
+  --string "fallback_path=none" \
+  --int    "functions=3" \
+  --string "generated_at_utc=$ts" \
+  --string "host_callback=none" \
+  --string "imported_module=$MODULE" \
+  --bool   "imported_prebundle_native=false" \
+  --string "native_elf=$ELF" \
+  --string "native_elf_sha256=$elf_sha" \
+  --string "program=$PROGRAM" \
+  --int    "runtime_exit=42" \
+  --string "schema=sounio.native_v2_imported_captured_closure_boundary.v1" \
+  --string "scope=single_i64_capture_imported_factory_only" \
+  --string "status=pass" \
+  --string "target=x86_64-linux" \
+  --array-strings "unsupported=general_heap_closure_env|linear_captures|epistemic_captures|multi_capture_envs" \
+  > "$SUMMARY_JSON"
 
 echo "[native-v2-imported-captured-closure-boundary] PASS: imported captured i64 closure factory uses modular IR native driver directly"
 echo "[native-v2-imported-captured-closure-boundary] summary=$SUMMARY_JSON"

@@ -210,13 +210,8 @@ assert_file_kind "$PRINT_SMOKE_BIN" "$HOST_FILE_KIND"
 PRINT_OUTPUT="$("$PRINT_SMOKE_BIN" 2>&1)"
 assert_output_equals $'3.141590\n-0.500000\n2.000000' "$PRINT_OUTPUT" "native_print_f64_smoke"
 
-python3 - "$READ_DATA_BIN" <<'PY'
-import struct
-import sys
-
-with open(sys.argv[1], "wb") as f:
-    f.write(struct.pack("<ddq", 3.14159, -0.5, 42))
-PY
+# Write test binary: little-endian f64(3.14159) f64(-0.5) i64(42)
+printf '\x6e\x86\x1b\xf0\xf9\x21\x09\x40\x00\x00\x00\x00\x00\x00\xe0\xbf\x2a\x00\x00\x00\x00\x00\x00\x00' > "$READ_DATA_BIN"
 
 "$STAGE2_BIN" self-hosted/compiler/native_read64_smoke.sio "$READ_SMOKE_BIN" --target "$HOST_TARGET" >"$LOG_DIR/read64.log" 2>&1
 chmod +x "$READ_SMOKE_BIN" 2>/dev/null || true
