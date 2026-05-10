@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dissertation rapamycin DES gate — native-v2 epistemic PBPK.
+# Dissertation rapamycin DES gate -- native-v2 epistemic PBPK.
 # Requires: native_v2_gum_primitives_gate.sh must pass first.
 # Compiles tests/native-v2/science_spine/rapamycin_des_gum.sio through the
 # generated stage1 driver. Verifies: ELF kind, stdout parity with fixture,
@@ -78,7 +78,7 @@ echo "[dissertation-rapa] building stage1 (pass 1)..."
 chmod +x "$STAGE1_DRIVER" 2>/dev/null || true
 assert_elf_x86_64 "$STAGE1_DRIVER" "stage1"
 
-# Build stage1 driver (pass 2 — deterministic replay)
+# Build stage1 driver (pass 2 -- deterministic replay)
 echo "[dissertation-rapa] building stage1 (pass 2 replay)..."
 "$SOUC_BIN" run "$DRIVER_SRC" -- "$DRIVER_SRC" -o "$STAGE1_DRIVER_2" >"$STAGE1_REPLAY_LOG" 2>&1
 chmod +x "$STAGE1_DRIVER_2" 2>/dev/null || true

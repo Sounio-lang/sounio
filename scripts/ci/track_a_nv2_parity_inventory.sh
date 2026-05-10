@@ -10,10 +10,10 @@
 #
 # Categories drive the M1.2 punch-list:
 #   ok            both compilers succeed and the resulting ELFs agree
-#   nv2_compile   A compiles but N-v2 fails to compile      (the punch-list — wire features in)
+#   nv2_compile   A compiles but N-v2 fails to compile      (the punch-list -- wire features in)
 #   nv2_run       both compile but N-v2's ELF behaves differently (codegen divergence)
 #   a_only        A compiles, N-v2 cannot even attempt (e.g. parse error)
-#   a_fail        A also fails — out of scope for parity (likely an intentionally broken test)
+#   a_fail        A also fails -- out of scope for parity (likely an intentionally broken test)
 #   both_fail     neither compiler accepts the input
 #
 # Usage:
@@ -143,7 +143,7 @@ for src in "${INPUTS[@]}"; do
       stdout_match=1
     else
       # Strip trailing newlines from both and re-compare. Track A's print()
-      # currently emits an extra trailing newline that N-v2 does not — treat
+      # currently emits an extra trailing newline that N-v2 does not -- treat
       # that as parity for inventory purposes but mark it as "trim".
       a_trim="$(printf '%s' "$(cat "$case_dir/a.stdout")")"
       nv2_trim="$(printf '%s' "$(cat "$case_dir/nv2.stdout")")"
@@ -191,11 +191,11 @@ done
   printf 'parity inventory: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'corpus           : %d files\n' "$total"
   printf 'ok               : %d\n' "$ok"
-  printf 'nv2_compile fail : %d  (the punch-list — Track A accepts, N-v2 does not)\n' "$nv2_compile_fail"
+  printf 'nv2_compile fail : %d  (the punch-list -- Track A accepts, N-v2 does not)\n' "$nv2_compile_fail"
   printf 'nv2_run diverge  : %d  (both compile, behaviour differs)\n' "$nv2_run_diverge"
-  printf 'a_only           : %d  (only N-v2 fails — investigate; possibly N-v2-specific features)\n' "$a_only"
+  printf 'a_only           : %d  (only N-v2 fails -- investigate; possibly N-v2-specific features)\n' "$a_only"
   printf 'both_fail        : %d  (neither accepts; likely intentionally broken or unsupported by both)\n' "$both_fail"
-  printf 'a_fail           : %d  (Track A also failed — out of scope)\n' "$a_fail"
+  printf 'a_fail           : %d  (Track A also failed -- out of scope)\n' "$a_fail"
   printf '\nResults TSV     : %s\n' "$RESULTS_TSV"
 } | tee "$SUMMARY"
 

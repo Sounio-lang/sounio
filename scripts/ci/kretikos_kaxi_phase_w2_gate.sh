@@ -3,8 +3,8 @@
 #
 # Phase W.2 gate: sharded multi-GPU billion-patient sweep across two CUDA
 # devices on separate nodes:
-#   GPU-0  RTX 4000 Ada (4 GB CUDA ctx) — workspace pod, direct access
-#   GPU-1  RTX A5000  (4 GB CUDA ctx)   — r740 worker, via kubectl exec wrapper
+#   GPU-0  RTX 4000 Ada (4 GB CUDA ctx) -- workspace pod, direct access
+#   GPU-1  RTX A5000  (4 GB CUDA ctx)   -- r740 worker, via kubectl exec wrapper
 #
 # Sharding: PHW2_SHARD_COUNT shards total. Each GPU runs half the shards
 # sequentially; both GPUs run concurrently (background jobs). With the
@@ -13,7 +13,7 @@
 #
 # The kaxi_pbpk_sampler uses O(1) splitmix64 skip-ahead: shard K generates
 # patients [K*floor(N/S), ...) byte-identical to slicing the full-cohort
-# run — each node samples its own shard, no file transfer needed.
+# run -- each node samples its own shard, no file transfer needed.
 #
 # Truth-claim: GPU aggregate (in_budget + nan_count across all shards) must
 # equal the CPU analytic reference from --counts-only (no file I/O).
@@ -79,7 +79,7 @@ _kubectl() {
 # ---------- prerequisite checks ----------
 
 if [[ ! -f "${PHW2_PTX}" ]]; then
-  echo "kretikos_kaxi_phase_w2_gate: FAIL — PTX missing: ${PHW2_PTX}"
+  echo "kretikos_kaxi_phase_w2_gate: FAIL -- PTX missing: ${PHW2_PTX}"
   exit 1
 fi
 if ! command -v cc >/dev/null 2>&1; then
@@ -96,7 +96,7 @@ if [[ -z "${WORKER_SCRIPT}" ]]; then
 fi
 
 shard_patients=$(( PHW2_COHORT / PHW2_SHARD_COUNT ))
-echo "[W.2] Phase W.2 — sharded multi-GPU billion-patient sweep"
+echo "[W.2] Phase W.2 -- sharded multi-GPU billion-patient sweep"
 echo "  cohort=${PHW2_COHORT} shards=${PHW2_SHARD_COUNT} (~${shard_patients} patients/shard)"
 echo "  GPU-0: shards 0..$(( PHW2_GPU0_SHARDS - 1 )) (RTX4000Ada, local)"
 echo "  GPU-1: shards ${PHW2_GPU0_SHARDS}..$(( PHW2_SHARD_COUNT - 1 )) (A5000, remote)"
@@ -129,7 +129,7 @@ REMOTE_BUILD="cc -O2 -Wall /tmp/phw2_sampler_src.c -lm -o /tmp/phw2_sampler2 && 
               cc -O2 -Wall /tmp/phw2_runner_src.c   -ldl -o /tmp/phw2_runner2 && \
               echo BUILD_OK"
 if ! rb="$("${WORKER_SCRIPT}" "${REMOTE_BUILD}" 2>&1)" || ! echo "${rb}" | grep -q BUILD_OK; then
-  echo "kretikos_kaxi_phase_w2_gate: FAIL — remote build"; echo "${rb}"; exit 1
+  echo "kretikos_kaxi_phase_w2_gate: FAIL -- remote build"; echo "${rb}"; exit 1
 fi
 echo "  remote build: OK"
 
@@ -222,7 +222,7 @@ for src_label in "GPU0:${GPU0_OUT}" "GPU1:${GPU1_OUT}"; do
   label="${src_label%%:*}"
   out_file="${src_label#*:}"
   if [[ ! -s "${out_file}" ]]; then
-    echo "  FAIL — ${label} output file empty or missing"
+    echo "  FAIL -- ${label} output file empty or missing"
     fail=1; continue
   fi
   while IFS= read -r phw_line; do
@@ -233,7 +233,7 @@ for src_label in "GPU0:${GPU0_OUT}" "GPU1:${GPU1_OUT}"; do
     dig="$(extract_field "${phw_line}" mem_digest)"
     echo "  ${label} shard=${shard} wall_us=${wall} in_budget=${in_b} nan=${nan} digest=${dig}"
     if [[ -z "${in_b}" || -z "${nan}" ]]; then
-      echo "  FAIL — ${label} shard=${shard} missing in_budget or nan_count"
+      echo "  FAIL -- ${label} shard=${shard} missing in_budget or nan_count"
       fail=1; missing=$(( missing + 1 )); continue
     fi
     total_in=$(( total_in + in_b ))
@@ -256,14 +256,14 @@ echo "  aggregate: in_budget=${total_in} nan_count=${total_nan} total=${total_pa
 echo "  analytic:  in_budget=${ref_in_budget} nan_count=${ref_nan_count} total=${PHW2_COHORT}"
 
 if [[ "${total_in}" == "${ref_in_budget}" && "${total_nan}" == "${ref_nan_count}" ]]; then
-  echo "  truth-claim: PASS — GPU aggregate == CPU analytic exactly"
+  echo "  truth-claim: PASS -- GPU aggregate == CPU analytic exactly"
 else
-  echo "  truth-claim: FAIL — mismatch"
+  echo "  truth-claim: FAIL -- mismatch"
   fail=1
 fi
 
 if [[ "${total_patients}" != "${PHW2_COHORT}" ]]; then
-  echo "  patient-count: FAIL — total ${total_patients} != cohort ${PHW2_COHORT}"
+  echo "  patient-count: FAIL -- total ${total_patients} != cohort ${PHW2_COHORT}"
   fail=1
 fi
 

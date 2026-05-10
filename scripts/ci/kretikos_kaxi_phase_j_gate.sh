@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase J epistemic-PTX confidence-gate — drift oracle.
+# Phase J epistemic-PTX confidence-gate -- drift oracle.
 #
 # Verifies the genuinely first compile-time confidence enforcement at GPU
 # code-emission time: a kernel declares ; conf_budget=<N> in K-AXI; the
@@ -94,12 +94,12 @@ if ! grep -q "// CONF_REJECT:" "$reject_golden"; then
 fi
 if grep -q ".visible .entry" "$reject_golden"; then
     FAIL=$((FAIL + 1))
-    FIRST_FAILURES+=("INV   conf_reject_min500.ptx still contains .visible .entry — gate did NOT suppress body")
+    FIRST_FAILURES+=("INV   conf_reject_min500.ptx still contains .visible .entry -- gate did NOT suppress body")
 fi
 pass_golden="$GOLDEN_DIR/conf_pass_min500.ptx"
 if ! grep -q ".visible .entry" "$pass_golden"; then
     FAIL=$((FAIL + 1))
-    FIRST_FAILURES+=("INV   conf_pass_min500.ptx missing .visible .entry — pass case mis-emitted")
+    FIRST_FAILURES+=("INV   conf_pass_min500.ptx missing .visible .entry -- pass case mis-emitted")
 fi
 
 echo "=== Phase J epistemic-PTX confidence-gate ==="

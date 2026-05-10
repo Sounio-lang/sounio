@@ -44,7 +44,7 @@ if [[ "${_try_local}" == "1" ]]; then
     echo "kretikos_kaxi_l4_launch_gate: PASS (local GPU)"
     exit 0
   fi
-  echo "kretikos_kaxi_l4_launch_gate: FAIL — ${summary_line}"
+  echo "kretikos_kaxi_l4_launch_gate: FAIL -- ${summary_line}"
   exit 1
 fi
 
@@ -79,5 +79,5 @@ if echo "${summary_line}" | grep -qE 'passed=([0-9]+)/\1 failed= *$'; then
   exit 0
 fi
 
-echo "kretikos_kaxi_l4_launch_gate: FAIL — ${summary_line}"
+echo "kretikos_kaxi_l4_launch_gate: FAIL -- ${summary_line}"
 exit 1

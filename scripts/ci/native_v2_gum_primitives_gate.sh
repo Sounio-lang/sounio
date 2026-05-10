@@ -196,7 +196,7 @@ if command -v objdump >/dev/null 2>&1; then
     fi
   fi
 else
-  echo "[native-v2-gum] NOTE: objdump not available — sqrtsd scan skipped"
+  echo "[native-v2-gum] NOTE: objdump not available -- sqrtsd scan skipped"
 fi
 
 python3 - "$SUMMARY_JSON" "$RESULTS_TSV" "$SOUC_BIN" "$MANIFEST_PATH" \

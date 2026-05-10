@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# validate_skills_coverage.sh — Validate all required skills exist with correct structure
+# validate_skills_coverage.sh -- Validate all required skills exist with correct structure
 #
 # Every active skill must have:
 #   - skills/<name>/SKILL.md

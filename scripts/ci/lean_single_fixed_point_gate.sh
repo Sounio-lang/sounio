@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/ci/lean_single_fixed_point_gate.sh
 #
-# Verifies that Track A — self-hosted/compiler/lean_single.sio — self-compiles
+# Verifies that Track A -- self-hosted/compiler/lean_single.sio -- self-compiles
 # to a bit-identical fixed point (stage1 == stage2 == stage3). Establishes the
 # frozen reference baseline used by milestone M1.1 of the three-track
 # convergence plan: lock down "the compiler that bin/souc IS today" before
@@ -117,7 +117,7 @@ if [[ "$STAGE2_MD5" != "$STAGE3_MD5" ]]; then
 fi
 
 # Shipped binary should already be at the fixed point. We warn rather than
-# fail on divergence because it may legitimately drift in mid-development —
+# fail on divergence because it may legitimately drift in mid-development --
 # what we strictly require is that the chain itself converges.
 if [[ "$SHIPPED_MD5" != "$STAGE1_MD5" ]]; then
   echo "[lean-single-fp] WARN: shipped souc differs from stage1." >&2

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Golden PTX gate for K-AXI→PTX transpilers — drift oracle for Phase C
+# Golden PTX gate for K-AXI→PTX transpilers -- drift oracle for Phase C
 ulimit -s unlimited 2>/dev/null || true
 # (5-transpiler unification). Re-emits all (pattern × mode) combinations
 # and asserts byte-identical output vs. captured goldens at
@@ -17,7 +17,7 @@ cd "$ROOT_DIR"
 GOLDEN_DIR="tests/golden/kaxi_ptx"
 
 if [[ ! -d "$GOLDEN_DIR" ]]; then
-    echo "FAIL: golden dir $GOLDEN_DIR missing — run scripts/ci/kaxi_ptx_capture.sh first" >&2
+    echo "FAIL: golden dir $GOLDEN_DIR missing -- run scripts/ci/kaxi_ptx_capture.sh first" >&2
     exit 2
 fi
 
@@ -81,7 +81,7 @@ for mode_entry in "${MODES[@]}"; do
         set -e
 
         if [[ -f "$gold_unsup" ]]; then
-            # Expected unsupported. Assert rc nonzero (we don't compare stderr text — it can be noisy).
+            # Expected unsupported. Assert rc nonzero (we don't compare stderr text -- it can be noisy).
             if [[ "$rc" -eq 0 ]]; then
                 FAIL=$((FAIL + 1))
                 [[ "${#FIRST_FAILURES[@]}" -lt 5 ]] && FIRST_FAILURES+=("REGR  $mode/$pattern (was unsupported, now supported)")
@@ -89,7 +89,7 @@ for mode_entry in "${MODES[@]}"; do
                 PASS=$((PASS + 1))
             fi
         else
-            # Expected supported — assert byte-identical.
+            # Expected supported -- assert byte-identical.
             if [[ "$rc" -ne 0 || ! -s "$tmp_ptx" ]]; then
                 FAIL=$((FAIL + 1))
                 [[ "${#FIRST_FAILURES[@]}" -lt 5 ]] && FIRST_FAILURES+=("DROP  $mode/$pattern (rc=$rc, was supported)")

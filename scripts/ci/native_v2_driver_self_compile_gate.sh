@@ -188,13 +188,13 @@ SMOKE_COHORT=(
   "examples/native/struct_basic.sio"
   # Tail-literal array init. Currently skipped by baseline (the driver's
   # TK_VAR array-decl branch does not yet accept `= [v0, v1, ...]`), but
-  # auto-activates as soon as M1.2 step 4 bisect lands the handler — at which
+  # auto-activates as soon as M1.2 step 4 bisect lands the handler -- at which
   # point stage1 must finish within SMOKE_TIMEOUT or this phase fails.
   "examples/native/array_init_tail.sio"
   # Refinement-type non-termination canary (R2.1, post-Layer-B3 revert).
   # The driver should fail-fast (parse-reject `{ N: T | PRED }` syntax),
   # NOT hang. Layer B3's `&Type` param branch caused an infinite loop
-  # on this pattern — and the bug only surfaced during inventory, not
+  # on this pattern -- and the bug only surfaced during inventory, not
   # during driver-self-compile, because the driver's own source has no
   # refinement syntax. The new baseline-rc=124 → FAIL guard above turns
   # this entry into a hard regression test for that bug class.
@@ -204,7 +204,7 @@ SMOKE_COHORT=(
   # `fn(T) -> T` parameter type without bailing on the inner `fn`
   # keyword or running off the end. PR #56 was reverted because of a
   # purported logical_ops hang that turned out to be transient; this
-  # entry pins the actual fix forward — both the baseline (with the
+  # entry pins the actual fix forward -- both the baseline (with the
   # fix) and stage1 must compile this file successfully, so any future
   # change that re-breaks find_fn_lbrace fails the gate immediately.
   "examples/native/hof_param_signature.sio"
@@ -242,7 +242,7 @@ for smoke_src in "${SMOKE_COHORT[@]}"; do
   # baseline can't handle rather than hardcoding expected stdout.
   # Distinguish parse-rejection (rc!=0, rc!=124) → soft SKIP from
   # wall-clock hang (rc==124) → hard FAIL. A baseline timeout means the
-  # driver itself is non-terminating on this input — the B3-class
+  # driver itself is non-terminating on this input -- the B3-class
   # regression (Layer B3 `&Type` param branch hung on refinement-type
   # syntax `{ N: T | PRED }`) we now refuse to ship past.
   set +e
@@ -251,7 +251,7 @@ for smoke_src in "${SMOKE_COHORT[@]}"; do
   base_rc=$?
   set -e
   if [[ "$base_rc" -eq 124 ]]; then
-    echo "[native-v2-driver-self] FAIL: baseline driver hung for ${SMOKE_TIMEOUT}s compiling $smoke_src — non-termination regression" >&2
+    echo "[native-v2-driver-self] FAIL: baseline driver hung for ${SMOKE_TIMEOUT}s compiling $smoke_src -- non-termination regression" >&2
     tail -n 20 "$base_compile_log" >&2 || true
     exit 1
   fi
@@ -304,7 +304,7 @@ printf '[native-v2-driver-self] stage1-smoke OK ran=%d checked=%d\n' "$smoke_ran
 
 # ── Stage2: stage1 native binary compiles the driver again ───────────────────
 # Wall-clock timeout. The fixed-point property only catches divergence between
-# stage2 and stage3 — it cannot detect non-termination at stage2 itself. A
+# stage2 and stage3 -- it cannot detect non-termination at stage2 itself. A
 # stage1 binary that spins compiling the driver source is the recurring trap
 # (step 4 array-init, step D user-globals). Baseline self-compile is ~1s; we
 # allow 90s so a 90× slowdown still terminates and trips the explicit failure.
@@ -318,7 +318,7 @@ timeout "$SELFCOMPILE_TIMEOUT" "$STAGE1_DRIVER" "$DRIVER_SRC" -o "$STAGE2_DRIVER
 stage2_rc=$?
 set -e
 if [[ "$stage2_rc" -eq 124 ]]; then
-  echo "[native-v2-driver-self] FAIL: stage1 timed out after ${SELFCOMPILE_TIMEOUT}s compiling driver source (likely non-terminating loop in stage1 codegen — see step-D blocker note)" >&2
+  echo "[native-v2-driver-self] FAIL: stage1 timed out after ${SELFCOMPILE_TIMEOUT}s compiling driver source (likely non-terminating loop in stage1 codegen -- see step-D blocker note)" >&2
   exit 1
 fi
 if [[ "$stage2_rc" -ne 0 ]]; then
@@ -346,7 +346,7 @@ if ! cmp -s "$EXPECTED_STDOUT" "$STAGE2_STDOUT"; then
 fi
 
 # ── Fixed-point: stage2 compiles stage3, stage3 == stage2 ────────────────────
-# Same wall-clock guard as stage2 — defence in depth.
+# Same wall-clock guard as stage2 -- defence in depth.
 set +e
 timeout "$SELFCOMPILE_TIMEOUT" "$STAGE2_DRIVER" "$DRIVER_SRC" -o "$STAGE3_DRIVER" \
   >"$STAGE3_COMPILE_LOG" 2>&1
@@ -362,7 +362,7 @@ if [[ "$stage3_rc" -ne 0 ]]; then
   exit 1
 fi
 if ! cmp -s "$STAGE2_DRIVER" "$STAGE3_DRIVER"; then
-  echo "[native-v2-driver-self] FAIL: fixed-point broken — stage2 != stage3" >&2
+  echo "[native-v2-driver-self] FAIL: fixed-point broken -- stage2 != stage3" >&2
   python3 -c "
 a=open('$STAGE2_DRIVER','rb').read(); b=open('$STAGE3_DRIVER','rb').read()
 diffs=[(i,a[i],b[i]) for i in range(min(len(a),len(b))) if a[i]!=b[i]]
@@ -407,7 +407,7 @@ if [[ "$STAGE2_EP" == "absent" || "$STAGE3_EP" == "absent" ]]; then
   exit 1
 fi
 if [[ "$STAGE2_EP" != "$STAGE3_EP" ]]; then
-  echo "[native-v2-driver-self] FAIL: epistemic fixed-point broken — stage2 != stage3 epistemic profile" >&2
+  echo "[native-v2-driver-self] FAIL: epistemic fixed-point broken -- stage2 != stage3 epistemic profile" >&2
   exit 1
 fi
 STAGE2_INSTR="$(echo "$STAGE2_EP" | cut -d: -f2)"

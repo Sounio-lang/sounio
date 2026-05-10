@@ -1,5 +1,5 @@
 #!/bin/bash
-# souc_v2_gate.sh — Gate test for lean_single.sio / souc_v2 bootstrap compiler
+# souc_v2_gate.sh -- Gate test for lean_single.sio / souc_v2 bootstrap compiler
 # Runs bootstrap fixed-point, souc_v2 split fixed-point, feature tests, regression.
 set -e
 PASS=0; FAIL=0; TOTAL=0

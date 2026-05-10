@@ -9,11 +9,11 @@
 #             else write NaN sentinel
 #
 # Truth-claim: GPU in_budget + nan_count matches CPU analytic exactly (f32 arithmetic).
-# This is stronger than Phase W.2 — the GPU evaluates the rapamycin therapeutic
+# This is stronger than Phase W.2 -- the GPU evaluates the rapamycin therapeutic
 # window with ISO-traceable GUM uncertainty propagation, not just a variance proxy.
 #
 # Sharding: 4 shards × 500M patients. GPU-0 (local RTX4000Ada) runs shards 0-1;
-# GPU-1 (remote A5000 via kubectl) runs shards 2-3 — concurrently.
+# GPU-1 (remote A5000 via kubectl) runs shards 2-3 -- concurrently.
 #
 # Throughput metric: effective_decisions/sec = PHX_COHORT / max_shard_wall_us × 1e6
 #
@@ -73,7 +73,7 @@ _kubectl() {
 # ---------- prerequisite checks ----------
 
 if [[ ! -f "${PHX_PTX}" ]]; then
-  echo "kretikos_kaxi_phase_x_gate: FAIL — PTX missing: ${PHX_PTX}"
+  echo "kretikos_kaxi_phase_x_gate: FAIL -- PTX missing: ${PHX_PTX}"
   exit 1
 fi
 if ! command -v cc >/dev/null 2>&1; then
@@ -90,7 +90,7 @@ if [[ -z "${WORKER_SCRIPT}" ]]; then
 fi
 
 shard_patients=$(( PHX_COHORT / PHX_SHARD_COUNT ))
-echo "[X] Phase X — rapamycin 1-comp epistemic PBPK at billion-patient scale"
+echo "[X] Phase X -- rapamycin 1-comp epistemic PBPK at billion-patient scale"
 echo "  cohort=${PHX_COHORT} shards=${PHX_SHARD_COUNT} (~${shard_patients} patients/shard)"
 echo "  GPU-0: shards 0..$(( PHX_GPU0_SHARDS - 1 )) (RTX4000Ada, local)"
 echo "  GPU-1: shards ${PHX_GPU0_SHARDS}..$(( PHX_SHARD_COUNT - 1 )) (A5000, remote)"
@@ -128,7 +128,7 @@ REMOTE_BUILD="cc -O2 -Wall -ffp-contract=off /tmp/phx_sampler_src.c -lm -o /tmp/
               cc -O2 -Wall /tmp/phx_runner_src.c -ldl -o /tmp/phx_runner2 && \
               echo BUILD_OK"
 if ! rb="$("${WORKER_SCRIPT}" "${REMOTE_BUILD}" 2>&1)" || ! echo "${rb}" | grep -q BUILD_OK; then
-  echo "kretikos_kaxi_phase_x_gate: FAIL — remote build"; echo "${rb}"; exit 1
+  echo "kretikos_kaxi_phase_x_gate: FAIL -- remote build"; echo "${rb}"; exit 1
 fi
 echo "  remote build: OK"
 
@@ -222,7 +222,7 @@ for src_label in "GPU0:${GPU0_OUT}" "GPU1:${GPU1_OUT}"; do
   label="${src_label%%:*}"
   out_file="${src_label#*:}"
   if [[ ! -s "${out_file}" ]]; then
-    echo "  FAIL — ${label} output file empty or missing"
+    echo "  FAIL -- ${label} output file empty or missing"
     fail=1; continue
   fi
   while IFS= read -r phw_line; do
@@ -233,7 +233,7 @@ for src_label in "GPU0:${GPU0_OUT}" "GPU1:${GPU1_OUT}"; do
     dig="$(extract_field "${phw_line}" mem_digest)"
     echo "  ${label} shard=${shard} wall_us=${wall} in_budget=${in_b} nan=${nan} digest=${dig}"
     if [[ -z "${in_b}" || -z "${nan}" ]]; then
-      echo "  FAIL — ${label} shard=${shard} missing in_budget or nan_count"
+      echo "  FAIL -- ${label} shard=${shard} missing in_budget or nan_count"
       fail=1; missing=$(( missing + 1 )); continue
     fi
     total_in=$(( total_in + in_b ))
@@ -256,14 +256,14 @@ echo "  aggregate: in_budget=${total_in} nan_count=${total_nan} total=${total_pa
 echo "  analytic:  in_budget=${ref_in_budget} nan_count=${ref_nan_count} total=${PHX_COHORT}"
 
 if [[ "${total_in}" == "${ref_in_budget}" && "${total_nan}" == "${ref_nan_count}" ]]; then
-  echo "  truth-claim: PASS — GPU epistemic PBPK aggregate == CPU analytic exactly"
+  echo "  truth-claim: PASS -- GPU epistemic PBPK aggregate == CPU analytic exactly"
 else
-  echo "  truth-claim: FAIL — mismatch"
+  echo "  truth-claim: FAIL -- mismatch"
   fail=1
 fi
 
 if [[ "${total_patients}" != "${PHX_COHORT}" ]]; then
-  echo "  patient-count: FAIL — total ${total_patients} != cohort ${PHX_COHORT}"
+  echo "  patient-count: FAIL -- total ${total_patients} != cohort ${PHX_COHORT}"
   fail=1
 fi
 

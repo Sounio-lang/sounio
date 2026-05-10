@@ -2,7 +2,7 @@
 # Capture golden PTX for all (pattern × mode) combinations from the K-AXI→PTX
 ulimit -s unlimited 2>/dev/null || true
 # transpilers in self-hosted/gpu/kaxi_to_ptx.sio. This is the drift oracle
-# for Phase C (5-transpiler unification) — capture once, then assert
+# for Phase C (5-transpiler unification) -- capture once, then assert
 # byte-identical PTX after refactor via kaxi_ptx_golden_gate.sh.
 #
 # Usage:

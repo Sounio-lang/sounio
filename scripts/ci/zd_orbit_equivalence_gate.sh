@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase B — sedenion zero-divisor orbit-equivalence verification gate.
+# Phase B -- sedenion zero-divisor orbit-equivalence verification gate.
 #
 # Compiles and runs tests/math/test_zd_orbit_equivalence.sio, captures the
 # findings block, and asserts the test exits 0 with "ALL PASS". The findings
@@ -7,10 +7,10 @@
 # in CI output for downstream interpretation.
 #
 # This gate is *evidence-recording*, not pass/fail of the empirical claim
-# — disconfirmation of the "5 ZD pairs bit-identical MSE" memory note is
+# -- disconfirmation of the "5 ZD pairs bit-identical MSE" memory note is
 # itself a successful run. Only crashes / compile failures fail the gate.
 #
-# Reference: 2026-05-09 baseline finding — 2/5 annihilate, max delta ~2 ULP.
+# Reference: 2026-05-09 baseline finding -- 2/5 annihilate, max delta ~2 ULP.
 
 ulimit -s unlimited 2>/dev/null || true
 set -euo pipefail
