@@ -1,0 +1,169 @@
+.version 7.0
+.target sm_50
+.address_size 64
+
+// 2-compartment PBPK Euler ODE with full GUM variance propagation (Phase Y).
+//
+// 4 params (all f32 arrays, one entry per patient):
+//   param_a = C1   blood compartment concentration
+//   param_b = C2   tissue compartment concentration
+//   param_c = V11  variance of C1 (GUM, J*Sigma*J^T propagation)
+//   param_d = V22  variance of C2 (GUM)
+//
+// V12 (covariance) is tracked in local register %f4, starts at 0.
+// Full J*Sigma*J^T propagation is required: diagonal-only underestimates V11 ~46%.
+//
+// ODE (must match kaxi_pbpk_2comp_gum_sampler.c):
+//   K_in=1.0, k12=0.5, k21=0.25, dt=0.5, n_steps=4
+//   C1_new = J11*C1 + J12*C2 + K_in*dt   (J11=0.75, J12=0.125)
+//   C2_new = J21*C1 + J22*C2              (J21=0.25, J22=0.875)
+//
+// GUM (covariance matrix Sigma = [[V11,V12],[V12,V22]]):
+//   V11_new = J11^2*V11 + 2*J11*J12*V12 + J12^2*V22
+//   V12_new = J11*J21*V11 + (J11*J22+J12*J21)*V12 + J12*J22*V22
+//   V22_new = J21^2*V11 + 2*J21*J22*V12 + J22^2*V22
+//
+// Registers:
+//   State : %f0=C1  %f1=C2  %f2=V11  %f3=V22  %f4=V12
+//   Consts: %f10=J11 %f11=J12 %f12=J21 %f13=J22 %f14=K_in_dt
+//           %f15=J11^2 %f16=2*J11*J12=J11*J21 %f17=J12^2
+//           %f18=J11*J22+J12*J21 %f19=J12*J22
+//           %f20=J21^2 %f21=2*J21*J22 %f22=J22^2
+//   Temps : %f23=C1_new %f24=C2_new %f25=V11_new %f26=V12_new %f27=V22_new
+
+.visible .entry kaxi_kernel(
+    .param .u64 param_a,
+    .param .u64 param_b,
+    .param .u64 param_c,
+    .param .u64 param_d
+)
+{
+    .reg .b64 %rd<10>;
+    .reg .b32 %r<4>;
+    .reg .f32 %f<28>;
+
+    ld.param.u64 %rd0, [param_a];
+    ld.param.u64 %rd1, [param_b];
+    ld.param.u64 %rd2, [param_c];
+    ld.param.u64 %rd3, [param_d];
+
+    // gid = blockIdx.x * blockDim.x + threadIdx.x
+    mov.u32 %r0, %ctaid.x;
+    mov.u32 %r1, %ntid.x;
+    mov.u32 %r2, %tid.x;
+    mad.lo.u32 %r3, %r0, %r1, %r2;
+    cvt.u64.u32 %rd4, %r3;
+
+    // byte_offset = gid * 4
+    shl.b64 %rd5, %rd4, 2;
+
+    add.u64 %rd6, %rd0, %rd5;
+    add.u64 %rd7, %rd1, %rd5;
+    add.u64 %rd8, %rd2, %rd5;
+    add.u64 %rd9, %rd3, %rd5;
+
+    // load initial state
+    ld.global.f32 %f0, [%rd6];
+    ld.global.f32 %f1, [%rd7];
+    ld.global.f32 %f2, [%rd8];
+    ld.global.f32 %f3, [%rd9];
+    mov.f32 %f4, 0f00000000;
+
+    // load ODE + GUM constants into registers
+    mov.f32 %f10, 0f3F400000;   // J11 = 0.75
+    mov.f32 %f11, 0f3E000000;   // J12 = 0.125
+    mov.f32 %f12, 0f3E800000;   // J21 = 0.25
+    mov.f32 %f13, 0f3F600000;   // J22 = 0.875
+    mov.f32 %f14, 0f3F000000;   // K_in*dt = 0.5
+    mov.f32 %f15, 0f3F100000;   // J11^2 = 0.5625
+    mov.f32 %f16, 0f3E400000;   // 2*J11*J12 = J11*J21 = 0.1875
+    mov.f32 %f17, 0f3C800000;   // J12^2 = 0.015625
+    mov.f32 %f18, 0f3F300000;   // J11*J22+J12*J21 = 0.6875
+    mov.f32 %f19, 0f3DE00000;   // J12*J22 = 0.109375
+    mov.f32 %f20, 0f3D800000;   // J21^2 = 0.0625
+    mov.f32 %f21, 0f3EE00000;   // 2*J21*J22 = 0.4375
+    mov.f32 %f22, 0f3F440000;   // J22^2 = 0.765625
+
+    // --- Euler + GUM step 1 ---
+    mul.rn.f32 %f23, %f10, %f0;
+    fma.rn.f32 %f23, %f11, %f1, %f23;
+    add.rn.f32 %f23, %f23, %f14;
+    mul.rn.f32 %f24, %f12, %f0;
+    fma.rn.f32 %f24, %f13, %f1, %f24;
+    mul.rn.f32 %f25, %f15, %f2;
+    fma.rn.f32 %f25, %f16, %f4, %f25;
+    fma.rn.f32 %f25, %f17, %f3, %f25;
+    mul.rn.f32 %f26, %f16, %f2;
+    fma.rn.f32 %f26, %f18, %f4, %f26;
+    fma.rn.f32 %f26, %f19, %f3, %f26;
+    mul.rn.f32 %f27, %f20, %f2;
+    fma.rn.f32 %f27, %f21, %f4, %f27;
+    fma.rn.f32 %f27, %f22, %f3, %f27;
+    mov.f32 %f0, %f23;
+    mov.f32 %f1, %f24;
+    mov.f32 %f2, %f25;
+    mov.f32 %f3, %f27;
+    mov.f32 %f4, %f26;
+
+    // --- Euler + GUM step 2 ---
+    mul.rn.f32 %f23, %f10, %f0;
+    fma.rn.f32 %f23, %f11, %f1, %f23;
+    add.rn.f32 %f23, %f23, %f14;
+    mul.rn.f32 %f24, %f12, %f0;
+    fma.rn.f32 %f24, %f13, %f1, %f24;
+    mul.rn.f32 %f25, %f15, %f2;
+    fma.rn.f32 %f25, %f16, %f4, %f25;
+    fma.rn.f32 %f25, %f17, %f3, %f25;
+    mul.rn.f32 %f26, %f16, %f2;
+    fma.rn.f32 %f26, %f18, %f4, %f26;
+    fma.rn.f32 %f26, %f19, %f3, %f26;
+    mul.rn.f32 %f27, %f20, %f2;
+    fma.rn.f32 %f27, %f21, %f4, %f27;
+    fma.rn.f32 %f27, %f22, %f3, %f27;
+    mov.f32 %f0, %f23;
+    mov.f32 %f1, %f24;
+    mov.f32 %f2, %f25;
+    mov.f32 %f3, %f27;
+    mov.f32 %f4, %f26;
+
+    // --- Euler + GUM step 3 ---
+    mul.rn.f32 %f23, %f10, %f0;
+    fma.rn.f32 %f23, %f11, %f1, %f23;
+    add.rn.f32 %f23, %f23, %f14;
+    mul.rn.f32 %f24, %f12, %f0;
+    fma.rn.f32 %f24, %f13, %f1, %f24;
+    mul.rn.f32 %f25, %f15, %f2;
+    fma.rn.f32 %f25, %f16, %f4, %f25;
+    fma.rn.f32 %f25, %f17, %f3, %f25;
+    mul.rn.f32 %f26, %f16, %f2;
+    fma.rn.f32 %f26, %f18, %f4, %f26;
+    fma.rn.f32 %f26, %f19, %f3, %f26;
+    mul.rn.f32 %f27, %f20, %f2;
+    fma.rn.f32 %f27, %f21, %f4, %f27;
+    fma.rn.f32 %f27, %f22, %f3, %f27;
+    mov.f32 %f0, %f23;
+    mov.f32 %f1, %f24;
+    mov.f32 %f2, %f25;
+    mov.f32 %f3, %f27;
+    mov.f32 %f4, %f26;
+
+    // --- Euler + GUM step 4 (V12 not written back) ---
+    mul.rn.f32 %f23, %f10, %f0;
+    fma.rn.f32 %f23, %f11, %f1, %f23;
+    add.rn.f32 %f23, %f23, %f14;
+    mul.rn.f32 %f24, %f12, %f0;
+    fma.rn.f32 %f24, %f13, %f1, %f24;
+    mul.rn.f32 %f25, %f15, %f2;
+    fma.rn.f32 %f25, %f16, %f4, %f25;
+    fma.rn.f32 %f25, %f17, %f3, %f25;
+    mul.rn.f32 %f27, %f20, %f2;
+    fma.rn.f32 %f27, %f21, %f4, %f27;
+    fma.rn.f32 %f27, %f22, %f3, %f27;
+
+    st.global.f32 [%rd6], %f23;
+    st.global.f32 [%rd7], %f24;
+    st.global.f32 [%rd8], %f25;
+    st.global.f32 [%rd9], %f27;
+
+    ret;
+}

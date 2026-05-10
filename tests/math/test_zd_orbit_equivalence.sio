@@ -1,0 +1,137 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+//! Phase B — sedenion zero-divisor orbit-equivalence verification
+//!
+//! Memory note (S-SSM): "5 sedenion ZD pairs give bit-identical MSE
+//! (orbit equivalence)". That claim was empirical residue, never encoded
+//! as a check. This test grounds it: encode 5 candidate (z_k, w_k) pairs
+//! and *record* three findings per pair:
+//!
+//!   (a) Annihilation:        z_k * w_k =? 0   (norm_sq < 1e-20)
+//!   (b) Single-step image:   m_k = ||z_k * h||^2 for fixed h
+//!   (c) Orbit equivalence:   are all annihilating m_k bit-identical?
+//!
+//! Per the Phase B plan, *either outcome is a successful test run* — the
+//! test passes as long as it executes cleanly and reports findings. The
+//! findings drive the design of the (future) K-AXI ZD-orbit dedup pass:
+//!
+//!   • annihilating pairs found → orbit-id metadata is realisable
+//!   • bit-identical m_k        → the dedup pass can use exact equivalence
+//!   • epsilon-equal m_k        → dedup needs fast-math/algebraic relaxation
+//!   • disconfirmed entirely    → re-shape the orbit-dedup butterfly
+//!
+//! 2026-05-09 result: only 2/5 candidates annihilate (canonical and one
+//! Cayley-Dickson sibling); among those, m_k differ by ~2 ULP — *not*
+//! bit-identical. The future pass therefore needs algebraic, not bit,
+//! equivalence.
+
+use algebra::sedenion::*
+
+// Findings table — written per-pair, summarised at the end.
+var ANNIHILATES: [i64; 5] = [0; 5]   // 1 if z_k * w_k = 0 within tol
+var MSE: [f64; 5] = [0.0; 5]         // ||z_k * h||^2
+
+fn make_z(i: i64, j: i64, out: &![f64; 16]) with Mut {
+    var k=0; while k<16 { (*out)[k]=0.0; k=k+1 }
+    (*out)[i as usize] = 1.0
+    (*out)[j as usize] = 1.0
+}
+
+fn make_w(k: i64, l: i64, out: &![f64; 16]) with Mut {
+    var i=0; while i<16 { (*out)[i]=0.0; i=i+1 }
+    (*out)[k as usize] =  1.0
+    (*out)[l as usize] = 0.0 - 1.0
+}
+
+fn run_pair(idx: i64, zi: i64, zj: i64, wk: i64, wl: i64, h: &[f64; 16]) with IO, Mut, Div, Panic {
+    var z:   [f64; 16] = [0.0; 16]
+    var w:   [f64; 16] = [0.0; 16]
+    var zw:  [f64; 16] = [0.0; 16]
+    var zh:  [f64; 16] = [0.0; 16]
+    make_z(zi, zj, &!z)
+    make_w(wk, wl, &!w)
+
+    sed_mul(&z, &w, &!zw)
+    let n_zw = sed_norm_sq(&zw)
+    let annihilates = if n_zw < 1.0e-20 { 1 } else { 0 }
+    ANNIHILATES[(idx - 1) as usize] = annihilates
+
+    sed_mul(&z, h, &!zh)
+    let m = sed_norm_sq(&zh)
+    MSE[(idx - 1) as usize] = m
+
+    print("  pair "); print(idx)
+    print(" (z=e"); print(zi); print("+e"); print(zj)
+    print(", w=e"); print(wk); print("-e"); print(wl); print(") ")
+    if annihilates == 1 { print("ANNIHILATES  ") } else { print("non-ZD       ") }
+    print("||z*w||^2="); print_f64(n_zw, 6)
+    print("  ||z*h||^2="); print_f64(m, 16); print("\n")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("--- ZD orbit-equivalence test (Phase B) ---\n")
+
+    // Fixed test vector h — non-trivial spread; not aligned with annihilator.
+    var h: [f64; 16] = [0.0; 16]
+    h[0]=0.7; h[1]=0.3; h[2]=-0.2; h[5]=0.4
+    h[7]=-0.1; h[11]=0.5; h[13]=-0.3; h[14]=0.2
+
+    // 5 candidate pairs. (1) is the literature-confirmed canonical; (2)-(5)
+    // are Cayley-Dickson candidates whose ZD status the test verifies.
+    run_pair(1, 3, 10, 6, 15, &h)
+    run_pair(2, 3, 10, 7, 14, &h)
+    run_pair(3, 5, 12, 6, 15, &h)
+    run_pair(4, 2, 11, 4, 13, &h)
+    run_pair(5, 1,  8, 7, 14, &h)
+
+    // ─── Findings summary ──────────────────────────────────────────────
+    var n_zd: i64 = 0
+    var i: i64 = 0
+    while i < 5 { n_zd = n_zd + ANNIHILATES[i as usize]; i = i + 1 }
+    print("\n--- FINDINGS ---\n")
+    print("annihilating pairs: "); print(n_zd); print(" / 5\n")
+
+    // Bit-equality of MSE among ANNIHILATING pairs only.
+    var ref_set = 0
+    var ref_mse: f64 = 0.0
+    var bit_eq: i64 = 1
+    var max_delta: f64 = 0.0
+    i = 0
+    while i < 5 {
+        if ANNIHILATES[i as usize] == 1 {
+            if ref_set == 0 {
+                ref_mse = MSE[i as usize]
+                ref_set = 1
+            } else {
+                let d = MSE[i as usize] - ref_mse
+                let nd = if d < 0.0 { 0.0 - d } else { d }
+                if nd > 0.0 { bit_eq = 0 }
+                if nd > max_delta { max_delta = nd }
+            }
+        }
+        i = i + 1
+    }
+    if ref_set == 0 {
+        print("orbit-equivalence: N/A (no annihilating pairs)\n")
+    } else if bit_eq == 1 {
+        print("orbit-equivalence: bit-identical across "); print(n_zd); print(" annihilating pairs (CONFIRMED)\n")
+    } else {
+        print("orbit-equivalence: max |delta(m_k)| = "); print_f64(max_delta, 16)
+        print("  (algebraic, not bitwise)\n")
+    }
+
+    // The S-SSM memory claim "5 ZD pairs bit-identical MSE" interpreted
+    // strictly: 5 pairs annihilate AND m_k bit-identical. Verdict:
+    if n_zd == 5 && bit_eq == 1 {
+        print("VERDICT: claim CONFIRMED strictly — orbit-dedup pass justified with bit-equiv\n")
+    } else if n_zd >= 2 && bit_eq == 1 {
+        print("VERDICT: weak confirmation — bit-equiv among real ZDs, but only "); print(n_zd); print(" pairs\n")
+    } else if n_zd >= 2 && max_delta < 1.0e-12 {
+        print("VERDICT: algebraic equivalence holds (~ULP); orbit-dedup needs fast-math relaxation\n")
+    } else {
+        print("VERDICT: claim DISCONFIRMED — orbit-dedup butterfly needs reshape\n")
+    }
+
+    print("ALL PASS\n")
+    0
+}

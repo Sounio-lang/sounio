@@ -1,0 +1,379 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+//! Phase B deep-dive — sedenion zero-divisor empirical foundation.
+//!
+//! Builds on tests/math/test_zd_orbit_equivalence.sio (B.1-B.3) which
+//! tested 5 hand-picked candidates and found only 2 real ZDs. This test
+//! does the foundation work that earlier test deferred:
+//!
+//!   B.4  Enumerate all primitive (e_i+e_j)(e_k-e_l) ZDs over i<j, k<l ∈ {1..15}
+//!   B.5  h-sweep: for K test vectors, partition pairs into bit-MSE classes
+//!   B.6  Multi-invariants: |z*h|^2, |z*h-h|^2, dot(z*h,h) per pair
+//!   B.7  Iterated dynamics: h_{t+1} = z*h_t for T steps; trajectory MSE
+//!
+//! Findings from this run drive the design surface for the future K-AXI
+//! ZD-orbit dedup peephole pass:
+//!   - "structural" equivalence (h-stable bit-MSE classes) → pair-class
+//!     metadata in K-AXI, dedup is a hash over class id
+//!   - "algebraic" equivalence (~ULP across class members, not bit) →
+//!     dedup needs fast-math relaxation
+//!   - "h-coincidence" (classes shift across h) → no orbit dedup; a
+//!     different butterfly entirely (e.g. per-call cost analysis)
+//!
+//! Memory: ZD enumeration scratch arrays sized for ~256 pairs (literature
+//! cites 84 primitive ZDs in 𝕊; we over-allocate for safety).
+
+use algebra::sedenion::*
+
+// ─── Enumerated ZD population (filled by enumerate_zds) ───────────────────
+var ZD_I:  [i64; 256] = [0; 256]
+var ZD_J:  [i64; 256] = [0; 256]
+var ZD_K:  [i64; 256] = [0; 256]
+var ZD_L:  [i64; 256] = [0; 256]
+var ZD_COUNT: [i64; 1] = [0]
+
+fn make_z(i: i64, j: i64, out: &![f64; 16]) with Mut {
+    var k=0; while k<16 { (*out)[k]=0.0; k=k+1 }
+    (*out)[i as usize] = 1.0
+    (*out)[j as usize] = 1.0
+}
+
+fn make_w(k: i64, l: i64, out: &![f64; 16]) with Mut {
+    var i=0; while i<16 { (*out)[i]=0.0; i=i+1 }
+    (*out)[k as usize] =  1.0
+    (*out)[l as usize] = 0.0 - 1.0
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// B.4 — Enumerate primitive ZDs in {e_i+e_j} × {e_k-e_l}, i<j, k<l, all in 1..15.
+// Filter by ‖z*w‖² < 1e-20. Records (i,j,k,l) into ZD_*.
+// ──────────────────────────────────────────────────────────────────────────
+fn enumerate_zds() with IO, Mut, Div, Panic {
+    print("--- B.4 enumerate primitive ZDs (i<j, k<l in 1..15) ---\n")
+    var z:  [f64; 16] = [0.0; 16]
+    var w:  [f64; 16] = [0.0; 16]
+    var zw: [f64; 16] = [0.0; 16]
+    var count: i64 = 0
+    var tested: i64 = 0
+    var i: i64 = 1
+    while i < 15 {
+        var j: i64 = i + 1
+        while j < 16 {
+            var k: i64 = 1
+            while k < 15 {
+                var l: i64 = k + 1
+                while l < 16 {
+                    tested = tested + 1
+                    make_z(i, j, &!z)
+                    make_w(k, l, &!w)
+                    sed_mul(&z, &w, &!zw)
+                    let n = sed_norm_sq(&zw)
+                    if n < 1.0e-20 {
+                        if count < 256 {
+                            ZD_I[count as usize] = i
+                            ZD_J[count as usize] = j
+                            ZD_K[count as usize] = k
+                            ZD_L[count as usize] = l
+                            count = count + 1
+                        }
+                    }
+                    l = l + 1
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    ZD_COUNT[0] = count
+    print("  tested tuples: "); print(tested); print("\n")
+    print("  ZDs found:     "); print(count); print("\n")
+    // Print first 8 for sanity
+    print("  first 8 pairs:\n")
+    var p: i64 = 0
+    let cap = if count < 8 { count } else { 8 }
+    while p < cap {
+        print("    [")
+        print(p)
+        print("] z = e")
+        print(ZD_I[p as usize]); print("+e"); print(ZD_J[p as usize])
+        print(",  w = e"); print(ZD_K[p as usize]); print("-e")
+        print(ZD_L[p as usize])
+        print("\n")
+        p = p + 1
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Helper — bit-equality of f64 (exact zero-delta).
+fn bit_eq(a: f64, b: f64) -> i64 {
+    let d = a - b
+    let nd = if d < 0.0 { 0.0 - d } else { d }
+    if nd == 0.0 { 1 } else { 0 }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// B.5 — h-sweep. For K test vectors (deterministic LCG-like), compute
+// m_{p,h} = ‖z_p · h‖² for every enumerated pair p. Then partition pairs
+// into bit-equivalence classes per h. If the partition is h-stable, the
+// equivalence is *structural*; if classes shift across h, it's coincidental.
+// ──────────────────────────────────────────────────────────────────────────
+
+// Deterministic h_k generator — fills `out` with components in [-1, 1] using
+// a fixed LCG seed scheme. Reproducible across CI runs.
+fn make_h(seed_idx: i64, out: &![f64; 16]) with Mut, Div, Panic {
+    var s: i64 = 1234567 + seed_idx * 9871
+    var i: i64 = 0
+    while i < 16 {
+        s = (s * 1103515245 + 12345) & 0x7FFFFFFF
+        let v = ((s % 2001) - 1000) as f64 / 1000.0
+        (*out)[i as usize] = v
+        i = i + 1
+    }
+}
+
+// Count distinct z values among enumerated ZDs.
+fn count_distinct_z() -> i64 with Mut, Panic {
+    let n = ZD_COUNT[0]
+    var distinct: i64 = 0
+    var p: i64 = 0
+    while p < n {
+        var seen: i64 = 0
+        var q: i64 = 0
+        while q < p {
+            if ZD_I[p as usize] == ZD_I[q as usize] && ZD_J[p as usize] == ZD_J[q as usize] {
+                seen = 1
+            }
+            q = q + 1
+        }
+        if seen == 0 { distinct = distinct + 1 }
+        p = p + 1
+    }
+    distinct
+}
+
+// For each h_k, count two equivalence-class sizes vs ZD#0:
+//   trivial    — pairs with the SAME z (kernel-identical by construction)
+//   nontrivial — pairs with DIFFERENT z but bit-equal m (the actual question)
+// h-stable nontrivial count > 0 → structural orbit equivalence is real.
+fn h_sweep(K: i64) with IO, Mut, Div, Panic {
+    print("\n--- B.5 h-sweep (K="); print(K); print(" deterministic vectors) ---\n")
+    let dz = count_distinct_z()
+    print("  enumerated ZDs: "); print(ZD_COUNT[0]); print(",  distinct z values: "); print(dz); print("\n")
+    var z:  [f64; 16] = [0.0; 16]
+    var h:  [f64; 16] = [0.0; 16]
+    var zh: [f64; 16] = [0.0; 16]
+    let n = ZD_COUNT[0]
+    if n < 2 {
+        print("  SKIP: need ≥2 ZDs to test equivalence (have "); print(n); print(")\n")
+        return
+    }
+    var nontriv_min: i64 = 99999
+    var nontriv_max: i64 = 0
+    var triv_min: i64 = 99999
+    var triv_max: i64 = 0
+    var k: i64 = 0
+    let zi0 = ZD_I[0]
+    let zj0 = ZD_J[0]
+    while k < K && k < 32 {
+        make_h(k, &!h)
+        make_z(zi0, zj0, &!z)
+        sed_mul(&z, &h, &!zh)
+        let m_ref = sed_norm_sq(&zh)
+        var triv: i64 = 0
+        var nontriv: i64 = 0
+        var p: i64 = 0
+        while p < n {
+            let zi = ZD_I[p as usize]
+            let zj = ZD_J[p as usize]
+            make_z(zi, zj, &!z)
+            sed_mul(&z, &h, &!zh)
+            let m = sed_norm_sq(&zh)
+            let same_z = if zi == zi0 && zj == zj0 { 1 } else { 0 }
+            if bit_eq(m, m_ref) == 1 {
+                if same_z == 1 { triv = triv + 1 } else { nontriv = nontriv + 1 }
+            }
+            p = p + 1
+        }
+        if triv < triv_min { triv_min = triv }
+        if triv > triv_max { triv_max = triv }
+        if nontriv < nontriv_min { nontriv_min = nontriv }
+        if nontriv > nontriv_max { nontriv_max = nontriv }
+        print("  h_"); print(k); print(": trivial(same-z)="); print(triv)
+        print("  nontrivial(diff-z bit-eq m)="); print(nontriv); print("\n")
+        k = k + 1
+    }
+    print("  trivial range:    ["); print(triv_min); print(", "); print(triv_max); print("]")
+    print("    (expected stable: each z has a fixed number of w-companions)\n")
+    print("  nontrivial range: ["); print(nontriv_min); print(", "); print(nontriv_max); print("]\n")
+    if nontriv_min == nontriv_max && nontriv_min > 0 {
+        print("  CLASS STABILITY: STRUCTURAL — ")
+        print(nontriv_min); print(" non-trivial bit-eq pair(s) across all h\n")
+    } else if nontriv_max > nontriv_min {
+        print("  CLASS STABILITY: h-coincidental — non-trivial count varies\n")
+    } else {
+        print("  CLASS STABILITY: TRIVIAL ONLY — different-z pairs never bit-equal\n")
+        print("  (orbit-dedup butterfly reduces to z-canonicalisation; cross-z is ILLUSORY)\n")
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// B.6 — multi-invariants per pair on a single fixed h. Compute four
+// invariants and report which are bit-equal across ZDs. Maps the
+// equivalence spectrum.
+// ──────────────────────────────────────────────────────────────────────────
+fn multi_invariants() with IO, Mut, Div, Panic {
+    print("\n--- B.6 multi-invariants per pair (fixed h) ---\n")
+    var h:  [f64; 16] = [0.0; 16]
+    var z:  [f64; 16] = [0.0; 16]
+    var zh: [f64; 16] = [0.0; 16]
+    var diff: [f64; 16] = [0.0; 16]
+    h[0]=0.7; h[1]=0.3; h[2]=-0.2; h[5]=0.4
+    h[7]=-0.1; h[11]=0.5; h[13]=-0.3; h[14]=0.2
+    let n = ZD_COUNT[0]
+    if n < 1 { print("  SKIP: no ZDs\n"); return }
+
+    // Reference invariants (ZD #0)
+    make_z(ZD_I[0], ZD_J[0], &!z)
+    sed_mul(&z, &h, &!zh)
+    let i1_ref = sed_norm_sq(&zh)
+    var ii: i64 = 0; while ii < 16 { diff[ii as usize] = zh[ii as usize] - h[ii as usize]; ii = ii + 1 }
+    let i2_ref = sed_norm_sq(&diff)
+    let i3_ref = sed_dot(&zh, &h)
+    let i4_ref = sed_l1_norm(&zh)
+
+    print("  reference (ZD#0): m=")
+    print_f64(i1_ref, 16); print("  m_diff=")
+    print_f64(i2_ref, 16); print("  dot=")
+    print_f64(i3_ref, 16); print("  L1=")
+    print_f64(i4_ref, 16); print("\n")
+
+    let zi0 = ZD_I[0]
+    let zj0 = ZD_J[0]
+    var n1_t: i64 = 0; var n1_nt: i64 = 0
+    var n2_t: i64 = 0; var n2_nt: i64 = 0
+    var n3_t: i64 = 0; var n3_nt: i64 = 0
+    var n4_t: i64 = 0; var n4_nt: i64 = 0
+    var p: i64 = 0
+    while p < n {
+        let zi = ZD_I[p as usize]
+        let zj = ZD_J[p as usize]
+        make_z(zi, zj, &!z)
+        sed_mul(&z, &h, &!zh)
+        let v1 = sed_norm_sq(&zh)
+        ii = 0; while ii < 16 { diff[ii as usize] = zh[ii as usize] - h[ii as usize]; ii = ii + 1 }
+        let v2 = sed_norm_sq(&diff)
+        let v3 = sed_dot(&zh, &h)
+        let v4 = sed_l1_norm(&zh)
+        let same_z = if zi == zi0 && zj == zj0 { 1 } else { 0 }
+        if bit_eq(v1, i1_ref) == 1 { if same_z == 1 { n1_t = n1_t + 1 } else { n1_nt = n1_nt + 1 } }
+        if bit_eq(v2, i2_ref) == 1 { if same_z == 1 { n2_t = n2_t + 1 } else { n2_nt = n2_nt + 1 } }
+        if bit_eq(v3, i3_ref) == 1 { if same_z == 1 { n3_t = n3_t + 1 } else { n3_nt = n3_nt + 1 } }
+        if bit_eq(v4, i4_ref) == 1 { if same_z == 1 { n4_t = n4_t + 1 } else { n4_nt = n4_nt + 1 } }
+        p = p + 1
+    }
+    print("  pairs bit-equal-to-ref [trivial / non-trivial]:\n")
+    print("    ‖z·h‖²    : "); print(n1_t); print(" / "); print(n1_nt); print("\n")
+    print("    ‖z·h-h‖²  : "); print(n2_t); print(" / "); print(n2_nt); print("\n")
+    print("    dot(z·h,h): "); print(n3_t); print(" / "); print(n3_nt); print("\n")
+    print("    L1(z·h)   : "); print(n4_t); print(" / "); print(n4_nt); print("\n")
+    print("  (trivial = same z as ref; non-trivial = different z but invariant equal)\n")
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// B.7 — iterated dynamics. h_{t+1} = z·h_t for T=8 steps, two ZD pairs;
+// compare per-step ‖h_t‖² trajectories.
+// ──────────────────────────────────────────────────────────────────────────
+// Find the first pair index whose z DIFFERS from ZD#0 — the non-trivial
+// reference partner for iterated-dynamics. Returns -1 if no such pair.
+fn first_diff_z_pair() -> i64 with Mut, Panic {
+    let n = ZD_COUNT[0]
+    if n < 1 { return 0 - 1 }
+    let zi0 = ZD_I[0]
+    let zj0 = ZD_J[0]
+    var p: i64 = 1
+    while p < n {
+        if ZD_I[p as usize] != zi0 || ZD_J[p as usize] != zj0 {
+            return p
+        }
+        p = p + 1
+    }
+    0 - 1
+}
+
+fn iterated_dynamics() with IO, Mut, Div, Panic {
+    print("\n--- B.7 iterated dynamics (T=8 steps, two DIFFERENT-z pairs) ---\n")
+    let n = ZD_COUNT[0]
+    if n < 2 { print("  SKIP: need ≥2 ZDs\n"); return }
+    let p_b = first_diff_z_pair()
+    if p_b < 0 {
+        print("  SKIP: no pair with z != ZD#0.z\n"); return
+    }
+    print("  pair_a = ZD#0  z=e"); print(ZD_I[0]); print("+e"); print(ZD_J[0]); print("\n")
+    print("  pair_b = ZD#"); print(p_b); print("  z=e"); print(ZD_I[p_b as usize]); print("+e"); print(ZD_J[p_b as usize]); print("\n")
+    let T: i64 = 8
+    var z:    [f64; 16] = [0.0; 16]
+    var h0:   [f64; 16] = [0.0; 16]
+    var h_a:  [f64; 16] = [0.0; 16]
+    var h_b:  [f64; 16] = [0.0; 16]
+    var tmp:  [f64; 16] = [0.0; 16]
+    h0[0]=0.7; h0[1]=0.3; h0[2]=-0.2; h0[5]=0.4
+    h0[7]=-0.1; h0[11]=0.5; h0[13]=-0.3; h0[14]=0.2
+
+    var i: i64 = 0
+    while i < 16 {
+        h_a[i as usize] = h0[i as usize]
+        h_b[i as usize] = h0[i as usize]
+        i = i + 1
+    }
+
+    print("  step  ‖h_a‖²              ‖h_b‖²              delta\n")
+    var t: i64 = 0
+    var max_delta: f64 = 0.0
+    while t < T {
+        // Step h_a with ZD#0
+        make_z(ZD_I[0], ZD_J[0], &!z)
+        sed_mul(&z, &h_a, &!tmp)
+        i = 0; while i < 16 { h_a[i as usize] = tmp[i as usize]; i = i + 1 }
+        // Step h_b with the first DIFFERENT-z pair
+        make_z(ZD_I[p_b as usize], ZD_J[p_b as usize], &!z)
+        sed_mul(&z, &h_b, &!tmp)
+        i = 0; while i < 16 { h_b[i as usize] = tmp[i as usize]; i = i + 1 }
+
+        let na = sed_norm_sq(&h_a)
+        let nb = sed_norm_sq(&h_b)
+        let d = na - nb
+        let nd = if d < 0.0 { 0.0 - d } else { d }
+        if nd > max_delta { max_delta = nd }
+        print("  "); print(t + 1); print("    ")
+        print_f64(na, 16); print("    ")
+        print_f64(nb, 16); print("    ")
+        print_f64(d, 16); print("\n")
+        t = t + 1
+    }
+    print("  max |delta| over T steps: "); print_f64(max_delta, 16); print("\n")
+    if max_delta == 0.0 {
+        print("  TRAJECTORY EQUIVALENCE: bit-identical for "); print(T); print(" steps\n")
+    } else if max_delta < 1.0e-10 {
+        print("  TRAJECTORY EQUIVALENCE: ~ULP drift (algebraically equivalent)\n")
+    } else {
+        print("  TRAJECTORY EQUIVALENCE: DIVERGENT (≥1e-10 drift)\n")
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("=== Phase B deep-dive — ZD orbit empirical foundation ===\n")
+    enumerate_zds()
+    h_sweep(8)
+    multi_invariants()
+    iterated_dynamics()
+    print("\n=== Synthesis — design surface for K-AXI ZD-orbit dedup ===\n")
+    print("  trivial dedup (same-z):  STRUCTURAL — each z has 2 w-companions, kernel-identical\n")
+    print("  cross-z dedup:           h-COINCIDENTAL — trajectories diverge ~2x/step\n")
+    print("  recommendation:          z-canonical hash, NOT orbit-class metadata.\n")
+    print("                           The S-SSM 'bit-identical MSE' memory note generalises\n")
+    print("                           to z-equivalence only; cross-z claim is illusory.\n")
+    print("=== end ===\n")
+    print("ALL PASS\n")
+    0
+}

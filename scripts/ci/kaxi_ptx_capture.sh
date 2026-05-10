@@ -40,6 +40,7 @@ PATTERNS=(
     pbpk_2comp_epistemic pbpk_2comp_epistemic_4step pbpk_traj_4step
     conf_gate
     octonion_assoc octonion_mul sedenion_mul
+    pbpk_2comp_gum_4step
 )
 
 # Mode name : flag passed to kaxi-emit-ptx (empty = default f64)
@@ -49,6 +50,7 @@ MODES=(
     "f32:--f32"
     "f32_2c:--f32-2c"
     "f32e:--f32-epistemic"
+    "f32_gum:--f32-gum"
 )
 
 NEW=0

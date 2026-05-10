@@ -123,6 +123,8 @@ tar -C "${ROOT_DIR}" -czf "${LOCAL_TARBALL}" \
   self-hosted/gpu/kretikos_emit_ptx.sio \
   self-hosted/gpu/kretikos_emit_cubin.sio \
   self-hosted/gpu/kretikos_emit_kaxi.sio \
+  self-hosted/gpu/kretikos_kaxi_validate_evidence.sio \
+  self-hosted/gpu/kretikos_json_emit.sio \
   self-hosted/gpu/kaxi_backend.sio \
   self-hosted/gpu/ptx.sio \
   self-hosted/gpu/nvidia_bare.sio \
@@ -209,55 +211,32 @@ mark "kretikos_source=running phase=run_source"
   ./bin/kretikos run-source "\${SOUNIO_DIR}/\${SOURCE_PAYLOAD_NAME}" -o "\${BUNDLE_DIR}" --force --validate-toolchain --require-runtime
 } > "\${LOG_FILE}" 2>&1
 
-comment="\$(python3 - "\${BUNDLE_DIR}/kretikos_bundle.v1.json" "\${BUNDLE_DIR}/kretikos_source_profile.v1.json" <<'PY'
-import json
-import sys
-
-bundle = json.load(open(sys.argv[1], encoding="utf-8"))
-source = json.load(open(sys.argv[2], encoding="utf-8"))
-runtime = bundle.get("runtime_validation") or {}
-tool = bundle.get("toolchain_validation") or {}
-ptxas = (tool.get("ptxas") or {})
-nvdisasm = (tool.get("nvdisasm") or {})
-print(
-    "kretikos_source={status} profile={profile} reason={reason} stage={stage} "
-    "cuda={cuda} driver={driver} devices={devices} cc={cc_major}.{cc_minor} "
-    "device={device} rung={rung} kernel={kernel} ptxas={ptxas}/{ptxas_reason} "
-    "nvdisasm={nvdisasm}/{nvdisasm_reason}".format(
-        status=runtime.get("status"),
-        profile=source.get("profile"),
-        reason=runtime.get("reason"),
-        stage=runtime.get("stage"),
-        cuda=runtime.get("cuda_result"),
-        driver=runtime.get("driver_version"),
-        devices=runtime.get("device_count"),
-        cc_major=runtime.get("cc_major"),
-        cc_minor=runtime.get("cc_minor"),
-        device=runtime.get("device_name"),
-        rung=runtime.get("rung"),
-        kernel=runtime.get("kernel"),
-        ptxas=ptxas.get("status"),
-        ptxas_reason=ptxas.get("reason"),
-        nvdisasm=nvdisasm.get("status"),
-        nvdisasm_reason=nvdisasm.get("reason"),
-    )
-)
-PY
-)"
+mapfile -t __cm_b < <(./bin/kretikos kaxi-validate-evidence "\${BUNDLE_DIR}/kretikos_bundle.v1.json" \\
+    --print-or-empty runtime_validation.status \\
+    --print-or-empty runtime_validation.reason \\
+    --print-or-empty runtime_validation.stage \\
+    --print-or-empty runtime_validation.cuda_result \\
+    --print-or-empty runtime_validation.driver_version \\
+    --print-or-empty runtime_validation.device_count \\
+    --print-or-empty runtime_validation.cc_major \\
+    --print-or-empty runtime_validation.cc_minor \\
+    --print-or-empty runtime_validation.device_name \\
+    --print-or-empty runtime_validation.rung \\
+    --print-or-empty runtime_validation.kernel \\
+    --print-or-empty toolchain_validation.ptxas.status \\
+    --print-or-empty toolchain_validation.ptxas.reason \\
+    --print-or-empty toolchain_validation.nvdisasm.status \\
+    --print-or-empty toolchain_validation.nvdisasm.reason)
+__cm_prof="\$(./bin/kretikos kaxi-validate-evidence "\${BUNDLE_DIR}/kretikos_source_profile.v1.json" --print-or-empty profile)"
+comment="\$(printf 'kretikos_source=%s profile=%s reason=%s stage=%s cuda=%s driver=%s devices=%s cc=%s.%s device=%s rung=%s kernel=%s ptxas=%s/%s nvdisasm=%s/%s' \\
+    "\${__cm_b[0]}" "\${__cm_prof}" "\${__cm_b[1]}" "\${__cm_b[2]}" "\${__cm_b[3]}" "\${__cm_b[4]}" "\${__cm_b[5]}" "\${__cm_b[6]}" "\${__cm_b[7]}" "\${__cm_b[8]}" "\${__cm_b[9]}" "\${__cm_b[10]}" "\${__cm_b[11]}" "\${__cm_b[12]}" "\${__cm_b[13]}" "\${__cm_b[14]}")"
 mark "\${comment}"
 
 KAXI_CERT_STATUS="not_run"
 KAXI_CERT_REASON="profile_not_supported"
 KAXI_CERT_WORKER_PATH=""
 KAXI_CERT_PUBLISHED_PATH=""
-SOURCE_PROFILE="\$(python3 - "\${BUNDLE_DIR}/kretikos_source_profile.v1.json" <<'PY'
-import json
-import sys
-
-source = json.load(open(sys.argv[1], encoding="utf-8"))
-print(source.get("profile") or "")
-PY
-)"
+SOURCE_PROFILE="\$(./bin/kretikos kaxi-validate-evidence "\${BUNDLE_DIR}/kretikos_source_profile.v1.json" --print-or-empty profile)"
 
 case "\${SOURCE_PROFILE}" in
   vec_add_f32|vec_sub_f32|vec_mul_f32|vec_div_f32|fma_f32|epistemic_elementwise_f32|epistemic_dual_output_f32)
@@ -283,25 +262,27 @@ case "\${SOURCE_PROFILE}" in
           --force \
           --require-runtime > "\${CERT_LOG}" 2>&1
       fi
-      python3 - "\${KAXI_CERT_JSON}" "\${SOURCE_PROFILE}" <<'PY'
-import json
-import sys
-
-obj = json.load(open(sys.argv[1], encoding="utf-8"))
-expected_profile = sys.argv[2]
-runtime = obj.get("runtime", {}).get("runtime_validation", {})
-profile = obj.get("profile", {}).get("name")
-if obj.get("status") != "pass":
-    raise SystemExit(f"kaxi_certificate_not_pass:{obj.get('status')}")
-if profile != expected_profile:
-    raise SystemExit(f"kaxi_certificate_profile_mismatch:{profile}!={expected_profile}")
-if obj.get("failures"):
-    raise SystemExit(f"kaxi_certificate_failures:{obj.get('failures')}")
-if runtime.get("status") != "pass":
-    raise SystemExit(f"kaxi_certificate_runtime_not_pass:{runtime.get('status')}/{runtime.get('reason')}")
-if runtime.get("rung") != expected_profile:
-    raise SystemExit(f"kaxi_certificate_runtime_rung_mismatch:{runtime.get('rung')}!={expected_profile}")
-PY
+      __kc_status="\$(./bin/kretikos kaxi-validate-evidence "\${KAXI_CERT_JSON}" --print-or-empty status)"
+      __kc_profile="\$(./bin/kretikos kaxi-validate-evidence "\${KAXI_CERT_JSON}" --print-or-empty profile.name)"
+      __kc_failures="\$(./bin/kretikos kaxi-validate-evidence "\${KAXI_CERT_JSON}" --print-subtree-or failures '[]')"
+      __kc_rt_status="\$(./bin/kretikos kaxi-validate-evidence "\${KAXI_CERT_JSON}" --print-or-empty runtime.runtime_validation.status)"
+      __kc_rt_reason="\$(./bin/kretikos kaxi-validate-evidence "\${KAXI_CERT_JSON}" --print-or-empty runtime.runtime_validation.reason)"
+      __kc_rt_rung="\$(./bin/kretikos kaxi-validate-evidence "\${KAXI_CERT_JSON}" --print-or-empty runtime.runtime_validation.rung)"
+      if [[ "\${__kc_status}" != "pass" ]]; then
+        echo "kaxi_certificate_not_pass:\${__kc_status}" >&2; exit 1
+      fi
+      if [[ "\${__kc_profile}" != "\${SOURCE_PROFILE}" ]]; then
+        echo "kaxi_certificate_profile_mismatch:\${__kc_profile}!=\${SOURCE_PROFILE}" >&2; exit 1
+      fi
+      if [[ "\${__kc_failures}" != "[]" ]]; then
+        echo "kaxi_certificate_failures:\${__kc_failures}" >&2; exit 1
+      fi
+      if [[ "\${__kc_rt_status}" != "pass" ]]; then
+        echo "kaxi_certificate_runtime_not_pass:\${__kc_rt_status}/\${__kc_rt_reason}" >&2; exit 1
+      fi
+      if [[ "\${__kc_rt_rung}" != "\${SOURCE_PROFILE}" ]]; then
+        echo "kaxi_certificate_runtime_rung_mismatch:\${__kc_rt_rung}!=\${SOURCE_PROFILE}" >&2; exit 1
+      fi
       KAXI_CERT_STATUS="pass"
       KAXI_CERT_REASON="runtime_backed_\${KAXI_CERT_KIND}_certificate_pass"
       KAXI_CERT_WORKER_PATH="\${KAXI_CERT_JSON}"
@@ -330,69 +311,58 @@ if [[ "\${PUBLISH_RESULTS}" == "1" ]]; then
   printf '%s\n' "\${comment}" > "\${PUBLISH_DIR}/comment.txt"
   printf '%s\n' "\${LOCAL_ROOT}" > "\${PUBLISH_DIR}/worker_run_dir.txt"
   printf '%s\n' "\$(hostname)" > "\${PUBLISH_DIR}/worker_host.txt"
-  python3 - "\${PUBLISH_DIR}/kretikos_hpc_source_result.v1.json" \
-    "\${SLURM_JOB_ID:-unknown}" "\$(hostname)" "\${comment}" \
-    "\${BUNDLE_DIR}/kretikos_bundle.v1.json" \
-    "\${BUNDLE_DIR}/kretikos_source_profile.v1.json" \
-    "\${KAXI_CERT_STATUS}" "\${KAXI_CERT_REASON}" "\${KAXI_CERT_WORKER_PATH}" \
-    "\${KAXI_CERT_PUBLISHED_PATH}" "\${CERT_LOG}" <<'PY'
-import json
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-
-(
-    out,
-    job_id,
-    host,
-    comment,
-    bundle_path,
-    source_path,
-    kaxi_cert_status,
-    kaxi_cert_reason,
-    kaxi_cert_worker_path,
-    kaxi_cert_published_path,
-    kaxi_cert_log_path,
-) = sys.argv[1:]
-bundle = json.load(open(bundle_path, encoding="utf-8"))
-source = json.load(open(source_path, encoding="utf-8"))
-certificate = None
-if kaxi_cert_worker_path and Path(kaxi_cert_worker_path).is_file():
-    certificate = json.load(open(kaxi_cert_worker_path, encoding="utf-8"))
-payload = {
-    "schema": "sounio.kretikos.hpc-source-result.v1",
-    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "job_id": job_id,
-    "host": host,
-    "comment": comment,
-    "source_profile": source,
-    "bundle": bundle,
-    "runtime_validation": bundle.get("runtime_validation") or {},
-    "toolchain_validation": bundle.get("toolchain_validation") or {},
-    "kaxi_certificate": {
-        "status": kaxi_cert_status,
-        "reason": kaxi_cert_reason,
-        "worker_path": kaxi_cert_worker_path or None,
-        "published_path": kaxi_cert_published_path or None,
-        "log_path": kaxi_cert_log_path,
-        "certificate": certificate,
-        "runtime_validation": (certificate or {}).get("runtime", {}).get("runtime_validation") if certificate else None,
-        "profile": (certificate or {}).get("profile", {}).get("name") if certificate else source.get("profile"),
-        "kaxi_pattern": (certificate or {}).get("kaxi", {}).get("pattern") if certificate else None,
-        "semantic_profile": (certificate or {}).get("kaxi", {}).get("semantic_profile") if certificate else None,
-    },
-    "boundaries": [
-        "payload_was_embedded_in_sbatch_not_read_from_orangefs",
-        "runtime_execution_happened_on_slurm_gpu_worker",
-        "published_results_are_post_run_evidence",
-        "kaxi_certificate_requires_worker_runtime_pass_for_supported_profiles",
-        "worker_side_ptxas_or_nvdisasm_missing_is_not_a_runtime_failure",
-    ],
-}
-with open(out, "w", encoding="utf-8") as fh:
-    json.dump(payload, fh, indent=2, sort_keys=True)
-    fh.write("\n")
-PY
+  __agg_runtime_val="\$(./bin/kretikos kaxi-validate-evidence "\${BUNDLE_DIR}/kretikos_bundle.v1.json" --print-subtree-or runtime_validation '{}')"
+  __agg_toolchain_val="\$(./bin/kretikos kaxi-validate-evidence "\${BUNDLE_DIR}/kretikos_bundle.v1.json" --print-subtree-or toolchain_validation '{}')"
+  __agg_source_raw="\$(cat "\${BUNDLE_DIR}/kretikos_source_profile.v1.json")"
+  __agg_bundle_raw="\$(cat "\${BUNDLE_DIR}/kretikos_bundle.v1.json")"
+  if [[ -n "\${KAXI_CERT_WORKER_PATH}" && -f "\${KAXI_CERT_WORKER_PATH}" ]]; then
+    __agg_cert_raw="\$(cat "\${KAXI_CERT_WORKER_PATH}")"
+    __agg_cert_rt_val="\$(./bin/kretikos kaxi-validate-evidence "\${KAXI_CERT_WORKER_PATH}" --print-subtree-or runtime.runtime_validation null)"
+    __agg_cert_profile="\$(./bin/kretikos kaxi-validate-evidence "\${KAXI_CERT_WORKER_PATH}" --print-or-empty profile.name)"
+    __agg_cert_kaxi_pattern="\$(./bin/kretikos kaxi-validate-evidence "\${KAXI_CERT_WORKER_PATH}" --print-subtree-or kaxi.pattern null)"
+    __agg_cert_kaxi_sempro="\$(./bin/kretikos kaxi-validate-evidence "\${KAXI_CERT_WORKER_PATH}" --print-subtree-or kaxi.semantic_profile null)"
+  else
+    __agg_cert_raw="null"
+    __agg_cert_rt_val="null"
+    __agg_cert_profile="\$(./bin/kretikos kaxi-validate-evidence "\${BUNDLE_DIR}/kretikos_source_profile.v1.json" --print-or-empty profile)"
+    __agg_cert_kaxi_pattern="null"
+    __agg_cert_kaxi_sempro="null"
+  fi
+  __agg_cert_args=(
+    --raw-json "certificate=\${__agg_cert_raw}"
+    --raw-json "kaxi_pattern=\${__agg_cert_kaxi_pattern}"
+    --string  "log_path=\${CERT_LOG}"
+    --string  "profile=\${__agg_cert_profile}"
+  )
+  if [[ -n "\${KAXI_CERT_PUBLISHED_PATH}" ]]; then
+    __agg_cert_args+=(--string "published_path=\${KAXI_CERT_PUBLISHED_PATH}")
+  else
+    __agg_cert_args+=(--null published_path)
+  fi
+  __agg_cert_args+=(--string "reason=\${KAXI_CERT_REASON}")
+  __agg_cert_args+=(--raw-json "runtime_validation=\${__agg_cert_rt_val}")
+  __agg_cert_args+=(--raw-json "semantic_profile=\${__agg_cert_kaxi_sempro}")
+  __agg_cert_args+=(--string "status=\${KAXI_CERT_STATUS}")
+  if [[ -n "\${KAXI_CERT_WORKER_PATH}" ]]; then
+    __agg_cert_args+=(--string "worker_path=\${KAXI_CERT_WORKER_PATH}")
+  else
+    __agg_cert_args+=(--null worker_path)
+  fi
+  __agg_kaxi_certificate="\$(./bin/kretikos json-emit "\${__agg_cert_args[@]}")"
+  __agg_now="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  ./bin/kretikos json-emit \\
+    --array-strings 'boundaries=payload_was_embedded_in_sbatch_not_read_from_orangefs|runtime_execution_happened_on_slurm_gpu_worker|published_results_are_post_run_evidence|kaxi_certificate_requires_worker_runtime_pass_for_supported_profiles|worker_side_ptxas_or_nvdisasm_missing_is_not_a_runtime_failure' \\
+    --raw-json "bundle=\${__agg_bundle_raw}" \\
+    --string "comment=\${comment}" \\
+    --string "generated_at_utc=\${__agg_now}" \\
+    --string "host=\$(hostname)" \\
+    --string "job_id=\${SLURM_JOB_ID:-unknown}" \\
+    --raw-json "kaxi_certificate=\${__agg_kaxi_certificate}" \\
+    --raw-json "runtime_validation=\${__agg_runtime_val}" \\
+    --string 'schema=sounio.kretikos.hpc-source-result.v1' \\
+    --raw-json "source_profile=\${__agg_source_raw}" \\
+    --raw-json "toolchain_validation=\${__agg_toolchain_val}" \\
+    > "\${PUBLISH_DIR}/kretikos_hpc_source_result.v1.json"
 fi
 EOF
 
@@ -458,20 +428,15 @@ if [[ "${STATE}" == "COMPLETED" && "${KRETIKOS_HPC_PUBLISH_RESULTS}" == "1" ]]; 
     echo "Artifacts=${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR}"
     echo "ArtifactJSON=${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR}/kretikos_hpc_source_result.v1.json"
     if [[ -f "${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR}/kretikos_hpc_source_result.v1.json" ]]; then
-      python3 - "${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR}/kretikos_hpc_source_result.v1.json" <<'PY'
-import json
-import sys
-
-obj = json.load(open(sys.argv[1], encoding="utf-8"))
-runtime = obj.get("runtime_validation") or {}
-print("ArtifactRuntime={}/{} rung={} kernel={} device={}".format(
-    runtime.get("status"),
-    runtime.get("reason"),
-    runtime.get("rung"),
-    runtime.get("kernel"),
-    runtime.get("device_name"),
-))
-PY
+      mapfile -t __ar_parts < <("${ROOT_DIR}/bin/kretikos" kaxi-validate-evidence \
+        "${KRETIKOS_HPC_LOCAL_ARTIFACT_DIR}/kretikos_hpc_source_result.v1.json" \
+        --print-or-empty runtime_validation.status \
+        --print-or-empty runtime_validation.reason \
+        --print-or-empty runtime_validation.rung \
+        --print-or-empty runtime_validation.kernel \
+        --print-or-empty runtime_validation.device_name)
+      printf 'ArtifactRuntime=%s/%s rung=%s kernel=%s device=%s\n' \
+        "${__ar_parts[0]}" "${__ar_parts[1]}" "${__ar_parts[2]}" "${__ar_parts[3]}" "${__ar_parts[4]}"
     fi
   else
     echo "ArtifactsRemote=${WORKER_POD}:${WORKER_PUBLISH_DIR}"
