@@ -439,3 +439,30 @@ checks:
   - bin/souc compile examples/cocycle_subspace_k6.sio -o /tmp/k6 && /tmp/k6 (ALL PASS)
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+lane: 7
+time_utc: 2026-05-10T16:08:00Z
+files:
+  - scripts/ci/native_v2_dissertation_rapamycin_gate.sh
+intent: Lane 7 ONLINE (NEW lane, scope=python-extermination beyond kretikos core). Phase 6 cubin-emit was already done — bin/kretikos has 0 live python heredocs. Pivoting Lane 7 to extend python-extermination into scripts/ci/native_v2_*.sh which still have ~20+ python3 invocations. First target: native_v2_dissertation_rapamycin_gate.sh:136 — 1 json.dump heredoc. Replace with `kretikos json-emit` (existing Phase 1 primitive). Diff before/after summary.json. Bounded, low-risk.
+checks:
+  - bash scripts/ci/native_v2_dissertation_rapamycin_gate.sh (pre-state baseline)
+status: lock-acquired
+
+---
+
+agent: claude
+lane: 7
+time_utc: 2026-05-10T16:18:00Z
+files:
+  - scripts/ci/native_v2_dissertation_rapamycin_gate.sh
+intent: Lane 7 RELEASE — replaced 1 python3 json.dump heredoc (line 136, 33 LoC) with `kretikos json-emit` invocation (19 LoC). Schema sounio.native_v2_dissertation_rapamycin.v1 byte-identical pre/post (diff = none, including key order via alphabetical args). First Lane 7 win extending python-extermination beyond kretikos core into scripts/ci/native_v2_*.sh. Remaining native_v2_* python heredocs flagged for follow-up: native_v2_metal_algebra_gate.sh (3), native_v2_hof_closure_gate.sh (1), native_v2_driver_self_compile_gate.sh (2), native_v2_imported_core_abi_gate.sh (1), native_v2_imported_hof_abi_gate.sh (1).
+checks:
+  - bash scripts/ci/native_v2_dissertation_rapamycin_gate.sh (PASS, baseline vs post: byte-identical)
+  - bash -n scripts/ci/native_v2_dissertation_rapamycin_gate.sh (rc=0)
+  - live python3 count in file: 0
+commit: pending
+status: lock-released
