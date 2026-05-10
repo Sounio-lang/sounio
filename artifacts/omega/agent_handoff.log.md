@@ -327,3 +327,16 @@ checks:
   - bin/llm-offload -t math-review -p xai (NO MATHEMATICAL CONTENT TO REVIEW)
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+time_utc: 2026-05-10T13:48:00Z
+files:
+  - tests/golden/kaxi_ptx/**
+intent: Lane 1 RELEASE — BLK-20260510-lane1-golden-drift closed. 318/318 PASS, 0 FAIL, 0 MISSING after kaxi_ptx_capture.sh --force regen. souc unchanged (lean_single fixed point still md5=1c89bbde). PR pending. bin/souc-linux-x86_64 release-token NOT consumed; remains available for Lane 4 nv2-hardening.
+checks:
+  - bash scripts/ci/kaxi_ptx_golden_gate.sh (PASS=318, FAIL=0, MISSING=0)
+  - bash scripts/ci/lean_single_fixed_point_gate.sh (PASS, md5=1c89bbde stage1==stage2==stage3)
+commit: pending
+status: lock-released
