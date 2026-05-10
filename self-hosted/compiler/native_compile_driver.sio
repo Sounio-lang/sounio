@@ -1261,6 +1261,20 @@ fn mark_parse_unsupported_call(pos: i64) with Mut, Panic {
     }
 }
 
+fn mark_parse_unsupported_pathsep(pos: i64) with Mut, Panic {
+    if V2_PARSE_UNSUPPORTED == 0 {
+        V2_PARSE_UNSUPPORTED_REASON = 2
+        mark_parse_unsupported(pos)
+    }
+}
+
+fn mark_parse_unsupported_refinement(pos: i64) with Mut, Panic {
+    if V2_PARSE_UNSUPPORTED == 0 {
+        V2_PARSE_UNSUPPORTED_REASON = 3
+        mark_parse_unsupported(pos)
+    }
+}
+
 fn register_user_fn(token_idx: i64, fn_id: i64) with Mut, Panic {
     let idx = V2_USER_FN_COUNT
     if idx < 512 {
@@ -2710,11 +2724,15 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
             return parse_fn_call_ir(func, ctx, pos)
         }
         let bare_fn_id = lookup_user_fn_id_tok(pos)
-        if bare_fn_id >= 0 && token_kind(pos + 1) != TK_LPAREN {
+        if bare_fn_id >= 0 && token_kind(pos + 1) != TK_LPAREN && token_kind(pos + 1) != TK_COLONCOLON {
             let dst_fn = alloc_reg(ctx)
             ufn_record_load_imm(dst_fn, bare_fn_id)
             mark_reg_fnref(dst_fn)
             return ExprParse { ok: 1, reg: dst_fn, next: pos + 1}
+        }
+        if token_kind(pos + 1) == TK_COLONCOLON {
+            mark_parse_unsupported_pathsep(pos + 1)
+            return ExprParse { ok: 0, reg: -1, next: pos}
         }
         let reg = lookup_local_tok(ctx, pos)
         if reg >= 0 {
@@ -6702,6 +6720,19 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
         while ppos < open_pos && token_kind(ppos) != TK_RPAREN {
             if token_kind(ppos) == TK_IDENT {
                 let param_name_tok = ppos
+                // Refinement type `{ d: T | pred }` in param position — N-v2 has
+                // no general type-parser for brace-balanced predicates. Refuse
+                // cleanly with reason=refinement_type and skip the predicate.
+                var refinement_skip: i64 = 0
+                if ppos + 2 <= open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == TK_LBRACE {
+                    // open_pos may BE this `{` because find_fn_lbrace returned the
+                    // refinement's brace as the (incorrectly-detected) fn body. Mark
+                    // the function unsupported and let the emitter print the diagnostic.
+                    mark_parse_unsupported_refinement(ppos + 2)
+                    refinement_skip = 1
+                    ppos = open_pos
+                }
+                if refinement_skip == 0 {
                 // peek at type: param_name : TypeName
                 var param_sidx: i64 = -1
                 var param_is_ref: i64 = 0
@@ -6828,6 +6859,7 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
                     ppos = ppos + 1
                 }
                 if ppos < open_pos && token_kind(ppos) == TK_COMMA { ppos = ppos + 1 }
+                }
             } else {
                 ppos = ppos + 1
             }
@@ -6850,6 +6882,12 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
         print_int(V2_PARSE_UNSUPPORTED_KIND)
         if V2_PARSE_UNSUPPORTED_REASON == 1 {
             print(" reason=unresolved_call")
+        }
+        if V2_PARSE_UNSUPPORTED_REASON == 2 {
+            print(" reason=pathsep_in_expr")
+        }
+        if V2_PARSE_UNSUPPORTED_REASON == 3 {
+            print(" reason=refinement_type")
         }
         print(" text=")
         print_token_text(V2_PARSE_UNSUPPORTED_TOKEN)
