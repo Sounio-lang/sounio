@@ -1,44 +1,90 @@
-import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, PerspectiveCamera } from '@react-three/drei';
 import { Compartments } from './Compartments';
 import { BloodFlowEdges } from './BloodFlowEdges';
 import { Stent } from './Stent';
 import { Silhouette } from './Silhouette';
-import { COMPARTMENTS } from './compartments';
+import { GumBudgetBar } from './GumBudgetBar';
+import { ConfidenceGate } from './ConfidenceGate';
+import { HessianHeatmap } from './HessianHeatmap';
+import { OrganDetailModal } from './OrganDetailModal';
+import { TimeScrubber } from './TimeScrubber';
 import { DEFAULT_PARAMS, useSimulation } from '../../hooks/usePBPK14';
 import type { PBPKParams } from '../../hooks/usePBPK14';
 
 const PATIENT_PROFILES: Record<string, PBPKParams> = {
   typical: { ...DEFAULT_PARAMS },
-  'low CL': { ...DEFAULT_PARAMS, clHep: 6.2 },     // CYP3A4 poor metabolizer
+  'low CL': { ...DEFAULT_PARAMS, clHep: 6.2 },     // CYP3A4 poor metaboliser
   'high CL': { ...DEFAULT_PARAMS, clHep: 24.8 },   // CYP3A4 ultrarapid
   lean: { ...DEFAULT_PARAMS, vdScale: 0.7 },
   obese: { ...DEFAULT_PARAMS, vdScale: 1.4 },
 };
 
-const MAX_SIM_HOURS = 30 * 24; // 30-day Cypher elution window
-const REAL_SECONDS_PER_30D = 60; // 1 minute of wall-clock spans the entire 30-day window at speed=1
+const MAX_SIM_HOURS = 30 * 24;        // 30-day Cypher elution window
+const REAL_SECONDS_PER_30D = 60;      // 1 minute wall-clock spans the full window at speed=1
+const C_VISUAL_MAX_MG_PER_L = 1.3e-3; // shared with usePBPK14.ts normalisation anchor
+
+interface SimSnapshot {
+  timeHours: number;
+  concentrations: Float32Array;
+  uncertainties: Float32Array;
+  releasedMg: number;
+}
 
 interface SimulationBridgeProps {
   params: PBPKParams;
   playing: boolean;
   speed: number;
-  onTick: (timeHours: number, conc: Float32Array, uncert: Float32Array, releasedMg: number) => void;
+  /** Non-null sets a seek target (hours). The bridge advances toward it
+   *  catching up to the requested time, then clears its internal latch. */
+  seekTo: number | null;
+  onSeekDone: () => void;
+  onTick: (snapshot: SimSnapshot) => void;
 }
 
-function SimulationBridge({ params, playing, speed, onTick }: SimulationBridgeProps) {
+function SimulationBridge({ params, playing, speed, seekTo, onSeekDone, onTick }: SimulationBridgeProps) {
   const { state, step } = useSimulation(params);
+  const lastEmitRef = useRef(state);
 
-  // Emit state outward whenever it changes.
   useEffect(() => {
-    onTick(state.timeHours, state.concentrations, state.uncertainties, state.releasedMg);
+    lastEmitRef.current = state;
+    onTick({ ...state });
   }, [state, onTick]);
 
   useFrame((_, delta) => {
+    // Honour seek requests first — they catch the integrator up before play
+    // resumes. We cap each frame's catch-up so the JS event loop stays
+    // responsive even when the user drags by many days.
+    if (seekTo !== null) {
+      const remaining = seekTo - state.timeHours;
+      if (Math.abs(remaining) < 1e-6) {
+        onSeekDone();
+        return;
+      }
+      if (remaining < 0) {
+        // Backward seek requires a restart — handled at the React layer by
+        // toggling params; here just clear the latch.
+        onSeekDone();
+        return;
+      }
+      const maxPerFrame = 6.0; // up to 6 simulation hours per frame
+      const chunk = Math.min(remaining, maxPerFrame);
+      // Use 0.1 h fixed steps for stability during fast catch-up.
+      const dt = 0.1;
+      let advanced = 0;
+      while (advanced + dt <= chunk) {
+        step(dt);
+        advanced += dt;
+      }
+      if (chunk - advanced > 1e-6) {
+        step(chunk - advanced);
+      }
+      return;
+    }
     if (!playing) return;
     const simHoursPerWallSec = (MAX_SIM_HOURS / REAL_SECONDS_PER_30D) * speed;
-    const dt = Math.min(0.5, delta * simHoursPerWallSec); // cap RK4 step at 30 min sim time
+    const dt = Math.min(0.5, delta * simHoursPerWallSec);
     if (dt <= 0) return;
     if (state.timeHours + dt > MAX_SIM_HOURS) return;
     step(dt);
@@ -52,31 +98,51 @@ export default function DissertationViewer() {
   const [profile, setProfile] = useState<keyof typeof PATIENT_PROFILES>('typical');
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
+  const [logScale, setLogScale] = useState(true);
   const [selected, setSelected] = useState<number | null>(null);
+  const [seekTo, setSeekTo] = useState<number | null>(null);
+  /** Forces a sim restart by changing the params reference. */
+  const [restartNonce, setRestartNonce] = useState(0);
 
-  interface SimSnapshot {
-    timeHours: number;
-    concentrations: Float32Array;
-    uncertainties: Float32Array;
-    releasedMg: number;
-  }
   const [simState, setSimState] = useState<SimSnapshot>(() => ({
     timeHours: 0,
     concentrations: new Float32Array(14),
     uncertainties: new Float32Array(14),
     releasedMg: 0,
   }));
-  const onTick = useCallback(
-    (timeHours: number, concentrations: Float32Array, uncertainties: Float32Array, releasedMg: number) => {
-      setSimState({ timeHours, concentrations, uncertainties, releasedMg });
-    },
-    [],
-  );
+  const onTick = useCallback((snap: SimSnapshot) => setSimState(snap), []);
+  const onSeekDone = useCallback(() => setSeekTo(null), []);
 
   // Re-apply profile.
   useEffect(() => {
-    setParams(PATIENT_PROFILES[profile]);
-  }, [profile]);
+    setParams({ ...PATIENT_PROFILES[profile] });
+  }, [profile, restartNonce]);
+
+  const handleSeek = (target: number) => {
+    if (target < simState.timeHours) {
+      // Backward seek: restart from t=0, then catch up forward.
+      setRestartNonce((n) => n + 1);
+      // Defer the forward catch-up until the restart effect lands.
+      setTimeout(() => setSeekTo(target), 0);
+      setPlaying(false);
+    } else {
+      setSeekTo(target);
+      setPlaying(false);
+    }
+  };
+
+  const handleReset = () => {
+    setRestartNonce((n) => n + 1);
+    setSeekTo(null);
+    setPlaying(true);
+  };
+
+  const handleParamChange = (patch: Partial<PBPKParams>) => {
+    setParams((p) => ({ ...p, ...patch }));
+  };
+
+  const selectedConcNorm = selected !== null ? simState.concentrations[selected] : 0;
+  const selectedConcAbs = selectedConcNorm * C_VISUAL_MAX_MG_PER_L;
 
   const dayString = useMemo(() => {
     const d = simState.timeHours / 24;
@@ -84,81 +150,93 @@ export default function DissertationViewer() {
     return `${d.toFixed(2)} d`;
   }, [simState.timeHours]);
 
-  const selectedCompartment = selected !== null ? COMPARTMENTS[selected] : null;
-  const selectedConc = selected !== null ? simState.concentrations[selected] : 0;
+  // Mass currently in the selected organ = C × V_ref (V_ref from compartments.ts
+  // is implicit in the visual max; we use the same anchor here for consistency).
+  const selectedMassMg = useMemo(() => {
+    if (selected === null) return 0;
+    // V_ref values, length 14, ICRP standard man. Local copy to avoid wide deps.
+    const V_REF = [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7];
+    return selectedConcAbs * V_REF[selected] * params.vdScale;
+  }, [selected, selectedConcAbs, params.vdScale]);
 
   return (
     <div className="dissertation-viewer rounded-[var(--radius-xl)] overflow-hidden border border-[var(--glass-border)] bg-[rgba(0,0,0,0.35)] mt-[2rem]">
-      {/* 3D canvas */}
-      <div className="relative h-[640px] w-full">
-        <Canvas
-          shadows
-          dpr={[1, 2]}
-          gl={{ antialias: true, alpha: true }}
-        >
-          <color attach="background" args={['#0b1020']} />
-          <fog attach="fog" args={['#0b1020', 12, 30]} />
-          <PerspectiveCamera makeDefault position={[6, 3.5, 8]} fov={42} near={0.1} far={100} />
-          <OrbitControls
-            target={[0, 2.5, 0]}
-            enableDamping
-            dampingFactor={0.08}
-            minDistance={4}
-            maxDistance={20}
-          />
-          <ambientLight intensity={0.55} />
-          <directionalLight position={[6, 10, 8]} intensity={0.85} castShadow />
-          <directionalLight position={[-6, 4, -6]} intensity={0.25} color="#60a5fa" />
-          <Suspense fallback={null}>
-            <Silhouette />
-            <BloodFlowEdges />
-            <Compartments
-              concentrations={simState.concentrations}
-              uncertainties={simState.uncertainties}
-              selected={selected}
-              onSelect={(i) => setSelected(i === selected ? null : i)}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px]">
+        {/* Left: 3D canvas */}
+        <div className="relative h-[640px] w-full">
+          <Canvas shadows dpr={[1, 2]} gl={{ antialias: true, alpha: true }}>
+            <color attach="background" args={['#0b1020']} />
+            <fog attach="fog" args={['#0b1020', 12, 30]} />
+            <PerspectiveCamera makeDefault position={[6, 3.5, 8]} fov={42} near={0.1} far={100} />
+            <OrbitControls
+              target={[0, 2.5, 0]}
+              enableDamping
+              dampingFactor={0.08}
+              minDistance={4}
+              maxDistance={20}
             />
-            <Stent timeHours={simState.timeHours} speed={speed} />
-            <SimulationBridge params={params} playing={playing} speed={speed} onTick={onTick} />
-          </Suspense>
-        </Canvas>
+            <ambientLight intensity={0.55} />
+            <directionalLight position={[6, 10, 8]} intensity={0.85} castShadow />
+            <directionalLight position={[-6, 4, -6]} intensity={0.25} color="#60a5fa" />
+            <Suspense fallback={null}>
+              <Silhouette />
+              <BloodFlowEdges />
+              <Compartments
+                concentrations={simState.concentrations}
+                uncertainties={simState.uncertainties}
+                selected={selected}
+                onSelect={(i) => setSelected(i === selected ? null : i)}
+              />
+              <Stent timeHours={simState.timeHours} speed={speed} />
+              <SimulationBridge
+                params={params}
+                playing={playing}
+                speed={speed}
+                seekTo={seekTo}
+                onSeekDone={onSeekDone}
+                onTick={onTick}
+              />
+            </Suspense>
+          </Canvas>
 
-        {/* HUD: time + released mass + Phase J gate */}
-        <div className="absolute top-4 left-4 flex flex-col gap-1 text-sm text-white pointer-events-none">
-          <div className="bg-black/55 px-3 py-1.5 rounded">
-            <span className="opacity-75">t = </span>
-            <span className="font-mono font-semibold">{dayString}</span>
-          </div>
-          <div className="bg-black/55 px-3 py-1.5 rounded">
-            <span className="opacity-75">Released: </span>
-            <span className="font-mono">{(simState.releasedMg * 1000).toFixed(1)} µg</span>
-            <span className="opacity-50"> / 140 µg</span>
+          {/* HUD: time + released mass (modal handles per-organ detail now). */}
+          <div className="absolute top-4 left-4 flex flex-col gap-1 text-sm text-white pointer-events-none">
+            <div className="bg-black/55 px-3 py-1.5 rounded">
+              <span className="opacity-75">t = </span>
+              <span className="font-mono font-semibold">{dayString}</span>
+            </div>
+            <div className="bg-black/55 px-3 py-1.5 rounded">
+              <span className="opacity-75">Released: </span>
+              <span className="font-mono">{(simState.releasedMg * 1000).toFixed(1)} µg</span>
+              <span className="opacity-50"> / 140 µg</span>
+            </div>
           </div>
         </div>
 
-        {/* Per-organ detail (Phase D will replace with KaTeX modal) */}
-        {selectedCompartment && (
-          <div className="absolute top-4 right-4 max-w-[260px] bg-black/65 backdrop-blur p-3 rounded text-white text-sm">
-            <div className="text-base font-semibold mb-1">{selectedCompartment.label}</div>
-            <div className="opacity-75 text-xs mb-2">{selectedCompartment.family}</div>
-            <div className="font-mono text-xs leading-relaxed">
-              Kp = {selectedCompartment.kp.toFixed(2)}<br />
-              Q&nbsp; = {selectedCompartment.q} L/h<br />
-              C&nbsp; ≈ {(selectedConc * 100).toFixed(1)} % of visual max
-            </div>
-            <button
-              type="button"
-              onClick={() => setSelected(null)}
-              className="mt-2 text-xs underline opacity-70 hover:opacity-100"
-            >
-              close
-            </button>
-          </div>
-        )}
+        {/* Right: side panel — GUM bar, confidence gate, Hessian */}
+        <aside className="flex flex-col gap-4 p-4 border-t lg:border-t-0 lg:border-l border-[var(--glass-border)] bg-[rgba(0,0,0,0.2)] text-white">
+          <ConfidenceGate params={params} />
+          <hr className="border-white/10" />
+          <GumBudgetBar />
+          <hr className="border-white/10" />
+          <HessianHeatmap />
+        </aside>
       </div>
 
       {/* Bottom control strip */}
-      <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_1fr_220px] gap-4 p-4 border-t border-[var(--glass-border)] bg-[rgba(0,0,0,0.25)]">
+      <div className="grid grid-cols-1 md:grid-cols-[1.4fr_1fr_1fr] gap-4 p-4 border-t border-[var(--glass-border)] bg-[rgba(0,0,0,0.25)] text-white">
+        <TimeScrubber
+          timeHours={simState.timeHours}
+          maxHours={MAX_SIM_HOURS}
+          playing={playing}
+          speed={speed}
+          logScale={logScale}
+          onSeek={handleSeek}
+          onTogglePlay={() => setPlaying(!playing)}
+          onSpeedChange={setSpeed}
+          onToggleScale={() => setLogScale(!logScale)}
+          onReset={handleReset}
+        />
         <div className="flex flex-col gap-1">
           <label className="text-xs uppercase tracking-wide opacity-70">Patient profile</label>
           <select
@@ -171,10 +249,9 @@ export default function DissertationViewer() {
             ))}
           </select>
           <p className="text-[0.7rem] opacity-60">
-            CYP3A4 metabolizer status changes the hepatic clearance, widening the GUM cone.
+            CYP3A4 metaboliser status changes hepatic clearance and widens the GUM cone.
           </p>
         </div>
-
         <div className="flex flex-col gap-1">
           <label className="text-xs uppercase tracking-wide opacity-70">
             Stent release scale ({params.higuchiScale.toFixed(2)}×)
@@ -185,52 +262,24 @@ export default function DissertationViewer() {
             max={1.5}
             step={0.05}
             value={params.higuchiScale}
-            onChange={(e) =>
-              setParams({ ...params, higuchiScale: Number(e.target.value) })
-            }
+            onChange={(e) => handleParamChange({ higuchiScale: Number(e.target.value) })}
+            className="accent-amber-400"
           />
           <p className="text-[0.7rem] opacity-60">
-            Higuchi K_H multiplier; reflects coating thickness & solubility uncertainty.
+            Higuchi K<sub>H</sub> multiplier; reflects coating-thickness &amp; solubility CV per Cordis 2003 IFU.
           </p>
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <label className="text-xs uppercase tracking-wide opacity-70">
-            Speed ({speed.toFixed(1)}×)
-          </label>
-          <input
-            type="range"
-            min={0.1}
-            max={4}
-            step={0.1}
-            value={speed}
-            onChange={(e) => setSpeed(Number(e.target.value))}
-          />
-          <p className="text-[0.7rem] opacity-60">
-            Wall-clock playback rate; full 30-day window takes ~60 s at 1×.
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-2 justify-end">
-          <button
-            type="button"
-            onClick={() => setPlaying(!playing)}
-            className="px-3 py-1.5 rounded bg-amber-500/85 text-black font-semibold text-sm hover:bg-amber-500"
-          >
-            {playing ? 'Pause' : 'Play'}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setParams({ ...params }); // triggers useEffect reset (params reference change)
-              setProfile(profile);
-            }}
-            className="px-3 py-1.5 rounded bg-white/10 text-white text-sm hover:bg-white/15"
-          >
-            Restart at t = 0
-          </button>
         </div>
       </div>
+
+      {selected !== null && (
+        <OrganDetailModal
+          organIndex={selected}
+          concentrationNorm={selectedConcNorm}
+          concentrationMgPerL={selectedConcAbs}
+          massMg={selectedMassMg}
+          onClose={() => setSelected(null)}
+        />
+      )}
     </div>
   );
 }
