@@ -77,6 +77,11 @@ TESTS=(
   "haloperidol_oral_pbpk        stdlib/darwin_pbpk/validation/haloperidol_oral_pbpk.sio"
   "d2_gum                       stdlib/darwin_pbpk/pd/d2_gum.sio"
   "d2_voi                       stdlib/darwin_pbpk/pd/d2_voi.sio"
+  "dissertation_pbpk_rapamycin  examples/dissertation_pbpk_rapamycin.sio"
+  "dissertation_oral_pd         examples/dissertation_oral_pd_demo.sio"
+  "dissertation_steady_state    examples/dissertation_steady_state_demo.sio"
+  "dissertation_steady_state_fullvd examples/dissertation_steady_state_fullvd_demo.sio"
+  "dissertation_scenario_gate   examples/dissertation_scenario_gate_demo.sio"
 )
 
 fails=0
@@ -111,7 +116,7 @@ for entry in "${TESTS[@]}"; do
     continue
   fi
 
-  if ! grep -qE "^PASS$|ALL [0-9]+ TESTS PASSED" "$log"; then
+  if ! grep -qE "^PASS$|^ALL PASS$|ALL [0-9]+ TESTS PASSED|^ *(DEMO|SS DEMO|SS FULLVD|SCENARIO GATE|PK/PD DEMO) OK$" "$log"; then
     echo "  FAIL: no PASS marker in stdout"
     tail -5 "$log" | sed 's/^/    /'
     fails=$((fails + 1))
