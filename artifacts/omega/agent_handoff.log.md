@@ -526,3 +526,20 @@ checks:
   - metal_algebra python3 count: 3 -> 2
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+lane: 7
+time_utc: 2026-05-10T17:18:00Z
+files:
+  - scripts/ci/native_v2_metal_algebra_gate.sh
+intent: Lane 7 RELEASE (final) — killed last 2 python heredocs in native_v2_metal_algebra_gate.sh. Heredoc 1 (line 66): TSV manifest walker + 7-pattern structural MSL check -> bash while-read + grep -qF + bash array. Heredoc 2 (line 148): csv.DictReader + json.dump with nested cases array -> awk TSV->JSON object array + kretikos json-emit --raw-json cases. Full end-to-end gate run produces summary.json byte-identical to python baseline modulo OUT_DIR path strings. native_v2_metal_algebra python3 count: 2 -> 0. **All native_v2_*_gate.sh files now 100% python-free for json/struct heredocs.**
+checks:
+  - bash -n scripts/ci/native_v2_metal_algebra_gate.sh (rc=0)
+  - end-to-end gate run: status=partial (Apple xcrun unavailable, same as baseline)
+  - normalized diff baseline vs postchange summary.json (sed s|OUT_DIR|OUTDIR|g): BYTE IDENTICAL
+  - cases array preserved, sha256, ordering, sort_keys, all match
+  - native_v2_metal_algebra.sh python3 count: 2 -> 0
+commit: pending
+status: lock-released
