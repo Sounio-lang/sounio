@@ -6,6 +6,12 @@ driven from a `DossierInput` struct (no file I/O) and prints
 Markdown matching this layout. The smoke test in
 `tests/run-pass/dossier_smoke.sio` shows a representative input.
 
+Claim boundary: generated dossiers should be read with
+`docs/dissertation/pbpk_claim_truth_table.md`. The current defensible wording is
+that Sounio demonstrates GUM-through-ODE in the PBPK14 stdlib and
+GPU-validated K-AXI kernels for narrower PBPK/GUM witnesses; PBPK14 GPU-first
+Tsit5 and GPU speedup claims require later gates.
+
 ## §1. Subject of submission
 
 - Drug: `<drug_name>`
@@ -65,6 +71,7 @@ Read from `stdlib/darwin_pbpk/validation/rapamycin_clinical.sio` outputs.
 - commit_sha: `<commit_sha>`
 - generated_at_utc: `<generated_at_utc>`
 - sounio_version: `<sounio_version>`
+- claim_control: `docs/dissertation/pbpk_claim_truth_table.md`
 
 ## PDF rendering
 
