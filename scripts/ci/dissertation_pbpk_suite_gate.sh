@@ -84,6 +84,16 @@ TESTS=(
   "dissertation_scenario_gate   examples/dissertation_scenario_gate_demo.sio"
 )
 
+# Smoke entries: artifact-emitting demos (HTML, SVG, narrative reports).
+# These don't have PASS markers because they aren't test runners — they
+# render dissertation visuals for figures/appendices. Gate only checks
+# rc=0 and that stdout has at least 100 bytes.
+TESTS_SMOKE=(
+  "dissertation_demo            examples/dissertation_demo.sio"
+  "dissertation_interactive     examples/dissertation_interactive.sio"
+  "dissertation_plot            examples/dissertation_plot.sio"
+)
+
 fails=0
 results=()
 
@@ -128,6 +138,51 @@ for entry in "${TESTS[@]}"; do
   results+=("PASS  $name")
 done
 
+# Smoke tests: dissertation visualisation/narrative demos. rc=0 + non-trivial
+# output. No PASS marker required.
+for entry in "${TESTS_SMOKE[@]}"; do
+  name="${entry%% *}"
+  src="${entry##* }"
+  log="$STAGE_DIR/$name.log"
+
+  echo ""
+  echo "[$name] (smoke)"
+  echo "  src=$src"
+
+  if [[ ! -f "$src" ]]; then
+    echo "  FAIL: source missing"
+    fails=$((fails + 1))
+    results+=("FAIL  $name  source_missing")
+    continue
+  fi
+
+  set +e
+  timeout "$TIMEOUT_SECONDS" "$SOUC_BIN" run "$src" >"$log" 2>&1
+  rc=$?
+  set -e
+
+  if [[ $rc -ne 0 ]]; then
+    echo "  FAIL: rc=$rc (timeout=$TIMEOUT_SECONDS)"
+    tail -5 "$log" | sed 's/^/    /'
+    fails=$((fails + 1))
+    results+=("FAIL  $name  rc=$rc")
+    continue
+  fi
+
+  out_bytes=$(wc -c < "$log")
+  if [[ $out_bytes -lt 100 ]]; then
+    echo "  FAIL: output too short ($out_bytes bytes < 100)"
+    fails=$((fails + 1))
+    results+=("FAIL  $name  short_output")
+    continue
+  fi
+
+  echo "  PASS (rc=0, ${out_bytes}B emitted, log=$log)"
+  results+=("PASS  $name (smoke)")
+done
+
+total=$((${#TESTS[@]} + ${#TESTS_SMOKE[@]}))
+
 echo ""
 echo "=== Summary ==="
 for r in "${results[@]}"; do
@@ -136,9 +191,9 @@ done
 
 if [[ $fails -ne 0 ]]; then
   echo ""
-  echo "dissertation_pbpk_suite_gate: FAIL ($fails / ${#TESTS[@]} tests failed)"
+  echo "dissertation_pbpk_suite_gate: FAIL ($fails / $total tests failed)"
   exit 1
 fi
 
 echo ""
-echo "dissertation_pbpk_suite_gate: PASS (${#TESTS[@]}/${#TESTS[@]} rapamycin PBPK tests)"
+echo "dissertation_pbpk_suite_gate: PASS ($total/$total rapamycin PBPK tests + smoke demos)"
