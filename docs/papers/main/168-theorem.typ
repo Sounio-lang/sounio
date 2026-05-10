@@ -240,4 +240,97 @@ The original open questions from the initial submission are now resolved (OQ1: $
 2. Does the norm dichotomy $||[e_i, e_j, e_k]|| in {0, 2}$ hold for _all_ Cayley–Dickson algebras ($k gt.eq 6$)? It is verified at $k = 3, 4, 5$.
 3. Characterize the sub-class distribution (analogous to @table:sedenion) for trigintaduonions and higher, and determine whether the sub-class counts are individually multiples of 168.
 
+= Cohomological Reformulation
+
+This section recasts the results above in the language of group cohomology and twisted group algebras, following Albuquerque & Majid #cite(<albuquerque-majid-1999>) and Bremner & Hentzel #cite(<bremner-hentzel-2017>). The reformulation does not introduce new arithmetic but exposes that the $ZZ_2^k$ grading argument used implicitly in §3 (Lemma 2) is in fact a statement about a 3-cocycle in $H^3((ZZ slash 2)^k, {plus.minus 1})$. The cohomological view yields (a) a closed-form alternative for $T_k$, (b) a structural decomposition of 3-dimensional subspaces of $(ZZ slash 2)^k$ that constrains any analytic proof of Conjecture 5, and (c) a categorical chassis $"Hyper"(G, F)$ unifying the entire Cayley–Dickson tower as a single parametric family.
+
+== Octonions as a twisted group algebra
+
+Albuquerque & Majid #cite(<albuquerque-majid-1999>) prove that the octonions are the group algebra $k[(ZZ slash 2)^3]$ twisted by a 2-cochain $F : (ZZ slash 2)^3 times (ZZ slash 2)^3 -> {plus.minus 1}$:
+
+$ e_x dot e_y = F(x, y) dot e_(x + y) quad (#text("addition is XOR in") (ZZ slash 2)^3) $
+
+Bremner & Hentzel #cite(<bremner-hentzel-2017>) give the explicit closed form via the identification $(ZZ slash 2)^3 tilde.equiv FF_8$ (additive) where $FF_8 = FF_2[alpha] slash (alpha^3 + alpha + 1)$:
+
+$ F(x, y) = (-1)^(phi(x, y)), quad phi(x, y) = "tr"(y dot x^6) in FF_2 $
+
+with $"tr": FF_8 -> FF_2$ the absolute trace $"tr"(z) = z + z^2 + z^4$ and $x^6 = x^(-1)$ for nonzero $x$ (since $x^7 = 1$ in $FF_8^times$).
+
+The cochain $F$ is *not* a 2-cocycle — its failure to satisfy the cocycle condition is precisely the non-associativity. The associator is the coboundary $phi = diff F$ given by:
+
+$ phi(x, y, z) = F(x, y) dot F(x + y, z) slash (F(x, y + z) dot F(y, z)) in {plus.minus 1} $
+
+Although $F$ is not a 2-cocycle, $phi = diff F$ *is* a 3-cocycle (since $diff^2 = 0$ formally), and $phi$ represents a class in $H^3((ZZ slash 2)^3, {plus.minus 1})$ — the *Fano cocycle* $omega_("Fano")$.
+
+== The 168 Theorem as cocycle support
+
+Lemma 2 (§3) is now seen as the statement that the associator coboundary takes values in a sign group rather than continuous $U(1)$:
+
+#block(inset: (left: 0em), stroke: (left: 2pt + black), outset: (left: 0.5em))[
+  *Lemma 2$'$* (cohomological form). _The Cayley–Dickson cocycle $phi_k : ((ZZ slash 2)^k)^3 -> U(1)$ takes values in the discrete subgroup ${plus.minus 1} subset U(1)$ for all $k gt.eq 3$._
+]
+
+Theorem 1 is then the statement that the support of the Fano cocycle has cardinality equal to the order of its automorphism group:
+
+#block(inset: (left: 0em), stroke: (left: 2pt + black), outset: (left: 0.5em))[
+  *Theorem 1$'$* (cocycle support). _Let $omega_("Fano") in H^3((ZZ slash 2)^3, {plus.minus 1})$ denote the Fano 3-cocycle. Then $|"supp"(omega_("Fano"))| = |"Aut"(omega_("Fano"))| = |"PSL"(2, 7)| = 168$, where $"Aut"(omega_("Fano"))$ is the stabilizer in $"GL"(3, FF_2)$ acting on $((ZZ slash 2)^3)^3$._
+]
+
+The proof of §3.3 supplies this directly: the action is regular on ordered non-collinear triples (= ordered bases), and these are precisely the triples for which $phi(x, y, z) = -1$.
+
+== Closed form and subspace decomposition
+
+The conjectured formula $T_k = 168(P_k - 4 P_(k-1))$ admits an equivalent closed form:
+
+$ T_k = 168 dot (2^(k-1) - 1)(2^(k-2) - 1)(2^(k-1) + 3) slash 21 $
+
+The factor $(2^(k-1) + 3)$ reflects a *cohomological weight* specific to the Cayley–Dickson doubling, distinct from the purely combinatorial Fano-subplane count.
+
+A natural cohomological interpretation of Conjecture 5 would be: $T_k = 168 dot n_("oct")(k)$, where $n_("oct")(k)$ counts 3-dimensional subspaces $V <= (ZZ slash 2)^k$ on which the cocycle restriction $phi_k|_V$ equals the Fano cocycle $omega_("Fano")$. We verified empirically that this naive interpretation requires refinement.
+
+Enumerate the 15 three-dimensional subspaces of $(ZZ slash 2)^4$ as $V_c = ker(c)$ for nonzero $c in (ZZ slash 2)^4$. Counting nonzero basis associators per subspace reveals a *trichotomy*, not a dichotomy:
+
+#figure(
+  table(
+    columns: 3,
+    align: (left, center, center),
+    stroke: 0.5pt,
+    [*Subspace class*], [*Count per subspace*], [*Number of subspaces*],
+    [Fully octonionic ($phi_k|_V = omega_("Fano")$)], [168], [8],
+    [Mixed cocycle (intermediate class)], [96], [7],
+    [Trivial ($phi_k|_V = 0$)], [0], [0],
+  ),
+  caption: [Empirical sub-decomposition of the 15 three-dimensional subspaces of $(ZZ slash 2)^4$, classified by associator count among ordered triples. Verified by exhaustive enumeration in Sounio (`examples/cocycle_subspace_168.sio`).],
+) <table:subspace>
+
+Naive sums: $8 dot 168 + 7 dot 96 = 2016 = T_4 + 168$. The overcount of 168 corresponds to exactly $56$ non-linearly-independent triples with nonzero sedenion associator (each lying in three subspaces $V_c$ via a shared 2-dimensional parent $W subset V_c$). Such triples cannot exist in alternative algebras; their presence in sedenions reflects the loss of alternativity and contributes a previously uncatalogued substructure to the basis associator landscape.
+
+== Implications and revised open question
+
+Three immediate consequences:
+
+1. *The naive proof route via "trivialization counting" fails as stated.* A proof of Conjecture 5 via "$11 = 15 - 4$ subspaces are octonionic, the other $4$ are trivial" is empirically false: the actual decomposition is $8$ octonionic plus $7$ intermediate, not $11 + 4$. Any analytic proof must classify the *intermediate cocycle classes* (the "96" subspaces) and account for non-LI nonzero associators in sedenions.
+
+2. *A unified parametric type emerges.* The construction $"Hyper"(G, F)$ — a finite abelian group $G$ together with a 2-cochain $F: G times G -> {plus.minus 1}$ — instantiates the entire Cayley–Dickson tower:
+
+$ CC = "Hyper"((ZZ slash 2)^1, F_(CC)), quad HH = "Hyper"((ZZ slash 2)^2, F_(HH)), quad OO = "Hyper"((ZZ slash 2)^3, F_("Fano")) $
+$ SS = "Hyper"((ZZ slash 2)^4, F_4), quad TT = "Hyper"((ZZ slash 2)^5, F_5), thick dots $
+
+This is the natural categorical home for the algebras and may organize the Sounio compiler's hypercomplex type system around a single parametric primitive #cite(<sounio2026>).
+
+3. *Zero divisors as cohomological obstruction.* The appearance of zero divisors at $k = 4$ is the obstruction to extending the Fano cocycle from $(ZZ slash 2)^3$ to $(ZZ slash 2)^4$ in a way compatible with multiplicative cancellation. A cohomological characterization of this obstruction is open.
+
+#block(inset: (left: 0em), stroke: (left: 2pt + black), outset: (left: 0.5em))[
+  *Revised Open Question 1.* _Classify the cocycle classes that arise as restrictions $phi_k|_V$ for 3-dimensional subspaces $V <= (ZZ slash 2)^k$, and prove Conjecture 5 by counting each class with its associated nonzero-associator contribution._
+]
+
+The empirical trichotomy at $k = 4$ (8 + 7 + 0 with values 168 + 96 + 0) provides the first nontrivial data point for this classification. Whether the intermediate value $96$ generalizes — and whether the multiplicities $(8, 7)$ admit a closed form in $k$ — are computational questions tractable to extension of the verification scripts.
+
+== Computational verification of the cohomological construction
+
+The cohomological reformulation is computationally validated in Sounio:
+
+- `examples/phi_fano_cohomological.sio` — implements $phi_("Fano")$ via $"tr"(y dot x^6)$ over $FF_8$ from scratch, defines basis multiplication $e_x dot e_y = (-1)^(phi(x, y)) e_(x xor y)$, and verifies that the resulting algebra satisfies (i) 168 nonzero basis associators, (ii) norm dichotomy ${0, 2}$, (iii) alternativity. Confirms isomorphism with the standard octonions: 7/7 PASS.
+- `examples/cocycle_subspace_168.sio` — enumerates the 15 three-dimensional subspaces of $(ZZ slash 2)^4$ via dual functionals, computes per-subspace associator counts using the Cayley–Dickson sedenion table, and produces @table:subspace.
+
 #bibliography("168-refs.yml", style: "springer-mathphys")
