@@ -543,3 +543,20 @@ checks:
   - native_v2_metal_algebra.sh python3 count: 2 -> 0
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+lane: 7
+time_utc: 2026-05-10T17:35:00Z
+files:
+  - scripts/selfhost/selfhost_driver_output_parity_gate.sh
+  - scripts/selfhost/selfhost_zero_fallback_gate.sh
+intent: Lane 7 expanded — killed 3 python heredocs across selfhost gates. 2× run_with_timeout python fallback (subprocess.run timeout=) -> perl alarm with SIGALRM exit-code normalization (142 -> 124 to match python). 1× independence-contract schema validator -> kretikos kaxi-validate-evidence --expect. Pre-existing path bug noted (ROOT_DIR in selfhost gates resolves to scripts/ not repo root; source line 6 is broken on main, gate fails before reaching python heredocs). Worked around in my edit by using $ROOT_DIR/../bin/kretikos. Did NOT fix the pre-existing bug (out of Lane 7 scope).
+checks:
+  - bash -n on both files: rc=0
+  - both files: live python3 count = 0
+  - perl alarm semantics: rc=142 (SIGALRM) on timeout, normalized to 124; rc=0 on success
+  - validator path resolution: $ROOT_DIR/../bin/kretikos resolves correctly; positive + negative tests both correct
+commit: pending
+status: lock-released
