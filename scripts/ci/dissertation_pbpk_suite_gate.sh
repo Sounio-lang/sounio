@@ -3,7 +3,7 @@
 #
 # Dissertation evidence gate: rapamycin (sirolimus) PBPK validation suite.
 #
-# Five independent rapamycin tests cover the dissertation's applied PBPK
+# Eight independent rapamycin tests cover the dissertation's applied PBPK
 # layer — the *evidence* that the three core contributions (GUM-through-ODE,
 # compile-time confidence, ISO budgets) actually work on a real drug:
 #
@@ -13,6 +13,10 @@
 #   4. rapamycin_epistemic_adaptive Bogacki-Shampine 3(2) + variance lookbehind
 #   5. rapamycin_gum_vs_mc         GUM linearization vs Monte-Carlo (ratio<10)
 #   6. biomaterial_release         Cypher DES — zero/first-order/Higuchi + 14-comp PBPK
+#   7. rapamycin_clinical          14-comp clinical validation: brain/blood ratio,
+#                                  Vd_ss, GUM budget vs Lampen 1998, Schreiber 1991
+#   8. gum_vs_mc                   ISO budget vs Monte-Carlo: 5x cost advantage,
+#                                  parameter-level attribution, CV=20% vs CV=60%
 #
 # Each test ends with "PASS\n" on success. Gate fails if any test rc != 0
 # or stdout doesn't contain "PASS".
@@ -53,6 +57,8 @@ TESTS=(
   "rapamycin_epistemic_adaptive tests/run-pass/rapamycin_epistemic_adaptive.sio"
   "rapamycin_gum_vs_mc          tests/run-pass/rapamycin_gum_vs_mc.sio"
   "biomaterial_release          stdlib/darwin_pbpk/release/biomaterial_release.sio"
+  "rapamycin_clinical           stdlib/darwin_pbpk/validation/rapamycin_clinical.sio"
+  "gum_vs_mc                    stdlib/darwin_pbpk/validation/gum_vs_mc.sio"
 )
 
 fails=0
