@@ -15,6 +15,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.c
 
 **Status**: M5 outline. Synthesises the PL paper (`vancomycin_pl_paper_outline.md`) and the clinical paper (`vancomycin_clinical_paper_outline.md`) into the dissertation argument.
 
+**PBPK claim boundary**: when this chapter cross-references the rapamycin/PBPK dissertation lane, use `pbpk_claim_truth_table.md` as the claim-control artifact. Current safe wording is that Sounio demonstrates GUM-through-ODE in the PBPK14 stdlib and GPU-validated K-AXI kernels for narrower PBPK/GUM witnesses. Do not claim PBPK14 Tsit5 currently compiles to one GPU kernel.
+
 **Estimated length**: 60-80 pages.
 
 ## Chapter abstract (1 page)
@@ -99,8 +101,9 @@ The chapter argues that Sounio is **necessary** for this construction: no other 
 ### Section 9 — Synthesis with Adjacent Chapters
 
 - 9.1 Connection to the rapamycin / BBB chapter (`bbb_pbpk_dissertation_chapter.md`).
-- 9.2 Connection to the surgical-interventions program.
-- 9.3 The Sounio thesis: epistemic computing as a unifying substrate.
+- 9.2 PBPK/GUM claim boundary: cite `pbpk_claim_truth_table.md` before importing any GPU or speedup language.
+- 9.3 Connection to the surgical-interventions program.
+- 9.4 The Sounio thesis: epistemic computing as a unifying substrate.
 
 ### Section 10 — Future Work
 
@@ -114,6 +117,7 @@ The chapter argues that Sounio is **necessary** for this construction: no other 
 This chapter is cross-cited from:
 
 - `bbb_pbpk_dissertation_chapter.md` (rapamycin) — shared Sounio epistemic substrate.
+- `pbpk_claim_truth_table.md` — allowed/forbidden PBPK, GUM, and GPU claim language.
 - `HYPER_UNCERTAINTY_PARENTHESIZATION_REPORT.md` — directional-projection lever.
 - (Other dissertation chapters TBD as the dissertation table-of-contents stabilises.)
 

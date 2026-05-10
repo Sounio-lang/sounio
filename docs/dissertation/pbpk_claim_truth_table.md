@@ -1,0 +1,45 @@
+# PBPK Dissertation Claim Truth Table
+
+Purpose: map PBPK, GUM, and GPU dissertation-language candidates to the current repository evidence. This is an evidence table, not promotional copy. Use the narrowest claim that the cited files and gates can actually support.
+
+Status vocabulary:
+
+- `repo-backed`: directly supported by committed source and an executable gate.
+- `experimental`: supported by a prototype or artifact but not yet a full dissertation claim.
+- `future-work`: plausible direction, but not current evidence.
+- `unsupported/overclaim`: no current repo-backed implementation, gate, or benchmark supports the wording.
+- `unsupported/benchmark-needed`: no current benchmark gate or committed result supports the performance wording.
+
+| Claim | Status | Evidence | Allowed wording | Forbidden wording | Next gate |
+|---|---|---|---|---|---|
+| PBPK14 Tsit5/GUM CPU model exists for rapamycin/sirolimus with a 14-compartment state and finite-difference GUM propagation. | repo-backed | `stdlib/darwin_pbpk/epistemic_pbpk14.sio`; `stdlib/darwin_pbpk/tsit5_pbpk14.sio`; `scripts/ci/dissertation_pbpk_suite_gate.sh` | "The PBPK14 stdlib demonstrates adaptive Tsit5 simulation with numerical GUM propagation for the rapamycin case study." | "The PBPK14 model is GPU-first." | Keep `bash scripts/ci/dissertation_pbpk_suite_gate.sh` green and cite the exact source/gate pair. |
+| PBPK14 GUM uses reference plus seven finite-difference perturbation simulations over epistemic parameters. | repo-backed | `stdlib/darwin_pbpk/epistemic_pbpk14.sio` (`ep14_perturb`, `ep14_fdiff_h`, `ep14_run`); `scripts/ci/dissertation_pbpk_suite_gate.sh` | "The current PBPK14 path computes first-order numerical GUM sensitivities over seven rapamycin epistemic parameters." | "The current PBPK14 path proves all parameter uncertainty exactly." | Add or keep a focused PBPK14 self-test that checks the seven perturbation path and PASS marker through the dissertation gate. |
+| PBPK14 reports AUC, Cmax, Tmax, terminal compartment concentrations, mass, and uncertainty summaries. | repo-backed | `stdlib/darwin_pbpk/epistemic_pbpk14.sio` (`PBPK14Metrics`, `simulate_14`, `EpResult14`); `scripts/ci/dissertation_pbpk_suite_gate.sh` | "The PBPK14 witness tracks AUC/Cmax/Tmax and propagates GUM variance to selected outputs." | "The PBPK14 witness establishes clinically calibrated posterior risk probabilities." | Keep the metric checks in the PBPK dissertation suite and add golden output snapshots before quoting exact values. |
+| Rapamycin priors and confidence scores are encoded for clearance, binding, and partition parameters. | repo-backed | `stdlib/darwin_pbpk/epistemic_pbpk14.sio` (`ep14_rapamycin_priors`); `stdlib/darwin_pbpk/drugs/rapamycin.sio`; `scripts/ci/dissertation_pbpk_suite_gate.sh` | "The rapamycin PBPK14 example attaches evidence-quality confidence scores to literature-derived priors." | "The confidence scores are Bayesian posterior probabilities" or "validated clinical probabilities." | If using clinical language, add a calibration/validation gate that estimates posterior predictive performance against held-out clinical data. |
+| PBPK14 confidence aggregation weights prior confidence by AUC sensitivity contribution. | repo-backed | `stdlib/darwin_pbpk/epistemic_pbpk14.sio` (`sensitivity`, `auc_conf` in `ep14_run`) | "The implementation computes an evidence-weighted AUC confidence score from sensitivity fractions." | "The implementation outputs a patient-level probability of efficacy, toxicity, or safety." | Add a documented calibration layer before making probability or clinical-decision claims. |
+| Dissertation PBPK suite covers rapamycin and haloperidol CPU examples, including validation, GUM-vs-MC, population simulation, scenarios, and smoke demos. | repo-backed | `scripts/ci/dissertation_pbpk_suite_gate.sh`; files named in that gate under `tests/run-pass/`, `stdlib/darwin_pbpk/validation/`, `stdlib/darwin_pbpk/pd/`, `stdlib/darwin_pbpk/scenarios/`, and `examples/` | "The dissertation PBPK suite is a CPU evidence gate spanning rapamycin and haloperidol examples." | "The dissertation PBPK suite validates GPU PBPK14." | Keep the suite green and include gate output in the dissertation artifact bundle. |
+| GPU K-AXI Phase Y validates GUM-through-ODE for a narrow 2-compartment PBPK witness. | repo-backed | `scripts/ci/kretikos_kaxi_phase_y_gate.sh`; `tests/golden/kaxi_ptx/f32_gum/pbpk_2comp_gum_4step.ptx`; `scripts/gpu/kaxi_pbpk_2comp_gum_sampler.c`; `scripts/gpu/kaxi_ptx_runner.c` | "Sounio has a GPU-validated K-AXI witness for 2-compartment PBPK/GUM over `pbpk_2comp_gum_4step`." | "PBPK14 currently compiles to one GPU kernel" or "all PBPK/GUM models are GPU validated." | Keep `bash scripts/ci/kretikos_kaxi_phase_y_gate.sh` green on CUDA hardware; record skip status when CUDA is absent. |
+| Phase Y GPU truth claims are digest equality for C1 and V11 plus a well-formed ISO-style GUM budget. | repo-backed | `scripts/ci/kretikos_kaxi_phase_y_gate.sh`; generated `benchmarks/pbpk/gum_budget.csv` when the gate runs | "Phase Y checks exact f32 digest agreement against a CPU analytic sampler and emits an ISO-style uncertainty budget for the 2-comp witness." | "Phase Y proves PBPK14 Tsit5 GPU correctness." | Store gate logs/artifacts in the dissertation dossier and keep the claim scoped to the 2-comp Euler witness. |
+| PBPK14 GPU-first Tsit5 single-kernel implementation exists. | future-work | Current repo contains `stdlib/darwin_pbpk/tsit5_pbpk14.sio` and `stdlib/darwin_pbpk/epistemic_pbpk14.sio`, but not GPU-specific PBPK14 source or a PBPK14 GPU gate. | "A PBPK14 GPU Tsit5 kernel is a future extension." | "PBPK14 Tsit5 currently compiles to one GPU kernel with 8 warps." | Create a GPU PBPK14 source file, generated PTX artifact, CPU/GPU numerical parity gate, and hardware run log. |
+| `stdlib/darwin_pbpk/epistemic_pbpk14_gpu.sio` or `stdlib/darwin_pbpk/tsit5_pbpk14_gpu.sio` backs dissertation GPU claims. | unsupported/overclaim | These files are absent on `origin/main` at the time of this table. | "No current repo file by that name backs the claim." | "The PBPK14 GPU files implement the dissertation GPU model." | Add the files, review their semantics, and wire them into a named CI gate before citing them. |
+| `compiler/codegen/gpu/epistemic.rs` backs PBPK/GUM GPU lowering. | unsupported/overclaim | `compiler/codegen/gpu/epistemic.rs` is absent on `origin/main`; active GPU evidence in this area is under Sounio/K-AXI scripts and golden PTX. | "Current GPU evidence is K-AXI artifact/gate based, not a Rust `compiler/codegen/gpu/epistemic.rs` path." | "The Rust GPU epistemic codegen path proves PBPK14 lowering." | Add the file only if the repo intentionally reintroduces that codegen surface, then gate it. |
+| `scripts/souc_v2_gate.sh` is a PBPK/GPU evidence gate. | unsupported/overclaim | `scripts/souc_v2_gate.sh` is absent; `scripts/ci/souc_v2_gate.sh` exists but is a bootstrap/compiler fixed-point and feature gate, not a PBPK14 GPU gate. | "The existing `scripts/ci/souc_v2_gate.sh` is compiler/bootstrap evidence, not PBPK/GPU model evidence." | "souc_v2 proves PBPK14 GPU semantics." | If needed, create a dedicated PBPK14 GPU gate instead of reusing the bootstrap gate as semantic evidence. |
+| GPU speedups such as `180-420x` are established for PBPK/GUM. | unsupported/benchmark-needed | No cited PBPK/GUM benchmark gate or committed result in this evidence set establishes that range. `scripts/ci/kretikos_kaxi_phase_y_gate.sh` says correctness focus, not throughput. | "Performance has not yet been established by a PBPK/GUM benchmark in this table." | "Sounio PBPK/GUM is 180-420x faster on GPU." | Add reproducible benchmark scripts, hardware metadata, CPU baseline, GPU result artifacts, confidence intervals, and an offload/publication review before quoting speedups. |
+| Sounio demonstrates GUM-through-ODE in PBPK14 and GPU-validated K-AXI kernels for narrower PBPK/GUM witnesses. | repo-backed | CPU: `stdlib/darwin_pbpk/epistemic_pbpk14.sio`, `scripts/ci/dissertation_pbpk_suite_gate.sh`. GPU: `scripts/ci/kretikos_kaxi_phase_y_gate.sh`, `tests/golden/kaxi_ptx/f32_gum/pbpk_2comp_gum_4step.ptx`. | "Sounio demonstrates GUM-through-ODE in the PBPK14 stdlib and GPU-validated K-AXI kernels for narrower PBPK/GUM witnesses." | "Sounio already has a GPU-first PBPK14 Tsit5 single-kernel implementation." | Keep both gates green; include the CPU/GPU scope distinction in dissertation prose. |
+
+## Safe Dissertation Language
+
+Say:
+
+> Sounio demonstrates GUM-through-ODE in the PBPK14 stdlib and GPU-validated K-AXI kernels for narrower PBPK/GUM witnesses.
+
+Do not say:
+
+> PBPK14 Tsit5 currently compiles to one GPU kernel with 8 warps.
+
+## Review Checklist
+
+- Every `repo-backed` row names at least one repo path and, where available, an executable gate.
+- GPU claims are scoped either to `pbpk_2comp_gum_4step` Phase Y evidence or marked future/unsupported.
+- Confidence scores are evidence-quality scores, not clinical posterior probabilities.
+- Speedup claims require a dedicated benchmark gate and committed results before use.
