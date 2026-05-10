@@ -744,3 +744,18 @@ checks:
   - bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (rc=0; 12/12 sub-gates PASS in 8m14s)
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T23:21:22Z
+files:
+  - examples/cocycle_subspace_k9.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh
+intent: Lane 3 CLAIM (stacked on PR #115) — extend cohomological subspace decomposition to k=8→k=9 (1024-ions, dim 512). Enumerates [9 choose 3]_2 = 788035 three-dim subspaces of (Z/2)^9 in the 512-dim CD algebra. Direct 3-LI-generator enumeration (proven feasible at k=8). 512² × 2 i64 = 4 MB BSS per multiplication table (4× k=8). Two purposes: (a) push Conjecture 5 formula T_k = 168·(P_k − 4·P_{k−1}) to its sixth consecutive level (predicted T_9 = 168·399415 = 67,101,720); (b) re-confirm saturation hypothesis from PR #115 — class set should remain bit-identical at 23 values. Worktree /workspace/sounio-lane-3-paper168-k9 on branch coord/lane-3-paper-168-k9, stacked off coord/lane-3-paper-168-k8 (PR #115). Wall clock estimate: ~1-2 min on x86-64 native.
+checks:
+  - bin/souc check examples/cocycle_subspace_k8.sio (rc=0, pre-state baseline includes PR #115)
+status: lock-acquired
