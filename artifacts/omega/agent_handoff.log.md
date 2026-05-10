@@ -496,3 +496,33 @@ checks:
   - bash -n on all 3 files: rc=0
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+lane: 7
+time_utc: 2026-05-10T16:43:00Z
+files:
+  - scripts/ci/native_v2_driver_self_compile_gate.sh
+  - scripts/ci/native_v2_metal_algebra_gate.sh
+intent: Lane 7 follow-up — kill 3 python invocations across 2 native_v2 gates. driver_self_compile: byte-diff (line 366, FAIL-path debug) + SIEP binary chunk parse (line 380). metal_algebra: 1 trivial status reader (line 211). Deferring 2 heavy metal_algebra heredocs (TSV walker line 66 + nested-cases emitter line 148) to next follow-up.
+status: lock-acquired
+
+---
+
+agent: claude
+lane: 7
+time_utc: 2026-05-10T16:52:00Z
+files:
+  - scripts/ci/native_v2_driver_self_compile_gate.sh
+  - scripts/ci/native_v2_metal_algebra_gate.sh
+intent: Lane 7 RELEASE — killed 3 python invocations across 2 native_v2 gates. driver_self_compile (2): byte-diff debug -> cmp -l + bash arithmetic for octal-to-hex; SIEP binary chunk parse -> grep -ab + dd + od. metal_algebra (1 of 3): trivial json.load["status"] reader -> kretikos kaxi-validate-evidence --print "status". Verified equivalence on real artifact (SIEP read /tmp/sret-marker4.310163/stage1 = "1:25328:0" matches python). Deferred 2 heavy metal_algebra heredocs (TSV walker line 66 + nested-cases emitter line 148) to next follow-up.
+checks:
+  - bash -n on both files: rc=0
+  - SIEP parser (real artifact): bash output identical to python (1:25328:0)
+  - byte-diff (synthetic 6-byte test): identical output ("2 byte(s) differ" + per-offset "0x2: 02 vs 99")
+  - status reader: kaxi-validate-evidence --print = python json.load["status"] = "pass"
+  - driver_self_compile python3 count: 2 -> 0
+  - metal_algebra python3 count: 3 -> 2
+commit: pending
+status: lock-released
