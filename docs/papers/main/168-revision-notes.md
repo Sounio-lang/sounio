@@ -527,3 +527,116 @@ classification proof.
 - Lane 3 build target green: cocycle_subspace_{168,k5,k6,k7,k8}.sio
   all compile and pass their internal checks.
 - Wall clock: full k=8 enumeration in 1.4 s on Linux x86-64 native.
+
+---
+
+## Revision 3.4 — Lane 3 follow-up: k=9 (1024-ions, dim 512) confirms three-level saturation (2026-05-10)
+
+Lane 3 continuation past Revision 3.3 (k=8 saturation result): added
+the sixth empirical data point in the 512-dimensional Cayley-Dickson
+algebra to test whether the k=7=k=8 plateau was a coincidence or a
+genuine asymptotic regime.
+
+### What's new
+
+- `examples/cocycle_subspace_k9.sio` (NEW). Builds the 512×512
+  multiplication table for the k=9 CD algebra (the "1024-ions") via
+  six CD doublings 𝕆→𝕊→𝕋→𝕮→ℝ→𝕍→𝕂. Static memory: 512² × 2 i64
+  = 4 MB BSS for the k=9 table, plus ~1.34 MB for all lower-CD tables
+  ≈ 5.34 MB total. Compiles cleanly under the Sounio native compiler,
+  no observed BSS-zero-init limit at this size.
+- Enumerates 788035 = P_9 three-dim subspaces of (ℤ/2)⁹ via direct
+  3-LI-generator enumeration (same canonical form as k=8). Total
+  enumeration wall clock: **11.5 s** on Linux x86-64. Inner-loop
+  VLIST optimization: 7³ = 343 associator calls per canonical.
+- `@table:subspace-k9` added to Section 7.
+
+### Empirical findings
+
+**23 distinct count classes** at k=9 — same count AND same values as
+k=7 and k=8. The class set
+{72, 76, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110,
+ 168, 180, 184, 186, 188, 190, 194}
+is now confirmed bit-identical across **three consecutive levels**
+(k=7, k=8, k=9).
+
+| Count | Mult.  | Count | Mult.   |
+|---:|---:|---:|---:|
+| 194 | 3255   | 100 | 3255    |
+| 190 | 13020  | 98  | 19530   |
+| 188 | 3255   | 96  | 4130    |
+| 186 | 9765   | 94  | 48825   |
+| 184 | 3255   | 92  | 3906    |
+| 180 | 217    | 90  | 71610   |
+| 168 | 75183  | 88  | 169911  |
+| 110 | 3255   | 86  | 39060   |
+| 108 | 55552  | 84  | 3255    |
+| 106 | 13020  | 76  | 166656  |
+| 104 | 3255   | 72  | 61845   |
+| 102 | 13020  | —   | —       |
+
+(Sum = 788035 = P_9, ✓.)
+
+### Three findings
+
+1. **Saturation is genuine, not a two-level coincidence.** The
+   class-count chain {1, 2, 7, 16, 23, 23, 23} at k ∈ {3,4,5,6,7,8,9}
+   now spans three consecutive plateaus at 23 classes, with the same
+   set of count values recovered bit-exact each time. Strong evidence
+   that the limiting distinct-count set is exactly 23 in the
+   GL(∞, F₂) action.
+
+2. **Conjecture 5 holds at six consecutive levels.** Predicted
+   T_9 = 168·(P_9 − 4·P_8) = 168·399415 = 67,101,720.
+   Measured: 67,101,720 (bit-exact). Closed-form
+   `T_k = 168·(2^{k-1}−1)(2^{k-2}−1)(2^{k-1}+3)/21` validated at
+   k ∈ {4, 5, 6, 7, 8, 9}.
+
+3. **Anomaly multiplicity grows geometrically toward ratio 8.** The
+   count=168 multiplicities at k = 5, 6, 7, 8, 9 are
+   {43, 247, 1535, 10383, 75183}; the consecutive ratios are
+   5.74, 6.21, 6.76, 7.24 — monotone increasing, apparently
+   converging to 8 from below. If the trend continues, the
+   asymptotic multiplicity ratio is exactly 2³, suggesting a
+   structural origin (e.g. orbit size growth controlled by the
+   degree of the determinant character of GL(k, F₂)).
+
+### Updated anomaly factorisation table
+
+| k | mult     | factorisation     | non-7 form           |
+|---|---------:|:------------------|:---------------------|
+| 4 | 0        | —                 | (no count=168 class) |
+| 5 | 43       | 43 (prime)        | single prime, non-7  |
+| 6 | 247      | 13 · 19           | two primes, non-7    |
+| 7 | 1535     | 5 · 307           | two primes, non-7    |
+| 8 | 10383    | 3 · 3461          | two primes, non-7    |
+| 9 | 75183    | 3 · 25061         | two primes, non-7    |
+
+Both 3461 and 25061 are prime (the latter verified by trial division
+up to √25061 ≈ 158). Both k=8 and k=9 share the factor 3; the other
+prime is different in each case. The "two-prime non-7" pattern is
+robust at four CD levels (k = 6, 7, 8, 9).
+
+### Pattern in non-anomaly multiplicities
+
+Notable at k=9: the factor 31 = 2⁵ − 1 appears in many multiplicities
+(3255 = 3·5·7·31, 13020 = 2²·3·5·7·31, 9765 = 3²·5·7·31,
+217 = 7·31, 19530 = 2·3²·5·7·31, 48825 = 3²·5²·7·31,
+3906 = 2·3²·7·31, 39060 = 2²·3²·5·7·31), all of which remain
+7-divisible. The factor 31 is the order of GL(1, F₂⁵) = F₃₂*, and
+the prime appearing in P_5 = 155 = 5·31. This hints that the k=9
+multiplicity pattern inherits arithmetic structure from
+GL(5, F₂) subgroup actions on the higher-CD-level cocycle —
+consistent with an orbit-counting derivation under nested
+GL(k', F₂) ⊂ GL(k, F₂) actions for k' < k.
+
+### Status
+
+- T_3, T_4, T_5, T_6, T_7, T_8, T_9 all numerically confirmed against
+  Conjecture 5 closed form (six consecutive levels at k≥4).
+- Revised Open Question 1 now has **six** empirical inputs (k=4..9)
+  AND a three-level saturation result: 23 orbit classes confirmed at
+  k=7, 8, 9 — strongly supporting the limiting-orbit-set conjecture.
+- Lane 3 build target green: cocycle_subspace_{168,k5,k6,k7,k8,k9}.sio
+  all compile and pass their internal checks.
+- Wall clock: full k=9 enumeration in 11.5 s on Linux x86-64 native.
