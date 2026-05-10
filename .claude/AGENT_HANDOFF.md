@@ -1,5 +1,25 @@
 # Claude Code Agent Handoff
 
+## Session summary (2026-05-10, Claude #1)
+
+- Phase J wired into umbrella as `cbe6716e` (compile-time confidence gate,
+  dissertation contribution #2). CPU-only gate, ~1s. rc=0 confirmed.
+- Phase Y wired into umbrella as `2b6b5b1a` (GUM variance propagation,
+  dissertation contribution #1). Self-skips without libcuda. rc=0 confirmed.
+- Shell fallback added to `emit_summary_json` (`4def6b5e`) for aggregator
+  SRET Heisenbug — umbrella now ships pass/fail signal regardless.
+- **Native-compiler 5-gate FAIL — root cause found and fixed.** After
+  `dfe0894a` (S-A defensive backstop), parse_stmt_ir's call to
+  `refuse_let_array_lit` added 7 IR ops, pushing the per-function
+  `V2_UFN_OPS[2048]` buffer over its silent-drop threshold during
+  self-compile. Dropped IR ops produced incomplete x86-64 → SIGSEGV in
+  stage1's `compile_user_fn` for the first user fn. Bisected: pre-`dfe0894a`
+  source self-compiles (md5=ccfbf10a…), post-`dfe0894a` source
+  self-compiles to a binary that crashes on its own self-compile
+  (md5=f821f5…, rc=139). Fix: bumped V2_UFN buffers 2048→4096 (12 arrays
+  + 26 bounds checks). Self-host fixed-point restored: stage1==stage2==stage3
+  (md5=c54005c7…, 405,968 bytes).
+
 Start here for parallel Sounio work:
 
 1. Read `CLAUDE_HANDOFF.md`.

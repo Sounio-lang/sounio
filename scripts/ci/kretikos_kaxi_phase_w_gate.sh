@@ -3,7 +3,7 @@
 #
 # Phase W gate: streamed multi-launch over a 1M-patient cohort. Validates
 # mem_digest invariance across (streams × chunks) combinations against the
-# reference (streams=1, chunks=64) — proves CUDA streams give bit-exact
+# reference (streams=1, chunks=64) -- proves CUDA streams give bit-exact
 # correctness equivalent to a single default-stream launch at clinical scale.
 #
 # SCOPE NOTE: This is a CORRECTNESS gate, not a throughput gate. The current
@@ -11,7 +11,7 @@
 # launch+D2H. Empirically wall-clock is flat across stream count (kernel is
 # 0.04 ms per chunk; D2H of u64 buffers leaves nothing meaningful to overlap).
 # Genuine concurrent throughput requires H2D async + cuMemHostAlloc pinned
-# staging — deferred to Phase W.1. The gate enforces a wall-clock CEILING
+# staging -- deferred to Phase W.1. The gate enforces a wall-clock CEILING
 # (PHW_WALL_CEILING_US) only as a regression detector against future launch
 # overhead growth, not as a positive throughput claim.
 #
@@ -63,7 +63,7 @@ PHW_COHORT_SWEEP="${PHW_COHORT_SWEEP:-}"
 PHW_REQUIRE_SPEEDUP_AT="${PHW_REQUIRE_SPEEDUP_AT:-100000000}"
 
 if [[ ! -f "${PHW_PTX}" ]]; then
-  echo "kretikos_kaxi_phase_w_gate: FAIL — PTX missing: ${PHW_PTX}"
+  echo "kretikos_kaxi_phase_w_gate: FAIL -- PTX missing: ${PHW_PTX}"
   exit 1
 fi
 if ! command -v cc >/dev/null 2>&1; then
@@ -84,7 +84,7 @@ expected_nan="$(grep '^nan_count=' "${PHW_STAGE_DIR}/expected.summary" | cut -d=
 echo "  analytic reference: in_budget=${expected_in_budget} nan_count=${expected_nan}"
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo "kretikos_kaxi_phase_w_gate: SKIPPED (nvidia-smi missing — slurm path not auto-invoked here)"
+  echo "kretikos_kaxi_phase_w_gate: SKIPPED (nvidia-smi missing -- slurm path not auto-invoked here)"
   exit 0
 fi
 if ! "${PHW_STAGE_DIR}/runner" >/dev/null 2>&1; then : ; fi  # warm dlopen
@@ -132,7 +132,7 @@ ref_wall="$(extract_wall "${ref_out}")"
 ref_nan="$(extract_nan "${ref_out}")"
 ref_in_budget="$(extract_in_budget "${ref_out}")"
 if [[ -z "${ref_dig}" ]]; then
-  echo "kretikos_kaxi_phase_w_gate: FAIL — reference run produced no PHW line"
+  echo "kretikos_kaxi_phase_w_gate: FAIL -- reference run produced no PHW line"
   echo "${ref_out}"
   exit 1
 fi
@@ -190,7 +190,7 @@ fi
 sweep_fail=0
 if [[ -n "${PHW_COHORT_SWEEP}" ]]; then
   echo ""
-  echo "[Phase W.1] cohort sweep — pinned async H2D throughput curve"
+  echo "[Phase W.1] cohort sweep -- pinned async H2D throughput curve"
   echo "  threshold for required speedup: cohort >= ${PHW_REQUIRE_SPEEDUP_AT}"
   for cohort in ${PHW_COHORT_SWEEP}; do
     sweep_dir="${PHW_STAGE_DIR}/sweep_${cohort}"
@@ -202,7 +202,7 @@ if [[ -n "${PHW_COHORT_SWEEP}" ]]; then
     par_dig="$(extract_digest "${par_out}")"
     par_wall="$(extract_wall "${par_out}")"
     if [[ -z "${seq_dig}" || -z "${par_dig}" ]]; then
-      echo "  cohort=${cohort} FAIL — missing PHW line (seq_dig=${seq_dig:-EMPTY} par_dig=${par_dig:-EMPTY})"
+      echo "  cohort=${cohort} FAIL -- missing PHW line (seq_dig=${seq_dig:-EMPTY} par_dig=${par_dig:-EMPTY})"
       sweep_fail=$((sweep_fail + 1))
       continue
     fi

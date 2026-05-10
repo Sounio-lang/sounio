@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase B deep-dive — sedenion ZD empirical foundation gate.
+# Phase B deep-dive -- sedenion ZD empirical foundation gate.
 #
 # Compiles and runs tests/math/test_zd_deep_dive.sio:
 #   B.4 enumerate primitive ZDs in {1..15}
@@ -7,7 +7,7 @@
 #   B.6 multi-invariant equivalence spectrum
 #   B.7 iterated trajectory drift between different-z pairs
 #
-# This is *evidence-recording* — the test always asserts ALL PASS as long
+# This is *evidence-recording* -- the test always asserts ALL PASS as long
 # as it runs cleanly. The synthesis block at the end is the durable artifact
 # downstream readers (and future butterfly-shapers) consume.
 #

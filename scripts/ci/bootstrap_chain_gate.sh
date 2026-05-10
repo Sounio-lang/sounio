@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bootstrap Chain Gate — proves Sounio compiles Sounio natively (no JIT)
+# Bootstrap Chain Gate -- proves Sounio compiles Sounio natively (no JIT)
 set -eo pipefail
 
 TMPDIR=/tmp/bootstrap_gate_$$

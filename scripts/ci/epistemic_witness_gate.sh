@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# epistemic_witness_gate.sh — non-trivial witness for the Epistemic Monotonicity Theorem.
+# epistemic_witness_gate.sh -- non-trivial witness for the Epistemic Monotonicity Theorem.
 #
 # Compiles examples/pbpk_simple.sio through native_compile_driver and asserts that
 # u_c_scaled > 0 in the output binary's .sounio.epistemic (SIEP) section.
 #
 # pbpk_simple.sio contains 2 Knowledge<f64> type occurrences, so u_c_scaled must be >= 2.
-# This proves the compiler correctly measures external epistemic density — the gate is
+# This proves the compiler correctly measures external epistemic density -- the gate is
 # not a tautology (u_c=0 for the compiler itself; u_c>=2 for an epistemic program).
 #
 # Theorem instantiation:

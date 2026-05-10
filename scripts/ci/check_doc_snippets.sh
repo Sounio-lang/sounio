@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check_doc_snippets.sh — Extract ```sio blocks from docs and check them
+# check_doc_snippets.sh -- Extract ```sio blocks from docs and check them
 #
 # Extracts Sounio code blocks from markdown docs, writes each to a temp file,
 # and runs `souc check` on them. Reports pass/fail counts.

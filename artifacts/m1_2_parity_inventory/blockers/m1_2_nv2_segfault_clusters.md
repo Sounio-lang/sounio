@@ -133,11 +133,28 @@ in $OUT_DIR/nv2_driver.stage1 as a side effect).
 
 ## Inventory delta this session
 
-| Date | corpus | ok | nv2_compile fail |
-|--|--:|--:|--:|
-| 2026-04-30 baseline | 392 | 50 (12.7%) | 324 |
-| 2026-05-03 delta    | 392 | 76 (19.4%) | 291 |
-| **2026-05-09**      | **407** | **129 (31.7%)** | **230** |
+| Date | corpus | ok | nv2_compile fail | of which silent segv |
+|--|--:|--:|--:|--:|
+| 2026-04-30 baseline | 392 | 50 (12.7%) | 324 | — |
+| 2026-05-03 delta    | 392 | 76 (19.4%) | 291 | — |
+| 2026-05-09          | 407 | 129 (31.7%) | 230 | 157 |
+| **2026-05-10**      | **407** | **129 (31.7%)** | **230** | **156** |
+
+## 2026-05-10 update — S-A landed
+
+S-A defensive backstop landed (commit `dfe0894a`): `parse_stmt_ir` refuses
+type-inferred `let X = [...]` cleanly via `refuse_let_array_lit/2` helper.
+Inline guard tipped `parse_stmt_ir` over the V2_UFN_OPS[2048] budget; the
+helper-extraction approach kept self-compile fixed-point intact.
+
+S-B/S-C (`::` in expression position) and S-D (`{` refinement type) deferred:
+both required edits to `parse_atom_ir`, which is at the same IR-op limit. Naïve
+inline guards and the same helper-extraction trick both broke driver
+self-compile. These need a different approach (peek-ahead in dispatch table
+vs. early-return helper), out of scope for this session.
+
+Of the 8 smallest remaining segfaults: 1 turbofish, 1 Box::new, 5 refinement
+type, 1 import-resolution. S-B/S-C/S-D still cover the bulk.
 
 Regressions vs 2026-05-03 (only 2):
   - `tests/run-pass/import_basic.sio` — clean `unresolved_call text=imported_add`

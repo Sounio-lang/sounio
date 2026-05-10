@@ -124,7 +124,7 @@ case "$HOST_PLATFORM" in
         ;;
 esac
 
-# Strategy 0: Use checked-in self-hosted native compiler (fast path — copy)
+# Strategy 0: Use checked-in self-hosted native compiler (fast path -- copy)
 if [ "$FORCE_SOURCE_BOOTSTRAP" != "1" ]; then
     for NATIVE_PREBUILT in "${HOST_PREBUILTS[@]}"; do
         if [ -x "$NATIVE_PREBUILT" ]; then
