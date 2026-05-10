@@ -62,6 +62,7 @@ mkdir -p "${STAGE_DIR}"
 
 echo "[1/4] building GUM sampler and runner"
 cc -O2 -Wall \
+   -ffp-contract=off \
    "${ROOT_DIR}/scripts/gpu/kaxi_pbpk_2comp_gum_sampler.c" \
    -lm -o "${STAGE_DIR}/gum_sampler"
 cc -O2 -Wall \

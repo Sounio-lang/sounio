@@ -59,7 +59,8 @@ static double next_normal(uint64_t *state) {
 }
 
 // Precomputed GUM constants (matching pbpk_2comp_gum_4step.ptx mov.f32 lines).
-// All exact in f32 since each is a finite sum/product of {0.75, 0.875, 0.5, 0.25, 0.125}.
+// All exact in f32 since each is a finite sum/product of
+// {0.75, 0.875, 0.5, 0.25, 0.125}.
 #define J11SQ        0.5625f    // J11*J11
 #define TWO_J11_J12  0.1875f    // 2*J11*J12 == J11*J21 (shared with V12 lane)
 #define J12SQ        0.015625f  // J12*J12
@@ -69,38 +70,47 @@ static double next_normal(uint64_t *state) {
 #define TWO_J21_J22  0.4375f    // 2*J21*J22
 #define J22SQ        0.765625f  // J22*J22
 
-// One Euler step in f32 — matches PTX mul.rn / fma.rn / add.rn chain bit-exactly.
+// One Euler step in f32. Keep this as explicit mul/add statements so it
+// matches the generated PTX mul.rn/add.rn chain bit-for-bit.
 //
 // PTX:
-//   %f23 = mul(J11, c1); %f23 = fma(J12, c2, %f23); %f23 = add(%f23, K_in_dt);
-//   %f24 = mul(J21, c1); %f24 = fma(J22, c2, %f24);
+//   t1 = mul(J11, c1); t2 = mul(J12, c2); c1 = add(add(t1, t2), K_in_dt)
+//   t3 = mul(J21, c1); t4 = mul(J22, c2); c2 = add(t3, t4)
 static void euler_step_f32(float c1, float c2, float *c1_out, float *c2_out) {
     float t = J11 * c1;
-    t = fmaf(J12, c2, t);
+    float u = J12 * c2;
+    t = t + u;
     *c1_out = t + K_IN_DT;
     t = J21 * c1;
-    *c2_out = fmaf(J22, c2, t);
+    u = J22 * c2;
+    *c2_out = t + u;
 }
 
 // Full GUM covariance propagation step via J·Σ·Jᵀ.
 // Σ = [[v11, v12], [v12, v22]]
 //
-// PTX uses mul.rn + 2× fma.rn (single rounding for each fma's mul-add pair),
-// so the CPU oracle must use fmaf() in the same order.
+// PTX uses explicit mul.rn/add.rn, so the CPU oracle must keep the same
+// operation order instead of contracting to FMA.
 static void gum_step(float v11, float v12, float v22,
                      float *v11_out, float *v12_out, float *v22_out) {
-    float t;
+    float t, u;
     t = J11SQ * v11;
-    t = fmaf(TWO_J11_J12, v12, t);
-    *v11_out = fmaf(J12SQ, v22, t);
+    u = TWO_J11_J12 * v12;
+    t = t + u;
+    u = J12SQ * v22;
+    *v11_out = t + u;
 
     t = TWO_J11_J12 * v11;     // J11*J21 == 2*J11*J12 = 0.1875
-    t = fmaf(J11_J22_PLUS_J12_J21, v12, t);
-    *v12_out = fmaf(J12_J22, v22, t);
+    u = J11_J22_PLUS_J12_J21 * v12;
+    t = t + u;
+    u = J12_J22 * v22;
+    *v12_out = t + u;
 
     t = J21SQ * v11;
-    t = fmaf(TWO_J21_J22, v12, t);
-    *v22_out = fmaf(J22SQ, v22, t);
+    u = TWO_J21_J22 * v12;
+    t = t + u;
+    u = J22SQ * v22;
+    *v22_out = t + u;
 }
 
 static int write_all(const char *path, const void *buf, size_t bytes) {

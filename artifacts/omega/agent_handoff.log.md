@@ -454,6 +454,23 @@ status: lock-acquired
 
 ---
 
+agent: codex
+lane: integration
+time_utc: 2026-05-10T16:16:48Z
+files:
+  - scripts/ci/kretikos_kaxi_phase_y_gate.sh
+  - benchmarks/pbpk/**
+  - self-hosted/gpu/**
+  - bin/kretikos
+intent: CLAIM — resolve BLK-20260510-lane6-phase-y-gpu-cpu-digest-divergence. Reproduced on origin/main@fc25564d and still investigating on origin/main@b9b4e631: Phase Y GPU PBPK launches successfully but final C1/V11 digests diverge from CPU analytic oracle, making native_v2_cpu_compiler_umbrella_gate red.
+checks:
+  - pending: PHY_STAGE_DIR=$(mktemp -d) bash scripts/ci/kretikos_kaxi_phase_y_gate.sh
+  - pending: bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh
+commit: pending
+status: lock-acquired
+
+---
+
 agent: claude
 lane: 7
 time_utc: 2026-05-10T16:18:00Z
@@ -477,6 +494,20 @@ files:
   - scripts/ci/native_v2_imported_core_abi_gate.sh
   - scripts/ci/native_v2_imported_hof_abi_gate.sh
 intent: Lane 7 follow-up — kill 3 same-shape python heredocs across native_v2_*_gate.sh. hof_closure is a validator (replace with kretikos kaxi-validate-evidence --expect); imported_core_abi + imported_hof_abi are json.dump emitters (replace with kretikos json-emit + bash date -u + sha256sum). Byte-identity verified modulo generated_at_utc timestamp.
+status: lock-acquired
+
+---
+
+agent: codex
+lane: integration
+time_utc: 2026-05-10T16:34:53Z
+files:
+  - .claude/llm_offload_log.md
+intent: CLAIM extension — document mandatory math-review offload unavailability for the Phase Y GUM/PK repair. No provider keys are present in this environment; policy fallback requires an audit-log entry.
+checks:
+  - bin/llm-offload --status (keys file NOT FOUND)
+  - provider env presence check (XAI_API_KEY/OPENROUTER_API_KEY/DEEPSEEK_API_KEY/GROQ_API_KEY/MINIMAX_API_KEY all missing; values not printed)
+commit: pending
 status: lock-acquired
 
 ---
@@ -541,5 +572,48 @@ checks:
   - normalized diff baseline vs postchange summary.json (sed s|OUT_DIR|OUTDIR|g): BYTE IDENTICAL
   - cases array preserved, sha256, ordering, sort_keys, all match
   - native_v2_metal_algebra.sh python3 count: 2 -> 0
+commit: pending
+status: lock-released
+
+---
+
+agent: codex
+lane: integration
+time_utc: 2026-05-10T16:35:30Z
+files:
+  - scripts/ci/kretikos_kaxi_phase_y_gate.sh
+  - scripts/gpu/kaxi_pbpk_2comp_gum_sampler.c
+  - self-hosted/gpu/kretikos_emit_kaxi.sio
+  - tests/golden/kaxi_ptx/default/pbpk_2comp_gum_4step.ptx
+  - tests/golden/kaxi_ptx/default/pbpk_2comp_gum_4step.sha256
+  - tests/golden/kaxi_ptx/epistemic/pbpk_2comp_gum_4step.ptx
+  - tests/golden/kaxi_ptx/epistemic/pbpk_2comp_gum_4step.sha256
+  - tests/golden/kaxi_ptx/f32/pbpk_2comp_gum_4step.ptx
+  - tests/golden/kaxi_ptx/f32/pbpk_2comp_gum_4step.sha256
+  - tests/golden/kaxi_ptx/f32_2c/pbpk_2comp_gum_4step.ptx
+  - tests/golden/kaxi_ptx/f32_2c/pbpk_2comp_gum_4step.sha256
+  - tests/golden/kaxi_ptx/f32_gum/pbpk_2comp_gum_4step.ptx
+  - tests/golden/kaxi_ptx/f32_gum/pbpk_2comp_gum_4step.sha256
+  - tests/golden/kaxi_ptx/f32e/pbpk_2comp_gum_4step.ptx
+  - tests/golden/kaxi_ptx/f32e/pbpk_2comp_gum_4step.sha256
+  - .claude/llm_offload_log.md
+intent: RELEASE — BLK-20260510-lane6-phase-y-gpu-cpu-digest-divergence fixed. Phase Y emitter now matches the CPU oracle: C1 update includes K_in*dt, GUM propagation carries local V12 and writes V11/V22; CPU oracle uses explicit mul/add with ffp-contract off to match generated PTX.
+checks:
+  - bin/souc check self-hosted/gpu/kretikos_emit_kaxi.sio (PASS)
+  - bin/souc check self-hosted/gpu/kretikos_kaxi_to_ptx.sio (PASS)
+  - cc -O2 -Wall -ffp-contract=off scripts/gpu/kaxi_pbpk_2comp_gum_sampler.c -lm (PASS)
+  - PHY_COHORT=1024 PHY_PTX=<generated> bash scripts/ci/kretikos_kaxi_phase_y_gate.sh (PASS, C1/V11 digests match)
+  - bash scripts/ci/kaxi_ptx_capture.sh --force (318 supported)
+  - bash scripts/ci/kaxi_ptx_golden_gate.sh (PASS=318, FAIL=0, MISSING=0)
+  - PHY_STAGE_DIR=/tmp/phasey-fixed-ZOdeiH bash scripts/ci/kretikos_kaxi_phase_y_gate.sh (PASS, 10M C1=ec2d8e0114973729 V11=afe65c27b669f528)
+  - SOUNIO_NATIVE_V2_CPU_COMPILER_DIR=/tmp/umbrella-phasey-fixed-XMhg3h bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (PASS via known shell fallback aggregator; all subgate rc=0)
+  - SOUNIO_NATIVE_V2_CPU_COMPILER_DIR=/tmp/umbrella-phasey-final-tCRIiQ bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (PASS on origin/main@be2cec23 via known shell fallback aggregator; all subgate rc=0; phase_y C1/V11=ec2d8e0114973729/afe65c27b669f528)
+  - final rebase to origin/main@4188c439 only changed upstream coordination docs (.agent-orchestration/coordination/6_lane_assignment.md, .claude/AGENT_HANDOFF.md); post-rebase git diff --check, blocker contract, souc checks, and kaxi_ptx_golden_gate re-run PASS
+  - final rebase to origin/main@ebc8b5a5 only conflicted in artifacts/omega/agent_handoff.log.md; preserved Lane 7 and Phase Y entries; post-rebase git diff --check, blocker contract, souc checks, and kaxi_ptx_golden_gate re-run PASS
+  - SOUNIO_NATIVE_V2_CPU_COMPILER_DIR=/tmp/umbrella-phasey-ebc8-CsDO4o bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (PASS via known shell fallback aggregator; all subgate rc=0; phase_y C1/V11=ec2d8e0114973729/afe65c27b669f528)
+  - final rebase to origin/main@0bdff39c only conflicted in artifacts/omega/agent_handoff.log.md; preserved Lane 7 final metal_algebra release and Phase Y entries; post-rebase git diff --check, blocker contract, souc checks, and kaxi_ptx_golden_gate re-run PASS
+  - SOUNIO_NATIVE_V2_CPU_COMPILER_DIR=/tmp/umbrella-phasey-0bdff-UL8gPz bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (PASS via known shell fallback aggregator; all subgate rc=0; phase_y C1/V11=ec2d8e0114973729/afe65c27b669f528)
+  - git diff --check (PASS)
+  - bin/llm-offload -t math-review -p xai -i scripts/gpu/kaxi_pbpk_2comp_gum_sampler.c (UNAVAILABLE: no provider keys; logged in .claude/llm_offload_log.md)
 commit: pending
 status: lock-released
