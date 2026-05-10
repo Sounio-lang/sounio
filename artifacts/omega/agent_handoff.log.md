@@ -396,3 +396,17 @@ checks:
   - bin/souc check tests/run-pass/rapamycin_iso_budget.sio (rc=0)
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+time_utc: 2026-05-10T15:02:00Z
+files:
+  - tests/run-pass/rapamycin_rk4_budget.sio
+intent: Lane 2 sweep follow-up — also wired Budget64 into rapamycin_rk4_budget.sio (same pattern, RK4 instead of Euler, 3 compartments). Real dissertation finding exposed: Knowledge propagation is ACTIVE for RK4 (std>0 for all 3 compartments) but disagrees with explicit Budget64 by factors of 2.13× (blood), 1.18× (brain), 0.27× (periph). Documents that Sounio's automatic GUM tracking and explicit ISO budget can diverge in coupled ODE systems even when both are mathematically "correct" — Knowledge does not see cross-compartment sensitivity coupling.
+checks:
+  - bin/souc check tests/run-pass/rapamycin_rk4_budget.sio (rc=0)
+  - bash scripts/ci/dissertation_pbpk_suite_gate.sh (PASS, 22/22)
+  - sweep inventory: rapamycin_iso_budget.sio (fixed in PR #98), rapamycin_rk4_budget.sio (fixed here), rapamycin_clinical.sio (already complete), rapamycin_epistemic_adaptive.sio (no budget claim, skip), rapamycin_gum_vs_mc.sio (intentional .value in MC sampling, skip), gum_vs_mc.sio (intentional, skip), des_sirolimus*.sio (no empty budget, skip), pop_sim.sio (no empty budget, skip), steady_state_runner.sio (no empty budget, skip)
+commit: pending
+status: lock-released
