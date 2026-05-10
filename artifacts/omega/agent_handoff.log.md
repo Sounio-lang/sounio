@@ -644,4 +644,35 @@ checks:
   - bin/souc check stdlib/darwin_pbpk/aggregate_confidence.sio (rc=0)
   - bin/souc check tests/run-pass/multi_drug_aggregate_test.sio (rc=0)
   - compiled test stdout bytewise-matches tests/golden/multi_drug_conf/aggregator_outputs.txt
+agent: claude-b
+lane: 8c
+time_utc: 2026-05-10T16:40:00Z
+files:
+  - scripts/dissertation/dossier_generator.sio (NEW)
+  - docs/dissertation/dossier_template.md (NEW)
+  - scripts/ci/dissertation_dossier_gate.sh (NEW)
+  - tests/run-pass/dossier_smoke.sio (NEW)
+  - tests/golden/dissertation/dossier_rapamycin_snapshot.md (NEW)
+intent: Lane 8c CLAIM — regulatory dossier generator (Markdown). Dissertation contribution #3 narrative wrapper for ISO 17025 GUM budget. New top-level dirs scripts/dissertation/, docs/dissertation/, tests/golden/dissertation/ owned exclusively by this lane. Brief in worktree TASK.md. Owner offload Kimi 2.5; reviewer Claude B.
+worktree: /workspace/sounio-lane-8c-dossier
+branch: coord/lane-8c-dossier (off origin/main 91d48adb)
+status: lock-acquired
+
+---
+
+agent: claude-b
+lane: 8c
+time_utc: 2026-05-10T17:25:00Z
+files:
+  - scripts/dissertation/dossier_generator.sio
+  - docs/dissertation/dossier_template.md
+  - tests/run-pass/dossier_smoke.sio
+  - tests/golden/dissertation/dossier_rapamycin_snapshot.md
+  - scripts/ci/dissertation_dossier_gate.sh
+  - TASK.md
+intent: Lane 8c RELEASE — regulatory dossier generator (Markdown). Renders 9-section dossier from a DossierInput struct (no file I/O — Sounio stdlib lacks blocking read_file in current compiler). Smoke test embeds deterministic fixture; gate diffs stdout bytewise against committed golden snapshot. Disjoint from all other Lane 8 sub-lanes and from Lanes 1-7.
+checks:
+  - bash scripts/ci/dissertation_dossier_gate.sh (PASS=5 FAIL=0 rc=0)
+  - bin/souc check tests/run-pass/dossier_smoke.sio (rc=0)
+  - bin/souc compile + run, stdout bytewise-matches golden
 status: lock-released
