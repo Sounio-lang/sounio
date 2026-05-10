@@ -370,3 +370,29 @@ checks:
   - bash scripts/ci/lean_single_fixed_point_gate.sh (PASS, md5=1c89bbde stage1==stage2==stage3)
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+time_utc: 2026-05-10T14:38:00Z
+files:
+  - stdlib/darwin_pbpk/validation/**
+  - scripts/ci/dissertation_pbpk_suite_gate.sh
+intent: Lane 2 ONLINE — Claude #1 acting as dissertation-evidence owner this session. Baseline 22/22 PASS verified on coord/lane-2-dissertation-evidence. Picking next move.
+checks:
+  - bash scripts/ci/dissertation_pbpk_suite_gate.sh (PASS, 22/22)
+commit: pending
+status: lock-open
+
+---
+
+agent: claude
+time_utc: 2026-05-10T14:48:00Z
+files:
+  - tests/run-pass/rapamycin_iso_budget.sio
+intent: Lane 2 RELEASE — wired Budget64 into rapamycin_iso_budget.sio. Test now prints actual ISO §8 budget tables (was empty section headers). Brain budget shows Kp_brain dominates 83.1% as expected for P-gp efflux at BBB. Cross-check exposes Knowledge<f64> inactivity from .value extraction (documented, not a failure).
+checks:
+  - bash scripts/ci/dissertation_pbpk_suite_gate.sh (PASS, 22/22)
+  - bin/souc check tests/run-pass/rapamycin_iso_budget.sio (rc=0)
+commit: pending
+status: lock-released
