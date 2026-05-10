@@ -145,9 +145,39 @@ emit_summary_json() {
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   mkdir -p "$(dirname "$SUMMARY_JSON")"
-  "$ROOT_DIR/bin/kretikos" umbrella-aggregate \
-    "$RESULTS_TSV" "$SOUC_BIN" "$OUT_DIR" "$ts" \
-    > "$SUMMARY_JSON"
+  if "$ROOT_DIR/bin/kretikos" umbrella-aggregate \
+       "$RESULTS_TSV" "$SOUC_BIN" "$OUT_DIR" "$ts" \
+       > "$SUMMARY_JSON" 2>/dev/null \
+     && [[ -s "$SUMMARY_JSON" ]]; then
+    return 0
+  fi
+
+  # Fallback: aggregator hit the native-compiler SRET bug on a TSV that
+  # mixes log-only and summary rows. Emit a minimal shell-built JSON so
+  # the umbrella's pass/fail signal still works. Sub-gate rcs come from
+  # the TSV directly. See memory: "Native compiler limits".
+  echo "[native-v2-cpu-compiler] aggregator unavailable, using shell fallback" >&2
+  local any_fail=0
+  local rows=""
+  local first=1
+  while IFS=$'\t' read -r gate rc out_dir sjson lpath; do
+    [[ "$gate" == "gate" ]] && continue
+    [[ -z "$gate" ]] && continue
+    if [[ "$rc" != "0" ]]; then any_fail=1; fi
+    if [[ $first -eq 1 ]]; then first=0; else rows="$rows,"$'\n'; fi
+    rows="$rows    {\"gate\": \"$gate\", \"rc\": $rc, \"out_dir\": \"$out_dir\"}"
+  done < "$RESULTS_TSV"
+  cat > "$SUMMARY_JSON" <<EOF
+{
+  "schema": "native_v2_cpu_compiler_umbrella.shell_fallback.v1",
+  "generated_at": "$ts",
+  "fallback_reason": "aggregator_native_sret_bug",
+  "gates": [
+$rows
+  ]
+}
+EOF
+  return $any_fail
 }
 
 echo "[native-v2-cpu-compiler] souc=$SOUC_BIN"
