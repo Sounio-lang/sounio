@@ -489,6 +489,19 @@ files:
 intent: Lane 8a CLAIM — second-order Hessian GUM through PBPK14. Dissertation contribution #1 extension. Disjoint from Lanes 1, 2, 4, 5, 7. Brief in worktree TASK.md. Owner offload Kimi 2.5; reviewer Claude B. Companion sibling lanes 8b (multi-drug aggregation) and 8c (regulatory dossier generator) also stood up at the same time with disjoint file sets — see /workspace/sounio-lane-8b-multi-drug/TASK.md and /workspace/sounio-lane-8c-dossier/TASK.md.
 worktree: /workspace/sounio-lane-8a-hessian
 branch: coord/lane-8a-hessian (off origin/main 91d48adb)
+agent: claude-b
+lane: 8b
+time_utc: 2026-05-10T16:40:00Z
+files:
+  - stdlib/darwin_pbpk/aggregate_confidence.sio (NEW)
+  - scripts/ci/kretikos_kaxi_phase_j_aggregate_gate.sh (NEW)
+  - tests/golden/multi_drug_conf/worst_case.ptx (NEW)
+  - tests/golden/multi_drug_conf/rss.ptx (NEW)
+  - tests/golden/multi_drug_conf/cov_weighted.ptx (NEW)
+  - tests/run-pass/multi_drug_aggregate_test.sio (NEW)
+intent: Lane 8b CLAIM — multi-drug confidence aggregation (worst-case / RSS / cov-weighted). Dissertation contribution #2 extension. Goldens deliberately under tests/golden/multi_drug_conf/** to stay disjoint from Lane 1's tests/golden/kaxi_ptx/** ownership. Brief in worktree TASK.md. Owner offload Codex; reviewer Claude B.
+worktree: /workspace/sounio-lane-8b-multi-drug
+branch: coord/lane-8b-multi-drug (off origin/main 91d48adb)
 status: lock-acquired
 
 ---
@@ -616,4 +629,19 @@ checks:
   - bin/souc check: stdlib hessian module (transitive via e2e), unit test, e2e — all rc=0
   - unit test: PASS unit_quadratic_recovery (Hessian elements bit-exact for polynomial deg 2)
   - e2e: PASS hessian_correction_reduces_residual (synthetic y=ax² truth match to ~1e-13)
+agent: claude-b
+lane: 8b
+time_utc: 2026-05-10T17:05:00Z
+files:
+  - stdlib/darwin_pbpk/aggregate_confidence.sio
+  - tests/run-pass/multi_drug_aggregate_test.sio
+  - tests/golden/multi_drug_conf/aggregator_outputs.txt
+  - scripts/ci/kretikos_kaxi_phase_j_aggregate_gate.sh
+  - TASK.md
+intent: Lane 8b RELEASE — multi-drug confidence aggregation (worst_case / rss / cov_weighted) landed. Reframed during impl to a CPU-only, Sounio-stdout-golden gate after observing that introducing a new K-AXI pattern would have required edits to self-hosted/gpu/kaxi_to_ptx.sio (Lane 1's claim). Aggregation is pure-Sounio and operates on per-drug confidences already produced by Phase J. Goldens deliberately under tests/golden/multi_drug_conf/** (NOT tests/golden/kaxi_ptx/**) per the disjoint claim list. Gate 6/6 PASS, rc=0.
+checks:
+  - bash scripts/ci/kretikos_kaxi_phase_j_aggregate_gate.sh (PASS=6 FAIL=0 rc=0)
+  - bin/souc check stdlib/darwin_pbpk/aggregate_confidence.sio (rc=0)
+  - bin/souc check tests/run-pass/multi_drug_aggregate_test.sio (rc=0)
+  - compiled test stdout bytewise-matches tests/golden/multi_drug_conf/aggregator_outputs.txt
 status: lock-released
