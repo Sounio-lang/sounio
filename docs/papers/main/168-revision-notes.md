@@ -324,3 +324,92 @@ Notable observations:
   cocycle restriction class enumeration.
 - Lane 3 build target green: cocycle_subspace_168.sio rc=0,
   cocycle_subspace_k5.sio PASS, cocycle_subspace_k6.sio PASS.
+
+---
+
+## Revision 3.2 — Lane 3 follow-up: k=7 routon distribution (2026-05-10)
+
+Lane 3 continuation past Revision 3.1: added the fourth empirical data
+point requested by Revised Open Question 1, this time at k=7 in the
+128-dimensional routon algebra.
+
+### What's new
+
+- `examples/cocycle_subspace_k7.sio` (NEW). Builds the 128×128 routon
+  basis multiplication table via four CD doublings (𝕆→𝕊→𝕋→𝕮→ℝ).
+  Enumerates the 11811 = P_7 three-dimensional subspaces of (ℤ/2)⁷ as
+  canonical lex-minimal LI quadruples of dual functionals (V is codim-4
+  at k=7). Inner loop is accelerated via a VLIST precomputation: for each
+  canonical quadruple, V's 7 nonzero elements are tabulated once, then
+  iterated as 7³ = 343 triples instead of the naive 127³ ≈ 2M (~6000×
+  speedup; total wall clock ≈ 0.6 s for the full k=7 enumeration). 3/3
+  PASS, T_7 = 1046808 confirmed.
+- `@table:subspace-k7` added to Section 7. The fourth data point in the
+  Conjecture 5 cocycle classification.
+
+### Empirical findings
+
+**23 distinct count classes** at k=7 (vs 16 at k=6, 7 at k=5, 2 at k=4,
+1 at k=3):
+
+| Count | Mult. | Count | Mult. |
+|---:|---:|---:|---:|
+| 194 | 21   | 100 | 147  |
+| 190 | 84   | 98  | 252  |
+| 188 | 147  | 96  | 350  |
+| 186 | 63   | 94  | 819  |
+| 184 | 147  | 92  | 294  |
+| 180 | 49   | 90  | 840  |
+| 168 | 1535 | 88  | 2499 |
+| 110 | 21   | 86  | 252  |
+| 108 | 784  | 84  | 147  |
+| 106 | 84   | 76  | 2352 |
+| 104 | 147  | 72  | 693  |
+| 102 | 84   | —   | —    |
+
+(Sum = 11811 = P_7, ✓.)
+
+Three structural features survive the passage from k=6 to k=7:
+
+1. **Formula T_k = 168·(P_k − 4·P_{k−1}) confirmed at k=7.** Predicted
+   T_7 = 168·(11811 − 4·1395) = 168·6231 = 1,046,808. Measured T_7 =
+   1,046,808 (bit-exact). The cohomological balance therefore holds at
+   four consecutive levels (k=4,5,6,7).
+
+2. **Super-octonionic family expands.** At k=5 there was one
+   super-octonionic class (count=180, mult=7). At k=6 there were three
+   (counts 180/184/188, each with mult=21). At k=7 there are *six*
+   super-octonionic classes (counts 180, 184, 186, 188, 190, 194), all
+   with 7-divisible multiplicities {49, 147, 63, 147, 84, 21} =
+   7·{7, 21, 9, 21, 12, 3}. The phenomenon of 3-dimensional subspaces
+   carrying *more* nonzero basis associators than the pure octonion
+   subalgebra (count > 168) intensifies with k.
+
+3. **Count-168 anomaly persists with level-specific signature.** The
+   non-7-divisible multiplicity at count=168 (the principal anomaly
+   identified at k=6 as 247 = 13·19) grows at k=7 to 1535 = 5·307.
+   Both are products of exactly two primes, neither equal to 7. The
+   anomaly orbit family therefore propagates up the tower with a
+   level-dependent two-prime signature, supporting the conjecture that
+   it arises from a non-PSL(2,7) orbit.
+
+### Class-count chain
+
+The {1, 2, 7, 16, 23} chain at k ∈ {3,4,5,6,7} slows from the k=5→k=6
+doubling (7→16, factor 2.3) to a 7-class jump at k=6→k=7 (16→23, factor
+1.4). This deceleration hints at a saturation regime in which most
+cocycle restriction classes have already appeared by k=7 and further
+levels add only refinements. Quantitative classification at k=8 (voudons,
+dim 256, P_8 = 97155) would test the saturation hypothesis but requires
+either a more efficient enumeration or larger arrays than the current
+example chain uses.
+
+### Status
+
+- T_3, T_4, T_5, T_6, T_7 all numerically confirmed against Conjecture 5
+  closed form.
+- Revised Open Question 1 now has **four** empirical inputs (k=4, 5, 6, 7)
+  for cocycle restriction class enumeration.
+- Lane 3 build target green: cocycle_subspace_168.sio rc=0,
+  cocycle_subspace_k5.sio PASS, cocycle_subspace_k6.sio PASS,
+  cocycle_subspace_k7.sio PASS.
