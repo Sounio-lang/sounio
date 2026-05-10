@@ -205,11 +205,7 @@ if fail_count:
     raise SystemExit(1)
 PY
 
-summary_status="$(python3 - "$SUMMARY_JSON" <<'PY'
-import json, sys
-print(json.load(open(sys.argv[1]))["status"])
-PY
-)"
+summary_status="$("$ROOT_DIR/bin/kretikos" kaxi-validate-evidence "$SUMMARY_JSON" --print "status")"
 
 echo "[native-v2-metal-algebra] status=$summary_status summary=$SUMMARY_JSON"
 if [[ "$summary_status" == "fail" ]]; then

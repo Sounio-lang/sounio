@@ -363,12 +363,13 @@ if [[ "$stage3_rc" -ne 0 ]]; then
 fi
 if ! cmp -s "$STAGE2_DRIVER" "$STAGE3_DRIVER"; then
   echo "[native-v2-driver-self] FAIL: fixed-point broken -- stage2 != stage3" >&2
-  python3 -c "
-a=open('$STAGE2_DRIVER','rb').read(); b=open('$STAGE3_DRIVER','rb').read()
-diffs=[(i,a[i],b[i]) for i in range(min(len(a),len(b))) if a[i]!=b[i]]
-print(f'  {len(diffs)} byte(s) differ')
-for i,x,y in diffs[:5]: print(f'  offset 0x{i:x}: {x:02x} vs {y:02x}')
-" >&2 || true
+  # Pure-bash byte-diff debug (replaces python3 -c heredoc).
+  # cmp -l emits "byteoff val1 val2" with values in octal; we render hex.
+  diff_total=$(cmp -l "$STAGE2_DRIVER" "$STAGE3_DRIVER" 2>/dev/null | wc -l)
+  printf '  %s byte(s) differ\n' "$diff_total" >&2
+  cmp -l "$STAGE2_DRIVER" "$STAGE3_DRIVER" 2>/dev/null | head -n 5 | while read -r off v1 v2; do
+    printf '  offset 0x%x: %02x vs %02x\n' $((off - 1)) $((8#$v1)) $((8#$v2)) >&2
+  done || true
   exit 1
 fi
 check_driver_elf_layout "$STAGE3_DRIVER" "$STAGE3_SECTIONS_LOG" "stage3 driver"
@@ -376,24 +377,20 @@ STAGE2_MD5="$(md5sum "$STAGE2_DRIVER" | cut -d' ' -f1)"
 printf '[native-v2-driver-self] fixed-point md5=%s\n' "$STAGE2_MD5"
 
 # ── Epistemic fixed-point: read .sounio.epistemic from stage1/2/3 ────────────
+# Pure-bash SIEP chunk reader (replaces python struct.unpack heredoc).
+# SIEP chunk layout: 'SIEP' magic at offset 0, u32 version at +4,
+# u64 instr_count at +8, u64 u_c_scaled at +16. All little-endian.
 read_epistemic() {
-  python3 - "$1" <<'PYEOF'
-import struct, sys, os
-path = sys.argv[1]
-if not os.path.exists(path):
-    print("absent")
-    sys.exit(0)
-data = open(path, 'rb').read()
-idx = data.find(b'SIEP')
-if idx < 0:
-    print("absent")
-    sys.exit(0)
-chunk = data[idx:idx+24]
-version = struct.unpack_from('<I', chunk, 4)[0]
-instr_count = struct.unpack_from('<Q', chunk, 8)[0]
-u_c_scaled = struct.unpack_from('<Q', chunk, 16)[0]
-print(f"{version}:{instr_count}:{u_c_scaled}")
-PYEOF
+  local path="$1"
+  if [[ ! -f "$path" ]]; then echo "absent"; return 0; fi
+  local idx
+  idx=$(LC_ALL=C grep -ab -o 'SIEP' "$path" 2>/dev/null | head -n 1 | cut -d: -f1)
+  if [[ -z "$idx" ]]; then echo "absent"; return 0; fi
+  local version instr_count u_c_scaled
+  version=$(dd if="$path" bs=1 skip=$((idx+4)) count=4 2>/dev/null | od -An -t u4 | tr -d ' ')
+  instr_count=$(dd if="$path" bs=1 skip=$((idx+8)) count=8 2>/dev/null | od -An -t u8 | tr -d ' ')
+  u_c_scaled=$(dd if="$path" bs=1 skip=$((idx+16)) count=8 2>/dev/null | od -An -t u8 | tr -d ' ')
+  echo "${version}:${instr_count}:${u_c_scaled}"
 }
 
 STAGE1_EP="$(read_epistemic "$STAGE1_DRIVER")"
