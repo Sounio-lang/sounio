@@ -3,7 +3,7 @@
 ## 6-Agent Lane Activation — 2026-05-10T13:35Z
 
 **Authority**: human-approved at 2026-05-10 (this commit).
-**Companion docs**: `.claude/coordination/6_lane_assignment.md` (full
+**Companion docs**: `.agent-orchestration/coordination/6_lane_assignment.md` (full
 matrix), `.claude/PARALLEL_BLOCKER_CONTRACT.md` (blocker shape).
 
 **Active lanes** (see companion doc for file-set + build target details):
@@ -59,7 +59,7 @@ Evidence-Level: E3 (gate-bound)
 ```
 
 **Per-lane init**: each agent runs the checklist in
-`.claude/coordination/6_lane_assignment.md#per-lane-initialization-checklist`
+`.agent-orchestration/coordination/6_lane_assignment.md#per-lane-initialization-checklist`
 on session start. Branch flips to verify via
 `git branch --show-current` before any edit.
 

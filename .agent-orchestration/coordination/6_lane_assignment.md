@@ -1,9 +1,9 @@
-# 6-Agent Lane Assignment (proposal — 2026-05-10)
+# 6-Agent Lane Assignment (active — 2026-05-10)
 
-Status: **proposal**, awaiting human green-light to activate.
+Status: **active**. Human green-light is PR #94 merge; lanes may initialize from this document after it lands on main.
 Author: Claude #1 (this session, dissertation-examples branch).
 Companion contract: `.claude/PARALLEL_BLOCKER_CONTRACT.md`.
-Companion live state: `.claude/AGENT_HANDOFF.md`.
+Companion live state: `artifacts/omega/agent_handoff.log.md`.
 
 ## Goal
 
@@ -58,7 +58,7 @@ is RED at 209/318 PASS. 38 commits to `kaxi_to_ptx.sio` since Phase L
   - `self-hosted/gpu/kaxi_to_ptx.sio` (the source the goldens are
     captured from)
 - **Procedure**:
-  1. CLAIM in `AGENT_HANDOFF.md`.
+  1. CLAIM in `artifacts/omega/agent_handoff.log.md`.
   2. Verify current `bin/souc` can compile current `kaxi_to_ptx.sio`
      without error: `bin/souc check self-hosted/gpu/kaxi_to_ptx.sio`.
   3. If souc rebuild needed: `bash scripts/ci/lean_single_fixed_point_gate.sh`
@@ -134,7 +134,7 @@ lane consolidates them and owns the N-v2 frontend close-out (run-pass
 - **File-set (own + edit)**:
   - `self-hosted/native-v2/**`
   - `self-hosted/compiler/native_compile_driver.sio` (**SERIALIZED**;
-    must hold AGENT_HANDOFF claim before editing)
+    must hold an `artifacts/omega/agent_handoff.log.md` CLAIM before editing)
 - **File-set (coordinated, RELEASE token required)**:
   - `bin/souc-linux-x86_64` — coordinate with Lane 1. Rule: Lane 1 holds
     the binary token until its goldens land; Lane 4 takes the token next
@@ -183,11 +183,11 @@ landed in 5.A–5.G + Phase 1–4 already.
 that pass their own builds but conflict on `main`'s umbrella gate (the
 post-merge state is the only state users actually run against).
 
-- **Branch**: `main` (no feature work; merge commits and AGENT_HANDOFF
+- **Branch**: `main` (no feature work; merge commits and handoff-log
   edits only)
 - **Worktree**: `/workspace/sounio` (canonical, kept clean)
 - **File-set (own + edit)**:
-  - `.claude/AGENT_HANDOFF.md` (live coordination state)
+  - `artifacts/omega/agent_handoff.log.md` (live coordination state)
   - merge commits to `main` only
 - **Forbidden**: feature edits, fixture edits, prose edits.
 - **Procedure (per merge)**:
@@ -197,7 +197,7 @@ post-merge state is the only state users actually run against).
   4. If green: merge the next PR in lane-number order.
   5. Re-run umbrella gate post-merge. If RED: revert merge, mark
      PR `merge-blocked` with Blocker-ID, hand back to lane owner.
-  6. Update `AGENT_HANDOFF.md` with merge timestamp + next-up lane.
+  6. Update `artifacts/omega/agent_handoff.log.md` with merge timestamp + next-up lane.
 - **Build target**: post-merge umbrella gate rc=0.
 
 ## Coordination mechanics
@@ -205,7 +205,7 @@ post-merge state is the only state users actually run against).
 ### Live state file
 
 Single source of truth for who-is-doing-what is
-`.claude/AGENT_HANDOFF.md`. Each lane owner appends:
+`artifacts/omega/agent_handoff.log.md`. Each lane owner appends:
 
 ```text
 LANE-N CLAIM 2026-MM-DDTHH:MM:SSZ <agent-id> <files...>
@@ -228,7 +228,7 @@ cross-lane staging impossible-by-construction.
 
 ### Serialized surfaces
 
-These files require AGENT_HANDOFF CLAIM before any edit, regardless of
+These files require an `artifacts/omega/agent_handoff.log.md` CLAIM before any edit, regardless of
 lane assignment:
 
 - `bin/souc-linux-x86_64` (and `.sha256`, `.sig`)
@@ -277,8 +277,8 @@ cd "$WORKTREE"
 test "$(git branch --show-current)" = "coord/lane-${LANE}-<slug>" \
   || { echo "BRANCH FLIP DETECTED — abort"; exit 1; }
 
-# 3. CLAIM in AGENT_HANDOFF.md
-# (manually append "LANE-N CLAIM <ts> <files>" line)
+# 3. CLAIM in artifacts/omega/agent_handoff.log.md
+# (manually append a lock entry before editing)
 
 # 4. Run baseline build target before any edit
 bash scripts/ci/<lane-build-target>.sh
@@ -308,19 +308,3 @@ bash scripts/ci/<lane-build-target>.sh
 ## Blocker-IDs closed by this PR
 - BLK-YYYYMMDD-...
 ```
-
-## Open questions for the human before activation
-
-1. **Lane 1 (golden-recapture)** — am I (Claude #1) the right owner, or
-   should it go to Codex? The investigation is already loaded in this
-   session, but the regen step is purely mechanical.
-2. **Existing branches** — should the existing `codex/native-v2-*`
-   branches be **renamed** to `coord/lane-4-...`, or should Lane 4
-   continue from one of them by rebase? Renaming is destructive to
-   anything that has remote PRs open against the old names.
-3. **Garden lane** — `garden/above-stars` exists (`/workspace/sounio-garden-above-stars`,
-   commit `daff10e4`). Is that a 7th lane or to be retired? Not
-   covered above.
-4. **Cursor lane** — `origin/cursor/quaternionic-ssm-88c0` is a remote
-   branch from the Cursor agent. Is Cursor a 7th agent or out of scope
-   for this 6-lane scheme?
