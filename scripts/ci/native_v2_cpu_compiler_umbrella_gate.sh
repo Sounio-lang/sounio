@@ -174,6 +174,27 @@ run_phase_j() {
   append_gate_row "$gate" "$rc" "$gate_dir" "-" "$log_path"
 }
 
+# Dissertation PBPK suite: applied evidence layer for the rapamycin model.
+# 5 run-pass tests cover Euler+RK4 ISO budgets, BBB/Pgp clinical claims,
+# variance-aware adaptive integration, and GUM-vs-MC validation. CPU-only,
+# ~30s. This is the regression shield for the dissertation's *evidence*
+# (contributions #1/#2/#3 are about the mechanism; this gate is about the
+# results those mechanisms produce on rapamycin).
+run_dissertation_pbpk_suite() {
+  local gate="dissertation_pbpk_suite"
+  local gate_dir="$OUT_DIR/$gate"
+  local log_path="$LOG_DIR/$gate.log"
+
+  mkdir -p "$gate_dir"
+  echo "[native-v2-cpu-compiler] running $gate"
+  set +e
+  DPS_STAGE_DIR="$gate_dir" \
+    bash scripts/ci/dissertation_pbpk_suite_gate.sh >"$log_path" 2>&1
+  local rc=$?
+  set -e
+  append_gate_row "$gate" "$rc" "$gate_dir" "-" "$log_path"
+}
+
 # Phase Y: real GUM variance propagation through 2-comp PBPK ODE on local GPU.
 # Self-skips when libcuda is absent -- safe to call on CPU-only boxes.
 # Kept at 10M patients (~30s) which is the gate's regression-grade default.
@@ -246,9 +267,10 @@ run_lean_single_fixed_point
 run_iso_budget
 run_phase_j
 run_phase_y
+run_dissertation_pbpk_suite
 
 if emit_summary_json; then
-  echo "[native-v2-cpu-compiler] PASS: driver self-compile, science spine, f64 ladder, GUM primitives, semantic hardening, lean_single fixed-point, iso_budget, phase_j_conf_gate, phase_y_gum_pbpk"
+  echo "[native-v2-cpu-compiler] PASS: driver self-compile, science spine, f64 ladder, GUM primitives, semantic hardening, lean_single fixed-point, iso_budget, phase_j_conf_gate, phase_y_gum_pbpk, dissertation_pbpk_suite"
   echo "[native-v2-cpu-compiler] summary=$SUMMARY_JSON"
 else
   echo "[native-v2-cpu-compiler] FAIL: see summary=$SUMMARY_JSON" >&2
