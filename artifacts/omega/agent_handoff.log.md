@@ -676,3 +676,37 @@ checks:
   - bin/souc check tests/run-pass/dossier_smoke.sio (rc=0)
   - bin/souc compile + run, stdout bytewise-matches golden
 status: lock-released
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T22:07:36Z
+files:
+  - examples/cocycle_subspace_k7.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh (NEW or extend)
+intent: Lane 3 CLAIM — extend cohomological subspace decomposition to k=7 (routons, dim 128). Per the k=4→k=5→k=6 chain (2/7/16 distinct count classes), k=7 enumerates [7 choose 3]_2 = 11811 three-dim subspaces of (Z/2)^7 and tallies per-subspace nonzero associator counts to test whether (a) T_7 remains 168-divisible, (b) the super-octonionic mult-21 signature persists, and (c) the count=168 mult=247=13·19 anomaly at k=6 generalises or refines. Will replace 64-dim chingon tables with 128-dim routon tables built via an inlined 4th Cayley-Dickson doubling; bucket array bumped to 64. Worktree /workspace/sounio-lane-3-paper168 on branch coord/lane-3-paper-168.
+checks:
+  - bin/souc check examples/cocycle_subspace_k6.sio (rc=0, pre-state baseline)
+status: lock-acquired
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T22:44:19Z
+files:
+  - examples/cocycle_subspace_k7.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh (NEW)
+intent: Lane 3 RELEASE — k=7 routon subspace decomposition delivered. T_7 = 1,046,808 = 168·6231 confirmed (Conjecture 5 formula T_k = 168·(P_k − 4·P_{k−1}) now holds at k=4,5,6,7); 11811 = P_7 subspaces enumerated; **23 distinct count classes** found (vs 16 at k=6, 7 at k=5, 2 at k=4). Super-octonionic family expands from 3 classes at k=6 to 6 at k=7 (counts 180/184/186/188/190/194, all with 7-divisible multiplicities). Principal anomaly at count=168 persists with level-specific signature: mult=1535=5·307 at k=7 (vs 247=13·19 at k=6) — both two-prime products, neither 7. Class-count chain {1,2,7,16,23} at k∈{3..7} decelerates from k=5→6 to k=6→7, hinting at saturation. New gate `paper168_cocycle_subspace_gate.sh` covers k=4..7 (k=4 relaxed to T_4=1848 since cocycle_subspace_168.sio predates cohomological reformulation). VLIST inner-loop optimization keeps wall clock at 0.6s. Build target green. Umbrella green (12/12).
+checks:
+  - bin/souc check examples/cocycle_subspace_k7.sio (rc=0)
+  - bin/souc compile + run /tmp/k7_bin (ALL PASS in 0.6s; T_7=1046808; P_7=11811; 23 classes; no bucket overflow)
+  - bash scripts/ci/paper168_cocycle_subspace_gate.sh (PASS=4 FAIL=0 rc=0 in 1.9s)
+  - bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (rc=0; 12/12 sub-gates PASS in 8m15s)
+commit: pending
+status: lock-released
