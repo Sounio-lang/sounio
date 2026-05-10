@@ -3,8 +3,9 @@
 ## 6-Agent Lane Activation — 2026-05-10T13:35Z
 
 **Authority**: human-approved at 2026-05-10 (this commit).
-**Companion docs**: `.agent-orchestration/coordination/6_lane_assignment.md` (full
-matrix), `.claude/PARALLEL_BLOCKER_CONTRACT.md` (blocker shape).
+**Companion docs**: `.agent-orchestration/coordination/6_lane_assignment.md`
+(full matrix), `.claude/PARALLEL_BLOCKER_CONTRACT.md` (blocker shape).
+**Canonical live log**: `artifacts/omega/agent_handoff.log.md`.
 
 **Active lanes** (see companion doc for file-set + build target details):
 
@@ -29,22 +30,27 @@ Lanes 2/3/5 are file-disjoint and may land in any order.
 **Live CLAIMs / RELEASEs** (most recent first):
 
 ```text
+LANE-1 RELEASE 2026-05-10T13:48Z claude-1 tests/golden/kaxi_ptx/**
+  blocker: BLK-20260510-lane1-golden-drift closed by PR #95
+  evidence: kaxi_ptx_golden_gate.sh = 318 PASS / 0 FAIL / 0 MISSING
+  binary-token: bin/souc-linux-x86_64 NOT consumed; Lane 4 may claim next if needed
+
 LANE-1 CLAIM 2026-05-10T13:35Z claude-1 tests/golden/kaxi_ptx/** bin/souc-linux-x86_64{,.sha256,.sig}
   blocker: BLK-20260510-lane1-golden-drift  severity:B1  class:gate-regression
   evidence: kaxi_ptx_golden_gate.sh = 209/52 FAIL/57 MISSING vs 318 nominal
   next-command: bash scripts/ci/kaxi_ptx_capture.sh && bash scripts/ci/kaxi_ptx_golden_gate.sh
 ```
 
-**Open Blocker (lane 1, currently being worked)**:
+**Closed Blocker (lane 1)**:
 
 ```text
 Blocker-ID: BLK-20260510-lane1-golden-drift
-Status: owned
+Status: closed by PR #95
 Severity: B1
 Class: gate-regression
 Owner: Claude #1
 Lane: 1 (golden-recapture)
-Worktree: /workspace/sounio-lane-1-goldens (will be created)
+Worktree: /workspace/sounio-lane-1-goldens
 Branch: coord/lane-1-golden-recapture
 Evidence: tests/golden/kaxi_ptx/default/exit_only.ptx golden last touched
   3f3af0cd (Phase L, 2026-05-08) declares `.reg .b32 %r<8>`, but current
@@ -53,8 +59,9 @@ Evidence: tests/golden/kaxi_ptx/default/exit_only.ptx golden last touched
   kaxi_to_ptx.sio between Phase L and HEAD did not regenerate goldens.
 Reproduction: bash scripts/ci/kaxi_ptx_golden_gate.sh in any worktree
   off origin/main HEAD (8a1a6fa2). Result: PASS=209 FAIL=52 MISSING=57.
-Next-Command: bash scripts/ci/kaxi_ptx_capture.sh && bash scripts/ci/kaxi_ptx_golden_gate.sh
-Acceptance: kaxi_ptx_golden_gate.sh rc=0, output line "FAIL: 0", "MISSING: 0"
+Resolution: PR #95 regenerated tests/golden/kaxi_ptx/**. Post-merge
+  kaxi_ptx_golden_gate.sh reports PASS=318, FAIL=0, MISSING=0.
+Acceptance: satisfied.
 Evidence-Level: E3 (gate-bound)
 ```
 
