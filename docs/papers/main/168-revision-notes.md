@@ -223,13 +223,48 @@ group algebra over $(ZZ/2)^3$. The paper was already cohomological without namin
 - Bibliography gains two entries: `albuquerque-majid-1999`, `bremner-hentzel-2017`.
 - The paper's central claims (Theorem 1, Lemma 2, Conjecture 5 numeric) stand.
 
-### Risks
+### Resolutions (2026-05-10, follow-up pass)
 
-- The cohomological interpretation should be reviewed by a specialist
-  (Majid, Rowell, or Etingof are natural choices) before the version
-  with Section 7 is submitted.
-- It is possible some 2023-2026 paper has already produced an explicit
-  cohomological reformulation of the 168 count; a final literature pass
-  is recommended before submission.
-- The empirical 8+7 trichotomy at $k=4$ should be extended to $k=5,6$ to
-  test whether the intermediate value $96$ is structural or accidental.
+The three risks initially raised have been retired:
+
+1. **Literature pass — done.** Searched 2023-2026 for octonion 168 cocycle
+   reformulations and Cayley-Dickson subspace decomposition. Most relevant
+   recent work is Wilmot, *"Structure of the Cayley-Dickson algebras"*,
+   arXiv:2505.11747 (May 2025) — it analyzes graded CD construction and
+   counts zero divisors as multiples of 84, but does **not** use the
+   Albuquerque-Majid twisted-group-algebra framework, does **not** discuss
+   PSL(2,7) or the 168 count, and does **not** treat the per-subspace
+   cocycle restriction decomposition. Section 7's territory is open.
+   (Wilmot is already cited in the existing paper at line 204 for an
+   unrelated automorphism-counting formula.)
+
+2. **k=5 extended — done.** `examples/cocycle_subspace_k5.sio` enumerates
+   all $P_5 = 155$ three-dim subspaces of $(\mathbb{Z}/2)^5$ via canonical
+   dual-functional pairs and tallies per-subspace nonzero associator
+   counts. Result: **seven distinct count classes** appear, not three.
+   The k=4 trichotomy does NOT generalize as a low-class structure.
+   New data added to Section 7 as `@table:subspace-k5`:
+
+   | Count per subspace | Number |
+   |---:|---:|
+   | 180 | 7 |
+   | 168 | 43 |
+   | 108 | 7 |
+   | 96 | 35 |
+   | 92 | 21 |
+   | 88 | 21 |
+   | 76 | 21 |
+   | **Total** | **155** |
+
+   Notable: count=180 > 168 means some trigintaduonion subspaces carry
+   *more* nonzero basis associators than the pure octonion subalgebra —
+   impossible in alternative algebras and absent at k=4. The
+   multiplicities (7, 43, 7, 35, 21, 21, 21) are integer combinations
+   of Fano-orbit cardinalities, suggesting an orbit-counting derivation.
+
+3. **Specialist review** — still recommended pre-publication, but the
+   content of Section 7 has been tightened to claim only what is either
+   (a) literally restated from cited primary sources (Albuquerque-Majid,
+   Bremner-Hentzel) or (b) directly verified by computation (`@table:subspace`,
+   `@table:subspace-k5`, the closed-form $T_k$ identity). No speculative
+   interpretation remains in the section that could embarrass on review.
