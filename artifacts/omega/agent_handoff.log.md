@@ -477,6 +477,18 @@ files:
   - scripts/ci/native_v2_imported_core_abi_gate.sh
   - scripts/ci/native_v2_imported_hof_abi_gate.sh
 intent: Lane 7 follow-up — kill 3 same-shape python heredocs across native_v2_*_gate.sh. hof_closure is a validator (replace with kretikos kaxi-validate-evidence --expect); imported_core_abi + imported_hof_abi are json.dump emitters (replace with kretikos json-emit + bash date -u + sha256sum). Byte-identity verified modulo generated_at_utc timestamp.
+agent: claude-b
+lane: 8a
+time_utc: 2026-05-10T16:40:00Z
+files:
+  - stdlib/darwin_pbpk/epistemic_pbpk14_hessian.sio (NEW)
+  - tests/run-pass/dissertation_pbpk14_hessian.sio (NEW)
+  - tests/stdlib/darwin_pbpk/hessian_correction_test.sio (NEW)
+  - benchmarks/pbpk/hessian_budget.csv (NEW)
+  - scripts/ci/dissertation_pbpk_hessian_gate.sh (NEW)
+intent: Lane 8a CLAIM — second-order Hessian GUM through PBPK14. Dissertation contribution #1 extension. Disjoint from Lanes 1, 2, 4, 5, 7. Brief in worktree TASK.md. Owner offload Kimi 2.5; reviewer Claude B. Companion sibling lanes 8b (multi-drug aggregation) and 8c (regulatory dossier generator) also stood up at the same time with disjoint file sets — see /workspace/sounio-lane-8b-multi-drug/TASK.md and /workspace/sounio-lane-8c-dossier/TASK.md.
+worktree: /workspace/sounio-lane-8a-hessian
+branch: coord/lane-8a-hessian (off origin/main 91d48adb)
 status: lock-acquired
 
 ---
@@ -588,4 +600,20 @@ checks:
     - non-deterministic: error with stage1=/stage2= + rc=1 (matches python)
   - kaxi-validate-evidence --print and --print-or-empty smoke-tested with bool, int, string field reads
 commit: pending
+agent: claude-b
+lane: 8a
+time_utc: 2026-05-10T17:35:00Z
+files:
+  - stdlib/darwin_pbpk/epistemic_pbpk14_hessian.sio
+  - tests/stdlib/darwin_pbpk/hessian_correction_test.sio
+  - tests/run-pass/dissertation_pbpk14_hessian.sio
+  - benchmarks/pbpk/hessian_budget.csv
+  - scripts/ci/dissertation_pbpk_hessian_gate.sh
+  - TASK.md
+intent: Lane 8a RELEASE — second-order Hessian GUM through PBPK14. Dissertation contribution #1 extension. Mixed-partial 4-point central FD with diagonal 3-point stencil. Acceptance proven on (a) controlled polynomial in unit test (analytic exactness) and (b) synthetic non-linear y=ax² endpoint where the 2nd-order term takes |GUM-truth| from 1.6e-3 to 2e-13. Rapamycin AUC Hessian budget (CL_hep × fu_plasma sub-case) emitted as CSV at benchmarks/pbpk/hessian_budget.csv (committed golden). Disjoint from Lane 2's stdlib/darwin_pbpk/validation/** + release/** + tests/run-pass/rapamycin_*.sio claim — uses tests/run-pass/dissertation_pbpk14_* prefix.
+checks:
+  - bash scripts/ci/dissertation_pbpk_hessian_gate.sh (PASS=5 FAIL=0 rc=0)
+  - bin/souc check: stdlib hessian module (transitive via e2e), unit test, e2e — all rc=0
+  - unit test: PASS unit_quadratic_recovery (Hessian elements bit-exact for polynomial deg 2)
+  - e2e: PASS hessian_correction_reduces_residual (synthetic y=ax² truth match to ~1e-13)
 status: lock-released
