@@ -178,6 +178,13 @@ let V2_BUILTIN_READ_I64: i64 = 24
 let V2_BUILTIN_WRITE_I64: i64 = 25
 let V2_BUILTIN_HEAP_REALLOC: i64 = 26
 let V2_BUILTIN_INDIRECT_CALL: i64 = 27
+// gpu_thread_id_x() / gpu_block_dim_x() / gpu_barrier() / etc. are GPU thread
+// intrinsics that lean_single emits as x86 stub instructions. On the N-v2 CPU
+// path, kernel fn bodies are compiled but never executed (runtime skips when
+// no GPU). Treat all 12 GPU intrinsics as a single zero-arg builtin that
+// parse-time expands to load_imm 0 — the kernel body becomes dead-but-valid
+// code, and the runtime never runs it on CPU-only hosts.
+let V2_BUILTIN_GPU_INTRINSIC: i64 = 28
 let V2_FIRST_USER_FN_ID: i64 = 32
 
 // V2_UFN_* — user fn instruction recording (scalar, bypasses broken IrInstr struct writes)
@@ -1097,6 +1104,7 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "V2_BUILTIN_WRITE_I64") { return 25 }
     if token_text_eq(tok, "V2_BUILTIN_HEAP_REALLOC") { return 26 }
     if token_text_eq(tok, "V2_BUILTIN_INDIRECT_CALL") { return 27 }
+    if token_text_eq(tok, "V2_BUILTIN_GPU_INTRINSIC") { return 28 }
     if token_text_eq(tok, "V2_FIRST_USER_FN_ID") { return 32 }
 
     if token_text_eq(tok, "UFN_LOAD_IMM") { return 1 }
@@ -2317,6 +2325,18 @@ fn builtin_fn_id(name: Name) -> i64 with Mut, Panic, Div {
     if name_eq_text(name, "read_i64") { return V2_BUILTIN_READ_I64 }
     if name_eq_text(name, "write_i64") { return V2_BUILTIN_WRITE_I64 }
     if name_eq_text(name, "heap_realloc") { return V2_BUILTIN_HEAP_REALLOC }
+    if name_eq_text(name, "gpu_thread_id_x") { return V2_BUILTIN_GPU_INTRINSIC }
+    if name_eq_text(name, "gpu_thread_id_y") { return V2_BUILTIN_GPU_INTRINSIC }
+    if name_eq_text(name, "gpu_thread_id_z") { return V2_BUILTIN_GPU_INTRINSIC }
+    if name_eq_text(name, "gpu_block_id_x") { return V2_BUILTIN_GPU_INTRINSIC }
+    if name_eq_text(name, "gpu_block_id_y") { return V2_BUILTIN_GPU_INTRINSIC }
+    if name_eq_text(name, "gpu_block_id_z") { return V2_BUILTIN_GPU_INTRINSIC }
+    if name_eq_text(name, "gpu_block_dim_x") { return V2_BUILTIN_GPU_INTRINSIC }
+    if name_eq_text(name, "gpu_block_dim_y") { return V2_BUILTIN_GPU_INTRINSIC }
+    if name_eq_text(name, "gpu_block_dim_z") { return V2_BUILTIN_GPU_INTRINSIC }
+    if name_eq_text(name, "gpu_barrier") { return V2_BUILTIN_GPU_INTRINSIC }
+    if name_eq_text(name, "gpu_barrier_sync") { return V2_BUILTIN_GPU_INTRINSIC }
+    if name_eq_text(name, "gpu_sync_threads") { return V2_BUILTIN_GPU_INTRINSIC }
     -1
 }
 
@@ -2349,6 +2369,18 @@ fn builtin_fn_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "read_i64") { return V2_BUILTIN_READ_I64 }
     if token_text_eq(tok, "write_i64") { return V2_BUILTIN_WRITE_I64 }
     if token_text_eq(tok, "heap_realloc") { return V2_BUILTIN_HEAP_REALLOC }
+    if token_text_eq(tok, "gpu_thread_id_x") { return V2_BUILTIN_GPU_INTRINSIC }
+    if token_text_eq(tok, "gpu_thread_id_y") { return V2_BUILTIN_GPU_INTRINSIC }
+    if token_text_eq(tok, "gpu_thread_id_z") { return V2_BUILTIN_GPU_INTRINSIC }
+    if token_text_eq(tok, "gpu_block_id_x") { return V2_BUILTIN_GPU_INTRINSIC }
+    if token_text_eq(tok, "gpu_block_id_y") { return V2_BUILTIN_GPU_INTRINSIC }
+    if token_text_eq(tok, "gpu_block_id_z") { return V2_BUILTIN_GPU_INTRINSIC }
+    if token_text_eq(tok, "gpu_block_dim_x") { return V2_BUILTIN_GPU_INTRINSIC }
+    if token_text_eq(tok, "gpu_block_dim_y") { return V2_BUILTIN_GPU_INTRINSIC }
+    if token_text_eq(tok, "gpu_block_dim_z") { return V2_BUILTIN_GPU_INTRINSIC }
+    if token_text_eq(tok, "gpu_barrier") { return V2_BUILTIN_GPU_INTRINSIC }
+    if token_text_eq(tok, "gpu_barrier_sync") { return V2_BUILTIN_GPU_INTRINSIC }
+    if token_text_eq(tok, "gpu_sync_threads") { return V2_BUILTIN_GPU_INTRINSIC }
     -1
 }
 
@@ -2972,6 +3004,13 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         }
     }
     if token_kind(pos + 1) != TK_LPAREN { return ExprParse { ok: 0, reg: -1, next: pos} }
+    // GPU thread/block intrinsics: zero-arg, parse-time expand to load_imm 0.
+    // Kernel fn body becomes dead-but-valid CPU code; runtime skips on no-GPU hosts.
+    if is_indirect_call == 0 && fn_id == V2_BUILTIN_GPU_INTRINSIC && token_kind(pos + 2) == TK_RPAREN {
+        let stub_reg = alloc_reg(ctx)
+        ufn_record_load_imm(stub_reg, 0)
+        return ExprParse { ok: 1, reg: stub_reg, next: pos + 3}
+    }
     if is_indirect_call == 0 && fn_id == V2_BUILTIN_EMPTY_NAME && token_kind(pos + 2) == TK_RPAREN {
         let sidx = find_name_struct_idx()
         if sidx >= 0 {
