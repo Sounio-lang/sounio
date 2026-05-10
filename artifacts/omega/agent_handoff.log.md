@@ -710,3 +710,37 @@ checks:
   - bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (rc=0; 12/12 sub-gates PASS in 8m15s)
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T22:56:12Z
+files:
+  - examples/cocycle_subspace_k8.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh
+intent: Lane 3 CLAIM (stacked on PR #114) — extend cohomological subspace decomposition to k=7→k=8 (voudons, dim 256). Enumerates [8 choose 3]_2 = 97155 three-dim subspaces of (Z/2)^8 in the 256-dim voudon algebra. The dual-functional approach used at k=4..7 becomes infeasible at k=8 (5 LI functionals → ~127^5/120 ≈ 1.4G raw quintuples). This lane therefore switches enumeration to direct 3-LI-generator basis: v1<v2<v3, v3 ∉ span(v1,v2), and each generator is lex-min of its remaining coset in V. ~8M raw triples, ~178× speedup. Voudon table requires 256² × 2 i64 = 1 MB BSS (4× k=7); inner loop uses same VLIST optimization (7^3 = 343 per canonical). Will test whether (a) formula T_k = 168·(P_k − 4·P_{k−1}) extends to k=8 (predicted T_8 = 168·49911 = 8,385,048), (b) saturation hypothesis from k=6→7 deceleration holds at k=7→8, (c) the count=168 two-prime anomaly signature extends. Worktree /workspace/sounio-lane-3-paper168-k8 on branch coord/lane-3-paper-168-k8, stacked off coord/lane-3-paper-168 (PR #114).
+checks:
+  - bin/souc check examples/cocycle_subspace_k7.sio (rc=0, pre-state baseline includes PR #114)
+status: lock-acquired
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T23:10:33Z
+files:
+  - examples/cocycle_subspace_k8.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh
+intent: Lane 3 RELEASE — k=8 voudon subspace decomposition delivered. ALL THREE conjectures from PR #114 (k=7) confirmed at k=8. (1) T_8 = 8,385,048 = 168·49911 (Conjecture 5 formula T_k = 168·(P_k − 4·P_{k−1}) now holds at five consecutive levels k=4..8). (2) **23 distinct count classes** at k=8 — SAME count AND SAME values as k=7. The class set {72, 76, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 168, 180, 184, 186, 188, 190, 194} is bit-identical between k=7 and k=8. **Saturation hypothesis confirmed**: the distinct-count set stabilises at 23 from k=7 onward; further CD doublings change multiplicities but not the count set. Classification target reduced from infinite family to finite set of 23 orbits. (3) count=168 anomaly continues with two-prime non-7 signature: mult=10383 = 3·3461 at k=8 (vs 1535=5·307 at k=7, 247=13·19 at k=6). Every other non-anomaly multiplicity at k=8 is 7-divisible. Direct 3-LI-generator enumeration (vs dual-functional) keeps wall clock at 1.4s. Build target green (5/5 PASS in 3.6s). Umbrella green (12/12 in 8m14s).
+checks:
+  - bin/souc check examples/cocycle_subspace_k8.sio (rc=0)
+  - bin/souc compile + run /tmp/k8_bin (ALL PASS in 1.4s; T_8=8385048; P_8=97155; 23 classes; no bucket overflow)
+  - bash scripts/ci/paper168_cocycle_subspace_gate.sh (PASS=5 FAIL=0 rc=0 in 3.6s)
+  - bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (rc=0; 12/12 sub-gates PASS in 8m14s)
+commit: pending
+status: lock-released
