@@ -138,23 +138,37 @@ in $OUT_DIR/nv2_driver.stage1 as a side effect).
 | 2026-04-30 baseline | 392 | 50 (12.7%) | 324 | — |
 | 2026-05-03 delta    | 392 | 76 (19.4%) | 291 | — |
 | 2026-05-09          | 407 | 129 (31.7%) | 230 | 157 |
-| **2026-05-10**      | **407** | **129 (31.7%)** | **230** | **156** |
+| 2026-05-10 (S-A)    | 407 | 129 (31.7%) | 230 | 156 |
+| **2026-05-10b**     | **407** | **145 (35.6%)** | **194** | **0** |
 
-## 2026-05-10 update — S-A landed
+## 2026-05-10b update — S-B/S-C/S-D ALL CLOSED
+
+After the V2_UFN buffers were doubled (`213c5c27`, parallel agent),
+S-B/S-C/S-D landed cleanly:
+
+- **S-B/S-C** (`d025215d`): `parse_atom_ir` extends the bare-fn-ref
+  guard to exclude TK_COLONCOLON and adds a small refusal block
+  setting reason=2 (`pathsep_in_expr`).
+- **S-D** (`34075a4e`): param-type scanner detects `IDENT : {` (where
+  `find_fn_lbrace` returned the refinement's brace as the
+  incorrectly-detected fn body) and refuses with reason=3
+  (`refinement_type`).
+
+Result: **0 silent segfaults remain** in tests/run-pass. All 156 silent
+crashes converted to clean `unsupported_frontend` diagnostics. As a
+side-effect of dropping invalid-but-now-cleanly-refused functions, 16
+tests graduated to ok (129→145, 31.7%→35.6%) and 20 newly compile-but-diverge
+(44→64 nv2_run). The remaining 194 nv2_compile failures are the actual
+M1.2 punch-list — all clean diagnostics with identifiable kind/text/reason.
+
+## 2026-05-10 update — S-A landed (superseded)
+
+(see 2026-05-10b row above; previous status retained for history)
 
 S-A defensive backstop landed (commit `dfe0894a`): `parse_stmt_ir` refuses
 type-inferred `let X = [...]` cleanly via `refuse_let_array_lit/2` helper.
 Inline guard tipped `parse_stmt_ir` over the V2_UFN_OPS[2048] budget; the
 helper-extraction approach kept self-compile fixed-point intact.
-
-S-B/S-C (`::` in expression position) and S-D (`{` refinement type) deferred:
-both required edits to `parse_atom_ir`, which is at the same IR-op limit. Naïve
-inline guards and the same helper-extraction trick both broke driver
-self-compile. These need a different approach (peek-ahead in dispatch table
-vs. early-return helper), out of scope for this session.
-
-Of the 8 smallest remaining segfaults: 1 turbofish, 1 Box::new, 5 refinement
-type, 1 import-resolution. S-B/S-C/S-D still cover the bulk.
 
 Regressions vs 2026-05-03 (only 2):
   - `tests/run-pass/import_basic.sio` — clean `unresolved_call text=imported_add`
