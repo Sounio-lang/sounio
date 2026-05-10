@@ -331,6 +331,36 @@ status: lock-released
 ---
 
 agent: claude
+time_utc: 2026-05-10T13:35:00Z
+files:
+  - .agent-orchestration/HANDOFF.md
+  - .agent-orchestration/coordination/6_lane_assignment.md
+intent: Activate 6-agent lane assignment overlay. Lane 1 (golden-recapture, owner=Claude #1, branch=coord/lane-1-golden-recapture, worktree=/workspace/sounio-lane-1-goldens) opens with Blocker BLK-20260510-lane1-golden-drift (B1 gate-regression). Lanes 2-6 await their owners' init. See coordination doc for full matrix, file-sets, and merge order.
+checks:
+  - bash scripts/ci/check_parallel_blocker_contract.sh (not run: this commit is org-coordination doc only, no contract literal change)
+commit: pending
+status: lock-released
+
+---
+
+agent: claude
+time_utc: 2026-05-10T13:36:00Z
+files:
+  - tests/golden/kaxi_ptx/**
+  - bin/souc-linux-x86_64
+  - bin/souc-linux-x86_64.sha256
+  - bin/souc-linux-x86_64.sig
+intent: Lane 1 — regenerate kaxi_ptx goldens against post-Phase-Y emitter source. Blocker BLK-20260510-lane1-golden-drift (B1, gate-regression). Verified 209 PASS / 52 FAIL / 57 MISSING vs 318 nominal; root cause = 38 commits to self-hosted/gpu/kaxi_to_ptx.sio after Phase L (3f3af0cd) without golden regen. Worktree to be created at /workspace/sounio-lane-1-goldens off origin/main.
+checks:
+  - bash scripts/ci/kaxi_ptx_capture.sh (pending)
+  - bash scripts/ci/kaxi_ptx_golden_gate.sh (pending; acceptance: rc=0, FAIL=0, MISSING=0)
+  - bash scripts/ci/lean_single_fixed_point_gate.sh (pending; gate self-host fixed point still green)
+commit: pending
+status: lock-open
+
+---
+
+agent: claude
 time_utc: 2026-05-10T13:48:00Z
 files:
   - tests/golden/kaxi_ptx/**
