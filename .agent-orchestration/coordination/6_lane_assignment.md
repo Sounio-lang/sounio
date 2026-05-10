@@ -1,9 +1,11 @@
 # 6-Agent Lane Assignment (active — 2026-05-10)
 
-Status: **active**. Human green-light is PR #94 merge; lanes may initialize from this document after it lands on main.
+Status: **active**. PR #94 activated the overlay; PR #95 closed the Lane 1
+golden-recapture blocker.
 Author: Claude #1 (this session, dissertation-examples branch).
 Companion contract: `.claude/PARALLEL_BLOCKER_CONTRACT.md`.
 Companion live state: `artifacts/omega/agent_handoff.log.md`.
+Claude-private mirror: `.claude/AGENT_HANDOFF.md`.
 
 ## Goal
 
@@ -43,10 +45,14 @@ multiple are green at once: lower number lands first.
 
 ### Lane 1 — `golden-recapture` (Claude #1, this session)
 
-**Why first**: A live `gate-regression` (B1) — `kaxi_ptx_golden_gate.sh`
-is RED at 209/318 PASS. 38 commits to `kaxi_to_ptx.sio` since Phase L
-(`3f3af0cd`) drifted from goldens. Until this lands, every other lane's
-"is the umbrella gate green?" question is muddied.
+**Status**: complete. PR #95 closed
+`BLK-20260510-lane1-golden-drift` after regenerating K-AXI PTX goldens:
+`kaxi_ptx_golden_gate.sh` reports 318 PASS, 0 FAIL, 0 MISSING.
+
+**Why first**: This lane opened with a `gate-regression` (B1). At
+activation, `kaxi_ptx_golden_gate.sh` was RED at 209/318 PASS because
+38 commits to `kaxi_to_ptx.sio` since Phase L (`3f3af0cd`) had drifted
+from goldens.
 
 - **Branch**: `coord/lane-1-golden-recapture`
 - **Worktree**: `/workspace/sounio-lane-1-goldens`
@@ -75,8 +81,7 @@ is RED at 209/318 PASS. 38 commits to `kaxi_to_ptx.sio` since Phase L
 - **Build target**: `bash scripts/ci/kaxi_ptx_golden_gate.sh` returns
   rc=0, output line `PASS:    318` (or current N), `FAIL:    0`,
   `MISSING: 0`.
-- **Merge prerequisites**: Build target green + Claude A umbrella green
-  on the lane branch.
+- **Merge status**: merged via PR #95.
 
 ### Lane 2 — `dissertation-evidence` (Codex #1)
 
@@ -183,11 +188,12 @@ landed in 5.A–5.G + Phase 1–4 already.
 that pass their own builds but conflict on `main`'s umbrella gate (the
 post-merge state is the only state users actually run against).
 
-- **Branch**: `main` (no feature work; merge commits and handoff-log
+- **Branch**: `main` (no feature work; merge commits and coordination-log
   edits only)
 - **Worktree**: `/workspace/sounio` (canonical, kept clean)
 - **File-set (own + edit)**:
   - `artifacts/omega/agent_handoff.log.md` (live coordination state)
+  - `.claude/AGENT_HANDOFF.md` (Claude-private mirror)
   - merge commits to `main` only
 - **Forbidden**: feature edits, fixture edits, prose edits.
 - **Procedure (per merge)**:
@@ -197,7 +203,8 @@ post-merge state is the only state users actually run against).
   4. If green: merge the next PR in lane-number order.
   5. Re-run umbrella gate post-merge. If RED: revert merge, mark
      PR `merge-blocked` with Blocker-ID, hand back to lane owner.
-  6. Update `artifacts/omega/agent_handoff.log.md` with merge timestamp + next-up lane.
+  6. Update `artifacts/omega/agent_handoff.log.md` with merge timestamp
+     + next-up lane.
 - **Build target**: post-merge umbrella gate rc=0.
 
 ## Coordination mechanics
@@ -228,8 +235,8 @@ cross-lane staging impossible-by-construction.
 
 ### Serialized surfaces
 
-These files require an `artifacts/omega/agent_handoff.log.md` CLAIM before any edit, regardless of
-lane assignment:
+These files require a CLAIM in `artifacts/omega/agent_handoff.log.md`
+before any edit, regardless of lane assignment:
 
 - `bin/souc-linux-x86_64` (and `.sha256`, `.sig`)
 - `self-hosted/compiler/lean_single.sio`
@@ -308,3 +315,15 @@ bash scripts/ci/<lane-build-target>.sh
 ## Blocker-IDs closed by this PR
 - BLK-YYYYMMDD-...
 ```
+
+## Activation Decisions
+
+1. **Lane 1 (golden-recapture)** — owned by Claude #1 and completed in
+   PR #95.
+2. **Lane 4 branch strategy** — use `coord/lane-4-nv2-hardening` as the
+   coordination branch; any older `codex/native-v2-*` branches remain
+   historical evidence unless explicitly revived.
+3. **Garden lane** — `garden/above-stars` remains out of scope for this
+   6-lane overlay.
+4. **Cursor lane** — `origin/cursor/quaternionic-ssm-88c0` remains out of
+   scope for this 6-lane overlay.
