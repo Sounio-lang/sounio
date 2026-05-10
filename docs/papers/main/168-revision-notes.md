@@ -268,3 +268,59 @@ The three risks initially raised have been retired:
    Bremner-Hentzel) or (b) directly verified by computation (`@table:subspace`,
    `@table:subspace-k5`, the closed-form $T_k$ identity). No speculative
    interpretation remains in the section that could embarrass on review.
+
+---
+
+## Revision 3.1 — Lane 3 follow-up: k=6 chingon distribution (2026-05-10)
+
+Lane 3 of the 6-agent overlay added the third data point requested by
+Revised Open Question 1 of Section 7: per-subspace nonzero associator
+counts in the 64-dimensional chingon algebra.
+
+### What's new
+
+- `examples/cocycle_subspace_k6.sio` (NEW). Builds the 64×64 chingon basis
+  multiplication table via three CD doublings (𝕆→𝕊→𝕋→𝕮). Enumerates the
+  1395 = P_6 three-dimensional subspaces of (ℤ/2)⁶ by canonical lex-minimal
+  LI triples of dual functionals (V is codim-3 at k=6, so canonical
+  enumeration requires triples not pairs). 2/2 PASS, T_6 = 130200 confirmed.
+- `@table:subspace-k6` added to Section 7. The third data point in the
+  Conjecture 5 cocycle classification.
+
+### Empirical findings
+
+**16 distinct count classes** at k=6 (vs 7 at k=5, 2 at k=4, 1 at k=3):
+
+| Count | Mult. | Count | Mult. |
+|---:|---:|---:|---:|
+| 188 | 21 | 96 | 112 |
+| 184 | 21 | 94 | 84 |
+| 180 | 21 | 92 | 84 |
+| 168 | 247 | 90 | 63 |
+| 108 | 84 | 88 | 273 |
+| 104 | 21 | 84 | 21 |
+| 100 | 21 | 76 | 252 |
+| 98 | 21 | 72 | 49 |
+
+Notable observations:
+- Class count grows superlinearly: **1 → 2 → 7 → 16** across k=3→6.
+- Three super-octonionic classes (counts 180, 184, 188) at k=6, each with
+  multiplicity 21. At k=5 there was only one super-octonionic class
+  (count=180, mult=7). Super-octonionic structure proliferates with k.
+- Most multiplicities at k=6 are divisible by 7 or 21 (consistent with
+  PSL(2,7)-orbit derivation), with one anomaly: **count=168 at multiplicity
+  247 = 13·19**, NOT divisible by 7. This is the principal anomaly the
+  classification must explain.
+- Sum across classes: 149016 = T_6 + 18816, with overcount 18816 = 112·168.
+  Pattern across k: overcount/168 = 1, 12, 112 at k=4, 5, 6 (factor ~10× per step).
+- Counts span 72 to 188 (vs 76-180 at k=5, 96-168 at k=4); spread widens
+  with k, consistent with richer cocycle obstruction structure.
+
+### Status
+
+- T_3, T_4, T_5, T_6 all numerically confirmed against Conjecture 5 closed
+  form 168·(2^{k−1}−1)(2^{k−2}−1)(2^{k−1}+3)/21.
+- Revised Open Question 1 now has three empirical inputs (k=4, 5, 6) for
+  cocycle restriction class enumeration.
+- Lane 3 build target green: cocycle_subspace_168.sio rc=0,
+  cocycle_subspace_k5.sio PASS, cocycle_subspace_k6.sio PASS.
