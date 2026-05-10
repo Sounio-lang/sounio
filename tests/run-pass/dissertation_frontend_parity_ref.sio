@@ -1,0 +1,210 @@
+//@ run-pass
+//@ timeout: 60
+// ============================================================================
+// DISSERTATION FRONTEND PARITY REFERENCE
+//
+// Companion to website/src/lib/pbpk14_core.mjs and the parity gate at
+// scripts/ci/dissertation_frontend_parity_gate.sh. Emits per-organ
+// concentrations at 12 log-spaced sample times for a fixed IV-bolus
+// initial condition. The Node-side runner consumes the same constants and
+// must agree within 1% RMSE per compartment.
+//
+// Compartment indexing (matches website/src/components/dissertation/
+// compartments.ts — *not* the same as dissertation_pbpk14_gum.sio):
+//   0 blood    1 liver    2 kidney   3 brain     4 heart
+//   5 lung     6 muscle   7 adipose  8 gut       9 skin
+//  10 bone    11 spleen  12 pancreas 13 other
+//
+// Model: flow-limited, well-stirred
+//   V_i dC_i/dt = Q_i (C_blood - C_i / Kp_i)              for i >= 1
+//   V_0 dC_0/dt = sum_i Q_i (C_i/Kp_i - C_blood) - CL_hep C_blood
+//
+// Integrator: RK4 dt=0.01 h (fixed step).
+// Initial condition: bolus 0.05 mg into blood (C_blood(0) = 0.01 mg/L).
+// CL_hep = 12.4 L/h. No stent source (stent_active=false).
+// ============================================================================
+
+struct PbpkState { v: [f64; 14] }
+
+fn pbpk_zero() -> PbpkState { PbpkState { v: [0.0; 14] } }
+
+// V_ref, L, ICRP standard man 70 kg.
+fn vref_at(i: i64) -> f64 {
+    if i ==  0 { return 5.0 }
+    if i ==  1 { return 1.8 }
+    if i ==  2 { return 0.31 }
+    if i ==  3 { return 1.45 }
+    if i ==  4 { return 0.33 }
+    if i ==  5 { return 1.1 }
+    if i ==  6 { return 28.0 }
+    if i ==  7 { return 20.0 }
+    if i ==  8 { return 1.2 }
+    if i ==  9 { return 3.6 }
+    if i == 10 { return 6.6 }
+    if i == 11 { return 0.18 }
+    if i == 12 { return 0.09 }
+    return 3.7
+}
+
+// Kp (rapamycin partition coefficients).
+fn kp_at(i: i64) -> f64 {
+    if i ==  0 { return 1.00 }
+    if i ==  1 { return 5.40 }
+    if i ==  2 { return 4.20 }
+    if i ==  3 { return 0.10 }
+    if i ==  4 { return 2.30 }
+    if i ==  5 { return 3.10 }
+    if i ==  6 { return 0.50 }
+    if i ==  7 { return 0.30 }
+    if i ==  8 { return 2.60 }
+    if i ==  9 { return 0.80 }
+    if i == 10 { return 0.20 }
+    if i == 11 { return 2.10 }
+    if i == 12 { return 1.80 }
+    return 0.40
+}
+
+// Q (organ blood flow, L/h, 70 kg adult).
+fn q_at(i: i64) -> f64 {
+    if i ==  0 { return 350.0 }
+    if i ==  1 { return 90.0 }
+    if i ==  2 { return 74.0 }
+    if i ==  3 { return 44.0 }
+    if i ==  4 { return 16.0 }
+    if i ==  5 { return 350.0 }
+    if i ==  6 { return 42.0 }
+    if i ==  7 { return 10.0 }
+    if i ==  8 { return 55.0 }
+    if i ==  9 { return 21.0 }
+    if i == 10 { return 17.0 }
+    if i == 11 { return 10.0 }
+    if i == 12 { return 8.0 }
+    return 13.0
+}
+
+fn cl_hep() -> f64 { return 12.4 }
+
+// Right-hand side: dC/dt for all 14 compartments.
+fn rhs(C: &PbpkState) -> PbpkState with Mut, Div {
+    var out = pbpk_zero()
+    var c_blood = C.v[0]
+    var blood_flux_out = 0.0
+    var i = 1
+    while i < 14 {
+        var flux = q_at(i) * (c_blood - C.v[i] / kp_at(i))  // mg/h to organ i
+        out.v[i] = flux / vref_at(i)
+        blood_flux_out = blood_flux_out + flux
+        i = i + 1
+    }
+    out.v[0] = (0.0 - blood_flux_out - cl_hep() * c_blood) / vref_at(0)
+    return out
+}
+
+fn axpy(base: &PbpkState, scale: f64, deriv: &PbpkState) -> PbpkState with Mut {
+    var r = pbpk_zero()
+    var i = 0
+    while i < 14 {
+        r.v[i] = base.v[i] + scale * deriv.v[i]
+        i = i + 1
+    }
+    return r
+}
+
+fn rk4_step(C: &PbpkState, dt: f64) -> PbpkState with Mut, Div {
+    var k1 = rhs(C)
+    var s1 = axpy(C, 0.5 * dt, &k1)
+    var k2 = rhs(&s1)
+    var s2 = axpy(C, 0.5 * dt, &k2)
+    var k3 = rhs(&s2)
+    var s3 = axpy(C, dt, &k3)
+    var k4 = rhs(&s3)
+    var sum = pbpk_zero()
+    var i = 0
+    while i < 14 {
+        sum.v[i] = k1.v[i] + 2.0 * k2.v[i] + 2.0 * k3.v[i] + k4.v[i]
+        i = i + 1
+    }
+    var next = axpy(C, dt / 6.0, &sum)
+    // Clamp non-negative
+    var j = 0
+    while j < 14 {
+        if next.v[j] < 0.0 { next.v[j] = 0.0 }
+        j = j + 1
+    }
+    return next
+}
+
+fn emit_at(C: &PbpkState, t: f64) with IO, Mut {
+    var i = 0
+    while i < 14 {
+        // Sounio: println(i64) and println(&str) emit a trailing newline,
+        // println(f64) does NOT. The empty-string println after each f64
+        // closes the line so the parity-gate parser can read one record per
+        // 3-line block (t, i, c).
+        print("PARITY|t=")
+        println(t)
+        println("")
+        print("PARITY|i=")
+        println(i)
+        print("PARITY|c=")
+        println(C.v[i])
+        println("")
+        i = i + 1
+    }
+}
+
+// Run to a target time using fixed dt=0.01 h. Returns final state.
+fn integrate_to(state: PbpkState, t_start: f64, t_end: f64, dt: f64) -> PbpkState with Mut, Div {
+    var C = state
+    var t = t_start
+    while t + dt * 0.5 < t_end {
+        C = rk4_step(&C, dt)
+        t = t + dt
+    }
+    return C
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("DISSERTATION_PARITY_REF v1")
+    println("compartments=14")
+    println("dt=0.01")
+    println("bolus_mg=0.05")
+    println("cl_hep_L_per_h=12.4")
+    println("samples=12")
+
+    // Initial condition: 0.05 mg into 5.0 L blood = 0.01 mg/L.
+    var C = pbpk_zero()
+    C.v[0] = 0.05 / vref_at(0)
+
+    // Twelve log-spaced sample times (hours).
+    var t = 0.0
+    var dt = 0.01
+
+    // t = 0.1
+    C = integrate_to(C, t, 0.1, dt); t = 0.1; emit_at(&C, t)
+    // t = 0.5
+    C = integrate_to(C, t, 0.5, dt); t = 0.5; emit_at(&C, t)
+    // t = 1.0
+    C = integrate_to(C, t, 1.0, dt); t = 1.0; emit_at(&C, t)
+    // t = 2.0
+    C = integrate_to(C, t, 2.0, dt); t = 2.0; emit_at(&C, t)
+    // t = 4.0
+    C = integrate_to(C, t, 4.0, dt); t = 4.0; emit_at(&C, t)
+    // t = 6.0
+    C = integrate_to(C, t, 6.0, dt); t = 6.0; emit_at(&C, t)
+    // t = 8.0
+    C = integrate_to(C, t, 8.0, dt); t = 8.0; emit_at(&C, t)
+    // t = 12.0
+    C = integrate_to(C, t, 12.0, dt); t = 12.0; emit_at(&C, t)
+    // t = 16.0
+    C = integrate_to(C, t, 16.0, dt); t = 16.0; emit_at(&C, t)
+    // t = 20.0
+    C = integrate_to(C, t, 20.0, dt); t = 20.0; emit_at(&C, t)
+    // t = 24.0
+    C = integrate_to(C, t, 24.0, dt); t = 24.0; emit_at(&C, t)
+    // t = 30.0
+    C = integrate_to(C, t, 30.0, dt); t = 30.0; emit_at(&C, t)
+
+    println("DISSERTATION_PARITY_DONE")
+    return 0
+}

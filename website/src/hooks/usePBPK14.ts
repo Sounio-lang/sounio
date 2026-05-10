@@ -1,27 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { COMPARTMENTS, STENT } from '../components/dissertation/compartments';
-
-/**
- * 14-compartment flow-limited PBPK ODE driver for rapamycin / Cypher DES.
- *
- * Reference: stdlib/darwin_pbpk/tsit5_pbpk14.sio (compartment list, indices),
- * stdlib/darwin_pbpk/drugs/rapamycin.sio (kinetics), and
- * stdlib/darwin_pbpk/release/biomaterial_release.sio (Higuchi release).
- *
- * Browser-side this is a fixed-step RK4. A CI parity gate
- * (scripts/ci/dissertation_frontend_parity_gate.sh) compares 12 sample points
- * to the Sounio Tsit5 reference solver and requires < 1% RMSE before any
- * deploy — see the Lane 9 plan document.
- *
- * Mass balance (per organ i, flow-limited):
- *   V_i · dC_i/dt = Q_i · ( C_blood - C_i / Kp_i )
- *
- * Blood compartment additionally receives:
- *   + Cypher stent release: dQ_drug/dt = K_H / (2·√t)  for t > 0
- *   - Hepatic clearance:    -CL_hep · C_blood
- *
- * State vector C ∈ ℝ¹⁴ in mg/L; cumulative released mass tracked separately.
- */
+// Pure-JS core also imported by scripts/dissertation/run_pbpk14_node.mjs
+// and exercised by scripts/ci/dissertation_frontend_parity_gate.sh.
+import { initialState, makeScratch, stepRK4, N } from '../lib/pbpk14_core.mjs';
 
 export interface PBPKParams {
   /** Hepatic clearance, L/h. Default = rapamycin typical (12.4 L/h, 70 kg). */
@@ -32,6 +12,8 @@ export interface PBPKParams {
   vdScale: number;
   /** Initial dose released as IV bolus at t=0, mg. 0 = stent only. */
   bolusMg: number;
+  /** Whether the Cypher stent is releasing drug. */
+  stentActive: boolean;
 }
 
 export const DEFAULT_PARAMS: PBPKParams = {
@@ -39,26 +21,8 @@ export const DEFAULT_PARAMS: PBPKParams = {
   higuchiScale: 1.0,
   vdScale: 1.0,
   bolusMg: 0.0,
+  stentActive: true,
 };
-
-// Reference volumes V_i, L, 70 kg adult. Order matches COMPARTMENTS[].
-// Sources: ICRP, scaled to standard man. Blood = central plasma + RBC.
-const V_REF: readonly number[] = [
-  5.0,   // blood
-  1.8,   // liver
-  0.31,  // kidney
-  1.45,  // brain
-  0.33,  // heart
-  1.1,   // lung
-  28.0,  // muscle
-  20.0,  // adipose
-  1.2,   // gut
-  3.6,   // skin
-  6.6,   // bone
-  0.18,  // spleen
-  0.09,  // pancreas
-  3.7,   // other
-];
 
 export interface PBPKState {
   /** Hours since stent implantation. */
@@ -71,101 +35,70 @@ export interface PBPKState {
   releasedMg: number;
 }
 
-// Normalization anchors. The peak rapamycin blood concentration after Cypher
-// implant is ≈ 0.85 ng/mL → 8.5e-4 mg/L (Ferron 1997 / Kahan 2001 literature).
-// We use 1.5 × that as the visual saturation point.
-const C_VISUAL_MAX = 1.3e-3; // mg/L
-
-function rhs(
-  C: Float32Array,
-  out: Float32Array,
-  params: PBPKParams,
-  releaseRate: number, // mg/h
-) {
-  const cBlood = C[0];
-  // Start by initialising blood derivative; we will accumulate venous returns.
-  out[0] = 0;
-  for (let i = 1; i < 14; i++) {
-    const c = COMPARTMENTS[i];
-    const v = V_REF[i] * params.vdScale;
-    const ci = C[i];
-    const flux = c.q * (cBlood - ci / c.kp); // mg/h delivered to organ i
-    out[i] = flux / v;
-    out[0] -= flux; // mass conservation: leaves blood, enters organ
-  }
-  // Blood: convert mass/h back to concentration/h, add stent release, subtract hepatic clearance.
-  const vBlood = V_REF[0] * params.vdScale;
-  out[0] = out[0] / vBlood + releaseRate / vBlood - (params.clHep * cBlood) / vBlood;
-}
+// Normalization anchor — peak rapamycin blood concentration after Cypher
+// implant ≈ 0.85 ng/mL → 8.5e-4 mg/L (Ferron 1997 / Kahan 2001). We use 1.5×
+// that as the visual saturation point. This is a *display* constant only;
+// trajectories themselves are pure-JS in pbpk14_core and parity-gated.
+const C_VISUAL_MAX = 1.3e-3;
 
 export function useSimulation(params: PBPKParams) {
-  const [state, setState] = useState<PBPKState>(() => {
-    const C = new Float32Array(14);
-    C[0] = params.bolusMg / (V_REF[0] * params.vdScale);
-    return {
-      timeHours: 0,
-      concentrations: new Float32Array(14),
-      uncertainties: new Float32Array(14),
-      releasedMg: 0,
-    };
-  });
+  const [state, setState] = useState<PBPKState>(() => ({
+    timeHours: 0,
+    concentrations: new Float32Array(N),
+    uncertainties: new Float32Array(N),
+    releasedMg: 0,
+  }));
 
   // Persistent integrator state (mutable, kept outside React state to avoid
-  // O(N) Float32Array allocations per frame).
-  const integrator = useRef({
-    C: new Float32Array(14),
-    k1: new Float32Array(14),
-    k2: new Float32Array(14),
-    k3: new Float32Array(14),
-    k4: new Float32Array(14),
-    tmp: new Float32Array(14),
-    t: 0,
-    released: 0,
-  });
+  // O(N) allocations per frame).
+  const integratorRef = useRef<{
+    C: Float64Array;
+    scratch: ReturnType<typeof makeScratch>;
+    t: number;
+    released: number;
+  } | null>(null);
+  if (integratorRef.current === null) {
+    integratorRef.current = {
+      C: initialState(params),
+      scratch: makeScratch(),
+      t: 0,
+      released: 0,
+    };
+  }
 
-  // Reset on param change (bolus is initial-condition-bearing).
+  // Reset on param change (bolus is initial-condition-bearing; clHep / vd
+  // affect both IC and ODE; higuchiScale only affects the source — but the
+  // simplest correct policy is full restart).
   useEffect(() => {
-    const I = integrator.current;
-    I.C.fill(0);
-    I.C[0] = params.bolusMg / (V_REF[0] * params.vdScale);
+    const I = integratorRef.current!;
+    const fresh = initialState(params);
+    for (let i = 0; i < N; i++) I.C[i] = fresh[i];
     I.t = 0;
     I.released = 0;
     setState({
       timeHours: 0,
-      concentrations: new Float32Array(14),
-      uncertainties: new Float32Array(14),
+      concentrations: new Float32Array(N),
+      uncertainties: new Float32Array(N),
       releasedMg: 0,
     });
-  }, [params.bolusMg, params.clHep, params.higuchiScale, params.vdScale]);
+  }, [params.bolusMg, params.clHep, params.higuchiScale, params.vdScale, params.stentActive]);
 
-  // Advance the simulation by `dtHours` and emit a new state.
   const step = (dtHours: number) => {
-    const I = integrator.current;
-    const t0 = Math.max(1e-3, I.t);
-    const releaseRate = params.higuchiScale * STENT.higuchiKH / (2 * Math.sqrt(t0));
-    // RK4
-    rhs(I.C, I.k1, params, releaseRate);
-    for (let i = 0; i < 14; i++) I.tmp[i] = I.C[i] + 0.5 * dtHours * I.k1[i];
-    rhs(I.tmp, I.k2, params, releaseRate);
-    for (let i = 0; i < 14; i++) I.tmp[i] = I.C[i] + 0.5 * dtHours * I.k2[i];
-    rhs(I.tmp, I.k3, params, releaseRate);
-    for (let i = 0; i < 14; i++) I.tmp[i] = I.C[i] + dtHours * I.k3[i];
-    rhs(I.tmp, I.k4, params, releaseRate);
-    for (let i = 0; i < 14; i++) {
-      I.C[i] += (dtHours / 6) * (I.k1[i] + 2 * I.k2[i] + 2 * I.k3[i] + I.k4[i]);
-      if (I.C[i] < 0) I.C[i] = 0;
-    }
+    const I = integratorRef.current!;
+    const dRel = stepRK4(I.C, I.t, dtHours, params, I.scratch);
     I.t += dtHours;
-    I.released += releaseRate * dtHours;
+    I.released += dRel;
 
-    // Normalize to [0..1] for visual encoding, with a single reference anchor.
-    const concNorm = new Float32Array(14);
-    const uncertNorm = new Float32Array(14);
-    for (let i = 0; i < 14; i++) {
-      const ci = I.C[i] / C_VISUAL_MAX;
-      concNorm[i] = Math.max(0, Math.min(1, ci));
-      // Uncertainty proxy: σ_CL × |∂C/∂CL| is dominant; use |k1| · σ_rel as cheap surrogate.
-      uncertNorm[i] = Math.max(0, Math.min(1, Math.abs(I.k1[i]) / C_VISUAL_MAX * 0.25));
+    const concNorm = new Float32Array(N);
+    const uncertNorm = new Float32Array(N);
+    // |dC/dt| · σ_rel is a cheap surrogate for the GUM cone radius. The
+    // committed gum_budget.csv values are exact for the standard profile;
+    // this in-browser proxy widens visibly when clHep moves off-typical,
+    // which is the dissertation's contribution-#1 money shot.
+    for (let i = 0; i < N; i++) {
+      concNorm[i] = Math.max(0, Math.min(1, I.C[i] / C_VISUAL_MAX));
+      // |k1[i]| · 0.25 normalised the same way
+      uncertNorm[i] = Math.max(0, Math.min(1, Math.abs(I.scratch.k1[i]) / C_VISUAL_MAX * 0.25));
     }
     setState({
       timeHours: I.t,
