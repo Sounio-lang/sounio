@@ -831,36 +831,41 @@ fn kaxi_lower_div(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) ->
 }
 
 fn kaxi_lower_fma(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) -> string with Mut, Panic, Div, Alloc {
-    // K-AXI fma: dst = src_a * src_b + src_a (matches kaxi_to_c semantics).
+    // K-AXI fma:
+    //   2-source `fma rD, rA, rB`       → D = A·B + A   (legacy / matches kaxi_to_c)
+    //   3-source `fma rD, rA, rB, rC`   → D = A·B + C   (standard PTX FMA)
     let dst = ptx_parse_reg(asm, line_start, line_len, "r", 0)
     let src_a = ptx_parse_reg(asm, line_start, line_len, "r", 1)
     let src_b = ptx_parse_reg(asm, line_start, line_len, "r", 2)
+    let src_c_parsed = ptx_parse_reg(asm, line_start, line_len, "r", 3)
     if dst < 0 || src_a < 0 || src_b < 0 { return "" }
+    var src_c: i64 = src_c_parsed
+    if src_c < 0 { src_c = src_a }
     if mode == 0 {
         if kaxi_line_has_type_f64(asm, line_start, line_len) {
             return "    mul.f64 " + fd(65) + ", " + fd(src_a) + ", " + fd(src_b) + ";\n"
-                 + "    add.f64 " + fd(dst) + ", " + fd(65) + ", " + fd(src_a) + ";\n"
+                 + "    add.f64 " + fd(dst) + ", " + fd(65) + ", " + fd(src_c) + ";\n"
         }
         if kaxi_line_has_type_f32(asm, line_start, line_len) {
-            return "    fma.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + fr(src_a) + ";\n"
+            return "    fma.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + fr(src_c) + ";\n"
         }
         if kaxi_line_has_type_i32(asm, line_start, line_len) {
-            return "    mad.lo.s32 " + ri(dst) + ", " + ri(src_a) + ", " + ri(src_b) + ", " + ri(src_a) + ";\n"
+            return "    mad.lo.s32 " + ri(dst) + ", " + ri(src_a) + ", " + ri(src_b) + ", " + ri(src_c) + ";\n"
         }
         return "    mul.lo.u64 %rd256, " + rd(src_a) + ", " + rd(src_b) + ";\n"
-             + "    add.u64 " + rd(dst) + ", %rd256, " + rd(src_a) + ";\n"
+             + "    add.u64 " + rd(dst) + ", %rd256, " + rd(src_c) + ";\n"
     }
     if mode == 1 {
         // u64 fma + variance (additive).
         return "    mul.lo.u64 %rd256, " + rd(src_a) + ", " + rd(src_b) + ";\n"
-             + "    add.u64 " + rd(dst) + ", %rd256, " + rd(src_a) + ";\n"
+             + "    add.u64 " + rd(dst) + ", %rd256, " + rd(src_c) + ";\n"
              + "    add.u64 " + ev(dst) + ", " + ev(src_a) + ", " + ev(src_b) + ";\n"
     }
     if mode == 2 || mode == 3 || mode == 5 {
-        return "    fma.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + fr(src_a) + ";\n"
+        return "    fma.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + fr(src_c) + ";\n"
     }
     // mode == 4: fma + variance lane (additive).
-    return "    fma.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + fr(src_a) + ";\n"
+    return "    fma.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + fr(src_c) + ";\n"
          + "    add.rn.f32 " + fv(dst) + ", " + fv(src_a) + ", " + fv(src_b) + ";\n"
 }
 
