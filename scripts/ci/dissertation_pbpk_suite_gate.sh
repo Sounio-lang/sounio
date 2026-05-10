@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # scripts/ci/dissertation_pbpk_suite_gate.sh
 #
-# Dissertation evidence gate: rapamycin (sirolimus) PBPK validation suite.
+# Dissertation evidence gate: PBPK validation suite (rapamycin + haloperidol).
 #
-# Ten independent rapamycin tests cover the dissertation's applied PBPK
-# layer — the *evidence* that the three core contributions (GUM-through-ODE,
-# compile-time confidence, ISO budgets) actually work on a real drug:
+# 14 independent tests cover the dissertation's applied PBPK layer — the
+# *evidence* that the three core contributions (GUM-through-ODE, compile-time
+# confidence, ISO budgets) actually work on real drugs:
 #
+# Rapamycin (sirolimus) — primary dissertation drug:
 #   1. rapamycin_iso_budget        Euler 3-comp, ISO §8 budget, IV bolus 6 mg
 #   2. rapamycin_rk4_budget        RK4 3-comp, GUM through 4-stage RK
 #   3. rapamycin_epistemic_pbpk    BBB/Pgp clinical claims, AUC-CV, CL inverse
@@ -15,12 +16,19 @@
 #   6. biomaterial_release         Cypher DES — zero/first-order/Higuchi + 14-comp PBPK
 #   7. rapamycin_clinical          14-comp clinical validation: brain/blood ratio,
 #                                  Vd_ss, GUM budget vs Lampen 1998, Schreiber 1991
-#   8. gum_vs_mc                   ISO budget vs Monte-Carlo: 5x cost advantage,
-#                                  parameter-level attribution, CV=20% vs CV=60%
-#   9. des_sirolimus               Cypher DES extended scenario: epistemic ep_des_run
-#                                  with cross-domain uncertainty (release + PK)
-#  10. rapamycin_pop_sim           Population simulation: 32 virtual patients
-#                                  with lognormal CL/fu/Kp variability + percentile
+#   8. gum_vs_mc                   ISO budget vs Monte-Carlo: 5x cost advantage
+#   9. des_sirolimus               Cypher DES extended scenario: cross-domain GUM
+#  10. rapamycin_pop_sim           32 virtual patients with lognormal CL/fu/Kp
+#
+# Haloperidol — second drug for cross-validation of method generality:
+#  11. haloperidol_d2_pet          D2 receptor occupancy via PET, Hill-Langmuir
+#                                  saturation, therapeutic-window vs EPS-threshold
+#  12. haloperidol_oral_pbpk       Oral PBPK with repeated dosing, CYP3A4-CYP2D6
+#                                  metabolism, CNS coverage projection
+#  13. d2_gum                      D2 receptor PD: GUM uncertainty over kpuu_brain,
+#                                  ps_bbb permeability, mixed-evidence confidence
+#  14. d2_voi                      D2 value-of-information: which experiment to
+#                                  prioritize given current PK/PD evidence
 #
 # Each test ends with "PASS\n" on success. Gate fails if any test rc != 0
 # or stdout doesn't contain "PASS".
@@ -65,6 +73,10 @@ TESTS=(
   "gum_vs_mc                    stdlib/darwin_pbpk/validation/gum_vs_mc.sio"
   "des_sirolimus                stdlib/darwin_pbpk/scenarios/des_sirolimus.sio"
   "rapamycin_pop_sim            stdlib/darwin_pbpk/population/pop_sim.sio"
+  "haloperidol_d2_pet           stdlib/darwin_pbpk/validation/haloperidol_d2_pet.sio"
+  "haloperidol_oral_pbpk        stdlib/darwin_pbpk/validation/haloperidol_oral_pbpk.sio"
+  "d2_gum                       stdlib/darwin_pbpk/pd/d2_gum.sio"
+  "d2_voi                       stdlib/darwin_pbpk/pd/d2_voi.sio"
 )
 
 fails=0
