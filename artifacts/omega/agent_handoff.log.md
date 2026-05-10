@@ -410,3 +410,32 @@ checks:
   - sweep inventory: rapamycin_iso_budget.sio (fixed in PR #98), rapamycin_rk4_budget.sio (fixed here), rapamycin_clinical.sio (already complete), rapamycin_epistemic_adaptive.sio (no budget claim, skip), rapamycin_gum_vs_mc.sio (intentional .value in MC sampling, skip), gum_vs_mc.sio (intentional, skip), des_sirolimus*.sio (no empty budget, skip), pop_sim.sio (no empty budget, skip), steady_state_runner.sio (no empty budget, skip)
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T16:00:00Z
+files:
+  - examples/cocycle_subspace_k6.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+intent: Lane 3 CLAIM — extend cohomological subspace decomposition to k=6 (chingons, dim 64). Per Revised OQ1 in §7 of paper 168 (just merged in PR #92), the next computational step is to enumerate the 1395 = P_6 three-dimensional subspaces of (Z/2)^6 and tally per-subspace nonzero associator counts. Predicted T_6 = 168 * 775 = 130200. Will reveal whether the 7-class distribution at k=5 simplifies, complicates, or generalizes structurally.
+status: lock-acquired
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T16:45:00Z
+files:
+  - examples/cocycle_subspace_k6.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+intent: Lane 3 RELEASE — k=6 chingon subspace decomposition delivered. T_6 = 130200 confirmed; 1395 = P_6 subspaces enumerated; **16 distinct count classes** found (vs 7 at k=5, 2 at k=4). Three super-octonionic classes (180/184/188) emerge at k=6 with mult 21 each. Principal anomaly: count=168 mult=247=13·19, not 7-divisible — flagged as the orbit family the classification must explain. Section 7 of paper 168 now carries @table:subspace-k6 plus updated implications. Build target green.
+checks:
+  - bin/souc check examples/cocycle_subspace_168.sio (rc=0)
+  - bin/souc compile examples/cocycle_subspace_k5.sio -o /tmp/k5 && /tmp/k5 (ALL PASS)
+  - bin/souc compile examples/cocycle_subspace_k6.sio -o /tmp/k6 && /tmp/k6 (ALL PASS)
+commit: pending
+status: lock-released
