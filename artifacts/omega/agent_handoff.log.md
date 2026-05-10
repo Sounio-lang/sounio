@@ -466,3 +466,33 @@ checks:
   - live python3 count in file: 0
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+lane: 7
+time_utc: 2026-05-10T16:28:00Z
+files:
+  - scripts/ci/native_v2_hof_closure_gate.sh
+  - scripts/ci/native_v2_imported_core_abi_gate.sh
+  - scripts/ci/native_v2_imported_hof_abi_gate.sh
+intent: Lane 7 follow-up — kill 3 same-shape python heredocs across native_v2_*_gate.sh. hof_closure is a validator (replace with kretikos kaxi-validate-evidence --expect); imported_core_abi + imported_hof_abi are json.dump emitters (replace with kretikos json-emit + bash date -u + sha256sum). Byte-identity verified modulo generated_at_utc timestamp.
+status: lock-acquired
+
+---
+
+agent: claude
+lane: 7
+time_utc: 2026-05-10T16:38:00Z
+files:
+  - scripts/ci/native_v2_hof_closure_gate.sh
+  - scripts/ci/native_v2_imported_core_abi_gate.sh
+  - scripts/ci/native_v2_imported_hof_abi_gate.sh
+intent: Lane 7 follow-up RELEASE — killed 3 python heredocs (1 validator, 2 json.dump emitters). hof_closure: replaced json.loads validator with kretikos kaxi-validate-evidence (E2E gate run PASS, validate-evidence reports "PASS 1 checks"). imported_{core,hof}_abi: replaced json.dump emitters with kretikos json-emit + bash date -u + sha256sum. JSON output byte-identical to python in isolation test (mock env, both produce identical sort_keys=True output). Live python3 count in all 3 files: 0. bash -n clean.
+checks:
+  - bash scripts/ci/native_v2_hof_closure_gate.sh (PASS, validate-evidence: PASS 1 checks)
+  - isolation test imported_core_abi: BYTE IDENTICAL (kretikos json-emit vs json.dump sort_keys=True)
+  - isolation test imported_hof_abi: BYTE IDENTICAL (same)
+  - bash -n on all 3 files: rc=0
+commit: pending
+status: lock-released

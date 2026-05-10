@@ -128,49 +128,30 @@ if [[ "$runtime_rc" -ne 42 ]]; then
   exit 1
 fi
 
-python3 - "$SUMMARY_JSON" "$SOUC_BIN" "$PROGRAM" "$IMPORTED_MODULE" "$ELF" "$OUT_DIR" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-from datetime import datetime, timezone
-
-summary_path = pathlib.Path(sys.argv[1])
-souc_bin = sys.argv[2]
-program = sys.argv[3]
-imported_module = sys.argv[4]
-elf = pathlib.Path(sys.argv[5])
-out_dir = pathlib.Path(sys.argv[6])
-
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-payload = {
-    "schema": "sounio.native_v2_imported_hof_abi.v1",
-    "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    "status": "pass",
-    "compiler_resolved": souc_bin,
-    "compiler_entrypoint": "self-hosted/compiler/lean.sio",
-    "target": "x86_64-linux",
-    "program": program,
-    "imported_module": imported_module,
-    "native_elf": str(elf),
-    "native_elf_sha256": sha256(elf),
-    "runtime_exit": 42,
-    "fallback_path": "none",
-    "host_callback": "none",
-    "imported_prebundle_native": False,
-    "hof_abi_scope": "named_fn_refs_and_fn_typed_params_returns_no_captures",
-    "imported_body_lowering": "compact_imported_body_lowering_v1_no_source_marker",
-    "source_markers": 0,
-    "artifact_dir": str(out_dir),
-}
-summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
+# Emit summary JSON via pure-Sounio kretikos json-emit (replaces python json.dump heredoc).
+# Schema sounio.native_v2_imported_hof_abi.v1. Args ordered alphabetically by key.
+ELF_SHA256="$(sha256sum "$ELF" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$ELF" | awk '{print $1}')"
+GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)"
+"$ROOT_DIR/bin/kretikos" json-emit \
+    --string "artifact_dir=$OUT_DIR" \
+    --string "compiler_entrypoint=self-hosted/compiler/lean.sio" \
+    --string "compiler_resolved=$SOUC_BIN" \
+    --string "fallback_path=none" \
+    --string "generated_at_utc=$GENERATED_AT_UTC" \
+    --string "hof_abi_scope=named_fn_refs_and_fn_typed_params_returns_no_captures" \
+    --string "host_callback=none" \
+    --string "imported_body_lowering=compact_imported_body_lowering_v1_no_source_marker" \
+    --string "imported_module=$IMPORTED_MODULE" \
+    --bool   "imported_prebundle_native=false" \
+    --string "native_elf=$ELF" \
+    --string "native_elf_sha256=$ELF_SHA256" \
+    --string "program=$PROGRAM" \
+    --int    "runtime_exit=42" \
+    --string "schema=sounio.native_v2_imported_hof_abi.v1" \
+    --int    "source_markers=0" \
+    --string "status=pass" \
+    --string "target=x86_64-linux" \
+    > "$SUMMARY_JSON"
 
 echo "[native-v2-imported-hof-abi] PASS: imported HOF ABI v1 uses modular IR native driver directly"
 echo "[native-v2-imported-hof-abi] summary=$SUMMARY_JSON"

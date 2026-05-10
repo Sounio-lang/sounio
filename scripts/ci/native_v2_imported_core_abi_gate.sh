@@ -110,45 +110,27 @@ if [[ "$runtime_rc" -ne 42 ]]; then
   exit 1
 fi
 
-python3 - "$SUMMARY_JSON" "$SOUC_BIN" "$PROGRAM" "$ELF" "$OUT_DIR" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-from datetime import datetime, timezone
-
-summary_path = pathlib.Path(sys.argv[1])
-souc_bin = sys.argv[2]
-program = sys.argv[3]
-elf = pathlib.Path(sys.argv[4])
-out_dir = pathlib.Path(sys.argv[5])
-
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-payload = {
-    "schema": "sounio.native_v2_imported_core_abi.v2",
-    "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    "status": "pass",
-    "compiler_resolved": souc_bin,
-    "compiler_entrypoint": "self-hosted/compiler/lean.sio",
-    "target": "x86_64-linux",
-    "program": program,
-    "native_elf": str(elf),
-    "native_elf_sha256": sha256(elf),
-    "runtime_exit": 42,
-    "fallback_path": "none",
-    "host_callback": "none",
-    "imported_prebundle_native": False,
-    "source_markers": 0,
-    "artifact_dir": str(out_dir),
-}
-summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
+# Emit summary JSON via pure-Sounio kretikos json-emit (replaces python json.dump heredoc).
+# Schema sounio.native_v2_imported_core_abi.v2. Args ordered alphabetically by key.
+ELF_SHA256="$(sha256sum "$ELF" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$ELF" | awk '{print $1}')"
+GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)"
+"$ROOT_DIR/bin/kretikos" json-emit \
+    --string "artifact_dir=$OUT_DIR" \
+    --string "compiler_entrypoint=self-hosted/compiler/lean.sio" \
+    --string "compiler_resolved=$SOUC_BIN" \
+    --string "fallback_path=none" \
+    --string "generated_at_utc=$GENERATED_AT_UTC" \
+    --string "host_callback=none" \
+    --bool   "imported_prebundle_native=false" \
+    --string "native_elf=$ELF" \
+    --string "native_elf_sha256=$ELF_SHA256" \
+    --string "program=$PROGRAM" \
+    --int    "runtime_exit=42" \
+    --string "schema=sounio.native_v2_imported_core_abi.v2" \
+    --int    "source_markers=0" \
+    --string "status=pass" \
+    --string "target=x86_64-linux" \
+    > "$SUMMARY_JSON"
 
 echo "[native-v2-imported-core-abi] PASS: imported core ABI uses modular IR native driver directly"
 echo "[native-v2-imported-core-abi] summary=$SUMMARY_JSON"

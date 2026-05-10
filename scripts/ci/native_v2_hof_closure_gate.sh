@@ -16,16 +16,9 @@ SOUNIO_NATIVE_V2_SCIENCE_SPINE_DIR="$OUT_DIR" \
 SOUNIO_NATIVE_V2_SCIENCE_SPINE_MANIFEST="$MANIFEST_PATH" \
   bash scripts/ci/native_v2_epistemic_science_spine_gate.sh
 
-python3 - "$SUMMARY_JSON" <<'PY'
-import json
-import pathlib
-import sys
-
-summary_path = pathlib.Path(sys.argv[1])
-payload = json.loads(summary_path.read_text(encoding="utf-8"))
-if payload.get("fallback_path") != "none":
-    raise SystemExit(f"fallback_path={payload.get('fallback_path')!r}")
-PY
+# Validate fallback_path via pure-Sounio kaxi-validate-evidence (replaces python json.loads heredoc).
+"$ROOT_DIR/bin/kretikos" kaxi-validate-evidence "$SUMMARY_JSON" \
+    --expect "fallback_path=none"
 
 echo "[native-v2-hof] PASS: HOF closure promotion gate; fallback_path=none"
 echo "[native-v2-hof] summary=$SUMMARY_JSON"
