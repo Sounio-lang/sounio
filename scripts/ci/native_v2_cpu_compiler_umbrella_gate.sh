@@ -141,6 +141,44 @@ run_lean_single_fixed_point() {
   append_gate_row "$gate" "$rc" "$gate_dir" "-" "$log_path"
 }
 
+# Imported noncapturing closure boundary: pins imported closure literals to the
+# modular IR native driver path -- fails loudly if compile falls back to
+# native_prebundle or full IR. ~5s.
+run_imported_closure_boundary() {
+  local gate="imported_closure_boundary"
+  local gate_dir="$OUT_DIR/$gate"
+  local log_path="$LOG_DIR/$gate.log"
+
+  mkdir -p "$gate_dir"
+  echo "[native-v2-cpu-compiler] running $gate"
+  set +e
+  SOUNIO_NATIVE_V2_IMPORTED_CLOSURE_BOUNDARY_DIR="$gate_dir" \
+    bash scripts/ci/native_v2_imported_closure_boundary_gate.sh >"$log_path" 2>&1
+  local rc=$?
+  set -e
+  append_gate_row "$gate" "$rc" "$gate_dir" "-" "$log_path"
+}
+
+# Imported captured closure boundary: same path-discrimination invariants as
+# above, but for closure factories that capture an i64 across the module
+# boundary. The gate internally re-runs the noncapturing variant as a
+# prerequisite -- intentionally kept as a separate umbrella row so the failure
+# surface stays diagnosable. ~10s.
+run_imported_captured_closure_boundary() {
+  local gate="imported_captured_closure_boundary"
+  local gate_dir="$OUT_DIR/$gate"
+  local log_path="$LOG_DIR/$gate.log"
+
+  mkdir -p "$gate_dir"
+  echo "[native-v2-cpu-compiler] running $gate"
+  set +e
+  SOUNIO_NATIVE_V2_IMPORTED_CAPTURED_CLOSURE_BOUNDARY_DIR="$gate_dir" \
+    bash scripts/ci/native_v2_imported_captured_closure_boundary_gate.sh >"$log_path" 2>&1
+  local rc=$?
+  set -e
+  append_gate_row "$gate" "$rc" "$gate_dir" "-" "$log_path"
+}
+
 # ISO budget: dissertation contribution #3 -- ISO 17025 GUM uncertainty budget
 # for rapamycin 2-comp PBPK. CPU-only sampler, ~1s at 1M patients.
 run_iso_budget() {
@@ -264,13 +302,15 @@ run_f64_ladder
 run_gum_primitives
 run_semantic_hardening
 run_lean_single_fixed_point
+run_imported_closure_boundary
+run_imported_captured_closure_boundary
 run_iso_budget
 run_phase_j
 run_phase_y
 run_dissertation_pbpk_suite
 
 if emit_summary_json; then
-  echo "[native-v2-cpu-compiler] PASS: driver self-compile, science spine, f64 ladder, GUM primitives, semantic hardening, lean_single fixed-point, iso_budget, phase_j_conf_gate, phase_y_gum_pbpk, dissertation_pbpk_suite"
+  echo "[native-v2-cpu-compiler] PASS: driver self-compile, science spine, f64 ladder, GUM primitives, semantic hardening, lean_single fixed-point, imported_closure_boundary, imported_captured_closure_boundary, iso_budget, phase_j_conf_gate, phase_y_gum_pbpk, dissertation_pbpk_suite"
   echo "[native-v2-cpu-compiler] summary=$SUMMARY_JSON"
 else
   echo "[native-v2-cpu-compiler] FAIL: see summary=$SUMMARY_JSON" >&2
