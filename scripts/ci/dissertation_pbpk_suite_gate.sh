@@ -12,6 +12,7 @@
 #   3. rapamycin_epistemic_pbpk    BBB/Pgp clinical claims, AUC-CV, CL inverse
 #   4. rapamycin_epistemic_adaptive Bogacki-Shampine 3(2) + variance lookbehind
 #   5. rapamycin_gum_vs_mc         GUM linearization vs Monte-Carlo (ratio<10)
+#   6. biomaterial_release         Cypher DES — zero/first-order/Higuchi + 14-comp PBPK
 #
 # Each test ends with "PASS\n" on success. Gate fails if any test rc != 0
 # or stdout doesn't contain "PASS".
@@ -51,6 +52,7 @@ TESTS=(
   "rapamycin_epistemic_pbpk     tests/run-pass/rapamycin_epistemic_pbpk.sio"
   "rapamycin_epistemic_adaptive tests/run-pass/rapamycin_epistemic_adaptive.sio"
   "rapamycin_gum_vs_mc          tests/run-pass/rapamycin_gum_vs_mc.sio"
+  "biomaterial_release          stdlib/darwin_pbpk/release/biomaterial_release.sio"
 )
 
 fails=0
