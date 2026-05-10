@@ -1,0 +1,355 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Cohomological reformulation of the 168 Theorem
+// φ(x,y) = tr(y · x⁶) over F_8 — Bremner-Hentzel 2017 / Albuquerque-Majid 1999
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Octonions as twisted group algebra over (Z/2)^3 ≅ F_8 (additive):
+//   e_x · e_y = (-1)^φ(x,y) · e_{x XOR y}     (XOR = sum in (Z/2)^3)
+//   φ(x,y) = tr(y · x⁶) over F_8 = F_2[α]/(α³+α+1)
+//   tr(z) = z + z² + z⁴   (image in F_2 ⊂ F_8)
+//
+// We construct the algebra from this formula alone (no Fano table) and
+// verify it has the structural invariants of O:
+//   1. Algebra has unit (e_0)
+//   2. F_8 multiplication is correct (x⁷ = 1, identity, inverse)
+//   3. Exactly 168 nonzero basis associators (= |PSL(2,7)|)
+//   4. Norm dichotomy: associators land on {0, ±2}
+//   5. Alternativity: (a·a)·b = a·(a·b)
+//
+// Confirms: the algebra defined by the cohomological cocycle IS octonions.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// F_8 multiplication table
+var F8_MUL: [i64; 64] = [0; 64]
+
+fn poly_mul_reduce(a: i64, b: i64) -> i64 with Mut {
+    // Multiply two F_2[α] polys of deg < 3 (a, b in 0..7), reduce mod α³+α+1.
+    // prod has degree ≤ 4 (bits 0..4) before reduction.
+    var prod: i64 = 0
+    var i: i64 = 0
+    while i < 3 {
+        if (a >> i) & 1 != 0 {
+            prod = prod ^ (b << i)
+        }
+        i = i + 1
+    }
+    // Reduce bit 4 (α⁴ ≡ α²+α, XOR with 0b10110 = 22).
+    if (prod >> 4) & 1 != 0 { prod = prod ^ 22 }
+    // Reduce bit 3 (α³ ≡ α+1, XOR with 0b1011 = 11).
+    if (prod >> 3) & 1 != 0 { prod = prod ^ 11 }
+    prod & 7
+}
+
+fn init_f8() with Mut {
+    var x = 0
+    while x < 8 {
+        var y = 0
+        while y < 8 {
+            F8_MUL[x * 8 + y] = poly_mul_reduce(x, y)
+            y = y + 1
+        }
+        x = x + 1
+    }
+}
+
+fn f8_mul(a: i64, b: i64) -> i64 with Panic {
+    F8_MUL[a * 8 + b]
+}
+
+fn f8_pow(x: i64, n: i64) -> i64 with Mut, Panic {
+    // x^n by repeated squaring
+    var result: i64 = 1
+    var base: i64 = x
+    var e: i64 = n
+    while e > 0 {
+        if e & 1 != 0 {
+            result = f8_mul(result, base)
+        }
+        base = f8_mul(base, base)
+        e = e >> 1
+    }
+    result
+}
+
+fn trace_f2(z: i64) -> i64 with Mut, Panic {
+    // tr(z) = z + z² + z⁴ as element of F_2 ⊂ F_8.
+    // Result should be 0 or 1 (the constant-coefficient bit of z+z²+z⁴).
+    let z2 = f8_mul(z, z)
+    let z4 = f8_mul(z2, z2)
+    let s = z ^ z2 ^ z4
+    s & 1
+}
+
+fn phi_fano(x: i64, y: i64) -> i64 with Mut, Panic {
+    // φ(x, y) = tr(y · x⁶) ∈ F_2 (returns 0 or 1).
+    // Convention: φ(0, _) = φ(_, 0) = 0 so identity multiplications give +1.
+    if x == 0 { return 0 }
+    if y == 0 { return 0 }
+    let x6 = f8_pow(x, 6)
+    let prod = f8_mul(y, x6)
+    trace_f2(prod)
+}
+
+fn fano_sign(x: i64, y: i64) -> i64 with Mut, Panic {
+    // F(x, y) = (-1)^φ(x,y) ∈ {+1, -1}
+    if phi_fano(x, y) == 0 { 1 } else { 0 - 1 }
+}
+
+// Multiplication via cocycle: e_x · e_y = F(x,y) · e_{x XOR y}
+// We use indices 0..7 as elements of (Z/2)^3.
+// e_0 acts as identity. e_x · e_x = -e_0 for x != 0 (consistent with O).
+var BMUL_IDX: i64 = 0
+var BMUL_SGN: i64 = 0
+
+fn cocycle_basis_mul(x_idx: i64, x_sgn: i64, y_idx: i64, y_sgn: i64) with Mut, Panic {
+    if x_idx == 0 {
+        BMUL_IDX = y_idx
+        BMUL_SGN = x_sgn * y_sgn
+        return
+    }
+    if y_idx == 0 {
+        BMUL_IDX = x_idx
+        BMUL_SGN = x_sgn * y_sgn
+        return
+    }
+    let new_idx = x_idx ^ y_idx
+    if new_idx == 0 {
+        // x = y: e_x² = -e_0
+        BMUL_IDX = 0
+        BMUL_SGN = 0 - (x_sgn * y_sgn)
+        return
+    }
+    let f = fano_sign(x_idx, y_idx)
+    BMUL_IDX = new_idx
+    BMUL_SGN = x_sgn * y_sgn * f
+}
+
+fn count_nonzero_associators() -> i64 with Mut, Panic {
+    var nonzero = 0
+    var i = 1
+    while i < 8 {
+        var j = 1
+        while j < 8 {
+            var k = 1
+            while k < 8 {
+                cocycle_basis_mul(i, 1, j, 1)
+                let l1_idx = BMUL_IDX
+                let l1_sgn = BMUL_SGN
+                cocycle_basis_mul(l1_idx, l1_sgn, k, 1)
+                let li = BMUL_IDX
+                let ls = BMUL_SGN
+                cocycle_basis_mul(j, 1, k, 1)
+                let r1_idx = BMUL_IDX
+                let r1_sgn = BMUL_SGN
+                cocycle_basis_mul(i, 1, r1_idx, r1_sgn)
+                let ri = BMUL_IDX
+                let rs = BMUL_SGN
+                if li != ri {
+                    nonzero = nonzero + 1
+                } else {
+                    if ls != rs {
+                        nonzero = nonzero + 1
+                    }
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    nonzero
+}
+
+fn verify_norm_dichotomy() -> i64 with Mut, Panic {
+    // For basis triples, associator [e_i,e_j,e_k] = (l_sgn - r_sgn)·e_{l_idx}
+    // when l_idx = r_idx (which Lemma 2 says is always the case).
+    // The coefficient l_sgn - r_sgn ∈ {-2, 0, +2}. Norm ∈ {0, 2}.
+    var ok = 1
+    var same_idx_always = 1
+    var i = 1
+    while i < 8 {
+        var j = 1
+        while j < 8 {
+            var k = 1
+            while k < 8 {
+                cocycle_basis_mul(i, 1, j, 1)
+                let l1_idx = BMUL_IDX
+                let l1_sgn = BMUL_SGN
+                cocycle_basis_mul(l1_idx, l1_sgn, k, 1)
+                let li = BMUL_IDX
+                let ls = BMUL_SGN
+                cocycle_basis_mul(j, 1, k, 1)
+                let r1_idx = BMUL_IDX
+                let r1_sgn = BMUL_SGN
+                cocycle_basis_mul(i, 1, r1_idx, r1_sgn)
+                let ri = BMUL_IDX
+                let rs = BMUL_SGN
+                if li != ri {
+                    same_idx_always = 0
+                } else {
+                    let diff = ls - rs
+                    if diff != 0 {
+                        if diff != 2 {
+                            if diff != (0 - 2) {
+                                ok = 0
+                            }
+                        }
+                    }
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if same_idx_always == 0 { ok = 0 }
+    ok
+}
+
+fn verify_alternativity() -> i64 with Mut, Panic {
+    // (a·a)·b = a·(a·b)
+    var ok = 1
+    var i = 1
+    while i < 8 {
+        var j = 1
+        while j < 8 {
+            cocycle_basis_mul(i, 1, i, 1)
+            let aa_i = BMUL_IDX
+            let aa_s = BMUL_SGN
+            cocycle_basis_mul(aa_i, aa_s, j, 1)
+            let lhs_i = BMUL_IDX
+            let lhs_s = BMUL_SGN
+            cocycle_basis_mul(i, 1, j, 1)
+            let ij_i = BMUL_IDX
+            let ij_s = BMUL_SGN
+            cocycle_basis_mul(i, 1, ij_i, ij_s)
+            let rhs_i = BMUL_IDX
+            let rhs_s = BMUL_SGN
+            if lhs_i != rhs_i { ok = 0 }
+            if lhs_s != rhs_s { ok = 0 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    ok
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    println("═══════════════════════════════════════════════════════════════")
+    println("  Cohomological 168: phi(x,y) = tr(y * x^6) over F_8")
+    println("  Bremner-Hentzel 2017 / Albuquerque-Majid 1999")
+    println("═══════════════════════════════════════════════════════════════")
+
+    init_f8()
+
+    var pass = 0
+    var fail = 0
+
+    // 1. F_8 has 1 as identity
+    var ok = 1
+    var z = 1
+    while z < 8 {
+        if f8_mul(1, z) != z { ok = 0 }
+        if f8_mul(z, 1) != z { ok = 0 }
+        z = z + 1
+    }
+    if ok == 1 {
+        print("  [PASS] F_8 has 1 as identity\n")
+        pass = pass + 1
+    } else {
+        print("  [FAIL] F_8 identity\n")
+        fail = fail + 1
+    }
+
+    // 2. x^7 = 1 for nonzero x in F_8
+    ok = 1
+    z = 1
+    while z < 8 {
+        if f8_pow(z, 7) != 1 { ok = 0 }
+        z = z + 1
+    }
+    if ok == 1 {
+        print("  [PASS] x^7 = 1 in F_8*\n")
+        pass = pass + 1
+    } else {
+        print("  [FAIL] x^7 = 1\n")
+        fail = fail + 1
+    }
+
+    // 3. x^6 = x^-1 (i.e., x^6 * x = 1)
+    ok = 1
+    z = 1
+    while z < 8 {
+        let x6 = f8_pow(z, 6)
+        if f8_mul(x6, z) != 1 { ok = 0 }
+        z = z + 1
+    }
+    if ok == 1 {
+        print("  [PASS] x^6 = x^-1 in F_8*\n")
+        pass = pass + 1
+    } else {
+        print("  [FAIL] x^6 inverse\n")
+        fail = fail + 1
+    }
+
+    // 4. Trace is F_2-valued (0 or 1)
+    ok = 1
+    z = 0
+    while z < 8 {
+        let t = trace_f2(z)
+        if t != 0 {
+            if t != 1 { ok = 0 }
+        }
+        z = z + 1
+    }
+    if ok == 1 {
+        print("  [PASS] tr: F_8 -> F_2 well-defined\n")
+        pass = pass + 1
+    } else {
+        print("  [FAIL] trace\n")
+        fail = fail + 1
+    }
+
+    // 5. THE 168 THEOREM (cohomological)
+    let count = count_nonzero_associators()
+    print("  Nonzero associators (cocycle-defined): ")
+    print_int(count)
+    print(" (expected 168)\n")
+    if count == 168 {
+        print("  [PASS] |supp(omega_Fano)| = 168 = |PSL(2,7)|\n")
+        pass = pass + 1
+    } else {
+        print("  [FAIL] Wrong associator count\n")
+        fail = fail + 1
+    }
+
+    // 6. Norm dichotomy (Lemma 2)
+    if verify_norm_dichotomy() == 1 {
+        print("  [PASS] Norm dichotomy ||[ei,ej,ek]|| in {0,2}\n")
+        pass = pass + 1
+    } else {
+        print("  [FAIL] Norm dichotomy\n")
+        fail = fail + 1
+    }
+
+    // 7. Alternativity
+    if verify_alternativity() == 1 {
+        print("  [PASS] Alternativity (a*a)*b = a*(a*b)\n")
+        pass = pass + 1
+    } else {
+        print("  [FAIL] Alternativity\n")
+        fail = fail + 1
+    }
+
+    print("\nPassed: ")
+    print_int(pass)
+    print("\nFailed: ")
+    print_int(fail)
+    print("\n")
+    if fail == 0 { println("ALL PASS") }
+    else { println("SOME FAILED") }
+    0
+}

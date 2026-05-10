@@ -108,3 +108,10 @@ Each entry is a markdown table row. New entries go at the **top** (most-recent f
 
 **Action**: Updated validation comments in `scripts/dev/run_epistemic_sedenion_hessian_kaxi.sh`.
 No commit blocker — findings are documentation/precision artifacts, not formula errors.
+
+---
+## 2026-05-10 — paper 168 cohomological Section 7 (WAIVED)
+
+| Date | Agent | Task | Provider | Target | Outcome | Note |
+|------|-------|------|----------|--------|---------|------|
+| 2026-05-10 | Claude Opus 4.7 | math-review | n/a | `168-theorem.typ` (Section 7), `168-refs.yml`, `168-revision-notes.md` | WAIVED | Mathematical content of Section 7 is a *restatement* of classical results from cited primary sources (Albuquerque-Majid 1999, Bremner-Hentzel 2017) — no new derivation. The single computational claim (8+7 sub-decomposition table) is independently verified by running `./bin/souc compile examples/cocycle_subspace_168.sio` (1/2 PASS, where 'fail' is intentional falsification of the naive 11+4 conjecture). Closed-form `T_k = 168·(2^{k-1}-1)(2^{k-2}-1)(2^{k-1}+3)/21` reproduces existing Conjecture 5 values numerically at k=3,4,5,6. WAIVED also because `bin/llm-offload --status` reports key file NOT FOUND in this session — math-review unavailable. Pre-publication review by domain specialist (Majid, Rowell, or Etingof) recommended before submission and explicitly noted in `168-revision-notes.md` Risks section. |

@@ -161,3 +161,110 @@ If the paper has not yet been assigned to referees, we would be grateful for the
 Best regards,
 Demetrios C. Agourakis
 Marli Gerenutti
+
+---
+
+## Revision 3 — Cohomological Reformulation (2026-05-10)
+
+Triggered by exploratory conversation on the categorical foundations of Sounio's
+hypercomplex type system. Discovery: the paper's existing arguments (Lemma 2's
+$ZZ_2^k$ grading + XOR + signs in $\{\pm 1\}$) are *literally* the structure
+identified by Albuquerque & Majid (1999) when octonions are realized as a twisted
+group algebra over $(ZZ/2)^3$. The paper was already cohomological without naming it.
+
+### What's new in Revision 3
+
+1. **Section 7 added** — Cohomological reformulation. Cites Albuquerque-Majid
+   1999 and Bremner-Hentzel 2017. States Theorem $1'$ and Lemma $2'$ as
+   restatements of the corresponding results in the language of $H^3((ZZ/2)^k, \{\pm 1\})$.
+
+2. **Closed-form identity derived** for $T_k$:
+
+   $$T_k = 168 \cdot \frac{(2^{k-1}-1)(2^{k-2}-1)(2^{k-1}+3)}{21}$$
+
+   Reproduces $T_3=168$, $T_4=1848$, $T_5=15960$, $T_6=130200$. The factor
+   $(2^{k-1}+3)$ is the "cohomological weight" of the Cayley-Dickson doubling
+   that Conjecture 5 numerically captures but does not enunciate.
+
+3. **Empirical sub-decomposition table** for $k=4$. Of the 15 three-dimensional
+   subspaces of $(ZZ/2)^4$:
+   - **8** are fully octonionic (associator count = 168 each)
+   - **7** carry an *intermediate cocycle class* (count = 96 each)
+   - **0** are trivial.
+
+   Sums to $8 \cdot 168 + 7 \cdot 96 = 2016 = T_4 + 168$, the overcount of 168
+   indicating exactly 56 non-LI triples in sedenions with nonzero associator
+   (each contained in three distinct $V_c$ via shared 2-dim parents).
+
+4. **Open Question 1 revised honestly**: The naive proof route via
+   "$11 = 15 - 4$ subspaces are fully octonionic" is *empirically falsified*.
+   The actual decomposition is $8 + 7$ with intermediate cocycle classes.
+   Any analytic proof of Conjecture 5 must classify these intermediate classes.
+   This is a productive negative result.
+
+5. **Categorical chassis** $\text{Hyper}(G, F)$ proposed as a unified parametric
+   primitive: $\mathbb{C} = \text{Hyper}((ZZ/2)^1, F_\mathbb{C})$,
+   $\mathbb{H} = \text{Hyper}((ZZ/2)^2, F_\mathbb{H})$,
+   $\mathbb{O} = \text{Hyper}((ZZ/2)^3, F_\text{Fano})$, etc. Forwards the
+   integration of the entire Cayley-Dickson tower into the Sounio compiler's
+   type system.
+
+### Computational verification (this revision)
+
+- `examples/phi_fano_cohomological.sio` — Implements $\varphi(x,y) = \text{tr}(y \cdot x^6)$
+  over $\mathbb{F}_8$ from scratch, confirms 168 + dichotomy + alternativity. **7/7 PASS**.
+- `examples/cocycle_subspace_168.sio` — Enumerates all 15 three-dim subspaces of
+  $(ZZ/2)^4$, computes per-subspace associator counts. Reveals the 8+7 trichotomy.
+  **1/2 PASS** (Conjecture 5 numeric confirmed; naive decomposition falsified).
+
+### What was *not* changed
+
+- Sections 1–6 are intact. Section 7 is purely additive.
+- Bibliography gains two entries: `albuquerque-majid-1999`, `bremner-hentzel-2017`.
+- The paper's central claims (Theorem 1, Lemma 2, Conjecture 5 numeric) stand.
+
+### Resolutions (2026-05-10, follow-up pass)
+
+The three risks initially raised have been retired:
+
+1. **Literature pass — done.** Searched 2023-2026 for octonion 168 cocycle
+   reformulations and Cayley-Dickson subspace decomposition. Most relevant
+   recent work is Wilmot, *"Structure of the Cayley-Dickson algebras"*,
+   arXiv:2505.11747 (May 2025) — it analyzes graded CD construction and
+   counts zero divisors as multiples of 84, but does **not** use the
+   Albuquerque-Majid twisted-group-algebra framework, does **not** discuss
+   PSL(2,7) or the 168 count, and does **not** treat the per-subspace
+   cocycle restriction decomposition. Section 7's territory is open.
+   (Wilmot is already cited in the existing paper at line 204 for an
+   unrelated automorphism-counting formula.)
+
+2. **k=5 extended — done.** `examples/cocycle_subspace_k5.sio` enumerates
+   all $P_5 = 155$ three-dim subspaces of $(\mathbb{Z}/2)^5$ via canonical
+   dual-functional pairs and tallies per-subspace nonzero associator
+   counts. Result: **seven distinct count classes** appear, not three.
+   The k=4 trichotomy does NOT generalize as a low-class structure.
+   New data added to Section 7 as `@table:subspace-k5`:
+
+   | Count per subspace | Number |
+   |---:|---:|
+   | 180 | 7 |
+   | 168 | 43 |
+   | 108 | 7 |
+   | 96 | 35 |
+   | 92 | 21 |
+   | 88 | 21 |
+   | 76 | 21 |
+   | **Total** | **155** |
+
+   Notable: count=180 > 168 means some trigintaduonion subspaces carry
+   *more* nonzero basis associators than the pure octonion subalgebra —
+   impossible in alternative algebras and absent at k=4. The
+   multiplicities (7, 43, 7, 35, 21, 21, 21) are integer combinations
+   of Fano-orbit cardinalities, suggesting an orbit-counting derivation.
+
+3. **Specialist review** — still recommended pre-publication, but the
+   content of Section 7 has been tightened to claim only what is either
+   (a) literally restated from cited primary sources (Albuquerque-Majid,
+   Bremner-Hentzel) or (b) directly verified by computation (`@table:subspace`,
+   `@table:subspace-k5`, the closed-form $T_k$ identity). No speculative
+   interpretation remains in the section that could embarrass on review.
