@@ -1,9 +1,35 @@
-// Pure-JS, Node-and-browser-portable core of the 14-compartment PBPK RK4.
+// Pure-JS, Node-and-browser-portable core of the 14-compartment well-stirred
+// PBPK using **arrow-matrix Crank-Nicolson** (G-α-δ; commit 33015d8f superseded
+// the prior explicit-RK4-dt=0.01 form that violated mass conservation by 172×
+// over 30 h — brain eigenvalue Q/(V·Kp)=303 h⁻¹ exceeded RK4's stability
+// boundary 2.785).
 //
 // Both `website/src/hooks/usePBPK14.ts` (the React adapter) and
 // `scripts/dissertation/run_pbpk14_node.mjs` (the parity-gate runner) consume
 // this module. Keeping it ESM .mjs with no TS-only syntax lets Node import it
 // directly without a build step.
+//
+// ODE: dx/dt = M·x + f, x = [C_b, C_1, ..., C_13]
+//   M[0,0] = -(Σ Q_i + cl_hep)/V_b
+//   M[0,i] =  Q_i / (V_b · Kp_i)        (venous return at C_i/Kp_i)
+//   M[i,0] =  Q_i / V_i                 (organ supply at C_b)
+//   M[i,i] = -Q_i / (V_i · Kp_i)
+//   f[0] = release/V_b
+//
+// CN: (I - dt·M/2)·x_new = (I + dt·M/2)·x_old + dt·f_mid
+// Arrow-matrix Schur-complement solve in O(N):
+//   h     = dt/2
+//   S     = h·(Σ Q + cl_hep)/V_b                  (Cb self in A)
+//   α_i   = h·Q_i / V_i                           (Cb ← Ci  ; A[i,0] = -α_i)
+//   α'_i  = h·Q_i / (V_i · Kp_i)                  (Ci self in A: 1+α'_i)
+//   β_i   = h·Q_i / (V_b · Kp_i)                  (Ci ← Cb in row 0)
+//   γ_i   = β_i / (1 + α'_i)
+//   b[0]  = (1-S)·C_b_old + Σ β_i·C_i_old + dt·release/V_b
+//   b[i]  = α_i·C_b_old + (1 - α'_i)·C_i_old
+//   x_new[0] = (b[0] + Σ γ_i·b[i]) / ((1+S) - Σ γ_i·α_i)
+//   x_new[i] = (b[i] + α_i·x_new[0]) / (1 + α'_i)
+//
+// A-stable, 2nd-order, mass-conserving (dM/dt = -cl_hep·C_b exactly).
 //
 // Compartment indexing matches `website/src/components/dissertation/compartments.ts`
 // and is *different* from `tests/run-pass/dissertation_pbpk14_gum.sio` — the
@@ -34,33 +60,8 @@ export const DEFAULT_PARAMS = Object.freeze({
 });
 
 /**
- * Right-hand side of dC/dt. Writes into `out` in place.
- *
- * @param {Float64Array} C        Length-14 concentrations, mg/L
- * @param {Float64Array} out      Length-14 derivative target, mg/(L·h)
- * @param {PBPKParams}   params
- * @param {number}       releaseRate  Drug release into blood, mg/h
- */
-export function rhs(C, out, params, releaseRate) {
-  const cBlood = C[0];
-  let bloodFluxOut = 0; // mg/h leaving blood toward organs
-  for (let i = 1; i < N; i++) {
-    const v = V_REF[i] * params.vdScale;
-    const flux = Q[i] * (cBlood - C[i] / KP[i]); // mg/h delivered to organ i
-    out[i] = flux / v;
-    bloodFluxOut += flux;
-  }
-  const vBlood = V_REF[0] * params.vdScale;
-  out[0] = (-bloodFluxOut + releaseRate - params.clHep * cBlood) / vBlood;
-}
-
-/**
  * Stent release rate at time t. Higuchi diffusion clipped at t < 0.1 h to
  * avoid 1/√0 divergence.
- *
- * @param {number} tHours
- * @param {PBPKParams} params
- * @returns {number} mg/h released into blood
  */
 export function releaseRateAt(tHours, params) {
   if (!params.stentActive) return 0;
@@ -69,42 +70,81 @@ export function releaseRateAt(tHours, params) {
 }
 
 /**
- * One RK4 step. Mutates `C` in place. Returns the new cumulative released mg
- * (caller accumulates).
- *
- * @param {Float64Array} C
- * @param {number} tHours    Time at the start of the step
- * @param {number} dtHours
- * @param {PBPKParams} params
- * @param {{k1: Float64Array, k2: Float64Array, k3: Float64Array, k4: Float64Array, tmp: Float64Array}} scratch
- * @returns {number} drug mass released during this step (mg)
+ * One arrow-matrix CN step on the 14-state well-stirred PBPK14. Mutates `C`
+ * in place. Returns mg released this step. A-stable, 2nd-order, mass-
+ * conserving (replaces the prior explicit-RK4 step which violated stability
+ * because brain λ = Q/(V·Kp) = 303 h⁻¹ exceeded RK4's boundary at dt = 0.01).
  */
-export function stepRK4(C, tHours, dtHours, params, scratch) {
-  const { k1, k2, k3, k4, tmp } = scratch;
-  // Approximation: hold releaseRate constant across the step (release is a
-  // slow-varying source vs ODE timescale; secondary-effect on parity).
-  const release = releaseRateAt(tHours, params);
-  rhs(C, k1, params, release);
-  for (let i = 0; i < N; i++) tmp[i] = C[i] + 0.5 * dtHours * k1[i];
-  rhs(tmp, k2, params, release);
-  for (let i = 0; i < N; i++) tmp[i] = C[i] + 0.5 * dtHours * k2[i];
-  rhs(tmp, k3, params, release);
-  for (let i = 0; i < N; i++) tmp[i] = C[i] + dtHours * k3[i];
-  rhs(tmp, k4, params, release);
-  for (let i = 0; i < N; i++) {
-    C[i] += (dtHours / 6) * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]);
-    if (C[i] < 0) C[i] = 0;
+export function stepCN(C, tHours, dtHours, params, scratch) {
+  const h = 0.5 * dtHours;
+  const Vb = V_REF[0] * params.vdScale;
+  const release = releaseRateAt(tHours + h, params);
+
+  // Populate `k1` with the natural ODE rhs at start of step. This is used by
+  // `usePBPK14.ts` as a |dC/dt| surrogate for the GUM-cone uncertainty
+  // visual (uncertNorm in the React adapter). Not used by the CN solve.
+  if (scratch.k1) {
+    const k1 = scratch.k1;
+    const cBlood = C[0];
+    let bloodFluxOut = 0;
+    for (let i = 1; i < N; i++) {
+      const Vi = V_REF[i] * params.vdScale;
+      const flux = Q[i] * (cBlood - C[i] / KP[i]);
+      k1[i] = flux / Vi;
+      bloodFluxOut += flux;
+    }
+    k1[0] = (-bloodFluxOut + release - params.clHep * cBlood) / Vb;
+  }
+
+  let sumQ = 0;
+  for (let i = 1; i < N; i++) sumQ += Q[i];
+  const S = h * (sumQ + params.clHep) / Vb;
+
+  const cbOld = C[0];
+  let rhs0 = (1 - S) * cbOld + dtHours * release / Vb;
+  for (let i = 1; i < N; i++) {
+    const beta = h * Q[i] / (Vb * KP[i]);
+    rhs0 += beta * C[i];
+  }
+
+  const alpha = scratch.alpha;
+  const alphaP = scratch.alphaP;
+  const bi = scratch.bi;
+  let denomAcc = 0;
+  let numAcc = 0;
+  for (let i = 1; i < N; i++) {
+    const Vi = V_REF[i] * params.vdScale;
+    const a = h * Q[i] / Vi;
+    const ap = a / KP[i];
+    alpha[i] = a;
+    alphaP[i] = ap;
+    bi[i] = a * cbOld + (1 - ap) * C[i];
+    const beta = h * Q[i] / (Vb * KP[i]);
+    const gamma = beta / (1 + ap);
+    denomAcc += gamma * a;
+    numAcc += gamma * bi[i];
+  }
+  const cbNew = (rhs0 + numAcc) / ((1 + S) - denomAcc);
+  C[0] = cbNew < 0 ? 0 : cbNew;
+  for (let i = 1; i < N; i++) {
+    const ci = (bi[i] + alpha[i] * cbNew) / (1 + alphaP[i]);
+    C[i] = ci < 0 ? 0 : ci;
   }
   return release * dtHours;
 }
 
+// Backward-compat alias for any caller still using the old explicit-RK4 name.
+// The new step uses fully-implicit arrow-CN and is mass-conserving.
+export const stepRK4 = stepCN;
+
 export function makeScratch() {
   return {
-    k1: new Float64Array(N),
-    k2: new Float64Array(N),
-    k3: new Float64Array(N),
-    k4: new Float64Array(N),
-    tmp: new Float64Array(N),
+    alpha:  new Float64Array(N),
+    alphaP: new Float64Array(N),
+    bi:     new Float64Array(N),
+    // k1 retained for the React adapter's |dC/dt| GUM-cone surrogate (the
+    // CN step populates it with the natural ODE rhs at start of step).
+    k1:     new Float64Array(N),
   };
 }
 

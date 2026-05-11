@@ -84,52 +84,71 @@ fn q_at(i: i64) -> f64 {
 
 fn cl_hep() -> f64 { return 12.4 }
 
-// Right-hand side: dC/dt for all 14 compartments.
-fn rhs(C: &PbpkState) -> PbpkState with Mut, Div {
-    var out = pbpk_zero()
-    var c_blood = C.v[0]
-    var blood_flux_out = 0.0
+// Arrow-matrix Crank-Nicolson on the 14-state well-stirred PBPK14.
+// REPLACES the prior explicit-RK4 step which violated mass conservation
+// (172× growth over 30 h) — brain eigenvalue Q/(V·Kp) = 303 h⁻¹ exceeded
+// RK4's stability boundary at dt = 0.01. CN is A-stable, 2nd-order, and
+// dM/dt = -cl_hep·C_b is preserved exactly by the algorithm.
+//
+//   h     = dt/2
+//   S     = h·(Σ Q + cl_hep)/V_b
+//   α_i   = h·Q_i / V_i
+//   α'_i  = h·Q_i / (V_i · Kp_i)
+//   β_i   = h·Q_i / (V_b · Kp_i)
+//   γ_i   = β_i / (1 + α'_i)
+//   b[0]  = (1-S)·C_b_old + Σ β_i·C_i_old   (no release in parity ref)
+//   b[i]  = α_i·C_b_old + (1-α'_i)·C_i_old
+//   C_b_new = (b[0] + Σ γ_i·b[i]) / ((1+S) - Σ γ_i·α_i)
+//   C_i_new = (b[i] + α_i·C_b_new) / (1 + α'_i)
+fn rk4_step(C: &PbpkState, dt: f64) -> PbpkState with Mut, Div {
+    let h = 0.5 * dt
+    let vb = vref_at(0)
+
+    var sum_q = 0.0
     var i = 1
     while i < 14 {
-        var flux = q_at(i) * (c_blood - C.v[i] / kp_at(i))  // mg/h to organ i
-        out.v[i] = flux / vref_at(i)
-        blood_flux_out = blood_flux_out + flux
+        sum_q = sum_q + q_at(i)
         i = i + 1
     }
-    out.v[0] = (0.0 - blood_flux_out - cl_hep() * c_blood) / vref_at(0)
-    return out
-}
+    let big_s = h * (sum_q + cl_hep()) / vb
 
-fn axpy(base: &PbpkState, scale: f64, deriv: &PbpkState) -> PbpkState with Mut {
-    var r = pbpk_zero()
-    var i = 0
+    let cb_old = C.v[0]
+    var rhs0 = (1.0 - big_s) * cb_old
+    i = 1
     while i < 14 {
-        r.v[i] = base.v[i] + scale * deriv.v[i]
+        let beta = h * q_at(i) / (vb * kp_at(i))
+        rhs0 = rhs0 + beta * C.v[i]
         i = i + 1
     }
-    return r
-}
 
-fn rk4_step(C: &PbpkState, dt: f64) -> PbpkState with Mut, Div {
-    var k1 = rhs(C)
-    var s1 = axpy(C, 0.5 * dt, &k1)
-    var k2 = rhs(&s1)
-    var s2 = axpy(C, 0.5 * dt, &k2)
-    var k3 = rhs(&s2)
-    var s3 = axpy(C, dt, &k3)
-    var k4 = rhs(&s3)
-    var sum = pbpk_zero()
-    var i = 0
+    var alpha: [f64; 14] = [0.0; 14]
+    var alphap: [f64; 14] = [0.0; 14]
+    var bi: [f64; 14] = [0.0; 14]
+    var denom_acc = 0.0
+    var num_acc = 0.0
+    i = 1
     while i < 14 {
-        sum.v[i] = k1.v[i] + 2.0 * k2.v[i] + 2.0 * k3.v[i] + k4.v[i]
+        let vi = vref_at(i)
+        let a = h * q_at(i) / vi
+        let ap = a / kp_at(i)
+        alpha[i] = a
+        alphap[i] = ap
+        bi[i] = a * cb_old + (1.0 - ap) * C.v[i]
+        let beta = h * q_at(i) / (vb * kp_at(i))
+        let gamma = beta / (1.0 + ap)
+        denom_acc = denom_acc + gamma * a
+        num_acc = num_acc + gamma * bi[i]
         i = i + 1
     }
-    var next = axpy(C, dt / 6.0, &sum)
-    // Clamp non-negative
-    var j = 0
-    while j < 14 {
-        if next.v[j] < 0.0 { next.v[j] = 0.0 }
-        j = j + 1
+
+    let cb_new = (rhs0 + num_acc) / ((1.0 + big_s) - denom_acc)
+    var next = pbpk_zero()
+    next.v[0] = if cb_new < 0.0 { 0.0 } else { cb_new }
+    i = 1
+    while i < 14 {
+        let ci = (bi[i] + alpha[i] * cb_new) / (1.0 + alphap[i])
+        next.v[i] = if ci < 0.0 { 0.0 } else { ci }
+        i = i + 1
     }
     return next
 }
