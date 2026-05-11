@@ -44,6 +44,9 @@
 #                  cl_proteolytic=0.077 L/h, peptide Kp/PS). RMSE < 1.0% per
 #                  organ on cavg. Demonstrates the DrugProfile abstraction —
 #                  same PBPK28 integrator, different drug.
+#   8. HARD GATE — Semaglutide TMDD parity (G-δ-2): Node ↔ Sounio on GLP-1R
+#                  binding at brain=3, gut=8, pancreas=12 (K_d = 0.4 nM,
+#                  Lau 2015). R_free and DR within 1.0% RMSE per organ.
 
 set -euo pipefail
 
@@ -564,3 +567,61 @@ awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
     }
   }
 ' "$SEMA_JOINED"
+
+# ─── Case 8: Semaglutide TMDD parity Node ↔ Sounio (G-δ-2) ───────────────────
+echo
+echo "[pbpk28-parity] Case 8: Sounio ↔ Node semaglutide GLP-1R TMDD (brain, gut, pancreas)"
+
+SEMA_SIO_TMDD_TSV="$OUT_DIR/sema_sounio_tmdd.tsv"
+SEMA_NODE_TMDD_TSV="$OUT_DIR/sema_node_tmdd.tsv"
+parse_tmdd_tsv "$SEMA_SIO_LOG" "$SEMA_SIO_TMDD_TSV"
+parse_tmdd_tsv "$SEMA_NODE_LOG" "$SEMA_NODE_TMDD_TSV"
+
+SEMA_SIO_TMDD_ROWS=$(wc -l < "$SEMA_SIO_TMDD_TSV")
+SEMA_NODE_TMDD_ROWS=$(wc -l < "$SEMA_NODE_TMDD_TSV")
+EXPECTED_SEMA_TMDD=$((12 * 3))
+if [[ "$SEMA_SIO_TMDD_ROWS" -ne "$EXPECTED_SEMA_TMDD" || "$SEMA_NODE_TMDD_ROWS" -ne "$EXPECTED_SEMA_TMDD" ]]; then
+  echo "[pbpk28-parity:case8] FAIL: sema-TMDD row mismatch — Sounio=$SEMA_SIO_TMDD_ROWS Node=$SEMA_NODE_TMDD_ROWS expected=$EXPECTED_SEMA_TMDD" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case8] both runs emitted $SEMA_SIO_TMDD_ROWS sema-TMDD records"
+
+SEMA_JOINED_TMDD="$OUT_DIR/sema_joined_tmdd.tsv"
+awk -F'\t' '
+  NR==FNR { Rs[$1"|"$2] = $3; Ds[$1"|"$2] = $4; next }
+  { print $1"\t"$2"\t"Rs[$1"|"$2]"\t"$3"\t"Ds[$1"|"$2]"\t"$4 }
+' "$SEMA_SIO_TMDD_TSV" "$SEMA_NODE_TMDD_TSV" > "$SEMA_JOINED_TMDD"
+
+awk -F'\t' '
+  BEGIN { THR = 1.0; organ[3]="brain"; organ[8]="gut"; organ[12]="pancreas"; }
+  {
+    i = $2 + 0;
+    rs = $3 + 0; rn = $4 + 0;
+    ds = $5 + 0; dn = $6 + 0;
+    dR = rs - rn; dD = ds - dn;
+    SSR[i] += dR * dR;  SSD[i] += dD * dD;
+    NN[i] += 1;
+    if (rs > PKR[i]) PKR[i] = rs;  if (rn > PKR[i]) PKR[i] = rn;
+    if (ds > PKD[i]) PKD[i] = ds;  if (dn > PKD[i]) PKD[i] = dn;
+  }
+  END {
+    bad = 0;
+    printf "%-3s %-9s %-12s %-12s %-10s  %-12s %-12s %-10s\n", "i", "organ", "rmse_Rfree", "peak_Rfree", "Rfree_pct", "rmse_DR", "peak_DR", "DR_pct";
+    for (idx = 0; idx < 14; idx++) {
+      if (NN[idx] == 0) continue;
+      i = idx;
+      rmseR = sqrt(SSR[i] / NN[i]); pctR = (PKR[i] != 0) ? 100 * rmseR / PKR[i] : 0;
+      rmseD = sqrt(SSD[i] / NN[i]); pctD = (PKD[i] != 0) ? 100 * rmseD / PKD[i] : 0;
+      statR = (pctR < THR) ? "OK" : "FAIL"; statD = (pctD < THR) ? "OK" : "FAIL";
+      if (statR == "FAIL" || statD == "FAIL") bad += 1;
+      printf "%-3d %-9s %-12.6e %-12.6e %-7.4f %s  %-12.6e %-12.6e %-7.4f %s\n", \
+             i, organ[i], rmseR, PKR[i], pctR, statR, rmseD, PKD[i], pctD, statD;
+    }
+    if (bad > 0) {
+      printf "PBPK28_SEMA_TMDD_PARITY_FAIL %d organ(s) exceed threshold\n", bad;
+      exit 1;
+    } else {
+      printf "PBPK28_SEMA_TMDD_PARITY_PASS 3/3 GLP-1R organs within 1.0%% RMSE on (R_free, DR)\n";
+    }
+  }
+' "$SEMA_JOINED_TMDD"

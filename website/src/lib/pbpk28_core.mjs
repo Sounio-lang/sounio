@@ -220,6 +220,20 @@ export const PS_SEMAGLUTIDE = Object.freeze([
 export const SEMA_KA_DEFAULT = Math.LN2 / 60.0;
 export const SEMA_F_DEFAULT  = 0.89;
 
+// ─── Semaglutide TMDD: GLP-1R binding (pancreas, gut, brain) — G-δ-2 ──────
+// GLP-1R distribution and density from Knudsen 2019 (semaglutide vs liraglutide
+// receptor occupancy) + Lau 2015 (sema-GLP-1R affinity K_d ≈ 0.4 nM).
+// Pancreatic β-cells are the highest-density site; enteroendocrine L-cells in
+// gut and arcuate-nucleus neurons in brain are lower but clinically relevant
+// (gut → satiety signaling; brain → central anorectic effect).
+export const TMDD_ORGANS_SEMAGLUTIDE = Object.freeze([3, 8, 12]);  // brain, gut, pancreas
+
+export const TMDD_PARAMS_SEMAGLUTIDE = Object.freeze({
+  3:  tmddParams(/*R_total*/ 1.0, /*k_deg*/ 0.05, /*k_on*/ 0.50, /*K_d*/ 0.40, /*k_int*/ 0.050),  // brain
+  8:  tmddParams(                 2.0,            0.05,         0.50,        0.40,            0.050),  // gut
+  12: tmddParams(                 5.0,            0.05,         0.50,        0.40,            0.050),  // pancreas
+});
+
 export const DEFAULT_PARAMS_SEMAGLUTIDE = Object.freeze({
   clHep: 0.077,                             // L/h — proteolytic clearance (Overgaard 2019)
   higuchiScale: 1.0,                        // unused for SC depot release
@@ -234,10 +248,9 @@ export const DEFAULT_PARAMS_SEMAGLUTIDE = Object.freeze({
   releaseKa: SEMA_KA_DEFAULT,
   releaseF:  SEMA_F_DEFAULT,
   releaseDoseMg: 1.0,                       // typical weekly dose
-  // G-δ-2 will add tmddOrgans (pancreas, gut, brain) for GLP-1R
+  tmddOrgans: TMDD_ORGANS_SEMAGLUTIDE,
+  tmddParams: TMDD_PARAMS_SEMAGLUTIDE,
   // G-δ-3 will add pdOrgans (glucose-insulin minimal model)
-  tmddOrgans: [],
-  tmddParams: {},
   pdOrgans:   [],
   pdParams:   {},
 });

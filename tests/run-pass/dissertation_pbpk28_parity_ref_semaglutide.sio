@@ -133,6 +133,105 @@ fn sema_ka() -> f64 { return 0.011552453009332421 }   // ln(2)/60 h ≈ 0.01155 
 fn sema_f() -> f64  { return 0.89 }
 fn sema_dose_mg() -> f64 { return 1.0 }            // typical weekly dose
 
+fn mw_semaglutide() -> f64 { return 4113.58 }
+
+// ─── Semaglutide TMDD: GLP-1R (brain=3, gut=8, pancreas=12) — G-δ-2 ──────
+// Knudsen 2019 (semaglutide GLP-1R occupancy); Lau 2015 (K_d = 0.4 nM).
+fn tmdd_is_organ(i: i64) -> bool {
+    if i ==  3 { return true }
+    if i ==  8 { return true }
+    if i == 12 { return true }
+    return false
+}
+
+fn tmdd_rtotal0_at(i: i64) -> f64 {
+    if i ==  3 { return 1.0 }     // brain (arcuate nucleus, low density)
+    if i ==  8 { return 2.0 }     // gut (L-cells)
+    if i == 12 { return 5.0 }     // pancreas (β-cells, highest density)
+    return 0.0
+}
+
+fn tmdd_kdeg_at(i: i64) -> f64 { return 0.05 }    // 1/h (GPCR turnover)
+fn tmdd_kon_at(i: i64)  -> f64 { return 0.50 }    // L/(nmol·h) (peptide-GPCR)
+fn tmdd_kd_at(i: i64)   -> f64 { return 0.40 }    // nmol/L (Lau 2015)
+fn tmdd_kint_at(i: i64) -> f64 { return 0.050 }   // 1/h (GPCR internalization)
+fn tmdd_koff_at(i: i64) -> f64 { return tmdd_kon_at(i) * tmdd_kd_at(i) }
+fn tmdd_ksyn_at(i: i64) -> f64 { return tmdd_kdeg_at(i) * tmdd_rtotal0_at(i) }
+
+// Newton-linearized 3×3 implicit step on (C_t_nM, R_free, DR) — identical
+// algorithm to the rapamycin TMDD step; only parameters differ.
+fn tmdd_step_organ(state: Pbpk28, i: i64, dt: f64) -> Pbpk28 with Mut, Div {
+    if !tmdd_is_organ(i) { return state }
+    var r = state
+    let h = 0.5 * dt
+    let mass_to_nm = 1.0e6 / mw_semaglutide()
+    let nm_to_mass = mw_semaglutide() * 1.0e-6
+    let ct_old_mass = r.ct[i]
+    let ct_old_nm = if ct_old_mass < 0.0 { 0.0 } else { ct_old_mass * mass_to_nm }
+    let rf_old = r.rfree[i]
+    let dr_old = r.dr[i]
+
+    let k_on = tmdd_kon_at(i)
+    let k_off = tmdd_koff_at(i)
+    let k_int = tmdd_kint_at(i)
+    let k_syn = tmdd_ksyn_at(i)
+    let k_deg = tmdd_kdeg_at(i)
+
+    let kon_rf  = k_on * rf_old
+    let kon_ct  = k_on * ct_old_nm
+    let bil_old = k_on * ct_old_nm * rf_old
+
+    let m00 = 0.0 - kon_rf
+    let m01 = 0.0 - kon_ct
+    let m02 = k_off
+    let m10 = 0.0 - kon_rf
+    let m11 = (0.0 - k_deg) - kon_ct
+    let m12 = k_off
+    let m20 = kon_rf
+    let m21 = kon_ct
+    let m22 = 0.0 - (k_off + k_int)
+
+    let f0 = bil_old
+    let f1 = k_syn + bil_old
+    let f2 = 0.0 - bil_old
+
+    let rhs0 = (1.0 + h*m00) * ct_old_nm + (h*m01) * rf_old + (h*m02) * dr_old + dt * f0
+    let rhs1 = (h*m10) * ct_old_nm + (1.0 + h*m11) * rf_old + (h*m12) * dr_old + dt * f1
+    let rhs2 = (h*m20) * ct_old_nm + (h*m21) * rf_old + (1.0 + h*m22) * dr_old + dt * f2
+
+    let a00 = 1.0 - h*m00
+    let a01 = 0.0 - h*m01
+    let a02 = 0.0 - h*m02
+    let a10 = 0.0 - h*m10
+    let a11 = 1.0 - h*m11
+    let a12 = 0.0 - h*m12
+    let a20 = 0.0 - h*m20
+    let a21 = 0.0 - h*m21
+    let a22 = 1.0 - h*m22
+
+    let c00 = a11*a22 - a12*a21
+    let c01 = a12*a20 - a10*a22
+    let c02 = a10*a21 - a11*a20
+    let det = a00*c00 + a01*c01 + a02*c02
+
+    let c10 = a02*a21 - a01*a22
+    let c11 = a00*a22 - a02*a20
+    let c12 = a01*a20 - a00*a21
+    let c20 = a01*a12 - a02*a11
+    let c21 = a02*a10 - a00*a12
+    let c22 = a00*a11 - a01*a10
+
+    let ct_new_nm = (c00*rhs0 + c10*rhs1 + c20*rhs2) / det
+    let rf_new    = (c01*rhs0 + c11*rhs1 + c21*rhs2) / det
+    let dr_new    = (c02*rhs0 + c12*rhs1 + c22*rhs2) / det
+
+    let ct_new_clamped = if ct_new_nm < 0.0 { 0.0 } else { ct_new_nm }
+    r.ct[i] = ct_new_clamped * nm_to_mass
+    r.rfree[i] = if rf_new < 0.0 { 0.0 } else { rf_new }
+    r.dr[i] = if dr_new < 0.0 { 0.0 } else { dr_new }
+    return r
+}
+
 // Taylor exp_neg for release rate (argument always non-positive: -k_a·t).
 fn exp_neg(x: f64) -> f64 with Mut, Div {
     if x == 0.0 { return 1.0 }
@@ -246,7 +345,11 @@ fn full_cn_step(state: Pbpk28, dt: f64, rel_mid: f64) -> Pbpk28 with Mut, Div {
 
 fn strang_step(state: Pbpk28, t_start: f64, dt: f64) -> Pbpk28 with Mut, Div {
     let rel_mid = release_rate_at(t_start + 0.5 * dt)
-    return full_cn_step(state, dt, rel_mid)
+    var s = full_cn_step(state, dt, rel_mid)
+    s = tmdd_step_organ(s, 3, dt)
+    s = tmdd_step_organ(s, 8, dt)
+    s = tmdd_step_organ(s, 12, dt)
+    return s
 }
 
 fn integrate_to(state: Pbpk28, t_start: f64, t_end: f64, dt: f64) -> Pbpk28 with Mut, Div {
@@ -277,6 +380,14 @@ fn emit_at(state: &Pbpk28, t: f64) with IO, Mut {
         let avg = if i == 0 { state.cv[0] } else { vasc_frac_at(i) * state.cv[i] + (1.0 - vasc_frac_at(i)) * state.ct[i] }
         println(avg)
         println("")
+        if tmdd_is_organ(i) {
+            print("PARITY|rfree=")
+            println(state.rfree[i])
+            println("")
+            print("PARITY|dr=")
+            println(state.dr[i])
+            println("")
+        }
         i = i + 1
     }
 }
@@ -297,6 +408,10 @@ fn main() -> i32 with IO, Mut, Div, Panic {
 
     var C = pbpk28_zero()
     // No IV bolus — drug enters via SC depot release.
+    // TMDD organs: initialize R_free at baseline R_total_0, DR at 0.
+    C.rfree[3]  = tmdd_rtotal0_at(3)
+    C.rfree[8]  = tmdd_rtotal0_at(8)
+    C.rfree[12] = tmdd_rtotal0_at(12)
 
     let dt = 0.001
     var t = 0.0
