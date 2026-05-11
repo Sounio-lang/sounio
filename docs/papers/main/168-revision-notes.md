@@ -640,3 +640,133 @@ GL(k', F₂) ⊂ GL(k, F₂) actions for k' < k.
 - Lane 3 build target green: cocycle_subspace_{168,k5,k6,k7,k8,k9}.sio
   all compile and pass their internal checks.
 - Wall clock: full k=9 enumeration in 11.5 s on Linux x86-64 native.
+
+---
+
+## Revision 3.5 — Lane 3 follow-up: k=10 (2048-ions, dim 1024) confirms four-level saturation; anomaly factorisation refines (2026-05-10)
+
+Lane 3 continuation past Revision 3.4 (three-level saturation result):
+added the seventh empirical data point in the 1024-dimensional Cayley-
+Dickson algebra. Two purposes: test the four-level-plateau hypothesis,
+and check whether the count-168 anomaly factorisation continues with
+exactly two primes.
+
+### What's new
+
+- `examples/cocycle_subspace_k10.sio` (NEW). Builds the 1024×1024
+  multiplication table for the k=10 CD algebra (2048-ions) via seven
+  CD doublings 𝕆→𝕊→𝕋→𝕮→ℝ→𝕍→𝕂→𝕃. Static memory: 1024² × 2 i64
+  = 16 MB BSS for the k=10 table alone, plus ~5.34 MB for all lower-CD
+  tables ≈ 21.3 MB total. Compiles cleanly under the Sounio native
+  compiler (no observed BSS-zero-init limit even at 16 MB).
+- Enumerates 6,347,715 = P_10 three-dim subspaces of (ℤ/2)^10 via
+  direct 3-LI-generator enumeration. Total enumeration wall clock:
+  **95 s** on Linux x86-64. Inner-loop VLIST optimization: 7³ = 343
+  associator calls per canonical.
+- `@table:subspace-k10` added to Section 7.
+
+### Empirical findings
+
+**23 distinct count classes** at k=10 — same count AND same values as
+k=7, 8, 9. The class set
+{72, 76, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110,
+ 168, 180, 184, 186, 188, 190, 194}
+is now confirmed bit-identical across **four consecutive levels**
+(k=7, 8, 9, 10).
+
+| Count | Mult.    | Count | Mult.    |
+|---:|---:|---:|---:|
+| 194 | 29295    | 100 | 13671    |
+| 190 | 117180   | 98  | 160146   |
+| 188 | 13671    | 96  | 15442    |
+| 186 | 87885    | 94  | 376929   |
+| 184 | 13671    | 92  | 14994    |
+| 180 | 441      | 90  | 597618   |
+| 168 | 569327   | 88  | 1368423  |
+| 110 | 29295    | 86  | 351540   |
+| 108 | 451584   | 84  | 13671    |
+| 106 | 117180   | 76  | 1354752  |
+| 104 | 13671    | 72  | 520149   |
+| 102 | 117180   | —   | —        |
+
+(Sum = 6,347,715 = P_10, ✓.)
+
+### Three findings
+
+1. **Saturation across four consecutive levels.** Class-count chain
+   {1, 2, 7, 16, 23, 23, 23, 23} at k ∈ {3..10}. Distinct-count set
+   stays bit-identical at k=7, 8, 9, 10. Very strong evidence the
+   limiting set is exactly the 23 values listed above.
+
+2. **Conjecture 5 holds at SEVEN consecutive levels.** Predicted
+   T_10 = 168·(P_10 − 4·P_9) = 168·3195575 = 536,856,600.
+   Measured: 536,856,600 (bit-exact). Closed-form
+   `T_k = 168·(2^{k-1}−1)(2^{k-2}−1)(2^{k-1}+3)/21` validated at
+   k ∈ {4, 5, 6, 7, 8, 9, 10}.
+
+3. **Anomaly factorisation transitions from two primes to three.**
+   At k=6,7,8,9 the count-168 multiplicity was a two-prime non-7
+   product. At k=10 the multiplicity is 569327 = **11 · 73 · 709**
+   — THREE primes, still non-7. The "two-prime" pattern was therefore
+   not the structural feature; the structural feature is **non-7
+   divisibility**. The number of prime factors evidently grows
+   slowly with k.
+
+### Updated anomaly factorisation table
+
+| k  | mult     | factorisation     | non-7 form              |
+|----|---------:|:------------------|:------------------------|
+| 4  | 0        | —                 | (no count=168 class)    |
+| 5  | 43       | 43 (prime)        | single prime, non-7     |
+| 6  | 247      | 13 · 19           | two primes, non-7       |
+| 7  | 1535     | 5 · 307           | two primes, non-7       |
+| 8  | 10383    | 3 · 3461          | two primes, non-7       |
+| 9  | 75183    | 3 · 25061         | two primes, non-7       |
+| 10 | 569327   | 11 · 73 · 709     | **three** primes, non-7 |
+
+At k=10 the largest prime factor (709) is dramatically smaller than
+at k=9 (25061), even though the multiplicity itself is 7.57× larger.
+This reflects the structural transition from two- to three-prime
+factorisation rather than a discontinuity in the orbit structure.
+
+### Anomaly multiplicity growth ratios
+
+Consecutive ratios mult(k+1) / mult(k):
+
+| k → k+1 | Ratio |
+|---------|------:|
+| 5 → 6   | 5.74  |
+| 6 → 7   | 6.21  |
+| 7 → 8   | 6.76  |
+| 8 → 9   | 7.24  |
+| 9 → 10  | 7.57  |
+
+Monotone increasing, converging from below toward 8 = 2³. Five
+consecutive ratios now support this conjecture.
+
+### Pattern in non-anomaly multiplicities
+
+The factor 31 = 2⁵ − 1 continues to appear in many k=10 multiplicities,
+e.g. count=184/188 mult=13671 = 3² · 7² · 31; count=110/194 mult=29295
+= 3³ · 5 · 7² · 31. The GL(5, F₂) subgroup observation from Revision 3.4
+extends. Notable new factor: count=88 has mult=1368423 = 3 · 7 · 65163,
+the dominant class at k=10 (1.37 M subspaces out of 6.35 M, 21.6%).
+
+### Memory observation
+
+The Sounio native compiler handles a 16 MB static array
+`[i64; 1048576]` without complaint. This is the largest single static
+allocation in the example chain to date. The total static BSS for
+k=10 including all lower CD tables is ~21.3 MB.
+
+### Status
+
+- T_3, T_4, T_5, T_6, T_7, T_8, T_9, T_10 all numerically confirmed
+  against Conjecture 5 closed form (**seven** consecutive levels at k≥4).
+- Revised Open Question 1 now has **seven** empirical inputs (k=4..10)
+  AND a four-level saturation result: 23 orbit classes confirmed at
+  k=7, 8, 9, 10 — very strong evidence for the limiting-orbit-set
+  conjecture.
+- Lane 3 build target green: cocycle_subspace_{168,k5,k6,k7,k8,k9,k10}.sio
+  all compile and pass their internal checks.
+- Wall clock: full k=10 enumeration in 95 s on Linux x86-64 native.

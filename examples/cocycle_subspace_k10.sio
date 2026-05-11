@@ -1,0 +1,704 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Cohomological subspace decomposition at k=10 (2048-ions, dim 1024)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Lane 3 continuation past cocycle_subspace_k9.sio. Walks one more level
+// up the Cayley-Dickson tower and enumerates the 6,347,715 = P_10 =
+// [10 choose 3]_2 three-dimensional subspaces of (Z/2)^10 in the
+// 1024-dim CD algebra.
+//
+// Predicted total (Conjecture 5, validated at k=4..9):
+//   T_k = 168 * (P_k - 4 * P_{k-1})
+//   T_10 = 168 * (6,347,715 - 4 * 788,035) = 168 * 3,195,575 = 536,856,600.
+//
+// Tests whether the three-level saturation plateau {23, 23, 23} at
+// k ∈ {7, 8, 9} extends to a FOURTH consecutive level. Class-count chain
+// so far: {1, 2, 7, 16, 23, 23, 23} at k ∈ {3..9}.
+//
+// Memory: this is the bulkiest example in the chain. 1024² = 1,048,576
+// entries per table = 8 MB per i64 array. Two arrays (MUL+SGN) for k=10
+// alone = 16 MB BSS. Total static memory including all lower CD doublings:
+// ~21.3 MB. If the Sounio native compiler rejects the 1M-entry static
+// array, fall back to either i32 entries (8 MB combined) or chunked
+// allocation (not yet attempted in the chain).
+//
+// Runtime: ~3-5 min wall clock. Comprises:
+//   - count_total at 1023³ ≈ 1.07G associator triples
+//   - canonical enumeration over ~1023³/6 ≈ 178M raw triples
+//   - 6,347,715 canonicals × 7³ = 2.18G inner associator calls
+// All inner calls are ~6 array lookups; total ~10G ops. Bound the gate
+// timeout at 600s.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Octonion multiplication table.
+var O_MUL: [i64; 64] = [0; 64]
+var O_SGN: [i64; 64] = [0; 64]
+
+fn init_oct() with Mut {
+    var i = 0
+    while i < 8 {
+        O_MUL[0 * 8 + i] = i
+        O_SGN[0 * 8 + i] = 1
+        O_MUL[i * 8 + 0] = i
+        O_SGN[i * 8 + 0] = 1
+        i = i + 1
+    }
+    i = 1
+    while i < 8 {
+        O_MUL[i * 8 + i] = 0
+        O_SGN[i * 8 + i] = 0 - 1
+        i = i + 1
+    }
+    var FA: [i64; 7] = [1, 2, 3, 4, 5, 6, 7]
+    var FB: [i64; 7] = [2, 3, 4, 5, 6, 7, 1]
+    var FC: [i64; 7] = [4, 5, 6, 7, 1, 2, 3]
+    var t = 0
+    while t < 7 {
+        let a = FA[t]
+        let b = FB[t]
+        let c = FC[t]
+        O_MUL[a * 8 + b] = c
+        O_SGN[a * 8 + b] = 1
+        O_MUL[b * 8 + a] = c
+        O_SGN[b * 8 + a] = 0 - 1
+        O_MUL[b * 8 + c] = a
+        O_SGN[b * 8 + c] = 1
+        O_MUL[c * 8 + b] = a
+        O_SGN[c * 8 + b] = 0 - 1
+        O_MUL[c * 8 + a] = b
+        O_SGN[c * 8 + a] = 1
+        O_MUL[a * 8 + c] = b
+        O_SGN[a * 8 + c] = 0 - 1
+        t = t + 1
+    }
+}
+
+var S_MUL: [i64; 256] = [0; 256]
+var S_SGN: [i64; 256] = [0; 256]
+var T_MUL: [i64; 1024] = [0; 1024]
+var T_SGN: [i64; 1024] = [0; 1024]
+var C_MUL: [i64; 4096] = [0; 4096]
+var C_SGN: [i64; 4096] = [0; 4096]
+var R_MUL: [i64; 16384] = [0; 16384]
+var R_SGN: [i64; 16384] = [0; 16384]
+var V_MUL: [i64; 65536] = [0; 65536]
+var V_SGN: [i64; 65536] = [0; 65536]
+var K_MUL: [i64; 262144] = [0; 262144]
+var K_SGN: [i64; 262144] = [0; 262144]
+var L_MUL: [i64; 1048576] = [0; 1048576]
+var L_SGN: [i64; 1048576] = [0; 1048576]
+
+fn init_doublings() with Mut, Panic {
+    // Step 1: build S (sedenions, dim 16) from O (octonions, dim 8).
+    var i = 0
+    while i < 16 {
+        var j = 0
+        while j < 16 {
+            let a_part = i & 7
+            let top_a = i >> 3
+            let b_part = j & 7
+            let top_b = j >> 3
+            let ab_idx = O_MUL[a_part * 8 + b_part]
+            let ab_sgn = O_SGN[a_part * 8 + b_part]
+            let ba_idx = O_MUL[b_part * 8 + a_part]
+            let ba_sgn = O_SGN[b_part * 8 + a_part]
+            var r_idx = 0
+            var r_sgn = 0
+            var r_top = 0
+            if top_a == 0 {
+                if top_b == 0 {
+                    r_idx = ab_idx
+                    r_sgn = ab_sgn
+                    r_top = 0
+                } else {
+                    r_idx = ba_idx
+                    r_sgn = ba_sgn
+                    r_top = 1
+                }
+            } else {
+                if top_b == 0 {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 1
+                        r_top = 1
+                    } else {
+                        r_idx = ab_idx
+                        r_sgn = 0 - ab_sgn
+                        r_top = 1
+                    }
+                } else {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 0 - 1
+                        r_top = 0
+                    } else {
+                        r_idx = ba_idx
+                        r_sgn = ba_sgn
+                        r_top = 0
+                    }
+                }
+            }
+            S_MUL[i * 16 + j] = r_idx + r_top * 8
+            S_SGN[i * 16 + j] = r_sgn
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 2: build T (trigintaduonions, dim 32) from S.
+    i = 0
+    while i < 32 {
+        var j = 0
+        while j < 32 {
+            let a_part = i & 15
+            let top_a = i >> 4
+            let b_part = j & 15
+            let top_b = j >> 4
+            let ab_idx = S_MUL[a_part * 16 + b_part]
+            let ab_sgn = S_SGN[a_part * 16 + b_part]
+            let ba_idx = S_MUL[b_part * 16 + a_part]
+            let ba_sgn = S_SGN[b_part * 16 + a_part]
+            var r_idx = 0
+            var r_sgn = 0
+            var r_top = 0
+            if top_a == 0 {
+                if top_b == 0 {
+                    r_idx = ab_idx
+                    r_sgn = ab_sgn
+                    r_top = 0
+                } else {
+                    r_idx = ba_idx
+                    r_sgn = ba_sgn
+                    r_top = 1
+                }
+            } else {
+                if top_b == 0 {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 1
+                        r_top = 1
+                    } else {
+                        r_idx = ab_idx
+                        r_sgn = 0 - ab_sgn
+                        r_top = 1
+                    }
+                } else {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 0 - 1
+                        r_top = 0
+                    } else {
+                        r_idx = ba_idx
+                        r_sgn = ba_sgn
+                        r_top = 0
+                    }
+                }
+            }
+            T_MUL[i * 32 + j] = r_idx + r_top * 16
+            T_SGN[i * 32 + j] = r_sgn
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 3: build C (chingons, dim 64) from T.
+    i = 0
+    while i < 64 {
+        var j = 0
+        while j < 64 {
+            let a_part = i & 31
+            let top_a = i >> 5
+            let b_part = j & 31
+            let top_b = j >> 5
+            let ab_idx = T_MUL[a_part * 32 + b_part]
+            let ab_sgn = T_SGN[a_part * 32 + b_part]
+            let ba_idx = T_MUL[b_part * 32 + a_part]
+            let ba_sgn = T_SGN[b_part * 32 + a_part]
+            var r_idx = 0
+            var r_sgn = 0
+            var r_top = 0
+            if top_a == 0 {
+                if top_b == 0 {
+                    r_idx = ab_idx
+                    r_sgn = ab_sgn
+                    r_top = 0
+                } else {
+                    r_idx = ba_idx
+                    r_sgn = ba_sgn
+                    r_top = 1
+                }
+            } else {
+                if top_b == 0 {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 1
+                        r_top = 1
+                    } else {
+                        r_idx = ab_idx
+                        r_sgn = 0 - ab_sgn
+                        r_top = 1
+                    }
+                } else {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 0 - 1
+                        r_top = 0
+                    } else {
+                        r_idx = ba_idx
+                        r_sgn = ba_sgn
+                        r_top = 0
+                    }
+                }
+            }
+            C_MUL[i * 64 + j] = r_idx + r_top * 32
+            C_SGN[i * 64 + j] = r_sgn
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 4: build R (routons, dim 128) from C.
+    i = 0
+    while i < 128 {
+        var j = 0
+        while j < 128 {
+            let a_part = i & 63
+            let top_a = i >> 6
+            let b_part = j & 63
+            let top_b = j >> 6
+            let ab_idx = C_MUL[a_part * 64 + b_part]
+            let ab_sgn = C_SGN[a_part * 64 + b_part]
+            let ba_idx = C_MUL[b_part * 64 + a_part]
+            let ba_sgn = C_SGN[b_part * 64 + a_part]
+            var r_idx = 0
+            var r_sgn = 0
+            var r_top = 0
+            if top_a == 0 {
+                if top_b == 0 {
+                    r_idx = ab_idx
+                    r_sgn = ab_sgn
+                    r_top = 0
+                } else {
+                    r_idx = ba_idx
+                    r_sgn = ba_sgn
+                    r_top = 1
+                }
+            } else {
+                if top_b == 0 {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 1
+                        r_top = 1
+                    } else {
+                        r_idx = ab_idx
+                        r_sgn = 0 - ab_sgn
+                        r_top = 1
+                    }
+                } else {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 0 - 1
+                        r_top = 0
+                    } else {
+                        r_idx = ba_idx
+                        r_sgn = ba_sgn
+                        r_top = 0
+                    }
+                }
+            }
+            R_MUL[i * 128 + j] = r_idx + r_top * 64
+            R_SGN[i * 128 + j] = r_sgn
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 5: build V (voudons, dim 256) from R.
+    i = 0
+    while i < 256 {
+        var j = 0
+        while j < 256 {
+            let a_part = i & 127
+            let top_a = i >> 7
+            let b_part = j & 127
+            let top_b = j >> 7
+            let ab_idx = R_MUL[a_part * 128 + b_part]
+            let ab_sgn = R_SGN[a_part * 128 + b_part]
+            let ba_idx = R_MUL[b_part * 128 + a_part]
+            let ba_sgn = R_SGN[b_part * 128 + a_part]
+            var r_idx = 0
+            var r_sgn = 0
+            var r_top = 0
+            if top_a == 0 {
+                if top_b == 0 {
+                    r_idx = ab_idx
+                    r_sgn = ab_sgn
+                    r_top = 0
+                } else {
+                    r_idx = ba_idx
+                    r_sgn = ba_sgn
+                    r_top = 1
+                }
+            } else {
+                if top_b == 0 {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 1
+                        r_top = 1
+                    } else {
+                        r_idx = ab_idx
+                        r_sgn = 0 - ab_sgn
+                        r_top = 1
+                    }
+                } else {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 0 - 1
+                        r_top = 0
+                    } else {
+                        r_idx = ba_idx
+                        r_sgn = ba_sgn
+                        r_top = 0
+                    }
+                }
+            }
+            V_MUL[i * 256 + j] = r_idx + r_top * 128
+            V_SGN[i * 256 + j] = r_sgn
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 6: build K (1024-ions, dim 512) from V.
+    i = 0
+    while i < 512 {
+        var j = 0
+        while j < 512 {
+            let a_part = i & 255
+            let top_a = i >> 8
+            let b_part = j & 255
+            let top_b = j >> 8
+            let ab_idx = V_MUL[a_part * 256 + b_part]
+            let ab_sgn = V_SGN[a_part * 256 + b_part]
+            let ba_idx = V_MUL[b_part * 256 + a_part]
+            let ba_sgn = V_SGN[b_part * 256 + a_part]
+            var r_idx = 0
+            var r_sgn = 0
+            var r_top = 0
+            if top_a == 0 {
+                if top_b == 0 {
+                    r_idx = ab_idx
+                    r_sgn = ab_sgn
+                    r_top = 0
+                } else {
+                    r_idx = ba_idx
+                    r_sgn = ba_sgn
+                    r_top = 1
+                }
+            } else {
+                if top_b == 0 {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 1
+                        r_top = 1
+                    } else {
+                        r_idx = ab_idx
+                        r_sgn = 0 - ab_sgn
+                        r_top = 1
+                    }
+                } else {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 0 - 1
+                        r_top = 0
+                    } else {
+                        r_idx = ba_idx
+                        r_sgn = ba_sgn
+                        r_top = 0
+                    }
+                }
+            }
+            K_MUL[i * 512 + j] = r_idx + r_top * 256
+            K_SGN[i * 512 + j] = r_sgn
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 7: build L (2048-ions, dim 1024) from K.
+    i = 0
+    while i < 1024 {
+        var j = 0
+        while j < 1024 {
+            let a_part = i & 511
+            let top_a = i >> 9
+            let b_part = j & 511
+            let top_b = j >> 9
+            let ab_idx = K_MUL[a_part * 512 + b_part]
+            let ab_sgn = K_SGN[a_part * 512 + b_part]
+            let ba_idx = K_MUL[b_part * 512 + a_part]
+            let ba_sgn = K_SGN[b_part * 512 + a_part]
+            var r_idx = 0
+            var r_sgn = 0
+            var r_top = 0
+            if top_a == 0 {
+                if top_b == 0 {
+                    r_idx = ab_idx
+                    r_sgn = ab_sgn
+                    r_top = 0
+                } else {
+                    r_idx = ba_idx
+                    r_sgn = ba_sgn
+                    r_top = 1
+                }
+            } else {
+                if top_b == 0 {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 1
+                        r_top = 1
+                    } else {
+                        r_idx = ab_idx
+                        r_sgn = 0 - ab_sgn
+                        r_top = 1
+                    }
+                } else {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 0 - 1
+                        r_top = 0
+                    } else {
+                        r_idx = ba_idx
+                        r_sgn = ba_sgn
+                        r_top = 0
+                    }
+                }
+            }
+            L_MUL[i * 1024 + j] = r_idx + r_top * 512
+            L_SGN[i * 1024 + j] = r_sgn
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+var LR_IDX: i64 = 0
+var LR_SGN: i64 = 0
+
+fn ten_bmul(i_idx: i64, i_sgn: i64, j_idx: i64, j_sgn: i64) with Mut, Panic {
+    LR_IDX = L_MUL[i_idx * 1024 + j_idx]
+    LR_SGN = i_sgn * j_sgn * L_SGN[i_idx * 1024 + j_idx]
+}
+
+fn ten_associator_nonzero(x: i64, y: i64, z: i64) -> i64 with Mut, Panic {
+    ten_bmul(x, 1, y, 1)
+    let li_t = LR_IDX
+    let ls_t = LR_SGN
+    ten_bmul(li_t, ls_t, z, 1)
+    let l_idx = LR_IDX
+    let l_sgn = LR_SGN
+    ten_bmul(y, 1, z, 1)
+    let ri_t = LR_IDX
+    let rs_t = LR_SGN
+    ten_bmul(x, 1, ri_t, rs_t)
+    let r_idx = LR_IDX
+    let r_sgn = LR_SGN
+    if l_idx != r_idx { return 1 }
+    if l_sgn != r_sgn { return 1 }
+    0
+}
+
+// VLIST holds the 7 nonzero elements of V = span(v1, v2, v3).
+var VLIST: [i64; 8] = [0; 8]
+
+fn build_v_k10(v1: i64, v2: i64, v3: i64) with Mut {
+    VLIST[0] = v1
+    VLIST[1] = v2
+    VLIST[2] = v3
+    VLIST[3] = v1 ^ v2
+    VLIST[4] = v1 ^ v3
+    VLIST[5] = v2 ^ v3
+    VLIST[6] = v1 ^ v2 ^ v3
+}
+
+fn count_subspace_assoc_3d_k10() -> i64 with Mut, Panic {
+    var n = 0
+    var ii = 0
+    while ii < 7 {
+        let i = VLIST[ii]
+        var jj = 0
+        while jj < 7 {
+            let j = VLIST[jj]
+            var kk = 0
+            while kk < 7 {
+                let k = VLIST[kk]
+                if ten_associator_nonzero(i, j, k) == 1 {
+                    n = n + 1
+                }
+                kk = kk + 1
+            }
+            jj = jj + 1
+        }
+        ii = ii + 1
+    }
+    n
+}
+
+fn count_total_ten() -> i64 with Mut, Panic {
+    var n = 0
+    var i = 1
+    while i < 1024 {
+        var j = 1
+        while j < 1024 {
+            var k = 1
+            while k < 1024 {
+                if ten_associator_nonzero(i, j, k) == 1 {
+                    n = n + 1
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+// Distribution buckets — 128 still ample (saturation at 23 from k=7).
+var BUCKET_VAL: [i64; 128] = [0; 128]
+var BUCKET_CNT: [i64; 128] = [0; 128]
+var N_BUCKETS: i64 = 0
+var BUCKET_OVERFLOW: i64 = 0
+
+fn record_bucket(v: i64) with Mut, Panic {
+    var i = 0
+    while i < N_BUCKETS {
+        if BUCKET_VAL[i] == v {
+            BUCKET_CNT[i] = BUCKET_CNT[i] + 1
+            return
+        }
+        i = i + 1
+    }
+    if N_BUCKETS < 128 {
+        BUCKET_VAL[N_BUCKETS] = v
+        BUCKET_CNT[N_BUCKETS] = 1
+        N_BUCKETS = N_BUCKETS + 1
+    } else {
+        BUCKET_OVERFLOW = BUCKET_OVERFLOW + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    println("═══════════════════════════════════════════════════════════════")
+    println("  Subspace decomposition at k=10 (2048-ions, dim 1024)")
+    println("═══════════════════════════════════════════════════════════════")
+
+    init_oct()
+    init_doublings()
+
+    var pass = 0
+    var fail = 0
+
+    // 1. Sanity: total nonzero 2048-ion associators = T_10 (predicted 168·3195575).
+    let total = count_total_ten()
+    print("  Total 2048-ion associators: ")
+    print_int(total)
+    print(" (expected 536856600 = 168 * 3195575)\n")
+    if total == 536856600 {
+        print("  [PASS] T_10 = 536856600 = 3195575 * 168\n")
+        pass = pass + 1
+    } else {
+        print("  [FAIL] T_10 mismatch\n")
+        fail = fail + 1
+    }
+
+    // 2. Enumerate 6,347,715 = P_10 three-dim subspaces of (Z/2)^10.
+    //    Direct 3-LI-generator enumeration: canonical (v1, v2, v3) with
+    //    v1 < v2 < v3, v3 ∉ {v1, v2, v1^v2}, and each generator the
+    //    minimum of its remaining coset (lex-min RREF basis).
+    var seen = 0
+    var v1 = 1
+    while v1 < 1024 {
+        var v2 = v1 + 1
+        while v2 < 1024 {
+            let s12 = v1 ^ v2
+            var v3 = v2 + 1
+            while v3 < 1024 {
+                if v3 != s12 {
+                    let s13 = v1 ^ v3
+                    let s23 = v2 ^ v3
+                    let s123 = v1 ^ v2 ^ v3
+                    var ok = 1
+                    if s12 < v1 { ok = 0 }
+                    if s13 < v1 { ok = 0 }
+                    if s23 < v1 { ok = 0 }
+                    if s123 < v1 { ok = 0 }
+                    if s12 < v2 { ok = 0 }
+                    if s13 < v2 { ok = 0 }
+                    if s23 < v2 { ok = 0 }
+                    if s123 < v2 { ok = 0 }
+                    if s13 < v3 { ok = 0 }
+                    if s23 < v3 { ok = 0 }
+                    if s123 < v3 { ok = 0 }
+                    if ok == 1 {
+                        build_v_k10(v1, v2, v3)
+                        let cnt = count_subspace_assoc_3d_k10()
+                        record_bucket(cnt)
+                        seen = seen + 1
+                    }
+                }
+                v3 = v3 + 1
+            }
+            v2 = v2 + 1
+        }
+        v1 = v1 + 1
+    }
+    print("  Enumerated 3-dim subspaces: ")
+    print_int(seen)
+    print(" (expected 6347715 = P_10)\n")
+    if seen == 6347715 {
+        print("  [PASS] P_10 = 6347715 enumerated correctly\n")
+        pass = pass + 1
+    } else {
+        print("  [FAIL] subspace enumeration count\n")
+        fail = fail + 1
+    }
+
+    // 3. Bucket-overflow guard.
+    if BUCKET_OVERFLOW == 0 {
+        print("  [PASS] bucket capacity sufficient (no overflow)\n")
+        pass = pass + 1
+    } else {
+        print("  [FAIL] BUCKET overflow: ")
+        print_int(BUCKET_OVERFLOW)
+        print(" classes truncated — recompile with larger BUCKET arrays\n")
+        fail = fail + 1
+    }
+
+    // 4. Print distribution.
+    print("\n  Distribution of per-subspace nonzero associator counts:\n")
+    var i = 0
+    while i < N_BUCKETS {
+        print("    count=")
+        print_int(BUCKET_VAL[i])
+        print(" -> ")
+        print_int(BUCKET_CNT[i])
+        print(" subspaces\n")
+        i = i + 1
+    }
+    print("  Total distinct count classes: ")
+    print_int(N_BUCKETS)
+    print("\n")
+
+    print("\nPassed: ")
+    print_int(pass)
+    print("\nFailed: ")
+    print_int(fail)
+    print("\n")
+    if fail == 0 { println("ALL PASS") }
+    else { println("SOME FAILED") }
+    0
+}

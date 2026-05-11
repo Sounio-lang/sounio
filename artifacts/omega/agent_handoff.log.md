@@ -759,3 +759,36 @@ intent: Lane 3 CLAIM (stacked on PR #115) — extend cohomological subspace deco
 checks:
   - bin/souc check examples/cocycle_subspace_k8.sio (rc=0, pre-state baseline includes PR #115)
 status: lock-acquired
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T23:35:00Z
+files:
+  - examples/cocycle_subspace_k9.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh
+intent: Lane 3 RELEASE (retroactive; missed in PR #116 commit) — k=9 1024-ion subspace decomposition delivered. All three conjectures from PR #115 confirmed at k=9. (1) T_9 = 67,101,720 = 168·399415 (Conjecture 5 holds at six consecutive levels k=4..9). (2) **Three-level saturation**: 23 distinct count classes, value set bit-identical at k=7, k=8, k=9. (3) count=168 anomaly mult=75183 = 3·25061 continues two-prime non-7 signature; multiplicity ratios {5.74, 6.21, 6.76, 7.24} monotone increasing toward 2³=8. Wall clock 11.5s. Merged via PR #116 (commit 958c8fba).
+checks:
+  - bin/souc compile + run /tmp/k9_bin (ALL PASS in 11.5s; T_9=67101720; P_9=788035; 23 classes)
+  - bash scripts/ci/paper168_cocycle_subspace_gate.sh (PASS=6 FAIL=0 rc=0 in 15.5s)
+  - post-merge gate on origin/main rc=0 (verified after PR #116 landed)
+commit: 958c8fba
+status: lock-released
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T23:51:27Z
+files:
+  - examples/cocycle_subspace_k10.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh
+intent: Lane 3 CLAIM — extend cohomological subspace decomposition to k=10 (2048-ions, dim 1024). Enumerates [10 choose 3]_2 = 6,347,715 three-dim subspaces of (Z/2)^10 in the 1024-dim CD algebra. Direct 3-LI-generator enumeration. 1024² × 2 i64 = 16 MB BSS per multiplication table (4× k=9); total static BSS estimated ~21.3 MB. Tests whether saturation holds at a FOURTH consecutive level (k=7,8,9,10) and pushes Conjecture 5 formula to its seventh consecutive level (predicted T_10 = 168·3195575 = 536,856,600). Worktree /workspace/sounio-lane-3-paper168-k10 on branch coord/lane-3-paper-168-k10, branched off origin/main (with #114/#115/#116 landed). Wall clock estimate: 3-5 minutes on x86-64 native; gate timeout 600s.
+checks:
+  - bin/souc check examples/cocycle_subspace_k9.sio (rc=0, pre-state baseline includes PR #116)
+status: lock-acquired
