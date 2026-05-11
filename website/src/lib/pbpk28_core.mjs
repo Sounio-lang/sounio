@@ -311,9 +311,10 @@ export function releaseRateAt(tHours, params) {
   const model = params.releaseModel || 'higuchi';
   if (model === 'sc_depot') {
     // SC depot: rate = F · Dose · k_a · exp(-k_a · t)   (1st-order absorption)
+    // higuchiScale is reused as the dose-multiplier slider (G-ε-4).
     const ka = params.releaseKa;
     const F  = params.releaseF;
-    const D  = params.releaseDoseMg;
+    const D  = params.releaseDoseMg * (params.higuchiScale ?? 1);
     return F * D * ka * Math.exp(-ka * Math.max(0, tHours));
   }
   // Higuchi (default): dQ/dt = K_H / (2·√t), clipped at t < 0.1 h

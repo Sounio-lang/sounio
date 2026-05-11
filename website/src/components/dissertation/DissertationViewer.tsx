@@ -22,12 +22,26 @@ import type { PBPKParams, DrugId } from '../../hooks/usePBPK';
 import { DrugSelector } from './DrugSelector';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 
-const PATIENT_PROFILES: Record<string, PBPKParams> = {
-  typical: { ...DEFAULT_PARAMS },
-  'low CL': { ...DEFAULT_PARAMS, clHep: 6.2 },     // CYP3A4 poor metaboliser
-  'high CL': { ...DEFAULT_PARAMS, clHep: 24.8 },   // CYP3A4 ultrarapid
-  lean: { ...DEFAULT_PARAMS, vdScale: 0.7 },
-  obese: { ...DEFAULT_PARAMS, vdScale: 1.4 },
+// Per-drug "typical patient" anchor + envelope perturbations.
+//   rapamycin: clHep is CYP3A4 hepatic clearance (L/h), Ferron 1997 envelope
+//              ± 2× covers PM ↔ ultrarapid.
+//   semaglutide: clHep is proteolytic + renal clearance (L/h), Overgaard 2019
+//              envelope is much tighter (CV ≈ 15%); lean/obese affects V_d more.
+const PATIENT_PROFILES_BY_DRUG: Record<DrugId, Record<string, PBPKParams>> = {
+  rapamycin: {
+    typical: { ...DEFAULT_PARAMS },
+    'low CL': { ...DEFAULT_PARAMS, clHep: 6.2 },
+    'high CL': { ...DEFAULT_PARAMS, clHep: 24.8 },
+    lean: { ...DEFAULT_PARAMS, vdScale: 0.7 },
+    obese: { ...DEFAULT_PARAMS, vdScale: 1.4 },
+  },
+  semaglutide: {
+    typical: { ...DEFAULT_PARAMS, clHep: 0.077 },
+    'slow CL': { ...DEFAULT_PARAMS, clHep: 0.054 },
+    'fast CL': { ...DEFAULT_PARAMS, clHep: 0.108 },
+    lean: { ...DEFAULT_PARAMS, clHep: 0.077, vdScale: 0.7 },
+    obese: { ...DEFAULT_PARAMS, clHep: 0.077, vdScale: 1.4 },
+  },
 };
 
 const MAX_SIM_HOURS = 30 * 24;        // 30-day Cypher elution window
@@ -123,8 +137,9 @@ function SimulationBridge({ drug, params, playing, speed, seekTo, onSeekDone, on
 
 export default function DissertationViewer() {
   const [drug, setDrug] = useState<DrugId>('rapamycin');
-  const [params, setParams] = useState<PBPKParams>(PATIENT_PROFILES.typical);
-  const [profile, setProfile] = useState<keyof typeof PATIENT_PROFILES>('typical');
+  const activeProfiles = PATIENT_PROFILES_BY_DRUG[drug];
+  const [params, setParams] = useState<PBPKParams>(PATIENT_PROFILES_BY_DRUG.rapamycin.typical);
+  const [profile, setProfile] = useState<string>('typical');
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [logScale, setLogScale] = useState(true);
@@ -144,8 +159,8 @@ export default function DissertationViewer() {
 
   const handleTourKeyframe = useCallback((k: TourKeyframe) => {
     setTourNarration(k.narration ?? null);
-    if (k.profile && k.profile in PATIENT_PROFILES) {
-      setProfile(k.profile as keyof typeof PATIENT_PROFILES);
+    if (k.profile && k.profile in activeProfiles) {
+      setProfile(k.profile);
     }
     if (typeof k.higuchiScale === 'number') {
       setParams((p) => ({ ...p, higuchiScale: k.higuchiScale! }));
@@ -187,7 +202,7 @@ export default function DissertationViewer() {
 
   // Re-apply profile.
   useEffect(() => {
-    setParams({ ...PATIENT_PROFILES[profile] });
+    setParams({ ...activeProfiles[profile] });
   }, [profile, restartNonce]);
 
   // Keyboard shortcuts for advisor/committee usability.
@@ -257,9 +272,9 @@ export default function DissertationViewer() {
             onChange={(d) => {
               setDrug(d);
               // Reset patient-overrides on drug switch — clHep / higuchiScale
-              // are calibrated for rapamycin and would corrupt semaglutide's
-              // cl_proteolytic if carried over.
-              setParams({ ...DEFAULT_PARAMS });
+              // are calibrated per drug (rapamycin CYP3A4 ↔ semaglutide
+              // proteolytic) and would corrupt the other drug if carried over.
+              setParams({ ...PATIENT_PROFILES_BY_DRUG[d].typical });
               setProfile('typical');
               setRestartNonce((n) => n + 1);
             }}
@@ -399,20 +414,24 @@ export default function DissertationViewer() {
           <label className="text-xs uppercase tracking-wide opacity-70">Patient profile</label>
           <select
             value={profile}
-            onChange={(e) => setProfile(e.target.value as keyof typeof PATIENT_PROFILES)}
+            onChange={(e) => setProfile(e.target.value)}
             className="bg-black/35 border border-white/15 rounded px-2 py-1.5 text-sm"
           >
-            {Object.keys(PATIENT_PROFILES).map((k) => (
+            {Object.keys(activeProfiles).map((k) => (
               <option key={k} value={k}>{k}</option>
             ))}
           </select>
           <p className="text-[0.7rem] opacity-60">
-            CYP3A4 metaboliser status changes hepatic clearance and widens the GUM cone.
+            {drug === 'rapamycin'
+              ? 'CYP3A4 metaboliser status changes hepatic clearance and widens the GUM cone.'
+              : 'Proteolytic-clearance phenotype (Overgaard 2019 ±30%) and body-mass envelope (lean ↔ obese V_d).'}
           </p>
         </div>
         <div className="flex flex-col gap-1">
           <label className="text-xs uppercase tracking-wide opacity-70">
-            Stent release scale ({params.higuchiScale.toFixed(2)}×)
+            {drug === 'rapamycin'
+              ? `Stent release scale (${params.higuchiScale.toFixed(2)}×)`
+              : `SC depot dose (${(params.higuchiScale * 1.0).toFixed(2)} mg)`}
           </label>
           <input
             type="range"
@@ -421,10 +440,12 @@ export default function DissertationViewer() {
             step={0.05}
             value={params.higuchiScale}
             onChange={(e) => handleParamChange({ higuchiScale: Number(e.target.value) })}
-            className="accent-amber-400"
+            className={drug === 'rapamycin' ? 'accent-amber-400' : 'accent-cyan-400'}
           />
           <p className="text-[0.7rem] opacity-60">
-            Higuchi K<sub>H</sub> multiplier; reflects coating-thickness &amp; solubility CV per Cordis 2003 IFU.
+            {drug === 'rapamycin'
+              ? <>Higuchi K<sub>H</sub> multiplier; reflects coating-thickness &amp; solubility CV per Cordis 2003 IFU.</>
+              : <>Dose multiplier on the 1 mg weekly SC injection (Overgaard 2019 PK envelope, F = 0.89, k<sub>a</sub> = ln 2 / 60 h).</>}
           </p>
         </div>
       </div>
