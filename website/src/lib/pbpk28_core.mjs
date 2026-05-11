@@ -234,6 +234,48 @@ export const TMDD_PARAMS_SEMAGLUTIDE = Object.freeze({
   12: tmddParams(                 5.0,            0.05,         0.50,        0.40,            0.050),  // pancreas
 });
 
+// ─── Semaglutide PD: glucose-insulin Bergman minimal model (G-δ-3) ────────
+// Couples pancreas GLP-1R occupancy to a 2-state linearized glucose-insulin
+// system. States (stored at PD organ index = pancreas):
+//   A[12]  =  ΔG  (mg/dL)  plasma glucose deviation from basal Gb
+//   Ni[12] =  ΔI  (mU/L)   plasma insulin deviation from basal Ib
+//
+// Insulin secretion is augmented by GLP-1R activation in pancreas β-cells:
+//   dΔI/dt = k_base · α · occ - kI · ΔI
+//     where occ = DR_panc / (R_free_panc + DR_panc),
+//           k_base = kI · Ib (steady-state secretion at no drug),
+//           α = 1 (full GLP-1R occupancy doubles insulin secretion).
+//
+// Glucose dynamics (linearized at G ≈ Gb to keep 2-state linear):
+//   dΔG/dt = -(SG + SI · Ib) · ΔG - SI · Gb · ΔI
+//
+// Bergman 1979 + UVA/Padova 2013 minimal parameters, scaled from /min to /h.
+export const PD_ORGANS_SEMAGLUTIDE = Object.freeze([12]);    // pancreas as host
+
+function pdParamsGlucoseInsulin(Gb, Ib, SG_h, SI_h, kI_h, alphaGLP1) {
+  return Object.freeze({
+    pdModel: 'glucose_insulin',
+    Gb: Gb,                            // basal glucose [mg/dL]
+    Ib: Ib,                            // basal insulin [mU/L]
+    SG: SG_h,                          // glucose effectiveness [1/h]
+    SI: SI_h,                          // insulin sensitivity [1/(mU·L·h)]
+    kI: kI_h,                          // insulin elimination [1/h]
+    kBase: kI_h * Ib,                  // baseline secretion [mU/(L·h)]
+    alpha: alphaGLP1,                  // GLP-1R relative augmentation (1 = doubles at full occ)
+  });
+}
+
+export const PD_PARAMS_SEMAGLUTIDE = Object.freeze({
+  12: pdParamsGlucoseInsulin(/*Gb*/ 100.0, /*Ib*/ 10.0, /*SG*/ 1.5,
+                             /*SI*/ 0.020, /*kI*/ 12.6, /*α*/ 1.0),
+});
+
+// Mark the rapamycin PD params as the mTORC1_neointima model so the
+// step-dispatcher can distinguish (other arms might add new PD models later).
+// Reassign PD_PARAMS_RAPAMYCIN inline above? — simpler: dispatch on the
+// presence of `pdModel`. Default for rapamycin pdParams (no pdModel field)
+// is mTORC1+neointima; semaglutide explicitly tags itself.
+
 export const DEFAULT_PARAMS_SEMAGLUTIDE = Object.freeze({
   clHep: 0.077,                             // L/h — proteolytic clearance (Overgaard 2019)
   higuchiScale: 1.0,                        // unused for SC depot release
@@ -250,9 +292,8 @@ export const DEFAULT_PARAMS_SEMAGLUTIDE = Object.freeze({
   releaseDoseMg: 1.0,                       // typical weekly dose
   tmddOrgans: TMDD_ORGANS_SEMAGLUTIDE,
   tmddParams: TMDD_PARAMS_SEMAGLUTIDE,
-  // G-δ-3 will add pdOrgans (glucose-insulin minimal model)
-  pdOrgans:   [],
-  pdParams:   {},
+  pdOrgans:   PD_ORGANS_SEMAGLUTIDE,
+  pdParams:   PD_PARAMS_SEMAGLUTIDE,
 });
 
 /**
@@ -509,21 +550,33 @@ export function stepStrang(Cv, Ct, tHours, dt, params, scratch, Rfree, DR, A, Ni
     for (const j of params.pdOrgans) {
       const pp = params.pdParams[j];
       if (!pp) continue;
-      const targetA = Rfree[j] / pp.rTotal0;
 
-      // CN on dA/dt = k_a · (target - A)
-      //   (1 + h·k_a) · A_new = (1 - h·k_a) · A_old + dt · k_a · target
-      const aNew = ((1 - h * pp.kA) * A[j] + dt * pp.kA * targetA) / (1 + h * pp.kA);
-      A[j] = aNew < 0 ? 0 : (aNew > 1 ? 1 : aNew);
+      if (pp.pdModel === 'glucose_insulin') {
+        // ── Semaglutide PD: Bergman glucose-insulin (G-δ-3) ──────────────
+        // A[j] = ΔG (mg/dL), Ni[j] = ΔI (mU/L)
+        // Occupancy = DR / (Rfree + DR) at this organ (pancreas).
+        const denom = Rfree[j] + DR[j];
+        const occ = denom > 1e-9 ? DR[j] / denom : 0;
 
-      // CN on dN/dt = k_prolif · A_new - k_apo · (1 - A_new) · N
-      //   Linear in N at fixed A_new.
-      //   γ = k_apo · (1 - A_new)
-      //   (1 + h·γ) · N_new = (1 - h·γ) · N_old + dt · k_prolif · A_new
-      const oneMinusA = 1 - A[j];
-      const gammaN = pp.kApo * oneMinusA;
-      const nNew = ((1 - h * gammaN) * Ni[j] + dt * pp.kProlif * A[j]) / (1 + h * gammaN);
-      Ni[j] = nNew < 0 ? 0 : nNew;
+        // CN on dΔI/dt = k_base · α · occ - kI · ΔI
+        const diNew = ((1 - h * pp.kI) * Ni[j] + dt * pp.kBase * pp.alpha * occ) / (1 + h * pp.kI);
+        Ni[j] = diNew;
+
+        // CN on dΔG/dt = -λG · ΔG - SI · Gb · ΔI_new   (linear at G ≈ Gb)
+        const lambdaG = pp.SG + pp.SI * pp.Ib;
+        const dgNew = ((1 - h * lambdaG) * A[j] - dt * pp.SI * pp.Gb * Ni[j]) / (1 + h * lambdaG);
+        A[j] = dgNew;
+      } else {
+        // ── Rapamycin PD: mTORC1 activity + neointimal index (G-γ) ───────
+        const targetA = Rfree[j] / pp.rTotal0;
+        const aNew = ((1 - h * pp.kA) * A[j] + dt * pp.kA * targetA) / (1 + h * pp.kA);
+        A[j] = aNew < 0 ? 0 : (aNew > 1 ? 1 : aNew);
+
+        const oneMinusA = 1 - A[j];
+        const gammaN = pp.kApo * oneMinusA;
+        const nNew = ((1 - h * gammaN) * Ni[j] + dt * pp.kProlif * A[j]) / (1 + h * gammaN);
+        Ni[j] = nNew < 0 ? 0 : nNew;
+      }
     }
   }
 
@@ -563,7 +616,16 @@ export function initialState(params) {
   }
   if (params.pdOrgans && params.pdParams) {
     for (const j of params.pdOrgans) {
-      if (params.pdParams[j]) A[j] = 1.0;   // baseline mTORC1 activity
+      const pp = params.pdParams[j];
+      if (!pp) continue;
+      if (pp.pdModel === 'glucose_insulin') {
+        // ΔG and ΔI both start at 0 (system at baseline before drug)
+        A[j] = 0.0;
+        Nidx[j] = 0.0;
+      } else {
+        // Rapamycin: A starts at 1.0 (baseline mTORC1 activity), N at 0.
+        A[j] = 1.0;
+      }
     }
   }
   return { Cv, Ct, Rfree, DR, A, N: Nidx };

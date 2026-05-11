@@ -47,6 +47,10 @@
 #   8. HARD GATE — Semaglutide TMDD parity (G-δ-2): Node ↔ Sounio on GLP-1R
 #                  binding at brain=3, gut=8, pancreas=12 (K_d = 0.4 nM,
 #                  Lau 2015). R_free and DR within 1.0% RMSE per organ.
+#   9. HARD GATE — Semaglutide PD parity (G-δ-3): Node ↔ Sounio on the
+#                  glucose-insulin Bergman minimal model (ΔG, ΔI at pancreas
+#                  index 12). Demonstrates end-to-end PK→TMDD→PD chain for
+#                  the peptide. Within 1.0% RMSE.
 
 set -euo pipefail
 
@@ -625,3 +629,64 @@ awk -F'\t' '
     }
   }
 ' "$SEMA_JOINED_TMDD"
+
+# ─── Case 9: Semaglutide PD parity Node ↔ Sounio (G-δ-3) ─────────────────────
+echo
+echo "[pbpk28-parity] Case 9: Sounio ↔ Node semaglutide glucose-insulin PD (pancreas)"
+
+SEMA_SIO_PD_TSV="$OUT_DIR/sema_sounio_pd.tsv"
+SEMA_NODE_PD_TSV="$OUT_DIR/sema_node_pd.tsv"
+parse_pd_tsv "$SEMA_SIO_LOG" "$SEMA_SIO_PD_TSV"
+parse_pd_tsv "$SEMA_NODE_LOG" "$SEMA_NODE_PD_TSV"
+
+SEMA_SIO_PD_ROWS=$(wc -l < "$SEMA_SIO_PD_TSV")
+SEMA_NODE_PD_ROWS=$(wc -l < "$SEMA_NODE_PD_TSV")
+EXPECTED_SEMA_PD=$((12 * 1))
+if [[ "$SEMA_SIO_PD_ROWS" -ne "$EXPECTED_SEMA_PD" || "$SEMA_NODE_PD_ROWS" -ne "$EXPECTED_SEMA_PD" ]]; then
+  echo "[pbpk28-parity:case9] FAIL: sema-PD row mismatch — Sounio=$SEMA_SIO_PD_ROWS Node=$SEMA_NODE_PD_ROWS expected=$EXPECTED_SEMA_PD" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case9] both runs emitted $SEMA_SIO_PD_ROWS sema-PD records"
+
+SEMA_JOINED_PD="$OUT_DIR/sema_joined_pd.tsv"
+awk -F'\t' '
+  NR==FNR { Gs[$1"|"$2] = $3; Is[$1"|"$2] = $4; next }
+  { print $1"\t"$2"\t"Gs[$1"|"$2]"\t"$3"\t"Is[$1"|"$2]"\t"$4 }
+' "$SEMA_SIO_PD_TSV" "$SEMA_NODE_PD_TSV" > "$SEMA_JOINED_PD"
+
+awk -F'\t' '
+  BEGIN { THR = 1.0; }
+  {
+    i = $2 + 0;
+    gs = $3 + 0; gn = $4 + 0;
+    is_v = $5 + 0; in_v = $6 + 0;
+    dG = gs - gn; dI = is_v - in_v;
+    SSG[i] += dG * dG; SSI[i] += dI * dI;
+    NN[i] += 1;
+    # Track peak |ΔG| and |ΔI| (deviations can be negative)
+    absG_s = (gs < 0 ? -gs : gs); if (absG_s > PKG[i]) PKG[i] = absG_s;
+    absG_n = (gn < 0 ? -gn : gn); if (absG_n > PKG[i]) PKG[i] = absG_n;
+    absI_s = (is_v < 0 ? -is_v : is_v); if (absI_s > PKI[i]) PKI[i] = absI_s;
+    absI_n = (in_v < 0 ? -in_v : in_v); if (absI_n > PKI[i]) PKI[i] = absI_n;
+  }
+  END {
+    bad = 0;
+    printf "%-3s %-9s %-12s %-12s %-10s  %-12s %-12s %-10s\n", "i", "organ", "rmse_ΔG", "peak_|ΔG|", "G_pct", "rmse_ΔI", "peak_|ΔI|", "I_pct";
+    for (idx = 0; idx < 14; idx++) {
+      if (NN[idx] == 0) continue;
+      i = idx;
+      rmseG = sqrt(SSG[i] / NN[i]); pctG = (PKG[i] != 0) ? 100 * rmseG / PKG[i] : 0;
+      rmseI = sqrt(SSI[i] / NN[i]); pctI = (PKI[i] != 0) ? 100 * rmseI / PKI[i] : 0;
+      sG = (pctG < THR) ? "OK" : "FAIL"; sI = (pctI < THR) ? "OK" : "FAIL";
+      if (sG == "FAIL" || sI == "FAIL") bad += 1;
+      printf "%-3d %-9s %-12.6e %-12.6e %-7.4f %s  %-12.6e %-12.6e %-7.4f %s\n", \
+             i, "pancreas", rmseG, PKG[i], pctG, sG, rmseI, PKI[i], pctI, sI;
+    }
+    if (bad > 0) {
+      printf "PBPK28_SEMA_PD_PARITY_FAIL %d organ(s) exceed threshold\n", bad;
+      exit 1;
+    } else {
+      printf "PBPK28_SEMA_PD_PARITY_PASS 1/1 PD organ(s) within 1.0%% RMSE on (ΔG, ΔI)\n";
+    }
+  }
+' "$SEMA_JOINED_PD"
