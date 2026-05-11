@@ -479,10 +479,15 @@ export default function DissertationViewer() {
 
       {selected !== null && (
         <OrganDetailModal
+          drug={drug}
           organIndex={selected}
           concentrationNorm={selectedConcNorm}
           concentrationMgPerL={selectedConcAbs}
           massMg={selectedMassMg}
+          rfree={simState.rfree}
+          dr={simState.dr}
+          pdA={simState.pdA}
+          pdN={simState.pdN}
           onClose={() => setSelected(null)}
         />
       )}
