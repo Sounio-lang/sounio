@@ -100,7 +100,7 @@ export function releaseRateAt(tHours, params) {
  *
  * Conserved: M = V_v·C_v + V_t·C_t  (mass in organ).
  * Decay rate: λ = PS · (1/V_v + 1/(V_t·Kp))
- * Equilibrium: C_v_eq = M / (V_v + V_t/Kp), C_t_eq = Kp · C_v_eq.
+ * Equilibrium: Cv_eq = M / (V_v + V_t·Kp), Ct_eq = Kp · Cv_eq.
  * Solution: C(τ) = C_eq + (C(0) - C_eq) · exp(-λ·τ).
  *
  * Mutates Cv[i], Ct[i] in place for one organ.
@@ -121,56 +121,76 @@ function psRelaxOrgan(Cv, Ct, i, Vv, Vt, Kp, PS, dt) {
 }
 
 /**
- * RHS of the SLOW sub-operator only: Q-transport between blood and Cv,
- * hepatic clearance, and stent release. Writes derivatives into outCv (with
- * outCv[0] = dC_blood/dt). dC_t/dt is identically zero in the slow operator —
- * mass exchange between vascular and interstitial sub-compartments happens
- * only through PS-relaxation.
+ * Crank-Nicolson step on the SLOW sub-operator (Q-transport + clearance +
+ * release; Ct held by the Strang split). The slow operator is the 14-state
+ * linear ODE dx/dt = M·x + f where x = [C_blood, Cv_1, ..., Cv_13] and M
+ * is an arrow matrix:
+ *   M[0,0] = -(Σ Q_i + cl_hep) / V_b
+ *   M[0,i] =  Q_i / V_b           [i≥1]
+ *   M[i,0] =  Q_i / V_v_i         [i≥1]
+ *   M[i,i] = -Q_i / V_v_i         [i≥1]
+ * f[0] = release/V_b; f[i] = 0.
+ *
+ * CN: (I - dt·M/2)·x_new = (I + dt·M/2)·x_old + dt·f_mid
+ * Closed-form arrow-matrix solve in O(N):
+ *   α_i = (dt/2)·Q_i/V_v_i,  β_i = (dt/2)·Q_i/V_b,  s = (dt/2)·(ΣQ+cl_hep)/V_b
+ *   b[0] = (1 - s)·C_blood_old + (dt/(2·V_b))·Σ Q_i·Cv_i_old + dt·release/V_b
+ *   b[i] = α_i·C_blood_old + (1 - α_i)·Cv_i_old
+ *   γ_i = β_i / (1 + α_i)
+ *   x_new[0] = (b[0] + Σ γ_i·b[i]) / ((1 + s) - Σ γ_i·α_i)
+ *   x_new[i] = (b[i] + α_i·x_new[0]) / (1 + α_i)
+ *
+ * CN is A-stable (handles V_v→0 stiffness without sub-stepping) and 2nd-order
+ * accurate. Together with the analytical exp() PS-relaxation, the full Strang
+ * scheme exp(L_PS·dt/2) ∘ CN(L_slow, dt) ∘ exp(L_PS·dt/2) is unconditionally
+ * stable in both stiff terms.
  */
-function rhsSlow(Cv, outCv, params, releaseRate) {
-  const cBlood = Cv[0];
-  let bloodFluxIn = 0;
+function cnSlowStep(Cv, dt, params, scratch) {
+  const half = 0.5 * dt;
+  const Vblood = V_REF[0] * params.vdScale;
+  const release = releaseRateAt(scratch._tCenter, params);
+
+  let sumQ = 0;
+  for (let i = 1; i < N; i++) sumQ += Q[i];
+  const s = half * (sumQ + params.clHep) / Vblood;
+
+  const cBloodOld = Cv[0];
+  let sumQCv = 0;
+  for (let i = 1; i < N; i++) sumQCv += Q[i] * Cv[i];
+  const b0 = (1 - s) * cBloodOld + half * sumQCv / Vblood + dt * release / Vblood;
+
+  const alpha = scratch.cnAlpha;
+  const bi = scratch.cnBi;
+  let denomAcc = 0;
+  let numAcc = 0;
   for (let i = 1; i < N; i++) {
     const Vi = V_REF[i] * params.vdScale;
     const Vv = Math.max(Vi * params.vascFrac[i], 1e-30);
-    outCv[i] = Q[i] * (cBlood - Cv[i]) / Vv;
-    bloodFluxIn += Q[i] * (Cv[i] - cBlood);
+    const a = half * Q[i] / Vv;
+    alpha[i] = a;
+    bi[i] = a * cBloodOld + (1 - a) * Cv[i];
+    const beta = half * Q[i] / Vblood;
+    const gamma = beta / (1 + a);
+    denomAcc += gamma * a;
+    numAcc += gamma * bi[i];
   }
-  const Vblood = V_REF[0] * params.vdScale;
-  outCv[0] = (bloodFluxIn + releaseRate - params.clHep * cBlood) / Vblood;
-}
-
-/**
- * RK4 on the slow operator only (Cv evolves; Ct is held constant). Mutates
- * tmpv, kN_v in scratch; final Cv update in place. Returns void.
- */
-function stepRK4Slow(Cv, dt, params, scratch) {
-  const { k1v, k2v, k3v, k4v, tmpv } = scratch;
-  const release = releaseRateAt(scratch._tCenter, params);
-  rhsSlow(Cv, k1v, params, release);
-  for (let i = 0; i < N; i++) tmpv[i] = Cv[i] + 0.5 * dt * k1v[i];
-  rhsSlow(tmpv, k2v, params, release);
-  for (let i = 0; i < N; i++) tmpv[i] = Cv[i] + 0.5 * dt * k2v[i];
-  rhsSlow(tmpv, k3v, params, release);
-  for (let i = 0; i < N; i++) tmpv[i] = Cv[i] + dt * k3v[i];
-  rhsSlow(tmpv, k4v, params, release);
-  for (let i = 0; i < N; i++) {
-    Cv[i] += (dt / 6) * (k1v[i] + 2 * k2v[i] + 2 * k3v[i] + k4v[i]);
-    if (Cv[i] < 0) Cv[i] = 0;
+  const x0 = (b0 + numAcc) / ((1 + s) - denomAcc);
+  Cv[0] = x0 < 0 ? 0 : x0;
+  for (let i = 1; i < N; i++) {
+    const xi = (bi[i] + alpha[i] * x0) / (1 + alpha[i]);
+    Cv[i] = xi < 0 ? 0 : xi;
   }
   return release * dt;
 }
 
 /**
- * One Strang-split step: exp(L_PS·dt/2) · RK4(L_slow, dt) · exp(L_PS·dt/2).
- * Mutates Cv, Ct in place. Returns mg released this step (for cumulative
- * release tracking).
+ * One Strang-split step: exp(L_PS·dt/2) · CN(L_slow, dt) · exp(L_PS·dt/2).
+ * Mutates Cv, Ct in place. Returns mg released this step.
  */
 export function stepStrang(Cv, Ct, tHours, dt, params, scratch) {
   scratch._tCenter = tHours + 0.5 * dt;
   const halfDt = 0.5 * dt;
 
-  // Stage 1: half-step PS relaxation per organ
   for (let i = 1; i < N; i++) {
     const Vi = V_REF[i] * params.vdScale;
     const Vv = Vi * params.vascFrac[i];
@@ -178,10 +198,8 @@ export function stepStrang(Cv, Ct, tHours, dt, params, scratch) {
     psRelaxOrgan(Cv, Ct, i, Vv, Vt, params.kp[i], params.ps[i], halfDt);
   }
 
-  // Stage 2: full-step RK4 on slow dynamics (Ct frozen)
-  const released = stepRK4Slow(Cv, dt, params, scratch);
+  const released = cnSlowStep(Cv, dt, params, scratch);
 
-  // Stage 3: half-step PS relaxation per organ
   for (let i = 1; i < N; i++) {
     const Vi = V_REF[i] * params.vdScale;
     const Vv = Vi * params.vascFrac[i];
@@ -195,8 +213,8 @@ export function stepStrang(Cv, Ct, tHours, dt, params, scratch) {
 export function makeScratch() {
   const a = () => new Float64Array(N);
   return {
-    k1v: a(), k2v: a(), k3v: a(), k4v: a(),
-    tmpv: a(),
+    cnAlpha: a(),
+    cnBi: a(),
     _tCenter: 0,
   };
 }
