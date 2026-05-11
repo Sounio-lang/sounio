@@ -55,7 +55,7 @@ const params = (CASE === 'degenerate')
   ? degenerateParams(baseParams, { eps: 1e-3, psScale: 1e4 })
   : baseParams;
 
-const { Cv, Ct } = initialState(params);
+const { Cv, Ct, Rfree, DR } = initialState(params);
 const scratch = makeScratch();
 let t = 0;
 
@@ -80,9 +80,11 @@ function fmt(x) {
   return Number(x).toExponential(6);
 }
 
+const TMDD_SET = new Set(params.tmddOrgans || []);
+
 for (const target of SAMPLES) {
   while (t + DT * 0.5 < target) {
-    stepStrang(Cv, Ct, t, DT, params, scratch);
+    stepStrang(Cv, Ct, t, DT, params, scratch, Rfree, DR);
     t += DT;
   }
   const avg = organAverage(Cv, Ct, params);
@@ -92,6 +94,10 @@ for (const target of SAMPLES) {
     out.push(`PARITY|cv=${fmt(Cv[i])}`);
     out.push(`PARITY|ct=${fmt(Ct[i])}`);
     out.push(`PARITY|cavg=${fmt(avg[i])}`);
+    if (TMDD_SET.has(i)) {
+      out.push(`PARITY|rfree=${fmt(Rfree[i])}`);
+      out.push(`PARITY|dr=${fmt(DR[i])}`);
+    }
   }
 }
 out.push('DISSERTATION_PBPK28_PARITY_DONE');

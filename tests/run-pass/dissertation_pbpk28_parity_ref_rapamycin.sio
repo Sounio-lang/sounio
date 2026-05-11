@@ -30,9 +30,51 @@
 // Node runner's identical output.
 // ============================================================================
 
-struct Pbpk28 { cv: [f64; 14], ct: [f64; 14] }
+// State: 14 organs × {Cv [mg/L], Ct [mg/L], Rfree [nmol/L], DR [nmol/L]}.
+// Rfree/DR are non-zero only for TMDD organs (1=liver, 4=heart, 8=gut) per
+// rapamycin's FKBP12/mTORC1 targets — for other organs they stay at 0.
+struct Pbpk28 {
+    cv: [f64; 14],
+    ct: [f64; 14],
+    rfree: [f64; 14],
+    dr: [f64; 14]
+}
 
-fn pbpk28_zero() -> Pbpk28 { Pbpk28 { cv: [0.0; 14], ct: [0.0; 14] } }
+fn pbpk28_zero() -> Pbpk28 {
+    Pbpk28 {
+        cv: [0.0; 14],
+        ct: [0.0; 14],
+        rfree: [0.0; 14],
+        dr: [0.0; 14]
+    }
+}
+
+// ─── TMDD layer (rapamycin → FKBP12/mTORC1; Mager 2004) ────────────────────
+fn mw_rapamycin() -> f64 { return 914.17 }
+
+// TMDD organ membership: liver=1, heart=4, gut=8.
+fn tmdd_is_organ(i: i64) -> bool {
+    if i == 1 { return true }
+    if i == 4 { return true }
+    if i == 8 { return true }
+    return false
+}
+
+// Baseline R_free at no-drug steady state, nmol/L.
+fn tmdd_rtotal0_at(i: i64) -> f64 {
+    if i == 1 { return 50.0 }
+    if i == 4 { return 25.0 }
+    if i == 8 { return 30.0 }
+    return 0.0
+}
+
+fn tmdd_kdeg_at(i: i64) -> f64 { return 0.05 }                 // 1/h, R-turnover
+fn tmdd_kon_at(i: i64)  -> f64 { return 0.10 }                 // L/(nmol·h)
+fn tmdd_kd_at(i: i64)   -> f64 { return 0.10 }                 // nmol/L (K_d = k_off/k_on)
+fn tmdd_kint_at(i: i64) -> f64 { return 0.010 }                // 1/h, DR internalization
+
+fn tmdd_koff_at(i: i64) -> f64 { return tmdd_kon_at(i) * tmdd_kd_at(i) }
+fn tmdd_ksyn_at(i: i64) -> f64 { return tmdd_kdeg_at(i) * tmdd_rtotal0_at(i) }
 
 // V_i, L, ICRP standard man 70 kg (matches pbpk14_core.mjs V_REF).
 fn vref_at(i: i64) -> f64 {
@@ -278,7 +320,7 @@ fn full_cn_step(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
     }
 
     let cb_new = (rhs0 + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
-    var out = pbpk28_zero()
+    var out = state                                          // inherits rfree/dr
     out.cv[0] = if cb_new < 0.0 { 0.0 } else { cb_new }
     i = 1
     while i < 14 {
@@ -291,9 +333,50 @@ fn full_cn_step(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
     return out
 }
 
-// One fully-coupled implicit step (replaces Strang splitting).
+// ─── TMDD passive observer step (G-β-1) ────────────────────────────────────
+// Per-TMDD-organ analytical 2×2 CN on (R_free, DR) at frozen C_t_new:
+//   dR_free/dt = k_syn - k_deg·R_free - k_on·C_t_nM·R_free + k_off·DR
+//   dDR/dt     = k_on·C_t_nM·R_free - (k_off + k_int)·DR
+// where C_t_nM = C_t_mass[mg/L] · 1e6 / MW. Linear at fixed C_t ⇒ closed-form
+// 2×2 CN solve. v1 is *passive observer* — no back-reaction on C_t (added in
+// G-β-2 once the [drug] >> [receptor] simplification is relaxed).
+fn tmdd_step_organ(state: Pbpk28, i: i64, dt: f64) -> Pbpk28 with Mut, Div {
+    if !tmdd_is_organ(i) { return state }
+    var r = state
+    let h = 0.5 * dt
+    let mass_to_nm = 1.0e6 / mw_rapamycin()
+    let ct_mass = r.ct[i]
+    let ct_nm = if ct_mass < 0.0 { 0.0 } else { ct_mass * mass_to_nm }
+
+    let k_on = tmdd_kon_at(i)
+    let k_off = tmdd_koff_at(i)
+    let k_int = tmdd_kint_at(i)
+    let k_syn = tmdd_ksyn_at(i)
+    let k_deg = tmdd_kdeg_at(i)
+    let k_ct = k_on * ct_nm
+
+    let a11 = 1.0 + h * (k_deg + k_ct)
+    let a12 = 0.0 - h * k_off
+    let a21 = 0.0 - h * k_ct
+    let a22 = 1.0 + h * (k_off + k_int)
+    let rhs_r = (1.0 - h * (k_deg + k_ct)) * r.rfree[i] + (h * k_off) * r.dr[i] + dt * k_syn
+    let rhs_d = (h * k_ct) * r.rfree[i] + (1.0 - h * (k_off + k_int)) * r.dr[i]
+    let det = a11 * a22 - a12 * a21
+    let r_new = (rhs_r * a22 - rhs_d * a12) / det
+    let d_new = (a11 * rhs_d - a21 * rhs_r) / det
+    r.rfree[i] = if r_new < 0.0 { 0.0 } else { r_new }
+    r.dr[i] = if d_new < 0.0 { 0.0 } else { d_new }
+    return r
+}
+
+// One fully-coupled implicit PBPK step followed by per-TMDD-organ binding step
+// (Lie split: PBPK first, then TMDD at fixed Ct_new).
 fn strang_step(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
-    return full_cn_step(state, dt)
+    var s = full_cn_step(state, dt)
+    s = tmdd_step_organ(s, 1, dt)
+    s = tmdd_step_organ(s, 4, dt)
+    s = tmdd_step_organ(s, 8, dt)
+    return s
 }
 
 fn integrate_to(state: Pbpk28, t_start: f64, t_end: f64, dt: f64) -> Pbpk28 with Mut, Div {
@@ -317,8 +400,9 @@ fn c_avg_at(state: &Pbpk28, i: i64) -> f64 {
 fn emit_at(state: &Pbpk28, t: f64) with IO, Mut {
     var i = 0
     while i < 14 {
-        // PARITY|t / PARITY|i / PARITY|cv / PARITY|ct / PARITY|cavg per organ.
-        // Five lines per organ per sample time → 14 × 12 × 5 = 840 records.
+        // PARITY|t / PARITY|i / PARITY|cv / PARITY|ct / PARITY|cavg per organ;
+        // PARITY|rfree / PARITY|dr additionally for TMDD organs (1=liver,
+        // 4=heart, 8=gut). Gate joins on (t, i).
         print("PARITY|t=")
         println(t)
         println("")
@@ -334,6 +418,14 @@ fn emit_at(state: &Pbpk28, t: f64) with IO, Mut {
         let avg = if i == 0 { state.cv[0] } else { vasc_frac_at(i) * state.cv[i] + (1.0 - vasc_frac_at(i)) * state.ct[i] }
         println(avg)
         println("")
+        if tmdd_is_organ(i) {
+            print("PARITY|rfree=")
+            println(state.rfree[i])
+            println("")
+            print("PARITY|dr=")
+            println(state.dr[i])
+            println("")
+        }
         i = i + 1
     }
 }
@@ -351,6 +443,11 @@ fn main() -> i32 with IO, Mut, Div, Panic {
 
     var C = pbpk28_zero()
     C.cv[0] = 0.05 / vref_at(0)  // 0.01 mg/L initial blood concentration
+    // TMDD organs: initialize R_free at baseline steady-state R_total_0,
+    // DR at 0 (no drug bound at t=0).
+    C.rfree[1] = tmdd_rtotal0_at(1)
+    C.rfree[4] = tmdd_rtotal0_at(4)
+    C.rfree[8] = tmdd_rtotal0_at(8)
 
     let dt = 0.001
     var t = 0.0

@@ -72,6 +72,43 @@ export const PS_RAPAMYCIN = Object.freeze([
     78.0,   // 13 other (PS/Q =  6)
 ]);
 
+// Rapamycin molecular weight (g/mol) — needed to convert PBPK28 mass
+// concentrations (mg/L) to molar concentrations (nmol/L) for the TMDD layer.
+export const MW_RAPAMYCIN = 914.17;
+
+// TMDD organ indices for rapamycin → FKBP12 / mTORC1 binding.
+// Liver and gut are major FKBP12 reservoirs; heart is the Cypher-stent
+// clinical-endpoint organ (vascular smooth muscle proliferation).
+export const TMDD_ORGANS_RAPAMYCIN = Object.freeze([1, 4, 8]);  // liver, heart, gut
+
+// Per-TMDD-organ parameters, indexed by full 14-organ index (0..13).
+// Non-TMDD organs map to null. Literature: Mager 2004 (sirolimus FKBP12 TMDD;
+// FKBP12 cellular levels Schreiber 1991; receptor turnover Bohnacker 1992).
+//
+// Units:
+//   k_on   [L / (nmol · h)]    binding rate constant
+//   k_off  [1/h]                dissociation rate constant
+//   k_int  [1/h]                bound-complex internalization
+//   k_syn  [nmol / (L · h)]    receptor synthesis
+//   k_deg  [1/h]                free-receptor degradation
+//   r_total_0 [nmol/L]         baseline R_free at steady state = k_syn / k_deg
+function tmddParams(rTotal0_nM, kDeg_per_h, kOn_per_nM_per_h, Kd_nM, kInt_per_h) {
+  return Object.freeze({
+    rTotal0: rTotal0_nM,
+    kDeg:    kDeg_per_h,
+    kSyn:    kDeg_per_h * rTotal0_nM,         // steady-state: k_syn = k_deg · R_total_0
+    kOn:     kOn_per_nM_per_h,
+    kOff:    kOn_per_nM_per_h * Kd_nM,        // K_d = k_off / k_on
+    kInt:    kInt_per_h,
+  });
+}
+
+export const TMDD_PARAMS_RAPAMYCIN = Object.freeze({
+  1: tmddParams(/*R_total*/ 50.0,  /*k_deg*/ 0.05, /*k_on*/ 0.10, /*K_d*/ 0.10, /*k_int*/ 0.010),  // liver
+  4: tmddParams(                   25.0,            0.05,         0.10,        0.10,            0.010),  // heart (coronary SMC)
+  8: tmddParams(                   30.0,            0.05,         0.10,        0.10,            0.010),  // gut
+});
+
 export const DEFAULT_PARAMS_RAPAMYCIN = Object.freeze({
   clHep: CL_HEP_DEFAULT,
   higuchiScale: 1.0,
@@ -81,6 +118,9 @@ export const DEFAULT_PARAMS_RAPAMYCIN = Object.freeze({
   ps: PS_RAPAMYCIN,
   vascFrac: VASC_FRAC,
   kp: KP,
+  mw: MW_RAPAMYCIN,
+  tmddOrgans: TMDD_ORGANS_RAPAMYCIN,
+  tmddParams: TMDD_PARAMS_RAPAMYCIN,
 });
 
 /**
@@ -164,7 +204,7 @@ function psRelaxOrgan(Cv, Ct, i, Vv, Vt, Kp, PS, dt) {
  *     no splitting introduces non-commutativity error.
  *   - O(N) per step (13 organ-block inversions + 1 scalar solve + 13 back-subs).
  */
-export function stepStrang(Cv, Ct, tHours, dt, params, scratch) {
+export function stepStrang(Cv, Ct, tHours, dt, params, scratch, Rfree, DR) {
   scratch._tCenter = tHours + 0.5 * dt;
   const h = 0.5 * dt;
   const Vb = V_REF[0] * params.vdScale;
@@ -228,6 +268,45 @@ export function stepStrang(Cv, Ct, tHours, dt, params, scratch) {
     Cv[i] = cv < 0 ? 0 : cv;
     Ct[i] = ct < 0 ? 0 : ct;
   }
+
+  // ─── TMDD passive observer (G-β-1) ────────────────────────────────────────
+  // After the PBPK28 CN step, per-TMDD-organ receptor-binding ODE evolves on
+  // (R_free, DR) at frozen C_t_new. Linear at fixed C_t ⇒ analytical 2×2 CN
+  // per organ. v1 is a *passive observer* (no -k_on·C_t·R_free back-reaction
+  // on C_t) — adequate when [drug] >> [receptor]; back-reaction added in G-β-2.
+  //
+  //   dR_free/dt = k_syn - k_deg·R_free - k_on·C_t·R_free + k_off·DR
+  //   dDR/dt     = k_on·C_t·R_free - (k_off + k_int)·DR
+  //
+  //   2×2 matrix at fixed C_t (in nmol/L; Ct_mass[mg/L] → Ct_nM via MW):
+  //     M_TMDD = [-k_deg - k_on·C_t_nM,  +k_off                 ]
+  //              [+k_on·C_t_nM,           -(k_off + k_int)       ]
+  //     f      = [k_syn; 0]
+  //   CN: (I - dt·M/2)·x_new = (I + dt·M/2)·x_old + dt·f_mid
+  if (Rfree && DR && params.tmddOrgans && params.tmddParams && params.mw) {
+    const h = 0.5 * dt;
+    const mass_to_nM = 1.0e6 / params.mw;  // mg/L → nmol/L
+    for (const j of params.tmddOrgans) {
+      const tp = params.tmddParams[j];
+      if (!tp) continue;
+      const ctNM = Math.max(Ct[j], 0) * mass_to_nM;
+      const kCt = tp.kOn * ctNM;
+      // A = I - h·M
+      const a11 =  1 + h * (tp.kDeg + kCt);
+      const a12 = -h * tp.kOff;
+      const a21 = -h * kCt;
+      const a22 =  1 + h * (tp.kOff + tp.kInt);
+      // RHS = (I + h·M)·x_old + dt·f
+      const rhsR = (1 - h * (tp.kDeg + kCt)) * Rfree[j] + (h * tp.kOff) * DR[j] + dt * tp.kSyn;
+      const rhsD = (h * kCt) * Rfree[j] + (1 - h * (tp.kOff + tp.kInt)) * DR[j];
+      const det = a11 * a22 - a12 * a21;
+      const rNew = (rhsR * a22 - rhsD * a12) / det;
+      const dNew = (a11 * rhsD - a21 * rhsR) / det;
+      Rfree[j] = rNew < 0 ? 0 : rNew;
+      DR[j]    = dNew < 0 ? 0 : dNew;
+    }
+  }
+
   return release * dt;
 }
 
@@ -244,13 +323,22 @@ export function makeScratch() {
 
 /**
  * Bolus initial state. Drug enters Cv[0] = C_blood; interstitial sub-comps
- * start at zero. (Ct[0] is unused and kept at zero.)
+ * start at zero. TMDD organs start at R_free = R_total_0 (free-receptor
+ * baseline at no-drug steady state), DR = 0.
  */
 export function initialState(params) {
   const Cv = new Float64Array(N);
   const Ct = new Float64Array(N);
+  const Rfree = new Float64Array(N);
+  const DR = new Float64Array(N);
   Cv[0] = params.bolusMg / (V_REF[0] * params.vdScale);
-  return { Cv, Ct };
+  if (params.tmddOrgans && params.tmddParams) {
+    for (const j of params.tmddOrgans) {
+      const tp = params.tmddParams[j];
+      if (tp) Rfree[j] = tp.rTotal0;
+    }
+  }
+  return { Cv, Ct, Rfree, DR };
 }
 
 /**

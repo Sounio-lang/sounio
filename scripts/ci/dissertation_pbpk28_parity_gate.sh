@@ -31,6 +31,11 @@
 #                  analytically) within 5% tolerance at all 12 sample times.
 #                  This is the numerical-stability anchor that distinguishes
 #                  PBPK28-CN from PBPK14-Stage-C's unstable RK4.
+#   5. HARD GATE — TMDD layer parity (G-β-1): Node ↔ Sounio agreement on
+#                  receptor-binding trajectories at the 3 TMDD organs
+#                  (liver=1, heart=4, gut=8). R_free and DR within 1.0% RMSE
+#                  per organ over 12 sample times. Verifies the analytical
+#                  2×2 CN sub-step is implemented identically on both sides.
 
 set -euo pipefail
 
@@ -334,3 +339,75 @@ awk -F'\t' -v VFRAC="$VFRAC_AWK" '
     }
   }
 ' "$SIO_TSV" | tee "$MASS_CSV"
+
+# ─── Case 5: TMDD parity Node ↔ Sounio (G-β-1) ───────────────────────────────
+echo
+echo "[pbpk28-parity] Case 5: Node ↔ Sounio TMDD (R_free, DR) parity at organs {1, 4, 8}"
+
+# Re-parse logs into TMDD-only TSV: t, i, rfree, dr  (only TMDD organs emit these)
+parse_tmdd_tsv() {
+  local in="$1"
+  local out="$2"
+  awk '
+    /^PARITY\|t=/    { t = substr($0, 10); next }
+    /^PARITY\|i=/    { i = substr($0, 10); rfree=""; dr=""; next }
+    /^PARITY\|rfree=/ { rfree = substr($0, 14); next }
+    /^PARITY\|dr=/   {
+      dr = substr($0, 11);
+      printf "%s\t%s\t%s\t%s\n", t, i, rfree, dr;
+    }
+  ' "$in" > "$out"
+}
+SIO_TMDD_TSV="$OUT_DIR/sounio_tmdd.tsv"
+NODE_TMDD_TSV="$OUT_DIR/node_tmdd.tsv"
+parse_tmdd_tsv "$SIO_LOG" "$SIO_TMDD_TSV"
+parse_tmdd_tsv "$NODE_LOG" "$NODE_TMDD_TSV"
+
+SIO_TMDD_ROWS=$(wc -l < "$SIO_TMDD_TSV")
+NODE_TMDD_ROWS=$(wc -l < "$NODE_TMDD_TSV")
+EXPECTED_TMDD_ROWS=$((12 * 3))   # 12 samples × 3 TMDD organs
+if [[ "$SIO_TMDD_ROWS" -ne "$EXPECTED_TMDD_ROWS" || "$NODE_TMDD_ROWS" -ne "$EXPECTED_TMDD_ROWS" ]]; then
+  echo "[pbpk28-parity:case5] FAIL: TMDD row count mismatch — Sounio=$SIO_TMDD_ROWS Node=$NODE_TMDD_ROWS expected=$EXPECTED_TMDD_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case5] both runs emitted $SIO_TMDD_ROWS TMDD records"
+
+JOINED_TMDD="$OUT_DIR/joined_tmdd.tsv"
+awk -F'\t' '
+  NR==FNR { Rs[$1"|"$2] = $3; Ds[$1"|"$2] = $4; next }
+  { print $1"\t"$2"\t"Rs[$1"|"$2]"\t"$3"\t"Ds[$1"|"$2]"\t"$4 }
+' "$SIO_TMDD_TSV" "$NODE_TMDD_TSV" > "$JOINED_TMDD"
+
+awk -F'\t' '
+  BEGIN { THR = 1.0; organ[1]="liver"; organ[4]="heart"; organ[8]="gut"; }
+  {
+    t = $1; i = $2 + 0;
+    rs = $3 + 0; rn = $4 + 0;
+    ds = $5 + 0; dn = $6 + 0;
+    dR = rs - rn; dD = ds - dn;
+    SSR[i] += dR * dR;  SSD[i] += dD * dD;
+    NN[i] += 1;
+    if (rs > PKR[i]) PKR[i] = rs;  if (rn > PKR[i]) PKR[i] = rn;
+    if (ds > PKD[i]) PKD[i] = ds;  if (dn > PKD[i]) PKD[i] = dn;
+  }
+  END {
+    bad = 0;
+    printf "%-3s %-7s %-12s %-12s %-10s  %-12s %-12s %-10s\n", "i", "organ", "rmse_Rfree", "peak_Rfree", "Rfree_pct", "rmse_DR", "peak_DR", "DR_pct";
+    for (idx = 0; idx < 14; idx++) {
+      if (NN[idx] == 0) continue;
+      i = idx;
+      rmseR = sqrt(SSR[i] / NN[i]); pctR = (PKR[i] != 0) ? 100.0 * rmseR / PKR[i] : 0;
+      rmseD = sqrt(SSD[i] / NN[i]); pctD = (PKD[i] != 0) ? 100.0 * rmseD / PKD[i] : 0;
+      statR = (pctR < THR) ? "OK" : "FAIL"; statD = (pctD < THR) ? "OK" : "FAIL";
+      if (statR == "FAIL" || statD == "FAIL") bad += 1;
+      printf "%-3d %-7s %-12.6e %-12.6e %-7.4f %s  %-12.6e %-12.6e %-7.4f %s\n", \
+             i, organ[i], rmseR, PKR[i], pctR, statR, rmseD, PKD[i], pctD, statD;
+    }
+    if (bad > 0) {
+      printf "PBPK28_TMDD_PARITY_FAIL %d/3 TMDD organs exceed threshold\n", bad;
+      exit 1;
+    } else {
+      printf "PBPK28_TMDD_PARITY_PASS 3/3 TMDD organs within 1.0%% RMSE on (R_free, DR)\n";
+    }
+  }
+' "$JOINED_TMDD"
