@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { InfoPopover } from './InfoPopover';
 
 // hessian_budget.csv schema:
 //   kind=ref       i=0  j=0  value=<reference AUC mean>, units=ng·h/mL
@@ -91,7 +92,23 @@ export function HessianHeatmap({ highlightedParam, onSelectParam }: HessianHeatm
   return (
     <div className="text-sm">
       <div className="flex items-baseline justify-between mb-2">
-        <h4 className="text-[var(--color-text-primary)] font-semibold">2nd-order Hessian</h4>
+        <div className="flex items-center gap-1.5">
+          <h4 className="text-[var(--color-text-primary)] font-semibold">2nd-order Hessian</h4>
+          <InfoPopover ariaLabel="What is the Hessian budget?">
+            <p className="mb-1.5">
+              <strong>What you're seeing.</strong> The matrix of second
+              derivatives of AUC with respect to CL<sub>hep</sub> and
+              f<sub>u,plasma</sub>. Diagonal cells are pure curvature; the
+              off-diagonal captures parameter interaction.
+            </p>
+            <p>
+              <strong>Why it matters.</strong> First-order GUM truncates the
+              Taylor expansion; for non-linear PBPK that can <em>understate</em>{' '}
+              uncertainty. Var(O₂) − Var(O₁) is the magnitude of the correction
+              the second-order term adds. Per JCGM 100:2008 §F.
+            </p>
+          </InfoPopover>
+        </div>
         <span className="text-[0.7rem] opacity-60">Lane 8a · CL × fu_plasma</span>
       </div>
       {/* Heatmap grid: 3×3 with header row + header col */}

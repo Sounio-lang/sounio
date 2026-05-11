@@ -1,6 +1,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, PerspectiveCamera } from '@react-three/drei';
+import type { WebGLRenderer } from 'three';
 import { Compartments } from './Compartments';
 import { BloodFlowEdges } from './BloodFlowEdges';
 import { Stent } from './Stent';
@@ -10,8 +11,12 @@ import { ConfidenceGate } from './ConfidenceGate';
 import { HessianHeatmap } from './HessianHeatmap';
 import { OrganDetailModal } from './OrganDetailModal';
 import { TimeScrubber } from './TimeScrubber';
+import { CameraDirector } from './CameraDirector';
+import { TourControls } from './TourControls';
+import { TOURS, type TourKeyframe } from './tours';
 import { DEFAULT_PARAMS, useSimulation } from '../../hooks/usePBPK14';
 import type { PBPKParams } from '../../hooks/usePBPK14';
+import { useReducedMotion } from '../../hooks/useReducedMotion';
 
 const PATIENT_PROFILES: Record<string, PBPKParams> = {
   typical: { ...DEFAULT_PARAMS },
@@ -41,6 +46,19 @@ interface SimulationBridgeProps {
   seekTo: number | null;
   onSeekDone: () => void;
   onTick: (snapshot: SimSnapshot) => void;
+}
+
+function TourElapsedClock({ active, onTick }: { active: boolean; onTick: (s: number) => void }) {
+  const elapsed = useRef(0);
+  useEffect(() => {
+    if (!active) elapsed.current = 0;
+  }, [active]);
+  useFrame((_, delta) => {
+    if (!active) return;
+    elapsed.current += delta;
+    onTick(elapsed.current);
+  });
+  return null;
 }
 
 function SimulationBridge({ params, playing, speed, seekTo, onSeekDone, onTick }: SimulationBridgeProps) {
@@ -104,6 +122,49 @@ export default function DissertationViewer() {
   /** Forces a sim restart by changing the params reference. */
   const [restartNonce, setRestartNonce] = useState(0);
 
+  // Stage E — tours, snapshot, reduced motion.
+  const reducedMotion = useReducedMotion();
+  const [activeTourId, setActiveTourId] = useState<string | null>(null);
+  const [tourNarration, setTourNarration] = useState<string | null>(null);
+  const [tourElapsed, setTourElapsed] = useState(0);
+  const controlsRef = useRef<{ target: import('three').Vector3; update: () => void } | null>(null);
+  const rendererRef = useRef<WebGLRenderer | null>(null);
+  const activeTour = useMemo(() => TOURS.find((t) => t.id === activeTourId) ?? null, [activeTourId]);
+
+  const handleTourKeyframe = useCallback((k: TourKeyframe) => {
+    setTourNarration(k.narration ?? null);
+    if (k.profile && k.profile in PATIENT_PROFILES) {
+      setProfile(k.profile as keyof typeof PATIENT_PROFILES);
+    }
+    if (typeof k.higuchiScale === 'number') {
+      setParams((p) => ({ ...p, higuchiScale: k.higuchiScale! }));
+    }
+  }, []);
+  const handleTourElapsedTick = useCallback((s: number) => setTourElapsed(s), []);
+  const handleTourComplete = useCallback(() => {
+    setActiveTourId(null);
+    setTourNarration(null);
+    setTourElapsed(0);
+  }, []);
+  const handleTourStart = (id: string) => {
+    setActiveTourId(id);
+    setTourElapsed(0);
+    setTourNarration(null);
+  };
+  const handleTourStop = handleTourComplete;
+
+  const handleSnapshot = () => {
+    if (!rendererRef.current) return;
+    // toDataURL only works with preserveDrawingBuffer:true on the Canvas.
+    const url = rendererRef.current.domElement.toDataURL('image/png');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `dissertation-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
   const [simState, setSimState] = useState<SimSnapshot>(() => ({
     timeHours: 0,
     concentrations: new Float32Array(14),
@@ -117,6 +178,22 @@ export default function DissertationViewer() {
   useEffect(() => {
     setParams({ ...PATIENT_PROFILES[profile] });
   }, [profile, restartNonce]);
+
+  // Keyboard shortcuts for advisor/committee usability.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Ignore when typing in a form control (organ modal escape handled there).
+      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      if (e.key === ' ') { e.preventDefault(); setPlaying((p) => !p); }
+      else if (e.key.toLowerCase() === 'r') setRestartNonce((n) => n + 1);
+      else if (e.key.toLowerCase() === 's') handleSnapshot();
+      else if (e.key === 'Escape' && activeTourId) handleTourStop();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTourId]);
 
   const handleSeek = (target: number) => {
     if (target < simState.timeHours) {
@@ -164,11 +241,17 @@ export default function DissertationViewer() {
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px]">
         {/* Left: 3D canvas */}
         <div className="relative h-[640px] w-full">
-          <Canvas shadows dpr={[1, 2]} gl={{ antialias: true, alpha: true }}>
+          <Canvas
+            shadows
+            dpr={[1, 2]}
+            gl={{ antialias: true, alpha: true, preserveDrawingBuffer: true }}
+            onCreated={({ gl }) => { rendererRef.current = gl; }}
+          >
             <color attach="background" args={['#0b1020']} />
             <fog attach="fog" args={['#0b1020', 12, 30]} />
             <PerspectiveCamera makeDefault position={[6, 3.5, 8]} fov={42} near={0.1} far={100} />
             <OrbitControls
+              ref={controlsRef as never}
               target={[0, 2.5, 0]}
               enableDamping
               dampingFactor={0.08}
@@ -187,7 +270,11 @@ export default function DissertationViewer() {
                 selected={selected}
                 onSelect={(i) => setSelected(i === selected ? null : i)}
               />
-              <Stent timeHours={simState.timeHours} speed={speed} />
+              <Stent
+                timeHours={simState.timeHours}
+                speed={speed}
+                reducedMotion={reducedMotion}
+              />
               <SimulationBridge
                 params={params}
                 playing={playing}
@@ -196,6 +283,15 @@ export default function DissertationViewer() {
                 onSeekDone={onSeekDone}
                 onTick={onTick}
               />
+              <CameraDirector
+                tour={activeTour}
+                paused={false}
+                controlsRef={controlsRef}
+                onKeyframe={handleTourKeyframe}
+                onComplete={handleTourComplete}
+              />
+              {/* Tick the elapsed clock for the tour controls. */}
+              <TourElapsedClock active={!!activeTour} onTick={handleTourElapsedTick} />
             </Suspense>
           </Canvas>
 
@@ -211,10 +307,36 @@ export default function DissertationViewer() {
               <span className="opacity-50"> / 140 µg</span>
             </div>
           </div>
+
+          {/* Top-right: snapshot export */}
+          <button
+            type="button"
+            onClick={handleSnapshot}
+            title="Export the current frame as a PNG suitable for committee handouts"
+            className="absolute top-4 right-4 bg-black/55 hover:bg-black/70 text-white text-xs px-3 py-1.5 rounded border border-white/15"
+          >
+            📸 Snapshot PNG
+          </button>
+
+          {/* Bottom-of-canvas narration overlay during tours */}
+          {tourNarration && (
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 max-w-[80%] text-center text-sm text-white bg-black/65 backdrop-blur px-4 py-2 rounded shadow-lg">
+              {tourNarration}
+            </div>
+          )}
         </div>
 
-        {/* Right: side panel — GUM bar, confidence gate, Hessian */}
+        {/* Right: side panel — tour controls, GUM bar, confidence gate, Hessian */}
         <aside className="flex flex-col gap-4 p-4 border-t lg:border-t-0 lg:border-l border-[var(--glass-border)] bg-[rgba(0,0,0,0.2)] text-white">
+          <TourControls
+            tours={TOURS}
+            activeTourId={activeTourId}
+            narration={tourNarration}
+            elapsedSec={tourElapsed}
+            onStart={handleTourStart}
+            onStop={handleTourStop}
+          />
+          <hr className="border-white/10" />
           <ConfidenceGate params={params} />
           <hr className="border-white/10" />
           <GumBudgetBar />

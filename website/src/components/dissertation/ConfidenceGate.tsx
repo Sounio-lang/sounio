@@ -1,4 +1,5 @@
 import type { PBPKParams } from '../../hooks/usePBPK14';
+import { InfoPopover } from './InfoPopover';
 
 /**
  * Phase J compile-time confidence gate, visualised as a traffic light.
@@ -72,7 +73,25 @@ export function ConfidenceGate({ params }: { params: PBPKParams }) {
   return (
     <div className="text-sm">
       <div className="flex items-baseline justify-between mb-2">
-        <h4 className="text-[var(--color-text-primary)] font-semibold">Phase J confidence gate</h4>
+        <div className="flex items-center gap-1.5">
+          <h4 className="text-[var(--color-text-primary)] font-semibold">Phase J confidence gate</h4>
+          <InfoPopover ariaLabel="What is the confidence gate?">
+            <p className="mb-1.5">
+              <strong>What you're seeing.</strong> A compile-time check that
+              refuses to run the simulation if the population priors fall
+              outside their documented evidence band — for rapamycin, ±50% of
+              the typical CL (Ferron 1997, n=24) and ±30% on the Cypher
+              coating-thickness CV (Cordis 2003 IFU).
+            </p>
+            <p>
+              <strong>Why it matters.</strong> Conventional PBPK tools will
+              happily extrapolate past their evidence base. The gate makes
+              that <em>impossible</em>: kernels outside the confidence band
+              compile to a <code>CONF_REJECT</code> with the failure reason
+              attached, before any patient simulation runs.
+            </p>
+          </InfoPopover>
+        </div>
         <span className="text-[0.7rem] opacity-60">compile-time</span>
       </div>
       <div className="flex items-center gap-3">
