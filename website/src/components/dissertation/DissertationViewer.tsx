@@ -9,6 +9,8 @@ import { Silhouette } from './Silhouette';
 import { GumBudgetBar } from './GumBudgetBar';
 import { ConfidenceGate } from './ConfidenceGate';
 import { HessianHeatmap } from './HessianHeatmap';
+import { TmddPanel } from './TmddPanel';
+import { PdReadoutPanel } from './PdReadoutPanel';
 import { OrganDetailModal } from './OrganDetailModal';
 import { TimeScrubber } from './TimeScrubber';
 import { CameraDirector } from './CameraDirector';
@@ -357,6 +359,10 @@ export default function DissertationViewer() {
             onStart={handleTourStart}
             onStop={handleTourStop}
           />
+          <hr className="border-white/10" />
+          <TmddPanel drug={drug} rfree={simState.rfree} dr={simState.dr} />
+          <hr className="border-white/10" />
+          <PdReadoutPanel drug={drug} pdA={simState.pdA} pdN={simState.pdN} />
           <hr className="border-white/10" />
           <ConfidenceGate params={params} />
           <hr className="border-white/10" />

@@ -19,19 +19,24 @@ import {
 
 export type DrugId = 'rapamycin' | 'semaglutide';
 
+/**
+ * PBPKParams — keeps the same shape as the legacy usePBPK14.PBPKParams
+ * (required fields) so that components consuming it (ConfidenceGate,
+ * GumBudgetBar, etc.) don't need updating. Drug-specific semantics:
+ *   rapamycin:   clHep = hepatic clearance L/h; higuchiScale = Cypher K_H mult
+ *   semaglutide: clHep = proteolytic clearance L/h; higuchiScale = unused
+ */
 export interface PBPKParams {
-  /** Override on the active drug's `clHep` (or cl_proteolytic for semaglutide). */
-  clHep?: number;
-  /** Multiplier on Higuchi K_H (rapamycin only). */
-  higuchiScale?: number;
+  /** Hepatic / proteolytic clearance, L/h. */
+  clHep: number;
+  /** Multiplier on Higuchi K_H (rapamycin only; ignored for SC depot). */
+  higuchiScale: number;
   /** Distribution-volume scale (1.0 = typical, 0.7 = lean, 1.4 = obese). */
-  vdScale?: number;
-  /** Initial IV bolus (mg). Rapamycin only; semaglutide uses SC depot. */
-  bolusMg?: number;
+  vdScale: number;
+  /** Initial IV bolus (mg). Rapamycin uses for IV; semaglutide ignores. */
+  bolusMg: number;
   /** Whether the release source (stent or SC depot) is active. */
-  stentActive?: boolean;
-  /** SC depot dose, mg (semaglutide only). */
-  doseMg?: number;
+  stentActive: boolean;
 }
 
 export interface PBPKState {
@@ -56,14 +61,14 @@ export interface PBPKState {
 
 function mergeParams(drug: DrugId, params: PBPKParams) {
   const base = drug === 'semaglutide' ? DEFAULT_PARAMS_SEMAGLUTIDE : DEFAULT_PARAMS_RAPAMYCIN;
-  const out: any = { ...base };
-  if (params.clHep        !== undefined) out.clHep        = params.clHep;
-  if (params.higuchiScale !== undefined) out.higuchiScale = params.higuchiScale;
-  if (params.vdScale      !== undefined) out.vdScale      = params.vdScale;
-  if (params.bolusMg      !== undefined) out.bolusMg      = params.bolusMg;
-  if (params.stentActive  !== undefined) out.stentActive  = params.stentActive;
-  if (params.doseMg       !== undefined && drug === 'semaglutide') out.releaseDoseMg = params.doseMg;
-  return out;
+  return {
+    ...base,
+    clHep:        params.clHep,
+    higuchiScale: params.higuchiScale,
+    vdScale:      params.vdScale,
+    bolusMg:      params.bolusMg,
+    stentActive:  params.stentActive,
+  };
 }
 
 export function useSimulation(drug: DrugId, params: PBPKParams) {
@@ -119,7 +124,7 @@ export function useSimulation(drug: DrugId, params: PBPKParams) {
       pdN:   new Float32Array(N),
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drug, params.bolusMg, params.clHep, params.higuchiScale, params.vdScale, params.stentActive, params.doseMg]);
+  }, [drug, params.bolusMg, params.clHep, params.higuchiScale, params.vdScale, params.stentActive]);
 
   const step = (dtHours: number) => {
     const I = integratorRef.current;
@@ -161,7 +166,13 @@ export function useSimulation(drug: DrugId, params: PBPKParams) {
   return { state, step, drug, profile };
 }
 
+/** DEFAULT_PARAMS — sliders' "typical-patient" anchor (rapamycin units;
+ *  cosmetically reused when semaglutide is selected, then ignored where the
+ *  field doesn't apply — e.g. higuchiScale, which doesn't drive SC depot). */
 export const DEFAULT_PARAMS: PBPKParams = {
+  clHep: 12.4,
+  higuchiScale: 1.0,
   vdScale: 1.0,
+  bolusMg: 0.0,
   stentActive: true,
 };
