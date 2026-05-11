@@ -408,7 +408,7 @@ export default function DissertationViewer() {
           <hr className="border-white/10" />
           <PdReadoutPanel drug={drug} pdA={simState.pdA} pdN={simState.pdN} />
           <hr className="border-white/10" />
-          <ConfidenceGate params={params} />
+          <ConfidenceGate drug={drug} params={params} />
           <hr className="border-white/10" />
           <GumBudgetBar />
           <hr className="border-white/10" />

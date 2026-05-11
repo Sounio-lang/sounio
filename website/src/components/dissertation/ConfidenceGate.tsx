@@ -1,4 +1,4 @@
-import type { PBPKParams } from '../../hooks/usePBPK14';
+import type { PBPKParams, DrugId } from '../../hooks/usePBPK';
 import { InfoPopover } from './InfoPopover';
 
 /**
@@ -6,19 +6,60 @@ import { InfoPopover } from './InfoPopover';
  *
  * The committed Phase J gate
  * (`scripts/ci/kretikos_kaxi_phase_j_gate.sh`) enforces evidence-quality
- * thresholds on the kernel. Here we mirror that contract in the viewer:
- * given the current patient + dose configuration, would the dissertation's
- * confidence gate pass or trip?
+ * thresholds on the kernel. Here we mirror that contract in the viewer,
+ * per drug, since the evidence bands are different:
  *
- * Thresholds:
- *  - clHep must remain within ±50% of the typical 12.4 L/h (covers
- *    CYP3A4 fast/poor metaboliser bands documented in Ferron 1997).
- *  - higuchiScale within [0.7, 1.3] (coating-thickness CV in
- *    biomaterial_release.sio is ~15% per Cordis 2003 IFU).
- *  - vdScale within [0.7, 1.4] (BMI-normal envelope).
+ *   rapamycin   — Ferron 1997 (n=24, CL CV=58%) + Cordis 2003 IFU
+ *                 (coating-thickness CV ~30%). Band: clHep within ±50%,
+ *                 higuchiScale within [0.7, 1.3], vdScale within [0.7, 1.4].
+ *   semaglutide — Overgaard 2019 (n=72, CL CV=15%) + Carlsson 2020
+ *                 (SC absorption F=0.89 ± 0.05, k_a CV=22%). Band:
+ *                 clHep within ±40%, higuchiScale (= SC dose multiplier)
+ *                 within [0.75, 1.25], vdScale within [0.7, 1.4].
  */
 
-const TYPICAL_CL = 12.4;
+interface DrugBand {
+  typicalCL: number;
+  clBandFrac: number;        // hard-fail
+  clSoftFrac: number;        // warn
+  releaseLo: number;
+  releaseHi: number;
+  releaseSoftLo: number;
+  releaseSoftHi: number;
+  vdLo: number;
+  vdHi: number;
+  releaseLabel: string;      // human-readable name for the higuchiScale knob
+  citation: string;          // shown in info popover
+}
+
+const BANDS: Record<DrugId, DrugBand> = {
+  rapamycin: {
+    typicalCL: 12.4,
+    clBandFrac: 0.5,
+    clSoftFrac: 0.3,
+    releaseLo: 0.7,
+    releaseHi: 1.3,
+    releaseSoftLo: 0.85,
+    releaseSoftHi: 1.15,
+    vdLo: 0.7,
+    vdHi: 1.4,
+    releaseLabel: 'Stent release scale',
+    citation: 'Ferron 1997 (n=24, CV=58%) + Cordis 2003 IFU (coating CV ~30%).',
+  },
+  semaglutide: {
+    typicalCL: 0.077,
+    clBandFrac: 0.4,
+    clSoftFrac: 0.25,
+    releaseLo: 0.75,
+    releaseHi: 1.25,
+    releaseSoftLo: 0.9,
+    releaseSoftHi: 1.1,
+    vdLo: 0.7,
+    vdHi: 1.4,
+    releaseLabel: 'SC depot dose',
+    citation: 'Overgaard 2019 (n=72, CL CV=15%) + Carlsson 2020 (F=0.89 ± 0.05, k_a CV=22%).',
+  },
+};
 
 function checkBand(value: number, anchor: number, frac: number) {
   return Math.abs(value - anchor) / anchor <= frac;
@@ -29,27 +70,33 @@ export interface GateVerdict {
   reason: string;
 }
 
-export function evaluateGate(params: PBPKParams): GateVerdict {
-  if (!checkBand(params.clHep, TYPICAL_CL, 0.5)) {
+export function evaluateGate(drug: DrugId, params: PBPKParams): GateVerdict {
+  const b = BANDS[drug];
+  if (!checkBand(params.clHep, b.typicalCL, b.clBandFrac)) {
+    const clearanceName = drug === 'rapamycin' ? 'Hepatic clearance' : 'Proteolytic clearance';
     return {
       status: 'fail',
-      reason: `Hepatic clearance ${params.clHep.toFixed(1)} L/h exceeds ±50% band around typical (Ferron 1997, CYP3A4 CV=58%).`,
+      reason: `${clearanceName} ${params.clHep.toFixed(drug === 'rapamycin' ? 1 : 3)} L/h exceeds ±${(b.clBandFrac * 100).toFixed(0)}% band around typical (${b.citation}).`,
     };
   }
-  if (params.higuchiScale < 0.7 || params.higuchiScale > 1.3) {
+  if (params.higuchiScale < b.releaseLo || params.higuchiScale > b.releaseHi) {
     return {
       status: 'fail',
-      reason: `Stent release scale ${params.higuchiScale.toFixed(2)}× outside Cypher coating-thickness CV (±30%, Cordis 2003 IFU).`,
+      reason: `${b.releaseLabel} ${params.higuchiScale.toFixed(2)}× outside [${b.releaseLo}, ${b.releaseHi}] band (${b.citation}).`,
     };
   }
-  if (params.vdScale < 0.7 || params.vdScale > 1.4) {
+  if (params.vdScale < b.vdLo || params.vdScale > b.vdHi) {
     return {
       status: 'fail',
       reason: `Body composition scale ${params.vdScale.toFixed(2)}× outside BMI-normal envelope.`,
     };
   }
   // Soft warnings near the band edge.
-  if (!checkBand(params.clHep, TYPICAL_CL, 0.3) || params.higuchiScale < 0.85 || params.higuchiScale > 1.15) {
+  if (
+    !checkBand(params.clHep, b.typicalCL, b.clSoftFrac) ||
+    params.higuchiScale < b.releaseSoftLo ||
+    params.higuchiScale > b.releaseSoftHi
+  ) {
     return {
       status: 'warn',
       reason: 'Patient profile sits near the confidence-gate boundary; widen the GUM cone before clinical interpretation.',
@@ -61,8 +108,9 @@ export function evaluateGate(params: PBPKParams): GateVerdict {
   };
 }
 
-export function ConfidenceGate({ params }: { params: PBPKParams }) {
-  const verdict = evaluateGate(params);
+export function ConfidenceGate({ drug, params }: { drug: DrugId; params: PBPKParams }) {
+  const verdict = evaluateGate(drug, params);
+  const b = BANDS[drug];
   const colors = {
     pass: { bg: '#16a34a', glow: 'rgba(34,197,94,0.5)', label: 'PASS' },
     warn: { bg: '#f59e0b', glow: 'rgba(245,158,11,0.5)', label: 'WARN' },
@@ -79,16 +127,18 @@ export function ConfidenceGate({ params }: { params: PBPKParams }) {
             <p className="mb-1.5">
               <strong>What you're seeing.</strong> A compile-time check that
               refuses to run the simulation if the population priors fall
-              outside their documented evidence band — for rapamycin, ±50% of
-              the typical CL (Ferron 1997, n=24) and ±30% on the Cypher
-              coating-thickness CV (Cordis 2003 IFU).
+              outside their documented evidence band. For the active drug
+              ({drug}), the band is sourced from {b.citation}
             </p>
             <p>
               <strong>Why it matters.</strong> Conventional PBPK tools will
               happily extrapolate past their evidence base. The gate makes
               that <em>impossible</em>: kernels outside the confidence band
               compile to a <code>CONF_REJECT</code> with the failure reason
-              attached, before any patient simulation runs.
+              attached, before any patient simulation runs. Each drug carries
+              its own evidence band — semaglutide's is tighter than
+              rapamycin's because Overgaard 2019 had a larger, more uniform
+              cohort.
             </p>
           </InfoPopover>
         </div>
