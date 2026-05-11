@@ -1,5 +1,7 @@
 //@ run-pass
 //@ timeout: 90
+use darwin_pbpk::tmdd::fkbp12_mtorc1::*
+use darwin_pbpk::pd::coronary_smc_prolif::*
 // ============================================================================
 // DISSERTATION PBPK28 PARITY REFERENCE — RAPAMYCIN at literature PS
 //
@@ -54,43 +56,19 @@ fn pbpk28_zero() -> Pbpk28 {
     }
 }
 
-// ─── TMDD layer (rapamycin → FKBP12/mTORC1; Mager 2004) ────────────────────
-fn mw_rapamycin() -> f64 { return 914.17 }
-
-// TMDD organ membership: liver=1, heart=4, gut=8.
-fn tmdd_is_organ(i: i64) -> bool {
-    if i == 1 { return true }
-    if i == 4 { return true }
-    if i == 8 { return true }
-    return false
-}
-
-// Baseline R_free at no-drug steady state, nmol/L.
-fn tmdd_rtotal0_at(i: i64) -> f64 {
-    if i == 1 { return 50.0 }
-    if i == 4 { return 25.0 }
-    if i == 8 { return 30.0 }
-    return 0.0
-}
-
-fn tmdd_kdeg_at(i: i64) -> f64 { return 0.05 }                 // 1/h, R-turnover
-fn tmdd_kon_at(i: i64)  -> f64 { return 0.10 }                 // L/(nmol·h)
-fn tmdd_kd_at(i: i64)   -> f64 { return 0.10 }                 // nmol/L (K_d = k_off/k_on)
-fn tmdd_kint_at(i: i64) -> f64 { return 0.010 }                // 1/h, DR internalization
-
-fn tmdd_koff_at(i: i64) -> f64 { return tmdd_kon_at(i) * tmdd_kd_at(i) }
-fn tmdd_ksyn_at(i: i64) -> f64 { return tmdd_kdeg_at(i) * tmdd_rtotal0_at(i) }
-
-// ─── PD layer (G-γ): heart only (coronary_smc proxy, i=4) ─────────────────
+// ─── TMDD + PD layers — sourced from stdlib/darwin_pbpk/{tmdd,pd}/ ──────────
+// `use` lines above pull in:
+//   tmdd/fkbp12_mtorc1 — fkbp12_mw_rapamycin_da, fkbp12_{kdeg,kon,kd,kint,koff,ksyn_at,rtotal0_at,is_tmdd_organ}
+//   pd/coronary_smc_prolif — coronary_pd_{ka,kprolif,kapo}
+// The Pbpk28-coupled step glue (`tmdd_step_organ`, `pd_step_organ`) stays
+// local — it needs Pbpk28-vector unpacking + nmol/mg unit handling that the
+// pure stdlib `tmdd_step`/`pd_step_rapamycin` kernels don't carry. Constants
+// previously defined inline (mw_rapamycin, tmdd_kon_at, pd_ka_at, …) are now
+// the single-source-of-truth from stdlib.
 fn pd_is_organ(i: i64) -> bool {
     if i == 4 { return true }
     return false
 }
-
-fn pd_ka_at(i: i64)      -> f64 { return 1.0 }        // mTORC1 signaling rate /h
-fn pd_kprolif_at(i: i64) -> f64 { return 5.0e-4 }     // neointimal growth /h
-fn pd_kapo_at(i: i64)    -> f64 { return 3.0e-3 }     // apoptosis under inhibition /h
-fn pd_rtotal0_at(i: i64) -> f64 { return tmdd_rtotal0_at(i) }   // reference R for A target
 
 // V_i, L, ICRP standard man 70 kg (matches pbpk14_core.mjs V_REF).
 fn vref_at(i: i64) -> f64 {
@@ -362,21 +340,21 @@ fn full_cn_step(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
 // Newton at (C_t_old, R_free_old):
 //   k_on·C_t·R_free ≈ k_on·(C_t_old·R_free + R_free_old·C_t - C_t_old·R_free_old)
 fn tmdd_step_organ(state: Pbpk28, i: i64, dt: f64) -> Pbpk28 with Mut, Div {
-    if !tmdd_is_organ(i) { return state }
+    if !fkbp12_is_tmdd_organ(i) { return state }
     var r = state
     let h = 0.5 * dt
-    let mass_to_nm = 1.0e6 / mw_rapamycin()
-    let nm_to_mass = mw_rapamycin() * 1.0e-6
+    let mass_to_nm = 1.0e6 / fkbp12_mw_rapamycin_da()
+    let nm_to_mass = fkbp12_mw_rapamycin_da() * 1.0e-6
     let ct_old_mass = r.ct[i]
     let ct_old_nm = if ct_old_mass < 0.0 { 0.0 } else { ct_old_mass * mass_to_nm }
     let rf_old = r.rfree[i]
     let dr_old = r.dr[i]
 
-    let k_on = tmdd_kon_at(i)
-    let k_off = tmdd_koff_at(i)
-    let k_int = tmdd_kint_at(i)
-    let k_syn = tmdd_ksyn_at(i)
-    let k_deg = tmdd_kdeg_at(i)
+    let k_on = fkbp12_kon()
+    let k_off = fkbp12_koff()
+    let k_int = fkbp12_kint()
+    let k_syn = fkbp12_ksyn_at(i)
+    let k_deg = fkbp12_kdeg()
 
     let kon_rf  = k_on * rf_old
     let kon_ct  = k_on * ct_old_nm
@@ -442,8 +420,8 @@ fn pd_step_organ(state: Pbpk28, i: i64, dt: f64) -> Pbpk28 with Mut, Div {
     if !pd_is_organ(i) { return state }
     var r = state
     let h = 0.5 * dt
-    let target_a = r.rfree[i] / pd_rtotal0_at(i)
-    let k_a = pd_ka_at(i)
+    let target_a = r.rfree[i] / fkbp12_rtotal0_at(i)
+    let k_a = coronary_pd_ka()
     // CN on dA/dt = k_a · (target - A):  (1 + h·k_a)·A_new = (1 - h·k_a)·A_old + dt·k_a·target
     let a_new = ((1.0 - h * k_a) * r.a[i] + dt * k_a * target_a) / (1.0 + h * k_a)
     let a_clamped = if a_new < 0.0 { 0.0 } else { if a_new > 1.0 { 1.0 } else { a_new } }
@@ -451,8 +429,8 @@ fn pd_step_organ(state: Pbpk28, i: i64, dt: f64) -> Pbpk28 with Mut, Div {
 
     // CN on dN/dt = k_prolif · A - k_apo · (1-A) · N at fixed A_new:
     let one_minus_a = 1.0 - a_clamped
-    let gamma_n = pd_kapo_at(i) * one_minus_a
-    let n_new = ((1.0 - h * gamma_n) * r.n[i] + dt * pd_kprolif_at(i) * a_clamped) / (1.0 + h * gamma_n)
+    let gamma_n = coronary_pd_kapo() * one_minus_a
+    let n_new = ((1.0 - h * gamma_n) * r.n[i] + dt * coronary_pd_kprolif() * a_clamped) / (1.0 + h * gamma_n)
     r.n[i] = if n_new < 0.0 { 0.0 } else { n_new }
     return r
 }
@@ -507,7 +485,7 @@ fn emit_at(state: &Pbpk28, t: f64) with IO, Mut {
         let avg = if i == 0 { state.cv[0] } else { vasc_frac_at(i) * state.cv[i] + (1.0 - vasc_frac_at(i)) * state.ct[i] }
         println(avg)
         println("")
-        if tmdd_is_organ(i) {
+        if fkbp12_is_tmdd_organ(i) {
             print("PARITY|rfree=")
             println(state.rfree[i])
             println("")
@@ -542,9 +520,9 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     C.cv[0] = 0.05 / vref_at(0)  // 0.01 mg/L initial blood concentration
     // TMDD organs: initialize R_free at baseline steady-state R_total_0,
     // DR at 0 (no drug bound at t=0).
-    C.rfree[1] = tmdd_rtotal0_at(1)
-    C.rfree[4] = tmdd_rtotal0_at(4)
-    C.rfree[8] = tmdd_rtotal0_at(8)
+    C.rfree[1] = fkbp12_rtotal0_at(1)
+    C.rfree[4] = fkbp12_rtotal0_at(4)
+    C.rfree[8] = fkbp12_rtotal0_at(8)
     // PD organs (heart only for G-γ-1): A = 1.0 (full mTORC1 activity at
     // baseline, no drug), N = 0 (no neointima at stent implant).
     C.a[4] = 1.0

@@ -1,5 +1,7 @@
 //@ run-pass
 //@ timeout: 90
+use darwin_pbpk::tmdd::glp1r::*
+use darwin_pbpk::pd::bergman_glucose_insulin::*
 // ============================================================================
 // DISSERTATION PBPK28 PARITY REFERENCE — SEMAGLUTIDE (G-δ-1)
 //
@@ -133,49 +135,29 @@ fn sema_ka() -> f64 { return 0.011552453009332421 }   // ln(2)/60 h ≈ 0.01155 
 fn sema_f() -> f64  { return 0.89 }
 fn sema_dose_mg() -> f64 { return 1.0 }            // typical weekly dose
 
-fn mw_semaglutide() -> f64 { return 4113.58 }
-
-// ─── Semaglutide TMDD: GLP-1R (brain=3, gut=8, pancreas=12) — G-δ-2 ──────
-// Knudsen 2019 (semaglutide GLP-1R occupancy); Lau 2015 (K_d = 0.4 nM).
-fn tmdd_is_organ(i: i64) -> bool {
-    if i ==  3 { return true }
-    if i ==  8 { return true }
-    if i == 12 { return true }
-    return false
-}
-
-fn tmdd_rtotal0_at(i: i64) -> f64 {
-    if i ==  3 { return 1.0 }     // brain (arcuate nucleus, low density)
-    if i ==  8 { return 2.0 }     // gut (L-cells)
-    if i == 12 { return 5.0 }     // pancreas (β-cells, highest density)
-    return 0.0
-}
-
-fn tmdd_kdeg_at(i: i64) -> f64 { return 0.05 }    // 1/h (GPCR turnover)
-fn tmdd_kon_at(i: i64)  -> f64 { return 0.50 }    // L/(nmol·h) (peptide-GPCR)
-fn tmdd_kd_at(i: i64)   -> f64 { return 0.40 }    // nmol/L (Lau 2015)
-fn tmdd_kint_at(i: i64) -> f64 { return 0.050 }   // 1/h (GPCR internalization)
-fn tmdd_koff_at(i: i64) -> f64 { return tmdd_kon_at(i) * tmdd_kd_at(i) }
-fn tmdd_ksyn_at(i: i64) -> f64 { return tmdd_kdeg_at(i) * tmdd_rtotal0_at(i) }
+// ─── TMDD layer — sourced from stdlib/darwin_pbpk/tmdd/glp1r.sio ───────────
+// `use darwin_pbpk::tmdd::glp1r::*` (top of file) pulls in:
+//   glp1r_mw_semaglutide_da, glp1r_{kdeg,kon,kd,kint,koff,ksyn_at,rtotal0_at,is_tmdd_organ}
+// Brain=3, gut=8, pancreas=12. Knudsen 2019 / Lau 2015 (K_d = 0.4 nM).
 
 // Newton-linearized 3×3 implicit step on (C_t_nM, R_free, DR) — identical
 // algorithm to the rapamycin TMDD step; only parameters differ.
 fn tmdd_step_organ(state: Pbpk28, i: i64, dt: f64) -> Pbpk28 with Mut, Div {
-    if !tmdd_is_organ(i) { return state }
+    if !glp1r_is_tmdd_organ(i) { return state }
     var r = state
     let h = 0.5 * dt
-    let mass_to_nm = 1.0e6 / mw_semaglutide()
-    let nm_to_mass = mw_semaglutide() * 1.0e-6
+    let mass_to_nm = 1.0e6 / glp1r_mw_semaglutide_da()
+    let nm_to_mass = glp1r_mw_semaglutide_da() * 1.0e-6
     let ct_old_mass = r.ct[i]
     let ct_old_nm = if ct_old_mass < 0.0 { 0.0 } else { ct_old_mass * mass_to_nm }
     let rf_old = r.rfree[i]
     let dr_old = r.dr[i]
 
-    let k_on = tmdd_kon_at(i)
-    let k_off = tmdd_koff_at(i)
-    let k_int = tmdd_kint_at(i)
-    let k_syn = tmdd_ksyn_at(i)
-    let k_deg = tmdd_kdeg_at(i)
+    let k_on = glp1r_kon()
+    let k_off = glp1r_koff()
+    let k_int = glp1r_kint()
+    let k_syn = glp1r_ksyn_at(i)
+    let k_deg = glp1r_kdeg()
 
     let kon_rf  = k_on * rf_old
     let kon_ct  = k_on * ct_old_nm
@@ -347,13 +329,10 @@ fn full_cn_step(state: Pbpk28, dt: f64, rel_mid: f64) -> Pbpk28 with Mut, Div {
 // Couples pancreas GLP-1R occupancy (i=12) to a 2-state linear system:
 //   state.a[12]  =  ΔG  (mg/dL)  plasma glucose deviation from Gb=100
 //   state.n[12]  =  ΔI  (mU/L)   plasma insulin deviation from Ib=10
-fn pd_gb()    -> f64 { return 100.0 }      // basal glucose, mg/dL
-fn pd_ib()    -> f64 { return 10.0 }       // basal insulin, mU/L
-fn pd_sg()    -> f64 { return 1.5 }        // glucose effectiveness, 1/h
-fn pd_si()    -> f64 { return 0.020 }      // insulin sensitivity, 1/(mU·L·h)
-fn pd_ki()    -> f64 { return 12.6 }       // insulin elimination, 1/h
-fn pd_kbase() -> f64 { return pd_ki() * pd_ib() }   // baseline secretion, mU/L/h
-fn pd_alpha() -> f64 { return 1.0 }        // GLP-1R doubles secretion at full occ
+// ─── PD layer — sourced from stdlib/darwin_pbpk/pd/bergman_glucose_insulin.sio
+// `use darwin_pbpk::pd::bergman_glucose_insulin::*` (top of file) pulls in:
+//   bergman_{gb,ib,sg,si,ki,kbase,alpha}
+// Bergman minimal model + GLP-1R-modulated insulin secretion at pancreas (i=12).
 
 fn pd_step_glucose_insulin(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
     var r = state
@@ -362,14 +341,14 @@ fn pd_step_glucose_insulin(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
     let occ = if denom > 1.0e-9 { r.dr[12] / denom } else { 0.0 }
 
     // dΔI/dt = k_base · α · occ - kI · ΔI
-    let di_new = ((1.0 - h * pd_ki()) * r.n[12]
-                  + dt * pd_kbase() * pd_alpha() * occ) / (1.0 + h * pd_ki())
+    let di_new = ((1.0 - h * bergman_ki()) * r.n[12]
+                  + dt * bergman_kbase() * bergman_alpha() * occ) / (1.0 + h * bergman_ki())
     r.n[12] = di_new
 
     // dΔG/dt = -(SG + SI·Ib)·ΔG - SI·Gb·ΔI_new   (linearized at G ≈ Gb)
-    let lambda_g = pd_sg() + pd_si() * pd_ib()
+    let lambda_g = bergman_sg() + bergman_si() * bergman_ib()
     let dg_new = ((1.0 - h * lambda_g) * r.a[12]
-                  - dt * pd_si() * pd_gb() * r.n[12]) / (1.0 + h * lambda_g)
+                  - dt * bergman_si() * bergman_gb() * r.n[12]) / (1.0 + h * lambda_g)
     r.a[12] = dg_new
     return r
 }
@@ -412,7 +391,7 @@ fn emit_at(state: &Pbpk28, t: f64) with IO, Mut {
         let avg = if i == 0 { state.cv[0] } else { vasc_frac_at(i) * state.cv[i] + (1.0 - vasc_frac_at(i)) * state.ct[i] }
         println(avg)
         println("")
-        if tmdd_is_organ(i) {
+        if glp1r_is_tmdd_organ(i) {
             print("PARITY|rfree=")
             println(state.rfree[i])
             println("")
@@ -450,9 +429,9 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     var C = pbpk28_zero()
     // No IV bolus — drug enters via SC depot release.
     // TMDD organs: initialize R_free at baseline R_total_0, DR at 0.
-    C.rfree[3]  = tmdd_rtotal0_at(3)
-    C.rfree[8]  = tmdd_rtotal0_at(8)
-    C.rfree[12] = tmdd_rtotal0_at(12)
+    C.rfree[3]  = glp1r_rtotal0_at(3)
+    C.rfree[8]  = glp1r_rtotal0_at(8)
+    C.rfree[12] = glp1r_rtotal0_at(12)
 
     let dt = 0.001
     var t = 0.0
