@@ -14,8 +14,9 @@ import { TimeScrubber } from './TimeScrubber';
 import { CameraDirector } from './CameraDirector';
 import { TourControls } from './TourControls';
 import { TOURS, type TourKeyframe } from './tours';
-import { DEFAULT_PARAMS, useSimulation } from '../../hooks/usePBPK14';
-import type { PBPKParams } from '../../hooks/usePBPK14';
+import { DEFAULT_PARAMS, useSimulation } from '../../hooks/usePBPK';
+import type { PBPKParams, DrugId } from '../../hooks/usePBPK';
+import { DrugSelector } from './DrugSelector';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 
 const PATIENT_PROFILES: Record<string, PBPKParams> = {
@@ -35,9 +36,15 @@ interface SimSnapshot {
   concentrations: Float32Array;
   uncertainties: Float32Array;
   releasedMg: number;
+  // G-ε-1: TMDD + PD state available (rendering hooks to come in G-ε-2)
+  rfree?: Float32Array;
+  dr?: Float32Array;
+  pdA?: Float32Array;
+  pdN?: Float32Array;
 }
 
 interface SimulationBridgeProps {
+  drug: DrugId;
   params: PBPKParams;
   playing: boolean;
   speed: number;
@@ -61,8 +68,8 @@ function TourElapsedClock({ active, onTick }: { active: boolean; onTick: (s: num
   return null;
 }
 
-function SimulationBridge({ params, playing, speed, seekTo, onSeekDone, onTick }: SimulationBridgeProps) {
-  const { state, step } = useSimulation(params);
+function SimulationBridge({ drug, params, playing, speed, seekTo, onSeekDone, onTick }: SimulationBridgeProps) {
+  const { state, step } = useSimulation(drug, params);
   const lastEmitRef = useRef(state);
 
   useEffect(() => {
@@ -112,6 +119,7 @@ function SimulationBridge({ params, playing, speed, seekTo, onSeekDone, onTick }
 }
 
 export default function DissertationViewer() {
+  const [drug, setDrug] = useState<DrugId>('rapamycin');
   const [params, setParams] = useState<PBPKParams>(PATIENT_PROFILES.typical);
   const [profile, setProfile] = useState<keyof typeof PATIENT_PROFILES>('typical');
   const [playing, setPlaying] = useState(true);
@@ -241,6 +249,18 @@ export default function DissertationViewer() {
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px]">
         {/* Left: 3D canvas */}
         <div className="relative h-[640px] w-full">
+          <DrugSelector
+            drug={drug}
+            onChange={(d) => {
+              setDrug(d);
+              // Reset patient-overrides on drug switch — clHep / higuchiScale
+              // are calibrated for rapamycin and would corrupt semaglutide's
+              // cl_proteolytic if carried over.
+              setParams({ ...DEFAULT_PARAMS });
+              setProfile('typical');
+              setRestartNonce((n) => n + 1);
+            }}
+          />
           <Canvas
             shadows
             dpr={[1, 2]}
@@ -276,6 +296,7 @@ export default function DissertationViewer() {
                 reducedMotion={reducedMotion}
               />
               <SimulationBridge
+                drug={drug}
                 params={params}
                 playing={playing}
                 speed={speed}

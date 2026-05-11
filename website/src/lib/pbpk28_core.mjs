@@ -158,6 +158,9 @@ export const DEFAULT_PARAMS_RAPAMYCIN = Object.freeze({
   tmddParams: TMDD_PARAMS_RAPAMYCIN,
   pdOrgans:   PD_ORGANS_RAPAMYCIN,
   pdParams:   PD_PARAMS_RAPAMYCIN,
+  cVisualMax: 1.3e-3,                       // mg/L, viewer organ-color saturation anchor
+  drugLabel: 'Rapamycin (Cypher stent)',
+  releaseSourceLabel: 'Cypher stent (Cordis 2003 Higuchi diffusion)',
 });
 
 // ─── Semaglutide profile (G-δ): GLP-1 receptor agonist, peptide, SC depot ──
@@ -294,6 +297,9 @@ export const DEFAULT_PARAMS_SEMAGLUTIDE = Object.freeze({
   tmddParams: TMDD_PARAMS_SEMAGLUTIDE,
   pdOrgans:   PD_ORGANS_SEMAGLUTIDE,
   pdParams:   PD_PARAMS_SEMAGLUTIDE,
+  cVisualMax: 3.0e-5,                       // mg/L, peak blood ~25 ng/mL ≈ 2.5e-5
+  drugLabel: 'Semaglutide (SC depot)',
+  releaseSourceLabel: 'Subcutaneous depot (k_a = ln 2 / 60 h, F = 0.89)',
 });
 
 /**

@@ -105,6 +105,42 @@ a one-sentence narration card across the bottom of the canvas.
 
 ---
 
+## Try the other drug (G-δ, multi-drug A/B toggle)
+
+A drug-selector chip row sits at the top of the canvas — or press
+<kbd>D</kbd> to cycle. The default is **Rapamycin** (Cypher coronary stent,
+the original dissertation drug). The alternative is **Semaglutide** —
+the GLP-1 receptor agonist used as Ozempic / Wegovy.
+
+The same engine drives both drugs:
+
+|  | Rapamycin | Semaglutide |
+|---|---|---|
+| Release | Cypher stent, Higuchi diffusion | Subcutaneous depot, k<sub>a</sub> = ln 2 / 60 h |
+| Distribution | Lipophilic (Kp up to 5.4 in liver) | Vascular-confined peptide (Kp < 1, BBB ≈ 0.05) |
+| Clearance | Hepatic CYP3A4, CL = 12.4 L/h | Proteolytic, CL = 0.077 L/h (FcRn recycling) |
+| Target | FKBP12 / mTORC1 in coronary smooth muscle | GLP-1R on pancreatic β-cells |
+| Clinical endpoint | Late lumen loss (restenosis suppression) | Fasting plasma glucose reduction |
+
+When you switch to semaglutide:
+- The release source visual swaps from the chest-mounted Cypher
+  cylinder to a subcutaneous depot ellipsoid (planned G-ε-2).
+- The patient sliders reset to semaglutide defaults — the existing
+  CL<sub>hep</sub> slider is calibrated for rapamycin and would corrupt
+  the semaglutide PK if carried over.
+- Pancreas, gut, and brain become the high-occupancy organs (instead
+  of liver / heart / gut for rapamycin). All currently rendered as
+  organ-colour intensity; explicit receptor-occupancy and PD readout
+  panels follow in G-ε-2.
+
+The dissertation message: a single permeability-limited PBPK28 +
+TMDD + PD framework, A-stable Crank-Nicolson integrator, handles a
+914 g/mol lipophilic small molecule **and** a 4114 g/mol peptide
+without changes to the numerical core. The framework's *generality*
+is the unifying contribution.
+
+---
+
 ## Controls reference
 
 | Control | What it does |
