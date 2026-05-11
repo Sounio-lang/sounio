@@ -19,6 +19,7 @@ import { TourControls } from './TourControls';
 import { TOURS, type TourKeyframe } from './tours';
 import { DEFAULT_PARAMS, useSimulation } from '../../hooks/usePBPK';
 import type { PBPKParams, DrugId } from '../../hooks/usePBPK';
+import { DEFAULT_PARAMS_RAPAMYCIN, DEFAULT_PARAMS_SEMAGLUTIDE } from '../../lib/pbpk28_core.mjs';
 import { DrugSelector } from './DrugSelector';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 
@@ -46,7 +47,13 @@ const PATIENT_PROFILES_BY_DRUG: Record<DrugId, Record<string, PBPKParams>> = {
 
 const MAX_SIM_HOURS = 30 * 24;        // 30-day Cypher elution window
 const REAL_SECONDS_PER_30D = 60;      // 1 minute wall-clock spans the full window at speed=1
-const C_VISUAL_MAX_MG_PER_L = 1.3e-3; // shared with usePBPK14.ts normalisation anchor
+// Drug-aware visual-saturation anchor: rapamycin and semaglutide differ by ~43×
+// in plasma concentration scale, so the absolute-concentration display in the
+// OrganDetailModal (and the mass-mg readout) must rescale on drug switch.
+const C_VISUAL_MAX_BY_DRUG: Record<DrugId, number> = {
+  rapamycin:   DEFAULT_PARAMS_RAPAMYCIN.cVisualMax,
+  semaglutide: DEFAULT_PARAMS_SEMAGLUTIDE.cVisualMax,
+};
 
 interface SimSnapshot {
   timeHours: number;
@@ -264,7 +271,7 @@ export default function DissertationViewer() {
   };
 
   const selectedConcNorm = selected !== null ? simState.concentrations[selected] : 0;
-  const selectedConcAbs = selectedConcNorm * C_VISUAL_MAX_MG_PER_L;
+  const selectedConcAbs = selectedConcNorm * C_VISUAL_MAX_BY_DRUG[drug];
 
   const dayString = useMemo(() => {
     const d = simState.timeHours / 24;
