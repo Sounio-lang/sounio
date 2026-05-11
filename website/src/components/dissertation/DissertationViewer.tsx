@@ -156,6 +156,7 @@ export default function DissertationViewer() {
   const controlsRef = useRef<{ target: import('three').Vector3; update: () => void } | null>(null);
   const rendererRef = useRef<WebGLRenderer | null>(null);
   const activeTour = useMemo(() => TOURS.find((t) => t.id === activeTourId) ?? null, [activeTourId]);
+  const drugTours = useMemo(() => TOURS.filter((t) => t.drug === drug), [drug]);
 
   const handleTourKeyframe = useCallback((k: TourKeyframe) => {
     setTourNarration(k.narration ?? null);
@@ -185,7 +186,7 @@ export default function DissertationViewer() {
     const url = rendererRef.current.domElement.toDataURL('image/png');
     const a = document.createElement('a');
     a.href = url;
-    a.download = `dissertation-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+    a.download = `dissertation-${drug}-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -214,12 +215,30 @@ export default function DissertationViewer() {
       if (e.key === ' ') { e.preventDefault(); setPlaying((p) => !p); }
       else if (e.key.toLowerCase() === 'r') setRestartNonce((n) => n + 1);
       else if (e.key.toLowerCase() === 's') handleSnapshot();
+      else if (e.key.toLowerCase() === 'd') {
+        // Cycle drug A↔B.
+        const next: DrugId = drug === 'rapamycin' ? 'semaglutide' : 'rapamycin';
+        setDrug(next);
+        setParams({ ...PATIENT_PROFILES_BY_DRUG[next].typical });
+        setProfile('typical');
+        setRestartNonce((n) => n + 1);
+        if (activeTourId) handleTourStop();
+      }
+      else if (e.key.toLowerCase() === 't') {
+        // Cycle tours within the active drug.
+        const tours = TOURS.filter((tr) => tr.drug === drug);
+        if (tours.length === 0) return;
+        const idx = tours.findIndex((tr) => tr.id === activeTourId);
+        const nextId = tours[(idx + 1) % tours.length].id;
+        if (activeTourId) handleTourStop();
+        handleTourStart(nextId);
+      }
       else if (e.key === 'Escape' && activeTourId) handleTourStop();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTourId]);
+  }, [activeTourId, drug]);
 
   const handleSeek = (target: number) => {
     if (target < simState.timeHours) {
@@ -277,6 +296,7 @@ export default function DissertationViewer() {
               setParams({ ...PATIENT_PROFILES_BY_DRUG[d].typical });
               setProfile('typical');
               setRestartNonce((n) => n + 1);
+              if (activeTourId) handleTourStop();
             }}
           />
           <Canvas
@@ -376,7 +396,7 @@ export default function DissertationViewer() {
         {/* Right: side panel — tour controls, GUM bar, confidence gate, Hessian */}
         <aside className="flex flex-col gap-4 p-4 border-t lg:border-t-0 lg:border-l border-[var(--glass-border)] bg-[rgba(0,0,0,0.2)] text-white">
           <TourControls
-            tours={TOURS}
+            tours={drugTours}
             activeTourId={activeTourId}
             narration={tourNarration}
             elapsedSec={tourElapsed}
