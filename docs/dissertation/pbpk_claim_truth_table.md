@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.dissertation.pbpk-claim-truth-table
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.pbpk-claim-truth-table
+-->
+
 # PBPK Dissertation Claim Truth Table
 
 Purpose: map PBPK, GUM, and GPU dissertation-language candidates to the current repository evidence. This is an evidence table, not promotional copy. Use the narrowest claim that the cited files and gates can actually support.
