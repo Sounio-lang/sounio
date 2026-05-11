@@ -45,3 +45,14 @@ All four JSON files validated with `python3 -c 'import json; json.load(open(...)
 5. **CI-gate naming**. Draft claims four parity gates; code has one mega-gate (`dissertation_pbpk28_parity_gate.sh`) covering 9 cases. Honest framing: rename the dissertation §4.x descriptions to refer to the 9 cases of the single gate, or split the gate. Promotion cost is trivial (~30 LOC of bash shuffling) but the draft narrative needs revision regardless.
 
 6. **The Higuchi singularity regulariser `ε_t = 1e-4 h`** claim conflicts with code (`Math.max(0.1, tHours)` — a 0.1 h clamp, 1000× looser). The K_H value (draft 4.18 µg·h⁻¹⸍², code 0.00417 mg·√h⁻¹) is consistent (same number, different units). Cypher `f_local = 0.3` to coronary_smc and late-lumen-loss `α = 1.00 mm/unit-N` are **not implemented anywhere** — the JS PD model produces a unitless neointimal `N(t)` only, with no spatial localisation step and no clinical-endpoint conversion.
+
+## Compiler items (added 2026-05-11, Stage G-ε-11)
+
+7. **`Knowledge<T>` constructor expression rejected by `./bin/souc` at HEAD `ae2123ad`.** The AST plumbing is present (`self-hosted/test_knowledge.sio:T04` parses `Knowledge<f64>` shorthand into a `TypeKnowledge` node with `KnowledgeTypeInfo`); the *type annotation* `let x: Knowledge<f64>` compiles fine. But the canonical run-pass test `tests/run-pass/med/vancomycin_full_propagation.sio`, which uses the `Knowledge(value, ε=…, prov=…)` constructor expression, fails the typechecker:
+   ```
+   E200 `ε` at line 70
+   E200 `prov` at line 70
+   error: unknown identifier at line 70
+   typecheck: failed
+   ```
+   Same error on a minimal repro (`let f = Foo { cl_hep: Knowledge(12.4, ε=0.85, prov="ferron_1997_cpt") }`). The Stage G stdlib promotion path therefore *cannot* introduce Knowledge<T>-wrapped parameters without a parallel compiler fix; the Stage G-ε-11+ ports use plain `f64` fields (matching the existing parity refs). Re-evaluate when the compiler self-hosting work lands the named-args parser for the Knowledge constructor.
