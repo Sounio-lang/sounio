@@ -20,37 +20,40 @@ const CORE_PATH = resolve(__dirname, '../../website/src/lib/pbpk28_core.mjs');
 const core = await import(CORE_PATH);
 const {
   initialState, makeScratch, stepStrang, organAverage,
-  DEFAULT_PARAMS_RAPAMYCIN, degenerateParams, N,
+  DEFAULT_PARAMS_RAPAMYCIN, DEFAULT_PARAMS_SEMAGLUTIDE,
+  degenerateParams, N,
 } = core;
 
-// CLI: --case=literature | --case=degenerate
-//   literature (default): rapamycin at lit PS + vasc_frac (matches Sounio
-//     dissertation_pbpk28_parity_ref_rapamycin.sio).
-//   degenerate: vasc_frac=1e-3 ∀ organs, psScale=1e4 — exercises CN's A-stable
-//     handling of the V_v→0 regime; matches Sounio
-//     dissertation_pbpk28_degenerate_parity_ref.sio. Trajectory must converge to
-//     PBPK14 well-stirred (Stage C ref) for the asymptotic reduction Case 2.
+// CLI: --drug=rapamycin|semaglutide  --case=literature|degenerate
 const args = Object.fromEntries(
   process.argv.slice(2)
     .filter(a => a.startsWith('--'))
     .map(a => a.slice(2).split('='))
     .map(([k, v]) => [k, v === undefined ? true : v])
 );
+const DRUG = args.drug || 'rapamycin';
 const CASE = args.case || 'literature';
 
 const DT = 0.001;
-const BOLUS_MG = 0.05;
-const CL_HEP = 12.4;
 const SAMPLES = [0.1, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 20.0, 24.0, 30.0];
 
-const baseParams = {
-  ...DEFAULT_PARAMS_RAPAMYCIN,
-  clHep: CL_HEP,
-  higuchiScale: 1.0,
-  vdScale: 1.0,
-  bolusMg: BOLUS_MG,
-  stentActive: false,
-};
+let baseParams;
+if (DRUG === 'semaglutide') {
+  baseParams = {
+    ...DEFAULT_PARAMS_SEMAGLUTIDE,
+    bolusMg: 0.0,         // no IV bolus — SC depot release only
+    stentActive: true,    // re-used as 'depot active'
+  };
+} else {
+  baseParams = {
+    ...DEFAULT_PARAMS_RAPAMYCIN,
+    clHep: 12.4,
+    higuchiScale: 1.0,
+    vdScale: 1.0,
+    bolusMg: 0.05,
+    stentActive: false,
+  };
+}
 const params = (CASE === 'degenerate')
   ? degenerateParams(baseParams, { eps: 1e-3, psScale: 1e4 })
   : baseParams;
@@ -60,14 +63,16 @@ const scratch = makeScratch();
 let t = 0;
 
 const out = [];
-out.push('DISSERTATION_PBPK28_PARITY_NODE v1');
+if (DRUG === 'semaglutide') {
+  out.push('DISSERTATION_PBPK28_SEMAGLUTIDE_PARITY_NODE v1');
+} else {
+  out.push('DISSERTATION_PBPK28_PARITY_NODE v1');
+}
 out.push(`compartments=${N}`);
 out.push(`states=${2 * N}`);
 out.push(`dt=${DT}`);
-out.push(`bolus_mg=${BOLUS_MG}`);
-out.push(`cl_hep_L_per_h=${CL_HEP}`);
 out.push('integrator=fully_coupled_CN_27state');
-out.push('drug=rapamycin');
+out.push(`drug=${DRUG}`);
 out.push(`case=${CASE}`);
 out.push(`samples=${SAMPLES.length}`);
 
@@ -105,5 +110,9 @@ for (const target of SAMPLES) {
     }
   }
 }
-out.push('DISSERTATION_PBPK28_PARITY_DONE');
+if (DRUG === 'semaglutide') {
+  out.push('DISSERTATION_PBPK28_SEMAGLUTIDE_PARITY_DONE');
+} else {
+  out.push('DISSERTATION_PBPK28_PARITY_DONE');
+}
 process.stdout.write(out.join('\n') + '\n');

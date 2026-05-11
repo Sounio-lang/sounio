@@ -39,6 +39,11 @@
 #                  A(t) and neointimal index N(t) at PD organs (heart=4 only
 #                  in G-γ-1; coronary_smc proxy). Both within 1.0% RMSE.
 #                  Couples the PK chain end-to-end: PBPK28 → TMDD → PD readout.
+#   7. HARD GATE — Semaglutide PBPK28 parity (G-δ-1): Node ↔ Sounio on
+#                  semaglutide trajectory (SC depot release k_a=0.01155 /h,
+#                  cl_proteolytic=0.077 L/h, peptide Kp/PS). RMSE < 1.0% per
+#                  organ on cavg. Demonstrates the DrugProfile abstraction —
+#                  same PBPK28 integrator, different drug.
 
 set -euo pipefail
 
@@ -485,3 +490,77 @@ awk -F'\t' '
     }
   }
 ' "$JOINED_PD"
+
+# ─── Case 7: Semaglutide PBPK28 parity Node ↔ Sounio (G-δ-1) ─────────────────
+echo
+echo "[pbpk28-parity] Case 7: Sounio ↔ Node semaglutide PBPK28 (SC depot)"
+
+SEMA_SIO_LOG="$OUT_DIR/sema_sounio.txt"
+SEMA_NODE_LOG="$OUT_DIR/sema_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_semaglutide.sio > "$SEMA_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case7] FAIL: Sounio semaglutide ref returned non-zero" >&2
+  tail -n 20 "$SEMA_SIO_LOG" >&2
+  exit 1
+}
+if ! grep -q '^DISSERTATION_PBPK28_SEMAGLUTIDE_PARITY_DONE$' "$SEMA_SIO_LOG"; then
+  echo "[pbpk28-parity:case7] FAIL: Sounio semaglutide ref did not emit DONE" >&2
+  exit 1
+fi
+node "$NODE_RUNNER" --drug=semaglutide > "$SEMA_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case7] FAIL: Node semaglutide runner returned non-zero" >&2
+  exit 1
+}
+if ! grep -q '^DISSERTATION_PBPK28_SEMAGLUTIDE_PARITY_DONE$' "$SEMA_NODE_LOG"; then
+  echo "[pbpk28-parity:case7] FAIL: Node semaglutide runner did not emit DONE" >&2
+  exit 1
+fi
+
+SEMA_SIO_TSV="$OUT_DIR/sema_sounio.tsv"
+SEMA_NODE_TSV="$OUT_DIR/sema_node.tsv"
+parse_to_tsv "$SEMA_SIO_LOG" "$SEMA_SIO_TSV"
+parse_to_tsv "$SEMA_NODE_LOG" "$SEMA_NODE_TSV"
+
+SEMA_SIO_ROWS=$(wc -l < "$SEMA_SIO_TSV")
+SEMA_NODE_ROWS=$(wc -l < "$SEMA_NODE_TSV")
+if [[ "$SEMA_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$SEMA_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case7] FAIL: semaglutide row count mismatch — Sounio=$SEMA_SIO_ROWS Node=$SEMA_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case7] both runs emitted $SEMA_SIO_ROWS records"
+
+SEMA_JOINED="$OUT_DIR/sema_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$SEMA_SIO_TSV" "$SEMA_NODE_TSV" > "$SEMA_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    printf "%-3s %-12s %-12s %-12s %-7s %s\n", "i", "rmse", "peak", "rmse_pct", "thr_pct", "status";
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "%-3d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) {
+        printf "%-3d %-12.3e %-12.3e %-12s %-7s zero-traj OK\n", i, rmse, pk, "-", THR;
+        continue;
+      }
+      pct = 100.0 * rmse / pk;
+      st = (pct < THR + 0) ? "OK" : "FAIL";
+      if (st == "FAIL") bad += 1;
+      printf "%-3d %-12.6e %-12.6e %-12.4f %-7s %s\n", i, rmse, pk, pct, THR, st;
+    }
+    if (bad > 0) {
+      printf "PBPK28_SEMAGLUTIDE_PARITY_FAIL %d/14 compartments exceed threshold\n", bad;
+      exit 1;
+    } else {
+      printf "PBPK28_SEMAGLUTIDE_PARITY_PASS 14/14 compartments within %s%% RMSE\n", THR;
+    }
+  }
+' "$SEMA_JOINED"

@@ -152,10 +152,94 @@ export const DEFAULT_PARAMS_RAPAMYCIN = Object.freeze({
   vascFrac: VASC_FRAC,
   kp: KP,
   mw: MW_RAPAMYCIN,
+  releaseModel: 'higuchi',                  // Cypher stent diffusion (Cordis 2003)
+  releaseKH: HIGUCHI_KH_DEFAULT,
   tmddOrgans: TMDD_ORGANS_RAPAMYCIN,
   tmddParams: TMDD_PARAMS_RAPAMYCIN,
   pdOrgans:   PD_ORGANS_RAPAMYCIN,
   pdParams:   PD_PARAMS_RAPAMYCIN,
+});
+
+// ─── Semaglutide profile (G-δ): GLP-1 receptor agonist, peptide, SC depot ──
+// Overgaard 2019 (Clin Pharmacokinet) — semaglutide PK in T2D patients:
+//   MW = 4113.58 g/mol         (peptide, vs 914 for rapamycin)
+//   V_d ≈ 9 L (70 kg)          (vascular-confined; FcRn-mediated albumin
+//                              recycling extends half-life to ~165 h)
+//   CL_proteolytic ≈ 0.077 L/h  (very low; receptor-mediated + DPP-IV cleavage)
+//   t1/2_abs ≈ 60 h            (slow SC absorption from depot, k_a = ln2/t)
+//   F = 0.89                   (subcutaneous bioavailability)
+//
+// PBPK Kp for a peptide is dominated by tissue-vascular partitioning; almost
+// all values are well below 1 (peptide stays in plasma/interstitial fluid).
+// PS is much smaller than rapamycin (peptide endothelial transit slow,
+// especially across BBB).
+export const MW_SEMAGLUTIDE = 4113.58;
+
+export const KP_SEMAGLUTIDE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  0.50,  // 1 liver
+  0.60,  // 2 kidney
+  0.05,  // 3 brain  (BBB extremely restrictive)
+  0.40,  // 4 heart
+  0.30,  // 5 lung
+  0.20,  // 6 muscle
+  0.10,  // 7 adipose
+  0.80,  // 8 gut   (enteroendocrine GLP-1R distribution)
+  0.30,  // 9 skin
+  0.20,  // 10 bone
+  0.40,  // 11 spleen
+  0.70,  // 12 pancreas (β-cell GLP-1R target)
+  0.30,  // 13 other
+]);
+
+// Peptide PS: literature scarce; estimate from MW-based scaling of Rodgers &
+// Rowland 2006 + biologic PBPK (Chen 2014, Zhao 2020): PS scales roughly as
+// 1/sqrt(MW), so semaglutide PS ≈ rapamycin PS · sqrt(914/4114) ≈ 0.47×, but
+// peptides also suffer additional steric exclusion at the endothelium —
+// reduce another 5–10×.
+export const PS_SEMAGLUTIDE = Object.freeze([
+   0.0,    // 0 blood — unused
+  50.0,    // 1 liver  (sinusoidal endothelium still relatively permeable)
+  30.0,    // 2 kidney
+   1.0,    // 3 brain  (BBB nearly impermeable to peptide)
+   5.0,    // 4 heart
+ 100.0,    // 5 lung   (alveolar surface, larger area)
+  10.0,    // 6 muscle
+   2.0,    // 7 adipose
+  30.0,    // 8 gut    (GLP-1R distribution)
+   5.0,    // 9 skin   (also SC depot exit, but modelled separately)
+   2.0,    // 10 bone
+  10.0,    // 11 spleen
+   8.0,    // 12 pancreas
+   5.0,    // 13 other
+]);
+
+// Semaglutide subcutaneous depot release: dQ/dt = k_a · Q_depot,
+// Q_depot(t) = F · Dose · exp(-k_a · t), giving rate = F · Dose · k_a · exp(-k_a · t).
+// Default k_a = ln(2) / 60 h ≈ 0.01155 /h, F = 0.89.
+export const SEMA_KA_DEFAULT = Math.LN2 / 60.0;
+export const SEMA_F_DEFAULT  = 0.89;
+
+export const DEFAULT_PARAMS_SEMAGLUTIDE = Object.freeze({
+  clHep: 0.077,                             // L/h — proteolytic clearance (Overgaard 2019)
+  higuchiScale: 1.0,                        // unused for SC depot release
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,                        // re-used as "depot active" toggle
+  ps: PS_SEMAGLUTIDE,
+  vascFrac: VASC_FRAC,
+  kp: KP_SEMAGLUTIDE,
+  mw: MW_SEMAGLUTIDE,
+  releaseModel: 'sc_depot',
+  releaseKa: SEMA_KA_DEFAULT,
+  releaseF:  SEMA_F_DEFAULT,
+  releaseDoseMg: 1.0,                       // typical weekly dose
+  // G-δ-2 will add tmddOrgans (pancreas, gut, brain) for GLP-1R
+  // G-δ-3 will add pdOrgans (glucose-insulin minimal model)
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans:   [],
+  pdParams:   {},
 });
 
 /**
@@ -163,8 +247,19 @@ export const DEFAULT_PARAMS_RAPAMYCIN = Object.freeze({
  */
 export function releaseRateAt(tHours, params) {
   if (!params.stentActive) return 0;
+  // Dispatch on releaseModel; default to Higuchi for back-compat.
+  const model = params.releaseModel || 'higuchi';
+  if (model === 'sc_depot') {
+    // SC depot: rate = F · Dose · k_a · exp(-k_a · t)   (1st-order absorption)
+    const ka = params.releaseKa;
+    const F  = params.releaseF;
+    const D  = params.releaseDoseMg;
+    return F * D * ka * Math.exp(-ka * Math.max(0, tHours));
+  }
+  // Higuchi (default): dQ/dt = K_H / (2·√t), clipped at t < 0.1 h
   const t = Math.max(0.1, tHours);
-  return params.higuchiScale * HIGUCHI_KH_DEFAULT / (2 * Math.sqrt(t));
+  const kH = params.releaseKH || HIGUCHI_KH_DEFAULT;
+  return params.higuchiScale * kH / (2 * Math.sqrt(t));
 }
 
 /**
