@@ -142,59 +142,42 @@ run_case imported_core tests/selfhost/native_runtime/import_core_abi_42.sio 6
 run_case imported_hof tests/selfhost/native_runtime/import_hof_abi_42.sio 6
 run_case imported_mixed tests/selfhost/native_runtime/import_body_lowering_42.sio 7
 
-python3 - "$SUMMARY_JSON" "$SOUC_BIN" "$OUT_DIR" "$ARTIFACT_DIR/cases.tsv" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-from datetime import datetime, timezone
+# Pure-bash summary JSON emitter (replaces python3 hashlib + json.dump heredoc).
+# Reads cases.tsv (name\tprogram\tfunctions\telf), computes sha256 per ELF,
+# builds cases array with keys sorted alphabetically, then emits summary JSON.
+CASES_JSON="$(
+  first=true
+  while IFS=$'\t' read -r name program functions elf_path; do
+    [[ -z "$name" ]] && continue
+    elf_sha="$(sha256sum "$elf_path" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$elf_path" | awk '{print $1}')"
+    [[ "$first" == true ]] && first=false || printf ','
+    printf '{"functions":%d,"name":"%s","native_elf":"%s","native_elf_sha256":"%s","program":"%s","runtime_exit":42}' \
+      "$functions" "$name" "$elf_path" "$elf_sha" "$program"
+  done < "$ARTIFACT_DIR/cases.tsv"
+)"
+CASES_JSON="[$CASES_JSON]"
+case_count="$(grep -c . "$ARTIFACT_DIR/cases.tsv" 2>/dev/null || echo 0)"
+ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-summary_path = pathlib.Path(sys.argv[1])
-souc_bin = sys.argv[2]
-out_dir = pathlib.Path(sys.argv[3])
-cases_path = pathlib.Path(sys.argv[4])
-
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-cases = []
-for line in cases_path.read_text(encoding="utf-8").splitlines():
-    name, program, functions, elf = line.split("\t")
-    elf_path = pathlib.Path(elf)
-    cases.append({
-        "name": name,
-        "program": program,
-        "functions": int(functions),
-        "native_elf": str(elf_path),
-        "native_elf_sha256": sha256(elf_path),
-        "runtime_exit": 42,
-    })
-
-payload = {
-    "schema": "sounio.native_v2_imported_body_lowering.v1",
-    "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    "status": "pass",
-    "compiler_resolved": souc_bin,
-    "compiler_entrypoint": "self-hosted/compiler/lean.sio",
-    "target": "x86_64-linux",
-    "case_count": len(cases),
-    "pass_count": len(cases),
-    "fail_count": 0,
-    "cases": cases,
-    "fallback_path": "none",
-    "host_callback": "none",
-    "imported_prebundle_native": False,
-    "imported_body_lowering": "compact_imported_body_lowering_v1_no_source_marker",
-    "scope": "i64 imported summaries, small struct returns, named fn refs, fn-typed params/returns, no captures",
-    "source_markers": 0,
-    "artifact_dir": str(out_dir),
-}
-summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
+"$ROOT_DIR/bin/kretikos" json-emit \
+  --string "artifact_dir=$OUT_DIR" \
+  --int    "case_count=$case_count" \
+  --raw-json "cases=$CASES_JSON" \
+  --string "compiler_entrypoint=self-hosted/compiler/lean.sio" \
+  --string "compiler_resolved=$SOUC_BIN" \
+  --int    "fail_count=0" \
+  --string "fallback_path=none" \
+  --string "generated_at_utc=$ts" \
+  --string "host_callback=none" \
+  --string "imported_body_lowering=compact_imported_body_lowering_v1_no_source_marker" \
+  --bool   "imported_prebundle_native=false" \
+  --int    "pass_count=$case_count" \
+  --string "schema=sounio.native_v2_imported_body_lowering.v1" \
+  --string "scope=i64 imported summaries, small struct returns, named fn refs, fn-typed params/returns, no captures" \
+  --int    "source_markers=0" \
+  --string "status=pass" \
+  --string "target=x86_64-linux" \
+  > "$SUMMARY_JSON"
 
 echo "[native-v2-imported-body-lowering] PASS: imported body lowering v1 covers core, HOF, and mixed witnesses"
 echo "[native-v2-imported-body-lowering] summary=$SUMMARY_JSON"

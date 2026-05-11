@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.dissertation.handoff.chapter-04
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.handoff.chapter-04
+-->
+
 # Chapter 4 — Handoff packet for Claude Desktop
 
 **For:** Claude Desktop, drafting §4 of the rapamycin/semaglutide PBPK28 chapter

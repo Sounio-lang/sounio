@@ -3063,11 +3063,17 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         }
         let inner_dst = alloc_reg(ctx)
         ufn_record_call(inner_dst, inner_fn_id, arg.reg, 1)
-        let nl_reg = alloc_reg(ctx)
-        let nl_dst = alloc_reg(ctx)
-        ufn_record_load_imm(nl_reg, 10)
-        ufn_record_call(nl_dst, V2_BUILTIN_PRINT_CHAR, nl_reg, 1)
-        return ExprParse { ok: 1, reg: nl_dst, next: arg.next + 1}
+        // lean_single's emit_print_int bakes '\n' into its buffer and
+        // println(string) also adds '\n'. But println(f64) in lean_single
+        // calls emit_print_f64 with no trailing newline — match that.
+        if inner_fn_id != V2_BUILTIN_PRINT_F64 {
+            let nl_reg = alloc_reg(ctx)
+            let nl_dst = alloc_reg(ctx)
+            ufn_record_load_imm(nl_reg, 10)
+            ufn_record_call(nl_dst, V2_BUILTIN_PRINT_CHAR, nl_reg, 1)
+            return ExprParse { ok: 1, reg: nl_dst, next: arg.next + 1}
+        }
+        return ExprParse { ok: 1, reg: inner_dst, next: arg.next + 1}
     }
     // assert(cond): inline expansion — branch around a sys_exit(1) call.
     // Semantics: if cond == 0 → exit(1); else → continue.
@@ -4741,9 +4747,17 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
 
 fn find_fn_lbrace(token_count: i64, name_str_pos: i64) -> i64 with Mut, Panic, Div {
     var j = name_str_pos + 1
+    var paren_depth: i64 = 0
     while j < token_count {
-        if token_kind(j) == TK_LBRACE { return j }
-        if token_kind(j) == TK_FN && j + 1 < token_count && token_kind(j + 1) == TK_IDENT {
+        let k = token_kind(j)
+        if k == TK_LPAREN {
+            paren_depth = paren_depth + 1
+        } else if k == TK_RPAREN {
+            if paren_depth > 0 { paren_depth = paren_depth - 1 }
+        } else if k == TK_LBRACE && paren_depth == 0 {
+            return j
+        }
+        if k == TK_FN && j + 1 < token_count && token_kind(j + 1) == TK_IDENT {
             return -1
         }
         j = j + 1
@@ -6759,17 +6773,48 @@ fn compile_user_fn(fn_name_tok: i64, fn_id: i64, token_count: i64) -> bool with 
         while ppos < open_pos && token_kind(ppos) != TK_RPAREN {
             if token_kind(ppos) == TK_IDENT {
                 let param_name_tok = ppos
-                // Refinement type `{ d: T | pred }` in param position — N-v2 has
-                // no general type-parser for brace-balanced predicates. Refuse
-                // cleanly with reason=refinement_type and skip the predicate.
+                // Refinement type `{ d: T | pred }` in param position. N-v2 does
+                // not enforce the predicate here, but the runtime representation is
+                // the inner scalar type, matching Track A for these run-pass cases.
                 var refinement_skip: i64 = 0
                 if ppos + 2 <= open_pos && token_kind(ppos + 1) == TK_COLON && token_kind(ppos + 2) == TK_LBRACE {
-                    // open_pos may BE this `{` because find_fn_lbrace returned the
-                    // refinement's brace as the (incorrectly-detected) fn body. Mark
-                    // the function unsupported and let the emitter print the diagnostic.
-                    mark_parse_unsupported_refinement(ppos + 2)
                     refinement_skip = 1
-                    ppos = open_pos
+                    let refinement_end = find_matching_rbrace(ppos + 2, open_pos)
+                    if refinement_end < 0 {
+                        mark_parse_unsupported_refinement(ppos + 2)
+                        ppos = open_pos
+                    } else {
+                        var refinement_type_tok: i64 = -1
+                        var rtp = ppos + 3
+                        while rtp + 2 < refinement_end && refinement_type_tok < 0 && token_kind(rtp) != TK_OR {
+                            if token_kind(rtp) == TK_IDENT && token_kind(rtp + 1) == TK_COLON && token_kind(rtp + 2) == TK_IDENT {
+                                refinement_type_tok = rtp + 2
+                            }
+                            rtp = rtp + 1
+                        }
+                        let refinement_type_ok =
+                            refinement_type_tok >= 0 &&
+                            (token_text_eq(refinement_type_tok, "i32") ||
+                             token_text_eq(refinement_type_tok, "i64") ||
+                             token_text_eq(refinement_type_tok, "f64"))
+                        if !refinement_type_ok {
+                            mark_parse_unsupported_refinement(ppos + 2)
+                            ppos = open_pos
+                        } else {
+                            let vreg = alloc_reg(&! ctx)
+                            remember_local_tok(&! ctx, param_name_tok, vreg)
+                            if token_text_eq(refinement_type_tok, "f64") {
+                                mark_reg_f64(vreg)
+                            }
+                            if param_idx < 64 {
+                                V2_CURRENT_PARAM_REGS[param_idx as usize] = vreg
+                            }
+                            V2_CURRENT_PARAM_COUNT = param_idx + 1
+                            param_idx = param_idx + 1
+                            ppos = refinement_end + 1
+                            if ppos < open_pos && token_kind(ppos) == TK_COMMA { ppos = ppos + 1 }
+                        }
+                    }
                 }
                 if refinement_skip == 0 {
                 // peek at type: param_name : TypeName

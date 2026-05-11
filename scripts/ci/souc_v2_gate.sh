@@ -192,11 +192,8 @@ run_test_exact \
     $'3.141590\n-0.500000\n2.000000'
 
 # Test: read_file + read_f64/read_i64
-python3 - <<'PY'
-import struct
-with open('/tmp/gate_read64.bin', 'wb') as f:
-    f.write(struct.pack('<ddq', 3.14159, -0.5, 42))
-PY
+# Write test binary: little-endian f64(3.14159) f64(-0.5) i64(42)
+printf '\x6e\x86\x1b\xf0\xf9\x21\x09\x40\x00\x00\x00\x00\x00\x00\xe0\xbf\x2a\x00\x00\x00\x00\x00\x00\x00' > /tmp/gate_read64.bin
 run_test_exact \
     "read64_smoke" \
     self-hosted/compiler/native_read64_smoke.sio \

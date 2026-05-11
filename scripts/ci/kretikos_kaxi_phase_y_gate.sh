@@ -105,6 +105,7 @@ echo "[3/4] GPU run -- ${PHY_COHORT} patients, ${PHY_THREADS} threads/block"
 PHY_BLOCKS=$(( (PHY_COHORT + PHY_THREADS - 1) / PHY_THREADS ))
 
 GPU_OUT="${STAGE_DIR}/gpu_output.txt"
+set +e
 "${STAGE_DIR}/runner" "${PHY_PTX}" \
   --kernel kaxi_kernel \
   --gum --type f32 \
@@ -117,6 +118,17 @@ GPU_OUT="${STAGE_DIR}/gpu_output.txt"
   --init-v11-file "${STAGE_DIR}/init_v11.bin" \
   --init-v22-file "${STAGE_DIR}/init_v22.bin" \
   2>&1 | tee "${GPU_OUT}"
+runner_rc=${PIPESTATUS[0]}
+set -e
+
+if [[ "${runner_rc}" -ne 0 ]]; then
+  if grep -q 'status=not_run reason=cuInit_failed' "${GPU_OUT}"; then
+    echo "kretikos_kaxi_phase_y_gate: SKIPPED (CUDA driver unavailable: cuInit_failed)"
+    exit 0
+  fi
+  echo "kretikos_kaxi_phase_y_gate: FAIL -- GPU runner exited rc=${runner_rc}"
+  exit "${runner_rc}"
+fi
 
 echo "  GPU run complete"
 

@@ -124,50 +124,30 @@ if [[ "$runtime_rc" -ne 42 ]]; then
   exit 1
 fi
 
-python3 - "$SUMMARY_JSON" "$SOUC_BIN" "$PROGRAM" "$MODULE" "$ELF" "$OUT_DIR" "$functions_count" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-from datetime import datetime, timezone
+# Pure-bash summary JSON emitter (replaces python3 hashlib + json.dump heredoc).
+elf_sha="$(sha256sum "$ELF" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$ELF" | awk '{print $1}')"
+ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-summary_path = pathlib.Path(sys.argv[1])
-souc_bin = sys.argv[2]
-program = sys.argv[3]
-module = sys.argv[4]
-elf = pathlib.Path(sys.argv[5])
-out_dir = pathlib.Path(sys.argv[6])
-functions_count = int(sys.argv[7])
-
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-payload = {
-    "schema": "sounio.native_v2_imported_closure_boundary.v1",
-    "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    "status": "pass",
-    "compiler_resolved": souc_bin,
-    "compiler_entrypoint": "self-hosted/compiler/lean.sio",
-    "target": "x86_64-linux",
-    "program": program,
-    "imported_module": module,
-    "native_elf": str(elf),
-    "native_elf_sha256": sha256(elf),
-    "runtime_exit": 42,
-    "functions": functions_count,
-    "fallback_path": "none",
-    "host_callback": "none",
-    "imported_prebundle_native": False,
-    "scope": "noncapturing_closure_literals_only",
-    "captured_closure_environments": False,
-    "artifact_dir": str(out_dir),
-}
-summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
+"$ROOT_DIR/bin/kretikos" json-emit \
+  --string "artifact_dir=$OUT_DIR" \
+  --bool   "captured_closure_environments=false" \
+  --string "compiler_entrypoint=self-hosted/compiler/lean.sio" \
+  --string "compiler_resolved=$SOUC_BIN" \
+  --string "fallback_path=none" \
+  --int    "functions=$functions_count" \
+  --string "generated_at_utc=$ts" \
+  --string "host_callback=none" \
+  --string "imported_module=$MODULE" \
+  --bool   "imported_prebundle_native=false" \
+  --string "native_elf=$ELF" \
+  --string "native_elf_sha256=$elf_sha" \
+  --string "program=$PROGRAM" \
+  --int    "runtime_exit=42" \
+  --string "schema=sounio.native_v2_imported_closure_boundary.v1" \
+  --string "scope=noncapturing_closure_literals_only" \
+  --string "status=pass" \
+  --string "target=x86_64-linux" \
+  > "$SUMMARY_JSON"
 
 echo "[native-v2-imported-closure-boundary] PASS: imported noncapturing closure boundary uses modular IR native driver directly"
 echo "[native-v2-imported-closure-boundary] summary=$SUMMARY_JSON"

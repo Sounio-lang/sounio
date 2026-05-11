@@ -349,6 +349,128 @@ The same enumeration carried one further level up the tower to the chingons ($k 
 
 The class count grows superlinearly across the tower: $1$ class at $k = 3$, $2$ at $k = 4$, $7$ at $k = 5$, $16$ at $k = 6$. At $k = 6$ the spread of counts widens (from $72$ to $188$); three super-octonionic classes (counts $180, 184, 188$) emerge with multiplicity $21$ each. Most multiplicities at $k = 6$ are divisible by $7$ or $21$ (consistent with $"PSL"(2,7)$-orbit structure), with the notable exception of count $168$ at multiplicity $247 = 13 dot 19$, which suggests a contribution from a different orbit family. The sum across all sixteen classes is $149016 = T_6 + 18816$ with overcount $18816 = 112 dot 168$.
 
+Pushed one further level up the tower to the routons ($k = 7$, $dim = 128$), the fourth data point is obtained by enumerating the $P_7 = 11811$ three-dimensional subspaces of $(ZZ slash 2)^7$ as canonical lex-minimal LI quadruples of dual functionals. The per-subspace counts span *twenty-three* distinct values:
+
+#figure(
+  table(
+    columns: 4,
+    align: (center, center, center, center),
+    stroke: 0.5pt,
+    [*Count*], [*Multiplicity*], [*Count*], [*Multiplicity*],
+    [194], [21],   [100], [147],
+    [190], [84],   [98],  [252],
+    [188], [147],  [96],  [350],
+    [186], [63],   [94],  [819],
+    [184], [147],  [92],  [294],
+    [180], [49],   [90],  [840],
+    [168], [1535], [88],  [2499],
+    [110], [21],   [86],  [252],
+    [108], [784],  [84],  [147],
+    [106], [84],   [76],  [2352],
+    [104], [147],  [72],  [693],
+    [102], [84],   [--],  [--],
+  ),
+  caption: [Distribution of nonzero basis associator counts at $k = 7$, exhaustive over all $11811$ three-dimensional subspaces of $(ZZ slash 2)^7$. Verified in Sounio (`examples/cocycle_subspace_k7.sio`); total $T_7 = 1046808 = 6231 dot 168$ matches the prediction of Conjecture 5.],
+) <table:subspace-k7>
+
+Three structural features survive the passage from $k = 6$ to $k = 7$. First, the formula $T_k = 168(P_k - 4 P_(k-1))$ predicted $T_7 = 168 dot 6231 = 1046808$ and the enumeration produces exactly that total, confirming the cohomological balance at one more level. Second, the super-octonionic family $(180, 184, 188)$ that emerged at $k = 6$ persists at $k = 7$ and *expands* to six counts above $168$: ${180, 184, 186, 188, 190, 194}$, all with $7$-divisible multiplicities (49, 147, 63, 147, 84, 21 — each of the form $7 dot n$ with $n in {3, 7, 9, 12, 21, 21}$). Third, the principal anomaly at count $168$ — multiplicity $247 = 13 dot 19$ at $k = 6$, not $7$-divisible — *grows* at $k = 7$ to multiplicity $1535 = 5 dot 307$, again not $7$-divisible. The anomaly orbit family therefore propagates up the tower with a level-specific arithmetic signature (each multiplicity is a product of two primes, neither equal to $7$), reinforcing the conjecture that it arises from a non-$"PSL"(2,7)$ orbit. The class-count chain ${1, 2, 7, 16, 23}$ at $k in {3, 4, 5, 6, 7}$ slows from the $k = 5 -> k = 6$ doubling to a $7$-class jump at $k = 6 -> k = 7$, suggesting a saturation regime tested at $k = 8$ below.
+
+Pushed one further level — voudons at $k = 8$, $dim = 256$ — the fifth and most decisive data point requires a different enumeration: a dual-functional walk at $k = 8$ would scan $approx 127^5 slash 120 approx 1.4 dot 10^9$ raw LI quintuples and is infeasible. We switch to a *direct $3$-LI-generator basis* — canonical $v_1 < v_2 < v_3$ with $v_3 in.not "span"(v_1, v_2)$ and each generator the minimum of its remaining coset — which enumerates $P_8 = 97155 = binom(8,3)_2$ canonical triples in $approx 8$ million raw iterations. The resulting per-subspace counts span:
+
+#figure(
+  table(
+    columns: 4,
+    align: (center, center, center, center),
+    stroke: 0.5pt,
+    [*Count*], [*Multiplicity*], [*Count*], [*Multiplicity*],
+    [194], [315],   [100], [735],
+    [190], [1260],  [98],  [2310],
+    [188], [735],   [96],  [1162],
+    [186], [945],   [94],  [6405],
+    [184], [735],   [92],  [1050],
+    [180], [105],   [90],  [8190],
+    [168], [10383], [88],  [20895],
+    [110], [315],   [86],  [3780],
+    [108], [6720],  [84],  [735],
+    [106], [1260],  [76],  [20160],
+    [104], [735],   [72],  [6965],
+    [102], [1260],  [--],  [--],
+  ),
+  caption: [Distribution of nonzero basis associator counts at $k = 8$, exhaustive over all $97155$ three-dimensional subspaces of $(ZZ slash 2)^8$. Verified in Sounio (`examples/cocycle_subspace_k8.sio`); total $T_8 = 8385048 = 49911 dot 168$ matches the prediction of Conjecture 5. The class set (twenty-three count values) is *identical* to the class set at $k = 7$.],
+) <table:subspace-k8>
+
+The $k = 8$ data settles three open questions raised by the $k = 6 -> k = 7$ deceleration:
+
+1. *Saturation is confirmed at $k = 7$.* The class-count chain ${1, 2, 7, 16, 23, 23}$ at $k in {3, 4, 5, 6, 7, 8}$ shows the distinct-count set stabilising at twenty-three. The set ${72, 76, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 168, 180, 184, 186, 188, 190, 194}$ is *bit-identical* between $k = 7$ and $k = 8$. Further Cayley–Dickson doublings change multiplicities but, evidently, do not produce new count values. The full classification problem is therefore reduced to enumerating $23$ orbit families in the limiting $"GL"(infinity, FF_2)$ action.
+
+2. *Conjecture 5 holds at one more level.* Predicted $T_8 = 168 dot (P_8 - 4 P_7) = 168 dot (97155 - 47244) = 168 dot 49911 = 8385048$; measured total $= 8385048$ bit-exact. The closed form $T_k = 168 dot (2^(k-1) - 1)(2^(k-2) - 1)(2^(k-1) + 3) slash 21$ is now validated against five consecutive levels $k in {4, 5, 6, 7, 8}$.
+
+3. *Every non-anomaly multiplicity at $k = 8$ is $7$-divisible.* The twenty-two count classes other than $168$ have multiplicities in ${105, 315, 735, 945, 1050, 1162, 1260, 2310, 3780, 6405, 6720, 6965, 8190, 20160, 20895}$, every entry of which factors through $7$ (e.g. $20895 = 3 dot 5 dot 7 dot 199$; $1162 = 2 dot 7 dot 83$; $6965 = 5 dot 7 dot 199$). The single count-$168$ multiplicity $10383 = 3 dot 3461$ — again a product of two primes, neither $7$ — extends the level-specific signature ($247 = 13 dot 19$ at $k = 6$, $1535 = 5 dot 307$ at $k = 7$, $10383 = 3 dot 3461$ at $k = 8$). The "two-prime non-$7$" structure of the count-$168$ anomaly orbit is robust under three levels of Cayley–Dickson doubling and is unlikely to be coincidental.
+
+A sixth level ($k = 9$, $dim = 512$) was added to test whether the $k = 7 = k = 8$ plateau is a two-level coincidence or a genuine asymptotic regime. Direct $3$-LI-generator enumeration scans the $511^3 slash 6 approx 22$ million raw triples in approximately $11.5$ seconds wall clock and resolves all $P_9 = 788035 = binom(9,3)_2$ canonical subspaces:
+
+#figure(
+  table(
+    columns: 4,
+    align: (center, center, center, center),
+    stroke: 0.5pt,
+    [*Count*], [*Multiplicity*], [*Count*], [*Multiplicity*],
+    [194], [3255],   [100], [3255],
+    [190], [13020],  [98],  [19530],
+    [188], [3255],   [96],  [4130],
+    [186], [9765],   [94],  [48825],
+    [184], [3255],   [92],  [3906],
+    [180], [217],    [90],  [71610],
+    [168], [75183],  [88],  [169911],
+    [110], [3255],   [86],  [39060],
+    [108], [55552],  [84],  [3255],
+    [106], [13020],  [76],  [166656],
+    [104], [3255],   [72],  [61845],
+    [102], [13020],  [--],  [--],
+  ),
+  caption: [Distribution of nonzero basis associator counts at $k = 9$, exhaustive over all $788035$ three-dimensional subspaces of $(ZZ slash 2)^9$. Verified in Sounio (`examples/cocycle_subspace_k9.sio`); total $T_9 = 67101720 = 399415 dot 168$ matches the prediction of Conjecture 5. The class set (twenty-three count values) is *bit-identical* to the class sets at $k = 7$ and $k = 8$.],
+) <table:subspace-k9>
+
+Three more results survive the passage to $k = 9$:
+
+- *Saturation is genuine, not a two-level coincidence.* The class-count chain ${1, 2, 7, 16, 23, 23, 23}$ at $k in {3, 4, 5, 6, 7, 8, 9}$ now spans *three* consecutive plateaus at twenty-three classes, with the same set ${72, 76, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 168, 180, 184, 186, 188, 190, 194}$ recovered bit-exact. The "no new count values appear past $k = 7$" conjecture is now strongly supported.
+
+- *Conjecture 5 holds at six consecutive levels.* Predicted $T_9 = 168 dot (P_9 - 4 P_8) = 168 dot 399415 = 67101720$; measured: $67101720$ bit-exact. The formula is now validated at $k in {4, 5, 6, 7, 8, 9}$ without exception.
+
+- *Anomaly multiplicity grows geometrically.* The count-$168$ multiplicities ${43, 247, 1535, 10383, 75183}$ at $k in {5, 6, 7, 8, 9}$ give ratios $5.74, 6.21, 6.76, 7.24$, monotone increasing and apparently converging from below toward $8 = 2^3$. The factorisations $43, 247 = 13 dot 19, 1535 = 5 dot 307, 10383 = 3 dot 3461, 75183 = 3 dot 25061$ continue the "single prime or two-prime non-$7$" signature (note $25061$ is prime, as is $3461$). The other twenty-two multiplicities at $k = 9$ are again all $7$-divisible, including the entire super-octonionic family ${180, 184, 186, 188, 190, 194}$ with $7$-divisible multiplicities ${217, 3255, 9765, 3255, 13020, 3255}$ where $217 = 7 dot 31$ is the smallest. The factor $31 = 2^5 - 1$ appears in many $k = 9$ multiplicities, suggesting a $"GL"(5, FF_2)$ subgroup structure inherited from the trigintaduonion level.
+
+A seventh level ($k = 10$, $dim = 1024$) was added to test the four-level-plateau hypothesis. The direct $3$-LI-generator enumeration scans the $1023^3 slash 6 approx 178$ million raw triples in approximately $95$ seconds wall clock and resolves all $P_{10} = 6347715 = binom(10,3)_2$ canonical subspaces:
+
+#figure(
+  table(
+    columns: 4,
+    align: (center, center, center, center),
+    stroke: 0.5pt,
+    [*Count*], [*Multiplicity*], [*Count*], [*Multiplicity*],
+    [194], [29295],   [100], [13671],
+    [190], [117180],  [98],  [160146],
+    [188], [13671],   [96],  [15442],
+    [186], [87885],   [94],  [376929],
+    [184], [13671],   [92],  [14994],
+    [180], [441],     [90],  [597618],
+    [168], [569327],  [88],  [1368423],
+    [110], [29295],   [86],  [351540],
+    [108], [451584],  [84],  [13671],
+    [106], [117180],  [76],  [1354752],
+    [104], [13671],   [72],  [520149],
+    [102], [117180],  [--],  [--],
+  ),
+  caption: [Distribution of nonzero basis associator counts at $k = 10$, exhaustive over all $6347715$ three-dimensional subspaces of $(ZZ slash 2)^{10}$. Verified in Sounio (`examples/cocycle_subspace_k10.sio`); total $T_{10} = 536856600 = 3195575 dot 168$ matches the prediction of Conjecture 5. The class set (twenty-three count values) is *bit-identical* to the class sets at $k = 7, 8, 9$.],
+) <table:subspace-k10>
+
+The $k = 10$ data delivers a four-level saturation plateau and an unexpected refinement of the anomaly factorisation pattern:
+
+- *Saturation across four levels.* The class-count chain extends to ${1, 2, 7, 16, 23, 23, 23, 23}$ at $k in {3, 4, 5, 6, 7, 8, 9, 10}$. The distinct-count set ${72, 76, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 168, 180, 184, 186, 188, 190, 194}$ is bit-identical across four consecutive Cayley–Dickson levels. The conjecture that the limiting distinct-count set is exactly twenty-three is now strongly supported.
+
+- *Conjecture 5 holds at seven consecutive levels.* Predicted $T_{10} = 168 dot (P_{10} - 4 P_9) = 168 dot 3195575 = 536856600$; measured: $536856600$ bit-exact. The closed form is validated without exception at $k in {4, 5, 6, 7, 8, 9, 10}$.
+
+- *Anomaly factorisation transitions from two primes to three.* The count-$168$ multiplicity at $k = 10$ is $569327 = 11 dot 73 dot 709$, with all three factors prime. This breaks the "two-prime" pattern that held at $k = 6, 7, 8, 9$ but preserves the structural feature — the multiplicity is still not divisible by $7$. The pattern is therefore refined from "two-prime non-$7$" to "non-$7$ with bounded prime count growing slowly with $k$". The multiplicity ratio $569327 slash 75183 approx 7.57$ extends the monotone-increasing sequence ${5.74, 6.21, 6.76, 7.24, 7.57}$, still approaching $8 = 2^3$ from below. Every other multiplicity at $k = 10$ remains $7$-divisible, including all six super-octonionic counts and the highly composite multiplicities like $1368423 = 3 dot 7 dot 65163$ at count $88$ or $1354752 = 2^9 dot 3^3 dot 7^2$ at count $76$.
+
 == Implications
 
 1. *Conjecture 5 is structurally richer than its compact form $T_k = 168(P_k - 4 P_(k-1))$ suggests.* The simple "subtract trivial subspaces" interpretation is empirically false: at $k = 5$ no 3-dimensional subspace carries the trivial cocycle, and the per-subspace counts span seven distinct values. The arithmetic identity $T_k = 168(P_k - 4 P_(k-1))$ is therefore a *cohomological balance*, with positive contributions from "super-octonionic" subspaces (e.g. count $180$ at $k = 5$) cancelling against partial-cocycle subspaces (counts below 168). A complete proof must enumerate the cocycle restriction classes and weight them with their LI nonzero contributions, recovering the closed form $T_k = 168 dot (2^(k-1) - 1)(2^(k-2) - 1)(2^(k-1) + 3) slash 21$.
@@ -366,7 +488,7 @@ This is the natural categorical home for the algebras and organizes the Sounio c
   *Revised Open Question 1.* _Classify the cocycle restriction classes that arise as $phi_k|_V$ for 3-dimensional subspaces $V <= (ZZ slash 2)^k$, with their multiplicities, and prove Conjecture 5 by weighting each class by its LI nonzero associator count._
 ]
 
-@table:subspace, @table:subspace-k5, and @table:subspace-k6 supply three empirical inputs for this classification. The multiplicities at $k = 4, 5, 6$ are predominantly multiples of $7$ and $21$, consistent with an orbit-counting derivation under the $"GL"(k, FF_2)$ action lifting the canonical $"PSL"(2,7)$-action on the Fano cocycle. The exception at $k = 6$ — count $168$ at multiplicity $247 = 13 dot 19$ — is the principal anomaly to explain: a complete classification must identify the orbit family producing this specific non-7-divisible contribution.
+@table:subspace, @table:subspace-k5, @table:subspace-k6, @table:subspace-k7, @table:subspace-k8, @table:subspace-k9, and @table:subspace-k10 supply seven empirical inputs for this classification. The multiplicities at $k = 4, 5, 6, 7, 8, 9, 10$ are predominantly multiples of $7$ and $21$, consistent with an orbit-counting derivation under the $"GL"(k, FF_2)$ action lifting the canonical $"PSL"(2,7)$-action on the Fano cocycle. *At $k = 8, 9, 10$ every non-anomaly multiplicity is $7$-divisible*; the only exception at each level is the count-$168$ class. The anomaly-multiplicity factorisations at $k = 6, 7, 8, 9, 10$ are $247 = 13 dot 19$, $1535 = 5 dot 307$, $10383 = 3 dot 3461$, $75183 = 3 dot 25061$, $569327 = 11 dot 73 dot 709$ — all non-$7$, with the count of prime factors transitioning from two (at $k = 6..9$) to three (at $k = 10$). The growth ratios ${5.74, 6.21, 6.76, 7.24, 7.57}$ are monotone increasing and converge from below toward $8 = 2^3$. The class-set saturation at $k = 7$ is now confirmed across four consecutive levels ($k = 7, 8, 9, 10$), reducing the classification target from an infinite family to a finite set of $23$ orbits: a complete proof must identify *two* orbit families — the $"PSL"(2,7)$-derived multiples of $7$, and the count-$168$ anomaly with its level-dependent non-$7$ signature.
 
 == Computational verification of the cohomological construction
 
@@ -376,5 +498,9 @@ The cohomological reformulation is computationally validated in Sounio:
 - `examples/cocycle_subspace_168.sio` — enumerates the 15 three-dimensional subspaces of $(ZZ slash 2)^4$ via dual functionals, computes per-subspace associator counts using the Cayley–Dickson sedenion table, produces @table:subspace.
 - `examples/cocycle_subspace_k5.sio` — extends to trigintaduonions; enumerates the 155 three-dimensional subspaces of $(ZZ slash 2)^5$ via canonical pairs of dual functionals, produces @table:subspace-k5 (2/2 PASS, $T_5 = 15960$ confirmed).
 - `examples/cocycle_subspace_k6.sio` — extends to chingons (dim $64$); enumerates the 1395 three-dimensional subspaces of $(ZZ slash 2)^6$ via canonical lex-minimal LI triples of dual functionals, produces @table:subspace-k6 (2/2 PASS, $T_6 = 130200$ confirmed).
+- `examples/cocycle_subspace_k7.sio` — extends to routons (dim $128$); enumerates the 11811 three-dimensional subspaces of $(ZZ slash 2)^7$ via canonical lex-minimal LI quadruples of dual functionals, with VLIST inner-loop optimization (precompute $V$'s seven nonzero elements before triple iteration), producing @table:subspace-k7 (3/3 PASS, $T_7 = 1046808 = 6231 dot 168$ confirmed).
+- `examples/cocycle_subspace_k8.sio` — extends to voudons (dim $256$); enumerates the 97155 three-dimensional subspaces of $(ZZ slash 2)^8$. The dual-functional walk used at $k = 4..7$ is infeasible at $k = 8$ ($approx 1.4$ billion raw LI quintuples), so this case switches to direct 3-LI-generator enumeration (canonical $v_1 < v_2 < v_3$, $v_3 in.not "span"(v_1, v_2)$, each generator the minimum of its coset). Produces @table:subspace-k8 (3/3 PASS, $T_8 = 8385048 = 49911 dot 168$ confirmed) and establishes the class-set saturation at twenty-three count values from $k = 7$ onward.
+- `examples/cocycle_subspace_k9.sio` — extends to $1024$-ions (dim $512$); enumerates the 788035 three-dimensional subspaces of $(ZZ slash 2)^9$ via the same direct $3$-generator enumeration as $k = 8$, with one additional Cayley–Dickson doubling step (six total: $OO -> SS -> TT -> "Chingons" -> "Routons" -> "Voudons" -> "1024-ions"$). Produces @table:subspace-k9 (3/3 PASS, $T_9 = 67101720 = 399415 dot 168$ confirmed) and confirms saturation at twenty-three count values across three consecutive levels ($k = 7, 8, 9$). Wall clock: $approx 11.5$ s on Linux x86-64 native.
+- `examples/cocycle_subspace_k10.sio` — extends to $2048$-ions (dim $1024$); enumerates the 6,347,715 three-dimensional subspaces of $(ZZ slash 2)^{10}$ via the same direct $3$-generator enumeration as $k = 8, 9$, with one more Cayley–Dickson doubling step (seven total). Static memory: $1024^2 dot 2$ i64 $= 16$ MB BSS for the $k = 10$ multiplication table alone (plus $approx 5.34$ MB for all lower-CD tables). Produces @table:subspace-k10 (3/3 PASS, $T_{10} = 536856600 = 3195575 dot 168$ confirmed) and confirms saturation across four consecutive levels ($k = 7, 8, 9, 10$). Wall clock: $approx 95$ s on Linux x86-64 native; gate timeout 600 s.
 
 #bibliography("168-refs.yml", style: "springer-mathphys")

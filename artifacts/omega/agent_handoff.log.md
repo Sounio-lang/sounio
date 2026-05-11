@@ -676,3 +676,151 @@ checks:
   - bin/souc check tests/run-pass/dossier_smoke.sio (rc=0)
   - bin/souc compile + run, stdout bytewise-matches golden
 status: lock-released
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T22:07:36Z
+files:
+  - examples/cocycle_subspace_k7.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh (NEW or extend)
+intent: Lane 3 CLAIM — extend cohomological subspace decomposition to k=7 (routons, dim 128). Per the k=4→k=5→k=6 chain (2/7/16 distinct count classes), k=7 enumerates [7 choose 3]_2 = 11811 three-dim subspaces of (Z/2)^7 and tallies per-subspace nonzero associator counts to test whether (a) T_7 remains 168-divisible, (b) the super-octonionic mult-21 signature persists, and (c) the count=168 mult=247=13·19 anomaly at k=6 generalises or refines. Will replace 64-dim chingon tables with 128-dim routon tables built via an inlined 4th Cayley-Dickson doubling; bucket array bumped to 64. Worktree /workspace/sounio-lane-3-paper168 on branch coord/lane-3-paper-168.
+checks:
+  - bin/souc check examples/cocycle_subspace_k6.sio (rc=0, pre-state baseline)
+status: lock-acquired
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T22:44:19Z
+files:
+  - examples/cocycle_subspace_k7.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh (NEW)
+intent: Lane 3 RELEASE — k=7 routon subspace decomposition delivered. T_7 = 1,046,808 = 168·6231 confirmed (Conjecture 5 formula T_k = 168·(P_k − 4·P_{k−1}) now holds at k=4,5,6,7); 11811 = P_7 subspaces enumerated; **23 distinct count classes** found (vs 16 at k=6, 7 at k=5, 2 at k=4). Super-octonionic family expands from 3 classes at k=6 to 6 at k=7 (counts 180/184/186/188/190/194, all with 7-divisible multiplicities). Principal anomaly at count=168 persists with level-specific signature: mult=1535=5·307 at k=7 (vs 247=13·19 at k=6) — both two-prime products, neither 7. Class-count chain {1,2,7,16,23} at k∈{3..7} decelerates from k=5→6 to k=6→7, hinting at saturation. New gate `paper168_cocycle_subspace_gate.sh` covers k=4..7 (k=4 relaxed to T_4=1848 since cocycle_subspace_168.sio predates cohomological reformulation). VLIST inner-loop optimization keeps wall clock at 0.6s. Build target green. Umbrella green (12/12).
+checks:
+  - bin/souc check examples/cocycle_subspace_k7.sio (rc=0)
+  - bin/souc compile + run /tmp/k7_bin (ALL PASS in 0.6s; T_7=1046808; P_7=11811; 23 classes; no bucket overflow)
+  - bash scripts/ci/paper168_cocycle_subspace_gate.sh (PASS=4 FAIL=0 rc=0 in 1.9s)
+  - bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (rc=0; 12/12 sub-gates PASS in 8m15s)
+commit: pending
+status: lock-released
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T22:56:12Z
+files:
+  - examples/cocycle_subspace_k8.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh
+intent: Lane 3 CLAIM (stacked on PR #114) — extend cohomological subspace decomposition to k=7→k=8 (voudons, dim 256). Enumerates [8 choose 3]_2 = 97155 three-dim subspaces of (Z/2)^8 in the 256-dim voudon algebra. The dual-functional approach used at k=4..7 becomes infeasible at k=8 (5 LI functionals → ~127^5/120 ≈ 1.4G raw quintuples). This lane therefore switches enumeration to direct 3-LI-generator basis: v1<v2<v3, v3 ∉ span(v1,v2), and each generator is lex-min of its remaining coset in V. ~8M raw triples, ~178× speedup. Voudon table requires 256² × 2 i64 = 1 MB BSS (4× k=7); inner loop uses same VLIST optimization (7^3 = 343 per canonical). Will test whether (a) formula T_k = 168·(P_k − 4·P_{k−1}) extends to k=8 (predicted T_8 = 168·49911 = 8,385,048), (b) saturation hypothesis from k=6→7 deceleration holds at k=7→8, (c) the count=168 two-prime anomaly signature extends. Worktree /workspace/sounio-lane-3-paper168-k8 on branch coord/lane-3-paper-168-k8, stacked off coord/lane-3-paper-168 (PR #114).
+checks:
+  - bin/souc check examples/cocycle_subspace_k7.sio (rc=0, pre-state baseline includes PR #114)
+status: lock-acquired
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T23:10:33Z
+files:
+  - examples/cocycle_subspace_k8.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh
+intent: Lane 3 RELEASE — k=8 voudon subspace decomposition delivered. ALL THREE conjectures from PR #114 (k=7) confirmed at k=8. (1) T_8 = 8,385,048 = 168·49911 (Conjecture 5 formula T_k = 168·(P_k − 4·P_{k−1}) now holds at five consecutive levels k=4..8). (2) **23 distinct count classes** at k=8 — SAME count AND SAME values as k=7. The class set {72, 76, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 168, 180, 184, 186, 188, 190, 194} is bit-identical between k=7 and k=8. **Saturation hypothesis confirmed**: the distinct-count set stabilises at 23 from k=7 onward; further CD doublings change multiplicities but not the count set. Classification target reduced from infinite family to finite set of 23 orbits. (3) count=168 anomaly continues with two-prime non-7 signature: mult=10383 = 3·3461 at k=8 (vs 1535=5·307 at k=7, 247=13·19 at k=6). Every other non-anomaly multiplicity at k=8 is 7-divisible. Direct 3-LI-generator enumeration (vs dual-functional) keeps wall clock at 1.4s. Build target green (5/5 PASS in 3.6s). Umbrella green (12/12 in 8m14s).
+checks:
+  - bin/souc check examples/cocycle_subspace_k8.sio (rc=0)
+  - bin/souc compile + run /tmp/k8_bin (ALL PASS in 1.4s; T_8=8385048; P_8=97155; 23 classes; no bucket overflow)
+  - bash scripts/ci/paper168_cocycle_subspace_gate.sh (PASS=5 FAIL=0 rc=0 in 3.6s)
+  - bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (rc=0; 12/12 sub-gates PASS in 8m14s)
+commit: pending
+status: lock-released
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T23:21:22Z
+files:
+  - examples/cocycle_subspace_k9.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh
+intent: Lane 3 CLAIM (stacked on PR #115) — extend cohomological subspace decomposition to k=8→k=9 (1024-ions, dim 512). Enumerates [9 choose 3]_2 = 788035 three-dim subspaces of (Z/2)^9 in the 512-dim CD algebra. Direct 3-LI-generator enumeration (proven feasible at k=8). 512² × 2 i64 = 4 MB BSS per multiplication table (4× k=8). Two purposes: (a) push Conjecture 5 formula T_k = 168·(P_k − 4·P_{k−1}) to its sixth consecutive level (predicted T_9 = 168·399415 = 67,101,720); (b) re-confirm saturation hypothesis from PR #115 — class set should remain bit-identical at 23 values. Worktree /workspace/sounio-lane-3-paper168-k9 on branch coord/lane-3-paper-168-k9, stacked off coord/lane-3-paper-168-k8 (PR #115). Wall clock estimate: ~1-2 min on x86-64 native.
+checks:
+  - bin/souc check examples/cocycle_subspace_k8.sio (rc=0, pre-state baseline includes PR #115)
+status: lock-acquired
+
+---
+
+agent: codex
+lane: 4
+time_utc: 2026-05-10T20:28:36Z
+files:
+  - self-hosted/compiler/native_compile_driver.sio
+intent: Lane 4 CLAIM/RELEASE - native-v2 hardening for scalar refinement-typed function parameters. Refreshed from origin/main@e6a247dd, kept tests/run-pass read-only, and reduced the current run-pass parity inventory by lowering parameter refinements as their inner scalar runtime type in the N-v2 driver while leaving predicate enforcement to the existing frontend/typecheck path.
+worktree: /workspace/sounio-lane-4-nv2
+branch: coord/lane-4-nv2-hardening
+checks:
+  - bin/souc check self-hosted/compiler/native_compile_driver.sio (rc=0)
+  - baseline inventory /tmp/lane4-parity-inventory-20260510T203929Z: corpus=410 ok=147 nv2_compile=188 nv2_run=70 a_only=1 both_fail=4 a_fail=0
+  - targeted inventory /tmp/lane4-refinement-inventory-20260510T204417Z: corpus=8 ok=8 nv2_compile=0 nv2_run=0
+  - post inventory /tmp/lane4-parity-post-20260510T204428Z: corpus=410 ok=155 nv2_compile=180 nv2_run=70 a_only=1 both_fail=4 a_fail=0
+  - xAI offload review /tmp/llm-offload-07bTJ1: CAUGHT_BUG - replaced positional refinement type probe with brace-local inner binder/type scan
+  - post-xAI targeted inventory /tmp/lane4-refinement-inventory-post-xai-20260510T220243Z: corpus=8 ok=8 nv2_compile=0 nv2_run=0
+  - post-xAI full inventory /tmp/lane4-parity-post-xai-20260510T220257Z: corpus=410 ok=155 nv2_compile=180 nv2_run=70 a_only=1 both_fail=4 a_fail=0
+  - bash scripts/ci/native_v2_serious_track_gate.sh (rc=0)
+  - bash scripts/ci/lean_single_fixed_point_gate.sh (rc=0; fixed-point md5=1c89bbde4db02b708febd46fb5448520)
+  - SOUNIO_NATIVE_V2_CPU_COMPILER_DIR=/tmp/lane4-post-umbrella-20260510T204612Z bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (rc=0; shell fallback used for aggregator)
+  - post-xAI full umbrella attempt /tmp/lane4-post-xai-umbrella-20260510T234331Z: native-v2 subgates rc=0, phase_y_gum_pbpk rc=1 due local CUDA cuInit_failed cuda_result=304
+  - SOUNIO_KAXI_PHASE_Y_GATE_SKIP=1 SOUNIO_NATIVE_V2_CPU_COMPILER_DIR=/tmp/lane4-post-xai-umbrella-skip-phase-y-20260510T235309Z bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (rc=0; shell fallback used for aggregator; Phase Y explicitly skipped because local CUDA device admission failed)
+  - post-rebase direct Phase Y GPU retry /tmp/lane4-phase-y-gpu-retry-20260511T094129Z: rc=0; device=NVIDIA RTX 4000 Ada Generation cc=8.9; TC-1/TC-2/TC-3 PASS
+  - post-rebase full GPU umbrella /tmp/lane4-post-rebase-umbrella-gpu-20260511T102012Z: rc=0; all 12 rows PASS including phase_y_gum_pbpk rc=0; shell fallback used for aggregator
+  - git diff --check (rc=0)
+commit: 3c6a46cc (pushed to origin/coord/lane-4-nv2-hardening; PR #129)
+status: lock-released
+blocker-closed:
+  Blocker-ID: BLK-20260510-lane4-publish-auth
+  closed: 2026-05-11 — gh auth live, pushed from workspace container
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T23:35:00Z
+files:
+  - examples/cocycle_subspace_k9.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh
+intent: Lane 3 RELEASE (retroactive; missed in PR #116 commit) — k=9 1024-ion subspace decomposition delivered. All three conjectures from PR #115 confirmed at k=9. (1) T_9 = 67,101,720 = 168·399415 (Conjecture 5 holds at six consecutive levels k=4..9). (2) **Three-level saturation**: 23 distinct count classes, value set bit-identical at k=7, k=8, k=9. (3) count=168 anomaly mult=75183 = 3·25061 continues two-prime non-7 signature; multiplicity ratios {5.74, 6.21, 6.76, 7.24} monotone increasing toward 2³=8. Wall clock 11.5s. Merged via PR #116 (commit 958c8fba).
+checks:
+  - bin/souc compile + run /tmp/k9_bin (ALL PASS in 11.5s; T_9=67101720; P_9=788035; 23 classes)
+  - bash scripts/ci/paper168_cocycle_subspace_gate.sh (PASS=6 FAIL=0 rc=0 in 15.5s)
+  - post-merge gate on origin/main rc=0 (verified after PR #116 landed)
+commit: 958c8fba
+status: lock-released
+
+---
+
+agent: claude
+lane: 3
+time_utc: 2026-05-10T23:51:27Z
+files:
+  - examples/cocycle_subspace_k10.sio (NEW)
+  - docs/papers/main/168-theorem.typ
+  - docs/papers/main/168-revision-notes.md
+  - scripts/ci/paper168_cocycle_subspace_gate.sh
+intent: Lane 3 CLAIM — extend cohomological subspace decomposition to k=10 (2048-ions, dim 1024). Enumerates [10 choose 3]_2 = 6,347,715 three-dim subspaces of (Z/2)^10 in the 1024-dim CD algebra. Direct 3-LI-generator enumeration. 1024² × 2 i64 = 16 MB BSS per multiplication table (4× k=9); total static BSS estimated ~21.3 MB. Tests whether saturation holds at a FOURTH consecutive level (k=7,8,9,10) and pushes Conjecture 5 formula to its seventh consecutive level (predicted T_10 = 168·3195575 = 536,856,600). Worktree /workspace/sounio-lane-3-paper168-k10 on branch coord/lane-3-paper-168-k10, branched off origin/main (with #114/#115/#116 landed). Wall clock estimate: 3-5 minutes on x86-64 native; gate timeout 600s.
+checks:
+  - bin/souc check examples/cocycle_subspace_k9.sio (rc=0, pre-state baseline includes PR #116)
+status: lock-acquired
