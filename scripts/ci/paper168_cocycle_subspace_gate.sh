@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Lane 3 — Paper 168 cocycle subspace enumeration gate.
 #
-# Compiles and runs the six cocycle_subspace_*.sio examples that
+# Compiles and runs the seven cocycle_subspace_*.sio examples that
 # back §7 of paper 168 ("On 168") and verifies each prints ALL PASS:
 #
-#   k=4 (sedenions,    dim 16)  examples/cocycle_subspace_168.sio
-#   k=5 (32-ions,      dim 32)  examples/cocycle_subspace_k5.sio
-#   k=6 (chingons,     dim 64)  examples/cocycle_subspace_k6.sio
-#   k=7 (routons,      dim 128) examples/cocycle_subspace_k7.sio
-#   k=8 (voudons,      dim 256) examples/cocycle_subspace_k8.sio
-#   k=9 (1024-ions,    dim 512) examples/cocycle_subspace_k9.sio
+#   k=4  (sedenions,    dim 16)   examples/cocycle_subspace_168.sio
+#   k=5  (32-ions,      dim 32)   examples/cocycle_subspace_k5.sio
+#   k=6  (chingons,     dim 64)   examples/cocycle_subspace_k6.sio
+#   k=7  (routons,      dim 128)  examples/cocycle_subspace_k7.sio
+#   k=8  (voudons,      dim 256)  examples/cocycle_subspace_k8.sio
+#   k=9  (1024-ions,    dim 512)  examples/cocycle_subspace_k9.sio
+#   k=10 (2048-ions,    dim 1024) examples/cocycle_subspace_k10.sio
 #
 # Each example does its own self-check (T_k matches Conjecture 5,
 # P_k enumeration matches the Gaussian binomial [k choose 3]_2),
@@ -79,7 +80,7 @@ run_case() {
 }
 
 echo "═══════════════════════════════════════════════════════════════"
-echo "  Paper 168 — cocycle subspace enumeration gate (k=4..9)"
+echo "  Paper 168 — cocycle subspace enumeration gate (k=4..10)"
 echo "═══════════════════════════════════════════════════════════════"
 
 # k=4 (cocycle_subspace_168.sio) predates the cohomological reformulation
@@ -114,6 +115,11 @@ run_case "k8" \
 run_case "k9" \
     "examples/cocycle_subspace_k9.sio" \
     "788035 = P_9" \
+    "yes"
+
+run_case "k10" \
+    "examples/cocycle_subspace_k10.sio" \
+    "6347715 = P_10" \
     "yes"
 
 echo ""
