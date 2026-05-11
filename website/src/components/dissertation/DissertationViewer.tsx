@@ -5,6 +5,7 @@ import type { WebGLRenderer } from 'three';
 import { Compartments } from './Compartments';
 import { BloodFlowEdges } from './BloodFlowEdges';
 import { Stent } from './Stent';
+import { SCDepot } from './SCDepot';
 import { Silhouette } from './Silhouette';
 import { GumBudgetBar } from './GumBudgetBar';
 import { ConfidenceGate } from './ConfidenceGate';
@@ -292,11 +293,19 @@ export default function DissertationViewer() {
                 selected={selected}
                 onSelect={(i) => setSelected(i === selected ? null : i)}
               />
-              <Stent
-                timeHours={simState.timeHours}
-                speed={speed}
-                reducedMotion={reducedMotion}
-              />
+              {drug === 'rapamycin' ? (
+                <Stent
+                  timeHours={simState.timeHours}
+                  speed={speed}
+                  reducedMotion={reducedMotion}
+                />
+              ) : (
+                <SCDepot
+                  timeHours={simState.timeHours}
+                  speed={speed}
+                  reducedMotion={reducedMotion}
+                />
+              )}
               <SimulationBridge
                 drug={drug}
                 params={params}
