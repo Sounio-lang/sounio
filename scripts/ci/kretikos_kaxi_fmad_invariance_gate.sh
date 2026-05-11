@@ -37,7 +37,7 @@ fi
 SOUC="${SOUC:-./bin/souc}"
 KRETIKOS="${KRETIKOS:-./bin/kretikos}"
 ARCH="${ARCH:-sm_89}"
-KERNELS=(octonion_mul sedenion_mul octonion_associator sedenion_associator lse8)
+KERNELS=(octonion_mul sedenion_mul octonion_associator sedenion_associator lse8 sinkhorn16)
 
 TMP_DIR="$(mktemp -d -t kaxi_fmad.XXXXXX)"
 trap 'rm -rf "$TMP_DIR"' EXIT
