@@ -12,13 +12,13 @@
 //   V_t,i · dC_t,i/dt = PS_i·(C_v,i - C_t,i/Kp_i)
 //   V_b   · dC_b/dt   = sum_i Q_i·(C_v,i - C_b) - cl_hep·C_b
 //
-// Integrator: Strang splitting (Strang 1968). Each dt is:
-//   exp(L_PS · dt/2) → CN(L_slow, dt) → exp(L_PS · dt/2)
-// where L_PS is the per-organ PS-coupling (closed-form 2-state linear ODE)
-// and L_slow is the 14-state Q-transport + clearance + release "arrow"
-// linear ODE solved by Crank-Nicolson (A-stable, 2nd-order). CN handles the
-// V_v→0 stiffness regime unconditionally — required for Case 2 (degenerate
-// reduction to PBPK14) and Stage G-δ semaglutide PS values.
+// Integrator: **fully-coupled Crank-Nicolson** on the 27-state system. No
+// operator splitting — PS coupling and Q transport integrated implicitly in
+// one CN step via per-organ Schur-complement elimination (organ 2×2 blocks
+// inverted analytically) + scalar reduction for C_blood. A-stable, 2nd-order,
+// O(N) per step. Eliminates the operator-splitting bias of the prior
+// Strang(PS, CN-slow) scheme — required for the deep-degenerate (V_v→0, PS→∞)
+// asymptotic regime and Stage G-δ semaglutide PS values.
 //
 // Compartment indexing matches website/src/components/dissertation/compartments.ts:
 //   0=blood 1=liver 2=kidney 3=brain 4=heart 5=lung 6=muscle 7=adipose
@@ -184,26 +184,40 @@ fn ps_relax(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
     return r
 }
 
-// Crank-Nicolson step on the slow operator (Q-transport + clearance + release;
-// Ct held by the Strang split). The slow operator is the 14-state linear ODE
-//   dx/dt = M·x + f
-// with M an arrow matrix:
-//   M[0,0] = -(Σ Q_i + cl_hep)/V_b
-//   M[0,i] =  Q_i / V_b           [i≥1]
-//   M[i,0] =  Q_i / V_v_i         [i≥1]
-//   M[i,i] = -Q_i / V_v_i         [i≥1]
+// Fully-coupled Crank-Nicolson step on the **27-state** PBPK28 system.
+// Replaces the prior Strang(PS, CN-slow) splitting — no operator splitting at
+// all. PS-coupling and Q-transport are integrated implicitly in one CN step.
 //
-// CN: (I - dt·M/2)·x_new = (I + dt·M/2)·x_old + dt·f_mid
-// Closed-form arrow-matrix solve in O(N):
-//   α_i = (dt/2)·Q_i/V_v_i,  β_i = (dt/2)·Q_i/V_b,  s = (dt/2)·(ΣQ+cl_hep)/V_b
-//   b[0] = (1 - s)·C_blood + (dt/(2·V_b))·Σ Q_i·Cv_i + 0   (release=0 for parity ref)
-//   b[i] = α_i·C_blood + (1 - α_i)·Cv_i
-//   γ_i = β_i / (1 + α_i)
-//   x_new[0] = (b[0] + Σ γ_i·b[i]) / ((1 + s) - Σ γ_i·α_i)
-//   x_new[i] = (b[i] + α_i·x_new[0]) / (1 + α_i)
-fn cn_slow_step(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
-    let half = 0.5 * dt
-    let v_blood = vref_at(0)
+// State x = [C_blood, Cv_1, Ct_1, ..., Cv_13, Ct_13]; M is block-arrow.
+// (I - dt·M/2)·x_new = (I + dt·M/2)·x_old + dt·f_mid
+// Per-organ Schur elimination + scalar reduction for C_blood — O(N).
+//
+//   h = dt/2
+//   p_i = 1 + h·(Q_i + PS_i)/V_v_i        (Cv self)
+//   q_i = h·PS_i/(V_v_i·Kp_i)             (Cv ← Ct)
+//   r_i = h·PS_i/V_t_i                    (Ct ← Cv)
+//   s_i = 1 + h·PS_i/(V_t_i·Kp_i)         (Ct self)
+//   D_i = p_i·s_i - q_i·r_i               (organ-block det)
+//   γ_i = h·Q_i/V_v_i                     (Cv ← Cb)
+//   β_i = h·Q_i/V_b                       (Cb ← Cv)
+//   S   = h·(Σ Q_i + cl_hep)/V_b          (Cb self)
+//
+//   rhs0   = (1-S)·Cb_old + Σ β_i·Cv_i_old
+//   rhsv_i = γ_i·Cb_old + (1 - h(Q+PS)/V_v)·Cv_i_old + q_i·Ct_i_old
+//   rhst_i = r_i·Cv_i_old + (1 - h·PS/(V_t·Kp))·Ct_i_old
+//
+//   aV_i = (s_i·rhsv_i + q_i·rhst_i)/D_i
+//   bV_i = s_i·γ_i / D_i
+//   aT_i = (r_i·rhsv_i + p_i·rhst_i)/D_i
+//   bT_i = r_i·γ_i / D_i
+//   Cb_new = (rhs0 + Σ β_i·aV_i) / ((1+S) - Σ β_i·bV_i)
+//   Cv_i_new = aV_i + bV_i·Cb_new
+//   Ct_i_new = aT_i + bT_i·Cb_new
+//
+// A-stable, 2nd-order, no operator-splitting bias.
+fn full_cn_step(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
+    let h = 0.5 * dt
+    let vb = vref_at(0)
 
     var sum_q = 0.0
     var i = 1
@@ -211,56 +225,75 @@ fn cn_slow_step(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
         sum_q = sum_q + q_at(i)
         i = i + 1
     }
-    let s = half * (sum_q + cl_hep()) / v_blood
+    let big_s = h * (sum_q + cl_hep()) / vb
 
-    let c_blood_old = state.cv[0]
-    var sum_q_cv = 0.0
-    i = 1
-    while i < 14 {
-        sum_q_cv = sum_q_cv + q_at(i) * state.cv[i]
-        i = i + 1
-    }
-    let b0 = (1.0 - s) * c_blood_old + half * sum_q_cv / v_blood
+    let cb_old = state.cv[0]
+    var rhs0 = (1.0 - big_s) * cb_old
 
-    var alpha: [f64; 14] = [0.0; 14]
-    var bi: [f64; 14] = [0.0; 14]
-    var denom_acc = 0.0
-    var num_acc = 0.0
+    var a_v: [f64; 14] = [0.0; 14]
+    var b_v: [f64; 14] = [0.0; 14]
+    var a_t: [f64; 14] = [0.0; 14]
+    var b_t: [f64; 14] = [0.0; 14]
+    var sum_beta_a = 0.0
+    var sum_beta_b = 0.0
+
     i = 1
     while i < 14 {
         let vi = vref_at(i)
-        let vv_raw = vi * vasc_frac_at(i)
+        let vf = vasc_frac_at(i)
+        let vv_raw = vi * vf
+        let vt_raw = vi * (1.0 - vf)
         let vv = if vv_raw < 1.0e-30 { 1.0e-30 } else { vv_raw }
-        let a = half * q_at(i) / vv
-        alpha[i] = a
-        bi[i] = a * c_blood_old + (1.0 - a) * state.cv[i]
-        let beta = half * q_at(i) / v_blood
-        let gamma = beta / (1.0 + a)
-        denom_acc = denom_acc + gamma * a
-        num_acc = num_acc + gamma * bi[i]
+        let vt = if vt_raw < 1.0e-30 { 1.0e-30 } else { vt_raw }
+        let kp = kp_at(i)
+        let ps = ps_at(i)
+        let qi = q_at(i)
+
+        let beta = h * qi / vb
+        let gamma = h * qi / vv
+        let p = 1.0 + h * (qi + ps) / vv
+        let q = h * ps / (vv * kp)
+        let r = h * ps / vt
+        let sb = 1.0 + h * ps / (vt * kp)
+        let det = p * sb - q * r
+
+        rhs0 = rhs0 + beta * state.cv[i]
+
+        let rhs_v = gamma * cb_old + (1.0 - h * (qi + ps) / vv) * state.cv[i] + q * state.ct[i]
+        let rhs_t = r * state.cv[i] + (1.0 - h * ps / (vt * kp)) * state.ct[i]
+
+        let av = (sb * rhs_v + q * rhs_t) / det
+        let bv = (sb * gamma) / det
+        let at = (r * rhs_v + p * rhs_t) / det
+        let bt = (r * gamma) / det
+
+        a_v[i] = av
+        b_v[i] = bv
+        a_t[i] = at
+        b_t[i] = bt
+
+        sum_beta_a = sum_beta_a + beta * av
+        sum_beta_b = sum_beta_b + beta * bv
         i = i + 1
     }
 
-    let x0 = (b0 + num_acc) / ((1.0 + s) - denom_acc)
-    var out = state
-    out.cv[0] = if x0 < 0.0 { 0.0 } else { x0 }
+    let cb_new = (rhs0 + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
+    var out = pbpk28_zero()
+    out.cv[0] = if cb_new < 0.0 { 0.0 } else { cb_new }
     i = 1
     while i < 14 {
-        let xi = (bi[i] + alpha[i] * x0) / (1.0 + alpha[i])
-        out.cv[i] = if xi < 0.0 { 0.0 } else { xi }
-        // out.ct[i] unchanged — Ct is held by Strang split
+        let cv = a_v[i] + b_v[i] * cb_new
+        let ct = a_t[i] + b_t[i] * cb_new
+        out.cv[i] = if cv < 0.0 { 0.0 } else { cv }
+        out.ct[i] = if ct < 0.0 { 0.0 } else { ct }
         i = i + 1
     }
     return out
 }
 
-// One Strang-split step: exp(L_PS·dt/2) ∘ CN(L_slow, dt) ∘ exp(L_PS·dt/2).
+// One fully-coupled implicit step (replaces Strang splitting).
 fn strang_step(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
-    let half = 0.5 * dt
-    let s1 = ps_relax(state, half)
-    let s2 = cn_slow_step(s1, dt)
-    let s3 = ps_relax(s2, half)
-    return s3
+    return full_cn_step(state, dt)
 }
 
 fn integrate_to(state: Pbpk28, t_start: f64, t_end: f64, dt: f64) -> Pbpk28 with Mut, Div {
@@ -312,7 +345,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     println("dt=0.001")
     println("bolus_mg=0.05")
     println("cl_hep_L_per_h=12.4")
-    println("integrator=strang_split_PS_then_CN_then_PS")
+    println("integrator=fully_coupled_CN_27state")
     println("drug=rapamycin")
     println("samples=12")
 

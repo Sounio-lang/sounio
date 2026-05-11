@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Node-side reference runner for the dissertation 3D viewer's PBPK28
-// permeability-limited RK4 + Strang splitting on PS coupling.
+// permeability-limited model with fully-coupled Crank-Nicolson integration.
 //
 // Consumes the SAME pure-JS core (website/src/lib/pbpk28_core.mjs) that the
 // React hook will use. Emits PARITY|t / PARITY|i / PARITY|cv / PARITY|ct /
@@ -66,7 +66,7 @@ out.push(`states=${2 * N}`);
 out.push(`dt=${DT}`);
 out.push(`bolus_mg=${BOLUS_MG}`);
 out.push(`cl_hep_L_per_h=${CL_HEP}`);
-out.push('integrator=strang_split_PS_then_CN_then_PS');
+out.push('integrator=fully_coupled_CN_27state');
 out.push('drug=rapamycin');
 out.push(`case=${CASE}`);
 out.push(`samples=${SAMPLES.length}`);

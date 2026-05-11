@@ -121,100 +121,123 @@ function psRelaxOrgan(Cv, Ct, i, Vv, Vt, Kp, PS, dt) {
 }
 
 /**
- * Crank-Nicolson step on the SLOW sub-operator (Q-transport + clearance +
- * release; Ct held by the Strang split). The slow operator is the 14-state
- * linear ODE dx/dt = M·x + f where x = [C_blood, Cv_1, ..., Cv_13] and M
- * is an arrow matrix:
- *   M[0,0] = -(Σ Q_i + cl_hep) / V_b
- *   M[0,i] =  Q_i / V_b           [i≥1]
- *   M[i,0] =  Q_i / V_v_i         [i≥1]
- *   M[i,i] = -Q_i / V_v_i         [i≥1]
- * f[0] = release/V_b; f[i] = 0.
+ * Fully-coupled Crank-Nicolson step on the **27-state** PBPK28 system.
+ * No operator splitting — both the PS coupling and the Q transport are
+ * integrated implicitly in a single CN step.
  *
- * CN: (I - dt·M/2)·x_new = (I + dt·M/2)·x_old + dt·f_mid
- * Closed-form arrow-matrix solve in O(N):
- *   α_i = (dt/2)·Q_i/V_v_i,  β_i = (dt/2)·Q_i/V_b,  s = (dt/2)·(ΣQ+cl_hep)/V_b
- *   b[0] = (1 - s)·C_blood_old + (dt/(2·V_b))·Σ Q_i·Cv_i_old + dt·release/V_b
- *   b[i] = α_i·C_blood_old + (1 - α_i)·Cv_i_old
- *   γ_i = β_i / (1 + α_i)
- *   x_new[0] = (b[0] + Σ γ_i·b[i]) / ((1 + s) - Σ γ_i·α_i)
- *   x_new[i] = (b[i] + α_i·x_new[0]) / (1 + α_i)
+ * State vector x = [C_blood, Cv_1, Ct_1, Cv_2, Ct_2, ..., Cv_13, Ct_13].
+ * M is a block-arrow matrix: a 1×1 blood diagonal, 13 organ 2×2 diagonal
+ * blocks, and only the C_blood ↔ Cv_i off-diagonal coupling. Block structure
+ * lets the CN linear system (I - dt·M/2)·x_new = (I + dt·M/2)·x_old + dt·f
+ * be solved in O(N) via per-organ Schur-complement elimination:
  *
- * CN is A-stable (handles V_v→0 stiffness without sub-stepping) and 2nd-order
- * accurate. Together with the analytical exp() PS-relaxation, the full Strang
- * scheme exp(L_PS·dt/2) ∘ CN(L_slow, dt) ∘ exp(L_PS·dt/2) is unconditionally
- * stable in both stiff terms.
+ *   Per organ i (h = dt/2):
+ *     p_i = 1 + h·(Q_i + PS_i)/V_v_i           (Cv self in A = I - h·M)
+ *     q_i = h·PS_i/(V_v_i·Kp_i)                (Cv ← Ct coupling)
+ *     r_i = h·PS_i/V_t_i                       (Ct ← Cv coupling)
+ *     s_i = 1 + h·PS_i/(V_t_i·Kp_i)            (Ct self in A)
+ *     D_i = p_i·s_i - q_i·r_i                  (organ-block determinant)
+ *     γ_i = h·Q_i/V_v_i                        (Cv ← Cb coupling)
+ *     β_i = h·Q_i/V_b                          (Cb ← Cv coupling)
+ *
+ *   RHS = B·x_old + dt·f  where B = I + h·M:
+ *     rhs_0   = (1-S)·Cb_old + Σ β_i·Cv_i_old + dt·release/V_b   (S = h·(ΣQ+cl)/V_b)
+ *     rhs_v_i = γ_i·Cb_old + (1 - h(Q+PS)/V_v)·Cv_i_old + q_i·Ct_i_old
+ *     rhs_t_i = r_i·Cv_i_old + (1 - h·PS/(V_t·Kp))·Ct_i_old
+ *
+ *   Per-organ Schur elimination (organ block A_i is 2×2 invertible):
+ *     Cv_i_new = a_v_i + b_v_i·Cb_new  with  a_v_i = (s_i·rhs_v + q_i·rhs_t)/D_i,
+ *                                            b_v_i =  s_i·γ_i / D_i
+ *     Ct_i_new = a_t_i + b_t_i·Cb_new  with  a_t_i = (r_i·rhs_v + p_i·rhs_t)/D_i,
+ *                                            b_t_i =  r_i·γ_i / D_i
+ *
+ *   Scalar reduction for blood (row 0 of A · x_new = rhs):
+ *     (1+S)·Cb_new - Σ β_i·(a_v_i + b_v_i·Cb_new) = rhs_0
+ *     Cb_new = (rhs_0 + Σ β_i·a_v_i) / ((1+S) - Σ β_i·b_v_i)
+ *
+ *   Back-substitute for Cv_i_new, Ct_i_new.
+ *
+ * Properties:
+ *   - A-stable (any stiff eigenvalue of M is integrated stably).
+ *   - 2nd-order accurate.
+ *   - Reduces to PBPK14 well-stirred in the (V_v→0, PS→∞) limit because
+ *     no splitting introduces non-commutativity error.
+ *   - O(N) per step (13 organ-block inversions + 1 scalar solve + 13 back-subs).
  */
-function cnSlowStep(Cv, dt, params, scratch) {
-  const half = 0.5 * dt;
-  const Vblood = V_REF[0] * params.vdScale;
+export function stepStrang(Cv, Ct, tHours, dt, params, scratch) {
+  scratch._tCenter = tHours + 0.5 * dt;
+  const h = 0.5 * dt;
+  const Vb = V_REF[0] * params.vdScale;
   const release = releaseRateAt(scratch._tCenter, params);
 
   let sumQ = 0;
   for (let i = 1; i < N; i++) sumQ += Q[i];
-  const s = half * (sumQ + params.clHep) / Vblood;
+  const S = h * (sumQ + params.clHep) / Vb;
 
-  const cBloodOld = Cv[0];
-  let sumQCv = 0;
-  for (let i = 1; i < N; i++) sumQCv += Q[i] * Cv[i];
-  const b0 = (1 - s) * cBloodOld + half * sumQCv / Vblood + dt * release / Vblood;
+  const cbOld = Cv[0];
+  let rhs0 = (1 - S) * cbOld + dt * release / Vb;
 
-  const alpha = scratch.cnAlpha;
-  const bi = scratch.cnBi;
-  let denomAcc = 0;
-  let numAcc = 0;
+  const Av = scratch.aV;
+  const Bv = scratch.bV;
+  const At = scratch.aT;
+  const Bt = scratch.bT;
+  let sumBetaA = 0;
+  let sumBetaB = 0;
+
   for (let i = 1; i < N; i++) {
     const Vi = V_REF[i] * params.vdScale;
     const Vv = Math.max(Vi * params.vascFrac[i], 1e-30);
-    const a = half * Q[i] / Vv;
-    alpha[i] = a;
-    bi[i] = a * cBloodOld + (1 - a) * Cv[i];
-    const beta = half * Q[i] / Vblood;
-    const gamma = beta / (1 + a);
-    denomAcc += gamma * a;
-    numAcc += gamma * bi[i];
+    const Vt = Math.max(Vi * (1 - params.vascFrac[i]), 1e-30);
+    const Kp = params.kp[i];
+    const PS = params.ps[i];
+    const Qi = Q[i];
+
+    const beta = h * Qi / Vb;
+    const gamma = h * Qi / Vv;
+    const p = 1 + h * (Qi + PS) / Vv;
+    const q = h * PS / (Vv * Kp);
+    const r = h * PS / Vt;
+    const s = 1 + h * PS / (Vt * Kp);
+    const D = p * s - q * r;
+
+    // B · x_old contributions
+    rhs0 += beta * Cv[i];
+    const rhsV = gamma * cbOld + (1 - h * (Qi + PS) / Vv) * Cv[i] + q * Ct[i];
+    const rhsT = r * Cv[i] + (1 - h * PS / (Vt * Kp)) * Ct[i];
+
+    // Linear-in-Cb_new coefficients
+    const aV = (s * rhsV + q * rhsT) / D;
+    const bV = (s * gamma) / D;
+    const aT = (r * rhsV + p * rhsT) / D;
+    const bT = (r * gamma) / D;
+
+    Av[i] = aV;
+    Bv[i] = bV;
+    At[i] = aT;
+    Bt[i] = bT;
+
+    sumBetaA += beta * aV;
+    sumBetaB += beta * bV;
   }
-  const x0 = (b0 + numAcc) / ((1 + s) - denomAcc);
-  Cv[0] = x0 < 0 ? 0 : x0;
+
+  const cbNew = (rhs0 + sumBetaA) / ((1 + S) - sumBetaB);
+  Cv[0] = cbNew < 0 ? 0 : cbNew;
   for (let i = 1; i < N; i++) {
-    const xi = (bi[i] + alpha[i] * x0) / (1 + alpha[i]);
-    Cv[i] = xi < 0 ? 0 : xi;
+    const cv = Av[i] + Bv[i] * cbNew;
+    const ct = At[i] + Bt[i] * cbNew;
+    Cv[i] = cv < 0 ? 0 : cv;
+    Ct[i] = ct < 0 ? 0 : ct;
   }
   return release * dt;
-}
-
-/**
- * One Strang-split step: exp(L_PS·dt/2) · CN(L_slow, dt) · exp(L_PS·dt/2).
- * Mutates Cv, Ct in place. Returns mg released this step.
- */
-export function stepStrang(Cv, Ct, tHours, dt, params, scratch) {
-  scratch._tCenter = tHours + 0.5 * dt;
-  const halfDt = 0.5 * dt;
-
-  for (let i = 1; i < N; i++) {
-    const Vi = V_REF[i] * params.vdScale;
-    const Vv = Vi * params.vascFrac[i];
-    const Vt = Vi * (1 - params.vascFrac[i]);
-    psRelaxOrgan(Cv, Ct, i, Vv, Vt, params.kp[i], params.ps[i], halfDt);
-  }
-
-  const released = cnSlowStep(Cv, dt, params, scratch);
-
-  for (let i = 1; i < N; i++) {
-    const Vi = V_REF[i] * params.vdScale;
-    const Vv = Vi * params.vascFrac[i];
-    const Vt = Vi * (1 - params.vascFrac[i]);
-    psRelaxOrgan(Cv, Ct, i, Vv, Vt, params.kp[i], params.ps[i], halfDt);
-  }
-
-  return released;
 }
 
 export function makeScratch() {
   const a = () => new Float64Array(N);
   return {
-    cnAlpha: a(),
-    cnBi: a(),
+    aV: a(),
+    bV: a(),
+    aT: a(),
+    bT: a(),
     _tCenter: 0,
   };
 }
