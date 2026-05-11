@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.dissertation.advisor-handoff
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.advisor-handoff
+-->
+
 # Dissertation Viewer — Advisor & Committee Walkthrough
 
 **Audience:** advisor (pharmacologist) and committee members (no
