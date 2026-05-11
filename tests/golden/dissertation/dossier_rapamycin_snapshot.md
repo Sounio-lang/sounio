@@ -63,4 +63,50 @@ Compartmental PBPK system: PBPK14 + Cypher DES coupling
 - generated_at_utc: 2026-05-10T00:00:00Z
 - sounio_version: lane-8c-test
 
+## §10. Live interactive viewer — multi-drug A/B (Stage G)
+
+A 3D, browser-native interactive view of this model is hosted at:
+
+> **https://www.souniolang.org/dissertation/**
+
+The Stage-G viewer is drug-agnostic: a chip-row selector at the top of the
+canvas (or the `D` keyboard shortcut) toggles between rapamycin (Cypher
+coronary stent — Higuchi diffusion release) and semaglutide (subcutaneous
+depot — first-order absorption, k_a = ln 2 / 60 h, F = 0.89 per Overgaard
+2019 / Carlsson 2020). Release-source visual, receptor-occupancy bars, PD
+readout panel, Phase J evidence band, patient-profile dropdown and the
+release-scale slider all swap with the active drug.
+
+The PBPK kernel is PBPK28 — permeability-limited (C_v, C_t) per organ with
+a PS coupling — plus per-organ TMDD blocks (Mager 2004) and the drug's PD
+ODE. The fully-coupled Crank-Nicolson step on the 27-state arrow matrix is
+parity-locked (<= 1% RMSE per organ) against the Sounio reference solver
+by scripts/ci/dissertation_pbpk28_parity_gate.sh, which runs nine hard
+cases in a single pass (PBPK28 Node<->Sounio, QSS analytical, PBPK14
+model-form reporting, mass-conservation monotonicity, rapamycin TMDD/PD,
+semaglutide PBPK28/TMDD/PD).
+
+Six narrated tours are available — three per drug. Press `T` to cycle
+within the active drug; `D` cycles drug and resets tour selection:
+
+Rapamycin:
+1. **Cypher -> blood -> liver** (30 s) — Higuchi release; Kp = 5.4 hepatic
+   accumulation.
+2. **BBB closeup — Kp = 0.10** (20 s) — P-gp efflux; why BPR stays < 0.15.
+3. **GUM cone widening under CL_hep variability** (20 s) — direct visual
+   proof of contribution #1 (GUM-through-ODE).
+
+Semaglutide:
+4. **SC depot -> blood -> pancreas** (30 s) — first-order absorption from
+   the abdominal depot, slow systemic distribution.
+5. **GLP-1R occupancy — brain, gut, pancreas** (24 s) — TMDD bars filling
+   at three sites; appetite, satiety, insulinotropic pathways narrated.
+6. **Bergman PD — DG falls as DI rises** (22 s) — pancreatic occupancy
+   drives insulin secretion which suppresses plasma glucose; switches
+   mid-tour to "slow CL" so the PD GUM cone widens visibly.
+
+For committee handouts the viewer's `Snapshot PNG` button (or the `S`
+keyboard shortcut) exports a print-quality PNG of the current frame,
+file-named with the active drug so multi-drug demos remain unambiguous.
+
 PASS dossier_smoke

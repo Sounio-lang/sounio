@@ -1,0 +1,454 @@
+//@ run-pass
+//@ timeout: 90
+use darwin_pbpk::tmdd::glp1r::*
+use darwin_pbpk::pd::bergman_glucose_insulin::*
+// ============================================================================
+// DISSERTATION PBPK28 PARITY REFERENCE — SEMAGLUTIDE (G-δ-1)
+//
+// GLP-1 receptor agonist, peptide MW = 4113.58 g/mol. Subcutaneous depot
+// release with first-order absorption (k_a = ln(2)/60 h ≈ 0.01155 h⁻¹,
+// bioavailability F = 0.89; Overgaard 2019). Proteolytic clearance
+// CL = 0.077 L/h (vs rapamycin's CL_hep = 12.4 L/h — semaglutide is
+// dramatically slower because FcRn recycling protects the peptide).
+//
+// Companion to website/src/lib/pbpk28_core.mjs (DEFAULT_PARAMS_SEMAGLUTIDE)
+// and the parity gate at scripts/ci/dissertation_pbpk28_parity_gate.sh
+// Case 7. G-δ-1 ships PK only; G-δ-2 adds TMDD on GLP-1R (pancreas, gut,
+// brain), G-δ-3 adds the glucose-insulin minimal model PD readout.
+//
+// Integrator: same fully-coupled CN on the 27-state arrow matrix as the
+// rapamycin ref. The release-rate term enters as dt·release/V_b in row 0
+// of rhs (see release_rate_at(t) below).
+// ============================================================================
+
+struct Pbpk28 {
+    cv: [f64; 14],
+    ct: [f64; 14],
+    rfree: [f64; 14],
+    dr: [f64; 14],
+    a: [f64; 14],
+    n: [f64; 14]
+}
+
+fn pbpk28_zero() -> Pbpk28 {
+    Pbpk28 {
+        cv: [0.0; 14],
+        ct: [0.0; 14],
+        rfree: [0.0; 14],
+        dr: [0.0; 14],
+        a: [0.0; 14],
+        n: [0.0; 14]
+    }
+}
+
+fn vref_at(i: i64) -> f64 {
+    if i ==  0 { return 5.0 }
+    if i ==  1 { return 1.8 }
+    if i ==  2 { return 0.31 }
+    if i ==  3 { return 1.45 }
+    if i ==  4 { return 0.33 }
+    if i ==  5 { return 1.1 }
+    if i ==  6 { return 28.0 }
+    if i ==  7 { return 20.0 }
+    if i ==  8 { return 1.2 }
+    if i ==  9 { return 3.6 }
+    if i == 10 { return 6.6 }
+    if i == 11 { return 0.18 }
+    if i == 12 { return 0.09 }
+    return 3.7
+}
+
+// Brown 1997 — same vasc_frac as rapamycin (anatomy not drug).
+fn vasc_frac_at(i: i64) -> f64 {
+    if i ==  0 { return 1.000 }
+    if i ==  1 { return 0.210 }
+    if i ==  2 { return 0.160 }
+    if i ==  3 { return 0.037 }
+    if i ==  4 { return 0.262 }
+    if i ==  5 { return 0.262 }
+    if i ==  6 { return 0.040 }
+    if i ==  7 { return 0.050 }
+    if i ==  8 { return 0.024 }
+    if i ==  9 { return 0.019 }
+    if i == 10 { return 0.041 }
+    if i == 11 { return 0.282 }
+    if i == 12 { return 0.180 }
+    return 0.050
+}
+
+// Kp_semaglutide — peptide; values < 1.0 (vascular-confined drug).
+fn kp_at(i: i64) -> f64 {
+    if i ==  0 { return 1.00 }
+    if i ==  1 { return 0.50 }
+    if i ==  2 { return 0.60 }
+    if i ==  3 { return 0.05 }
+    if i ==  4 { return 0.40 }
+    if i ==  5 { return 0.30 }
+    if i ==  6 { return 0.20 }
+    if i ==  7 { return 0.10 }
+    if i ==  8 { return 0.80 }
+    if i ==  9 { return 0.30 }
+    if i == 10 { return 0.20 }
+    if i == 11 { return 0.40 }
+    if i == 12 { return 0.70 }
+    return 0.30
+}
+
+fn q_at(i: i64) -> f64 {
+    if i ==  0 { return 350.0 }
+    if i ==  1 { return 90.0 }
+    if i ==  2 { return 74.0 }
+    if i ==  3 { return 44.0 }
+    if i ==  4 { return 16.0 }
+    if i ==  5 { return 350.0 }
+    if i ==  6 { return 42.0 }
+    if i ==  7 { return 10.0 }
+    if i ==  8 { return 55.0 }
+    if i ==  9 { return 21.0 }
+    if i == 10 { return 17.0 }
+    if i == 11 { return 10.0 }
+    if i == 12 { return 8.0 }
+    return 13.0
+}
+
+// PS_semaglutide — peptide; much lower than rapamycin (steric exclusion at
+// endothelium; BBB nearly impermeable).
+fn ps_at(i: i64) -> f64 {
+    if i ==  0 { return 0.0 }
+    if i ==  1 { return 50.0 }
+    if i ==  2 { return 30.0 }
+    if i ==  3 { return 1.0 }
+    if i ==  4 { return 5.0 }
+    if i ==  5 { return 100.0 }
+    if i ==  6 { return 10.0 }
+    if i ==  7 { return 2.0 }
+    if i ==  8 { return 30.0 }
+    if i ==  9 { return 5.0 }
+    if i == 10 { return 2.0 }
+    if i == 11 { return 10.0 }
+    if i == 12 { return 8.0 }
+    return 5.0
+}
+
+fn cl_proteolytic() -> f64 { return 0.077 }       // L/h, Overgaard 2019
+fn sema_ka() -> f64 { return 0.011552453009332421 }   // ln(2)/60 h ≈ 0.01155 /h
+fn sema_f() -> f64  { return 0.89 }
+fn sema_dose_mg() -> f64 { return 1.0 }            // typical weekly dose
+
+// ─── TMDD layer — sourced from stdlib/darwin_pbpk/tmdd/glp1r.sio ───────────
+// `use darwin_pbpk::tmdd::glp1r::*` (top of file) pulls in:
+//   glp1r_mw_semaglutide_da, glp1r_{kdeg,kon,kd,kint,koff,ksyn_at,rtotal0_at,is_tmdd_organ}
+// Brain=3, gut=8, pancreas=12. Knudsen 2019 / Lau 2015 (K_d = 0.4 nM).
+
+// Newton-linearized 3×3 implicit step on (C_t_nM, R_free, DR) — identical
+// algorithm to the rapamycin TMDD step; only parameters differ.
+fn tmdd_step_organ(state: Pbpk28, i: i64, dt: f64) -> Pbpk28 with Mut, Div {
+    if !glp1r_is_tmdd_organ(i) { return state }
+    var r = state
+    let h = 0.5 * dt
+    let mass_to_nm = 1.0e6 / glp1r_mw_semaglutide_da()
+    let nm_to_mass = glp1r_mw_semaglutide_da() * 1.0e-6
+    let ct_old_mass = r.ct[i]
+    let ct_old_nm = if ct_old_mass < 0.0 { 0.0 } else { ct_old_mass * mass_to_nm }
+    let rf_old = r.rfree[i]
+    let dr_old = r.dr[i]
+
+    let k_on = glp1r_kon()
+    let k_off = glp1r_koff()
+    let k_int = glp1r_kint()
+    let k_syn = glp1r_ksyn_at(i)
+    let k_deg = glp1r_kdeg()
+
+    let kon_rf  = k_on * rf_old
+    let kon_ct  = k_on * ct_old_nm
+    let bil_old = k_on * ct_old_nm * rf_old
+
+    let m00 = 0.0 - kon_rf
+    let m01 = 0.0 - kon_ct
+    let m02 = k_off
+    let m10 = 0.0 - kon_rf
+    let m11 = (0.0 - k_deg) - kon_ct
+    let m12 = k_off
+    let m20 = kon_rf
+    let m21 = kon_ct
+    let m22 = 0.0 - (k_off + k_int)
+
+    let f0 = bil_old
+    let f1 = k_syn + bil_old
+    let f2 = 0.0 - bil_old
+
+    let rhs0 = (1.0 + h*m00) * ct_old_nm + (h*m01) * rf_old + (h*m02) * dr_old + dt * f0
+    let rhs1 = (h*m10) * ct_old_nm + (1.0 + h*m11) * rf_old + (h*m12) * dr_old + dt * f1
+    let rhs2 = (h*m20) * ct_old_nm + (h*m21) * rf_old + (1.0 + h*m22) * dr_old + dt * f2
+
+    let a00 = 1.0 - h*m00
+    let a01 = 0.0 - h*m01
+    let a02 = 0.0 - h*m02
+    let a10 = 0.0 - h*m10
+    let a11 = 1.0 - h*m11
+    let a12 = 0.0 - h*m12
+    let a20 = 0.0 - h*m20
+    let a21 = 0.0 - h*m21
+    let a22 = 1.0 - h*m22
+
+    let c00 = a11*a22 - a12*a21
+    let c01 = a12*a20 - a10*a22
+    let c02 = a10*a21 - a11*a20
+    let det = a00*c00 + a01*c01 + a02*c02
+
+    let c10 = a02*a21 - a01*a22
+    let c11 = a00*a22 - a02*a20
+    let c12 = a01*a20 - a00*a21
+    let c20 = a01*a12 - a02*a11
+    let c21 = a02*a10 - a00*a12
+    let c22 = a00*a11 - a01*a10
+
+    let ct_new_nm = (c00*rhs0 + c10*rhs1 + c20*rhs2) / det
+    let rf_new    = (c01*rhs0 + c11*rhs1 + c21*rhs2) / det
+    let dr_new    = (c02*rhs0 + c12*rhs1 + c22*rhs2) / det
+
+    let ct_new_clamped = if ct_new_nm < 0.0 { 0.0 } else { ct_new_nm }
+    r.ct[i] = ct_new_clamped * nm_to_mass
+    r.rfree[i] = if rf_new < 0.0 { 0.0 } else { rf_new }
+    r.dr[i] = if dr_new < 0.0 { 0.0 } else { dr_new }
+    return r
+}
+
+// Taylor exp_neg for release rate (argument always non-positive: -k_a·t).
+fn exp_neg(x: f64) -> f64 with Mut, Div {
+    if x == 0.0 { return 1.0 }
+    var s = x
+    var k = 0
+    while s < (0.0 - 0.5) {
+        s = s * 0.5
+        k = k + 1
+    }
+    let s2 = s * s
+    let s3 = s2 * s
+    let s4 = s2 * s2
+    let s5 = s4 * s
+    let s6 = s3 * s3
+    let s7 = s6 * s
+    let s8 = s4 * s4
+    var r = 1.0 + s + s2 / 2.0 + s3 / 6.0 + s4 / 24.0 + s5 / 120.0
+              + s6 / 720.0 + s7 / 5040.0 + s8 / 40320.0
+    var j = 0
+    while j < k {
+        r = r * r
+        j = j + 1
+    }
+    return r
+}
+
+// SC depot release rate at time t (mg/h):
+//   rate(t) = F · Dose · k_a · exp(-k_a · t)
+fn release_rate_at(t: f64) -> f64 with Mut, Div {
+    let ka = sema_ka()
+    let t_clamped = if t < 0.0 { 0.0 } else { t }
+    return sema_f() * sema_dose_mg() * ka * exp_neg(0.0 - ka * t_clamped)
+}
+
+// Fully-coupled CN step at midpoint release rate `rel_mid` (mg/h).
+fn full_cn_step(state: Pbpk28, dt: f64, rel_mid: f64) -> Pbpk28 with Mut, Div {
+    let h = 0.5 * dt
+    let vb = vref_at(0)
+
+    var sum_q = 0.0
+    var i = 1
+    while i < 14 {
+        sum_q = sum_q + q_at(i)
+        i = i + 1
+    }
+    let big_s = h * (sum_q + cl_proteolytic()) / vb
+
+    let cb_old = state.cv[0]
+    var rhs0 = (1.0 - big_s) * cb_old + dt * rel_mid / vb
+
+    var a_v: [f64; 14] = [0.0; 14]
+    var b_v: [f64; 14] = [0.0; 14]
+    var a_t: [f64; 14] = [0.0; 14]
+    var b_t: [f64; 14] = [0.0; 14]
+    var sum_beta_a = 0.0
+    var sum_beta_b = 0.0
+
+    i = 1
+    while i < 14 {
+        let vi = vref_at(i)
+        let vf = vasc_frac_at(i)
+        let vv_raw = vi * vf
+        let vt_raw = vi * (1.0 - vf)
+        let vv = if vv_raw < 1.0e-30 { 1.0e-30 } else { vv_raw }
+        let vt = if vt_raw < 1.0e-30 { 1.0e-30 } else { vt_raw }
+        let kp = kp_at(i)
+        let ps = ps_at(i)
+        let qi = q_at(i)
+
+        let beta = h * qi / vb
+        let gamma = h * qi / vv
+        let p = 1.0 + h * (qi + ps) / vv
+        let q = h * ps / (vv * kp)
+        let r = h * ps / vt
+        let sb = 1.0 + h * ps / (vt * kp)
+        let det = p * sb - q * r
+
+        rhs0 = rhs0 + beta * state.cv[i]
+
+        let rhs_v = gamma * cb_old + (1.0 - h * (qi + ps) / vv) * state.cv[i] + q * state.ct[i]
+        let rhs_t = r * state.cv[i] + (1.0 - h * ps / (vt * kp)) * state.ct[i]
+
+        let av = (sb * rhs_v + q * rhs_t) / det
+        let bv = (sb * gamma) / det
+        let at = (r * rhs_v + p * rhs_t) / det
+        let bt = (r * gamma) / det
+
+        a_v[i] = av
+        b_v[i] = bv
+        a_t[i] = at
+        b_t[i] = bt
+
+        sum_beta_a = sum_beta_a + beta * av
+        sum_beta_b = sum_beta_b + beta * bv
+        i = i + 1
+    }
+
+    let cb_new = (rhs0 + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
+    var out = state
+    out.cv[0] = if cb_new < 0.0 { 0.0 } else { cb_new }
+    i = 1
+    while i < 14 {
+        let cv = a_v[i] + b_v[i] * cb_new
+        let ct = a_t[i] + b_t[i] * cb_new
+        out.cv[i] = if cv < 0.0 { 0.0 } else { cv }
+        out.ct[i] = if ct < 0.0 { 0.0 } else { ct }
+        i = i + 1
+    }
+    return out
+}
+
+// ─── Semaglutide PD: glucose-insulin Bergman model (G-δ-3) ───────────────
+// Couples pancreas GLP-1R occupancy (i=12) to a 2-state linear system:
+//   state.a[12]  =  ΔG  (mg/dL)  plasma glucose deviation from Gb=100
+//   state.n[12]  =  ΔI  (mU/L)   plasma insulin deviation from Ib=10
+// ─── PD layer — sourced from stdlib/darwin_pbpk/pd/bergman_glucose_insulin.sio
+// `use darwin_pbpk::pd::bergman_glucose_insulin::*` (top of file) pulls in:
+//   bergman_{gb,ib,sg,si,ki,kbase,alpha}
+// Bergman minimal model + GLP-1R-modulated insulin secretion at pancreas (i=12).
+
+fn pd_step_glucose_insulin(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
+    var r = state
+    let h = 0.5 * dt
+    let denom = r.rfree[12] + r.dr[12]
+    let occ = if denom > 1.0e-9 { r.dr[12] / denom } else { 0.0 }
+
+    // dΔI/dt = k_base · α · occ - kI · ΔI
+    let di_new = ((1.0 - h * bergman_ki()) * r.n[12]
+                  + dt * bergman_kbase() * bergman_alpha() * occ) / (1.0 + h * bergman_ki())
+    r.n[12] = di_new
+
+    // dΔG/dt = -(SG + SI·Ib)·ΔG - SI·Gb·ΔI_new   (linearized at G ≈ Gb)
+    let lambda_g = bergman_sg() + bergman_si() * bergman_ib()
+    let dg_new = ((1.0 - h * lambda_g) * r.a[12]
+                  - dt * bergman_si() * bergman_gb() * r.n[12]) / (1.0 + h * lambda_g)
+    r.a[12] = dg_new
+    return r
+}
+
+fn strang_step(state: Pbpk28, t_start: f64, dt: f64) -> Pbpk28 with Mut, Div {
+    let rel_mid = release_rate_at(t_start + 0.5 * dt)
+    var s = full_cn_step(state, dt, rel_mid)
+    s = tmdd_step_organ(s, 3, dt)
+    s = tmdd_step_organ(s, 8, dt)
+    s = tmdd_step_organ(s, 12, dt)
+    s = pd_step_glucose_insulin(s, dt)
+    return s
+}
+
+fn integrate_to(state: Pbpk28, t_start: f64, t_end: f64, dt: f64) -> Pbpk28 with Mut, Div {
+    var C = state
+    var t = t_start
+    while t + dt * 0.5 < t_end {
+        C = strang_step(C, t, dt)
+        t = t + dt
+    }
+    return C
+}
+
+fn emit_at(state: &Pbpk28, t: f64) with IO, Mut {
+    var i = 0
+    while i < 14 {
+        print("PARITY|t=")
+        println(t)
+        println("")
+        print("PARITY|i=")
+        println(i)
+        print("PARITY|cv=")
+        println(state.cv[i])
+        println("")
+        print("PARITY|ct=")
+        println(state.ct[i])
+        println("")
+        print("PARITY|cavg=")
+        let avg = if i == 0 { state.cv[0] } else { vasc_frac_at(i) * state.cv[i] + (1.0 - vasc_frac_at(i)) * state.ct[i] }
+        println(avg)
+        println("")
+        if glp1r_is_tmdd_organ(i) {
+            print("PARITY|rfree=")
+            println(state.rfree[i])
+            println("")
+            print("PARITY|dr=")
+            println(state.dr[i])
+            println("")
+        }
+        if i == 12 {
+            // PD readout (glucose-insulin) at pancreas index.
+            print("PARITY|pd_a=")    // ΔG (mg/dL)
+            println(state.a[i])
+            println("")
+            print("PARITY|pd_n=")    // ΔI (mU/L)
+            println(state.n[i])
+            println("")
+        }
+        i = i + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("DISSERTATION_PBPK28_SEMAGLUTIDE_PARITY_REF v1")
+    println("compartments=14")
+    println("states=28")
+    println("dt=0.001")
+    println("dose_mg=1.0")
+    println("cl_proteolytic_L_per_h=0.077")
+    println("ka_h_inv=0.01155")
+    println("F_bioavailability=0.89")
+    println("integrator=fully_coupled_CN_27state")
+    println("drug=semaglutide")
+    println("release=sc_depot")
+    println("samples=12")
+
+    var C = pbpk28_zero()
+    // No IV bolus — drug enters via SC depot release.
+    // TMDD organs: initialize R_free at baseline R_total_0, DR at 0.
+    C.rfree[3]  = glp1r_rtotal0_at(3)
+    C.rfree[8]  = glp1r_rtotal0_at(8)
+    C.rfree[12] = glp1r_rtotal0_at(12)
+
+    let dt = 0.001
+    var t = 0.0
+
+    C = integrate_to(C, t,  0.1, dt); t =  0.1; emit_at(&C, t)
+    C = integrate_to(C, t,  0.5, dt); t =  0.5; emit_at(&C, t)
+    C = integrate_to(C, t,  1.0, dt); t =  1.0; emit_at(&C, t)
+    C = integrate_to(C, t,  2.0, dt); t =  2.0; emit_at(&C, t)
+    C = integrate_to(C, t,  4.0, dt); t =  4.0; emit_at(&C, t)
+    C = integrate_to(C, t,  6.0, dt); t =  6.0; emit_at(&C, t)
+    C = integrate_to(C, t,  8.0, dt); t =  8.0; emit_at(&C, t)
+    C = integrate_to(C, t, 12.0, dt); t = 12.0; emit_at(&C, t)
+    C = integrate_to(C, t, 16.0, dt); t = 16.0; emit_at(&C, t)
+    C = integrate_to(C, t, 20.0, dt); t = 20.0; emit_at(&C, t)
+    C = integrate_to(C, t, 24.0, dt); t = 24.0; emit_at(&C, t)
+    C = integrate_to(C, t, 30.0, dt); t = 30.0; emit_at(&C, t)
+
+    println("DISSERTATION_PBPK28_SEMAGLUTIDE_PARITY_DONE")
+    return 0
+}
