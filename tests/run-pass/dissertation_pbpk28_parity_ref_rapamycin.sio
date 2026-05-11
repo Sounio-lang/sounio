@@ -30,14 +30,17 @@
 // Node runner's identical output.
 // ============================================================================
 
-// State: 14 organs × {Cv [mg/L], Ct [mg/L], Rfree [nmol/L], DR [nmol/L]}.
-// Rfree/DR are non-zero only for TMDD organs (1=liver, 4=heart, 8=gut) per
-// rapamycin's FKBP12/mTORC1 targets — for other organs they stay at 0.
+// State: 14 organs × {Cv [mg/L], Ct [mg/L], Rfree [nmol/L], DR [nmol/L],
+//                     A [0..1 mTORC1 activity], N [0..1 neointimal index]}.
+// Rfree/DR populated at TMDD organs (1=liver, 4=heart, 8=gut).
+// A/N populated at PD organs (4=heart, coronary_smc proxy).
 struct Pbpk28 {
     cv: [f64; 14],
     ct: [f64; 14],
     rfree: [f64; 14],
-    dr: [f64; 14]
+    dr: [f64; 14],
+    a: [f64; 14],
+    n: [f64; 14]
 }
 
 fn pbpk28_zero() -> Pbpk28 {
@@ -45,7 +48,9 @@ fn pbpk28_zero() -> Pbpk28 {
         cv: [0.0; 14],
         ct: [0.0; 14],
         rfree: [0.0; 14],
-        dr: [0.0; 14]
+        dr: [0.0; 14],
+        a: [0.0; 14],
+        n: [0.0; 14]
     }
 }
 
@@ -75,6 +80,17 @@ fn tmdd_kint_at(i: i64) -> f64 { return 0.010 }                // 1/h, DR intern
 
 fn tmdd_koff_at(i: i64) -> f64 { return tmdd_kon_at(i) * tmdd_kd_at(i) }
 fn tmdd_ksyn_at(i: i64) -> f64 { return tmdd_kdeg_at(i) * tmdd_rtotal0_at(i) }
+
+// ─── PD layer (G-γ): heart only (coronary_smc proxy, i=4) ─────────────────
+fn pd_is_organ(i: i64) -> bool {
+    if i == 4 { return true }
+    return false
+}
+
+fn pd_ka_at(i: i64)      -> f64 { return 1.0 }        // mTORC1 signaling rate /h
+fn pd_kprolif_at(i: i64) -> f64 { return 5.0e-4 }     // neointimal growth /h
+fn pd_kapo_at(i: i64)    -> f64 { return 3.0e-3 }     // apoptosis under inhibition /h
+fn pd_rtotal0_at(i: i64) -> f64 { return tmdd_rtotal0_at(i) }   // reference R for A target
 
 // V_i, L, ICRP standard man 70 kg (matches pbpk14_core.mjs V_REF).
 fn vref_at(i: i64) -> f64 {
@@ -421,13 +437,34 @@ fn tmdd_step_organ(state: Pbpk28, i: i64, dt: f64) -> Pbpk28 with Mut, Div {
     return r
 }
 
-// One fully-coupled implicit PBPK step followed by per-TMDD-organ binding step
-// (Lie split: PBPK first, then TMDD at fixed Ct_new).
+// ─── PD step (G-γ): 1-state implicit CN on A, then on N at fixed A_new ────
+fn pd_step_organ(state: Pbpk28, i: i64, dt: f64) -> Pbpk28 with Mut, Div {
+    if !pd_is_organ(i) { return state }
+    var r = state
+    let h = 0.5 * dt
+    let target_a = r.rfree[i] / pd_rtotal0_at(i)
+    let k_a = pd_ka_at(i)
+    // CN on dA/dt = k_a · (target - A):  (1 + h·k_a)·A_new = (1 - h·k_a)·A_old + dt·k_a·target
+    let a_new = ((1.0 - h * k_a) * r.a[i] + dt * k_a * target_a) / (1.0 + h * k_a)
+    let a_clamped = if a_new < 0.0 { 0.0 } else { if a_new > 1.0 { 1.0 } else { a_new } }
+    r.a[i] = a_clamped
+
+    // CN on dN/dt = k_prolif · A - k_apo · (1-A) · N at fixed A_new:
+    let one_minus_a = 1.0 - a_clamped
+    let gamma_n = pd_kapo_at(i) * one_minus_a
+    let n_new = ((1.0 - h * gamma_n) * r.n[i] + dt * pd_kprolif_at(i) * a_clamped) / (1.0 + h * gamma_n)
+    r.n[i] = if n_new < 0.0 { 0.0 } else { n_new }
+    return r
+}
+
+// One fully-coupled implicit PBPK step + per-TMDD-organ binding step
+// + per-PD-organ (A, N) step. Lie split: PBPK → TMDD → PD.
 fn strang_step(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
     var s = full_cn_step(state, dt)
     s = tmdd_step_organ(s, 1, dt)
     s = tmdd_step_organ(s, 4, dt)
     s = tmdd_step_organ(s, 8, dt)
+    s = pd_step_organ(s, 4, dt)
     return s
 }
 
@@ -478,6 +515,14 @@ fn emit_at(state: &Pbpk28, t: f64) with IO, Mut {
             println(state.dr[i])
             println("")
         }
+        if pd_is_organ(i) {
+            print("PARITY|pd_a=")
+            println(state.a[i])
+            println("")
+            print("PARITY|pd_n=")
+            println(state.n[i])
+            println("")
+        }
         i = i + 1
     }
 }
@@ -500,6 +545,9 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     C.rfree[1] = tmdd_rtotal0_at(1)
     C.rfree[4] = tmdd_rtotal0_at(4)
     C.rfree[8] = tmdd_rtotal0_at(8)
+    // PD organs (heart only for G-γ-1): A = 1.0 (full mTORC1 activity at
+    // baseline, no drug), N = 0 (no neointima at stent implant).
+    C.a[4] = 1.0
 
     let dt = 0.001
     var t = 0.0

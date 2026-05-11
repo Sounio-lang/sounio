@@ -55,7 +55,7 @@ const params = (CASE === 'degenerate')
   ? degenerateParams(baseParams, { eps: 1e-3, psScale: 1e4 })
   : baseParams;
 
-const { Cv, Ct, Rfree, DR } = initialState(params);
+const { Cv, Ct, Rfree, DR, A, N: Nidx } = initialState(params);
 const scratch = makeScratch();
 let t = 0;
 
@@ -81,10 +81,11 @@ function fmt(x) {
 }
 
 const TMDD_SET = new Set(params.tmddOrgans || []);
+const PD_SET = new Set(params.pdOrgans || []);
 
 for (const target of SAMPLES) {
   while (t + DT * 0.5 < target) {
-    stepStrang(Cv, Ct, t, DT, params, scratch, Rfree, DR);
+    stepStrang(Cv, Ct, t, DT, params, scratch, Rfree, DR, A, Nidx);
     t += DT;
   }
   const avg = organAverage(Cv, Ct, params);
@@ -97,6 +98,10 @@ for (const target of SAMPLES) {
     if (TMDD_SET.has(i)) {
       out.push(`PARITY|rfree=${fmt(Rfree[i])}`);
       out.push(`PARITY|dr=${fmt(DR[i])}`);
+    }
+    if (PD_SET.has(i)) {
+      out.push(`PARITY|pd_a=${fmt(A[i])}`);
+      out.push(`PARITY|pd_n=${fmt(Nidx[i])}`);
     }
   }
 }

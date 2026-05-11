@@ -109,6 +109,39 @@ export const TMDD_PARAMS_RAPAMYCIN = Object.freeze({
   8: tmddParams(                   30.0,            0.05,         0.10,        0.10,            0.010),  // gut
 });
 
+// ─── PD layer: mTORC1 activity + neointimal proliferation (G-γ) ───────────
+// PD organs: heart (i=4) as coronary smooth-muscle (coronary_smc) proxy.
+// G-γ-2 will refine by carving a 5%-of-heart-mass sub-compartment from
+// heart for the true coronary_smc; G-γ-1 uses the whole heart and is
+// directionally correct for the dissertation message.
+//
+//   A(t)  mTORC1 active fraction in target tissue (dimensionless, 0..1).
+//         At baseline (no drug): A = 1.0 (full activity).
+//         Under drug: A → R_free / R_total_0 (fraction of FKBP12 unbound).
+//
+//   N(t)  Neointimal proliferation index (dimensionless, normalized 0..1).
+//         dN/dt = k_prolif · A - k_apo · (1 - A) · N
+//         At A=1 (no drug): dN/dt = k_prolif (linear neointimal growth →
+//                                  restenosis if untreated).
+//         At A=0 (full inhibition): dN/dt = -k_apo · N (regression).
+//
+// PD parameters from Mehilli 2003 (Cypher restenosis kinetics) and Nakazawa
+// 2010 (sirolimus VSMC turnover). Times converted from days⁻¹ to hours⁻¹.
+export const PD_ORGANS_RAPAMYCIN = Object.freeze([4]);   // heart / coronary_smc
+
+function pdParams(kA_per_h, kProlif_per_h, kApo_per_h, rTotal0_nM) {
+  return Object.freeze({
+    kA:       kA_per_h,        // mTORC1 signaling-cascade rate (~1.0 /h, ~40 min half-life)
+    kProlif:  kProlif_per_h,   // neointimal proliferation (~5e-4 /h, ~1.2%/day)
+    kApo:     kApo_per_h,      // apoptosis under mTOR inhibition (~3e-3 /h, ~7%/day)
+    rTotal0:  rTotal0_nM,      // reference R_total for normalizing A
+  });
+}
+
+export const PD_PARAMS_RAPAMYCIN = Object.freeze({
+  4: pdParams(/*k_a*/ 1.0, /*k_prolif*/ 5.0e-4, /*k_apo*/ 3.0e-3, /*R_total_0*/ 25.0),
+});
+
 export const DEFAULT_PARAMS_RAPAMYCIN = Object.freeze({
   clHep: CL_HEP_DEFAULT,
   higuchiScale: 1.0,
@@ -121,6 +154,8 @@ export const DEFAULT_PARAMS_RAPAMYCIN = Object.freeze({
   mw: MW_RAPAMYCIN,
   tmddOrgans: TMDD_ORGANS_RAPAMYCIN,
   tmddParams: TMDD_PARAMS_RAPAMYCIN,
+  pdOrgans:   PD_ORGANS_RAPAMYCIN,
+  pdParams:   PD_PARAMS_RAPAMYCIN,
 });
 
 /**
@@ -204,7 +239,7 @@ function psRelaxOrgan(Cv, Ct, i, Vv, Vt, Kp, PS, dt) {
  *     no splitting introduces non-commutativity error.
  *   - O(N) per step (13 organ-block inversions + 1 scalar solve + 13 back-subs).
  */
-export function stepStrang(Cv, Ct, tHours, dt, params, scratch, Rfree, DR) {
+export function stepStrang(Cv, Ct, tHours, dt, params, scratch, Rfree, DR, A, Ni) {
   scratch._tCenter = tHours + 0.5 * dt;
   const h = 0.5 * dt;
   const Vb = V_REF[0] * params.vdScale;
@@ -353,6 +388,37 @@ export function stepStrang(Cv, Ct, tHours, dt, params, scratch, Rfree, DR) {
     }
   }
 
+  // ─── PD layer: mTORC1 activity A + neointimal proliferation N (G-γ) ───────
+  // Per PD organ at frozen (R_free, DR) from the TMDD step:
+  //   target_A = R_free / R_total_0      (free-receptor fraction)
+  //   dA/dt    = k_a · (target_A - A)    1st-order tracker (signaling lag)
+  //   dN/dt    = k_prolif · A - k_apo · (1-A) · N
+  // Both 1-state implicit CN per organ. A solves first at frozen target; N
+  // then solves at frozen A_new (Lie split — accuracy ample for the slow PD
+  // timescales of 1.2%/day proliferation and 7%/day apoptosis).
+  if (A && Ni && params.pdOrgans && params.pdParams && Rfree) {
+    const h = 0.5 * dt;
+    for (const j of params.pdOrgans) {
+      const pp = params.pdParams[j];
+      if (!pp) continue;
+      const targetA = Rfree[j] / pp.rTotal0;
+
+      // CN on dA/dt = k_a · (target - A)
+      //   (1 + h·k_a) · A_new = (1 - h·k_a) · A_old + dt · k_a · target
+      const aNew = ((1 - h * pp.kA) * A[j] + dt * pp.kA * targetA) / (1 + h * pp.kA);
+      A[j] = aNew < 0 ? 0 : (aNew > 1 ? 1 : aNew);
+
+      // CN on dN/dt = k_prolif · A_new - k_apo · (1 - A_new) · N
+      //   Linear in N at fixed A_new.
+      //   γ = k_apo · (1 - A_new)
+      //   (1 + h·γ) · N_new = (1 - h·γ) · N_old + dt · k_prolif · A_new
+      const oneMinusA = 1 - A[j];
+      const gammaN = pp.kApo * oneMinusA;
+      const nNew = ((1 - h * gammaN) * Ni[j] + dt * pp.kProlif * A[j]) / (1 + h * gammaN);
+      Ni[j] = nNew < 0 ? 0 : nNew;
+    }
+  }
+
   return release * dt;
 }
 
@@ -377,6 +443,9 @@ export function initialState(params) {
   const Ct = new Float64Array(N);
   const Rfree = new Float64Array(N);
   const DR = new Float64Array(N);
+  // PD states: A starts at 1.0 (full mTORC1 activity, no drug), N at 0.
+  const A = new Float64Array(N);
+  const Nidx = new Float64Array(N);
   Cv[0] = params.bolusMg / (V_REF[0] * params.vdScale);
   if (params.tmddOrgans && params.tmddParams) {
     for (const j of params.tmddOrgans) {
@@ -384,7 +453,12 @@ export function initialState(params) {
       if (tp) Rfree[j] = tp.rTotal0;
     }
   }
-  return { Cv, Ct, Rfree, DR };
+  if (params.pdOrgans && params.pdParams) {
+    for (const j of params.pdOrgans) {
+      if (params.pdParams[j]) A[j] = 1.0;   // baseline mTORC1 activity
+    }
+  }
+  return { Cv, Ct, Rfree, DR, A, N: Nidx };
 }
 
 /**

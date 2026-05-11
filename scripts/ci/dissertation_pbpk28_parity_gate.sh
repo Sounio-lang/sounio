@@ -31,11 +31,14 @@
 #                  analytically) within 5% tolerance at all 12 sample times.
 #                  This is the numerical-stability anchor that distinguishes
 #                  PBPK28-CN from PBPK14-Stage-C's unstable RK4.
-#   5. HARD GATE — TMDD layer parity (G-β-1): Node ↔ Sounio agreement on
+#   5. HARD GATE — TMDD layer parity (G-β): Node ↔ Sounio agreement on
 #                  receptor-binding trajectories at the 3 TMDD organs
 #                  (liver=1, heart=4, gut=8). R_free and DR within 1.0% RMSE
-#                  per organ over 12 sample times. Verifies the analytical
-#                  2×2 CN sub-step is implemented identically on both sides.
+#                  per organ over 12 sample times.
+#   6. HARD GATE — PD layer parity (G-γ): Node ↔ Sounio on the mTORC1 activity
+#                  A(t) and neointimal index N(t) at PD organs (heart=4 only
+#                  in G-γ-1; coronary_smc proxy). Both within 1.0% RMSE.
+#                  Couples the PK chain end-to-end: PBPK28 → TMDD → PD readout.
 
 set -euo pipefail
 
@@ -411,3 +414,74 @@ awk -F'\t' '
     }
   }
 ' "$JOINED_TMDD"
+
+# ─── Case 6: PD parity Node ↔ Sounio (G-γ) ───────────────────────────────────
+echo
+echo "[pbpk28-parity] Case 6: Node ↔ Sounio PD (A, N) parity at heart (i=4)"
+
+parse_pd_tsv() {
+  local in="$1"
+  local out="$2"
+  awk '
+    /^PARITY\|t=/    { t = substr($0, 10); next }
+    /^PARITY\|i=/    { i = substr($0, 10); pda=""; pdn=""; next }
+    /^PARITY\|pd_a=/ { pda = substr($0, 13); next }
+    /^PARITY\|pd_n=/ {
+      pdn = substr($0, 13);
+      printf "%s\t%s\t%s\t%s\n", t, i, pda, pdn;
+    }
+  ' "$in" > "$out"
+}
+SIO_PD_TSV="$OUT_DIR/sounio_pd.tsv"
+NODE_PD_TSV="$OUT_DIR/node_pd.tsv"
+parse_pd_tsv "$SIO_LOG" "$SIO_PD_TSV"
+parse_pd_tsv "$NODE_LOG" "$NODE_PD_TSV"
+
+SIO_PD_ROWS=$(wc -l < "$SIO_PD_TSV")
+NODE_PD_ROWS=$(wc -l < "$NODE_PD_TSV")
+EXPECTED_PD_ROWS=$((12 * 1))   # 12 samples × 1 PD organ
+if [[ "$SIO_PD_ROWS" -ne "$EXPECTED_PD_ROWS" || "$NODE_PD_ROWS" -ne "$EXPECTED_PD_ROWS" ]]; then
+  echo "[pbpk28-parity:case6] FAIL: PD row count mismatch — Sounio=$SIO_PD_ROWS Node=$NODE_PD_ROWS expected=$EXPECTED_PD_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case6] both runs emitted $SIO_PD_ROWS PD records"
+
+JOINED_PD="$OUT_DIR/joined_pd.tsv"
+awk -F'\t' '
+  NR==FNR { As[$1"|"$2] = $3; Ns[$1"|"$2] = $4; next }
+  { print $1"\t"$2"\t"As[$1"|"$2]"\t"$3"\t"Ns[$1"|"$2]"\t"$4 }
+' "$SIO_PD_TSV" "$NODE_PD_TSV" > "$JOINED_PD"
+
+awk -F'\t' '
+  BEGIN { THR = 1.0; organ[4]="heart"; }
+  {
+    t = $1; i = $2 + 0;
+    asi = $3 + 0; ani = $4 + 0;
+    nsi = $5 + 0; nni = $6 + 0;
+    dA = asi - ani; dN = nsi - nni;
+    SSA[i] += dA * dA; SSN[i] += dN * dN;
+    NN[i] += 1;
+    if (asi > PKA[i]) PKA[i] = asi; if (ani > PKA[i]) PKA[i] = ani;
+    if (nsi > PKN[i]) PKN[i] = nsi; if (nni > PKN[i]) PKN[i] = nni;
+  }
+  END {
+    bad = 0;
+    printf "%-3s %-7s %-12s %-12s %-10s  %-12s %-12s %-10s\n", "i", "organ", "rmse_A", "peak_A", "A_pct", "rmse_N", "peak_N", "N_pct";
+    for (idx = 0; idx < 14; idx++) {
+      if (NN[idx] == 0) continue;
+      i = idx;
+      rA = sqrt(SSA[i] / NN[i]); pA = (PKA[i] != 0) ? 100 * rA / PKA[i] : 0;
+      rN = sqrt(SSN[i] / NN[i]); pN = (PKN[i] != 0) ? 100 * rN / PKN[i] : 0;
+      sA = (pA < THR) ? "OK" : "FAIL"; sN = (pN < THR) ? "OK" : "FAIL";
+      if (sA == "FAIL" || sN == "FAIL") bad += 1;
+      printf "%-3d %-7s %-12.6e %-12.6e %-7.4f %s  %-12.6e %-12.6e %-7.4f %s\n", \
+             i, organ[i], rA, PKA[i], pA, sA, rN, PKN[i], pN, sN;
+    }
+    if (bad > 0) {
+      printf "PBPK28_PD_PARITY_FAIL %d PD organ(s) exceed threshold\n", bad;
+      exit 1;
+    } else {
+      printf "PBPK28_PD_PARITY_PASS 1/1 PD organ(s) within 1.0%% RMSE on (A, N)\n";
+    }
+  }
+' "$JOINED_PD"
