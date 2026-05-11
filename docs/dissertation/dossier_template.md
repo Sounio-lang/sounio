@@ -66,6 +66,29 @@ Read from `stdlib/darwin_pbpk/validation/rapamycin_clinical.sio` outputs.
 - generated_at_utc: `<generated_at_utc>`
 - sounio_version: `<sounio_version>`
 
+## §10. Live interactive viewer
+
+A 3D, browser-native interactive view of this model is hosted at:
+
+> **https://www.souniolang.org/dissertation/**
+
+The viewer renders the same 14 compartments, the Cypher elution timeline,
+the GUM uncertainty cone, the Phase J confidence-gate verdict, and the
+2nd-order Hessian heatmap reported above — all driven by an in-browser
+RK4 integrator that is parity-locked to the Sounio `tsit5_pbpk14`
+reference solver by `scripts/ci/dissertation_frontend_parity_gate.sh`
+(< 1% RMSE per compartment).
+
+Three narrated tours are available from the side panel:
+
+1. **Cypher → blood → liver** (30 s) — drug-release kinetics
+2. **BBB closeup** (20 s) — Kp_brain = 0.10, P-gp efflux
+3. **GUM cone widening under CL_hep variability** (20 s) — direct
+   visual proof of contribution #1 (GUM-through-ODE)
+
+For committee handouts the viewer's `📸 Snapshot PNG` button (or the
+`S` keyboard shortcut) exports a print-quality PNG of the current frame.
+
 ## PDF rendering
 
 The generator emits Markdown only. To produce a PDF dossier suitable for
