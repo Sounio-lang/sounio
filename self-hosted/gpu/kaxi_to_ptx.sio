@@ -213,6 +213,43 @@ fn kaxi_line_has_type_i32(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> bo
     false
 }
 
+// Sub-PTX step 0 (B1 / B2): scan line for "round=rN" attribute where
+// N ∈ {n,z,p,m}. Returns the PTX rounding-mode suffix to splice into
+// the op string (".rn" / ".rz" / ".rp" / ".rm"). Returns "" if absent
+// so the existing emission is byte-stable for any line that does not
+// opt in. Sites that read this must default to behaviour matching
+// the prior hardcoded op string when the attribute is absent.
+//
+// "round=r<X>" = r(114) o(111) u(117) n(110) d(100) =(61) r(114) X
+//   X ∈ { n(110), z(122), p(112), m(109) }
+fn kaxi_line_get_round_mode(asm: KaxiAsmBuf, line_start: i64, line_len: i64) -> string with Mut, Panic, Div, Alloc {
+    let end = line_start + line_len - 7
+    var pos: i64 = line_start
+    while pos <= end {
+        if asm.data[pos as usize] as i8 == 114 {
+            if asm.data[(pos + 1) as usize] as i8 == 111 {
+                if asm.data[(pos + 2) as usize] as i8 == 117 {
+                    if asm.data[(pos + 3) as usize] as i8 == 110 {
+                        if asm.data[(pos + 4) as usize] as i8 == 100 {
+                            if asm.data[(pos + 5) as usize] as i8 == 61 {
+                                if asm.data[(pos + 6) as usize] as i8 == 114 {
+                                    let m = asm.data[(pos + 7) as usize] as i8
+                                    if m == 110 { return ".rn" }
+                                    if m == 122 { return ".rz" }
+                                    if m == 112 { return ".rp" }
+                                    if m == 109 { return ".rm" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pos = pos + 1
+    }
+    ""
+}
+
 // ---------------------------------------------------------------------------
 // Epistemic lowering — GUM variance propagation alongside value computation
 // ---------------------------------------------------------------------------
@@ -681,7 +718,8 @@ fn kaxi_lower_add(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) ->
     if dst < 0 || src_a < 0 || src_b < 0 { return "" }
     if mode == 0 {
         if kaxi_line_has_type_f64(asm, line_start, line_len) {
-            return ptx_binop_f64("add.f64", dst, src_a, src_b)
+            let rmode = kaxi_line_get_round_mode(asm, line_start, line_len)
+            return ptx_binop_f64("add" + rmode + ".f64", dst, src_a, src_b)
         }
         if kaxi_line_has_type_f32(asm, line_start, line_len) {
             return ptx_binop_f32("add.rn.f32", dst, src_a, src_b)
@@ -712,7 +750,8 @@ fn kaxi_lower_sub(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) ->
     if dst < 0 || src_a < 0 || src_b < 0 { return "" }
     if mode == 0 {
         if kaxi_line_has_type_f64(asm, line_start, line_len) {
-            return ptx_binop_f64("sub.f64", dst, src_a, src_b)
+            let rmode = kaxi_line_get_round_mode(asm, line_start, line_len)
+            return ptx_binop_f64("sub" + rmode + ".f64", dst, src_a, src_b)
         }
         if kaxi_line_has_type_f32(asm, line_start, line_len) {
             return ptx_binop_f32("sub.rn.f32", dst, src_a, src_b)
@@ -744,7 +783,8 @@ fn kaxi_lower_mul(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) ->
     if dst < 0 || src_a < 0 || src_b < 0 { return "" }
     if mode == 0 {
         if kaxi_line_has_type_f64(asm, line_start, line_len) {
-            return ptx_binop_f64("mul.f64", dst, src_a, src_b)
+            let rmode = kaxi_line_get_round_mode(asm, line_start, line_len)
+            return ptx_binop_f64("mul" + rmode + ".f64", dst, src_a, src_b)
         }
         if kaxi_line_has_type_f32(asm, line_start, line_len) {
             return ptx_binop_f32("mul.rn.f32", dst, src_a, src_b)
@@ -843,8 +883,9 @@ fn kaxi_lower_fma(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64) ->
     if src_c < 0 { src_c = src_a }
     if mode == 0 {
         if kaxi_line_has_type_f64(asm, line_start, line_len) {
-            return "    mul.f64 " + fd(65) + ", " + fd(src_a) + ", " + fd(src_b) + ";\n"
-                 + "    add.f64 " + fd(dst) + ", " + fd(65) + ", " + fd(src_c) + ";\n"
+            let rmode = kaxi_line_get_round_mode(asm, line_start, line_len)
+            return "    mul" + rmode + ".f64 " + fd(65) + ", " + fd(src_a) + ", " + fd(src_b) + ";\n"
+                 + "    add" + rmode + ".f64 " + fd(dst) + ", " + fd(65) + ", " + fd(src_c) + ";\n"
         }
         if kaxi_line_has_type_f32(asm, line_start, line_len) {
             return "    fma.rn.f32 " + fr(dst) + ", " + fr(src_a) + ", " + fr(src_b) + ", " + fr(src_c) + ";\n"
