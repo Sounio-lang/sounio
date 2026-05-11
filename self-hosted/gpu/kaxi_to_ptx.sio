@@ -1477,6 +1477,142 @@ fn kaxi_lower_simple(asm: KaxiAsmBuf, line_start: i64, line_len: i64, mode: i64)
 
 // ----- unified transpiler -------------------------------------------
 
+// Phase H: streaming PTX emitter — same logic as kaxi_transpile_to_ptx_unified
+// below, but writes each chunk directly to stdout via print() instead of
+// building a heap-string accumulator.  Eliminates the O(N²) cost of
+// incremental string concatenation that bottlenecked Sinkhorn-16 at ≥4
+// iterations (see docs/research/subptx_buffer_refactor_investigation.md).
+//
+// Callers that just want to dump PTX to stdout (e.g. kretikos_kaxi_to_ptx
+// driver) should prefer this entry point — the accumulator version below
+// is preserved only for in-process callers that need the PTX as a string
+// (small kernels: tests, kretikos_kaxi_compile pipeline).
+pub fn kaxi_transpile_to_ptx_streaming(asm: KaxiAsmBuf, mode: i64) with IO, Mut, Panic, Div, Alloc {
+    print(".version 7.0\n")
+    print(".target sm_50\n")
+    print(".address_size 64\n\n")
+    print(".visible .entry kaxi_kernel(\n")
+
+    // Param decls — same dispatch as the unified accumulator version.
+    if mode == 0 || mode == 2 {
+        print("    .param .u64 param_mem\n")
+    } else if mode == 3 {
+        print("    .param .u64 param_a,\n")
+        print("    .param .u64 param_b\n")
+    } else if mode == 5 {
+        print("    .param .u64 param_a,\n")
+        print("    .param .u64 param_b,\n")
+        print("    .param .u64 param_c,\n")
+        print("    .param .u64 param_d\n")
+    } else {
+        print("    .param .u64 param_mem,\n")
+        print("    .param .u64 param_var\n")
+    }
+    print(")\n{\n")
+
+    // Register banks.
+    if mode == 0 {
+        print("    .reg .b64 %rd<260>;\n")
+        print("    .reg .f64 %fd<70>;\n")
+        print("    .reg .f32 %f<260>;\n")
+        print("    .reg .b32 %r<260>;\n")
+        print("    .reg .pred %p<8>;\n\n")
+    } else if mode == 1 {
+        print("    .reg .b64 %rd<260>;\n")
+        print("    .reg .f64 %fd<8>;\n")
+        print("    .reg .b32 %r<8>;\n")
+        print("    .reg .pred %p<8>;\n\n")
+    } else if mode == 2 {
+        print("    .reg .b64 %rd<260>;\n")
+        print("    .reg .b32 %r<8>;\n")
+        print("    .reg .f32 %f<260>;\n")
+        print("    .reg .pred %p<8>;\n\n")
+    } else if mode == 3 {
+        print("    .reg .b64 %rd<260>;\n")
+        print("    .reg .b32 %r<8>;\n")
+        print("    .reg .f32 %f<260>;\n")
+        print("    .reg .pred %p<8>;\n\n")
+    } else if mode == 5 {
+        print("    .reg .b64 %rd<262>;\n")
+        print("    .reg .b32 %r<8>;\n")
+        print("    .reg .f32 %f<260>;\n")
+        print("    .reg .pred %p<8>;\n\n")
+    } else {
+        print("    .reg .b64 %rd<260>;\n")
+        print("    .reg .b32 %r<8>;\n")
+        print("    .reg .f32 %f<260>;\n")
+        print("    .reg .pred %p<8>;\n\n")
+    }
+
+    // ld.param prologue.
+    if mode == 0 || mode == 2 {
+        print("    ld.param.u64 %rd258, [param_mem];\n")
+    } else if mode == 3 {
+        print("    ld.param.u64 %rd258, [param_a];\n")
+        print("    ld.param.u64 %rd259, [param_b];\n")
+    } else if mode == 5 {
+        print("    ld.param.u64 %rd258, [param_a];\n")
+        print("    ld.param.u64 %rd259, [param_b];\n")
+        print("    ld.param.u64 %rd260, [param_c];\n")
+        print("    ld.param.u64 %rd261, [param_d];\n")
+    } else {
+        print("    ld.param.u64 %rd258, [param_mem];\n")
+        print("    ld.param.u64 %rd259, [param_var];\n")
+    }
+
+    // Per-line dispatch loop.  Identical to the unified version except
+    // that each emitted PTX chunk is printed instead of concatenated.
+    var line_start: i64 = 0
+    var i: i64 = 0
+    var instr_idx: i64 = 0
+    while i <= asm.len {
+        let is_end = i == asm.len
+        let is_newline = if i < asm.len { asm.data[i as usize] as i8 == 10 } else { true }
+        if is_end || is_newline {
+            let line_len = i - line_start
+            if line_len > 0 {
+                let first_char = asm.data[line_start as usize] as i8
+                if first_char != 59 && first_char != 0 {
+                    let p_arith = kaxi_lower_arith(asm, line_start, line_len, mode)
+                    let p_mem = if str_len(p_arith) > 0 { "" } else { kaxi_lower_mem(asm, line_start, line_len, mode) }
+                    let p_spec = if str_len(p_arith) > 0 || str_len(p_mem) > 0 { "" } else { kaxi_lower_special(asm, line_start, line_len, mode) }
+                    let p_simple = if str_len(p_arith) > 0 || str_len(p_mem) > 0 || str_len(p_spec) > 0 { "" } else { kaxi_lower_simple(asm, line_start, line_len, mode) }
+                    let p = if str_len(p_arith) > 0 {
+                        p_arith
+                    } else if str_len(p_mem) > 0 {
+                        p_mem
+                    } else if str_len(p_spec) > 0 {
+                        p_spec
+                    } else if str_len(p_simple) > 0 {
+                        p_simple
+                    } else if mode == 0 {
+                        kaxi_transpile_line_to_ptx(asm, line_start, line_len)
+                    } else if mode == 1 {
+                        kaxi_transpile_line_to_ptx_epistemic(asm, line_start, line_len)
+                    } else if mode == 2 {
+                        kaxi_transpile_line_to_ptx_f32(asm, line_start, line_len)
+                    } else if mode == 3 || mode == 5 {
+                        kaxi_transpile_line_to_ptx_f32_2c(asm, line_start, line_len)
+                    } else {
+                        kaxi_transpile_line_to_ptx_f32_epistemic(asm, line_start, line_len)
+                    }
+                    print("L" + ptx_int_to_string(instr_idx) + ":\n")
+                    if str_len(p) > 0 {
+                        print(p)
+                    } else {
+                        print("    // unhandled\n")
+                    }
+                    instr_idx = instr_idx + 1
+                }
+            }
+            line_start = i + 1
+        }
+        i = i + 1
+    }
+
+    print("}\n")
+}
+
 pub fn kaxi_transpile_to_ptx_unified(asm: KaxiAsmBuf, mode: i64) -> string with Mut, Panic, Div, Alloc {
     // Phase G: heap-string accumulator (was: stack-allocated KaxiAsmBuf,
     // 64K hard cap that broke sedenion_mul in epistemic / f32_epistemic).
