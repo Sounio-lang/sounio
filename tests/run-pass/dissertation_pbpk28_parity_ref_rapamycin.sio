@@ -1,0 +1,325 @@
+//@ run-pass
+//@ timeout: 90
+// ============================================================================
+// DISSERTATION PBPK28 PARITY REFERENCE — RAPAMYCIN at literature PS
+//
+// Companion to website/src/lib/pbpk28_core.mjs and the parity gate at
+// scripts/ci/dissertation_pbpk28_parity_gate.sh (Case 1: Node ↔ Sounio at
+// literature parameters).
+//
+// Model: permeability-limited PBPK, 14 organs × {vascular, interstitial}.
+//   V_v,i · dC_v,i/dt = Q_i·(C_blood - C_v,i) - PS_i·(C_v,i - C_t,i/Kp_i)
+//   V_t,i · dC_t,i/dt = PS_i·(C_v,i - C_t,i/Kp_i)
+//   V_b   · dC_b/dt   = sum_i Q_i·(C_v,i - C_b) - cl_hep·C_b
+//
+// Integrator: Strang splitting (Strang 1968). Each dt is:
+//   exp(L_PS · dt/2) → RK4(L_slow, dt) → exp(L_PS · dt/2)
+// where L_PS is the per-organ PS-coupling (closed-form 2-state linear ODE)
+// and L_slow is Q-transport + clearance (explicit RK4). Splitting handles the
+// PS stiffness exactly while leaving the slow Q-transport non-stiff at the
+// literature PS regime + dt = 0.001 h.
+//
+// Compartment indexing matches website/src/components/dissertation/compartments.ts:
+//   0=blood 1=liver 2=kidney 3=brain 4=heart 5=lung 6=muscle 7=adipose
+//   8=gut   9=skin  10=bone   11=spleen 12=pancreas 13=other
+//
+// Bolus 0.05 mg into blood (C_blood(0) = 0.01 mg/L). cl_hep = 12.4 L/h. Stent off.
+// Twelve log-spaced sample times. Emits PARITY|t / PARITY|i / PARITY|cv / PARITY|ct
+// / PARITY|cavg records — the gate joins on (t, i) and compares against the
+// Node runner's identical output.
+// ============================================================================
+
+struct Pbpk28 { cv: [f64; 14], ct: [f64; 14] }
+
+fn pbpk28_zero() -> Pbpk28 { Pbpk28 { cv: [0.0; 14], ct: [0.0; 14] } }
+
+// V_i, L, ICRP standard man 70 kg (matches pbpk14_core.mjs V_REF).
+fn vref_at(i: i64) -> f64 {
+    if i ==  0 { return 5.0 }
+    if i ==  1 { return 1.8 }
+    if i ==  2 { return 0.31 }
+    if i ==  3 { return 1.45 }
+    if i ==  4 { return 0.33 }
+    if i ==  5 { return 1.1 }
+    if i ==  6 { return 28.0 }
+    if i ==  7 { return 20.0 }
+    if i ==  8 { return 1.2 }
+    if i ==  9 { return 3.6 }
+    if i == 10 { return 6.6 }
+    if i == 11 { return 0.18 }
+    if i == 12 { return 0.09 }
+    return 3.7
+}
+
+// Vascular volume fraction V_v,i / V_i. Brown 1997.
+fn vasc_frac_at(i: i64) -> f64 {
+    if i ==  0 { return 1.000 }
+    if i ==  1 { return 0.210 }
+    if i ==  2 { return 0.160 }
+    if i ==  3 { return 0.037 }
+    if i ==  4 { return 0.262 }
+    if i ==  5 { return 0.262 }
+    if i ==  6 { return 0.040 }
+    if i ==  7 { return 0.050 }
+    if i ==  8 { return 0.024 }
+    if i ==  9 { return 0.019 }
+    if i == 10 { return 0.041 }
+    if i == 11 { return 0.282 }
+    if i == 12 { return 0.180 }
+    return 0.050
+}
+
+// Kp (rapamycin partition coefficient, tissue:vascular at equilibrium).
+fn kp_at(i: i64) -> f64 {
+    if i ==  0 { return 1.00 }
+    if i ==  1 { return 5.40 }
+    if i ==  2 { return 4.20 }
+    if i ==  3 { return 0.10 }
+    if i ==  4 { return 2.30 }
+    if i ==  5 { return 3.10 }
+    if i ==  6 { return 0.50 }
+    if i ==  7 { return 0.30 }
+    if i ==  8 { return 2.60 }
+    if i ==  9 { return 0.80 }
+    if i == 10 { return 0.20 }
+    if i == 11 { return 2.10 }
+    if i == 12 { return 1.80 }
+    return 0.40
+}
+
+// Q (organ blood flow, L/h, 70 kg adult).
+fn q_at(i: i64) -> f64 {
+    if i ==  0 { return 350.0 }
+    if i ==  1 { return 90.0 }
+    if i ==  2 { return 74.0 }
+    if i ==  3 { return 44.0 }
+    if i ==  4 { return 16.0 }
+    if i ==  5 { return 350.0 }
+    if i ==  6 { return 42.0 }
+    if i ==  7 { return 10.0 }
+    if i ==  8 { return 55.0 }
+    if i ==  9 { return 21.0 }
+    if i == 10 { return 17.0 }
+    if i == 11 { return 10.0 }
+    if i == 12 { return 8.0 }
+    return 13.0
+}
+
+// PS_i (L/h) for rapamycin. Identical to PS_RAPAMYCIN in pbpk28_core.mjs.
+fn ps_at(i: i64) -> f64 {
+    if i ==  0 { return 0.0 }
+    if i ==  1 { return 1800.0 }
+    if i ==  2 { return 1110.0 }
+    if i ==  3 { return 88.0 }
+    if i ==  4 { return 160.0 }
+    if i ==  5 { return 10500.0 }
+    if i ==  6 { return 336.0 }
+    if i ==  7 { return 40.0 }
+    if i ==  8 { return 660.0 }
+    if i ==  9 { return 126.0 }
+    if i == 10 { return 51.0 }
+    if i == 11 { return 150.0 }
+    if i == 12 { return 96.0 }
+    return 78.0
+}
+
+fn cl_hep() -> f64 { return 12.4 }
+
+// Taylor-series exp for the PS-relaxation analytical step. The argument is
+// always non-positive (-λ·dt/2 with λ > 0, dt > 0); we range-reduce x → x/2^k
+// until |x| ≤ 0.5, evaluate the truncated series to order 8, then square back
+// k times. This gives ~14 digits of accuracy for the negative-x range we use.
+fn exp_neg(x: f64) -> f64 with Mut, Div {
+    if x == 0.0 { return 1.0 }
+    var s = x
+    var k = 0
+    while s < (0.0 - 0.5) {
+        s = s * 0.5
+        k = k + 1
+    }
+    let s2 = s * s
+    let s3 = s2 * s
+    let s4 = s2 * s2
+    let s5 = s4 * s
+    let s6 = s3 * s3
+    let s7 = s6 * s
+    let s8 = s4 * s4
+    var r = 1.0 + s + s2 / 2.0 + s3 / 6.0 + s4 / 24.0 + s5 / 120.0
+              + s6 / 720.0 + s7 / 5040.0 + s8 / 40320.0
+    var j = 0
+    while j < k {
+        r = r * r
+        j = j + 1
+    }
+    return r
+}
+
+// Half-step exact PS-relaxation per organ. Equilibrium: Ct_eq = Kp · Cv_eq;
+// mass conservation: V_v · Cv + V_t · Ct = M ⇒ Cv_eq = M / (V_v + V_t·Kp).
+// Decay: z(τ) = z(0) · exp(-λ·τ) where z = Cv - Ct/Kp,
+// λ = PS · (1/V_v + 1/(V_t·Kp)).
+fn ps_relax(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
+    var r = state
+    var i = 1
+    while i < 14 {
+        let vi = vref_at(i)
+        let vf = vasc_frac_at(i)
+        let vv = vi * vf
+        let vt = vi * (1.0 - vf)
+        let kp = kp_at(i)
+        let ps = ps_at(i)
+        if vv > 0.0 && vt > 0.0 && kp > 0.0 && ps > 0.0 {
+            let mass = vv * r.cv[i] + vt * r.ct[i]
+            let denom = vv + vt * kp
+            let cv_eq = mass / denom
+            let ct_eq = kp * cv_eq
+            let lambda = ps * (1.0 / vv + 1.0 / (vt * kp))
+            let decay = exp_neg(0.0 - lambda * dt)
+            r.cv[i] = cv_eq + (r.cv[i] - cv_eq) * decay
+            r.ct[i] = ct_eq + (r.ct[i] - ct_eq) * decay
+        }
+        i = i + 1
+    }
+    return r
+}
+
+// Slow operator: Q-transport between blood and Cv, plus clearance on blood.
+// Ct does not evolve in this sub-operator (held by Strang split).
+fn rhs_slow(state: &Pbpk28) -> Pbpk28 with Mut, Div {
+    var out = pbpk28_zero()
+    let c_blood = state.cv[0]
+    var blood_flux_in = 0.0
+    var i = 1
+    while i < 14 {
+        let vi = vref_at(i)
+        let vv = vi * vasc_frac_at(i)
+        out.cv[i] = q_at(i) * (c_blood - state.cv[i]) / vv
+        out.ct[i] = 0.0
+        blood_flux_in = blood_flux_in + q_at(i) * (state.cv[i] - c_blood)
+        i = i + 1
+    }
+    out.cv[0] = (blood_flux_in - cl_hep() * c_blood) / vref_at(0)
+    out.ct[0] = 0.0
+    return out
+}
+
+fn pbpk28_axpy(base: &Pbpk28, scale: f64, deriv: &Pbpk28) -> Pbpk28 with Mut {
+    var r = pbpk28_zero()
+    var i = 0
+    while i < 14 {
+        r.cv[i] = base.cv[i] + scale * deriv.cv[i]
+        r.ct[i] = base.ct[i] + scale * deriv.ct[i]
+        i = i + 1
+    }
+    return r
+}
+
+fn rk4_slow_step(state: &Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
+    let k1 = rhs_slow(state)
+    let s1 = pbpk28_axpy(state, 0.5 * dt, &k1)
+    let k2 = rhs_slow(&s1)
+    let s2 = pbpk28_axpy(state, 0.5 * dt, &k2)
+    let k3 = rhs_slow(&s2)
+    let s3 = pbpk28_axpy(state, dt, &k3)
+    let k4 = rhs_slow(&s3)
+    var sum = pbpk28_zero()
+    var i = 0
+    while i < 14 {
+        sum.cv[i] = k1.cv[i] + 2.0 * k2.cv[i] + 2.0 * k3.cv[i] + k4.cv[i]
+        sum.ct[i] = k1.ct[i] + 2.0 * k2.ct[i] + 2.0 * k3.ct[i] + k4.ct[i]
+        i = i + 1
+    }
+    var next = pbpk28_axpy(state, dt / 6.0, &sum)
+    var j = 0
+    while j < 14 {
+        if next.cv[j] < 0.0 { next.cv[j] = 0.0 }
+        if next.ct[j] < 0.0 { next.ct[j] = 0.0 }
+        j = j + 1
+    }
+    return next
+}
+
+// One Strang-split step.
+fn strang_step(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
+    let half = 0.5 * dt
+    let s1 = ps_relax(state, half)
+    let s2 = rk4_slow_step(&s1, dt)
+    let s3 = ps_relax(s2, half)
+    return s3
+}
+
+fn integrate_to(state: Pbpk28, t_start: f64, t_end: f64, dt: f64) -> Pbpk28 with Mut, Div {
+    var C = state
+    var t = t_start
+    while t + dt * 0.5 < t_end {
+        C = strang_step(C, dt)
+        t = t + dt
+    }
+    return C
+}
+
+// Organ-average concentration C_avg = vasc_frac · Cv + (1 - vasc_frac) · Ct.
+// (For blood at i=0, Cv[0] is the central concentration and Ct[0] is unused.)
+fn c_avg_at(state: &Pbpk28, i: i64) -> f64 {
+    if i == 0 { return state.cv[0] }
+    let vf = vasc_frac_at(i)
+    return vf * state.cv[i] + (1.0 - vf) * state.ct[i]
+}
+
+fn emit_at(state: &Pbpk28, t: f64) with IO, Mut {
+    var i = 0
+    while i < 14 {
+        // PARITY|t / PARITY|i / PARITY|cv / PARITY|ct / PARITY|cavg per organ.
+        // Five lines per organ per sample time → 14 × 12 × 5 = 840 records.
+        print("PARITY|t=")
+        println(t)
+        println("")
+        print("PARITY|i=")
+        println(i)
+        print("PARITY|cv=")
+        println(state.cv[i])
+        println("")
+        print("PARITY|ct=")
+        println(state.ct[i])
+        println("")
+        print("PARITY|cavg=")
+        let avg = if i == 0 { state.cv[0] } else { vasc_frac_at(i) * state.cv[i] + (1.0 - vasc_frac_at(i)) * state.ct[i] }
+        println(avg)
+        println("")
+        i = i + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("DISSERTATION_PBPK28_PARITY_REF v1")
+    println("compartments=14")
+    println("states=28")
+    println("dt=0.001")
+    println("bolus_mg=0.05")
+    println("cl_hep_L_per_h=12.4")
+    println("integrator=strang_split_PS_then_RK4_then_PS")
+    println("drug=rapamycin")
+    println("samples=12")
+
+    var C = pbpk28_zero()
+    C.cv[0] = 0.05 / vref_at(0)  // 0.01 mg/L initial blood concentration
+
+    let dt = 0.001
+    var t = 0.0
+
+    C = integrate_to(C, t,  0.1, dt); t =  0.1; emit_at(&C, t)
+    C = integrate_to(C, t,  0.5, dt); t =  0.5; emit_at(&C, t)
+    C = integrate_to(C, t,  1.0, dt); t =  1.0; emit_at(&C, t)
+    C = integrate_to(C, t,  2.0, dt); t =  2.0; emit_at(&C, t)
+    C = integrate_to(C, t,  4.0, dt); t =  4.0; emit_at(&C, t)
+    C = integrate_to(C, t,  6.0, dt); t =  6.0; emit_at(&C, t)
+    C = integrate_to(C, t,  8.0, dt); t =  8.0; emit_at(&C, t)
+    C = integrate_to(C, t, 12.0, dt); t = 12.0; emit_at(&C, t)
+    C = integrate_to(C, t, 16.0, dt); t = 16.0; emit_at(&C, t)
+    C = integrate_to(C, t, 20.0, dt); t = 20.0; emit_at(&C, t)
+    C = integrate_to(C, t, 24.0, dt); t = 24.0; emit_at(&C, t)
+    C = integrate_to(C, t, 30.0, dt); t = 30.0; emit_at(&C, t)
+
+    println("DISSERTATION_PBPK28_PARITY_DONE")
+    return 0
+}
