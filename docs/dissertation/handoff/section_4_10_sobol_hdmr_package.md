@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.dissertation.handoff.section-4-10-sobol-hdmr-package
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.handoff.section-4-10-sobol-hdmr-package
+-->
+
 # §4.10 Writing Package — Sobol/Cut-HDMR Global Sensitivity Analysis
 ## PUC-SP Biomaterials Master's Thesis (PBPK28, rapamycin + semaglutide)
 

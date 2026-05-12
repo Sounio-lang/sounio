@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.dissertation.handoff.psychiatric-pgx-mtor-168-pop-package
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.handoff.psychiatric-pgx-mtor-168-pop-package
+-->
+
 # Dissertation Writing Package — Psychiatric Epistemic Pharmacology
 ## Levels 1–4: PGx Gate · mTOR Collision · 168-Theorem · Population PBPK/PD
 
