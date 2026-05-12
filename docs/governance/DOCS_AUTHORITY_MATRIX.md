@@ -337,6 +337,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.serious-language.paper-bundle | repo_only | docs/serious-language/paper-bundle.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.serious-language.readiness-ledger | repo_only | docs/serious-language/readiness-ledger.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.serious-language.readme | repo_only | docs/serious-language/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.serious-language.real-world-defensibility | repo_only | docs/serious-language/real-world-defensibility.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.serious-language.sunil-brief | repo_only | docs/serious-language/sunil-brief.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.sounio-vs-python | repo_only | docs/sounio_vs_python.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.spec.language-specification | repo_only | docs/spec/LANGUAGE_SPECIFICATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
