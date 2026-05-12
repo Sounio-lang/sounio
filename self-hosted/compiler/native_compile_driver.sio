@@ -3084,6 +3084,35 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
     // Zero-arg form `println()` just emits a newline. Mirrors lean_single's
     // println lowering where the type of the single argument decides between
     // print_cstr, print_int, and print_f64 followed by a linefeed.
+    // print(expr): JIT dispatches on arg type — string→print, int→print_int, f64→print_f64.
+    // Match lean_single behaviour exactly so outputs agree. print(0) → print_int(0) = "0\n".
+    if is_indirect_call == 0 && fn_id == V2_BUILTIN_PRINT {
+        if token_kind(pos + 2) == TK_RPAREN {
+            return ExprParse { ok: 1, reg: alloc_reg(ctx), next: pos + 3}
+        }
+        let print_arg_kind = token_kind(pos + 2)
+        V2_LAST_STRUCT_IDX = -1
+        let print_arg = parse_expr_ir(func, ctx, pos + 2)
+        if print_arg.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+        if token_kind(print_arg.next) != TK_RPAREN { return ExprParse { ok: 0, reg: -1, next: pos} }
+        var print_fn_id = V2_BUILTIN_PRINT_INT
+        if reg_is_f64(print_arg.reg) {
+            print_fn_id = V2_BUILTIN_PRINT_F64
+        } else if print_arg_kind == TK_STRING {
+            print_fn_id = V2_BUILTIN_PRINT
+        }
+        let print_dst = alloc_reg(ctx)
+        ufn_record_call(print_dst, print_fn_id, print_arg.reg, 1)
+        // lean_single print_int bakes '\n'; print_f64 does NOT. For string print, no '\n'.
+        if print_fn_id == V2_BUILTIN_PRINT_INT {
+            let nl_r = alloc_reg(ctx)
+            let nl_d = alloc_reg(ctx)
+            ufn_record_load_imm(nl_r, 10)
+            ufn_record_call(nl_d, V2_BUILTIN_PRINT_CHAR, nl_r, 1)
+            return ExprParse { ok: 1, reg: nl_d, next: print_arg.next + 1}
+        }
+        return ExprParse { ok: 1, reg: print_dst, next: print_arg.next + 1}
+    }
     if is_indirect_call == 0 && fn_id == V2_BUILTIN_PRINTLN {
         // Zero-arg: println() → just a newline.
         if token_kind(pos + 2) == TK_RPAREN {
@@ -7137,6 +7166,10 @@ fn drv_emit_builtin_print_str(fn_id: i64) with Mut, Panic, Div {
     drv_emit_push_rbp()
     drv_emit_mov_rbp_rsp()
     drv_emit_mov_reg_reg(6, 7)
+    // Null-guard: print(0) / print(null) must not dereference address 0.
+    // jz +38 skips xor(3)+movzx(4)+test(2)+jz(2)+inc(3)+inc(3)+jmp(2)+mov(3)+write(16)=38.
+    drv_emit_test_rdi_rdi()
+    drv_emit_jz_rel8(38)
     drv_emit_xor_rcx_rcx()
     drv_emit_movzx_rax_byte_rdi()
     drv_emit_test_al_al()
