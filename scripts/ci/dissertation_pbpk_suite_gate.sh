@@ -97,6 +97,9 @@ TESTS=(
   "tirzepatide_sc_pbpk          stdlib/darwin_pbpk/validation/tirzepatide_sc_pbpk.sio"
   "glp1_gipr_gum                stdlib/darwin_pbpk/pd/glp1_gipr_gum.sio"
   "dissertation_tirzepatide_demo examples/dissertation_tirzepatide_demo.sio"
+  "vancomycin_icu_pbpk          stdlib/darwin_pbpk/validation/vancomycin_icu_pbpk.sio"
+  "vancomycin_auc_gum           stdlib/darwin_pbpk/pd/vancomycin_auc_gum.sio"
+  "dissertation_vancomycin_demo examples/dissertation_vancomycin_demo.sio"
 )
 
 # Smoke entries: artifact-emitting demos (HTML, SVG, narrative reports).

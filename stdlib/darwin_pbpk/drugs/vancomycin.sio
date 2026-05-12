@@ -1,0 +1,125 @@
+// darwin_pbpk/drugs/vancomycin.sio — Vancomycin Population PK Parameters
+//
+// Vancomycin is a glycopeptide antibiotic (MW 1449 Da), primary IV therapy for
+// MRSA and serious gram-positive infections. AUC-guided TDM is the current
+// standard of care per ASHP/SIDP/IDSA 2020 consensus guidelines.
+//
+// PK class: small molecule, primarily renal elimination (~90%), 2-compartment IV
+//
+// Primary literature:
+//   - Matzke GR et al. (1984) Clin Pharmacol Ther 35:360–367
+//     CL (mL/min) = 0.689 × CrCl (mL/min) + 3.66 [renal + non-renal]
+//   - Roberts JA et al. (2011) Crit Care Med 39:2449–2457 [2-comp ICU popPK]
+//     Q = 2.99 L/h; Vc = 0.40 L/kg; Vp = 0.30 L/kg (approximate from Table 2)
+//   - Rybak MJ et al. (2020) Am J Health-Syst Pharm 77:835–864 [ASHP guidelines]
+//     AUC24/MIC target 400–600 mg·h/L (MIC = 1 mg/L MRSA breakpoint)
+//   - Pryka RD et al. (1991) Ann Pharmacother 25:1232–1234 [IIV estimates]
+//     IIV CL: CV~25%; IIV Vc: CV~25%
+//   - Cockcroft DW & Gault MH (1976) Nephron 16:31–41 [CrCl estimation]
+//     CrCl estimation accuracy CV~15% vs measured GFR
+
+fn vanco_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 12 { y = (y + x / y) * 0.5; i = i + 1 }
+    y
+}
+
+// ============================================================================
+// PHARMACOKINETIC PARAMETER STRUCT
+// ============================================================================
+// 2-comp IV model:
+//   dCc/dt = R_inf/Vc - (CL/Vc)·Cc - (Q/Vc)·(Cc - Cp)
+//   dCp/dt = (Q/Vp)·(Cc - Cp)
+// Units: dose mg, concentration mg/L, volume L, time h
+
+pub struct VancoPKParams {
+    dose_mg:    f64,    // mg per dose
+    infusion_h: f64,    // infusion duration (h)
+    interval_h: f64,    // dosing interval (h)
+    cl_lh:      f64,    // clearance (L/h)       — Matzke 1984
+    vc_l:       f64,    // central volume (L)    — Roberts 2011
+    vp_l:       f64,    // peripheral volume (L) — Roberts 2011
+    q_lh:       f64,    // intercompartmental clearance (L/h) = 2.99
+    fu_plasma:  f64,    // unbound fraction (~0.45; 55% protein bound)
+}
+
+pub fn vanco_pk_from_patient(crcl_ml_min: f64, weight_kg: f64,
+                              dose_mg: f64, interval_h: f64) -> VancoPKParams {
+    let cl_ml_min = 0.689 * crcl_ml_min + 3.66
+    let cl_lh     = cl_ml_min * 0.06          // mL/min → L/h (× 60/1000)
+    let vc_l      = 0.40 * weight_kg
+    let vp_l      = 0.30 * weight_kg
+    VancoPKParams {
+        dose_mg:    dose_mg,
+        infusion_h: 1.0,
+        interval_h: interval_h,
+        cl_lh:      cl_lh,
+        vc_l:       vc_l,
+        vp_l:       vp_l,
+        q_lh:       2.99,
+        fu_plasma:  0.45,
+    }
+}
+
+// Standard ICU dosing: 15 mg/kg every 12h, 1h infusion
+pub fn vanco_15mg_kg_q12h(crcl_ml_min: f64, weight_kg: f64) -> VancoPKParams {
+    vanco_pk_from_patient(crcl_ml_min, weight_kg, 15.0 * weight_kg, 12.0)
+}
+
+// ============================================================================
+// GUM EPISTEMIC PRIORS (JCGM 100:2008)
+// ============================================================================
+// 7 uncertainty sources for AUC24/MIC output:
+//   1. CL inter-individual variability  (Matzke → popPK IIV, CV=25%)
+//   2. CrCl estimation error             (Cockcroft-Gault vs measured, CV=15%)
+//   3. Vc volume uncertainty             (Roberts 2011 covariate model, CV=25%)
+//   4. Vp volume uncertainty             (Roberts 2011, CV=25%)
+//   5. fu_plasma uncertainty             (equilibrium dialysis, CV=10%)
+//   6. MIC breakpoint assay uncertainty  (clinical microdilution, CV=30%)
+//   7. Numerical AUC integration error   (RK4 step-size residual, CV=2%)
+
+pub struct VancoEpParam {
+    mean:       f64,
+    variance:   f64,
+    confidence: f64,
+}
+
+pub struct VancoPriors {
+    cl:   VancoEpParam,
+    crcl: VancoEpParam,
+    vc:   VancoEpParam,
+    vp:   VancoEpParam,
+    fu:   VancoEpParam,
+    mic:  VancoEpParam,
+    num:  VancoEpParam,
+}
+
+pub fn vancomycin_priors(cl_lh: f64, crcl_ml_min: f64,
+                          vc_l: f64, vp_l: f64,
+                          fu: f64, auc_nom: f64) -> VancoPriors with Mut {
+    let cl_sd   = 0.25 * cl_lh
+    let crcl_sd = 0.15 * crcl_ml_min
+    let vc_sd   = 0.25 * vc_l
+    let vp_sd   = 0.25 * vp_l
+    let fu_sd   = 0.10 * fu
+    let mic_sd  = 0.30 * 1.0
+    let num_sd  = 0.02 * auc_nom
+    let cl_ep   = VancoEpParam { mean: cl_lh,       variance: cl_sd*cl_sd,     confidence: 0.72 }
+    let crcl_ep = VancoEpParam { mean: crcl_ml_min, variance: crcl_sd*crcl_sd, confidence: 0.75 }
+    let vc_ep   = VancoEpParam { mean: vc_l,         variance: vc_sd*vc_sd,     confidence: 0.70 }
+    let vp_ep   = VancoEpParam { mean: vp_l,         variance: vp_sd*vp_sd,     confidence: 0.70 }
+    let fu_ep   = VancoEpParam { mean: fu,           variance: fu_sd*fu_sd,     confidence: 0.80 }
+    let mic_ep  = VancoEpParam { mean: 1.0,          variance: mic_sd*mic_sd,   confidence: 0.65 }
+    let num_ep  = VancoEpParam { mean: auc_nom,      variance: num_sd*num_sd,   confidence: 0.95 }
+    VancoPriors {
+        cl:   cl_ep,
+        crcl: crcl_ep,
+        vc:   vc_ep,
+        vp:   vp_ep,
+        fu:   fu_ep,
+        mic:  mic_ep,
+        num:  num_ep,
+    }
+}
