@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/ci/dissertation_pbpk_suite_gate.sh
 #
-# Dissertation evidence gate: PBPK validation suite (rapamycin + haloperidol).
+# Dissertation evidence gate: PBPK validation suite (rapamycin + haloperidol + tirzepatide).
 #
 # 14 independent tests cover the dissertation's applied PBPK layer — the
 # *evidence* that the three core contributions (GUM-through-ODE, compile-time
@@ -29,6 +29,14 @@
 #                                  ps_bbb permeability, mixed-evidence confidence
 #  14. d2_voi                      D2 value-of-information: which experiment to
 #                                  prioritize given current PK/PD evidence
+#
+# Tirzepatide — drug #3, cross-validates framework boundaries (peptide class):
+#  15. tirzepatide_sc_pbpk         2-comp SC ODE (Urva 2022): Tmax, Cmax, t½, AUC,
+#                                  GLP-1R/GIPR occupancy (6 tests)
+#  16. glp1_gipr_gum               Dual receptor GUM: EC50 sensitivity near EC50,
+#                                  combined u_occ, GIPR > GLP-1R at Cmax (4 tests)
+#  17. dissertation_tirzepatide_demo ISO budget (7 sources): CL/Ka/fu/Vc/F/EC50×2,
+#                                  framework boundary audit, confidence gate PASS
 #
 # Each test ends with "PASS\n" on success. Gate fails if any test rc != 0
 # or stdout doesn't contain "PASS".
@@ -86,6 +94,9 @@ TESTS=(
   "gnn_rapamycin_inference      stdlib/darwin_pbpk/ml/gnn_inference.sio"
   "hybrid_ode_rapamycin         stdlib/darwin_pbpk/ml/hybrid_ode.sio"
   "dissertation_hybrid_demo     examples/dissertation_hybrid_demo.sio"
+  "tirzepatide_sc_pbpk          stdlib/darwin_pbpk/validation/tirzepatide_sc_pbpk.sio"
+  "glp1_gipr_gum                stdlib/darwin_pbpk/pd/glp1_gipr_gum.sio"
+  "dissertation_tirzepatide_demo examples/dissertation_tirzepatide_demo.sio"
 )
 
 # Smoke entries: artifact-emitting demos (HTML, SVG, narrative reports).
