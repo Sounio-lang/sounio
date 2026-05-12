@@ -109,6 +109,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.dissertation.advisor-handoff | repo_only | docs/dissertation/ADVISOR_HANDOFF.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.audit.discovery-log | repo_only | docs/dissertation/audit/discovery_log.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.chapter-clinical-verified-outline | repo_only | docs/dissertation/chapter_clinical_verified_outline.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.cross-drug-iso-budget-findings | repo_only | docs/dissertation/cross_drug_iso_budget_findings.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.dossier-template | repo_only | docs/dissertation/dossier_template.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.handoff.chapter-04 | repo_only | docs/dissertation/handoff/chapter_04.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.pbpk-claim-truth-table | repo_only | docs/dissertation/pbpk_claim_truth_table.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

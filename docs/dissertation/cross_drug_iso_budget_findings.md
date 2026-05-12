@@ -2,9 +2,9 @@
 topic_id: repo.docs.dissertation.cross-drug-iso-budget-findings
 authority: repo_only
 audience: users
-last_validated: 2026-05-12
-validated_by: claude/refine-local-plan-GYbyW
-source_of_truth: stdlib/darwin_pbpk/validation/cross_drug_iso_budget.sio
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.cross-drug-iso-budget-findings
 -->
 
 # Cross-Drug ISO Uncertainty Budget — Findings
