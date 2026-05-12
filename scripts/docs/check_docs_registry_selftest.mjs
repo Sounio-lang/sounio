@@ -15,13 +15,20 @@ const locales = ['en', 'pt', 'el', 'zh', 'ja', 'es'];
 
 async function runNode(scriptPath, cwd) {
   try {
-    const { stdout, stderr } = await execFileAsync(process.execPath, [scriptPath], { cwd });
+    const { stdout, stderr } = await execFileAsync(process.execPath, [scriptPath], {
+      cwd,
+      maxBuffer: 128 * 1024 * 1024,
+    });
     return { ok: true, stdout, stderr, code: 0 };
   } catch (error) {
     return {
       ok: false,
       stdout: error.stdout ?? '',
-      stderr: error.stderr ?? '',
+      stderr: [
+        error.stderr ?? '',
+        error.message ?? '',
+        `code=${error.code ?? ''} signal=${error.signal ?? ''}`,
+      ].filter(Boolean).join('\n'),
       code: error.code ?? 1,
     };
   }

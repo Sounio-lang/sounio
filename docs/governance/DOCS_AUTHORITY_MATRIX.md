@@ -295,6 +295,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.fisher-matrix-fix | historical | docs/research/FISHER_MATRIX_FIX.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.gradual-epistemic-positioning | historical | docs/research/gradual_epistemic_positioning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.hyper-uncertainty-parenthesization-report | historical | docs/research/HYPER_UNCERTAINTY_PARENTHESIZATION_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.hyperbolic-semantic-networks-run | historical | docs/research/hyperbolic_semantic_networks_run.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.irb-protocol-draft | historical | docs/research/irb_protocol_draft.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.knightian-operator-choice | historical | docs/research/knightian_operator_choice.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.knightian-operator-consensus-2026-04-30 | historical | docs/research/knightian_operator_consensus_2026-04-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -327,6 +328,14 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.research-validation-summary | repo_only | docs/research/RESEARCH_VALIDATION_SUMMARY.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sedenion-zero-divisor-geometry-report | historical | docs/research/SEDENION_ZERO_DIVISOR_GEOMETRY_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-hosted-hypercomplex | historical | docs/research/self_hosted_hypercomplex.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.subptx-abide-cohort-orc | historical | docs/research/subptx_abide_cohort_orc.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.subptx-abide-cross-arch-repro | historical | docs/research/subptx_abide_cross_arch_repro.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.subptx-abide-orc-sweep | historical | docs/research/subptx_abide_orc_sweep.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.subptx-abide-sinkhorn-probe | historical | docs/research/subptx_abide_sinkhorn_probe.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.subptx-buffer-refactor-investigation | historical | docs/research/subptx_buffer_refactor_investigation.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.subptx-fmad-invariance | historical | docs/research/subptx_fmad_invariance.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.subptx-phase-h-complete | historical | docs/research/subptx_phase_h_complete.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.subptx-sinkhorn16-2iter | historical | docs/research/subptx_sinkhorn16_2iter.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.variance-of-associator | historical | docs/research/variance_of_associator.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.while-loop-bug-investigation | historical | docs/research/WHILE_LOOP_BUG_INVESTIGATION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zeta-variance-deep-investigation | historical | docs/research/zeta_variance_deep_investigation.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
