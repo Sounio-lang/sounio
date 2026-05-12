@@ -1,0 +1,113 @@
+// stdlib/darwin_pbpk/pd/bergman_glucose_insulin.sio — Semaglutide PD
+//
+// Linearised Bergman minimal model for the semaglutide / GLP-1R PD readout.
+// Couples pancreas GLP-1R occupancy (from the upstream TMDD layer at i=12)
+// to a 2-state linear system in plasma glucose and insulin deviations
+// (ΔG, ΔI) around the basal pair (G_b = 100 mg/dL, I_b = 10 mU/L):
+//
+//   dΔI / dt = k_base · α · occ - k_I · ΔI                (mU/L/h)
+//   dΔG / dt = -(S_G + S_I · I_b) · ΔG - S_I · G_b · ΔI   (mg/dL/h)
+//
+// where occ = DR / (R_free + DR) at pancreas, α is the GLP-1R secretion
+// enhancement factor (α=1.0 → 2× insulin secretion at full occupancy), and
+// (S_G, S_I) are the Bergman glucose-effectiveness / insulin-sensitivity
+// coefficients. Linearisation valid for G ≈ G_b (the dissertation runs near
+// fasting baseline).
+//
+// Stepping strategy: implicit CN on ΔI first (1-state linear), then implicit
+// CN on ΔG at the fixed ΔI_new (1-state linear with forcing). Identical math
+// to parity-ref `pd_step_glucose_insulin`
+// (`tests/run-pass/dissertation_pbpk28_parity_ref_semaglutide.sio:358-375`)
+// — pure-function extraction.
+//
+// Stage G-ε-14. gap-report claim `pd_semaglutide_path`.
+
+// ─── Literature parameters per dissertation §4.6.3 ──────────────────────────
+//   G_b   = 100 mg/dL    — fasting glucose basal (ADA target)
+//   I_b   =  10 mU/L     — fasting insulin basal (~70 pmol/L; HOMA reference)
+//   S_G   = 1.5  /h      — glucose effectiveness (Bergman 1979 / FSIGT
+//                          population mean in T2D; gap-report flags that the
+//                          draft's 2.5e-2 /min = 1.5/h *is* the same value
+//                          in different units — consistent)
+//   S_I   = 0.020 /(mU·L·h) — insulin sensitivity
+//                          (Bergman 1981 IVGTT estimate; reduced in T2D)
+//   k_I   = 12.6 /h      — insulin elimination
+//                          (Polonsky 1988 hepatic + renal clearance,
+//                          ~5 min half-life)
+//   α     = 1.0          — GLP-1R secretion gain at full occupancy
+//                          (Lau 2015 + Knudsen 2019 β-cell incretin)
+// At equilibrium with no drug: k_base = k_I · I_b — derived, not free.
+
+fn bergman_gb()    -> f64 { return 100.0 }      // mg/dL
+fn bergman_ib()    -> f64 { return 10.0 }       // mU/L
+fn bergman_sg()    -> f64 { return 1.5 }        // 1/h
+fn bergman_si()    -> f64 { return 0.020 }      // 1/(mU·L·h)
+fn bergman_ki()    -> f64 { return 12.6 }       // 1/h
+fn bergman_alpha() -> f64 { return 1.0 }
+fn bergman_kbase() -> f64 { return bergman_ki() * bergman_ib() }   // mU/L/h
+
+// ─── State + parameter records ──────────────────────────────────────────────
+struct BergmanState {
+    dg: f64,    // ΔG, mg/dL
+    di: f64,    // ΔI, mU/L
+}
+
+struct BergmanParams {
+    g_b:   f64,
+    i_b:   f64,
+    s_g:   f64,
+    s_i:   f64,
+    k_i:   f64,
+    alpha: f64,
+    k_base: f64,
+}
+
+fn bergman_default_params() -> BergmanParams {
+    BergmanParams {
+        g_b:    bergman_gb(),
+        i_b:    bergman_ib(),
+        s_g:    bergman_sg(),
+        s_i:    bergman_si(),
+        k_i:    bergman_ki(),
+        alpha:  bergman_alpha(),
+        k_base: bergman_kbase(),
+    }
+}
+
+// Initial PD state — ΔG = ΔI = 0 (start at basal G_b / I_b).
+fn bergman_state_init() -> BergmanState {
+    BergmanState { dg: 0.0, di: 0.0 }
+}
+
+// ─── Step kernel ────────────────────────────────────────────────────────────
+// One implicit-CN half-step on (ΔI, ΔG). `occ` is the upstream-supplied
+// pancreas GLP-1R occupancy (DR / (R_free + DR)) at the start-of-step.
+fn pd_step_glucose_insulin(s: BergmanState, occ: f64, p: BergmanParams, dt: f64)
+    -> BergmanState with Mut, Div
+{
+    let h = 0.5 * dt
+
+    // CN on dΔI/dt = k_base · α · occ - k_I · ΔI:
+    //   (1 + h·k_I) · ΔI_new = (1 - h·k_I) · ΔI_old + dt · k_base · α · occ
+    let di_num = (1.0 - h * p.k_i) * s.di + dt * p.k_base * p.alpha * occ
+    let di_new = di_num / (1.0 + h * p.k_i)
+
+    // CN on dΔG/dt = -(λ_G)·ΔG - S_I·G_b·ΔI at fixed ΔI_new:
+    //   λ_G = S_G + S_I · I_b
+    //   (1 + h·λ_G) · ΔG_new = (1 - h·λ_G) · ΔG_old - dt · S_I · G_b · ΔI_new
+    let lambda_g = p.s_g + p.s_i * p.i_b
+    let dg_num = (1.0 - h * lambda_g) * s.dg - dt * p.s_i * p.g_b * di_new
+    let dg_new = dg_num / (1.0 + h * lambda_g)
+
+    BergmanState { dg: dg_new, di: di_new }
+}
+
+// ─── Clinical-endpoint helpers ──────────────────────────────────────────────
+// Absolute plasma glucose and insulin from the deviations.
+fn bergman_plasma_glucose(s: BergmanState, p: BergmanParams) -> f64 {
+    return p.g_b + s.dg
+}
+
+fn bergman_plasma_insulin(s: BergmanState, p: BergmanParams) -> f64 {
+    return p.i_b + s.di
+}

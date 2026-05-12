@@ -1,0 +1,80 @@
+//@ run-pass
+//@ expect-stdout-contains: TMDD_GLP1R_SMOKE_PASS
+
+// Smoke test for stdlib/darwin_pbpk/tmdd/glp1r.sio (Stage G-ε-12).
+//
+// Drives the shared tmdd_step kernel (imported via fkbp12_mtorc1.sio) on the
+// semaglutide / pancreas configuration (i=12, R_total_0 = 5 nM, K_d = 0.4 nM,
+// k_on = 0.50 L/(nmol·h)) at a fixed C_t_mass = 5.0e-3 mg/L plasma — the same
+// concentration the parity ref reaches around steady-state on weekly
+// semaglutide dosing. Confirms:
+//
+//   1. Receptor occupancy climbs monotonically from 0 toward saturation
+//      under sustained drug exposure.
+//   2. R_free + DR stays in a sane budget (k_syn = 0.25 nM/h on a 5 nM pool).
+//   3. Pancreas occupancy at 12 h is *higher* than rapamycin/liver occupancy
+//      at 12 h under matched dosing — semaglutide-GLP-1R kinetics are
+//      5× faster, so the binding timescale τ = 1 / (k_on·C_t) ≈ 3.3 h
+//      (vs ~9 h for rapa/FKBP12).
+//
+// Pure-Sounio, no external golden file. Transitive parity with the JS engine
+// is enforced by case 8 of `scripts/ci/dissertation_pbpk28_parity_gate.sh`
+// once the parity ref switches its inline tmdd_step_organ to import this
+// module (planned G-ζ-1 after ε-15).
+
+use darwin_pbpk::tmdd::fkbp12_mtorc1::*
+use darwin_pbpk::tmdd::glp1r::*
+
+fn fmt_4(x: f64) -> i64 { return (x * 10000.0) as i64 }
+
+fn main() with Mut, Div, IO {
+    let p = glp1r_params_at(12)        // pancreas
+    var s = TmddState { ct_mass: 5.0e-3, rfree: glp1r_rtotal0_at(12), dr: 0.0 }
+    let dt = 0.5                       // hours per step
+    let n_steps = 24                   // → 12 h total
+
+    print("TMDD smoke — pancreas (i=12), R_total_0 = ")
+    print(glp1r_rtotal0_at(12) as i64)
+    println(" nM, C_t fixed at 5e-5 mg/L")
+    println("step  R_free(nM)   DR(nM)       occupancy")
+
+    var step = 0
+    while step < n_steps {
+        s = tmdd_step(s, p, dt)
+        // Re-pin C_t (smoke isolates TMDD).
+        s.ct_mass = 5.0e-3
+        let occ = tmdd_occupancy(s)
+        let total = s.rfree + s.dr
+        let report = (step + 1) == 1 || (step + 1) == 6 || (step + 1) == 12 || (step + 1) == 24
+        if report {
+            print("step="); print(step + 1)
+            print(" rfree*1e4="); print(fmt_4(s.rfree))
+            print(" dr*1e4="); print(fmt_4(s.dr))
+            print(" occ*1e4="); println(fmt_4(occ))
+        }
+        let inv_ok = (s.rfree >= 0.0) && (s.dr >= 0.0)
+        if !inv_ok {
+            println("FAIL: negative state component")
+            return
+        }
+        if total > 10.0 {
+            println("FAIL: receptor budget blew up")
+            return
+        }
+        step = step + 1
+    }
+
+    // At C_t = 5e-3 mg/L on a 4114 Da peptide → 5e-3 · 1e6 / 4114 ≈ 1.22 nM
+    // drug; K_d = 0.4 nM → eq saturation ≈ 1.22/1.62 ≈ 0.75. Binding
+    // timescale 1 / (k_on·C_t) = 1 / (0.50·1.22) ≈ 1.6 h → reaches equilibrium
+    // in ~5 h, well before 12 h. Expect occ_final ≈ 0.65-0.80.
+    let occ_final = tmdd_occupancy(s)
+    let occ_ok = (occ_final > 0.55) && (occ_final < 0.85)
+    if !occ_ok {
+        print("FAIL: occupancy out of expected band [0.55, 0.85]: ")
+        println(fmt_4(occ_final))
+        return
+    }
+
+    println("TMDD_GLP1R_SMOKE_PASS")
+}

@@ -9,6 +9,8 @@ The actual Lean files live in `formal/lean4/` so they are discovered by
 | Obligation | Lean module |
 |---|---|
 | Vancomycin dosing safety (M3 milestone) | `formal/lean4/SounioVancomycinDosingSafety.lean` |
+| Tacrolimus oral C24h-trough dosing safety | `formal/lean4/SounioTacrolimusDosingSafety.lean` |
+| Tacrolimus + sirolimus DDI uncertainty | `formal/lean4/SounioTacrolimusDDI.lean` |
 
 ## How to add a new obligation
 
