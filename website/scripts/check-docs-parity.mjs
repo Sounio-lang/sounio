@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { writeSync } from 'node:fs';
 import { buildGovernedTopicRegistry, readRegistryFile } from '../../scripts/docs/governance_registry.mjs';
 
 const repoRoot = path.resolve(process.cwd(), '..');
@@ -9,11 +10,8 @@ function fail(errors) {
     return;
   }
 
-  console.error('Docs parity validation failed:');
-  for (const error of errors) {
-    console.error(`- ${error}`);
-  }
-  process.exit(1);
+  writeSync(2, `Docs parity validation failed:\n${errors.map((error) => `- ${error}`).join('\n')}\n`);
+  process.exitCode = 1;
 }
 
 function compareByTopicId(topics) {
