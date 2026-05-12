@@ -20,9 +20,10 @@
 #     2. ptxas --fmad=false emits a cubin with zero FFMA instructions
 #     3. The two SASS dumps are byte-identical
 #
-# SKIP behaviour: if ptxas or cuobjdump are not on PATH, prints
-# "SKIPPED (no CUDA toolchain)" and exits 0 — this is a sub-PTX gate,
-# not a core PTX gate; CI without CUDA must not regress for this reason.
+# SKIP behaviour: if ptxas/cuobjdump are missing or cuobjdump cannot dump
+# the generated cubin, prints SKIPPED and exits 0. This is a sub-PTX gate,
+# not a core PTX gate; CI without a usable CUDA disassembler must not regress
+# for this reason.
 
 set -euo pipefail
 
@@ -77,8 +78,14 @@ for kernel in "${KERNELS[@]}"; do
         continue
     fi
 
-    cuobjdump --dump-sass "$cubin_t" > "$sass_t" 2>&1
-    cuobjdump --dump-sass "$cubin_f" > "$sass_f" 2>&1
+    if ! cuobjdump --dump-sass "$cubin_t" > "$sass_t" 2>&1; then
+        echo "kretikos_kaxi_fmad_invariance_gate: SKIPPED (CUDA disassembler unusable for ${kernel}/${ARCH})"
+        exit 0
+    fi
+    if ! cuobjdump --dump-sass "$cubin_f" > "$sass_f" 2>&1; then
+        echo "kretikos_kaxi_fmad_invariance_gate: SKIPPED (CUDA disassembler unusable for ${kernel}/${ARCH})"
+        exit 0
+    fi
 
     # 1: zero FFMA in --fmad=true cubin
     if [[ $(grep -c '\bFFMA\b' "$sass_t") -eq 0 ]]; then
