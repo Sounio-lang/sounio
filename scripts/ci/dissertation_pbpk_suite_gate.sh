@@ -109,6 +109,9 @@ TESTS=(
   "halo_pgx_gate_pass         tests/run-pass/halo_pgx_gate_pass.sio"
   "olanzapine_d2_mtor         stdlib/darwin_pbpk/validation/olanzapine_d2_mtor.sio"
   "pop_pbpk_pd                stdlib/darwin_pbpk/population/pop_pbpk_pd.sio"
+  "epistemic_pbpk28           stdlib/darwin_pbpk/epistemic_pbpk28.sio"
+  "epistemic_pbpk28_hessian   stdlib/darwin_pbpk/epistemic_pbpk28_hessian.sio"
+  "pbpk28_sobol_pce           stdlib/darwin_pbpk/validation/pbpk28_sobol_pce.sio"
 )
 
 # Smoke entries: artifact-emitting demos (HTML, SVG, narrative reports).

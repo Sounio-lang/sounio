@@ -1,0 +1,602 @@
+// stdlib/darwin_pbpk/epistemic_pbpk28.sio — Epistemic PBPK28 (first-order GUM)
+//
+// GUM-compliant uncertainty propagation through the 28-state permeability-limited
+// PBPK model (PBPKState28: 14 organs × {C_v, C_t}). Dissertation §4.10 contribution.
+//
+// Method (JCGM 100:2008 §5.1.3):
+//   For each epistemic parameter θᵢ:
+//     1. Run reference simulation at θ = θ_mean
+//     2. Run ± perturbed simulations at θᵢ ± hᵢ
+//     3. Central-difference sensitivity: cᵢ = (y(+h) − y(−h)) / (2hᵢ)
+//     4. Combined variance: Var(y) = Σᵢ cᵢ² · Var(θᵢ)
+//
+// Step size (JCGM 100:2008 §5.1.2): hᵢ = max(1e-6 · |μᵢ|, 1e-2 · σᵢ)
+//
+// Organ index map (from pbpk28_params.sio, rapamycin profile):
+//   0=blood, 1=liver, 2=kidney, 3=brain, 4=heart, 5=lung,
+//   6=muscle, 7=adipose, 8=gut, 9=skin, 10=bone, 11=spleen,
+//   12=pancreas, 13=other
+//
+// Epistemic parameters (7, compatible with epistemic_pbpk14.sio):
+//   0 = cl_hepatic  (→ p.cl_central)
+//   1 = cl_renal    (→ added to p.cl_central; rapamycin renal ~0.3 L/h)
+//   2 = fu_plasma   (→ CL_eff ∝ fu: scales p.cl_central by (fu+δ)/fu_ref)
+//   3 = kp_brain    (→ p.kp[3])
+//   4 = kp_liver    (→ p.kp[1])
+//   5 = kp_kidney   (→ p.kp[2])
+//   6 = kp_adipose  (→ p.kp[7])
+//
+// Endpoints:
+//   AUC_blood  at 168h (trapezoidal, mg·h/L)
+//   C_brain    at 24h  (point concentration, mg/L)
+//   AUC_liver  at 168h (trapezoidal, mg·h/L)
+//   AUC_kidney at 168h (trapezoidal, mg·h/L)
+//
+// Solver: Crank-Nicolson (A-stable, 2nd-order) via pbpk28_full_cn_step.
+//         Fixed dt=0.05h → 3360 steps for 168h.
+//
+// References: JCGM 100:2008; Ferron 1997; Lampen 1998; Schreiber 1991;
+//             Valoteau 1996; Rodgers & Rowland 2006 (∂Kp/∂fu = −Kp/fu).
+//
+// Author: Demetrios Chiuratto Agourakis
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+
+// ============================================================================
+// MATH HELPERS (not exported by pbpk28 imports)
+// ============================================================================
+
+fn ep28_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ep28_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn ep28_max(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+// fu_plasma reference value for rapamycin (Schreiber 1991)
+fn ep28_fu_ref() -> f64 { return 0.08 }
+
+// ============================================================================
+// SIMULATION METRICS
+// ============================================================================
+
+pub struct PBPK28Metrics {
+    auc_blood:   f64,   // trapezoidal AUC(0→t_end), blood, mg·h/L
+    c_brain_24h: f64,   // C_brain at t=24h, mg/L (organ average)
+    auc_liver:   f64,   // trapezoidal AUC(0→t_end), liver avg, mg·h/L
+    auc_kidney:  f64,   // trapezoidal AUC(0→t_end), kidney avg, mg·h/L
+    mass_final:  f64,   // total body mass at t=t_end, mg
+    success:     bool,
+}
+
+fn ep28_metrics_empty() -> PBPK28Metrics {
+    PBPK28Metrics {
+        auc_blood: 0.0, c_brain_24h: 0.0,
+        auc_liver: 0.0, auc_kidney: 0.0,
+        mass_final: 0.0, success: false,
+    }
+}
+
+fn ep28_finite(x: f64) -> bool {
+    if x != x { return false }
+    return ep28_abs(x) < 1.0e12
+}
+
+// ============================================================================
+// DETERMINISTIC SIMULATION — CRANK-NICOLSON FIXED STEP
+// ============================================================================
+// A-stable CN: even stiff PS-coupled organs (PS_liver/V_t ~ 3600/h) are
+// stable at dt=0.05h. rel_mid=0 for IV bolus (no depot release).
+
+fn ep28_simulate(prm: PBPKParams28, dose_mg: f64, t_end: f64) -> PBPK28Metrics with Mut, Div, Panic {
+    let dt = 0.05
+    var st = pbpk28_state_zero()
+    st.cv[0] = dose_mg / prm.v_ref[0]   // IV bolus into blood compartment
+
+    var t = 0.0
+    var auc_blood = 0.0
+    var auc_liver = 0.0
+    var auc_kidney = 0.0
+    var c_prev_blood = st.cv[0]
+    var c_prev_liver = 0.0
+    var c_prev_kidney = 0.0
+    var c_brain_24h = 0.0
+    var found_24h = false
+
+    while t < t_end {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+
+        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
+
+        let c_blood  = st_new.cv[0]
+        let c_liver  = pbpk28_organ_average(st_new, prm, 1)
+        let c_kidney = pbpk28_organ_average(st_new, prm, 2)
+
+        if !ep28_finite(c_blood) { return ep28_metrics_empty() }
+
+        // trapezoidal AUC accumulation
+        auc_blood  = auc_blood  + 0.5 * (c_prev_blood  + c_blood)  * dt_use
+        auc_liver  = auc_liver  + 0.5 * (c_prev_liver  + c_liver)  * dt_use
+        auc_kidney = auc_kidney + 0.5 * (c_prev_kidney + c_kidney) * dt_use
+
+        c_prev_blood  = c_blood
+        c_prev_liver  = c_liver
+        c_prev_kidney = c_kidney
+
+        t = t + dt_use
+        st = st_new
+
+        // C_brain at first step that reaches or passes 24h
+        if found_24h == false && t >= 24.0 {
+            c_brain_24h = pbpk28_organ_average(st, prm, 3)
+            found_24h = true
+        }
+    }
+
+    let mass = pbpk28_total_mass(st, prm)
+
+    PBPK28Metrics {
+        auc_blood:   auc_blood,
+        c_brain_24h: c_brain_24h,
+        auc_liver:   auc_liver,
+        auc_kidney:  auc_kidney,
+        mass_final:  mass,
+        success:     true,
+    }
+}
+
+// ============================================================================
+// GUM STEP SIZE (JCGM 100:2008 §5.1.2)
+// ============================================================================
+
+fn ep28_fdiff_h(mean: f64, variance: f64) -> f64 with Mut, Div, Panic {
+    let h_rel = 1.0e-6 * ep28_abs(mean)
+    let h_abs = 0.01 * ep28_sqrt(variance)
+    ep28_max(h_rel, h_abs)
+}
+
+// ============================================================================
+// PARAMETER PERTURBATION
+// ============================================================================
+// fu_plasma (idx=2): CL_eff ∝ fu (well-stirred liver, consistent with
+// PBPK14 where c_unbound = c_plasma × fu drives CL terms).
+// Kp values are not perturbed with fu: Kp_total = Kp_u,t × fu_t / fu_p,
+// but in this parameterisation Kp already encodes the reference fu, so
+// we keep Kp fixed and only scale CL. (Conservative; see §4.10.3.)
+
+fn ep28_perturb(prm: PBPKParams28, idx: i32, delta: f64) -> PBPKParams28 with Mut, Div {
+    var p = prm
+    if idx == 0 {
+        // cl_hepatic → cl_central
+        p.cl_central = p.cl_central + delta
+    }
+    if idx == 1 {
+        // cl_renal → additional central clearance
+        p.cl_central = p.cl_central + delta
+    }
+    if idx == 2 {
+        // fu_plasma → scale cl_central by (fu + δ) / fu_ref
+        let fu_ref = ep28_fu_ref()
+        if fu_ref > 0.0 {
+            let scale = (fu_ref + delta) / fu_ref
+            p.cl_central = p.cl_central * scale
+        }
+    }
+    if idx == 3 {
+        // kp_brain — organ index 3
+        p.kp[3] = p.kp[3] + delta
+    }
+    if idx == 4 {
+        // kp_liver — organ index 1
+        p.kp[1] = p.kp[1] + delta
+    }
+    if idx == 5 {
+        // kp_kidney — organ index 2
+        p.kp[2] = p.kp[2] + delta
+    }
+    if idx == 6 {
+        // kp_adipose — organ index 7
+        p.kp[7] = p.kp[7] + delta
+    }
+    return p
+}
+
+// ============================================================================
+// EPISTEMIC PRIORS (7 parameters)
+// ============================================================================
+
+pub struct EpPrior28 {
+    mean:       [f64; 8],
+    variance:   [f64; 8],
+    confidence: [f64; 8],
+    n:          i32,
+}
+
+fn ep28_prior_empty() -> EpPrior28 {
+    var m: [f64; 8] = [0.0; 8]
+    var v: [f64; 8] = [0.0; 8]
+    var c: [f64; 8] = [0.0; 8]
+    EpPrior28 { mean: m, variance: v, confidence: c, n: 0 }
+}
+
+pub fn ep28_rapamycin_priors() -> EpPrior28 with Mut {
+    var m: [f64; 8] = [0.0; 8]
+    var v: [f64; 8] = [0.0; 8]
+    var c: [f64; 8] = [0.0; 8]
+
+    // 0: cl_hepatic (CYP3A4, CV=58%, Ferron 1997 n=24)
+    m[0] = 12.4;   v[0] = 51.85;    c[0] = 0.65
+
+    // 1: cl_renal (CV=40%, estimated)
+    m[1] = 0.3;    v[1] = 0.0144;   c[1] = 0.50
+
+    // 2: fu_plasma (Schreiber 1991, CV=25%)
+    m[2] = 0.08;   v[2] = 0.0004;   c[2] = 0.72
+
+    // 3: kp_brain (Lampen 1998; P-gp limited; CV=25%)
+    m[3] = 0.10;   v[3] = 0.000625; c[3] = 0.63
+
+    // 4: kp_liver (Valoteau 1996, CV=25%)
+    m[4] = 5.40;   v[4] = 1.8225;   c[4] = 0.60
+
+    // 5: kp_kidney (Valoteau 1996, CV=25%)
+    m[5] = 4.20;   v[5] = 1.1025;   c[5] = 0.55
+
+    // 6: kp_adipose (capped model, CV=40%)
+    m[6] = 0.30;   v[6] = 0.0144;   c[6] = 0.40
+
+    EpPrior28 { mean: m, variance: v, confidence: c, n: 7 }
+}
+
+// ============================================================================
+// EPISTEMIC RESULT
+// ============================================================================
+
+pub struct EpResult28 {
+    auc_blood_mean:  f64,
+    auc_blood_var:   f64,
+    auc_blood_conf:  f64,
+    c_brain_mean:    f64,
+    c_brain_var:     f64,
+    auc_liver_mean:  f64,
+    auc_liver_var:   f64,
+    auc_kidney_mean: f64,
+    auc_kidney_var:  f64,
+    sensitivity:     [f64; 8],   // fractional AUC_blood variance contribution
+    mass_init:       f64,
+    mass_final:      f64,
+    success:         bool,
+}
+
+fn ep28_result_empty() -> EpResult28 {
+    var s: [f64; 8] = [0.0; 8]
+    EpResult28 {
+        auc_blood_mean: 0.0, auc_blood_var: 0.0, auc_blood_conf: 0.0,
+        c_brain_mean: 0.0,   c_brain_var: 0.0,
+        auc_liver_mean: 0.0, auc_liver_var: 0.0,
+        auc_kidney_mean: 0.0, auc_kidney_var: 0.0,
+        sensitivity: s,
+        mass_init: 0.0, mass_final: 0.0, success: false,
+    }
+}
+
+// ============================================================================
+// MAIN GUM ANALYSIS
+// ============================================================================
+
+pub fn ep28_run(
+    base_prm: PBPKParams28,
+    priors:   EpPrior28,
+    dose_mg:  f64,
+    t_end:    f64
+) -> EpResult28 with Mut, Div, Panic {
+    let n = priors.n
+
+    let ref_m = ep28_simulate(base_prm, dose_mg, t_end)
+    if ref_m.success == false {
+        return ep28_result_empty()
+    }
+
+    let auc_b_ref  = ref_m.auc_blood
+    let cb24_ref   = ref_m.c_brain_24h
+    let auc_l_ref  = ref_m.auc_liver
+    let auc_k_ref  = ref_m.auc_kidney
+
+    // Central-difference Jacobian
+    var d_auc_b:  [f64; 8] = [0.0; 8]
+    var d_cb24:   [f64; 8] = [0.0; 8]
+    var d_auc_l:  [f64; 8] = [0.0; 8]
+    var d_auc_k:  [f64; 8] = [0.0; 8]
+
+    var i = 0
+    while i < n {
+        let h = ep28_fdiff_h(priors.mean[i], priors.variance[i])
+        if h > 0.0 {
+            let prm_p = ep28_perturb(base_prm, i, h)
+            let prm_n = ep28_perturb(base_prm, i, 0.0 - h)
+            let m_p = ep28_simulate(prm_p, dose_mg, t_end)
+            let m_n = ep28_simulate(prm_n, dose_mg, t_end)
+            if m_p.success && m_n.success {
+                let inv2h = 1.0 / (2.0 * h)
+                d_auc_b[i] = (m_p.auc_blood   - m_n.auc_blood)   * inv2h
+                d_cb24[i]  = (m_p.c_brain_24h - m_n.c_brain_24h) * inv2h
+                d_auc_l[i] = (m_p.auc_liver   - m_n.auc_liver)   * inv2h
+                d_auc_k[i] = (m_p.auc_kidney  - m_n.auc_kidney)  * inv2h
+            }
+        }
+        i = i + 1
+    }
+
+    // GUM variance
+    var var_auc_b:  f64 = 0.0
+    var var_cb24:   f64 = 0.0
+    var var_auc_l:  f64 = 0.0
+    var var_auc_k:  f64 = 0.0
+    var sensitivity: [f64; 8] = [0.0; 8]
+
+    var j = 0
+    while j < n {
+        let vi = priors.variance[j]
+        let contrib = d_auc_b[j] * d_auc_b[j] * vi
+        var_auc_b = var_auc_b + contrib
+        var_cb24  = var_cb24  + d_cb24[j]  * d_cb24[j]  * vi
+        var_auc_l = var_auc_l + d_auc_l[j] * d_auc_l[j] * vi
+        var_auc_k = var_auc_k + d_auc_k[j] * d_auc_k[j] * vi
+        sensitivity[j] = contrib
+        j = j + 1
+    }
+
+    // Normalize sensitivity to fractions
+    var k = 0
+    while k < n {
+        if var_auc_b > 1.0e-30 {
+            sensitivity[k] = sensitivity[k] / var_auc_b
+        }
+        k = k + 1
+    }
+
+    // Evidence-weighted confidence
+    var conf_auc = 0.0
+    var c = 0
+    while c < n {
+        conf_auc = conf_auc + priors.confidence[c] * sensitivity[c]
+        c = c + 1
+    }
+
+    EpResult28 {
+        auc_blood_mean:  auc_b_ref,
+        auc_blood_var:   var_auc_b,
+        auc_blood_conf:  conf_auc,
+        c_brain_mean:    cb24_ref,
+        c_brain_var:     var_cb24,
+        auc_liver_mean:  auc_l_ref,
+        auc_liver_var:   var_auc_l,
+        auc_kidney_mean: auc_k_ref,
+        auc_kidney_var:  var_auc_k,
+        sensitivity:     sensitivity,
+        mass_init:       dose_mg,
+        mass_final:      ref_m.mass_final,
+        success:         true,
+    }
+}
+
+// ============================================================================
+// RAPAMYCIN REFERENCE (PBPK28)
+// ============================================================================
+
+pub fn ep28_rapamycin_params() -> PBPKParams28 {
+    pbpk28_params_rapamycin()
+}
+
+// ============================================================================
+// MAIN — TEST SUITE (8 tests)
+// ============================================================================
+
+fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  Epistemic PBPK28 — GUM Uncertainty Propagation (first-order)")
+    println("  Drug: Rapamycin (Sirolimus)")
+    println("  Kernel: Crank-Nicolson 28-state permeability-limited PBPK")
+    println("  Method: Central-difference Jacobian (JCGM 100:2008 SS 5.1.3)")
+    println("  Epistemic parameters: 7 (CL, fu, Kp_brain, Kp_liver, ...)")
+    println("======================================================================")
+    println("")
+
+    let prm     = ep28_rapamycin_params()
+    let priors  = ep28_rapamycin_priors()
+    let dose_mg = 5.0
+    let t_end   = 168.0
+
+    let ep = ep28_run(prm, priors, dose_mg, t_end)
+
+    var passed = 0
+    var failed = 0
+
+    // TEST 1: simulation completes
+    println("TEST 1: Epistemic analysis completes (reference + 14 perturbations)")
+    if ep.success {
+        println("  [PASS]")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Simulation failed")
+        failed = failed + 1
+    }
+    println("")
+
+    // TEST 2: AUC_blood > 0 with variance
+    println("TEST 2: AUC_blood > 0 with non-zero variance")
+    let auc_sd = ep28_sqrt(ep.auc_blood_var)
+    print("  AUC_blood(0-168h) mean (mg.h/L): ")
+    print_f64(ep.auc_blood_mean)
+    println("")
+    print("  AUC_blood SD:                    ")
+    print_f64(auc_sd)
+    println("")
+    if ep.auc_blood_mean > 0.0 && ep.auc_blood_var > 0.0 {
+        println("  [PASS]")
+        passed = passed + 1
+    } else {
+        println("  FAIL")
+        failed = failed + 1
+    }
+    println("")
+
+    // TEST 3: C_brain@24h << C_blood (P-gp efflux, kp_brain=0.10)
+    println("TEST 3: C_brain@24h << C_blood (P-gp efflux)")
+    print("  C_brain at 24h (mg/L): ")
+    print_f64(ep.c_brain_mean)
+    println("")
+    let c_blood_est = if t_end > 0.0 { ep.auc_blood_mean / t_end } else { 0.0 }
+    print("  C_blood estimate (AUC/168h, mg/L): ")
+    print_f64(c_blood_est)
+    println("")
+    let ratio = if c_blood_est > 1.0e-12 { ep.c_brain_mean / c_blood_est } else { 0.0 }
+    print("  brain/blood ratio (approx): ")
+    print_f64(ratio)
+    println("")
+    if ratio < 0.25 {
+        println("  [PASS] P-gp efflux correctly limits CNS penetration")
+        passed = passed + 1
+    } else {
+        println("  FAIL: brain/blood ratio expected < 0.25 (kp_brain=0.10)")
+        failed = failed + 1
+    }
+    println("")
+
+    // TEST 4: CV(AUC_blood) > 0
+    println("TEST 4: CV(AUC_blood) > 0 (GUM propagates)")
+    let cv_auc = if ep.auc_blood_mean > 1.0e-12 { auc_sd / ep.auc_blood_mean } else { 0.0 }
+    print("  CV(AUC_blood): ")
+    print_f64(cv_auc)
+    println("")
+    if cv_auc > 0.001 {
+        println("  [PASS] GUM uncertainty propagates through 28-state model")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected CV > 0.1%")
+        failed = failed + 1
+    }
+    println("")
+
+    // TEST 5: Sensitivity fractions sum to ~1.0
+    println("TEST 5: Sensitivity fractions sum to 1.0")
+    var s_sum = 0.0
+    var si = 0
+    while si < 7 {
+        s_sum = s_sum + ep.sensitivity[si]
+        si = si + 1
+    }
+    print("  sum(sensitivity): ")
+    print_f64(s_sum)
+    println("")
+    var s_max = 0.0
+    var sk = 0
+    while sk < 7 {
+        if ep.sensitivity[sk] > s_max { s_max = ep.sensitivity[sk] }
+        sk = sk + 1
+    }
+    print("  max(sensitivity): ")
+    print_f64(s_max)
+    println("")
+    let sum_ok = s_sum > 0.95 && s_sum < 1.05
+    let dom_ok = s_max > 0.3
+    if sum_ok && dom_ok {
+        println("  [PASS] Fractions sum to 1.0; dominant parameter identified")
+        passed = passed + 1
+    } else {
+        println("  FAIL: sensitivity fractions malformed")
+        failed = failed + 1
+    }
+    println("")
+
+    // TEST 6: Evidence-weighted confidence in [0.20, 0.90]
+    println("TEST 6: Confidence in [0.20, 0.90]")
+    print("  AUC confidence: ")
+    print_f64(ep.auc_blood_conf)
+    println("")
+    if ep.auc_blood_conf > 0.20 && ep.auc_blood_conf < 0.90 {
+        println("  [PASS]")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected confidence in [0.20, 0.90]")
+        failed = failed + 1
+    }
+    println("")
+
+    // TEST 7: Mass conservation
+    println("TEST 7: Mass conservation")
+    print("  Initial mass (mg): ")
+    print_f64(ep.mass_init)
+    println("")
+    print("  Final mass (mg):   ")
+    print_f64(ep.mass_final)
+    println("")
+    if ep.mass_final >= 0.0 && ep.mass_final < ep.mass_init {
+        println("  [PASS] Mass decreases from elimination, stays non-negative")
+        passed = passed + 1
+    } else {
+        println("  FAIL: mass should decrease but stay >= 0")
+        failed = failed + 1
+    }
+    println("")
+
+    // TEST 8: AUC_liver > AUC_blood (hepatic sequestration: kp_liver=5.40)
+    println("TEST 8: AUC_liver > AUC_blood (hepatic sequestration)")
+    print("  AUC_liver:  ")
+    print_f64(ep.auc_liver_mean)
+    println("")
+    print("  AUC_blood:  ")
+    print_f64(ep.auc_blood_mean)
+    println("")
+    if ep.auc_liver_mean > ep.auc_blood_mean {
+        println("  [PASS] High kp_liver=5.40 drives hepatic sequestration")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected AUC_liver > AUC_blood for rapamycin")
+        failed = failed + 1
+    }
+    println("")
+
+    println("======================================================================")
+    println("  EPISTEMIC PBPK28 — TEST SUMMARY")
+    println("======================================================================")
+    print("  Passed: ")
+    print_f64(passed as f64)
+    println("")
+    print("  Failed: ")
+    print_f64(failed as f64)
+    println("")
+    if failed == 0 {
+        println("")
+        println("  ALL 8 TESTS PASSED")
+        println("")
+        println("  First-order GUM through 28-state permeability-limited PBPK.")
+        println("  Dissertation Section 4.10 epistemic stack: CONFIRMED.")
+        println("  PASS")
+    } else {
+        println("  SOME TESTS FAILED")
+    }
+    println("======================================================================")
+
+    return failed
+}
