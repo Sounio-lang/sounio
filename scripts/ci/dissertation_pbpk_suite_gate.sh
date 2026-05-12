@@ -82,6 +82,11 @@ TESTS=(
   "dissertation_steady_state    examples/dissertation_steady_state_demo.sio"
   "dissertation_steady_state_fullvd examples/dissertation_steady_state_fullvd_demo.sio"
   "dissertation_scenario_gate   examples/dissertation_scenario_gate_demo.sio"
+  "tacrolimus_oral_pbpk         stdlib/darwin_pbpk/validation/tacrolimus_oral_pbpk.sio"
+  "tacrolimus_trough_gum        stdlib/darwin_pbpk/pd/tacrolimus_trough_gum.sio"
+  "tacrolimus_ddi_module        stdlib/darwin_pbpk/ddi/tacrolimus_sirolimus_ddi.sio"
+  "tacrolimus_ddi_clinical      stdlib/darwin_pbpk/validation/tacrolimus_sirolimus_ddi_clinical.sio"
+  "cross_drug_iso_budget        stdlib/darwin_pbpk/validation/cross_drug_iso_budget.sio"
 )
 
 # Smoke entries: artifact-emitting demos (HTML, SVG, narrative reports).
@@ -126,7 +131,7 @@ for entry in "${TESTS[@]}"; do
     continue
   fi
 
-  if ! grep -qE "^PASS$|^ALL PASS$|ALL [0-9]+ TESTS PASSED|^ *(DEMO|SS DEMO|SS FULLVD|SCENARIO GATE|PK/PD DEMO) OK$" "$log"; then
+  if ! grep -qE "^PASS$|^ALL PASS$|ALL [0-9]+ TESTS PASSED|^ *ALL (TESTS|GUM TESTS) PASSED$|^ *(DEMO|SS DEMO|SS FULLVD|SCENARIO GATE|PK/PD DEMO) OK$|^ *DDI MODULE OK$|^ *DDI CLINICAL VALIDATION COMPLETE$|^ *CROSS-DRUG ISO BUDGET COMPLETE$" "$log"; then
     echo "  FAIL: no PASS marker in stdout"
     tail -5 "$log" | sed 's/^/    /'
     fails=$((fails + 1))

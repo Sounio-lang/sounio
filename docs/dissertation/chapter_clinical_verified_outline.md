@@ -79,6 +79,46 @@ The chapter argues that Sounio is **necessary** for this construction: no other 
 - 6.2 The Knightian-Cmin pipeline (pre-TDM vs post-TDM band widths).
 - 6.3 The contract gates and refusal as a first-class outcome.
 - 6.4 The Lean dosing-safety theorem (statement and discharge plan).
+- 6.5 **Tacrolimus and cross-drug synthesis** — exercising F_oral as
+  the dominant GUM source.
+  - 6.5.1 Closed-form 1-compartment oral steady-state trough Knightian
+    gate (`stdlib/clinical/tacrolimus_oral_safety.sio`,
+    `predict_c_trough_knightian`).
+  - 6.5.2 14-compartment Tsit5 validation against Jusko 1995, Kershner
+    1996, and Staatz 2004
+    (`stdlib/darwin_pbpk/validation/tacrolimus_oral_pbpk.sio` — eight
+    gates, GMFE ≤ 3.0).
+  - 6.5.3 JCGM 100:2008 GUM budget showing F_oral dominance
+    (`stdlib/darwin_pbpk/pd/tacrolimus_trough_gum.sio`).
+  - 6.5.4 Lean obligation
+    (`formal/lean4/SounioTacrolimusDosingSafety.lean`).
+  - 6.5.5 Cross-drug ISO budget synthesis demonstrating that the
+    dominant uncertainty source is drug-class-dependent
+    (`stdlib/darwin_pbpk/validation/cross_drug_iso_budget.sio`,
+    findings tabulated in
+    `docs/dissertation/cross_drug_iso_budget_findings.md`).
+
+- 6.6 **Drug-drug interactions as an irreducible GUM class** —
+  tacrolimus + sirolimus (Cypher DES) co-administration.
+  - 6.6.1 Mechanistic intestinal P-gp inhibition model
+    (`stdlib/darwin_pbpk/ddi/tacrolimus_sirolimus_ddi.sio`).
+  - 6.6.2 Clinical validation under Knightian-conservative F_combo
+    propagation
+    (`stdlib/darwin_pbpk/validation/tacrolimus_sirolimus_ddi_clinical.sio` —
+    six gates including a "transitions from PRESCRIBE to ADJUST"
+    decision-flip check on co-administration).
+  - 6.6.3 Lean obligation
+    (`formal/lean4/SounioTacrolimusDDI.lean`).
+  - 6.6.4 Dissertation argument: DDI magnitude is bounded below by the
+    Undre 1999 (n=12) single-study floor — an *irreducible* epistemic
+    uncertainty that no analytical chemistry improvement can collapse.
+
+- 6.7 Compile-time confidence gate exercised on a clinical refusal
+  pathway (`tests/run-pass/tac_compile_gate_pass.sio` +
+  `tests/compile-fail/tac_compile_gate_refuse.sio`). The compiler's
+  `EpistemicComplete` enforcement at `lean_single.sio:20950-21020`
+  rejects under-confident clinical pathways before binary emission —
+  a guarantee that runtime gates cannot give.
 
 ### Section 7 — Empirical Evaluation
 

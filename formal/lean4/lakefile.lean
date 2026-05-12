@@ -97,6 +97,17 @@ lean_lib «SounioKnightian» where
 @[default_target]
 lean_lib «SounioVancomycinDosingSafety» where
 
+-- Tacrolimus dissertation thrust — oral C24h-trough Knightian gate
+-- (F·D/(V·(eᶿ−1)) closed-form; mirrors SounioVancomycinDosingSafety)
+@[default_target]
+lean_lib «SounioTacrolimusDosingSafety» where
+
+-- Tacrolimus + sirolimus DDI — F-boost monotonicity + Fréchet
+-- composition widens the combined F_oral PBox (irreducible
+-- epistemic floor argument).
+@[default_target]
+lean_lib «SounioTacrolimusDDI» where
+
 -- M2.5: Vancomycin-Knightian thrust — Fréchet outer enclosure for
 -- monotone-in-each-arg functions (joint-dependence resolution)
 @[default_target]

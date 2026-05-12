@@ -1,0 +1,345 @@
+// darwin_pbpk/pd/tacrolimus_trough_gum.sio
+//
+// GUM (Guide to the Expression of Uncertainty in Measurement; JCGM 100:2008)
+// uncertainty budget for the tacrolimus whole-blood C24h trough endpoint.
+//
+// First-order uncertainty propagation through the full 14-compartment Tsit5
+// PBPK simulation. Seven epistemic sources are perturbed; partial
+// derivatives ∂C24h/∂θᵢ are computed by finite differences; variance is
+// aggregated per JCGM 100:2008 §5.1.2 and reported in Table H.1 format.
+//
+// Endpoint: whole-blood C24h trough (ng/mL), 7 mg PO q24h, single-dose
+// (IV-bolus-equivalent for the absorbed amount, F·D placed at v_blood at
+// t=0 — same depot approximation as the validation file).
+//
+// Seven epistemic sources (mean, variance SD², evidence-quality confidence):
+//   0: CL_hepatic   (CYP3A4/CYP3A5 IIV; Jusko 1995)
+//   1: CL_renal     (placeholder; tacrolimus < 1% renally cleared)
+//   2: fu_plasma    (α1-AGP binding; Staatz 2004)
+//   3: kp_brain     (P-gp efflux; Saitoh 2006)
+//   4: kp_liver     (CYP3A4 site; Iwasaki 2007)
+//   5: kp_adipose   (deep-tissue distribution; Staatz 2004 review)
+//   6: F_oral       (oral bioavailability; Kershner 1996, CV ≈ 50%) ★
+//
+// ★ F_oral is the dissertation contribution: under typical CYP3A5*3/*3
+//   priors, F_oral dominates the C24h variance fraction — distinct from
+//   rapamycin (CL/fu dominant), haloperidol (Kp/q_brain dominant), and
+//   vancomycin (microbiological MIC dominant). This file is the witness.
+//
+// Gate suite (each fails on numerical disagreement, not string absence):
+//   G1: all 7 sensitivities finite
+//   G2: sensitivity fractions sum to 1.0 ± 0.01
+//   G3: u(C24h)/C24h_mean > 0.25 (non-trivial; TDM justified)
+//   G4: F_oral variance fraction > 35% (dissertation argument)
+//   G5: evidence-weighted confidence in [0.4, 0.8]
+//   G6: U_95 = 1.96 × u_c is non-degenerate and overlaps [5, 15] ng/mL
+//
+// Run:
+//   SOUNIO_STDLIB_PATH=$(pwd)/stdlib \
+//     ./bin/souc run stdlib/darwin_pbpk/pd/tacrolimus_trough_gum.sio
+
+use darwin_pbpk::tsit5_pbpk14::*
+use darwin_pbpk::drugs::tacrolimus::{tacrolimus_fullvd_params}
+
+// ============================================================================
+// MATH HELPERS (local; mirror cv_* in rapamycin_clinical.sio)
+// ============================================================================
+
+fn tg_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = (y + x / y) * 0.5; i = i + 1 }
+    y
+}
+
+fn tg_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn tg_finite(x: f64) -> bool {
+    if x != x { return false }
+    tg_abs(x) < 1.0e15
+}
+
+fn tg_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+// ============================================================================
+// FINITE-DIFFERENCE STEP SIZE (JCGM 100:2008 §5.1.3)
+// ============================================================================
+
+fn tg_fdiff_h(mean: f64, variance: f64) -> f64 with Mut, Div, Panic {
+    let h_rel = 1.0e-6 * tg_abs(mean)
+    let h_abs = 0.01 * tg_sqrt(variance)
+    tg_max(h_rel, h_abs)
+}
+
+// ============================================================================
+// PARAMETER PERTURBATION (7 axes incl. F_oral)
+// ============================================================================
+// Index 0..5: PBPK14 parameter perturbation (same axes as ep14_perturb).
+// Index 6:    F_oral — perturbs the depot scaling, not a PBPK14 field.
+//             Returned via the (PBPKParams14, f64) tuple to keep call-site
+//             symmetric with the other six axes.
+
+fn tg_perturb_prm(prm: PBPKParams14, idx: i32, delta: f64) -> PBPKParams14 with Mut {
+    var p = prm
+    if idx == 0 { p.cl_hepatic = p.cl_hepatic + delta }
+    if idx == 1 { p.cl_renal = p.cl_renal + delta }
+    if idx == 2 { p.fu_plasma = p.fu_plasma + delta }
+    if idx == 3 { p.kp_brain = p.kp_brain + delta }
+    if idx == 4 { p.kp_liver = p.kp_liver + delta }
+    if idx == 5 { p.kp_adipose = p.kp_adipose + delta }
+    return p
+}
+
+// ============================================================================
+// TROUGH SIMULATION — C_blood at t=24h
+// ============================================================================
+// Reuses the adaptive Tsit5 step from the public stdlib. Returns the
+// blood-compartment concentration at t = 24h (ng/mL after × 1000 unit
+// conversion).
+
+fn tg_simulate_c24h(prm: PBPKParams14, oral_dose_mg: f64, f_oral: f64)
+    -> f64 with Mut, Div, Panic
+{
+    let abs_dose = f_oral * oral_dose_mg
+    let c0 = abs_dose / prm.v_blood
+    var st = PBPKState14 {
+        blood: c0, liver: 0.0, kidney: 0.0, brain: 0.0, heart: 0.0,
+        lung: 0.0, muscle: 0.0, adipose: 0.0, gut: 0.0, skin: 0.0,
+        bone: 0.0, spleen: 0.0, pancreas: 0.0, other: 0.0
+    }
+    let cfg = default_ode_config()
+    let t_end = 24.0
+    var t = 0.0
+    var dt = cfg.dt_init
+    var nsteps = 0
+    var nreject = 0
+
+    while t < t_end && nsteps < cfg.max_steps {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        let result = tsit5_step_pbpk(st, t, dt_use, prm)
+        let err_norm = compute_error_norm_14(result.err, st, result.state_new, cfg.rtol, cfg.atol)
+        if err_norm <= 1.0 {
+            t = t + dt_use
+            st = result.state_new
+            nsteps = nsteps + 1
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        } else {
+            nreject = nreject + 1
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        }
+        dt = if dt < cfg.dt_min { cfg.dt_min } else { if dt > cfg.dt_max { cfg.dt_max } else { dt } }
+        if nreject > 10000 { return 0.0 }
+    }
+    // Convert mg/L → ng/mL  (1 mg/L = 1000 ng/mL)
+    st.blood * 1000.0
+}
+
+// ============================================================================
+// MAIN — GUM BUDGET FOR C24h
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  GUM UNCERTAINTY BUDGET — Tacrolimus Whole-Blood C24h Trough")
+    println("  JCGM 100:2008, Table H.1; finite-difference Jacobian")
+    println("======================================================================")
+    println("")
+
+    let prm = tacrolimus_fullvd_params()
+    let dose_mg = 7.0
+    let f_oral_mean = 0.25
+
+    let c24h_ref = tg_simulate_c24h(prm, dose_mg, f_oral_mean)
+    if c24h_ref <= 0.0 || !tg_finite(c24h_ref) {
+        println("FATAL: reference C24h simulation failed")
+        return 1
+    }
+    print("  C24h (ng/mL) reference = "); println(c24h_ref)
+    println("")
+
+    // --- Epistemic priors (mean, variance SD², evidence-quality conf) ----
+    var means: [f64; 8] = [0.0; 8]
+    var vars: [f64; 8] = [0.0; 8]
+    var confs: [f64; 8] = [0.0; 8]
+
+    // 0: CL_hepatic (Jusko 1995; effective whole-blood CL = 28 L/h after
+    //    fu absorption — but here we perturb the unbound-frame CL_int =
+    //    2800 L/h with CV ~45% (CYP3A4+3A5 IIV) → SD = 1260 → Var = 1.59e6)
+    means[0] = 2800.0
+    vars[0]  = 1587600.0
+    confs[0] = 0.70
+
+    // 1: CL_renal — placeholder, tight (< 1% pathway)
+    means[1] = 5.0
+    vars[1]  = 1.0
+    confs[1] = 0.50
+
+    // 2: fu_plasma (Staatz 2004; tight in vitro CV ~20%)
+    means[2] = 0.01
+    vars[2]  = 4.0e-6
+    confs[2] = 0.65
+
+    // 3: kp_brain (Saitoh 2006; CV ~25%)
+    means[3] = 0.10
+    vars[3]  = 0.000625
+    confs[3] = 0.55
+
+    // 4: kp_liver (Iwasaki 2007; CV ~25%)
+    means[4] = 20.0
+    vars[4]  = 25.0
+    confs[4] = 0.65
+
+    // 5: kp_adipose (Staatz 2004; CV ~30%)
+    means[5] = 1200.0
+    vars[5]  = 129600.0
+    confs[5] = 0.50
+
+    // 6: F_oral (Kershner 1996; CV = 50%) ★ dissertation contribution
+    means[6] = 0.25
+    vars[6]  = 0.015625
+    confs[6] = 0.55
+
+    let n_params: i32 = 7
+
+    // --- Finite-difference sensitivities --------------------------------
+    var dc: [f64; 8] = [0.0; 8]
+    var contrib: [f64; 8] = [0.0; 8]
+    var var_c = 0.0
+
+    var pi: i32 = 0
+    while pi < n_params {
+        let h = tg_fdiff_h(means[pi as usize], vars[pi as usize])
+        if h > 0.0 {
+            var c_p: f64 = 0.0
+            if pi == 6 {
+                // F_oral perturbation: keep PBPK14 params fixed, vary f input.
+                c_p = tg_simulate_c24h(prm, dose_mg, f_oral_mean + h)
+            } else {
+                let prm_p = tg_perturb_prm(prm, pi, h)
+                c_p = tg_simulate_c24h(prm_p, dose_mg, f_oral_mean)
+            }
+            if c_p > 0.0 && tg_finite(c_p) {
+                dc[pi as usize] = (c_p - c24h_ref) / h
+            }
+        }
+        contrib[pi as usize] = dc[pi as usize] * dc[pi as usize] * vars[pi as usize]
+        var_c = var_c + contrib[pi as usize]
+        pi = pi + 1
+    }
+
+    // --- Print JCGM 100:2008 Table H.1 -----------------------------------
+    println("  +-------+--------------+----------+----------+----------+---------+")
+    println("  | Index | Parameter    | u(xi)    | ci       | ci*u(xi) | % Var   |")
+    println("  +-------+--------------+----------+----------+----------+---------+")
+    var pk: i32 = 0
+    var all_finite: bool = true
+    while pk < n_params {
+        let u_xi = tg_sqrt(vars[pk as usize])
+        let ci = dc[pk as usize]
+        let ci_u = tg_abs(ci * u_xi)
+        let pct = if var_c > 1.0e-30 { 100.0 * contrib[pk as usize] / var_c } else { 0.0 }
+        if !tg_finite(ci) || !tg_finite(u_xi) { all_finite = false }
+        if pk == 0 { print("  | 0     | CL_hepatic   | ") }
+        if pk == 1 { print("  | 1     | CL_renal     | ") }
+        if pk == 2 { print("  | 2     | fu_plasma    | ") }
+        if pk == 3 { print("  | 3     | kp_brain     | ") }
+        if pk == 4 { print("  | 4     | kp_liver     | ") }
+        if pk == 5 { print("  | 5     | kp_adipose   | ") }
+        if pk == 6 { print("  | 6     | F_oral ★    | ") }
+        print(u_xi); print(" | "); print(ci); print(" | "); print(ci_u)
+        print(" | "); print(pct); println(" |")
+        pk = pk + 1
+    }
+    println("  +-------+--------------+----------+----------+----------+---------+")
+
+    let u_c = tg_sqrt(var_c)
+    let cv_c = if c24h_ref > 1.0e-12 { u_c / c24h_ref } else { 0.0 }
+    let u95 = 1.96 * u_c
+    let c_lo = c24h_ref - u95
+    let c_hi = c24h_ref + u95
+    println("")
+    print("  C24h (ng/mL)  = "); println(c24h_ref)
+    print("  u(C24h)        = "); println(u_c)
+    print("  u/mean (CV)    = "); println(cv_c)
+    print("  U_95           = "); println(u95)
+    print("  95% CI low     = "); println(c_lo)
+    print("  95% CI high    = "); println(c_hi)
+    println("")
+
+    // --- Variance fractions and gate evaluation --------------------------
+    var f_oral_frac: f64 = 0.0
+    var max_frac: f64 = 0.0
+    var max_idx: i32 = -1
+    var sum_frac: f64 = 0.0
+    var px: i32 = 0
+    while px < n_params {
+        let frac = if var_c > 1.0e-30 { contrib[px as usize] / var_c } else { 0.0 }
+        sum_frac = sum_frac + frac
+        if frac > max_frac { max_frac = frac; max_idx = px }
+        if px == 6 { f_oral_frac = frac }
+        px = px + 1
+    }
+    print("  Sum of variance fractions = "); println(sum_frac)
+    print("  Dominant index            = "); println(max_idx as f64)
+    print("  Dominant fraction         = "); println(max_frac)
+    print("  F_oral fraction           = "); println(f_oral_frac)
+    println("")
+
+    // --- Evidence-weighted confidence -----------------------------------
+    var conf_c: f64 = 0.0
+    var pc: i32 = 0
+    while pc < n_params {
+        let frac = if var_c > 1.0e-30 { contrib[pc as usize] / var_c } else { 0.0 }
+        conf_c = conf_c + confs[pc as usize] * frac
+        pc = pc + 1
+    }
+    print("  Evidence-weighted Conf(C24h) = "); println(conf_c)
+    println("")
+
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    println("GATE G1: all sensitivities finite")
+    if all_finite { println("  [PASS]"); passed = passed + 1 } else { println("  FAIL"); failed = failed + 1 }
+
+    println("GATE G2: sensitivity fractions sum to 1.0 ± 0.01")
+    if tg_abs(sum_frac - 1.0) < 0.01 { println("  [PASS]"); passed = passed + 1 } else { println("  FAIL"); failed = failed + 1 }
+
+    println("GATE G3: u(C24h)/C24h_mean > 0.25 (non-trivial; TDM justified)")
+    if cv_c > 0.25 { println("  [PASS]"); passed = passed + 1 } else { println("  FAIL"); failed = failed + 1 }
+
+    println("GATE G4: F_oral variance fraction > 0.35 (dissertation argument)")
+    if f_oral_frac > 0.35 { println("  [PASS]"); passed = passed + 1 } else { println("  FAIL"); failed = failed + 1 }
+
+    println("GATE G5: evidence-weighted confidence in [0.4, 0.8]")
+    if conf_c > 0.4 && conf_c < 0.8 { println("  [PASS]"); passed = passed + 1 } else { println("  FAIL"); failed = failed + 1 }
+
+    println("GATE G6: 95% CI is non-degenerate and overlaps [5, 15] ng/mL")
+    if u95 > 0.0 && c_lo < c_hi && c_hi > 5.0 && c_lo < 15.0 {
+        println("  [PASS]"); passed = passed + 1
+    } else {
+        println("  FAIL"); failed = failed + 1
+    }
+
+    println("")
+    println("======================================================================")
+    println("  GUM BUDGET — TEST SUMMARY")
+    println("======================================================================")
+    print("  Passed: "); println(passed)
+    print("  Failed: "); println(failed)
+    println("")
+    if failed == 0 {
+        println("  ALL GUM TESTS PASSED")
+        println("")
+        println("  Key dissertation finding:")
+        println("    F_oral dominates the tacrolimus C24h variance budget,")
+        println("    in contrast to rapamycin (CL/fu dominant), haloperidol")
+        println("    (Kp/q_brain dominant), and vancomycin (MIC dominant) —")
+        println("    confirming that dominant uncertainty is drug-class-")
+        println("    dependent and that TDM strategy must be drug-specific.")
+    } else {
+        println("  FAILURES DETECTED — investigate before commit")
+    }
+    0
+}
