@@ -20,6 +20,7 @@ Each generated bundle should contain:
 - `RESULTS.md`: commands, exit codes, and summary.
 - `manifest.json`: commit, branch, host, timestamp, selected compiler metadata, binary hashes, tool versions, and claim coverage.
 - `logs/`: raw command logs.
+- `serious-conformance/`: bounded conformance summary when full mode runs.
 - a copy or link to `docs/serious-language/readiness-ledger.md`.
 - a copy or link to the paper draft under review.
 - offload review logs or pointers in `.claude/llm_offload_log.md` before submission.
@@ -31,6 +32,7 @@ Smoke mode requires the checked repository artifact, Bash, Git, and Python 3. Fu
 The bundle records:
 
 - `SOUC_BIN`;
+- `SOUNIO_STDLIB_PATH`, pinned to this checkout's `stdlib` unless `SOUNIO_SERIOUS_LANGUAGE_STDLIB_PATH` is set;
 - SHA256 and byte size for the wrapper and selected compiler binary;
 - `git`, `bash`, `python3`, and `lake` versions;
 - relative log paths;
@@ -47,6 +49,8 @@ Heavier command:
 ```bash
 SOUNIO_SERIOUS_LANGUAGE_FULL=1 bash scripts/paper/build_serious_language_bundle.sh
 ```
+
+Full mode includes the bounded serious-language conformance gate, passes the same pinned compiler and stdlib paths into that sub-gate, and writes its summary under `serious-conformance/`.
 
 ## Required Claim Checks
 
@@ -100,6 +104,6 @@ These are blockers for a top-tier PL submission, not blockers for an internal or
 
 - binary provenance needs to be cited from the generated bundle's hashes and self-host gate logs;
 - `lean_single.sio` versus modular compiler parity needs a conformance or parity gate before any source-swap claim;
-- the language spec needs a conformance corpus before it is treated as normative;
+- the language spec needs broader conformance coverage before it is treated as normative;
 - full-suite failures must be fixed or downgraded before saying the whole suite is green;
 - Lean build status must be generated on a host with `lake` before formal claims are submitted.

@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 export SOUC_BIN="${SOUNIO_SERIOUS_LANGUAGE_SOUC_BIN:-$ROOT_DIR/bin/souc}"
-export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+export SOUNIO_STDLIB_PATH="${SOUNIO_SERIOUS_LANGUAGE_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
 timestamp="$(date -u +"%Y%m%dT%H%M%SZ")"
 ARTIFACT_ROOT="${SOUNIO_SERIOUS_LANGUAGE_ARTIFACT_ROOT:-$ROOT_DIR/artifacts/conference-serious-language/$timestamp}"
@@ -107,6 +107,7 @@ Generated at: $timestamp
 | host | \`$host_os/$host_arch\` |
 | souc_bin | \`$SOUC_BIN\` |
 | souc_bin_sha256 | \`$souc_wrapper_sha256\` |
+| stdlib_path | \`$SOUNIO_STDLIB_PATH\` |
 | selected_bin | \`$selected_bin\` |
 | selected_bin_sha256 | \`$selected_bin_sha256\` |
 | full_mode | \`$FULL_MODE\` |
@@ -126,6 +127,7 @@ cat >"$MANIFEST" <<EOF
   "host_os": $(printf '%s' "$host_os" | json_escape),
   "host_arch": $(printf '%s' "$host_arch" | json_escape),
   "souc_bin": $(printf '%s' "$SOUC_BIN" | json_escape),
+  "stdlib_path": $(printf '%s' "$SOUNIO_STDLIB_PATH" | json_escape),
   "souc_bin_sha256": $(printf '%s' "$souc_wrapper_sha256" | json_escape),
   "souc_bin_bytes": $(printf '%s' "$souc_wrapper_bytes" | json_escape),
   "selected_bin": $(printf '%s' "$selected_bin" | json_escape),
@@ -144,6 +146,7 @@ cat >"$MANIFEST" <<EOF
     "checked_compiler_entry": ["souc-version.log", "souc-info.log"],
     "linux_x86_64_compile_run": ["hello-check.log", "hello-run.log"],
     "docs_governance": ["docs-consistency.log", "docs-registry.log"],
+    "serious_conformance": ["serious-conformance.log", "serious-conformance/summary.v1.tsv", "serious-conformance/summary.v1.json"],
     "sounio_suite": ["sio-suite.log"],
     "selfhost": ["selfhost-host-gate.log"],
     "ontology": ["ontology-rebuilt.log"],
@@ -175,6 +178,7 @@ run_step required docs-consistency bash scripts/dev/check_docs_consistency.sh
 run_step required docs-registry bash scripts/dev/check_docs_registry.sh
 
 if [[ "$FULL_MODE" == "1" ]]; then
+  run_step optional serious-conformance env SOUNIO_SERIOUS_CONFORMANCE_ARTIFACT_ROOT="$ARTIFACT_ROOT/serious-conformance" SOUNIO_SERIOUS_CONFORMANCE_SOUC_BIN="$SOUC_BIN" SOUNIO_SERIOUS_CONFORMANCE_STDLIB_PATH="$SOUNIO_STDLIB_PATH" bash scripts/ci/serious_language_conformance_gate.sh
   run_step optional sio-suite bash scripts/run_sio_test_suite.sh --jobs "${SOUNIO_TEST_JOBS:-4}"
   run_step optional selfhost-host-gate bash scripts/ci/selfhost_host_gate.sh
   run_step optional ontology-rebuilt bash scripts/ci/run_ontology_validation.sh --mode rebuilt ontology

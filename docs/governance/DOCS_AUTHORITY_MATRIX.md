@@ -332,6 +332,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.zeta-variance-fix-plan | historical | docs/research/zeta_variance_fix_plan.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.roadmap.2026-q2-research-milestones | repo_only | docs/roadmap/2026_Q2_research_milestones.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.serious-language.compiler-maturity-snapshot | repo_only | docs/serious-language/compiler-maturity-snapshot.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.serious-language.conformance-spine | repo_only | docs/serious-language/conformance-spine.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.serious-language.paper-bundle | repo_only | docs/serious-language/paper-bundle.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.serious-language.readiness-ledger | repo_only | docs/serious-language/readiness-ledger.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.serious-language.readme | repo_only | docs/serious-language/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
