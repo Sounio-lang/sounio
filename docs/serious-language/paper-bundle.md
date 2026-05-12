@@ -22,6 +22,8 @@ Each generated bundle should contain:
 - `logs/`: raw command logs.
 - `serious-conformance/`: bounded conformance summary when full mode runs.
 - a copy or link to `docs/serious-language/readiness-ledger.md`.
+- a link to `docs/serious-language/real-world-defensibility.md`.
+- a spec/evidence drift log from `scripts/ci/serious_language_spec_drift_gate.sh`, including the bounded conformance summary used to validate cited conformance cases.
 - a copy or link to the paper draft under review.
 - offload review logs or pointers in `.claude/llm_offload_log.md` before submission.
 
@@ -57,9 +59,10 @@ Full mode includes the bounded serious-language conformance gate, passes the sam
 Before any paper or slide deck says a claim is stable:
 
 1. The claim appears in `readiness-ledger.md`.
-2. The generated bundle includes a command or artifact supporting it.
-3. Failures are either fixed or explicitly downgraded in wording.
-4. External-facing prose has at least two-provider `bin/llm-offload` review.
+2. Any spec-backed claim appears in `spec-evidence-matrix.v1.tsv` with appropriate status. The readiness ledger governs public wording; the matrix governs spec-area evidence status.
+3. The generated bundle includes a command or artifact supporting it.
+4. Failures are either fixed or explicitly downgraded in wording.
+5. External-facing prose has at least two-provider `bin/llm-offload` review.
 
 ## Paper Structure
 
@@ -80,6 +83,7 @@ Do not build the paper around broad claims such as "production-ready language" o
 A bundle is conference-ready only when:
 
 - the smoke bundle completes with no required-step failures;
+- the spec/evidence drift gate passes;
 - any full-lane failures are documented in `RESULTS.md`;
 - paper claims are downgraded to match the ledger;
 - Lean proof status includes explicit `sorry` and `axiom` accounting;
