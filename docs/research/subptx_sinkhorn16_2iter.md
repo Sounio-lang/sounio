@@ -24,6 +24,12 @@ is the inner OT solver for ORC.
 
 **Both yes.**
 
+This is a fixed-iteration structure smoke, not a convergence theorem.
+The gate checks the diagonal sanity case against the analytic
+2-iteration fixed point within the documented f32 `.approx`
+transcendental floor; production ABIDE-I use in later commits moves to
+the 16-iteration kernel and separate per-edge NumPy spot-checks.
+
 On the diagonal-cost / uniform-marginal sanity case
 (C[i][j] = (i==j) ? 0 : 1, λ=1, a=b=1/16 marginals, so
 K[i][j] = (i==j) ? 0 : -1, la = lb = log2(1/16) = -4), the analytic
@@ -60,6 +66,11 @@ either build. The same mechanism that holds for LSE-8 and the
 Cayley-Dickson kernels (per
 `docs/research/subptx_fmad_invariance.md`) holds for Sinkhorn-16
 at scale.
+
+This SASS statement depends on a working CUDA disassembler-capable
+runner. CPU-only or broken-`cuobjdump` environments can compile and
+inspect the source/gates, but cannot regenerate this part of the
+evidence locally.
 
 **Run-to-run determinism.** Three back-to-back launches of the same
 kernel on the same input produced bit-identical u and v outputs.

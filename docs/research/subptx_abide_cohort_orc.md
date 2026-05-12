@@ -122,6 +122,13 @@ Both ASD/TD comparisons are essentially null. The mean-ORC d of
 +0.011 is **even more nullward** than the G₂ bridge analysis
 of CC200 eigenmodes (`project_g2_bridge.md`: d = 0.06).
 
+No inferential p-values are claimed here. The ASD/TD table is a
+descriptive effect-size screen over two predeclared per-subject
+features, without covariate adjustment, site harmonisation, or
+multiple-comparison correction. It is useful as a null-direction
+engineering result for this direct-kNN ORC operator, not as a
+confirmatory biomarker analysis.
+
 ## What this confirms — and what it doesn't
 
 **Confirms.** The G₂ bridge null was not an artefact of the
@@ -152,6 +159,11 @@ step is to re-emit on A5000 / L4 via the cluster path and
 diff `<subject>_orc.npy` bytewise — the kernel-level 3-run
 determinism gate already confirms run-to-run on the same
 GPU; cross-GPU is the cluster experiment.
+
+**GPU evidence boundary.** The committed TSV is an output artefact from
+the recorded RTX 4000 Ada sweep. CPU-only checkouts can inspect and
+reuse the TSV, but cannot regenerate the GPU `.npy` matrices or the
+Sinkhorn execution evidence without a CUDA-capable runner.
 
 ## Output artefacts
 

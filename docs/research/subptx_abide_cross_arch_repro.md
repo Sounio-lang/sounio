@@ -1,4 +1,4 @@
-# Sub-PTX B2: cross-arch / re-emit ORC reproducibility (kick-off)
+# Sub-PTX B2: same-arch re-emit and cross-arch ORC reproducibility kickoff
 
 **Date:** 2026-05-11
 **Branch:** `research/subptx-rounding-mode-step0`
@@ -17,6 +17,10 @@ Two halves of the reproducibility claim that closes the B2 plan:
    the cluster GPU (L4 / sm_86 on `gpuorangefs-r770-proxmox`).
    Submission script ready; the cluster node is currently
    `DOWN+NOT_RESPONDING` so the job is staged, not yet fired.
+
+This note demonstrates the same-architecture re-emit/run half only.
+The cross-architecture result is not claimed yet; it is a staged
+experiment and remains the next evidence gate.
 
 ## Half 1: same-arch re-emit (RTX 4000 Ada / sm_89)
 
@@ -100,6 +104,7 @@ bash slurm-jobs/research/submit-abide-cross-arch-repro.sh
 sizes through 480k mul+add chains): byte-identical PTX is reproducible
 on a different sm_89 card, and **ULP-equivalent** (`.approx ex2/lg2`
 floor ~5e-6 single-edge, ~1e-7 on per-edge κ) across sm_86 / sm_89.
+This is a hypothesis for the queued cluster run, not a shipped result.
 Whether the cubin / SASS is byte-identical depends on ptxas's choice
 of code-gen, which is sm-version dependent — that's expected; the
 bit-stability claim is at the **kernel output level**, not at the

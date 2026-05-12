@@ -6,6 +6,13 @@
 **Branch:** `research/subptx-rounding-mode-step0`
 **Plan reference:** B1 Path C of the ORC × EEG/fMRI × SWOW × geometric biomarker plan
 
+**Evidence boundary.** The SASS/FFMA table below is a recorded
+GPU-toolchain result from the habitat-0 RTX 4000 Ada run. The CI gate
+can only re-check it when both `ptxas` and a usable `cuobjdump` are
+available; if a local CUDA disassembler is absent or crashes while
+dumping the generated cubin, the gate reports SKIPPED rather than
+pretending that SASS evidence was regenerated.
+
 ## Question
 
 The S-SSM zero-divisor regularization on real EEG reports a 5.6×
@@ -77,9 +84,10 @@ hardcoded.
 ## Interpretation
 
 1. **The orbit-equivalence bit-identical-MSE claim on the 5 ZD pairs
-   is robust to FMA-contracting**, the most-commonly-cited ptxas
-   sub-PTX freedom. The 5.6× regularization on real EEG inherits this
-   robustness for the algebra layer underneath.
+   is robust to FMA-contracting on the tested CUDA 12.0 / sm_50 /
+   sm_89 toolchain**, the most-commonly-cited ptxas sub-PTX freedom.
+   The 5.6× regularization on real EEG inherits this tested robustness
+   for the algebra layer underneath.
 
 2. **The G₂ bridge null result** (`project_g2_bridge.md`: no ASD/TD
    diff at d=0.06 on ABIDE-I CC200 eigenmodes; z≈2 is a combinatorial
@@ -115,6 +123,10 @@ hardcoded.
 - It does not measure numerical accuracy. The kernels are bit-stable
   in their binary form; whether that binary form is the *most
   accurate* possible is a separate question.
+- It does not claim that every future CI run has regenerated the SASS
+  comparison. CPU-only or broken-CUDA environments must treat the gate
+  as a skip and rely on the recorded GPU evidence until a CUDA
+  disassembler-capable runner is available.
 
 ## Reproduction
 
