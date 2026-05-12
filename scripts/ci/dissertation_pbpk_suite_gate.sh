@@ -105,6 +105,10 @@ TESTS=(
   "tacrolimus_ddi_module        stdlib/darwin_pbpk/ddi/tacrolimus_sirolimus_ddi.sio"
   "tacrolimus_ddi_clinical      stdlib/darwin_pbpk/validation/tacrolimus_sirolimus_ddi_clinical.sio"
   "cross_drug_iso_budget        stdlib/darwin_pbpk/validation/cross_drug_iso_budget.sio"
+  "halo_pgx_gate              stdlib/darwin_pbpk/validation/haloperidol_pgx_gate.sio"
+  "halo_pgx_gate_pass         tests/run-pass/halo_pgx_gate_pass.sio"
+  "olanzapine_d2_mtor         stdlib/darwin_pbpk/validation/olanzapine_d2_mtor.sio"
+  "pop_pbpk_pd                stdlib/darwin_pbpk/population/pop_pbpk_pd.sio"
 )
 
 # Smoke entries: artifact-emitting demos (HTML, SVG, narrative reports).
@@ -115,6 +119,10 @@ TESTS_SMOKE=(
   "dissertation_demo            examples/dissertation_demo.sio"
   "dissertation_interactive     examples/dissertation_interactive.sio"
   "dissertation_plot            examples/dissertation_plot.sio"
+  "dissertation_pgx_demo      examples/dissertation_pgx_compile_gate_demo.sio"
+  "dissertation_olanzapine    examples/dissertation_olanzapine_demo.sio"
+  "dissertation_168_poly      examples/dissertation_168_polypharmacy.sio"
+  "dissertation_pop_demo      examples/dissertation_pop_pbpk_pd_demo.sio"
 )
 
 fails=0
@@ -149,7 +157,7 @@ for entry in "${TESTS[@]}"; do
     continue
   fi
 
-  if ! grep -qE "^PASS$|^ALL PASS$|ALL [0-9]+ TESTS PASSED|^ *ALL (TESTS|GUM TESTS) PASSED$|^ *(DEMO|SS DEMO|SS FULLVD|SCENARIO GATE|PK/PD DEMO) OK$|^ *DDI MODULE OK$|^ *DDI CLINICAL VALIDATION COMPLETE$|^ *CROSS-DRUG ISO BUDGET COMPLETE$" "$log"; then
+  if ! grep -qE "^PASS$|^ALL PASS$|ALL [0-9]+ TESTS PASSED|^ *ALL (TESTS|GUM TESTS) PASSED$|^ *(DEMO|SS DEMO|SS FULLVD|SCENARIO GATE|PK/PD DEMO) OK$|^ *DDI MODULE OK$|^ *DDI CLINICAL VALIDATION COMPLETE$|^ *CROSS-DRUG ISO BUDGET COMPLETE$|^HALO PGX GATE PASS$" "$log"; then
     echo "  FAIL: no PASS marker in stdout"
     tail -5 "$log" | sed 's/^/    /'
     fails=$((fails + 1))
