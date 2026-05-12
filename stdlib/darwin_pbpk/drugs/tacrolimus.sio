@@ -1,0 +1,259 @@
+// darwin_pbpk/drugs/tacrolimus.sio — Tacrolimus (FK506) PBPK Parameters
+//
+// Epistemic priors for tacrolimus based on published pharmacokinetic literature.
+//
+// Key pharmacological identity:
+//   - Calcineurin inhibitor, immunosuppressant (Fujisawa/Astellas, 1989)
+//   - CYP3A4 / CYP3A5 / P-gp substrate: large CYP3A5 polymorphism effect
+//   - Low oral bioavailability F ≈ 0.25 with CV ~50% (Kershner 1996;
+//     Staatz 2004)
+//   - Strong erythrocyte sequestration via FKBP12 (rb_ratio ~ 15)
+//   - Strong plasma binding (~99% albumin/α1-AGP): fu_plasma ≈ 0.01
+//   - Narrow therapeutic window: whole-blood C24h target 5–15 ng/mL
+//   - Therapeutic drug monitoring (TDM) mandatory in clinical practice
+//
+// This module is the F_oral-dominant witness for the dissertation: rapamycin
+// (sirolimus), haloperidol, vancomycin, and the semaglutide TMDD path all
+// have other dominant GUM sources. Tacrolimus uniquely exercises F% as the
+// largest single contributor to the C24h variance budget under typical
+// CYP3A5*3/*3 priors.
+//
+// Literature sources used in this file:
+//   - Jusko WJ et al. (1995) Clin Pharmacol Ther 57:281–290
+//     → Population PK in liver transplant patients (n=27), CL ≈ 0.4 L/h/kg
+//   - Kershner RP & Fitzsimmons WE (1996) Transplantation 62:920–926
+//     → Whole-blood concentration / efficacy + toxicity relationship,
+//       oral F ≈ 0.25 with CV ~50%
+//   - Bekersky I et al. (1999) J Clin Pharmacol 39:1212–1216
+//     → Oral absorption (ka ≈ 0.38 h⁻¹), food effect characterization
+//   - Beysens AJ et al. (1991) Transplant Proc 23:2745
+//     → RBC FKBP12 binding, whole-blood / plasma ratio ≈ 15
+//   - Staatz CE & Tett SE (2004) Clin Pharmacokinet 43:623–653
+//     → Canonical review of tacrolimus PK/PD; serves as umbrella reference
+//       for several derived constants in this module
+//   - Iwasaki K (2007) Drug Metab Pharmacokinet 22:328
+//     → Tacrolimus metabolism review (CYP3A4 hepatic Kp ≈ 20)
+//   - Hesselink DA et al. (2014) Clin Pharmacokinet 53:123–139
+//     → CYP3A5 expressor vs non-expressor pharmacogenetics (used by the
+//       fast-metabolizer gate in tacrolimus_oral_pbpk.sio)
+//   - Saitoh H et al. (2006) Drug Metab Pharmacokinet 21:235
+//     → Intestinal P-gp efflux limiting tacrolimus brain penetration;
+//       supports kp_brain ≈ 0.10 (passive but P-gp-restrained)
+//
+// Confidence rubric (identical to rapamycin.sio):
+//     0.40–0.50: single in vitro study, small n
+//     0.50–0.65: single in vivo study, moderate n (10–30 patients)
+//     0.65–0.80: replicated in vivo, n>30, consistent
+//     0.80–0.95: meta-analysis or regulatory submission-grade data
+
+use darwin_pbpk::tsit5_pbpk14::*
+
+// ============================================================================
+// LOCAL MATH HELPERS
+// ============================================================================
+// Newton–Raphson sqrt and exp suitable for use in `fn` (not `pub fn`) helpers
+// inside small parameter calculations. Heavy math is delegated to the
+// validation modules that use the existing rapamycin_clinical.sio cv_* helpers.
+
+fn tac_sqrt_drug(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 10 {
+        y = (y + x / y) * 0.5
+        i = i + 1
+    }
+    return y
+}
+
+// ============================================================================
+// MEAN PBPK14 PARAMETERS
+// ============================================================================
+// 70 kg adult, whole-blood referenced.
+//
+// Note on Vd parameterization:
+//   Real tacrolimus Vd_ss ≈ 1300 L (Staatz 2004) — driven by intracellular
+//   FKBP12 binding plus deep tissue sequestration. For the dissertation's
+//   24-48 h simulation window the distribution-capped layout is sufficient;
+//   adipose Kp stays modest to keep step cost bounded. See
+//   tacrolimus_fullvd_params() below for the steady-state-fitted variant.
+//
+// Clearance parameterization:
+//   The ODE applies CL on unbound drug: dC/dt ⊃ −(CL/V_blood) · c_unbound · rb.
+//   Reported whole-blood CL (Jusko 1995) is 28 L/h. With fu_plasma = 0.01,
+//   the intrinsic-unbound clearance entering the ODE is
+//       CL_int = CL_wb / fu = 28 / 0.01 = 2800 L/h.
+//   See rapamycin.sio:121–134 for the analogous reasoning.
+
+pub fn tacrolimus_mean_params() -> PBPKParams14 {
+    var prm = default_pbpk_params()
+
+    // --- Clearance (CYP3A4/CYP3A5-dominated) ----------------------------
+    // CL_wb = 28 L/h (Jusko 1995, popPK n=27, liver transplant).
+    // Unbound-driven ODE: CL_int = CL_wb / fu = 28 / 0.01 = 2800 L/h.
+    prm.cl_hepatic = 2800.0
+    prm.cl_renal = 5.0       // negligible (< 1%); placeholder for sensitivity
+
+    // --- Binding -----------------------------------------------------------
+    // fu_plasma = 0.01 (Staatz 2004; ≈ 99% bound, mostly α1-AGP + albumin)
+    // rb_ratio = 15 (Beysens 1991; RBC FKBP12 sequestration)
+    prm.fu_plasma = 0.01
+    prm.rb_ratio = 15.0
+
+    // --- Partition coefficients (literature in vivo Kp) -------------------
+    prm.kp_brain   = 0.10     // P-gp efflux at BBB; Saitoh 2006 (kept tight)
+    prm.kp_liver   = 20.0     // CYP3A4 site (Iwasaki 2007)
+    prm.kp_kidney  = 6.0
+    prm.kp_heart   = 4.0
+    prm.kp_lung    = 8.0
+    prm.kp_muscle  = 3.0
+    prm.kp_gut     = 6.0      // enterocyte CYP3A4 + P-gp
+    prm.kp_spleen  = 8.0      // lymphocyte FKBP12
+    prm.kp_pancreas = 4.0
+    prm.kp_skin    = 2.0
+    prm.kp_bone    = 1.5
+    prm.kp_other   = 2.0
+    // Adipose capped for 24-48 h simulations: see header note.
+    prm.kp_adipose = 5.0
+
+    return prm
+}
+
+// ============================================================================
+// FULL-Vd VARIANT (steady-state-fitted)
+// ============================================================================
+// Reproduces the literature Vd_ss ≈ 1300 L by un-capping adipose. Use this
+// for multi-day steady-state regimens (e.g. the trough_gum endpoint).
+//
+// Mass-balance target (rb_ratio = 15):
+//   Vd_eff = V_blood + Σ V_t · Kp_t / rb_ratio
+// With Σ V_t · Kp_t for fast tissues ≈ 320, matching Vd_eff = 1300 L requires
+//   1300 = 5 + (320 + 15 × Kp_adipose) / 15
+//   Kp_adipose = (1295 × 15 − 320) / 15 ≈ 1273
+// We adopt 1200 (within Staatz 2004 reported variability) and cap q_adipose
+// to keep adipose-release as the terminal-phase rate-limit, matching
+// t½ = ln2 · Vd / CL = 0.693 × 1300 / 28 ≈ 32 h (Kershner 1996: 12–24 h
+// reported for whole-blood; longer terminal phase emerges under prolonged
+// sampling — Staatz 2004).
+
+pub fn tacrolimus_fullvd_params() -> PBPKParams14 {
+    var prm = tacrolimus_mean_params()
+    prm.kp_adipose = 1200.0   // un-capped adipose sequestration
+    prm.q_adipose  = 0.5      // PS-limited release (sets terminal t½)
+    prm.q_liver    = 25.0     // CYP3A4-limited, not flow-limited
+    prm.q_muscle   = 10.0
+    prm.q_bone     = 1.0
+    prm.q_skin     = 4.0
+    return prm
+}
+
+// ============================================================================
+// ORAL ABSORPTION PARAMETERS
+// ============================================================================
+// Tacrolimus is administered orally (Prograf capsules / Astagraf XL).
+// First-order depot absorption with low F_oral is the canonical PK model.
+
+pub struct TacrolimusOralParams {
+    ka: f64,         // absorption rate constant (h⁻¹)
+    f_oral: f64,     // oral bioavailability (dimensionless, [0,1])
+    tlag_h: f64,     // absorption lag (h); often modeled as ~0 for tacrolimus
+}
+
+pub fn tacrolimus_oral_params() -> TacrolimusOralParams {
+    TacrolimusOralParams {
+        ka: 0.38,        // h⁻¹ (Bekersky 1999, fasted)
+        f_oral: 0.25,    // Kershner 1996, CV ~50%
+        tlag_h: 0.0,
+    }
+}
+
+// ============================================================================
+// EPISTEMIC VARIANCE PRIORS
+// ============================================================================
+// Each uncertain parameter: mean, variance (SD²), evidence-quality confidence.
+// Confidence is NOT a Beta posterior for unbounded params (CL, Ka); it is
+// a normalized evidence score per the header rubric.
+
+pub struct TacrolimusEpParam {
+    mean: f64,
+    variance: f64,     // SD² (GUM Var)
+    confidence: f64,   // [0,1] evidence quality
+}
+
+fn tac_ep_param(mean: f64, variance: f64, confidence: f64) -> TacrolimusEpParam {
+    TacrolimusEpParam { mean: mean, variance: variance, confidence: confidence }
+}
+
+pub fn tac_ep_cv(ep: &TacrolimusEpParam) -> f64 {
+    let sig = tac_sqrt_drug(ep.variance)
+    if ep.mean > 1.0e-12 || ep.mean < 0.0 - 1.0e-12 {
+        let abs_mean = if ep.mean < 0.0 { 0.0 - ep.mean } else { ep.mean }
+        return sig / abs_mean
+    }
+    return 0.0
+}
+
+pub struct TacrolimusPriors {
+    // CL_hepatic (whole-blood basis):
+    //   SD ≈ 12.6 L/h (CV ≈ 45% — CYP3A5 polymorphism + CYP3A4 IIV).
+    //   Source: Jusko 1995 (n=27).
+    cl_hepatic: TacrolimusEpParam,
+
+    // kp_brain:
+    //   SD ≈ 0.025 (P-gp efflux + sparse in vivo CNS data).
+    //   Source: Saitoh 2006 + extrapolation; low confidence.
+    kp_brain: TacrolimusEpParam,
+
+    // fu_plasma:
+    //   SD ≈ 0.003 (well-characterized in vitro for tacrolimus α1-AGP
+    //   binding; tighter than for rapamycin). Source: Staatz 2004.
+    fu_plasma: TacrolimusEpParam,
+
+    // F_oral:
+    //   SD ≈ 0.125 (CV ≈ 50%; food effect + P-gp/CYP3A4 first-pass IIV).
+    //   Source: Kershner 1996. THIS IS THE DOMINANT SOURCE FOR C24h
+    //   under typical CYP3A5*3/*3 priors — the dissertation contribution.
+    f_oral: TacrolimusEpParam,
+
+    // ka (oral absorption rate):
+    //   SD ≈ 0.11 (CV ≈ 30%; depot variability, food, gastric emptying).
+    //   Source: Bekersky 1999.
+    ka: TacrolimusEpParam,
+}
+
+pub fn tacrolimus_priors() -> TacrolimusPriors {
+    // CL: mean=28 L/h, SD=12.6 → variance=158.76, conf=0.70
+    let cl_prior = tac_ep_param(28.0, 158.76, 0.70)
+
+    // kp_brain: mean=0.10, SD=0.025 → variance=0.000625, conf=0.55
+    let kp_brain_prior = tac_ep_param(0.10, 0.000625, 0.55)
+
+    // fu_plasma: mean=0.01, SD=0.003 → variance=9.0e-6, conf=0.65
+    let fu_prior = tac_ep_param(0.01, 9.0e-6, 0.65)
+
+    // F_oral: mean=0.25, SD=0.125 → variance=0.015625, conf=0.55
+    let f_prior = tac_ep_param(0.25, 0.015625, 0.55)
+
+    // ka: mean=0.38 h⁻¹, SD=0.114 → variance=0.013, conf=0.60
+    let ka_prior = tac_ep_param(0.38, 0.013, 0.60)
+
+    TacrolimusPriors {
+        cl_hepatic: cl_prior,
+        kp_brain:   kp_brain_prior,
+        fu_plasma:  fu_prior,
+        f_oral:     f_prior,
+        ka:         ka_prior,
+    }
+}
+
+// ============================================================================
+// CYP3A5 GENOTYPE MODIFIER
+// ============================================================================
+// CYP3A5*1/*1 or *1/*3 (expressors) have ~2× tacrolimus clearance vs
+// CYP3A5*3/*3 (non-expressors). Hesselink 2014 reports the multiplicative
+// factor 1.8–2.2 with CV ~25%. The validation module's T6 gate uses 2.0
+// as the central estimate.
+
+pub fn tac_cyp3a5_fast_cl_multiplier() -> f64 { 2.0 }
+
+pub fn tac_cyp3a5_fast_cl_multiplier_uncertainty() -> f64 { 0.5 }
