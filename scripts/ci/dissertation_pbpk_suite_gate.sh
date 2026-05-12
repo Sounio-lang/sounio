@@ -82,6 +82,10 @@ TESTS=(
   "dissertation_steady_state    examples/dissertation_steady_state_demo.sio"
   "dissertation_steady_state_fullvd examples/dissertation_steady_state_fullvd_demo.sio"
   "dissertation_scenario_gate   examples/dissertation_scenario_gate_demo.sio"
+  "rodgers_rowland_kp           stdlib/darwin_pbpk/core/rodgers_rowland.sio"
+  "gnn_rapamycin_inference      stdlib/darwin_pbpk/ml/gnn_inference.sio"
+  "hybrid_ode_rapamycin         stdlib/darwin_pbpk/ml/hybrid_ode.sio"
+  "dissertation_hybrid_demo     examples/dissertation_hybrid_demo.sio"
 )
 
 # Smoke entries: artifact-emitting demos (HTML, SVG, narrative reports).
