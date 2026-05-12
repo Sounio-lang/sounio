@@ -28,6 +28,7 @@ The purpose is not to make every ambitious part of the repository sound finished
 |---|---|
 | [readiness-ledger.md](readiness-ledger.md) | Claim-to-evidence ledger and allowed public wording. |
 | [compiler-maturity-snapshot.md](compiler-maturity-snapshot.md) | Current compiler contract, gaps, and serious-language worklist. |
+| [conformance-spine.md](conformance-spine.md) | Bounded executable bridge from claims to compiler behavior. |
 | [paper-bundle.md](paper-bundle.md) | Paper/reproducibility bundle structure and acceptance criteria. |
 | [sunil-brief.md](sunil-brief.md) | Short, honest briefing frame for a senior PL/science conversation. |
 
@@ -47,11 +48,19 @@ SOUNIO_SERIOUS_LANGUAGE_FULL=1 bash scripts/paper/build_serious_language_bundle.
 
 The script writes logs, a manifest, and `RESULTS.md` under `artifacts/conference-serious-language/<timestamp>/`.
 
+Run just the bounded conformance spine:
+
+```bash
+bash scripts/ci/serious_language_conformance_gate.sh
+```
+
 The script pins `SOUC_BIN` to this checkout's `bin/souc` by default. Override only deliberately:
 
 ```bash
 SOUNIO_SERIOUS_LANGUAGE_SOUC_BIN=/path/to/souc bash scripts/paper/build_serious_language_bundle.sh
 ```
+
+The script also pins `SOUNIO_STDLIB_PATH` to this checkout's `stdlib` by default. Use `SOUNIO_SERIOUS_LANGUAGE_STDLIB_PATH` only when the bundle is deliberately testing another stdlib tree.
 
 ## Public Posture
 

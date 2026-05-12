@@ -41,7 +41,7 @@ The work needed for serious programming-language credibility is mostly consolida
 | Source-of-truth split | The checked binary still depends on `lean_single.sio`; modular sources can drift. | Add a parity corpus comparing checked behavior against modular intent before source-swap claims. |
 | Reproducibility | Papers need commands and logs, not only prose. | Use `scripts/paper/build_serious_language_bundle.sh` for every conference artifact. |
 | Language specification | A serious language needs a spec that matches behavior. | Audit `docs/spec/LANGUAGE_SPECIFICATION.md` against run-pass and compile-fail cases. |
-| Conformance corpus | Reviewer trust improves when behavior is executable. | Promote a small `tests/conformance/` corpus with expected stdout/stderr/exit codes. |
+| Conformance corpus | Reviewer trust improves when behavior is executable. | Maintain and expand `tests/conformance/manifest.v1.tsv` through `scripts/ci/serious_language_conformance_gate.sh`. |
 | Formal status | Mixed proof status can be misread as all-proven or all-scaffold. | Generate and publish a Lean `sorry`/`axiom` status table per paper bundle. |
 | Tooling/install | Adoption discussions need one boring path. | Use checked-artifact install instructions first; defer broad package promises. |
 | Research boundaries | GPU, hypercomplex, ontology, and clinical surfaces have different maturity. | Name gate, hardware, and scope for each claim. |
@@ -51,7 +51,7 @@ The work needed for serious programming-language credibility is mostly consolida
 1. Lock the evidence language.
 2. Generate a paper bundle from current commands.
 3. Refresh paper prose to cite only ledger-backed claims.
-4. Add conformance and spec-drift gates.
+4. Expand the conformance spine and add spec-drift gates.
 5. Only then expand public feature claims.
 
 ## Demo Contract
@@ -65,7 +65,7 @@ The default live demo should be intentionally small:
 ./bin/souc run examples/hello.sio
 ```
 
-Then show one epistemic/GUM example and one compile-fail/effect example from the checked corpus.
+Then show one epistemic/GUM example, one compile-fail/effect example, and the bounded conformance summary from `scripts/ci/serious_language_conformance_gate.sh`.
 
 Avoid live-demonstrating:
 
@@ -84,6 +84,6 @@ The next serious-language milestone is not a new feature. It is a reproducible s
 ## Non-Negotiable Blockers Before Strong PL Submission
 
 - A parity/conformance gate must fence the `lean_single.sio` and modular compiler split.
-- The language specification must be tied to executable conformance tests.
+- The language specification must be tied to broader executable conformance tests.
 - The generated paper bundle must include binary hashes and self-host gate logs.
 - Formal claims must cite exact Lean `sorry`/`axiom` status from the generated bundle.
