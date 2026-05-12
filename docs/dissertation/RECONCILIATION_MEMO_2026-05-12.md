@@ -3,7 +3,10 @@
 **Date:** 2026-05-12  
 **Branch:** claude/refine-local-plan-KAgIS  
 **Commit:** 8dff1ed988bcdaf61bc83e8fc4dda44bb9db7f0a  
-**Auditor:** Claude Code
+**Auditor:** Claude Code  
+**Human answer (2026-05-12):** PUC-SP — the September–October defense is the biomaterials master's.  
+**Resolved action:** §§4.1–4.9 are final. §4.10 (Sobol/Cut-HDMR) is the next deliverable.
+The Sounio epistemic-computing thesis is a separate, longer-horizon project.
 
 ---
 
