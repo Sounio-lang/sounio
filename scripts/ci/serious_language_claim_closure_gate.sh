@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 CLAIM_REGISTRY="${SOUNIO_PUBLIC_CLAIM_REGISTRY:-$ROOT_DIR/docs/serious-language/public-claim-registry.v1.tsv}"
 DOC_SURFACE="${SOUNIO_DOC_CLAIM_SURFACE:-$ROOT_DIR/docs/serious-language/doc-claim-surface.v1.tsv}"
+CLAIM_LINES="${SOUNIO_CLAIM_LINE_ANNOTATIONS:-$ROOT_DIR/docs/serious-language/claim-line-annotations.v1.tsv}"
 MATRIX="${SOUNIO_SPEC_EVIDENCE_MATRIX:-$ROOT_DIR/docs/serious-language/spec-evidence-matrix.v1.tsv}"
 CONFORMANCE_MANIFEST="${SOUNIO_SERIOUS_CONFORMANCE_MANIFEST:-$ROOT_DIR/tests/conformance/manifest.v1.tsv}"
 timestamp="$(date -u +"%Y%m%dT%H%M%SZ")"
@@ -17,7 +18,7 @@ RESULTS="$ARTIFACT_ROOT/RESULTS.md"
 
 mkdir -p "$ARTIFACT_ROOT"
 
-for path in "$CLAIM_REGISTRY" "$DOC_SURFACE" "$MATRIX" "$CONFORMANCE_MANIFEST"; do
+for path in "$CLAIM_REGISTRY" "$DOC_SURFACE" "$CLAIM_LINES" "$MATRIX" "$CONFORMANCE_MANIFEST"; do
   if [[ ! -f "$path" ]]; then
     echo "Required claim-closure input not found: $path" >&2
     exit 2
@@ -51,7 +52,7 @@ if [[ ! -f "$CONFORMANCE_SUMMARY" ]]; then
   exit 2
 fi
 
-python3 - "$ROOT_DIR" "$CLAIM_REGISTRY" "$DOC_SURFACE" "$MATRIX" "$CONFORMANCE_MANIFEST" "$CONFORMANCE_SUMMARY" "$SUMMARY_JSON" "$RESULTS" "$timestamp" <<'PY'
+python3 - "$ROOT_DIR" "$CLAIM_REGISTRY" "$DOC_SURFACE" "$CLAIM_LINES" "$MATRIX" "$CONFORMANCE_MANIFEST" "$CONFORMANCE_SUMMARY" "$SUMMARY_JSON" "$RESULTS" "$timestamp" <<'PY'
 from __future__ import annotations
 
 import csv
@@ -65,12 +66,13 @@ from pathlib import Path
 root = Path(sys.argv[1])
 claim_registry_path = Path(sys.argv[2])
 doc_surface_path = Path(sys.argv[3])
-matrix_path = Path(sys.argv[4])
-manifest_path = Path(sys.argv[5])
-conformance_summary_path = Path(sys.argv[6])
-summary_json = Path(sys.argv[7])
-results_md = Path(sys.argv[8])
-timestamp = sys.argv[9]
+claim_lines_path = Path(sys.argv[4])
+matrix_path = Path(sys.argv[5])
+manifest_path = Path(sys.argv[6])
+conformance_summary_path = Path(sys.argv[7])
+summary_json = Path(sys.argv[8])
+results_md = Path(sys.argv[9])
+timestamp = sys.argv[10]
 
 claim_header = [
     "claim_id",
@@ -82,6 +84,7 @@ claim_header = [
     "public_wording",
 ]
 surface_header = ["pattern", "match_kind", "surface_policy", "claim_ids", "notes"]
+claim_line_header = ["annotation_id", "doc_path", "line", "claim_id", "anchor_text", "notes"]
 matrix_header = ["spec_id", "spec_anchor", "status", "evidence_kind", "evidence_ref", "claim_id", "notes"]
 valid_levels = {"stable", "validated_research", "prototype", "scaffold", "stale_conflicting"}
 valid_closure = {"closed", "downgraded", "internal_only", "historical"}
@@ -113,6 +116,7 @@ def read_tsv(path: Path, expected: list[str], label: str) -> list[dict[str, str]
 
 claims = read_tsv(claim_registry_path, claim_header, "claim-registry")
 surfaces = read_tsv(doc_surface_path, surface_header, "doc-surface")
+claim_lines = read_tsv(claim_lines_path, claim_line_header, "claim-line-annotations")
 matrix_rows = read_tsv(matrix_path, matrix_header, "spec-matrix")
 
 with manifest_path.open(newline="", encoding="utf-8") as handle:
@@ -245,6 +249,57 @@ for surface in surfaces:
         elif surface["surface_policy"] == "public" and claim_by_id[claim_id]["closure_status"] not in {"closed", "downgraded"}:
             failures.append({"surface": surface["pattern"], "reason": f"public surface references non-public claim closure: {claim_id}"})
 
+annotation_ids: set[str] = set()
+for annotation in claim_lines:
+    annotation_id = annotation["annotation_id"]
+    doc_path = annotation["doc_path"]
+    claim_id = annotation["claim_id"]
+    anchor_text = annotation["anchor_text"]
+    line_value = annotation["line"]
+
+    if not annotation_id:
+        failures.append({"surface": "claim-line-annotations", "reason": "empty annotation_id"})
+        continue
+    if annotation_id in annotation_ids:
+        failures.append({"surface": annotation_id, "reason": "duplicate annotation_id"})
+        continue
+    annotation_ids.add(annotation_id)
+
+    if claim_id not in claim_by_id:
+        failures.append({"surface": annotation_id, "reason": f"unknown claim_id: {claim_id}"})
+
+    if not doc_path or doc_path.startswith("/") or ".." in Path(doc_path).parts:
+        failures.append({"surface": annotation_id, "reason": f"unsafe doc_path: {doc_path}"})
+        continue
+
+    doc_file = root / doc_path
+    if not doc_file.is_file():
+        failures.append({"surface": annotation_id, "reason": f"missing annotated doc path: {doc_path}"})
+        continue
+
+    try:
+        line_number = int(line_value)
+    except ValueError:
+        failures.append({"surface": annotation_id, "reason": f"line is not an integer: {line_value}"})
+        continue
+
+    if line_number < 1:
+        failures.append({"surface": annotation_id, "reason": f"line must be >= 1: {line_value}"})
+        continue
+
+    lines_for_doc = doc_file.read_text(encoding="utf-8").splitlines()
+    if line_number > len(lines_for_doc):
+        failures.append({"surface": annotation_id, "reason": f"line exceeds doc length: {doc_path}:{line_number}"})
+        continue
+
+    if not anchor_text or anchor_text == "-":
+        failures.append({"surface": annotation_id, "reason": "missing anchor_text"})
+    elif anchor_text not in lines_for_doc[line_number - 1]:
+        failures.append({"surface": annotation_id, "reason": f"anchor_text not found at {doc_path}:{line_number}"})
+
+    if not any(matches(row, doc_path) for row in surfaces):
+        failures.append({"surface": annotation_id, "reason": f"annotated doc has no doc-surface rule: {doc_path}"})
+
 git = subprocess.run(
     ["git", "ls-files", "README.md", "INSTALL.md", "docs"],
     cwd=root,
@@ -280,11 +335,13 @@ payload = {
     "generated_at": timestamp,
     "claim_registry": rel(claim_registry_path),
     "doc_surface": rel(doc_surface_path),
+    "claim_line_annotations": rel(claim_lines_path),
     "spec_matrix": rel(matrix_path),
     "conformance_manifest": rel(manifest_path),
     "conformance_summary": rel(conformance_summary_path),
     "claim_count": len(claims),
     "doc_surface_rule_count": len(surfaces),
+    "claim_line_annotation_count": len(claim_lines),
     "repo_doc_count": len(doc_paths),
     "covered_repo_doc_count": len(coverage),
     "failures": failures,
@@ -301,11 +358,13 @@ lines = [
     "|---|---|",
     f"| claim_registry | `{rel(claim_registry_path)}` |",
     f"| doc_surface | `{rel(doc_surface_path)}` |",
+    f"| claim_line_annotations | `{rel(claim_lines_path)}` |",
     f"| spec_matrix | `{rel(matrix_path)}` |",
     f"| conformance_manifest | `{rel(manifest_path)}` |",
     f"| conformance_summary | `{rel(conformance_summary_path)}` |",
     f"| claims | `{len(claims)}` |",
     f"| doc_surface_rules | `{len(surfaces)}` |",
+    f"| claim_line_annotations | `{len(claim_lines)}` |",
     f"| repo_docs | `{len(doc_paths)}` |",
     f"| covered_repo_docs | `{len(coverage)}` |",
     f"| failures | `{len(failures)}` |",
@@ -324,6 +383,7 @@ lines.extend([
     "Every stable or validated-research registry claim must have passing evidence.",
     "Every prototype, scaffold, or stale/conflicting claim must be explicitly downgraded rather than silently promoted.",
     "Every governed repo doc under `README.md`, `INSTALL.md`, or `docs/` must be covered by the doc-surface manifest.",
+    "Every high-value claim-line annotation must point to a registered claim and an exact doc line containing the recorded anchor text.",
     "",
 ])
 results_md.write_text("\n".join(lines), encoding="utf-8")

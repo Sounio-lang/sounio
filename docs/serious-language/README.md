@@ -35,6 +35,7 @@ The purpose is not to make every ambitious part of the repository sound finished
 | [spec-evidence-matrix.v1.tsv](spec-evidence-matrix.v1.tsv) | Machine-checkable spec area to evidence map used by the spec-drift gate. |
 | [public-claim-registry.v1.tsv](public-claim-registry.v1.tsv) | Machine-checkable public PL claim registry with closure status and evidence rules. |
 | [doc-claim-surface.v1.tsv](doc-claim-surface.v1.tsv) | Machine-checkable coverage map for public, downgraded, internal, and historical repo docs. |
+| [claim-line-annotations.v1.tsv](claim-line-annotations.v1.tsv) | Machine-checkable exact-line anchors for high-value public PL claims. |
 
 ## Reproducibility Entry Point
 

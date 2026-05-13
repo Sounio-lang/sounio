@@ -80,7 +80,7 @@ The language specification is not automatically a public support promise. The v1
 
 `scripts/ci/serious_language_spec_drift_gate.sh` enforces the minimum rule: rows marked `executable` or `partially_executable` must cite live repo evidence. For conformance evidence, the gate runs the bounded conformance gate and requires cited cases to pass.
 
-`scripts/ci/serious_language_claim_closure_gate.sh` adds the public-claim closure rule. Every claim ID cited by the conformance manifest or spec/evidence matrix must appear in `docs/serious-language/public-claim-registry.v1.tsv`, and every repo doc under `README.md`, `INSTALL.md`, or `docs/` must be covered by `docs/serious-language/doc-claim-surface.v1.tsv` as public, downgraded, internal, or historical. A public PL claim is acceptable only when it has passing evidence or an explicit downgraded status.
+`scripts/ci/serious_language_claim_closure_gate.sh` adds the public-claim closure rule. Every claim ID cited by the conformance manifest or spec/evidence matrix must appear in `docs/serious-language/public-claim-registry.v1.tsv`, every repo doc under `README.md`, `INSTALL.md`, or `docs/` must be covered by `docs/serious-language/doc-claim-surface.v1.tsv` as public, downgraded, internal, or historical, and high-value public claims must have exact anchors in `docs/serious-language/claim-line-annotations.v1.tsv`. A public PL claim is acceptable only when it has passing evidence or an explicit downgraded status.
 
 Evidence kinds in the matrix are deliberately small:
 
@@ -93,7 +93,7 @@ Evidence kinds in the matrix are deliberately small:
 | `doc` | `evidence_ref` is an honest-status or limitations document, not runtime proof. |
 
 The drift gate checks references and passing bounded conformance behavior. Broader semantic adequacy still depends on the readiness ledger, the conformance spine, and the generated bundle; the matrix is traceability evidence, not a proof of the whole language.
-The claim-closure gate checks that the repo has no unregistered public claim surface in the governed docs set.
+The claim-closure gate checks that the repo has no unregistered public claim surface in the governed docs set, and that registered high-value claim annotations still point at the intended line text.
 
 ## What Must Not Be Claimed
 
@@ -114,4 +114,5 @@ Sounio is defensible when a skeptical engineer can:
 4. read known limitations without private explanation;
 5. reproduce the bundle for the current commit;
 6. distinguish stable language behavior from research lanes;
-7. verify that public docs are either evidence-closed or explicitly downgraded.
+7. verify that public docs are either evidence-closed or explicitly downgraded;
+8. inspect exact-line annotations for the highest-value public PL claims.

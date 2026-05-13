@@ -15,7 +15,7 @@ The conformance spine is the first executable bridge between the readiness ledge
 
 It is not a complete language specification suite. It is the conference-safe seed that lets Sounio say, "these selected language claims are executable at this commit."
 The spec/evidence matrix in `docs/serious-language/spec-evidence-matrix.v1.tsv` is the v1 seed map from tracked specification areas to evidence. `scripts/ci/serious_language_spec_drift_gate.sh` enforces that tracked executable spec rows cite live evidence, runs the bounded conformance gate, and verifies cited conformance cases pass.
-The public-claim registry in `docs/serious-language/public-claim-registry.v1.tsv` and doc-surface map in `docs/serious-language/doc-claim-surface.v1.tsv` close the remaining loop: public repo docs must either cite closed evidence-backed claims or carry an explicit downgraded/internal/historical status through `scripts/ci/serious_language_claim_closure_gate.sh`.
+The public-claim registry in `docs/serious-language/public-claim-registry.v1.tsv`, doc-surface map in `docs/serious-language/doc-claim-surface.v1.tsv`, and exact-line annotations in `docs/serious-language/claim-line-annotations.v1.tsv` close the remaining loop: public repo docs must either cite closed evidence-backed claims or carry an explicit downgraded/internal/historical status through `scripts/ci/serious_language_claim_closure_gate.sh`.
 
 ## Entry Point
 
@@ -84,6 +84,7 @@ Standalone runs default to `/tmp/sounio-serious-conformance-<timestamp>`. The co
 - The language specification is not normative until a section has executable conformance coverage and the readiness ledger permits that wording.
 - A spec area may be called executable only when its matrix row cites live evidence and the drift gate verifies any cited conformance behavior passed.
 - A public repo doc may carry a PL claim only when its doc-surface rule points to registered claim IDs whose evidence is closed or explicitly downgraded.
+- A high-value public PL claim should be added to `claim-line-annotations.v1.tsv` with an exact line number and anchor text so drift is caught.
 
 ## Current Limits
 
