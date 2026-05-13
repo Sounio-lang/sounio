@@ -36,6 +36,7 @@ With Bash, Git, Python 3, and a complete checkout, the same engineer can verify 
 ```bash
 bash scripts/ci/serious_language_conformance_gate.sh
 bash scripts/ci/serious_language_spec_drift_gate.sh
+bash scripts/ci/serious_language_claim_closure_gate.sh
 ```
 
 The primary checked environment for this path is Linux x86-64. The bundle records exact tool versions for each run; use `docs/guide/MINIMUM_VIABLE_SOUNIO.md` for the broader current support boundary.
@@ -79,6 +80,8 @@ The language specification is not automatically a public support promise. The v1
 
 `scripts/ci/serious_language_spec_drift_gate.sh` enforces the minimum rule: rows marked `executable` or `partially_executable` must cite live repo evidence. For conformance evidence, the gate runs the bounded conformance gate and requires cited cases to pass.
 
+`scripts/ci/serious_language_claim_closure_gate.sh` adds the public-claim closure rule. Every claim ID cited by the conformance manifest or spec/evidence matrix must appear in `docs/serious-language/public-claim-registry.v1.tsv`, and every repo doc under `README.md`, `INSTALL.md`, or `docs/` must be covered by `docs/serious-language/doc-claim-surface.v1.tsv` as public, downgraded, internal, or historical. A public PL claim is acceptable only when it has passing evidence or an explicit downgraded status.
+
 Evidence kinds in the matrix are deliberately small:
 
 | Evidence kind | Meaning |
@@ -90,6 +93,7 @@ Evidence kinds in the matrix are deliberately small:
 | `doc` | `evidence_ref` is an honest-status or limitations document, not runtime proof. |
 
 The drift gate checks references and passing bounded conformance behavior. Broader semantic adequacy still depends on the readiness ledger, the conformance spine, and the generated bundle; the matrix is traceability evidence, not a proof of the whole language.
+The claim-closure gate checks that the repo has no unregistered public claim surface in the governed docs set.
 
 ## What Must Not Be Claimed
 
@@ -109,4 +113,5 @@ Sounio is defensible when a skeptical engineer can:
 3. see which spec areas are executable and which are not;
 4. read known limitations without private explanation;
 5. reproduce the bundle for the current commit;
-6. distinguish stable language behavior from research lanes.
+6. distinguish stable language behavior from research lanes;
+7. verify that public docs are either evidence-closed or explicitly downgraded.
