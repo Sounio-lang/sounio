@@ -452,6 +452,31 @@ status: lock-released
 
 agent: codex
 lane: 4
+time_utc: 2026-05-13T10:40:34Z
+files:
+  - self-hosted/compiler/native_compile_driver.sio
+  - artifacts/omega/agent_handoff.log.md
+intent: Lane 4 RELEASE — native-v2 parity hardening for untyped non-capturing closure parameters. N-v2 now scans `|x| expr` and `|x, y| expr` as i64-param closure literals while preserving typed `|x: T|` handling. This closes `tests/run-pass/closure_hof.sio`; `closure_capture.sio` remains intentionally outside this slice because captured environments are not represented by the current non-capturing fnref ABI.
+worktree: /tmp/sounio-lane-4-nv2-parity
+branch: codex/lane-4-nv2-closure-capture-20260513
+checks:
+  - closure classification inventory /tmp/lane4-parity-closure-next-20260513Tnext: closure_capture=nv2_compile, closure_hof=nv2_compile, closure_effect_infer=nv2_compile
+  - targeted compile: bin/souc run self-hosted/compiler/native_compile_driver.sio -- tests/run-pass/closure_hof.sio -o /tmp/closure_hof_nv2_untyped (rc=0)
+  - targeted runtime parity: /tmp/closure_hof_nv2_untyped stdout/exit matched Track A (`PASS`, rc=0)
+  - closure inventory /tmp/lane4-parity-untyped-closure-20260513T1030: corpus=15 ok=7 nv2_compile=5 nv2_run=2 a_only=0 both_fail=1 a_fail=0; closure_hof=ok
+  - pinned full inventory /tmp/lane4-parity-untyped-closure-full-20260513T1031 with SOUC_BIN=/tmp/sounio-lane-4-nv2-parity/bin/souc: corpus=422 ok=176 nv2_compile=188 nv2_run=57 a_only=0 both_fail=1 a_fail=0
+  - bin/souc check self-hosted/compiler/native_compile_driver.sio (rc=0)
+  - bash scripts/ci/native_v2_serious_track_gate.sh (rc=0)
+  - bash scripts/ci/lean_single_fixed_point_gate.sh (rc=0; fixed-point md5=1c89bbde4db02b708febd46fb5448520)
+  - SOUC_BIN=/tmp/sounio-lane-4-nv2-parity/bin/souc bash scripts/ci/compiler_stage_contract_gate.sh (rc=0; pass=14 known_blocker=1)
+  - SOUC_BIN=/tmp/sounio-lane-4-nv2-parity/bin/souc SOUNIO_NATIVE_V2_CPU_COMPILER_DIR=/tmp/lane4-untyped-closure-umbrella-20260513T1032 bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (rc=0; shell fallback used for aggregator)
+  - git diff --check (rc=0)
+status: lock-released
+
+---
+
+agent: codex
+lane: 4
 time_utc: 2026-05-13T09:52:55Z
 files:
   - self-hosted/compiler/native_compile_driver.sio
