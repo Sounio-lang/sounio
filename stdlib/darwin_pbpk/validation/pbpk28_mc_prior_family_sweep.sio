@@ -75,7 +75,7 @@ fn ms28_exp(x: f64) -> f64 with Mut, Div {
     let ln2 = 0.693147180559945
     while rx > ln2 { rx = rx - ln2; n = n + 1 }
     while rx < 0.0 - ln2 { rx = rx + ln2; n = n - 1 }
-    var t = rx
+    var t: f64 = 1.0    // Knuth TAOCP Vol.2 §4.2.2: correct Taylor seed (was: rx — missing linear term)
     var result: f64 = 1.0
     var k: i64 = 1
     while k < 20 { t = t * rx / (k as f64); result = result + t; k = k + 1 }
@@ -83,6 +83,29 @@ fn ms28_exp(x: f64) -> f64 with Mut, Div {
     if n > 0 { var i: i64 = 0; while i < n { factor = factor * 2.0; i = i + 1 } }
     if n < 0 { let neg_n = 0 - n; var i: i64 = 0; while i < neg_n { factor = factor * 0.5; i = i + 1 } }
     return result * factor
+}
+
+// ============================================================================
+// WELFORD ONLINE ACCUMULATOR
+// Welford 1962; Knuth TAOCP Vol.2 §4.2.2 — avoids catastrophic cancellation
+// in the naive E[Y^2] - (E[Y])^2 two-pass formula for large-variance distributions.
+// ============================================================================
+
+struct MS28Welford { count: i64, mean: f64, m2: f64 }
+
+fn ms28_welford_init() -> MS28Welford { MS28Welford { count: 0, mean: 0.0, m2: 0.0 } }
+
+fn ms28_welford_update(s: MS28Welford, x: f64) -> MS28Welford with Div {
+    let n    = s.count + 1
+    let d1   = x - s.mean
+    let mean = s.mean + d1 / (n as f64)
+    let d2   = x - mean
+    MS28Welford { count: n, mean: mean, m2: s.m2 + d1 * d2 }
+}
+
+fn ms28_welford_variance(s: MS28Welford) -> f64 with Div {
+    if s.count < 2 { return 0.0 }
+    s.m2 / (s.count as f64)
 }
 
 // ============================================================================
@@ -269,11 +292,9 @@ fn ms28_run_family(
     seed:     i64,
     kind:     i32,
 ) -> MS28Result with Mut, Div, Panic {
-    var rng     = ms28_rng_new(seed)
-    var sum_y:  f64 = 0.0
-    var sum_y2: f64 = 0.0
-    var n_ok:   i32 = 0
-    var iter:   i32 = 0
+    var rng  = ms28_rng_new(seed)
+    var ws   = ms28_welford_init()
+    var iter: i32 = 0
     let n_prms = priors.n
 
     while iter < n {
@@ -303,23 +324,19 @@ fn ms28_run_family(
         let auc   = ms28_auc_fast(prm_s, dose_mg)
 
         if ms28_finite(auc) && auc > 0.0 {
-            sum_y  = sum_y  + auc
-            sum_y2 = sum_y2 + auc * auc
-            n_ok   = n_ok + 1
+            ws = ms28_welford_update(ws, auc)
         }
         iter = iter + 1
     }
 
-    if n_ok < 2 {
-        return MS28Result { mean_auc: 0.0, sd_auc: 0.0, n_valid: n_ok, success: false }
+    if ws.count < 2 {
+        return MS28Result { mean_auc: 0.0, sd_auc: 0.0, n_valid: ws.count as i32, success: false }
     }
 
-    let n_f    = n_ok as f64
-    let mean_y = sum_y / n_f
-    let var_y  = (sum_y2 / n_f) - (mean_y * mean_y)
-    let sd_y   = ms28_sqrt(if var_y > 0.0 { var_y } else { 0.0 })
+    let var_y = ms28_welford_variance(ws)
+    let sd_y  = ms28_sqrt(if var_y > 0.0 { var_y } else { 0.0 })
 
-    MS28Result { mean_auc: mean_y, sd_auc: sd_y, n_valid: n_ok, success: true }
+    MS28Result { mean_auc: ws.mean, sd_auc: sd_y, n_valid: ws.count as i32, success: true }
 }
 
 // ============================================================================

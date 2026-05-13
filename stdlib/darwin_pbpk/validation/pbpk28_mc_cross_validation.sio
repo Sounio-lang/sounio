@@ -119,6 +119,29 @@ fn mc28_exp(x: f64) -> f64 with Mut, Div {
 }
 
 // ============================================================================
+// WELFORD ONLINE ACCUMULATOR
+// Welford 1962; Knuth TAOCP Vol.2 §4.2.2 — avoids catastrophic cancellation
+// in the naive E[Y^2] - (E[Y])^2 two-pass formula for large-variance distributions.
+// ============================================================================
+
+struct MC28Welford { count: i64, mean: f64, m2: f64 }
+
+fn mc28_welford_init() -> MC28Welford { MC28Welford { count: 0, mean: 0.0, m2: 0.0 } }
+
+fn mc28_welford_update(s: MC28Welford, x: f64) -> MC28Welford with Div {
+    let n    = s.count + 1
+    let d1   = x - s.mean
+    let mean = s.mean + d1 / (n as f64)
+    let d2   = x - mean
+    MC28Welford { count: n, mean: mean, m2: s.m2 + d1 * d2 }
+}
+
+fn mc28_welford_variance(s: MC28Welford) -> f64 with Div {
+    if s.count < 2 { return 0.0 }
+    s.m2 / (s.count as f64)
+}
+
+// ============================================================================
 // RNG + SAMPLING (LCG + Marsaglia polar method)
 // ============================================================================
 
@@ -245,11 +268,9 @@ fn mc28_run_lognormal(
     n:        i32,
     seed:     i64,
 ) -> MC28Result with Mut, Div, Panic {
-    var rng    = mc28_rng_new(seed)
-    var sum_y:  f64 = 0.0
-    var sum_y2: f64 = 0.0
-    var n_ok:   i32 = 0
-    var iter:   i32 = 0
+    var rng  = mc28_rng_new(seed)
+    var ws   = mc28_welford_init()
+    var iter: i32 = 0
     let n_prms = priors.n
 
     while iter < n {
@@ -270,24 +291,20 @@ fn mc28_run_lognormal(
         let auc   = mc28_auc_fast(prm_s, dose_mg)
 
         if mc28_finite(auc) && auc > 0.0 {
-            sum_y  = sum_y  + auc
-            sum_y2 = sum_y2 + auc * auc
-            n_ok   = n_ok + 1
+            ws = mc28_welford_update(ws, auc)
         }
 
         iter = iter + 1
     }
 
-    if n_ok < 2 {
-        return MC28Result { mean_auc: 0.0, sd_auc: 0.0, n_valid: n_ok, success: false }
+    if ws.count < 2 {
+        return MC28Result { mean_auc: 0.0, sd_auc: 0.0, n_valid: ws.count as i32, success: false }
     }
 
-    let n_f    = n_ok as f64
-    let mean_y = sum_y / n_f
-    let var_y  = (sum_y2 / n_f) - (mean_y * mean_y)   // biased estimator (good for large N)
-    let sd_y   = mc28_sqrt(if var_y > 0.0 { var_y } else { 0.0 })
+    let var_y = mc28_welford_variance(ws)
+    let sd_y  = mc28_sqrt(if var_y > 0.0 { var_y } else { 0.0 })
 
-    MC28Result { mean_auc: mean_y, sd_auc: sd_y, n_valid: n_ok, success: true }
+    MC28Result { mean_auc: ws.mean, sd_auc: sd_y, n_valid: ws.count as i32, success: true }
 }
 
 // ============================================================================
