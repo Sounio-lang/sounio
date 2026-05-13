@@ -14,6 +14,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.serious-langua
 The conformance spine is the first executable bridge between the readiness ledger, the language specification, and the checked compiler artifact. It is intentionally small: every case must have a named claim, an expected exit contract, and optional stdout or stderr evidence.
 
 It is not a complete language specification suite. It is the conference-safe seed that lets Sounio say, "these selected language claims are executable at this commit."
+The spec/evidence matrix in `docs/serious-language/spec-evidence-matrix.v1.tsv` is the v1 seed map from tracked specification areas to evidence. `scripts/ci/serious_language_spec_drift_gate.sh` enforces that tracked executable spec rows cite live evidence, runs the bounded conformance gate, and verifies cited conformance cases pass.
 
 ## Entry Point
 
@@ -21,6 +22,12 @@ Run the gate directly:
 
 ```bash
 bash scripts/ci/serious_language_conformance_gate.sh
+```
+
+Run the companion spec/evidence drift gate:
+
+```bash
+bash scripts/ci/serious_language_spec_drift_gate.sh
 ```
 
 The gate writes:
@@ -68,6 +75,7 @@ Standalone runs default to `/tmp/sounio-serious-conformance-<timestamp>`. The co
 - A new stable public claim needs at least one positive case and, where applicable, one diagnostic or boundary case.
 - Prototype areas may enter the manifest only as explicit boundary cases until their readiness-ledger level is raised.
 - The language specification is not normative until a section has executable conformance coverage and the readiness ledger permits that wording.
+- A spec area may be called executable only when its matrix row cites live evidence and the drift gate verifies any cited conformance behavior passed.
 
 ## Current Limits
 

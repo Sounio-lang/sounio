@@ -26,9 +26,8 @@ OUT_DIR="${SOUNIO_NATIVE_V2_IMPORTED_CORE_ABI_DIR:-$(mktemp -d /tmp/sounio-nativ
 LOG_DIR="$OUT_DIR/logs"
 ARTIFACT_DIR="$OUT_DIR/artifacts"
 PROGRAM="tests/selfhost/native_runtime/import_core_abi_42.sio"
-BUNDLE="$ARTIFACT_DIR/import_core_abi_42.bundle.sio"
 ELF="$ARTIFACT_DIR/import_core_abi_42.native"
-SUMMARY_JSON="$ARTIFACT_DIR/native_v2_imported_core_abi.v1.json"
+SUMMARY_JSON="$ARTIFACT_DIR/native_v2_imported_core_abi.v2.json"
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 
@@ -41,6 +40,12 @@ if [[ ! -f "$PROGRAM" ]]; then
   exit 1
 fi
 
+if grep -Eq 'module_frontend_try_fold_imported_struct_array_i64_main|module_frontend_patch_main_constant_and_stubs' \
+  self-hosted/compiler/module_frontend.sio; then
+  echo "[native-v2-imported-core-abi] FAIL: retired imported-core ABI whole-module patch symbol is present" >&2
+  exit 1
+fi
+
 run_log() {
   local name="$1"
   shift
@@ -50,36 +55,31 @@ run_log() {
 
 run_log frontend_convergence bash scripts/ci/native_v2_frontend_convergence_gate.sh
 
-run_log prebundle \
-  "$SOUC_BIN" run self-hosted/compiler/native_prebundle.sio -- "$PROGRAM" -o "$BUNDLE" --root tests/selfhost/native_runtime
+run_log imported_ir_summary \
+  bash scripts/lib/run_selfhost_fresh.sh "$SOUC_BIN" self-hosted/compiler/lean.sio -- --ir-summary "$PROGRAM"
 
-if [[ ! -s "$BUNDLE" ]]; then
-  echo "[native-v2-imported-core-abi] FAIL: bundle not produced" >&2
-  cat "$LOG_DIR/prebundle.log" >&2 || true
-  exit 1
-fi
-
-source_markers="$(awk 'BEGIN { n = 0 } /^\/\/ SOURCE:/ { n += 1 } END { print n }' "$BUNDLE")"
-if [[ "$source_markers" -ne 2 ]]; then
-  echo "[native-v2-imported-core-abi] FAIL: expected 2 SOURCE markers, got $source_markers" >&2
-  exit 1
-fi
-
-if grep -Eq '^(use |module )' "$BUNDLE"; then
-  echo "[native-v2-imported-core-abi] FAIL: bundle still contains use/module lines" >&2
-  grep -En '^(use |module )' "$BUNDLE" >&2 || true
-  exit 1
-fi
-
-if ! grep -q '^// SOURCE: tests/selfhost/native_runtime/import_core_abi/mod.sio$' "$BUNDLE" ||
-   ! grep -q '^// SOURCE: tests/selfhost/native_runtime/import_core_abi_42.sio$' "$BUNDLE"; then
-  echo "[native-v2-imported-core-abi] FAIL: expected imported and main source markers" >&2
-  grep '^// SOURCE:' "$BUNDLE" >&2 || true
+if ! grep -q 'Merged IR: 6' "$LOG_DIR/imported_ir_summary.log" ||
+   ! grep -q 'souc-lean ir-summary: functions=6' "$LOG_DIR/imported_ir_summary.log"; then
+  echo "[native-v2-imported-core-abi] FAIL: modular lean IR summary did not prove 6-function imported handoff" >&2
+  cat "$LOG_DIR/imported_ir_summary.log" >&2 || true
   exit 1
 fi
 
 run_log native_compile \
-  "$SOUC_BIN" run self-hosted/compiler/native_compile_driver.sio -- "$BUNDLE" -o "$ELF"
+  bash scripts/lib/run_selfhost_fresh.sh "$SOUC_BIN" self-hosted/compiler/lean.sio -- --native-compile "$PROGRAM" -o "$ELF"
+
+if grep -q 'native_prebundle:' "$LOG_DIR/native_compile.log"; then
+  echo "[native-v2-imported-core-abi] FAIL: direct native path used native_prebundle" >&2
+  cat "$LOG_DIR/native_compile.log" >&2 || true
+  exit 1
+fi
+
+if ! grep -q 'module_native_driver: imported source uses modular IR path' "$LOG_DIR/native_compile.log" ||
+   ! grep -q 'Merged IR: 6' "$LOG_DIR/native_compile.log"; then
+  echo "[native-v2-imported-core-abi] FAIL: native compile did not use imported modular IR path" >&2
+  cat "$LOG_DIR/native_compile.log" >&2 || true
+  exit 1
+fi
 
 if [[ ! -f "$ELF" ]]; then
   echo "[native-v2-imported-core-abi] FAIL: native ELF not produced" >&2
@@ -110,47 +110,27 @@ if [[ "$runtime_rc" -ne 42 ]]; then
   exit 1
 fi
 
-python3 - "$SUMMARY_JSON" "$SOUC_BIN" "$PROGRAM" "$BUNDLE" "$ELF" "$source_markers" "$OUT_DIR" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-from datetime import datetime, timezone
+# Emit summary JSON via pure-Sounio kretikos json-emit (replaces python json.dump heredoc).
+# Schema sounio.native_v2_imported_core_abi.v2. Args ordered alphabetically by key.
+ELF_SHA256="$(sha256sum "$ELF" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$ELF" | awk '{print $1}')"
+GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)"
+"$ROOT_DIR/bin/kretikos" json-emit \
+    --string "artifact_dir=$OUT_DIR" \
+    --string "compiler_entrypoint=self-hosted/compiler/lean.sio" \
+    --string "compiler_resolved=$SOUC_BIN" \
+    --string "fallback_path=none" \
+    --string "generated_at_utc=$GENERATED_AT_UTC" \
+    --string "host_callback=none" \
+    --bool   "imported_prebundle_native=false" \
+    --string "native_elf=$ELF" \
+    --string "native_elf_sha256=$ELF_SHA256" \
+    --string "program=$PROGRAM" \
+    --int    "runtime_exit=42" \
+    --string "schema=sounio.native_v2_imported_core_abi.v2" \
+    --int    "source_markers=0" \
+    --string "status=pass" \
+    --string "target=x86_64-linux" \
+    > "$SUMMARY_JSON"
 
-summary_path = pathlib.Path(sys.argv[1])
-souc_bin = sys.argv[2]
-program = sys.argv[3]
-bundle = pathlib.Path(sys.argv[4])
-elf = pathlib.Path(sys.argv[5])
-source_markers = int(sys.argv[6])
-out_dir = pathlib.Path(sys.argv[7])
-
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-payload = {
-    "schema": "sounio.native_v2_imported_core_abi.v1",
-    "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    "status": "pass",
-    "compiler_resolved": souc_bin,
-    "target": "x86_64-linux",
-    "program": program,
-    "bundle": str(bundle),
-    "native_elf": str(elf),
-    "native_elf_sha256": sha256(elf),
-    "runtime_exit": 42,
-    "fallback_path": "prebundle",
-    "host_callback": "none",
-    "imported_prebundle_native": True,
-    "source_markers": source_markers,
-    "artifact_dir": str(out_dir),
-}
-summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
-
-echo "[native-v2-imported-core-abi] PASS: imported core ABI prebundles to native ELF"
+echo "[native-v2-imported-core-abi] PASS: imported core ABI uses modular IR native driver directly"
 echo "[native-v2-imported-core-abi] summary=$SUMMARY_JSON"
