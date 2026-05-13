@@ -112,6 +112,7 @@ TESTS=(
   "epistemic_pbpk28           stdlib/darwin_pbpk/epistemic_pbpk28.sio"
   "epistemic_pbpk28_hessian   stdlib/darwin_pbpk/epistemic_pbpk28_hessian.sio"
   "pbpk28_sobol_pce           stdlib/darwin_pbpk/validation/pbpk28_sobol_pce.sio"
+  "pbpk28_mc_cross_validation stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio"
 )
 
 # Smoke entries: artifact-emitting demos (HTML, SVG, narrative reports).
@@ -160,7 +161,7 @@ for entry in "${TESTS[@]}"; do
     continue
   fi
 
-  if ! grep -qE "^PASS$|^ALL PASS$|ALL [0-9]+ TESTS PASSED|^ *ALL (TESTS|GUM TESTS) PASSED$|^ *(DEMO|SS DEMO|SS FULLVD|SCENARIO GATE|PK/PD DEMO) OK$|^ *DDI MODULE OK$|^ *DDI CLINICAL VALIDATION COMPLETE$|^ *CROSS-DRUG ISO BUDGET COMPLETE$|^HALO PGX GATE PASS$|^HESSIAN_PBPK28_DUAL_RHO_PASS$|^SOBOL_PCE_SEMAGLUTIDE_FULL_PASS$|^MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_PASS$|^MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_HESSIAN_PASS$|^MC_PRIOR_FAMILY_SWEEP_PASS$" "$log"; then
+  if ! grep -qE "^PASS$|^ALL PASS$|ALL [0-9]+ TESTS PASSED|^ *ALL (TESTS|GUM TESTS) PASSED$|^ *(DEMO|SS DEMO|SS FULLVD|SCENARIO GATE|PK/PD DEMO) OK$|^ *DDI MODULE OK$|^ *DDI CLINICAL VALIDATION COMPLETE$|^ *CROSS-DRUG ISO BUDGET COMPLETE$|^HALO PGX GATE PASS$|^HESSIAN_PBPK28_DUAL_RHO_PASS$|^SOBOL_PCE_SEMAGLUTIDE_FULL_PASS$|^MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_PASS$|^MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_HESSIAN_PASS$|^MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_OUTPUT$|^MC_PRIOR_FAMILY_SWEEP_PASS$|^MC_PRIOR_FAMILY_SWEEP_OUTPUT$" "$log"; then
     echo "  FAIL: no PASS marker in stdout"
     tail -5 "$log" | sed 's/^/    /'
     fails=$((fails + 1))
