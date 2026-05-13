@@ -17,6 +17,31 @@ status: lock-open|lock-released|blocked
 
 ---
 
+agent: codex
+time_utc: 2026-05-13T12:27:09Z
+files:
+  - scripts/ci/track_a_nv2_parity_inventory.sh
+  - artifacts/omega/agent_handoff.log.md
+intent: use existing native_prebundle lowering for algebra::octonion imports in the Track A/N-v2 parity inventory
+checks:
+  - bash -n scripts/ci/track_a_nv2_parity_inventory.sh
+  - git diff --check
+  - SOUC_BIN=/tmp/sounio-lane-4-nv2-parity/bin/souc SOUNIO_PARITY_INVENTORY_DIR=/tmp/lane4-parity-import-stdlib-script-20260513T4 bash scripts/ci/track_a_nv2_parity_inventory.sh 'tests/run-pass/algebra_g2_invariants_import.sio' 'tests/run-pass/associator_variance_mc.sio'
+  - SOUC_BIN=/tmp/sounio-lane-4-nv2-parity/bin/souc SOUNIO_PARITY_INVENTORY_DIR=/tmp/lane4-parity-import-stdlib-full-20260513T1 bash scripts/ci/track_a_nv2_parity_inventory.sh 'tests/run-pass/*.sio'
+  - bash scripts/ci/native_v2_serious_track_gate.sh
+notes: |
+  algebra_g2_invariants_import.sio now compiles through the N-v2 inventory path
+  after prebundling stdlib/algebra/octonion.sio, moving from nv2_compile to
+  nv2_run. Its remaining runtime divergence matches the existing G2 algebra
+  semantic layer, not import resolution. associator_variance_mc.sio remains an
+  N-v2 compile failure and is not covered by this import-prebundle slice. Full
+  run-pass inventory: corpus=422, ok=176, nv2_compile=187, nv2_run=58,
+  both_fail=1.
+commit: pending
+status: lock-released
+
+---
+
 agent: claude
 time_utc: 2026-04-26T00:00:00Z
 files:

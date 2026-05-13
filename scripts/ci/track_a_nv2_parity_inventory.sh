@@ -121,8 +121,25 @@ for src in "${INPUTS[@]}"; do
   if [[ $a_compile -eq 0 && -f "$a_elf" ]]; then chmod +x "$a_elf"; fi
 
   # ── Compile with Track N-v2. ────────────────────────────────────────────────
+  nv2_src="$src"
+  if grep -Eq '^[[:space:]]*use[[:space:]]+algebra::octonion(::|[[:space:]])' "$src"; then
+    bundled_src="$case_dir/nv2.prebundled.sio"
+    prebundle_log="$LOG_DIR/$slug.nv2.prebundle.log"
+    set +e
+    timeout 30 "$SOUC_BIN" run self-hosted/compiler/native_prebundle.sio -- "$src" -o "$bundled_src" --root stdlib >"$prebundle_log" 2>&1
+    prebundle_rc=$?
+    set -e
+    if [[ $prebundle_rc -eq 0 && -s "$bundled_src" ]]; then
+      nv2_src="$bundled_src"
+    else
+      {
+        printf '[parity-inv] native_prebundle failed rc=%s for %s\n' "$prebundle_rc" "$src"
+        cat "$prebundle_log" 2>/dev/null || true
+      } >>"$nv2_log"
+    fi
+  fi
   set +e
-  timeout 30 "$NV2_STAGE1" "$src" "$nv2_elf" >"$nv2_log" 2>&1
+  timeout 30 "$NV2_STAGE1" "$nv2_src" "$nv2_elf" >>"$nv2_log" 2>&1
   nv2_compile=$?
   set -e
   if [[ $nv2_compile -eq 0 && -f "$nv2_elf" ]]; then chmod +x "$nv2_elf"; fi
