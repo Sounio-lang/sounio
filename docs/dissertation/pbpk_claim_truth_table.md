@@ -21,10 +21,10 @@ Status vocabulary:
 
 ## Current Validation Snapshot
 
-This table was refreshed against `origin/main` at merge commit `bc80e31d` after the stdlib reliability lane landed. The claim surface is intentionally conservative:
+This table was refreshed against `origin/main` at `6e2354bb` after PR #137 and PR #140 landed. The claim surface is intentionally conservative:
 
-- `scripts/ci/dissertation_pbpk_suite_gate.sh` is the broad CPU PBPK evidence gate. It currently includes rapamycin, haloperidol, tirzepatide, vancomycin, tacrolimus, tacrolimus-sirolimus DDI, cross-drug ISO budget, smoke demos, and supporting ML/scenario examples.
-- `scripts/ci/dissertation_pbpk28_parity_gate.sh` is the PBPK28 parity gate. It checks Node/Sounio PBPK28 agreement, PBPK28 mass conservation, TMDD/PD parity, semaglutide PBPK28/TMDD/PD parity, and publishes model-reduction/model-form CSV artifacts.
+- `scripts/ci/dissertation_pbpk_suite_gate.sh` is the broad CPU PBPK evidence gate. It currently includes rapamycin, haloperidol, haloperidol PGx, olanzapine D2/mTOR, tirzepatide, vancomycin, tacrolimus, tacrolimus-sirolimus DDI, cross-drug ISO budget, PBPK28 epistemic/Sobol-PCE witnesses, smoke demos, and supporting ML/scenario examples.
+- `scripts/ci/dissertation_pbpk28_parity_gate.sh` is the PBPK28 parity gate. It checks Node/Sounio PBPK28 agreement, PBPK28 mass conservation, TMDD/PD parity, semaglutide PBPK28/TMDD/PD parity, and publishes model-reduction/model-form CSV artifacts. The newer PBPK28 epistemic and Sobol/PCE witnesses are separately covered by the broad dissertation PBPK suite.
 - `scripts/ci/dissertation_pbpk_hessian_gate.sh` is the second-order PBPK14 Hessian GUM gate. It checks the Hessian module, a quadratic-recovery unit witness, an end-to-end residual-reduction witness, and bytewise drift against `benchmarks/pbpk/hessian_budget.csv`.
 - GPU dissertation claims remain scoped to bounded K-AXI witnesses and Kretikos gates. The current table still does not support "PBPK14 Tsit5 single-kernel GPU" wording.
 - Compiler/bootstrap gates may be cited as enabling infrastructure only. They are not PBPK model-evidence gates unless a row names a dedicated PBPK source/gate pair.

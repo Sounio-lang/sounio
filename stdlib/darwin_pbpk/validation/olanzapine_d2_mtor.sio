@@ -1,0 +1,213 @@
+// darwin_pbpk/validation/olanzapine_d2_mtor.sio — Olanzapine D2 + mTOR collision
+//
+// 6 tests validating:
+//   (a) Olanzapine D2 occupancy at clinical doses (PET-calibrated)
+//   (b) mTOR activation at therapeutic plasma concentrations
+//   (c) Rapamycin ↔ olanzapine net mTOR collision gate (3 gate states)
+//
+// Olanzapine D2 Kd calibration (PET-based, not radioligand):
+//   Kapur S et al. (2000) J Neurosci 20:RC57 (PET-derived apparent affinity)
+//   Clinical: 5–10 mg olanzapine → ~65–75% D2 occupancy by PET
+//   PBPK back-calculation: Kd_apparent = 5.76 nM × 312.43 g/mol × 1e-6 = 1.8e-3 mg/L
+//   (This is the PET-apparent affinity, not the in-vitro radioligand Kd of ~11 nM)
+//
+// Doses tested:
+//   T1: 20 mg QD → C_ss = 20 ng/mL → D2 ≈ 61% (low therapeutic window)
+//   T2: 60 mg QD → C_ss = 60 ng/mL → D2 ≈ 82% (high-dose → EPS risk)
+//   T3: mTOR activation at 20 ng/mL olanzapine > 0.5 (clinically significant)
+//   T4: rapamycin 1 nM ICF + olanzapine 20 ng/mL → UNCERTAIN
+//   T5: rapamycin 10 nM ICF + olanzapine 5 ng/mL  → PROTECTED
+//   T6: rapamycin 0.1 nM ICF + olanzapine 40 ng/mL → UNPROTECTED
+//
+// Run:
+//   SOUNIO_STDLIB_PATH=/workspace/sounio/stdlib \
+//     ./bin/souc run stdlib/darwin_pbpk/validation/olanzapine_d2_mtor.sio
+
+use darwin_pbpk::bbb::bbb_core::{bbb_integrate_constant_plasma, bbb_c_isf_u}
+use darwin_pbpk::drugs::olanzapine::{olanzapine_bbb_params, olanzapine_mtor_act_params}
+use darwin_pbpk::pd::d2_occupancy::{D2Params, d2_occupancy}
+use darwin_pbpk::pd::mtor_collision::{
+    mtor_olanz_activate, mtor_net_interval, mtor_collision_gate, rapa_hill_params_clinical
+}
+
+// ============================================================================
+// OLANZAPINE D2 PARAMETERS (PET-calibrated)
+// ============================================================================
+// Kd_apparent = 5.76 nM (Kapur 2000 PET back-calculation for olanzapine)
+//   5.76 nM × 312.43 g/mol × 1e-6 = 1.7996e-3 mg/L ≈ 1.800e-3 mg/L
+// Bmax = 30 nM (same striatal Bmax as haloperidol; Hall 1994)
+//   30 nM × 312.43 g/mol × 1e-6 = 9.373e-3 mg/L
+
+fn olanzapine_d2_params() -> D2Params {
+    D2Params {
+        kd_d2:         0.001800,
+        bmax_d2:       0.009373,
+        ant_threshold: 0.60,
+        eps_threshold: 0.80,
+    }
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn olz_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 40 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn olz_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn olz_c_plasma_ss(dose_mg: f64, cl_l_h: f64) -> f64 with Div, Panic {
+    // C_ss = F_oral * dose / (CL * tau)
+    // F_oral=0.60, tau=24h
+    0.60 * dose_mg / (cl_l_h * 24.0)
+}
+
+fn olz_d2_occ_at_cplasma(c_plasma: f64) -> f64 with Div, Panic, Mut {
+    let bbb = olanzapine_bbb_params()
+    let st  = bbb_integrate_constant_plasma(c_plasma, 500.0, 0.1, bbb)
+    let c_isf_free = bbb_c_isf_u(st, bbb)
+    d2_occupancy(c_isf_free, olanzapine_d2_params())
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  Olanzapine D2 occupancy + mTOR collision gate — 6 tests")
+    println("======================================================================")
+    println("")
+
+    let cl_olz: f64 = 25.0    // L/h (NM, non-smoker, Bergstrom 2006)
+    var passed = 0
+    var failed = 0
+
+    // -----------------------------------------------------------------------
+    // T1: 20 mg QD → D2 occupancy ∈ [60%, 80%]
+    // Clinical: 20 mg/day is the typical maintenance dose (FDA label)
+    // -----------------------------------------------------------------------
+    println("T1: Olanzapine 20 mg QD → D2 in [60%, 80%]")
+    let c_20mg = olz_c_plasma_ss(20.0, cl_olz)
+    print("    C_plasma_ss = "); print_f64(c_20mg * 1000.0); println(" ng/mL")
+    let occ_20 = olz_d2_occ_at_cplasma(c_20mg)
+    print("    D2 occupancy = "); print_f64(occ_20 * 100.0); println("%")
+    if occ_20 >= 0.60 && occ_20 < 0.80 {
+        println("    [PASS] Olanzapine 20 mg QD in therapeutic window")
+        passed = passed + 1
+    } else {
+        println("    FAIL: expected D2 ∈ [60%, 80%)")
+        failed = failed + 1
+    }
+    println("")
+
+    // -----------------------------------------------------------------------
+    // T2: 60 mg QD → D2 > 80% (high-dose treatment-resistant schizophrenia)
+    // -----------------------------------------------------------------------
+    println("T2: Olanzapine 60 mg QD → D2 > 80% (EPS risk)")
+    let c_60mg = olz_c_plasma_ss(60.0, cl_olz)
+    print("    C_plasma_ss = "); print_f64(c_60mg * 1000.0); println(" ng/mL")
+    let occ_60 = olz_d2_occ_at_cplasma(c_60mg)
+    print("    D2 occupancy = "); print_f64(occ_60 * 100.0); println("%")
+    if occ_60 > 0.80 {
+        println("    [PASS] High-dose olanzapine in EPS-risk zone")
+        passed = passed + 1
+    } else {
+        println("    FAIL: expected D2 > 80% at 60 mg")
+        failed = failed + 1
+    }
+    println("")
+
+    // -----------------------------------------------------------------------
+    // T3: mTOR activation at C_plasma = 20 ng/mL > 0.5
+    // Clinical: 20 ng/mL is the low end of the therapeutic range.
+    // At EC50=10 ng/mL: activation = 20/(20+10) = 0.667 → clinically significant.
+    // -----------------------------------------------------------------------
+    println("T3: mTOR activation at 20 ng/mL > 0.5 (clinically significant)")
+    let mtp = olanzapine_mtor_act_params()
+    let act_20 = mtor_olanz_activate(20.0, mtp)
+    print("    mTOR activation at 20 ng/mL = "); print_f64(act_20); println("")
+    if act_20 > 0.5 {
+        println("    [PASS] >50% mTOR activation at therapeutic olanzapine")
+        passed = passed + 1
+    } else {
+        println("    FAIL: expected mTOR activation > 0.5 at 20 ng/mL")
+        failed = failed + 1
+    }
+    println("")
+
+    // -----------------------------------------------------------------------
+    // T4: Low-mid rapamycin (1 nM ICF) + olanzapine 20 ng/mL → UNCERTAIN
+    // c_rapa=1 nM: systemic spillover from DES (inhibit ≈ 0.67, activate ≈ 0.67)
+    // Net ≈ 0.0 → straddles zero under uncertainty → gate = 1 (UNCERTAIN)
+    // -----------------------------------------------------------------------
+    println("T4: rapamycin 1 nM ICF + olanzapine 20 ng/mL → UNCERTAIN")
+    let rapa_p = rapa_hill_params_clinical()
+    let ivl4 = mtor_net_interval(1.0, 0.5, 20.0, 0.3, rapa_p, mtp)
+    let gate4 = mtor_collision_gate(ivl4.0, ivl4.1)
+    print("    net mTOR interval: ["); print_f64(ivl4.0); print(", "); print_f64(ivl4.1); println("]")
+    print("    gate = "); print(gate4); println(" (1=UNCERTAIN)")
+    if gate4 == 1 {
+        println("    [PASS] Stent protection UNCERTAIN — dose review indicated")
+        passed = passed + 1
+    } else {
+        println("    FAIL: expected UNCERTAIN gate (1)")
+        failed = failed + 1
+    }
+    println("")
+
+    // -----------------------------------------------------------------------
+    // T5: High rapamycin (10 nM ICF) + low olanzapine (5 ng/mL) → PROTECTED
+    // c_rapa=10 nM: DES local arterial wall during elution peak
+    // inhibit ≈ 0.95, activate ≈ 0.33 → net_lower ≈ +0.45 > 0 → PROTECTED
+    // -----------------------------------------------------------------------
+    println("T5: rapamycin 10 nM ICF + olanzapine 5 ng/mL → PROTECTED")
+    let ivl5 = mtor_net_interval(10.0, 0.3, 5.0, 0.3, rapa_p, mtp)
+    let gate5 = mtor_collision_gate(ivl5.0, ivl5.1)
+    print("    net mTOR interval: ["); print_f64(ivl5.0); print(", "); print_f64(ivl5.1); println("]")
+    print("    gate = "); print(gate5); println(" (2=PROTECTED)")
+    if gate5 == 2 {
+        println("    [PASS] Stent protection MAINTAINED under high local rapamycin")
+        passed = passed + 1
+    } else {
+        println("    FAIL: expected PROTECTED gate (2)")
+        failed = failed + 1
+    }
+    println("")
+
+    // -----------------------------------------------------------------------
+    // T6: Very low rapamycin (0.1 nM ICF) + high olanzapine (40 ng/mL) → UNPROTECTED
+    // Late-phase DES (elution complete) + high olanzapine → olanzapine wins
+    // inhibit ≈ 0.17, activate ≈ 0.80 → net_upper < 0 → UNPROTECTED
+    // -----------------------------------------------------------------------
+    println("T6: rapamycin 0.1 nM ICF + olanzapine 40 ng/mL → UNPROTECTED")
+    let ivl6 = mtor_net_interval(0.1, 0.5, 40.0, 0.3, rapa_p, mtp)
+    let gate6 = mtor_collision_gate(ivl6.0, ivl6.1)
+    print("    net mTOR interval: ["); print_f64(ivl6.0); print(", "); print_f64(ivl6.1); println("]")
+    print("    gate = "); print(gate6); println(" (0=UNPROTECTED)")
+    if gate6 == 0 {
+        println("    [PASS] Stent UNPROTECTED — olanzapine overwhelms depleted rapamycin")
+        passed = passed + 1
+    } else {
+        println("    FAIL: expected UNPROTECTED gate (0)")
+        failed = failed + 1
+    }
+    println("")
+
+    // -----------------------------------------------------------------------
+    // SUMMARY
+    // -----------------------------------------------------------------------
+    println("======================================================================")
+    print("  Results: "); print(passed); print("/6 passed")
+    if failed > 0 { print(" ("); print(failed); print(" failed)") }
+    println("")
+    println("======================================================================")
+    if failed == 0 {
+        println("ALL PASS")
+    }
+}

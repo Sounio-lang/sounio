@@ -1,0 +1,229 @@
+// darwin_pbpk/ddi/polypharmacy_fano.sio — 168-Theorem Psychiatric Polypharmacy Gate
+//
+// The 168-theorem (Agourakis & Gerenutti 2026): of 343 ordered CYP enzyme triples,
+// 168 are non-associative — drug administration ORDER changes the net DDI outcome.
+// The Fano plane structure over the 7 CYP450 isoforms predicts which triples show
+// order-dependent vs order-independent drug-drug interactions.
+//
+// Psychiatric triple: olanzapine (CYP1A2=1) × haloperidol (CYP2D6=6) × carbamazepine (CYP3A4=7)
+// Fano elements (1, 6, 7) — NOT on any Fano line → Fano predicts non-associative.
+//
+// Mechanistic cascade model:
+//   When drug A is prescribed BEFORE drug B, A inhibits B's CYP pathway, elevating [B].
+//   Elevated [B] then more strongly inhibits drug C's CYP pathway.
+//   → The net DDI burden on C is HIGHER when A precedes B than when B precedes A.
+//   This ordering effect is large for non-Fano triples, negligible for Fano-line triples.
+//
+// Associativity definition (DDI analogue of octonion associativity):
+//   Does the DDI boost on drug C change if we swap the prescription order of A and B?
+//   For Fano-line triple: |boost[A,B,C] - boost[B,A,C]| < eps  (approximately associative)
+//   For non-Fano triple:  |boost[A,B,C] - boost[B,A,C]| ≥ eps  (non-associative)
+//
+// Boost model reuses ddi_f_boost from tacrolimus_sirolimus_ddi.sio:
+//   delta_F = R_max × [inhibitor] / (Ki + [inhibitor])
+//
+// References:
+//   Agourakis & Gerenutti (2026): The 168 Theorem. AACA (submitted)
+//   Olanzapine CYP2D6 inhibition Ki: Callaghan 1999 Clin Pharmacokinet (~30-50 ng/mL)
+//   Haloperidol CYP3A4 inhibition Ki: Desta 2001 Drug Metab Dispos (~10-15 ng/mL estimate)
+//   cyp450_fano.sio lines 70-80: Fano line (6,7,2) and interpretation
+
+use medical::cyp450_fano::{is_on_fano_line}
+use darwin_pbpk::ddi::tacrolimus_sirolimus_ddi::{ddi_f_boost}
+
+// ============================================================================
+// STRUCTURES
+// ============================================================================
+
+pub struct CypDDITriple {
+    cyp_a:  i32,    // Fano element for drug A's primary CYP (1–7)
+    cyp_b:  i32,    // Fano element for drug B's primary CYP
+    cyp_c:  i32,    // Fano element for drug C's primary CYP (target/victim drug)
+    ki_ab:  f64,    // Ki (ng/mL): drug A inhibits drug B's CYP pathway
+    ki_bc:  f64,    // Ki (ng/mL): drug B inhibits drug C's CYP pathway
+    ki_ac:  f64,    // Ki (ng/mL): drug A inhibits drug C's CYP pathway (direct)
+    rmax:   f64,    // Emax for inhibition fraction (reference: Undre 1999 = 0.30)
+}
+
+// ============================================================================
+// DDI Ki LOOKUP
+// ============================================================================
+
+// Returns Ki (ng/mL) for drug 'inhibitor' (0=A, 1=B, 2=C) inhibiting 'target's CYP.
+// Directed model: only A→B, A→C, B→C have specified Ki values.
+// All reverse directions (B→A, C→A, C→B) use Ki=1000 (clinically negligible).
+fn pair_ki(triple: CypDDITriple, inhibitor: i32, target: i32) -> f64 {
+    if inhibitor == 0 && target == 1 { return triple.ki_ab }
+    if inhibitor == 0 && target == 2 { return triple.ki_ac }
+    if inhibitor == 1 && target == 2 { return triple.ki_bc }
+    return 1000.0
+}
+
+// ============================================================================
+// CORE: SEQUENTIAL DDI CASCADE ON DRUG C
+// ============================================================================
+
+// Computes the net DDI boost accumulated by drug C (index 2) given a prescription
+// ordering of the three drugs.
+//
+// order[k] ∈ {0=A, 1=B, 2=C} specifies which drug is prescribed at step k.
+//
+// Cascade logic:
+//   (1) If drug A is prescribed before drug B, A inhibits B's CYP pathway:
+//         c_eff_b = c_b × (1 + ddi_f_boost(rmax, ki_ab, c_a))
+//       This elevates drug B's effective concentration (and thus its inhibitory potency).
+//   (2) The boost on drug C = sum of contributions from each drug prescribed before C:
+//         boost_from_A = ddi_f_boost(rmax, ki_ac, c_a)        [if A prescribed before C]
+//         boost_from_B = ddi_f_boost(rmax, ki_bc, c_eff_b)    [if B prescribed before C]
+//
+// Non-commutativity: when A precedes B, c_eff_b > c_b → B's boost on C is larger.
+pub fn ddi_sequence_inhib(triple: CypDDITriple, order: [i32; 3],
+                           c_a: f64, c_b: f64) -> f64 with Div, Panic, Mut {
+    // Find position of each drug in the sequence
+    var a_pos = 3
+    var b_pos = 3
+    var c_pos = 3
+    var s = 0
+    while s < 3 {
+        if order[s] == 0 { a_pos = s }
+        if order[s] == 1 { b_pos = s }
+        if order[s] == 2 { c_pos = s }
+        s = s + 1
+    }
+
+    // Effective concentration of B: elevated if A was prescribed first
+    var c_eff_b = c_b
+    if a_pos < b_pos {
+        let boost_ab = ddi_f_boost(triple.rmax, triple.ki_ab, c_a)
+        c_eff_b = c_b * (1.0 + boost_ab)
+    }
+
+    // Accumulate boost on C from drugs prescribed before it
+    var boost_c = 0.0
+    if a_pos < c_pos {
+        boost_c = boost_c + ddi_f_boost(triple.rmax, triple.ki_ac, c_a)
+    }
+    if b_pos < c_pos {
+        boost_c = boost_c + ddi_f_boost(triple.rmax, triple.ki_bc, c_eff_b)
+    }
+
+    boost_c
+}
+
+// ============================================================================
+// ASSOCIATIVITY CHECK
+// ============================================================================
+
+// Returns true if the DDI cascade is approximately order-independent within eps.
+// Compares orderings [A first, B second, C third] vs [B first, A second, C third].
+// Both have C last; only the ordering of A and B is swapped.
+//
+// For Fano-line triples (symmetric or weak Ki): |diff| < eps → "associative"
+// For non-Fano triples (asymmetric Ki with cascade): |diff| ≥ eps → "non-associative"
+pub fn ddi_is_associative(triple: CypDDITriple, c_a: f64, c_b: f64, eps: f64)
+    -> bool with Div, Panic, Mut
+{
+    var ord_abc: [i32; 3] = [0; 3]
+    ord_abc[0] = 0
+    ord_abc[1] = 1
+    ord_abc[2] = 2
+
+    var ord_bac: [i32; 3] = [0; 3]
+    ord_bac[0] = 1
+    ord_bac[1] = 0
+    ord_bac[2] = 2
+
+    let net_abc = ddi_sequence_inhib(triple, ord_abc, c_a, c_b)
+    let net_bac = ddi_sequence_inhib(triple, ord_bac, c_a, c_b)
+    let diff = if net_abc > net_bac { net_abc - net_bac } else { net_bac - net_abc }
+    diff < eps
+}
+
+// ============================================================================
+// CLINICAL TRIPLES
+// ============================================================================
+
+// Olanzapine × Haloperidol × Carbamazepine
+// CYP mapping: olanzapine=CYP1A2 (e1), haloperidol=CYP2D6 (e6), carbamazepine=CYP3A4 (e7)
+// Fano triple (1, 6, 7): NOT on any Fano line → Fano predicts non-associative.
+//
+// Ki parameters (directed model):
+//   ki_ab: olanzapine inhibits CYP2D6 (haloperidol pathway). Ki≈30 ng/mL (Callaghan 1999).
+//   ki_bc: haloperidol inhibits CYP3A4 (carbamazepine pathway). Ki≈10 ng/mL (Desta 2001 est.)
+//   ki_ac: olanzapine inhibits CYP1A2 via carbamazepine pathway. Ki≈200 ng/mL (very weak).
+pub fn olanz_halo_carbamazepine_triple() -> CypDDITriple {
+    CypDDITriple {
+        cyp_a:  1,
+        cyp_b:  6,
+        cyp_c:  7,
+        ki_ab:  30.0,
+        ki_bc:  10.0,
+        ki_ac:  200.0,
+        rmax:   0.30,
+    }
+}
+
+// CYP2C gene cluster: CYP2C9 × CYP2C8 × CYP2C19 = (2, 3, 5)
+// ON Fano line (2,3,5) → Fano predicts associative (shared substrate chemistry,
+// same chromosome 10 gene cluster, highly overlapping substrate profiles).
+// All cross-inhibitions within the CYP2C family are weak and bidirectional.
+// Large Ki values (200 ng/mL) reflect low cross-inhibition potency within family.
+pub fn cyp2c_cluster_triple() -> CypDDITriple {
+    CypDDITriple {
+        cyp_a:  2,
+        cyp_b:  3,
+        cyp_c:  5,
+        ki_ab:  200.0,
+        ki_bc:  200.0,
+        ki_ac:  200.0,
+        rmax:   0.30,
+    }
+}
+
+// ============================================================================
+// FANO STRUCTURAL PREDICTOR
+// ============================================================================
+
+// Returns true if the Fano plane structure predicts non-associative DDI for this triple.
+// This is the algebraic compile-time check — pure structural; no PK calculation required.
+// Rationale: non-Fano triples span different CYP families with asymmetric substrate
+// overlap, enabling cascade inhibition amplification that depends on prescription order.
+pub fn ddi_fano_predicts_nonassoc(a: i32, b: i32, c: i32) -> bool with Mut, Panic, Div {
+    if is_on_fano_line(a, b, c) { return false }
+    return true
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() with IO, Mut, Div, Panic {
+    println("polypharmacy_fano: 168-theorem DDI non-associativity gate")
+
+    let triple_na = olanz_halo_carbamazepine_triple()
+    let triple_fa = cyp2c_cluster_triple()
+
+    // Structural check
+    let pred_na = ddi_fano_predicts_nonassoc(triple_na.cyp_a, triple_na.cyp_b, triple_na.cyp_c)
+    let pred_fa = ddi_fano_predicts_nonassoc(triple_fa.cyp_a, triple_fa.cyp_b, triple_fa.cyp_c)
+    if pred_na  { println("  (1,6,7): Fano NONASSOC prediction OK") }
+    if pred_fa  { println("  (2,3,5): Fano NONASSOC prediction UNEXPECTED") }
+    if pred_na == false { println("  (1,6,7): Fano ASSOC prediction UNEXPECTED") }
+    if pred_fa == false { println("  (2,3,5): Fano ASSOC prediction OK") }
+
+    // Empirical check
+    let c_a: f64 = 20.0
+    let c_b: f64 = 5.0
+    let assoc_na = ddi_is_associative(triple_na, c_a, c_b, 0.001)
+    let assoc_fa = ddi_is_associative(triple_fa, c_a, c_b, 0.001)
+    if assoc_na        { println("  (1,6,7) empirical: ASSOCIATIVE — unexpected") }
+    if assoc_na == false { println("  (1,6,7) empirical: NON-ASSOCIATIVE — correct") }
+    if assoc_fa        { println("  (2,3,5) empirical: ASSOCIATIVE — correct") }
+    if assoc_fa == false { println("  (2,3,5) empirical: NON-ASSOCIATIVE — unexpected") }
+
+    if pred_na && assoc_na == false && pred_fa == false && assoc_fa {
+        println("PASS")
+    } else {
+        println("FAIL")
+    }
+}
