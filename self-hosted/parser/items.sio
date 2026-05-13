@@ -4,6 +4,7 @@
 
 use parser::ast::*
 use lexer::token::*
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_peek_ahead, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
 
 impl Parser {
     // ============================================================
@@ -24,22 +25,22 @@ impl Parser {
         // Handle optional 'linear' or 'affine' modifier
         var is_linear = false
         var is_affine = false
-        if p.peek() == TokenKind::Linear {
+        if parser_peek(p) == TokenKind::Linear {
             is_linear = true
             p = p.advance()
-        } else if p.peek() == TokenKind::Affine {
+        } else if parser_peek(p) == TokenKind::Affine {
             is_affine = true
             p = p.advance()
         }
 
         // Handle optional 'kernel' modifier for GPU kernel functions
         var is_kernel = false
-        if p.peek() == TokenKind::Kernel {
+        if parser_peek(p) == TokenKind::Kernel {
             is_kernel = true
             p = p.advance()
         }
 
-        let item_kind = p.peek()
+        let item_kind = parser_peek(p)
 
         if item_kind == TokenKind::Fn {
             p.parse_fn_item(is_pub, is_kernel)
@@ -109,11 +110,13 @@ impl Parser {
             p.had_error = true
             p.error_count = p.error_count + 1
             let pa = p.advance()
-            (pa, Item {
+            let en = empty_name()
+            let ep2 = empty_path()
+            let result_item = Item {
                 kind: ItemKind::ItemFn,
                 span: span,
                 is_pub: is_pub,
-                name: empty_name(),
+                name: en,
                 fn_def: None,
                 struct_def: None,
                 enum_def: None,
@@ -132,13 +135,17 @@ impl Parser {
                 models_def: None,
                 validation_def: None,
                 audit_def: None,
-                use_path: empty_path(),
+                use_path: ep2,
                 use_glob: false,
                 use_items: None,
                 effect_def: None,
                 session_decl: None,
                 trait_def: None,
-            })
+                algebra_def: None,
+                study_def: None,
+                ontology_def: None,
+            }
+            (pa, result_item)
         }
     }
 
@@ -159,8 +166,8 @@ impl Parser {
 
         // = expr
         p = p.expect(TokenKind::Eq)
-        let expr_pair = p.parse_expr()
-        p = expr_pair.0
+        p = p.parse_expr()
+        // expr value not used in Item (global let initialiser stored separately)
 
         let span = p.span_from(start)
         (p, Item {
@@ -207,8 +214,8 @@ impl Parser {
 
         // = expr
         p = p.expect(TokenKind::Eq)
-        let expr_pair = p.parse_expr()
-        p = expr_pair.0
+        p = p.parse_expr()
+        // expr value not used in Item (global var initialiser stored separately)
 
         let span = p.span_from(start)
         (p, Item {
@@ -247,7 +254,8 @@ impl Parser {
     // ============================================================
 
     fn parse_fn_item(self, is_pub: bool, is_kernel: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
-        if self.peek() != TokenKind::Fn {
+        let pfi_k = self.peek()
+        if pfi_k != TokenKind::Fn {
             // Recovery: consume one token so callers never stall.
             let span = self.current_span()
             var p_bad = self
@@ -288,30 +296,26 @@ impl Parser {
 
         let start = self.current_span()
         var p = self.advance()  // skip 'fn'
-
         let name = p.current_name()
         p = p.expect_ident()
-
         // Parameters
         p = p.expect(TokenKind::LParen)
         let pair = p.parse_param_list()
         p = pair.0
         let params_opt = pair.1
         p = p.expect(TokenKind::RParen)
-
         // Return type
         let pair2 = p.parse_optional_return_type()
         p = pair2.0
         let ret_ty = pair2.1
-
         // Effects
+        // p came from pair2.0 (SIZE_HINT type) — use parser_peek free fn
         var effects_opt: Option<Box<EffectList>> = None
-        if p.peek() == TokenKind::With {
+        if parser_peek(p) == TokenKind::With {
             let pair3 = p.parse_effect_list()
             p = pair3.0
             effects_opt = Some(Box::new(pair3.1))
         }
-
         // Body
         let pair4 = p.parse_block()
         p = pair4.0
@@ -356,6 +360,10 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
@@ -367,22 +375,21 @@ impl Parser {
         if self.peek() == TokenKind::RParen {
             return (self, None)
         }
-
         let pair = self.parse_param()
         var p = pair.0
         let first = pair.1
         var rev_params_opt: Option<Box<ParamList>> = Some(Box::new(ParamList { head: first, tail: None }))
 
-        while p.peek() == TokenKind::Comma {
+        while parser_peek(p) == TokenKind::Comma {
             p = p.advance()
-            if p.peek() == TokenKind::RParen { break }
+            if parser_peek(p) == TokenKind::RParen { break }
             let pair2 = p.parse_param()
             p = pair2.0
             let next = pair2.1
             rev_params_opt = Some(Box::new(ParamList { head: next, tail: rev_params_opt }))
         }
-
-        (p, reverse_param_list_opt(rev_params_opt))
+        let rp = reverse_param_list_opt(rev_params_opt)
+        (p, rp)
     }
 
     // ============================================================
@@ -435,16 +442,16 @@ impl Parser {
 
         // Parse optional type parameters: struct Foo<T, U> { ... }
         var type_params_opt: Option<Box<TypeParamDefList>> = None
-        if p.peek() == TokenKind::Lt {
+        if parser_peek(p) == TokenKind::Lt {
             p = p.advance()  // skip '<'
             var rev_tparams: Option<Box<TypeParamDefList>> = None
-            while p.peek() != TokenKind::Gt && p.peek() != TokenKind::Eof {
+            while parser_peek(p) != TokenKind::Gt && parser_peek(p) != TokenKind::Eof {
                 let tp_span = p.current_span()
                 let tp_name = p.current_name()
                 p = p.expect_ident()
                 let tpd = TypeParamDef { name: tp_name, span: p.span_from(tp_span) }
                 rev_tparams = Some(Box::new(TypeParamDefList { head: tpd, tail: rev_tparams }))
-                if p.peek() == TokenKind::Comma {
+                if parser_peek(p) == TokenKind::Comma {
                     p = p.advance()
                 }
             }
@@ -457,7 +464,7 @@ impl Parser {
         // Parse fields
         var rev_fields_opt: Option<Box<FieldDefList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             let field_start = p.current_span()
             let field_name = p.current_name()
             p = p.expect_ident()
@@ -470,7 +477,7 @@ impl Parser {
 
             rev_fields_opt = Some(Box::new(FieldDefList { head: field, tail: rev_fields_opt }))
 
-            if p.peek() == TokenKind::Comma {
+            if parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
             }
         }
@@ -525,17 +532,17 @@ impl Parser {
 
         var rev_variants_opt: Option<Box<VariantDefList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             let v_start = p.current_span()
             let v_name = p.current_name()
             p = p.expect_ident()
 
             // Parse optional variant fields: Variant { field1: Type1, field2: Type2 }
             var v_fields: Option<Box<FieldDefList>> = None
-            if p.peek() == TokenKind::LBrace {
+            if parser_peek(p) == TokenKind::LBrace {
                 p = p.advance()  // skip {
                 var rev_fields: Option<Box<FieldDefList>> = None
-                while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+                while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
                     let f_name = p.current_name()
                     p = p.expect_ident()
                     p = p.expect(TokenKind::Colon)
@@ -545,7 +552,7 @@ impl Parser {
                     let f_span = p.span_from(v_start)
                     let fdef = FieldDef { name: f_name, ty: f_ty, span: f_span }
                     rev_fields = Some(Box::new(FieldDefList { head: fdef, tail: rev_fields }))
-                    if p.peek() == TokenKind::Comma {
+                    if parser_peek(p) == TokenKind::Comma {
                         p = p.advance()
                     }
                 }
@@ -558,7 +565,7 @@ impl Parser {
 
             rev_variants_opt = Some(Box::new(VariantDefList { head: variant, tail: rev_variants_opt }))
 
-            if p.peek() == TokenKind::Comma {
+            if parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
             }
         }
@@ -615,14 +622,14 @@ impl Parser {
         // Build methods in reverse for O(1) cons, reverse once at the end.
         var rev_methods_opt: Option<Box<ItemList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             // Ignore trivia and doc comments between methods.
-            while p.peek() == TokenKind::Newline || p.peek() == TokenKind::Semi || tk_is_doc_comment(p.peek()) {
+            while parser_peek(p) == TokenKind::Newline || parser_peek(p) == TokenKind::Semi || tk_is_doc_comment(parser_peek(p)) {
                 p = p.advance()
             }
 
-            if p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-                if p.peek() == TokenKind::Fn {
+            if parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+                if parser_peek(p) == TokenKind::Fn {
                     let pair2 = p.parse_fn_item(false, false)
                     p = pair2.0
                     let method = pair2.1
@@ -690,7 +697,7 @@ impl Parser {
         // Parse trait body: { fn m1(); fn m2(x: i64) -> i64; ... }
         p = p.expect(TokenKind::LBrace)
         var rev_methods_opt: Option<Box<ItemList>> = None
-        while p.peek() != TokenKind::RBrace && !p.at_eof() {
+        while parser_peek(p) != TokenKind::RBrace && !parser_at_eof(p) {
             let method_pair = p.parse_item()
             p = method_pair.0
             let method_item = method_pair.1
@@ -747,7 +754,7 @@ impl Parser {
         p = p.expect(TokenKind::Eq)
 
         // Check for refinement type: { var: Type | predicate }
-        if p.peek() == TokenKind::LBrace {
+        if parser_peek(p) == TokenKind::LBrace {
             let ref_pair = p.parse_refinement_type()
             p = ref_pair.0
             let ref_ty = ref_pair.1
@@ -838,12 +845,12 @@ impl Parser {
 
         var level_name = empty_name()
         var scope_name = empty_name()
-        if p.peek() == TokenKind::Level {
+        if parser_peek(p) == TokenKind::Level {
             p = p.advance()
             level_name = p.current_name()
             p = p.expect_ident()
         }
-        if p.peek() == TokenKind::Scope {
+        if parser_peek(p) == TokenKind::Scope {
             p = p.advance()
             scope_name = p.current_name()
             p = p.expect_ident()
@@ -852,11 +859,11 @@ impl Parser {
         p = p.expect(TokenKind::LBrace)
         var rev_requirements_opt: Option<Box<PolicyRequirementList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
 
@@ -867,7 +874,7 @@ impl Parser {
                 tail: rev_requirements_opt,
             }))
 
-            while p.peek() == TokenKind::Semi {
+            while parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
             }
         }
@@ -928,14 +935,14 @@ impl Parser {
         let target_ty = target_pair.1
 
         var objective_name = empty_name()
-        if p.peek() == TokenKind::Objective {
+        if parser_peek(p) == TokenKind::Objective {
             p = p.advance()
             objective_name = p.current_name()
             p = p.expect_ident()
         }
 
         var route_name = empty_name()
-        if p.peek() == TokenKind::Route {
+        if parser_peek(p) == TokenKind::Route {
             p = p.advance()
             route_name = p.current_name()
             p = p.expect_ident()
@@ -944,11 +951,11 @@ impl Parser {
         p = p.expect(TokenKind::LBrace)
         var rev_requirements_opt: Option<Box<PolicyRequirementList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
 
@@ -959,7 +966,7 @@ impl Parser {
                 tail: rev_requirements_opt,
             }))
 
-            while p.peek() == TokenKind::Semi {
+            while parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
             }
         }
@@ -1020,14 +1027,14 @@ impl Parser {
         let target_ty = target_pair.1
 
         var strategy_name = empty_name()
-        if p.peek() == TokenKind::Strategy {
+        if parser_peek(p) == TokenKind::Strategy {
             p = p.advance()
             strategy_name = p.current_name()
             p = p.expect_ident()
         }
 
         var route_name = empty_name()
-        if p.peek() == TokenKind::Route {
+        if parser_peek(p) == TokenKind::Route {
             p = p.advance()
             route_name = p.current_name()
             p = p.expect_ident()
@@ -1036,11 +1043,11 @@ impl Parser {
         p = p.expect(TokenKind::LBrace)
         var rev_requirements_opt: Option<Box<PolicyRequirementList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
 
@@ -1051,7 +1058,7 @@ impl Parser {
                 tail: rev_requirements_opt,
             }))
 
-            while p.peek() == TokenKind::Semi {
+            while parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
             }
         }
@@ -1112,7 +1119,7 @@ impl Parser {
         let target_ty = target_pair.1
 
         var route_name = empty_name()
-        if p.peek() == TokenKind::Route {
+        if parser_peek(p) == TokenKind::Route {
             p = p.advance()
             route_name = p.current_name()
             p = p.expect_ident()
@@ -1123,24 +1130,24 @@ impl Parser {
         var max_steps: i64 = -1
         var rollback_route_name = empty_name()
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
 
-            if p.peek() == TokenKind::Require {
+            if parser_peek(p) == TokenKind::Require {
                 let req_pair = p.parse_policy_requirement()
                 p = req_pair.0
                 rev_requirements_opt = Some(Box::new(PolicyRequirementList {
                     head: req_pair.1,
                     tail: rev_requirements_opt,
                 }))
-            } else if p.peek() == TokenKind::MaxSteps {
+            } else if parser_peek(p) == TokenKind::MaxSteps {
                 p = p.advance()
-                if p.peek() == TokenKind::IntLit {
+                if parser_peek(p) == TokenKind::IntLit {
                     max_steps = p.current().int_value
                     p = p.advance()
                 } else {
@@ -1148,7 +1155,7 @@ impl Parser {
                     p.error_count = p.error_count + 1
                     p = p.advance()
                 }
-            } else if p.peek() == TokenKind::RollbackRoute {
+            } else if parser_peek(p) == TokenKind::RollbackRoute {
                 p = p.advance()
                 rollback_route_name = p.current_name()
                 p = p.expect_ident()
@@ -1158,7 +1165,7 @@ impl Parser {
                 p = p.advance()
             }
 
-            while p.peek() == TokenKind::Semi {
+            while parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
             }
         }
@@ -1220,7 +1227,7 @@ impl Parser {
         let target_ty = target_pair.1
 
         var route_name = empty_name()
-        if p.peek() == TokenKind::Route {
+        if parser_peek(p) == TokenKind::Route {
             p = p.advance()
             route_name = p.current_name()
             p = p.expect_ident()
@@ -1230,22 +1237,22 @@ impl Parser {
         var rev_requirements_opt: Option<Box<PolicyRequirementList>> = None
         var rollback_route_name = empty_name()
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
 
-            if p.peek() == TokenKind::Require {
+            if parser_peek(p) == TokenKind::Require {
                 let req_pair = p.parse_policy_requirement()
                 p = req_pair.0
                 rev_requirements_opt = Some(Box::new(PolicyRequirementList {
                     head: req_pair.1,
                     tail: rev_requirements_opt,
                 }))
-            } else if p.peek() == TokenKind::RollbackRoute {
+            } else if parser_peek(p) == TokenKind::RollbackRoute {
                 p = p.advance()
                 rollback_route_name = p.current_name()
                 p = p.expect_ident()
@@ -1255,7 +1262,7 @@ impl Parser {
                 p = p.advance()
             }
 
-            while p.peek() == TokenKind::Semi {
+            while parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
             }
         }
@@ -1315,7 +1322,7 @@ impl Parser {
         p = target_pair.0
         let target_ty = target_pair.1
 
-        if p.peek() == TokenKind::Ident && parser_name_is_under(p.current_name()) {
+        if parser_peek(p) == TokenKind::Ident && parser_name_is_under(p.current_name()) {
             p = p.advance()
         } else {
             p.had_error = true
@@ -1327,11 +1334,11 @@ impl Parser {
         p = p.expect(TokenKind::LBrace)
 
         var rev_steps_opt: Option<Box<TransitionStepDefList>> = None
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
             let step_pair = p.parse_transition_step_def()
@@ -1340,7 +1347,7 @@ impl Parser {
                 head: step_pair.1,
                 tail: rev_steps_opt,
             }))
-            while p.peek() == TokenKind::Semi {
+            while parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
             }
         }
@@ -1400,7 +1407,7 @@ impl Parser {
         let target_ty = target_pair.1
 
         var frontier_name = empty_name()
-        if p.peek() == TokenKind::Ident && parser_name_is_frontier(p.current_name()) {
+        if parser_peek(p) == TokenKind::Ident && parser_name_is_frontier(p.current_name()) {
             p = p.advance()
             frontier_name = p.current_name()
             p = p.expect_ident()
@@ -1410,24 +1417,24 @@ impl Parser {
         var rev_objectives_opt: Option<Box<AlternativeObjectiveDefList>> = None
         var max_options: i64 = -1
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
 
-            if p.peek() == TokenKind::Objective {
+            if parser_peek(p) == TokenKind::Objective {
                 let obj_pair = p.parse_alternative_objective_def()
                 p = obj_pair.0
                 rev_objectives_opt = Some(Box::new(AlternativeObjectiveDefList {
                     head: obj_pair.1,
                     tail: rev_objectives_opt,
                 }))
-            } else if p.peek() == TokenKind::Ident && parser_name_is_max_options(p.current_name()) {
+            } else if parser_peek(p) == TokenKind::Ident && parser_name_is_max_options(p.current_name()) {
                 p = p.advance()
-                if p.peek() == TokenKind::IntLit {
+                if parser_peek(p) == TokenKind::IntLit {
                     max_options = p.current().int_value
                     p = p.advance()
                 } else {
@@ -1441,7 +1448,7 @@ impl Parser {
                 p = p.advance()
             }
 
-            while p.peek() == TokenKind::Semi {
+            while parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
             }
         }
@@ -1501,7 +1508,7 @@ impl Parser {
         p = target_pair.0
         let target_ty = target_pair.1
 
-        if p.peek() == TokenKind::Ident && parser_name_is_under(p.current_name()) {
+        if parser_peek(p) == TokenKind::Ident && parser_name_is_under(p.current_name()) {
             p = p.advance()
         } else {
             p.had_error = true
@@ -1513,11 +1520,11 @@ impl Parser {
         p = p.expect(TokenKind::LBrace)
 
         var rev_candidates_opt: Option<Box<AlternativeCandidateDefList>> = None
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
             let cand_pair = p.parse_alternative_candidate_def()
@@ -1526,7 +1533,7 @@ impl Parser {
                 head: cand_pair.1,
                 tail: rev_candidates_opt,
             }))
-            while p.peek() == TokenKind::Semi {
+            while parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
             }
         }
@@ -1578,10 +1585,10 @@ impl Parser {
         var p = self.advance()  // skip objective
 
         var direction = AlternativeObjectiveDirection::AlternativeObjectiveMinimize
-        if p.peek() == TokenKind::Ident && parser_name_is_maximize(p.current_name()) {
+        if parser_peek(p) == TokenKind::Ident && parser_name_is_maximize(p.current_name()) {
             direction = AlternativeObjectiveDirection::AlternativeObjectiveMaximize
             p = p.advance()
-        } else if p.peek() == TokenKind::Ident && parser_name_is_minimize(p.current_name()) {
+        } else if parser_peek(p) == TokenKind::Ident && parser_name_is_minimize(p.current_name()) {
             p = p.advance()
         } else {
             p.had_error = true
@@ -1610,7 +1617,7 @@ impl Parser {
 
         var via_name = empty_name()
         if uses_via {
-            if p.peek() == TokenKind::Ident && parser_name_is_via(p.current_name()) {
+            if parser_peek(p) == TokenKind::Ident && parser_name_is_via(p.current_name()) {
                 p = p.advance()
                 via_name = p.current_name()
                 p = p.expect_ident()
@@ -1626,29 +1633,29 @@ impl Parser {
         var value_expr = mk_expr(ExprKind::ExprError, Span { file_id: 0, start: 0, end: 0 })
         var rev_metrics_opt: Option<Box<AuditFieldEntryList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline || p.peek() == TokenKind::Comma {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline || parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
 
-            if p.peek() == TokenKind::Ident && parser_name_is_value(p.current_name()) {
+            if parser_peek(p) == TokenKind::Ident && parser_name_is_value(p.current_name()) {
                 p = p.advance()
                 p = p.expect(TokenKind::Colon)
-                let value_pair = p.parse_expr()
-                p = value_pair.0
-                value_expr = value_pair.1
+                p = p.parse_expr()
+                let value_box = parser_take_expr_box()
+                value_expr = *value_box
                 have_value = true
-            } else if p.peek() == TokenKind::Ident && parser_name_is_metrics(p.current_name()) {
+            } else if parser_peek(p) == TokenKind::Ident && parser_name_is_metrics(p.current_name()) {
                 p = p.advance()
                 p = p.expect(TokenKind::LBrace)
-                while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-                    while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline || p.peek() == TokenKind::Comma {
+                while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+                    while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline || parser_peek(p) == TokenKind::Comma {
                         p = p.advance()
                     }
-                    if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+                    if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                         break
                     }
                     let metric_pair = p.parse_audit_field_entry()
@@ -1657,7 +1664,7 @@ impl Parser {
                         head: metric_pair.1,
                         tail: rev_metrics_opt,
                     }))
-                    while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Comma {
+                    while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Comma {
                         p = p.advance()
                     }
                 }
@@ -1687,7 +1694,7 @@ impl Parser {
     fn parse_transition_step_def(self) -> (Parser, TransitionStepDef) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self
-        if p.peek() == TokenKind::Step {
+        if parser_peek(p) == TokenKind::Step {
             p = p.advance()
         } else {
             p.had_error = true
@@ -1702,22 +1709,22 @@ impl Parser {
         var value_expr = mk_expr(ExprKind::ExprError, Span { file_id: 0, start: 0, end: 0 })
         var rev_requirements_opt: Option<Box<PolicyRequirementList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline || p.peek() == TokenKind::Comma {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline || parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
 
-            if p.peek() == TokenKind::Ident && parser_name_is_value(p.current_name()) {
+            if parser_peek(p) == TokenKind::Ident && parser_name_is_value(p.current_name()) {
                 p = p.advance()
                 p = p.expect(TokenKind::Colon)
-                let value_pair = p.parse_expr()
-                p = value_pair.0
-                value_expr = value_pair.1
+                p = p.parse_expr()
+                let value_box = parser_take_expr_box()
+                value_expr = *value_box
                 have_value = true
-            } else if p.peek() == TokenKind::Require {
+            } else if parser_peek(p) == TokenKind::Require {
                 let req_pair = p.parse_policy_requirement()
                 p = req_pair.0
                 rev_requirements_opt = Some(Box::new(PolicyRequirementList {
@@ -1730,7 +1737,7 @@ impl Parser {
                 p = p.advance()
             }
 
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Comma {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
             }
         }
@@ -1768,11 +1775,11 @@ impl Parser {
         p = p.expect(TokenKind::LBrace)
         var rev_requirements_opt: Option<Box<PolicyRequirementList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
 
@@ -1783,7 +1790,7 @@ impl Parser {
                 tail: rev_requirements_opt,
             }))
 
-            while p.peek() == TokenKind::Semi {
+            while parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
             }
         }
@@ -1842,7 +1849,7 @@ impl Parser {
         let target_ty = target_pair.1
 
         var route_name = empty_name()
-        if p.peek() == TokenKind::Route {
+        if parser_peek(p) == TokenKind::Route {
             p = p.advance()
             route_name = p.current_name()
             p = p.expect_ident()
@@ -1851,11 +1858,11 @@ impl Parser {
         p = p.expect(TokenKind::LBrace)
         var rev_requirements_opt: Option<Box<PolicyRequirementList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
 
@@ -1866,7 +1873,7 @@ impl Parser {
                 tail: rev_requirements_opt,
             }))
 
-            while p.peek() == TokenKind::Semi {
+            while parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
             }
         }
@@ -1925,15 +1932,15 @@ impl Parser {
         var rev_models_opt: Option<Box<AstPathList>> = None
         var model_count: i64 = 0
 
-        if p.peek() != TokenKind::RBracket {
+        if parser_peek(p) != TokenKind::RBracket {
             let pair = p.parse_type_path()
             p = pair.0
             rev_models_opt = Some(Box::new(AstPathList { head: pair.1, tail: None }))
             model_count = 1
 
-            while p.peek() == TokenKind::Comma {
+            while parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
-                if p.peek() == TokenKind::RBracket { break }
+                if parser_peek(p) == TokenKind::RBracket { break }
                 let pair2 = p.parse_type_path()
                 p = pair2.0
                 rev_models_opt = Some(Box::new(AstPathList { head: pair2.1, tail: rev_models_opt }))
@@ -1994,7 +2001,7 @@ impl Parser {
         let target_ty = target_pair.1
 
         p = p.expect(TokenKind::LBrace)
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             p = p.advance()
         }
         p = p.expect(TokenKind::RBrace)
@@ -2052,11 +2059,11 @@ impl Parser {
         p = p.expect(TokenKind::LBrace)
         var rev_sections_opt: Option<Box<AuditSectionList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
             let section_pair = p.parse_audit_section()
@@ -2065,7 +2072,7 @@ impl Parser {
                 head: section_pair.1,
                 tail: rev_sections_opt,
             }))
-            while p.peek() == TokenKind::Semi {
+            while parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
             }
         }
@@ -2118,11 +2125,11 @@ impl Parser {
         p = p.expect(TokenKind::LBrace)
 
         var rev_fields_opt: Option<Box<AuditFieldEntryList>> = None
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Comma || p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Comma || parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
             let field_pair = p.parse_audit_field_entry()
@@ -2131,7 +2138,7 @@ impl Parser {
                 head: field_pair.1,
                 tail: rev_fields_opt,
             }))
-            while p.peek() == TokenKind::Comma || p.peek() == TokenKind::Semi {
+            while parser_peek(p) == TokenKind::Comma || parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
             }
         }
@@ -2155,11 +2162,11 @@ impl Parser {
         var value_name = empty_name()
         var value_f64: f64 = 0.0
         var value_kind = AuditValueKind::AuditValueName
-        if p.peek() == TokenKind::IntLit {
+        if parser_peek(p) == TokenKind::IntLit {
             value_kind = AuditValueKind::AuditValueFloat
             value_f64 = p.current().int_value as f64
             p = p.advance()
-        } else if p.peek() == TokenKind::FloatLit {
+        } else if parser_peek(p) == TokenKind::FloatLit {
             value_kind = AuditValueKind::AuditValueFloat
             value_f64 = p.current().float_value
             p = p.advance()
@@ -2184,7 +2191,7 @@ impl Parser {
             let name = self.current_name()
             (self.advance(), name)
         } else if self.peek() == TokenKind::Ident {
-            if self.peek_ahead(1) == TokenKind::ColonColon {
+            if parser_peek_ahead(self, 1) == TokenKind::ColonColon {
                 let pair = self.parse_type_path()
                 (pair.0, copy_string_list_tail_to_name(pair.1.segments))
             } else {
@@ -2214,23 +2221,23 @@ impl Parser {
         var threshold_kind: i64 = 0
         var bool_threshold = false
         var name_threshold = empty_name()
-        if p.peek() == TokenKind::IntLit {
+        if parser_peek(p) == TokenKind::IntLit {
             threshold = p.current().int_value as f64
             p = p.advance()
-        } else if p.peek() == TokenKind::FloatLit {
+        } else if parser_peek(p) == TokenKind::FloatLit {
             threshold = p.current().float_value
             p = p.advance()
-        } else if p.peek() == TokenKind::True {
+        } else if parser_peek(p) == TokenKind::True {
             threshold = 1.0
             threshold_kind = 1
             bool_threshold = true
             p = p.advance()
-        } else if p.peek() == TokenKind::False {
+        } else if parser_peek(p) == TokenKind::False {
             threshold = 0.0
             threshold_kind = 1
             bool_threshold = false
             p = p.advance()
-        } else if p.peek() == TokenKind::Ident {
+        } else if parser_peek(p) == TokenKind::Ident {
             threshold_kind = 2
             name_threshold = p.current_name()
             p = p.advance()
@@ -2297,7 +2304,7 @@ impl Parser {
 
         // Parse comparison operator
         var pred_op: i64 = 0
-        let op_tok = p.peek()
+        let op_tok = parser_peek(p)
         if op_tok == TokenKind::Gt {
             pred_op = 1  // refinement_op_gt
             p = p.advance()
@@ -2327,7 +2334,7 @@ impl Parser {
         var pred_int_val: i64 = 0
         var pred_float_val: f64 = 0.0
         var pred_is_float = false
-        let val_tok = p.peek()
+        let val_tok = parser_peek(p)
         if val_tok == TokenKind::IntLit {
             let tok = p.current()
             pred_int_val = tok.int_value
@@ -2385,26 +2392,26 @@ impl Parser {
         var is_glob = false
         var use_items_opt: Option<Box<ImportItemList>> = None
 
-        if p.peek() == TokenKind::ColonColon && p.peek_ahead(1) == TokenKind::Star {
+        if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::Star {
             // Glob import: use path::*
             p = p.advance()  // skip ::
             p = p.advance()  // skip *
             is_glob = true
-        } else if p.peek() == TokenKind::ColonColon && p.peek_ahead(1) == TokenKind::LBrace {
+        } else if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::LBrace {
             // Selective import: use path::{A, B, C}
             p = p.advance()  // skip ::
             p = p.advance()  // skip {
 
             // Parse comma-separated identifiers
             var rev_items: Option<Box<ImportItemList>> = None
-            if p.peek() != TokenKind::RBrace {
+            if parser_peek(p) != TokenKind::RBrace {
                 let first_name = p.current_name()
                 p = p.advance()  // skip ident
                 rev_items = Some(Box::new(ImportItemList { head: first_name, tail: None }))
 
-                while p.peek() == TokenKind::Comma {
+                while parser_peek(p) == TokenKind::Comma {
                     p = p.advance()  // skip ,
-                    if p.peek() == TokenKind::RBrace { break }
+                    if parser_peek(p) == TokenKind::RBrace { break }
                     let next_name = p.current_name()
                     p = p.advance()  // skip ident
                     rev_items = Some(Box::new(ImportItemList { head: next_name, tail: rev_items }))
@@ -2493,14 +2500,14 @@ impl Parser {
         var rev_ops_opt: Option<Box<EffectOpDefList>> = None
         var op_count: i64 = 0
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
-            if p.peek() == TokenKind::Fn {
+            if parser_peek(p) == TokenKind::Fn {
                 let op_pair = p.parse_effect_op_def()
                 p = op_pair.0
                 rev_ops_opt = Some(Box::new(EffectOpDefList {
@@ -2563,14 +2570,14 @@ impl Parser {
 
         // Optional conversion: = expr ;
         var conv_ty: Option<Box<TypeExpr>> = None
-        if p.peek() == TokenKind::Eq {
+        if parser_peek(p) == TokenKind::Eq {
             p = p.advance()          // consume '='
             // Parse the conversion expression as a type expression
             // (for now, skip to semicolon — conversion is stored but not evaluated)
         }
 
         // Expect semicolon
-        if p.peek() == TokenKind::Semi {
+        if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
         }
 
@@ -2636,18 +2643,18 @@ impl Parser {
         }; 16]
         var step_count: i64 = 0
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             // skip newlines/semis between steps
-            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+            while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
                 p = p.advance()
             }
-            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+            if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
                 break
             }
 
             let step_start = p.current_span()
 
-            if p.peek() == TokenKind::Send {
+            if parser_peek(p) == TokenKind::Send {
                 p = p.advance()  // skip 'send'
                 let ty_pair = p.parse_type()
                 p = ty_pair.0
@@ -2660,7 +2667,7 @@ impl Parser {
                     }
                     step_count = step_count + 1
                 }
-            } else if p.peek() == TokenKind::Recv {
+            } else if parser_peek(p) == TokenKind::Recv {
                 p = p.advance()  // skip 'recv'
                 let ty_pair = p.parse_type()
                 p = ty_pair.0
@@ -2673,7 +2680,7 @@ impl Parser {
                     }
                     step_count = step_count + 1
                 }
-            } else if p.peek() == TokenKind::Close {
+            } else if parser_peek(p) == TokenKind::Close {
                 p = p.advance()  // skip 'close'
                 if step_count < 16 {
                     steps[step_count as usize] = SessionStep {
@@ -2699,7 +2706,7 @@ impl Parser {
             }
 
             // optional comma separator
-            if p.peek() == TokenKind::Comma {
+            if parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
             }
         }
@@ -2748,8 +2755,8 @@ impl Parser {
     fn parse_extern_fn_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'extern'
-        if p.peek() == TokenKind::StringLit { p = p.advance() }
-        if p.peek() != TokenKind::Fn {
+        if parser_peek(p) == TokenKind::StringLit { p = p.advance() }
+        if parser_peek(p) != TokenKind::Fn {
             let span = p.current_span()
             p.had_error = true
             p.error_count = p.error_count + 1
@@ -2775,7 +2782,7 @@ impl Parser {
     // Sprint 109: export "C" fn
     fn parse_export_fn_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         var p = self.advance()  // skip 'export'
-        if p.peek() == TokenKind::StringLit { p = p.advance() }
+        if parser_peek(p) == TokenKind::StringLit { p = p.advance() }
         p.parse_fn_item(true, false)
     }
 
@@ -2797,7 +2804,8 @@ fn reverse_param_list_loop(
         None => acc,
         Some(node) => {
             let next = (*node).tail
-            let rev_node = ParamList { head: (*node).head, tail: acc }
+            let head = (*node).head
+            let rev_node = ParamList { head: head, tail: acc }
             reverse_param_list_loop(next, Some(Box::new(rev_node)))
         },
     }
@@ -3254,7 +3262,7 @@ fn study_parse_name_f64(name: Name) -> f64 with Mut, Panic, Div {
 }
 
 fn study_parse_i64_value(p: Parser) -> (Parser, i64) with Mut, IO, Panic, Div, Alloc {
-    if p.peek() == TokenKind::IntLit {
+    if parser_peek(p) == TokenKind::IntLit {
         let value = p.current().int_value
         (p.advance(), value)
     } else {
@@ -3266,10 +3274,10 @@ fn study_parse_i64_value(p: Parser) -> (Parser, i64) with Mut, IO, Panic, Div, A
 }
 
 fn study_parse_f64_value(p: Parser) -> (Parser, f64) with Mut, IO, Panic, Div, Alloc {
-    if p.peek() == TokenKind::IntLit {
+    if parser_peek(p) == TokenKind::IntLit {
         let value = p.current().int_value as f64
         (p.advance(), value)
-    } else if p.peek() == TokenKind::FloatLit {
+    } else if parser_peek(p) == TokenKind::FloatLit {
         let lit_name = p.current_name()
         (p.advance(), study_parse_name_f64(lit_name))
     } else {

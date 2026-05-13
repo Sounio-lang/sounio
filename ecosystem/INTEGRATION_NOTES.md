@@ -41,13 +41,13 @@ All three projects depend on these **two critical env vars**. Set them before ru
 
 **Default location:**
 ```
-/home/demetrios/RustroverProjects/sounio/bin/souc
+/workspace/sounio/bin/souc
 ```
 
 **How to set:**
 ```bash
 # In your shell profile (~/.bashrc, ~/.zshrc)
-export SOUC=/home/demetrios/RustroverProjects/sounio/bin/souc
+export SOUC=/workspace/sounio/bin/souc
 
 # Or set at runtime
 SOUC=/path/to/souc python demo.py
@@ -63,13 +63,13 @@ $SOUC --version
 
 **Default location:**
 ```
-/home/demetrios/RustroverProjects/sounio/stdlib
+/workspace/sounio/stdlib
 ```
 
 **How to set:**
 ```bash
 # In your shell profile
-export SOUNIO_STDLIB_PATH=/home/demetrios/RustroverProjects/sounio/stdlib
+export SOUNIO_STDLIB_PATH=/workspace/sounio/stdlib
 
 # Or at runtime
 SOUNIO_STDLIB_PATH=/path/to/stdlib python demo.py
@@ -337,7 +337,7 @@ Pipeline complete
 
 ```
 ┌─────────────────────────────────────────────┐
-│  python triple-sounio-ecosystem/demo.py     │
+│  python ecosystem/demo.py     │
 ├─────────────────────────────────────────────┤
 │                                             │
 │  Test 1: Import sounio (Track A)            │
@@ -384,8 +384,8 @@ ls $SOUC
 
 **Fix:**
 ```bash
-export SOUC=/home/demetrios/RustroverProjects/sounio/bin/souc
-python triple-sounio-ecosystem/demo.py
+export SOUC=/workspace/sounio/bin/souc
+python ecosystem/demo.py
 ```
 
 ### Failure: "cannot find stdlib"
@@ -400,8 +400,8 @@ ls $SOUNIO_STDLIB_PATH/epistemic/
 
 **Fix:**
 ```bash
-export SOUNIO_STDLIB_PATH=/home/demetrios/RustroverProjects/sounio/stdlib
-python triple-sounio-ecosystem/demo.py
+export SOUNIO_STDLIB_PATH=/workspace/sounio/stdlib
+python ecosystem/demo.py
 ```
 
 ### Failure: "sounio module not found"
@@ -410,13 +410,13 @@ python triple-sounio-ecosystem/demo.py
 
 **Diagnosis:**
 ```bash
-cd triple-sounio-ecosystem/sounio-py
+cd ecosystem/sounio-py
 maturin develop --help  # Check if installed
 ```
 
 **Fix:**
 ```bash
-cd triple-sounio-ecosystem/sounio-py
+cd ecosystem/sounio-py
 maturin develop
 python -c "import sounio; print(sounio.__file__)"
 ```
@@ -427,13 +427,13 @@ python -c "import sounio; print(sounio.__file__)"
 
 **Diagnosis:**
 ```bash
-cd triple-sounio-ecosystem/sounio-jupyter
+cd ecosystem/sounio-jupyter
 python install.py --help
 ```
 
 **Fix:**
 ```bash
-cd triple-sounio-ecosystem/sounio-jupyter
+cd ecosystem/sounio-jupyter
 pip install -e .
 python install.py
 jupyter kernelspec list  # Check installation
@@ -446,7 +446,7 @@ jupyter kernelspec list  # Check installation
 **Diagnosis:**
 ```bash
 # Run pipeline directly
-$SOUC run triple-sounio-ecosystem/drug-discovery/examples/full_pipeline.sio
+$SOUC run ecosystem/drug-discovery/examples/full_pipeline.sio
 # Look at actual output format
 ```
 

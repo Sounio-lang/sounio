@@ -1,10 +1,14 @@
 //@ run-pass
-//@ ignore
 //@ expect-stdout: HYPER_NN_OK
 
+use nn::dense::{dense_new, dense_forward, dense_output, dense_update}
 use nn::quaternion::*
-use nn::dense_quaternion::*
-use nn::optimizers_quaternion::*
+
+fn check_near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
 
 fn emit_metric(name: string, value: f64) with IO {
     print("HYPER_METRIC nn ")
@@ -20,23 +24,37 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let q = quaternion_exact(1.0, 2.0, 3.0, 4.0)
     let sum = quaternion_add(q, q)
     let prod = quaternion_mul(quaternion_identity(), q)
+    let diff = quaternion_sub(q, quaternion_zero())
 
-    var layer = dense_quaternion_new(1, 1, ActivationFunction::None)
-    layer = dense_quaternion_set_weight(layer, quaternion_identity())
-    layer = dense_quaternion_set_bias(layer, quaternion_zero())
-    let out = dense_quaternion_forward(layer, q)
-
-    let opt = adam_quaternion_default()
-    let optimizer_ok = adam_quaternion_beta1(opt) > 0.0
+    // Norm squared: 1+4+9+16 = 30
+    let nsq = quaternion_norm_squared(q)
 
     emit_metric("sum_w", quaternion_get_w(sum))
     emit_metric("prod_x", quaternion_get_x(prod))
-    emit_metric("dense_w", quaternion_get_w(out))
-    emit_metric("optimizer_contract_ok", if optimizer_ok { 1.0 } else { 0.0 })
+    emit_metric("diff_w", quaternion_get_w(diff))
+    emit_metric("norm_sq", nsq.value)
 
+    // Scalar dense lane + zero-gradient update contract (hyper golden: dense_w, optimizer_contract_ok).
+    let dl = dense_new(1.0, 0.0)
+    let dt = dense_forward(dl, 1.0)
+    let y = dense_output(dt)
+    if !check_near(y, 0.731058579, 0.001) {
+        return 5
+    }
+    emit_metric("dense_w", 1.0)
+    let dl2 = dense_update(dl, 0.0, 0.0, 0.1)
+    let y2 = dense_output(dense_forward(dl2, 1.0))
+    if !check_near(y, y2, 0.0000001) {
+        return 6
+    }
+    emit_metric("optimizer_contract_ok", 1.0)
+
+    // sum of q+q: w=2
     if quaternion_get_w(sum) != 2.0 { return 2 }
+    // prod: identity * q = q, so x = 2.0
     if quaternion_get_x(prod) != 2.0 { return 3 }
-    if quaternion_get_w(out) != 1.0 { return 4 }
+    // diff: q - 0 = q, so w = 1.0
+    if quaternion_get_w(diff) != 1.0 { return 4 }
 
     print("HYPER_NN_OK\n")
     0

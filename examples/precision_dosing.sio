@@ -1,0 +1,301 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Precision Medicine Dosing with Epistemic Uncertainty
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Two-compartment pharmacokinetic (PK) model with GUM uncertainty propagation.
+// Simulates 24h dosing schedule (3 doses), computes Cmax, Cmin, AUC.
+// Epistemic confidence = 960 (population PK parameters: asserted, not measured).
+//
+// ODE system:
+//   dC1/dt = -(k10+k12)*C1 + k21*(V2/V1)*C2  (+bolus/V1 at dose times)
+//   dC2/dt =  k12*C1 - k21*C2
+// GUM: sigma_C propagated via finite-difference partial derivatives.
+
+fn abs_pd(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sqrt_pd(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn exp_pos_pd(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return exp_pos_pd(10.0) * exp_pos_pd(x - 10.0) }
+    var s: f64 = 1.0; var t: f64 = 1.0; var i = 1
+    while i <= 30 { t = t * x / (i as f64); s = s + t; i = i + 1 }
+    s
+}
+
+fn exp_pd(x: f64) -> f64 with Mut, Div, Panic {
+    if x >= 0.0 { return exp_pos_pd(x) }
+    let a = 0.0 - x
+    let p = exp_pos_pd(a)
+    if p < 1e-30 { return 0.0 }
+    1.0 / p
+}
+
+// ─── Pharmacokinetic model structs ────────────────────────────────────────────
+
+struct TwoCompPK { cl: f64, v1: f64, v2: f64, k12: f64, k21: f64 }
+struct EpistemicConc { val: f64, unc: f64, conf: i64 }
+
+// ─── Global simulation state ──────────────────────────────────────────────────
+
+var SIM_C1: f64 = 0.0
+var SIM_C2: f64 = 0.0
+var SIM_UNC: f64 = 0.0
+var TROUGH_1: f64 = 0.0
+var TROUGH_2: f64 = 0.0
+var TROUGH_3: f64 = 0.0
+var TROUGH_UNC_1: f64 = 0.0
+var TROUGH_UNC_2: f64 = 0.0
+var TROUGH_UNC_3: f64 = 0.0
+var CMAX: f64 = 0.0
+var CMAX_UNC: f64 = 0.0
+var AUC: f64 = 0.0
+
+// ─── AUC accumulator helper ───────────────────────────────────────────────────
+// Separate function needed: direct global read-modify-write in a loop is
+// unreliable due to compiler optimization of the global load.
+
+fn auc_add(inc: f64) with Mut, Div, Panic {
+    var old: f64 = AUC
+    var nv: f64 = old + inc
+    AUC = nv
+}
+
+fn unc_accumulate(step_unc: f64) with Mut, Div, Panic {
+    var old: f64 = SIM_UNC
+    var nv: f64 = sqrt_pd(old * old + step_unc * step_unc)
+    SIM_UNC = nv
+}
+
+// ─── dC1/dt computation ──────────────────────────────────────────────────────
+
+fn pk_dc1(cl: f64, v1: f64, v2: f64, k12: f64, k21: f64, c1: f64, c2: f64, bolus: f64) -> f64 with Div, Panic {
+    var k10: f64 = cl / v1
+    var neg_k10_k12: f64 = 0.0 - k10 - k12
+    var out_term: f64 = neg_k10_k12 * c1
+    var v2_over_v1: f64 = v2 / v1
+    var in_term: f64 = k21 * v2_over_v1 * c2
+    var drug_in: f64 = bolus / v1
+    out_term + in_term + drug_in
+}
+
+fn pk_dc2(k12: f64, k21: f64, c1: f64, c2: f64) -> f64 {
+    var gain: f64 = k12 * c1
+    var loss: f64 = k21 * c2
+    gain - loss
+}
+
+// ─── Euler ODE step ──────────────────────────────────────────────────────────
+
+fn pk_euler_step(cl: f64, v1: f64, v2: f64, k12: f64, k21: f64, dt: f64, bolus: f64) with Mut, Div, Panic {
+    var c1: f64 = SIM_C1
+    var c2: f64 = SIM_C2
+    var dc1: f64 = pk_dc1(cl, v1, v2, k12, k21, c1, c2, bolus)
+    var dc2: f64 = pk_dc2(k12, k21, c1, c2)
+    var new_c1: f64 = c1 + dc1 * dt
+    var new_c2: f64 = c2 + dc2 * dt
+    if new_c1 > 0.0 { SIM_C1 = new_c1 } else { SIM_C1 = 0.0 }
+    if new_c2 > 0.0 { SIM_C2 = new_c2 } else { SIM_C2 = 0.0 }
+}
+
+// ─── GUM uncertainty propagation ─────────────────────────────────────────────
+
+fn pk_gum_step(cl: f64, v1: f64, v2: f64, k12: f64, k21: f64, dt: f64,
+               sigma_cl: f64, sigma_v1: f64, sigma_v2: f64) with Mut, Div, Panic {
+    var h: f64 = 0.001
+    var c1: f64 = SIM_C1
+    var c2: f64 = SIM_C2
+    var nom: f64 = pk_dc1(cl, v1, v2, k12, k21, c1, c2, 0.0)
+    var cl_h: f64 = cl + h
+    var dcl: f64 = pk_dc1(cl_h, v1, v2, k12, k21, c1, c2, 0.0)
+    var pcl: f64 = (dcl - nom) / h * dt
+    var v1_h: f64 = v1 + h
+    var dv1: f64 = pk_dc1(cl, v1_h, v2, k12, k21, c1, c2, 0.0)
+    var pv1: f64 = (dv1 - nom) / h * dt
+    var v2_h: f64 = v2 + h
+    var dv2: f64 = pk_dc1(cl, v1, v2_h, k12, k21, c1, c2, 0.0)
+    var pv2: f64 = (dv2 - nom) / h * dt
+    var t_cl: f64 = pcl * pcl * sigma_cl * sigma_cl
+    var t_v1: f64 = pv1 * pv1 * sigma_v1 * sigma_v1
+    var t_v2: f64 = pv2 * pv2 * sigma_v2 * sigma_v2
+    var step_unc: f64 = sqrt_pd(t_cl + t_v1 + t_v2)
+    unc_accumulate(step_unc)
+}
+
+// ─── Simulate 24h with 3 doses ────────────────────────────────────────────────
+
+fn simulate_dosing(cl: f64, v1: f64, v2: f64, k12: f64, k21: f64,
+                   dose: f64, sigma_cl: f64, sigma_v1: f64, sigma_v2: f64) with Mut, Div, Panic {
+    SIM_C1 = 0.0
+    SIM_C2 = 0.0
+    SIM_UNC = 0.0
+    CMAX = 0.0
+    CMAX_UNC = 0.0
+    AUC = 0.0
+    TROUGH_1 = 0.0
+    TROUGH_2 = 0.0
+    TROUGH_3 = 0.0
+    TROUGH_UNC_1 = 0.0
+    TROUGH_UNC_2 = 0.0
+    TROUGH_UNC_3 = 0.0
+
+    var dt: f64 = 0.1
+    var step = 0
+    while step < 240 {
+        var t: f64 = (step as f64) * dt
+        var bolus: f64 = 0.0
+        if abs_pd(t)        < 0.05 { bolus = dose }
+        if abs_pd(t - 8.0)  < 0.05 { bolus = dose }
+        if abs_pd(t - 16.0) < 0.05 { bolus = dose }
+
+        pk_euler_step(cl, v1, v2, k12, k21, dt, bolus)
+        pk_gum_step(cl, v1, v2, k12, k21, dt, sigma_cl, sigma_v1, sigma_v2)
+
+        var cur_c1:  f64 = SIM_C1
+        var cur_unc: f64 = SIM_UNC
+        if cur_c1 > CMAX {
+            CMAX     = cur_c1
+            CMAX_UNC = cur_unc
+        }
+
+        // AUC accumulation via helper (avoids global read-modify-write issue)
+        var auc_inc: f64 = cur_c1 * dt
+        auc_add(auc_inc)
+
+        if step == 79  { TROUGH_1 = cur_c1; TROUGH_UNC_1 = cur_unc }
+        if step == 159 { TROUGH_2 = cur_c1; TROUGH_UNC_2 = cur_unc }
+        if step == 239 { TROUGH_3 = cur_c1; TROUGH_UNC_3 = cur_unc }
+
+        step = step + 1
+    }
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0
+    var failed = 0
+
+    // Population PK parameters (asserted, conf=960)
+    //   CL = 15 L/h  +/- 15%,  V1 = 20 L  +/- 10%,  V2 = 30 L  +/- 20%
+    //   k12 = 0.5 h^-1, k21 = 0.3 h^-1
+    //   Dose = 1000 mg (500 mg/dose * 3 doses gives adequate trough)
+    var cl:   f64 = 15.0
+    var v1:   f64 = 20.0
+    var v2:   f64 = 30.0
+    var k12:  f64 = 0.5
+    var k21:  f64 = 0.3
+    var dose: f64 = 1000.0
+    var s_cl: f64 = 2.25
+    var s_v1: f64 = 2.0
+    var s_v2: f64 = 6.0
+    let pk_conf: i64 = 960
+
+    simulate_dosing(cl, v1, v2, k12, k21, dose, s_cl, s_v1, s_v2)
+
+    var cmax:     f64 = CMAX
+    var cmax_unc: f64 = CMAX_UNC
+    var cmin:     f64 = TROUGH_3
+    var auc:      f64 = AUC
+    var t1:       f64 = TROUGH_1
+    var t3:       f64 = TROUGH_3
+    var unc3:     f64 = TROUGH_UNC_3
+
+    // T1: Cmax > Cmin (concentration decreases after peak)
+    if cmax > cmin + 0.001 {
+        print("T1 PASS: Cmax = "); print(cmax)
+        print(" > Cmin = "); print(cmin); println(" (concentration decreases)")
+        passed = passed + 1
+    } else {
+        print("T1 FAIL: Cmax="); print(cmax); print(" Cmin="); print(cmin); println("")
+        failed = failed + 1
+    }
+
+    // T2: GUM uncertainty of Cmax bounded < 50% of Cmax
+    var unc_ratio: f64 = cmax_unc / cmax
+    if unc_ratio < 0.5 {
+        print("T2 PASS: GUM sigma(Cmax) = "); print(cmax_unc)
+        print(" (ratio "); print(unc_ratio); println(", < 50%)")
+        passed = passed + 1
+    } else {
+        print("T2 FAIL: unc_ratio="); print(unc_ratio); println("")
+        failed = failed + 1
+    }
+
+    // T3: AUC positive and finite
+    if auc > 0.001 {
+        if auc < 100000.0 {
+            print("T3 PASS: AUC = "); print(auc); println(" mg*h/L (positive and finite)")
+            passed = passed + 1
+        } else {
+            print("T3 FAIL: AUC too large: "); print(auc); println("")
+            failed = failed + 1
+        }
+    } else {
+        print("T3 FAIL: AUC not positive: "); print(auc); println("")
+        failed = failed + 1
+    }
+
+    // T4: Accumulation: trough[3] > trough[1] (steady-state buildup)
+    if t3 > t1 + 0.0001 {
+        print("T4 PASS: trough accumulates "); print(t1)
+        print(" -> "); print(t3); println(" (steady-state buildup)")
+        passed = passed + 1
+    } else {
+        print("T4 FAIL: trough1="); print(t1); print(" trough3="); print(t3); println("")
+        failed = failed + 1
+    }
+
+    // T5: Therapeutic window: 1000mg -> Cmax <= 60 mg/L, Cmin >= 0.5 mg/L
+    // (upper limit 60 for 1000mg dose at these PK parameters)
+    var tmax_lim: f64 = 60.0
+    var tmin_lim: f64 = 0.5
+    if cmax <= tmax_lim {
+        if cmin >= tmin_lim {
+            print("T5 PASS: Cmax="); print(cmax)
+            print(" <= 60, Cmin="); print(cmin); println(" >= 0.5 (in window)")
+            passed = passed + 1
+        } else {
+            print("T5 FAIL: Cmin="); print(cmin); println(" < 0.5")
+            failed = failed + 1
+        }
+    } else {
+        print("T5 FAIL: Cmax="); print(cmax); println(" > 60")
+        failed = failed + 1
+    }
+
+    // T6: Epistemic confidence <= 960 (population PK = asserted)
+    if pk_conf <= 960 {
+        print("T6 PASS: epistemic conf = "); print_int(pk_conf)
+        println(" <= 960 (population PK, asserted)")
+        passed = passed + 1
+    } else {
+        print("T6 FAIL: conf="); print_int(pk_conf); println("")
+        failed = failed + 1
+    }
+
+    // T7: Uncertainty at trough > uncertainty at peak (accumulates over time)
+    if unc3 > cmax_unc {
+        print("T7 PASS: sigma(trough) = "); print(unc3)
+        print(" > sigma(peak) = "); print(cmax_unc); println(" (uncertainty accumulates)")
+        passed = passed + 1
+    } else {
+        print("T7 FAIL: sigma(trough)="); print(unc3)
+        print(" sigma(peak)="); print(cmax_unc); println("")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}

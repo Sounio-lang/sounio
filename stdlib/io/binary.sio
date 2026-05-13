@@ -1,0 +1,109 @@
+// stdlib/io/binary.sio — endian-aware integer unpacking from byte slices
+//
+// Equivalent of Python's `struct.unpack_from("<H", data, offset)`. Used by
+// CUBIN/ELF validation, NIfTI parsing, and any binary protocol decode.
+//
+// All readers return i64 to avoid sign-extension surprises; signed variants
+// re-interpret the bit pattern.
+
+pub enum Endian {
+    Little,
+    Big,
+}
+
+// Bounds-checked single-byte read returning unsigned 0..=255 in i64.
+pub fn byte_u8(bytes: &[u8], idx: i64) -> i64 {
+    if idx < 0 || idx >= bytes.len() as i64 {
+        return 0
+    }
+    let raw = bytes[idx as usize] as i64
+    if raw < 0 { raw + 256 } else { raw }
+}
+
+// ---- 16-bit ----
+
+pub fn read_u16_le(bytes: &[u8], off: i64) -> i64 {
+    let b0 = byte_u8(bytes, off)
+    let b1 = byte_u8(bytes, off + 1)
+    b0 | (b1 << 8)
+}
+
+pub fn read_u16_be(bytes: &[u8], off: i64) -> i64 {
+    let b0 = byte_u8(bytes, off)
+    let b1 = byte_u8(bytes, off + 1)
+    (b0 << 8) | b1
+}
+
+pub fn read_u16(bytes: &[u8], off: i64, endian: Endian) -> i64 {
+    if endian == Endian::Little { read_u16_le(bytes, off) } else { read_u16_be(bytes, off) }
+}
+
+pub fn read_i16(bytes: &[u8], off: i64, endian: Endian) -> i64 {
+    let u = read_u16(bytes, off, endian)
+    if u >= 32768 { u - 65536 } else { u }
+}
+
+// ---- 32-bit ----
+
+pub fn read_u32_le(bytes: &[u8], off: i64) -> i64 {
+    let b0 = byte_u8(bytes, off)
+    let b1 = byte_u8(bytes, off + 1)
+    let b2 = byte_u8(bytes, off + 2)
+    let b3 = byte_u8(bytes, off + 3)
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+pub fn read_u32_be(bytes: &[u8], off: i64) -> i64 {
+    let b0 = byte_u8(bytes, off)
+    let b1 = byte_u8(bytes, off + 1)
+    let b2 = byte_u8(bytes, off + 2)
+    let b3 = byte_u8(bytes, off + 3)
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+pub fn read_u32(bytes: &[u8], off: i64, endian: Endian) -> i64 {
+    if endian == Endian::Little { read_u32_le(bytes, off) } else { read_u32_be(bytes, off) }
+}
+
+pub fn read_i32(bytes: &[u8], off: i64, endian: Endian) -> i64 {
+    let u = read_u32(bytes, off, endian)
+    if u >= 2147483648 { u - 4294967296 } else { u }
+}
+
+// ---- 64-bit ----
+
+pub fn read_u64_le(bytes: &[u8], off: i64) -> i64 {
+    let lo = read_u32_le(bytes, off)
+    let hi = read_u32_le(bytes, off + 4)
+    lo | (hi << 32)
+}
+
+pub fn read_u64_be(bytes: &[u8], off: i64) -> i64 {
+    let hi = read_u32_be(bytes, off)
+    let lo = read_u32_be(bytes, off + 4)
+    (hi << 32) | lo
+}
+
+pub fn read_u64(bytes: &[u8], off: i64, endian: Endian) -> i64 {
+    if endian == Endian::Little { read_u64_le(bytes, off) } else { read_u64_be(bytes, off) }
+}
+
+pub fn read_i64(bytes: &[u8], off: i64, endian: Endian) -> i64 {
+    // 64-bit unsigned and signed share representation in i64; readers above
+    // already produce a signed-i64 bit pattern.
+    read_u64(bytes, off, endian)
+}
+
+// ---- magic / fixed-pattern helpers ----
+
+// Returns true iff bytes[off..off+n] match the given pattern bytes.
+pub fn match_bytes_at(bytes: &[u8], off: i64, pattern: &[u8]) -> bool with Mut, Panic, Div {
+    let n = pattern.len() as i64
+    if off < 0 || off + n > bytes.len() as i64 { return false }
+    var i: i64 = 0
+    while i < n {
+        if byte_u8(bytes, off + i) != byte_u8(pattern, i) { return false }
+        i = i + 1
+    }
+    true
+}

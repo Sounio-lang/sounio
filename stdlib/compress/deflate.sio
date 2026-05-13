@@ -1,0 +1,221 @@
+//@ module compress::deflate
+// Pure Sounio DEFLATE — stored block format (RFC 1951 §3.2.4)
+//
+// No external library. BTYPE=00: stored blocks only.
+// Each stored block encodes:
+//   1 byte  — BFINAL (1 bit) | BTYPE (2 bits) | 5 padding bits, all in one byte
+//   2 bytes — LEN  (little-endian, 16-bit block length)
+//   2 bytes — NLEN (one's complement of LEN, little-endian)
+//   N bytes — literal data
+//
+// Maximum block payload: 65535 bytes (RFC 1951 §3.2.4).
+// This implementation handles blocks up to 32768 bytes (src array bound).
+//
+// References:
+//   RFC 1951 — DEFLATE Compressed Data Format Specification, Deutsch (1996)
+//   https://datatracker.ietf.org/doc/html/rfc1951#section-3.2.4
+
+// ============================================================================
+// RESULT TYPE
+// ============================================================================
+
+pub struct DeflateResult {
+    pub ok: bool,
+    pub written: i64,
+    pub error_code: i64,
+}
+
+// Error codes
+pub const DEFLATE_OK: i64 = 0
+pub const DEFLATE_ERR_SRC_TOO_LARGE: i64 = 1
+pub const DEFLATE_ERR_DST_TOO_SMALL: i64 = 2
+pub const DEFLATE_ERR_BAD_HEADER: i64 = 3
+pub const DEFLATE_ERR_NLEN_MISMATCH: i64 = 4
+pub const DEFLATE_ERR_TRUNCATED: i64 = 5
+
+fn deflate_ok(written: i64) -> DeflateResult {
+    DeflateResult { ok: true, written: written, error_code: DEFLATE_OK }
+}
+
+fn deflate_err(code: i64) -> DeflateResult {
+    DeflateResult { ok: false, written: 0, error_code: code }
+}
+
+// ============================================================================
+// BUFFER HELPERS
+// ============================================================================
+
+// Wrap mutable arrays in structs to comply with Sounio ownership rules.
+// See KNOWN_LIMITATIONS.md — bare &![T; N] mutation not visible to caller in JIT.
+
+pub struct SrcBuf {
+    pub data: [i64; 32768],
+}
+
+pub struct DstBuf {
+    pub data: [i64; 65536],
+}
+
+// ============================================================================
+// DEFLATE STORED BLOCK (BTYPE=00)
+// ============================================================================
+
+// deflate_stored — encode src[0..src_len) into a single RFC 1951 stored block.
+//
+// Output layout (5 + src_len bytes):
+//   dst[0]           = 0x01  — BFINAL=1, BTYPE=00 (stored), padding=0
+//   dst[1]           = LEN & 0xFF
+//   dst[2]           = (LEN >> 8) & 0xFF
+//   dst[3]           = NLEN & 0xFF  (= ~LEN & 0xFF)
+//   dst[4]           = (NLEN >> 8) & 0xFF
+//   dst[5..5+LEN)    = literal bytes
+//
+// Panics (via error return) if:
+//   src_len > 32768  — exceeds source buffer
+//   src_len > 65535  — RFC 1951 stored block limit
+//   5 + src_len > 65536 — exceeds destination buffer
+pub fn deflate_stored(src: &SrcBuf, src_len: i64,
+                      dst: &! DstBuf, dst_len: &! i64) -> DeflateResult with Mut, Panic {
+    // Validate lengths
+    if src_len < 0 || src_len > 32768 {
+        return deflate_err(DEFLATE_ERR_SRC_TOO_LARGE)
+    }
+
+    // RFC 1951: stored block payload max is 65535
+    if src_len > 65535 {
+        return deflate_err(DEFLATE_ERR_SRC_TOO_LARGE)
+    }
+
+    // Need 5 header bytes + src_len data bytes in destination
+    let required = 5 + src_len
+    if required > 65536 {
+        return deflate_err(DEFLATE_ERR_DST_TOO_SMALL)
+    }
+
+    let len = src_len
+    // One's complement of len (16-bit, so mask to lower 16 bits)
+    let nlen_raw = (0 - 1 - len) * 1
+    // Mask to 16-bit range: nlen = ~len in 16-bit arithmetic
+    let nlen = nlen_raw - ((nlen_raw / 65536) * 65536)
+    // For positive len <= 65535, ~len (16-bit) = 65535 - len
+    let nlen16 = 65535 - len
+
+    // Write BFINAL=1, BTYPE=00 block header byte
+    (*dst).data[0] = 1
+
+    // Write LEN little-endian (16-bit)
+    let len_lo = len - ((len / 256) * 256)
+    let len_hi = len / 256
+    (*dst).data[1] = len_lo
+    (*dst).data[2] = len_hi
+
+    // Write NLEN = one's complement of LEN, little-endian (16-bit)
+    let nlen_lo = nlen16 - ((nlen16 / 256) * 256)
+    let nlen_hi = nlen16 / 256
+    (*dst).data[3] = nlen_lo
+    (*dst).data[4] = nlen_hi
+
+    // Copy literal bytes
+    for i in 0..len {
+        (*dst).data[5 + i] = (*src).data[i]
+    }
+
+    *dst_len = required
+    deflate_ok(required)
+}
+
+// ============================================================================
+// INFLATE STORED BLOCK (BTYPE=00)
+// ============================================================================
+
+// inflate_stored — decode a single RFC 1951 stored block from src[0..src_len).
+//
+// Reads the 5-byte header, validates BTYPE==00 and NLEN == ~LEN,
+// then copies LEN literal bytes to dst.
+//
+// Returns DeflateResult with written = number of bytes written to dst.
+pub fn inflate_stored(src: &SrcBuf, src_len: i64,
+                      dst: &! DstBuf, dst_len: &! i64) -> DeflateResult with Mut, Panic {
+    // Need at least 5 bytes (header)
+    if src_len < 5 {
+        return deflate_err(DEFLATE_ERR_TRUNCATED)
+    }
+
+    // Read BFINAL/BTYPE byte — we accept BFINAL=0 or BFINAL=1, require BTYPE=00
+    let header_byte = (*src).data[0]
+    // BTYPE occupies bits 1-2 of the first byte (RFC 1951 §3.2.3)
+    // In our stored encoding: bits [2:1] = 00
+    let btype = (header_byte / 2) - ((header_byte / 2 / 2) * 2)
+    if btype != 0 {
+        return deflate_err(DEFLATE_ERR_BAD_HEADER)
+    }
+
+    // Read LEN (little-endian 16-bit)
+    let len_lo = (*src).data[1]
+    let len_hi = (*src).data[2]
+    let len = len_lo + len_hi * 256
+
+    // Read NLEN (little-endian 16-bit)
+    let nlen_lo = (*src).data[3]
+    let nlen_hi = (*src).data[4]
+    let nlen = nlen_lo + nlen_hi * 256
+
+    // Validate NLEN = ~LEN (16-bit ones complement)
+    let expected_nlen = 65535 - len
+    if nlen != expected_nlen {
+        return deflate_err(DEFLATE_ERR_NLEN_MISMATCH)
+    }
+
+    // Validate we have enough src data
+    if 5 + len > src_len {
+        return deflate_err(DEFLATE_ERR_TRUNCATED)
+    }
+
+    // Validate dst has enough room
+    if len > 32768 {
+        return deflate_err(DEFLATE_ERR_DST_TOO_SMALL)
+    }
+
+    // Copy literal bytes
+    for i in 0..len {
+        (*dst).data[i] = (*src).data[5 + i]
+    }
+
+    *dst_len = len
+    deflate_ok(len)
+}
+
+// ============================================================================
+// UTILITY: inspect a deflate block header
+// ============================================================================
+
+pub struct DeflateHeader {
+    pub bfinal: i64,
+    pub btype: i64,
+    pub len: i64,
+    pub nlen: i64,
+    pub valid: bool,
+}
+
+pub fn deflate_read_header(src: &SrcBuf, src_len: i64) -> DeflateHeader {
+    if src_len < 5 {
+        return DeflateHeader { bfinal: 0, btype: 0, len: 0, nlen: 0, valid: false }
+    }
+
+    let hdr = (*src).data[0]
+    let bfinal = hdr - ((hdr / 2) * 2)
+    let btype = (hdr / 2) - ((hdr / 4) * 2)
+    let len = (*src).data[1] + (*src).data[2] * 256
+    let nlen = (*src).data[3] + (*src).data[4] * 256
+
+    let expected_nlen = 65535 - len
+    let valid = nlen == expected_nlen && btype == 0
+
+    DeflateHeader {
+        bfinal: bfinal,
+        btype: btype,
+        len: len,
+        nlen: nlen,
+        valid: valid,
+    }
+}

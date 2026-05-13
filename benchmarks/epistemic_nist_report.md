@@ -253,8 +253,8 @@ done
 ## Files Referenced
 
 - **NIST standard**: https://www.bipm.org/documents/20126/2071204/JCGM_100_2008_E.pdf
-- **Epistemic core**: `/home/demetrios/RustroverProjects/sounio/stdlib/epistemic/`
-- **Test suite**: `/home/demetrios/RustroverProjects/sounio/tests/stdlib/epistemic/`
+- **Epistemic core**: `/workspace/sounio/stdlib/epistemic/`
+- **Test suite**: `/workspace/sounio/tests/stdlib/epistemic/`
 - **Compiler binary**: `./bin/souc`
 - **Project memory**: `.claude/projects/-home-demetrios-RustroverProjects-sounio/memory/MEMORY.md`
 

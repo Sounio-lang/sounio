@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.llm-guide.error-catalog
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.llm-guide.error-catalog
+-->
+
 # Sounio Error Catalog
 
 Every error an LLM is likely to produce, with diagnosis and fix.

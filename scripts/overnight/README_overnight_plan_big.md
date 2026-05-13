@@ -23,7 +23,7 @@ This document describes the reliability contract for the overnight Plan BIG lane
 - Ops-only regression suite:
   - `bash scripts/overnight_plan_big_ops_suite.sh`
   - isolated default (recommended for infra-only checks): uses runner gate `/bin/true`
-  - strict mode: `bash scripts/overnight_plan_big_ops_suite.sh --with-gate --runner-gate-script scripts/plan_big_gate.sh`
+  - strict mode: `bash scripts/overnight_plan_big_ops_suite.sh --with-gate --runner-gate-script scripts/ci/plan_big_gate.sh`
 
 ## Tmux Default Environment
 
@@ -48,7 +48,7 @@ It also opens default windows: `status`, `health`, `gate`, `report`, `burnin-log
 It also opens `canary` for live strict-canary status (`status/rc/run/finished_at_utc`).
 You can override runner gate command for tmux startup via:
 
-- `PLAN_BIG_OVERNIGHT_GATE_SCRIPT` (default: `scripts/plan_big_gate.sh`)
+- `PLAN_BIG_OVERNIGHT_GATE_SCRIPT` (default: `scripts/ci/plan_big_gate.sh`)
 - `PLAN_BIG_OVERNIGHT_GATE_ARGS` (default: empty)
 
 The runner accepts both executable binaries (example: `/bin/true`) and shell scripts for `PLAN_BIG_OVERNIGHT_GATE_SCRIPT`.
@@ -79,7 +79,7 @@ Shortcut wrappers:
 Controls:
 
 - `PLAN_BIG_STRICT_CANARY_ENABLE=0|1` (default: `1`)
-- `PLAN_BIG_STRICT_CANARY_GATE_SCRIPT` (default: `scripts/plan_big_gate.sh`)
+- `PLAN_BIG_STRICT_CANARY_GATE_SCRIPT` (default: `scripts/ci/plan_big_gate.sh`)
 - `PLAN_BIG_STRICT_CANARY_GATE_ARGS` (default shown above)
 
 Canary failures are recorded in artifacts and hourly snapshots, but do not stop hourly report emission.
@@ -136,7 +136,7 @@ The `latest_pass` check requires `latest.status=pass`, `latest.rc=0`, and `lates
 
 ## Gate Integration
 
-`scripts/plan_big_gate.sh` now supports:
+`scripts/ci/plan_big_gate.sh` now supports:
 
 - `--require-overnight-burnin`
 - `--no-require-overnight-burnin`

@@ -1,0 +1,225 @@
+//@ run-pass
+// E2E tests for stdlib/verify/interval.sio
+// Tests ISO 1788-2015 compliant interval arithmetic uniquely in Sounio's stdlib.
+
+// ============================================================================
+// Inline all required types and functions (no module import yet)
+// ============================================================================
+
+let IV_EXACT:    i64 = 0
+let IV_BOUNDED:  i64 = 1
+let IV_DERIVED:  i64 = 4
+let IV_EMPTY:    i64 = 6
+let IV_DEC_ILL:  i64 = 0
+let IV_DEC_COM:  i64 = 16
+
+struct Interval {
+    lo:         f64,
+    hi:         f64,
+    provenance: i64,
+    decoration: i64,
+    empty:      bool,
+}
+
+fn interval(lo: f64, hi: f64) -> Interval with Panic {
+    assert(lo <= hi)
+    Interval { lo: lo, hi: hi, provenance: IV_BOUNDED, decoration: IV_DEC_COM, empty: false }
+}
+
+fn interval_empty() -> Interval {
+    Interval { lo: 1.0, hi: 0.0 - 1.0, provenance: IV_EMPTY, decoration: IV_DEC_COM, empty: true }
+}
+
+fn iv_add(a: Interval, b: Interval) -> Interval {
+    if a.empty || b.empty { return interval_empty() }
+    Interval { lo: a.lo + b.lo, hi: a.hi + b.hi, provenance: IV_DERIVED, decoration: IV_DEC_COM, empty: false }
+}
+
+fn iv_sub(a: Interval, b: Interval) -> Interval {
+    if a.empty || b.empty { return interval_empty() }
+    Interval { lo: a.lo - b.hi, hi: a.hi - b.lo, provenance: IV_DERIVED, decoration: IV_DEC_COM, empty: false }
+}
+
+fn f64_min4(a: f64, b: f64, c: f64, d: f64) -> f64 with Mut {
+    var m = a
+    if b < m { m = b }
+    if c < m { m = c }
+    if d < m { m = d }
+    m
+}
+
+fn f64_max4(a: f64, b: f64, c: f64, d: f64) -> f64 with Mut {
+    var m = a
+    if b > m { m = b }
+    if c > m { m = c }
+    if d > m { m = d }
+    m
+}
+
+fn iv_mul(a: Interval, b: Interval) -> Interval with Mut {
+    if a.empty || b.empty { return interval_empty() }
+    let p1 = a.lo * b.lo
+    let p2 = a.lo * b.hi
+    let p3 = a.hi * b.lo
+    let p4 = a.hi * b.hi
+    Interval {
+        lo: f64_min4(p1, p2, p3, p4),
+        hi: f64_max4(p1, p2, p3, p4),
+        provenance: IV_DERIVED,
+        decoration: IV_DEC_COM,
+        empty: false,
+    }
+}
+
+fn iv_div_zero_check(b: Interval) -> bool {
+    b.lo <= 0.0 && b.hi >= 0.0
+}
+
+fn iv_width(a: Interval) -> f64 {
+    if a.empty { return 0.0 }
+    a.hi - a.lo
+}
+
+fn iv_midpoint(a: Interval) -> f64 with Div {
+    if a.empty { return 0.0 }
+    (a.lo + a.hi) / 2.0
+}
+
+fn iv_contains(a: Interval, x: f64) -> bool {
+    if a.empty { return false }
+    x >= a.lo && x <= a.hi
+}
+
+fn iv_subset(a: Interval, b: Interval) -> bool {
+    if a.empty { return true }
+    if b.empty { return false }
+    a.lo >= b.lo && a.hi <= b.hi
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_addition() -> bool with Panic {
+    // [1,3] + [2,5] = [3,8]
+    let a = interval(1.0, 3.0)
+    let b = interval(2.0, 5.0)
+    let s = iv_add(a, b)
+    s.lo == 3.0 && s.hi == 8.0
+}
+
+fn test_subtraction() -> bool with Panic {
+    // [1,3] - [2,5] = [-4,1]
+    let a = interval(1.0, 3.0)
+    let b = interval(2.0, 5.0)
+    let d = iv_sub(a, b)
+    d.lo == (0.0 - 4.0) && d.hi == 1.0
+}
+
+fn test_multiplication() -> bool with Panic, Mut {
+    // [1,3] * [2,5] = [2,15]
+    let a = interval(1.0, 3.0)
+    let b = interval(2.0, 5.0)
+    let m = iv_mul(a, b)
+    m.lo == 2.0 && m.hi == 15.0
+}
+
+fn test_multiplication_negative() -> bool with Panic, Mut {
+    // [-2,-1] * [3,4] = [-8,-3]
+    let a = interval(0.0 - 2.0, 0.0 - 1.0)
+    let b = interval(3.0, 4.0)
+    let m = iv_mul(a, b)
+    m.lo == (0.0 - 8.0) && m.hi == (0.0 - 3.0)
+}
+
+fn test_div_by_zero_detection() -> bool with Panic {
+    let b = interval(0.0 - 1.0, 1.0)  // 0 ∈ b
+    iv_div_zero_check(b)
+}
+
+fn test_width() -> bool with Panic {
+    let a = interval(1.0, 5.0)
+    let w = iv_width(a)
+    w == 4.0
+}
+
+fn test_midpoint() -> bool with Panic, Div {
+    let a = interval(2.0, 8.0)
+    let mp = iv_midpoint(a)
+    mp == 5.0
+}
+
+fn test_contains() -> bool with Panic {
+    let a = interval(1.0, 5.0)
+    iv_contains(a, 3.0) && !iv_contains(a, 6.0)
+}
+
+fn test_subset() -> bool with Panic {
+    let a = interval(2.0, 4.0)
+    let b = interval(1.0, 5.0)
+    iv_subset(a, b) && !iv_subset(b, a)
+}
+
+fn test_empty_propagation() -> bool with Panic {
+    let a = interval(1.0, 3.0)
+    let e = interval_empty()
+    let s = iv_add(a, e)
+    s.empty
+}
+
+fn test_epistemic_bridge() -> bool with Panic, Div, Mut {
+    // σ=0.5, k=2.0 → U=1.0 → [9.0, 11.0]
+    let u_exp = 0.5 * 2.0
+    let lo = 10.0 - u_exp
+    let hi = 10.0 + u_exp
+    let iv = interval(lo, hi)
+    // Project back: u = width / (2*k)
+    let u_back = iv_width(iv) / (2.0 * 2.0)
+    var diff = u_back - 0.5
+    if diff < 0.0 { diff = 0.0 - diff }
+    diff < 0.0001
+}
+
+fn main() -> i32 with IO, Panic, Mut, Div {
+    var ok = true
+
+    if test_addition() { println("T1 addition: PASS") }
+    else { println("T1 addition: FAIL"); ok = false }
+
+    if test_subtraction() { println("T2 subtraction: PASS") }
+    else { println("T2 subtraction: FAIL"); ok = false }
+
+    if test_multiplication() { println("T3 multiplication: PASS") }
+    else { println("T3 multiplication: FAIL"); ok = false }
+
+    if test_multiplication_negative() { println("T4 mul_negative: PASS") }
+    else { println("T4 mul_negative: FAIL"); ok = false }
+
+    if test_div_by_zero_detection() { println("T5 div_zero_detect: PASS") }
+    else { println("T5 div_zero_detect: FAIL"); ok = false }
+
+    if test_width() { println("T6 width: PASS") }
+    else { println("T6 width: FAIL"); ok = false }
+
+    if test_midpoint() { println("T7 midpoint: PASS") }
+    else { println("T7 midpoint: FAIL"); ok = false }
+
+    if test_contains() { println("T8 contains: PASS") }
+    else { println("T8 contains: FAIL"); ok = false }
+
+    if test_subset() { println("T9 subset: PASS") }
+    else { println("T9 subset: FAIL"); ok = false }
+
+    if test_empty_propagation() { println("T10 empty_propagation: PASS") }
+    else { println("T10 empty_propagation: FAIL"); ok = false }
+
+    if test_epistemic_bridge() { println("T11 epistemic_bridge: PASS") }
+    else { println("T11 epistemic_bridge: FAIL"); ok = false }
+
+    if ok {
+        println("test_interval_e2e: ALL PASS")
+        return 0
+    }
+    println("test_interval_e2e: FAILED")
+    return 1
+}

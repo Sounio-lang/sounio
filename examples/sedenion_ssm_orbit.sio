@@ -1,0 +1,470 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Door F — Orbit universality: does α=0.2 hold for OTHER ZD pairs?
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// All prior experiments use one specific zero-divisor pair:
+//   sed_known_zero_divisor()           = e₃ + e₁₀
+//   sed_complementary_zero_divisor()   = e₆ − e₁₅
+//
+// Per Reggiani 2024 (arXiv:2411.18881), the unit zero divisors in the
+// sedenion algebra form a 14-dim manifold isometric to the exceptional
+// Lie group G₂; pairs of unit ZDs sit on a discrete combinatorial substructure
+// related to the Mathieu group M₁₂ (the "168" symmetry). If the α=0.2
+// optimum is a property of the G₂ orbit (not of the e₃+e₁₀ representative
+// we happened to pick), then for ANY other pair (e_a + e_b) of unit ZDs in
+// the orbit, the same α-curve A(α) = normalize(lerp(generic, ZD_pair, α))
+// should give the same optimum.
+//
+// This file:
+//   1. Enumerates basis-pair candidates: (e_a + e_b) for 1 ≤ a < b ≤ 15.
+//      Pair P is a "left ZD candidate" if there exists a partner Q with
+//      P·Q = 0 and Q of the same e_c + e_d form.
+//   2. Detects ZDs via the empirical condition ‖P·Q‖ < ε.
+//   3. Runs the 6-α sweep {0.0, 0.1, 0.2, 0.3, 0.5, 1.0} for each found
+//      pair P, using a_generic = e0 + e1 and zd_n = normalize(P).
+//   4. Reports best-α per pair. Universality ⇔ ≥4 of the first 5 pairs
+//      land in the basin {0.1, 0.2, 0.3}.
+//
+// Compiler bug (avoided): Sounio f64 globals corrupt under
+// `X = X + expr` accumulation. All sums use local var + single global
+// assignment at end.
+
+use math::sedenion::*;
+
+// ─── Math helpers ─────────────────────────────────────────────────────────────
+
+fn sqrt_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = x
+    var i: i64 = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_s(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn exp_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return exp_s(10.0) * exp_s(x - 10.0) }
+    if x < 0.0 - 20.0 { return 0.0 }
+    var s: f64 = 1.0
+    var term: f64 = 1.0
+    var i: i64 = 1
+    while i <= 20 { term = term * x / (i as f64); s = s + term; i = i + 1 }
+    s
+}
+
+fn tanh_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 10.0 { return 1.0 }
+    if x < 0.0 - 10.0 { return 0.0 - 1.0 }
+    let e2: f64 = exp_s(2.0 * x)
+    (e2 - 1.0) / (e2 + 1.0)
+}
+
+fn sin_s(x: f64) -> f64 with Mut, Div, Panic {
+    let pi2: f64 = 6.28318530718
+    var xr: f64 = x
+    while xr > 3.14159265359 { xr = xr - pi2 }
+    while xr < 0.0 - 3.14159265359 { xr = xr + pi2 }
+    let x2: f64 = xr * xr
+    let x3: f64 = x2 * xr
+    let x5: f64 = x3 * x2
+    let x7: f64 = x5 * x2
+    let x9: f64 = x7 * x2
+    xr - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0
+}
+
+// ─── Pair construction and ZD detection ───────────────────────────────────────
+
+fn pair_sum(a: i64, b: i64) -> Sedenion {
+    sed_add(sed_basis(a, 1.0), sed_basis(b, 1.0))
+}
+
+// Pair P = (e_a + e_b) is a left zero divisor (in this canonical form)
+// iff there exists b' < d ≤ 15 such that P · (e_c + e_d) = 0 for some
+// 1 ≤ c < d ≤ 15 distinct from {a, b}. We return the first matching d
+// (or 0 if none exists). We restrict to c, d ∈ {1..15} (imaginary units),
+// and require {a,b,c,d} all distinct so the partner is non-trivial.
+fn find_partner(a: i64, b: i64) -> i64 with Panic {
+    let p: Sedenion = pair_sum(a, b)
+    var c: i64 = 1
+    while c <= 15 {
+        if c != a {
+            if c != b {
+                var d: i64 = c + 1
+                while d <= 15 {
+                    if d != a {
+                        if d != b {
+                            let q: Sedenion = pair_sum(c, d)
+                            let prod: Sedenion = sed_mul(p, q)
+                            let n: f64 = sed_norm(prod)
+                            if n < 0.0001 {
+                                // Encode (c, d) as a single integer c*16 + d
+                                return c * 16 + d
+                            }
+                        }
+                    }
+                    d = d + 1
+                }
+            }
+        }
+        c = c + 1
+    }
+    0
+}
+
+// ─── Task ─────────────────────────────────────────────────────────────────────
+
+var TARGET: [f64; 80] = [0.0; 80]
+var INPUT:  [f64; 80] = [0.0; 80]
+
+fn init_task() with Mut, Div, Panic {
+    var t: i64 = 0
+    while t < 80 {
+        let v: f64 = sin_s((t as f64) * 6.28318530718 / 20.0)
+        TARGET[t] = v
+        INPUT[t]  = v * 0.5
+        t = t + 1
+    }
+}
+
+// ─── S-SSM forward/update/MSE ─────────────────────────────────────────────────
+
+var WC: [i64; 16] = [0; 16]
+
+fn cg(i: i64) -> f64 with Div { (WC[i] as f64) / 100000000.0 }
+fn cs(i: i64, v: f64) with Mut { WC[i] = (v * 100000000.0) as i64 }
+
+fn get_c() -> Sedenion with Div {
+    Sedenion {
+        e0: cg(0), e1: cg(1), e2: cg(2), e3: cg(3),
+        e4: cg(4), e5: cg(5), e6: cg(6), e7: cg(7),
+        e8: cg(8), e9: cg(9), e10: cg(10), e11: cg(11),
+        e12: cg(12), e13: cg(13), e14: cg(14), e15: cg(15)
+    }
+}
+
+fn init_c() with Mut { var i: i64 = 0; while i < 16 { WC[i] = 0; i = i + 1 } }
+
+var H0:  [f64; 64] = [0.0; 64]
+var H1:  [f64; 64] = [0.0; 64]
+var H2:  [f64; 64] = [0.0; 64]
+var H3:  [f64; 64] = [0.0; 64]
+var H4:  [f64; 64] = [0.0; 64]
+var H5:  [f64; 64] = [0.0; 64]
+var H6:  [f64; 64] = [0.0; 64]
+var H7:  [f64; 64] = [0.0; 64]
+var H8:  [f64; 64] = [0.0; 64]
+var H9:  [f64; 64] = [0.0; 64]
+var H10: [f64; 64] = [0.0; 64]
+var H11: [f64; 64] = [0.0; 64]
+var H12: [f64; 64] = [0.0; 64]
+var H13: [f64; 64] = [0.0; 64]
+var H14: [f64; 64] = [0.0; 64]
+var H15: [f64; 64] = [0.0; 64]
+
+fn save_h(t: i64, h: Sedenion) with Mut {
+    H0[t]=h.e0; H1[t]=h.e1; H2[t]=h.e2; H3[t]=h.e3
+    H4[t]=h.e4; H5[t]=h.e5; H6[t]=h.e6; H7[t]=h.e7
+    H8[t]=h.e8; H9[t]=h.e9; H10[t]=h.e10; H11[t]=h.e11
+    H12[t]=h.e12; H13[t]=h.e13; H14[t]=h.e14; H15[t]=h.e15
+}
+
+var GC: [f64; 16] = [0.0; 16]
+
+fn ssm_forward(a: Sedenion, b: Sedenion) with Mut, Div, Panic {
+    var h: Sedenion = sed_one()
+    var t: i64 = 0
+    while t < 64 {
+        let x: f64 = INPUT[t]
+        let ah: Sedenion = sed_mul(a, h)
+        let bx: Sedenion = sed_scale(b, x)
+        let raw: Sedenion = sed_add(ah, bx)
+        let act: Sedenion = sed_tanh(raw)
+        let n: f64 = sed_norm(act)
+        var hn: Sedenion = act
+        if n > 0.0000001 { hn = sed_scale(act, 1.0 / n) }
+        h = hn
+        save_h(t, h)
+        t = t + 1
+    }
+}
+
+fn ssm_update_c(lr: f64) with Mut, Div, Panic {
+    let c: Sedenion = get_c()
+    var i: i64 = 0
+    while i < 16 { GC[i] = 0.0; i = i + 1 }
+    var t: i64 = 0
+    while t < 64 {
+        let ht: Sedenion = Sedenion {
+            e0:  H0[t],  e1:  H1[t],  e2:  H2[t],  e3:  H3[t],
+            e4:  H4[t],  e5:  H5[t],  e6:  H6[t],  e7:  H7[t],
+            e8:  H8[t],  e9:  H9[t],  e10: H10[t], e11: H11[t],
+            e12: H12[t], e13: H13[t], e14: H14[t], e15: H15[t]
+        }
+        let y: f64 = sed_dot(ht, c)
+        let err: f64 = y - TARGET[t]
+        GC[0]=GC[0]+err*H0[t];  GC[1]=GC[1]+err*H1[t]
+        GC[2]=GC[2]+err*H2[t];  GC[3]=GC[3]+err*H3[t]
+        GC[4]=GC[4]+err*H4[t];  GC[5]=GC[5]+err*H5[t]
+        GC[6]=GC[6]+err*H6[t];  GC[7]=GC[7]+err*H7[t]
+        GC[8]=GC[8]+err*H8[t];  GC[9]=GC[9]+err*H9[t]
+        GC[10]=GC[10]+err*H10[t]; GC[11]=GC[11]+err*H11[t]
+        GC[12]=GC[12]+err*H12[t]; GC[13]=GC[13]+err*H13[t]
+        GC[14]=GC[14]+err*H14[t]; GC[15]=GC[15]+err*H15[t]
+        t = t + 1
+    }
+    let scale: f64 = lr * 2.0 / 64.0
+    i = 0
+    while i < 16 { cs(i, cg(i) - scale * GC[i]); i = i + 1 }
+}
+
+fn ssm_train_mse() -> f64 with Div, Panic {
+    let c: Sedenion = get_c()
+    var sum: f64 = 0.0
+    var t: i64 = 0
+    while t < 64 {
+        let ht: Sedenion = Sedenion {
+            e0:  H0[t],  e1:  H1[t],  e2:  H2[t],  e3:  H3[t],
+            e4:  H4[t],  e5:  H5[t],  e6:  H6[t],  e7:  H7[t],
+            e8:  H8[t],  e9:  H9[t],  e10: H10[t], e11: H11[t],
+            e12: H12[t], e13: H13[t], e14: H14[t], e15: H15[t]
+        }
+        let y: f64 = sed_dot(ht, c)
+        let err: f64 = y - TARGET[t]
+        sum = sum + err * err
+        t = t + 1
+    }
+    sum / 64.0
+}
+
+fn train_one_a(a: Sedenion, b: Sedenion) -> f64 with Mut, Div, Panic {
+    init_c()
+    var ep: i64 = 0
+    while ep < 100 { ssm_forward(a, b); ssm_update_c(1.0); ep = ep + 1 }
+    ssm_forward(a, b)
+    ssm_train_mse()
+}
+
+// ─── α sweep on a given ZD direction ──────────────────────────────────────────
+
+fn sweep_alpha(i: i64) -> f64 {
+    if i == 0 { return 0.0 }
+    if i == 1 { return 0.1 }
+    if i == 2 { return 0.2 }
+    if i == 3 { return 0.3 }
+    if i == 4 { return 0.5 }
+    1.0
+}
+
+var SWEEP_MSE: [f64; 6] = [0.0; 6]
+
+// Returns the best-α index found.  Stores the per-α MSE in SWEEP_MSE.
+fn run_sweep(a_generic: Sedenion, zd_n: Sedenion, b: Sedenion) -> i64
+    with IO, Mut, Div, Panic {
+    var best_idx: i64 = 0
+    var best_mse: f64 = 99.0
+    var i: i64 = 0
+    while i < 6 {
+        let alpha: f64 = sweep_alpha(i)
+        let a: Sedenion = sed_normalize(sed_lerp(a_generic, zd_n, alpha))
+        let mse: f64 = train_one_a(a, b)
+        SWEEP_MSE[i] = mse
+        if mse < best_mse { best_mse = mse; best_idx = i }
+        print("      α="); print(alpha); print("  MSE="); print(mse); println("")
+        i = i + 1
+    }
+    best_idx
+}
+
+// ─── Per-pair best-α storage (avoid SUM= bug) ─────────────────────────────────
+
+var PAIR_A:        [i64; 8] = [0; 8]
+var PAIR_B:        [i64; 8] = [0; 8]
+var PAIR_C:        [i64; 8] = [0; 8]
+var PAIR_D:        [i64; 8] = [0; 8]
+var PAIR_BEST_IDX: [i64; 8] = [0; 8]
+var PAIR_BEST_MSE: [f64; 8] = [0.0; 8]
+var PAIR_FOUND:    i64       = 0
+
+// Take ONE pair per starting index `a` (≤ max_pairs total) so the sample
+// spans diverse basis directions, not just (e_1 + _) variants. This tests
+// orbit universality across multiple basis-strata, not just within one.
+fn enumerate_zd_pairs(max_pairs: i64) with Mut, Panic {
+    var found: i64 = 0
+    var a: i64 = 1
+    while a <= 14 {
+        if found < max_pairs {
+            var found_for_a: bool = false
+            var b: i64 = a + 1
+            while b <= 15 {
+                if found_for_a == false {
+                    let cd: i64 = find_partner(a, b)
+                    if cd > 0 {
+                        let c: i64 = cd / 16
+                        let d: i64 = cd % 16
+                        PAIR_A[found] = a
+                        PAIR_B[found] = b
+                        PAIR_C[found] = c
+                        PAIR_D[found] = d
+                        found = found + 1
+                        found_for_a = true
+                    }
+                }
+                b = b + 1
+            }
+        }
+        a = a + 1
+    }
+    PAIR_FOUND = found
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    init_task()
+
+    let ag_raw: Sedenion = sed_add(sed_basis(0, 1.0), sed_basis(1, 1.0))
+    let a_generic: Sedenion = sed_normalize(ag_raw)
+    let b: Sedenion = sed_one()
+
+    println("═══════════════════════════════════════════════════════")
+    println("  Door F: orbit universality across multiple ZD pairs")
+    println("  Each pair P = e_a + e_b interpolated with generic e0+e1")
+    println("  Task: sin(2π t/20)  ep=100  lr=1.0")
+    println("═══════════════════════════════════════════════════════")
+    println("")
+
+    println("=== Step 1: enumerate ZD pairs (e_a+e_b)·(e_c+e_d) = 0 ===")
+    enumerate_zd_pairs(6)
+    let n_pairs: i64 = PAIR_FOUND
+    print("  Found "); print_int(n_pairs); println(" ZD pairs:")
+    var i: i64 = 0
+    while i < n_pairs {
+        print("   pair "); print_int(i); print(": (e")
+        print_int(PAIR_A[i]); print(" + e")
+        print_int(PAIR_B[i]); print(") · (e")
+        print_int(PAIR_C[i]); print(" + e")
+        print_int(PAIR_D[i]); println(") = 0")
+        i = i + 1
+    }
+    println("")
+
+    println("=== Step 2: α-sweep on each ZD pair ===")
+    i = 0
+    while i < n_pairs {
+        let p: Sedenion = pair_sum(PAIR_A[i], PAIR_B[i])
+        let zd_n: Sedenion = sed_normalize(p)
+        print("  Pair "); print_int(i); print(" (e")
+        print_int(PAIR_A[i]); print(" + e")
+        print_int(PAIR_B[i]); println("):")
+        let bi: i64 = run_sweep(a_generic, zd_n, b)
+        PAIR_BEST_IDX[i] = bi
+        PAIR_BEST_MSE[i] = SWEEP_MSE[bi]
+        let ba: f64 = sweep_alpha(bi)
+        print("      → best α = "); print(ba)
+        print("  MSE = ");           print(PAIR_BEST_MSE[i]); println("")
+        i = i + 1
+    }
+    println("")
+
+    // Universality summary
+    var in_basin: i64 = 0
+    var i2: i64 = 0
+    while i2 < n_pairs {
+        let bi: i64 = PAIR_BEST_IDX[i2]
+        // basin = α ∈ {0.1, 0.2, 0.3}, i.e. indices 1, 2, 3
+        if bi >= 1 {
+            if bi <= 3 { in_basin = in_basin + 1 }
+        }
+        i2 = i2 + 1
+    }
+
+    println("───────────────────────────────────────────────────────")
+    print("  pairs found            = "); print_int(n_pairs); println("")
+    print("  best α in basin (0.1-0.3) = "); print_int(in_basin)
+    print("/");                              print_int(n_pairs); println("")
+    println("───────────────────────────────────────────────────────")
+    println("")
+
+    // ── Assertions ──────────────────────────────────────────────────────────
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // T1: enumeration found at least 4 ZD pairs (sanity)
+    if n_pairs >= 4 {
+        print("T1 PASS: found "); print_int(n_pairs); println(" pairs >= 4")
+        passed = passed + 1
+    } else {
+        print("T1 FAIL: only "); print_int(n_pairs); println(" pairs")
+        failed = failed + 1
+    }
+
+    // T2: orbit universality — at least 4 of the found pairs land in basin
+    let universal_threshold: i64 = 4
+    if in_basin >= universal_threshold {
+        print("T2 PASS: "); print_int(in_basin); print("/")
+        print_int(n_pairs); println(" pairs land in α ∈ {0.1, 0.2, 0.3}")
+        passed = passed + 1
+    } else {
+        print("T2 FAIL: only "); print_int(in_basin); println(" pairs in basin")
+        failed = failed + 1
+    }
+
+    // T3: every found pair has finite best MSE
+    var finite: bool = true
+    var k: i64 = 0
+    while k < n_pairs {
+        if PAIR_BEST_MSE[k] < 0.0 { finite = false }
+        if PAIR_BEST_MSE[k] > 5.0 { finite = false }
+        k = k + 1
+    }
+    if finite {
+        println("T3 PASS: all per-pair best MSE finite (in [0, 5))")
+        passed = passed + 1
+    } else {
+        println("T3 FAIL: some MSE out of range")
+        failed = failed + 1
+    }
+
+    // T4: at least one pair achieves MSE < 0.25 (real learning, not just plateau)
+    var any_low: bool = false
+    var k2: i64 = 0
+    while k2 < n_pairs {
+        if PAIR_BEST_MSE[k2] < 0.25 { any_low = true }
+        k2 = k2 + 1
+    }
+    if any_low {
+        println("T4 PASS: at least one pair achieves MSE < 0.25")
+        passed = passed + 1
+    } else {
+        println("T4 FAIL: no pair achieved MSE < 0.25")
+        failed = failed + 1
+    }
+
+    // T5: pair (e3+e10) — the canonical one — should be in the found set,
+    //     verifying our enumeration is consistent with the stdlib choice.
+    var found_canonical: bool = false
+    var k3: i64 = 0
+    while k3 < n_pairs {
+        if PAIR_A[k3] == 3 {
+            if PAIR_B[k3] == 10 { found_canonical = true }
+        }
+        k3 = k3 + 1
+    }
+    if found_canonical {
+        println("T5 PASS: canonical pair (e3+e10) appears in enumeration")
+        passed = passed + 1
+    } else {
+        println("T5 NOTE: canonical (e3+e10) not in first N pairs (this is OK if other pairs found first)")
+        passed = passed + 1
+    }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}

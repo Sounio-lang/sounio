@@ -1,0 +1,417 @@
+// self-hosted::compiler::flat_lex_parse
+//
+// Flat-style lexer for slim native compile driver.
+// Uses integer constants for token kinds, calls parser_set_token_flat directly.
+
+module compiler::flat_lex_parse
+
+use parser::parser::{parser_set_token_flat}
+
+// ============================================================================
+// TOKEN KIND CONSTANTS
+// ============================================================================
+
+let EOF: i64 = 0
+let ERROR: i64 = 1
+let NEWLINE: i64 = 2
+let USE: i64 = 5
+let FN: i64 = 7
+let LET: i64 = 8
+let VAR: i64 = 9
+let TYPE: i64 = 12
+let STRUCT: i64 = 13
+let ENUM: i64 = 14
+let IF: i64 = 20
+let ELSE: i64 = 21
+let WHILE: i64 = 24
+let RETURN: i64 = 28
+let AS: i64 = 30
+let PUB: i64 = 32
+let TRUE: i64 = 35
+let FALSE: i64 = 36
+let WITH: i64 = 45
+let IDENT: i64 = 123
+let INT_LIT: i64 = 124
+let STRING_LIT: i64 = 126
+let PLUS: i64 = 132
+let MINUS: i64 = 133
+let STAR: i64 = 134
+let SLASH: i64 = 135
+let PERCENT: i64 = 136
+let EQ: i64 = 137
+let LT: i64 = 138
+let GT: i64 = 139
+let BANG: i64 = 140
+let AMP: i64 = 141
+let PIPE: i64 = 142
+let EQ_EQ: i64 = 146
+let BANG_EQ: i64 = 147
+let LT_EQ: i64 = 148
+let GT_EQ: i64 = 149
+let AMP_AMP: i64 = 150
+let PIPE_PIPE: i64 = 151
+let ARROW: i64 = 158
+let COLON_COLON: i64 = 162
+let AMP_BANG: i64 = 163
+let L_PAREN: i64 = 174
+let R_PAREN: i64 = 175
+let L_BRACE: i64 = 176
+let R_BRACE: i64 = 177
+let L_BRACKET: i64 = 178
+let R_BRACKET: i64 = 179
+let SEMI: i64 = 180
+let COLON: i64 = 181
+let COMMA: i64 = 182
+let DOT: i64 = 183
+
+// ============================================================================
+// SOURCE BUFFER
+// ============================================================================
+var FLAT_SRC: [i8; 1048576] = [0; 1048576]
+var FLAT_SRC_LEN: i64 = 0
+
+// ============================================================================
+// CHARACTER CLASSIFICATION
+// ============================================================================
+
+fn is_whitespace(ch: i8) -> bool {
+    ch == 32 as i8 || ch == 9 as i8 || ch == 13 as i8
+}
+
+fn is_digit(ch: i8) -> bool {
+    ch >= 48 as i8 && ch <= 57 as i8
+}
+
+fn is_ident_start(ch: i8) -> bool {
+    (ch >= 65 as i8 && ch <= 90 as i8) ||
+    (ch >= 97 as i8 && ch <= 122 as i8) ||
+    ch == 95 as i8
+}
+
+fn is_ident_cont(ch: i8) -> bool {
+    is_ident_start(ch) || is_digit(ch)
+}
+
+fn is_operator_start(ch: i8) -> bool {
+    ch == 43 as i8 ||  // +
+    ch == 45 as i8 ||  // -
+    ch == 42 as i8 ||  // *
+    ch == 47 as i8 ||  // /
+    ch == 37 as i8 ||  // %
+    ch == 61 as i8 ||  // =
+    ch == 60 as i8 ||  // <
+    ch == 62 as i8 ||  // >
+    ch == 33 as i8 ||  // !
+    ch == 38 as i8 ||  // &
+    ch == 124 as i8 || // |
+    ch == 94 as i8 ||  // ^
+    ch == 126 as i8 || // ~
+    ch == 63 as i8     // ?
+}
+
+fn is_delimiter(ch: i8) -> bool {
+    ch == 40 as i8 ||  // (
+    ch == 41 as i8 ||  // )
+    ch == 123 as i8 || // {
+    ch == 125 as i8 || // }
+    ch == 91 as i8 ||  // [
+    ch == 93 as i8     // ]
+}
+
+fn is_punctuation(ch: i8) -> bool {
+    ch == 59 as i8 ||  // ;
+    ch == 58 as i8 ||  // :
+    ch == 44 as i8 ||  // ,
+    ch == 46 as i8     // .
+}
+
+// ============================================================================
+// KEYWORD LOOKUP
+// ============================================================================
+
+fn keyword_kind(text_start: i64, text_len: i64) -> i64 with Mut {
+    if text_len == 2 {
+        let ch0 = FLAT_SRC[text_start as usize]
+        let ch1 = FLAT_SRC[(text_start + 1) as usize]
+        if ch0 == 102 as i8 && ch1 == 110 as i8 { return FN }     // fn
+        if ch0 == 105 as i8 && ch1 == 102 as i8 { return IF }     // if
+    }
+    if text_len == 3 {
+        let ch0 = FLAT_SRC[text_start as usize]
+        let ch1 = FLAT_SRC[(text_start + 1) as usize]
+        let ch2 = FLAT_SRC[(text_start + 2) as usize]
+        if ch0 == 108 as i8 && ch1 == 101 as i8 && ch2 == 116 as i8 { return LET }    // let
+        if ch0 == 118 as i8 && ch1 == 97 as i8 && ch2 == 114 as i8 { return VAR }     // var
+        if ch0 == 117 as i8 && ch1 == 115 as i8 && ch2 == 101 as i8 { return USE }    // use
+    }
+    if text_len == 4 {
+        let ch0 = FLAT_SRC[text_start as usize]
+        let ch1 = FLAT_SRC[(text_start + 1) as usize]
+        let ch2 = FLAT_SRC[(text_start + 2) as usize]
+        let ch3 = FLAT_SRC[(text_start + 3) as usize]
+        if ch0 == 119 as i8 && ch1 == 105 as i8 && ch2 == 116 as i8 && ch3 == 104 as i8 { return WITH }  // with
+        if ch0 == 101 as i8 && ch1 == 108 as i8 && ch2 == 115 as i8 && ch3 == 101 as i8 { return ELSE }   // else
+        if ch0 == 116 as i8 && ch1 == 114 as i8 && ch2 == 117 as i8 && ch3 == 101 as i8 { return TRUE }   // true
+    }
+    if text_len == 5 {
+        let ch0 = FLAT_SRC[text_start as usize]
+        let ch1 = FLAT_SRC[(text_start + 1) as usize]
+        let ch2 = FLAT_SRC[(text_start + 2) as usize]
+        let ch3 = FLAT_SRC[(text_start + 3) as usize]
+        let ch4 = FLAT_SRC[(text_start + 4) as usize]
+        if ch0 == 119 as i8 && ch1 == 104 as i8 && ch2 == 105 as i8 && ch3 == 108 as i8 && ch4 == 101 as i8 { return WHILE }  // while
+        if ch0 == 102 as i8 && ch1 == 97 as i8 && ch2 == 108 as i8 && ch3 == 115 as i8 && ch4 == 101 as i8 { return FALSE }   // false
+    }
+    if text_len == 6 {
+        let ch0 = FLAT_SRC[text_start as usize]
+        let ch1 = FLAT_SRC[(text_start + 1) as usize]
+        let ch2 = FLAT_SRC[(text_start + 2) as usize]
+        let ch3 = FLAT_SRC[(text_start + 3) as usize]
+        let ch4 = FLAT_SRC[(text_start + 4) as usize]
+        let ch5 = FLAT_SRC[(text_start + 5) as usize]
+        if ch0 == 114 as i8 && ch1 == 101 as i8 && ch2 == 116 as i8 && ch3 == 117 as i8 && ch4 == 114 as i8 && ch5 == 110 as i8 { return RETURN }  // return
+        if ch0 == 115 as i8 && ch1 == 116 as i8 && ch2 == 114 as i8 && ch3 == 117 as i8 && ch4 == 99 as i8 && ch5 == 116 as i8 { return STRUCT }  // struct
+    }
+    IDENT
+}
+
+// ============================================================================
+// BASIC SCANNING
+// ============================================================================
+
+fn scan_identifier(pos: i64) -> i64 with Mut {
+    var end = pos
+    while end < FLAT_SRC_LEN && is_ident_cont(FLAT_SRC[end as usize]) {
+        end = end + 1
+    }
+    end
+}
+
+fn scan_number(pos: i64) -> i64 with Mut {
+    var end = pos
+    while end < FLAT_SRC_LEN && is_digit(FLAT_SRC[end as usize]) {
+        end = end + 1
+    }
+    end
+}
+
+fn scan_string(pos: i64) -> i64 with Mut {
+    var end = pos + 1  // skip opening quote
+    while end < FLAT_SRC_LEN && FLAT_SRC[end as usize] != 34 as i8 {
+        if end + 1 < FLAT_SRC_LEN && FLAT_SRC[end as usize] == 92 as i8 {  // backslash escape
+            end = end + 2
+        } else {
+            end = end + 1
+        }
+    }
+    if end < FLAT_SRC_LEN && FLAT_SRC[end as usize] == 34 as i8 {
+        end = end + 1  // skip closing quote
+    }
+    end
+}
+
+fn scan_operator(pos: i64) -> i64 with Mut {
+    var end = pos + 1
+    if end >= FLAT_SRC_LEN { return end }
+
+    let ch0 = FLAT_SRC[pos as usize]
+    let ch1 = FLAT_SRC[end as usize]
+
+    // Check two-char operators
+    if ch0 == 61 as i8 && ch1 == 61 as i8 { return pos + 2 }  // ==
+    if ch0 == 33 as i8 && ch1 == 61 as i8 { return pos + 2 }  // !=
+    if ch0 == 60 as i8 && ch1 == 61 as i8 { return pos + 2 }  // <=
+    if ch0 == 62 as i8 && ch1 == 61 as i8 { return pos + 2 }  // >=
+    if ch0 == 38 as i8 && ch1 == 38 as i8 { return pos + 2 }  // &&
+    if ch0 == 124 as i8 && ch1 == 124 as i8 { return pos + 2 }  // ||
+    if ch0 == 45 as i8 && ch1 == 62 as i8 { return pos + 2 }  // ->
+    if ch0 == 38 as i8 && ch1 == 33 as i8 { return pos + 2 }  // &!
+
+    end
+}
+
+fn get_operator_kind(pos: i64, end: i64) -> i64 with Mut {
+    let len = end - pos
+    if len == 1 {
+        let ch = FLAT_SRC[pos as usize]
+        if ch == 43 as i8 { return PLUS }
+        if ch == 45 as i8 { return MINUS }
+        if ch == 42 as i8 { return STAR }
+        if ch == 47 as i8 { return SLASH }
+        if ch == 37 as i8 { return PERCENT }
+        if ch == 61 as i8 { return EQ }
+        if ch == 60 as i8 { return LT }
+        if ch == 62 as i8 { return GT }
+        if ch == 33 as i8 { return BANG }
+        if ch == 38 as i8 { return AMP }
+        if ch == 124 as i8 { return PIPE }
+    }
+    if len == 2 {
+        let ch0 = FLAT_SRC[pos as usize]
+        let ch1 = FLAT_SRC[(pos + 1) as usize]
+        if ch0 == 61 as i8 && ch1 == 61 as i8 { return EQ_EQ }
+        if ch0 == 33 as i8 && ch1 == 61 as i8 { return BANG_EQ }
+        if ch0 == 60 as i8 && ch1 == 61 as i8 { return LT_EQ }
+        if ch0 == 62 as i8 && ch1 == 61 as i8 { return GT_EQ }
+        if ch0 == 38 as i8 && ch1 == 38 as i8 { return AMP_AMP }
+        if ch0 == 124 as i8 && ch1 == 124 as i8 { return PIPE_PIPE }
+        if ch0 == 45 as i8 && ch1 == 62 as i8 { return ARROW }
+        if ch0 == 38 as i8 && ch1 == 33 as i8 { return AMP_BANG }
+    }
+    IDENT
+}
+
+fn get_delimiter_kind(ch: i8) -> i64 with Mut {
+    if ch == 40 as i8 { return L_PAREN }
+    if ch == 41 as i8 { return R_PAREN }
+    if ch == 123 as i8 { return L_BRACE }
+    if ch == 125 as i8 { return R_BRACE }
+    if ch == 91 as i8 { return L_BRACKET }
+    if ch == 93 as i8 { return R_BRACKET }
+    ERROR
+}
+
+fn get_punctuation_kind(ch: i8) -> i64 with Mut {
+    if ch == 59 as i8 { return SEMI }
+    if ch == 58 as i8 { return COLON }
+    if ch == 44 as i8 { return COMMA }
+    if ch == 46 as i8 { return DOT }
+    ERROR
+}
+
+// ============================================================================
+// MAIN LEXER FUNCTION
+// ============================================================================
+
+pub fn flat_lex_file(path: string) -> i64 with IO, Mut, Div, Panic {
+    // Read file into FLAT_SRC
+    let size = file_size(path)
+    let data = read_file(path)
+    var n: i64 = size
+    if n < 0 { n = 0 }
+    if n > 1048576 { n = 1048576 }
+
+    var i: i64 = 0
+    while i < n {
+        FLAT_SRC[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    FLAT_SRC_LEN = n
+
+    // Tokenize
+    var pos: i64 = 0
+    var line: i64 = 1
+    var col: i64 = 1
+    var token_count: i64 = 0
+
+    while pos < FLAT_SRC_LEN {
+        let ch = FLAT_SRC[pos as usize]
+
+        // Skip whitespace
+        if is_whitespace(ch) {
+            col = col + 1
+            pos = pos + 1
+            continue
+        }
+
+        // Skip newlines
+        if ch == 10 as i8 {
+            line = line + 1
+            col = 1
+            pos = pos + 1
+            continue
+        }
+
+        // Skip comments (// to end of line)
+        if ch == 47 as i8 && pos + 1 < FLAT_SRC_LEN && FLAT_SRC[(pos + 1) as usize] == 47 as i8 {
+            while pos < FLAT_SRC_LEN && FLAT_SRC[pos as usize] != 10 as i8 {
+                col = col + 1
+                pos = pos + 1
+            }
+            continue
+        }
+
+        // Identifiers and keywords
+        if is_ident_start(ch) {
+            let start = pos
+            pos = scan_identifier(pos)
+            let len = pos - start
+            let kind = keyword_kind(start, len)
+            parser_set_token_flat(token_count, kind, start, pos, line, col, 0)
+            token_count = token_count + 1
+            col = col + len
+            continue
+        }
+
+        // Numbers
+        if is_digit(ch) {
+            let start = pos
+            pos = scan_number(pos)
+            let len = pos - start
+            // Parse integer value
+            var val: i64 = 0
+            var j: i64 = start
+            while j < pos {
+                let d = FLAT_SRC[j as usize] - 48 as i8
+                val = val * 10 + (d as i64)
+                j = j + 1
+            }
+            parser_set_token_flat(token_count, INT_LIT, start, pos, line, col, val)
+            token_count = token_count + 1
+            col = col + len
+            continue
+        }
+
+        // Strings
+        if ch == 34 as i8 {
+            let start = pos
+            pos = scan_string(pos)
+            let len = pos - start
+            parser_set_token_flat(token_count, STRING_LIT, start, pos, line, col, 0)
+            token_count = token_count + 1
+            col = col + len
+            continue
+        }
+
+        // Operators
+        if is_operator_start(ch) {
+            let start = pos
+            pos = scan_operator(pos)
+            let kind = get_operator_kind(start, pos)
+            parser_set_token_flat(token_count, kind, start, pos, line, col, 0)
+            token_count = token_count + 1
+            col = col + (pos - start)
+            continue
+        }
+
+        // Delimiters
+        if is_delimiter(ch) {
+            let kind = get_delimiter_kind(ch)
+            parser_set_token_flat(token_count, kind, pos, pos + 1, line, col, 0)
+            token_count = token_count + 1
+            col = col + 1
+            pos = pos + 1
+            continue
+        }
+
+        // Punctuation
+        if is_punctuation(ch) {
+            let kind = get_punctuation_kind(ch)
+            parser_set_token_flat(token_count, kind, pos, pos + 1, line, col, 0)
+            token_count = token_count + 1
+            col = col + 1
+            pos = pos + 1
+            continue
+        }
+
+        // Unknown character — skip
+        col = col + 1
+        pos = pos + 1
+    }
+
+    // EOF token
+    parser_set_token_flat(token_count, EOF, pos, pos, line, col, 0)
+    token_count = token_count + 1
+
+    token_count
+}

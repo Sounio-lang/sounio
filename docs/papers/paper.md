@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.paper.paper
+topic_id: repo.docs.papers.paper
 authority: repo_only
-audience: researchers
+audience: users
 last_validated: 2026-03-07
-validated_by: A6
-source_of_truth: docs/governance/topic-registry.v1.json#repo.paper.paper
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.paper
 -->
 
 # Paper

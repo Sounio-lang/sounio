@@ -1,0 +1,278 @@
+// darwin_pbpk/pd/hill_mtor.sio — Hill-equation PD layer for mTOR inhibition
+//
+// Pharmacodynamic bridge from BBB intracellular unbound concentration
+// (C_icf, nM) to fractional mTOR inhibition:
+//
+//   E(C) = Emax * C^n / (EC50^n + C^n)        (Hill equation, n>0)
+//
+// For rapamycin:
+//   Emax = 1.0  (full saturation achievable at high intracellular exposure)
+//   EC50 = 0.5 nM  (mTORC1 S6K1-phosphorylation IC50)
+//   n    = 1.0  (classical single-site binding; FKBP12 stoichiometry)
+//
+// Literature:
+//   - Sehgal SN (2003) Transplantation Proc 35:7S–14S
+//   - MacKeigan JP et al. (2015) Cancer Res 75:4127–4139
+//   - Foster DA et al. (2010) Trends Pharmacol Sci 31:242–248
+//
+// This module is agnostic to how C_icf(t) was computed. It takes an
+// array of unbound intracellular concentrations (already sampled on a
+// grid) plus a time grid, and produces inhibition time-series + AUC +
+// time-above-threshold endpoints.
+//
+// Epistemic note:
+//   EC50 and n carry material uncertainty — most rapamycin EC50 values
+//   are cell-line-specific in vitro. We export priors with confidence
+//   scores that feed bbb_gum.sio + bbb_voi.sio (see Phase 3 of the
+//   epistemic-PBPK dissertation plan).
+
+// ----------------------------------------------------------------------------
+// Parameters + priors
+// ----------------------------------------------------------------------------
+
+pub struct HillParams {
+    emax: f64,      // maximum effect [0,1]
+    ec50_nM: f64,   // half-maximal effective concentration (nM)
+    n: f64,         // Hill coefficient
+}
+
+pub fn rapamycin_hill_params() -> HillParams {
+    HillParams { emax: 1.0, ec50_nM: 0.5, n: 1.0 }
+}
+
+pub struct HillEpParam {
+    mean: f64,
+    variance: f64,
+    confidence: f64,
+}
+
+pub struct HillPriors {
+    emax: HillEpParam,
+    ec50: HillEpParam,
+    n:    HillEpParam,
+}
+
+pub fn rapamycin_hill_priors() -> HillPriors {
+    // Emax: mean=1.0 (saturation); low variance, good confidence.
+    // Multiple cell-lines confirm near-complete mTORC1 inhibition at high C.
+    let emax = HillEpParam { mean: 1.0, variance: 0.01, confidence: 0.75 }
+
+    // EC50: mean=0.5 nM, SD=0.3 nM, confidence=0.40.
+    //
+    // In vitro phospho-endpoint convergence (all S6K1 Thr389 readouts,
+    // dose-response curves):
+    //   HEK293 (kinase assay):   ~0.1 nM     (Selleckchem S1039)
+    //   Jurkat T-cell:           ~0.45 nM    (pooled reports)
+    //   Cell-based consensus:    ~1.0 nM     (PMC4834780, Dowling 2008)
+    //   Range:                   0.1 – 2 nM  (log-uniform across assays)
+    // Geometric-mean centring of these would put the prior closer to
+    // 0.3 nM than 0.5 nM, but this is an IN VITRO aggregate.
+    //
+    // The in vivo brain ICF reality check (this commit's finding):
+    //   Clinical Rapamune trough target     = 5 – 15 ng/mL whole blood
+    //                                       = 5.5 – 16 nM whole blood
+    //   Plasma fu                           = 0.08
+    //   Kp,uu,brain (reported "poor")       ≈ 0.1
+    //   Estimated unbound ICF               ≈ 0.04 – 0.13 nM
+    // That is below the in vitro EC50 — i.e., clinical trough dosing
+    // leaves brain mTOR well below its phospho half-max. This matches
+    // observed rapalog-brain efficacy challenges (ALS CSF undetectable;
+    // TSC-seizure efficacy driven by chronic accumulation + peripheral
+    // routes) and is *why* the model's inhibition-AUC output is small.
+    //
+    // Epistemic gap (kept as-is, not tightened):
+    //   No rodent brain microdialysis EC50 for rapamycin S6K1 phospho
+    //   was located in primary literature. Using in vitro variance to
+    //   tighten an in vivo brain ICF prior would be a category error
+    //   (same conflation the hill_n refinement above just corrected).
+    //   The VoI rerank's identification of ec50_nM as the next target
+    //   IS the dissertation contribution — it points at the real gap.
+    //   Variance 0.09 and confidence 0.40 remain conservative pending
+    //   direct in vivo brain measurement.
+    let ec50 = HillEpParam { mean: 0.5, variance: 0.09, confidence: 0.40 }
+
+    // n: mean=1.0 (classical single-site allosteric inhibition via the
+    // FKBP12·rapamycin·FRB ternary complex — one binding site per mTOR,
+    // so Hill theory predicts n=1 exactly for the phospho endpoint).
+    //
+    // Prior refinement (lit-backed) — variance 0.04 → 0.01, conf 0.70 → 0.85:
+    //   The earlier wide SD=0.20 conflated two distinct endpoints:
+    //     (a) cell-viability curves, which Kuo et al. (PMC6455999) flag
+    //         as "unusually shallow" for rapamycin — a cytostatic /
+    //         incomplete-kill artifact, NOT Hill behavior at the molecular
+    //         target;
+    //     (b) S6K1-Thr389 phospho dose-response, which this PD layer
+    //         actually models, and which the single-site FRB mechanism
+    //         constrains tightly to n≈1.
+    //   Cross-cell-line S6K1-phospho curves cluster at n ≈ 1.0 ± 0.1
+    //   (HEK293, Jurkat, MCF7, T98G — Dowling et al. 2008 PNAS;
+    //   biochemistry per Banaszynski et al. JACS 2005 ternary complex;
+    //   pooled kinase datasheet — Selleckchem S1039).
+    //   SD=0.10 covers the 0.8–1.2 observed spread; confidence 0.85
+    //   reflects the mechanistic constraint + multi-cell-line convergence.
+    let hn   = HillEpParam { mean: 1.0, variance: 0.01, confidence: 0.85 }
+
+    HillPriors { emax: emax, ec50: ec50, n: hn }
+}
+
+// ----------------------------------------------------------------------------
+// Math helpers (local, avoid cross-module imports)
+// ----------------------------------------------------------------------------
+
+fn hill_log(x: f64) -> f64 with Div, Panic, Mut {
+    // Natural log via Halley-style iteration on y = ln(x).
+    // Only used for non-integer Hill coefficients. For n=1 the direct
+    // formula bypasses this path entirely (see hill_inhibition).
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    // Scale x into [1, e] range: x = 2^k * m
+    var y = 0.0
+    var xs = x
+    while xs > 2.0 { xs = xs * 0.5; y = y + 0.6931471805599453 }
+    while xs < 0.5 { xs = xs * 2.0; y = y - 0.6931471805599453 }
+    // Taylor for ln around 1: xs in roughly [0.5, 2]
+    let u = xs - 1.0
+    // ln(1+u) ~ u - u^2/2 + u^3/3 - ...
+    var term = u
+    var sum = u
+    var k: i32 = 2
+    while k < 40 {
+        term = term * (0.0 - u)
+        sum = sum + term / (k as f64)
+        k = k + 1
+    }
+    y + sum
+}
+
+fn hill_exp(x: f64) -> f64 with Div, Panic, Mut {
+    if x >= 0.5 {
+        let half = hill_exp(x * 0.5)
+        return half * half
+    }
+    if x <= 0.0 - 0.5 {
+        let half = hill_exp(x * 0.5)
+        return half * half
+    }
+    var term: f64 = 1.0
+    var sum: f64 = 1.0
+    var k: i32 = 1
+    while k < 20 {
+        term = term * x / (k as f64)
+        sum = sum + term
+        k = k + 1
+    }
+    sum
+}
+
+fn hill_pow(base: f64, expn: f64) -> f64 with Div, Panic, Mut {
+    if base <= 0.0 { return 0.0 }
+    // Integer fast-path for n=1 (by far the common rapamycin case)
+    let n_int_round = expn
+    if n_int_round > 0.9999 && n_int_round < 1.0001 { return base }
+    if n_int_round > 1.9999 && n_int_round < 2.0001 { return base * base }
+    hill_exp(expn * hill_log(base))
+}
+
+// ----------------------------------------------------------------------------
+// Core Hill inhibition
+// ----------------------------------------------------------------------------
+
+// Fractional inhibition E(C) in [0, Emax].
+pub fn hill_inhibition(c_icf_nM: f64, p: HillParams) -> f64 with Div, Panic, Mut {
+    if c_icf_nM <= 0.0 { return 0.0 }
+    // Fast path for classical n=1
+    if p.n > 0.9999 && p.n < 1.0001 {
+        return p.emax * c_icf_nM / (p.ec50_nM + c_icf_nM)
+    }
+    let cn  = hill_pow(c_icf_nM, p.n)
+    let kn  = hill_pow(p.ec50_nM, p.n)
+    p.emax * cn / (kn + cn)
+}
+
+// ----------------------------------------------------------------------------
+// Trajectory endpoints — takes sampled C_icf(t) series
+// ----------------------------------------------------------------------------
+
+pub struct PDEndpoint {
+    inhibition_auc:        f64, // integral of E(C) over simulation (unitless·h)
+    time_above_80pct:      f64, // hours spent with E >= 0.8
+    max_inhibition:        f64, // peak E reached
+    mean_inhibition:       f64, // time-weighted mean E
+    n_points:              i32,
+    times_h:   [f64; 32],
+    inhib:     [f64; 32],
+}
+
+pub fn pd_endpoint_zero() -> PDEndpoint {
+    PDEndpoint {
+        inhibition_auc: 0.0,
+        time_above_80pct: 0.0,
+        max_inhibition: 0.0,
+        mean_inhibition: 0.0,
+        n_points: 0,
+        times_h: [0.0; 32],
+        inhib:   [0.0; 32],
+    }
+}
+
+// Driven from a sampled C_icf time-series (unbound intracellular nM) on a
+// grid of size n_points (<= 32). Mirrors the checkpoint layout used by
+// scenarios/des_sirolimus_bbb.sio (DESBBBTrace).
+pub fn pd_from_icf_series(
+    times_h:  [f64; 32],
+    c_icf_nM: [f64; 32],
+    n_points: i32,
+    p: HillParams
+) -> PDEndpoint with Div, Panic, Mut {
+    var out = pd_endpoint_zero()
+    out.n_points = n_points
+
+    // Per-point inhibition
+    var i: i32 = 0
+    while i < n_points {
+        let idx = i as usize
+        let e = hill_inhibition(c_icf_nM[idx], p)
+        out.times_h[idx] = times_h[idx]
+        out.inhib[idx] = e
+        if e > out.max_inhibition { out.max_inhibition = e }
+        i = i + 1
+    }
+
+    // Trapezoidal integral + time-above-threshold
+    var auc: f64 = 0.0
+    var t_above: f64 = 0.0
+    var k: i32 = 0
+    while k < n_points - 1 {
+        let a = k as usize
+        let b = (k + 1) as usize
+        let dt = out.times_h[b] - out.times_h[a]
+        auc = auc + 0.5 * dt * (out.inhib[a] + out.inhib[b])
+        // conservative: count dt only if both endpoints >= 0.8
+        if out.inhib[a] >= 0.8 && out.inhib[b] >= 0.8 {
+            t_above = t_above + dt
+        }
+        k = k + 1
+    }
+    out.inhibition_auc = auc
+    out.time_above_80pct = t_above
+
+    let total_t = out.times_h[(n_points - 1) as usize] - out.times_h[0]
+    out.mean_inhibition = if total_t > 0.0 { auc / total_t } else { 0.0 }
+    out
+}
+
+pub fn pd_print_csv(pd: PDEndpoint) with IO, Mut, Panic, Div {
+    println("time_h,inhibition_fraction")
+    var i: i32 = 0
+    while i < pd.n_points {
+        let idx = i as usize
+        print_f64(pd.times_h[idx]); print(",")
+        print_f64(pd.inhib[idx])
+        println("")
+        i = i + 1
+    }
+    println("")
+    print("inhibition_AUC,");      print_f64(pd.inhibition_auc);   println("")
+    print("time_above_80pct_h,");  print_f64(pd.time_above_80pct); println("")
+    print("max_inhibition,");      print_f64(pd.max_inhibition);   println("")
+    print("mean_inhibition,");     print_f64(pd.mean_inhibition);  println("")
+}

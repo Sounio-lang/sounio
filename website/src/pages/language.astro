@@ -2,195 +2,629 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 import EpistemicTypeLadder from '../components/diagrams/EpistemicTypeLadder.astro';
 import UncertaintyFlow from '../components/diagrams/UncertaintyFlow.astro';
+import RuntimeArchitecture from '../components/diagrams/RuntimeArchitecture.astro';
+import SounioCode from '../components/SounioCode.astro';
 import { getLocaleFromUrl, getLocalizedPath } from '../lib/i18n';
 
 const locale = getLocaleFromUrl(Astro.url);
 
-const pillars = [
-  {
-    title: 'Knowledge<T> as a Primitive',
-    body: 'Values carry uncertainty, confidence, and provenance by default instead of external spreadsheet logic.',
-  },
-  {
-    title: 'Validated<T>',
-    body: 'Values that pass a formal threshold check become Validated<T> — a distinct type that cannot be confused with raw measurements.',
-  },
-  {
-    title: 'Intervention<T> & Counterfactual<T>',
-    body: 'Intervention<T> and Counterfactual<T> are compiler-level types that carry epistemic confidence. The causal stdlib library implements Pearl\u2019s do-operator.',
-  },
-  {
-    title: 'Confidence-Gated Execution',
-    body: 'Control flow can branch on confidence guarantees, so runtime behavior reflects evidence quality.',
-  },
-  {
-    title: 'Explicit Effects',
-    body: 'I/O, mutation, allocation, GPU, and probabilistic effects are visible in function signatures.',
-  },
-  {
-    title: 'Units + Constraints',
-    body: 'Dimensional analysis enforced at compile time. Refinement predicate checking works today; SMT integration planned for 2026.',
-  },
-];
-
-const example = `let concentration: Knowledge<f64> = Knowledge(
-  9.8,
+const knowledgeExample = `let dose: Knowledge<f64> = Knowledge(
+  500.0,
   ε=0.97,
   prov="lab_run_042"
 )
 
-if concentration.ε > 0.95 {
-  approve_for_decision(concentration)
+// Confidence gate: only passes if ε >= 0.82
+if dose.ε >= 0.82 {
+  prescribe(dose)           // type: Knowledge<f64>
 } else {
-  request_remeasurement(concentration)
+  request_remeasurement()
 }`;
+
+const effectsExample = `// Effects are part of the signature — callee effects must
+// be a subset of the caller's declared effects.
+fn read_sensor() -> Knowledge<f64> with IO, Observe {
+    let raw = read_port(0x3F8)          // requires IO
+    return observe(raw)                  // requires Observe
+}
+
+// Linear struct: the handle must be consumed exactly once.
+linear struct FileHandle { fd: i32 }
+
+fn close(h: FileHandle) with IO {
+    syscall_close(h.fd)                 // h is consumed here
+}`;
+
+const compilerExample = `# Stage 0: C compiler compiles the first Sounio compiler
+./artifacts/self-hosted/souc-self-hosted-x86_64 \\
+    self-hosted/compiler/lean_single.sio gen1.elf
+
+# Stage 1 → Stage 2: first self-hosted compile
+./gen1.elf self-hosted/compiler/lean_single.sio gen2.elf
+
+# Stage 2 → Stage 3: fixed-point check
+./gen2.elf self-hosted/compiler/lean_single.sio gen3.elf
+
+# Must be identical — this is the fixed point.
+sha256sum gen2.elf gen3.elf`;
 ---
 
-<BaseLayout title="Language" description="Sounio language principles and core semantics">
-  <section class="section-shell language-hero">
-    <div class="container hero-inner">
-      <span class="badge-pill">Language</span>
-      <h1>Designed for evidence-aware software, not just numerical output.</h1>
-      <p>
-        Sounio treats scientific trust as a language concern. The type system keeps uncertainty, provenance,
-        and effect boundaries visible from first line to production deployment.
-      </p>
-      <div class="hero-actions">
-        <a href={getLocalizedPath('/learn/language', locale)} class="hero-cta primary">Read the Language Guide</a>
-        <a href={getLocalizedPath('/playground', locale)} class="hero-cta secondary">Try the Playground</a>
-      </div>
-    </div>
-  </section>
+<BaseLayout
+  title="Language — Sounio"
+  description="Authoritative tour of Sounio: epistemic types, effects, compiler, and runtime. Anything not on this page is scaffolding or missing."
+>
 
-  <section class="section-shell">
-    <div class="container">
-      <div class="section-headline">
-        <h2 class="section-heading">Core Pillars</h2>
-        <p class="section-subhead">Mechanisms that make trust and performance coexist in one systems language.</p>
-      </div>
-      <div class="pillar-grid premium-grid">
-        {pillars.map((pillar) => (
-          <article class="pillar-card glass glass-specular">
-            <h3>{pillar.title}</h3>
-            <p>{pillar.body}</p>
-          </article>
-        ))}
-      </div>
-    </div>
-  </section>
+  {/* ═══════════════════════════════════════════════════════════════
+      LAYOUT SHELL — TOC left, content right on wide viewports
+  ═══════════════════════════════════════════════════════════════ */}
+  <div class="language-shell">
 
-  <section class="section-shell">
-    <div class="container">
-      <div class="section-headline">
-        <h2 class="section-heading">The Knowledge&lt;T&gt; Progression</h2>
-        <p class="section-subhead">Every value evolves through four tiers — from bare numeric to a fully epistemic, provenance-tracked type.</p>
-      </div>
-      <EpistemicTypeLadder />
-    </div>
-  </section>
+    {/* ── Sticky TOC ─────────────────────────────────────────────── */}
+    <aside class="language-toc" aria-label="Page sections">
+      <nav>
+        <p class="toc-label">On this page</p>
+        <ol class="toc-list">
+          <li><a href="#epistemic-types" class="toc-link">A — Epistemic types</a></li>
+          <li><a href="#effects" class="toc-link">B — Effects & linearity</a></li>
+          <li><a href="#compiler" class="toc-link">C — Compiler</a></li>
+          <li><a href="#runtime" class="toc-link">D — Runtime</a></li>
+        </ol>
+        <div class="toc-divider"></div>
+        <div class="toc-meta">
+          <a href={getLocalizedPath('/proof', locale)} class="toc-proof-link">Honest status →</a>
+          <a href={getLocalizedPath('/learn/getting-started', locale)} class="toc-proof-link">Getting started →</a>
+        </div>
+      </nav>
+    </aside>
 
-  <section class="section-shell">
-    <div class="container sample-grid">
-      <article class="glass sample-card">
-        <h2 class="section-heading">What Epistemic Code Looks Like</h2>
-        <p class="section-subhead">Trust conditions become explicit runtime behavior rather than hidden assumptions.</p>
-      </article>
-      <article class="glass code-card">
-        <pre><code>{example}</code></pre>
-      </article>
-    </div>
-  </section>
+    {/* ── Main content ────────────────────────────────────────────── */}
+    <main class="language-main">
 
-  <section class="section-shell">
-    <div class="container flow-section">
-      <div class="flow-label">
-        <h2 class="section-heading">From Measurement to Decision</h2>
-        <p class="section-subhead">Uncertainty propagates automatically through every operation. Confidence gates enforce data quality at the call site — no boilerplate.</p>
-      </div>
-      <UncertaintyFlow />
-    </div>
-  </section>
+      {/* HEADER */}
+      <section class="section-shell pt-[clamp(3rem,8vw,5rem)]">
+        <div class="max-w-[740px] grid gap-[1rem]">
+          <span class="badge-pill">Language</span>
+          <h1 class="font-sans text-[clamp(2.2rem,5vw,3.4rem)] font-[750] leading-[1.1] tracking-[-0.025em] text-[var(--color-text-primary)]">
+            What Sounio actually offers today.
+          </h1>
+          <p class="text-[1rem] text-[var(--color-text-secondary)] max-w-[60ch] leading-[1.75]">
+            Sounio is a systems language. This page is the authoritative tour
+            of what the language offers today. Anything not listed here is
+            either scaffolding or missing — see{' '}
+            <a href={getLocalizedPath('/proof', locale)} class="text-[var(--color-accent-gold-soft)] hover:underline">/proof</a>
+            {' '}for the honest status.
+          </p>
+        </div>
+      </section>
+
+      <div class="border-t border-[var(--glass-border)]"></div>
+
+      {/* ═══════════════════════════════════════════════════════════
+          SECTION A — EPISTEMIC TYPES
+      ═══════════════════════════════════════════════════════════ */}
+      <section id="epistemic-types" class="section-shell scroll-mt-[5rem]">
+        <div class="max-w-[740px] grid gap-[1.8rem]">
+
+          <div class="grid gap-[0.4rem]">
+            <span class="text-[0.78rem] font-[700] uppercase tracking-[0.1em] text-[var(--color-accent-gold-soft)]">A</span>
+            <h2 class="text-[1.7rem] font-[700] leading-[1.2] text-[var(--color-text-primary)]">
+              Epistemic types
+            </h2>
+            <p class="text-[0.95rem] text-[var(--color-text-secondary)] leading-[1.75] max-w-[64ch]">
+              Every value in Sounio can carry the evidence behind it. The type system
+              enforces this at compile time — not as a lint, not as a runtime check.
+            </p>
+          </div>
+
+          {/* Type cards */}
+          <div class="grid gap-[0.75rem] sm:grid-cols-2">
+
+            <article class="glass glass-specular rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.5rem]">
+              <h3 class="text-[1.05rem] font-[680] text-[var(--color-text-primary)]">
+                Knowledge&lt;T&gt;
+              </h3>
+              <p class="text-[0.87rem] text-[var(--color-text-secondary)] leading-[1.65]">
+                The base epistemic type. Wraps any value with a confidence level ε ∈ [0, 1],
+                an uncertainty interval, and a provenance string. GUM uncertainty
+                propagates automatically through arithmetic.
+              </p>
+              <code class="text-[0.8rem] font-mono text-[var(--color-accent-gold-soft)] bg-[rgba(255,255,255,0.05)] px-[0.5em] py-[0.25em] rounded self-start">
+                Knowledge&lt;f64&gt;, Knowledge&lt;mg&gt;
+              </code>
+            </article>
+
+            <article class="glass glass-specular rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.5rem]">
+              <h3 class="text-[1.05rem] font-[680] text-[var(--color-text-primary)]">
+                Validated&lt;T&gt;
+              </h3>
+              <p class="text-[0.87rem] text-[var(--color-text-secondary)] leading-[1.65]">
+                A distinct type that can only be produced by passing a formal confidence
+                gate. Cannot be confused with raw measurements. Confidence-gated
+                execution branches on Validated vs. raw.
+              </p>
+              <code class="text-[0.8rem] font-mono text-[var(--color-accent-gold-soft)] bg-[rgba(255,255,255,0.05)] px-[0.5em] py-[0.25em] rounded self-start">
+                fn prescribe(d: Validated&lt;f64, ε &gt;= 0.82&gt;)
+              </code>
+            </article>
+
+            <article class="glass glass-specular rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.5rem]">
+              <h3 class="text-[1.05rem] font-[680] text-[var(--color-text-primary)]">
+                Unobserved&lt;T&gt;
+              </h3>
+              <p class="text-[0.87rem] text-[var(--color-text-secondary)] leading-[1.65]">
+                Values remain quantum-indeterminate until a comparison or I/O boundary
+                collapses them. Bayesian and quantum measurement semantics live in
+                the type system, not in runtime libraries.
+              </p>
+              <code class="text-[0.8rem] font-mono text-[var(--color-accent-gold-soft)] bg-[rgba(255,255,255,0.05)] px-[0.5em] py-[0.25em] rounded self-start">
+                fn observe(x: Unobserved&lt;f64&gt;) -&gt; bool with Observe
+              </code>
+            </article>
+
+            <article class="glass glass-specular rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.5rem]">
+              <h3 class="text-[1.05rem] font-[680] text-[var(--color-text-primary)]">
+                Intervention&lt;T&gt; &amp; Counterfactual&lt;T&gt;
+              </h3>
+              <p class="text-[0.87rem] text-[var(--color-text-secondary)] leading-[1.65]">
+                Compiler-level types that carry causal confidence. Intervention&lt;T&gt;
+                corresponds to Pearl's do-operator; Counterfactual&lt;T&gt; encodes
+                hypothetical reasoning under the same discipline as observational data.
+              </p>
+              <code class="text-[0.8rem] font-mono text-[var(--color-accent-gold-soft)] bg-[rgba(255,255,255,0.05)] px-[0.5em] py-[0.25em] rounded self-start">
+                do(X = x): Intervention&lt;f64&gt;
+              </code>
+            </article>
+
+          </div>
+
+          {/* Type progression diagram */}
+          <div class="grid gap-[0.6rem]">
+            <p class="text-[0.82rem] font-[600] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+              Knowledge&lt;T&gt; progression — bare numeric to fully epistemic
+            </p>
+            <EpistemicTypeLadder />
+          </div>
+
+          {/* Code example */}
+          <div class="grid gap-[0.5rem]">
+            <p class="text-[0.82rem] font-[600] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+              Confidence-gated execution
+            </p>
+            <SounioCode code={knowledgeExample} title="confidence_gate.sio" />
+          </div>
+
+          {/* Algebra declarations */}
+          <div class="glass rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.6rem]">
+            <h3 class="text-[1rem] font-[680] text-[var(--color-text-primary)]">Algebra declarations</h3>
+            <p class="text-[0.88rem] text-[var(--color-text-secondary)] leading-[1.65]">
+              Declare algebraic laws on types. The e-graph optimizer uses only the
+              rewrites your algebra permits — no unsound reordering of non-commutative ops.
+            </p>
+            <pre class="rounded-[var(--radius-md)] bg-[#1e1e1e] text-[#d4d4d4] text-[0.85rem] font-mono p-[0.85rem] overflow-x-auto border border-white/10"><code>{`algebra Octonion over f64 {
+  add: commutative, associative
+  mul: alternative, non_commutative
+  reassociate: fano_selective
+}`}</code></pre>
+          </div>
+
+          {/* Units */}
+          <div class="glass rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.5rem]">
+            <h3 class="text-[1rem] font-[680] text-[var(--color-text-primary)]">Units & dimensional analysis</h3>
+            <p class="text-[0.88rem] text-[var(--color-text-secondary)] leading-[1.65]">
+              Units are checked at compile time. A value declared as <code class="font-mono text-[0.85em] bg-[rgba(255,255,255,0.07)] px-[0.3em] rounded">mg</code> cannot
+              be silently coerced to <code class="font-mono text-[0.85em] bg-[rgba(255,255,255,0.07)] px-[0.3em] rounded">kg</code> or dimensionless.
+              Refinement predicates (e.g. <code class="font-mono text-[0.85em] bg-[rgba(255,255,255,0.07)] px-[0.3em] rounded">x &gt; 0</code>) work today;
+              SMT integration is planned.
+            </p>
+            <pre class="rounded-[var(--radius-md)] bg-[#1e1e1e] text-[#d4d4d4] text-[0.85rem] font-mono p-[0.85rem] overflow-x-auto border border-white/10"><code>{`let dose: mg = 500.0
+let weight: kg = 78.5
+// let wrong = dose + weight  ← compile error: mg + kg`}</code></pre>
+          </div>
+
+          {/* Uncertainty flow */}
+          <div class="grid gap-[0.6rem]">
+            <p class="text-[0.82rem] font-[600] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+              GUM propagation — uncertainty flows automatically
+            </p>
+            <UncertaintyFlow />
+          </div>
+
+        </div>
+      </section>
+
+      <div class="border-t border-[var(--glass-border)]"></div>
+
+      {/* ═══════════════════════════════════════════════════════════
+          SECTION B — EFFECTS & LINEARITY
+      ═══════════════════════════════════════════════════════════ */}
+      <section id="effects" class="section-shell scroll-mt-[5rem]">
+        <div class="max-w-[740px] grid gap-[1.8rem]">
+
+          <div class="grid gap-[0.4rem]">
+            <span class="text-[0.78rem] font-[700] uppercase tracking-[0.1em] text-[var(--color-accent-gold-soft)]">B</span>
+            <h2 class="text-[1.7rem] font-[700] leading-[1.2] text-[var(--color-text-primary)]">
+              Effects &amp; linearity
+            </h2>
+            <p class="text-[0.95rem] text-[var(--color-text-secondary)] leading-[1.75] max-w-[64ch]">
+              Side effects are visible in function signatures. Linear types enforce
+              exactly-once resource consumption. Neither requires runtime overhead.
+            </p>
+          </div>
+
+          {/* Effects table */}
+          <div class="glass rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.8rem]">
+            <h3 class="text-[0.82rem] font-[700] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">Built-in effects</h3>
+            <div class="grid gap-[0.5rem]">
+              {[
+                { eff: 'IO', desc: 'File, network, stdin/stdout — any real-world I/O.' },
+                { eff: 'Panic', desc: 'Controlled abort path. Functions without Panic cannot panic.' },
+                { eff: 'Observe', desc: 'Collapses Unobserved\u003cT\u003e to a concrete value — separates measurement from computation.' },
+                { eff: 'Async', desc: 'Async/await, channels, spawn. Phase 1 wired (channel + send/recv + spawn); full scheduler pending.' },
+                { eff: 'GPU', desc: 'Kernel launch, memory transfer. Syntax integrated; end-to-end path requires CUDA driver.' },
+                { eff: 'Probabilistic', desc: 'Monte Carlo sampling, Bayesian updates. In stdlib; effect annotation enforces separation from deterministic code.' },
+              ].map(({ eff, desc }) => (
+                <div class="flex gap-[0.8rem] text-[0.88rem]">
+                  <code class="font-mono font-[600] text-[var(--color-accent-gold-soft)] shrink-0 w-[7rem]">with {eff}</code>
+                  <span class="text-[var(--color-text-secondary)] leading-[1.6]">{desc}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Effect rule */}
+          <div class="glass rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.5rem]">
+            <h3 class="text-[1rem] font-[680] text-[var(--color-text-primary)]">The subset rule</h3>
+            <p class="text-[0.88rem] text-[var(--color-text-secondary)] leading-[1.65]">
+              A function's effects must be a subset of its caller's declared effects.
+              A function without <code class="font-mono text-[0.85em] bg-[rgba(255,255,255,0.07)] px-[0.3em] rounded">with IO</code> cannot call a function that has it.
+              This is checked by the type checker, not at runtime.
+            </p>
+          </div>
+
+          {/* Linear types */}
+          <div class="glass rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.5rem]">
+            <h3 class="text-[1rem] font-[680] text-[var(--color-text-primary)]">Linear structs</h3>
+            <p class="text-[0.88rem] text-[var(--color-text-secondary)] leading-[1.65]">
+              A <code class="font-mono text-[0.85em] bg-[rgba(255,255,255,0.07)] px-[0.3em] rounded">linear struct</code> must be consumed exactly once — it cannot
+              be copied, dropped silently, or moved into two branches. File handles,
+              network connections, and cryptographic contexts are the canonical use case.
+            </p>
+          </div>
+
+          <SounioCode code={effectsExample} title="effects_and_linear.sio" />
+
+        </div>
+      </section>
+
+      <div class="border-t border-[var(--glass-border)]"></div>
+
+      {/* ═══════════════════════════════════════════════════════════
+          SECTION C — COMPILER
+      ═══════════════════════════════════════════════════════════ */}
+      <section id="compiler" class="section-shell scroll-mt-[5rem]">
+        <div class="max-w-[740px] grid gap-[1.8rem]">
+
+          <div class="grid gap-[0.4rem]">
+            <span class="text-[0.78rem] font-[700] uppercase tracking-[0.1em] text-[var(--color-accent-gold-soft)]">C</span>
+            <h2 class="text-[1.7rem] font-[700] leading-[1.2] text-[var(--color-text-primary)]">
+              Compiler
+            </h2>
+            <p class="text-[0.95rem] text-[var(--color-text-secondary)] leading-[1.75] max-w-[64ch]">
+              The compiler is self-hosted: written in Sounio, it compiles Sounio.
+              The bootstrap chain is verified — stage 2 and stage 3 produce byte-for-byte
+              identical binaries.
+            </p>
+          </div>
+
+          {/* Pipeline diagram */}
+          <div class="grid gap-[0.6rem]">
+            <p class="text-[0.82rem] font-[600] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+              Compilation pipeline
+            </p>
+            <RuntimeArchitecture />
+          </div>
+
+          {/* Pipeline steps */}
+          <div class="glass rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.6rem]">
+            <h3 class="text-[0.82rem] font-[700] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">Pipeline stages</h3>
+            <div class="grid gap-[0.45rem]">
+              {[
+                ['Source → Lexer → Parser', 'Recursive-descent parser. No external parser generator.'],
+                ['AST → Check', 'Bidirectional type inference + effect analysis. Knowledge\u003cT\u003e subtyping, confidence gates, linear resource tracking.'],
+                ['Check → HIR → SIR', 'High-level IR, then Static IR (SSA form). Epistemic metadata preserved through lowering.'],
+                ['SIR → HLIR (e-graph)', '1,000+ algebraic rewrite rules. Algebra declarations constrain which rewrites apply.'],
+                ['HLIR → ELF (x86-64)', 'Native code generation. No LLVM. Bootstrap chain: C → gen1 → gen2 → gen3 (fixed point).'],
+              ].map(([stage, desc]) => (
+                <div class="flex gap-[0.8rem] text-[0.87rem]">
+                  <code class="font-mono font-[600] text-[var(--color-accent-gold-soft)] shrink-0 leading-[1.6]">{stage}</code>
+                  <span class="text-[var(--color-text-secondary)] leading-[1.6]">{desc}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Bootstrap fixed point */}
+          <div class="grid gap-[0.5rem]">
+            <p class="text-[0.82rem] font-[600] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+              Reproducing the self-hosting fixed point
+            </p>
+            <pre class="rounded-[var(--radius-lg)] bg-[#1e1e1e] text-[#d4d4d4] text-[0.85rem] font-mono p-[1rem] overflow-x-auto leading-relaxed border border-white/10"><code>{compilerExample}</code></pre>
+            <p class="text-[0.8rem] text-[var(--color-text-tertiary)] leading-[1.6]">
+              Achieved 2026-03-23. Recorded hash: <code class="font-mono text-[0.82em]">md5=7b91e249</code> (230 KB).
+              See <a href={getLocalizedPath('/proof#fixed-point', locale)} class="text-[var(--color-accent-gold-soft)] hover:underline">/proof §2</a> for the full verification.
+            </p>
+          </div>
+
+          {/* E-graph optimizer */}
+          <div class="glass rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.5rem]">
+            <h3 class="text-[1rem] font-[680] text-[var(--color-text-primary)]">E-graph optimizer</h3>
+            <p class="text-[0.88rem] text-[var(--color-text-secondary)] leading-[1.65]">
+              The optimizer implements equality saturation over an e-graph — the same
+              approach used by egg/egglog but running inside a Sounio compiler written
+              in Sounio. 1,000+ algebraic rewrite rules, all at FAIL=0 in the test gate.
+              Algebra declarations constrain which rewrites apply per type.
+            </p>
+          </div>
+
+          {/* CLI commands */}
+          <div class="glass rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.6rem]">
+            <h3 class="text-[0.82rem] font-[700] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">Common commands</h3>
+            <div class="grid gap-[0.45rem]">
+              {[
+                ['souc check file.sio', 'Type-check; no output generated.'],
+                ['souc run file.sio', 'Compile to temp ELF, execute, clean up.'],
+                ['souc compile file.sio -o out.elf', 'Direct native compilation to ELF.'],
+                ['souc check --show-types file.sio', 'Dump inferred types (JIT mode only).'],
+              ].map(([cmd, desc]) => (
+                <div class="flex gap-[0.8rem] text-[0.87rem]">
+                  <code class="font-mono font-[600] text-[var(--color-text-primary)] shrink-0 leading-[1.6] min-w-[16rem]">$ {cmd}</code>
+                  <span class="text-[var(--color-text-secondary)] leading-[1.6]">{desc}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <div class="border-t border-[var(--glass-border)]"></div>
+
+      {/* ═══════════════════════════════════════════════════════════
+          SECTION D — RUNTIME
+      ═══════════════════════════════════════════════════════════ */}
+      <section id="runtime" class="section-shell scroll-mt-[5rem]">
+        <div class="max-w-[740px] grid gap-[1.8rem]">
+
+          <div class="grid gap-[0.4rem]">
+            <span class="text-[0.78rem] font-[700] uppercase tracking-[0.1em] text-[var(--color-accent-gold-soft)]">D</span>
+            <h2 class="text-[1.7rem] font-[700] leading-[1.2] text-[var(--color-text-primary)]">
+              Runtime
+            </h2>
+            <p class="text-[0.95rem] text-[var(--color-text-secondary)] leading-[1.75] max-w-[64ch]">
+              What is and isn't wired up end-to-end. The anti-slop move is to say
+              this explicitly before the reader discovers it.
+            </p>
+          </div>
+
+          {/* Works / Scaffolding / Missing */}
+          <div class="grid gap-[0.75rem] sm:grid-cols-3">
+
+            <article class="glass rounded-[var(--radius-xl)] p-[1rem] grid gap-[0.7rem]">
+              <h3 class="text-[0.75rem] font-[700] uppercase tracking-[0.1em] text-[var(--color-accent-gold-soft)]">End-to-end</h3>
+              <ul class="grid gap-[0.4rem] text-[0.84rem] text-[var(--color-text-secondary)] list-none p-0">
+                <li>x86-64 ELF native codegen</li>
+                <li>Self-hosted bootstrap chain</li>
+                <li>Knowledge&lt;f64&gt; + GUM propagation</li>
+                <li>Dimensional units (stdlib)</li>
+                <li>ODE solvers (exponential decay)</li>
+                <li>Stats / linalg / signal / CSV</li>
+                <li>Octonion algebra + 168 theorem</li>
+                <li>1,000+ e-graph rewrites</li>
+              </ul>
+            </article>
+
+            <article class="glass rounded-[var(--radius-xl)] p-[1rem] grid gap-[0.7rem]">
+              <h3 class="text-[0.75rem] font-[700] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">Partial</h3>
+              <ul class="grid gap-[0.4rem] text-[0.84rem] text-[var(--color-text-secondary)] list-none p-0">
+                <li>Async (channels wired; scheduler pending)</li>
+                <li>LSP (scaffolded; no completion yet)</li>
+                <li>Ontology (8 hardcoded CURIEs)</li>
+                <li>GPU syntax (kernel compiles; no end-to-end driver path)</li>
+                <li>Neural networks (types exist; runtime errors)</li>
+              </ul>
+            </article>
+
+            <article class="glass rounded-[var(--radius-xl)] p-[1rem] grid gap-[0.7rem]">
+              <h3 class="text-[0.75rem] font-[700] uppercase tracking-[0.1em] text-[rgba(255,80,80,0.7)]">Missing</h3>
+              <ul class="grid gap-[0.4rem] text-[0.84rem] text-[var(--color-text-secondary)] list-none p-0">
+                <li>Windows / macOS targets</li>
+                <li>SMT refinement solver</li>
+                <li>Package registry (site scaffolded)</li>
+                <li>GPU entry point (lib.sio empty)</li>
+              </ul>
+            </article>
+
+          </div>
+
+          {/* GPU section */}
+          <div class="glass rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.5rem]">
+            <h3 class="text-[1rem] font-[680] text-[var(--color-text-primary)]">GPU path</h3>
+            <p class="text-[0.88rem] text-[var(--color-text-secondary)] leading-[1.65]">
+              Kernel syntax is integrated into the language — a Sounio function annotated
+              <code class="font-mono text-[0.85em] bg-[rgba(255,255,255,0.07)] px-[0.3em] rounded">with GPU</code> compiles to PTX via a backend bridge.
+              The world's first GUM uncertainty propagation through a GPU WMMA kernel
+              is verified in <code class="font-mono text-[0.85em] bg-[rgba(255,255,255,0.07)] px-[0.3em] rounded">tests/stdlib/gpu/</code> (13/13 gate PASS on CUDA hardware).
+              The end-to-end driver path requires a CUDA-capable host —
+              <code class="font-mono text-[0.85em] bg-[rgba(255,255,255,0.07)] px-[0.3em] rounded">gpu/lib.sio</code> is currently an empty stub.
+            </p>
+          </div>
+
+          {/* Test gate summary */}
+          <div class="glass rounded-[var(--radius-xl)] p-[1.1rem] grid gap-[0.5rem]">
+            <h3 class="text-[1rem] font-[680] text-[var(--color-text-primary)]">Test gate snapshot</h3>
+            <p class="text-[0.88rem] text-[var(--color-text-secondary)] leading-[1.65]">
+              Full suite as of 2026-05-05: <strong class="text-[var(--color-text-primary)]">822 pass / 1 fail / 96 skip</strong> across 919 test files.
+              The single failure is `test_steady_state.sio` (an ODE simulation test); the skipped tests are
+              documented in <code class="font-mono text-[0.85em] bg-[rgba(255,255,255,0.07)] px-[0.3em] rounded">tests/README.md</code>.
+              See <a href={getLocalizedPath('/proof#test-gate', locale)} class="text-[var(--color-accent-gold-soft)] hover:underline">/proof §4</a> for the captured output.
+            </p>
+          </div>
+
+        </div>
+      </section>
+
+      <div class="border-t border-[var(--glass-border)]"></div>
+
+      {/* ── CTA ─────────────────────────────────────────────────── */}
+      <section class="section-shell">
+        <div class="max-w-[740px] flex flex-wrap gap-[0.65rem]">
+          <a
+            href={getLocalizedPath('/learn/getting-started', locale)}
+            class="inline-flex items-center justify-center rounded-full px-[1.3rem] py-[0.75rem] text-[0.93rem] font-[650] transition-all hover:-translate-y-px bg-[linear-gradient(120deg,var(--color-accent-gold),var(--color-accent-gold-soft))] text-[#10233e]"
+          >
+            Getting started
+          </a>
+          <a
+            href={getLocalizedPath('/proof', locale)}
+            class="inline-flex items-center justify-center rounded-full px-[1.3rem] py-[0.75rem] text-[0.93rem] font-[650] transition-all hover:-translate-y-px border border-[var(--glass-border)] bg-[rgba(255,255,255,0.06)] text-[var(--color-text-primary)]"
+          >
+            Honest status →
+          </a>
+          <a
+            href={getLocalizedPath('/learn/language', locale)}
+            class="inline-flex items-center justify-center rounded-full px-[1.3rem] py-[0.75rem] text-[0.93rem] font-[650] transition-all hover:-translate-y-px border border-[var(--glass-border)] bg-[rgba(255,255,255,0.06)] text-[var(--color-text-primary)]"
+          >
+            Language guide (docs) →
+          </a>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
 </BaseLayout>
 
 <style>
-  .language-hero {
-    padding-top: clamp(4.5rem, 8vw, 6.5rem);
-  }
-
-  .hero-inner {
-    max-width: 760px;
+  .language-shell {
     display: grid;
-    gap: 1rem;
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 100vh;
   }
 
-  .hero-inner h1 {
-    font-size: clamp(2.2rem, 5.7vw, 4.4rem);
-  }
-
-  .hero-inner p {
-    color: var(--color-text-secondary);
-    font-size: clamp(1rem, 2.4vw, 1.2rem);
-    max-width: 60ch;
-  }
-
-  .hero-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.7rem;
-  }
-
-  .pillar-grid {
-    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  }
-
-  .pillar-card {
-    border-radius: var(--radius-xl);
-    padding: 1.15rem;
-    display: grid;
-    gap: 0.55rem;
-  }
-
-  .pillar-card h3 {
-    font-size: 1.22rem;
-  }
-
-  .pillar-card p {
-    color: var(--color-text-secondary);
-    font-size: 0.95rem;
-  }
-
-  .sample-grid {
-    display: grid;
-    gap: 1rem;
-  }
-
-  .sample-card,
-  .code-card {
-    border-radius: var(--radius-xl);
-    padding: 1.1rem;
-  }
-
-  @media (min-width: 960px) {
-    .sample-grid {
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
-      align-items: stretch;
+  @media (min-width: 1100px) {
+    .language-shell {
+      grid-template-columns: 14rem minmax(0, 1fr);
+      align-items: start;
     }
   }
 
-  .flow-section {
-    display: grid;
-    gap: 2rem;
-    align-items: center;
+  /* TOC */
+  .language-toc {
+    display: none;
   }
 
-  .flow-label {
-    display: grid;
-    gap: 0.6rem;
-  }
-
-  @media (min-width: 860px) {
-    .flow-section {
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  @media (min-width: 1100px) {
+    .language-toc {
+      display: block;
+      position: sticky;
+      top: 5rem;
+      padding: 2rem 1.2rem 2rem 1rem;
+      height: fit-content;
+      border-right: 1px solid var(--glass-border);
     }
+  }
+
+  .toc-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--color-text-tertiary);
+    margin-bottom: 0.65rem;
+  }
+
+  .toc-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: 0.2rem;
+  }
+
+  .toc-link {
+    display: block;
+    font-size: 0.85rem;
+    color: var(--color-text-secondary);
+    padding: 0.28rem 0.5rem;
+    border-radius: var(--radius-md);
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .toc-link:hover {
+    color: var(--color-text-primary);
+    background: color-mix(in srgb, var(--color-text-primary) 7%, transparent);
+  }
+
+  .toc-divider {
+    height: 1px;
+    background: var(--glass-border);
+    margin: 0.9rem 0;
+  }
+
+  .toc-meta {
+    display: grid;
+    gap: 0.2rem;
+  }
+
+  .toc-proof-link {
+    font-size: 0.82rem;
+    color: var(--color-accent-gold-soft);
+    padding: 0.2rem 0.5rem;
+    display: block;
+    transition: opacity var(--transition-fast);
+  }
+
+  .toc-proof-link:hover {
+    opacity: 0.8;
+  }
+
+  /* Main content */
+  .language-main {
+    min-width: 0;
+  }
+
+  .language-main .section-shell {
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .language-main .section-shell > * {
+    padding-left: clamp(1rem, 5vw, 2.5rem);
+    padding-right: clamp(1rem, 5vw, 2.5rem);
   }
 </style>
+
+<script>
+  /* Highlight active TOC entry based on scroll position */
+  const tocLinks = document.querySelectorAll<HTMLAnchorElement>('.toc-link');
+  const sections = ['epistemic-types', 'effects', 'compiler', 'runtime'].map(
+    (id) => document.getElementById(id)
+  ).filter(Boolean) as HTMLElement[];
+
+  function updateToc() {
+    let active = sections[0];
+    for (const section of sections) {
+      if (section.getBoundingClientRect().top <= 100) active = section;
+    }
+    tocLinks.forEach((link) => {
+      const matches = link.getAttribute('href') === `#${active?.id}`;
+      link.style.color = matches ? 'var(--color-text-primary)' : '';
+      link.style.background = matches
+        ? 'color-mix(in srgb, var(--color-accent-gold) 12%, transparent)'
+        : '';
+    });
+  }
+
+  window.addEventListener('scroll', updateToc, { passive: true });
+  updateToc();
+</script>

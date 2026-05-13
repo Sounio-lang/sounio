@@ -7,63 +7,69 @@ module native::reloc
 use native::encode::{CodeBuffer, low8}
 
 // Relocation kinds
-struct RelocKind {
-    kind_code: i64,   // 1=rel32 function call, 2=RIP-relative rodata, 3=RIP-relative .data
+pub struct RelocKind {
+    pub kind_code: i64,   // 1=rel32 function call, 2=RIP-relative rodata, 3=RIP-relative .data
 }
 
-fn reloc_rel32() -> RelocKind {
+pub fn reloc_rel32() -> RelocKind {
     RelocKind { kind_code: 1 }
 }
 
-fn reloc_rip_rel32() -> RelocKind {
+pub fn reloc_rip_rel32() -> RelocKind {
     RelocKind { kind_code: 2 }
 }
 
-fn reloc_data_rel32() -> RelocKind {
+pub fn reloc_data_rel32() -> RelocKind {
     RelocKind { kind_code: 3 }
 }
 
 // Relocation target types
-struct RelocTarget {
-    is_function: i64,     // 1 if function, 0 if data label
-    target_index: i64,    // Function index or data offset
+pub struct RelocTarget {
+    pub is_function: i64,     // 1 if function, 0 if data label
+    pub target_index: i64,    // Function index or data offset
 }
 
-fn reloc_target_function(func_index: i64) -> RelocTarget {
+pub fn reloc_target_function(func_index: i64) -> RelocTarget {
     RelocTarget { is_function: 1, target_index: func_index }
 }
 
-fn reloc_target_data(data_offset: i64) -> RelocTarget {
+pub fn reloc_target_data(data_offset: i64) -> RelocTarget {
     RelocTarget { is_function: 0, target_index: data_offset }
 }
 
 // Single relocation entry
-struct Relocation {
-    offset: i64,          // Code buffer position to patch
-    target: RelocTarget,  // What to patch
-    kind: RelocKind,      // How to encode the patch
+pub struct Relocation {
+    pub offset: i64,          // Code buffer position to patch
+    pub target: RelocTarget,  // What to patch
+    pub kind: RelocKind,      // How to encode the patch
+    pub flat_kind_code: i64,
+    pub flat_is_function: i64,
+    pub flat_target_index: i64,
 }
 
 // Relocation table (fixed-size array for bootstrap)
-struct RelocationTable {
-    entries: [Relocation; 256],
-    count: i64,
+pub struct RelocationTable {
+    pub entries: [Relocation; 4096],
+    pub count: i64,
 }
 
-fn reloc_table_new() -> RelocationTable {
+pub fn reloc_table_new() -> RelocationTable {
     var out: RelocationTable
     out.count = 0
     out
 }
 
 // Add a call relocation (rel32)
-fn add_call_reloc(table: RelocationTable, offset: i64, target_func: i64) -> RelocationTable with Mut, Panic {
+pub fn add_call_reloc(table: RelocationTable, offset: i64, target_func: i64) -> RelocationTable with Mut, Panic {
     var t = table
     if t.count < 256 {
         t.entries[t.count as usize] = Relocation {
             offset: offset,
             target: reloc_target_function(target_func),
             kind: reloc_rel32(),
+            flat_kind_code: 1,
+            flat_is_function: 1,
+            flat_target_index: target_func,
         }
         t.count = t.count + 1
     }
@@ -71,13 +77,16 @@ fn add_call_reloc(table: RelocationTable, offset: i64, target_func: i64) -> Relo
 }
 
 // Add a data relocation (rip-relative)
-fn add_data_reloc(table: RelocationTable, offset: i64, data_offset: i64) -> RelocationTable with Mut, Panic {
+pub fn add_data_reloc(table: RelocationTable, offset: i64, data_offset: i64) -> RelocationTable with Mut, Panic {
     var t = table
     if t.count < 256 {
         t.entries[t.count as usize] = Relocation {
             offset: offset,
             target: reloc_target_data(data_offset),
             kind: reloc_rip_rel32(),
+            flat_kind_code: 2,
+            flat_is_function: 0,
+            flat_target_index: data_offset,
         }
         t.count = t.count + 1
     }
@@ -85,13 +94,16 @@ fn add_data_reloc(table: RelocationTable, offset: i64, data_offset: i64) -> Relo
 }
 
 // Add RIP-relative relocation for string literals
-fn add_rip_reloc(table: RelocationTable, lea_disp_offset: i64, rodata_offset: i64) -> RelocationTable with Mut, Panic {
+pub fn add_rip_reloc(table: RelocationTable, lea_disp_offset: i64, rodata_offset: i64) -> RelocationTable with Mut, Panic {
     var t = table
     if t.count < 256 {
         t.entries[t.count as usize] = Relocation {
             offset: lea_disp_offset,
             target: reloc_target_data(rodata_offset),
             kind: reloc_rip_rel32(),
+            flat_kind_code: 2,
+            flat_is_function: 0,
+            flat_target_index: rodata_offset,
         }
         t.count = t.count + 1
     }
@@ -99,13 +111,16 @@ fn add_rip_reloc(table: RelocationTable, lea_disp_offset: i64, rodata_offset: i6
 }
 
 // Add RIP-relative relocation targeting .data section (profiling counters)
-fn add_data_section_reloc(table: RelocationTable, disp_offset: i64, data_offset: i64) -> RelocationTable with Mut, Panic {
+pub fn add_data_section_reloc(table: RelocationTable, disp_offset: i64, data_offset: i64) -> RelocationTable with Mut, Panic {
     var t = table
     if t.count < 256 {
         t.entries[t.count as usize] = Relocation {
             offset: disp_offset,
             target: reloc_target_data(data_offset),
             kind: reloc_data_rel32(),
+            flat_kind_code: 3,
+            flat_is_function: 0,
+            flat_target_index: data_offset,
         }
         t.count = t.count + 1
     }
@@ -113,10 +128,10 @@ fn add_data_section_reloc(table: RelocationTable, disp_offset: i64, data_offset:
 }
 
 // Apply all relocations (patch code buffer)
-fn apply_relocations(
+pub fn apply_relocations(
     table: RelocationTable,
     buf: CodeBuffer,
-    fn_offsets: [i64; 256],
+    fn_offsets: [i64; 2048],
     fn_count: i64,
     rodata_file_offset: i64,
     data_file_offset: i64
@@ -166,18 +181,18 @@ fn apply_relocations(
 // ============================================================================
 
 // Raw byte buffer for .rela.text — 256 Elf64_Rela entries max (24 bytes each = 6144 bytes)
-struct RelaSection {
-    bytes: [i8; 8192],
-    len: i64,
+pub struct RelaSection {
+    pub bytes: [i8; 8192],
+    pub len: i64,
 }
 
-fn rela_section_new() -> RelaSection {
+pub fn rela_section_new() -> RelaSection {
     var out: RelaSection
     out.len = 0
     out
 }
 
-fn rela_emit_byte(rs: RelaSection, b: i64) -> RelaSection with Mut, Panic, Div {
+pub fn rela_emit_byte(rs: RelaSection, b: i64) -> RelaSection with Mut, Panic, Div {
     var r = rs
     if r.len < 8192 {
         r.bytes[r.len as usize] = low8(b) as i8
@@ -186,7 +201,7 @@ fn rela_emit_byte(rs: RelaSection, b: i64) -> RelaSection with Mut, Panic, Div {
     r
 }
 
-fn rela_emit_i64_le(rs: RelaSection, v: i64) -> RelaSection with Mut, Panic, Div {
+pub fn rela_emit_i64_le(rs: RelaSection, v: i64) -> RelaSection with Mut, Panic, Div {
     var r = rs
     r = rela_emit_byte(r, low8(v))
     r = rela_emit_byte(r, low8(v >> 8))
@@ -208,7 +223,7 @@ fn rela_emit_i64_le(rs: RelaSection, v: i64) -> RelaSection with Mut, Panic, Div
 //
 // R_X86_64_PLT32=4 for function calls (addend=-4)
 // R_X86_64_PC32=2  for RIP-relative data refs (addend=target_offset-4)
-fn collect_rela_section(
+pub fn collect_rela_section(
     table: RelocationTable,
     sym_first_fn: i64,
     sym_rodata: i64,
@@ -219,9 +234,9 @@ fn collect_rela_section(
     while i < table.count {
         let reloc = table.entries[i as usize]
         let r_offset = reloc.offset
-        let r_type: i64
-        let r_sym: i64
-        let r_addend: i64
+        var r_type: i64 = 0
+        var r_sym: i64 = 0
+        var r_addend: i64 = 0
         if reloc.kind.kind_code == 1 {
             // Function call: R_X86_64_PLT32
             r_type = 4
@@ -249,7 +264,7 @@ fn collect_rela_section(
 }
 
 // Patch a u32 at the given offset
-fn patch_u32_le(buf: CodeBuffer, offset: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+pub fn patch_u32_le(buf: CodeBuffer, offset: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
     if offset >= 0 && offset + 4 <= b.len {
         b.bytes[offset as usize] = low8(val) as i8
@@ -261,28 +276,28 @@ fn patch_u32_le(buf: CodeBuffer, offset: i64, val: i64) -> CodeBuffer with Mut, 
 }
 
 // Sprint 108: extern "C" fn call relocations
-struct ExternReloc {
-    offset: i64,
-    sym_buf: [i8; 128],
-    sym_len: i64,
+pub struct ExternReloc {
+    pub offset: i64,
+    pub sym_buf: [i8; 128],
+    pub sym_len: i64,
 }
 
-struct ExternRelocTable {
-    entries: [ExternReloc; 128],
-    count: i64,
+pub struct ExternRelocTable {
+    pub entries: [ExternReloc; 128],
+    pub count: i64,
 }
 
-fn extern_reloc_empty_entry() -> ExternReloc {
+pub fn extern_reloc_empty_entry() -> ExternReloc {
     ExternReloc { offset: 0, sym_buf: [0; 128], sym_len: 0 }
 }
 
-fn extern_reloc_table_new() -> ExternRelocTable {
+pub fn extern_reloc_table_new() -> ExternRelocTable {
     var out: ExternRelocTable
     out.count = 0
     out
 }
 
-fn add_extern_reloc(table: &! ExternRelocTable, offset: i64, name_buf: [i8; 128], name_len: i64) with Mut, Panic {
+pub fn add_extern_reloc(table: &! ExternRelocTable, offset: i64, name_buf: [i8; 128], name_len: i64) with Mut, Panic {
     if (*table).count < 128 {
         let idx = (*table).count
         (*table).entries[idx as usize] = ExternReloc { offset: offset, sym_buf: name_buf, sym_len: name_len }

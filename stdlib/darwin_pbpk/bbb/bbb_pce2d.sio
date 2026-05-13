@@ -1,0 +1,240 @@
+// darwin_pbpk/bbb/bbb_pce2d.sio — 2-D PCE + Sobol indices
+//
+// Tensor-product Gauss-Hermite PCE over the two transporter inputs
+// (kpuu_brain, ps_bbb) — together 78.5% of the combined variance per
+// the first-order GUM budget.  Order-2 bivariate He basis:
+//
+//   Ψ_00 = 1
+//   Ψ_10 = He_1(ξ₁)         — kpuu_brain linear
+//   Ψ_01 = He_1(ξ₂)         — ps_bbb linear
+//   Ψ_20 = He_2(ξ₁)         — kpuu_brain quadratic
+//   Ψ_11 = He_1(ξ₁) He_1(ξ₂) — interaction
+//   Ψ_02 = He_2(ξ₂)         — ps_bbb quadratic
+//
+// Under probabilists' normalisation ⟨Ψ_αβ, Ψ_αβ⟩_N = α! β!, so the
+// variance decomposition is
+//
+//   Var(Y)  = Σ_{α+β ≥ 1} c_αβ²  α!  β!
+//
+// and the Sobol indices follow directly:
+//
+//   V_1    = c_10² · 1 + c_20² · 2            (kpuu_brain alone)
+//   V_2    = c_01² · 1 + c_02² · 2            (ps_bbb alone)
+//   V_12   = c_11² · 1 · 1                    (pairwise interaction)
+//
+//   S_1  = V_1 / V_total,  S_2  = V_2 / V_total,  S_12 = V_12 / V_total
+//   S_T1 = S_1 + S_12       (total-effect of kpuu_brain)
+//   S_T2 = S_2 + S_12       (total-effect of ps_bbb)
+//
+// Cost: 8×8 = 64 coupled-solver evaluations.
+
+use darwin_pbpk::bbb::bbb_core::{BBBParams}
+use darwin_pbpk::bbb::bbb_coupled::{bbb_coupled_run}
+use darwin_pbpk::bbb::bbb_pce::*
+use darwin_pbpk::tsit5_pbpk14::{PBPKParams14}
+
+// ----------------------------------------------------------------------------
+// Bivariate He basis
+// ----------------------------------------------------------------------------
+
+fn pce2_he(n: i32, x: f64) -> f64 with Mut, Div, Panic {
+    if n == 0 { return 1.0 }
+    if n == 1 { return x }
+    if n == 2 { return x * x - 1.0 }
+    // Higher orders only needed if we extend beyond total order 2.
+    var h_prev = 1.0
+    var h_curr = x
+    var k = 2
+    while k <= n {
+        let h_next = x * h_curr - ((k - 1) as f64) * h_prev
+        h_prev = h_curr
+        h_curr = h_next
+        k = k + 1
+    }
+    h_curr
+}
+
+fn pce2_sqrt(x: f64) -> f64 with Div, Panic, Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 18 { y = (y + x / y) * 0.5; i = i + 1 }
+    y
+}
+
+// ----------------------------------------------------------------------------
+// 2-D PCE result container
+// ----------------------------------------------------------------------------
+
+pub struct BBBPCE2D {
+    // Input distributions (normal)
+    mu1: f64,
+    sd1: f64,
+    mu2: f64,
+    sd2: f64,
+    // Six PCE coefficients on the order-2 bivariate He basis.
+    c00: f64,
+    c10: f64,    // kpuu_brain linear
+    c01: f64,    // ps_bbb     linear
+    c20: f64,    // kpuu_brain quadratic
+    c11: f64,    // interaction
+    c02: f64,    // ps_bbb     quadratic
+
+    // Derived statistics.
+    mean:     f64,
+    variance: f64,
+    stddev:   f64,
+
+    // Sobol indices.
+    v1:       f64,
+    v2:       f64,
+    v12:      f64,
+    s1:       f64,      // first-order, kpuu_brain
+    s2:       f64,      // first-order, ps_bbb
+    s12:      f64,      // interaction share
+    s_t1:     f64,      // total-effect, kpuu_brain = s1 + s12
+    s_t2:     f64,      // total-effect, ps_bbb     = s2 + s12
+
+    // Share captured by the linear (first-order He) terms alone —
+    // complement to the higher-order + interaction terms.
+    linear_share: f64,
+}
+
+fn bbb_pce2d_zero() -> BBBPCE2D {
+    BBBPCE2D {
+        mu1: 0.0, sd1: 0.0, mu2: 0.0, sd2: 0.0,
+        c00: 0.0, c10: 0.0, c01: 0.0,
+        c20: 0.0, c11: 0.0, c02: 0.0,
+        mean: 0.0, variance: 0.0, stddev: 0.0,
+        v1: 0.0, v2: 0.0, v12: 0.0,
+        s1: 0.0, s2: 0.0, s12: 0.0, s_t1: 0.0, s_t2: 0.0,
+        linear_share: 0.0,
+    }
+}
+
+// Build a 2-D PCE on (kpuu_brain, ps_bbb) for the Kpuu_AUC endpoint.
+// floor1, floor2 prevent negative parameter draws from the outer
+// Gauss-Hermite nodes.
+pub fn bbb_pce2d_build_kpuu_auc(
+    sys_prm:     PBPKParams14,
+    base_bbb:    BBBParams,
+    mu1: f64, sd1: f64, floor1: f64,
+    mu2: f64, sd2: f64, floor2: f64,
+    dose_mg:     f64,
+    checkpoints: [f64; 32],
+    n_points:    i32,
+    bbb_dt:      f64
+) -> BBBPCE2D with Mut, Div, Panic {
+    var pce = bbb_pce2d_zero()
+    pce.mu1 = mu1; pce.sd1 = sd1
+    pce.mu2 = mu2; pce.sd2 = sd2
+
+    // Accumulate quadrature sums for each coefficient.
+    var s_00 = 0.0
+    var s_10 = 0.0
+    var s_01 = 0.0
+    var s_20 = 0.0
+    var s_11 = 0.0
+    var s_02 = 0.0
+
+    var i: i32 = 0
+    while i < 8 {
+        let xi1 = bbb_pce_node_at(i)
+        let w1  = bbb_pce_wt_at(i)
+        var p1 = mu1 + sd1 * xi1
+        if p1 < floor1 { p1 = floor1 }
+
+        var j: i32 = 0
+        while j < 8 {
+            let xi2 = bbb_pce_node_at(j)
+            let w2  = bbb_pce_wt_at(j)
+            var p2 = mu2 + sd2 * xi2
+            if p2 < floor2 { p2 = floor2 }
+
+            var bbb = base_bbb
+            bbb.kpuu_brain = p1
+            bbb.ps_bbb     = p2
+            let trace = bbb_coupled_run(sys_prm, bbb, dose_mg, checkpoints, n_points, bbb_dt)
+            let y = trace.kpuu_auc
+            let w = w1 * w2
+
+            s_00 = s_00 + w * y
+            s_10 = s_10 + w * y * pce2_he(1, xi1)
+            s_01 = s_01 + w * y * pce2_he(1, xi2)
+            s_20 = s_20 + w * y * pce2_he(2, xi1)
+            s_11 = s_11 + w * y * pce2_he(1, xi1) * pce2_he(1, xi2)
+            s_02 = s_02 + w * y * pce2_he(2, xi2)
+
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // c_αβ = s_αβ / (α! β!)  — under probabilists' norm ⟨Ψ_αβ, Ψ_αβ⟩ = α! β!.
+    pce.c00 = s_00
+    pce.c10 = s_10
+    pce.c01 = s_01
+    pce.c20 = s_20 / 2.0
+    pce.c11 = s_11
+    pce.c02 = s_02 / 2.0
+
+    // --- Variance decomposition ---
+    let v_10 = pce.c10 * pce.c10 * 1.0        // He_1⊗He_0: 1! · 0! = 1
+    let v_20 = pce.c20 * pce.c20 * 2.0        // He_2⊗He_0: 2! · 0! = 2
+    let v_01 = pce.c01 * pce.c01 * 1.0
+    let v_02 = pce.c02 * pce.c02 * 2.0
+    let v_11 = pce.c11 * pce.c11 * 1.0        // 1!·1! = 1
+    let v_1  = v_10 + v_20
+    let v_2  = v_01 + v_02
+    let v_12 = v_11
+    let total = v_1 + v_2 + v_12
+
+    pce.mean     = pce.c00
+    pce.variance = total
+    pce.stddev   = pce2_sqrt(total)
+    pce.v1  = v_1
+    pce.v2  = v_2
+    pce.v12 = v_12
+    if total > 0.0 {
+        pce.s1   = v_1 / total
+        pce.s2   = v_2 / total
+        pce.s12  = v_12 / total
+        pce.s_t1 = pce.s1 + pce.s12
+        pce.s_t2 = pce.s2 + pce.s12
+        pce.linear_share = (v_10 + v_01) / total
+    }
+
+    pce
+}
+
+// ----------------------------------------------------------------------------
+// Diagnostic print (human-readable)
+// ----------------------------------------------------------------------------
+
+pub fn bbb_pce2d_print(pce: BBBPCE2D) with IO, Mut, Panic, Div {
+    println("BBB PCE (2-D, order 2, tensor He basis, 8×8 Gauss-Hermite)")
+    print("  input 1 (kpuu_brain):  mu="); print_f64(pce.mu1)
+    print("  sd="); print_f64(pce.sd1); println("")
+    print("  input 2 (ps_bbb):      mu="); print_f64(pce.mu2)
+    print("  sd="); print_f64(pce.sd2); println("")
+    println("  coefficients:")
+    print("    c00 (mean)         = "); print_f64(pce.c00); println("")
+    print("    c10 (linear k_br)  = "); print_f64(pce.c10); println("")
+    print("    c01 (linear ps_bbb)= "); print_f64(pce.c01); println("")
+    print("    c20 (quadratic k)  = "); print_f64(pce.c20); println("")
+    print("    c11 (interaction)  = "); print_f64(pce.c11); println("")
+    print("    c02 (quadratic p)  = "); print_f64(pce.c02); println("")
+    println("  statistics:")
+    print("    E[Y]               = "); print_f64(pce.mean);      println("")
+    print("    u_c (stddev)       = "); print_f64(pce.stddev);    println("")
+    print("    linear-share       = "); print_f64(pce.linear_share); println("")
+    println("  Sobol (variance-based):")
+    print("    V_1  (kpuu_brain)  = "); print_f64(pce.v1);        println("")
+    print("    V_2  (ps_bbb)      = "); print_f64(pce.v2);        println("")
+    print("    V_12 (interaction) = "); print_f64(pce.v12);       println("")
+    print("    S_1                = "); print_f64(pce.s1);        println("")
+    print("    S_2                = "); print_f64(pce.s2);        println("")
+    print("    S_12 (interaction) = "); print_f64(pce.s12);       println("")
+    print("    S_T1 (total k_br)  = "); print_f64(pce.s_t1);      println("")
+    print("    S_T2 (total ps)    = "); print_f64(pce.s_t2);      println("")
+}

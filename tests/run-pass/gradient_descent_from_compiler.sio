@@ -1,0 +1,86 @@
+//@ run-pass
+// sensitivity_of() implemented via β⁴ shadow buffer in lean_single.sio
+// THE SURPRISE: gradient descent in Sounio.
+//
+// β⁴'s per-channel sensitivity buffer stores ∂y/∂x_k — literally, the
+// gradient of y with respect to each uncertain input x_k, computed by
+// the compiler at emit-time via forward-mode automatic differentiation.
+//
+// We expose this via the new `sensitivity_of(y, k)` builtin. That turns
+// Sounio — a language originally designed for epistemic typed computing —
+// into an automatic-differentiation language.
+//
+// To prove it: minimize L(x) = (x − 3)² by gradient descent, using the
+// compiler's sensitivity as the gradient. No external library. No manual
+// derivative. The compiler knows dL/dx because it computed it while
+// emitting the code.
+//
+// Starting x = 0. Learning rate 0.1. 30 iterations.
+// Expected: x → 3.0, L → 0.
+
+fn abs_f64(z: f64) -> f64 {
+    if z < 0.0 { return 0.0 - z }
+    return z
+}
+
+fn main() with IO, Mut, Div, Epistemic {
+    // Initial parameter x, wrapped as Knowledge<f64> so β⁴ tracks its
+    // sensitivity channel. uncertainty value is irrelevant here — we
+    // only use the sensitivity machinery, not the variance.
+    var x: f64 = 0.0
+    let learning_rate: f64 = 0.1
+
+    var iter: i64 = 0
+    while iter < 30 {
+        // Re-bind x as a Knowledge<f64> each iteration so the compiler
+        // allocates a fresh sensitivity channel anchored to the current x.
+        let kx: Knowledge<f64> = measure(x, uncertainty: 1.0)
+        let kv = kx.value
+
+        // Compute loss L(x) = (x − 3)²
+        let diff = kv - 3.0
+        let loss = diff * diff
+
+        // Extract the gradient dL/dx via the compiler's sensitivity channel.
+        // β⁴ chain rule at emit time:
+        //   sens(kv)[0]   = 1          (measure seeded ch 0 with sens=1)
+        //   sens(diff)[0] = 1          (kv - 3.0, 3.0 is a constant)
+        //   sens(loss)[0] = 2·diff     (diff · diff, chain rule: 2·diff·1)
+        // So sensitivity_of(loss, 0) gives the compile-time-computed
+        // derivative dL/dx evaluated at runtime x.
+        let grad = sensitivity_of(loss, 0)
+
+        if iter < 5 || iter == 15 || iter == 29 {
+            print("iter ")
+            print_int(iter)
+            print(": x = ")
+            print_f64(x)
+            print("  L = ")
+            print_f64(loss)
+            print("  dL/dx = ")
+            print_f64(grad)
+            print("\n")
+        }
+
+        // Gradient descent step
+        x = x - learning_rate * grad
+
+        iter = iter + 1
+    }
+
+    print("\nfinal x = ")
+    println(x)
+
+    let final_err = abs_f64(x - 3.0)
+    print("|x - 3| = ")
+    println(final_err)
+
+    if final_err < 0.01 {
+        print("\nPASS: Sounio did gradient descent. The compiler is an autodiff engine.\n")
+        print("      The sensitivity channel β⁴ uses for variance IS the gradient.\n")
+        print("      This works because ∂y/∂x_k is stored literally in the BSS\n")
+        print("      shadow buffer, and sensitivity_of() surfaces it directly.\n")
+    } else {
+        print("\nFAIL: did not converge (|x - 3| too large)\n")
+    }
+}

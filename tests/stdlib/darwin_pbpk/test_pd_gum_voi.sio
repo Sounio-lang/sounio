@@ -1,0 +1,79 @@
+//@ run-pass
+// @ timeout: 60
+//@ expect-stdout: PD_GUM_VOI_OK
+//
+// First empirical run of the 10-D PD VoI ranking on rapamycin priors.
+//
+// Endpoint: mTOR inhibition AUC (the clinically meaningful PD output),
+// over an oral Rapamune-like dose through the absorption → PBPK → BBB
+// → Hill pipeline.
+//
+// Invariants (same as bbb_voi, extended to the 10-D prior set):
+//   1. VoI_total > 0, each VoI non-negative.
+//   2. VoI_i = share_i · (1 − conf_i) exactly.
+//   3. rank[0] matches top_idx.
+//
+// This test does NOT pin the ranking yet — it prints it so we can see
+// empirically which of {ps_bbb, ps_mem, kpuu_brain, kpuu_cell, fu_plasma,
+// fu_isf, fu_icf, emax, ec50, hill_n} is the top VoI target under the
+// inhibition-AUC endpoint. That informs the next prior-refinement commit.
+
+use darwin_pbpk::absorption::{rapamycin_absorption_params}
+use darwin_pbpk::bbb::bbb_priors::{bbb_rapamycin_priors}
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::epistemic_pbpk14::{ep14_rapamycin_params}
+use darwin_pbpk::pd::hill_mtor::{rapamycin_hill_params, rapamycin_hill_priors}
+use darwin_pbpk::pd::pd_gum::*
+
+fn pv_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let sys_prm = ep14_rapamycin_params()
+    let bbb_prm = bbb_rapamycin_params()
+    let abs_prm = rapamycin_absorption_params()
+    let hp      = rapamycin_hill_params()
+    let bbb_pri = bbb_rapamycin_priors()
+    let hp_pri  = rapamycin_hill_priors()
+
+    let priors = pd_priors_from_bbb_and_hill(bbb_pri, hp_pri)
+
+    // Checkpoint grid — coarser than bbb_voi but still covers absorption
+    // peak (2–6h) and terminal decay (up to 168h).
+    var cp: [f64; 32] = [0.0; 32]
+    cp[0]  = 0.0;   cp[1]  = 0.5;  cp[2]  = 1.0;  cp[3]  = 2.0
+    cp[4]  = 4.0;   cp[5]  = 6.0;  cp[6]  = 8.0;  cp[7]  = 12.0
+    cp[8]  = 24.0;  cp[9]  = 48.0; cp[10] = 72.0; cp[11] = 120.0
+    let n_points = 12
+    let dose_mg  = 2.0     // Rapamune 2 mg oral
+    let bbb_dt   = 0.05    // coarser for finite-diff budget; endpoint is AUC
+
+    let budget = pd_gum_budget(sys_prm, bbb_prm, abs_prm, hp, priors,
+                               dose_mg, cp, n_points, bbb_dt)
+    let voi = pd_voi_from_gum(budget)
+
+    // --- 1. Formula sanity ---
+    if voi.voi_total <= 0.0 { return 1 }
+    var i: i32 = 0
+    while i < voi.n_rows {
+        let idx = i as usize
+        if voi.voi[idx] < 0.0 { return 2 }
+        let expected = voi.sobol[idx] * (1.0 - voi.confidence[idx])
+        if pv_abs(voi.voi[idx] - expected) > 1.0e-9 { return 3 }
+        i = i + 1
+    }
+
+    // --- 2. rank[0] matches top_idx ---
+    let top_rank_i = voi.rank[0]
+    if voi.param_idx[top_rank_i as usize] != voi.top_idx { return 4 }
+
+    // --- 3. Total stddev is positive and finite ---
+    if budget.y_stddev <= 0.0 { return 5 }
+
+    pd_gum_print_budget(budget)
+    println("")
+    pd_voi_print(voi)
+    println("PD_GUM_VOI_OK")
+    0
+}

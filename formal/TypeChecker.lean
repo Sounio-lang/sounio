@@ -47,7 +47,7 @@ inductive Ty : Type where
   | Option  : Ty → Ty
   -- Type variable (used during unification)
   | Var     : Nat → Ty
-  deriving Repr, DecidableEq
+  deriving Repr
 
 -- ---------------------------------------------------------------------------
 -- Effect rows (simplified)
@@ -243,21 +243,22 @@ theorem knowledge_sub_trans (t1 t2 t3 : Ty)
 /-- Helper inversion lemma: if `Knowledge t1 ≤ t` then `t` is of the form
     `Knowledge t2` with `t1 ≤ t2`.  Proved by induction on the derivation of
     `Sub (Ty.Knowledge t1) t`. -/
-private lemma sub_knowledge_inv (t1 : Ty) (t : Ty)
+private theorem sub_knowledge_inv (t1 : Ty) (t : Ty)
     (h : Sub (Ty.Knowledge t1) t) : ∃ t2, t = Ty.Knowledge t2 ∧ Sub t1 t2 := by
-  induction h with
-  | refl t =>
-    -- t = Knowledge t1
-    exact ⟨t1, rfl, Sub.refl t1⟩
+  generalize eq : Ty.Knowledge t1 = k at h
+  induction h generalizing t1 with
+  | refl a =>
+      rw [show a = Ty.Knowledge t1 by rw [←eq]]
+      exact ⟨t1, rfl, Sub.refl t1⟩
   | trans a b c hab hbc ih_ab ih_bc =>
-    -- a = Knowledge t1; obtain b = Knowledge t' with t1 ≤ t'
-    obtain ⟨t', rfl, ht'⟩ := ih_ab
-    -- now hbc : Sub (Knowledge t') c; use ih_bc
-    obtain ⟨t'', rfl, ht''⟩ := ih_bc
-    exact ⟨t'', rfl, Sub.trans t1 t' t'' ht' ht''⟩
+      rw [←eq] at hab
+      obtain ⟨t', rfl, ht'⟩ := ih_ab t1 eq
+      obtain ⟨t'', rfl, ht''⟩ := ih_bc t' (Eq.symm rfl)
+      exact ⟨t'', rfl, Sub.trans t1 t' t'' ht' ht''⟩
   | knowledge_cov t1' t2' h' =>
-    -- Ty.Knowledge t1' ≤ Ty.Knowledge t2'; here t1' = t1
-    exact ⟨t2', rfl, h'⟩
+      injection eq with eq_t1
+      rw [eq_t1]
+      exact ⟨t2', rfl, h'⟩
   | ref_cov t1' t2' h' =>
     -- LHS is Ty.Ref t1', not Ty.Knowledge — impossible
     contradiction
@@ -399,14 +400,16 @@ def isValue : Expr → Bool
     expression witness, deferring the full step relation to Phase 8.2. -/
 theorem progress (e : Expr) (t : Ty) (h : HasType [] e t) :
     isValue e = true ∨ ∃ e', e ≠ e' := by
-  cases h with
+  induction h with
   | t_unit        => left; rfl
   | t_bool _      => left; rfl
   | t_int _       => left; rfl
   | t_float _     => left; rfl
-  | t_var x t hm  => exact absurd hm (List.not_mem_nil _)
-  | t_sub _ _     => right; exact ⟨_, fun heq => absurd heq (by simp)⟩
-  | t_annot _     => right; exact ⟨_, fun heq => absurd heq (by simp)⟩
+  | t_var x t hm  => exact absurd hm List.not_mem_nil
+  | t_sub _ _ ih     => exact ih
+  | @t_annot e_inner _ ih =>
+      right
+      exact ⟨Expr.val Val.Unit, by intro h_eq; injection h_eq⟩
 
 /-- **preservation** (stub):
     If a well-typed expression steps, the result has the same type.
@@ -460,22 +463,47 @@ inductive Step : Expr → Expr → Prop where
 -- ---------------------------------------------------------------------------
 
 /-- A closed variable cannot be well-typed. -/
-private def no_closed_var (x : String) (t : Ty)
+private theorem no_closed_var' (x : String) {Γ e t}
+    (h : HasType Γ e t) (hΓ : Γ = []) (he : e = Expr.var x) : False := by
+  induction h with
+  | t_unit => injection he
+  | t_bool b => injection he
+  | t_int n => injection he
+  | t_float f => injection he
+  | t_var _ _ hmem => rw [hΓ] at hmem; exact absurd hmem List.not_mem_nil
+  | t_annot _ _ => injection he
+  | t_sub _ _ ih => exact ih he
+
+private theorem no_closed_var (x : String) (t : Ty)
     (h : HasType [] (Expr.var x) t) : False :=
-  match h with
-  | HasType.t_var _ _ hmem => absurd hmem (List.not_mem_nil _)
-  | HasType.t_sub he _     => no_closed_var x _ he
+  no_closed_var' x h rfl rfl
 
 /-- Inversion: HasType Γ (annot e t) T implies HasType Γ e t and Sub t T. -/
-private def annot_inv
+private theorem annot_inv' {Γ e_annot T}
+    (h : HasType Γ e_annot T) :
+    ∀ e t, e_annot = Expr.annot e t → HasType Γ e t ∧ Sub t T := by
+  intro e' t' heq
+  induction h with
+  | t_unit => injection heq
+  | t_bool b => injection heq
+  | t_int n => injection heq
+  | t_float f => injection heq
+  | t_var _ _ _ => injection heq
+  | t_annot ht ih =>
+      injection heq with he1 ht'
+      rw [he1, ht'] at ht
+      rw [ht']
+      exact ⟨ht, Sub.refl t'⟩
+  | t_sub ht hsub ih =>
+      rw [heq] at ht
+      let ⟨h_e, h_s⟩ := ih heq
+      exact ⟨h_e, Sub.trans t' _ _ h_s hsub⟩
+
+private theorem annot_inv
     (Γ : List (String × Ty)) (e : Expr) (t T : Ty)
     (h : HasType Γ (Expr.annot e t) T) :
     HasType Γ e t ∧ Sub t T :=
-  match h with
-  | HasType.t_annot he    => ⟨he, Sub.refl t⟩
-  | HasType.t_sub he hsub =>
-      let ⟨h_e, h_s⟩ := annot_inv Γ e t _ he
-      ⟨h_e, Sub.trans t _ T h_s hsub⟩
+  annot_inv' h e t rfl
 
 -- ---------------------------------------------------------------------------
 -- Substitution preserves typing
@@ -498,8 +526,8 @@ theorem subst_preserves_type
       rw [List.mem_cons] at hmem
       cases hmem with
       | inl h =>
-          have hyx  : y  = x := congr_arg Prod.fst h
-          have htyS : ty = S := congr_arg Prod.snd h
+          have hyx  : y  = x := congrArg Prod.fst h
+          have htyS : ty = S := congrArg Prod.snd h
           subst hyx; subst htyS; simp [beq_iff_eq]; exact hv
       | inr h =>
           have hne : y ≠ x := hfresh y ty h
@@ -554,7 +582,7 @@ theorem progress_real (e : Expr) (t : Ty) (h : HasType [] e t) :
   | t_bool _       => left; rfl
   | t_int  _       => left; rfl
   | t_float _      => left; rfl
-  | t_var x ty hmem => exact absurd hmem (List.not_mem_nil _)
+  | t_var x ty hmem => exact absurd hmem List.not_mem_nil
   | t_sub _ _ ih   => exact ih
   | t_annot he ih =>
       right

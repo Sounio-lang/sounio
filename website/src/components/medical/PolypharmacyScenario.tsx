@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 
 const DRUGS = [
   { id: 'warfarin', name: 'Warfarin', type: 'Substrate', pathway: 'CYP2C9', risk: 'High', index: 'Narrow' },

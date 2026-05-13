@@ -3,6 +3,32 @@
 // Handles: let bindings, var declarations, expression statements,
 // assignment statements, and blocks.
 
+use parser::ast::*
+use lexer::token::*
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_take_expr_box, parser_advance, parser_assign_op_code, error_expr}
+
+// Lean compiler safety: keep assignment targets out of the local frame while
+// recursively parsing the RHS. Holding both Boxes locally corrupts some nested
+// parenthesized RHS parses in the split compiler path.
+var LAST_ASSIGN_TARGET: Option<Box<Expr>> = None
+
+fn stmt_store_assign_target(target: Box<Expr>) with Mut {
+    LAST_ASSIGN_TARGET = Some(target)
+}
+
+fn stmt_take_assign_target() -> Box<Expr> with Mut, Alloc {
+    match LAST_ASSIGN_TARGET {
+        Some(target) => {
+            LAST_ASSIGN_TARGET = None
+            target
+        },
+        None => {
+            LAST_ASSIGN_TARGET = None
+            Box::new(error_expr(Span { file_id: 0, start: 0, end: 0 }))
+        },
+    }
+}
+
 impl Parser {
     // ============================================================
     // Block: { stmt; stmt; expr }
@@ -16,8 +42,8 @@ impl Parser {
         // skipping nested block bodies in linear time.
         if PARSER_FAST_SKIP_BLOCKS {
             var depth: i64 = 1
-            while depth > 0 && !p.at_eof() {
-                let k = p.peek()
+            while depth > 0 && !parser_at_eof(p) {
+                let k = parser_peek(p)
                 if k == TokenKind::LBrace {
                     depth = depth + 1
                 } else if k == TokenKind::RBrace {
@@ -33,7 +59,7 @@ impl Parser {
         // Build in reverse for O(1) cons, reverse once at block end.
         var rev_stmts_opt: Option<Box<StmtList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             let pair = p.parse_stmt()
             p = pair.0
             let stmt = pair.1
@@ -41,7 +67,7 @@ impl Parser {
             rev_stmts_opt = Some(Box::new(StmtList { head: stmt, tail: rev_stmts_opt }))
 
             // Skip optional semicolons between statements
-            while p.peek() == TokenKind::Semi {
+            while parser_peek(p) == TokenKind::Semi {
                 p = p.advance()
             }
         }
@@ -86,9 +112,8 @@ impl Parser {
 
         // = expr
         p = p.expect(TokenKind::Eq)
-        let pair2 = p.parse_expr()
-        p = pair2.0
-        let init_expr = pair2.1
+        p = p.parse_expr()
+        let init_box = parser_take_expr_box()
 
         let span = p.span_from(start)
         (p, Stmt {
@@ -96,7 +121,7 @@ impl Parser {
             span: span,
             name: name,
             ty: ty_opt,
-            expr: Some(Box::new(init_expr)),
+            expr: Some(init_box),
             target: None,
             assign_op: AssignOp::AssignEq,
         })
@@ -120,9 +145,8 @@ impl Parser {
 
         // = expr
         p = p.expect(TokenKind::Eq)
-        let pair2 = p.parse_expr()
-        p = pair2.0
-        let init_expr = pair2.1
+        p = p.parse_expr()
+        let init_box = parser_take_expr_box()
 
         let span = p.span_from(start)
         (p, Stmt {
@@ -130,7 +154,7 @@ impl Parser {
             span: span,
             name: name,
             ty: ty_opt,
-            expr: Some(Box::new(init_expr)),
+            expr: Some(init_box),
             target: None,
             assign_op: AssignOp::AssignEq,
         })
@@ -142,38 +166,37 @@ impl Parser {
 
     fn parse_expr_or_assign_stmt(self) -> (Parser, Stmt) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
-        let pair = self.parse_expr()
-        let p1 = pair.0
-        let lhs = pair.1
+        var p1 = self.parse_expr()
 
-        let k = p1.peek()
-        if k == TokenKind::Eq || k == TokenKind::PlusEq || k == TokenKind::MinusEq
-            || k == TokenKind::StarEq || k == TokenKind::SlashEq || k == TokenKind::PercentEq {
+        let assign_code = parser_assign_op_code(p1)
+        if assign_code >= 0 {
             // Assignment
-            let op = parse_assign_op(k)
-            var p = p1.advance()  // skip operator
-            let pair2 = p.parse_expr()
-            p = pair2.0
-            let rhs = pair2.1
+            stmt_store_assign_target(parser_take_expr_box())
+            var p = parser_advance(p1)  // skip operator
+            p = parse_expr_entry(p)
+            let rhs_box = parser_take_expr_box()
+            let lhs_box = stmt_take_assign_target()
+            let op = assign_op_from_code(assign_code)
             let span = p.span_from(start)
             (p, Stmt {
                 kind: StmtKind::StmtAssign,
                 span: span,
                 name: empty_name(),
                 ty: None,
-                expr: Some(Box::new(rhs)),
-                target: Some(Box::new(lhs)),
+                expr: Some(rhs_box),
+                target: Some(lhs_box),
                 assign_op: op,
             })
         } else {
             // Expression statement
+            let lhs_box = parser_take_expr_box()
             let span = p1.span_from(start)
             (p1, Stmt {
                 kind: StmtKind::StmtExpr,
                 span: span,
                 name: empty_name(),
                 ty: None,
-                expr: Some(Box::new(lhs)),
+                expr: Some(lhs_box),
                 target: None,
                 assign_op: AssignOp::AssignEq,
             })
@@ -195,6 +218,15 @@ fn parse_assign_op(kind: TokenKind) -> AssignOp {
         TokenKind::PercentEq => AssignOp::AssignRem,
         _ => AssignOp::AssignEq,
     }
+}
+
+fn assign_op_from_code(code: i64) -> AssignOp {
+    if code == 1 { return AssignOp::AssignAdd }
+    if code == 2 { return AssignOp::AssignSub }
+    if code == 3 { return AssignOp::AssignMul }
+    if code == 4 { return AssignOp::AssignDiv }
+    if code == 5 { return AssignOp::AssignRem }
+    AssignOp::AssignEq
 }
 
 fn stmt_list_append(list: StmtList, node: StmtList) -> StmtList with Mut, Alloc {

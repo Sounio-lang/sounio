@@ -16,7 +16,7 @@ TARGETS=(
   "scripts/selfhost_driver_output_gate.sh"
   "scripts/selfhost/selfhost_driver_output_parity_gate.sh"
   "scripts/bootstrap/bootstrap_kernel_gate.sh"
-  "scripts/e2e_gate.sh"
+  "scripts/dev/e2e_gate.sh"
   "scripts/full_gate.sh"
   ".github/workflows/ci.yml"
   ".github/workflows/release-gate.yml"

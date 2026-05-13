@@ -109,7 +109,7 @@ python3 -m pip install --user jupyter
 
 ### Run notebooks
 ```bash
-cd /home/demetrios/RustroverProjects/sounio/triple-sounio-ecosystem
+cd /workspace/sounio/ecosystem
 jupyter notebook notebooks/
 ```
 
@@ -191,7 +191,7 @@ rb.save("report.tex", format="latex")
 
 **ImportError: No module named 'sounio'**
 ```bash
-cd /home/demetrios/RustroverProjects/sounio/triple-sounio-ecosystem
+cd /workspace/sounio/ecosystem
 # Notebooks add this automatically:
 # import sys
 # sys.path.insert(0, '../sounio-py/python')

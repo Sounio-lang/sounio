@@ -298,9 +298,9 @@ Before converting between representations, verify:
 ## 8. References
 
 - **GUM**: BIPM/JCGM-100 "Evaluation of measurement data — Guide to the expression of uncertainty in measurement" (2008)
-- **Sounio shared types**: `/triple-sounio-ecosystem/shared/epistemic_types.sio`
-- **Drug discovery types**: `/triple-sounio-ecosystem/drug-discovery/src/types.sio`
-- **Python Knowledge**: `/triple-sounio-ecosystem/sounio-py/python/sounio/knowledge.py`
+- **Sounio shared types**: `/ecosystem/shared/epistemic_types.sio`
+- **Drug discovery types**: `/ecosystem/drug-discovery/src/types.sio`
+- **Python Knowledge**: `/ecosystem/sounio-py/python/sounio/knowledge.py`
 
 ---
 

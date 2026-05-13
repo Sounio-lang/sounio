@@ -7,17 +7,28 @@
 // resolved at the transport boundary.
 //
 // The module maintains a flat-arena context (LspgContext) with:
-//   - Definition table   (4096 entries)
-//   - Reference table    (8192 entries)
-//   - Symbol table       (4096 entries)
-//   - Result list        (512 entries)
+//   - Definition table       (4096 entries)
+//   - Reference table        (8192 entries)
+//   - Symbol table           (4096 entries)
+//   - Result list            (512 entries)
+//   - sym_id → def_id bridge (4096 entries)
 //
 // No heap allocation, no recursive structures.  Every lookup is a
 // linear scan over the arena -- perfectly adequate for files under
 // a few thousand definitions.
 //
+// Cross-file goto-definition (Section 27) uses the module resolver's
+// hierarchical namespace (ModuleGraph + mod_graph_resolve_import) as a
+// fallback when the legacy flat scan cannot find a definition.  The
+// sym_id_to_def_id bridge table maps resolver symbol IDs (from
+// MgModuleExport.symbol_id) back to LspgContext definition indices.
+//
 // Naming convention: all public names use the `lspg_` prefix to avoid
 // global namespace collisions.
+
+// Import the module resolver's graph types so we can call
+// mod_graph_resolve_import for cross-file symbol lookup (Section 27).
+use resolve::modules::*
 
 // ============================================================================
 // Section 1: CONSTANTS
@@ -28,6 +39,7 @@ let LSPG_MAX_REFS: i64    = 8192
 let LSPG_MAX_FILES: i64   = 256
 let LSPG_MAX_RESULTS: i64 = 512
 let LSPG_MAX_SYMBOLS: i64 = 4096
+let LSPG_MAX_SYM_BRIDGE: i64 = 4096  // capacity of sym_id → def_id bridge table
 let LSPG_INVALID: i64     = 0 - 1
 
 // ============================================================================
@@ -93,6 +105,22 @@ struct LspgResultList {
     count: i64,
 }
 
+// Bridge table: maps resolver symbol_id → LspgContext def_id.
+// Populated by lspg_register_def_with_sym_id; queried by the module-graph
+// goto-def fallback path to convert MgModuleExport.symbol_id back into a
+// local definition index.
+struct LspgSymBridge {
+    sym_id: i64,
+    def_id: i64,
+}
+
+fn lspg_sym_bridge_zero() -> LspgSymBridge {
+    LspgSymBridge {
+        sym_id: 0 - 1,
+        def_id: 0 - 1,
+    }
+}
+
 struct LspgContext {
     defs: [LspgDefinition; 4096],
     def_count: i64,
@@ -102,6 +130,9 @@ struct LspgContext {
     sym_count: i64,
     results: LspgResultList,
     current_file_id: i64,
+    // sym_id → def_id bridge for module-graph cross-file resolution
+    sym_bridge: [LspgSymBridge; 4096],
+    sym_bridge_count: i64,
 }
 
 // ============================================================================
@@ -168,6 +199,8 @@ fn lspg_context_new() -> LspgContext {
         sym_count: 0,
         results: lspg_result_list_zero(),
         current_file_id: 0,
+        sym_bridge: [lspg_sym_bridge_zero(); 4096],
+        sym_bridge_count: 0,
     }
 }
 
@@ -1305,6 +1338,7 @@ fn lspg_reset(ctx: &! LspgContext) with Mut {
     ctx.sym_count = 0
     ctx.results.count = 0
     ctx.current_file_id = 0
+    ctx.sym_bridge_count = 0
 }
 
 // Reset only the symbol table (useful when rebuilding)
@@ -1436,6 +1470,337 @@ fn lspg_count_refs_in_file(ctx: &LspgContext, file_id: i64) -> i64 with Mut, Div
     count
 }
 
+// ============================================================================
+// Section 26: DEFINITION COUNT (ADDITIONAL FILE QUERY)
+// ============================================================================
+
+// Count definitions in a specific file (public accessor)
+fn lspg_count_defs_in_file(ctx: &LspgContext, file_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var count: i64 = 0
+    while i < ctx.def_count {
+        if ctx.defs[i as usize].loc.file_id == file_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 27: MODULE-GRAPH CROSS-FILE NAVIGATION
+// ============================================================================
+//
+// The legacy goto-definition path (lspg_handle_definition) performs a flat
+// linear scan of the LspgContext definition arena.  This works well for
+// same-file symbols and for cross-file symbols whose definitions have been
+// pre-registered into the shared context by the indexer.  It FAILS when a
+// symbol is encountered only as an import reference — the cursor sits on an
+// identifier that was brought in via "use module::symbol", but the definition
+// lives in another file's context that was never merged into the current one.
+//
+// The functions in this section replace that fallback with a two-level lookup:
+//
+//   Level 1 (fast path)  — unchanged: linear scan of ctx.defs[]
+//   Level 2 (new path)   — mod_graph_resolve_import on the qualified or
+//                          unqualified name extracted from the reference,
+//                          followed by a sym_id → def_id bridge lookup.
+//
+// Bridge registration:
+//   When the indexer builds the LspgContext it should call
+//   lspg_register_def_with_sym_id() instead of lspg_add_definition() so that
+//   the resolver symbol_id is recorded in ctx.sym_bridge[].  The module-graph
+//   fallback then does:
+//
+//     mod_graph_resolve_import(graph, name, name_len)
+//       → (module_id, export_idx)
+//     graph.exports[export_idx].symbol_id
+//       → sym_id
+//     lspg_find_def_by_sym_id(ctx, sym_id)
+//       → def_id
+//     lspg_def_location(ctx, def_id)
+//       → LspgLocation (possibly in a different file_id)
+//
+// Name encoding:
+//   The module graph uses [i8; 64] byte arrays with explicit lengths.
+//   The LspgContext uses i64 name_hashes (intern IDs).  The transport
+//   boundary must extract the original name text before calling the
+//   module-graph functions; the bridge only needs the sym_id once
+//   resolution succeeds.
+// ============================================================================
+
+// Register a definition AND record its resolver symbol_id in the bridge table.
+// Returns the def_id, or LSPG_INVALID on overflow.
+fn lspg_register_def_with_sym_id(
+    ctx: &! LspgContext,
+    kind: LspgSymKind,
+    name_hash: i64,
+    loc: LspgLocation,
+    scope: i64,
+    sym_id: i64
+) -> i64 with Mut, Div, Panic {
+    let def_id = lspg_add_definition(ctx, kind, name_hash, loc, scope)
+    if def_id == LSPG_INVALID {
+        return LSPG_INVALID
+    }
+    // Record the sym_id → def_id mapping in the bridge
+    if ctx.sym_bridge_count < LSPG_MAX_SYM_BRIDGE {
+        let idx = ctx.sym_bridge_count
+        ctx.sym_bridge[idx as usize] = LspgSymBridge {
+            sym_id: sym_id,
+            def_id: def_id,
+        }
+        ctx.sym_bridge_count = idx + 1
+    }
+    def_id
+}
+
+// Find the def_id for a given resolver symbol_id via the bridge table.
+// Returns LSPG_INVALID if no mapping was registered.
+fn lspg_find_def_by_sym_id(ctx: &LspgContext, sym_id: i64) -> i64 with Div, Panic {
+    var i: i64 = 0
+    while i < ctx.sym_bridge_count {
+        if ctx.sym_bridge[i as usize].sym_id == sym_id {
+            return ctx.sym_bridge[i as usize].def_id
+        }
+        i = i + 1
+    }
+    LSPG_INVALID
+}
+
+// Query how many sym_id → def_id mappings are registered in the bridge.
+fn lspg_sym_bridge_count(ctx: &LspgContext) -> i64 {
+    ctx.sym_bridge_count
+}
+
+// Core of the module-graph fallback: given a qualified or unqualified symbol
+// name (as a [i8; 64] byte array with explicit length) and a ModuleGraph,
+// resolve it to an LspgLocation.  Returns lspg_location_zero() on failure.
+//
+// This function is called by lspg_handle_definition_via_module_graph when
+// the cheap flat-scan fails to find a definition.
+fn lspg_resolve_via_module_graph(
+    ctx: &LspgContext,
+    graph: ModuleGraph,
+    name: [i8; 64],
+    name_len: i64
+) -> LspgLocation with Mut, Div, Panic {
+    // Use the 2-pass module resolver's hierarchical namespace lookup.
+    // mod_graph_resolve_import handles both qualified ("mod::sym") and
+    // unqualified names by searching all exported symbols.
+    let result = mod_graph_resolve_import(graph, name, name_len)
+    let module_id = result.0
+    let export_idx = result.1
+
+    if module_id < 0 || export_idx < 0 {
+        return lspg_location_zero()
+    }
+
+    // Retrieve the resolver symbol_id from the export table
+    if export_idx >= graph.export_count {
+        return lspg_location_zero()
+    }
+    let sym_id = graph.exports[export_idx as usize].symbol_id
+
+    if sym_id < 0 {
+        return lspg_location_zero()
+    }
+
+    // Bridge: map the resolver symbol_id back to an LspgContext def_id
+    let def_id = lspg_find_def_by_sym_id(ctx, sym_id)
+    if def_id == LSPG_INVALID {
+        return lspg_location_zero()
+    }
+
+    lspg_def_location(ctx, def_id)
+}
+
+// Extended goto-definition handler that uses the module resolver's
+// hierarchical namespace as a fallback for imported cross-file symbols.
+//
+// Behaviour:
+//   1. Try the legacy flat scan (lspg_handle_definition).
+//   2. If that succeeds, return immediately.
+//   3. Otherwise, call lspg_resolve_via_module_graph with the provided
+//      name bytes (extracted by the caller from the cursor's token).
+//   4. If the module graph returns a valid location, push it to the result
+//      list and return true.
+//   5. Return false only if both paths fail.
+//
+// The caller is responsible for supplying the raw name bytes from the
+// StringInterner — this function does not re-hash the name.
+fn lspg_handle_definition_via_module_graph(
+    ctx: &! LspgContext,
+    line: i64,
+    col: i64,
+    graph: ModuleGraph,
+    name: [i8; 64],
+    name_len: i64
+) -> bool with Mut, Div, Panic {
+    // Level 1: fast path — legacy flat scan
+    let fast_ok = lspg_handle_definition(ctx, line, col)
+    if fast_ok {
+        return true
+    }
+
+    // Level 2: module-graph hierarchical namespace lookup
+    lspg_clear_results(ctx)
+    let loc = lspg_resolve_via_module_graph(ctx, graph, name, name_len)
+    if lspg_location_is_zero(&loc) {
+        return false
+    }
+    let added = lspg_add_result(ctx, loc)
+    added
+}
+
+// Cross-file variant: sets the active file before running the module-graph
+// aware goto-def, then restores the saved file context.
+fn lspg_handle_definition_cross_file_mg(
+    ctx: &! LspgContext,
+    file_id: i64,
+    line: i64,
+    col: i64,
+    graph: ModuleGraph,
+    name: [i8; 64],
+    name_len: i64
+) -> bool with Mut, Div, Panic {
+    let saved_file = ctx.current_file_id
+    lspg_set_current_file(ctx, file_id)
+    let result = lspg_handle_definition_via_module_graph(ctx, line, col, graph, name, name_len)
+    lspg_set_current_file(ctx, saved_file)
+    result
+}
+
+// ============================================================================
+// Section 27 TESTS
+// ============================================================================
+
+// T71: bridge registration and lookup
+fn test_lspg_sym_bridge_register_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc = lspg_location_new(2, 5, 0, 5, 10)
+    // Register a def with sym_id = 42
+    let def_id = lspg_register_def_with_sym_id(ctx, LspgSymKind::GSymFunction, 9001, loc, 0, 42)
+    // Bridge lookup must return that def_id
+    let found = lspg_find_def_by_sym_id(ctx, 42)
+    def_id >= 0 && found == def_id
+}
+fn test_lspg_sym_bridge_register() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_sym_bridge_register_inner(&! ctx)
+}
+
+// T72: bridge miss returns LSPG_INVALID
+fn test_lspg_sym_bridge_miss_inner(ctx: &! LspgContext) -> bool with Div, Panic {
+    lspg_find_def_by_sym_id(ctx, 999) == LSPG_INVALID
+}
+fn test_lspg_sym_bridge_miss() -> bool with Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_sym_bridge_miss_inner(&! ctx)
+}
+
+// T73: module-graph goto-def resolves an imported cross-file symbol
+// Setup: a ModuleGraph with one module "mylib" exporting "compute" (sym_id=7)
+//        at file_id=2, line 3.  The LspgContext knows the definition via bridge.
+//        The cursor is NOT on a registered reference — flat scan will fail.
+//        The module-graph path must find it.
+fn test_lspg_module_graph_goto_def_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    // Register the definition in file 2, line 3, sym_id = 7
+    let def_loc = lspg_location_new(2, 3, 0, 3, 10)
+    let def_id = lspg_register_def_with_sym_id(ctx, LspgSymKind::GSymFunction, 9999, def_loc, 0, 7)
+    let _ = def_id
+
+    // Build a minimal ModuleGraph: one module "mylib" exporting "compute"
+    // Module name bytes: 'm'=109 'y'=121 'l'=108 'i'=105 'b'=98
+    var mod_name: [i8; 64] = [0; 64]
+    mod_name[0] = 109  // m
+    mod_name[1] = 121  // y
+    mod_name[2] = 108  // l
+    mod_name[3] = 105  // i
+    mod_name[4] = 98   // b
+    var mod_path: [i8; 256] = [0; 256]
+    mod_path[0] = 109
+
+    let graph_pair = mod_graph_add_module(mod_graph_new(), mod_name, 5, mod_path, 1, 0 - 1, true)
+    var graph = graph_pair.0
+    let mod_id = graph_pair.1
+
+    // Export name bytes: 'c'=99 'o'=111 'm'=109 'p'=112 'u'=117 't'=116 'e'=101
+    var exp_name: [i8; 64] = [0; 64]
+    exp_name[0] = 99   // c
+    exp_name[1] = 111  // o
+    exp_name[2] = 109  // m
+    exp_name[3] = 112  // p
+    exp_name[4] = 117  // u
+    exp_name[5] = 116  // t
+    exp_name[6] = 101  // e
+    graph = mod_graph_add_export(graph, exp_name, 7, MOD_KIND_FN, 7, mod_id, true)
+
+    // Qualified lookup name: "mylib::compute"
+    // m=109 y=121 l=108 i=105 b=98 ::= 58 58 c=99 o=111 m=109 p=112 u=117 t=116 e=101
+    var qname: [i8; 64] = [0; 64]
+    qname[0]  = 109  // m
+    qname[1]  = 121  // y
+    qname[2]  = 108  // l
+    qname[3]  = 105  // i
+    qname[4]  = 98   // b
+    qname[5]  = 58   // :
+    qname[6]  = 58   // :
+    qname[7]  = 99   // c
+    qname[8]  = 111  // o
+    qname[9]  = 109  // m
+    qname[10] = 112  // p
+    qname[11] = 117  // u
+    qname[12] = 116  // t
+    qname[13] = 101  // e
+
+    // Cursor is at a position with no reference registered → flat scan fails
+    lspg_set_current_file(ctx, 1)
+    let ok = lspg_handle_definition_via_module_graph(ctx, 20, 5, graph, qname, 14)
+    let count = lspg_result_count(ctx)
+    let got = lspg_result_at(ctx, 0)
+    ok && count == 1 && lspg_location_eq(&got, &def_loc)
+}
+fn test_lspg_module_graph_goto_def() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_module_graph_goto_def_inner(&! ctx)
+}
+
+// T74: module-graph path returns false when symbol not in graph
+fn test_lspg_module_graph_miss_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    // Empty graph — nothing to resolve
+    let graph = mod_graph_new()
+    var name: [i8; 64] = [0; 64]
+    name[0] = 120  // x
+    lspg_set_current_file(ctx, 1)
+    let ok = lspg_handle_definition_via_module_graph(ctx, 5, 3, graph, name, 1)
+    ok == false && lspg_result_count(ctx) == 0
+}
+fn test_lspg_module_graph_miss() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_module_graph_miss_inner(&! ctx)
+}
+
+// T75: legacy flat-scan still works via the new entry point
+fn test_lspg_module_graph_fast_path_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    // Register a def AND a reference in the same file
+    let loc_d = lspg_location_new(1, 2, 0, 2, 8)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 1234, loc_d, 0)
+    let loc_r = lspg_location_new(1, 10, 3, 10, 9)
+    let ref_id = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r)
+    let _ = ref_id
+    // Use an empty graph — fast path must succeed without consulting it
+    let graph = mod_graph_new()
+    var name: [i8; 64] = [0; 64]
+    let ok = lspg_handle_definition_via_module_graph(ctx, 10, 5, graph, name, 0)
+    let count = lspg_result_count(ctx)
+    let got = lspg_result_at(ctx, 0)
+    ok && count == 1 && lspg_location_eq(&got, &loc_d)
+}
+fn test_lspg_module_graph_fast_path() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_module_graph_fast_path_inner(&! ctx)
+}
 
 // ############################################################################
 //
@@ -1443,7 +1808,7 @@ fn lspg_count_refs_in_file(ctx: &LspgContext, file_id: i64) -> i64 with Mut, Div
 //
 // ############################################################################
 //
-// 70 tests organized in 8 categories:
+// 75 tests organized in 9 categories:
 //   1. Location      (T01-T08)   -- create, eq, contains, overlap, span
 //   2. Definitions   (T09-T18)   -- add, query, find at cursor, scope
 //   3. References    (T19-T28)   -- add, query, find at cursor, counts
@@ -1452,6 +1817,7 @@ fn lspg_count_refs_in_file(ctx: &LspgContext, file_id: i64) -> i64 with Mut, Div
 //   6. Find-refs     (T47-T56)   -- collect refs, handle request, multi-ref
 //   7. Result list   (T57-T62)   -- add, count, clear, dedup, at index
 //   8. Integration   (T63-T70)   -- full pipeline, batch, cross-file, stats
+//   9. Module-graph  (T71-T75)   -- bridge table, mod-graph goto-def, fast path
 //
 
 // -------------------------------------------------------
@@ -2547,7 +2913,7 @@ fn test_lspg_shadowing() -> bool with Mut, Div, Panic {
 }
 
 // ============================================================================
-// Section 26: TEST RUNNER
+// Section 28: TEST RUNNER
 // ============================================================================
 
 fn lspg_run_all_tests() -> i64 with Mut, Div, Panic {
@@ -2771,6 +3137,22 @@ fn lspg_run_all_tests() -> i64 with Mut, Div, Panic {
 
     total = total + 1
     if test_lspg_shadowing() { passed = passed + 1 }
+
+    // ---- Module-graph cross-file navigation tests (T71-T75) ----
+    total = total + 1
+    if test_lspg_sym_bridge_register() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_sym_bridge_miss() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_module_graph_goto_def() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_module_graph_miss() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_module_graph_fast_path() { passed = passed + 1 }
 
     passed
 }

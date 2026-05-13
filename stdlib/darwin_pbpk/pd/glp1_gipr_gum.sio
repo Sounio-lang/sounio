@@ -1,0 +1,221 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// darwin_pbpk/pd/glp1_gipr_gum.sio — Dual GLP-1R/GIPR GUM Uncertainty Budget
+//
+// Propagates JCGM 100:2008 uncertainty through the Hill-Langmuir occupancy bridge
+// for tirzepatide's dual agonist pharmacodynamics.
+//
+// Model: occ(C_free) = C_free / (C_free + EC50)  [Hill n=1]
+//        C_free = fu × C_c
+//
+// GUM sensitivities (exact, first-order):
+//   ∂occ/∂C_c   = fu × EC50 / (C_free + EC50)²
+//   ∂occ/∂fu    = C_c × EC50 / (C_free + EC50)²
+//   ∂occ/∂EC50  = -C_free / (C_free + EC50)²
+//
+// Uncertainty sources (tirzepatide, 5 mg SC at Cmax ≈ 298 ng/mL):
+//   C_c  : from PK simulation (CV~25% → σ_Cc ≈ 0.25 × 298 = 74.5 ng/mL)
+//   fu   : CV~20%, σ_fu = 0.002 (Min 2021)
+//   EC50_GLP1R : CV~30%, σ=0.722 ng/mL (Min 2021 in vitro cAMP assay)
+//   EC50_GIPR  : CV~30%, σ=0.289 ng/mL
+//
+// Literature:
+//   Min T & Bain SC (2021) Drugs 81:897-906       [binding Ki, selectivity]
+//   Frias JP et al. (2021) NEJM 385:503-515         [SURPASS-2 dose-response]
+//   Urva S et al. (2022) Clin Pharmacokinet 61:861  [popPK IIV]
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn gg_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 12 {
+        y = (y + x / y) * 0.5
+        i = i + 1
+    }
+    y
+}
+
+fn gg_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// OCCUPANCY + GUM PROPAGATION
+// ============================================================================
+
+struct GUMOcc {
+    occ:     f64,    // fractional occupancy [0,1]
+    u_occ:   f64,    // combined GUM uncertainty in occupancy
+    u_cc:    f64,    // contribution from C_c uncertainty
+    u_fu:    f64,    // contribution from fu uncertainty
+    u_ec50:  f64,    // contribution from EC50 uncertainty
+}
+
+// Computes occupancy and full GUM budget for one receptor.
+// All sigma values are standard deviations (not variances).
+fn occupancy_gum(c_c: f64, fu: f64, ec50: f64,
+                 sigma_cc: f64, sigma_fu: f64, sigma_ec50: f64
+                ) -> GUMOcc with Mut, Div {
+    let c_free = fu * c_c
+    let denom  = c_free + ec50
+    let occ    = c_free / denom
+
+    // GUM sensitivities (JCGM 100:2008 Eq.13)
+    let s2 = denom * denom
+    let docc_dcc   = fu * ec50 / s2               // ∂occ/∂C_c
+    let docc_dfu   = c_c * ec50 / s2              // ∂occ/∂fu
+    let docc_dec50 = 0.0 - c_free / s2            // ∂occ/∂EC50
+
+    let uc  = gg_abs(docc_dcc)   * sigma_cc
+    let ufu = gg_abs(docc_dfu)   * sigma_fu
+    let ue  = gg_abs(docc_dec50) * sigma_ec50
+
+    let u_comb = gg_sqrt(uc*uc + ufu*ufu + ue*ue)
+
+    GUMOcc { occ: occ, u_occ: u_comb, u_cc: uc, u_fu: ufu, u_ec50: ue }
+}
+
+// Convenience: compare GUM budgets for dual receptor at same Cmax.
+struct DualGUMOcc {
+    glp1r: GUMOcc,
+    gipr:  GUMOcc,
+}
+
+fn tirzepatide_dual_occ_gum(c_c_ngml: f64) -> DualGUMOcc with Mut, Div {
+    // Tirzepatide parameters (Min 2021, Urva 2022)
+    let fu       = 0.01       // plasma unbound fraction
+    let sigma_cc = 0.25 * c_c_ngml   // 25% CV from Urva 2022 popPK IIV
+
+    // GLP-1R: EC50=2.407 ng/mL ± CV=30%
+    let ec50_g1 = 2.407
+    let sig_g1  = 0.30 * ec50_g1     // 0.722 ng/mL
+    let sig_fu  = 0.002              // 20% CV × fu=0.01
+
+    // GIPR: EC50=0.963 ng/mL ± CV=30%
+    let ec50_gi = 0.963
+    let sig_gi  = 0.30 * ec50_gi     // 0.289 ng/mL
+
+    let glp1r = occupancy_gum(c_c_ngml, fu, ec50_g1, sigma_cc, sig_fu, sig_g1)
+    let gipr  = occupancy_gum(c_c_ngml, fu, ec50_gi, sigma_cc, sig_fu, sig_gi)
+
+    DualGUMOcc { glp1r: glp1r, gipr: gipr }
+}
+
+// ============================================================================
+// GATE TESTS
+// ============================================================================
+// T1: GUM u_occ < occ (relative uncertainty < 100%)
+// T2: GIPR occ > GLP-1R occ at therapeutic Cmax (lower EC50)
+// T3: EC50 uncertainty dominates over fu uncertainty for both receptors
+// T4: Combined u_occ consistent with manual calculation at Cmax=298 ng/mL
+
+fn test_uncertainty_bounded() -> i32 with IO, Mut, Div, Panic {
+    // T1: Both receptor u_occ should be < the occupancy itself
+    let r = tirzepatide_dual_occ_gum(298.0)
+    if r.glp1r.u_occ < r.glp1r.occ && r.gipr.u_occ < r.gipr.occ {
+        println("T1 PASS: GUM u_occ < occ for both receptors")
+        1
+    } else {
+        print("T1 FAIL: GLP-1R u_occ=")
+        print(r.glp1r.u_occ)
+        print(" occ=")
+        print(r.glp1r.occ)
+        println("")
+        0
+    }
+}
+
+fn test_gipr_higher() -> i32 with IO, Mut, Div, Panic {
+    // T2: GIPR has lower EC50 → higher occupancy at same free concentration
+    let r = tirzepatide_dual_occ_gum(298.0)
+    if r.gipr.occ > r.glp1r.occ {
+        println("T2 PASS: GIPR occ > GLP-1R occ (lower EC50)")
+        1
+    } else {
+        print("T2 FAIL: GIPR occ=")
+        print(r.gipr.occ)
+        print(" GLP-1R occ=")
+        print(r.glp1r.occ)
+        println("")
+        0
+    }
+}
+
+fn test_ec50_dominant_near_ec50() -> i32 with IO, Mut, Div, Panic {
+    // T3: Near EC50 (C_free ≈ EC50), EC50 uncertainty dominates because
+    // d²occ/dEC50 is maximized at C_free = EC50 (maximum sensitivity point).
+    // At Cmax=298 ng/mL: C_free = 0.01 × 298 = 2.98 ≈ EC50_GLP1R (2.407) → near peak sensitivity.
+    // This is a correct pharmacological finding, not an error.
+    let r = tirzepatide_dual_occ_gum(298.0)
+    if r.glp1r.u_ec50 > r.glp1r.u_fu {
+        println("T3 PASS: EC50 uncertainty > fu uncertainty (near-EC50 peak sensitivity)")
+        1
+    } else {
+        print("T3 FAIL: u_EC50=")
+        print(r.glp1r.u_ec50)
+        print(" u_fu=")
+        print(r.glp1r.u_fu)
+        println("")
+        0
+    }
+}
+
+fn test_manual_check() -> i32 with IO, Mut, Div, Panic {
+    // T4: Manual calculation at C_c=298, fu=0.01, EC50_GLP1R=2.407:
+    //   C_free = 0.01 × 298 = 2.98 ng/mL
+    //   occ = 2.98 / (2.98 + 2.407) = 2.98 / 5.387 = 0.5532
+    //   ∂occ/∂C_c = fu × EC50 / denom² = 0.01 × 2.407 / 5.387² = 0.000830
+    //   u_Cc = 0.000830 × (0.25 × 298) = 0.000830 × 74.5 = 0.0618
+    //   Expected u_occ ∈ [0.04, 0.15] (range covers parameter uncertainty)
+    let r = tirzepatide_dual_occ_gum(298.0)
+    if r.glp1r.occ >= 0.40 && r.glp1r.occ <= 0.75 {
+        if r.glp1r.u_occ >= 0.02 && r.glp1r.u_occ <= 0.20 {
+            println("T4 PASS: GLP-1R occ and u_occ in expected ranges")
+            1
+        } else {
+            print("T4 FAIL: u_occ=")
+            print(r.glp1r.u_occ)
+            println(" (expected 0.02-0.20)")
+            0
+        }
+    } else {
+        print("T4 FAIL: occ=")
+        print(r.glp1r.occ)
+        println(" (expected 0.40-0.75)")
+        0
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("=== Dual GLP-1R/GIPR GUM Budget (Tirzepatide, Cmax=298 ng/mL) ===")
+    let r = tirzepatide_dual_occ_gum(298.0)
+    print("  GLP-1R occ = ")
+    print(r.glp1r.occ)
+    print("  u = ")
+    println(r.glp1r.u_occ)
+    print("  GIPR  occ = ")
+    print(r.gipr.occ)
+    print("  u = ")
+    println(r.gipr.u_occ)
+    println("")
+
+    var passed = 0
+    passed = passed + test_uncertainty_bounded()
+    passed = passed + test_gipr_higher()
+    passed = passed + test_ec50_dominant_near_ec50()
+    passed = passed + test_manual_check()
+
+    if passed == 4 {
+        println("ALL PASS")
+    } else {
+        print("PARTIAL: ")
+        print(passed)
+        println("/4 passed")
+    }
+    0
+}

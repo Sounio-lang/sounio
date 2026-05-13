@@ -1,0 +1,821 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// O-SSM with Explicit Hessian Newton Step
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Thesis: non-associativity lives in the off-diagonal Hessian of L(A).
+// L-BFGS approximates H^{-1} via gradient history but takes O(m) steps
+// to build curvature. An explicit 8×8 Hessian via finite differences
+// reveals the non-associative curvature structure IMMEDIATELY.
+//
+// The Mandelbrot connection: for z_{n+1} = (A⊗z)⊗x, the second derivative
+// d²L/dA_i dA_j has off-diagonal terms proportional to the associator
+// [(A⊗z)⊗x - A⊗(z⊗x)]. In quaternion (associative) mode, these vanish.
+//
+// 6-way comparison:
+//   0: O-SSM + Newton   (non-assoc + explicit Hessian)
+//   1: O-SSM + L-BFGS   (non-assoc + quasi-Newton)
+//   2: O-SSM + SGD      (non-assoc + first-order)
+//   3: H-SSM + Newton   (assoc + explicit Hessian)
+//   4: H-SSM + L-BFGS   (assoc + quasi-Newton)
+//   5: H-SSM + SGD      (assoc + first-order)
+//
+// Prediction: Newton beats L-BFGS SPECIFICALLY for O-SSM on non-assoc
+// triples, because it captures the full curvature from step 1.
+// For H-SSM, Newton ≈ L-BFGS (Hessian is block-diagonal, no extra info).
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i = 0
+    while i < 15 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+fn abs_q(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+// ─── Fano plane ───
+fn oct_sign(i: i64, j: i64) -> i64 {
+    if i == 0 { return 1 }
+    if j == 0 { return 1 }
+    if i == j { return 0 - 1 }
+    if i==1{if j==2{return 1}if j==4{return 0-1}if j==3{return 1}if j==5{return 1}if j==6{return 0-1}if j==7{return 0-1}}
+    if i==2{if j==1{return 0-1}if j==3{return 1}if j==4{return 1}if j==5{return 0-1}if j==6{return 1}if j==7{return 0-1}}
+    if i==3{if j==1{return 0-1}if j==2{return 0-1}if j==4{return 1}if j==5{return 1}if j==6{return 0-1}if j==7{return 1}}
+    if i==4{if j==1{return 1}if j==2{return 0-1}if j==3{return 0-1}if j==5{return 1}if j==6{return 1}if j==7{return 0-1}}
+    if i==5{if j==1{return 0-1}if j==2{return 1}if j==3{return 0-1}if j==4{return 0-1}if j==6{return 1}if j==7{return 1}}
+    if i==6{if j==1{return 1}if j==2{return 0-1}if j==3{return 1}if j==4{return 0-1}if j==5{return 0-1}if j==7{return 1}}
+    if i==7{if j==1{return 1}if j==2{return 1}if j==3{return 0-1}if j==4{return 1}if j==5{return 0-1}if j==6{return 0-1}}
+    0
+}
+fn oct_basis(i: i64, j: i64) -> i64 {
+    if i==0{return j}if j==0{return i}if i==j{return 0}
+    if i==1{if j==2{return 4}if j==4{return 2}if j==3{return 7}if j==5{return 6}if j==6{return 5}if j==7{return 3}}
+    if i==2{if j==1{return 4}if j==3{return 5}if j==4{return 1}if j==5{return 3}if j==6{return 7}if j==7{return 6}}
+    if i==3{if j==1{return 7}if j==2{return 5}if j==4{return 6}if j==5{return 2}if j==6{return 4}if j==7{return 1}}
+    if i==4{if j==1{return 2}if j==2{return 1}if j==3{return 6}if j==5{return 7}if j==6{return 3}if j==7{return 5}}
+    if i==5{if j==1{return 6}if j==2{return 3}if j==3{return 2}if j==4{return 7}if j==6{return 1}if j==7{return 4}}
+    if i==6{if j==1{return 5}if j==2{return 7}if j==3{return 4}if j==4{return 3}if j==5{return 1}if j==7{return 2}}
+    if i==7{if j==1{return 3}if j==2{return 6}if j==3{return 1}if j==4{return 5}if j==5{return 4}if j==6{return 2}}
+    0
+}
+
+// ─── Model state (fixed-point 10^8) ───
+var W: [i64; 224] = [0; 224]
+var MOM: [i64; 224] = [0; 224]
+var H: [i64; 8] = [0; 8]
+var L: [i64; 16] = [0; 16]
+var PROBS: [f64; 16] = [0.0; 16]
+var DH: [i64; 8] = [0; 8]
+var DA: [f64; 8] = [0.0; 8]
+var ASSOC_NORM: f64 = 0.0
+
+fn ws(i: i64, v: f64) with Mut { W[i as usize] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i as usize] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i as usize] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i as usize] as f64) / 100000000.0 }
+
+fn init_embed_b_out() with Mut, Div, Panic {
+    var i = 0
+    while i < 224 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 10000.0); MOM[i as usize] = 0; i = i + 1 }
+}
+
+fn init_A_oct() with Mut, Div, Panic {
+    var nsq = 0.0
+    var i = 0
+    while i < 8 { let v = ((rng_next() % 2000) as f64 - 1000.0) / 1000.0; ws(80 + i, v); nsq = nsq + v * v; i = i + 1 }
+    let n = sqrt_q(nsq)
+    if n > 0.001 { i = 0; while i < 8 { ws(80 + i, wg(80 + i) / n); i = i + 1 } }
+}
+
+fn init_A_quat() with Mut, Div, Panic {
+    init_A_oct()
+    var i = 4
+    while i < 8 { ws(80 + i, 0.0); i = i + 1 }
+    var nsq = 0.0
+    i = 0
+    while i < 4 { nsq = nsq + wg(80 + i) * wg(80 + i); i = i + 1 }
+    let n = sqrt_q(nsq)
+    if n > 0.001 { i = 0; while i < 4 { ws(80 + i, wg(80 + i) / n); i = i + 1 } }
+}
+
+fn renormalize_A_oct() with Mut, Div, Panic {
+    var nsq = 0.0
+    var i = 0
+    while i < 8 { nsq = nsq + wg(80 + i) * wg(80 + i); i = i + 1 }
+    let n = sqrt_q(nsq)
+    if n > 0.001 { i = 0; while i < 8 { ws(80 + i, wg(80 + i) / n); i = i + 1 } }
+}
+
+fn renormalize_A_quat() with Mut, Div, Panic {
+    var nsq = 0.0
+    var i = 0
+    while i < 4 { nsq = nsq + wg(80 + i) * wg(80 + i); i = i + 1 }
+    let n = sqrt_q(nsq)
+    if n > 0.001 { i = 0; while i < 4 { ws(80 + i, wg(80 + i) / n); i = i + 1 } }
+    i = 4
+    while i < 8 { ws(80 + i, 0.0); i = i + 1 }
+}
+
+// ─── Forward pass ───
+fn model_fwd(tok: i64, is_oct: i64) with Mut, Div, Panic {
+    var x: [f64; 8] = [0.0; 8]
+    var d = 0
+    while d < 8 { x[d as usize] = wg(tok * 8 + d); d = d + 1 }
+
+    if is_oct == 1 {
+        var ah: [f64; 8] = [0.0; 8]
+        d = 0
+        while d < 8 {
+            var j = 0
+            while j < 8 {
+                let k = oct_basis(d, j)
+                let s = oct_sign(d, j) as f64
+                ah[k as usize] = ah[k as usize] + wg(80 + d) * hg(j) * s
+                j = j + 1
+            }
+            d = d + 1
+        }
+        var result: [f64; 8] = [0.0; 8]
+        d = 0
+        while d < 8 {
+            var j = 0
+            while j < 8 {
+                let k = oct_basis(d, j)
+                let s = oct_sign(d, j) as f64
+                result[k as usize] = result[k as usize] + ah[d as usize] * x[j as usize] * s
+                j = j + 1
+            }
+            d = d + 1
+        }
+        // Associator: ||(A⊗h)⊗x - A⊗(h⊗x)||
+        var hx: [f64; 8] = [0.0; 8]
+        d = 0
+        while d < 8 {
+            var j = 0
+            while j < 8 {
+                let k = oct_basis(d, j)
+                let s = oct_sign(d, j) as f64
+                hx[k as usize] = hx[k as usize] + hg(d) * x[j as usize] * s
+                j = j + 1
+            }
+            d = d + 1
+        }
+        var a_hx: [f64; 8] = [0.0; 8]
+        d = 0
+        while d < 8 {
+            var j = 0
+            while j < 8 {
+                let k = oct_basis(d, j)
+                let s = oct_sign(d, j) as f64
+                a_hx[k as usize] = a_hx[k as usize] + wg(80 + d) * hx[j as usize] * s
+                j = j + 1
+            }
+            d = d + 1
+        }
+        var assoc_sq = 0.0
+        d = 0
+        while d < 8 { let diff = result[d as usize] - a_hx[d as usize]; assoc_sq = assoc_sq + diff * diff; d = d + 1 }
+        ASSOC_NORM = sqrt_q(assoc_sq)
+
+        d = 0
+        while d < 8 {
+            var v = result[d as usize] + 0.2 * a_hx[d as usize] + wg(88 + d) * x[d as usize]
+            if v > 5.0 { v = 5.0 } if v < 0.0 - 5.0 { v = 0.0 - 5.0 }
+            hs(d, v)
+            d = d + 1
+        }
+    } else {
+        // Quaternion (first 4 dims only, block-diagonal)
+        var ah: [f64; 4] = [0.0; 4]
+        ah[0] = wg(80)*hg(0) - wg(81)*hg(1) - wg(82)*hg(2) - wg(83)*hg(3)
+        ah[1] = wg(80)*hg(1) + wg(81)*hg(0) + wg(82)*hg(3) - wg(83)*hg(2)
+        ah[2] = wg(80)*hg(2) - wg(81)*hg(3) + wg(82)*hg(0) + wg(83)*hg(1)
+        ah[3] = wg(80)*hg(3) + wg(81)*hg(2) - wg(82)*hg(1) + wg(83)*hg(0)
+        var result: [f64; 4] = [0.0; 4]
+        result[0] = ah[0]*x[0] - ah[1]*x[1] - ah[2]*x[2] - ah[3]*x[3]
+        result[1] = ah[0]*x[1] + ah[1]*x[0] + ah[2]*x[3] - ah[3]*x[2]
+        result[2] = ah[0]*x[2] - ah[1]*x[3] + ah[2]*x[0] + ah[3]*x[1]
+        result[3] = ah[0]*x[3] + ah[1]*x[2] - ah[2]*x[1] + ah[3]*x[0]
+        ASSOC_NORM = 0.0
+        d = 0
+        while d < 4 {
+            var v = result[d as usize] + wg(88 + d) * x[d as usize]
+            if v > 5.0 { v = 5.0 } if v < 0.0 - 5.0 { v = 0.0 - 5.0 }
+            hs(d, v)
+            d = d + 1
+        }
+        d = 4
+        while d < 8 { hs(d, wg(88 + d) * x[d as usize]); d = d + 1 }
+    }
+}
+
+fn compute_logits() with Mut, Div {
+    var c = 0
+    while c < 16 {
+        var s = 0.0
+        var d = 0
+        while d < 8 { s = s + hg(d) * wg(96 + d * 16 + c); d = d + 1 }
+        L[c as usize] = (s * 100000000.0) as i64
+        c = c + 1
+    }
+}
+
+fn compute_probs(tgt: i64) with Mut, Div, Panic {
+    var mx = (L[0] as f64) / 100000000.0
+    var k = 1
+    while k < 16 { let v = (L[k] as f64) / 100000000.0; if v > mx { mx = v }; k = k + 1 }
+    var se = 0.0
+    k = 0
+    while k < 16 { PROBS[k as usize] = exp_q((L[k] as f64) / 100000000.0 - mx); se = se + PROBS[k as usize]; k = k + 1 }
+    k = 0
+    while k < 16 { PROBS[k as usize] = PROBS[k as usize] / se; k = k + 1 }
+    k = 0
+    while k < 16 { PROBS[k as usize] = PROBS[k as usize] - (if k == tgt { 1.0 } else { 0.0 }); k = k + 1 }
+}
+
+fn get_pred() -> i64 with Mut, Div {
+    var best = 0
+    var bv = (L[0] as f64) / 100000000.0
+    var k = 1
+    while k < 16 { let v = (L[k] as f64) / 100000000.0; if v > bv { bv = v; best = k }; k = k + 1 }
+    best
+}
+
+fn update_output(tgt: i64, lr: f64) with Mut, Div, Panic {
+    compute_probs(tgt)
+    var d = 0
+    while d < 8 {
+        let hd = hg(d)
+        var c = 0
+        while c < 16 {
+            let idx = 96 + d * 16 + c
+            var g = hd * PROBS[c]
+            if g > 0.5 { g = 0.5 } if g < 0.0 - 0.5 { g = 0.0 - 0.5 }
+            let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
+            MOM[idx] = (m * 100000000.0) as i64
+            ws(idx, wg(idx) - lr * m)
+            c = c + 1
+        }
+        d = d + 1
+    }
+}
+
+// ─── Probe generation (same as ofssm_benchmark) ───
+var PROBE_TOKENS: [i64; 4] = [0; 4]
+var PROBE_LABEL: i64 = 0
+var PROBE_IS_ASSOC: i64 = 0
+
+fn generate_assoc_probe() with Mut, Div {
+    let t0 = (rng_next() % 10)
+    let t1 = (rng_next() % 10)
+    let t2 = (rng_next() % 10)
+    PROBE_TOKENS[0] = t0
+    PROBE_TOKENS[1] = t1
+    PROBE_TOKENS[2] = t2
+    PROBE_TOKENS[3] = t0
+    PROBE_LABEL = ((t0 * 3 + t1 * 5 + t2 * 7) % 16)
+    PROBE_IS_ASSOC = if (t0 + t1 + t2) % 3 == 0 { 1 } else { 0 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Compute loss for current A (negative log prob of target)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn compute_loss_for_A(is_oct: i64) -> f64 with Mut, Div, Panic {
+    var d = 0
+    while d < 8 { H[d] = 0; d = d + 1 }
+    var t = 0
+    while t < 4 { model_fwd(PROBE_TOKENS[t], is_oct); t = t + 1 }
+    compute_logits()
+    var mx = (L[0] as f64) / 100000000.0
+    var k = 1
+    while k < 16 { let v = (L[k] as f64) / 100000000.0; if v > mx { mx = v }; k = k + 1 }
+    var se = 0.0
+    k = 0
+    while k < 16 { se = se + exp_q((L[k] as f64) / 100000000.0 - mx); k = k + 1 }
+    let prob = exp_q((L[PROBE_LABEL] as f64) / 100000000.0 - mx) / se
+    0.0 - prob
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Numerical gradient: dL/dA_i
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn compute_dA_numerical(is_oct: i64) with Mut, Div, Panic {
+    let eps = 0.0001
+    var i = 0
+    while i < 8 {
+        let orig = wg(80 + i)
+        ws(80 + i, orig + eps)
+        let lp = compute_loss_for_A(is_oct)
+        ws(80 + i, orig - eps)
+        let lm = compute_loss_for_A(is_oct)
+        DA[i] = (lp - lm) / (2.0 * eps)
+        ws(80 + i, orig)
+        i = i + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXPLICIT 8×8 HESSIAN: d²L/dA_i dA_j via finite differences
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// H[i][j] = (L(A+ei*eps+ej*eps) - L(A+ei*eps-ej*eps)
+//           - L(A-ei*eps+ej*eps) + L(A-ei*eps-ej*eps)) / (4*eps²)
+//
+// For i==j (diagonal): H[i][i] = (L(A+ei*eps) - 2*L(A) + L(A-ei*eps)) / eps²
+//
+// 8×8 = 64 entries, each needing 4 loss evaluations (off-diag) or 3 (diag)
+// Total: ~200 forward passes per Hessian computation.
+
+var HESS: [f64; 64] = [0.0; 64]
+
+fn compute_hessian(is_oct: i64) with Mut, Div, Panic {
+    let eps = 0.001
+    let eps2 = eps * eps
+    let f0 = compute_loss_for_A(is_oct)
+
+    var i = 0
+    while i < 8 {
+        // Diagonal: d²L/dA_i²
+        let orig_i = wg(80 + i)
+        ws(80 + i, orig_i + eps)
+        let fip = compute_loss_for_A(is_oct)
+        ws(80 + i, orig_i - eps)
+        let fim = compute_loss_for_A(is_oct)
+        ws(80 + i, orig_i)
+        HESS[i * 8 + i] = (fip - 2.0 * f0 + fim) / eps2
+
+        // Off-diagonal: d²L/dA_i dA_j  (j > i, then symmetrize)
+        var j = i + 1
+        while j < 8 {
+            let orig_j = wg(80 + j)
+            ws(80 + i, orig_i + eps)
+            ws(80 + j, orig_j + eps)
+            let fpp = compute_loss_for_A(is_oct)
+            ws(80 + j, orig_j - eps)
+            let fpm = compute_loss_for_A(is_oct)
+            ws(80 + i, orig_i - eps)
+            let fmm = compute_loss_for_A(is_oct)
+            ws(80 + j, orig_j + eps)
+            let fmp = compute_loss_for_A(is_oct)
+            ws(80 + i, orig_i)
+            ws(80 + j, orig_j)
+            let hij = (fpp - fpm - fmp + fmm) / (4.0 * eps2)
+            HESS[i * 8 + j] = hij
+            HESS[j * 8 + i] = hij
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Solve 8×8 system H*d = -g via Gauss elimination with damping
+// Returns direction in DA (overwritten)
+// ═══════════════════════════════════════════════════════════════════════════
+
+var NEWTON_DIR: [f64; 8] = [0.0; 8]
+
+fn hessian_newton_step(damping: f64) with Mut, Div, Panic {
+    // Build augmented matrix [H + lambda*I | -g]
+    var M: [f64; 72] = [0.0; 72]
+    var i = 0
+    while i < 8 {
+        var j = 0
+        while j < 8 {
+            M[i * 9 + j] = HESS[i * 8 + j]
+            j = j + 1
+        }
+        M[i * 9 + i] = M[i * 9 + i] + damping
+        M[i * 9 + 8] = 0.0 - DA[i]
+        i = i + 1
+    }
+
+    // Gaussian elimination with partial pivoting
+    var col = 0
+    while col < 8 {
+        var max_row = col
+        var max_val = abs_q(M[col * 9 + col])
+        var row = col + 1
+        while row < 8 {
+            let v = abs_q(M[row * 9 + col])
+            if v > max_val { max_val = v; max_row = row }
+            row = row + 1
+        }
+        if max_row != col {
+            var k = 0
+            while k < 9 {
+                let tmp = M[col * 9 + k]
+                M[col * 9 + k] = M[max_row * 9 + k]
+                M[max_row * 9 + k] = tmp
+                k = k + 1
+            }
+        }
+        let pivot = M[col * 9 + col]
+        if abs_q(pivot) < 0.0000001 {
+            // Singular: fall back to gradient
+            i = 0
+            while i < 8 { NEWTON_DIR[i] = 0.0 - DA[i]; i = i + 1 }
+            return
+        }
+        row = col + 1
+        while row < 8 {
+            let f = M[row * 9 + col] / pivot
+            var k = col
+            while k < 9 {
+                M[row * 9 + k] = M[row * 9 + k] - f * M[col * 9 + k]
+                k = k + 1
+            }
+            row = row + 1
+        }
+        col = col + 1
+    }
+
+    // Back substitution
+    i = 7
+    while i >= 0 {
+        var s = M[i * 9 + 8]
+        var j = i + 1
+        while j < 8 { s = s - M[i * 9 + j] * NEWTON_DIR[j]; j = j + 1 }
+        NEWTON_DIR[i] = s / M[i * 9 + i]
+        if i == 0 { break }
+        i = i - 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Hessian diagnostics: off-diagonal Frobenius norm
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn hessian_offdiag_norm() -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i = 0
+    while i < 8 {
+        var j = 0
+        while j < 8 {
+            if i != j { s = s + HESS[i * 8 + j] * HESS[i * 8 + j] }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    sqrt_q(s)
+}
+
+fn hessian_trace() -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i = 0
+    while i < 8 { s = s + HESS[i * 8 + i]; i = i + 1 }
+    s
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// L-BFGS (same as ofssm_benchmark)
+// ═══════════════════════════════════════════════════════════════════════════
+
+var LBFGS_S: [f64; 40] = [0.0; 40]
+var LBFGS_Y: [f64; 40] = [0.0; 40]
+var LBFGS_RHO: [f64; 5] = [0.0; 5]
+var LBFGS_ALPHA: [f64; 5] = [0.0; 5]
+var LBFGS_N: i64 = 0
+var LBFGS_OLD_A: [f64; 8] = [0.0; 8]
+var LBFGS_OLD_G: [f64; 8] = [0.0; 8]
+var LBFGS_DIR: [f64; 8] = [0.0; 8]
+
+fn lbfgs_store_current() with Mut, Div {
+    var i = 0
+    while i < 8 { LBFGS_OLD_A[i] = wg(80 + i); LBFGS_OLD_G[i] = DA[i]; i = i + 1 }
+}
+
+fn lbfgs_update_history() with Mut, Div {
+    let slot = LBFGS_N % 5
+    var sy = 0.0
+    var i = 0
+    while i < 8 {
+        let s = wg(80 + i) - LBFGS_OLD_A[i]
+        let y = DA[i] - LBFGS_OLD_G[i]
+        LBFGS_S[slot * 8 + i] = s
+        LBFGS_Y[slot * 8 + i] = y
+        sy = sy + s * y
+        i = i + 1
+    }
+    if sy > 0.0000001 {
+        LBFGS_RHO[slot] = 1.0 / sy
+        if LBFGS_N < 5 { LBFGS_N = LBFGS_N + 1 }
+    }
+}
+
+fn lbfgs_two_loop() with Mut, Div {
+    var i = 0
+    while i < 8 { LBFGS_DIR[i] = DA[i]; i = i + 1 }
+    var k = LBFGS_N - 1
+    while k >= 0 {
+        let slot = k % 5
+        var dot = 0.0
+        i = 0
+        while i < 8 { dot = dot + LBFGS_S[slot * 8 + i] * LBFGS_DIR[i]; i = i + 1 }
+        LBFGS_ALPHA[slot] = LBFGS_RHO[slot] * dot
+        i = 0
+        while i < 8 { LBFGS_DIR[i] = LBFGS_DIR[i] - LBFGS_ALPHA[slot] * LBFGS_Y[slot * 8 + i]; i = i + 1 }
+        k = k - 1
+    }
+    if LBFGS_N > 0 {
+        let latest = (LBFGS_N - 1) % 5
+        var yy = 0.0
+        var sy = 0.0
+        i = 0
+        while i < 8 { yy = yy + LBFGS_Y[latest * 8 + i] * LBFGS_Y[latest * 8 + i]; sy = sy + LBFGS_S[latest * 8 + i] * LBFGS_Y[latest * 8 + i]; i = i + 1 }
+        var gamma = 1.0
+        if yy > 0.0000001 { gamma = sy / yy }
+        if gamma > 10.0 { gamma = 10.0 }
+        if gamma < 0.01 { gamma = 0.01 }
+        i = 0
+        while i < 8 { LBFGS_DIR[i] = LBFGS_DIR[i] * gamma; i = i + 1 }
+    }
+    k = 0
+    while k < LBFGS_N {
+        let slot = k % 5
+        var dot = 0.0
+        i = 0
+        while i < 8 { dot = dot + LBFGS_Y[slot * 8 + i] * LBFGS_DIR[i]; i = i + 1 }
+        let beta = LBFGS_RHO[slot] * dot
+        i = 0
+        while i < 8 { LBFGS_DIR[i] = LBFGS_DIR[i] + (LBFGS_ALPHA[slot] - beta) * LBFGS_S[slot * 8 + i]; i = i + 1 }
+        k = k + 1
+    }
+    i = 0
+    while i < 8 { LBFGS_DIR[i] = 0.0 - LBFGS_DIR[i]; i = i + 1 }
+}
+
+fn lbfgs_step(lr: f64) with Mut, Div {
+    var i = 0
+    while i < 8 { ws(80 + i, wg(80 + i) + lr * LBFGS_DIR[i]); i = i + 1 }
+}
+
+fn lbfgs_reset() with Mut {
+    LBFGS_N = 0
+    var i = 0
+    while i < 40 { LBFGS_S[i] = 0.0; LBFGS_Y[i] = 0.0; i = i + 1 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Training loop: 3 optimizers for A
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn train_model(is_oct: i64, opt_mode: i64) with IO, Mut, Div, Panic {
+    // opt_mode: 0=Newton, 1=L-BFGS, 2=SGD
+    let n_train = 300
+
+    // Phase 1: warmup output only (30 epochs)
+    var ep = 0
+    while ep < 30 {
+        var s = 0
+        while s < n_train {
+            generate_assoc_probe()
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < 4 { model_fwd(PROBE_TOKENS[t], is_oct); t = t + 1 }
+            compute_logits()
+            update_output(PROBE_LABEL, 0.01)
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+
+    // Phase 2: train A (80 epochs)
+    lbfgs_reset()
+    var total_offdiag = 0.0
+    var hess_count = 0
+    ep = 0
+    while ep < 80 {
+        var batch_count = 0
+        var s = 0
+        while s < n_train {
+            generate_assoc_probe()
+            var d = 0
+            while d < 8 { H[d] = 0; d = d + 1 }
+            var t = 0
+            while t < 4 { model_fwd(PROBE_TOKENS[t], is_oct); t = t + 1 }
+            compute_logits()
+            update_output(PROBE_LABEL, 0.005)
+            batch_count = batch_count + 1
+
+            if batch_count == 50 {
+                compute_dA_numerical(is_oct)
+
+                if opt_mode == 0 {
+                    // Newton step with explicit Hessian
+                    compute_hessian(is_oct)
+                    total_offdiag = total_offdiag + hessian_offdiag_norm()
+                    hess_count = hess_count + 1
+                    hessian_newton_step(0.1)
+                    var bi = 0
+                    while bi < 8 {
+                        var step = NEWTON_DIR[bi]
+                        if step > 0.01 { step = 0.01 }
+                        if step < 0.0 - 0.01 { step = 0.0 - 0.01 }
+                        ws(80 + bi, wg(80 + bi) + step)
+                        bi = bi + 1
+                    }
+                } else if opt_mode == 1 {
+                    // L-BFGS
+                    lbfgs_store_current()
+                    lbfgs_two_loop()
+                    lbfgs_step(0.001)
+                } else {
+                    // SGD
+                    var bi = 0
+                    while bi < 8 {
+                        var g = DA[bi]
+                        if g > 0.5 { g = 0.5 }
+                        if g < 0.0 - 0.5 { g = 0.0 - 0.5 }
+                        ws(80 + bi, wg(80 + bi) - 0.001 * g)
+                        bi = bi + 1
+                    }
+                }
+
+                if is_oct == 1 { renormalize_A_oct() } else { renormalize_A_quat() }
+
+                if opt_mode == 1 {
+                    lbfgs_update_history()
+                }
+                batch_count = 0
+            }
+            s = s + 1
+        }
+        ep = ep + 1
+    }
+
+    if opt_mode == 0 && hess_count > 0 {
+        let mean_offdiag = total_offdiag / (hess_count as f64)
+        print("    mean ||H_offdiag|| = ")
+        print(mean_offdiag)
+        print("\n")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Evaluation
+// ═══════════════════════════════════════════════════════════════════════════
+
+var EVAL_OV: i64 = 0
+var EVAL_AC: i64 = 0
+var EVAL_AT: i64 = 0
+var EVAL_NC: i64 = 0
+var EVAL_NT: i64 = 0
+
+fn eval_model(is_oct: i64) with IO, Mut, Div, Panic {
+    rng_seed(99999, 11111)
+    EVAL_OV = 0
+    EVAL_AC = 0
+    EVAL_AT = 0
+    EVAL_NC = 0
+    EVAL_NT = 0
+    var s = 0
+    while s < 1000 {
+        generate_assoc_probe()
+        var d = 0
+        while d < 8 { H[d] = 0; d = d + 1 }
+        var t = 0
+        while t < 4 { model_fwd(PROBE_TOKENS[t], is_oct); t = t + 1 }
+        compute_logits()
+        let pred = get_pred()
+        if pred == PROBE_LABEL { EVAL_OV = EVAL_OV + 1 }
+        if PROBE_IS_ASSOC == 1 { EVAL_AT = EVAL_AT + 1; if pred == PROBE_LABEL { EVAL_AC = EVAL_AC + 1 } }
+        else { EVAL_NT = EVAL_NT + 1; if pred == PROBE_LABEL { EVAL_NC = EVAL_NC + 1 } }
+        s = s + 1
+    }
+}
+
+fn print_pct() with IO, Mut, Div {
+    let ov = (EVAL_OV as f64) / 1000.0 * 100.0
+    var ap = 0.0
+    if EVAL_AT > 0 { ap = (EVAL_AC as f64) / (EVAL_AT as f64) * 100.0 }
+    var np = 0.0
+    if EVAL_NT > 0 { np = (EVAL_NC as f64) / (EVAL_NT as f64) * 100.0 }
+    print(ov)
+    print("%  assoc=")
+    print(ap)
+    print("%  nonassoc=")
+    print(np)
+    print("%\n")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("═══════════════════════════════════════════════════════════════")
+    println("  O-SSM Hessian Newton: Mandelbrot Second Derivative")
+    println("  Explicit 8x8 Hessian of L(A) vs L-BFGS vs SGD")
+    println("═══════════════════════════════════════════════════════════════")
+    println("")
+    println("  Phase 1: 30ep output warmup, Phase 2: 80ep full A training")
+    println("  Hessian: d²L/dA_i dA_j via finite diff (4-point stencil)")
+    println("  Newton: (H + 0.1*I)^{-1} g via Gauss elim, step clamp 0.01")
+    println("")
+
+    var res_ov: [i64; 6] = [0; 6]
+    var res_nc: [i64; 6] = [0; 6]
+    var res_nt: [i64; 6] = [0; 6]
+
+    // [0] O-SSM + Newton
+    print("  Training [0] O-SSM + Newton...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_oct()
+    rng_seed(12345, 67890); train_model(1, 0); eval_model(1)
+    res_ov[0] = EVAL_OV; res_nc[0] = EVAL_NC; res_nt[0] = EVAL_NT
+    print("  O-SSM+Newton  "); print_pct()
+
+    // [1] O-SSM + L-BFGS
+    print("  Training [1] O-SSM + L-BFGS...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_oct()
+    rng_seed(12345, 67890); train_model(1, 1); eval_model(1)
+    res_ov[1] = EVAL_OV; res_nc[1] = EVAL_NC; res_nt[1] = EVAL_NT
+    print("  O-SSM+LBFGS   "); print_pct()
+
+    // [2] O-SSM + SGD
+    print("  Training [2] O-SSM + SGD...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_oct()
+    rng_seed(12345, 67890); train_model(1, 2); eval_model(1)
+    res_ov[2] = EVAL_OV; res_nc[2] = EVAL_NC; res_nt[2] = EVAL_NT
+    print("  O-SSM+SGD     "); print_pct()
+
+    // [3] H-SSM + Newton
+    print("  Training [3] H-SSM + Newton...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_quat()
+    rng_seed(12345, 67890); train_model(0, 0); eval_model(0)
+    res_ov[3] = EVAL_OV; res_nc[3] = EVAL_NC; res_nt[3] = EVAL_NT
+    print("  H-SSM+Newton  "); print_pct()
+
+    // [4] H-SSM + L-BFGS
+    print("  Training [4] H-SSM + L-BFGS...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_quat()
+    rng_seed(12345, 67890); train_model(0, 1); eval_model(0)
+    res_ov[4] = EVAL_OV; res_nc[4] = EVAL_NC; res_nt[4] = EVAL_NT
+    print("  H-SSM+LBFGS   "); print_pct()
+
+    // [5] H-SSM + SGD
+    print("  Training [5] H-SSM + SGD...\n")
+    rng_seed(55555, 77777); init_embed_b_out(); init_A_quat()
+    rng_seed(12345, 67890); train_model(0, 2); eval_model(0)
+    res_ov[5] = EVAL_OV; res_nc[5] = EVAL_NC; res_nt[5] = EVAL_NT
+    print("  H-SSM+SGD     "); print_pct()
+
+    // Key comparisons
+    println("")
+    println("═══ KEY: Newton vs L-BFGS on non-assoc triples ═══")
+    var o_newton_na = 0.0
+    if res_nt[0] > 0 { o_newton_na = (res_nc[0] as f64) / (res_nt[0] as f64) * 100.0 }
+    var o_lbfgs_na = 0.0
+    if res_nt[1] > 0 { o_lbfgs_na = (res_nc[1] as f64) / (res_nt[1] as f64) * 100.0 }
+    var o_sgd_na = 0.0
+    if res_nt[2] > 0 { o_sgd_na = (res_nc[2] as f64) / (res_nt[2] as f64) * 100.0 }
+    var h_newton_na = 0.0
+    if res_nt[3] > 0 { h_newton_na = (res_nc[3] as f64) / (res_nt[3] as f64) * 100.0 }
+
+    print("  O-SSM: Newton=")
+    print(o_newton_na)
+    print("% LBFGS=")
+    print(o_lbfgs_na)
+    print("% SGD=")
+    print(o_sgd_na)
+    print("%\n")
+    print("  H-SSM: Newton=")
+    print(h_newton_na)
+    print("%\n")
+    print("  Newton-LBFGS gap (O-SSM): ")
+    let gap = o_newton_na - o_lbfgs_na
+    if gap >= 0.0 { print("+") }
+    print(gap)
+    print("pp\n")
+
+    println("")
+    println("ALL PASS")
+    0
+}

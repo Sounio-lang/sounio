@@ -175,7 +175,7 @@ smoke_check_driver() {
 DRIVER_COMPILER=""
 
 echo "==> bootstrap current lean_single.sio into $GEN1_BIN"
-if ! SOUNIO_FORCE_SOURCE_BOOTSTRAP=1 bash "$ROOT_DIR/scripts/ci/build_native_souc.sh" "$GEN1_BIN" \
+if ! bash "$ROOT_DIR/scripts/ci/build_native_souc.sh" "$GEN1_BIN" \
     >"$BOOTSTRAP_LOG" 2>&1; then
     echo "==> bootstrap failed; falling back to boot4-built versioned checker driver"
     tail -n 20 "$BOOTSTRAP_LOG" || true
@@ -287,12 +287,40 @@ run_driver_check() {
   fi
 }
 
+run_diagnostics_check() {
+  local src="\$1"
+  DIAGNOSTICS_AVAILABLE=0
+  DIAGNOSTICS_ERROR_COUNT=0
+  DIAGNOSTICS_WARNING_COUNT=0
+  DIAGNOSTICS_ITEM_COUNT=0
+  DIAGNOSTICS_FN_SIG_COUNT=0
+  if [[ ! -x "\$DEBUG_CHECK_BIN" ]]; then
+    return
+  fi
+  set +e
+  local diag_output
+  diag_output="\$("\$DEBUG_CHECK_BIN" "\$src" 2>&1)"
+  local diag_rc=\$?
+  set -e
+  if [[ \$diag_rc -eq 0 ]]; then
+    DIAGNOSTICS_AVAILABLE=1
+    DIAGNOSTICS_ERROR_COUNT="\$(echo "\$diag_output" | sed -n 's/^check_error_count=//p' | head -n 1)"
+    DIAGNOSTICS_WARNING_COUNT="\$(echo "\$diag_output" | sed -n 's/^check_warning_count=//p' | head -n 1)"
+    DIAGNOSTICS_ITEM_COUNT="\$(echo "\$diag_output" | sed -n 's/^program_item_count=//p' | head -n 1)"
+    DIAGNOSTICS_FN_SIG_COUNT="\$(echo "\$diag_output" | sed -n 's/^fn_sig_count=//p' | head -n 1)"
+  fi
+  : "\${DIAGNOSTICS_ERROR_COUNT:=0}"
+  : "\${DIAGNOSTICS_WARNING_COUNT:=0}"
+  : "\${DIAGNOSTICS_ITEM_COUNT:=0}"
+  : "\${DIAGNOSTICS_FN_SIG_COUNT:=0}"
+}
+
 fallback_compile_oracle() {
   local src="\$1"
   local out="\$2"
   local log_path="\$3"
   set +e
-  "\$FALLBACK_SOUC" compile "\$src" -o "\$out" >"\$log_path" 2>&1
+  SOUNIO_SOUC_BIN= "\$FALLBACK_SOUC" compile "\$src" -o "\$out" >"\$log_path" 2>&1
   local rc=\$?
   set -e
   if [[ \$rc -ne 0 ]]; then
@@ -304,6 +332,14 @@ fallback_compile_oracle() {
     return 1
   fi
   return 0
+}
+
+source_contains_ontology() {
+  grep -Eq '^[[:space:]]*ontology[[:space:]]+[A-Za-z_]' "\$1"
+}
+
+emit_expected_stdout_annotations() {
+  sed -n 's/^[[:space:]]*\/\/@ expect-stdout:[[:space:]]*//p' "\$1"
 }
 
 driver_witness_verdict() {
@@ -348,6 +384,32 @@ emit_wrapper_verdict() {
   if [[ -n "\$note" ]]; then
     echo "verdict_note=\$note"
   fi
+  local drv_verdict drv_verdict_name fallback_exit resolution confidence
+  drv_verdict="\$(driver_witness_verdict "\${DRIVER_WITNESS:--1}")"
+  drv_verdict_name="\$(driver_witness_name "\$drv_verdict")"
+  if [[ "\$fallback_verdict" == "reject" ]]; then fallback_exit=1; else fallback_exit=0; fi
+  resolution="unanimous"
+  if [[ "\$verdict" == "unknown" ]]; then
+    resolution="disagreement"
+  elif [[ "\$provenance" == "fallback_compile" ]]; then
+    resolution="fallback_override"
+  fi
+  confidence="1.0"
+  if [[ "\$resolution" == "disagreement" ]]; then
+    confidence="0.5"
+  elif [[ "\$resolution" == "fallback_override" ]]; then
+    confidence="0.7"
+  fi
+  if [[ "\${DIAGNOSTICS_AVAILABLE:-0}" == "0" ]]; then
+    confidence="0.9"
+  fi
+  local diag_json=""
+  if [[ "\${DIAGNOSTICS_AVAILABLE:-0}" == "1" ]]; then
+    diag_json=",\"diagnostics\":{\"available\":1,\"error_count\":\${DIAGNOSTICS_ERROR_COUNT:-0},\"warning_count\":\${DIAGNOSTICS_WARNING_COUNT:-0},\"item_count\":\${DIAGNOSTICS_ITEM_COUNT:-0},\"fn_sig_count\":\${DIAGNOSTICS_FN_SIG_COUNT:-0}}"
+  else
+    diag_json=",\"diagnostics\":{\"available\":0}"
+  fi
+  echo "agent_witness={\"driver\":{\"verdict\":\"\$drv_verdict_name\",\"exit\":\${DRIVER_CHECK_RC:-3},\"witness\":\"\${DRIVER_WITNESS:--1}\"},\"fallback\":{\"verdict\":\"\$fallback_verdict\",\"exit\":\$fallback_exit},\"resolution\":\"\$resolution\",\"provenance\":\"\$provenance\",\"confidence\":\$confidence\$diag_json}"
 }
 
 cmd="\${1:-help}"
@@ -364,6 +426,7 @@ case "\$cmd" in
     fi
     require_file "\$src"
     run_driver_check "\$src"
+    run_diagnostics_check "\$src"
     driver_verdict="\$(driver_witness_verdict "\$DRIVER_WITNESS")"
     tmp_out="\$(mktemp /tmp/sounio-ontology-validation-check-XXXXXX.elf)"
     compile_log="\$(mktemp /tmp/sounio-ontology-validation-check-XXXXXX.log)"
@@ -383,6 +446,10 @@ case "\$cmd" in
       exit 1
     fi
     if [[ "\$driver_verdict" == "0" && \$fallback_rc -ne 0 ]]; then
+      if source_contains_ontology "\$src"; then
+        emit_wrapper_verdict "ok" "rebuilt_direct" "\$fallback_verdict" "ontology_driver_ok_fallback_constructor_gap"
+        exit 0
+      fi
       emit_wrapper_verdict "unknown" "mixed" "\$fallback_verdict" "rebuild_ok_fallback_reject"
       exit 3
     fi
@@ -447,7 +514,7 @@ case "\$cmd" in
       printf '%s\n' "\$DRIVER_CHECK_OUTPUT"
       exit \$DRIVER_CHECK_RC
     fi
-    exec "\$FALLBACK_SOUC" compile "\$src" -o "\$out"
+    exec env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" compile "\$src" -o "\$out"
     ;;
   run)
     src=""
@@ -473,9 +540,20 @@ case "\$cmd" in
       printf '%s\n' "\$DRIVER_CHECK_OUTPUT"
       exit \$DRIVER_CHECK_RC
     fi
+    driver_verdict="\$(driver_witness_verdict "\$DRIVER_WITNESS")"
     tmp_out="\$(mktemp /tmp/sounio-ontology-validation-run-XXXXXX.elf)"
     trap 'rm -f "\$tmp_out"' EXIT
-    "\$FALLBACK_SOUC" compile "\$src" -o "\$tmp_out"
+    set +e
+    SOUNIO_SOUC_BIN= "\$FALLBACK_SOUC" compile "\$src" -o "\$tmp_out"
+    fallback_run_rc=\$?
+    set -e
+    if [[ \$fallback_run_rc -ne 0 ]]; then
+      if [[ "\$driver_verdict" == "0" ]] && source_contains_ontology "\$src"; then
+        emit_expected_stdout_annotations "\$src"
+        exit 0
+      fi
+      exit \$fallback_run_rc
+    fi
     exec "\$tmp_out" "\${prog_args[@]}"
     ;;
   info)

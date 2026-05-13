@@ -1,0 +1,314 @@
+//@ run-pass
+// Phase 1 — Non-Associative Epistemic Connectomics
+// associator_field.sio — per-subject associator pipeline.
+//
+// For each subject in artifacts/research/abide/frames.bin (or a synthetic
+// self-test fallback), build per-node octonion labels
+//     L_i = (1.0, v1[i], v2[i], v3[i], v4[i], v5[i], v6[i], v7[i])
+// from the 7 Laplacian eigenvectors, iterate over all triples of the first
+// N_WORKING = 30 ROIs, compute ‖[L_i, L_j, L_k]‖², and reduce to mean and
+// p95 per subject. Emit one JSON line per subject to stdout.
+//
+// Constants match PROTOCOL.md § Design.
+
+// =============================================================================
+// Constants
+// =============================================================================
+// N_WORKING = 30  (first 30 ROIs by CC200 ordering)
+// N_TRIPLES = C(30,3) = 4060
+// N_ROIS per frame = 200  (frames.bin fixed layout)
+// N_EIG = 7              (eigenvectors per subject)
+// Pilot limit: max 5 ASD + 5 TD
+
+// =============================================================================
+// Fano-plane associator norm² — inline octonion product twice
+// =============================================================================
+fn assoc_norm_sq(
+    a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64,
+    b0: f64, b1: f64, b2: f64, b3: f64, b4: f64, b5: f64, b6: f64, b7: f64,
+    c0: f64, c1: f64, c2: f64, c3: f64, c4: f64, c5: f64, c6: f64, c7: f64,
+) -> f64 {
+    let p0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    let p1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+    let p2 = a0*b2 + a2*b0 - a1*b3 + a3*b1 + a4*b6 - a6*b4 + a5*b7 - a7*b5
+    let p3 = a0*b3 + a3*b0 + a1*b2 - a2*b1 + a4*b7 - a7*b4 - a5*b6 + a6*b5
+    let p4 = a0*b4 + a4*b0 - a1*b5 + a5*b1 - a2*b6 + a6*b2 - a3*b7 + a7*b3
+    let p5 = a0*b5 + a5*b0 + a1*b4 - a4*b1 + a3*b6 - a6*b3 - a2*b7 + a7*b2
+    let p6 = a0*b6 + a6*b0 + a2*b4 - a4*b2 - a3*b5 + a5*b3 + a1*b7 - a7*b1
+    let p7 = a0*b7 + a7*b0 - a1*b6 + a6*b1 + a2*b5 - a5*b2 + a3*b4 - a4*b3
+
+    let l0 = p0*c0 - p1*c1 - p2*c2 - p3*c3 - p4*c4 - p5*c5 - p6*c6 - p7*c7
+    let l1 = p0*c1 + p1*c0 + p2*c3 - p3*c2 + p4*c5 - p5*c4 - p6*c7 + p7*c6
+    let l2 = p0*c2 + p2*c0 - p1*c3 + p3*c1 + p4*c6 - p6*c4 + p5*c7 - p7*c5
+    let l3 = p0*c3 + p3*c0 + p1*c2 - p2*c1 + p4*c7 - p7*c4 - p5*c6 + p6*c5
+    let l4 = p0*c4 + p4*c0 - p1*c5 + p5*c1 - p2*c6 + p6*c2 - p3*c7 + p7*c3
+    let l5 = p0*c5 + p5*c0 + p1*c4 - p4*c1 + p3*c6 - p6*c3 - p2*c7 + p7*c2
+    let l6 = p0*c6 + p6*c0 + p2*c4 - p4*c2 - p3*c5 + p5*c3 + p1*c7 - p7*c1
+    let l7 = p0*c7 + p7*c0 - p1*c6 + p6*c1 + p2*c5 - p5*c2 + p3*c4 - p4*c3
+
+    let q0 = b0*c0 - b1*c1 - b2*c2 - b3*c3 - b4*c4 - b5*c5 - b6*c6 - b7*c7
+    let q1 = b0*c1 + b1*c0 + b2*c3 - b3*c2 + b4*c5 - b5*c4 - b6*c7 + b7*c6
+    let q2 = b0*c2 + b2*c0 - b1*c3 + b3*c1 + b4*c6 - b6*c4 + b5*c7 - b7*c5
+    let q3 = b0*c3 + b3*c0 + b1*c2 - b2*c1 + b4*c7 - b7*c4 - b5*c6 + b6*c5
+    let q4 = b0*c4 + b4*c0 - b1*c5 + b5*c1 - b2*c6 + b6*c2 - b3*c7 + b7*c3
+    let q5 = b0*c5 + b5*c0 + b1*c4 - b4*c1 + b3*c6 - b6*c3 - b2*c7 + b7*c2
+    let q6 = b0*c6 + b6*c0 + b2*c4 - b4*c2 - b3*c5 + b5*c3 + b1*c7 - b7*c1
+    let q7 = b0*c7 + b7*c0 - b1*c6 + b6*c1 + b2*c5 - b5*c2 + b3*c4 - b4*c3
+
+    let r0 = a0*q0 - a1*q1 - a2*q2 - a3*q3 - a4*q4 - a5*q5 - a6*q6 - a7*q7
+    let r1 = a0*q1 + a1*q0 + a2*q3 - a3*q2 + a4*q5 - a5*q4 - a6*q7 + a7*q6
+    let r2 = a0*q2 + a2*q0 - a1*q3 + a3*q1 + a4*q6 - a6*q4 + a5*q7 - a7*q5
+    let r3 = a0*q3 + a3*q0 + a1*q2 - a2*q1 + a4*q7 - a7*q4 - a5*q6 + a6*q5
+    let r4 = a0*q4 + a4*q0 - a1*q5 + a5*q1 - a2*q6 + a6*q2 - a3*q7 + a7*q3
+    let r5 = a0*q5 + a5*q0 + a1*q4 - a4*q1 + a3*q6 - a6*q3 - a2*q7 + a7*q2
+    let r6 = a0*q6 + a6*q0 + a2*q4 - a4*q2 - a3*q5 + a5*q3 + a1*q7 - a7*q1
+    let r7 = a0*q7 + a7*q0 - a1*q6 + a6*q1 + a2*q5 - a5*q2 + a3*q4 - a4*q3
+
+    let d0 = l0 - r0
+    let d1 = l1 - r1
+    let d2 = l2 - r2
+    let d3 = l3 - r3
+    let d4 = l4 - r4
+    let d5 = l5 - r5
+    let d6 = l6 - r6
+    let d7 = l7 - r7
+
+    d0*d0 + d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7
+}
+
+// =============================================================================
+// Insertion sort for p95 extraction (4060 elements)
+// =============================================================================
+fn isort4060(xs: &![f64; 4060], n: i32) with Mut {
+    var i: i32 = 1
+    while i < n {
+        var j = i
+        while j > 0 {
+            if xs[j - 1] > xs[j] {
+                let t = xs[j - 1]
+                xs[j - 1] = xs[j]
+                xs[j] = t
+                j = j - 1
+            } else {
+                j = 0 - 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Per-subject computation — given 30 nodes × 8 octonion components as a flat
+// array `lab` of length 240, compute (mean, p95) of associator-norm² over all
+// C(30,3) = 4060 triples.
+// =============================================================================
+
+// We return the pair via two out-arrays of length 2 so the caller can collect
+// both mean and p95 without a tuple.
+fn subject_stats(lab: &![f64; 240], out: &![f64; 2]) with Mut, Div {
+    var norms: [f64; 4060] = [0.0; 4060]
+    var tidx: i32 = 0
+    var i: i32 = 0
+    while i < 30 {
+        var j = i + 1
+        while j < 30 {
+            var k = j + 1
+            while k < 30 {
+                norms[tidx] = assoc_norm_sq(
+                    lab[i*8+0], lab[i*8+1], lab[i*8+2], lab[i*8+3],
+                    lab[i*8+4], lab[i*8+5], lab[i*8+6], lab[i*8+7],
+                    lab[j*8+0], lab[j*8+1], lab[j*8+2], lab[j*8+3],
+                    lab[j*8+4], lab[j*8+5], lab[j*8+6], lab[j*8+7],
+                    lab[k*8+0], lab[k*8+1], lab[k*8+2], lab[k*8+3],
+                    lab[k*8+4], lab[k*8+5], lab[k*8+6], lab[k*8+7],
+                )
+                tidx = tidx + 1
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Mean
+    var sum: f64 = 0.0
+    var m: i32 = 0
+    while m < 4060 { sum = sum + norms[m]; m = m + 1 }
+    out[0] = sum / 4060.0
+
+    // p95
+    isort4060(&!norms, 4060)
+    // index = floor(0.95 * 4060) = 3857
+    out[1] = norms[3857]
+}
+
+// =============================================================================
+// Synthetic label generator — mirrors α=0.5 quaternion/octonion mix from
+// sim_ground_truth.sio, parameterized by subject seed.
+// =============================================================================
+fn rng_next(state: i64) -> i64 with Div {
+    let a: i64 = 16807
+    let m: i64 = 2147483647
+    let q: i64 = 127773
+    let r: i64 = 2836
+    let hi = state / q
+    let lo = state - hi * q
+    let t = a * lo - r * hi
+    if t > 0 { t } else { t + m }
+}
+
+fn rng_uniform(state: i64) -> f64 with Div {
+    let m: i64 = 2147483647
+    let s = state as f64
+    let mf = m as f64
+    (s / mf) * 2.0 - 1.0
+}
+
+// =============================================================================
+// Main — synthetic fallback if frames.bin absent; else real ABIDE pilot
+// =============================================================================
+fn main() -> i32 with IO, Mut, Div {
+    let path = "artifacts/research/abide/frames.bin"
+    let sz = file_size(path)
+    let use_real = sz > 16
+
+    // CSV header (also serves as "mode" diagnostic downstream)
+    println("group,mean,p95,n_triples,subject_id")
+    if use_real {
+        println("# mode: real ABIDE")
+        let raw = read_file(path)
+        let n_asd = read_i64(raw, 0)
+        let n_td = read_i64(raw, 1)
+
+        // Pilot limit: first 5 ASD + first 5 TD
+        var max_asd: i64 = n_asd
+        if max_asd > 25 { max_asd = 25 }
+        var max_td: i64 = n_td
+        if max_td > 25 { max_td = 25 }
+
+        let frame_size: i64 = 1400
+        let header: i64 = 2
+
+        var s: i64 = 0
+        while s < max_asd {
+            var lab: [f64; 240] = [0.0; 240]
+            var out_buf: [f64; 2] = [0.0; 2]
+            var node: i32 = 0
+            while node < 30 {
+                lab[node * 8 + 0] = 1.0
+                var e: i32 = 0
+                while e < 7 {
+                    let off = header + s * frame_size + (e as i64) * 200 + (node as i64)
+                    lab[node * 8 + (e + 1)] = read_f64(raw, off) * 5.0
+                    e = e + 1
+                }
+                node = node + 1
+            }
+            subject_stats(&!lab, &!out_buf)
+            // CSV: group,mean,p95,n_triples,subject_id (integer last; print_int newlines)
+            print("ASD,")
+            print_f64(out_buf[0]); print(",")
+            print_f64(out_buf[1]); print(",4060,")
+            print_int(s)
+            s = s + 1
+        }
+        s = 0
+        while s < max_td {
+            var lab: [f64; 240] = [0.0; 240]
+            var out_buf: [f64; 2] = [0.0; 2]
+            let orig = n_asd + s
+            var node: i32 = 0
+            while node < 30 {
+                lab[node * 8 + 0] = 1.0
+                var e: i32 = 0
+                while e < 7 {
+                    let off = header + orig * frame_size + (e as i64) * 200 + (node as i64)
+                    lab[node * 8 + (e + 1)] = read_f64(raw, off) * 5.0
+                    e = e + 1
+                }
+                node = node + 1
+            }
+            subject_stats(&!lab, &!out_buf)
+            print("TD,")
+            print_f64(out_buf[0]); print(",")
+            print_f64(out_buf[1]); print(",4060,")
+            print_int(s)
+            s = s + 1
+        }
+        return 0
+    }
+
+    // ----- Synthetic self-test -----
+    println("# mode: synthetic self-test (frames.bin absent)")
+
+    // 5 ASD synthetic
+    var sid: i32 = 0
+    while sid < 5 {
+        var lab: [f64; 240] = [0.0; 240]
+        var out_buf: [f64; 2] = [0.0; 2]
+        // Inline synthetic fill (ASD bias: α≈0.7)
+        var rng = 42 + (sid as i64) * 101
+        var node: i32 = 0
+        while node < 30 {
+            rng = rng_next(rng)
+            var bucket = rng
+            if bucket < 0 { bucket = 0 - bucket }
+            let mod10 = bucket - (bucket / 10) * 10
+            let full_oct = mod10 < 7
+            var k: i32 = 0
+            while k < 8 {
+                rng = rng_next(rng)
+                let v = rng_uniform(rng)
+                if k >= 4 && !full_oct {
+                    lab[node * 8 + k] = 0.0
+                } else {
+                    lab[node * 8 + k] = v
+                }
+                k = k + 1
+            }
+            node = node + 1
+        }
+        subject_stats(&!lab, &!out_buf)
+        print("ASD,")
+        print_f64(out_buf[0]); print(",")
+        print_f64(out_buf[1]); print(",4060,")
+        print_int(sid)
+        sid = sid + 1
+    }
+    // 5 TD synthetic
+    sid = 0
+    while sid < 5 {
+        var lab: [f64; 240] = [0.0; 240]
+        var out_buf: [f64; 2] = [0.0; 2]
+        // Inline synthetic fill (TD: α≈0.5)
+        var rng = 7919 + (sid as i64) * 233
+        var node: i32 = 0
+        while node < 30 {
+            rng = rng_next(rng)
+            var bucket = rng
+            if bucket < 0 { bucket = 0 - bucket }
+            let mod10 = bucket - (bucket / 10) * 10
+            let full_oct = mod10 < 5
+            var k: i32 = 0
+            while k < 8 {
+                rng = rng_next(rng)
+                let v = rng_uniform(rng)
+                if k >= 4 && !full_oct {
+                    lab[node * 8 + k] = 0.0
+                } else {
+                    lab[node * 8 + k] = v
+                }
+                k = k + 1
+            }
+            node = node + 1
+        }
+        subject_stats(&!lab, &!out_buf)
+        print("TD,")
+        print_f64(out_buf[0]); print(",")
+        print_f64(out_buf[1]); print(",4060,")
+        print_int(sid)
+        sid = sid + 1
+    }
+
+    0
+}

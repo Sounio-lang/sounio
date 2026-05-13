@@ -65,20 +65,16 @@ run_with_timeout() {
     return $?
   fi
 
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$seconds" "$@" <<'PY'
-import subprocess
-import sys
-
-seconds = int(sys.argv[1])
-command = sys.argv[2:]
-try:
-    completed = subprocess.run(command, timeout=seconds)
-    sys.exit(completed.returncode)
-except subprocess.TimeoutExpired:
-    sys.exit(124)
-PY
-    return $?
+  # Pure-perl timeout fallback (replaces python3 subprocess.run heredoc).
+  # perl is on every macOS and most Linux distros by default; on hosts where
+  # `timeout(1)` is missing, perl alarm gives the same semantics. The exec'd
+  # process inherits the alarm; SIGALRM (14) -> exit 128+14=142, which we
+  # normalize to 124 to match Python's subprocess.TimeoutExpired exit semantics.
+  if command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm $ARGV[0]; shift @ARGV; exec @ARGV; exit 127' "$seconds" "$@"
+    local rc=$?
+    [[ $rc -eq 142 ]] && rc=124
+    return $rc
   fi
 
   "$@"

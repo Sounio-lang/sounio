@@ -1,0 +1,137 @@
+//! stdlib/algebra/fano.sio
+//!
+//! Fano plane combinatorics on {1..7} — the substrate of the 168 /
+//! 30 / 7 counts that structure the OSSM-168 pre-registration.
+//!
+//! This module provides the portable primitives required by H1 (feature
+//! F_1, 168 non-Fano ordered octonion triples) and H2/H3 (the sedenion
+//! lifts thereof). It is the Sounio-native companion of
+//! `scripts/research/ossm_168_dryrun/fano_orbits.py` and agrees with
+//! that reference on:
+//!
+//!   * the seven Fano lines on {1..7} under `i XOR j XOR k == 0`
+//!   * the 168 non-Fano ordered triples (i,j,k) with i≠j≠k in {1..7}
+//!   * |Aut(Fano)| = 168 and |S_7 / Aut(Fano)| = 30 (proved in
+//!     `formal/FanoLabellingOrbits.lean`, see DEVIATIONS entry 0001)
+//!
+//! Convention: indices are 1-based (1..7) to match the prereg text and
+//! the Lean/Python enumerations. Callers that need 0-based indexing
+//! into an `[f64; 8]` octonion basis must subtract 1.
+
+// ============================================================================
+// XOR primitives on 3-bit indices (1..7 convention)
+// ============================================================================
+
+// Integer XOR for basis indices 0..7; duplicates `oct_xor` from
+// `octonion.sio` to keep this module self-contained.
+fn fano_xor(a: i64, b: i64) -> i64 with Mut, Div {
+    let a0 = a - (a / 2) * 2
+    let b0 = b - (b / 2) * 2
+    let a1 = (a / 2) - (a / 4) * 2
+    let b1 = (b / 2) - (b / 4) * 2
+    let a2 = a / 4
+    let b2 = b / 4
+    let x0 = if a0 == b0 { 0 } else { 1 }
+    let x1 = if a1 == b1 { 0 } else { 1 }
+    let x2 = if a2 == b2 { 0 } else { 1 }
+    x0 + 2 * x1 + 4 * x2
+}
+
+// ============================================================================
+// Fano line membership
+// ============================================================================
+
+// Return true iff {i, j, k} is one of the seven Fano lines on {1..7}.
+// Requires i, j, k pairwise distinct and all in 1..7; returns false on
+// degenerate input (matches Python `is_fano_triple`).
+pub fn is_fano_line(i: i64, j: i64, k: i64) -> bool with Mut, Div {
+    if i < 1 || i > 7 { return false }
+    if j < 1 || j > 7 { return false }
+    if k < 1 || k > 7 { return false }
+    if i == j || j == k || i == k { return false }
+    fano_xor(fano_xor(i, j), k) == 0
+}
+
+// ============================================================================
+// Enumeration of the 168 non-Fano ordered triples
+// ----------------------------------------------------------------------------
+// There are 7·6·5 = 210 ordered triples with distinct entries in {1..7}.
+// Seven Fano lines contribute 3! = 6 ordered triples each, so 7·6 = 42
+// are "associative" (XOR = 0). The remaining 210 − 42 = 168 are the
+// non-Fano ordered triples enumerated here in lexicographic order.
+// ============================================================================
+
+// Writes the 168 non-Fano ordered triples into three parallel arrays,
+// in lex order of (i, j, k). Each array is length 168; entries in
+// [168..200] are left untouched by this routine.
+//
+// API deliberately uses three `&!` arrays rather than returning a
+// struct containing `[i64; N]` fields, to avoid the mini-native
+// cross-module large-aggregate-return codegen issue that segfaults
+// structs carrying fixed arrays of size ≥ 100.
+pub fn non_fano_ordered_triples(
+    out_i: &![i64; 200],
+    out_j: &![i64; 200],
+    out_k: &![i64; 200]
+) -> i64 with Mut, Div {
+    var count: i64 = 0
+    var i: i64 = 1
+    while i <= 7 {
+        var j: i64 = 1
+        while j <= 7 {
+            var k: i64 = 1
+            while k <= 7 {
+                if i != j && j != k && i != k {
+                    if fano_xor(fano_xor(i, j), k) != 0 {
+                        out_i[count as usize] = i
+                        out_j[count as usize] = j
+                        out_k[count as usize] = k
+                        count = count + 1
+                    }
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Self-tests (compile-time available via `souc run`)
+// ============================================================================
+
+fn test_count_168() -> bool with Mut, Div {
+    var oi: [i64; 200] = [0; 200]
+    var oj: [i64; 200] = [0; 200]
+    var ok: [i64; 200] = [0; 200]
+    non_fano_ordered_triples(&!oi, &!oj, &!ok) == 168
+}
+
+fn test_no_fano_in_output() -> bool with Mut, Div {
+    var oi: [i64; 200] = [0; 200]
+    var oj: [i64; 200] = [0; 200]
+    var ok: [i64; 200] = [0; 200]
+    let n = non_fano_ordered_triples(&!oi, &!oj, &!ok)
+    var t: i64 = 0
+    while t < n {
+        if is_fano_line(oi[t as usize], oj[t as usize], ok[t as usize]) {
+            return false
+        }
+        t = t + 1
+    }
+    true
+}
+
+fn test_fano_lines_recognised() -> bool with Mut, Div {
+    // Seven Fano lines on {1..7}: (1,2,3) (1,4,5) (1,6,7) (2,4,6)
+    // (2,5,7) (3,4,7) (3,5,6).
+    is_fano_line(1, 2, 3) &&
+    is_fano_line(1, 4, 5) &&
+    is_fano_line(1, 6, 7) &&
+    is_fano_line(2, 4, 6) &&
+    is_fano_line(2, 5, 7) &&
+    is_fano_line(3, 4, 7) &&
+    is_fano_line(3, 5, 6)
+}

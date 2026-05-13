@@ -11,7 +11,7 @@
 // Named imports only — glob imports caused type-checker stack overflow
 use parser::ast::{AstPath, empty_path, ImportItemList, ItemKind, ItemList, Name, Program, StringList}
 use ir::ir::{ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_name, ir_empty_validated_patch_stats, IrAlgebraTable, IrEpistemicSection, IrFunction, IrInstr, IrLowerResult, IR_MAX_EPI_ACQUISITION_PLANS, IR_MAX_EPI_ACQUISITION_POLICIES, IR_MAX_EPI_ACQUISITION_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_CANDIDATES, IR_MAX_EPI_ALTERNATIVE_FRONTIERS, IR_MAX_EPI_ALTERNATIVE_POLICIES, IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_SETS, IR_MAX_EPI_AUDITS, IR_MAX_EPI_CONTESTS, IR_MAX_EPI_CONTEST_WITNESSES, IR_MAX_EPI_COUNTEREXAMPLES, IR_MAX_EPI_DECISION_CERTIFICATES, IR_MAX_EPI_DECISION_POLICIES, IR_MAX_EPI_DEFERRAL_POLICIES, IR_MAX_EPI_DEFERRED_CERTIFICATES, IR_MAX_EPI_DEFERRED_REASON_WITNESSES, IR_MAX_EPI_MECHANISTIC_REPORTS, IR_MAX_EPI_MODEL_FAMILIES, IR_MAX_EPI_MONITORING_POLICIES, IR_MAX_EPI_OBSERVED_TRANSITIONS, IR_MAX_EPI_POLICIES, IR_MAX_EPI_POSTERIOR_WEIGHTS, IR_MAX_EPI_RECOURSE_PLANS, IR_MAX_EPI_RECOURSE_POLICIES, IR_MAX_EPI_RECOURSE_REASON_WITNESSES, IR_MAX_EPI_ROBUST_PROOFS, IR_MAX_EPI_ROLLBACK_CERTIFICATES, IR_MAX_EPI_TRANSITION_PLANS, IR_MAX_EPI_TRANSITION_POLICIES, IR_MAX_EPI_TRANSITION_PROTOCOLS, IR_MAX_EPI_TRANSITION_REASON_WITNESSES, IR_MAX_EPI_TRANSITION_STEPS, IR_MAX_EPI_VALIDATED_MANIFESTS, IR_MAX_EPI_VALIDATIONS, IR_MAX_FUNCS, IR_MAX_STRINGS, IrModule, ir_name_eq, IrOpcode, IrProfCounterInfo, IR_STRATEGY_STANDARD, make_name}
-use check::mod::{check_program_with_artifacts, checker_apply_ir_metadata, checker_to_ir_epistemic_into}
+use check::mod::{check_program_epistemic_into, check_program_with_artifacts, checker_apply_ir_metadata, checker_to_ir_epistemic_into}
 use resolve::mod::{resolve_modules, ResolveBatchResult}
 use resolve::imports::{collect_module_exports, ModuleEntry, ModuleRegistry, module_registry_find, module_registry_new, module_registry_put}
 use resolve::symbol::{SymbolKind}
@@ -20,7 +20,7 @@ use lexer::mod::{sourcefile_load, sourcefile_parse_program_loaded, sourcefile_st
 use io::file_write::{io_write_bytes_to_file, io_write_huge_binary, io_write_native_binary, io_write_native_decision_trace}
 use io::trace::{io_trace_append_byte, io_trace_append_json_string, io_trace_append_string, io_trace_bool_string, io_trace_i64_string}
 use compiler::ontology::cache::{ontology_default_home, ontology_default_mode, ontology_default_cache_dir}
-use ir::lower::{IrProgramSummary, IrLowerBoxResult, lower_program_to_ir_trace, lower_program_to_ir_probe_summary, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_with_epistemic, lower_program_function_body_from_summary_with_epistemic, ir_empty_program_summary}
+use ir::lower::{IrProgramSummary, IrProgramSummaryResult, IrProgramSummaryBoxResult, IrProgramSummaryFlat, IrProgramSummaryFlatResult, IrFunctionBodyResult, IrLowerBoxResult, lower_program_to_ir_trace, lower_program_to_ir_probe_summary, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_with_epistemic, lower_program_function_body_from_summary_with_epistemic, ir_empty_program_summary}
 use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_boxed_trace, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_program_to_ir_with_epistemic_boxed_trace_ref}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
 use ir::serialize::{serialize_ir_module, deserialize_ir_module}
@@ -29,10 +29,11 @@ use ir::opt_cleanup::{opt_cleanup_module}
 use ir::loop_opt::{lopt_optimize_module}
 use ir::tailcall::{tco_run_pass}
 use ir::profile::{sprof_apply_promotion, sprof_empty_profile, sprof_parse, SprofProfile}
-use native::frame::{compiler_new}
-use native::machine_ir::{native_v2_legalize_function, native_v2_lower_function_to_machine}
+use native::frame::{compiler_new, NativeCompiler}
+use native::machine_ir::{native_v2_legalize_function, native_v2_lower_function_to_machine, MachineFunction}
+use native::elf::{Elf64Binary}
 use wasm::lower::{wasm_lower_module}
-use native::codegen::{compile_ir_function, compile_ir_function_v2, compile_module_streaming_begin, compile_module_streaming_finish, compile_native, finalize_compiled_elf, name_is_file_size, name_is_get_arg, name_is_get_arg_count, name_is_main, name_is_print, name_is_print_char, name_is_print_int, name_is_read_file, name_is_starts_with, name_is_str_concat, name_is_str_eq, name_is_str_len, name_is_str_slice, name_is_write_file, NativeCompileResult, native_compile_result_error, native_compile_result_ok, native_matrix_mode_string, native_resolve_target, native_target_source_string, NativeTargetSpec, read_env}
+use native::codegen::{ARCH_X86_64, compile_ir_function, compile_ir_function_v2, compile_module_streaming_begin, compile_module_streaming_finish, compile_native, finalize_compiled_elf, name_is_file_size, name_is_get_arg, name_is_get_arg_count, name_is_main, name_is_print, name_is_print_char, name_is_print_int, name_is_read_file, name_is_starts_with, name_is_str_concat, name_is_str_eq, name_is_str_len, name_is_str_slice, name_is_write_file, ERR_BACKEND_NOT_IMPLEMENTED, FORMAT_ELF64, NativeCompileResult, native_compile_result_error, native_compile_result_ok, native_matrix_mode_string, native_resolve_target, native_target_source_string, NativeTargetSpec, OS_LINUX, read_env}
 
 // ============================================================
 // Path conversion: AstPath segments → string
@@ -65,13 +66,13 @@ fn string_list_seg_to_buf(sl: StringList, out: [i8; 512], pos: i64) -> ([i8; 512
 
 fn string_list_to_path_buf(sl: StringList, sep_a: i8, sep_b: i8, out: [i8; 512], pos: i64) -> ([i8; 512], i64) with Mut, Panic, Div, Alloc {
     // Copy head segment
-    let (buf1, p1) = string_list_seg_to_buf(sl, out, pos)
+    let head_pair = string_list_seg_to_buf(sl, out, pos)
     // If there is a tail, add separator and recurse
     match sl.tail {
-        None => (buf1, p1)
+        None => head_pair
         Some(next) => {
-            var buf2 = buf1
-            var p2 = p1
+            var buf2 = head_pair.0
+            var p2 = head_pair.1
             if p2 < 500 {
                 buf2[p2] = sep_a
                 p2 = p2 + 1
@@ -92,9 +93,9 @@ fn use_path_to_string(path: AstPath) -> string with Mut, Panic, Div, Alloc {
     }
     var buf: [i8; 512] = [0; 512]
     // Use :: as separator (58 = ':', 58 = ':')
-    let (result_buf, result_len) = string_list_to_path_buf(path.segments, 58 as i8, 58 as i8, buf, 0)
+    let path_pair = string_list_to_path_buf(path.segments, 58 as i8, 58 as i8, buf, 0)
     // Convert [i8; 512] to string via byte printing
-    buf_to_string(result_buf, result_len)
+    buf_to_string(path_pair.0, path_pair.1)
 }
 
 // Check if a StringList head segment is exactly "super" (115,117,112,101,114)
@@ -124,10 +125,10 @@ fn buf_strip_last_dir(buf: [i8; 512], len: i64) -> ([i8; 512], i64) with Mut, Pa
 // Each non-super segment is appended as "/seg"; "super" strips the last dir component.
 fn use_path_segs_to_buf(sl: StringList, out: [i8; 512], pos: i64) -> ([i8; 512], i64) with Mut, Panic, Div, Alloc {
     if seg_is_super(sl) {
-        let (stripped, new_pos) = buf_strip_last_dir(out, pos)
+        let strip_pair = buf_strip_last_dir(out, pos)
         match sl.tail {
-            None => (stripped, new_pos)
-            Some(next) => use_path_segs_to_buf(*next, stripped, new_pos)
+            None => strip_pair
+            Some(next) => use_path_segs_to_buf(*next, strip_pair.0, strip_pair.1)
         }
     } else {
         var buf2 = out
@@ -136,10 +137,10 @@ fn use_path_segs_to_buf(sl: StringList, out: [i8; 512], pos: i64) -> ([i8; 512],
             buf2[p2] = 47 as i8  // '/'
             p2 = p2 + 1
         }
-        let (buf3, p3) = string_list_seg_to_buf(sl, buf2, p2)
+        let seg_pair = string_list_seg_to_buf(sl, buf2, p2)
         match sl.tail {
-            None => (buf3, p3)
-            Some(next) => use_path_segs_to_buf(*next, buf3, p3)
+            None => seg_pair
+            Some(next) => use_path_segs_to_buf(*next, seg_pair.0, seg_pair.1)
         }
     }
 }
@@ -161,10 +162,10 @@ fn use_path_to_file_path(path: AstPath, prefix: string) -> string with Mut, Pani
         pi = pi + 1
     }
     // Process all segments (super-aware)
-    let (result_buf, result_len) = use_path_segs_to_buf(path.segments, buf, pos)
+    let path_pair = use_path_segs_to_buf(path.segments, buf, pos)
     // Append ".sio"
-    var final_buf = result_buf
-    var fp = result_len
+    var final_buf = path_pair.0
+    var fp = path_pair.1
     if fp < 508 {
         final_buf[fp] = 46 as i8      // '.'
         final_buf[fp + 1] = 115 as i8 // 's'
@@ -184,12 +185,12 @@ fn buf_to_string(buf: [i8; 512], len: i64) -> string with Mut, Panic, Div {
 // Import extraction
 // ============================================================
 
-struct ImportList {
+pub struct ImportList {
     paths: [AstPath; 64],
     count: i64,
 }
 
-fn extract_imports_from_ast(prog: Program) -> ImportList with Mut, Panic, Div, Alloc {
+pub fn extract_imports_from_ast(prog: Program) -> ImportList with Mut, Panic, Div, Alloc {
     var imports = ImportList {
         paths: [empty_path(); 64],
         count: 0,
@@ -232,7 +233,7 @@ fn empty_program() -> Program {
     }
 }
 
-fn load_module_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
+pub fn load_module_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
     let status = sourcefile_load(path)
     if !sourcefile_status_ok() {
         return empty_program()
@@ -318,7 +319,7 @@ fn ir_merge_adjust_epistemic_instr(
     transition_plan_offset: i64,
     observed_transition_offset: i64,
     rollback_certificate_offset: i64
-) -> IrInstr {
+) -> IrInstr with Mut {
     var out = instr
     if out.op == IrOpcode::IrContest || out.op == IrOpcode::IrLiftKnowledge {
         out.label_id = ir_epistemic_offset_id(out.label_id, contest_offset)
@@ -527,12 +528,20 @@ fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection)
 
     i = 0
     while i < src.validated_manifest_count && merged.validated_manifest_count < IR_MAX_EPI_VALIDATED_MANIFESTS {
-        var info = src.validated_manifests[i]
-        info.id = merged.validated_manifest_count
-        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
-        info.robust_proof_id = ir_epistemic_offset_id(info.robust_proof_id, robust_offset)
-        info.validation_id = ir_epistemic_offset_id(info.validation_id, validation_offset)
-        merged.validated_manifests[merged.validated_manifest_count as usize] = info
+        let src_info = src.validated_manifests[i]
+        merged.validated_manifests[merged.validated_manifest_count as usize] = IrValidatedManifestInfo {
+            id: merged.validated_manifest_count,
+            span_start: src_info.span_start,
+            span_end: src_info.span_end,
+            audit_id: ir_epistemic_offset_id(src_info.audit_id, audit_offset),
+            robust_proof_id: ir_epistemic_offset_id(src_info.robust_proof_id, robust_offset),
+            validation_id: if src_info.validation_id >= 0 {
+                src_info.validation_id + validation_offset
+            } else {
+                src_info.validation_id
+            },
+            inner_ty: src_info.inner_ty,
+        }
         merged.validated_manifest_count = merged.validated_manifest_count + 1
         i = i + 1
     }
@@ -587,10 +596,17 @@ fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection)
 
     i = 0
     while i < src.acquisition_reason_witness_count && merged.acquisition_reason_witness_count < IR_MAX_EPI_ACQUISITION_REASON_WITNESSES {
-        var info = src.acquisition_reason_witnesses[i]
-        info.id = merged.acquisition_reason_witness_count
-        info.acquisition_plan_id = ir_epistemic_offset_id(info.acquisition_plan_id, acquisition_plan_offset)
-        merged.acquisition_reason_witnesses[merged.acquisition_reason_witness_count as usize] = info
+        let src_info = src.acquisition_reason_witnesses[i]
+        merged.acquisition_reason_witnesses[merged.acquisition_reason_witness_count as usize] = IrAcquisitionReasonWitnessInfo {
+            id: merged.acquisition_reason_witness_count,
+            span_start: src_info.span_start,
+            span_end: src_info.span_end,
+            acquisition_plan_id: if src_info.acquisition_plan_id >= 0 {
+                src_info.acquisition_plan_id + acquisition_plan_offset
+            } else {
+                src_info.acquisition_plan_id
+            },
+        }
         merged.acquisition_reason_witness_count = merged.acquisition_reason_witness_count + 1
         i = i + 1
     }
@@ -926,18 +942,18 @@ fn visited_contains(visited: [string; 64], count: i64, path: string) -> bool wit
 // Multi-module IR loading (shared by bytecode + native paths)
 // ============================================================
 
-struct MultiModuleIrResult {
+pub struct MultiModuleIrResult {
     ok: bool,
     module: IrModule,
     error_msg: string,
 }
 
-struct MultiModuleFrontendResult {
+pub struct MultiModuleFrontendResult {
     ok: bool,
     error_msg: string,
 }
 
-struct LoadMultimoduleIrTrace {
+pub struct LoadMultimoduleIrTrace {
     loaded_modules: i64,
     resolved_modules: i64,
     typechecked_modules: i64,
@@ -952,7 +968,7 @@ struct LoadMultimoduleIrTrace {
     fallback_insertions: i64,
 }
 
-fn empty_load_multimodule_ir_trace() -> LoadMultimoduleIrTrace {
+pub fn empty_load_multimodule_ir_trace() -> LoadMultimoduleIrTrace {
     LoadMultimoduleIrTrace {
         loaded_modules: 0,
         resolved_modules: 0,
@@ -1011,7 +1027,7 @@ fn multimodule_frontend_error(msg: string) -> MultiModuleFrontendResult {
     MultiModuleFrontendResult { ok: false, error_msg: msg }
 }
 
-fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
+pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
     let main_prog = load_module_file(main_path)
     let main_items = count_items(main_prog)
 
@@ -1106,7 +1122,7 @@ fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendResul
     multimodule_frontend_ok()
 }
 
-fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
+pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
     let main_prog = load_module_file(main_path)
     var programs: [Program; 64] = [empty_program(); 64]
     var file_paths: [string; 64] = [""; 64]
@@ -1186,7 +1202,7 @@ fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrac
     var seed_lower_had_error = false
     var merged_module = ir_empty_module()
     {
-        var seed_lower_result = load_multimodule_lower_program_traced(programs[0], seed_epistemic, 0, &! trace)
+        var seed_lower_result = load_multimodule_lower_program_traced(programs[0], seed_epistemic, 0, trace)
         seed_lower_had_error = seed_lower_result.had_error
         if !seed_lower_had_error {
             checker_apply_ir_metadata(&seed_artifacts.checker, &! seed_lower_result.module)
@@ -1216,7 +1232,7 @@ fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrac
         var lower_had_error = false
         var lowered_module = ir_empty_module()
         {
-            var lower_result = load_multimodule_lower_program_traced(programs[i], epistemic, i, &! trace)
+            var lower_result = load_multimodule_lower_program_traced(programs[i], epistemic, i, trace)
             lower_had_error = lower_result.had_error
             if !lower_had_error {
                 checker_apply_ir_metadata(&artifacts.checker, &! lower_result.module)
@@ -1249,12 +1265,12 @@ fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrac
     multimodule_ir_ok(merged_module)
 }
 
-fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
+pub fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
     var trace = empty_load_multimodule_ir_trace()
     load_multimodule_ir_traced(main_path, &! trace)
 }
 
-fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
+pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
     let main_prog = load_module_file(main_path)
     var programs: [Program; 64] = [empty_program(); 64]
     var file_paths: [string; 64] = [""; 64]
@@ -1384,12 +1400,12 @@ fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! LoadMul
     multimodule_ir_ok(merged_module)
 }
 
-fn load_multimodule_ir_probe_summary(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
+pub fn load_multimodule_ir_probe_summary(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
     var trace = empty_load_multimodule_ir_trace()
     load_multimodule_ir_probe_summary_traced(main_path, &! trace)
 }
 
-fn load_multimodule_epistemic_into(main_path: string, out: &! IrEpistemicSection) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
+pub fn load_multimodule_epistemic_into(main_path: string, out: &! IrEpistemicSection) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
     let main_prog = load_module_file(main_path)
     var programs: [Program; 64] = [empty_program(); 64]
     var file_paths: [string; 64] = [""; 64]
@@ -1473,7 +1489,7 @@ fn compile_multimodule_program(main_path: string) -> BytecodeResult with IO, Mut
     bytecode_result_ok(serialized.0, serialized.1)
 }
 
-fn compile_multimodule_llvm(main_path: string, output_path: string, optimize: bool) -> i32 with IO, Mut, Div, Panic, Alloc {
+pub fn compile_multimodule_llvm(main_path: string, output_path: string, optimize: bool) -> i32 with IO, Mut, Div, Panic, Alloc {
     print("LLVM multimodule backend is unavailable in this build: ")
     print(main_path)
     print(" -> ")
@@ -1493,7 +1509,7 @@ fn program_has_imports(prog: Program) -> bool with Mut, Panic, Div, Alloc {
 // Multi-module native compilation pipeline (ELF output)
 // ============================================================
 
-fn multimodule_native_trace_output_path() -> string {
+fn multimodule_native_trace_output_path() -> string with IO, Mut, Div, Panic {
     let override_path = read_env("SOUNIO_NATIVE_DECISION_TRACE_PATH")
     if str_len(override_path) > 0 {
         override_path
@@ -1520,6 +1536,16 @@ fn thin_copy_huge_to_small(src: [i8; 16777216], len: i64) -> [i8; 131072] with M
     out
 }
 
+fn thin_copy_elf_to_small(src: [i8; 1048576], len: i64) -> [i8; 131072] with Mut, Panic, Div {
+    var out: [i8; 131072] = [0; 131072]
+    var i: i64 = 0
+    while i < len && i < 131072 {
+        out[i as usize] = src[i as usize]
+        i = i + 1
+    }
+    out
+}
+
 fn thin_read_small_file(path: string) -> (bool, [i8; 131072], i64) with IO, Mut, Panic, Div {
     let len = file_size(path)
     if len <= 0 || len > 131072 || !file_exists(path) {
@@ -1535,6 +1561,14 @@ fn thin_native_compile_result_from_wide(bytes: [i8; 16777216], len: i64, format_
         return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_native_binary_too_large")
     }
     let narrow = thin_copy_huge_to_small(bytes, len)
+    native_compile_result_ok(narrow, len, format_id)
+}
+
+fn thin_native_compile_result_from_elf(bytes: [i8; 1048576], len: i64, format_id: i64) -> NativeCompileResult with Mut, Panic, Div {
+    if len <= 0 || len > 131072 {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_native_binary_too_large")
+    }
+    let narrow = thin_copy_elf_to_small(bytes, len)
     native_compile_result_ok(narrow, len, format_id)
 }
 
@@ -1580,7 +1614,7 @@ fn compile_singlemodule_native_streaming_result_from_program(
     if full_result.had_error {
         return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "ir_lowering_failed")
     }
-    let full_module = &(*full_result.module)
+    let full_module: &IrModule = &(*full_result.module)
     if (*full_module).fn_count <= 0 {
         return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "ir_lowering_empty")
     }
@@ -1590,7 +1624,7 @@ fn compile_singlemodule_native_streaming_result_from_program(
         print("\n")
     }
 
-    var nc = compile_module_streaming_begin(compiler_new(), full_module)
+    var nc: NativeCompiler = compile_module_streaming_begin(compiler_new(), full_module)
     var fi: i64 = 0
     while fi < (*full_module).fn_count {
         let fn_body = (*full_module).functions[fi as usize]
@@ -1599,8 +1633,8 @@ fn compile_singlemodule_native_streaming_result_from_program(
             print(str_from_bytes(fn_body.name.buf, fn_body.name.len))
             print("\n")
         }
-        let lowered = native_v2_lower_function_to_machine(fn_body)
-        let legal = native_v2_legalize_function(lowered)
+        let lowered: MachineFunction = native_v2_lower_function_to_machine(fn_body)
+        let legal: MachineFunction = native_v2_legalize_function(lowered)
         if !legal.supported {
             return native_compile_result_error(
                 ERR_BACKEND_NOT_IMPLEMENTED(),
@@ -1612,11 +1646,11 @@ fn compile_singlemodule_native_streaming_result_from_program(
     }
 
     nc = compile_module_streaming_finish(nc, full_module)
-    let elf = finalize_compiled_elf(nc, 4194304)
-    thin_native_compile_result_from_wide(elf.bytes, elf.len, FORMAT_ELF64())
+    let elf: Elf64Binary = finalize_compiled_elf(nc, 4194304)
+    thin_native_compile_result_from_elf(elf.bytes, elf.len, FORMAT_ELF64())
 }
 
-fn compile_multimodule_native_maybe_streaming(main_path: string, target_spec: NativeTargetSpec) -> (bool, NativeCompileResult) with IO, Mut, Div, Panic, Alloc {
+pub fn compile_multimodule_native_maybe_streaming(main_path: string, target_spec: NativeTargetSpec) -> (bool, NativeCompileResult) with IO, Mut, Div, Panic, Alloc {
     if target_spec.arch_id != ARCH_X86_64() || target_spec.os_id != OS_LINUX() {
         return (false, native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_fallback_target"))
     }
@@ -2442,7 +2476,7 @@ fn thin_append_stub_if_missing(module: IrModule, func: IrFunction, stub_name: Na
         return (module, found)
     }
     var out = module
-    if out.fn_count >= 1024 {
+    if out.fn_count >= IR_MAX_FUNCS {
         return (out, -1)
     }
     let idx = out.fn_count
@@ -2950,7 +2984,7 @@ fn thin_write_native_decision_trace_extended(
     io_write_bytes_to_file(path, buf, p)
 }
 
-fn compile_multimodule_native_advanced(
+pub fn compile_multimodule_native_advanced(
     main_path: string,
     output_path: string,
     requested_target: string,
@@ -3598,7 +3632,7 @@ fn compile_multimodule_native_advanced(
     return 0
 }
 
-fn compile_multimodule_native_with_ir(
+pub fn compile_multimodule_native_with_ir(
     main_path: string,
     preloaded_ir: IrModule,
     output_path: string,
@@ -3758,7 +3792,7 @@ fn compile_multimodule_native_with_ir(
     return 0
 }
 
-fn compile_multimodule_native(
+pub fn compile_multimodule_native(
     main_path: string,
     output_path: string,
     requested_target: string,

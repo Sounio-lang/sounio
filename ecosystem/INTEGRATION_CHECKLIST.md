@@ -98,7 +98,7 @@
   - Python API via sounio-py
 
 ### Ecosystem-Level Documentation
-- [ ] **triple-sounio-ecosystem/README.md** exists (overview, setup, all 3 projects)
+- [ ] **ecosystem/README.md** exists (overview, setup, all 3 projects)
 - [ ] **INTEGRATION_NOTES.md** documents critical handoffs (executable paths, env vars, format specs)
 - [ ] Each project has its own README with installation + quick start
 
@@ -165,7 +165,7 @@
 ```
 Provider: grok
 Task: expand
-File: triple-sounio-ecosystem/sounio-py/README.md
+File: ecosystem/sounio-py/README.md
 
 Prompt:
 "Write a 300-word README for the sounio-py Python package.
@@ -184,7 +184,7 @@ Tone: Technical but accessible to Python scientists. Emphasize epistemic computi
 ```
 Provider: grok
 Task: expand
-File: triple-sounio-ecosystem/sounio-jupyter/README.md
+File: ecosystem/sounio-jupyter/README.md
 
 Prompt:
 "Write a 300-word README for sounio-jupyter Jupyter kernel.
@@ -204,7 +204,7 @@ Tone: User-friendly, emphasize interactivity and visual display of uncertainty."
 ```
 Provider: grok
 Task: expand
-File: triple-sounio-ecosystem/drug-discovery/README.md
+File: ecosystem/drug-discovery/README.md
 
 Prompt:
 "Write a 300-word README for drug-discovery Sounio package.

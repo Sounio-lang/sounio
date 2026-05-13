@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 
 type ActId = 1 | 2 | 3 | 4;
 
@@ -9,7 +9,7 @@ interface ActData {
   subtitle: string;
   image: string;
   imageAlt: string;
-  blendMode?: React.CSSProperties['mixBlendMode'];
+  blendMode?: CSSProperties['mixBlendMode'];
   paragraphs: string[];
 }
 

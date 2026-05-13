@@ -1,5 +1,6 @@
-.PHONY: build check test test-stdlib clean fmt install help lint lint-fix \
-         ops-guardrail-local ops-infra-up ops-strict-up ops-status
+.PHONY: build check test test-stdlib clean fmt install help lint lint-fix lint-docs \
+         docs-gen ops-guardrail-local ops-infra-up ops-strict-up ops-status \
+         website-verified-snapshot
 
 SOUC := ./bin/souc
 
@@ -12,13 +13,16 @@ endif
 help:                ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-build:               ## Bootstrap compile: gen1 → gen2 → gen3 (fixed-point verification)
-	@echo "→ Stage 1: boot4.elf compiles lean_single → gen1.elf"
-	./artifacts/bootstrap/boot4.elf self-hosted/compiler/lean_single.sio gen1.elf
-	@echo "→ Stage 2: gen1.elf compiles lean_single → gen2.elf"
+build:               ## Bootstrap compile: JIT → gen1 → gen2 → gen3 (fixed-point verification)
+	@echo "→ Stage 0: JIT (bin/souc-linux-x86_64) compiles lean_single → gen1.elf"
+	./bin/souc-linux-x86_64 self-hosted/compiler/lean_single.sio gen1.elf
+	chmod +x gen1.elf
+	@echo "→ Stage 1: gen1.elf compiles lean_single → gen2.elf"
 	./gen1.elf self-hosted/compiler/lean_single.sio gen2.elf
-	@echo "→ Stage 3: gen2.elf compiles lean_single → gen3.elf"
+	chmod +x gen2.elf
+	@echo "→ Stage 2: gen2.elf compiles lean_single → gen3.elf"
 	./gen2.elf self-hosted/compiler/lean_single.sio gen3.elf
+	chmod +x gen3.elf
 	@echo "→ Verifying fixed-point..."
 	@MD5_GEN2=$$(md5sum gen2.elf | awk '{print $$1}'); \
 	 MD5_GEN3=$$(md5sum gen3.elf | awk '{print $$1}'); \
@@ -34,8 +38,10 @@ build:               ## Bootstrap compile: gen1 → gen2 → gen3 (fixed-point v
 check:               ## Type-check self-hosted compiler and run lint gates
 	@echo "→ Type-checking self-hosted/compiler/lean_single.sio"
 	$(SOUC) check self-hosted/compiler/lean_single.sio
+	@echo "→ Regenerating stdlib API reference"
+	@bash scripts/build/gen_stdlib_api_md.sh
 	@echo "→ Running lint gates..."
-	@bash scripts/ci/full_gate.sh 2>&1 | tail -30
+	@bash -o pipefail -c 'bash scripts/dev/full_gate.sh 2>&1 | tail -40'
 
 test:                ## Run full test suite (compile-fail + run-pass + stdlib)
 	@echo "→ Running full test suite"
@@ -47,7 +53,7 @@ test-stdlib:         ## Run stdlib integration tests (subset)
 	$(SOUC) run tests/stdlib/complex/test_complex.sio
 
 clean:               ## Remove generated ELF artifacts (gen1, gen2, gen3)
-	rm -f gen1.elf gen2.elf gen3.elf
+	rm -f gen1.elf gen2.elf gen3.elf gen4.elf
 	@echo "✓ Cleaned generated artifacts"
 
 fmt:                 ## Format .sio source code (not yet implemented)
@@ -59,6 +65,18 @@ lint:                ## Lint .sio files for Rust hallucinations (LLM grammar enf
 lint-fix:            ## Apply automatic fixes to a file: make lint-fix FILE=path/to/file.sio
 	@if [ -z "$(FILE)" ]; then echo "Usage: make lint-fix FILE=path/to/file.sio"; exit 1; fi
 	@python3 scripts/dev/sounio-lint.py --fix $(FILE)
+
+docs-gen:            ## Regenerate stdlib API reference from source
+	@bash scripts/build/gen_stdlib_api_md.sh
+
+website-verified-snapshot: ## Run stdlib reliability gate + refresh website verified-snapshot.json (needs SOUC_BIN)
+	@echo "→ SOUC_BIN must point to a working souc (e.g. export SOUC_BIN=/tmp/souc.elf)"
+	@bash scripts/dev/stdlib_reliability_gate.sh
+	@npm run gen:verified-snapshot --prefix website
+	@echo "✓ Updated website/src/data/verified-snapshot.json (review and git add)"
+
+lint-docs:           ## Extract and check code snippets from docs/**/*.md
+	@bash scripts/ci/check_doc_snippets.sh
 
 install:             ## Install souc compiler to ~/.local/bin/souc
 	mkdir -p ~/.local/bin

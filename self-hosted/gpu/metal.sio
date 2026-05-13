@@ -11,6 +11,11 @@
 //       device float* param_b [[buffer(1)]],
 //       uint tid [[thread_position_in_grid]]
 //   ) { ... }
+//
+// Metal Shading Language does not expose a portable native `double` type.
+// Sounio therefore lowers source-level f64 through an explicit policy. The
+// default self-hosted MSL path uses checked f32 storage until compensated
+// float2 lowering is promoted by a runtime gate.
 
 // ============================================================================
 // MetalBuf — text buffer (same pattern as PtxBuf)
@@ -119,12 +124,50 @@ fn metal_to_string(buf: MetalBuf) -> string with Mut, Panic, Div, Alloc {
 // Type mapping: GpuType → MSL type string
 // ============================================================================
 
+enum MetalF64Policy {
+    MetalF64Reject,
+    MetalF64F32Checked,
+    MetalF64Float2Compensated,
+}
+
+fn metal_msl_supports_native_f64() -> bool {
+    false
+}
+
+fn metal_default_f64_policy() -> MetalF64Policy {
+    MetalF64Policy::MetalF64F32Checked
+}
+
+fn metal_f64_policy_to_string(policy: MetalF64Policy) -> string {
+    match policy {
+        MetalF64Policy::MetalF64Reject => "reject"
+        MetalF64Policy::MetalF64F32Checked => "f32_checked"
+        MetalF64Policy::MetalF64Float2Compensated => "float2_compensated"
+    }
+}
+
+fn metal_f64_value_type(policy: MetalF64Policy) -> string {
+    match policy {
+        MetalF64Policy::MetalF64Reject => "unsupported_f64"
+        MetalF64Policy::MetalF64F32Checked => "float"
+        MetalF64Policy::MetalF64Float2Compensated => "float2"
+    }
+}
+
+fn metal_f64_param_type(policy: MetalF64Policy) -> string {
+    match policy {
+        MetalF64Policy::MetalF64Reject => "device unsupported_f64*"
+        MetalF64Policy::MetalF64F32Checked => "device float*"
+        MetalF64Policy::MetalF64Float2Compensated => "device float2*"
+    }
+}
+
 fn gpu_type_to_msl(ty: GpuType) -> string {
     match ty {
         GpuType::GpuU32  => "uint",
         GpuType::GpuU64  => "ulong",
         GpuType::GpuF32  => "float",
-        GpuType::GpuF64  => "double",
+        GpuType::GpuF64  => metal_f64_value_type(metal_default_f64_policy()),
         GpuType::GpuI32  => "int",
         GpuType::GpuI64  => "long",
         GpuType::GpuPtr  => "device void*",
@@ -142,7 +185,7 @@ fn gpu_type_to_msl_param(ty: GpuType) -> string {
         GpuType::GpuU32  => "device uint*",
         GpuType::GpuU64  => "device ulong*",
         GpuType::GpuF32  => "device float*",
-        GpuType::GpuF64  => "device double*",
+        GpuType::GpuF64  => metal_f64_param_type(metal_default_f64_policy()),
         GpuType::GpuI32  => "device int*",
         GpuType::GpuI64  => "device long*",
         GpuType::GpuPtr  => "device void*",
@@ -258,7 +301,9 @@ fn metal_emit_var_decls(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf with Mut
     if kernel.max_reg_f64 > 0 {
         var i: i64 = 0
         while i < kernel.max_reg_f64 {
-            out = metal_push_str(out, "    double fd")
+            out = metal_push_str(out, "    ")
+            out = metal_push_str(out, metal_f64_value_type(metal_default_f64_policy()))
+            out = metal_push_str(out, " fd")
             out = metal_push_i64(out, i)
             out = metal_push_str(out, ";\n")
             i = i + 1
@@ -310,7 +355,9 @@ fn metal_emit_var_decls(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf with Mut
         out = metal_push_str(out, "    threadgroup uint __omega_shfl_u32[1024];\n")
         out = metal_push_str(out, "    threadgroup ulong __omega_shfl_u64[1024];\n")
         out = metal_push_str(out, "    threadgroup float __omega_shfl_f32[1024];\n")
-        out = metal_push_str(out, "    threadgroup double __omega_shfl_f64[1024];\n")
+        out = metal_push_str(out, "    threadgroup ")
+        out = metal_push_str(out, metal_f64_value_type(metal_default_f64_policy()))
+        out = metal_push_str(out, " __omega_shfl_f64[1024];\n")
         out = metal_push_str(out, "    threadgroup int __omega_shfl_i32[1024];\n")
         out = metal_push_str(out, "    threadgroup long __omega_shfl_i64[1024];\n")
         out = metal_push_str(out, "    uint __omega_local_tid = tid - (bid * ntid);\n")
@@ -336,6 +383,11 @@ fn metal_reg_name(ty: GpuType, idx: i64) -> string with Mut, Panic, Div, Alloc {
         GpuType::GpuI32 => str_concat("sr", i64_to_string(idx)),
         GpuType::GpuI64 => str_concat("srd", i64_to_string(idx)),
         GpuType::GpuPtr => str_concat("rd", i64_to_string(idx)),
+        GpuType::GpuBool => str_concat("p", i64_to_string(idx)),
+        GpuType::GpuTf32 => str_concat("f", i64_to_string(idx)),
+        GpuType::GpuF16 => str_concat("h", i64_to_string(idx)),
+        GpuType::GpuB32 => str_concat("r", i64_to_string(idx)),
+        GpuType::GpuB64 => str_concat("rd", i64_to_string(idx)),
     }
 }
 
@@ -1393,9 +1445,99 @@ fn metal_emit_cvt_f32_to_f64(buf: MetalBuf, dst: string, src: string) -> MetalBu
     var out = buf
     out = metal_push_str(out, "    ")
     out = metal_push_str(out, dst)
-    out = metal_push_str(out, " = static_cast<double>(")
+    out = metal_push_str(out, " = static_cast<")
+    out = metal_push_str(out, metal_f64_value_type(metal_default_f64_policy()))
+    out = metal_push_str(out, ">(")
     out = metal_push_str(out, src)
     out = metal_push_str(out, ");\n")
+    out
+}
+
+// ============================================================================
+// Metal-first algebraic kernel witnesses
+// ============================================================================
+
+fn metal_emit_vec_add_f32() -> MetalBuf with Mut, Panic, Div {
+    var b = metal_buf_new()
+    b = metal_push_str(b, "#include <metal_stdlib>\n")
+    b = metal_push_str(b, "using namespace metal;\n\n")
+    b = metal_push_str(b, "kernel void vec_add(\n")
+    b = metal_push_str(b, "    device const float* a [[buffer(0)]],\n")
+    b = metal_push_str(b, "    device const float* b_in [[buffer(1)]],\n")
+    b = metal_push_str(b, "    device float* c [[buffer(2)]],\n")
+    b = metal_push_str(b, "    uint tid [[thread_position_in_grid]]\n")
+    b = metal_push_str(b, ")\n")
+    b = metal_push_str(b, "{\n")
+    b = metal_push_str(b, "    c[tid] = a[tid] + b_in[tid];\n")
+    b = metal_push_str(b, "}\n")
+    b
+}
+
+fn metal_emit_ossm_oct_step_f64_checked() -> MetalBuf with Mut, Panic, Div {
+    var out = metal_buf_new()
+    out = metal_emit_header(out)
+    out = metal_push_str(out, "// sounio.source_semantics=f64\n")
+    out = metal_push_str(out, "// sounio.metal_f64_policy=f32_checked\n")
+    out = metal_push_str(out, "// sounio.algebra_law_profile=octonion:alternative,non_associative,epistemic_shadow\n")
+    out = metal_push_str(out, "kernel void ossm_oct_step_f64_checked(\n")
+    out = metal_push_str(out, "    device int* n [[buffer(0)]],\n")
+    out = metal_push_str(out, "    device float* state [[buffer(1)]],\n")
+    out = metal_push_str(out, "    device float* out_buf [[buffer(2)]],\n")
+    out = metal_push_str(out, "    device float* shadow [[buffer(3)]],\n")
+    out = metal_push_str(out, "    uint tid [[thread_position_in_grid]]) {\n")
+    out = metal_push_str(out, "    if ((int)tid >= n[0]) return;\n")
+    out = metal_push_str(out, "    int upper = (int)tid + 64;\n")
+    out = metal_push_str(out, "    float h0 = state[(int)tid];\n")
+    out = metal_push_str(out, "    float h1 = state[upper];\n")
+    out = metal_push_str(out, "    float x0 = h0 + 1.0f;\n")
+    out = metal_push_str(out, "    float x1 = h1 + 0.25f;\n")
+    out = metal_push_str(out, "    float ah0 = (0.5f * h0) - (0.125f * h1);\n")
+    out = metal_push_str(out, "    float ah1 = (0.5f * h1) + (0.125f * h0);\n")
+    out = metal_push_str(out, "    float bx0 = (0.25f * x0) - (0.5f * x1);\n")
+    out = metal_push_str(out, "    float bx1 = (0.25f * x1) + (0.5f * x0);\n")
+    out = metal_push_str(out, "    float next0 = ah0 + bx0;\n")
+    out = metal_push_str(out, "    float next1 = ah1 + bx1;\n")
+    out = metal_push_str(out, "    float energy = (next0 * next0) + (next1 * next1);\n")
+    out = metal_push_str(out, "    out_buf[(int)tid] = next0;\n")
+    out = metal_push_str(out, "    out_buf[upper] = next1;\n")
+    out = metal_push_str(out, "    shadow[(int)tid] = energy + 0.015625f;\n")
+    out = metal_push_str(out, "}\n")
+    out
+}
+
+fn metal_emit_sedenion_cd_step_f64_checked() -> MetalBuf with Mut, Panic, Div {
+    var out = metal_buf_new()
+    out = metal_emit_header(out)
+    out = metal_push_str(out, "// sounio.source_semantics=f64\n")
+    out = metal_push_str(out, "// sounio.metal_f64_policy=f32_checked\n")
+    out = metal_push_str(out, "// sounio.algebra_law_profile=sedenion:cayley_dickson,non_associative,zero_divisor_sensitive,epistemic_shadow\n")
+    out = metal_push_str(out, "kernel void sedenion_cd_step_f64_checked(\n")
+    out = metal_push_str(out, "    device int* n [[buffer(0)]],\n")
+    out = metal_push_str(out, "    device float* state [[buffer(1)]],\n")
+    out = metal_push_str(out, "    device float* out_buf [[buffer(2)]],\n")
+    out = metal_push_str(out, "    device float* shadow [[buffer(3)]],\n")
+    out = metal_push_str(out, "    uint tid [[thread_position_in_grid]]) {\n")
+    out = metal_push_str(out, "    if ((int)tid >= n[0]) return;\n")
+    out = metal_push_str(out, "    int o1 = (int)tid + 64;\n")
+    out = metal_push_str(out, "    int o2 = (int)tid + 128;\n")
+    out = metal_push_str(out, "    int o3 = (int)tid + 192;\n")
+    out = metal_push_str(out, "    float lo0 = state[(int)tid];\n")
+    out = metal_push_str(out, "    float lo1 = state[o1];\n")
+    out = metal_push_str(out, "    float hi0 = state[o2];\n")
+    out = metal_push_str(out, "    float hi1 = state[o3];\n")
+    out = metal_push_str(out, "    float x0 = lo0 + 1.0f;\n")
+    out = metal_push_str(out, "    float x1 = 0.5f;\n")
+    out = metal_push_str(out, "    float lo_mul0 = (lo0 * x0) - (lo1 * x1);\n")
+    out = metal_push_str(out, "    float lo_mul1 = (lo0 * x1) + (lo1 * x0);\n")
+    out = metal_push_str(out, "    float hi_mul0 = (0.25f * hi0) - (0.125f * hi1);\n")
+    out = metal_push_str(out, "    float hi_mul1 = (0.25f * hi1) + (0.125f * hi0);\n")
+    out = metal_push_str(out, "    float cd_lo0 = lo_mul0 - hi_mul0;\n")
+    out = metal_push_str(out, "    float cd_hi0 = hi_mul1 + lo_mul1;\n")
+    out = metal_push_str(out, "    float norm_shadow = (cd_lo0 * cd_lo0) + (cd_hi0 * cd_hi0);\n")
+    out = metal_push_str(out, "    out_buf[(int)tid] = cd_lo0;\n")
+    out = metal_push_str(out, "    out_buf[o1] = cd_hi0;\n")
+    out = metal_push_str(out, "    shadow[(int)tid] = norm_shadow + 0.015625f;\n")
+    out = metal_push_str(out, "}\n")
     out
 }
 

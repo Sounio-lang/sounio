@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-g
 
 These are the mistakes LLMs (and humans) make writing Sounio. Learn them.
 
-**Full syntax ref**: [docs/LLM_PROGRAMMING_GUIDE.md](../LLM_PROGRAMMING_GUIDE.md)
+**Full syntax ref**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](LLM_PROGRAMMING_GUIDE.md)
 
 ## 1. SEMICOLONS - The #1 Mistake
 
@@ -389,4 +389,4 @@ extern "C" {
 
 ---
 
-**TL;DR**: Sounio ≠ Rust. Study `tests/run-pass/` for verified examples. Read [docs/LLM_PROGRAMMING_GUIDE.md](../LLM_PROGRAMMING_GUIDE.md) for full syntax reference.
+**TL;DR**: Sounio ≠ Rust. Study `tests/run-pass/` for verified examples. Read [docs/guide/LLM_PROGRAMMING_GUIDE.md](LLM_PROGRAMMING_GUIDE.md) for full syntax reference.

@@ -3,6 +3,10 @@
 // Handles: named types, references, arrays, tuples, function types,
 // generic arguments, and effect lists.
 
+use parser::ast::*
+use lexer::token::*
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_peek_ahead, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
+
 impl Parser {
     // ============================================================
     // Type expression entry point
@@ -65,6 +69,22 @@ impl Parser {
             self.parse_fn_type()
         } else if k == TokenKind::Knowledge {
             self.parse_knowledge_type()
+        } else if k == TokenKind::Forgettable {
+            self.parse_forgettable_type()
+        } else if k == TokenKind::ExactlyPrivate {
+            self.parse_exactly_private_type()
+        } else if k == TokenKind::Editable {
+            self.parse_editable_type()
+        } else if k == TokenKind::CapabilityGated {
+            self.parse_capability_gated_type()
+        } else if k == TokenKind::Composable {
+            self.parse_composable_type()
+        } else if k == TokenKind::Audited {
+            self.parse_audited_type()
+        } else if k == TokenKind::Revivable {
+            self.parse_revivable_type()
+        } else if k == TokenKind::Interpretable {
+            self.parse_interpretable_type()
         } else if k == TokenKind::Model {
             self.parse_generic_wrapper_type(TypeExprKind::TypeModel)
         } else if k == TokenKind::Policy {
@@ -146,10 +166,24 @@ impl Parser {
         let p1 = pair.0
         let path = pair.1
 
+        // Inline peek() logic to avoid method-call codegen issues on SIZE_HINT-typed p1.
+        // pair.0 loses the Parser type hash (SIZE_HINT_SENTINEL), so p1.peek() dispatches
+        // incorrectly. Use field accesses + pt_read_kind (free fn) instead.
+        let p1_peek_kind: TokenKind = if p1.pending_gt > 0 {
+            TokenKind::Gt
+        } else if p1.pos < p1.token_count {
+            pt_read_kind(p1.pos)
+        } else {
+            TokenKind::Eof
+        }
+
         // Check for generic arguments <T, U>
-        if p1.peek() == TokenKind::Lt {
+        if p1_peek_kind == TokenKind::Lt {
             let pair2 = p1.parse_type_args()
-            let span = pair2.0.span_from(start)
+            // Inline span_from to avoid SIZE_HINT method-call issues on pair2.0
+            let p2 = pair2.0
+            let p2_end: i64 = if p2.pos < p2.token_count { PT_END[p2.pos as usize] } else { start.end }
+            let span = Span { file_id: start.file_id, start: start.start, end: p2_end }
             (pair2.0, TypeExpr {
                 kind: TypeExprKind::TypeNamed,
                 span: span,
@@ -162,7 +196,9 @@ impl Parser {
                 refinement_info: None,
             })
         } else {
-            let span = p1.span_from(start)
+            // Inline span_from to avoid SIZE_HINT method-call issues on p1
+            let p1_end: i64 = if p1.pos < p1.token_count { PT_END[p1.pos as usize] } else { start.end }
+            let span = Span { file_id: start.file_id, start: start.start, end: p1_end }
             (p1, TypeExpr {
                 kind: TypeExprKind::TypeNamed,
                 span: span,
@@ -186,8 +222,11 @@ impl Parser {
         var p = self.advance()
         var rev_segs = StringList { head_buf: name.buf, head_len: name.len, tail: None }
         var count: i64 = 1
-
-        while p.peek() == TokenKind::ColonColon && (p.peek_ahead(1) == TokenKind::Ident || tk_is_keyword(p.peek_ahead(1))) {
+        // Avoid p.peek_ahead() method call — use free fn parser_peek_ahead.
+        // Also restructure: check first part of && without calling peek_ahead in condition.
+        while parser_peek(p) == TokenKind::ColonColon {
+            let next_k = parser_peek_ahead(p, 1)
+            if !(next_k == TokenKind::Ident || tk_is_keyword(next_k)) { break }
             p = p.advance()  // skip ::
             let seg_name = p.current_name()
             rev_segs = StringList {
@@ -199,8 +238,14 @@ impl Parser {
             p = p.advance()  // skip ident
         }
 
-        let segs = reverse_string_list(rev_segs)
-        (p, AstPath { segments: segs, seg_count: count })
+        // For single-segment paths (common case), skip reversal entirely
+        // to avoid passing large StringList structs by value (IS_SPTR issue).
+        if count == 1 {
+            (p, AstPath { segments: rev_segs, seg_count: count })
+        } else {
+            let segs = reverse_string_list(rev_segs)
+            (p, AstPath { segments: segs, seg_count: count })
+        }
     }
 
     // ============================================================
@@ -214,7 +259,7 @@ impl Parser {
         let first_ty = pair.1
         var rev_list = TypeExprList { head: first_ty, tail: None }
 
-        while p.peek() == TokenKind::Comma {
+        while parser_peek(p) == TokenKind::Comma {
             p = p.advance()  // skip ,
             let pair2 = p.parse_type()
             p = pair2.0
@@ -281,11 +326,10 @@ impl Parser {
         let elem_ty = pair.1
         p = pair.0
         var size_expr: Option<Box<Expr>> = None
-        if p.peek() == TokenKind::Semi {
+        if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
-            let pair2 = p.parse_expr()
-            p = pair2.0
-            size_expr = Some(Box::new(pair2.1))
+            p = p.parse_expr()
+            size_expr = Some(parser_take_expr_box())
         }
         p = p.expect(TokenKind::RBracket)
         let span = p.span_from(start)
@@ -311,7 +355,7 @@ impl Parser {
         var p = self.advance()  // skip (
 
         // Unit type ()
-        if p.peek() == TokenKind::RParen {
+        if parser_peek(p) == TokenKind::RParen {
             p = p.advance()
             let span = p.span_from(start)
             (p, TypeExpr {
@@ -331,16 +375,16 @@ impl Parser {
             p = pair.0
             let first_ty = pair.1
 
-            if p.peek() == TokenKind::Comma {
+            if parser_peek(p) == TokenKind::Comma {
                 // Tuple type
                 p = p.advance()  // skip ,
                 var rev_list = TypeExprList { head: first_ty, tail: None }
-                while p.peek() != TokenKind::RParen && p.peek() != TokenKind::Eof {
+                while parser_peek(p) != TokenKind::RParen && parser_peek(p) != TokenKind::Eof {
                     let pair2 = p.parse_type()
                     p = pair2.0
                     let next_ty = pair2.1
                     rev_list = TypeExprList { head: next_ty, tail: Some(Box::new(rev_list)) }
-                    if p.peek() == TokenKind::Comma {
+                    if parser_peek(p) == TokenKind::Comma {
                         p = p.advance()
                     }
                 }
@@ -378,13 +422,13 @@ impl Parser {
         var has_params = false
         var param_list = TypeExprList { head: dummy_type_expr(), tail: None }
 
-        if p.peek() != TokenKind::RParen {
+        if parser_peek(p) != TokenKind::RParen {
             let pair = p.parse_type()
             p = pair.0
             var rev_param_list = TypeExprList { head: pair.1, tail: None }
             has_params = true
 
-            while p.peek() == TokenKind::Comma {
+            while parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
                 let pair2 = p.parse_type()
                 p = pair2.0
@@ -399,7 +443,7 @@ impl Parser {
         // Parse return type
         var ret_ty = dummy_type_expr()
         var has_ret = false
-        if p.peek() == TokenKind::Arrow {
+        if parser_peek(p) == TokenKind::Arrow {
             p = p.advance()
             let pair = p.parse_type()
             p = pair.0
@@ -409,7 +453,7 @@ impl Parser {
 
         // Parse effects
         var effs: Option<Box<EffectList>> = None
-        if p.peek() == TokenKind::With {
+        if parser_peek(p) == TokenKind::With {
             let pair2 = p.parse_effect_list()
             p = pair2.0
             effs = Some(Box::new(pair2.1))
@@ -442,7 +486,7 @@ impl Parser {
 
         var rev_list = EffectList { head: first, tail: None }
 
-        while p.peek() == TokenKind::Comma {
+        while parser_peek(p) == TokenKind::Comma {
             p = p.advance()  // skip ,
             let eff_name = p.current_name()
             let eff = EffectRef { name_buf: [0; 64], name_len: eff_name.len }
@@ -476,7 +520,9 @@ impl Parser {
         if self.peek() == TokenKind::Arrow {
             var p = self.advance()  // skip ->
             let pair = p.parse_type()
-            (pair.0, Some(Box::new(pair.1)))
+            let port_p = pair.0
+            let port_ty = pair.1
+            (port_p, Some(Box::new(port_ty)))
         } else {
             (self, None)
         }
@@ -491,7 +537,7 @@ impl Parser {
         var p = self.advance()  // skip 'Knowledge'
 
         // Determine delimiter: < (shorthand) or [ (extended)
-        let delim = p.peek()
+        let delim = parser_peek(p)
         var use_bracket = false
         if delim == TokenKind::LBracket {
             use_bracket = true
@@ -511,29 +557,29 @@ impl Parser {
         var provenance_opt: Option<Box<AstProvenanceKind>> = None
 
         if use_bracket {
-            while p.peek() == TokenKind::Comma {
+            while parser_peek(p) == TokenKind::Comma {
                 p = p.advance()  // skip ,
 
-                let ck = p.peek()
+                let ck = parser_peek(p)
 
                 // Check for epsilon bound: identifier followed by comparison op
                 if ck == TokenKind::Ident {
                     // Assume epsilon identifier: parse op + value
                     p = p.advance()  // skip epsilon identifier
                     var cmp_op = CompareOp::CmpLt
-                    if p.peek() == TokenKind::Lt {
+                    if parser_peek(p) == TokenKind::Lt {
                         cmp_op = CompareOp::CmpLt
                         p = p.advance()
-                    } else if p.peek() == TokenKind::LtEq {
+                    } else if parser_peek(p) == TokenKind::LtEq {
                         cmp_op = CompareOp::CmpLe
                         p = p.advance()
-                    } else if p.peek() == TokenKind::Gt {
+                    } else if parser_peek(p) == TokenKind::Gt {
                         cmp_op = CompareOp::CmpGt
                         p = p.advance()
-                    } else if p.peek() == TokenKind::GtEq {
+                    } else if parser_peek(p) == TokenKind::GtEq {
                         cmp_op = CompareOp::CmpGe
                         p = p.advance()
-                    } else if p.peek() == TokenKind::EqEq {
+                    } else if parser_peek(p) == TokenKind::EqEq {
                         cmp_op = CompareOp::CmpEq
                         p = p.advance()
                     }
@@ -546,11 +592,10 @@ impl Parser {
                     p = p.advance()  // skip 'Valid'
                     let vkind = AstValidityKind::ValidDuration
                     var vexpr: Option<Box<Expr>> = None
-                    if p.peek() == TokenKind::LParen {
+                    if parser_peek(p) == TokenKind::LParen {
                         p = p.advance()  // skip (
-                        let epair = p.parse_expr()
-                        p = epair.0
-                        vexpr = Some(Box::new(epair.1))
+                        p = p.parse_expr()
+                        vexpr = Some(parser_take_expr_box())
                         p = p.expect(TokenKind::RParen)
                     }
                     validity_opt = Some(Box::new(ValidityCondition { kind: vkind, expr: vexpr }))
@@ -558,11 +603,10 @@ impl Parser {
                     p = p.advance()  // skip 'ValidUntil'
                     let vkind = AstValidityKind::ValidUntilTime
                     var vexpr: Option<Box<Expr>> = None
-                    if p.peek() == TokenKind::LParen {
+                    if parser_peek(p) == TokenKind::LParen {
                         p = p.advance()
-                        let epair = p.parse_expr()
-                        p = epair.0
-                        vexpr = Some(Box::new(epair.1))
+                        p = p.parse_expr()
+                        vexpr = Some(parser_take_expr_box())
                         p = p.expect(TokenKind::RParen)
                     }
                     validity_opt = Some(Box::new(ValidityCondition { kind: vkind, expr: vexpr }))
@@ -570,11 +614,10 @@ impl Parser {
                     p = p.advance()  // skip 'ValidWhile'
                     let vkind = AstValidityKind::ValidWhileCond
                     var vexpr: Option<Box<Expr>> = None
-                    if p.peek() == TokenKind::LParen {
+                    if parser_peek(p) == TokenKind::LParen {
                         p = p.advance()
-                        let epair = p.parse_expr()
-                        p = epair.0
-                        vexpr = Some(Box::new(epair.1))
+                        p = p.parse_expr()
+                        vexpr = Some(parser_take_expr_box())
                         p = p.expect(TokenKind::RParen)
                     }
                     validity_opt = Some(Box::new(ValidityCondition { kind: vkind, expr: vexpr }))
@@ -621,11 +664,206 @@ impl Parser {
         })
     }
 
+    // Forgettable<T> — ZD-annihilable type.
+    // Syntax: Forgettable<T> or Forgettable<T, "e3e10"> (with optional ZD locus name)
+    // Inner type stored in `inner` field; functions that use Forgettable<T>
+    // must declare the `ZD` effect so the compiler can verify exact erasure.
+    fn parse_forgettable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()   // skip 'Forgettable'
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeForgettable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // ExactlyPrivate<T> — exact-privacy wrapper: contribution to a trained model
+    // is algebraically zero in the ZD kernel (G3/G4). Stronger than DP.
+    // Requires `with ZD`.
+    fn parse_exactly_private_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeExactlyPrivate,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Editable<T> — locality-bounded model editing wrapper (G5).
+    // Edits via ZD are confined to the 4D kernel of the ZD operator.
+    fn parse_editable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeEditable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // CapabilityGated<T> — capability containment (G7): value lives in a ZD-gated
+    // subspace; can be exactly annihilated without touching orthogonal capabilities.
+    fn parse_capability_gated_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeCapabilityGated,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Composable<T> — ZD-orthogonal model merge (G8). Two Composable values
+    // combine along ZD-orthogonal complements without mutual perturbation.
+    fn parse_composable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeComposable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Audited<T> — witness-bearing surgery (G9). Every surgical operation
+    // emits a machine-checkable Lean derivation.
+    fn parse_audited_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeAudited,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Revivable<T> — time-bounded reversible surgery (G10). Surgical ops
+    // can be inverted within a Temporal window, irrevocable afterward.
+    fn parse_revivable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeRevivable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Interpretable<T> — AMI canonical-basis marker. T's internal
+    // representation admits a unique decomposition onto the 168 ZD classes.
+    fn parse_interpretable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeInterpretable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
     fn parse_epistemic_wrapper_type(self, wrapper_kind: TypeExprKind) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()
 
-        let delim = p.peek()
+        let delim = parser_peek(p)
         var use_bracket = false
         if delim == TokenKind::LBracket {
             use_bracket = true
@@ -643,17 +881,17 @@ impl Parser {
         var provenance_opt: Option<Box<AstProvenanceKind>> = None
 
         if use_bracket {
-            while p.peek() == TokenKind::Comma {
+            while parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
-                let component_tok = p.peek()
+                let component_tok = parser_peek(p)
 
                 if component_tok == TokenKind::Valid {
                     p = p.advance()
                     p = p.expect(TokenKind::LParen)
-                    let expr_pair = p.parse_expr()
-                    p = expr_pair.0
+                    p = p.parse_expr()
+                    let expr_box = parser_take_expr_box()
                     p = p.expect(TokenKind::RParen)
-                    validity_opt = Some(Box::new(ValidityCondition { kind: AstValidityKind::ValidDuration, expr: Some(Box::new(expr_pair.1)) }))
+                    validity_opt = Some(Box::new(ValidityCondition { kind: AstValidityKind::ValidDuration, expr: Some(expr_box) }))
                 } else if component_tok == TokenKind::Derived {
                     p = p.advance()
                     provenance_opt = Some(Box::new(AstProvenanceKind::AstProvDerived))
@@ -693,7 +931,7 @@ impl Parser {
     }
 
     fn parse_validated_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
-        let after_keyword = self.peek_ahead(1)
+        let after_keyword = parser_peek_ahead(self, 1)
         if after_keyword == TokenKind::LBracket {
             self.parse_epistemic_wrapper_type(TypeExprKind::TypeValidated)
         } else {
@@ -727,7 +965,7 @@ impl Parser {
         let first_ty = pair.1
         var rev_list = TypeExprList { head: first_ty, tail: None }
 
-        while p.peek() == TokenKind::Comma {
+        while parser_peek(p) == TokenKind::Comma {
             p = p.advance()
             let pair2 = p.parse_type()
             p = pair2.0

@@ -11,7 +11,7 @@ Desenvolver simultaneamente três projetos interconectados que demonstram o pode
 ## 📁 Estrutura do Projeto
 
 ```
-triple-sounio-ecosystem/
+ecosystem/
 ├── README.md                          # Este arquivo
 ├── ARCHITECTURE.md                    # Arquitetura integrada
 ├── ROADMAP.md                         # Plano paralelo
@@ -168,7 +168,7 @@ jupyter kernelspec list | grep sounio
 # 3. Run the complete drug discovery pipeline
 export SOUC=./bin/souc
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
-$SOUC run triple-sounio-ecosystem/drug-discovery/examples/full_pipeline.sio
+$SOUC run ecosystem/drug-discovery/examples/full_pipeline.sio
 ```
 
 Expected output:

@@ -1,0 +1,360 @@
+//@ run-pass
+// E2E tests for stdlib/dataframe — epistemic column statistics.
+//
+// Inlined implementation using flat fixed arrays (no heap, no Vec<T>).
+// Capacities: max 4 columns, max 64 rows.
+// Tests 01-05 cover a minimal DataFrame struct (n_rows, col indexing).
+// Tests 06-11 cover epistemic statistics on f64 columns.
+
+// ── Minimal DataFrame ────────────────────────────────────────────────────────
+
+struct DataFrame {
+    n_cols: i32,
+    n_rows: i32,
+    col_names: [string; 4],
+    data: [f64; 256],
+}
+
+fn df_new() -> DataFrame {
+    DataFrame { n_cols: 0, n_rows: 0, col_names: [""; 4], data: [0.0; 256] }
+}
+
+fn df_cell_idx(col: i32, row: i32) -> usize {
+    (col * 64 + row) as usize
+}
+
+fn df_get(df: &DataFrame, col: i32, row: i32) -> f64 {
+    df.data[df_cell_idx(col, row)]
+}
+
+fn df_set(df: &! DataFrame, col: i32, row: i32, v: f64) with Mut {
+    df.data[df_cell_idx(col, row)] = v
+}
+
+fn df_add_col_5(df: &! DataFrame, name: string, v0: f64, v1: f64, v2: f64, v3: f64, v4: f64) -> i32 with Mut {
+    if df.n_cols >= 4 { return -1 }
+    let ci = df.n_cols
+    df.col_names[ci as usize] = name
+    df_set(df, ci, 0, v0)
+    df_set(df, ci, 1, v1)
+    df_set(df, ci, 2, v2)
+    df_set(df, ci, 3, v3)
+    df_set(df, ci, 4, v4)
+    df.n_cols = df.n_cols + 1
+    if df.n_rows < 5 { df.n_rows = 5 }
+    1
+}
+
+fn df_head(df: &DataFrame, n: i32) -> DataFrame with Mut {
+    var out = df_new()
+    out.n_cols = df.n_cols
+    out.n_rows = if n < df.n_rows { n } else { df.n_rows }
+    var c = 0
+    while c < df.n_cols {
+        out.col_names[c as usize] = df.col_names[c as usize]
+        var r = 0
+        while r < out.n_rows {
+            out.data[df_cell_idx(c, r)] = df.data[df_cell_idx(c, r)]
+            r = r + 1
+        }
+        c = c + 1
+    }
+    out
+}
+
+fn df_tail(df: &DataFrame, n: i32) -> DataFrame with Mut {
+    var out = df_new()
+    out.n_cols = df.n_cols
+    let take = if n < df.n_rows { n } else { df.n_rows }
+    let start = df.n_rows - take
+    out.n_rows = take
+    var c = 0
+    while c < df.n_cols {
+        out.col_names[c as usize] = df.col_names[c as usize]
+        var r = 0
+        while r < take {
+            out.data[df_cell_idx(c, r)] = df.data[df_cell_idx(c, start + r)]
+            r = r + 1
+        }
+        c = c + 1
+    }
+    out
+}
+
+fn df_col_idx(df: &DataFrame, name: string) -> i32 with Mut {
+    var i = 0
+    while i < df.n_cols {
+        if df.col_names[i as usize] == name { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn df_unique_count(df: &DataFrame, col_name: string) -> i32 with Mut {
+    let ci = df_col_idx(df, col_name)
+    if ci < 0 { return -1 }
+    var seen: [f64; 16] = [0.0; 16]
+    var n_seen = 0
+    var r = 0
+    while r < df.n_rows {
+        let v = df_get(df, ci, r)
+        var found = 0
+        var s = 0
+        while s < n_seen {
+            if seen[s as usize] == v { found = 1 }
+            s = s + 1
+        }
+        if found == 0 && n_seen < 16 {
+            seen[n_seen as usize] = v
+            n_seen = n_seen + 1
+        }
+        r = r + 1
+    }
+    n_seen
+}
+
+// ── Epistemic statistics ─────────────────────────────────────────────────────
+
+fn col_mean(data: &[f64; 64], n: i32) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + data[i as usize]
+        i = i + 1
+    }
+    sum / (n as f64)
+}
+
+fn col_variance(data: &[f64; 64], n: i32) -> f64 with Mut, Div {
+    let m = col_mean(data, n)
+    var v = 0.0
+    var i = 0
+    while i < n {
+        let d = data[i as usize] - m
+        v = v + d * d
+        i = i + 1
+    }
+    v / (n as f64)
+}
+
+fn f64_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    var i = 0
+    while i < 40 {
+        g = (g + x / g) / 2.0
+        i = i + 1
+    }
+    g
+}
+
+fn f64_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn col_std(data: &[f64; 64], n: i32) -> f64 with Mut, Div {
+    f64_sqrt(col_variance(data, n))
+}
+
+fn col_correlation(xa: &[f64; 64], xb: &[f64; 64], n: i32) -> f64 with Mut, Div {
+    let ma = col_mean(xa, n)
+    let mb = col_mean(xb, n)
+    var num = 0.0
+    var da = 0.0
+    var db = 0.0
+    var i = 0
+    while i < n {
+        let a = xa[i as usize] - ma
+        let b = xb[i as usize] - mb
+        num = num + a * b
+        da = da + a * a
+        db = db + b * b
+        i = i + 1
+    }
+    let denom = f64_sqrt(da) * f64_sqrt(db)
+    if denom == 0.0 { return 0.0 }
+    num / denom
+}
+
+fn col_quantile_50(data: &[f64; 64], n: i32) -> f64 with Mut, Div {
+    var sorted: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < n {
+        sorted[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    var j = 1
+    while j < n {
+        let key = sorted[j as usize]
+        var k = j - 1
+        while k >= 0 && sorted[k as usize] > key {
+            sorted[(k + 1) as usize] = sorted[k as usize]
+            k = k - 1
+        }
+        sorted[(k + 1) as usize] = key
+        j = j + 1
+    }
+    if n % 2 == 0 {
+        (sorted[(n / 2 - 1) as usize] + sorted[(n / 2) as usize]) / 2.0
+    } else {
+        sorted[(n / 2) as usize]
+    }
+}
+
+fn col_covariance(xa: &[f64; 64], xb: &[f64; 64], n: i32) -> f64 with Mut, Div {
+    let ma = col_mean(xa, n)
+    let mb = col_mean(xb, n)
+    var cov = 0.0
+    var i = 0
+    while i < n {
+        cov = cov + (xa[i as usize] - ma) * (xb[i as usize] - mb)
+        i = i + 1
+    }
+    cov / ((n - 1) as f64)
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+fn run_tests() -> i32 with IO, Mut, Div {
+    var pass = 0
+    var fail = 0
+
+    print("Test 01: DataFrame n_rows/n_cols... ")
+    var df1 = df_new()
+    df_add_col_5(&! df1, "x", 1.0, 2.0, 3.0, 4.0, 5.0)
+    df_add_col_5(&! df1, "y", 2.0, 4.0, 6.0, 8.0, 10.0)
+    df_add_col_5(&! df1, "z", 1.5, 2.5, 3.5, 4.5, 5.5)
+    if df1.n_rows == 5 && df1.n_cols == 3 {
+        print("PASS\n") pass = pass + 1
+    } else { print("FAIL\n") fail = fail + 1 }
+
+    print("Test 02: dataframe_head(3)... ")
+    let head = df_head(&df1, 3)
+    if head.n_rows == 3 {
+        print("PASS\n") pass = pass + 1
+    } else { print("FAIL\n") fail = fail + 1 }
+
+    print("Test 03: dataframe_tail(2)... ")
+    let tail = df_tail(&df1, 2)
+    if tail.n_rows == 2 {
+        print("PASS\n") pass = pass + 1
+    } else { print("FAIL\n") fail = fail + 1 }
+
+    print("Test 04: unique count in [1,2,1,3,2] == 3... ")
+    var df4 = df_new()
+    df_add_col_5(&! df4, "val", 1.0, 2.0, 1.0, 3.0, 2.0)
+    if df_unique_count(&df4, "val") == 3 {
+        print("PASS\n") pass = pass + 1
+    } else { print("FAIL\n") fail = fail + 1 }
+
+    print("Test 05: head values preserved... ")
+    let head2 = df_head(&df1, 2)
+    if f64_abs(df_get(&head2, 0, 0) - 1.0) < 0.001 && f64_abs(df_get(&head2, 0, 1) - 2.0) < 0.001 {
+        print("PASS\n") pass = pass + 1
+    } else { print("FAIL\n") fail = fail + 1 }
+
+    let m5: [f64; 64] = [1.0, 2.0, 3.0, 4.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0]
+
+    print("Test 06: mean([1..5]) == 3.0... ")
+    if f64_abs(col_mean(&m5, 5) - 3.0) < 0.001 {
+        print("PASS\n") pass = pass + 1
+    } else { print("FAIL\n") fail = fail + 1 }
+
+    let s8: [f64; 64] = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0]
+
+    print("Test 07: std([2,4,4,4,5,5,7,9]) ≈ 2.0... ")
+    let sv = col_std(&s8, 8)
+    if sv > 1.9 && sv < 2.1 {
+        print("PASS\n") pass = pass + 1
+    } else { print("FAIL\n") fail = fail + 1 }
+
+    let cx5: [f64; 64] = [1.0, 2.0, 3.0, 4.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0]
+    let cy5: [f64; 64] = [2.0, 4.0, 6.0, 8.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0]
+
+    print("Test 08: correlation([1..5],[2..10]) ≈ 1.0... ")
+    let rv = col_correlation(&cx5, &cy5, 5)
+    if rv > 0.999 {
+        print("PASS\n") pass = pass + 1
+    } else { print("FAIL\n") fail = fail + 1 }
+
+    let q10: [f64; 64] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0]
+
+    print("Test 09: median([1..10]) == 5.5... ")
+    if f64_abs(col_quantile_50(&q10, 10) - 5.5) < 0.001 {
+        print("PASS\n") pass = pass + 1
+    } else { print("FAIL\n") fail = fail + 1 }
+
+    let ci5: [f64; 64] = [10.0, 10.0, 10.0, 10.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0]
+
+    print("Test 10: mean(constant col [10×5]) == 10.0... ")
+    if f64_abs(col_mean(&ci5, 5) - 10.0) < 0.001 {
+        print("PASS\n") pass = pass + 1
+    } else { print("FAIL\n") fail = fail + 1 }
+
+    let ca3: [f64; 64] = [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0]
+    let cb3: [f64; 64] = [2.0, 4.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0]
+
+    print("Test 11: covariance([1,2,3],[2,4,6]) ≈ 2.0... ")
+    let cov = col_covariance(&ca3, &cb3, 3)
+    if cov > 1.9 && cov < 2.1 {
+        print("PASS\n") pass = pass + 1
+    } else { print("FAIL\n") fail = fail + 1 }
+
+    if fail == 0 {
+        print("stdlib_dataframe: ALL PASS (11/11)\n")
+        0
+    } else {
+        print("stdlib_dataframe: FAIL\n")
+        1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    run_tests()
+}

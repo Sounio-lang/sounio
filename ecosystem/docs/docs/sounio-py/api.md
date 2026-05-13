@@ -1018,4 +1018,4 @@ if check.ok:
 
 ---
 
-For more examples, see the [Quickstart](quickstart.md) and [Examples Repository](https://github.com/sounio-org/sounio/tree/main/triple-sounio-ecosystem/sounio-py/examples).
+For more examples, see the [Quickstart](quickstart.md) and [Examples Repository](https://github.com/sounio-org/sounio/tree/main/ecosystem/sounio-py/examples).

@@ -1,0 +1,439 @@
+// self-hosted/gpu/runtime/cpu_ir_interpreter.sio
+// Self-contained CPU interpreter for a minimal GPU kernel IR.
+// Does NOT import kernel_ir.sio — uses its own EmuKernel type with parallel arrays.
+//
+// This is a real opcode-dispatch interpreter with:
+//   - typed register file (f32/f64/i32/i64/u32/u64/pred)
+//   - pointer-encoded memory model (param_idx << 32 | byte_offset)
+//   - per-thread execution loop
+
+// ============================================================================
+// Opcode constants (self-contained)
+// ============================================================================
+
+let EMU_OP_GET_TID: i64 = 0
+let EMU_OP_LOAD_PARAM: i64 = 1
+let EMU_OP_MUL_IMM: i64 = 2
+let EMU_OP_ADD: i64 = 3
+let EMU_OP_SUB: i64 = 4
+let EMU_OP_MUL: i64 = 5
+let EMU_OP_DIV: i64 = 6
+let EMU_OP_LOAD_GLOBAL: i64 = 7
+let EMU_OP_STORE_GLOBAL: i64 = 8
+let EMU_OP_RET: i64 = 9
+
+// ============================================================================
+// Kernel representation (parallel arrays to avoid compiler struct-array bug)
+// ============================================================================
+
+struct EmuKernel {
+    opcodes: [i64; 64],
+    dst_regs: [i64; 64],
+    src_a_regs: [i64; 64],
+    src_b_regs: [i64; 64],
+    imms: [i64; 64],
+    param_idxs: [i64; 64],
+    addr_regs: [i64; 64],
+    ty_tags: [i64; 64],      // 0=f32, 1=f64, 2=i32, 3=i64, 4=u32, 5=u64
+    op_count: i64,
+    param_count: i64,
+}
+
+fn emu_kernel_new() -> EmuKernel {
+    EmuKernel {
+        opcodes: [EMU_OP_RET; 64],
+        dst_regs: [-1; 64],
+        src_a_regs: [-1; 64],
+        src_b_regs: [-1; 64],
+        imms: [0; 64],
+        param_idxs: [-1; 64],
+        addr_regs: [-1; 64],
+        ty_tags: [0; 64],
+        op_count: 0,
+        param_count: 0,
+    }
+}
+
+fn emu_kernel_append_op(k: EmuKernel, opcode: i64, dst: i64, src_a: i64, src_b: i64, imm: i64, param_idx: i64, addr_reg: i64, ty_tag: i64) -> EmuKernel with Mut, Panic {
+    var out = k
+    if out.op_count < 64 {
+        let idx = out.op_count
+        out.opcodes[idx as usize] = opcode
+        out.dst_regs[idx as usize] = dst
+        out.src_a_regs[idx as usize] = src_a
+        out.src_b_regs[idx as usize] = src_b
+        out.imms[idx as usize] = imm
+        out.param_idxs[idx as usize] = param_idx
+        out.addr_regs[idx as usize] = addr_reg
+        out.ty_tags[idx as usize] = ty_tag
+        out.op_count = out.op_count + 1
+    }
+    out
+}
+
+// ============================================================================
+// Typed register file
+// ============================================================================
+
+struct EmuRegFile {
+    f32: [f32; 64],
+    f64: [f64; 64],
+    i32: [i32; 64],
+    i64: [i64; 64],
+    u32: [u32; 64],
+    u64: [u64; 64],
+    pred: [bool; 8],
+}
+
+fn emu_regfile_new() -> EmuRegFile {
+    EmuRegFile {
+        f32: [0.0; 64],
+        f64: [0.0; 64],
+        i32: [0; 64],
+        i64: [0; 64],
+        u32: [0; 64],
+        u64: [0; 64],
+        pred: [false; 8],
+    }
+}
+
+// ============================================================================
+// Register accessors by ty_tag
+// ============================================================================
+
+fn emu_rf_set_f32(rf: EmuRegFile, reg: i64, v: f32) -> EmuRegFile with Mut, Panic {
+    var out = rf
+    if reg >= 0 && reg < 64 { out.f32[reg as usize] = v }
+    out
+}
+
+fn emu_rf_get_f32(rf: EmuRegFile, reg: i64) -> f32 {
+    if reg >= 0 && reg < 64 { rf.f32[reg as usize] } else { 0.0 }
+}
+
+fn emu_rf_set_f64(rf: EmuRegFile, reg: i64, v: f64) -> EmuRegFile with Mut, Panic {
+    var out = rf
+    if reg >= 0 && reg < 64 { out.f64[reg as usize] = v }
+    out
+}
+
+fn emu_rf_get_f64(rf: EmuRegFile, reg: i64) -> f64 {
+    if reg >= 0 && reg < 64 { rf.f64[reg as usize] } else { 0.0 }
+}
+
+fn emu_rf_set_i32(rf: EmuRegFile, reg: i64, v: i32) -> EmuRegFile with Mut, Panic {
+    var out = rf
+    if reg >= 0 && reg < 64 { out.i32[reg as usize] = v }
+    out
+}
+
+fn emu_rf_get_i32(rf: EmuRegFile, reg: i64) -> i32 {
+    if reg >= 0 && reg < 64 { rf.i32[reg as usize] } else { 0 }
+}
+
+fn emu_rf_set_i64(rf: EmuRegFile, reg: i64, v: i64) -> EmuRegFile with Mut, Panic {
+    var out = rf
+    if reg >= 0 && reg < 64 { out.i64[reg as usize] = v }
+    out
+}
+
+fn emu_rf_get_i64(rf: EmuRegFile, reg: i64) -> i64 {
+    if reg >= 0 && reg < 64 { rf.i64[reg as usize] } else { 0 }
+}
+
+fn emu_rf_set_u32(rf: EmuRegFile, reg: i64, v: u32) -> EmuRegFile with Mut, Panic {
+    var out = rf
+    if reg >= 0 && reg < 64 { out.u32[reg as usize] = v }
+    out
+}
+
+fn emu_rf_get_u32(rf: EmuRegFile, reg: i64) -> u32 {
+    if reg >= 0 && reg < 64 { rf.u32[reg as usize] } else { 0 }
+}
+
+fn emu_rf_set_u64(rf: EmuRegFile, reg: i64, v: u64) -> EmuRegFile with Mut, Panic {
+    var out = rf
+    if reg >= 0 && reg < 64 { out.u64[reg as usize] = v }
+    out
+}
+
+fn emu_rf_get_u64(rf: EmuRegFile, reg: i64) -> u64 {
+    if reg >= 0 && reg < 64 { rf.u64[reg as usize] } else { 0 }
+}
+
+// ============================================================================
+// Pointer encoding: param_idx in high 32 bits, byte_offset in low 32 bits
+// ============================================================================
+
+fn emu_ptr_encode(param_idx: i64, byte_offset: i64) -> u64 {
+    ((param_idx as u64) * 4294967296) + (byte_offset as u64)
+}
+
+fn emu_ptr_param_idx(ptr: u64) -> i64 {
+    (ptr / 4294967296) as i64
+}
+
+fn emu_ptr_byte_offset(ptr: u64) -> i64 {
+    (ptr % 4294967296) as i64
+}
+
+// ============================================================================
+// Real opcode-dispatch interpreter for f32 kernels
+// ============================================================================
+
+fn emu_interpret_kernel_f32(
+    kern: EmuKernel,
+    p0: [f32; 1024],
+    p1: [f32; 1024],
+    p2: [f32; 1024],
+    n: i64
+) -> [f32; 1024] with Mut, Panic, Div {
+    var out0 = p0
+    var out1 = p1
+    var out2 = p2
+    var tid: i64 = 0
+    while tid < n {
+        var rf = emu_regfile_new()
+        var op_idx: i64 = 0
+        while op_idx < kern.op_count {
+            let opc = kern.opcodes[op_idx as usize]
+            let dst = kern.dst_regs[op_idx as usize]
+            let src_a = kern.src_a_regs[op_idx as usize]
+            let src_b = kern.src_b_regs[op_idx as usize]
+            let imm = kern.imms[op_idx as usize]
+            let param_idx = kern.param_idxs[op_idx as usize]
+            let addr_reg = kern.addr_regs[op_idx as usize]
+            let ty_tag = kern.ty_tags[op_idx as usize]
+
+            // ---- EmuGetTid ----
+            if opc == EMU_OP_GET_TID {
+                rf = emu_rf_set_i64(rf, dst, tid)
+            }
+            // ---- EmuLoadParam ----
+            else if opc == EMU_OP_LOAD_PARAM {
+                let ptr = emu_ptr_encode(param_idx, 0)
+                rf = emu_rf_set_i64(rf, dst, ptr as i64)
+            }
+            // ---- EmuMulImm ----
+            else if opc == EMU_OP_MUL_IMM {
+                let v = emu_rf_get_i64(rf, src_a)
+                rf = emu_rf_set_i64(rf, dst, v * imm)
+            }
+            // ---- EmuAdd ----
+            else if opc == EMU_OP_ADD {
+                if ty_tag == 0 {
+                    let a = emu_rf_get_f32(rf, src_a)
+                    let b = emu_rf_get_f32(rf, src_b)
+                    rf = emu_rf_set_f32(rf, dst, a + b)
+                } else if ty_tag == 1 {
+                    let a = emu_rf_get_f64(rf, src_a)
+                    let b = emu_rf_get_f64(rf, src_b)
+                    rf = emu_rf_set_f64(rf, dst, a + b)
+                } else if ty_tag == 2 {
+                    let a = emu_rf_get_i32(rf, src_a)
+                    let b = emu_rf_get_i32(rf, src_b)
+                    rf = emu_rf_set_i32(rf, dst, a + b)
+                } else if ty_tag == 3 {
+                    let a = emu_rf_get_i64(rf, src_a)
+                    let b = emu_rf_get_i64(rf, src_b)
+                    rf = emu_rf_set_i64(rf, dst, a + b)
+                } else if ty_tag == 4 {
+                    let a = emu_rf_get_u32(rf, src_a)
+                    let b = emu_rf_get_u32(rf, src_b)
+                    rf = emu_rf_set_u32(rf, dst, a + b)
+                } else if ty_tag == 5 {
+                    let a = emu_rf_get_u64(rf, src_a)
+                    let b = emu_rf_get_u64(rf, src_b)
+                    rf = emu_rf_set_u64(rf, dst, a + b)
+                }
+            }
+            // ---- EmuSub ----
+            else if opc == EMU_OP_SUB {
+                if ty_tag == 0 {
+                    let a = emu_rf_get_f32(rf, src_a)
+                    let b = emu_rf_get_f32(rf, src_b)
+                    rf = emu_rf_set_f32(rf, dst, a - b)
+                } else if ty_tag == 2 {
+                    let a = emu_rf_get_i32(rf, src_a)
+                    let b = emu_rf_get_i32(rf, src_b)
+                    rf = emu_rf_set_i32(rf, dst, a - b)
+                } else if ty_tag == 3 {
+                    let a = emu_rf_get_i64(rf, src_a)
+                    let b = emu_rf_get_i64(rf, src_b)
+                    rf = emu_rf_set_i64(rf, dst, a - b)
+                }
+            }
+            // ---- EmuMul ----
+            else if opc == EMU_OP_MUL {
+                if ty_tag == 0 {
+                    let a = emu_rf_get_f32(rf, src_a)
+                    let b = emu_rf_get_f32(rf, src_b)
+                    rf = emu_rf_set_f32(rf, dst, a * b)
+                } else if ty_tag == 2 {
+                    let a = emu_rf_get_i32(rf, src_a)
+                    let b = emu_rf_get_i32(rf, src_b)
+                    rf = emu_rf_set_i32(rf, dst, a * b)
+                } else if ty_tag == 3 {
+                    let a = emu_rf_get_i64(rf, src_a)
+                    let b = emu_rf_get_i64(rf, src_b)
+                    rf = emu_rf_set_i64(rf, dst, a * b)
+                }
+            }
+            // ---- EmuDiv ----
+            else if opc == EMU_OP_DIV {
+                if ty_tag == 0 {
+                    let a = emu_rf_get_f32(rf, src_a)
+                    let b = emu_rf_get_f32(rf, src_b)
+                    rf = emu_rf_set_f32(rf, dst, a / b)
+                } else if ty_tag == 2 {
+                    let a = emu_rf_get_i32(rf, src_a)
+                    let b = emu_rf_get_i32(rf, src_b)
+                    rf = emu_rf_set_i32(rf, dst, a / b)
+                } else if ty_tag == 3 {
+                    let a = emu_rf_get_i64(rf, src_a)
+                    let b = emu_rf_get_i64(rf, src_b)
+                    rf = emu_rf_set_i64(rf, dst, a / b)
+                }
+            }
+            // ---- EmuLoadGlobal ----
+            else if opc == EMU_OP_LOAD_GLOBAL {
+                let addr = emu_rf_get_i64(rf, addr_reg)
+                let pidx = emu_ptr_param_idx(addr as u64)
+                let boff = emu_ptr_byte_offset(addr as u64)
+                let eidx = boff / 4
+                if ty_tag == 0 {
+                    var val: f32 = 0.0
+                    if pidx == 0 { val = out0[eidx as usize] }
+                    else if pidx == 1 { val = out1[eidx as usize] }
+                    else if pidx == 2 { val = out2[eidx as usize] }
+                    rf = emu_rf_set_f32(rf, dst, val)
+                } else if ty_tag == 2 {
+                    var val: i32 = 0
+                    if pidx == 0 { val = out0[eidx as usize] as i32 }
+                    else if pidx == 1 { val = out1[eidx as usize] as i32 }
+                    else if pidx == 2 { val = out2[eidx as usize] as i32 }
+                    rf = emu_rf_set_i32(rf, dst, val)
+                }
+            }
+            // ---- EmuStoreGlobal ----
+            else if opc == EMU_OP_STORE_GLOBAL {
+                let addr = emu_rf_get_i64(rf, addr_reg)
+                let pidx = emu_ptr_param_idx(addr as u64)
+                let boff = emu_ptr_byte_offset(addr as u64)
+                let eidx = boff / 4
+                if ty_tag == 0 {
+                    let val = emu_rf_get_f32(rf, src_a)
+                    if pidx == 0 { out0[eidx as usize] = val }
+                    else if pidx == 1 { out1[eidx as usize] = val }
+                    else if pidx == 2 { out2[eidx as usize] = val }
+                } else if ty_tag == 2 {
+                    let val = emu_rf_get_i32(rf, src_a)
+                    if pidx == 0 { out0[eidx as usize] = val as f32 }
+                    else if pidx == 1 { out1[eidx as usize] = val as f32 }
+                    else if pidx == 2 { out2[eidx as usize] = val as f32 }
+                }
+            }
+            // ---- EmuRet ----
+            else if opc == EMU_OP_RET {
+                op_idx = kern.op_count
+            }
+
+            op_idx = op_idx + 1
+        }
+        tid = tid + 1
+    }
+    out2
+}
+
+// ============================================================================
+// Build vec_add EmuKernel (f32)
+//
+// IR pattern:
+//   0: GetTid   → r1
+//   1: MulImm   r1 * 4 → r2        (byte offset)
+//   2: LoadParam 0 → r3             (param a base)
+//   3: LoadParam 1 → r4             (param b base)
+//   4: LoadParam 2 → r5             (param out base)
+//   5: Add      r3 + r2 → r6        (addr of a[tid])
+//   6: Add      r4 + r2 → r7        (addr of b[tid])
+//   7: Add      r5 + r2 → r8        (addr of out[tid])
+//   8: LoadGlobal r6 → f1           (value a[tid])
+//   9: LoadGlobal r7 → f2           (value b[tid])
+//  10: Add      f1 + f2 → f3
+//  11: StoreGlobal r8, f3
+//  12: Ret
+// ============================================================================
+
+fn emu_build_vec_add_kernel() -> EmuKernel with Mut, Panic {
+    var k = emu_kernel_new()
+    k.param_count = 3
+
+    // 0: r1 = tid
+    k = emu_kernel_append_op(k, EMU_OP_GET_TID, 1, -1, -1, 0, -1, -1, 3)
+    // 1: r2 = r1 * 4
+    k = emu_kernel_append_op(k, EMU_OP_MUL_IMM, 2, 1, -1, 4, -1, -1, 3)
+    // 2: r3 = param 0
+    k = emu_kernel_append_op(k, EMU_OP_LOAD_PARAM, 3, -1, -1, 0, 0, -1, 3)
+    // 3: r4 = param 1
+    k = emu_kernel_append_op(k, EMU_OP_LOAD_PARAM, 4, -1, -1, 0, 1, -1, 3)
+    // 4: r5 = param 2
+    k = emu_kernel_append_op(k, EMU_OP_LOAD_PARAM, 5, -1, -1, 0, 2, -1, 3)
+    // 5: r6 = r3 + r2
+    k = emu_kernel_append_op(k, EMU_OP_ADD, 6, 3, 2, 0, -1, -1, 3)
+    // 6: r7 = r4 + r2
+    k = emu_kernel_append_op(k, EMU_OP_ADD, 7, 4, 2, 0, -1, -1, 3)
+    // 7: r8 = r5 + r2
+    k = emu_kernel_append_op(k, EMU_OP_ADD, 8, 5, 2, 0, -1, -1, 3)
+    // 8: f1 = global[r6]
+    k = emu_kernel_append_op(k, EMU_OP_LOAD_GLOBAL, 1, -1, -1, 0, -1, 6, 0)
+    // 9: f2 = global[r7]
+    k = emu_kernel_append_op(k, EMU_OP_LOAD_GLOBAL, 2, -1, -1, 0, -1, 7, 0)
+    // 10: f3 = f1 + f2
+    k = emu_kernel_append_op(k, EMU_OP_ADD, 3, 1, 2, 0, -1, -1, 0)
+    // 11: global[r8] = f3
+    k = emu_kernel_append_op(k, EMU_OP_STORE_GLOBAL, -1, 3, -1, 0, -1, 8, 0)
+    // 12: ret
+    k = emu_kernel_append_op(k, EMU_OP_RET, -1, -1, -1, 0, -1, -1, 0)
+
+    k
+}
+
+// ============================================================================
+// Self-check
+// ============================================================================
+
+fn emu_test_vec_add_f32() -> bool with Mut, Panic, Div {
+    var a: [f32; 1024] = [0.0; 1024]
+    var b: [f32; 1024] = [0.0; 1024]
+    var out: [f32; 1024] = [0.0; 1024]
+    a[0] = 1.0
+    a[1] = 2.0
+    a[2] = 3.0
+    b[0] = 10.0
+    b[1] = 20.0
+    b[2] = 30.0
+
+    let kern = emu_build_vec_add_kernel()
+    let result = emu_interpret_kernel_f32(kern, a, b, out, 4)
+
+    let r0 = result[0] == 11.0
+    let r1 = result[1] == 22.0
+    let r2 = result[2] == 33.0
+    let r3 = result[3] == 0.0
+    r0 && r1 && r2 && r3
+}
+
+fn emu_self_check() -> bool with Mut, Panic, Div {
+    emu_test_vec_add_f32()
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let ok = emu_self_check()
+    if ok {
+        print("PASS emu_self_check\n")
+        0
+    } else {
+        print("FAIL emu_self_check\n")
+        1
+    }
+}

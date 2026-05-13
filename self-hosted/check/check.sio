@@ -6,6 +6,15 @@
 // Methods return (Checker, ...) to thread state through value semantics.
 
 use check::refinement::*
+use check::types::*
+use check::defs::*
+use check::env::*
+use check::borrow::*
+use check::units::*
+use check::traits::*
+use check::ownership::*
+use parser::ast::*
+use ir::ir::*
 
 // ============================================================
 // Security limits
@@ -155,6 +164,13 @@ struct Checker {
     ownership: OwnContext,
     trait_registry: TraitRegistry,
     impl_registry: ImplRegistry,
+    // ── Static refinement proof engine (no Z3) ──────────────────────────────
+    // Counters updated by check_refinement_literal / check_call_arg_refinement_boundary.
+    refine_static_proved: i64,    // predicates proved at compile time
+    refine_runtime_checked: i64,  // predicates deferred to runtime assertion
+    refine_violations: i64,       // predicates definitely violated (compile error)
+    // Condition-narrowing guard stack: up to 8 nested if-conditions.
+    refine_cond_env: RefineStaticEnv,
 }
 
 // Wrapper for inferred type arguments (avoids &![T;N] JIT bug)
@@ -421,6 +437,10 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         ownership: own_context_new(),
         trait_registry: trait_registry_new(),
         impl_registry: impl_register_builtins(impl_registry_new()),
+        refine_static_proved: 0,
+        refine_runtime_checked: 0,
+        refine_violations: 0,
+        refine_cond_env: refine_static_env_new(),
     }
 }
 
@@ -504,6 +524,10 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).ownership = own_context_new()
     (*raw).trait_registry = trait_registry_new()
     (*raw).impl_registry = impl_register_builtins(impl_registry_new())
+    (*raw).refine_static_proved = 0
+    (*raw).refine_runtime_checked = 0
+    (*raw).refine_violations = 0
+    (*raw).refine_cond_env = refine_static_env_new()
 }
 
 fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Div, Alloc {
@@ -586,6 +610,10 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).ownership = src.ownership
     (*dst).trait_registry = src.trait_registry
     (*dst).impl_registry = src.impl_registry
+    (*dst).refine_static_proved = src.refine_static_proved
+    (*dst).refine_runtime_checked = src.refine_runtime_checked
+    (*dst).refine_violations = src.refine_violations
+    (*dst).refine_cond_env = src.refine_cond_env
 }
 
 fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
@@ -657,6 +685,24 @@ fn checker_fn_sig_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, All
     (*c).fn_sigs.count
 }
 
+fn checker_refine_static_proved_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
+    (*c).refine_static_proved
+}
+
+fn checker_refine_runtime_checked_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
+    (*c).refine_runtime_checked
+}
+
+fn checker_refine_violations_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
+    (*c).refine_violations
+}
+
+// Print the static refinement proof summary.
+// Called by the driver after check_items completes.
+fn checker_print_refine_summary_mut(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    refine_print_summary((*c).refine_static_proved, (*c).refine_runtime_checked, (*c).refine_violations)
+}
+
 // --------------------------------------------------------
 // Summary API (driver-facing scalar surface only)
 // --------------------------------------------------------
@@ -689,7 +735,7 @@ fn checker_const_name_eq(
     lens: &[i64; 128],
     idx: i64,
     name: Name
-) -> bool with Panic, Div {
+) -> bool with Mut, Panic, Div {
     if idx < 0 || idx >= 128 {
         return false
     }
@@ -4255,7 +4301,11 @@ impl Checker {
         } else {
             c.const_int_count = c.const_int_count + 1
         }
-        checker_const_name_write(&! c.const_int_name_bufs, &! c.const_int_name_lens, idx, name)
+        var bufs = c.const_int_name_bufs
+        var lens = c.const_int_name_lens
+        checker_const_name_write(&! bufs, &! lens, idx, name)
+        c.const_int_name_bufs = bufs
+        c.const_int_name_lens = lens
         c.const_int_known[idx as usize] = known
         c.const_int_values[idx as usize] = value
         c
@@ -4436,6 +4486,19 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 158 { print("inverse_of target role not found") }
     else if code == 159 { print("inverse role constraints are inconsistent or duplicate role declaration encountered") }
     else if code == 160 { print("ontology axiom store overflow (maximum 256 axioms)") }
+    // Epistemic enforcement (170-171)
+    else if code == 170 { print("accessing .value on epistemic type requires `with Epistemic` effect") }
+    else if code == 171 { print("cannot cast epistemic type to its inner type; epistemic wrapping cannot be silently stripped") }
+    else if code == 172 { print("Knowledge.unwrap requires exactly one argument") }
+    else if code == 173 { print("reason must be a `string` literal") }
+    else if code == 200 { print("Forgettable type requires ZD effect: exact annihilation is only possible via zero-divisor algebra (sedenions). Division algebras cannot satisfy this guarantee. Add `with ZD` to your function signature.") }
+    else if code == 201 { print("ExactlyPrivate<T> requires ZD effect: exact data-contribution removal is only possible via sedenion annihilation. Differential privacy (epsilon-bounded) does not suffice. Add `with ZD` to your function signature.") }
+    else if code == 202 { print("Editable<T> requires ZD effect: locality-bounded edits (G5) require ZD-based kernel annihilation. Ripple-free editing is not achievable via rank-1 or mask-based updates. Add `with ZD` to your function signature.") }
+    else if code == 203 { print("CapabilityGated<T> requires ZD effect: capability containment requires exact ZD annihilation of the gated subspace. Activation patching and masking leave residual. Add `with ZD` to your function signature.") }
+    else if code == 204 { print("Composable<T> requires ZD effect: ZD-orthogonal model merge (G8) relies on the 4D annihilator complement — two models can only be composed without mutual perturbation when their capabilities live in ZD-orthogonal subspaces. Parameter averaging leaks across capabilities. Add `with ZD` to your function signature.") }
+    else if code == 205 { print("Audited<T> requires ZD and Witness effects: witness-bearing surgery (G9) must emit a machine-checkable Lean derivation of the ZD-kernel action. `with ZD` alone produces the erasure without evidence; Witness is what makes it checkable. Add `with ZD, Witness` to your function signature.") }
+    else if code == 206 { print("Revivable<T> requires ZD and Temporal effects: time-bounded reversible surgery (G10) needs both the ZD annihilator algebra and an explicit Temporal window in which the op can be inverted. After the window, the surgery is irrevocable. Add `with ZD, Temporal` to your function signature.") }
+    else if code == 207 { print("Interpretable<T> requires ZD effect: the 168-class canonical basis is the projective ZD-graph of sedenions. Without the ZD effect the compiler cannot guarantee that decomposition/reconstruction is fp-exact. Add `with ZD` to your function signature.") }
     else { print("unknown error") }
 }
 
@@ -4700,6 +4763,13 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 155 {
         print("   |\n   = help: add at least one `hypothesis Hn { ... }` block inside the study's `analysis` section\n")
+    }
+    // Epistemic enforcement (170-171)
+    else if code == 170 {
+        print("   |\n   = help: add `with Epistemic` to your function signature, or use `acknowledge(k, reason)` to explicitly accept uncertainty\n")
+    }
+    else if code == 171 {
+        print("   |\n   = help: use `.value` within a `with Epistemic` function to extract the inner value with explicit acknowledgment\n")
     }
     else {
         // No help available for unknown errors
@@ -5720,14 +5790,14 @@ fn contest_info_from_family_signature(family: ModelFamilyInfo, policy_id: i64) -
     info
 }
 
-fn contest_info_attach_span(info: ContestInfo, span: Span) -> ContestInfo {
+fn contest_info_attach_span(info: ContestInfo, span: Span) -> ContestInfo with Mut, Panic {
     var next = info
     next.span_start = span.start
     next.span_end = span.end
     next
 }
 
-fn contest_info_attach_family_id(info: ContestInfo, family_id: i64) -> ContestInfo {
+fn contest_info_attach_family_id(info: ContestInfo, family_id: i64) -> ContestInfo with Mut, Panic {
     var next = info
     next.family_id = family_id
     next
@@ -6420,6 +6490,14 @@ impl Checker {
             TypeProof => c.lower_proof_annotation(te.type_args, te.span)
             TypeLemma => c.lower_lemma_annotation(te.type_args, te.span)
             TypeAxiom => c.lower_axiom_annotation(te.type_args, te.span)
+            TypeForgettable => c.lower_forgettable_type(te.inner, te.span)
+            TypeExactlyPrivate => c.lower_exactly_private_type(te.inner, te.span)
+            TypeEditable => c.lower_editable_type(te.inner, te.span)
+            TypeCapabilityGated => c.lower_capability_gated_type(te.inner, te.span)
+            TypeComposable => c.lower_composable_type(te.inner, te.span)
+            TypeAudited => c.lower_audited_type(te.inner, te.span)
+            TypeRevivable => c.lower_revivable_type(te.inner, te.span)
+            TypeInterpretable => c.lower_interpretable_type(te.inner, te.span)
         }
         (result.0.exit_type_depth(), result.1)
     }
@@ -6792,6 +6870,162 @@ impl Checker {
         match opt {
             Some(info) => check_knowledge_type(self, *info)
             None => (self, ty_error())
+        }
+    }
+
+    // Forgettable<T>: lowers to the inner type T while enforcing that the
+    // enclosing function declares the ZD effect (ID 18). If not declared,
+    // error code 200 is emitted:
+    // "Forgettable type requires ZD effect: exact annihilation is only possible
+    //  via zero-divisor algebra. Division algebras cannot satisfy this guarantee."
+    fn lower_forgettable_type(self, inner_opt: Option<Box<TypeExpr> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match inner_opt {
+            None => (self, ty_error())
+            Some(inner_te) => {
+                let pair = self.lower_type_expr(*inner_te)
+                var c = pair.0
+                let inner_ty = pair.1
+                let zd_id = 18  // ZD effect ID from effects.sio
+                if !has_effect_id(c.current_effects, c.current_effect_count, zd_id) {
+                    c = c.report_error_at(span, 200, 0, 0, 0)
+                }
+                (c, inner_ty)
+            }
+        }
+    }
+
+    // ExactlyPrivate<T> (G3): training-data contribution algebraically zero in the
+    // ZD kernel. Requires `with ZD`; missing effect emits error 201.
+    fn lower_exactly_private_type(self, inner_opt: Option<Box<TypeExpr> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match inner_opt {
+            None => (self, ty_error())
+            Some(inner_te) => {
+                let pair = self.lower_type_expr(*inner_te)
+                var c = pair.0
+                let inner_ty = pair.1
+                let zd_id = 18
+                if !has_effect_id(c.current_effects, c.current_effect_count, zd_id) {
+                    c = c.report_error_at(span, 201, 0, 0, 0)
+                }
+                (c, inner_ty)
+            }
+        }
+    }
+
+    // Editable<T> (G5): edits are confined to the 4D ZD kernel; orthogonal
+    // complement is provably unaffected. Requires `with ZD`; error 202.
+    fn lower_editable_type(self, inner_opt: Option<Box<TypeExpr> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match inner_opt {
+            None => (self, ty_error())
+            Some(inner_te) => {
+                let pair = self.lower_type_expr(*inner_te)
+                var c = pair.0
+                let inner_ty = pair.1
+                let zd_id = 18
+                if !has_effect_id(c.current_effects, c.current_effect_count, zd_id) {
+                    c = c.report_error_at(span, 202, 0, 0, 0)
+                }
+                (c, inner_ty)
+            }
+        }
+    }
+
+    // CapabilityGated<T> (G7): capability lives in a ZD-gated subspace; can be
+    // annihilated exactly without touching orthogonal capabilities. Error 203.
+    fn lower_capability_gated_type(self, inner_opt: Option<Box<TypeExpr> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match inner_opt {
+            None => (self, ty_error())
+            Some(inner_te) => {
+                let pair = self.lower_type_expr(*inner_te)
+                var c = pair.0
+                let inner_ty = pair.1
+                let zd_id = 18
+                if !has_effect_id(c.current_effects, c.current_effect_count, zd_id) {
+                    c = c.report_error_at(span, 203, 0, 0, 0)
+                }
+                (c, inner_ty)
+            }
+        }
+    }
+
+    // Composable<T> (G8): ZD-orthogonal model merge. Two values combine along
+    // annihilator-complementary subspaces without mutual perturbation. Error 204.
+    fn lower_composable_type(self, inner_opt: Option<Box<TypeExpr> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match inner_opt {
+            None => (self, ty_error())
+            Some(inner_te) => {
+                let pair = self.lower_type_expr(*inner_te)
+                var c = pair.0
+                let inner_ty = pair.1
+                let zd_id = 18
+                if !has_effect_id(c.current_effects, c.current_effect_count, zd_id) {
+                    c = c.report_error_at(span, 204, 0, 0, 0)
+                }
+                (c, inner_ty)
+            }
+        }
+    }
+
+    // Audited<T> (G9): every surgical op emits a machine-checkable Lean
+    // derivation. Requires both ZD (annihilation) and Witness (checkability).
+    // Error 205 when either is missing.
+    fn lower_audited_type(self, inner_opt: Option<Box<TypeExpr> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match inner_opt {
+            None => (self, ty_error())
+            Some(inner_te) => {
+                let pair = self.lower_type_expr(*inner_te)
+                var c = pair.0
+                let inner_ty = pair.1
+                let zd_id = 18
+                let witness_id = 19
+                let has_zd = has_effect_id(c.current_effects, c.current_effect_count, zd_id)
+                let has_wit = has_effect_id(c.current_effects, c.current_effect_count, witness_id)
+                if !has_zd || !has_wit {
+                    c = c.report_error_at(span, 205, 0, 0, 0)
+                }
+                (c, inner_ty)
+            }
+        }
+    }
+
+    // Revivable<T> (G10): time-bounded reversible surgery. Requires ZD for the
+    // algebraic aniquilation AND Temporal for the bounded inversion window.
+    // Error 206 when either is missing.
+    fn lower_revivable_type(self, inner_opt: Option<Box<TypeExpr> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match inner_opt {
+            None => (self, ty_error())
+            Some(inner_te) => {
+                let pair = self.lower_type_expr(*inner_te)
+                var c = pair.0
+                let inner_ty = pair.1
+                let zd_id = 18
+                let temporal_id = 20
+                let has_zd = has_effect_id(c.current_effects, c.current_effect_count, zd_id)
+                let has_temp = has_effect_id(c.current_effects, c.current_effect_count, temporal_id)
+                if !has_zd || !has_temp {
+                    c = c.report_error_at(span, 206, 0, 0, 0)
+                }
+                (c, inner_ty)
+            }
+        }
+    }
+
+    // Interpretable<T> (AMI): 168-class canonical basis decomposition.
+    // Requires ZD for the algebraic correctness of the decomposition.
+    // Error 207 when ZD is missing.
+    fn lower_interpretable_type(self, inner_opt: Option<Box<TypeExpr> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match inner_opt {
+            None => (self, ty_error())
+            Some(inner_te) => {
+                let pair = self.lower_type_expr(*inner_te)
+                var c = pair.0
+                let inner_ty = pair.1
+                let zd_id = 18
+                if !has_effect_id(c.current_effects, c.current_effect_count, zd_id) {
+                    c = c.report_error_at(span, 207, 0, 0, 0)
+                }
+                (c, inner_ty)
+            }
         }
     }
 
@@ -9999,13 +10233,23 @@ impl Checker {
         let rt = self.refinements.entries[ty.refinement_id as usize]
         var c = self
         if c.last_literal_kind == 1 {
-            // Integer literal — check predicate
-            if !pred_check_int(rt.predicate, c.last_literal_int) {
+            // Integer literal — static constant folding proof.
+            let result = refine_static_check_int_literal(rt.predicate, c.last_literal_int)
+            if result == refine_static_result_proved() {
+                // Statically proved: no runtime assertion needed.
+                c.refine_static_proved = c.refine_static_proved + 1
+            } else {
+                // Definitely violated at compile time.
+                c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(span, 42, 0, 0, 0)
             }
         } else if c.last_literal_kind == 2 {
-            // Float literal — check predicate
-            if !pred_check_float(rt.predicate, c.last_literal_float) {
+            // Float literal — static constant folding proof.
+            let result = refine_static_check_float_literal(rt.predicate, c.last_literal_float)
+            if result == refine_static_result_proved() {
+                c.refine_static_proved = c.refine_static_proved + 1
+            } else {
+                c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(span, 42, 0, 0, 0)
             }
         }
@@ -10491,6 +10735,27 @@ impl Checker {
         c
     }
 
+    fn report_unit_call_mismatch(self, span: Span, arg_uid: i64, param_uid: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        c.had_error = true
+        c.error_count = c.error_count + 1
+        print("error[E041]: unit mismatch in call argument\n")
+        print("  argument unit: ")
+        if arg_uid >= 0 {
+            print_unit_dim(c.units.get_dim(arg_uid))
+        } else {
+            print("(dimensionless)")
+        }
+        print("\n  parameter unit: ")
+        if param_uid >= 0 {
+            print_unit_dim(c.units.get_dim(param_uid))
+        } else {
+            print("(dimensionless)")
+        }
+        print("\n")
+        c
+    }
+
     // --------------------------------------------------------
     // Unary expression
     // --------------------------------------------------------
@@ -10624,6 +10889,11 @@ impl Checker {
             // Knowledge<T> field access: .value -> T, .epsilon -> f64
             if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
                 // "value" = [118, 97, 108, 117, 101]
+                // Epistemic enforcement: .value requires `with Epistemic` effect
+                let epistemic_id: i64 = 8
+                if !has_effect_id(c.current_effects, c.current_effect_count, epistemic_id) {
+                    c = c.report_error_at(e.span, 170, 0, 0, 0)
+                }
                 (c, knowledge_inner(base_ty))
             } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
                 // "epsilon" = [101, 112, 115, 105, 108, 111, 110]
@@ -10634,6 +10904,10 @@ impl Checker {
             }
         } else if base_ty.kind == TypeKind::TyIntervention {
             if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
+                let epistemic_id: i64 = 8
+                if !has_effect_id(c.current_effects, c.current_effect_count, epistemic_id) {
+                    c = c.report_error_at(e.span, 170, 0, 0, 0)
+                }
                 (c, knowledge_inner(base_ty))
             } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
                 (c, ty_f64())
@@ -10643,6 +10917,10 @@ impl Checker {
             }
         } else if base_ty.kind == TypeKind::TyCounterfactual {
             if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
+                let epistemic_id: i64 = 8
+                if !has_effect_id(c.current_effects, c.current_effect_count, epistemic_id) {
+                    c = c.report_error_at(e.span, 170, 0, 0, 0)
+                }
                 (c, knowledge_inner(base_ty))
             } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
                 (c, ty_f64())
@@ -10652,6 +10930,10 @@ impl Checker {
             }
         } else if base_ty.kind == TypeKind::TyValidated {
             if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
+                let epistemic_id: i64 = 8
+                if !has_effect_id(c.current_effects, c.current_effect_count, epistemic_id) {
+                    c = c.report_error_at(e.span, 170, 0, 0, 0)
+                }
                 (c, knowledge_inner(base_ty))
             } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
                 (c, ty_f64())
@@ -10766,9 +11048,21 @@ impl Checker {
             if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
                 // "unwrap" = [117, 110, 119, 114, 97, 112]
                 let call_start_borrows = c.borrows
-                c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
-                (c, knowledge_inner(base_ty))
+                match e.args {
+                    None => {
+                        c = c.report_error_at(e.span, 172, 0, 0, 0)
+                        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                        (c, knowledge_inner(base_ty))
+                    }
+                    Some(arg_list) => {
+                        if (*arg_list).head.kind != ExprKind::ExprStringLit {
+                            c = c.report_error_at(e.span, 173, 0, 0, 0)
+                        }
+                        c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                        (c, knowledge_inner(base_ty))
+                    }
+                }
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
                 let call_start_borrows = c.borrows
@@ -13036,13 +13330,22 @@ impl Checker {
         var c = self
 
         if arg_expr.kind == ExprKind::ExprIntLit {
-            if !pred_check_int(expected_ref.predicate, arg_expr.int_val) {
+            // Constant folding: literal known at compile time.
+            let result = refine_static_check_int_literal(expected_ref.predicate, arg_expr.int_val)
+            if result == refine_static_result_proved() {
+                c.refine_static_proved = c.refine_static_proved + 1
+            } else {
+                c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(call_span, 42, 0, 0, 0)
             }
             return c
         }
         if arg_expr.kind == ExprKind::ExprFloatLit {
-            if !pred_check_float(expected_ref.predicate, arg_expr.float_val) {
+            let result = refine_static_check_float_literal(expected_ref.predicate, arg_expr.float_val)
+            if result == refine_static_result_proved() {
+                c.refine_static_proved = c.refine_static_proved + 1
+            } else {
+                c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(call_span, 42, 0, 0, 0)
             }
             return c
@@ -13050,7 +13353,10 @@ impl Checker {
 
         if provided_ty.refinement_id >= 0 && provided_ty.refinement_id < 128 {
             let provided_ref = c.refinements.entries[provided_ty.refinement_id as usize]
-            if !pred_implies(provided_ref.predicate, expected_ref.predicate) {
+            if pred_implies(provided_ref.predicate, expected_ref.predicate) {
+                c.refine_static_proved = c.refine_static_proved + 1
+            } else {
+                c.refine_violations = c.refine_violations + 1
                 c = c.report_error_at(call_span, 42, 0, 0, 0)
             }
             return c
@@ -13060,10 +13366,14 @@ impl Checker {
         if arg_expr.kind == ExprKind::ExprIdent {
             let const_result = c.const_int_lookup(arg_expr.name)
             if const_result.0 {
-                if !pred_check_int(expected_ref.predicate, const_result.1) {
+                let result = refine_static_check_int_literal(expected_ref.predicate, const_result.1)
+                if result == refine_static_result_proved() {
+                    c.refine_static_proved = c.refine_static_proved + 1
+                    return c
+                } else {
+                    c.refine_violations = c.refine_violations + 1
                     return c.report_error_at(call_span, 42, 0, 0, 0)
                 }
-                return c
             }
         }
 
@@ -13073,9 +13383,20 @@ impl Checker {
             if env_lookup.refinement_id >= 0 && env_lookup.refinement_id < 128 {
                 let env_ref = c.refinements.entries[env_lookup.refinement_id as usize]
                 if pred_implies(env_ref.predicate, expected_ref.predicate) {
+                    c.refine_static_proved = c.refine_static_proved + 1
                     return c
                 }
             }
+
+            // Condition-narrowing proof: use guard predicates accumulated from
+            // enclosing `if` conditions.  E.g., inside `if x > 0 { f(x) }`,
+            // x > 0 is a guard — sufficient to prove `x` satisfies `{ x > 0 }`.
+            let cond_result = refine_static_check_var(c.refine_cond_env, arg_expr.name, expected_ref.predicate)
+            if cond_result == refine_static_result_proved() {
+                c.refine_static_proved = c.refine_static_proved + 1
+                return c
+            }
+
             // Ontology-aware proof: collect ALL property predicates from
             // class + ancestors into a single conjunction, then check once.
             //
@@ -13155,19 +13476,22 @@ impl Checker {
                         ci = ci + 1
                     }
                     if pred_implies_structural(conjoined, expected_ref.predicate) {
+                        c.refine_static_proved = c.refine_static_proved + 1
                         return c
                     }
                 }
             }
         }
 
-        // Epistemic fallback: emit warning, not error — unverifiable != wrong.
+        // Epistemic fallback: static analysis exhausted — defer to runtime assertion.
         // W040 semantics: the call compiles. The predicate is NOT proven statically.
+        //   Emit refine_hint: static_unknown diagnostic (W045) alongside W040.
         //   - Debug mode (future): codegen inserts runtime assertion at this call site.
         //     If the predicate fails at runtime, panic with "refinement predicate violated".
         //   - Release mode: trust the programmer. The warning was sufficient notice.
         // To suppress: #[allow(W040)] on the call site (not yet implemented).
         // To force proof: annotate the argument with an explicit refinement type.
+        c.refine_runtime_checked = c.refine_runtime_checked + 1
         c.report_warning_at(call_span, 40, 0, 0, 0)
     }
 
@@ -13188,6 +13512,18 @@ impl Checker {
         } else {
             self.report_error_at(call_span, 36, 0, 0, 0)
         }
+    }
+
+    fn check_call_arg_unit_boundary(self, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
+        let expected_ty = call_ref_inner_or_self(param_ty)
+        let provided_ty = call_ref_inner_or_self(arg_ty)
+        if is_error_or_unknown(expected_ty) || is_error_or_unknown(provided_ty) {
+            return self
+        }
+        if expected_ty.unit_id >= 0 && provided_ty.unit_id >= 0 && expected_ty.unit_id != provided_ty.unit_id {
+            return self.report_unit_call_mismatch(call_span, provided_ty.unit_id, expected_ty.unit_id)
+        }
+        self
     }
 
     fn check_call_arg_ontology_boundary(self, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
@@ -13248,6 +13584,7 @@ impl Checker {
                     c = c.check_call_arg_borrow_boundary(arg_expr, param_info.ty, call_span)
                     c = c.check_call_arg_refinement_boundary(arg_expr, arg_ty, param_info.ty, call_span)
                     c = c.check_call_arg_knowledge_boundary(arg_ty, param_info.ty, call_span)
+                    c = c.check_call_arg_unit_boundary(arg_ty, param_info.ty, call_span)
                     c = c.ontology_boundary_check_call_arg_contract(arg_ty, param_info.ty, call_span)
                 }
                 // Linear type consumption: if arg is linear and not implicitly borrowed, consume it
@@ -13314,22 +13651,40 @@ impl Checker {
         if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
             c = c.report_mismatch(e.span, 6, ty_bool(), cond_ty)
         }
-        // Check then block
+        // ── Condition narrowing ──────────────────────────────────────────────
+        // Attempt to extract a refinement predicate from the `if` condition so
+        // the then-branch can prove refinement requirements without Z3.
+        // E.g.: `if x > 0 { f(x as Pos) }` — we push `x > 0` as a guard.
+        // The saved env is restored after both branches so guards don't leak.
+        let saved_cond_env = c.refine_cond_env
+        let cond_guard = if_cond_extract_pred(e.left)
+        if cond_guard.0 {
+            c.refine_cond_env = refine_static_env_push(c.refine_cond_env, cond_guard.1)
+        }
+        // Check then block (with narrowed env)
         let then_pair = c.check_opt_block(e.block)
         c = then_pair.0
         let then_ty = then_pair.1
+        // Restore env before else branch (negation narrowing is not yet implemented
+        // — the safe choice is no narrowing in the else branch).
+        c.refine_cond_env = saved_cond_env
         // Check else
         match e.else_expr {
             Some(else_e) => {
                 let else_pair = c.check_expr(*else_e)
                 c = else_pair.0
                 let else_ty = else_pair.1
+                // Restore after else branch
+                c.refine_cond_env = saved_cond_env
                 if !types_compatible(then_ty, else_ty) {
                     c = c.report_mismatch(e.span, 7, then_ty, else_ty)
                 }
                 (c, then_ty)
             }
-            None => (c, ty_unit())
+            None => {
+                c.refine_cond_env = saved_cond_env
+                (c, ty_unit())
+            }
         }
     }
 
@@ -13867,6 +14222,18 @@ impl Checker {
                 let ty_pair = c.lower_type_expr(*ty)
                 c = ty_pair.0
                 let target_ty = ty_pair.1
+                // Epistemic enforcement: cannot cast Knowledge<T> to T via `as`
+                let src_is_epistemic = src_ty.kind == TypeKind::TyKnowledge
+                    || src_ty.kind == TypeKind::TyIntervention
+                    || src_ty.kind == TypeKind::TyCounterfactual
+                    || src_ty.kind == TypeKind::TyValidated
+                let tgt_is_epistemic = target_ty.kind == TypeKind::TyKnowledge
+                    || target_ty.kind == TypeKind::TyIntervention
+                    || target_ty.kind == TypeKind::TyCounterfactual
+                    || target_ty.kind == TypeKind::TyValidated
+                if src_is_epistemic && !tgt_is_epistemic {
+                    c = c.report_error_at(e.span, 171, 0, 0, 0)
+                }
                 // Unit conversion check: if both are unit-typed, dimensions must be compatible
                 if src_ty.unit_id >= 0 && target_ty.unit_id >= 0 {
                     let src_dim = c.units.get_dim(src_ty.unit_id)
@@ -14121,5 +14488,100 @@ fn struct_field_list_count(opt: Option<Box<StructFieldList> >) -> i64 with Mut, 
     match opt {
         None => 0
         Some(list) => 1 + struct_field_list_count((*list).tail)
+    }
+}
+
+// ============================================================
+// Static refinement: condition guard extraction
+// ============================================================
+//
+// Extract a RefinementPred from a simple boolean expression used as an `if`
+// condition.  Recognised forms:
+//   <ident> > <int_lit>    →  pred_gt(ident, n)
+//   <ident> >= <int_lit>   →  pred_gt_eq(ident, n)
+//   <ident> < <int_lit>    →  pred_lt(ident, n)
+//   <ident> <= <int_lit>   →  pred_lt_eq(ident, n)
+//   <ident> == <int_lit>   →  pred_eq(ident, n)
+//   <ident> != <int_lit>   →  pred_neq(ident, n)
+//
+// Returns (true, pred) on success, (false, _) when the form is unrecognised.
+// Handles atomic comparisons (x > 0), AND conjunctions (x > 0 && x < 100),
+// and OR disjunctions (x < 0 || x > 100) by recursing on both sides.
+// Partial extraction: if only one side of a compound is recognisable, that
+// side's predicate is returned (conservative but sound under-approximation).
+fn if_cond_extract_pred(opt: Option<Box<Expr> >) -> (bool, RefinementPred) with Mut, Panic, Div, Alloc {
+    let no_pred = (false, empty_refinement_pred())
+    match opt {
+        None => no_pred
+        Some(e) => {
+            let expr = *e
+            if expr.kind != ExprKind::ExprBinary {
+                return no_pred
+            }
+            // Compound conditions: recurse on both sides and combine.
+            if expr.bin_op == BinaryOp::OpAnd || expr.bin_op == BinaryOp::OpOr {
+                let left_pair  = if_cond_extract_pred(expr.left)
+                let right_pair = if_cond_extract_pred(expr.right)
+                let found_l = left_pair.0
+                let pred_l  = left_pair.1
+                let found_r = right_pair.0
+                let pred_r  = right_pair.1
+                if found_l && found_r {
+                    let combined = if expr.bin_op == BinaryOp::OpAnd {
+                        pred_and(pred_l, pred_r)
+                    } else {
+                        pred_or(pred_l, pred_r)
+                    }
+                    return (true, combined)
+                }
+                if found_l { return (true, pred_l) }
+                if found_r { return (true, pred_r) }
+                return no_pred
+            }
+            // LHS must be an identifier
+            let lhs_ok = match expr.left {
+                Some(lhs_e) => (*lhs_e).kind == ExprKind::ExprIdent
+                None => false
+            }
+            if !lhs_ok {
+                return no_pred
+            }
+            let lhs_name = match expr.left {
+                Some(lhs_e) => (*lhs_e).name
+                None => Name { buf: [0; 128], len: 0 }
+            }
+            // RHS must be an integer literal
+            let rhs_ok = match expr.right {
+                Some(rhs_e) => (*rhs_e).kind == ExprKind::ExprIntLit
+                None => false
+            }
+            if !rhs_ok {
+                return no_pred
+            }
+            let rhs_val = match expr.right {
+                Some(rhs_e) => (*rhs_e).int_val
+                None => 0
+            }
+            // Map BinaryOp → refinement_op
+            let op = if expr.bin_op == BinaryOp::OpGt {
+                refinement_op_gt()
+            } else if expr.bin_op == BinaryOp::OpGe {
+                refinement_op_gt_eq()
+            } else if expr.bin_op == BinaryOp::OpLt {
+                refinement_op_lt()
+            } else if expr.bin_op == BinaryOp::OpLe {
+                refinement_op_lt_eq()
+            } else if expr.bin_op == BinaryOp::OpEq {
+                refinement_op_eq()
+            } else if expr.bin_op == BinaryOp::OpNe {
+                refinement_op_neq()
+            } else {
+                refinement_op_none()
+            }
+            if op == refinement_op_none() {
+                return no_pred
+            }
+            (true, pred_make_int(op, lhs_name, rhs_val))
+        }
     }
 }

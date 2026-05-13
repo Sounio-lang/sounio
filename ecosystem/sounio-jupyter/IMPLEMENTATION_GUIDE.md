@@ -77,7 +77,7 @@ Color scheme:
 
 Run `verify_day1.sh`:
 ```bash
-cd triple-sounio-ecosystem/sounio-jupyter
+cd ecosystem/sounio-jupyter
 bash verify_day1.sh
 # ✓ File structure: 12 files
 # ✓ Python syntax: all modules compile
@@ -254,7 +254,7 @@ stdlib path: {self.kernel.executor.stdlib_path}
 ### From Source
 
 ```bash
-cd triple-sounio-ecosystem/sounio-jupyter
+cd ecosystem/sounio-jupyter
 
 # Install in development mode (requires pip)
 pip install -e .
@@ -325,7 +325,7 @@ jupyter notebook
 - **Jupyter Kernel Spec**: https://jupyter-client.readthedocs.io/en/latest/kernels.html
 - **IPykernel Source**: https://github.com/ipython/ipykernel
 - **Sounio Docs**: https://docs.sounio.dev
-- **Epistemic Types**: `/home/demetrios/RustroverProjects/sounio/stdlib/epistemic/`
+- **Epistemic Types**: `/workspace/sounio/stdlib/epistemic/`
 
 ## Next Session Checklist
 

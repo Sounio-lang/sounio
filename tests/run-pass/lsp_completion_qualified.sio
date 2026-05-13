@@ -1,0 +1,162 @@
+//@ run-pass
+// Verifies cross-module completion: Mod:: prefix returns non-empty list
+//
+// Simulates the lsp_completions_from_module bridge table logic inline,
+// without importing compiler internals.  Registers test symbols in a
+// mod-symbol table and verifies that prefix-matched lookups return the
+// correct counts and symbol hashes.
+
+// ---- Module-symbol bridge table ----
+
+struct ModSymEntry {
+    mod_hash:  i64,
+    sym_hash:  i64,
+    kind:      i64,
+    detail_id: i64,
+}
+
+fn mod_sym_entry_new(mh: i64, sh: i64, k: i64, d: i64) -> ModSymEntry {
+    ModSymEntry { mod_hash: mh, sym_hash: sh, kind: k, detail_id: d }
+}
+
+// ---- Flat completion result list (avoids nested-struct ABI limitations) ----
+
+struct CompResult {
+    sym_hashes:  [i64; 32],
+    kinds:       [i64; 32],
+    detail_ids:  [i64; 32],
+    count:       i64,
+}
+
+fn comp_result_new() -> CompResult {
+    CompResult {
+        sym_hashes:  [0; 32],
+        kinds:       [0; 32],
+        detail_ids:  [0; 32],
+        count:       0,
+    }
+}
+
+fn comp_result_add(result: &! CompResult, sym: i64, kind: i64, det: i64) with Mut, Panic {
+    if result.count < 32 {
+        let n = result.count
+        result.sym_hashes[n as usize] = sym
+        result.kinds[n as usize] = kind
+        result.detail_ids[n as usize] = det
+        result.count = n + 1
+    }
+}
+
+// completions_from_module: scan bridge table for entries matching mod_hash.
+// prefix_hash == 0 means no filter; otherwise only entries with
+// sym_hash == prefix_hash are included.
+// Appends matched entries to result in place.
+// Returns the number of items added.
+fn completions_from_module(
+    table: &[ModSymEntry; 16],
+    table_count: i64,
+    mod_hash: i64,
+    prefix_hash: i64,
+    result: &! CompResult
+) -> i64 with Mut, Div, Panic {
+    var added: i64 = 0
+    var i: i64 = 0
+    while i < table_count {
+        let e_mod  = table[i as usize].mod_hash
+        let e_sym  = table[i as usize].sym_hash
+        let e_kind = table[i as usize].kind
+        let e_det  = table[i as usize].detail_id
+        if e_mod == mod_hash {
+            let match_prefix = prefix_hash == 0 || e_sym == prefix_hash
+            if match_prefix {
+                comp_result_add(result, e_sym, e_kind, e_det)
+                added = added + 1
+            }
+        }
+        i = i + 1
+    }
+    added
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // Build bridge table:
+    //   mod=1: sym=10 (fn, kind=3), sym=20 (struct, kind=7), sym=30 (var, kind=6)
+    //   mod=2: sym=40 (fn, kind=3), sym=50 (const, kind=21)
+    var tbl: [ModSymEntry; 16] = [ModSymEntry { mod_hash: 0, sym_hash: 0, kind: 0, detail_id: 0 }; 16]
+    tbl[0] = mod_sym_entry_new(1, 10, 3, 0)
+    tbl[1] = mod_sym_entry_new(1, 20, 7, 1)
+    tbl[2] = mod_sym_entry_new(1, 30, 6, 0)
+    tbl[3] = mod_sym_entry_new(2, 40, 3, 0)
+    tbl[4] = mod_sym_entry_new(2, 50, 21, 0)
+    let count: i64 = 5
+
+    // T1: mod=1 with no prefix filter → all 3 entries, added count=3
+    var res1 = comp_result_new()
+    let added1 = completions_from_module(&tbl, count, 1, 0, &! res1)
+    if added1 == 3 && res1.count == 3 {
+        passed = passed + 1
+    } else {
+        println("T1 FAIL")
+        failed = failed + 1
+    }
+
+    // T2: mod=2 with no prefix filter → 2 entries, added count=2
+    var res2 = comp_result_new()
+    let added2 = completions_from_module(&tbl, count, 2, 0, &! res2)
+    if added2 == 2 && res2.count == 2 {
+        passed = passed + 1
+    } else {
+        println("T2 FAIL")
+        failed = failed + 1
+    }
+
+    // T3: mod=1, prefix=10 → exactly 1 entry with sym_hash=10
+    var res3 = comp_result_new()
+    let added3 = completions_from_module(&tbl, count, 1, 10, &! res3)
+    if added3 == 1 && res3.count == 1 && res3.sym_hashes[0] == 10 {
+        passed = passed + 1
+    } else {
+        println("T3 FAIL")
+        failed = failed + 1
+    }
+
+    // T4: mod=99 (unknown) → empty, added=0
+    var res4 = comp_result_new()
+    let added4 = completions_from_module(&tbl, count, 99, 0, &! res4)
+    if added4 == 0 && res4.count == 0 {
+        passed = passed + 1
+    } else {
+        println("T4 FAIL")
+        failed = failed + 1
+    }
+
+    // T5: mod=2, prefix=50 → 1 entry with kind=21 (const)
+    var res5 = comp_result_new()
+    let added5 = completions_from_module(&tbl, count, 2, 50, &! res5)
+    if added5 == 1 && res5.count == 1 && res5.kinds[0] == 21 {
+        passed = passed + 1
+    } else {
+        println("T5 FAIL")
+        failed = failed + 1
+    }
+
+    // T6: append: start from mod=2 results, then mod=1 results → total 5
+    var res6 = comp_result_new()
+    let a6a = completions_from_module(&tbl, count, 2, 0, &! res6)
+    let a6b = completions_from_module(&tbl, count, 1, 0, &! res6)
+    let _ = a6a
+    let _ = a6b
+    if res6.count == 5 {
+        passed = passed + 1
+    } else {
+        println("T6 FAIL")
+        failed = failed + 1
+    }
+
+    if failed == 0 { println("lsp_completion_qualified: PASS") }
+    else { println("lsp_completion_qualified: FAIL") }
+    failed as i32
+}

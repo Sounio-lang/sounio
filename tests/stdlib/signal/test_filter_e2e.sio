@@ -1,37 +1,126 @@
-//@ check-only
-//@ contract-adjustment: renamed hamming_window expectation to active flt_hamming_window symbol in signal::filter
-// E2E test for stdlib/signal/filter active API.
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// E2E test for stdlib/signal/filter — IIR1, IIR2, FIR64 APIs.
 
 use signal::filter::*
 
-fn check_near(a: f64, b: f64, tol: f64) -> bool {
-    let d = a - b
-    let ad = if d < 0.0 { 0.0 - d } else { d }
-    return ad < tol
+fn flt_abs_local(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
 }
 
-fn run_tests() -> i32 {
-    let bw = butterworth_lowpass(1000.0, 100.0, 2)
-    if bw.order != 2 { return 1 }
+fn main() with IO, Mut, Div, Panic {
+    var pass = 0
+    var fail = 0
 
-    let mag_dc = iir_magnitude_response(bw, 1000.0, 10.0)
-    if check_near(mag_dc, 1.0, 0.15) == false { return 1 }
+    // Test 1: IIR1 lowpass — DC input should pass unchanged
+    print("Test 1 [iir1_lowpass DC pass]: ")
+    var lp = iir1_lowpass(100.0, 1000.0)
+    var y: f64 = 0.0
+    var i: i64 = 0
+    while i < 200 {
+        y = iir1_step(&!lp, 1.0)
+        i = i + 1
+    }
+    // after 200 steps the filter should have settled near 1.0
+    if flt_abs_local(y - 1.0) < 0.01 {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
 
-    let nf = notch_filter(1000.0, 60.0, 30.0)
-    if nf.order != 2 { return 1 }
+    // Test 2: IIR1 highpass — DC input should be rejected (output → 0)
+    print("Test 2 [iir1_highpass DC reject]: ")
+    var hp = iir1_highpass(100.0, 1000.0)
+    var yh: f64 = 0.0
+    var j: i64 = 0
+    while j < 200 {
+        yh = iir1_step(&!hp, 1.0)
+        j = j + 1
+    }
+    if flt_abs_local(yh) < 0.05 {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
 
-    let mag_notch = iir_magnitude_response(nf, 1000.0, 60.0)
-    if mag_notch > 0.15 { return 1 }
+    // Test 3: IIR2 notch — at notch frequency output should be attenuated.
+    // Uses wider bw (20Hz) for faster settling; skips first 200 warmup samples.
+    print("Test 3 [iir2_notch attenuates at f0]: ")
+    var notch = iir2_notch(50.0, 20.0, 1000.0)
+    let pi = flt_pi()
+    var sum_out: f64 = 0.0
+    var sum_in: f64 = 0.0
+    var k: i64 = 0
+    while k < 400 {
+        let t = (k as f64) / 1000.0
+        let x = flt_sin(2.0 * pi * 50.0 * t)
+        let yn = iir2_step(&!notch, x)
+        if k >= 200 {
+            sum_in = sum_in + x * x
+            sum_out = sum_out + yn * yn
+        }
+        k = k + 1
+    }
+    // steady-state output power should be much less than input at notch freq
+    if sum_out < sum_in * 0.1 {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
 
-    let fir = fir_lowpass(1000.0, 100.0, 31)
-    if fir.length != 31 { return 1 }
+    // Test 4: FIR64 moving average — step response settles to 1.0 after `taps` samples
+    print("Test 4 [fir64_ma step settles]: ")
+    var fir = fir64_ma(8)
+    var yf: f64 = 0.0
+    var m: i64 = 0
+    while m < 16 {
+        yf = fir64_step(&!fir, 1.0)
+        m = m + 1
+    }
+    if flt_abs_local(yf - 1.0) < 0.001 {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
 
-    let w_mid = flt_hamming_window(31, 15)
-    if check_near(w_mid, 1.0, 0.01) == false { return 1 }
+    // Test 5: iir1_apply + fir64_apply on fixed arrays
+    print("Test 5 [iir1_apply + fir64_apply]: ")
+    var inp: [f64; 512] = [0.0; 512]
+    var out1: [f64; 512] = [0.0; 512]
+    var out2: [f64; 512] = [0.0; 512]
+    var n: i64 = 0
+    while n < 64 {
+        inp[n] = 1.0
+        n = n + 1
+    }
+    var lp2 = iir1_lowpass(200.0, 1000.0)
+    iir1_apply(&!lp2, &inp, &!out1, 64)
+    var fir2 = fir64_ma(4)
+    fir64_apply(&!fir2, &inp, &!out2, 64)
+    // both outputs at sample 63 should be near 1.0
+    if flt_abs_local(out1[63] - 1.0) < 0.05 && flt_abs_local(out2[63] - 1.0) < 0.001 {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
 
-    return 0
-}
-
-fn main() -> i32 {
-    return run_tests()
+    println("")
+    print("Passed: ")
+    print(pass)
+    print("  Failed: ")
+    println(fail)
+    println("")
+    if fail == 0 {
+        println("ALL PASS")
+    }
 }

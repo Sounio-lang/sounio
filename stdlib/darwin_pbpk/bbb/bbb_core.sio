@@ -1,0 +1,178 @@
+// darwin_pbpk/bbb/bbb_core.sio — Blood-Brain Barrier sub-model
+//
+// A 2-compartment brain model (ISF / ICF) driven by an external plasma
+// concentration input.  Replaces the coarse Kp-based brain compartment
+// in PBPKState14 with the Fridén/Hammarlund-Udenaes Kpuu framework
+// (Fridén et al., Drug Metab. Dispos. 35:1711, 2007), which is the
+// current gold standard for CNS PBPK modelling of transporter-affected
+// drugs (e.g., P-gp substrates like rapamycin).
+//
+// Why 2 compartments (not 3):
+//   The brain vascular space (~3% brain mass) equilibrates with
+//   systemic plasma on a ~3 second timescale (Q_brain/V_vasc ≈ 1073/h).
+//   For drug timescales of hours, perfusion-limited equilibration is
+//   effectively instantaneous, so C_vasc ≈ C_plasma at all times the
+//   PK model cares about.  Dropping the vascular compartment is the
+//   standard literature simplification (Gaohua et al., Drug Metab.
+//   Pharmacokinet. 31:224, 2016; Liu et al., Clin. Pharmacokinet.
+//   59:807, 2020) and removes the stiff eigenvalue that would force
+//   sub-second step sizes under explicit RK.
+//
+//   - Brain ISF (~20% brain mass) is separated from vascular space by
+//     the BBB.  For P-gp substrates this is the rate-limiting step,
+//     not perfusion — characterised by effective PS_bbb and the
+//     steady-state unbound partition Kpuu_brain (Fridén 2007).
+//   - Brain ICF (~75% brain mass) is separated from ISF by cellular
+//     membranes (PS_mem).  This is where the PD target (mTOR) lives.
+//
+// State equations (c denotes total concentration, c_u = fu * c is
+// unbound concentration):
+//
+//   V_isf * dC_isf/dt =   PS_bbb * (fu_plasma*C_plasma - fu_isf*C_isf/Kpuu_brain)
+//                       - PS_mem * (fu_isf*C_isf       - fu_icf*C_icf/Kpuu_cell)
+//
+//   V_icf * dC_icf/dt =   PS_mem * (fu_isf*C_isf       - fu_icf*C_icf/Kpuu_cell)
+//
+// At steady state: C_isf_u / C_plasma_u = Kpuu_brain (the BBB
+// transport asymmetry — efflux-dominated for P-gp substrates,
+// Kpuu_brain < 1) and C_icf_u / C_isf_u = Kpuu_cell (cell membrane
+// partitioning).
+//
+// Coupling style: feed-forward.  The systemic PBPKState14 is solved
+// independently; its plasma trajectory is sampled and passed to this
+// sub-model.  BBB uptake drain on systemic circulation is neglected
+// because PS_bbb * fu_plasma << Q_systemic for CNS-poor drugs
+// (verified in Gaohua et al. 2016).
+
+pub struct BBBState {
+    // Total concentrations (mg/L).  Unbound concentrations are
+    // derived on-the-fly via fu_isf / fu_icf; plasma is external.
+    c_isf:  f64,
+    c_icf:  f64,
+}
+
+pub fn bbb_state_zero() -> BBBState {
+    BBBState { c_isf: 0.0, c_icf: 0.0 }
+}
+
+pub struct BBBParams {
+    // Compartment volumes (L).  v_vasc is retained as a documented
+    // anatomical value but is not used in the 2-compartment ODE
+    // (perfusion-limited equilibration absorbed into C_plasma input).
+    v_vasc: f64,      // brain vascular volume (anatomical, not in ODE)
+    v_isf:  f64,      // brain ISF / extracellular volume
+    v_icf:  f64,      // brain ICF / intracellular volume
+
+    // Flows and permeabilities (L/h).  q_brain is retained as an
+    // anatomical reference value; the BBB sub-model uses PS_bbb
+    // rather than perfusion for ISF flux.
+    q_brain: f64,     // cerebral blood flow (anatomical, not in ODE)
+    ps_bbb:  f64,     // effective BBB permeability-surface area
+    ps_mem:  f64,     // effective cellular membrane PS
+
+    // Unbound fractions (dimensionless, 0 < fu <= 1)
+    fu_plasma: f64,
+    fu_isf:    f64,
+    fu_icf:    f64,
+
+    // Steady-state unbound partition ratios (dimensionless)
+    kpuu_brain: f64,  // ISF_unbound / plasma_unbound at SS (Fridén 2007)
+    kpuu_cell:  f64,  // ICF_unbound / ISF_unbound     at SS
+}
+
+// ----------------------------------------------------------------------------
+// Derivative (RHS of the BBB ODE)
+// ----------------------------------------------------------------------------
+
+pub fn bbb_ode(st: BBBState, c_plasma: f64, prm: BBBParams) -> BBBState with Div, Panic, Mut {
+    // BBB flux driven by unbound concentration gradient.  Kpuu scales
+    // the ISF-side driving force to encode transporter asymmetry.
+    // Plasma side uses C_plasma directly (vascular equilibration
+    // assumed instantaneous — see module header).
+    let c_plasma_u = prm.fu_plasma * c_plasma
+    let c_isf_u    = prm.fu_isf    * st.c_isf
+    let c_icf_u    = prm.fu_icf    * st.c_icf
+    let bbb_flux = prm.ps_bbb * (c_plasma_u - c_isf_u / prm.kpuu_brain)
+    let mem_flux = prm.ps_mem * (c_isf_u    - c_icf_u / prm.kpuu_cell)
+
+    let d_isf = (bbb_flux - mem_flux) / prm.v_isf
+    let d_icf = mem_flux / prm.v_icf
+
+    BBBState { c_isf: d_isf, c_icf: d_icf }
+}
+
+// ----------------------------------------------------------------------------
+// Fixed-step RK4 integrator for the BBB sub-model
+// ----------------------------------------------------------------------------
+// The BBB timescale (V_isf / PS_bbb for rapamycin) is on the order of
+// hours; fixed-step RK4 at dt ≤ 0.01 h is well under any stability
+// floor and deterministically reproducible.  We deliberately avoid
+// Tsit5's adaptive machinery here: for a 3-state sub-model the
+// adaptivity overhead dominates and the non-adaptive form is easier
+// to audit for dissertation-grade reproducibility.
+
+fn bbb_state_axpy(a: BBBState, b: BBBState, k: f64) -> BBBState {
+    BBBState {
+        c_isf: a.c_isf + k * b.c_isf,
+        c_icf: a.c_icf + k * b.c_icf,
+    }
+}
+
+fn bbb_state_comb4(y: BBBState, k1: BBBState, k2: BBBState, k3: BBBState, k4: BBBState, dt: f64) -> BBBState {
+    let sixth = dt / 6.0
+    let third = dt / 3.0
+    BBBState {
+        c_isf: y.c_isf + sixth * k1.c_isf + third * k2.c_isf + third * k3.c_isf + sixth * k4.c_isf,
+        c_icf: y.c_icf + sixth * k1.c_icf + third * k2.c_icf + third * k3.c_icf + sixth * k4.c_icf,
+    }
+}
+
+// One RK4 step.  The plasma driver is treated as constant over the
+// step; the caller should choose dt small enough that the plasma
+// trajectory is essentially linear over [t, t+dt].
+pub fn bbb_rk4_step(st: BBBState, c_plasma: f64, dt: f64, prm: BBBParams) -> BBBState with Div, Panic, Mut {
+    let k1 = bbb_ode(st, c_plasma, prm)
+    let k2 = bbb_ode(bbb_state_axpy(st, k1, 0.5 * dt), c_plasma, prm)
+    let k3 = bbb_ode(bbb_state_axpy(st, k2, 0.5 * dt), c_plasma, prm)
+    let k4 = bbb_ode(bbb_state_axpy(st, k3, dt),       c_plasma, prm)
+    bbb_state_comb4(st, k1, k2, k3, k4, dt)
+}
+
+// Integrate from t=0 to t=t_end under a constant plasma input,
+// returning the final BBB state.  Intended for steady-state /
+// Kpuu-probe simulations where C_plasma is held fixed.
+pub fn bbb_integrate_constant_plasma(
+    c_plasma: f64,
+    t_end: f64,
+    dt: f64,
+    prm: BBBParams
+) -> BBBState with Div, Panic, Mut {
+    var st = bbb_state_zero()
+    var t = 0.0
+    while t < t_end {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        st = bbb_rk4_step(st, c_plasma, dt_use, prm)
+        t = t + dt_use
+    }
+    st
+}
+
+// ----------------------------------------------------------------------------
+// Derived observables (for dissertation figures + validation)
+// ----------------------------------------------------------------------------
+
+// Unbound concentrations (ng/mL equivalent, same units as c_plasma).
+pub fn bbb_c_isf_u(st: BBBState, prm: BBBParams) -> f64 { prm.fu_isf * st.c_isf }
+pub fn bbb_c_icf_u(st: BBBState, prm: BBBParams) -> f64 { prm.fu_icf * st.c_icf }
+
+// Observed Kp,uu,brain = C_isf_unbound / C_plasma_unbound.
+// This is the PK quantity that pharmacologists care about for CNS
+// drugs — it reports the net BBB transport asymmetry regardless of
+// plasma protein binding or brain tissue binding.
+pub fn bbb_kpuu_observed(st: BBBState, c_plasma: f64, prm: BBBParams) -> f64 with Div, Panic, Mut {
+    let c_plasma_u = prm.fu_plasma * c_plasma
+    if c_plasma_u <= 0.0 {
+        return 0.0
+    }
+    (prm.fu_isf * st.c_isf) / c_plasma_u
+}

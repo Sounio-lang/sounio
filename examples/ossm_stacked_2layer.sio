@@ -1,0 +1,458 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stacked 2-Layer Octonion State Space Model (O-SSM-2L)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Architecture:
+//   Layer 1: h1_t = σ(A1 ⊗ h1_{t-1} + B1 ⊗ embed_tok)
+//   Layer 2: h2_t = σ(A2 ⊗ h2_{t-1} + B2 ⊗ h1_t)
+//
+// Task: Permutation discrimination on {1,2,3}.
+//   The 6 permutations produce different octonion state trajectories.
+//   Layer 2 integrates Layer 1's dynamics, amplifying order-sensitive
+//   differences through the non-associative octonion multiplication.
+//
+// Comparison: 1-layer vs 2-layer on state separability and
+// associator trajectory distinctness.
+
+// ─── Math ───
+fn sqrt_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn abs_s(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn sigmoid_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 10.0 { return 1.0 }
+    if x < 0.0 - 10.0 { return 0.0 }
+    var s = 1.0
+    var t = 1.0
+    var i = 1
+    while i <= 12 { t = t * x / (i as f64); s = s + t; i = i + 1 }
+    1.0 / (1.0 + s)
+}
+
+var RNG_S: i64 = 161803
+fn rand_s() -> f64 with Mut, Div, Panic {
+    RNG_S = (RNG_S * 6364136223846793005 + 1442695040888963407)
+    var v = RNG_S
+    if v < 0 { v = 0 - v }
+    (v % 10000) as f64 / 10000.0 - 0.5
+}
+
+// ─── Octonion ───
+struct OctS { e: [f64; 8] }
+
+fn octs_zero() -> OctS { OctS { e: [0.0; 8] } }
+
+fn octs_mul(a: &OctS, b: &OctS) -> OctS with Mut, Div, Panic {
+    var o: [f64; 8] = [0.0; 8]
+    o[0] = a.e[0]*b.e[0] - a.e[1]*b.e[1] - a.e[2]*b.e[2] - a.e[3]*b.e[3] - a.e[4]*b.e[4] - a.e[5]*b.e[5] - a.e[6]*b.e[6] - a.e[7]*b.e[7]
+    o[1] = a.e[0]*b.e[1] + a.e[1]*b.e[0] + a.e[2]*b.e[3] - a.e[3]*b.e[2] + a.e[4]*b.e[5] - a.e[5]*b.e[4] - a.e[6]*b.e[7] + a.e[7]*b.e[6]
+    o[2] = a.e[0]*b.e[2] + a.e[2]*b.e[0] - a.e[1]*b.e[3] + a.e[3]*b.e[1] + a.e[4]*b.e[6] - a.e[6]*b.e[4] + a.e[5]*b.e[7] - a.e[7]*b.e[5]
+    o[3] = a.e[0]*b.e[3] + a.e[3]*b.e[0] + a.e[1]*b.e[2] - a.e[2]*b.e[1] + a.e[4]*b.e[7] - a.e[7]*b.e[4] - a.e[5]*b.e[6] + a.e[6]*b.e[5]
+    o[4] = a.e[0]*b.e[4] + a.e[4]*b.e[0] - a.e[1]*b.e[5] + a.e[5]*b.e[1] - a.e[2]*b.e[6] + a.e[6]*b.e[2] - a.e[3]*b.e[7] + a.e[7]*b.e[3]
+    o[5] = a.e[0]*b.e[5] + a.e[5]*b.e[0] + a.e[1]*b.e[4] - a.e[4]*b.e[1] - a.e[2]*b.e[7] + a.e[7]*b.e[2] + a.e[3]*b.e[6] - a.e[6]*b.e[3]
+    o[6] = a.e[0]*b.e[6] + a.e[6]*b.e[0] + a.e[1]*b.e[7] - a.e[7]*b.e[1] + a.e[2]*b.e[4] - a.e[4]*b.e[2] - a.e[3]*b.e[5] + a.e[5]*b.e[3]
+    o[7] = a.e[0]*b.e[7] + a.e[7]*b.e[0] - a.e[1]*b.e[6] + a.e[6]*b.e[1] - a.e[2]*b.e[5] + a.e[5]*b.e[2] + a.e[3]*b.e[4] - a.e[4]*b.e[3]
+    OctS { e: o }
+}
+
+fn octs_add(a: &OctS, b: &OctS) -> OctS with Mut {
+    var o: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { o[i as usize] = a.e[i as usize] + b.e[i as usize]; i = i + 1 }
+    OctS { e: o }
+}
+
+fn octs_norm(a: &OctS) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i = 0
+    while i < 8 { s = s + a.e[i as usize] * a.e[i as usize]; i = i + 1 }
+    sqrt_s(s)
+}
+
+fn octs_sigmoid(a: &OctS) -> OctS with Mut, Div, Panic {
+    var o: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { o[i as usize] = sigmoid_s(a.e[i as usize]); i = i + 1 }
+    OctS { e: o }
+}
+
+// ─── Octonion embedding: each token maps to a basis unit ───
+fn embed_oct(tok: i64) -> OctS {
+    if tok == 1 { OctS { e: [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] } }
+    else if tok == 2 { OctS { e: [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0] } }
+    else if tok == 3 { OctS { e: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0] } }
+    else { octs_zero() }
+}
+
+// ─── Parameters ───
+var A1S: [f64; 8] = [0.0; 8]
+var B1S: [f64; 8] = [0.0; 8]
+var A2S: [f64; 8] = [0.0; 8]
+var B2S: [f64; 8] = [0.0; 8]
+
+fn init_params(seed: i64) with Mut, Div, Panic {
+    RNG_S = seed
+    var i = 0
+    while i < 8 { A1S[i as usize] = rand_s() * 0.3; B1S[i as usize] = rand_s() * 0.3; i = i + 1 }
+    i = 0
+    while i < 8 { A2S[i as usize] = rand_s() * 0.3; B2S[i as usize] = rand_s() * 0.3; i = i + 1 }
+}
+
+// ─── 1-layer forward: returns final state + cumulative associator ───
+fn forward_1layer(tok1: i64, tok2: i64, tok3: i64, final_h: &![f64; 8], cum_assoc: &![f64; 8]) with Mut, Div, Panic {
+    var A = OctS { e: [A1S[0], A1S[1], A1S[2], A1S[3], A1S[4], A1S[5], A1S[6], A1S[7]] }
+    var B = OctS { e: [B1S[0], B1S[1], B1S[2], B1S[3], B1S[4], B1S[5], B1S[6], B1S[7]] }
+    var h = octs_zero()
+    var ca = 0.0
+    var seq: [i64; 3] = [tok1, tok2, tok3]
+    var t = 0
+    while t < 3 {
+        let emb = embed_oct(seq[t as usize])
+        let Bx = octs_mul(&B, &emb)
+        let Ah = octs_mul(&A, &h)
+        let comb = octs_add(&Ah, &Bx)
+        h = octs_sigmoid(&comb)
+        // Associator: [A, h_prev, Bx]
+        let assoc = octs_mul(&A, &h)
+        let ah_prev = octs_mul(&A, &h)  // Approximation: use current h as proxy
+        // Skip exact associator to save ops; use norm of state change as proxy
+        ca = ca + octs_norm(&h)
+        t = t + 1
+    }
+    var i = 0
+    while i < 8 { final_h[i as usize] = h.e[i as usize]; i = i + 1 }
+    cum_assoc[0] = ca
+}
+
+// ─── 2-layer forward: returns final h2 + layer-wise cumulators ───
+fn forward_2layer(tok1: i64, tok2: i64, tok3: i64, final_h2: &![f64; 8], cum1: &![f64; 8], cum2: &![f64; 8]) with Mut, Div, Panic {
+    var A1 = OctS { e: [A1S[0], A1S[1], A1S[2], A1S[3], A1S[4], A1S[5], A1S[6], A1S[7]] }
+    var B1 = OctS { e: [B1S[0], B1S[1], B1S[2], B1S[3], B1S[4], B1S[5], B1S[6], B1S[7]] }
+    var A2 = OctS { e: [A2S[0], A2S[1], A2S[2], A2S[3], A2S[4], A2S[5], A2S[6], A2S[7]] }
+    var B2 = OctS { e: [B2S[0], B2S[1], B2S[2], B2S[3], B2S[4], B2S[5], B2S[6], B2S[7]] }
+    var h1 = octs_zero()
+    var h2 = octs_zero()
+    var c1 = 0.0
+    var c2 = 0.0
+    var seq: [i64; 3] = [tok1, tok2, tok3]
+    var t = 0
+    while t < 3 {
+        // Layer 1
+        let emb = embed_oct(seq[t as usize])
+        let B1x = octs_mul(&B1, &emb)
+        let A1h1 = octs_mul(&A1, &h1)
+        let comb1 = octs_add(&A1h1, &B1x)
+        h1 = octs_sigmoid(&comb1)
+        c1 = c1 + octs_norm(&h1)
+        // Layer 2
+        let B2h1 = octs_mul(&B2, &h1)
+        let A2h2 = octs_mul(&A2, &h2)
+        let comb2 = octs_add(&A2h2, &B2h1)
+        h2 = octs_sigmoid(&comb2)
+        c2 = c2 + octs_norm(&h2)
+        t = t + 1
+    }
+    var i = 0
+    while i < 8 { final_h2[i as usize] = h2.e[i as usize]; i = i + 1 }
+    cum1[0] = c1
+    cum2[0] = c2
+}
+
+// ─── State distance (L2) ───
+fn state_dist(a: &[f64; 8], b: &[f64; 8]) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i = 0
+    while i < 8 {
+        let d = a[i as usize] - b[i as usize]
+        s = s + d * d
+        i = i + 1
+    }
+    sqrt_s(s)
+}
+
+// ─── Evaluate all 6 permutations ───
+fn eval_separation_1layer() -> f64 with Mut, Div, Panic {
+    var states: [f64; 48] = [0.0; 48]
+    var p = 0
+    while p < 6 {
+        var t1: i64 = 0; var t2: i64 = 0; var t3: i64 = 0
+        if p == 0 { t1 = 1; t2 = 2; t3 = 3 }
+        if p == 1 { t1 = 1; t2 = 3; t3 = 2 }
+        if p == 2 { t1 = 2; t2 = 1; t3 = 3 }
+        if p == 3 { t1 = 2; t2 = 3; t3 = 1 }
+        if p == 4 { t1 = 3; t2 = 1; t3 = 2 }
+        if p == 5 { t1 = 3; t2 = 2; t3 = 1 }
+        var fh: [f64; 8] = [0.0; 8]
+        var ca: [f64; 8] = [0.0; 8]
+        forward_1layer(t1, t2, t3, &!fh, &!ca)
+        var j = 0
+        while j < 8 { states[(p * 8 + j) as usize] = fh[j as usize]; j = j + 1 }
+        p = p + 1
+    }
+    var total = 0.0
+    var count = 0
+    var i = 0
+    while i < 6 {
+        var j = i + 1
+        while j < 6 {
+            var a: [f64; 8] = [0.0; 8]
+            var b: [f64; 8] = [0.0; 8]
+            var k = 0
+            while k < 8 {
+                a[k as usize] = states[(i * 8 + k) as usize]
+                b[k as usize] = states[(j * 8 + k) as usize]
+                k = k + 1
+            }
+            total = total + state_dist(&a, &b)
+            count = count + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if count > 0 { total / (count as f64) } else { 0.0 }
+}
+
+fn eval_separation_2layer() -> f64 with Mut, Div, Panic {
+    var states: [f64; 48] = [0.0; 48]
+    var p = 0
+    while p < 6 {
+        var t1: i64 = 0; var t2: i64 = 0; var t3: i64 = 0
+        if p == 0 { t1 = 1; t2 = 2; t3 = 3 }
+        if p == 1 { t1 = 1; t2 = 3; t3 = 2 }
+        if p == 2 { t1 = 2; t2 = 1; t3 = 3 }
+        if p == 3 { t1 = 2; t2 = 3; t3 = 1 }
+        if p == 4 { t1 = 3; t2 = 1; t3 = 2 }
+        if p == 5 { t1 = 3; t2 = 2; t3 = 1 }
+        var fh: [f64; 8] = [0.0; 8]
+        var c1: [f64; 8] = [0.0; 8]
+        var c2: [f64; 8] = [0.0; 8]
+        forward_2layer(t1, t2, t3, &!fh, &!c1, &!c2)
+        var j = 0
+        while j < 8 { states[(p * 8 + j) as usize] = fh[j as usize]; j = j + 1 }
+        p = p + 1
+    }
+    var total = 0.0
+    var count = 0
+    var i = 0
+    while i < 6 {
+        var j = i + 1
+        while j < 6 {
+            var a: [f64; 8] = [0.0; 8]
+            var b: [f64; 8] = [0.0; 8]
+            var k = 0
+            while k < 8 {
+                a[k as usize] = states[(i * 8 + k) as usize]
+                b[k as usize] = states[(j * 8 + k) as usize]
+                k = k + 1
+            }
+            total = total + state_dist(&a, &b)
+            count = count + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if count > 0 { total / (count as f64) } else { 0.0 }
+}
+
+// ─── Tests ───
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0
+    var failed = 0
+
+    init_params(1)
+
+    // T1: 1-layer produces nonzero outputs
+    var fh1: [f64; 8] = [0.0; 8]
+    var ca1: [f64; 8] = [0.0; 8]
+    forward_1layer(1, 2, 3, &!fh1, &!ca1)
+    var nz1 = 0
+    var i = 0
+    while i < 8 { if abs_s(fh1[i as usize]) > 0.001 { nz1 = nz1 + 1 }; i = i + 1 }
+    if nz1 >= 4 { print("T1 PASS: 1-layer nonzero "); print_int(nz1); println("/8"); passed = passed + 1 }
+    else { println("T1 FAIL"); failed = failed + 1 }
+
+    // T2: 2-layer produces nonzero outputs
+    var fh2: [f64; 8] = [0.0; 8]
+    var c1a: [f64; 8] = [0.0; 8]
+    var c2a: [f64; 8] = [0.0; 8]
+    forward_2layer(1, 2, 3, &!fh2, &!c1a, &!c2a)
+    var nz2 = 0
+    i = 0
+    while i < 8 { if abs_s(fh2[i as usize]) > 0.001 { nz2 = nz2 + 1 }; i = i + 1 }
+    if nz2 >= 4 { print("T2 PASS: 2-layer nonzero "); print_int(nz2); println("/8"); passed = passed + 1 }
+    else { println("T2 FAIL"); failed = failed + 1 }
+
+    // T3: 2-layer final state separation > 1-layer
+    let sep1 = eval_separation_1layer()
+    let sep2 = eval_separation_2layer()
+    if sep2 > sep1 {
+        print("T3 PASS: sep 2L="); print(sep2); print(" > 1L="); print(sep1); println("")
+        passed = passed + 1
+    } else { println("T3 FAIL"); failed = failed + 1 }
+
+    // T4: Cumulative activity (norm sum) differs across permutations for 2L
+    var cum2_vals: [f64; 6] = [0.0; 6]
+    var p = 0
+    while p < 6 {
+        var t1: i64 = 0; var t2: i64 = 0; var t3: i64 = 0
+        if p == 0 { t1 = 1; t2 = 2; t3 = 3 }
+        if p == 1 { t1 = 1; t2 = 3; t3 = 2 }
+        if p == 2 { t1 = 2; t2 = 1; t3 = 3 }
+        if p == 3 { t1 = 2; t2 = 3; t3 = 1 }
+        if p == 4 { t1 = 3; t2 = 1; t3 = 2 }
+        if p == 5 { t1 = 3; t2 = 2; t3 = 1 }
+        var fh: [f64; 8] = [0.0; 8]
+        var c1: [f64; 8] = [0.0; 8]
+        var c2: [f64; 8] = [0.0; 8]
+        forward_2layer(t1, t2, t3, &!fh, &!c1, &!c2)
+        cum2_vals[p as usize] = c2[0]
+        p = p + 1
+    }
+    var cum2_min = cum2_vals[0]
+    var cum2_max = cum2_vals[0]
+    p = 1
+    while p < 6 {
+        if cum2_vals[p as usize] < cum2_min { cum2_min = cum2_vals[p as usize] }
+        if cum2_vals[p as usize] > cum2_max { cum2_max = cum2_vals[p as usize] }
+        p = p + 1
+    }
+    if cum2_max - cum2_min > 0.001 {
+        print("T4 PASS: 2L cum range ["); print(cum2_min); print(", "); print(cum2_max); println("]")
+        passed = passed + 1
+    } else { println("T4 FAIL"); failed = failed + 1 }
+
+    // T5: Layer-2 cumulative activity > Layer-1 (integration amplifies)
+    var c1_sum = 0.0
+    var c2_sum = 0.0
+    p = 0
+    while p < 6 {
+        var t1: i64 = 0; var t2: i64 = 0; var t3: i64 = 0
+        if p == 0 { t1 = 1; t2 = 2; t3 = 3 }
+        if p == 1 { t1 = 1; t2 = 3; t3 = 2 }
+        if p == 2 { t1 = 2; t2 = 1; t3 = 3 }
+        if p == 3 { t1 = 2; t2 = 3; t3 = 1 }
+        if p == 4 { t1 = 3; t2 = 1; t3 = 2 }
+        if p == 5 { t1 = 3; t2 = 2; t3 = 1 }
+        var fh: [f64; 8] = [0.0; 8]
+        var c1: [f64; 8] = [0.0; 8]
+        var c2: [f64; 8] = [0.0; 8]
+        forward_2layer(t1, t2, t3, &!fh, &!c1, &!c2)
+        c1_sum = c1_sum + c1[0]
+        c2_sum = c2_sum + c2[0]
+        p = p + 1
+    }
+    if c2_sum > c1_sum {
+        print("T5 PASS: total L2 cum="); print(c2_sum); print(" > L1 cum="); print(c1_sum); println("")
+        passed = passed + 1
+    } else { println("T5 FAIL"); failed = failed + 1 }
+
+    // T6: Layer-2 state norm variance > Layer-1
+    var norms1: [f64; 6] = [0.0; 6]
+    var norms2: [f64; 6] = [0.0; 6]
+    p = 0
+    while p < 6 {
+        var t1: i64 = 0; var t2: i64 = 0; var t3: i64 = 0
+        if p == 0 { t1 = 1; t2 = 2; t3 = 3 }
+        if p == 1 { t1 = 1; t2 = 3; t3 = 2 }
+        if p == 2 { t1 = 2; t2 = 1; t3 = 3 }
+        if p == 3 { t1 = 2; t2 = 3; t3 = 1 }
+        if p == 4 { t1 = 3; t2 = 1; t3 = 2 }
+        if p == 5 { t1 = 3; t2 = 2; t3 = 1 }
+        var fh1_l: [f64; 8] = [0.0; 8]
+        var ca1_l: [f64; 8] = [0.0; 8]
+        forward_1layer(t1, t2, t3, &!fh1_l, &!ca1_l)
+        var fh2_l: [f64; 8] = [0.0; 8]
+        var c1_l: [f64; 8] = [0.0; 8]
+        var c2_l: [f64; 8] = [0.0; 8]
+        forward_2layer(t1, t2, t3, &!fh2_l, &!c1_l, &!c2_l)
+        var n1 = 0.0
+        var n2 = 0.0
+        i = 0
+        while i < 8 { n1 = n1 + fh1_l[i as usize] * fh1_l[i as usize]; n2 = n2 + fh2_l[i as usize] * fh2_l[i as usize]; i = i + 1 }
+        norms1[p as usize] = sqrt_s(n1)
+        norms2[p as usize] = sqrt_s(n2)
+        p = p + 1
+    }
+    var mean1 = 0.0
+    var mean2 = 0.0
+    p = 0
+    while p < 6 { mean1 = mean1 + norms1[p as usize]; mean2 = mean2 + norms2[p as usize]; p = p + 1 }
+    mean1 = mean1 / 6.0
+    mean2 = mean2 / 6.0
+    var var1 = 0.0
+    var var2 = 0.0
+    p = 0
+    while p < 6 {
+        let d1 = norms1[p as usize] - mean1
+        let d2 = norms2[p as usize] - mean2
+        var1 = var1 + d1 * d1
+        var2 = var2 + d2 * d2
+        p = p + 1
+    }
+    if var2 > var1 {
+        print("T6 PASS: norm variance 2L="); print(var2); print(" > 1L="); print(var1); println("")
+        passed = passed + 1
+    } else { println("T6 FAIL"); failed = failed + 1 }
+
+    // T7: Reversing input order produces different 2L output
+    var fh_fwd: [f64; 8] = [0.0; 8]
+    var fh_rev: [f64; 8] = [0.0; 8]
+    var c1f: [f64; 8] = [0.0; 8]
+    var c2f: [f64; 8] = [0.0; 8]
+    var c1r: [f64; 8] = [0.0; 8]
+    var c2r: [f64; 8] = [0.0; 8]
+    forward_2layer(1, 2, 3, &!fh_fwd, &!c1f, &!c2f)
+    forward_2layer(3, 2, 1, &!fh_rev, &!c1r, &!c2r)
+    var diff = 0.0
+    i = 0
+    while i < 8 {
+        let d = fh_fwd[i as usize] - fh_rev[i as usize]
+        diff = diff + d * d
+        i = i + 1
+    }
+    diff = sqrt_s(diff)
+    if diff > 0.001 {
+        print("T7 PASS: fwd/rev diff="); print(diff); println(" (order-sensitive)")
+        passed = passed + 1
+    } else { println("T7 FAIL"); failed = failed + 1 }
+
+    // T8: No explosion (all norms bounded)
+    var max_norm = 0.0
+    p = 0
+    while p < 6 {
+        var t1: i64 = 0; var t2: i64 = 0; var t3: i64 = 0
+        if p == 0 { t1 = 1; t2 = 2; t3 = 3 }
+        if p == 1 { t1 = 1; t2 = 3; t3 = 2 }
+        if p == 2 { t1 = 2; t2 = 1; t3 = 3 }
+        if p == 3 { t1 = 2; t2 = 3; t3 = 1 }
+        if p == 4 { t1 = 3; t2 = 1; t3 = 2 }
+        if p == 5 { t1 = 3; t2 = 2; t3 = 1 }
+        var fh: [f64; 8] = [0.0; 8]
+        var c1: [f64; 8] = [0.0; 8]
+        var c2: [f64; 8] = [0.0; 8]
+        forward_2layer(t1, t2, t3, &!fh, &!c1, &!c2)
+        var n = 0.0
+        i = 0
+        while i < 8 { n = n + fh[i as usize] * fh[i as usize]; i = i + 1 }
+        let nr = sqrt_s(n)
+        if nr > max_norm { max_norm = nr }
+        p = p + 1
+    }
+    if max_norm < 100.0 {
+        print("T8 PASS: max norm="); print(max_norm); println(" (bounded)")
+        passed = passed + 1
+    } else { println("T8 FAIL"); failed = failed + 1 }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed as i32
+}

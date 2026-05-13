@@ -1,0 +1,261 @@
+//@ run-pass
+// Phase 1 — Non-Associative Epistemic Connectomics
+// sim_ground_truth.sio — α-tunable synthetic connectome.
+//
+// Parameter α ∈ {0.0, 0.5, 1.0} controls the fraction of node labels drawn
+// from the full octonion sphere (vs the quaternion subalgebra span(e_0..e_3)).
+// The associator [a,b,c] = (ab)c − a(bc) is identically zero on any
+// associative subalgebra, so at α=0 the 95th-percentile of ‖[a,b,c]‖² should
+// be indistinguishable from floating-point noise. At α=1 it should be large.
+//
+// Gate assertion: p95(α=0) << p95(α=0.5) < p95(α=1).
+//
+// Fano-plane multiplication convention mirrors
+// tests/run-pass/knowledge_octonion_structure.sio.
+
+// =============================================================================
+// PRNG — linear congruential, deterministic
+// =============================================================================
+
+fn rng_next(state: i64) -> i64 with Div {
+    let a: i64 = 16807
+    let m: i64 = 2147483647
+    let q: i64 = 127773
+    let r: i64 = 2836
+    let hi = state / q
+    let lo = state - hi * q
+    let t = a * lo - r * hi
+    if t > 0 { t } else { t + m }
+}
+
+// Uniform [−1, 1] from LCG state
+fn rng_uniform(state: i64) -> f64 with Div {
+    let m: i64 = 2147483647
+    let s = state as f64
+    let mf = m as f64
+    (s / mf) * 2.0 - 1.0
+}
+
+// =============================================================================
+// Octonion product — inline Fano-plane convention
+// =============================================================================
+// Returns only the scalar-part squared norm for triple (a*b). A full product
+// is inlined in oct_triple_assoc_norm_sq below; this helper is isolated so
+// the compiler can hoist it into a fresh frame (VAR_ cap mitigation).
+
+// Compute the squared L2 norm of the associator a(bc) − (ab)c for three
+// octonions packed as a0..a7, b0..b7, c0..c7.
+// Inlined Cayley-Dickson product twice, minus, squared-norm. No inner functions
+// to keep the compile-time trace shallow.
+fn assoc_norm_sq(
+    a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64,
+    b0: f64, b1: f64, b2: f64, b3: f64, b4: f64, b5: f64, b6: f64, b7: f64,
+    c0: f64, c1: f64, c2: f64, c3: f64, c4: f64, c5: f64, c6: f64, c7: f64,
+) -> f64 {
+    // p = a * b
+    let p0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    let p1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+    let p2 = a0*b2 + a2*b0 - a1*b3 + a3*b1 + a4*b6 - a6*b4 + a5*b7 - a7*b5
+    let p3 = a0*b3 + a3*b0 + a1*b2 - a2*b1 + a4*b7 - a7*b4 - a5*b6 + a6*b5
+    let p4 = a0*b4 + a4*b0 - a1*b5 + a5*b1 - a2*b6 + a6*b2 - a3*b7 + a7*b3
+    let p5 = a0*b5 + a5*b0 + a1*b4 - a4*b1 + a3*b6 - a6*b3 - a2*b7 + a7*b2
+    let p6 = a0*b6 + a6*b0 + a2*b4 - a4*b2 - a3*b5 + a5*b3 + a1*b7 - a7*b1
+    let p7 = a0*b7 + a7*b0 - a1*b6 + a6*b1 + a2*b5 - a5*b2 + a3*b4 - a4*b3
+
+    // L = p * c = (a*b)*c
+    let l0 = p0*c0 - p1*c1 - p2*c2 - p3*c3 - p4*c4 - p5*c5 - p6*c6 - p7*c7
+    let l1 = p0*c1 + p1*c0 + p2*c3 - p3*c2 + p4*c5 - p5*c4 - p6*c7 + p7*c6
+    let l2 = p0*c2 + p2*c0 - p1*c3 + p3*c1 + p4*c6 - p6*c4 + p5*c7 - p7*c5
+    let l3 = p0*c3 + p3*c0 + p1*c2 - p2*c1 + p4*c7 - p7*c4 - p5*c6 + p6*c5
+    let l4 = p0*c4 + p4*c0 - p1*c5 + p5*c1 - p2*c6 + p6*c2 - p3*c7 + p7*c3
+    let l5 = p0*c5 + p5*c0 + p1*c4 - p4*c1 + p3*c6 - p6*c3 - p2*c7 + p7*c2
+    let l6 = p0*c6 + p6*c0 + p2*c4 - p4*c2 - p3*c5 + p5*c3 + p1*c7 - p7*c1
+    let l7 = p0*c7 + p7*c0 - p1*c6 + p6*c1 + p2*c5 - p5*c2 + p3*c4 - p4*c3
+
+    // q = b * c
+    let q0 = b0*c0 - b1*c1 - b2*c2 - b3*c3 - b4*c4 - b5*c5 - b6*c6 - b7*c7
+    let q1 = b0*c1 + b1*c0 + b2*c3 - b3*c2 + b4*c5 - b5*c4 - b6*c7 + b7*c6
+    let q2 = b0*c2 + b2*c0 - b1*c3 + b3*c1 + b4*c6 - b6*c4 + b5*c7 - b7*c5
+    let q3 = b0*c3 + b3*c0 + b1*c2 - b2*c1 + b4*c7 - b7*c4 - b5*c6 + b6*c5
+    let q4 = b0*c4 + b4*c0 - b1*c5 + b5*c1 - b2*c6 + b6*c2 - b3*c7 + b7*c3
+    let q5 = b0*c5 + b5*c0 + b1*c4 - b4*c1 + b3*c6 - b6*c3 - b2*c7 + b7*c2
+    let q6 = b0*c6 + b6*c0 + b2*c4 - b4*c2 - b3*c5 + b5*c3 + b1*c7 - b7*c1
+    let q7 = b0*c7 + b7*c0 - b1*c6 + b6*c1 + b2*c5 - b5*c2 + b3*c4 - b4*c3
+
+    // R = a * q = a*(b*c)
+    let r0 = a0*q0 - a1*q1 - a2*q2 - a3*q3 - a4*q4 - a5*q5 - a6*q6 - a7*q7
+    let r1 = a0*q1 + a1*q0 + a2*q3 - a3*q2 + a4*q5 - a5*q4 - a6*q7 + a7*q6
+    let r2 = a0*q2 + a2*q0 - a1*q3 + a3*q1 + a4*q6 - a6*q4 + a5*q7 - a7*q5
+    let r3 = a0*q3 + a3*q0 + a1*q2 - a2*q1 + a4*q7 - a7*q4 - a5*q6 + a6*q5
+    let r4 = a0*q4 + a4*q0 - a1*q5 + a5*q1 - a2*q6 + a6*q2 - a3*q7 + a7*q3
+    let r5 = a0*q5 + a5*q0 + a1*q4 - a4*q1 + a3*q6 - a6*q3 - a2*q7 + a7*q2
+    let r6 = a0*q6 + a6*q0 + a2*q4 - a4*q2 - a3*q5 + a5*q3 + a1*q7 - a7*q1
+    let r7 = a0*q7 + a7*q0 - a1*q6 + a6*q1 + a2*q5 - a5*q2 + a3*q4 - a4*q3
+
+    // associator = L - R
+    let d0 = l0 - r0
+    let d1 = l1 - r1
+    let d2 = l2 - r2
+    let d3 = l3 - r3
+    let d4 = l4 - r4
+    let d5 = l5 - r5
+    let d6 = l6 - r6
+    let d7 = l7 - r7
+
+    d0*d0 + d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7
+}
+
+// =============================================================================
+// Sort helper — insertion sort for p95 extraction
+// =============================================================================
+fn isort(xs: &![f64; 220], n: i32) with Mut {
+    var i: i32 = 1
+    while i < n {
+        var j = i
+        while j > 0 {
+            if xs[j - 1] > xs[j] {
+                let t = xs[j - 1]
+                xs[j - 1] = xs[j]
+                xs[j] = t
+                j = j - 1
+            } else {
+                j = 0 - 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Tier computation — 12 nodes, α-controlled mixture, p95 of associator norm
+// =============================================================================
+// alpha_num / alpha_den gives α (avoids passing f64 to keep ABI simple).
+// Returns p95 of the associator-norm² across all C(12,3) = 220 triples.
+fn tier_p95(alpha_num: i32, alpha_den: i32, seed0: i64) -> f64 with Mut, Div {
+    // 12 nodes × 8 octonion components
+    var lab: [f64; 96] = [0.0; 96]
+    var rng = seed0
+    var node: i32 = 0
+    while node < 12 {
+        // Decide whether this node draws from full 𝕆 (octonion) or from
+        // quaternion subalgebra span(e_0..e_3). Hash-deterministic by node index
+        // so α sweep is reproducible.
+        rng = rng_next(rng)
+        let roll = rng
+        // roll_mod in [0..alpha_den)
+        var rmod = roll
+        if rmod < 0 { rmod = 0 - rmod }
+        let bucket = rmod - (rmod / (alpha_den as i64)) * (alpha_den as i64)
+        let full_oct = bucket < (alpha_num as i64)
+
+        var k: i32 = 0
+        while k < 8 {
+            rng = rng_next(rng)
+            let v = rng_uniform(rng)
+            // Zero out channels 4..7 if this node is restricted to quaternion
+            if k >= 4 && !full_oct {
+                lab[node * 8 + k] = 0.0
+            } else {
+                lab[node * 8 + k] = v
+            }
+            k = k + 1
+        }
+        node = node + 1
+    }
+
+    // Iterate all C(12,3) = 220 triples
+    var norms: [f64; 220] = [0.0; 220]
+    var tidx: i32 = 0
+    var i: i32 = 0
+    while i < 12 {
+        var j = i + 1
+        while j < 12 {
+            var k = j + 1
+            while k < 12 {
+                let a0 = lab[i * 8 + 0]
+                let a1 = lab[i * 8 + 1]
+                let a2 = lab[i * 8 + 2]
+                let a3 = lab[i * 8 + 3]
+                let a4 = lab[i * 8 + 4]
+                let a5 = lab[i * 8 + 5]
+                let a6 = lab[i * 8 + 6]
+                let a7 = lab[i * 8 + 7]
+                let b0 = lab[j * 8 + 0]
+                let b1 = lab[j * 8 + 1]
+                let b2 = lab[j * 8 + 2]
+                let b3 = lab[j * 8 + 3]
+                let b4 = lab[j * 8 + 4]
+                let b5 = lab[j * 8 + 5]
+                let b6 = lab[j * 8 + 6]
+                let b7 = lab[j * 8 + 7]
+                let c0 = lab[k * 8 + 0]
+                let c1 = lab[k * 8 + 1]
+                let c2 = lab[k * 8 + 2]
+                let c3 = lab[k * 8 + 3]
+                let c4 = lab[k * 8 + 4]
+                let c5 = lab[k * 8 + 5]
+                let c6 = lab[k * 8 + 6]
+                let c7 = lab[k * 8 + 7]
+                norms[tidx] = assoc_norm_sq(
+                    a0,a1,a2,a3,a4,a5,a6,a7,
+                    b0,b1,b2,b3,b4,b5,b6,b7,
+                    c0,c1,c2,c3,c4,c5,c6,c7,
+                )
+                tidx = tidx + 1
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    isort(&!norms, 220)
+    // p95 index = floor(0.95 * 220) = 209
+    norms[209]
+}
+
+// =============================================================================
+// Main — three α tiers, monotone assertion
+// =============================================================================
+fn main() -> i32 with IO, Mut, Div {
+    println("=== sim_ground_truth: α-tunable associator field ===")
+
+    // α = 0.0 (pure quaternion subalgebra — associator must vanish)
+    let p95_a0 = tier_p95(0, 10, 42)
+    print("p95(α=0.0)   = "); println(p95_a0)
+
+    // α = 0.5
+    let p95_a5 = tier_p95(5, 10, 1337)
+    print("p95(α=0.5)   = "); println(p95_a5)
+
+    // α = 1.0 (full octonion — associator maximally non-zero)
+    let p95_a1 = tier_p95(10, 10, 7919)
+    print("p95(α=1.0)   = "); println(p95_a1)
+
+    // Monotone check. α=0 should be exactly zero (quaternion closure); allow
+    // 1e-20 floor for float noise.
+    let tol_zero = 0.000000000000000001  // 1e-18
+    let ok_zero = p95_a0 < tol_zero
+    let ok_mono_05 = p95_a0 <= p95_a5
+    let ok_mono_51 = p95_a5 <= p95_a1
+    let ok_nontriv = p95_a1 > 0.01
+
+    println("")
+    if ok_zero && ok_mono_05 && ok_mono_51 && ok_nontriv {
+        println("PASS: monotone associator recovery")
+        return 0
+    }
+    if !ok_zero {
+        println("FAIL: α=0 not zero — quaternion subalgebra not closing")
+    }
+    if !ok_mono_05 {
+        println("FAIL: p95(α=0) > p95(α=0.5)")
+    }
+    if !ok_mono_51 {
+        println("FAIL: p95(α=0.5) > p95(α=1.0)")
+    }
+    if !ok_nontriv {
+        println("FAIL: α=1 associator too small — check Fano convention")
+    }
+    1
+}

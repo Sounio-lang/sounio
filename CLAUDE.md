@@ -1,97 +1,155 @@
 # CLAUDE.md
 
-**START HERE**: [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md) | **Syntax ref**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md) | **LLM guide**: [docs/llm-guide/](docs/llm-guide/)
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+**Recovery context**: [CLAUDE_HANDOFF.md](CLAUDE_HANDOFF.md) | **Syntax ref**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md) | **LLM guide**: [docs/llm-guide/](docs/llm-guide/) | **Minimum viable**: [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md)
 
 ## Project Identity
 
-**Sounio** — L0 systems + scientific programming language for epistemic computing. NOT a Rust/Julia dialect; own syntax, semantics, philosophy.
+**Sounio** — a self-hosted systems + scientific programming language for epistemic computing, uncertainty propagation, and algebraic effects. NOT a Rust/Julia dialect; own syntax, semantics, philosophy. Linux x86-64 only.
 
-## Working Principles (MANDATORY)
+## Session Bootstrap
 
-1. **No AI attribution** — No "Co-Authored-By" or similar in commits
-2. **Sounio syntax** — `&!` not `&mut`, `var` not `let mut`
-3. **Atomic commits** — One logical change per commit
-4. **Token efficiency** — Parallel agents, concise ops
-5. **YOLO mode** — Execute routine ops without asking
-6. **Q1+ research first** — Literature review before architecture decisions
-7. **No drift to mean** — Excellence only
-8. **Epistemic honesty** — Cite sources, acknowledge uncertainty
-9. **Edge of novelty** — Don't copy existing languages
+Before non-trivial changes:
+
+1. Read `CLAUDE_HANDOFF.md` — recovery history and workspace context
+2. Verify current branch (should be `integration/sounio-dev-ready-base`)
+3. Do not start from `main` until reconciliation is completed
+4. Do not propose destructive reset/clean/rebase flows on this repo
+
+## Build & Run
+
+The compiler is **self-hosted** (written in Sounio, not Rust). `bin/souc` is a bash wrapper around the native self-hosted binary at `artifacts/self-hosted/souc-self-hosted-x86_64`.
+
+```bash
+SOUC=./bin/souc
+export SOUNIO_STDLIB_PATH=$(pwd)/stdlib   # needed when outside repo root
+
+$SOUC --version                           # verify toolchain
+$SOUC check file.sio                      # type-check only
+$SOUC run file.sio                        # compile to temp ELF, execute, clean up
+$SOUC compile file.sio -o output.elf      # emit named ELF binary
+$SOUC info                                # compiler status
+
+# Bootstrap chain (fixed-point verification)
+make build      # boot4 → gen1 → gen2 → gen3, verifies gen2 == gen3
+make clean      # remove gen1/gen2/gen3.elf
+```
+
+## Testing
+
+```bash
+# Full test suite (run-pass + compile-fail + stdlib)
+bash scripts/run_sio_test_suite.sh
+bash scripts/run_sio_test_suite.sh --verbose
+
+# Single test by name pattern
+bash scripts/run_sio_test_suite.sh covid
+bash scripts/run_sio_test_suite.sh vancomycin --verbose
+
+# Stdlib gates
+bash scripts/stdlib_hyper_execution_gate.sh
+bash scripts/stdlib_science_pipeline_gate.sh
+bash scripts/stdlib_reliability_gate.sh
+
+# Lint for Rust hallucinations in .sio files
+make lint
+make lint-fix FILE=path/to/file.sio
+
+# Type-check compiler + CI gates
+make check
+
+# Solo / self-hosted-only workflow (skips Cargo steps inside gates):
+#   SKIP_BUILD=1 bash scripts/dev/fast_gate.sh
+#   SKIP_BUILD=1 make check
+# Omit SKIP_BUILD when you need workspace `cargo test` / `cargo run` parity with CI Rust jobs.
+
+# Doctor the workspace
+bash scripts/dev/doctor_workspace.sh
+```
+
+### Test Annotations
+
+Tests use header comments for the harness:
+
+- `//@ run-pass` — expect exit 0
+- `//@ compile-fail` — expect exit != 0
+- `//@ expect-stdout: X` — stdout must contain X (run-pass only)
+- `//@ error-pattern: X` — stderr/stdout must contain X (compile-fail only)
+- `//@ ignore` — skip this test
+- `//@ check-only` — compile only, do not execute
+
+Test directories: `tests/run-pass/`, `tests/compile-fail/`, `tests/ui/`, `tests/stdlib/`, `tests/selfhost/`, `tests/native/`, `tests/regression/`
 
 ## Sounio Syntax (NOT Rust)
 
-**CRITICAL — What doesn't work:**
+**Critical differences — these are compile errors:**
 
-- `&mut` → use `&!`
-- `assert!()`, `println!()` → no Rust macros (use `assert()`, `println()`)
-- `#[test]`, `#[derive()]` → no attributes
-- `|x| x + 1` → no closure literals (named fn refs work: `let f = square`)
-- Bare `&![T; N]` array mutation → wrap in struct (see KNOWN_LIMITATIONS.md)
+| Wrong (Rust) | Correct (Sounio) |
+|---|---|
+| `let x = 5;` | `let x = 5` (no semicolons) |
+| `let mut y = 10` | `var y = 10` |
+| `&mut T` | `&!T` |
+| `assert!(cond)` | `assert(cond)` |
+| `println!("hi")` | `println("hi")` |
+| `#[test]`, `#[derive()]` | No attributes |
+| `\|x\| x + 1` | Closure literals — `|x| x + 1` works |
+| `-42` | `0 - 42` (no unary minus) |
+| `x >> 4` | `x >> 4u8` (bit shifts require u8) |
+
+**Helpers must be defined before callers** — no forward references.
 
 **Quick reference:**
 
 ```sio
 let x = 5                              // immutable
 var y = 10                             // mutable
+var buf: [i64; 8] = [0; 8]            // fixed-size array
 &T / &!T                               // shared / exclusive ref
-fn f(x: i32) -> i32 with IO { }        // effects
-linear struct Handle { fd: i32 }       // linear types
+fn f(x: i32) -> i32 with IO { }        // effects declaration
+linear struct Handle { fd: i32 }       // linear types (consumed exactly once)
 let dose: mg = 500.0                   // units
-let arr2 = a ++ b                      // concatenation
-type Pos = { x: i32 | x > 0 }          // refinement
-let m: Knowledge<mg> = measure(500.0, uncertainty: 2.5)  // epistemic
-algebra Octonion over f64 { add: commutative, associative; mul: alternative, non_commutative; reassociate: fano_selective }
+let arr2 = a ++ b                      // array concatenation
+type Pos = { x: i32 | x > 0 }          // refinement type
+let m: Knowledge<mg> = measure(500.0, uncertainty: 2.5)  // epistemic type
 fn observe(x: Unobserved<f64>) -> bool with Observe { x > 0.0 }
+
+// Effects: IO, Mut, Div, Panic, Alloc, Async, GPU, Prob, Observe
+fn main() with IO, Mut, Panic, Div { }
+
+// Methods use explicit self
+impl MyStruct {
+    fn get(self: &MyStruct) -> i64 { self.val }
+    fn set(self: &!MyStruct, v: i64) with Mut { self.val = v }
+}
+
+// Control flow
+for i in 0..10 { }       // exclusive range
+for i in 0..=10 { }      // inclusive range
+while cond { }
+if x > 0 { "pos" } else { "neg" }   // if is an expression
 ```
-
-## Build & Run
-
-The compiler is **self-hosted** (written in Sounio). Use the native wrapper:
-
-```bash
-SOUC=./bin/souc
-
-$SOUC check examples/file.sio          # type-check
-$SOUC run examples/file.sio            # compile to temp ELF, execute, clean up
-$SOUC compile file.sio -o output.elf   # direct native compilation
-$SOUC repl                             # not yet supported in native mode
-
-# Debug flags not yet supported in native mode:
-#   --show-ast
-#   --show-types
-
-# Bootstrap chain
-./artifacts/self-hosted/souc-self-hosted-x86_64 self-hosted/compiler/lean_single.sio gen1.elf
-./gen1.elf self-hosted/compiler/lean_single.sio gen2.elf
-```
-
-**Stdlib path** (when outside repo): `export SOUNIO_STDLIB_PATH=$(pwd)/stdlib`
 
 ## Architecture
 
-**Pipeline:** Source → Lexer → Parser → AST → Check → HIR → SIR → HLIR (SSA) → Codegen
+**Pipeline:** Source → Lexer → Parser → AST → Check → HIR → SIR → HLIR (SSA) → Codegen (x86-64 ELF)
 
-| Module | Purpose |
-|--------|---------|
+| Directory | Purpose |
+|---|---|
 | `self-hosted/lexer/`, `parser/` | Frontend (tokenizer, recursive descent) |
-| `self-hosted/check/`, `types/` | Bidirectional inference + effects |
-| `self-hosted/ir/` | IR lowering, optimization, e-graph |
+| `self-hosted/check/`, `types/` | Bidirectional type inference + algebraic effects |
+| `self-hosted/ir/` | IR lowering, e-graph optimization (1000+ rewrite rules) |
 | `self-hosted/native/` | x86-64 ELF emission |
 | `self-hosted/compiler/` | Codegen drivers (lean, IR, GPU) |
-| `stdlib/epistemic/` | Knowledge<T>, uncertainty (GUM) |
+| `self-hosted/gpu/` | PTX/GPU codegen (exists but no end-to-end CLI path) |
+| `stdlib/epistemic/` | Knowledge\<T\>, uncertainty (GUM), provenance |
 | `stdlib/units/` | Dimensional analysis |
-| `bootstrap/` | stage0 (C) → boot2g → boot1 chain |
+| `bootstrap/` | stage0 (C) → boot2g → boot3 → boot4 → self-hosted chain |
+| `formal/` | Lean 4 proofs (epistemic type invariants) |
 
-See: [docs/compiler/KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md)
+**Bootstrap chain**: `bootstrap/stage0` (C, ~103KB) builds the first Sounio binary; successive stages (`boot0`→`boot4`, each written in Sounio) build the next until the compiler compiles itself. Fixed-point: stage N and N+1 produce bit-identical ELFs.
 
-## Tests
-
-- `tests/run-pass/` — Should compile and run
-- `tests/compile-fail/` — Should fail to compile
-- `tests/ui/` — Error message snapshots
-- `tests/stdlib/` — Standard library validation
-
-Annotations: `//@ run-pass`, `//@ compile-fail`, `//@ error-pattern: <text>`, `//@ ignore`
+**Key file**: `self-hosted/compiler/lean_single.sio` — the main self-hosted compiler entrypoint.
 
 ## Commits
 
@@ -103,51 +161,62 @@ Components: lexer, parser, ast, check, types, effects, hir, hlir,
            epistemic, lsp, pkg, sir, units, refinement
 ```
 
-## LLM Offload
+No AI attribution in commits.
 
-**Providers**: Grok (`grok`), GLM-5 (`glm`), MiniMax M2.7 (`minimax`, Anthropic SDK compatible), DeepSeek (`deepseek`), Ollama (`local`)
+## Working Principles
 
-**Routing config**: `.claude/offload-routing.md` — provider table, MiniMax SDK setup, routing rules
+1. **Sounio syntax** — `&!` not `&mut`, `var` not `let mut`, no Rust macros
+2. **Atomic commits** — one logical change per commit
+3. **Q1+ research first** — literature review before architecture decisions
+4. **Epistemic honesty** — cite sources, acknowledge uncertainty
+5. **Edge of novelty** — don't copy existing languages
+6. **No drift to mean** — excellence only
 
-**MiniMax note**: Supports Anthropic messages API via `ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic`. Models: M2.7 (204K ctx), M2.5, M2.1, M2. Supports tools, streaming, thinking.
+## Known Limitations
+
+- `Knowledge<T>` supports struct-level generics (f64, bool, struct types work)
+- No unary minus — write `0 - x`
+- No REPL/`--show-ast`/`--show-types` in native mode yet
+- `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
+- GPU: PTX codegen exists but no end-to-end path from CLI
+
+Full list: [docs/compiler/KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md)
+
+## Cluster GPU Jobs
+
+The AI/HPC cluster control plane is at `/home/devsounio/beagle/k8s/hpc-sota`. Before GPU work, read:
+1. `/home/devsounio/beagle/k8s/hpc-sota/AGENT_BOOTSTRAP.md`
+2. `/home/devsounio/beagle/k8s/hpc-sota/DEV_WORKFLOW.md`
+
+Prefer proven wrappers from `ops/lab-ops.sh` over ad hoc `sbatch` or `kubectl` commands.
+
+## LLM Offload (mandatory checkpoints)
+
+**Policy is normative**: see [`.claude/AGENT_OFFLOAD_POLICY.md`](.claude/AGENT_OFFLOAD_POLICY.md).
+
+Mandatory pre-commit reviews:
+
+- **Math claims** (PK formulas, GUM, p-box, Lean theorem statements, refinement invariants): run `bin/llm-offload -t math-review -p xai` before commit.
+- **Clinical-pathway code** (`stdlib/clinical/*`, vancomycin tests, clinical Lean obligations): run `bin/llm-offload -t review -p deepseek` before commit.
+- **External-facing artifacts** (papers, cover letters, dissertation, IRB protocols): fan out `bin/llm-offload --raw <draft> deepseek xai gemini` before submission.
+
+Each non-trivial offload appends to [`.claude/llm_offload_log.md`](.claude/llm_offload_log.md). When a review catches a bug, the commit message must include an `LLM-offload-review:` trailer (format in the policy doc).
+
+Optional but encouraged:
 
 ```bash
-llm-offload -t expand -p grok       # outline → prose
-llm-offload -t scaffold -p glm      # boilerplate code
-llm-offload -t review -p deepseek   # second opinion
-llm-offload -t paraphrase -p minimax # rewrite
-llm-offload --list-providers         # status table
+bin/llm-offload -t expand -p gemini -i outline.md     # outline → prose
+bin/llm-offload -t scaffold -p deepseek -i spec.md    # boilerplate
+bin/llm-offload -t paraphrase -p qwen -i letter.md    # tone shifts
+bin/llm-offload --status                              # which keys are loaded
+bin/llm-offload --list-tasks                          # available tasks
 ```
 
-**Slash commands** (use inside Claude Code):
-- `/offload-expand [provider] [file]` — expand outline → prose
-- `/offload-scaffold [provider] [file]` — spec → boilerplate
-- `/offload-review [provider] [file]` — independent code review
-- `/offload-paraphrase [provider] [file]` — rewrite text
-
-**Pipelines** (multi-model workflows):
-```bash
-llm-pipeline consensus review -i file.rs    # 3 providers review same code
-llm-pipeline expand-critique outline.md     # Grok expands → DeepSeek critiques
-llm-pipeline multi-scaffold spec.txt        # 2 providers scaffold → diff
-```
-
-**Flow**: Claude designs → `/offload-expand` expands → Claude critiques
+Routing reference: [`.claude/offload-routing.md`](.claude/offload-routing.md). Task-specific system prompts: `.claude/offload-tasks/<task>.md`.
 
 ## Session Persistence
 
-Use `.claude/` for cross-session context:
-
-- `decisions.md` — Architectural choices
-- `pending.md` — Open questions, WIP
-- `session_state.json` — Structured state
-
-## Session Hygiene (Token Efficiency)
-
-- **`/clear`** — Use at the start of an unrelated task or after a long exploration session
-- **`/compact`** — Use when context is large but still relevant (summarizes history)
-- **Start sessions with**: read `.claude/session_state.json` — never re-explore what's already tracked
-- **Offload first**: route review, expand, scaffold tasks to `llm-offload` before asking Claude
-- **Grep before Read**: use Grep/Glob for targeted lookups; only Read when full file content is needed
-- **Batch related changes**: group edits to the same module in one session turn
-- **Routing**: see `.claude/offload-routing.md` for which tasks go to which offload provider
+Cross-session context lives in `.claude/`:
+- `decisions.md` — architectural choices
+- `pending.md` — open questions, WIP
+- `session_state.json` — structured state

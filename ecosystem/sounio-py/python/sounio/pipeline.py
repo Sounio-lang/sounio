@@ -112,10 +112,10 @@ class DrugDiscoveryPipeline:
             os.environ.get("SOUNIO_DRUG_DISCOVERY_PATH", ""),
             # sounio-py/python/sounio/ → ../../drug-discovery
             os.path.join(os.path.dirname(__file__), "..", "..", "..", "drug-discovery"),
-            # repo root / triple-sounio-ecosystem / drug-discovery
+            # repo root / ecosystem / drug-discovery
             os.path.join(
                 os.path.dirname(__file__),
-                "..", "..", "..", "..", "triple-sounio-ecosystem", "drug-discovery"
+                "..", "..", "..", "..", "ecosystem", "drug-discovery"
             ),
         ]
         for c in candidates:

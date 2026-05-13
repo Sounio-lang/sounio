@@ -1,0 +1,74 @@
+//@ run-pass
+//@ expect-stdout: DOSE_PROPORTIONALITY_OK
+// Validates linear PK dose-proportionality for the 14-compartment PBPK model.
+// Uses default_pbpk_params() (rb_ratio = 1.0, all Kp = 1.0) so the ODE system
+// is strictly linear and AUC/Cmax must scale proportionally with dose.
+
+use darwin_pbpk::tsit5_pbpk14::*
+
+struct Metrics {
+    auc: f64,
+    cmax: f64,
+    success: bool,
+}
+
+fn simulate_for_metrics(prm: PBPKParams14, dose_mg: f64, t_end: f64) -> Metrics with Mut, Div, Panic {
+    let c0 = dose_mg / prm.v_blood
+    var st = pbpk_state_zero()
+    st.blood = c0
+    let cfg = tight_ode_config()
+    var t = 0.0
+    var dt = cfg.dt_init
+    var auc = 0.0
+    var cmax = c0
+    var c_prev = c0
+    var nsteps = 0
+    while t < t_end && nsteps < cfg.max_steps {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        let result = tsit5_step_pbpk(st, t, dt_use, prm)
+        let err_norm = compute_error_norm_14(result.err, st, result.state_new, cfg.rtol, cfg.atol)
+        if err_norm <= 1.0 {
+            let c_now = result.state_new.blood
+            auc = auc + (c_prev + c_now) * 0.5 * dt_use
+            if c_now > cmax { cmax = c_now }
+            c_prev = c_now
+            st = result.state_new
+            t = t + dt_use
+            nsteps = nsteps + 1
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        } else {
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        }
+        if dt < cfg.dt_min { dt = cfg.dt_min }
+        if dt > cfg.dt_max { dt = cfg.dt_max }
+    }
+    let ok = t >= t_end - cfg.dt_min
+    Metrics { auc: auc, cmax: cmax, success: ok }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let prm = default_pbpk_params()
+    let t_end = 24.0
+
+    let m_low = simulate_for_metrics(prm, 2.5, t_end)
+    if m_low.success == false { return 1 }
+
+    let m_mid = simulate_for_metrics(prm, 5.0, t_end)
+    if m_mid.success == false { return 2 }
+
+    let m_high = simulate_for_metrics(prm, 10.0, t_end)
+    if m_high.success == false { return 3 }
+
+    let auc_ratio_mid_low = m_mid.auc / m_low.auc
+    let auc_ratio_high_mid = m_high.auc / m_mid.auc
+    let cmax_ratio_mid_low = m_mid.cmax / m_low.cmax
+    let cmax_ratio_high_mid = m_high.cmax / m_mid.cmax
+
+    if auc_ratio_mid_low < 1.9 || auc_ratio_mid_low > 2.1 { return 4 }
+    if auc_ratio_high_mid < 1.9 || auc_ratio_high_mid > 2.1 { return 5 }
+    if cmax_ratio_mid_low < 1.9 || cmax_ratio_mid_low > 2.1 { return 6 }
+    if cmax_ratio_high_mid < 1.9 || cmax_ratio_high_mid > 2.1 { return 7 }
+
+    println("DOSE_PROPORTIONALITY_OK")
+    0
+}

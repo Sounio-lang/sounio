@@ -1,0 +1,165 @@
+//! stdlib/algebra/features.sio
+//!
+//! OSSM-168 depression-biomarker features F_1, F_2, F_3 (prereg v3).
+//!
+//! Port of `scripts/research/ossm_168_dryrun/features.py`. Exposes
+//! **per-state** contributions rather than whole-trajectory helpers:
+//! Sounio requires fixed-size arrays and the trajectory length T is
+//! runtime-variable, so the caller accumulates per-state contributions
+//! externally and divides by T. (The per-state values are already
+//! normalised by the 168-fold inner sums where applicable, matching the
+//! `/(T * 168)` / `/T` factorisation in the Python reference.)
+//!
+//! Conventions:
+//!   * a trajectory state is a pair of octonions (h_0, h_1), each
+//!     `[f64; 8]`; the lift to a sedenion is (h_0, h_1) in CD order
+//!   * Fano / non-Fano index convention matches `fano.sio`
+//!     (indices 1..7, XOR-characterised lines)
+//!   * F_3 uses the sedenion triples (i, 8+j, k) from each non-Fano
+//!     ordered triple (i, j, k) in O_168 — see
+//!     `sedenion.py::O_168_sedenion_triples` and DEVIATIONS 0003
+//!   * F_2 uses the canonical primitive zero-divisor pair
+//!     (e_3 + e_10, e_6 − e_15) from `sedenion.sio`
+//!
+//! References: `docs/papers/preregistrations/2026-04-21_ossm_168_depression_v3.md`
+//! and `docs/papers/preregistrations/DEVIATIONS.md` entry 0004.
+
+use algebra::fano::{non_fano_ordered_triples}
+use algebra::sedenion::{
+    sed_from_pair, sed_basis, sed_mul, sed_associator,
+    sed_norm_sq, sed_l1_norm, sed_canonical_zd_z, sed_canonical_zd_w
+}
+
+// Embed an octonion into a sedenion's first eight components; second
+// half zero. (a, 0) * (b, 0) = (a*b, 0) under CD doubling, so this
+// preserves the octonion subalgebra under `sed_mul`.
+fn sed_from_oct(h0: &[f64; 8], out: &![f64; 16]) with Mut {
+    var i: i64 = 0
+    while i < 16 { out[i as usize] = 0.0; i = i + 1 }
+    i = 0
+    while i < 8 { out[i as usize] = h0[i as usize]; i = i + 1 }
+}
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// ============================================================================
+// F_1 per-state (rumination substrate, H1)
+// ----------------------------------------------------------------------------
+// F_1(h_0) = (1/168) * sum_{(i,j,k) in O_168}
+//              |h_0[i] * h_0[j] * h_0[k]| * ||[e_i, e_j, e_k]||_L2
+//
+// Multilinearity is exploited exactly as in the Python reference:
+// [a_i e_i, a_j e_j, a_k e_k] = a_i a_j a_k * [e_i, e_j, e_k],
+// so only the scalar coefficient depends on the state and the basis
+// associator norms are constants.
+// ============================================================================
+
+pub fn f1_state_contribution(h0: &[f64; 8]) -> f64 with Mut, Div, Panic {
+    var ti: [i64; 200] = [0; 200]
+    var tj: [i64; 200] = [0; 200]
+    var tk: [i64; 200] = [0; 200]
+    let n = non_fano_ordered_triples(&!ti, &!tj, &!tk)
+
+    var total: f64 = 0.0
+    var ei: [f64; 16] = [0.0; 16]
+    var ej: [f64; 16] = [0.0; 16]
+    var ek: [f64; 16] = [0.0; 16]
+    var assoc: [f64; 16] = [0.0; 16]
+
+    var t: i64 = 0
+    while t < n {
+        let i = ti[t as usize]
+        let j = tj[t as usize]
+        let k = tk[t as usize]
+        sed_basis(i, &!ei)
+        sed_basis(j, &!ej)
+        sed_basis(k, &!ek)
+        sed_associator(&ei, &ej, &ek, &!assoc)
+        // Basis associator lives in the octonion half, so its L2 norm
+        // under the sedenion embedding equals the octonion L2 norm.
+        var n2 = sed_norm_sq(&assoc)
+        // sqrt via Newton iteration on n2 (Sounio stdlib lacks sqrt here).
+        var r: f64 = if n2 > 0.0 { n2 } else { 0.0 }
+        var it: i64 = 0
+        while it < 20 && r > 0.0 {
+            r = 0.5 * (r + n2 / r)
+            it = it + 1
+        }
+        let coeff = h0[i as usize] * h0[j as usize] * h0[k as usize]
+        total = total + abs_f64(coeff) * r
+        t = t + 1
+    }
+    total / 168.0
+}
+
+// ============================================================================
+// F_2 per-state (anhedonia substrate, H2)
+// ----------------------------------------------------------------------------
+// F_2(h_0, h_1) = ( ||s * z||² + ||s * w||² ) / ( ||s||² + eps ),
+// where s = CD_doubling(h_0, h_1) and (z, w) is the canonical primitive
+// zero-divisor pair catalogued in `sedenion.sio::sed_canonical_zd_*`.
+// Smaller = closer to the zero-divisor variety.
+// ============================================================================
+
+pub fn f2_state_contribution(h0: &[f64; 8], h1: &[f64; 8]) -> f64 with Mut, Div, Panic {
+    var s: [f64; 16] = [0.0; 16]
+    sed_from_pair(h0, h1, &!s)
+    var z: [f64; 16] = [0.0; 16]
+    var w: [f64; 16] = [0.0; 16]
+    sed_canonical_zd_z(&!z)
+    sed_canonical_zd_w(&!w)
+    var pz: [f64; 16] = [0.0; 16]
+    var pw: [f64; 16] = [0.0; 16]
+    sed_mul(&s, &z, &!pz)
+    sed_mul(&s, &w, &!pw)
+    let eps: f64 = 1.0e-12
+    let denom = sed_norm_sq(&s) + eps
+    (sed_norm_sq(&pz) + sed_norm_sq(&pw)) / denom
+}
+
+// ============================================================================
+// F_3 per-state (valence substrate, H3; v3 L¹ variant — DEVIATIONS 0004)
+// ----------------------------------------------------------------------------
+// F_3(h_0, h_1) = (1/168) * sum_{(i,j,k) in O_168}
+//                    ||[ s * e_i, s * e_{8+j}, s * e_k ]||_{L¹},
+// with s = CD_doubling(h_0, h_1). L¹ is the componentwise absolute-value
+// sum across all 16 sedenion coordinates. Non-zero generically;
+// vanishes only when all three arguments lie in an associative
+// subalgebra.
+// ============================================================================
+
+pub fn f3_state_contribution(h0: &[f64; 8], h1: &[f64; 8]) -> f64 with Mut, Div, Panic {
+    var ti: [i64; 200] = [0; 200]
+    var tj: [i64; 200] = [0; 200]
+    var tk: [i64; 200] = [0; 200]
+    let n = non_fano_ordered_triples(&!ti, &!tj, &!tk)
+
+    var s: [f64; 16] = [0.0; 16]
+    sed_from_pair(h0, h1, &!s)
+
+    var ei: [f64; 16] = [0.0; 16]
+    var ej: [f64; 16] = [0.0; 16]
+    var ek: [f64; 16] = [0.0; 16]
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    var c: [f64; 16] = [0.0; 16]
+    var assoc: [f64; 16] = [0.0; 16]
+
+    var total: f64 = 0.0
+    var t: i64 = 0
+    while t < n {
+        let i = ti[t as usize]
+        let j = tj[t as usize]
+        let k = tk[t as usize]
+        sed_basis(i, &!ei)
+        sed_basis(8 + j, &!ej)
+        sed_basis(k, &!ek)
+        sed_mul(&s, &ei, &!a)
+        sed_mul(&s, &ej, &!b)
+        sed_mul(&s, &ek, &!c)
+        sed_associator(&a, &b, &c, &!assoc)
+        total = total + sed_l1_norm(&assoc)
+        t = t + 1
+    }
+    total / 168.0
+}

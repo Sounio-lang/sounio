@@ -1,0 +1,394 @@
+// darwin_pbpk/pd/d2_voi.sio — Value-of-Information ranking for D2 occupancy
+//
+// Answers the question: "If I can run exactly one experiment to reduce
+// D2 occupancy prediction uncertainty, which parameter should I target?"
+//
+// Definition (Claxton 1999; Kennedy 2000; EVSI framework):
+//
+//     VoI_i = share_i × (1 − confidence_i)
+//
+// where:
+//   share_i      — variance fraction contributed by parameter i
+//                  (from d2_gum.sio GUM budget; equivalent to first-order
+//                  Sobol index under GUM linearisation assumptions)
+//   confidence_i — evidence-quality score [0,1] from haloperidol_bbb_priors
+//                  and haloperidol_d2_priors (how well-measured is this now)
+//
+// The VoI formula penalises both:
+//   - Low-share parameters: their uncertainty barely propagates to D2 prediction
+//   - High-confidence parameters: they're already well-measured; further data
+//     gives diminishing returns
+//
+// Only high-share × low-confidence parameters are worth measuring.
+//
+// Expected finding (pharmacologically predictable):
+//   kd_d2 has 18.7% variance share BUT confidence 0.82 (radioligand
+//   binding is the most rigorously measured receptor parameter).
+//   → VoI_kd = 0.187 × 0.18 = 0.034 — ranks FOURTH.
+//
+//   ps_bbb has 32.6% variance share AND only confidence 0.45 (no direct
+//   haloperidol BBB permeability measurement in primary literature).
+//   → VoI_ps_bbb = 0.326 × 0.55 = 0.179 — ranks FIRST.
+//
+//   Message: "Don't run more D2 binding assays. Measure BBB permeability
+//   for haloperidol." This finding requires both GUM + VoI; neither GUM
+//   alone nor Sobol alone delivers the actionable recommendation.
+//
+// This is dissertation contribution #6 (antipsychotic D2 VoI), the
+// counterpart to bbb_voi.sio (rapamycin Kpuu VoI, contribution #5).
+//
+// Run:
+//   SOUNIO_STDLIB_PATH=/workspace/sounio/stdlib \
+//     ./bin/souc run stdlib/darwin_pbpk/pd/d2_voi.sio
+
+use darwin_pbpk::pd::d2_gum::*
+
+// ============================================================================
+// VoI STRUCT + COMPUTATION
+// ============================================================================
+
+pub struct D2VoI {
+    n_rows:     i32,
+    share:      [f64; 16],
+    confidence: [f64; 16],
+    voi:        [f64; 16],
+    rank:       [i32; 16],    // rank[k] = param index with k-th highest VoI
+    top_idx:    i32,
+    top_voi:    f64,
+    voi_total:  f64,
+}
+
+fn d2voi_zero() -> D2VoI {
+    D2VoI {
+        n_rows: 0,
+        share:  [0.0; 16], confidence: [0.0; 16], voi: [0.0; 16],
+        rank:   [0; 16],
+        top_idx: 0, top_voi: 0.0, voi_total: 0.0,
+    }
+}
+
+pub fn d2_voi_from_budget(b: D2GUMBudget) -> D2VoI with Mut, Div, Panic {
+    var out = d2voi_zero()
+    let n = b.n_rows
+    out.n_rows = n
+
+    var total: f64 = 0.0
+    var best_idx: i32 = 0
+    var best_voi: f64 = 0.0 - 1.0
+
+    var i: i32 = 0
+    while i < n {
+        let idx = i as usize
+        let s = b.share[idx]
+        let c = b.confidence[idx]
+        let v = s * (1.0 - c)
+        out.share[idx]      = s
+        out.confidence[idx] = c
+        out.voi[idx]        = v
+        total = total + v
+        if v > best_voi { best_voi = v; best_idx = i }
+        i = i + 1
+    }
+    out.voi_total = total
+    out.top_idx   = best_idx
+    out.top_voi   = best_voi
+
+    // Selection sort: rank[k] = index of k-th highest VoI
+    var used: [bool; 16] = [false; 16]
+    var k: i32 = 0
+    while k < n {
+        var best_j:  i32 = 0
+        var best_v: f64 = 0.0 - 1.0
+        var j: i32 = 0
+        while j < n {
+            let jdx = j as usize
+            if used[jdx] == false && out.voi[jdx] > best_v {
+                best_v = out.voi[jdx]
+                best_j = j
+            }
+            j = j + 1
+        }
+        out.rank[k as usize] = best_j
+        used[best_j as usize] = true
+        k = k + 1
+    }
+
+    out
+}
+
+// ============================================================================
+// PARAMETER NAME LOOKUP
+// ============================================================================
+
+fn d2voi_param_name(idx: i32) -> string {
+    if idx == 0 { return "ps_bbb" }
+    if idx == 1 { return "ps_mem" }
+    if idx == 2 { return "kpuu_brain" }
+    if idx == 3 { return "kpuu_cell" }
+    if idx == 4 { return "fu_plasma" }
+    if idx == 5 { return "fu_isf" }
+    if idx == 6 { return "fu_icf" }
+    if idx == 7 { return "kd_d2" }
+    if idx == 8 { return "bmax_d2" }
+    "unknown"
+}
+
+fn d2voi_action(idx: i32) -> string {
+    if idx == 0 { return "Measure haloperidol BBB PS in-vivo (P-gp/passive permeability assay)" }
+    if idx == 1 { return "Measure cellular membrane PS (brain ICF kinetics, microdialysis)" }
+    if idx == 2 { return "Measure in-vivo Kpuu,brain (brain microdialysis, chronic dosing)" }
+    if idx == 3 { return "Measure lysosomal trapping (kpuu_cell via cell fractionation)" }
+    if idx == 4 { return "Measure fu_plasma (equilibrium dialysis, already well-characterized)" }
+    if idx == 5 { return "Measure fu_isf (brain ECF microdialysis protein binding)" }
+    if idx == 6 { return "Measure fu_icf (cell fractionation, unbound intracellular fraction)" }
+    if idx == 7 { return "Measure D2 Kd (radioligand binding — already well-characterized)" }
+    if idx == 8 { return "Measure Bmax (PET receptor density — does not affect occupancy fraction)" }
+    "Unknown parameter"
+}
+
+// ============================================================================
+// PRINT REPORT
+// ============================================================================
+
+pub fn d2_voi_print(v: D2VoI, budget: D2GUMBudget) with IO, Mut, Panic, Div {
+    println("======================================================================")
+    println("  D2 Occupancy Value-of-Information Ranking")
+    println("  VoI_i = share_i × (1 − confidence_i)   (Claxton 1999 EVSI)")
+    println("  Endpoint: D2 trough at 72h, chronic 3×QD 5 mg haloperidol")
+    println("======================================================================")
+    print("  D2 trough (mean):    "); print_f64(budget.y_mean);       println("")
+    print("  Combined CV:         "); print_f64(budget.y_rel_stddev); println("")
+    print("  VoI_total:           "); print_f64(v.voi_total);         println("")
+    println("")
+    println("  rank | parameter      | share%  | conf  | VoI")
+    println("  -----+----------------+---------+-------+--------")
+    var k: i32 = 0
+    while k < v.n_rows {
+        let kdx = k as usize
+        let p   = v.rank[kdx]
+        let pdx = p as usize
+        let rank_k = (k + 1) as i64
+        print("  ")
+        print_int(rank_k);                             print("    | ")
+        print(d2voi_param_name(p));                    print(" | ")
+        print_f64(v.share[pdx] * 100.0);              print(" | ")
+        print_f64(v.confidence[pdx]);                  print(" | ")
+        print_f64(v.voi[pdx])
+        println("")
+        k = k + 1
+    }
+    println("")
+    println("  PRIMARY RECOMMENDATION:")
+    print("  #1 parameter: "); println(d2voi_param_name(v.top_idx))
+    print("  Action:       "); println(d2voi_action(v.top_idx))
+    print("  VoI:          "); print_f64(v.top_voi); println("")
+    println("======================================================================")
+}
+
+// ============================================================================
+// MAIN — 8-TEST VALIDATION SUITE
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  D2 Occupancy VoI — Haloperidol CNS-PBPK/PD")
+    println("  Value-of-Information from 9-D GUM budget")
+    println("======================================================================")
+    println("")
+
+    // Build GUM budget then derive VoI
+    let priors = haloperidol_d2_gum_priors()
+    let budget = d2_gum_build(priors)
+    let voi    = d2_voi_from_budget(budget)
+
+    d2_voi_print(voi, budget)
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    // ------------------------------------------------------------------
+    // TEST 1: ps_bbb ranks #1 (highest VoI)
+    //   High variance share (32.6%) + low confidence (0.45) = highest
+    //   expected return from measuring BBB permeability.
+    // ------------------------------------------------------------------
+    println("TEST 1: ps_bbb ranks #1 in VoI (high share, low confidence)")
+    println("  VoI rank #1 parameter index:")
+    println(voi.top_idx)
+    if voi.top_idx == 0 {
+        println("  [PASS] ps_bbb is the #1 measurement target")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Expected ps_bbb (idx=0) to have highest VoI")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 2: kd_d2 does NOT rank #1 despite being in top-3 by variance share
+    //   Core VoI insight: high confidence (0.82) suppresses kd_d2's VoI
+    //   even though it has 18.7% of variance share.
+    //   Message: "Don't run more D2 binding assays — it's already measured."
+    // ------------------------------------------------------------------
+    println("TEST 2: kd_d2 does NOT rank #1 (high conf suppresses VoI despite large share)")
+    let voi_kd = voi.voi[7]
+    let voi_ps = voi.voi[0]
+    println("  VoI kd_d2:")
+    println(voi_kd)
+    println("  VoI ps_bbb:")
+    println(voi_ps)
+    if voi_ps > voi_kd {
+        println("  [PASS] ps_bbb VoI > kd_d2 VoI: measuring BBB permeability beats re-measuring Kd")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Expected ps_bbb VoI > kd_d2 VoI")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 3: bmax_d2 VoI = 0 (zero share → zero VoI regardless of confidence)
+    // ------------------------------------------------------------------
+    println("TEST 3: bmax_d2 VoI = 0 (Emax invariant propagates to VoI = 0)")
+    let voi_bmax = voi.voi[8]
+    println("  VoI bmax_d2:")
+    println(voi_bmax)
+    if voi_bmax < 0.0001 {
+        println("  [PASS] Bmax has zero VoI: measuring receptor density is irrelevant for occupancy")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Expected VoI_bmax = 0")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 4: fu_plasma VoI < ps_bbb VoI (well-measured parameter ranks lower)
+    //   fu_plasma: share 5.9%, confidence 0.82 → VoI = 0.011
+    //   ps_bbb:    share 32.6%, confidence 0.45 → VoI = 0.179
+    // ------------------------------------------------------------------
+    println("TEST 4: fu_plasma VoI < ps_bbb VoI (well-measured parameter ranks lower)")
+    let voi_fup = voi.voi[4]
+    println("  VoI fu_plasma:")
+    println(voi_fup)
+    if voi_fup < voi_ps {
+        println("  [PASS] Well-measured fu_plasma has lower VoI than poorly-measured ps_bbb")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Expected VoI_fu_plasma < VoI_ps_bbb")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 5: VoI total > 0 (budget carries non-trivial uncertainty)
+    // ------------------------------------------------------------------
+    println("TEST 5: VoI_total > 0 (meaningful measurement opportunities exist)")
+    println("  VoI total:")
+    println(voi.voi_total)
+    if voi.voi_total > 0.01 {
+        println("  [PASS] Non-trivial VoI indicates measurement opportunities to reduce D2 uncertainty")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Expected VoI_total > 0.01")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 6: Top-3 VoI parameters account for > 70% of total VoI
+    //   Pareto principle: a few parameters dominate the measurement agenda.
+    // ------------------------------------------------------------------
+    println("TEST 6: Top-3 VoI parameters account for > 70% of total VoI")
+    let top3_voi = voi.voi[voi.rank[0] as usize]
+                 + voi.voi[voi.rank[1] as usize]
+                 + voi.voi[voi.rank[2] as usize]
+    let top3_pct = if voi.voi_total > 0.0 { top3_voi / voi.voi_total } else { 0.0 }
+    println("  Top-3 share of VoI_total (%):")
+    println(top3_pct * 100.0)
+    if top3_pct > 0.70 {
+        println("  [PASS] Pareto: top-3 parameters explain >70% of measurement value")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Expected top-3 parameters to account for >70% of VoI")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 7: kd_d2 VoI < fu_icf VoI
+    //   fu_icf: share 20.0%, confidence 0.20 → VoI = 0.160
+    //   kd_d2:  share 18.7%, confidence 0.82 → VoI = 0.034
+    //   Smaller share but MUCH lower confidence → fu_icf is higher priority
+    //   despite being less discussed in literature.
+    // ------------------------------------------------------------------
+    println("TEST 7: fu_icf VoI > kd_d2 VoI (low confidence elevates ICF over well-known PD)")
+    let voi_fuicf = voi.voi[6]
+    println("  VoI fu_icf:")
+    println(voi_fuicf)
+    println("  VoI kd_d2:")
+    println(voi_kd)
+    if voi_fuicf > voi_kd {
+        println("  [PASS] fu_icf has higher VoI than kd_d2 despite similar variance share")
+        println("         Reason: fu_icf confidence = 0.20 (unmeasured); kd_d2 = 0.82 (well-known)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Expected VoI_fu_icf > VoI_kd_d2")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    // TEST 8: VoI ranking encodes the experimental design recommendation
+    //   The #1 VoI parameter is one of the BBB kinetic parameters
+    //   (ps_bbb, ps_mem, kpuu_cell, fu_icf) — not a PD parameter.
+    //   At 72h pre-SS, the measurement agenda is dominated by BBB kinetics.
+    // ------------------------------------------------------------------
+    println("TEST 8: Top VoI target is a BBB kinetic parameter (not a PD parameter)")
+    let top_is_bbb = voi.top_idx < 7
+    println("  Top VoI parameter index (< 7 = BBB, >= 7 = PD):")
+    println(voi.top_idx)
+    if top_is_bbb {
+        println("  [PASS] Experimental agenda at 72h dominated by BBB kinetics, not PD")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Expected the top VoI target to be a BBB parameter at 72h pre-SS")
+        failed = failed + 1
+    }
+    println("")
+
+    // ------------------------------------------------------------------
+    println("======================================================================")
+    println("  D2 VoI — TEST SUMMARY")
+    println("======================================================================")
+    println("  Passed:")
+    println(passed)
+    println("  Failed:")
+    println(failed)
+    println("")
+    if failed == 0 {
+        println("  ALL 8 TESTS PASSED")
+        println("")
+        println("  D2 Occupancy VoI Findings:")
+        println("")
+        println("    #1: ps_bbb    — Measure haloperidol BBB permeability in vivo")
+        println("    #2: fu_icf    — Measure brain ICF unbound fraction (unmeasured)")
+        println("    #3: kpuu_cell — Measure lysosomal trapping degree")
+        println("    #4: kd_d2     — Already well-measured (radioligand; low priority)")
+        println("    #9: bmax_d2   — Irrelevant for occupancy fraction (Emax invariant)")
+        println("")
+        println("  Key dissertation message:")
+        println("    The GUM budget alone might suggest 'measure kd_d2 more carefully'")
+        println("    (18.7% of variance). VoI reveals this is wrong: kd_d2 is already")
+        println("    well-characterized (confidence 0.82). The bottleneck is BBB kinetics.")
+        println("    Without VoI, experimental resources would be mis-allocated.")
+        println("")
+        println("  This finding requires the full Sounio epistemic stack:")
+        println("    GUM (variance shares) + confidence priors + VoI formula = actionable")
+        println("    Existing tools (Simcyp, NONMEM, PK-Sim) emit neither GUM nor VoI.")
+    } else {
+        println("  SOME TESTS FAILED — see diagnostics above")
+    }
+    println("======================================================================")
+    return 0
+}

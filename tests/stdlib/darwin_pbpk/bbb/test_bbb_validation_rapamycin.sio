@@ -1,0 +1,116 @@
+//@ run-pass
+//@ expect-stdout: BBB_VALIDATION_RAPAMYCIN_OK
+//
+// BBB sub-model end-to-end validation against published rapamycin CNS data.
+//
+// Compares the coupled systemic + BBB model against the human /
+// rodent literature benchmarks that define "defensible" CNS PBPK
+// for rapamycin:
+//
+//   Benchmark 1 — Kpuu_brain from AUC(ISF_unbound) / AUC(plasma_unbound)
+//     over a 0-168h IV trajectory must be in [0.10, 0.25].
+//     Reference: Lampen 1998 (MDR1 KO mice), Laplanche 1994 (human
+//     brain/plasma AUC).  The steady-state Kpuu target (0.15) is the
+//     model design input; the AUC-derived Kpuu is the OBSERVATIONAL
+//     endpoint that pharmacologists use.  Agreement within a factor
+//     of ~1.5 is considered defensible in the literature.
+//
+//   Benchmark 2 — AUC-based cell-to-ISF unbound ratio approaches
+//     Kpuu_cell = 2.0 within 10% (the drug target compartment for
+//     mTOR inhibition sits in the ICF).  The AUC-based endpoint
+//     is preferred over an instantaneous sample because the ICF
+//     lags the ISF during the decay phase (fast cell equilibration
+//     + slow ISF drain → phase lag in the instantaneous ratio),
+//     but the integrated exposures retain the steady-state
+//     partition as long as the filling and decay phases are
+//     symmetric on the cell-equilibration timescale.
+//
+//   Benchmark 3 — Brain ISF Cmax lag: time-to-max for C_isf must be
+//     later than time-to-max for plasma (confirming the BBB is
+//     rate-limiting, not perfusion).
+//
+//   Benchmark 4 — Monotonicity invariants: none of the concentrations
+//     may become negative at any checkpoint.
+//
+// The test uses the 5 mg IV bolus dose canonical to this repo.
+
+use darwin_pbpk::bbb::bbb_coupled::*
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::epistemic_pbpk14::{ep14_rapamycin_params}
+
+fn val_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let sys_prm = ep14_rapamycin_params()
+    let bbb_prm = bbb_rapamycin_params()
+
+    // 16-point grid over 0-168h (weighted for the early distribution
+    // phase where brain uptake peaks).
+    var checkpoints: [f64; 32] = [0.0; 32]
+    checkpoints[0]  = 0.0
+    checkpoints[1]  = 0.25
+    checkpoints[2]  = 0.5
+    checkpoints[3]  = 1.0
+    checkpoints[4]  = 2.0
+    checkpoints[5]  = 4.0
+    checkpoints[6]  = 6.0
+    checkpoints[7]  = 8.0
+    checkpoints[8]  = 12.0
+    checkpoints[9]  = 18.0
+    checkpoints[10] = 24.0
+    checkpoints[11] = 36.0
+    checkpoints[12] = 48.0
+    checkpoints[13] = 72.0
+    checkpoints[14] = 120.0
+    checkpoints[15] = 168.0
+    let n_points = 16
+
+    let trace = bbb_coupled_run(sys_prm, bbb_prm, 5.0, checkpoints, n_points, 0.01)
+
+    // ----- Benchmark 4: monotonicity invariants (no negative c) -----
+    var k: i32 = 0
+    while k < n_points {
+        let idx = k as usize
+        if trace.plasma[idx] < 0.0 { return 1 }
+        if trace.isf[idx]    < 0.0 { return 2 }
+        if trace.icf[idx]    < 0.0 { return 3 }
+        k = k + 1
+    }
+
+    // ----- Benchmark 1: AUC-based Kpuu_brain in [0.10, 0.25] -----
+    if trace.kpuu_auc < 0.10 { return 4 }
+    if trace.kpuu_auc > 0.25 { return 5 }
+
+    // ----- Benchmark 2: AUC-based cell-to-ISF unbound ratio -----
+    if trace.auc_isf_u <= 0.0 { return 6 }
+    let cell_ratio_auc = trace.auc_icf_u / trace.auc_isf_u
+    if val_abs(cell_ratio_auc - bbb_prm.kpuu_cell) / bbb_prm.kpuu_cell > 0.10 { return 7 }
+
+    // ----- Benchmark 3: Brain ISF Cmax lag vs plasma Cmax -----
+    var plasma_tmax_idx: i32 = 0
+    var isf_tmax_idx: i32 = 0
+    var plasma_cmax = 0.0
+    var isf_cmax = 0.0
+    var j: i32 = 0
+    while j < n_points {
+        let jdx = j as usize
+        if trace.plasma[jdx] > plasma_cmax {
+            plasma_cmax = trace.plasma[jdx]
+            plasma_tmax_idx = j
+        }
+        if trace.isf_u[jdx] > isf_cmax {
+            isf_cmax = trace.isf_u[jdx]
+            isf_tmax_idx = j
+        }
+        j = j + 1
+    }
+    // Brain ISF Cmax must occur no earlier than plasma Cmax.  The
+    // grid resolution (0.25 h) allows ties in the infusion limit,
+    // but bolus rapamycin should show a strict lag.
+    if isf_tmax_idx < plasma_tmax_idx { return 8 }
+
+    println("BBB_VALIDATION_RAPAMYCIN_OK")
+    0
+}

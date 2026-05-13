@@ -1,0 +1,363 @@
+// darwin_pbpk/scenarios/oral_haloperidol_bbb.sio
+//
+// Oral haloperidol + systemic PBPK + BBB sub-model, fully coupled.
+//
+// Architecture mirrors oral_rapamycin_bbb.sio:
+//   1. First-order oral absorption releases mg from gut depot into blood
+//      (operator-split, analytic exp decay in absorption.sio).
+//   2. Systemic 14-compartment PBPK advances under tight_ode_config (Tsit5).
+//   3. BBB sub-model (ISF + ICF) steps on linearly-interpolated plasma
+//      driver at fixed bbb_dt = 0.01 h (RK4).
+//
+// Key pharmacological differences from rapamycin:
+//   - F = 0.65 (haloperidol) vs 0.14 (rapamycin): higher oral bioavailability
+//   - Kpuu_brain = 3.0: brain ACCUMULATES haloperidol (vs 0.15 rapamycin efflux)
+//   - Slow BBB equilibration: ICF time constant ~100h (lysosomal trapping)
+//   - Therapeutic endpoint: D2 occupancy, not plasma AUC
+//
+// Typical clinical use: single oral dose 2-10 mg, 12h or 24h dosing interval.
+// Simulation window: 72h (3 dosing intervals at 24h) to capture oscillations
+// in D2 occupancy and identify trough coverage.
+//
+// The OralHaloBBBTrace records plasma + ISF_free at each checkpoint.
+// The caller can feed isf_free into d2_occupancy() for a full PK/PD trace.
+
+use darwin_pbpk::absorption::*
+use darwin_pbpk::bbb::bbb_core::*
+use darwin_pbpk::drugs::haloperidol::*
+use darwin_pbpk::tsit5_pbpk14::*
+
+// ============================================================================
+// TRACE STRUCT
+// ============================================================================
+
+pub struct OralHaloBBBTrace {
+    n_points:     i32,
+    times_h:      [f64; 32],
+    c_plasma:     [f64; 32],   // total blood concentration (mg/L)
+    c_isf_free:   [f64; 32],   // unbound ISF concentration (mg/L)
+    c_icf_free:   [f64; 32],   // unbound ICF concentration (mg/L)
+    a_gut:        [f64; 32],   // gut-depot mass remaining (mg)
+    released_cum: [f64; 32],   // cumulative mass delivered to blood (mg)
+    auc_plasma:   f64,         // total plasma AUC (mg·h/L)
+    auc_isf_free: f64,         // unbound ISF AUC (mg·h/L)
+    kpuu_auc:     f64,         // AUC-based Kpuu (ISF_free / plasma_free)
+    success:      bool,
+}
+
+pub fn oral_halo_trace_zero() -> OralHaloBBBTrace {
+    OralHaloBBBTrace {
+        n_points: 0,
+        times_h:      [0.0; 32],
+        c_plasma:     [0.0; 32],
+        c_isf_free:   [0.0; 32],
+        c_icf_free:   [0.0; 32],
+        a_gut:        [0.0; 32],
+        released_cum: [0.0; 32],
+        auc_plasma:   0.0,
+        auc_isf_free: 0.0,
+        kpuu_auc:     0.0,
+        success:      false,
+    }
+}
+
+// ============================================================================
+// LINEAR INTERPOLATION (local copy to avoid duplicate import)
+// ============================================================================
+
+fn halo_interp(t: f64, t0: f64, t1: f64, c0: f64, c1: f64) -> f64 with Div, Panic, Mut {
+    if t1 <= t0 { return c0 }
+    let alpha = (t - t0) / (t1 - t0)
+    c0 + alpha * (c1 - c0)
+}
+
+// ============================================================================
+// MULTI-DOSE HELPER
+// ============================================================================
+// Add a bolus to the gut depot (simulates a new oral dose at time of call).
+// Returns updated AbsorptionState with a_gut incremented.
+fn add_oral_dose(abs_st: AbsorptionState, dose_mg: f64) -> AbsorptionState {
+    AbsorptionState {
+        a_gut:        abs_st.a_gut + dose_mg,
+        released_cum: abs_st.released_cum,
+    }
+}
+
+// ============================================================================
+// COUPLED ORAL + PBPK + BBB RUN (multi-dose)
+// ============================================================================
+// dose_mg:     single-dose amount (mg)
+// dose_times:  array of dose times (h); first dose is always at t=0
+//              (loaded into abs_st before entering the loop)
+// n_doses:     number of doses (max 8)
+// checkpoints: simulation output times (sorted ascending, n_points values)
+
+pub fn oral_halo_bbb_run(
+    dose_mg:     f64,
+    dose_times:  [f64; 8],
+    n_doses:     i32,
+    checkpoints: [f64; 32],
+    n_points:    i32,
+    bbb_dt:      f64
+) -> OralHaloBBBTrace with Mut, Div, Panic {
+    let cfg     = tight_ode_config()
+    let sys_prm = haloperidol_pbpk_params()
+    let bbb_prm = haloperidol_bbb_params()
+    let abs_prm = haloperidol_absorption_params()
+
+    var trace = oral_halo_trace_zero()
+    trace.n_points = n_points
+
+    var sys_st = pbpk_state_zero()
+    var bbb_st = bbb_state_zero()
+    // First dose at t=0 loaded into depot
+    var abs_st = absorption_state_with_dose(dose_mg)
+
+    trace.times_h[0]      = 0.0
+    trace.c_plasma[0]     = sys_st.blood
+    trace.c_isf_free[0]   = bbb_prm.fu_isf * bbb_st.c_isf
+    trace.c_icf_free[0]   = bbb_prm.fu_icf * bbb_st.c_icf
+    trace.a_gut[0]        = abs_st.a_gut
+    trace.released_cum[0] = 0.0
+
+    var t: f64     = 0.0
+    var dt_sys     = cfg.dt_init
+    var point_i: i32 = 1
+    var dose_idx: i32 = 1   // next dose to add (index 0 already loaded)
+
+    while point_i < n_points {
+        let idx    = point_i as usize
+        let target = checkpoints[idx]
+        let t_prev = t
+        let c_prev = sys_st.blood
+
+        var nsteps:  i64 = 0
+        var nreject: i64 = 0
+
+        while t < target && nsteps < cfg.max_steps {
+            let dt_use = if t + dt_sys > target { target - t } else { dt_sys }
+
+            // Inject any pending oral doses that fall in [t, t+dt_use)
+            if dose_idx < n_doses {
+                let di = dose_idx as usize
+                let dose_t = dose_times[di]
+                if dose_t >= t && dose_t < t + dt_use {
+                    abs_st = add_oral_dose(abs_st, dose_mg)
+                    dose_idx = dose_idx + 1
+                }
+            }
+
+            let released_before = abs_st.released_cum
+            let abs_next = absorption_step(abs_st, t, dt_use, abs_prm)
+            let rel_mg = abs_next.released_cum - released_before
+
+            var st_in = sys_st
+            if rel_mg > 0.0 {
+                st_in.blood = st_in.blood + absorption_mass_to_blood_delta(rel_mg, sys_prm.v_blood)
+            }
+
+            let result    = tsit5_step_pbpk(st_in, t, dt_use, sys_prm)
+            let err_norm  = compute_error_norm_14(result.err, st_in, result.state_new, cfg.rtol, cfg.atol)
+
+            if err_norm <= 1.0 {
+                sys_st = result.state_new
+                abs_st = abs_next
+                t      = t + dt_use
+                nsteps = nsteps + 1
+                dt_sys = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            } else {
+                nreject = nreject + 1
+                dt_sys  = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            }
+            if dt_sys < cfg.dt_min { dt_sys = cfg.dt_min }
+            if dt_sys > cfg.dt_max { dt_sys = cfg.dt_max }
+            if nreject > 10000 { return trace }
+        }
+
+        // BBB sub-model over [t_prev, target] driven by interpolated plasma
+        let c_now = sys_st.blood
+        var t_bbb = t_prev
+        while t_bbb < target {
+            let dt_bbb_use = if t_bbb + bbb_dt > target { target - t_bbb } else { bbb_dt }
+            let c_mid = halo_interp(t_bbb + 0.5 * dt_bbb_use, t_prev, target, c_prev, c_now)
+            bbb_st = bbb_rk4_step(bbb_st, c_mid, dt_bbb_use, bbb_prm)
+            t_bbb  = t_bbb + dt_bbb_use
+        }
+
+        trace.times_h[idx]      = target
+        trace.c_plasma[idx]     = c_now
+        trace.c_isf_free[idx]   = bbb_prm.fu_isf * bbb_st.c_isf
+        trace.c_icf_free[idx]   = bbb_prm.fu_icf * bbb_st.c_icf
+        trace.a_gut[idx]        = abs_st.a_gut
+        trace.released_cum[idx] = abs_st.released_cum
+
+        point_i = point_i + 1
+    }
+
+    // Trapezoidal AUCs
+    var auc_p:  f64 = 0.0
+    var auc_if: f64 = 0.0
+    var k: i32 = 0
+    while k < n_points - 1 {
+        let ka = k as usize
+        let kb = (k + 1) as usize
+        let h  = trace.times_h[kb] - trace.times_h[ka]
+        auc_p  = auc_p  + 0.5 * h * (trace.c_plasma[ka]   + trace.c_plasma[kb])
+        auc_if = auc_if + 0.5 * h * (trace.c_isf_free[ka] + trace.c_isf_free[kb])
+        k = k + 1
+    }
+    trace.auc_plasma   = auc_p
+    trace.auc_isf_free = auc_if
+    let auc_plasma_free = bbb_prm.fu_plasma * auc_p
+    trace.kpuu_auc = if auc_plasma_free > 0.0 { auc_if / auc_plasma_free } else { 0.0 }
+    trace.success  = true
+    trace
+}
+
+// ============================================================================
+// PARAMS-OVERRIDE VARIANT (for GUM perturbation)
+// ============================================================================
+// Same as oral_halo_bbb_run but accepts an explicit bbb_prm parameter,
+// allowing callers (d2_gum.sio) to perturb BBB params without modifying
+// the default haloperidol_bbb_params(). Sys + absorption params are fixed.
+
+pub fn oral_halo_bbb_run_params(
+    dose_mg:     f64,
+    dose_times:  [f64; 8],
+    n_doses:     i32,
+    checkpoints: [f64; 32],
+    n_points:    i32,
+    bbb_dt:      f64,
+    bbb_prm:     BBBParams
+) -> OralHaloBBBTrace with Mut, Div, Panic {
+    let cfg     = tight_ode_config()
+    let sys_prm = haloperidol_pbpk_params()
+    let abs_prm = haloperidol_absorption_params()
+
+    var trace = oral_halo_trace_zero()
+    trace.n_points = n_points
+
+    var sys_st = pbpk_state_zero()
+    var bbb_st = bbb_state_zero()
+    var abs_st = absorption_state_with_dose(dose_mg)
+
+    trace.times_h[0]      = 0.0
+    trace.c_plasma[0]     = sys_st.blood
+    trace.c_isf_free[0]   = bbb_prm.fu_isf * bbb_st.c_isf
+    trace.c_icf_free[0]   = bbb_prm.fu_icf * bbb_st.c_icf
+    trace.a_gut[0]        = abs_st.a_gut
+    trace.released_cum[0] = 0.0
+
+    var t: f64     = 0.0
+    var dt_sys     = cfg.dt_init
+    var point_i: i32 = 1
+    var dose_idx: i32 = 1
+
+    while point_i < n_points {
+        let idx    = point_i as usize
+        let target = checkpoints[idx]
+        let t_prev = t
+        let c_prev = sys_st.blood
+
+        var nsteps:  i64 = 0
+        var nreject: i64 = 0
+
+        while t < target && nsteps < cfg.max_steps {
+            let dt_use = if t + dt_sys > target { target - t } else { dt_sys }
+
+            if dose_idx < n_doses {
+                let di = dose_idx as usize
+                let dose_t = dose_times[di]
+                if dose_t >= t && dose_t < t + dt_use {
+                    abs_st = add_oral_dose(abs_st, dose_mg)
+                    dose_idx = dose_idx + 1
+                }
+            }
+
+            let released_before = abs_st.released_cum
+            let abs_next = absorption_step(abs_st, t, dt_use, abs_prm)
+            let rel_mg = abs_next.released_cum - released_before
+
+            var st_in = sys_st
+            if rel_mg > 0.0 {
+                st_in.blood = st_in.blood + absorption_mass_to_blood_delta(rel_mg, sys_prm.v_blood)
+            }
+
+            let result   = tsit5_step_pbpk(st_in, t, dt_use, sys_prm)
+            let err_norm = compute_error_norm_14(result.err, st_in, result.state_new, cfg.rtol, cfg.atol)
+
+            if err_norm <= 1.0 {
+                sys_st = result.state_new
+                abs_st = abs_next
+                t      = t + dt_use
+                nsteps = nsteps + 1
+                dt_sys = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            } else {
+                nreject = nreject + 1
+                dt_sys  = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            }
+            if dt_sys < cfg.dt_min { dt_sys = cfg.dt_min }
+            if dt_sys > cfg.dt_max { dt_sys = cfg.dt_max }
+            if nreject > 10000 { return trace }
+        }
+
+        let c_now = sys_st.blood
+        var t_bbb = t_prev
+        while t_bbb < target {
+            let dt_bbb_use = if t_bbb + bbb_dt > target { target - t_bbb } else { bbb_dt }
+            let c_mid = halo_interp(t_bbb + 0.5 * dt_bbb_use, t_prev, target, c_prev, c_now)
+            bbb_st = bbb_rk4_step(bbb_st, c_mid, dt_bbb_use, bbb_prm)
+            t_bbb  = t_bbb + dt_bbb_use
+        }
+
+        trace.times_h[idx]      = target
+        trace.c_plasma[idx]     = c_now
+        trace.c_isf_free[idx]   = bbb_prm.fu_isf * bbb_st.c_isf
+        trace.c_icf_free[idx]   = bbb_prm.fu_icf * bbb_st.c_icf
+        trace.a_gut[idx]        = abs_st.a_gut
+        trace.released_cum[idx] = abs_st.released_cum
+
+        point_i = point_i + 1
+    }
+
+    var auc_p:  f64 = 0.0
+    var auc_if: f64 = 0.0
+    var k: i32 = 0
+    while k < n_points - 1 {
+        let ka = k as usize
+        let kb = (k + 1) as usize
+        let h  = trace.times_h[kb] - trace.times_h[ka]
+        auc_p  = auc_p  + 0.5 * h * (trace.c_plasma[ka]   + trace.c_plasma[kb])
+        auc_if = auc_if + 0.5 * h * (trace.c_isf_free[ka] + trace.c_isf_free[kb])
+        k = k + 1
+    }
+    trace.auc_plasma   = auc_p
+    trace.auc_isf_free = auc_if
+    let auc_plasma_free = bbb_prm.fu_plasma * auc_p
+    trace.kpuu_auc = if auc_plasma_free > 0.0 { auc_if / auc_plasma_free } else { 0.0 }
+    trace.success  = true
+    trace
+}
+
+// ============================================================================
+// CSV PRINTER
+// ============================================================================
+pub fn oral_halo_print_csv(tr: OralHaloBBBTrace) with IO, Mut, Panic, Div {
+    println("time_h,c_plasma_mg_L,c_isf_free_mg_L,c_icf_free_mg_L,a_gut_mg,released_cum_mg")
+    var i: i32 = 0
+    while i < tr.n_points {
+        let idx = i as usize
+        print_f64(tr.times_h[idx]);      print(",")
+        print_f64(tr.c_plasma[idx]);     print(",")
+        print_f64(tr.c_isf_free[idx]);   print(",")
+        print_f64(tr.c_icf_free[idx]);   print(",")
+        print_f64(tr.a_gut[idx]);        print(",")
+        print_f64(tr.released_cum[idx])
+        println("")
+        i = i + 1
+    }
+    println("")
+    print("AUC_plasma_mg_h_per_L,");    print_f64(tr.auc_plasma);   println("")
+    print("AUC_isf_free_mg_h_per_L,");  print_f64(tr.auc_isf_free); println("")
+    print("Kpuu_AUC,");                 print_f64(tr.kpuu_auc);     println("")
+}

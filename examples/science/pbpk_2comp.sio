@@ -1,0 +1,140 @@
+//@ run-pass
+//@ expect-stdout: PBPK 2-COMP PASSED
+// Two-Compartment PBPK Model — amounts formulation with RK4 Integration
+//
+// ODE system (in amounts, mg):
+//   dX1/dt = -(k12 + k_elim)*X1 + k21*X2
+//   dX2/dt =   k12*X1 - k21*X2
+//
+// Concentrations: C1 = X1/V1,  C2 = X2/V2
+// IV bolus ICs:   X1(0) = dose,  X2(0) = 0
+//
+// Analytical solution (IV bolus):
+//   C1(t) = A*exp(-alpha*t) + B*exp(-beta*t)
+//   alpha, beta = macro rate constants (eigenvalues of transfer matrix)
+//
+// Parameters: dose=100mg, V1=10L, V2=20L,
+//             k12=0.5/hr, k21=0.3/hr, k_elim=0.2/hr
+//
+// Reference: Rowland & Tozer, "Clinical Pharmacokinetics" (4th ed.), §15
+//            Gabrielsson & Weiner, "Pharmacokinetic/Pharmacodynamic Data Analysis" §3.2
+//
+// EGC result: 100% expression certainty (1381 expr, 0 uncertain, 0 guarded sites).
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn exp_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 10.0 { let h = exp_approx(x / 2.0); return h * h }
+    if x < 0.0 - 10.0 { return 1.0 / exp_approx(0.0 - x) }
+    var sum: f64 = 1.0
+    var term: f64 = 1.0
+    var n: i64 = 1
+    while n <= 30 {
+        term = term * x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn sqrt_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var sq: f64 = x / 2.0 + 0.5
+    var i: i64 = 0
+    while i < 25 { sq = 0.5 * (sq + x / sq); i = i + 1 }
+    return sq
+}
+
+// Analytical C1(t) for 2-comp IV bolus (amounts formulation)
+fn pbpk2_analytical(
+    t: f64, dose: f64, v1: f64,
+    k12: f64, k21: f64, k_elim: f64
+) -> f64 with Mut, Panic, Div {
+    // Eigenvalues of [-(k12+k_elim), k21; k12, -k21]:
+    //   λ² + (k12+k21+k_elim)λ + k21*k_elim = 0
+    let sum_k  = k12 + k21 + k_elim
+    let disc   = sum_k * sum_k - 4.0 * k21 * k_elim
+    let sq     = sqrt_approx(disc)
+    let alpha  = (sum_k + sq) / 2.0
+    let beta_  = (sum_k - sq) / 2.0
+    // C1 coefficients: from initial amounts X1(0)=dose, X2(0)=0
+    // C1(t) = [A*exp(-alpha*t) + B*exp(-beta*t)] / V1
+    // where A = (alpha - k21)*dose / (alpha - beta_)
+    //       B = (k21 - beta_)*dose / (alpha - beta_)
+    let denom  = (alpha - beta_) * v1
+    let a_coef = (alpha - k21) * dose / denom
+    let b_coef = (k21 - beta_) * dose / denom
+    return a_coef * exp_approx(0.0 - alpha * t) + b_coef * exp_approx(0.0 - beta_ * t)
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Two-Compartment PBPK Model (amounts, RK4 + Analytical) ===")
+    println("dose=100mg IV bolus, V1=10L, V2=20L, k12=0.5/hr, k21=0.3/hr, k_elim=0.2/hr")
+    println("")
+
+    let dose:   f64 = 100.0   // mg, IV bolus
+    let v1:     f64 = 10.0    // L, central volume
+    let v2:     f64 = 20.0    // L, peripheral volume
+    let k12:    f64 = 0.5     // 1/hr
+    let k21:    f64 = 0.3     // 1/hr
+    let k_elim: f64 = 0.2     // 1/hr
+
+    // RK4 integration in amounts (X1=mg in central, X2=mg in peripheral)
+    var x1: f64 = dose    // 100 mg
+    var x2: f64 = 0.0
+
+    let dt: f64 = 0.001   // hr
+    var step: i64 = 0
+
+    // ODE: dX1/dt = -(k12+k_elim)*X1 + k21*X2
+    //      dX2/dt = k12*X1 - k21*X2
+    while step < 24000 {
+        let k1x1 = 0.0 - (k12 + k_elim) * x1 + k21 * x2
+        let k1x2 = k12 * x1 - k21 * x2
+
+        let mx1 = x1 + 0.5 * dt * k1x1
+        let mx2 = x2 + 0.5 * dt * k1x2
+        let k2x1 = 0.0 - (k12 + k_elim) * mx1 + k21 * mx2
+        let k2x2 = k12 * mx1 - k21 * mx2
+
+        let m2x1 = x1 + 0.5 * dt * k2x1
+        let m2x2 = x2 + 0.5 * dt * k2x2
+        let k3x1 = 0.0 - (k12 + k_elim) * m2x1 + k21 * m2x2
+        let k3x2 = k12 * m2x1 - k21 * m2x2
+
+        let ex1 = x1 + dt * k3x1
+        let ex2 = x2 + dt * k3x2
+        let k4x1 = 0.0 - (k12 + k_elim) * ex1 + k21 * ex2
+        let k4x2 = k12 * ex1 - k21 * ex2
+
+        x1 = x1 + (dt / 6.0) * (k1x1 + 2.0 * k2x1 + 2.0 * k3x1 + k4x1)
+        x2 = x2 + (dt / 6.0) * (k1x2 + 2.0 * k2x2 + 2.0 * k3x2 + k4x2)
+        step = step + 1
+    }
+
+    let c1_numerical  = x1 / v1
+    let c2_numerical  = x2 / v2
+    let c1_analytical = pbpk2_analytical(24.0, dose, v1, k12, k21, k_elim)
+    let abs_err = abs_f64(c1_numerical - c1_analytical)
+
+    print("C1(24h) numerical:  "); println(c1_numerical)
+    print("C1(24h) analytical: "); println(c1_analytical)
+    print("Absolute error:     "); println(abs_err)
+    print("C2(24h) numerical:  "); println(c2_numerical)
+    println("")
+
+    if abs_err > 0.001 {
+        println("PBPK 2-COMP FAILED: RK4 error too large")
+        return 1
+    }
+    if c2_numerical < 0.0 {
+        println("PBPK 2-COMP FAILED: negative C2")
+        return 1
+    }
+
+    println("PBPK 2-COMP PASSED")
+    return 0
+}

@@ -2,13 +2,22 @@
 //
 // Precedence-climbing for binary operators, prefix/postfix handling,
 // and all expression forms (literals, calls, field access, if, match, etc).
+//
+// LEAN-COMPILER NOTE: All functions that previously returned (Parser, Expr)
+// now return Parser only.  The Expr result is stored in the LAST_EXPR global
+// (parser_store_expr_box / parser_take_expr_box).  This eliminates the 74-slot
+// (Parser, Expr) SRET which corrupts rdi in the lean compiler.
+
+use parser::ast::*
+use lexer::token::*
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_peek_ahead, parser_assign_op_code, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box}
 
 impl Parser {
     // ============================================================
     // Expression entry point (dispatches to Pratt parser)
     // ============================================================
 
-    fn parse_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         self.parse_expr_bp(0)
     }
 
@@ -16,15 +25,15 @@ impl Parser {
     // Pratt parser: parse expression with minimum binding power
     // ============================================================
 
-    fn parse_expr_bp(self, min_bp: i64) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
-        // Parse prefix / atom
-        let pair = self.parse_prefix()
-        var p = pair.0
-        var lhs = pair.1
+    fn parse_expr_bp(self, min_bp: i64) -> Parser with Mut, IO, Panic, Div, Alloc {
+        // Parse prefix / atom; result stored in LAST_EXPR
+        var p = self.parse_prefix()
+        var lhs = parser_take_expr_box()
 
         // Parse infix operators
-        while !p.at_eof() {
-            let op_kind = p.peek()
+        while !parser_at_eof(p) {
+            if parser_assign_op_code(p) >= 0 { break }
+            let op_kind = parser_peek(p)
             let prec = tk_precedence(op_kind)
 
             // Stop if current operator has lower or equal precedence
@@ -32,26 +41,22 @@ impl Parser {
 
             // Postfix: function call, method call, field access, index
             // A `(` after a newline is NOT a call — it starts a new expression.
-            // e.g. `v\n    (*b)[0]` must not be parsed as `v((*b)[0])`.
             if op_kind == TokenKind::LParen {
                 if p.had_newline_before() { break }
-                let pair2 = p.parse_call_expr(lhs)
-                p = pair2.0
-                lhs = pair2.1
+                p = p.parse_call_expr_box(lhs)
+                lhs = parser_take_expr_box()
                 continue
             }
 
             if op_kind == TokenKind::LBracket {
-                let pair2 = p.parse_index_expr(lhs)
-                p = pair2.0
-                lhs = pair2.1
+                p = p.parse_index_expr_box(lhs)
+                lhs = parser_take_expr_box()
                 continue
             }
 
             if op_kind == TokenKind::Dot {
-                let pair2 = p.parse_dot_expr(lhs)
-                p = pair2.0
-                lhs = pair2.1
+                p = p.parse_dot_expr_box(lhs)
+                lhs = parser_take_expr_box()
                 continue
             }
 
@@ -59,11 +64,12 @@ impl Parser {
                 p = p.advance()
                 let audit_name = p.current_name()
                 p = p.expect_ident()
-                let span = p.span_from(lhs.span)
+                let lhs_span = lhs.span
+                let span = p.span_from(lhs_span)
                 var audit_e = mk_expr(ExprKind::ExprAuditAttach, span)
-                audit_e.left = Some(Box::new(lhs))
+                audit_e.left = Some(lhs)
                 audit_e.name = audit_name
-                lhs = audit_e
+                lhs = Box::new(audit_e)
                 continue
             }
 
@@ -72,59 +78,24 @@ impl Parser {
                 let bin_op = if op_kind == TokenKind::DotDot { BinaryOp::OpRange } else { BinaryOp::OpRangeInclusive }
                 p = p.advance()
                 if p.at_expr_start() {
-                    let pair2 = p.parse_expr_bp(prec)
-                    p = pair2.0
-                    let rhs = pair2.1
-                    let span = p.span_from(lhs.span)
-                    lhs = Expr {
-                        kind: ExprKind::ExprRange,
-                        span: span,
-                        int_val: 0,
-                        float_val: 0.0,
-                        name: empty_name(),
-                        path: empty_path(),
-                        bin_op: bin_op,
-                        un_op: UnaryOp::OpNeg,
-                        left: Some(Box::new(lhs)),
-                        right: Some(Box::new(rhs)),
-                        block: None,
-                        else_expr: None,
-                        args: None,
-                        arms: None,
-                        fields: None,
-                        cast_type: None,
-                        handler_block: None,
-                        closure_params: None,
-                        closure_return: None,
-                        closure_effects: None,
-                        closure_body: None,
-                    }
+                    p = p.parse_expr_bp(prec)
+                    let rhs = parser_take_expr_box()
+                    let lhs_span = lhs.span
+                    let span = p.span_from(lhs_span)
+                    var range_e = mk_expr(ExprKind::ExprRange, span)
+                    range_e.bin_op = bin_op
+                    range_e.left = Some(lhs)
+                    range_e.right = Some(rhs)
+                    lhs = Box::new(range_e)
                 } else {
                     // Half-open range: expr..
-                    let span = p.span_from(lhs.span)
-                    lhs = Expr {
-                        kind: ExprKind::ExprRange,
-                        span: span,
-                        int_val: 0,
-                        float_val: 0.0,
-                        name: empty_name(),
-                        path: empty_path(),
-                        bin_op: bin_op,
-                        un_op: UnaryOp::OpNeg,
-                        left: Some(Box::new(lhs)),
-                        right: None,
-                        block: None,
-                        else_expr: None,
-                        args: None,
-                        arms: None,
-                        fields: None,
-                        cast_type: None,
-                        handler_block: None,
-                        closure_params: None,
-                        closure_return: None,
-                        closure_effects: None,
-                        closure_body: None,
-                    }
+                    let lhs_span = lhs.span
+                    let span = p.span_from(lhs_span)
+                    var range_e = mk_expr(ExprKind::ExprRange, span)
+                    range_e.bin_op = bin_op
+                    range_e.left = Some(lhs)
+                    range_e.right = None
+                    lhs = Box::new(range_e)
                 }
                 continue
             }
@@ -135,11 +106,12 @@ impl Parser {
                 let pair2 = p.parse_type()
                 p = pair2.0
                 let target_ty = pair2.1
-                let span = p.span_from(lhs.span)
+                let lhs_span = lhs.span
+                let span = p.span_from(lhs_span)
                 var cast_e = mk_expr(ExprKind::ExprCast, span)
-                cast_e.left = Some(Box::new(lhs))
+                cast_e.left = Some(lhs)
                 cast_e.cast_type = Some(Box::new(target_ty))
-                lhs = cast_e
+                lhs = Box::new(cast_e)
                 continue
             }
 
@@ -150,26 +122,27 @@ impl Parser {
             p = p.advance()
 
             // Right-hand side: use prec for left-associativity
-            let pair2 = p.parse_expr_bp(prec)
-            p = pair2.0
-            let rhs = pair2.1
-            let span = p.span_from(lhs.span)
+            p = p.parse_expr_bp(prec)
+            let rhs = parser_take_expr_box()
+            let lhs_span = lhs.span
+            let span = p.span_from(lhs_span)
 
             var bin_e = mk_expr(ExprKind::ExprBinary, span)
             bin_e.bin_op = bin_op
-            bin_e.left = Some(Box::new(lhs))
-            bin_e.right = Some(Box::new(rhs))
-            lhs = bin_e
+            bin_e.left = Some(lhs)
+            bin_e.right = Some(rhs)
+            lhs = Box::new(bin_e)
         }
 
-        (p, lhs)
+        parser_store_expr_box(lhs)
+        p
     }
 
     // ============================================================
     // Prefix / atom expressions
     // ============================================================
 
-    fn parse_prefix(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_prefix(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let k = self.peek()
 
         // Unary operators
@@ -196,11 +169,13 @@ impl Parser {
         } else if k == TokenKind::True {
             let span = self.current_span()
             let p = self.advance()
-            (p, mk_expr(ExprKind::ExprBoolTrue, span))
+            parser_store_expr_box(Box::new(mk_expr(ExprKind::ExprBoolTrue, span)))
+            p
         } else if k == TokenKind::False {
             let span = self.current_span()
             let p = self.advance()
-            (p, mk_expr(ExprKind::ExprBoolFalse, span))
+            parser_store_expr_box(Box::new(mk_expr(ExprKind::ExprBoolFalse, span)))
+            p
         }
         // Grouping / tuple
         else if k == TokenKind::LParen {
@@ -232,7 +207,8 @@ impl Parser {
         } else if k == TokenKind::Continue {
             let span = self.current_span()
             let p = self.advance()
-            (p, mk_expr(ExprKind::ExprContinue, span))
+            parser_store_expr_box(Box::new(mk_expr(ExprKind::ExprContinue, span)))
+            p
         }
         // Self
         else if k == TokenKind::SelfLower {
@@ -241,7 +217,8 @@ impl Parser {
             let p = self.advance()
             var e = mk_expr(ExprKind::ExprIdent, span)
             e.name = name
-            (p, e)
+            parser_store_expr_box(Box::new(e))
+            p
         }
         // Effect handler: handle<Effect> { body } with { handlers }
         else if k == TokenKind::Handle {
@@ -266,7 +243,8 @@ impl Parser {
             p.had_error = true
             p.error_count = p.error_count + 1
             p = p.advance()
-            (p, error_expr(span))
+            parser_store_expr_box(Box::new(error_expr(span)))
+            p
         }
     }
 
@@ -274,139 +252,146 @@ impl Parser {
     // Unary expression: -x, !x, &x, &!x, *x
     // ============================================================
 
-    fn parse_unary(self, op: UnaryOp) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_unary(self, op: UnaryOp) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip operator
-        let pair = p.parse_expr_bp(13)  // unary precedence
-        p = pair.0
-        let operand = pair.1
+        p = p.parse_expr_bp(13)  // unary precedence
+        let operand = parser_take_expr_box()
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprUnary, span)
         e.un_op = op
-        e.left = Some(Box::new(operand))
-        (p, e)
+        e.left = Some(operand)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // Integer literal
     // ============================================================
 
-    fn parse_int_literal(self) -> (Parser, Expr) with Mut, IO, Panic, Div {
+    fn parse_int_literal(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let span = self.current_span()
         let tok = self.current()
         let p = self.advance()
         var e = mk_expr(ExprKind::ExprIntLit, span)
         e.int_val = tok.int_value
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // Float literal
     // ============================================================
 
-    fn parse_float_literal(self) -> (Parser, Expr) with Mut, IO, Panic, Div {
+    fn parse_float_literal(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let span = self.current_span()
         let tok = self.current()
         let p = self.advance()
         var e = mk_expr(ExprKind::ExprFloatLit, span)
         e.float_val = tok.float_value
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // String literal
     // ============================================================
 
-    fn parse_string_literal(self) -> (Parser, Expr) with Mut, IO, Panic, Div {
+    fn parse_string_literal(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let span = self.current_span()
         let name = self.current_name()
         let p = self.advance()
         var e = mk_expr(ExprKind::ExprStringLit, span)
         e.name = name
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // Char literal
     // ============================================================
 
-    fn parse_char_literal(self) -> (Parser, Expr) with Mut, IO, Panic, Div {
+    fn parse_char_literal(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let span = self.current_span()
         let tok = self.current()
         let p = self.advance()
         var e = mk_expr(ExprKind::ExprCharLit, span)
         e.int_val = tok.int_value
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
-    fn parse_contest_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_contest_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip contest
         p = p.expect(TokenKind::LBracket)
 
         var rev_models_opt: Option<Box<ExprList>> = None
-        if p.peek() != TokenKind::RBracket {
-            let first_pair = p.parse_contest_model_expr()
-            p = first_pair.0
-            rev_models_opt = Some(Box::new(ExprList { label: empty_name(), head: first_pair.1, tail: None }))
+        if parser_peek(p) != TokenKind::RBracket {
+            p = p.parse_contest_model_expr()
+            let first_box = parser_take_expr_box()
+            rev_models_opt = Some(Box::new(ExprList { label: empty_name(), head: *first_box, tail: None }))
 
-            while p.peek() == TokenKind::Comma {
+            while parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
-                let next_pair = p.parse_contest_model_expr()
-                p = next_pair.0
-                rev_models_opt = Some(Box::new(ExprList { label: empty_name(), head: next_pair.1, tail: rev_models_opt }))
+                p = p.parse_contest_model_expr()
+                let next_box = parser_take_expr_box()
+                rev_models_opt = Some(Box::new(ExprList { label: empty_name(), head: *next_box, tail: rev_models_opt }))
             }
         }
 
         p = p.expect(TokenKind::RBracket)
         p = p.expect(TokenKind::On)
-        let subject_pair = p.parse_expr()
-        p = subject_pair.0
+        p = p.parse_expr()
+        let subject_box = parser_take_expr_box()
 
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprContest, span)
         e.args = reverse_expr_list_opt(rev_models_opt)
-        e.left = Some(Box::new(subject_pair.1))
-        (p, e)
+        e.left = Some(subject_box)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
-    fn parse_contest_model_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div {
+    fn parse_contest_model_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         let pair = self.parse_type_path()
         let span = pair.0.span_from(start)
         var e = mk_expr(ExprKind::ExprPath, span)
         e.path = pair.1
-        (pair.0, e)
+        parser_store_expr_box(Box::new(e))
+        pair.0
     }
 
     // ============================================================
     // Parenthesized expression or tuple: (expr) or (a, b, c)
     // ============================================================
 
-    fn parse_paren_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_paren_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip (
 
-        if p.peek() == TokenKind::RParen {
+        if parser_peek(p) == TokenKind::RParen {
             // Unit value ()
             p = p.advance()
             let span = p.span_from(start)
-            (p, mk_expr(ExprKind::ExprTupleLit, span))
+            parser_store_expr_box(Box::new(mk_expr(ExprKind::ExprTupleLit, span)))
+            p
         } else {
-            let pair = p.parse_expr()
-            p = pair.0
-            let first = pair.1
+            p = p.parse_expr()
+            let first_box = parser_take_expr_box()
 
-            if p.peek() == TokenKind::Comma {
+            if parser_peek(p) == TokenKind::Comma {
                 // Tuple literal
                 p = p.advance()
-                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(ExprList { label: empty_name(), head: first, tail: None }))
-                while p.peek() != TokenKind::RParen && p.peek() != TokenKind::Eof {
-                    let pair2 = p.parse_expr()
-                    p = pair2.0
-                    let next = pair2.1
-                    rev_list_opt = Some(Box::new(ExprList { label: empty_name(), head: next, tail: rev_list_opt }))
-                    if p.peek() == TokenKind::Comma {
+                let first_node = ExprList { label: empty_name(), head: *first_box, tail: None }
+                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(first_node))
+                while parser_peek(p) != TokenKind::RParen && parser_peek(p) != TokenKind::Eof {
+                    p = p.parse_expr()
+                    let next_box = parser_take_expr_box()
+                    let next_node = ExprList { label: empty_name(), head: *next_box, tail: rev_list_opt }
+                    rev_list_opt = Some(Box::new(next_node))
+                    if parser_peek(p) == TokenKind::Comma {
                         p = p.advance()
                     }
                 }
@@ -414,11 +399,13 @@ impl Parser {
                 let span = p.span_from(start)
                 var e = mk_expr(ExprKind::ExprTupleLit, span)
                 e.args = reverse_expr_list_opt(rev_list_opt)
-                (p, e)
+                parser_store_expr_box(Box::new(e))
+                p
             } else {
                 // Just grouping
                 p = p.expect(TokenKind::RParen)
-                (p, first)
+                parser_store_expr_box(first_box)
+                p
             }
         }
     }
@@ -427,47 +414,50 @@ impl Parser {
     // Array literal: [a, b, c] or [val; count]
     // ============================================================
 
-    fn parse_array_literal(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_array_literal(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip [
 
-        if p.peek() == TokenKind::RBracket {
+        if parser_peek(p) == TokenKind::RBracket {
             // Empty array
             p = p.advance()
             let span = p.span_from(start)
-            (p, mk_expr(ExprKind::ExprArrayLit, span))
+            parser_store_expr_box(Box::new(mk_expr(ExprKind::ExprArrayLit, span)))
+            p
         } else {
-            let pair = p.parse_expr()
-            p = pair.0
-            let first = pair.1
+            p = p.parse_expr()
+            let first_box = parser_take_expr_box()
 
-            if p.peek() == TokenKind::Semi {
+            if parser_peek(p) == TokenKind::Semi {
                 // Array repeat: [val; count]
                 p = p.advance()  // skip ;
-                let pair2 = p.parse_expr()
-                p = pair2.0.expect(TokenKind::RBracket)
-                let count = pair2.1
+                p = p.parse_expr()
+                let count_box = parser_take_expr_box()
+                p = p.expect(TokenKind::RBracket)
                 let span = p.span_from(start)
                 var e = mk_expr(ExprKind::ExprArrayLit, span)
-                e.left = Some(Box::new(first))
-                e.right = Some(Box::new(count))
-                (p, e)
+                e.left = Some(first_box)
+                e.right = Some(count_box)
+                parser_store_expr_box(Box::new(e))
+                p
             } else {
                 // Array elements: [a, b, c]
-                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(ExprList { label: empty_name(), head: first, tail: None }))
-                while p.peek() == TokenKind::Comma {
+                let first_node = ExprList { label: empty_name(), head: *first_box, tail: None }
+                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(first_node))
+                while parser_peek(p) == TokenKind::Comma {
                     p = p.advance()
-                    if p.peek() == TokenKind::RBracket { break }
-                    let pair2 = p.parse_expr()
-                    p = pair2.0
-                    let next = pair2.1
-                    rev_list_opt = Some(Box::new(ExprList { label: empty_name(), head: next, tail: rev_list_opt }))
+                    if parser_peek(p) == TokenKind::RBracket { break }
+                    p = p.parse_expr()
+                    let next_box = parser_take_expr_box()
+                    let next_node = ExprList { label: empty_name(), head: *next_box, tail: rev_list_opt }
+                    rev_list_opt = Some(Box::new(next_node))
                 }
                 p = p.expect(TokenKind::RBracket)
                 let span = p.span_from(start)
                 var e = mk_expr(ExprKind::ExprArrayLit, span)
                 e.args = reverse_expr_list_opt(rev_list_opt)
-                (p, e)
+                parser_store_expr_box(Box::new(e))
+                p
             }
         }
     }
@@ -476,7 +466,7 @@ impl Parser {
     // Block expression: { ... }
     // ============================================================
 
-    fn parse_block_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_block_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         let pair = self.parse_block()
         let p = pair.0
@@ -484,14 +474,15 @@ impl Parser {
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprBlock, span)
         e.block = Some(Box::new(blk))
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // Handle expression: handle<Effect> { body } with { handlers }
     // ============================================================
 
-    fn parse_handle_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_handle_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'handle'
 
@@ -508,7 +499,7 @@ impl Parser {
 
         // Parse optional handler: with { ... }
         var handler_opt: Option<Box<Block>> = None
-        if p.peek() == TokenKind::With {
+        if parser_peek(p) == TokenKind::With {
             p = p.advance()  // skip 'with'
             let handler_pair = p.parse_block()
             p = handler_pair.0
@@ -520,20 +511,21 @@ impl Parser {
         e.name = effect_name
         e.block = Some(Box::new(body))
         e.handler_block = handler_opt
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // Closure expression: |x: T, y: U| body  or  |x: T| -> R with E { body }
     // ============================================================
 
-    fn parse_closure_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_closure_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip opening '|'
 
         // Parse params until closing '|'
         var params: Option<Box<ClosureParamList>> = None
-        if p.peek() != TokenKind::Pipe {
+        if parser_peek(p) != TokenKind::Pipe {
             let params_pair = p.parse_closure_params()
             p = params_pair.0
             params = params_pair.1
@@ -542,7 +534,7 @@ impl Parser {
 
         // Parse optional return type: -> T
         var ret_type: Option<Box<TypeExpr>> = None
-        if p.peek() == TokenKind::Arrow {
+        if parser_peek(p) == TokenKind::Arrow {
             p = p.advance()  // skip '->'
             let ty_pair = p.parse_type()
             p = ty_pair.0
@@ -551,44 +543,46 @@ impl Parser {
 
         // Parse optional effects: with IO, Mut
         var effects: Option<Box<EffectList>> = None
-        if p.peek() == TokenKind::With {
+        if parser_peek(p) == TokenKind::With {
             let eff_pair = p.parse_effect_list()
             p = eff_pair.0
             effects = Some(Box::new(eff_pair.1))
         }
 
         // Parse body: block { ... } or single expression
-        let body_pair = if p.peek() == TokenKind::LBrace {
+        if parser_peek(p) == TokenKind::LBrace {
             let blk_pair = p.parse_block()
             let blk_p = blk_pair.0
             let blk = blk_pair.1
             let blk_span = blk_p.span_from(start)
             var blk_expr = mk_expr(ExprKind::ExprBlock, blk_span)
             blk_expr.block = Some(Box::new(blk))
-            (blk_p, blk_expr)
+            parser_store_expr_box(Box::new(blk_expr))
+            p = blk_p
         } else {
-            p.parse_expr()
+            p = p.parse_expr()
+            // body is in LAST_EXPR
         }
-        p = body_pair.0
-        let body = body_pair.1
+        let body_box = parser_take_expr_box()
 
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprClosure, span)
         e.closure_params = params
         e.closure_return = ret_type
         e.closure_effects = effects
-        e.closure_body = Some(Box::new(body))
-        (p, e)
+        e.closure_body = Some(body_box)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // Zero-param closure: || body  (PipePipe token)
-    fn parse_closure_no_params(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_closure_no_params(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip '||'
 
         // Parse optional return type: -> T
         var ret_type: Option<Box<TypeExpr>> = None
-        if p.peek() == TokenKind::Arrow {
+        if parser_peek(p) == TokenKind::Arrow {
             p = p.advance()
             let ty_pair = p.parse_type()
             p = ty_pair.0
@@ -597,34 +591,36 @@ impl Parser {
 
         // Parse optional effects: with IO, Mut
         var effects: Option<Box<EffectList>> = None
-        if p.peek() == TokenKind::With {
+        if parser_peek(p) == TokenKind::With {
             let eff_pair = p.parse_effect_list()
             p = eff_pair.0
             effects = Some(Box::new(eff_pair.1))
         }
 
         // Parse body
-        let body_pair = if p.peek() == TokenKind::LBrace {
+        if parser_peek(p) == TokenKind::LBrace {
             let blk_pair = p.parse_block()
             let blk_p = blk_pair.0
             let blk = blk_pair.1
             let blk_span = blk_p.span_from(start)
             var blk_expr = mk_expr(ExprKind::ExprBlock, blk_span)
             blk_expr.block = Some(Box::new(blk))
-            (blk_p, blk_expr)
+            parser_store_expr_box(Box::new(blk_expr))
+            p = blk_p
         } else {
-            p.parse_expr()
+            p = p.parse_expr()
+            // body in LAST_EXPR
         }
-        p = body_pair.0
-        let body = body_pair.1
+        let body_box = parser_take_expr_box()
 
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprClosure, span)
         e.closure_params = None
         e.closure_return = ret_type
         e.closure_effects = effects
-        e.closure_body = Some(Box::new(body))
-        (p, e)
+        e.closure_body = Some(body_box)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // Parse comma-separated closure params: name: Type, name: Type
@@ -634,9 +630,9 @@ impl Parser {
         let head = pair.1
 
         var tail: Option<Box<ClosureParamList>> = None
-        if p.peek() == TokenKind::Comma {
+        if parser_peek(p) == TokenKind::Comma {
             p = p.advance()  // skip ','
-            if p.peek() != TokenKind::Pipe {
+            if parser_peek(p) != TokenKind::Pipe {
                 let rest_pair = p.parse_closure_params()
                 p = rest_pair.0
                 tail = rest_pair.1
@@ -663,27 +659,26 @@ impl Parser {
     // If expression: if cond { ... } [else { ... }]
     // ============================================================
 
-    fn parse_if_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_if_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'if'
         // Restrict struct literals in condition to avoid { ambiguity
         p.no_struct_lit = true
-        let pair = p.parse_expr()
-        p = pair.0
-        let cond = pair.1
+        p = p.parse_expr()
+        let cond_box = parser_take_expr_box()
         p.no_struct_lit = false
         let pair2 = p.parse_block()
         p = pair2.0
         let then_block = pair2.1
 
         var else_opt: Option<Box<Expr>> = None
-        if p.peek() == TokenKind::Else {
+        if parser_peek(p) == TokenKind::Else {
             p = p.advance()  // skip 'else'
-            if p.peek() == TokenKind::If {
-                // else if
-                let pair3 = p.parse_if_expr()
-                p = pair3.0
-                else_opt = Some(Box::new(pair3.1))
+            if parser_peek(p) == TokenKind::If {
+                // else if — recursively parses and stores to LAST_EXPR
+                p = p.parse_if_expr()
+                let else_if_box = parser_take_expr_box()
+                else_opt = Some(else_if_box)
             } else {
                 // else { ... }
                 let pair3 = p.parse_block()
@@ -698,38 +693,38 @@ impl Parser {
 
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprIf, span)
-        e.left = Some(Box::new(cond))
+        e.left = Some(cond_box)
         e.block = Some(Box::new(then_block))
         e.else_expr = else_opt
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // Match expression: match expr { pat => body, ... }
     // ============================================================
 
-    fn parse_match_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_match_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'match'
         // Restrict struct literals in scrutinee to avoid { ambiguity
         p.no_struct_lit = true
-        let pair = p.parse_expr()
-        p = pair.0
-        let scrutinee = pair.1
+        p = p.parse_expr()
+        let scrutinee_box = parser_take_expr_box()
         p.no_struct_lit = false
         p = p.expect(TokenKind::LBrace)
 
         // Parse arms
         var rev_arms_opt: Option<Box<MatchArmList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             let arm_start = p.current_span()
             let pair2 = p.parse_pattern()
             p = pair2.0
             let pattern = pair2.1
             p = p.expect(TokenKind::FatArrow)
 
-            let pair3 = if p.peek() == TokenKind::LBrace {
+            if parser_peek(p) == TokenKind::LBrace {
                 // Block body
                 let pair4 = p.parse_block()
                 let pb = pair4.0
@@ -737,18 +732,18 @@ impl Parser {
                 let blk_span = pb.span_from(arm_start)
                 var be = mk_expr(ExprKind::ExprBlock, blk_span)
                 be.block = Some(Box::new(blk))
-                (pb, be)
+                parser_store_expr_box(Box::new(be))
+                p = pb
             } else {
-                p.parse_expr()
+                p = p.parse_expr()
+                // body in LAST_EXPR
             }
-            p = pair3.0
-            let body = pair3.1
-
-            let arm = MatchArm { pattern: pattern, body: body, span: p.span_from(arm_start) }
+            let body_box = parser_take_expr_box()
+            let arm = MatchArm { pattern: pattern, body: *body_box, span: p.span_from(arm_start) }
             rev_arms_opt = Some(Box::new(MatchArmList { head: arm, tail: rev_arms_opt }))
 
             // Skip comma between arms
-            if p.peek() == TokenKind::Comma {
+            if parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
             }
         }
@@ -756,39 +751,40 @@ impl Parser {
         p = p.expect(TokenKind::RBrace)
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprMatch, span)
-        e.left = Some(Box::new(scrutinee))
+        e.left = Some(scrutinee_box)
         e.arms = reverse_match_arm_list_opt(rev_arms_opt)
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // While expression: while cond { ... }
     // ============================================================
 
-    fn parse_while_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_while_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'while'
         // Restrict struct literals in condition to avoid { ambiguity
         p.no_struct_lit = true
-        let pair = p.parse_expr()
-        p = pair.0
-        let cond = pair.1
+        p = p.parse_expr()
+        let cond_box = parser_take_expr_box()
         p.no_struct_lit = false
         let pair2 = p.parse_block()
         p = pair2.0
         let body = pair2.1
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprWhile, span)
-        e.left = Some(Box::new(cond))
+        e.left = Some(cond_box)
         e.block = Some(Box::new(body))
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // Loop expression: loop { ... }
     // ============================================================
 
-    fn parse_loop_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_loop_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'loop'
         let pair = p.parse_block()
@@ -797,14 +793,15 @@ impl Parser {
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprLoop, span)
         e.block = Some(Box::new(body))
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // For-in expression: for x in iter_expr { body }
     // ============================================================
 
-    fn parse_for_in_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_for_in_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'for'
 
@@ -817,9 +814,8 @@ impl Parser {
 
         // Parse iterator expression (restrict struct lits to avoid { ambiguity)
         p.no_struct_lit = true
-        let pair = p.parse_expr()
-        p = pair.0
-        let iter_expr = pair.1
+        p = p.parse_expr()
+        let iter_box = parser_take_expr_box()
         p.no_struct_lit = false
 
         // Parse body block
@@ -830,71 +826,72 @@ impl Parser {
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprForIn, span)
         e.name = binding_name
-        e.left = Some(Box::new(iter_expr))
+        e.left = Some(iter_box)
         e.block = Some(Box::new(body))
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // Return expression: return [expr]
     // ============================================================
 
-    fn parse_return_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_return_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'return'
         var e = mk_expr(ExprKind::ExprReturn, start)
         if p.at_expr_start() {
-            let pair = p.parse_expr()
-            p = pair.0
-            e.left = Some(Box::new(pair.1))
+            p = p.parse_expr()
+            let val_box = parser_take_expr_box()
+            e.left = Some(val_box)
             e.span = p.span_from(start)
         }
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // Break expression: break [expr]
     // ============================================================
 
-    fn parse_break_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_break_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'break'
         var e = mk_expr(ExprKind::ExprBreak, start)
         if p.at_expr_start() {
-            let pair = p.parse_expr()
-            p = pair.0
-            e.left = Some(Box::new(pair.1))
+            p = p.parse_expr()
+            let val_box = parser_take_expr_box()
+            e.left = Some(val_box)
             e.span = p.span_from(start)
         }
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // Identifier expression (variable, path, struct literal, call)
     // ============================================================
 
-    fn parse_ident_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_ident_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         let name = self.current_name()
 
         // Check for path: Foo::Bar::baz or turbofish: foo::<T>(args)
-        if self.peek_ahead(1) == TokenKind::ColonColon {
+        if parser_peek_ahead(self, 1) == TokenKind::ColonColon {
             let pair = self.parse_type_path()
             var p1 = pair.0
             let path = pair.1
 
             // Turbofish: ident_or_path followed by ::<T, U>
-            // parse_type_path stops when :: is not followed by Ident,
-            // so ::<T> leaves us at the :: token.
             var turbofish_args: Option<Box<TypeExprList>> = None
-            if p1.peek() == TokenKind::ColonColon && p1.peek_ahead(1) == TokenKind::Lt {
+            if parser_peek(p1) == TokenKind::ColonColon && parser_peek_ahead(p1, 1) == TokenKind::Lt {
                 p1 = p1.advance()  // skip ::
                 let ta_pair = p1.parse_type_args()
                 p1 = ta_pair.0
                 turbofish_args = Some(Box::new(ta_pair.1))
             }
 
-            if !p1.no_struct_lit && p1.peek() == TokenKind::LBrace {
+            if !p1.no_struct_lit && parser_peek(p1) == TokenKind::LBrace {
                 // Struct literal: Foo { x: 1, y: 2 }
                 p1.parse_struct_literal(path, start)
             } else {
@@ -903,9 +900,10 @@ impl Parser {
                 var e = mk_expr(ExprKind::ExprPath, span)
                 e.path = path
                 e.type_args = turbofish_args
-                (p1, e)
+                parser_store_expr_box(Box::new(e))
+                p1
             }
-        } else if !self.no_struct_lit && self.peek_ahead(1) == TokenKind::LBrace {
+        } else if !self.no_struct_lit && parser_peek_ahead(self, 1) == TokenKind::LBrace {
             // Struct literal with simple name: Point { x: 1, y: 2 }
             var p = self.advance()
             let path = AstPath {
@@ -914,12 +912,19 @@ impl Parser {
             }
             p.parse_struct_literal(path, start)
         } else {
-            // Simple identifier
+            // Simple identifier — may still carry turbofish: vec_new::<f64>()
             let span = self.current_span()
-            let p = self.advance()
+            var p = self.advance()
             var e = mk_expr(ExprKind::ExprIdent, span)
             e.name = name
-            (p, e)
+            if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::Lt {
+                p = p.advance()  // skip ::
+                let ta_pair = p.parse_type_args()
+                p = ta_pair.0
+                e.type_args = Some(Box::new(ta_pair.1))
+            }
+            parser_store_expr_box(Box::new(e))
+            p
         }
     }
 
@@ -927,23 +932,22 @@ impl Parser {
     // Struct literal: Path { field: expr, ... }
     // ============================================================
 
-    fn parse_struct_literal(self, path: AstPath, start: Span) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_struct_literal(self, path: AstPath, start: Span) -> Parser with Mut, IO, Panic, Div, Alloc {
         var p = self.advance()  // skip {
 
         var rev_fields_opt: Option<Box<StructFieldList>> = None
 
-        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             let field_name = p.current_name()
             p = p.expect_ident()
             p = p.expect(TokenKind::Colon)
-            let pair = p.parse_expr()
-            p = pair.0
-            let field_val = pair.1
+            p = p.parse_expr()
+            let field_val_box = parser_take_expr_box()
 
-            let field = StructFieldInit { name: field_name, value: field_val }
+            let field = StructFieldInit { name: field_name, value: *field_val_box }
             rev_fields_opt = Some(Box::new(StructFieldList { head: field, tail: rev_fields_opt }))
 
-            if p.peek() == TokenKind::Comma {
+            if parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
             }
         }
@@ -953,45 +957,49 @@ impl Parser {
         var e = mk_expr(ExprKind::ExprStructLit, span)
         e.path = path
         e.fields = reverse_struct_field_list_opt(rev_fields_opt)
-        (p, e)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // Call expression: callee(arg1, arg2)
     // ============================================================
 
-    fn parse_call_arg_expr(self) -> (Parser, ExprList) with Mut, IO, Panic, Div, Alloc {
+    fn parse_call_arg_expr(self) -> (Parser, Box<ExprList>) with Mut, IO, Panic, Div, Alloc {
         var p = self
         var label = empty_name()
 
-        if p.peek() == TokenKind::Ident && p.peek_ahead(1) == TokenKind::Colon {
+        if parser_peek(p) == TokenKind::Ident && parser_peek_ahead(p, 1) == TokenKind::Colon {
             label = p.current_name()
             p = p.advance()
             p = p.expect(TokenKind::Colon)
         }
-        let pair = p.parse_expr()
-        (pair.0, ExprList { label: label, head: pair.1, tail: None })
+        p = p.parse_expr()
+        let expr_box = parser_take_expr_box()
+        let node = ExprList { label: label, head: *expr_box, tail: None }
+        (p, Box::new(node))
     }
 
-    fn parse_call_expr(self, callee: Expr) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_call_expr_box(self, callee: Box<Expr>) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = callee.span
         var p = self.advance()  // skip (
 
         var args_opt: Option<Box<ExprList>> = None
 
-        if p.peek() != TokenKind::RParen {
+        if parser_peek(p) != TokenKind::RParen {
             let pair = p.parse_call_arg_expr()
             p = pair.0
-            let first = pair.1
-            var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(first))
+            let first = pair.1  // Box<ExprList>
+            var rev_list_opt: Option<Box<ExprList>> = Some(first)
 
-            while p.peek() == TokenKind::Comma {
+            while parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
-                if p.peek() == TokenKind::RParen { break }
+                if parser_peek(p) == TokenKind::RParen { break }
                 let pair2 = p.parse_call_arg_expr()
                 p = pair2.0
-                let next = pair2.1
-                rev_list_opt = Some(Box::new(ExprList { label: next.label, head: next.head, tail: rev_list_opt }))
+                let next = pair2.1  // Box<ExprList>
+                let new_node = ExprList { label: next.label, head: next.head, tail: rev_list_opt }
+                rev_list_opt = Some(Box::new(new_node))
             }
 
             args_opt = reverse_expr_list_opt(rev_list_opt)
@@ -1000,60 +1008,80 @@ impl Parser {
         p = p.expect(TokenKind::RParen)
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprCall, span)
-        // Propagate turbofish type args from callee path to call expression
-        // (callee.type_args is set by parse_ident_expr for foo::<T>(...) syntax)
         e.type_args = callee.type_args
-        e.left = Some(Box::new(callee))
+        e.left = Some(callee)
         e.args = args_opt
-        e = rewrite_hardware_publish_call(e)
-        (p, e)
+        // Note: hardware_publish rewriting skipped (IS_SPTR issue with Expr params, TODO)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // Index expression: base[index]
     // ============================================================
 
-    fn parse_index_expr(self, base: Expr) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_index_expr_box(self, base: Box<Expr>) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = base.span
         var p = self.advance()  // skip [
-        let pair = p.parse_expr()
-        p = pair.0.expect(TokenKind::RBracket)
-        let index = pair.1
+        p = p.parse_expr()
+        var index_box = parser_take_expr_box()
+        if parser_peek(p) == TokenKind::As {
+            p = p.advance()
+            let ty_pair = p.parse_type()
+            p = ty_pair.0
+            let span_cast = p.span_from(index_box.span)
+            var cast_e = mk_expr(ExprKind::ExprCast, span_cast)
+            cast_e.left = Some(index_box)
+            cast_e.cast_type = Some(Box::new(ty_pair.1))
+            index_box = Box::new(cast_e)
+        }
+        p = p.expect(TokenKind::RBracket)
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprIndex, span)
-        e.left = Some(Box::new(base))
-        e.right = Some(Box::new(index))
-        (p, e)
+        e.left = Some(base)
+        e.right = Some(index_box)
+        parser_store_expr_box(Box::new(e))
+        p
     }
 
     // ============================================================
     // Dot expression: field access or method call
     // ============================================================
 
-    fn parse_dot_expr(self, base: Expr) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+    fn parse_dot_expr_box(self, base: Box<Expr>) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = base.span
         var p = self.advance()  // skip .
         let name = p.current_name()
         p = p.advance()  // skip field/method name
 
-        if p.peek() == TokenKind::LParen {
-            // Method call: base.method(args)
+        // Turbofish on method: base.method::<T>(args)
+        var method_type_args: Option<Box<TypeExprList>> = None
+        if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::Lt {
+            p = p.advance()  // skip ::
+            let ta_pair = p.parse_type_args()
+            p = ta_pair.0
+            method_type_args = Some(Box::new(ta_pair.1))
+        }
+
+        if parser_peek(p) == TokenKind::LParen {
+            // Method call: base.method(args) or base.method::<T>(args)
             p = p.advance()  // skip (
             var args_opt: Option<Box<ExprList>> = None
 
-            if p.peek() != TokenKind::RParen {
+            if parser_peek(p) != TokenKind::RParen {
                 let pair = p.parse_call_arg_expr()
                 p = pair.0
-                let first = pair.1
-                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(first))
+                let first = pair.1  // Box<ExprList>
+                var rev_list_opt: Option<Box<ExprList>> = Some(first)
 
-                while p.peek() == TokenKind::Comma {
+                while parser_peek(p) == TokenKind::Comma {
                     p = p.advance()
-                    if p.peek() == TokenKind::RParen { break }
+                    if parser_peek(p) == TokenKind::RParen { break }
                     let pair2 = p.parse_call_arg_expr()
                     p = pair2.0
                     let next = pair2.1
-                    rev_list_opt = Some(Box::new(ExprList { label: next.label, head: next.head, tail: rev_list_opt }))
+                    let new_node = ExprList { label: next.label, head: next.head, tail: rev_list_opt }
+                    rev_list_opt = Some(Box::new(new_node))
                 }
                 args_opt = reverse_expr_list_opt(rev_list_opt)
             }
@@ -1062,22 +1090,27 @@ impl Parser {
             let span = p.span_from(start)
             var e = mk_expr(ExprKind::ExprMethodCall, span)
             e.name = name
-            e.left = Some(Box::new(base))
+            e.left = Some(base)
             e.args = args_opt
-            (p, e)
+            e.type_args = method_type_args
+            parser_store_expr_box(Box::new(e))
+            p
         } else {
             // Field access: base.field
             let span = p.span_from(start)
             var e = mk_expr(ExprKind::ExprFieldAccess, span)
             e.name = name
-            e.left = Some(Box::new(base))
-            (p, e)
+            e.left = Some(base)
+            parser_store_expr_box(Box::new(e))
+            p
         }
     }
 }
 
 // ============================================================
 // hardware_publish canonicalization helpers
+// Note: rewrite_hardware_publish_call disabled in parse_call_expr_box due to IS_SPTR.
+// The functions below remain for future use but are not currently called from parsing.
 // ============================================================
 
 fn rewrite_hardware_publish_call(call_expr: Expr) -> Expr with Mut, Panic, Div, Alloc {
@@ -1235,6 +1268,10 @@ fn path_last_name(path: AstPath) -> Name with Mut, Panic, Div, Alloc {
         return exprs_copy_string_list_to_name(path.segments)
     }
     string_list_last_name(path.segments)
+}
+
+pub fn parse_expr_entry(p: Parser) -> Parser with Mut, IO, Panic, Div, Alloc {
+    p.parse_expr()
 }
 
 fn string_list_last_name(list: StringList) -> Name with Mut, Panic, Div, Alloc {

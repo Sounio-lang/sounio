@@ -1,0 +1,235 @@
+// self-hosted::compiler::lean
+//
+// Lean modular entrypoint.
+// Supports frontend probes (check/IR/probe), native compilation, and algebra
+// self-tests. The native witness path intentionally imports only the compact
+// imported-simple driver so frontend probes do not pull in the full codegen stack.
+
+use module_frontend::{load_multimodule_ir_fn_count, module_frontend_algebra_law_self_test, preflight_multimodule_frontend}
+use module_native_simple_driver::{compile_imported_simple_native_advanced}
+
+fn lean_print_help() with IO {
+    println("Usage: souc-lean [options] <input.sio>")
+    println("")
+    println("Options:")
+    println("  -o, --output <file>       Output file (default: a.out)")
+    println("  -t, --target <target>     Accepted for CLI compatibility")
+    println("  --matrix <mode>           Accepted for CLI compatibility")
+    println("  -O, --optimize            Accepted for CLI compatibility")
+    println("  --check <source.sio>      Parse, resolve and typecheck only")
+    println("  --ir-summary <source.sio> Print loaded IR function/string counts")
+    println("  --probe-load-ir <source.sio>  Compatibility alias for modular IR load")
+    println("  --probe-load-ir-trace <source.sio>  Compatibility alias with body count")
+    println("  --native-compile <source.sio>  Compile imported/simple source to native ELF")
+    println("  --algebra-law-self-test  Check CD-tower reassoc_strategy decisions")
+    println("  --self-test               Run lean CLI/import-contract smoke")
+    println("  --cache-dir <dir>         Accepted for CLI compatibility")
+    println("  --cache-mode <mode>       Accepted for CLI compatibility")
+    println("  --cache-stats             Accepted for CLI compatibility")
+    println("  --gpu-target <name>       Accepted for CLI compatibility")
+    println("  --gpu-binary-format <fmt> Accepted for CLI compatibility")
+    println("  --gpu-strict-parity       Accepted for CLI compatibility")
+    println("  -v, --verbose             Accepted for CLI compatibility")
+    println("  -h, --help                Print this help message")
+}
+
+fn lean_arg_after_flag(default_path: string) -> string with IO {
+    let argc = arg_count()
+    if argc >= 2 {
+        return get_arg(1)
+    }
+    default_path
+}
+
+fn lean_flag_takes_value(arg: string) -> bool with Mut, Panic, Div {
+    if arg == "-o" || arg == "--output" { return true }
+    if arg == "-t" || arg == "--target" { return true }
+    if arg == "--matrix" { return true }
+    if arg == "--cache-dir" { return true }
+    if arg == "--cache-mode" { return true }
+    if arg == "--gpu-target" { return true }
+    if arg == "--gpu-binary-format" { return true }
+    false
+}
+
+fn lean_first_source_arg(default_path: string) -> string with IO, Mut, Panic, Div {
+    let argc = arg_count()
+    var i: i64 = 0
+    while i < argc {
+        let arg = get_arg(i)
+        if lean_flag_takes_value(arg) {
+            i = i + 2
+            continue
+        }
+        if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
+            return arg
+        }
+        i = i + 1
+    }
+    default_path
+}
+
+fn lean_run_check(source_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let result = preflight_multimodule_frontend(source_path)
+    if result.ok {
+        println("souc-lean check: ok")
+        return 0
+    }
+    println("souc-lean check: failed: " + result.error_msg)
+    1
+}
+
+fn lean_run_ir_summary(source_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let fn_count = load_multimodule_ir_fn_count(source_path)
+    if fn_count <= 0 {
+        println("souc-lean ir-summary: failed")
+        return 1
+    }
+    print("souc-lean ir-summary: functions=")
+    print_int(fn_count)
+    print(" strings=")
+    print_int(0)
+    print(" epistemic_contests=")
+    print_int(0)
+    print("\n")
+    0
+}
+
+fn lean_run_probe_load_ir(source_path: string, trace: bool) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let fn_count = load_multimodule_ir_fn_count(source_path)
+    if fn_count <= 0 {
+        if trace {
+            println("probe_load_ir_trace: failed")
+        } else {
+            println("probe_load_ir: failed")
+        }
+        return 1
+    }
+    if trace {
+        print("body_lowered=")
+        print_int(fn_count)
+        print("\n")
+        println("probe_load_ir_trace: ok")
+    } else {
+        println("probe_load_ir: ok")
+    }
+    0
+}
+
+fn lean_output_arg(default_path: string) -> string with IO, Mut, Panic, Div {
+    let argc = arg_count()
+    var i: i64 = 0
+    while i < argc {
+        let arg = get_arg(i)
+        if (arg == "-o" || arg == "--output") && i + 1 < argc {
+            return get_arg(i + 1)
+        }
+        i = i + 1
+    }
+    default_path
+}
+
+fn lean_run_compile(source_path: string, output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    compile_imported_simple_native_advanced(
+        source_path,
+        output_path,
+        "native",
+        "auto",
+        "",
+        "",
+        false,
+        false,
+        false,
+        "",
+        "",
+        "off",
+        false
+    ) as i64
+}
+
+fn lean_run_algebra_law_self_test() -> i64 with IO, Mut, Div, Panic {
+    let rc = module_frontend_algebra_law_self_test()
+    if rc == 0 {
+        println("souc-lean algebra-law-self-test: T1201 OK")
+        return 0
+    }
+    println("souc-lean algebra-law-self-test: T1201 FAIL")
+    1
+}
+
+fn lean_run_self_test() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let result = preflight_multimodule_frontend("examples/hello.sio")
+    if result.ok {
+        println("souc-lean self-test: ok")
+        return 0
+    }
+    println("souc-lean self-test: failed: " + result.error_msg)
+    1
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc <= 0 {
+        lean_print_help()
+        return 1
+    }
+    let mode = get_arg(0)
+    if mode == "-h" || mode == "--help" {
+        lean_print_help()
+        return 0
+    }
+    if mode == "--self-test" {
+        return lean_run_self_test()
+    }
+    if mode == "--algebra-law-self-test" {
+        return lean_run_algebra_law_self_test()
+    }
+    if mode == "--check" {
+        let source_path = lean_arg_after_flag("")
+        if source_path == "" {
+            lean_print_help()
+            return 1
+        }
+        return lean_run_check(source_path)
+    }
+    if mode == "--ir-summary" {
+        let source_path = lean_arg_after_flag("")
+        if source_path == "" {
+            lean_print_help()
+            return 1
+        }
+        return lean_run_ir_summary(source_path)
+    }
+    if mode == "--probe-load-ir" {
+        let source_path = lean_arg_after_flag("")
+        if source_path == "" {
+            lean_print_help()
+            return 1
+        }
+        return lean_run_probe_load_ir(source_path, false)
+    }
+    if mode == "--probe-load-ir-trace" {
+        let source_path = lean_arg_after_flag("")
+        if source_path == "" {
+            lean_print_help()
+            return 1
+        }
+        return lean_run_probe_load_ir(source_path, true)
+    }
+    if mode == "--native-compile" {
+        let source_path = lean_arg_after_flag("")
+        if source_path == "" {
+            lean_print_help()
+            return 1
+        }
+        let output_path = lean_output_arg("a.out")
+        return lean_run_compile(source_path, output_path)
+    }
+    let source_path = lean_first_source_arg("")
+    if source_path == "" {
+        lean_print_help()
+        return 1
+    }
+    let output_path = lean_output_arg("a.out")
+    lean_run_compile(source_path, output_path)
+}

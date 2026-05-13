@@ -35,7 +35,7 @@ pip install mkdocs mkdocs-material
 ### Build Static Site
 
 ```bash
-cd triple-sounio-ecosystem/docs
+cd ecosystem/docs
 mkdocs build
 ```
 

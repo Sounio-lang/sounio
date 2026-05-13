@@ -1,0 +1,466 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Door E — Fair-comparison ablation: is the win G₂-specific or just sedenion?
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Every prior result compares "S-SSM α=0.2 (G₂ basin)" against "real diagonal
+// baseline." That's not the fairest test: the diagonal has 16 independent
+// 1-pole filters while sed_mul(A, h) encodes 256 cross-couplings via the
+// Cayley-Dickson table. Maybe ANY structured 16×16 matrix beats the diagonal,
+// not G₂ specifically.
+//
+// This file pits the G₂-curve point against:
+//   (1) S-SSM with α=0.0           (generic sedenion, far from G₂ basin)
+//   (2) S-SSM with random unit A    (5 random sedenions, off the G₂ curve)
+//   (3) Diagonal real-valued baseline (the original benchmark)
+//
+// If G₂ α=0.2 strictly beats (1), (2), and (3), the claim is "G₂ basin is
+// privileged."  If random sedenion (2) ties G₂, the claim shrinks to
+// "any sedenion structure beats diagonal."  If random sedenion BEATS G₂,
+// the G₂ story is wrong.
+//
+// Same task as the prior sweeps: TARGET = sin(2π t/20), INPUT = TARGET·0.5,
+// T=80 train=64 test=16, 100 epochs, lr=1.0, only C trained.
+
+use math::sedenion::*;
+
+// ─── Math helpers ─────────────────────────────────────────────────────────────
+
+fn sqrt_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = x
+    var i: i64 = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_s(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn exp_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return exp_s(10.0) * exp_s(x - 10.0) }
+    if x < 0.0 - 20.0 { return 0.0 }
+    var s: f64 = 1.0
+    var term: f64 = 1.0
+    var i: i64 = 1
+    while i <= 20 { term = term * x / (i as f64); s = s + term; i = i + 1 }
+    s
+}
+
+fn tanh_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 10.0 { return 1.0 }
+    if x < 0.0 - 10.0 { return 0.0 - 1.0 }
+    let e2: f64 = exp_s(2.0 * x)
+    (e2 - 1.0) / (e2 + 1.0)
+}
+
+fn sin_s(x: f64) -> f64 with Mut, Div, Panic {
+    let pi2: f64 = 6.28318530718
+    var xr: f64 = x
+    while xr > 3.14159265359 { xr = xr - pi2 }
+    while xr < 0.0 - 3.14159265359 { xr = xr + pi2 }
+    let x2: f64 = xr * xr
+    let x3: f64 = x2 * xr
+    let x5: f64 = x3 * x2
+    let x7: f64 = x5 * x2
+    let x9: f64 = x7 * x2
+    xr - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0
+}
+
+// ─── RNG ──────────────────────────────────────────────────────────────────────
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+
+fn rng_next() -> i64 with Mut {
+    var x: i64 = RNG_A
+    let y: i64 = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r: i64 = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_pm() -> f64 with Mut, Div {
+    ((rng_next() % 2000) as f64 - 1000.0) / 1000.0
+}
+
+fn rand_small() -> f64 with Mut, Div {
+    ((rng_next() % 2000) as f64 - 1000.0) / 3000.0
+}
+
+fn random_unit_sedenion() -> Sedenion with Mut, Div, Panic {
+    let s: Sedenion = Sedenion {
+        e0:  rand_pm(), e1:  rand_pm(), e2:  rand_pm(), e3:  rand_pm(),
+        e4:  rand_pm(), e5:  rand_pm(), e6:  rand_pm(), e7:  rand_pm(),
+        e8:  rand_pm(), e9:  rand_pm(), e10: rand_pm(), e11: rand_pm(),
+        e12: rand_pm(), e13: rand_pm(), e14: rand_pm(), e15: rand_pm()
+    }
+    sed_normalize(s)
+}
+
+// ─── Task ─────────────────────────────────────────────────────────────────────
+
+var TARGET: [f64; 80] = [0.0; 80]
+var INPUT:  [f64; 80] = [0.0; 80]
+
+fn init_task() with Mut, Div, Panic {
+    var t: i64 = 0
+    while t < 80 {
+        let v: f64 = sin_s((t as f64) * 6.28318530718 / 20.0)
+        TARGET[t] = v
+        INPUT[t]  = v * 0.5
+        t = t + 1
+    }
+}
+
+// ─── S-SSM (same as prior files, condensed) ──────────────────────────────────
+
+var WC: [i64; 16] = [0; 16]
+
+fn cg(i: i64) -> f64 with Div { (WC[i] as f64) / 100000000.0 }
+fn cs(i: i64, v: f64) with Mut { WC[i] = (v * 100000000.0) as i64 }
+
+fn get_c() -> Sedenion with Div {
+    Sedenion {
+        e0: cg(0), e1: cg(1), e2: cg(2), e3: cg(3),
+        e4: cg(4), e5: cg(5), e6: cg(6), e7: cg(7),
+        e8: cg(8), e9: cg(9), e10: cg(10), e11: cg(11),
+        e12: cg(12), e13: cg(13), e14: cg(14), e15: cg(15)
+    }
+}
+
+fn init_c() with Mut { var i: i64 = 0; while i < 16 { WC[i] = 0; i = i + 1 } }
+
+var H0:  [f64; 64] = [0.0; 64]
+var H1:  [f64; 64] = [0.0; 64]
+var H2:  [f64; 64] = [0.0; 64]
+var H3:  [f64; 64] = [0.0; 64]
+var H4:  [f64; 64] = [0.0; 64]
+var H5:  [f64; 64] = [0.0; 64]
+var H6:  [f64; 64] = [0.0; 64]
+var H7:  [f64; 64] = [0.0; 64]
+var H8:  [f64; 64] = [0.0; 64]
+var H9:  [f64; 64] = [0.0; 64]
+var H10: [f64; 64] = [0.0; 64]
+var H11: [f64; 64] = [0.0; 64]
+var H12: [f64; 64] = [0.0; 64]
+var H13: [f64; 64] = [0.0; 64]
+var H14: [f64; 64] = [0.0; 64]
+var H15: [f64; 64] = [0.0; 64]
+
+fn save_h(t: i64, h: Sedenion) with Mut {
+    H0[t]=h.e0;  H1[t]=h.e1;  H2[t]=h.e2;  H3[t]=h.e3
+    H4[t]=h.e4;  H5[t]=h.e5;  H6[t]=h.e6;  H7[t]=h.e7
+    H8[t]=h.e8;  H9[t]=h.e9;  H10[t]=h.e10; H11[t]=h.e11
+    H12[t]=h.e12; H13[t]=h.e13; H14[t]=h.e14; H15[t]=h.e15
+}
+
+var GC: [f64; 16] = [0.0; 16]
+
+fn ssm_forward(a: Sedenion, b: Sedenion) with Mut, Div, Panic {
+    var h: Sedenion = sed_one()
+    var t: i64 = 0
+    while t < 64 {
+        let x: f64 = INPUT[t]
+        let ah: Sedenion = sed_mul(a, h)
+        let bx: Sedenion = sed_scale(b, x)
+        let raw: Sedenion = sed_add(ah, bx)
+        let act: Sedenion = sed_tanh(raw)
+        let n: f64 = sed_norm(act)
+        var hn: Sedenion = act
+        if n > 0.0000001 { hn = sed_scale(act, 1.0 / n) }
+        h = hn
+        save_h(t, h)
+        t = t + 1
+    }
+}
+
+fn ssm_update_c(lr: f64) with Mut, Div, Panic {
+    let c: Sedenion = get_c()
+    var i: i64 = 0
+    while i < 16 { GC[i] = 0.0; i = i + 1 }
+    var t: i64 = 0
+    while t < 64 {
+        let ht: Sedenion = Sedenion {
+            e0:  H0[t],  e1:  H1[t],  e2:  H2[t],  e3:  H3[t],
+            e4:  H4[t],  e5:  H5[t],  e6:  H6[t],  e7:  H7[t],
+            e8:  H8[t],  e9:  H9[t],  e10: H10[t], e11: H11[t],
+            e12: H12[t], e13: H13[t], e14: H14[t], e15: H15[t]
+        }
+        let y: f64 = sed_dot(ht, c)
+        let err: f64 = y - TARGET[t]
+        GC[0]=GC[0]+err*H0[t];  GC[1]=GC[1]+err*H1[t]
+        GC[2]=GC[2]+err*H2[t];  GC[3]=GC[3]+err*H3[t]
+        GC[4]=GC[4]+err*H4[t];  GC[5]=GC[5]+err*H5[t]
+        GC[6]=GC[6]+err*H6[t];  GC[7]=GC[7]+err*H7[t]
+        GC[8]=GC[8]+err*H8[t];  GC[9]=GC[9]+err*H9[t]
+        GC[10]=GC[10]+err*H10[t]; GC[11]=GC[11]+err*H11[t]
+        GC[12]=GC[12]+err*H12[t]; GC[13]=GC[13]+err*H13[t]
+        GC[14]=GC[14]+err*H14[t]; GC[15]=GC[15]+err*H15[t]
+        t = t + 1
+    }
+    let scale: f64 = lr * 2.0 / 64.0
+    i = 0
+    while i < 16 { cs(i, cg(i) - scale * GC[i]); i = i + 1 }
+}
+
+fn ssm_train_mse() -> f64 with Div, Panic {
+    let c: Sedenion = get_c()
+    var sum: f64 = 0.0
+    var t: i64 = 0
+    while t < 64 {
+        let ht: Sedenion = Sedenion {
+            e0:  H0[t],  e1:  H1[t],  e2:  H2[t],  e3:  H3[t],
+            e4:  H4[t],  e5:  H5[t],  e6:  H6[t],  e7:  H7[t],
+            e8:  H8[t],  e9:  H9[t],  e10: H10[t], e11: H11[t],
+            e12: H12[t], e13: H13[t], e14: H14[t], e15: H15[t]
+        }
+        let y: f64 = sed_dot(ht, c)
+        let err: f64 = y - TARGET[t]
+        sum = sum + err * err
+        t = t + 1
+    }
+    sum / 64.0
+}
+
+fn train_one_a(a: Sedenion, b: Sedenion) -> f64 with Mut, Div, Panic {
+    init_c()
+    var ep: i64 = 0
+    while ep < 100 { ssm_forward(a, b); ssm_update_c(1.0); ep = ep + 1 }
+    ssm_forward(a, b)
+    ssm_train_mse()
+}
+
+// ─── Diagonal baseline ────────────────────────────────────────────────────────
+
+var WA_R: [f64; 16] = [0.0; 16]
+var WB_R: [f64; 16] = [0.0; 16]
+var WC_R: [i64; 16] = [0; 16]
+var H_REAL: [f64; 1024] = [0.0; 1024]
+
+fn cg_r(i: i64) -> f64 with Div { (WC_R[i] as f64) / 100000000.0 }
+fn cs_r(i: i64, v: f64) with Mut { WC_R[i] = (v * 100000000.0) as i64 }
+
+fn init_real() with Mut, Div {
+    var i: i64 = 0
+    while i < 16 {
+        var ai: f64 = 0.75 + abs_s(rand_small()) * 0.5
+        if ai > 0.97 { ai = 0.97 }
+        WA_R[i] = ai
+        WB_R[i] = rand_small() * 0.2
+        WC_R[i] = 0
+        i = i + 1
+    }
+}
+
+fn real_forward() with Mut, Div, Panic {
+    var h: [f64; 16] = [0.0; 16]
+    var t: i64 = 0
+    while t < 64 {
+        let x: f64 = INPUT[t]
+        var i: i64 = 0
+        while i < 16 {
+            let new_hi: f64 = tanh_s(WA_R[i] * h[i] + WB_R[i] * x)
+            H_REAL[t * 16 + i] = new_hi
+            h[i] = new_hi
+            i = i + 1
+        }
+        t = t + 1
+    }
+}
+
+fn real_update_c(lr: f64) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < 16 { GC[i] = 0.0; i = i + 1 }
+    var t: i64 = 0
+    while t < 64 {
+        var y: f64 = 0.0
+        i = 0
+        while i < 16 { y = y + cg_r(i) * H_REAL[t * 16 + i]; i = i + 1 }
+        let err: f64 = y - TARGET[t]
+        i = 0
+        while i < 16 { GC[i] = GC[i] + err * H_REAL[t * 16 + i]; i = i + 1 }
+        t = t + 1
+    }
+    let scale: f64 = lr * 2.0 / 64.0
+    i = 0
+    while i < 16 { cs_r(i, cg_r(i) - scale * GC[i]); i = i + 1 }
+}
+
+fn real_train_mse() -> f64 with Div, Panic {
+    var sum: f64 = 0.0
+    var t: i64 = 0
+    while t < 64 {
+        var y: f64 = 0.0
+        var i: i64 = 0
+        while i < 16 { y = y + cg_r(i) * H_REAL[t * 16 + i]; i = i + 1 }
+        let err: f64 = y - TARGET[t]
+        sum = sum + err * err
+        t = t + 1
+    }
+    sum / 64.0
+}
+
+// ─── Random-A statistics ──────────────────────────────────────────────────────
+
+var MEAN_RAND: f64 = 0.0
+var MIN_RAND:  f64 = 99.0
+var MAX_RAND:  f64 = 0.0
+var RAND_SEEDS: [f64; 8] = [0.0; 8]
+
+fn random_a_run(b: Sedenion, n_seeds: i64) with Mut, Div, Panic {
+    MIN_RAND = 99.0
+    MAX_RAND = 0.0
+    var k: i64 = 0
+    while k < n_seeds {
+        let a_rand: Sedenion = random_unit_sedenion()
+        let mse: f64 = train_one_a(a_rand, b)
+        RAND_SEEDS[k] = mse
+        if mse < MIN_RAND { MIN_RAND = mse }
+        if mse > MAX_RAND { MAX_RAND = mse }
+        print("    seed "); print_int(k); print(": MSE="); print(mse); println("")
+        k = k + 1
+    }
+    var acc: f64 = 0.0
+    var i: i64 = 0
+    while i < n_seeds { acc = acc + RAND_SEEDS[i]; i = i + 1 }
+    MEAN_RAND = acc / (n_seeds as f64)
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    init_task()
+
+    let zd: Sedenion = sed_known_zero_divisor()
+    let zd_n: Sedenion = sed_normalize(zd)
+    let ag_raw: Sedenion = sed_add(sed_basis(0, 1.0), sed_basis(1, 1.0))
+    let a_generic: Sedenion = sed_normalize(ag_raw)
+    let b: Sedenion = sed_one()
+    let a02: Sedenion = sed_normalize(sed_lerp(a_generic, zd_n, 0.2))
+
+    println("═══════════════════════════════════════════════════════")
+    println("  Door E: G₂ basin vs. structured sedenion alternatives")
+    println("  Task: sin(2π t/20)  T=80  ep=100  lr=1.0  only C trained")
+    println("═══════════════════════════════════════════════════════")
+    println("")
+
+    // (1) G₂ basin α=0.2
+    let mse_g2: f64 = train_one_a(a02, b)
+    print("  (1) S-SSM α=0.2  (G₂ basin)         train MSE = "); print(mse_g2); println("")
+
+    // (2) Generic α=0.0 (e0+e1 normalized, far from ZD curve)
+    let mse_generic: f64 = train_one_a(a_generic, b)
+    print("  (2) S-SSM α=0.0  (e0+e1 normalized) train MSE = "); print(mse_generic); println("")
+
+    // (3) Random unit sedenion A — 5 seeds
+    println("")
+    println("  (3) S-SSM random unit sedenion A — 5 seeds:")
+    rng_seed(2718281828, 3141592653)
+    random_a_run(b, 5)
+    let mean_rand: f64 = MEAN_RAND
+    let min_rand_v: f64 = MIN_RAND
+    let max_rand_v: f64 = MAX_RAND
+    print("      mean="); print(mean_rand)
+    print("  min=");      print(min_rand_v)
+    print("  max=");      print(max_rand_v); println("")
+    println("")
+
+    // (4) Diagonal baseline
+    rng_seed(31415926, 27182818)
+    init_real()
+    var ep: i64 = 0
+    while ep < 100 { real_forward(); real_update_c(1.0); ep = ep + 1 }
+    real_forward()
+    let mse_real: f64 = real_train_mse()
+    print("  (4) Diagonal real baseline          train MSE = "); print(mse_real); println("")
+    println("")
+
+    println("───────────────────────────────────────────────────────")
+    print("  G₂ vs random-sed mean: "); print(mse_g2)
+    print(" vs ");                       print(mean_rand); println("")
+    print("  G₂ vs diagonal:        "); print(mse_g2)
+    print(" vs ");                       print(mse_real); println("")
+    let g2_vs_rand_advantage_pct: f64 = (mean_rand - mse_g2) / mean_rand * 100.0
+    print("  G₂ advantage over random sedenion = "); print(g2_vs_rand_advantage_pct); println(" %")
+    println("───────────────────────────────────────────────────────")
+    println("")
+
+    // ── Assertions ───────────────────────────────────────────────────────────
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // T1: G₂ α=0.2 beats α=0.0 (gate matters within sedenion architecture)
+    if mse_g2 < mse_generic {
+        print("T1 PASS: G₂ "); print(mse_g2)
+        print(" < generic ");  print(mse_generic); println("")
+        passed = passed + 1
+    } else {
+        print("T1 FAIL: G₂ "); print(mse_g2)
+        print(" >= generic "); print(mse_generic); println("")
+        failed = failed + 1
+    }
+
+    // T2: G₂ α=0.2 beats the MEAN of 5 random sedenions
+    //     (the critical fair-comparison test)
+    if mse_g2 < mean_rand {
+        print("T2 PASS: G₂ ");        print(mse_g2)
+        print(" < random-sed mean "); print(mean_rand)
+        print(" (advantage ");        print(g2_vs_rand_advantage_pct); println(" %)")
+        passed = passed + 1
+    } else {
+        print("T2 FAIL: G₂ ");        print(mse_g2)
+        print(" >= random-sed mean "); print(mean_rand); println("")
+        failed = failed + 1
+    }
+
+    // T3: G₂ α=0.2 beats EVERY one of the 5 random seeds (strong claim).
+    //     Checks via min-of-random > G₂.
+    if mse_g2 < min_rand_v {
+        print("T3 PASS: G₂ ");           print(mse_g2)
+        print(" < min random sedenion "); print(min_rand_v)
+        println(" (G₂ beats every random seed)")
+        passed = passed + 1
+    } else {
+        print("T3 FAIL: random seed beat G₂. min random = "); print(min_rand_v); println("")
+        failed = failed + 1
+    }
+
+    // T4: G₂ α=0.2 beats diagonal baseline (consistency with prior result)
+    if mse_g2 < mse_real {
+        print("T4 PASS: G₂ "); print(mse_g2)
+        print(" < diagonal "); print(mse_real); println("")
+        passed = passed + 1
+    } else {
+        print("T4 FAIL: G₂ "); print(mse_g2)
+        print(" >= diagonal "); print(mse_real); println("")
+        failed = failed + 1
+    }
+
+    // T5: all MSE values finite
+    var ok: bool = true
+    if mse_g2 < 0.0 { ok = false }; if mse_g2 > 5.0 { ok = false }
+    if mse_generic < 0.0 { ok = false }; if mse_generic > 5.0 { ok = false }
+    if mean_rand < 0.0 { ok = false }; if mean_rand > 5.0 { ok = false }
+    if mse_real < 0.0 { ok = false }; if mse_real > 5.0 { ok = false }
+    if ok {
+        println("T5 PASS: all MSE values in [0, 5)")
+        passed = passed + 1
+    } else {
+        println("T5 FAIL: some MSE out of range")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}

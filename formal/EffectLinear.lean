@@ -79,11 +79,11 @@ inductive EffExpr : Type where
 def usageOf (env : UsageEnv) (x : String) : Mult :=
   match env with
   | []             => Mult.Zero
-  | (y, m) :: rest => if y == x then m else usageOf rest x
+  | (y, m) :: rest => if y = x then m else usageOf rest x
 
 /-- Zero out every occurrence of `x` in `env`. -/
 def consumeVar (env : UsageEnv) (x : String) : UsageEnv :=
-  env.map (fun p => if p.1 == x then (p.1, Mult.Zero) else p)
+  env.map (fun p => if p.1 = x then (p.1, Mult.Zero) else p)
 
 /-- Prepend a new binding `(x, m)` to `env`. -/
 def envExtend (env : UsageEnv) (x : String) (m : Mult) : UsageEnv :=
@@ -99,10 +99,12 @@ theorem consumeVar_removes (Γ : UsageEnv) (x : String) :
   induction Γ with
   | nil => simp [consumeVar, usageOf]
   | cons p ps ih =>
-    simp only [consumeVar, List.map_cons, usageOf]
-    rcases Bool.eq_false_or_eq_true (p.1 == x) with hpx | hpx
+    unfold consumeVar
+    simp only [List.map_cons, usageOf]
+    by_cases hpx : p.1 = x
     · simp [hpx]
-    · simp [hpx, ih]
+    · simp [hpx]
+      exact ih
 
 /-- `consumeVar x` does not affect the lookup of any `y ≠ x`. -/
 theorem consumeVar_preserves (Γ : UsageEnv) (x y : String) (hne : x ≠ y) :
@@ -110,16 +112,15 @@ theorem consumeVar_preserves (Γ : UsageEnv) (x y : String) (hne : x ≠ y) :
   induction Γ with
   | nil => simp [consumeVar, usageOf]
   | cons p ps ih =>
-    simp only [consumeVar, List.map_cons, usageOf]
-    rcases Bool.eq_false_or_eq_true (p.1 == y) with hpy | hpy
-    · rcases Bool.eq_false_or_eq_true (p.1 == x) with hpx | hpx
-      · simp only [beq_iff_eq] at hpy hpx
-        -- hpy : p.1 = y, hpx : p.1 = x, so y = x, contradicting x ≠ y
-        exact absurd (hpy.symm.trans hpx) (Ne.symm hne)
-      · simp [hpx, hpy]
-    · rcases Bool.eq_false_or_eq_true (p.1 == x) with hpx | hpx
-      · simp [hpx, hpy, ih]
-      · simp [hpx, hpy, ih]
+    unfold consumeVar
+    simp only [List.map_cons, usageOf]
+    by_cases hpy : p.1 = y
+    · have hyx : y ≠ x := Ne.symm hne
+      simp [hpy, hyx]
+    · have hfst : (if p.1 = x then (p.1, Mult.Zero) else p).1 = p.1 := by
+        by_cases hpx : p.1 = x <;> simp [hpx]
+      simp [hpy, hfst]
+      exact ih
 
 /-- `consumeVar` is idempotent. -/
 theorem consumeVar_idempotent (Γ : UsageEnv) (x : String) :
@@ -127,8 +128,12 @@ theorem consumeVar_idempotent (Γ : UsageEnv) (x : String) :
   induction Γ with
   | nil => simp [consumeVar]
   | cons p ps ih =>
-    simp only [consumeVar, List.map_cons]
-    rcases Bool.eq_false_or_eq_true (p.1 == x) with hpx | hpx <;> simp [hpx, ih]
+    unfold consumeVar
+    simp only [List.map_cons]
+    rw [List.cons_eq_cons]
+    constructor
+    · by_cases hpx : p.1 = x <;> simp [hpx]
+    · exact ih
 
 /-- After consuming `v` (where `v ≠ x`), the pair `(x, One)` is in the
     result iff it was already present. -/
@@ -137,30 +142,16 @@ theorem consumeVar_mem_one_iff (Γ : UsageEnv) (v x : String) (hne : v ≠ x) :
   simp only [consumeVar, List.mem_map]
   constructor
   · intro ⟨⟨y, m⟩, hym, hpair⟩
-    -- hpair : (if y == v then (y, Mult.Zero) else (y, m)) = (x, Mult.One)
-    -- We split on whether y equals v.
-    by_cases hyv : (y : String) = v
-    · -- y = v, so the map sends (y, m) to (y, Zero)
-      have hbool : y == v = true := by simp [beq_iff_eq, hyv]
-      simp only [hbool, ↓reduceIte] at hpair
-      -- hpair : (y, Mult.Zero) = (x, Mult.One); Zero ≠ One
-      exact absurd (congrArg Prod.snd hpair) (by decide)
-    · -- y ≠ v, so the map leaves (y, m) unchanged
-      have hbool : y == v = false := by
-        rw [Bool.eq_false_iff, beq_iff_eq]; exact hyv
-      simp only [hbool, ↓reduceIte] at hpair
-      -- hpair : (y, m) = (x, Mult.One)
-      have hyx : y = x := congrArg Prod.fst hpair
-      have hmult : m = Mult.One := congrArg Prod.snd hpair
-      rw [← hyx, ← hmult]; exact hym
+    by_cases hyv : y = v
+    · simp [hyv] at hpair
+    · simp [hyv] at hpair
+      obtain ⟨hyx, hmult⟩ := hpair
+      rw [← hyx, ← hmult]
+      exact hym
   · intro hxone
     refine ⟨(x, Mult.One), hxone, ?_⟩
-    -- goal: (fun p => if p.1 == v then (p.1, Mult.Zero) else p) (x, Mult.One) = (x, Mult.One)
-    -- Reduces to: (if x == v then (x, Zero) else (x, One)) = (x, One)
-    have hxv : (x : String) ≠ v := fun h => hne h.symm
-    have hbool : x == v = false := by
-      rw [Bool.eq_false_iff, beq_iff_eq]; exact hxv
-    simp [hbool]
+    have hxv : x ≠ v := fun h => hne h.symm
+    simp [hxv]
 
 /-- Extending then looking up the same variable. -/
 theorem extend_same_lookup (Γ : UsageEnv) (x : String) (m : Mult) :
@@ -171,9 +162,7 @@ theorem extend_same_lookup (Γ : UsageEnv) (x : String) (m : Mult) :
 theorem extend_other_lookup (Γ : UsageEnv) (x y : String) (m : Mult) (hne : x ≠ y) :
     usageOf (envExtend Γ y m) x = usageOf Γ x := by
   simp only [envExtend, usageOf]
-  have hyx : y == x = false := by
-    rw [Bool.eq_false_iff, beq_iff_eq]
-    exact Ne.symm hne
+  have hyx : y ≠ x := Ne.symm hne
   simp [hyx]
 
 /-- Extending then consuming the same variable zeroes it out. -/
@@ -195,9 +184,7 @@ theorem extend_shadows (Γ : UsageEnv) (x : String) (m1 m2 : Mult) :
 theorem extend_two_lookup_first (Γ : UsageEnv) (x y : String) (hne : x ≠ y) :
     usageOf (envExtend (envExtend Γ x Mult.One) y Mult.One) x = Mult.One := by
   simp only [envExtend, usageOf]
-  have hyx : y == x = false := by
-    rw [Bool.eq_false_iff, beq_iff_eq]
-    exact Ne.symm hne
+  have hyx : y ≠ x := Ne.symm hne
   simp [hyx]
 
 /-- For distinct `x ≠ z` and `y ≠ z`, extending with x then y vs y then x
@@ -207,8 +194,8 @@ theorem extend_comm_lookup (Γ : UsageEnv) (x y : String) (mx my : Mult)
     usageOf (envExtend (envExtend Γ x mx) y my) z =
     usageOf (envExtend (envExtend Γ y my) x mx) z := by
   simp only [envExtend, usageOf]
-  have hyz : y == z = false := by rw [Bool.eq_false_iff, beq_iff_eq]; exact Ne.symm hzy
-  have hxz : x == z = false := by rw [Bool.eq_false_iff, beq_iff_eq]; exact Ne.symm hzx
+  have hyz : y ≠ z := Ne.symm hzy
+  have hxz : x ≠ z := Ne.symm hzx
   simp [hyz, hxz]
 
 /-- After extending with `y = One` and consuming `y`, `usageOf x = One` is
@@ -350,6 +337,34 @@ theorem extend_does_not_clobber (Γ : UsageEnv) (x y : String) (m : Mult) (hne :
 -- Theorem 10: Effect × Linear Non-Interference (main theorem)
 -- ---------------------------------------------------------------------------
 
+/-- **Uniqueness of typing output**: for the same `Γ`, `e`, and `ε`, the
+    output environment is unique. -/
+theorem lintyped_unique (Γ : UsageEnv) (e : EffExpr) (ε : EffRow) (Γ' Γ'' : UsageEnv)
+    (h1 : LinTyped Γ e ε Γ') (h2 : LinTyped Γ e ε Γ'') :
+    Γ' = Γ'' := by
+  induction h1 generalizing Γ'' with
+  | lt_var _ =>
+    cases h2 with
+    | lt_var _ => rfl
+  | lt_unit =>
+    cases h2 with
+    | lt_unit => rfl
+  | lt_seq hA hB ihA ihB =>
+    cases h2 with
+    | lt_seq hA' hB' =>
+      have hmid : _ = _ := ihA _ hA'
+      subst hmid; exact ihB _ hB'
+  | lt_handle hbody hhandler ihbody ihhandler =>
+    cases h2 with
+    | lt_handle hbody' hhandler' =>
+      have hmid : _ = _ := ihbody _ hbody'
+      subst hmid; exact ihhandler _ hhandler'
+  | lt_letLin hrhs hbody ihrhs ihbody =>
+    cases h2 with
+    | lt_letLin hrhs' hbody' =>
+      have hmid : _ = _ := ihrhs _ hrhs'
+      subst hmid; exact ihbody _ hbody'
+
 /-- **Effect × Linear Non-Interference**:
     The effect annotation `ε` does not affect how linear variables are consumed.
     The output usage environment `Γ'` is uniquely determined by the expression
@@ -360,36 +375,13 @@ theorem extend_does_not_clobber (Γ : UsageEnv) (x y : String) (m : Mult) (hne :
 
     Proof strategy:
     1. Re-annotate `h2` with the same effect row `ε` using Theorem 1.
-    2. Prove uniqueness by structural induction on `h1`, inverting `h2'`
-       at each constructor: in every case the output environment is fully
-       determined by the input environment and the sub-expressions' outputs. -/
+    2. Apply uniqueness of typing output. -/
 theorem effect_linear_noninterference (Γ : UsageEnv) (e : EffExpr)
     (ε ε' : EffRow) (Γ' Γ'' : UsageEnv)
     (h1 : LinTyped Γ e ε Γ') (h2 : LinTyped Γ e ε' Γ'') :
     Γ' = Γ'' := by
   have h2' : LinTyped Γ e ε Γ'' := lintyped_effect_independent Γ e ε' ε Γ'' h2
-  induction h1 generalizing Γ'' with
-  | lt_var _ =>
-    cases h2' with
-    | lt_var _ => rfl
-  | lt_unit =>
-    cases h2' with
-    | lt_unit => rfl
-  | lt_seq hA hB ihA ihB =>
-    cases h2' with
-    | lt_seq hA' hB' =>
-      have hmid : _ = _ := ihA _ hA'
-      subst hmid; exact ihB _ hB'
-  | lt_handle hbody hhandler ihbody ihhandler =>
-    cases h2' with
-    | lt_handle hbody' hhandler' =>
-      have hmid : _ = _ := ihbody _ hbody'
-      subst hmid; exact ihhandler _ hhandler'
-  | lt_letLin hrhs hbody ihrhs ihbody =>
-    cases h2' with
-    | lt_letLin hrhs' hbody' =>
-      have hmid : _ = _ := ihrhs _ hrhs'
-      subst hmid; exact ihbody _ hbody'
+  exact lintyped_unique Γ e ε Γ' Γ'' h1 h2'
 
 -- ===========================================================================
 -- §7. Additional Theorems (A11–A35)
@@ -627,7 +619,7 @@ theorem seq_noninterference_combined (Γ : UsageEnv) (e1 e2 : EffExpr)
     Γ' = Γ'' := by
   have hmid : Γ_mid = Γ_mid' :=
     effect_linear_noninterference Γ e1 ε₁ ε₁' Γ_mid Γ_mid' hA hA'
-  subst hmid
+  rw [hmid] at hB
   exact effect_linear_noninterference Γ_mid' e2 ε₂ ε₂' Γ' Γ'' hB hB'
 
 -- ===========================================================================

@@ -1,0 +1,221 @@
+//@ run-pass
+//@ timeout: 60
+//@ expect-stdout: DIRECTIONAL_PERTURBATION_OK
+// Validates qualitative parameter-response relationships in the 14-compartment PBPK model.
+//
+// Directional claims tested:
+//   1. ↑ cl_hepatic → ↓ blood AUC (by at least 3%)
+//   2. ↑ kp_brain   → ↑ brain_final (by at least 20%)
+//   3. ↑ q_brain    → ↑ brain AUC (by at least 2%)
+//   4. ↑ kp_liver   → ↑ liver_final (by at least 20%)
+//   5. ↑ cl_renal   → ↓ blood AUC (any decrease)
+//
+// Uses rapamycin parameters (ep14_rapamycin_params) which set fu_plasma=0.08
+// and q_brain=0.05, making the brain compartment membrane-limited.  With
+// these parameters a 50% cl_hepatic increase produces ~3.8% AUC decrease at
+// 24h (tissue distribution buffers blood concentration), so claim 1 uses a
+// 3% threshold.  Claim 3 measures brain AUC rather than final concentration
+// because higher q_brain accelerates equilibration and increases total
+// exposure even though the 24h endpoint may lag behind the declining blood
+// curve.
+
+use darwin_pbpk::tsit5_pbpk14::*
+use darwin_pbpk::epistemic_pbpk14::*
+
+// ============================================================================
+// LOCAL HELPERS
+// ============================================================================
+
+fn local_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn local_max(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn local_min(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+fn local_finite(x: f64) -> bool {
+    if x != x { return false }
+    return local_abs(x) < 1.0e12
+}
+
+// ============================================================================
+// METRICS + SIMULATION (inlined because simulate_14 is private)
+// ============================================================================
+
+struct TestMetrics {
+    auc: f64,
+    brain_auc: f64,
+    cmax: f64,
+    tmax: f64,
+    blood_final: f64,
+    liver_final: f64,
+    brain_final: f64,
+    kidney_final: f64,
+    lung_final: f64,
+    muscle_final: f64,
+    adipose_final: f64,
+    mass_final: f64,
+    success: bool,
+}
+
+fn metrics_empty() -> TestMetrics {
+    TestMetrics {
+        auc: 0.0, brain_auc: 0.0, cmax: 0.0, tmax: 0.0,
+        blood_final: 0.0, liver_final: 0.0, brain_final: 0.0,
+        kidney_final: 0.0, lung_final: 0.0, muscle_final: 0.0,
+        adipose_final: 0.0, mass_final: 0.0, success: false,
+    }
+}
+
+fn simulate_14_local(prm: PBPKParams14, dose_mg: f64, t_end: f64) -> TestMetrics with Mut, Div, Panic {
+    let c0 = dose_mg / prm.v_blood
+    var st = PBPKState14 {
+        blood: c0,
+        liver: 0.0,
+        kidney: 0.0,
+        brain: 0.0,
+        heart: 0.0,
+        lung: 0.0,
+        muscle: 0.0,
+        adipose: 0.0,
+        gut: 0.0,
+        skin: 0.0,
+        bone: 0.0,
+        spleen: 0.0,
+        pancreas: 0.0,
+        other: 0.0
+    }
+
+    let cfg = default_ode_config()
+    var t = 0.0
+    var dt = cfg.dt_init
+    var nsteps = 0
+    var nreject = 0
+    var cmax = c0
+    var tmax = 0.0
+    var auc = 0.0
+    var brain_auc = 0.0
+    var c_prev = c0
+    var b_prev = 0.0
+
+    while t < t_end && nsteps < cfg.max_steps {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+
+        let result = tsit5_step_pbpk(st, t, dt_use, prm)
+        let err_norm = compute_error_norm_14(result.err, st, result.state_new, cfg.rtol, cfg.atol)
+
+        if err_norm <= 1.0 {
+            let c_now = result.state_new.blood
+            let b_now = result.state_new.brain
+            auc = auc + (c_prev + c_now) * 0.5 * dt_use
+            brain_auc = brain_auc + (b_prev + b_now) * 0.5 * dt_use
+            if c_now > cmax {
+                cmax = c_now
+                tmax = t + dt_use
+            }
+            c_prev = c_now
+            b_prev = b_now
+            t = t + dt_use
+            st = result.state_new
+            nsteps = nsteps + 1
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        } else {
+            nreject = nreject + 1
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        }
+
+        dt = local_max(cfg.dt_min, local_min(cfg.dt_max, dt))
+
+        if nreject > 10000 {
+            return metrics_empty()
+        }
+    }
+
+    let mass = pbpk_state_total_mass(st, prm)
+    let ok = t >= t_end - cfg.dt_min && local_finite(auc) && local_finite(cmax)
+
+    TestMetrics {
+        auc: auc, brain_auc: brain_auc, cmax: cmax, tmax: tmax,
+        blood_final: st.blood,
+        liver_final: st.liver,
+        brain_final: st.brain,
+        kidney_final: st.kidney,
+        lung_final: st.lung,
+        muscle_final: st.muscle,
+        adipose_final: st.adipose,
+        mass_final: mass,
+        success: ok,
+    }
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let base_prm = ep14_rapamycin_params()
+    let base = simulate_14_local(base_prm, 5.0, 24.0)
+    if base.success == false { return 1 }
+
+    // ------------------------------------------------------------------
+    // Claim 1: ↑ cl_hepatic → ↓ blood AUC (by at least 3%)
+    // Rapamycin: fu_plasma=0.08 buffers the blood AUC sensitivity; at 24h
+    // a 50% CL increase yields ~3.8% AUC reduction.
+    // ------------------------------------------------------------------
+    var prm = base_prm
+    prm.cl_hepatic = prm.cl_hepatic * 1.5
+    let pert1 = simulate_14_local(prm, 5.0, 24.0)
+    if pert1.success == false { return 2 }
+    if pert1.auc >= base.auc * 0.97 { return 3 }
+
+    // ------------------------------------------------------------------
+    // Claim 2: ↑ kp_brain → ↑ brain_final (by at least 20%)
+    // Doubling Kp approximately doubles equilibrium brain concentration.
+    // ------------------------------------------------------------------
+    prm = base_prm
+    prm.kp_brain = prm.kp_brain * 2.0
+    let pert2 = simulate_14_local(prm, 5.0, 24.0)
+    if pert2.success == false { return 4 }
+    if pert2.brain_final <= base.brain_final * 1.20 { return 5 }
+
+    // ------------------------------------------------------------------
+    // Claim 3: ↑ q_brain → ↑ brain delivery (brain AUC increases)
+    // Higher perfusion accelerates brain uptake during the absorption phase,
+    // increasing total brain exposure even though the 24h endpoint may
+    // track the declining blood curve.
+    // ------------------------------------------------------------------
+    prm = base_prm
+    prm.q_brain = prm.q_brain * 2.0
+    let pert3 = simulate_14_local(prm, 5.0, 24.0)
+    if pert3.success == false { return 6 }
+    if pert3.brain_auc <= base.brain_auc * 1.02 { return 7 }
+
+    // ------------------------------------------------------------------
+    // Claim 4: ↑ kp_liver → ↑ liver_final (by at least 20%)
+    // ------------------------------------------------------------------
+    prm = base_prm
+    prm.kp_liver = prm.kp_liver * 2.0
+    let pert4 = simulate_14_local(prm, 5.0, 24.0)
+    if pert4.success == false { return 8 }
+    if pert4.liver_final <= base.liver_final * 1.20 { return 9 }
+
+    // ------------------------------------------------------------------
+    // Claim 5: ↑ cl_renal → ↓ blood AUC (any decrease)
+    // ------------------------------------------------------------------
+    prm = base_prm
+    prm.cl_renal = prm.cl_renal * 2.0
+    let pert5 = simulate_14_local(prm, 5.0, 24.0)
+    if pert5.success == false { return 10 }
+    if pert5.auc >= base.auc { return 11 }
+
+    println("DIRECTIONAL_PERTURBATION_OK")
+    0
+}

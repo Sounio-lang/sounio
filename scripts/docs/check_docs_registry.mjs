@@ -1,4 +1,5 @@
 import { readFile, stat } from 'node:fs/promises';
+import { writeSync } from 'node:fs';
 import path from 'node:path';
 import {
   ACCEPTANCE_RELATIVE_PATH,
@@ -25,11 +26,8 @@ function fail(errors) {
     return;
   }
 
-  console.error('Docs registry check failed:');
-  for (const error of errors) {
-    console.error(`- ${error}`);
-  }
-  process.exit(1);
+  writeSync(2, `Docs registry check failed:\n${errors.map((error) => `- ${error}`).join('\n')}\n`);
+  process.exitCode = 1;
 }
 
 function normalizeLinkTarget(target) {

@@ -178,8 +178,8 @@ r"Knowledge \{ value: ([\d.e+-]+) epsilon: ([\d.e+-]+) prov: \"([^\"]+)\" \}"
 
 ### Environment Variables (SET BEFORE DAY 12)
 ```bash
-export SOUC=/home/demetrios/RustroverProjects/sounio/bin/souc
-export SOUNIO_STDLIB_PATH=/home/demetrios/RustroverProjects/sounio/stdlib
+export SOUC=/workspace/sounio/bin/souc
+export SOUNIO_STDLIB_PATH=/workspace/sounio/stdlib
 ```
 
 ### Critical Dates
@@ -250,7 +250,7 @@ export SOUNIO_STDLIB_PATH=/home/demetrios/RustroverProjects/sounio/stdlib
 ## File Locations
 
 ```
-/home/demetrios/RustroverProjects/sounio/triple-sounio-ecosystem/
+/workspace/sounio/ecosystem/
 ├── demo.py                        ✅ Executable integration test
 ├── INTEGRATION_CHECKLIST.md       ✅ Day 11-14 validation guide
 ├── INTEGRATION_NOTES.md           ✅ Critical handoff documentation

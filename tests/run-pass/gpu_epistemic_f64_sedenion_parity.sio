@@ -1,0 +1,58 @@
+//@ run-pass
+//@ expect-stdout: PASS: GPU epistemic f64 S-SSM parity
+
+kernel fn sedenion_cd_step_f64(n: i64, state: &[f64], out: &![f64], shadow: &![f64]) with GPU {
+    let tid = gpu_thread_id_x()
+    if tid < n {
+        let o1 = tid + 64
+        let o2 = tid + 128
+        let o3 = tid + 192
+
+        let lo0 = state[tid as usize]
+        let lo1 = state[o1 as usize]
+        let hi0 = state[o2 as usize]
+        let hi1 = state[o3 as usize]
+        let x0 = lo0 + 1.0
+        let x1 = 0.5
+
+        let lo_mul0 = (lo0 * x0) - (lo1 * x1)
+        let lo_mul1 = (lo0 * x1) + (lo1 * x0)
+        let hi_mul0 = (0.25 * hi0) - (0.125 * hi1)
+        let hi_mul1 = (0.25 * hi1) + (0.125 * hi0)
+        let cd_lo0 = lo_mul0 - hi_mul0
+        let cd_hi0 = hi_mul1 + lo_mul1
+        let norm_shadow = (cd_lo0 * cd_lo0) + (cd_hi0 * cd_hi0)
+
+        out[tid as usize] = cd_lo0
+        out[o1 as usize] = cd_hi0
+        shadow[tid as usize] = norm_shadow + 0.015625
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic, GPU {
+    var state: [f64; 256] = [0.0; 256]
+    var out: [f64; 128] = [0.0; 128]
+    var shadow: [f64; 64] = [0.0; 64]
+
+    var i: i64 = 0
+    while i < 64 {
+        state[i as usize] = (i as f64) + 1.0
+        state[(i + 64) as usize] = ((i as f64) + 1.0) * 0.5
+        state[(i + 128) as usize] = ((i as f64) + 1.0) * 0.25
+        state[(i + 192) as usize] = ((i as f64) + 1.0) * 0.125
+        i = i + 1
+    }
+
+    sedenion_cd_step_f64(64, &state, &!out, &!shadow)
+
+    if out[0] > 1.703 && out[0] < 1.704 &&
+       out[64] > 1.562 && out[64] < 1.563 &&
+       out[10] > 128.734 && out[10] < 128.735 &&
+       out[74] > 72.187 && out[74] < 72.188 &&
+       shadow[0] > 5.356 && shadow[0] < 5.358 {
+        println("PASS: GPU epistemic f64 S-SSM parity")
+    } else {
+        println("FAIL: GPU epistemic f64 S-SSM parity")
+    }
+    0
+}

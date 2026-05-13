@@ -387,7 +387,7 @@ def _find_default_pipeline() -> Optional[str]:
         "../drug-discovery/examples/full_pipeline.sio",
         str(
             Path(__file__).parents[5]
-            / "triple-sounio-ecosystem"
+            / "ecosystem"
             / "drug-discovery"
             / "examples"
             / "full_pipeline.sio"

@@ -418,6 +418,6 @@ python your_script.py
 ## Next Steps
 
 - [**API Reference**](api.md) — Full documentation of all classes and methods
-- [**Examples Repository**](https://github.com/sounio-org/sounio/tree/main/triple-sounio-ecosystem/sounio-py/examples) — Real-world examples
+- [**Examples Repository**](https://github.com/sounio-org/sounio/tree/main/ecosystem/sounio-py/examples) — Real-world examples
 - [**Sounio Language Guide**](https://github.com/sounio-org/sounio/docs/LLM_PROGRAMMING_GUIDE.md) — Learn the Sounio language
 - [**Jupyter Notebooks**](../sounio-jupyter/usage.md) — Interactive Sounio development

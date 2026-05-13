@@ -1,0 +1,202 @@
+// darwin_pbpk/pd/d2_occupancy.sio — Striatal D2 receptor occupancy model
+//
+// Pharmacodynamic bridge from brain ISF unbound concentration (mg/L)
+// to fractional D2 receptor occupancy:
+//
+//   occ(C) = C_isf_free / (C_isf_free + Kd_D2)   (competitive binding, Hill n=1)
+//
+// The therapeutic window for antipsychotics is defined by D2 occupancy:
+//   < 60% : insufficient antipsychotic effect      (Farde et al. 1992)
+//   60-80%: therapeutic window (efficacy, no EPS)  (Nordstrom 1993)
+//   > 80% : EPS onset threshold                    (Farde 1992)
+//
+// ISF is the target compartment (not ICF): D2 receptors are on the
+// postsynaptic membrane surface, accessed from the synaptic cleft / ISF,
+// not the intracellular space.  The unbound ISF concentration (fu_isf * C_isf)
+// from bbb_core.sio is passed directly to d2_occupancy().
+//
+// Haloperidol defaults (Seeman 1976; Farde 1992):
+//   Kd_D2 = 1.5 nM; MW_haloperidol = 375.86 g/mol
+//   → 1 nM = 3.759e-4 mg/L  →  Kd_D2 = 5.638e-4 mg/L
+//
+// This module is drug-agnostic in structure; drug-specific Kd values are
+// passed in as D2Params.  Analogous to pd/hill_mtor.sio for mTOR.
+//
+// Literature:
+//   Farde L et al. (1992) Arch Gen Psychiatry 49:538-544    [PET window]
+//   Seeman P et al. (1976) Nature 261:717-719               [Kd radioligand]
+//   Nordstrom AL et al. (1993) Psychopharmacology 110:265   [EPS threshold]
+//   Hall H et al. (1994) Neuropsychopharmacology 10:71-80   [Bmax PET]
+//   Loryan I et al. (2014) J Pharm Sci 103:3145-3154        [Kpuu brain]
+
+// ============================================================================
+// PARAMETERS + PRIORS
+// ============================================================================
+
+pub struct D2Params {
+    kd_d2:         f64,   // D2 receptor Kd (mg/L)
+    bmax_d2:       f64,   // D2 receptor density (mg/L)
+    ant_threshold: f64,   // min occupancy for antipsychotic effect (fraction)
+    eps_threshold: f64,   // EPS onset occupancy threshold (fraction)
+}
+
+pub struct D2EpParam {
+    mean:       f64,
+    variance:   f64,
+    confidence: f64,
+}
+
+pub struct D2Priors {
+    kd:   D2EpParam,
+    bmax: D2EpParam,
+}
+
+// Haloperidol D2 parameters (default).
+pub fn haloperidol_d2_params() -> D2Params {
+    D2Params {
+        kd_d2:         0.000564,
+        bmax_d2:       0.011276,
+        ant_threshold: 0.60,
+        eps_threshold: 0.80,
+    }
+}
+
+// Haloperidol D2 epistemic priors.
+//
+// Kd: 1.5 nM (Seeman 1976 radioligand) confirmed by PET displacement
+//   (Farde 1992, Nordstrom 1993).  SD ~0.4 nM (CV 27%).
+//   variance in mg/L: (0.4 * 3.759e-4)^2 = 2.26e-8
+//   confidence = 0.82 (multiple independent methods converge)
+//
+// Bmax: 30 nM (Hall 1994 PET, striatum, healthy adults, n=17).
+//   Wide inter-individual spread (age, sex, genotype).  CV ~40%.
+//   variance in mg/L: (0.40 * 30 * 3.759e-4)^2 = 2.03e-5
+//   confidence = 0.65 (PET measurements exist; high population variability)
+pub fn haloperidol_d2_priors() -> D2Priors {
+    let kd = D2EpParam {
+        mean:       0.000564,
+        variance:   0.0000000226,
+        confidence: 0.82,
+    }
+    let bmax = D2EpParam {
+        mean:       0.011276,
+        variance:   0.0000203,
+        confidence: 0.65,
+    }
+    D2Priors { kd: kd, bmax: bmax }
+}
+
+// ============================================================================
+// OCCUPANCY FUNCTIONS
+// ============================================================================
+
+// Fractional D2 occupancy [0, 1] from unbound ISF concentration (mg/L).
+pub fn d2_occupancy(c_isf_free: f64, p: D2Params) -> f64 with Div, Panic {
+    if c_isf_free <= 0.0 { return 0.0 }
+    c_isf_free / (c_isf_free + p.kd_d2)
+}
+
+// D2 occupancy as percentage (0-100).
+pub fn d2_occupancy_pct(c_isf_free: f64, p: D2Params) -> f64 with Div, Panic {
+    d2_occupancy(c_isf_free, p) * 100.0
+}
+
+// Absolute bound receptor concentration (mg/L).
+pub fn d2_bound(c_isf_free: f64, p: D2Params) -> f64 with Div, Panic {
+    p.bmax_d2 * c_isf_free / (c_isf_free + p.kd_d2)
+}
+
+// Is occupancy in the antipsychotic therapeutic window [ant_threshold, eps_threshold)?
+pub fn d2_in_window(occ: f64, p: D2Params) -> bool {
+    occ >= p.ant_threshold && occ < p.eps_threshold
+}
+
+// Is occupancy above EPS threshold?
+pub fn d2_above_eps(occ: f64, p: D2Params) -> bool {
+    occ >= p.eps_threshold
+}
+
+// ============================================================================
+// TRAJECTORY ENDPOINTS
+// ============================================================================
+// Takes sampled C_isf_free(t) series; mirrors pd_from_icf_series() in hill_mtor.sio.
+
+pub struct D2Trajectory {
+    n_points:       i32,
+    times_h:        [f64; 32],
+    occupancy:      [f64; 32],
+    occ_auc:        f64,   // time-integral of occupancy (h·fraction)
+    time_in_window: f64,   // hours in therapeutic window [ant, eps)
+    time_above_eps: f64,   // hours above EPS threshold
+    max_occ:        f64,
+    mean_occ:       f64,
+}
+
+pub fn d2_trajectory_zero() -> D2Trajectory {
+    D2Trajectory {
+        n_points: 0,
+        times_h:  [0.0; 32],
+        occupancy: [0.0; 32],
+        occ_auc:        0.0,
+        time_in_window: 0.0,
+        time_above_eps: 0.0,
+        max_occ:  0.0,
+        mean_occ: 0.0,
+    }
+}
+
+// PGx-adjusted D2 params: override bmax_d2 from DRD2 TaqI A genotype.
+// taq1a_allele: 0=A1A1, 1=A1A2, 2=A2A2 (see pgx/drd2_taq1a.sio)
+// MW haloperidol = 375.86 g/mol.
+use darwin_pbpk::pgx::drd2_taq1a::{drd2_bmax_mgL}
+
+pub fn haloperidol_d2_params_pgx(taq1a_allele: i32) -> D2Params with Div, Panic {
+    var p = haloperidol_d2_params()
+    p.bmax_d2 = drd2_bmax_mgL(taq1a_allele, 375.86)
+    return p
+}
+
+pub fn d2_from_isf_series(
+    times_h:    [f64; 32],
+    c_isf_free: [f64; 32],
+    n_points:   i32,
+    p: D2Params
+) -> D2Trajectory with Div, Panic, Mut {
+    var out = d2_trajectory_zero()
+    out.n_points = n_points
+
+    var i: i32 = 0
+    while i < n_points {
+        let idx = i as usize
+        let occ = d2_occupancy(c_isf_free[idx], p)
+        out.times_h[idx]   = times_h[idx]
+        out.occupancy[idx] = occ
+        if occ > out.max_occ { out.max_occ = occ }
+        i = i + 1
+    }
+
+    var auc:   f64 = 0.0
+    var t_win: f64 = 0.0
+    var t_eps: f64 = 0.0
+    var k: i32 = 0
+    while k < n_points - 1 {
+        let a = k as usize
+        let b = (k + 1) as usize
+        let dt = out.times_h[b] - out.times_h[a]
+        auc = auc + 0.5 * dt * (out.occupancy[a] + out.occupancy[b])
+        if d2_in_window(out.occupancy[a], p) && d2_in_window(out.occupancy[b], p) {
+            t_win = t_win + dt
+        }
+        if d2_above_eps(out.occupancy[a], p) && d2_above_eps(out.occupancy[b], p) {
+            t_eps = t_eps + dt
+        }
+        k = k + 1
+    }
+    out.occ_auc = auc
+    out.time_in_window = t_win
+    out.time_above_eps = t_eps
+
+    let total_t = out.times_h[(n_points - 1) as usize] - out.times_h[0]
+    out.mean_occ = if total_t > 0.0 { auc / total_t } else { 0.0 }
+    out
+}

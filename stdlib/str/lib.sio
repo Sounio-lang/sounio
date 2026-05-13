@@ -25,9 +25,12 @@ pub struct Str {
     pub len:  i32,
 }
 
-// Wrapper for str_split_char results (struct wrapping needed for &! mutation).
+// Wrapper for str_split_char results.
+// Uses flat arrays to avoid the stride-mismatch bug with [Str; N] arrays.
+// Each part i has its data at data[i*256 .. i*256+lens[i]] and length lens[i].
 pub struct StrSplit {
-    pub parts: [Str; 16],
+    pub data:  [i8; 4096],  // 16 parts × 256 bytes each
+    pub lens:  [i32; 16],
     pub count: i32,
 }
 
@@ -42,7 +45,21 @@ pub fn str_new() -> Str {
 
 // Return an empty StrSplit.
 pub fn str_split_new() -> StrSplit {
-    StrSplit { parts: [str_new(); 16], count: 0 }
+    StrSplit { data: [0; 4096], lens: [0; 16], count: 0 }
+}
+
+// Extract part i from a StrSplit as a Str.
+pub fn str_split_get(out: &StrSplit, i: i32) -> Str with Mut, Div, Panic {
+    var result = str_new()
+    if i < 0 || i >= out.count { return result }
+    let len = out.lens[i as usize]
+    result.len = len
+    var j: i32 = 0
+    while j < len {
+        result.data[j as usize] = out.data[(i * 256 + j) as usize]
+        j = j + 1
+    }
+    result
 }
 
 // ============================================================================
@@ -83,7 +100,7 @@ pub fn str_from_literal(s: string) -> Str with Mut, Div, Panic {
     var i: i64 = 0
     while i < 256 {
         let ch = str_char_at(s, i)  // builtin: returns -1 past end
-        if ch < 0 { return result }
+        if ch <= 0 { return result }
         result.data[i as usize] = ch as i8
         result.len = result.len + 1
         i = i + 1
@@ -119,7 +136,7 @@ pub fn str_len(s: &Str) -> i32 {
 // NOTE: shadows builtin str_eq(string, string).
 // ============================================================================
 
-pub fn str_eq(a: &Str, b: &Str) -> bool {
+pub fn str_eq(a: &Str, b: &Str) -> bool with Mut, Panic {
     if a.len != b.len { return false }
     var i = 0
     while i < a.len {
@@ -133,7 +150,7 @@ pub fn str_eq(a: &Str, b: &Str) -> bool {
 // Concatenation — a ++ b, truncated at 256 bytes.
 // ============================================================================
 
-pub fn str_concat(a: &Str, b: &Str) -> Str with Mut, Div, Panic {
+pub fn str_cat(a: &Str, b: &Str) -> Str with Mut, Div, Panic {
     var result = str_new()
     var i = 0
     while i < a.len && result.len < 256 {
@@ -155,7 +172,7 @@ pub fn str_concat(a: &Str, b: &Str) -> Str with Mut, Div, Panic {
 // Returns true if needle matches haystack starting at byte offset pos.
 // ============================================================================
 
-fn str_match_at(haystack: &Str, needle: &Str, pos: i32) -> bool {
+fn str_match_at(haystack: &Str, needle: &Str, pos: i32) -> bool with Mut, Panic {
     if needle.len == 0 { return true }
     if pos < 0 { return false }
     if pos + needle.len > haystack.len { return false }
@@ -173,7 +190,7 @@ fn str_match_at(haystack: &Str, needle: &Str, pos: i32) -> bool {
 // Contains / starts_with / ends_with / index_of
 // ============================================================================
 
-pub fn str_contains(haystack: &Str, needle: &Str) -> bool {
+pub fn str_contains(haystack: &Str, needle: &Str) -> bool with Mut, Panic {
     if needle.len == 0 { return true }
     if needle.len > haystack.len { return false }
     var i = 0
@@ -184,18 +201,17 @@ pub fn str_contains(haystack: &Str, needle: &Str) -> bool {
     false
 }
 
-pub fn str_starts_with(s: &Str, prefix: &Str) -> bool {
+pub fn str_starts_with(s: &Str, prefix: &Str) -> bool with Mut, Panic {
     str_match_at(s, prefix, 0)
 }
 
-pub fn str_ends_with(s: &Str, suffix: &Str) -> bool {
+pub fn str_ends_with(s: &Str, suffix: &Str) -> bool with Mut, Panic {
     if suffix.len == 0 { return true }
     if suffix.len > s.len { return false }
     str_match_at(s, suffix, s.len - suffix.len)
 }
 
-// Returns the byte index of the first occurrence of needle, or -1.
-pub fn str_index_of(haystack: &Str, needle: &Str) -> i32 {
+pub fn str_index_of(haystack: &Str, needle: &Str) -> i32 with Mut, Panic {
     if needle.len == 0 { return 0 }
     if needle.len > haystack.len { return 0 - 1 }
     var i = 0
@@ -210,7 +226,7 @@ pub fn str_index_of(haystack: &Str, needle: &Str) -> i32 {
 // Slice — substring [start, end) (clamped to valid range)
 // ============================================================================
 
-pub fn str_slice(s: &Str, start: i32, end: i32) -> Str with Mut, Div, Panic {
+pub fn str_sub(s: &Str, start: i32, end: i32) -> Str with Mut, Div, Panic {
     var result = str_new()
     let lo = if start < 0 { 0 } else { start }
     let hi = if end > s.len { s.len } else { end }
@@ -246,7 +262,7 @@ fn str_trim_end_from(s: &Str, start: i32) -> Str with Mut, Div, Panic {
     var hi = s.len
     while hi > start {
         let ch = s.data[(hi - 1) as usize]
-        if ch != 32 as i8 && ch != 9 as i8 { return str_slice(s, start, hi) }
+        if ch != 32 as i8 && ch != 9 as i8 { return str_sub(s, start, hi) }
         hi = hi - 1
     }
     str_new()
@@ -304,16 +320,14 @@ pub fn str_split_char(s: &Str, delim: i8, out: &!StrSplit) -> i32 with Mut, Div,
         let at_end   = i == s.len
         let at_delim = i < s.len && s.data[i as usize] == delim
         if at_end || at_delim {
-            let ci = out.count
-            out.parts[ci as usize].len = 0
-            var j = start
-            while j < i {
-                let plen = out.parts[ci as usize].len
-                out.parts[ci as usize].data[plen as usize] = s.data[j as usize]
-                out.parts[ci as usize].len = plen + 1
+            let part_len = i - start
+            out.lens[out.count as usize] = part_len
+            var j: i32 = 0
+            while j < part_len {
+                out.data[(out.count * 256 + j) as usize] = s.data[(start + j) as usize]
                 j = j + 1
             }
-            out.count = ci + 1
+            out.count = out.count + 1
             start = i + 1
         }
         i = i + 1
@@ -387,31 +401,29 @@ pub fn str_repeat(s: &Str, n: i32) -> Str with Mut, Div, Panic {
 // ============================================================================
 
 // Write decimal digits of |n| (n >= 0) into buf[pos..] in reverse order.
-fn str_i64_to_buf(n: i64, buf: [i8; 64], pos: i32) -> ([i8; 64], i32) with Mut, Div, Panic {
-    var b = buf
+// Modifies buf in-place via exclusive ref; returns new position.
+fn str_i64_to_buf(n: i64, buf: &![i8; 64], pos: i32) -> i32 with Mut, Div, Panic {
     var p = pos
     var m = n
     while m > 0 {
-        b[p as usize] = (48 + m % 10) as i8
+        (*buf)[p as usize] = (48 + m % 10) as i8
         p = p + 1
         m = m / 10
     }
-    (b, p)
+    p
 }
 
-// Reverse buf[lo..hi) in place.
-fn str_buf64_rev(buf: [i8; 64], lo: i32, hi: i32) -> [i8; 64] with Mut, Div, Panic {
-    var b = buf
+// Reverse buf[lo..hi) in place via exclusive ref.
+fn str_buf64_rev(buf: &![i8; 64], lo: i32, hi: i32) with Mut, Div, Panic {
     var l = lo
     var h = hi - 1
     while l < h {
-        let tmp = b[l as usize]
-        b[l as usize] = b[h as usize]
-        b[h as usize] = tmp
+        let tmp = (*buf)[l as usize]
+        (*buf)[l as usize] = (*buf)[h as usize]
+        (*buf)[h as usize] = tmp
         l = l + 1
         h = h - 1
     }
-    b
 }
 
 // ============================================================================
@@ -420,7 +432,6 @@ fn str_buf64_rev(buf: [i8; 64], lo: i32, hi: i32) -> [i8; 64] with Mut, Div, Pan
 
 pub fn str_from_i64(val: i64) -> Str with Mut, Div, Panic {
     var buf: [i8; 64] = [0; 64]
-    var pos: i32 = 0
 
     if val == 0 {
         buf[0] = 48 as i8
@@ -430,17 +441,15 @@ pub fn str_from_i64(val: i64) -> Str with Mut, Div, Panic {
     let neg = val < 0
     let m   = if neg { 0 - val } else { val }
 
-    let (buf2, digit_end) = str_i64_to_buf(m, buf, 0)
-    var b  = buf2
-    var de = digit_end
+    var de = str_i64_to_buf(m, &!buf, 0)
 
     if neg {
-        b[de as usize] = 45 as i8  // '-'
+        buf[de as usize] = 45 as i8  // '-'
         de = de + 1
     }
 
-    let b2 = str_buf64_rev(b, 0, de)
-    str_from_buf_i64(&b2, de)
+    str_buf64_rev(&!buf, 0, de)
+    str_from_buf_i64(&buf, de)
 }
 
 // ============================================================================
@@ -468,10 +477,8 @@ pub fn str_from_f64(val: f64, decimals: i32) -> Str with Mut, Div, Panic {
         buf[pos as usize] = 48 as i8
         pos = pos + 1
     } else {
-        let (buf2, digit_end) = str_i64_to_buf(int_part, buf, pos)
-        buf = buf2
-        pos = digit_end
-        buf = str_buf64_rev(buf, int_start, pos)
+        pos = str_i64_to_buf(int_part, &!buf, pos)
+        str_buf64_rev(&!buf, int_start, pos)
     }
 
     // Fractional part

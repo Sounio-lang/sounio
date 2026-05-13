@@ -2,19 +2,20 @@
 import '../styles/global.css';
 import Header from '../components/common/Header.astro';
 import Footer from '../components/common/Footer.astro';
-import { ViewTransitions } from 'astro:transitions';
-import { getLocaleFromUrl, getLocalizedPath, isLocaleFullyLocalized, type Locale } from '../lib/i18n';
-import { isDocsPath } from '../lib/docs-locale';
+import { CustomCursor } from '../components/common/CustomCursor';
+import { ClientRouter } from 'astro:transitions';
+import { getLocaleFromUrl, getLocalizedPath, isLocaleFullyLocalized, loadTranslations, ogLocaleTag, shouldShowLocaleTranslationNotice, type Locale } from '../lib/i18n';
 
 interface Props {
   title: string;
   description?: string;
   image?: string;
   noIndex?: boolean;
+  localizedAlternates?: boolean;
   removeTopPadding?: boolean;
 }
 
-const { title, description, image, noIndex = false, removeTopPadding = false } = Astro.props;
+const { title, description, image, noIndex = false, localizedAlternates = true, removeTopPadding = false } = Astro.props;
 const locale = getLocaleFromUrl(Astro.url);
 const canonicalURL = new URL(Astro.url.pathname, Astro.site);
 
@@ -24,8 +25,10 @@ const metaDescription = description || 'A systems programming language for epist
 const ogImage = image || '/assets/lockups/lockup_horizontal_light.svg';
 
 const localeAlternates: Locale[] = ['en', 'pt', 'el', 'zh', 'ja', 'es'];
-const localeUpdateInProgress = !isLocaleFullyLocalized(locale);
-const hideLocaleNotice = isDocsPath(Astro.url.pathname);
+const showLocaleNotice =
+  locale !== 'en' && !isLocaleFullyLocalized(locale) && shouldShowLocaleTranslationNotice(Astro.url.pathname);
+const englishUrl = getLocalizedPath(Astro.url.pathname, 'en');
+const t = showLocaleNotice ? await loadTranslations(locale) : null;
 ---
 
 <!doctype html>
@@ -60,7 +63,7 @@ const hideLocaleNotice = isDocsPath(Astro.url.pathname);
     <meta property="og:title" content={fullTitle} />
     <meta property="og:description" content={metaDescription} />
     <meta property="og:image" content={new URL(ogImage, Astro.site)} />
-    <meta property="og:locale" content={locale} />
+    <meta property="og:locale" content={ogLocaleTag(locale)} />
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image" />
@@ -69,24 +72,24 @@ const hideLocaleNotice = isDocsPath(Astro.url.pathname);
     <meta name="twitter:image" content={new URL(ogImage, Astro.site)} />
 
     <!-- Alternate language links -->
-    {!noIndex && localeAlternates.map((altLocale) => (
+    {!noIndex && localizedAlternates && localeAlternates.map((altLocale) => (
       <link
         rel="alternate"
         hreflang={altLocale}
         href={new URL(getLocalizedPath(Astro.url.pathname, altLocale), Astro.site)}
       />
     ))}
-    {!noIndex && <link rel="alternate" hreflang="x-default" href={new URL(getLocalizedPath(Astro.url.pathname, 'en'), Astro.site)} />}
+    {!noIndex && localizedAlternates && <link rel="alternate" hreflang="x-default" href={new URL(getLocalizedPath(Astro.url.pathname, 'en'), Astro.site)} />}
 
     <!-- JSON-LD Structured Data -->
-    <script type="application/ld+json" set:html={JSON.stringify({
+    <script is:inline type="application/ld+json" set:html={JSON.stringify({
       "@context": "https://schema.org",
       "@type": "SoftwareApplication",
       "name": "Sounio",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "Cross-platform",
       "description": metaDescription,
-      "url": Astro.site?.toString() || "https://souniolang.org",
+      "url": (Astro.site?.toString() || "https://www.souniolang.org").replace(/\/$/, ""),
       "offers": {
         "@type": "Offer",
         "price": "0",
@@ -122,6 +125,13 @@ const hideLocaleNotice = isDocsPath(Astro.url.pathname);
       if (storedAudience === 'scientist' || storedAudience === 'technical') {
         document.documentElement.setAttribute('data-audience', storedAudience);
       }
+      // Persist audience across Astro client router / view transitions (prevents reset on navigation)
+      document.addEventListener('astro:before-swap', (e) => {
+        const current = document.documentElement.getAttribute('data-audience');
+        if (current === 'scientist' || current === 'technical') {
+          e.newDocument.documentElement.setAttribute('data-audience', current);
+        }
+      });
     </script>
 
     <!-- Pagefind runtime (present in production builds; ignored in dev if missing) -->
@@ -136,16 +146,21 @@ const hideLocaleNotice = isDocsPath(Astro.url.pathname);
       })();
     </script>
 
-    <ViewTransitions />
+    <ClientRouter />
   </head>
   <body class="min-h-screen flex flex-col bg-[var(--color-bg)] text-[var(--color-text)]">
+    <CustomCursor client:load />
     <a href="#main-content" class="skip-link">Skip to main content</a>
 
     <Header locale={locale} />
 
-    {locale !== 'en' && localeUpdateInProgress && !hideLocaleNotice && (
+    {showLocaleNotice && (
       <div class="locale-notice" role="status" aria-live="polite">
-        Localized V2 rewrite for this language is in progress. Showing English-first content for now.
+        {t?.locale_banner_notice ?? 'This page has not yet been translated for this release. The English version is authoritative.'}
+        {' '}
+        <a href={englishUrl} class="locale-notice-link">
+          {t?.locale_banner_link ?? 'View English version'} &rarr;
+        </a>
       </div>
     )}
 
@@ -153,6 +168,6 @@ const hideLocaleNotice = isDocsPath(Astro.url.pathname);
       <slot />
     </main>
 
-    <Footer locale={locale} />
+    <Footer locale={locale} localizedAlternates={localizedAlternates} />
   </body>
 </html>

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion, useSpring } from 'framer-motion';
 
 export function CustomCursor() {
@@ -10,6 +10,12 @@ export function CustomCursor() {
   useEffect(() => {
     // Hide on mobile / touch devices
     if (typeof window !== 'undefined' && window.matchMedia("(hover: none)").matches) {
+      return;
+    }
+
+    // Respect OS “reduce motion” — keep native cursor semantics
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (reduceMotion.matches) {
       return;
     }
 

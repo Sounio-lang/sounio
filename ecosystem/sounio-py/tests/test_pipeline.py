@@ -1,7 +1,7 @@
 """Tests for DrugDiscoveryPipeline high-level API.
 
 Run with:
-    cd triple-sounio-ecosystem/sounio-py
+    cd ecosystem/sounio-py
     PYTHONPATH=python \
     SOUC=../../bin/souc \
     SOUNIO_STDLIB_PATH=../../stdlib \

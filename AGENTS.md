@@ -17,6 +17,28 @@ When in doubt, prefer:
 3. historical prompt contracts
 4. assumptions
 
+## Recovery + Remote-First Bootstrap
+
+Before implementation work:
+
+1. Read `CLAUDE_HANDOFF.md`.
+2. Confirm the current branch.
+3. Treat `/workspace/sounio` as the active development surface when operating in the promoted workspace.
+
+Important context:
+
+- This repository was recovered from VM `sounio-dev-01`.
+- The recovery was based on tarball import, then Git re-attachment.
+- The safe active branch is:
+  - `integration/sounio-dev-ready-base`
+- Older Claude/Codex artifacts may still reference the VM-era path:
+  - `/home/demetrios/RustroverProjects/sounio`
+- The current remote-first workspace path is:
+  - `/workspace/sounio`
+
+Do not treat stale VM paths as the current execution surface.
+Preserve recovery state and avoid destructive "align with main" workflows unless explicitly requested.
+
 ---
 
 ## Repository identity
@@ -60,6 +82,15 @@ If a prose document disagrees with a script that is actually wired into the repo
 ## Parallel-work contract
 
 Use this division unless the user explicitly overrides it.
+
+Blocker ownership, severity, evidence level, handoff shape, and merge eligibility
+for parallel work are governed by:
+
+- `.claude/PARALLEL_BLOCKER_CONTRACT.md`
+
+If an agent leaves a blocker for another agent, it must use that contract's
+Blocker-ID, severity, class, evidence, owner, worktree, branch, acceptance gate,
+and next-action fields.
 
 ### Claude Code
 Use for:
@@ -144,6 +175,7 @@ Report whether you are using:
 - Preserve bootstrap safety
 - Preserve legacy code until parity is proven
 - Prefer explicit failure classification over silent fallback
+- Classify remaining blockers using `.claude/PARALLEL_BLOCKER_CONTRACT.md`
 - Do not claim semantic milestones more broadly than the evidence supports
 - Separate:
   - ontology semantics
@@ -225,3 +257,19 @@ At the end of substantial work, report:
    - fallback path
 6. remaining blockers
 7. whether any legacy path was intentionally kept
+8. blocker contract status for any unresolved blocker: Blocker-ID, severity, class, evidence level, owner, acceptance gate, and next action
+9. **LLM-offload reviews invoked** (provider, task, target, outcome) — required for any work touching math claims, clinical-pathway code, or external-facing artifacts. See `.claude/AGENT_OFFLOAD_POLICY.md`.
+
+---
+
+## LLM-offload policy (mandatory)
+
+This repository runs many parallel agents with a single human author. Pre-commit review by orthogonal LLM providers via `bin/llm-offload` is **mandatory** at the checkpoints listed in `.claude/AGENT_OFFLOAD_POLICY.md`:
+
+- **Math claims** (PK/PD, GUM, p-box, Lean statements, refinement invariants) → `bin/llm-offload -t math-review -p xai`
+- **Clinical-pathway code** (`stdlib/clinical/*`, vancomycin tests, clinical Lean) → `bin/llm-offload -t review -p deepseek`
+- **External-facing artifacts** (papers, cover letters, dissertation, IRB) → `bin/llm-offload --raw <draft> deepseek xai gemini`
+
+Every non-trivial offload appends to `.claude/llm_offload_log.md`. Bug-catching offloads require an `LLM-offload-review:` trailer in the commit message. The policy document lists fallback rules when a provider key is missing or down.
+
+**Codex agents must not skip this step**. If you find yourself about to commit a `vancomycin_*.sio`, a Lean theorem statement, or a paper draft without a logged offload review, stop and run the review first.

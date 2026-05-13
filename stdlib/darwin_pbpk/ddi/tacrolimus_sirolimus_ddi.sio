@@ -1,0 +1,203 @@
+// stdlib/darwin_pbpk/ddi/tacrolimus_sirolimus_ddi.sio
+//
+// Mechanistic drug-drug interaction (DDI) between tacrolimus (oral
+// CYP3A4 / P-gp substrate) and sirolimus (also CYP3A4 / P-gp substrate;
+// the Cypher drug-eluting stent payload). Sirolimus inhibits intestinal
+// P-gp efflux, raising the apparent bioavailability of tacrolimus.
+//
+// This DDI is the canonical post-transplant interaction studied in
+// Undre 1999 (Transplant Proc 31:1305, n=12). It illustrates a
+// qualitatively distinct GUM source — one that cannot be reduced by
+// improved analytical chemistry, only by a separate drug-drug
+// pharmacokinetic study. This is the dissertation's "irreducible
+// epistemic floor" argument.
+//
+// Mechanistic model (single-dose, intestinal P-gp competitive inhibition):
+//
+//   delta_F([S]) = R_max · [S] / (K_i + [S])
+//   F_combo([S]) = F_baseline · (1 + delta_F([S]))
+//
+// Parameter priors (with literature confidence):
+//
+//   R_max = 0.30   (max fractional F boost; Undre 1999 n=12)
+//   K_i   = 5 ng/mL (P-gp inhibition constant; Lampen 1998 Caco-2 in vitro)
+//
+//   Confidence(R_max) = 0.45 — single n=12 in vivo PK study
+//   Confidence(K_i)   = 0.40 — in vitro extrapolation
+//
+// Epistemic uncertainty on delta_F:
+//   u(delta_F) / delta_F = 0.40 (40% CV from the single-study floor)
+//
+// All combined-F propagation uses the Fréchet outer enclosure pattern
+// already proved sound in formal/lean4/SounioFrechet.lean
+// (`pb_apply2_monotone_inc_dec` and `pb_apply2_monotone_inc_inc`).
+//
+// Monotonicity hand-derivation:
+//   ∂delta_F / ∂R_max = [S] / (K_i + [S])           > 0 ∀ [S] > 0
+//   ∂delta_F / ∂K_i   = − R_max · [S] / (K_i+[S])²  < 0 ∀ [S] > 0
+//   → corner enclosure: delta_F at (R_max_lo, K_i_hi) and (R_max_hi, K_i_lo)
+//
+//   ∂F_combo / ∂F_baseline = 1 + delta_F                > 0 (delta_F ≥ 0)
+//   ∂F_combo / ∂delta_F     = F_baseline                 > 0
+//   → corner enclosure inc-inc on (F_baseline, delta_F).
+//
+// Lean obligation: formal/lean4/SounioTacrolimusDDI.lean.
+
+use darwin_pbpk::ddi::mechanistic_ddi::*
+use epistemic::knightian::*
+
+// ============================================================================
+// POINT-WISE DDI FUNCTIONS (used inline by the PBox enclosure)
+// ============================================================================
+
+pub fn ddi_f_boost(r_max: f64, ki_ng_ml: f64, c_siro_ng_ml: f64)
+    -> f64 with Mut, Div, Panic
+{
+    if c_siro_ng_ml < 0.0 { return 0.0 }
+    let denom = ki_ng_ml + c_siro_ng_ml
+    if denom <= 1.0e-12 { return 0.0 }
+    r_max * c_siro_ng_ml / denom
+}
+
+pub fn ddi_f_boost_uncertainty(r_max: f64, ki_ng_ml: f64, c_siro_ng_ml: f64)
+    -> f64 with Mut, Div, Panic
+{
+    // 40% CV of the single-study floor: u(delta_F) = 0.40 · delta_F.
+    let d = ddi_f_boost(r_max, ki_ng_ml, c_siro_ng_ml)
+    let abs_d = if d < 0.0 { 0.0 - d } else { d }
+    0.40 * abs_d
+}
+
+// ============================================================================
+// DDI PARAMETER PRIORS — population means and variance bands
+// ============================================================================
+// 30% boost is the Undre 1999 central estimate; ±50% CV bracket captures
+// the 15–45% range observed in subsequent literature (Hodge 2004,
+// Cattaneo 2008 cohort studies).
+
+fn ddi_r_max_mean() -> f64 { 0.30 }
+fn ddi_r_max_band() -> f64 { 0.50 }   // ±50% on R_max
+
+fn ddi_ki_mean() -> f64 { 5.0 }       // ng/mL, Lampen 1998
+fn ddi_ki_band() -> f64 { 0.60 }      // ±60% on Ki (in vitro extrapolation)
+
+pub fn ddi_r_max_pbox() -> PBox {
+    let m = ddi_r_max_mean()
+    let b = ddi_r_max_band()
+    let lo = (1.0 - b) * m
+    let hi = (1.0 + b) * m
+    let v = 0.25 * m * m
+    pb_new(lo, hi, v, 450)
+}
+
+pub fn ddi_ki_pbox() -> PBox {
+    let m = ddi_ki_mean()
+    let b = ddi_ki_band()
+    let lo = (1.0 - b) * m
+    let hi = (1.0 + b) * m
+    let v = 0.36 * m * m
+    pb_new(lo, hi, v, 400)
+}
+
+// ============================================================================
+// DELTA_F PBOX — Fréchet enclosure on (R_max, K_i) for fixed [S].
+// ============================================================================
+// Inline corner enumeration; equivalent to pb_apply2_monotone_inc_dec.
+
+pub fn ddi_delta_f_pbox(c_siro_ng_ml: f64) -> PBox with Mut, Div, Panic {
+    if c_siro_ng_ml <= 0.0 { return pb_new(0.0, 0.0, 0.0, 500) }
+    let r_pb = ddi_r_max_pbox()
+    let k_pb = ddi_ki_pbox()
+    // ∂delta_F/∂R_max > 0, ∂delta_F/∂K_i < 0 ⇒
+    //   delta_F_min at (R_max_lo, K_i_hi)
+    //   delta_F_max at (R_max_hi, K_i_lo)
+    let lo = ddi_f_boost(pb_lo_mean(&r_pb), pb_hi_mean(&k_pb), c_siro_ng_ml)
+    let hi = ddi_f_boost(pb_hi_mean(&r_pb), pb_lo_mean(&k_pb), c_siro_ng_ml)
+    let v = ddi_f_boost_uncertainty(ddi_r_max_mean(), ddi_ki_mean(), c_siro_ng_ml)
+    let conf_r = pb_confidence(&r_pb)
+    let conf_k = pb_confidence(&k_pb)
+    let conf = if conf_r < conf_k { conf_r } else { conf_k }
+    pb_new(lo, hi, v * v, conf)
+}
+
+// ============================================================================
+// COMBINED F_oral PBOX — Fréchet enclosure on (F_baseline, delta_F).
+// ============================================================================
+// F_combo = F_baseline · (1 + delta_F), monotone INC in both arguments.
+// Inline corner enumeration (inc-inc): F_combo_lo at (F_lo, d_lo),
+// F_combo_hi at (F_hi, d_hi).
+
+pub fn ddi_combined_f_knightian(f_baseline_pbox: &PBox, c_siro_ng_ml: f64)
+    -> PBox with Mut, Div, Panic
+{
+    let d_pb = ddi_delta_f_pbox(c_siro_ng_ml)
+    let f_lo = pb_lo_mean(f_baseline_pbox)
+    let f_hi = pb_hi_mean(f_baseline_pbox)
+    let d_lo = pb_lo_mean(&d_pb)
+    let d_hi = pb_hi_mean(&d_pb)
+    let combo_lo = f_lo * (1.0 + d_lo)
+    let combo_hi = f_hi * (1.0 + d_hi)
+    // Bioavailability cannot exceed 1; clamp the upper bound for the gate.
+    var clo = combo_lo
+    var chi = combo_hi
+    if clo < 0.0 { clo = 0.0 }
+    if chi > 1.0 { chi = 1.0 }
+    let v = pb_variance(f_baseline_pbox) + pb_variance(&d_pb)
+    let conf_f = pb_confidence(f_baseline_pbox)
+    let conf_d = pb_confidence(&d_pb)
+    let conf = if conf_f < conf_d { conf_f } else { conf_d }
+    pb_new(clo, chi, v, conf)
+}
+
+// ============================================================================
+// SELF-TESTS
+// ============================================================================
+
+pub fn test_ddi_zero_siro_no_boost() -> bool with Mut, Div, Panic {
+    let pb = ddi_delta_f_pbox(0.0)
+    let m = (pb_lo_mean(&pb) + pb_hi_mean(&pb)) * 0.5
+    let abs_m = if m < 0.0 { 0.0 - m } else { m }
+    abs_m < 1.0e-6
+}
+
+pub fn test_ddi_monotone_in_siro() -> bool with Mut, Div, Panic {
+    let r = ddi_r_max_mean()
+    let k = ddi_ki_mean()
+    let d_lo = ddi_f_boost(r, k, 1.0)
+    let d_hi = ddi_f_boost(r, k, 20.0)
+    d_lo < d_hi
+}
+
+pub fn test_ddi_combined_inflates_f() -> bool with Mut, Div, Panic {
+    // At therapeutic sirolimus [S] = 12 ng/mL (Sousa 2003), the central
+    // F_oral boost should be approximately 30% · 12/(5+12) ≈ 21%.
+    let r = ddi_r_max_mean()
+    let k = ddi_ki_mean()
+    let d = ddi_f_boost(r, k, 12.0)
+    d > 0.15 && d < 0.30
+}
+
+pub fn test_ddi_combined_pbox_wider() -> bool with Mut, Div, Panic {
+    // Co-administration PBox must be at least as wide as baseline.
+    let baseline = pb_new(0.20, 0.30, 0.04, 700)
+    let combo = ddi_combined_f_knightian(&baseline, 12.0)
+    let gap_base = pb_gap(&baseline)
+    let gap_combo = pb_gap(&combo)
+    gap_combo >= gap_base
+}
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0
+    var failed = 0
+    if test_ddi_zero_siro_no_boost() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_ddi_monotone_in_siro() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_ddi_combined_inflates_f() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_ddi_combined_pbox_wider() { passed = passed + 1 } else { failed = failed + 1 }
+    print("ddi self-tests passed: "); println(passed)
+    if failed == 0 {
+        println("DDI MODULE OK")
+    } else {
+        println("DDI MODULE FAIL")
+    }
+    0
+}

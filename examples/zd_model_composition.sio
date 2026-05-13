@@ -1,0 +1,152 @@
+//@ run-pass
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ZD-Orthogonal Model Composition (G8, Composable<T>)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Scenario:
+//   Two teams independently train a sedenion-encoded "weight vector" on
+//   disjoint capabilities.  Team A's capabilities live in the 2D
+//   right-annihilator of A = e3 + e10: span{ (e6-e15)/√2, (e7+e14)/√2 }.
+//   Team B's capabilities live in the 14D complement.  We now want to
+//   ship a MERGED model with both teams' capabilities intact.
+//
+// Prior art:
+//   - Parameter averaging (Task Vectors / Model Soups / TIES-Merging)
+//     performs w_out = (w_A + w_B) / 2 or weighted variants.  Because
+//     capabilities share directions in parameter space, each contribution
+//     PERTURBS the other by an amount proportional to the cross-inner-
+//     product <cap_A, w_B>.
+//   - Federated averaging has the same issue.
+//
+// ZD solution:
+//   Because the kernel of A = e3+e10 is exactly 2D and is ORTHOGONAL to
+//   the 14D complement in the standard f64 inner product, if Team A's
+//   capabilities are encoded in the kernel and Team B's in the complement,
+//   then simple vector addition w_out = w_A + w_B is provably non-
+//   interfering: the Team A readout of w_out equals the Team A readout
+//   of w_A exactly, and symmetrically for B.
+//
+// Protocol:
+//   - w_A lives in the kernel (one capability: "bob's preference").
+//   - w_B lives in the complement (one capability: "temperature prediction").
+//   - Method 1: parameter averaging w_avg = (w_A + w_B) / 2.
+//   - Method 2: ZD-orthogonal composition w_zd = w_A + w_B.
+//   - For each, evaluate capability-A readout and capability-B readout
+//     and compare to the pre-merge values.
+//
+// Metrics:
+//   residual_A = |<r_A, w_merged>  -  <r_A, w_A>|  (ideal: 0)
+//   residual_B = |<r_B, w_merged>  -  <r_B, w_B>|  (ideal: 0)
+//
+// Expected outcome:
+//   ZD:      residual_A = residual_B = 0.000000 (exact)
+//   AVG:     residual_A > 0, residual_B > 0  (averaging leaks)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn inner16(a: &[f64;16], b: &[f64;16]) -> f64 with Mut, Panic {
+    var s = 0.0
+    var i = 0
+    while i < 16 { s = s + (*a)[i] * (*b)[i]; i = i + 1 }
+    s
+}
+
+fn abs_f(x: f64) -> f64 with Mut {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, ZD {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  ZD-Orthogonal Model Composition (G8, Composable<T>)\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+
+    // ─── Setup ────────────────────────────────────────────────────────────
+    let s = 0.707107   // 1/√2 to fp precision used elsewhere in the repo
+
+    // Team A's weight lives in the kernel of A = e3 + e10:
+    // w_A = 0.9 * u1 + 0.3 * u2,  with  u1 = (e6-e15)/√2, u2 = (e7+e14)/√2.
+    var w_a: [f64; 16] = [0.0; 16]
+    w_a[6]  =  0.9 * s
+    w_a[15] = 0.0 - 0.9 * s
+    w_a[7]  =  0.3 * s
+    w_a[14] =  0.3 * s
+
+    // Team B's weight lives in the 14D complement (axis-aligned).
+    var w_b: [f64; 16] = [0.0; 16]
+    w_b[0] = 1.2
+    w_b[1] = 0.5
+    w_b[9] = 0.0 - 0.7
+
+    // Capability readouts.
+    // r_a = u1 + u2 (reads both kernel directions).
+    var r_a: [f64; 16] = [0.0; 16]
+    r_a[6]  =  s
+    r_a[15] = 0.0 - s
+    r_a[7]  =  s
+    r_a[14] =  s
+
+    // r_b = e0 + e1 + e9 (reads the complement directions B used).
+    var r_b: [f64; 16] = [0.0; 16]
+    r_b[0] = 1.0
+    r_b[1] = 1.0
+    r_b[9] = 1.0
+
+    let pre_a = inner16(&r_a, &w_a)
+    let pre_b = inner16(&r_b, &w_b)
+
+    print("  Pre-merge readouts:\n")
+    print("    Team A cap  <r_A, w_A> = "); print(pre_a); print("\n")
+    print("    Team B cap  <r_B, w_B> = "); print(pre_b); print("\n\n")
+
+    // ─── Method 1: Parameter averaging (Task Vectors / Model Soups) ────────
+    print("  ── Method 1: Parameter averaging (w_A + w_B) / 2 ──\n")
+    var w_avg: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 16 { w_avg[i] = (w_a[i] + w_b[i]) / 2.0; i = i + 1 }
+    let avg_a = inner16(&r_a, &w_avg)
+    let avg_b = inner16(&r_b, &w_avg)
+    let res_avg_a = abs_f(avg_a - pre_a)
+    let res_avg_b = abs_f(avg_b - pre_b)
+    print("    <r_A, w_avg> = "); print(avg_a); print("  residual = "); print(res_avg_a); print("\n")
+    print("    <r_B, w_avg> = "); print(avg_b); print("  residual = "); print(res_avg_b); print("\n")
+    print("    (averaging halves each capability; residual = pre / 2)\n\n")
+
+    // ─── Method 2: ZD-orthogonal composition ──────────────────────────────
+    print("  ── Method 2: ZD-orthogonal composition (w_A + w_B) ──\n")
+    var w_zd: [f64; 16] = [0.0; 16]
+    i = 0
+    while i < 16 { w_zd[i] = w_a[i] + w_b[i]; i = i + 1 }
+    let zd_a = inner16(&r_a, &w_zd)
+    let zd_b = inner16(&r_b, &w_zd)
+    let res_zd_a = abs_f(zd_a - pre_a)
+    let res_zd_b = abs_f(zd_b - pre_b)
+    print("    <r_A, w_zd>  = "); print(zd_a); print("  residual = "); print(res_zd_a); print("\n")
+    print("    <r_B, w_zd>  = "); print(zd_b); print("  residual = "); print(res_zd_b); print("\n")
+    print("    (ZD-orthogonal addition: each capability preserved exactly)\n\n")
+
+    // ─── Interference residual (compliance audit metric) ─────────────────
+    // For truly ZD-orthogonal weights, the kernel component of w_B and the
+    // complement component of w_A both have zero inner product with the
+    // counterpart.  Any non-zero value indicates a merge leak.
+    let kern_b_mass =
+        (w_b[6]*w_b[6]) + (w_b[7]*w_b[7]) + (w_b[14]*w_b[14]) + (w_b[15]*w_b[15])
+    let comp_a_mass =
+        (w_a[0]*w_a[0]) + (w_a[1]*w_a[1]) + (w_a[2]*w_a[2]) + (w_a[3]*w_a[3])
+      + (w_a[4]*w_a[4]) + (w_a[5]*w_a[5]) + (w_a[8]*w_a[8]) + (w_a[9]*w_a[9])
+      + (w_a[10]*w_a[10]) + (w_a[11]*w_a[11]) + (w_a[12]*w_a[12]) + (w_a[13]*w_a[13])
+    print("  Cross-contamination audit:\n")
+    print("    kernel(B) mass     = "); print(kern_b_mass); print("  (want 0)\n")
+    print("    complement(A) mass = "); print(comp_a_mass); print("  (want 0)\n\n")
+
+    // ─── Summary ─────────────────────────────────────────────────────────
+    print("  ─── Summary ──────────────────────────────────────────────\n")
+    print("    Method 1 (parameter avg):       res_A = "); print(res_avg_a); print(", res_B = "); print(res_avg_b); print("\n")
+    print("    Method 2 (ZD-ortho compose):    res_A = "); print(res_zd_a); print(", res_B = "); print(res_zd_b); print("\n\n")
+
+    // ─── Pass/fail ───────────────────────────────────────────────────────
+    let zd_exact = res_zd_a < 0.0000000001 && res_zd_b < 0.0000000001
+    let avg_leaks = res_avg_a > 0.0001 && res_avg_b > 0.0001
+    if zd_exact && avg_leaks { println("ZD COMPOSITION PASS") }
+    else { println("ZD COMPOSITION FAIL") }
+    0
+}

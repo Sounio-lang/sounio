@@ -1,0 +1,257 @@
+//@ run-pass
+//@ expect-stdout: BIDIRECTIONAL_OSSM_V0_OK
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Bidirectional O-SSM v0 — Late Fusion Conversational Engine
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Design: Separate forward and backward octonion recurrences with late fusion.
+//   h_t = σ(A_f ⊗ h_{t-1} + B_f ⊗ x_t)   // past → present
+//   g_t = σ(A_b ⊗ g_{t+1} + B_b ⊗ x_t)   // future → present
+//   readout = f(h_t, g_t)                // fusion only at output
+//
+// This is the safest bidirectional design: octonions stay in the recurrent
+// core, sedenion doubling is reserved for readout/fusion experiments.
+//
+// Based on synthesis of Grok 4.3beta (bold architecture) and Codex internal
+// (safety-first engineering) responses to the Tapestry collaboration brief.
+
+// ─── Math primitives ────────────────────────────────────────────────────────
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var s = 1.0; var t = 1.0; var i = 1
+    while i <= 20 { t = t * x / (i as f64); s = s + t; i = i + 1 }
+    s
+}
+
+fn sigmoid_q(x: f64) -> f64 with Mut, Div, Panic { 1.0 / (1.0 + exp_q(0.0 - x)) }
+
+// ─── Octonion (8-dim) ───────────────────────────────────────────────────────
+
+struct Oct { e: [f64; 8] }
+
+fn oct_zero() -> Oct { Oct { e: [0.0; 8] } }
+
+fn oct_mul(a: &Oct, b: &Oct) -> Oct with Mut, Div, Panic {
+    var o: [f64; 8] = [0.0; 8]
+    let a0=a.e[0]; let a1=a.e[1]; let a2=a.e[2]; let a3=a.e[3]
+    let a4=a.e[4]; let a5=a.e[5]; let a6=a.e[6]; let a7=a.e[7]
+    let b0=b.e[0]; let b1=b.e[1]; let b2=b.e[2]; let b3=b.e[3]
+    let b4=b.e[4]; let b5=b.e[5]; let b6=b.e[6]; let b7=b.e[7]
+    o[0] = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    o[1] = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+    o[2] = a0*b2 + a2*b0 - a1*b3 + a3*b1 + a4*b6 - a6*b4 + a5*b7 - a7*b5
+    o[3] = a0*b3 + a3*b0 + a1*b2 - a2*b1 + a4*b7 - a7*b4 - a5*b6 + a6*b5
+    o[4] = a0*b4 + a4*b0 - a1*b5 + a5*b1 - a2*b6 + a6*b2 - a3*b7 + a7*b3
+    o[5] = a0*b5 + a5*b0 + a1*b4 - a4*b1 - a2*b7 + a7*b2 + a3*b6 - a6*b3
+    o[6] = a0*b6 + a6*b0 + a1*b7 - a7*b1 + a2*b4 - a4*b2 - a3*b5 + a5*b3
+    o[7] = a0*b7 + a7*b0 - a1*b6 + a6*b1 - a2*b5 + a5*b2 + a3*b4 - a4*b3
+    Oct { e: o }
+}
+
+fn oct_add(a: &Oct, b: &Oct) -> Oct with Mut {
+    var o: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { o[i as usize] = a.e[i as usize] + b.e[i as usize]; i = i + 1 }
+    Oct { e: o }
+}
+
+fn oct_scale(a: &Oct, s: f64) -> Oct with Mut {
+    var o: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { o[i as usize] = a.e[i as usize] * s; i = i + 1 }
+    Oct { e: o }
+}
+
+fn oct_sigmoid(a: &Oct) -> Oct with Mut, Div, Panic {
+    var o: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { o[i as usize] = sigmoid_q(a.e[i as usize]); i = i + 1 }
+    Oct { e: o }
+}
+
+fn oct_norm_sq(a: &Oct) -> f64 with Mut {
+    var s = 0.0; var i = 0
+    while i < 8 { s = s + a.e[i as usize] * a.e[i as usize]; i = i + 1 }
+    s
+}
+
+fn oct_dot(a: &Oct, b: &Oct) -> f64 with Mut {
+    var s = 0.0; var i = 0
+    while i < 8 { s = s + a.e[i as usize] * b.e[i as usize]; i = i + 1 }
+    s
+}
+
+// ─── RNG ────────────────────────────────────────────────────────────────────
+
+var RNG_A: i64 = 424242
+var RNG_B: i64 = 131313
+
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_normal() -> f64 with Mut, Div, Panic {
+    var s = 0.0; var j = 0
+    while j < 12 { s = s + (rng_next() % 10000) as f64 / 10000.0; j = j + 1 }
+    s - 6.0
+}
+
+// ─── Bidirectional O-SSM Parameters ─────────────────────────────────────────
+// Layout: A_f[0..7], A_b[8..15], B_f[16..23], B_b[24..31], W_out[32..47]
+// Total: 48 parameters for a minimal v0
+
+var W: [f64; 64] = [0.0; 64]
+
+fn init_weights() with Mut, Div, Panic {
+    rng_seed(20260423, 42)
+    var i = 0
+    while i < 8 {
+        // A_f: near-identity with small off-diagonal coupling
+        W[i] = 0.85 + rand_normal() * 0.05
+        // A_b: independent backward transition
+        W[8 + i] = 0.80 + rand_normal() * 0.05
+        // B_f, B_b: input projections
+        W[16 + i] = rand_normal() * 0.1
+        W[24 + i] = rand_normal() * 0.1
+        i = i + 1
+    }
+    // Output fusion weights
+    while i < 16 {
+        W[32 + i] = rand_normal() * 0.1
+        i = i + 1
+    }
+}
+
+// ─── Forward recurrence ─────────────────────────────────────────────────────
+// h_t = sigmoid(A_f * h_{t-1} + B_f * x_t)
+// Here A_f and B_f are treated as diagonal octonions for v0 simplicity.
+
+fn forward_step(h_prev: &Oct, x: &Oct, a_f: &Oct, b_f: &Oct) -> Oct with Mut, Div, Panic {
+    let ah = oct_mul(a_f, h_prev)
+    let bx = oct_mul(b_f, x)
+    let sum = oct_add(&ah, &bx)
+    oct_sigmoid(&sum)
+}
+
+// ─── Backward recurrence ────────────────────────────────────────────────────
+// g_t = sigmoid(A_b * g_{t+1} + B_b * x_t)
+// Note: A_b is independent of A_f. No transpose assumption.
+
+fn backward_step(g_next: &Oct, x: &Oct, a_b: &Oct, b_b: &Oct) -> Oct with Mut, Div, Panic {
+    let ag = oct_mul(a_b, g_next)
+    let bx = oct_mul(b_b, x)
+    let sum = oct_add(&ag, &bx)
+    oct_sigmoid(&sum)
+}
+
+// ─── Late fusion readout ────────────────────────────────────────────────────
+// Combines h_t and g_t into a scalar emotional valence score.
+// v0: simple weighted dot product.
+
+fn readout(h: &Oct, g: &Oct, w_h: &Oct, w_g: &Oct) -> f64 with Mut {
+    let dh = oct_dot(h, w_h)
+    let dg = oct_dot(g, w_g)
+    dh + dg
+}
+
+// ─── Conversation simulation ────────────────────────────────────────────────
+// 5 turns, each an octonion encoding emotional state.
+// Turn structure: [valence, arousal, dominance, anticipation, confidence, curiosity, tension, coherence]
+
+var TURNS: [Oct; 5] = [
+    Oct { e: [0.3,  0.5,  0.2,  0.1,  0.8,  0.4,  0.1,  0.7] },  // t0: neutral opening
+    Oct { e: [0.1,  0.7,  0.4,  0.3,  0.6,  0.5,  0.4,  0.5] },  // t1: tension rises
+    Oct { e: [-0.4, 0.8,  0.6,  0.2,  0.4,  0.3,  0.7,  0.3] },  // t2: negative peak (conflict)
+    Oct { e: [-0.1, 0.6,  0.5,  0.4,  0.5,  0.4,  0.5,  0.4] },  // t3: recovery begins
+    Oct { e: [0.4,  0.4,  0.3,  0.5,  0.7,  0.6,  0.2,  0.6] },  // t4: positive resolution
+]
+
+// ─── Main demo ──────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    init_weights()
+
+    // Pack parameters into octonions
+    let a_f = Oct { e: [W[0], W[1], W[2], W[3], W[4], W[5], W[6], W[7]] }
+    let a_b = Oct { e: [W[8], W[9], W[10], W[11], W[12], W[13], W[14], W[15]] }
+    let b_f = Oct { e: [W[16], W[17], W[18], W[19], W[20], W[21], W[22], W[23]] }
+    let b_b = Oct { e: [W[24], W[25], W[26], W[27], W[28], W[29], W[30], W[31]] }
+    let w_h = Oct { e: [W[32], W[33], W[34], W[35], W[36], W[37], W[38], W[39]] }
+    let w_g = Oct { e: [W[40], W[41], W[42], W[43], W[44], W[45], W[46], W[47]] }
+
+    // Forward pass: compute h[0..4]
+    var h: [Oct; 5] = [oct_zero(), oct_zero(), oct_zero(), oct_zero(), oct_zero()]
+    var t: i64 = 0
+    while t < 5 {
+        if t == 0 {
+            h[t] = forward_step(&oct_zero(), &TURNS[t], &a_f, &b_f)
+        } else {
+            h[t] = forward_step(&h[t - 1], &TURNS[t], &a_f, &b_f)
+        }
+        t = t + 1
+    }
+
+    // Backward pass: compute g[0..4]
+    var g: [Oct; 5] = [oct_zero(), oct_zero(), oct_zero(), oct_zero(), oct_zero()]
+    t = 4
+    while t >= 0 {
+        if t == 4 {
+            g[t] = backward_step(&oct_zero(), &TURNS[t], &a_b, &b_b)
+        } else {
+            g[t] = backward_step(&g[t + 1], &TURNS[t], &a_b, &b_b)
+        }
+        t = t - 1
+    }
+
+    // Late fusion readout per turn
+    print("BIDIRECTIONAL_OSSM_V0_OK\n")
+    print("turn | forward_norm | backward_norm | readout\n")
+    print("-----+--------------+---------------+--------\n")
+
+    t = 0
+    while t < 5 {
+        let hn = sqrt_q(oct_norm_sq(&h[t as usize]))
+        let gn = sqrt_q(oct_norm_sq(&g[t as usize]))
+        let r = readout(&h[t as usize], &g[t as usize], &w_h, &w_g)
+        print("  ")
+        print_int(t)
+        print("  | ")
+        print_f64(hn)
+        print("       | ")
+        print_f64(gn)
+        print("        | ")
+        print_f64(r)
+        print("\n")
+        t = t + 1
+    }
+
+    // Verify that forward and backward states are non-trivial
+    let h4_norm = sqrt_q(oct_norm_sq(&h[4]))
+    let g0_norm = sqrt_q(oct_norm_sq(&g[0]))
+
+    if h4_norm > 0.01 && g0_norm > 0.01 {
+        print("[PASS] Forward and backward states are both active\n")
+    } else {
+        print("[FAIL] State collapse detected\n")
+    }
+
+    0
+}

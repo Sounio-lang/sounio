@@ -1,0 +1,196 @@
+// self-hosted::gpu::opt::bridge — Conversion between GpuKernelIr and GpuModuleOpt
+//
+// Bridge functions for wiring the GPU optimizer (opt_run_pass) into the
+// compilation pipeline. Converts between GpuKernelIr (used by the main
+// pipeline) and GpuModuleOpt (used by the optimizer).
+
+// ============================================================================
+// Zero-value constructors for optimizer structs
+// ============================================================================
+
+fn bridge_opt_block_zero() -> OptGpuBlockEntry {
+    OptGpuBlockEntry {
+        id: 0,
+        ops: [opt_gpu_op_entry_zero(); 4096],
+        op_count: 0,
+        term_tag: 0,
+        term_src: -1,
+        term_target0: -1,
+        term_target1: -1,
+    }
+}
+
+fn bridge_opt_kernel_zero() -> OptGpuKernelEntry {
+    OptGpuKernelEntry {
+        name: [0 as i8; 256],
+        name_len: 0,
+        is_kernel: false,
+        blocks: [bridge_opt_block_zero(); 256],
+        block_count: 0,
+        param_count: 0,
+        shared_mem_bytes: 0,
+        max_threads_per_block: 0,
+    }
+}
+
+// ============================================================================
+// Type tag helper: derive OptGpuOpEntry.type_tag from GpuType
+// ============================================================================
+
+fn bridge_type_tag_from_gpu_type(ty: GpuType) -> i64 {
+    if ty == GpuType::GpuF32 { return 1 }
+    if ty == GpuType::GpuF64 { return 1 }
+    if ty == GpuType::GpuF16 { return 1 }
+    if ty == GpuType::GpuTf32 { return 1 }
+    if ty == GpuType::GpuOctF32 { return 1 }
+    if ty == GpuType::GpuOctF64 { return 1 }
+    if ty == GpuType::GpuSedF32 { return 1 }
+    if ty == GpuType::GpuSedF64 { return 1 }
+    0
+}
+
+// ============================================================================
+// Opcode mapping
+// ============================================================================
+
+// (a) Map GpuOpcode i64 constants to optimizer i64 constants.
+//     Basic opcodes already share values (ADD=4, SUB=5, etc).
+//     Hypercomplex opcodes use opt_map_gpu_opcode_to_opt from optimizer.sio.
+//     Unknown opcodes pass through unchanged.
+fn gpu_opcode_to_opt_opcode(opcode: i64) -> i64 with Panic {
+    opt_map_gpu_opcode_to_opt(opcode)
+}
+
+// Reverse-map optimizer hypercomplex opcodes back to GPU opcode discriminants.
+fn bridge_opt_opcode_to_gpu_opcode(opcode: i64) -> i64 {
+    if opcode == 100 { return 38 }
+    if opcode == 101 { return 39 }
+    if opcode == 102 { return 40 }
+    if opcode == 103 { return 41 }
+    if opcode == 104 { return 44 }
+    if opcode == 105 { return 45 }
+    if opcode == 106 { return 46 }
+    if opcode == 107 { return 47 }
+    if opcode == 108 { return 51 }
+    if opcode == 109 { return 42 }
+    opcode
+}
+
+// ============================================================================
+// Single-op conversions
+// ============================================================================
+
+fn bridge_gpu_op_to_opt_entry(op: GpuOp) -> OptGpuOpEntry with Panic {
+    OptGpuOpEntry {
+        opcode: gpu_opcode_to_opt_opcode(op.opcode as i64),
+        type_tag: bridge_type_tag_from_gpu_type(op.ty),
+        dst_idx: op.dst_reg,
+        src0: op.lhs_reg,
+        src1: op.rhs_reg,
+        src2: op.src_reg,
+        imm_int: op.rhs_imm,
+        imm_f32: 0.0 as f32,
+        pred: op.pred_reg,
+        axis: op.axis,
+        dead: false,
+    }
+}
+
+fn bridge_opt_entry_to_gpu_op(entry: OptGpuOpEntry) -> GpuOp with Panic {
+    var op = gpu_op_new()
+    op.opcode = bridge_opt_opcode_to_gpu_opcode(entry.opcode) as GpuOpcode
+    op.dst_reg = entry.dst_idx
+    op.lhs_reg = entry.src0
+    op.rhs_reg = entry.src1
+    op.src_reg = entry.src2
+    op.rhs_imm = entry.imm_int
+    op.pred_reg = entry.pred
+    op.axis = entry.axis
+    op
+}
+
+// ============================================================================
+// (b) GpuKernelIr → GpuModuleOpt
+//     Creates single-kernel module with single block containing all ops.
+// ============================================================================
+
+fn gpu_kernel_ir_to_opt_module(kernel: GpuKernelIr) -> GpuModuleOpt with Mut, Panic, Div {
+    var block = bridge_opt_block_zero()
+    block.id = 0
+
+    var i: i64 = 0
+    while i < kernel.op_count {
+        block.ops[i as usize] = bridge_gpu_op_to_opt_entry(kernel.ops[i as usize])
+        block.op_count = block.op_count + 1
+        i = i + 1
+    }
+
+    var entry = bridge_opt_kernel_zero()
+    entry.is_kernel = true
+    entry.block_count = 1
+    entry.blocks[0] = block
+    entry.param_count = kernel.param_count
+    entry.shared_mem_bytes = kernel.shared_mem_bytes
+    entry.max_threads_per_block = kernel.max_threads
+
+    var ni: i64 = 0
+    while ni < kernel.kernel_name.len && ni < 256 {
+        entry.name[ni as usize] = kernel.kernel_name.buf[ni as usize]
+        ni = ni + 1
+    }
+    entry.name_len = if kernel.kernel_name.len < 256 { kernel.kernel_name.len } else { 256 }
+
+    var module = GpuModuleOpt {
+        kernels: [bridge_opt_kernel_zero(); 64],
+        kernel_count: 1,
+    }
+    module.kernels[0] = entry
+
+    module
+}
+
+// ============================================================================
+// (c) GpuModuleOpt → GpuKernelIr
+//     Flattens all blocks from first kernel into a single ops array.
+// ============================================================================
+
+fn opt_module_to_kernel_ir(module: GpuModuleOpt) -> GpuKernelIr with Mut, Panic, Div {
+    var out = gpu_kernel_new()
+
+    if module.kernel_count == 0 {
+        return out
+    }
+
+    let entry = module.kernels[0]
+
+    // Restore kernel name
+    let name_cap = if entry.name_len < 128 { entry.name_len } else { 128 }
+    var ni: i64 = 0
+    while ni < name_cap {
+        out.kernel_name.buf[ni as usize] = entry.name[ni as usize]
+        ni = ni + 1
+    }
+    out.kernel_name.len = name_cap
+
+    // Flatten all blocks' ops into out.ops
+    var total_ops: i64 = 0
+    var bi: i64 = 0
+    while bi < entry.block_count {
+        let blk = entry.blocks[bi as usize]
+        var oi: i64 = 0
+        while oi < blk.op_count && total_ops < 1024 {
+            out.ops[total_ops as usize] = bridge_opt_entry_to_gpu_op(blk.ops[oi as usize])
+            total_ops = total_ops + 1
+            oi = oi + 1
+        }
+        bi = bi + 1
+    }
+    out.op_count = total_ops
+
+    // Restore metadata
+    out.param_count = entry.param_count
+    out.shared_mem_bytes = entry.shared_mem_bytes
+    out.max_threads = entry.max_threads_per_block
+
+    out
+}

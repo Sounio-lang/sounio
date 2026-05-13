@@ -1,0 +1,176 @@
+//@ run-pass
+//@ expect-stdout: EPISTEMIC DECAY PASSED
+// Gen 17 D5: Temporal Confidence Decay
+//
+// Measurements become stale over time. This example demonstrates:
+//   - EpistemicTimed struct with birth_tick field
+//   - measured_fresh(): creates a time-tagged epistemic value
+//   - conf_at_tick(): computes decayed confidence using binary half-life
+//
+// Decay model (binary halving):
+//   conf(age) = base_conf >> (age / half_life)
+//   At half_life multiples: 990 → 495 → 247 → 123 → 61 → ...
+//
+// Threshold: when conf_at_tick < 950, value is epistemically stale.
+// Below 500 (half of 1000): deep uncertainty — treat as unreliable.
+//
+// Integration with D4: update_conf(gate_id, conf_at_tick(sensor, tick(), half_life))
+// drives the R15 side table dynamically when --r15-monitor is active.
+
+// --------------------------------------------------------------------------
+// Global tick counter
+// --------------------------------------------------------------------------
+var G_TICK: i64 = 0
+
+// --------------------------------------------------------------------------
+// Time-tagged epistemic value (Gen 17 D5)
+// --------------------------------------------------------------------------
+struct EpistemicTimed {
+    value: f64,
+    variance: f64,
+    label: i64,
+    birth_tick: i64,
+}
+
+fn tick() -> i64 with Mut {
+    G_TICK = G_TICK + 1
+    return G_TICK
+}
+
+fn measured_fresh(value: f64, variance: f64) -> EpistemicTimed with Mut {
+    EpistemicTimed {
+        value: value,
+        variance: variance,
+        label: 0,
+        birth_tick: G_TICK,
+    }
+}
+
+// Compute decayed confidence at a given tick.
+// Uses binary halving: conf = base >> (age / half_life)
+// base_conf starts at 990 (measurement quality).
+fn conf_at_tick(e: EpistemicTimed, current_tick: i64, half_life: i64) -> i64 with Panic, Div {
+    let age = current_tick - e.birth_tick
+    if age <= 0 { return 990 }
+    let shifts = age / half_life
+    var conf: i64 = 990
+    var s: i64 = 0
+    while s < shifts && conf > 0 {
+        conf = conf / 2
+        s = s + 1
+    }
+    return conf
+}
+
+// --------------------------------------------------------------------------
+// Math helpers
+// --------------------------------------------------------------------------
+fn abs_i64(x: i64) -> i64 {
+    if x < 0 { return 0 - x }
+    return x
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Gen 17 D5: Temporal Confidence Decay ===")
+    println("Model: conf(age) = 990 >> (age / half_life)")
+    println("Half-life = 100 ticks")
+    println("")
+
+    // -----------------------------------------------------------------------
+    // Create a fresh measurement at tick 0
+    // -----------------------------------------------------------------------
+    let half_life: i64 = 100
+    let sensor = measured_fresh(42.0, 0.001)
+    let t0 = G_TICK
+
+    println("Decay trajectory:")
+
+    // Tick 0: fresh
+    let c0 = conf_at_tick(sensor, t0, half_life)
+    print("  Tick   0: conf=")
+    print_int(c0)
+    if c0 >= 950 { println("  (GOLD — fresh)") } else { println("  (below threshold)") }
+
+    // Tick 100: 1 half-life
+    let t100 = t0 + 100
+    let c100 = conf_at_tick(sensor, t100, half_life)
+    print("  Tick 100: conf=")
+    print_int(c100)
+    if c100 >= 950 { println("  (GOLD)") } else if c100 >= 500 { println("  (SILVER — stale)") } else { println("  (BRONZE — unreliable)") }
+
+    // Tick 200: 2 half-lives
+    let t200 = t0 + 200
+    let c200 = conf_at_tick(sensor, t200, half_life)
+    print("  Tick 200: conf=")
+    print_int(c200)
+    if c200 >= 950 { println("  (GOLD)") } else if c200 >= 500 { println("  (SILVER — stale)") } else { println("  (BRONZE — unreliable)") }
+
+    // Tick 300: 3 half-lives
+    let t300 = t0 + 300
+    let c300 = conf_at_tick(sensor, t300, half_life)
+    print("  Tick 300: conf=")
+    print_int(c300)
+    if c300 >= 950 { println("  (GOLD)") } else if c300 >= 500 { println("  (SILVER — stale)") } else { println("  (BRONZE — unreliable)") }
+
+    // Tick 400: 4 half-lives
+    let t400 = t0 + 400
+    let c400 = conf_at_tick(sensor, t400, half_life)
+    print("  Tick 400: conf=")
+    print_int(c400)
+    if c400 >= 950 { println("  (GOLD)") } else if c400 >= 500 { println("  (SILVER — stale)") } else { println("  (BRONZE — unreliable)") }
+
+    println("")
+
+    // -----------------------------------------------------------------------
+    // Epistemic interpretation
+    // -----------------------------------------------------------------------
+    println("Epistemic decay summary:")
+    println("  Tick   0: sensor fresh, conf=990 >= 950 (GOLD threshold)")
+    println("  Tick 100: 1 half-life elapsed, conf=495 < 950 (stale)")
+    println("  Tick 200: 2 half-lives, conf=247 < 500 (unreliable)")
+    println("  Tick 300: 3 half-lives, conf=123 < 500 (deep uncertainty)")
+    println("")
+    println("D4 integration: update_conf(gate_id, conf_at_tick(sensor, tick(), half_life))")
+    println("  drives R15 side table — gates trap when sensor confidence < 950")
+    println("")
+
+    // -----------------------------------------------------------------------
+    // Validation
+    // -----------------------------------------------------------------------
+    if c0 != 990 {
+        print("EPISTEMIC DECAY FAILED: c0=")
+        print_int(c0)
+        println(" (expected 990)")
+        return 1
+    }
+    // After 1 half-life: 990/2 = 495
+    if c100 != 495 {
+        print("EPISTEMIC DECAY FAILED: c100=")
+        print_int(c100)
+        println(" (expected 495)")
+        return 1
+    }
+    // After 2 half-lives: 495/2 = 247
+    if c200 != 247 {
+        print("EPISTEMIC DECAY FAILED: c200=")
+        print_int(c200)
+        println(" (expected 247)")
+        return 1
+    }
+    // After 3 half-lives: 247/2 = 123
+    if c300 != 123 {
+        print("EPISTEMIC DECAY FAILED: c300=")
+        print_int(c300)
+        println(" (expected 123)")
+        return 1
+    }
+    // Below threshold check
+    let below_thresh_ok = c100 < 950 && c200 < 500 && c300 < 500
+    if !below_thresh_ok {
+        println("EPISTEMIC DECAY FAILED: decay thresholds violated")
+        return 1
+    }
+
+    println("EPISTEMIC DECAY PASSED")
+    return 0
+}
