@@ -1855,41 +1855,52 @@ fn probe_closure_body_expr(body_start: i64, param_start: i64, param_count: i64) 
 }
 
 fn try_scan_closure_literal(pos: i64, token_count: i64) -> i64 with Mut, Panic, Div, Alloc {
-    if token_kind(pos) != TK_OR { return pos + 1 }
+    let start_kind = token_kind(pos)
+    if start_kind != TK_OR && start_kind != TK_OROR { return pos + 1 }
     let param_start = V2_CLOSURE_PARAM_TOTAL
     var param_count: i64 = 0
     var p = pos + 1
-    while p < token_count && token_kind(p) != TK_OR {
-        if param_start + param_count >= 512 {
+    if start_kind == TK_OROR {
+        if pos > 0 {
+            let prev_kind = token_kind(pos - 1)
+            if prev_kind != TK_EQ && prev_kind != TK_LPAREN && prev_kind != TK_COMMA && prev_kind != TK_RETURN && prev_kind != TK_LBRACE {
+                return pos + 1
+            }
+        }
+        p = pos
+    } else {
+        while p < token_count && token_kind(p) != TK_OR {
+            if param_start + param_count >= 512 {
+                V2_CLOSURE_PARAM_TOTAL = param_start
+                return pos + 1
+            }
+            if token_kind(p) != TK_IDENT || token_kind(p + 1) != TK_COLON || token_kind(p + 2) != TK_IDENT {
+                V2_CLOSURE_PARAM_TOTAL = param_start
+                return pos + 1
+            }
+            if !token_text_eq(p + 2, "i64") && !token_text_eq(p + 2, "f64") {
+                V2_CLOSURE_PARAM_TOTAL = param_start
+                return pos + 1
+            }
+            let pslot = param_start + param_count
+            V2_CLOSURE_PARAM_NAME_TOK[pslot as usize] = p
+            if token_text_eq(p + 2, "f64") {
+                V2_CLOSURE_PARAM_IS_F64[pslot as usize] = 1
+            } else {
+                V2_CLOSURE_PARAM_IS_F64[pslot as usize] = 0
+            }
+            param_count = param_count + 1
+            p = p + 3
+            if token_kind(p) == TK_COMMA { p = p + 1 }
+            else if token_kind(p) != TK_OR {
+                V2_CLOSURE_PARAM_TOTAL = param_start
+                return pos + 1
+            }
+        }
+        if p >= token_count || token_kind(p) != TK_OR || param_count <= 0 {
             V2_CLOSURE_PARAM_TOTAL = param_start
             return pos + 1
         }
-        if token_kind(p) != TK_IDENT || token_kind(p + 1) != TK_COLON || token_kind(p + 2) != TK_IDENT {
-            V2_CLOSURE_PARAM_TOTAL = param_start
-            return pos + 1
-        }
-        if !token_text_eq(p + 2, "i64") && !token_text_eq(p + 2, "f64") {
-            V2_CLOSURE_PARAM_TOTAL = param_start
-            return pos + 1
-        }
-        let pslot = param_start + param_count
-        V2_CLOSURE_PARAM_NAME_TOK[pslot as usize] = p
-        if token_text_eq(p + 2, "f64") {
-            V2_CLOSURE_PARAM_IS_F64[pslot as usize] = 1
-        } else {
-            V2_CLOSURE_PARAM_IS_F64[pslot as usize] = 0
-        }
-        param_count = param_count + 1
-        p = p + 3
-        if token_kind(p) == TK_COMMA { p = p + 1 }
-        else if token_kind(p) != TK_OR {
-            V2_CLOSURE_PARAM_TOTAL = param_start
-            return pos + 1
-        }
-    }
-    if p >= token_count || token_kind(p) != TK_OR || param_count <= 0 {
-        V2_CLOSURE_PARAM_TOTAL = param_start
-        return pos + 1
     }
     var body_start = p + 1
     var literal_end: i64 = -1
@@ -2574,7 +2585,7 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
     if k == TK_MATCH {
         return parse_match_expr_ir(func, ctx, pos)
     }
-    if k == TK_OR {
+    if k == TK_OR || k == TK_OROR {
         return parse_closure_literal_ref_ir(ctx, pos)
     }
     if k == TK_BANG {

@@ -452,6 +452,33 @@ status: lock-released
 
 agent: codex
 lane: 4
+time_utc: 2026-05-13T09:52:55Z
+files:
+  - self-hosted/compiler/native_compile_driver.sio
+  - artifacts/omega/agent_handoff.log.md
+intent: Lane 4 RELEASE — native-v2 parity hardening for zero-parameter closure literals tokenized as `||`. N-v2 now recognizes `|| expr` in expression-start positions, preserves normal boolean `a || b` as a non-closure operator, and closes the `tests/run-pass/closure_basic.sio` compile/parity row after PR #140 landed.
+worktree: /tmp/sounio-lane-4-nv2-parity
+branch: codex/lane-4-nv2-zero-closure-20260513
+checks:
+  - post-PR #140 inventory /tmp/lane4-parity-post-20260513T0147: corpus=421 ok=173 nv2_compile=190 nv2_run=57 a_only=0 both_fail=1 a_fail=0
+  - targeted compile: bin/souc run self-hosted/compiler/native_compile_driver.sio -- tests/run-pass/closure_basic.sio -o /tmp/closure_basic_nv2_zero (rc=0)
+  - targeted runtime parity: /tmp/closure_basic_nv2_zero stdout/exit matched Track A (rc=0)
+  - closure inventory /tmp/lane4-parity-zero-closure-20260513T0950: closure_basic=ok
+  - full inventory /tmp/lane4-parity-zero-full-20260513T0953: corpus=422 ok=175 nv2_compile=189 nv2_run=57 a_only=0 both_fail=1 a_fail=0
+  - pinned full inventory /tmp/lane4-parity-zero-full-pinned-20260513T0956 with SOUC_BIN=/tmp/sounio-lane-4-nv2-parity/bin/souc: corpus=422 ok=175 nv2_compile=189 nv2_run=57 a_only=0 both_fail=1 a_fail=0
+  - bin/souc check self-hosted/compiler/native_compile_driver.sio (rc=0)
+  - bash scripts/ci/native_v2_serious_track_gate.sh (rc=0)
+  - bash scripts/ci/lean_single_fixed_point_gate.sh (rc=0; fixed-point md5=1c89bbde4db02b708febd46fb5448520)
+  - SOUC_BIN=/tmp/sounio-lane-4-nv2-parity/bin/souc bash scripts/ci/compiler_stage_contract_gate.sh (rc=0; pass=14 known_blocker=1)
+  - SOUC_BIN=/tmp/sounio-lane-4-nv2-parity/bin/souc SOUNIO_NATIVE_V2_CPU_COMPILER_DIR=/tmp/lane4-zero-umbrella-20260513T0956 bash scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh (rc=0; shell fallback used for aggregator)
+  - default compiler_stage_contract_gate.sh resolved /workspace/sounio/bin/souc and failed diagnostic_assign_to_immut_rejects; pinned SOUC_BIN run above is the branch-local evidence
+  - git diff --check (rc=0)
+status: lock-released
+
+---
+
+agent: codex
+lane: 4
 time_utc: 2026-05-13T01:40:42Z
 files:
   - self-hosted/compiler/native_compile_driver.sio
