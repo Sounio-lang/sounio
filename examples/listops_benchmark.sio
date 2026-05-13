@@ -12,14 +12,12 @@
 //   [MED 1 5 3]          -> 3
 //
 // The model sees tokens sequentially and must track nested operations.
-// This tests hierarchical/nested structure -- where non-associativity helps.
 //
-// Simplified for our compiler:
-//   Operations: MIN (10), MAX (11), MED (12)
-//   Operands: digits 0-9
-//   Nesting depth: 1-2
-//   Sequence length: 10-20 tokens
-//   Output: result digit 0-9 (10 classes)
+// Ablations (same embed + a/b/output param count, same training loop):
+//   mode 0 — Diagonal: h_d = a_d*h_d + b_d*embed_d (no cross-dim coupling)
+//   mode 1 — O-SSM:    h' = oct_mul(a⊙h, b⊙embed) + residual (non-associative)
+//   mode 2 — H-SSM-8:  two independent quaternions in R^8; each q' = quat_mul(...)
+//                      (associative Hamilton product per 4-block)
 //
 // Token vocabulary (13 tokens, indices 0-12):
 //   0-9:  digit operands
@@ -27,8 +25,8 @@
 //   11:   MAX operator
 //   12:   MED operator
 //
-// Architecture: embed 13x8, A 8x8 (cross) or 8 (diag), B 8, output 8x10
-// Training: 200 samples/epoch, 40 epochs, SGD+momentum
+// Weights: embed 13x8 = 104, a[8], b[8], out 8x10 = 80 → total 200
+// Training: 200 samples/epoch, 40 epochs, SGD+momentum on output only
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
@@ -41,6 +39,13 @@ fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
     sum
 }
 
+fn clamp_h(s: f64) -> f64 with Mut, Panic {
+    var t = s
+    if t > 5.0 { t = 5.0 }
+    if t < 0.0 - 5.0 { t = 0.0 - 5.0 }
+    t
+}
+
 var RNG_A: i64 = 0
 var RNG_B: i64 = 0
 fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
@@ -51,23 +56,16 @@ fn rng_next() -> i64 with Mut {
 }
 
 // ─── Expression generation ───
-// We flatten expressions into a token sequence.
-// Format: OP arg1 arg2 ... argN  (no explicit brackets -- position implies structure)
-// The model must learn to parse this from sequential tokens.
-//
-// SEQ holds the flattened token sequence, LABEL holds the ground truth result.
 
 var SEQ: [i64; 32] = [0; 32]
 var SEQ_POS: i64 = 0
 
-// Scratch arrays for evaluating subexpressions
 var ARGS: [i64; 8] = [0; 8]
 
-fn min_val(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
-fn max_val(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
+fn min_val(a: i64, b: i64) -> i64 with Panic { if a < b { a } else { b } }
+fn max_val(a: i64, b: i64) -> i64 with Panic { if a > b { a } else { b } }
 
-fn compute_med3(a: i64, b: i64, c: i64) -> i64 {
-    // Median of three values
+fn compute_med3(a: i64, b: i64, c: i64) -> i64 with Panic {
     if a <= b {
         if b <= c { b }
         else { if a <= c { c } else { a } }
@@ -77,35 +75,28 @@ fn compute_med3(a: i64, b: i64, c: i64) -> i64 {
     }
 }
 
-fn apply_op(op: i64, vals: i64, v0: i64, v1: i64, v2: i64) -> i64 {
-    // Apply operation to arguments
-    // op: 10=MIN, 11=MAX, 12=MED
+fn apply_op(op: i64, vals: i64, v0: i64, v1: i64, v2: i64) -> i64 with Mut, Panic {
     if op == 10 {
-        // MIN
         var r = v0
         if vals >= 2 { r = min_val(r, v1) }
         if vals >= 3 { r = min_val(r, v2) }
         r
     } else {
         if op == 11 {
-            // MAX
             var r = v0
             if vals >= 2 { r = max_val(r, v1) }
             if vals >= 3 { r = max_val(r, v2) }
             r
         } else {
-            // MED -- only meaningful with 3 args, otherwise return first
             if vals >= 3 { compute_med3(v0, v1, v2) }
             else { if vals >= 2 { min_val(v0, v1) } else { v0 } }
         }
     }
 }
 
-// Generate a flat (depth-1) subexpression: OP d1 d2 [d3]
-// Returns the result value and writes tokens to SEQ starting at SEQ_POS
-fn gen_flat_expr() -> i64 with Mut, Div {
+fn gen_flat_expr() -> i64 with Mut, Div, Panic {
     let op = (rng_next() / 100) % 3 + 10
-    let nargs = (rng_next() / 100) % 2 + 2  // 2 or 3 args
+    let nargs = (rng_next() / 100) % 2 + 2
     SEQ[SEQ_POS] = op
     SEQ_POS = SEQ_POS + 1
     var v0 = (rng_next() / 100) % 10
@@ -120,20 +111,16 @@ fn gen_flat_expr() -> i64 with Mut, Div {
     apply_op(op, nargs, v0, v1, v2)
 }
 
-// Generate a nested expression (depth 1-2).
-// Outer: OP arg1 arg2 [arg3], where each arg is either a digit or a flat subexpr.
-// Returns the result value.
-fn gen_nested_expr() -> i64 with Mut, Div {
+fn gen_nested_expr() -> i64 with Mut, Div, Panic {
     let outer_op = (rng_next() / 100) % 3 + 10
-    let outer_nargs = (rng_next() / 100) % 2 + 2  // 2 or 3
+    let outer_nargs = (rng_next() / 100) % 2 + 2
     SEQ[SEQ_POS] = outer_op
     SEQ_POS = SEQ_POS + 1
 
-    // Generate each argument -- coin flip for nested vs digit
     var vals: [i64; 3] = [0; 3]
     var ai = 0
     while ai < outer_nargs {
-        let nest = (rng_next() / 100) % 3  // 0 = nested, 1,2 = digit
+        let nest = (rng_next() / 100) % 3
         if nest == 0 {
             vals[ai] = gen_flat_expr()
         } else {
@@ -147,36 +134,32 @@ fn gen_nested_expr() -> i64 with Mut, Div {
     apply_op(outer_op, outer_nargs, vals[0], vals[1], vals[2])
 }
 
-fn generate_sample_lo(target_len: i64) -> i64 with Mut, Div {
-    // Generate an expression, pad or truncate to target_len
-    // We try to generate expressions that roughly fit the target length
+fn generate_sample_lo(target_len: i64) -> i64 with Mut, Div, Panic {
     SEQ_POS = 0
     let result = gen_nested_expr()
 
-    // Pad remainder with digit 0 tokens (padding)
     var actual_len = SEQ_POS
     while actual_len < target_len {
         SEQ[actual_len] = 0
         actual_len = actual_len + 1
     }
-    // If expression was longer than target, we still use actual_len
     if SEQ_POS > target_len { SEQ_POS = target_len }
     else { SEQ_POS = target_len }
 
     result
 }
 
-// ─── Model ───
-// Embed: 13 tokens x 8 dims = 104
-// A: 8x8 = 64 (cross) or 8 (diag)
-// B: 8
-// Output: 8 x 10 = 80
-// Total: 104 + 64 + 8 + 80 = 256
+// ─── Model: W[200] = embed[0..103], a[104..111], b[112..119], out[120..199] ───
 
-var W: [i64; 256] = [0; 256]
+var W: [i64; 200] = [0; 200]
 var H: [i64; 8] = [0; 8]
 var L: [i64; 10] = [0; 10]
-var MOM: [i64; 256] = [0; 256]
+var MOM: [i64; 200] = [0; 200]
+
+// Octonion multiply scratch (Fano plane)
+var OCT_A: [f64; 8] = [0.0; 8]
+var OCT_B: [f64; 8] = [0.0; 8]
+var OCT_R: [f64; 8] = [0.0; 8]
 
 fn ws(i: i64, v: f64) with Mut { W[i] = (v * 100000000.0) as i64 }
 fn wg(i: i64) -> f64 with Div { (W[i] as f64) / 100000000.0 }
@@ -184,78 +167,125 @@ fn hs(i: i64, v: f64) with Mut { H[i] = (v * 100000000.0) as i64 }
 fn hg(i: i64) -> f64 with Div { (H[i] as f64) / 100000000.0 }
 
 fn init_embed() with Mut, Div {
-    // 13 tokens x 8 dims = 104 weights
     var i = 0
     while i < 104 { ws(i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
 }
 
-fn init_a_matrix(is_cross: i64) with Mut, Div {
+fn init_ab() with Mut, Div {
     var i = 0
-    while i < 64 {
-        var v = ((rng_next() % 2000) as f64 - 1000.0) / 10000.0
-        let row = i / 8; let col = i - row * 8
-        if row == col { v = 0.95 }
-        if is_cross == 0 { if row != col { v = 0.0 } }
-        ws(104 + i, v); i = i + 1
+    while i < 8 {
+        ws(104 + i, 0.9 + ((rng_next() % 2000) as f64 - 1000.0) / 20000.0)
+        ws(112 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0)
+        i = i + 1
     }
 }
 
-fn init_b_out() with Mut, Div {
+fn init_out() with Mut, Div {
     var i = 0
-    while i < 8 { ws(168 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
-    i = 0
-    while i < 80 { ws(176 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
+    while i < 80 { ws(120 + i, ((rng_next() % 2000) as f64 - 1000.0) / 3000.0); i = i + 1 }
 }
 
-fn init_model(is_cross: i64) with Mut, Div {
+fn init_model() with Mut, Div {
     init_embed()
-    init_a_matrix(is_cross)
-    init_b_out()
+    init_ab()
+    init_out()
     var i = 0
-    while i < 256 { MOM[i] = 0; i = i + 1 }
+    while i < 200 { MOM[i] = 0; i = i + 1 }
 }
 
-fn model_step_cross(token: i64) with Mut, Div {
-    var new_h: [f64; 8] = [0.0; 8]
+fn oct_mul() with Mut {
+    let a0 = OCT_A[0]; let a1 = OCT_A[1]; let a2 = OCT_A[2]; let a3 = OCT_A[3]
+    let a4 = OCT_A[4]; let a5 = OCT_A[5]; let a6 = OCT_A[6]; let a7 = OCT_A[7]
+    let b0 = OCT_B[0]; let b1 = OCT_B[1]; let b2 = OCT_B[2]; let b3 = OCT_B[3]
+    let b4 = OCT_B[4]; let b5 = OCT_B[5]; let b6 = OCT_B[6]; let b7 = OCT_B[7]
+
+    OCT_R[0] = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    OCT_R[1] = a0*b1 + a1*b0 + a2*b4 - a4*b2 + a3*b7 - a7*b3 - a6*b5 + a5*b6
+    OCT_R[2] = a0*b2 + a2*b0 + a3*b5 - a5*b3 + a4*b1 - a1*b4 - a7*b6 + a6*b7
+    OCT_R[3] = a0*b3 + a3*b0 + a4*b6 - a6*b4 + a5*b2 - a2*b5 - a1*b7 + a7*b1
+    OCT_R[4] = a0*b4 + a4*b0 + a5*b7 - a7*b5 + a6*b3 - a3*b6 - a2*b1 + a1*b2
+    OCT_R[5] = a0*b5 + a5*b0 + a6*b1 - a1*b6 + a7*b4 - a4*b7 - a3*b2 + a2*b3
+    OCT_R[6] = a0*b6 + a6*b0 + a7*b2 - a2*b7 + a1*b5 - a5*b1 - a4*b3 + a3*b4
+    OCT_R[7] = a0*b7 + a7*b0 + a1*b3 - a3*b1 + a2*b6 - a6*b2 - a5*b4 + a4*b5
+}
+
+fn model_step_diag(token: i64) with Mut, Div, Panic {
     var d = 0
     while d < 8 {
-        let inp = wg(token * 8 + d)
-        var s = 0.0
-        var j = 0
-        while j < 8 { s = s + wg(104 + d * 8 + j) * hg(j); j = j + 1 }
-        s = s + wg(168 + d) * inp
-        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
-        new_h[d] = s; d = d + 1
+        let s = wg(104 + d) * hg(d) + wg(112 + d) * wg(token * 8 + d)
+        hs(d, clamp_h(s)); d = d + 1
+    }
+}
+
+fn model_step_ossm(token: i64) with Mut, Div, Panic {
+    var d = 0
+    while d < 8 {
+        OCT_B[d] = wg(token * 8 + d)
+        d = d + 1
     }
     d = 0
-    while d < 8 { hs(d, new_h[d]); d = d + 1 }
-}
-
-fn model_step_diag(token: i64) with Mut, Div {
-    var d = 0
     while d < 8 {
-        var s = wg(104 + d) * hg(d) + wg(168 + d) * wg(token * 8 + d)
-        if s > 5.0 { s = 5.0 } if s < 0.0 - 5.0 { s = 0.0 - 5.0 }
-        hs(d, s); d = d + 1
+        OCT_A[d] = wg(104 + d) * hg(d)
+        d = d + 1
+    }
+    d = 0
+    while d < 8 {
+        OCT_B[d] = wg(112 + d) * OCT_B[d]
+        d = d + 1
+    }
+    oct_mul()
+    d = 0
+    while d < 8 {
+        let s = OCT_R[d] + OCT_B[d] * 0.1
+        hs(d, clamp_h(s)); d = d + 1
     }
 }
 
-fn model_step(token: i64, is_cross: i64) with Mut, Div {
-    if is_cross == 1 { model_step_cross(token) } else { model_step_diag(token) }
+fn model_step_hssm8(token: i64) with Mut, Div, Panic {
+    // Quaternion 0 (w,x,y,z) = dims 0..3 — fully unrolled (Hamilton product)
+    let a0 = wg(104) * hg(0); let a1 = wg(105) * hg(1); let a2 = wg(106) * hg(2); let a3 = wg(107) * hg(3)
+    let b0 = wg(112) * wg(token * 8); let b1 = wg(113) * wg(token * 8 + 1)
+    let b2 = wg(114) * wg(token * 8 + 2); let b3 = wg(115) * wg(token * 8 + 3)
+    let r0 = a0*b0 - a1*b1 - a2*b2 - a3*b3
+    let r1 = a0*b1 + a1*b0 + a2*b3 - a3*b2
+    let r2 = a0*b2 - a1*b3 + a2*b0 + a3*b1
+    let r3 = a0*b3 + a1*b2 - a2*b1 + a3*b0
+    hs(0, clamp_h(r0 + b0 * 0.1)); hs(1, clamp_h(r1 + b1 * 0.1))
+    hs(2, clamp_h(r2 + b2 * 0.1)); hs(3, clamp_h(r3 + b3 * 0.1))
+
+    // Quaternion 1 = dims 4..7
+    let c0 = wg(108) * hg(4); let c1 = wg(109) * hg(5); let c2 = wg(110) * hg(6); let c3 = wg(111) * hg(7)
+    let d0 = wg(116) * wg(token * 8 + 4); let d1 = wg(117) * wg(token * 8 + 5)
+    let d2 = wg(118) * wg(token * 8 + 6); let d3 = wg(119) * wg(token * 8 + 7)
+    let s0 = c0*d0 - c1*d1 - c2*d2 - c3*d3
+    let s1 = c0*d1 + c1*d0 + c2*d3 - c3*d2
+    let s2 = c0*d2 - c1*d3 + c2*d0 + c3*d1
+    let s3 = c0*d3 + c1*d2 - c2*d1 + c3*d0
+    hs(4, clamp_h(s0 + d0 * 0.1)); hs(5, clamp_h(s1 + d1 * 0.1))
+    hs(6, clamp_h(s2 + d2 * 0.1)); hs(7, clamp_h(s3 + d3 * 0.1))
 }
 
-fn compute_logits() with Mut, Div {
+// mode: 0 = diagonal, 1 = O-SSM (octonion), 2 = H-SSM-8 (dual quaternion)
+fn model_step(token: i64, mode: i64) with Mut, Div, Panic {
+    if mode == 1 { model_step_ossm(token) }
+    else {
+        if mode == 2 { model_step_hssm8(token) }
+        else { model_step_diag(token) }
+    }
+}
+
+fn compute_logits() with Mut, Div, Panic {
     var c = 0
     while c < 10 {
         var s = 0.0
         var d = 0
-        while d < 8 { s = s + hg(d) * wg(176 + d * 10 + c); d = d + 1 }
+        while d < 8 { s = s + hg(d) * wg(120 + d * 10 + c); d = d + 1 }
         L[c] = (s * 100000000.0) as i64
         c = c + 1
     }
 }
 
-fn get_pred() -> i64 with Div {
+fn get_pred() -> i64 with Mut, Div, Panic {
     var best = 0
     var bv = (L[0] as f64) / 100000000.0
     var i = 1
@@ -268,7 +298,6 @@ fn get_pred() -> i64 with Div {
 }
 
 fn update_output(tgt: i64, lr: f64) with Mut, Div, Panic {
-    // Softmax + cross-entropy gradient on output layer
     var mx = (L[0] as f64) / 100000000.0
     var i = 1
     while i < 10 {
@@ -288,7 +317,7 @@ fn update_output(tgt: i64, lr: f64) with Mut, Div, Panic {
         let hd = hg(d)
         var c = 0
         while c < 10 {
-            let idx = 176 + d * 10 + c
+            let idx = 120 + d * 10 + c
             var g = hd * probs[c]
             if g > 0.3 { g = 0.3 } if g < 0.0 - 0.3 { g = 0.0 - 0.3 }
             let m = (MOM[idx] as f64) / 100000000.0 * 0.9 + g
@@ -300,9 +329,9 @@ fn update_output(tgt: i64, lr: f64) with Mut, Div, Panic {
     }
 }
 
-fn run_config(is_cross: i64, seq_len: i64) -> f64 with IO, Mut, Div, Panic {
+fn run_config(mode: i64, seq_len: i64) -> f64 with IO, Mut, Div, Panic {
     rng_seed(55555 + seq_len * 100, 77777 + seq_len * 100)
-    init_model(is_cross)
+    init_model()
 
     let n_train = 200
     let n_epochs = 40
@@ -314,14 +343,13 @@ fn run_config(is_cross: i64, seq_len: i64) -> f64 with IO, Mut, Div, Panic {
         var s = 0
         while s < n_train {
             let label = generate_sample_lo(seq_len)
-            // Clamp label to 0-9
             var tgt = label % 10
             if tgt < 0 { tgt = tgt + 10 }
             var d = 0
             while d < 8 { H[d] = 0; d = d + 1 }
             var t = 0
             while t < SEQ_POS {
-                model_step(SEQ[t], is_cross)
+                model_step(SEQ[t], mode)
                 t = t + 1
             }
             compute_logits()
@@ -336,21 +364,20 @@ fn run_config(is_cross: i64, seq_len: i64) -> f64 with IO, Mut, Div, Panic {
         ep = ep + 1
     }
 
-    // Evaluate
     rng_seed(99999 + seq_len, 11111 + seq_len)
     var correct = 0
-    var s = 0
-    while s < 200 {
+    var ev = 0
+    while ev < 200 {
         let label = generate_sample_lo(seq_len)
         var tgt = label % 10
         if tgt < 0 { tgt = tgt + 10 }
         var d = 0
         while d < 8 { H[d] = 0; d = d + 1 }
         var t = 0
-        while t < SEQ_POS { model_step(SEQ[t], is_cross); t = t + 1 }
+        while t < SEQ_POS { model_step(SEQ[t], mode); t = t + 1 }
         compute_logits()
         if get_pred() == tgt { correct = correct + 1 }
-        s = s + 1
+        ev = ev + 1
     }
     let acc = (correct as f64) / 200.0 * 100.0
     print("    Eval: "); print(acc); print("%\n")
@@ -359,46 +386,47 @@ fn run_config(is_cross: i64, seq_len: i64) -> f64 with IO, Mut, Div, Panic {
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     print("═══════════════════════════════════════════════════════════════\n")
-    print("  ListOps Benchmark: O-SSM vs Diagonal (LRA-style)\n")
+    print("  ListOps: O-SSM vs H-SSM-8 vs Diagonal (LRA-style)\n")
     print("═══════════════════════════════════════════════════════════════\n\n")
     print("  Ops: MIN(10) MAX(11) MED(12), Operands: 0-9\n")
     print("  Classes: 10 (result digit 0-9)\n")
     print("  Random baseline: 10%\n\n")
 
-    var cross_wins = 0
-
     print("--- SeqLen=10 ---\n")
-    print("  O-SSM:\n")
-    let c1 = run_config(1, 10)
+    print("  O-SSM (octonion recurrence):\n")
+    let o1 = run_config(1, 10)
+    print("  H-SSM-8 (dual quaternion):\n")
+    let h1 = run_config(2, 10)
     print("  Diagonal:\n")
     let d1 = run_config(0, 10)
-    if c1 > d1 { cross_wins = cross_wins + 1 }
 
     print("\n--- SeqLen=15 ---\n")
     print("  O-SSM:\n")
-    let c2 = run_config(1, 15)
+    let o2 = run_config(1, 15)
+    print("  H-SSM-8:\n")
+    let h2 = run_config(2, 15)
     print("  Diagonal:\n")
     let d2 = run_config(0, 15)
-    if c2 > d2 { cross_wins = cross_wins + 1 }
 
     print("\n--- SeqLen=20 ---\n")
     print("  O-SSM:\n")
-    let c3 = run_config(1, 20)
+    let o3 = run_config(1, 20)
+    print("  H-SSM-8:\n")
+    let h3 = run_config(2, 20)
     print("  Diagonal:\n")
     let d3 = run_config(0, 20)
-    if c3 > d3 { cross_wins = cross_wins + 1 }
 
     print("\n═══════════════════════════════════════════════════════════════\n")
-    print("  RESULTS\n")
+    print("  RESULTS (eval accuracy %)\n")
     print("═══════════════════════════════════════════════════════════════\n")
-    print("  Config       O-SSM      Diagonal   Random(10%)\n")
-    print("  SeqLen=10    "); print(c1); print("%   "); print(d1); print("%\n")
-    print("  SeqLen=15    "); print(c2); print("%   "); print(d2); print("%\n")
-    print("  SeqLen=20    "); print(c3); print("%   "); print(d3); print("%\n")
-    print("\n  [PASS] O-SSM wins "); print_int(cross_wins); print("/3 configs\n")
+    print("  SeqLen   O-SSM    H-SSM-8  Diagonal  Random\n")
+    print("  10       "); print(o1); print("   "); print(h1); print("   "); print(d1); print("   10%\n")
+    print("  15       "); print(o2); print("   "); print(h2); print("   "); print(d2); print("   10%\n")
+    print("  20       "); print(o3); print("   "); print(h3); print("   "); print(d3); print("   10%\n")
+    print("\n  [PASS] All three modes completed (empirical comparison; no winner required)\n")
     print("  [PASS] ListOps = nested hierarchical expression evaluation\n")
 
-    print("\nPassed: 3\nFailed: 0\n")
+    print("\nPassed: 1\nFailed: 0\n")
     println("ALL PASS")
     0
 }
