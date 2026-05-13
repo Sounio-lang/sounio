@@ -33,6 +33,8 @@ The purpose is not to make every ambitious part of the repository sound finished
 | [paper-bundle.md](paper-bundle.md) | Paper/reproducibility bundle structure and acceptance criteria. |
 | [sunil-brief.md](sunil-brief.md) | Short, honest briefing frame for a senior PL/science conversation. |
 | [spec-evidence-matrix.v1.tsv](spec-evidence-matrix.v1.tsv) | Machine-checkable spec area to evidence map used by the spec-drift gate. |
+| [public-claim-registry.v1.tsv](public-claim-registry.v1.tsv) | Machine-checkable public PL claim registry with closure status and evidence rules. |
+| [doc-claim-surface.v1.tsv](doc-claim-surface.v1.tsv) | Machine-checkable coverage map for public, downgraded, internal, and historical repo docs. |
 
 ## Reproducibility Entry Point
 
@@ -60,6 +62,12 @@ Run the spec/evidence drift gate:
 
 ```bash
 bash scripts/ci/serious_language_spec_drift_gate.sh
+```
+
+Run the public claim-closure gate:
+
+```bash
+bash scripts/ci/serious_language_claim_closure_gate.sh
 ```
 
 The script pins `SOUC_BIN` to this checkout's `bin/souc` by default. Override only deliberately:

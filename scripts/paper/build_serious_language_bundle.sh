@@ -147,6 +147,7 @@ cat >"$MANIFEST" <<EOF
     "linux_x86_64_compile_run": ["hello-check.log", "hello-run.log"],
     "real_world_defensibility": ["docs/serious-language/real-world-defensibility.md", "docs/serious-language/readiness-ledger.md"],
     "spec_evidence_drift": ["spec-drift.log", "spec-drift/RESULTS.md", "spec-drift/summary.v1.json", "spec-drift/conformance.log", "spec-drift/conformance/summary.v1.tsv", "docs/serious-language/spec-evidence-matrix.v1.tsv"],
+    "claim_closure": ["claim-closure.log", "claim-closure/RESULTS.md", "claim-closure/summary.v1.json", "docs/serious-language/public-claim-registry.v1.tsv", "docs/serious-language/doc-claim-surface.v1.tsv"],
     "docs_governance": ["docs-consistency.log", "docs-registry.log"],
     "serious_conformance": ["serious-conformance.log", "serious-conformance/summary.v1.tsv", "serious-conformance/summary.v1.json"],
     "sounio_suite": ["sio-suite.log"],
@@ -179,6 +180,7 @@ run_step required hello-run "$SOUC_BIN" run examples/hello.sio
 run_step required docs-consistency bash scripts/dev/check_docs_consistency.sh
 run_step required docs-registry bash scripts/dev/check_docs_registry.sh
 run_step required spec-drift env SOUNIO_SPEC_DRIFT_ARTIFACT_ROOT="$ARTIFACT_ROOT/spec-drift" bash scripts/ci/serious_language_spec_drift_gate.sh
+run_step required claim-closure env SOUNIO_CLAIM_CLOSURE_ARTIFACT_ROOT="$ARTIFACT_ROOT/claim-closure" bash scripts/ci/serious_language_claim_closure_gate.sh
 
 if [[ "$FULL_MODE" == "1" ]]; then
   run_step optional serious-conformance env SOUNIO_SERIOUS_CONFORMANCE_ARTIFACT_ROOT="$ARTIFACT_ROOT/serious-conformance" SOUNIO_SERIOUS_CONFORMANCE_SOUC_BIN="$SOUC_BIN" SOUNIO_SERIOUS_CONFORMANCE_STDLIB_PATH="$SOUNIO_STDLIB_PATH" bash scripts/ci/serious_language_conformance_gate.sh
@@ -201,6 +203,7 @@ cat >>"$RESULTS" <<EOF
 ## Claim Review Checklist
 
 - Compare every external claim against \`docs/serious-language/readiness-ledger.md\`.
+- Confirm public PL claims close through \`docs/serious-language/public-claim-registry.v1.tsv\` and \`docs/serious-language/doc-claim-surface.v1.tsv\`.
 - Downgrade any claim whose supporting command failed or was not run.
 - For external-facing papers/slides/abstracts, run the required \`bin/llm-offload\` review and log the result.
 - Record remaining blockers before submission.
