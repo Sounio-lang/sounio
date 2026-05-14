@@ -61,9 +61,11 @@ SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 bin/souc run tests/stdli
 The test surface covers:
 
 - constant derivative equals zero,
-- power witness `t^0.5` for `alpha = 0.7, 0.8, 0.9`,
+- power witnesses `t` and `t^2` at `t = 1.0`, `dt = 0.01`, and
+  `alpha = 0.7, 0.8, 0.9`,
 - Mittag-Leffler decay identity,
-- fractional-decay L1 residual checks for `alpha = 0.7` and `alpha = 0.9`.
+- fractional-decay L1 solve-vs-analytical checks over `t in [0, 24h]`,
+  `dt = 0.1h`, and `CL/V = 0.1 h^-1` for `alpha = 0.7` and `alpha = 0.9`.
 
 ## Caveats
 
@@ -71,3 +73,9 @@ The L1 method is first-order to `2-alpha` order under the usual smoothness
 assumptions and degrades near weakly singular initial behavior. The current
 tests use finite tolerances appropriate for a small fixed-grid stdlib witness,
 not a high-precision fractional calculus benchmark.
+
+The linear power witness is exact to floating-point tolerance. The quadratic
+power witness is below `1e-3` at `alpha = 0.7`; at `alpha = 0.8` and
+`alpha = 0.9`, the mathematically expected fixed-grid L1 truncation error at
+`dt = 0.01` is about `1.7e-3` and `2.9e-3`, so the committed regression uses a
+`3e-3` guard for those two points rather than masking the discretization error.
