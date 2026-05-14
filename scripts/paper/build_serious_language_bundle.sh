@@ -147,7 +147,7 @@ cat >"$MANIFEST" <<EOF
     "linux_x86_64_compile_run": ["hello-check.log", "hello-run.log"],
     "real_world_defensibility": ["docs/serious-language/real-world-defensibility.md", "docs/serious-language/readiness-ledger.md"],
     "spec_evidence_drift": ["spec-drift.log", "spec-drift/RESULTS.md", "spec-drift/summary.v1.json", "spec-drift/conformance.log", "spec-drift/conformance/summary.v1.tsv", "docs/serious-language/spec-evidence-matrix.v1.tsv"],
-    "claim_closure": ["claim-closure.log", "claim-closure/RESULTS.md", "claim-closure/summary.v1.json", "docs/serious-language/public-claim-registry.v1.tsv", "docs/serious-language/doc-claim-surface.v1.tsv"],
+    "claim_closure": ["claim-closure.log", "claim-closure/RESULTS.md", "claim-closure/summary.v1.json", "docs/serious-language/public-claim-registry.v1.tsv", "docs/serious-language/doc-claim-surface.v1.tsv", "docs/serious-language/claim-line-annotations.v1.tsv"],
     "docs_governance": ["docs-consistency.log", "docs-registry.log"],
     "serious_conformance": ["serious-conformance.log", "serious-conformance/summary.v1.tsv", "serious-conformance/summary.v1.json"],
     "sounio_suite": ["sio-suite.log"],
@@ -204,6 +204,7 @@ cat >>"$RESULTS" <<EOF
 
 - Compare every external claim against \`docs/serious-language/readiness-ledger.md\`.
 - Confirm public PL claims close through \`docs/serious-language/public-claim-registry.v1.tsv\` and \`docs/serious-language/doc-claim-surface.v1.tsv\`.
+- Confirm high-value public claims have exact anchors in \`docs/serious-language/claim-line-annotations.v1.tsv\`.
 - Downgrade any claim whose supporting command failed or was not run.
 - For external-facing papers/slides/abstracts, run the required \`bin/llm-offload\` review and log the result.
 - Record remaining blockers before submission.

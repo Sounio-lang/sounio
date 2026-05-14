@@ -61,9 +61,10 @@ Before any paper or slide deck says a claim is stable:
 1. The claim appears in `readiness-ledger.md`.
 2. Any spec-backed claim appears in `spec-evidence-matrix.v1.tsv` with appropriate status. The readiness ledger governs public wording; the matrix governs spec-area evidence status.
 3. Any public PL claim closes through `public-claim-registry.v1.tsv` and any repo doc surface carrying the claim is covered by `doc-claim-surface.v1.tsv`.
-4. The generated bundle includes a command or artifact supporting it.
-5. Failures are either fixed or explicitly downgraded in wording.
-6. External-facing prose has at least two-provider `bin/llm-offload` review.
+4. Any high-value public PL claim has an exact line anchor in `claim-line-annotations.v1.tsv`.
+5. The generated bundle includes a command or artifact supporting it.
+6. Failures are either fixed or explicitly downgraded in wording.
+7. External-facing prose has at least two-provider `bin/llm-offload` review.
 
 ## Paper Structure
 

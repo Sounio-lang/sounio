@@ -43,7 +43,7 @@ The work needed for serious programming-language credibility is mostly consolida
 | Language specification | A serious language needs a spec that matches behavior. | Audit `docs/spec/LANGUAGE_SPECIFICATION.md` against run-pass and compile-fail cases. |
 | Conformance corpus | Reviewer trust improves when behavior is executable. | Maintain and expand `tests/conformance/manifest.v1.tsv` through `scripts/ci/serious_language_conformance_gate.sh`. |
 | Spec drift | Engineers need to know which spec claims are executable today. | Keep `docs/serious-language/spec-evidence-matrix.v1.tsv` green through `scripts/ci/serious_language_spec_drift_gate.sh`. |
-| Public claim closure | Engineers need to know that docs cannot silently overclaim PL support. | Keep `docs/serious-language/public-claim-registry.v1.tsv`, `docs/serious-language/doc-claim-surface.v1.tsv`, and `scripts/ci/serious_language_claim_closure_gate.sh` green. |
+| Public claim closure | Engineers need to know that docs cannot silently overclaim PL support. | Keep `docs/serious-language/public-claim-registry.v1.tsv`, `docs/serious-language/doc-claim-surface.v1.tsv`, `docs/serious-language/claim-line-annotations.v1.tsv`, and `scripts/ci/serious_language_claim_closure_gate.sh` green. |
 | Formal status | Mixed proof status can be misread as all-proven or all-scaffold. | Generate and publish a Lean `sorry`/`axiom` status table per paper bundle. |
 | Tooling/install | Adoption discussions need one boring path. | Use checked-artifact install instructions first; defer broad package promises. |
 | Research boundaries | GPU, hypercomplex, ontology, and clinical surfaces have different maturity. | Name gate, hardware, and scope for each claim. |
