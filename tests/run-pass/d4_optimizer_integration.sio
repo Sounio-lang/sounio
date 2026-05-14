@@ -1,0 +1,199 @@
+//@ run-pass
+//! D.4 tensor-level optimizer integration.
+
+use tensor::types::{shape1, tensor_get, tensor_set}
+use tensor::ops::{tensor_scalar, tensor_zeros, tensor_free}
+use nn::optimizer::{
+    param_store_new, param_store_register, param_store_zero_grad,
+    param_store_set_grad_value, param_store_grad_value,
+    adam_new, adam_new_full, adam_step, adamw_step,
+    sgd_new_with_momentum, sgd_step,
+    clip_grad_global_norm, clip_grad_value,
+    param_store_free, d4_optimizer_abs, d4_optimizer_sqrt,
+}
+
+fn check_near(a: f64, b: f64, tol: f64) -> bool {
+    d4_optimizer_abs(a - b) <= tol
+}
+
+fn test_parameter_store_zero_grad() with Alloc, Mut, Panic, Div {
+    var w = tensor_scalar(1.0)
+    var store = param_store_new()
+    let pid = param_store_register(&!store, &!w, 17)
+    param_store_set_grad_value(&!store, pid, 0 as usize, 9.0)
+    assert(check_near(param_store_grad_value(&store, pid, 0 as usize), 9.0, 1.0e-12))
+    param_store_zero_grad(&!store)
+    assert(check_near(param_store_grad_value(&store, pid, 0 as usize), 0.0, 1.0e-12))
+    param_store_free(&!store)
+    tensor_free(&!w)
+}
+
+fn test_adam_quadratic() with Alloc, Mut, Panic, Div {
+    var w = tensor_scalar(0.0)
+    var store = param_store_new()
+    let pid = param_store_register(&!store, &!w, 1)
+    var opt = adam_new(0.01)
+    var step: usize = 0 as usize
+    while step < 1000 as usize {
+        let v = tensor_get(&w, 0 as usize)
+        param_store_zero_grad(&!store)
+        param_store_set_grad_value(&!store, pid, 0 as usize, 2.0 * (v - 3.0))
+        adam_step(&!opt, &!store)
+        step = step + 1 as usize
+    }
+    let final_w = tensor_get(&w, 0 as usize)
+    assert(d4_optimizer_abs(final_w - 3.0) < 0.01)
+    param_store_free(&!store)
+    tensor_free(&!w)
+}
+
+fn test_adamw_quadratic_stable() with Alloc, Mut, Panic, Div {
+    var w = tensor_scalar(0.0)
+    var store = param_store_new()
+    let pid = param_store_register(&!store, &!w, 2)
+    var opt = adam_new_full(0.01, 0.9, 0.999, 1.0e-8)
+    var step: usize = 0 as usize
+    while step < 1200 as usize {
+        let v = tensor_get(&w, 0 as usize)
+        param_store_zero_grad(&!store)
+        param_store_set_grad_value(&!store, pid, 0 as usize, 2.0 * (v - 3.0))
+        adamw_step(&!opt, &!store, 0.001)
+        step = step + 1 as usize
+    }
+    let final_w = tensor_get(&w, 0 as usize)
+    assert(final_w > 2.8)
+    assert(final_w < 3.1)
+    param_store_free(&!store)
+    tensor_free(&!w)
+}
+
+fn lin_x(i: usize) -> f64 {
+    ((i as f64) - 25.0) / 10.0
+}
+
+fn lin_y(i: usize) -> f64 {
+    2.0 * lin_x(i) - 1.0
+}
+
+fn test_linear_regression_adam_and_sgd() with Alloc, Mut, Panic, Div {
+    var wb = tensor_zeros(shape1(2 as usize))
+    tensor_set(&!wb, 0 as usize, 0.0)
+    tensor_set(&!wb, 1 as usize, 0.0)
+    var store = param_store_new()
+    let pid = param_store_register(&!store, &!wb, 3)
+    var opt = adam_new(0.01)
+    var step: usize = 0 as usize
+    while step < 2000 as usize {
+        var gw = 0.0
+        var gb = 0.0
+        var i: usize = 0 as usize
+        while i < 50 as usize {
+            let x = lin_x(i)
+            let pred = tensor_get(&wb, 0 as usize) * x + tensor_get(&wb, 1 as usize)
+            let err = pred - lin_y(i)
+            gw = gw + 2.0 * err * x / 50.0
+            gb = gb + 2.0 * err / 50.0
+            i = i + 1 as usize
+        }
+        param_store_zero_grad(&!store)
+        param_store_set_grad_value(&!store, pid, 0 as usize, gw)
+        param_store_set_grad_value(&!store, pid, 1 as usize, gb)
+        adam_step(&!opt, &!store)
+        step = step + 1 as usize
+    }
+    assert(d4_optimizer_abs(tensor_get(&wb, 0 as usize) - 2.0) < 0.1)
+    assert(d4_optimizer_abs(tensor_get(&wb, 1 as usize) + 1.0) < 0.1)
+    param_store_free(&!store)
+    tensor_free(&!wb)
+
+    var wb2 = tensor_zeros(shape1(2 as usize))
+    var store2 = param_store_new()
+    let pid2 = param_store_register(&!store2, &!wb2, 4)
+    var sgd = sgd_new_with_momentum(0.01, 0.9)
+    step = 0 as usize
+    while step < 2500 as usize {
+        var gw2 = 0.0
+        var gb2 = 0.0
+        var j: usize = 0 as usize
+        while j < 50 as usize {
+            let x2 = lin_x(j)
+            let pred2 = tensor_get(&wb2, 0 as usize) * x2 + tensor_get(&wb2, 1 as usize)
+            let err2 = pred2 - lin_y(j)
+            gw2 = gw2 + 2.0 * err2 * x2 / 50.0
+            gb2 = gb2 + 2.0 * err2 / 50.0
+            j = j + 1 as usize
+        }
+        param_store_zero_grad(&!store2)
+        param_store_set_grad_value(&!store2, pid2, 0 as usize, gw2)
+        param_store_set_grad_value(&!store2, pid2, 1 as usize, gb2)
+        sgd_step(&!sgd, &!store2)
+        step = step + 1 as usize
+    }
+    assert(d4_optimizer_abs(tensor_get(&wb2, 0 as usize) - 2.0) < 0.1)
+    assert(d4_optimizer_abs(tensor_get(&wb2, 1 as usize) + 1.0) < 0.1)
+    param_store_free(&!store2)
+    tensor_free(&!wb2)
+}
+
+fn test_gradient_clipping() with Alloc, Mut, Panic, Div {
+    var w = tensor_zeros(shape1(2 as usize))
+    var store = param_store_new()
+    let pid = param_store_register(&!store, &!w, 5)
+    param_store_set_grad_value(&!store, pid, 0 as usize, 30.0)
+    param_store_set_grad_value(&!store, pid, 1 as usize, 40.0)
+    let pre = clip_grad_global_norm(&!store, 1.0)
+    let post = d4_optimizer_sqrt(
+        param_store_grad_value(&store, pid, 0 as usize) * param_store_grad_value(&store, pid, 0 as usize)
+        + param_store_grad_value(&store, pid, 1 as usize) * param_store_grad_value(&store, pid, 1 as usize)
+    )
+    assert(check_near(pre, 50.0, 1.0e-9))
+    assert(post <= 1.000001)
+    param_store_set_grad_value(&!store, pid, 0 as usize, 5.0)
+    param_store_set_grad_value(&!store, pid, 1 as usize, 0.0 - 5.0)
+    clip_grad_value(&!store, 0.25)
+    assert(check_near(param_store_grad_value(&store, pid, 0 as usize), 0.25, 1.0e-12))
+    assert(check_near(param_store_grad_value(&store, pid, 1 as usize), 0.0 - 0.25, 1.0e-12))
+    param_store_free(&!store)
+    tensor_free(&!w)
+}
+
+fn run_adam_100() -> f64 with Alloc, Mut, Panic, Div {
+    var w = tensor_scalar(0.0)
+    var store = param_store_new()
+    let pid = param_store_register(&!store, &!w, 6)
+    var opt = adam_new(0.01)
+    var step: usize = 0 as usize
+    while step < 100 as usize {
+        let v = tensor_get(&w, 0 as usize)
+        param_store_zero_grad(&!store)
+        param_store_set_grad_value(&!store, pid, 0 as usize, 2.0 * (v - 3.0))
+        adam_step(&!opt, &!store)
+        step = step + 1 as usize
+    }
+    let out = tensor_get(&w, 0 as usize)
+    param_store_free(&!store)
+    tensor_free(&!w)
+    out
+}
+
+fn test_determinism() with Alloc, Mut, Panic, Div {
+    let a = run_adam_100()
+    let b = run_adam_100()
+    assert(a == b)
+}
+
+pub fn main() with IO, Alloc, Mut, Panic, Div {
+    println("d4 parameter store")
+    test_parameter_store_zero_grad()
+    println("d4 adam quadratic")
+    test_adam_quadratic()
+    println("d4 adamw")
+    test_adamw_quadratic_stable()
+    println("d4 linear")
+    test_linear_regression_adam_and_sgd()
+    println("d4 clipping")
+    test_gradient_clipping()
+    println("d4 determinism")
+    test_determinism()
+    println("D4_OPTIMIZER_INTEGRATION_PASS")
+}
