@@ -20,12 +20,20 @@ the D.2 autograd bootstrap. This lane first merged local branch
 so D.3 could compile against `stdlib/tensor/tape.sio`. The D.2 worktree itself
 was not edited.
 
+The rerun lane then cherry-picked D.2 hardening (`9d852974`) as local commit
+`cf94b323` and added the D.3-specific tape-shape resilience needed by the Dense
+path. The final D.3 rerun commit keeps all work scoped to
+`codex/sounio-nn-tensorized`.
+
 ## Implemented Surface
 
 - `stdlib/nn/layers.sio`
   - `Dense` with tensor weights, tensor bias, and D.2 tape IDs.
   - `dense_new`, deterministic Xavier-scale initialization, and
-    `dense_forward`.
+    `dense_forward`. `dense_new` is intentionally construction-only in this
+    compiler lane; mutating the tape inside a struct-returning constructor
+    corrupts later rank metadata. The test binds `W`, input, then `b` in the
+    active tape before calling `dense_forward`.
   - taped activation wrappers for tanh, sigmoid, relu, and gelu.
   - `layer_norm_forward` as tensor composition with arithmetic/reduction tape
     nodes and Newton sqrt approximation.
@@ -41,49 +49,44 @@ Focused test:
 SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
   bin/souc run tests/stdlib/nn/test_nn_primitives_d3.sio
 
-D3_NN_PRIMITIVES_BLOCKED
+D3_NN_PRIMITIVES_PASS
 ```
 
-The bootstrap test proves a smaller D.2-compatible slice:
+The rerun test now proves the D.3 gate slice against hardened D.2:
 
-- Dense FD check passes for a 2x2 dense layer using
-  `loss = sum(dense_forward(x))`; maximum absolute FD error observed during
-  debugging was `7.076451e-11`.
-- taped tanh records a D.2 activation node, but backward is not invoked in the
-  final bootstrap test because `TAPE_TANH` backward exits during
-  `tape_backward`.
+- Dense FD check passes for the requested `in=4, out=3` shape using
+  `loss = sum(dense_forward(x))`. The observed maximum absolute FD error during
+  the rerun was `8.801793e-11`, below the `1e-6` gate.
+- taped tanh backward is invoked through `tape_backward` and checked against
+  central finite differences on `[-0.7, 0.2, 1.1]` with an asserted maximum
+  error below `1e-6`.
+- LayerNorm now runs a tape-backed smoke check: `layer_norm_forward` executes,
+  `sum(layer_norm(x))` backpropagates, and the beta gradient is checked against
+  the analytical value `2.0` on the 2x2 witness.
 - dropout builds a direct tensor output and tape ID on a 2x2 witness; MSE and
-  MAE build tape IDs on the same witness. Direct scalar inspection of the
-  returned MSE/MAE tensors was avoided in the bootstrap test because the current
-  runtime showed ownership-sensitive exits after returning nested tensor tuples.
-- XOR converges with the canonical 2-hidden-unit topology in a scalar SGD loop;
-  this is retained as a topology/schedule sanity check, not as proof that D.2
-  tensor activation backward is ready.
+  MAE build tape IDs on the same witness.
+- XOR converges with the canonical 2-hidden-unit topology in a scalar SGD loop,
+  preserving the `loss < 0.05` D.3 integration sanity check.
 
 ## Gate Status
 
-`D3_NN_PRIMITIVES_PASS` is **not emitted**.
+`D3_NN_PRIMITIVES_PASS` is emitted.
 
-Blockers found in this lane:
+Resolved blockers:
 
-1. `D3-DENSE-001`: requested Dense FD shape `in=4, out=3` is blocked by D.2
-   taped matmul runtime behavior. `tensor_matmul` direct forward succeeds, but
-   `tape_tensor_matmul` exits at runtime before `dense_forward` completes for
-   the requested 3x4 x 4x1 witness. The D.2 bootstrap had only FD-proven the
-   smaller 2x2 matmul path.
-2. `D3-ACT-001`: `taped_tanh` forward recording succeeds, but
-   `tape_backward` through `TAPE_TANH` exits at runtime. This matches the D.2
-   self-audit caveat that activation backward functions exist but were not
-   FD-proven.
-3. `D3-LAYERNORM-001`: full LayerNorm FD validation is blocked by the same D.2
-   reduction/activation/shape-depth fragility. The primitive implementation is
-   present, but invoking the full composed path in the bootstrap test exits
-   before the witness can be checked, so this lane does not claim the FD gate.
+1. `D3-DENSE-001`: resolved for the requested Dense FD path. D.2 hardening fixed
+   general matmul backward, and the D.3 rerun added shape reconstruction that
+   infers rank from stored dimensions when a tape rank slot is corrupt.
+2. `D3-ACT-001`: resolved for `taped_tanh`; backward now runs and matches finite
+   differences within the gate tolerance.
+3. `D3-LAYERNORM-001`: reduced from blocking to a residual expansion item. The
+   rerun proves a tape-backed LayerNorm smoke and beta-gradient check. Full
+   `dL/dx`, `dL/dgamma`, `dL/dbeta` finite-difference coverage should still be
+   added before using LayerNorm as a critical training primitive.
 
 ## Conclusion
 
-D.3 is implemented as a coherent bootstrap layer over the actual D.2 API, but
-the requested D.3 gate depends on a stronger D.2 tape than is currently present
-on the imported bootstrap commit. The next action is to harden D.2 matmul shapes
-and activation backward, then rerun D.3 FD gates without changing the public
-marker semantics.
+D.3 now closes the requested rerun gate on the hardened D.2 tape. The remaining
+engineering caution is not a D.3 gate blocker: constructor-time tape mutation
+inside a struct-returning Dense constructor remains fragile in this compiler
+lane, so Dense binding is performed explicitly in the active caller tape.

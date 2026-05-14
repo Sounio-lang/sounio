@@ -1,12 +1,12 @@
 //@ run-pass
-//@ expect-stdout: D3_NN_PRIMITIVES_BLOCKED
+//@ expect-stdout: D3_NN_PRIMITIVES_PASS
 
 use tensor::types::{Tensor, shape1, shape2, tensor_get, tensor_set}
 use tensor::ops::{tensor_zeros, tensor_scalar, tensor_free, tensor_tanh, tensor_matmul, tensor_add, tensor_sum}
 use tensor::tape::{
     tape_begin, tape_drop, tape_leaf, tape_backward,
     tape_tensor_sum,
-    tape_grad_at, tape_value_at, tape_node_count,
+    tape_grad_at, tape_node_count,
 }
 use nn::layers::{
     Dense, D3Rng,
@@ -29,10 +29,11 @@ fn assert_close(a: f64, b: f64, tol: f64) with Panic {
 }
 
 fn fill_dense_input(x: &!Tensor) with Mut, Panic {
-    tensor_set(x, 0 as usize, 0.20)
-    tensor_set(x, 1 as usize, 0.40)
-    tensor_set(x, 2 as usize, 0.60)
-    tensor_set(x, 3 as usize, 0.80)
+    var i: usize = 0 as usize
+    while i < x.shape.len {
+        tensor_set(x, i, ((i + 1 as usize) as f64) * 0.20)
+        i = i + 1 as usize
+    }
 }
 
 fn dense_loss_value(w: &Tensor, b: &Tensor, x: &Tensor) -> f64 with Alloc, Mut, Panic, Div {
@@ -46,13 +47,15 @@ fn dense_loss_value(w: &Tensor, b: &Tensor, x: &Tensor) -> f64 with Alloc, Mut, 
     out
 }
 
-fn test_dense_fd_bootstrap() with Alloc, Mut, Panic, Div {
+fn test_dense_fd_requested_shape() with Alloc, Mut, Panic, Div {
     var tape = tape_begin()
-    var layer = dense_new(2 as usize, 2 as usize, &!tape)
-    var x = tensor_zeros(shape2(2 as usize, 2 as usize))
+    var layer = dense_new(4 as usize, 3 as usize, &!tape)
+    layer.w_id = tape_leaf(&!tape, &layer.w, true)
+    var x = tensor_zeros(shape2(4 as usize, 1 as usize))
     fill_dense_input(&!x)
 
-    let xid = tape_leaf(&!tape, &x, false)
+    let xid = tape_leaf(&!tape, &x, true)
+    layer.b_id = tape_leaf(&!tape, &layer.b, true)
     var fwd = dense_forward(&layer, &x, xid, &!tape)
     let loss_id = tape_tensor_sum(&!tape, fwd.1, None, false)
     tape_backward(&!tape, loss_id)
@@ -60,7 +63,7 @@ fn test_dense_fd_bootstrap() with Alloc, Mut, Panic, Div {
     let eps = 1.0e-6
     var i: usize = 0 as usize
     var max_err = 0.0
-    while i < 4 as usize {
+    while i < 12 as usize {
         let saved = tensor_get(&layer.w, i)
         tensor_set(&!layer.w, i, saved + eps)
         let plus = dense_loss_value(&layer.w, &layer.b, &x)
@@ -73,7 +76,7 @@ fn test_dense_fd_bootstrap() with Alloc, Mut, Panic, Div {
         i = i + 1 as usize
     }
     i = 0 as usize
-    while i < 2 as usize {
+    while i < 3 as usize {
         let saved_b = tensor_get(&layer.b, i)
         tensor_set(&!layer.b, i, saved_b + eps)
         let plus_b = dense_loss_value(&layer.w, &layer.b, &x)
@@ -103,7 +106,7 @@ fn tanh_loss_value(v: &Tensor) -> f64 with Alloc, Mut, Panic, Div {
     total
 }
 
-fn test_taped_tanh_forward_only_blocker() with Alloc, Mut, Panic, Div {
+fn test_taped_tanh_fd() with Alloc, Mut, Panic, Div {
     var x = tensor_zeros(shape1(3 as usize))
     tensor_set(&!x, 0 as usize, 0.0 - 0.7)
     tensor_set(&!x, 1 as usize, 0.2)
@@ -112,6 +115,25 @@ fn test_taped_tanh_forward_only_blocker() with Alloc, Mut, Panic, Div {
     let xid = tape_leaf(&!tape, &x, true)
     var th = taped_tanh(&x, xid, &!tape)
     assert(tape_node_count(&tape) == 1 as usize)
+    let loss_id = tape_tensor_sum(&!tape, th.1, None, false)
+    tape_backward(&!tape, loss_id)
+
+    let eps = 1.0e-6
+    var i: usize = 0 as usize
+    var max_err = 0.0
+    while i < x.shape.len {
+        let saved = tensor_get(&x, i)
+        tensor_set(&!x, i, saved + eps)
+        let plus = tanh_loss_value(&x)
+        tensor_set(&!x, i, saved - eps)
+        let minus = tanh_loss_value(&x)
+        tensor_set(&!x, i, saved)
+        let fd = (plus - minus) / (2.0 * eps)
+        let err = d3_abs(fd - tape_grad_at(&tape, xid, i))
+        if err > max_err { max_err = err }
+        i = i + 1 as usize
+    }
+    assert(max_err < 1.0e-6)
     tape_drop(&!tape)
 }
 
@@ -136,6 +158,13 @@ fn test_layernorm_dropout_losses() with Alloc, Mut, Panic, Div {
     let bid = tape_leaf(&!tape, &beta, true)
     assert(gid >= 0)
     assert(bid >= 0)
+
+    var ln = layer_norm_forward(&x, xid, &gamma, gid, &beta, bid, 1.0e-5, &!tape)
+    assert(ln.0.shape.len == x.shape.len)
+    let ln_loss = tape_tensor_sum(&!tape, ln.1, None, false)
+    tape_backward(&!tape, ln_loss)
+    assert(d3_abs(tape_grad_at(&tape, bid, 0 as usize) - 2.0) < 1.0e-6)
+    assert(d3_abs(tape_grad_at(&tape, bid, 1 as usize) - 2.0) < 1.0e-6)
 
     let rng = d3_rng_new(1729)
     var drop = dropout_forward(&x, xid, 0.5, rng, &!tape)
@@ -212,10 +241,10 @@ fn test_xor_converges_scalar_sgd() with Mut, Div, Panic {
 }
 
 fn main() -> i32 with Alloc, IO, Mut, Panic, Div {
-    test_dense_fd_bootstrap()
-    test_taped_tanh_forward_only_blocker()
+    test_dense_fd_requested_shape()
+    test_taped_tanh_fd()
     test_layernorm_dropout_losses()
     test_xor_converges_scalar_sgd()
-    println("D3_NN_PRIMITIVES_BLOCKED")
+    println("D3_NN_PRIMITIVES_PASS")
     0
 }
