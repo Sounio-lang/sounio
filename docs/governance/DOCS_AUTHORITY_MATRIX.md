@@ -84,6 +84,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.compiler.known-limitations | repo_only | docs/compiler/KNOWN_LIMITATIONS.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.metal-first-algebraic-gpu | repo_only | docs/compiler/METAL_FIRST_ALGEBRAIC_GPU.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.native-v2-serious-track | repo_only | docs/compiler/NATIVE_V2_SERIOUS_TRACK.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.compiler.numerical-determinism | repo_only | docs/compiler/numerical_determinism.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.nvidia-bare-metal | repo_only | docs/compiler/NVIDIA_BARE_METAL.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.octonion-algebra | repo_only | docs/compiler/OCTONION_ALGEBRA.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.package-import-resolution | repo_only | docs/compiler/PACKAGE_IMPORT_RESOLUTION.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -116,7 +117,19 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.dissertation.handoff.section-4-10-sobol-hdmr-package | repo_only | docs/dissertation/handoff/section_4_10_sobol_hdmr_package.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.pbpk-claim-truth-table | repo_only | docs/dissertation/pbpk_claim_truth_table.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.reconciliation-memo-2026-05-12 | repo_only | docs/dissertation/RECONCILIATION_MEMO_2026-05-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.d1-tensor-ops-v1 | repo_only | docs/dissertation/results/d1_tensor_ops_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.d5-caputo-scalar-v1 | repo_only | docs/dissertation/results/d5_caputo_scalar_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.determinism-audit-summary-v1 | repo_only | docs/dissertation/results/determinism_audit_summary_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.determinism-audit-v1 | repo_only | docs/dissertation/results/determinism_audit_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.m6-prior-update-v1 | repo_only | docs/dissertation/results/m6_prior_update_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.mc-cross-validation-lognormal-v1 | repo_only | docs/dissertation/results/mc_cross_validation_lognormal_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.mc-cross-validation-lognormal-v2 | repo_only | docs/dissertation/results/mc_cross_validation_lognormal_v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.mc-prior-family-sweep-v1 | repo_only | docs/dissertation/results/mc_prior_family_sweep_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.mc-prior-family-sweep-v2 | repo_only | docs/dissertation/results/mc_prior_family_sweep_v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.pbpk28-epistemic-v1 | repo_only | docs/dissertation/results/pbpk28_epistemic_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.prior-evolution-sprint-summary-v1 | repo_only | docs/dissertation/results/prior_evolution_sprint_summary_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.prior-evolution-sprint-summary-v2 | repo_only | docs/dissertation/results/prior_evolution_sprint_summary_v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.sobol-pce-semaglutide-v1 | repo_only | docs/dissertation/results/sobol_pce_semaglutide_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.curated-packages | repo_only | docs/ecosystem/CURATED_PACKAGES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.ecosystem-roadmap-2026 | repo_only | docs/ecosystem/ECOSYSTEM_ROADMAP_2026.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.pkg-manager-sota-position | repo_only | docs/ecosystem/PKG_MANAGER_SOTA_POSITION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

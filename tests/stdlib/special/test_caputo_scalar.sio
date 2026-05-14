@@ -1,0 +1,145 @@
+//@ run-pass
+// E2E tests for stdlib/special/caputo.sio.
+
+use special::caputo::{
+    caputo_l1_derivative,
+    caputo_l1_scale,
+    caputo_power_exact,
+    caputo_pow,
+    fractional_decay_ml,
+    mittag_leffler_e_alpha
+}
+
+fn d5_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn d5_rel_close(got: f64, expected: f64, rtol: f64, atol: f64) -> bool with Div {
+    let diff = d5_abs(got - expected)
+    let scale = if d5_abs(expected) > 1.0 { d5_abs(expected) } else { 1.0 }
+    return diff <= atol || diff / scale <= rtol
+}
+
+fn fill_constant(value: f64, n: i32) -> [f64; 512] with Mut {
+    var samples: [f64; 512] = [0.0; 512]
+    var i = 0
+    while i <= n {
+        samples[i] = value
+        i = i + 1
+    }
+    return samples
+}
+
+fn fill_power(beta: f64, dt: f64, n: i32) -> [f64; 512] with Mut, Div, Panic {
+    var samples: [f64; 512] = [0.0; 512]
+    var i = 0
+    while i <= n {
+        let t = (i as f64) * dt
+        samples[i] = caputo_pow(t, beta)
+        i = i + 1
+    }
+    return samples
+}
+
+fn fill_ml_decay(c0: f64, lambda: f64, alpha: f64, dt: f64, n: i32) -> [f64; 512] with Mut, Div, Panic {
+    var samples: [f64; 512] = [0.0; 512]
+    var i = 0
+    while i <= n {
+        let t = (i as f64) * dt
+        samples[i] = fractional_decay_ml(c0, lambda, t, alpha)
+        i = i + 1
+    }
+    return samples
+}
+
+fn l1_fractional_decay(c0: f64, lambda: f64, alpha: f64, dt: f64, n: i32) -> [f64; 512] with Mut, Div, Panic {
+    var samples: [f64; 512] = [0.0; 512]
+    samples[0] = c0
+    let scale = caputo_l1_scale(alpha, dt)
+    var step = 1
+    while step <= n {
+        var history = 0.0
+        var compensation = 0.0
+        var j = 1
+        while j < step {
+            let weight = caputo_pow((j + 1) as f64, 1.0 - alpha) - caputo_pow(j as f64, 1.0 - alpha)
+            let diff = samples[step - j] - samples[step - j - 1]
+            let y = weight * diff - compensation
+            let t = history + y
+            compensation = (t - history) - y
+            history = t
+            j = j + 1
+        }
+        samples[step] = (scale * samples[step - 1] - scale * history) / (scale + lambda)
+        step = step + 1
+    }
+    return samples
+}
+
+fn test_constant() -> bool with Mut, Div, Panic {
+    let n = 256
+    let dt = 1.0 / (n as f64)
+    let samples = fill_constant(7.25, n)
+    let d = caputo_l1_derivative(samples, n, dt, 0.8)
+    return d5_abs(d) < 1.0e-10
+}
+
+fn test_power_alpha_beta(alpha: f64, beta: f64, rtol: f64) -> bool with Mut, Div, Panic {
+    let n = 100
+    let dt = 0.01
+    let samples = fill_power(beta, dt, n)
+    let got = caputo_l1_derivative(samples, n, dt, alpha)
+    let expected = caputo_power_exact(beta, alpha, 1.0)
+    return d5_rel_close(got, expected, rtol, rtol)
+}
+
+fn test_ml_decay_identity() -> bool with Mut, Div, Panic {
+    let alpha = 0.8
+    let lambda = 0.5
+    let t = 1.0
+    let y = fractional_decay_ml(1.0, lambda, t, alpha)
+    let direct = mittag_leffler_e_alpha(alpha, 0.0 - lambda * caputo_pow(t, alpha))
+    return d5_rel_close(y, direct, 1.0e-12, 1.0e-12)
+}
+
+fn test_fractional_decay_l2(alpha: f64) -> bool with Mut, Div, Panic {
+    let n = 240
+    let dt = 0.1
+    let lambda = 0.1
+    let numerical = l1_fractional_decay(1.0, lambda, alpha, dt, n)
+    let exact = fill_ml_decay(1.0, lambda, alpha, dt, n)
+    var sum_sq = 0.0
+    var i = 0
+    while i <= n {
+        let err = numerical[i] - exact[i]
+        sum_sq = sum_sq + err * err
+        i = i + 1
+    }
+    let l2 = caputo_pow(sum_sq / ((n + 1) as f64), 0.5)
+    return l2 < 5.0e-2
+}
+
+fn run_tests() -> i32 with IO, Mut, Div, Panic {
+    var pass = 0
+    var fail = 0
+
+    if test_constant() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_power_alpha_beta(0.7, 1.0, 1.0e-10) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_power_alpha_beta(0.8, 1.0, 1.0e-10) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_power_alpha_beta(0.9, 1.0, 1.0e-10) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_power_alpha_beta(0.7, 2.0, 1.0e-3) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_power_alpha_beta(0.8, 2.0, 3.0e-3) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_power_alpha_beta(0.9, 2.0, 3.0e-3) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ml_decay_identity() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_fractional_decay_l2(0.7) { pass = pass + 1 } else { fail = fail + 1 }
+    if test_fractional_decay_l2(0.9) { pass = pass + 1 } else { fail = fail + 1 }
+
+    if fail > 0 { return 1 }
+    println("D5_CAPUTO_SCALAR_PASS")
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    return run_tests()
+}
