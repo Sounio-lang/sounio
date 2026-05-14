@@ -14,6 +14,12 @@ use tensor::ops::{
     tensor_matmul, tensor_sum, tensor_mean, sum_to_shape,
     tensor_reshape, tensor_transpose, tensor_permute,
     tensor_tanh, tensor_sigmoid, tensor_relu, tensor_gelu,
+    tensor_scalar,
+}
+use special::caputo::{
+    caputo_l1_derivative,
+    caputo_l1_scale,
+    caputo_l1_weight,
 }
 
 pub fn TAPE_ADD() -> i32 { 1 }
@@ -49,6 +55,7 @@ pub struct TapeNode {
     has_axis: bool,
     keepdims: bool,
     scalar: f64,
+    alpha: f64,
     permutation: [usize; 8],
     rank: usize,
 }
@@ -62,6 +69,7 @@ pub struct TensorTape {
     node_has_axis: [bool; 128],
     node_keepdims: [bool; 128],
     node_scalar: [f64; 128],
+    node_alpha: [f64; 128],
     node_perm: [usize; 1024],
     node_rank: [usize; 128],
     node_len: usize,
@@ -180,6 +188,7 @@ fn tape_node_at(tape: &TensorTape, idx: usize) -> TapeNode with Mut, Panic, Div 
         has_axis: tape.node_has_axis[idx],
         keepdims: tape.node_keepdims[idx],
         scalar: tape.node_scalar[idx],
+        alpha: tape.node_alpha[idx],
         permutation: perm,
         rank: tape.node_rank[idx],
     }
@@ -195,6 +204,7 @@ pub fn tape_begin() -> TensorTape {
         node_has_axis: [false; 128],
         node_keepdims: [false; 128],
         node_scalar: [0.0; 128],
+        node_alpha: [0.0; 128],
         node_perm: [0 as usize; 1024],
         node_rank: [0 as usize; 128],
         node_len: 0 as usize,
@@ -259,6 +269,10 @@ pub fn tape_leaf(tape: &!TensorTape, value: &Tensor, requires_grad: bool) -> i32
 }
 
 fn tape_push_node(tape: &!TensorTape, op: i32, out: i32, a: i32, b: i32, axis: usize, has_axis: bool, keepdims: bool, scalar: f64, perm: [usize; 8], rank: usize) with Mut, Panic {
+    tape_push_node_alpha(tape, op, out, a, b, axis, has_axis, keepdims, scalar, 0.0, perm, rank)
+}
+
+fn tape_push_node_alpha(tape: &!TensorTape, op: i32, out: i32, a: i32, b: i32, axis: usize, has_axis: bool, keepdims: bool, scalar: f64, alpha: f64, perm: [usize; 8], rank: usize) with Mut, Panic {
     if tape.node_len >= tape_node_capacity() { assert(false) }
     let idx = tape.node_len
     tape.node_op[idx] = op
@@ -269,6 +283,7 @@ fn tape_push_node(tape: &!TensorTape, op: i32, out: i32, a: i32, b: i32, axis: u
     tape.node_has_axis[idx] = has_axis
     tape.node_keepdims[idx] = keepdims
     tape.node_scalar[idx] = scalar
+    tape.node_alpha[idx] = alpha
     tape.node_rank[idx] = rank
     var i: usize = 0 as usize
     while i < 8 as usize {
@@ -431,6 +446,28 @@ pub fn tape_tensor_gelu(tape: &!TensorTape, a: i32) -> i32 with Alloc, Mut, Pani
     let out = tensor_gelu(&av)
     let req = tape.requires_grad[a as usize]
     tape_unary_out(tape, a, out, TAPE_GELU(), req)
+}
+
+pub fn tape_tensor_caputo_l1(tape: &!TensorTape, a: i32, dt: f64, alpha: f64) -> i32 with Alloc, Mut, Panic, Div {
+    var av = tape_tensor_view(tape, a, false)
+    if av.shape.rank != 1 as usize { assert(false) }
+    if av.shape.len < 2 as usize { assert(false) }
+    if av.shape.len > 512 as usize { assert(false) }
+    var samples: [f64; 512] = [0.0; 512]
+    var i: usize = 0 as usize
+    while i < av.shape.len {
+        samples[i] = tensor_get(&av, i)
+        i = i + 1 as usize
+    }
+    let intervals = (av.shape.len - 1 as usize) as i32
+    let value = caputo_l1_derivative(samples, intervals, dt, alpha)
+    let out_value = tensor_scalar(value)
+    let req = tape.requires_grad[a as usize]
+    let out = tape_push_value_raw(tape, out_value.data, out_value.shape, req)
+    if req {
+        tape_push_node_alpha(tape, TAPE_CAPUTO_L1(), out, a, -1, 0 as usize, false, false, dt, alpha, av.shape.dims, av.shape.rank)
+    }
+    out
 }
 
 fn tape_ensure_grad(tape: &!TensorTape, id: i32) with Alloc, Mut, Panic, Div {
@@ -701,7 +738,7 @@ fn backward_sub(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
             i = i + 1 as usize
         }
     }
-    if tape.requires_grad[b as usize] {
+    if tape.requires_grad[rhs as usize] {
         let b_len = tape.value_len_elems[b as usize]
         var i: usize = 0 as usize
         while i < out_len {
@@ -947,6 +984,34 @@ fn backward_permute(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div 
     tape_accumulate_grad(tape, a, &delta)
 }
 
+fn backward_caputo_l1(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
+    let out = tape.node_out[idx]
+    let a = tape.node_a[idx]
+    let a_slot = a as usize
+    let len = tape.value_len_elems[a_slot]
+    if len < 2 as usize { assert(false) }
+    if len > 512 as usize { assert(false) }
+    let intervals = len - 1 as usize
+    let scale = caputo_l1_scale(tape.node_alpha[idx], tape.node_scalar[idx])
+    let gout = read_f64(tape.grad_data[out as usize], 0)
+
+    var k: usize = 0 as usize
+    while k < len {
+        var coeff = 0.0
+        if k == 0 as usize {
+            coeff = 0.0 - caputo_l1_weight(tape.node_alpha[idx], (intervals - 1 as usize) as i32) * scale
+        } else if k == intervals {
+            coeff = caputo_l1_weight(tape.node_alpha[idx], 0) * scale
+        } else {
+            coeff = (caputo_l1_weight(tape.node_alpha[idx], (intervals - k) as i32)
+                - caputo_l1_weight(tape.node_alpha[idx], (intervals - 1 as usize - k) as i32)) * scale
+        }
+        let cur = read_f64(tape.grad_data[a_slot], k as i64)
+        write_f64(tape.grad_data[a_slot], k as i64, cur + gout * coeff)
+        k = k + 1 as usize
+    }
+}
+
 pub fn tape_backward(tape: &!TensorTape, output_id: i32) with Alloc, Mut, Panic, Div {
     tape_clear_grads(tape)
     let out_shape = tape_value_shape(tape, output_id)
@@ -1004,6 +1069,9 @@ pub fn tape_backward(tape: &!TensorTape, output_id: i32) with Alloc, Mut, Panic,
             }
             if op == TAPE_PERMUTE() {
                 backward_permute(tape, i)
+            }
+            if op == TAPE_CAPUTO_L1() {
+                backward_caputo_l1(tape, i)
             }
         }
     }

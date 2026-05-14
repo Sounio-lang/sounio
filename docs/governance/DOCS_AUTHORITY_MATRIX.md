@@ -118,7 +118,10 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.dissertation.pbpk-claim-truth-table | repo_only | docs/dissertation/pbpk_claim_truth_table.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.reconciliation-memo-2026-05-12 | repo_only | docs/dissertation/RECONCILIATION_MEMO_2026-05-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.d1-tensor-ops-v1 | repo_only | docs/dissertation/results/d1_tensor_ops_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.d2-autograd-v1 | repo_only | docs/dissertation/results/d2_autograd_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.d2-hardening-v1 | repo_only | docs/dissertation/results/d2_hardening_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.d5-caputo-scalar-v1 | repo_only | docs/dissertation/results/d5_caputo_scalar_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.d5-caputo-tensor-v1 | repo_only | docs/dissertation/results/d5_caputo_tensor_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.determinism-audit-summary-v1 | repo_only | docs/dissertation/results/determinism_audit_summary_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.determinism-audit-v1 | repo_only | docs/dissertation/results/determinism_audit_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.m6-prior-update-v1 | repo_only | docs/dissertation/results/m6_prior_update_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
