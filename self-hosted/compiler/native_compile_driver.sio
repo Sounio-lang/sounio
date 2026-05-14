@@ -1575,7 +1575,7 @@ fn scan_struct_field_types(token_count: i64) with Mut, Panic, Div {
         if name_tok + 2 < token_count {
             if token_kind(name_tok + 1) == TK_COLON && token_kind(name_tok + 2) == TK_IDENT {
                 type_sidx = find_struct_idx_tok(name_tok + 2)
-                if token_text_eq(name_tok + 2, "f64") {
+                if token_text_eq(name_tok + 2, "f64") || token_text_eq(name_tok + 2, "f32") {
                     STRUCT_FIELD_IS_F64[fi as usize] = 1
                 }
                 if name_tok + 5 < token_count && token_kind(name_tok + 3) == TK_LT && token_kind(name_tok + 4) == TK_IDENT && token_kind(name_tok + 5) == TK_GT && token_text_eq(name_tok + 4, "f64") {
@@ -1591,7 +1591,7 @@ fn scan_struct_field_types(token_count: i64) with Mut, Panic, Div {
                     STRUCT_FIELD_ARRAY_SIZE[fi as usize] = pt_read_int_value(semi_pos + 1)
                 }
                 // Mark element type as f64 when array element type is f64
-                if token_kind(name_tok + 3) == TK_IDENT && token_text_eq(name_tok + 3, "f64") {
+                if token_kind(name_tok + 3) == TK_IDENT && (token_text_eq(name_tok + 3, "f64") || token_text_eq(name_tok + 3, "f32")) {
                     STRUCT_FIELD_IS_F64[fi as usize] = 1
                 }
             }
@@ -4416,6 +4416,14 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
             ufn_record_return(zero_ret)
             return p + 1
         }
+        if token_kind(after_return) == TK_IDENT {
+            let direct_arr_base = lookup_local_tok(ctx, after_return)
+            let direct_arr_len = lookup_local_alen_tok(ctx, after_return)
+            if direct_arr_base >= 0 && direct_arr_len > 0 && token_kind(after_return + 1) != TK_LBRACKET {
+                ufn_record_return_struct(direct_arr_base, direct_arr_len)
+                return after_return + 1
+            }
+        }
         V2_LAST_STRUCT_IDX = -1
         V2_LAST_ARR_LEN = 0
         let parsed = parse_expr_ir(func, ctx, p + 1)
@@ -4502,6 +4510,11 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                         V2_LAST_STRUCT_IDX = -1
                         return early_tail_expr.next
                     }
+                    if V2_LAST_ARR_LEN > 0 {
+                        ufn_record_return_struct(early_tail_expr.reg, V2_LAST_ARR_LEN)
+                        V2_LAST_ARR_LEN = 0
+                        return early_tail_expr.next
+                    }
                     ufn_record_return(early_tail_expr.reg)
                     return early_tail_expr.next
                 }
@@ -4524,6 +4537,11 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                     if V2_LAST_STRUCT_IDX >= 0 {
                         ufn_record_return_struct(call.reg, STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize])
                         V2_LAST_STRUCT_IDX = -1
+                        return call.next
+                    }
+                    if V2_LAST_ARR_LEN > 0 {
+                        ufn_record_return_struct(call.reg, V2_LAST_ARR_LEN)
+                        V2_LAST_ARR_LEN = 0
                         return call.next
                     }
                     ufn_record_return(call.reg)
@@ -4562,6 +4580,11 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                     if V2_LAST_STRUCT_IDX >= 0 {
                         ufn_record_return_struct(early_local_tail.reg, STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize])
                         V2_LAST_STRUCT_IDX = -1
+                        return early_local_tail.next
+                    }
+                    let early_local_alen = lookup_local_alen_by_reg(ctx, early_local_tail.reg)
+                    if early_local_alen > 0 {
+                        ufn_record_return_struct(early_local_tail.reg, early_local_alen)
                         return early_local_tail.next
                     }
                     ufn_record_return(early_local_tail.reg)
@@ -5122,9 +5145,21 @@ fn scan_user_fns(token_count: i64, first_fn_id: i64) with Mut, Panic, Div {
                                 ret_is_f64 = 1
                             }
                         }
-                        // detect -> [T; N] array return (TK_LBRACKET=178, TK_SEMI=180)
-                        if j + 4 < token_count && token_kind(j + 1) == 178 && token_kind(j + 3) == 180 && token_kind(j + 4) == TK_INT {
-                            ret_arr_size = pt_read_int_value(j + 4)
+                        // Detect -> [T; N] array return. Scan to the body
+                        // opener instead of relying on exact offsets; imported
+                        // stdlib signatures may carry trivia/effects nearby.
+                        var ret_scan = j + 1
+                        while ret_scan + 3 < token_count && token_kind(ret_scan) != TK_LBRACE && token_kind(ret_scan) != TK_FN {
+                            if token_kind(ret_scan) == TK_LBRACKET {
+                                var ret_semi = ret_scan + 1
+                                while ret_semi < token_count && token_kind(ret_semi) != TK_SEMI && token_kind(ret_semi) != TK_RBRACKET && token_kind(ret_semi) != TK_LBRACE {
+                                    ret_semi = ret_semi + 1
+                                }
+                                if ret_semi + 1 < token_count && token_kind(ret_semi) == TK_SEMI && token_kind(ret_semi + 1) == TK_INT {
+                                    ret_arr_size = pt_read_int_value(ret_semi + 1)
+                                }
+                            }
+                            ret_scan = ret_scan + 1
                         }
                         break
                     }
