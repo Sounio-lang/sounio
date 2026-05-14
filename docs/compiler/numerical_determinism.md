@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.compiler.numerical-determinism
+authority: repo_only
+audience: contributors
+last_validated: 2026-03-07
+validated_by: A4
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.numerical-determinism
+-->
+
 # Sounio Compiler — Numerical Determinism Guarantees
 
 **Last updated:** 2026-05-13  

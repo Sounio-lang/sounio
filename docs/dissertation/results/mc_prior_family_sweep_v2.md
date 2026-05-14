@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.dissertation.results.mc-prior-family-sweep-v2
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.results.mc-prior-family-sweep-v2
+-->
+
 # PBPK28 Prior-Family Sweep — v2
 
 **Date:** 2026-05-13  
