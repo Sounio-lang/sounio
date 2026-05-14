@@ -18,6 +18,36 @@ status: lock-open|lock-released|blocked
 ---
 
 agent: codex
+time_utc: 2026-05-14T00:10:20Z
+files:
+  - self-hosted/compiler/native_compile_driver.sio
+  - tests/run-pass/native_v2_f32_struct_sret.sio
+  - tests/run-pass/native_v2_array_tail_return.sio
+  - artifacts/omega/agent_handoff.log.md
+intent: fix N-v2 algebra runtime divergence by preserving f32 struct SRET fields and tail-expression array returns
+checks:
+  - bin/souc run tests/run-pass/native_v2_f32_struct_sret.sio
+  - bin/souc run tests/run-pass/native_v2_array_tail_return.sio
+  - SOUC_BIN=/tmp/sounio-lane-4-nv2-algebra-runtime-b/bin/souc SOUNIO_PARITY_INVENTORY_DIR=/tmp/lane4-algebra-runtime-fixed-20260513T1 bash scripts/ci/track_a_nv2_parity_inventory.sh tests/run-pass/algebra_g2_invariants.sio tests/run-pass/algebra_g2_invariants_import.sio tests/run-pass/native_v2_f32_struct_sret.sio tests/run-pass/native_v2_array_tail_return.sio
+  - SOUC_BIN=/tmp/sounio-lane-4-nv2-algebra-runtime-b/bin/souc SOUNIO_PARITY_INVENTORY_DIR=/tmp/lane4-algebra-runtime-rebased-20260514T1 bash scripts/ci/track_a_nv2_parity_inventory.sh tests/run-pass/algebra_g2_invariants.sio tests/run-pass/algebra_g2_invariants_import.sio tests/run-pass/native_v2_f32_struct_sret.sio tests/run-pass/native_v2_array_tail_return.sio
+  - SOUC_BIN=/tmp/sounio-lane-4-nv2-algebra-runtime-b/bin/souc SOUNIO_NATIVE_V2_GATE_DIR=/tmp/lane4-algebra-runtime-serious-gate-20260514T1 bash scripts/ci/native_v2_serious_track_gate.sh
+  - SOUC_BIN=/tmp/sounio-lane-4-nv2-algebra-runtime-b/bin/souc SOUNIO_NATIVE_V2_GATE_DIR=/tmp/lane4-algebra-runtime-serious-gate-rebased-20260514T1 bash scripts/ci/native_v2_serious_track_gate.sh
+  - SOUC_BIN=/tmp/sounio-lane-4-nv2-algebra-runtime-b/bin/souc SOUNIO_PARITY_INVENTORY_DIR=/tmp/lane4-algebra-runtime-full-20260514T1 bash scripts/ci/track_a_nv2_parity_inventory.sh 'tests/run-pass/*.sio'
+  - SOUC_BIN=/tmp/sounio-lane-4-nv2-algebra-runtime-b/bin/souc SOUNIO_PARITY_INVENTORY_DIR=/tmp/lane4-algebra-runtime-full-rebased-20260514T1 bash scripts/ci/track_a_nv2_parity_inventory.sh 'tests/run-pass/*.sio'
+  - SOUC_BIN=/tmp/sounio-lane-4-nv2-algebra-runtime-b/bin/souc bash scripts/ci/compiler_stage_contract_gate.sh
+notes: |
+  Root causes: f32 struct fields were not marked as floating slots, corrupting
+  8-field SRET values in the inline G2 test; tail-expression returns of local
+  [f64; N] arrays emitted scalar returns, zeroing imported stdlib oct_basis
+  results. Both algebra_g2_invariants.sio and algebra_g2_invariants_import.sio
+  now classify as ok in the parity inventory. Full run-pass inventory:
+  corpus=424, ok=185, nv2_compile=187, nv2_run=51, both_fail=1.
+commit: pending
+status: lock-released
+
+---
+
+agent: codex
 time_utc: 2026-05-13T12:27:09Z
 files:
   - scripts/ci/track_a_nv2_parity_inventory.sh
