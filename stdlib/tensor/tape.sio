@@ -575,6 +575,15 @@ fn tape_node_saved_shape(tape: &TensorTape, idx: usize) -> TensorShape with Mut,
     shape_from_dims(dims, tape.node_rank[idx])
 }
 
+fn tape_i32_to_usize(x: i32) -> usize with Panic {
+    if x < 0 { assert(false) }
+    x as usize
+}
+
+fn tape_node_b_read(tape: &TensorTape, idx: usize) -> i32 {
+    tape.node_b[idx]
+}
+
 fn tape_exp_local(x: f64) -> f64 with Mut, Div, Panic {
     if x > 500.0 { return 1.0e200 }
     if x < 0.0 - 500.0 { return 0.0 }
@@ -763,16 +772,20 @@ fn backward_div(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
 }
 
 fn backward_matmul(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
-    let out = tape.node_out[idx]
+    let out_id = tape.node_out[idx]
     let a = tape.node_a[idx]
-    let b = tape.node_b[idx]
-    let a_shape = tape_value_shape(tape, a)
-    let b_shape = tape_value_shape(tape, b)
-    if a_shape.rank != 2 as usize { assert(false) }
-    if b_shape.rank != 2 as usize { assert(false) }
-    let m = a_shape.dims[0]
-    let k = a_shape.dims[1]
-    let n = b_shape.dims[1]
+    let rhs = tape_node_b_read(tape, idx)
+    let a_slot = tape_i32_to_usize(a)
+    let b_slot = tape_i32_to_usize(rhs)
+    let out_slot = tape_i32_to_usize(out_id)
+    let m = tape.node_perm[idx * 8 as usize]
+    let n = tape.node_perm[idx * 8 as usize + 1 as usize]
+    if m == 0 as usize { assert(false) }
+    if n == 0 as usize { assert(false) }
+    if tape.value_len_elems[out_slot] != m * n { assert(false) }
+    if tape.value_len_elems[a_slot] % m != 0 as usize { assert(false) }
+    let k = tape.value_len_elems[a_slot] / m
+    if tape.value_len_elems[b_slot] != k * n { assert(false) }
     if tape.requires_grad[a as usize] {
         var i: usize = 0 as usize
         while i < m {
@@ -781,12 +794,12 @@ fn backward_matmul(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
                 var acc = 0.0
                 var j: usize = 0 as usize
                 while j < n {
-                    acc = acc + read_f64(tape.grad_data[out as usize], (i * n + j) as i64) * read_f64(tape.value_data[b as usize], (kk * n + j) as i64)
+                    acc = acc + read_f64(tape.grad_data[out_slot], (i * n + j) as i64) * read_f64(tape.value_data[b_slot], (kk * n + j) as i64)
                     j = j + 1 as usize
                 }
                 let off = i * k + kk
-                let cur = read_f64(tape.grad_data[a as usize], off as i64)
-                write_f64(tape.grad_data[a as usize], off as i64, cur + acc)
+                let cur = read_f64(tape.grad_data[a_slot], off as i64)
+                write_f64(tape.grad_data[a_slot], off as i64, cur + acc)
                 kk = kk + 1 as usize
             }
             i = i + 1 as usize
@@ -800,12 +813,12 @@ fn backward_matmul(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
                 var acc = 0.0
                 var i: usize = 0 as usize
                 while i < m {
-                    acc = acc + read_f64(tape.value_data[a as usize], (i * k + kk) as i64) * read_f64(tape.grad_data[out as usize], (i * n + j) as i64)
+                    acc = acc + read_f64(tape.value_data[a_slot], (i * k + kk) as i64) * read_f64(tape.grad_data[out_slot], (i * n + j) as i64)
                     i = i + 1 as usize
                 }
                 let off = kk * n + j
-                let cur = read_f64(tape.grad_data[b as usize], off as i64)
-                write_f64(tape.grad_data[b as usize], off as i64, cur + acc)
+                let cur = read_f64(tape.grad_data[b_slot], off as i64)
+                write_f64(tape.grad_data[b_slot], off as i64, cur + acc)
                 j = j + 1 as usize
             }
             kk = kk + 1 as usize
@@ -852,46 +865,47 @@ fn backward_mean(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
 fn backward_tanh(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
     let out = tape.node_out[idx]
     let a = tape.node_a[idx]
-    let out_shape = tape_value_shape(tape, out)
-    var gout = tape_grad_view(tape, out, false)
-    var outv = tape_tensor_view(tape, out, false)
-    var deriv = tensor_full(out_shape, 0.0)
+    let out_slot = out as usize
+    let a_slot = a as usize
     var i: usize = 0 as usize
-    while i < out_shape.len {
-        let y = tensor_get(&outv, i)
-        tensor_set(&!deriv, i, 1.0 - y * y)
+    while i < tape.value_len_elems[out_slot] {
+        let y = read_f64(tape.value_data[out_slot], i as i64)
+        let inc = read_f64(tape.grad_data[out_slot], i as i64) * (1.0 - y * y)
+        let cur = read_f64(tape.grad_data[a_slot], i as i64)
+        write_f64(tape.grad_data[a_slot], i as i64, cur + inc)
         i = i + 1 as usize
     }
-    var delta = tensor_mul(&gout, &deriv)
-    tape_accumulate_grad(tape, a, &delta)
-    tensor_free(&!deriv)
 }
 
 fn backward_sigmoid(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
     let out = tape.node_out[idx]
     let a = tape.node_a[idx]
-    let out_shape = tape_value_shape(tape, out)
-    var gout = tape_grad_view(tape, out, false)
-    var outv = tape_tensor_view(tape, out, false)
-    var deriv = tensor_full(out_shape, 0.0)
+    let out_slot = out as usize
+    let a_slot = a as usize
     var i: usize = 0 as usize
-    while i < out_shape.len {
-        let y = tensor_get(&outv, i)
-        tensor_set(&!deriv, i, y * (1.0 - y))
+    while i < tape.value_len_elems[out_slot] {
+        let y = read_f64(tape.value_data[out_slot], i as i64)
+        let inc = read_f64(tape.grad_data[out_slot], i as i64) * y * (1.0 - y)
+        let cur = read_f64(tape.grad_data[a_slot], i as i64)
+        write_f64(tape.grad_data[a_slot], i as i64, cur + inc)
         i = i + 1 as usize
     }
-    var delta = tensor_mul(&gout, &deriv)
-    tape_accumulate_grad(tape, a, &delta)
-    tensor_free(&!deriv)
 }
 
 fn backward_relu(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
     let out = tape.node_out[idx]
     let a = tape.node_a[idx]
-    var gout = tape_grad_view(tape, out, false)
-    var av = tape_tensor_view(tape, a, false)
-    var delta = tape_relu_mask_grad(&gout, &av)
-    tape_accumulate_grad(tape, a, &delta)
+    let out_slot = out as usize
+    let a_slot = a as usize
+    var i: usize = 0 as usize
+    while i < tape.value_len_elems[out_slot] {
+        if read_f64(tape.value_data[a_slot], i as i64) > 0.0 {
+            let cur = read_f64(tape.grad_data[a_slot], i as i64)
+            let inc = read_f64(tape.grad_data[out_slot], i as i64)
+            write_f64(tape.grad_data[a_slot], i as i64, cur + inc)
+        }
+        i = i + 1 as usize
+    }
 }
 
 fn backward_gelu(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
