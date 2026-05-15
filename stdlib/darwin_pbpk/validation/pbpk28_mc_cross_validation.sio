@@ -41,6 +41,7 @@ use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::tsit5_pbpk28::*
 use darwin_pbpk::epistemic_pbpk28::{EpPrior28, ep28_rapamycin_params, ep28_rapamycin_priors, ep28_run}
 use darwin_pbpk::epistemic_pbpk28_hessian::{hessian_pbpk28_auc, h28_nonlinearity_ratio_literal}
+use numerical::linalg::{Cholesky7, cholesky7_banachiewicz, mat7_get, mat7_identity, mat7_set}
 
 // ============================================================================
 // MATH HELPERS
@@ -206,6 +207,16 @@ fn mc28_sample_lognormal(
     MC28ParamSample { value: sample, rng: ns.rng }
 }
 
+fn mc28_lognormal_from_z(mean: f64, variance: f64, z: f64) -> f64 with Mut, Div, Panic {
+    if mean <= 0.0 { return mean }
+    if variance <= 0.0 { return mean }
+    let cv2       = variance / (mean * mean)
+    let sig2_log  = mc28_ln(1.0 + cv2)
+    let sig_log   = mc28_sqrt(sig2_log)
+    let mu_log    = mc28_ln(mean) - 0.5 * sig2_log
+    return mc28_exp(mu_log + sig_log * z)
+}
+
 // ============================================================================
 // FAST AUC SIMULATION (dt=0.5h, 336 steps for 168h)
 // ============================================================================
@@ -308,6 +319,170 @@ fn mc28_run_lognormal(
     let sd_y  = mc28_sqrt(if var_y > 0.0 { var_y } else { 0.0 })
 
     MC28Result { mean_auc: ws.mean, sd_auc: sd_y, n_valid: ws.count as i32, success: true }
+}
+
+// ============================================================================
+// LOGNORMAL GAUSSIAN-COPULA SAMPLING
+// ============================================================================
+
+struct MC28CopulaSpec {
+    rho_cl_fu: f64,
+    rho_cl_renal: f64,
+}
+
+fn mc28_correlation_cholesky(spec: MC28CopulaSpec) -> Cholesky7 with Mut, Div, Panic {
+    var corr = mat7_identity()
+    corr = mat7_set(corr, 0, 2, spec.rho_cl_fu)
+    corr = mat7_set(corr, 2, 0, spec.rho_cl_fu)
+    corr = mat7_set(corr, 0, 1, spec.rho_cl_renal)
+    corr = mat7_set(corr, 1, 0, spec.rho_cl_renal)
+    return cholesky7_banachiewicz(corr)
+}
+
+fn mc28_run_lognormal_copula(
+    base_prm: PBPKParams28,
+    priors:   EpPrior28,
+    dose_mg:  f64,
+    n:        i32,
+    seed:     i64,
+    spec:     MC28CopulaSpec,
+) -> MC28Result with Mut, Div, Panic {
+    let chol = mc28_correlation_cholesky(spec)
+    if !chol.ok {
+        return MC28Result { mean_auc: 0.0, sd_auc: 0.0, n_valid: 0, success: false }
+    }
+
+    var rng  = mc28_rng_new(seed)
+    var ws   = mc28_welford_init()
+    var iter: i32 = 0
+    let n_prms = priors.n
+
+    while iter < n {
+        var z: [f64; 8] = [0.0; 8]
+        var y: [f64; 8] = [0.0; 8]
+        var vals: [f64; 8] = [0.0; 8]
+
+        var zi: i32 = 0
+        while zi < n_prms {
+            let ns = mc28_sample_normal_unit(rng)
+            z[zi] = ns.value
+            rng = ns.rng
+            zi = zi + 1
+        }
+
+        var i: i32 = 0
+        while i < n_prms {
+            var sum = 0.0
+            var k: i32 = 0
+            while k < n_prms {
+                sum = sum + mat7_get(chol.l, i, k) * z[k]
+                k = k + 1
+            }
+            y[i] = sum
+            i = i + 1
+        }
+
+        var ki: i32 = 0
+        while ki < n_prms {
+            vals[ki] = mc28_lognormal_from_z(priors.mean[ki], priors.variance[ki], y[ki])
+            ki = ki + 1
+        }
+
+        let prm_s = mc28_params_from_sample(base_prm, priors, vals)
+        let auc   = mc28_auc_fast(prm_s, dose_mg)
+        if mc28_finite(auc) && auc > 0.0 {
+            ws = mc28_welford_update(ws, auc)
+        }
+        iter = iter + 1
+    }
+
+    if ws.count < 2 {
+        return MC28Result { mean_auc: 0.0, sd_auc: 0.0, n_valid: ws.count as i32, success: false }
+    }
+
+    let var_y = mc28_welford_variance(ws)
+    let sd_y  = mc28_sqrt(if var_y > 0.0 { var_y } else { 0.0 })
+    return MC28Result { mean_auc: ws.mean, sd_auc: sd_y, n_valid: ws.count as i32, success: true }
+}
+
+fn mc28_print_copula_row(
+    label_id: i32,
+    rho_cl_fu: f64,
+    rho_cl_renal: f64,
+    result: MC28Result,
+    u_gum: f64,
+    u_hess: f64,
+) -> bool with IO, Mut, Div, Panic {
+    let u_mc = result.sd_auc
+    let rel_gum  = if u_mc > 1.0e-12 { mc28_abs(u_gum - u_mc) / u_mc } else { 999.0 }
+    let rel_hess = if u_mc > 1.0e-12 { mc28_abs(u_hess - u_mc) / u_mc } else { 999.0 }
+    if label_id == 6 {
+        print("combined")
+    } else if label_id == 1 {
+        print("sweep_1")
+    } else if label_id == 2 {
+        print("sweep_2")
+    } else if label_id == 3 {
+        print("sweep_3")
+    } else if label_id == 4 {
+        print("sweep_4")
+    } else if label_id == 5 {
+        print("sweep_5")
+    } else {
+        print("sweep")
+    }
+    print(" | rho_CL_fu="); print_f64(rho_cl_fu)
+    print(" rho_CL_renal="); print_f64(rho_cl_renal)
+    print(" n_valid="); print_f64(result.n_valid as f64)
+    print(" mean_AUC="); print_f64(result.mean_auc)
+    print(" u_MC="); print_f64(u_mc)
+    print(" rel_GUM="); print_f64(rel_gum)
+    print(" rel_Hess="); print_f64(rel_hess)
+    println("")
+    return result.success && result.n_valid > 1900 && u_mc > 0.0
+}
+
+fn mc28_run_m1_copula_sweep(
+    prm: PBPKParams28,
+    priors: EpPrior28,
+    dose_mg: f64,
+    u_gum: f64,
+    u_hess: f64,
+    independent: MC28Result,
+) -> bool with IO, Mut, Div, Panic {
+    println("")
+    println("======================================================================")
+    println("  M1 LogNormal Gaussian-Copula Sweep")
+    println("  N=2000  seed=1729  dt=0.5h  prior=LogNormal")
+    println("  rho sweep: corr(CL_hep, fu_plasma); combined row adds corr(CL_hep, CL_renal)")
+    println("======================================================================")
+
+    var ok_all = true
+    let r0 = mc28_run_lognormal_copula(prm, priors, dose_mg, 2000, 1729, MC28CopulaSpec { rho_cl_fu: -0.7, rho_cl_renal: 0.0 })
+    ok_all = mc28_print_copula_row(1, -0.7, 0.0, r0, u_gum, u_hess) && ok_all
+    let r1 = mc28_run_lognormal_copula(prm, priors, dose_mg, 2000, 1729, MC28CopulaSpec { rho_cl_fu: -0.5, rho_cl_renal: 0.0 })
+    ok_all = mc28_print_copula_row(2, -0.5, 0.0, r1, u_gum, u_hess) && ok_all
+    let r2 = mc28_run_lognormal_copula(prm, priors, dose_mg, 2000, 1729, MC28CopulaSpec { rho_cl_fu: -0.3, rho_cl_renal: 0.0 })
+    ok_all = mc28_print_copula_row(3, -0.3, 0.0, r2, u_gum, u_hess) && ok_all
+    let r3 = mc28_run_lognormal_copula(prm, priors, dose_mg, 2000, 1729, MC28CopulaSpec { rho_cl_fu: 0.0, rho_cl_renal: 0.0 })
+    ok_all = mc28_print_copula_row(4, 0.0, 0.0, r3, u_gum, u_hess) && ok_all
+    let rho0_mean_delta = mc28_abs(r3.mean_auc - independent.mean_auc)
+    let rho0_u_delta = mc28_abs(r3.sd_auc - independent.sd_auc)
+    print("rho0_vs_independent_delta_mean="); print_f64(rho0_mean_delta)
+    print(" delta_u_MC="); print_f64(rho0_u_delta)
+    println("")
+    ok_all = ok_all && rho0_mean_delta <= 1.0e-12 && rho0_u_delta <= 1.0e-12
+    let r4 = mc28_run_lognormal_copula(prm, priors, dose_mg, 2000, 1729, MC28CopulaSpec { rho_cl_fu: 0.3, rho_cl_renal: 0.0 })
+    ok_all = mc28_print_copula_row(5, 0.3, 0.0, r4, u_gum, u_hess) && ok_all
+    let r5 = mc28_run_lognormal_copula(prm, priors, dose_mg, 2000, 1729, MC28CopulaSpec { rho_cl_fu: -0.5, rho_cl_renal: 0.3 })
+    ok_all = mc28_print_copula_row(6, -0.5, 0.3, r5, u_gum, u_hess) && ok_all
+
+    if ok_all {
+        println("M1_COPULA_SWEEP_PASS")
+    } else {
+        println("M1_COPULA_SWEEP_OUTPUT")
+    }
+    return ok_all
 }
 
 // ============================================================================
@@ -440,6 +615,11 @@ fn mc28_selftest_main() -> i32 with IO, Mut, Div, Panic {
     print("u_MC:      "); print_f64(u_mc); println(" mg.h/L")
     print("rel_GUM:   "); print_f64(rel_gum); println("")
     print("rel_Hess:  "); print_f64(rel_hess); println("")
+    println("")
+    let copula_ok = mc28_run_m1_copula_sweep(prm, priors, dose_mg, u_gum, u_hess, mc_res)
+    if mc_ok && copula_ok {
+        println("M1_COPULA_CHOLESKY_PASS")
+    }
     println("")
     println("MC cross-validation complete.")
     println("PASS")

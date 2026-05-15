@@ -61,3 +61,7 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 - Repo-backed topics: 400
 - Authority count `repo_only`: 281
 - A2: 236 topics
+- Total governed topics: 433
+- Repo-backed topics: 391
+- Authority count `repo_only`: 272
+- A2: 227 topics
