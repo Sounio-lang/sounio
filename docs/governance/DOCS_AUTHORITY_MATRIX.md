@@ -460,3 +460,5 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.dissertation.results.d6-full-integration-v1 | repo_only | docs/dissertation/results/d6_full_integration_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.d6-pinn-training-v1 | repo_only | docs/dissertation/results/d6_pinn_training_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.m1-copula-v1 | repo_only | docs/dissertation/results/m1_copula_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+
+| repo.docs.dissertation.results.m2-hierarchical-v1 | repo_only | docs/dissertation/results/m2_hierarchical_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
