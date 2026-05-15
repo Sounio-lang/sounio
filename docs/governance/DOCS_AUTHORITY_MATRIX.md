@@ -136,6 +136,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.dissertation.results.mc-cross-validation-lognormal-v2 | repo_only | docs/dissertation/results/mc_cross_validation_lognormal_v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.mc-prior-family-sweep-v1 | repo_only | docs/dissertation/results/mc_prior_family_sweep_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.mc-prior-family-sweep-v2 | repo_only | docs/dissertation/results/mc_prior_family_sweep_v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.ml-negz-fix-v1 | repo_only | docs/dissertation/results/ml_negz_fix_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.pbpk28-epistemic-v1 | repo_only | docs/dissertation/results/pbpk28_epistemic_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.prior-evolution-sprint-summary-v1 | repo_only | docs/dissertation/results/prior_evolution_sprint_summary_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.prior-evolution-sprint-summary-v2 | repo_only | docs/dissertation/results/prior_evolution_sprint_summary_v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
