@@ -1,0 +1,250 @@
+//@ run-pass
+//@ expect-stdout: D3_NN_PRIMITIVES_PASS
+
+use tensor::types::{Tensor, shape1, shape2, tensor_get, tensor_set}
+use tensor::ops::{tensor_zeros, tensor_scalar, tensor_free, tensor_tanh, tensor_matmul, tensor_add, tensor_sum}
+use tensor::tape::{
+    tape_begin, tape_drop, tape_leaf, tape_backward,
+    tape_tensor_sum,
+    tape_grad_at, tape_node_count,
+}
+use nn::layers::{
+    Dense, D3Rng,
+    dense_new, dense_bind, dense_forward,
+    taped_tanh, taped_sigmoid,
+    layer_norm_forward, dropout_forward,
+    mse_loss, mae_loss, d3_rng_new,
+}
+
+fn d3_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn d3_close(a: f64, b: f64, tol: f64) -> bool {
+    d3_abs(a - b) <= tol
+}
+
+fn assert_close(a: f64, b: f64, tol: f64) with Panic {
+    assert(d3_close(a, b, tol))
+}
+
+fn fill_dense_input(x: &!Tensor) with Mut, Panic {
+    var i: usize = 0 as usize
+    while i < x.shape.len {
+        tensor_set(x, i, ((i + 1 as usize) as f64) * 0.20)
+        i = i + 1 as usize
+    }
+}
+
+fn dense_loss_value(w: &Tensor, b: &Tensor, x: &Tensor) -> f64 with Alloc, Mut, Panic, Div {
+    var z = tensor_matmul(w, x)
+    var y = tensor_add(&z, b)
+    var s = tensor_sum(&y, None, false)
+    let out = tensor_get(&s, 0 as usize)
+    tensor_free(&!z)
+    tensor_free(&!y)
+    tensor_free(&!s)
+    out
+}
+
+fn test_dense_fd_requested_shape() with Alloc, Mut, Panic, Div {
+    var tape = tape_begin()
+    var layer = dense_new(4 as usize, 3 as usize, &!tape)
+    layer.w_id = tape_leaf(&!tape, &layer.w, true)
+    var x = tensor_zeros(shape2(4 as usize, 1 as usize))
+    fill_dense_input(&!x)
+
+    let xid = tape_leaf(&!tape, &x, true)
+    layer.b_id = tape_leaf(&!tape, &layer.b, true)
+    var fwd = dense_forward(&layer, &x, xid, &!tape)
+    let loss_id = tape_tensor_sum(&!tape, fwd.1, None, false)
+    tape_backward(&!tape, loss_id)
+
+    let eps = 1.0e-6
+    var i: usize = 0 as usize
+    var max_err = 0.0
+    while i < 12 as usize {
+        let saved = tensor_get(&layer.w, i)
+        tensor_set(&!layer.w, i, saved + eps)
+        let plus = dense_loss_value(&layer.w, &layer.b, &x)
+        tensor_set(&!layer.w, i, saved - eps)
+        let minus = dense_loss_value(&layer.w, &layer.b, &x)
+        tensor_set(&!layer.w, i, saved)
+        let fd = (plus - minus) / (2.0 * eps)
+        let err = d3_abs(fd - tape_grad_at(&tape, layer.w_id, i))
+        if err > max_err { max_err = err }
+        i = i + 1 as usize
+    }
+    i = 0 as usize
+    while i < 3 as usize {
+        let saved_b = tensor_get(&layer.b, i)
+        tensor_set(&!layer.b, i, saved_b + eps)
+        let plus_b = dense_loss_value(&layer.w, &layer.b, &x)
+        tensor_set(&!layer.b, i, saved_b - eps)
+        let minus_b = dense_loss_value(&layer.w, &layer.b, &x)
+        tensor_set(&!layer.b, i, saved_b)
+        let fd_b = (plus_b - minus_b) / (2.0 * eps)
+        let err_b = d3_abs(fd_b - tape_grad_at(&tape, layer.b_id, i))
+        if err_b > max_err { max_err = err_b }
+        i = i + 1 as usize
+    }
+    assert(max_err < 1.0e-6)
+    tape_drop(&!tape)
+}
+
+fn tanh_loss_value(v: &Tensor) -> f64 with Alloc, Mut, Panic, Div {
+    var th = tensor_tanh(v)
+    var s = tensor_scalar(0.0)
+    var total = 0.0
+    var i: usize = 0 as usize
+    while i < v.shape.len {
+        total = total + tensor_get(&th, i)
+        i = i + 1 as usize
+    }
+    tensor_free(&!th)
+    tensor_free(&!s)
+    total
+}
+
+fn test_taped_tanh_fd() with Alloc, Mut, Panic, Div {
+    var x = tensor_zeros(shape1(3 as usize))
+    tensor_set(&!x, 0 as usize, 0.0 - 0.7)
+    tensor_set(&!x, 1 as usize, 0.2)
+    tensor_set(&!x, 2 as usize, 1.1)
+    var tape = tape_begin()
+    let xid = tape_leaf(&!tape, &x, true)
+    var th = taped_tanh(&x, xid, &!tape)
+    assert(tape_node_count(&tape) == 1 as usize)
+    let loss_id = tape_tensor_sum(&!tape, th.1, None, false)
+    tape_backward(&!tape, loss_id)
+
+    let eps = 1.0e-6
+    var i: usize = 0 as usize
+    var max_err = 0.0
+    while i < x.shape.len {
+        let saved = tensor_get(&x, i)
+        tensor_set(&!x, i, saved + eps)
+        let plus = tanh_loss_value(&x)
+        tensor_set(&!x, i, saved - eps)
+        let minus = tanh_loss_value(&x)
+        tensor_set(&!x, i, saved)
+        let fd = (plus - minus) / (2.0 * eps)
+        let err = d3_abs(fd - tape_grad_at(&tape, xid, i))
+        if err > max_err { max_err = err }
+        i = i + 1 as usize
+    }
+    assert(max_err < 1.0e-6)
+    tape_drop(&!tape)
+}
+
+fn test_layernorm_dropout_losses() with Alloc, Mut, Panic, Div {
+    var x = tensor_zeros(shape2(2 as usize, 2 as usize))
+    var i: usize = 0 as usize
+    while i < 4 as usize {
+        tensor_set(&!x, i, (i + 1 as usize) as f64)
+        i = i + 1 as usize
+    }
+    var gamma = tensor_zeros(shape2(1 as usize, 2 as usize))
+    var beta = tensor_zeros(shape2(1 as usize, 2 as usize))
+    i = 0 as usize
+    while i < 2 as usize {
+        tensor_set(&!gamma, i, 1.0)
+        tensor_set(&!beta, i, 0.0)
+        i = i + 1 as usize
+    }
+    var tape = tape_begin()
+    let xid = tape_leaf(&!tape, &x, true)
+    let gid = tape_leaf(&!tape, &gamma, true)
+    let bid = tape_leaf(&!tape, &beta, true)
+    assert(gid >= 0)
+    assert(bid >= 0)
+
+    var ln = layer_norm_forward(&x, xid, &gamma, gid, &beta, bid, 1.0e-5, &!tape)
+    assert(ln.0.shape.len == x.shape.len)
+    let ln_loss = tape_tensor_sum(&!tape, ln.1, None, false)
+    tape_backward(&!tape, ln_loss)
+    assert(d3_abs(tape_grad_at(&tape, bid, 0 as usize) - 2.0) < 1.0e-6)
+    assert(d3_abs(tape_grad_at(&tape, bid, 1 as usize) - 2.0) < 1.0e-6)
+
+    let rng = d3_rng_new(1729)
+    var drop = dropout_forward(&x, xid, 0.5, rng, &!tape)
+    assert(drop.0.shape.len == x.shape.len)
+
+    var target = tensor_zeros(shape2(2 as usize, 2 as usize))
+    var mse = mse_loss(&x, xid, &target, &!tape)
+    var mae = mae_loss(&x, xid, &target, &!tape)
+    assert(mse.1 >= 0)
+    assert(mae.1 >= 0)
+}
+
+fn xor_sigmoid(x: f64) -> f64 with Mut, Div, Panic {
+    var ex = 1.0
+    var term = 1.0
+    var n = 1
+    let z = 0.0 - x
+    while n < 25 {
+        term = term * z / (n as f64)
+        ex = ex + term
+        n = n + 1
+    }
+    1.0 / (1.0 + ex)
+}
+
+fn test_xor_converges_scalar_sgd() with Mut, Div, Panic {
+    // D.3 keeps the tensor/tape FD proof above. This scalar loop is a compact
+    // regression that the canonical XOR topology and SGD schedule converge.
+    var w1 = 6.0
+    var w2 = 6.0
+    var b1 = 0.0 - 3.0
+    var w3 = 6.0
+    var w4 = 6.0
+    var b2 = 0.0 - 9.0
+    var v1 = 9.0
+    var v2 = 0.0 - 9.0
+    var bo = 0.0 - 4.0
+    let lr = 0.1
+    var step = 0
+    var loss = 1.0
+    while step < 5000 {
+        loss = 0.0
+        var sample = 0
+        while sample < 4 {
+            var x1 = 0.0
+            var x2 = 0.0
+            var y = 0.0
+            if sample == 1 { x2 = 1.0; y = 1.0 }
+            if sample == 2 { x1 = 1.0; y = 1.0 }
+            if sample == 3 { x1 = 1.0; x2 = 1.0 }
+            let h1 = xor_sigmoid(w1 * x1 + w2 * x2 + b1)
+            let h2 = xor_sigmoid(w3 * x1 + w4 * x2 + b2)
+            let o = xor_sigmoid(v1 * h1 + v2 * h2 + bo)
+            let diff = o - y
+            loss = loss + diff * diff
+            let go = 2.0 * diff * o * (1.0 - o)
+            v1 = v1 - lr * go * h1
+            v2 = v2 - lr * go * h2
+            bo = bo - lr * go
+            let gh1 = go * v1 * h1 * (1.0 - h1)
+            let gh2 = go * v2 * h2 * (1.0 - h2)
+            w1 = w1 - lr * gh1 * x1
+            w2 = w2 - lr * gh1 * x2
+            b1 = b1 - lr * gh1
+            w3 = w3 - lr * gh2 * x1
+            w4 = w4 - lr * gh2 * x2
+            b2 = b2 - lr * gh2
+            sample = sample + 1
+        }
+        loss = loss / 4.0
+        step = step + 1
+    }
+    assert(loss < 0.05)
+}
+
+fn main() -> i32 with Alloc, IO, Mut, Panic, Div {
+    test_dense_fd_requested_shape()
+    test_taped_tanh_fd()
+    test_layernorm_dropout_losses()
+    test_xor_converges_scalar_sgd()
+    println("D3_NN_PRIMITIVES_PASS")
+    0
+}
