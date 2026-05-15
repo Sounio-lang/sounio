@@ -10,11 +10,17 @@ use tensor::types::{
     tensor_get, tensor_set,
 }
 use tensor::ops::{
-    tensor_zeros, tensor_clone, tensor_free,
+    tensor_full, tensor_zeros, tensor_clone, tensor_free,
+}
+use tensor::tape::{
+    TensorTape,
+    tape_grad_at,
+    tape_grad_len,
+    tape_has_grad,
 }
 
 fn d4_param_capacity() -> usize { 32 as usize }
-fn d4_value_capacity() -> usize { 4096 as usize }
+fn d4_value_capacity() -> usize { 20000 as usize }
 
 pub struct ParameterStore {
     param_data: [*mut f64; 32],
@@ -24,12 +30,14 @@ pub struct ParameterStore {
     param_len: [usize; 32],
     tape_id: [i32; 32],
     has_grad: [bool; 32],
+    grad_synced: [bool; 32],
+    grad_cache: [f64; 20000],
     count: usize,
 }
 
 pub struct AdamState {
-    m: [f64; 4096],
-    v: [f64; 4096],
+    m: [f64; 20000],
+    v: [f64; 20000],
     offset: [usize; 32],
     len: [usize; 32],
     slots_ready: [bool; 32],
@@ -41,7 +49,7 @@ pub struct AdamState {
 }
 
 pub struct SGDState {
-    velocity: [f64; 4096],
+    velocity: [f64; 20000],
     offset: [usize; 32],
     len: [usize; 32],
     slots_ready: [bool; 32],
@@ -126,6 +134,31 @@ fn optimizer_prepare_slot(offsets: &![usize; 32], lens: &![usize; 32], ready: &!
     }
 }
 
+fn store_value_offset(store: &ParameterStore, slot: usize) -> usize {
+    var base: usize = 0 as usize
+    var i: usize = 0 as usize
+    while i < slot {
+        base = base + store.param_len[i]
+        i = i + 1 as usize
+    }
+    base
+}
+
+fn store_grad_read(store: &ParameterStore, slot: usize, offset: usize) -> f64 with Panic {
+    if store.grad_synced[slot] {
+        return store.grad_cache[store_value_offset(store, slot) + offset]
+    }
+    read_f64(store.grad_data[slot], offset as i64)
+}
+
+fn store_grad_write(store: &!ParameterStore, slot: usize, offset: usize, value: f64) with Mut, Panic {
+    if store.grad_synced[slot] {
+        store.grad_cache[store_value_offset(store, slot) + offset] = value
+    } else {
+        write_f64(store.grad_data[slot], offset as i64, value)
+    }
+}
+
 pub fn param_store_new() -> ParameterStore {
     ParameterStore {
         param_data: [0 as *mut f64; 32],
@@ -135,6 +168,8 @@ pub fn param_store_new() -> ParameterStore {
         param_len: [0 as usize; 32],
         tape_id: [-1; 32],
         has_grad: [false; 32],
+        grad_synced: [false; 32],
+        grad_cache: [0.0; 20000],
         count: 0 as usize,
     }
 }
@@ -142,7 +177,7 @@ pub fn param_store_new() -> ParameterStore {
 pub fn param_store_register(store: &!ParameterStore, t: &!Tensor, tape_id: i32) -> usize with Alloc, Mut, Panic, Div {
     if store.count >= d4_param_capacity() { assert(false) }
     let slot = store.count
-    var grad = tensor_zeros(t.shape)
+    var grad = tensor_full(t.shape, 0.0)
     store.param_data[slot] = t.data
     store.grad_data[slot] = grad.data
     grad.storage_owner = false
@@ -158,10 +193,11 @@ pub fn param_store_zero_grad(store: &!ParameterStore) with Mut, Panic, Div {
     while p < store.count {
         var i: usize = 0 as usize
         while i < store.param_len[p] {
-            write_f64(store.grad_data[p], i as i64, 0.0)
+            store_grad_write(store, p, i, 0.0)
             i = i + 1 as usize
         }
         store.has_grad[p] = false
+        store.grad_synced[p] = false
         p = p + 1 as usize
     }
 }
@@ -175,6 +211,7 @@ pub fn param_store_set_grad(store: &!ParameterStore, param_idx: usize, grad: &Te
         i = i + 1 as usize
     }
     store.has_grad[param_idx] = true
+    store.grad_synced[param_idx] = false
 }
 
 pub fn param_store_set_grad_value(store: &!ParameterStore, param_idx: usize, offset: usize, value: f64) with Mut, Panic {
@@ -182,10 +219,11 @@ pub fn param_store_set_grad_value(store: &!ParameterStore, param_idx: usize, off
     if offset >= store.param_len[param_idx] { assert(false) }
     write_f64(store.grad_data[param_idx], offset as i64, value)
     store.has_grad[param_idx] = true
+    store.grad_synced[param_idx] = false
 }
 
 pub fn param_store_grad_value(store: &ParameterStore, param_idx: usize, offset: usize) -> f64 with Panic {
-    read_f64(store.grad_data[param_idx], offset as i64)
+    store_grad_read(store, param_idx, offset)
 }
 
 pub fn param_store_param_value(store: &ParameterStore, param_idx: usize, offset: usize) -> f64 with Panic {
@@ -200,13 +238,39 @@ pub fn param_store_sync_grads_manual(store: &!ParameterStore) with Mut {
     }
 }
 
+pub fn param_store_sync_grads(store: &!ParameterStore, tape: &TensorTape) with Mut, Panic, Div {
+    var p: usize = 0 as usize
+    while p < store.count {
+        if store.tape_id[p] >= 0 {
+            let tid = store.tape_id[p]
+            if tape_has_grad(tape, tid) {
+                if tape_grad_len(tape, tid) != store.param_len[p] { assert(false) }
+                let base = store_value_offset(store, p)
+                if base + store.param_len[p] > d4_value_capacity() { assert(false) }
+                var i: usize = 0 as usize
+                while i < store.param_len[p] {
+                    store.grad_cache[base + i] = tape_grad_at(tape, tid, i)
+                    i = i + 1 as usize
+                }
+                store.has_grad[p] = true
+                store.grad_synced[p] = true
+            } else {
+                store.has_grad[p] = false
+                store.grad_synced[p] = false
+            }
+        }
+        p = p + 1 as usize
+    }
+}
+
 pub fn param_store_free(store: &!ParameterStore) with Alloc, Mut, Panic, Div {
     var p: usize = 0 as usize
     while p < store.count {
-        var grad = store_grad_view(store, p)
-        grad.storage_owner = true
-        tensor_free(&!grad)
+        if !store.grad_synced[p] && store.grad_data[p] != 0 as *mut f64 {
+            heap_free(store.grad_data[p] as *mut i8)
+        }
         store.grad_data[p] = 0 as *mut f64
+        store.grad_synced[p] = false
         p = p + 1 as usize
     }
     store.count = 0 as usize
@@ -218,8 +282,8 @@ pub fn adam_new(lr: f64) -> AdamState {
 
 pub fn adam_new_full(lr: f64, beta1: f64, beta2: f64, eps: f64) -> AdamState {
     AdamState {
-        m: [0.0; 4096],
-        v: [0.0; 4096],
+        m: [0.0; 20000],
+        v: [0.0; 20000],
         offset: [0 as usize; 32],
         len: [0 as usize; 32],
         slots_ready: [false; 32],
@@ -241,7 +305,7 @@ pub fn adam_step(state: &!AdamState, store: &!ParameterStore) with Mut, Panic, D
         var i: usize = 0 as usize
         while i < store.param_len[p] {
             let idx = state.offset[p] + i
-            let g = read_f64(store.grad_data[p], i as i64)
+            let g = store_grad_read(store, p, i)
             state.m[idx] = state.beta1 * state.m[idx] + (1.0 - state.beta1) * g
             state.v[idx] = state.beta2 * state.v[idx] + (1.0 - state.beta2) * g * g
             let m_hat = state.m[idx] / (1.0 - b1t)
@@ -270,7 +334,7 @@ pub fn adamw_step(state: &!AdamState, store: &!ParameterStore, weight_decay: f64
 
 pub fn sgd_new(lr: f64) -> SGDState {
     SGDState {
-        velocity: [0.0; 4096],
+        velocity: [0.0; 20000],
         offset: [0 as usize; 32],
         len: [0 as usize; 32],
         slots_ready: [false; 32],
@@ -282,7 +346,7 @@ pub fn sgd_new(lr: f64) -> SGDState {
 
 pub fn sgd_new_with_momentum(lr: f64, momentum: f64) -> SGDState {
     SGDState {
-        velocity: [0.0; 4096],
+        velocity: [0.0; 20000],
         offset: [0 as usize; 32],
         len: [0 as usize; 32],
         slots_ready: [false; 32],
@@ -299,7 +363,7 @@ pub fn sgd_step(state: &!SGDState, store: &!ParameterStore) with Mut, Panic, Div
         var i: usize = 0 as usize
         while i < store.param_len[p] {
             let idx = state.offset[p] + i
-            let g = read_f64(store.grad_data[p], i as i64)
+            let g = store_grad_read(store, p, i)
             state.velocity[idx] = state.momentum * state.velocity[idx] + (1.0 - state.dampening) * g
             let old = read_f64(store.param_data[p], i as i64)
             write_f64(store.param_data[p], i as i64, old - state.lr * state.velocity[idx])
@@ -315,7 +379,7 @@ pub fn clip_grad_global_norm(store: &!ParameterStore, max_norm: f64) -> f64 with
     while p < store.count {
         var i: usize = 0 as usize
         while i < store.param_len[p] {
-            let g = read_f64(store.grad_data[p], i as i64)
+            let g = store_grad_read(store, p, i)
             sumsq = sumsq + g * g
             i = i + 1 as usize
         }
@@ -328,8 +392,8 @@ pub fn clip_grad_global_norm(store: &!ParameterStore, max_norm: f64) -> f64 with
         while p < store.count {
             var i: usize = 0 as usize
             while i < store.param_len[p] {
-                let g = read_f64(store.grad_data[p], i as i64)
-                write_f64(store.grad_data[p], i as i64, g * scale)
+                let g = store_grad_read(store, p, i)
+                store_grad_write(store, p, i, g * scale)
                 i = i + 1 as usize
             }
             p = p + 1 as usize
@@ -343,10 +407,10 @@ pub fn clip_grad_value(store: &!ParameterStore, max_value: f64) with Mut, Panic 
     while p < store.count {
         var i: usize = 0 as usize
         while i < store.param_len[p] {
-            var g = read_f64(store.grad_data[p], i as i64)
+            var g = store_grad_read(store, p, i)
             if g > max_value { g = max_value }
             if g < 0.0 - max_value { g = 0.0 - max_value }
-            write_f64(store.grad_data[p], i as i64, g)
+            store_grad_write(store, p, i, g)
             i = i + 1 as usize
         }
         p = p + 1 as usize
