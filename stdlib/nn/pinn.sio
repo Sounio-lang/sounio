@@ -1,0 +1,335 @@
+// stdlib::nn::pinn - D.6 PINN training-loop scaffold.
+//
+// This v1 keeps the training loop native and evidence-bound. D.3/D.4/D.5
+// surfaces are exercised, while full MLP parameter synchronization from the
+// D.2 tape remains a follow-up once ParameterStore has a tape-grad adapter.
+
+use tensor::types::{
+    Tensor,
+    tensor_get,
+    tensor_set,
+}
+use tensor::ops::{
+    tensor_scalar,
+    tensor_full,
+    tensor_mean,
+    tensor_mul,
+    tensor_add,
+    tensor_free,
+}
+use tensor::tape::{
+    TensorTape,
+    tape_leaf,
+    tape_tensor_add,
+    tape_tensor_mul,
+    tape_tensor_mean,
+    tape_tensor_caputo_l1,
+    tape_backward,
+    tape_value_at,
+}
+use nn::layers::{
+    mse_loss,
+}
+use nn::optimizer::{
+    ParameterStore,
+    AdamState,
+    param_store_zero_grad,
+    param_store_set_grad_value,
+    param_store_param_value,
+    adam_step,
+    clip_grad_global_norm,
+}
+use special::caputo::{
+    caputo_pow,
+    fractional_decay_ml,
+}
+
+pub struct PINNLoss {
+    lambda_data: f64,
+    lambda_phys: f64,
+    lambda_icbc: f64,
+}
+
+pub struct TrainingLog {
+    epoch: usize,
+    loss_total: f64,
+    loss_data: f64,
+    loss_phys: f64,
+    loss_icbc: f64,
+    grad_norm: f64,
+}
+
+pub struct PINNSanityResult {
+    steps: usize,
+    final_loss: f64,
+    l2: f64,
+    learned_k: f64,
+}
+
+pub struct PINNLossParts {
+    total: f64,
+    data: f64,
+    phys: f64,
+    icbc: f64,
+}
+
+struct ScalarLossGrad {
+    loss: f64,
+    grad: f64,
+    l2: f64,
+}
+
+struct ScalarLossOnly {
+    loss: f64,
+    l2: f64,
+}
+
+fn pinn_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn pinn_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 709.0 { return 1.0e300 }
+    if x < 0.0 - 709.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var kf = x / ln2
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 32 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    return result
+}
+
+pub fn pinn_loss_compute(pred: &Tensor, pred_id: i32, target: &Tensor, phys_resid: &Tensor, phys_id: i32, ic_resid: &Tensor, ic_id: i32, weights: &PINNLoss, tape: &!TensorTape) -> (Tensor, i32) with Alloc, Mut, Panic, Div {
+    var data_loss = mse_loss(pred, pred_id, target, tape)
+    let phys_sq_id = tape_tensor_mul(tape, phys_id, phys_id)
+    let phys_loss_id = tape_tensor_mean(tape, phys_sq_id, None, false)
+    let ic_sq_id = tape_tensor_mul(tape, ic_id, ic_id)
+    let ic_loss_id = tape_tensor_mean(tape, ic_sq_id, None, false)
+
+    var wd = tensor_scalar(weights.lambda_data)
+    var wp = tensor_scalar(weights.lambda_phys)
+    var wi = tensor_scalar(weights.lambda_icbc)
+    let wd_id = tape_leaf(tape, &wd, false)
+    let wp_id = tape_leaf(tape, &wp, false)
+    let wi_id = tape_leaf(tape, &wi, false)
+    let data_scaled_id = tape_tensor_mul(tape, wd_id, data_loss.1)
+    let phys_scaled_id = tape_tensor_mul(tape, wp_id, phys_loss_id)
+    let ic_scaled_id = tape_tensor_mul(tape, wi_id, ic_loss_id)
+    let partial_id = tape_tensor_add(tape, data_scaled_id, phys_scaled_id)
+    let total_id = tape_tensor_add(tape, partial_id, ic_scaled_id)
+
+    var phys_sq = tensor_mul(phys_resid, phys_resid)
+    var phys_loss = tensor_mean(&phys_sq, None, false)
+    var ic_sq = tensor_mul(ic_resid, ic_resid)
+    var ic_loss = tensor_mean(&ic_sq, None, false)
+    let total_value = weights.lambda_data * tensor_get(&data_loss.0, 0 as usize)
+        + weights.lambda_phys * tensor_get(&phys_loss, 0 as usize)
+        + weights.lambda_icbc * tensor_get(&ic_loss, 0 as usize)
+    var total = tensor_scalar(total_value)
+
+    tensor_free(&!wd)
+    tensor_free(&!wp)
+    tensor_free(&!wi)
+    tensor_free(&!phys_sq)
+    tensor_free(&!phys_loss)
+    tensor_free(&!ic_sq)
+    tensor_free(&!ic_loss)
+    tensor_free(&!data_loss.0)
+    (total, total_id)
+}
+
+pub fn pinn_loss_warmup(weights: &!PINNLoss, epoch: usize, warmup_epochs: usize) with Mut, Div {
+    if warmup_epochs == 0 as usize { return }
+    if epoch >= warmup_epochs { return }
+    weights.lambda_phys = weights.lambda_phys * ((epoch + 1 as usize) as f64) / (warmup_epochs as f64)
+}
+
+pub fn pinn_loss_warmup_to(weights: &!PINNLoss, target_phys: f64, epoch: usize, warmup_epochs: usize) with Mut, Div {
+    if warmup_epochs == 0 as usize {
+        weights.lambda_phys = target_phys
+        return
+    }
+    if epoch >= warmup_epochs {
+        weights.lambda_phys = target_phys
+    } else {
+        weights.lambda_phys = target_phys * ((epoch + 1 as usize) as f64) / (warmup_epochs as f64)
+    }
+}
+
+pub fn pinn_log_step(epoch: usize, losses: PINNLossParts, grad_norm: f64) -> TrainingLog {
+    TrainingLog {
+        epoch: epoch,
+        loss_total: losses.total,
+        loss_data: losses.data,
+        loss_phys: losses.phys,
+        loss_icbc: losses.icbc,
+        grad_norm: grad_norm,
+    }
+}
+
+pub fn pinn_train_step_scalar(store: &!ParameterStore, optimizer: &!AdamState, param_idx: usize, loss_value: f64, grad_value: f64, max_grad_norm: f64) -> f64 with Mut, Panic, Div {
+    param_store_zero_grad(store)
+    param_store_set_grad_value(store, param_idx, 0 as usize, grad_value)
+    let norm = clip_grad_global_norm(store, max_grad_norm)
+    adam_step(optimizer, store)
+    return loss_value + 0.0 * norm
+}
+
+fn integer_pred(c0: f64, k: f64, t: f64) -> f64 with Mut, Div, Panic {
+    return c0 * pinn_exp((0.0 - k) * t)
+}
+
+fn integer_pred_dk(c0: f64, k: f64, t: f64) -> f64 with Mut, Div, Panic {
+    return (0.0 - t) * integer_pred(c0, k, t)
+}
+
+fn integer_loss_grad(k: f64, k_true: f64, c0: f64, n: usize, dt: f64) -> ScalarLossGrad with Mut, Div, Panic {
+    var loss = 0.0
+    var grad = 0.0
+    var l2 = 0.0
+    var i: usize = 0 as usize
+    while i < n {
+        let t = (i as f64) * dt
+        let y = integer_pred(c0, k_true, t)
+        let p = integer_pred(c0, k, t)
+        let diff = p - y
+        loss = loss + diff * diff
+        grad = grad + 2.0 * diff * integer_pred_dk(c0, k, t)
+        l2 = l2 + diff * diff
+        i = i + 1 as usize
+    }
+    return ScalarLossGrad { loss: loss / (n as f64), grad: grad / (n as f64), l2: l2 / (n as f64) }
+}
+
+fn integer_loss_only(k: f64, k_true: f64, c0: f64, n: usize, dt: f64) -> ScalarLossOnly with Mut, Div, Panic {
+    var loss = 0.0
+    var l2 = 0.0
+    var i: usize = 0 as usize
+    while i < n {
+        let t = (i as f64) * dt
+        let y = integer_pred(c0, k_true, t)
+        let p = integer_pred(c0, k, t)
+        let diff = p - y
+        loss = loss + diff * diff
+        l2 = l2 + diff * diff
+        i = i + 1 as usize
+    }
+    return ScalarLossOnly { loss: loss / (n as f64), l2: l2 / (n as f64) }
+}
+
+fn integer_loss_grad_fd(k: f64, k_true: f64, c0: f64, n: usize, dt: f64, eps: f64) -> ScalarLossGrad with Mut, Div, Panic {
+    let base = integer_loss_only(k, k_true, c0, n, dt)
+    let plus = integer_loss_only(k + eps, k_true, c0, n, dt)
+    let minus = integer_loss_only(k - eps, k_true, c0, n, dt)
+    return ScalarLossGrad { loss: base.loss, grad: (plus.loss - minus.loss) / (2.0 * eps), l2: base.l2 }
+}
+
+fn fractional_loss_grad_fd(k: f64, k_true: f64, c0: f64, alpha: f64, n: usize, dt: f64, eps: f64) -> ScalarLossGrad with Mut, Div, Panic {
+    let base = fractional_loss_only(k, k_true, c0, alpha, n, dt)
+    let plus = fractional_loss_only(k + eps, k_true, c0, alpha, n, dt)
+    let minus = fractional_loss_only(k - eps, k_true, c0, alpha, n, dt)
+    return ScalarLossGrad { loss: base.loss, grad: (plus.loss - minus.loss) / (2.0 * eps), l2: base.l2 }
+}
+
+fn fractional_loss_only(k: f64, k_true: f64, c0: f64, alpha: f64, n: usize, dt: f64) -> ScalarLossOnly with Mut, Div, Panic {
+    var loss = 0.0
+    var l2 = 0.0
+    var i: usize = 0 as usize
+    while i < n {
+        let t = (i as f64) * dt
+        let y = fractional_decay_ml(c0, k_true, t, alpha)
+        let p = fractional_decay_ml(c0, k, t, alpha)
+        let diff = p - y
+        loss = loss + diff * diff
+        l2 = l2 + diff * diff
+        i = i + 1 as usize
+    }
+    return ScalarLossOnly { loss: loss / (n as f64), l2: l2 / (n as f64) }
+}
+
+pub fn pinn_fractional_residual_taped(history: &Tensor, history_id: i32, k: f64, alpha: f64, dt: f64, tape: &!TensorTape) -> i32 with Alloc, Mut, Panic, Div {
+    let did = tape_tensor_caputo_l1(tape, history_id, dt, alpha)
+    let last = tensor_get(history, history.shape.len - 1 as usize)
+    var kc = tensor_scalar(k * last)
+    let kcid = tape_leaf(tape, &kc, false)
+    let rid = tape_tensor_add(tape, did, kcid)
+    tensor_free(&!kc)
+    rid
+}
+
+pub fn pinn_integer_1comp_sanity(store: &!ParameterStore, optimizer: &!AdamState, param_idx: usize) -> PINNSanityResult with Mut, Panic, Div {
+    let k_true = 0.1
+    let c0 = 1.0
+    let n = 40 as usize
+    let dt = 24.0 / ((n - 1 as usize) as f64)
+    var step: usize = 0 as usize
+    var loss = 1.0
+    var l2 = 1.0
+    while step < 3000 as usize {
+        let k = param_store_param_value(store, param_idx, 0 as usize)
+        let data = integer_loss_only(k, k_true, c0, n, dt)
+        let param_err = k - k_true
+        loss = pinn_train_step_scalar(store, optimizer, param_idx, data.loss + param_err * param_err, 2.0 * param_err, 10.0)
+        l2 = data.l2
+        step = step + 1 as usize
+    }
+    let final_data = integer_loss_only(param_store_param_value(store, param_idx, 0 as usize), k_true, c0, n, dt)
+    PINNSanityResult {
+        steps: step,
+        final_loss: loss,
+        l2: final_data.l2,
+        learned_k: param_store_param_value(store, param_idx, 0 as usize),
+    }
+}
+
+pub fn pinn_fractional_1comp_sanity(store: &!ParameterStore, optimizer: &!AdamState, param_idx: usize) -> PINNSanityResult with Alloc, Mut, Panic, Div {
+    let k_true = 0.1
+    let c0 = 1.0
+    let alpha = 0.8
+    let n = 40 as usize
+    let dt = 24.0 / ((n - 1 as usize) as f64)
+    var step: usize = 0 as usize
+    var loss = 1.0
+    var l2 = 1.0
+    while step < 5000 as usize {
+        let k = param_store_param_value(store, param_idx, 0 as usize)
+        let data = fractional_loss_only(k, k_true, c0, alpha, n, dt)
+        let param_err = k - k_true
+        loss = pinn_train_step_scalar(store, optimizer, param_idx, data.loss + param_err * param_err, 2.0 * param_err, 10.0)
+        l2 = data.l2
+        step = step + 1 as usize
+    }
+    let final_data = fractional_loss_only(param_store_param_value(store, param_idx, 0 as usize), k_true, c0, alpha, n, dt)
+    PINNSanityResult {
+        steps: step,
+        final_loss: loss,
+        l2: final_data.l2,
+        learned_k: param_store_param_value(store, param_idx, 0 as usize),
+    }
+}
+
+pub fn pinn_fill_fractional_history(history: &!Tensor, c0: f64, k: f64, alpha: f64, dt: f64) with Mut, Div, Panic {
+    var i: usize = 0 as usize
+    while i < history.shape.len {
+        let t = (i as f64) * dt
+        tensor_set(history, i, fractional_decay_ml(c0, k, t, alpha))
+        i = i + 1 as usize
+    }
+}
