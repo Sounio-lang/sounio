@@ -457,3 +457,5 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | website.tutorials.drug-dosing-04-propagation | website_only | - | tutorials/drug-dosing-04-propagation | A2 | en:present, pt:english_only, el:english_only, zh:english_only, ja:english_only, es:english_only |
 | website.tutorials.drug-dosing-05-decision | website_only | - | tutorials/drug-dosing-05-decision | A2 | en:present, pt:english_only, el:english_only, zh:english_only, ja:english_only, es:english_only |
 | website.tutorials.hello-world | website_only | - | tutorials/hello-world | A2 | en:present, pt:english_only, el:english_only, zh:english_only, ja:english_only, es:english_only |
+| repo.docs.dissertation.results.d2-autograd-v1 | repo_only | docs/dissertation/results/d2_autograd_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.d2-hardening-v1 | repo_only | docs/dissertation/results/d2_hardening_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
