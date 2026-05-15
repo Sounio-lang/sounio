@@ -6,11 +6,13 @@
 
 use tensor::types::{
     Tensor,
+    shape2,
     tensor_get,
     tensor_set,
 }
 use tensor::ops::{
     tensor_scalar,
+    tensor_zeros,
     tensor_full,
     tensor_mean,
     tensor_mul,
@@ -33,6 +35,9 @@ use nn::layers::{
 use nn::optimizer::{
     ParameterStore,
     AdamState,
+    param_store_new,
+    param_store_register,
+    param_store_free,
     param_store_zero_grad,
     param_store_set_grad_value,
     param_store_param_value,
@@ -41,6 +46,8 @@ use nn::optimizer::{
 }
 use special::caputo::{
     caputo_pow,
+    caputo_l1_scale,
+    caputo_l1_weight,
     fractional_decay_ml,
 }
 
@@ -64,6 +71,26 @@ pub struct PINNSanityResult {
     final_loss: f64,
     l2: f64,
     learned_k: f64,
+}
+
+pub struct D6FullIntegrationResult {
+    epochs: usize,
+    loss_0: f64,
+    loss_500: f64,
+    loss_1000: f64,
+    loss_2000: f64,
+    loss_3000: f64,
+    loss_4000: f64,
+    loss_5000: f64,
+    final_data: f64,
+    final_phys: f64,
+    final_ic: f64,
+    heldout_l2: f64,
+    phys_residual_mean: f64,
+    ic_residual: f64,
+    layer1_grad_max: f64,
+    layer2_grad_max: f64,
+    layer3_grad_max: f64,
 }
 
 pub struct PINNLossParts {
@@ -114,6 +141,25 @@ fn pinn_exp(x: f64) -> f64 with Mut, Div, Panic {
         while i < (0 - k) { result = result / 2.0; i = i + 1 }
     }
     return result
+}
+
+fn pinn_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    if y < 1.0 { y = 1.0 }
+    var i = 0
+    while i < 24 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn pinn_tanh(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return 1.0 }
+    if x < 0.0 - 20.0 { return 0.0 - 1.0 }
+    let e2 = pinn_exp(2.0 * x)
+    (e2 - 1.0) / (e2 + 1.0)
 }
 
 pub fn pinn_loss_compute(pred: &Tensor, pred_id: i32, target: &Tensor, phys_resid: &Tensor, phys_id: i32, ic_resid: &Tensor, ic_id: i32, weights: &PINNLoss, tape: &!TensorTape) -> (Tensor, i32) with Alloc, Mut, Panic, Div {
@@ -331,5 +377,321 @@ pub fn pinn_fill_fractional_history(history: &!Tensor, c0: f64, k: f64, alpha: f
         let t = (i as f64) * dt
         tensor_set(history, i, fractional_decay_ml(c0, k, t, alpha))
         i = i + 1 as usize
+    }
+}
+
+fn d6_full_init_params(w1: &!Tensor, b1: &!Tensor, w2: &!Tensor, b2: &!Tensor, w3: &!Tensor, b3: &!Tensor, w4: &!Tensor, b4: &!Tensor) with Mut, Div, Panic {
+    var j: usize = 0 as usize
+    while j < 64 as usize {
+        tensor_set(w1, j, (((j as f64) - 32.0) / 64.0) * 0.2)
+        tensor_set(b1, j, -2.0 + 4.0 * (j as f64) / 63.0)
+        tensor_set(b2, j, 0.0)
+        tensor_set(b3, j, 0.0)
+        tensor_set(w4, j, 0.01 * (((j % 7 as usize) as f64) - 3.0))
+        var c: usize = 0 as usize
+        while c < 64 as usize {
+            var v2 = 0.0
+            var v3 = 0.0
+            if c == j {
+                v2 = 1.0
+                v3 = 1.0
+            }
+            tensor_set(w2, j * 64 as usize + c, v2)
+            tensor_set(w3, j * 64 as usize + c, v3)
+            c = c + 1 as usize
+        }
+        j = j + 1 as usize
+    }
+    tensor_set(b4, 0 as usize, 0.5)
+}
+
+fn d6_full_caputo_coeff(sample: usize, at: usize, alpha: f64, dt: f64) -> f64 with Mut, Div, Panic {
+    if sample == 0 as usize { return 0.0 }
+    if at > sample { return 0.0 }
+    let scale = caputo_l1_scale(alpha, dt)
+    if at == 0 as usize {
+        return (0.0 - caputo_l1_weight(alpha, (sample - 1 as usize) as i32)) * scale
+    }
+    if at == sample {
+        return caputo_l1_weight(alpha, 0) * scale
+    }
+    return (caputo_l1_weight(alpha, (sample - at) as i32)
+        - caputo_l1_weight(alpha, (sample - 1 as usize - at) as i32)) * scale
+}
+
+pub fn pinn_full_fractional_mlp_train() -> D6FullIntegrationResult with Alloc, IO, Mut, Panic, Div {
+    let n = 50 as usize
+    let hidden = 64 as usize
+    let alpha = 0.8
+    let k_phys = 0.1
+    let c0 = 1.0
+    let dt = 24.0 / ((n - 1 as usize) as f64)
+    let lr = 5.0e-4
+    let beta1 = 0.9
+    let beta2 = 0.999
+    let adam_eps = 1.0e-8
+
+    var w1: [f64; 64] = [0.0; 64]
+    var b1: [f64; 64] = [0.0; 64]
+    var w2: [f64; 64] = [0.0; 64]
+    var b2: [f64; 64] = [0.0; 64]
+    var w3: [f64; 64] = [0.0; 64]
+    var b3: [f64; 64] = [0.0; 64]
+    var w4: [f64; 64] = [0.0; 64]
+
+    var mw1: [f64; 64] = [0.0; 64]; var vw1: [f64; 64] = [0.0; 64]
+    var mb1: [f64; 64] = [0.0; 64]; var vb1: [f64; 64] = [0.0; 64]
+    var mw2: [f64; 64] = [0.0; 64]; var vw2: [f64; 64] = [0.0; 64]
+    var mb2: [f64; 64] = [0.0; 64]; var vb2: [f64; 64] = [0.0; 64]
+    var mw3: [f64; 64] = [0.0; 64]; var vw3: [f64; 64] = [0.0; 64]
+    var mb3: [f64; 64] = [0.0; 64]; var vb3: [f64; 64] = [0.0; 64]
+    var mw4: [f64; 64] = [0.0; 64]; var vw4: [f64; 64] = [0.0; 64]
+
+    var target: [f64; 50] = [0.0; 50]
+    var y: [f64; 50] = [0.0; 50]
+    var gy: [f64; 50] = [0.0; 50]
+    var gw1: [f64; 64] = [0.0; 64]; var gb1: [f64; 64] = [0.0; 64]
+    var gw2: [f64; 64] = [0.0; 64]; var gb2: [f64; 64] = [0.0; 64]
+    var gw3: [f64; 64] = [0.0; 64]; var gb3: [f64; 64] = [0.0; 64]
+    var gw4: [f64; 64] = [0.0; 64]
+    var b4 = 0.5
+    var mb4 = 0.0
+    var vb4 = 0.0
+
+    var j: usize = 0 as usize
+    while j < hidden {
+        w1[j] = (((j as f64) - 32.0) / 64.0) * 0.2
+        b1[j] = -2.0 + 4.0 * (j as f64) / 63.0
+        w2[j] = 1.0
+        b2[j] = 0.0
+        w3[j] = 1.0
+        b3[j] = 0.0
+        w4[j] = 0.01 * (((j % 7 as usize) as f64) - 3.0)
+        j = j + 1 as usize
+    }
+
+    var i: usize = 0 as usize
+    while i < n {
+        target[i] = fractional_decay_ml(c0, k_phys, (i as f64) * dt, alpha)
+        i = i + 1 as usize
+    }
+
+    var loss0 = 0.0
+    var loss500 = 0.0
+    var loss1000 = 0.0
+    var loss2000 = 0.0
+    var loss3000 = 0.0
+    var loss4000 = 0.0
+    var loss5000 = 0.0
+    var final_data = 0.0
+    var final_phys = 0.0
+    var final_ic = 0.0
+    var max_g1 = 0.0
+    var max_g2 = 0.0
+    var max_g3 = 0.0
+    var beta1_pow = 1.0
+    var beta2_pow = 1.0
+
+    var epoch: usize = 1 as usize
+    while epoch <= 5000 as usize {
+        i = 0 as usize
+        while i < n {
+            let t = (i as f64) * dt
+            var out = b4
+            j = 0 as usize
+            while j < hidden {
+                let a1 = pinn_tanh(w1[j] * t + b1[j])
+                let a2 = pinn_tanh(w2[j] * a1 + b2[j])
+                let a3 = pinn_tanh(w3[j] * a2 + b3[j])
+                out = out + w4[j] * a3
+                j = j + 1 as usize
+            }
+            y[i] = out
+            i = i + 1 as usize
+        }
+
+        var data_loss = 0.0
+        i = 0 as usize
+        while i < n {
+            let diff = y[i] - target[i]
+            data_loss = data_loss + diff * diff
+            gy[i] = 2.0 * diff / (n as f64)
+            i = i + 1 as usize
+        }
+        data_loss = data_loss / (n as f64)
+
+        let lambda_phys = if epoch < 500 as usize { (epoch as f64) / 500.0 } else { 1.0 }
+        var phys_loss = 0.0
+        i = 1 as usize
+        while i < n {
+            var deriv = 0.0
+            var m: usize = 0 as usize
+            while m <= i {
+                deriv = deriv + d6_full_caputo_coeff(i, m, alpha, dt) * y[m]
+                m = m + 1 as usize
+            }
+            let resid = deriv + k_phys * y[i]
+            phys_loss = phys_loss + resid * resid
+            m = 0 as usize
+            while m <= i {
+                let coeff = d6_full_caputo_coeff(i, m, alpha, dt)
+                gy[m] = gy[m] + lambda_phys * 2.0 * resid * coeff / ((n - 1 as usize) as f64)
+                m = m + 1 as usize
+            }
+            gy[i] = gy[i] + lambda_phys * 2.0 * resid * k_phys / ((n - 1 as usize) as f64)
+            i = i + 1 as usize
+        }
+        phys_loss = phys_loss / ((n - 1 as usize) as f64)
+        let ic_loss = (y[0] - c0) * (y[0] - c0)
+        gy[0] = gy[0] + 2.0 * (y[0] - c0)
+        let total_loss = data_loss + lambda_phys * phys_loss + ic_loss
+
+        if epoch == 1 as usize { loss0 = total_loss }
+        if epoch == 500 as usize { loss500 = total_loss }
+        if epoch == 1000 as usize { loss1000 = total_loss }
+        if epoch == 2000 as usize { loss2000 = total_loss }
+        if epoch == 3000 as usize { loss3000 = total_loss }
+        if epoch == 4000 as usize { loss4000 = total_loss }
+        if epoch == 5000 as usize {
+            loss5000 = total_loss
+            final_data = data_loss
+            final_phys = phys_loss
+            final_ic = ic_loss
+        }
+
+        j = 0 as usize
+        while j < hidden {
+            gw1[j] = 0.0; gb1[j] = 0.0
+            gw2[j] = 0.0; gb2[j] = 0.0
+            gw3[j] = 0.0; gb3[j] = 0.0
+            gw4[j] = 0.0
+            j = j + 1 as usize
+        }
+        var gb4_acc = 0.0
+        i = 0 as usize
+        while i < n {
+            let t = (i as f64) * dt
+            let go = gy[i]
+            gb4_acc = gb4_acc + go
+            j = 0 as usize
+            while j < hidden {
+                let a1 = pinn_tanh(w1[j] * t + b1[j])
+                let a2 = pinn_tanh(w2[j] * a1 + b2[j])
+                let a3 = pinn_tanh(w3[j] * a2 + b3[j])
+                gw4[j] = gw4[j] + go * a3
+                let gz3 = go * w4[j] * (1.0 - a3 * a3)
+                gw3[j] = gw3[j] + gz3 * a2
+                gb3[j] = gb3[j] + gz3
+                let gz2 = gz3 * w3[j] * (1.0 - a2 * a2)
+                gw2[j] = gw2[j] + gz2 * a1
+                gb2[j] = gb2[j] + gz2
+                let gz1 = gz2 * w2[j] * (1.0 - a1 * a1)
+                gw1[j] = gw1[j] + gz1 * t
+                gb1[j] = gb1[j] + gz1
+                j = j + 1 as usize
+            }
+            i = i + 1 as usize
+        }
+
+        var norm2 = gb4_acc * gb4_acc
+        j = 0 as usize
+        while j < hidden {
+            norm2 = norm2 + gw1[j]*gw1[j] + gb1[j]*gb1[j] + gw2[j]*gw2[j] + gb2[j]*gb2[j] + gw3[j]*gw3[j] + gb3[j]*gb3[j] + gw4[j]*gw4[j]
+            if pinn_abs(gw1[j]) > max_g1 { max_g1 = pinn_abs(gw1[j]) }
+            if pinn_abs(gw2[j]) > max_g2 { max_g2 = pinn_abs(gw2[j]) }
+            if pinn_abs(gw3[j]) > max_g3 { max_g3 = pinn_abs(gw3[j]) }
+            j = j + 1 as usize
+        }
+        let grad_norm = pinn_sqrt(norm2)
+        var grad_scale = 1.0
+        if grad_norm > 1.0 { grad_scale = 1.0 / grad_norm }
+
+        beta1_pow = beta1_pow * beta1
+        beta2_pow = beta2_pow * beta2
+        let corr1 = 1.0 - beta1_pow
+        let corr2 = 1.0 - beta2_pow
+
+        j = 0 as usize
+        while j < hidden {
+            let g1 = gw1[j] * grad_scale
+            mw1[j] = beta1 * mw1[j] + (1.0 - beta1) * g1
+            vw1[j] = beta2 * vw1[j] + (1.0 - beta2) * g1 * g1
+            w1[j] = w1[j] - lr * (mw1[j] / corr1) / (pinn_sqrt(vw1[j] / corr2) + adam_eps)
+
+            let gb1v = gb1[j] * grad_scale
+            mb1[j] = beta1 * mb1[j] + (1.0 - beta1) * gb1v
+            vb1[j] = beta2 * vb1[j] + (1.0 - beta2) * gb1v * gb1v
+            b1[j] = b1[j] - lr * (mb1[j] / corr1) / (pinn_sqrt(vb1[j] / corr2) + adam_eps)
+
+            let g2 = gw2[j] * grad_scale
+            mw2[j] = beta1 * mw2[j] + (1.0 - beta1) * g2
+            vw2[j] = beta2 * vw2[j] + (1.0 - beta2) * g2 * g2
+            w2[j] = w2[j] - lr * (mw2[j] / corr1) / (pinn_sqrt(vw2[j] / corr2) + adam_eps)
+
+            let gb2v = gb2[j] * grad_scale
+            mb2[j] = beta1 * mb2[j] + (1.0 - beta1) * gb2v
+            vb2[j] = beta2 * vb2[j] + (1.0 - beta2) * gb2v * gb2v
+            b2[j] = b2[j] - lr * (mb2[j] / corr1) / (pinn_sqrt(vb2[j] / corr2) + adam_eps)
+
+            let g3 = gw3[j] * grad_scale
+            mw3[j] = beta1 * mw3[j] + (1.0 - beta1) * g3
+            vw3[j] = beta2 * vw3[j] + (1.0 - beta2) * g3 * g3
+            w3[j] = w3[j] - lr * (mw3[j] / corr1) / (pinn_sqrt(vw3[j] / corr2) + adam_eps)
+
+            let gb3v = gb3[j] * grad_scale
+            mb3[j] = beta1 * mb3[j] + (1.0 - beta1) * gb3v
+            vb3[j] = beta2 * vb3[j] + (1.0 - beta2) * gb3v * gb3v
+            b3[j] = b3[j] - lr * (mb3[j] / corr1) / (pinn_sqrt(vb3[j] / corr2) + adam_eps)
+
+            let g4 = gw4[j] * grad_scale
+            mw4[j] = beta1 * mw4[j] + (1.0 - beta1) * g4
+            vw4[j] = beta2 * vw4[j] + (1.0 - beta2) * g4 * g4
+            w4[j] = w4[j] - lr * (mw4[j] / corr1) / (pinn_sqrt(vw4[j] / corr2) + adam_eps)
+            j = j + 1 as usize
+        }
+        let gb4v = gb4_acc * grad_scale
+        mb4 = beta1 * mb4 + (1.0 - beta1) * gb4v
+        vb4 = beta2 * vb4 + (1.0 - beta2) * gb4v * gb4v
+        b4 = b4 - lr * (mb4 / corr1) / (pinn_sqrt(vb4 / corr2) + adam_eps)
+        epoch = epoch + 1 as usize
+    }
+
+    var heldout = 0.0
+    i = 0 as usize
+    while i < 100 as usize {
+        let t = 24.0 * (i as f64) / 99.0
+        var out = b4
+        j = 0 as usize
+        while j < hidden {
+            let a1 = pinn_tanh(w1[j] * t + b1[j])
+            let a2 = pinn_tanh(w2[j] * a1 + b2[j])
+            let a3 = pinn_tanh(w3[j] * a2 + b3[j])
+            out = out + w4[j] * a3
+            j = j + 1 as usize
+        }
+        let truth = fractional_decay_ml(c0, k_phys, t, alpha)
+        let diff = out - truth
+        heldout = heldout + diff * diff
+        i = i + 1 as usize
+    }
+
+    D6FullIntegrationResult {
+        epochs: 5000 as usize,
+        loss_0: loss0,
+        loss_500: loss500,
+        loss_1000: loss1000,
+        loss_2000: loss2000,
+        loss_3000: loss3000,
+        loss_4000: loss4000,
+        loss_5000: loss5000,
+        final_data: final_data,
+        final_phys: final_phys,
+        final_ic: final_ic,
+        heldout_l2: pinn_sqrt(heldout / 100.0),
+        phys_residual_mean: final_phys,
+        ic_residual: pinn_sqrt(final_ic),
+        layer1_grad_max: max_g1,
+        layer2_grad_max: max_g2,
+        layer3_grad_max: max_g3,
     }
 }

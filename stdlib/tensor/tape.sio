@@ -37,6 +37,7 @@ pub fn TAPE_RESHAPE() -> i32 { 12 }
 pub fn TAPE_TRANSPOSE() -> i32 { 13 }
 pub fn TAPE_PERMUTE() -> i32 { 14 }
 pub fn TAPE_CAPUTO_L1() -> i32 { 15 }
+pub fn TAPE_INDEX() -> i32 { 16 }
 
 fn tape_value_capacity() -> usize { 128 as usize }
 fn tape_node_capacity() -> usize { 128 as usize }
@@ -502,6 +503,19 @@ pub fn tape_tensor_caputo_l1(tape: &!TensorTape, a: i32, dt: f64, alpha: f64) ->
     out
 }
 
+pub fn tape_tensor_index(tape: &!TensorTape, a: i32, idx: usize) -> i32 with Alloc, Mut, Panic, Div {
+    var av = tape_tensor_view(tape, a, false)
+    if idx >= av.shape.len { assert(false) }
+    let value = tensor_get(&av, idx)
+    let out_value = tensor_scalar(value)
+    let req = tape.requires_grad[a as usize]
+    let out = tape_push_value_raw(tape, out_value.data, out_value.shape, req)
+    if req {
+        tape_push_node(tape, TAPE_INDEX(), out, a, -1, idx, true, false, 0.0, av.shape.dims, av.shape.rank)
+    }
+    out
+}
+
 fn tape_ensure_grad(tape: &!TensorTape, id: i32) with Alloc, Mut, Panic, Div {
     let idx = id as usize
     if tape.grad_data[idx] == 0 as *mut f64 {
@@ -803,7 +817,7 @@ fn backward_mul(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Div {
             i = i + 1 as usize
         }
     }
-    if tape.requires_grad[b as usize] {
+    if tape.requires_grad[rhs as usize] {
         var i: usize = 0 as usize
         while i < out_len {
             let cur = read_f64(tape.grad_data[b as usize], i as i64)
@@ -1045,6 +1059,17 @@ fn backward_caputo_l1(tape: &!TensorTape, idx: usize) with Alloc, Mut, Panic, Di
     }
 }
 
+fn backward_index(tape: &!TensorTape, idx: usize) with Mut, Panic {
+    let out = tape.node_out[idx]
+    let a = tape.node_a[idx]
+    let a_slot = a as usize
+    let at = tape.node_axis[idx]
+    if at >= tape.value_len_elems[a_slot] { assert(false) }
+    let gout = read_f64(tape.grad_data[out as usize], 0)
+    let cur = read_f64(tape.grad_data[a_slot], at as i64)
+    write_f64(tape.grad_data[a_slot], at as i64, cur + gout)
+}
+
 pub fn tape_backward(tape: &!TensorTape, output_id: i32) with Alloc, Mut, Panic, Div {
     tape_clear_grads(tape)
     let out_shape = tape_value_shape(tape, output_id)
@@ -1106,6 +1131,9 @@ pub fn tape_backward(tape: &!TensorTape, output_id: i32) with Alloc, Mut, Panic,
             if op == TAPE_CAPUTO_L1() {
                 backward_caputo_l1(tape, i)
             }
+            if op == TAPE_INDEX() {
+                backward_index(tape, i)
+            }
         }
     }
 }
@@ -1117,8 +1145,16 @@ pub fn tape_value_at(tape: &TensorTape, id: i32, offset: usize) -> f64 with Mut,
 
 pub fn tape_grad_at(tape: &TensorTape, id: i32, offset: usize) -> f64 with Mut, Panic, Div {
     if tape.grad_data[id as usize] == 0 as *mut f64 { return 0.0 }
-    var g = tape_grad_view(tape, id, false)
-    tensor_get(&g, offset)
+    if offset >= tape.grad_len_elems[id as usize] { assert(false) }
+    read_f64(tape.grad_data[id as usize], offset as i64)
+}
+
+pub fn tape_grad_len(tape: &TensorTape, id: i32) -> usize {
+    tape.grad_len_elems[id as usize]
+}
+
+pub fn tape_has_grad(tape: &TensorTape, id: i32) -> bool {
+    tape.grad_data[id as usize] != 0 as *mut f64
 }
 
 pub fn tape_value_count(tape: &TensorTape) -> usize {
