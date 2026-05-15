@@ -6,20 +6,14 @@ last_validated: 2026-03-07
 validated_by: A1
 source_of_truth: docs/governance/topic-registry.v1.json#repo.governance.authority-matrix
 -->
-
 # Docs Authority Matrix
-
 This matrix is the human-readable companion to `docs/governance/topic-registry.v1.json`.
-
 ## Dual-Canon Policy
-
 - Website pages are canonical for public IA, onboarding, localized docs, tutorials, and concise summaries.
 - Repo docs are canonical for deep technical guidance, executable commands, evidence packs, paper workflows, and historical lineage.
 - Topics marked `dual` must keep their website summary and repo detail synchronized through the registry rather than by copying long-form prose.
 - Topics marked `historical` or `archived` are retained for lineage and must point readers back to the current canonical surface.
-
 ## Topic Matrix
-
 | Topic ID | Authority | Repo doc | Website slug | Owner | Locales |
 | --- | --- | --- | --- | --- | --- |
 | repo.contributor.codebase-overview | repo_only | docs/codebase_overview.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -459,3 +453,4 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | website.tutorials.hello-world | website_only | - | tutorials/hello-world | A2 | en:present, pt:english_only, el:english_only, zh:english_only, ja:english_only, es:english_only |
 | repo.docs.dissertation.results.d2-autograd-v1 | repo_only | docs/dissertation/results/d2_autograd_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.d2-hardening-v1 | repo_only | docs/dissertation/results/d2_hardening_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.d3-nn-primitives-v1 | repo_only | docs/dissertation/results/d3_nn_primitives_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

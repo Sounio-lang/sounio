@@ -6,19 +6,13 @@ last_validated: 2026-03-07
 validated_by: A0
 source_of_truth: docs/governance/topic-registry.v1.json#repo.governance.acceptance-report
 -->
-
 # Docs Acceptance Report
-
 This is the editor-in-chief acceptance snapshot generated from `docs/governance/topic-registry.v1.json`.
-
 ## Verdict
-
 - Status: accepted for the current documentation-governance wave when the listed validation surfaces pass.
 - Dual-canon sync contract is active across repo docs, website docs, and localized docs metadata.
 - Historical and archived repo docs are labeled and redirected back to the current canonical surface through the authority matrix.
-
 ## Scope Summary
-
 - Total governed topics: 435
 - Repo-backed topics: 393
 - Website-backed topics: 55
@@ -28,9 +22,7 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 - Authority count `historical`: 87
 - Authority count `repo_only`: 274
 - Authority count `website_only`: 42
-
 ## Ownership Summary
-
 - A0: 1 topics
 - A1: 1 topics
 - A2: 229 topics
@@ -39,27 +31,25 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 - A5: 29 topics
 - A6: 81 topics
 - A7: 52 topics
-
 ## Locale Acceptance
-
 - Docs collection topics with full six-locale coverage: 37/37
 - All governed website docs topics are present in `en`, `pt`, `el`, `zh`, `ja`, and `es`.
 - English-only website collections allowed by policy and marked in the registry: tutorials: 6; showcases: 9; blog: 3
-
 ## Evidence-Bearing Topics
-
 - repo.docs.implementation.paper-artifact-packaging-spec: scripts/paper/package_paper_artifacts.sh, scripts/paper/paper_submission_pack.sh
 - repo.frontdoor.docs-index: docs/governance/DOCS_AUTHORITY_MATRIX.md
 - repo.governance.acceptance-report: docs/governance/topic-registry.v1.json, docs/governance/DOCS_AUTHORITY_MATRIX.md
 - repo.governance.authority-matrix: docs/governance/topic-registry.v1.json
 - website.docs.gpu: artifacts/omega/gpu_runtime_attest_gate.v1.json
 - website.docs.vancomycin-uncertainty: website/public/docs/assets/vancomycin-ship/check_pass.png
-
 ## Validation Surfaces
-
 - `bash paper/reproduce.sh`
 - `bash scripts/check_docs_consistency.sh`
 - `bash scripts/check_docs_registry.sh`
 - `bash scripts/fast_gate.sh`
 - `node website/scripts/check-docs-parity.mjs`
 - `npm --prefix website run check:quality`
+- Total governed topics: 438
+- Repo-backed topics: 396
+- Authority count `repo_only`: 277
+- A2: 232 topics
