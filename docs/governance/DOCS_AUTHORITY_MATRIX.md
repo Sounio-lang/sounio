@@ -118,6 +118,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.dissertation.results.d5-caputo-tensor-v1 | repo_only | docs/dissertation/results/d5_caputo_tensor_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.determinism-audit-summary-v1 | repo_only | docs/dissertation/results/determinism_audit_summary_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.determinism-audit-v1 | repo_only | docs/dissertation/results/determinism_audit_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.m5-gum-4th-order-v1 | repo_only | docs/dissertation/results/m5_gum_4th_order_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.m6-prior-update-v1 | repo_only | docs/dissertation/results/m6_prior_update_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.mc-cross-validation-lognormal-v1 | repo_only | docs/dissertation/results/mc_cross_validation_lognormal_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.mc-cross-validation-lognormal-v2 | repo_only | docs/dissertation/results/mc_cross_validation_lognormal_v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
