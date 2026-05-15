@@ -98,6 +98,10 @@ fn cap_sin(x: f64) -> f64 with Mut, Div, Panic {
     return sum
 }
 
+fn cap_cos(x: f64) -> f64 with Mut, Div, Panic {
+    return cap_sin(1.57079632679489661923 - x)
+}
+
 pub fn caputo_lgamma(x: f64) -> f64 with Mut, Div, Panic {
     let pi = 3.14159265358979323846
     let ln_sqrt_2pi = 0.91893853320467274178
@@ -182,9 +186,83 @@ pub fn caputo_power_exact(beta: f64, alpha: f64, t: f64) -> f64 with Mut, Div, P
     return numerator / denominator * caputo_pow(t, beta - alpha)
 }
 
+fn mittag_leffler_neg_real_large(alpha: f64, z: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.14159265358979323846
+    let x = 0.0 - z
+    if x < 5.0 { return 0.0 }
+
+    let sin_pa = cap_sin(pi * alpha)
+    let cos_pa = cap_cos(pi * alpha)
+    let scale = sin_pa / (pi * alpha)
+    if scale <= 0.0 { return 0.0 }
+
+    // Stable negative-real branch used by the D.8 reference grid:
+    //
+    //   E_alpha(-x^alpha)
+    //     = sin(pi alpha)/(pi alpha)
+    //       * int_0^inf exp(-x s^(1/alpha))
+    //         / (s^2 + 2s cos(pi alpha) + 1) ds
+    //
+    // The s = r^alpha substitution removes the endpoint singularity in
+    // the completely monotone density.  For x >= 5, s in [0, 4] leaves a
+    // negligible positive tail in the D.8 alpha range; a dense uniform
+    // Simpson grid is used because the mass moves toward s = 0 as x grows.
+    let n = 32768
+    let h = 4.0 / (n as f64)
+    var acc = 0.0
+    var c = 0.0
+    var i = 0
+    while i <= n {
+        let s = (i as f64) * h
+        let denom = s * s + 2.0 * s * cos_pa + 1.0
+        let expo = if s <= 0.0 { 1.0 } else { cap_exp(0.0 - x * caputo_pow(s, 1.0 / alpha)) }
+        let f = expo / denom
+        var w = 2.0
+        if i == 0 || i == n {
+            w = 1.0
+        } else if (i / 2) * 2 != i {
+            w = 4.0
+        }
+        let y = w * f - c
+        let t = acc + y
+        c = (t - acc) - y
+        acc = t
+        i = i + 1
+    }
+    return scale * h * acc / 3.0
+}
+
+fn mittag_leffler_half_neg_large(z: f64) -> f64 with Mut, Div {
+    let sqrt_pi = 1.77245385090551602730
+    let x = 0.0 - z
+    if x <= 0.0 { return 1.0 }
+
+    // E_{1/2}(-x) = exp(x^2) erfc(x).  For x >= 5 the erfcx asymptotic
+    // is alternating and rapidly convergent.
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 24 {
+        term = 0.0 - term * (((2 * n - 1) as f64) / (2.0 * x * x))
+        sum = sum + term
+        if cap_abs(term) < cap_abs(sum) * 1.0e-15 {
+            n = 24
+        } else {
+            n = n + 1
+        }
+    }
+    return sum / (sqrt_pi * x)
+}
+
 pub fn mittag_leffler_e_alpha(alpha: f64, z: f64) -> f64 with Mut, Div, Panic {
     if alpha <= 0.0 { return 0.0 }
     if cap_abs(z) < 1.0e-15 { return 1.0 }
+    if alpha < 1.0 && z <= 0.0 - 5.0 {
+        if cap_abs(alpha - 0.5) < 1.0e-12 {
+            return mittag_leffler_half_neg_large(z)
+        }
+        return mittag_leffler_neg_real_large(alpha, z)
+    }
 
     var sum = 1.0
     var compensation = 0.0
