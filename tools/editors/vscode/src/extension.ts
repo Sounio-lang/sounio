@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import {
@@ -10,10 +11,27 @@ import {
 let client: LanguageClient | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
 
+// Resolve the souc launcher. Priority:
+//   1. `sounio.serverPath` setting (absolute path or PATH-name).
+//   2. `bin/souc` relative to the first workspace folder (in-tree dev).
+//   3. Bare `souc` (relies on $PATH).
+function resolveSoucPath(configured: string): string {
+    if (configured && configured !== 'souc' && fs.existsSync(configured)) {
+        return configured;
+    }
+    const folders = vscode.workspace.workspaceFolders;
+    if (folders && folders.length > 0) {
+        const local = path.join(folders[0].uri.fsPath, 'bin', 'souc');
+        if (fs.existsSync(local)) { return local; }
+    }
+    return configured || 'souc';
+}
+
 export function activate(context: vscode.ExtensionContext) {
     // Get server path from configuration
     const config = vscode.workspace.getConfiguration('sounio');
-    const serverPath = config.get<string>('serverPath', 'souc');
+    const configuredPath = config.get<string>('serverPath', 'souc');
+    const serverPath = resolveSoucPath(configuredPath);
 
     // Server options - run LSP via 'souc lsp'
     const serverOptions: ServerOptions = {
