@@ -1005,6 +1005,314 @@ fn respond_hover() with IO, Mut, Panic, Div {
     write_frame()
 }
 
+// ============================================================================
+// Completions
+// ============================================================================
+//
+// Cursor-position completions sourced from two pools:
+//   (a) Static table — Sounio keywords, primitive types, effects, stdlib
+//       functions. Same vocabulary the hover handler uses.
+//   (b) Document scan — identifiers declared in DOC_TEXT via
+//       `fn <name>`, `let <name>`, `var <name>`, `struct <name>`,
+//       `enum <name>`. Best-effort byte scan, not a real parser; covers
+//       the most-asked-for AST shapes.
+//
+// LSP CompletionItem kinds used (subset of the LSP spec enum):
+//   3  Function
+//   6  Variable
+//   14 Keyword
+//   22 Struct
+//   25 TypeParameter (we co-opt for effects)
+
+let CK_FUNCTION: i64 = 3
+let CK_VARIABLE: i64 = 6
+let CK_KEYWORD:  i64 = 14
+let CK_STRUCT:   i64 = 22
+let CK_TYPEPARM: i64 = 25
+
+// Completion prefix (bytes already typed under the cursor)
+var COMP_PREFIX: [i8; 128] = [0; 128]
+var COMP_PREFIX_LEN: i64 = 0
+
+// Track whether we've emitted at least one item so the comma logic stays sane
+var COMP_EMITTED: i64 = 0
+
+// Walk DOC_TEXT to the byte offset of HOVER_LINE:HOVER_CHAR and scan
+// backwards over identifier bytes to capture whatever the user has typed
+// so far. Empty prefix → emit everything.
+fn parse_completion_prefix() with Mut, Panic {
+    COMP_PREFIX_LEN = 0
+    if HOVER_OK == 0 { return }
+    var i: i64 = 0
+    var line: i64 = 0
+    while i < DOC_TEXT_LEN && line < HOVER_LINE {
+        if (DOC_TEXT[i as usize] as i64) == 10 { line = line + 1 }
+        i = i + 1
+    }
+    if line != HOVER_LINE { return }
+    var pos = i
+    var col: i64 = 0
+    while col < HOVER_CHAR && pos < DOC_TEXT_LEN {
+        if (DOC_TEXT[pos as usize] as i64) == 10 { return }
+        pos = pos + 1
+        col = col + 1
+    }
+    var start = pos
+    while start > i {
+        let c = DOC_TEXT[(start - 1) as usize] as i64
+        if is_ident_byte(c) == false { break }
+        start = start - 1
+    }
+    var k = start
+    while k < pos && COMP_PREFIX_LEN < 128 {
+        COMP_PREFIX[COMP_PREFIX_LEN as usize] = DOC_TEXT[k as usize]
+        COMP_PREFIX_LEN = COMP_PREFIX_LEN + 1
+        k = k + 1
+    }
+}
+
+// Does `label` begin with the captured prefix? Empty prefix → always true.
+fn label_matches_prefix(label: string) -> bool with Mut, Panic {
+    if COMP_PREFIX_LEN == 0 { return true }
+    let n = str_len(label)
+    if n < COMP_PREFIX_LEN { return false }
+    var i: i64 = 0
+    while i < COMP_PREFIX_LEN {
+        if str_char_at(label, i) != (COMP_PREFIX[i as usize] as i64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Does the substring DOC_TEXT[start..start+len] begin with COMP_PREFIX?
+fn doc_slice_matches_prefix(start: i64, len: i64) -> bool with Mut, Panic {
+    if COMP_PREFIX_LEN == 0 { return true }
+    if len < COMP_PREFIX_LEN { return false }
+    var i: i64 = 0
+    while i < COMP_PREFIX_LEN {
+        if (DOC_TEXT[(start + i) as usize] as i64) != (COMP_PREFIX[i as usize] as i64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn emit_comma_if_needed() with Mut, Panic {
+    if COMP_EMITTED == 1 { tx_putc(44) }
+    COMP_EMITTED = 1
+}
+
+fn emit_completion_item(label: string, kind: i64, detail: string) with Mut, Panic, Div {
+    emit_comma_if_needed()
+    tx_puts("{\"label\":\"")
+    tx_puts(label)
+    tx_puts("\",\"kind\":")
+    tx_put_i64(kind)
+    let dl = str_len(detail)
+    if dl > 0 {
+        tx_puts(",\"detail\":\"")
+        tx_puts(detail)
+        tx_puts("\"")
+    }
+    tx_putc(125)
+}
+
+// Wraps the prefix check + emission of one static item.
+fn maybe_emit(label: string, kind: i64, detail: string) with Mut, Panic, Div {
+    if label_matches_prefix(label) == true {
+        emit_completion_item(label, kind, detail)
+    }
+}
+
+// Append the byte slice DOC_TEXT[start..start+len] into the current TX_BODY
+// (escaped where necessary).
+fn tx_put_slice(start: i64, len: i64) with Mut, Panic {
+    var i: i64 = 0
+    while i < len {
+        let c = DOC_TEXT[(start + i) as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+}
+
+// Emit one user-defined completion item with the label sourced from
+// DOC_TEXT[start..start+len].
+fn emit_user_item(start: i64, len: i64, kind: i64, detail: string) with Mut, Panic, Div {
+    emit_comma_if_needed()
+    tx_puts("{\"label\":\"")
+    tx_put_slice(start, len)
+    tx_puts("\",\"kind\":")
+    tx_put_i64(kind)
+    let dl = str_len(detail)
+    if dl > 0 {
+        tx_puts(",\"detail\":\"")
+        tx_puts(detail)
+        tx_puts("\"")
+    }
+    tx_putc(125)
+}
+
+// Skip ASCII whitespace in DOC_TEXT starting at `i`. Returns new index.
+fn skip_ws(i: i64) -> i64 with Mut, Panic {
+    var p = i
+    while p < DOC_TEXT_LEN {
+        let c = DOC_TEXT[p as usize] as i64
+        if c != 32 && c != 9 { break }
+        p = p + 1
+    }
+    return p
+}
+
+// Starting at `i`, read identifier bytes. Returns end offset (i if none).
+fn read_ident_run(i: i64) -> i64 with Mut, Panic {
+    var p = i
+    while p < DOC_TEXT_LEN {
+        let c = DOC_TEXT[p as usize] as i64
+        if is_ident_byte(c) == false { break }
+        p = p + 1
+    }
+    return p
+}
+
+// True if the identifier at DOC_TEXT[s..e] matches the given keyword. The
+// caller has already verified [s..e] is an identifier run, so we just byte
+// compare the full slice.
+fn ident_slice_eq(s: i64, e: i64, kw: string) -> bool with Mut, Panic {
+    let n = e - s
+    if n != str_len(kw) { return false }
+    var k: i64 = 0
+    while k < n {
+        if (DOC_TEXT[(s + k) as usize] as i64) != str_char_at(kw, k) { return false }
+        k = k + 1
+    }
+    return true
+}
+
+// Scan DOC_TEXT for declarations and emit completion items. Honors prefix.
+// Handles: `fn N(`, `let N`, `var N`, `struct N`, `enum N`. Identifier
+// must follow on the same line. Crude — no scope tracking.
+fn emit_doc_completions() with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < DOC_TEXT_LEN {
+        // Sit at start-of-token: either start of DOC_TEXT, or after a byte
+        // that isn't identifier-continue.
+        var at_word_start: bool = false
+        if i == 0 { at_word_start = true }
+        else {
+            let prev = DOC_TEXT[(i - 1) as usize] as i64
+            if is_ident_byte(prev) == false { at_word_start = true }
+        }
+        if at_word_start == true {
+            let je = read_ident_run(i)
+            if je > i {
+                var kind: i64 = 0
+                var detail: string = ""
+                if ident_slice_eq(i, je, "fn")     { kind = CK_FUNCTION; detail = "fn declared in this file" }
+                else if ident_slice_eq(i, je, "let")    { kind = CK_VARIABLE; detail = "let binding" }
+                else if ident_slice_eq(i, je, "var")    { kind = CK_VARIABLE; detail = "var binding" }
+                else if ident_slice_eq(i, je, "struct") { kind = CK_STRUCT;   detail = "struct in this file" }
+                else if ident_slice_eq(i, je, "enum")   { kind = CK_STRUCT;   detail = "enum in this file" }
+
+                if kind != 0 {
+                    let ns = skip_ws(je)
+                    let ne = read_ident_run(ns)
+                    if ne > ns {
+                        let nlen = ne - ns
+                        // Skip if this is one of our seed keywords (don't dedup
+                        // against static table — duplicates are tolerable).
+                        if doc_slice_matches_prefix(ns, nlen) == true {
+                            emit_user_item(ns, nlen, kind, detail)
+                        }
+                    }
+                    i = je
+                } else {
+                    i = je
+                }
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+fn emit_static_completions() with Mut, Panic, Div {
+    // Keywords
+    maybe_emit("fn", CK_KEYWORD, "Function declaration")
+    maybe_emit("let", CK_KEYWORD, "Immutable binding")
+    maybe_emit("var", CK_KEYWORD, "Mutable binding")
+    maybe_emit("if", CK_KEYWORD, "Conditional")
+    maybe_emit("else", CK_KEYWORD, "Conditional alternative")
+    maybe_emit("while", CK_KEYWORD, "Loop")
+    maybe_emit("return", CK_KEYWORD, "Return from a function")
+    maybe_emit("with", CK_KEYWORD, "Effect annotation")
+    maybe_emit("struct", CK_KEYWORD, "Record type")
+    maybe_emit("enum", CK_KEYWORD, "Sum type")
+    maybe_emit("match", CK_KEYWORD, "Pattern match")
+    maybe_emit("break", CK_KEYWORD, "Exit loop")
+    maybe_emit("continue", CK_KEYWORD, "Next iteration")
+    maybe_emit("true", CK_KEYWORD, "Boolean literal")
+    maybe_emit("false", CK_KEYWORD, "Boolean literal")
+    maybe_emit("as", CK_KEYWORD, "Type cast")
+    maybe_emit("pub", CK_KEYWORD, "Public visibility")
+    maybe_emit("use", CK_KEYWORD, "Import")
+    maybe_emit("mod", CK_KEYWORD, "Module declaration")
+    maybe_emit("spawn", CK_KEYWORD, "Fork parallel block")
+    // Primitive types
+    maybe_emit("i8", CK_TYPEPARM, "8-bit signed integer")
+    maybe_emit("i16", CK_TYPEPARM, "16-bit signed integer")
+    maybe_emit("i32", CK_TYPEPARM, "32-bit signed integer")
+    maybe_emit("i64", CK_TYPEPARM, "64-bit signed integer")
+    maybe_emit("u8", CK_TYPEPARM, "8-bit unsigned integer")
+    maybe_emit("u32", CK_TYPEPARM, "32-bit unsigned integer")
+    maybe_emit("u64", CK_TYPEPARM, "64-bit unsigned integer")
+    maybe_emit("usize", CK_TYPEPARM, "pointer-sized unsigned")
+    maybe_emit("f32", CK_TYPEPARM, "32-bit float")
+    maybe_emit("f64", CK_TYPEPARM, "64-bit float")
+    maybe_emit("bool", CK_TYPEPARM, "boolean")
+    maybe_emit("string", CK_TYPEPARM, "null-terminated byte string")
+    // Effects
+    maybe_emit("IO", CK_TYPEPARM, "effect: outside world")
+    maybe_emit("Mut", CK_TYPEPARM, "effect: mutates state")
+    maybe_emit("Panic", CK_TYPEPARM, "effect: may panic")
+    maybe_emit("Div", CK_TYPEPARM, "effect: may diverge")
+    maybe_emit("Async", CK_TYPEPARM, "effect: async-suspending")
+    maybe_emit("GPU", CK_TYPEPARM, "effect: runs on GPU")
+    maybe_emit("Alloc", CK_TYPEPARM, "effect: heap-allocates")
+    // Stdlib functions
+    maybe_emit("print", CK_FUNCTION, "print(s: string) with IO")
+    maybe_emit("println", CK_FUNCTION, "println(s: string) with IO")
+    maybe_emit("read_line", CK_FUNCTION, "read_line() -> string with IO")
+    maybe_emit("read_file", CK_FUNCTION, "read_file(path) -> string with IO")
+    maybe_emit("write_file", CK_FUNCTION, "write_file(path, buf, len) -> i64 with IO")
+    maybe_emit("syscall6", CK_FUNCTION, "syscall6(nr, a1..a6) -> i64 with IO")
+    maybe_emit("str_len", CK_FUNCTION, "str_len(s) -> i64")
+    maybe_emit("str_eq", CK_FUNCTION, "str_eq(a, b) -> bool")
+    maybe_emit("str_char_at", CK_FUNCTION, "str_char_at(s, i) -> i64")
+    maybe_emit("assert", CK_FUNCTION, "assert(cond: bool) with Panic")
+}
+
+fn respond_completion() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    parse_hover_position()       // reuse position parser
+    parse_completion_prefix()
+    COMP_EMITTED = 0
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":{\"isIncomplete\":false,\"items\":[")
+    emit_static_completions()
+    emit_doc_completions()
+    tx_puts("]}}")
+    write_frame()
+}
+
 // Pull document text + URI from current message, run check, publish.
 fn handle_did_open_or_change() with IO, Mut, Panic, Div {
     let u = extract_doc_uri()
@@ -1086,7 +1394,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_DID_CLOSE   { return }
     if method == M_DID_SAVE    { return }
     if method == M_HOVER       { respond_hover();             return }
-    if method == M_COMPLETION  { respond_empty_result();      return }
+    if method == M_COMPLETION  { respond_completion();        return }
     if method == M_DEFINITION  { respond_empty_result();      return }
     if method == M_REFERENCES  { respond_empty_result();      return }
     if method == M_RENAME      { respond_empty_result();      return }
