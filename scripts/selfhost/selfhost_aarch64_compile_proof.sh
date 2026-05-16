@@ -51,9 +51,12 @@ run_crash_diag() {
   rm -f "$diag_log"
   lldb --batch \
     -o "run" \
+    -o "register read x0 x1 x2 x3 x8 x9 x10 x29 sp pc" \
     -o "thread backtrace all" \
+    -o "image lookup --address 0x1000319d8" \
+    -o "disassemble --pc --count 24" \
     -- "$SOUC_NATIVE" "$program_path" "$out_path" --target "$TARGET" \
-    >"$diag_log" 2>&1 || true
+    >"$diag_log" 2>&1 </dev/null || true
 }
 
 expected_file_kind() {
