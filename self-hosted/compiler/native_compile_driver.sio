@@ -222,6 +222,12 @@ let UFN_REF_ARRAY_STORE: i64 = 24
 let UFN_CVT_I64_TO_F64: i64 = 25
 // Float-to-integer conversion (truncation): cvttsd2si rax, xmm0; store to dst
 let UFN_CVT_F64_TO_I64: i64 = 26
+// Array fill: rep stosq loop; DST=base_reg, SRC1=val_reg, IMM=count
+let UFN_ARRAY_FILL: i64 = 27
+// Bulk copy: rep movsq loop; DST=dst_base, SRC1=src_base, IMM=count
+let UFN_BULK_COPY: i64 = 28
+// User-global base address: lea rax, [rip + bss_offset]; DST=dst_reg, IMM=ug_idx
+let UFN_USER_GLOBAL_BASE: i64 = 29
 
 var V2_UFN_OPS: [i64; 4096] = [0; 4096]
 var V2_UFN_DST: [i64; 4096] = [0; 4096]
@@ -1184,6 +1190,9 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "UFN_REF_ARRAY_STORE") { return 24 }
     if token_text_eq(tok, "UFN_CVT_I64_TO_F64") { return 25 }
     if token_text_eq(tok, "UFN_CVT_F64_TO_I64") { return 26 }
+    if token_text_eq(tok, "UFN_ARRAY_FILL") { return 27 }
+    if token_text_eq(tok, "UFN_BULK_COPY") { return 28 }
+    if token_text_eq(tok, "UFN_USER_GLOBAL_BASE") { return 29 }
 
     if token_text_eq(tok, "V2_GLOBAL_PT_KIND_CODE") { return 43 }
     if token_text_eq(tok, "V2_GLOBAL_PT_START") { return 44 }
@@ -2219,6 +2228,16 @@ fn ufn_record_user_global_store(user_global_idx: i64, index_reg: i64, src: i64) 
     }
 }
 
+fn ufn_record_user_global_base(dst: i64, user_global_idx: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 4096 {
+        V2_UFN_OPS[idx as usize] = UFN_USER_GLOBAL_BASE
+        V2_UFN_DST[idx as usize] = dst
+        V2_UFN_IMM[idx as usize] = user_global_idx
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
 fn ufn_record_local_load(dst: i64, base_reg: i64, idx_reg: i64) with Mut {
     let idx = V2_UFN_COUNT
     if idx < 4096 {
@@ -2237,6 +2256,28 @@ fn ufn_record_local_store(base_reg: i64, idx_reg: i64, src: i64) with Mut {
         V2_UFN_SRC1[idx as usize] = base_reg
         V2_UFN_SRC2[idx as usize] = idx_reg
         V2_UFN_DST[idx as usize] = src
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_array_fill(base_reg: i64, val_reg: i64, count: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 4096 {
+        V2_UFN_OPS[idx as usize] = UFN_ARRAY_FILL
+        V2_UFN_DST[idx as usize] = base_reg
+        V2_UFN_SRC1[idx as usize] = val_reg
+        V2_UFN_IMM[idx as usize] = count
+        V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_record_bulk_copy(dst_base: i64, src_base: i64, count: i64) with Mut {
+    let idx = V2_UFN_COUNT
+    if idx < 4096 {
+        V2_UFN_OPS[idx as usize] = UFN_BULK_COPY
+        V2_UFN_DST[idx as usize] = dst_base
+        V2_UFN_SRC1[idx as usize] = src_base
+        V2_UFN_IMM[idx as usize] = count
         V2_UFN_COUNT = idx + 1
     }
 }
@@ -2560,11 +2601,7 @@ fn parse_array_lit_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPa
             V2_NEXT_REG = arr_base + fill_n
             let fill_val = parse_expr_ir(func, ctx, ac)
             if fill_val.ok != 0 {
-                var fi: i64 = 0
-                while fi < fill_n {
-                    ufn_record_copy(arr_base + fi, fill_val.reg)
-                    fi = fi + 1
-                }
+                ufn_record_array_fill(arr_base, fill_val.reg, fill_n)
                 var ec = semi_at + 2
                 while ec < V2_TOKEN_COUNT && token_kind(ec) != TK_RBRACKET { ec = ec + 1 }
                 if token_kind(ec) == TK_RBRACKET {
@@ -2660,6 +2697,12 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
         }
     }
     if k == TK_AMPBANG && token_kind(pos + 1) == TK_IDENT {
+        let bss_ref_idx = lookup_local_bss_idx_tok(ctx, pos + 1)
+        if bss_ref_idx >= 0 {
+            let dst = alloc_reg(ctx)
+            ufn_record_user_global_base(dst, bss_ref_idx)
+            return ExprParse { ok: 1, reg: dst, next: pos + 2}
+        }
         let base_reg = lookup_local_tok(ctx, pos + 1)
         if base_reg >= 0 {
             let dst = alloc_reg(ctx)
@@ -2670,6 +2713,12 @@ fn parse_atom_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprParse w
     }
     // Immutable reference &ident (treated identically to &! for codegen purposes).
     if k == TK_AMP && token_kind(pos + 1) == TK_IDENT {
+        let bss_ro_ref_idx = lookup_local_bss_idx_tok(ctx, pos + 1)
+        if bss_ro_ref_idx >= 0 {
+            let dst = alloc_reg(ctx)
+            ufn_record_user_global_base(dst, bss_ro_ref_idx)
+            return ExprParse { ok: 1, reg: dst, next: pos + 2}
+        }
         let base_reg = lookup_local_tok(ctx, pos + 1)
         if base_reg >= 0 {
             let dst = alloc_reg(ctx)
@@ -3082,19 +3131,11 @@ fn parse_struct_lit_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, token_co
             let val_sidx = V2_LAST_STRUCT_IDX
             if val_sidx >= 0 {
                 let inner_flat = STRUCT_FLAT_SIZE[val_sidx as usize]
-                var ci: i64 = 0
-                while ci < inner_flat {
-                    ufn_record_copy(base_reg + foff + ci, val.reg + ci)
-                    ci = ci + 1
-                }
+                ufn_record_bulk_copy(base_reg + foff, val.reg, inner_flat)
             } else {
                 // scalar or fixed array — use the field's actual flat size
                 let fld_flat = struct_field_flat_size(sidx, foff)
-                var ci: i64 = 0
-                while ci < fld_flat {
-                    ufn_record_copy(base_reg + foff + ci, val.reg + ci)
-                    ci = ci + 1
-                }
+                ufn_record_bulk_copy(base_reg + foff, val.reg, fld_flat)
             }
         }
         cur = val.next
@@ -3140,11 +3181,7 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
             V2_NEXT_REG = base + flat_size
             let zero = alloc_reg(ctx)
             ufn_record_load_imm(zero, 0)
-            var zi: i64 = 0
-            while zi < flat_size {
-                ufn_record_copy(base + zi, zero)
-                zi = zi + 1
-            }
+            ufn_record_array_fill(base, zero, flat_size)
             V2_LAST_STRUCT_IDX = sidx
             return ExprParse { ok: 1, reg: base, next: pos + 3}
         }
@@ -4196,11 +4233,7 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                         let val_sidx = V2_LAST_STRUCT_IDX
                         if val_sidx >= 0 {
                             let inner_flat = STRUCT_FLAT_SIZE[val_sidx as usize]
-                            var ci_lit: i64 = 0
-                            while ci_lit < inner_flat {
-                                ufn_record_copy(base_reg + foff + ci_lit, val_lit.reg + ci_lit)
-                                ci_lit = ci_lit + 1
-                            }
+                            ufn_record_bulk_copy(base_reg + foff, val_lit.reg, inner_flat)
                         } else {
                             ufn_record_copy(base_reg + foff, val_lit.reg)
                         }
@@ -4304,8 +4337,7 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                 if has_semi_init == 0 {
                     let zero_reg = alloc_reg(ctx)
                     ufn_record_load_imm(zero_reg, 0)
-                    var ai: i64 = 0
-                    while ai < arr_size { ufn_record_copy(arr_base + ai, zero_reg); ai = ai + 1 }
+                    ufn_record_array_fill(arr_base, zero_reg, arr_size)
                 }
                 // M1.2 step 4 bisect — tail-literal initializer for
                 // `var arr: [T; N] = [v0, v1, ...]` or `= [val; N]`. See
@@ -4337,11 +4369,7 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                         let fill_parse = parse_expr_ir(func, ctx, rhs_first)
                         V2_LAST_STRUCT_IDX = 0 - 1
                         if fill_parse.ok != 0 {
-                            var fi: i64 = 0
-                            while fi < arr_size {
-                                ufn_record_copy(arr_base + fi, fill_parse.reg)
-                                fi = fi + 1
-                            }
+                            ufn_record_array_fill(arr_base, fill_parse.reg, arr_size)
                         }
                     } else {
                         // [v0, v1, ...] — parse each element as a full expression.
@@ -4386,11 +4414,7 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
             let bind_base = alloc_reg(ctx)
             var bi: i64 = 1
             while bi < flat_size { let _ = alloc_reg(ctx); bi = bi + 1 }
-            var ci: i64 = 0
-            while ci < flat_size {
-                ufn_record_copy(bind_base + ci, let_reg + ci)
-                ci = ci + 1
-            }
+            ufn_record_bulk_copy(bind_base, let_reg, flat_size)
             remember_struct_local_tok(ctx, p + 1, bind_base, bind_sidx)
             V2_LAST_STRUCT_IDX = -1
             return let_next
@@ -4630,12 +4654,8 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                 let early_asn_sidx = V2_LAST_STRUCT_IDX
                 if early_asn_sidx >= 0 {
                     let early_asn_flat = STRUCT_FLAT_SIZE[early_asn_sidx as usize]
-                    var early_ci: i64 = 0
-                    while early_ci < early_asn_flat {
-                        if early_asn.reg + early_ci != early_old_reg + early_ci {
-                            ufn_record_copy(early_old_reg + early_ci, early_asn.reg + early_ci)
-                        }
-                        early_ci = early_ci + 1
+                    if early_asn.reg != early_old_reg {
+                        ufn_record_bulk_copy(early_old_reg, early_asn.reg, early_asn_flat)
                     }
                     V2_LAST_STRUCT_IDX = -1
                     return early_asn.next
@@ -4862,11 +4882,7 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                         }
                         if V2_LAST_STRUCT_IDX >= 0 {
                             let inner_flat = STRUCT_FLAT_SIZE[V2_LAST_STRUCT_IDX as usize]
-                            var ci: i64 = 0
-                            while ci < inner_flat {
-                                ufn_record_copy(base_reg + foff + ci, parsed.reg + ci)
-                                ci = ci + 1
-                            }
+                            ufn_record_bulk_copy(base_reg + foff, parsed.reg, inner_flat)
                             V2_LAST_STRUCT_IDX = -1
                             return parsed.next
                         }
@@ -4892,10 +4908,8 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                 if asn_sidx >= 0 {
                     // struct copy: update all fields
                     let asn_flat = STRUCT_FLAT_SIZE[asn_sidx as usize]
-                    var ci: i64 = 0
-                    while ci < asn_flat {
-                        if parsed.reg + ci != old_reg + ci { ufn_record_copy(old_reg + ci, parsed.reg + ci) }
-                        ci = ci + 1
+                    if parsed.reg != old_reg {
+                        ufn_record_bulk_copy(old_reg, parsed.reg, asn_flat)
                     }
                     V2_LAST_STRUCT_IDX = -1
                     return parsed.next
@@ -5374,6 +5388,14 @@ fn drv_emit_add_rsp_8() with Mut, Div, Panic {
     drv_emit_byte(131)
     drv_emit_byte(196)
     drv_emit_byte(8)
+}
+
+fn drv_emit_add_rsp_imm32(val: i64) with Mut, Div, Panic {
+    // add rsp, imm32  →  48 81 C4 <imm32-LE>
+    drv_emit_byte(72)
+    drv_emit_byte(129)
+    drv_emit_byte(196)
+    drv_emit_u32_le(val)
 }
 
 fn drv_emit_lea_rax_rip_disp32(disp: i64) with Mut, Div, Panic {
@@ -6073,6 +6095,17 @@ fn drv_begin_function(fn_id: i64) with Mut, Panic, Div {
             }
             i = i + 1
         }
+        // Stack params: arg[7] at [rbp+16], arg[8] at [rbp+24], etc.
+        var si: i64 = 7
+        while si < V2_CURRENT_PARAM_COUNT {
+            let vreg = V2_CURRENT_PARAM_REGS[si as usize]
+            if vreg >= 0 {
+                let stk_disp = 16 + (si - 7) * 8
+                drv_emit_load_rbp_disp32_reg(0, stk_disp)
+                drv_emit_store_rbp_disp32_reg(0, drv_ir_slot_offset(vreg))
+            }
+            si = si + 1
+        }
     } else {
         var i: i64 = 0
         while i < V2_CURRENT_PARAM_COUNT && i < 8 {
@@ -6082,6 +6115,17 @@ fn drv_begin_function(fn_id: i64) with Mut, Panic, Div {
                 drv_emit_store_rbp_disp32_reg(preg, drv_ir_slot_offset(vreg))
             }
             i = i + 1
+        }
+        // Stack params: arg[8] at [rbp+16], arg[9] at [rbp+24], etc.
+        var si: i64 = 8
+        while si < V2_CURRENT_PARAM_COUNT {
+            let vreg = V2_CURRENT_PARAM_REGS[si as usize]
+            if vreg >= 0 {
+                let stk_disp = 16 + (si - 8) * 8
+                drv_emit_load_rbp_disp32_reg(0, stk_disp)
+                drv_emit_store_rbp_disp32_reg(0, drv_ir_slot_offset(vreg))
+            }
+            si = si + 1
         }
     }
 }
@@ -6353,6 +6397,17 @@ fn drv_emit_print_f64(arg_reg: i64) with Mut, Panic, Div {
 }
 
 fn drv_emit_call_argc(dst: i64, fn_id: i64, arg0: i64, argc: i64) with Mut, Panic, Div {
+    // Push stack args (beyond reg cap of 8) in reverse order so callee sees
+    // arg[8] at [rbp+16], arg[9] at [rbp+24], etc. after its prologue.
+    let reg_cap: i64 = 8
+    var excess: i64 = argc - reg_cap
+    if excess < 0 { excess = 0 }
+    var sk: i64 = argc - 1
+    while sk >= reg_cap {
+        drv_emit_load_rbp_disp32_reg(0, drv_ir_slot_offset(arg0 + sk))
+        drv_emit_push_rax()
+        sk = sk - 1
+    }
     if argc >= 1 { drv_emit_load_rbp_disp32_reg(7, drv_ir_slot_offset(arg0)) }
     if argc >= 2 { drv_emit_load_rbp_disp32_reg(6, drv_ir_slot_offset(arg0 + 1)) }
     if argc >= 3 { drv_emit_load_rbp_disp32_reg(2, drv_ir_slot_offset(arg0 + 2)) }
@@ -6364,6 +6419,7 @@ fn drv_emit_call_argc(dst: i64, fn_id: i64, arg0: i64, argc: i64) with Mut, Pani
     let call_pos = DRV_CODE_LEN
     drv_emit_call_rel32_placeholder()
     drv_add_call_reloc(call_pos + 1, fn_id)
+    if excess > 0 { drv_emit_add_rsp_imm32(excess * 8) }
     if dst >= 0 { drv_core_store_rax_to_temp(dst) }
 }
 
@@ -6409,7 +6465,16 @@ fn drv_emit_call_fnref_switch(dst: i64, arg0: i64, argc: i64) with Mut, Panic, D
 
 fn drv_emit_call_argc_sret(dst: i64, fn_id: i64, arg0: i64, argc: i64) with Mut, Panic, Div {
     // SRET call: rdi = pointer to caller's result buffer (dst slot), actual
-    // args start at rsi (shifted +1). The callee writes directly to the buffer.
+    // args start at rsi (shifted +1). Excess args beyond reg cap of 7 go on stack.
+    let sret_reg_cap: i64 = 7
+    var sret_excess: i64 = argc - sret_reg_cap
+    if sret_excess < 0 { sret_excess = 0 }
+    var ssk: i64 = argc - 1
+    while ssk >= sret_reg_cap {
+        drv_emit_load_rbp_disp32_reg(0, drv_ir_slot_offset(arg0 + ssk))
+        drv_emit_push_rax()
+        ssk = ssk - 1
+    }
     drv_emit_lea_rdi_rbp_disp32(drv_ir_slot_offset(dst))
     if argc >= 1 { drv_emit_load_rbp_disp32_reg(6, drv_ir_slot_offset(arg0)) }
     if argc >= 2 { drv_emit_load_rbp_disp32_reg(2, drv_ir_slot_offset(arg0 + 1)) }
@@ -6421,6 +6486,7 @@ fn drv_emit_call_argc_sret(dst: i64, fn_id: i64, arg0: i64, argc: i64) with Mut,
     let call_pos = DRV_CODE_LEN
     drv_emit_call_rel32_placeholder()
     drv_add_call_reloc(call_pos + 1, fn_id)
+    if sret_excess > 0 { drv_emit_add_rsp_imm32(sret_excess * 8) }
 }
 
 fn drv_emit_call1(dst: i64, fn_id: i64, arg: i64, argc: i64) with Mut, Panic, Div {
@@ -6542,17 +6608,20 @@ fn drv_emit_driver_global_store(global_id: i64, index_reg: i64, src: i64) with M
     else { drv_emit_store_rax_mem_rdx_rbx8() }
 }
 
-// M1.2 step D — user-global load: `rax = data[user_global_offset + idx*8]`.
-// Uses kind=3 relocations (already wired in drv_apply_relocations) which
-// patch the rip-relative lea to the .data file offset. The index register
-// is loaded into rbx and rdx holds the base; indexed load is 8 bytes.
+// M1.2 step D — user-global load: arr[idx] = *(data_top - idx*8)
+// BSS arrays use DESCENDING layout (matching stack arrays) so that &bss_array
+// pointers work with drv_emit_ref_array_load unchanged. data_top points at
+// arr[0] which is stored at the highest address; arr[i] is at data_top - i*8.
 fn drv_emit_user_global_load(dst: i64, ug_idx: i64, index_reg: i64) with Mut, Panic, Div {
     let data_offset = USER_GLOBAL_DATA_OFFSET[ug_idx as usize]
+    let n = USER_GLOBAL_ELEM_COUNT[ug_idx as usize]
+    let top_offset = data_offset + (n - 1) * 8
     let load_pos = DRV_CODE_LEN + 3
     drv_emit_lea_rax_rip_disp32(0)
-    drv_add_data_reloc(load_pos, data_offset)
+    drv_add_data_reloc(load_pos, top_offset)
     drv_emit_mov_reg_reg(2, 0)
     drv_core_load_temp_to_rax(index_reg)
+    drv_emit_neg_rax_only()
     drv_emit_mov_reg_reg(3, 0)
     drv_emit_load_rax_mem_rdx_rbx8()
     drv_core_store_rax_to_temp(dst)
@@ -6560,14 +6629,27 @@ fn drv_emit_user_global_load(dst: i64, ug_idx: i64, index_reg: i64) with Mut, Pa
 
 fn drv_emit_user_global_store(ug_idx: i64, index_reg: i64, src: i64) with Mut, Panic, Div {
     let data_offset = USER_GLOBAL_DATA_OFFSET[ug_idx as usize]
+    let n = USER_GLOBAL_ELEM_COUNT[ug_idx as usize]
+    let top_offset = data_offset + (n - 1) * 8
     let load_pos = DRV_CODE_LEN + 3
     drv_emit_lea_rax_rip_disp32(0)
-    drv_add_data_reloc(load_pos, data_offset)
+    drv_add_data_reloc(load_pos, top_offset)
     drv_emit_mov_reg_reg(2, 0)
     drv_core_load_temp_to_rax(index_reg)
+    drv_emit_neg_rax_only()
     drv_emit_mov_reg_reg(3, 0)
     drv_core_load_temp_to_rax(src)
     drv_emit_store_rax_mem_rdx_rbx8()
+}
+
+fn drv_emit_user_global_base(dst: i64, ug_idx: i64) with Mut, Panic, Div {
+    let data_offset = USER_GLOBAL_DATA_OFFSET[ug_idx as usize]
+    let n = USER_GLOBAL_ELEM_COUNT[ug_idx as usize]
+    let top_offset = data_offset + (n - 1) * 8
+    let load_pos = DRV_CODE_LEN + 3
+    drv_emit_lea_rax_rip_disp32(0)
+    drv_add_data_reloc(load_pos, top_offset)
+    drv_core_store_rax_to_temp(dst)
 }
 
 fn drv_emit_local_array_load(dst: i64, base_reg: i64, idx_reg: i64) with Mut, Panic, Div {
@@ -6587,6 +6669,42 @@ fn drv_emit_local_array_store(base_reg: i64, idx_reg: i64, src: i64) with Mut, P
     drv_emit_mov_reg_reg(2, 0)
     drv_core_load_temp_to_rax(src)
     drv_emit_store_rax_mem_rdx_rbx8()
+}
+
+fn drv_emit_array_fill(base_reg: i64, val_reg: i64, count: i64) with Mut, Panic, Div {
+    // Fill stack array [base_reg .. base_reg+count-1] with the value in val_reg.
+    // Uses rep stosq (DF=0, incrementing): rdi = &arr[count-1] (lowest addr), rcx = count.
+    // arr[k] is at rbp - (base_reg+k+1)*8; arr[count-1] at rbp - (base_reg+count)*8.
+    if count <= 0 { return }
+    drv_core_load_temp_to_rax(val_reg)
+    // lea rdi, [rbp + disp_of_arr[count-1]]
+    drv_emit_lea_rdi_rbp_disp32(drv_ir_slot_offset(base_reg + count - 1))
+    // mov rcx, count  →  48 C7 C1 <count as i32>
+    drv_emit_byte(72)
+    drv_emit_byte(199)
+    drv_emit_byte(193)
+    drv_emit_u32_le(count)
+    // rep stosq  →  F3 48 AB
+    drv_emit_byte(243)
+    drv_emit_byte(72)
+    drv_emit_byte(171)
+}
+
+fn drv_emit_bulk_copy(dst_base: i64, src_base: i64, count: i64) with Mut, Panic, Div {
+    // Copy count stack slots from src_base..src_base+count-1 → dst_base..dst_base+count-1.
+    // Uses rep movsq (DF=0): rsi = &src[count-1], rdi = &dst[count-1], rcx = count.
+    if count <= 0 { return }
+    drv_emit_lea_rax_rbp_disp32(drv_ir_slot_offset(src_base + count - 1))
+    drv_emit_mov_reg_reg(6, 0)
+    drv_emit_lea_rdi_rbp_disp32(drv_ir_slot_offset(dst_base + count - 1))
+    drv_emit_byte(72)
+    drv_emit_byte(199)
+    drv_emit_byte(193)
+    drv_emit_u32_le(count)
+    // rep movsq  →  F3 48 A5
+    drv_emit_byte(243)
+    drv_emit_byte(72)
+    drv_emit_byte(165)
 }
 
 fn drv_emit_ref_array_load(dst: i64, ptr_reg: i64, idx_reg: i64) with Mut, Panic, Div {
@@ -6866,6 +6984,12 @@ fn compile_ufn_from_globals(fn_id: i64) -> bool with IO, Mut, Panic, Div {
             drv_emit_cvt_i64_to_f64(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
         } else if op == UFN_CVT_F64_TO_I64 {
             drv_emit_cvt_f64_to_i64(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize])
+        } else if op == UFN_ARRAY_FILL {
+            drv_emit_array_fill(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_IMM[i as usize])
+        } else if op == UFN_BULK_COPY {
+            drv_emit_bulk_copy(V2_UFN_DST[i as usize], V2_UFN_SRC1[i as usize], V2_UFN_IMM[i as usize])
+        } else if op == UFN_USER_GLOBAL_BASE {
+            drv_emit_user_global_base(V2_UFN_DST[i as usize], V2_UFN_IMM[i as usize])
         }
         i = i + 1
     }
