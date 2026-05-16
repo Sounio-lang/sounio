@@ -324,6 +324,7 @@ compat_inspect() {
   local source=""
   local line=-1
   local char=-1
+  local resolve_name=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -334,8 +335,14 @@ compat_inspect() {
         char="${p##*:}"
         shift 2
         ;;
+      --resolve)
+        [[ $# -lt 2 ]] && { echo "error: --resolve needs NAME" >&2; exit 2; }
+        resolve_name="$2"
+        shift 2
+        ;;
       -h|--help)
         echo "usage: souc inspect --pos LINE:COL <source.sio>" >&2
+        echo "       souc inspect --resolve NAME <source.sio>" >&2
         exit 0
         ;;
       *)
@@ -348,8 +355,14 @@ compat_inspect() {
   done
 
   [[ -z "$source" ]] && { echo "error: missing source.sio" >&2; exit 2; }
+
+  if [[ -n "$resolve_name" ]]; then
+    inspect_resolve "$resolve_name" "$source"
+    return $?
+  fi
+
   if ! [[ "$line" =~ ^[0-9]+$ ]] || ! [[ "$char" =~ ^[0-9]+$ ]]; then
-    echo "error: --pos LINE:COL required (zero-based)" >&2
+    echo "error: --pos LINE:COL or --resolve NAME required" >&2
     exit 2
   fi
 
@@ -439,6 +452,151 @@ compat_inspect() {
 
   printf '{"schema":"sounio.inspect.v1","uri":"%s","position":{"line":%d,"character":%d},"found":true,"name":"%s","kind":"function","decl_line":%d,"fn_index":%d,"signature":"%s"}\n' \
     "$uri" "$line" "$char" "$fn_name" "$decl_line" "$found_idx" "$esc"
+}
+
+# inspect_resolve NAME <source.sio>
+#
+# Best-effort name resolution across the source's `use` graph. BFS over
+# directly-imported files (with depth + visited limits to avoid walking
+# the whole stdlib). Emits sounio.inspect.v1 JSON on hit, {found:false}
+# on miss. Used by the LSP as the third tier of textDocument/definition
+# after in-file scan and peer-open-buffer scan both miss.
+inspect_resolve() {
+  local name="$1"
+  local source="$2"
+
+  if ! [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    printf '{"schema":"sounio.inspect.v1","found":false,"error":"bad NAME"}\n'
+    return 0
+  fi
+
+  local source_abs
+  source_abs="$(readlink -f -- "$source" 2>/dev/null || echo "$source")"
+  local source_dir
+  source_dir="$(dirname -- "$source_abs")"
+
+  # Walk up from source_dir looking for project markers. Any ancestor
+  # with souc.toml / .git / Cargo.toml becomes a search root, so
+  # `use libs::helpers` from src/main.sio resolves into libs/helpers.sio
+  # in a project rooted multiple levels up.
+  local -a project_roots=()
+  local up="$source_dir"
+  local guard=0
+  while [[ "$up" != "/" && $guard -lt 16 ]]; do
+    if [[ -e "$up/souc.toml" || -e "$up/.git" || -e "$up/Cargo.toml" ]]; then
+      project_roots+=("$up")
+    fi
+    up="$(dirname -- "$up")"
+    guard=$((guard + 1))
+  done
+
+  local -a roots=("$source_dir")
+  local r
+  for r in "${project_roots[@]}"; do roots+=("$r"); done
+  roots+=("$ROOT_DIR/stdlib" "$ROOT_DIR/self-hosted" "$ROOT_DIR")
+
+  local -a queue=("$source_abs")
+  local -A visited=()
+  local files_scanned=0
+  local files_limit=200
+
+  while (( ${#queue[@]} > 0 && files_scanned < files_limit )); do
+    local current="${queue[0]}"
+    queue=("${queue[@]:1}")
+    [[ -n "${visited[$current]:-}" ]] && continue
+    visited[$current]=1
+    files_scanned=$((files_scanned + 1))
+    [[ -f "$current" ]] || continue
+
+    local hit
+    hit="$(awk -v n="$name" '
+      {
+        line=$0
+        sub(/^[[:space:]]+/, "", line)
+        if (match(line, "^(pub[[:space:]]+)?(fn|let|var|struct|enum)[[:space:]]+" n "([^A-Za-z0-9_]|$)")) {
+          orig=$0
+          re="(^|[^A-Za-z0-9_])" n "([^A-Za-z0-9_]|$)"
+          if (match(orig, re)) {
+            col = RSTART
+            ch = substr(orig, col, 1)
+            if (ch !~ /[A-Za-z0-9_]/) { col = col + 1 }
+            if (line ~ "^(pub[[:space:]]+)?fn[[:space:]]+") k="function"
+            else if (line ~ "^(pub[[:space:]]+)?(let|var)[[:space:]]+") k="variable"
+            else if (line ~ "^(pub[[:space:]]+)?struct[[:space:]]+") k="struct"
+            else if (line ~ "^(pub[[:space:]]+)?enum[[:space:]]+") k="enum"
+            else k="identifier"
+            print (NR - 1) "\t" (col - 1) "\t" k
+            exit
+          }
+        }
+      }
+    ' "$current")"
+
+    if [[ -n "$hit" ]]; then
+      local decl_line decl_char kind
+      IFS=$'\t' read -r decl_line decl_char kind <<<"$hit"
+      local uri="file://${current// /%20}"
+      printf '{"schema":"sounio.inspect.v1","found":true,"name":"%s","kind":"%s","file":"%s","uri":"%s","decl_line":%d,"decl_char":%d}\n' \
+        "$name" "$kind" "$current" "$uri" "$decl_line" "$decl_char"
+      return 0
+    fi
+
+    while IFS= read -r imp_path; do
+      [[ -z "$imp_path" ]] && continue
+      local parts="${imp_path//::/ }"
+      local -a segs
+      read -ra segs <<<"$parts"
+      [[ ${#segs[@]} -eq 0 ]] && continue
+      local k
+      for ((k = ${#segs[@]}; k >= 1; k--)); do
+        local rel=""
+        local j
+        for ((j = 0; j < k; j++)); do
+          if [[ -z "$rel" ]]; then rel="${segs[$j]}"
+          else rel="$rel/${segs[$j]}"
+          fi
+        done
+        local cand="${rel}.sio"
+        local r2
+        for r2 in "${roots[@]}"; do
+          local p="$r2/$cand"
+          if [[ -f "$p" ]]; then
+            p="$(readlink -f -- "$p")"
+            if [[ -z "${visited[$p]:-}" ]]; then
+              queue+=("$p")
+            fi
+          fi
+        done
+      done
+    done < <(
+      awk '
+        /^use[[:space:]]+/ {
+          line=$0
+          sub(/^use[[:space:]]+/, "", line)
+          sub(/[[:space:]]*\/\/.*$/, "", line)
+          sub(/;[[:space:]]*$/, "", line)
+          if (line ~ /\{.*\}/) {
+            prefix=line
+            sub(/::\{.*$/, "", prefix)
+            inner=line
+            sub(/^[^{]*\{/, "", inner)
+            sub(/\}.*$/, "", inner)
+            n=split(inner, items, ",")
+            for (i = 1; i <= n; i++) {
+              s=items[i]
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+              if (s != "") print prefix "::" s
+            }
+          } else {
+            gsub(/[[:space:]]/, "", line)
+            if (line != "") print line
+          }
+        }
+      ' "$current"
+    )
+  done
+
+  printf '{"schema":"sounio.inspect.v1","found":false,"name":"%s"}\n' "$name"
 }
 
 compat_compile() {
