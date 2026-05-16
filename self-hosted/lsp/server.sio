@@ -75,10 +75,23 @@ var SAW_SHUTDOWN: i64 = 0
 // Diagnostics state
 // ============================================================================
 
-// argv / envp for fork+execve of `souc <src> <out>`. Static slots — only one
-// check at a time per server (single-threaded).
-var ARGV: [i64; 4] = [0; 4]
+// argv / envp for fork+execve. 8 slots covers both `souc <src> <out>`
+// (check pipeline) and `souc inspect --pos L:C <src>` (hover fallback).
+// Static slots — only one subprocess at a time per server (single-
+// threaded).
+var ARGV: [i64; 8] = [0; 8]
 var ENVP: [i64; 1] = [0; 1]
+
+// "LINE:COL\0" arg buffer used by `souc inspect`.
+var POS_ARG: [i8; 32] = [0; 32]
+
+// stdout capture buffer for inspect.
+var INSPECT_RAW: [i8; 8192] = [0; 8192]
+var INSPECT_RAW_LEN: i64 = 0
+
+// Most recent inspect result. Empty if no signature found.
+var INSPECT_SIG: [i8; 1024] = [0; 1024]
+var INSPECT_SIG_LEN: i64 = 0
 
 // Active document (the one the current request is about). This is
 // populated either by `extract_doc_text` / `extract_doc_uri` on
@@ -760,6 +773,186 @@ fn run_souc_check() -> i64 with IO, Mut, Panic {
     return 0
 }
 
+// ----------------------------------------------------------------------------
+// Inspect — souc inspect --pos LINE:COL <src> via fork+execve
+// ----------------------------------------------------------------------------
+
+// Format `LINE:COL\0` into POS_ARG. Returns nothing (callers pass the
+// buffer address into ARGV).
+fn format_pos_arg(line: i64, col: i64) with Mut, Panic, Div {
+    var p: i64 = 0
+    // line digits
+    if line == 0 {
+        POS_ARG[p as usize] = 48 as i8
+        p = p + 1
+    } else {
+        var v = line
+        var rev: [i8; 16] = [0; 16]
+        var rl: i64 = 0
+        while v > 0 {
+            rev[rl as usize] = (48 + v % 10) as i8
+            rl = rl + 1
+            v = v / 10
+        }
+        var i = rl - 1
+        while i >= 0 {
+            POS_ARG[p as usize] = rev[i as usize]
+            p = p + 1
+            if i == 0 { break }
+            i = i - 1
+        }
+    }
+    POS_ARG[p as usize] = 58 as i8   // ':'
+    p = p + 1
+    // col digits
+    if col == 0 {
+        POS_ARG[p as usize] = 48 as i8
+        p = p + 1
+    } else {
+        var v = col
+        var rev: [i8; 16] = [0; 16]
+        var rl: i64 = 0
+        while v > 0 {
+            rev[rl as usize] = (48 + v % 10) as i8
+            rl = rl + 1
+            v = v / 10
+        }
+        var i = rl - 1
+        while i >= 0 {
+            POS_ARG[p as usize] = rev[i as usize]
+            p = p + 1
+            if i == 0 { break }
+            i = i - 1
+        }
+    }
+    POS_ARG[p as usize] = 0 as i8    // null terminator
+}
+
+// fork + exec `./bin/souc inspect --pos LINE:COL /tmp/sounio_lsp_doc.sio`
+// with stdout (and stderr) captured to /tmp/sounio_lsp_inspect.json.
+// Returns 0 on success, -1 on fork failure.
+fn run_souc_inspect(line: i64, col: i64) -> i64 with IO, Mut, Panic, Div {
+    format_pos_arg(line, col)
+
+    ARGV[0] = "./bin/souc" as i64
+    ARGV[1] = "inspect" as i64
+    ARGV[2] = "--pos" as i64
+    ARGV[3] = &! POS_ARG as i64
+    ARGV[4] = "/tmp/sounio_lsp_doc.sio" as i64
+    ARGV[5] = 0
+    ENVP[0] = 0
+
+    let pid = syscall6(57, 0, 0, 0, 0, 0, 0)
+    if pid < 0 { return 0 - 1 }
+    if pid == 0 {
+        let fd = syscall6(2, "/tmp/sounio_lsp_inspect.json", 577, 420, 0, 0, 0)
+        if fd >= 0 {
+            syscall6(33, fd, 1, 0, 0, 0, 0)
+            syscall6(33, fd, 2, 0, 0, 0, 0)
+            syscall6(3, fd, 0, 0, 0, 0, 0)
+        }
+        syscall6(59, "./bin/souc" as i64, &! ARGV, &! ENVP, 0, 0, 0)
+        syscall6(60, 127, 0, 0, 0, 0, 0)
+    }
+    syscall6(61, pid, 0, 0, 0, 0, 0)
+    return 0
+}
+
+// Read /tmp/sounio_lsp_inspect.json into INSPECT_RAW. Returns bytes.
+fn slurp_inspect_file() -> i64 with IO, Mut, Panic {
+    INSPECT_RAW_LEN = 0
+    let fd = syscall6(2, "/tmp/sounio_lsp_inspect.json", 0, 0, 0, 0, 0)
+    if fd < 0 { return 0 }
+    var got: i64 = 0
+    var done: i64 = 0
+    while done == 0 {
+        let r = syscall6(0, fd, &! RX_ONE, 1, 0, 0, 0)
+        if r <= 0 { done = 1 }
+        else if got >= 8192 { done = 1 }
+        else {
+            INSPECT_RAW[got as usize] = RX_ONE[0]
+            got = got + 1
+        }
+    }
+    syscall6(3, fd, 0, 0, 0, 0, 0)
+    INSPECT_RAW_LEN = got
+    return got
+}
+
+// Find a key like `"signature"` in INSPECT_RAW and capture the string
+// value that follows. Stores into INSPECT_SIG. Returns true on hit.
+fn extract_inspect_string(key: string, out: &![i8; 1024], out_len: i64) -> i64 with Mut, Panic {
+    let klen = str_len(key)
+    if klen == 0 || INSPECT_RAW_LEN == 0 { return 0 }
+    var i: i64 = 0
+    while i + klen <= INSPECT_RAW_LEN {
+        var k: i64 = 0
+        var ok: i64 = 1
+        while k < klen {
+            if (INSPECT_RAW[(i + k) as usize] as i64) != str_char_at(key, k) { ok = 0; k = klen }
+            else { k = k + 1 }
+        }
+        if ok == 1 {
+            i = i + klen
+            // skip ws + ':' + ws + '"'
+            var saw_quote: i64 = 0
+            while i < INSPECT_RAW_LEN && saw_quote == 0 {
+                let c = INSPECT_RAW[i as usize] as i64
+                if c == 34 { saw_quote = 1 }
+                i = i + 1
+            }
+            if saw_quote == 0 { return 0 }
+            var n: i64 = 0
+            while i < INSPECT_RAW_LEN && n < 1024 {
+                let c = INSPECT_RAW[i as usize] as i64
+                if c == 34 { return n }
+                if c == 92 && i + 1 < INSPECT_RAW_LEN {
+                    let nx = INSPECT_RAW[(i + 1) as usize] as i64
+                    if nx == 110 { out[n as usize] = 10 as i8; n = n + 1; i = i + 2 }
+                    else if nx == 34 { out[n as usize] = 34 as i8; n = n + 1; i = i + 2 }
+                    else if nx == 92 { out[n as usize] = 92 as i8; n = n + 1; i = i + 2 }
+                    else { i = i + 2 }
+                } else {
+                    out[n as usize] = c as i8
+                    n = n + 1
+                    i = i + 1
+                }
+            }
+            return n
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Run the inspect pipeline for the cursor position and try to fetch a
+// type-checker-inferred signature. Returns true on hit, populates
+// INSPECT_SIG. Caller must have ensured DOC_TEXT is on disk.
+fn fetch_inspect_signature(line: i64, col: i64) -> bool with IO, Mut, Panic, Div {
+    INSPECT_SIG_LEN = 0
+    if run_souc_inspect(line, col) < 0 { return false }
+    if slurp_inspect_file() <= 0 { return false }
+    // Confirm "found":true; otherwise skip.
+    var found_true: i64 = 0
+    var i: i64 = 0
+    let needle = "\"found\":true"
+    let nlen = str_len(needle)
+    while i + nlen <= INSPECT_RAW_LEN && found_true == 0 {
+        var k: i64 = 0
+        var ok: i64 = 1
+        while k < nlen {
+            if (INSPECT_RAW[(i + k) as usize] as i64) != str_char_at(needle, k) { ok = 0; k = nlen }
+            else { k = k + 1 }
+        }
+        if ok == 1 { found_true = 1 }
+        i = i + 1
+    }
+    if found_true == 0 { return false }
+    let n = extract_inspect_string("\"signature\"", &! INSPECT_SIG, 1024)
+    INSPECT_SIG_LEN = n
+    return n > 0
+}
+
 // Read the stderr file into DIAG_RAW. Returns bytes read.
 fn slurp_diag_file() -> i64 with IO, Mut, Panic {
     DIAG_RAW_LEN = 0
@@ -1104,6 +1297,7 @@ fn respond_hover() with IO, Mut, Panic, Div {
     parse_hover_position()
     var content: string = "*no identifier under cursor*"
     var have: i64 = 0
+    var from_inspect: i64 = 0
     if HOVER_OK == 1 {
         let n = locate_ident()
         if n > 0 {
@@ -1113,8 +1307,28 @@ fn respond_hover() with IO, Mut, Panic, Div {
                 content = found
                 have = 1
             } else {
-                content = "Sounio identifier"
-                have = 1
+                // Static-table miss. The cursor may be on a call site
+                // — i.e. inside one fn but referring to another. Find
+                // the declaration of the cursor's identifier, then ask
+                // souc inspect at THAT line:char. Falls back to the
+                // cursor position when no declaration is found.
+                var ins_line = HOVER_LINE
+                var ins_char = HOVER_CHAR
+                scan_definition_for_ident()
+                if DEF_FOUND == 1 {
+                    ins_line = DEF_LINE
+                    ins_char = DEF_CHAR
+                }
+                if write_doc_to_disk() == true {
+                    if fetch_inspect_signature(ins_line, ins_char) == true {
+                        from_inspect = 1
+                        have = 1
+                    }
+                }
+                if have == 0 {
+                    content = "Sounio identifier"
+                    have = 1
+                }
             }
         }
     }
@@ -1123,8 +1337,6 @@ fn respond_hover() with IO, Mut, Panic, Div {
     tx_emit_id()
     if have == 1 {
         tx_puts(",\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":\"")
-        // Write the identifier name first as a header, then a blank line,
-        // then the looked-up content. content uses literal `\\n` already.
         tx_puts("### `")
         var i: i64 = 0
         while i < IDENT_LEN {
@@ -1134,7 +1346,28 @@ fn respond_hover() with IO, Mut, Panic, Div {
             i = i + 1
         }
         tx_puts("`\\n\\n")
-        tx_puts(content)
+        if from_inspect == 1 {
+            // Render the inspect signature inside a markdown code fence
+            // (sounio-flavored). Escape backticks; remap real newlines
+            // and control chars to literal `\\n` since they live inside
+            // a JSON string.
+            tx_puts("```sounio\\n")
+            var j: i64 = 0
+            while j < INSPECT_SIG_LEN {
+                let c = INSPECT_SIG[j as usize] as i64
+                if c == 34 { tx_putc(92); tx_putc(34) }
+                else if c == 92 { tx_putc(92); tx_putc(92) }
+                else if c == 10 { tx_putc(92); tx_putc(110) }
+                else if c == 13 { tx_putc(92); tx_putc(114) }
+                else if c == 9  { tx_putc(92); tx_putc(116) }
+                else if c < 32  { tx_putc(32) }
+                else { tx_putc(c) }
+                j = j + 1
+            }
+            tx_puts("\\n```\\n\\n*from type-checker*")
+        } else {
+            tx_puts(content)
+        }
         tx_puts("\"}}")
     } else {
         tx_puts(",\"result\":null")
