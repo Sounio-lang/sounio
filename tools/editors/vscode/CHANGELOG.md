@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.1
+
+- Published under the `sounio-lang` namespace on Open VSX. 1.1.0
+  briefly landed under `sounio` but was held inactive due to
+  unverified-namespace policy. No code changes from 1.1.0 — same
+  pure-Sounio LSP wiring, same eight LSP methods.
+
 ## 1.1.0
 
 - Switched the language client to the pure-Sounio LSP (`souc lsp`).
