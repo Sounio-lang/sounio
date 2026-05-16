@@ -773,6 +773,238 @@ fn publish_diagnostics() with IO, Mut, Panic, Div {
     write_frame()
 }
 
+// ============================================================================
+// Hover
+// ============================================================================
+//
+// Cursor-accurate hover. Extracts the request position, locates the
+// identifier at (line, character) in DOC_TEXT (the most recently opened or
+// changed document), and renders Markdown content:
+//   - if it's a Sounio keyword → "**keyword** `name`\n\nReserved word."
+//   - if it's a known stdlib name → its signature
+//   - otherwise → name with a generic "Sounio identifier" note
+//
+// Real type-checker integration (showing inferred Knowledge<T, eps≥N> at
+// the call site) requires a new `souc inspect --pos LINE:COL` subcommand
+// in lean_single.sio; tracked as Compiler prereq #5.
+
+// Identifier under cursor, scratch
+var IDENT_BUF: [i8; 128] = [0; 128]
+var IDENT_LEN: i64 = 0
+
+// Parsed hover position (LSP zero-based)
+var HOVER_LINE: i64 = 0
+var HOVER_CHAR: i64 = 0
+var HOVER_OK:   i64 = 0
+
+// Read the integer value following a key (e.g. "\"line\"" at offset `pos`).
+// Returns the integer, or -1 if not found.
+fn body_read_int_after(pos: i64) -> i64 with Mut, Panic, Div {
+    var i = pos
+    while i < RX_BODY_LEN {
+        let c = RX_BODY[i as usize] as i64
+        if c == 58 { i = i + 1; break }
+        i = i + 1
+    }
+    while i < RX_BODY_LEN {
+        let c = RX_BODY[i as usize] as i64
+        if c != 32 && c != 9 { break }
+        i = i + 1
+    }
+    if i >= RX_BODY_LEN { return 0 - 1 }
+    let first = RX_BODY[i as usize] as i64
+    if first < 48 || first > 57 { return 0 - 1 }
+    var v: i64 = 0
+    while i < RX_BODY_LEN {
+        let c = RX_BODY[i as usize] as i64
+        if c < 48 || c > 57 { break }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn parse_hover_position() with Mut, Panic, Div {
+    HOVER_OK = 0
+    let lpos = body_find("\"line\"", 0)
+    let cpos = body_find("\"character\"", 0)
+    if lpos < 0 || cpos < 0 { return }
+    let ln = body_read_int_after(lpos + 6)
+    let ch = body_read_int_after(cpos + 11)
+    if ln < 0 || ch < 0 { return }
+    HOVER_LINE = ln
+    HOVER_CHAR = ch
+    HOVER_OK = 1
+}
+
+// True if byte is identifier-continue: [A-Za-z0-9_]
+fn is_ident_byte(b: i64) -> bool {
+    if b >= 65 && b <= 90 { return true }
+    if b >= 97 && b <= 122 { return true }
+    if b >= 48 && b <= 57 { return true }
+    if b == 95 { return true }
+    return false
+}
+
+// Locate identifier in DOC_TEXT at (HOVER_LINE, HOVER_CHAR). Copies it
+// into IDENT_BUF. Returns IDENT_LEN, or 0 if no identifier under cursor.
+fn locate_ident() -> i64 with Mut, Panic {
+    IDENT_LEN = 0
+    var i: i64 = 0
+    var line: i64 = 0
+    var col: i64 = 0
+    // Walk to (HOVER_LINE, HOVER_CHAR)
+    while i < DOC_TEXT_LEN && line < HOVER_LINE {
+        let c = DOC_TEXT[i as usize] as i64
+        if c == 10 { line = line + 1 }
+        i = i + 1
+    }
+    if line != HOVER_LINE { return 0 }
+    var pos = i
+    while col < HOVER_CHAR && pos < DOC_TEXT_LEN {
+        let c = DOC_TEXT[pos as usize] as i64
+        if c == 10 { return 0 }
+        pos = pos + 1
+        col = col + 1
+    }
+    // Walk left to identifier start
+    var start = pos
+    while start > i {
+        let c = DOC_TEXT[(start - 1) as usize] as i64
+        if is_ident_byte(c) == false { break }
+        start = start - 1
+    }
+    // Walk right to identifier end
+    var endp = pos
+    while endp < DOC_TEXT_LEN {
+        let c = DOC_TEXT[endp as usize] as i64
+        if is_ident_byte(c) == false { break }
+        endp = endp + 1
+    }
+    if endp <= start { return 0 }
+    var k = start
+    while k < endp && IDENT_LEN < 128 {
+        IDENT_BUF[IDENT_LEN as usize] = DOC_TEXT[k as usize]
+        IDENT_LEN = IDENT_LEN + 1
+        k = k + 1
+    }
+    return IDENT_LEN
+}
+
+fn ident_eq(s: string) -> bool with Mut, Panic {
+    let n = str_len(s)
+    if n != IDENT_LEN { return false }
+    var i: i64 = 0
+    while i < n {
+        if (IDENT_BUF[i as usize] as i64) != str_char_at(s, i) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Map IDENT_BUF to a hover-content string. Returns "" if unknown.
+fn hover_lookup() -> string with Mut, Panic {
+    // Keywords (subset of Sounio reserved words)
+    if ident_eq("fn")     { return "**keyword** `fn`\\n\\nFunction declaration." }
+    if ident_eq("let")    { return "**keyword** `let`\\n\\nImmutable binding." }
+    if ident_eq("var")    { return "**keyword** `var`\\n\\nMutable binding." }
+    if ident_eq("if")     { return "**keyword** `if`\\n\\nConditional." }
+    if ident_eq("else")   { return "**keyword** `else`\\n\\nConditional alternative." }
+    if ident_eq("while")  { return "**keyword** `while`\\n\\nLoop." }
+    if ident_eq("return") { return "**keyword** `return`\\n\\nExit a function with a value." }
+    if ident_eq("with")   { return "**keyword** `with`\\n\\nEffect annotation on a function signature." }
+    if ident_eq("struct") { return "**keyword** `struct`\\n\\nRecord type." }
+    if ident_eq("enum")   { return "**keyword** `enum`\\n\\nSum type." }
+    if ident_eq("match")  { return "**keyword** `match`\\n\\nPattern match." }
+    if ident_eq("break")  { return "**keyword** `break`\\n\\nExit the innermost loop." }
+    if ident_eq("continue") { return "**keyword** `continue`\\n\\nSkip to the next loop iteration." }
+    if ident_eq("true")   { return "**keyword** `true`\\n\\nBoolean literal." }
+    if ident_eq("false")  { return "**keyword** `false`\\n\\nBoolean literal." }
+    if ident_eq("as")     { return "**keyword** `as`\\n\\nType cast." }
+    if ident_eq("pub")    { return "**keyword** `pub`\\n\\nPublic visibility." }
+    if ident_eq("use")    { return "**keyword** `use`\\n\\nImport a module symbol." }
+    if ident_eq("mod")    { return "**keyword** `mod`\\n\\nDeclare a module." }
+    if ident_eq("spawn")  { return "**keyword** `spawn`\\n\\nFork a parallel computation." }
+    // Primitive types
+    if ident_eq("i8")    { return "**type** `i8` — 8-bit signed integer." }
+    if ident_eq("i16")   { return "**type** `i16` — 16-bit signed integer." }
+    if ident_eq("i32")   { return "**type** `i32` — 32-bit signed integer." }
+    if ident_eq("i64")   { return "**type** `i64` — 64-bit signed integer." }
+    if ident_eq("u8")    { return "**type** `u8` — 8-bit unsigned integer." }
+    if ident_eq("u32")   { return "**type** `u32` — 32-bit unsigned integer." }
+    if ident_eq("u64")   { return "**type** `u64` — 64-bit unsigned integer." }
+    if ident_eq("usize") { return "**type** `usize` — pointer-sized unsigned integer." }
+    if ident_eq("f32")   { return "**type** `f32` — 32-bit IEEE-754 float." }
+    if ident_eq("f64")   { return "**type** `f64` — 64-bit IEEE-754 float." }
+    if ident_eq("bool")  { return "**type** `bool` — boolean." }
+    if ident_eq("string"){ return "**type** `string` — null-terminated byte string." }
+    // Effects
+    if ident_eq("IO")    { return "**effect** `IO` — touches the outside world (read/write/syscalls)." }
+    if ident_eq("Mut")   { return "**effect** `Mut` — mutates state." }
+    if ident_eq("Panic") { return "**effect** `Panic` — may panic." }
+    if ident_eq("Div")   { return "**effect** `Div` — may diverge / non-termination." }
+    if ident_eq("Async") { return "**effect** `Async` — async-suspending." }
+    if ident_eq("GPU")   { return "**effect** `GPU` — runs on the GPU." }
+    if ident_eq("Alloc") { return "**effect** `Alloc` — heap-allocating." }
+    // Stdlib I/O / syscalls
+    if ident_eq("print")     { return "`print(s: string) with IO`\\n\\nWrite `s` to stdout." }
+    if ident_eq("println")   { return "`println(s: string) with IO`\\n\\nWrite `s` and a newline to stdout." }
+    if ident_eq("read_line") { return "`read_line() -> string with IO`\\n\\nRead one line from stdin (strips trailing '\\\\n'). Buffered up to 4096 bytes." }
+    if ident_eq("read_file") { return "`read_file(path: string) -> string with IO`\\n\\nLoad an entire file into a fresh mmap buffer." }
+    if ident_eq("write_file"){ return "`write_file(path: string, buf: &![i8; N], len: i64) -> i64 with IO`\\n\\nO_WRONLY|O_CREAT|O_TRUNC; returns bytes written or -1." }
+    if ident_eq("syscall6")  { return "`syscall6(nr, a1, a2, a3, a4, a5, a6) -> i64 with IO`\\n\\nRaw Linux x86_64 syscall." }
+    if ident_eq("str_len")   { return "`str_len(s: string) -> i64`\\n\\nByte length of a null-terminated string." }
+    if ident_eq("str_eq")    { return "`str_eq(a: string, b: string) -> bool`\\n\\nByte-wise equality." }
+    if ident_eq("str_char_at") { return "`str_char_at(s: string, i: i64) -> i64`\\n\\nByte at index `i`." }
+    if ident_eq("assert")    { return "`assert(cond: bool) with Panic`\\n\\nAbort if `cond` is false." }
+    if ident_eq("main")      { return "**entry point** `fn main() -> i32 with IO, Mut, Panic, Div, Alloc`\\n\\nProgram entry." }
+    return ""
+}
+
+fn respond_hover() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    parse_hover_position()
+    var content: string = "*no identifier under cursor*"
+    var have: i64 = 0
+    if HOVER_OK == 1 {
+        let n = locate_ident()
+        if n > 0 {
+            let found = hover_lookup()
+            let fl = str_len(found)
+            if fl > 0 {
+                content = found
+                have = 1
+            } else {
+                content = "Sounio identifier"
+                have = 1
+            }
+        }
+    }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    if have == 1 {
+        tx_puts(",\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":\"")
+        // Write the identifier name first as a header, then a blank line,
+        // then the looked-up content. content uses literal `\\n` already.
+        tx_puts("### `")
+        var i: i64 = 0
+        while i < IDENT_LEN {
+            let c = IDENT_BUF[i as usize] as i64
+            if c == 96 { tx_putc(92); tx_putc(96) }
+            else { tx_putc(c) }
+            i = i + 1
+        }
+        tx_puts("`\\n\\n")
+        tx_puts(content)
+        tx_puts("\"}}")
+    } else {
+        tx_puts(",\"result\":null")
+    }
+    tx_puts("}")
+    write_frame()
+}
+
 // Pull document text + URI from current message, run check, publish.
 fn handle_did_open_or_change() with IO, Mut, Panic, Div {
     let u = extract_doc_uri()
@@ -853,7 +1085,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_DID_CHANGE  { handle_did_open_or_change(); return }
     if method == M_DID_CLOSE   { return }
     if method == M_DID_SAVE    { return }
-    if method == M_HOVER       { respond_empty_result();      return }
+    if method == M_HOVER       { respond_hover();             return }
     if method == M_COMPLETION  { respond_empty_result();      return }
     if method == M_DEFINITION  { respond_empty_result();      return }
     if method == M_REFERENCES  { respond_empty_result();      return }
