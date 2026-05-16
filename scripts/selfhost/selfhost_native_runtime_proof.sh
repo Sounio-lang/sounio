@@ -11,6 +11,14 @@ ARTIFACT_DIR="$WORK_DIR/artifacts"
 LOG_DIR="$WORK_DIR/logs"
 TIMEOUT_SECS="${TIMEOUT_SECS:-30}"
 FILTER="${FILTER:-}"
+SOUNIO_NATIVE_TARGET="${SOUNIO_NATIVE_TARGET:-}"
+
+if [ -z "$SOUNIO_NATIVE_TARGET" ] && [ "$(uname -s)" = "Darwin" ]; then
+  case "$(uname -m)" in
+    arm64|aarch64) SOUNIO_NATIVE_TARGET="aarch64-macos" ;;
+    x86_64) SOUNIO_NATIVE_TARGET="x86_64-macos" ;;
+  esac
+fi
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -57,6 +65,7 @@ echo "souc_native=$SOUC_NATIVE"
 echo "manifest=$MANIFEST_PATH"
 echo "work_dir=$WORK_DIR"
 echo "timeout_secs=$TIMEOUT_SECS"
+echo "native_target=${SOUNIO_NATIVE_TARGET:-default}"
 
 if [ ! -x "$SOUC_NATIVE" ]; then
   echo "error: missing self-hosted native compiler at $SOUC_NATIVE" >&2
@@ -93,8 +102,13 @@ run_case() {
   rm -f "$elf_path" "$compile_stdout" "$compile_stderr" "$run_stdout" "$run_stderr"
 
   set +e
-  run_with_timeout "$TIMEOUT_SECS" "$SOUC_NATIVE" "$program_path" "$elf_path" \
-    >"$compile_stdout" 2>"$compile_stderr"
+  if [ -n "$SOUNIO_NATIVE_TARGET" ]; then
+    run_with_timeout "$TIMEOUT_SECS" "$SOUC_NATIVE" "$program_path" "$elf_path" --target "$SOUNIO_NATIVE_TARGET" \
+      >"$compile_stdout" 2>"$compile_stderr"
+  else
+    run_with_timeout "$TIMEOUT_SECS" "$SOUC_NATIVE" "$program_path" "$elf_path" \
+      >"$compile_stdout" 2>"$compile_stderr"
+  fi
   compile_exit=$?
   set -e
 
@@ -183,6 +197,7 @@ done <"$MANIFEST_PATH"
   echo "summary_skip=$SKIP_COUNT"
   echo "manifest=$MANIFEST_PATH"
   echo "souc_native=$SOUC_NATIVE"
+  echo "native_target=${SOUNIO_NATIVE_TARGET:-default}"
   echo "results_file=$RESULTS_FILE"
   echo "artifact_dir=$ARTIFACT_DIR"
   echo "log_dir=$LOG_DIR"
