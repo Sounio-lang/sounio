@@ -85,13 +85,30 @@ var ENVP: [i64; 1] = [0; 1]
 // "LINE:COL\0" arg buffer used by `souc inspect`.
 var POS_ARG: [i8; 32] = [0; 32]
 
+// Null-terminated copy of IDENT_BUF for use as argv arg.
+var IDENT_ARG: [i8; 130] = [0; 130]
+
+// Null-terminated absolute path derived from DOC_URI ("file://..."
+// stripped + percent-decoded), used as the source arg to `souc inspect
+// --resolve`. Lets the resolver walk up from the user's project dir
+// instead of from /tmp.
+var URI_PATH_ARG: [i8; 1024] = [0; 1024]
+var URI_PATH_ARG_LEN: i64 = 0
+
 // stdout capture buffer for inspect.
 var INSPECT_RAW: [i8; 8192] = [0; 8192]
 var INSPECT_RAW_LEN: i64 = 0
 
-// Most recent inspect result. Empty if no signature found.
+// Most recent inspect signature (for --pos hover use).
 var INSPECT_SIG: [i8; 1024] = [0; 1024]
 var INSPECT_SIG_LEN: i64 = 0
+
+// Most recent --resolve result.
+var RESOLVED_FILE: [i8; 1024] = [0; 1024]
+var RESOLVED_FILE_LEN: i64 = 0
+var RESOLVED_LINE: i64 = 0
+var RESOLVED_CHAR: i64 = 0
+var RESOLVED_FOUND: i64 = 0
 
 // Active document (the one the current request is about). This is
 // populated either by `extract_doc_text` / `extract_doc_uri` on
@@ -951,6 +968,179 @@ fn fetch_inspect_signature(line: i64, col: i64) -> bool with IO, Mut, Panic, Div
     let n = extract_inspect_string("\"signature\"", &! INSPECT_SIG, 1024)
     INSPECT_SIG_LEN = n
     return n > 0
+}
+
+// Extract an integer-valued JSON field from INSPECT_RAW. Returns the
+// value or -1 if missing / non-numeric.
+fn extract_inspect_int(key: string) -> i64 with Mut, Panic, Div {
+    let klen = str_len(key)
+    if klen == 0 || INSPECT_RAW_LEN == 0 { return 0 - 1 }
+    var i: i64 = 0
+    while i + klen <= INSPECT_RAW_LEN {
+        var k: i64 = 0
+        var ok: i64 = 1
+        while k < klen {
+            if (INSPECT_RAW[(i + k) as usize] as i64) != str_char_at(key, k) { ok = 0; k = klen }
+            else { k = k + 1 }
+        }
+        if ok == 1 {
+            var p = i + klen
+            while p < INSPECT_RAW_LEN {
+                let c = INSPECT_RAW[p as usize] as i64
+                if c == 58 { p = p + 1; break }
+                p = p + 1
+            }
+            while p < INSPECT_RAW_LEN {
+                let c = INSPECT_RAW[p as usize] as i64
+                if c != 32 && c != 9 { break }
+                p = p + 1
+            }
+            if p >= INSPECT_RAW_LEN { return 0 - 1 }
+            let first = INSPECT_RAW[p as usize] as i64
+            if first < 48 || first > 57 { return 0 - 1 }
+            var v: i64 = 0
+            while p < INSPECT_RAW_LEN {
+                let c = INSPECT_RAW[p as usize] as i64
+                if c < 48 || c > 57 { break }
+                v = v * 10 + (c - 48)
+                p = p + 1
+            }
+            return v
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// Copy IDENT_BUF into IDENT_ARG, null-terminate. Caller passes the
+// IDENT_ARG address into ARGV.
+fn pack_ident_arg() with Mut, Panic {
+    var i: i64 = 0
+    while i < IDENT_LEN && i < 128 {
+        IDENT_ARG[i as usize] = IDENT_BUF[i as usize]
+        i = i + 1
+    }
+    IDENT_ARG[i as usize] = 0 as i8
+}
+
+// Derive the filesystem path from DOC_URI ("file:///abs/path" →
+// "/abs/path"), percent-decode common %XX escapes, null-terminate into
+// URI_PATH_ARG. Returns true on success.
+fn pack_uri_path_arg() -> bool with Mut, Panic, Div {
+    URI_PATH_ARG_LEN = 0
+    let prefix = "file://"
+    let plen = str_len(prefix)
+    if DOC_URI_LEN < plen { return false }
+    var k: i64 = 0
+    while k < plen {
+        if (DOC_URI[k as usize] as i64) != str_char_at(prefix, k) { return false }
+        k = k + 1
+    }
+    var i = plen
+    while i < DOC_URI_LEN && URI_PATH_ARG_LEN < 1023 {
+        let c = DOC_URI[i as usize] as i64
+        if c == 37 && i + 2 < DOC_URI_LEN {
+            // percent-decode %XX
+            let h1 = DOC_URI[(i + 1) as usize] as i64
+            let h2 = DOC_URI[(i + 2) as usize] as i64
+            var d1: i64 = 0 - 1
+            var d2: i64 = 0 - 1
+            if h1 >= 48 && h1 <= 57      { d1 = h1 - 48 }
+            else if h1 >= 65 && h1 <= 70 { d1 = h1 - 55 }
+            else if h1 >= 97 && h1 <= 102{ d1 = h1 - 87 }
+            if h2 >= 48 && h2 <= 57      { d2 = h2 - 48 }
+            else if h2 >= 65 && h2 <= 70 { d2 = h2 - 55 }
+            else if h2 >= 97 && h2 <= 102{ d2 = h2 - 87 }
+            if d1 >= 0 && d2 >= 0 {
+                URI_PATH_ARG[URI_PATH_ARG_LEN as usize] = (d1 * 16 + d2) as i8
+                URI_PATH_ARG_LEN = URI_PATH_ARG_LEN + 1
+                i = i + 3
+                continue
+            }
+        }
+        URI_PATH_ARG[URI_PATH_ARG_LEN as usize] = c as i8
+        URI_PATH_ARG_LEN = URI_PATH_ARG_LEN + 1
+        i = i + 1
+    }
+    URI_PATH_ARG[URI_PATH_ARG_LEN as usize] = 0 as i8
+    return URI_PATH_ARG_LEN > 0
+}
+
+// fork+exec `./bin/souc inspect --resolve NAME /tmp/sounio_lsp_doc.sio`.
+// Captures stdout (JSON) into INSPECT_RAW via /tmp/sounio_lsp_inspect.json.
+// Returns 0 on success, -1 on fork failure.
+fn run_souc_resolve() -> i64 with IO, Mut, Panic, Div {
+    pack_ident_arg()
+    // Prefer the actual document path on disk so the resolver can
+    // walk up to the project root. Falls back to the LSP temp file
+    // when DOC_URI isn't a file:// URI.
+    var src_arg: i64 = 0
+    if pack_uri_path_arg() == true {
+        src_arg = &! URI_PATH_ARG as i64
+    } else {
+        src_arg = "/tmp/sounio_lsp_doc.sio" as i64
+    }
+
+    ARGV[0] = "./bin/souc" as i64
+    ARGV[1] = "inspect" as i64
+    ARGV[2] = "--resolve" as i64
+    ARGV[3] = &! IDENT_ARG as i64
+    ARGV[4] = src_arg
+    ARGV[5] = 0
+    ENVP[0] = 0
+
+    let pid = syscall6(57, 0, 0, 0, 0, 0, 0)
+    if pid < 0 { return 0 - 1 }
+    if pid == 0 {
+        let fd = syscall6(2, "/tmp/sounio_lsp_inspect.json", 577, 420, 0, 0, 0)
+        if fd >= 0 {
+            syscall6(33, fd, 1, 0, 0, 0, 0)
+            syscall6(33, fd, 2, 0, 0, 0, 0)
+            syscall6(3, fd, 0, 0, 0, 0, 0)
+        }
+        syscall6(59, "./bin/souc" as i64, &! ARGV, &! ENVP, 0, 0, 0)
+        syscall6(60, 127, 0, 0, 0, 0, 0)
+    }
+    syscall6(61, pid, 0, 0, 0, 0, 0)
+    return 0
+}
+
+// Run --resolve for IDENT_BUF, parse the JSON, populate RESOLVED_*.
+// Returns true on hit, false otherwise.
+fn fetch_resolved_decl() -> bool with IO, Mut, Panic, Div {
+    RESOLVED_FOUND = 0
+    RESOLVED_FILE_LEN = 0
+    RESOLVED_LINE = 0
+    RESOLVED_CHAR = 0
+    if IDENT_LEN <= 0 { return false }
+    if run_souc_resolve() < 0 { return false }
+    if slurp_inspect_file() <= 0 { return false }
+
+    var found_true: i64 = 0
+    var i: i64 = 0
+    let needle = "\"found\":true"
+    let nlen = str_len(needle)
+    while i + nlen <= INSPECT_RAW_LEN && found_true == 0 {
+        var k: i64 = 0
+        var ok: i64 = 1
+        while k < nlen {
+            if (INSPECT_RAW[(i + k) as usize] as i64) != str_char_at(needle, k) { ok = 0; k = nlen }
+            else { k = k + 1 }
+        }
+        if ok == 1 { found_true = 1 }
+        i = i + 1
+    }
+    if found_true == 0 { return false }
+
+    RESOLVED_FILE_LEN = extract_inspect_string("\"file\"", &! RESOLVED_FILE, 1024)
+    if RESOLVED_FILE_LEN <= 0 { return false }
+    let dl = extract_inspect_int("\"decl_line\"")
+    let dc = extract_inspect_int("\"decl_char\"")
+    if dl < 0 || dc < 0 { return false }
+    RESOLVED_LINE = dl
+    RESOLVED_CHAR = dc
+    RESOLVED_FOUND = 1
+    return true
 }
 
 // Read the stderr file into DIAG_RAW. Returns bytes read.
@@ -1814,13 +2004,26 @@ fn respond_definition() with IO, Mut, Panic, Div {
     parse_hover_position()
     let home_slot = slot_find_by_uri()
     var have: i64 = 0
+    var from_resolve: i64 = 0
     if HOVER_OK == 1 {
         let n = locate_ident()
         if n > 0 {
+            // Tier 1: in-file declarator scan
             scan_definition_for_ident()
             if DEF_FOUND == 0 {
-                // Cross-file fallback: search peer open buffers.
+                // Tier 2: peer open buffers
                 scan_definition_cross_file(home_slot)
+            }
+            if DEF_FOUND == 0 {
+                // Tier 3: `souc inspect --resolve NAME` walks the
+                // `use` graph from disk. We need the active doc on
+                // disk for the resolver to see its imports.
+                if write_doc_to_disk() == true {
+                    if fetch_resolved_decl() == true {
+                        from_resolve = 1
+                        have = 1
+                    }
+                }
             }
             if DEF_FOUND == 1 { have = 1 }
         }
@@ -1829,11 +2032,21 @@ fn respond_definition() with IO, Mut, Panic, Div {
     tx_puts("{\"jsonrpc\":\"2.0\",")
     tx_emit_id()
     if have == 1 {
-        // Choose the URI: if the def lives in another slot, use that
-        // slot's URI directly from DOC_SLOT_URI (since the active
-        // slot was restored to home before we render).
         tx_puts(",\"result\":{\"uri\":\"")
-        if DEF_SLOT >= 0 {
+        if from_resolve == 1 {
+            // Emit file:// + the absolute path the resolver returned.
+            // RESOLVED_FILE already lacks the file:// prefix.
+            tx_puts("file://")
+            var i: i64 = 0
+            while i < RESOLVED_FILE_LEN {
+                let c = RESOLVED_FILE[i as usize] as i64
+                if c == 34 { tx_putc(92); tx_putc(34) }
+                else if c == 92 { tx_putc(92); tx_putc(92) }
+                else if c == 32 { tx_puts("%20") }
+                else { tx_putc(c) }
+                i = i + 1
+            }
+        } else if DEF_SLOT >= 0 {
             let base = DEF_SLOT * 1024
             let ulen = DOC_SLOT_URI_LEN[DEF_SLOT as usize]
             var i: i64 = 0
@@ -1854,14 +2067,22 @@ fn respond_definition() with IO, Mut, Panic, Div {
                 i = i + 1
             }
         }
+        var resp_line = DEF_LINE
+        var resp_char = DEF_CHAR
+        var resp_name_len = DEF_NAME_LEN
+        if from_resolve == 1 {
+            resp_line = RESOLVED_LINE
+            resp_char = RESOLVED_CHAR
+            resp_name_len = IDENT_LEN
+        }
         tx_puts("\",\"range\":{\"start\":{\"line\":")
-        tx_put_i64(DEF_LINE)
+        tx_put_i64(resp_line)
         tx_puts(",\"character\":")
-        tx_put_i64(DEF_CHAR)
+        tx_put_i64(resp_char)
         tx_puts("},\"end\":{\"line\":")
-        tx_put_i64(DEF_LINE)
+        tx_put_i64(resp_line)
         tx_puts(",\"character\":")
-        tx_put_i64(DEF_CHAR + DEF_NAME_LEN)
+        tx_put_i64(resp_char + resp_name_len)
         tx_puts("}}}")
     } else {
         tx_puts(",\"result\":null")
