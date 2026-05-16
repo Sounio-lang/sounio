@@ -1,0 +1,508 @@
+// self-hosted::lsp::server — Sounio Language Server (stdio JSON-RPC)
+//
+// Pure-Sounio LSP entry point. Speaks LSP over stdin/stdout with
+// Content-Length framing. Reads request envelopes, dispatches by method,
+// emits framed responses.
+//
+// W2 surface (this file, minimal):
+//   - initialize / initialized
+//   - shutdown / exit
+//   - textDocument/didOpen, didChange, didClose (no-op, acknowledge)
+//   - any other method → error -32601 (MethodNotFound)
+//
+// Future modules will plug in:
+//   - diagnostics via api.check_source → self-hosted/lsp/diagnostics.sio
+//   - hover     via api.inspect_at   → self-hosted/lsp/hover.sio
+//   - etc.
+//
+// Build: souc compile self-hosted/lsp/server.sio -o bin/sounio-lsp
+// Wire as `souc lsp` subcommand in lean_single.sio dispatcher (later).
+
+// ============================================================================
+// Buffers — fixed-size BSS, no heap
+// ============================================================================
+
+// Incoming JSON-RPC body (LSP spec recommends ≤ 1 MB; 256 KB plenty for v0)
+var RX_BODY: [i8; 262144] = [0; 262144]
+var RX_BODY_LEN: i64 = 0
+
+// Outgoing response body
+var TX_BODY: [i8; 262144] = [0; 262144]
+var TX_BODY_LEN: i64 = 0
+
+// Header scratch (Content-Length: NNNNN\r\n\r\n)
+var TX_HEAD: [i8; 64] = [0; 64]
+var TX_HEAD_LEN: i64 = 0
+
+// Last seen request id (echoed in responses)
+var LAST_ID_NUM: i64 = 0       // numeric id, if any
+var LAST_ID_IS_STR: i64 = 0    // 1 if id was a string
+var LAST_ID_STR: [i8; 64] = [0; 64]
+var LAST_ID_STR_LEN: i64 = 0
+var LAST_ID_PRESENT: i64 = 0
+
+// Method classification
+let M_UNKNOWN:       i64 = 0
+let M_INITIALIZE:    i64 = 1
+let M_INITIALIZED:   i64 = 2
+let M_SHUTDOWN:      i64 = 3
+let M_EXIT:          i64 = 4
+let M_DID_OPEN:      i64 = 10
+let M_DID_CHANGE:    i64 = 11
+let M_DID_CLOSE:     i64 = 12
+let M_DID_SAVE:      i64 = 13
+let M_HOVER:         i64 = 20
+let M_COMPLETION:    i64 = 21
+let M_DEFINITION:    i64 = 22
+let M_REFERENCES:    i64 = 23
+let M_RENAME:        i64 = 24
+let M_CODE_ACTION:   i64 = 25
+let M_SEM_TOKENS:    i64 = 26
+let M_FORMATTING:    i64 = 27
+
+// Shutdown state machine — LSP requires shutdown before exit
+var SAW_SHUTDOWN: i64 = 0
+
+// ============================================================================
+// Low-level I/O — syscall6 wrappers
+// ============================================================================
+
+// write(fd=2 stderr, str, len) — log helper
+fn log_stderr(msg: string) with IO, Mut, Panic {
+    let n = str_len(msg)
+    syscall6(1, 2, msg, n, 0, 0, 0)
+}
+
+fn log_stderr_nl(msg: string) with IO, Mut, Panic {
+    log_stderr(msg)
+    syscall6(1, 2, "\n", 1, 0, 0, 0)
+}
+
+// ============================================================================
+// Header parsing — read "Content-Length: N\r\n\r\n", return N
+// ============================================================================
+
+// Returns content length, or -1 on EOF/error
+fn read_headers() -> i64 with IO, Mut, Panic, Div {
+    var content_length: i64 = 0 - 1
+    var done: i64 = 0
+    while done == 0 {
+        let line = read_line()
+        let n = str_len(line)
+        if n == 0 { done = 1 }
+        else if n == 1 && str_char_at(line, 0) == 13 { done = 1 }
+        else if starts_with_ci(line, "Content-Length:") {
+            content_length = parse_i64_after(line, 15)
+        }
+    }
+    return content_length
+}
+
+// Read exactly `n` bytes from stdin into RX_BODY. Returns bytes read.
+fn read_body(n: i64) -> i64 with IO, Mut, Panic, Div {
+    var got: i64 = 0
+    while got < n {
+        let want = n - got
+        let r = syscall6(0, 0, &! RX_BODY, want, 0, 0, 0)
+        if r <= 0 { return got }
+        got = got + r
+    }
+    RX_BODY_LEN = got
+    got
+}
+
+// ============================================================================
+// Tiny string utils — case-insensitive prefix + integer parse from offset
+// ============================================================================
+
+fn to_lower(b: i64) -> i64 {
+    if b >= 65 && b <= 90 { b + 32 } else { b }
+}
+
+fn starts_with_ci(s: string, prefix: string) -> bool with Mut, Panic {
+    let ns = str_len(s)
+    let np = str_len(prefix)
+    if ns < np { return false }
+    var i: i64 = 0
+    while i < np {
+        if to_lower(str_char_at(s, i)) != to_lower(str_char_at(prefix, i)) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn parse_i64_after(s: string, off: i64) -> i64 with Mut, Panic, Div {
+    let n = str_len(s)
+    var i = off
+    // skip whitespace
+    while i < n {
+        let c = str_char_at(s, i)
+        if c != 32 && c != 9 { break }
+        i = i + 1
+    }
+    var val: i64 = 0
+    var any: i64 = 0
+    while i < n {
+        let c = str_char_at(s, i)
+        if c < 48 || c > 57 { break }
+        val = val * 10 + (c - 48)
+        any = 1
+        i = i + 1
+    }
+    if any == 0 { return 0 - 1 }
+    return val
+}
+
+// ============================================================================
+// Method classification — substring scan of the request body
+// ============================================================================
+//
+// LSP request envelopes look like:
+//   {"jsonrpc":"2.0","id":42,"method":"initialize","params":{...}}
+//
+// We don't need a real JSON parser for v0 — we just look for:
+//   "method":"<name>"
+//   "id":<num>  or  "id":"<str>"
+//
+// This is unsafe against escaped quotes inside string values, but
+// LSP method names are well-known ASCII and the id is always early
+// in the envelope. Promote to a proper parser when we wire features.
+
+fn body_find(needle: string, start: i64) -> i64 with Mut, Panic {
+    let bn = RX_BODY_LEN
+    let nl = str_len(needle)
+    if nl == 0 { return 0 - 1 }
+    var i = start
+    while i + nl <= bn {
+        var k: i64 = 0
+        var ok: i64 = 1
+        while k < nl {
+            let bb = RX_BODY[(i + k) as usize] as i64
+            let nb = str_char_at(needle, k)
+            if bb != nb { ok = 0; k = nl; }
+            else { k = k + 1 }
+        }
+        if ok == 1 { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Extract the string value following the first occurrence of key in the body.
+// Writes the value bytes into `out` (max `cap` bytes), returns length, or -1.
+fn body_extract_str(key: string, out: &![i8; 64], cap: i64) -> i64 with Mut, Panic {
+    let pos = body_find(key, 0)
+    if pos < 0 { return 0 - 1 }
+    // After the key we expect: optional ws, ':', ws, '"', value, '"'
+    var i = pos + str_len(key)
+    while i < RX_BODY_LEN {
+        let c = RX_BODY[i as usize] as i64
+        if c == 34 { i = i + 1; break }       // opening quote
+        i = i + 1
+    }
+    var n: i64 = 0
+    while i < RX_BODY_LEN && n < cap {
+        let c = RX_BODY[i as usize] as i64
+        if c == 34 { return n }                // closing quote
+        if c == 92 {                           // escape — skip pair
+            i = i + 2
+            continue
+        }
+        out[n as usize] = c as i8
+        n = n + 1
+        i = i + 1
+    }
+    n
+}
+
+fn classify_method() -> i64 with Mut, Panic {
+    var name: [i8; 64] = [0; 64]
+    let nlen = body_extract_str("\"method\"", &! name, 64)
+    if nlen <= 0 { return M_UNKNOWN }
+    let s = str_from_bytes(name, nlen)
+    if str_eq(s, "initialize")                      { return M_INITIALIZE  }
+    if str_eq(s, "initialized")                     { return M_INITIALIZED }
+    if str_eq(s, "shutdown")                        { return M_SHUTDOWN    }
+    if str_eq(s, "exit")                            { return M_EXIT        }
+    if str_eq(s, "textDocument/didOpen")            { return M_DID_OPEN    }
+    if str_eq(s, "textDocument/didChange")          { return M_DID_CHANGE  }
+    if str_eq(s, "textDocument/didClose")           { return M_DID_CLOSE   }
+    if str_eq(s, "textDocument/didSave")            { return M_DID_SAVE    }
+    if str_eq(s, "textDocument/hover")              { return M_HOVER       }
+    if str_eq(s, "textDocument/completion")         { return M_COMPLETION  }
+    if str_eq(s, "textDocument/definition")         { return M_DEFINITION  }
+    if str_eq(s, "textDocument/references")         { return M_REFERENCES  }
+    if str_eq(s, "textDocument/rename")             { return M_RENAME      }
+    if str_eq(s, "textDocument/codeAction")         { return M_CODE_ACTION }
+    if str_eq(s, "textDocument/semanticTokens/full") { return M_SEM_TOKENS }
+    if str_eq(s, "textDocument/formatting")         { return M_FORMATTING  }
+    M_UNKNOWN
+}
+
+// Capture the id (numeric or string). Stored in LAST_ID_* globals.
+fn capture_id() with Mut, Panic, Div {
+    LAST_ID_PRESENT = 0
+    LAST_ID_IS_STR = 0
+    LAST_ID_NUM = 0
+    LAST_ID_STR_LEN = 0
+    let pos = body_find("\"id\"", 0)
+    if pos < 0 { return }
+    var i = pos + 4
+    // skip ws + ':'
+    while i < RX_BODY_LEN {
+        let c = RX_BODY[i as usize] as i64
+        if c == 58 { i = i + 1; break }
+        i = i + 1
+    }
+    while i < RX_BODY_LEN {
+        let c = RX_BODY[i as usize] as i64
+        if c != 32 && c != 9 { break }
+        i = i + 1
+    }
+    if i >= RX_BODY_LEN { return }
+    let first = RX_BODY[i as usize] as i64
+    if first == 34 {
+        // string id
+        LAST_ID_IS_STR = 1
+        LAST_ID_PRESENT = 1
+        i = i + 1
+        var n: i64 = 0
+        while i < RX_BODY_LEN && n < 64 {
+            let c = RX_BODY[i as usize] as i64
+            if c == 34 { break }
+            LAST_ID_STR[n as usize] = c as i8
+            n = n + 1
+            i = i + 1
+        }
+        LAST_ID_STR_LEN = n
+    } else if first >= 48 && first <= 57 {
+        LAST_ID_IS_STR = 0
+        LAST_ID_PRESENT = 1
+        var v: i64 = 0
+        while i < RX_BODY_LEN {
+            let c = RX_BODY[i as usize] as i64
+            if c < 48 || c > 57 { break }
+            v = v * 10 + (c - 48)
+            i = i + 1
+        }
+        LAST_ID_NUM = v
+    }
+}
+
+// ============================================================================
+// TX_BODY builder helpers
+// ============================================================================
+
+fn tx_reset() with Mut { TX_BODY_LEN = 0 }
+
+fn tx_putc(b: i64) with Mut, Panic {
+    if TX_BODY_LEN < 262144 {
+        TX_BODY[TX_BODY_LEN as usize] = b as i8
+        TX_BODY_LEN = TX_BODY_LEN + 1
+    }
+}
+
+fn tx_puts(s: string) with Mut, Panic {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n { tx_putc(str_char_at(s, i)); i = i + 1 }
+}
+
+fn tx_put_i64(v: i64) with Mut, Panic, Div {
+    if v == 0 { tx_putc(48); return }
+    var n = v
+    var neg: i64 = 0
+    if n < 0 { neg = 1; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var rl: i64 = 0
+    while n > 0 {
+        rev[rl as usize] = (48 + n % 10) as i8
+        rl = rl + 1
+        n = n / 10
+    }
+    if neg == 1 { tx_putc(45) }
+    var i = rl - 1
+    while i >= 0 {
+        tx_putc(rev[i as usize] as i64)
+        if i == 0 { break }
+        i = i - 1
+    }
+}
+
+// Emit "id":<id> using the captured id. Skips emission if no id was present.
+fn tx_emit_id() with Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    tx_puts("\"id\":")
+    if LAST_ID_IS_STR == 1 {
+        tx_putc(34)
+        var i: i64 = 0
+        while i < LAST_ID_STR_LEN {
+            tx_putc(LAST_ID_STR[i as usize] as i64)
+            i = i + 1
+        }
+        tx_putc(34)
+    } else {
+        tx_put_i64(LAST_ID_NUM)
+    }
+}
+
+// ============================================================================
+// Frame writer — emit Content-Length header + body to stdout
+// ============================================================================
+
+fn write_frame() with IO, Mut, Panic, Div {
+    // Header: "Content-Length: N\r\n\r\n"
+    TX_HEAD_LEN = 0
+    let h = "Content-Length: "
+    let hn = str_len(h)
+    var i: i64 = 0
+    while i < hn {
+        TX_HEAD[TX_HEAD_LEN as usize] = str_char_at(h, i) as i8
+        TX_HEAD_LEN = TX_HEAD_LEN + 1
+        i = i + 1
+    }
+    // length digits
+    var n = TX_BODY_LEN
+    if n == 0 {
+        TX_HEAD[TX_HEAD_LEN as usize] = 48 as i8
+        TX_HEAD_LEN = TX_HEAD_LEN + 1
+    } else {
+        var rev: [i8; 24] = [0; 24]
+        var rl: i64 = 0
+        while n > 0 {
+            rev[rl as usize] = (48 + n % 10) as i8
+            rl = rl + 1
+            n = n / 10
+        }
+        var j = rl - 1
+        while j >= 0 {
+            TX_HEAD[TX_HEAD_LEN as usize] = rev[j as usize]
+            TX_HEAD_LEN = TX_HEAD_LEN + 1
+            if j == 0 { break }
+            j = j - 1
+        }
+    }
+    TX_HEAD[TX_HEAD_LEN as usize] = 13 as i8; TX_HEAD_LEN = TX_HEAD_LEN + 1
+    TX_HEAD[TX_HEAD_LEN as usize] = 10 as i8; TX_HEAD_LEN = TX_HEAD_LEN + 1
+    TX_HEAD[TX_HEAD_LEN as usize] = 13 as i8; TX_HEAD_LEN = TX_HEAD_LEN + 1
+    TX_HEAD[TX_HEAD_LEN as usize] = 10 as i8; TX_HEAD_LEN = TX_HEAD_LEN + 1
+
+    // Write header then body to stdout (fd=1)
+    syscall6(1, 1, &! TX_HEAD, TX_HEAD_LEN, 0, 0, 0)
+    syscall6(1, 1, &! TX_BODY, TX_BODY_LEN, 0, 0, 0)
+}
+
+// ============================================================================
+// Response builders
+// ============================================================================
+
+fn respond_initialize() with IO, Mut, Panic, Div {
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":{")
+    tx_puts("\"capabilities\":{")
+    tx_puts("\"textDocumentSync\":1,")
+    tx_puts("\"hoverProvider\":true,")
+    tx_puts("\"definitionProvider\":true,")
+    tx_puts("\"referencesProvider\":true,")
+    tx_puts("\"renameProvider\":true,")
+    tx_puts("\"documentFormattingProvider\":false,")
+    tx_puts("\"codeActionProvider\":true,")
+    tx_puts("\"semanticTokensProvider\":{")
+    tx_puts("\"legend\":{\"tokenTypes\":[],\"tokenModifiers\":[]},")
+    tx_puts("\"full\":true")
+    tx_puts("},")
+    tx_puts("\"completionProvider\":{")
+    tx_puts("\"triggerCharacters\":[\".\",\":\"]")
+    tx_puts("}")
+    tx_puts("},")
+    tx_puts("\"serverInfo\":{")
+    tx_puts("\"name\":\"sounio-lsp\",")
+    tx_puts("\"version\":\"0.1.0\"")
+    tx_puts("}")
+    tx_puts("}}")
+    write_frame()
+}
+
+fn respond_shutdown() with IO, Mut, Panic, Div {
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":null}")
+    write_frame()
+}
+
+fn respond_method_not_found() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }   // notification → no response
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"error\":{\"code\":-32601,\"message\":\"Method not implemented yet (W2 skeleton)\"}}")
+    write_frame()
+}
+
+fn respond_empty_result() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":null}")
+    write_frame()
+}
+
+// ============================================================================
+// Dispatch
+// ============================================================================
+
+fn dispatch(method: i64) with IO, Mut, Panic, Div {
+    if method == M_INITIALIZE  { respond_initialize();   return }
+    if method == M_INITIALIZED { return }                              // notification
+    if method == M_SHUTDOWN    { SAW_SHUTDOWN = 1; respond_shutdown(); return }
+    if method == M_EXIT        { return }                              // handled in main loop
+    if method == M_DID_OPEN    { return }                              // notification (TODO: diagnostics)
+    if method == M_DID_CHANGE  { return }
+    if method == M_DID_CLOSE   { return }
+    if method == M_DID_SAVE    { return }
+    if method == M_HOVER       { respond_empty_result();      return }
+    if method == M_COMPLETION  { respond_empty_result();      return }
+    if method == M_DEFINITION  { respond_empty_result();      return }
+    if method == M_REFERENCES  { respond_empty_result();      return }
+    if method == M_RENAME      { respond_empty_result();      return }
+    if method == M_CODE_ACTION { respond_empty_result();      return }
+    if method == M_SEM_TOKENS  { respond_empty_result();      return }
+    if method == M_FORMATTING  { respond_empty_result();      return }
+    respond_method_not_found()
+}
+
+// ============================================================================
+// Main loop
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    log_stderr_nl("lsp start")
+    var running: i64 = 1
+    while running == 1 {
+        let cl = read_headers()
+        if cl <= 0 { running = 0 }
+        else if cl > 262144 {
+            log_stderr_nl("body too large")
+            running = 0
+        } else {
+            let got = read_body(cl)
+            if got < cl {
+                running = 0
+            } else {
+                capture_id()
+                let m = classify_method()
+                dispatch(m)
+                if m == M_EXIT { running = 0 }
+            }
+        }
+    }
+    log_stderr_nl("lsp stop")
+    if SAW_SHUTDOWN == 1 { return 0 }
+    return 1
+}
