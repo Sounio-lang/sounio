@@ -72,6 +72,42 @@ let M_FORMATTING:    i64 = 27
 var SAW_SHUTDOWN: i64 = 0
 
 // ============================================================================
+// Diagnostics state
+// ============================================================================
+
+// argv / envp for fork+execve of `souc <src> <out>`. Static slots — only one
+// check at a time per server (single-threaded).
+var ARGV: [i64; 4] = [0; 4]
+var ENVP: [i64; 1] = [0; 1]
+
+// Document text (extracted from JSON), written to disk before checking.
+var DOC_TEXT: [i8; 262144] = [0; 262144]
+var DOC_TEXT_LEN: i64 = 0
+
+// Last URI seen (echoed in publishDiagnostics)
+var DOC_URI: [i8; 1024] = [0; 1024]
+var DOC_URI_LEN: i64 = 0
+
+// Compiler stderr capture (read back after fork+exec)
+var DIAG_RAW: [i8; 65536] = [0; 65536]
+var DIAG_RAW_LEN: i64 = 0
+
+// Parsed diagnostics: parallel arrays, fixed 64 max
+let DIAG_MAX: i64 = 64
+var DIAG_LINE:   [i64; 64] = [0; 64]
+var DIAG_MSG_OFF: [i64; 64] = [0; 64]  // byte offsets into DIAG_MSG_BUF
+var DIAG_MSG_LEN: [i64; 64] = [0; 64]
+var DIAG_MSG_BUF: [i8; 16384] = [0; 16384]
+var DIAG_MSG_BUF_LEN: i64 = 0
+var DIAG_COUNT: i64 = 0
+
+// Paths used by the check pipeline. Single fixed path is fine for v0
+// (server is single-threaded). NOTE: Sounio's `let X: string = "..."`
+// does not currently produce a pointer that survives the `as i64` cast
+// or being passed to builtins, so we inline the literals at each use
+// site below.
+
+// ============================================================================
 // Low-level I/O — syscall6 wrappers
 // ============================================================================
 
@@ -472,6 +508,283 @@ fn write_frame() with IO, Mut, Panic, Div {
 // Response builders
 // ============================================================================
 
+// ============================================================================
+// Diagnostics pipeline
+// ============================================================================
+
+// Extract the body field (textDocument.text or contentChanges[0].text) into
+// DOC_TEXT. Decodes the common JSON string escapes we care about (\n, \r,
+// \t, \", \\, \uXXXX for the ASCII subset). Returns DOC_TEXT_LEN, or -1 if
+// no text field is found.
+fn extract_doc_text() -> i64 with Mut, Panic, Div {
+    DOC_TEXT_LEN = 0
+    let pos = body_find("\"text\"", 0)
+    if pos < 0 { return 0 - 1 }
+    var i = pos + 6
+    // skip ws + ':' + ws + '"'
+    var saw_quote: i64 = 0
+    while i < RX_BODY_LEN && saw_quote == 0 {
+        let c = RX_BODY[i as usize] as i64
+        if c == 34 { saw_quote = 1 }
+        i = i + 1
+    }
+    if saw_quote == 0 { return 0 - 1 }
+    while i < RX_BODY_LEN && DOC_TEXT_LEN < 262144 {
+        let c = RX_BODY[i as usize] as i64
+        if c == 34 { return DOC_TEXT_LEN }
+        if c == 92 && i + 1 < RX_BODY_LEN {
+            let n = RX_BODY[(i + 1) as usize] as i64
+            if n == 110     { DOC_TEXT[DOC_TEXT_LEN as usize] = 10 as i8; DOC_TEXT_LEN = DOC_TEXT_LEN + 1; i = i + 2 }
+            else if n == 114 { DOC_TEXT[DOC_TEXT_LEN as usize] = 13 as i8; DOC_TEXT_LEN = DOC_TEXT_LEN + 1; i = i + 2 }
+            else if n == 116 { DOC_TEXT[DOC_TEXT_LEN as usize] = 9  as i8; DOC_TEXT_LEN = DOC_TEXT_LEN + 1; i = i + 2 }
+            else if n == 34  { DOC_TEXT[DOC_TEXT_LEN as usize] = 34 as i8; DOC_TEXT_LEN = DOC_TEXT_LEN + 1; i = i + 2 }
+            else if n == 92  { DOC_TEXT[DOC_TEXT_LEN as usize] = 92 as i8; DOC_TEXT_LEN = DOC_TEXT_LEN + 1; i = i + 2 }
+            else if n == 47  { DOC_TEXT[DOC_TEXT_LEN as usize] = 47 as i8; DOC_TEXT_LEN = DOC_TEXT_LEN + 1; i = i + 2 }
+            else if n == 117 {
+                // \uXXXX — decode 4 hex digits, drop high byte for v0
+                if i + 5 >= RX_BODY_LEN { return DOC_TEXT_LEN }
+                var v: i64 = 0
+                var k: i64 = 0
+                while k < 4 {
+                    let h = RX_BODY[(i + 2 + k) as usize] as i64
+                    var d: i64 = 0
+                    if h >= 48 && h <= 57 { d = h - 48 }
+                    else if h >= 97 && h <= 102 { d = h - 87 }
+                    else if h >= 65 && h <= 70 { d = h - 55 }
+                    v = v * 16 + d
+                    k = k + 1
+                }
+                DOC_TEXT[DOC_TEXT_LEN as usize] = (v % 256) as i8
+                DOC_TEXT_LEN = DOC_TEXT_LEN + 1
+                i = i + 6
+            } else {
+                DOC_TEXT[DOC_TEXT_LEN as usize] = n as i8
+                DOC_TEXT_LEN = DOC_TEXT_LEN + 1
+                i = i + 2
+            }
+        } else {
+            DOC_TEXT[DOC_TEXT_LEN as usize] = c as i8
+            DOC_TEXT_LEN = DOC_TEXT_LEN + 1
+            i = i + 1
+        }
+    }
+    return DOC_TEXT_LEN
+}
+
+// Extract the document URI ("uri": "...") into DOC_URI. Returns length, -1
+// if missing.
+fn extract_doc_uri() -> i64 with Mut, Panic {
+    DOC_URI_LEN = 0
+    let pos = body_find("\"uri\"", 0)
+    if pos < 0 { return 0 - 1 }
+    var i = pos + 5
+    var saw_quote: i64 = 0
+    while i < RX_BODY_LEN && saw_quote == 0 {
+        let c = RX_BODY[i as usize] as i64
+        if c == 34 { saw_quote = 1 }
+        i = i + 1
+    }
+    if saw_quote == 0 { return 0 - 1 }
+    while i < RX_BODY_LEN && DOC_URI_LEN < 1024 {
+        let c = RX_BODY[i as usize] as i64
+        if c == 34 { return DOC_URI_LEN }
+        if c == 92 && i + 1 < RX_BODY_LEN {
+            // crude escape skip — URIs almost never contain escapes in practice
+            i = i + 2
+        } else {
+            DOC_URI[DOC_URI_LEN as usize] = c as i8
+            DOC_URI_LEN = DOC_URI_LEN + 1
+            i = i + 1
+        }
+    }
+    return DOC_URI_LEN
+}
+
+// fork + execve souc on TMP_DOC_PATH; stderr+stdout → TMP_ERR_PATH. Blocks
+// in wait4. Returns 0 on success, -1 on fork failure.
+fn run_souc_check() -> i64 with IO, Mut, Panic {
+    ARGV[0] = "./bin/souc-linux-x86_64" as i64
+    ARGV[1] = "/tmp/sounio_lsp_doc.sio" as i64
+    ARGV[2] = "/tmp/sounio_lsp_out.elf" as i64
+    ARGV[3] = 0
+    ENVP[0] = 0
+
+    let pid = syscall6(57, 0, 0, 0, 0, 0, 0)
+    if pid < 0 { return 0 - 1 }
+    if pid == 0 {
+        // child: redirect stderr+stdout to err file, exec
+        let fd = syscall6(2, "/tmp/sounio_lsp_err.txt", 577, 420, 0, 0, 0)
+        if fd >= 0 {
+            syscall6(33, fd, 1, 0, 0, 0, 0)
+            syscall6(33, fd, 2, 0, 0, 0, 0)
+            syscall6(3, fd, 0, 0, 0, 0, 0)
+        }
+        syscall6(59, "./bin/souc-linux-x86_64" as i64, &! ARGV, &! ENVP, 0, 0, 0)
+        syscall6(60, 127, 0, 0, 0, 0, 0)
+    }
+    syscall6(61, pid, 0, 0, 0, 0, 0)
+    return 0
+}
+
+// Read the stderr file into DIAG_RAW. Returns bytes read.
+fn slurp_diag_file() -> i64 with IO, Mut, Panic {
+    DIAG_RAW_LEN = 0
+    let fd = syscall6(2, "/tmp/sounio_lsp_err.txt", 0, 0, 0, 0, 0)  // O_RDONLY
+    if fd < 0 { return 0 }
+    var got: i64 = 0
+    var done: i64 = 0
+    while done == 0 {
+        let r = syscall6(0, fd, &! RX_ONE, 1, 0, 0, 0)
+        if r <= 0 { done = 1 }
+        else if got >= 65536 { done = 1 }
+        else {
+            DIAG_RAW[got as usize] = RX_ONE[0]
+            got = got + 1
+        }
+    }
+    syscall6(3, fd, 0, 0, 0, 0, 0)
+    DIAG_RAW_LEN = got
+    return got
+}
+
+// Scan DIAG_RAW for lines matching `error: <message> at line <N>` and
+// populate DIAG_LINE / DIAG_MSG_OFF / DIAG_MSG_LEN. Resets DIAG_COUNT.
+fn parse_diagnostics() with Mut, Panic, Div {
+    DIAG_COUNT = 0
+    DIAG_MSG_BUF_LEN = 0
+    let prefix = "error: "
+    let plen = str_len(prefix)
+    var i: i64 = 0
+    while i < DIAG_RAW_LEN && DIAG_COUNT < DIAG_MAX {
+        // Match prefix at start of a line
+        var at_bol: bool = false
+        if i == 0 { at_bol = true }
+        else if (DIAG_RAW[(i - 1) as usize] as i64) == 10 { at_bol = true }
+        if at_bol == true && i + plen <= DIAG_RAW_LEN {
+            var k: i64 = 0
+            var match_ok: i64 = 1
+            while k < plen {
+                if (DIAG_RAW[(i + k) as usize] as i64) != str_char_at(prefix, k) {
+                    match_ok = 0
+                    k = plen
+                } else { k = k + 1 }
+            }
+            if match_ok == 1 {
+                // Capture message up to "at line N" or EOL
+                let msg_start = i + plen
+                var j = msg_start
+                while j < DIAG_RAW_LEN && (DIAG_RAW[j as usize] as i64) != 10 { j = j + 1 }
+                let eol = j
+                // Try to find " at line " inside [msg_start, eol)
+                let at_pat = " at line "
+                let alen = str_len(at_pat)
+                var line_no: i64 = 0
+                var msg_end = eol
+                var ai = msg_start
+                while ai + alen <= eol {
+                    var m: i64 = 1
+                    var aj: i64 = 0
+                    while aj < alen {
+                        if (DIAG_RAW[(ai + aj) as usize] as i64) != str_char_at(at_pat, aj) {
+                            m = 0
+                            aj = alen
+                        } else { aj = aj + 1 }
+                    }
+                    if m == 1 {
+                        msg_end = ai
+                        var nx = ai + alen
+                        while nx < eol {
+                            let c = DIAG_RAW[nx as usize] as i64
+                            if c < 48 || c > 57 { nx = eol }
+                            else { line_no = line_no * 10 + (c - 48); nx = nx + 1 }
+                        }
+                        ai = eol
+                    } else { ai = ai + 1 }
+                }
+                // Convert souc 1-based line to LSP 0-based
+                let lsp_line = if line_no > 0 { line_no - 1 } else { 0 }
+                let msg_len = msg_end - msg_start
+                if msg_len > 0 && DIAG_MSG_BUF_LEN + msg_len <= 16384 {
+                    var mi: i64 = 0
+                    while mi < msg_len {
+                        DIAG_MSG_BUF[(DIAG_MSG_BUF_LEN + mi) as usize] = DIAG_RAW[(msg_start + mi) as usize]
+                        mi = mi + 1
+                    }
+                    DIAG_LINE[DIAG_COUNT as usize] = lsp_line
+                    DIAG_MSG_OFF[DIAG_COUNT as usize] = DIAG_MSG_BUF_LEN
+                    DIAG_MSG_LEN[DIAG_COUNT as usize] = msg_len
+                    DIAG_MSG_BUF_LEN = DIAG_MSG_BUF_LEN + msg_len
+                    DIAG_COUNT = DIAG_COUNT + 1
+                }
+                i = eol
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Write DOC_TEXT to TMP_DOC_PATH using write_file. Returns true on success.
+fn write_doc_to_disk() -> bool with IO, Mut, Panic {
+    let r = write_file("/tmp/sounio_lsp_doc.sio", &! DOC_TEXT, DOC_TEXT_LEN)
+    return r >= 0
+}
+
+// Build and send a textDocument/publishDiagnostics notification.
+fn publish_diagnostics() with IO, Mut, Panic, Div {
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{")
+    tx_puts("\"uri\":\"")
+    var i: i64 = 0
+    while i < DOC_URI_LEN {
+        let c = DOC_URI[i as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+    tx_puts("\",\"diagnostics\":[")
+    var d: i64 = 0
+    while d < DIAG_COUNT {
+        if d > 0 { tx_putc(44) }
+        let ln = DIAG_LINE[d as usize]
+        tx_puts("{\"severity\":1,\"source\":\"sounio:type\",\"code\":\"E001\",\"range\":{\"start\":{\"line\":")
+        tx_put_i64(ln)
+        tx_puts(",\"character\":0},\"end\":{\"line\":")
+        tx_put_i64(ln)
+        tx_puts(",\"character\":0}},\"message\":\"")
+        let off = DIAG_MSG_OFF[d as usize]
+        let mlen = DIAG_MSG_LEN[d as usize]
+        var mi: i64 = 0
+        while mi < mlen {
+            let c = DIAG_MSG_BUF[(off + mi) as usize] as i64
+            if c == 34 { tx_putc(92); tx_putc(34) }
+            else if c == 92 { tx_putc(92); tx_putc(92) }
+            else if c == 10 { tx_putc(92); tx_putc(110) }
+            else if c == 13 { tx_putc(92); tx_putc(114) }
+            else if c == 9  { tx_putc(92); tx_putc(116) }
+            else if c < 32 { tx_putc(32) }
+            else { tx_putc(c) }
+            mi = mi + 1
+        }
+        tx_puts("\"}")
+        d = d + 1
+    }
+    tx_puts("]}}")
+    write_frame()
+}
+
+// Pull document text + URI from current message, run check, publish.
+fn handle_did_open_or_change() with IO, Mut, Panic, Div {
+    let u = extract_doc_uri()
+    let t = extract_doc_text()
+    if u < 0 || t < 0 { return }
+    if write_doc_to_disk() == false { return }
+    if run_souc_check() < 0 { return }
+    slurp_diag_file()
+    parse_diagnostics()
+    publish_diagnostics()
+}
+
 fn respond_initialize() with IO, Mut, Panic, Div {
     tx_reset()
     tx_puts("{\"jsonrpc\":\"2.0\",")
@@ -536,8 +849,8 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_INITIALIZED { return }                              // notification
     if method == M_SHUTDOWN    { SAW_SHUTDOWN = 1; respond_shutdown(); return }
     if method == M_EXIT        { return }                              // handled in main loop
-    if method == M_DID_OPEN    { return }                              // notification (TODO: diagnostics)
-    if method == M_DID_CHANGE  { return }
+    if method == M_DID_OPEN    { handle_did_open_or_change(); return }
+    if method == M_DID_CHANGE  { handle_did_open_or_change(); return }
     if method == M_DID_CLOSE   { return }
     if method == M_DID_SAVE    { return }
     if method == M_HOVER       { respond_empty_result();      return }
