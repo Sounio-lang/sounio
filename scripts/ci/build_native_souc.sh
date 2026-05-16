@@ -28,6 +28,10 @@ run_bootstrap_step() {
     local src_path="$2"
     local out_path="$3"
 
+    if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
+        sounio_ad_hoc_codesign "$compiler_bin"
+    fi
+
     set +e
     "$compiler_bin" "$src_path" "$out_path" >/dev/null 2>&1
     local rc=$?
