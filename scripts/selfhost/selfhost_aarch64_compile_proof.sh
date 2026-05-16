@@ -50,6 +50,7 @@ run_crash_diag() {
 
   rm -f "$diag_log"
   lldb --batch \
+    -o "target stop-hook add -o 'register read x0 x1 x2 x3 x8 x9 x10 x29 x30 sp pc' -o 'thread backtrace all' -o 'disassemble --pc --count 24'" \
     -o "run" \
     -o "register read x0 x1 x2 x3 x8 x9 x10 x29 sp pc" \
     -o "thread backtrace all" \
