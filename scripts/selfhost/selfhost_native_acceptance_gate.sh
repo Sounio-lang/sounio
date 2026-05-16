@@ -8,6 +8,12 @@ SOUC_NATIVE="${SOUC_NATIVE:-$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86
 WORK_DIR="${WORK_DIR:-/tmp/sounio-selfhost-native-acceptance-gate}"
 LOG_DIR="$WORK_DIR/logs"
 ARTIFACT_DIR="$WORK_DIR/artifacts"
+SOUNIO_NATIVE_FAIL_FAST="${SOUNIO_NATIVE_FAIL_FAST:-}"
+
+if [ -z "$SOUNIO_NATIVE_FAIL_FAST" ] && [ "$(uname -s)" = "Darwin" ]; then
+  SOUNIO_NATIVE_FAIL_FAST=1
+fi
+export SOUNIO_NATIVE_FAIL_FAST
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 
@@ -19,6 +25,7 @@ SUMMARY_FILE="$ARTIFACT_DIR/summary.txt"
 echo "SELFHOST_NATIVE_ACCEPTANCE_GATE_START"
 echo "souc_native=$SOUC_NATIVE"
 echo "work_dir=$WORK_DIR"
+echo "native_fail_fast=${SOUNIO_NATIVE_FAIL_FAST:-0}"
 
 if [ ! -x "$SOUC_NATIVE" ]; then
   echo "error: missing self-hosted native compiler at $SOUC_NATIVE" >&2
@@ -51,6 +58,7 @@ bash "$ROOT_DIR/scripts/selfhost/selfhost_native_typecheck_proof.sh" \
 
 {
   echo "souc_native=$SOUC_NATIVE"
+  echo "native_fail_fast=${SOUNIO_NATIVE_FAIL_FAST:-0}"
   echo "macos_log=$MACOS_LOG"
   echo "runtime_log=$RUNTIME_LOG"
   echo "typecheck_log=$TYPECHECK_LOG"

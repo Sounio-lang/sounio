@@ -11,6 +11,7 @@ ARTIFACT_DIR="$WORK_DIR/artifacts"
 LOG_DIR="$WORK_DIR/logs"
 TIMEOUT_SECS="${TIMEOUT_SECS:-30}"
 FILTER="${FILTER:-}"
+FAIL_FAST="${FAIL_FAST:-${SOUNIO_NATIVE_FAIL_FAST:-0}}"
 SOUNIO_NATIVE_TARGET="${SOUNIO_NATIVE_TARGET:-}"
 
 if [ -z "$SOUNIO_NATIVE_TARGET" ] && [ "$(uname -s)" = "Darwin" ]; then
@@ -78,6 +79,7 @@ echo "manifest=$MANIFEST_PATH"
 echo "work_dir=$WORK_DIR"
 echo "timeout_secs=$TIMEOUT_SECS"
 echo "native_target=${SOUNIO_NATIVE_TARGET:-default}"
+echo "fail_fast=$FAIL_FAST"
 
 if [ ! -x "$SOUC_NATIVE" ]; then
   echo "error: missing self-hosted native compiler at $SOUC_NATIVE" >&2
@@ -201,6 +203,9 @@ while IFS=$'\t' read -r case_id program_path expected_exit expected_stdout_path;
   fi
 
   run_case "$case_id" "$program_path" "$expected_exit" "$expected_stdout_path"
+  if [ "$FAIL_FAST" = "1" ] && [ "$FAIL_COUNT" -ne 0 ]; then
+    break
+  fi
 done <"$MANIFEST_PATH"
 
 {
@@ -210,6 +215,7 @@ done <"$MANIFEST_PATH"
   echo "manifest=$MANIFEST_PATH"
   echo "souc_native=$SOUC_NATIVE"
   echo "native_target=${SOUNIO_NATIVE_TARGET:-default}"
+  echo "fail_fast=$FAIL_FAST"
   echo "results_file=$RESULTS_FILE"
   echo "artifact_dir=$ARTIFACT_DIR"
   echo "log_dir=$LOG_DIR"
