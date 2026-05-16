@@ -80,13 +80,42 @@ var SAW_SHUTDOWN: i64 = 0
 var ARGV: [i64; 4] = [0; 4]
 var ENVP: [i64; 1] = [0; 1]
 
-// Document text (extracted from JSON), written to disk before checking.
+// Active document (the one the current request is about). This is
+// populated either by `extract_doc_text` / `extract_doc_uri` on
+// didOpen/didChange, or by `activate_uri_slot` before serving hover
+// / definition / references / rename — see the multi-document store
+// below.
 var DOC_TEXT: [i8; 262144] = [0; 262144]
 var DOC_TEXT_LEN: i64 = 0
 
-// Last URI seen (echoed in publishDiagnostics)
 var DOC_URI: [i8; 1024] = [0; 1024]
 var DOC_URI_LEN: i64 = 0
+
+// ----------------------------------------------------------------------------
+// Multi-document store
+// ----------------------------------------------------------------------------
+//
+// Per-URI buffers held in BSS. Slot count × per-slot capacity = total
+// memory; 8 × 256 KB text + 8 × 1 KB URI = 2 MB. Plenty for v0; bump
+// DOC_SLOT_COUNT if your editor opens more than 8 .sio files at once.
+//
+// Storage layout:
+//   DOC_SLOT_URI [slot * 1024  + k]  =  URI byte k
+//   DOC_SLOT_TEXT[slot * 262144 + k] =  text byte k
+//
+// Sounio doesn't (yet) give us pointer arithmetic into multi-row 2D
+// arrays cheaply, so we flatten into one big i8 array and do the
+// addressing by hand.
+
+let DOC_SLOT_COUNT:    i64 = 8
+let DOC_SLOT_URI_CAP:  i64 = 1024
+let DOC_SLOT_TEXT_CAP: i64 = 262144
+
+var DOC_SLOT_USED:     [i64; 8] = [0; 8]
+var DOC_SLOT_URI_LEN:  [i64; 8] = [0; 8]
+var DOC_SLOT_TEXT_LEN: [i64; 8] = [0; 8]
+var DOC_SLOT_URI:      [i8; 8192]    = [0; 8192]      // 8 * 1024
+var DOC_SLOT_TEXT:     [i8; 2097152] = [0; 2097152]   // 8 * 262144
 
 // Compiler stderr capture (read back after fork+exec)
 var DIAG_RAW: [i8; 65536] = [0; 65536]
@@ -507,6 +536,111 @@ fn write_frame() with IO, Mut, Panic, Div {
 // ============================================================================
 // Response builders
 // ============================================================================
+
+// ============================================================================
+// Multi-document store — slot helpers
+// ============================================================================
+
+// True if DOC_SLOT_URI for `slot` byte-equals DOC_URI[0..DOC_URI_LEN].
+fn slot_uri_eq(slot: i64) -> bool with Mut, Panic {
+    if DOC_SLOT_USED[slot as usize] == 0 { return false }
+    if DOC_SLOT_URI_LEN[slot as usize] != DOC_URI_LEN { return false }
+    let base = slot * 1024
+    var i: i64 = 0
+    while i < DOC_URI_LEN {
+        if (DOC_SLOT_URI[(base + i) as usize] as i64) != (DOC_URI[i as usize] as i64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Linear search for a slot matching the active DOC_URI. Returns slot
+// index, or -1 if not present.
+fn slot_find_by_uri() -> i64 with Mut, Panic {
+    var s: i64 = 0
+    while s < DOC_SLOT_COUNT {
+        if slot_uri_eq(s) == true { return s }
+        s = s + 1
+    }
+    return 0 - 1
+}
+
+// Allocate (or reuse) a slot for DOC_URI. Strategy: prefer first
+// unused; if all are used, evict slot 0 (FIFO would be nicer; v0
+// is fine). Copies the active DOC_URI into the slot.
+fn slot_alloc_for_uri() -> i64 with Mut, Panic {
+    var s: i64 = 0
+    while s < DOC_SLOT_COUNT {
+        if DOC_SLOT_USED[s as usize] == 0 { break }
+        s = s + 1
+    }
+    if s >= DOC_SLOT_COUNT { s = 0 }
+    let base = s * 1024
+    var i: i64 = 0
+    while i < DOC_URI_LEN && i < 1024 {
+        DOC_SLOT_URI[(base + i) as usize] = DOC_URI[i as usize]
+        i = i + 1
+    }
+    DOC_SLOT_URI_LEN[s as usize] = DOC_URI_LEN
+    DOC_SLOT_USED[s as usize] = 1
+    DOC_SLOT_TEXT_LEN[s as usize] = 0
+    return s
+}
+
+// Copy active DOC_TEXT[0..DOC_TEXT_LEN] into slot `slot`. Caller
+// guarantees slot is in use.
+fn slot_set_text(slot: i64) with Mut, Panic {
+    let base = slot * 262144
+    var i: i64 = 0
+    while i < DOC_TEXT_LEN && i < 262144 {
+        DOC_SLOT_TEXT[(base + i) as usize] = DOC_TEXT[i as usize]
+        i = i + 1
+    }
+    DOC_SLOT_TEXT_LEN[slot as usize] = DOC_TEXT_LEN
+}
+
+// Mark slot empty.
+fn slot_release(slot: i64) with Mut, Panic {
+    DOC_SLOT_USED[slot as usize] = 0
+    DOC_SLOT_URI_LEN[slot as usize] = 0
+    DOC_SLOT_TEXT_LEN[slot as usize] = 0
+}
+
+// Copy slot's URI + text back into the active DOC_URI / DOC_TEXT so
+// the existing handler pipeline (hover, definition, references,
+// rename) can operate on it unchanged.
+fn slot_activate(slot: i64) with Mut, Panic {
+    if DOC_SLOT_USED[slot as usize] == 0 { return }
+    let ubase = slot * 1024
+    let tbase = slot * 262144
+    let ulen = DOC_SLOT_URI_LEN[slot as usize]
+    let tlen = DOC_SLOT_TEXT_LEN[slot as usize]
+    DOC_URI_LEN = ulen
+    var i: i64 = 0
+    while i < ulen && i < 1024 {
+        DOC_URI[i as usize] = DOC_SLOT_URI[(ubase + i) as usize]
+        i = i + 1
+    }
+    DOC_TEXT_LEN = tlen
+    var j: i64 = 0
+    while j < tlen && j < 262144 {
+        DOC_TEXT[j as usize] = DOC_SLOT_TEXT[(tbase + j) as usize]
+        j = j + 1
+    }
+}
+
+// Convenience: parse params.textDocument.uri from RX_BODY, find or
+// alloc a slot, activate it. Returns slot index or -1 if no URI in
+// the request.
+fn activate_uri_slot() -> i64 with Mut, Panic {
+    if extract_doc_uri() < 0 { return 0 - 1 }
+    let s = slot_find_by_uri()
+    if s < 0 { return 0 - 1 }
+    slot_activate(s)
+    return s
+}
 
 // ============================================================================
 // Diagnostics pipeline
@@ -963,6 +1097,10 @@ fn hover_lookup() -> string with Mut, Panic {
 
 fn respond_hover() with IO, Mut, Panic, Div {
     if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        respond_empty_result()
+        return
+    }
     parse_hover_position()
     var content: string = "*no identifier under cursor*"
     var have: i64 = 0
@@ -1300,6 +1438,10 @@ fn emit_static_completions() with Mut, Panic, Div {
 
 fn respond_completion() with IO, Mut, Panic, Div {
     if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        respond_empty_result()
+        return
+    }
     parse_hover_position()       // reuse position parser
     parse_completion_prefix()
     COMP_EMITTED = 0
@@ -1405,6 +1547,10 @@ fn scan_definition_for_ident() with Mut, Panic {
 
 fn respond_definition() with IO, Mut, Panic, Div {
     if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        respond_empty_result()
+        return
+    }
     parse_hover_position()
     var have: i64 = 0
     if HOVER_OK == 1 {
@@ -1525,6 +1671,15 @@ fn ref_emit_location(off: i64) with Mut, Panic, Div {
 
 fn respond_references() with IO, Mut, Panic, Div {
     if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        // Empty Location[] for unknown URI
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
     parse_hover_position()
     parse_include_decl()
     var ok: i64 = 0
@@ -1649,6 +1804,10 @@ fn rename_emit_text_edit(off: i64) with Mut, Panic, Div {
 
 fn respond_rename() with IO, Mut, Panic, Div {
     if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        respond_empty_result()
+        return
+    }
     parse_hover_position()
     let new_ok = parse_new_name()
     var ok: i64 = 0
@@ -1689,16 +1848,31 @@ fn respond_rename() with IO, Mut, Panic, Div {
     write_frame()
 }
 
-// Pull document text + URI from current message, run check, publish.
+// Pull document text + URI from current message, store in slot, run
+// check, publish diagnostics.
 fn handle_did_open_or_change() with IO, Mut, Panic, Div {
     let u = extract_doc_uri()
     let t = extract_doc_text()
     if u < 0 || t < 0 { return }
+
+    // Store in the multi-document slot for this URI.
+    var s = slot_find_by_uri()
+    if s < 0 { s = slot_alloc_for_uri() }
+    if s >= 0 { slot_set_text(s) }
+
     if write_doc_to_disk() == false { return }
     if run_souc_check() < 0 { return }
     slurp_diag_file()
     parse_diagnostics()
     publish_diagnostics()
+}
+
+// textDocument/didClose — release the slot so we don't keep stale
+// state around. Operates on the URI in params.textDocument.uri.
+fn handle_did_close() with IO, Mut, Panic, Div {
+    if extract_doc_uri() < 0 { return }
+    let s = slot_find_by_uri()
+    if s >= 0 { slot_release(s) }
 }
 
 fn respond_initialize() with IO, Mut, Panic, Div {
@@ -1767,7 +1941,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_EXIT        { return }                              // handled in main loop
     if method == M_DID_OPEN    { handle_did_open_or_change(); return }
     if method == M_DID_CHANGE  { handle_did_open_or_change(); return }
-    if method == M_DID_CLOSE   { return }
+    if method == M_DID_CLOSE   { handle_did_close(); return }
     if method == M_DID_SAVE    { return }
     if method == M_HOVER       { respond_hover();             return }
     if method == M_COMPLETION  { respond_completion();        return }
