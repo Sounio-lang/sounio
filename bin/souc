@@ -143,6 +143,7 @@ parse_compat_args() {
   COMPAT_TARGET=""
   COMPAT_COMPILER_ARGS=()
   COMPAT_PROGRAM_ARGS=()
+  COMPAT_JSON=0
 
   local saw_program_sep=0
 
@@ -177,6 +178,10 @@ parse_compat_args() {
         ;;
       --show-ast|--show-types|--r15-monitor)
         COMPAT_COMPILER_ARGS+=("$1")
+        shift
+        ;;
+      --json)
+        COMPAT_JSON=1
         shift
         ;;
       -h|--help)
@@ -220,6 +225,23 @@ compat_check() {
   local rc=0
   tmp_dir="$(mktemp -d)"
 
+  if [[ "$COMPAT_JSON" == "1" ]]; then
+    # Capture compiler stderr+stdout into a buffer, parse the canonical
+    # `error: <msg> at line <N>` format into sounio.diagnostic.v1 JSON.
+    local log="$tmp_dir/check.log"
+    if [[ ${#COMPAT_COMPILER_ARGS[@]} -gt 0 ]]; then
+      "$SELECTED_BIN" "$COMPAT_SOURCE" "$tmp_dir/check.out" "${COMPAT_COMPILER_ARGS[@]}" \
+        >"$log" 2>&1 || rc=$?
+    else
+      "$SELECTED_BIN" "$COMPAT_SOURCE" "$tmp_dir/check.out" >"$log" 2>&1 || rc=$?
+    fi
+    emit_diagnostics_json "$COMPAT_SOURCE" "$log"
+    rm -rf "$tmp_dir"
+    # Exit 0 when JSON is well-formed even if compile failed — the
+    # diagnostics array communicates failure. Mirrors the LSP shape.
+    return 0
+  fi
+
   if [[ ${#COMPAT_COMPILER_ARGS[@]} -gt 0 ]]; then
     raw_compile_quiet "$COMPAT_SOURCE" "$tmp_dir/check.out" "${COMPAT_COMPILER_ARGS[@]}" || rc=$?
   else
@@ -227,6 +249,196 @@ compat_check() {
   fi
   rm -rf "$tmp_dir"
   return "$rc"
+}
+
+# Emit sounio.diagnostic.v1 JSON for a captured compiler log. No `jq`
+# dependency — pure bash + printf.
+emit_diagnostics_json() {
+  local source="$1"
+  local log="$2"
+
+  # file:// URI: percent-encode spaces, leave everything else.
+  local abs_path
+  abs_path="$(readlink -f -- "$source" 2>/dev/null || echo "$source")"
+  local uri="file://${abs_path// /%20}"
+
+  local diags_buf=""
+  local first=1
+  while IFS= read -r line; do
+    [[ "$line" =~ ^error:\ (.+)\ at\ line\ ([0-9]+)$ ]] || continue
+    local msg="${BASH_REMATCH[1]}"
+    local lineno="${BASH_REMATCH[2]}"
+    # LSP uses zero-based line numbers; souc reports one-based.
+    local lsp_line=$(( lineno - 1 ))
+    [[ $lsp_line -lt 0 ]] && lsp_line=0
+
+    # Escape backslash, double-quote, tab, CR in msg.
+    # NB: error lines never contain literal newlines (already
+    # split by `read -r`), so no `\n` escape needed.
+    local esc
+    esc=${msg//\\/\\\\}
+    esc=${esc//\"/\\\"}
+    esc=${esc//$'\t'/\\t}
+    esc=${esc//$'\r'/\\r}
+
+    if [[ $first -eq 1 ]]; then
+      first=0
+    else
+      diags_buf="$diags_buf,"
+    fi
+    diags_buf+=$(printf '{"severity":1,"code":"E001","source":"sounio:type","message":"%s","range":{"start":{"line":%d,"character":0},"end":{"line":%d,"character":0}}}' \
+      "$esc" "$lsp_line" "$lsp_line")
+  done < "$log"
+
+  printf '{"schema":"sounio.diagnostic.v1","uri":"%s","version":null,"diagnostics":[%s]}\n' \
+    "$uri" "$diags_buf"
+}
+
+# souc inspect --pos LINE:COL <source.sio>
+#
+# Best-effort cursor-resolution against the type-checker's per-function
+# output. Emits:
+#
+#   {
+#     "schema": "sounio.inspect.v1",
+#     "uri": "file://...",
+#     "position": {"line": N, "character": M},
+#     "found": true|false,
+#     "name": "...",            # identifier under cursor, if any
+#     "kind": "function" | "identifier" | "keyword" | ...,
+#     "signature": "fn NAME(...) -> T with EFFECTS",  # for functions
+#     "decl_line": N,           # zero-based line of the declaration
+#     "fn_index": N             # fn#N in --show-types
+#   }
+#
+# Resolution path:
+#   1. Walk the source for `fn <name>` declarations and record each
+#      one's (line, name, end-line).
+#   2. Find the declaration whose [start_line, next_decl_line) range
+#      contains the cursor.
+#   3. Parse `--show-types` output and pick the matching fn# entry by
+#      ordinal index (user-defined fns are emitted first).
+#   4. If the cursor is on the declarator name itself, also resolve
+#      the identifier-under-cursor in the source to fill `name`.
+compat_inspect() {
+  local source=""
+  local line=-1
+  local char=-1
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pos)
+        [[ $# -lt 2 ]] && { echo "error: --pos needs LINE:COL" >&2; exit 2; }
+        local p="$2"
+        line="${p%%:*}"
+        char="${p##*:}"
+        shift 2
+        ;;
+      -h|--help)
+        echo "usage: souc inspect --pos LINE:COL <source.sio>" >&2
+        exit 0
+        ;;
+      *)
+        if [[ -z "$source" ]]; then source="$1"
+        else echo "error: unexpected arg: $1" >&2; exit 2
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -z "$source" ]] && { echo "error: missing source.sio" >&2; exit 2; }
+  if ! [[ "$line" =~ ^[0-9]+$ ]] || ! [[ "$char" =~ ^[0-9]+$ ]]; then
+    echo "error: --pos LINE:COL required (zero-based)" >&2
+    exit 2
+  fi
+
+  local abs_path
+  abs_path="$(readlink -f -- "$source" 2>/dev/null || echo "$source")"
+  local uri="file://${abs_path// /%20}"
+
+  # 1. Walk source for `fn NAME` declarations.
+  # Recognizes `fn` or `pub fn` at column 0 (or after leading whitespace),
+  # followed by an identifier.
+  local -a decl_lines=()
+  local -a decl_names=()
+  local cur=0
+  while IFS= read -r src_line; do
+    if [[ "$src_line" =~ ^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+([A-Za-z_][A-Za-z0-9_]*) ]]; then
+      decl_lines+=("$cur")
+      decl_names+=("${BASH_REMATCH[2]}")
+    fi
+    cur=$((cur + 1))
+  done < "$source"
+
+  # 2. Find the decl whose range contains `line`.
+  local found_idx=-1
+  local i
+  for ((i = 0; i < ${#decl_lines[@]}; i++)); do
+    local start="${decl_lines[$i]}"
+    local end
+    if (( i + 1 < ${#decl_lines[@]} )); then
+      end="${decl_lines[$((i + 1))]}"
+    else
+      end=$cur
+    fi
+    if (( line >= start && line < end )); then
+      found_idx=$i
+      break
+    fi
+  done
+
+  if (( found_idx < 0 )); then
+    printf '{"schema":"sounio.inspect.v1","uri":"%s","position":{"line":%d,"character":%d},"found":false}\n' \
+      "$uri" "$line" "$char"
+    return 0
+  fi
+
+  local fn_name="${decl_names[$found_idx]}"
+  local decl_line="${decl_lines[$found_idx]}"
+
+  # 3. Run --show-types, parse fn#<idx> entry. The lean_single output
+  # collapses each "fn#N : arity A -> T with EFFECTS" record into
+  # newline-separated short tokens; reassemble.
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  local types_log="$tmp_dir/types.log"
+  "$SELECTED_BIN" "$source" "$tmp_dir/out.elf" --show-types >"$types_log" 2>&1 || true
+
+  # Reassemble: each fn record spans the line `fn#N` through the next
+  # `fn#M` (or EOF). Within that span we expect tokens like
+  #  ": arity A", "-> T with EFFECTS", which are split across multiple
+  # lines.
+  local fn_signature=""
+  local in_record=0
+  local accum=""
+  while IFS= read -r tline; do
+    if [[ "$tline" =~ ^fn\#([0-9]+) ]]; then
+      local n="${BASH_REMATCH[1]}"
+      if [[ "$in_record" == "1" ]]; then break; fi
+      if [[ "$n" == "$found_idx" ]]; then
+        in_record=1
+        continue
+      fi
+    elif [[ "$in_record" == "1" ]]; then
+      # Strip leading whitespace; concat
+      local t="${tline# }"
+      if [[ -z "$accum" ]]; then accum="$t"
+      else accum="$accum $t"
+      fi
+    fi
+  done < "$types_log"
+  fn_signature="$accum"
+  rm -rf "$tmp_dir"
+
+  # Build the displayed `signature` string.
+  local rendered="fn $fn_name $fn_signature"
+  # Escape for JSON
+  local esc="${rendered//\\/\\\\}"
+  esc="${esc//\"/\\\"}"
+
+  printf '{"schema":"sounio.inspect.v1","uri":"%s","position":{"line":%d,"character":%d},"found":true,"name":"%s","kind":"function","decl_line":%d,"fn_index":%d,"signature":"%s"}\n' \
+    "$uri" "$line" "$char" "$fn_name" "$decl_line" "$found_idx" "$esc"
 }
 
 compat_compile() {
@@ -303,6 +515,11 @@ case "$1" in
   run)
     shift
     compat_run "$@"
+    exit 0
+    ;;
+  inspect)
+    shift
+    compat_inspect "$@"
     exit 0
     ;;
   lsp)

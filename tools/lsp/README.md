@@ -21,6 +21,29 @@ Diagnostics are sourced from a real `souc check` subprocess via
 fork+execve, so every error you see in the IDE is one the compiler
 actually reports.
 
+For non-IDE consumers, the same diagnostics are available via the CLI:
+
+```bash
+./bin/souc check --json path/to/file.sio
+# {"schema":"sounio.diagnostic.v1","uri":"file://...","diagnostics":[...]}
+```
+
+The JSON conforms to `tools/shared/diagnostic_schema.json` — the
+canonical wire format also consumed by the MCP server.
+
+Type-checker-inferred function info at a position:
+
+```bash
+./bin/souc inspect --pos LINE:COL path/to/file.sio
+# {"schema":"sounio.inspect.v1","name":"helper",
+#  "signature":"fn helper : arity 1 -> i64 with Mut,Panic", ...}
+```
+
+`signature` is the real type-checker output (effects included). The
+LSP hover handler currently uses a static lookup table for keywords /
+stdlib names; wiring it to call `souc inspect` for user-defined
+functions is straightforward future work.
+
 ## Install
 
 The server is a single Sounio source file. Build it once:
