@@ -160,6 +160,13 @@ while IFS=$'\t' read -r case_id program_path expected_exit expected_stdout_path;
     continue
   fi
 
+  if grep -Eq '^//@[[:space:]]*ignore\b' "$program_path"; then
+    skip "$case_id" "ignore annotation"
+    printf '%s\t%s\t-\t-\t%s\t-\tignore_annotation\n' \
+      "$case_id" "$program_path" "$expected_exit" >>"$RESULTS_FILE"
+    continue
+  fi
+
   if [ "$expected_stdout_path" != "-" ] && [ ! -f "$expected_stdout_path" ]; then
     fail "$case_id" "missing stdout fixture $expected_stdout_path"
     printf '%s\t%s\t-\t-\t%s\t-\tmissing_stdout_fixture\n' \

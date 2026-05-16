@@ -13,7 +13,7 @@ mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 
 RUNTIME_LOG="$LOG_DIR/runtime.log"
 TYPECHECK_LOG="$LOG_DIR/typecheck.log"
-AARCH64_LOG="$LOG_DIR/aarch64_compile.log"
+MACOS_LOG="$LOG_DIR/macos_compile.log"
 SUMMARY_FILE="$ARTIFACT_DIR/summary.txt"
 
 echo "SELFHOST_NATIVE_ACCEPTANCE_GATE_START"
@@ -24,6 +24,14 @@ if [ ! -x "$SOUC_NATIVE" ]; then
   echo "error: missing self-hosted native compiler at $SOUC_NATIVE" >&2
   exit 1
 fi
+
+bash "$ROOT_DIR/scripts/selfhost/selfhost_macos_compile_proof.sh" \
+  >"$MACOS_LOG" 2>&1 \
+  || {
+    echo "error: macOS compile proof failed (see $MACOS_LOG)" >&2
+    cat "$MACOS_LOG" >&2 || true
+    exit 1
+  }
 
 bash "$ROOT_DIR/scripts/selfhost/selfhost_native_runtime_proof.sh" \
   >"$RUNTIME_LOG" 2>&1 \
@@ -41,22 +49,14 @@ bash "$ROOT_DIR/scripts/selfhost/selfhost_native_typecheck_proof.sh" \
     exit 1
   }
 
-bash "$ROOT_DIR/scripts/selfhost/selfhost_aarch64_compile_proof.sh" \
-  >"$AARCH64_LOG" 2>&1 \
-  || {
-    echo "error: aarch64 compile proof failed (see $AARCH64_LOG)" >&2
-    cat "$AARCH64_LOG" >&2 || true
-    exit 1
-  }
-
 {
   echo "souc_native=$SOUC_NATIVE"
+  echo "macos_log=$MACOS_LOG"
   echo "runtime_log=$RUNTIME_LOG"
   echo "typecheck_log=$TYPECHECK_LOG"
-  echo "aarch64_log=$AARCH64_LOG"
 } >"$SUMMARY_FILE"
 
 echo "SELFHOST_NATIVE_ACCEPTANCE_GATE_DONE"
+echo "macos_log=$MACOS_LOG"
 echo "runtime_log=$RUNTIME_LOG"
 echo "typecheck_log=$TYPECHECK_LOG"
-echo "aarch64_log=$AARCH64_LOG"
