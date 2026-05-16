@@ -26,6 +26,14 @@
 var RX_BODY: [i8; 262144] = [0; 262144]
 var RX_BODY_LEN: i64 = 0
 
+// One-byte scratch for byte-at-a-time stdin reads — used by line reader so
+// we never over-read past the header terminator into the body
+var RX_ONE: [i8; 1] = [0; 1]
+
+// Header line buffer (RFC 4180-ish, but LSP headers stay short)
+var RX_LINE: [i8; 1024] = [0; 1024]
+var RX_LINE_LEN: i64 = 0
+
 // Outgoing response body
 var TX_BODY: [i8; 262144] = [0; 262144]
 var TX_BODY_LEN: i64 = 0
@@ -82,33 +90,99 @@ fn log_stderr_nl(msg: string) with IO, Mut, Panic {
 // Header parsing — read "Content-Length: N\r\n\r\n", return N
 // ============================================================================
 
+// Read one CRLF-terminated header line into RX_LINE. Strips the CRLF (or LF
+// alone). Returns line length (0 = empty line / end of headers, -1 = EOF).
+fn read_header_line() -> i64 with IO, Mut, Panic {
+    RX_LINE_LEN = 0
+    var saw_any: i64 = 0
+    var done: i64 = 0
+    while done == 0 {
+        let r = syscall6(0, 0, &! RX_ONE, 1, 0, 0, 0)
+        if r <= 0 {
+            if saw_any == 0 { return 0 - 1 }
+            done = 1
+        } else {
+            saw_any = 1
+            let b = RX_ONE[0] as i64
+            if b == 10 { done = 1 }
+            else if RX_LINE_LEN < 1024 {
+                RX_LINE[RX_LINE_LEN as usize] = b as i8
+                RX_LINE_LEN = RX_LINE_LEN + 1
+            }
+        }
+    }
+    // Strip trailing CR if present
+    if RX_LINE_LEN > 0 && (RX_LINE[(RX_LINE_LEN - 1) as usize] as i64) == 13 {
+        RX_LINE_LEN = RX_LINE_LEN - 1
+    }
+    return RX_LINE_LEN
+}
+
+// Compare a prefix of RX_LINE against an ASCII literal, case-insensitive.
+fn line_starts_with_ci(prefix: string) -> bool with Mut, Panic {
+    let np = str_len(prefix)
+    if RX_LINE_LEN < np { return false }
+    var i: i64 = 0
+    while i < np {
+        let a = to_lower(RX_LINE[i as usize] as i64)
+        let b = to_lower(str_char_at(prefix, i))
+        if a != b { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Parse a non-negative decimal i64 from RX_LINE starting at `off`. Returns -1
+// if no digits found.
+fn line_parse_i64_after(off: i64) -> i64 with Mut, Panic, Div {
+    var i = off
+    while i < RX_LINE_LEN {
+        let c = RX_LINE[i as usize] as i64
+        if c != 32 && c != 9 { break }
+        i = i + 1
+    }
+    var val: i64 = 0
+    var any: i64 = 0
+    while i < RX_LINE_LEN {
+        let c = RX_LINE[i as usize] as i64
+        if c < 48 || c > 57 { break }
+        val = val * 10 + (c - 48)
+        any = 1
+        i = i + 1
+    }
+    if any == 0 { return 0 - 1 }
+    return val
+}
+
 // Returns content length, or -1 on EOF/error
 fn read_headers() -> i64 with IO, Mut, Panic, Div {
     var content_length: i64 = 0 - 1
     var done: i64 = 0
     while done == 0 {
-        let line = read_line()
-        let n = str_len(line)
+        let n = read_header_line()
+        if n < 0 { return 0 - 1 }
         if n == 0 { done = 1 }
-        else if n == 1 && str_char_at(line, 0) == 13 { done = 1 }
-        else if starts_with_ci(line, "Content-Length:") {
-            content_length = parse_i64_after(line, 15)
+        else if line_starts_with_ci("Content-Length:") {
+            content_length = line_parse_i64_after(15)
         }
     }
     return content_length
 }
 
-// Read exactly `n` bytes from stdin into RX_BODY. Returns bytes read.
+// Read `n` bytes from stdin into RX_BODY. Byte-at-a-time so partial reads
+// don't overwrite earlier bytes (no pointer arithmetic in v0 Sounio).
 fn read_body(n: i64) -> i64 with IO, Mut, Panic, Div {
     var got: i64 = 0
     while got < n {
-        let want = n - got
-        let r = syscall6(0, 0, &! RX_BODY, want, 0, 0, 0)
-        if r <= 0 { return got }
-        got = got + r
+        let r = syscall6(0, 0, &! RX_ONE, 1, 0, 0, 0)
+        if r <= 0 { RX_BODY_LEN = got; return got }
+        if got < 262144 {
+            RX_BODY[got as usize] = RX_ONE[0]
+        }
+        got = got + 1
     }
     RX_BODY_LEN = got
-    got
+    return got
 }
 
 // ============================================================================
