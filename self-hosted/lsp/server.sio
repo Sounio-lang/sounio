@@ -1704,6 +1704,10 @@ var DEF_FOUND: i64 = 0
 var DEF_LINE:  i64 = 0
 var DEF_CHAR:  i64 = 0
 var DEF_NAME_LEN: i64 = 0
+// Which doc store slot owns the definition. -1 = the currently active
+// DOC_TEXT (i.e. the request's own URI). >= 0 = a different open
+// buffer; respond_definition will emit that slot's URI in the Location.
+var DEF_SLOT:  i64 = 0 - 1
 
 // Does DOC_TEXT[s..s+IDENT_LEN] equal IDENT_BUF?
 fn doc_slice_eq_ident(s: i64) -> bool with Mut, Panic {
@@ -1740,6 +1744,7 @@ fn offset_to_position(off: i64, out_line: i64) -> i64 with Mut, Panic {
 // DEF_LINE/DEF_CHAR. Sets DEF_FOUND=1 on success.
 fn scan_definition_for_ident() with Mut, Panic {
     DEF_FOUND = 0
+    DEF_SLOT = 0 - 1   // -1 = current active doc
     if IDENT_LEN <= 0 { return }
     var i: i64 = 0
     var done: i64 = 0
@@ -1778,6 +1783,28 @@ fn scan_definition_for_ident() with Mut, Panic {
     }
 }
 
+// Cross-file fallback. On a miss in the active buffer, iterate over
+// every other open doc store slot. For each, activate it temporarily,
+// run the same declarator scan, and if it hits, leave DEF_SLOT set to
+// that slot and DEF_LINE / DEF_CHAR pointing into it. The caller is
+// responsible for restoring the originally-active slot afterwards if
+// it needs the active DOC_TEXT for further work.
+fn scan_definition_cross_file(home_slot: i64) with Mut, Panic {
+    if DEF_FOUND == 1 { return }
+    var s: i64 = 0
+    while s < DOC_SLOT_COUNT && DEF_FOUND == 0 {
+        if s != home_slot && DOC_SLOT_USED[s as usize] == 1 {
+            slot_activate(s)
+            scan_definition_for_ident()
+            if DEF_FOUND == 1 { DEF_SLOT = s }
+        }
+        s = s + 1
+    }
+    // Restore the home slot so subsequent state matches the request
+    // URI's buffer.
+    if home_slot >= 0 { slot_activate(home_slot) }
+}
+
 fn respond_definition() with IO, Mut, Panic, Div {
     if LAST_ID_PRESENT == 0 { return }
     if activate_uri_slot() < 0 {
@@ -1785,11 +1812,16 @@ fn respond_definition() with IO, Mut, Panic, Div {
         return
     }
     parse_hover_position()
+    let home_slot = slot_find_by_uri()
     var have: i64 = 0
     if HOVER_OK == 1 {
         let n = locate_ident()
         if n > 0 {
             scan_definition_for_ident()
+            if DEF_FOUND == 0 {
+                // Cross-file fallback: search peer open buffers.
+                scan_definition_cross_file(home_slot)
+            }
             if DEF_FOUND == 1 { have = 1 }
         }
     }
@@ -1797,14 +1829,30 @@ fn respond_definition() with IO, Mut, Panic, Div {
     tx_puts("{\"jsonrpc\":\"2.0\",")
     tx_emit_id()
     if have == 1 {
+        // Choose the URI: if the def lives in another slot, use that
+        // slot's URI directly from DOC_SLOT_URI (since the active
+        // slot was restored to home before we render).
         tx_puts(",\"result\":{\"uri\":\"")
-        var i: i64 = 0
-        while i < DOC_URI_LEN {
-            let c = DOC_URI[i as usize] as i64
-            if c == 34 { tx_putc(92); tx_putc(34) }
-            else if c == 92 { tx_putc(92); tx_putc(92) }
-            else { tx_putc(c) }
-            i = i + 1
+        if DEF_SLOT >= 0 {
+            let base = DEF_SLOT * 1024
+            let ulen = DOC_SLOT_URI_LEN[DEF_SLOT as usize]
+            var i: i64 = 0
+            while i < ulen {
+                let c = DOC_SLOT_URI[(base + i) as usize] as i64
+                if c == 34 { tx_putc(92); tx_putc(34) }
+                else if c == 92 { tx_putc(92); tx_putc(92) }
+                else { tx_putc(c) }
+                i = i + 1
+            }
+        } else {
+            var i: i64 = 0
+            while i < DOC_URI_LEN {
+                let c = DOC_URI[i as usize] as i64
+                if c == 34 { tx_putc(92); tx_putc(34) }
+                else if c == 92 { tx_putc(92); tx_putc(92) }
+                else { tx_putc(c) }
+                i = i + 1
+            }
         }
         tx_puts("\",\"range\":{\"start\":{\"line\":")
         tx_put_i64(DEF_LINE)
