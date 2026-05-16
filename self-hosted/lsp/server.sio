@@ -1443,6 +1443,132 @@ fn respond_definition() with IO, Mut, Panic, Div {
     write_frame()
 }
 
+// ============================================================================
+// References — textDocument/references
+// ============================================================================
+//
+// Word-boundary occurrence scan of DOC_TEXT for IDENT_BUF. Each match
+// emits a Location pointing into DOC_URI. Honors
+// `params.context.includeDeclaration`: if false, the declaration site
+// (found via scan_definition_for_ident) is skipped.
+
+var REF_INCLUDE_DECL: i64 = 1  // 1 = include declaration in results
+var REF_EMITTED: i64 = 0       // first-item-no-comma sentinel
+
+// Parse `params.context.includeDeclaration` (default true). LSP encodes
+// it as a literal `true` / `false` after the key.
+fn parse_include_decl() with Mut, Panic {
+    REF_INCLUDE_DECL = 1
+    let kpos = body_find("\"includeDeclaration\"", 0)
+    if kpos < 0 { return }
+    var i = kpos + 20
+    while i < RX_BODY_LEN {
+        let c = RX_BODY[i as usize] as i64
+        if c == 58 { i = i + 1; break }
+        i = i + 1
+    }
+    while i < RX_BODY_LEN {
+        let c = RX_BODY[i as usize] as i64
+        if c != 32 && c != 9 { break }
+        i = i + 1
+    }
+    if i + 5 <= RX_BODY_LEN {
+        let b0 = RX_BODY[i as usize] as i64
+        if b0 == 102 { REF_INCLUDE_DECL = 0 }   // 'f' of false
+    }
+}
+
+// True if DOC_TEXT[i..i+IDENT_LEN] is the captured identifier with
+// non-ident-continue bytes on both sides (word boundary).
+fn ref_match_at(i: i64) -> bool with Mut, Panic {
+    if i + IDENT_LEN > DOC_TEXT_LEN { return false }
+    if i > 0 {
+        if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == true { return false }
+    }
+    if i + IDENT_LEN < DOC_TEXT_LEN {
+        if is_ident_byte(DOC_TEXT[(i + IDENT_LEN) as usize] as i64) == true { return false }
+    }
+    var k: i64 = 0
+    while k < IDENT_LEN {
+        if (DOC_TEXT[(i + k) as usize] as i64) != (IDENT_BUF[k as usize] as i64) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+// Emit a Location object for the identifier at byte offset `off`.
+fn ref_emit_location(off: i64) with Mut, Panic, Div {
+    if REF_EMITTED == 1 { tx_putc(44) }
+    REF_EMITTED = 1
+    offset_to_position(off, 0)   // populates DEF_LINE / DEF_CHAR
+    tx_puts("{\"uri\":\"")
+    var i: i64 = 0
+    while i < DOC_URI_LEN {
+        let c = DOC_URI[i as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+    tx_puts("\",\"range\":{\"start\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR)
+    tx_puts("},\"end\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR + IDENT_LEN)
+    tx_puts("}}}")
+}
+
+fn respond_references() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    parse_hover_position()
+    parse_include_decl()
+    var ok: i64 = 0
+    if HOVER_OK == 1 {
+        let n = locate_ident()
+        if n > 0 { ok = 1 }
+    }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    REF_EMITTED = 0
+    if ok == 1 {
+        // Find the declaration offset (so we can skip it when
+        // includeDeclaration:false). We re-run scan and convert.
+        scan_definition_for_ident()
+        var skip_off: i64 = 0 - 1
+        if DEF_FOUND == 1 && REF_INCLUDE_DECL == 0 {
+            // recompute the byte offset that matches DEF_LINE/DEF_CHAR
+            var ln: i64 = 0
+            var col: i64 = 0
+            var p: i64 = 0
+            while p < DOC_TEXT_LEN && (ln < DEF_LINE || (ln == DEF_LINE && col < DEF_CHAR)) {
+                let c = DOC_TEXT[p as usize] as i64
+                if c == 10 { ln = ln + 1; col = 0 }
+                else { col = col + 1 }
+                p = p + 1
+            }
+            skip_off = p
+        }
+        var i: i64 = 0
+        while i < DOC_TEXT_LEN {
+            if ref_match_at(i) == true {
+                if i != skip_off { ref_emit_location(i) }
+                i = i + IDENT_LEN
+            } else {
+                i = i + 1
+            }
+        }
+    }
+    tx_puts("]}")
+    write_frame()
+}
+
 // Pull document text + URI from current message, run check, publish.
 fn handle_did_open_or_change() with IO, Mut, Panic, Div {
     let u = extract_doc_uri()
@@ -1526,7 +1652,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_HOVER       { respond_hover();             return }
     if method == M_COMPLETION  { respond_completion();        return }
     if method == M_DEFINITION  { respond_definition();        return }
-    if method == M_REFERENCES  { respond_empty_result();      return }
+    if method == M_REFERENCES  { respond_references();        return }
     if method == M_RENAME      { respond_empty_result();      return }
     if method == M_CODE_ACTION { respond_empty_result();      return }
     if method == M_SEM_TOKENS  { respond_empty_result();      return }
