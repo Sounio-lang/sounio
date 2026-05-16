@@ -1569,6 +1569,126 @@ fn respond_references() with IO, Mut, Panic, Div {
     write_frame()
 }
 
+// ============================================================================
+// Rename — textDocument/rename
+// ============================================================================
+//
+// Same word-boundary scan as references, but emits a WorkspaceEdit
+// whose `changes[uri]` is an array of TextEdit. Each edit replaces the
+// matched range with the requested `newName`.
+
+var RENAME_NEW: [i8; 128] = [0; 128]
+var RENAME_NEW_LEN: i64 = 0
+var RENAME_EMITTED: i64 = 0
+
+// Extract `params.newName`. Returns true on success.
+fn parse_new_name() -> bool with Mut, Panic {
+    RENAME_NEW_LEN = 0
+    let pos = body_find("\"newName\"", 0)
+    if pos < 0 { return false }
+    var i = pos + 9
+    var saw_quote: i64 = 0
+    while i < RX_BODY_LEN && saw_quote == 0 {
+        let c = RX_BODY[i as usize] as i64
+        if c == 34 { saw_quote = 1 }
+        i = i + 1
+    }
+    if saw_quote == 0 { return false }
+    while i < RX_BODY_LEN && RENAME_NEW_LEN < 128 {
+        let c = RX_BODY[i as usize] as i64
+        if c == 34 { return RENAME_NEW_LEN > 0 }
+        if c == 92 && i + 1 < RX_BODY_LEN {
+            // simple escape skip — names rarely contain escapes
+            i = i + 2
+        } else {
+            RENAME_NEW[RENAME_NEW_LEN as usize] = c as i8
+            RENAME_NEW_LEN = RENAME_NEW_LEN + 1
+            i = i + 1
+        }
+    }
+    return RENAME_NEW_LEN > 0
+}
+
+// Validate newName is a non-empty Sounio identifier (first byte
+// non-digit, all bytes ident-continue).
+fn validate_new_name() -> bool with Mut, Panic {
+    if RENAME_NEW_LEN <= 0 { return false }
+    let first = RENAME_NEW[0] as i64
+    if first >= 48 && first <= 57 { return false }
+    var i: i64 = 0
+    while i < RENAME_NEW_LEN {
+        if is_ident_byte(RENAME_NEW[i as usize] as i64) == false { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn rename_emit_text_edit(off: i64) with Mut, Panic, Div {
+    if RENAME_EMITTED == 1 { tx_putc(44) }
+    RENAME_EMITTED = 1
+    offset_to_position(off, 0)
+    tx_puts("{\"range\":{\"start\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR)
+    tx_puts("},\"end\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR + IDENT_LEN)
+    tx_puts("}},\"newText\":\"")
+    var i: i64 = 0
+    while i < RENAME_NEW_LEN {
+        let c = RENAME_NEW[i as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+    tx_puts("\"}")
+}
+
+fn respond_rename() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    parse_hover_position()
+    let new_ok = parse_new_name()
+    var ok: i64 = 0
+    if HOVER_OK == 1 && new_ok == true && validate_new_name() == true {
+        let n = locate_ident()
+        if n > 0 { ok = 1 }
+    }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    if ok == 0 {
+        tx_puts(",\"result\":null}")
+        write_frame()
+        return
+    }
+    // Build WorkspaceEdit
+    tx_puts(",\"result\":{\"changes\":{\"")
+    var u: i64 = 0
+    while u < DOC_URI_LEN {
+        let c = DOC_URI[u as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        u = u + 1
+    }
+    tx_puts("\":[")
+    RENAME_EMITTED = 0
+    var i: i64 = 0
+    while i < DOC_TEXT_LEN {
+        if ref_match_at(i) == true {
+            rename_emit_text_edit(i)
+            i = i + IDENT_LEN
+        } else {
+            i = i + 1
+        }
+    }
+    tx_puts("]}}}")
+    write_frame()
+}
+
 // Pull document text + URI from current message, run check, publish.
 fn handle_did_open_or_change() with IO, Mut, Panic, Div {
     let u = extract_doc_uri()
@@ -1653,7 +1773,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_COMPLETION  { respond_completion();        return }
     if method == M_DEFINITION  { respond_definition();        return }
     if method == M_REFERENCES  { respond_references();        return }
-    if method == M_RENAME      { respond_empty_result();      return }
+    if method == M_RENAME      { respond_rename();            return }
     if method == M_CODE_ACTION { respond_empty_result();      return }
     if method == M_SEM_TOKENS  { respond_empty_result();      return }
     if method == M_FORMATTING  { respond_empty_result();      return }
