@@ -29,6 +29,33 @@ run_with_timeout() {
   "$@"
 }
 
+run_crash_diag() {
+  local case_id="$1"
+  local program_path="$2"
+  local out_path="$3"
+  local diag_log="$LOG_DIR/${case_id}.lldb.txt"
+
+  if [ "${SOUNIO_MACOS_CRASH_DIAG:-0}" != "1" ]; then
+    return 0
+  fi
+
+  if [ "$(uname -s 2>/dev/null || true)" != "Darwin" ]; then
+    return 0
+  fi
+
+  if ! command -v lldb >/dev/null 2>&1; then
+    echo "crash diagnostic skipped: lldb not found" >"$diag_log"
+    return 0
+  fi
+
+  rm -f "$diag_log"
+  lldb --batch \
+    -o "run" \
+    -o "thread backtrace all" \
+    -- "$SOUC_NATIVE" "$program_path" "$out_path" --target "$TARGET" \
+    >"$diag_log" 2>&1 || true
+}
+
 expected_file_kind() {
   case "$1" in
     aarch64-macos) printf '%s\n' "Mach-O 64-bit arm64 executable|Mach-O 64-bit executable arm64" ;;
@@ -142,6 +169,12 @@ run_case() {
     printf '%s\t%s\t%s\t%s\t-\tcompile_fail\n' "$case_id" "$program_path" "$TARGET" "$compile_exit" >>"$RESULTS_FILE"
     sed -n '1,20p' "$compile_stdout" || true
     sed -n '1,20p' "$compile_stderr" || true
+    if [ "$compile_exit" -eq 139 ]; then
+      run_crash_diag "$case_id" "$program_path" "$out_path"
+      if [ -f "$LOG_DIR/${case_id}.lldb.txt" ]; then
+        sed -n '1,80p' "$LOG_DIR/${case_id}.lldb.txt" || true
+      fi
+    fi
     return 0
   fi
 
