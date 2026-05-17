@@ -25197,6 +25197,203 @@ fn emit_f64_binop_a64(opcode: i64) with Mut {
     em32(0x9E660000)  // fmov x0, d0
 }
 
+fn emit_i64_to_f64_in_x0_a64() with Mut {
+    em32(0x9E620000)  // scvtf d0, x0
+    em32(0x9E660000)  // fmov x0, d0
+}
+
+fn emit_sqrt_builtin_a64() with Mut {
+    em32(0x9E670000)  // fmov d0, x0
+    em32(0x1E61C000)  // fsqrt d0, d0
+    em32(0x9E660000)  // fmov x0, d0
+}
+
+fn emit_load_operand_value_a64(slot: i64, ty: i64, ty_hash: i64, tok: i64) with IO, Mut, Panic, Div {
+    emit_load_var_a64(slot)
+    if knowledge_hash_is(ty_hash) {
+        em32(0xF9400000)  // ldr x0, [x0] (.value)
+        let inner_ty = knowledge_hash_inner_ty(ty_hash)
+        if inner_ty != 2 {
+            if ty_is_numeric(inner_ty) { emit_i64_to_f64_in_x0_a64() }
+            else {
+                tc_error(tok, "Knowledge arithmetic requires numeric inner type")
+                em32(0xD2800000)
+            }
+        }
+        return
+    }
+    if ty != 2 {
+        if ty_is_numeric(ty) { emit_i64_to_f64_in_x0_a64() }
+        else {
+            tc_error(tok, "Knowledge arithmetic requires numeric operands")
+            em32(0xD2800000)
+        }
+    }
+}
+
+fn emit_load_operand_variance_a64(slot: i64, ty_hash: i64) with Mut, Panic {
+    if knowledge_hash_is(ty_hash) {
+        emit_load_var_a64(slot)
+        em32(0xF9400400)  // ldr x0, [x0, #8]
+        return
+    }
+    em32(0xD2800000)
+}
+
+fn emit_load_operand_confidence_a64(slot: i64, ty_hash: i64) with Mut, Panic {
+    if knowledge_hash_is(ty_hash) {
+        emit_load_var_a64(slot)
+        em32(0xF9400800)  // ldr x0, [x0, #16]
+        return
+    }
+    emit_imm64_a64(4607182418800017408)
+}
+
+fn emit_min_positive_f64_bits_a64() with Mut, Panic {
+    em32(0xEB00003F)       // cmp x1, x0
+    let skip = CL
+    em32(0x5400000C)       // b.gt skip
+    em32(0xAA0103E0)       // mov x0, x1
+    patch_branch_a64(skip, CL)
+}
+
+fn compile_knowledge_addsub_a64(op_tok: i64, op: i64, left_ty: i64, left_hash: i64, right_ty: i64, right_hash: i64) with IO, Mut, Panic, Div {
+    let rhs_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var_a64(rhs_slot)
+    let lhs_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_pop_x0_a64()
+    emit_store_var_a64(lhs_slot)
+    let base_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+
+    emit_load_operand_value_a64(lhs_slot, left_ty, left_hash, op_tok)
+    emit_push_a64()
+    emit_load_operand_value_a64(rhs_slot, right_ty, right_hash, op_tok)
+    emit_pop_x1_a64()
+    if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
+    emit_store_var_a64(base_slot + 2)
+
+    emit_load_operand_variance_a64(lhs_slot, left_hash)
+    emit_push_a64()
+    emit_load_operand_variance_a64(rhs_slot, right_hash)
+    emit_pop_x1_a64()
+    emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(base_slot + 1)
+
+    emit_load_operand_confidence_a64(lhs_slot, left_hash)
+    emit_push_a64()
+    emit_load_operand_confidence_a64(rhs_slot, right_hash)
+    emit_pop_x1_a64()
+    emit_min_positive_f64_bits_a64()
+    emit_store_var_a64(base_slot)
+
+    emit_lea_var_a64(base_slot + 2)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = knowledge_binary_result_hash(op, left_ty, left_hash, right_ty, right_hash)
+}
+
+fn compile_knowledge_muldiv_a64(op_tok: i64, op: i64, left_ty: i64, left_hash: i64, right_ty: i64, right_hash: i64) with IO, Mut, Panic, Div {
+    let rhs_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var_a64(rhs_slot)
+    let lhs_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_pop_x0_a64()
+    emit_store_var_a64(lhs_slot)
+    let base_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+
+    emit_load_operand_value_a64(lhs_slot, left_ty, left_hash, op_tok)
+    emit_push_a64()
+    emit_load_operand_value_a64(rhs_slot, right_ty, right_hash, op_tok)
+    emit_pop_x1_a64()
+    if op == 19 { emit_f64_binop_a64(0x1E610800) } else { emit_f64_binop_a64(0x1E611800) }
+    emit_store_var_a64(base_slot + 2)
+
+    if op == 19 {
+        emit_load_operand_value_a64(lhs_slot, left_ty, left_hash, op_tok)
+        emit_push_a64()
+        emit_load_operand_value_a64(lhs_slot, left_ty, left_hash, op_tok)
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E610800)
+        emit_push_a64()
+        emit_load_operand_variance_a64(rhs_slot, right_hash)
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E610800)
+        emit_push_a64()
+
+        emit_load_operand_value_a64(rhs_slot, right_ty, right_hash, op_tok)
+        emit_push_a64()
+        emit_load_operand_value_a64(rhs_slot, right_ty, right_hash, op_tok)
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E610800)
+        emit_push_a64()
+        emit_load_operand_variance_a64(lhs_slot, left_hash)
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E610800)
+
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E612800)
+    } else {
+        emit_load_operand_variance_a64(lhs_slot, left_hash)
+        emit_push_a64()
+        emit_load_operand_value_a64(rhs_slot, right_ty, right_hash, op_tok)
+        emit_push_a64()
+        emit_load_operand_value_a64(rhs_slot, right_ty, right_hash, op_tok)
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E611800)
+        emit_push_a64()
+
+        emit_load_operand_value_a64(lhs_slot, left_ty, left_hash, op_tok)
+        emit_push_a64()
+        emit_load_operand_value_a64(lhs_slot, left_ty, left_hash, op_tok)
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E610800)
+        emit_push_a64()
+        emit_load_operand_variance_a64(rhs_slot, right_hash)
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E610800)
+        emit_push_a64()
+
+        emit_load_operand_value_a64(rhs_slot, right_ty, right_hash, op_tok)
+        emit_push_a64()
+        emit_load_operand_value_a64(rhs_slot, right_ty, right_hash, op_tok)
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E610800)
+        emit_push_a64()
+        emit_load_operand_value_a64(rhs_slot, right_ty, right_hash, op_tok)
+        emit_push_a64()
+        emit_load_operand_value_a64(rhs_slot, right_ty, right_hash, op_tok)
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E610800)
+
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E611800)
+        emit_pop_x1_a64()
+        emit_f64_binop_a64(0x1E612800)
+    }
+    emit_store_var_a64(base_slot + 1)
+
+    emit_load_operand_confidence_a64(lhs_slot, left_hash)
+    emit_push_a64()
+    emit_load_operand_confidence_a64(rhs_slot, right_hash)
+    emit_pop_x1_a64()
+    emit_min_positive_f64_bits_a64()
+    emit_store_var_a64(base_slot)
+
+    emit_lea_var_a64(base_slot + 2)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = knowledge_binary_result_hash(op, left_ty, left_hash, right_ty, right_hash)
+}
+
 fn compile_measure_call_a64(call_tok: i64) with IO, Mut, Panic, Div {
     EP = EP + 1
     var value_ty: i64 = 0
@@ -28027,6 +28224,12 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     EXPR_TY = 2
                     EXPR_TY_HASH = 0
                     EXPR_IS_F64 = 1
+                } else if src_match(fns, fne - fns, "uncertainty") {
+                    em32(0xF9400400)
+                    emit_sqrt_builtin_a64()
+                    EXPR_TY = 2
+                    EXPR_TY_HASH = 0
+                    EXPR_IS_F64 = 1
                 } else if src_match(fns, fne - fns, "confidence") || src_match(fns, fne - fns, "epsilon") {
                     em32(0xF9400800)
                     EXPR_TY = 2
@@ -28127,6 +28330,8 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             rhs_const_val = TV[(rhs_start + 1) as usize] - TV[(rhs_start + 3) as usize]
         }
         let left_f64 = EXPR_IS_F64
+        let left_ty = EXPR_TY
+        let left_hash = EXPR_TY_HASH
         // β⁴: capture LHS shadow + save LHS f64 value for GUM/AD propagation
         let b4am_left_vshadow = EXPR_VSHADOW
         let b4am_left_sshadow = EXPR_SSHADOW
@@ -28153,11 +28358,39 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         let b4am_right_sshadow_1 = EXPR_SSHADOW_1
         let b4am_right_sshadow_2 = EXPR_SSHADOW_2
         let b4am_right_sshadow_3 = EXPR_SSHADOW_3
+        let right_ty = EXPR_TY
+        let right_hash = EXPR_TY_HASH
         var b4am_rval_slot: i64 = -1
         if left_f64 == 1 {
             b4am_rval_slot = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_rval_slot)
+        }
+        let left_has_knowledge = knowledge_hash_is(left_hash)
+        let right_has_knowledge = knowledge_hash_is(right_hash)
+        if left_has_knowledge || right_has_knowledge {
+            var left_inner_ty = left_ty
+            var left_inner_hash = left_hash
+            if left_has_knowledge {
+                left_inner_ty = knowledge_hash_inner_ty(left_hash)
+                left_inner_hash = knowledge_hash_inner_hash(left_hash)
+            }
+            var right_inner_ty = right_ty
+            var right_inner_hash = right_hash
+            if right_has_knowledge {
+                right_inner_ty = knowledge_hash_inner_ty(right_hash)
+                right_inner_hash = knowledge_hash_inner_hash(right_hash)
+            }
+            if op == 29 {
+                tc_error(op_tok, "modulo requires integer operands")
+            } else if left_inner_ty != 0 && right_inner_ty != 0 {
+                if ty_is_numeric(left_inner_ty) == false || ty_is_numeric(right_inner_ty) == false || ty_eq(left_inner_ty, left_inner_hash, right_inner_ty, right_inner_hash) == false {
+                    tc_error(op_tok, "Knowledge arithmetic requires matching numeric operands")
+                }
+            }
+            compile_knowledge_muldiv_a64(op_tok, op, left_ty, left_hash, right_ty, right_hash)
+            lhs_end_line = TL[(EP - 1) as usize]
+            continue
         }
         emit_pop_x1_a64()
         if left_f64 == 1 {
@@ -28281,9 +28514,12 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
 fn compile_additive_a64() with IO, Mut, Panic, Div {
     compile_multiplicative_a64()
     while TK[EP as usize] == 17 || TK[EP as usize] == 18 {
+        let op_tok = EP
         let op = TK[EP as usize]
         EP = EP + 1
         let left_f64 = EXPR_IS_F64
+        let left_ty = EXPR_TY
+        let left_hash = EXPR_TY_HASH
         // β⁴: capture LHS shadow
         let b4aa_left_vshadow = EXPR_VSHADOW
         let b4aa_left_sshadow = EXPR_SSHADOW
@@ -28299,6 +28535,31 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         let b4aa_right_sshadow_1 = EXPR_SSHADOW_1
         let b4aa_right_sshadow_2 = EXPR_SSHADOW_2
         let b4aa_right_sshadow_3 = EXPR_SSHADOW_3
+        let right_ty = EXPR_TY
+        let right_hash = EXPR_TY_HASH
+        let left_has_knowledge = knowledge_hash_is(left_hash)
+        let right_has_knowledge = knowledge_hash_is(right_hash)
+        if left_has_knowledge || right_has_knowledge {
+            var left_inner_ty = left_ty
+            var left_inner_hash = left_hash
+            if left_has_knowledge {
+                left_inner_ty = knowledge_hash_inner_ty(left_hash)
+                left_inner_hash = knowledge_hash_inner_hash(left_hash)
+            }
+            var right_inner_ty = right_ty
+            var right_inner_hash = right_hash
+            if right_has_knowledge {
+                right_inner_ty = knowledge_hash_inner_ty(right_hash)
+                right_inner_hash = knowledge_hash_inner_hash(right_hash)
+            }
+            if left_inner_ty != 0 && right_inner_ty != 0 {
+                if ty_is_numeric(left_inner_ty) == false || ty_is_numeric(right_inner_ty) == false || ty_eq(left_inner_ty, left_inner_hash, right_inner_ty, right_inner_hash) == false {
+                    tc_error(op_tok, "Knowledge arithmetic requires matching numeric operands")
+                }
+            }
+            compile_knowledge_addsub_a64(op_tok, op, left_ty, left_hash, right_ty, right_hash)
+            continue
+        }
         emit_pop_x1_a64()
         if left_f64 == 1 {
             if op == 17 { emit_f64_binop_a64(0x1E612800) }
