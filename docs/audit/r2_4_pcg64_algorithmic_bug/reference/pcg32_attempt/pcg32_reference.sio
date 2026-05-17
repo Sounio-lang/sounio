@@ -1,0 +1,126 @@
+// R.2.4 — PCG reference implementation (oracle generator).
+//
+// Algorithm: PCG-XSH-RR-64/32-LCG (a.k.a. PCG32), per Melissa O'Neill 2014
+// "PCG: A Family of Simple Fast Space-Efficient Statistically Good
+//  Algorithms for Random Number Generation".
+//
+// Why PCG32 not PCG64-XSL-RR: PCG32 has a single 64-bit state (one i64
+// slot), no 128-bit emulation needed. We produce a 64-bit output per
+// step by calling PCG32 twice and concatenating two 32-bit outputs
+// (high32 << 32 | low32). This is the same pattern most "pcg64" wrapper
+// libraries use internally — a single-stream PCG32 doubled.
+//
+// Constants:
+//   MULT  = 6364136223846793005  (PCG_DEFAULT_MULTIPLIER_64)
+//   INC   = 1                     (corresponds to PCG initseq=0)
+//
+// All right-shifts on signed i64 use the `lshr` helper to obtain the
+// logical / unsigned shift semantics PCG requires.
+//
+// This file is the ORACLE. Its output is canonical by declaration for
+// R.2.4. The operator is responsible for cross-checking the printed
+// streams against PCG's published C reference, outside the workspace,
+// before stdlib/random/distributions.sio is changed.
+
+extern "C" {
+    fn print_i64(x: i64) -> i64;
+}
+
+struct Pcg32 {
+    state: i64,
+    inc: i64,
+}
+
+// Logical right shift on signed i64.
+// Strips bits filled by Sounio's arithmetic `>>` when x < 0.
+// Defined for 0 <= n <= 64. n == 0 returns x; n >= 64 returns 0.
+fn lshr(x: i64, n: i64) -> i64 with Mut, Div, Panic {
+    if n <= 0 { return x }
+    if n >= 64 { return 0 }
+    let raw = x >> n
+    let one: i64 = 1
+    let mask = (one << (64 - n)) - 1
+    raw & mask
+}
+
+// One PCG32 advance. Returns (new_rng, output_low32_in_i64).
+// Output occupies the low 32 bits of the returned i64; upper 32 bits are zero.
+fn pcg32_step(rng: Pcg32) -> (Pcg32, i64) with Mut, Div, Panic {
+    let old_state = rng.state
+    // LCG step. i64 multiplication wraps mod 2^64 deterministically.
+    let new_state = old_state * 6364136223846793005 + rng.inc
+
+    // XSH (xor-shift-high): xor-shift by 18, then shift down by 27 → 32 bits.
+    let xorshifted_64 = lshr(old_state, 18) ^ old_state
+    let xorshifted = lshr(xorshifted_64, 27) & 4294967295  // mask to u32
+
+    // RR (random rotation): rot count is top 5 bits of old_state.
+    let rot = lshr(old_state, 59) & 31
+
+    // Rotate-right the 32-bit value by `rot` bits.
+    let right_part = lshr(xorshifted, rot)
+    // Left part: x << ((32 - rot) mod 32). When rot==0, that's a shift by 0.
+    var left_shift = (32 - rot) & 31
+    let left_part_raw = xorshifted << left_shift
+    let left_part = left_part_raw & 4294967295
+
+    let output = (right_part | left_part) & 4294967295
+
+    (Pcg32 { state: new_state, inc: rng.inc }, output)
+}
+
+// Initialize PCG32 from a seed using O'Neill's canonical pattern:
+//   state = 0
+//   inc = (initseq << 1) | 1
+//   step (mix initial state)
+//   state += seed
+//   step (mix in seed)
+// We fix initseq = 0 → inc = 1, matching the existing stdlib's inc_lo=1.
+fn pcg32_init(seed: i64) -> Pcg32 with Mut, Div, Panic {
+    var rng = Pcg32 { state: 0, inc: 1 }
+    let r1 = pcg32_step(rng)
+    rng = r1.0
+    rng = Pcg32 { state: rng.state + seed, inc: rng.inc }
+    let r2 = pcg32_step(rng)
+    r2.0
+}
+
+// One 64-bit output: concatenate two PCG32 outputs as (high32 << 32) | low32.
+// Order: first call → high, second call → low. This matches what most
+// "pcg64" wrappers do internally.
+fn pcg64_step(rng: Pcg32) -> (Pcg32, i64) with Mut, Div, Panic {
+    let r1 = pcg32_step(rng)
+    let r2 = pcg32_step(r1.0)
+    let hi = r1.1 & 4294967295
+    let lo = r2.1 & 4294967295
+    let combined = (hi << 32) | lo
+    (r2.0, combined)
+}
+
+// Print N 64-bit outputs from seed `seed`, one per line.
+fn emit_stream(seed: i64, n: i64) with IO, Mut, Div, Panic {
+    var rng = pcg32_init(seed)
+    var i: i64 = 0
+    while i < n {
+        let r = pcg64_step(rng)
+        rng = r.0
+        println(r.1)
+        i = i + 1
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    // Phase A oracle: 256 samples per canonical seed, 4 seeds.
+    // Total 1024 lines plus 4 seed-marker lines. Operator splits via awk.
+    // Seed marker lines are the raw seed value alone on a line; sample
+    // lines below are the i64 output of pcg64_step.
+    let n: i64 = 256
+    println(0)
+    emit_stream(0, n)
+    println(1)
+    emit_stream(1, n)
+    println(31415)
+    emit_stream(31415, n)
+    println(20260516)
+    emit_stream(20260516, n)
+}
