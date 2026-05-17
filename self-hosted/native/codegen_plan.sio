@@ -9,56 +9,60 @@
 // Algorithm:  List scheduling with critical-path priority (Gibbons & Muchnick,
 // "Efficient instruction scheduling for a pipelined architecture", 1986).
 
+module native::codegen_plan
+
 // ============================================================================
 // Constants
 // ============================================================================
 
-let DEP_DATA: i64 = 1        // true (flow) dependency: write -> read
-let DEP_ANTI: i64 = 2        // anti dependency: read -> write
-let DEP_OUTPUT: i64 = 3      // output dependency: write -> write
-let DEP_CONTROL: i64 = 4     // control dependency (branches, barriers)
+pub let DEP_DATA: i64 = 1        // true (flow) dependency: write -> read
+pub let DEP_ANTI: i64 = 2        // anti dependency: read -> write
+pub let DEP_OUTPUT: i64 = 3      // output dependency: write -> write
+pub let DEP_CONTROL: i64 = 4     // control dependency (branches, barriers)
 
-let CGPLAN_MAX_INSTRS: i64 = 512
-let CGPLAN_MAX_DEPS: i64 = 2048
-let CGPLAN_MAX_BLOCKS: i64 = 256
-let CGPLAN_MAX_CYCLES: i64 = 512
+pub let CGPLAN_MAX_INSTRS: i64 = 512
+pub let CGPLAN_MAX_DEPS: i64 = 2048
+pub let CGPLAN_MAX_BLOCKS: i64 = 256
+pub let CGPLAN_MAX_CYCLES: i64 = 512
 
 // Opcode constants for peephole patterns
-let CGOP_NOP: i64 = 0
-let CGOP_MOV: i64 = 1
-let CGOP_ADD: i64 = 2
-let CGOP_SUB: i64 = 3
-let CGOP_MUL: i64 = 4
-let CGOP_DIV: i64 = 5
-let CGOP_LOAD: i64 = 6
-let CGOP_STORE: i64 = 7
-let CGOP_CMP: i64 = 8
-let CGOP_BRANCH: i64 = 9
-let CGOP_CALL: i64 = 10
-let CGOP_RET: i64 = 11
+pub let CGOP_NOP: i64 = 0
+pub let CGOP_MOV: i64 = 1
+pub let CGOP_ADD: i64 = 2
+pub let CGOP_SUB: i64 = 3
+pub let CGOP_MUL: i64 = 4
+pub let CGOP_DIV: i64 = 5
+pub let CGOP_LOAD: i64 = 6
+pub let CGOP_STORE: i64 = 7
+pub let CGOP_CMP: i64 = 8
+pub let CGOP_BRANCH: i64 = 9
+pub let CGOP_CALL: i64 = 10
+pub let CGOP_RET: i64 = 11
 
 // Sentinel values
-let REG_NONE: i64 = 0 - 1
-let CYCLE_INF: i64 = 999999
+pub let REG_NONE: i64 = 0 - 1
+pub let CYCLE_INF: i64 = 999999
 
 // ============================================================================
 // Core data structures
 // ============================================================================
 
 // A single instruction in the scheduling model.
-struct CodegenInstr {
+pub struct CodegenInstr {
     id: i64,              // unique instruction index within block
     opcode: i64,          // operation kind (OP_* constants)
     dst_reg: i64,         // destination register (-1 = none)
     src1_reg: i64,        // first source register (-1 = none)
     src2_reg: i64,        // second source register (-1 = none)
     latency: i64,         // execution latency in cycles
+    port_mask: i64,       // Skylake execution port bitmask (bit i = port i)
+    throughput_x2: i64,   // throughput in half-cycles (2=1 cycle, 1=0.5 cycles)
     is_scheduled: bool,   // true if already placed in the schedule
     earliest_cycle: i64,  // earliest cycle this instr can execute
 }
 
 // A dependency edge between two instructions.
-struct DepEdge {
+pub struct DepEdge {
     from_id: i64,         // producer instruction id
     to_id: i64,           // consumer instruction id
     kind: i64,            // DEP_DATA, DEP_ANTI, DEP_OUTPUT, DEP_CONTROL
@@ -66,7 +70,7 @@ struct DepEdge {
 }
 
 // A basic block with its instructions, dependency graph, and schedule.
-struct CodegenBlock {
+pub struct CodegenBlock {
     instrs: [CodegenInstr; 512],
     instr_count: i64,
     schedule: [i64; 512],       // ordered list of instruction ids
@@ -77,7 +81,7 @@ struct CodegenBlock {
 }
 
 // Top-level scheduling plan: a collection of blocks with global metrics.
-struct CodegenPlan {
+pub struct CodegenPlan {
     blocks: [CodegenBlock; 256],
     block_count: i64,
     reg_pressure: [i64; 512],   // register pressure per cycle
@@ -89,7 +93,7 @@ struct CodegenPlan {
 // Constructors
 // ============================================================================
 
-fn codegen_instr_new(
+pub fn codegen_instr_new(
     id: i64, opcode: i64, dst_reg: i64, src1_reg: i64, src2_reg: i64, latency: i64
 ) -> CodegenInstr {
     CodegenInstr {
@@ -99,12 +103,31 @@ fn codegen_instr_new(
         src1_reg: src1_reg,
         src2_reg: src2_reg,
         latency: latency,
+        port_mask: 255,
+        throughput_x2: 2,
         is_scheduled: false,
         earliest_cycle: 0,
     }
 }
 
-fn empty_codegen_instr() -> CodegenInstr {
+pub fn codegen_instr_with_port(
+    id: i64, opcode: i64, dst_reg: i64, src1_reg: i64, src2_reg: i64, latency: i64, port_mask: i64, throughput_x2: i64
+) -> CodegenInstr {
+    CodegenInstr {
+        id: id,
+        opcode: opcode,
+        dst_reg: dst_reg,
+        src1_reg: src1_reg,
+        src2_reg: src2_reg,
+        latency: latency,
+        port_mask: port_mask,
+        throughput_x2: throughput_x2,
+        is_scheduled: false,
+        earliest_cycle: 0,
+    }
+}
+
+pub fn empty_codegen_instr() -> CodegenInstr {
     CodegenInstr {
         id: 0,
         opcode: CGOP_NOP,
@@ -112,12 +135,14 @@ fn empty_codegen_instr() -> CodegenInstr {
         src1_reg: REG_NONE,
         src2_reg: REG_NONE,
         latency: 1,
+        port_mask: 255,
+        throughput_x2: 2,
         is_scheduled: false,
         earliest_cycle: 0,
     }
 }
 
-fn dep_edge_new(from_id: i64, to_id: i64, kind: i64, latency: i64) -> DepEdge {
+pub fn dep_edge_new(from_id: i64, to_id: i64, kind: i64, latency: i64) -> DepEdge {
     DepEdge {
         from_id: from_id,
         to_id: to_id,
@@ -126,7 +151,7 @@ fn dep_edge_new(from_id: i64, to_id: i64, kind: i64, latency: i64) -> DepEdge {
     }
 }
 
-fn empty_dep_edge() -> DepEdge {
+pub fn empty_dep_edge() -> DepEdge {
     DepEdge {
         from_id: 0,
         to_id: 0,
@@ -135,7 +160,7 @@ fn empty_dep_edge() -> DepEdge {
     }
 }
 
-fn codegen_block_new() -> CodegenBlock {
+pub fn codegen_block_new() -> CodegenBlock {
     CodegenBlock {
         instrs: [empty_codegen_instr(); 512],
         instr_count: 0,
@@ -147,7 +172,7 @@ fn codegen_block_new() -> CodegenBlock {
     }
 }
 
-fn codegen_plan_new() -> CodegenPlan {
+pub fn codegen_plan_new() -> CodegenPlan {
     CodegenPlan {
         blocks: [codegen_block_new(); 256],
         block_count: 0,
@@ -157,12 +182,257 @@ fn codegen_plan_new() -> CodegenPlan {
     }
 }
 
+// Return minimum port pressure across enabled ports in mask.
+// Bits 0-7 of mask correspond to Skylake execution ports 0-7.
+fn cgplan_min_port_load(mask: i64, pressure: [i64; 8]) -> i64 with Mut, Div, Panic {
+    var min_load: i64 = CYCLE_INF
+    if (mask & 1) != 0 { if pressure[0] < min_load { min_load = pressure[0] } }
+    if (mask & 2) != 0 { if pressure[1] < min_load { min_load = pressure[1] } }
+    if (mask & 4) != 0 { if pressure[2] < min_load { min_load = pressure[2] } }
+    if (mask & 8) != 0 { if pressure[3] < min_load { min_load = pressure[3] } }
+    if (mask & 16) != 0 { if pressure[4] < min_load { min_load = pressure[4] } }
+    if (mask & 32) != 0 { if pressure[5] < min_load { min_load = pressure[5] } }
+    if (mask & 64) != 0 { if pressure[6] < min_load { min_load = pressure[6] } }
+    if (mask & 128) != 0 { if pressure[7] < min_load { min_load = pressure[7] } }
+    min_load
+}
+
+// ============================================================================
+// Module-scope single-block scheduler buffer
+//
+// CodegenPlan is ~27 MB and the native compiler does not emit stack
+// probes for large frames — passing it by value SIGSEGVs on the first
+// scheduled function.  Hoist a single CodegenBlock (~110 KB) to BSS so
+// callers (codegen_x86_linux::compile_ir_function_v2_mut) can drive
+// the scheduler without putting the plan on the stack.  Single-block
+// only — sufficient for the per-function scheduler path; multi-block
+// callers still use the pass-by-value CodegenPlan API.
+// ============================================================================
+
+pub var CGPLAN_GLOBAL_BLOCK: CodegenBlock = codegen_block_new()
+
+pub fn cgplan_global_reset() with Mut {
+    CGPLAN_GLOBAL_BLOCK.instr_count = 0
+    CGPLAN_GLOBAL_BLOCK.schedule_len = 0
+    CGPLAN_GLOBAL_BLOCK.dep_count = 0
+    CGPLAN_GLOBAL_BLOCK.cycle_count = 0
+}
+
+pub fn cgplan_global_add(instr: CodegenInstr) with Mut, Div, Panic {
+    let idx = CGPLAN_GLOBAL_BLOCK.instr_count
+    if idx < CGPLAN_MAX_INSTRS {
+        CGPLAN_GLOBAL_BLOCK.instrs[idx as usize] = instr
+        CGPLAN_GLOBAL_BLOCK.instr_count = idx + 1
+    }
+}
+
+fn cgplan_global_find_last_writer(reg: i64, before_pos: i64) -> i64 with Mut, Div, Panic {
+    var result: i64 = 0 - 1
+    var i: i64 = 0
+    while i < before_pos {
+        if CGPLAN_GLOBAL_BLOCK.instrs[i as usize].dst_reg == reg { result = i }
+        i = i + 1
+    }
+    result
+}
+
+fn cgplan_global_find_last_reader(reg: i64, before_pos: i64) -> i64 with Mut, Div, Panic {
+    var result: i64 = 0 - 1
+    var i: i64 = 0
+    while i < before_pos {
+        let instr = CGPLAN_GLOBAL_BLOCK.instrs[i as usize]
+        if instr.src1_reg == reg || instr.src2_reg == reg { result = i }
+        i = i + 1
+    }
+    result
+}
+
+fn cgplan_global_has_dep(from_id: i64, to_id: i64) -> bool with Mut, Div, Panic {
+    var d: i64 = 0
+    while d < CGPLAN_GLOBAL_BLOCK.dep_count {
+        let edge = CGPLAN_GLOBAL_BLOCK.deps[d as usize]
+        if edge.from_id == from_id && edge.to_id == to_id { return true }
+        d = d + 1
+    }
+    false
+}
+
+fn cgplan_global_add_dep_edge(from_id: i64, to_id: i64, kind: i64, latency: i64) with Mut, Div, Panic {
+    if CGPLAN_GLOBAL_BLOCK.dep_count < CGPLAN_MAX_DEPS {
+        let idx = CGPLAN_GLOBAL_BLOCK.dep_count
+        CGPLAN_GLOBAL_BLOCK.deps[idx as usize] = dep_edge_new(from_id, to_id, kind, latency)
+        CGPLAN_GLOBAL_BLOCK.dep_count = idx + 1
+    }
+}
+
+pub fn cgplan_global_build_deps() with Mut, Div, Panic {
+    CGPLAN_GLOBAL_BLOCK.dep_count = 0
+    var i: i64 = 0
+    while i < CGPLAN_GLOBAL_BLOCK.instr_count {
+        let instr = CGPLAN_GLOBAL_BLOCK.instrs[i as usize]
+        if instr.src1_reg >= 0 {
+            let writer = cgplan_global_find_last_writer(instr.src1_reg, i)
+            if writer >= 0 {
+                let lat = CGPLAN_GLOBAL_BLOCK.instrs[writer as usize].latency
+                cgplan_global_add_dep_edge(writer, i, DEP_DATA, lat)
+            }
+        }
+        if instr.src2_reg >= 0 {
+            let writer = cgplan_global_find_last_writer(instr.src2_reg, i)
+            if writer >= 0 {
+                let lat = CGPLAN_GLOBAL_BLOCK.instrs[writer as usize].latency
+                cgplan_global_add_dep_edge(writer, i, DEP_DATA, lat)
+            }
+        }
+        if instr.dst_reg >= 0 {
+            let reader = cgplan_global_find_last_reader(instr.dst_reg, i)
+            if reader >= 0 {
+                cgplan_global_add_dep_edge(reader, i, DEP_ANTI, 0)
+            }
+        }
+        if instr.dst_reg >= 0 {
+            let prev_writer = cgplan_global_find_last_writer(instr.dst_reg, i)
+            if prev_writer >= 0 {
+                cgplan_global_add_dep_edge(prev_writer, i, DEP_OUTPUT, 1)
+            }
+        }
+        if instr.opcode == CGOP_BRANCH || instr.opcode == CGOP_CALL || instr.opcode == CGOP_RET {
+            var j: i64 = 0
+            while j < i {
+                let prior = CGPLAN_GLOBAL_BLOCK.instrs[j as usize]
+                if !cgplan_global_has_dep(j, i) {
+                    cgplan_global_add_dep_edge(j, i, DEP_CONTROL, prior.latency)
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn cgplan_global_check_ready(instr_id: i64, cycle: i64) -> bool with Mut, Div, Panic {
+    let instr = CGPLAN_GLOBAL_BLOCK.instrs[instr_id as usize]
+    if instr.is_scheduled { return false }
+    var d: i64 = 0
+    while d < CGPLAN_GLOBAL_BLOCK.dep_count {
+        let edge = CGPLAN_GLOBAL_BLOCK.deps[d as usize]
+        if edge.to_id == instr_id {
+            let pred = CGPLAN_GLOBAL_BLOCK.instrs[edge.from_id as usize]
+            if !(pred.is_scheduled) { return false }
+            if pred.earliest_cycle + edge.latency > cycle { return false }
+        }
+        d = d + 1
+    }
+    true
+}
+
+fn cgplan_global_priority_inner(instr_id: i64, priorities: [i64; 512]) -> [i64; 512] with Mut, Div, Panic {
+    var prio = priorities
+    if prio[instr_id as usize] >= 0 { return prio }
+    var max_succ: i64 = 0
+    var d: i64 = 0
+    while d < CGPLAN_GLOBAL_BLOCK.dep_count {
+        let edge = CGPLAN_GLOBAL_BLOCK.deps[d as usize]
+        if edge.from_id == instr_id {
+            prio = cgplan_global_priority_inner(edge.to_id, prio)
+            let succ_total = edge.latency + prio[edge.to_id as usize]
+            if succ_total > max_succ { max_succ = succ_total }
+        }
+        d = d + 1
+    }
+    prio[instr_id as usize] = CGPLAN_GLOBAL_BLOCK.instrs[instr_id as usize].latency + max_succ
+    prio
+}
+
+fn cgplan_global_pick_best(cycle: i64, saved_prio: [i64; 512], port_pressure: [i64; 8]) -> i64 with Mut, Div, Panic {
+    var best_id: i64 = 0 - 1
+    var best_prio: i64 = 0 - 1
+    var best_port_load: i64 = CYCLE_INF
+    var i: i64 = 0
+    while i < CGPLAN_GLOBAL_BLOCK.instr_count {
+        if !(CGPLAN_GLOBAL_BLOCK.instrs[i as usize].is_scheduled) {
+            if cgplan_global_check_ready(i, cycle) {
+                let p = saved_prio[i as usize]
+                let mask = CGPLAN_GLOBAL_BLOCK.instrs[i as usize].port_mask
+                let port_load = cgplan_min_port_load(mask, port_pressure)
+                if p > best_prio || (p == best_prio && port_load < best_port_load) {
+                    best_prio = p
+                    best_port_load = port_load
+                    best_id = i
+                }
+            }
+        }
+        i = i + 1
+    }
+    best_id
+}
+
+pub fn cgplan_global_schedule() with Mut, Div, Panic {
+    let n = CGPLAN_GLOBAL_BLOCK.instr_count
+    if n == 0 { return }
+
+    var prio: [i64; 512] = [0; 512]
+    var k: i64 = 0
+    while k < CGPLAN_MAX_INSTRS {
+        prio[k as usize] = 0 - 1
+        k = k + 1
+    }
+    var i: i64 = 0
+    while i < n {
+        prio = cgplan_global_priority_inner(i, prio)
+        i = i + 1
+    }
+
+    var saved_prio: [i64; 512] = [0; 512]
+    var port_pressure: [i64; 8] = [0; 8]
+    var k2: i64 = 0
+    while k2 < n {
+        saved_prio[k2 as usize] = prio[k2 as usize]
+        k2 = k2 + 1
+    }
+
+    var ri: i64 = 0
+    while ri < n {
+        CGPLAN_GLOBAL_BLOCK.instrs[ri as usize].is_scheduled = false
+        CGPLAN_GLOBAL_BLOCK.instrs[ri as usize].earliest_cycle = 0
+        ri = ri + 1
+    }
+    CGPLAN_GLOBAL_BLOCK.schedule_len = 0
+
+    var scheduled_count: i64 = 0
+    var cycle: i64 = 0
+    var stall_limit: i64 = n * 10
+    while scheduled_count < n && cycle < stall_limit {
+        let best = cgplan_global_pick_best(cycle, saved_prio, port_pressure)
+        if best >= 0 {
+            CGPLAN_GLOBAL_BLOCK.instrs[best as usize].is_scheduled = true
+            CGPLAN_GLOBAL_BLOCK.instrs[best as usize].earliest_cycle = cycle
+            CGPLAN_GLOBAL_BLOCK.schedule[scheduled_count as usize] = best
+            scheduled_count = scheduled_count + 1
+            let mask = CGPLAN_GLOBAL_BLOCK.instrs[best as usize].port_mask
+            if (mask & 1) != 0 { port_pressure[0] = port_pressure[0] + 1 }
+            if (mask & 2) != 0 { port_pressure[1] = port_pressure[1] + 1 }
+            if (mask & 4) != 0 { port_pressure[2] = port_pressure[2] + 1 }
+            if (mask & 8) != 0 { port_pressure[3] = port_pressure[3] + 1 }
+            if (mask & 16) != 0 { port_pressure[4] = port_pressure[4] + 1 }
+            if (mask & 32) != 0 { port_pressure[5] = port_pressure[5] + 1 }
+            if (mask & 64) != 0 { port_pressure[6] = port_pressure[6] + 1 }
+            if (mask & 128) != 0 { port_pressure[7] = port_pressure[7] + 1 }
+            cycle = cycle + 1
+        } else {
+            cycle = cycle + 1
+        }
+    }
+    CGPLAN_GLOBAL_BLOCK.schedule_len = scheduled_count
+    CGPLAN_GLOBAL_BLOCK.cycle_count = cycle
+}
+
 // ============================================================================
 // Instruction and dependency management
 // ============================================================================
 
 // Add an instruction to block 0 (convenience for single-block plans).
-fn cgplan_add_instr(
+pub fn cgplan_add_instr(
     plan: CodegenPlan, instr: CodegenInstr
 ) -> CodegenPlan with Mut, Div, Panic {
     var p = plan
@@ -179,7 +449,7 @@ fn cgplan_add_instr(
 }
 
 // Add an instruction to a specific block.
-fn cgplan_add_instr_to_block(
+pub fn cgplan_add_instr_to_block(
     plan: CodegenPlan, block_idx: i64, instr: CodegenInstr
 ) -> CodegenPlan with Mut, Div, Panic {
     var p = plan
@@ -195,7 +465,7 @@ fn cgplan_add_instr_to_block(
 }
 
 // Add a dependency edge to block 0.
-fn cgplan_add_dep(
+pub fn cgplan_add_dep(
     plan: CodegenPlan, edge: DepEdge
 ) -> CodegenPlan with Mut, Div, Panic {
     var p = plan
@@ -212,7 +482,7 @@ fn cgplan_add_dep(
 }
 
 // Add a dependency edge to a specific block.
-fn cgplan_add_dep_to_block(
+pub fn cgplan_add_dep_to_block(
     plan: CodegenPlan, block_idx: i64, edge: DepEdge
 ) -> CodegenPlan with Mut, Div, Panic {
     var p = plan
@@ -273,7 +543,7 @@ fn cgplan_find_last_reader(
 //   - ANTI deps: read(r) -> write(r)
 //   - OUTPUT deps: write(r) -> write(r)
 //   - CONTROL deps: branch/call/ret -> all subsequent instrs
-fn cgplan_build_deps(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
+pub fn cgplan_build_deps(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
     var p = plan
     if p.block_count == 0 {
         return p
@@ -522,11 +792,13 @@ fn cgplan_count_predecessors(block: CodegenBlock, instr_id: i64) -> i64 with Mut
 // Priority is stored in earliest_cycle after cgplan_compute_priority.
 // During scheduling, we save the original priority in a temporary, then
 // overwrite earliest_cycle with the actual issue cycle.
+// port_pressure is a per-port occupancy count used to break priority ties.
 fn cgplan_pick_best_ready(
-    plan: CodegenPlan, block_idx: i64, cycle: i64, saved_prio: [i64; 512]
+    plan: CodegenPlan, block_idx: i64, cycle: i64, saved_prio: [i64; 512], port_pressure: [i64; 8]
 ) -> i64 with Mut, Div, Panic {
     var best_id: i64 = 0 - 1
     var best_prio: i64 = 0 - 1
+    var best_port_load: i64 = CYCLE_INF
     let block = plan.blocks[block_idx as usize]
 
     var i: i64 = 0
@@ -535,8 +807,11 @@ fn cgplan_pick_best_ready(
             let ready = cgplan_check_ready(plan, block_idx, i, cycle)
             if ready {
                 let p = saved_prio[i as usize]
-                if p > best_prio {
+                let mask = block.instrs[i as usize].port_mask
+                let port_load = cgplan_min_port_load(mask, port_pressure)
+                if p > best_prio || (p == best_prio && port_load < best_port_load) {
                     best_prio = p
+                    best_port_load = port_load
                     best_id = i
                 }
             }
@@ -566,6 +841,7 @@ fn cgplan_list_schedule(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
         let n = p.blocks[bi as usize].instr_count
         if n > 0 {
             var saved_prio: [i64; 512] = [0; 512]
+            var port_pressure: [i64; 8] = [0; 8]
             var k: i64 = 0
             while k < n {
                 saved_prio[k as usize] = p.blocks[bi as usize].instrs[k as usize].earliest_cycle
@@ -585,12 +861,21 @@ fn cgplan_list_schedule(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
             var stall_limit: i64 = n * 10
 
             while scheduled_count < n && cycle < stall_limit {
-                let best = cgplan_pick_best_ready(p, bi, cycle, saved_prio)
+                let best = cgplan_pick_best_ready(p, bi, cycle, saved_prio, port_pressure)
                 if best >= 0 {
                     p.blocks[bi as usize].instrs[best as usize].is_scheduled = true
                     p.blocks[bi as usize].instrs[best as usize].earliest_cycle = cycle
                     p.blocks[bi as usize].schedule[scheduled_count as usize] = best
                     scheduled_count = scheduled_count + 1
+                    let scheduled_mask = p.blocks[bi as usize].instrs[best as usize].port_mask
+                    if (scheduled_mask & 1) != 0 { port_pressure[0] = port_pressure[0] + 1 }
+                    if (scheduled_mask & 2) != 0 { port_pressure[1] = port_pressure[1] + 1 }
+                    if (scheduled_mask & 4) != 0 { port_pressure[2] = port_pressure[2] + 1 }
+                    if (scheduled_mask & 8) != 0 { port_pressure[3] = port_pressure[3] + 1 }
+                    if (scheduled_mask & 16) != 0 { port_pressure[4] = port_pressure[4] + 1 }
+                    if (scheduled_mask & 32) != 0 { port_pressure[5] = port_pressure[5] + 1 }
+                    if (scheduled_mask & 64) != 0 { port_pressure[6] = port_pressure[6] + 1 }
+                    if (scheduled_mask & 128) != 0 { port_pressure[7] = port_pressure[7] + 1 }
                     cycle = cycle + 1
                 } else {
                     cycle = cycle + 1
@@ -1003,7 +1288,7 @@ fn cgplan_validate_deps(plan: CodegenPlan) -> bool with Mut, Div, Panic {
 // ============================================================================
 
 // Schedule all blocks in the plan (applies list scheduling to each).
-fn cgplan_schedule_all_blocks(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
+pub fn cgplan_schedule_all_blocks(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
     cgplan_list_schedule(plan)
 }
 
@@ -1563,7 +1848,7 @@ fn test_cgplan_validate_multiblock() -> i64 with Mut, Div, Panic {
 // Test runner
 // ============================================================================
 
-fn cgplan_run_tests() -> i64 with Mut, Div, Panic {
+pub fn cgplan_run_tests() -> i64 with IO, Mut, Div, Panic {
     var fail: i64 = 0
 
     let t01 = test_cgplan_empty()

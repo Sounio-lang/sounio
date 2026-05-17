@@ -23,6 +23,7 @@ use native::gc::*
 use native::runtime_context::*
 use native::stack_maps::*
 use native::target_policy::*
+use native::codegen_plan::*
 // Sprint 40: IR-level dual-path transformation for Instrumented strategy
 use ir::opt_strategy::{ir_opt_apply_strategy}
 // io::trace is a lightweight extraction of io::file_write's trace helpers.
@@ -5676,6 +5677,65 @@ pub fn compile_ir_function_v2_ref(nc: NativeCompiler, func: &IrFunction, machine
     c
 }
 
+// Map MachineOperand to a scheduler register ID for dependency tracking.
+// GPR64 → vreg directly; STACK_SLOT → 2000+slot; FLAGS → 4000; else REG_NONE.
+fn mir_operand_to_sched_reg(op: MachineOperand) -> i64 {
+    if op.kind == MIR_OPERAND_GPR64 { op.value }
+    else if op.kind == MIR_OPERAND_STACK_SLOT { 2000 + op.value }
+    else if op.kind == MIR_OPERAND_FLAGS { 4000 }
+    else { REG_NONE }
+}
+
+fn mir_opcode_to_cgop(opcode: i64) -> i64 {
+    if opcode == MIR_OP_LOAD_STACK || opcode == MIR_OP_FIELD_LOAD || opcode == MIR_OP_INDEX_LOAD
+       || opcode == MIR_OP_LOAD_FLOAT_RIP { CGOP_LOAD }
+    else if opcode == MIR_OP_STORE_STACK || opcode == MIR_OP_FIELD_STORE
+            || opcode == MIR_OP_INDEX_STORE { CGOP_STORE }
+    else if opcode == MIR_OP_BINOP || opcode == MIR_OP_FLOAT_BINOP { CGOP_MUL }
+    else if opcode == MIR_OP_CALL { CGOP_CALL }
+    else if opcode == MIR_OP_RET { CGOP_RET }
+    else if opcode == MIR_OP_JMP || opcode == MIR_OP_JCC { CGOP_BRANCH }
+    else { CGOP_MOV }
+}
+
+fn mir_opcode_latency(opcode: i64) -> i64 {
+    if opcode == MIR_OP_LOAD_STACK || opcode == MIR_OP_FIELD_LOAD
+       || opcode == MIR_OP_INDEX_LOAD || opcode == MIR_OP_LOAD_FLOAT_RIP { 4 }
+    else if opcode == MIR_OP_FLOAT_BINOP { 5 }
+    else if opcode == MIR_OP_BINOP { 3 }
+    else if opcode == MIR_OP_CALL || opcode == MIR_OP_RET { 5 }
+    else { 1 }
+}
+
+// Skylake execution port bitmask per MIR opcode.
+// Bit 0=P0, 1=P1, 2=P2, 3=P3, 4=P4, 5=P5, 6=P6, 7=P7.
+fn mir_opcode_port_mask(opcode: i64) -> i64 {
+    if opcode == MIR_OP_LOAD_STACK || opcode == MIR_OP_FIELD_LOAD
+       || opcode == MIR_OP_INDEX_LOAD || opcode == MIR_OP_LOAD_FLOAT_RIP { 12 }   // P2,P3
+    else if opcode == MIR_OP_STORE_STACK || opcode == MIR_OP_FIELD_STORE
+            || opcode == MIR_OP_INDEX_STORE { 144 }                                // P4,P7
+    else if opcode == MIR_OP_FLOAT_BINOP { 1 }                                    // P0 (FP MUL)
+    else if opcode == MIR_OP_CALL || opcode == MIR_OP_RET
+            || opcode == MIR_OP_JMP || opcode == MIR_OP_JCC { 64 }                // P6
+    else { 99 }                                                                    // P0,P1,P5,P6
+}
+
+fn machine_func_has_control_flow(func: MachineFunction) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < func.blocks[0].instr_count {
+        let op = func.blocks[0].instrs[i as usize].opcode
+        if op == MIR_OP_LABEL || op == MIR_OP_JMP || op == MIR_OP_JCC { return true }
+        i = i + 1
+    }
+    false
+}
+
+// Scheduler runtime gate.  Now driven by the module-scope
+// CGPLAN_GLOBAL_BLOCK (~110 KB) instead of a 27 MB stack-allocated
+// CodegenPlan, so the SUB-RSP-past-the-guard-page hang on
+// struct_basic is gone.
+fn native_v2_scheduler_enabled() -> bool { true }
+
 fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) with Mut, Panic, Div, Alloc {
     reset_function_state_mut(nc)
 
@@ -5712,7 +5772,41 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
 
     (*nc).code = emit_prologue_with_preg_mask((*nc).code, frame_size, preg_mask)
     spill_ir_params_mut(nc, func)
-    native_v2_emit_machine_function_mut(nc, machine_func, fn_index, function_offset)
+    if !native_v2_scheduler_enabled() || machine_func_has_control_flow(machine_func) {
+        native_v2_emit_machine_function_mut(nc, machine_func, fn_index, function_offset)
+    } else {
+        cgplan_global_reset()
+        var mi: i64 = 0
+        while mi < machine_func.blocks[0].instr_count {
+            let m = machine_func.blocks[0].instrs[mi as usize]
+            let cg = codegen_instr_with_port(
+                mi,
+                mir_opcode_to_cgop(m.opcode),
+                mir_operand_to_sched_reg(m.dst),
+                mir_operand_to_sched_reg(m.src1),
+                mir_operand_to_sched_reg(m.src2),
+                mir_opcode_latency(m.opcode),
+                mir_opcode_port_mask(m.opcode),
+                2
+            )
+            cgplan_global_add(cg)
+            mi = mi + 1
+        }
+        cgplan_global_build_deps()
+        cgplan_global_schedule()
+        let slen = CGPLAN_GLOBAL_BLOCK.schedule_len
+        var si: i64 = 0
+        while si < slen {
+            let idx = CGPLAN_GLOBAL_BLOCK.schedule[si as usize]
+            let em_instr = machine_func.blocks[0].instrs[idx as usize]
+            if native_v2_machine_instr_is_safepoint(em_instr) {
+                let sp_kind = if em_instr.opcode == MIR_OP_CALL { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
+                native_v2_record_safepoint_mut(nc, fn_index, sp_kind, idx, (*nc).code.len - function_offset, machine_func.temp_count, (*nc).current_machine_spill_count)
+            }
+            (*nc) = native_v2_emit_machine_instr((*nc), em_instr)
+            si = si + 1
+        }
+    }
 
     let epilogue_offset = (*nc).code.len
     (*nc).code = emit_epilogue_with_preg_mask((*nc).code, preg_mask)
