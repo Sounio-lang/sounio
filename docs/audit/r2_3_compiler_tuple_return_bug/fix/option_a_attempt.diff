@@ -1,0 +1,62 @@
+diff --git a/self-hosted/compiler/lean_single.sio b/self-hosted/compiler/lean_single.sio
+index facffee2..a61b9afe 100644
+--- a/self-hosted/compiler/lean_single.sio
++++ b/self-hosted/compiler/lean_single.sio
+@@ -18372,12 +18372,16 @@ fn compile_stmt() with IO, Mut, Panic, Div {
+             emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B5_RET_VSHADOW_BSS_OFF)
+             em(0x58)  // pop rax (restore return value)
+         }
++        // R.2.3 fix: mirror prologue order in epilogue.
++        if CURRENT_SRET_SLOT > 0 {
++            em(0x4c); em(0x89); em(0xe0)  // mov rax, r12 (return SRET ptr before pop)
++        }
+         em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
++        em(0x5d)  // pop rbp
+         if CURRENT_SRET_SLOT > 0 {
+-            em(0x4c); em(0x89); em(0xe0)  // mov rax, r12 (return SRET ptr)
+-            em(0x41); em(0x5c)  // pop r12
++            em(0x41); em(0x5c)  // pop r12 (restore caller's r12)
+         }
+-        em(0x5d); em(0xc3)
++        em(0xc3)  // ret
+         return
+     }
+ 
+@@ -23647,12 +23651,14 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
+         // Save error count before compiling this function's body
+         let fn_err_before = TC_FN_ERR_COUNT
+ 
+-        // Emit prologue: push rbp; mov rbp, rsp; sub rsp, <frame>
+-        em(0x55); em(0x48); em(0x89); em(0xe5)
+-        // If SRET: save r12 (callee-saved), then mov r12, rdi (preserve SRET ptr)
++        // Emit prologue: [push r12 if SRET]; push rbp; mov rbp, rsp; sub rsp, <frame>
++        // R.2.3 fix: save callee-saved r12 BEFORE pushing rbp so the saved
++        // slot lands at +0x8(%rbp) in caller's frame area, never colliding
++        // with the local allocator's slots at -0x8(%rbp), -0x10(%rbp), ...
+         if CURRENT_SRET_SLOT > 0 {
+-            em(0x41); em(0x54)  // push r12
++            em(0x41); em(0x54)  // push r12 (saved at +0x8(%rbp) after rbp setup)
+         }
++        em(0x55); em(0x48); em(0x89); em(0xe5)
+         em(0x48); em(0x81); em(0xec); record_frame_patch(); em32(0)
+ 
+         // Store parameters from registers/stack using low-level ABI slot order.
+@@ -23822,12 +23828,16 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
+             if ty_is_unobserved(LAST_STMT_TY) && !ty_is_unobserved(CURRENT_RET_TY) && CURRENT_RET_TY != 5 && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+                 tc_observe_boundary(EP - 1, "cannot return Unobserved<T> as non-Unobserved type")
+             }
++            // R.2.3 fix: mirror prologue order in epilogue.
++            if CURRENT_SRET_SLOT > 0 {
++                em(0x4c); em(0x89); em(0xe0)  // mov rax, r12 (return SRET ptr before pop)
++            }
+             em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
++            em(0x5d)  // pop rbp
+             if CURRENT_SRET_SLOT > 0 {
+-                em(0x4c); em(0x89); em(0xe0)  // mov rax, r12 (return SRET ptr)
+                 em(0x41); em(0x5c)  // pop r12 (restore callee-saved)
+             }
+-            em(0x5d); em(0xc3)
++            em(0xc3)  // ret
+         }
+         // Patch sub rsp / add rsp with actual frame size
+         let frame_sz = (NEXT_SLOT * 8 + 15) & 0xFFFFFFF0

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.r2-3-compiler-tuple-return-bug.r2-2-synthesis
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.r2-3-compiler-tuple-return-bug.r2-2-synthesis
+-->
+
 # R.2.2 — Cause B Compiler Bug — Synthesis & Halt
 
 **Date:** 2026-05-16
