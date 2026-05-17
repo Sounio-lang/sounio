@@ -82,6 +82,7 @@ let M_PREPARE_CALL_HIERARCHY: i64 = 39
 let M_INCOMING_CALLS: i64 = 40
 let M_OUTGOING_CALLS: i64 = 41
 let M_DOCUMENT_LINK: i64 = 42
+let M_ON_TYPE_FORMATTING: i64 = 43
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -437,6 +438,7 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "callHierarchy/incomingCalls")     { return M_INCOMING_CALLS }
     if str_eq(s, "callHierarchy/outgoingCalls")     { return M_OUTGOING_CALLS }
     if str_eq(s, "textDocument/documentLink")       { return M_DOCUMENT_LINK }
+    if str_eq(s, "textDocument/onTypeFormatting")   { return M_ON_TYPE_FORMATTING }
     M_UNKNOWN
 }
 
@@ -4062,6 +4064,178 @@ fn respond_document_link() with IO, Mut, Panic, Div {
 }
 
 // ============================================================================
+// On-type formatting — textDocument/onTypeFormatting
+// ============================================================================
+//
+// Fires after the user types one of the trigger characters. v0 handles:
+//
+//   `\n`  — Scan DOC_TEXT[0..cursor] counting net `{` - `}` (skipping
+//           strings, chars, line / block comments), then insert
+//           depth*4 spaces at the cursor.
+//   `}`   — If the line containing the cursor is whitespace+`}`,
+//           replace that leading whitespace with (depth-1)*4 spaces
+//           where depth is the brace count at the start of the line.
+//
+// Both responses are a JSON array of TextEdits (possibly empty).
+
+fn otf_count_brace_depth(end: i64) -> i64 with Mut, Panic {
+    var d: i64 = 0
+    var state: i64 = 0   // 0=code 1=" 2=' 3=// 4=/*
+    var i: i64 = 0
+    while i < end {
+        let c = DOC_TEXT[i as usize] as i64
+        if state == 1 {
+            if c == 92 && i + 1 < end { i = i + 2 }
+            else { if c == 34 { state = 0 } i = i + 1 }
+        } else if state == 2 {
+            if c == 92 && i + 1 < end { i = i + 2 }
+            else { if c == 39 { state = 0 } i = i + 1 }
+        } else if state == 3 {
+            if c == 10 { state = 0 }
+            i = i + 1
+        } else if state == 4 {
+            if c == 42 && i + 1 < end && (DOC_TEXT[(i + 1) as usize] as i64) == 47 {
+                state = 0; i = i + 2
+            } else { i = i + 1 }
+        } else {
+            if c == 34 { state = 1; i = i + 1 }
+            else if c == 39 { state = 2; i = i + 1 }
+            else if c == 47 && i + 1 < end && (DOC_TEXT[(i + 1) as usize] as i64) == 47 {
+                state = 3; i = i + 2
+            } else if c == 47 && i + 1 < end && (DOC_TEXT[(i + 1) as usize] as i64) == 42 {
+                state = 4; i = i + 2
+            } else {
+                if c == 123 { d = d + 1 }
+                else if c == 125 { d = d - 1 }
+                i = i + 1
+            }
+        }
+    }
+    if d < 0 { d = 0 }
+    return d
+}
+
+fn respond_on_type_formatting() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+    parse_hover_position()
+
+    // Detect the typed character. body_extract_str drops the escape
+    // pair `\n` so it can't represent newline; instead, peek directly
+    // at the byte sequence after `"ch":"` in RX_BODY.
+    var trigger: i64 = 0
+    let chp = body_find("\"ch\"", 0)
+    if chp >= 0 {
+        var j = chp + 4
+        while j < RX_BODY_LEN {
+            let c = RX_BODY[j as usize] as i64
+            if c == 34 { j = j + 1; break }
+            j = j + 1
+        }
+        if j < RX_BODY_LEN {
+            let c0 = RX_BODY[j as usize] as i64
+            if c0 == 92 && j + 1 < RX_BODY_LEN {
+                let c1 = RX_BODY[(j + 1) as usize] as i64
+                if c1 == 110 { trigger = 10 }       // \n
+                else if c1 == 116 { trigger = 9 }   // \t
+                else if c1 == 114 { trigger = 13 }  // \r
+                else { trigger = c1 }
+            } else {
+                trigger = c0
+            }
+        }
+    }
+
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+
+    if HOVER_OK == 1 && trigger != 0 {
+        // Cursor byte offset.
+        var i: i64 = 0
+        var line: i64 = 0
+        while i < DOC_TEXT_LEN && line < HOVER_LINE {
+            if (DOC_TEXT[i as usize] as i64) == 10 { line = line + 1 }
+            i = i + 1
+        }
+        var cur = i
+        var col: i64 = 0
+        while col < HOVER_CHAR && cur < DOC_TEXT_LEN {
+            let c = DOC_TEXT[cur as usize] as i64
+            if c == 10 { col = HOVER_CHAR } else { cur = cur + 1; col = col + 1 }
+        }
+
+        let first = trigger
+        if first == 10 {
+            // Newline trigger — count braces up to the cursor and emit
+            // depth*4 spaces.
+            let depth = otf_count_brace_depth(cur)
+            let n_spaces = depth * 4
+            if n_spaces > 0 {
+                tx_puts("{\"range\":{\"start\":{\"line\":")
+                tx_put_i64(HOVER_LINE)
+                tx_puts(",\"character\":")
+                tx_put_i64(HOVER_CHAR)
+                tx_puts("},\"end\":{\"line\":")
+                tx_put_i64(HOVER_LINE)
+                tx_puts(",\"character\":")
+                tx_put_i64(HOVER_CHAR)
+                tx_puts("}},\"newText\":\"")
+                var s: i64 = 0
+                while s < n_spaces { tx_putc(32); s = s + 1 }
+                tx_puts("\"}")
+            }
+        } else if first == 125 {
+            // `}` trigger — if the current line is whitespace + `}`,
+            // align to (depth-1)*4 columns. We find the start of the
+            // line, then scan forward for non-whitespace. If the first
+            // non-ws byte is `}`, replace the leading whitespace.
+            var ls = cur - 1
+            while ls > 0 {
+                let c = DOC_TEXT[(ls - 1) as usize] as i64
+                if c == 10 { break }
+                ls = ls - 1
+            }
+            if ls < 0 { ls = 0 }
+            var nws = ls
+            while nws < DOC_TEXT_LEN {
+                let c = DOC_TEXT[nws as usize] as i64
+                if c == 32 || c == 9 { nws = nws + 1 } else { break }
+            }
+            if nws < DOC_TEXT_LEN && (DOC_TEXT[nws as usize] as i64) == 125 {
+                let depth_at_line = otf_count_brace_depth(ls)
+                var target_indent = (depth_at_line - 1) * 4
+                if target_indent < 0 { target_indent = 0 }
+                let cur_indent = nws - ls
+                if cur_indent != target_indent {
+                    tx_puts("{\"range\":{\"start\":{\"line\":")
+                    tx_put_i64(HOVER_LINE)
+                    tx_puts(",\"character\":0},\"end\":{\"line\":")
+                    tx_put_i64(HOVER_LINE)
+                    tx_puts(",\"character\":")
+                    tx_put_i64(cur_indent)
+                    tx_puts("}},\"newText\":\"")
+                    var s: i64 = 0
+                    while s < target_indent { tx_putc(32); s = s + 1 }
+                    tx_puts("\"}")
+                }
+            }
+        }
+    }
+
+    tx_puts("]}")
+    write_frame()
+}
+
+// ============================================================================
 // Semantic tokens — textDocument/semanticTokens/full
 // ============================================================================
 //
@@ -4871,7 +5045,8 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"typeDefinitionProvider\":true,")
     tx_puts("\"implementationProvider\":true,")
     tx_puts("\"callHierarchyProvider\":true,")
-    tx_puts("\"documentLinkProvider\":{\"resolveProvider\":false}")
+    tx_puts("\"documentLinkProvider\":{\"resolveProvider\":false},")
+    tx_puts("\"documentOnTypeFormattingProvider\":{\"firstTriggerCharacter\":\"\\n\",\"moreTriggerCharacter\":[\"}\"]}")
     tx_puts("},")
     tx_puts("\"serverInfo\":{")
     tx_puts("\"name\":\"sounio-lsp\",")
@@ -4943,6 +5118,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_INCOMING_CALLS   { respond_incoming_calls(); return }
     if method == M_OUTGOING_CALLS   { respond_outgoing_calls(); return }
     if method == M_DOCUMENT_LINK    { respond_document_link(); return }
+    if method == M_ON_TYPE_FORMATTING { respond_on_type_formatting(); return }
     respond_method_not_found()
 }
 
