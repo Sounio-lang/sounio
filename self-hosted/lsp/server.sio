@@ -1998,6 +1998,279 @@ fn scan_definition_cross_file(home_slot: i64) with Mut, Panic {
 }
 
 // ============================================================================
+// Semantic tokens — textDocument/semanticTokens/full
+// ============================================================================
+//
+// LSP semantic-tokens response is an encoded uint[] of 5-tuples
+// (deltaLine, deltaStartChar, length, tokenType, tokenModifiers).
+// Lines and chars are deltas from the previous emitted token; for the
+// first token they are absolute. tokenType is an index into the legend
+// advertised in capabilities (see ST_TYPE_* below).
+//
+// v0 tokens emitted: keywords, primitive type names, the identifier
+// after `fn` (= function decl), strings, integer + float literals,
+// `//` line comments, `/* */` block comments. Identifiers that aren't
+// keywords / types / fn-decl are NOT emitted (the editor's TextMate
+// grammar handles them by default; LSP semantic tokens are an overlay).
+
+let ST_TYPE_KEYWORD:  i64 = 0
+let ST_TYPE_TYPE:     i64 = 1
+let ST_TYPE_VARIABLE: i64 = 2
+let ST_TYPE_FUNCTION: i64 = 3
+let ST_TYPE_STRING:   i64 = 4
+let ST_TYPE_NUMBER:   i64 = 5
+let ST_TYPE_COMMENT:  i64 = 6
+let ST_TYPE_OPERATOR: i64 = 7
+
+// Position cursor of the most recently emitted token (used to compute
+// deltas for the next one).
+var ST_PREV_LINE: i64 = 0
+var ST_PREV_CHAR: i64 = 0
+var ST_EMITTED:   i64 = 0
+
+fn st_emit(line: i64, col: i64, length: i64, ttype: i64) with Mut, Panic, Div {
+    if length <= 0 { return }
+    if ST_EMITTED == 1 { tx_putc(44) }
+    ST_EMITTED = 1
+    var dline: i64 = 0
+    var dchar: i64 = 0
+    if line == ST_PREV_LINE {
+        dline = 0
+        dchar = col - ST_PREV_CHAR
+    } else {
+        dline = line - ST_PREV_LINE
+        dchar = col
+    }
+    tx_put_i64(dline); tx_putc(44)
+    tx_put_i64(dchar); tx_putc(44)
+    tx_put_i64(length); tx_putc(44)
+    tx_put_i64(ttype); tx_putc(44)
+    tx_put_i64(0)
+    ST_PREV_LINE = line
+    ST_PREV_CHAR = col
+}
+
+// Classify an identifier at DOC_TEXT[s..e]. Returns ST_TYPE_* or -1
+// when the run is not worth emitting (regular variable / parameter).
+fn st_classify_ident(s: i64, e: i64) -> i64 with Mut, Panic {
+    let nlen = e - s
+    if nlen <= 0 { return 0 - 1 }
+    // Keywords
+    if ident_slice_eq(s, e, "fn")       { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "let")      { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "var")      { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "if")       { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "else")     { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "while")    { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "return")   { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "with")     { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "struct")   { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "enum")     { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "match")    { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "break")    { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "continue") { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "true")     { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "false")    { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "as")       { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "pub")      { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "use")      { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "mod")      { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "spawn")    { return ST_TYPE_KEYWORD }
+    if ident_slice_eq(s, e, "loop")     { return ST_TYPE_KEYWORD }
+    // Primitive types + effects
+    if ident_slice_eq(s, e, "i8")    { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "i16")   { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "i32")   { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "i64")   { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "u8")    { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "u32")   { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "u64")   { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "usize") { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "f32")   { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "f64")   { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "bool")  { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "string"){ return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "IO")    { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "Mut")   { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "Panic") { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "Div")   { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "Async") { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "GPU")   { return ST_TYPE_TYPE }
+    if ident_slice_eq(s, e, "Alloc") { return ST_TYPE_TYPE }
+    // User-defined types (PascalCase heuristic)
+    let first = DOC_TEXT[s as usize] as i64
+    if first >= 65 && first <= 90 { return ST_TYPE_TYPE }
+    return 0 - 1
+}
+
+fn respond_semantic_tokens() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        respond_empty_result()
+        return
+    }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":{\"data\":[")
+    ST_EMITTED = 0
+    ST_PREV_LINE = 0
+    ST_PREV_CHAR = 0
+
+    var i: i64 = 0
+    var line: i64 = 0
+    var col: i64 = 0
+    while i < DOC_TEXT_LEN {
+        let c = DOC_TEXT[i as usize] as i64
+        // Newline
+        if c == 10 {
+            line = line + 1
+            col = 0
+            i = i + 1
+            continue
+        }
+        // // line comment
+        if c == 47 && i + 1 < DOC_TEXT_LEN && (DOC_TEXT[(i + 1) as usize] as i64) == 47 {
+            var p = i
+            while p < DOC_TEXT_LEN && (DOC_TEXT[p as usize] as i64) != 10 { p = p + 1 }
+            st_emit(line, col, p - i, ST_TYPE_COMMENT)
+            col = col + (p - i)
+            i = p
+            continue
+        }
+        // /* block comment */ (single-line emit only; multi-line gets
+        // tokenized as one comment span on the start line)
+        if c == 47 && i + 1 < DOC_TEXT_LEN && (DOC_TEXT[(i + 1) as usize] as i64) == 42 {
+            let start_line = line
+            let start_col = col
+            var p = i + 2
+            var inner_col = col + 2
+            var inner_line = line
+            var closed: i64 = 0
+            while p + 1 < DOC_TEXT_LEN && closed == 0 {
+                let cc = DOC_TEXT[p as usize] as i64
+                if cc == 42 && (DOC_TEXT[(p + 1) as usize] as i64) == 47 {
+                    closed = 1
+                    p = p + 2
+                    inner_col = inner_col + 2
+                } else if cc == 10 {
+                    inner_line = inner_line + 1
+                    inner_col = 0
+                    p = p + 1
+                } else {
+                    inner_col = inner_col + 1
+                    p = p + 1
+                }
+            }
+            // Emit a token only for the portion on the comment's start line.
+            // VS Code semantic tokens don't natively span lines; multi-line
+            // block comments fall back to TextMate highlighting for the
+            // continuation.
+            if inner_line == start_line {
+                st_emit(start_line, start_col, p - i, ST_TYPE_COMMENT)
+            } else {
+                // first-line span
+                var j = i
+                while j < DOC_TEXT_LEN && (DOC_TEXT[j as usize] as i64) != 10 { j = j + 1 }
+                st_emit(start_line, start_col, j - i, ST_TYPE_COMMENT)
+            }
+            line = inner_line
+            col = inner_col
+            i = p
+            continue
+        }
+        // String literal
+        if c == 34 {
+            let start_col = col
+            let start_line = line
+            var p = i + 1
+            var inner_col = col + 1
+            while p < DOC_TEXT_LEN {
+                let cc = DOC_TEXT[p as usize] as i64
+                if cc == 92 && p + 1 < DOC_TEXT_LEN {
+                    p = p + 2
+                    inner_col = inner_col + 2
+                } else if cc == 34 {
+                    p = p + 1
+                    inner_col = inner_col + 1
+                    break
+                } else if cc == 10 {
+                    // unterminated single-line string; bail
+                    p = p
+                    break
+                } else {
+                    p = p + 1
+                    inner_col = inner_col + 1
+                }
+            }
+            st_emit(start_line, start_col, p - i, ST_TYPE_STRING)
+            col = inner_col
+            i = p
+            continue
+        }
+        // Number literal (integer or float; hex like 0x1A also accepted)
+        if c >= 48 && c <= 57 {
+            let start_col = col
+            var p = i
+            while p < DOC_TEXT_LEN {
+                let cc = DOC_TEXT[p as usize] as i64
+                let is_digit = cc >= 48 && cc <= 57
+                let is_hex = (cc >= 97 && cc <= 102) || (cc >= 65 && cc <= 70)
+                let is_x = cc == 88 || cc == 120
+                let is_dot = cc == 46
+                let is_under = cc == 95
+                if is_digit == false && is_hex == false && is_x == false && is_dot == false && is_under == false {
+                    break
+                }
+                p = p + 1
+            }
+            st_emit(line, start_col, p - i, ST_TYPE_NUMBER)
+            col = col + (p - i)
+            i = p
+            continue
+        }
+        // Identifier
+        if is_ident_byte(c) == true {
+            let start_col = col
+            let s = i
+            let e = read_ident_run(i)
+            let kind = st_classify_ident(s, e)
+            if kind >= 0 {
+                st_emit(line, start_col, e - s, kind)
+            }
+            // Heuristic: after `fn` keyword token, classify the next
+            // identifier on the same line as a function name.
+            if ident_slice_eq(s, e, "fn") == true {
+                var q = e
+                var qcol = col + (e - s)
+                while q < DOC_TEXT_LEN {
+                    let qc = DOC_TEXT[q as usize] as i64
+                    if qc == 32 || qc == 9 { q = q + 1; qcol = qcol + 1 }
+                    else { break }
+                }
+                if q < DOC_TEXT_LEN && is_ident_byte(DOC_TEXT[q as usize] as i64) == true {
+                    let fs = q
+                    let fe = read_ident_run(q)
+                    st_emit(line, qcol, fe - fs, ST_TYPE_FUNCTION)
+                    col = qcol + (fe - fs)
+                    i = fe
+                    continue
+                }
+            }
+            col = col + (e - s)
+            i = e
+            continue
+        }
+        // Other bytes (operators, punctuation) — just advance
+        col = col + 1
+        i = i + 1
+    }
+
+    tx_puts("]}}")
+    write_frame()
+}
+
+// ============================================================================
 // Document symbols — textDocument/documentSymbol
 // ============================================================================
 //
@@ -2511,7 +2784,12 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"documentFormattingProvider\":false,")
     tx_puts("\"codeActionProvider\":true,")
     tx_puts("\"semanticTokensProvider\":{")
-    tx_puts("\"legend\":{\"tokenTypes\":[],\"tokenModifiers\":[]},")
+    tx_puts("\"legend\":{")
+    // Indices here must match the ST_TYPE_* constants used by the
+    // tokenizer below.
+    tx_puts("\"tokenTypes\":[\"keyword\",\"type\",\"variable\",\"function\",\"string\",\"number\",\"comment\",\"operator\"],")
+    tx_puts("\"tokenModifiers\":[]")
+    tx_puts("},")
     tx_puts("\"full\":true")
     tx_puts("},")
     tx_puts("\"completionProvider\":{")
@@ -2571,7 +2849,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_REFERENCES  { respond_references();        return }
     if method == M_RENAME      { respond_rename();            return }
     if method == M_CODE_ACTION { respond_empty_result();      return }
-    if method == M_SEM_TOKENS  { respond_empty_result();      return }
+    if method == M_SEM_TOKENS  { respond_semantic_tokens();   return }
     if method == M_FORMATTING  { respond_empty_result();      return }
     if method == M_DOC_SYMBOL  { respond_document_symbol();   return }
     respond_method_not_found()

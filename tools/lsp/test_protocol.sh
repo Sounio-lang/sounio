@@ -157,6 +157,27 @@ grep -q '"name":"helper","kind":12' "$T7B_OUT" && note_pass "T7b.helper function
 grep -q '"name":"GLOBAL","kind":13' "$T7B_OUT" && note_pass "T7b.GLOBAL variable" || note_fail "T7b.GLOBAL variable"
 grep -q '"name":"shared","kind":12' "$T7B_OUT" && note_pass "T7b.shared (pub fn)" || note_fail "T7b.shared (pub fn)"
 
+# ----- T7c: semanticTokens/full -----------------------------------------
+T7C_OUT="$LOG_DIR/t7c.out"
+run_session "$T7C_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"// hello\nfn helper(x: i64) -> i64 { return 42 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":65,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///tmp/t.sio"}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+# Capabilities legend should advertise the token-type vocabulary
+grep -q '"tokenTypes":\["keyword","type","variable","function","string","number","comment","operator"\]' "$T7C_OUT" \
+  && note_pass "T7c.legend" || note_fail "T7c.legend"
+# Encoded uint[] data array present + non-empty
+grep -q '"id":65,"result":{"data":\[[0-9]' "$T7C_OUT" \
+  && note_pass "T7c.data non-empty" || note_fail "T7c.data non-empty"
+# `// hello` on line 0 → first 5 ints are 0,0,8,6,0
+grep -q '"data":\[0,0,8,6,0,' "$T7C_OUT" \
+  && note_pass "T7c.first token = line-0 comment" || note_fail "T7c.first token = line-0 comment"
+# `helper` follows `fn` with type=3 (function) → look for ,3,6,3,0
+grep -q ',3,6,3,0' "$T7C_OUT" \
+  && note_pass "T7c.helper classified as function" || note_fail "T7c.helper classified as function"
+
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"
 run_session "$T8_OUT" \
