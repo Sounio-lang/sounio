@@ -68,6 +68,35 @@ make check
 bash scripts/dev/doctor_workspace.sh
 ```
 
+## AI-Native Tooling
+
+This checkout ships two local agent surfaces:
+
+- [tools/lsp/README.md](tools/lsp/README.md) — Sounio LSP diagnostics, hover, completions, go-to-definition, references, and rename over stdio.
+- [tools/mcp/README.md](tools/mcp/README.md) — Sounio MCP server exposing compiler check, compile, run, test, stdlib docs, and compiler-error resources over local stdio.
+
+Run the MCP server for Claude Code or other MCP-aware coding agents:
+
+```bash
+pip install -e tools/mcp
+python -m sounio_mcp.server --transport stdio
+claude --mcp-server sounio=python:-m:sounio_mcp.server
+```
+
+Use `sounio_check` as the first repair loop step for `.sio` edits. The tool returns the same diagnostic wire family as `souc check --json` and `tools/shared/diagnostic_schema.json`, with MCP-friendly line/column/span fields. For common compiler errors, read `sounio://errors/{code}`; for stdlib context, read `sounio://stdlib/{module}`.
+
+Current sprint cross-references:
+
+- `examples/pbpk_rapamycin/` — CC-3 pharmacometrics proof-domain target.
+- `examples/octonion_nn/` — Cx-3 octonion neural layer proof-domain target.
+- [tools/mcp/examples/claude_code_usage.md](tools/mcp/examples/claude_code_usage.md) — Error -> Fix loop recipe for Claude Code.
+
+## Documentation Style
+
+- Use EN-UK orthography in new documentation unless preserving quoted source text.
+- For papers, IRB-facing material, clinical artefacts, and external submissions, follow the GAIDeT-ICMJE 2025 AI disclosure pattern and update the relevant `AI_DISCLOSURE.md`.
+- Do not overstate semantic milestones: report the exact command, path, compiler surface, and evidence used.
+
 ### Test Annotations
 
 Tests use header comments for the harness:
