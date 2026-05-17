@@ -1,33 +1,21 @@
 // random::distributions — Probability Distributions
 //
-// !! DEPRECATED PCG64 BACKEND !! ----------------------------------------------
-// As of 2026-05-16 (Sounio-Pure dispatch R.2.1), `DstPcg64` and its samplers
-// (`dst_pcg64_*`, all `*_sample` calls that depend on it) produce a degenerate
-// stream under the pinned souc binary. Two root causes:
+// PCG64-XSL-RR-128/64-LCG backend (Sounio-Pure R.2.4 Phase B, 2026-05-17).
+// Bit-exact against pcg-cpp HEAD pcg64 (4 seeds × 8 samples = 32/32) and
+// against the 256-sample × 4-seed oracle at
+// docs/audit/r2_4_pcg64_algorithmic_bug/reference/oracle_seed_*.txt.
 //
-//   (Cause A, this file) Algorithmic: `state_hi` is dead weight — only
-//   `state_lo` advances. Output uses arithmetic right shift on signed i64,
-//   distorting the unsigned-PCG `xorshifted >> rot` chain. The
-//   `positive = abs(bits)` step does not handle `i64::MIN`.
+// History: R.2.1 deprecated the prior dst_pcg64_* impl with two known
+// defects — (Cause A) state_hi was dead, output used arithmetic shift on
+// signed i64, abs() mishandled i64::MIN; (Cause B / R.2.3) 4-field struct
+// SRET aliasing. Cause B was fixed by R.2.3 commit 95b68a04 (slot
+// allocator skip). Cause A is fixed by this replacement: full 128-bit
+// state advance, unsigned helpers, XSL-RR output from NEW state per
+// pcg-cpp setseq_base output_previous=false (itype=pcg128_t).
 //
-//   (Cause B, compiler) The 4-field `DstPcg64` struct return is subject to a
-//   state-aliasing codegen issue: identical seeds produce different first
-//   samples depending on prior context in the same function body. Same-fn
-//   chained calls converge on a single stuck value after the first step.
-//
-// For any new PBPK / Monte Carlo code, USE INSTEAD:
-//   `use stdlib::random::park_miller::{pm_new, pm_uniform, pm_normal,
-//                                       pm_standard_normal, pm_lognormal}`
-//
-// Park-Miller uses a single f64 state and bypasses Cause B entirely. Quality
-// is adequate for biological simulation (n ≪ 10^8); see park_miller.sio for
-// the full quality disclaimer.
-//
-// Cause A is stdlib-fixable; Cause B requires a compiler-track dispatch and
-// is filed separately. Until both are resolved, the `dst_pcg64*` symbols
-// in this file are RETAINED for ABI continuity but should NOT be used for
-// scientific outputs that enter the thesis manuscript.
-// -----------------------------------------------------------------------------
+// Park-Miller (random::park_miller) remains the recommended path for
+// simple PBPK Monte Carlo; this PCG64 backend is now safe for any new
+// use and is reinstated for high-stream multi-substream work.
 //
 // Sample from common distributions with epistemic awareness.
 // Every sample carries its distributional provenance.
@@ -66,38 +54,114 @@ struct DstPcg64 {
     inc_lo: i64,
 }
 
+struct DstU128 {
+    hi: i64,
+    lo: i64,
+}
+
+// ─── Unsigned 128-bit helpers on i64 pairs ────────────────────────────────
+
+// Unsigned less-than on u64 bit-patterns stored in i64.
+fn dst_pcg_u_lt(a: i64, b: i64) -> bool {
+    let top: i64 = 1
+    let mask = top << 63
+    (a ^ mask) < (b ^ mask)
+}
+
+// Logical right shift. Valid for 0 <= n <= 64.
+fn dst_pcg_lshr(x: i64, n: i64) -> i64 {
+    if n <= 0 { return x }
+    if n >= 64 { return 0 }
+    let raw = x >> n
+    let one: i64 = 1
+    let mask = (one << (64 - n)) - 1
+    return raw & mask
+}
+
+// High 64 of u64 × u64 via 32-bit half decomposition.
+fn dst_pcg_umul64_high(a: i64, b: i64) -> i64 {
+    let mask32: i64 = 4294967295
+    let al = a & mask32
+    let ah = dst_pcg_lshr(a, 32)
+    let bl = b & mask32
+    let bh = dst_pcg_lshr(b, 32)
+
+    let ll = al * bl
+    let lh = al * bh
+    let hl = ah * bl
+    let hh = ah * bh
+
+    let t = dst_pcg_lshr(ll, 32) + (lh & mask32) + (hl & mask32)
+    return dst_pcg_lshr(t, 32) + dst_pcg_lshr(lh, 32) + dst_pcg_lshr(hl, 32) + hh
+}
+
+// 128-bit add mod 2^128.
+fn dst_pcg_u128_add(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> DstU128 {
+    let res_lo = a_lo + b_lo
+    let carry: i64 = if dst_pcg_u_lt(res_lo, a_lo) { 1 } else { 0 }
+    let res_hi = a_hi + b_hi + carry
+    return DstU128 { hi: res_hi, lo: res_lo }
+}
+
+// 128-bit multiply mod 2^128.
+fn dst_pcg_u128_mul(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> DstU128 {
+    let res_lo = a_lo * b_lo
+    let res_hi = dst_pcg_umul64_high(a_lo, b_lo) + a_hi * b_lo + a_lo * b_hi
+    return DstU128 { hi: res_hi, lo: res_lo }
+}
+
+// 64-bit right rotate. Valid for 0 <= rot < 64.
+fn dst_pcg_rotr64(x: i64, rot: i64) -> i64 {
+    let r = rot & 63
+    if r == 0 { return x }
+    let right = dst_pcg_lshr(x, r)
+    let left = x << (64 - r)
+    return right | left
+}
+
+// ─── PCG64-XSL-RR-128/64 step + init ──────────────────────────────────────
+
 fn dst_pcg64_new(seed: i64) -> DstPcg64 {
-    // Simplified initialization
-    DstPcg64 {
-        state_hi: seed ^ 0x853c49e6748fea9b,
-        state_lo: seed * 6364136223846793005,
-        inc_hi: 1,
-        inc_lo: 1,
-    }
+    // O'Neill canonical pcg64(seed) with stream=0: inc = PCG_DEFAULT_INCREMENT_128.
+    let inc_hi: i64 = 6364136223846793005
+    let inc_lo: i64 = 1442695040888963407
+    let s0 = DstPcg64 { state_hi: 0, state_lo: 0, inc_hi: inc_hi, inc_lo: inc_lo }
+    let r1 = dst_pcg64_next_i64(s0)
+    let mid = r1.0
+    let add = dst_pcg_u128_add(mid.state_hi, mid.state_lo, 0, seed)
+    let s2 = DstPcg64 { state_hi: add.hi, state_lo: add.lo, inc_hi: inc_hi, inc_lo: inc_lo }
+    let r2 = dst_pcg64_next_i64(s2)
+    return r2.0
 }
 
 fn dst_pcg64_next_i64(rng: DstPcg64) -> (DstPcg64, i64) {
-    let old_state = rng.state_lo
-    let new_lo = rng.state_lo * 6364136223846793005 + rng.inc_lo
-    let new_hi = rng.state_hi + rng.inc_hi
+    let mult_hi: i64 = 2549297995355413924
+    let mult_lo: i64 = 4865540595714422341
 
-    let xorshifted = (old_state >> 18) ^ old_state
-    let rot = (old_state >> 59) & 63
-    let result = xorshifted >> rot
+    let mul = dst_pcg_u128_mul(rng.state_hi, rng.state_lo, mult_hi, mult_lo)
+    let add = dst_pcg_u128_add(mul.hi, mul.lo, rng.inc_hi, rng.inc_lo)
+
+    // XSL-RR output from NEW state (pcg-cpp output_previous=false for pcg128_t).
+    let new_hi = add.hi
+    let new_lo = add.lo
+    let xorshifted = new_hi ^ new_lo
+    let rot = dst_pcg_lshr(new_hi, 58) & 63
+    let output = dst_pcg_rotr64(xorshifted, rot)
 
     return (DstPcg64 {
         state_hi: new_hi,
         state_lo: new_lo,
         inc_hi: rng.inc_hi,
         inc_lo: rng.inc_lo,
-    }, result)
+    }, output)
 }
 
 fn dst_pcg64_next_f64(rng: DstPcg64) -> (DstPcg64, f64) {
     let result = dst_pcg64_next_i64(rng)
-    let bits = result.1
-    let positive = if bits < 0 { 0 - bits } else { bits }
-    let fraction = (positive as f64) / 9223372036854775807.0
+    // Top 53 bits of u64 → f64 in [0, 1) at full mantissa precision.
+    // dst_pcg_lshr handles the sign bit so result is in [0, 2^53).
+    let mantissa = dst_pcg_lshr(result.1, 11)
+    let fraction = (mantissa as f64) / 9007199254740992.0
     return (result.0, fraction)
 }
 
