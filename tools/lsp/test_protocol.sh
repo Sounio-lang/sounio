@@ -236,6 +236,55 @@ fi
 grep -q '"id":82,"result":{"signatures":\[\]' "$T7E_OUT" \
   && note_pass "T7e.outside call → empty" || note_fail "T7e.outside call → empty"
 
+# ----- T7f: foldingRange -------------------------------------------------
+T7F_OUT="$LOG_DIR/t7f.out"
+# Doc spans 6 lines:
+#   0: fn helper(x: i64) -> i64 {
+#   1:     if x > 0 {
+#   2:         x + 1
+#   3:     } else {
+#   4:         0
+#   5:     }
+#   6: }
+# Expect at least 3 folding ranges (outer fn body + 2 if/else arms).
+run_session "$T7F_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn helper(x: i64) -> i64 {\n    if x > 0 {\n        x + 1\n    } else {\n        0\n    }\n}\n"}}}' \
+  '{"jsonrpc":"2.0","id":90,"method":"textDocument/foldingRange","params":{"textDocument":{"uri":"file:///tmp/t.sio"}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+n_fold=$(grep -oE '"id":90,"result":\[[^]]*\]' "$T7F_OUT" | grep -oE '"startLine":[0-9]+' | wc -l)
+if [ "$n_fold" -ge 3 ]; then
+  note_pass "T7f.foldingRange ≥3 regions (got $n_fold)"
+else
+  note_fail "T7f.foldingRange expected ≥3 (got $n_fold)"
+fi
+grep -q '"id":90,"result":\[.*"kind":"region"' "$T7F_OUT" \
+  && note_pass "T7f.kind=region" || note_fail "T7f.kind=region"
+# Outer fn body must span lines 0..6
+grep -q '"startLine":0,"endLine":6' "$T7F_OUT" \
+  && note_pass "T7f.outer fn fold 0..6" || note_fail "T7f.outer fn fold 0..6"
+
+# ----- T7g: foldingRange comment + string awareness ----------------------
+T7G_OUT="$LOG_DIR/t7g.out"
+# 4 consecutive // lines (0..3) then a code block. Brace inside a string
+# must NOT open a fold.
+run_session "$T7G_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"// header line one\n// header line two\n// header line three\n// header line four\nfn f() -> i32 {\n    let s = \"open { brace\"\n    0\n}\n"}}}' \
+  '{"jsonrpc":"2.0","id":91,"method":"textDocument/foldingRange","params":{"textDocument":{"uri":"file:///tmp/t.sio"}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"startLine":0,"endLine":3,"kind":"comment"' "$T7G_OUT" \
+  && note_pass "T7g.comment run 0..3" || note_fail "T7g.comment run 0..3"
+# Exactly one region fold (fn body) — the `{` in the string must not open a second.
+n_region=$(grep -oE '"id":91,"result":\[[^]]*\]' "$T7G_OUT" | grep -oE '"kind":"region"' | wc -l)
+if [ "$n_region" -eq 1 ]; then
+  note_pass "T7g.string brace ignored (1 region)"
+else
+  note_fail "T7g.string brace ignored expected 1 region (got $n_region)"
+fi
+
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"
 run_session "$T8_OUT" \

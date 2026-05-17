@@ -71,6 +71,7 @@ let M_DOC_SYMBOL:    i64 = 28
 let M_DOC_HIGHLIGHT: i64 = 29
 let M_PREPARE_RENAME: i64 = 30
 let M_SIGNATURE_HELP: i64 = 31
+let M_FOLDING_RANGE: i64 = 32
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -415,6 +416,7 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "textDocument/documentHighlight")  { return M_DOC_HIGHLIGHT }
     if str_eq(s, "textDocument/prepareRename")      { return M_PREPARE_RENAME }
     if str_eq(s, "textDocument/signatureHelp")      { return M_SIGNATURE_HELP }
+    if str_eq(s, "textDocument/foldingRange")       { return M_FOLDING_RANGE }
     M_UNKNOWN
 }
 
@@ -2426,6 +2428,181 @@ fn respond_signature_help() with IO, Mut, Panic, Div {
 }
 
 // ============================================================================
+// Folding ranges — textDocument/foldingRange
+// ============================================================================
+//
+// Two kinds of folds are emitted:
+//   1. Brace-balanced regions: every `{` opens a fold ending at its
+//      matching `}`. Folds where start_line == end_line are skipped
+//      (single-line blocks aren't useful).
+//   2. Multi-line `/* ... */` comments. `//` line comments are also
+//      coalesced into runs of consecutive comment-only lines.
+//
+// Strings and char literals are respected so `{` / `}` / `/*` inside a
+// "..." don't open phantom folds.
+//
+// Capacity: 256 folds per request (BSS arrays).
+
+var FOLD_S: [i64; 256] = [0; 256]
+var FOLD_E: [i64; 256] = [0; 256]
+var FOLD_K: [i64; 256] = [0; 256]   // 0=region, 1=comment
+var FOLD_N: i64 = 0
+
+var FOLD_STK: [i64; 64] = [0; 64]
+var FOLD_STK_N: i64 = 0
+
+fn fold_push_open(line: i64) with Mut, Panic {
+    if FOLD_STK_N < 64 {
+        FOLD_STK[FOLD_STK_N as usize] = line
+        FOLD_STK_N = FOLD_STK_N + 1
+    }
+}
+
+fn fold_close(end_line: i64) with Mut, Panic {
+    if FOLD_STK_N <= 0 { return }
+    FOLD_STK_N = FOLD_STK_N - 1
+    let s = FOLD_STK[FOLD_STK_N as usize]
+    if end_line > s && FOLD_N < 256 {
+        FOLD_S[FOLD_N as usize] = s
+        FOLD_E[FOLD_N as usize] = end_line
+        FOLD_K[FOLD_N as usize] = 0
+        FOLD_N = FOLD_N + 1
+    }
+}
+
+fn fold_emit_comment(s_line: i64, e_line: i64) with Mut, Panic {
+    if e_line > s_line && FOLD_N < 256 {
+        FOLD_S[FOLD_N as usize] = s_line
+        FOLD_E[FOLD_N as usize] = e_line
+        FOLD_K[FOLD_N as usize] = 1
+        FOLD_N = FOLD_N + 1
+    }
+}
+
+fn respond_folding_range() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+
+    FOLD_N = 0
+    FOLD_STK_N = 0
+
+    var line: i64 = 0
+    var i: i64 = 0
+    // States: 0=code, 1=string ("), 2=char ('), 3=line comment, 4=block comment
+    var state: i64 = 0
+    // For // comments: start line of current consecutive run, or -1
+    var line_cmt_start: i64 = 0 - 1
+    var line_cmt_prev: i64 = 0 - 1
+    var block_cmt_start: i64 = 0
+
+    while i < DOC_TEXT_LEN {
+        let c = DOC_TEXT[i as usize] as i64
+
+        if state == 1 {
+            if c == 92 && i + 1 < DOC_TEXT_LEN { i = i + 2 }
+            else {
+                if c == 34 { state = 0 }
+                if c == 10 { line = line + 1 }
+                i = i + 1
+            }
+        } else if state == 2 {
+            if c == 92 && i + 1 < DOC_TEXT_LEN { i = i + 2 }
+            else {
+                if c == 39 { state = 0 }
+                if c == 10 { line = line + 1 }
+                i = i + 1
+            }
+        } else if state == 3 {
+            // line comment runs until newline
+            if c == 10 {
+                state = 0
+                // Track consecutive `//` lines.
+                if line_cmt_start < 0 { line_cmt_start = line; line_cmt_prev = line }
+                else if line == line_cmt_prev { line_cmt_prev = line }
+                else if line == line_cmt_prev + 1 { line_cmt_prev = line }
+                else {
+                    fold_emit_comment(line_cmt_start, line_cmt_prev)
+                    line_cmt_start = line
+                    line_cmt_prev = line
+                }
+                line = line + 1
+            }
+            i = i + 1
+        } else if state == 4 {
+            if c == 42 && i + 1 < DOC_TEXT_LEN && (DOC_TEXT[(i + 1) as usize] as i64) == 47 {
+                fold_emit_comment(block_cmt_start, line)
+                state = 0
+                i = i + 2
+            } else {
+                if c == 10 { line = line + 1 }
+                i = i + 1
+            }
+        } else {
+            // state == 0 (code)
+            if c == 34 { state = 1; i = i + 1 }
+            else if c == 39 { state = 2; i = i + 1 }
+            else if c == 47 && i + 1 < DOC_TEXT_LEN && (DOC_TEXT[(i + 1) as usize] as i64) == 47 {
+                state = 3
+                i = i + 2
+            } else if c == 47 && i + 1 < DOC_TEXT_LEN && (DOC_TEXT[(i + 1) as usize] as i64) == 42 {
+                state = 4
+                block_cmt_start = line
+                i = i + 2
+            } else if c == 123 {                         // '{'
+                fold_push_open(line)
+                i = i + 1
+            } else if c == 125 {                         // '}'
+                fold_close(line)
+                i = i + 1
+            } else {
+                if c == 10 {
+                    // Newline outside any comment ends a `//` run.
+                    if line_cmt_start >= 0 && line_cmt_prev < line - 1 {
+                        fold_emit_comment(line_cmt_start, line_cmt_prev)
+                        line_cmt_start = 0 - 1
+                        line_cmt_prev = 0 - 1
+                    }
+                    line = line + 1
+                }
+                i = i + 1
+            }
+        }
+    }
+    if line_cmt_start >= 0 {
+        fold_emit_comment(line_cmt_start, line_cmt_prev)
+    }
+
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    var u: i64 = 0
+    while u < FOLD_N {
+        if u > 0 { tx_putc(44) }
+        tx_puts("{\"startLine\":")
+        tx_put_i64(FOLD_S[u as usize])
+        tx_puts(",\"endLine\":")
+        tx_put_i64(FOLD_E[u as usize])
+        if FOLD_K[u as usize] == 1 {
+            tx_puts(",\"kind\":\"comment\"")
+        } else {
+            tx_puts(",\"kind\":\"region\"")
+        }
+        tx_putc(125)
+        u = u + 1
+    }
+    tx_puts("]}")
+    write_frame()
+}
+
+// ============================================================================
 // Semantic tokens — textDocument/semanticTokens/full
 // ============================================================================
 //
@@ -3226,7 +3403,8 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("},")
     tx_puts("\"signatureHelpProvider\":{")
     tx_puts("\"triggerCharacters\":[\"(\",\",\"]")
-    tx_puts("}")
+    tx_puts("},")
+    tx_puts("\"foldingRangeProvider\":true")
     tx_puts("},")
     tx_puts("\"serverInfo\":{")
     tx_puts("\"name\":\"sounio-lsp\",")
@@ -3287,6 +3465,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_DOC_HIGHLIGHT { respond_document_highlight(); return }
     if method == M_PREPARE_RENAME { respond_prepare_rename(); return }
     if method == M_SIGNATURE_HELP { respond_signature_help(); return }
+    if method == M_FOLDING_RANGE  { respond_folding_range(); return }
     respond_method_not_found()
 }
 
