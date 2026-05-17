@@ -467,6 +467,79 @@ grep -q '"from":{"name":"other"' "$T7N_OUT" \
 grep -q '"id":162,.*"to":{"name":"helper"' "$T7N_OUT" \
   && note_pass "T7n.outgoing.helper" || note_fail "T7n.outgoing.helper"
 
+# ----- T7o: documentLink ------------------------------------------------
+T7O_OUT="$LOG_DIR/t7o.out"
+run_session "$T7O_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///workspace/sounio/self-hosted/lsp/x.sio","languageId":"sounio","version":1,"text":"use compiler::lean_single\nuse check::check::Checker\nfn main() -> i32 { 0 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":600,"method":"textDocument/documentLink","params":{"textDocument":{"uri":"file:///workspace/sounio/self-hosted/lsp/x.sio"}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"target":"file:///workspace/sounio/self-hosted/compiler/lean_single.sio"' "$T7O_OUT" \
+  && note_pass "T7o.documentLink → lean_single.sio" || note_fail "T7o.documentLink → lean_single.sio"
+grep -q '"target":"file:///workspace/sounio/self-hosted/check/check/Checker.sio"' "$T7O_OUT" \
+  && note_pass "T7o.documentLink → Checker.sio" || note_fail "T7o.documentLink → Checker.sio"
+
+# ----- T7p: onTypeFormatting (newline auto-indent) ----------------------
+T7P_OUT="$LOG_DIR/t7p.out"
+run_session "$T7P_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn main() -> i32 {\n    if true {\n\n    }\n    0\n}\n"}}}' \
+  '{"jsonrpc":"2.0","id":700,"method":"textDocument/onTypeFormatting","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"position":{"line":2,"character":0},"ch":"\n","options":{"tabSize":4,"insertSpaces":true}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"id":700,"result":\[{"range":{"start":{"line":2,"character":0},"end":{"line":2,"character":0}},"newText":"        "}\]' "$T7P_OUT" \
+  && note_pass "T7p.onType \\n → 8 spaces (depth 2)" || note_fail "T7p.onType \\n → 8 spaces (depth 2)"
+
+# ----- T7q: formatting (whitespace trim) --------------------------------
+T7Q_OUT="$LOG_DIR/t7q.out"
+run_session "$T7Q_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"a   \nb\nc\t \n"}}}' \
+  '{"jsonrpc":"2.0","id":800,"method":"textDocument/formatting","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"options":{"tabSize":4,"insertSpaces":true}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"start":{"line":0,"character":1},"end":{"line":0,"character":4}' "$T7Q_OUT" \
+  && note_pass "T7q.fmt trims line 0" || note_fail "T7q.fmt trims line 0"
+grep -q '"start":{"line":2,"character":1},"end":{"line":2,"character":3}' "$T7Q_OUT" \
+  && note_pass "T7q.fmt trims line 2" || note_fail "T7q.fmt trims line 2"
+n_fmt_edits=$(grep -oE '"id":800,"result":\[[^]]*\]' "$T7Q_OUT" | grep -oE '"newText":""' | wc -l)
+if [ "$n_fmt_edits" -eq 2 ]; then
+  note_pass "T7q.fmt exactly 2 edits"
+else
+  note_fail "T7q.fmt expected 2 edits (got $n_fmt_edits)"
+fi
+
+# ----- T7r: rangeFormatting --------------------------------------------
+T7R_OUT="$LOG_DIR/t7r.out"
+run_session "$T7R_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"a   \nb \nc\t \n"}}}' \
+  '{"jsonrpc":"2.0","id":900,"method":"textDocument/rangeFormatting","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"range":{"start":{"line":1,"character":0},"end":{"line":2,"character":0}},"options":{"tabSize":4,"insertSpaces":true}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"start":{"line":1,"character":1},"end":{"line":1,"character":2}' "$T7R_OUT" \
+  && note_pass "T7r.range trims line 1" || note_fail "T7r.range trims line 1"
+grep -q '"id":900,"result":\[[^]]*"line":0' "$T7R_OUT" \
+  && note_fail "T7r.range leaks to line 0" || note_pass "T7r.range leaves line 0"
+grep -q '"id":900,"result":\[[^]]*"line":2' "$T7R_OUT" \
+  && note_fail "T7r.range leaks to line 2" || note_pass "T7r.range leaves line 2"
+
+# ----- T7s: codeAction trailing-; quickfix ------------------------------
+T7S_OUT="$LOG_DIR/t7s.out"
+run_session "$T7S_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn main() -> i32 {\n    let x = 1;\n    let s = \";\"\n    0\n}\n"}}}' \
+  '{"jsonrpc":"2.0","id":1000,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"range":{"start":{"line":0,"character":0},"end":{"line":5,"character":0}},"context":{"diagnostics":[]}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"title":"Remove trailing `;` (Sounio uses newlines)"' "$T7S_OUT" \
+  && note_pass "T7s.title" || note_fail "T7s.title"
+grep -q '"start":{"line":1,"character":13},"end":{"line":1,"character":14}' "$T7S_OUT" \
+  && note_pass "T7s.edit at stray ;" || note_fail "T7s.edit at stray ;"
+grep -q '"start":{"line":2,"character":13},"end":{"line":2,"character":14}' "$T7S_OUT" \
+  && note_fail "T7s.in-string ; not skipped" || note_pass "T7s.in-string ; skipped"
+
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"
 run_session "$T8_OUT" \
