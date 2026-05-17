@@ -1,89 +1,175 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file is the entry-point for Claude Code (claude.ai/code) and other AI assistants working in the Sounio repository. It is the active source of truth for AI behavior; `AGENTS.md` is the Codex-facing execution contract; together they cover all AI roles in the project.
 
-**Recovery context**: [CLAUDE_HANDOFF.md](CLAUDE_HANDOFF.md) | **Syntax ref**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md) | **LLM guide**: [docs/llm-guide/](docs/llm-guide/) | **Minimum viable**: [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md)
+If you are a human reader: see §11.
 
-## Project Identity
+| Quick reference | |
+|---|---|
+| Recovery context | [`CLAUDE_HANDOFF.md`](CLAUDE_HANDOFF.md) |
+| Codex contract | [`AGENTS.md`](AGENTS.md) |
+| Programming guide | [`docs/guide/LLM_PROGRAMMING_GUIDE.md`](docs/guide/LLM_PROGRAMMING_GUIDE.md) |
+| LLM cookbook | [`docs/llm-guide/`](docs/llm-guide/) |
+| Minimum viable Sounio | [`docs/guide/MINIMUM_VIABLE_SOUNIO.md`](docs/guide/MINIMUM_VIABLE_SOUNIO.md) |
+| Style guide | [`docs/guide/SOUNIO_STYLE_GUIDE.md`](docs/guide/SOUNIO_STYLE_GUIDE.md) |
+| Gotchas | [`docs/guide/SOUNIO_GOTCHAS.md`](docs/guide/SOUNIO_GOTCHAS.md) |
+| Known limitations | [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/compiler/KNOWN_LIMITATIONS.md) |
+| Governance | [`docs/governance/`](docs/governance/) |
+| LLM offload policy | [`.claude/AGENT_OFFLOAD_POLICY.md`](.claude/AGENT_OFFLOAD_POLICY.md) |
 
-**Sounio** — a self-hosted systems + scientific programming language for epistemic computing, uncertainty propagation, and algebraic effects. NOT a Rust/Julia dialect; own syntax, semantics, philosophy. Linux x86-64 only.
+---
 
-## Session Bootstrap
+## 1. Calibration — read before any analysis
+
+Sounio is not a small experimental repository. Past AI sessions, including those with many hours of context, have consistently underestimated its scope by roughly an order of magnitude. **Calibrate before producing analysis.** The most predictable AI failure mode in this repository is measuring `stdlib/` and treating it as the whole.
+
+Measured on `feature/mcp-server` at HEAD `75c5ac90`:
+
+| Versioned `.sio` source | Value |
+|---|---:|
+| Files | 4,048 |
+| Lines (raw) | 1,810,739 |
+| Lines (code-only) | 1,379,461 |
+| Bytes | 63 MB |
+
+| Subsystem | Files | LOC (raw) | What it is |
+|---|---:|---:|---|
+| `self-hosted/` | 551 | 554,531 | The Sounio compiler, written in Sounio |
+| `archive/` | 19 | 309,422 | Historical evolution of the language |
+| `stdlib/` | 954 | 293,096 | Math, special functions, statistics, PBPK, epistemic types, autograd, PINN, fractional calculus, RNG, I/O |
+| `examples/` | 782 | 257,214 | Working examples |
+| `bootstrap/` | 16 | 236,206 | Bootstrap compiler chain (C → Sounio) |
+| `tests/` | 1,529 | 137,360 | Test suite |
+| `benchmarks/` | 116 | 13,219 | Performance baselines |
+| Other | ~100 | ~9,000 | tools, experiments, ecosystem |
+
+Verify before disagreeing:
+
+```bash
+git ls-files -z '*.sio' | xargs -0 wc -l | tail -1
+git ls-files -z '*.sio' | wc -l
+```
+
+If your measurement gives ~200k LOC, you measured `stdlib/` alone. Do not proceed under that prior.
+
+---
+
+## 2. Project identity
+
+**Sounio** — a self-hosted systems + scientific programming language for epistemic computing, uncertainty propagation, and algebraic effects. Single-author development since 25 December 2025. Linux x86-64 only. Not a Rust or Julia dialect; own syntax, semantics, philosophy.
+
+Three things are simultaneously true about this repository:
+
+1. **It is a language.** A self-hosted compiler in `self-hosted/`, a bootstrap chain `bootstrap/stage0` (C, ~103 KB) → `boot4` → `gen1` → `gen2` → `gen3` (fixed-point verification: gen2 = gen3 bit-identical).
+
+2. **It is a scientific computing platform.** First-class `Knowledge[T]` with GUM uncertainty propagation, Caputo fractional derivatives, autograd, PINN training, refinement types, algebraic effects (`IO`, `Mut`, `Div`, `Panic`, `Alloc`, `Async`, `GPU`, `Prob`, `Observe`), units, linear types.
+
+3. **It is the platform for a master's dissertation in biomaterials/pharmacology** at PUC-SP (defense Aug–Sep 2026). The dissertation is one application; the language is the broader product.
+
+---
+
+## 3. Session bootstrap
 
 Before non-trivial changes:
 
 1. Read `CLAUDE_HANDOFF.md` — recovery history and workspace context
-2. Verify current branch (should be `integration/sounio-dev-ready-base`)
+2. Verify current branch (workspace default: `integration/sounio-dev-ready-base`)
 3. Do not start from `main` until reconciliation is completed
-4. Do not propose destructive reset/clean/rebase flows on this repo
+4. Do not propose destructive `reset`/`clean`/`rebase` flows on this repo
 
-## Build & Run
+---
 
-The compiler is **self-hosted** (written in Sounio, not Rust). `bin/souc` is a bash wrapper around the native self-hosted binary at `artifacts/self-hosted/souc-self-hosted-x86_64`.
+## 4. Build & run
+
+The compiler is self-hosted (written in Sounio, not Rust). `bin/souc` is a bash wrapper around the native self-hosted binary at `artifacts/self-hosted/souc-self-hosted-x86_64`.
 
 ```bash
 SOUC=./bin/souc
-export SOUNIO_STDLIB_PATH=$(pwd)/stdlib   # needed when outside repo root
+export SOUNIO_STDLIB_PATH=$(pwd)/stdlib   # required when outside repo root
 
 $SOUC --version                           # verify toolchain
 $SOUC check file.sio                      # type-check only
-$SOUC run file.sio                        # compile to temp ELF, execute, clean up
+$SOUC run file.sio                        # compile + execute + clean up
 $SOUC compile file.sio -o output.elf      # emit named ELF binary
 $SOUC info                                # compiler status
 
-# Bootstrap chain (fixed-point verification)
-make build      # boot4 → gen1 → gen2 → gen3, verifies gen2 == gen3
-make clean      # remove gen1/gen2/gen3.elf
+# Bootstrap chain
+make build    # boot4 → gen1 → gen2 → gen3, verifies gen2 == gen3
+make clean    # remove generated stages
+make check    # type-check compiler + CI gates
 ```
 
-## Testing
+Testing:
 
 ```bash
-# Full test suite (run-pass + compile-fail + stdlib)
-bash scripts/run_sio_test_suite.sh
-bash scripts/run_sio_test_suite.sh --verbose
-
-# Single test by name pattern
-bash scripts/run_sio_test_suite.sh covid
-bash scripts/run_sio_test_suite.sh vancomycin --verbose
-
-# Stdlib gates
-bash scripts/stdlib_hyper_execution_gate.sh
-bash scripts/stdlib_science_pipeline_gate.sh
-bash scripts/stdlib_reliability_gate.sh
-
-# Lint for Rust hallucinations in .sio files
-make lint
-make lint-fix FILE=path/to/file.sio
-
-# Type-check compiler + CI gates
-make check
-
-# Solo / self-hosted-only workflow (skips Cargo steps inside gates):
-#   SKIP_BUILD=1 bash scripts/dev/fast_gate.sh
-#   SKIP_BUILD=1 make check
-# Omit SKIP_BUILD when you need workspace `cargo test` / `cargo run` parity with CI Rust jobs.
-
-# Doctor the workspace
-bash scripts/dev/doctor_workspace.sh
+bash scripts/run_sio_test_suite.sh                      # full suite
+bash scripts/run_sio_test_suite.sh vancomycin --verbose # single test by pattern
+bash scripts/stdlib_hyper_execution_gate.sh             # stdlib gates
+bash scripts/dev/doctor_workspace.sh                    # workspace health
 ```
 
-### Test Annotations
+Solo / self-hosted-only workflow (skip Cargo): set `SKIP_BUILD=1` for gate scripts.
 
-Tests use header comments for the harness:
+For full lint, harness annotations, and test directory layout, see [`docs/guide/SOUNIO_DEFINITIVE_GUIDE.md`](docs/guide/SOUNIO_DEFINITIVE_GUIDE.md) and [`docs/guide/CHECK_SOUNIO_GUIDE.md`](docs/guide/CHECK_SOUNIO_GUIDE.md).
 
-- `//@ run-pass` — expect exit 0
-- `//@ compile-fail` — expect exit != 0
-- `//@ expect-stdout: X` — stdout must contain X (run-pass only)
-- `//@ error-pattern: X` — stderr/stdout must contain X (compile-fail only)
-- `//@ ignore` — skip this test
-- `//@ check-only` — compile only, do not execute
+---
 
-Test directories: `tests/run-pass/`, `tests/compile-fail/`, `tests/ui/`, `tests/stdlib/`, `tests/selfhost/`, `tests/native/`, `tests/regression/`
+## 5. AI-native tooling
 
-## Sounio Syntax (NOT Rust)
+This checkout ships two local agent surfaces:
 
-**Critical differences — these are compile errors:**
+- [`tools/lsp/README.md`](tools/lsp/README.md) — Sounio LSP: diagnostics, hover, completions, go-to-definition, references, rename over stdio
+- [`tools/mcp/README.md`](tools/mcp/README.md) — Sounio MCP server exposing compiler `check`, `compile`, `run`, `test`, stdlib docs, and compiler-error resources over local stdio
+
+Run the MCP server with Claude Code:
+
+```bash
+pip install -e tools/mcp
+python -m sounio_mcp.server --transport stdio
+claude --mcp-server sounio=python:-m:sounio_mcp.server
+```
+
+Use `sounio_check` as the first repair-loop step for `.sio` edits. The tool returns the same diagnostic wire family as `souc check --json` and `tools/shared/diagnostic_schema.json`, with MCP-friendly `line`/`column`/`span` fields. For compiler errors, read `sounio://errors/{code}`; for stdlib context, read `sounio://stdlib/{module}`.
+
+Sprint cross-references:
+
+- `examples/pbpk_rapamycin/` — CC-3 pharmacometrics proof-domain target
+- `examples/octonion_nn/` — Cx-3 octonion neural-layer proof-domain target
+- [`tools/mcp/examples/claude_code_usage.md`](tools/mcp/examples/claude_code_usage.md) — error → fix loop recipe
+
+---
+
+## 6. Operating principles
+
+The numbered principles below are binding. Each was learned from a measured failure cycle.
+
+1. **Measure before claiming.** Any quantitative statement about this repository must be backed by a command the operator can re-run. Never write "the codebase is small/incomplete/legacy" based on prior probability.
+
+2. **Stubs are not gaps.** Files with low line counts, empty function bodies, or comment-only contents may be intentional structural placeholders (type signatures, design intent, future markers). Do not delete, refactor, or "complete" them without operator confirmation.
+
+3. **Compilation is the test of existence.** A `.sio` file's status is `./bin/souc check <file>` plus the presence of a caller. Running `./bin/souc run` on a library file and reporting it broken is a category error: most files in `stdlib/` and `examples/` are libraries, not executables.
+
+4. **Sounio is the language of this repository.** Science (data generation, statistical analysis, numerical experiments, model comparison) is implemented in Sounio. Introducing Python, JavaScript, or other languages into the science path is drift, even under time pressure. If you find yourself reaching for `import numpy`, stop. Find the Sounio primitive or ask the operator.
+
+5. **Dispatched scope is bounded scope.** Tasks arrive as scoped dispatches. Completing a dispatch does not authorize starting the next one, even if obvious. Halt at the scope boundary and report. See [`.claude/PARALLEL_BLOCKER_CONTRACT.md`](.claude/PARALLEL_BLOCKER_CONTRACT.md).
+
+6. **Numerical values must be derivable, not retrofitted.** When a test fails by a margin, the correct response is to tighten the implementation, broaden the bound with a published derivation, or report `FAIL_HONEST`. Selecting a tolerance because it permits the observed failure to pass is drift.
+
+7. **Auditability over speed.** The operator runs adversarial audits on AI output. Plausible-looking output that does not survive forensic verification is worse than honest partial output. A phase completed much faster than scoped is a flag, not an achievement.
+
+8. **Halt is a deliverable.** Stopping with a clear report of what was done, what was not done, and what blocks the next step is a complete deliverable.
+
+9. **Q1-research first.** Literature review before architecture decisions. Cite sources; acknowledge uncertainty.
+
+10. **Edge of novelty.** Sounio does not copy existing languages. Proposals to match Rust/Julia/Python semantics are rejected unless evidence shows the convergence is correct on first principles.
+
+11. **No drift to mean.** Excellence only. Atomic commits — one logical change per commit. No AI attribution in commit messages.
+
+---
+
+## 7. Sounio syntax (NOT Rust)
+
+Critical differences — these are compile errors:
 
 | Wrong (Rust) | Correct (Sounio) |
 |---|---|
@@ -93,46 +179,45 @@ Test directories: `tests/run-pass/`, `tests/compile-fail/`, `tests/ui/`, `tests/
 | `assert!(cond)` | `assert(cond)` |
 | `println!("hi")` | `println("hi")` |
 | `#[test]`, `#[derive()]` | No attributes |
-| `\|x\| x + 1` | Closure literals — `|x| x + 1` works |
 | `-42` | `0 - 42` (no unary minus) |
-| `x >> 4` | `x >> 4u8` (bit shifts require u8) |
+| `x >> 4` | `x >> 4u8` (bit shifts require `u8`) |
 
-**Helpers must be defined before callers** — no forward references.
+Helpers must be defined before callers — no forward references.
 
-**Quick reference:**
+Quick reference:
 
-```sio
+```sounio
 let x = 5                              // immutable
 var y = 10                             // mutable
-var buf: [i64; 8] = [0; 8]            // fixed-size array
+var buf: [i64; 8] = [0; 8]             // fixed-size array
 &T / &!T                               // shared / exclusive ref
 fn f(x: i32) -> i32 with IO { }        // effects declaration
-linear struct Handle { fd: i32 }       // linear types (consumed exactly once)
+linear struct Handle { fd: i32 }       // linear types
 let dose: mg = 500.0                   // units
 let arr2 = a ++ b                      // array concatenation
 type Pos = { x: i32 | x > 0 }          // refinement type
-let m: Knowledge<mg> = measure(500.0, uncertainty: 2.5)  // epistemic type
+let m: Knowledge<mg> = measure(500.0, uncertainty: 2.5)
 fn observe(x: Unobserved<f64>) -> bool with Observe { x > 0.0 }
 
 // Effects: IO, Mut, Div, Panic, Alloc, Async, GPU, Prob, Observe
-fn main() with IO, Mut, Panic, Div { }
 
-// Methods use explicit self
 impl MyStruct {
     fn get(self: &MyStruct) -> i64 { self.val }
     fn set(self: &!MyStruct, v: i64) with Mut { self.val = v }
 }
 
-// Control flow
-for i in 0..10 { }       // exclusive range
-for i in 0..=10 { }      // inclusive range
-while cond { }
+for i in 0..10 { }      // exclusive range
+for i in 0..=10 { }     // inclusive range
 if x > 0 { "pos" } else { "neg" }   // if is an expression
 ```
 
-## Architecture
+Full reference: [`docs/guide/LLM_PROGRAMMING_GUIDE.md`](docs/guide/LLM_PROGRAMMING_GUIDE.md).
 
-**Pipeline:** Source → Lexer → Parser → AST → Check → HIR → SIR → HLIR (SSA) → Codegen (x86-64 ELF)
+---
+
+## 8. Architecture
+
+Pipeline: Source → Lexer → Parser → AST → Check → HIR → SIR → HLIR (SSA) → Codegen (x86-64 ELF).
 
 | Directory | Purpose |
 |---|---|
@@ -141,82 +226,94 @@ if x > 0 { "pos" } else { "neg" }   // if is an expression
 | `self-hosted/ir/` | IR lowering, e-graph optimization (1000+ rewrite rules) |
 | `self-hosted/native/` | x86-64 ELF emission |
 | `self-hosted/compiler/` | Codegen drivers (lean, IR, GPU) |
-| `self-hosted/gpu/` | PTX/GPU codegen (exists but no end-to-end CLI path) |
-| `stdlib/epistemic/` | Knowledge\<T\>, uncertainty (GUM), provenance |
+| `self-hosted/gpu/` | PTX/GPU codegen (exists; no end-to-end CLI path) |
+| `stdlib/epistemic/` | `Knowledge<T>`, uncertainty (GUM), provenance |
 | `stdlib/units/` | Dimensional analysis |
-| `bootstrap/` | stage0 (C) → boot2g → boot3 → boot4 → self-hosted chain |
+| `bootstrap/` | stage0 (C) → boot2g → boot3 → boot4 → self-hosted |
 | `formal/` | Lean 4 proofs (epistemic type invariants) |
 
-**Bootstrap chain**: `bootstrap/stage0` (C, ~103KB) builds the first Sounio binary; successive stages (`boot0`→`boot4`, each written in Sounio) build the next until the compiler compiles itself. Fixed-point: stage N and N+1 produce bit-identical ELFs.
+Bootstrap fixed-point: stage N and N+1 produce bit-identical ELFs. Entrypoint of self-hosted compiler: `self-hosted/compiler/lean_single.sio`.
 
-**Key file**: `self-hosted/compiler/lean_single.sio` — the main self-hosted compiler entrypoint.
+Compiler bug fixes follow the forensic dispatch protocol documented in `docs/audit/`. Do not patch `self-hosted/` ad hoc; record evidence and proposed fix as a dispatch first.
 
-## Commits
+---
 
-```text
-[component] Brief description
+## 9. Documentation style
 
-Components: lexer, parser, ast, check, types, effects, hir, hlir,
-           codegen, backend, cli, docs, stdlib, tests, ontology,
-           epistemic, lsp, pkg, sir, units, refinement
-```
+- EN-UK orthography in new documentation unless preserving quoted source text
+- Papers, IRB-facing material, clinical artefacts, and external submissions follow GAIDeT-ICMJE 2025 AI disclosure pattern; update `AI_DISCLOSURE.md` per artefact
+- Do not overstate semantic milestones. Report the exact command, path, compiler surface, and evidence used
 
-No AI attribution in commits.
+---
 
-## Working Principles
+## 10. Mandatory LLM-offload checkpoints
 
-1. **Sounio syntax** — `&!` not `&mut`, `var` not `let mut`, no Rust macros
-2. **Atomic commits** — one logical change per commit
-3. **Q1+ research first** — literature review before architecture decisions
-4. **Epistemic honesty** — cite sources, acknowledge uncertainty
-5. **Edge of novelty** — don't copy existing languages
-6. **No drift to mean** — excellence only
+Pre-commit review by orthogonal LLM providers via `bin/llm-offload` is mandatory at the following checkpoints. Full policy: [`.claude/AGENT_OFFLOAD_POLICY.md`](.claude/AGENT_OFFLOAD_POLICY.md).
 
-## Known Limitations
+| Trigger | Command | Required |
+|---|---|---|
+| Math claims (PK/PD, GUM, p-box, Lean theorem, refinement invariants) | `bin/llm-offload -t math-review -p xai` | Yes |
+| Clinical-pathway code (`stdlib/clinical/*`, vancomycin tests, clinical Lean obligations) | `bin/llm-offload -t review -p deepseek` | Yes |
+| External-facing artefacts (papers, dissertation, IRB, cover letters) | `bin/llm-offload --raw <draft> deepseek xai gemini` | Yes |
 
-- `Knowledge<T>` supports struct-level generics (f64, bool, struct types work)
-- No unary minus — write `0 - x`
-- No REPL/`--show-ast`/`--show-types` in native mode yet
-- `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
-- GPU: PTX codegen exists but no end-to-end path from CLI
-
-Full list: [docs/compiler/KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md)
-
-## Cluster GPU Jobs
-
-The AI/HPC cluster control plane is at `/home/devsounio/beagle/k8s/hpc-sota`. Before GPU work, read:
-1. `/home/devsounio/beagle/k8s/hpc-sota/AGENT_BOOTSTRAP.md`
-2. `/home/devsounio/beagle/k8s/hpc-sota/DEV_WORKFLOW.md`
-
-Prefer proven wrappers from `ops/lab-ops.sh` over ad hoc `sbatch` or `kubectl` commands.
-
-## LLM Offload (mandatory checkpoints)
-
-**Policy is normative**: see [`.claude/AGENT_OFFLOAD_POLICY.md`](.claude/AGENT_OFFLOAD_POLICY.md).
-
-Mandatory pre-commit reviews:
-
-- **Math claims** (PK formulas, GUM, p-box, Lean theorem statements, refinement invariants): run `bin/llm-offload -t math-review -p xai` before commit.
-- **Clinical-pathway code** (`stdlib/clinical/*`, vancomycin tests, clinical Lean obligations): run `bin/llm-offload -t review -p deepseek` before commit.
-- **External-facing artifacts** (papers, cover letters, dissertation, IRB protocols): fan out `bin/llm-offload --raw <draft> deepseek xai gemini` before submission.
-
-Each non-trivial offload appends to [`.claude/llm_offload_log.md`](.claude/llm_offload_log.md). When a review catches a bug, the commit message must include an `LLM-offload-review:` trailer (format in the policy doc).
+Every non-trivial offload appends to `.claude/llm_offload_log.md`. Bug-catching offloads require an `LLM-offload-review:` trailer in the commit. Codex agents must not skip this step.
 
 Optional but encouraged:
 
 ```bash
-bin/llm-offload -t expand -p gemini -i outline.md     # outline → prose
-bin/llm-offload -t scaffold -p deepseek -i spec.md    # boilerplate
-bin/llm-offload -t paraphrase -p qwen -i letter.md    # tone shifts
-bin/llm-offload --status                              # which keys are loaded
-bin/llm-offload --list-tasks                          # available tasks
+bin/llm-offload -t expand     -p gemini   -i outline.md   # outline → prose
+bin/llm-offload -t scaffold   -p deepseek -i spec.md      # boilerplate
+bin/llm-offload -t paraphrase -p qwen     -i letter.md    # tone shifts
+bin/llm-offload --status                                  # which keys are loaded
+bin/llm-offload --list-tasks                              # available tasks
 ```
 
-Routing reference: [`.claude/offload-routing.md`](.claude/offload-routing.md). Task-specific system prompts: `.claude/offload-tasks/<task>.md`.
+Routing: [`.claude/offload-routing.md`](.claude/offload-routing.md). Task prompts: `.claude/offload-tasks/<task>.md`.
 
-## Session Persistence
+---
+
+## 11. For human readers
+
+This document is written for AI assistants. If you are human:
+
+- **First visit:** start with the project README.
+- **Researcher / collaborator:** dissertation context lives under `docs/dissertation/`; language design rationale will live under `docs/design/` (forthcoming); evolution is accessible via commit log and `archive/`.
+- **Reviewer (banca, peer review, contribution evaluation):** a tailored overview is planned but not yet available; contact the author directly.
+
+---
+
+## 12. Session persistence
 
 Cross-session context lives in `.claude/`:
+
 - `decisions.md` — architectural choices
-- `pending.md` — open questions, WIP
+- `pending.md` — open questions, work-in-progress
 - `session_state.json` — structured state
+- `llm_offload_log.md` — offload audit trail
+
+---
+
+## 13. Known limitations
+
+Headline limitations (full list in [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/compiler/KNOWN_LIMITATIONS.md)):
+
+- `Knowledge<T>` supports struct-level generics (`f64`, `bool`, struct types)
+- No unary minus — write `0 - x`
+- No REPL / `--show-ast` / `--show-types` in native mode
+- `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
+- GPU: PTX codegen exists but no end-to-end path from CLI
+
+---
+
+## 14. Cluster GPU jobs
+
+The AI/HPC cluster control plane is at `/home/devsounio/beagle/k8s/hpc-sota`. Before GPU work, read:
+
+1. `/home/devsounio/beagle/k8s/hpc-sota/AGENT_BOOTSTRAP.md`
+2. `/home/devsounio/beagle/k8s/hpc-sota/DEV_WORKFLOW.md`
+
+Prefer proven wrappers from `ops/lab-ops.sh` over ad hoc `sbatch` or `kubectl`.
+
+---
+
+*This file is the AI-assistant entry-point. For the Codex-facing execution contract, see [`AGENTS.md`](AGENTS.md). For governance authority matrix, see [`docs/governance/DOCS_AUTHORITY_MATRIX.md`](docs/governance/DOCS_AUTHORITY_MATRIX.md). Last revised 17 May 2026; check `git log -1 CLAUDE.md` for current state.*
