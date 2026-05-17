@@ -3328,15 +3328,20 @@ fn ca_parse_range() -> bool with Mut, Panic, Div {
     return true
 }
 
-fn ca_emit_loop_fix(loop_off: i64) with Mut, Panic, Div {
+// Emit a CodeAction with WorkspaceEdit replacing DOC_TEXT[edit_off..
+// edit_off+edit_len] with new_text. The edit must lie on a single line.
+fn ca_emit_replace(edit_off: i64, edit_len: i64, title: string, new_text: string)
+    with Mut, Panic, Div {
     if CA_EMITTED == 1 { tx_putc(44) }
     CA_EMITTED = 1
     CA_COUNT = CA_COUNT + 1
-    offset_to_position(loop_off, 0)
+    offset_to_position(edit_off, 0)
     let s_line = DEF_LINE
     let s_char = DEF_CHAR
-    let e_char = DEF_CHAR + 4
-    tx_puts("{\"title\":\"Replace `loop` with `while true`\",\"kind\":\"quickfix\",\"edit\":{\"changes\":{\"")
+    let e_char = DEF_CHAR + edit_len
+    tx_puts("{\"title\":\"")
+    tx_puts(title)
+    tx_puts("\",\"kind\":\"quickfix\",\"edit\":{\"changes\":{\"")
     var i: i64 = 0
     while i < DOC_URI_LEN {
         let c = DOC_URI[i as usize] as i64
@@ -3353,7 +3358,9 @@ fn ca_emit_loop_fix(loop_off: i64) with Mut, Panic, Div {
     tx_put_i64(s_line)
     tx_puts(",\"character\":")
     tx_put_i64(e_char)
-    tx_puts("}},\"newText\":\"while true\"}]}}}")
+    tx_puts("}},\"newText\":\"")
+    tx_puts(new_text)
+    tx_puts("\"}]}}}")
 }
 
 fn respond_code_action() with IO, Mut, Panic, Div {
@@ -3405,9 +3412,28 @@ fn respond_code_action() with IO, Mut, Panic, Div {
             if je > i && ident_slice_eq(i, je, "loop") {
                 let ps = skip_ws(je)
                 if ps < DOC_TEXT_LEN && (DOC_TEXT[ps as usize] as i64) == 123 {
-                    // Only emit if the keyword overlaps the requested range.
                     if je > rs && i < re {
-                        ca_emit_loop_fix(i)
+                        ca_emit_replace(i, 4,
+                            "Replace `loop` with `while true`",
+                            "while true")
+                    }
+                }
+                if je > i { i = je } else { i = i + 1 }
+            } else if je > i && ident_slice_eq(i, je, "let") {
+                // `let mut IDENT` (Rust-ism) → `var IDENT`.
+                let ms = skip_ws(je)
+                let me = read_ident_run(ms)
+                if me > ms && ident_slice_eq(ms, me, "mut") {
+                    let ns = skip_ws(me)
+                    let ne = read_ident_run(ns)
+                    if ne > ns {
+                        // Replace `let mut` (i..me) with `var`.
+                        let span = me - i
+                        if me > rs && i < re {
+                            ca_emit_replace(i, span,
+                                "Replace `let mut` with `var`",
+                                "var")
+                        }
                     }
                 }
                 if je > i { i = je } else { i = i + 1 }

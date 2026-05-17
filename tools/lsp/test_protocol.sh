@@ -414,6 +414,23 @@ grep -q '"start":{"line":1,"character":4},"end":{"line":1,"character":8}' "$T7L_
 grep -q '"id":141,"result":\[\]' "$T7L_OUT" \
   && note_pass "T7l.range outside loop → empty" || note_fail "T7l.range outside loop → empty"
 
+# ----- T7m: codeAction `let mut` → `var` --------------------------------
+T7M_OUT="$LOG_DIR/t7m.out"
+# Doc with `let mut x = 1`. Request codeAction over the whole file.
+run_session "$T7M_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn main() -> i32 {\n    let mut x = 1\n    x\n}\n"}}}' \
+  '{"jsonrpc":"2.0","id":150,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"range":{"start":{"line":0,"character":0},"end":{"line":3,"character":0}},"context":{"diagnostics":[]}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"title":"Replace `let mut` with `var`"' "$T7M_OUT" \
+  && note_pass "T7m.title" || note_fail "T7m.title"
+grep -q '"newText":"var"' "$T7M_OUT" \
+  && note_pass "T7m.newText=var" || note_fail "T7m.newText=var"
+# Edit range: `let mut` on line 1, char 4..11
+grep -q '"start":{"line":1,"character":4},"end":{"line":1,"character":11}' "$T7M_OUT" \
+  && note_pass "T7m.edit range = let-mut span" || note_fail "T7m.edit range = let-mut span"
+
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"
 run_session "$T8_OUT" \
