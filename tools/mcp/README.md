@@ -1,6 +1,7 @@
 # Sounio MCP Server
 
 <!-- mcp-name: io.github.sounio-lang/sounio-mcp-server -->
+<!-- mcp-name: io.github.agourakis82/sounio-mcp-server -->
 
 `sounio-mcp-server` exposes the checked Sounio compiler to agentic tools over
 local Model Context Protocol stdio transport. It is intentionally local-only:
