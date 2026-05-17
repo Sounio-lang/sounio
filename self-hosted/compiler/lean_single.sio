@@ -26591,6 +26591,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         em32(0x10000000 | ((adr_immlo & 0x3) << 29) | ((adr_immhi & 0x7FFFF) << 5) | 0)
         EP = EP + 1
         EXPR_IS_F64 = 0
+        EXPR_TY = 3
+        EXPR_TY_HASH = 0
         return
     }
     // Identifier or function call
@@ -27114,7 +27116,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             if src_match(ns, ne - ns, "str_len") {
                 EP = EP + 1; compile_or_a64()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                emit_str_len_a64(); EXPR_IS_F64 = 0; return
+                emit_str_len_a64(); EXPR_IS_F64 = 0; EXPR_TY = 1; EXPR_TY_HASH = 0; return
             }
             if src_match(ns, ne - ns, "slice_len") {
                 EP = EP + 1; compile_or_a64()
@@ -27345,7 +27347,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }
             if fi >= 0 {
-                if FN_ARITY[fi as usize] != argc { tc_wrong_arity(call_tok, FN_ARITY[fi as usize], argc) }
+                if FN_ARITY[fi as usize] != argc { tc_wrong_arity_hard(call_tok, FN_ARITY[fi as usize], argc) }
                 let callee_eff = FN_EFFECTS[fi as usize]
                 let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
                 let a64_callee_imp = (FN_EFFECTS[fi as usize] & 2048) != 0
@@ -28393,6 +28395,17 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             continue
         }
         emit_pop_x1_a64()
+        if left_ty != 0 && right_ty != 0 {
+            if op == 29 {
+                if left_ty != 1 || right_ty != 1 {
+                    tc_error_hard(op_tok, "modulo requires integer operands")
+                }
+            } else {
+                if ty_is_numeric(left_ty) == false || ty_is_numeric(right_ty) == false || ty_eq(left_ty, left_hash, right_ty, right_hash) == false {
+                    tc_error_hard(op_tok, "arithmetic operands must have matching numeric types")
+                }
+            }
+        }
         if left_f64 == 1 {
             if op == 19 { emit_f64_binop_a64(0x1E610800) }
             if op == 20 { emit_f64_binop_a64(0x1E611800) }
@@ -28561,6 +28574,15 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             continue
         }
         emit_pop_x1_a64()
+        if left_ty != 0 && right_ty != 0 {
+            if ty_is_numeric(left_ty) == false || ty_is_numeric(right_ty) == false {
+                tc_error_hard(op_tok, "arithmetic operands must have matching numeric types")
+            }
+            if ty_eq(left_ty, left_hash, right_ty, right_hash) == false {
+                if left_ty == 2 && right_ty == 2 { tc_error(op_tok, "unit mismatch") }
+                tc_error_hard(op_tok, "arithmetic operands must have matching numeric types")
+            }
+        }
         if left_f64 == 1 {
             if op == 17 { emit_f64_binop_a64(0x1E612800) }
             if op == 18 { emit_f64_binop_a64(0x1E613800) }
@@ -29805,6 +29827,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         LOOP_DEPTH = LOOP_DEPTH + 1
         let saved_bc = BREAK_COUNT
         compile_or_a64()
+        if EXPR_TY != 0 && EXPR_TY != 4 { tc_error_hard(EP - 1, "while condition must be bool") }
         let cbz_off = CL
         em32(0xB4000000)
         if TK[EP as usize] == 8 { EP = EP + 1 }

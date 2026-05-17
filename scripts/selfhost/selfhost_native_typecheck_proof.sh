@@ -138,12 +138,6 @@ run_case() {
   fi
 
   if [ "$compile_exit" -eq 0 ]; then
-    if [ "$SOUNIO_NATIVE_TARGET" = "aarch64-macos" ]; then
-      skip "$case_id" "aarch64-macos diagnostic gap"
-      printf '%s\t%s\t%s\t%s\tdiagnostic_gap\n' \
-        "$case_id" "$program_path" "$compile_exit" "$expected_pattern" >>"$RESULTS_FILE"
-      return 0
-    fi
     fail "$case_id" "expected diagnostic but compilation succeeded silently"
     printf '%s\t%s\t%s\t%s\tunexpected_success\n' \
       "$case_id" "$program_path" "$compile_exit" "$expected_pattern" >>"$RESULTS_FILE"
