@@ -45,83 +45,15 @@ fn splitmix64_next(rng: SplitMix64) -> (SplitMix64, i64) {
 // ============================================================================
 
 // PCG64 state — 128-bit state (state_hi:state_lo) + 128-bit stream inc.
+use stdlib::random::pcg64_core::{
+    PcgU128, pcg_u_lt, pcg_lshr, pcg_u128_add, pcg_u128_mul, pcg_rotr64, pcg_umod,
+}
+
 struct Pcg64 {
     state_hi: i64,
     state_lo: i64,
     inc_hi: i64,
     inc_lo: i64,
-}
-
-struct RngU128 {
-    hi: i64,
-    lo: i64,
-}
-
-// ─── Unsigned 128-bit helpers (canonical per R.2.4 / pcg-cpp) ─────────────
-
-fn rng_pcg_u_lt(a: i64, b: i64) -> bool {
-    let top: i64 = 1
-    let mask = top << 63
-    (a ^ mask) < (b ^ mask)
-}
-
-fn rng_pcg_lshr(x: i64, n: i64) -> i64 {
-    if n <= 0 { return x }
-    if n >= 64 { return 0 }
-    let raw = x >> n
-    let one: i64 = 1
-    let mask = (one << (64 - n)) - 1
-    return raw & mask
-}
-
-fn rng_pcg_umul64_high(a: i64, b: i64) -> i64 {
-    let mask32: i64 = 4294967295
-    let al = a & mask32
-    let ah = rng_pcg_lshr(a, 32)
-    let bl = b & mask32
-    let bh = rng_pcg_lshr(b, 32)
-    let ll = al * bl
-    let lh = al * bh
-    let hl = ah * bl
-    let hh = ah * bh
-    let t = rng_pcg_lshr(ll, 32) + (lh & mask32) + (hl & mask32)
-    return rng_pcg_lshr(t, 32) + rng_pcg_lshr(lh, 32) + rng_pcg_lshr(hl, 32) + hh
-}
-
-fn rng_pcg_u128_add(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> RngU128 {
-    let res_lo = a_lo + b_lo
-    let carry: i64 = if rng_pcg_u_lt(res_lo, a_lo) { 1 } else { 0 }
-    let res_hi = a_hi + b_hi + carry
-    return RngU128 { hi: res_hi, lo: res_lo }
-}
-
-fn rng_pcg_u128_mul(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> RngU128 {
-    let res_lo = a_lo * b_lo
-    let res_hi = rng_pcg_umul64_high(a_lo, b_lo) + a_hi * b_lo + a_lo * b_hi
-    return RngU128 { hi: res_hi, lo: res_lo }
-}
-
-fn rng_pcg_rotr64(x: i64, rot: i64) -> i64 {
-    let r = rot & 63
-    if r == 0 { return x }
-    let right = rng_pcg_lshr(x, r)
-    let left = x << (64 - r)
-    return right | left
-}
-
-// Unsigned 64-bit mod n via binary long-division. n must be > 0.
-fn rng_pcg_umod(x: i64, n: i64) -> i64 {
-    let n_minus_1 = n - 1
-    if (n & n_minus_1) == 0 { return x & n_minus_1 }
-    var rem: i64 = 0
-    var i: i64 = 63
-    while i >= 0 {
-        let bit = rng_pcg_lshr(x, i) & 1
-        rem = rem + rem + bit
-        if !rng_pcg_u_lt(rem, n) { rem = rem - n }
-        i = i - 1
-    }
-    return rem
 }
 
 // ─── PCG64-XSL-RR-128/64 step + splitmix64-derived seeding ────────────────
@@ -154,13 +86,13 @@ fn pcg64_new(seed: i64) -> Pcg64 {
 fn pcg64_next_i64(rng: Pcg64) -> (Pcg64, i64) {
     let mult_hi: i64 = 2549297995355413924
     let mult_lo: i64 = 4865540595714422341
-    let mul = rng_pcg_u128_mul(rng.state_hi, rng.state_lo, mult_hi, mult_lo)
-    let add = rng_pcg_u128_add(mul.hi, mul.lo, rng.inc_hi, rng.inc_lo)
+    let mul = pcg_u128_mul(rng.state_hi, rng.state_lo, mult_hi, mult_lo)
+    let add = pcg_u128_add(mul.hi, mul.lo, rng.inc_hi, rng.inc_lo)
     let new_hi = add.hi
     let new_lo = add.lo
     let xorshifted = new_hi ^ new_lo
-    let rot = rng_pcg_lshr(new_hi, 58) & 63
-    let output = rng_pcg_rotr64(xorshifted, rot)
+    let rot = pcg_lshr(new_hi, 58) & 63
+    let output = pcg_rotr64(xorshifted, rot)
     (Pcg64 {
         state_hi: new_hi,
         state_lo: new_lo,
@@ -172,7 +104,7 @@ fn pcg64_next_i64(rng: Pcg64) -> (Pcg64, i64) {
 // Generate f64 in [0, 1)
 fn pcg64_next_f64(rng: Pcg64) -> (Pcg64, f64) {
     let result = pcg64_next_i64(rng)
-    let mantissa = rng_pcg_lshr(result.1, 11)
+    let mantissa = pcg_lshr(result.1, 11)
     let fraction = (mantissa as f64) / 9007199254740992.0
     (result.0, fraction)
 }
@@ -209,14 +141,14 @@ fn pcg64_bounded(rng: Pcg64, n: i64) -> (Pcg64, i64) {
     if n <= 0 { return (rng, 0) }
     // threshold = (2^64 mod n) computed as u64(-n) mod n.
     let neg_n = 0 - n
-    let threshold = rng_pcg_umod(neg_n, n)
+    let threshold = pcg_umod(neg_n, n)
     var current = rng
     var attempts: i64 = 0
     while attempts < 100 {
         let r = pcg64_next_i64(current)
         current = r.0
-        if !rng_pcg_u_lt(r.1, threshold) {
-            return (current, rng_pcg_umod(r.1, n))
+        if !pcg_u_lt(r.1, threshold) {
+            return (current, pcg_umod(r.1, n))
         }
         attempts = attempts + 1
     }
