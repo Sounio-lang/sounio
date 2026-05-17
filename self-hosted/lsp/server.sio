@@ -70,6 +70,7 @@ let M_FORMATTING:    i64 = 27
 let M_DOC_SYMBOL:    i64 = 28
 let M_DOC_HIGHLIGHT: i64 = 29
 let M_PREPARE_RENAME: i64 = 30
+let M_SIGNATURE_HELP: i64 = 31
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -413,6 +414,7 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "textDocument/documentSymbol")     { return M_DOC_SYMBOL  }
     if str_eq(s, "textDocument/documentHighlight")  { return M_DOC_HIGHLIGHT }
     if str_eq(s, "textDocument/prepareRename")      { return M_PREPARE_RENAME }
+    if str_eq(s, "textDocument/signatureHelp")      { return M_SIGNATURE_HELP }
     M_UNKNOWN
 }
 
@@ -2160,6 +2162,270 @@ fn respond_prepare_rename() with IO, Mut, Panic, Div {
 }
 
 // ============================================================================
+// Signature help — textDocument/signatureHelp
+// ============================================================================
+//
+// Walks back from the cursor to find the innermost enclosing `(`, counts
+// depth-1 commas (→ activeParameter), recovers the callee identifier
+// immediately before that `(`, scans DOC_TEXT for `fn NAME(...)`, and
+// emits a single SignatureInformation with the declarator line as label
+// and depth-1 parameter ranges. Returns {signatures:[]} when the cursor
+// is not inside a call.
+
+fn put_signature_empty() with IO, Mut, Panic, Div {
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":{\"signatures\":[],\"activeSignature\":0,\"activeParameter\":0}}")
+    write_frame()
+}
+
+// Append DOC_TEXT[start..start+len] into TX_BODY as a JSON-escaped string,
+// collapsing any newline / tab / carriage-return to a single space so the
+// signature label stays single-line.
+fn tx_put_label_slice(start: i64, len: i64) with Mut, Panic {
+    var i: i64 = 0
+    while i < len {
+        let c = DOC_TEXT[(start + i) as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else if c == 10 || c == 13 || c == 9 { tx_putc(32) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+}
+
+fn respond_signature_help() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        put_signature_empty()
+        return
+    }
+    parse_hover_position()
+    if HOVER_OK == 0 { put_signature_empty(); return }
+
+    // Convert (HOVER_LINE, HOVER_CHAR) to byte offset.
+    var i: i64 = 0
+    var line: i64 = 0
+    while i < DOC_TEXT_LEN && line < HOVER_LINE {
+        if (DOC_TEXT[i as usize] as i64) == 10 { line = line + 1 }
+        i = i + 1
+    }
+    if line != HOVER_LINE { put_signature_empty(); return }
+    var cur = i
+    var col: i64 = 0
+    while col < HOVER_CHAR && cur < DOC_TEXT_LEN {
+        let cc = DOC_TEXT[cur as usize] as i64
+        if cc == 10 { col = HOVER_CHAR } else { cur = cur + 1; col = col + 1 }
+    }
+
+    // Walk back from cur looking for `(` at depth 0. Track `)`/`(` for
+    // depth and count depth-0 commas. Bail on `{` / `}` / `;` (out of a
+    // call expression).
+    var depth: i64 = 0
+    var active: i64 = 0
+    var open_paren: i64 = 0 - 1
+    var p = cur - 1
+    var stop: i64 = 0
+    while p >= 0 && stop == 0 {
+        let c = DOC_TEXT[p as usize] as i64
+        if c == 41 { depth = depth + 1 }            // ')'
+        else if c == 40 {                            // '('
+            if depth == 0 { open_paren = p; stop = 1 }
+            else { depth = depth - 1 }
+        }
+        else if c == 44 && depth == 0 { active = active + 1 }   // ','
+        else if c == 123 || c == 125 || c == 59 {   // '{' '}' ';'
+            stop = 1
+        }
+        if stop == 0 { p = p - 1 }
+    }
+    if open_paren < 0 { put_signature_empty(); return }
+
+    // Walk back over whitespace from open_paren to find the callee ident.
+    var q = open_paren - 1
+    while q >= 0 {
+        let c = DOC_TEXT[q as usize] as i64
+        if c == 32 || c == 9 || c == 10 || c == 13 { q = q - 1 }
+        else { break }
+    }
+    if q < 0 { put_signature_empty(); return }
+    let name_end = q + 1
+    if is_ident_byte(DOC_TEXT[q as usize] as i64) == false { put_signature_empty(); return }
+    var name_start = q
+    while name_start > 0 {
+        let c = DOC_TEXT[(name_start - 1) as usize] as i64
+        if is_ident_byte(c) == false { break }
+        name_start = name_start - 1
+    }
+    // Reject numeric leading byte.
+    let first = DOC_TEXT[name_start as usize] as i64
+    if first >= 48 && first <= 57 { put_signature_empty(); return }
+
+    // Copy callee name into IDENT_BUF for reuse by scan_definition_for_ident.
+    IDENT_LEN = 0
+    var k = name_start
+    while k < name_end && IDENT_LEN < 128 {
+        IDENT_BUF[IDENT_LEN as usize] = DOC_TEXT[k as usize]
+        IDENT_LEN = IDENT_LEN + 1
+        k = k + 1
+    }
+    if IDENT_LEN <= 0 { put_signature_empty(); return }
+
+    // Scan DOC_TEXT for `fn NAME(` declaration. Walk linearly; reuse the
+    // same word-start / is_decl=="fn" filter as scan_definition_for_ident
+    // but require the declarator keyword to be exactly `fn`.
+    var fn_name_off: i64 = 0 - 1
+    var fn_paren_off: i64 = 0 - 1
+    var si: i64 = 0
+    while si < DOC_TEXT_LEN && fn_name_off < 0 {
+        var at_word_start: bool = false
+        if si == 0 { at_word_start = true }
+        else if is_ident_byte(DOC_TEXT[(si - 1) as usize] as i64) == false { at_word_start = true }
+        if at_word_start == true {
+            let je = read_ident_run(si)
+            if je > si && ident_slice_eq(si, je, "fn") {
+                let ns = skip_ws(je)
+                let ne = read_ident_run(ns)
+                let nlen = ne - ns
+                if nlen == IDENT_LEN && doc_slice_eq_ident(ns) == true {
+                    // Expect `(` after optional whitespace.
+                    let ps = skip_ws(ne)
+                    if ps < DOC_TEXT_LEN && (DOC_TEXT[ps as usize] as i64) == 40 {
+                        fn_name_off = ns
+                        fn_paren_off = ps
+                    }
+                }
+                if fn_name_off < 0 { si = je }
+            } else {
+                if je > si { si = je } else { si = si + 1 }
+            }
+        } else {
+            si = si + 1
+        }
+    }
+    if fn_name_off < 0 { put_signature_empty(); return }
+
+    // Find matching `)` for fn_paren_off.
+    var depth2: i64 = 1
+    var pe = fn_paren_off + 1
+    while pe < DOC_TEXT_LEN && depth2 > 0 {
+        let c = DOC_TEXT[pe as usize] as i64
+        if c == 40 { depth2 = depth2 + 1 }
+        else if c == 41 { depth2 = depth2 - 1; if depth2 == 0 { break } }
+        pe = pe + 1
+    }
+    if depth2 != 0 { put_signature_empty(); return }
+    // close paren index = pe
+
+    // Extend label to end of declarator: include the `-> ret` and effect
+    // clause up to `{` or newline, whichever comes first.
+    var label_end = pe + 1
+    while label_end < DOC_TEXT_LEN {
+        let c = DOC_TEXT[label_end as usize] as i64
+        if c == 123 || c == 10 { break }
+        label_end = label_end + 1
+    }
+
+    // Compute char offsets within the (collapsed) label for each
+    // parameter. The label starts at fn_name_off - 3 ("fn " then name) —
+    // we'll emit it starting at "fn" so users see the full declarator.
+    var label_start = fn_name_off
+    // Walk back over "fn " (3 bytes) to include the keyword.
+    if fn_name_off >= 3 {
+        if (DOC_TEXT[(fn_name_off - 3) as usize] as i64) == 102 &&
+           (DOC_TEXT[(fn_name_off - 2) as usize] as i64) == 110 {
+            label_start = fn_name_off - 3
+        }
+    }
+
+    // Build parameter range list: scan fn_paren_off+1 .. pe for depth-1
+    // commas. For each segment, find first/last non-whitespace byte to
+    // tighten the highlight, then convert to label-relative char offsets.
+    // We emit up to 32 params.
+    var param_starts: [i64; 32] = [0; 32]
+    var param_ends:   [i64; 32] = [0; 32]
+    var n_params: i64 = 0
+    var seg_start = fn_paren_off + 1
+    var d3: i64 = 0
+    var pp = fn_paren_off + 1
+    while pp < pe {
+        let c = DOC_TEXT[pp as usize] as i64
+        if c == 40 { d3 = d3 + 1 }
+        else if c == 41 { d3 = d3 - 1 }
+        else if c == 44 && d3 == 0 {
+            if n_params < 32 {
+                param_starts[n_params as usize] = seg_start
+                param_ends[n_params as usize] = pp
+                n_params = n_params + 1
+            }
+            seg_start = pp + 1
+        }
+        pp = pp + 1
+    }
+    // Final segment (only if non-empty so `fn f()` yields zero params).
+    var trail = seg_start
+    var trail_has: i64 = 0
+    while trail < pe {
+        let c = DOC_TEXT[trail as usize] as i64
+        if c != 32 && c != 9 && c != 10 && c != 13 { trail_has = 1; break }
+        trail = trail + 1
+    }
+    if trail_has == 1 && n_params < 32 {
+        param_starts[n_params as usize] = seg_start
+        param_ends[n_params as usize] = pe
+        n_params = n_params + 1
+    }
+    // Trim whitespace inside each param.
+    var t: i64 = 0
+    while t < n_params {
+        var s0 = param_starts[t as usize]
+        var e0 = param_ends[t as usize]
+        while s0 < e0 {
+            let c = DOC_TEXT[s0 as usize] as i64
+            if c == 32 || c == 9 || c == 10 || c == 13 { s0 = s0 + 1 } else { break }
+        }
+        while e0 > s0 {
+            let c = DOC_TEXT[(e0 - 1) as usize] as i64
+            if c == 32 || c == 9 || c == 10 || c == 13 { e0 = e0 - 1 } else { break }
+        }
+        param_starts[t as usize] = s0
+        param_ends[t as usize] = e0
+        t = t + 1
+    }
+    // Clamp active to the actual param count (e.g. user typed extra `,`).
+    if active > 0 && active >= n_params {
+        if n_params > 0 { active = n_params - 1 } else { active = 0 }
+    }
+
+    // Emit response.
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":{\"signatures\":[{\"label\":\"")
+    tx_put_label_slice(label_start, label_end - label_start)
+    tx_puts("\",\"parameters\":[")
+    var u: i64 = 0
+    while u < n_params {
+        if u > 0 { tx_putc(44) }
+        let rel_s = param_starts[u as usize] - label_start
+        let rel_e = param_ends[u as usize] - label_start
+        tx_puts("{\"label\":[")
+        tx_put_i64(rel_s)
+        tx_putc(44)
+        tx_put_i64(rel_e)
+        tx_puts("]}")
+        u = u + 1
+    }
+    tx_puts("],\"activeParameter\":")
+    tx_put_i64(active)
+    tx_puts("}],\"activeSignature\":0,\"activeParameter\":")
+    tx_put_i64(active)
+    tx_puts("}}")
+    write_frame()
+}
+
+// ============================================================================
 // Semantic tokens — textDocument/semanticTokens/full
 // ============================================================================
 //
@@ -2957,6 +3223,9 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("},")
     tx_puts("\"completionProvider\":{")
     tx_puts("\"triggerCharacters\":[\".\",\":\"]")
+    tx_puts("},")
+    tx_puts("\"signatureHelpProvider\":{")
+    tx_puts("\"triggerCharacters\":[\"(\",\",\"]")
     tx_puts("}")
     tx_puts("},")
     tx_puts("\"serverInfo\":{")
@@ -3017,6 +3286,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_DOC_SYMBOL  { respond_document_symbol();   return }
     if method == M_DOC_HIGHLIGHT { respond_document_highlight(); return }
     if method == M_PREPARE_RENAME { respond_prepare_rename(); return }
+    if method == M_SIGNATURE_HELP { respond_signature_help(); return }
     respond_method_not_found()
 }
 

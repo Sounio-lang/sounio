@@ -202,6 +202,40 @@ grep -q '"id":76,"result":{"start":' "$T7D_OUT" && note_pass "T7d.prepareRename 
 # prepareRename on `fn` keyword should return null
 grep -q '"id":77,"result":null' "$T7D_OUT" && note_pass "T7d.prepareRename rejects keyword" || note_fail "T7d.prepareRename rejects keyword"
 
+# ----- T7e: signatureHelp ------------------------------------------------
+T7E_OUT="$LOG_DIR/t7e.out"
+# Doc:
+#   line 0: fn add(a: i64, b: i64) -> i64 { a + b }
+#   line 1: fn main() -> i32 { add(10, 20); 0 }
+# Cursor positions exercise activeParameter detection.
+run_session "$T7E_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i32 { add(10, 20); 0 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":80,"method":"textDocument/signatureHelp","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"position":{"line":1,"character":23}}}' \
+  '{"jsonrpc":"2.0","id":81,"method":"textDocument/signatureHelp","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"position":{"line":1,"character":28}}}' \
+  '{"jsonrpc":"2.0","id":82,"method":"textDocument/signatureHelp","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"position":{"line":0,"character":2}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+# id 80: cursor inside add(10|, 20) → activeParameter == 0
+grep -q '"id":80,"result":{"signatures":\[{"label":"fn add(a: i64, b: i64)' "$T7E_OUT" \
+  && note_pass "T7e.signatureHelp label" || note_fail "T7e.signatureHelp label"
+grep -q '"id":80,.*"activeParameter":0}],' "$T7E_OUT" \
+  && note_pass "T7e.activeParameter=0" || note_fail "T7e.activeParameter=0"
+# id 81: cursor after the comma → activeParameter == 1
+grep -q '"id":81,.*"activeParameter":1}],' "$T7E_OUT" \
+  && note_pass "T7e.activeParameter=1 after comma" || note_fail "T7e.activeParameter=1 after comma"
+# id 81: parameter ranges advertised (two `{"label":[N,M]}` entries)
+n_par=$(grep -oE '"id":81,"result":\{.*"activeParameter":1\}\],' "$T7E_OUT" \
+        | grep -oE '"label":\[[0-9]+,[0-9]+\]' | wc -l)
+if [ "$n_par" -eq 2 ]; then
+  note_pass "T7e.two parameter ranges"
+else
+  note_fail "T7e.two parameter ranges (got $n_par)"
+fi
+# id 82: outside any call → empty signatures
+grep -q '"id":82,"result":{"signatures":\[\]' "$T7E_OUT" \
+  && note_pass "T7e.outside call → empty" || note_fail "T7e.outside call → empty"
+
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"
 run_session "$T8_OUT" \
