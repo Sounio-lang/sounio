@@ -3284,6 +3284,146 @@ fn respond_inlay_hint() with IO, Mut, Panic, Div {
 }
 
 // ============================================================================
+// Code actions — textDocument/codeAction
+// ============================================================================
+//
+// v0 ships a single quick-fix: `loop {` → `while true {`. The compiler
+// rejects `loop` as E200, so this is by far the highest-traffic fix in
+// practice.  Scans the requested range for the `loop` keyword (at a
+// word start, followed by optional whitespace and `{`), and emits one
+// CodeAction per hit with a WorkspaceEdit that replaces just the
+// keyword with `while true`.
+//
+// Future kinds (refactor.extract, source.organizeImports, ...) layer on
+// the same dispatch.
+
+let CA_CAP: i64 = 64
+var CA_EMITTED: i64 = 0
+var CA_COUNT:   i64 = 0
+
+// Parse params.range. Fills CA_RANGE_S_OFF / CA_RANGE_E_OFF (DOC_TEXT
+// byte offsets). Returns true on success.
+var CA_RANGE_S_OFF: i64 = 0
+var CA_RANGE_E_OFF: i64 = 0
+
+fn ca_parse_range() -> bool with Mut, Panic, Div {
+    // The request always has at least one line/character pair for the
+    // range.start; the second pair is range.end. body_find walks in
+    // order so the FIRST two `"line"` keys are start/end respectively.
+    let lp1 = body_find("\"line\"", 0)
+    if lp1 < 0 { return false }
+    let cp1 = body_find("\"character\"", lp1)
+    if cp1 < 0 { return false }
+    let lp2 = body_find("\"line\"", cp1)
+    if lp2 < 0 { return false }
+    let cp2 = body_find("\"character\"", lp2)
+    if cp2 < 0 { return false }
+    let s_ln = body_read_int_after(lp1 + 6)
+    let s_ch = body_read_int_after(cp1 + 11)
+    let e_ln = body_read_int_after(lp2 + 6)
+    let e_ch = body_read_int_after(cp2 + 11)
+    if s_ln < 0 || s_ch < 0 || e_ln < 0 || e_ch < 0 { return false }
+    CA_RANGE_S_OFF = sr_pos_to_offset(s_ln, s_ch)
+    CA_RANGE_E_OFF = sr_pos_to_offset(e_ln, e_ch)
+    return true
+}
+
+fn ca_emit_loop_fix(loop_off: i64) with Mut, Panic, Div {
+    if CA_EMITTED == 1 { tx_putc(44) }
+    CA_EMITTED = 1
+    CA_COUNT = CA_COUNT + 1
+    offset_to_position(loop_off, 0)
+    let s_line = DEF_LINE
+    let s_char = DEF_CHAR
+    let e_char = DEF_CHAR + 4
+    tx_puts("{\"title\":\"Replace `loop` with `while true`\",\"kind\":\"quickfix\",\"edit\":{\"changes\":{\"")
+    var i: i64 = 0
+    while i < DOC_URI_LEN {
+        let c = DOC_URI[i as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+    tx_puts("\":[{\"range\":{\"start\":{\"line\":")
+    tx_put_i64(s_line)
+    tx_puts(",\"character\":")
+    tx_put_i64(s_char)
+    tx_puts("},\"end\":{\"line\":")
+    tx_put_i64(s_line)
+    tx_puts(",\"character\":")
+    tx_put_i64(e_char)
+    tx_puts("}},\"newText\":\"while true\"}]}}}")
+}
+
+fn respond_code_action() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+
+    var have_range: bool = ca_parse_range()
+    var rs: i64 = 0
+    var re: i64 = DOC_TEXT_LEN
+    if have_range == true {
+        rs = CA_RANGE_S_OFF
+        re = CA_RANGE_E_OFF
+    }
+    if rs < 0 { rs = 0 }
+    if re > DOC_TEXT_LEN { re = DOC_TEXT_LEN }
+
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    CA_EMITTED = 0
+    CA_COUNT = 0
+
+    // Scan the range for `loop` at word start, followed by ws then `{`.
+    // We extend the lower bound by 4 bytes to catch a `loop` that
+    // overlaps the start of the range. Likewise extend the upper bound
+    // so that we still recognize a `loop` whose keyword bytes are in
+    // range even if the trailing `{` is just past it.
+    var sb = rs - 4
+    if sb < 0 { sb = 0 }
+    var eb = re + 4
+    if eb > DOC_TEXT_LEN { eb = DOC_TEXT_LEN }
+    var i = sb
+    while i < eb && CA_COUNT < CA_CAP {
+        var at_word_start: bool = false
+        if i == 0 { at_word_start = true }
+        else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false {
+            at_word_start = true
+        }
+        if at_word_start == true {
+            let je = read_ident_run(i)
+            if je > i && ident_slice_eq(i, je, "loop") {
+                let ps = skip_ws(je)
+                if ps < DOC_TEXT_LEN && (DOC_TEXT[ps as usize] as i64) == 123 {
+                    // Only emit if the keyword overlaps the requested range.
+                    if je > rs && i < re {
+                        ca_emit_loop_fix(i)
+                    }
+                }
+                if je > i { i = je } else { i = i + 1 }
+            } else {
+                if je > i { i = je } else { i = i + 1 }
+            }
+        } else {
+            i = i + 1
+        }
+    }
+
+    tx_puts("]}")
+    write_frame()
+}
+
+// ============================================================================
 // Semantic tokens — textDocument/semanticTokens/full
 // ============================================================================
 //
@@ -4069,7 +4209,7 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"documentSymbolProvider\":true,")
     tx_puts("\"documentHighlightProvider\":true,")
     tx_puts("\"documentFormattingProvider\":false,")
-    tx_puts("\"codeActionProvider\":true,")
+    tx_puts("\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"]},")
     tx_puts("\"semanticTokensProvider\":{")
     tx_puts("\"legend\":{")
     // Indices here must match the ST_TYPE_* constants used by the
@@ -4145,7 +4285,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_DEFINITION  { respond_definition();        return }
     if method == M_REFERENCES  { respond_references();        return }
     if method == M_RENAME      { respond_rename();            return }
-    if method == M_CODE_ACTION { respond_empty_result();      return }
+    if method == M_CODE_ACTION { respond_code_action();       return }
     if method == M_SEM_TOKENS  { respond_semantic_tokens();   return }
     if method == M_FORMATTING  { respond_empty_result();      return }
     if method == M_DOC_SYMBOL  { respond_document_symbol();   return }

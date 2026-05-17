@@ -391,6 +391,29 @@ grep -q '"typeDefinitionProvider":true' "$T7K_OUT" \
 grep -q '"implementationProvider":true' "$T7K_OUT" \
   && note_pass "T7k.cap.implementation" || note_fail "T7k.cap.implementation"
 
+# ----- T7l: codeAction (loop → while true) ------------------------------
+T7L_OUT="$LOG_DIR/t7l.out"
+# Doc with a `loop {`. Request codeAction over the whole file.
+run_session "$T7L_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn main() -> i32 {\n    loop {\n        break\n    }\n    0\n}\n"}}}' \
+  '{"jsonrpc":"2.0","id":140,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"range":{"start":{"line":0,"character":0},"end":{"line":5,"character":0}},"context":{"diagnostics":[]}}}' \
+  '{"jsonrpc":"2.0","id":141,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"range":{"start":{"line":3,"character":0},"end":{"line":4,"character":0}},"context":{"diagnostics":[]}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+# id 140: whole-file range → one quickfix for the `loop` on line 1
+grep -q '"id":140,"result":\[{"title":"Replace `loop` with `while true`"' "$T7L_OUT" \
+  && note_pass "T7l.title" || note_fail "T7l.title"
+grep -q '"kind":"quickfix"' "$T7L_OUT" \
+  && note_pass "T7l.kind=quickfix" || note_fail "T7l.kind=quickfix"
+grep -q '"newText":"while true"' "$T7L_OUT" \
+  && note_pass "T7l.newText=while true" || note_fail "T7l.newText=while true"
+grep -q '"start":{"line":1,"character":4},"end":{"line":1,"character":8}' "$T7L_OUT" \
+  && note_pass "T7l.edit range = loop keyword" || note_fail "T7l.edit range = loop keyword"
+# id 141: range that excludes the `loop` → empty result
+grep -q '"id":141,"result":\[\]' "$T7L_OUT" \
+  && note_pass "T7l.range outside loop → empty" || note_fail "T7l.range outside loop → empty"
+
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"
 run_session "$T8_OUT" \
