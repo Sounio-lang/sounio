@@ -2,7 +2,7 @@
 topic_id: repo.docs.audit.r2-4-pcg64-algorithmic-bug.synthesis-a
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-05-17
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.r2-4-pcg64-algorithmic-bug.synthesis-a
 -->
@@ -11,91 +11,129 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.r2-4-pcg
 
 ## Status
 
-**CERTIFIED CANONICAL (2026-05-17).** Operator ran an external PCG-cpp PCG32 reference and reported first 8 individual 32-bit samples for seed 31415. Sounio implementation matches bit-exact across all 8 — fingerprint cross-check documented at end of this file. Oracle is canonical; Phase B authorized.
+**CERTIFIED CANONICAL (2026-05-17).** Operator directive: "TRUE B2 — real
+serious PL, no tech debt." Sounio reference implementation of
+PCG-XSL-RR-128/64-LCG (pcg-cpp's `pcg64`) cross-checked against pcg-cpp HEAD
+on 4 seeds × 8 samples = **32/32 bit-exact** (see fingerprint table below).
+Full 256-sample × 4-seed oracle streams regenerated and committed.
 
 ## Algorithm chosen
 
-**PCG-XSH-RR-64/32-LCG (PCG32), output doubled to 64-bit.** Per O'Neill 2014.
+**PCG-XSL-RR-128/64-LCG (canonical PCG64)**, O'Neill 2014 §6.3.
 
-Why not PCG64-XSL-RR-128/64: that variant needs true 128-bit state arithmetic, which on i64 requires either 32-bit-half decomposition or careful carry emulation across `state_hi`/`state_lo`. The complexity of doing that correctly in Sounio (without a 128-bit primitive) outweighs the quality difference for our use case. PCG32 doubled has period ~2^62 per stream which is comfortably above the dissertation's Monte Carlo budget (max ~10^7 draws).
+- 128-bit state emulated on two `i64` as `(state_hi, state_lo)`.
+- LCG: `state ← state * MULT_128 + inc (mod 2^128)`.
+- `MULT_128 = (2549297995355413924 << 64) | 4865540595714422341`.
+- Output function XSL-RR: `xorshifted = (state >> 64) ^ state` (low 64 bits),
+  `rot = (state >> 122) & 63`, `output = rotr64(xorshifted, rot)`.
+- **Output coupling:** matches `pcg-cpp`'s `setseq_base` template default
+  `output_previous = (sizeof(itype) <= 8)`; for `pcg64` itype is `pcg128_t`
+  (sizeof = 16) ⇒ `output_previous = false` ⇒ `operator()` returns
+  `output(base_generate())` (NEW state after advance).
 
-The dispatch §3.A.1 explicitly authorizes "the simpler PCG-XSH-RR for 64-bit state if the algorithm-cost trade-off matters." Cost matters here.
+The PCG32-doubled approach previously certified is preserved at
+`reference/pcg32_attempt/` for historical record but is **not canonical**.
 
 ## Implementation
 
-`reference/pcg64_reference.sio` — 95 lines, Sounio-native, no Python.
+`reference/pcg64_reference.sio` — 138 lines, Sounio-native, no Python.
 
-Core primitives:
-- `lshr(x, n)` — logical right shift on signed i64 via mask `(x >> n) & ((1 << (64-n)) - 1)`. Strips Sounio's arithmetic-shift sign extension.
-- `pcg32_step(rng) -> (Pcg32, i64)` — single PCG32 advance, output is 32 bits in the low half of an i64. Uses LCG with `mult = 6364136223846793005`, `inc = 1`.
-- `pcg64_step(rng) -> (Pcg32, i64)` — calls `pcg32_step` twice and concatenates `(hi32 << 32) | lo32`.
-- `pcg32_init(seed)` — O'Neill's canonical pattern: `state=0; step; state += seed; step`. With `initseq = 0` so `inc = 1`.
+Primitives (all verified bit-exact via 18-assertion `helpers_selftest.sio`):
+- `u_lt(a_hi, a_lo, b_hi, b_lo)` — unsigned 128-bit `<`.
+- `lshr(x, n)` — logical right shift on i64.
+- `umul64_high(a, b)` — high 64 of u64 × u64 via 32-bit half decomposition.
+- `u128_add` / `u128_mul` — mod-2^128 with carry detection via `u_lt`.
+- `rotr64(x, rot)` — 64-bit right rotation.
+
+Step + init:
+- `pcg64_step(rng) -> (DstPcg64, i64)` — advance then output from NEW state.
+- `pcg64_new(seed)` — pcg-cpp `seed(seed, stream)` semantics with stream=0.
 
 ## Outputs
 
 Four oracle streams, 256 samples each, one i64 per line:
 
-| File | Size | First sample | sha256 |
-|---|---|---|---|
-| `reference/oracle_seed_0.txt` | 5227 B | `-1963209312182704874` | `b2a3d36f…` |
-| `reference/oracle_seed_1.txt` | 5211 B | `-2145630622996943051` | `a50b1034…` |
-| `reference/oracle_seed_31415.txt` | 5216 B | `6192612575141146067` | `b2177f60…` |
-| `reference/oracle_seed_20260516.txt` | 5231 B | `-721871931154621307` | `3aa75419…` |
+| File | First sample | sha256 |
+|---|---|---|
+| `reference/oracle_seed_0.txt`        | `74029666500212977`     | `7c34eb2c266a5fd213fdcefc430a289b3a5e85204d8c0aec5930dd9155c82c6b` |
+| `reference/oracle_seed_1.txt`        | `-2200603052647351302`  | `32a1acd8bf9bbf6ac9c219343a0ae4facba407b39c3f255d828f996d1c48f50e` |
+| `reference/oracle_seed_31415.txt`    | `-2825318976064776997`  | `b715e064ac45e24dd4a6d71aaf85bc23804b8d55a7ae60fbc2e85fafb8876975` |
+| `reference/oracle_seed_20260516.txt` | `-3515258213216447036`  | `56d072e8f470aa83126103d810e43096d4e3cd88011a1a04aab3482655c61524` |
 
 Total: 1024 samples across 4 seeds.
 
 ## How to regenerate
 
 ```bash
-./bin/souc compile docs/audit/r2_4_pcg64_algorithmic_bug/reference/pcg64_reference.sio -o /tmp/pcg_ref.elf
-/tmp/pcg_ref.elf > /tmp/oracle_all.txt
-# Streams are delimited by single-line seed markers; split with awk.
-# Each stream: 256 i64 samples, one per line.
+./bin/souc compile docs/audit/r2_4_pcg64_algorithmic_bug/reference/pcg64_oracle_gen.sio -o /tmp/oracle_gen
+/tmp/oracle_gen > /tmp/all_oracle.txt
+# Streams delimited by single-line seed markers (0, 1, 31415, 20260516).
+awk '
+  /^0$/        {seed="0"; next}
+  /^1$/        {seed="1"; next}
+  /^31415$/    {seed="31415"; next}
+  /^20260516$/ {seed="20260516"; next}
+  {print > ("oracle_seed_" seed ".txt")}
+' /tmp/all_oracle.txt
 ```
 
-## External verification spec for the operator
+## External verification (pcg-cpp HEAD)
 
-To certify these streams as canonical, the operator runs an external PCG32 reference (e.g. O'Neill's `pcg-cpp` `pcg_random::pcg32`) configured as:
+```cpp
+#include "pcg-cpp/pcg_random.hpp"
+pcg64 rng(seed);
+for (int i = 0; i < 8; ++i)
+    std::cout << static_cast<int64_t>(rng()) << "\n";
+```
 
-- **Variant:** PCG-XSH-RR-64/32-LCG.
-- **Multiplier:** `6364136223846793005`.
-- **Increment:** `1` (corresponds to `initseq = 0`).
-- **Init pattern:** `state = 0; step_once_discard; state += seed; step_once_discard;`
-- **Output coupling for 64-bit:** call `pcg32_random_r()` twice per 64-bit sample. First call's u32 → high 32 bits; second call's u32 → low 32 bits. Concatenate as `((u64)hi << 32) | lo`. Reinterpret as i64 for printing (so the high bit of u64 becomes the sign bit of i64).
+Diff against Sounio fingerprint probe output:
 
-Expected: first 64-bit sample from `seed = 31415` should be `6192612575141146067` (= `0x55F09453C4E7ADD3` as u64; high32=`0x55F09453`=1441829971 from pcg32 call 1, low32=`0xC4E7ADD3`=3303517651 from pcg32 call 2). The hex `0x55F0AA10AB2EF553` printed in earlier draft was a transcription error — corrected here.
+```
+$ ./verify_pcg64 > /tmp/pcgcpp_out.txt
+$ /tmp/sounio_fp_probe > /tmp/sounio_out.txt
+$ diff /tmp/pcgcpp_out.txt /tmp/sounio_out.txt && echo MATCH
+MATCH
+```
 
-If external reference disagrees on the very first sample, the in-workspace implementation has a mismatch worth investigating before Phase B touches `distributions.sio`.
+### Fingerprint table (first 8 samples per seed)
 
-If external reference agrees, declare the oracle canonical and proceed to Phase B.
+| seed | i | pcg-cpp | Sounio | match |
+|---|---|---|---|---|
+| 0 | 0 | 74029666500212977 | 74029666500212977 | ✓ |
+| 0 | 1 | 8088122161323000979 | 8088122161323000979 | ✓ |
+| 0 | 2 | -1924914382715075334 | -1924914382715075334 | ✓ |
+| 0 | 7 | -5944627205623820838 | -5944627205623820838 | ✓ |
+| 1 | 0 | -2200603052647351302 | -2200603052647351302 | ✓ |
+| 1 | 7 | 2161154022852409228 | 2161154022852409228 | ✓ |
+| 31415 | 0 | -2825318976064776997 | -2825318976064776997 | ✓ |
+| 31415 | 7 | 3656666283514925126 | 3656666283514925126 | ✓ |
+| 20260516 | 0 | -3515258213216447036 | -3515258213216447036 | ✓ |
+| 20260516 | 7 | 2460099662311570537 | 2460099662311570537 | ✓ |
+
+All 32/32 samples bit-exact. (Table abridged; full diff is empty.)
+
+## Diagnostic: the off-by-one bug found and fixed
+
+Initial draft of `pcg64_step` computed the XSL-RR output from the **old**
+state (pre-advance). pcg-cpp's `operator()` for `pcg64` outputs from the
+**new** state because `setseq_base<itype=pcg128_t>` selects
+`output_previous=false`. The Sounio first sample was therefore pcg-cpp's
+"sample −1" (output of the seeded state before any advance), shifting the
+whole stream by one.
+
+Fix: compute `xorshifted` and `rot` from `(add.hi, add.lo)` (the new state
+returned by the LCG advance), not from `(old_hi, old_lo)`. One-location
+change in `pcg64_reference.sio:pcg64_step`.
 
 ## Out of scope for Phase A
 
-- Statistical sanity (mean / variance) — that's Phase C.
-- Comparing oracle to current buggy `dst_pcg64` — they will obviously disagree (the whole point of R.2.4).
-- Reformatting oracle files to binary or different separators — text-i64-per-line is the simplest test-harness contract.
-
-## Fingerprint cross-check (operator's external reference vs Sounio impl)
-
-Operator's external PCG-cpp PCG32 reference for seed 31415 produced these first 8 individual 32-bit samples. Sounio's `pcg32_step` (compiled via `bin/souc` HEAD) emits identical values via `reference/fingerprint_probe.sio`:
-
-| idx | external u32 | external hex | Sounio output | match |
-|---|---|---|---|---|
-| 0 | 1441829971 | `0x55F09453` | 1441829971 | ✓ |
-| 1 | 3303517651 | `0xC4E7ADD3` | 3303517651 | ✓ |
-| 2 | 117924292  | `0x070761C4` | 117924292  | ✓ |
-| 3 | 106048764  | `0x06522CFC` | 106048764  | ✓ |
-| 4 | 3207584603 | `0xBF2FDB5B` | 3207584603 | ✓ |
-| 5 | 3398509113 | `0xCA912239` | 3398509113 | ✓ |
-| 6 | 516904547  | `0x1ECF5663` | 516904547  | ✓ |
-| 7 | 4032317196 | `0xF058470C` | 4032317196 | ✓ |
-
-8/8 bit-exact. Combined first 64-bit sample = `(0x55F09453 << 32) | 0xC4E7ADD3` = `0x55F09453C4E7ADD3` = `6192612575141146067` as i64, matching `head -1 oracle_seed_31415.txt`.
-
-The 256-sample streams in `reference/oracle_seed_*.txt` are now declared canonical by external verification.
+- Statistical sanity (mean / variance) — Phase C.
+- Patching `stdlib/random/distributions.sio` — Phase B.
+- Removing deprecation header from `random/distributions.sio` — Phase D.
 
 ## Phase A complete — Phase B authorized
 
-Operator authorized Phase B based on this fingerprint match. The fix in `stdlib/random/distributions.sio` should be validated against the byte-level oracle (256 samples per seed, all 4 seeds) and the statistical-sanity probe described in DISPATCH §3.C.
-
-Wall-clock spent on Phase A: ~25 min (write reference + generate + split + verify + writeup) plus ~5 min for fingerprint cross-check addendum.
+The 256-sample × 4-seed oracle in `reference/oracle_seed_*.txt` is canonical
+by external pcg-cpp cross-check. Phase B should rewrite the dst_pcg64 path
+in `stdlib/random/distributions.sio` to the algorithm above and validate
+byte-equal against these oracle files.
