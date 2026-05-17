@@ -5720,20 +5720,9 @@ fn mir_opcode_port_mask(opcode: i64) -> i64 {
     else { 99 }                                                                    // P0,P1,P5,P6
 }
 
-fn machine_func_has_control_flow(func: MachineFunction) -> bool with Mut, Panic, Div {
-    var i: i64 = 0
-    while i < func.blocks[0].instr_count {
-        let op = func.blocks[0].instrs[i as usize].opcode
-        if op == MIR_OP_LABEL || op == MIR_OP_JMP || op == MIR_OP_JCC { return true }
-        i = i + 1
-    }
-    false
-}
-
-// Scheduler runtime gate.  Now driven by the module-scope
-// CGPLAN_GLOBAL_BLOCK (~110 KB) instead of a 27 MB stack-allocated
-// CodegenPlan, so the SUB-RSP-past-the-guard-page hang on
-// struct_basic is gone.
+// Scheduler runtime gate.  Drives compile_ir_function_v2_mut to
+// either go through the legacy linear emitter or the basic-block
+// list scheduler (CGPLAN_GLOBAL_BLOCK + cgplan_global_*).
 fn native_v2_scheduler_enabled() -> bool { true }
 
 fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) with Mut, Panic, Div, Alloc {
@@ -5772,39 +5761,67 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
 
     (*nc).code = emit_prologue_with_preg_mask((*nc).code, frame_size, preg_mask)
     spill_ir_params_mut(nc, func)
-    if !native_v2_scheduler_enabled() || machine_func_has_control_flow(machine_func) {
+    if !native_v2_scheduler_enabled() {
         native_v2_emit_machine_function_mut(nc, machine_func, fn_index, function_offset)
     } else {
-        cgplan_global_reset()
+        // Per-basic-block scheduling: chop the MIR stream at labels,
+        // jumps, rets, and calls; schedule each chunk through
+        // CGPLAN_GLOBAL_BLOCK; emit terminators in original order
+        // (preserves control-flow + safepoint positions).
+        let n = machine_func.blocks[0].instr_count
+        var block_start: i64 = 0
         var mi: i64 = 0
-        while mi < machine_func.blocks[0].instr_count {
-            let m = machine_func.blocks[0].instrs[mi as usize]
-            let cg = codegen_instr_with_port(
-                mi,
-                mir_opcode_to_cgop(m.opcode),
-                mir_operand_to_sched_reg(m.dst),
-                mir_operand_to_sched_reg(m.src1),
-                mir_operand_to_sched_reg(m.src2),
-                mir_opcode_latency(m.opcode),
-                mir_opcode_port_mask(m.opcode),
-                2
-            )
-            cgplan_global_add(cg)
-            mi = mi + 1
-        }
-        cgplan_global_build_deps()
-        cgplan_global_schedule()
-        let slen = CGPLAN_GLOBAL_BLOCK.schedule_len
-        var si: i64 = 0
-        while si < slen {
-            let idx = CGPLAN_GLOBAL_BLOCK.schedule[si as usize]
-            let em_instr = machine_func.blocks[0].instrs[idx as usize]
-            if native_v2_machine_instr_is_safepoint(em_instr) {
-                let sp_kind = if em_instr.opcode == MIR_OP_CALL { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
-                native_v2_record_safepoint_mut(nc, fn_index, sp_kind, idx, (*nc).code.len - function_offset, machine_func.temp_count, (*nc).current_machine_spill_count)
+        while mi <= n {
+            var is_terminator: bool = false
+            if mi < n {
+                let op = machine_func.blocks[0].instrs[mi as usize].opcode
+                if op == MIR_OP_LABEL || op == MIR_OP_JMP || op == MIR_OP_JCC
+                   || op == MIR_OP_RET || op == MIR_OP_CALL {
+                    is_terminator = true
+                }
             }
-            (*nc) = native_v2_emit_machine_instr((*nc), em_instr)
-            si = si + 1
+            if is_terminator || mi == n {
+                if block_start < mi {
+                    cgplan_global_reset()
+                    var pi: i64 = block_start
+                    while pi < mi {
+                        let m = machine_func.blocks[0].instrs[pi as usize]
+                        let cg = codegen_instr_with_port(
+                            pi - block_start,
+                            mir_opcode_to_cgop(m.opcode),
+                            mir_operand_to_sched_reg(m.dst),
+                            mir_operand_to_sched_reg(m.src1),
+                            mir_operand_to_sched_reg(m.src2),
+                            mir_opcode_latency(m.opcode),
+                            mir_opcode_port_mask(m.opcode),
+                            2
+                        )
+                        cgplan_global_add(cg)
+                        pi = pi + 1
+                    }
+                    cgplan_global_build_deps()
+                    cgplan_global_schedule()
+                    let slen = CGPLAN_GLOBAL_BLOCK.schedule_len
+                    var si: i64 = 0
+                    while si < slen {
+                        let local_idx = CGPLAN_GLOBAL_BLOCK.schedule[si as usize]
+                        let real_idx = block_start + local_idx
+                        let em_instr = machine_func.blocks[0].instrs[real_idx as usize]
+                        (*nc) = native_v2_emit_machine_instr((*nc), em_instr)
+                        si = si + 1
+                    }
+                }
+                if is_terminator {
+                    let term_instr = machine_func.blocks[0].instrs[mi as usize]
+                    if native_v2_machine_instr_is_safepoint(term_instr) {
+                        let sp_kind = if term_instr.opcode == MIR_OP_CALL { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
+                        native_v2_record_safepoint_mut(nc, fn_index, sp_kind, mi, (*nc).code.len - function_offset, machine_func.temp_count, (*nc).current_machine_spill_count)
+                    }
+                    (*nc) = native_v2_emit_machine_instr((*nc), term_instr)
+                }
+                block_start = mi + 1
+            }
+            mi = mi + 1
         }
     }
 
