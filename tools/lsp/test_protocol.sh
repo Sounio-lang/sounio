@@ -365,6 +365,32 @@ fi
 grep -q '"paddingRight":true' "$T7J_OUT" \
   && note_pass "T7j.paddingRight" || note_fail "T7j.paddingRight"
 
+# ----- T7k: declaration / typeDefinition / implementation ---------------
+T7K_OUT="$LOG_DIR/t7k.out"
+run_session "$T7K_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn helper(x: i64) -> i64 { x + 1 }\nfn main() -> i32 { helper(1); 0 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":130,"method":"textDocument/declaration","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"position":{"line":1,"character":20}}}' \
+  '{"jsonrpc":"2.0","id":131,"method":"textDocument/typeDefinition","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"position":{"line":1,"character":20}}}' \
+  '{"jsonrpc":"2.0","id":132,"method":"textDocument/implementation","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"position":{"line":1,"character":20}}}' \
+  '{"jsonrpc":"2.0","id":133,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+# All three should return a Location pointing at the fn helper decl
+grep -q '"id":130,"result":{"uri":"file:///tmp/t.sio"' "$T7K_OUT" \
+  && note_pass "T7k.declaration → helper" || note_fail "T7k.declaration → helper"
+grep -q '"id":131,"result":{"uri":"file:///tmp/t.sio"' "$T7K_OUT" \
+  && note_pass "T7k.typeDefinition → helper" || note_fail "T7k.typeDefinition → helper"
+grep -q '"id":132,"result":{"uri":"file:///tmp/t.sio"' "$T7K_OUT" \
+  && note_pass "T7k.implementation → helper" || note_fail "T7k.implementation → helper"
+# initialize must now advertise the three new capabilities.
+grep -q '"declarationProvider":true' "$T7K_OUT" \
+  && note_pass "T7k.cap.declaration" || note_fail "T7k.cap.declaration"
+grep -q '"typeDefinitionProvider":true' "$T7K_OUT" \
+  && note_pass "T7k.cap.typeDefinition" || note_fail "T7k.cap.typeDefinition"
+grep -q '"implementationProvider":true' "$T7K_OUT" \
+  && note_pass "T7k.cap.implementation" || note_fail "T7k.cap.implementation"
+
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"
 run_session "$T8_OUT" \
