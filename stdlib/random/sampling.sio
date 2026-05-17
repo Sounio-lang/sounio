@@ -24,47 +24,167 @@ struct SmpPcg64 {
     inc_lo: i64,
 }
 
+struct SmpU128 {
+    hi: i64,
+    lo: i64,
+}
+
+// ─── Unsigned 128-bit helpers (canonical per R.2.4 / pcg-cpp) ─────────────
+
+fn smp_pcg_u_lt(a: i64, b: i64) -> bool {
+    let top: i64 = 1
+    let mask = top << 63
+    (a ^ mask) < (b ^ mask)
+}
+
+fn smp_pcg_lshr(x: i64, n: i64) -> i64 {
+    if n <= 0 { return x }
+    if n >= 64 { return 0 }
+    let raw = x >> n
+    let one: i64 = 1
+    let mask = (one << (64 - n)) - 1
+    return raw & mask
+}
+
+fn smp_pcg_umul64_high(a: i64, b: i64) -> i64 {
+    let mask32: i64 = 4294967295
+    let al = a & mask32
+    let ah = smp_pcg_lshr(a, 32)
+    let bl = b & mask32
+    let bh = smp_pcg_lshr(b, 32)
+    let ll = al * bl
+    let lh = al * bh
+    let hl = ah * bl
+    let hh = ah * bh
+    let t = smp_pcg_lshr(ll, 32) + (lh & mask32) + (hl & mask32)
+    return smp_pcg_lshr(t, 32) + smp_pcg_lshr(lh, 32) + smp_pcg_lshr(hl, 32) + hh
+}
+
+fn smp_pcg_u128_add(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> SmpU128 {
+    let res_lo = a_lo + b_lo
+    let carry: i64 = if smp_pcg_u_lt(res_lo, a_lo) { 1 } else { 0 }
+    let res_hi = a_hi + b_hi + carry
+    return SmpU128 { hi: res_hi, lo: res_lo }
+}
+
+fn smp_pcg_u128_mul(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> SmpU128 {
+    let res_lo = a_lo * b_lo
+    let res_hi = smp_pcg_umul64_high(a_lo, b_lo) + a_hi * b_lo + a_lo * b_hi
+    return SmpU128 { hi: res_hi, lo: res_lo }
+}
+
+fn smp_pcg_rotr64(x: i64, rot: i64) -> i64 {
+    let r = rot & 63
+    if r == 0 { return x }
+    let right = smp_pcg_lshr(x, r)
+    let left = x << (64 - r)
+    return right | left
+}
+
+// ─── PCG64-XSL-RR-128/64 step + canonical seeding (matches pcg-cpp) ───────
+
 fn smp_pcg64_new(seed: i64) -> SmpPcg64 {
-    SmpPcg64 {
-        state_hi: seed ^ 0x853c49e6748fea9b,
-        state_lo: seed * 6364136223846793005,
-        inc_hi: 1,
-        inc_lo: 1,
-    }
+    let inc_hi: i64 = 6364136223846793005
+    let inc_lo: i64 = 1442695040888963407
+    let s0 = SmpPcg64 { state_hi: 0, state_lo: 0, inc_hi: inc_hi, inc_lo: inc_lo }
+    let r1 = smp_pcg64_next_i64(s0)
+    let mid = r1.0
+    let add = smp_pcg_u128_add(mid.state_hi, mid.state_lo, 0, seed)
+    let s2 = SmpPcg64 { state_hi: add.hi, state_lo: add.lo, inc_hi: inc_hi, inc_lo: inc_lo }
+    let r2 = smp_pcg64_next_i64(s2)
+    return r2.0
 }
 
 fn smp_pcg64_next_i64(rng: SmpPcg64) -> (SmpPcg64, i64) {
-    let old_state = rng.state_lo
-    let new_lo = rng.state_lo * 6364136223846793005 + rng.inc_lo
-    let new_hi = rng.state_hi + rng.inc_hi
-
-    let xorshifted = (old_state >> 18) ^ old_state
-    let rot = (old_state >> 59) & 63
-    let result = xorshifted >> rot
-
+    let mult_hi: i64 = 2549297995355413924
+    let mult_lo: i64 = 4865540595714422341
+    let mul = smp_pcg_u128_mul(rng.state_hi, rng.state_lo, mult_hi, mult_lo)
+    let add = smp_pcg_u128_add(mul.hi, mul.lo, rng.inc_hi, rng.inc_lo)
+    let new_hi = add.hi
+    let new_lo = add.lo
+    let xorshifted = new_hi ^ new_lo
+    let rot = smp_pcg_lshr(new_hi, 58) & 63
+    let output = smp_pcg_rotr64(xorshifted, rot)
     return (SmpPcg64 {
         state_hi: new_hi,
         state_lo: new_lo,
         inc_hi: rng.inc_hi,
         inc_lo: rng.inc_lo,
-    }, result)
+    }, output)
 }
 
 fn smp_pcg64_next_f64(rng: SmpPcg64) -> (SmpPcg64, f64) {
     let result = smp_pcg64_next_i64(rng)
-    let bits = result.1
-    let positive = if bits < 0 { 0 - bits } else { bits }
-    let fraction = (positive as f64) / 9223372036854775807.0
+    let mantissa = smp_pcg_lshr(result.1, 11)
+    let fraction = (mantissa as f64) / 9007199254740992.0
     return (result.0, fraction)
 }
 
-// Generate integer in [0, n)
+// Generate integer in [0, n) with unbiased rejection-modulo.
+// threshold = (2^64 mod n) = ((-n as u64) mod n); reject if u64(x) < threshold.
 fn smp_pcg64_bounded(rng: SmpPcg64, n: i64) -> (SmpPcg64, i64) {
-    let result = smp_pcg64_next_i64(rng)
-    let x = result.1
-    let positive = if x < 0 { 0 - x } else { x }
-    let bounded = positive % n
-    return (result.0, bounded)
+    if n <= 0 { return (rng, 0) }
+    // threshold = (0 - n) mod n in u64 semantics.
+    // For n > 0 (i64), (0 - n) wraps to large u64; we need its remainder mod n.
+    // Since n < 2^63 here, the standard u64 trick:
+    let neg_n = 0 - n
+    var threshold: i64 = 0
+    // Compute u64(neg_n) % u64(n) via repeated subtraction-style loop guarded
+    // by unsigned compare. Bounded iterations: at most one full pass since
+    // we only need the residue, and divisor n is large compared to typical
+    // workloads. Use simple algorithm: keep subtracting n while unsigned ≥ n.
+    var t: i64 = neg_n
+    // Fast path: if n is a power of two, threshold is 0.
+    let one: i64 = 1
+    let n_minus_1 = n - 1
+    if (n & n_minus_1) == 0 {
+        threshold = 0
+    } else {
+        // u64 division by n via repeated halving + subtract; bounded by 64 steps.
+        // Compute t mod n where t is unsigned. Use binary long division.
+        var rem: i64 = 0
+        var i: i64 = 63
+        while i >= 0 {
+            // rem = rem * 2 + bit i of t
+            let bit = smp_pcg_lshr(t, i) & 1
+            rem = rem + rem + bit
+            // After shift+add, rem fits in u64; check rem >= n unsigned.
+            if !smp_pcg_u_lt(rem, n) {
+                rem = rem - n
+            }
+            i = i - 1
+        }
+        threshold = rem
+    }
+
+    var current = rng
+    var attempts: i64 = 0
+    while attempts < 100 {
+        let r = smp_pcg64_next_i64(current)
+        current = r.0
+        if !smp_pcg_u_lt(r.1, threshold) {
+            // Unbiased: reduce by n.
+            var x: i64 = r.1
+            // Same binary mod algorithm for r.1 mod n.
+            if (n & n_minus_1) == 0 {
+                return (current, x & n_minus_1)
+            }
+            var rem2: i64 = 0
+            var j: i64 = 63
+            while j >= 0 {
+                let bit2 = smp_pcg_lshr(x, j) & 1
+                rem2 = rem2 + rem2 + bit2
+                if !smp_pcg_u_lt(rem2, n) {
+                    rem2 = rem2 - n
+                }
+                j = j - 1
+            }
+            return (current, rem2)
+        }
+        attempts = attempts + 1
+    }
+    // Fallback (should be unreachable in practice; rejection rate ≤ 50% per call):
+    return (current, 0)
 }
 
 // ============================================================================
