@@ -78,6 +78,9 @@ let M_INLAY_HINT: i64 = 35
 let M_DECLARATION: i64 = 36
 let M_TYPE_DEFINITION: i64 = 37
 let M_IMPLEMENTATION: i64 = 38
+let M_PREPARE_CALL_HIERARCHY: i64 = 39
+let M_INCOMING_CALLS: i64 = 40
+let M_OUTGOING_CALLS: i64 = 41
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -429,6 +432,9 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "textDocument/declaration")        { return M_DECLARATION }
     if str_eq(s, "textDocument/typeDefinition")     { return M_TYPE_DEFINITION }
     if str_eq(s, "textDocument/implementation")     { return M_IMPLEMENTATION }
+    if str_eq(s, "textDocument/prepareCallHierarchy") { return M_PREPARE_CALL_HIERARCHY }
+    if str_eq(s, "callHierarchy/incomingCalls")     { return M_INCOMING_CALLS }
+    if str_eq(s, "callHierarchy/outgoingCalls")     { return M_OUTGOING_CALLS }
     M_UNKNOWN
 }
 
@@ -3450,6 +3456,467 @@ fn respond_code_action() with IO, Mut, Panic, Div {
 }
 
 // ============================================================================
+// Call hierarchy — prepare / incomingCalls / outgoingCalls
+// ============================================================================
+//
+// prepareCallHierarchy: cursor on an ident → if there's a matching
+// `fn NAME(...)` in the active buffer, emit a single CallHierarchyItem.
+//
+// incomingCalls: client sends back the item.name; we iterate every
+// open buffer, scan for `NAME(` call sites (non-declarator-prefixed),
+// walk back to the most-recent enclosing `fn CALLER(`, and emit one
+// CallHierarchyIncomingCall per (caller, callsite). Up to 64 results.
+//
+// outgoingCalls: client sends item.name; we locate the fn body in the
+// active buffer (matching braces from the fn paren), scan it for
+// IDENT( calls, and emit one CallHierarchyOutgoingCall per unique
+// callee with a fromRanges list. Up to 64 callees, 64 callsites each.
+
+let CH_CAP: i64 = 64
+var CH_EMITTED: i64 = 0
+var CH_COUNT:   i64 = 0
+
+// Reusable name buffer for callees / callers.
+var CH_NAME: [i8; 128] = [0; 128]
+var CH_NAME_LEN: i64 = 0
+
+fn ch_set_name_from_doc(s: i64, e: i64) with Mut, Panic {
+    CH_NAME_LEN = 0
+    var i = s
+    while i < e && CH_NAME_LEN < 128 {
+        CH_NAME[CH_NAME_LEN as usize] = DOC_TEXT[i as usize]
+        CH_NAME_LEN = CH_NAME_LEN + 1
+        i = i + 1
+    }
+}
+
+fn ch_name_eq_doc(ds: i64, de: i64) -> bool with Mut, Panic {
+    let dl = de - ds
+    if dl != CH_NAME_LEN { return false }
+    var i: i64 = 0
+    while i < dl {
+        if (DOC_TEXT[(ds + i) as usize] as i64) != (CH_NAME[i as usize] as i64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Find `fn NAME(...)` in active DOC_TEXT. Returns the offset of the
+// fn name identifier (>=0) or -1 on miss. Also stores the `(` offset
+// in CH_FN_PAREN.
+var CH_FN_PAREN: i64 = 0
+
+fn ch_find_fn_in_active() -> i64 with Mut, Panic {
+    CH_FN_PAREN = 0 - 1
+    var i: i64 = 0
+    while i < DOC_TEXT_LEN {
+        var at_word_start: bool = false
+        if i == 0 { at_word_start = true }
+        else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false { at_word_start = true }
+        if at_word_start == true {
+            let je = read_ident_run(i)
+            if je > i && ident_slice_eq(i, je, "fn") {
+                let ns = skip_ws(je)
+                let ne = read_ident_run(ns)
+                if ne > ns && ch_name_eq_doc(ns, ne) == true {
+                    let ps = skip_ws(ne)
+                    if ps < DOC_TEXT_LEN && (DOC_TEXT[ps as usize] as i64) == 40 {
+                        CH_FN_PAREN = ps
+                        return ns
+                    }
+                }
+                if je > i { i = je } else { i = i + 1 }
+            } else {
+                if je > i { i = je } else { i = i + 1 }
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    return 0 - 1
+}
+
+// Common emitter for a CallHierarchyItem with name = CH_NAME and the
+// given uri + range/selectionRange.
+fn ch_emit_item(name_s: i64, name_e: i64, uri_slot: i64) with Mut, Panic, Div {
+    offset_to_position(name_s, 0)
+    let s_line = DEF_LINE
+    let s_char = DEF_CHAR
+    let nlen = name_e - name_s
+    tx_puts("{\"name\":\"")
+    var i = name_s
+    while i < name_e {
+        let c = DOC_TEXT[i as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+    tx_puts("\",\"kind\":12,\"uri\":\"")
+    if uri_slot < 0 {
+        var k: i64 = 0
+        while k < DOC_URI_LEN {
+            let c = DOC_URI[k as usize] as i64
+            if c == 34 { tx_putc(92); tx_putc(34) }
+            else if c == 92 { tx_putc(92); tx_putc(92) }
+            else { tx_putc(c) }
+            k = k + 1
+        }
+    } else {
+        let base = uri_slot * 1024
+        let ulen = DOC_SLOT_URI_LEN[uri_slot as usize]
+        var k: i64 = 0
+        while k < ulen {
+            let c = DOC_SLOT_URI[(base + k) as usize] as i64
+            if c == 34 { tx_putc(92); tx_putc(34) }
+            else if c == 92 { tx_putc(92); tx_putc(92) }
+            else { tx_putc(c) }
+            k = k + 1
+        }
+    }
+    tx_puts("\",\"range\":{\"start\":{\"line\":")
+    tx_put_i64(s_line)
+    tx_puts(",\"character\":")
+    tx_put_i64(s_char)
+    tx_puts("},\"end\":{\"line\":")
+    tx_put_i64(s_line)
+    tx_puts(",\"character\":")
+    tx_put_i64(s_char + nlen)
+    tx_puts("}},\"selectionRange\":{\"start\":{\"line\":")
+    tx_put_i64(s_line)
+    tx_puts(",\"character\":")
+    tx_put_i64(s_char)
+    tx_puts("},\"end\":{\"line\":")
+    tx_put_i64(s_line)
+    tx_puts(",\"character\":")
+    tx_put_i64(s_char + nlen)
+    tx_puts("}}}")
+}
+
+fn respond_prepare_call_hierarchy() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":null}")
+        write_frame()
+        return
+    }
+    parse_hover_position()
+    var have: bool = false
+    var name_s: i64 = 0
+    var name_e: i64 = 0
+    if HOVER_OK == 1 {
+        let n = locate_ident()
+        if n > 0 {
+            // Copy IDENT_BUF into CH_NAME and look up the fn decl.
+            CH_NAME_LEN = 0
+            var k: i64 = 0
+            while k < IDENT_LEN && CH_NAME_LEN < 128 {
+                CH_NAME[CH_NAME_LEN as usize] = IDENT_BUF[k as usize]
+                CH_NAME_LEN = CH_NAME_LEN + 1
+                k = k + 1
+            }
+            let off = ch_find_fn_in_active()
+            if off >= 0 {
+                name_s = off
+                name_e = off + IDENT_LEN
+                have = true
+            }
+        }
+    }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    if have == true {
+        tx_puts(",\"result\":[")
+        ch_emit_item(name_s, name_e, 0 - 1)
+        tx_puts("]}")
+    } else {
+        tx_puts(",\"result\":null}")
+    }
+    write_frame()
+}
+
+// Reads "name" field from request body into CH_NAME (truncating to 64
+// bytes so it fits in body_extract_str's signature). Returns true on
+// success.
+fn ch_extract_name_from_request() -> bool with Mut, Panic {
+    var tmp: [i8; 64] = [0; 64]
+    let n = body_extract_str("\"name\"", &! tmp, 64)
+    if n <= 0 { return false }
+    CH_NAME_LEN = 0
+    var k: i64 = 0
+    while k < n && CH_NAME_LEN < 128 {
+        CH_NAME[CH_NAME_LEN as usize] = tmp[k as usize]
+        CH_NAME_LEN = CH_NAME_LEN + 1
+        k = k + 1
+    }
+    return true
+}
+
+// Walk back from `pos` in DOC_TEXT to find the most recent
+// `fn CALLER(` declaration; returns (caller_name_start, caller_name_end)
+// packed via CH_CALLER_S / CH_CALLER_E or -1/-1 on miss.
+var CH_CALLER_S: i64 = 0
+var CH_CALLER_E: i64 = 0
+
+fn ch_find_enclosing_fn(pos: i64) with Mut, Panic {
+    CH_CALLER_S = 0 - 1
+    CH_CALLER_E = 0 - 1
+    var i: i64 = 0
+    while i < pos {
+        var at_word_start: bool = false
+        if i == 0 { at_word_start = true }
+        else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false { at_word_start = true }
+        if at_word_start == true {
+            let je = read_ident_run(i)
+            if je > i && ident_slice_eq(i, je, "fn") {
+                let ns = skip_ws(je)
+                let ne = read_ident_run(ns)
+                if ne > ns {
+                    CH_CALLER_S = ns
+                    CH_CALLER_E = ne
+                }
+                if je > i { i = je } else { i = i + 1 }
+            } else {
+                if je > i { i = je } else { i = i + 1 }
+            }
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+// True if the ident at `name_s..name_e` is the *declaration* of a fn
+// (i.e. immediately preceded by `fn` keyword + ws). Used to skip the
+// fn's own decl when looking for incoming calls.
+fn ch_at_fn_decl(name_s: i64) -> bool with Mut, Panic {
+    var p = name_s - 1
+    while p >= 0 {
+        let c = DOC_TEXT[p as usize] as i64
+        if c == 32 || c == 9 || c == 10 || c == 13 { p = p - 1 }
+        else { break }
+    }
+    if p < 1 { return false }
+    let kwe = p + 1
+    var ks = p
+    while ks > 0 {
+        let c = DOC_TEXT[(ks - 1) as usize] as i64
+        if is_ident_byte(c) == false { break }
+        ks = ks - 1
+    }
+    return ident_slice_eq(ks, kwe, "fn")
+}
+
+fn respond_incoming_calls() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if ch_extract_name_from_request() == false {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    CH_EMITTED = 0
+    CH_COUNT = 0
+
+    var s: i64 = 0
+    while s < 8 && CH_COUNT < CH_CAP {
+        if DOC_SLOT_URI_LEN[s as usize] > 0 {
+            slot_activate(s)
+            var i: i64 = 0
+            while i < DOC_TEXT_LEN && CH_COUNT < CH_CAP {
+                var at_word_start: bool = false
+                if i == 0 { at_word_start = true }
+                else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false {
+                    at_word_start = true
+                }
+                if at_word_start == true {
+                    let je = read_ident_run(i)
+                    if je > i && ch_name_eq_doc(i, je) == true {
+                        // Must be followed (after ws) by `(`.
+                        let ps = skip_ws(je)
+                        if ps < DOC_TEXT_LEN && (DOC_TEXT[ps as usize] as i64) == 40 {
+                            // Skip the declaration itself.
+                            if ch_at_fn_decl(i) == false {
+                                ch_find_enclosing_fn(i)
+                                if CH_CALLER_S >= 0 {
+                                    if CH_EMITTED == 1 { tx_putc(44) }
+                                    CH_EMITTED = 1
+                                    CH_COUNT = CH_COUNT + 1
+                                    tx_puts("{\"from\":")
+                                    ch_emit_item(CH_CALLER_S, CH_CALLER_E, s)
+                                    // fromRanges: just the call-site ident.
+                                    offset_to_position(i, 0)
+                                    tx_puts(",\"fromRanges\":[{\"start\":{\"line\":")
+                                    tx_put_i64(DEF_LINE)
+                                    tx_puts(",\"character\":")
+                                    tx_put_i64(DEF_CHAR)
+                                    tx_puts("},\"end\":{\"line\":")
+                                    tx_put_i64(DEF_LINE)
+                                    tx_puts(",\"character\":")
+                                    tx_put_i64(DEF_CHAR + (je - i))
+                                    tx_puts("}}]}")
+                                }
+                            }
+                        }
+                        if je > i { i = je } else { i = i + 1 }
+                    } else {
+                        if je > i { i = je } else { i = i + 1 }
+                    }
+                } else {
+                    i = i + 1
+                }
+            }
+        }
+        s = s + 1
+    }
+
+    tx_puts("]}")
+    write_frame()
+}
+
+fn respond_outgoing_calls() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+    if ch_extract_name_from_request() == false {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+
+    // Locate the fn declaration body in the active buffer.
+    let off = ch_find_fn_in_active()
+    if off < 0 {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+    // Find the `{` that starts the body after the param paren.
+    var p = CH_FN_PAREN
+    var d: i64 = 0
+    var body_start: i64 = 0 - 1
+    while p < DOC_TEXT_LEN {
+        let c = DOC_TEXT[p as usize] as i64
+        if c == 40 { d = d + 1 }
+        else if c == 41 {
+            d = d - 1
+            if d == 0 { p = p + 1; break }
+        }
+        p = p + 1
+    }
+    while p < DOC_TEXT_LEN {
+        let c = DOC_TEXT[p as usize] as i64
+        if c == 123 { body_start = p; break }
+        if c == 10 || c == 59 { break }
+        p = p + 1
+    }
+    if body_start < 0 {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+    // Find matching `}`.
+    var d2: i64 = 1
+    var q = body_start + 1
+    while q < DOC_TEXT_LEN && d2 > 0 {
+        let c = DOC_TEXT[q as usize] as i64
+        if c == 123 { d2 = d2 + 1 }
+        else if c == 125 { d2 = d2 - 1; if d2 == 0 { break } }
+        q = q + 1
+    }
+    let body_end = q
+
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    CH_EMITTED = 0
+    CH_COUNT = 0
+
+    var i = body_start + 1
+    while i < body_end && CH_COUNT < CH_CAP {
+        var at_word_start: bool = false
+        if i == 0 { at_word_start = true }
+        else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false {
+            at_word_start = true
+        }
+        if at_word_start == true {
+            let je = read_ident_run(i)
+            if je > i {
+                // Skip declarator keywords.
+                var is_kw: bool = false
+                if ident_slice_eq(i, je, "fn") { is_kw = true }
+                else if ident_slice_eq(i, je, "let") { is_kw = true }
+                else if ident_slice_eq(i, je, "var") { is_kw = true }
+                else if ident_slice_eq(i, je, "if") { is_kw = true }
+                else if ident_slice_eq(i, je, "else") { is_kw = true }
+                else if ident_slice_eq(i, je, "while") { is_kw = true }
+                else if ident_slice_eq(i, je, "return") { is_kw = true }
+                else if ident_slice_eq(i, je, "with") { is_kw = true }
+                else if ident_slice_eq(i, je, "match") { is_kw = true }
+                else if ident_slice_eq(i, je, "struct") { is_kw = true }
+                else if ident_slice_eq(i, je, "enum") { is_kw = true }
+                if is_kw == false {
+                    let ps = skip_ws(je)
+                    if ps < DOC_TEXT_LEN && (DOC_TEXT[ps as usize] as i64) == 40 {
+                        if CH_EMITTED == 1 { tx_putc(44) }
+                        CH_EMITTED = 1
+                        CH_COUNT = CH_COUNT + 1
+                        tx_puts("{\"to\":")
+                        ch_emit_item(i, je, 0 - 1)
+                        offset_to_position(i, 0)
+                        tx_puts(",\"fromRanges\":[{\"start\":{\"line\":")
+                        tx_put_i64(DEF_LINE)
+                        tx_puts(",\"character\":")
+                        tx_put_i64(DEF_CHAR)
+                        tx_puts("},\"end\":{\"line\":")
+                        tx_put_i64(DEF_LINE)
+                        tx_puts(",\"character\":")
+                        tx_put_i64(DEF_CHAR + (je - i))
+                        tx_puts("}}]}")
+                    }
+                }
+                if je > i { i = je } else { i = i + 1 }
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+
+    tx_puts("]}")
+    write_frame()
+}
+
+// ============================================================================
 // Semantic tokens — textDocument/semanticTokens/full
 // ============================================================================
 //
@@ -4257,7 +4724,8 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"inlayHintProvider\":true,")
     tx_puts("\"declarationProvider\":true,")
     tx_puts("\"typeDefinitionProvider\":true,")
-    tx_puts("\"implementationProvider\":true")
+    tx_puts("\"implementationProvider\":true,")
+    tx_puts("\"callHierarchyProvider\":true")
     tx_puts("},")
     tx_puts("\"serverInfo\":{")
     tx_puts("\"name\":\"sounio-lsp\",")
@@ -4325,6 +4793,9 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_DECLARATION      { respond_definition(); return }
     if method == M_TYPE_DEFINITION  { respond_definition(); return }
     if method == M_IMPLEMENTATION   { respond_definition(); return }
+    if method == M_PREPARE_CALL_HIERARCHY { respond_prepare_call_hierarchy(); return }
+    if method == M_INCOMING_CALLS   { respond_incoming_calls(); return }
+    if method == M_OUTGOING_CALLS   { respond_outgoing_calls(); return }
     respond_method_not_found()
 }
 

@@ -431,6 +431,42 @@ grep -q '"newText":"var"' "$T7M_OUT" \
 grep -q '"start":{"line":1,"character":4},"end":{"line":1,"character":11}' "$T7M_OUT" \
   && note_pass "T7m.edit range = let-mut span" || note_fail "T7m.edit range = let-mut span"
 
+# ----- T7n: call hierarchy ----------------------------------------------
+T7N_OUT="$LOG_DIR/t7n.out"
+# Doc:
+#   line 0: fn helper(x: i64) -> i64 { x + 1 }
+#   line 1: fn main() -> i32 { helper(1); helper(2); 0 }
+#   line 2: fn other() -> i32 { helper(3); 0 }
+# Cursor on `helper` decl @ line 0, char 5.
+run_session "$T7N_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn helper(x: i64) -> i64 { x + 1 }\nfn main() -> i32 { helper(1); helper(2); 0 }\nfn other() -> i32 { helper(3); 0 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":160,"method":"textDocument/prepareCallHierarchy","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"position":{"line":0,"character":5}}}' \
+  '{"jsonrpc":"2.0","id":161,"method":"callHierarchy/incomingCalls","params":{"item":{"name":"helper","kind":12,"uri":"file:///tmp/t.sio","range":{"start":{"line":0,"character":3},"end":{"line":0,"character":9}},"selectionRange":{"start":{"line":0,"character":3},"end":{"line":0,"character":9}}}}}' \
+  '{"jsonrpc":"2.0","id":162,"method":"callHierarchy/outgoingCalls","params":{"item":{"name":"main","kind":12,"uri":"file:///tmp/t.sio","range":{"start":{"line":1,"character":3},"end":{"line":1,"character":7}},"selectionRange":{"start":{"line":1,"character":3},"end":{"line":1,"character":7}}}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+# prepareCallHierarchy: returns [{name:"helper",kind:12,uri:...}]
+grep -q '"id":160,"result":\[{"name":"helper","kind":12' "$T7N_OUT" \
+  && note_pass "T7n.prepare returns helper item" || note_fail "T7n.prepare returns helper item"
+# incomingCalls: should find callers main + other (2 results)
+# Count unique caller names — v0 emits one IncomingCall per call site
+# (not per caller fn), so 2 calls in main + 1 in other = 3 entries but
+# the unique caller set is {main, other}.
+n_uniq=$(grep -oE '"id":161,"result":\[.*\]\}' "$T7N_OUT" | grep -oE '"from":\{"name":"[a-z]+"' | sort -u | wc -l)
+if [ "$n_uniq" -eq 2 ]; then
+  note_pass "T7n.incoming = 2 unique callers"
+else
+  note_fail "T7n.incoming expected 2 unique callers (got $n_uniq)"
+fi
+grep -q '"from":{"name":"main"' "$T7N_OUT" \
+  && note_pass "T7n.incoming.main" || note_fail "T7n.incoming.main"
+grep -q '"from":{"name":"other"' "$T7N_OUT" \
+  && note_pass "T7n.incoming.other" || note_fail "T7n.incoming.other"
+# outgoingCalls for main: should find helper called twice (2 entries OR 1 entry with 2 fromRanges)
+grep -q '"id":162,.*"to":{"name":"helper"' "$T7N_OUT" \
+  && note_pass "T7n.outgoing.helper" || note_fail "T7n.outgoing.helper"
+
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"
 run_session "$T8_OUT" \
