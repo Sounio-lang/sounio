@@ -3336,13 +3336,80 @@ fn respond_inlay_hint() with IO, Mut, Panic, Div {
                 }
                 if at_word_start == true && is_ident_byte(c) == true {
                     let je = read_ident_run(i)
+                    // `let NAME = literal` / `var NAME = literal` →
+                    // emit a type hint after NAME when there is no
+                    // explicit `: T` annotation.
+                    var is_let_var: bool = false
+                    if ident_slice_eq(i, je, "let") { is_let_var = true }
+                    else if ident_slice_eq(i, je, "var") { is_let_var = true }
+                    if is_let_var == true {
+                        let ns = skip_ws(je)
+                        let ne = read_ident_run(ns)
+                        if ne > ns {
+                            // Look for `=` after optional whitespace.
+                            // If we see `:` first, an explicit type is
+                            // already given → skip hint.
+                            let after = skip_ws(ne)
+                            if after < DOC_TEXT_LEN &&
+                               (DOC_TEXT[after as usize] as i64) == 61 {
+                                // skip `=` + ws
+                                var expr_off = after + 1
+                                while expr_off < DOC_TEXT_LEN {
+                                    let ec = DOC_TEXT[expr_off as usize] as i64
+                                    if ec == 32 || ec == 9 { expr_off = expr_off + 1 }
+                                    else { break }
+                                }
+                                if expr_off < DOC_TEXT_LEN {
+                                    let e0 = DOC_TEXT[expr_off as usize] as i64
+                                    var ty: string = ""
+                                    if e0 == 34 { ty = ": string" }
+                                    else if e0 >= 48 && e0 <= 57 {
+                                        // integer vs float — scan until
+                                        // non-digit; if we hit `.`
+                                        // followed by digit, it's f64.
+                                        var p = expr_off
+                                        var saw_dot: bool = false
+                                        while p < DOC_TEXT_LEN {
+                                            let dc = DOC_TEXT[p as usize] as i64
+                                            if dc >= 48 && dc <= 57 { p = p + 1 }
+                                            else if dc == 46 && p + 1 < DOC_TEXT_LEN {
+                                                let nx = DOC_TEXT[(p + 1) as usize] as i64
+                                                if nx >= 48 && nx <= 57 {
+                                                    saw_dot = true
+                                                    p = p + 2
+                                                } else { break }
+                                            } else { break }
+                                        }
+                                        if saw_dot == true { ty = ": f64" }
+                                        else { ty = ": i64" }
+                                    } else if is_ident_byte(e0) == true {
+                                        let kw_e = read_ident_run(expr_off)
+                                        if ident_slice_eq(expr_off, kw_e, "true") { ty = ": bool" }
+                                        else if ident_slice_eq(expr_off, kw_e, "false") { ty = ": bool" }
+                                    }
+                                    if str_len(ty) > 0 {
+                                        if IH_EMITTED == 1 { tx_putc(44) }
+                                        IH_EMITTED = 1
+                                        IH_COUNT = IH_COUNT + 1
+                                        offset_to_position(ne, 0)
+                                        tx_puts("{\"position\":{\"line\":")
+                                        tx_put_i64(DEF_LINE)
+                                        tx_puts(",\"character\":")
+                                        tx_put_i64(DEF_CHAR)
+                                        tx_puts("},\"label\":\"")
+                                        tx_puts(ty)
+                                        tx_puts("\",\"kind\":1,\"paddingLeft\":false,\"paddingRight\":false}")
+                                    }
+                                }
+                            }
+                        }
+                        if je > i { i = je } else { i = i + 1 }
+                    } else {
                     // Check this is NOT a declarator keyword.
                     var is_kw: bool = false
                     if ident_slice_eq(i, je, "fn")     { is_kw = true }
                     else if ident_slice_eq(i, je, "struct") { is_kw = true }
                     else if ident_slice_eq(i, je, "enum")   { is_kw = true }
-                    else if ident_slice_eq(i, je, "let")    { is_kw = true }
-                    else if ident_slice_eq(i, je, "var")    { is_kw = true }
                     else if ident_slice_eq(i, je, "if")     { is_kw = true }
                     else if ident_slice_eq(i, je, "while")  { is_kw = true }
                     else if ident_slice_eq(i, je, "return") { is_kw = true }
@@ -3365,6 +3432,7 @@ fn respond_inlay_hint() with IO, Mut, Panic, Div {
                         }
                     }
                     if je > i { i = je } else { i = i + 1 }
+                    }    // close else (not let_var)
                 } else {
                     i = i + 1
                 }
