@@ -2,7 +2,7 @@
 topic_id: repo.docs.audit.r2-6-pcg64-core-unify.dispatch
 authority: repo_only
 audience: users
-last_validated: 2026-05-17
+last_validated: 2026-03-07
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.r2-6-pcg64-core-unify.dispatch
 -->
