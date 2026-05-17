@@ -83,6 +83,7 @@ let M_INCOMING_CALLS: i64 = 40
 let M_OUTGOING_CALLS: i64 = 41
 let M_DOCUMENT_LINK: i64 = 42
 let M_ON_TYPE_FORMATTING: i64 = 43
+let M_RANGE_FORMATTING: i64 = 44
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -439,6 +440,7 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "callHierarchy/outgoingCalls")     { return M_OUTGOING_CALLS }
     if str_eq(s, "textDocument/documentLink")       { return M_DOCUMENT_LINK }
     if str_eq(s, "textDocument/onTypeFormatting")   { return M_ON_TYPE_FORMATTING }
+    if str_eq(s, "textDocument/rangeFormatting")    { return M_RANGE_FORMATTING }
     M_UNKNOWN
 }
 
@@ -4095,6 +4097,39 @@ fn fmt_emit_trim(line_no: i64, ws_start_col: i64, ws_end_col: i64)
     tx_puts("}},\"newText\":\"\"}")
 }
 
+// Core trim pass. Emits TextEdits for every line in [line_lo, line_hi]
+// (inclusive on both ends) that has trailing space / tab.
+fn fmt_trim_lines(line_lo: i64, line_hi: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    var line_no: i64 = 0
+    var line_start: i64 = 0
+    while i <= DOC_TEXT_LEN && FMT_COUNT < FMT_CAP {
+        var at_eol: bool = false
+        if i == DOC_TEXT_LEN { at_eol = true }
+        else if (DOC_TEXT[i as usize] as i64) == 10 { at_eol = true }
+        if at_eol == true {
+            if line_no >= line_lo && line_no <= line_hi {
+                var w = i
+                while w > line_start {
+                    let c = DOC_TEXT[(w - 1) as usize] as i64
+                    if c == 32 || c == 9 { w = w - 1 } else { break }
+                }
+                if w < i {
+                    fmt_emit_trim(line_no, w - line_start, i - line_start)
+                }
+            }
+            if i == DOC_TEXT_LEN { i = i + 1 }
+            else {
+                line_no = line_no + 1
+                line_start = i + 1
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+}
+
 fn respond_formatting() with IO, Mut, Panic, Div {
     if LAST_ID_PRESENT == 0 { return }
     if activate_uri_slot() < 0 {
@@ -4105,42 +4140,53 @@ fn respond_formatting() with IO, Mut, Panic, Div {
         write_frame()
         return
     }
-
     tx_reset()
     tx_puts("{\"jsonrpc\":\"2.0\",")
     tx_emit_id()
     tx_puts(",\"result\":[")
     FMT_EMITTED = 0
     FMT_COUNT = 0
+    fmt_trim_lines(0, 1000000000)
+    tx_puts("]}")
+    write_frame()
+}
 
-    var i: i64 = 0
-    var line_no: i64 = 0
-    var line_start: i64 = 0
-    while i <= DOC_TEXT_LEN && FMT_COUNT < FMT_CAP {
-        var at_eol: bool = false
-        if i == DOC_TEXT_LEN { at_eol = true }
-        else if (DOC_TEXT[i as usize] as i64) == 10 { at_eol = true }
-        if at_eol == true {
-            // Walk backwards from i to find run of space / tab.
-            var w = i
-            while w > line_start {
-                let c = DOC_TEXT[(w - 1) as usize] as i64
-                if c == 32 || c == 9 { w = w - 1 } else { break }
-            }
-            if w < i {
-                fmt_emit_trim(line_no, w - line_start, i - line_start)
-            }
-            if i == DOC_TEXT_LEN { i = i + 1 }    // exit
-            else {
-                line_no = line_no + 1
-                line_start = i + 1
-                i = i + 1
-            }
-        } else {
-            i = i + 1
+fn respond_range_formatting() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+    // Reuse ca_parse_range: pulls the first two "line"/"character"
+    // pairs out of RX_BODY and stores byte offsets in CA_RANGE_*.
+    var line_lo: i64 = 0
+    var line_hi: i64 = 1000000000
+    if ca_parse_range() == true {
+        // Convert offsets back to lines. CA_RANGE_S_OFF / _E_OFF are
+        // byte offsets in DOC_TEXT.
+        offset_to_position(CA_RANGE_S_OFF, 0)
+        line_lo = DEF_LINE
+        offset_to_position(CA_RANGE_E_OFF, 0)
+        line_hi = DEF_LINE
+        // If range.end sits at column 0 of a new line, the editor
+        // really means "up to but not including that line".
+        if line_hi > line_lo && CA_RANGE_E_OFF > 0 &&
+           (DOC_TEXT[(CA_RANGE_E_OFF - 1) as usize] as i64) == 10 &&
+           DEF_CHAR == 0 {
+            line_hi = line_hi - 1
         }
     }
-
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    FMT_EMITTED = 0
+    FMT_COUNT = 0
+    fmt_trim_lines(line_lo, line_hi)
     tx_puts("]}")
     write_frame()
 }
@@ -5103,6 +5149,7 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"documentSymbolProvider\":true,")
     tx_puts("\"documentHighlightProvider\":true,")
     tx_puts("\"documentFormattingProvider\":true,")
+    tx_puts("\"documentRangeFormattingProvider\":true,")
     tx_puts("\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"]},")
     tx_puts("\"semanticTokensProvider\":{")
     tx_puts("\"legend\":{")
@@ -5201,6 +5248,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_OUTGOING_CALLS   { respond_outgoing_calls(); return }
     if method == M_DOCUMENT_LINK    { respond_document_link(); return }
     if method == M_ON_TYPE_FORMATTING { respond_on_type_formatting(); return }
+    if method == M_RANGE_FORMATTING { respond_range_formatting(); return }
     respond_method_not_found()
 }
 
