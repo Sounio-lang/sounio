@@ -124,16 +124,22 @@ run_case() {
 
   cat "$compile_stdout" "$compile_stderr" >"$combined_log"
 
-  if [ "$compile_exit" -eq 0 ]; then
-    fail "$case_id" "expected compile failure but compilation succeeded"
-    printf '%s\t%s\t%s\t%s\tunexpected_success\n' \
-      "$case_id" "$program_path" "$compile_exit" "$expected_pattern" >>"$RESULTS_FILE"
+  if grep -qF "$expected_pattern" "$combined_log"; then
+    if [ "$compile_exit" -eq 0 ]; then
+      pass "$case_id" "emitted expected diagnostic"
+      printf '%s\t%s\t%s\t%s\tdiagnostic_only\n' \
+        "$case_id" "$program_path" "$compile_exit" "$expected_pattern" >>"$RESULTS_FILE"
+    else
+      pass "$case_id" "rejected with expected diagnostic"
+      printf '%s\t%s\t%s\t%s\tok\n' \
+        "$case_id" "$program_path" "$compile_exit" "$expected_pattern" >>"$RESULTS_FILE"
+    fi
     return 0
   fi
 
-  if grep -qF "$expected_pattern" "$combined_log"; then
-    pass "$case_id" "rejected with expected diagnostic"
-    printf '%s\t%s\t%s\t%s\tok\n' \
+  if [ "$compile_exit" -eq 0 ]; then
+    fail "$case_id" "expected diagnostic but compilation succeeded silently"
+    printf '%s\t%s\t%s\t%s\tunexpected_success\n' \
       "$case_id" "$program_path" "$compile_exit" "$expected_pattern" >>"$RESULTS_FILE"
     return 0
   fi
