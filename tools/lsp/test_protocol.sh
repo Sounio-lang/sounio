@@ -63,7 +63,7 @@ run_session "$T1_OUT" \
 grep -q '"hoverProvider":true' "$T1_OUT" && note_pass "T1.hoverProvider" || note_fail "T1.hoverProvider"
 grep -q '"definitionProvider":true' "$T1_OUT" && note_pass "T1.definitionProvider" || note_fail "T1.definitionProvider"
 grep -q '"referencesProvider":true' "$T1_OUT" && note_pass "T1.referencesProvider" || note_fail "T1.referencesProvider"
-grep -q '"renameProvider":true' "$T1_OUT" && note_pass "T1.renameProvider" || note_fail "T1.renameProvider"
+grep -qE '"renameProvider":(true|\{"prepareProvider":true\})' "$T1_OUT" && note_pass "T1.renameProvider" || note_fail "T1.renameProvider"
 grep -q '"completionProvider"' "$T1_OUT" && note_pass "T1.completionProvider" || note_fail "T1.completionProvider"
 grep -q '"sounio-lsp"' "$T1_OUT" && note_pass "T1.serverInfo.name" || note_fail "T1.serverInfo.name"
 
@@ -177,6 +177,30 @@ grep -q '"data":\[0,0,8,6,0,' "$T7C_OUT" \
 # `helper` follows `fn` with type=3 (function) → look for ,3,6,3,0
 grep -q ',3,6,3,0' "$T7C_OUT" \
   && note_pass "T7c.helper classified as function" || note_fail "T7c.helper classified as function"
+
+# ----- T7d: documentHighlight + prepareRename ---------------------------
+T7D_OUT="$LOG_DIR/t7d.out"
+run_session "$T7D_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn helper(x: i64) -> i64 { x + 1 }\nfn main() -> i32 { helper(1); helper(2); 0 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":75,"method":"textDocument/documentHighlight","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"position":{"line":0,"character":5}}}' \
+  '{"jsonrpc":"2.0","id":76,"method":"textDocument/prepareRename","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"position":{"line":0,"character":5}}}' \
+  '{"jsonrpc":"2.0","id":77,"method":"textDocument/prepareRename","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"position":{"line":0,"character":0}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+# documentHighlight should return 3 ranges with kind:1 (text)
+n_dh=$(grep -oE '"id":75,"result":\[[^]]*\]' "$T7D_OUT" | grep -oE '"line":[0-9]+' | wc -l)
+if [ "$n_dh" -ge 6 ]; then
+  note_pass "T7d.documentHighlight ≥3 ranges (got $((n_dh/2)))"
+else
+  note_fail "T7d.documentHighlight expected ≥3 ranges (got $((n_dh/2)))"
+fi
+grep -q '"id":75,"result":\[.*"kind":1' "$T7D_OUT" && note_pass "T7d.kind=1 (text)" || note_fail "T7d.kind=1 (text)"
+
+# prepareRename on identifier should return a range
+grep -q '"id":76,"result":{"start":' "$T7D_OUT" && note_pass "T7d.prepareRename valid range" || note_fail "T7d.prepareRename valid range"
+# prepareRename on `fn` keyword should return null
+grep -q '"id":77,"result":null' "$T7D_OUT" && note_pass "T7d.prepareRename rejects keyword" || note_fail "T7d.prepareRename rejects keyword"
 
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"

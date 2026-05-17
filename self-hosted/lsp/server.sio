@@ -68,6 +68,8 @@ let M_CODE_ACTION:   i64 = 25
 let M_SEM_TOKENS:    i64 = 26
 let M_FORMATTING:    i64 = 27
 let M_DOC_SYMBOL:    i64 = 28
+let M_DOC_HIGHLIGHT: i64 = 29
+let M_PREPARE_RENAME: i64 = 30
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -409,6 +411,8 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "textDocument/semanticTokens/full") { return M_SEM_TOKENS }
     if str_eq(s, "textDocument/formatting")         { return M_FORMATTING  }
     if str_eq(s, "textDocument/documentSymbol")     { return M_DOC_SYMBOL  }
+    if str_eq(s, "textDocument/documentHighlight")  { return M_DOC_HIGHLIGHT }
+    if str_eq(s, "textDocument/prepareRename")      { return M_PREPARE_RENAME }
     M_UNKNOWN
 }
 
@@ -1998,6 +2002,164 @@ fn scan_definition_cross_file(home_slot: i64) with Mut, Panic {
 }
 
 // ============================================================================
+// Document highlight — textDocument/documentHighlight
+// ============================================================================
+//
+// Like references, but scoped to the active document only and returns
+// DocumentHighlight[] (each entry has `range` + optional `kind`).
+// Editors use this to flash all occurrences of the symbol under the
+// cursor (e.g. select-occurrences-on-click in VS Code). Reuses the
+// word-boundary scan from references.
+
+// LSP DocumentHighlightKind enum
+let DH_KIND_TEXT:  i64 = 1
+let DH_KIND_READ:  i64 = 2
+let DH_KIND_WRITE: i64 = 3
+
+var DH_EMITTED: i64 = 0
+
+fn dh_emit(off: i64, kind: i64) with Mut, Panic, Div {
+    if DH_EMITTED == 1 { tx_putc(44) }
+    DH_EMITTED = 1
+    offset_to_position(off, 0)
+    tx_puts("{\"range\":{\"start\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR)
+    tx_puts("},\"end\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR + IDENT_LEN)
+    tx_puts("}},\"kind\":")
+    tx_put_i64(kind)
+    tx_putc(125)
+}
+
+fn respond_document_highlight() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        respond_empty_result()
+        return
+    }
+    parse_hover_position()
+    var ok: i64 = 0
+    if HOVER_OK == 1 {
+        let n = locate_ident()
+        if n > 0 { ok = 1 }
+    }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    DH_EMITTED = 0
+    if ok == 1 {
+        // For v0 every match is DH_KIND_TEXT (we don't do read/write
+        // discrimination without a parser). DocumentHighlight clients
+        // still flash them all uniformly.
+        var i: i64 = 0
+        while i < DOC_TEXT_LEN {
+            if ref_match_at(i) == true {
+                dh_emit(i, DH_KIND_TEXT)
+                i = i + IDENT_LEN
+            } else {
+                i = i + 1
+            }
+        }
+    }
+    tx_puts("]}")
+    write_frame()
+}
+
+// ============================================================================
+// Prepare rename — textDocument/prepareRename
+// ============================================================================
+//
+// Validates whether the cursor is on a renameable identifier and, if
+// so, returns the range of that identifier so the editor can pre-fill
+// the rename input box. If invalid (cursor on a keyword / non-ident
+// byte / unknown declaration), return null so F2 doesn't trigger.
+
+fn respond_prepare_rename() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        respond_empty_result()
+        return
+    }
+    parse_hover_position()
+    var have: i64 = 0
+    if HOVER_OK == 1 {
+        let n = locate_ident()
+        if n > 0 {
+            // Reject Sounio keywords — these can't be renamed in-
+            // tree. Built-in type / effect names are technically
+            // re-bindable as new identifiers in user code, so we
+            // accept those; the rename will produce a TextEdit list
+            // but won't reach stdlib.
+            if ident_eq("fn") == false && ident_eq("let") == false &&
+               ident_eq("var") == false && ident_eq("if") == false &&
+               ident_eq("else") == false && ident_eq("while") == false &&
+               ident_eq("return") == false && ident_eq("with") == false &&
+               ident_eq("struct") == false && ident_eq("enum") == false &&
+               ident_eq("match") == false && ident_eq("break") == false &&
+               ident_eq("continue") == false && ident_eq("true") == false &&
+               ident_eq("false") == false && ident_eq("as") == false &&
+               ident_eq("pub") == false && ident_eq("use") == false &&
+               ident_eq("mod") == false && ident_eq("spawn") == false &&
+               ident_eq("loop") == false {
+                have = 1
+            }
+        }
+    }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    if have == 1 {
+        // Compute the exact range of the identifier under the cursor.
+        // locate_ident populates IDENT_BUF but not its start position;
+        // re-walk DOC_TEXT to recover it.
+        var i: i64 = 0
+        var line: i64 = 0
+        while i < DOC_TEXT_LEN && line < HOVER_LINE {
+            if (DOC_TEXT[i as usize] as i64) == 10 { line = line + 1 }
+            i = i + 1
+        }
+        var pos = i
+        var col: i64 = 0
+        while col < HOVER_CHAR && pos < DOC_TEXT_LEN {
+            if (DOC_TEXT[pos as usize] as i64) == 10 { pos = DOC_TEXT_LEN }
+            else { pos = pos + 1; col = col + 1 }
+        }
+        var start = pos
+        while start > i {
+            let c = DOC_TEXT[(start - 1) as usize] as i64
+            if is_ident_byte(c) == false { break }
+            start = start - 1
+        }
+        var endp = pos
+        while endp < DOC_TEXT_LEN {
+            let c = DOC_TEXT[endp as usize] as i64
+            if is_ident_byte(c) == false { break }
+            endp = endp + 1
+        }
+        let start_col = start - i
+        let end_col = endp - i
+        tx_puts(",\"result\":{\"start\":{\"line\":")
+        tx_put_i64(HOVER_LINE)
+        tx_puts(",\"character\":")
+        tx_put_i64(start_col)
+        tx_puts("},\"end\":{\"line\":")
+        tx_put_i64(HOVER_LINE)
+        tx_puts(",\"character\":")
+        tx_put_i64(end_col)
+        tx_puts("}}")
+    } else {
+        tx_puts(",\"result\":null")
+    }
+    tx_puts("}")
+    write_frame()
+}
+
+// ============================================================================
 // Semantic tokens — textDocument/semanticTokens/full
 // ============================================================================
 //
@@ -2779,8 +2941,9 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"hoverProvider\":true,")
     tx_puts("\"definitionProvider\":true,")
     tx_puts("\"referencesProvider\":true,")
-    tx_puts("\"renameProvider\":true,")
+    tx_puts("\"renameProvider\":{\"prepareProvider\":true},")
     tx_puts("\"documentSymbolProvider\":true,")
+    tx_puts("\"documentHighlightProvider\":true,")
     tx_puts("\"documentFormattingProvider\":false,")
     tx_puts("\"codeActionProvider\":true,")
     tx_puts("\"semanticTokensProvider\":{")
@@ -2852,6 +3015,8 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_SEM_TOKENS  { respond_semantic_tokens();   return }
     if method == M_FORMATTING  { respond_empty_result();      return }
     if method == M_DOC_SYMBOL  { respond_document_symbol();   return }
+    if method == M_DOC_HIGHLIGHT { respond_document_highlight(); return }
+    if method == M_PREPARE_RENAME { respond_prepare_rename(); return }
     respond_method_not_found()
 }
 
