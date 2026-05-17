@@ -144,6 +144,19 @@ grep -q '"id":50' "$T7_OUT" && grep -q '"changes":' "$T7_OUT" && grep -q '"newTe
   note_pass "T7.rename WorkspaceEdit" || note_fail "T7.rename WorkspaceEdit"
 grep -q '"id":50,"result":null' "$T7_OUT" && note_fail "T7.rename returned null" || true
 
+# ----- T7b: documentSymbol outline --------------------------------------
+T7B_OUT="$LOG_DIR/t7b.out"
+run_session "$T7B_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"struct Point { x: i64 }\nfn helper() -> i32 { 0 }\nlet GLOBAL: i64 = 0\npub fn shared() -> i32 { 0 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":55,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":"file:///tmp/t.sio"}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"name":"Point","kind":22' "$T7B_OUT" && note_pass "T7b.Point struct" || note_fail "T7b.Point struct"
+grep -q '"name":"helper","kind":12' "$T7B_OUT" && note_pass "T7b.helper function" || note_fail "T7b.helper function"
+grep -q '"name":"GLOBAL","kind":13' "$T7B_OUT" && note_pass "T7b.GLOBAL variable" || note_fail "T7b.GLOBAL variable"
+grep -q '"name":"shared","kind":12' "$T7B_OUT" && note_pass "T7b.shared (pub fn)" || note_fail "T7b.shared (pub fn)"
+
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"
 run_session "$T8_OUT" \

@@ -67,6 +67,7 @@ let M_RENAME:        i64 = 24
 let M_CODE_ACTION:   i64 = 25
 let M_SEM_TOKENS:    i64 = 26
 let M_FORMATTING:    i64 = 27
+let M_DOC_SYMBOL:    i64 = 28
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -407,6 +408,7 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "textDocument/codeAction")         { return M_CODE_ACTION }
     if str_eq(s, "textDocument/semanticTokens/full") { return M_SEM_TOKENS }
     if str_eq(s, "textDocument/formatting")         { return M_FORMATTING  }
+    if str_eq(s, "textDocument/documentSymbol")     { return M_DOC_SYMBOL  }
     M_UNKNOWN
 }
 
@@ -1995,6 +1997,123 @@ fn scan_definition_cross_file(home_slot: i64) with Mut, Panic {
     if home_slot >= 0 { slot_activate(home_slot) }
 }
 
+// ============================================================================
+// Document symbols — textDocument/documentSymbol
+// ============================================================================
+//
+// Walks DOC_TEXT for top-level declarators (`fn`, `struct`, `enum`,
+// `let`, `var`) and emits a flat DocumentSymbol[] — one entry per
+// declaration. Kinds follow the LSP SymbolKind enum:
+//   12 Function, 13 Variable, 22 Struct, 10 Enum
+//
+// LSP also supports a hierarchical DocumentSymbol (children for nested
+// scopes). v0 is flat; a follow-up could nest `let`/`var` inside their
+// enclosing fn.
+
+let SK_FUNCTION: i64 = 12
+let SK_VARIABLE: i64 = 13
+let SK_STRUCT:   i64 = 22
+let SK_ENUM:     i64 = 10
+
+var DSYM_EMITTED: i64 = 0
+
+// Emit a single DocumentSymbol JSON object given the declared name at
+// DOC_TEXT[ns..ns+nlen] and the line:char of `ns`. The selectionRange
+// is the name itself; the range covers the whole declared name only
+// (v0 — no body-span tracking).
+fn dsym_emit(ns: i64, nlen: i64, kind: i64) with Mut, Panic, Div {
+    if DSYM_EMITTED == 1 { tx_putc(44) }
+    DSYM_EMITTED = 1
+    offset_to_position(ns, 0)   // populates DEF_LINE / DEF_CHAR
+    tx_puts("{\"name\":\"")
+    var i: i64 = 0
+    while i < nlen {
+        let c = DOC_TEXT[(ns + i) as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+    tx_puts("\",\"kind\":")
+    tx_put_i64(kind)
+    tx_puts(",\"range\":{\"start\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR)
+    tx_puts("},\"end\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR + nlen)
+    tx_puts("}},\"selectionRange\":{\"start\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR)
+    tx_puts("},\"end\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR + nlen)
+    tx_puts("}}}")
+}
+
+fn respond_document_symbol() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        respond_empty_result()
+        return
+    }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    DSYM_EMITTED = 0
+    var i: i64 = 0
+    while i < DOC_TEXT_LEN {
+        var at_word_start: bool = false
+        if i == 0 { at_word_start = true }
+        else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false { at_word_start = true }
+        if at_word_start == false {
+            i = i + 1
+        } else {
+            let je = read_ident_run(i)
+            if je == i {
+                // not an identifier byte — advance
+                i = i + 1
+            } else {
+                // If this keyword is `pub`, peek at the next token.
+                var kw_start = i
+                var kw_end   = je
+                if ident_slice_eq(kw_start, kw_end, "pub") == true {
+                    let kw2_s = skip_ws(kw_end)
+                    let kw2_e = read_ident_run(kw2_s)
+                    if kw2_e > kw2_s {
+                        kw_start = kw2_s
+                        kw_end   = kw2_e
+                    }
+                }
+                var kind: i64 = 0
+                if      ident_slice_eq(kw_start, kw_end, "fn")     { kind = SK_FUNCTION }
+                else if ident_slice_eq(kw_start, kw_end, "struct") { kind = SK_STRUCT }
+                else if ident_slice_eq(kw_start, kw_end, "enum")   { kind = SK_ENUM }
+                else if ident_slice_eq(kw_start, kw_end, "let")    { kind = SK_VARIABLE }
+                else if ident_slice_eq(kw_start, kw_end, "var")    { kind = SK_VARIABLE }
+                if kind != 0 {
+                    let ns = skip_ws(kw_end)
+                    let ne = read_ident_run(ns)
+                    let nlen = ne - ns
+                    if nlen > 0 { dsym_emit(ns, nlen, kind) }
+                    if ne > kw_end { i = ne } else { i = kw_end }
+                } else {
+                    // Not a declarator keyword. Advance past the
+                    // identifier we just read.
+                    i = je
+                }
+            }
+        }
+    }
+    tx_puts("]}")
+    write_frame()
+}
+
 fn respond_definition() with IO, Mut, Panic, Div {
     if LAST_ID_PRESENT == 0 { return }
     if activate_uri_slot() < 0 {
@@ -2388,6 +2507,7 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"definitionProvider\":true,")
     tx_puts("\"referencesProvider\":true,")
     tx_puts("\"renameProvider\":true,")
+    tx_puts("\"documentSymbolProvider\":true,")
     tx_puts("\"documentFormattingProvider\":false,")
     tx_puts("\"codeActionProvider\":true,")
     tx_puts("\"semanticTokensProvider\":{")
@@ -2453,6 +2573,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_CODE_ACTION { respond_empty_result();      return }
     if method == M_SEM_TOKENS  { respond_empty_result();      return }
     if method == M_FORMATTING  { respond_empty_result();      return }
+    if method == M_DOC_SYMBOL  { respond_document_symbol();   return }
     respond_method_not_found()
 }
 
