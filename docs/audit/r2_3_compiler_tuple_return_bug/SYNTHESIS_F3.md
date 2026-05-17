@@ -74,13 +74,13 @@ In short: F3 fixes the corruption mechanism without changing the post-call regis
 - Fix commit: `95b68a04` (parallel-agent commit, content-identical to my proposed diff)
 - `bin/souc-linux-x86_64`: rebuilt with F3, sha256 `34bb00d267f5…`
 - `repro/canonical.sio`: bug fixed
-- park_miller stays canonical RNG (Cause A in `distributions.sio` is separate)
+- park_miller stays recommended for simple PBPK MC; PCG64 backend now canonical too post-R.2.4 (commits `f686d6fe` Phase B, `1410cc39` Phase C).
 - PBPK28 D.7 still unblocked
 
 ## Remaining work
 
-1. **Cause A in `distributions.sio`** — algorithmic bug in signed-i64 right shift / `abs(i64::MIN)` handling. Separate stdlib dispatch.
+1. ~~**Cause A in `distributions.sio`**~~ — RESOLVED in R.2.4 (2026-05-17). Canonical PCG64-XSL-RR-128/64 bit-exact vs pcg-cpp (32/32 fingerprint + 1024/1024 oracle) + statistical sanity 6/6 PASS.
 2. **`phase_j_conf_gate` golden drift** — `bin/kretikos` PTX emitter; not lean_single-related.
-3. **R.2.3 closure** — once Cause A lands, the deprecation header in `stdlib/random/distributions.sio` can be removed.
+3. **R.2.3 closure** — Cause A landed; deprecation header in `stdlib/random/distributions.sio` removed by R.2.4 Phase B.
 
 Wall-clock spent on F3 (this session): ~15 min including bootstrap, validation, umbrella gate, and confirmation that parallel agent had committed identical fix.
