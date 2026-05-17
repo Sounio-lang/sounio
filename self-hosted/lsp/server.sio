@@ -81,6 +81,7 @@ let M_IMPLEMENTATION: i64 = 38
 let M_PREPARE_CALL_HIERARCHY: i64 = 39
 let M_INCOMING_CALLS: i64 = 40
 let M_OUTGOING_CALLS: i64 = 41
+let M_DOCUMENT_LINK: i64 = 42
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -435,6 +436,7 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "textDocument/prepareCallHierarchy") { return M_PREPARE_CALL_HIERARCHY }
     if str_eq(s, "callHierarchy/incomingCalls")     { return M_INCOMING_CALLS }
     if str_eq(s, "callHierarchy/outgoingCalls")     { return M_OUTGOING_CALLS }
+    if str_eq(s, "textDocument/documentLink")       { return M_DOCUMENT_LINK }
     M_UNKNOWN
 }
 
@@ -3917,6 +3919,149 @@ fn respond_outgoing_calls() with IO, Mut, Panic, Div {
 }
 
 // ============================================================================
+// Document links — textDocument/documentLink
+// ============================================================================
+//
+// Scans DOC_TEXT for `use a::b::c` clauses. For each module path, emits
+// a DocumentLink whose range covers the full path span (`a::b::c`) and
+// whose target is resolved by taking DOC_URI up to and including the
+// last `/self-hosted/` segment and appending `<a>/<b>/<c>.sio`. Skips
+// the clause if DOC_URI does not live under a `/self-hosted/` root or
+// the path contains no `::` separator. Cap 256 links.
+
+let DL_CAP: i64 = 256
+var DL_EMITTED: i64 = 0
+var DL_COUNT:   i64 = 0
+
+// Returns the offset of the last `/self-hosted/` in DOC_URI, or -1.
+fn dl_self_hosted_off() -> i64 with Mut, Panic {
+    let needle = "/self-hosted/"
+    let nlen: i64 = 13
+    var i: i64 = DOC_URI_LEN - nlen
+    while i >= 0 {
+        var k: i64 = 0
+        var hit: bool = true
+        while k < nlen {
+            if (DOC_URI[(i + k) as usize] as i64) != str_char_at(needle, k) {
+                hit = false; break
+            }
+            k = k + 1
+        }
+        if hit == true { return i + nlen }   // offset just past `/self-hosted/`
+        i = i - 1
+    }
+    return 0 - 1
+}
+
+// Emit one DocumentLink. path_s..path_e covers the `a::b::c` span; the
+// target is built from DOC_URI[0..base_off] + path-with-:::→/ + `.sio`.
+fn dl_emit(path_s: i64, path_e: i64, base_off: i64) with Mut, Panic, Div {
+    if DL_EMITTED == 1 { tx_putc(44) }
+    DL_EMITTED = 1
+    DL_COUNT = DL_COUNT + 1
+    offset_to_position(path_s, 0)
+    let s_line = DEF_LINE
+    let s_char = DEF_CHAR
+    let plen = path_e - path_s
+    tx_puts("{\"range\":{\"start\":{\"line\":")
+    tx_put_i64(s_line)
+    tx_puts(",\"character\":")
+    tx_put_i64(s_char)
+    tx_puts("},\"end\":{\"line\":")
+    tx_put_i64(s_line)
+    tx_puts(",\"character\":")
+    tx_put_i64(s_char + plen)
+    tx_puts("}},\"target\":\"")
+    // Copy DOC_URI[0..base_off]
+    var i: i64 = 0
+    while i < base_off {
+        let c = DOC_URI[i as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+    // Walk path_s..path_e: copy bytes, transforming `::` → `/`. Stop
+    // at the first `{` or non-path byte (caller already trimmed).
+    var p = path_s
+    while p < path_e {
+        let c = DOC_TEXT[p as usize] as i64
+        if c == 58 && p + 1 < path_e && (DOC_TEXT[(p + 1) as usize] as i64) == 58 {
+            tx_putc(47)         // '/'
+            p = p + 2
+        } else {
+            tx_putc(c)
+            p = p + 1
+        }
+    }
+    tx_puts(".sio\"}")
+}
+
+fn respond_document_link() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+    let base_off = dl_self_hosted_off()
+
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    DL_EMITTED = 0
+    DL_COUNT = 0
+
+    if base_off >= 0 {
+        var i: i64 = 0
+        while i < DOC_TEXT_LEN && DL_COUNT < DL_CAP {
+            var at_word_start: bool = false
+            if i == 0 { at_word_start = true }
+            else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false {
+                at_word_start = true
+            }
+            if at_word_start == true {
+                let je = read_ident_run(i)
+                if je > i && ident_slice_eq(i, je, "use") {
+                    // Skip whitespace, then walk over path bytes (ident
+                    // bytes plus `::`). Stop at `;`, `{`, `,`, newline,
+                    // or any other non-path char.
+                    let ps = skip_ws(je)
+                    var pe = ps
+                    var has_sep: bool = false
+                    while pe < DOC_TEXT_LEN {
+                        let c = DOC_TEXT[pe as usize] as i64
+                        if is_ident_byte(c) == true { pe = pe + 1 }
+                        else if c == 58 && pe + 1 < DOC_TEXT_LEN &&
+                                (DOC_TEXT[(pe + 1) as usize] as i64) == 58 {
+                            has_sep = true
+                            pe = pe + 2
+                        } else { break }
+                    }
+                    // Trim trailing `::` if any.
+                    while pe > ps && (DOC_TEXT[(pe - 1) as usize] as i64) == 58 { pe = pe - 1 }
+                    if pe > ps && has_sep == true {
+                        dl_emit(ps, pe, base_off)
+                    }
+                    if je > i { i = je } else { i = i + 1 }
+                } else {
+                    if je > i { i = je } else { i = i + 1 }
+                }
+            } else {
+                i = i + 1
+            }
+        }
+    }
+
+    tx_puts("]}")
+    write_frame()
+}
+
+// ============================================================================
 // Semantic tokens — textDocument/semanticTokens/full
 // ============================================================================
 //
@@ -4725,7 +4870,8 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"declarationProvider\":true,")
     tx_puts("\"typeDefinitionProvider\":true,")
     tx_puts("\"implementationProvider\":true,")
-    tx_puts("\"callHierarchyProvider\":true")
+    tx_puts("\"callHierarchyProvider\":true,")
+    tx_puts("\"documentLinkProvider\":{\"resolveProvider\":false}")
     tx_puts("},")
     tx_puts("\"serverInfo\":{")
     tx_puts("\"name\":\"sounio-lsp\",")
@@ -4796,6 +4942,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_PREPARE_CALL_HIERARCHY { respond_prepare_call_hierarchy(); return }
     if method == M_INCOMING_CALLS   { respond_incoming_calls(); return }
     if method == M_OUTGOING_CALLS   { respond_outgoing_calls(); return }
+    if method == M_DOCUMENT_LINK    { respond_document_link(); return }
     respond_method_not_found()
 }
 
