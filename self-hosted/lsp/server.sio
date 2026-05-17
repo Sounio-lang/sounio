@@ -94,6 +94,7 @@ let M_WILL_RENAME_FILES: i64 = 51
 let M_PULL_DIAGNOSTIC: i64 = 52
 let M_LINKED_EDITING: i64 = 53
 let M_INLAY_HINT_RESOLVE: i64 = 54
+let M_SEM_TOKENS_RANGE: i64 = 55
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -433,6 +434,7 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "textDocument/rename")             { return M_RENAME      }
     if str_eq(s, "textDocument/codeAction")         { return M_CODE_ACTION }
     if str_eq(s, "textDocument/semanticTokens/full") { return M_SEM_TOKENS }
+    if str_eq(s, "textDocument/semanticTokens/range") { return M_SEM_TOKENS_RANGE }
     if str_eq(s, "textDocument/formatting")         { return M_FORMATTING  }
     if str_eq(s, "textDocument/documentSymbol")     { return M_DOC_SYMBOL  }
     if str_eq(s, "textDocument/documentHighlight")  { return M_DOC_HIGHLIGHT }
@@ -1382,15 +1384,65 @@ fn respond_linked_editing_range() with IO, Mut, Panic, Div {
 
 // inlayHint/resolve — our hints are already fully populated when
 // emitted, so resolve just echoes the params.* object back as result.
-// We can't easily reconstruct the original hint without an opaque data
-// field; the simplest correct behaviour is to return null and let the
-// editor keep the original hint as-is.
+// Echo the incoming `params` object back as the `result` so the response
+// is a syntactically valid InlayHint per LSP 3.17 §inlayHint/resolve.
+// Editors that wait on resolve before rendering are unblocked; the hint
+// payload is unchanged from what `textDocument/inlayHint` returned.
 fn respond_inlay_hint_resolve() with IO, Mut, Panic, Div {
     if LAST_ID_PRESENT == 0 { return }
+    let pp = body_find("\"params\"", 0)
     tx_reset()
     tx_puts("{\"jsonrpc\":\"2.0\",")
     tx_emit_id()
-    tx_puts(",\"result\":null}")
+    if pp < 0 {
+        tx_puts(",\"result\":null}")
+        write_frame()
+        return
+    }
+    // Skip past `"params"` (8 bytes), then any whitespace + ':' + whitespace.
+    var i = pp + 8
+    while i < RX_BODY_LEN {
+        let c = RX_BODY[i as usize] as i64
+        if c == 32 || c == 58 || c == 9 || c == 10 || c == 13 {
+            i = i + 1
+        } else {
+            break
+        }
+    }
+    if i >= RX_BODY_LEN || (RX_BODY[i as usize] as i64) != 123 {
+        tx_puts(",\"result\":null}")
+        write_frame()
+        return
+    }
+    tx_puts(",\"result\":")
+    // Copy the balanced `{ … }` verbatim, tracking string state so braces
+    // inside string literals don't disturb the depth count.
+    var depth: i64 = 0
+    var in_string: bool = false
+    var escape: bool = false
+    while i < RX_BODY_LEN {
+        let c = RX_BODY[i as usize] as i64
+        tx_putc(c)
+        if escape == true {
+            escape = false
+            i = i + 1
+            continue
+        }
+        if in_string == true {
+            if c == 92 { escape = true }
+            else if c == 34 { in_string = false }
+            i = i + 1
+            continue
+        }
+        if c == 34 { in_string = true }
+        else if c == 123 { depth = depth + 1 }
+        else if c == 125 {
+            depth = depth - 1
+            if depth == 0 { i = i + 1; break }
+        }
+        i = i + 1
+    }
+    tx_puts("}")
     write_frame()
 }
 
@@ -3556,6 +3608,39 @@ let CA_CAP: i64 = 64
 var CA_EMITTED: i64 = 0
 var CA_COUNT:   i64 = 0
 
+// Buffered fix sites discovered by the scanner.  The scanner records
+// (offset, length, type) for each site; respond_code_action then emits
+// one `quickfix` action per site and one `source.fixAll` action that
+// batches every site into a single WorkspaceEdit.
+let FIX_TYPE_LOOP:    i64 = 0
+let FIX_TYPE_LET_MUT: i64 = 1
+let FIX_TYPE_SEMI:    i64 = 2
+let FIX_CAP: i64 = 64
+var FIX_COUNT: i64 = 0
+var FIX_OFF: [i64; 64] = [0; 64]
+var FIX_LEN: [i64; 64] = [0; 64]
+var FIX_TY:  [i64; 64] = [0; 64]
+
+fn ca_record_fix(off: i64, len: i64, ty: i64) with Mut, Panic {
+    if FIX_COUNT >= FIX_CAP { return }
+    FIX_OFF[FIX_COUNT as usize] = off
+    FIX_LEN[FIX_COUNT as usize] = len
+    FIX_TY[FIX_COUNT  as usize] = ty
+    FIX_COUNT = FIX_COUNT + 1
+}
+
+fn fix_title(t: i64) -> string with Mut, Panic {
+    if t == FIX_TYPE_LOOP    { return "Replace `loop` with `while true`" }
+    if t == FIX_TYPE_LET_MUT { return "Replace `let mut` with `var`"     }
+    return "Remove trailing `;` (Sounio uses newlines)"
+}
+
+fn fix_new_text(t: i64) -> string with Mut, Panic {
+    if t == FIX_TYPE_LOOP    { return "while true" }
+    if t == FIX_TYPE_LET_MUT { return "var"        }
+    return ""
+}
+
 // Parse params.range. Fills CA_RANGE_S_OFF / CA_RANGE_E_OFF (DOC_TEXT
 // byte offsets). Returns true on success.
 var CA_RANGE_S_OFF: i64 = 0
@@ -3585,18 +3670,8 @@ fn ca_parse_range() -> bool with Mut, Panic, Div {
 
 // Emit a CodeAction with WorkspaceEdit replacing DOC_TEXT[edit_off..
 // edit_off+edit_len] with new_text. The edit must lie on a single line.
-fn ca_emit_replace(edit_off: i64, edit_len: i64, title: string, new_text: string)
-    with Mut, Panic, Div {
-    if CA_EMITTED == 1 { tx_putc(44) }
-    CA_EMITTED = 1
-    CA_COUNT = CA_COUNT + 1
-    offset_to_position(edit_off, 0)
-    let s_line = DEF_LINE
-    let s_char = DEF_CHAR
-    let e_char = DEF_CHAR + edit_len
-    tx_puts("{\"title\":\"")
-    tx_puts(title)
-    tx_puts("\",\"kind\":\"quickfix\",\"edit\":{\"changes\":{\"")
+// Write the active document URI with JSON-escaping for `"` and `\`.
+fn ca_emit_uri_escaped() with Mut, Panic {
     var i: i64 = 0
     while i < DOC_URI_LEN {
         let c = DOC_URI[i as usize] as i64
@@ -3605,7 +3680,15 @@ fn ca_emit_replace(edit_off: i64, edit_len: i64, title: string, new_text: string
         else { tx_putc(c) }
         i = i + 1
     }
-    tx_puts("\":[{\"range\":{\"start\":{\"line\":")
+}
+
+// Emit one TextEdit JSON object for DOC_TEXT[off..off+len] -> new_text.
+fn ca_emit_text_edit(off: i64, len: i64, new_text: string) with Mut, Panic, Div {
+    offset_to_position(off, 0)
+    let s_line = DEF_LINE
+    let s_char = DEF_CHAR
+    let e_char = DEF_CHAR + len
+    tx_puts("{\"range\":{\"start\":{\"line\":")
     tx_put_i64(s_line)
     tx_puts(",\"character\":")
     tx_put_i64(s_char)
@@ -3615,7 +3698,85 @@ fn ca_emit_replace(edit_off: i64, edit_len: i64, title: string, new_text: string
     tx_put_i64(e_char)
     tx_puts("}},\"newText\":\"")
     tx_puts(new_text)
-    tx_puts("\"}]}}}")
+    tx_puts("\"}")
+}
+
+fn ca_emit_replace(edit_off: i64, edit_len: i64, title: string, new_text: string)
+    with Mut, Panic, Div {
+    if CA_EMITTED == 1 { tx_putc(44) }
+    CA_EMITTED = 1
+    CA_COUNT = CA_COUNT + 1
+    tx_puts("{\"title\":\"")
+    tx_puts(title)
+    tx_puts("\",\"kind\":\"quickfix\",\"edit\":{\"changes\":{\"")
+    ca_emit_uri_escaped()
+    tx_puts("\":[")
+    ca_emit_text_edit(edit_off, edit_len, new_text)
+    tx_puts("]}}}")
+}
+
+// Emit one `source.fixAll` action that batches every recorded fix into a
+// single WorkspaceEdit.  Skipped when FIX_COUNT == 0.
+fn ca_emit_fix_all() with Mut, Panic, Div {
+    if FIX_COUNT <= 0 { return }
+    if CA_EMITTED == 1 { tx_putc(44) }
+    CA_EMITTED = 1
+    CA_COUNT = CA_COUNT + 1
+    tx_puts("{\"title\":\"Sounio: fix all auto-fixable issues in document\",")
+    tx_puts("\"kind\":\"source.fixAll\",\"edit\":{\"changes\":{\"")
+    ca_emit_uri_escaped()
+    tx_puts("\":[")
+    var k: i64 = 0
+    while k < FIX_COUNT {
+        if k > 0 { tx_putc(44) }
+        let t = FIX_TY[k as usize]
+        ca_emit_text_edit(FIX_OFF[k as usize], FIX_LEN[k as usize], fix_new_text(t))
+        k = k + 1
+    }
+    tx_puts("]}}}")
+}
+
+// Emit one `refactor.extract` action that wraps DOC_TEXT[rs..re] in a new
+// `let __extracted = … in __extracted` binding.  Caller guarantees the
+// range is non-empty and contains at least one non-whitespace byte.
+fn ca_emit_refactor_extract(rs: i64, re: i64) with Mut, Panic, Div {
+    if CA_EMITTED == 1 { tx_putc(44) }
+    CA_EMITTED = 1
+    CA_COUNT = CA_COUNT + 1
+    let len = re - rs
+    tx_puts("{\"title\":\"Extract expression into `let` binding\",")
+    tx_puts("\"kind\":\"refactor.extract\",\"edit\":{\"changes\":{\"")
+    ca_emit_uri_escaped()
+    tx_puts("\":[")
+    // Single TextEdit: replace selection with
+    //     let __extracted = <selection>\n    __extracted
+    offset_to_position(rs, 0)
+    let s_line = DEF_LINE
+    let s_char = DEF_CHAR
+    let e_char = DEF_CHAR + len
+    tx_puts("{\"range\":{\"start\":{\"line\":")
+    tx_put_i64(s_line)
+    tx_puts(",\"character\":")
+    tx_put_i64(s_char)
+    tx_puts("},\"end\":{\"line\":")
+    tx_put_i64(s_line)
+    tx_puts(",\"character\":")
+    tx_put_i64(e_char)
+    tx_puts("}},\"newText\":\"let __extracted = ")
+    var i = rs
+    while i < re {
+        let c = DOC_TEXT[i as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else if c == 10 { tx_putc(92); tx_putc(110) }
+        else if c == 13 { tx_putc(92); tx_putc(114) }
+        else if c == 9  { tx_putc(92); tx_putc(116) }
+        else if c < 32 { tx_putc(32) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+    tx_puts("\\n    __extracted\"}")
+    tx_puts("]}}}")
 }
 
 fn respond_code_action() with IO, Mut, Panic, Div {
@@ -3645,18 +3806,17 @@ fn respond_code_action() with IO, Mut, Panic, Div {
     tx_puts(",\"result\":[")
     CA_EMITTED = 0
     CA_COUNT = 0
+    FIX_COUNT = 0
 
-    // Scan the range for `loop` at word start, followed by ws then `{`.
-    // We extend the lower bound by 4 bytes to catch a `loop` that
-    // overlaps the start of the range. Likewise extend the upper bound
-    // so that we still recognize a `loop` whose keyword bytes are in
-    // range even if the trailing `{` is just past it.
+    // Pass 1 — `loop {` and `let mut IDENT` recorded into FIX_*.
+    // We extend the lower bound by 4 bytes so a `loop` keyword that
+    // overlaps the start of the range is still recognized.
     var sb = rs - 4
     if sb < 0 { sb = 0 }
     var eb = re + 4
     if eb > DOC_TEXT_LEN { eb = DOC_TEXT_LEN }
     var i = sb
-    while i < eb && CA_COUNT < CA_CAP {
+    while i < eb && FIX_COUNT < FIX_CAP {
         var at_word_start: bool = false
         if i == 0 { at_word_start = true }
         else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false {
@@ -3668,26 +3828,20 @@ fn respond_code_action() with IO, Mut, Panic, Div {
                 let ps = skip_ws(je)
                 if ps < DOC_TEXT_LEN && (DOC_TEXT[ps as usize] as i64) == 123 {
                     if je > rs && i < re {
-                        ca_emit_replace(i, 4,
-                            "Replace `loop` with `while true`",
-                            "while true")
+                        ca_record_fix(i, 4, FIX_TYPE_LOOP)
                     }
                 }
                 if je > i { i = je } else { i = i + 1 }
             } else if je > i && ident_slice_eq(i, je, "let") {
-                // `let mut IDENT` (Rust-ism) → `var IDENT`.
                 let ms = skip_ws(je)
                 let me = read_ident_run(ms)
                 if me > ms && ident_slice_eq(ms, me, "mut") {
                     let ns = skip_ws(me)
                     let ne = read_ident_run(ns)
                     if ne > ns {
-                        // Replace `let mut` (i..me) with `var`.
                         let span = me - i
                         if me > rs && i < re {
-                            ca_emit_replace(i, span,
-                                "Replace `let mut` with `var`",
-                                "var")
+                            ca_record_fix(i, span, FIX_TYPE_LET_MUT)
                         }
                     }
                 }
@@ -3700,12 +3854,10 @@ fn respond_code_action() with IO, Mut, Panic, Div {
         }
     }
 
-    // Second pass: stray `;` (Rust-ism — Sounio statements end with
-    // newlines). Byte-level state-machine scan skipping strings, chars,
-    // line and block comments.
+    // Pass 2 — stray `;` outside strings/chars/comments.
     var state: i64 = 0
     var k = sb
-    while k < eb && CA_COUNT < CA_CAP {
+    while k < eb && FIX_COUNT < FIX_CAP {
         let c = DOC_TEXT[k as usize] as i64
         if state == 1 {
             if c == 92 && k + 1 < eb { k = k + 2 }
@@ -3729,14 +3881,42 @@ fn respond_code_action() with IO, Mut, Panic, Div {
                 state = 4; k = k + 2
             } else if c == 59 {
                 if k >= rs && k < re {
-                    ca_emit_replace(k, 1,
-                        "Remove trailing `;` (Sounio uses newlines)",
-                        "")
+                    ca_record_fix(k, 1, FIX_TYPE_SEMI)
                 }
                 k = k + 1
             } else {
                 k = k + 1
             }
+        }
+    }
+
+    // Emit one quickfix per recorded site.
+    var q: i64 = 0
+    while q < FIX_COUNT {
+        let t = FIX_TY[q as usize]
+        ca_emit_replace(FIX_OFF[q as usize], FIX_LEN[q as usize],
+                        fix_title(t), fix_new_text(t))
+        q = q + 1
+    }
+
+    // Emit one `source.fixAll` action batching every recorded site.
+    ca_emit_fix_all()
+
+    // Emit one `refactor.extract` action when the selection looks like
+    // an expression: it must contain at least one ident-class byte
+    // (letter / digit / underscore).  Pure-punctuation or whitespace
+    // selections (a lone `}`, an empty line) do not qualify.
+    if have_range == true && re > rs {
+        var any_ident: bool = false
+        var s2 = rs
+        while s2 < re && any_ident == false {
+            if is_ident_byte(DOC_TEXT[s2 as usize] as i64) == true {
+                any_ident = true
+            }
+            s2 = s2 + 1
+        }
+        if any_ident == true {
+            ca_emit_refactor_extract(rs, re)
         }
     }
 
@@ -4814,8 +4994,25 @@ var ST_PREV_LINE: i64 = 0
 var ST_PREV_CHAR: i64 = 0
 var ST_EMITTED:   i64 = 0
 
+// Range filter for /semanticTokens/range. When ST_RANGE_ACTIVE == 1
+// st_emit drops tokens whose start position is outside the half-open
+// interval [(ST_RANGE_S_LINE, ST_RANGE_S_CHAR),
+// (ST_RANGE_E_LINE, ST_RANGE_E_CHAR)). Skipped tokens do not update
+// ST_PREV_*, so subsequent deltas remain valid for emitted tokens.
+var ST_RANGE_ACTIVE: i64 = 0
+var ST_RANGE_S_LINE: i64 = 0
+var ST_RANGE_S_CHAR: i64 = 0
+var ST_RANGE_E_LINE: i64 = 0
+var ST_RANGE_E_CHAR: i64 = 0
+
 fn st_emit(line: i64, col: i64, length: i64, ttype: i64) with Mut, Panic, Div {
     if length <= 0 { return }
+    if ST_RANGE_ACTIVE == 1 {
+        if line < ST_RANGE_S_LINE { return }
+        if line == ST_RANGE_S_LINE && col < ST_RANGE_S_CHAR { return }
+        if line > ST_RANGE_E_LINE { return }
+        if line == ST_RANGE_E_LINE && col >= ST_RANGE_E_CHAR { return }
+    }
     if ST_EMITTED == 1 { tx_putc(44) }
     ST_EMITTED = 1
     var dline: i64 = 0
@@ -5054,6 +5251,44 @@ fn respond_semantic_tokens() with IO, Mut, Panic, Div {
 
     tx_puts("]}}")
     write_frame()
+}
+
+// Parse params.range as (line, character) pairs into ST_RANGE_*.
+// Returns true on success.  Re-uses body_find's in-order key walk: the
+// first two "line"/"character" pairs are range.start and range.end.
+fn st_parse_range() -> bool with Mut, Panic, Div {
+    let lp1 = body_find("\"line\"", 0)
+    if lp1 < 0 { return false }
+    let cp1 = body_find("\"character\"", lp1)
+    if cp1 < 0 { return false }
+    let lp2 = body_find("\"line\"", cp1)
+    if lp2 < 0 { return false }
+    let cp2 = body_find("\"character\"", lp2)
+    if cp2 < 0 { return false }
+    let s_ln = body_read_int_after(lp1 + 6)
+    let s_ch = body_read_int_after(cp1 + 11)
+    let e_ln = body_read_int_after(lp2 + 6)
+    let e_ch = body_read_int_after(cp2 + 11)
+    if s_ln < 0 || s_ch < 0 || e_ln < 0 || e_ch < 0 { return false }
+    ST_RANGE_S_LINE = s_ln
+    ST_RANGE_S_CHAR = s_ch
+    ST_RANGE_E_LINE = e_ln
+    ST_RANGE_E_CHAR = e_ch
+    return true
+}
+
+// textDocument/semanticTokens/range — same scanner as /full with an
+// emission filter restricting tokens whose start position falls outside
+// params.range.  Delta encoding remains valid because skipped tokens do
+// not update ST_PREV_*.
+fn respond_semantic_tokens_range() with IO, Mut, Panic, Div {
+    if st_parse_range() == true {
+        ST_RANGE_ACTIVE = 1
+    } else {
+        ST_RANGE_ACTIVE = 0
+    }
+    respond_semantic_tokens()
+    ST_RANGE_ACTIVE = 0
 }
 
 // ============================================================================
@@ -5570,7 +5805,7 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"documentHighlightProvider\":true,")
     tx_puts("\"documentFormattingProvider\":true,")
     tx_puts("\"documentRangeFormattingProvider\":true,")
-    tx_puts("\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"]},")
+    tx_puts("\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\",\"source.fixAll\",\"refactor.extract\"]},")
     tx_puts("\"semanticTokensProvider\":{")
     tx_puts("\"legend\":{")
     // Indices here must match the ST_TYPE_* constants used by the
@@ -5578,7 +5813,8 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"tokenTypes\":[\"keyword\",\"type\",\"variable\",\"function\",\"string\",\"number\",\"comment\",\"operator\"],")
     tx_puts("\"tokenModifiers\":[]")
     tx_puts("},")
-    tx_puts("\"full\":true")
+    tx_puts("\"full\":true,")
+    tx_puts("\"range\":true")
     tx_puts("},")
     tx_puts("\"completionProvider\":{")
     tx_puts("\"triggerCharacters\":[\".\",\":\"]")
@@ -5661,6 +5897,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_RENAME      { respond_rename();            return }
     if method == M_CODE_ACTION { respond_code_action();       return }
     if method == M_SEM_TOKENS  { respond_semantic_tokens();   return }
+    if method == M_SEM_TOKENS_RANGE { respond_semantic_tokens_range(); return }
     if method == M_FORMATTING  { respond_formatting();        return }
     if method == M_DOC_SYMBOL  { respond_document_symbol();   return }
     if method == M_DOC_HIGHLIGHT { respond_document_highlight(); return }
