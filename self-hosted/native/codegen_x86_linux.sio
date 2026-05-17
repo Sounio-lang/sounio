@@ -5730,13 +5730,11 @@ fn machine_func_has_control_flow(func: MachineFunction) -> bool with Mut, Panic,
     false
 }
 
-// Scheduler runtime gate.  CodegenPlan is ~27 MB; the native compiler
-// emits SUB RSP that skips past the stack guard page → SIGSEGV / hang
-// on the first scheduled fn (caught by semantic_hardening's struct_basic
-// baseline).  Helpers + integration stay wired (type-checked) so the
-// gated path ships; flip to `true` once the plan is hoisted to a
-// module-scope buffer.
-fn native_v2_scheduler_enabled() -> bool { false }
+// Scheduler runtime gate.  Now driven by the module-scope
+// CGPLAN_GLOBAL_BLOCK (~110 KB) instead of a 27 MB stack-allocated
+// CodegenPlan, so the SUB-RSP-past-the-guard-page hang on
+// struct_basic is gone.
+fn native_v2_scheduler_enabled() -> bool { true }
 
 fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) with Mut, Panic, Div, Alloc {
     reset_function_state_mut(nc)
@@ -5777,7 +5775,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     if !native_v2_scheduler_enabled() || machine_func_has_control_flow(machine_func) {
         native_v2_emit_machine_function_mut(nc, machine_func, fn_index, function_offset)
     } else {
-        var plan = codegen_plan_new()
+        cgplan_global_reset()
         var mi: i64 = 0
         while mi < machine_func.blocks[0].instr_count {
             let m = machine_func.blocks[0].instrs[mi as usize]
@@ -5791,16 +5789,15 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
                 mir_opcode_port_mask(m.opcode),
                 2
             )
-            plan = cgplan_add_instr(plan, cg)
+            cgplan_global_add(cg)
             mi = mi + 1
         }
-        plan = cgplan_build_deps(plan)
-        plan = cgplan_schedule_all_blocks(plan)
-        let sched = plan.blocks[0].schedule
-        let slen = plan.blocks[0].schedule_len
+        cgplan_global_build_deps()
+        cgplan_global_schedule()
+        let slen = CGPLAN_GLOBAL_BLOCK.schedule_len
         var si: i64 = 0
         while si < slen {
-            let idx = sched[si as usize]
+            let idx = CGPLAN_GLOBAL_BLOCK.schedule[si as usize]
             let em_instr = machine_func.blocks[0].instrs[idx as usize]
             if native_v2_machine_instr_is_safepoint(em_instr) {
                 let sp_kind = if em_instr.opcode == MIR_OP_CALL { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
