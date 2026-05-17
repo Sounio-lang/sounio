@@ -4064,6 +4064,88 @@ fn respond_document_link() with IO, Mut, Panic, Div {
 }
 
 // ============================================================================
+// Formatting — textDocument/formatting
+// ============================================================================
+//
+// Conservative whitespace-only formatter: emits one TextEdit per line
+// whose trailing run contains spaces or tabs immediately before the
+// newline (or before EOF on the final unterminated line). No
+// structural reformatting — never touches code bytes, indentation, or
+// blank-line layout. Safe to run on every save.
+//
+// Cap 1024 edits per request.
+
+let FMT_CAP: i64 = 1024
+var FMT_EMITTED: i64 = 0
+var FMT_COUNT:   i64 = 0
+
+fn fmt_emit_trim(line_no: i64, ws_start_col: i64, ws_end_col: i64)
+    with Mut, Panic, Div {
+    if FMT_EMITTED == 1 { tx_putc(44) }
+    FMT_EMITTED = 1
+    FMT_COUNT = FMT_COUNT + 1
+    tx_puts("{\"range\":{\"start\":{\"line\":")
+    tx_put_i64(line_no)
+    tx_puts(",\"character\":")
+    tx_put_i64(ws_start_col)
+    tx_puts("},\"end\":{\"line\":")
+    tx_put_i64(line_no)
+    tx_puts(",\"character\":")
+    tx_put_i64(ws_end_col)
+    tx_puts("}},\"newText\":\"\"}")
+}
+
+fn respond_formatting() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    FMT_EMITTED = 0
+    FMT_COUNT = 0
+
+    var i: i64 = 0
+    var line_no: i64 = 0
+    var line_start: i64 = 0
+    while i <= DOC_TEXT_LEN && FMT_COUNT < FMT_CAP {
+        var at_eol: bool = false
+        if i == DOC_TEXT_LEN { at_eol = true }
+        else if (DOC_TEXT[i as usize] as i64) == 10 { at_eol = true }
+        if at_eol == true {
+            // Walk backwards from i to find run of space / tab.
+            var w = i
+            while w > line_start {
+                let c = DOC_TEXT[(w - 1) as usize] as i64
+                if c == 32 || c == 9 { w = w - 1 } else { break }
+            }
+            if w < i {
+                fmt_emit_trim(line_no, w - line_start, i - line_start)
+            }
+            if i == DOC_TEXT_LEN { i = i + 1 }    // exit
+            else {
+                line_no = line_no + 1
+                line_start = i + 1
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+
+    tx_puts("]}")
+    write_frame()
+}
+
+// ============================================================================
 // On-type formatting — textDocument/onTypeFormatting
 // ============================================================================
 //
@@ -5020,7 +5102,7 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"renameProvider\":{\"prepareProvider\":true},")
     tx_puts("\"documentSymbolProvider\":true,")
     tx_puts("\"documentHighlightProvider\":true,")
-    tx_puts("\"documentFormattingProvider\":false,")
+    tx_puts("\"documentFormattingProvider\":true,")
     tx_puts("\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"]},")
     tx_puts("\"semanticTokensProvider\":{")
     tx_puts("\"legend\":{")
@@ -5102,7 +5184,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_RENAME      { respond_rename();            return }
     if method == M_CODE_ACTION { respond_code_action();       return }
     if method == M_SEM_TOKENS  { respond_semantic_tokens();   return }
-    if method == M_FORMATTING  { respond_empty_result();      return }
+    if method == M_FORMATTING  { respond_formatting();        return }
     if method == M_DOC_SYMBOL  { respond_document_symbol();   return }
     if method == M_DOC_HIGHLIGHT { respond_document_highlight(); return }
     if method == M_PREPARE_RENAME { respond_prepare_rename(); return }
