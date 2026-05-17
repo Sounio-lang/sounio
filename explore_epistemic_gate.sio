@@ -1,0 +1,82 @@
+// Compile-time confidence gate demo.
+//
+// Two synthetic schedules go through the EXACT same scheduler infrastructure
+// (cgplan_global_*).  The only difference is each instr's latency_var:
+//
+//   "tight"  : variances 0–1   → upper-quantile ≈ mean → high confidence
+//   "loose"  : load var = 64   → upper-quantile pushes makespan way out →
+//              confidence drops
+//
+// Then we set CGPLAN_SCHED_MIN_CONF to 950 and check whether each schedule
+// passes the policy.  The tight one accepts; the loose one refuses — without
+// the gate, both would compile identically.  This is the compiler-side analog
+// of kaxi_check_conf_policy refusing to lower a PTX kernel whose conf_budget
+// falls below the --min-conf flag.
+
+use native::codegen_plan::*
+
+fn build_tight() with Mut, Div, Panic {
+    cgplan_global_reset()
+    // 3 LOADs with zero variance.  Skylake L1 hit assumed certain (mean=4, var=0).
+    cgplan_global_add_dist(codegen_instr_with_port(0, CGOP_LOAD, 1, 0 - 1, 0 - 1, 4, 12, 1), 0)
+    cgplan_global_add_dist(codegen_instr_with_port(1, CGOP_LOAD, 2, 0 - 1, 0 - 1, 4, 12, 1), 0)
+    cgplan_global_add_dist(codegen_instr_with_port(2, CGOP_LOAD, 3, 0 - 1, 0 - 1, 4, 12, 1), 0)
+    // ADD chain reducing the loads
+    cgplan_global_add_dist(codegen_instr_with_port(3, CGOP_ADD, 4, 1, 2, 1, 99, 2), 0)
+    cgplan_global_add_dist(codegen_instr_with_port(4, CGOP_ADD, 5, 4, 3, 1, 99, 2), 0)
+    cgplan_global_build_deps()
+    cgplan_global_schedule()
+}
+
+fn build_loose() with Mut, Div, Panic {
+    cgplan_global_reset()
+    // Same shape, but each LOAD carries cache-miss variance.  sigma=8 →
+    // variance=64 — captures the L1/L2/L3/mem dispersion.
+    cgplan_global_add_dist(codegen_instr_with_port(0, CGOP_LOAD, 1, 0 - 1, 0 - 1, 4, 12, 1), 64)
+    cgplan_global_add_dist(codegen_instr_with_port(1, CGOP_LOAD, 2, 0 - 1, 0 - 1, 4, 12, 1), 64)
+    cgplan_global_add_dist(codegen_instr_with_port(2, CGOP_LOAD, 3, 0 - 1, 0 - 1, 4, 12, 1), 64)
+    cgplan_global_add_dist(codegen_instr_with_port(3, CGOP_ADD, 4, 1, 2, 1, 99, 2), 0)
+    cgplan_global_add_dist(codegen_instr_with_port(4, CGOP_ADD, 5, 4, 3, 1, 99, 2), 0)
+    cgplan_global_build_deps()
+    cgplan_global_schedule()
+}
+
+fn main() with IO, Mut, Panic, Div {
+    print("epistemic scheduler — compile-time confidence gate\n")
+    print("policy threshold = 950 (out of 1000)\n\n")
+
+    // ---------- TIGHT schedule -----------------------------------------------
+    cgplan_set_schedule_policy(950)
+    build_tight()
+    print("tight schedule:\n")
+    print("  makespan mean    = ")
+    print_int(CGPLAN_MAKESPAN_MEAN)
+    print("\n  makespan var     = ")
+    print_int(CGPLAN_MAKESPAN_VAR)
+    print("\n  makespan conf    = ")
+    print_int(CGPLAN_MAKESPAN_CONF)
+    print("\n  policy verdict   = ")
+    let tight_ok = cgplan_check_schedule_policy()
+    if tight_ok { print("ACCEPT\n") } else { print("REJECT\n") }
+
+    // ---------- LOOSE schedule -----------------------------------------------
+    cgplan_set_schedule_policy(950)
+    build_loose()
+    print("\nloose schedule:\n")
+    print("  makespan mean    = ")
+    print_int(CGPLAN_MAKESPAN_MEAN)
+    print("\n  makespan var     = ")
+    print_int(CGPLAN_MAKESPAN_VAR)
+    print("\n  makespan conf    = ")
+    print_int(CGPLAN_MAKESPAN_CONF)
+    print("\n  policy verdict   = ")
+    let loose_ok = cgplan_check_schedule_policy()
+    if loose_ok { print("ACCEPT\n") } else { print("REJECT\n") }
+
+    print("\n")
+    if tight_ok && !loose_ok {
+        println("PASS — gate accepts tight, refuses loose")
+    } else {
+        println("FAIL — gate does not discriminate")
+    }
+}

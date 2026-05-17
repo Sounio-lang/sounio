@@ -1,0 +1,128 @@
+// Phase 5 — Reproducibility under microarch swap.
+//
+// Claim.  Let M₁, M₂ be two MicroarchLatencyEpistemic profiles such that for
+// every opcode op, the upper-quantile intervals [μ-kσ, μ+kσ] under M₁ and
+// under M₂ overlap.  Then for any DAG D, the priority order assigned to nodes
+// of D by cgplan_global_priority_inner is identical under M₁ and M₂, and so
+// is the schedule produced by cgplan_global_pick_best.
+//
+// Sketch.  pick_best is a strict argmax over Q(n) = path_mean(n) + k·path_σ(n).
+// Path-mean and path-variance under M_i are linear in opcode mean/variance,
+// so the difference |Q_M₁(n) − Q_M₂(n)| is bounded by the path length times
+// the per-op interval radius δ_op = max(|μ₁−μ₂|, k·|σ₁−σ₂|).  When the gap
+// between any two nodes' priorities exceeds 2·max-path-δ, the order is
+// preserved.  For the DAGs the scheduler sees in practice (≤ ~50 nodes,
+// gaps ≥ 1 cycle from latency discretization), this condition holds whenever
+// the cross-microarch envelope intervals overlap pairwise — which is the
+// definition of cross_microarch_epistemic() in target_policy.sio.
+//
+// This test exercises a concrete 5-node DAG (load–load–add–load–add) and
+// verifies that scheduling under skylake / sunny_cove / zen4 / cross
+// produces bit-identical schedule slot orderings.  When this test passes,
+// the compiler can swap microarch profiles at build time without changing
+// the generated instruction order — the schedule is a property of the DAG
+// and of the equivalence class of overlapping microarch profiles, not of
+// any one CPU.
+
+use native::codegen_plan::*
+use native::target_policy::*
+
+// Build the SAME DAG of 5 instrs using the given (load_lat, fadd_lat,
+// load_var, fadd_var).  All builds share id assignment so schedules can be
+// compared slot-by-slot.
+fn build_dag(load_lat: i64, fadd_lat: i64, load_var: i64, fadd_var: i64) with Mut, Div, Panic {
+    cgplan_global_reset()
+    // 3 independent LOADs into r1, r2, r3 — these can execute concurrently
+    cgplan_global_add_dist(codegen_instr_with_port(0, CGOP_LOAD, 1, 0 - 1, 0 - 1, load_lat, 12, 1), load_var)
+    cgplan_global_add_dist(codegen_instr_with_port(1, CGOP_LOAD, 2, 0 - 1, 0 - 1, load_lat, 12, 1), load_var)
+    cgplan_global_add_dist(codegen_instr_with_port(2, CGOP_LOAD, 3, 0 - 1, 0 - 1, load_lat, 12, 1), load_var)
+    // FADD r4 = r1 + r2  — depends on instrs 0 and 1
+    cgplan_global_add_dist(codegen_instr_with_port(3, CGOP_ADD, 4, 1, 2, fadd_lat, 3, 2), fadd_var)
+    // FADD r5 = r4 + r3  — depends on instrs 3 and 2
+    cgplan_global_add_dist(codegen_instr_with_port(4, CGOP_ADD, 5, 4, 3, fadd_lat, 3, 2), fadd_var)
+    cgplan_global_build_deps()
+    cgplan_global_schedule()
+}
+
+// Capture the schedule slot order into a fresh i64 array.
+fn capture_schedule(out: &![i64; 5]) with Mut, Div, Panic {
+    let slen = cgplan_get_schedule_len()
+    var i: i64 = 0
+    while i < slen && i < 5 {
+        (*out)[i as usize] = cgplan_get_schedule_slot(i)
+        i = i + 1
+    }
+}
+
+fn schedules_match(a: [i64; 5], b: [i64; 5]) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    var ok: bool = true
+    while i < 5 {
+        if a[i as usize] != b[i as usize] { ok = false }
+        i = i + 1
+    }
+    ok
+}
+
+fn print_schedule(label: i64, sched: [i64; 5]) with IO, Mut, Div, Panic {
+    print("  schedule [")
+    print_int(label)
+    print("]:")
+    var i: i64 = 0
+    while i < 5 {
+        print(" ")
+        print_int(sched[i as usize])
+        i = i + 1
+    }
+    print("\n")
+}
+
+fn main() with IO, Mut, Panic, Div {
+    print("microarch invariance — same DAG under 4 epistemic profiles\n")
+    print("expected: bit-identical schedule slot ordering\n\n")
+
+    let sk = skylake_microarch_epistemic()
+    let sc = sunny_cove_microarch_epistemic()
+    let zn = zen4_microarch_epistemic()
+    let xv = cross_microarch_epistemic()
+
+    var sched_sk: [i64; 5] = [0; 5]
+    var sched_sc: [i64; 5] = [0; 5]
+    var sched_zn: [i64; 5] = [0; 5]
+    var sched_xv: [i64; 5] = [0; 5]
+
+    build_dag(sk.load_cycles.mean, sk.fp_add_cycles.mean, sk.load_cycles.variance, sk.fp_add_cycles.variance)
+    capture_schedule(&!sched_sk)
+    print("skylake     : mean=") print_int(CGPLAN_MAKESPAN_MEAN) print(" var=") print_int(CGPLAN_MAKESPAN_VAR) print(" conf=") print_int(CGPLAN_MAKESPAN_CONF) print("\n")
+    print_schedule(1, sched_sk)
+
+    build_dag(sc.load_cycles.mean, sc.fp_add_cycles.mean, sc.load_cycles.variance, sc.fp_add_cycles.variance)
+    capture_schedule(&!sched_sc)
+    print("sunny cove  : mean=") print_int(CGPLAN_MAKESPAN_MEAN) print(" var=") print_int(CGPLAN_MAKESPAN_VAR) print(" conf=") print_int(CGPLAN_MAKESPAN_CONF) print("\n")
+    print_schedule(2, sched_sc)
+
+    build_dag(zn.load_cycles.mean, zn.fp_add_cycles.mean, zn.load_cycles.variance, zn.fp_add_cycles.variance)
+    capture_schedule(&!sched_zn)
+    print("zen4        : mean=") print_int(CGPLAN_MAKESPAN_MEAN) print(" var=") print_int(CGPLAN_MAKESPAN_VAR) print(" conf=") print_int(CGPLAN_MAKESPAN_CONF) print("\n")
+    print_schedule(3, sched_zn)
+
+    build_dag(xv.load_cycles.mean, xv.fp_add_cycles.mean, xv.load_cycles.variance, xv.fp_add_cycles.variance)
+    capture_schedule(&!sched_xv)
+    print("cross-uarch : mean=") print_int(CGPLAN_MAKESPAN_MEAN) print(" var=") print_int(CGPLAN_MAKESPAN_VAR) print(" conf=") print_int(CGPLAN_MAKESPAN_CONF) print("\n")
+    print_schedule(4, sched_xv)
+
+    print("\n")
+    let m12 = schedules_match(sched_sk, sched_sc)
+    let m13 = schedules_match(sched_sk, sched_zn)
+    let m14 = schedules_match(sched_sk, sched_xv)
+    if m12 && m13 && m14 {
+        println("PASS — schedule invariant under microarch swap (all 4 profiles agree)")
+    } else {
+        println("FAIL — schedule diverged: sk=sc?")
+        if m12 { print("yes ") } else { print("no ") }
+        print(" sk=zn? ")
+        if m13 { print("yes ") } else { print("no ") }
+        print(" sk=xv? ")
+        if m14 { print("yes\n") } else { print("no\n") }
+    }
+}
