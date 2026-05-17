@@ -285,6 +285,37 @@ else
   note_fail "T7g.string brace ignored expected 1 region (got $n_region)"
 fi
 
+# ----- T7h: workspace/symbol --------------------------------------------
+T7H_OUT="$LOG_DIR/t7h.out"
+# Two open documents. Workspace query should hit symbols across both.
+run_session "$T7H_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/a.sio","languageId":"sounio","version":1,"text":"fn alpha() -> i32 { 0 }\nstruct AlphaCfg { x: i64 }\n"}}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/b.sio","languageId":"sounio","version":1,"text":"fn beta() -> i32 { 0 }\nfn alphabet() -> i32 { 0 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":100,"method":"workspace/symbol","params":{"query":"alpha"}}' \
+  '{"jsonrpc":"2.0","id":101,"method":"workspace/symbol","params":{"query":"beta"}}' \
+  '{"jsonrpc":"2.0","id":102,"method":"workspace/symbol","params":{"query":"ZZZNOMATCH"}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+# id 100: should hit fn alpha + struct AlphaCfg + fn alphabet (3 results)
+n_alpha=$(grep -oE '"id":100,"result":\[.*\]\}' "$T7H_OUT" | grep -oE '"name":"[A-Za-z]+"' | wc -l)
+if [ "$n_alpha" -ge 3 ]; then
+  note_pass "T7h.alpha matches ≥3 (got $n_alpha)"
+else
+  note_fail "T7h.alpha matches expected ≥3 (got $n_alpha)"
+fi
+# Cross-file: result for query alpha must include URIs for both a.sio and b.sio
+grep -q '"id":100,.*file:///tmp/a.sio' "$T7H_OUT" \
+  && note_pass "T7h.alpha cross-file a.sio" || note_fail "T7h.alpha cross-file a.sio"
+grep -q '"id":100,.*file:///tmp/b.sio' "$T7H_OUT" \
+  && note_pass "T7h.alpha cross-file b.sio" || note_fail "T7h.alpha cross-file b.sio"
+# id 101: should hit fn beta exactly (case-insensitive substring; alphabet has no "beta")
+grep -q '"id":101,"result":\[{"name":"beta"' "$T7H_OUT" \
+  && note_pass "T7h.beta exact match" || note_fail "T7h.beta exact match"
+# id 102: no match → empty array
+grep -q '"id":102,"result":\[\]' "$T7H_OUT" \
+  && note_pass "T7h.no match empty" || note_fail "T7h.no match empty"
+
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"
 run_session "$T8_OUT" \

@@ -72,6 +72,7 @@ let M_DOC_HIGHLIGHT: i64 = 29
 let M_PREPARE_RENAME: i64 = 30
 let M_SIGNATURE_HELP: i64 = 31
 let M_FOLDING_RANGE: i64 = 32
+let M_WORKSPACE_SYMBOL: i64 = 33
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -417,6 +418,7 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "textDocument/prepareRename")      { return M_PREPARE_RENAME }
     if str_eq(s, "textDocument/signatureHelp")      { return M_SIGNATURE_HELP }
     if str_eq(s, "textDocument/foldingRange")       { return M_FOLDING_RANGE }
+    if str_eq(s, "workspace/symbol")                { return M_WORKSPACE_SYMBOL }
     M_UNKNOWN
 }
 
@@ -2603,6 +2605,149 @@ fn respond_folding_range() with IO, Mut, Panic, Div {
 }
 
 // ============================================================================
+// Workspace symbol search — workspace/symbol
+// ============================================================================
+//
+// Iterates every active document slot, scans its DOC_TEXT for fn / struct
+// / enum / let / var declarations (same recipe as documentSymbol), filters
+// names by case-insensitive substring against `params.query`, and emits a
+// SymbolInformation[] with `location: {uri, range}`. An empty query
+// returns all symbols (capped at 256 results).
+
+let WSYM_CAP: i64 = 256
+var WSYM_QUERY: [i8; 64] = [0; 64]
+var WSYM_QUERY_LEN: i64 = 0
+var WSYM_EMITTED: i64 = 0
+var WSYM_COUNT:   i64 = 0
+
+fn lower_byte(b: i64) -> i64 {
+    if b >= 65 && b <= 90 { return b + 32 }
+    b
+}
+
+// case-insensitive contains: does DOC_TEXT[ns..ns+nlen] contain WSYM_QUERY?
+fn wsym_name_matches(ns: i64, nlen: i64) -> bool with Mut, Panic {
+    if WSYM_QUERY_LEN <= 0 { return true }
+    if nlen < WSYM_QUERY_LEN { return false }
+    var i: i64 = 0
+    let last = nlen - WSYM_QUERY_LEN
+    while i <= last {
+        var k: i64 = 0
+        var hit: bool = true
+        while k < WSYM_QUERY_LEN {
+            let a = lower_byte(DOC_TEXT[(ns + i + k) as usize] as i64)
+            let b = lower_byte(WSYM_QUERY[k as usize] as i64)
+            if a != b { hit = false; break }
+            k = k + 1
+        }
+        if hit == true { return true }
+        i = i + 1
+    }
+    return false
+}
+
+fn wsym_emit(slot: i64, ns: i64, nlen: i64, kind: i64) with Mut, Panic, Div {
+    if WSYM_EMITTED == 1 { tx_putc(44) }
+    WSYM_EMITTED = 1
+    WSYM_COUNT = WSYM_COUNT + 1
+    offset_to_position(ns, 0)
+    tx_puts("{\"name\":\"")
+    var i: i64 = 0
+    while i < nlen {
+        let c = DOC_TEXT[(ns + i) as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+    tx_puts("\",\"kind\":")
+    tx_put_i64(kind)
+    tx_puts(",\"location\":{\"uri\":\"")
+    let base = slot * 1024
+    let ulen = DOC_SLOT_URI_LEN[slot as usize]
+    var j: i64 = 0
+    while j < ulen {
+        let c = DOC_SLOT_URI[(base + j) as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        j = j + 1
+    }
+    tx_puts("\",\"range\":{\"start\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR)
+    tx_puts("},\"end\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR + nlen)
+    tx_puts("}}}}")
+}
+
+fn wsym_scan_active_slot(slot: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < DOC_TEXT_LEN && WSYM_COUNT < WSYM_CAP {
+        var at_word_start: bool = false
+        if i == 0 { at_word_start = true }
+        else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false { at_word_start = true }
+        if at_word_start == false { i = i + 1 }
+        else {
+            let je = read_ident_run(i)
+            if je == i { i = i + 1 }
+            else {
+                var kw_start = i
+                var kw_end   = je
+                if ident_slice_eq(kw_start, kw_end, "pub") == true {
+                    let kw2_s = skip_ws(kw_end)
+                    let kw2_e = read_ident_run(kw2_s)
+                    if kw2_e > kw2_s { kw_start = kw2_s; kw_end = kw2_e }
+                }
+                var kind: i64 = 0
+                if      ident_slice_eq(kw_start, kw_end, "fn")     { kind = SK_FUNCTION }
+                else if ident_slice_eq(kw_start, kw_end, "struct") { kind = SK_STRUCT }
+                else if ident_slice_eq(kw_start, kw_end, "enum")   { kind = SK_ENUM }
+                else if ident_slice_eq(kw_start, kw_end, "let")    { kind = SK_VARIABLE }
+                else if ident_slice_eq(kw_start, kw_end, "var")    { kind = SK_VARIABLE }
+                if kind != 0 {
+                    let ns = skip_ws(kw_end)
+                    let ne = read_ident_run(ns)
+                    let nlen = ne - ns
+                    if nlen > 0 && wsym_name_matches(ns, nlen) == true {
+                        wsym_emit(slot, ns, nlen, kind)
+                    }
+                    if ne > kw_end { i = ne } else { i = kw_end }
+                } else {
+                    i = je
+                }
+            }
+        }
+    }
+}
+
+fn respond_workspace_symbol() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    WSYM_QUERY_LEN = body_extract_str("\"query\"", &! WSYM_QUERY, 64)
+    if WSYM_QUERY_LEN < 0 { WSYM_QUERY_LEN = 0 }
+
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    WSYM_EMITTED = 0
+    WSYM_COUNT = 0
+    var s: i64 = 0
+    while s < 8 && WSYM_COUNT < WSYM_CAP {
+        if DOC_SLOT_URI_LEN[s as usize] > 0 {
+            slot_activate(s)
+            wsym_scan_active_slot(s)
+        }
+        s = s + 1
+    }
+    tx_puts("]}")
+    write_frame()
+}
+
+// ============================================================================
 // Semantic tokens — textDocument/semanticTokens/full
 // ============================================================================
 //
@@ -3404,7 +3549,8 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"signatureHelpProvider\":{")
     tx_puts("\"triggerCharacters\":[\"(\",\",\"]")
     tx_puts("},")
-    tx_puts("\"foldingRangeProvider\":true")
+    tx_puts("\"foldingRangeProvider\":true,")
+    tx_puts("\"workspaceSymbolProvider\":true")
     tx_puts("},")
     tx_puts("\"serverInfo\":{")
     tx_puts("\"name\":\"sounio-lsp\",")
@@ -3466,6 +3612,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_PREPARE_RENAME { respond_prepare_rename(); return }
     if method == M_SIGNATURE_HELP { respond_signature_help(); return }
     if method == M_FOLDING_RANGE  { respond_folding_range(); return }
+    if method == M_WORKSPACE_SYMBOL { respond_workspace_symbol(); return }
     respond_method_not_found()
 }
 
