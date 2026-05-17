@@ -338,6 +338,33 @@ grep -q '"start":{"line":0,"character":7},"end":{"line":0,"character":8}' "$T7I_
 grep -q '"id":110,.*"parent":{"range"' "$T7I_OUT" \
   && note_pass "T7i.parent chain present" || note_fail "T7i.parent chain present"
 
+# ----- T7j: inlayHint ---------------------------------------------------
+T7J_OUT="$LOG_DIR/t7j.out"
+# Doc:
+#   line 0: fn add(a: i64, b: i64) -> i64 { a + b }
+#   line 1: fn main() -> i32 { add(10, 20); 0 }
+# Expect inlay hints "a:" before 10 and "b:" before 20.
+run_session "$T7J_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i32 { add(10, 20); 0 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":120,"method":"textDocument/inlayHint","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"range":{"start":{"line":0,"character":0},"end":{"line":2,"character":0}}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"label":"a:","kind":2' "$T7J_OUT" \
+  && note_pass "T7j.hint a: kind 2" || note_fail "T7j.hint a: kind 2"
+grep -q '"label":"b:","kind":2' "$T7J_OUT" \
+  && note_pass "T7j.hint b: kind 2" || note_fail "T7j.hint b: kind 2"
+# Both hints must land on line 1 (call site)
+n_l1=$(grep -oE '"position":\{"line":1,"character":[0-9]+\}' "$T7J_OUT" | wc -l)
+if [ "$n_l1" -ge 2 ]; then
+  note_pass "T7j.both hints on line 1 (got $n_l1)"
+else
+  note_fail "T7j.both hints on line 1 (got $n_l1)"
+fi
+# paddingRight true
+grep -q '"paddingRight":true' "$T7J_OUT" \
+  && note_pass "T7j.paddingRight" || note_fail "T7j.paddingRight"
+
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"
 run_session "$T8_OUT" \

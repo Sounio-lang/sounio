@@ -74,6 +74,7 @@ let M_SIGNATURE_HELP: i64 = 31
 let M_FOLDING_RANGE: i64 = 32
 let M_WORKSPACE_SYMBOL: i64 = 33
 let M_SELECTION_RANGE: i64 = 34
+let M_INLAY_HINT: i64 = 35
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -421,6 +422,7 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "textDocument/foldingRange")       { return M_FOLDING_RANGE }
     if str_eq(s, "workspace/symbol")                { return M_WORKSPACE_SYMBOL }
     if str_eq(s, "textDocument/selectionRange")     { return M_SELECTION_RANGE }
+    if str_eq(s, "textDocument/inlayHint")          { return M_INLAY_HINT }
     M_UNKNOWN
 }
 
@@ -3005,6 +3007,277 @@ fn respond_selection_range() with IO, Mut, Panic, Div {
 }
 
 // ============================================================================
+// Inlay hints — textDocument/inlayHint
+// ============================================================================
+//
+// Emits param-name hints at call sites. For each `IDENT(` that is not a
+// declaration (i.e. not preceded by `fn`/`struct`/`enum`), look up the
+// fn declaration in the same buffer, parse its param names, and emit
+// one InlayHint per supplied argument at the argument's first non-ws
+// position with label `"name:"` and kind 2 (Parameter).
+//
+// String, char, and comment scanning is done with the same tiny state
+// machine used by foldingRange so `foo(` inside a string doesn't fire.
+// Capped at 256 hints.
+
+let IH_CAP: i64 = 256
+var IH_EMITTED: i64 = 0
+var IH_COUNT:   i64 = 0
+
+// Buffer for the current callee identifier (separate from IDENT_BUF so
+// fn-lookup helpers can reuse IDENT_BUF without clobbering).
+var IH_NAME: [i8; 64] = [0; 64]
+var IH_NAME_LEN: i64 = 0
+
+// Buffer for one param-name slice (start, end offsets in DOC_TEXT).
+var IH_PNAMES_S: [i64; 16] = [0; 16]
+var IH_PNAMES_E: [i64; 16] = [0; 16]
+var IH_NPARAMS: i64 = 0
+
+fn ih_set_name(s: i64, e: i64) with Mut, Panic {
+    IH_NAME_LEN = 0
+    var i = s
+    while i < e && IH_NAME_LEN < 64 {
+        IH_NAME[IH_NAME_LEN as usize] = DOC_TEXT[i as usize]
+        IH_NAME_LEN = IH_NAME_LEN + 1
+        i = i + 1
+    }
+}
+
+fn ih_name_eq_doc(ds: i64, de: i64) -> bool with Mut, Panic {
+    let dl = de - ds
+    if dl != IH_NAME_LEN { return false }
+    var i: i64 = 0
+    while i < dl {
+        if (DOC_TEXT[(ds + i) as usize] as i64) != (IH_NAME[i as usize] as i64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Find `fn NAME(...)` declaration. Returns offset of `(` or -1.
+fn ih_find_fn_paren() -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < DOC_TEXT_LEN {
+        var at_word_start: bool = false
+        if i == 0 { at_word_start = true }
+        else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false { at_word_start = true }
+        if at_word_start == true {
+            let je = read_ident_run(i)
+            if je > i && ident_slice_eq(i, je, "fn") {
+                let ns = skip_ws(je)
+                let ne = read_ident_run(ns)
+                if ne > ns && ih_name_eq_doc(ns, ne) == true {
+                    let ps = skip_ws(ne)
+                    if ps < DOC_TEXT_LEN && (DOC_TEXT[ps as usize] as i64) == 40 {
+                        return ps
+                    }
+                }
+                if je > i { i = je } else { i = i + 1 }
+            } else {
+                if je > i { i = je } else { i = i + 1 }
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    return 0 - 1
+}
+
+// Extract param names from `fn NAME(...)`. paren_off points at `(`.
+fn ih_parse_param_names(paren_off: i64) with Mut, Panic {
+    IH_NPARAMS = 0
+    var i = paren_off + 1
+    var d: i64 = 0
+    var seg_start = i
+    while i < DOC_TEXT_LEN {
+        let c = DOC_TEXT[i as usize] as i64
+        if c == 40 { d = d + 1 }
+        else if c == 41 {
+            if d == 0 {
+                // final segment
+                ih_take_pname(seg_start, i)
+                return
+            }
+            d = d - 1
+        } else if c == 44 && d == 0 {
+            ih_take_pname(seg_start, i)
+            seg_start = i + 1
+        }
+        i = i + 1
+    }
+}
+
+fn ih_take_pname(s: i64, e: i64) with Mut, Panic {
+    if IH_NPARAMS >= 16 { return }
+    // Skip leading whitespace.
+    var a = s
+    while a < e {
+        let c = DOC_TEXT[a as usize] as i64
+        if c == 32 || c == 9 || c == 10 || c == 13 { a = a + 1 } else { break }
+    }
+    if a >= e { return }
+    // First identifier in segment is the param name.
+    var b = a
+    while b < e {
+        let c = DOC_TEXT[b as usize] as i64
+        if is_ident_byte(c) == false { break }
+        b = b + 1
+    }
+    if b > a {
+        IH_PNAMES_S[IH_NPARAMS as usize] = a
+        IH_PNAMES_E[IH_NPARAMS as usize] = b
+        IH_NPARAMS = IH_NPARAMS + 1
+    }
+}
+
+fn ih_emit_hint(arg_off: i64, p_idx: i64) with Mut, Panic, Div {
+    if IH_EMITTED == 1 { tx_putc(44) }
+    IH_EMITTED = 1
+    IH_COUNT = IH_COUNT + 1
+    offset_to_position(arg_off, 0)
+    tx_puts("{\"position\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR)
+    tx_puts("},\"label\":\"")
+    let ps = IH_PNAMES_S[p_idx as usize]
+    let pe = IH_PNAMES_E[p_idx as usize]
+    var i = ps
+    while i < pe {
+        let c = DOC_TEXT[i as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+    tx_puts(":\",\"kind\":2,\"paddingRight\":true}")
+}
+
+// Walk argument list at call paren_off, emit hints for each arg.
+fn ih_emit_call_args(call_paren: i64) with Mut, Panic, Div {
+    var i = call_paren + 1
+    var d: i64 = 0
+    var arg_idx: i64 = 0
+    var pending_arg_start: bool = true
+    while i < DOC_TEXT_LEN && IH_COUNT < IH_CAP {
+        let c = DOC_TEXT[i as usize] as i64
+        if c == 40 || c == 91 || c == 123 { d = d + 1; pending_arg_start = false }
+        else if c == 41 {
+            if d == 0 { return }
+            d = d - 1
+        } else if c == 93 || c == 125 { if d > 0 { d = d - 1 } }
+        else if c == 44 && d == 0 {
+            arg_idx = arg_idx + 1
+            pending_arg_start = true
+        } else if c == 32 || c == 9 || c == 10 || c == 13 {
+            // whitespace
+        } else if pending_arg_start == true {
+            if arg_idx < IH_NPARAMS {
+                ih_emit_hint(i, arg_idx)
+            }
+            pending_arg_start = false
+        }
+        i = i + 1
+    }
+}
+
+fn respond_inlay_hint() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    IH_EMITTED = 0
+    IH_COUNT = 0
+
+    // Tiny state machine for skipping strings / chars / comments.
+    var state: i64 = 0
+    var i: i64 = 0
+    while i < DOC_TEXT_LEN && IH_COUNT < IH_CAP {
+        let c = DOC_TEXT[i as usize] as i64
+
+        if state == 1 {
+            if c == 92 && i + 1 < DOC_TEXT_LEN { i = i + 2 }
+            else { if c == 34 { state = 0 } i = i + 1 }
+        } else if state == 2 {
+            if c == 92 && i + 1 < DOC_TEXT_LEN { i = i + 2 }
+            else { if c == 39 { state = 0 } i = i + 1 }
+        } else if state == 3 {
+            if c == 10 { state = 0 }
+            i = i + 1
+        } else if state == 4 {
+            if c == 42 && i + 1 < DOC_TEXT_LEN && (DOC_TEXT[(i + 1) as usize] as i64) == 47 {
+                state = 0; i = i + 2
+            } else { i = i + 1 }
+        } else {
+            if c == 34 { state = 1; i = i + 1 }
+            else if c == 39 { state = 2; i = i + 1 }
+            else if c == 47 && i + 1 < DOC_TEXT_LEN && (DOC_TEXT[(i + 1) as usize] as i64) == 47 {
+                state = 3; i = i + 2
+            } else if c == 47 && i + 1 < DOC_TEXT_LEN && (DOC_TEXT[(i + 1) as usize] as i64) == 42 {
+                state = 4; i = i + 2
+            } else {
+                // Are we at a word start that begins an identifier?
+                var at_word_start: bool = false
+                if i == 0 { at_word_start = true }
+                else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false {
+                    at_word_start = true
+                }
+                if at_word_start == true && is_ident_byte(c) == true {
+                    let je = read_ident_run(i)
+                    // Check this is NOT a declarator keyword.
+                    var is_kw: bool = false
+                    if ident_slice_eq(i, je, "fn")     { is_kw = true }
+                    else if ident_slice_eq(i, je, "struct") { is_kw = true }
+                    else if ident_slice_eq(i, je, "enum")   { is_kw = true }
+                    else if ident_slice_eq(i, je, "let")    { is_kw = true }
+                    else if ident_slice_eq(i, je, "var")    { is_kw = true }
+                    else if ident_slice_eq(i, je, "if")     { is_kw = true }
+                    else if ident_slice_eq(i, je, "while")  { is_kw = true }
+                    else if ident_slice_eq(i, je, "return") { is_kw = true }
+                    else if ident_slice_eq(i, je, "match")  { is_kw = true }
+                    else if ident_slice_eq(i, je, "for")    { is_kw = true }
+                    if is_kw == false {
+                        // Look ahead for `(` with no intervening
+                        // non-ws (so `foo (x)` and `foo(x)` both fire,
+                        // but `foo.bar()` is handled at `bar`).
+                        let ps = skip_ws(je)
+                        if ps < DOC_TEXT_LEN && (DOC_TEXT[ps as usize] as i64) == 40 {
+                            ih_set_name(i, je)
+                            if IH_NAME_LEN > 0 {
+                                let fn_paren = ih_find_fn_paren()
+                                if fn_paren >= 0 {
+                                    ih_parse_param_names(fn_paren)
+                                    ih_emit_call_args(ps)
+                                }
+                            }
+                        }
+                    }
+                    if je > i { i = je } else { i = i + 1 }
+                } else {
+                    i = i + 1
+                }
+            }
+        }
+    }
+
+    tx_puts("]}")
+    write_frame()
+}
+
+// ============================================================================
 // Semantic tokens — textDocument/semanticTokens/full
 // ============================================================================
 //
@@ -3808,7 +4081,8 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("},")
     tx_puts("\"foldingRangeProvider\":true,")
     tx_puts("\"workspaceSymbolProvider\":true,")
-    tx_puts("\"selectionRangeProvider\":true")
+    tx_puts("\"selectionRangeProvider\":true,")
+    tx_puts("\"inlayHintProvider\":true")
     tx_puts("},")
     tx_puts("\"serverInfo\":{")
     tx_puts("\"name\":\"sounio-lsp\",")
@@ -3872,6 +4146,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_FOLDING_RANGE  { respond_folding_range(); return }
     if method == M_WORKSPACE_SYMBOL { respond_workspace_symbol(); return }
     if method == M_SELECTION_RANGE  { respond_selection_range(); return }
+    if method == M_INLAY_HINT       { respond_inlay_hint(); return }
     respond_method_not_found()
 }
 
