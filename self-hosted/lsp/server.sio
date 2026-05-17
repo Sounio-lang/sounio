@@ -73,6 +73,7 @@ let M_PREPARE_RENAME: i64 = 30
 let M_SIGNATURE_HELP: i64 = 31
 let M_FOLDING_RANGE: i64 = 32
 let M_WORKSPACE_SYMBOL: i64 = 33
+let M_SELECTION_RANGE: i64 = 34
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -419,6 +420,7 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "textDocument/signatureHelp")      { return M_SIGNATURE_HELP }
     if str_eq(s, "textDocument/foldingRange")       { return M_FOLDING_RANGE }
     if str_eq(s, "workspace/symbol")                { return M_WORKSPACE_SYMBOL }
+    if str_eq(s, "textDocument/selectionRange")     { return M_SELECTION_RANGE }
     M_UNKNOWN
 }
 
@@ -2748,6 +2750,261 @@ fn respond_workspace_symbol() with IO, Mut, Panic, Div {
 }
 
 // ============================================================================
+// Selection range — textDocument/selectionRange
+// ============================================================================
+//
+// For each cursor position in params.positions[], emit a nested
+// SelectionRange chain:
+//   token range → enclosing (), [] or {} → ... → whole file
+//
+// Strings/chars/comments aren't fully respected here (kept simple): the
+// editor only uses this for smart-select, so a balanced-bracket walk is
+// good enough in practice for code regions and harmless inside strings.
+
+let SR_MAX_POS: i64 = 16
+var SR_LINES: [i64; 16] = [0; 16]
+var SR_CHARS: [i64; 16] = [0; 16]
+var SR_N: i64 = 0
+
+// Each level of the chain stores (start_off, end_off). Up to 32 levels.
+var SR_OS: [i64; 32] = [0; 32]
+var SR_OE: [i64; 32] = [0; 32]
+var SR_LEVELS: i64 = 0
+
+fn sr_parse_positions() with Mut, Panic, Div {
+    SR_N = 0
+    // Walk RX_BODY looking for "line" / "character" pairs in order. A
+    // position object has both. We require both keys to be found within
+    // the same scan step and consume them sequentially.
+    var i: i64 = 0
+    while i < RX_BODY_LEN && SR_N < SR_MAX_POS {
+        let lp = body_find("\"line\"", i)
+        if lp < 0 { break }
+        let cp = body_find("\"character\"", lp)
+        if cp < 0 { break }
+        let ln = body_read_int_after(lp + 6)
+        let ch = body_read_int_after(cp + 11)
+        if ln < 0 || ch < 0 { break }
+        SR_LINES[SR_N as usize] = ln
+        SR_CHARS[SR_N as usize] = ch
+        SR_N = SR_N + 1
+        // Advance past whichever comes later.
+        if cp > lp { i = cp + 11 } else { i = lp + 6 }
+    }
+}
+
+fn sr_pos_to_offset(ln: i64, ch: i64) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    var line: i64 = 0
+    while i < DOC_TEXT_LEN && line < ln {
+        if (DOC_TEXT[i as usize] as i64) == 10 { line = line + 1 }
+        i = i + 1
+    }
+    if line != ln { return DOC_TEXT_LEN }
+    var col: i64 = 0
+    while col < ch && i < DOC_TEXT_LEN {
+        let c = DOC_TEXT[i as usize] as i64
+        if c == 10 { return i }
+        i = i + 1
+        col = col + 1
+    }
+    return i
+}
+
+// Walk outward from `cur` finding the innermost enclosing pair of
+// (open, close) brackets. Stores result in *_OS / *_OE level.
+fn sr_find_outer(cur_s: i64, cur_e: i64, open_b: i64, close_b: i64) -> bool with Mut, Panic {
+    var d: i64 = 0
+    var p = cur_s - 1
+    var open_off: i64 = 0 - 1
+    while p >= 0 {
+        let c = DOC_TEXT[p as usize] as i64
+        if c == close_b { d = d + 1 }
+        else if c == open_b {
+            if d == 0 { open_off = p; p = 0 - 1; break }
+            else { d = d - 1 }
+        }
+        p = p - 1
+    }
+    if open_off < 0 { return false }
+    var d2: i64 = 0
+    var q = cur_e
+    var close_off: i64 = 0 - 1
+    while q < DOC_TEXT_LEN {
+        let c = DOC_TEXT[q as usize] as i64
+        if c == open_b { d2 = d2 + 1 }
+        else if c == close_b {
+            if d2 == 0 { close_off = q + 1; break }
+            else { d2 = d2 - 1 }
+        }
+        q = q + 1
+    }
+    if close_off < 0 { return false }
+    // Push two levels: inside-brackets (exclusive of the delimiters)
+    // and the brackets themselves (inclusive).
+    if SR_LEVELS < 32 {
+        SR_OS[SR_LEVELS as usize] = open_off + 1
+        SR_OE[SR_LEVELS as usize] = close_off - 1
+        SR_LEVELS = SR_LEVELS + 1
+    }
+    if SR_LEVELS < 32 {
+        SR_OS[SR_LEVELS as usize] = open_off
+        SR_OE[SR_LEVELS as usize] = close_off
+        SR_LEVELS = SR_LEVELS + 1
+    }
+    return true
+}
+
+fn sr_build_chain(cur: i64) with Mut, Panic {
+    SR_LEVELS = 0
+    // Innermost level: identifier under cursor, if any. Otherwise
+    // 1-byte span (or 0-byte at EOF).
+    var s: i64 = cur
+    var e: i64 = cur
+    if cur < DOC_TEXT_LEN && is_ident_byte(DOC_TEXT[cur as usize] as i64) == true {
+        while s > 0 {
+            let c = DOC_TEXT[(s - 1) as usize] as i64
+            if is_ident_byte(c) == false { break }
+            s = s - 1
+        }
+        e = cur
+        while e < DOC_TEXT_LEN {
+            let c = DOC_TEXT[e as usize] as i64
+            if is_ident_byte(c) == false { break }
+            e = e + 1
+        }
+    } else if cur < DOC_TEXT_LEN {
+        e = cur + 1
+    }
+    SR_OS[0] = s
+    SR_OE[0] = e
+    SR_LEVELS = 1
+
+    // Expand outward through (), [], {} in turn. Each call adds 2
+    // levels (inside + brackets) when it finds a match.
+    var changed: bool = true
+    while changed == true && SR_LEVELS < 30 {
+        changed = false
+        let cs = SR_OS[(SR_LEVELS - 1) as usize]
+        let ce = SR_OE[(SR_LEVELS - 1) as usize]
+        // Try the *closest* enclosing of any kind by finding all three
+        // and picking the innermost.
+        var best_open: i64 = 0 - 1
+        var best_close: i64 = 0 - 1
+        var best_pair_open: i64 = 0
+        var best_pair_close: i64 = 0
+        // ( )
+        if sr_find_outer(cs, ce, 40, 41) == true {
+            let new_open = SR_OS[(SR_LEVELS - 2) as usize] - 1
+            let new_close = SR_OE[(SR_LEVELS - 2) as usize] + 1
+            best_open = new_open
+            best_close = new_close
+            best_pair_open = 40
+            best_pair_close = 41
+            // Pop the two we just pushed; we'll re-push the winner.
+            SR_LEVELS = SR_LEVELS - 2
+        }
+        // [ ]
+        if sr_find_outer(cs, ce, 91, 93) == true {
+            let new_open = SR_OS[(SR_LEVELS - 2) as usize] - 1
+            let new_close = SR_OE[(SR_LEVELS - 2) as usize] + 1
+            if best_open < 0 || new_open > best_open {
+                best_open = new_open
+                best_close = new_close
+                best_pair_open = 91
+                best_pair_close = 93
+            }
+            SR_LEVELS = SR_LEVELS - 2
+        }
+        // { }
+        if sr_find_outer(cs, ce, 123, 125) == true {
+            let new_open = SR_OS[(SR_LEVELS - 2) as usize] - 1
+            let new_close = SR_OE[(SR_LEVELS - 2) as usize] + 1
+            if best_open < 0 || new_open > best_open {
+                best_open = new_open
+                best_close = new_close
+                best_pair_open = 123
+                best_pair_close = 125
+            }
+            SR_LEVELS = SR_LEVELS - 2
+        }
+        if best_open >= 0 {
+            if SR_LEVELS < 32 {
+                SR_OS[SR_LEVELS as usize] = best_open + 1
+                SR_OE[SR_LEVELS as usize] = best_close - 1
+                SR_LEVELS = SR_LEVELS + 1
+            }
+            if SR_LEVELS < 32 {
+                SR_OS[SR_LEVELS as usize] = best_open
+                SR_OE[SR_LEVELS as usize] = best_close
+                SR_LEVELS = SR_LEVELS + 1
+            }
+            changed = true
+        }
+    }
+    // Outermost: whole file.
+    if SR_LEVELS < 32 {
+        SR_OS[SR_LEVELS as usize] = 0
+        SR_OE[SR_LEVELS as usize] = DOC_TEXT_LEN
+        SR_LEVELS = SR_LEVELS + 1
+    }
+}
+
+fn sr_emit_chain_level(idx: i64) with Mut, Panic, Div {
+    let so = SR_OS[idx as usize]
+    let eo = SR_OE[idx as usize]
+    offset_to_position(so, 0)
+    let s_line = DEF_LINE
+    let s_char = DEF_CHAR
+    offset_to_position(eo, 0)
+    let e_line = DEF_LINE
+    let e_char = DEF_CHAR
+    tx_puts("{\"range\":{\"start\":{\"line\":")
+    tx_put_i64(s_line)
+    tx_puts(",\"character\":")
+    tx_put_i64(s_char)
+    tx_puts("},\"end\":{\"line\":")
+    tx_put_i64(e_line)
+    tx_puts(",\"character\":")
+    tx_put_i64(e_char)
+    // Closes start/end → "end":{...}, range:{...}. No outer `}` yet.
+    tx_puts("}}")
+    if idx + 1 < SR_LEVELS {
+        tx_puts(",\"parent\":")
+        sr_emit_chain_level(idx + 1)
+    }
+    tx_putc(125)
+}
+
+fn respond_selection_range() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+    sr_parse_positions()
+
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    var k: i64 = 0
+    while k < SR_N {
+        if k > 0 { tx_putc(44) }
+        let off = sr_pos_to_offset(SR_LINES[k as usize], SR_CHARS[k as usize])
+        sr_build_chain(off)
+        sr_emit_chain_level(0)
+        k = k + 1
+    }
+    tx_puts("]}")
+    write_frame()
+}
+
+// ============================================================================
 // Semantic tokens — textDocument/semanticTokens/full
 // ============================================================================
 //
@@ -3550,7 +3807,8 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"triggerCharacters\":[\"(\",\",\"]")
     tx_puts("},")
     tx_puts("\"foldingRangeProvider\":true,")
-    tx_puts("\"workspaceSymbolProvider\":true")
+    tx_puts("\"workspaceSymbolProvider\":true,")
+    tx_puts("\"selectionRangeProvider\":true")
     tx_puts("},")
     tx_puts("\"serverInfo\":{")
     tx_puts("\"name\":\"sounio-lsp\",")
@@ -3613,6 +3871,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_SIGNATURE_HELP { respond_signature_help(); return }
     if method == M_FOLDING_RANGE  { respond_folding_range(); return }
     if method == M_WORKSPACE_SYMBOL { respond_workspace_symbol(); return }
+    if method == M_SELECTION_RANGE  { respond_selection_range(); return }
     respond_method_not_found()
 }
 

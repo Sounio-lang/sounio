@@ -316,6 +316,28 @@ grep -q '"id":101,"result":\[{"name":"beta"' "$T7H_OUT" \
 grep -q '"id":102,"result":\[\]' "$T7H_OUT" \
   && note_pass "T7h.no match empty" || note_fail "T7h.no match empty"
 
+# ----- T7i: selectionRange ----------------------------------------------
+T7I_OUT="$LOG_DIR/t7i.out"
+# Doc: fn add(a: i64, b: i64) -> i64 { a + b }
+# Position at character 7 = `a` (the param identifier).
+# Expected chain: `a` → param list inside `()` → `(a: i64, b: i64)` →
+#                  fn signature region → whole file
+run_session "$T7I_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn add(a: i64, b: i64) -> i64 { a + b }\n"}}}' \
+  '{"jsonrpc":"2.0","id":110,"method":"textDocument/selectionRange","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"positions":[{"line":0,"character":7}]}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+# Must return at least one SelectionRange with nested parent chain.
+grep -q '"id":110,"result":\[{"range"' "$T7I_OUT" \
+  && note_pass "T7i.selectionRange shape" || note_fail "T7i.selectionRange shape"
+# Innermost should be the identifier `a` at char 7..8.
+grep -q '"start":{"line":0,"character":7},"end":{"line":0,"character":8}' "$T7I_OUT" \
+  && note_pass "T7i.innermost = ident a" || note_fail "T7i.innermost = ident a"
+# Chain must include a `"parent":` link.
+grep -q '"id":110,.*"parent":{"range"' "$T7I_OUT" \
+  && note_pass "T7i.parent chain present" || note_fail "T7i.parent chain present"
+
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"
 run_session "$T8_OUT" \
