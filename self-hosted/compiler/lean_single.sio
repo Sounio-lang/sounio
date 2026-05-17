@@ -23424,29 +23424,48 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     if CLI_SHOW_AST != 0 { dump_cli_ast_summary() }
     if CLI_SHOW_TYPES != 0 { dump_cli_type_summary() }
 
-    // Pass 1c.5: re-scan return types for refinement predicates now that the alias table is complete.
-    // Pass 1 signature scan runs before Pass 1c (type alias registration), so alias-typed returns
-    // like `-> Pos` can't resolve their predicates at sig-scan time. This pass re-scans each
-    // function's recorded return type token and (re-)populates FN_RET_HAS_PRED.
-    var has_ref_pred_alias: i64 = 0
+    // Pass 1c.5: re-scan return types now that the alias table is complete.
+    // Pass 1 signature scan runs before Pass 1c (type alias registration), so
+    // alias-typed returns like `-> Pos` (refinement) or `-> Bar` (where
+    // `type Bar = Foo` and Foo is a multi-slot struct) can't resolve at sig-
+    // scan time. The unresolved alias falls into the "type 0, hash=alias_hash"
+    // branch of scan_type, and ty_slot_count(0, alias_hash) returns 1 by
+    // fallback — silently baking the wrong slot count into tuple return hashes.
+    //
+    // This pass re-runs scan_type for every function's recorded return token
+    // once the alias table is complete, then redoes the Pass-1 tuple-hash
+    // encoding logic so first/last slot counts are recorded correctly.
+    // Without this fix, `fn wrap(b: Bar) -> (Bar, i64) { return step(b) }`
+    // produces "return type does not match function signature" for any
+    // multi-slot Bar alias of a struct. (Sounio-Pure R.2.7 root cause.)
     if REF_TYPE_COUNT > 0 {
-        var hp_i: i64 = 0
-        while hp_i < REF_TYPE_COUNT {
-            let hp_b = hp_i * 10
-            if REF_TYPE_DATA[(hp_b + 2) as usize] == 1 || REF_TYPE_DATA[(hp_b + 6) as usize] == 1 {
-                has_ref_pred_alias = 1
-                hp_i = REF_TYPE_COUNT
-            } else {
-                hp_i = hp_i + 1
-            }
-        }
-    }
-    if has_ref_pred_alias > 0 {
         var rp_i: i64 = 0
         while rp_i < FN_COUNT {
             let rp_tok = FN_RET_TY_TOK[rp_i as usize]
             if rp_tok >= 0 {
                 scan_type(rp_tok)
+                var re_ret_ty = SCAN_TY
+                var re_ret_hash = SCAN_TY_HASH
+                // Tuple return: redo the slot-count encoding so resolved
+                // alias-typed elements update first_nslots / total_nslots.
+                if re_ret_ty == 6 && TK[rp_tok as usize] == 6 {
+                    let tcount_enc2 = re_ret_hash / 1000000
+                    scan_type(rp_tok + 1)
+                    let re_first_ty = SCAN_TY
+                    let re_first_hash = SCAN_TY_HASH
+                    let re_first_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
+                    var second_q2 = SCAN_TY_NEXT
+                    if TK[second_q2 as usize] == 28 { second_q2 = second_q2 + 1 }
+                    scan_type(second_q2)
+                    let re_last_ty = SCAN_TY
+                    let re_last_hash = SCAN_TY_HASH
+                    let re_last_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
+                    let re_total = re_first_nslots + re_last_nslots
+                    re_ret_hash = tcount_enc2 * 1000000 + re_first_nslots * 1000 + re_total
+                    tup_cache_register(re_ret_hash, re_first_ty, re_first_hash, re_last_ty, re_last_hash)
+                }
+                FN_RET_TY[rp_i as usize] = re_ret_ty
+                FN_RET_HASH[rp_i as usize] = re_ret_hash
                 // PR-10: store f64 metadata alongside integer predicates
                 if SCAN_HAS_PRED == 1 {
                     FN_RET_HAS_PRED[rp_i as usize] = 1
