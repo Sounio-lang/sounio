@@ -84,6 +84,12 @@ let M_OUTGOING_CALLS: i64 = 41
 let M_DOCUMENT_LINK: i64 = 42
 let M_ON_TYPE_FORMATTING: i64 = 43
 let M_RANGE_FORMATTING: i64 = 44
+let M_CANCEL_REQUEST: i64 = 45
+let M_DID_CHANGE_WATCHED_FILES: i64 = 46
+let M_DID_CHANGE_WORKSPACE_FOLDERS: i64 = 47
+let M_DID_CHANGE_CONFIGURATION: i64 = 48
+let M_CODE_LENS: i64 = 49
+let M_EXECUTE_COMMAND: i64 = 50
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -441,6 +447,12 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "textDocument/documentLink")       { return M_DOCUMENT_LINK }
     if str_eq(s, "textDocument/onTypeFormatting")   { return M_ON_TYPE_FORMATTING }
     if str_eq(s, "textDocument/rangeFormatting")    { return M_RANGE_FORMATTING }
+    if str_eq(s, "$/cancelRequest")                 { return M_CANCEL_REQUEST }
+    if str_eq(s, "workspace/didChangeWatchedFiles") { return M_DID_CHANGE_WATCHED_FILES }
+    if str_eq(s, "workspace/didChangeWorkspaceFolders") { return M_DID_CHANGE_WORKSPACE_FOLDERS }
+    if str_eq(s, "workspace/didChangeConfiguration") { return M_DID_CHANGE_CONFIGURATION }
+    if str_eq(s, "textDocument/codeLens")           { return M_CODE_LENS }
+    if str_eq(s, "workspace/executeCommand")        { return M_EXECUTE_COMMAND }
     M_UNKNOWN
 }
 
@@ -4232,6 +4244,127 @@ fn respond_range_formatting() with IO, Mut, Panic, Div {
 }
 
 // ============================================================================
+// Code lens — textDocument/codeLens + workspace/executeCommand
+// ============================================================================
+//
+// Emits a Run-button CodeLens above every `fn main(` and a Check-button
+// above every `pub fn` declaration. Command names route through
+// workspace/executeCommand → sounio.run / sounio.check, which the
+// editor extension hooks to spawn `souc run` or `souc check`.
+// 256-lens cap; arguments carry the file URI so the editor can pick
+// the right buffer.
+
+let CL_CAP: i64 = 256
+var CL_EMITTED: i64 = 0
+var CL_COUNT:   i64 = 0
+
+fn cl_emit_lens(line: i64, title: string, command: string) with Mut, Panic, Div {
+    if CL_EMITTED == 1 { tx_putc(44) }
+    CL_EMITTED = 1
+    CL_COUNT = CL_COUNT + 1
+    tx_puts("{\"range\":{\"start\":{\"line\":")
+    tx_put_i64(line)
+    tx_puts(",\"character\":0},\"end\":{\"line\":")
+    tx_put_i64(line)
+    tx_puts(",\"character\":0}},\"command\":{\"title\":\"")
+    tx_puts(title)
+    tx_puts("\",\"command\":\"")
+    tx_puts(command)
+    tx_puts("\",\"arguments\":[\"")
+    var i: i64 = 0
+    while i < DOC_URI_LEN {
+        let c = DOC_URI[i as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+    tx_puts("\"]}}")
+}
+
+fn respond_code_lens() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":[]}")
+        write_frame()
+        return
+    }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    CL_EMITTED = 0
+    CL_COUNT = 0
+
+    var i: i64 = 0
+    while i < DOC_TEXT_LEN && CL_COUNT < CL_CAP {
+        var at_word_start: bool = false
+        if i == 0 { at_word_start = true }
+        else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false {
+            at_word_start = true
+        }
+        if at_word_start == true {
+            let je = read_ident_run(i)
+            if je > i {
+                var kw_start = i
+                var kw_end   = je
+                var is_pub: bool = false
+                if ident_slice_eq(kw_start, kw_end, "pub") {
+                    let kw2_s = skip_ws(kw_end)
+                    let kw2_e = read_ident_run(kw2_s)
+                    if kw2_e > kw2_s {
+                        is_pub = true
+                        kw_start = kw2_s
+                        kw_end = kw2_e
+                    }
+                }
+                if ident_slice_eq(kw_start, kw_end, "fn") {
+                    let ns = skip_ws(kw_end)
+                    let ne = read_ident_run(ns)
+                    if ne > ns {
+                        offset_to_position(i, 0)
+                        let line = DEF_LINE
+                        // Run-button only on `fn main`.
+                        if ident_slice_eq(ns, ne, "main") {
+                            cl_emit_lens(line, "▶ Run", "sounio.run")
+                        }
+                        // Check button on every public function.
+                        if is_pub == true {
+                            cl_emit_lens(line, "✓ Check", "sounio.check")
+                        }
+                    }
+                    if je > i { i = je } else { i = i + 1 }
+                } else {
+                    if je > i { i = je } else { i = i + 1 }
+                }
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    tx_puts("]}")
+    write_frame()
+}
+
+// workspace/executeCommand — the server reports success and lets the
+// client run the actual command (sounio.run / sounio.check) since the
+// editor process is what owns the integrated terminal. We respond
+// `null` so the editor sees a clean RPC ack.
+fn respond_execute_command() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":null}")
+    write_frame()
+}
+
+// ============================================================================
 // On-type formatting — textDocument/onTypeFormatting
 // ============================================================================
 //
@@ -5215,11 +5348,14 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"implementationProvider\":true,")
     tx_puts("\"callHierarchyProvider\":true,")
     tx_puts("\"documentLinkProvider\":{\"resolveProvider\":false},")
-    tx_puts("\"documentOnTypeFormattingProvider\":{\"firstTriggerCharacter\":\"\\n\",\"moreTriggerCharacter\":[\"}\"]}")
+    tx_puts("\"documentOnTypeFormattingProvider\":{\"firstTriggerCharacter\":\"\\n\",\"moreTriggerCharacter\":[\"}\"]},")
+    tx_puts("\"workspace\":{\"workspaceFolders\":{\"supported\":true,\"changeNotifications\":true}},")
+    tx_puts("\"codeLensProvider\":{\"resolveProvider\":false},")
+    tx_puts("\"executeCommandProvider\":{\"commands\":[\"sounio.run\",\"sounio.check\"]}")
     tx_puts("},")
     tx_puts("\"serverInfo\":{")
     tx_puts("\"name\":\"sounio-lsp\",")
-    tx_puts("\"version\":\"0.1.0\"")
+    tx_puts("\"version\":\"0.2.0\"")
     tx_puts("}")
     tx_puts("}}")
     write_frame()
@@ -5289,6 +5425,15 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_DOCUMENT_LINK    { respond_document_link(); return }
     if method == M_ON_TYPE_FORMATTING { respond_on_type_formatting(); return }
     if method == M_RANGE_FORMATTING { respond_range_formatting(); return }
+    // Notifications-only: silently consume. Cancel never has an id;
+    // didChange* notifications do not request a response. The server
+    // does not run async work today so $/cancelRequest is a no-op.
+    if method == M_CANCEL_REQUEST { return }
+    if method == M_DID_CHANGE_WATCHED_FILES { return }
+    if method == M_DID_CHANGE_WORKSPACE_FOLDERS { return }
+    if method == M_DID_CHANGE_CONFIGURATION { return }
+    if method == M_CODE_LENS { respond_code_lens(); return }
+    if method == M_EXECUTE_COMMAND { respond_execute_command(); return }
     respond_method_not_found()
 }
 

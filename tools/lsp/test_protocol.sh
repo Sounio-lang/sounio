@@ -540,6 +540,27 @@ grep -q '"start":{"line":1,"character":13},"end":{"line":1,"character":14}' "$T7
 grep -q '"start":{"line":2,"character":13},"end":{"line":2,"character":14}' "$T7S_OUT" \
   && note_fail "T7s.in-string ; not skipped" || note_pass "T7s.in-string ; skipped"
 
+# ----- T7t: codeLens + $/cancelRequest no-op + watchedFiles no-op -------
+T7T_OUT="$LOG_DIR/t7t.out"
+run_session "$T7T_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"pub fn helper(x: i64) -> i64 { x + 1 }\nfn main() -> i32 { 0 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":2000,"method":"textDocument/codeLens","params":{"textDocument":{"uri":"file:///tmp/t.sio"}}}' \
+  '{"jsonrpc":"2.0","id":2001,"method":"$/cancelRequest","params":{"id":2000}}' \
+  '{"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{"changes":[]}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"title":"✓ Check","command":"sounio.check"' "$T7T_OUT" \
+  && note_pass "T7t.codeLens ✓ Check" || note_fail "T7t.codeLens ✓ Check"
+grep -q '"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":0}},"command":{"title":"▶ Run","command":"sounio.run"' "$T7T_OUT" \
+  && note_pass "T7t.codeLens ▶ Run main" || note_fail "T7t.codeLens ▶ Run main"
+grep -q '"codeLensProvider"' "$T7T_OUT" \
+  && note_pass "T7t.cap.codeLens" || note_fail "T7t.cap.codeLens"
+grep -q '"workspaceFolders"' "$T7T_OUT" \
+  && note_pass "T7t.cap.workspaceFolders" || note_fail "T7t.cap.workspaceFolders"
+grep -q '"id":2001' "$T7T_OUT" \
+  && note_fail "T7t.cancelRequest leaked a response" || note_pass "T7t.cancelRequest silent"
+
 # ----- T8: shutdown + exit clean ----------------------------------------
 T8_OUT="$LOG_DIR/t8.out"
 run_session "$T8_OUT" \
