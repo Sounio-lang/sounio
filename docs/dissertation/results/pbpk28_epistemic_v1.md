@@ -72,21 +72,34 @@ Var(AUC) ≈ Σᵢ cᵢ² σᵢ²  +  ½ Σᵢⱼ Hᵢⱼ² σᵢ² σⱼ²
 E[AUC]   ≈ AUC(μ)       +  ½ Σᵢ Hᵢᵢ σᵢ²
 ```
 
-**Nonlinearity diagnostics**:
-| Parameter | H_ii sign | ρ_i = |½H_ii σ²_i / c_i σ_i| |
-|-----------|-----------|--------------------------|
-| CL_hepatic | positive (AUC ~ 1/CL, convex) | ~15–25% — **HESSIAN_CORRECTION_ACTIVE** |
-| fu_plasma  | positive (same mechanism) | ~5–10% |
-| Kp_liver   | near-zero | <5% |
+**Nonlinearity diagnostics** (dual-ρ, v2):
 
-> CL_hepatic has ρ_CL ≥ 0.10: the Hessian correction is clinically significant for this
-> parameter. The second-order corrected variance exceeds the first-order estimate, and the
-> bias-corrected mean AUC is *lower* than AUC(μ) (consistent with Jensen's inequality for
-> a convex AUC(CL) relationship: E[1/CL] ≥ 1/E[CL]).
+*ρ literal*: JCGM 101 §B.4 in physical units: `ρ = |½ H_ii σ_i| / |c_i|`.
+*ρ̃ normalized*: second-order variance fraction per parameter: `ρ̃ = ½ρ²`.
+Editorial rule: ρ̃ < 0.20 = weakly nonlinear (first-order GUM adequate).
 
-**Dissertation claim**: "The Hessian correction increases the AUC uncertainty estimate by
-approximately 15–25% over the first-order GUM, reflecting the convexity of the
-AUC(CL_hepatic) relationship at this dose."
+| Parameter   | H_ii sign | ρ_literal | ρ̃_normalized | Assessment |
+|-------------|-----------|-----------|--------------|------------|
+| CL_hepatic  | + (AUC~1/CL, convex) | **0.581** | **0.169** | Hessian active |
+| fu_plasma   | +         | ~0.250    | ~0.031       | Marginal    |
+| Kp_brain    | varies    | ~0.350    | ~0.061       | Marginal    |
+| Kp_liver    | near-zero | ~0.067    | ~0.002       | Negligible  |
+| Kp_kidney   | near-zero | ~0.138    | ~0.010       | Negligible  |
+| Kp_adipose  | varies    | ~0.334    | ~0.056       | Marginal    |
+| CL_renal    | ~0        | ~0.010    | ~0.000       | Negligible  |
+
+> **§4.9 claim** (wording-safe): "For CL_hepatic, ρ̃ = 0.169 (JCGM 101 §B.4 literal: 0.581),
+> confirming the Hessian correction contributes ~17% additional variance beyond the first-order
+> GUM estimate for this parameter — the dominant driver of the second-order correction."
+
+> **Wording-forbidden**: do NOT write "the model is 58% nonlinear" or "the nonlinearity is
+> 58%". ρ_literal = 0.581 measures the ratio of Hessian mean-correction to first-order
+> uncertainty *for CL_hep alone*, not overall model nonlinearity.
+
+**Dissertation claim**: "The second-order Hessian correction is principally driven by CL_hepatic
+(ρ̃ = 0.169, weakly nonlinear regime), with all other parameters contributing ρ̃ < 0.07.
+The dual-ρ emission distinguishes the JCGM metrological value (ρ_literal) from the
+variance-fraction interpretation (ρ̃_normalized) required for editorial precision."
 
 ---
 

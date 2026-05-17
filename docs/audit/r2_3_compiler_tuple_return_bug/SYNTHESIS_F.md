@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.r2-3-compiler-tuple-return-bug.synthesis-f
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.r2-3-compiler-tuple-return-bug.synthesis-f
+-->
+
 # Phase F Synthesis — Option A applied & reverted (2026-05-17)
 
 ## Outcome
