@@ -736,9 +736,63 @@ pub fn cgplan_phase_c_reset_scratch(n: i64) with Mut, Div, Panic {
     cgplan_set_schedule_len(0)
 }
 
-// Phase D — list scheduling.  Issues at each cycle the highest-priority
-// ready instruction (port-pressure tie-break) and tracks the makespan
-// distribution by upper-quantile.  Writes CGPLAN_MAKESPAN_* via helper.
+// Port-parallel ready-instr selector.  Same priority + tie-break rule as
+// pick_best_n, but skips any instruction whose port_mask has no free bit
+// in (mask & ~busy_mask) — every port it could land on is already busy
+// in the current cycle.  Returns -1 when no ready+port-feasible instr exists.
+pub fn cgplan_global_pick_best_pp_n(cycle: i64, ic: i64, busy_mask: i64) -> i64 with Mut, Div, Panic {
+    var best_id: i64 = 0 - 1
+    var best_quant: i64 = 0 - 1
+    var best_port_load: i64 = CYCLE_INF
+    var i: i64 = 0
+    while i < ic {
+        if !(CGPLAN_INSTR_IS_SCHED[i as usize]) {
+            if cgplan_global_check_ready(i, cycle) {
+                let mask = CGPLAN_INSTR_PORT_MASK[i as usize]
+                let free = mask & (~busy_mask)
+                if free != 0 {
+                    let q = CGPLAN_SAVED_PRIO_QUANT[i as usize]
+                    let port_load = cgplan_pick_min_port_load(free)
+                    if q > best_quant || (q == best_quant && port_load < best_port_load) {
+                        best_quant = q
+                        best_port_load = port_load
+                        best_id = i
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    best_id
+}
+
+// Greedy port-matching: among the free bits in (mask & ~busy_mask), pick
+// the port with the lowest cumulative pressure.  Returns -1 if no free
+// compatible port exists.
+fn cgplan_pick_port_idx(mask: i64, busy_mask: i64) -> i64 with Mut, Div, Panic {
+    let free = mask & (~busy_mask)
+    if free == 0 { return 0 - 1 }
+    var best_port: i64 = 0 - 1
+    var best_load: i64 = CYCLE_INF
+    if (free & 1)   != 0 { if CGPLAN_PICK_PORT_PRESS[0] < best_load { best_load = CGPLAN_PICK_PORT_PRESS[0]; best_port = 0 } }
+    if (free & 2)   != 0 { if CGPLAN_PICK_PORT_PRESS[1] < best_load { best_load = CGPLAN_PICK_PORT_PRESS[1]; best_port = 1 } }
+    if (free & 4)   != 0 { if CGPLAN_PICK_PORT_PRESS[2] < best_load { best_load = CGPLAN_PICK_PORT_PRESS[2]; best_port = 2 } }
+    if (free & 8)   != 0 { if CGPLAN_PICK_PORT_PRESS[3] < best_load { best_load = CGPLAN_PICK_PORT_PRESS[3]; best_port = 3 } }
+    if (free & 16)  != 0 { if CGPLAN_PICK_PORT_PRESS[4] < best_load { best_load = CGPLAN_PICK_PORT_PRESS[4]; best_port = 4 } }
+    if (free & 32)  != 0 { if CGPLAN_PICK_PORT_PRESS[5] < best_load { best_load = CGPLAN_PICK_PORT_PRESS[5]; best_port = 5 } }
+    if (free & 64)  != 0 { if CGPLAN_PICK_PORT_PRESS[6] < best_load { best_load = CGPLAN_PICK_PORT_PRESS[6]; best_port = 6 } }
+    if (free & 128) != 0 { if CGPLAN_PICK_PORT_PRESS[7] < best_load { best_load = CGPLAN_PICK_PORT_PRESS[7]; best_port = 7 } }
+    best_port
+}
+
+// Phase D — port-parallel list scheduling.  Within each cycle, greedily
+// matches the highest-priority ready instructions to free execution ports
+// until either no ready instr exists or every port their port_mask covers
+// is already busy this cycle.  Models multi-port issue (Skylake ≈ 8 ports,
+// Zen 4 ≈ 11) instead of the single-port serial form.  Cycle advances only
+// after the greedy issue loop blocks.  Tracks the makespan upper-quantile
+// across all issued instructions; the finish-time distribution under the
+// max-of-iid concentration law is handled by Lane 2 (Fisher-Tippett/Clark).
 pub fn cgplan_phase_d_list_schedule(n: i64) with Mut, Div, Panic {
     var scheduled_count: i64 = 0
     var cycle: i64 = 0
@@ -747,22 +801,20 @@ pub fn cgplan_phase_d_list_schedule(n: i64) with Mut, Div, Panic {
     var max_finish_var:  i64 = 0
     var max_finish_q:    i64 = 0 - 1
     while scheduled_count < n && cycle < stall_limit {
-        let best = cgplan_global_pick_best_n(cycle, n)
-        if best >= 0 {
+        var busy_mask: i64 = 0
+        while scheduled_count < n {
+            let best = cgplan_global_pick_best_pp_n(cycle, n, busy_mask)
+            if best < 0 { break }
             let b_lat  = CGPLAN_INSTR_LAT[best as usize]
             let b_mask = CGPLAN_INSTR_PORT_MASK[best as usize]
+            let port   = cgplan_pick_port_idx(b_mask, busy_mask)
+            if port < 0 { break }
+            busy_mask = busy_mask | (1 << port)
             cgplan_set_instr_scheduled(best, cycle)
             cgplan_record_schedule_slot(scheduled_count, best)
             scheduled_count = scheduled_count + 1
 
-            if (b_mask & 1)   != 0 { cgplan_bump_port_press(0) }
-            if (b_mask & 2)   != 0 { cgplan_bump_port_press(1) }
-            if (b_mask & 4)   != 0 { cgplan_bump_port_press(2) }
-            if (b_mask & 8)   != 0 { cgplan_bump_port_press(3) }
-            if (b_mask & 16)  != 0 { cgplan_bump_port_press(4) }
-            if (b_mask & 32)  != 0 { cgplan_bump_port_press(5) }
-            if (b_mask & 64)  != 0 { cgplan_bump_port_press(6) }
-            if (b_mask & 128) != 0 { cgplan_bump_port_press(7) }
+            cgplan_bump_port_press(port)
 
             let finish_mean = cycle + b_lat
             let finish_var  = CGPLAN_INSTR_VAR[best as usize]
@@ -772,11 +824,8 @@ pub fn cgplan_phase_d_list_schedule(n: i64) with Mut, Div, Panic {
                 max_finish_mean = finish_mean
                 max_finish_var  = finish_var
             }
-
-            cycle = cycle + 1
-        } else {
-            cycle = cycle + 1
         }
+        cycle = cycle + 1
     }
     cgplan_set_schedule_len(scheduled_count)
     cgplan_set_cycle_count(cycle)
