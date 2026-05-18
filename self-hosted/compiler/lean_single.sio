@@ -2564,6 +2564,18 @@ fn type_is_slice_ref(ty: i64, ty_hash: i64) -> bool with Panic, Div, Mut {
     return arr_hash_alen(ref_hash_inner_hash(ty_hash)) == 0
 }
 
+fn type_is_unsized_array_value(ty: i64, ty_hash: i64) -> bool with Panic, Div, Mut {
+    if ty != 8 { return false }
+    return arr_hash_alen(ty_hash) == 0
+}
+
+fn normalize_dynamic_array_param_type() with Panic, Div, Mut {
+    if type_is_unsized_array_value(SCAN_TY, SCAN_TY_HASH) {
+        SCAN_TY_HASH = ref_hash_make(8, SCAN_TY_HASH, 0)
+        SCAN_TY = 10
+    }
+}
+
 fn type_is_array_ref(ty: i64, ty_hash: i64) -> bool with Panic, Div, Mut {
     if ty != 10 { return false }
     return ref_hash_inner_ty(ty_hash) == 8
@@ -2582,6 +2594,18 @@ fn slice_inner_matches(expected_hash: i64, actual_hash: i64) -> bool with Panic,
     return true
 }
 
+fn slice_inner_matches_array(expected_hash: i64, actual_array_hash: i64) -> bool with Panic, Div, Mut {
+    let expected_inner = ref_hash_inner_hash(expected_hash)
+    if arr_hash_esiz(expected_inner) != arr_hash_esiz(actual_array_hash) { return false }
+    if arr_hash_elem_ty(expected_inner) != arr_hash_elem_ty(actual_array_hash) { return false }
+    let expected_elem_hash = arr_hash_elem_hash(expected_inner)
+    let actual_elem_hash = arr_hash_elem_hash(actual_array_hash)
+    if expected_elem_hash != 0 || actual_elem_hash != 0 {
+        return expected_elem_hash == actual_elem_hash
+    }
+    return true
+}
+
 fn call_arg_type_compatible(expected_ty: i64, expected_hash: i64, actual_ty: i64, actual_hash: i64) -> bool with Panic, Div, Mut {
     // Unknown actual type (e.g. array element from struct array) — skip check
     if actual_ty == 0 && actual_hash == 0 { return true }
@@ -2591,6 +2615,9 @@ fn call_arg_type_compatible(expected_ty: i64, expected_hash: i64, actual_ty: i64
     if actual_ty == 6 && actual_hash >= 1000000007 && actual_hash < 1000001007 { return true }
     if ty_eq(expected_ty, expected_hash, actual_ty, actual_hash) { return true }
     if type_is_slice_ref(expected_ty, expected_hash) {
+        if actual_ty == 8 {
+            return slice_inner_matches_array(expected_hash, actual_hash)
+        }
         if actual_ty == 10 && ref_hash_inner_ty(actual_hash) == 8 {
             if slice_inner_matches(expected_hash, actual_hash) == false { return false }
             if ref_hash_mut(expected_hash) != 0 && ref_hash_mut(actual_hash) == 0 { return false }
@@ -3446,6 +3473,7 @@ fn scan_fn_param_type(fi: i64, arg_idx: i64) with IO, Mut, Panic, Div {
             if TK[q as usize] == 43 {
                 q = q + 1
                 scan_type(q)
+                normalize_dynamic_array_param_type()
                 if idx == arg_idx { return }
                 q = SCAN_TY_NEXT
                 idx = idx + 1
@@ -4109,6 +4137,7 @@ fn scan_fn_type_signature(p0: i64) with IO, Mut, Panic, Div {
         p = p + 1
         while TK[p as usize] != 7 && TK[p as usize] != 0 {
             scan_type(p)
+            normalize_dynamic_array_param_type()
             if arity < 16 {
                 FNSIG_TMP_PARAM_TY[(tmp_base + arity) as usize] = SCAN_TY
                 FNSIG_TMP_PARAM_HASH[(tmp_base + arity) as usize] = SCAN_TY_HASH
@@ -5830,6 +5859,10 @@ fn bind_slice_local_from_rax_x86(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
         emit_store_var(ptr_slot)
         emit_imm64(arr_hash_alen(ref_hash_inner_hash(EXPR_TY_HASH)))
         emit_store_var(len_slot)
+    } else if EXPR_TY == 8 {
+        emit_store_var(ptr_slot)
+        emit_imm64(arr_hash_alen(EXPR_TY_HASH))
+        emit_store_var(len_slot)
     } else {
         emit_store_var(ptr_slot)
         emit_imm64(0)
@@ -5857,6 +5890,10 @@ fn bind_slice_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic,
     } else if EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 8 {
         emit_store_var_a64(ptr_slot)
         emit_imm64_a64(arr_hash_alen(ref_hash_inner_hash(EXPR_TY_HASH)))
+        emit_store_var_a64(len_slot)
+    } else if EXPR_TY == 8 {
+        emit_store_var_a64(ptr_slot)
+        emit_imm64_a64(arr_hash_alen(EXPR_TY_HASH))
         emit_store_var_a64(len_slot)
     } else {
         emit_store_var_a64(ptr_slot)
@@ -6091,6 +6128,12 @@ fn emit_push_expr_as_slice_arg_x86(call_tok: i64) with IO, Mut, Panic, Div {
         emit_push()
         return
     }
+    if EXPR_TY == 8 {
+        emit_push()
+        emit_imm64(arr_hash_alen(EXPR_TY_HASH))
+        emit_push()
+        return
+    }
     tc_error(call_tok, "slice argument requires slice or array reference")
     emit_push()
     emit_imm64(0)
@@ -6109,6 +6152,12 @@ fn emit_push_expr_as_slice_arg_a64(call_tok: i64) with IO, Mut, Panic, Div {
     if type_is_array_ref(EXPR_TY, EXPR_TY_HASH) {
         emit_push_a64()
         emit_imm64_a64(arr_hash_alen(ref_hash_inner_hash(EXPR_TY_HASH)))
+        emit_push_a64()
+        return
+    }
+    if EXPR_TY == 8 {
+        emit_push_a64()
+        emit_imm64_a64(arr_hash_alen(EXPR_TY_HASH))
         emit_push_a64()
         return
     }
@@ -10317,6 +10366,26 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 emit_str_len()
                 EXPR_IS_F64 = 0
                 EXPR_TY = 1
+                return
+            }
+            // Functional len(x) mirrors x.len(): strings are runtime length,
+            // arrays are compile-time length, and slices carry runtime length.
+            if src_match(ns, ne - ns, "len") {
+                EP = EP + 1; compile_or()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
+                    em(0x48); em(0x8b); em(0x40); em(8)  // mov rax, [rax + 8]
+                } else if EXPR_TY == 3 {
+                    emit_str_len()
+                } else if EXPR_TY == 8 {
+                    emit_imm64(arr_hash_alen(EXPR_TY_HASH))
+                } else {
+                    tc_error(name_tok, "len requires string, array, or slice")
+                    em(0x31); em(0xc0)
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
                 return
             }
             if src_match(ns, ne - ns, "slice_len") {
@@ -22392,6 +22461,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 if TK[p as usize] == 43 {
                     p = p + 1  // skip :
                     scan_type(p)
+                    normalize_dynamic_array_param_type()
                     if pslot >= 0 {
                         VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                         VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
@@ -25457,6 +25527,21 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_str_len_a64(); EXPR_IS_F64 = 0; return
             }
+            if src_match(ns, ne - ns, "len") {
+                EP = EP + 1; compile_or_a64()
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
+                    em32(0xF9400400)  // ldr x0, [x0, #8]
+                } else if EXPR_TY == 3 {
+                    emit_str_len_a64()
+                } else if EXPR_TY == 8 {
+                    emit_imm64_a64(arr_hash_alen(EXPR_TY_HASH))
+                } else {
+                    tc_error(name_tok, "len requires string, array, or slice")
+                    em32(0xD2800000)
+                }
+                EXPR_IS_F64 = 0; EXPR_TY = 1; EXPR_TY_HASH = 0; return
+            }
             if src_match(ns, ne - ns, "slice_len") {
                 EP = EP + 1; compile_or_a64()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -28485,6 +28570,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                 if TK[p as usize] == 43 {
                     p = p + 1
                     scan_type(p)
+                    normalize_dynamic_array_param_type()
                     if pslot >= 0 {
                         VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                         VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
