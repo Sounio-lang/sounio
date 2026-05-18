@@ -2,14 +2,17 @@
 topic_id: repo.docs.audit.r2-8-alias-deep-resolve.synthesis
 authority: repo_only
 audience: users
-last_validated: 2026-05-18
-validated_by: claude-opus-4-7
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.r2-8-alias-deep-resolve.synthesis
 -->
 
-# R.2.8 — Deep alias resolution beyond function returns — RESOLVED-PARTIAL
+# R.2.8 — Deep alias resolution beyond function returns — RESOLVED (via R.3.1)
 
-**Status:** RESOLVED-PARTIAL (2026-05-18).
+**Status:** RESOLVED (2026-05-18, completed by R.3.1 `d5b43742…`).
+Originally shipped RESOLVED-PARTIAL because rng.sio Phase D failed on
+the TUP_CACHE_KEY hash collision; R.3.0 located the bug, R.3.1 fixed
+it, and rng.sio's Phase D wiring landed in the same session.
 **Compiler patch:** None. R.2.7 `ce9810ee9` was sufficient for 2 of 3 caller-wiring cases.
 **Wall-clock:** ~2h single session (Phase A diagnose + Phase D wiring + gates + writeup).
 **Result:** distributions.sio + sampling.sio fully wired via `type X = PcgState`; rng.sio reverted; umbrella 12/12 PASS; R.2.4 distributions oracle 1024/1024 bit-exact; R.2.5 rng self-oracle 1024/1024 bit-exact (via reverted rng.sio); R.2.7 SYNTHESIS flipped HALTED → RESOLVED-PARTIAL.

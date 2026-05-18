@@ -2,12 +2,21 @@
 topic_id: repo.docs.audit.r3-0-transitive-alias-chain.synthesis
 authority: repo_only
 audience: users
-last_validated: 2026-05-18
-validated_by: claude-opus-4-7
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.r3-0-transitive-alias-chain.synthesis
 -->
 
-# R.3.0 — Phase A converged: TUP_CACHE_KEY hash collision
+# R.3.0 — Phase A converged: TUP_CACHE_KEY hash collision — RESOLVED (via R.3.1)
+
+**Status update 2026-05-18:** R.3.1 (`d5b43742…`) applied the (Fc)
+fix recommended in §3 — Pass 1c.5 force-overwrite on collision-
+detected. All gates green; rng.sio Phase D wiring lands; R.2.7 + R.2.8
++ R.2.9 + R.3.0 all RESOLVED. Phase A synthesis preserved below.
+
+---
+
+## Phase A converged
 
 **Status:** Phase A COMPLETE (2026-05-18). Phase B/C/D scoped as R.3.1.
 **Wall-clock:** Phase A ~1h.

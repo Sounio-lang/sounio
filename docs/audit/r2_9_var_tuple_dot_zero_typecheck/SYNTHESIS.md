@@ -2,14 +2,21 @@
 topic_id: repo.docs.audit.r2-9-var-tuple-dot-zero-typecheck.synthesis
 authority: repo_only
 audience: users
-last_validated: 2026-05-18
-validated_by: claude-opus-4-7
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.r2-9-var-tuple-dot-zero-typecheck.synthesis
 -->
 
-# R.2.9 — `var x = fn(seed); x = tuple.0` typecheck fragility — RESOLVED-PARTIAL
+# R.2.9 — `var x = fn(seed); x = tuple.0` typecheck fragility — RESOLVED (via R.3.1)
 
-**Status:** RESOLVED-PARTIAL (2026-05-18).
+**Status update 2026-05-18:** Originally shipped RESOLVED-PARTIAL
+because rng.sio Phase D was deferred. R.2.9 §4's "transitive alias"
+hypothesis was wrong (corrected in R.3.0 SYNTHESIS). The actual
+blocker was TUP_CACHE_KEY hash collision, fixed in R.3.1
+(`d5b43742…`). rng.sio Phase D now landed; all R.2.9 acceptance
+criteria now PASS.
+
+**Original status:** RESOLVED-PARTIAL (2026-05-18).
 **Compiler patch:** `self-hosted/compiler/lean_single.sio` lines 13597–
 13630 (scalar branch of tuple `.N` field access). Rebuilt
 `bin/souc-linux-x86_64` md5 `ffdc0fd5…` → `c7ea6a4d…` (+415 bytes).

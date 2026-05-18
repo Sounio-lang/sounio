@@ -7,9 +7,11 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.r2-7-pcg-state-unify.synthesis
 -->
 
-# R.2.7 — Unify PcgState + step in pcg64_core — RESOLVED-PARTIAL (via R.2.8)
+# R.2.7 — Unify PcgState + step in pcg64_core — RESOLVED (via R.3.1)
 
-**Status:** RESOLVED-PARTIAL (2026-05-18, via R.2.8). HALTED IN PHASE A
+**Status:** RESOLVED (2026-05-18, via R.3.1 `d5b43742…`). Previously
+RESOLVED-PARTIAL via R.2.8; rng.sio third-caller Phase D landed once
+R.3.1 fixed the TUP_CACHE_KEY hash collision. HALTED IN PHASE A
 on 2026-05-17; subsequently unblocked by the compiler patch landed in
 `ce9810ee9` and completed by R.2.8 caller wiring.
 **Wall-clock:** ~20 min Phase A diagnosis (2026-05-17) + R.2.8 Phase D
