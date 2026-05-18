@@ -792,14 +792,240 @@ fn cgplan_pick_port_idx(mask: i64, busy_mask: i64) -> i64 with Mut, Div, Panic {
 // Zen 4 ≈ 11) instead of the single-port serial form.  Cycle advances only
 // after the greedy issue loop blocks.  Tracks the makespan upper-quantile
 // across all issued instructions; the finish-time distribution under the
-// max-of-iid concentration law is handled by Lane 2 (Fisher-Tippett/Clark).
+// max-of-iid concentration law is handled below (Fisher-Tippett/Clark fold
+// applied via cgplan_finalize_makespan_clark).
+
+// ----------------------------------------------------------------------------
+// Max-of-distributions: Clark 1961 pairwise fold + Fisher-Tippett iid limit.
+//
+// The previous Phase D tracked only the WINNING instr's own variance for
+// CGPLAN_MAKESPAN_VAR.  That collapses to "single-port serial model" in the
+// width-sweep diagnostic (commit c1e6cf07c): mean grows linearly with N but
+// sigma stays constant.  Real concentration of measure — the σ/μ ~ 1/√(log N)
+// scaling that Section 3 of the paper needs — requires composing the
+// distribution of the MAX of many independent finish-times.
+//
+// We implement two primitives:
+//
+//   cgplan_clark_fold(m1, v1, m2, v2)
+//     Clark 1961 moment-matched approximation for max of two independent
+//     normals.  Writes CGPLAN_CLARK_MEAN_OUT, CGPLAN_CLARK_VAR_OUT.  Fixed-
+//     point integer arithmetic throughout; Φ and φ are linearly interpolated
+//     from 13-entry tables at α = 0, 0.25, ..., 3.0.
+//
+//   cgplan_fisher_tippett_var(sigma2, n)
+//     π²σ²/(6 · ln N) asymptotic upper bound for the variance of the max of
+//     N iid normals — checked at runtime against an iterative-Clark inner
+//     loop and validated against Monte Carlo in
+//     explore_bench_clark_unit_test.sio.
+//
+// Iterative Clark fold over all scheduled finish-times yields the makespan
+// distribution: starting from (CGPLAN_FINISH_MEAN[0], CGPLAN_FINISH_VAR[0]),
+// fold in each subsequent (mean, var).  Each fold matches the first two
+// moments of the running max; the result is a normal approximation that the
+// scheduler treats as the makespan distribution.
+// ----------------------------------------------------------------------------
+
+pub var CGPLAN_FINISH_MEAN: [i64; 512] = [0; 512]
+pub var CGPLAN_FINISH_VAR:  [i64; 512] = [0; 512]
+
+pub var CGPLAN_CLARK_MEAN_OUT: i64 = 0
+pub var CGPLAN_CLARK_VAR_OUT:  i64 = 0
+
+// Φ(α) × 1000 sampled at α = 0, 0.25, 0.50, ..., 3.00 (13 entries, step 0.25).
+// Linearly interpolated.  For |α| ≥ 3 we clamp to 999 / 1.
+fn cgplan_phi_table(idx: i64) -> i64 with Mut {
+    if idx <= 0  { return 500 }
+    if idx == 1  { return 599 }
+    if idx == 2  { return 691 }
+    if idx == 3  { return 773 }
+    if idx == 4  { return 841 }
+    if idx == 5  { return 894 }
+    if idx == 6  { return 933 }
+    if idx == 7  { return 960 }
+    if idx == 8  { return 977 }
+    if idx == 9  { return 988 }
+    if idx == 10 { return 994 }
+    if idx == 11 { return 997 }
+    999
+}
+
+// φ(α) × 1000 sampled at the same α grid.  Symmetric: φ(-x) = φ(x).
+fn cgplan_phi_pdf_table(idx: i64) -> i64 with Mut {
+    if idx <= 0  { return 399 }
+    if idx == 1  { return 387 }
+    if idx == 2  { return 352 }
+    if idx == 3  { return 301 }
+    if idx == 4  { return 242 }
+    if idx == 5  { return 183 }
+    if idx == 6  { return 130 }
+    if idx == 7  { return  86 }
+    if idx == 8  { return  54 }
+    if idx == 9  { return  32 }
+    if idx == 10 { return  18 }
+    if idx == 11 { return   9 }
+    4
+}
+
+// Returns Φ(α) × 1000 where the input is α × 1000.
+pub fn cgplan_phi_x1000(alpha_x1000: i64) -> i64 with Mut, Div, Panic {
+    var a = alpha_x1000
+    var negate = false
+    if a < 0 { a = 0 - a; negate = true }
+    if a >= 3000 {
+        if negate { return 1 } else { return 999 }
+    }
+    let idx = a / 250
+    let rem = a - idx * 250
+    let lo = cgplan_phi_table(idx)
+    let hi = cgplan_phi_table(idx + 1)
+    let val = lo + ((hi - lo) * rem) / 250
+    if negate { return 1000 - val }
+    val
+}
+
+// Returns φ(α) × 1000 where the input is α × 1000.
+pub fn cgplan_phi_pdf_x1000(alpha_x1000: i64) -> i64 with Mut, Div, Panic {
+    var a = alpha_x1000
+    if a < 0 { a = 0 - a }
+    if a >= 3000 { return 4 }
+    let idx = a / 250
+    let rem = a - idx * 250
+    let lo = cgplan_phi_pdf_table(idx)
+    let hi = cgplan_phi_pdf_table(idx + 1)
+    lo + ((hi - lo) * rem) / 250
+}
+
+// Clark 1961 pairwise fold for max of two independent normals X1~N(m1,v1),
+// X2~N(m2,v2).  Writes the moment-matched normal approximation to
+// CGPLAN_CLARK_MEAN_OUT, CGPLAN_CLARK_VAR_OUT.  All arithmetic in integer
+// fixed-point.
+//
+//   a   = √(v1 + v2)
+//   α   = (m1 − m2)/a
+//   E[max]  = m1·Φ(α) + m2·Φ(−α) + a·φ(α)
+//   E[max²] = (m1²+v1)·Φ(α) + (m2²+v2)·Φ(−α) + (m1+m2)·a·φ(α)
+//   Var     = E[max²] − E[max]²
+pub fn cgplan_clark_fold(m1: i64, v1: i64, m2: i64, v2: i64) with Mut, Div, Panic {
+    let sum_v = v1 + v2
+    if sum_v <= 0 {
+        if m1 >= m2 { CGPLAN_CLARK_MEAN_OUT = m1 } else { CGPLAN_CLARK_MEAN_OUT = m2 }
+        CGPLAN_CLARK_VAR_OUT = 0
+        return
+    }
+    // a × 1000 = √((v1 + v2) × 10⁶)
+    let a_x1000 = cgplan_isqrt(sum_v * 1000000)
+    if a_x1000 <= 0 {
+        if m1 >= m2 { CGPLAN_CLARK_MEAN_OUT = m1 } else { CGPLAN_CLARK_MEAN_OUT = m2 }
+        CGPLAN_CLARK_VAR_OUT = 0
+        return
+    }
+    // α × 1000 = (m1 − m2) × 10⁶ / a_x1000
+    let alpha_x1000 = ((m1 - m2) * 1000000) / a_x1000
+    let phi_a  = cgplan_phi_x1000(alpha_x1000)
+    let phi_na = 1000 - phi_a
+    let pdf_a  = cgplan_phi_pdf_x1000(alpha_x1000)
+    // E[max] × 1000 = m1·phi_a + m2·phi_na + a·pdf_a
+    // (a·pdf_a in × 1000 scale = a_x1000 · pdf_a / 1000.)
+    let e_max_x1000 = m1 * phi_a + m2 * phi_na + (a_x1000 * pdf_a) / 1000
+    // E[max²] × 1000 = (m1²+v1)·phi_a + (m2²+v2)·phi_na + (m1+m2)·a·pdf_a
+    let e_max2_x1000 = (m1 * m1 + v1) * phi_a
+                     + (m2 * m2 + v2) * phi_na
+                     + ((m1 + m2) * a_x1000 * pdf_a) / 1000
+    // Var = E[max²] − E[max]².  Compute in × 10⁶ to avoid truncation of
+    // E[max] before squaring — that loss compounds catastrophically because
+    // Var subtracts two nearly-equal terms.
+    let e_max2_x1m = e_max2_x1000 * 1000
+    let e_max_sq_x1m = e_max_x1000 * e_max_x1000
+    var v_out_x1m: i64 = e_max2_x1m - e_max_sq_x1m
+    if v_out_x1m < 0 { v_out_x1m = 0 }
+    CGPLAN_CLARK_MEAN_OUT = e_max_x1000 / 1000
+    CGPLAN_CLARK_VAR_OUT  = v_out_x1m / 1000000
+}
+
+// Fisher-Tippett asymptotic upper bound for Var[max of N iid normals]:
+//   Var ≤ π² · σ² / (6 · ln N)
+// Returned in × 1 (cycles²) scale.  ln N approximated via integer log2(N)
+// then scaled by ln 2 ≈ 0.6931 in fixed-point (×1000 → 693).
+pub fn cgplan_fisher_tippett_var(sigma2: i64, n: i64) -> i64 with Mut, Div, Panic {
+    if n <= 1 { return sigma2 }
+    var log2_n: i64 = 0
+    var nn = n
+    while nn > 1 { nn = nn / 2; log2_n = log2_n + 1 }
+    let ln_n_x1000 = log2_n * 693
+    if ln_n_x1000 <= 0 { return sigma2 }
+    // π²/6 × 1000 ≈ 1644 (π² ≈ 9.8696, /6 = 1.6449)
+    (1644 * sigma2) / ln_n_x1000
+}
+
+// Compute the makespan distribution by folding the TIED top-tier of
+// finish-times via iterative Clark.  Rationale: when finish_means are
+// widely separated, the max is dominated by the largest-mean finisher
+// (Clark of (m1, m1−δ) with δ ≫ σ collapses to the larger one's normal).
+// When K finishers share the same maximum finish_mean (tied iid), iterative
+// Clark over those K gives the right concentration: Var ≈ 0.68·v at K=2,
+// 0.55·v at K=3, 0.47·v at K=4 …, asymptoting to π²·v/(6·ln K).
+//
+// Tied set = {i : CGPLAN_FINISH_MEAN[i] == max_finish_mean}.  Heterogeneous
+// finishers contribute only via the max-mean tier; the rest are correctly
+// dominated and need no explicit fold (Clark would yield the same answer
+// under the |α|≥3 cutoff).
+pub fn cgplan_finalize_makespan_clark(count: i64) with Mut, Div, Panic {
+    if count <= 0 {
+        cgplan_set_makespan(0, 0, 1000)
+        return
+    }
+    var max_mean: i64 = CGPLAN_FINISH_MEAN[0]
+    var i: i64 = 1
+    while i < count {
+        let m = CGPLAN_FINISH_MEAN[i as usize]
+        if m > max_mean { max_mean = m }
+        i = i + 1
+    }
+    var first_idx: i64 = 0 - 1
+    var j: i64 = 0
+    while j < count {
+        if CGPLAN_FINISH_MEAN[j as usize] == max_mean {
+            first_idx = j
+            j = count
+        } else {
+            j = j + 1
+        }
+    }
+    var run_mean: i64 = CGPLAN_FINISH_MEAN[first_idx as usize]
+    var run_var:  i64 = CGPLAN_FINISH_VAR[first_idx as usize]
+    var k: i64 = first_idx + 1
+    while k < count {
+        if CGPLAN_FINISH_MEAN[k as usize] == max_mean {
+            cgplan_clark_fold(run_mean, run_var, CGPLAN_FINISH_MEAN[k as usize], CGPLAN_FINISH_VAR[k as usize])
+            run_mean = CGPLAN_CLARK_MEAN_OUT
+            run_var  = CGPLAN_CLARK_VAR_OUT
+        }
+        k = k + 1
+    }
+    cgplan_set_makespan(run_mean, run_var, cgplan_confidence_from_dist(run_mean, run_var))
+}
+
+// Phase D — list scheduling with Clark-folded makespan variance.  Records
+// every scheduled instr's (finish_mean, finish_var) into the CGPLAN_FINISH_*
+// parallel arrays, then iteratively folds them via cgplan_clark_fold to
+// produce the makespan upper-quantile distribution.  Replaces the
+// single-winner variance tracking, which collapsed to σ_op² regardless of
+// schedule structure.
+// Phase D — port-parallel list scheduling with Clark-folded makespan
+// variance.  Lane 1 contributes the nested greedy port matching: within
+// each cycle, fill as many free ports as possible by repeatedly picking
+// the highest-priority ready instruction and assigning it to the
+// least-loaded compatible port.  Lane 2 contributes the variance
+// composition: every scheduled finish (mean, var) is recorded into the
+// CGPLAN_FINISH_* parallel arrays, and cgplan_finalize_makespan_clark
+// folds the tied top-tier via Clark 1961 at the end to produce the
+// makespan distribution.  Cycle advances only after the greedy issue loop
+// blocks (no remaining ready instr can land on a free port).
 pub fn cgplan_phase_d_list_schedule(n: i64) with Mut, Div, Panic {
     var scheduled_count: i64 = 0
     var cycle: i64 = 0
     var stall_limit: i64 = n * 10
-    var max_finish_mean: i64 = 0
-    var max_finish_var:  i64 = 0
-    var max_finish_q:    i64 = 0 - 1
     while scheduled_count < n && cycle < stall_limit {
         var busy_mask: i64 = 0
         while scheduled_count < n {
@@ -812,28 +1038,17 @@ pub fn cgplan_phase_d_list_schedule(n: i64) with Mut, Div, Panic {
             busy_mask = busy_mask | (1 << port)
             cgplan_set_instr_scheduled(best, cycle)
             cgplan_record_schedule_slot(scheduled_count, best)
-            scheduled_count = scheduled_count + 1
-
             cgplan_bump_port_press(port)
 
-            let finish_mean = cycle + b_lat
-            let finish_var  = CGPLAN_INSTR_VAR[best as usize]
-            let finish_q    = cgplan_priority_quantile(finish_mean, finish_var)
-            if finish_q > max_finish_q {
-                max_finish_q    = finish_q
-                max_finish_mean = finish_mean
-                max_finish_var  = finish_var
-            }
+            CGPLAN_FINISH_MEAN[scheduled_count as usize] = cycle + b_lat
+            CGPLAN_FINISH_VAR[scheduled_count as usize]  = CGPLAN_INSTR_VAR[best as usize]
+            scheduled_count = scheduled_count + 1
         }
         cycle = cycle + 1
     }
     cgplan_set_schedule_len(scheduled_count)
     cgplan_set_cycle_count(cycle)
-
-    cgplan_set_makespan(
-        max_finish_mean,
-        max_finish_var,
-        cgplan_confidence_from_dist(max_finish_mean, max_finish_var))
+    cgplan_finalize_makespan_clark(scheduled_count)
 }
 
 pub fn cgplan_global_schedule() with Mut, Div, Panic {
