@@ -13600,14 +13600,38 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     let tup_last_f64 = (EXPR_TY_HASH / 1000000) % 10
                     let elem_is_f64 = if tup_idx == 0 { tup_first_f64 } else { tup_last_f64 }
                     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
+                    // R.2.9: preserve nominal struct type for 1-field-struct elements.
+                    // Without this, `let r = step(x); var sm: SplitMix64 = ...; sm = r.0`
+                    // fails type-check because EXPR_TY=1 (i64) is recorded even though
+                    // the slot holds a 1-field struct. tup_cache (registered by both
+                    // tuple-literal construction and Pass 1 / Pass 1c.5 fn-return scan)
+                    // carries the correct (first_ty, first_hash) — consult it.
+                    let r29_tup_ci = tup_cache_lookup(EXPR_TY_HASH)
+                    var r29_elem_ty: i64 = -1
+                    var r29_elem_hash: i64 = 0
+                    if r29_tup_ci >= 0 {
+                        if tup_idx == 0 {
+                            r29_elem_ty = TUP_CACHE_FIRST_TY[r29_tup_ci as usize]
+                            r29_elem_hash = TUP_CACHE_FIRST_HASH[r29_tup_ci as usize]
+                        } else {
+                            r29_elem_ty = TUP_CACHE_LAST_TY[r29_tup_ci as usize]
+                            r29_elem_hash = TUP_CACHE_LAST_HASH[r29_tup_ci as usize]
+                        }
+                    }
                     if elem_is_f64 == 1 {
                         EXPR_IS_F64 = 1
                         EXPR_TY = 2
+                        EXPR_TY_HASH = 0
+                    } else if r29_elem_ty == 6 {
+                        // 1-field struct in this tuple slot — preserve nominal type.
+                        EXPR_IS_F64 = 0
+                        EXPR_TY = 6
+                        EXPR_TY_HASH = r29_elem_hash
                     } else {
                         EXPR_IS_F64 = 0
                         EXPR_TY = 1
+                        EXPR_TY_HASH = 0
                     }
-                    EXPR_TY_HASH = 0
                 } else {
                     // Aggregate element: materialize into fresh slots; rax is pointer.
                     EXPR_IS_F64 = 0
