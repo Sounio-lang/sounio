@@ -14,4 +14,5 @@ lean_lib Sounio where
              `Scheduler.CriticalPathLowerBound,
              `Scheduler.PortMatchingSound,
              `Scheduler.ClarkFoldDeterminism,
-             `Scheduler.MicroarchInvarianceWeak]
+             `Scheduler.MicroarchInvarianceWeak,
+             `Scheduler.IntegerFixedPointClark]
