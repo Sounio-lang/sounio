@@ -11,4 +11,5 @@ lean_lib Sounio where
              `TypeCheckerSoundness, `KnowledgeArithmeticSoundness,
              `ChannelAssignmentSemantics, `GradientTopology,
              `GradientTopologyBridge,
-             `Scheduler.CriticalPathLowerBound]
+             `Scheduler.CriticalPathLowerBound,
+             `Scheduler.PortMatchingSound]
