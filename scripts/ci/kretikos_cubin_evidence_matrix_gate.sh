@@ -23,6 +23,7 @@ CASES=(
   "vec_mul_f64|examples/kretikos/real_vec_mul_f64.sio|source_vec_mul_f64|vec_mul_f64|vec_mul_f64|vec_mul_f64"
   "vec_div_f64|examples/kretikos/real_vec_div_f64.sio|source_vec_div_f64|vec_div_f64|vec_div_f64|vec_div_f64"
   "fma_f64|examples/kretikos/real_fma_f64.sio|source_fma_f64|fma_f64|fma_f64|fma_f64"
+  "epistemic_dual_output_f32|examples/kretikos/real_epistemic_dual_output.sio|source_epistemic_dual_output_f32|epistemic_dual_output_f32|epistemic_dual_f32|epistemic_dual_output_f32"
 )
 
 reports=()
@@ -72,6 +73,6 @@ jq -s \
 
 "$ROOT_DIR/bin/kretikos" kaxi-validate-evidence "$SUMMARY_JSON" \
   --expect "status=pass" \
-  --expect "case_count=10" >/dev/null
+  --expect "case_count=11" >/dev/null
 
 echo "kretikos_cubin_evidence_matrix_gate: PASS report=${SUMMARY_JSON#$ROOT_DIR/} cases=${#CASES[@]}"
