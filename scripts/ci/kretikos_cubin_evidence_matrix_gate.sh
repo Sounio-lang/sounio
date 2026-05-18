@@ -13,19 +13,25 @@ SUMMARY_JSON="${SOUNIO_KRETIKOS_CUBIN_EVIDENCE_MATRIX_JSON:-$OUT_ROOT/kretikos_c
 mkdir -p "$OUT_ROOT"
 
 CASES=(
-  "vec_add_f32|examples/kretikos/real_vec_add.sio|vec_add|vec_add_f32|vec_add_f32"
-  "vec_sub_f32|examples/kretikos/real_vec_sub.sio|vec_sub|vec_sub_f32|vec_sub_f32"
-  "vec_mul_f32|examples/kretikos/real_vec_mul.sio|vec_mul|vec_mul_f32|vec_mul_f32"
-  "vec_div_f32|examples/kretikos/real_vec_div.sio|vec_div|vec_div_f32|vec_div_f32"
-  "fma_f32|examples/kretikos/real_fma_f32.sio|fma|fma_f32|fma_f32"
+  "vec_add_f32|examples/kretikos/real_vec_add.sio|source_vec_add_f32|vec_add|vec_add_f32|vec_add_f32"
+  "vec_sub_f32|examples/kretikos/real_vec_sub.sio|source_vec_sub_f32|vec_sub|vec_sub_f32|vec_sub_f32"
+  "vec_mul_f32|examples/kretikos/real_vec_mul.sio|source_vec_mul_f32|vec_mul|vec_mul_f32|vec_mul_f32"
+  "vec_div_f32|examples/kretikos/real_vec_div.sio|source_vec_div_f32|vec_div|vec_div_f32|vec_div_f32"
+  "fma_f32|examples/kretikos/real_fma_f32.sio|source_fma_f32|fma|fma_f32|fma_f32"
+  "vec_add_f64|examples/kretikos/real_vec_add_f64.sio|source_vec_add_f64|vec_add_f64|vec_add_f64|vec_add_f64"
+  "vec_sub_f64|examples/kretikos/real_vec_sub_f64.sio|source_vec_sub_f64|vec_sub_f64|vec_sub_f64|vec_sub_f64"
+  "vec_mul_f64|examples/kretikos/real_vec_mul_f64.sio|source_vec_mul_f64|vec_mul_f64|vec_mul_f64|vec_mul_f64"
+  "vec_div_f64|examples/kretikos/real_vec_div_f64.sio|source_vec_div_f64|vec_div_f64|vec_div_f64|vec_div_f64"
+  "fma_f64|examples/kretikos/real_fma_f64.sio|source_fma_f64|fma_f64|fma_f64|fma_f64"
 )
 
 reports=()
 for row in "${CASES[@]}"; do
-  IFS='|' read -r label source ptx_pattern cubin_kind runtime_rung <<<"$row"
+  IFS='|' read -r label source kaxi_pattern ptx_pattern cubin_kind runtime_rung <<<"$row"
   case_dir="$OUT_ROOT/$label"
   case_json="$case_dir/kretikos_cubin_evidence_gate.v1.json"
   SOUNIO_KRETIKOS_CUBIN_EVIDENCE_SOURCE="$source" \
+  SOUNIO_KRETIKOS_CUBIN_EVIDENCE_KAXI_PATTERN="$kaxi_pattern" \
   SOUNIO_KRETIKOS_CUBIN_EVIDENCE_PTX_PATTERN="$ptx_pattern" \
   SOUNIO_KRETIKOS_CUBIN_EVIDENCE_CUBIN_KIND="$cubin_kind" \
   SOUNIO_KRETIKOS_CUBIN_EVIDENCE_RUNTIME_RUNG="$runtime_rung" \
@@ -66,6 +72,6 @@ jq -s \
 
 "$ROOT_DIR/bin/kretikos" kaxi-validate-evidence "$SUMMARY_JSON" \
   --expect "status=pass" \
-  --expect "case_count=5" >/dev/null
+  --expect "case_count=10" >/dev/null
 
 echo "kretikos_cubin_evidence_matrix_gate: PASS report=${SUMMARY_JSON#$ROOT_DIR/} cases=${#CASES[@]}"

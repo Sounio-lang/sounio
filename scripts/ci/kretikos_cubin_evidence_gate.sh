@@ -15,6 +15,7 @@ cd "$ROOT_DIR"
 KRETIKOS="$ROOT_DIR/bin/kretikos"
 SOURCE_PATH="${SOUNIO_KRETIKOS_CUBIN_EVIDENCE_SOURCE:-examples/kretikos/real_vec_add.sio}"
 PTX_PATTERN="${SOUNIO_KRETIKOS_CUBIN_EVIDENCE_PTX_PATTERN:-vec_add}"
+KAXI_PATTERN="${SOUNIO_KRETIKOS_CUBIN_EVIDENCE_KAXI_PATTERN:-$PTX_PATTERN}"
 CUBIN_KIND="${SOUNIO_KRETIKOS_CUBIN_EVIDENCE_CUBIN_KIND:-vec_add_f32}"
 RUNTIME_RUNG="${SOUNIO_KRETIKOS_CUBIN_EVIDENCE_RUNTIME_RUNG:-vec_add_f32}"
 SM_TARGET="${SOUNIO_KRETIKOS_CUBIN_EVIDENCE_SM_TARGET:-sm80}"
@@ -57,13 +58,13 @@ if ! command -v ptxas >/dev/null 2>&1; then
   exit 1
 fi
 
-KAXI_ASM="$OUT_DIR/${PTX_PATTERN}.kaxi"
-KAXI_WITNESS="$OUT_DIR/${PTX_PATTERN}.kaxi_witness.json"
+KAXI_ASM="$OUT_DIR/${KAXI_PATTERN}.kaxi"
+KAXI_WITNESS="$OUT_DIR/${KAXI_PATTERN}.kaxi_witness.json"
 BUNDLE_DIR="$OUT_DIR/bundle"
 BUNDLE_JSON="$BUNDLE_DIR/kretikos_bundle.v1.json"
 DIGEST_INPUT="$OUT_DIR/validation_digest_input.tsv"
 
-"$KRETIKOS" kaxi-witness "$PTX_PATTERN" \
+"$KRETIKOS" kaxi-witness "$KAXI_PATTERN" \
   -o "$KAXI_WITNESS" \
   --asm-output "$KAXI_ASM" >/dev/null
 
@@ -141,9 +142,11 @@ GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 {
   printf 'source_sha256\t%s\n' "$SOURCE_SHA"
+  printf 'kaxi_pattern\t%s\n' "$KAXI_PATTERN"
   printf 'kaxi_sha256\t%s\n' "$KAXI_SHA"
   printf 'kaxi_witness_sha256\t%s\n' "$KAXI_WITNESS_SHA"
   printf 'ptx_sha256\t%s\n' "$PTX_SHA"
+  printf 'ptx_pattern\t%s\n' "$PTX_PATTERN"
   printf 'cubin_sha256\t%s\n' "$CUBIN_SHA"
   printf 'ptxas_cubin_sha256\t%s\n' "$PTXAS_CUBIN_SHA"
   printf 'bundle_sha256\t%s\n' "$BUNDLE_SHA"
@@ -173,7 +176,7 @@ VALIDATION_DIGEST="$(sha_file "$DIGEST_INPUT")"
   --string "generated_at_utc=$GENERATED_AT_UTC" \
   --int "kaxi.bytes=$KAXI_BYTES" \
   --string "kaxi.path=$(rel_path "$KAXI_ASM")" \
-  --string "kaxi.pattern=$PTX_PATTERN" \
+  --string "kaxi.pattern=$KAXI_PATTERN" \
   --string "kaxi.sha256=$KAXI_SHA" \
   --string "kaxi.witness_json=$(rel_path "$KAXI_WITNESS")" \
   --string "kaxi.witness_sha256=$KAXI_WITNESS_SHA" \
