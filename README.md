@@ -171,6 +171,7 @@ This is an active research repository. Here's what actually works and what doesn
 | **Native codegen** | Linux ELF plus current Mach-O output lanes from the self-hosted lean driver | Linux fixed-point verified; checked macOS artifact lane present |
 | **Core stdlib** | Stats, linalg, ODE solvers, signal processing, CSV, JSON | Gate: 81 pass / 0 fail / 5 skip |
 | **Optimizer** | 1000+ e-graph rewrite rules, GVN, LICM, load sinking | 1003 tests, all FAIL=0 |
+| **Language server** | LSP 3.17 — hover, def/decl/typeDef/impl, refs, rename + prepare, formatting (full / range / onType), 3 codeAction kinds (`quickfix` + `source.fixAll` + `refactor.extract`), inlay hints + resolve, semanticTokens (`full` + `range`), call hierarchy, push + pull diagnostics, codeLens | [v0.3.0 release](https://github.com/Sounio-lang/sounio/releases/tag/sounio-lsp-v0.3.0-r1) — 32/39 methods RESPONDS_OK; 88/88 protocol tests pass; binary asset attached |
 
 ### What's SCAFFOLDING (looks big, mostly empty)
 
@@ -243,6 +244,11 @@ $SOUC compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
 ```
 
 For detailed setup: [INSTALL.md](INSTALL.md) · [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md)
+
+### Editor integration
+
+The Sounio language server (`bin/sounio-lsp`) ships with the checkout and is the same binary published at
+[`sounio-lsp-v0.3.0-r1`](https://github.com/Sounio-lang/sounio/releases/tag/sounio-lsp-v0.3.0-r1). Point any LSP-aware editor (VS Code, Neovim, Helix, Zed, etc.) at the binary with file-type `.sio`. Capabilities and the change log live in [`tools/lsp/CHANGELOG.md`](tools/lsp/CHANGELOG.md); Sprint-2 backlog in [`tools/lsp/SPRINT2_TODO.md`](tools/lsp/SPRINT2_TODO.md).
 
 ---
 
