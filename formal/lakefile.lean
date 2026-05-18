@@ -10,4 +10,5 @@ lean_lib Sounio where
              `EffectLinear, `HessianAD, `SecondOrderGUM, `NonAssocHessian,
              `TypeCheckerSoundness, `KnowledgeArithmeticSoundness,
              `ChannelAssignmentSemantics, `GradientTopology,
-             `GradientTopologyBridge]
+             `GradientTopologyBridge,
+             `Scheduler.CriticalPathLowerBound]
