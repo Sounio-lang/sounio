@@ -337,3 +337,110 @@ pub fn skylake_microarch_latency() -> MicroarchLatency {
         call_cycles: 5,
     }
 }
+
+// ============================================================================
+// Epistemic latency model
+//
+// Each op's cost is a distribution, not a point estimate.  variance is in
+// cycles² (independent variances add along a chain).  This is what the
+// scheduler needs to (a) propagate uncertainty through critical-path priority
+// computation, (b) make schedule choices based on upper quantile of makespan
+// rather than the mean, and (c) gate emission on a per-function confidence
+// budget.
+//
+// All variances here are integer cycles² — the scheduler uses isqrt to recover
+// sigma when forming the upper-quantile priority.
+//
+// Variance budget rationale (Skylake reference):
+//   load     : L1=4, L2=12, L3=40, mem≈200.  Even with a perfect predictor,
+//              the realised latency depends on the access pattern → big sigma.
+//   store    : pipelined; minimal jitter.
+//   int_add  : extremely stable.
+//   int_mul  : stable (no division).
+//   fp_add   : depends on SSE2 vs AVX2 vs AVX-512; ±1 cycle envelope.
+//   fp_mul   : same envelope.
+//   call     : branch prediction + I$ miss exposure; ±10 cycle envelope.
+//
+// "cross" profile = the envelope across Skylake / Sunny-Cove / Zen 4.  Used
+// when the compiler is asked to schedule for "x86_64 in general" without
+// pinning a specific µarch.
+// ============================================================================
+
+pub struct LatencyDist {
+    pub mean: i64,        // cycles
+    pub variance: i64,    // cycles² — independent variances add along a chain
+}
+
+pub fn latency_dist(mean: i64, variance: i64) -> LatencyDist {
+    LatencyDist { mean: mean, variance: variance }
+}
+
+pub fn latency_certain(cycles: i64) -> LatencyDist {
+    LatencyDist { mean: cycles, variance: 0 }
+}
+
+// Convenience: variance from a sigma in cycles (cleaner reading than squaring).
+pub fn latency_from_sigma(mean: i64, sigma: i64) -> LatencyDist {
+    LatencyDist { mean: mean, variance: sigma * sigma }
+}
+
+pub struct MicroarchLatencyEpistemic {
+    pub load_cycles: LatencyDist,
+    pub store_cycles: LatencyDist,
+    pub int_add_cycles: LatencyDist,
+    pub int_mul_cycles: LatencyDist,
+    pub fp_add_cycles: LatencyDist,
+    pub fp_mul_cycles: LatencyDist,
+    pub call_cycles: LatencyDist,
+}
+
+pub fn skylake_microarch_epistemic() -> MicroarchLatencyEpistemic {
+    MicroarchLatencyEpistemic {
+        load_cycles:    latency_from_sigma(4, 8),    // L1 hit ± cache-tail dispersion
+        store_cycles:   latency_from_sigma(1, 1),
+        int_add_cycles: latency_certain(1),
+        int_mul_cycles: latency_certain(3),
+        fp_add_cycles:  latency_from_sigma(4, 1),    // SSE2/AVX2 envelope
+        fp_mul_cycles:  latency_from_sigma(5, 1),
+        call_cycles:    latency_from_sigma(5, 10),   // branch predictor / I$ jitter
+    }
+}
+
+pub fn sunny_cove_microarch_epistemic() -> MicroarchLatencyEpistemic {
+    MicroarchLatencyEpistemic {
+        load_cycles:    latency_from_sigma(5, 9),    // 5-cycle L1 vs Skylake's 4
+        store_cycles:   latency_from_sigma(1, 1),
+        int_add_cycles: latency_certain(1),
+        int_mul_cycles: latency_certain(3),
+        fp_add_cycles:  latency_from_sigma(4, 1),
+        fp_mul_cycles:  latency_from_sigma(4, 1),    // 4 (vs Skylake 5)
+        call_cycles:    latency_from_sigma(5, 10),
+    }
+}
+
+pub fn zen4_microarch_epistemic() -> MicroarchLatencyEpistemic {
+    MicroarchLatencyEpistemic {
+        load_cycles:    latency_from_sigma(4, 9),
+        store_cycles:   latency_from_sigma(1, 1),
+        int_add_cycles: latency_certain(1),
+        int_mul_cycles: latency_certain(3),
+        fp_add_cycles:  latency_from_sigma(3, 1),    // Zen4 FADD = 3
+        fp_mul_cycles:  latency_from_sigma(3, 1),
+        call_cycles:    latency_from_sigma(5, 12),
+    }
+}
+
+// Cross-µarch envelope: when the compiler must produce code that works
+// across Skylake / Sunny Cove / Zen 4, every op's variance widens to cover
+// the spread.  Schedule chosen under this profile is the most conservative.
+pub fn cross_microarch_epistemic() -> MicroarchLatencyEpistemic {
+    MicroarchLatencyEpistemic {
+        load_cycles:    latency_from_sigma(4, 10),
+        store_cycles:   latency_from_sigma(1, 2),
+        int_add_cycles: latency_from_sigma(1, 1),
+        int_mul_cycles: latency_from_sigma(3, 2),
+        fp_add_cycles:  latency_from_sigma(4, 2),
+        fp_mul_cycles:  latency_from_sigma(4, 2),
+        call_cycles:    latency_from_sigma(5, 15),
+    }
+}
