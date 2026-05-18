@@ -7,11 +7,18 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.r2-7-pcg-state-unify.synthesis
 -->
 
-# R.2.7 — Unify PcgState + step in pcg64_core — HALTED IN PHASE A
+# R.2.7 — Unify PcgState + step in pcg64_core — RESOLVED-PARTIAL (via R.2.8)
 
-**Status:** HALTED (2026-05-17). DISPATCH §5 halt condition triggered.
-**Wall-clock:** ~20 min of Phase A diagnosis.
-**Decision needed:** operator authorization for Path B (hard rename), or close R.2.7 as NOT_DONE.
+**Status:** RESOLVED-PARTIAL (2026-05-18, via R.2.8). HALTED IN PHASE A
+on 2026-05-17; subsequently unblocked by the compiler patch landed in
+`ce9810ee9` and completed by R.2.8 caller wiring.
+**Wall-clock:** ~20 min Phase A diagnosis (2026-05-17) + R.2.8 Phase D
+(~2h, 2026-05-18).
+**Outcome:** distributions.sio + sampling.sio fully wired via
+`type X = PcgState`; rng.sio reverted (a separate var-init/tuple-`.0`
+fragility surfaced under Pass 1c.5 when `type Pcg64 = PcgState` is
+added alongside the splitmix64/xoshiro state machine). See
+[../r2_8_alias_deep_resolve/SYNTHESIS.md](../r2_8_alias_deep_resolve/SYNTHESIS.md).
 
 ## What happened
 
