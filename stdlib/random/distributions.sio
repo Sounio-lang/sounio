@@ -47,71 +47,33 @@ extern "C" {
 // RNG (inline from rng.d for self-contained module)
 // ============================================================================
 
+// R.2.8 Phase D — DstPcg64 unified via type alias over canonical PcgState.
+// Wrappers forward to pcg64_core::pcg_* one-liners. Bit-exact preserved.
+
 use stdlib::random::pcg64_core::{
-    PcgU128, pcg_lshr, pcg_u128_add, pcg_u128_mul, pcg_rotr64,
+    PcgState, pcg_u128_add, pcg_step, pcg_next_f64, pcg_next_f64_nonzero,
 }
 
-struct DstPcg64 {
-    state_hi: i64,
-    state_lo: i64,
-    inc_hi: i64,
-    inc_lo: i64,
-}
-
-// ─── PCG64-XSL-RR-128/64 step + init (helpers from pcg64_core) ───────────
+type DstPcg64 = PcgState
 
 fn dst_pcg64_new(seed: i64) -> DstPcg64 {
     // O'Neill canonical pcg64(seed) with stream=0: inc = PCG_DEFAULT_INCREMENT_128.
     let inc_hi: i64 = 6364136223846793005
     let inc_lo: i64 = 1442695040888963407
-    let s0 = DstPcg64 { state_hi: 0, state_lo: 0, inc_hi: inc_hi, inc_lo: inc_lo }
-    let r1 = dst_pcg64_next_i64(s0)
+    let s0 = PcgState { state_hi: 0, state_lo: 0, inc_hi: inc_hi, inc_lo: inc_lo }
+    let r1 = pcg_step(s0)
     let mid = r1.0
     let add = pcg_u128_add(mid.state_hi, mid.state_lo, 0, seed)
-    let s2 = DstPcg64 { state_hi: add.hi, state_lo: add.lo, inc_hi: inc_hi, inc_lo: inc_lo }
-    let r2 = dst_pcg64_next_i64(s2)
+    let s2 = PcgState { state_hi: add.hi, state_lo: add.lo, inc_hi: inc_hi, inc_lo: inc_lo }
+    let r2 = pcg_step(s2)
     return r2.0
 }
 
-fn dst_pcg64_next_i64(rng: DstPcg64) -> (DstPcg64, i64) {
-    let mult_hi: i64 = 2549297995355413924
-    let mult_lo: i64 = 4865540595714422341
-    let mul = pcg_u128_mul(rng.state_hi, rng.state_lo, mult_hi, mult_lo)
-    let add = pcg_u128_add(mul.hi, mul.lo, rng.inc_hi, rng.inc_lo)
-    // XSL-RR output from NEW state (pcg-cpp output_previous=false for pcg128_t).
-    let new_hi = add.hi
-    let new_lo = add.lo
-    let xorshifted = new_hi ^ new_lo
-    let rot = pcg_lshr(new_hi, 58) & 63
-    let output = pcg_rotr64(xorshifted, rot)
-    return (DstPcg64 {
-        state_hi: new_hi,
-        state_lo: new_lo,
-        inc_hi: rng.inc_hi,
-        inc_lo: rng.inc_lo,
-    }, output)
-}
+fn dst_pcg64_next_i64(rng: DstPcg64) -> (DstPcg64, i64) { return pcg_step(rng) }
 
-fn dst_pcg64_next_f64(rng: DstPcg64) -> (DstPcg64, f64) {
-    let result = dst_pcg64_next_i64(rng)
-    let mantissa = pcg_lshr(result.1, 11)
-    let fraction = (mantissa as f64) / 9007199254740992.0
-    return (result.0, fraction)
-}
+fn dst_pcg64_next_f64(rng: DstPcg64) -> (DstPcg64, f64) { return pcg_next_f64(rng) }
 
-fn dst_pcg64_next_f64_nonzero(rng: DstPcg64) -> (DstPcg64, f64) {
-    var current = rng
-    var attempts = 0
-    while attempts < 10 {
-        let result = dst_pcg64_next_f64(current)
-        current = result.0
-        if result.1 > 0.0 {
-            return (current, result.1)
-        }
-        attempts = attempts + 1
-    }
-    (current, 0.0000001)
-}
+fn dst_pcg64_next_f64_nonzero(rng: DstPcg64) -> (DstPcg64, f64) { return pcg_next_f64_nonzero(rng) }
 
 // ============================================================================
 // CONSTANTS
