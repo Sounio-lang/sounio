@@ -13,4 +13,5 @@ lean_lib Sounio where
              `GradientTopologyBridge,
              `Scheduler.CriticalPathLowerBound,
              `Scheduler.PortMatchingSound,
-             `Scheduler.ClarkFoldDeterminism]
+             `Scheduler.ClarkFoldDeterminism,
+             `Scheduler.MicroarchInvarianceWeak]
