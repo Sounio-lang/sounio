@@ -50,6 +50,7 @@ ptxas_version="$("$ptxas_bin" --version | tr '\n' ' ' | sed 's/[[:space:]][[:spa
 "$ptxas_bin" "$EPI_PTX_OUT" -arch="$PTXAS_ARCH" -o "$EPI_CUBIN_OUT"
 
 vec_ptx_add_marker=false
+vec_ptx_global_id_marker=false
 vec_metal_add_marker=false
 vec_spirv_magic_marker=false
 vec_spirv_fadd_marker=false
@@ -58,6 +59,7 @@ epi_ptx_value_add_marker=false
 epi_ptx_eps_mul_marker=false
 epi_ptx_valid_and_marker=false
 epi_ptx_provenance_xor_marker=false
+epi_ptx_global_id_marker=false
 epi_metal_value_add_marker=false
 epi_metal_eps_square_sum_marker=false
 epi_metal_valid_and_marker=false
@@ -70,6 +72,7 @@ epi_spirv_provenance_xor_marker=false
 epi_ptxas_cubin_marker=false
 
 if grep -q 'add\.f32' "$VEC_PTX_OUT"; then vec_ptx_add_marker=true; fi
+if grep -q '%ctaid\.x' "$VEC_PTX_OUT" && grep -q '%ntid\.x' "$VEC_PTX_OUT" && grep -q 'mad\.lo\.u32' "$VEC_PTX_OUT"; then vec_ptx_global_id_marker=true; fi
 if grep -q 'c\[tid\] = a\[tid\] + b_in\[tid\];' "$VEC_METAL_OUT"; then vec_metal_add_marker=true; fi
 if head -n 1 "$VEC_SPIRV_OUT" | grep -qx '119734787'; then vec_spirv_magic_marker=true; fi
 if grep -qx '327809' "$VEC_SPIRV_OUT"; then vec_spirv_fadd_marker=true; fi
@@ -79,6 +82,7 @@ if grep -q 'add\.f32' "$EPI_PTX_OUT"; then epi_ptx_value_add_marker=true; fi
 if grep -q 'mul\.rn\.f32' "$EPI_PTX_OUT"; then epi_ptx_eps_mul_marker=true; fi
 if grep -q 'and\.b32' "$EPI_PTX_OUT"; then epi_ptx_valid_and_marker=true; fi
 if grep -q 'xor\.b32' "$EPI_PTX_OUT"; then epi_ptx_provenance_xor_marker=true; fi
+if grep -q '%ctaid\.x' "$EPI_PTX_OUT" && grep -q '%ntid\.x' "$EPI_PTX_OUT" && grep -q 'mad\.lo\.u32' "$EPI_PTX_OUT"; then epi_ptx_global_id_marker=true; fi
 if grep -q 'out_value\[tid\] = a_value\[tid\] + b_value\[tid\];' "$EPI_METAL_OUT"; then epi_metal_value_add_marker=true; fi
 if grep -q 'out_eps\[tid\] = (a_eps\[tid\] \* a_eps\[tid\]) + (b_eps\[tid\] \* b_eps\[tid\]);' "$EPI_METAL_OUT"; then epi_metal_eps_square_sum_marker=true; fi
 if grep -q 'out_valid\[tid\] = a_valid\[tid\] & b_valid\[tid\];' "$EPI_METAL_OUT"; then epi_metal_valid_and_marker=true; fi
@@ -91,6 +95,7 @@ if grep -qx '327879' "$EPI_SPIRV_OUT"; then epi_spirv_provenance_xor_marker=true
 if [[ -s "$EPI_CUBIN_OUT" ]]; then epi_ptxas_cubin_marker=true; fi
 
 if [[ "$vec_ptx_add_marker" != true ||
+      "$vec_ptx_global_id_marker" != true ||
       "$vec_metal_add_marker" != true ||
       "$vec_spirv_magic_marker" != true ||
       "$vec_spirv_fadd_marker" != true ||
@@ -99,6 +104,7 @@ if [[ "$vec_ptx_add_marker" != true ||
       "$epi_ptx_eps_mul_marker" != true ||
       "$epi_ptx_valid_and_marker" != true ||
       "$epi_ptx_provenance_xor_marker" != true ||
+      "$epi_ptx_global_id_marker" != true ||
       "$epi_metal_value_add_marker" != true ||
       "$epi_metal_eps_square_sum_marker" != true ||
       "$epi_metal_valid_and_marker" != true ||
@@ -125,6 +131,7 @@ artifacts_json="{\"epistemic_dual_output_f32\":{\"cubin\":{\"bytes\":$(size_file
   --bool "checks.epistemic_dual_output_f32_metal_valid_and_marker=$epi_metal_valid_and_marker" \
   --bool "checks.epistemic_dual_output_f32_metal_value_add_marker=$epi_metal_value_add_marker" \
   --bool "checks.epistemic_dual_output_f32_ptx_eps_mul_marker=$epi_ptx_eps_mul_marker" \
+  --bool "checks.epistemic_dual_output_f32_ptx_global_id_marker=$epi_ptx_global_id_marker" \
   --bool "checks.epistemic_dual_output_f32_ptx_provenance_xor_marker=$epi_ptx_provenance_xor_marker" \
   --bool "checks.epistemic_dual_output_f32_ptx_valid_and_marker=$epi_ptx_valid_and_marker" \
   --bool "checks.epistemic_dual_output_f32_ptx_value_add_marker=$epi_ptx_value_add_marker" \
@@ -136,6 +143,7 @@ artifacts_json="{\"epistemic_dual_output_f32\":{\"cubin\":{\"bytes\":$(size_file
   --bool "checks.epistemic_dual_output_f32_ptxas_cubin_marker=$epi_ptxas_cubin_marker" \
   --bool "checks.vec_add_f32_metal_add_marker=$vec_metal_add_marker" \
   --bool "checks.vec_add_f32_ptx_add_marker=$vec_ptx_add_marker" \
+  --bool "checks.vec_add_f32_ptx_global_id_marker=$vec_ptx_global_id_marker" \
   --bool "checks.vec_add_f32_ptxas_cubin_marker=$vec_ptxas_cubin_marker" \
   --bool "checks.vec_add_f32_spirv_fadd_marker=$vec_spirv_fadd_marker" \
   --bool "checks.vec_add_f32_spirv_magic_marker=$vec_spirv_magic_marker" \
@@ -168,11 +176,13 @@ artifacts_json="{\"epistemic_dual_output_f32\":{\"cubin\":{\"bytes\":$(size_file
 ./bin/kretikos kaxi-validate-evidence "$REPORT_JSON" \
   --expect "status=pass" \
   --expect "checks.vec_add_f32_ptx_add_marker=true" \
+  --expect "checks.vec_add_f32_ptx_global_id_marker=true" \
   --expect "checks.vec_add_f32_metal_add_marker=true" \
   --expect "checks.vec_add_f32_spirv_magic_marker=true" \
   --expect "checks.vec_add_f32_spirv_fadd_marker=true" \
   --expect "checks.epistemic_dual_output_f32_ptx_value_add_marker=true" \
   --expect "checks.epistemic_dual_output_f32_ptx_eps_mul_marker=true" \
+  --expect "checks.epistemic_dual_output_f32_ptx_global_id_marker=true" \
   --expect "checks.epistemic_dual_output_f32_ptx_provenance_xor_marker=true" \
   --expect "checks.epistemic_dual_output_f32_ptx_valid_and_marker=true" \
   --expect "checks.epistemic_dual_output_f32_metal_value_add_marker=true" \

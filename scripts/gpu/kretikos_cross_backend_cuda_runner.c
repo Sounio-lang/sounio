@@ -134,7 +134,9 @@ static int run_vec_add(struct CudaApi *api, CUfunction fn, uint32_t n) {
     if ((rc = api->cuMemsetD32(d_out, 0, n)) != 0) VEC_FAIL("cuMemsetD32_out_failed", "cuMemsetD32", rc);
 
     void *params[] = { &d_a, &d_b, &d_out };
-    if ((rc = api->cuLaunchKernel(fn, 1, 1, 1, n, 1, 1, 0, NULL, params, NULL)) != 0)
+    uint32_t block_threads = 256;
+    uint32_t grid_blocks = n / block_threads;
+    if ((rc = api->cuLaunchKernel(fn, grid_blocks, 1, 1, block_threads, 1, 1, 0, NULL, params, NULL)) != 0)
         VEC_FAIL("cuLaunchKernel_failed", "cuLaunchKernel", rc);
     if ((rc = api->cuCtxSynchronize()) != 0) VEC_FAIL("cuCtxSynchronize_failed", "cuCtxSynchronize", rc);
     if ((rc = api->cuMemcpyDtoH(out, d_out, bytes)) != 0) VEC_FAIL("cuMemcpyDtoH_failed", "cuMemcpyDtoH", rc);
@@ -218,7 +220,9 @@ static int run_epistemic_dual(struct CudaApi *api, CUfunction fn, uint32_t n) {
     if ((rc = api->cuMemsetD32(d_oprov, 0, n)) != 0) EPI_FAIL("cuMemsetD32_out_prov_failed", "cuMemsetD32", rc);
 
     void *params[] = { &d_av, &d_bv, &d_ae, &d_be, &d_aok, &d_bok, &d_ov, &d_oe, &d_ook, &d_oprov };
-    if ((rc = api->cuLaunchKernel(fn, 1, 1, 1, n, 1, 1, 0, NULL, params, NULL)) != 0)
+    uint32_t block_threads = 256;
+    uint32_t grid_blocks = n / block_threads;
+    if ((rc = api->cuLaunchKernel(fn, grid_blocks, 1, 1, block_threads, 1, 1, 0, NULL, params, NULL)) != 0)
         EPI_FAIL("cuLaunchKernel_failed", "cuLaunchKernel", rc);
     if ((rc = api->cuCtxSynchronize()) != 0) EPI_FAIL("cuCtxSynchronize_failed", "cuCtxSynchronize", rc);
     if ((rc = api->cuMemcpyDtoH(out_value, d_ov, fbytes)) != 0) EPI_FAIL("cuMemcpyDtoH_out_value_failed", "cuMemcpyDtoH", rc);
@@ -278,7 +282,7 @@ int main(int argc, char **argv) {
     const char *cubin = argv[1];
     const char *kernel = argv[2];
     const char *mode = argv[3];
-    uint32_t n = 64;
+    uint32_t n = 4096;
     struct CudaApi api;
     CUdevice dev = 0;
     CUcontext ctx = NULL;
