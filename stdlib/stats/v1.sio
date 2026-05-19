@@ -36,20 +36,39 @@ pub struct V1GroupComparison {
     pub p_value: f64,
     pub cohens_d: f64,
     pub balance_evidence: BetaConfidence,
+    pub diagnostics: V1GroupDiagnostics,
     pub report: V1AssumptionReport,
+}
+
+pub struct V1GroupDiagnostics {
+    pub variance_a: f64,
+    pub variance_b: f64,
+    pub variance_ratio: f64,
+    pub variance_ratio_evidence: BetaConfidence,
 }
 
 pub struct V1SimpleRegression {
     pub intercept: f64,
     pub slope: f64,
     pub r_squared: f64,
+    pub residual_variance: f64,
+    pub max_abs_residual: f64,
+    pub mean_abs_residual: f64,
     pub n: i64,
 }
 
 pub struct V1RegressionWorkflow {
     pub model: V1SimpleRegression,
     pub sample_evidence: BetaConfidence,
+    pub diagnostics: V1RegressionDiagnostics,
     pub report: V1AssumptionReport,
+}
+
+pub struct V1RegressionDiagnostics {
+    pub residual_variance: f64,
+    pub max_abs_residual: f64,
+    pub mean_abs_residual: f64,
+    pub fit_evidence: BetaConfidence,
 }
 
 pub fn beta_confidence(successes: f64, failures: f64) -> BetaConfidence {
@@ -116,19 +135,36 @@ fn variance_ratio_evidence(v_a: f64, v_b: f64) -> BetaConfidence {
         return beta_new(1.0, 10.0)
     }
 
-    let hi = if v_a > v_b { v_a } else { v_b }
-    let lo = if v_a > v_b { v_b } else { v_a }
-    let ratio = hi / lo
+    let ratio = variance_ratio_value(v_a, v_b)
     beta_new(10.0, 1.0 + (ratio - 1.0) * 4.0)
 }
 
-fn fit_quality_evidence(r_squared: f64) -> BetaConfidence {
-    // Heuristic v1 gate: maps R2 into evidence mass, not predictive validity.
+fn variance_ratio_value(v_a: f64, v_b: f64) -> f64 {
+    if v_a < 1e-10 && v_b < 1e-10 {
+        return 1.0
+    }
+
+    if v_a < 1e-10 || v_b < 1e-10 {
+        return 1e9
+    }
+
+    let hi = if v_a > v_b { v_a } else { v_b }
+    let lo = if v_a > v_b { v_b } else { v_a }
+    hi / lo
+}
+
+fn fit_quality_evidence(r_squared: f64, residual_variance: f64, max_abs_residual: f64, mean_abs_residual: f64, y_variance: f64) -> BetaConfidence {
+    // Heuristic v1 gate: blends R2 and scale-normalized residuals, not predictive validity.
     if r_squared <= 0.0 {
         return beta_new(1.0, 10.0)
     }
 
-    beta_new(1.0 + 10.0 * r_squared, 1.0 + 10.0 * (1.0 - r_squared))
+    let scale = if y_variance > 1e-10 { y_variance } else { 1.0 }
+    let residual_variance_ratio = residual_variance / scale
+    let mean_abs_ratio = (mean_abs_residual * mean_abs_residual) / scale
+    let max_abs_ratio = (max_abs_residual * max_abs_residual) / scale
+    let residual_penalty = residual_variance_ratio + mean_abs_ratio + max_abs_ratio
+    beta_new(1.0 + 10.0 * r_squared, 1.0 + 10.0 * (1.0 - r_squared) + residual_penalty)
 }
 
 pub fn describe(data: [f64; 100], n: i64) -> V1DescriptiveSummary {
@@ -152,7 +188,16 @@ pub fn compare_groups(a: [f64; 100], n_a: i64, b: [f64; 100], n_b: i64) -> V1Gro
     let test = t_test_independent(a, n_a, b, n_b)
     let sample = sample_size_evidence(n_a + n_b)
     let balance = balance_evidence_from_counts(n_a, n_b)
-    let variance_evidence = variance_ratio_evidence(variance(a, n_a), variance(b, n_b))
+    let variance_a = variance(a, n_a)
+    let variance_b = variance(b, n_b)
+    let variance_ratio = variance_ratio_value(variance_a, variance_b)
+    let variance_evidence = variance_ratio_evidence(variance_a, variance_b)
+    let diagnostics = V1GroupDiagnostics {
+        variance_a: variance_a,
+        variance_b: variance_b,
+        variance_ratio: variance_ratio,
+        variance_ratio_evidence: variance_evidence,
+    }
     let report = combine_report(sample, balance, variance_evidence, neutral_evidence())
 
     V1GroupComparison {
@@ -165,6 +210,7 @@ pub fn compare_groups(a: [f64; 100], n_a: i64, b: [f64; 100], n_b: i64) -> V1Gro
         p_value: test.p_value,
         cohens_d: test.cohens_d,
         balance_evidence: report.balance_evidence,
+        diagnostics: diagnostics,
         report: report,
     }
 }
@@ -194,18 +240,48 @@ pub fn regress_simple(x: [f64; 100], y: [f64; 100], n: i64) -> V1RegressionWorkf
     } else {
         0.0
     }
+
+    var ss_res = 0.0
+    var sum_abs_residual = 0.0
+    var max_abs_residual = 0.0
+    i = 0
+    while i < n {
+        let predicted = intercept + slope * x[i as usize]
+        let residual = y[i as usize] - predicted
+        let abs_residual = if residual < 0.0 { 0.0 - residual } else { residual }
+        ss_res = ss_res + residual * residual
+        sum_abs_residual = sum_abs_residual + abs_residual
+        if abs_residual > max_abs_residual {
+            max_abs_residual = abs_residual
+        }
+        i = i + 1
+    }
+
+    let residual_variance = if n > 2 { ss_res / ((n - 2) as f64) } else { ss_res }
+    let mean_abs_residual = if n > 0 { sum_abs_residual / (n as f64) } else { 0.0 }
     let model = V1SimpleRegression {
         intercept: intercept,
         slope: slope,
         r_squared: r_squared,
+        residual_variance: residual_variance,
+        max_abs_residual: max_abs_residual,
+        mean_abs_residual: mean_abs_residual,
         n: n,
     }
     let sample = sample_size_evidence(n)
-    let fit_evidence = fit_quality_evidence(r_squared)
+    let y_variance = variance(y, n)
+    let fit_evidence = fit_quality_evidence(r_squared, residual_variance, max_abs_residual, mean_abs_residual, y_variance)
+    let diagnostics = V1RegressionDiagnostics {
+        residual_variance: residual_variance,
+        max_abs_residual: max_abs_residual,
+        mean_abs_residual: mean_abs_residual,
+        fit_evidence: fit_evidence,
+    }
     let report = combine_report(sample, neutral_evidence(), neutral_evidence(), fit_evidence)
 
     V1RegressionWorkflow {
         sample_evidence: report.sample_evidence,
+        diagnostics: diagnostics,
         report: report,
         model: model,
     }

@@ -57,6 +57,10 @@ conservative workflow gating. The variance and fit channels are deliberately
 heuristic and scale-dependent in v1; future validated diagnostics should replace
 them where clinical or publication-grade inference is required.
 
+v1 diagnostics are first-pass workflow gates, not publication-grade assumption
+tests. Still missing for that stronger tier: Levene-style variance testing,
+Shapiro/residual normality checks, and robust regression.
+
 ```sio
 use stats::v1::{beta_confidence, confidence_mean};
 
