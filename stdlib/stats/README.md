@@ -39,9 +39,23 @@ command clone:
 | Group comparison | `compare_groups(a, n_a, b, n_b)` | [`examples/stats/v1_group_comparison_workflow.sio`](../../examples/stats/v1_group_comparison_workflow.sio) |
 | Simple regression | `regress_simple(x, y, n)` | [`examples/stats/v1_regression_workflow.sio`](../../examples/stats/v1_regression_workflow.sio) |
 
+Each workflow also exposes a `V1AssumptionReport` with separate evidence
+channels:
+
+| Channel | Meaning |
+|---------|---------|
+| `sample_evidence` | observation count support |
+| `balance_evidence` | group-size balance for comparison workflows |
+| `variance_evidence` | variance stability or group variance-ratio support |
+| `fit_evidence` | simple-regression fit quality |
+| `overall_evidence` | mechanical `BetaConfidence` combination of the available channels |
+
 Use `BetaConfidence` helpers from `stats::v1` when a workflow needs an explicit
-sample-evidence carrier. These helpers are not assumption diagnostics; use the
-lower-level epistemic modules for assumption checks.
+evidence carrier. These helpers are not calibrated coverage probabilities and
+are not full assumption diagnostics; they are v1 evidence channels for
+conservative workflow gating. The variance and fit channels are deliberately
+heuristic and scale-dependent in v1; future validated diagnostics should replace
+them where clinical or publication-grade inference is required.
 
 ```sio
 use stats::v1::{beta_confidence, confidence_mean};
