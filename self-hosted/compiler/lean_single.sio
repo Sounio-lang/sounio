@@ -668,6 +668,16 @@ fn st_find(hash: i64) -> i64 with Panic, Mut {
     return -1
 }
 
+// Disambiguator added to tuple encoded hashes so distinct structs sharing
+// the same (nslots, f64) shape produce distinct cache keys. The perturbation
+// lives in bits 30..56 (multiple of 1_000_000_000), so existing `% 1000`,
+// `% 1_000_000`, `/ 1_000_000 % 10`, `/ 10_000_000 % 10` decode patterns
+// keep recovering the original nslots/f64 fields unchanged.
+fn tup_perturbation(first_hash: i64, last_hash: i64) -> i64 with Mut {
+    let mix = (first_hash * 1103515245 + last_hash * 2654435761) & 134217727
+    mix * 1000000000
+}
+
 fn tup_cache_register(tup_hash: i64, first_ty: i64, first_hash: i64, last_ty: i64, last_hash: i64) with Panic, Mut {
     if tup_hash == 0 { return }
     var i: i64 = 0
@@ -4507,7 +4517,9 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         let total_nslots = first_nslots + last_nslots
         SCAN_TY = 6
         // Hash: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
-        SCAN_TY_HASH = tcount * 100000000 + first_f64 * 10000000 + last_f64 * 1000000 + first_nslots * 1000 + total_nslots
+        // + element-hash perturbation in bits >=30 (multiple of 1B) so cache keys
+        // disambiguate same-shape tuples whose element types differ.
+        SCAN_TY_HASH = tcount * 100000000 + first_f64 * 10000000 + last_f64 * 1000000 + first_nslots * 1000 + total_nslots + tup_perturbation(first_hash, last_hash)
         tup_cache_register(SCAN_TY_HASH, first_ty, first_hash, last_ty, last_hash)
         SCAN_TY_NEXT = p
         return
@@ -9607,7 +9619,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if first_ty == 2 { first_f64_flag = 1 }
             var last_f64_flag: i64 = 0
             if last_ty == 2 { last_f64_flag = 1 }
-            EXPR_TY_HASH = tup_count * 100000000 + first_f64_flag * 10000000 + last_f64_flag * 1000000 + first_actual * 1000 + total_slots
+            EXPR_TY_HASH = tup_count * 100000000 + first_f64_flag * 10000000 + last_f64_flag * 1000000 + first_actual * 1000 + total_slots + tup_perturbation(first_hash, last_hash)
             tup_cache_register(EXPR_TY_HASH, first_ty, first_hash, last_ty, last_hash)
             return
         }
@@ -23606,8 +23618,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 // so that .1 field access computes the correct byte offset.
                 // Hash format: tcount * 1000000 + first_nslots * 1000 + total_nslots
                 if scan_ret_ty == 6 && TK[q as usize] == 6 {
-                    let tcount_enc = scan_ret_hash / 1000000
-                    let first_enc_check = (scan_ret_hash % 1000000) / 1000
+                    // Strip prior perturbation (if any) before decoding tcount_enc.
+                    let clean_scan_ret_hash = scan_ret_hash % 1000000000
+                    let tcount_enc = clean_scan_ret_hash / 1000000
+                    let first_enc_check = (clean_scan_ret_hash % 1000000) / 1000
                     if first_enc_check == 0 {
                         scan_type(q + 1)
                         let sig_first_ty = SCAN_TY
@@ -23620,7 +23634,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         let sig_last_hash = SCAN_TY_HASH
                         let last_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
                         let total_nslots = first_nslots + last_nslots
-                        scan_ret_hash = tcount_enc * 1000000 + first_nslots * 1000 + total_nslots
+                        scan_ret_hash = tcount_enc * 1000000 + first_nslots * 1000 + total_nslots + tup_perturbation(sig_first_hash, sig_last_hash)
                         tup_cache_register(scan_ret_hash, sig_first_ty, sig_first_hash, sig_last_ty, sig_last_hash)
                         SCAN_TY = scan_ret_ty
                         SCAN_TY_HASH = scan_ret_hash
