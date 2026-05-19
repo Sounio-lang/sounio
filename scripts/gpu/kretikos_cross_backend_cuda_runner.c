@@ -20,6 +20,9 @@ typedef unsigned long long CUdeviceptr;
 
 typedef CUresult (*cuInit_t)(unsigned int);
 typedef CUresult (*cuDeviceGet_t)(CUdevice *, int);
+typedef CUresult (*cuDeviceGetName_t)(char *, int, CUdevice);
+typedef CUresult (*cuDeviceComputeCapability_t)(int *, int *, CUdevice);
+typedef CUresult (*cuDriverGetVersion_t)(int *);
 typedef CUresult (*cuCtxCreate_t)(CUcontext *, unsigned int, CUdevice);
 typedef CUresult (*cuCtxDestroy_t)(CUcontext);
 typedef CUresult (*cuModuleLoad_t)(CUmodule *, const char *);
@@ -39,6 +42,9 @@ struct CudaApi {
     void *lib;
     cuInit_t cuInit;
     cuDeviceGet_t cuDeviceGet;
+    cuDeviceGetName_t cuDeviceGetName;
+    cuDeviceComputeCapability_t cuDeviceComputeCapability;
+    cuDriverGetVersion_t cuDriverGetVersion;
     cuCtxCreate_t cuCtxCreate;
     cuCtxDestroy_t cuCtxDestroy;
     cuModuleLoad_t cuModuleLoad;
@@ -69,6 +75,9 @@ static int load_cuda(struct CudaApi *api) {
 
     LOAD_CUDA(cuInit);
     LOAD_CUDA(cuDeviceGet);
+    LOAD_CUDA(cuDeviceGetName);
+    LOAD_CUDA(cuDeviceComputeCapability);
+    LOAD_CUDA(cuDriverGetVersion);
     LOAD_CUDA(cuCtxCreate);
     LOAD_CUDA(cuCtxDestroy);
     LOAD_CUDA(cuModuleLoad);
@@ -82,6 +91,17 @@ static int load_cuda(struct CudaApi *api) {
     LOAD_CUDA(cuLaunchKernel);
     LOAD_CUDA(cuCtxSynchronize);
     return 0;
+}
+
+static char g_device_name[128] = "unknown";
+static int g_driver_version = 0;
+static int g_cc_major = 0;
+static int g_cc_minor = 0;
+
+static void sanitize_device_name(char *s) {
+    for (size_t i = 0; s[i] != '\0'; i++) {
+        if (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') s[i] = '_';
+    }
 }
 
 static void emit_fail(const char *kernel, const char *reason, const char *stage, int code) {
@@ -126,8 +146,8 @@ static int run_vec_add(struct CudaApi *api, CUfunction fn, uint32_t n) {
     }
     if (max_abs_err > 0.000001f) VEC_FAIL("mismatch", "verify", 0);
 
-    printf("cross_backend_cuda_runtime status=pass kernel=%s reason=runtime_vec_add_pass n=%u max_abs_err=%.9g observed0=%.9g expected0=%.9g\n",
-           kernel, n, max_abs_err, out[0], a[0] + b[0]);
+    printf("cross_backend_cuda_runtime status=pass kernel=%s reason=runtime_vec_add_pass n=%u max_abs_err=%.9g observed0=%.9g expected0=%.9g device_name=%s driver_version=%d cc=%d.%d\n",
+           kernel, n, max_abs_err, out[0], a[0] + b[0], g_device_name, g_driver_version, g_cc_major, g_cc_minor);
 
 vec_cleanup:
     if (d_out) api->cuMemFree(d_out);
@@ -214,8 +234,8 @@ static int run_epistemic_dual(struct CudaApi *api, CUfunction fn, uint32_t n) {
     if (value_max_abs_err > 0.000001f || eps_max_abs_err > 0.000001f || valid_mismatch != 0)
         EPI_FAIL("mismatch", "verify", 0);
 
-    printf("cross_backend_cuda_runtime status=pass kernel=%s reason=runtime_epistemic_dual_output_pass n=%u value_max_abs_err=%.9g eps_max_abs_err=%.9g valid_mismatch=%u observed_value0=%.9g observed_eps_last=%.9g\n",
-           kernel, n, value_max_abs_err, eps_max_abs_err, valid_mismatch, out_value[0], out_eps[n - 1]);
+    printf("cross_backend_cuda_runtime status=pass kernel=%s reason=runtime_epistemic_dual_output_pass n=%u value_max_abs_err=%.9g eps_max_abs_err=%.9g valid_mismatch=%u observed_value0=%.9g observed_eps_last=%.9g device_name=%s driver_version=%d cc=%d.%d\n",
+           kernel, n, value_max_abs_err, eps_max_abs_err, valid_mismatch, out_value[0], out_eps[n - 1], g_device_name, g_driver_version, g_cc_major, g_cc_minor);
 
 epi_cleanup:
     if (d_ook) api->cuMemFree(d_ook);
@@ -261,6 +281,10 @@ int main(int argc, char **argv) {
     if (load_cuda(&api) != 0) return 1;
     if ((rc = api.cuInit(0)) != 0) { emit_fail(kernel, "cuInit_failed", "cuInit", rc); return 1; }
     if ((rc = api.cuDeviceGet(&dev, 0)) != 0) { emit_fail(kernel, "cuDeviceGet_failed", "cuDeviceGet", rc); return 1; }
+    if ((rc = api.cuDeviceGetName(g_device_name, (int)sizeof(g_device_name), dev)) != 0) { emit_fail(kernel, "cuDeviceGetName_failed", "cuDeviceGetName", rc); return 1; }
+    sanitize_device_name(g_device_name);
+    if ((rc = api.cuDriverGetVersion(&g_driver_version)) != 0) { emit_fail(kernel, "cuDriverGetVersion_failed", "cuDriverGetVersion", rc); return 1; }
+    if ((rc = api.cuDeviceComputeCapability(&g_cc_major, &g_cc_minor, dev)) != 0) { emit_fail(kernel, "cuDeviceComputeCapability_failed", "cuDeviceComputeCapability", rc); return 1; }
     if ((rc = api.cuCtxCreate(&ctx, 0, dev)) != 0) { emit_fail(kernel, "cuCtxCreate_failed", "cuCtxCreate", rc); return 1; }
     if ((rc = api.cuModuleLoad(&mod, cubin)) != 0) { emit_fail(kernel, "cuModuleLoad_failed", "cuModuleLoad", rc); api.cuCtxDestroy(ctx); return 1; }
     if ((rc = api.cuModuleGetFunction(&fn, mod, kernel)) != 0) {

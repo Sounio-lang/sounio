@@ -63,6 +63,21 @@ else
   status="fail"
 fi
 
+device_name="$(grep -m1 -o 'device_name=[^ ]*' "$VEC_STDOUT" | cut -d= -f2-)"
+driver_version="$(grep -m1 -o 'driver_version=[0-9]*' "$VEC_STDOUT" | cut -d= -f2-)"
+compute_capability="$(grep -m1 -o 'cc=[0-9][0-9]*\.[0-9][0-9]*' "$VEC_STDOUT" | cut -d= -f2-)"
+epi_device_name="$(grep -m1 -o 'device_name=[^ ]*' "$EPI_STDOUT" | cut -d= -f2-)"
+epi_driver_version="$(grep -m1 -o 'driver_version=[0-9]*' "$EPI_STDOUT" | cut -d= -f2-)"
+epi_compute_capability="$(grep -m1 -o 'cc=[0-9][0-9]*\.[0-9][0-9]*' "$EPI_STDOUT" | cut -d= -f2-)"
+
+if [[ -z "$device_name" || -z "$driver_version" || -z "$compute_capability" ||
+      "$device_name" != "$epi_device_name" ||
+      "$driver_version" != "$epi_driver_version" ||
+      "$compute_capability" != "$epi_compute_capability" ]]; then
+  echo "kretikos_cross_backend_cuda_runtime_gate: FAIL runtime device identity missing or inconsistent" >&2
+  exit 1
+fi
+
 generated_at_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 ./bin/kretikos json-emit \
@@ -71,6 +86,9 @@ generated_at_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   --bool "checks.epistemic_dual_output_f32_runtime_pass=$epi_runtime_pass" \
   --bool "checks.vec_add_f32_runtime_pass=$vec_runtime_pass" \
   --string "generated_at_utc=$generated_at_utc" \
+  --string "runtime.compute_capability=$compute_capability" \
+  --string "runtime.device_name=$device_name" \
+  --string "runtime.driver_version=$driver_version" \
   --string "schema=sounio.kretikos.cross-backend-cuda-runtime.v1" \
   --array-strings "semantics=vec_add_f32|epistemic_dual_output_f32" \
   --string "status=$status" \
