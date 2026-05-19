@@ -200,6 +200,33 @@ fn digamma(x: f64) -> f64 {
     return result
 }
 
+// Log-gamma approximation using recurrence into a stable Stirling region.
+// Beta parameters are positive by construction; clamp defensively at the
+// module floor so invalid callers do not produce a negative log input.
+fn log_gamma_approx(x: f64) -> f64 {
+    var val = clamp_positive(x)
+    var shift = 0.0
+    while val < 8.0 {
+        shift = shift + ln_approx(val)
+        val = val + 1.0
+    }
+
+    let ln_2pi = 1.8378770664093453
+    let inv = 1.0 / val
+    let inv2 = inv * inv
+
+    var result = (val - 0.5) * ln_approx(val) - val + 0.5 * ln_2pi
+    result = result + inv / 12.0
+    result = result - inv * inv2 / 360.0
+    result = result + inv * inv2 * inv2 / 1260.0
+
+    return result - shift
+}
+
+fn beta_log_normalizer(a: f64, b: f64) -> f64 {
+    return log_gamma_approx(a) + log_gamma_approx(b) - log_gamma_approx(a + b)
+}
+
 // Simple tangent approximation
 fn tan_approx(x: f64) -> f64 {
     let sin_x = sin_approx(x)
@@ -561,20 +588,20 @@ fn expected_variance_reduction_k(b: Beta, k: f64) -> f64 {
     return current_var - expected_var
 }
 
-// Exploration-exploitation trade-off score
-// Returns value in [0, 1] where 0 = explore, 1 = exploit
+// Exploration-exploitation hard decision.
+// Returns 0.0 to explore and 1.0 to exploit.
 fn exploration_exploitation_score(b: Beta, exploit_threshold: f64) -> f64 {
-    let n = b.alpha + b.beta
-    let var = beta_variance(b)
+    let variance = beta_variance(b)
 
     // High variance = prefer exploration
     // High sample size = prefer exploitation
 
     // Normalized uncertainty: compare to threshold
-    let uncertainty_score = var / 0.25  // Max variance is 0.25 at Beta(1,1)
+    let uncertainty_score = variance / 0.25  // Max variance is 0.25 at Beta(1,1)
+    let exploration_threshold = 1.0 - exploit_threshold
 
     // If uncertainty > threshold, explore; otherwise exploit
-    if uncertainty_score > (1.0 - exploit_threshold) {
+    if uncertainty_score > exploration_threshold {
         return 0.0  // Explore
     }
     return 1.0  // Exploit
@@ -830,8 +857,8 @@ fn beta_kl_divergence(p: Beta, q: Beta) -> f64 {
     let sum_q = aq + bq
 
     // D_KL = ln B(q) - ln B(p) + (ap-aq)ψ(ap) + (bp-bq)ψ(bp) + (aq+bq-ap-bp)ψ(sum_p)
-    let ln_beta_q = ln_approx(aq) + ln_approx(bq) - ln_approx(sum_q)
-    let ln_beta_p = ln_approx(ap) + ln_approx(bp) - ln_approx(sum_p)
+    let ln_beta_q = beta_log_normalizer(aq, bq)
+    let ln_beta_p = beta_log_normalizer(ap, bp)
 
     let kl = ln_beta_q - ln_beta_p
            + (ap - aq) * digamma(ap)
