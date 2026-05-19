@@ -173,13 +173,15 @@ static int run_epistemic_dual(struct CudaApi *api, CUfunction fn, uint32_t n) {
     uint32_t *a_valid = (uint32_t *)calloc(n, sizeof(uint32_t));
     uint32_t *b_valid = (uint32_t *)calloc(n, sizeof(uint32_t));
     uint32_t *out_valid = (uint32_t *)calloc(n, sizeof(uint32_t));
-    CUdeviceptr d_av = 0, d_bv = 0, d_ae = 0, d_be = 0, d_aok = 0, d_bok = 0, d_ov = 0, d_oe = 0, d_ook = 0;
+    uint32_t *out_prov = (uint32_t *)calloc(n, sizeof(uint32_t));
+    CUdeviceptr d_av = 0, d_bv = 0, d_ae = 0, d_be = 0, d_aok = 0, d_bok = 0, d_ov = 0, d_oe = 0, d_ook = 0, d_oprov = 0;
     CUresult rc = 0;
     float value_max_abs_err = 0.0f;
     float eps_max_abs_err = 0.0f;
     uint32_t valid_mismatch = 0;
+    uint32_t prov_mismatch = 0;
 
-    if (!a_value || !b_value || !a_eps || !b_eps || !out_value || !out_eps || !a_valid || !b_valid || !out_valid) {
+    if (!a_value || !b_value || !a_eps || !b_eps || !out_value || !out_eps || !a_valid || !b_valid || !out_valid || !out_prov) {
         emit_fail(kernel, "host_alloc_failed", "calloc", 0);
         return 1;
     }
@@ -202,6 +204,7 @@ static int run_epistemic_dual(struct CudaApi *api, CUfunction fn, uint32_t n) {
     if ((rc = api->cuMemAlloc(&d_ov, fbytes)) != 0) EPI_FAIL("cuMemAlloc_out_value_failed", "cuMemAlloc", rc);
     if ((rc = api->cuMemAlloc(&d_oe, fbytes)) != 0) EPI_FAIL("cuMemAlloc_out_eps_failed", "cuMemAlloc", rc);
     if ((rc = api->cuMemAlloc(&d_ook, ubytes)) != 0) EPI_FAIL("cuMemAlloc_out_valid_failed", "cuMemAlloc", rc);
+    if ((rc = api->cuMemAlloc(&d_oprov, ubytes)) != 0) EPI_FAIL("cuMemAlloc_out_prov_failed", "cuMemAlloc", rc);
 
     if ((rc = api->cuMemcpyHtoD(d_av, a_value, fbytes)) != 0) EPI_FAIL("cuMemcpyHtoD_a_value_failed", "cuMemcpyHtoD", rc);
     if ((rc = api->cuMemcpyHtoD(d_bv, b_value, fbytes)) != 0) EPI_FAIL("cuMemcpyHtoD_b_value_failed", "cuMemcpyHtoD", rc);
@@ -212,32 +215,37 @@ static int run_epistemic_dual(struct CudaApi *api, CUfunction fn, uint32_t n) {
     if ((rc = api->cuMemsetD32(d_ov, 0, n)) != 0) EPI_FAIL("cuMemsetD32_out_value_failed", "cuMemsetD32", rc);
     if ((rc = api->cuMemsetD32(d_oe, 0, n)) != 0) EPI_FAIL("cuMemsetD32_out_eps_failed", "cuMemsetD32", rc);
     if ((rc = api->cuMemsetD32(d_ook, 0, n)) != 0) EPI_FAIL("cuMemsetD32_out_valid_failed", "cuMemsetD32", rc);
+    if ((rc = api->cuMemsetD32(d_oprov, 0, n)) != 0) EPI_FAIL("cuMemsetD32_out_prov_failed", "cuMemsetD32", rc);
 
-    void *params[] = { &d_av, &d_bv, &d_ae, &d_be, &d_aok, &d_bok, &d_ov, &d_oe, &d_ook };
+    void *params[] = { &d_av, &d_bv, &d_ae, &d_be, &d_aok, &d_bok, &d_ov, &d_oe, &d_ook, &d_oprov };
     if ((rc = api->cuLaunchKernel(fn, 1, 1, 1, n, 1, 1, 0, NULL, params, NULL)) != 0)
         EPI_FAIL("cuLaunchKernel_failed", "cuLaunchKernel", rc);
     if ((rc = api->cuCtxSynchronize()) != 0) EPI_FAIL("cuCtxSynchronize_failed", "cuCtxSynchronize", rc);
     if ((rc = api->cuMemcpyDtoH(out_value, d_ov, fbytes)) != 0) EPI_FAIL("cuMemcpyDtoH_out_value_failed", "cuMemcpyDtoH", rc);
     if ((rc = api->cuMemcpyDtoH(out_eps, d_oe, fbytes)) != 0) EPI_FAIL("cuMemcpyDtoH_out_eps_failed", "cuMemcpyDtoH", rc);
     if ((rc = api->cuMemcpyDtoH(out_valid, d_ook, ubytes)) != 0) EPI_FAIL("cuMemcpyDtoH_out_valid_failed", "cuMemcpyDtoH", rc);
+    if ((rc = api->cuMemcpyDtoH(out_prov, d_oprov, ubytes)) != 0) EPI_FAIL("cuMemcpyDtoH_out_prov_failed", "cuMemcpyDtoH", rc);
 
     for (uint32_t i = 0; i < n; i++) {
         float expected_value = a_value[i] + b_value[i];
         float expected_eps = a_eps[i] * a_eps[i] + b_eps[i] * b_eps[i];
         uint32_t expected_valid = a_valid[i] & b_valid[i];
+        uint32_t expected_prov = (i ^ 0x12345678U) ^ expected_valid;
         float verr = fabsf(out_value[i] - expected_value);
         float eerr = fabsf(out_eps[i] - expected_eps);
         if (verr > value_max_abs_err) value_max_abs_err = verr;
         if (eerr > eps_max_abs_err) eps_max_abs_err = eerr;
         if (out_valid[i] != expected_valid) valid_mismatch++;
+        if (out_prov[i] != expected_prov) prov_mismatch++;
     }
-    if (value_max_abs_err > 0.000001f || eps_max_abs_err > 0.000001f || valid_mismatch != 0)
+    if (value_max_abs_err > 0.000001f || eps_max_abs_err > 0.000001f || valid_mismatch != 0 || prov_mismatch != 0)
         EPI_FAIL("mismatch", "verify", 0);
 
-    printf("cross_backend_cuda_runtime status=pass kernel=%s reason=runtime_epistemic_dual_output_pass n=%u value_max_abs_err=%.9g eps_max_abs_err=%.9g valid_mismatch=%u observed_value0=%.9g observed_eps_last=%.9g device_name=%s driver_version=%d cc=%d.%d\n",
-           kernel, n, value_max_abs_err, eps_max_abs_err, valid_mismatch, out_value[0], out_eps[n - 1], g_device_name, g_driver_version, g_cc_major, g_cc_minor);
+    printf("cross_backend_cuda_runtime status=pass kernel=%s reason=runtime_epistemic_dual_output_pass n=%u value_max_abs_err=%.9g eps_max_abs_err=%.9g valid_mismatch=%u prov_mismatch=%u observed_value0=%.9g observed_eps_last=%.9g observed_prov0=0x%08x device_name=%s driver_version=%d cc=%d.%d\n",
+           kernel, n, value_max_abs_err, eps_max_abs_err, valid_mismatch, prov_mismatch, out_value[0], out_eps[n - 1], out_prov[0], g_device_name, g_driver_version, g_cc_major, g_cc_minor);
 
 epi_cleanup:
+    if (d_oprov) api->cuMemFree(d_oprov);
     if (d_ook) api->cuMemFree(d_ook);
     if (d_oe) api->cuMemFree(d_oe);
     if (d_ov) api->cuMemFree(d_ov);
@@ -248,6 +256,7 @@ epi_cleanup:
     if (d_bv) api->cuMemFree(d_bv);
     if (d_av) api->cuMemFree(d_av);
     free(out_valid);
+    free(out_prov);
     free(b_valid);
     free(a_valid);
     free(out_eps);

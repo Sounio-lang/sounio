@@ -55,7 +55,7 @@ cc -O2 "$RUNNER_SRC" -ldl -lm -o "$RUNNER_BIN"
 vec_runtime_pass=false
 epi_runtime_pass=false
 if grep -q 'status=pass' "$VEC_STDOUT" && grep -q 'max_abs_err=0' "$VEC_STDOUT"; then vec_runtime_pass=true; fi
-if grep -q 'status=pass' "$EPI_STDOUT" && grep -q 'value_max_abs_err=0' "$EPI_STDOUT" && grep -q 'eps_max_abs_err=0' "$EPI_STDOUT" && grep -q 'valid_mismatch=0' "$EPI_STDOUT"; then epi_runtime_pass=true; fi
+if grep -q 'status=pass' "$EPI_STDOUT" && grep -q 'value_max_abs_err=0' "$EPI_STDOUT" && grep -q 'eps_max_abs_err=0' "$EPI_STDOUT" && grep -q 'valid_mismatch=0' "$EPI_STDOUT" && grep -q 'prov_mismatch=0' "$EPI_STDOUT"; then epi_runtime_pass=true; fi
 
 if [[ "$vec_runtime_pass" == true && "$epi_runtime_pass" == true ]]; then
   status="pass"
@@ -82,7 +82,7 @@ generated_at_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 ./bin/kretikos json-emit \
   --raw-json "artifacts={\"epistemic_dual_output_f32\":{\"cubin\":{\"bytes\":$(size_file "$EPI_CUBIN"),\"path\":\"$(rel_path "$EPI_CUBIN")\",\"sha256\":\"$(sha_file "$EPI_CUBIN")\"},\"stdout\":{\"bytes\":$(size_file "$EPI_STDOUT"),\"path\":\"$(rel_path "$EPI_STDOUT")\",\"sha256\":\"$(sha_file "$EPI_STDOUT")\"}},\"vec_add_f32\":{\"cubin\":{\"bytes\":$(size_file "$VEC_CUBIN"),\"path\":\"$(rel_path "$VEC_CUBIN")\",\"sha256\":\"$(sha_file "$VEC_CUBIN")\"},\"stdout\":{\"bytes\":$(size_file "$VEC_STDOUT"),\"path\":\"$(rel_path "$VEC_STDOUT")\",\"sha256\":\"$(sha_file "$VEC_STDOUT")\"}},\"runner\":{\"binary\":{\"bytes\":$(size_file "$RUNNER_BIN"),\"path\":\"$(rel_path "$RUNNER_BIN")\",\"sha256\":\"$(sha_file "$RUNNER_BIN")\"},\"source\":{\"bytes\":$(size_file "$RUNNER_SRC"),\"path\":\"$(rel_path "$RUNNER_SRC")\",\"sha256\":\"$(sha_file "$RUNNER_SRC")\"}}}" \
-  --array-strings "boundaries=cuda_runtime_gate_for_ptx_side_only|does_not_claim_metal_runtime|does_not_claim_spirv_runtime|does_not_claim_general_backend_equivalence|runtime_oracles_are_vec_add_and_epistemic_value_eps_valid" \
+  --array-strings "boundaries=cuda_runtime_gate_for_ptx_side_only|does_not_claim_metal_runtime|does_not_claim_spirv_runtime|does_not_claim_general_backend_equivalence|runtime_oracles_are_vec_add_and_epistemic_value_eps_valid_provenance" \
   --bool "checks.epistemic_dual_output_f32_runtime_pass=$epi_runtime_pass" \
   --bool "checks.vec_add_f32_runtime_pass=$vec_runtime_pass" \
   --string "generated_at_utc=$generated_at_utc" \
