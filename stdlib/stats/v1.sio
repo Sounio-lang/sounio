@@ -5,7 +5,16 @@
 
 use stats::descriptive::{mean, variance, std_dev, std_error}
 use stats::inferential::{t_test_independent}
-use stats::shared::{BetaConfidence, beta_new, beta_mean}
+use stats::shared::{BetaConfidence, beta_new, beta_mean, beta_combine}
+
+pub struct V1AssumptionReport {
+    pub sample_evidence: BetaConfidence,
+    pub balance_evidence: BetaConfidence,
+    pub variance_evidence: BetaConfidence,
+    pub fit_evidence: BetaConfidence,
+    // Pooled workflow signal, not a calibrated coverage probability.
+    pub overall_evidence: BetaConfidence,
+}
 
 pub struct V1DescriptiveSummary {
     pub n: i64,
@@ -14,6 +23,7 @@ pub struct V1DescriptiveSummary {
     pub std_dev: f64,
     pub std_error: f64,
     pub sample_evidence: BetaConfidence,
+    pub report: V1AssumptionReport,
 }
 
 pub struct V1GroupComparison {
@@ -26,6 +36,7 @@ pub struct V1GroupComparison {
     pub p_value: f64,
     pub cohens_d: f64,
     pub balance_evidence: BetaConfidence,
+    pub report: V1AssumptionReport,
 }
 
 pub struct V1SimpleRegression {
@@ -38,13 +49,14 @@ pub struct V1SimpleRegression {
 pub struct V1RegressionWorkflow {
     pub model: V1SimpleRegression,
     pub sample_evidence: BetaConfidence,
+    pub report: V1AssumptionReport,
 }
 
 pub fn beta_confidence(successes: f64, failures: f64) -> BetaConfidence {
     beta_new(successes + 1.0, failures + 1.0)
 }
 
-fn sample_confidence(n: i64) -> BetaConfidence {
+fn sample_size_evidence(n: i64) -> BetaConfidence {
     if n <= 0 {
         return beta_new(1.0, 2.0)
     }
@@ -52,7 +64,30 @@ fn sample_confidence(n: i64) -> BetaConfidence {
     beta_new((n as f64) + 1.0, 1.0)
 }
 
-fn paired_sample_confidence(n_a: i64, n_b: i64) -> BetaConfidence {
+fn neutral_evidence() -> BetaConfidence {
+    beta_new(1.0, 1.0)
+}
+
+fn combine_report(
+    sample_evidence: BetaConfidence,
+    balance_evidence: BetaConfidence,
+    variance_evidence: BetaConfidence,
+    fit_evidence: BetaConfidence,
+) -> V1AssumptionReport {
+    let a = beta_combine(&sample_evidence, &balance_evidence)
+    let b = beta_combine(&a, &variance_evidence)
+    let overall = beta_combine(&b, &fit_evidence)
+
+    V1AssumptionReport {
+        sample_evidence: sample_evidence,
+        balance_evidence: balance_evidence,
+        variance_evidence: variance_evidence,
+        fit_evidence: fit_evidence,
+        overall_evidence: overall,
+    }
+}
+
+fn balance_evidence_from_counts(n_a: i64, n_b: i64) -> BetaConfidence {
     if n_a <= 0 || n_b <= 0 {
         return beta_new(1.0, 3.0)
     }
@@ -61,19 +96,65 @@ fn paired_sample_confidence(n_a: i64, n_b: i64) -> BetaConfidence {
     beta_new(((n_a + n_b) as f64) + 1.0, (balance_gap as f64) + 1.0)
 }
 
+fn variance_stability_evidence_from_variance(v: f64) -> BetaConfidence {
+    // Heuristic v1 gate: scale-dependent, not a calibrated variance test.
+    if v < 1e-10 {
+        return beta_new(10.0, 1.0)
+    }
+
+    let penalty = if v > 10.0 { (v - 10.0) / 10.0 } else { 0.0 }
+    beta_new(10.0, 1.0 + penalty * 5.0)
+}
+
+fn variance_ratio_evidence(v_a: f64, v_b: f64) -> BetaConfidence {
+    // Heuristic v1 gate: rewards comparable variances, but is not Levene's test.
+    if v_a < 1e-10 && v_b < 1e-10 {
+        return beta_new(10.0, 1.0)
+    }
+
+    if v_a < 1e-10 || v_b < 1e-10 {
+        return beta_new(1.0, 10.0)
+    }
+
+    let hi = if v_a > v_b { v_a } else { v_b }
+    let lo = if v_a > v_b { v_b } else { v_a }
+    let ratio = hi / lo
+    beta_new(10.0, 1.0 + (ratio - 1.0) * 4.0)
+}
+
+fn fit_quality_evidence(r_squared: f64) -> BetaConfidence {
+    // Heuristic v1 gate: maps R2 into evidence mass, not predictive validity.
+    if r_squared <= 0.0 {
+        return beta_new(1.0, 10.0)
+    }
+
+    beta_new(1.0 + 10.0 * r_squared, 1.0 + 10.0 * (1.0 - r_squared))
+}
+
 pub fn describe(data: [f64; 100], n: i64) -> V1DescriptiveSummary {
+    let sample = sample_size_evidence(n)
+    let variance_value = variance(data, n)
+    let variance_evidence = variance_stability_evidence_from_variance(variance_value)
+    let report = combine_report(sample, neutral_evidence(), variance_evidence, neutral_evidence())
+
     V1DescriptiveSummary {
         n: n,
         mean: mean(data, n),
-        variance: variance(data, n),
+        variance: variance_value,
         std_dev: std_dev(data, n),
         std_error: std_error(data, n),
-        sample_evidence: sample_confidence(n),
+        sample_evidence: report.sample_evidence,
+        report: report,
     }
 }
 
 pub fn compare_groups(a: [f64; 100], n_a: i64, b: [f64; 100], n_b: i64) -> V1GroupComparison {
     let test = t_test_independent(a, n_a, b, n_b)
+    let sample = sample_size_evidence(n_a + n_b)
+    let balance = balance_evidence_from_counts(n_a, n_b)
+    let variance_evidence = variance_ratio_evidence(variance(a, n_a), variance(b, n_b))
+    let report = combine_report(sample, balance, variance_evidence, neutral_evidence())
+
     V1GroupComparison {
         n_a: n_a,
         n_b: n_b,
@@ -83,7 +164,8 @@ pub fn compare_groups(a: [f64; 100], n_a: i64, b: [f64; 100], n_b: i64) -> V1Gro
         ci_upper: test.ci_upper,
         p_value: test.p_value,
         cohens_d: test.cohens_d,
-        balance_evidence: paired_sample_confidence(n_a, n_b),
+        balance_evidence: report.balance_evidence,
+        report: report,
     }
 }
 
@@ -118,9 +200,13 @@ pub fn regress_simple(x: [f64; 100], y: [f64; 100], n: i64) -> V1RegressionWorkf
         r_squared: r_squared,
         n: n,
     }
+    let sample = sample_size_evidence(n)
+    let fit_evidence = fit_quality_evidence(r_squared)
+    let report = combine_report(sample, neutral_evidence(), neutral_evidence(), fit_evidence)
 
     V1RegressionWorkflow {
-        sample_evidence: sample_confidence(n),
+        sample_evidence: report.sample_evidence,
+        report: report,
         model: model,
     }
 }
@@ -130,13 +216,13 @@ pub fn confidence_mean(confidence: &BetaConfidence) -> f64 {
 }
 
 pub fn summary_evidence_mean(summary: &V1DescriptiveSummary) -> f64 {
-    beta_mean(&summary.sample_evidence)
+    beta_mean(&summary.report.overall_evidence)
 }
 
 pub fn comparison_evidence_mean(comparison: &V1GroupComparison) -> f64 {
-    beta_mean(&comparison.balance_evidence)
+    beta_mean(&comparison.report.overall_evidence)
 }
 
 pub fn regression_evidence_mean(workflow: &V1RegressionWorkflow) -> f64 {
-    beta_mean(&workflow.sample_evidence)
+    beta_mean(&workflow.report.overall_evidence)
 }
