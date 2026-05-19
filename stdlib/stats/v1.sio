@@ -1,0 +1,142 @@
+// stats::v1 - stable Sounio-native statistics workflow API
+//
+// This facade keeps the public v1 surface small and workflow-shaped while the
+// underlying stats modules continue to own the statistical kernels.
+
+use stats::descriptive::{mean, variance, std_dev, std_error}
+use stats::inferential::{t_test_independent}
+use stats::shared::{BetaConfidence, beta_new, beta_mean}
+
+pub struct V1DescriptiveSummary {
+    pub n: i64,
+    pub mean: f64,
+    pub variance: f64,
+    pub std_dev: f64,
+    pub std_error: f64,
+    pub sample_evidence: BetaConfidence,
+}
+
+pub struct V1GroupComparison {
+    pub n_a: i64,
+    pub n_b: i64,
+    pub mean_diff: f64,
+    pub se_diff: f64,
+    pub ci_lower: f64,
+    pub ci_upper: f64,
+    pub p_value: f64,
+    pub cohens_d: f64,
+    pub balance_evidence: BetaConfidence,
+}
+
+pub struct V1SimpleRegression {
+    pub intercept: f64,
+    pub slope: f64,
+    pub r_squared: f64,
+    pub n: i64,
+}
+
+pub struct V1RegressionWorkflow {
+    pub model: V1SimpleRegression,
+    pub sample_evidence: BetaConfidence,
+}
+
+pub fn beta_confidence(successes: f64, failures: f64) -> BetaConfidence {
+    beta_new(successes + 1.0, failures + 1.0)
+}
+
+fn sample_confidence(n: i64) -> BetaConfidence {
+    if n <= 0 {
+        return beta_new(1.0, 2.0)
+    }
+
+    beta_new((n as f64) + 1.0, 1.0)
+}
+
+fn paired_sample_confidence(n_a: i64, n_b: i64) -> BetaConfidence {
+    if n_a <= 0 || n_b <= 0 {
+        return beta_new(1.0, 3.0)
+    }
+
+    let balance_gap = if n_a > n_b { n_a - n_b } else { n_b - n_a }
+    beta_new(((n_a + n_b) as f64) + 1.0, (balance_gap as f64) + 1.0)
+}
+
+pub fn describe(data: [f64; 100], n: i64) -> V1DescriptiveSummary {
+    V1DescriptiveSummary {
+        n: n,
+        mean: mean(data, n),
+        variance: variance(data, n),
+        std_dev: std_dev(data, n),
+        std_error: std_error(data, n),
+        sample_evidence: sample_confidence(n),
+    }
+}
+
+pub fn compare_groups(a: [f64; 100], n_a: i64, b: [f64; 100], n_b: i64) -> V1GroupComparison {
+    let test = t_test_independent(a, n_a, b, n_b)
+    V1GroupComparison {
+        n_a: n_a,
+        n_b: n_b,
+        mean_diff: test.mean_diff,
+        se_diff: test.se_diff,
+        ci_lower: test.ci_lower,
+        ci_upper: test.ci_upper,
+        p_value: test.p_value,
+        cohens_d: test.cohens_d,
+        balance_evidence: paired_sample_confidence(n_a, n_b),
+    }
+}
+
+pub fn regress_simple(x: [f64; 100], y: [f64; 100], n: i64) -> V1RegressionWorkflow {
+    let x_mean = mean(x, n)
+    let y_mean = mean(y, n)
+
+    var ss_xy = 0.0
+    var ss_xx = 0.0
+    var ss_yy = 0.0
+    var i: i64 = 0
+
+    while i < n {
+        let x_diff = x[i as usize] - x_mean
+        let y_diff = y[i as usize] - y_mean
+        ss_xy = ss_xy + x_diff * y_diff
+        ss_xx = ss_xx + x_diff * x_diff
+        ss_yy = ss_yy + y_diff * y_diff
+        i = i + 1
+    }
+
+    let slope = if ss_xx > 1e-10 { ss_xy / ss_xx } else { 0.0 }
+    let intercept = y_mean - slope * x_mean
+    let r_squared = if ss_xx > 1e-10 && ss_yy > 1e-10 {
+        (ss_xy * ss_xy) / (ss_xx * ss_yy)
+    } else {
+        0.0
+    }
+    let model = V1SimpleRegression {
+        intercept: intercept,
+        slope: slope,
+        r_squared: r_squared,
+        n: n,
+    }
+
+    V1RegressionWorkflow {
+        sample_evidence: sample_confidence(n),
+        model: model,
+    }
+}
+
+pub fn confidence_mean(confidence: &BetaConfidence) -> f64 {
+    beta_mean(confidence)
+}
+
+pub fn summary_evidence_mean(summary: &V1DescriptiveSummary) -> f64 {
+    beta_mean(&summary.sample_evidence)
+}
+
+pub fn comparison_evidence_mean(comparison: &V1GroupComparison) -> f64 {
+    beta_mean(&comparison.balance_evidence)
+}
+
+pub fn regression_evidence_mean(workflow: &V1RegressionWorkflow) -> f64 {
+    beta_mean(&workflow.sample_evidence)
+}

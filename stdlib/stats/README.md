@@ -6,7 +6,8 @@ Comprehensive statistics module: distributions, inference, regression (linear/lo
 
 ## Epistemic Differentiators
 
-- Assumption checks returned as [`BetaConfidence`](../epistemic/knowledge.sio) values
+- Stable v1 workflow facade in [`stats::v1`](./v1.sio)
+- Lower-level epistemic modules can return diagnostics as [`BetaConfidence`](../epistemic/knowledge.sio) values
 - [`LinearRegression::builder()`](./regression/linear.sio) with epistemic fit tracking VIF, Cook's D, leverage
 - Uncertainty propagation in bootstrap resampling and MCMC
 - [`KnowledgeLinearModel`](./regression/linear.sio) wraps results with provenance
@@ -14,19 +15,39 @@ Comprehensive statistics module: distributions, inference, regression (linear/lo
 ## Quickstart
 
 ```sio
-use stats::regression::linear::LinearRegression;
+use stats::v1::{describe, compare_groups, regress_simple, regression_evidence_mean};
 
-// Builder pattern with method chaining
-let model = LinearRegression::new()
-    .with_data(x, y, n)
-    .fit_epistemic();
+let summary = describe(values, n);
+let comparison = compare_groups(control, n_control, treated, n_treated);
+let regression = regress_simple(exposure, outcome, n);
 
-// Access provenance
-assert(model.provenance.method == "OLS");
-assert(model.provenance.n_obs == n);
+assert(summary.mean > 0.0);
+assert(comparison.ci_lower < comparison.ci_upper);
+assert(regression.model.r_squared > 0.0);
+assert(regression_evidence_mean(&regression) > 0.0);
+```
 
-// Predict with uncertainty
-let y_pred = model.value.predict(5.0);
+## Sounio-Native Workflow Surface
+
+The `stats::v1` module is the recommended public entry point for ordinary
+analysis scripts. It is intentionally workflow-shaped rather than a Stata
+command clone:
+
+| Workflow | Function | Example |
+|----------|----------|---------|
+| Descriptive summary | `describe(values, n)` | [`examples/stats/v1_descriptive_workflow.sio`](../../examples/stats/v1_descriptive_workflow.sio) |
+| Group comparison | `compare_groups(a, n_a, b, n_b)` | [`examples/stats/v1_group_comparison_workflow.sio`](../../examples/stats/v1_group_comparison_workflow.sio) |
+| Simple regression | `regress_simple(x, y, n)` | [`examples/stats/v1_regression_workflow.sio`](../../examples/stats/v1_regression_workflow.sio) |
+
+Use `BetaConfidence` helpers from `stats::v1` when a workflow needs an explicit
+sample-evidence carrier. These helpers are not assumption diagnostics; use the
+lower-level epistemic modules for assumption checks.
+
+```sio
+use stats::v1::{beta_confidence, confidence_mean};
+
+let assumptions = beta_confidence(9.0, 1.0);
+assert(confidence_mean(&assumptions) > 0.80);
 ```
 
 ## Benchmarks
@@ -41,6 +62,7 @@ See [`VALIDATION_REPORT.md`](../../benchmarks/stdlib_validation/VALIDATION_REPOR
 
 | Module | Description |
 |--------|-------------|
+| [`v1`](./v1.sio) | Stable Sounio-native workflow facade |
 | [`regression/linear`](./regression/linear.sio) | Linear regression with epistemic tracking |
 | [`regression/logistic`](./regression/logistic.sio) | Logistic regression |
 | [`regression/robust`](./regression/robust.sio) | Robust regression methods |

@@ -1,5 +1,36 @@
 # Stats Examples
 
+## 0. v1 Workflow Facade
+
+The recommended Sounio-native entry point for ordinary analysis scripts is
+`stats::v1`. It exposes workflow names instead of Stata-compatible commands.
+
+Workflow examples:
+
+- [`examples/stats/v1_descriptive_workflow.sio`](../../examples/stats/v1_descriptive_workflow.sio)
+- [`examples/stats/v1_group_comparison_workflow.sio`](../../examples/stats/v1_group_comparison_workflow.sio)
+- [`examples/stats/v1_regression_workflow.sio`](../../examples/stats/v1_regression_workflow.sio)
+
+```sio
+use stats::v1::{describe, compare_groups, regress_simple};
+
+pub fn main() with Mut, Div, Panic {
+    var a: [f64; 100] = [0.0; 100];
+    var b: [f64; 100] = [0.0; 100];
+
+    a[0] = 10.0; a[1] = 12.0; a[2] = 14.0;
+    b[0] = 12.0; b[1] = 14.0; b[2] = 16.0;
+
+    let summary = describe(a, 3);
+    let comparison = compare_groups(a, 3, b, 3);
+    let regression = regress_simple(a, b, 3);
+
+    assert(summary.n == 3);
+    assert(comparison.ci_lower < comparison.ci_upper);
+    assert(regression.model.r_squared >= 0.0);
+}
+```
+
 ## 1. Linear Regression Builder Pattern
 
 ```sio
