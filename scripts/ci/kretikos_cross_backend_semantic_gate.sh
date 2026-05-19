@@ -13,6 +13,7 @@ cd "$ROOT_DIR"
 
 OUT_DIR="${SOUNIO_KRETIKOS_CROSS_BACKEND_DIR:-$ROOT_DIR/artifacts/omega/kretikos_cross_backend_semantic}"
 REPORT_JSON="${SOUNIO_KRETIKOS_CROSS_BACKEND_JSON:-$OUT_DIR/kretikos_cross_backend_semantic.v1.json}"
+PTXAS_ARCH="${SOUNIO_KRETIKOS_CROSS_BACKEND_PTXAS_ARCH:-sm_89}"
 mkdir -p "$OUT_DIR"
 
 VEC_PTX_OUT="$OUT_DIR/vec_add.ptx"
@@ -45,8 +46,8 @@ if [[ -z "$ptxas_bin" ]]; then
   exit 1
 fi
 ptxas_version="$("$ptxas_bin" --version | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g')"
-"$ptxas_bin" "$VEC_PTX_OUT" -arch=sm_50 -o "$VEC_CUBIN_OUT"
-"$ptxas_bin" "$EPI_PTX_OUT" -arch=sm_50 -o "$EPI_CUBIN_OUT"
+"$ptxas_bin" "$VEC_PTX_OUT" -arch="$PTXAS_ARCH" -o "$VEC_CUBIN_OUT"
+"$ptxas_bin" "$EPI_PTX_OUT" -arch="$PTXAS_ARCH" -o "$EPI_CUBIN_OUT"
 
 vec_ptx_add_marker=false
 vec_metal_add_marker=false
@@ -145,6 +146,7 @@ artifacts_json="{\"epistemic_dual_output_f32\":{\"cubin\":{\"bytes\":$(size_file
   --int "spirv.valid_and_opcode_word=327877" \
   --string "schema=sounio.kretikos.cross-backend-semantic.v1" \
   --string "status=$status" \
+  --string "toolchain.ptxas_arch=$PTXAS_ARCH" \
   --string "toolchain.ptxas_path=$ptxas_bin" \
   --string "toolchain.ptxas_version=$ptxas_version" \
   > "$REPORT_JSON"
