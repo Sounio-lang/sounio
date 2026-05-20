@@ -37,10 +37,6 @@ if ! command -v cc >/dev/null 2>&1; then
     echo "kretikos_kaxi_sinkhorn16_gate: SKIPPED (no cc)"
     exit 0
 fi
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "kretikos_kaxi_sinkhorn16_gate: SKIPPED (no python3 for input generation)"
-    exit 0
-fi
 
 KRETIKOS="${KRETIKOS:-./bin/kretikos}"
 RUNNER_SRC="scripts/gpu/kaxi_ptx_runner.c"
@@ -76,15 +72,14 @@ else
 fi
 
 # 3) Generate diagonal-cost / uniform-marginal input.
-python3 -c "
-import math
-N = 16
-la = [math.log2(1.0/N)] * N
-lb = [math.log2(1.0/N)] * N
-K = [0.0 if i==j else -1.0 for i in range(N) for j in range(N)]
-all_vals = la + lb + K + [0.0]*N + [0.0]*N
-print(','.join(f'{v}' for v in all_vals))
-" > "$INPUT"
+# la=lb=log2(1/16)=-4.0 exactly (N=16 is a power of 2); K=0 on diag/-1 off; 32 trailing zeros.
+awk 'BEGIN {
+  sep=""
+  for (i=0;i<32;i++) { printf "%s-4.0",sep; sep="," }
+  for (i=0;i<16;i++) for (j=0;j<16;j++) { printf ",%s",(i==j?"0.0":"-1.0") }
+  for (i=0;i<32;i++) { printf ",0.0" }
+  printf "\n"
+}' > "$INPUT"
 
 # 4) Single launch, parse u_out (mem[288..303]) and v_out (mem[304..319]).
 LAUNCH_OUT="$(${RUNNER} ${PTX} --threads 1 --mem-words 320 --init-mem "$(cat ${INPUT})" --type f32 2>&1 | grep '^MEM:' || true)"
