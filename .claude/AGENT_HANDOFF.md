@@ -173,3 +173,63 @@ Claude's preferred role in the parallel flow:
 
 When Claude needs to hand off implementation, write the exact target files,
 current branch, relevant memory lane files, and required validation commands.
+
+---
+
+## Collision Resolution — 2026-05-20 (post-cluster-maintenance lane recovery)
+
+Context: cluster maintenance + new instructions caused several Claude lanes to
+drop and resume in a degraded state ("zuadas"). Two branch collisions were
+identified and resolved. This section is the current truth; the 6-lane matrix
+above (dated 05-10) is STALE — do not treat it as live.
+
+### Collision 1 — GPU SPIR-V/Vulkan: `kretikos/top-tier-runtime` vs `sounio-pure/python-extermination-phase7`
+
+Both branch from merge-base `982963e09`. Both create
+`self-hosted/gpu/kretikos_emit_spirv.sio`,
+`scripts/gpu/kretikos_spirv_vulkan_storage_vec_add.c`, and
+`scripts/ci/kretikos_spirv_vulkan_storage_semantic_baseline_gate.sh`
+with DIVERGENT content (`kretikos_emit_spirv.sio` differs 356/323 lines).
+
+Evidence (reflog, not file-count):
+- `kretikos/top-tier-runtime`: clean lineage, no reset, comprehensive superset
+  (+27 commits, 93 files: SPIR-V emitter + Vulkan dispatch + cross-backend
+  CUDA/Metal + MultiPL-E + audit). Last commit 05-19 20:07. No upstream, not
+  checked out in any worktree.
+- `sounio-pure/python-extermination-phase7`: reflog shows
+  `reset: moving to origin/main` then cherry-picks, originally
+  `Created from HEAD` at `50e0ebfe5` (a kretikos commit). This is the
+  POST-CRASH PARTIAL REBUILD — it re-did a SPIR-V subset divergently 6h later
+  (05-20 01:58). Pushed to origin; checked out at /workspace/sounio.
+
+RESOLUTION:
+- **`kretikos/top-tier-runtime` is the canonical GPU lane** (stable superset).
+- phase7's 3 GPU commits (`a576a4ac0`, `63b9bda7e`, `dde3a8ac4`) are a
+  post-crash divergent reimplementation — DO NOT merge them to main; they are
+  superseded by kretikos. NOT deleted/force-pushed (branch is pushed to origin;
+  rewriting would disrupt origin trackers per feedback_workspace_branch_flips).
+- phase7's one UNIQUE non-GPU commit `e869515c4` (heredoc-kill in
+  sinkhorn16 gate, disjoint from the GPU conflict) is PRESERVED on new branch
+  **`chore/sinkhorn16-heredoc-kill`** (off main, 1 clean commit) — land as a
+  tiny standalone PR.
+- PENDING VERIFICATION: the deciding gate
+  `scripts/ci/kretikos_spirv_vulkan_storage_vec_add_gate.sh` could NOT be run
+  here — `spirv-dis` is missing in this environment (cluster maintenance).
+  Re-run on a spirv-tools-equipped node to confirm kretikos's gate passes
+  before retiring phase7's GPU work permanently. Canonical call is reflog-based,
+  not execution-based.
+
+### Collision 2 — Park-Miller/CUDA duplicate: `claude-2/wip-2026-05-19` vs `sounio-pure/r2-1-park-miller`
+
+BYTE-IDENTICAL: same 11 SHAs, empty diff, shared tip `10d69fc4`
+(Merge PR #165 from `sounio-pure/r2-1-park-miller`).
+
+RESOLUTION:
+- **PR #165 is the single canonical landing path** for this 11-commit
+  Park-Miller RNG + epistemic-CUDA-runtime work. Do NOT double-merge.
+- `sounio-pure/r2-1-park-miller` is canonical (PR source).
+- `claude-2/wip-2026-05-19` is a redundant alias at the identical SHA, checked
+  out LIVE at /workspace/sounio-claude-2 (tracks origin/main). NOT deleted
+  (checked out by a live agent; git would refuse, and removal would disrupt
+  that agent). It will retire naturally when that agent advances; until then it
+  carries no unique commits.
