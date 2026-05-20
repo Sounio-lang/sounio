@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <ctype.h>
 
 #include <vulkan/vulkan.h>
 
@@ -83,6 +84,54 @@ static void destroy_host_buffer(VkDevice device, HostBuffer *buffer) {
     }
 }
 
+static int looks_like_binary_spv(const unsigned char *bytes, size_t n) {
+    return n >= 4 && bytes[0] == 0x03 && bytes[1] == 0x02 && bytes[2] == 0x23 && bytes[3] == 0x07;
+}
+
+static uint32_t *parse_decimal_spv_words(const char *path, const char *text, size_t n, size_t *bytes_out) {
+    size_t count = 0;
+    const char *p = text;
+    const char *end = text + n;
+    while (p < end) {
+        while (p < end && isspace((unsigned char)*p)) p++;
+        if (p >= end) break;
+        char *next = NULL;
+        strtoul(p, &next, 10);
+        if (next == p) {
+            fprintf(stderr, "FAIL: invalid decimal SPIR-V word in %s\n", path);
+            exit(1);
+        }
+        count++;
+        p = next;
+    }
+    if (count == 0) {
+        fprintf(stderr, "FAIL: no decimal SPIR-V words in %s\n", path);
+        exit(1);
+    }
+
+    uint32_t *words = (uint32_t *)malloc(count * sizeof(uint32_t));
+    if (!words) {
+        fprintf(stderr, "FAIL: malloc decimal SPIR-V\n");
+        exit(1);
+    }
+    p = text;
+    size_t i = 0;
+    while (p < end && i < count) {
+        while (p < end && isspace((unsigned char)*p)) p++;
+        if (p >= end) break;
+        char *next = NULL;
+        unsigned long word = strtoul(p, &next, 10);
+        words[i++] = (uint32_t)word;
+        p = next;
+    }
+    if (words[0] != 0x07230203u) {
+        fprintf(stderr, "FAIL: decimal SPIR-V magic word missing in %s\n", path);
+        exit(1);
+    }
+    *bytes_out = count * sizeof(uint32_t);
+    return words;
+}
+
 static uint32_t *read_spv(const char *path, size_t *bytes_out) {
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -92,21 +141,33 @@ static uint32_t *read_spv(const char *path, size_t *bytes_out) {
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     rewind(f);
-    if (n <= 0 || (n % 4) != 0) {
+    if (n <= 0) {
         fprintf(stderr, "FAIL: invalid SPIR-V byte size %ld\n", n);
         exit(1);
     }
-    uint32_t *words = (uint32_t *)malloc((size_t)n);
-    if (!words) {
-        fprintf(stderr, "FAIL: malloc SPIR-V\n");
+    unsigned char *raw = (unsigned char *)malloc((size_t)n + 1);
+    if (!raw) {
+        fprintf(stderr, "FAIL: malloc SPIR-V input\n");
         exit(1);
     }
-    if (fread(words, 1, (size_t)n, f) != (size_t)n) {
+    if (fread(raw, 1, (size_t)n, f) != (size_t)n) {
         fprintf(stderr, "FAIL: fread SPIR-V\n");
         exit(1);
     }
     fclose(f);
-    *bytes_out = (size_t)n;
+    raw[n] = 0;
+
+    if (looks_like_binary_spv(raw, (size_t)n)) {
+        if ((n % 4) != 0) {
+            fprintf(stderr, "FAIL: invalid binary SPIR-V byte size %ld\n", n);
+            exit(1);
+        }
+        *bytes_out = (size_t)n;
+        return (uint32_t *)raw;
+    }
+
+    uint32_t *words = parse_decimal_spv_words(path, (const char *)raw, (size_t)n, bytes_out);
+    free(raw);
     return words;
 }
 
