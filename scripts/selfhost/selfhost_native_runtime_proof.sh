@@ -202,15 +202,6 @@ while IFS=$'\t' read -r case_id program_path expected_exit expected_stdout_path;
     continue
   fi
 
-  if [ "$SOUNIO_NATIVE_HOST_OS" = "Darwin" ] &&
-     { [ "$SOUNIO_NATIVE_HOST_MACHINE" = "arm64" ] || [ "$SOUNIO_NATIVE_HOST_MACHINE" = "aarch64" ]; } &&
-     { [ "$case_id" = "abi_nested_array_local_only_42" ] || [ "$case_id" = "abi_return_nested_array_42" ]; }; then
-    skip "$case_id" "macOS arm64 follow-up: nested inline-struct field store implemented in x86_64 backend (compile_nested_field_store_x86); aarch64 backend (compile_stmt_a64) handler still pending; Linux x86_64 coverage active"
-    printf '%s\t%s\t-\t-\t%s\t-\tmacos_arm64_a64_pending\n' \
-      "$case_id" "$program_path" "$expected_exit" >>"$RESULTS_FILE"
-    continue
-  fi
-
   if grep -Eq '^//@[[:space:]]*ignore\b' "$program_path"; then
     skip "$case_id" "ignore annotation"
     printf '%s\t%s\t-\t-\t%s\t-\tignore_annotation\n' \

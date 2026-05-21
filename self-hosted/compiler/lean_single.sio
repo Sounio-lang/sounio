@@ -17557,6 +17557,140 @@ fn compile_nested_field_store_x86() with IO, Mut, Panic, Div {
     }
 }
 
+// AArch64 counterpart of compile_nested_field_store_x86. Same inline field-chain
+// offset accumulation; only the leaf store emission differs (a64 encodings).
+fn compile_nested_field_store_a64() with IO, Mut, Panic, Div {
+    let root_tok = EP
+    let ns = TS[EP as usize]
+    let ne = TE[EP as usize]
+
+    var cur_si: i64 = -1
+    let vi = var_find_idx(ns, ne)
+    if vi >= 0 && type_is_struct_like(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize]) {
+        cur_si = st_find(VAR_TY_HASH[vi as usize])
+    }
+    if cur_si < 0 {
+        let gi0 = gl_find(ns, ne)
+        if gi0 >= 0 && type_is_struct_like(GL_TY[gi0 as usize], GL_TY_HASH[gi0 as usize]) {
+            cur_si = st_find(GL_TY_HASH[gi0 as usize])
+        }
+    }
+    if cur_si < 0 {
+        tc_error(root_tok, "nested field store requires struct base")
+        return
+    }
+    EP = EP + 1  // skip root name
+
+    var total_off: i64 = 0
+    var leaf_ty: i64 = 0
+    var leaf_hash: i64 = 0
+    var leaf_tok: i64 = -1
+    var bad: bool = false
+    var done: bool = false
+    while done == false && TK[EP as usize] == 50 {
+        EP = EP + 1  // skip '.'
+        leaf_tok = EP
+        let fns = TS[EP as usize]
+        let fne = TE[EP as usize]
+        let fh = gl_name_hash(fns, fne)
+        EP = EP + 1  // skip field name
+        ST_QUERY_NS = fns
+        ST_QUERY_NE = fne
+        let off = st_field_offset(cur_si, fh)
+        let fty = st_field_ty(cur_si, fh)
+        let fhash = st_field_hash(cur_si, fh)
+        ST_QUERY_NS = -1
+        ST_QUERY_NE = -1
+        if off < 0 {
+            tc_error(leaf_tok, "unknown field access")
+            bad = true
+            done = true
+        } else {
+            total_off = total_off + off
+            let nxt = TK[EP as usize]
+            if nxt == 16 || nxt == 41 {
+                leaf_ty = fty
+                leaf_hash = fhash
+                done = true
+            } else {
+                let nsi = st_find(fhash)
+                if nsi < 0 {
+                    tc_error(leaf_tok, "nested field store requires inline struct field")
+                    bad = true
+                    done = true
+                } else {
+                    cur_si = nsi
+                }
+            }
+        }
+    }
+    if bad { return }
+
+    if TK[EP as usize] == 41 {
+        if leaf_ty != 8 {
+            tc_error(leaf_tok, "indexed field store requires array field")
+            return
+        }
+        let esiz = arr_hash_esiz(leaf_hash)
+        EP = EP + 1  // skip '['
+        compile_or_a64()  // index → x0
+        if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // 'as usize'
+        if TK[EP as usize] == 42 { EP = EP + 1 }  // ']'
+        if TK[EP as usize] == 16 { EP = EP + 1 }  // '='
+        emit_push_a64()  // push index
+        compile_or_a64()  // RHS → x0
+        let rhs_ty = EXPR_TY
+        let rhs_ty_hash = EXPR_TY_HASH
+        if ty_eq(arr_hash_elem_ty(leaf_hash), arr_hash_elem_hash(leaf_hash), rhs_ty, rhs_ty_hash) == false {
+            tc_error_hard(EP - 1, "assignment type mismatch")
+        }
+        materialize_aggregate_array_element_a64(leaf_hash)
+        em32(0xAA0003EA)  // mov x10, x0 (RHS)
+        emit_pop_x1_a64()  // pop index → x1
+        let slot = var_find(ns, ne)
+        if slot >= 0 { emit_load_var_a64(slot) }
+        else {
+            let gi = gl_find(ns, ne)
+            if gi >= 0 { emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+            else { tc_undefined_var(root_tok); em32(0xD2800000) }
+        }
+        if total_off != 0 {
+            emit_imm64_reg_a64(11, total_off)
+            em32(0x8B0B0000)  // add x0, x0, x11
+        }
+        if esiz == 8 { em32(0xF821780A) }  // str x10, [x0, x1, lsl #3]
+        else { em32(0x3821680A) }          // strb w10, [x0, x1]
+        return
+    }
+
+    if TK[EP as usize] == 16 { EP = EP + 1 }  // skip '='
+    compile_or_a64()  // RHS → x0
+    let rhs_ty2 = EXPR_TY
+    let rhs_ty_hash2 = EXPR_TY_HASH
+    if leaf_ty != 0 && ty_eq(leaf_ty, leaf_hash, rhs_ty2, rhs_ty_hash2) == false {
+        tc_error_hard(EP - 1, "assignment type mismatch")
+    }
+    emit_push_a64()  // push value/src ptr
+    let slot2 = var_find(ns, ne)
+    if slot2 >= 0 { emit_load_var_a64(slot2) }
+    else {
+        let gi2 = gl_find(ns, ne)
+        if gi2 >= 0 { emit_image_addr_a64(GL_BSS_BASE + GL[(gi2 * 4 + 1) as usize]) }
+        else { tc_undefined_var(root_tok); em32(0xD2800000) }
+    }
+    if total_off != 0 {
+        emit_imm64_reg_a64(11, total_off)
+        em32(0x8B0B0000)  // add x0, x0, x11
+    }
+    emit_pop_x1_a64()  // pop value/src ptr → x1
+    if leaf_ty == 8 || type_is_option_inline(leaf_ty, leaf_hash) || leaf_ty == 6 || knowledge_hash_is(leaf_hash) {
+        em32(0xAA0103EA)  // mov x10, x1
+        emit_copy_agg_to_ptr_a64(leaf_ty, leaf_hash)
+    } else {
+        em32(0xF9000001)  // str x1, [x0]
+    }
+}
+
 // ─── Statement compiler ───
 fn compile_stmt() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
@@ -29345,6 +29479,15 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         compile_field_array_store_a64()
+        return
+    }
+
+    // x.field.field(.field)*( [idx] )? = expr (nested inline-struct field store)
+    if stmt_is_nested_field_store(EP) {
+        if current_fn_allows_mutation() == false {
+            tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
+        }
+        compile_nested_field_store_a64()
         return
     }
 
