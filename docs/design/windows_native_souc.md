@@ -224,8 +224,22 @@ Real programs are unaffected: `souc.exe` exits **0** on a successful compile and
 3. ~~**Re-test `souc.exe` under wine**~~ **DONE** — reads source/output path args.
 4. ~~**Compile a real program with souc.exe under wine**~~ **DONE** — milestone met:
    `souc.exe prog.sio prog.elf` emits a working ELF (`return 7` → exit 7).
-5. **Tier 2 cleanup** — audit `emit_exit` (encode.sio, hardcoded Linux syscall
-   60) on Windows fallback paths; signal_handler.sio is POSIX-only (panic path).
+5. **Tier 2 cleanup** — process-exit primitives.
+   - ~~`emit_assert_fail` (active compiler, `lean_single.sio`) hardcoded Linux
+     `exit(1)` syscall 60 for every target~~ **DONE** — now target-dispatched:
+     Windows aborts via `ExitProcess(1)` (aligns rsp + reserves Win64 shadow
+     space, then `call [rip+disp32]` to IAT slot 0), macOS via `0x2000001`,
+     Linux via syscall 60. `PE_EXIT_CALL_OFF` (single site) became
+     `PE_EXIT_CALL_OFFS[]` since the abort adds ExitProcess call sites beyond the
+     entry trampoline; `write_pe` patches all of them. The `assert` keyword's
+     skip jump was converted from a hardcoded `jnz +12` to a backpatched rel8 so
+     it skips the now-variable-size abort. Verified under wine: `assert(false)`
+     and `panic()` → ERRORLEVEL 1, `assert(true)` falls through. Linux emitted
+     bytes are unchanged (byte-identical ELF vs upstream); self-host fixed point
+     holds.
+   - Still open: lean_single `print`/file I/O use raw Linux syscalls (work under
+     wine-on-Linux, not real Windows); `signal_handler.sio` is POSIX-only (panic
+     path); `encode.sio` `emit_exit` in the unused modular path.
 
 ## Minimal repro for the root cause
 
