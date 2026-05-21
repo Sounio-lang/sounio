@@ -75,8 +75,11 @@ var ONT_PROP_NHASH: [i64; 256] = [0; 256]  // property name hash
 var ONT_PROP_BOUND: [i64; 256] = [0; 256]  // signed bound ×1000 (neg stored as negative)
 var ONT_PROP_DIR: [i64; 256] = [0; 256]    // 0 = >=, 1 = <=
 var ONT_PROP_CNT: i64 = 0
-// PE: offset within CD[] of the ExitProcess call [rip+disp32]'s disp32 field
-var PE_EXIT_CALL_OFF: i64 = -1
+// PE: offsets within CD[] of every ExitProcess call [rip+disp32]'s disp32 field.
+// More than one site exists: the entry trampoline plus each emit_assert_fail abort.
+// write_pe patches every recorded offset to IAT slot 0 (ExitProcess).
+var PE_EXIT_CALL_OFFS: [i64; 4096] = [0; 4096]
+var PE_EXIT_CALL_N: i64 = 0
 // PE: offset within CD[] of the GetCommandLineA call [rip+disp32]'s disp32 field
 var PE_GETCMDLINE_CALL_OFF: i64 = -1
 
@@ -7119,10 +7122,41 @@ fn emit_print_nl() with Mut {
     em(0x48); em(0x83); em(0xc4); em(8)
 }
 
+// PE (Windows): emit `call [rip+disp32]` targeting ExitProcess and record the
+// disp32 field offset so write_pe can patch it to IAT slot 0. Used by both the
+// entry trampoline and emit_assert_fail's abort path (multiple sites per image).
+fn emit_pe_exitprocess_call() with Mut {
+    em(0xFF); em(0x15)
+    if PE_EXIT_CALL_N < 4096 {
+        PE_EXIT_CALL_OFFS[PE_EXIT_CALL_N as usize] = CL
+    }
+    PE_EXIT_CALL_N = PE_EXIT_CALL_N + 1  // always count so write_pe can detect overflow
+    em32(0)  // placeholder disp32, patched in write_pe
+}
+
+// Abort with exit code 1 (assertion / bounds / unreachable). Target-dispatched so
+// the abort uses the platform's real process-exit primitive — ExitProcess on
+// Windows (raw Linux syscall 60 would not terminate cleanly on a real PE host).
 fn emit_assert_fail() with Mut {
-    em(0xbf); em32(1)
-    em(0xb8); em32(60)
-    em(0x0f); em(0x05)
+    if TARGET_OS == 3 {
+        // Windows: ExitProcess(1). Align rsp + reserve Win64 shadow space first;
+        // we never return (process terminates), so clobbering rsp is fine.
+        em(0x48); em(0x83); em(0xe4); em(0xf0)  // and rsp, -16
+        em(0x48); em(0x83); em(0xec); em(0x20)  // sub rsp, 32
+        em(0xb9); em32(1)                        // mov ecx, 1  (Win64 arg0 = exit code)
+        emit_pe_exitprocess_call()               // call [rip+disp32] → ExitProcess
+        em(0x0F); em(0x0B)                        // ud2 (unreachable)
+    } else if TARGET_OS == 2 {
+        // macOS: exit(1) via BSD syscall 0x2000001
+        em(0xbf); em32(1)                        // mov edi, 1
+        em(0x48); em(0xb8); em64(0x2000001)      // mov rax, 0x2000001
+        em(0x0f); em(0x05)                        // syscall
+    } else {
+        // Linux: exit(1) via syscall 60
+        em(0xbf); em32(1)                        // mov edi, 1
+        em(0xb8); em32(60)                       // mov eax, 60
+        em(0x0f); em(0x05)                        // syscall
+    }
 }
 
 fn emit_sqrt_builtin_x86() with Mut {
@@ -10315,9 +10349,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 compile_or()
                 if EXPR_TY != 0 && EXPR_TY != 4 { tc_error_hard(name_tok, "assert requires bool condition") }
-                em(0x48); em(0x85); em(0xc0)
-                em(0x75); em(12)
-                emit_assert_fail()
+                em(0x48); em(0x85); em(0xc0)              // test rax, rax
+                em(0x75); let assert_ok = CL; em(0)      // jnz rel8 → skip abort (backpatched)
+                emit_assert_fail()                       // abort size is target-dependent
+                CD[assert_ok as usize] = (CL - assert_ok - 1) as i8  // skip the whole abort
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 em(0x31); em(0xc0)
                 EXPR_IS_F64 = 0
@@ -22387,6 +22422,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     R15_GATE_COUNT = 0
     R15_SIDE_TABLE_BSS_OFF = 0
     ARGV_TABLE_BSS_OFF = 0
+    PE_EXIT_CALL_N = 0   // reset recorded ExitProcess call sites (trampoline + aborts)
     // Note: do NOT reset TYPECHECK_FAILED here — lexer-phase errors must persist
     LIMIT_ERROR_KIND = 0
     var p: i64 = 0
@@ -24180,9 +24216,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         em32(wrel)
         // mov ecx, eax — exit code to RCX (Win64 first param)
         em(0x89); em(0xC1)
-        // call [rip+disp32] — ExitProcess via IAT (disp32 patched by write_pe)
-        PE_EXIT_CALL_OFF = CL + 2   // remember offset of disp32 for patching
-        em(0xFF); em(0x15); em32(0)  // placeholder disp32
+        // call [rip+disp32] — ExitProcess via IAT (disp32 recorded + patched by write_pe)
+        emit_pe_exitprocess_call()
         // ud2 (should never reach)
         em(0x0F); em(0x0B)
     } else if TARGET_OS == 2 {
@@ -24529,15 +24564,23 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
     let bss_vsize = GL_BSS_SIZE
     if bss_vsize < 4096 { let bss_vsize_min = 4096 }  // minimum 1 page
 
-    // Patch ExitProcess IAT displacement in trampoline code
+    // Patch every ExitProcess IAT displacement (trampoline + each assert abort).
     // call [rip+disp32]: disp32 = IAT_slot_RVA - (text_RVA + instruction_end_offset)
-    if PE_EXIT_CALL_OFF >= 0 {
-        let call_end = PE_EXIT_CALL_OFF + 4
+    if PE_EXIT_CALL_N > 4096 {
+        print("error: too many ExitProcess call sites ("); print_int(PE_EXIT_CALL_N)
+        print(" > 4096) — bump PE_EXIT_CALL_OFFS\n")
+        return 1
+    }
+    var ei: i64 = 0
+    while ei < PE_EXIT_CALL_N {
+        let eoff = PE_EXIT_CALL_OFFS[ei as usize]
+        let call_end = eoff + 4
         let disp = (idata_rva + iat_off) - (text_rva + call_end)  // IAT slot 0 = ExitProcess
-        CD[PE_EXIT_CALL_OFF as usize] = (disp & 0xFF) as i8
-        CD[(PE_EXIT_CALL_OFF + 1) as usize] = ((disp >> 8) & 0xFF) as i8
-        CD[(PE_EXIT_CALL_OFF + 2) as usize] = ((disp >> 16) & 0xFF) as i8
-        CD[(PE_EXIT_CALL_OFF + 3) as usize] = ((disp >> 24) & 0xFF) as i8
+        CD[eoff as usize] = (disp & 0xFF) as i8
+        CD[(eoff + 1) as usize] = ((disp >> 8) & 0xFF) as i8
+        CD[(eoff + 2) as usize] = ((disp >> 16) & 0xFF) as i8
+        CD[(eoff + 3) as usize] = ((disp >> 24) & 0xFF) as i8
+        ei = ei + 1
     }
 
     // Patch GetCommandLineA IAT displacement in the argv-init trampoline
