@@ -25567,6 +25567,30 @@ fn emit_str_len_a64() with Mut {
     em32(0x14000000 | (brel & 0x3FFFFFF))
 }
 
+// str_eq: x1 = ptr a, x0 = ptr b. Byte-compares to NUL; result in x0 (1 eq, 0 ne).
+fn emit_str_eq_regs_a64() with Mut, Panic {
+    let loop_off = CL
+    em32(0x39400022)   // ldrb w2, [x1]   (*a)
+    em32(0x39400003)   // ldrb w3, [x0]   (*b)
+    em32(0x6B03005F)   // cmp w2, w3
+    let ne_patch = CL
+    em32(0x54000001)   // b.ne not_equal (patched)
+    em32(0x7100005F)   // cmp w2, #0  (both bytes equal; NUL ⇒ strings equal)
+    let eq_patch = CL
+    em32(0x54000000)   // b.eq equal (patched)
+    em32(0x91000421)   // add x1, x1, #1
+    em32(0x91000400)   // add x0, x0, #1
+    let br = CL
+    em32(0x14000000 | (((loop_off - br) / 4) & 0x3FFFFFF))  // b loop
+    patch_branch_a64(ne_patch, CL)
+    em32(0xD2800000)   // not_equal: movz x0, #0
+    let done_patch = CL
+    em32(0x14000000)   // b done (patched)
+    patch_branch_a64(eq_patch, CL)
+    em32(0xD2800020)   // equal: movz x0, #1
+    patch_branch_a64(done_patch, CL)
+}
+
 // ─── ARM64 f64 binary op helper ───
 fn emit_f64_binop_a64(opcode: i64) with Mut {
     em32(0x9E670020)  // fmov d0, x1 (LHS)
@@ -27609,6 +27633,33 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EP = EP + 1; compile_or_a64()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_str_len_a64(); EXPR_IS_F64 = 0; EXPR_TY = 1; EXPR_TY_HASH = 0; return
+            }
+            if src_match(ns, ne - ns, "str_eq") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_eq requires string arguments") }
+                    emit_push_a64()
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_eq requires string arguments") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_pop_x1_a64()
+                    emit_str_eq_regs_a64()
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0; EXPR_TY = 4; EXPR_TY_HASH = 0; return
             }
             if src_match(ns, ne - ns, "slice_len") {
                 EP = EP + 1; compile_or_a64()
