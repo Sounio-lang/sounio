@@ -77,6 +77,8 @@ var ONT_PROP_DIR: [i64; 256] = [0; 256]    // 0 = >=, 1 = <=
 var ONT_PROP_CNT: i64 = 0
 // PE: offset within CD[] of the ExitProcess call [rip+disp32]'s disp32 field
 var PE_EXIT_CALL_OFF: i64 = -1
+// PE: offset within CD[] of the GetCommandLineA call [rip+disp32]'s disp32 field
+var PE_GETCMDLINE_CALL_OFF: i64 = -1
 
 // Shared string scratch buffer: used both as packed qwords and as decoded bytes.
 var SQW: [i64; 256] = [0; 256]
@@ -801,6 +803,8 @@ var EXT_ARR_ELEM_HASH: [i64; 4096] = [0; 4096]
 var EXT_ARR_COUNT: i64 = 0
 var GL_BSS_BASE: i64 = 0
 var RET_AGG_BSS_OFF: i64 = 0
+// PE (Windows): BSS offset of the argv pointer table built from GetCommandLineA
+var ARGV_TABLE_BSS_OFF: i64 = 0
 var LIMIT_ERROR_KIND: i64 = 0
 var LAST_LOCAL_BSS_SPILL: i64 = 0
 var LAST_LOCAL_BSS_ADDR: i64 = 0
@@ -7590,6 +7594,141 @@ fn emit_get_arg() with Mut {
     em(0x48); em(0xb8); em64(argv_addr)
     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax] = argv base
     em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
+}
+
+// PE (Windows) entry: populate argc/argv from GetCommandLineA so the self-hosted
+// CLI can read its <source>/<output> path arguments. The Windows kernel hands the
+// process no argc/argv on the stack (unlike Linux/macOS), so we must ask kernel32.
+//
+// Strategy: call GetCommandLineA -> ANSI command line (program name + args, NUL
+// terminated). Skip the program-name token (quote-aware), then split the remaining
+// args on spaces, recording each token's start pointer into ARGV_TABLE and
+// NUL-terminating it in place. argc = number of real args (program name excluded),
+// argv = &ARGV_TABLE[0] — matching get_arg/arg_count, which expect get_arg(0) to be
+// the first real argument (same convention as the Linux/macOS trampolines).
+//
+// Limitation: in-arg quoting splits a "a b" token at the inner quotes only; embedded
+// escaped quotes are not handled. Compiler CLI paths are space-free in practice.
+// All control-flow uses rel32 jumps backpatched via em32_at to avoid rel8 range bugs.
+fn emit_pe_argv_init_x86() with Mut, Panic, Div {
+    let argc_addr = GL_BSS_BASE - 16
+    let argv_addr = GL_BSS_BASE - 8
+    let table_addr = GL_BSS_BASE + ARGV_TABLE_BSS_OFF
+
+    // rax = GetCommandLineA()  — call [rip+disp32], disp patched in write_pe to IAT slot 1
+    em(0xFF); em(0x15)
+    PE_GETCMDLINE_CALL_OFF = CL
+    em32(0)
+
+    em(0x48); em(0x89); em(0xc6)              // mov rsi, rax  (cursor)
+    em(0x31); em(0xdb)                          // xor ebx, ebx  (argc = 0)
+    em(0x48); em(0xbf); em64(table_addr)        // mov rdi, table_addr (argv base)
+
+    // .skip0: skip leading spaces before the program name
+    let l_skip0 = CL
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x3c); em(0x20)                          // cmp al, ' '
+    em(0x0f); em(0x85); let p_pn = CL; em32(0) // jne .pn
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_skip0 - (CL + 4))         // jmp .skip0
+
+    // .pn: program-name token (quote-aware), consumed but not recorded
+    let l_pn = CL
+    em32_at(p_pn, l_pn - (p_pn + 4))
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x3c); em(0x22)                          // cmp al, '"'
+    em(0x0f); em(0x85); let p_pn_plain = CL; em32(0) // jne .pn_plain
+    // quoted program name: skip opening quote, scan to closing quote
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    let l_pn_q = CL
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x84); em(0xc0)                          // test al, al
+    em(0x0f); em(0x84); let p_pnq_done = CL; em32(0) // je .done
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0x3c); em(0x22)                          // cmp al, '"'
+    em(0x0f); em(0x85); em32(l_pn_q - (CL + 4)) // jne .pn_q
+    em(0xe9); let p_pnq_args = CL; em32(0)     // jmp .args
+    // .pn_plain: scan to first space or NUL
+    let l_pn_plain = CL
+    em32_at(p_pn_plain, l_pn_plain - (p_pn_plain + 4))
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x84); em(0xc0)                          // test al, al
+    em(0x0f); em(0x84); let p_pnp_done = CL; em32(0) // je .done
+    em(0x3c); em(0x20)                          // cmp al, ' '
+    em(0x0f); em(0x84); let p_pnp_args = CL; em32(0) // je .args
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_pn_plain - (CL + 4))      // jmp .pn_plain
+
+    // .args: loop over remaining argument tokens
+    let l_args = CL
+    em32_at(p_pnq_args, l_args - (p_pnq_args + 4))
+    em32_at(p_pnp_args, l_args - (p_pnp_args + 4))
+    // skip inter-arg spaces
+    let l_skipsp = CL
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x3c); em(0x20)                          // cmp al, ' '
+    em(0x0f); em(0x85); let p_check = CL; em32(0) // jne .arg_check
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_skipsp - (CL + 4))        // jmp .skipsp
+    // .arg_check
+    let l_check = CL
+    em32_at(p_check, l_check - (p_check + 4))
+    em(0x84); em(0xc0)                          // test al, al
+    em(0x0f); em(0x84); let p_chk_done = CL; em32(0) // je .done (end of line)
+    em(0x48); em(0x83); em(0xfb); em(0x3f)     // cmp rbx, 63  (table cap)
+    em(0x0f); em(0x8d); let p_cap_done = CL; em32(0) // jge .done
+    em(0x3c); em(0x22)                          // cmp al, '"'
+    em(0x0f); em(0x85); let p_plain = CL; em32(0) // jne .arg_plain
+    // quoted arg: record start after opening quote, scan to closing quote
+    em(0x48); em(0xff); em(0xc6)               // inc rsi (skip ")
+    em(0x48); em(0x89); em(0x34); em(0xdf)     // mov [rdi + rbx*8], rsi
+    em(0x48); em(0xff); em(0xc3)               // inc rbx
+    let l_arg_q = CL
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x84); em(0xc0)                          // test al, al
+    em(0x0f); em(0x84); let p_argq_done = CL; em32(0) // je .done (unterminated)
+    em(0x3c); em(0x22)                          // cmp al, '"'
+    em(0x0f); em(0x84); let p_argq_end = CL; em32(0) // je .arg_qend
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_arg_q - (CL + 4))         // jmp .arg_q
+    // .arg_qend: terminate at the closing quote, advance, loop
+    let l_arg_qend = CL
+    em32_at(p_argq_end, l_arg_qend - (p_argq_end + 4))
+    em(0xc6); em(0x06); em(0x00)               // mov byte [rsi], 0
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_args - (CL + 4))          // jmp .args
+    // .arg_plain: record start, scan to space or NUL
+    let l_plain = CL
+    em32_at(p_plain, l_plain - (p_plain + 4))
+    em(0x48); em(0x89); em(0x34); em(0xdf)     // mov [rdi + rbx*8], rsi
+    em(0x48); em(0xff); em(0xc3)               // inc rbx
+    let l_arg_p2 = CL
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x84); em(0xc0)                          // test al, al
+    em(0x0f); em(0x84); let p_argp2_done = CL; em32(0) // je .done
+    em(0x3c); em(0x20)                          // cmp al, ' '
+    em(0x0f); em(0x84); let p_argp2_sp = CL; em32(0) // je .arg_psp
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_arg_p2 - (CL + 4))        // jmp .arg_p2
+    // .arg_psp: terminate token, advance, loop
+    let l_arg_psp = CL
+    em32_at(p_argp2_sp, l_arg_psp - (p_argp2_sp + 4))
+    em(0xc6); em(0x06); em(0x00)               // mov byte [rsi], 0
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_args - (CL + 4))          // jmp .args
+
+    // .done: store argc (rbx) and argv (rdi = &table[0])
+    let l_done = CL
+    em32_at(p_pnq_done, l_done - (p_pnq_done + 4))
+    em32_at(p_pnp_done, l_done - (p_pnp_done + 4))
+    em32_at(p_chk_done, l_done - (p_chk_done + 4))
+    em32_at(p_cap_done, l_done - (p_cap_done + 4))
+    em32_at(p_argq_done, l_done - (p_argq_done + 4))
+    em32_at(p_argp2_done, l_done - (p_argp2_done + 4))
+    em(0x48); em(0x89); em(0xd8)               // mov rax, rbx
+    emit_store_rax_to_abs_qword_x86(argc_addr)
+    em(0x48); em(0x89); em(0xf8)               // mov rax, rdi
+    emit_store_rax_to_abs_qword_x86(argv_addr)
 }
 
 fn emit_str_len() with Mut {
@@ -22247,6 +22386,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     GPU_EMU_THREAD_ID_BSS_OFF = 0
     R15_GATE_COUNT = 0
     R15_SIDE_TABLE_BSS_OFF = 0
+    ARGV_TABLE_BSS_OFF = 0
     // Note: do NOT reset TYPECHECK_FAILED here — lexer-phase errors must persist
     LIMIT_ERROR_KIND = 0
     var p: i64 = 0
@@ -22844,6 +22984,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     if CLI_R15_MONITOR != 0 {
         R15_SIDE_TABLE_BSS_OFF = bss_alloc_aligned(16384 * 8)
     }
+
+    // PE (Windows) argv pointer table: up to 64 args parsed from GetCommandLineA.
+    // Always reserved (cheap, 512 bytes); only populated on the Windows trampoline.
+    ARGV_TABLE_BSS_OFF = bss_alloc_aligned(64 * 8)
 
     // BSS layout: [argc(8)] [argv(8)] [globals...] [aggregate return scratch]
     RET_AGG_BSS_OFF = GL_BSS_SIZE
@@ -24017,10 +24161,14 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     let tramp = CL
 
     if TARGET_OS == 3 {
-        // Windows PE trampoline: call main, then ExitProcess(rax) via IAT
-        // No argc/argv on Windows MVP (would need GetCommandLineW)
-        // sub rsp, 40 — align stack + shadow space
-        em(0x48); em(0x83); em(0xEC); em(0x28)
+        // Windows PE trampoline: init argc/argv from GetCommandLineA, call main,
+        // then ExitProcess(rax) via IAT.
+        // and rsp, -16 — guarantee 16-byte alignment at process entry
+        em(0x48); em(0x83); em(0xe4); em(0xf0)
+        // sub rsp, 32 — Win64 shadow space for the calls below (keeps 16-align)
+        em(0x48); em(0x83); em(0xec); em(0x20)
+        // GetCommandLineA → parse → store argc/argv globals
+        emit_pe_argv_init_x86()
         // call main
         em(0xe8)
         let wrel = FN_OFF[main_fn as usize] - (CL + 4)
@@ -24360,13 +24508,16 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
     let text_raw_size = ((CL + file_align - 1) / file_align) * file_align
     let idata_rva = text_rva + ((CL + sec_align - 1) / sec_align) * sec_align
 
-    // .idata layout: 1 import descriptor (20) + null (20) + INT(2*8+8=24) + IAT(24) + hints + dll name
+    // .idata layout: 1 import descriptor (20) + null (20) + INT(24) + IAT(24)
+    //   + hint/name entries + dll name. kernel32.dll imports two functions:
+    //   slot 0 = ExitProcess, slot 1 = GetCommandLineA.
     let idt_off: i64 = 0
-    let int_off: i64 = 40
-    let iat_off: i64 = 64
-    let hnt_ep_off: i64 = 88         // "ExitProcess" hint/name entry
-    let dll_name_off: i64 = 104      // "kernel32.dll\0"
-    let idata_total: i64 = 117       // 104 + 13
+    let int_off: i64 = 40            // INT: [ExitProcess][GetCommandLineA][null] = 24 bytes
+    let iat_off: i64 = 64            // IAT: same shape = 24 bytes
+    let hnt_ep_off: i64 = 88         // "ExitProcess" hint/name entry (hint(2)+12 = 14)
+    let hnt_gcl_off: i64 = 104       // "GetCommandLineA" hint/name entry (hint(2)+16 = 18)
+    let dll_name_off: i64 = 124      // "kernel32.dll\0" (13)
+    let idata_total: i64 = 137       // 124 + 13
     let idata_raw_size = ((idata_total + file_align - 1) / file_align) * file_align
 
     let bss_rva = 0x10000000 - image_base   // .bss VA = 0x10000000 to match GL_BSS_BASE (globals use absolute movabs)
@@ -24382,6 +24533,16 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
         CD[(PE_EXIT_CALL_OFF + 1) as usize] = ((disp >> 8) & 0xFF) as i8
         CD[(PE_EXIT_CALL_OFF + 2) as usize] = ((disp >> 16) & 0xFF) as i8
         CD[(PE_EXIT_CALL_OFF + 3) as usize] = ((disp >> 24) & 0xFF) as i8
+    }
+
+    // Patch GetCommandLineA IAT displacement in the argv-init trampoline
+    if PE_GETCMDLINE_CALL_OFF >= 0 {
+        let gcl_call_end = PE_GETCMDLINE_CALL_OFF + 4
+        let gcl_disp = (idata_rva + iat_off + 8) - (text_rva + gcl_call_end)  // IAT slot 1
+        CD[PE_GETCMDLINE_CALL_OFF as usize] = (gcl_disp & 0xFF) as i8
+        CD[(PE_GETCMDLINE_CALL_OFF + 1) as usize] = ((gcl_disp >> 8) & 0xFF) as i8
+        CD[(PE_GETCMDLINE_CALL_OFF + 2) as usize] = ((gcl_disp >> 16) & 0xFF) as i8
+        CD[(PE_GETCMDLINE_CALL_OFF + 3) as usize] = ((gcl_disp >> 24) & 0xFF) as i8
     }
 
     // Headers: DOS(64) + PE sig(4) + COFF(20) + OptHdr(112) + DataDirs(128) + 3 section headers(3*40=120) = 448
@@ -24484,13 +24645,15 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w32(idata_file_off + 16, idata_rva + iat_off)   // FirstThunk (IAT RVA)
     // Null terminator descriptor (20 bytes of zeros — already zero)
 
-    // INT: ExitProcess entry + null (offset 40)
-    elf_w64(idata_file_off + int_off, idata_rva + hnt_ep_off)  // → hint/name for ExitProcess
-    // null terminator at int_off+8 (already zero)
+    // INT: ExitProcess (slot 0) + GetCommandLineA (slot 1) + null (offset 40)
+    elf_w64(idata_file_off + int_off, idata_rva + hnt_ep_off)       // → hint/name for ExitProcess
+    elf_w64(idata_file_off + int_off + 8, idata_rva + hnt_gcl_off)  // → hint/name for GetCommandLineA
+    // null terminator at int_off+16 (already zero)
 
     // IAT: same as INT (offset 64)
     elf_w64(idata_file_off + iat_off, idata_rva + hnt_ep_off)
-    // null terminator at iat_off+8 (already zero)
+    elf_w64(idata_file_off + iat_off + 8, idata_rva + hnt_gcl_off)
+    // null terminator at iat_off+16 (already zero)
 
     // Hint/Name entry for ExitProcess (offset 88): hint(2) + "ExitProcess\0"
     elf_w16(idata_file_off + hnt_ep_off, 0)              // hint = 0
@@ -24507,7 +24670,25 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w8(idata_file_off + hnt_ep_off + 11, 0x73)  // s
     elf_w8(idata_file_off + hnt_ep_off + 12, 0x73)  // s
 
-    // DLL name: "kernel32.dll\0" (offset 104)
+    // Hint/Name entry for GetCommandLineA (offset 104): hint(2) + "GetCommandLineA\0"
+    elf_w16(idata_file_off + hnt_gcl_off, 0)             // hint = 0
+    elf_w8(idata_file_off + hnt_gcl_off + 2, 0x47)   // G
+    elf_w8(idata_file_off + hnt_gcl_off + 3, 0x65)   // e
+    elf_w8(idata_file_off + hnt_gcl_off + 4, 0x74)   // t
+    elf_w8(idata_file_off + hnt_gcl_off + 5, 0x43)   // C
+    elf_w8(idata_file_off + hnt_gcl_off + 6, 0x6F)   // o
+    elf_w8(idata_file_off + hnt_gcl_off + 7, 0x6D)   // m
+    elf_w8(idata_file_off + hnt_gcl_off + 8, 0x6D)   // m
+    elf_w8(idata_file_off + hnt_gcl_off + 9, 0x61)   // a
+    elf_w8(idata_file_off + hnt_gcl_off + 10, 0x6E)  // n
+    elf_w8(idata_file_off + hnt_gcl_off + 11, 0x64)  // d
+    elf_w8(idata_file_off + hnt_gcl_off + 12, 0x4C)  // L
+    elf_w8(idata_file_off + hnt_gcl_off + 13, 0x69)  // i
+    elf_w8(idata_file_off + hnt_gcl_off + 14, 0x6E)  // n
+    elf_w8(idata_file_off + hnt_gcl_off + 15, 0x65)  // e
+    elf_w8(idata_file_off + hnt_gcl_off + 16, 0x41)  // A
+
+    // DLL name: "kernel32.dll\0" (offset 124)
     elf_w8(idata_file_off + dll_name_off + 0, 0x6B)   // k
     elf_w8(idata_file_off + dll_name_off + 1, 0x65)   // e
     elf_w8(idata_file_off + dll_name_off + 2, 0x72)   // r

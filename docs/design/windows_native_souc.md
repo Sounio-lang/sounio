@@ -117,6 +117,62 @@ to PE, ran under wine:
 No regression: exit-code / stdout / file-round-trip PE programs still pass under
 wine with the fixed compiler. Bug #2 (argc/argv init) is now the next blocker.
 
+> **NOTE (2026-05-21):** `bin/souc-linux-x86_64` had not actually been
+> rebuilt when this section was written, so the shipped binary still emitted
+> `.bss` at `0x600000` and the probe faulted (exit 5). Bug #2's landing rebuilds
+> and reinstalls the bootstrap binary (`make build` → install gen3), which is
+> what makes both fixes live.
+
+## Root cause #2: FIXED + verified (2026-05-21)
+
+The Windows entry trampoline (`lean_single.sio`, `TARGET_OS == 3` branch) now
+calls `GetCommandLineA` and parses the ANSI command line into argc/argv before
+calling `main`:
+
+- **`emit_pe_argv_init_x86()`** — emitted just after stack alignment in the PE
+  trampoline. Calls `GetCommandLineA` (IAT slot 1), skips the program-name token
+  (quote-aware), space-splits the remaining args, records each token start into a
+  reserved BSS pointer table (`ARGV_TABLE_BSS_OFF`, 64 slots) and NUL-terminates
+  it in place. Stores argc (real-arg count, program name excluded) at
+  `GL_BSS_BASE-16` and argv base at `GL_BSS_BASE-8` — matching `emit_arg_count`/
+  `emit_get_arg` and the Linux/macOS convention where `get_arg(0)` is the first
+  real arg. All control flow uses rel32 jumps backpatched with `em32_at`.
+- **`write_pe`** — `.idata` import table extended from 1 to 2 kernel32 imports
+  (ExitProcess + GetCommandLineA): second INT/IAT thunk, a `GetCommandLineA\0`
+  hint/name entry, DLL-name offset shifted to 124, `idata_total` 117→137. The
+  trampoline's `call [rip+disp32]` for GetCommandLineA is patched to IAT slot 1.
+- Stack: trampoline now does `and rsp,-16; sub rsp,32` (16-aligned + Win64 shadow
+  space) so both `GetCommandLineA` and `main` are entered correctly aligned.
+
+**Proof (wine, rebuilt + reinstalled compiler):**
+- `arg_count()` probe + `get_arg` dump: `wine dump.exe alpha beta gamma` prints
+  `3` then `[alpha] [beta] [gamma]`; quoted `"hello world" solo` → `2`,
+  `[hello world] [solo]`.
+- **Milestone (roadmap 3–4):** `wine souc.exe prog.sio prog.elf` reads both path
+  args, compiles, and the emitted ELF runs (`return 7` → exit 7). souc.exe exits
+  `0` on success, `1` on a missing-input failure.
+- `scripts/ci/windows_pe_smoke_gate.sh` = 6/6 PASS; Linux self-host fixed point
+  (`make build`) still holds (stage2 == stage3).
+
+Known minor artifact (does **not** affect the compiler), characterized 2026-05-21:
+
+- A `main` that returns a *runtime-derived* value **directly** as its process
+  exit code, with **no** intervening effectful statement, reports an unstable
+  small garbage value under wine (`return arg_count()` with argc=3 → exit 1;
+  `let n=arg_count(); let m=n; return m` → 0). The same source returns the
+  correct value on Linux, so the function body codegen is fine — the divergence
+  is confined to the Windows main→ExitProcess hand-off for this degenerate shape.
+- It is **not** about reading globals: `let n=arg_count(); return 42` → 42, and
+  `return 99` → 99. Any arithmetic on the value (`arg_count()+100` → 103) or any
+  intervening syscall-backed effect (`print_int`, `write_file`) makes the exit
+  code correct. `get_arg`/`arg_count` values themselves are always correct
+  (verified by dumping them to stdout and to a file).
+- Real programs are unaffected: they compute their exit status and perform I/O.
+  `souc.exe` exits **0** on a successful compile and **1** on a missing-input
+  failure — both verified under wine. Root-causing the degenerate-main exit path
+  is deferred (likely a tail-return materialization quirk specific to the PE
+  trampoline boundary); it does not gate the milestone.
+
 ## Roadmap
 
 1. ~~**Fix the global/BSS base on Windows (root cause #1).**~~ **DONE** (above).
@@ -130,13 +186,12 @@ wine with the fixed compiler. Bug #2 (argc/argv init) is now the next blocker.
      RuntimeContext path), eliminating absolute addressing entirely. Cleaner and
      ASLR-friendly, but touches every global access site.
    Validate with the `arg_count()` probe under wine before touching `souc.exe`.
-2. **Initialize argc/argv in the PE trampoline (root cause #2).** GetCommandLineA
-   → build argv array in the VirtualAlloc heap → store base/count into the
-   argc/argv globals (or RuntimeContext). Add GetCommandLineA to .idata imports.
-3. **Re-test `souc.exe` under wine** — expect it to read its source/output path
-   args and proceed.
-4. **Compile a real program with souc.exe under wine** — the milestone: PE
-   compiler emits a working binary.
+2. ~~**Initialize argc/argv in the PE trampoline (root cause #2).**~~ **DONE**
+   (above). GetCommandLineA → parse into a BSS argv table → store base/count into
+   the argc/argv globals. GetCommandLineA added to .idata imports.
+3. ~~**Re-test `souc.exe` under wine**~~ **DONE** — reads source/output path args.
+4. ~~**Compile a real program with souc.exe under wine**~~ **DONE** — milestone met:
+   `souc.exe prog.sio prog.elf` emits a working ELF (`return 7` → exit 7).
 5. **Tier 2 cleanup** — audit `emit_exit` (encode.sio, hardcoded Linux syscall
    60) on Windows fallback paths; signal_handler.sio is POSIX-only (panic path).
 
