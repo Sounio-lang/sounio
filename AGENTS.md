@@ -21,16 +21,20 @@ When in doubt, prefer:
 
 Before implementation work:
 
-1. Read `CLAUDE_HANDOFF.md`.
-2. Confirm the current branch.
-3. Treat `/workspace/sounio` as the active development surface when operating in the promoted workspace.
+1. Run `./sounio-whereami --quick`.
+2. Read `ONBOARDING.md`.
+3. Read `CLAUDE_HANDOFF.md`.
+4. Confirm the current branch.
+5. Treat `/workspace/sounio` as the active development surface when operating in the promoted workspace.
+6. Use the Sounio Compiler Foundry or Slurm path for heavy validation; do not run full stress directly in `/workspace/sounio`.
 
 Important context:
 
 - This repository was recovered from VM `sounio-dev-01`.
 - The recovery was based on tarball import, then Git re-attachment.
-- The safe active branch is:
+- The historical safe base branch is:
   - `integration/sounio-dev-ready-base`
+- The current checked-out branch is the operational truth for this session.
 - Older Claude/Codex artifacts may still reference the VM-era path:
   - `/home/demetrios/RustroverProjects/sounio`
 - The current remote-first workspace path is:

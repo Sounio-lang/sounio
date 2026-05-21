@@ -2,6 +2,8 @@
 
 > Toda sessão de agente (Claude, Codex, Cursor, Kimi, …) começa por aqui.
 > Fonte de verdade em runtime: `cd /workspace/sounio && ./sounio-whereami --quick`.
+> Claude Code onboarding link, para agentes em outras sessões/máquinas:
+> <https://claude.ai/claude-code/onboard/Zi0vHDGtC038>
 
 ## 0. Primeiro comando, sempre
 
@@ -35,6 +37,7 @@ GPU owner, estado do Slurm e OrangeFS. Não adivinhe o mapa — leia o whereami.
 - **Validação pesada / stress** → Sounio Compiler Foundry / Slurm, **nunca** no workspace.
 - Output de runs → raízes de artefato da foundry, **não** na árvore viva.
 - OrangeFS (`/orangefs/training`) está ausente local; presente só no login Slurm.
+- Para pedir validação pesada, use `docs/ops/foundry_slurm_handoff.md`.
 
 ## 4. Compilador
 

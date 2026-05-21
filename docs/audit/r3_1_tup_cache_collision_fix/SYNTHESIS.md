@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.r3-1-tup-cache-collision-fix.synthesis
 authority: repo_only
 audience: users
-last_validated: 2026-05-18
-validated_by: claude-opus-4-7
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.r3-1-tup-cache-collision-fix.synthesis
 -->
 
