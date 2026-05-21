@@ -24,6 +24,12 @@ ${SOUC} check "${ROOT_DIR}/stdlib/graphics/export.sio"
 echo "--> check graphics::plot"
 ${SOUC} check "${ROOT_DIR}/stdlib/graphics/plot.sio"
 
+echo "--> check graphics::scatter"
+${SOUC} check "${ROOT_DIR}/stdlib/graphics/scatter.sio"
+
+echo "--> check graphics::heatmap"
+${SOUC} check "${ROOT_DIR}/stdlib/graphics/heatmap.sio"
+
 # 2. Smoke test compiles and runs
 echo "--> compile + run graphics_smoke"
 ${SOUC} compile "${ROOT_DIR}/tests/run-pass/graphics_smoke.sio" -o /tmp/graphics_smoke
