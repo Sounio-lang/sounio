@@ -25557,6 +25557,37 @@ fn emit_f64_binop_a64(opcode: i64) with Mut {
     em32(0x9E660000)  // fmov x0, d0
 }
 
+// β⁷ multiply Hessian component: H_jk(a·b) = H_jk(a)·b + s_j(a)·s_k(b) + s_k(a)·s_j(b) + a·H_jk(b).
+// Each arg is a frame slot index or <0 (treated as 0.0). Returns the result slot.
+fn emit_mul_hessian_comp_a64(lhsh: i64, rhsh: i64, lsj: i64, rsk: i64, lsk: i64, rsj: i64, aslot: i64, bslot: i64) -> i64 with Mut, Panic {
+    let r = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lhsh >= 0 { emit_load_var_a64(lhsh) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if bslot >= 0 { emit_load_var_a64(bslot) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)   // H_jk(a)·b
+    emit_push_a64()
+    if lsj >= 0 { emit_load_var_a64(lsj) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rsk >= 0 { emit_load_var_a64(rsk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)   // s_j(a)·s_k(b)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)   // running sum +=
+    emit_push_a64()
+    if lsk >= 0 { emit_load_var_a64(lsk) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rsj >= 0 { emit_load_var_a64(rsj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)   // s_k(a)·s_j(b)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)   // sum +=
+    emit_push_a64()
+    if aslot >= 0 { emit_load_var_a64(aslot) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rhsh >= 0 { emit_load_var_a64(rhsh) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)   // a·H_jk(b)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)   // sum +=
+    emit_store_var_a64(r)
+    r
+}
+
 fn emit_i64_to_f64_in_x0_a64() with Mut {
     em32(0x9E620000)  // scvtf d0, x0
     em32(0x9E660000)  // fmov x0, d0
@@ -27270,8 +27301,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
             if src_match(ns, ne - ns, "hessian_of") {
                 // hessian_of(expr, j, k) -> ∂²expr/∂input_j∂input_k via β⁷ shadows.
-                // Diagonal channels (j==k, 0..3) computed; off-diagonal returns 0
-                // (follow-up commit). Mirrors sensitivity_of's frontend.
+                // Reads the 4-channel symmetric block (diagonal h_jj from transcendentals,
+                // off-diagonal h_jk from the multiply-operator Hessian). Mirrors
+                // sensitivity_of's frontend. (Off-diagonal through a single transcendental
+                // of a multi-channel arg is GTT-refused on x86, so not propagated here.)
                 EP = EP + 1
                 EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
                 var b7h_arg_vi: i64 = -1
@@ -27283,6 +27316,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 var b7h_h11: i64 = EXPR_HSHADOW_11
                 var b7h_h22: i64 = EXPR_HSHADOW_22
                 var b7h_h33: i64 = EXPR_HSHADOW_33
+                var b7h_h01: i64 = EXPR_HSHADOW_01
+                var b7h_h02: i64 = EXPR_HSHADOW_02
+                var b7h_h03: i64 = EXPR_HSHADOW_03
+                var b7h_h12: i64 = EXPR_HSHADOW_12
+                var b7h_h13: i64 = EXPR_HSHADOW_13
+                var b7h_h23: i64 = EXPR_HSHADOW_23
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 var b7h_j: i64 = 0
                 if TK[EP as usize] == 4 { b7h_j = TV[EP as usize] }
@@ -27297,11 +27336,23 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if b7h_arg_vi >= 0 && VAR_HSHADOW_11[b7h_arg_vi as usize] >= 0 { b7h_h11 = VAR_HSHADOW_11[b7h_arg_vi as usize] }
                 if b7h_arg_vi >= 0 && VAR_HSHADOW_22[b7h_arg_vi as usize] >= 0 { b7h_h22 = VAR_HSHADOW_22[b7h_arg_vi as usize] }
                 if b7h_arg_vi >= 0 && VAR_HSHADOW_33[b7h_arg_vi as usize] >= 0 { b7h_h33 = VAR_HSHADOW_33[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_01[b7h_arg_vi as usize] >= 0 { b7h_h01 = VAR_HSHADOW_01[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_02[b7h_arg_vi as usize] >= 0 { b7h_h02 = VAR_HSHADOW_02[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_03[b7h_arg_vi as usize] >= 0 { b7h_h03 = VAR_HSHADOW_03[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_12[b7h_arg_vi as usize] >= 0 { b7h_h12 = VAR_HSHADOW_12[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_13[b7h_arg_vi as usize] >= 0 { b7h_h13 = VAR_HSHADOW_13[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_23[b7h_arg_vi as usize] >= 0 { b7h_h23 = VAR_HSHADOW_23[b7h_arg_vi as usize] }
                 var b7h_slot: i64 = -1
                 if b7h_j == 0 && b7h_k == 0 { b7h_slot = b7h_h00 }
                 else if b7h_j == 1 && b7h_k == 1 { b7h_slot = b7h_h11 }
                 else if b7h_j == 2 && b7h_k == 2 { b7h_slot = b7h_h22 }
                 else if b7h_j == 3 && b7h_k == 3 { b7h_slot = b7h_h33 }
+                else if b7h_j == 0 && b7h_k == 1 { b7h_slot = b7h_h01 }
+                else if b7h_j == 0 && b7h_k == 2 { b7h_slot = b7h_h02 }
+                else if b7h_j == 0 && b7h_k == 3 { b7h_slot = b7h_h03 }
+                else if b7h_j == 1 && b7h_k == 2 { b7h_slot = b7h_h12 }
+                else if b7h_j == 1 && b7h_k == 3 { b7h_slot = b7h_h13 }
+                else if b7h_j == 2 && b7h_k == 3 { b7h_slot = b7h_h23 }
                 if b7h_slot >= 0 { emit_load_var_a64(b7h_slot) } else { emit_imm64_a64(0) }
                 EXPR_IS_F64 = 1; EXPR_TY = 2; EXPR_TY_HASH = 0
                 EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
@@ -29080,6 +29131,17 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         let b4am_left_sshadow_1 = EXPR_SSHADOW_1
         let b4am_left_sshadow_2 = EXPR_SSHADOW_2
         let b4am_left_sshadow_3 = EXPR_SSHADOW_3
+        // β⁷: capture LHS diagonal+off-diagonal Hessian shadows for multiply Hessian
+        let b4am_left_hsh_00 = EXPR_HSHADOW_00
+        let b4am_left_hsh_01 = EXPR_HSHADOW_01
+        let b4am_left_hsh_02 = EXPR_HSHADOW_02
+        let b4am_left_hsh_03 = EXPR_HSHADOW_03
+        let b4am_left_hsh_11 = EXPR_HSHADOW_11
+        let b4am_left_hsh_12 = EXPR_HSHADOW_12
+        let b4am_left_hsh_13 = EXPR_HSHADOW_13
+        let b4am_left_hsh_22 = EXPR_HSHADOW_22
+        let b4am_left_hsh_23 = EXPR_HSHADOW_23
+        let b4am_left_hsh_33 = EXPR_HSHADOW_33
         // β⁴: always save lval/rval for f64 mul (a²·var(b) needs a even when var(a)=0)
         var b4am_lval_slot: i64 = -1
         if left_f64 == 1 {
@@ -29088,6 +29150,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             emit_store_var_a64(b4am_lval_slot)
         }
         EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+        EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1; EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1; EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
         emit_push_a64()
         compile_postfix_a64()
         if (op == 20 || op == 29) && rhs_const_known != 0 && rhs_const_val == 0 {
@@ -29100,6 +29163,17 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         let b4am_right_sshadow_1 = EXPR_SSHADOW_1
         let b4am_right_sshadow_2 = EXPR_SSHADOW_2
         let b4am_right_sshadow_3 = EXPR_SSHADOW_3
+        // β⁷: capture RHS Hessian shadows
+        let b4am_right_hsh_00 = EXPR_HSHADOW_00
+        let b4am_right_hsh_01 = EXPR_HSHADOW_01
+        let b4am_right_hsh_02 = EXPR_HSHADOW_02
+        let b4am_right_hsh_03 = EXPR_HSHADOW_03
+        let b4am_right_hsh_11 = EXPR_HSHADOW_11
+        let b4am_right_hsh_12 = EXPR_HSHADOW_12
+        let b4am_right_hsh_13 = EXPR_HSHADOW_13
+        let b4am_right_hsh_22 = EXPR_HSHADOW_22
+        let b4am_right_hsh_23 = EXPR_HSHADOW_23
+        let b4am_right_hsh_33 = EXPR_HSHADOW_33
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
         var b4am_rval_slot: i64 = -1
@@ -29256,6 +29330,43 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             let b4am_sres3 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_sres3)
             EXPR_SSHADOW_3 = b4am_sres3
+        }
+        // β⁷ second-order: Hessian through * — H_jk(a·b) = H_jk(a)·b + s_j(a)·s_k(b)
+        //  + s_k(a)·s_j(b) + a·H_jk(b), for the 4-channel symmetric block (10 components).
+        if left_f64 == 1 && op == 19 {
+            EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+            EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+            EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+            if b4am_left_hsh_00 >= 0 || b4am_right_hsh_00 >= 0 || (b4am_left_sshadow >= 0 && b4am_right_sshadow >= 0) {
+                EXPR_HSHADOW_00 = emit_mul_hessian_comp_a64(b4am_left_hsh_00, b4am_right_hsh_00, b4am_left_sshadow, b4am_right_sshadow, b4am_left_sshadow, b4am_right_sshadow, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_01 >= 0 || b4am_right_hsh_01 >= 0 || (b4am_left_sshadow >= 0 && b4am_right_sshadow_1 >= 0) || (b4am_left_sshadow_1 >= 0 && b4am_right_sshadow >= 0) {
+                EXPR_HSHADOW_01 = emit_mul_hessian_comp_a64(b4am_left_hsh_01, b4am_right_hsh_01, b4am_left_sshadow, b4am_right_sshadow_1, b4am_left_sshadow_1, b4am_right_sshadow, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_02 >= 0 || b4am_right_hsh_02 >= 0 || (b4am_left_sshadow >= 0 && b4am_right_sshadow_2 >= 0) || (b4am_left_sshadow_2 >= 0 && b4am_right_sshadow >= 0) {
+                EXPR_HSHADOW_02 = emit_mul_hessian_comp_a64(b4am_left_hsh_02, b4am_right_hsh_02, b4am_left_sshadow, b4am_right_sshadow_2, b4am_left_sshadow_2, b4am_right_sshadow, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_03 >= 0 || b4am_right_hsh_03 >= 0 || (b4am_left_sshadow >= 0 && b4am_right_sshadow_3 >= 0) || (b4am_left_sshadow_3 >= 0 && b4am_right_sshadow >= 0) {
+                EXPR_HSHADOW_03 = emit_mul_hessian_comp_a64(b4am_left_hsh_03, b4am_right_hsh_03, b4am_left_sshadow, b4am_right_sshadow_3, b4am_left_sshadow_3, b4am_right_sshadow, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_11 >= 0 || b4am_right_hsh_11 >= 0 || (b4am_left_sshadow_1 >= 0 && b4am_right_sshadow_1 >= 0) {
+                EXPR_HSHADOW_11 = emit_mul_hessian_comp_a64(b4am_left_hsh_11, b4am_right_hsh_11, b4am_left_sshadow_1, b4am_right_sshadow_1, b4am_left_sshadow_1, b4am_right_sshadow_1, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_12 >= 0 || b4am_right_hsh_12 >= 0 || (b4am_left_sshadow_1 >= 0 && b4am_right_sshadow_2 >= 0) || (b4am_left_sshadow_2 >= 0 && b4am_right_sshadow_1 >= 0) {
+                EXPR_HSHADOW_12 = emit_mul_hessian_comp_a64(b4am_left_hsh_12, b4am_right_hsh_12, b4am_left_sshadow_1, b4am_right_sshadow_2, b4am_left_sshadow_2, b4am_right_sshadow_1, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_13 >= 0 || b4am_right_hsh_13 >= 0 || (b4am_left_sshadow_1 >= 0 && b4am_right_sshadow_3 >= 0) || (b4am_left_sshadow_3 >= 0 && b4am_right_sshadow_1 >= 0) {
+                EXPR_HSHADOW_13 = emit_mul_hessian_comp_a64(b4am_left_hsh_13, b4am_right_hsh_13, b4am_left_sshadow_1, b4am_right_sshadow_3, b4am_left_sshadow_3, b4am_right_sshadow_1, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_22 >= 0 || b4am_right_hsh_22 >= 0 || (b4am_left_sshadow_2 >= 0 && b4am_right_sshadow_2 >= 0) {
+                EXPR_HSHADOW_22 = emit_mul_hessian_comp_a64(b4am_left_hsh_22, b4am_right_hsh_22, b4am_left_sshadow_2, b4am_right_sshadow_2, b4am_left_sshadow_2, b4am_right_sshadow_2, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_23 >= 0 || b4am_right_hsh_23 >= 0 || (b4am_left_sshadow_2 >= 0 && b4am_right_sshadow_3 >= 0) || (b4am_left_sshadow_3 >= 0 && b4am_right_sshadow_2 >= 0) {
+                EXPR_HSHADOW_23 = emit_mul_hessian_comp_a64(b4am_left_hsh_23, b4am_right_hsh_23, b4am_left_sshadow_2, b4am_right_sshadow_3, b4am_left_sshadow_3, b4am_right_sshadow_2, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_33 >= 0 || b4am_right_hsh_33 >= 0 || (b4am_left_sshadow_3 >= 0 && b4am_right_sshadow_3 >= 0) {
+                EXPR_HSHADOW_33 = emit_mul_hessian_comp_a64(b4am_left_hsh_33, b4am_right_hsh_33, b4am_left_sshadow_3, b4am_right_sshadow_3, b4am_left_sshadow_3, b4am_right_sshadow_3, b4am_lval_slot, b4am_rval_slot)
+            }
         }
         // Restore arithmetic result
         if b4am_result_slot >= 0 { emit_load_var_a64(b4am_result_slot) }
