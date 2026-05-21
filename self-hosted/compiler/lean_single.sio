@@ -25591,6 +25591,56 @@ fn emit_str_eq_regs_a64() with Mut, Panic {
     patch_branch_a64(done_patch, CL)
 }
 
+// Copy x11 bytes from x9 (src) to x10 (dst), advancing x9/x10; x11→0 on exit.
+fn emit_byte_copy_loop_a64() with Mut, Panic {
+    let loop_off = CL
+    let exit_patch = CL
+    em32(0xB400000B)   // cbz x11, done (patched)
+    em32(0x3940012C)   // ldrb w12, [x9]
+    em32(0x3900014C)   // strb w12, [x10]
+    em32(0x91000529)   // add x9, x9, #1
+    em32(0x9100054A)   // add x10, x10, #1
+    em32(0xD100056B)   // sub x11, x11, #1
+    em32(0x14000000 | (((loop_off - CL) / 4) & 0x3FFFFFF))  // b loop
+    patch_branch_a64(exit_patch, CL)
+}
+
+// str_concat(a,b): res = heap(len_a+len_b+1); copy a, copy b, NUL-terminate.
+fn emit_str_concat_slots_a64(slot_a: i64, slot_b: i64) with Mut, Panic {
+    let slot_len_a = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let slot_len_b = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let slot_res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(slot_a)
+    emit_str_len_a64()
+    emit_store_var_a64(slot_len_a)
+    emit_load_var_a64(slot_b)
+    emit_str_len_a64()
+    emit_store_var_a64(slot_len_b)
+    // total = len_a + len_b + 1
+    emit_load_var_a64(slot_len_a)
+    emit_push_a64()
+    emit_load_var_a64(slot_len_b)
+    emit_pop_x1_a64()
+    em32(0x8B000020)   // add x0, x1, x0
+    em32(0x91000400)   // add x0, x0, #1
+    emit_heap_alloc_a64()
+    emit_store_var_a64(slot_res)
+    // copy a → res. NOTE: emit_load_var_a64 clobbers x9, so set x9 (src) LAST.
+    emit_load_var_a64(slot_len_a); em32(0xAA0003EB)  // mov x11, x0 (count)
+    emit_load_var_a64(slot_res);   em32(0xAA0003EA)  // mov x10, x0 (dst)
+    emit_load_var_a64(slot_a);     em32(0xAA0003E9)  // mov x9, x0 (src) — last
+    emit_byte_copy_loop_a64()
+    // copy b → res+len_a (x10 already advanced; x9 set last again)
+    emit_load_var_a64(slot_len_b); em32(0xAA0003EB)  // mov x11, x0 (count)
+    emit_load_var_a64(slot_b);     em32(0xAA0003E9)  // mov x9, x0 (src) — last
+    emit_byte_copy_loop_a64()
+    em32(0x3900015F)   // strb wzr, [x10] (NUL terminator)
+    emit_load_var_a64(slot_res)
+}
+
 // ─── ARM64 f64 binary op helper ───
 fn emit_f64_binop_a64(opcode: i64) with Mut {
     em32(0x9E670020)  // fmov d0, x1 (LHS)
@@ -27660,6 +27710,37 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     if TK[EP as usize] == 7 { EP = EP + 1 }
                 }
                 EXPR_IS_F64 = 0; EXPR_TY = 4; EXPR_TY_HASH = 0; return
+            }
+            if src_match(ns, ne - ns, "str_concat") {
+                let sc_slot_a = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                let sc_slot_b = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_concat requires string arguments") }
+                    emit_store_var_a64(sc_slot_a)
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_concat requires string arguments") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    emit_store_var_a64(sc_slot_b)
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_str_concat_slots_a64(sc_slot_a, sc_slot_b)
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0; EXPR_TY = 3; EXPR_TY_HASH = 0; return
             }
             if src_match(ns, ne - ns, "slice_len") {
                 EP = EP + 1; compile_or_a64()
