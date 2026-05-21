@@ -2,7 +2,7 @@
 topic_id: repo.docs.dissertation.audit.discovery-log
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-05-21
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.audit.discovery-log
 -->
@@ -65,3 +65,37 @@ All four JSON files validated with `python3 -c 'import json; json.load(open(...)
    typecheck: failed
    ```
    Same error on a minimal repro (`let f = Foo { cl_hep: Knowledge(12.4, ε=0.85, prov="ferron_1997_cpt") }`). The Stage G stdlib promotion path therefore *cannot* introduce Knowledge<T>-wrapped parameters without a parallel compiler fix; the Stage G-ε-11+ ports use plain `f64` fields (matching the existing parity refs). Re-evaluate when the compiler self-hosting work lands the named-args parser for the Knowledge constructor.
+
+## Reconciliation — 2026-05-21 (HEAD `8c6631a2a`, origin/main)
+
+The Step 0–4 record above is an accurate point-in-time snapshot taken on 2026-05-11 at HEAD `890971ea` and is retained verbatim as history. This section reconciles it to the current tree; `gap_report.json` has been re-audited to match.
+
+**Headline #1 is RETIRED.** The 2026-05-11 verdict — *"the dissertation §4 cannot be honestly written from the current stdlib; the stdlib implements zero PBPK28-specific modules"* — is no longer true. The 2026-05-17 commit chain (`652133d7d` "PBPK28 epistemic stack: first-order GUM, Hessian, Sobol/PCE" → `d1bd7bf30` → `88def17ae` → `8d020fe93` → `6b922d385` → `1105dcccf` → merges `55863178f`/`cb51778fa`) authored the modules whose absence the headline rested on:
+
+- `stdlib/darwin_pbpk/epistemic_pbpk28.sio` (664 loc) and `epistemic_pbpk28_hessian.sio` (591 loc) — closes contributions (1) and (2) of `six_contributions_modules`.
+- `stdlib/darwin_pbpk/tmdd/fkbp12_mtorc1.sio` and `tmdd/glp1r.sio` — closes the module-authoring sub-gap of `tmdd_rapamycin_path` / `tmdd_semaglutide_path`.
+- `stdlib/darwin_pbpk/pd/coronary_smc_prolif.sio` (102 loc) and `pd/bergman_glucose_insulin.sio` (113 loc) — closes `pd_rapamycin_path` / `pd_semaglutide_path`.
+
+Six items flip locus from `PARITY_REF_SOUNIO`/`NOT_AUTHORED` to `STDLIB_SOUNIO`. Summary distribution moves from NONE=5/MINOR=7/MAJOR=28 to NONE=9/MINOR=8/MAJOR=23. The newly-authored modules are mutually consistent with the JS engine and the parity refs on every numeric value re-checked; the remaining numeric divergences are draft-vs-implementation, not locus disagreements.
+
+**Headline #4 (Knowledge<T>) STILL STANDS, re-verified.** `./bin/souc check` at this HEAD still rejects the named-arg `Knowledge(value, ε=…, prov=…)` constructor — confirmed on a minimal repro and on `tests/run-pass/med/vancomycin_full_propagation.sio` (both fail `E200 ε` / `E200 prov` / `E200 unknown identifier` / `typecheck: failed`). The PBPK28 modules above therefore use plain `f64`; every ε-bearing dissertation claim remains blocked on a compiler fix.
+
+**Gaps re-verified as genuinely OPEN at this HEAD** (still absent / unimplemented; not promoted by the May-17 work):
+
+- `stdlib/darwin_pbpk/core/tissue_composition.sio` — absent (values still inline in `rodgers_rowland.sio`).
+- `stdlib/darwin_pbpk/core/peptide_partitioning.sio` — absent.
+- `stdlib/darwin_pbpk/tmdd/qe_approximation.sio` — absent; the QE step is still not referenced anywhere.
+- `rapamycin_pd_alpha` (N → mm LLL conversion), `cypher_f_local`, `coronary_smc` 5% carve-out, `eag_window`, `nathan_conversion` (HbA1c), G-dependent `k_sec`, the 1% closure-error auditor, and the operator-split parity case — all unimplemented. (`coronary_smc_prolif.sio` self-flags the α gap in its own header comment.)
+
+**One-dissertation framing.** Per operator directive (2026-05-21), the PBPK28 biomaterials track and the broader Sounio epistemic track are a single dissertation. `RECONCILIATION_MEMO_2026-05-12.md`'s two-lane "binding authority" split is superseded (a banner has been added there; its body is retained for history). The audit and the claim truth table now present one unified evidence surface. The distinction between PBPK14 / PBPK28 / Hessian / K-AXI *gates* is retained as evidence-scoping discipline, not as a thesis-boundary.
+
+**Gates re-run 2026-05-21 — all six PASS.** The verification sweep was executed in the worktree at `8c6631a2a` (`SKIP_BUILD=1`, `SOUNIO_STDLIB_PATH=$(pwd)/stdlib`):
+
+- `dissertation_pbpk28_parity_gate.sh` — exit 0, 9/9 cases PASS (PBPK28 parity, mass conservation, TMDD {1,4,8}, PD heart, semaglutide PBPK28/GLP-1R-TMDD/glucose-insulin-PD), all within 1.0% RMSE.
+- `dissertation_pbpk_suite_gate.sh` — exit 0, PASS (50/50 rapamycin PBPK tests + smoke demos), ~99 s.
+- `dissertation_pbpk_hessian_gate.sh` — exit 0, PASS 5 / FAIL 0.
+- `dissertation_frontend_parity_gate.sh` — exit 0, 14/14 compartments within 1.0% RMSE.
+- `dissertation_dossier_gate.sh` — exit 0, PASS 5 / FAIL 0.
+- `kretikos_kaxi_phase_y_gate.sh` — exit 0, 3/3 truth claims; ran on real CUDA hardware (`/usr/local/bin/ptxas`, `nvidia-smi`/A5000 present), GPU↔CPU f32 digests bit-exact at a 10M cohort (`c1=38a827a54cb778aa`, `v11=dbf63987c228e0e6`), ISO budget emitted.
+
+The `repo-backed` rows in `pbpk_claim_truth_table.md` are confirmed green at this HEAD, not merely carried forward. This does not change the standing gaps above (the gates exercise what is implemented; they do not test the unimplemented tissue_composition / peptide_partitioning / qe_approximation modules or the blocked Knowledge<T> ε/prov constructor).
