@@ -36,6 +36,7 @@ Start with these current-state maps before diving into older deep reports:
 - [Self-Hosted Compiler](implementation/SELF_HOSTED_COMPILER.md)
 - [Tooling Summary](implementation/TOOLING_SUMMARY.md)
 - [Developer Workflow](contributor-guide/DEVELOPER_WORKFLOW.md)
+- [Foundry/Slurm Handoff](ops/foundry_slurm_handoff.md)
 
 ### Additional internals and design notes
 - [Technical Report](compiler/TECHNICAL_REPORT.md)
