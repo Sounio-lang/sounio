@@ -2,30 +2,28 @@
 topic_id: repo.docs.dissertation.handoff.section-4-10-sobol-hdmr-package
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-05-21
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.handoff.section-4-10-sobol-hdmr-package
 -->
 
 # §4.10 Writing Package — Sobol/Cut-HDMR Global Sensitivity Analysis
-## PUC-SP Biomaterials Master's Thesis (PBPK28, rapamycin + semaglutide)
+## PBPK dissertation (one document), §4.10 — rapamycin + semaglutide arm
 
 **For:** Claude Desktop, drafting §4.10  
 **From:** Claude Code, branch `claude/refine-local-plan-KAgIS`, commit `a5f633f`  
-**Confirmed context:** September–October defense = PUC-SP biomaterials master's under Dr. Moema Haussen.  
+**Reconciled 2026-05-21:** the unifying frame is **PBPK** — one dissertation across drug classes (the 2026-05-12 two-track split is superseded). Advisor name corrected below.  
+**Confirmed context:** September–October defense; advisor **Marli Gerenutti** (pharmacologist; PUC-SP biomaterials/regen-med program). The thesis is unified by PBPK + epistemic uncertainty, not biomaterials narrowly. (Earlier "Dr. Moema Haussen" was an error.)  
 **Governing artefact:** `docs/dissertation/handoff/chapter_04.md` + PBPK28 parity gate  
-**Truth table NOT applicable:** `pbpk_claim_truth_table.md` covers PBPK14 only; §4.10 is PBPK28 territory.
+**Truth table:** `pbpk_claim_truth_table.md` now carries PBPK28 rows (re-audited 2026-05-21); use it for §4.10 claim control.
 
 ---
 
-## 0. Critical Gap — Read Before Writing
+## 0. Status update — gap CLOSED 2026-05-21
 
-**`epistemic_pbpk28.sio` does NOT exist.** The gap audit (`docs/dissertation/audit/gap_report.json`, entry `six_contributions_modules`) classifies this as a **MAJOR** gap:
+**`epistemic_pbpk28.sio` now EXISTS** (664 loc), alongside `epistemic_pbpk28_hessian.sio` (591 loc) — authored 2026-05-17 (`652133d7d`..`cb51778fa`: first-order GUM + Hessian + Sobol/PCE over the 28-state kernel). The 2026-05-21 re-audit (`docs/dissertation/audit/gap_report.json`, entry `six_contributions_modules`) downgrades this from **MAJOR to MINOR**: contributions (1) and (2) are done at PBPK28 fidelity; only the full Cypher PBPK28 scenario (3) remains at PBPK14 fidelity.
 
-> "(1) epistemic_pbpk28.sio: NOT AUTHORED — only epistemic_pbpk14.sio exists.  
->  (2) epistemic_pbpk28_hessian.sio: NOT AUTHORED — only epistemic_pbpk14_hessian.sio exists."
-
-Promotion path identified by the gap audit: ~150 LOC (epistemic_pbpk28.sio) + ~200 LOC (hessian). These are Claude Code tasks, not Claude Desktop writing tasks.
+This means **Option B below is now available**: §4.10 can be written against the real 28-state permeability-limited kernel, not only the PBPK14 proxy.
 
 **What this means for §4.10:**
 
@@ -34,7 +32,7 @@ Promotion path identified by the gap audit: ~150 LOC (epistemic_pbpk28.sio) + ~2
 | **A — Write with honest gap statement** | §4.10 uses Sobol infrastructure from `stdlib/epistemic/sobol.sio` applied via the PBPK14 proxy (same parameter set; well-stirred kernel). Frame as "sensitivity analysis via the PBPK14 epistemic path, with PBPK28 port in progress." This is honest and defensible. |
 | **B — Wait for Claude Code to port PBPK28** | Delays §4.10 by one implementation sprint (~350 LOC). Result is a stronger claim: "Global sensitivity analysis through the full 28-state permeability-limited kernel." |
 
-**Recommendation for Sept–Oct timeline:** Option A. The Sobol indices are parameter-driven, not kernel-architecture-driven. For the 7 epistemic parameters (cl_hepatic, cl_renal, fu_plasma, kp_brain, kp_liver, kp_kidney, kp_adipose), the sensitivity ranking is the same in PBPK14 and PBPK28 because these parameters govern the same physiology. Write §4.10 using PBPK14 results; add a one-paragraph note that the PBPK28 port is a follow-up deliverable.
+**Recommendation for Sept–Oct timeline (updated 2026-05-21):** Option B is now viable since `epistemic_pbpk28.sio` landed — §4.10 can run Sobol/HDMR through the real 28-state kernel. Option A remains a sound fallback: the Sobol indices are parameter-driven, not kernel-architecture-driven, so for the 7 epistemic parameters (cl_hepatic, cl_renal, fu_plasma, kp_brain, kp_liver, kp_kidney, kp_adipose) the sensitivity ranking is the same in PBPK14 and PBPK28 (same physiology). Either is defensible; with the port done, prefer quoting PBPK28 results directly rather than as a "follow-up deliverable." (Drafting choice belongs to the prose session.)
 
 ---
 
