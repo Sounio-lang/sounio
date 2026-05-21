@@ -154,24 +154,47 @@ calling `main`:
 - `scripts/ci/windows_pe_smoke_gate.sh` = 6/6 PASS; Linux self-host fixed point
   (`make build`) still holds (stage2 == stage3).
 
-Known minor artifact (does **not** affect the compiler), characterized 2026-05-21:
+### A retracted "caveat": exit codes are correct; wine prefix state was the confounder
 
-- A `main` that returns a *runtime-derived* value **directly** as its process
-  exit code, with **no** intervening effectful statement, reports an unstable
-  small garbage value under wine (`return arg_count()` with argc=3 → exit 1;
-  `let n=arg_count(); let m=n; return m` → 0). The same source returns the
-  correct value on Linux, so the function body codegen is fine — the divergence
-  is confined to the Windows main→ExitProcess hand-off for this degenerate shape.
-- It is **not** about reading globals: `let n=arg_count(); return 42` → 42, and
-  `return 99` → 99. Any arithmetic on the value (`arg_count()+100` → 103) or any
-  intervening syscall-backed effect (`print_int`, `write_file`) makes the exit
-  code correct. `get_arg`/`arg_count` values themselves are always correct
-  (verified by dumping them to stdout and to a file).
-- Real programs are unaffected: they compute their exit status and perform I/O.
-  `souc.exe` exits **0** on a successful compile and **1** on a missing-input
-  failure — both verified under wine. Root-causing the degenerate-main exit path
-  is deferred (likely a tail-return materialization quirk specific to the PE
-  trampoline boundary); it does not gate the milestone.
+An earlier note here claimed that a `main` returning a *runtime-derived* value
+**directly** (e.g. `return arg_count()`) reported "garbage" under wine while
+`+100`/intervening-effect shapes were correct, and deferred it as a PE
+main→ExitProcess quirk. **That diagnosis was wrong** — re-investigated and
+retracted 2026-05-21. The PE exit path is correct for every shape; the original
+observation confounded *program shape* with *wine prefix state*.
+
+Root cause of the confound — two independent wine harness behaviors, neither a
+Sounio defect:
+
+1. **Wine auto-creating a non-existent `WINEPREFIX` poisons exit-code
+   propagation for that session.** If wine has to create the prefix directory
+   itself, the launcher returns **1 for every program in that session** — even a
+   bare `fn main() -> i64 { return 7 }`. Pre-creating the directory
+   (`mkdir -p "$WINEPREFIX"`, or any already-initialized `~/.wine`) makes exit
+   codes correct from the first call. The earlier `arg_count()→1` vs
+   `arg_count()+100→103` split was pure luck of which prefix happened to be warm
+   at the time, not the program.
+2. **Wine clamps a nonzero Windows exit code with a zero low byte to 1** so a
+   nonzero status never maps to Unix success (`return 256 → 1`, `return 512 → 1`).
+   Legitimate, documented wine behavior; the Unix shell only sees the low 8 bits
+   anyway (`return 300 → 44`, `return 1000 → 232`).
+
+**Proof (warmed prefix, true Windows exit code via `cmd %ERRORLEVEL%`):**
+with args `a b c` (argc=3), `return 9 → 9`, `return arg_count() → 3`,
+`return arg_count()+100 → 103`, `return arg_count()*7 → 21` — all correct,
+including the supposedly-broken direct-return shape. The constant `return 7`
+returning 1 on a *cold* prefix is the tell that the program is irrelevant.
+
+**Verifying exit codes under wine** — use the true Windows `ERRORLEVEL`, and
+ensure the prefix exists first:
+
+```bash
+mkdir -p "$WINEPREFIX"   # critical: never let wine auto-create it
+wine cmd /c "prog.exe a b c & echo EXIT=%ERRORLEVEL%" 2>/dev/null | tr -d '\r'
+```
+
+Real programs are unaffected: `souc.exe` exits **0** on a successful compile and
+**1** on a missing-input failure — verified under wine on a pre-created prefix.
 
 ## Roadmap
 

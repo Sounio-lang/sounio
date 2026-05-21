@@ -66,6 +66,15 @@ echo "PASS: fileio.exe is PE32+"
 
 # --- Execution checks (wine) ---------------------------------------------
 if have_wine; then
+    # Use a dedicated prefix and PRE-CREATE its directory. If wine has to
+    # auto-create a non-existent WINEPREFIX, it poisons exit-code propagation
+    # for the whole session — the launcher then returns 1 for *every* program,
+    # even `fn main(){return 7}` (root-caused 2026-05-21; see windows_native_souc.md).
+    # A pre-existing prefix dir makes exit codes correct from the first call.
+    export WINEPREFIX="$WORK/wineprefix"
+    mkdir -p "$WINEPREFIX"
+    wine cmd /c exit 0 >/dev/null 2>&1 || true   # initialize prefix synchronously
+
     set +e
     wine "$WORK/exit42.exe" >/dev/null 2>&1
     rc=$?
