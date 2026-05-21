@@ -6435,6 +6435,83 @@ fn emit_pop_rcx() with Mut { em(0x59) }
 // mov rax, imm64
 fn emit_imm64(v: i64) with Mut { em(0x48); em(0xb8); em64(v) }
 
+fn compile_struct_literal_shorthand_field_x86(field_tok: i64, fns: i64, fne: i64) with IO, Mut, Panic, Div {
+    let slot = var_find(fns, fne)
+    if slot < 0 {
+        tc_undefined_var(field_tok)
+        em(0x31); em(0xc0)
+        EXPR_TY = 0
+        EXPR_TY_HASH = 0
+        EXPR_IS_F64 = 0
+        return
+    }
+    let vi = var_find_idx(fns, fne)
+    if vi >= 0 && type_is_slice_ref(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize]) {
+        emit_lea_var(slot)
+    } else if vi >= 0 && type_is_option_inline(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize]) && VAR_ESIZ[vi as usize] >= 16 {
+        emit_lea_var(slot)
+    } else {
+        emit_load_var(slot)
+    }
+    EXPR_IS_F64 = var_find_is_f64(fns, fne)
+    if vi >= 0 {
+        EXPR_TY = VAR_TY[vi as usize]
+        EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
+        if VAR_ALEN[vi as usize] > 0 { LAST_ALEN = VAR_ALEN[vi as usize] }
+        if VAR_IS_CLOSURE[vi as usize] == 1 { LAST_EXPR_IS_CLOSURE = 1 }
+        if VAR_TY[vi as usize] == 6 || knowledge_hash_is(VAR_TY_HASH[vi as usize]) { LAST_EXPR_VAR_IDX = vi }
+        EXPR_VSHADOW = VAR_VSHADOW[vi as usize]
+        EXPR_SSHADOW = VAR_SSHADOW[vi as usize]
+        EXPR_SSHADOW_1 = VAR_SSHADOW_1[vi as usize]
+        EXPR_SSHADOW_2 = VAR_SSHADOW_2[vi as usize]
+        EXPR_SSHADOW_3 = VAR_SSHADOW_3[vi as usize]
+        EXPR_SSHADOW_4 = VAR_SSHADOW_4[vi as usize]
+        EXPR_SSHADOW_5 = VAR_SSHADOW_5[vi as usize]
+        EXPR_SSHADOW_6 = VAR_SSHADOW_6[vi as usize]
+        EXPR_SSHADOW_7 = VAR_SSHADOW_7[vi as usize]
+        EXPR_CH_SET = VAR_CH_SET[vi as usize]
+        EXPR_PARAM_USED = VAR_PARAM_USED[vi as usize]
+    }
+}
+
+fn compile_struct_literal_shorthand_field_a64(field_tok: i64, fns: i64, fne: i64) with IO, Mut, Panic, Div {
+    let slot = var_find(fns, fne)
+    if slot < 0 {
+        tc_undefined_var(field_tok)
+        em32(0xD2800000)
+        EXPR_TY = 0
+        EXPR_TY_HASH = 0
+        EXPR_IS_F64 = 0
+        return
+    }
+    let vi = var_find_idx(fns, fne)
+    if vi >= 0 && type_is_slice_ref(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize]) {
+        emit_lea_var_a64(slot)
+    } else if vi >= 0 && type_is_option_inline(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize]) && VAR_ESIZ[vi as usize] >= 16 {
+        emit_lea_var_a64(slot)
+    } else {
+        emit_load_var_a64(slot)
+    }
+    EXPR_IS_F64 = var_find_is_f64(fns, fne)
+    if vi >= 0 {
+        EXPR_TY = VAR_TY[vi as usize]
+        EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
+        if VAR_ALEN[vi as usize] > 0 { LAST_ALEN = VAR_ALEN[vi as usize] }
+        if VAR_IS_CLOSURE[vi as usize] == 1 { LAST_EXPR_IS_CLOSURE = 1 }
+        EXPR_VSHADOW = local_shadow_slot_or_neg(VAR_VSHADOW[vi as usize])
+        EXPR_SSHADOW = local_shadow_slot_or_neg(VAR_SSHADOW[vi as usize])
+        EXPR_SSHADOW_1 = local_shadow_slot_or_neg(VAR_SSHADOW_1[vi as usize])
+        EXPR_SSHADOW_2 = local_shadow_slot_or_neg(VAR_SSHADOW_2[vi as usize])
+        EXPR_SSHADOW_3 = local_shadow_slot_or_neg(VAR_SSHADOW_3[vi as usize])
+        EXPR_SSHADOW_4 = local_shadow_slot_or_neg(VAR_SSHADOW_4[vi as usize])
+        EXPR_SSHADOW_5 = local_shadow_slot_or_neg(VAR_SSHADOW_5[vi as usize])
+        EXPR_SSHADOW_6 = local_shadow_slot_or_neg(VAR_SSHADOW_6[vi as usize])
+        EXPR_SSHADOW_7 = local_shadow_slot_or_neg(VAR_SSHADOW_7[vi as usize])
+        EXPR_CH_SET = VAR_CH_SET[vi as usize]
+        EXPR_PARAM_USED = VAR_PARAM_USED[vi as usize]
+    }
+}
+
 fn emit_push_expr_as_slice_arg_x86(call_tok: i64) with IO, Mut, Panic, Div {
     if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
         em(0x48); em(0x89); em(0xc2)  // mov rdx, rax
@@ -12403,7 +12480,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         let fne = TE[EP as usize]
                         let fh = gl_name_hash(fns, fne)
                         EP = EP + 1  // skip field name
-                        if TK[EP as usize] == 43 { EP = EP + 1 }  // skip :
+                        var has_explicit_initializer: i64 = 0
+                        if TK[EP as usize] == 43 { EP = EP + 1; has_explicit_initializer = 1 }  // skip :
                     ST_QUERY_NS = fns
                     ST_QUERY_NE = fne
                         let foff = st_field_offset(si, fh)
@@ -12441,7 +12519,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                                 }
                                 fill_repeat_struct_array_slots_x86(dst_start, fhash)
                             } else {
-                                compile_or()
+                                if has_explicit_initializer == 1 {
+                                    compile_or()
+                                } else {
+                                    compile_struct_literal_shorthand_field_x86(field_tok, fns, fne)
+                                }
                                 try_apply_field_alias_refinement(fhash, field_tok)
                                 if fty != 0 && ty_eq(fty, fhash, EXPR_TY, EXPR_TY_HASH) == false {
                                     tc_error_hard(field_tok, "field initializer type does not match struct field")
@@ -27953,7 +28035,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         let fne = TE[EP as usize]
                         let fh = gl_name_hash(fns, fne)
                         EP = EP + 1
-                        if TK[EP as usize] == 43 { EP = EP + 1 }
+                        var has_explicit_initializer: i64 = 0
+                        if TK[EP as usize] == 43 { EP = EP + 1; has_explicit_initializer = 1 }
                     ST_QUERY_NS = fns
                     ST_QUERY_NE = fne
                         let foff = st_field_offset(si, fh)
@@ -27991,7 +28074,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                                 }
                                 fill_repeat_struct_array_slots_a64(dst_start, fhash)
                             } else {
-                                compile_or_a64()
+                                if has_explicit_initializer == 1 {
+                                    compile_or_a64()
+                                } else {
+                                    compile_struct_literal_shorthand_field_a64(field_tok, fns, fne)
+                                }
                                 try_apply_field_alias_refinement(fhash, field_tok)
                                 if fty != 0 && ty_eq(fty, fhash, EXPR_TY, EXPR_TY_HASH) == false {
                                     tc_error(field_tok, "field initializer type does not match struct field")
