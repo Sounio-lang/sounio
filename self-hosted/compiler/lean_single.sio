@@ -27510,6 +27510,17 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         tc_wrong_arity(name_tok, 1, 2)
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
+                    // β⁶ first-order AD: capture argument sensitivity shadows before the call
+                    let math_s0 = EXPR_SSHADOW
+                    let math_s1 = EXPR_SSHADOW_1
+                    let math_s2 = EXPR_SSHADOW_2
+                    let math_s3 = EXPR_SSHADOW_3
+                    var math_arg_slot: i64 = -1
+                    if math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 {
+                        math_arg_slot = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(math_arg_slot)
+                    }
                     emit_push_a64()
                     var math_fi: i64 = fn_find_lit("__native_sqrt_f64")
                     if src_match(ns, ne - ns, "sin") { math_fi = fn_find_lit("__native_sin_f64") }
@@ -27528,6 +27539,136 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         em32(0xD2800000)
                     }
                     if TK[EP as usize] == 7 { EP = EP + 1 }
+                    // β⁶ first-order AD chain rule: result is in x0; for each active
+                    // gradient channel propagate sens_k(f(x)) = f'(arg)·sens_k(x).
+                    // Math builtins carry 4 gradient channels (s0..s3); clear the rest.
+                    EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
+                    EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                    if math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 {
+                        let math_res_slot = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(math_res_slot)
+                        let math_deriv_slot = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        // f'(x) into x0 (1.0 bits = 4607182418800017408)
+                        if src_match(ns, ne - ns, "sqrt") {
+                            // 1/(2·result)
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_res_slot); emit_push_a64()
+                            emit_load_var_a64(math_res_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                        } else if src_match(ns, ne - ns, "exp") {
+                            emit_load_var_a64(math_res_slot)
+                        } else if src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") {
+                            // 1/arg
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                        } else if src_match(ns, ne - ns, "sin") {
+                            // cos(arg)
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            let cfd = fn_find_lit("__native_cos_f64")
+                            if cfd >= 0 { emit_direct_fn_call_a64(cfd, 1) } else { emit_imm64_a64(0) }
+                        } else if src_match(ns, ne - ns, "cos") {
+                            // -sin(arg), computed as 0 - sin(arg)
+                            emit_imm64_a64(0); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            let sfd = fn_find_lit("__native_sin_f64")
+                            if sfd >= 0 { emit_direct_fn_call_a64(sfd, 1) } else { emit_imm64_a64(0) }
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)  // 0 - sin(arg)
+                        } else if src_match(ns, ne - ns, "tan") {
+                            // 1 + result²  (sec²)
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_res_slot); emit_push_a64()
+                            emit_load_var_a64(math_res_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                        } else if src_match(ns, ne - ns, "atan") {
+                            // 1/(1 + arg²)
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                        } else if src_match(ns, ne - ns, "tanh") {
+                            // 1 - result²  (sech²)
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_res_slot); emit_push_a64()
+                            emit_load_var_a64(math_res_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                        } else if src_match(ns, ne - ns, "asin") {
+                            // 1/sqrt(1 - arg²)
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                            emit_push_a64()
+                            let qfd = fn_find_lit("__native_sqrt_f64")
+                            if qfd >= 0 { emit_direct_fn_call_a64(qfd, 1) } else { emit_imm64_a64(0) }
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                        } else if src_match(ns, ne - ns, "acos") {
+                            // -1/sqrt(1 - arg²), computed as 0 - (1/sqrt(1 - arg²))
+                            emit_imm64_a64(0); emit_push_a64()
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                            emit_push_a64()
+                            let qfd2 = fn_find_lit("__native_sqrt_f64")
+                            if qfd2 >= 0 { emit_direct_fn_call_a64(qfd2, 1) } else { emit_imm64_a64(0) }
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)  // 0 - (1/sqrt)
+                        } else {
+                            emit_imm64_a64(0)
+                        }
+                        emit_store_var_a64(math_deriv_slot)
+                        if math_s0 >= 0 {
+                            let msr0 = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_s0)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_store_var_a64(msr0)
+                            EXPR_SSHADOW = msr0
+                        }
+                        if math_s1 >= 0 {
+                            let msr1 = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_s1)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_store_var_a64(msr1)
+                            EXPR_SSHADOW_1 = msr1
+                        }
+                        if math_s2 >= 0 {
+                            let msr2 = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_s2)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_store_var_a64(msr2)
+                            EXPR_SSHADOW_2 = msr2
+                        }
+                        if math_s3 >= 0 {
+                            let msr3 = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_s3)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_store_var_a64(msr3)
+                            EXPR_SSHADOW_3 = msr3
+                        }
+                        // restore primal result to x0 for downstream consumers
+                        emit_load_var_a64(math_res_slot)
+                    }
                 }
                 EXPR_IS_F64 = 1
                 EXPR_TY = 2
