@@ -2,6 +2,8 @@
 
 > Toda sessão de agente (Claude, Codex, Cursor, Kimi, …) começa por aqui.
 > Fonte de verdade em runtime: `cd /workspace/sounio && ./sounio-whereami --quick`.
+> Claude Code onboarding link, para agentes em outras sessões/máquinas:
+> <https://claude.ai/claude-code/onboard/Zi0vHDGtC038>
 
 ## 0. Primeiro comando, sempre
 

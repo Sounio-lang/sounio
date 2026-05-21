@@ -5,16 +5,28 @@
 You are operating in a recovered-and-promoted Sounio environment.
 Do not assume a fresh clone or a laptop-first workflow.
 
+Inside the promoted Kubernetes workspace, start with:
+
+```bash
+cd /workspace/sounio
+./sounio-whereami --quick
+```
+
+The current checked-out branch is the operational truth for that session. Do
+not switch branches just because older host-side docs mention
+`integration/sounio-dev-ready-base`.
+
 Read these files in this order before making non-trivial changes:
 
-1. `CLAUDE_HANDOFF.md`
-2. `README.md`
-3. `AGENTS.md`
-4. `CLAUDE.md`
-5. `docs/archived/HANDOFF.md`
-6. `docs/archived/HISTORY.md`
-7. `docs/guide/MINIMUM_VIABLE_SOUNIO.md`
-8. `docs/guide/LLM_PROGRAMMING_GUIDE.md`
+1. `ONBOARDING.md`
+2. `CLAUDE_HANDOFF.md`
+3. `README.md`
+4. `AGENTS.md`
+5. `CLAUDE.md`
+6. `docs/archived/HANDOFF.md`
+7. `docs/archived/HISTORY.md`
+8. `docs/guide/MINIMUM_VIABLE_SOUNIO.md`
+9. `docs/guide/LLM_PROGRAMMING_GUIDE.md`
 
 If the host-level control docs are also visible in the environment, consult these next:
 
