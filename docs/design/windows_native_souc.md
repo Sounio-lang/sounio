@@ -66,33 +66,53 @@ faults under wine at a **read** of `0x10000000`. Disassembly of the emitted
 
 Two chained bugs, both attributed:
 
-1. **Globals use absolute addresses keyed to ImageBase 0x10000000, but the image
-   loads at 0x400000.** `pe_coff.sio:146,3020` declare ImageBase `0x10000000`,
-   yet wine maps the module at `0x400000` (rip in the dump is `0x401015`). The
-   compiler emits `movabs` of the *declared* base for global access; with no
-   `.reloc` section the loader places the image elsewhere and every absolute
-   global pointer dangles. (The earlier `souc.exe` execute-fault at `0x60DAA5`
-   is the same class: a global/pointer computed at the wrong base, here landing
-   in mapped-but-wrong memory and getting executed.)
-2. **argc/argv are never initialized** (codegen.sio:5121). Even with a correct
-   base, the argc global slot is zero because the trampoline never calls
-   GetCommandLine.
+1. **Global/BSS base mismatch.** The compiler (built from `lean_single.sio` via
+   the Makefile bootstrap) hardcodes its global/BSS segment base at absolute
+   `0x10000000` and emits `movabs rax, 0x10000000+off; mov rax,[rax]` for every
+   global access:
+   - `lean_single.sio:22857` `GL_BSS_BASE = 0x10000000 + 16`
+   - `lean_single.sio:24059` `argc_addr = 0x10000000`, `:24060` `argv_addr = 0x10000000 + 8`
+   - `:24129/:24301/:24332` BSS program header `p_vaddr = 0x10000000`
 
-Why the earlier exit/stdout/file tests passed: those builtins read the
-RuntimeContext via **RIP-relative** loads (`emit_load_runtime_context_ptr_rbx`,
-frame.sio:385 — `mov rbx,[rip+disp32]`), which are position-independent and
-survive the base mismatch. The `arg_count`/`get_arg` globals do not; they use
-absolute `movabs`. This is the real fault line for self-hosting.
+   But the emitted **PE maps `.bss` at VA `0x600000`** (ImageBase `0x400000` +
+   RVA `0x200000`; confirmed via `objdump -h`). So every absolute global address
+   points into unmapped memory. On Linux/ELF it works only because lean_single's
+   own ELF emitter puts the BSS program header at exactly `0x10000000`, matching
+   the hardcoded constant — that consistency is lost on the PE path.
+
+   **Correction to an earlier note in git history (commit 810168e5): this is NOT
+   a PE ImageBase relocation problem.** The PE's declared ImageBase IS
+   `0x400000` and it loads there cleanly (rip=0x401015). `0x10000000` is the
+   compiler's hardcoded *globals* base, unrelated to ImageBase. (`pe_coff.sio:71`
+   `PE_SCN_MEM_SHARED = 268435456` is the same numeric value but an unrelated
+   section-flag bit — a red herring.)
+
+2. **argc/argv are never initialized** (codegen.sio:5121). Even with a correct
+   base, the argc slot is zero because the trampoline never calls GetCommandLine.
+
+Why the earlier exit/stdout/file tests passed:
+- `print` materializes its string literal as **inline `movabs` immediates**
+  pushed to the stack (verified: `movabs rax,0x6f646e6977206d6f` = "o mwind"),
+  so it touches no global data segment.
+- exit/stdout/file builtins read the RuntimeContext via **RIP-relative** loads
+  (`emit_load_runtime_context_ptr_rbx`, frame.sio:385), position-independent.
+- `hello_print.exe` *does* contain `movabs 0x100000a0` global accesses, but they
+  sit in **un-executed branches** (int/float formatting that a pure-string print
+  skips), so the bad base is never dereferenced. `arg_count` is the smallest
+  program that puts a global access on the executed path.
 
 ## Roadmap
 
-1. **Fix global addressing on Windows (root cause #1).** Two options:
-   - (a) Emit RIP-relative loads for globals on PE targets (like the
-     RuntimeContext path already does), eliminating absolute `movabs`; or
-   - (b) Keep absolute addressing but emit a `.reloc` section so the loader
-     fixes up pointers, and ensure the global data segment is actually mapped at
-     ImageBase.
-   Option (a) is cleaner and matches the working RuntimeContext path.
+1. **Fix the global/BSS base on Windows (root cause #1).** Options, simplest
+   first:
+   - (a) **Make the hardcoded globals base agree with the PE `.bss` VA.** Either
+     emit the PE `.bss` at VA `0x10000000` to match `GL_BSS_BASE`, or make
+     `GL_BSS_BASE` target-dependent (= the PE `.bss` VA, 0x600000). Smallest
+     change; keeps absolute `movabs`. Risk: must stay consistent across every
+     site that bakes `0x10000000` (argc/argv/r15 table/BSS phdr).
+   - (b) Emit RIP-relative loads for globals on PE targets (like the
+     RuntimeContext path), eliminating absolute addressing entirely. Cleaner and
+     ASLR-friendly, but touches every global access site.
    Validate with the `arg_count()` probe under wine before touching `souc.exe`.
 2. **Initialize argc/argv in the PE trampoline (root cause #2).** GetCommandLineA
    → build argv array in the VirtualAlloc heap → store base/count into the
