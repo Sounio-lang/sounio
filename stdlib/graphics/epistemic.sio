@@ -1,0 +1,136 @@
+// Graphics Epistemic — Uncertainty visualization
+//
+// Raster epistemic plots: confidence bands, uncertainty ranges, and
+// decay-aware visualization. Counterpart to plot::epistemic (terminal-based).
+//
+// This module implements the "Linguagem Visual Epistêmica de Primeira Classe"
+// from docs/design/native_graphics_library.md §4.4.
+
+use graphics::drawing::{Color}
+use graphics::surface::{Surface, surface_draw_line, surface_draw_rect}
+
+pub struct EpistemicBandConfig {
+    pub margin: i64,
+    pub center_color: Color,
+    pub band_color: Color,
+    pub bg_color: Color,
+    pub axis_color: Color,
+}
+
+pub fn epistemic_band_config_default() -> EpistemicBandConfig {
+    EpistemicBandConfig {
+        margin: 20,
+        center_color: Color { r: 0, g: 80, b: 160, a: 255 },
+        band_color: Color { r: 180, g: 210, b: 240, a: 255 },
+        bg_color: Color { r: 255, g: 255, b: 255, a: 255 },
+        axis_color: Color { r: 0, g: 0, b: 0, a: 255 },
+    }
+}
+
+// Draw a filled confidence band between lower and upper curves,
+// with a center line on top.
+// All arrays share the same x-coordinates.
+// Returns the updated surface.
+pub fn plot_epistemic_band_raster(
+    s: Surface,
+    xs: &[f64; 256],
+    center: &[f64; 256],
+    lower: &[f64; 256],
+    upper: &[f64; 256],
+    n: i64,
+    config: EpistemicBandConfig
+) -> Surface with Mut, Panic, Div {
+    if n <= 0 { return s }
+
+    var out = s
+
+    // Find x bounds
+    var xmin = xs[0]
+    var xmax = xs[0]
+    var i: i64 = 1
+    while i < n {
+        if xs[i] < xmin { xmin = xs[i] }
+        if xs[i] > xmax { xmax = xs[i] }
+        i = i + 1
+    }
+
+    // Find y bounds across all three series for scaling
+    var ymin = center[0]
+    var ymax = center[0]
+    i = 0
+    while i < n {
+        if lower[i] < ymin { ymin = lower[i] }
+        if upper[i] > ymax { ymax = upper[i] }
+        i = i + 1
+    }
+
+    let x_range = xmax - xmin
+    let y_range = ymax - ymin
+    let plot_w = out.width - config.margin * 2
+    let plot_h = out.height - config.margin * 2
+
+    // Clear background
+    out = surface_draw_rect(out, 0, 0, out.width, out.height, config.bg_color)
+
+    // Draw axes
+    out = surface_draw_rect(out, config.margin, config.margin, 1, plot_h, config.axis_color)
+    out = surface_draw_rect(out, config.margin, out.height - config.margin - 1, plot_w, 1, config.axis_color)
+
+    // Fill band: for each x pixel column, interpolate lower/upper y and draw vertical line
+    var px: i64 = 0
+    while px < plot_w {
+        let x_frac = (px as f64) / (plot_w as f64)
+        let x_data = xmin + x_frac * x_range
+
+        let y_lower = interp_y(xs, lower, n, x_data)
+        let y_upper = interp_y(xs, upper, n, x_data)
+
+        let py_lower = out.height - config.margin - 1 - ((y_lower - ymin) / y_range * (plot_h as f64)) as i64
+        let py_upper = out.height - config.margin - 1 - ((y_upper - ymin) / y_range * (plot_h as f64)) as i64
+
+        let y0 = if py_lower < py_upper { py_lower } else { py_upper }
+        let y1 = if py_lower > py_upper { py_lower } else { py_upper }
+        let h = y1 - y0 + 1
+        if h > 0 {
+            out = surface_draw_rect(out, config.margin + px, y0, 1, h, config.band_color)
+        }
+        px = px + 1
+    }
+
+    // Draw center line on top
+    var j: i64 = 0
+    while j < n - 1 {
+        let x0f = if x_range == 0.0 { 0.0 } else { (xs[j] - xmin) / x_range }
+        let y0f = if y_range == 0.0 { 0.0 } else { (center[j] - ymin) / y_range }
+        let x1f = if x_range == 0.0 { 0.0 } else { (xs[j + 1] - xmin) / x_range }
+        let y1f = if y_range == 0.0 { 0.0 } else { (center[j + 1] - ymin) / y_range }
+
+        let px0 = config.margin + (x0f * (plot_w as f64)) as i64
+        let py0 = out.height - config.margin - 1 - (y0f * (plot_h as f64)) as i64
+        let px1 = config.margin + (x1f * (plot_w as f64)) as i64
+        let py1 = out.height - config.margin - 1 - (y1f * (plot_h as f64)) as i64
+
+        out = surface_draw_line(out, px0, py0, px1, py1, config.center_color)
+        j = j + 1
+    }
+    out
+}
+
+// Linear interpolation of y at x_target given piecewise-linear (xs, ys).
+fn interp_y(xs: &[f64; 256], ys: &[f64; 256], n: i64, x_target: f64) -> f64 with Mut, Div, Panic {
+    if n <= 0 { return 0.0 }
+    if x_target <= xs[0] { return ys[0] }
+    if x_target >= xs[n - 1] { return ys[n - 1] }
+    var i: i64 = 0
+    while i < n - 1 {
+        if x_target >= xs[i] && x_target <= xs[i + 1] {
+            let dx = xs[i + 1] - xs[i]
+            let t = if dx == 0.0 { 0.0 } else { (x_target - xs[i]) / dx }
+            return ys[i] + t * (ys[i + 1] - ys[i])
+        }
+        i = i + 1
+    }
+    ys[n - 1]
+}
+
+fn main() -> i32 with IO { 0 }

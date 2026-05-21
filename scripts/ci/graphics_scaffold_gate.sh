@@ -30,6 +30,9 @@ ${SOUC} check "${ROOT_DIR}/stdlib/graphics/scatter.sio"
 echo "--> check graphics::heatmap"
 ${SOUC} check "${ROOT_DIR}/stdlib/graphics/heatmap.sio"
 
+echo "--> check graphics::epistemic"
+${SOUC} check "${ROOT_DIR}/stdlib/graphics/epistemic.sio"
+
 # 2. Smoke test compiles and runs
 echo "--> compile + run graphics_smoke"
 ${SOUC} compile "${ROOT_DIR}/tests/run-pass/graphics_smoke.sio" -o /tmp/graphics_smoke
