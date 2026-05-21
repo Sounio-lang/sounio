@@ -101,10 +101,26 @@ Why the earlier exit/stdout/file tests passed:
   skips), so the bad base is never dereferenced. `arg_count` is the smallest
   program that puts a global access on the executed path.
 
+## Root cause #1: FIXED + verified (2026-05-21)
+
+`write_pe` (lean_single.sio) placed `.bss` at RVA `0x200000` (VA `0x600000`),
+contradicting the global-access base `GL_BSS_BASE = 0x10000000`. One-line fix:
+```
+let bss_rva = 0x10000000 - image_base   // .bss VA == GL_BSS_BASE
+```
+**Proof:** rebuilt the compiler with the fix, recompiled the `arg_count()` probe
+to PE, ran under wine:
+- before: read fault at `0x10000000`;
+- after: `.bss` VA = `0x10000000` (objdump -h), clean exit 0 (argc=0, since
+  bug #2 still pending — exactly the predicted behaviour).
+
+No regression: exit-code / stdout / file-round-trip PE programs still pass under
+wine with the fixed compiler. Bug #2 (argc/argv init) is now the next blocker.
+
 ## Roadmap
 
-1. **Fix the global/BSS base on Windows (root cause #1).** Options, simplest
-   first:
+1. ~~**Fix the global/BSS base on Windows (root cause #1).**~~ **DONE** (above).
+   Options considered, simplest first:
    - (a) **Make the hardcoded globals base agree with the PE `.bss` VA.** Either
      emit the PE `.bss` at VA `0x10000000` to match `GL_BSS_BASE`, or make
      `GL_BSS_BASE` target-dependent (= the PE `.bss` VA, 0x600000). Smallest
