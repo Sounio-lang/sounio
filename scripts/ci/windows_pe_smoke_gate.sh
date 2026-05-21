@@ -48,6 +48,22 @@ file "$WORK/print.exe" | grep -q "PE32+ executable" || fail "print.exe is not a 
 strings "$WORK/print.exe" | grep -q "kernel32.dll" || fail "print.exe missing kernel32.dll import"
 echo "PASS: print.exe is PE32+ and imports kernel32.dll"
 
+# --- Case 3: file I/O round-trip -----------------------------------------
+cat > "$WORK/fileio.sio" <<'EOF'
+fn main() -> i64 {
+    let buf = read_file("__IN__")
+    write_file("__OUT__", buf, str_len(buf))
+    print("done\n")
+    return 0
+}
+EOF
+# Inject absolute paths (the program embeds string literals at compile time).
+sed -i "s#__IN__#$WORK/in.txt#; s#__OUT__#$WORK/out.txt#" "$WORK/fileio.sio"
+printf 'roundtrip-payload-xyz' > "$WORK/in.txt"
+"$SOUC" compile "$WORK/fileio.sio" -o "$WORK/fileio.exe" --target x86_64-windows >/dev/null
+file "$WORK/fileio.exe" | grep -q "PE32+ executable" || fail "fileio.exe is not a PE32+ executable"
+echo "PASS: fileio.exe is PE32+"
+
 # --- Execution checks (wine) ---------------------------------------------
 if have_wine; then
     set +e
@@ -60,6 +76,13 @@ if have_wine; then
     out="$(wine "$WORK/print.exe" 2>/dev/null)"
     [ "$out" = "hello from windows" ] || fail "print.exe stdout was '$out', expected 'hello from windows'"
     echo "PASS: print.exe prints 'hello from windows' under wine"
+
+    rm -f "$WORK/out.txt"
+    wine "$WORK/fileio.exe" >/dev/null 2>&1
+    [ -f "$WORK/out.txt" ] || fail "fileio.exe did not produce output file under wine"
+    got="$(cat "$WORK/out.txt")"
+    [ "$got" = "roundtrip-payload-xyz" ] || fail "fileio.exe round-trip got '$got', expected 'roundtrip-payload-xyz'"
+    echo "PASS: fileio.exe round-trips a file under wine"
 else
     echo "SKIP: wine absent -- execution checks not run"
 fi
