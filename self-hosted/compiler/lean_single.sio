@@ -25353,6 +25353,72 @@ fn emit_read_file_a64() with Mut, Panic {
     em32(0x91000000 | (16 << 10) | (31 << 5) | 31)  // add sp, sp, #16 (discard fd)
 }
 
+// ─── ARM64 read_line ───
+// Gen 19 parity: read one line from stdin (fd=0) into a fresh mmap buffer.
+// Mirrors emit_read_line_x86. Returns buf pointer (string) in x0. Deliberate
+// a64↔x86 divergence: this clamps bytes_read<0 to 0 before null-terminating
+// (the emit_read_file_a64 house pattern), avoiding the latent OOB write that
+// x86's mov byte[rcx+rax],0 performs when read returns a negative errno.
+fn emit_read_line_a64() with Mut, Panic {
+    // mmap(NULL, 4096, PROT_READ|PROT_WRITE=3, MAP_PRIVATE|MAP_ANON, -1, 0)
+    em32(0xD2800000)               // movz x0, #0 (NULL)
+    emit_imm64_reg_a64(1, 4096)    // x1 = 4096
+    em32(0xD2800060 | 2)           // movz x2, #3 (PROT_READ|PROT_WRITE)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(3, 0x1002)  // x3 = MAP_PRIVATE|MAP_ANON (Darwin)
+    } else {
+        em32(0xD2800000 | ((0x22 & 0xFFFF) << 5) | 3)  // x3 = 0x22 (Linux)
+    }
+    emit_imm64_reg_a64(4, -1)      // x4 = -1
+    em32(0xD2800005)               // movz x5, #0
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 197)
+    } else {
+        em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8)  // x8 = 222 (mmap)
+    }
+    emit_syscall_a64()
+    // x0 = buf. Push it.
+    emit_push_a64()
+    // read(0, buf, 4095): x0=fd=0 (stdin), x1=buf, x2=4095 (leave room for \0)
+    em32(0xAA0003E1)               // mov x1, x0 (buf)
+    em32(0xD2800000)               // movz x0, #0 (fd stdin)
+    emit_imm64_reg_a64(2, 4095)    // x2 = 4095
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 3)
+    } else {
+        em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)  // x8 = 63 (read)
+    }
+    emit_syscall_a64()
+    // x2 = bytes_read; clamp negatives to 0
+    em32(0xAA0003E2)               // mov x2, x0 (bytes)
+    em32(0xF100005F)               // cmp x2, #0
+    let n_ok_patch = CL
+    em32(0x5400000A)               // b.ge n_ok (patched)
+    em32(0xD2800002)               // movz x2, #0
+    patch_branch_a64(n_ok_patch, CL)
+    // if bytes == 0, skip newline strip
+    em32(0xF100005F)               // cmp x2, #0
+    let strip_skip_patch = CL
+    em32(0x54000000)               // b.eq strip_done (patched)
+    // strip trailing '\n' (10): byte at buf+bytes-1
+    em32(0xF94003E1)               // ldr x1, [sp] (buf)
+    em32(0x8B020021)               // add x1, x1, x2
+    em32(0x385FF023)               // ldurb w3, [x1, #-1]
+    em32(0x7100287F)               // cmp w3, #10
+    let nl_skip_patch = CL
+    em32(0x54000001)               // b.ne strip_done (patched)
+    em32(0xD1000442)               // sub x2, x2, #1
+    // strip_done:
+    patch_branch_a64(strip_skip_patch, CL)
+    patch_branch_a64(nl_skip_patch, CL)
+    // null-terminate buf[bytes] = 0
+    em32(0xF94003E1)               // ldr x1, [sp] (buf)
+    em32(0x8B020021)               // add x1, x1, x2
+    em32(0x3900003F)               // strb wzr, [x1]
+    // Return buf
+    em32(0xF84107E0)               // ldr x0, [sp], #16 (pop buf)
+}
+
 // ─── ARM64 write_file ───
 fn emit_write_file_a64_flags(linux_flags: i64, macos_flags: i64) with Mut, Panic {
     // On entry: stack=[buf, path] (path pushed first, buf second), x0=len
@@ -27376,6 +27442,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 EXPR_TY_HASH = 0
                 return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_line") {
+                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }  // skip ')'
+                emit_read_line_a64(); EXPR_IS_F64 = 0; EXPR_TY = 3; EXPR_TY_HASH = 0; return
             }
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_file") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
