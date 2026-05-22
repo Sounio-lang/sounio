@@ -252,6 +252,10 @@ var VAR_UNIT: [i64; 1024] = [0; 1024]
 var ST_LINEAR: [i64; 1024] = [0; 1024]
 // Per-struct: 1 if declared with 'affine' keyword, 0 otherwise
 var ST_AFFINE: [i64; 1024] = [0; 1024]
+// Per-struct visibility: 1 if declared `pub struct`, 0 otherwise
+var ST_IS_PUB: [i64; 1024] = [0; 1024]
+// Per-struct origin: 1 if declared in an imported module, 0 if main module
+var ST_FROM_IMPORT: [i64; 1024] = [0; 1024]
 // ─── Phase 6d: Algebra property tracking (bit-packed per struct) ───
 // Bit 0: is_algebra, Bit 1: add_comm, Bit 2: add_assoc,
 // Bit 3: mul_comm, Bit 4: mul_assoc, Bit 5: mul_alt
@@ -13577,6 +13581,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
             let sh = gl_name_hash(ns, ne)
             let si = st_find(sh)
             if si >= 0 {
+                // Opacity: a non-pub struct from an imported module cannot be
+                // constructed by literal outside its declaring module.
+                if ST_FROM_IMPORT[si as usize] != 0 && ST_IS_PUB[si as usize] == 0 && (FN_EFFECTS[CURRENT_FN as usize] & 2048) == 0 {
+                    tc_error_hard(EP, "private struct literal — cannot construct non-pub struct from another module")
+                }
                 EP = EP + 1  // skip {
                 let total_slots = st_total_size(si) / 8
                 let base_slot = NEXT_SLOT
@@ -24528,8 +24537,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             // struct or pub/linear/affine keyword — skip prefix, track linear/affine
             var is_linear_decl: i64 = 0
             var is_affine_decl: i64 = 0
+            var is_pub_decl: i64 = 0
             if TK[p as usize] == 62 { is_linear_decl = 1 }
             if TK[p as usize] == 73 { is_affine_decl = 1 }
+            if TK[p as usize] == 49 { is_pub_decl = 1 }
             if TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73 { p = p + 1 }
             if TK[p as usize] == 46 {
                 p = p + 1  // skip 'struct'
@@ -24609,6 +24620,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 }
                 ST_LINEAR[si as usize] = is_linear_decl
                 ST_AFFINE[si as usize] = is_affine_decl
+                ST_IS_PUB[si as usize] = is_pub_decl
+                if MAIN_SRC_END > 0 && TS[struct_name_tok as usize] >= MAIN_SRC_END {
+                    ST_FROM_IMPORT[si as usize] = 1
+                } else {
+                    ST_FROM_IMPORT[si as usize] = 0
+                }
                 ST_COUNT = ST_COUNT + 1
                 if TK[p as usize] == 9 { p = p + 1 }
                 continue
