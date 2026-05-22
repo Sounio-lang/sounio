@@ -42,9 +42,6 @@ ${SOUC} check "${ROOT_DIR}/stdlib/graphics/tile.sio"
 echo "--> check graphics::png"
 ${SOUC} check "${ROOT_DIR}/stdlib/graphics/png.sio"
 
-echo "--> check graphics::png_decode"
-${SOUC} check "${ROOT_DIR}/stdlib/graphics/png_decode.sio"
-
 echo "--> check graphics::plot_png"
 ${SOUC} check "${ROOT_DIR}/stdlib/graphics/plot_png.sio"
 

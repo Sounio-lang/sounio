@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.design.native-graphics-integration-map
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.design.native-graphics-integration-map
+-->
+
 # Native Graphics Integration Map
 
 Status: active integration note
@@ -41,6 +50,11 @@ Use two gates, in this order:
 
 Do not replace the scaffold gate with the companion gate. The scaffold gate is
 the stable owner gate; the companion gate is the broader integration gate.
+
+If the companion gate fails while the scaffold gate still passes, treat that as
+an integration regression rather than a scaffold ownership failure. Fix the
+companion regression before release or PR merge, but keep the scaffold gate
+available as the smaller isolation gate for base-module work.
 
 ## Current Quality Surface
 
