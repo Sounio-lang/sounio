@@ -91,6 +91,17 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.r3-0-transitive-alias-chain.synthesis | repo_only | docs/audit/r3_0_transitive_alias_chain/SYNTHESIS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r3-1-tup-cache-collision-fix.dispatch | repo_only | docs/audit/r3_1_tup_cache_collision_fix/DISPATCH.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r3-1-tup-cache-collision-fix.synthesis | repo_only | docs/audit/r3_1_tup_cache_collision_fix/SYNTHESIS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.windows-assert-a64-parity.ad-hessian-diagonal | repo_only | docs/audit/windows_assert_a64_parity/AD_HESSIAN_DIAGONAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.windows-assert-a64-parity.ad-hessian-offdiagonal | repo_only | docs/audit/windows_assert_a64_parity/AD_HESSIAN_OFFDIAGONAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.windows-assert-a64-parity.ad-shadows-first-order | repo_only | docs/audit/windows_assert_a64_parity/AD_SHADOWS_FIRST_ORDER.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.windows-assert-a64-parity.audit | repo_only | docs/audit/windows_assert_a64_parity/AUDIT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.windows-assert-a64-parity.print-char | repo_only | docs/audit/windows_assert_a64_parity/PRINT_CHAR.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.windows-assert-a64-parity.print-f64-negative | repo_only | docs/audit/windows_assert_a64_parity/PRINT_F64_NEGATIVE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.windows-assert-a64-parity.read-line | repo_only | docs/audit/windows_assert_a64_parity/READ_LINE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.windows-assert-a64-parity.str-concat | repo_only | docs/audit/windows_assert_a64_parity/STR_CONCAT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.windows-assert-a64-parity.str-eq | repo_only | docs/audit/windows_assert_a64_parity/STR_EQ.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.windows-assert-a64-parity.str-slice | repo_only | docs/audit/windows_assert_a64_parity/STR_SLICE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.windows-assert-a64-parity.trig-builtins | repo_only | docs/audit/windows_assert_a64_parity/TRIG_BUILTINS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.brand.sounio-brand-pack-v4-complete.00-readme.font-licenses | repo_only | docs/brand/Sounio_Brand_Pack_v4_COMPLETE/00_README/FONT_LICENSES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.brand.sounio-brand-pack-v4-complete.00-readme.readme | repo_only | docs/brand/Sounio_Brand_Pack_v4_COMPLETE/00_README/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.competitive-position-2026 | repo_only | docs/COMPETITIVE_POSITION_2026.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
