@@ -72,6 +72,15 @@ Hand these off to Foundry/Slurm:
 
 ## Handoff Request Template
 
+To generate the template from the current checkout without submitting a job:
+
+```bash
+bash scripts/dev/foundry_slurm_handoff.sh
+```
+
+Use `--out <path>` only for small handoff notes that belong in the repo or an
+artifact packet. Do not use the workspace as scratch for batch output.
+
 ```text
 Heavy Validation Handoff
 requested_by:

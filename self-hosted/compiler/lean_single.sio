@@ -75,8 +75,13 @@ var ONT_PROP_NHASH: [i64; 256] = [0; 256]  // property name hash
 var ONT_PROP_BOUND: [i64; 256] = [0; 256]  // signed bound ×1000 (neg stored as negative)
 var ONT_PROP_DIR: [i64; 256] = [0; 256]    // 0 = >=, 1 = <=
 var ONT_PROP_CNT: i64 = 0
-// PE: offset within CD[] of the ExitProcess call [rip+disp32]'s disp32 field
-var PE_EXIT_CALL_OFF: i64 = -1
+// PE: offsets within CD[] of every ExitProcess call [rip+disp32]'s disp32 field.
+// More than one site exists: the entry trampoline plus each emit_assert_fail abort.
+// write_pe patches every recorded offset to IAT slot 0 (ExitProcess).
+var PE_EXIT_CALL_OFFS: [i64; 4096] = [0; 4096]
+var PE_EXIT_CALL_N: i64 = 0
+// PE: offset within CD[] of the GetCommandLineA call [rip+disp32]'s disp32 field
+var PE_GETCMDLINE_CALL_OFF: i64 = -1
 
 // Shared string scratch buffer: used both as packed qwords and as decoded bytes.
 var SQW: [i64; 256] = [0; 256]
@@ -801,6 +806,8 @@ var EXT_ARR_ELEM_HASH: [i64; 4096] = [0; 4096]
 var EXT_ARR_COUNT: i64 = 0
 var GL_BSS_BASE: i64 = 0
 var RET_AGG_BSS_OFF: i64 = 0
+// PE (Windows): BSS offset of the argv pointer table built from GetCommandLineA
+var ARGV_TABLE_BSS_OFF: i64 = 0
 var LIMIT_ERROR_KIND: i64 = 0
 var LAST_LOCAL_BSS_SPILL: i64 = 0
 var LAST_LOCAL_BSS_ADDR: i64 = 0
@@ -7217,10 +7224,41 @@ fn emit_print_nl() with Mut {
     em(0x48); em(0x83); em(0xc4); em(8)
 }
 
+// PE (Windows): emit `call [rip+disp32]` targeting ExitProcess and record the
+// disp32 field offset so write_pe can patch it to IAT slot 0. Used by both the
+// entry trampoline and emit_assert_fail's abort path (multiple sites per image).
+fn emit_pe_exitprocess_call() with Mut {
+    em(0xFF); em(0x15)
+    if PE_EXIT_CALL_N < 4096 {
+        PE_EXIT_CALL_OFFS[PE_EXIT_CALL_N as usize] = CL
+    }
+    PE_EXIT_CALL_N = PE_EXIT_CALL_N + 1  // always count so write_pe can detect overflow
+    em32(0)  // placeholder disp32, patched in write_pe
+}
+
+// Abort with exit code 1 (assertion / bounds / unreachable). Target-dispatched so
+// the abort uses the platform's real process-exit primitive — ExitProcess on
+// Windows (raw Linux syscall 60 would not terminate cleanly on a real PE host).
 fn emit_assert_fail() with Mut {
-    em(0xbf); em32(1)
-    em(0xb8); em32(60)
-    em(0x0f); em(0x05)
+    if TARGET_OS == 3 {
+        // Windows: ExitProcess(1). Align rsp + reserve Win64 shadow space first;
+        // we never return (process terminates), so clobbering rsp is fine.
+        em(0x48); em(0x83); em(0xe4); em(0xf0)  // and rsp, -16
+        em(0x48); em(0x83); em(0xec); em(0x20)  // sub rsp, 32
+        em(0xb9); em32(1)                        // mov ecx, 1  (Win64 arg0 = exit code)
+        emit_pe_exitprocess_call()               // call [rip+disp32] → ExitProcess
+        em(0x0F); em(0x0B)                        // ud2 (unreachable)
+    } else if TARGET_OS == 2 {
+        // macOS: exit(1) via BSD syscall 0x2000001
+        em(0xbf); em32(1)                        // mov edi, 1
+        em(0x48); em(0xb8); em64(0x2000001)      // mov rax, 0x2000001
+        em(0x0f); em(0x05)                        // syscall
+    } else {
+        // Linux: exit(1) via syscall 60
+        em(0xbf); em32(1)                        // mov edi, 1
+        em(0xb8); em32(60)                       // mov eax, 60
+        em(0x0f); em(0x05)                        // syscall
+    }
 }
 
 fn emit_sqrt_builtin_x86() with Mut {
@@ -7692,6 +7730,141 @@ fn emit_get_arg() with Mut {
     em(0x48); em(0xb8); em64(argv_addr)
     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax] = argv base
     em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
+}
+
+// PE (Windows) entry: populate argc/argv from GetCommandLineA so the self-hosted
+// CLI can read its <source>/<output> path arguments. The Windows kernel hands the
+// process no argc/argv on the stack (unlike Linux/macOS), so we must ask kernel32.
+//
+// Strategy: call GetCommandLineA -> ANSI command line (program name + args, NUL
+// terminated). Skip the program-name token (quote-aware), then split the remaining
+// args on spaces, recording each token's start pointer into ARGV_TABLE and
+// NUL-terminating it in place. argc = number of real args (program name excluded),
+// argv = &ARGV_TABLE[0] — matching get_arg/arg_count, which expect get_arg(0) to be
+// the first real argument (same convention as the Linux/macOS trampolines).
+//
+// Limitation: in-arg quoting splits a "a b" token at the inner quotes only; embedded
+// escaped quotes are not handled. Compiler CLI paths are space-free in practice.
+// All control-flow uses rel32 jumps backpatched via em32_at to avoid rel8 range bugs.
+fn emit_pe_argv_init_x86() with Mut, Panic, Div {
+    let argc_addr = GL_BSS_BASE - 16
+    let argv_addr = GL_BSS_BASE - 8
+    let table_addr = GL_BSS_BASE + ARGV_TABLE_BSS_OFF
+
+    // rax = GetCommandLineA()  — call [rip+disp32], disp patched in write_pe to IAT slot 1
+    em(0xFF); em(0x15)
+    PE_GETCMDLINE_CALL_OFF = CL
+    em32(0)
+
+    em(0x48); em(0x89); em(0xc6)              // mov rsi, rax  (cursor)
+    em(0x31); em(0xdb)                          // xor ebx, ebx  (argc = 0)
+    em(0x48); em(0xbf); em64(table_addr)        // mov rdi, table_addr (argv base)
+
+    // .skip0: skip leading spaces before the program name
+    let l_skip0 = CL
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x3c); em(0x20)                          // cmp al, ' '
+    em(0x0f); em(0x85); let p_pn = CL; em32(0) // jne .pn
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_skip0 - (CL + 4))         // jmp .skip0
+
+    // .pn: program-name token (quote-aware), consumed but not recorded
+    let l_pn = CL
+    em32_at(p_pn, l_pn - (p_pn + 4))
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x3c); em(0x22)                          // cmp al, '"'
+    em(0x0f); em(0x85); let p_pn_plain = CL; em32(0) // jne .pn_plain
+    // quoted program name: skip opening quote, scan to closing quote
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    let l_pn_q = CL
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x84); em(0xc0)                          // test al, al
+    em(0x0f); em(0x84); let p_pnq_done = CL; em32(0) // je .done
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0x3c); em(0x22)                          // cmp al, '"'
+    em(0x0f); em(0x85); em32(l_pn_q - (CL + 4)) // jne .pn_q
+    em(0xe9); let p_pnq_args = CL; em32(0)     // jmp .args
+    // .pn_plain: scan to first space or NUL
+    let l_pn_plain = CL
+    em32_at(p_pn_plain, l_pn_plain - (p_pn_plain + 4))
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x84); em(0xc0)                          // test al, al
+    em(0x0f); em(0x84); let p_pnp_done = CL; em32(0) // je .done
+    em(0x3c); em(0x20)                          // cmp al, ' '
+    em(0x0f); em(0x84); let p_pnp_args = CL; em32(0) // je .args
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_pn_plain - (CL + 4))      // jmp .pn_plain
+
+    // .args: loop over remaining argument tokens
+    let l_args = CL
+    em32_at(p_pnq_args, l_args - (p_pnq_args + 4))
+    em32_at(p_pnp_args, l_args - (p_pnp_args + 4))
+    // skip inter-arg spaces
+    let l_skipsp = CL
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x3c); em(0x20)                          // cmp al, ' '
+    em(0x0f); em(0x85); let p_check = CL; em32(0) // jne .arg_check
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_skipsp - (CL + 4))        // jmp .skipsp
+    // .arg_check
+    let l_check = CL
+    em32_at(p_check, l_check - (p_check + 4))
+    em(0x84); em(0xc0)                          // test al, al
+    em(0x0f); em(0x84); let p_chk_done = CL; em32(0) // je .done (end of line)
+    em(0x48); em(0x83); em(0xfb); em(0x3f)     // cmp rbx, 63  (table cap)
+    em(0x0f); em(0x8d); let p_cap_done = CL; em32(0) // jge .done
+    em(0x3c); em(0x22)                          // cmp al, '"'
+    em(0x0f); em(0x85); let p_plain = CL; em32(0) // jne .arg_plain
+    // quoted arg: record start after opening quote, scan to closing quote
+    em(0x48); em(0xff); em(0xc6)               // inc rsi (skip ")
+    em(0x48); em(0x89); em(0x34); em(0xdf)     // mov [rdi + rbx*8], rsi
+    em(0x48); em(0xff); em(0xc3)               // inc rbx
+    let l_arg_q = CL
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x84); em(0xc0)                          // test al, al
+    em(0x0f); em(0x84); let p_argq_done = CL; em32(0) // je .done (unterminated)
+    em(0x3c); em(0x22)                          // cmp al, '"'
+    em(0x0f); em(0x84); let p_argq_end = CL; em32(0) // je .arg_qend
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_arg_q - (CL + 4))         // jmp .arg_q
+    // .arg_qend: terminate at the closing quote, advance, loop
+    let l_arg_qend = CL
+    em32_at(p_argq_end, l_arg_qend - (p_argq_end + 4))
+    em(0xc6); em(0x06); em(0x00)               // mov byte [rsi], 0
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_args - (CL + 4))          // jmp .args
+    // .arg_plain: record start, scan to space or NUL
+    let l_plain = CL
+    em32_at(p_plain, l_plain - (p_plain + 4))
+    em(0x48); em(0x89); em(0x34); em(0xdf)     // mov [rdi + rbx*8], rsi
+    em(0x48); em(0xff); em(0xc3)               // inc rbx
+    let l_arg_p2 = CL
+    em(0x0f); em(0xb6); em(0x06)               // movzx eax, byte [rsi]
+    em(0x84); em(0xc0)                          // test al, al
+    em(0x0f); em(0x84); let p_argp2_done = CL; em32(0) // je .done
+    em(0x3c); em(0x20)                          // cmp al, ' '
+    em(0x0f); em(0x84); let p_argp2_sp = CL; em32(0) // je .arg_psp
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_arg_p2 - (CL + 4))        // jmp .arg_p2
+    // .arg_psp: terminate token, advance, loop
+    let l_arg_psp = CL
+    em32_at(p_argp2_sp, l_arg_psp - (p_argp2_sp + 4))
+    em(0xc6); em(0x06); em(0x00)               // mov byte [rsi], 0
+    em(0x48); em(0xff); em(0xc6)               // inc rsi
+    em(0xe9); em32(l_args - (CL + 4))          // jmp .args
+
+    // .done: store argc (rbx) and argv (rdi = &table[0])
+    let l_done = CL
+    em32_at(p_pnq_done, l_done - (p_pnq_done + 4))
+    em32_at(p_pnp_done, l_done - (p_pnp_done + 4))
+    em32_at(p_chk_done, l_done - (p_chk_done + 4))
+    em32_at(p_cap_done, l_done - (p_cap_done + 4))
+    em32_at(p_argq_done, l_done - (p_argq_done + 4))
+    em32_at(p_argp2_done, l_done - (p_argp2_done + 4))
+    em(0x48); em(0x89); em(0xd8)               // mov rax, rbx
+    emit_store_rax_to_abs_qword_x86(argc_addr)
+    em(0x48); em(0x89); em(0xf8)               // mov rax, rdi
+    emit_store_rax_to_abs_qword_x86(argv_addr)
 }
 
 fn emit_str_len() with Mut {
@@ -10278,9 +10451,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 compile_or()
                 if EXPR_TY != 0 && EXPR_TY != 4 { tc_error_hard(name_tok, "assert requires bool condition") }
-                em(0x48); em(0x85); em(0xc0)
-                em(0x75); em(12)
-                emit_assert_fail()
+                em(0x48); em(0x85); em(0xc0)              // test rax, rax
+                em(0x75); let assert_ok = CL; em(0)      // jnz rel8 → skip abort (backpatched)
+                emit_assert_fail()                       // abort size is target-dependent
+                CD[assert_ok as usize] = (CL - assert_ok - 1) as i8  // skip the whole abort
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 em(0x31); em(0xc0)
                 EXPR_IS_F64 = 0
@@ -22647,6 +22821,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     GPU_EMU_THREAD_ID_BSS_OFF = 0
     R15_GATE_COUNT = 0
     R15_SIDE_TABLE_BSS_OFF = 0
+    ARGV_TABLE_BSS_OFF = 0
+    PE_EXIT_CALL_N = 0   // reset recorded ExitProcess call sites (trampoline + aborts)
     // Note: do NOT reset TYPECHECK_FAILED here — lexer-phase errors must persist
     LIMIT_ERROR_KIND = 0
     var p: i64 = 0
@@ -23243,6 +23419,15 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // R15 Runtime Tag Stack: reserve BSS for side table (up to 16384 call sites × 8 bytes)
     if CLI_R15_MONITOR != 0 {
         R15_SIDE_TABLE_BSS_OFF = bss_alloc_aligned(16384 * 8)
+    }
+
+    // PE (Windows) argv pointer table: up to 64 args parsed from GetCommandLineA.
+    // Reserved ONLY for the Windows target — an unconditional reservation shifts
+    // every later BSS offset by 512 bytes on Linux/macOS too, which diverges from
+    // the upstream BSS layout and tipped a memory-heavy run-pass test (dataframe
+    // sort_by) into a segfault. Gating on TARGET_OS keeps non-Windows BSS identical.
+    if TARGET_OS == 3 {
+        ARGV_TABLE_BSS_OFF = bss_alloc_aligned(64 * 8)
     }
 
     // BSS layout: [argc(8)] [argv(8)] [globals...] [aggregate return scratch]
@@ -24417,19 +24602,22 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     let tramp = CL
 
     if TARGET_OS == 3 {
-        // Windows PE trampoline: call main, then ExitProcess(rax) via IAT
-        // No argc/argv on Windows MVP (would need GetCommandLineW)
-        // sub rsp, 40 — align stack + shadow space
-        em(0x48); em(0x83); em(0xEC); em(0x28)
+        // Windows PE trampoline: init argc/argv from GetCommandLineA, call main,
+        // then ExitProcess(rax) via IAT.
+        // and rsp, -16 — guarantee 16-byte alignment at process entry
+        em(0x48); em(0x83); em(0xe4); em(0xf0)
+        // sub rsp, 32 — Win64 shadow space for the calls below (keeps 16-align)
+        em(0x48); em(0x83); em(0xec); em(0x20)
+        // GetCommandLineA → parse → store argc/argv globals
+        emit_pe_argv_init_x86()
         // call main
         em(0xe8)
         let wrel = FN_OFF[main_fn as usize] - (CL + 4)
         em32(wrel)
         // mov ecx, eax — exit code to RCX (Win64 first param)
         em(0x89); em(0xC1)
-        // call [rip+disp32] — ExitProcess via IAT (disp32 patched by write_pe)
-        PE_EXIT_CALL_OFF = CL + 2   // remember offset of disp32 for patching
-        em(0xFF); em(0x15); em32(0)  // placeholder disp32
+        // call [rip+disp32] — ExitProcess via IAT (disp32 recorded + patched by write_pe)
+        emit_pe_exitprocess_call()
         // ud2 (should never reach)
         em(0x0F); em(0x0B)
     } else if TARGET_OS == 2 {
@@ -24747,8 +24935,11 @@ fn write_elf(output: string) -> i64 with IO, Mut, Panic, Div {
 
 // ─── PE/COFF writer ───
 // Builds a Windows PE32+ executable from compiled code in CD[0..CL].
-// Image layout: image_base=0x400000, .text at RVA 0x1000, .idata at next page, .bss at 0x200000.
-// This keeps BSS virtual address at 0x600000 = 0x400000 + 0x200000, matching ELF layout.
+// Image layout: image_base=0x400000, .text at RVA 0x1000, .idata at next page,
+// .bss placed so its VA == GL_BSS_BASE (0x10000000). Global accesses are emitted
+// as absolute `movabs 0x10000000+off`, so the .bss VA MUST equal that base; the
+// ELF path already maps BSS at 0x10000000 (the PE path previously used 0x600000,
+// which faulted on the first executed global access).
 fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
     let image_base = 0x400000
     let sec_align = 0x1000
@@ -24757,28 +24948,49 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
     let text_raw_size = ((CL + file_align - 1) / file_align) * file_align
     let idata_rva = text_rva + ((CL + sec_align - 1) / sec_align) * sec_align
 
-    // .idata layout: 1 import descriptor (20) + null (20) + INT(2*8+8=24) + IAT(24) + hints + dll name
+    // .idata layout: 1 import descriptor (20) + null (20) + INT(24) + IAT(24)
+    //   + hint/name entries + dll name. kernel32.dll imports two functions:
+    //   slot 0 = ExitProcess, slot 1 = GetCommandLineA.
     let idt_off: i64 = 0
-    let int_off: i64 = 40
-    let iat_off: i64 = 64
-    let hnt_ep_off: i64 = 88         // "ExitProcess" hint/name entry
-    let dll_name_off: i64 = 104      // "kernel32.dll\0"
-    let idata_total: i64 = 117       // 104 + 13
+    let int_off: i64 = 40            // INT: [ExitProcess][GetCommandLineA][null] = 24 bytes
+    let iat_off: i64 = 64            // IAT: same shape = 24 bytes
+    let hnt_ep_off: i64 = 88         // "ExitProcess" hint/name entry (hint(2)+12 = 14)
+    let hnt_gcl_off: i64 = 104       // "GetCommandLineA" hint/name entry (hint(2)+16 = 18)
+    let dll_name_off: i64 = 124      // "kernel32.dll\0" (13)
+    let idata_total: i64 = 137       // 124 + 13
     let idata_raw_size = ((idata_total + file_align - 1) / file_align) * file_align
 
-    let bss_rva = 0x200000            // .bss section: RVA so that VA = 0x600000
+    let bss_rva = 0x10000000 - image_base   // .bss VA = 0x10000000 to match GL_BSS_BASE (globals use absolute movabs)
     let bss_vsize = GL_BSS_SIZE
     if bss_vsize < 4096 { let bss_vsize_min = 4096 }  // minimum 1 page
 
-    // Patch ExitProcess IAT displacement in trampoline code
+    // Patch every ExitProcess IAT displacement (trampoline + each assert abort).
     // call [rip+disp32]: disp32 = IAT_slot_RVA - (text_RVA + instruction_end_offset)
-    if PE_EXIT_CALL_OFF >= 0 {
-        let call_end = PE_EXIT_CALL_OFF + 4
+    if PE_EXIT_CALL_N > 4096 {
+        print("error: too many ExitProcess call sites ("); print_int(PE_EXIT_CALL_N)
+        print(" > 4096) — bump PE_EXIT_CALL_OFFS\n")
+        return 1
+    }
+    var ei: i64 = 0
+    while ei < PE_EXIT_CALL_N {
+        let eoff = PE_EXIT_CALL_OFFS[ei as usize]
+        let call_end = eoff + 4
         let disp = (idata_rva + iat_off) - (text_rva + call_end)  // IAT slot 0 = ExitProcess
-        CD[PE_EXIT_CALL_OFF as usize] = (disp & 0xFF) as i8
-        CD[(PE_EXIT_CALL_OFF + 1) as usize] = ((disp >> 8) & 0xFF) as i8
-        CD[(PE_EXIT_CALL_OFF + 2) as usize] = ((disp >> 16) & 0xFF) as i8
-        CD[(PE_EXIT_CALL_OFF + 3) as usize] = ((disp >> 24) & 0xFF) as i8
+        CD[eoff as usize] = (disp & 0xFF) as i8
+        CD[(eoff + 1) as usize] = ((disp >> 8) & 0xFF) as i8
+        CD[(eoff + 2) as usize] = ((disp >> 16) & 0xFF) as i8
+        CD[(eoff + 3) as usize] = ((disp >> 24) & 0xFF) as i8
+        ei = ei + 1
+    }
+
+    // Patch GetCommandLineA IAT displacement in the argv-init trampoline
+    if PE_GETCMDLINE_CALL_OFF >= 0 {
+        let gcl_call_end = PE_GETCMDLINE_CALL_OFF + 4
+        let gcl_disp = (idata_rva + iat_off + 8) - (text_rva + gcl_call_end)  // IAT slot 1
+        CD[PE_GETCMDLINE_CALL_OFF as usize] = (gcl_disp & 0xFF) as i8
+        CD[(PE_GETCMDLINE_CALL_OFF + 1) as usize] = ((gcl_disp >> 8) & 0xFF) as i8
+        CD[(PE_GETCMDLINE_CALL_OFF + 2) as usize] = ((gcl_disp >> 16) & 0xFF) as i8
+        CD[(PE_GETCMDLINE_CALL_OFF + 3) as usize] = ((gcl_disp >> 24) & 0xFF) as i8
     }
 
     // Headers: DOS(64) + PE sig(4) + COFF(20) + OptHdr(112) + DataDirs(128) + 3 section headers(3*40=120) = 448
@@ -24881,13 +25093,15 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w32(idata_file_off + 16, idata_rva + iat_off)   // FirstThunk (IAT RVA)
     // Null terminator descriptor (20 bytes of zeros — already zero)
 
-    // INT: ExitProcess entry + null (offset 40)
-    elf_w64(idata_file_off + int_off, idata_rva + hnt_ep_off)  // → hint/name for ExitProcess
-    // null terminator at int_off+8 (already zero)
+    // INT: ExitProcess (slot 0) + GetCommandLineA (slot 1) + null (offset 40)
+    elf_w64(idata_file_off + int_off, idata_rva + hnt_ep_off)       // → hint/name for ExitProcess
+    elf_w64(idata_file_off + int_off + 8, idata_rva + hnt_gcl_off)  // → hint/name for GetCommandLineA
+    // null terminator at int_off+16 (already zero)
 
     // IAT: same as INT (offset 64)
     elf_w64(idata_file_off + iat_off, idata_rva + hnt_ep_off)
-    // null terminator at iat_off+8 (already zero)
+    elf_w64(idata_file_off + iat_off + 8, idata_rva + hnt_gcl_off)
+    // null terminator at iat_off+16 (already zero)
 
     // Hint/Name entry for ExitProcess (offset 88): hint(2) + "ExitProcess\0"
     elf_w16(idata_file_off + hnt_ep_off, 0)              // hint = 0
@@ -24904,7 +25118,25 @@ fn write_pe(output: string) -> i64 with IO, Mut, Panic, Div {
     elf_w8(idata_file_off + hnt_ep_off + 11, 0x73)  // s
     elf_w8(idata_file_off + hnt_ep_off + 12, 0x73)  // s
 
-    // DLL name: "kernel32.dll\0" (offset 104)
+    // Hint/Name entry for GetCommandLineA (offset 104): hint(2) + "GetCommandLineA\0"
+    elf_w16(idata_file_off + hnt_gcl_off, 0)             // hint = 0
+    elf_w8(idata_file_off + hnt_gcl_off + 2, 0x47)   // G
+    elf_w8(idata_file_off + hnt_gcl_off + 3, 0x65)   // e
+    elf_w8(idata_file_off + hnt_gcl_off + 4, 0x74)   // t
+    elf_w8(idata_file_off + hnt_gcl_off + 5, 0x43)   // C
+    elf_w8(idata_file_off + hnt_gcl_off + 6, 0x6F)   // o
+    elf_w8(idata_file_off + hnt_gcl_off + 7, 0x6D)   // m
+    elf_w8(idata_file_off + hnt_gcl_off + 8, 0x6D)   // m
+    elf_w8(idata_file_off + hnt_gcl_off + 9, 0x61)   // a
+    elf_w8(idata_file_off + hnt_gcl_off + 10, 0x6E)  // n
+    elf_w8(idata_file_off + hnt_gcl_off + 11, 0x64)  // d
+    elf_w8(idata_file_off + hnt_gcl_off + 12, 0x4C)  // L
+    elf_w8(idata_file_off + hnt_gcl_off + 13, 0x69)  // i
+    elf_w8(idata_file_off + hnt_gcl_off + 14, 0x6E)  // n
+    elf_w8(idata_file_off + hnt_gcl_off + 15, 0x65)  // e
+    elf_w8(idata_file_off + hnt_gcl_off + 16, 0x41)  // A
+
+    // DLL name: "kernel32.dll\0" (offset 124)
     elf_w8(idata_file_off + dll_name_off + 0, 0x6B)   // k
     elf_w8(idata_file_off + dll_name_off + 1, 0x65)   // e
     elf_w8(idata_file_off + dll_name_off + 2, 0x72)   // r
@@ -25227,6 +25459,24 @@ fn emit_print_char_lit_a64(ch: i64) with Mut {
     em32(0x910043FF)  // add sp, sp, #16
 }
 
+// print_char: write the low byte of the char code in x0 to stdout (dynamic
+// counterpart of emit_print_char_lit_a64).
+fn emit_print_char_a64() with Mut {
+    em32(0xAA0003EA)                                  // mov x10, x0 (save char code)
+    em32(0xD1000000 | (16 << 10) | (31 << 5) | 31)    // sub sp, sp, #16
+    em32(0x390003EA)                                  // strb w10, [sp]
+    em32(0xD2800020)                                  // movz x0, #1 (fd=stdout)
+    em32(0x910003E1)                                  // mov x1, sp
+    em32(0xD2800022)                                  // movz x2, #1 (len=1)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 4)
+    } else {
+        em32(0xD2800000 | ((64 & 0xFFFF) << 5) | 8)
+    }
+    emit_syscall_a64()
+    em32(0x910043FF)  // add sp, sp, #16
+}
+
 fn emit_assert_fail_a64() with Mut {
     em32(0xD2800020)  // movz x0, #1
     if TARGET_OS == 2 {
@@ -25384,12 +25634,15 @@ fn emit_print_f64_a64() with Mut, Panic {
     em32(0x54000000)                                  // b.eq nan
     let zero_sub_patch = CL
     em32(0xB4000000 | 9)                              // cbz x9, zero
+    // Capture |value| into d0 BEFORE printing the sign: emit_print_char_lit_a64
+    // does a write syscall that clobbers x0, so the fmov must precede it (FP
+    // registers survive the syscall). Otherwise negative values printed 0.
+    em32(0x9E670000)                                  // fmov d0, x0
     em32(0xF100001F | (15 << 5))                      // cmp x15, #0
     let sign_done_patch = CL
     em32(0x5400000A)                                  // b.ge sign_done
     emit_print_char_lit_a64(45)
     patch_branch_a64(sign_done_patch, CL)
-    em32(0x9E670000)                                  // fmov d0, x0
     em32(0x9E78000D)                                  // fcvtzs x13, d0
     em32(0xAA0D03E0)                                  // mov x0, x13
     em32(0x9E620001)                                  // scvtf d1, x0
@@ -25521,6 +25774,72 @@ fn emit_read_file_a64() with Mut, Panic {
     em32(0x91000000 | (16 << 10) | (31 << 5) | 31)  // add sp, sp, #16 (discard fd)
 }
 
+// ─── ARM64 read_line ───
+// Gen 19 parity: read one line from stdin (fd=0) into a fresh mmap buffer.
+// Mirrors emit_read_line_x86. Returns buf pointer (string) in x0. Deliberate
+// a64↔x86 divergence: this clamps bytes_read<0 to 0 before null-terminating
+// (the emit_read_file_a64 house pattern), avoiding the latent OOB write that
+// x86's mov byte[rcx+rax],0 performs when read returns a negative errno.
+fn emit_read_line_a64() with Mut, Panic {
+    // mmap(NULL, 4096, PROT_READ|PROT_WRITE=3, MAP_PRIVATE|MAP_ANON, -1, 0)
+    em32(0xD2800000)               // movz x0, #0 (NULL)
+    emit_imm64_reg_a64(1, 4096)    // x1 = 4096
+    em32(0xD2800060 | 2)           // movz x2, #3 (PROT_READ|PROT_WRITE)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(3, 0x1002)  // x3 = MAP_PRIVATE|MAP_ANON (Darwin)
+    } else {
+        em32(0xD2800000 | ((0x22 & 0xFFFF) << 5) | 3)  // x3 = 0x22 (Linux)
+    }
+    emit_imm64_reg_a64(4, -1)      // x4 = -1
+    em32(0xD2800005)               // movz x5, #0
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 197)
+    } else {
+        em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8)  // x8 = 222 (mmap)
+    }
+    emit_syscall_a64()
+    // x0 = buf. Push it.
+    emit_push_a64()
+    // read(0, buf, 4095): x0=fd=0 (stdin), x1=buf, x2=4095 (leave room for \0)
+    em32(0xAA0003E1)               // mov x1, x0 (buf)
+    em32(0xD2800000)               // movz x0, #0 (fd stdin)
+    emit_imm64_reg_a64(2, 4095)    // x2 = 4095
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 3)
+    } else {
+        em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)  // x8 = 63 (read)
+    }
+    emit_syscall_a64()
+    // x2 = bytes_read; clamp negatives to 0
+    em32(0xAA0003E2)               // mov x2, x0 (bytes)
+    em32(0xF100005F)               // cmp x2, #0
+    let n_ok_patch = CL
+    em32(0x5400000A)               // b.ge n_ok (patched)
+    em32(0xD2800002)               // movz x2, #0
+    patch_branch_a64(n_ok_patch, CL)
+    // if bytes == 0, skip newline strip
+    em32(0xF100005F)               // cmp x2, #0
+    let strip_skip_patch = CL
+    em32(0x54000000)               // b.eq strip_done (patched)
+    // strip trailing '\n' (10): byte at buf+bytes-1
+    em32(0xF94003E1)               // ldr x1, [sp] (buf)
+    em32(0x8B020021)               // add x1, x1, x2
+    em32(0x385FF023)               // ldurb w3, [x1, #-1]
+    em32(0x7100287F)               // cmp w3, #10
+    let nl_skip_patch = CL
+    em32(0x54000001)               // b.ne strip_done (patched)
+    em32(0xD1000442)               // sub x2, x2, #1
+    // strip_done:
+    patch_branch_a64(strip_skip_patch, CL)
+    patch_branch_a64(nl_skip_patch, CL)
+    // null-terminate buf[bytes] = 0
+    em32(0xF94003E1)               // ldr x1, [sp] (buf)
+    em32(0x8B020021)               // add x1, x1, x2
+    em32(0x3900003F)               // strb wzr, [x1]
+    // Return buf
+    em32(0xF84107E0)               // ldr x0, [sp], #16 (pop buf)
+}
+
 // ─── ARM64 write_file ───
 fn emit_write_file_a64_flags(linux_flags: i64, macos_flags: i64) with Mut, Panic {
     // On entry: stack=[buf, path] (path pushed first, buf second), x0=len
@@ -25648,12 +25967,150 @@ fn emit_str_len_a64() with Mut {
     em32(0x14000000 | (brel & 0x3FFFFFF))
 }
 
+// str_eq: x1 = ptr a, x0 = ptr b. Byte-compares to NUL; result in x0 (1 eq, 0 ne).
+fn emit_str_eq_regs_a64() with Mut, Panic {
+    let loop_off = CL
+    em32(0x39400022)   // ldrb w2, [x1]   (*a)
+    em32(0x39400003)   // ldrb w3, [x0]   (*b)
+    em32(0x6B03005F)   // cmp w2, w3
+    let ne_patch = CL
+    em32(0x54000001)   // b.ne not_equal (patched)
+    em32(0x7100005F)   // cmp w2, #0  (both bytes equal; NUL ⇒ strings equal)
+    let eq_patch = CL
+    em32(0x54000000)   // b.eq equal (patched)
+    em32(0x91000421)   // add x1, x1, #1
+    em32(0x91000400)   // add x0, x0, #1
+    let br = CL
+    em32(0x14000000 | (((loop_off - br) / 4) & 0x3FFFFFF))  // b loop
+    patch_branch_a64(ne_patch, CL)
+    em32(0xD2800000)   // not_equal: movz x0, #0
+    let done_patch = CL
+    em32(0x14000000)   // b done (patched)
+    patch_branch_a64(eq_patch, CL)
+    em32(0xD2800020)   // equal: movz x0, #1
+    patch_branch_a64(done_patch, CL)
+}
+
+// Copy x11 bytes from x9 (src) to x10 (dst), advancing x9/x10; x11→0 on exit.
+fn emit_byte_copy_loop_a64() with Mut, Panic {
+    let loop_off = CL
+    let exit_patch = CL
+    em32(0xB400000B)   // cbz x11, done (patched)
+    em32(0x3940012C)   // ldrb w12, [x9]
+    em32(0x3900014C)   // strb w12, [x10]
+    em32(0x91000529)   // add x9, x9, #1
+    em32(0x9100054A)   // add x10, x10, #1
+    em32(0xD100056B)   // sub x11, x11, #1
+    em32(0x14000000 | (((loop_off - CL) / 4) & 0x3FFFFFF))  // b loop
+    patch_branch_a64(exit_patch, CL)
+}
+
+// str_concat(a,b): res = heap(len_a+len_b+1); copy a, copy b, NUL-terminate.
+fn emit_str_concat_slots_a64(slot_a: i64, slot_b: i64) with Mut, Panic {
+    let slot_len_a = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let slot_len_b = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let slot_res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(slot_a)
+    emit_str_len_a64()
+    emit_store_var_a64(slot_len_a)
+    emit_load_var_a64(slot_b)
+    emit_str_len_a64()
+    emit_store_var_a64(slot_len_b)
+    // total = len_a + len_b + 1
+    emit_load_var_a64(slot_len_a)
+    emit_push_a64()
+    emit_load_var_a64(slot_len_b)
+    emit_pop_x1_a64()
+    em32(0x8B000020)   // add x0, x1, x0
+    em32(0x91000400)   // add x0, x0, #1
+    emit_heap_alloc_a64()
+    emit_store_var_a64(slot_res)
+    // copy a → res. NOTE: emit_load_var_a64 clobbers x9, so set x9 (src) LAST.
+    emit_load_var_a64(slot_len_a); em32(0xAA0003EB)  // mov x11, x0 (count)
+    emit_load_var_a64(slot_res);   em32(0xAA0003EA)  // mov x10, x0 (dst)
+    emit_load_var_a64(slot_a);     em32(0xAA0003E9)  // mov x9, x0 (src) — last
+    emit_byte_copy_loop_a64()
+    // copy b → res+len_a (x10 already advanced; x9 set last again)
+    emit_load_var_a64(slot_len_b); em32(0xAA0003EB)  // mov x11, x0 (count)
+    emit_load_var_a64(slot_b);     em32(0xAA0003E9)  // mov x9, x0 (src) — last
+    emit_byte_copy_loop_a64()
+    em32(0x3900015F)   // strb wzr, [x10] (NUL terminator)
+    emit_load_var_a64(slot_res)
+}
+
+// str_slice(s, start, end): res = heap(len+1); copy len=end-start bytes from
+// s+start; NUL-terminate. Returns res.
+fn emit_str_slice_range_slots_a64(slot_s: i64, slot_start: i64, slot_end: i64) with Mut, Panic {
+    let slot_len = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let slot_res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    // len = end - start
+    emit_load_var_a64(slot_end)
+    emit_push_a64()
+    emit_load_var_a64(slot_start)
+    emit_pop_x1_a64()
+    em32(0xCB000020)   // sub x0, x1, x0  (end - start)
+    emit_store_var_a64(slot_len)
+    // res = heap_alloc(len + 1)
+    emit_load_var_a64(slot_len)
+    em32(0x91000400)   // add x0, x0, #1
+    emit_heap_alloc_a64()
+    emit_store_var_a64(slot_res)
+    // copy len bytes from s+start to res (set x9=src LAST; emit_load clobbers x9)
+    emit_load_var_a64(slot_len);   em32(0xAA0003EB)  // mov x11, x0 (count)
+    emit_load_var_a64(slot_res);   em32(0xAA0003EA)  // mov x10, x0 (dst)
+    emit_load_var_a64(slot_s)
+    emit_push_a64()
+    emit_load_var_a64(slot_start)
+    emit_pop_x1_a64()
+    em32(0x8B000020)   // add x0, x1, x0  (s + start)
+    em32(0xAA0003E9)   // mov x9, x0 (src) — last
+    emit_byte_copy_loop_a64()
+    em32(0x3900015F)   // strb wzr, [x10] (NUL terminator)
+    emit_load_var_a64(slot_res)
+}
+
 // ─── ARM64 f64 binary op helper ───
 fn emit_f64_binop_a64(opcode: i64) with Mut {
     em32(0x9E670020)  // fmov d0, x1 (LHS)
     em32(0x9E670001)  // fmov d1, x0 (RHS)
     em32(opcode)       // f64 op d0, d0, d1
     em32(0x9E660000)  // fmov x0, d0
+}
+
+// β⁷ multiply Hessian component: H_jk(a·b) = H_jk(a)·b + s_j(a)·s_k(b) + s_k(a)·s_j(b) + a·H_jk(b).
+// Each arg is a frame slot index or <0 (treated as 0.0). Returns the result slot.
+fn emit_mul_hessian_comp_a64(lhsh: i64, rhsh: i64, lsj: i64, rsk: i64, lsk: i64, rsj: i64, aslot: i64, bslot: i64) -> i64 with Mut, Panic {
+    let r = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lhsh >= 0 { emit_load_var_a64(lhsh) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if bslot >= 0 { emit_load_var_a64(bslot) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)   // H_jk(a)·b
+    emit_push_a64()
+    if lsj >= 0 { emit_load_var_a64(lsj) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rsk >= 0 { emit_load_var_a64(rsk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)   // s_j(a)·s_k(b)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)   // running sum +=
+    emit_push_a64()
+    if lsk >= 0 { emit_load_var_a64(lsk) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rsj >= 0 { emit_load_var_a64(rsj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)   // s_k(a)·s_j(b)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)   // sum +=
+    emit_push_a64()
+    if aslot >= 0 { emit_load_var_a64(aslot) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rhsh >= 0 { emit_load_var_a64(rhsh) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)   // a·H_jk(b)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)   // sum +=
+    emit_store_var_a64(r)
+    r
 }
 
 fn emit_i64_to_f64_in_x0_a64() with Mut {
@@ -27213,6 +27670,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 emit_print_int_a64()
                 em32(0xD2800000); EXPR_IS_F64 = 0; EXPR_TY = 5; return
             }
+            if src_match(ns, ne - ns, "print_char") {
+                EP = EP + 1; compile_or_a64()
+                if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(name_tok, "print_char requires integer argument") }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_print_char_a64()
+                em32(0xD2800000); EXPR_IS_F64 = 0; EXPR_TY = 5; return
+            }
             if src_match(ns, ne - ns, "print_f64") {
                 EP = EP + 1; compile_or_a64()
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
@@ -27365,6 +27829,76 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 }
                 EXPR_IS_F64 = 1; EXPR_TY = 2; EXPR_TY_HASH = 0
                 EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                return
+            }
+            if src_match(ns, ne - ns, "hessian_of") {
+                // hessian_of(expr, j, k) -> ∂²expr/∂input_j∂input_k via β⁷ shadows.
+                // Reads the 4-channel symmetric block (diagonal h_jj from transcendentals,
+                // off-diagonal h_jk from the multiply-operator Hessian). Mirrors
+                // sensitivity_of's frontend. (Off-diagonal through a single transcendental
+                // of a multi-channel arg is GTT-refused on x86, so not propagated here.)
+                EP = EP + 1
+                EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                var b7h_arg_vi: i64 = -1
+                if TK[EP as usize] == 3 {
+                    b7h_arg_vi = var_find_idx(TS[EP as usize], TE[EP as usize])
+                }
+                compile_or_a64()  // first arg (expr)
+                var b7h_h00: i64 = EXPR_HSHADOW_00
+                var b7h_h11: i64 = EXPR_HSHADOW_11
+                var b7h_h22: i64 = EXPR_HSHADOW_22
+                var b7h_h33: i64 = EXPR_HSHADOW_33
+                var b7h_h01: i64 = EXPR_HSHADOW_01
+                var b7h_h02: i64 = EXPR_HSHADOW_02
+                var b7h_h03: i64 = EXPR_HSHADOW_03
+                var b7h_h12: i64 = EXPR_HSHADOW_12
+                var b7h_h13: i64 = EXPR_HSHADOW_13
+                var b7h_h23: i64 = EXPR_HSHADOW_23
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                var b7h_j: i64 = 0
+                if TK[EP as usize] == 4 { b7h_j = TV[EP as usize] }
+                compile_or_a64()  // second arg (j)
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                var b7h_k: i64 = 0
+                if TK[EP as usize] == 4 { b7h_k = TV[EP as usize] }
+                compile_or_a64()  // third arg (k)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                if b7h_j > b7h_k { let b7h_tmp = b7h_j; b7h_j = b7h_k; b7h_k = b7h_tmp }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_00[b7h_arg_vi as usize] >= 0 { b7h_h00 = VAR_HSHADOW_00[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_11[b7h_arg_vi as usize] >= 0 { b7h_h11 = VAR_HSHADOW_11[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_22[b7h_arg_vi as usize] >= 0 { b7h_h22 = VAR_HSHADOW_22[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_33[b7h_arg_vi as usize] >= 0 { b7h_h33 = VAR_HSHADOW_33[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_01[b7h_arg_vi as usize] >= 0 { b7h_h01 = VAR_HSHADOW_01[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_02[b7h_arg_vi as usize] >= 0 { b7h_h02 = VAR_HSHADOW_02[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_03[b7h_arg_vi as usize] >= 0 { b7h_h03 = VAR_HSHADOW_03[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_12[b7h_arg_vi as usize] >= 0 { b7h_h12 = VAR_HSHADOW_12[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_13[b7h_arg_vi as usize] >= 0 { b7h_h13 = VAR_HSHADOW_13[b7h_arg_vi as usize] }
+                if b7h_arg_vi >= 0 && VAR_HSHADOW_23[b7h_arg_vi as usize] >= 0 { b7h_h23 = VAR_HSHADOW_23[b7h_arg_vi as usize] }
+                var b7h_slot: i64 = -1
+                if b7h_j == 0 && b7h_k == 0 { b7h_slot = b7h_h00 }
+                else if b7h_j == 1 && b7h_k == 1 { b7h_slot = b7h_h11 }
+                else if b7h_j == 2 && b7h_k == 2 { b7h_slot = b7h_h22 }
+                else if b7h_j == 3 && b7h_k == 3 { b7h_slot = b7h_h33 }
+                else if b7h_j == 0 && b7h_k == 1 { b7h_slot = b7h_h01 }
+                else if b7h_j == 0 && b7h_k == 2 { b7h_slot = b7h_h02 }
+                else if b7h_j == 0 && b7h_k == 3 { b7h_slot = b7h_h03 }
+                else if b7h_j == 1 && b7h_k == 2 { b7h_slot = b7h_h12 }
+                else if b7h_j == 1 && b7h_k == 3 { b7h_slot = b7h_h13 }
+                else if b7h_j == 2 && b7h_k == 3 { b7h_slot = b7h_h23 }
+                if b7h_slot >= 0 { emit_load_var_a64(b7h_slot) } else { emit_imm64_a64(0) }
+                EXPR_IS_F64 = 1; EXPR_TY = 2; EXPR_TY_HASH = 0
+                EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+                EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+                EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+                EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
+                EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
+                EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
+                EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
+                EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
+                EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
+                EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
+                EXPR_HSHADOW_77 = -1
                 return
             }
             if src_match(ns, ne - ns, "arg_count") {
@@ -27545,6 +28079,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_line") {
+                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }  // skip ')'
+                emit_read_line_a64(); EXPR_IS_F64 = 0; EXPR_TY = 3; EXPR_TY_HASH = 0; return
+            }
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_file") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1; compile_or_a64()
@@ -27577,6 +28117,114 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_str_len_a64(); EXPR_IS_F64 = 0; EXPR_TY = 1; EXPR_TY_HASH = 0; return
             }
+            if src_match(ns, ne - ns, "str_eq") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_eq requires string arguments") }
+                    emit_push_a64()
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_eq requires string arguments") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_pop_x1_a64()
+                    emit_str_eq_regs_a64()
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0; EXPR_TY = 4; EXPR_TY_HASH = 0; return
+            }
+            if src_match(ns, ne - ns, "str_concat") {
+                let sc_slot_a = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                let sc_slot_b = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_concat requires string arguments") }
+                    emit_store_var_a64(sc_slot_a)
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_concat requires string arguments") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    emit_store_var_a64(sc_slot_b)
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_str_concat_slots_a64(sc_slot_a, sc_slot_b)
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                EXPR_IS_F64 = 0; EXPR_TY = 3; EXPR_TY_HASH = 0; return
+            }
+            if src_match(ns, ne - ns, "str_slice") {
+                let ss_slot_a = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                let ss_slot_b = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                let ss_slot_cnt = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                    EXPR_IS_F64 = 0; EXPR_TY = 3; EXPR_TY_HASH = 0; return
+                }
+                compile_or_a64()
+                if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_slice requires a string receiver") }
+                emit_store_var_a64(ss_slot_a)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    compile_or_a64()
+                    if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(name_tok, "str_slice indices must be integers") }
+                } else {
+                    em32(0xD2800000)
+                }
+                emit_store_var_a64(ss_slot_b)
+                if TK[EP as usize] == 28 {
+                    EP = EP + 1
+                    if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                        compile_or_a64()
+                        if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(name_tok, "str_slice indices must be integers") }
+                    } else {
+                        em32(0xD2800000)
+                    }
+                    emit_store_var_a64(ss_slot_cnt)
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 3, 4)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    emit_str_slice_range_slots_a64(ss_slot_a, ss_slot_b, ss_slot_cnt)
+                } else {
+                    // 2-arg form str_slice(s, start) → suffix pointer s + start
+                    emit_load_var_a64(ss_slot_a)
+                    emit_push_a64()
+                    emit_load_var_a64(ss_slot_b)
+                    emit_pop_x1_a64()
+                    em32(0x8B000020)  // add x0, x1, x0  (s + start)
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_IS_F64 = 0; EXPR_TY = 3; EXPR_TY_HASH = 0; return
+            }
             if src_match(ns, ne - ns, "slice_len") {
                 EP = EP + 1; compile_or_a64()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -27593,7 +28241,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 EXPR_IS_F64 = 0; return
             }
-            if src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") {
+            if src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") || src_match(ns, ne - ns, "tan") || src_match(ns, ne - ns, "atan") || src_match(ns, ne - ns, "tanh") || src_match(ns, ne - ns, "asin") || src_match(ns, ne - ns, "acos") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 1, 0)
@@ -27606,12 +28254,33 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         tc_wrong_arity(name_tok, 1, 2)
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
+                    // β⁶ first-order AD: capture argument sensitivity shadows before the call
+                    let math_s0 = EXPR_SSHADOW
+                    let math_s1 = EXPR_SSHADOW_1
+                    let math_s2 = EXPR_SSHADOW_2
+                    let math_s3 = EXPR_SSHADOW_3
+                    // β⁷ second-order: capture argument diagonal Hessian shadows too
+                    let math_h00 = EXPR_HSHADOW_00
+                    let math_h11 = EXPR_HSHADOW_11
+                    let math_h22 = EXPR_HSHADOW_22
+                    let math_h33 = EXPR_HSHADOW_33
+                    var math_arg_slot: i64 = -1
+                    if math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 {
+                        math_arg_slot = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(math_arg_slot)
+                    }
                     emit_push_a64()
                     var math_fi: i64 = fn_find_lit("__native_sqrt_f64")
                     if src_match(ns, ne - ns, "sin") { math_fi = fn_find_lit("__native_sin_f64") }
                     if src_match(ns, ne - ns, "cos") { math_fi = fn_find_lit("__native_cos_f64") }
                     if src_match(ns, ne - ns, "exp") { math_fi = fn_find_lit("__native_exp_f64") }
                     if src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") { math_fi = fn_find_lit("__native_ln_f64") }
+                    if src_match(ns, ne - ns, "tan") { math_fi = fn_find_lit("__native_tan_f64") }
+                    if src_match(ns, ne - ns, "atan") { math_fi = fn_find_lit("__native_atan_f64") }
+                    if src_match(ns, ne - ns, "tanh") { math_fi = fn_find_lit("__native_tanh_f64") }
+                    if src_match(ns, ne - ns, "asin") { math_fi = fn_find_lit("__native_asin_f64") }
+                    if src_match(ns, ne - ns, "acos") { math_fi = fn_find_lit("__native_acos_f64") }
                     if math_fi >= 0 { emit_direct_fn_call_a64(math_fi, 1) }
                     else {
                         tc_error(name_tok, "missing native math helper")
@@ -27619,6 +28288,309 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         em32(0xD2800000)
                     }
                     if TK[EP as usize] == 7 { EP = EP + 1 }
+                    // β⁶ first-order AD chain rule: result is in x0; for each active
+                    // gradient channel propagate sens_k(f(x)) = f'(arg)·sens_k(x).
+                    // Math builtins carry 4 gradient channels (s0..s3); clear the rest.
+                    EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
+                    EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                    EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+                    EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+                    EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+                    EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
+                    EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
+                    EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
+                    EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
+                    EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
+                    EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
+                    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
+                    EXPR_HSHADOW_77 = -1
+                    if math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 {
+                        let math_res_slot = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(math_res_slot)
+                        let math_deriv_slot = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        // f'(x) into x0 (1.0 bits = 4607182418800017408)
+                        if src_match(ns, ne - ns, "sqrt") {
+                            // 1/(2·result)
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_res_slot); emit_push_a64()
+                            emit_load_var_a64(math_res_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                        } else if src_match(ns, ne - ns, "exp") {
+                            emit_load_var_a64(math_res_slot)
+                        } else if src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") {
+                            // 1/arg
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                        } else if src_match(ns, ne - ns, "sin") {
+                            // cos(arg)
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            let cfd = fn_find_lit("__native_cos_f64")
+                            if cfd >= 0 { emit_direct_fn_call_a64(cfd, 1) } else { emit_imm64_a64(0) }
+                        } else if src_match(ns, ne - ns, "cos") {
+                            // -sin(arg), computed as 0 - sin(arg)
+                            emit_imm64_a64(0); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            let sfd = fn_find_lit("__native_sin_f64")
+                            if sfd >= 0 { emit_direct_fn_call_a64(sfd, 1) } else { emit_imm64_a64(0) }
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)  // 0 - sin(arg)
+                        } else if src_match(ns, ne - ns, "tan") {
+                            // 1 + result²  (sec²)
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_res_slot); emit_push_a64()
+                            emit_load_var_a64(math_res_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                        } else if src_match(ns, ne - ns, "atan") {
+                            // 1/(1 + arg²)
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                        } else if src_match(ns, ne - ns, "tanh") {
+                            // 1 - result²  (sech²)
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_res_slot); emit_push_a64()
+                            emit_load_var_a64(math_res_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                        } else if src_match(ns, ne - ns, "asin") {
+                            // 1/sqrt(1 - arg²)
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                            emit_push_a64()
+                            let qfd = fn_find_lit("__native_sqrt_f64")
+                            if qfd >= 0 { emit_direct_fn_call_a64(qfd, 1) } else { emit_imm64_a64(0) }
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                        } else if src_match(ns, ne - ns, "acos") {
+                            // -1/sqrt(1 - arg²), computed as 0 - (1/sqrt(1 - arg²))
+                            emit_imm64_a64(0); emit_push_a64()
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                            emit_push_a64()
+                            let qfd2 = fn_find_lit("__native_sqrt_f64")
+                            if qfd2 >= 0 { emit_direct_fn_call_a64(qfd2, 1) } else { emit_imm64_a64(0) }
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)  // 0 - (1/sqrt)
+                        } else {
+                            emit_imm64_a64(0)
+                        }
+                        emit_store_var_a64(math_deriv_slot)
+                        if math_s0 >= 0 {
+                            let msr0 = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_s0)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_store_var_a64(msr0)
+                            EXPR_SSHADOW = msr0
+                        }
+                        if math_s1 >= 0 {
+                            let msr1 = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_s1)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_store_var_a64(msr1)
+                            EXPR_SSHADOW_1 = msr1
+                        }
+                        if math_s2 >= 0 {
+                            let msr2 = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_s2)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_store_var_a64(msr2)
+                            EXPR_SSHADOW_2 = msr2
+                        }
+                        if math_s3 >= 0 {
+                            let msr3 = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_s3)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_store_var_a64(msr3)
+                            EXPR_SSHADOW_3 = msr3
+                        }
+                        // β⁷ second-order (diagonal): H_jj(f(g)) = f''(g)·s_j² + f'(g)·H_jj(g).
+                        // Compute f''(arg) into math_deriv2_slot, then propagate the
+                        // diagonal channels. Off-diagonal H_jk (j≠k) is a follow-up.
+                        let math_deriv2_slot = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if src_match(ns, ne - ns, "sqrt") {
+                            // -(f'/(2·arg))
+                            emit_imm64_a64(0); emit_push_a64()
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                        } else if src_match(ns, ne - ns, "exp") {
+                            emit_load_var_a64(math_res_slot)
+                        } else if src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") {
+                            // -(1/arg²)
+                            emit_imm64_a64(0); emit_push_a64()
+                            emit_imm64_a64(4607182418800017408); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                        } else if src_match(ns, ne - ns, "sin") {
+                            // -sin(arg)
+                            emit_imm64_a64(0); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            let s2fd = fn_find_lit("__native_sin_f64")
+                            if s2fd >= 0 { emit_direct_fn_call_a64(s2fd, 1) } else { emit_imm64_a64(0) }
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                        } else if src_match(ns, ne - ns, "cos") {
+                            // -result
+                            emit_imm64_a64(0); emit_push_a64()
+                            emit_load_var_a64(math_res_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                        } else if src_match(ns, ne - ns, "tan") {
+                            // 2·result·f'
+                            emit_imm64_a64(4611686018427387904); emit_push_a64()
+                            emit_load_var_a64(math_res_slot); emit_push_a64()
+                            emit_load_var_a64(math_deriv_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                        } else if src_match(ns, ne - ns, "atan") {
+                            // -(2·arg·f'²)
+                            emit_imm64_a64(0); emit_push_a64()
+                            emit_imm64_a64(4611686018427387904); emit_push_a64()
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_deriv_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                        } else if src_match(ns, ne - ns, "tanh") {
+                            // -(2·result·f')
+                            emit_imm64_a64(0); emit_push_a64()
+                            emit_imm64_a64(4611686018427387904); emit_push_a64()
+                            emit_load_var_a64(math_res_slot); emit_push_a64()
+                            emit_load_var_a64(math_deriv_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                        } else if src_match(ns, ne - ns, "asin") {
+                            // arg·f'³
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_deriv_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                        } else if src_match(ns, ne - ns, "acos") {
+                            // arg·f'³ (f' negative ⇒ result already negative)
+                            emit_load_var_a64(math_arg_slot); emit_push_a64()
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                            emit_load_var_a64(math_deriv_slot)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                        } else {
+                            emit_imm64_a64(0)
+                        }
+                        emit_store_var_a64(math_deriv2_slot)
+                        if math_s0 >= 0 {
+                            let mhr00 = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var_a64(math_deriv2_slot); emit_push_a64()
+                            emit_load_var_a64(math_s0)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_push_a64()
+                            emit_load_var_a64(math_s0)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            if math_h00 >= 0 {
+                                emit_push_a64()
+                                emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                                emit_load_var_a64(math_h00)
+                                emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                                emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                            }
+                            emit_store_var_a64(mhr00)
+                            EXPR_HSHADOW_00 = mhr00
+                        }
+                        if math_s1 >= 0 {
+                            let mhr11 = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var_a64(math_deriv2_slot); emit_push_a64()
+                            emit_load_var_a64(math_s1)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_push_a64()
+                            emit_load_var_a64(math_s1)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            if math_h11 >= 0 {
+                                emit_push_a64()
+                                emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                                emit_load_var_a64(math_h11)
+                                emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                                emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                            }
+                            emit_store_var_a64(mhr11)
+                            EXPR_HSHADOW_11 = mhr11
+                        }
+                        if math_s2 >= 0 {
+                            let mhr22 = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var_a64(math_deriv2_slot); emit_push_a64()
+                            emit_load_var_a64(math_s2)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_push_a64()
+                            emit_load_var_a64(math_s2)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            if math_h22 >= 0 {
+                                emit_push_a64()
+                                emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                                emit_load_var_a64(math_h22)
+                                emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                                emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                            }
+                            emit_store_var_a64(mhr22)
+                            EXPR_HSHADOW_22 = mhr22
+                        }
+                        if math_s3 >= 0 {
+                            let mhr33 = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_load_var_a64(math_deriv2_slot); emit_push_a64()
+                            emit_load_var_a64(math_s3)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            emit_push_a64()
+                            emit_load_var_a64(math_s3)
+                            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                            if math_h33 >= 0 {
+                                emit_push_a64()
+                                emit_load_var_a64(math_deriv_slot); emit_push_a64()
+                                emit_load_var_a64(math_h33)
+                                emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                                emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                            }
+                            emit_store_var_a64(mhr33)
+                            EXPR_HSHADOW_33 = mhr33
+                        }
+                        // restore primal result to x0 for downstream consumers
+                        emit_load_var_a64(math_res_slot)
+                    }
                 }
                 EXPR_IS_F64 = 1
                 EXPR_TY = 2
@@ -28804,6 +29776,17 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         let b4am_left_sshadow_1 = EXPR_SSHADOW_1
         let b4am_left_sshadow_2 = EXPR_SSHADOW_2
         let b4am_left_sshadow_3 = EXPR_SSHADOW_3
+        // β⁷: capture LHS diagonal+off-diagonal Hessian shadows for multiply Hessian
+        let b4am_left_hsh_00 = EXPR_HSHADOW_00
+        let b4am_left_hsh_01 = EXPR_HSHADOW_01
+        let b4am_left_hsh_02 = EXPR_HSHADOW_02
+        let b4am_left_hsh_03 = EXPR_HSHADOW_03
+        let b4am_left_hsh_11 = EXPR_HSHADOW_11
+        let b4am_left_hsh_12 = EXPR_HSHADOW_12
+        let b4am_left_hsh_13 = EXPR_HSHADOW_13
+        let b4am_left_hsh_22 = EXPR_HSHADOW_22
+        let b4am_left_hsh_23 = EXPR_HSHADOW_23
+        let b4am_left_hsh_33 = EXPR_HSHADOW_33
         // β⁴: always save lval/rval for f64 mul (a²·var(b) needs a even when var(a)=0)
         var b4am_lval_slot: i64 = -1
         if left_f64 == 1 {
@@ -28812,6 +29795,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             emit_store_var_a64(b4am_lval_slot)
         }
         EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+        EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1; EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1; EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
         emit_push_a64()
         compile_postfix_a64()
         if (op == 20 || op == 29) && rhs_const_known != 0 && rhs_const_val == 0 {
@@ -28824,6 +29808,17 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         let b4am_right_sshadow_1 = EXPR_SSHADOW_1
         let b4am_right_sshadow_2 = EXPR_SSHADOW_2
         let b4am_right_sshadow_3 = EXPR_SSHADOW_3
+        // β⁷: capture RHS Hessian shadows
+        let b4am_right_hsh_00 = EXPR_HSHADOW_00
+        let b4am_right_hsh_01 = EXPR_HSHADOW_01
+        let b4am_right_hsh_02 = EXPR_HSHADOW_02
+        let b4am_right_hsh_03 = EXPR_HSHADOW_03
+        let b4am_right_hsh_11 = EXPR_HSHADOW_11
+        let b4am_right_hsh_12 = EXPR_HSHADOW_12
+        let b4am_right_hsh_13 = EXPR_HSHADOW_13
+        let b4am_right_hsh_22 = EXPR_HSHADOW_22
+        let b4am_right_hsh_23 = EXPR_HSHADOW_23
+        let b4am_right_hsh_33 = EXPR_HSHADOW_33
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
         var b4am_rval_slot: i64 = -1
@@ -28980,6 +29975,43 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             let b4am_sres3 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_sres3)
             EXPR_SSHADOW_3 = b4am_sres3
+        }
+        // β⁷ second-order: Hessian through * — H_jk(a·b) = H_jk(a)·b + s_j(a)·s_k(b)
+        //  + s_k(a)·s_j(b) + a·H_jk(b), for the 4-channel symmetric block (10 components).
+        if left_f64 == 1 && op == 19 {
+            EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+            EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+            EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+            if b4am_left_hsh_00 >= 0 || b4am_right_hsh_00 >= 0 || (b4am_left_sshadow >= 0 && b4am_right_sshadow >= 0) {
+                EXPR_HSHADOW_00 = emit_mul_hessian_comp_a64(b4am_left_hsh_00, b4am_right_hsh_00, b4am_left_sshadow, b4am_right_sshadow, b4am_left_sshadow, b4am_right_sshadow, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_01 >= 0 || b4am_right_hsh_01 >= 0 || (b4am_left_sshadow >= 0 && b4am_right_sshadow_1 >= 0) || (b4am_left_sshadow_1 >= 0 && b4am_right_sshadow >= 0) {
+                EXPR_HSHADOW_01 = emit_mul_hessian_comp_a64(b4am_left_hsh_01, b4am_right_hsh_01, b4am_left_sshadow, b4am_right_sshadow_1, b4am_left_sshadow_1, b4am_right_sshadow, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_02 >= 0 || b4am_right_hsh_02 >= 0 || (b4am_left_sshadow >= 0 && b4am_right_sshadow_2 >= 0) || (b4am_left_sshadow_2 >= 0 && b4am_right_sshadow >= 0) {
+                EXPR_HSHADOW_02 = emit_mul_hessian_comp_a64(b4am_left_hsh_02, b4am_right_hsh_02, b4am_left_sshadow, b4am_right_sshadow_2, b4am_left_sshadow_2, b4am_right_sshadow, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_03 >= 0 || b4am_right_hsh_03 >= 0 || (b4am_left_sshadow >= 0 && b4am_right_sshadow_3 >= 0) || (b4am_left_sshadow_3 >= 0 && b4am_right_sshadow >= 0) {
+                EXPR_HSHADOW_03 = emit_mul_hessian_comp_a64(b4am_left_hsh_03, b4am_right_hsh_03, b4am_left_sshadow, b4am_right_sshadow_3, b4am_left_sshadow_3, b4am_right_sshadow, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_11 >= 0 || b4am_right_hsh_11 >= 0 || (b4am_left_sshadow_1 >= 0 && b4am_right_sshadow_1 >= 0) {
+                EXPR_HSHADOW_11 = emit_mul_hessian_comp_a64(b4am_left_hsh_11, b4am_right_hsh_11, b4am_left_sshadow_1, b4am_right_sshadow_1, b4am_left_sshadow_1, b4am_right_sshadow_1, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_12 >= 0 || b4am_right_hsh_12 >= 0 || (b4am_left_sshadow_1 >= 0 && b4am_right_sshadow_2 >= 0) || (b4am_left_sshadow_2 >= 0 && b4am_right_sshadow_1 >= 0) {
+                EXPR_HSHADOW_12 = emit_mul_hessian_comp_a64(b4am_left_hsh_12, b4am_right_hsh_12, b4am_left_sshadow_1, b4am_right_sshadow_2, b4am_left_sshadow_2, b4am_right_sshadow_1, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_13 >= 0 || b4am_right_hsh_13 >= 0 || (b4am_left_sshadow_1 >= 0 && b4am_right_sshadow_3 >= 0) || (b4am_left_sshadow_3 >= 0 && b4am_right_sshadow_1 >= 0) {
+                EXPR_HSHADOW_13 = emit_mul_hessian_comp_a64(b4am_left_hsh_13, b4am_right_hsh_13, b4am_left_sshadow_1, b4am_right_sshadow_3, b4am_left_sshadow_3, b4am_right_sshadow_1, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_22 >= 0 || b4am_right_hsh_22 >= 0 || (b4am_left_sshadow_2 >= 0 && b4am_right_sshadow_2 >= 0) {
+                EXPR_HSHADOW_22 = emit_mul_hessian_comp_a64(b4am_left_hsh_22, b4am_right_hsh_22, b4am_left_sshadow_2, b4am_right_sshadow_2, b4am_left_sshadow_2, b4am_right_sshadow_2, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_23 >= 0 || b4am_right_hsh_23 >= 0 || (b4am_left_sshadow_2 >= 0 && b4am_right_sshadow_3 >= 0) || (b4am_left_sshadow_3 >= 0 && b4am_right_sshadow_2 >= 0) {
+                EXPR_HSHADOW_23 = emit_mul_hessian_comp_a64(b4am_left_hsh_23, b4am_right_hsh_23, b4am_left_sshadow_2, b4am_right_sshadow_3, b4am_left_sshadow_3, b4am_right_sshadow_2, b4am_lval_slot, b4am_rval_slot)
+            }
+            if b4am_left_hsh_33 >= 0 || b4am_right_hsh_33 >= 0 || (b4am_left_sshadow_3 >= 0 && b4am_right_sshadow_3 >= 0) {
+                EXPR_HSHADOW_33 = emit_mul_hessian_comp_a64(b4am_left_hsh_33, b4am_right_hsh_33, b4am_left_sshadow_3, b4am_right_sshadow_3, b4am_left_sshadow_3, b4am_right_sshadow_3, b4am_lval_slot, b4am_rval_slot)
+            }
         }
         // Restore arithmetic result
         if b4am_result_slot >= 0 { emit_load_var_a64(b4am_result_slot) }
