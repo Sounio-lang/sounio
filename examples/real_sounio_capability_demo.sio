@@ -1,0 +1,390 @@
+// examples/real_sounio_capability_demo.sio
+//
+// Live capability demonstration: the author (Grok) wrote this file from scratch
+// during the current session to prove it can produce real, idiomatic, executable
+// Sounio that the self-hosted compiler accepts and runs.
+//
+// This file deliberately mirrors the structure and numeric discipline of the
+// validated reference stdlib/epistemic/knowledge.sio while adding two small
+// original extensions (ep_mean4 and ep_sem_from_single) that did not exist in
+// the reference. All original tests still pass; the new helpers are exercised
+// by additional checks.
+//
+// The goal is empirical proof, not elegance. The code is therefore intentionally
+// self-contained (no imports) and uses only language features that are known to
+// work in the current checked artifact.
+//
+// Usage:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   ./bin/souc check examples/real_sounio_capability_demo.sio
+//   ./bin/souc run  examples/real_sounio_capability_demo.sio
+
+// ============================================================================
+// SQRT AND MATH HELPERS (identical to the validated reference)
+// ============================================================================
+
+fn ep_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+fn ep_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn ep_min_conf(a: i64, b: i64) -> i64 {
+    if a < b { a } else { b }
+}
+
+fn ep_clamp_conf(c: i64) -> i64 {
+    if c < 0 { return 0 }
+    if c > 1000 { return 1000 }
+    c
+}
+
+// ============================================================================
+// EPISTEMIC STRUCT (core GUM type, identical pattern to reference)
+// ============================================================================
+
+pub struct Epistemic {
+    val: f64,
+    variance: f64,
+    confidence: i64,
+}
+
+impl Epistemic {
+    pub fn new(val: f64, variance: f64, confidence: i64) -> Epistemic {
+        Epistemic { val: val, variance: variance, confidence: ep_clamp_conf(confidence) }
+    }
+
+    pub fn certain(val: f64) -> Epistemic {
+        Epistemic { val: val, variance: 0.0, confidence: 1000 }
+    }
+
+    pub fn measured(val: f64, std_dev: f64) -> Epistemic with Mut, Div, Panic {
+        Epistemic { val: val, variance: std_dev * std_dev, confidence: 900 }
+    }
+
+    pub fn val(self: &Epistemic) -> f64 { self.val }
+    pub fn variance(self: &Epistemic) -> f64 { self.variance }
+    pub fn confidence(self: &Epistemic) -> i64 { self.confidence }
+
+    pub fn std(self: &Epistemic) -> f64 with Mut, Div, Panic {
+        ep_sqrt(self.variance)
+    }
+
+    pub fn is_credible(self: &Epistemic, min_conf: i64) -> bool {
+        self.confidence >= min_conf
+    }
+
+    // GUM: Var(X+Y) = Var(X) + Var(Y)
+    pub fn add(self: &Epistemic, other: &Epistemic) -> Epistemic {
+        Epistemic {
+            val: self.val + other.val,
+            variance: self.variance + other.variance,
+            confidence: ep_clamp_conf(ep_min_conf(self.confidence, other.confidence) * 99 / 100),
+        }
+    }
+
+    // GUM: Var(X-Y) = Var(X) + Var(Y)
+    pub fn sub(self: &Epistemic, other: &Epistemic) -> Epistemic {
+        Epistemic {
+            val: self.val - other.val,
+            variance: self.variance + other.variance,
+            confidence: ep_clamp_conf(ep_min_conf(self.confidence, other.confidence) * 99 / 100),
+        }
+    }
+
+    // GUM delta method: Var(XY) ≈ Y²·Var(X) + X²·Var(Y)
+    pub fn mul(self: &Epistemic, other: &Epistemic) -> Epistemic {
+        let new_var = other.val * other.val * self.variance
+                    + self.val * self.val * other.variance
+        Epistemic {
+            val: self.val * other.val,
+            variance: new_var,
+            confidence: ep_clamp_conf(ep_min_conf(self.confidence, other.confidence) * 98 / 100),
+        }
+    }
+
+    // GUM delta method: Var(X/Y) ≈ Var(X)/Y² + X²·Var(Y)/Y⁴
+    pub fn div(self: &Epistemic, other: &Epistemic) -> Epistemic with Div, Panic {
+        let y2 = other.val * other.val
+        let y4 = y2 * y2
+        let new_var = self.variance / y2 + self.val * self.val * other.variance / y4
+        Epistemic {
+            val: self.val / other.val,
+            variance: new_var,
+            confidence: ep_clamp_conf(ep_min_conf(self.confidence, other.confidence) * 97 / 100),
+        }
+    }
+
+    pub fn scale(self: &Epistemic, c: f64) -> Epistemic {
+        Epistemic {
+            val: self.val * c,
+            variance: self.variance * c * c,
+            confidence: self.confidence,
+        }
+    }
+
+    pub fn shift(self: &Epistemic, c: f64) -> Epistemic {
+        Epistemic {
+            val: self.val + c,
+            variance: self.variance,
+            confidence: self.confidence,
+        }
+    }
+
+    pub fn square(self: &Epistemic) -> Epistemic {
+        Epistemic {
+            val: self.val * self.val,
+            variance: 4.0 * self.val * self.val * self.variance,
+            confidence: ep_clamp_conf(self.confidence * 98 / 100),
+        }
+    }
+
+    pub fn sqrt(self: &Epistemic) -> Epistemic with Mut, Div, Panic {
+        let new_val = ep_sqrt(self.val)
+        let new_var = if self.val > 0.0 { self.variance / (4.0 * self.val) } else { 0.0 }
+        let new_conf = ep_clamp_conf(self.confidence * 98 / 100)
+        Epistemic {
+            val: new_val,
+            variance: new_var,
+            confidence: new_conf,
+        }
+    }
+
+    pub fn rel_uncertainty(self: &Epistemic) -> f64 with Mut, Div, Panic {
+        let abs_val = ep_abs(self.val)
+        if abs_val < 1e-15 { return 0.0 }
+        ep_sqrt(self.variance) / abs_val
+    }
+}
+
+// ============================================================================
+// ORIGINAL EXTENSIONS (authored for this capability demo)
+// ============================================================================
+
+// ep_mean4 — arithmetic mean of four independent Epistemic measurements.
+// Variance of the mean = (Σ var_i) / n²   (GUM propagation for independent inputs).
+// This helper did not exist in the reference; it is new code for the demo.
+pub fn ep_mean4(a: &Epistemic, b: &Epistemic, c: &Epistemic, d: &Epistemic) -> Epistemic with Div, Panic {
+    let sum_var = a.variance + b.variance + c.variance + d.variance
+    let sum_val = a.val + b.val + c.val + d.val
+    let sum_conf = (a.confidence + b.confidence + c.confidence + d.confidence) / 4
+    Epistemic {
+        val: sum_val / 4.0,
+        variance: sum_var / 16.0,
+        confidence: ep_clamp_conf(sum_conf),
+    }
+}
+
+// ep_sem_from_single — standard error of the mean when the input Epistemic
+// represents the uncertainty of a *single observation* and we have n i.i.d.
+// observations.  SEM = σ / √n ; variance scales by 1/n.
+pub fn ep_sem_from_single(s: &Epistemic, n: i64) -> Epistemic with Mut, Div, Panic {
+    if n <= 1 {
+        return Epistemic { val: s.val, variance: s.variance, confidence: s.confidence }
+    }
+    let nf = n as f64
+    let s_n = ep_sqrt(nf)
+    Epistemic {
+        val: s.val / s_n,
+        variance: s.variance / nf,
+        confidence: s.confidence,
+    }
+}
+
+// ============================================================================
+// GATE AND MERGE (kept for completeness of the replicated surface)
+// ============================================================================
+
+pub fn ep_gate(e: &Epistemic, min_conf: i64) -> i64 {
+    if e.confidence >= min_conf { 1 } else { 0 }
+}
+
+pub fn ep_merge(a: &Epistemic, b: &Epistemic) -> Epistemic with Div, Panic {
+    let w_a = if a.variance > 0.0 { 1.0 / a.variance } else { 1e15 }
+    let w_b = if b.variance > 0.0 { 1.0 / b.variance } else { 1e15 }
+    let w_total = w_a + w_b
+    let combined_val = (w_a * a.val + w_b * b.val) / w_total
+    let combined_var = 1.0 / w_total
+    let combined_conf = ep_clamp_conf((a.confidence + b.confidence) / 2)
+    Epistemic { val: combined_val, variance: combined_var, confidence: combined_conf }
+}
+
+// ============================================================================
+// TEST HARNESS (identical discipline to the reference)
+// ============================================================================
+
+var CNT: [i64; 2] = [0; 2]
+
+fn chk(label: i64, ok: i64) with IO, Mut {
+    if ok == 1 {
+        print("  PASS ["); print(label); print("]\n")
+        CNT[0] = CNT[0] + 1
+    } else {
+        print("  FAIL ["); print(label); print("]\n")
+        CNT[1] = CNT[1] + 1
+    }
+}
+
+fn near(a: f64, b: f64, tol: f64) -> i64 {
+    let d = a - b
+    let d2 = if d < 0.0 { 0.0 - d } else { d }
+    if d2 <= tol { 1 } else { 0 }
+}
+
+// ============================================================================
+// CORE TESTS (replicated from the reference to prove pattern fidelity)
+// ============================================================================
+
+fn test_basic() with IO, Mut, Div, Panic {
+    let x = Epistemic::new(3.0, 0.01, 900)
+    let y = Epistemic::new(4.0, 0.04, 800)
+
+    chk(1, near(x.val(), 3.0, 1e-12))
+    chk(2, near(x.variance(), 0.01, 1e-12))
+    chk(3, if x.confidence() == 900 { 1 } else { 0 })
+    chk(4, near(x.std(), 0.1, 1e-9))
+
+    let s = x.add(&y)
+    chk(5, near(s.val(), 7.0, 1e-12))
+    chk(6, near(s.variance(), 0.05, 1e-12))
+    chk(7, if s.confidence() <= 800 { 1 } else { 0 })
+
+    let d = x.sub(&y)
+    chk(8, near(d.val(), 0.0 - 1.0, 1e-12))
+    chk(9, near(d.variance(), 0.05, 1e-12))
+}
+
+fn test_mul_div() with IO, Mut, Div, Panic {
+    let x = Epistemic::new(3.0, 0.01, 900)
+    let y = Epistemic::new(4.0, 0.04, 800)
+
+    let p = x.mul(&y)
+    chk(10, near(p.val(), 12.0, 1e-12))
+    chk(11, near(p.variance(), 0.52, 1e-10))
+
+    let q = x.div(&y)
+    chk(12, near(q.val(), 0.75, 1e-12))
+    chk(13, near(q.variance(), 0.00203125, 1e-10))
+}
+
+fn test_scale_shift() with IO, Mut, Div, Panic {
+    let x = Epistemic::new(2.0, 0.04, 850)
+
+    let s = x.scale(3.0)
+    chk(14, near(s.val(), 6.0, 1e-12))
+    chk(15, near(s.variance(), 0.36, 1e-12))
+    chk(16, if s.confidence() == 850 { 1 } else { 0 })
+
+    let sh = s.shift(10.0)
+    chk(17, near(sh.val(), 16.0, 1e-12))
+    chk(18, near(sh.variance(), 0.36, 1e-12))
+}
+
+fn test_sqrt_square() with IO, Mut, Div, Panic {
+    let x = Epistemic::new(4.0, 0.16, 900)
+
+    let sq_val = ep_sqrt(x.val())
+    chk(19, near(sq_val, 2.0, 1e-9))
+
+    let sq_var = x.variance() / (4.0 * x.val())
+    chk(20, near(sq_var, 0.01, 1e-10))
+
+    let sq2 = x.square()
+    chk(21, near(sq2.val(), 16.0, 1e-12))
+    chk(22, near(sq2.variance(), 10.24, 1e-10))
+}
+
+fn test_credibility() with IO, Mut, Div, Panic {
+    let x = Epistemic::new(1.0, 0.001, 800)
+    chk(23, if x.is_credible(700) { 1 } else { 0 })
+    chk(24, if x.is_credible(900) { 0 } else { 1 })
+    chk(25, if ep_gate(&x, 700) == 1 { 1 } else { 0 })
+    chk(26, if ep_gate(&x, 900) == 0 { 1 } else { 0 })
+}
+
+fn test_combine() with IO, Mut, Div, Panic {
+    let a = Epistemic::new(1.0, 0.01, 900)
+    let b = Epistemic::new(1.0, 0.04, 800)
+    let c = ep_merge(&a, &b)
+    chk(27, near(c.val(), 1.0, 1e-10))
+    chk(28, near(c.variance(), 0.008, 1e-10))
+}
+
+fn test_certain() with IO, Mut, Div, Panic {
+    let c = Epistemic::certain(42.0)
+    chk(29, near(c.val(), 42.0, 1e-12))
+    chk(30, near(c.variance(), 0.0, 1e-12))
+    chk(31, if c.confidence() == 1000 { 1 } else { 0 })
+    chk(32, if c.is_credible(1000) { 1 } else { 0 })
+}
+
+// ============================================================================
+// NEW TESTS FOR THE ORIGINAL EXTENSIONS (authored for this demo)
+// ============================================================================
+
+fn test_mean4() with IO, Mut, Div, Panic {
+    // Four independent measurements with known values and variances
+    // Expected mean = 10.025, pooled variance of mean = 0.01125
+    let a = Epistemic::new(10.0, 0.04, 900)
+    let b = Epistemic::new(10.2, 0.09, 850)
+    let c = Epistemic::new(9.8, 0.01, 950)
+    let d = Epistemic::new(10.1, 0.04, 900)
+
+    let m = ep_mean4(&a, &b, &c, &d)
+
+    chk(33, near(m.val(), 10.025, 1e-12))
+    chk(34, near(m.variance(), 0.01125, 1e-10))
+    // confidence is the integer average of the four inputs
+    chk(35, if m.confidence() == 900 { 1 } else { 0 })
+}
+
+fn test_sem() with IO, Mut, Div, Panic {
+    // Single-observation uncertainty σ = 0.2 (var = 0.04), n = 4 observations
+    // SEM = 0.2 / 2 = 0.1, variance_of_sem = 0.04 / 4 = 0.01
+    let single = Epistemic::new(0.2, 0.04, 900)
+    let sem = ep_sem_from_single(&single, 4)
+
+    chk(36, near(sem.val(), 0.1, 1e-12))
+    chk(37, near(sem.variance(), 0.01, 1e-12))
+    chk(38, if sem.confidence() == 900 { 1 } else { 0 })
+}
+
+// ============================================================================
+// ENTRY POINT
+// ============================================================================
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    CNT[0] = 0; CNT[1] = 0
+    print("=== real sounio capability demo ===\n")
+    test_basic()
+    test_mul_div()
+    test_scale_shift()
+    test_sqrt_square()
+    test_credibility()
+    test_combine()
+    test_certain()
+    test_mean4()
+    test_sem()
+    print("=== "); print(CNT[0]); print("/"); print(CNT[0] + CNT[1]); print(" PASS ===\n")
+    if CNT[1] == 0 {
+        print("REAL SOUNIO CAPABILITY DEMO: PASS\n")
+        0
+    } else {
+        print("REAL SOUNIO CAPABILITY DEMO: FAIL\n")
+        1
+    }
+}
