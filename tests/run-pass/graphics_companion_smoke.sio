@@ -1,0 +1,129 @@
+//@ run-pass
+
+use graphics::drawing::{color_black, color_white, color_red, color_blue}
+use graphics::surface::{
+    surface_new, surface_clear, surface_set_pixel, surface_draw_line,
+    surface_draw_rect, surface_get_pixel_r, surface_get_pixel_g,
+    surface_get_pixel_b
+}
+use graphics::plot::{plot_line_raster, line_plot_config_default}
+use graphics::epistemic::{
+    plot_epistemic_band_raster, epistemic_band_config_default,
+    plot_confidence_decay_raster, confidence_decay_config_default
+}
+
+fn test_out_of_bounds_pixel_write_is_clipped() -> i64 with Mut, Panic {
+    var s = surface_new(16, 16)
+    s = surface_clear(s, color_black())
+    s = surface_set_pixel(s, -1, 0, color_red())
+    s = surface_set_pixel(s, 0, -1, color_red())
+    s = surface_set_pixel(s, 16, 0, color_red())
+    s = surface_set_pixel(s, 0, 16, color_red())
+    if surface_get_pixel_r(&s, 0, 0) != 0 { return 1 }
+    if surface_get_pixel_g(&s, 0, 0) != 0 { return 2 }
+    if surface_get_pixel_b(&s, 0, 0) != 0 { return 3 }
+    0
+}
+
+fn test_out_of_bounds_reads_return_zero() -> i64 {
+    let s = surface_new(16, 16)
+    if surface_get_pixel_r(&s, -1, 0) != 0 { return 10 }
+    if surface_get_pixel_g(&s, 0, -1) != 0 { return 11 }
+    if surface_get_pixel_b(&s, 16, 0) != 0 { return 12 }
+    0
+}
+
+fn test_rect_clips_at_surface_edges() -> i64 with Mut, Panic, Div {
+    var s = surface_new(16, 16)
+    s = surface_clear(s, color_black())
+    s = surface_draw_rect(s, -1, -1, 3, 3, color_red())
+    if surface_get_pixel_r(&s, 0, 0) != 255 { return 20 }
+    if surface_get_pixel_r(&s, 1, 1) != 255 { return 21 }
+    if surface_get_pixel_r(&s, 2, 2) != 0 { return 22 }
+    0
+}
+
+fn test_vertical_and_horizontal_lines() -> i64 with Mut, Panic, Div {
+    var s = surface_new(16, 16)
+    s = surface_clear(s, color_black())
+    s = surface_draw_line(s, 3, 2, 3, 12, color_white())
+    s = surface_draw_line(s, 1, 8, 10, 8, color_blue())
+    if surface_get_pixel_r(&s, 3, 2) != 255 { return 30 }
+    if surface_get_pixel_r(&s, 3, 12) != 255 { return 31 }
+    if surface_get_pixel_b(&s, 1, 8) != 255 { return 32 }
+    if surface_get_pixel_b(&s, 10, 8) != 255 { return 33 }
+    0
+}
+
+fn test_constant_line_plot_does_not_divide_by_zero() -> i64 with Mut, Panic, Div {
+    var s = surface_new(64, 64)
+    var xs: [f64; 256] = [2.0; 256]
+    var ys: [f64; 256] = [5.0; 256]
+    let cfg = line_plot_config_default()
+    s = plot_line_raster(s, &xs, &ys, 4, cfg)
+    if surface_get_pixel_r(&s, 20, 43) == 255 &&
+       surface_get_pixel_g(&s, 20, 43) == 255 &&
+       surface_get_pixel_b(&s, 20, 43) == 255 {
+        return 40
+    }
+    0
+}
+
+fn test_constant_epistemic_band_does_not_divide_by_zero() -> i64 with Mut, Panic, Div {
+    var s = surface_new(64, 64)
+    var xs: [f64; 256] = [1.0; 256]
+    var center: [f64; 256] = [2.0; 256]
+    var lower: [f64; 256] = [2.0; 256]
+    var upper: [f64; 256] = [2.0; 256]
+    let cfg = epistemic_band_config_default()
+    s = plot_epistemic_band_raster(s, &xs, &center, &lower, &upper, 4, cfg)
+    if surface_get_pixel_r(&s, 20, 43) == 255 &&
+       surface_get_pixel_g(&s, 20, 43) == 255 &&
+       surface_get_pixel_b(&s, 20, 43) == 255 {
+        return 50
+    }
+    0
+}
+
+fn test_confidence_decay_runs_without_crash() -> i64 with Mut, Panic, Div {
+    var s = surface_new(64, 64)
+    var xs: [f64; 256] = [0.0; 256]
+    var ys: [f64; 256] = [0.0; 256]
+    var conf: [f64; 256] = [0.0; 256]
+    // Simple increasing line with decaying confidence
+    xs[0] = 0.0;  ys[0] = 10.0;  conf[0] = 1.0
+    xs[1] = 1.0;  ys[1] = 20.0;  conf[1] = 0.6
+    xs[2] = 2.0;  ys[2] = 30.0;  conf[2] = 0.2
+    xs[3] = 3.0;  ys[3] = 40.0;  conf[3] = 0.0
+    let cfg = confidence_decay_config_default()
+    s = plot_confidence_decay_raster(s, &xs, &ys, &conf, 4, cfg)
+    // Just ensure it didn't panic and wrote something visible on the first segment
+    if surface_get_pixel_r(&s, 22, 40) == 0 { return 60 }
+    0
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    let r1 = test_out_of_bounds_pixel_write_is_clipped()
+    if r1 != 0 { print("FAIL test_out_of_bounds_pixel_write_is_clipped\n"); return r1 }
+
+    let r2 = test_out_of_bounds_reads_return_zero()
+    if r2 != 0 { print("FAIL test_out_of_bounds_reads_return_zero\n"); return r2 }
+
+    let r3 = test_rect_clips_at_surface_edges()
+    if r3 != 0 { print("FAIL test_rect_clips_at_surface_edges\n"); return r3 }
+
+    let r4 = test_vertical_and_horizontal_lines()
+    if r4 != 0 { print("FAIL test_vertical_and_horizontal_lines\n"); return r4 }
+
+    let r5 = test_constant_line_plot_does_not_divide_by_zero()
+    if r5 != 0 { print("FAIL test_constant_line_plot_does_not_divide_by_zero\n"); return r5 }
+
+    let r6 = test_constant_epistemic_band_does_not_divide_by_zero()
+    if r6 != 0 { print("FAIL test_constant_epistemic_band_does_not_divide_by_zero\n"); return r6 }
+
+    let r7 = test_confidence_decay_runs_without_crash()
+    if r7 != 0 { print("FAIL test_confidence_decay_runs_without_crash\n"); return r7 }
+
+    print("PASS graphics_companion_smoke\n")
+    0
+}
