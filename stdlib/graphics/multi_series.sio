@@ -1,0 +1,381 @@
+// Graphics Multi-Series — Multiple data series with auto-legend
+
+use graphics::drawing::{Color, color_white, color_black}
+use graphics::surface::{Surface, surface_new, surface_draw_line, surface_draw_rect}
+use graphics::tile::{TiledSurface, tiled_surface_new, tiled_clear, tiled_draw_line, tiled_draw_rect}
+use graphics::text::{draw_text_raster, tiled_draw_text}
+use graphics::png::{png_encode_surface}
+
+pub struct SeriesConfig {
+    pub label: string,
+    pub color: Color,
+    pub marker_size: i64,
+    pub line_width: i64,
+    pub show_line: bool,
+    pub show_scatter: bool,
+}
+
+pub struct MultiSeriesConfig {
+    pub width: i64,
+    pub height: i64,
+    pub margin: i64,
+    pub bg_color: Color,
+    pub axis_color: Color,
+    pub legend_bg: Color,
+    pub legend_border: Color,
+    pub show_legend: bool,
+    pub legend_x: i64,
+    pub legend_y: i64,
+}
+
+pub fn multi_series_config_default() -> MultiSeriesConfig {
+    MultiSeriesConfig {
+        width: 400,
+        height: 300,
+        margin: 40,
+        bg_color: color_white(),
+        axis_color: color_black(),
+        legend_bg: Color { r: 240, g: 240, b: 240, a: 255 },
+        legend_border: Color { r: 150, g: 150, b: 150, a: 255 },
+        show_legend: true,
+        legend_x: 0 - 1,
+        legend_y: 10,
+    }
+}
+
+pub fn series_config_default(label: string, color: Color) -> SeriesConfig {
+    SeriesConfig {
+        label: label,
+        color: color,
+        marker_size: 3,
+        line_width: 1,
+        show_line: true,
+        show_scatter: false,
+    }
+}
+
+// Convert string to [i64; 64] for draw_text_raster.
+fn string_to_text_array(s: string) -> [i64; 64] with Mut {
+    var arr: [i64; 64] = [0; 64]
+    var i: i64 = 0
+    while i < 64 {
+        let ch = str_char_at(s, i)
+        if ch < 0 { return arr }
+        arr[i] = ch
+        i = i + 1
+    }
+    arr
+}
+
+pub struct Bounds {
+    pub xmin: f64,
+    pub xmax: f64,
+    pub ymin: f64,
+    pub ymax: f64,
+}
+
+// Compute global bounds across all series.
+fn compute_global_bounds(xs: &[f64; 256], yss: &[f64; 2048], ns: &[i64; 8], series_count: i64) -> Bounds with Mut {
+    var b = Bounds { xmin: xs[0], xmax: xs[0], ymin: yss[0], ymax: yss[0] }
+
+    var si: i64 = 0
+    while si < series_count && si < 8 {
+        let n = ns[si]
+        let base = si * 256
+        var i: i64 = 0
+        while i < n && i < 256 {
+            if xs[i] < b.xmin { b.xmin = xs[i] }
+            if xs[i] > b.xmax { b.xmax = xs[i] }
+            let y = yss[base + i]
+            if y < b.ymin { b.ymin = y }
+            if y > b.ymax { b.ymax = y }
+            i = i + 1
+        }
+        si = si + 1
+    }
+    b
+}
+
+// Draw legend box on surface.
+fn draw_legend(s: Surface, series_configs: &[SeriesConfig; 8], series_count: i64, config: MultiSeriesConfig) -> Surface with Mut, Panic, Div {
+    var out = s
+    if !config.show_legend || series_count <= 0 { return out }
+
+    let entry_h = 12
+    let legend_w = 100
+    let legend_h = 8 + series_count * entry_h
+    var lx = config.legend_x
+    var ly = config.legend_y
+    if lx < 0 {
+        lx = out.width - legend_w - 10
+    }
+    if ly < 0 { ly = 10 }
+    if lx + legend_w > out.width { lx = out.width - legend_w - 1 }
+    if ly + legend_h > out.height { ly = out.height - legend_h - 1 }
+
+    // Background
+    out = surface_draw_rect(out, lx, ly, legend_w, legend_h, config.legend_bg)
+    // Border
+    var bx: i64 = lx
+    while bx < lx + legend_w {
+        if bx >= 0 && bx < out.width {
+            if ly >= 0 && ly < out.height {
+                let idx = ly * out.width + bx
+                out.r[idx] = config.legend_border.r
+                out.g[idx] = config.legend_border.g
+                out.b[idx] = config.legend_border.b
+                out.a[idx] = config.legend_border.a
+            }
+            if ly + legend_h - 1 >= 0 && ly + legend_h - 1 < out.height {
+                let idx = (ly + legend_h - 1) * out.width + bx
+                out.r[idx] = config.legend_border.r
+                out.g[idx] = config.legend_border.g
+                out.b[idx] = config.legend_border.b
+                out.a[idx] = config.legend_border.a
+            }
+        }
+        bx = bx + 1
+    }
+    var by: i64 = ly
+    while by < ly + legend_h {
+        if by >= 0 && by < out.height {
+            if lx >= 0 && lx < out.width {
+                let idx = by * out.width + lx
+                out.r[idx] = config.legend_border.r
+                out.g[idx] = config.legend_border.g
+                out.b[idx] = config.legend_border.b
+                out.a[idx] = config.legend_border.a
+            }
+            if lx + legend_w - 1 >= 0 && lx + legend_w - 1 < out.width {
+                let idx = by * out.width + lx + legend_w - 1
+                out.r[idx] = config.legend_border.r
+                out.g[idx] = config.legend_border.g
+                out.b[idx] = config.legend_border.b
+                out.a[idx] = config.legend_border.a
+            }
+        }
+        by = by + 1
+    }
+
+    // Entries
+    var ei: i64 = 0
+    while ei < series_count && ei < 8 {
+        let sc = series_configs[ei]
+        let ey = ly + 5 + ei * entry_h
+        // Color sample line
+        out = surface_draw_rect(out, lx + 5, ey, 20, 2, sc.color)
+        // Label text
+        let text_arr = string_to_text_array(sc.label)
+        let text_len = sc.label.len() as i64
+        if text_len > 0 {
+            out = draw_text_raster(out, &text_arr, text_len, lx + 28, ey - 3, color_black(), 1)
+        }
+        ei = ei + 1
+    }
+
+    out
+}
+
+pub fn plot_multi_line_raster(s: Surface, xs: &[f64; 256], yss: &[f64; 2048], ns: &[i64; 8], series_count: i64, series_configs: &[SeriesConfig; 8], config: MultiSeriesConfig) -> Surface with Mut, Panic, Div {
+    var out = s
+    if series_count <= 0 { return out }
+
+    let bounds = compute_global_bounds(xs, yss, ns, series_count)
+    let gxmin = bounds.xmin
+    let gxmax = bounds.xmax
+    let gymin = bounds.ymin
+    let gymax = bounds.ymax
+    let x_range = gxmax - gxmin
+    let y_range = gymax - gymin
+    let plot_w = out.width - config.margin * 2
+    let plot_h = out.height - config.margin * 2
+
+    // Clear background
+    out = surface_draw_rect(out, 0, 0, out.width, out.height, config.bg_color)
+
+    // Draw axes
+    out = surface_draw_rect(out, config.margin, config.margin, 1, plot_h, config.axis_color)
+    out = surface_draw_rect(out, config.margin, out.height - config.margin - 1, plot_w, 1, config.axis_color)
+
+    // Draw each series
+    var si: i64 = 0
+    while si < series_count && si < 8 {
+        let n = ns[si]
+        let base = si * 256
+        let sc = series_configs[si]
+        if n <= 0 { si = si + 1; continue }
+
+        // Draw lines
+        if sc.show_line {
+            var j: i64 = 0
+            while j < n - 1 && j < 255 {
+                let x0f = if x_range == 0.0 { 0.0 } else { (xs[j] - gxmin) / x_range }
+                let y0f = if y_range == 0.0 { 0.0 } else { (yss[base + j] - gymin) / y_range }
+                let x1f = if x_range == 0.0 { 0.0 } else { (xs[j + 1] - gxmin) / x_range }
+                let y1f = if y_range == 0.0 { 0.0 } else { (yss[base + j + 1] - gymin) / y_range }
+
+                let px0 = config.margin + (x0f * (plot_w as f64)) as i64
+                let py0 = out.height - config.margin - 1 - (y0f * (plot_h as f64)) as i64
+                let px1 = config.margin + (x1f * (plot_w as f64)) as i64
+                let py1 = out.height - config.margin - 1 - (y1f * (plot_h as f64)) as i64
+
+                out = surface_draw_line(out, px0, py0, px1, py1, sc.color)
+                j = j + 1
+            }
+        }
+
+        // Draw scatter markers
+        if sc.show_scatter {
+            var j: i64 = 0
+            while j < n && j < 256 {
+                let xf = if x_range == 0.0 { 0.0 } else { (xs[j] - gxmin) / x_range }
+                let yf = if y_range == 0.0 { 0.0 } else { (yss[base + j] - gymin) / y_range }
+                let px = config.margin + (xf * (plot_w as f64)) as i64
+                let py = out.height - config.margin - 1 - (yf * (plot_h as f64)) as i64
+                let half = sc.marker_size
+                out = surface_draw_line(out, px - half, py, px + half, py, sc.color)
+                out = surface_draw_line(out, px, py - half, px, py + half, sc.color)
+                j = j + 1
+            }
+        }
+
+        si = si + 1
+    }
+
+    // Draw legend
+    out = draw_legend(out, series_configs, series_count, config)
+    out
+}
+
+pub fn plot_multi_scatter_raster(s: Surface, xs: &[f64; 256], yss: &[f64; 2048], ns: &[i64; 8], series_count: i64, series_configs: &[SeriesConfig; 8], config: MultiSeriesConfig) -> Surface with Mut, Panic, Div {
+    // Same as line but force show_scatter=true, show_line=false for all series
+    var out = s
+    if series_count <= 0 { return out }
+
+    let bounds = compute_global_bounds(xs, yss, ns, series_count)
+    let gxmin = bounds.xmin
+    let gxmax = bounds.xmax
+    let gymin = bounds.ymin
+    let gymax = bounds.ymax
+    let x_range = gxmax - gxmin
+    let y_range = gymax - gymin
+    let plot_w = out.width - config.margin * 2
+    let plot_h = out.height - config.margin * 2
+
+    out = surface_draw_rect(out, 0, 0, out.width, out.height, config.bg_color)
+    out = surface_draw_rect(out, config.margin, config.margin, 1, plot_h, config.axis_color)
+    out = surface_draw_rect(out, config.margin, out.height - config.margin - 1, plot_w, 1, config.axis_color)
+
+    var si: i64 = 0
+    while si < series_count && si < 8 {
+        let n = ns[si]
+        let base = si * 256
+        let sc = series_configs[si]
+        if n <= 0 { si = si + 1; continue }
+
+        var j: i64 = 0
+        while j < n && j < 256 {
+            let xf = if x_range == 0.0 { 0.0 } else { (xs[j] - gxmin) / x_range }
+            let yf = if y_range == 0.0 { 0.0 } else { (yss[base + j] - gymin) / y_range }
+            let px = config.margin + (xf * (plot_w as f64)) as i64
+            let py = out.height - config.margin - 1 - (yf * (plot_h as f64)) as i64
+            let half = sc.marker_size
+            out = surface_draw_line(out, px - half, py, px + half, py, sc.color)
+            out = surface_draw_line(out, px, py - half, px, py + half, sc.color)
+            j = j + 1
+        }
+        si = si + 1
+    }
+
+    out = draw_legend(out, series_configs, series_count, config)
+    out
+}
+
+// TiledSurface versions
+pub fn tiled_plot_multi_line_raster(ts: TiledSurface, xs: &[f64; 256], yss: &[f64; 2048], ns: &[i64; 8], series_count: i64, series_configs: &[SeriesConfig; 8], config: MultiSeriesConfig) -> TiledSurface with Mut, Panic, Div {
+    var out = ts
+    if series_count <= 0 { return out }
+
+    let bounds = compute_global_bounds(xs, yss, ns, series_count)
+    let gxmin = bounds.xmin
+    let gxmax = bounds.xmax
+    let gymin = bounds.ymin
+    let gymax = bounds.ymax
+    let x_range = gxmax - gxmin
+    let y_range = gymax - gymin
+    let plot_w = out.width - config.margin * 2
+    let plot_h = out.height - config.margin * 2
+
+    // Clear background on all tiles
+    out = tiled_clear(out, config.bg_color)
+
+    // Draw axes via tiled_draw_line
+    out = tiled_draw_line(out, config.margin, config.margin, config.margin, out.height - config.margin, config.axis_color)
+    out = tiled_draw_line(out, config.margin, out.height - config.margin, out.width - config.margin, out.height - config.margin, config.axis_color)
+
+    // Draw each series
+    var si: i64 = 0
+    while si < series_count && si < 8 {
+        let n = ns[si]
+        let base = si * 256
+        let sc = series_configs[si]
+        if n <= 0 { si = si + 1; continue }
+
+        if sc.show_line {
+            var j: i64 = 0
+            while j < n - 1 && j < 255 {
+                let x0f = if x_range == 0.0 { 0.0 } else { (xs[j] - gxmin) / x_range }
+                let y0f = if y_range == 0.0 { 0.0 } else { (yss[base + j] - gymin) / y_range }
+                let x1f = if x_range == 0.0 { 0.0 } else { (xs[j + 1] - gxmin) / x_range }
+                let y1f = if y_range == 0.0 { 0.0 } else { (yss[base + j + 1] - gymin) / y_range }
+
+                let px0 = config.margin + (x0f * (plot_w as f64)) as i64
+                let py0 = out.height - config.margin - 1 - (y0f * (plot_h as f64)) as i64
+                let px1 = config.margin + (x1f * (plot_w as f64)) as i64
+                let py1 = out.height - config.margin - 1 - (y1f * (plot_h as f64)) as i64
+
+                out = tiled_draw_line(out, px0, py0, px1, py1, sc.color)
+                j = j + 1
+            }
+        }
+
+        if sc.show_scatter {
+            var j: i64 = 0
+            while j < n && j < 256 {
+                let xf = if x_range == 0.0 { 0.0 } else { (xs[j] - gxmin) / x_range }
+                let yf = if y_range == 0.0 { 0.0 } else { (yss[base + j] - gymin) / y_range }
+                let px = config.margin + (xf * (plot_w as f64)) as i64
+                let py = out.height - config.margin - 1 - (yf * (plot_h as f64)) as i64
+                let half = sc.marker_size
+                out = tiled_draw_line(out, px - half, py, px + half, py, sc.color)
+                out = tiled_draw_line(out, px, py - half, px, py + half, sc.color)
+                j = j + 1
+            }
+        }
+
+        si = si + 1
+    }
+
+    out
+}
+
+// One-shot PNG wrappers
+pub fn plot_multi_line_png(xs: &[f64; 256], yss: &[f64; 2048], ns: &[i64; 8], series_count: i64, series_configs: &[SeriesConfig; 8], config: MultiSeriesConfig, filename: string) -> bool with IO, Mut, Panic, Div {
+    var w = config.width
+    var h = config.height
+    if w > 256 { w = 256 }
+    if h > 256 { h = 256 }
+    if w < 1 { w = 1 }
+    if h < 1 { h = 1 }
+    var s = surface_new(w, h)
+    s = plot_multi_line_raster(s, xs, yss, ns, series_count, series_configs, config)
+    png_encode_surface(&s, filename)
+}
+
+pub fn tiled_plot_multi_line_png(xs: &[f64; 256], yss: &[f64; 2048], ns: &[i64; 8], series_count: i64, series_configs: &[SeriesConfig; 8], config: MultiSeriesConfig, filename: string) -> bool with IO, Mut, Panic, Div {
+    var ts = tiled_surface_new(config.width, config.height, 256, 256)
+    ts = tiled_plot_multi_line_raster(ts, xs, yss, ns, series_count, series_configs, config)
+    tiled_export_png(&ts, filename)
+}
+
+fn main() -> i32 with IO { 0 }

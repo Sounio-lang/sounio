@@ -1,0 +1,309 @@
+// Tiled Plot — High-resolution plot rendering on TiledSurface
+//
+// Versions of plot_line_raster, plot_scatter_raster, plot_heatmap_raster,
+// and plot_epistemic_band_raster that operate on TiledSurface for canvases
+// larger than 256×256 (up to 768×768 with the current 3×3 tile limit).
+
+use graphics::drawing::{Color, color_white}
+use graphics::tile::{
+    TiledSurface, tiled_surface_new, tiled_clear,
+    tiled_draw_line, tiled_draw_rect, tiled_export_png
+}
+use graphics::plot::{LinePlotConfig, line_plot_config_default}
+use graphics::scatter::{ScatterConfig, scatter_config_default}
+use graphics::heatmap::{HeatmapConfig, heatmap_config_default, heatmap_color}
+use graphics::epistemic::{EpistemicBandConfig, epistemic_band_config_default, interp_y}
+
+// ============================================================================
+// TILED LINE PLOT
+// ============================================================================
+
+pub fn tiled_plot_line_raster(
+    ts: TiledSurface,
+    xs: &[f64; 256],
+    ys: &[f64; 256],
+    n: i64,
+    config: LinePlotConfig
+) -> TiledSurface with Mut, Panic, Div {
+    if n <= 0 { return ts }
+
+    var out = ts
+
+    var xmin = xs[0]
+    var xmax = xs[0]
+    var ymin = ys[0]
+    var ymax = ys[0]
+    var i: i64 = 1
+    while i < n {
+        if xs[i] < xmin { xmin = xs[i] }
+        if xs[i] > xmax { xmax = xs[i] }
+        if ys[i] < ymin { ymin = ys[i] }
+        if ys[i] > ymax { ymax = ys[i] }
+        i = i + 1
+    }
+
+    let x_range = xmax - xmin
+    let y_range = ymax - ymin
+    let plot_w = out.width - config.margin * 2
+    let plot_h = out.height - config.margin * 2
+
+    out = tiled_clear(out, config.bg_color)
+    out = tiled_draw_rect(out, config.margin, config.margin, 1, plot_h, config.axis_color)
+    out = tiled_draw_rect(out, config.margin, out.height - config.margin - 1, plot_w, 1, config.axis_color)
+
+    var j: i64 = 0
+    while j < n - 1 {
+        let x0f = if x_range == 0.0 { 0.0 } else { (xs[j] - xmin) / x_range }
+        let y0f = if y_range == 0.0 { 0.0 } else { (ys[j] - ymin) / y_range }
+        let x1f = if x_range == 0.0 { 0.0 } else { (xs[j + 1] - xmin) / x_range }
+        let y1f = if y_range == 0.0 { 0.0 } else { (ys[j + 1] - ymin) / y_range }
+
+        let px0 = config.margin + (x0f * (plot_w as f64)) as i64
+        let py0 = out.height - config.margin - 1 - (y0f * (plot_h as f64)) as i64
+        let px1 = config.margin + (x1f * (plot_w as f64)) as i64
+        let py1 = out.height - config.margin - 1 - (y1f * (plot_h as f64)) as i64
+
+        out = tiled_draw_line(out, px0, py0, px1, py1, config.line_color)
+        j = j + 1
+    }
+    out
+}
+
+pub fn tiled_plot_line_png(
+    xs: &[f64; 256], ys: &[f64; 256], n: i64,
+    width: i64, height: i64, filename: string
+) -> bool with IO, Mut, Panic, Div {
+    var ts = tiled_surface_new(width, height, 256, 256)
+    ts = tiled_clear(ts, color_white())
+    let config = line_plot_config_default()
+    ts = tiled_plot_line_raster(ts, xs, ys, n, config)
+    tiled_export_png(&ts, filename)
+}
+
+// ============================================================================
+// TILED SCATTER PLOT
+// ============================================================================
+
+fn tiled_draw_cross(ts: TiledSurface, x: i64, y: i64, half: i64, c: Color) -> TiledSurface with Mut, Panic, Div {
+    var out = ts
+    out = tiled_draw_line(out, x - half, y, x + half, y, c)
+    out = tiled_draw_line(out, x, y - half, x, y + half, c)
+    out
+}
+
+pub fn tiled_plot_scatter_raster(
+    ts: TiledSurface,
+    xs: &[f64; 256],
+    ys: &[f64; 256],
+    n: i64,
+    config: ScatterConfig
+) -> TiledSurface with Mut, Panic, Div {
+    if n <= 0 { return ts }
+
+    var out = ts
+
+    var xmin = xs[0]
+    var xmax = xs[0]
+    var ymin = ys[0]
+    var ymax = ys[0]
+    var i: i64 = 1
+    while i < n {
+        if xs[i] < xmin { xmin = xs[i] }
+        if xs[i] > xmax { xmax = xs[i] }
+        if ys[i] < ymin { ymin = ys[i] }
+        if ys[i] > ymax { ymax = ys[i] }
+        i = i + 1
+    }
+
+    let x_range = xmax - xmin
+    let y_range = ymax - ymin
+    let plot_w = out.width - config.margin * 2
+    let plot_h = out.height - config.margin * 2
+
+    out = tiled_clear(out, config.bg_color)
+    out = tiled_draw_rect(out, config.margin, config.margin, 1, plot_h, config.axis_color)
+    out = tiled_draw_rect(out, config.margin, out.height - config.margin - 1, plot_w, 1, config.axis_color)
+
+    var j: i64 = 0
+    while j < n {
+        let xf = if x_range == 0.0 { 0.0 } else { (xs[j] - xmin) / x_range }
+        let yf = if y_range == 0.0 { 0.0 } else { (ys[j] - ymin) / y_range }
+
+        let px = config.margin + (xf * (plot_w as f64)) as i64
+        let py = out.height - config.margin - 1 - (yf * (plot_h as f64)) as i64
+
+        out = tiled_draw_cross(out, px, py, config.marker_size, config.marker_color)
+        j = j + 1
+    }
+    out
+}
+
+pub fn tiled_plot_scatter_png(
+    xs: &[f64; 256], ys: &[f64; 256], n: i64,
+    width: i64, height: i64, filename: string
+) -> bool with IO, Mut, Panic, Div {
+    var ts = tiled_surface_new(width, height, 256, 256)
+    ts = tiled_clear(ts, color_white())
+    let config = scatter_config_default()
+    ts = tiled_plot_scatter_raster(ts, xs, ys, n, config)
+    tiled_export_png(&ts, filename)
+}
+
+// ============================================================================
+// TILED HEATMAP
+// ============================================================================
+
+pub fn tiled_plot_heatmap_raster(
+    ts: TiledSurface,
+    data: &[f64; 4096],
+    rows: i64,
+    cols: i64,
+    config: HeatmapConfig
+) -> TiledSurface with Mut, Panic, Div {
+    if rows <= 0 || cols <= 0 { return ts }
+
+    var out = ts
+
+    var min_val = data[0]
+    var max_val = data[0]
+    var i: i64 = 1
+    while i < rows * cols {
+        if data[i] < min_val { min_val = data[i] }
+        if data[i] > max_val { max_val = data[i] }
+        i = i + 1
+    }
+    let range = max_val - min_val
+
+    let plot_w = out.width - config.margin * 2
+    let plot_h = out.height - config.margin * 2
+    let cell_w = plot_w / cols
+    let cell_h = plot_h / rows
+    if cell_w <= 0 { return ts }
+    if cell_h <= 0 { return ts }
+
+    out = tiled_clear(out, config.bg_color)
+    out = tiled_draw_rect(out, config.margin, config.margin, 1, plot_h, config.axis_color)
+    out = tiled_draw_rect(out, config.margin, out.height - config.margin - 1, plot_w, 1, config.axis_color)
+
+    var r: i64 = 0
+    while r < rows {
+        var c: i64 = 0
+        while c < cols {
+            let idx = r * cols + c
+            let normalized = if range == 0.0 { 0.5 } else { (data[idx] - min_val) / range }
+            let cell_color = heatmap_color(normalized)
+            let px = config.margin + c * cell_w
+            let py = out.height - config.margin - 1 - (r + 1) * cell_h
+            out = tiled_draw_rect(out, px, py, cell_w, cell_h, cell_color)
+            c = c + 1
+        }
+        r = r + 1
+    }
+    out
+}
+
+pub fn tiled_plot_heatmap_png(
+    data: &[f64; 4096], rows: i64, cols: i64,
+    width: i64, height: i64, filename: string
+) -> bool with IO, Mut, Panic, Div {
+    var ts = tiled_surface_new(width, height, 256, 256)
+    ts = tiled_clear(ts, color_white())
+    let config = heatmap_config_default()
+    ts = tiled_plot_heatmap_raster(ts, data, rows, cols, config)
+    tiled_export_png(&ts, filename)
+}
+
+// ============================================================================
+// TILED EPISTEMIC BAND
+// ============================================================================
+
+pub fn tiled_plot_epistemic_band_raster(
+    ts: TiledSurface,
+    xs: &[f64; 256],
+    center: &[f64; 256],
+    lower: &[f64; 256],
+    upper: &[f64; 256],
+    n: i64,
+    config: EpistemicBandConfig
+) -> TiledSurface with Mut, Panic, Div {
+    if n <= 0 { return ts }
+
+    var out = ts
+
+    var xmin = xs[0]
+    var xmax = xs[0]
+    var i: i64 = 1
+    while i < n {
+        if xs[i] < xmin { xmin = xs[i] }
+        if xs[i] > xmax { xmax = xs[i] }
+        i = i + 1
+    }
+
+    var ymin = center[0]
+    var ymax = center[0]
+    i = 0
+    while i < n {
+        if lower[i] < ymin { ymin = lower[i] }
+        if upper[i] > ymax { ymax = upper[i] }
+        i = i + 1
+    }
+
+    let x_range = xmax - xmin
+    let y_range = ymax - ymin
+    let plot_w = out.width - config.margin * 2
+    let plot_h = out.height - config.margin * 2
+
+    out = tiled_clear(out, config.bg_color)
+    out = tiled_draw_rect(out, config.margin, config.margin, 1, plot_h, config.axis_color)
+    out = tiled_draw_rect(out, config.margin, out.height - config.margin - 1, plot_w, 1, config.axis_color)
+
+    var px: i64 = 0
+    while px < plot_w {
+        let x_frac = (px as f64) / (plot_w as f64)
+        let x_data = xmin + x_frac * x_range
+
+        let y_lower = interp_y(xs, lower, n, x_data)
+        let y_upper = interp_y(xs, upper, n, x_data)
+
+        let py_lower = out.height - config.margin - 1 - ((y_lower - ymin) / y_range * (plot_h as f64)) as i64
+        let py_upper = out.height - config.margin - 1 - ((y_upper - ymin) / y_range * (plot_h as f64)) as i64
+
+        let y0 = if py_lower < py_upper { py_lower } else { py_upper }
+        let y1 = if py_lower > py_upper { py_lower } else { py_upper }
+        let h = y1 - y0 + 1
+        if h > 0 {
+            out = tiled_draw_rect(out, config.margin + px, y0, 1, h, config.band_color)
+        }
+        px = px + 1
+    }
+
+    var j: i64 = 0
+    while j < n - 1 {
+        let x0f = if x_range == 0.0 { 0.0 } else { (xs[j] - xmin) / x_range }
+        let y0f = if y_range == 0.0 { 0.0 } else { (center[j] - ymin) / y_range }
+        let x1f = if x_range == 0.0 { 0.0 } else { (xs[j + 1] - xmin) / x_range }
+        let y1f = if y_range == 0.0 { 0.0 } else { (center[j + 1] - ymin) / y_range }
+
+        let px0 = config.margin + (x0f * (plot_w as f64)) as i64
+        let py0 = out.height - config.margin - 1 - (y0f * (plot_h as f64)) as i64
+        let px1 = config.margin + (x1f * (plot_w as f64)) as i64
+        let py1 = out.height - config.margin - 1 - (y1f * (plot_h as f64)) as i64
+
+        out = tiled_draw_line(out, px0, py0, px1, py1, config.center_color)
+        j = j + 1
+    }
+    out
+}
+
+pub fn tiled_plot_epistemic_band_png(
+    xs: &[f64; 256], center: &[f64; 256], lower: &[f64; 256], upper: &[f64; 256], n: i64,
+    width: i64, height: i64, filename: string
+) -> bool with IO, Mut, Panic, Div {
+    var ts = tiled_surface_new(width, height, 256, 256)
+    ts = tiled_clear(ts, color_white())
+    let config = epistemic_band_config_default()
+    ts = tiled_plot_epistemic_band_raster(ts, xs, center, lower, upper, n, config)
+    tiled_export_png(&ts, filename)
+}
+
+fn main() -> i32 with IO { 0 }
