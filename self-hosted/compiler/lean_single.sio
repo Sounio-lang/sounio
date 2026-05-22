@@ -145,6 +145,11 @@ var ST_COUNT: i64 = 0
 // Field-name source positions for collision-safe lookup (concatenated SRC buffer)
 var ST_FNS: [i64; 131072] = [0; 131072]
 var ST_FNE: [i64; 131072] = [0; 131072]
+// Per-struct module visibility. A non-pub struct may be constructed and have
+// fields inspected only from the source file where it was declared.
+var ST_PUBLIC: [i64; 1024] = [0; 1024]
+var ST_DECL_NS: [i64; 1024] = [0; 1024]
+var ST_DECL_NE: [i64; 1024] = [0; 1024]
 // Query bounds for struct field lookup collision resolution
 var ST_QUERY_NS: i64 = -1
 var ST_QUERY_NE: i64 = -1
@@ -661,6 +666,30 @@ fn st_find(hash: i64) -> i64 with Panic, Mut {
         i = i + 1
     }
     return -1
+}
+
+fn src_file_marker_start(pos: i64) -> i64 with Panic, Mut {
+    var start: i64 = 0
+    var i: i64 = 0
+    while i < pos && i < SRC_LEN {
+        if SRC[i as usize] as i64 == 1 { start = i }
+        i = i + 1
+    }
+    return start
+}
+
+fn src_same_file_pos(a: i64, b: i64) -> bool with Panic, Mut {
+    if a < 0 || b < 0 { return true }
+    return src_file_marker_start(a) == src_file_marker_start(b)
+}
+
+fn st_private_access_denied(si: i64, access_tok: i64) -> bool with Panic, Mut {
+    if si < 0 { return false }
+    if ST_PUBLIC[si as usize] != 0 { return false }
+    if ST_DECL_NE[si as usize] <= ST_DECL_NS[si as usize] { return false }
+    if access_tok < 0 || access_tok >= TC { return false }
+    if src_same_file_pos(TS[access_tok as usize], ST_DECL_NS[si as usize]) { return false }
+    return true
 }
 
 fn tup_cache_register(tup_hash: i64, first_ty: i64, first_hash: i64, last_ty: i64, last_hash: i64) with Panic, Mut {
@@ -12248,6 +12277,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
             let sh = gl_name_hash(ns, ne)
             let si = st_find(sh)
             if si >= 0 {
+                if st_private_access_denied(si, name_tok) {
+                    tc_error_hard(name_tok, "private struct literal")
+                }
                 EP = EP + 1  // skip {
                 let total_slots = st_total_size(si) / 8
                 let base_slot = NEXT_SLOT
@@ -13682,12 +13714,52 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             if type_is_struct_like(base_data_ty, base_data_hash) {
                 let bsi = st_find(base_data_hash)
                 if bsi >= 0 {
-                    ST_QUERY_NS = fns
-                    ST_QUERY_NE = fne
-                    let off = st_field_offset(bsi, fh)
-                    if off >= 0 {
-                        EXPR_TY = st_field_ty(bsi, fh)
-                        EXPR_TY_HASH = st_field_hash(bsi, fh)
+                    if st_private_access_denied(bsi, method_tok) {
+                        tc_error_hard(method_tok, "private struct field access")
+                        em(0x31); em(0xc0)
+                    } else {
+                        ST_QUERY_NS = fns
+                        ST_QUERY_NE = fne
+                        let off = st_field_offset(bsi, fh)
+                        if off >= 0 {
+                            EXPR_TY = st_field_ty(bsi, fh)
+                            EXPR_TY_HASH = st_field_hash(bsi, fh)
+                        ST_QUERY_NS = -1
+                        ST_QUERY_NE = -1
+                            if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
+                                if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
+                            } else {
+                                if off == 0 {
+                                    em(0x48); em(0x8b); em(0x00)
+                                } else {
+                                    em(0x48); em(0x8b); em(0x80); em32(off)
+                                }
+                            }
+                            if EXPR_TY == 8 { LAST_ALEN = arr_hash_alen(EXPR_TY_HASH) }
+                        } else {
+                            tc_error_hard(method_tok, "unknown field access")
+                            em(0x31); em(0xc0)
+                        }
+                        ST_QUERY_NS = -1
+                        ST_QUERY_NE = -1
+                    }
+                    found = 1
+                }
+            }
+            var si: i64 = 0
+            while si < ST_COUNT && found == 0 {
+                ST_QUERY_NS = fns
+                ST_QUERY_NE = fne
+                let off = st_field_offset(si, fh)
+                if off >= 0 {
+                    if st_private_access_denied(si, method_tok) {
+                        ST_QUERY_NS = -1
+                        ST_QUERY_NE = -1
+                        tc_error_hard(method_tok, "private struct field access")
+                        em(0x31); em(0xc0)
+                    } else {
+                        EXPR_TY = st_field_ty(si, fh)
+                        EXPR_TY_HASH = st_field_hash(si, fh)
                     ST_QUERY_NS = -1
                     ST_QUERY_NE = -1
                         if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
@@ -13700,33 +13772,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                             }
                         }
                         if EXPR_TY == 8 { LAST_ALEN = arr_hash_alen(EXPR_TY_HASH) }
-                    } else {
-                        tc_error_hard(method_tok, "unknown field access")
-                        em(0x31); em(0xc0)
                     }
-                    found = 1
-                }
-            }
-            var si: i64 = 0
-            while si < ST_COUNT && found == 0 {
-                ST_QUERY_NS = fns
-                ST_QUERY_NE = fne
-                let off = st_field_offset(si, fh)
-                if off >= 0 {
-                    EXPR_TY = st_field_ty(si, fh)
-                    EXPR_TY_HASH = st_field_hash(si, fh)
-                ST_QUERY_NS = -1
-                ST_QUERY_NE = -1
-                    if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
-                        if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
-                    } else {
-                        if off == 0 {
-                            em(0x48); em(0x8b); em(0x00)
-                        } else {
-                            em(0x48); em(0x8b); em(0x80); em32(off)
-                        }
-                    }
-                    if EXPR_TY == 8 { LAST_ALEN = arr_hash_alen(EXPR_TY_HASH) }
                     found = 1
                 }
                 si = si + 1
@@ -16631,6 +16677,10 @@ fn tuple_destructure_from_ptr_a64(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
 // Struct pattern destructuring: let Point { x, y } = expr  (x86-64)
 // pat_start = token index of '{'; si = struct table index; ptr_slot = saved struct pointer
 fn struct_destructure_x86(pat_start: i64, si: i64, ptr_slot: i64) with IO, Mut, Panic, Div {
+    if st_private_access_denied(si, pat_start) {
+        tc_error_hard(pat_start, "private struct field access")
+        return
+    }
     var pp = pat_start + 1
     while TK[pp as usize] != 9 && TK[pp as usize] != 0 {
         if TK[pp as usize] == 28 { pp = pp + 1; continue }
@@ -16666,6 +16716,10 @@ fn struct_destructure_x86(pat_start: i64, si: i64, ptr_slot: i64) with IO, Mut, 
 
 // Struct pattern destructuring: let Point { x, y } = expr  (ARM64)
 fn struct_destructure_a64(pat_start: i64, si: i64, ptr_slot: i64) with IO, Mut, Panic, Div {
+    if st_private_access_denied(si, pat_start) {
+        tc_error_hard(pat_start, "private struct field access")
+        return
+    }
     var pp = pat_start + 1
     while TK[pp as usize] != 9 && TK[pp as usize] != 0 {
         if TK[pp as usize] == 28 { pp = pp + 1; continue }
@@ -16882,6 +16936,11 @@ fn compile_field_array_store_x86() with IO, Mut, Panic, Div {
         em(0x59)
         return
     }
+    if st_private_access_denied(si, field_tok) {
+        tc_error_hard(field_tok, "private struct field access")
+        em(0x59)
+        return
+    }
                     ST_QUERY_NS = fns
                     ST_QUERY_NE = fne
     let foff = st_field_offset(si, fh)
@@ -16963,8 +17022,12 @@ fn compile_field_array_array_store_x86() with IO, Mut, Panic, Div {
         tc_error(field_tok, "unknown field access")
         return
     }
-    ST_QUERY_NS = fns
-    ST_QUERY_NE = fne
+    if st_private_access_denied(si, field_tok) {
+        tc_error_hard(field_tok, "private struct field access")
+        return
+    }
+                    ST_QUERY_NS = fns
+                    ST_QUERY_NE = fne
     let foff = st_field_offset(si, fh)
     let fty = st_field_ty(si, fh)
     let fhash = st_field_hash(si, fh)
@@ -17058,6 +17121,11 @@ fn compile_field_array_store_a64() with IO, Mut, Panic, Div {
     let si = resolve_field_struct_index(ns, ne, fh)
     if si < 0 {
         tc_error(field_tok, "unknown field access")
+        emit_pop_x1_a64()
+        return
+    }
+    if st_private_access_denied(si, field_tok) {
+        tc_error_hard(field_tok, "private struct field access")
         emit_pop_x1_a64()
         return
     }
@@ -17174,6 +17242,11 @@ fn compile_indexed_field_field_store_x86() with IO, Mut, Panic, Div {
         em(0x59)
         return
     }
+    if st_private_access_denied(root_si, array_field_tok) {
+        tc_error_hard(array_field_tok, "private struct field access")
+        em(0x59)
+        return
+    }
                     ST_QUERY_NS = afns
                     ST_QUERY_NE = afne
     let array_off = st_field_offset(root_si, array_fh)
@@ -17202,6 +17275,11 @@ fn compile_indexed_field_field_store_x86() with IO, Mut, Panic, Div {
     ST_QUERY_NE = -1
     if elem_si < 0 {
         tc_error(leaf_field_tok, "unknown field access")
+        em(0x59)
+        return
+    }
+    if st_private_access_denied(elem_si, leaf_field_tok) {
+        tc_error_hard(leaf_field_tok, "private struct field access")
         em(0x59)
         return
     }
@@ -17874,6 +17952,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             tc_error(field_tok, "unknown field access")
             return
         }
+        if st_private_access_denied(si, field_tok) {
+            tc_error_hard(field_tok, "private struct field access")
+            return
+        }
         ST_QUERY_NS = fns
         ST_QUERY_NE = fne
         let off = st_field_offset(si, fh)
@@ -18178,6 +18260,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     let si = st_find(inner_hash)
                     if si < 0 {
                         tc_error(field_tok, "unknown field access")
+                    } else if st_private_access_denied(si, field_tok) {
+                        tc_error_hard(field_tok, "private struct field access")
                     } else {
                     ST_QUERY_NS = TS[field_tok as usize]
                     ST_QUERY_NE = TE[field_tok as usize]
@@ -21857,8 +21941,10 @@ fn mono_pass() with IO, Mut, Panic, Div {
         // Re-scan for monomorphized struct declarations
         p = 0
         while p < TC {
-            if TK[p as usize] == 46 || TK[p as usize] == 49 || TK[p as usize] == 62 {
-                if TK[p as usize] == 49 || TK[p as usize] == 62 { p = p + 1 }
+            if TK[p as usize] == 46 || TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73 {
+                var ris_public: i64 = 0
+                if TK[p as usize] == 49 { ris_public = 1 }
+                if TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73 { p = p + 1 }
                 if TK[p as usize] == 46 {
                     p = p + 1
                     let rsn_ns = TS[p as usize]
@@ -21869,6 +21955,9 @@ fn mono_pass() with IO, Mut, Panic, Div {
                         let rsi = ST_COUNT
                         let rbase = rsi * 130
                         ST[rbase as usize] = rsh
+                        ST_PUBLIC[rsi as usize] = ris_public
+                        ST_DECL_NS[rsi as usize] = rsn_ns
+                        ST_DECL_NE[rsi as usize] = rsn_ne
                         p = p + 1
                         if TK[p as usize] == 23 { p = p + 1; while TK[p as usize] != 9 && TK[p as usize] != 0 { p = p + 1 }; if TK[p as usize] == 9 { p = p + 1 }; ST[(rbase + 1) as usize] = 0; ST_COUNT = ST_COUNT + 1; continue }
                         if TK[p as usize] == 8 { p = p + 1 }
@@ -22189,6 +22278,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 let asi = ST_COUNT
                 let abase = asi * 130
                 ST[abase as usize] = alg_hash
+                ST_PUBLIC[asi as usize] = 1
+                ST_DECL_NS[asi as usize] = alg_ns
+                ST_DECL_NE[asi as usize] = alg_ne
                 ST[(abase + 1) as usize] = alg_fc
                 var afi_c1: i64 = 0
                 while afi_c1 < alg_fc {
@@ -22293,6 +22385,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     let tsi = ST_COUNT
                     let tbase = tsi * 130
                     ST[tbase as usize] = trait_hash
+                    ST_PUBLIC[tsi as usize] = 1
+                    ST_DECL_NS[tsi as usize] = trait_ns
+                    ST_DECL_NE[tsi as usize] = trait_ne
                     ST[(tbase + 1) as usize] = 0  // no fields
                     ST_LINEAR[tsi as usize] = 0
                     ST_AFFINE[tsi as usize] = 0
@@ -22363,6 +22458,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             // struct or pub/linear/affine keyword — skip prefix, track linear/affine
             var is_linear_decl: i64 = 0
             var is_affine_decl: i64 = 0
+            var is_pub_decl: i64 = 0
+            if TK[p as usize] == 49 { is_pub_decl = 1 }
             if TK[p as usize] == 62 { is_linear_decl = 1 }
             if TK[p as usize] == 73 { is_affine_decl = 1 }
             if TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73 { p = p + 1 }
@@ -22381,6 +22478,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 let si = ST_COUNT
                 let base = si * 130
                 ST[base as usize] = sh
+                ST_PUBLIC[si as usize] = is_pub_decl
+                ST_DECL_NS[si as usize] = sn_ns
+                ST_DECL_NE[si as usize] = sn_ne
                 if TK[p as usize] == 8 { p = p + 1 }  // skip {
                 var fc: i64 = 0
                 while TK[p as usize] != 9 && TK[p as usize] != 0 {
@@ -26926,6 +27026,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             let sh = gl_name_hash(ns, ne)
             let si = st_find(sh)
             if si >= 0 {
+                if st_private_access_denied(si, name_tok) {
+                    tc_error_hard(name_tok, "private struct literal")
+                }
                 EP = EP + 1
                 let total_slots = st_total_size(si) / 8
                 let base_slot = NEXT_SLOT
@@ -27603,12 +27706,52 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             if type_is_struct_like(base_data_ty, base_data_hash) {
                 let bsi = st_find(base_data_hash)
                 if bsi >= 0 {
-                    ST_QUERY_NS = fns
-                    ST_QUERY_NE = fne
-                    let off = st_field_offset(bsi, fh)
-                    if off >= 0 {
-                        EXPR_TY = st_field_ty(bsi, fh)
-                        EXPR_TY_HASH = st_field_hash(bsi, fh)
+                    if st_private_access_denied(bsi, method_tok) {
+                        tc_error_hard(method_tok, "private struct field access")
+                        em32(0xD2800000)
+                    } else {
+                        ST_QUERY_NS = fns
+                        ST_QUERY_NE = fne
+                        let off = st_field_offset(bsi, fh)
+                        if off >= 0 {
+                            EXPR_TY = st_field_ty(bsi, fh)
+                            EXPR_TY_HASH = st_field_hash(bsi, fh)
+                        ST_QUERY_NS = -1
+                        ST_QUERY_NE = -1
+                            if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
+                                if off != 0 {
+                                    emit_imm64_reg_a64(1, off)
+                                    em32(0x8B010000)
+                                }
+                            } else {
+                                if off == 0 { em32(0xF9400000) }
+                                else { em32(0xF9400000 | ((off / 8) << 10) | (0 << 5) | 0) }
+                            }
+                            if EXPR_TY == 8 { LAST_ALEN = arr_hash_alen(EXPR_TY_HASH) }
+                        } else {
+                            tc_error(method_tok, "unknown field access")
+                            em32(0xD2800000)
+                        }
+                        ST_QUERY_NS = -1
+                        ST_QUERY_NE = -1
+                    }
+                    found = 1
+                }
+            }
+            var si: i64 = 0
+            while si < ST_COUNT && found == 0 {
+                ST_QUERY_NS = fns
+                ST_QUERY_NE = fne
+                let off = st_field_offset(si, fh)
+                if off >= 0 {
+                    if st_private_access_denied(si, method_tok) {
+                        ST_QUERY_NS = -1
+                        ST_QUERY_NE = -1
+                        tc_error_hard(method_tok, "private struct field access")
+                        em32(0xD2800000)
+                    } else {
+                        EXPR_TY = st_field_ty(si, fh)
+                        EXPR_TY_HASH = st_field_hash(si, fh)
                     ST_QUERY_NS = -1
                     ST_QUERY_NE = -1
                         if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
@@ -27621,33 +27764,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                             else { em32(0xF9400000 | ((off / 8) << 10) | (0 << 5) | 0) }
                         }
                         if EXPR_TY == 8 { LAST_ALEN = arr_hash_alen(EXPR_TY_HASH) }
-                    } else {
-                        tc_error(method_tok, "unknown field access")
-                        em32(0xD2800000)
                     }
-                    found = 1
-                }
-            }
-            var si: i64 = 0
-            while si < ST_COUNT && found == 0 {
-                ST_QUERY_NS = fns
-                ST_QUERY_NE = fne
-                let off = st_field_offset(si, fh)
-                if off >= 0 {
-                    EXPR_TY = st_field_ty(si, fh)
-                    EXPR_TY_HASH = st_field_hash(si, fh)
-                ST_QUERY_NS = -1
-                ST_QUERY_NE = -1
-                    if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
-                        if off != 0 {
-                            emit_imm64_reg_a64(1, off)
-                            em32(0x8B010000)
-                        }
-                    } else {
-                        if off == 0 { em32(0xF9400000) }
-                        else { em32(0xF9400000 | ((off / 8) << 10) | (0 << 5) | 0) }
-                    }
-                    if EXPR_TY == 8 { LAST_ALEN = arr_hash_alen(EXPR_TY_HASH) }
                     found = 1
                 }
                 si = si + 1
@@ -28408,6 +28525,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             tc_error(field_tok, "unknown field access")
             return
         }
+        if st_private_access_denied(si, field_tok) {
+            tc_error_hard(field_tok, "private struct field access")
+            return
+        }
         ST_QUERY_NS = fns
         ST_QUERY_NE = fne
         let off = st_field_offset(si, fh)
@@ -28674,6 +28795,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     let si = st_find(inner_hash)
                     if si < 0 {
                         tc_error(field_tok, "unknown field access")
+                    } else if st_private_access_denied(si, field_tok) {
+                        tc_error_hard(field_tok, "private struct field access")
                     } else {
                     ST_QUERY_NS = TS[field_tok as usize]
                     ST_QUERY_NE = TE[field_tok as usize]
