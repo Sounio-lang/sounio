@@ -7,6 +7,15 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.reconciliation-memo-2026-05-12
 -->
 
+> **⚠️ SUPERSEDED — 2026-05-21.** Operator directive: the PBPK28 biomaterials track and the
+> broader Sounio epistemic-computing thesis are **one dissertation**, not the two-lane split
+> recorded below. The "binding authority" finding in this memo (that the September–October
+> defense is the biomaterials master's *and* that the Sounio epistemic thesis is a separate,
+> longer-horizon project) no longer governs. The audit (`audit/gap_report.json`,
+> `audit/discovery_log.md`) and `pbpk_claim_truth_table.md` have been re-framed to one unified
+> evidence surface. This memo is retained verbatim **for history only** — do not cite the
+> two-track split as current policy.
+
 # Dissertation Architecture Reconciliation
 
 **Date:** 2026-05-12  
