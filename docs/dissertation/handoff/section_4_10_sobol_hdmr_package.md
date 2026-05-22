@@ -2,7 +2,7 @@
 topic_id: repo.docs.dissertation.handoff.section-4-10-sobol-hdmr-package
 authority: repo_only
 audience: users
-last_validated: 2026-05-21
+last_validated: 2026-03-07
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.handoff.section-4-10-sobol-hdmr-package
 -->
