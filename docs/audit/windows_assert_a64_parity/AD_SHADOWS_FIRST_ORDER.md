@@ -2,9 +2,9 @@
 topic_id: repo.docs.audit.windows-assert-a64-parity.ad-shadows-first-order
 authority: repo_only
 audience: users
-last_validated: 2026-05-21
-validated_by: Claude Opus 4.7
-source_of_truth: docs/audit/windows_assert_a64_parity/AD_SHADOWS_FIRST_ORDER.md
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.windows-assert-a64-parity.ad-shadows-first-order
 -->
 
 # A64 PARITY — first-order AD shadows through transcendentals
