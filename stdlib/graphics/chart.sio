@@ -1,0 +1,232 @@
+// Graphics Chart — High-level composite chart builder
+//
+// Composes grid, axes, title, and data plots into a single chart.
+// Uses existing raster primitives from plot, scatter, bar, grid, text, and png modules.
+
+use graphics::drawing::{Color, color_white, color_black}
+use graphics::surface::{Surface, surface_new, surface_clear}
+use graphics::tile::{TiledSurface, tiled_surface_new, tiled_clear, tiled_export_png}
+use graphics::plot::{LinePlotConfig, plot_line_raster}
+use graphics::scatter::{ScatterConfig, plot_scatter_raster}
+use graphics::bar::{BarChartConfig, plot_bar_raster}
+use graphics::grid::{GridConfig, draw_grid_raster, tiled_draw_grid}
+use graphics::text::{draw_text_raster, tiled_draw_text}
+use graphics::png::{png_encode_surface}
+use graphics::tiled_plot::{tiled_plot_line_raster}
+
+pub struct ChartConfig {
+    pub width: i64,
+    pub height: i64,
+    pub margin: i64,
+    pub bg_color: Color,
+    pub grid_color: Color,
+    pub axis_color: Color,
+    pub text_color: Color,
+    pub title: string,
+    pub x_label: string,
+    pub y_label: string,
+    pub show_grid: bool,
+    pub show_axes: bool,
+    pub show_title: bool,
+    pub font_scale: i64,
+}
+
+pub fn chart_config_default() -> ChartConfig {
+    ChartConfig {
+        width: 400,
+        height: 300,
+        margin: 40,
+        bg_color: color_white(),
+        grid_color: Color { r: 200, g: 200, b: 200, a: 255 },
+        axis_color: color_black(),
+        text_color: color_black(),
+        title: "",
+        x_label: "",
+        y_label: "",
+        show_grid: true,
+        show_axes: true,
+        show_title: true,
+        font_scale: 1,
+    }
+}
+
+// Convert a builtin string to an [i64; 64] array for draw_text_raster.
+// Stops at first negative character (end of string).
+fn string_to_text_array(s: string) -> [i64; 64] with Mut {
+    var arr: [i64; 64] = [0; 64]
+    var i: i64 = 0
+    while i < 64 {
+        let ch = str_char_at(s, i)
+        if ch < 0 { return arr }
+        arr[i] = ch
+        i = i + 1
+    }
+    arr
+}
+
+// Helper: draw title text centered at the top of a Surface.
+fn draw_chart_title(s: Surface, config: ChartConfig) -> Surface with Mut, Panic {
+    var out = s
+    if config.show_title && config.title.len() > 0 {
+        let text_arr = string_to_text_array(config.title)
+        let text_len = config.title.len() as i64
+        let text_w = text_len * 6 * config.font_scale
+        let x = out.width / 2 - text_w / 2
+        let y = if config.margin / 2 - 4 * config.font_scale < 0 {
+            0
+        } else {
+            config.margin / 2 - 4 * config.font_scale
+        }
+        out = draw_text_raster(out, &text_arr, text_len, x, y, config.text_color, config.font_scale)
+    }
+    out
+}
+
+// Helper: draw title text centered at the top of a TiledSurface.
+fn tiled_draw_chart_title(ts: TiledSurface, config: ChartConfig) -> TiledSurface with Mut, Panic {
+    var out = ts
+    if config.show_title && config.title.len() > 0 {
+        let text_arr = string_to_text_array(config.title)
+        let text_len = config.title.len() as i64
+        let text_w = text_len * 6 * config.font_scale
+        let x = out.width / 2 - text_w / 2
+        let y = if config.margin / 2 - 4 * config.font_scale < 0 {
+            0
+        } else {
+            config.margin / 2 - 4 * config.font_scale
+        }
+        out = tiled_draw_text(out, &text_arr, text_len, x, y, config.text_color, config.font_scale)
+    }
+    out
+}
+
+// Helper: draw grid on a Surface.
+fn draw_chart_grid(s: Surface, config: ChartConfig) -> Surface with Mut, Panic {
+    var out = s
+    if config.show_grid {
+        let grid_config = GridConfig {
+            margin: config.margin,
+            grid_color: config.grid_color,
+            n_x_ticks: 5,
+            n_y_ticks: 5,
+        }
+        out = draw_grid_raster(out, grid_config)
+    }
+    out
+}
+
+// Helper: draw grid on a TiledSurface.
+fn tiled_draw_chart_grid(ts: TiledSurface, config: ChartConfig) -> TiledSurface with Mut, Panic, Div {
+    var out = ts
+    if config.show_grid {
+        let grid_config = GridConfig {
+            margin: config.margin,
+            grid_color: config.grid_color,
+            n_x_ticks: 5,
+            n_y_ticks: 5,
+        }
+        out = tiled_draw_grid(out, grid_config)
+    }
+    out
+}
+
+pub fn draw_chart_line_raster(s: Surface, xs: &[f64; 256], ys: &[f64; 256], n: i64, config: ChartConfig) -> Surface with Mut, Panic, Div {
+    var out = s
+    out = surface_clear(out, config.bg_color)
+
+    let axis_c = if config.show_axes { config.axis_color } else { config.bg_color }
+    let line_config = LinePlotConfig {
+        width: out.width,
+        height: out.height,
+        margin: config.margin,
+        line_color: Color { r: 0, g: 100, b: 200, a: 255 },
+        bg_color: config.bg_color,
+        axis_color: axis_c,
+    }
+
+    out = plot_line_raster(out, xs, ys, n, line_config)
+    out = draw_chart_grid(out, config)
+    out = draw_chart_title(out, config)
+    out
+}
+
+pub fn draw_chart_scatter_raster(s: Surface, xs: &[f64; 256], ys: &[f64; 256], n: i64, config: ChartConfig) -> Surface with Mut, Panic, Div {
+    var out = s
+    out = surface_clear(out, config.bg_color)
+
+    let axis_c = if config.show_axes { config.axis_color } else { config.bg_color }
+    let scatter_config = ScatterConfig {
+        width: out.width,
+        height: out.height,
+        margin: config.margin,
+        marker_color: Color { r: 200, g: 50, b: 50, a: 255 },
+        bg_color: config.bg_color,
+        axis_color: axis_c,
+        marker_size: 2,
+    }
+
+    out = plot_scatter_raster(out, xs, ys, n, scatter_config)
+    out = draw_chart_grid(out, config)
+    out = draw_chart_title(out, config)
+    out
+}
+
+pub fn draw_chart_bar_raster(s: Surface, values: &[f64; 64], n: i64, config: ChartConfig) -> Surface with Mut, Panic, Div {
+    var out = s
+    out = surface_clear(out, config.bg_color)
+
+    let axis_c = if config.show_axes { config.axis_color } else { config.bg_color }
+    let bar_config = BarChartConfig {
+        margin: config.margin,
+        bar_color: Color { r: 0, g: 100, b: 200, a: 255 },
+        bg_color: config.bg_color,
+        axis_color: axis_c,
+        bar_spacing: 4,
+    }
+
+    out = plot_bar_raster(out, values, n, bar_config)
+    out = draw_chart_grid(out, config)
+    out = draw_chart_title(out, config)
+    out
+}
+
+pub fn tiled_draw_chart_line_raster(ts: TiledSurface, xs: &[f64; 256], ys: &[f64; 256], n: i64, config: ChartConfig) -> TiledSurface with Mut, Panic, Div {
+    var out = ts
+    out = tiled_clear(out, config.bg_color)
+
+    let axis_c = if config.show_axes { config.axis_color } else { config.bg_color }
+    let line_config = LinePlotConfig {
+        width: out.width,
+        height: out.height,
+        margin: config.margin,
+        line_color: Color { r: 0, g: 100, b: 200, a: 255 },
+        bg_color: config.bg_color,
+        axis_color: axis_c,
+    }
+
+    out = tiled_plot_line_raster(out, xs, ys, n, line_config)
+    out = tiled_draw_chart_grid(out, config)
+    out = tiled_draw_chart_title(out, config)
+    out
+}
+
+pub fn plot_chart_line_png(xs: &[f64; 256], ys: &[f64; 256], n: i64, config: ChartConfig, filename: string) -> bool with IO, Mut, Panic, Div {
+    var w = config.width
+    var h = config.height
+    if w > 256 { w = 256 }
+    if h > 256 { h = 256 }
+    if w < 1 { w = 1 }
+    if h < 1 { h = 1 }
+
+    var s = surface_new(w, h)
+    s = draw_chart_line_raster(s, xs, ys, n, config)
+    png_encode_surface(&s, filename)
+}
+
+pub fn tiled_plot_chart_line_png(xs: &[f64; 256], ys: &[f64; 256], n: i64, config: ChartConfig, filename: string) -> bool with IO, Mut, Panic, Div {
+    var ts = tiled_surface_new(config.width, config.height, 256, 256)
+    ts = tiled_draw_chart_line_raster(ts, xs, ys, n, config)
+    tiled_export_png(&ts, filename)
+}
+
+fn main() -> i32 with IO { 0 }
