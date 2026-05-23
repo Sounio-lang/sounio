@@ -8366,6 +8366,34 @@ fn emit_seq_len_x86(slot_s: i64) with Mut, Panic {
     emit_lea_var(base + 2)                    // rax = &record
 }
 
+// push_uncertain(s, v, conf, var): an epistemically-hedged insertion. Stores v
+// like push, then erodes the length's certainty by the GUM rules that Knowledge
+// add/sub use: confidence = min(old, conf) (weakest-link), variance = old + var.
+// conf/var are f64 bit patterns in their slots.
+fn emit_seq_push_uncertain_slots_x86(slot_s: i64, slot_v: i64, slot_conf: i64, slot_var: i64) with Mut, Panic {
+    emit_seq_push_slots_x86(slot_s, slot_v)   // value insert + grow + len++ (writes back ptr)
+    // confidence = min(old_conf, new_conf)
+    emit_load_var(slot_conf)
+    em(0x48); em(0x89); em(0xc1)             // mov rcx, rax (new conf)
+    emit_load_var(slot_s)
+    em(0x48); em(0x8b); em(0x40); em(32)     // mov rax, [P+32] (old conf)
+    emit_min_positive_f64_bits_x86()         // rax = min(rax, rcx)
+    em(0x50)                                  // push min
+    emit_load_var(slot_s)                    // rax = P
+    em(0x59)                                  // pop rcx (min)
+    em(0x48); em(0x89); em(0x48); em(32)     // mov [P+32], rcx
+    // variance = old_var + new_var
+    emit_load_var(slot_var)
+    em(0x48); em(0x89); em(0xc1)             // mov rcx, rax (new var)
+    emit_load_var(slot_s)
+    em(0x48); em(0x8b); em(0x40); em(24)     // mov rax, [P+24] (old var)
+    emit_f64_add_from_rcx_rax_x86()          // rax = rcx + rax
+    em(0x50)                                  // push sum
+    emit_load_var(slot_s)                    // rax = P
+    em(0x59)                                  // pop rcx (sum)
+    em(0x48); em(0x89); em(0x48); em(24)     // mov [P+24], rcx
+}
+
 fn emit_read_file() with Mut {
     // Simpler: rax=path. open → save fd → mmap → read → close → return buf
     em(0x48); em(0x89); em(0xc7)  // mov rdi, rax
@@ -11717,6 +11745,45 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
+            if src_match(ns, ne - ns, "seq_push_uncertain") {
+                EP = EP + 1
+                let uvns = TS[EP as usize]
+                let uvne = TE[EP as usize]
+                var uslot_s: i64 = 0 - 1
+                if TK[EP as usize] == 3 { uslot_s = var_find(uvns, uvne) }
+                let ulvi = var_find_idx(uvns, uvne)
+                if uslot_s < 0 || ulvi < 0 || VAR_TY[ulvi as usize] != 12 {
+                    tc_error(name_tok, "seq_push_uncertain requires a local Seq variable as first argument")
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                    EXPR_IS_F64 = 0
+                    EXPR_TY = 5
+                    EXPR_TY_HASH = 0
+                    return
+                }
+                EP = EP + 1  // past variable name
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 4, 1) }
+                let uslot_v = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or()  // value
+                emit_store_var(uslot_v)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 4, 2) }
+                let uslot_conf = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or()  // confidence (f64)
+                emit_store_var(uslot_conf)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 4, 3) }
+                let uslot_var = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or()  // variance (f64)
+                emit_store_var(uslot_var)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_push_uncertain_slots_x86(uslot_s, uslot_v, uslot_conf, uslot_var)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
+                EXPR_TY_HASH = 0
+                return
+            }
             if src_match(ns, ne - ns, "seq_get") {
                 EP = EP + 1
                 let slot_sg = NEXT_SLOT
@@ -13820,6 +13887,37 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 emit_store_var(push_sv)
                 if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
                 emit_seq_push_slots_x86(push_slot_s, push_sv)
+                EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
+                continue
+            }
+            if EXPR_TY == 12 && src_match(fns, fne - fns, "push_uncertain") && TK[(EP + 1) as usize] == 6 {
+                if LAST_EXPR_VAR_IDX < 0 {
+                    tc_error(method_tok, "Seq .push_uncertain requires a local Seq variable receiver")
+                    EP = EP + 1
+                    var upd: i64 = 0
+                    while EP < TC { if TK[EP as usize] == 6 { upd = upd + 1 } if TK[EP as usize] == 7 { upd = upd - 1; if upd == 0 { EP = EP + 1; break } } EP = EP + 1 }
+                    EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
+                    continue
+                }
+                let pu_slot_s = VAR_SLOT[LAST_EXPR_VAR_IDX as usize]
+                EP = EP + 1  // skip 'push_uncertain'
+                EP = EP + 1  // skip (
+                let pu_v = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or()  // value
+                emit_store_var(pu_v)
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                let pu_conf = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or()  // confidence (f64)
+                emit_store_var(pu_conf)
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                let pu_var = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or()  // variance (f64)
+                emit_store_var(pu_var)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_push_uncertain_slots_x86(pu_slot_s, pu_v, pu_conf, pu_var)
                 EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
                 continue
             }
