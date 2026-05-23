@@ -377,3 +377,31 @@ small Cat-D fix in the modular source — no shortcut.
 onto main, self-host fixed point preserved. The one big mechanical root (top-level
 `let` consts) is done; ownership-dead-API and `&!`-deref cleared; the rest is
 confirmed genuine per-case source work with no remaining systematic root.
+
+---
+
+## IrHyperExprInfo cluster (~6) — half-implemented feature, deferred (not a bug fix)
+
+`check_hyper_expr_law_profile_audit_tag(info: IrHyperExprInfo)` (called from
+main.sio:7259) reads `info.reassoc_strategy / forbidden_law_mask /
+law_profile_source / law_profile_fingerprint`, none of which exist on
+`IrHyperExprInfo` (ir.sio:826 has only span/algebra_tag/op_kind/knowledge_wrapped/
+grade_*/cl_*). Also `make_hyper_expr_info(...)` (called check/mod.sio:282) is NOT
+defined anywhere, and serialize.sio:3486 doesn't read/write the law fields.
+
+This is an **aspirational law-profile feature that was never implemented** on
+IrHyperExprInfo. Completing it = add 4 fields + the missing `make_hyper_expr_info`
+constructor + symmetric serialize/deserialize read_i64/write_i64 for each +
+populate at all construction sites (mod.sio:283, check.sio:1626, serialize.sio:3486,
+ir.sio:839). That's a focused feature task with **serialization-symmetry risk**
+(IrHyperExprInfo round-trips through the IR serializer; asymmetric read/write would
+corrupt the format), not worth a mid-session grind for ~6 errors. **Deferred.**
+
+## Session close — 5304 → 338 type errors (-94%)
+Roots fixed: top-level `let` consts (the big one, 5304→423), dead ownership API
+(delete), `&! i64` deref in lint, **TraitDef bundle name-collision** (rename AST
+node → TraitItemDef), 4 stale method names. Plus the segfault root-cause + fix
+(patch32 code-buffer guard) and the rebase onto main. Self-host fixed point
+preserved throughout; all source-only fixes need no lean_single rebuild.
+Remaining ~338 are genuine per-case Cat-D source bugs + this one deferred
+half-feature; no further systematic root (confirmed by instrumentation).
