@@ -8366,6 +8366,13 @@ fn emit_seq_len_x86(slot_s: i64) with Mut, Panic {
     emit_lea_var(base + 2)                    // rax = &record
 }
 
+// seq_count(s) -> i64 : the bare length (no epistemic wrapper). The natural loop
+// bound; .len() stays as the Knowledge<i64> epistemic opt-in.
+fn emit_seq_count_x86(slot_s: i64) with Mut, Panic {
+    emit_load_var(slot_s)
+    em(0x48); em(0x8b); em(0x00)             // mov rax, [rax]  (len)
+}
+
 // push_uncertain(s, v, conf, var): an epistemically-hedged insertion. Stores v
 // like push, then erodes the length's certainty by the GUM rules that Knowledge
 // add/sub use: confidence = min(old, conf) (weakest-link), variance = old + var.
@@ -9026,6 +9033,32 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
     let rne = TE[EP as usize]
     EP = EP + 1
     if TK[EP as usize] == 41 {
+        // &seq[i] single-element borrow on a Seq receiver: the element value (for a
+        // struct inner that value is a heap pointer to the materialized struct, i.e.
+        // already &Inner). Returns a reference to the inner type. Handled before the
+        // slice-borrow logic, which only supports array/slice bases with a..b ranges.
+        let seq_bvi = var_find_idx(rns, rne)
+        if seq_bvi >= 0 && VAR_TY[seq_bvi as usize] == 12 {
+            let sbh = VAR_TY_HASH[seq_bvi as usize]
+            EP = EP + 1  // skip [
+            let sb_ps = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_load_var(VAR_SLOT[seq_bvi as usize])
+            emit_store_var(sb_ps)
+            let sb_is = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            compile_or()  // index → rax
+            emit_store_var(sb_is)
+            if TK[EP as usize] == 42 { EP = EP + 1 }
+            emit_seq_get_slots_x86(sb_ps, sb_is)  // rax = element (heap ptr for struct inner)
+            let sb_in_ty = seq_hash_inner_ty(sbh)
+            let sb_in_hash = seq_hash_inner_hash(sbh)
+            EXPR_IS_F64 = 0
+            EXPR_TY = 10
+            if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(sb_in_ty, sb_in_hash, 1) }
+            else { EXPR_TY_HASH = ref_hash_make(sb_in_ty, sb_in_hash, 0) }
+            return
+        }
         EP = EP + 1
         let start_slot = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + 1
@@ -11881,6 +11914,19 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = knowledge_hash_make(1, 0, -1)
                 return
             }
+            if src_match(ns, ne - ns, "seq_count") {
+                EP = EP + 1
+                let slot_sc = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or()  // seq ptr
+                emit_store_var(slot_sc)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_count_x86(slot_sc)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
             // str_from_bytes(buf: [i8; N], len: i64) -> string
             // Returns the address of the byte buffer as a string pointer.
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "str_from_bytes") {
@@ -14059,6 +14105,15 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 EXPR_TY = 0
                 EXPR_TY_HASH = knowledge_hash_make(1, 0, -1)
                 EXPR_IS_F64 = 0
+                continue
+            }
+            if EXPR_TY == 12 && src_match(fns, fne - fns, "count") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 {
+                EP = EP + 1; EP = EP + 1; EP = EP + 1   // skip count ( )
+                let cnt_ss = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(cnt_ss)
+                emit_seq_count_x86(cnt_ss)
+                EXPR_TY = 1; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
                 continue
             }
             // Built-in .len() — runtime length for strings, compile-time for arrays/slices
@@ -27499,6 +27554,11 @@ fn emit_seq_len_a64(slot_s: i64) with Mut, Panic {
     emit_lea_var_a64(base + 2)     // x0 = &record
 }
 
+fn emit_seq_count_a64(slot_s: i64) with Mut, Panic {
+    emit_load_var_a64(slot_s)
+    em32(0xF9400000)               // ldr x0, [x0]  (len)
+}
+
 fn emit_seq_push_uncertain_slots_a64(slot_s: i64, slot_v: i64, slot_conf: i64, slot_var: i64) with Mut, Panic {
     emit_seq_push_slots_a64(slot_s, slot_v)
     // confidence = min(old, new)
@@ -28266,6 +28326,29 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         let rne = TE[EP as usize]
         EP = EP + 1
         if TK[EP as usize] == 41 {
+            // &seq[i] single-element borrow on a Seq receiver (aarch64).
+            let seq_bvi = var_find_idx(rns, rne)
+            if seq_bvi >= 0 && VAR_TY[seq_bvi as usize] == 12 {
+                let sbh = VAR_TY_HASH[seq_bvi as usize]
+                EP = EP + 1  // skip [
+                let sb_ps = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_load_var_a64(VAR_SLOT[seq_bvi as usize])
+                emit_store_var_a64(sb_ps)
+                let sb_is = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()  // index → x0
+                emit_store_var_a64(sb_is)
+                if TK[EP as usize] == 42 { EP = EP + 1 }
+                emit_seq_get_slots_a64(sb_ps, sb_is)
+                let sb_in_ty = seq_hash_inner_ty(sbh)
+                let sb_in_hash = seq_hash_inner_hash(sbh)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 10
+                if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(sb_in_ty, sb_in_hash, 1) }
+                else { EXPR_TY_HASH = ref_hash_make(sb_in_ty, sb_in_hash, 0) }
+                return
+            }
             EP = EP + 1
             let start_slot = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
@@ -29426,6 +29509,19 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_IS_F64 = 0
                 EXPR_TY = 0
                 EXPR_TY_HASH = knowledge_hash_make(1, 0, -1)
+                return
+            }
+            if src_match(ns, ne - ns, "seq_count") {
+                EP = EP + 1
+                let asc = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()
+                emit_store_var_a64(asc)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_count_a64(asc)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
                 return
             }
             if src_match(ns, ne - ns, "slice_len") {
@@ -30818,6 +30914,15 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = 0
                 EXPR_TY_HASH = knowledge_hash_make(1, 0, -1)
                 EXPR_IS_F64 = 0
+                continue
+            }
+            if EXPR_TY == 12 && src_match(fns, fne - fns, "count") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 {
+                EP = EP + 1; EP = EP + 1; EP = EP + 1
+                let acnt_ss = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(acnt_ss)
+                emit_seq_count_a64(acnt_ss)
+                EXPR_TY = 1; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
                 continue
             }
             // Built-in .len() — runtime length for strings, compile-time for arrays/slices (ARM64)
