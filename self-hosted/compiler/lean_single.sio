@@ -8394,6 +8394,36 @@ fn emit_seq_push_uncertain_slots_x86(slot_s: i64, slot_v: i64, slot_conf: i64, s
     em(0x48); em(0x89); em(0x48); em(24)     // mov [P+24], rcx
 }
 
+// Field-receiver push: slot_place holds the ADDRESS of the cell storing the Seq
+// pointer (a struct field). Copy the pointer into a scratch slot, run the normal
+// push (which grows and writes the moved pointer back to that scratch slot), then
+// store the final pointer back into the field cell.
+fn emit_seq_push_at_place_x86(slot_place: i64, slot_v: i64) with Mut, Panic {
+    let slot_pcur = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var(slot_place)                // rax = field addr
+    em(0x48); em(0x8b); em(0x00)             // mov rax, [rax]  (current Seq ptr)
+    emit_store_var(slot_pcur)
+    emit_seq_push_slots_x86(slot_pcur, slot_v)
+    emit_load_var(slot_pcur)                 // rax = (possibly moved) ptr
+    em(0x48); em(0x89); em(0xc1)             // mov rcx, rax
+    emit_load_var(slot_place)                // rax = field addr
+    em(0x48); em(0x89); em(0x08)             // mov [rax], rcx  (write back to field)
+}
+
+fn emit_seq_push_uncertain_at_place_x86(slot_place: i64, slot_v: i64, slot_conf: i64, slot_var: i64) with Mut, Panic {
+    let slot_pcur = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var(slot_place)
+    em(0x48); em(0x8b); em(0x00)             // mov rax, [rax]
+    emit_store_var(slot_pcur)
+    emit_seq_push_uncertain_slots_x86(slot_pcur, slot_v, slot_conf, slot_var)
+    emit_load_var(slot_pcur)
+    em(0x48); em(0x89); em(0xc1)             // mov rcx, rax
+    emit_load_var(slot_place)
+    em(0x48); em(0x89); em(0x08)             // mov [rax], rcx
+}
+
 fn emit_read_file() with Mut {
     // Simpler: rax=path. open → save fd → mmap → read → close → return buf
     em(0x48); em(0x89); em(0xc7)  // mov rdi, rax
@@ -8574,6 +8604,12 @@ var LAST_EXPR_IS_LINEAR: i64 = 0
 var LAST_EXPR_IS_AFFINE: i64 = 0
 // Track VAR index of last struct identifier loaded (-1 if not applicable)
 var LAST_EXPR_VAR_IDX: i64 = -1
+// For a Seq method receiver that is a struct FIELD (e.g. obj.items.push(v)): a
+// stack slot holding the ADDRESS of the cell that stores the Seq pointer, so a
+// grow can write the moved pointer back into the field. -1 = receiver was not a
+// Seq field (use the LAST_EXPR_VAR_IDX / bare-var path instead). Set in the
+// struct field-load path, consumed+reset by the Seq .push/.push_uncertain arms.
+var SEQ_RECV_PLACE_SLOT: i64 = -1
 // Scratch local-slot ids for string builtins inside large expression compilers.
 var BUILTIN_SLOT_A: i64 = 0
 var BUILTIN_SLOT_B: i64 = 0
@@ -9303,6 +9339,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_LINEAR = 0
     LAST_EXPR_IS_AFFINE = 0
     LAST_EXPR_VAR_IDX = -1
+    SEQ_RECV_PLACE_SLOT = -1
     EXPR_TY = 0
     EXPR_TY_HASH = 0
     // GTT: fresh primary expression starts with empty channel topology.
@@ -13776,6 +13813,25 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_TY_HASH = 0
                     EXPR_IS_F64 = 0
                 }
+            } else if base_ty == 12 {
+                // Seq element read: rcx = Seq ptr, rdx = index → seq.get(index)
+                let sub_sgp = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                em(0x48); em(0x89); em(0xc8)   // mov rax, rcx (Seq ptr)
+                emit_store_var(sub_sgp)
+                let sub_sgi = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                em(0x48); em(0x89); em(0xd0)   // mov rax, rdx (index)
+                emit_store_var(sub_sgi)
+                emit_seq_get_slots_x86(sub_sgp, sub_sgi)
+                EXPR_IS_F64 = 0
+                if seq_hash_is(base_hash) {
+                    EXPR_TY = seq_hash_inner_ty(base_hash)
+                    EXPR_TY_HASH = seq_hash_inner_hash(base_hash)
+                } else {
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                }
             } else if type_is_slice_ref(base_ty, base_hash) {
                 let inner_hash = ref_hash_inner_hash(base_hash)
                 let esiz = arr_hash_esiz(inner_hash)
@@ -13892,15 +13948,17 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             }
             // ── Seq<T> methods (TY_SEQ = 12): .push(v) .get(i) .set(i,v) .len() ──
             if EXPR_TY == 12 && src_match(fns, fne - fns, "push") && TK[(EP + 1) as usize] == 6 {
-                if LAST_EXPR_VAR_IDX < 0 {
-                    tc_error(method_tok, "Seq .push requires a local Seq variable receiver")
+                let push_place = SEQ_RECV_PLACE_SLOT   // capture before arg compile resets it
+                if push_place < 0 && LAST_EXPR_VAR_IDX < 0 {
+                    tc_error(method_tok, "Seq .push requires a local Seq variable or struct field receiver")
                     EP = EP + 1
                     var pd: i64 = 0
                     while EP < TC { if TK[EP as usize] == 6 { pd = pd + 1 } if TK[EP as usize] == 7 { pd = pd - 1; if pd == 0 { EP = EP + 1; break } } EP = EP + 1 }
                     EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
                     continue
                 }
-                let push_slot_s = VAR_SLOT[LAST_EXPR_VAR_IDX as usize]
+                var push_slot_s: i64 = 0 - 1
+                if push_place < 0 { push_slot_s = VAR_SLOT[LAST_EXPR_VAR_IDX as usize] }
                 EP = EP + 1  // skip 'push'
                 EP = EP + 1  // skip (
                 let push_sv = NEXT_SLOT
@@ -13908,20 +13966,23 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 compile_or()  // value → rax
                 emit_store_var(push_sv)
                 if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
-                emit_seq_push_slots_x86(push_slot_s, push_sv)
+                if push_place >= 0 { emit_seq_push_at_place_x86(push_place, push_sv) }
+                else { emit_seq_push_slots_x86(push_slot_s, push_sv) }
                 EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
                 continue
             }
             if EXPR_TY == 12 && src_match(fns, fne - fns, "push_uncertain") && TK[(EP + 1) as usize] == 6 {
-                if LAST_EXPR_VAR_IDX < 0 {
-                    tc_error(method_tok, "Seq .push_uncertain requires a local Seq variable receiver")
+                let pu_place = SEQ_RECV_PLACE_SLOT
+                if pu_place < 0 && LAST_EXPR_VAR_IDX < 0 {
+                    tc_error(method_tok, "Seq .push_uncertain requires a local Seq variable or struct field receiver")
                     EP = EP + 1
                     var upd: i64 = 0
                     while EP < TC { if TK[EP as usize] == 6 { upd = upd + 1 } if TK[EP as usize] == 7 { upd = upd - 1; if upd == 0 { EP = EP + 1; break } } EP = EP + 1 }
                     EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
                     continue
                 }
-                let pu_slot_s = VAR_SLOT[LAST_EXPR_VAR_IDX as usize]
+                var pu_slot_s: i64 = 0 - 1
+                if pu_place < 0 { pu_slot_s = VAR_SLOT[LAST_EXPR_VAR_IDX as usize] }
                 EP = EP + 1  // skip 'push_uncertain'
                 EP = EP + 1  // skip (
                 let pu_v = NEXT_SLOT
@@ -13939,7 +14000,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 compile_or()  // variance (f64)
                 emit_store_var(pu_var)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                emit_seq_push_uncertain_slots_x86(pu_slot_s, pu_v, pu_conf, pu_var)
+                if pu_place >= 0 { emit_seq_push_uncertain_at_place_x86(pu_place, pu_v, pu_conf, pu_var) }
+                else { emit_seq_push_uncertain_slots_x86(pu_slot_s, pu_v, pu_conf, pu_var) }
                 EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
                 continue
             }
@@ -14814,6 +14876,17 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         EXPR_TY_HASH = st_field_hash(bsi, fh)
                     ST_QUERY_NS = -1
                     ST_QUERY_NE = -1
+                        if EXPR_TY == 12 {
+                            // Seq field: record its address (base+off) as the writeback
+                            // place for a following .push, then load the pointer value.
+                            em(0x50)                                  // push rax (base)
+                            if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }  // lea rax,[rax+off]
+                            let seq_place = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_store_var(seq_place)
+                            SEQ_RECV_PLACE_SLOT = seq_place
+                            em(0x58)                                  // pop rax (base)
+                        }
                         if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || type_is_option_inline(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                             if off != 0 { em(0x48); em(0x8d); em(0x80); em32(off) }
                         } else {
@@ -27450,6 +27523,33 @@ fn emit_seq_push_uncertain_slots_a64(slot_s: i64, slot_v: i64, slot_conf: i64, s
     em32(0xF9000C01)               // str x1, [x0, #24]
 }
 
+// Field-receiver push (aarch64): slot_place holds the address of the field cell.
+fn emit_seq_push_at_place_a64(slot_place: i64, slot_v: i64) with Mut, Panic {
+    let slot_pcur = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(slot_place)  // x0 = field addr
+    em32(0xF9400000)               // ldr x0, [x0]  (current Seq ptr)
+    emit_store_var_a64(slot_pcur)
+    emit_seq_push_slots_a64(slot_pcur, slot_v)
+    emit_load_var_a64(slot_pcur)   // x0 = (possibly moved) ptr
+    em32(0xAA0003EB)               // mov x11, x0
+    emit_load_var_a64(slot_place)  // x0 = field addr
+    em32(0xF900000B)               // str x11, [x0]
+}
+
+fn emit_seq_push_uncertain_at_place_a64(slot_place: i64, slot_v: i64, slot_conf: i64, slot_var: i64) with Mut, Panic {
+    let slot_pcur = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(slot_place)
+    em32(0xF9400000)               // ldr x0, [x0]
+    emit_store_var_a64(slot_pcur)
+    emit_seq_push_uncertain_slots_a64(slot_pcur, slot_v, slot_conf, slot_var)
+    emit_load_var_a64(slot_pcur)
+    em32(0xAA0003EB)               // mov x11, x0
+    emit_load_var_a64(slot_place)
+    em32(0xF900000B)               // str x11, [x0]
+}
+
 fn compile_acknowledge_call_a64(call_tok: i64) with IO, Mut, Panic, Div {
     // acknowledge(k: Knowledge<T>, reason: String) -> T  (ARM64)
     // Does NOT require `with Epistemic` — explicit uncertainty acknowledgment
@@ -27675,6 +27775,7 @@ fn compile_knowledge_literal_a64() with IO, Mut, Panic, Div {
 fn compile_primary_a64() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_CLOSURE = 0
     LAST_EXPR_IS_LINEAR = 0
+    SEQ_RECV_PLACE_SLOT = -1
     EXPR_VSHADOW = -1
     EXPR_SSHADOW = -1
     EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
@@ -30536,6 +30637,27 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     EXPR_TY_HASH = 0
                     EXPR_IS_F64 = 0
                 }
+            } else if base_ty == 12 {
+                // Seq element read (aarch64): x0 = Seq ptr, x9 = index → seq.get.
+                // emit_store_var_a64 clobbers x9, so stash index in x10 (safe) first.
+                em32(0xAA0003EA)               // mov x10, x0 (Seq ptr)
+                let asub_i = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                em32(0xAA0903E0)               // mov x0, x9 (index)
+                emit_store_var_a64(asub_i)
+                let asub_p = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                em32(0xAA0A03E0)               // mov x0, x10 (Seq ptr)
+                emit_store_var_a64(asub_p)
+                emit_seq_get_slots_a64(asub_p, asub_i)
+                EXPR_IS_F64 = 0
+                if seq_hash_is(base_hash) {
+                    EXPR_TY = seq_hash_inner_ty(base_hash)
+                    EXPR_TY_HASH = seq_hash_inner_hash(base_hash)
+                } else {
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                }
             } else if type_is_slice_ref(base_ty, base_hash) {
                 let inner_hash = ref_hash_inner_hash(base_hash)
                 let esiz = arr_hash_esiz(inner_hash)
@@ -30586,15 +30708,17 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             }
             // ── Seq<T> methods (aarch64): .push .get .set .len .push_uncertain ──
             if EXPR_TY == 12 && src_match(fns, fne - fns, "push") && TK[(EP + 1) as usize] == 6 {
-                if LAST_EXPR_VAR_IDX < 0 {
-                    tc_error(method_tok, "Seq .push requires a local Seq variable receiver")
+                let apush_place = SEQ_RECV_PLACE_SLOT
+                if apush_place < 0 && LAST_EXPR_VAR_IDX < 0 {
+                    tc_error(method_tok, "Seq .push requires a local Seq variable or struct field receiver")
                     EP = EP + 1
                     var apd: i64 = 0
                     while EP < TC { if TK[EP as usize] == 6 { apd = apd + 1 } if TK[EP as usize] == 7 { apd = apd - 1; if apd == 0 { EP = EP + 1; break } } EP = EP + 1 }
                     EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
                     continue
                 }
-                let apush_slot_s = VAR_SLOT[LAST_EXPR_VAR_IDX as usize]
+                var apush_slot_s: i64 = 0 - 1
+                if apush_place < 0 { apush_slot_s = VAR_SLOT[LAST_EXPR_VAR_IDX as usize] }
                 EP = EP + 1
                 EP = EP + 1
                 let apush_sv = NEXT_SLOT
@@ -30602,20 +30726,23 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 compile_or_a64()
                 emit_store_var_a64(apush_sv)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                emit_seq_push_slots_a64(apush_slot_s, apush_sv)
+                if apush_place >= 0 { emit_seq_push_at_place_a64(apush_place, apush_sv) }
+                else { emit_seq_push_slots_a64(apush_slot_s, apush_sv) }
                 EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
                 continue
             }
             if EXPR_TY == 12 && src_match(fns, fne - fns, "push_uncertain") && TK[(EP + 1) as usize] == 6 {
-                if LAST_EXPR_VAR_IDX < 0 {
-                    tc_error(method_tok, "Seq .push_uncertain requires a local Seq variable receiver")
+                let apu_place = SEQ_RECV_PLACE_SLOT
+                if apu_place < 0 && LAST_EXPR_VAR_IDX < 0 {
+                    tc_error(method_tok, "Seq .push_uncertain requires a local Seq variable or struct field receiver")
                     EP = EP + 1
                     var apud: i64 = 0
                     while EP < TC { if TK[EP as usize] == 6 { apud = apud + 1 } if TK[EP as usize] == 7 { apud = apud - 1; if apud == 0 { EP = EP + 1; break } } EP = EP + 1 }
                     EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
                     continue
                 }
-                let apu_slot_s = VAR_SLOT[LAST_EXPR_VAR_IDX as usize]
+                var apu_slot_s: i64 = 0 - 1
+                if apu_place < 0 { apu_slot_s = VAR_SLOT[LAST_EXPR_VAR_IDX as usize] }
                 EP = EP + 1
                 EP = EP + 1
                 let apu_v = NEXT_SLOT
@@ -30633,7 +30760,8 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 compile_or_a64()
                 emit_store_var_a64(apu_var)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                emit_seq_push_uncertain_slots_a64(apu_slot_s, apu_v, apu_conf, apu_var)
+                if apu_place >= 0 { emit_seq_push_uncertain_at_place_a64(apu_place, apu_v, apu_conf, apu_var) }
+                else { emit_seq_push_uncertain_slots_a64(apu_slot_s, apu_v, apu_conf, apu_var) }
                 EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
                 continue
             }
@@ -30924,6 +31052,19 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                         EXPR_TY_HASH = st_field_hash(bsi, fh)
                     ST_QUERY_NS = -1
                     ST_QUERY_NE = -1
+                        if EXPR_TY == 12 {
+                            // Seq field: record field address (base+off) as writeback place.
+                            emit_push_a64()                  // push x0 (base)
+                            if off != 0 {
+                                emit_imm64_reg_a64(1, off)
+                                em32(0x8B010000)             // add x0, x0, x1 (field addr)
+                            }
+                            let seq_place = NEXT_SLOT
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            emit_store_var_a64(seq_place)
+                            SEQ_RECV_PLACE_SLOT = seq_place
+                            emit_pop_x0_a64()                // restore base
+                        }
                         if EXPR_TY == 8 || type_is_struct_like(EXPR_TY, EXPR_TY_HASH) || knowledge_hash_is(EXPR_TY_HASH) {
                             if off != 0 {
                                 emit_imm64_reg_a64(1, off)
