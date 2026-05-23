@@ -346,3 +346,34 @@ once (~80 errors) — a potential third systematic root.
 Remaining 375 are: the forward-ref-fixup-miss family (~80), plus heterogeneous
 per-case mismatches (E001 ref args, type-mismatch). No further cheap source root;
 the fixup-miss is the next high-leverage target but needs instrumented lean_single.
+
+---
+
+## Instrumented investigation (2026-05-23) — VERDICT: unknown-field = genuine source bugs, no checker root
+
+Instrumented `st_field_offset` (the shared field-lookup) to log misses with the
+struct + field name hashes, rebuilt, ran on the bundle, and correlated each miss
+with the actual `tc_error("unknown field access")` emission (filtering out the
+function's benign feature-probe calls — e.g. ~30 `.span` "misses" that are just
+"does this type have a span field?" detection, not errors).
+
+**Real unknown-field errors map to fields/methods that genuinely don't exist on
+the resolved struct — confirmed by reading the struct defs:**
+- `TraitDef.method_count` (7) + `TraitDef.supertrait_count` (5) — **TraitDef has
+  only `{name, methods: Option<Box<ItemList>>, supertraits, span}`; no `*_count`
+  fields.** The caller wants counts but the struct stores linked lists. Source bug.
+- `IrHyperExprInfo.reassoc_strategy` + others (6) — field-name mismatches.
+- `Checker.report`, `Parser.peek/advance/...` — these are **methods**, hitting the
+  field-lookup path → method-vs-field resolution, not a missing field.
+
+**Conclusion (definitive):** there is NO third systematic checker root. The
+forward-ref fixup (`resolve_forward_struct_types`) works; struct/field tables are
+correctly populated. The remaining unknown-field / ctx.types / info errors are
+**genuine per-case source bugs in the bundle** (references to non-existent fields,
+stale field names, method calls mis-written as field access). Each is its own
+small Cat-D fix in the modular source — no shortcut.
+
+**Final session tally: 5304 → 375 type errors (−93%)**, segfault fixed, rebased
+onto main, self-host fixed point preserved. The one big mechanical root (top-level
+`let` consts) is done; ownership-dead-API and `&!`-deref cleared; the rest is
+confirmed genuine per-case source work with no remaining systematic root.
