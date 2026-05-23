@@ -405,3 +405,32 @@ node → TraitItemDef), 4 stale method names. Plus the segfault root-cause + fix
 preserved throughout; all source-only fixes need no lean_single rebuild.
 Remaining ~338 are genuine per-case Cat-D source bugs + this one deferred
 half-feature; no further systematic root (confirmed by instrumentation).
+
+---
+
+## unknown-field cluster re-attack (2026-05-23) — bulk is base-type-unresolved, not field-table
+
+Re-instrumented `st_field_offset` -> -1 returns, rebuilt, correlated with real
+`tc_error("unknown field access")`. Of 42 unknown-field errors, only ~7 actually
+reach st_field_offset and fail there — all **IrHyperExprInfo** law-profile fields
+(the DEFERRED half-feature) + 1 Resolver field. **The bulk (.head ×25, .name ×15,
+.kind ×13) never reach st_field_offset** — they fail earlier because the base
+expression has no type: `(*list).head` where `list` is bound by `Some(list)` over
+an `Option<Box<XList>>` param, and `list` resolves untyped.
+
+This is the match-binding / parameter-type propagation gap for `Option<Box<T>>`
+**at bundle scale** — it does NOT reproduce in isolation (every minimal repro of
+the exact pattern, incl. method-with-self and recursive structs, type-checks
+clean). The match-arm propagation (lean_single.sio:20130) and forward-struct fixup
+(22853) both exist and work for the simple cases; something in the 223K-line
+context leaves these specific `list` bindings untyped.
+
+**Next step:** instrument the `.head` access site's base-type resolution (NOT
+st_field_offset) — print `inner_ty/inner_hash` when a deref-field access bails —
+to see whether `list` is ty==0 (binding never typed) or a struct hash that
+st_find misses. That distinguishes a param-type-recording gap from a match-binding
+gap. Focused type-inference task; not a mid-session source fix.
+
+Session left at **338 type errors** (5304→338, -94%). The two systematic roots are
+banked; the unknown-field bulk + IrHyperExprInfo are the documented elusive/deferred
+remainder.
