@@ -275,3 +275,34 @@ path (lean_single.sio ~5504); bump to 4095 if pub-const overflow ever bites
 **Warning runaway (flag, separate bug):** `nested field store requires struct
 base` at bundle line 119783 loops ~63M times → 126M-line output, times out any
 full compile. Warning, not error, but blocks a clean end-to-end run.
+
+---
+
+## E001/type-mismatch cluster (44) — dominant sub-root: stale ownership API
+
+Investigated the 33 E001 sites. The dominant sub-cluster (check.sio:10043–10552,
+~6 calls + matching arity errors) is a **stale ownership API**: `check.sio`
+threads ownership by value and by name, but `ownership.sio` was rewritten to be
+`&! OwnContext`-mutating and **id-based**:
+
+| check.sio (old) | ownership.sio (new) | migration |
+|---|---|---|
+| `c.ownership = own_enter_scope(c.ownership)` | `own_enter_scope(&! ctx, is_loop)` → unit | mechanical |
+| `c.ownership = own_exit_scope(c.ownership)` | `own_exit_scope(&! ctx)` → unit | mechanical |
+| `own_check_linear_at_end(c.ownership).error_count` | `own_check_linear_at_end(&! ctx) -> bool` | struct→bool |
+| `own_declare_var(c.ownership, s.name, kind)` | `own_declare_var(&! ctx, kind, line) -> i64` | **name→id** |
+| `own_transfer(c2.ownership, e.name)` | `own_transfer(&! ctx, var_id, line) -> bool` | **name→id** |
+
+The last two require check.sio to track declared vars by the **id** returned from
+`own_declare_var` (the new model), not by name. That's a scoped semantic refactor
+of check.sio's ownership integration, NOT a mechanical fix — a half-migration
+would silently break linear-type checking. **Source-only (check.sio); no
+lean_single rebuild needed** — cheap to iterate against the current binary.
+
+Other E001 sites (48476–48503 `checker_collect_hyper_alg_*` with `&!` ref args;
+95805–95848 `ir_fast_summary_*` with `&!`/`&`) are per-case ref/type mismatches.
+
+**Verdict on the tail:** the one big mechanical root (top-level `let` consts) is
+done (5304→423). The remaining clusters (unknown-field, E001) are genuine per-case
+Cat-D source bugs in the bundle (stale APIs, ref mismatches), each needing
+understanding of the specific API/type intent. No further single-root shortcut.
