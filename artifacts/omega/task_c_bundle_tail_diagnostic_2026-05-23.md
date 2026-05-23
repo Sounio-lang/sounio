@@ -199,7 +199,39 @@ nested-if patterns (all clean — needs the real ~36-block scale).
    time out; budget ONE attempt). Re-run `/tmp/crash.sio`; if exit≠139, run full
    `bootstrap_concat.sh` for the true error count past line 129K.
 
-**Caller pinned to TUPLE-BINDING codegen.** Disassembling the immediate caller
+## RESOLVED (2026-05-23) — root cause + fix landed + verified
+
+**Real root cause: code-buffer (`CD`) overflow, not a truncation/tuple bug.**
+Instrumenting `patch32` and rebuilding (`SOUNIO_FORCE_SOURCE_BOOTSTRAP=1
+build_native_souc.sh` — succeeds in <1 cycle) showed the bad call is
+`patch32(off=134217728, ...)` where `134217728 = 0x8000000 = the exact capacity of
+var CD: [i8; 134217728]` (the 128 MB code buffer). Compiling the bundle emits
+>128 MB of machine code (the giant `IrEpistemicSection` struct → a 10 MB stack
+frame in fn#5472 and massive by-value copy code — see `warning: stack frame too
+large (10242384 bytes)`). `em()` already saturates + sets `CD_OVF` at the cap, but
+**`patch32` had no such guard** → it wrote `CD[CL]` one past the end → SIGSEGV.
+
+**Fix (lean_single.sio:16584 `patch32`):** guard the buffer bound exactly like
+`em()` — `if off < 0 || off + 3 >= 134217728 { set CD_OVF; return }`. Minimal,
+matches existing overflow machinery, no silent miscompile (the run is already
+doomed once `CD_OVF` is set; this just lets it fail cleanly instead of crashing).
+
+**Verified:** rebuilt compiler on the full bundle → **exit 1 (was 139), no
+segfault**, and the true error count is unmasked: **5303 errors** (was truncated
+to ~363 by the crash), checker now reaches **line 178690** (was stuck at 128974).
+
+**Remaining for Task C (now unblocked & measurable):**
+- 5303 type errors to work through (the real tail — E200/unknown-field/type-mismatch).
+- The deeper perf issue: `IrEpistemicSection` by-value codegen is pathological
+  (10 MB frame, >128 MB code). Long-term, that struct should be heap/pointer-based,
+  or enlarge `CD` — but the crash itself is fixed.
+- **Binary propagation:** the checked-in `bin/souc-linux-x86_64` / pinned artifact
+  still lack the fix; rebuild + commit the binary to make gates see it.
+
+---
+
+**Caller pinned to TUPLE-BINDING codegen.** (Superseded by the RESOLVED section
+above — the caller is irrelevant; the real cause is the CD cap.) Disassembling the immediate caller
 (ret `0x53ec16`) shows it zeroes the globals at `0x250098e8`/`0x250098f0`
 (= `TUP_PAT_NEXT`/`TUP_RHS_NEXT`, declared right after `patch32` at ~16586) then
 `mov 0x8(%rsp),%rdi; mov 0x0(%rsp),%rsi; call patch32`. So the crashing `patch32`
