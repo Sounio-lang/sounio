@@ -877,6 +877,63 @@ fn ptx_emit_src_range(ns: i64, ne: i64) with Mut, Panic {
     }
 }
 
+fn src_range_eq(a_ns: i64, a_ne: i64, b_ns: i64, b_ne: i64) -> bool with Panic, Mut {
+    let a_len = a_ne - a_ns
+    let b_len = b_ne - b_ns
+    if a_len != b_len { return false }
+    var i: i64 = 0
+    while i < a_len {
+        if sb(a_ns + i) != sb(b_ns + i) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn fn_param_name_matches_token(fi: i64, arg_idx: i64, tok: i64) -> bool with Mut, Panic {
+    if fi < 0 || fi >= FN_COUNT { return false }
+    if tok < 0 || tok >= TC { return false }
+    if TK[tok as usize] != 3 { return false }
+    var q = FN_NAME_TOK[fi as usize] + 1
+    if q < 0 || q >= TC || TK[q as usize] != 6 { return false }
+    q = q + 1
+    var idx: i64 = 0
+    while q < TC && TK[q as usize] != 7 && TK[q as usize] != 0 {
+        if TK[q as usize] == 3 {
+            let pname_tok = q
+            q = q + 1
+            if TK[q as usize] == 43 {
+                if idx == arg_idx {
+                    return src_range_eq(
+                        TS[pname_tok as usize], TE[pname_tok as usize],
+                        TS[tok as usize], TE[tok as usize]
+                    )
+                }
+                idx = idx + 1
+            }
+        } else {
+            q = q + 1
+        }
+        if TK[q as usize] == 28 { q = q + 1 }
+    }
+    return false
+}
+
+fn token_is_index_assignment_target(tok: i64) -> bool with Mut, Panic {
+    if tok < 0 || tok + 1 >= TC { return false }
+    if TK[tok as usize] != 3 { return false }
+    if TK[(tok + 1) as usize] != 41 { return false }
+    var p = tok + 2
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 41 { depth = depth + 1 }
+        if TK[p as usize] == 42 { depth = depth - 1 }
+        p = p + 1
+    }
+    if depth != 0 { return false }
+    if p < TC && TK[p as usize] == 16 { return true }
+    return false
+}
+
 fn ptx_finish_fn(fi: i64, start_off: i64, kind: i64, extent_slot: i64) with Mut, Panic {
     if fi < 0 || fi >= 4096 { return }
     ptx_emit_byte(0)
@@ -905,11 +962,10 @@ fn fn_param_kind(fi: i64, arg_idx: i64) -> i64 with IO, Mut, Panic, Div {
 fn kernel_matches_supported_vec_binary_pattern(fi: i64, body_start: i64) -> i64 with Mut, Panic {
     if fi < 0 || fi >= FN_COUNT { return 0 }
     var saw_gpu_tid: i64 = 0
-    var saw_tid: i64 = 0
-    var saw_n: i64 = 0
-    var saw_a: i64 = 0
-    var saw_b: i64 = 0
-    var saw_c: i64 = 0
+    var saw_extent: i64 = 0
+    var saw_lhs: i64 = 0
+    var saw_rhs: i64 = 0
+    var saw_out: i64 = 0
     var saw_add: i64 = 0
     var p: i64 = body_start
     var depth: i64 = 1
@@ -918,18 +974,17 @@ fn kernel_matches_supported_vec_binary_pattern(fi: i64, body_start: i64) -> i64 
         if TK[p as usize] == 9 { depth = depth - 1 }
         if TK[p as usize] == 3 {
             if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "gpu_thread_id_x") { saw_gpu_tid = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "tid") { saw_tid = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "n") { saw_n = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "a") { saw_a = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "b") { saw_b = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "c") { saw_c = 1 }
+            if fn_param_name_matches_token(fi, 0, p) { saw_extent = 1 }
+            if fn_param_name_matches_token(fi, 1, p) && token_is_index_assignment_target(p) == false { saw_lhs = 1 }
+            if fn_param_name_matches_token(fi, 2, p) && token_is_index_assignment_target(p) == false { saw_rhs = 1 }
+            if fn_param_name_matches_token(fi, 3, p) && token_is_index_assignment_target(p) { saw_out = 1 }
         }
         if TK[p as usize] == 17 { saw_add = 1 }
         p = p + 1
     }
     if saw_gpu_tid == 0 { return 0 }
-    if saw_tid == 0 || saw_n == 0 { return 0 }
-    if saw_a == 0 || saw_b == 0 || saw_c == 0 { return 0 }
+    if saw_extent == 0 { return 0 }
+    if saw_lhs == 0 || saw_rhs == 0 || saw_out == 0 { return 0 }
     if saw_add == 0 { return 0 }
     return 1
 }
@@ -940,7 +995,8 @@ fn maybe_compile_kernel_ptx(fi: i64, body_start: i64, extent_slot: i64) with IO,
     if FN_ARITY[fi as usize] != 4 { return }
     if fn_param_kind(fi, 0) != gpu_param_kind_scalar_i64() { return }
     if fn_param_kind(fi, 1) != gpu_param_kind_slice_in_f64() { return }
-    if fn_param_kind(fi, 2) != gpu_param_kind_slice_in_f64() { return }
+    let rhs_kind = fn_param_kind(fi, 2)
+    if rhs_kind != gpu_param_kind_slice_in_f64() && rhs_kind != gpu_param_kind_slice_out_f64() { return }
     if fn_param_kind(fi, 3) != gpu_param_kind_slice_out_f64() { return }
     if kernel_matches_supported_vec_binary_pattern(fi, body_start) == 0 { return }
 
@@ -951,7 +1007,7 @@ fn maybe_compile_kernel_ptx(fi: i64, body_start: i64, extent_slot: i64) with IO,
     let start_off = PTX_LEN
     FN_PTX_PARAM_KINDS[(fi * 8 + 0) as usize] = gpu_param_kind_scalar_i64()
     FN_PTX_PARAM_KINDS[(fi * 8 + 1) as usize] = gpu_param_kind_slice_in_f64()
-    FN_PTX_PARAM_KINDS[(fi * 8 + 2) as usize] = gpu_param_kind_slice_in_f64()
+    FN_PTX_PARAM_KINDS[(fi * 8 + 2) as usize] = rhs_kind
     FN_PTX_PARAM_KINDS[(fi * 8 + 3) as usize] = gpu_param_kind_slice_out_f64()
 
     ptx_emit_string(".version 7.0\n")
