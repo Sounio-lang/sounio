@@ -242,3 +242,36 @@ deserialize's `let pair = read_X(buf,p)` + `ep.field[i] = pair.0` /
 the `patch32(off, …)` reached from the tuple-bind path where `off` is built from a
 32-bit-narrowed value (look for `em32`/`as i32` round-trips on a saved offset in
 16595–16900), confirm with `break *0x51ea6d` + `bt`.
+
+---
+
+## Error-tail attack (2026-05-23 cont.) — 5304 → 423
+
+**Root cluster fixed: top-level `let` constants (E200 555 → 20).** lean_single's
+global-decl scanner registered `const`/`pub const` but not `let`; the modular
+dialect declares 741 module-scope scalar constants as `let NAME: T = VALUE`.
+Added a `let` branch (lean_single.sio ~5463, mirrors bare-const + `A - B` literal
+fold) and raised the const guard 511 → 4095. **Total errors 5304 → 423.**
+Commits `3ac470dbc` (source) + `f1694540d` (binary, fixed point `e254d3da`).
+
+**unknown-field cluster (62) — NO single root (verified, do not re-investigate):**
+split 34 `(*ptr).field` (mostly `(*list).head`) + 25 direct `var.field`. Match-arm
+binding already propagates inner type (lean_single.sio:20130, handles
+`Option<Box<T>>`). Five isolated repros with the current binary ALL pass:
+`Option<Box<Node>>`+`(*list).head`, non-boxed `Option<Node>`, direct `Box<Node>`,
+recursive struct w/ struct-typed head, impl-method-with-self. Struct table is fine
+(808 structs < 1024 cap; max 83 fields < 128 stride). So these are case-specific —
+likely `st_find` hash collisions among 808 structs or type edge-cases with real
+types, NOT a systematic root. This is the genuine per-case Task C tail.
+
+**Remaining 423 by category:** unknown-field 62, assignment-mismatch 54,
+type-mismatch/E001 44, field-init 27, E200 20, arity 7, exhaustiveness 5,
+effects 4. Heterogeneous — incremental Cat-D work, ~1 rebuild cycle per batch.
+
+**Minor latent:** a 4th `CONST_COUNT >= 511` guard remains on the `pub const`
+path (lean_single.sio ~5504); bump to 4095 if pub-const overflow ever bites
+(E200 already at 20, so not currently a problem).
+
+**Warning runaway (flag, separate bug):** `nested field store requires struct
+base` at bundle line 119783 loops ~63M times → 126M-line output, times out any
+full compile. Warning, not error, but blocks a clean end-to-end run.
