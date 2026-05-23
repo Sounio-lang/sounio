@@ -306,3 +306,43 @@ Other E001 sites (48476–48503 `checker_collect_hyper_alg_*` with `&!` ref args
 done (5304→423). The remaining clusters (unknown-field, E001) are genuine per-case
 Cat-D source bugs in the bundle (stale APIs, ref mismatches), each needing
 understanding of the specific API/type intent. No further single-root shortcut.
+
+---
+
+## Tail attack cont. (2026-05-23) — 423 → 375, then the resolution-at-scale wall
+
+Cleared two more clusters with source-only fixes (no lean_single rebuild):
+- **Ownership (dead stale API):** removed 6 redundant `own_*` calls in check.sio
+  (borrow checker is authoritative). 423 → 407. Commit `5332d645e`.
+- **`&! i64` deref (lint asserts):** `passed = passed + 1` → `*passed = *passed + 1`
+  in `lint_assert_*`. 407 → 375. Commit `0a55db68a`.
+
+**unknown-field + ctx.types[]=desc + info=pair.1 share one elusive root —
+forward-referenced struct field types, but the existing fixup misses specific
+cases at scale.** Investigation (all current-binary, no rebuilds wasted):
+- 69 struct fields reference a struct defined LATER in the bundle (e.g.
+  `ExprList.head: Expr`, `StmtList.head: Stmt`, `ItemList.head: Item`) — Sounio
+  has no forward refs, so single-pass registration records these unresolved.
+- BUT lean_single already has `resolve_forward_struct_types()` (lean_single.sio
+  :22853), called from compile_all (23315, 23380), which re-runs
+  `resolve_type_deep` over every struct field after all structs are registered.
+  `resolve_type_deep` handles `ty==0` via `resolve_type_leaf`.
+- So the two-pass fixup EXISTS and handles most cases — every isolated repro
+  passes (`Option<Box<T>>`+`(*list).head`, recursive struct, struct-valued
+  `arr[i]=desc`, struct `info=pair.1`). The 62+ bundle failures are a SUBSET the
+  fixup misses.
+- Ruled out: struct-name hash collisions (0 among 873 names, FNV-1a/37-bit),
+  struct-count cap (808 < 1024), field-stride (max 83 fields < 128 stride).
+
+**Next step (needs ONE instrumented rebuild):** add a print to
+`resolve_forward_struct_types()` emitting any field still unresolved (ty==0 or
+hash==0) after the pass, rebuild, run on the bundle. That names the exact structs/
+fields the fixup misses and why (likely a specific type encoding `resolve_type_leaf`
+doesn't recover, or a field beyond the fixup's per-struct field-count read
+`ST[fix_si*130+1]`). Pinning it could clear unknown-field + ctx.types + info at
+once (~80 errors) — a potential third systematic root.
+
+**Session tally:** 5304 → 375 type errors (-93%) + segfault fixed + rebased.
+Remaining 375 are: the forward-ref-fixup-miss family (~80), plus heterogeneous
+per-case mismatches (E001 ref args, type-mismatch). No further cheap source root;
+the fixup-miss is the next high-leverage target but needs instrumented lean_single.
