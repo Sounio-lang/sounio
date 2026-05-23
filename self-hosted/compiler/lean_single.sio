@@ -804,6 +804,14 @@ var EXT_ARR_ESIZ:      [i64; 4096] = [0; 4096]
 var EXT_ARR_ELEM_TY:   [i64; 4096] = [0; 4096]
 var EXT_ARR_ELEM_HASH: [i64; 4096] = [0; 4096]
 var EXT_ARR_COUNT: i64 = 0
+// Seq<T> element-type intern table. seq_hash interns (inner_ty, inner_hash) to a
+// small bounded id so the type hash stays in [SEQ_HASH_BASE, +256): positive and
+// well below the unobserved base (2^51), so knowledge_hash_is / unobserved_hash_is
+// both return false for a Seq hash. Dispatch is by TAG (TY_SEQ=12), not by hash
+// range, so numeric collision with a struct hash is harmless.
+var SEQ_INNER_TY:   [i64; 256] = [0; 256]
+var SEQ_INNER_HASH: [i64; 256] = [0; 256]
+var SEQ_COUNT: i64 = 0
 var GL_BSS_BASE: i64 = 0
 var RET_AGG_BSS_OFF: i64 = 0
 // PE (Windows): BSS offset of the argv pointer table built from GetCommandLineA
@@ -2685,6 +2693,49 @@ fn box_hash_is(h: i64) -> bool with Div, Mut {
     return ref_hash_mut(h) == 3
 }
 
+// ── Seq<T> type hash (TY_SEQ = 12) ──────────────────────────────────────────
+// Interns (inner_ty, inner_hash) into a bounded id; the hash is base + id, so it
+// stays in [1e9, 1e9+256): positive (knowledge_hash_is false), below 2^50 (ref/
+// option/box false) and below 2^51 (unobserved false). Inner type is recovered
+// only when the carrying tag is already known to be TY_SEQ.
+fn seq_hash_base() -> i64 {
+    return 1000000000
+}
+
+fn seq_hash_make(inner_ty: i64, inner_hash: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while i < SEQ_COUNT {
+        if SEQ_INNER_TY[i as usize] == inner_ty && SEQ_INNER_HASH[i as usize] == inner_hash {
+            return seq_hash_base() + i
+        }
+        i = i + 1
+    }
+    if SEQ_COUNT < 256 {
+        SEQ_INNER_TY[SEQ_COUNT as usize] = inner_ty
+        SEQ_INNER_HASH[SEQ_COUNT as usize] = inner_hash
+        let h = seq_hash_base() + SEQ_COUNT
+        SEQ_COUNT = SEQ_COUNT + 1
+        return h
+    }
+    return seq_hash_base()
+}
+
+fn seq_hash_is(h: i64) -> bool {
+    return h >= seq_hash_base() && h < seq_hash_base() + 256
+}
+
+fn seq_hash_inner_ty(h: i64) -> i64 with Mut {
+    let i = h - seq_hash_base()
+    if i < 0 || i >= SEQ_COUNT { return 0 }
+    return SEQ_INNER_TY[i as usize]
+}
+
+fn seq_hash_inner_hash(h: i64) -> i64 with Mut {
+    let i = h - seq_hash_base()
+    if i < 0 || i >= SEQ_COUNT { return 0 }
+    return SEQ_INNER_HASH[i as usize]
+}
+
 fn type_is_option_inline(ty: i64, ty_hash: i64) -> bool with Div, Mut {
     if ty != 11 { return false }
     if ty_hash == 0 { return true }
@@ -3011,6 +3062,10 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
         }
         if ptr_hash_mut(h1) != ptr_hash_mut(h2) { return false }
         return ty_eq(ptr_hash_inner_ty(h1), ptr_hash_inner_hash(h1), ptr_hash_inner_ty(h2), ptr_hash_inner_hash(h2))
+    }
+    if k1 == 12 && k2 == 12 {
+        if h1 == 0 || h2 == 0 { return true }
+        return ty_eq(seq_hash_inner_ty(h1), seq_hash_inner_hash(h1), seq_hash_inner_ty(h2), seq_hash_inner_hash(h2))
     }
     if k1 == 20 && k2 == 20 {
         return ty_eq(unobserved_hash_inner_ty(h1), unobserved_hash_inner_hash(h1), unobserved_hash_inner_ty(h2), unobserved_hash_inner_hash(h2))
@@ -4990,6 +5045,33 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             } else {
                 SCAN_TY_HASH = knowledge_hash_make_mode(inner_ty, inner_hash, meta_mode, eps_scaled)
             }
+            SCAN_TY_NEXT = p
+            return
+        }
+        // Seq<T> / Seq[T]: a heap-backed growable sequence (TY_SEQ = 12). Sibling
+        // arm to Knowledge; reuses the same '<'/'>' (23/24) and '[' / ']' (41/42)
+        // handling, including the '>>' (39) split for nested Seq<Seq<T>>. Falls
+        // through untouched for any non-"Seq" type name (length-checked src_match),
+        // so the self-compiling monolith — which uses no Seq — is unaffected.
+        if src_match(ns, ne - ns, "Seq") && (TK[(p + 1) as usize] == 23 || TK[(p + 1) as usize] == 41) {
+            let open_tk = TK[(p + 1) as usize]
+            var close_tk: i64 = 24
+            if open_tk == 41 { close_tk = 42 }
+            p = p + 2
+            scan_type(p)
+            let inner_ty = SCAN_TY
+            let inner_hash = SCAN_TY_HASH
+            p = SCAN_TY_NEXT
+            if TK[p as usize] == close_tk {
+                p = p + 1
+            } else if close_tk == 24 && TK[p as usize] == 39 {
+                // '>>' closes one level here; leave the second '>' for the caller.
+                TK[p as usize] = 24
+                TS[p as usize] = TS[p as usize] + 1
+                p = p + 1
+            }
+            SCAN_TY = 12
+            SCAN_TY_HASH = seq_hash_make(inner_ty, inner_hash)
             SCAN_TY_NEXT = p
             return
         }
@@ -8174,6 +8256,100 @@ fn emit_str_index_of_slots_x86(slot_hay: i64, slot_needle: i64, slot_from: i64) 
 
     // done:
     em32_at(p_done, CL - (p_done + 4))
+}
+
+// ── Seq<T> codegen (TY_SEQ = 12, Phase 0: x86, elem_size fixed at 8) ─────────
+// Heap layout at user pointer P (returned by emit_heap_alloc_x86):
+//   P+0 len   P+8 capacity   P+16 elem_size   P+24 len_variance(f64)
+//   P+32 len_confidence(f64) P+40 payload[0]…  (element i at P+40+i*8)
+
+fn emit_seq_new_x86() with Mut, Panic {
+    // allocate header(40) + cap0(4)*8 = 72 bytes; heap_alloc returns user ptr in rax
+    emit_imm64(72)
+    emit_heap_alloc_x86()
+    em(0x48); em(0xc7); em(0x40); em(0); em32(0)     // mov qword [rax+0], 0   (len)
+    em(0x48); em(0xc7); em(0x40); em(8); em32(4)     // mov qword [rax+8], 4   (capacity)
+    em(0x48); em(0xc7); em(0x40); em(16); em32(8)    // mov qword [rax+16], 8  (elem_size)
+    em(0x48); em(0xc7); em(0x40); em(24); em32(0)    // mov qword [rax+24], 0  (len_variance)
+    em(0x48); em(0xb9); em64(4607182418800017408)    // mov rcx, 0x3FF0000000000000 (1.0)
+    em(0x48); em(0x89); em(0x48); em(32)             // mov [rax+32], rcx      (len_confidence)
+}
+
+// seq_push for a LOCAL variable receiver (Phase 0): grows via mremap on full and
+// writes the possibly-moved pointer back to the receiver slot. Deterministic push
+// leaves len_variance / len_confidence unchanged.
+fn emit_seq_push_slots_x86(slot_s: i64, slot_v: i64) with Mut, Panic {
+    let slot_newcap = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var(slot_s)                    // rax = P
+    em(0x48); em(0x8b); em(0x48); em(0)      // mov rcx, [rax+0]  (len)
+    em(0x48); em(0x8b); em(0x50); em(8)      // mov rdx, [rax+8]  (capacity)
+    em(0x48); em(0x39); em(0xd1)             // cmp rcx, rdx
+    em(0x0f); em(0x85)                       // jne no_grow
+    let p_nogrow = CL
+    em32(0)
+    // grow: new_cap = capacity*2
+    em(0x48); em(0x89); em(0xd0)             // mov rax, rdx (cap)
+    em(0x48); em(0xd1); em(0xe0)             // shl rax, 1
+    emit_store_var(slot_newcap)
+    emit_load_var(slot_s)                    // rax = old P
+    em(0x50)                                  // push old user ptr
+    emit_load_var(slot_newcap)               // rax = new_cap
+    em(0x48); em(0xc1); em(0xe0); em(3)      // shl rax, 3  (new_cap*8)
+    em(0x48); em(0x83); em(0xc0); em(40)     // add rax, 40 (header bytes)
+    emit_heap_realloc_x86()                  // pops old ptr; rax = new user ptr
+    emit_store_var(slot_s)                    // write moved pointer back to receiver
+    emit_load_var(slot_newcap)               // rax = new_cap
+    em(0x48); em(0x89); em(0xc1)             // mov rcx, rax
+    emit_load_var(slot_s)                    // rax = P
+    em(0x48); em(0x89); em(0x48); em(8)      // mov [rax+8], rcx  (capacity = new_cap)
+    // no_grow:
+    em32_at(p_nogrow, CL - (p_nogrow + 4))
+    emit_load_var(slot_s)                    // rax = P
+    em(0x48); em(0x8b); em(0x48); em(0)      // mov rcx, [rax+0]  (len)
+    em(0x48); em(0x8d); em(0x50); em(40)     // lea rdx, [rax+40] (payload base)
+    emit_load_var(slot_v)                    // rax = value
+    em(0x48); em(0x89); em(0x04); em(0xca)   // mov [rdx + rcx*8], rax
+    emit_load_var(slot_s)                    // rax = P
+    em(0x48); em(0xff); em(0x00)             // inc qword [rax]   (len++)
+}
+
+// NOTE: seq_get / seq_set do NOT bounds-check the index in Phase 0 (an OOB index
+// reads/writes past the payload). Phase 1 adds `cmp idx,len ; jae trap` via the
+// emit_assert_fail path the array store already uses.
+fn emit_seq_get_slots_x86(slot_s: i64, slot_idx: i64) with Mut, Panic {
+    emit_load_var(slot_s)                    // rax = P
+    em(0x48); em(0x8d); em(0x50); em(40)     // lea rdx, [rax+40] (payload base)
+    emit_load_var(slot_idx)                  // rax = idx
+    em(0x48); em(0x89); em(0xc1)             // mov rcx, rax
+    em(0x48); em(0x8b); em(0x04); em(0xca)   // mov rax, [rdx + rcx*8]
+}
+
+fn emit_seq_set_slots_x86(slot_s: i64, slot_idx: i64, slot_v: i64) with Mut, Panic {
+    emit_load_var(slot_s)                    // rax = P
+    em(0x48); em(0x8d); em(0x50); em(40)     // lea rdx, [rax+40]
+    emit_load_var(slot_idx)                  // rax = idx
+    em(0x48); em(0x89); em(0xc1)             // mov rcx, rax
+    emit_load_var(slot_v)                    // rax = value
+    em(0x48); em(0x89); em(0x04); em(0xca)   // mov [rdx + rcx*8], rax
+}
+
+// seq_len materializes a Knowledge<i64> record [value=len, variance, confidence]
+// in three contiguous stack slots (ascending address) and returns its pointer, so
+// the existing .unwrap / .confidence machinery reads it unchanged.
+fn emit_seq_len_x86(slot_s: i64) with Mut, Panic {
+    let base = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+    emit_load_var(slot_s)
+    em(0x48); em(0x8b); em(0x40); em(0)      // mov rax, [rax+0]  (len)
+    emit_store_var(base + 2)                  // value @ lowest addr (offset 0)
+    emit_load_var(slot_s)
+    em(0x48); em(0x8b); em(0x40); em(24)     // mov rax, [rax+24] (variance)
+    emit_store_var(base + 1)                  // variance @ offset 8
+    emit_load_var(slot_s)
+    em(0x48); em(0x8b); em(0x40); em(32)     // mov rax, [rax+32] (confidence)
+    emit_store_var(base)                      // confidence @ offset 16
+    emit_lea_var(base + 2)                    // rax = &record
 }
 
 fn emit_read_file() with Mut {
@@ -11482,6 +11658,109 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_IS_F64 = 0
                 EXPR_TY = 1
                 EXPR_TY_HASH = 0
+                return
+            }
+            // ── Seq<T> free functions (Phase 0) ─────────────────────────────
+            if src_match(ns, ne - ns, "seq_new") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 } else {
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                emit_seq_new_x86()
+                EXPR_IS_F64 = 0
+                EXPR_TY = 12
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "seq_push") {
+                EP = EP + 1
+                // arg1 must be a bare local Seq variable (we write the moved ptr back)
+                let vns = TS[EP as usize]
+                let vne = TE[EP as usize]
+                var slot_s: i64 = 0 - 1
+                if TK[EP as usize] == 3 { slot_s = var_find(vns, vne) }
+                let lvi = var_find_idx(vns, vne)
+                if slot_s < 0 || lvi < 0 || VAR_TY[lvi as usize] != 12 {
+                    tc_error(name_tok, "seq_push requires a local Seq variable as first argument")
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                    EXPR_IS_F64 = 0
+                    EXPR_TY = 5
+                    EXPR_TY_HASH = 0
+                    return
+                }
+                EP = EP + 1  // past the variable name
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                let slot_v = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or()  // value → rax
+                emit_store_var(slot_v)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_push_slots_x86(slot_s, slot_v)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "seq_get") {
+                EP = EP + 1
+                let slot_sg = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                let slot_ig = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or()  // seq ptr → rax
+                let sh = EXPR_TY_HASH
+                emit_store_var(slot_sg)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                compile_or()  // index → rax
+                emit_store_var(slot_ig)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_get_slots_x86(slot_sg, slot_ig)
+                EXPR_IS_F64 = 0
+                if seq_hash_is(sh) {
+                    EXPR_TY = seq_hash_inner_ty(sh)
+                    EXPR_TY_HASH = seq_hash_inner_hash(sh)
+                } else {
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                }
+                return
+            }
+            if src_match(ns, ne - ns, "seq_set") {
+                EP = EP + 1
+                let slot_ss = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                let slot_is = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                let slot_vs = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or()  // seq ptr
+                emit_store_var(slot_ss)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 3, 1) }
+                compile_or()  // index
+                emit_store_var(slot_is)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 3, 2) }
+                compile_or()  // value
+                emit_store_var(slot_vs)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_set_slots_x86(slot_ss, slot_is, slot_vs)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "seq_len") {
+                EP = EP + 1
+                let slot_sl = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or()  // seq ptr
+                emit_store_var(slot_sl)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_len_x86(slot_sl)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 0
+                EXPR_TY_HASH = knowledge_hash_make(1, 0, -1)
                 return
             }
             // str_from_bytes(buf: [i8; N], len: i64) -> string
