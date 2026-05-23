@@ -9,6 +9,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOUC="${ROOT_DIR}/bin/souc"
 
+# Graphics value-types are large and passed by value on the stack: a Surface is
+# ~2 MB (four [i64; 65536] channel arrays) and a TiledSurface embeds 9 of them
+# (~18 MB), exceeding the default ~8-12 MB stack and SIGSEGVing at runtime (the
+# binaries are logically correct — they pass with a larger stack). Raise the
+# stack soft limit before running them; this is inherited by the owner gate and
+# every smoke binary below. Guarded so the gate still runs where the limit cannot
+# be changed. FOLLOW-UP: shrink Surface channel storage (tracking issue #187).
+ulimit -S -s unlimited 2>/dev/null || ulimit -S -s 262144 2>/dev/null || true
+
 echo "=== Graphics Companion Gate ==="
 
 "${ROOT_DIR}/scripts/ci/graphics_scaffold_gate.sh"
