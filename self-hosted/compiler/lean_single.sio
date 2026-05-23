@@ -8053,6 +8053,101 @@ fn emit_str_slice_range_slots_x86(slot_s: i64, slot_start: i64, slot_end: i64) w
     emit_load_var(slot_res)
 }
 
+// str_index_of_from(hay, needle, from) -> i64 : first byte offset of needle in
+// hay at or after `from`, or -1 if absent. str_index_of(hay, needle) is the
+// from=0 case. Empty needle matches at `from` (when from <= len(hay)). All
+// control flow uses rel32 backpatched via em32_at (no rel8 range bugs).
+fn emit_str_index_of_slots_x86(slot_hay: i64, slot_needle: i64, slot_from: i64) with Mut, Panic {
+    let slot_hlen = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let slot_nlen = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let slot_limit = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let slot_i = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+
+    // hlen = str_len(hay); nlen = str_len(needle)
+    emit_load_var(slot_hay)
+    emit_str_len()
+    emit_store_var(slot_hlen)
+    emit_load_var(slot_needle)
+    emit_str_len()
+    emit_store_var(slot_nlen)
+
+    // limit = hlen - nlen  (search positions are 0..=limit; may be negative)
+    emit_load_var(slot_nlen)
+    emit_push()
+    emit_load_var(slot_hlen)
+    em(0x59)                                 // pop rcx (nlen)
+    em(0x48); em(0x29); em(0xc8)             // sub rax, rcx -> hlen - nlen
+    emit_store_var(slot_limit)
+
+    // i = from
+    emit_load_var(slot_from)
+    emit_store_var(slot_i)
+
+    // loop_outer:
+    let top_outer = CL
+    emit_load_var(slot_limit)
+    emit_push()
+    emit_load_var(slot_i)
+    em(0x59)                                 // pop rcx (limit)
+    em(0x48); em(0x39); em(0xc8)             // cmp rax, rcx  (i - limit)
+    em(0x0f); em(0x8f)                       // jg not_found
+    let p_notfound = CL
+    em32(0)
+
+    // rsi = hay + i ; rdi = needle ; rcx = nlen
+    emit_load_var(slot_i)
+    emit_push()
+    emit_load_var(slot_hay)
+    em(0x59)                                 // pop rcx (i)
+    em(0x48); em(0x01); em(0xc8)             // add rax, rcx -> hay + i
+    em(0x48); em(0x89); em(0xc6)             // mov rsi, rax
+    emit_load_var(slot_needle)
+    em(0x48); em(0x89); em(0xc7)             // mov rdi, rax
+    emit_load_var(slot_nlen)
+    em(0x48); em(0x89); em(0xc1)             // mov rcx, rax (remaining)
+
+    // inner_top:
+    let inner_top = CL
+    em(0x48); em(0x85); em(0xc9)             // test rcx, rcx
+    em(0x0f); em(0x84)                       // jz matched (full needle consumed)
+    let p_matched = CL
+    em32(0)
+    em(0x8a); em(0x07)                       // mov al, [rdi]
+    em(0x3a); em(0x06)                       // cmp al, [rsi]
+    em(0x0f); em(0x85)                       // jne mismatch
+    let p_mismatch = CL
+    em32(0)
+    em(0x48); em(0xff); em(0xc7)             // inc rdi
+    em(0x48); em(0xff); em(0xc6)             // inc rsi
+    em(0x48); em(0xff); em(0xc9)             // dec rcx
+    em(0xe9); em32(inner_top - (CL + 4))     // jmp inner_top
+
+    // mismatch: i = i + 1 ; jmp loop_outer
+    em32_at(p_mismatch, CL - (p_mismatch + 4))
+    emit_load_var(slot_i)
+    em(0x48); em(0x83); em(0xc0); em(1)      // add rax, 1
+    emit_store_var(slot_i)
+    em(0xe9); em32(top_outer - (CL + 4))     // jmp loop_outer
+
+    // matched: result = i ; jmp done
+    em32_at(p_matched, CL - (p_matched + 4))
+    emit_load_var(slot_i)
+    em(0xe9)                                 // jmp done
+    let p_done = CL
+    em32(0)
+
+    // not_found: result = -1
+    em32_at(p_notfound, CL - (p_notfound + 4))
+    em(0x48); em(0xc7); em(0xc0); em32(-1)   // mov rax, -1
+
+    // done:
+    em32_at(p_done, CL - (p_done + 4))
+}
+
 fn emit_read_file() with Mut {
     // Simpler: rax=path. open → save fd → mmap → read → close → return buf
     em(0x48); em(0x89); em(0xc7)  // mov rdi, rax
@@ -11270,6 +11365,94 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 EXPR_IS_F64 = 0
                 EXPR_TY = 3
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "str_index_of") {
+                BUILTIN_SLOT_A = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                BUILTIN_SLOT_B = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                BUILTIN_SLOT_CNT = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em(0x48); em(0xc7); em(0xc0); em32(-1)
+                    EXPR_IS_F64 = 0
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                    return
+                }
+                compile_or()
+                if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_index_of requires string arguments") }
+                emit_store_var(BUILTIN_SLOT_A)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    compile_or()
+                    if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_index_of requires string arguments") }
+                } else {
+                    em(0x31); em(0xc0)
+                }
+                emit_store_var(BUILTIN_SLOT_B)
+                if TK[EP as usize] == 28 {
+                    tc_wrong_arity(name_tok, 2, 3)
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                }
+                em(0x31); em(0xc0)                       // from = 0
+                emit_store_var(BUILTIN_SLOT_CNT)
+                emit_str_index_of_slots_x86(BUILTIN_SLOT_A, BUILTIN_SLOT_B, BUILTIN_SLOT_CNT)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "str_index_of_from") {
+                BUILTIN_SLOT_A = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                BUILTIN_SLOT_B = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                BUILTIN_SLOT_CNT = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 3, 0)
+                    EP = EP + 1
+                    em(0x48); em(0xc7); em(0xc0); em32(-1)
+                    EXPR_IS_F64 = 0
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                    return
+                }
+                compile_or()
+                if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_index_of_from requires string arguments") }
+                emit_store_var(BUILTIN_SLOT_A)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 3, 1) }
+                if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    compile_or()
+                    if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_index_of_from requires string arguments") }
+                } else {
+                    em(0x31); em(0xc0)
+                }
+                emit_store_var(BUILTIN_SLOT_B)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 3, 2) }
+                if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+                    compile_or()
+                    if EXPR_TY != 0 && EXPR_TY != 1 { tc_error(name_tok, "str_index_of_from offset must be an integer") }
+                } else {
+                    em(0x31); em(0xc0)
+                }
+                emit_store_var(BUILTIN_SLOT_CNT)
+                if TK[EP as usize] == 28 {
+                    tc_wrong_arity(name_tok, 3, 4)
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                }
+                emit_str_index_of_slots_x86(BUILTIN_SLOT_A, BUILTIN_SLOT_B, BUILTIN_SLOT_CNT)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
                 EXPR_TY_HASH = 0
                 return
             }
