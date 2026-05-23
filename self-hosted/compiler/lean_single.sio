@@ -4114,6 +4114,34 @@ fn stmt_is_nested_field_store(p0: i64) -> bool with Panic, Mut {
     return TK[p as usize] == 16
 }
 
+// name [ idx ] . field (. field)* = expr  — array-element-then-field store.
+// The root is itself an array-of-structs variable (local, global, or &![T;N]
+// param); after the bracket-balanced index there must be a '.' field chain and
+// a terminal '='. Disjoint from every other store detector: stmt_is_array_store
+// requires '=' immediately after ']', and the field-array / nested / deref
+// families all begin '3 50' (name '.') rather than '3 41' (name '['). A leaf
+// index (arr[i].field[j]=) is intentionally NOT matched here (terminal must be
+// '=' not '['), so those still fall through — documented out-of-scope.
+fn stmt_is_array_elem_field_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 3 { return false }
+    if TK[(p0 + 1) as usize] != 41 { return false }
+    var p = p0 + 2
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 41 { depth = depth + 1 }
+        if TK[p as usize] == 42 { depth = depth - 1 }
+        p = p + 1
+    }
+    // p is just past the matching ']'; require at least one '.field'
+    if TK[p as usize] != 50 { return false }
+    if TK[(p + 1) as usize] != 3 { return false }
+    p = p + 2
+    while TK[p as usize] == 50 && TK[(p + 1) as usize] == 3 {
+        p = p + 2
+    }
+    return TK[p as usize] == 16
+}
+
 fn skip_type_meta_item(p0: i64, close_tk: i64) -> i64 with Panic, Mut {
     var p = p0
     var paren_depth: i64 = 0
@@ -17996,6 +18024,137 @@ fn compile_nested_field_store_x86() with IO, Mut, Panic, Div {
     }
 }
 
+// name[idx].field(.field)* = expr  — store into a field of a struct that is an
+// element of an array-of-structs (root is a local, global, or &![T;N] array).
+// Array-of-struct slots hold 8-byte pointers to heap-materialized struct copies
+// (see materialize_aggregate_array_element_x86), so the element pointer is
+// [base + idx*8]; we then add the inline field-chain offset and store at the
+// leaf. Distinct from compile_indexed_field_field_store_x86 (root struct's array
+// field) and compile_nested_field_store_x86 (root struct base, no index). Leaf
+// indexing (arr[i].field[j]=) is out of scope (detector excludes it).
+fn compile_array_elem_field_store_x86() with IO, Mut, Panic, Div {
+    let name_tok = EP
+    let ns = TS[EP as usize]
+    let ne = TE[EP as usize]
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    // Resolve the element struct of the array root.
+    var array_hash: i64 = 0
+    var is_global: i64 = 0
+    let gi = gl_find(ns, ne)
+    var lslot: i64 = 0 - 1
+    if gi >= 0 {
+        is_global = 1
+        array_hash = GL_TY_HASH[gi as usize]
+    } else {
+        lslot = var_find(ns, ne)
+        let lvi = var_find_idx(ns, ne)
+        if lslot < 0 || lvi < 0 {
+            tc_undefined_var(name_tok)
+            return
+        }
+        if VAR_TY[lvi as usize] == 8 {
+            array_hash = VAR_TY_HASH[lvi as usize]
+        } else if VAR_TY[lvi as usize] == 10 && ref_hash_inner_ty(VAR_TY_HASH[lvi as usize]) == 8 {
+            array_hash = ref_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+        } else {
+            tc_error(name_tok, "array-element field store requires an array of structs")
+            return
+        }
+    }
+    if arr_hash_elem_ty(array_hash) != 6 {
+        tc_error(name_tok, "array-element field store requires struct array element")
+        return
+    }
+    let elem_hash = arr_hash_elem_hash(array_hash)
+    var elem_si: i64 = 0 - 1
+    if elem_hash != 0 { elem_si = st_find(elem_hash) }
+    if elem_si < 0 {
+        tc_error(name_tok, "array-element field store requires a known struct element")
+        return
+    }
+
+    EP = EP + 1  // skip name
+    EP = EP + 1  // skip '['
+    compile_or()  // index → rax
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // 'as usize'
+    if TK[EP as usize] == 42 { EP = EP + 1 }  // ']'
+    em(0x50)  // push index
+
+    // Field-chain analysis walk (emits no code): accumulate the leaf offset.
+    var cur_si = elem_si
+    var total_off: i64 = 0
+    var leaf_ty: i64 = 0
+    var leaf_hash: i64 = 0
+    var leaf_tok: i64 = 0 - 1
+    var bad: bool = false
+    var done: bool = false
+    while done == false && TK[EP as usize] == 50 {
+        EP = EP + 1
+        leaf_tok = EP
+        let fns = TS[EP as usize]
+        let fne = TE[EP as usize]
+        let fh = gl_name_hash(fns, fne)
+        EP = EP + 1
+        ST_QUERY_NS = fns
+        ST_QUERY_NE = fne
+        let off = st_field_offset(cur_si, fh)
+        let fty = st_field_ty(cur_si, fh)
+        let fhash = st_field_hash(cur_si, fh)
+        ST_QUERY_NS = 0 - 1
+        ST_QUERY_NE = 0 - 1
+        if off < 0 {
+            tc_error(leaf_tok, "unknown field access")
+            bad = true
+            done = true
+        } else {
+            total_off = total_off + off
+            if TK[EP as usize] == 16 {
+                leaf_ty = fty
+                leaf_hash = fhash
+                done = true
+            } else {
+                let nsi = st_find(fhash)
+                if nsi < 0 {
+                    tc_error(leaf_tok, "array-element field store requires inline struct field")
+                    bad = true
+                    done = true
+                } else {
+                    cur_si = nsi
+                }
+            }
+        }
+    }
+    if bad {
+        em(0x58)  // discard pushed index (balance stack)
+        return
+    }
+    if TK[EP as usize] == 16 { EP = EP + 1 }  // skip '='
+
+    compile_or()  // RHS (value or src ptr) → rax
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    if leaf_ty != 0 && ty_eq(leaf_ty, leaf_hash, rhs_ty, rhs_ty_hash) == false {
+        tc_error_hard(EP - 1, "assignment type mismatch")
+    }
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (RHS)
+    em(0x59)                       // pop rcx (index)
+    if is_global == 1 {
+        let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+        em(0x48); em(0xb8); em64(base)          // mov rax, base
+    } else {
+        emit_load_var(lslot)                     // mov rax, [rbp-...] (base ptr)
+    }
+    em(0x48); em(0x8b); em(0x04); em(0xc8)       // mov rax, [rax + rcx*8] (element ptr)
+    if total_off != 0 { em(0x48); em(0x8d); em(0x80); em32(total_off) }  // lea rax, [rax+off]
+    if leaf_ty == 8 || type_is_option_inline(leaf_ty, leaf_hash) || leaf_ty == 6 || knowledge_hash_is(leaf_hash) {
+        emit_copy_agg_to_ptr_x86(leaf_ty, leaf_hash)
+    } else {
+        em(0x48); em(0x89); em(0x10)             // mov [rax], rdx
+    }
+}
+
 // AArch64 counterpart of compile_nested_field_store_x86. Same inline field-chain
 // offset accumulation; only the leaf store emission differs (a64 encodings).
 fn compile_nested_field_store_a64() with IO, Mut, Panic, Div {
@@ -18910,6 +19069,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 tc_undefined_var(name_tok)
             }
         }
+        return
+    }
+    // ARRAY[idx].field(.field)* = expr (store into struct element of an array)
+    if stmt_is_array_elem_field_store(EP) {
+        compile_array_elem_field_store_x86()
         return
     }
     // ARRAY[idx] = expr (global array write)
