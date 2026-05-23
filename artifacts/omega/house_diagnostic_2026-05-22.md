@@ -46,3 +46,28 @@ park-miller, task-c-bundle, dataset-expansion).
 5. Prune the 51 zero-ahead local branches + dead worktrees.
 6. Triage + prune the 57 stashes (eyeball each).
 7. Shepherd PR #184.
+
+## Resolution — executed 2026-05-22 → 2026-05-23
+
+All recovery items closed (Garden lane left to the other Claude; PR #184 left untouched).
+
+| Metric | Start | Final |
+|--------|------:|------:|
+| Local branches | 130 | 90 (−40) |
+| Worktrees | 26 | 18 (−8) |
+| Stashes | 57 | 32 (−25) |
+| Loose untracked files | 13 | 0 |
+| Local `main` | 14 behind | in sync (5eae60d10) |
+| Work branch | diverged 2/6 | rebased + pushed; **PR #185** |
+
+- **Junk dropped:** `test_huffman_encode`, `sounio-whereami`.
+- **Real artifacts committed** (`b1e4352a0`): examples, f32_assoc_gum scaffold, SPIR-V/Vulkan outputs (host ELF runner binaries excluded), smoke results, recovery docs.
+- **`fix/nested-field-store-codegen`** rebased clean onto origin, pushed; opened **PR #185** (original fix already shipped via #179).
+- **`main`** fast-forwarded inside its worktree (`sounio-native-v2-fnref-calls`); the 26 in-flight WIP files preserved (origin/main did not touch `module_frontend.sio`).
+- **Branches pruned (−40):** 32 zero-ahead + 8 from removed worktrees. Local-only; remote refs preserved (recover via `git checkout -b <name> origin/<name>`).
+- **Stashes pruned (−25):** mechanical noise only (autostash/stale/drift/DO-NOT-MERGE/parallel-agent/babysit). 32 named-feature stashes kept.
+- **Worktrees retired (−8):** paper168 ×4, lane-4-nv2, lane-5-phase5, native-v2-hof-lock, native-v2-imported-hof-abi.
+  - `lane-5-phase5` untracked file was byte-identical (md5 `db444d7b…`) to committed `kretikos_kaxi_source_recognizer.sio` → no loss.
+  - both `native-v2-hof-*` branches verified **superseded**: their 7 shared commits landed in main; tip proof gates exist in main in a more advanced pure-Sounio form (python heredoc → `kaxi-validate-evidence`).
+
+**Still live (real unmerged work, intentionally preserved):** `compiler/task-c-bundle-codegen` (+17), lsp/explore/stage-g/dissertation lanes, 5 locked `agent-*` worktrees, the Garden lane, and the 32 genuine-feature stashes.
