@@ -570,3 +570,31 @@ others (possibly more missing-file cases).
 warning-loop) + bundle-incompleteness were inflating/hiding the true picture; the
 core bundle is now far more complete. Categories now: E200 191, effect-not-declared
 (cascade), assignment/type-mismatch, unknown-field, + the added files' own errors.
+
+---
+
+## More missing def-files? — NO more cheap wins (2026-05-24, checked)
+
+Compared the full-profile FILES list vs the core list across ALL dirs. Many files
+are full-only (gpu/, llvm/, hlir/, effects/, printer/, collections/, ir/opt_*) —
+but these are **separate subsystems the core pipeline doesn't reference**. Verified:
+sample functions from effects/types.sio, ir/opt_cleanup.sio, ir/opt_strategy.sio,
+ir/profile.sio all have **0 uses in the bundle** → adding them resolves nothing and
+only injects their own errors. The genuine missing dependencies were the native
+codegen providers (machine_ir + runtime_context/target_policy/gc/stack_maps/
+peephole), already added (1391→1129).
+
+Confirming signal: the only NAMED undefined symbols left are the 6 PE_* (defined
+IN-CORE in pe_coff.sio) — so core has no undefined refs into the missing files
+(those would surface as named E200). 
+
+**Remaining E200 (191) is NOT missing-files:**
+- PE_* (6): in-core puzzle — `let PE_DIR_IAT` def at bundle L180604 but used at
+  L160599 (use-before-def cross-file); the const pre-scan should register it
+  regardless of order, so this is a scan/cap quirk worth a separate look (small).
+- `read_byte` (unnamed): an IO builtin lean_single's resolver doesn't know.
+- `lex/3`: defined only in bootstrap/bootstrap_v0.sio (a bootstrap entrypoint, NOT
+  appropriate for core — would collide).
+- the bulk of "unknown identifier at line" (unnamed) needs per-site inspection.
+
+Bundle-completeness as an error-reduction lever is now exhausted. Baseline 1069.
