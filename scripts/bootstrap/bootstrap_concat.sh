@@ -478,6 +478,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/native/abi.sio
     self-hosted/native/lower_hir.sio
     self-hosted/native/elf.sio
+    self-hosted/native/machine_ir.sio
     self-hosted/native/codegen.sio
     self-hosted/native/lower_ir.sio
     self-hosted/native/riscv.sio
