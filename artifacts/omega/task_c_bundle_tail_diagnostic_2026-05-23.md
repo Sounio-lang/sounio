@@ -531,3 +531,13 @@ fixed), so each iteration gives a trustworthy count.
 
 **Session state: 1392 clean errors. Root identified for the largest tractable
 cluster (effect-not-declared 189 = add-Mut). Deferred to a methodical fresh pass.**
+
+## reloc.sio proof (2026-05-24): effect-not-declared CASCADES (key finding)
+
+Fixed the 3 reloc.sio builder fns lacking Mut (reloc_table_new etc.) — correct,
+but net only **1392→1391** (effect-not-declared 189→188). Adding `with Mut` to a
+leaf builder shifts the requirement to its callers (now lacking Mut). **The cluster
+propagates up the call graph** — it needs transitive-closure annotation (fn + all
+callers), not per-leaf fixes. The earlier "37 errors in reloc.sio" was a filemap
+artifact; reloc.sio really had ~3. Next session: annotate Mut bottom-up by call
+chain (or top-down), expecting net reduction only once a whole chain is consistent.
