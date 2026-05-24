@@ -46,6 +46,21 @@ def validate_bundle_dir(bundle_dir: Path) -> None:
             raise ValueError(f"{path} missing ontology field")
         if payload.get("term_count", 0) <= 0:
             raise ValueError(f"{path} has no terms")
+        terms = payload.get("terms", [])
+        term_curies = {term.get("curie") for term in terms}
+        if payload.get("term_count") != len(terms):
+            raise ValueError(f"{path} term_count does not match terms")
+        disjoints = payload.get("disjoints", [])
+        if payload.get("disjoint_count", len(disjoints)) != len(disjoints):
+            raise ValueError(f"{path} disjoint_count does not match disjoints")
+        for pair in disjoints:
+            if not isinstance(pair, list) or len(pair) != 2:
+                raise ValueError(f"{path} has invalid disjoint pair {pair!r}")
+            left, right = pair
+            if left == right:
+                raise ValueError(f"{path} has reflexive disjoint pair {pair!r}")
+            if left not in term_curies or right not in term_curies:
+                raise ValueError(f"{path} has disjoint pair with unknown term {pair!r}")
         found.add(ontology)
 
     missing = REQUIRED - found

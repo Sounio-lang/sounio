@@ -61,7 +61,33 @@ fi
 
 HARNESS="$ROOT_DIR/scripts/run_sio_test_suite.sh"
 BUILD_WRAPPER="$ROOT_DIR/scripts/ci/build_ontology_validation_souc.sh"
+GENERATED_ONTOLOGY_GATE="$ROOT_DIR/scripts/ci/generated_ontology_gate.sh"
 REBUILT_GATE_INACTIVE_RC=97
+
+prepare_generated_ontology() {
+    if [[ "${SOUNIO_ONTOLOGY_PREPARE_GENERATED:-1}" == "0" ]]; then
+        return 0
+    fi
+    if [[ ! -x "$GENERATED_ONTOLOGY_GATE" && ! -f "$GENERATED_ONTOLOGY_GATE" ]]; then
+        echo "error: generated ontology gate missing: $GENERATED_ONTOLOGY_GATE" >&2
+        exit 2
+    fi
+
+    local check_mode="${SOUNIO_ONTOLOGY_CHECK_GENERATED:-auto}"
+    if [[ "$check_mode" == "auto" ]]; then
+        if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+            check_mode="1"
+        else
+            check_mode="0"
+        fi
+    fi
+
+    if [[ "$check_mode" == "1" || "$check_mode" == "true" ]]; then
+        bash "$GENERATED_ONTOLOGY_GATE" --check
+    else
+        bash "$GENERATED_ONTOLOGY_GATE" --refresh-only
+    fi
+}
 
 run_mode() {
     local mode="$1"
@@ -282,6 +308,8 @@ emit_structured_summary() {
     cat "$summary_file"
     rm -f "$summary_file"
 }
+
+prepare_generated_ontology
 
 if [[ "$MODE" != "diff" ]]; then
     run_mode "$MODE" ""
