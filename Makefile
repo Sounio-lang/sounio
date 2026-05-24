@@ -1,5 +1,6 @@
 .PHONY: build check test test-stdlib clean fmt install help lint lint-fix lint-docs \
-         docs-gen ops-guardrail-local ops-infra-up ops-strict-up ops-status \
+         docs-gen generated-ontology test-generated-ontology \
+         ops-guardrail-local ops-infra-up ops-strict-up ops-status \
          website-verified-snapshot
 
 SOUC := ./bin/souc
@@ -68,6 +69,21 @@ lint-fix:            ## Apply automatic fixes to a file: make lint-fix FILE=path
 
 docs-gen:            ## Regenerate stdlib API reference from source
 	@bash scripts/build/gen_stdlib_api_md.sh
+
+generated-ontology:  ## Regenerate .dontology bundles and generated ontology .sio stubs
+	@echo "→ Building .dontology bundles from stdlib ontology source slices"
+	@python3 scripts/ontology/build_bundle.py \
+		--source-dir stdlib/data/data/ontology/source \
+		--output-dir stdlib/data/data/ontology/bundles
+	@echo "→ Validating .dontology bundles and SSSOM mapping shards"
+	@python3 scripts/ontology/validate_bundle.py \
+		--bundle-dir stdlib/data/data/ontology/bundles \
+		--mapping-dir stdlib/data/data/ontology/bundles/mappings
+	@echo "→ Generating stdlib ontology stubs via the C FFI importer"
+	@bash scripts/ontology/generate_dontology_stubs.sh
+
+test-generated-ontology: generated-ontology ## Regenerate ontology stubs and run generated ontology witnesses
+	@bash scripts/run_sio_test_suite.sh ontology_generated --verbose
 
 website-verified-snapshot: ## Run stdlib reliability gate + refresh website verified-snapshot.json (needs SOUC_BIN)
 	@echo "→ SOUC_BIN must point to a working souc (e.g. export SOUC_BIN=/tmp/souc.elf)"
