@@ -434,3 +434,34 @@ gap. Focused type-inference task; not a mid-session source fix.
 Session left at **338 type errors** (5304→338, -94%). The two systematic roots are
 banked; the unknown-field bulk + IrHyperExprInfo are the documented elusive/deferred
 remainder.
+
+---
+
+## .head base-type instrumentation (2026-05-24) — blocked by the warning-loop
+
+Instrumented two sites across two rebuilds:
+1. `st_field_offset` -> -1 (field-name miss): caught only ~7 real misses
+   (IrHyperExprInfo law fields + 1 Resolver) after correlation.
+2. expression field-read fallthrough `lean_single.sio:14207` (found==0,
+   tc_error_hard): **0 hits** — the .head errors don't reach it.
+
+Read every `"unknown field access"` site: all either go through `st_field_offset`
+(8663/8934/8977/14173/14185) or are special-field handlers (14145 Knowledge
+.value/.variance/..., 14207 brute-force fallthrough). The 46 errors use plain
+`tc_error` and evade both instrumented points.
+
+**Root obstacle identified: the `nested field store requires struct base`
+warning-loop (bundle line 119783, ~63M repetitions) saturates stdout.** Every
+capture is `head`-capped, so the `.head` markers — which stream AFTER ~30 early
+`.span` probe-misses — get truncated before correlation. Clean full-output
+measurement is impossible until the warning loop is fixed.
+
+**Revised next step (reordered):** FIX the warning-loop first (it's a warning-
+recovery bug that doesn't advance/dedupe at bundle line 119783 — a `nested field
+store` codegen path that re-warns without consuming input). With clean bounded
+output, re-run the `st_field_offset` + a per-site-tagged `"unknown field access"`
+instrumentation to localize the `.head` base-type miss properly. Until then the
+.head cluster (~25) cannot be reliably measured or localized.
+
+Session unchanged at **338 type errors (5304→338, -94%)**; no source edits this
+round (instrumentation reverted, tree clean, binary = let-fix e254d3da).
