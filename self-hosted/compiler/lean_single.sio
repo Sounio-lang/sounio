@@ -11829,6 +11829,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let slot_v = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 compile_or()  // value → rax
+                seq_materialize_push_value_x86(VAR_TY_HASH[lvi as usize])
                 emit_store_var(slot_v)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_seq_push_slots_x86(slot_s, slot_v)
@@ -11858,6 +11859,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let uslot_v = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 compile_or()  // value
+                seq_materialize_push_value_x86(VAR_TY_HASH[ulvi as usize])
                 emit_store_var(uslot_v)
                 if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 4, 2) }
                 let uslot_conf = NEXT_SLOT
@@ -14017,6 +14019,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             // ── Seq<T> methods (TY_SEQ = 12): .push(v) .get(i) .set(i,v) .len() ──
             if EXPR_TY == 12 && src_match(fns, fne - fns, "push") && TK[(EP + 1) as usize] == 6 {
                 let push_place = SEQ_RECV_PLACE_SLOT   // capture before arg compile resets it
+                let push_seqhash = EXPR_TY_HASH        // receiver's Seq hash (for elem materialize)
                 if push_place < 0 && LAST_EXPR_VAR_IDX < 0 {
                     tc_error(method_tok, "Seq .push requires a local Seq variable or struct field receiver")
                     EP = EP + 1
@@ -14032,6 +14035,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 let push_sv = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 compile_or()  // value → rax
+                seq_materialize_push_value_x86(push_seqhash)
                 emit_store_var(push_sv)
                 if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
                 if push_place >= 0 { emit_seq_push_at_place_x86(push_place, push_sv) }
@@ -14041,6 +14045,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             }
             if EXPR_TY == 12 && src_match(fns, fne - fns, "push_uncertain") && TK[(EP + 1) as usize] == 6 {
                 let pu_place = SEQ_RECV_PLACE_SLOT
+                let pu_seqhash = EXPR_TY_HASH
                 if pu_place < 0 && LAST_EXPR_VAR_IDX < 0 {
                     tc_error(method_tok, "Seq .push_uncertain requires a local Seq variable or struct field receiver")
                     EP = EP + 1
@@ -14056,6 +14061,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 let pu_v = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 compile_or()  // value
+                seq_materialize_push_value_x86(pu_seqhash)
                 emit_store_var(pu_v)
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 let pu_conf = NEXT_SLOT
@@ -18413,6 +18419,65 @@ fn materialize_aggregate_array_element_a64(array_hash: i64) with Mut, Panic, Div
     em32(0xAA0003EA)
     emit_load_var_a64(dst_slot)
     emit_copy_agg_to_ptr_a64(6, elem_hash)
+}
+
+// Heap-copy the struct pointed to by rax/x0 (a fresh copy), leaving the new
+// pointer in rax/x0. Keyed on the struct hash directly (cf. the array variants,
+// which derive it from an array hash). Used by Seq push to give each pushed
+// struct element its own storage — otherwise repeated pushes of a struct literal
+// or fn-return all alias the same reused materialization buffer.
+fn materialize_struct_value_x86(struct_hash: i64) with Mut, Panic, Div {
+    let nslots = struct_like_nslots(struct_hash)
+    if nslots <= 0 { return }
+    let src_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let dst_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(src_slot)
+    emit_imm64(nslots * 8)
+    emit_heap_alloc_x86()
+    emit_store_var(dst_slot)
+    emit_load_var(src_slot)
+    em(0x48); em(0x89); em(0xc2)   // mov rdx, rax (src)
+    emit_load_var(dst_slot)        // rax = dst
+    emit_copy_agg_to_ptr_x86(6, struct_hash)
+}
+
+fn materialize_struct_value_a64(struct_hash: i64) with Mut, Panic, Div {
+    let nslots = struct_like_nslots(struct_hash)
+    if nslots <= 0 { return }
+    let src_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let dst_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var_a64(src_slot)
+    emit_imm64_a64(nslots * 8)
+    emit_heap_alloc_a64()
+    emit_store_var_a64(dst_slot)
+    emit_load_var_a64(src_slot)
+    em32(0xAA0003EA)               // mov x10, x0 (src)
+    emit_load_var_a64(dst_slot)    // x0 = dst
+    emit_copy_agg_to_ptr_a64(6, struct_hash)
+}
+
+// If the Seq's element type is a struct/aggregate, heap-copy the value in rax/x0
+// so the element gets its own storage. Scalars (i64/f64/ptr) are left untouched.
+fn seq_materialize_push_value_x86(seq_hash: i64) with Mut, Panic, Div {
+    if seq_hash_is(seq_hash) == false { return }
+    let in_ty = seq_hash_inner_ty(seq_hash)
+    let in_hash = seq_hash_inner_hash(seq_hash)
+    if in_ty == 6 || in_ty == 7 || type_is_struct_like(in_ty, in_hash) {
+        materialize_struct_value_x86(in_hash)
+    }
+}
+
+fn seq_materialize_push_value_a64(seq_hash: i64) with Mut, Panic, Div {
+    if seq_hash_is(seq_hash) == false { return }
+    let in_ty = seq_hash_inner_ty(seq_hash)
+    let in_hash = seq_hash_inner_hash(seq_hash)
+    if in_ty == 6 || in_ty == 7 || type_is_struct_like(in_ty, in_hash) {
+        materialize_struct_value_a64(in_hash)
+    }
 }
 
 fn compile_indexed_field_field_store_x86() with IO, Mut, Panic, Div {
@@ -29439,6 +29504,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let aslot_v = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 compile_or_a64()
+                seq_materialize_push_value_a64(VAR_TY_HASH[alvi as usize])
                 emit_store_var_a64(aslot_v)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 emit_seq_push_slots_a64(aslot_s, aslot_v)
@@ -29462,6 +29528,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let auslot_v = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 compile_or_a64()
+                seq_materialize_push_value_a64(VAR_TY_HASH[aulvi as usize])
                 emit_store_var_a64(auslot_v)
                 if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 4, 2) }
                 let auslot_conf = NEXT_SLOT
@@ -30827,6 +30894,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             // ── Seq<T> methods (aarch64): .push .get .set .len .push_uncertain ──
             if EXPR_TY == 12 && src_match(fns, fne - fns, "push") && TK[(EP + 1) as usize] == 6 {
                 let apush_place = SEQ_RECV_PLACE_SLOT
+                let apush_seqhash = EXPR_TY_HASH
                 if apush_place < 0 && LAST_EXPR_VAR_IDX < 0 {
                     tc_error(method_tok, "Seq .push requires a local Seq variable or struct field receiver")
                     EP = EP + 1
@@ -30842,6 +30910,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 let apush_sv = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 compile_or_a64()
+                seq_materialize_push_value_a64(apush_seqhash)
                 emit_store_var_a64(apush_sv)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 if apush_place >= 0 { emit_seq_push_at_place_a64(apush_place, apush_sv) }
@@ -30851,6 +30920,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             }
             if EXPR_TY == 12 && src_match(fns, fne - fns, "push_uncertain") && TK[(EP + 1) as usize] == 6 {
                 let apu_place = SEQ_RECV_PLACE_SLOT
+                let apu_seqhash = EXPR_TY_HASH
                 if apu_place < 0 && LAST_EXPR_VAR_IDX < 0 {
                     tc_error(method_tok, "Seq .push_uncertain requires a local Seq variable or struct field receiver")
                     EP = EP + 1
@@ -30866,6 +30936,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 let apu_v = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 compile_or_a64()
+                seq_materialize_push_value_a64(apu_seqhash)
                 emit_store_var_a64(apu_v)
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 let apu_conf = NEXT_SLOT
