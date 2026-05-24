@@ -598,3 +598,32 @@ IN-CORE in pe_coff.sio) — so core has no undefined refs into the missing files
 - the bulk of "unknown identifier at line" (unnamed) needs per-site inspection.
 
 Bundle-completeness as an error-reduction lever is now exhausted. Baseline 1069.
+
+---
+
+## effect-not-declared bottom-up attempt (2026-05-24) — CASCADE confirmed at scale, reverted
+
+Instrumented the 3 `tc_*_effect*` emission sites to dump CURRENT_FN + needed-effect
+mask. Got 48 distinct flagged functions (need: 2=Mut, 6=Mut+Panic, 14=Mut+Panic+Div),
+dominated by builders/test-helpers (ph_*, a64_preview_*, *_new, *make_test_module).
+Batch-added the missing effects to all 48 (script-driven). Rebuilt (fixed point holds
+a0e0184f).
+
+**Result: effect-not-declared 189 → 375 (+186), total 1069 → 1069 (net 0).** Adding
+Mut to 48 leaf functions exposed ALL their callers (now missing Mut) → more errors,
+not fewer. Confirms (at scale) the reloc proof: this is a CASCADE up the call graph.
+Reverted (kept the clean 1069 baseline).
+
+**Takeaway / decision for next session:** incremental bottom-up does NOT converge —
+the mutation-transitive-closure (every fn that mutates a local struct OR calls one,
+up to main) is most of the bundle. Two viable paths, both deliberate:
+1. **Annotate the whole closure in one coordinated script pass** (compute reachable
+   mutators + all transitive callers, add Mut everywhere, rebuild once). Big but
+   convergent.
+2. **Relax the effect rule in lean_single** — requiring `Mut` for *local-only* struct
+   field mutation (value never escapes) is unusually strict; if local mutation isn't
+   an observable effect, the checker could stop requiring it, clearing all 189+ at the
+   ROOT without touching source. Semantic decision (verify it doesn't weaken real
+   effect checking) — likely the higher-leverage, lower-churn fix.
+
+Recommend evaluating path 2 first. Baseline stays 1069.
