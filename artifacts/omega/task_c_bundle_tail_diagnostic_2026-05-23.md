@@ -500,3 +500,34 @@ top-level consts in the previously-hidden region past line 119783).
 
 **Next session: measurement is now reliable.** Re-attack from the clean 1392 —
 start with effect-not-declared (189, likely 1-2 roots) and the now-visible E200s.
+
+---
+
+## effect-not-declared cluster (189) — root confirmed: missing `with Mut` (bulk Cat-A1)
+
+Repro (current binary): a function with NO `with` clause doing local-struct field
+stores (`var m = em(); m.f = x`) errors "effect not declared in function
+signature" (one per store); adding `with Mut` clears it. **In Sounio's effect
+system, mutating a local struct's field (or array element) requires the `Mut`
+effect.** Many modular functions omit it.
+
+Concentrated in 4 files: `native/codegen.sio` (45), `ir/egraph.sio` (45),
+`native/reloc.sio` (37), `native/pe_coff.sio` (30) = 157/183; remainder scattered
+(frame/elf/auto_vectorize/tailcall/inline/...). All are builder/mutator functions
+(e.g. `reloc_table_new`, `rela_section_new`, `inl_make_test_module`) that build a
+struct via local-var field mutation but lack `with Mut`.
+
+**This is bulk mechanical Cat-A1 work**, NOT a single root fix: ~50 functions, each
+needing its `with` clause extended (add `Mut`; create a `with Mut` clause if none).
+Caveat: some may also need `Div`/`Panic`/`Alloc` (e.g. array indexing `[i as usize]`
+→ Div/Panic), so expect 1-2 rebuild-iterations per file to converge. Reliable
+detection needs care — static awk under-counts (misses array/nested stores). Best
+done methodically per-file in a fresh session, not a marathon tail.
+
+Recommended approach next session: per file, add `with Mut` to each flagged
+function, rebuild, re-run, add any remaining effects the new errors name, repeat
+until that file is clean; then next file. Measurement is now reliable (warning-loop
+fixed), so each iteration gives a trustworthy count.
+
+**Session state: 1392 clean errors. Root identified for the largest tractable
+cluster (effect-not-declared 189 = add-Mut). Deferred to a methodical fresh pass.**
