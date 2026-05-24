@@ -627,3 +627,37 @@ up to main) is most of the bundle. Two viable paths, both deliberate:
    effect checking) — likely the higher-leverage, lower-churn fix.
 
 Recommend evaluating path 2 first. Baseline stays 1069.
+
+---
+
+## relax-rule evaluation (2026-05-24) — VIABLE, high-leverage; recommend local-only refinement
+
+Mut (effect 2) is required at 18 store-site checks (`current_fn_allows_mutation()
+== false → tc_effect_violation(EP, 2, ...)`, lean_single.sio ~18717–19059) covering
+field/array/nested/indexed stores. `current_fn_allows_mutation()` (2331) only checks
+`FN_EFFECTS[CURRENT_FN] & 2` — no info about whether the store target escapes.
+
+**Ceiling experiment** — made `current_fn_allows_mutation()` return true (blanket),
+rebuilt: **total 1069 → 766 (-303), effect-not-declared 189 → 72 (-117), fixed point
+HOLDS (52cb6ad6).** Key: the Mut effect does NOT affect codegen (self-compile stays
+bit-identical) — it's purely a check; relaxing it changes what's *rejected*, not
+what's *produced*. Reverted (blanket guts a real language guarantee).
+
+**Verdict:** relax-rule is clearly the right lever (−303, no codegen risk, fixed
+point intact) — far better than annotating the cascade closure. But blanket-relax
+removes Mut checking for genuinely-observable mutation (`&!` ref params, globals),
+which is a language-design overreach.
+
+**Recommended implementation — local-only relax:** require Mut only when the store
+target ESCAPES (base var is pointer-like = a `&!` ref, OR a global). Local `var
+S` field/array mutation doesn't escape → no Mut needed. Add a helper
+`store_escapes(ns,ne) -> bool` (var_find_idx + type_is_pointer_like; gl_find for
+globals; conservative-true on unknown) and gate the 18 sites:
+`if !current_fn_allows_mutation() && store_escapes(...) { tc_effect_violation(...) }`.
+This clears the local-struct false-positives (the bulk of the 189) while preserving
+Mut for observable mutation. ~18 careful site edits + 1 rebuild; the base name (ns/ne)
+is available at each store site (some computed just after the current check — minor
+reorder). Remaining 72 effect-not-declared after the Mut relax are OTHER effects
+(IO/Div/Panic/Alloc), separate per-case.
+
+Baseline stays 1069 (experiment reverted).
