@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # prepare_corpus.sh — Collect all .sio files into a single corpus for LLM fine-tuning.
 #
-# Usage: bash training/finetune/prepare_corpus.sh
-# Output: training/finetune/sounio_corpus.txt
+# Usage: bash docs/training/finetune/prepare_corpus.sh
+# Output: docs/training/finetune/sounio_corpus.txt
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-OUTPUT="$REPO_ROOT/training/finetune/sounio_corpus.txt"
+REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+OUTPUT="$REPO_ROOT/docs/training/finetune/sounio_corpus.txt"
 
 echo "=== Sounio Corpus Builder ==="
 echo "Repo root: $REPO_ROOT"
@@ -15,6 +15,7 @@ echo ""
 
 # Directories to scan (relative to repo root)
 DIRS=(stdlib tests examples benchmarks)
+INCLUDE_ONTOLOGY="${LORA_CORPUS_INCLUDE_ONTOLOGY:-0}"
 
 > "$OUTPUT"  # truncate
 
@@ -30,12 +31,15 @@ for dir in "${DIRS[@]}"; do
 
     while IFS= read -r -d '' sio_file; do
         REL_PATH="${sio_file#$REPO_ROOT/}"
+        if [[ "$INCLUDE_ONTOLOGY" != "1" && "$REL_PATH" == stdlib/ontology/* ]]; then
+            continue
+        fi
         LINE_COUNT=$(wc -l < "$sio_file")
         TOTAL_LINES=$((TOTAL_LINES + LINE_COUNT))
         FILE_COUNT=$((FILE_COUNT + 1))
 
         echo "// === FILE: $REL_PATH ===" >> "$OUTPUT"
-        cat "$sio_file" >> "$OUTPUT"
+        sed 's/[[:space:]]\+$//' "$sio_file" >> "$OUTPUT"
         echo "" >> "$OUTPUT"
         echo "" >> "$OUTPUT"
     done < <(find "$SEARCH_DIR" -name '*.sio' -type f -print0 | sort -z)
