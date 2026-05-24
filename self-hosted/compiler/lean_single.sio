@@ -8345,6 +8345,130 @@ fn compile_measure_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
     EXPR_TY_HASH = knowledge_hash_make(value_ty, value_hash, eps_scaled)
 }
 
+// observe(k: Knowledge<T>, y, uncertainty: s) -> Knowledge<T>
+// Normal-normal conjugate posterior contraction (M1-reviewed, branchless product form):
+//   sobs = s*s ; den = var + sobs
+//   var_post = var*sobs / den
+//   mu_post  = (mu*sobs + y*var) / den
+//   confidence carried from prior. sobs=0 -> (y,0); var=0 -> prior; both-zero -> NaN (degenerate).
+fn compile_observe_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
+    EP = EP + 1
+    var k_hash: i64 = 0
+    compile_or()
+    k_hash = EXPR_TY_HASH
+    if knowledge_hash_is(k_hash) == false {
+        tc_error(call_tok, "observe requires a Knowledge<T> first argument")
+    }
+    let k_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(k_slot)
+    var y_slot: i64 = -1
+    var s_slot: i64 = -1
+    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        if TK[EP as usize] == 28 { EP = EP + 1 }
+        if TK[EP as usize] == 7 || TK[EP as usize] == 0 { break }
+        var is_unc: i64 = 0
+        if TK[EP as usize] == 3 && TK[(EP + 1) as usize] == 43 {
+            let lns = TS[EP as usize]
+            let lne = TE[EP as usize]
+            if src_match(lns, lne - lns, "uncertainty") { is_unc = 1 }
+            else { tc_error(call_tok, "unknown observe metadata label") }
+            EP = EP + 2
+        }
+        compile_or()
+        let arg_ty = EXPR_TY
+        if arg_ty != 2 {
+            if ty_is_numeric(arg_ty) { emit_i64_to_f64_in_rax_x86() }
+            else { tc_error(call_tok, "observe arguments must be numeric") }
+        }
+        let tmp_slot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        emit_store_var(tmp_slot)
+        if is_unc == 1 || y_slot >= 0 { s_slot = tmp_slot } else { y_slot = tmp_slot }
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }
+    if y_slot < 0 { tc_error(call_tok, "observe requires an observed value") }
+    if s_slot < 0 { tc_error(call_tok, "observe requires an uncertainty") }
+
+    // sobs = s*s
+    let sobs_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var(s_slot)
+    em(0x50)
+    emit_load_var(s_slot)
+    em(0x59)
+    emit_f64_mul_from_rcx_rax_x86()
+    emit_store_var(sobs_slot)
+
+    // var = [k+8] ; mu = [k+0]
+    let var_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var(k_slot)
+    em(0x48); em(0x8b); em(0x40); em(8)
+    emit_store_var(var_slot)
+    let mu_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var(k_slot)
+    em(0x48); em(0x8b); em(0x00)
+    emit_store_var(mu_slot)
+
+    // den = var + sobs
+    let den_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var(var_slot)
+    em(0x50)
+    emit_load_var(sobs_slot)
+    em(0x59)
+    emit_f64_add_from_rcx_rax_x86()
+    emit_store_var(den_slot)
+
+    let base_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+
+    // var_post = var*sobs / den  -> base+1
+    emit_load_var(var_slot)
+    em(0x50)
+    emit_load_var(sobs_slot)
+    em(0x59)
+    emit_f64_mul_from_rcx_rax_x86()
+    em(0x50)
+    emit_load_var(den_slot)
+    em(0x59)
+    emit_f64_div_from_rcx_rax_x86()
+    emit_store_var(base_slot + 1)
+
+    // mu_post = (mu*sobs + y*var) / den  -> base+2
+    emit_load_var(mu_slot)
+    em(0x50)
+    emit_load_var(sobs_slot)
+    em(0x59)
+    emit_f64_mul_from_rcx_rax_x86()
+    em(0x50)
+    emit_load_var(y_slot)
+    em(0x50)
+    emit_load_var(var_slot)
+    em(0x59)
+    emit_f64_mul_from_rcx_rax_x86()
+    em(0x59)
+    emit_f64_add_from_rcx_rax_x86()
+    em(0x50)
+    emit_load_var(den_slot)
+    em(0x59)
+    emit_f64_div_from_rcx_rax_x86()
+    emit_store_var(base_slot + 2)
+
+    // confidence carried from prior -> base+0
+    emit_load_var(k_slot)
+    em(0x48); em(0x8b); em(0x40); em(16)
+    emit_store_var(base_slot)
+
+    em(0x48); em(0x8d); em(0x85)
+    em32(0 - (base_slot + 2) * 8)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = k_hash
+}
+
 fn compile_acknowledge_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
     // acknowledge(k: Knowledge<T>, reason: String) -> T
     // Does NOT require `with Epistemic` — explicit uncertainty acknowledgment
@@ -10477,6 +10601,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "measure") {
                 compile_measure_call_x86(name_tok)
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "observe") {
+                compile_observe_call_x86(name_tok)
                 return
             }
             if src_match(ns, ne - ns, "acknowledge") {
