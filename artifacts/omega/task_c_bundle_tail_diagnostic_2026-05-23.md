@@ -541,3 +541,32 @@ propagates up the call graph** — it needs transitive-closure annotation (fn + 
 callers), not per-leaf fixes. The earlier "37 errors in reloc.sio" was a filemap
 artifact; reloc.sio really had ~3. Next session: annotate Mut bottom-up by call
 chain (or top-down), expecting net reduction only once a whole chain is consistent.
+
+---
+
+## E200 cluster (2026-05-24) → NEW root class: incomplete core bundle. 1391 → 1129
+
+The biggest E200 sub-cluster (MIR_*, ~80 + cascades) was NOT a compiler bug — the
+`core` profile in bootstrap_concat.sh concatenated CONSUMERS of native definitions
+(codegen/regalloc/lower_ir reference MIR_OP_*/PE_*/...) but omitted the PROVIDER
+files. Bundle-completeness fixes (build-script only, no rebuild):
+- add `machine_ir.sio` (defines MIR_*) → 1391→1218 (-173)
+- add runtime_context/target_policy/gc/stack_maps/peephole → 1218→1129 (-89),
+  E200 497→191 (-306). They bring some own errors but net negative.
+
+Two cap hypotheses tried first and REVERTED (both net 0 — not the cause):
+CONST table cap (pub-let already registered fine) and global table cap (1024→2048).
+The real cause was always missing files. Lesson: for E200 in the bundle, FIRST check
+whether the symbol's defining file is in the core profile (`grep <sym> build/...`
+def-count) before suspecting the compiler.
+
+**Remaining E200 (191):** dominated by **`loop` (30) — a real compiler feature gap**:
+lean_single doesn't recognize the `loop { }` keyword (Rust-style infinite loop),
+treats it as an identifier → E200. Fixing needs parser+codegen support (`loop {body}`
+≡ `while true {body}`) in lean_single + rebuild. Plus a few PE_* and scattered
+others (possibly more missing-file cases).
+
+**Corrected baseline: 1129 errors** (was 1391). The two maskers (segfault,
+warning-loop) + bundle-incompleteness were inflating/hiding the true picture; the
+core bundle is now far more complete. Categories now: E200 191, effect-not-declared
+(cascade), assignment/type-mismatch, unknown-field, + the added files' own errors.
