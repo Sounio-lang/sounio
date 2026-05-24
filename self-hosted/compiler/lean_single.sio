@@ -28602,8 +28602,16 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             let lvi_for_box = var_find_idx(rns, rne)
             var lhash_for_box: i64 = 0
             if lvi_for_box >= 0 { lhash_for_box = VAR_TY_HASH[lvi_for_box as usize] }
-            if lalen > 0 || lty == 6 || lty == 8 || (lty == 11 && box_hash_is(lhash_for_box)) { emit_load_var_a64(slot) }
-            else { emit_lea_var_a64(slot) }
+            // ref param followed by `.field`: load the ref VALUE (the struct ptr),
+            // not the address of the ref slot — otherwise field access derefs a
+            // pointer-to-pointer (was the &refparam.field[i] a64 segfault).
+            if TK[EP as usize] == 50 && lty == 10 && lhash_for_box != 0 && type_is_pointer_like(lty, lhash_for_box) {
+                emit_load_var_a64(slot)
+            } else if lalen > 0 || lty == 6 || lty == 8 || (lty == 11 && box_hash_is(lhash_for_box)) {
+                emit_load_var_a64(slot)
+            } else {
+                emit_lea_var_a64(slot)
+            }
         }
         else {
             let gi = gl_find(rns, rne)
@@ -28618,6 +28626,64 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             if inner_ty_b == 11 && box_hash_is(inner_hash_b) {
                 inner_ty_b = ptr_hash_inner_ty(inner_hash_b)
                 inner_hash_b = ptr_hash_inner_hash(inner_hash_b)
+            }
+            // deref a ref param before walking the field chain (rax already holds
+            // the ref value = struct ptr, so this only adjusts the tracked type).
+            if TK[EP as usize] == 50 && inner_ty_b == 10 && type_is_pointer_like(inner_ty_b, inner_hash_b) {
+                inner_ty_b = ptr_hash_inner_ty(inner_hash_b)
+                inner_hash_b = ptr_hash_inner_hash(inner_hash_b)
+            }
+            // &ident.field(.field)* field chain — accumulate offsets (add x0,x0,#off).
+            while TK[EP as usize] == 50 {
+                EP = EP + 1
+                let f_tok = EP
+                let fh = gl_name_hash(TS[EP as usize], TE[EP as usize])
+                EP = EP + 1
+                let si = st_find(inner_hash_b)
+                if si < 0 {
+                    tc_error(f_tok, "field borrow requires struct base")
+                    em32(0xD2800000)
+                    inner_ty_b = 0
+                    inner_hash_b = 0
+                } else {
+                    ST_QUERY_NS = TS[f_tok as usize]
+                    ST_QUERY_NE = TE[f_tok as usize]
+                    let off = st_field_offset(si, fh)
+                    if off < 0 {
+                        tc_error(f_tok, "unknown field access")
+                        em32(0xD2800000)
+                        inner_ty_b = 0
+                        inner_hash_b = 0
+                    } else {
+                        if off != 0 { emit_imm64_reg_a64(1, off); em32(0x8B010000) }  // add x0, x0, x1
+                        inner_ty_b = st_field_ty(si, fh)
+                        inner_hash_b = st_field_hash(si, fh)
+                    ST_QUERY_NS = -1
+                    ST_QUERY_NE = -1
+                    }
+                }
+            }
+            // &obj.field[i]: rax = address of the Seq field cell; load the Seq ptr
+            // and borrow element i (heap ptr = &Inner for struct elements).
+            if inner_ty_b == 12 && TK[EP as usize] == 41 {
+                em32(0xF9400000)  // ldr x0, [x0]  (Seq ptr)
+                let afb_ps = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(afb_ps)
+                EP = EP + 1  // skip [
+                let afb_is = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()  // index → x0
+                emit_store_var_a64(afb_is)
+                if TK[EP as usize] == 42 { EP = EP + 1 }
+                emit_seq_get_slots_a64(afb_ps, afb_is)
+                let afb_in_ty = seq_hash_inner_ty(inner_hash_b)
+                let afb_in_hash = seq_hash_inner_hash(inner_hash_b)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 10
+                if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(afb_in_ty, afb_in_hash, 1) }
+                else { EXPR_TY_HASH = ref_hash_make(afb_in_ty, afb_in_hash, 0) }
+                return
             }
             if want_mut != 0 {
                 EXPR_TY_HASH = ref_hash_make(inner_ty_b, inner_hash_b, 1)

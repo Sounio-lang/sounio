@@ -1,15 +1,21 @@
 //@ run-pass
-// &seq[i] single-element borrow — both a local Seq variable and a struct FIELD
-// Seq (&obj.field[i]). For struct elements (heap pointers to materialized copies),
-// &seq[i] yields a reference to the element — the ontology's pattern
-// iri_equals(&class.superclasses[i], superclass).
-//
-// NOTE: uses DISTINCT (non-loop) struct pushes. Pushing struct values in a loop
-// currently aliases (seq_push does not yet heap-copy struct elements) — tracked
-// as the top P4c blocker; orthogonal to the borrow tested here.
+// &seq[i] single-element borrow — local Seq var, struct FIELD Seq (&obj.field[i]),
+// and a struct FIELD Seq through a &Struct REF PARAMETER (the ontology's
+// iri_equals(&class.superclasses[i], superclass) pattern, which faulted on a64
+// until the a64 borrow path got field-chain handling). For struct elements (heap
+// pointers to materialized copies) &seq[i] yields a reference to the element.
 struct IRI { id: i64, ns: i64, local: i64 }
 fn eq(a: &IRI, b: &IRI) -> bool { a.id == b.id }
 struct Bag { items: Seq<IRI>, tag: i64 }
+
+// borrow a field-Seq element through a shared ref parameter, in a loop
+fn contains(bag: &Bag, needle: &IRI) -> bool {
+    let n = bag.items.count()
+    for i in 0..n {
+        if eq(&bag.items[i], needle) { return true }
+    }
+    false
+}
 
 fn main() -> i32 with IO, Mut, Panic, Epistemic {
     // local Seq receiver
@@ -27,6 +33,11 @@ fn main() -> i32 with IO, Mut, Panic, Epistemic {
     let t = IRI { id: 99, ns: 0, local: 0 }
     if eq(&b.items[0], &t) { return 3 }    // 42 != 99
     if !eq(&b.items[1], &t) { return 4 }   // 99 == 99
+
+    // &bag.items[i] through a &Bag ref parameter, in a loop
+    if !contains(&b, &t) { return 5 }
+    let miss = IRI { id: 123, ns: 0, local: 0 }
+    if contains(&b, &miss) { return 6 }
 
     return 0
 }
