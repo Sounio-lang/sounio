@@ -822,6 +822,7 @@ var LIMIT_ERROR_KIND: i64 = 0
 var LAST_LOCAL_BSS_SPILL: i64 = 0
 var LAST_LOCAL_BSS_ADDR: i64 = 0
 var GPU_EMU_THREAD_ID_BSS_OFF: i64 = 0
+var SAMPLE_RNG_BSS_OFF: i64 = 0  // Lane B: 64-bit RNG seed for sample_uniform()
 var GPU_RT_STATE_BSS_OFF: i64 = 0
 var GPU_RT_DIAG_BSS_OFF: i64 = 0
 var GPU_RT_LIBCUDA_HANDLE_BSS_OFF: i64 = 0
@@ -8517,6 +8518,32 @@ fn compile_observe_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
     EXPR_TY_HASH = k_hash
 }
 
+// sample_uniform() -> f64 in [0,1)  (Lane B: native PRNG; caller must declare `with Sampling`)
+// MMIX/PCG-style 64-bit LCG on a persistent BSS seed, then uniform = (seed >>> 11) * 2^-53.
+// Seed lives at GL_BSS_BASE+SAMPLE_RNG_BSS_OFF (zero-init → self-seeds to the increment).
+fn compile_sample_uniform_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
+    EP = EP + 1                                  // skip '('
+    if TK[EP as usize] == 7 { EP = EP + 1 }      // skip ')'
+    if (FN_EFFECTS[CURRENT_FN as usize] & 2097152) == 0 {
+        tc_effect_violation(call_tok, 2097152, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + SAMPLE_RNG_BSS_OFF)   // rax = seed
+    em(0x48); em(0xb9); em64(6364136223846793005)    // mov rcx, M
+    em(0x48); em(0x0f); em(0xaf); em(0xc1)            // imul rax, rcx
+    em(0x48); em(0xb9); em64(1442695040888963407)     // mov rcx, C
+    em(0x48); em(0x01); em(0xc8)                       // add rax, rcx
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + SAMPLE_RNG_BSS_OFF)  // store seed; rax preserved
+    em(0x48); em(0xc1); em(0xe8); em(11)              // shr rax, 11  (top 53 bits)
+    em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)  // cvtsi2sd xmm0, rax
+    em(0x48); em(0xb9); em64(4368491638549381120)     // mov rcx, bits(2^-53)
+    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc9)  // movq xmm1, rcx
+    em(0xf2); em(0x0f); em(0x59); em(0xc1)            // mulsd xmm0, xmm1
+    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
+    EXPR_IS_F64 = 1
+    EXPR_TY = 2
+    EXPR_TY_HASH = 0
+}
+
 fn compile_acknowledge_call_x86(call_tok: i64) with IO, Mut, Panic, Div {
     // acknowledge(k: Knowledge<T>, reason: String) -> T
     // Does NOT require `with Epistemic` — explicit uncertainty acknowledgment
@@ -10655,6 +10682,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 compile_observe_call_x86(name_tok)
                 return
             }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "sample_uniform") {
+                compile_sample_uniform_call_x86(name_tok)
+                return
+            }
             if src_match(ns, ne - ns, "acknowledge") {
                 compile_acknowledge_call_x86(name_tok)
                 return
@@ -12536,6 +12567,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // NaturalityG2 effect check (bit 20) — above & 1023 mask
                 if (FN_EFFECTS[fi as usize] & 1048576) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 1048576) == 0 {
                     tc_effect_call_violation(call_tok, 1048576, FN_EFFECTS[CURRENT_FN as usize])
+                }
+                // Sampling effect check (bit 21) — calling a `with Sampling` fn requires Sampling
+                if (FN_EFFECTS[fi as usize] & 2097152) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 2097152) == 0 {
+                    tc_effect_call_violation(call_tok, 2097152, FN_EFFECTS[CURRENT_FN as usize])
                 }
                 // E067: Causal confounding detection
                 // Calling an Observe function from a Causal function without Audit = potential confounding
@@ -20639,6 +20674,9 @@ fn ety_parse_effect_name(ns: i64, ne: i64) -> i64 with Panic, Mut {
     if l == 6 && sb(ns) == 65 && sb(ns + 1) == 112 && sb(ns + 2) == 112 && sb(ns + 3) == 114 && sb(ns + 4) == 111 && sb(ns + 5) == 120 { return 262144 }
     // Causal = bit 19 (524288) — causal inference effect
     if l == 6 && sb(ns) == 67 && sb(ns + 1) == 97 && sb(ns + 2) == 117 && sb(ns + 3) == 115 && sb(ns + 4) == 97 && sb(ns + 5) == 108 { return 524288 }
+    // Sampling = bit 21 (2097152) — function draws random samples (sample_uniform).
+    // Makes randomness visible at the type level (the previously-aspirational `Prob` effect).
+    if l == 8 && sb(ns) == 83 && sb(ns + 1) == 97 && sb(ns + 2) == 109 && sb(ns + 3) == 112 && sb(ns + 4) == 108 && sb(ns + 5) == 105 && sb(ns + 6) == 110 && sb(ns + 7) == 103 { return 2097152 }
     // NaturalityG2 = bit 20 (1048576) — homology functor F: C_dial → C_𝕆
     // is G₂-equivariant. Functions carrying this effect will emit a Lean
     // obligation at IR-emit time (deferred to M4). For now, declaring the
@@ -23600,6 +23638,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     p = 0
 
     GPU_EMU_THREAD_ID_BSS_OFF = bss_alloc_aligned(8)
+    SAMPLE_RNG_BSS_OFF = bss_alloc_aligned(8)
     GPU_RT_STATE_BSS_OFF = bss_alloc_aligned(8)
     GPU_RT_DIAG_BSS_OFF = bss_alloc_aligned(8)
     GPU_RT_LIBCUDA_HANDLE_BSS_OFF = bss_alloc_aligned(8)
@@ -26799,6 +26838,32 @@ fn compile_observe_call_a64(call_tok: i64) with IO, Mut, Panic, Div {
     EXPR_TY_HASH = k_hash
 }
 
+// sample_uniform() -> f64 in [0,1)  (ARM64 parity for Lane B native PRNG)
+// x9 holds &seed throughout; LCG step then (seed >>> 11) * 2^-53.
+fn compile_sample_uniform_call_a64(call_tok: i64) with IO, Mut, Panic, Div {
+    EP = EP + 1                                  // skip '('
+    if TK[EP as usize] == 7 { EP = EP + 1 }      // skip ')'
+    if (FN_EFFECTS[CURRENT_FN as usize] & 2097152) == 0 {
+        tc_effect_violation(call_tok, 2097152, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    emit_image_addr_reg_a64(9, GL_BSS_BASE + SAMPLE_RNG_BSS_OFF)  // x9 = &seed
+    em32(0xF9400120)                              // ldr x0, [x9]  (seed)
+    emit_imm64_reg_a64(1, 6364136223846793005)    // x1 = M
+    em32(0x9B017C00)                              // mul x0, x0, x1
+    emit_imm64_reg_a64(1, 1442695040888963407)     // x1 = C
+    em32(0x8B010000)                              // add x0, x0, x1
+    em32(0xF9000120)                              // str x0, [x9]
+    em32(0xD34BFC00)                              // lsr x0, x0, #11
+    em32(0x9E620000)                              // scvtf d0, x0
+    emit_imm64_reg_a64(1, 4368491638549381120)     // x1 = bits(2^-53)
+    em32(0x9E670021)                              // fmov d1, x1
+    em32(0x1E610800)                              // fmul d0, d0, d1
+    em32(0x9E660000)                              // fmov x0, d0
+    EXPR_IS_F64 = 1
+    EXPR_TY = 2
+    EXPR_TY_HASH = 0
+}
+
 fn compile_acknowledge_call_a64(call_tok: i64) with IO, Mut, Panic, Div {
     // acknowledge(k: Knowledge<T>, reason: String) -> T  (ARM64)
     // Does NOT require `with Epistemic` — explicit uncertainty acknowledgment
@@ -28088,6 +28153,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "observe") {
                 compile_observe_call_a64(name_tok)
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "sample_uniform") {
+                compile_sample_uniform_call_a64(name_tok)
                 return
             }
             if src_match(ns, ne - ns, "acknowledge") {
