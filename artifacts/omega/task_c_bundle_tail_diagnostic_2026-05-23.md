@@ -465,3 +465,38 @@ instrumentation to localize the `.head` base-type miss properly. Until then the
 
 Session unchanged at **338 type errors (5304→338, -94%)**; no source edits this
 round (instrumentation reverted, tree clean, binary = let-fix e254d3da).
+
+---
+
+## WARNING-LOOP FIXED (2026-05-24) → first clean complete measurement: 1392 errors
+
+Root: `compile_nested_field_store_x86/a64` warned "nested field store requires
+struct base" then `return`ed without advancing EP (the EP++ sat after the return).
+compile_stmt re-processed the same statement forever → ~63M warning repetitions at
+bundle line 119783, 126M-line output. Fix: skip to statement terminator
+(`while TK[EP] != 7 && != 0 { EP++ }`) before returning, both sites. Commits
+`15eb7d029` (source + binary, fixed point `dbd3d800`).
+
+**This unmasks the true error count — every prior number was truncated.** The loop
+saturated output, so all measurements (incl. the 5304 baseline and the 338 figure)
+were windows BEFORE line 119783. With the loop gone:
+- output 126M → **3809 lines** (fully capturable, no `head` cap needed)
+- warnings 63M → 31 (once per offending statement)
+- **errors: clean complete count = 1392**, spanning to line 177373 (was stuck ~119783)
+
+**Corrected baseline (clean, trustworthy) — 1392 by category:**
+E200 505 (of which "unknown identifier" 401), assignment-mismatch 200,
+**effect-not-declared 189**, Type-mismatch/E001 141, unknown-field 76,
+field-init 21, exhaustiveness 5, arity 5, misc 8.
+
+The earlier source/root fixes (let-const, TraitDef, ownership, deref, method names)
+were all real reductions in the measurable window and remain valid. But the honest
+state is: **the bundle has 1392 type errors, now cleanly measurable for the first
+time** (no segfault, no warning-loop, full output). The big remaining clusters
+(E200/unknown-identifier 505, effect-not-declared 189, assignment 200) are the real
+Task C tail — and several may have systematic roots now that they're visible
+(e.g. 189 effect-not-declared could share a root; 401 unknown-identifier may be more
+top-level consts in the previously-hidden region past line 119783).
+
+**Next session: measurement is now reliable.** Re-attack from the clean 1392 —
+start with effect-not-declared (189, likely 1-2 roots) and the now-visible E200s.
