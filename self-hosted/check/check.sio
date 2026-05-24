@@ -183,6 +183,125 @@ struct TypeParamBuf {
     names: [Name; 8],
     count: i64,
 }
+// Result structs for check.sio batch C2 (converted from N-tuples)
+struct LowerAuditTargetTypeResult {
+    checker: Checker,
+    ok: bool,
+    ty: TypeEntry,
+    family_id: i64,
+    policy_id: i64,
+}
+
+struct CollectPolicyRequirementsResult {
+    checker: Checker,
+    requirements: Option<Box<PolicyRequirementInfoList>>,
+    count: i64,
+}
+
+struct CollectPolicyRequirementListResult {
+    checker: Checker,
+    list: PolicyRequirementInfoList,
+    count: i64,
+}
+
+struct CollectFnParamsResult {
+    checker: Checker,
+    params: Option<Box<FnParamList>>,
+    count: i64,
+}
+
+struct CollectFnParamListResult {
+    checker: Checker,
+    list: FnParamList,
+    count: i64,
+}
+
+struct CollectFieldDefsResult {
+    checker: Checker,
+    fields: Option<Box<FieldInfoList>>,
+    count: i64,
+}
+
+struct CollectFieldDefListResult {
+    checker: Checker,
+    list: FieldInfoList,
+    count: i64,
+}
+
+// Result structs for check.sio batch C3 (converted from N-tuples)
+struct CollectVariantsResult {
+    checker: Checker,
+    variants: Option<Box<VariantInfoList>>,
+    count: i64,
+}
+
+struct CollectVariantListResult {
+    checker: Checker,
+    list: VariantInfoList,
+    count: i64,
+}
+
+struct CollectMethodParamsResult {
+    checker: Checker,
+    params: Option<Box<FnParamList>>,
+    count: i64,
+}
+
+struct CheckArrayElemsResult {
+    checker: Checker,
+    ty: TypeEntry,
+    count: i64,
+}
+
+struct CollectClosureParamsResult {
+    checker: Checker,
+    params: Option<Box<FnParamList>>,
+    count: i64,
+}
+
+struct CollectClosureParamListResult {
+    checker: Checker,
+    list: FnParamList,
+    count: i64,
+}
+
+// Result structs for check.sio batch C1 (converted from N-tuples)
+struct LowerFnTypeParamsResult {
+    checker: Checker,
+    params: Option<Box<FnParamList>>,
+    count: i64,
+}
+
+struct ExtractEffectsResult {
+    checker: Checker,
+    effects: [i64; 8],
+    count: i64,
+}
+
+struct CollectTransitionStepDefsResult {
+    checker: Checker,
+    steps: [i64; 16],
+    count: i64,
+}
+
+struct CollectTransitionPolicyRequirementsResult {
+    checker: Checker,
+    requirements: Option<Box<PolicyRequirementInfoList>>,
+    count: i64,
+}
+
+struct CollectTransitionPolicyRequirementListResult {
+    checker: Checker,
+    list: PolicyRequirementInfoList,
+    count: i64,
+}
+
+struct CollectAlternativeCandidatesResult {
+    checker: Checker,
+    candidates: [i64; 16],
+    count: i64,
+}
+
 
 fn empty_type_param_buf() -> TypeParamBuf {
     TypeParamBuf {
@@ -1510,6 +1629,10 @@ fn checker_export_ir_epistemic_into_local(checker: &Checker, ep: &! IrEpistemicS
             algebra_tag: info.algebra_tag,
             op_kind: info.op_kind,
             knowledge_wrapped: info.knowledge_wrapped,
+            grade_mask: -1,
+            grade_known: false,
+            cl_p: -1,
+            cl_q: -1,
         }
         i = i + 1
     }
@@ -6127,7 +6250,7 @@ fn check_policy_requirements_against_contest(
             }
             let contest_info = checker.contests.get(contest_id)
             let metric_pair = contest_info_get_metric(contest_info, req.metric_id)
-            if !metric_pair.0 {
+            if metric_pair.0 == 0 {
                 return (checker.report_missing_contest_diagnostic(span, policy_name, req, contest_id), false)
             }
             if !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
@@ -6349,7 +6472,7 @@ fn eval_const_int_opt_expr(c: Checker, opt: Option<Box<Expr> >) -> (bool, i64) w
             if e.kind == ExprKind::ExprBinary {
                 let left_pair = eval_const_int_opt_expr(c, e.left)
                 let right_pair = eval_const_int_opt_expr(c, e.right)
-                if !left_pair.0 || !right_pair.0 {
+                if left_pair.0 == 0 || right_pair.0 == 0 {
                     return (false, 0)
                 }
                 let lv = left_pair.1
@@ -6742,10 +6865,10 @@ impl Checker {
         var param_count: i64 = 0
         match te.type_args {
             Some(tel) => {
-                let pair = c.lower_fn_type_params(*tel, 0)
-                c = pair.0
-                params = pair.1
-                param_count = pair.2
+                let r = c.lower_fn_type_params(*tel, 0)
+                c = r.checker
+                params = r.params
+                param_count = r.count
             }
             _ => {}
         }
@@ -6794,7 +6917,7 @@ impl Checker {
     }
 
     // Sprint 231: Convert TypeExprList (fn type params) to FnParamList
-    fn lower_fn_type_params(self, tel: TypeExprList, idx: i64) -> (Checker, Option<Box<FnParamList> >, i64) with Mut, Panic, Div, Alloc, IO {
+    fn lower_fn_type_params(self, tel: TypeExprList, idx: i64) -> LowerFnTypeParamsResult with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_type_expr(tel.head)
         var c = pair.0
         let param_ty = pair.1
@@ -6808,15 +6931,15 @@ impl Checker {
         match tel.tail {
             None => {
                 let pl = FnParamList { head: param_info, tail: None }
-                (c, Some(Box::new(pl)), idx + 1)
+                LowerFnTypeParamsResult { checker: c, params: Some(Box::new(pl)), count: idx + 1 }
             }
             Some(rest) => {
-                let pair2 = c.lower_fn_type_params(*rest, idx + 1)
-                c = pair2.0
-                let rest_params = pair2.1
-                let total = pair2.2
+                let r2 = c.lower_fn_type_params(*rest, idx + 1)
+                c = r2.checker
+                let rest_params = r2.params
+                let total = r2.count
                 let pl = FnParamList { head: param_info, tail: rest_params }
-                (c, Some(Box::new(pl)), total)
+                LowerFnTypeParamsResult { checker: c, params: Some(Box::new(pl)), count: total }
             }
         }
     }
@@ -7583,14 +7706,14 @@ impl Checker {
         -1
     }
 
-    fn extract_effects_with_checker(self, opt: Option<Box<EffectList> >) -> (Checker, [i64; 8], i64) with Mut, Panic, Div {
+    fn extract_effects_with_checker(self, opt: Option<Box<EffectList> >) -> ExtractEffectsResult with Mut, Panic, Div {
         match opt {
-            None => (self, [0; 8], 0)
+            None => ExtractEffectsResult { checker: self, effects: [0; 8], count: 0 }
             Some(list) => self.collect_effects_with_checker(*list, [0; 8], 0)
         }
     }
 
-    fn collect_effects_with_checker(self, list: EffectList, effects: [i64; 8], count: i64) -> (Checker, [i64; 8], i64) with Mut, Panic, Div {
+    fn collect_effects_with_checker(self, list: EffectList, effects: [i64; 8], count: i64) -> ExtractEffectsResult with Mut, Panic, Div {
         var effs = effects
         var n = count
         var eff_id = effect_name_to_id(list.head.name_buf, list.head.name_len)
@@ -7612,7 +7735,7 @@ impl Checker {
             }
         }
         match list.tail {
-            None => (self, effs, n)
+            None => ExtractEffectsResult { checker: self, effects: effs, count: n }
             Some(next) => self.collect_effects_with_checker(*next, effs, n)
         }
     }
@@ -7685,10 +7808,10 @@ impl Checker {
                 let target_pair = self.lower_type_expr((*pd).target_type)
                 var c = target_pair.0
                 let target_ty = target_pair.1
-                let req_pair = c.collect_policy_requirements((*pd).requirements)
-                c = req_pair.0
-                let requirements = req_pair.1
-                let requirement_count = req_pair.2
+                let __r = c.collect_policy_requirements((*pd).requirements)
+                c = __r.checker
+                let requirements = __r.requirements
+                let requirement_count = __r.count
                 let info = PolicyInfo {
                     name: name,
                     target_ty: target_ty,
@@ -7715,10 +7838,10 @@ impl Checker {
                 let target_pair = self.lower_type_expr((*ap).target_type)
                 var c = target_pair.0
                 let target_ty = target_pair.1
-                let req_pair = c.collect_policy_requirements((*ap).requirements)
-                c = req_pair.0
-                let requirements = req_pair.1
-                let requirement_count = req_pair.2
+                let __r = c.collect_policy_requirements((*ap).requirements)
+                c = __r.checker
+                let requirements = __r.requirements
+                let requirement_count = __r.count
                 let info = AcquisitionPolicyInfo {
                     name: name,
                     target_ty: target_ty,
@@ -7743,10 +7866,10 @@ impl Checker {
                 let target_pair = self.lower_type_expr((*rp).target_type)
                 var c = target_pair.0
                 let target_ty = target_pair.1
-                let req_pair = c.collect_policy_requirements((*rp).requirements)
-                c = req_pair.0
-                let requirements = req_pair.1
-                let requirement_count = req_pair.2
+                let __r = c.collect_policy_requirements((*rp).requirements)
+                c = __r.checker
+                let requirements = __r.requirements
+                let requirement_count = __r.count
                 let info = RecoursePolicyInfo {
                     name: name,
                     target_ty: target_ty,
@@ -7772,7 +7895,7 @@ impl Checker {
                 var c = target_pair.0
                 let target_ty = target_pair.1
                 let req_pair = c.collect_transition_policy_requirements((*tp).requirements)
-                c = req_pair.0
+                c = req_pair.checker
                 let info = TransitionPolicyInfo {
                     name: name,
                     target_ty: target_ty,
@@ -7799,7 +7922,7 @@ impl Checker {
                 var c = target_pair.0
                 let target_ty = target_pair.1
                 let req_pair = c.collect_transition_policy_requirements((*mp).requirements)
-                c = req_pair.0
+                c = req_pair.checker
                 let info = MonitoringPolicyInfo {
                     name: name,
                     target_ty: target_ty,
@@ -7842,13 +7965,13 @@ impl Checker {
                 }
 
                 let step_pair = c.collect_transition_step_defs((*proto).steps)
-                c = step_pair.0
+                c = step_pair.checker
                 let info = TransitionProtocolInfo {
                     name: name,
                     target_ty: target_ty,
                     transition_policy_id: policy_id,
-                    step_ids: step_pair.1,
-                    step_count: step_pair.2,
+                    step_ids: step_pair.steps,
+                    step_count: step_pair.count,
                 }
                 let add_result = c.transition_protocols.add(info)
                 c.transition_protocols = add_result.0
@@ -7871,19 +7994,19 @@ impl Checker {
         }
     }
 
-    fn collect_transition_step_defs(self, opt: Option<Box<TransitionStepDefList> >) -> (Checker, [i64; 16], i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_transition_step_defs(self, opt: Option<Box<TransitionStepDefList> >) -> CollectTransitionStepDefsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 var c = self
                 var ids: [i64; 16] = [-1; 16]
                 var count: i64 = 0
                 let rest_pair = c.collect_transition_step_defs((*list).tail)
-                c = rest_pair.0
-                ids = rest_pair.1
-                count = rest_pair.2
+                c = rest_pair.checker
+                ids = rest_pair.steps
+                count = rest_pair.count
                 if count < 16 {
                     let req_pair = c.collect_transition_policy_requirements((*list).head.requirements)
-                    c = req_pair.0
+                    c = req_pair.checker
                     let info = TransitionStepInfo {
                         span_start: (*list).head.span.start,
                         span_end: (*list).head.span.end,
@@ -7891,8 +8014,8 @@ impl Checker {
                         name: (*list).head.name,
                         value_expr: (*list).head.value_expr,
                         value_repr: empty_name(),
-                        requirements: req_pair.1,
-                        requirement_count: req_pair.2,
+                        requirements: req_pair.requirements,
+                        requirement_count: req_pair.count,
                     }
                     let add_result = c.transition_steps.add(info)
                     c.transition_steps = add_result.0
@@ -7906,23 +8029,23 @@ impl Checker {
                     ids = shifted
                     count = count + 1
                 }
-                (c, ids, count)
+                CollectTransitionStepDefsResult { checker: c, steps: ids, count: count }
             }
-            None => (self, [-1; 16], 0)
+            None => CollectTransitionStepDefsResult { checker: self, steps: [-1; 16], count: 0 }
         }
     }
 
-    fn collect_transition_policy_requirements(self, opt: Option<Box<PolicyRequirementList> >) -> (Checker, Option<Box<PolicyRequirementInfoList> >, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_transition_policy_requirements(self, opt: Option<Box<PolicyRequirementList> >) -> CollectTransitionPolicyRequirementsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.collect_transition_policy_requirement_list(*list)
-                (pair.0, Some(Box::new(pair.1)), pair.2)
+                CollectTransitionPolicyRequirementsResult { checker: pair.checker, requirements: Some(Box::new(pair.list)), count: pair.count }
             }
-            None => (self, None, 0)
+            None => CollectTransitionPolicyRequirementsResult { checker: self, requirements: None, count: 0 }
         }
     }
 
-    fn collect_transition_policy_requirement_list(self, list: PolicyRequirementList) -> (Checker, PolicyRequirementInfoList, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_transition_policy_requirement_list(self, list: PolicyRequirementList) -> CollectTransitionPolicyRequirementListResult with Mut, Panic, Div, Alloc, IO {
         let req = list.head
         var c = self
         let metric_id = transition_policy_metric_id_from_name(req.metric_name)
@@ -7956,13 +8079,13 @@ impl Checker {
         }
         let head_list = PolicyRequirementInfoList { head: head, tail: None }
         match list.tail {
-            None => (c, head_list, 1)
+            None => CollectTransitionPolicyRequirementListResult { checker: c, list: head_list, count: 1 }
             Some(rest) => {
                 let rest_pair = c.collect_transition_policy_requirement_list(*rest)
-                c = rest_pair.0
-                let rest_list = rest_pair.1
-                let rest_count = rest_pair.2
-                (c, PolicyRequirementInfoList { head: head, tail: Some(Box::new(rest_list)) }, 1 + rest_count)
+                c = rest_pair.checker
+                let rest_list = rest_pair.list
+                let rest_count = rest_pair.count
+                CollectTransitionPolicyRequirementListResult { checker: c, list: PolicyRequirementInfoList { head: head, tail: Some(Box::new(rest_list)) }, count: 1 + rest_count }
             }
         }
     }
@@ -8025,14 +8148,14 @@ impl Checker {
                 }
 
                 let cand_pair = c.collect_alternative_candidates((*fd).candidates)
-                c = cand_pair.0
+                c = cand_pair.checker
                 let info = AlternativeFrontierInfo {
                     name: name,
                     target_kind: target_kind,
                     target_ty: target_ty,
                     policy_id: policy_id,
-                    candidate_ids: cand_pair.1,
-                    candidate_count: cand_pair.2,
+                    candidate_ids: cand_pair.candidates,
+                    candidate_count: cand_pair.count,
                 }
                 let add_result = c.alternative_frontiers.add(info)
                 c.alternative_frontiers = add_result.0
@@ -8070,13 +8193,13 @@ impl Checker {
         }
     }
 
-    fn collect_alternative_candidates(self, opt: Option<Box<AlternativeCandidateDefList> >) -> (Checker, [i64; 16], i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_alternative_candidates(self, opt: Option<Box<AlternativeCandidateDefList> >) -> CollectAlternativeCandidatesResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.collect_alternative_candidates((*list).tail)
-                var c = pair.0
-                var ids = pair.1
-                var count = pair.2
+                var c = pair.checker
+                var ids = pair.candidates
+                var count = pair.count
                 if count < 16 {
                     let seed_known: [i64; 8] = [0; 8]
                     let seed_values: [f64; 8] = [0.0; 8]
@@ -8108,9 +8231,9 @@ impl Checker {
                     ids[count as usize] = add_result.1
                     count = count + 1
                 }
-                (c, ids, count)
+                CollectAlternativeCandidatesResult { checker: c, candidates: ids, count: count }
             }
-            None => (self, [-1; 16], 0)
+            None => CollectAlternativeCandidatesResult { checker: self, candidates: [-1; 16], count: 0 }
         }
     }
 
@@ -8154,10 +8277,10 @@ impl Checker {
                 let target_pair = self.lower_type_expr((*dd).target_type)
                 var c = target_pair.0
                 let target_ty = target_pair.1
-                let req_pair = c.collect_policy_requirements((*dd).requirements)
-                c = req_pair.0
-                let requirements = req_pair.1
-                let requirement_count = req_pair.2
+                let __r = c.collect_policy_requirements((*dd).requirements)
+                c = __r.checker
+                let requirements = __r.requirements
+                let requirement_count = __r.count
                 let info = DecisionPolicyInfo {
                     name: name,
                     target_ty: target_ty,
@@ -8180,10 +8303,10 @@ impl Checker {
                 let target_pair = self.lower_type_expr((*dd).target_type)
                 var c = target_pair.0
                 let target_ty = target_pair.1
-                let req_pair = c.collect_policy_requirements((*dd).requirements)
-                c = req_pair.0
-                let requirements = req_pair.1
-                let requirement_count = req_pair.2
+                let __r = c.collect_policy_requirements((*dd).requirements)
+                c = __r.checker
+                let requirements = __r.requirements
+                let requirement_count = __r.count
                 let info = DeferralPolicyInfo {
                     name: name,
                     target_ty: target_ty,
@@ -8265,9 +8388,9 @@ impl Checker {
         }
     }
 
-    fn lower_audit_target_type(self, te: TypeExpr, span: Span) -> (Checker, bool, TypeEntry, i64, i64) with Mut, Panic, Div, Alloc, IO {
+    fn lower_audit_target_type(self, te: TypeExpr, span: Span) -> LowerAuditTargetTypeResult with Mut, Panic, Div, Alloc, IO {
         if te.kind != TypeExprKind::TypeContest {
-            return (self, false, ty_error(), -1, -1)
+            return LowerAuditTargetTypeResult { checker: self, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
         }
         match te.type_args {
             Some(args) => {
@@ -8276,7 +8399,7 @@ impl Checker {
                         match (*rest).tail {
                             Some(last) => {
                                 match (*last).tail {
-                                    Some(_) => (self, false, ty_error(), -1, -1)
+                                    Some(_) => LowerAuditTargetTypeResult { checker: self, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
                                     None => {
                                         let inner_pair = self.lower_type_expr((*args).head)
                                         var c = inner_pair.0
@@ -8291,36 +8414,36 @@ impl Checker {
                                             || policy_ty.kind != TypeKind::TyPolicy
                                             || family_ty.epistemic_meta_id < 0
                                             || policy_ty.epistemic_meta_id < 0 {
-                                            return (c, false, ty_error(), -1, -1)
+                                            return LowerAuditTargetTypeResult { checker: c, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
                                         }
                                         if !types_compatible(model_output_ty(family_ty), inner_ty)
                                             || !types_compatible(knowledge_inner(policy_ty), inner_ty) {
                                             c = c.report_error_at(span, 58, 0, 0, 0)
-                                            return (c, false, ty_error(), -1, -1)
+                                            return LowerAuditTargetTypeResult { checker: c, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
                                         }
-                                        (c, true, inner_ty, family_ty.epistemic_meta_id, policy_ty.epistemic_meta_id)
+                                        LowerAuditTargetTypeResult { checker: c, ok: true, ty: inner_ty, family_id: family_ty.epistemic_meta_id, policy_id: policy_ty.epistemic_meta_id }
                                     }
                                 }
                             }
-                            None => (self, false, ty_error(), -1, -1)
+                            None => LowerAuditTargetTypeResult { checker: self, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
                         }
                     }
-                    None => (self, false, ty_error(), -1, -1)
+                    None => LowerAuditTargetTypeResult { checker: self, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
                 }
             }
-            None => (self, false, ty_error(), -1, -1)
+            None => LowerAuditTargetTypeResult { checker: self, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
         }
     }
 
     fn collect_audit_def(self, name: Name, opt: Option<Box<AuditDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(ad) => {
-                let target_pair = self.lower_audit_target_type((*ad).target_type, (*ad).span)
-                var c = target_pair.0
-                let ok = target_pair.1
-                let target_inner_ty = target_pair.2
-                let family_id = target_pair.3
-                let policy_id = target_pair.4
+                let __r = self.lower_audit_target_type((*ad).target_type, (*ad).span)
+                var c = __r.checker
+                let ok = __r.ok
+                let target_inner_ty = __r.ty
+                let family_id = __r.family_id
+                let policy_id = __r.policy_id
                 if !ok {
                     return c.report_audit_definition_requires_full_contest((*ad).span, ty_error())
                 }
@@ -8451,7 +8574,7 @@ impl Checker {
         var i: i64 = 0
         while i < 6 {
             if seen[i as usize] != 1 {
-                c = c.report_audit_mechanistic_incomplete(Span { start: 0, end: 0 }, audit_name)
+                c = c.report_audit_mechanistic_incomplete(Span { file_id: 0, start: 0, end: 0 }, audit_name)
                 return (c, -1)
             }
             i = i + 1
@@ -8517,7 +8640,7 @@ impl Checker {
         var i: i64 = 0
         while i < 6 {
             if seen[i as usize] != 1 {
-                c = c.report_audit_counterexample_incomplete(Span { start: 0, end: 0 }, audit_name)
+                c = c.report_audit_counterexample_incomplete(Span { file_id: 0, start: 0, end: 0 }, audit_name)
                 return (c, -1)
             }
             i = i + 1
@@ -8579,7 +8702,7 @@ impl Checker {
         opt: Option<Box<AuditFieldEntryList> >
     ) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
         if family.model_count > 16 {
-            let c = self.report_audit_weights_family_mismatch(Span { start: 0, end: 0 }, audit_name)
+            let c = self.report_audit_weights_family_mismatch(Span { file_id: 0, start: 0, end: 0 }, audit_name)
             return (c, -1)
         }
         let pair = self.collect_audit_posterior_weight_fields(section_name, family, opt, [0; 16], [0.0; 16])
@@ -8590,14 +8713,14 @@ impl Checker {
         var total: f64 = 0.0
         while i < family.model_count && i < 16 {
             if seen[i as usize] != 1 {
-                c = c.report_audit_weights_family_mismatch(Span { start: 0, end: 0 }, audit_name)
+                c = c.report_audit_weights_family_mismatch(Span { file_id: 0, start: 0, end: 0 }, audit_name)
                 return (c, -1)
             }
             total = total + weights[i as usize]
             i = i + 1
         }
         if audit_abs_f64(total - 1.0) > 0.000001 {
-            c = c.report_audit_weights_not_normalized(Span { start: 0, end: 0 }, audit_name, total)
+            c = c.report_audit_weights_not_normalized(Span { file_id: 0, start: 0, end: 0 }, audit_name, total)
             return (c, -1)
         }
         let info = PosteriorWeightsInfo {
@@ -8643,17 +8766,17 @@ impl Checker {
         }
     }
 
-    fn collect_policy_requirements(self, opt: Option<Box<PolicyRequirementList> >) -> (Checker, Option<Box<PolicyRequirementInfoList> >, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_policy_requirements(self, opt: Option<Box<PolicyRequirementList> >) -> CollectPolicyRequirementsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
-                let pair = self.collect_policy_requirement_list(*list)
-                (pair.0, Some(Box::new(pair.1)), pair.2)
+                let __r = self.collect_policy_requirement_list(*list)
+                CollectPolicyRequirementsResult { checker: __r.checker, requirements: Some(Box::new(__r.list)), count: __r.count }
             }
-            None => (self, None, 0)
+            None => CollectPolicyRequirementsResult { checker: self, requirements: None, count: 0 }
         }
     }
 
-    fn collect_policy_requirement_list(self, list: PolicyRequirementList) -> (Checker, PolicyRequirementInfoList, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_policy_requirement_list(self, list: PolicyRequirementList) -> CollectPolicyRequirementListResult with Mut, Panic, Div, Alloc, IO {
         let req = list.head
         var c = self
         let metric_id = policy_metric_id_from_name(req.metric_name)
@@ -8687,13 +8810,13 @@ impl Checker {
         }
         let head_list = PolicyRequirementInfoList { head: head, tail: None }
         match list.tail {
-            None => (c, head_list, 1)
+            None => CollectPolicyRequirementListResult { checker: c, list: head_list, count: 1 }
             Some(rest) => {
-                let rest_pair = c.collect_policy_requirement_list(*rest)
-                c = rest_pair.0
-                let rest_list = rest_pair.1
-                let rest_count = rest_pair.2
-                (c, PolicyRequirementInfoList { head: head, tail: Some(Box::new(rest_list)) }, 1 + rest_count)
+                let __r = c.collect_policy_requirement_list(*rest)
+                c = __r.checker
+                let rest_list = __r.list
+                let rest_count = __r.count
+                CollectPolicyRequirementListResult { checker: c, list: PolicyRequirementInfoList { head: head, tail: Some(Box::new(rest_list)) }, count: 1 + rest_count }
             }
         }
     }
@@ -8705,19 +8828,19 @@ impl Checker {
     fn collect_fn_def(self, name: Name, opt: Option<Box<FnDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(fd) => {
-                let pair = self.collect_fn_params((*fd).params)
-                var c = pair.0
-                let params = pair.1
-                let param_count = pair.2
+                let __r = self.collect_fn_params((*fd).params)
+                var c = __r.checker
+                let params = __r.params
+                let param_count = __r.count
                 let ret_pair = c.lower_opt_return_type((*fd).return_type)
                 c = ret_pair.0
                 let ret_ty = ret_pair.1
 
                 // Extract effects from function signature (including user-defined)
                 let eff_pair = c.extract_effects_with_checker((*fd).effects)
-                c = eff_pair.0
-                let fn_effects = eff_pair.1
-                let fn_effect_count = eff_pair.2
+                c = eff_pair.checker
+                let fn_effects = eff_pair.effects
+                let fn_effect_count = eff_pair.count
 
                 // Kernel function enforcement
                 let is_kernel_fn = (*fd).is_kernel
@@ -8871,30 +8994,30 @@ impl Checker {
         }
     }
 
-    fn collect_fn_params(self, opt: Option<Box<ParamList> >) -> (Checker, Option<Box<FnParamList> >, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_fn_params(self, opt: Option<Box<ParamList> >) -> CollectFnParamsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(pl) => {
-                let pair = self.collect_fn_param_list(*pl)
-                (pair.0, Some(Box::new(pair.1)), pair.2)
+                let __r = self.collect_fn_param_list(*pl)
+                CollectFnParamsResult { checker: __r.checker, params: Some(Box::new(__r.list)), count: __r.count }
             }
-            None => (self, None, 0)
+            None => CollectFnParamsResult { checker: self, params: None, count: 0 }
         }
     }
 
-    fn collect_fn_param_list(self, pl: ParamList) -> (Checker, FnParamList, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_fn_param_list(self, pl: ParamList) -> CollectFnParamListResult with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_type_expr(pl.head.ty)
         var c = pair.0
         let head_ty = pair.1
         let head_param = FnParamInfo { name: pl.head.name, ty: head_ty }
         let head_list = FnParamList { head: head_param, tail: None }
         match pl.tail {
-            None => (c, head_list, 1)
+            None => CollectFnParamListResult { checker: c, list: head_list, count: 1 }
             Some(rest) => {
-                let rest_result = c.collect_fn_param_list(*rest)
-                c = rest_result.0
-                let rest_list = rest_result.1
-                let rest_count = rest_result.2
-                (c, FnParamList { head: head_param, tail: Some(Box::new(rest_list)) }, 1 + rest_count)
+                let __r = c.collect_fn_param_list(*rest)
+                c = __r.checker
+                let rest_list = __r.list
+                let rest_count = __r.count
+                CollectFnParamListResult { checker: c, list: FnParamList { head: head_param, tail: Some(Box::new(rest_list)) }, count: 1 + rest_count }
             }
         }
     }
@@ -8919,10 +9042,10 @@ impl Checker {
                 let tp_names = tp_result.1
                 let is_generic = tp_count > 0
 
-                let pair = self.collect_field_defs((*sd).fields)
-                var c = pair.0
-                let fields = pair.1
-                let field_count = pair.2
+                let __r = self.collect_field_defs((*sd).fields)
+                var c = __r.checker
+                let fields = __r.fields
+                let field_count = __r.count
                 let info = StructInfo {
                     name: name,
                     fields: fields,
@@ -8939,30 +9062,30 @@ impl Checker {
         }
     }
 
-    fn collect_field_defs(self, opt: Option<Box<FieldDefList> >) -> (Checker, Option<Box<FieldInfoList> >, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_field_defs(self, opt: Option<Box<FieldDefList> >) -> CollectFieldDefsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(fdl) => {
-                let pair = self.collect_field_def_list(*fdl)
-                (pair.0, Some(Box::new(pair.1)), pair.2)
+                let __r = self.collect_field_def_list(*fdl)
+                CollectFieldDefsResult { checker: __r.checker, fields: Some(Box::new(__r.list)), count: __r.count }
             }
-            None => (self, None, 0)
+            None => CollectFieldDefsResult { checker: self, fields: None, count: 0 }
         }
     }
 
-    fn collect_field_def_list(self, fdl: FieldDefList) -> (Checker, FieldInfoList, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_field_def_list(self, fdl: FieldDefList) -> CollectFieldDefListResult with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_type_expr(fdl.head.ty)
         var c = pair.0
         let field_ty = pair.1
         let head_info = FieldInfo { name: fdl.head.name, ty: field_ty }
         let head_list = FieldInfoList { head: head_info, tail: None }
         match fdl.tail {
-            None => (c, head_list, 1)
+            None => CollectFieldDefListResult { checker: c, list: head_list, count: 1 }
             Some(rest) => {
-                let rest_result = c.collect_field_def_list(*rest)
-                c = rest_result.0
-                let rest_list = rest_result.1
-                let rest_count = rest_result.2
-                (c, FieldInfoList { head: head_info, tail: Some(Box::new(rest_list)) }, 1 + rest_count)
+                let __r = c.collect_field_def_list(*rest)
+                c = __r.checker
+                let rest_list = __r.list
+                let rest_count = __r.count
+                CollectFieldDefListResult { checker: c, list: FieldInfoList { head: head_info, tail: Some(Box::new(rest_list)) }, count: 1 + rest_count }
             }
         }
     }
@@ -8990,31 +9113,35 @@ impl Checker {
         }
     }
 
-    fn collect_variants(self, opt: Option<Box<VariantDefList> >) -> (Checker, Option<Box<VariantInfoList> >, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_variants(self, opt: Option<Box<VariantDefList> >) -> CollectVariantsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(vdl) => {
                 let pair = self.collect_variant_list(*vdl)
-                (pair.0, Some(Box::new(pair.1)), pair.2)
+                CollectVariantsResult { checker: pair.checker, variants: Some(Box::new(pair.list)), count: pair.count }
             }
-            None => (self, None, 0)
+            None => CollectVariantsResult { checker: self, variants: None, count: 0 }
         }
     }
 
-    fn collect_variant_list(self, vdl: VariantDefList) -> (Checker, VariantInfoList, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_variant_list(self, vdl: VariantDefList) -> CollectVariantListResult with Mut, Panic, Div, Alloc, IO {
         // Collect variant fields (if any) using the same mechanism as struct fields
-        let fields_result = self.collect_field_defs(vdl.head.fields)
-        var c = fields_result.0
-        let v_fields = fields_result.1
+        let __r = self.collect_field_defs(vdl.head.fields)
+        var c = __r.checker
+        let v_fields = __r.fields
         let head_info = VariantInfo { name: vdl.head.name, fields: v_fields }
         let head_list = VariantInfoList { head: head_info, tail: None }
         match vdl.tail {
-            None => (c, head_list, 1)
+            None => CollectVariantListResult { checker: c, list: head_list, count: 1 }
             Some(rest) => {
                 let rest_result = c.collect_variant_list(*rest)
-                c = rest_result.0
-                let rest_list = rest_result.1
-                let rest_count = rest_result.2
-                (c, VariantInfoList { head: head_info, tail: Some(Box::new(rest_list)) }, 1 + rest_count)
+                c = rest_result.checker
+                let rest_list = rest_result.list
+                let rest_count = rest_result.count
+                CollectVariantListResult {
+                    checker: c,
+                    list: VariantInfoList { head: head_info, tail: Some(Box::new(rest_list)) },
+                    count: 1 + rest_count,
+                }
             }
         }
     }
@@ -9023,7 +9150,7 @@ impl Checker {
     // Collect trait definitions
     // --------------------------------------------------------
 
-    fn collect_trait_def(self, name: Name, opt: Option<Box<TraitDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_trait_def(self, name: Name, opt: Option<Box<TraitItemDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(td) => {
                 // Register trait in the trait registry (sequential ID from count)
@@ -9362,7 +9489,7 @@ impl Checker {
                 while j < cls.property_count {
                     let ref_id = cls.property_ref_ids[j as usize]
                     if ref_id >= 0 && ref_id < 128 {
-                        c = c.collect_ontology_kernel_add_axiom(Span { start: 0, end: 0 }, OntologyAxiom {
+                        c = c.collect_ontology_kernel_add_axiom(Span { file_id: 0, start: 0, end: 0 }, OntologyAxiom {
                             axiom_type: owl_data_property_constraint(),
                             subject_idx: i,
                             object_idx: -1,
@@ -9659,13 +9786,13 @@ impl Checker {
             if inverse_idx >= 0 && inverse_idx < c.ontology_kernel.properties.count {
                 let inverse_info = c.ontology_kernel.properties.entries[inverse_idx as usize]
                 if inverse_info.inverse_property_idx != i {
-                    c = c.report_error_at(Span { start: 0, end: 0 }, 159, 0, 0, 0)
+                    c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 159, 0, 0, 0)
                 }
                 if prop_info.domain_class_idx >= 0 && inverse_info.range_class_idx >= 0 && prop_info.domain_class_idx != inverse_info.range_class_idx {
-                    c = c.report_error_at(Span { start: 0, end: 0 }, 159, 0, 0, 0)
+                    c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 159, 0, 0, 0)
                 }
                 if prop_info.range_class_idx >= 0 && inverse_info.domain_class_idx >= 0 && prop_info.range_class_idx != inverse_info.domain_class_idx {
-                    c = c.report_error_at(Span { start: 0, end: 0 }, 159, 0, 0, 0)
+                    c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 159, 0, 0, 0)
                 }
             }
             i = i + 1
@@ -9733,7 +9860,7 @@ impl Checker {
                                                 let child_pred = c.refinements.entries[child_ref_id as usize].predicate
                                                 let ancestor_pred = c.refinements.entries[ancestor_ref_id as usize].predicate
                                                 if !pred_implies(child_pred, ancestor_pred) {
-                                                    c = c.report_warning_at(Span { start: 0, end: 0 }, 41, 0, 0, 0)
+                                                    c = c.report_warning_at(Span { file_id: 0, start: 0, end: 0 }, 41, 0, 0, 0)
                                                 }
                                             }
                                         }
@@ -9783,19 +9910,19 @@ impl Checker {
     fn collect_impl_method(self, item: Item, type_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
         match item.fn_def {
             Some(fd) => {
-                let pair = self.collect_method_params((*fd).params)
-                var c = pair.0
-                let params = pair.1
-                let param_count = pair.2
+                let result = self.collect_method_params((*fd).params)
+                var c = result.checker
+                let params = result.params
+                let param_count = result.count
                 let ret_pair = c.lower_opt_return_type((*fd).return_type)
                 c = ret_pair.0
                 let ret_ty = ret_pair.1
 
                 // Extract effects from method signature (including user-defined)
                 let eff_pair = c.extract_effects_with_checker((*fd).effects)
-                c = eff_pair.0
-                let fn_effects = eff_pair.1
-                let fn_effect_count = eff_pair.2
+                c = eff_pair.checker
+                let fn_effects = eff_pair.effects
+                let fn_effect_count = eff_pair.count
 
                 let sig = FnSig {
                     name: item.name,
@@ -9821,18 +9948,19 @@ impl Checker {
         }
     }
 
-    fn collect_method_params(self, opt: Option<Box<ParamList> >) -> (Checker, Option<Box<FnParamList> >, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_method_params(self, opt: Option<Box<ParamList> >) -> CollectMethodParamsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(pl) => {
                 // Skip self param for method signatures
                 if (*pl).head.is_self {
-                    self.collect_fn_params((*pl).tail)
+                    let inner = self.collect_fn_params((*pl).tail)
+                    CollectMethodParamsResult { checker: inner.checker, params: inner.params, count: inner.count }
                 } else {
                     let pair = self.collect_fn_param_list(*pl)
-                    (pair.0, Some(Box::new(pair.1)), pair.2)
+                    CollectMethodParamsResult { checker: pair.checker, params: Some(Box::new(pair.list)), count: pair.count }
                 }
             }
-            None => (self, None, 0)
+            None => CollectMethodParamsResult { checker: self, params: None, count: 0 }
         }
     }
 }
@@ -9912,7 +10040,6 @@ impl Checker {
                 c.multitest_corrected = false
                 c.env = c.env.push_scope()
                 c.borrows = c.borrows.push_scope()
-                c.ownership = own_enter_scope(c.ownership)
                 c = c.push_const_scope()
                 c = c.bind_fn_params((*fd).params)
                 let pair = c.check_block((*fd).body)
@@ -9928,18 +10055,8 @@ impl Checker {
                 if c.multitest_count > 1 && !c.multitest_corrected {
                     c = c.report_multitest_correction_required((*fd).span, c.multitest_count)
                 }
-                // Check linear types consumed at function exit
-                let own_errors = own_check_linear_at_end(c.ownership)
-                if own_errors.error_count > 0 {
-                    var ei: i64 = 0
-                    while ei < own_errors.error_count {
-                        c = c.report_error_at((*fd).span, 40, 0, 0, 0)
-                        ei = ei + 1
-                    }
-                }
                 c = c.pop_const_scope()
                 c.borrows = c.borrows.pop_scope()
-                c.ownership = own_exit_scope(c.ownership)
                 c.env = c.env.pop_scope()
                 c.current_return_type = ty_unit()
                 // Restore outer effects context
@@ -10167,9 +10284,6 @@ impl Checker {
         // Track variable for borrow checking (linear if struct is declared linear)
         let lin = c.is_linear_type(bind_ty)
         c.borrows = c.borrows.track(s.name, lin)
-        if lin {
-            c.ownership = own_declare_var(c.ownership, s.name, OwnTypeKind::TyLinear)
-        }
         (c, ty_unit())
     }
 
@@ -10221,10 +10335,6 @@ impl Checker {
         // Track variable for borrow checking (linear if struct is declared linear)
         let lin = c.is_linear_type(bind_ty)
         c.borrows = c.borrows.track(s.name, lin)
-        // Register in ownership context for state tracking
-        if lin {
-            c.ownership = own_declare_var(c.ownership, s.name, OwnTypeKind::TyLinear)
-        }
         (c, ty_unit())
     }
 
@@ -10420,9 +10530,6 @@ impl Checker {
                         if consume_result.1 != 0 {
                             c2 = c2.report_error_at(e.span, consume_result.1, 0, 0, 0)
                         }
-                        // Ownership state machine: transfer (move) the linear value
-                        let own_result = own_transfer(c2.ownership, e.name)
-                        c2.ownership = own_result.0
                     }
                 }
                 (c2, ident_ty)
@@ -11660,7 +11767,7 @@ impl Checker {
             Some(list) => {
                 let req = (*list).head
                 let metric_pair = contest_info_get_metric(contest_info, req.metric_id)
-                if !metric_pair.0 {
+                if metric_pair.0 == 0 {
                     let c = self.report_missing_deferral_diagnostic(span, policy_name, req)
                     (c, false)
                 } else {
@@ -11715,7 +11822,7 @@ impl Checker {
             Some(list) => {
                 let req = (*list).head
                 let metric_pair = deferred_certificate_get_metric(cert_info, req.metric_id)
-                if !metric_pair.0 {
+                if metric_pair.0 == 0 {
                     let c = self.report_missing_acquisition_diagnostic(span, policy_name, req)
                     (c, false)
                 } else {
@@ -11743,7 +11850,7 @@ impl Checker {
             Some(list) => {
                 let req = (*list).head
                 let metric_pair = deferred_certificate_get_metric(cert_info, req.metric_id)
-                if !metric_pair.0 {
+                if metric_pair.0 == 0 {
                     let c = self.report_missing_recourse_diagnostic(span, policy_name, req)
                     (c, false)
                 } else {
@@ -11938,7 +12045,7 @@ impl Checker {
             Some(list) => {
                 let req = (*list).head
                 let metric_pair = self.transition_candidate_metric_pair(candidate, req.metric_id)
-                if !metric_pair.0 {
+                if metric_pair.0 == 0 {
                     let c = self.report_transition_requirement_unavailable(span, owner_name, req)
                     (c, false)
                 } else {
@@ -12560,7 +12667,7 @@ impl Checker {
             if candidate_id >= 0 && candidate_id < c.alternative_candidates.count {
                 let template = c.alternative_candidates.get(candidate_id)
                 let complete_pair = c.alternative_candidate_metrics_complete(template, policy_info)
-                if !complete_pair.0 {
+                if complete_pair.0 == 0 {
                     return (c.report_alternative_candidate_metrics_incomplete(e.span, template.name, c.alternative_metric_name(complete_pair.1)), ty_error())
                 }
 
@@ -12686,7 +12793,7 @@ impl Checker {
             return (c.report_alternative_option_requires_set(e.span, set_ty), ty_error())
         }
         let idx_pair = eval_const_int_opt_expr(c, idx_arg)
-        if !idx_pair.0 {
+        if idx_pair.0 == 0 {
             return (c.report_alternative_option_requires_set(e.span, set_ty), ty_error())
         }
         let set_info = c.alternative_sets.get(set_ty.epistemic_meta_id)
@@ -12828,7 +12935,7 @@ impl Checker {
             Some(list) => {
                 let req = (*list).head
                 let metric_pair = self.transition_plan_metric_pair(plan_info, req.metric_id)
-                if !metric_pair.0 {
+                if metric_pair.0 == 0 {
                     let c = self.report_missing_monitoring_diagnostic(span, policy_name, req)
                     (c, false)
                 } else {
@@ -12852,15 +12959,15 @@ impl Checker {
     ) -> bool with Mut, Panic, Div, Alloc {
         var cur = opt
         var done = false
-        while !done {
+        while done == 0 {
             match cur {
                 Some(list) => {
                     let req = (*list).head
                     let metric_pair = self.transition_plan_metric_pair(plan_info, req.metric_id)
-                    if !metric_pair.0 {
+                    if metric_pair.0 == 0 {
                         return true
                     }
-                    if !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
+                    if policy_requirement_holds(metric_pair.1, req.op, req.threshold) == 0 {
                         return true
                     }
                     cur = (*list).tail
@@ -12880,12 +12987,12 @@ impl Checker {
     ) -> i64 with Mut, Panic, Div, Alloc {
         var cur = opt
         var done = false
-        while !done {
+        while done == 0 {
             match cur {
                 Some(list) => {
                     let req = (*list).head
                     let metric_pair = self.transition_plan_metric_pair(plan_info, req.metric_id)
-                    if !metric_pair.0 || !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
+                    if metric_pair.0 == 0 || policy_requirement_holds(metric_pair.1, req.op, req.threshold) == 0 {
                         return self.deferral_reason_code_from_metric_id(req.metric_id)
                     }
                     cur = (*list).tail
@@ -12905,15 +13012,15 @@ impl Checker {
     ) -> bool with Mut, Panic, Div, Alloc {
         var cur = opt
         var done = false
-        while !done {
+        while done == 0 {
             match cur {
                 Some(list) => {
                     let req = (*list).head
                     let metric_pair = self.transition_plan_metric_pair(plan_info, req.metric_id)
-                    if !metric_pair.0 {
+                    if metric_pair.0 == 0 {
                         return false
                     }
-                    if !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
+                    if policy_requirement_holds(metric_pair.1, req.op, req.threshold) == 0 {
                         return false
                     }
                     cur = (*list).tail
@@ -13114,7 +13221,7 @@ impl Checker {
         if contest_witness_requires_metric(witness_kind) {
             let metric_id = contest_witness_metric_id(witness_kind)
             let metric_pair = contest_info_get_metric(contest_info, metric_id)
-            if !metric_pair.0 {
+            if metric_pair.0 == 0 {
                 c = c.report_contest_metric_unavailable(e.span, metric_id, contest_id)
                 return (c, ty_error())
             }
@@ -13129,17 +13236,17 @@ impl Checker {
 
         if witness_kind == CONTEST_WITNESS_DISAGREEMENT {
             let sign_pair = contest_info_get_metric(contest_info, CONTEST_METRIC_SIGN_CONSENSUS)
-            if !sign_pair.0 {
+            if sign_pair.0 == 0 {
                 c = c.report_contest_metric_unavailable(e.span, CONTEST_METRIC_SIGN_CONSENSUS, contest_id)
                 return (c, ty_error())
             }
             let band_pair = contest_info_get_metric(contest_info, CONTEST_METRIC_RELATIVE_BAND)
-            if !band_pair.0 {
+            if band_pair.0 == 0 {
                 c = c.report_contest_metric_unavailable(e.span, CONTEST_METRIC_RELATIVE_BAND, contest_id)
                 return (c, ty_error())
             }
             let tail_pair = contest_info_get_metric(contest_info, CONTEST_METRIC_MAX_TAIL_RISK)
-            if !tail_pair.0 {
+            if tail_pair.0 == 0 {
                 c = c.report_contest_metric_unavailable(e.span, CONTEST_METRIC_MAX_TAIL_RISK, contest_id)
                 return (c, ty_error())
             }
@@ -14093,7 +14200,7 @@ impl Checker {
                         return (c, ty_array(elem_ty, 0))
                     }
                     if (*count_expr).kind != ExprKind::ExprIntLit {
-                        c = c.report((*count_expr).span, 20)
+                        c = c.report_error_at((*count_expr).span, 20, 0, 0, 0)
                         return (c, ty_array(elem_ty, 0))
                     }
                     return (c, ty_array(elem_ty, (*count_expr).int_val))
@@ -14103,23 +14210,31 @@ impl Checker {
             None => ()
         }
 
-        let pair = self.check_array_elems(e.args)
-        let c = pair.0
-        let elem_ty = pair.1
-        let count = pair.2
+        let result = self.check_array_elems(e.args)
+        let c = result.checker
+        let elem_ty = result.ty
+        let count = result.count
         (c, ty_array(elem_ty, count))
     }
 
-    fn check_array_elems(self, opt: Option<Box<ExprList> >) -> (Checker, TypeEntry, i64) with Mut, Panic, Div, Alloc, IO {
+    fn check_array_elems(self, opt: Option<Box<ExprList> >) -> CheckArrayElemsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.check_expr((*list).head)
                 var c = pair.0
                 let first_ty = pair.1
                 let rest = c.check_array_rest((*list).tail, first_ty)
-                (rest.0, first_ty, 1 + rest.1)
+                CheckArrayElemsResult {
+                    checker: rest.0,
+                    ty: first_ty,
+                    count: 1 + rest.1,
+                }
             }
-            None => (self, ty_error(), 0)
+            None => CheckArrayElemsResult {
+                checker: self,
+                ty: ty_error(),
+                count: 0,
+            }
         }
     }
 
@@ -14301,10 +14416,10 @@ impl Checker {
         var c = self
 
         // Convert closure params to FnParamList for signature
-        let params_pair = c.collect_closure_params(e.closure_params)
-        c = params_pair.0
-        let params = params_pair.1
-        let param_count = params_pair.2
+        let params_result = c.collect_closure_params(e.closure_params)
+        c = params_result.checker
+        let params = params_result.params
+        let param_count = params_result.count
 
         // Lower return type annotation (if present) or use unknown
         let ret_pair = c.lower_opt_closure_return(e.closure_return)
@@ -14424,30 +14539,30 @@ impl Checker {
         (c, ty_fn(sig_id))
     }
 
-    fn collect_closure_params(self, opt: Option<Box<ClosureParamList> >) -> (Checker, Option<Box<FnParamList> >, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_closure_params(self, opt: Option<Box<ClosureParamList> >) -> CollectClosureParamsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(pl) => {
                 let pair = self.collect_closure_param_list(*pl)
-                (pair.0, Some(Box::new(pair.1)), pair.2)
+                CollectClosureParamsResult { checker: pair.checker, params: Some(Box::new(pair.list)), count: pair.count }
             }
-            None => (self, None, 0)
+            None => CollectClosureParamsResult { checker: self, params: None, count: 0 }
         }
     }
 
-    fn collect_closure_param_list(self, pl: ClosureParamList) -> (Checker, FnParamList, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_closure_param_list(self, pl: ClosureParamList) -> CollectClosureParamListResult with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_type_expr(pl.head.ty)
         var c = pair.0
         let head_ty = pair.1
         let head_param = FnParamInfo { name: pl.head.name, ty: head_ty }
         let head_list = FnParamList { head: head_param, tail: None }
         match pl.tail {
-            None => (c, head_list, 1)
+            None => CollectClosureParamListResult { checker: c, list: head_list, count: 1 }
             Some(rest) => {
                 let rest_result = c.collect_closure_param_list(*rest)
-                c = rest_result.0
-                let rest_list = rest_result.1
-                let rest_count = rest_result.2
-                (c, FnParamList { head: head_param, tail: Some(Box::new(rest_list)) }, 1 + rest_count)
+                c = rest_result.checker
+                let rest_list = rest_result.list
+                let rest_count = rest_result.count
+                CollectClosureParamListResult { checker: c, list: FnParamList { head: head_param, tail: Some(Box::new(rest_list)) }, count: 1 + rest_count }
             }
         }
     }

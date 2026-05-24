@@ -668,6 +668,16 @@ fn st_find(hash: i64) -> i64 with Panic, Mut {
     return -1
 }
 
+// Disambiguator added to tuple encoded hashes so distinct structs sharing
+// the same (nslots, f64) shape produce distinct cache keys. The perturbation
+// lives in bits 30..56 (multiple of 1_000_000_000), so existing `% 1000`,
+// `% 1_000_000`, `/ 1_000_000 % 10`, `/ 10_000_000 % 10` decode patterns
+// keep recovering the original nslots/f64 fields unchanged.
+fn tup_perturbation(first_hash: i64, last_hash: i64) -> i64 with Mut {
+    let mix = (first_hash * 1103515245 + last_hash * 2654435761) & 134217727
+    mix * 1000000000
+}
+
 fn tup_cache_register(tup_hash: i64, first_ty: i64, first_hash: i64, last_ty: i64, last_hash: i64) with Panic, Mut {
     if tup_hash == 0 { return }
     var i: i64 = 0
@@ -4507,7 +4517,9 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         let total_nslots = first_nslots + last_nslots
         SCAN_TY = 6
         // Hash: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
-        SCAN_TY_HASH = tcount * 100000000 + first_f64 * 10000000 + last_f64 * 1000000 + first_nslots * 1000 + total_nslots
+        // + element-hash perturbation in bits >=30 (multiple of 1B) so cache keys
+        // disambiguate same-shape tuples whose element types differ.
+        SCAN_TY_HASH = tcount * 100000000 + first_f64 * 10000000 + last_f64 * 1000000 + first_nslots * 1000 + total_nslots + tup_perturbation(first_hash, last_hash)
         tup_cache_register(SCAN_TY_HASH, first_ty, first_hash, last_ty, last_hash)
         SCAN_TY_NEXT = p
         return
@@ -5248,6 +5260,7 @@ fn lex_all() with IO, Mut, Panic, Div {
             if src_match(s, l, "if") { k = 13 }
             if src_match(s, l, "else") { k = 14 }
             if src_match(s, l, "while") { k = 15 }
+            if src_match(s, l, "loop") { k = 15 }  // loop {} ≡ while true {} — handled in k==15 via leading '{'
             if src_match(s, l, "continue") { k = 33 }
             if src_match(s, l, "break") { k = 34 }
             if src_match(s, l, "for") { k = 54 }
@@ -5390,7 +5403,7 @@ fn scan_all_consts() with Panic, Mut {
         if depth == 0 && TK[p as usize] == 11 {
             p = p + 1  // skip 'let'
             if TK[p as usize] != 3 { continue }
-            if CONST_COUNT >= 511 { p = p + 1; continue }
+            if CONST_COUNT >= 4095 { p = p + 1; continue }
             cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
             var cty: i64 = 1
             var ctok: i64 = -1
@@ -5421,7 +5434,7 @@ fn scan_all_consts() with Panic, Mut {
         if depth == 0 && TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "const") {
             p = p + 1  // skip 'const'
             if TK[p as usize] != 3 { continue }
-            if CONST_COUNT >= 511 { p = p + 1; continue }
+            if CONST_COUNT >= 4095 { p = p + 1; continue }
             cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
             var cty2: i64 = 1
             var ctok2: i64 = -1
@@ -5445,6 +5458,41 @@ fn scan_all_consts() with Panic, Mut {
             CONST_VAL[CONST_COUNT as usize] = cv
             CONST_TYPE[CONST_COUNT as usize] = cty2
             CONST_TOK_IDX[CONST_COUNT as usize] = ctok2
+            CONST_COUNT = CONST_COUNT + 1
+            continue
+        }
+        // bare 'let NAME: TYPE = VALUE' (top-level immutable scalar constant —
+        // the modular self-hosted dialect uses `let` at module scope where lean
+        // uses `const`; register it so uses resolve instead of erroring E200).
+        if depth == 0 && TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "let") {
+            p = p + 1  // skip 'let'
+            if TK[p as usize] != 3 { continue }
+            if CONST_COUNT >= 4095 { p = p + 1; continue }
+            cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
+            var ltyL: i64 = 1
+            var ltokL: i64 = -1
+            if TK[p as usize] == 15 {
+                p = p + 1
+                if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "f64") {
+                    ltyL = 2
+                }
+                while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
+            } else {
+                while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
+            }
+            if TK[p as usize] == 16 { p = p + 1 }
+            cv = 0; neg_c = 0
+            if TK[p as usize] == 18 { neg_c = 1; p = p + 1 }
+            if TK[p as usize] == 4 { cv = TV[p as usize]; p = p + 1 }
+            if neg_c != 0 { cv = 0 - cv }
+            // simple 'A - B' literal expression (e.g. 0 - 1 sentinel)
+            if TK[p as usize] == 18 { p = p + 1; if TK[p as usize] == 4 { cv = cv - TV[p as usize]; p = p + 1 } }
+            if TK[p as usize] == 53 { ltyL = 2; ltokL = p; p = p + 1 }
+            CONST_NS[CONST_COUNT as usize] = cn_ns
+            CONST_NE[CONST_COUNT as usize] = cn_ne
+            CONST_VAL[CONST_COUNT as usize] = cv
+            CONST_TYPE[CONST_COUNT as usize] = ltyL
+            CONST_TOK_IDX[CONST_COUNT as usize] = ltokL
             CONST_COUNT = CONST_COUNT + 1
             continue
         }
@@ -9731,7 +9779,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if first_ty == 2 { first_f64_flag = 1 }
             var last_f64_flag: i64 = 0
             if last_ty == 2 { last_f64_flag = 1 }
-            EXPR_TY_HASH = tup_count * 100000000 + first_f64_flag * 10000000 + last_f64_flag * 1000000 + first_actual * 1000 + total_slots
+            EXPR_TY_HASH = tup_count * 100000000 + first_f64_flag * 10000000 + last_f64_flag * 1000000 + first_actual * 1000 + total_slots + tup_perturbation(first_hash, last_hash)
             tup_cache_register(EXPR_TY_HASH, first_ty, first_hash, last_ty, last_hash)
             return
         }
@@ -11050,7 +11098,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            if src_match(ns, ne - ns, "read_i64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_i64") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 2, 0)
@@ -11077,7 +11125,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            if src_match(ns, ne - ns, "read_f64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_f64") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 2, 0)
@@ -11104,7 +11152,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            if src_match(ns, ne - ns, "write_i64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "write_i64") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 3, 0)
@@ -11127,7 +11175,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            if src_match(ns, ne - ns, "write_f64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "write_f64") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 3, 0)
@@ -17003,6 +17051,14 @@ fn compile_or() with IO, Mut, Panic, Div {
 
 // ─── Patch helper ───
 fn patch32(off: i64, target: i64) with Mut, Panic {
+    // Guard the code-buffer bound like em() does: when CL has saturated at the
+    // CD cap, a captured patch offset can equal/exceed the buffer length. Route
+    // to the existing CD_OVF overflow report instead of writing out of bounds.
+    if off < 0 || off + 3 >= 134217728 {
+        if CD_OVF == 0 { CD_OVF_FN = CURRENT_FN; CD_OVF_CL = off }
+        CD_OVF = 1
+        return
+    }
     let rel = target - off - 4
     CD[off as usize] = (rel & 0xFF) as i8
     CD[(off+1) as usize] = ((rel >> 8) & 0xFF) as i8
@@ -17818,6 +17874,7 @@ fn compile_nested_field_store_x86() with IO, Mut, Panic, Div {
     }
     if cur_si < 0 {
         tc_error(root_tok, "nested field store requires struct base")
+        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
         return
     }
     EP = EP + 1  // skip root name
@@ -17961,6 +18018,7 @@ fn compile_nested_field_store_a64() with IO, Mut, Panic, Div {
     }
     if cur_si < 0 {
         tc_error(root_tok, "nested field store requires struct base")
+        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
         return
     }
     EP = EP + 1  // skip root name
@@ -19462,6 +19520,24 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // while expr { stmts }
     if k == 15 {
         EP = EP + 1
+        // ── 'loop { body }' — infinite loop (no condition), exits only via break ──
+        if TK[EP as usize] == 8 {
+            let lp_top = CL
+            LOOP_TOP[LOOP_DEPTH as usize] = lp_top
+            LOOP_DEPTH = LOOP_DEPTH + 1
+            let lp_saved_bc = BREAK_COUNT
+            gtt_loop_snapshot()
+            EP = EP + 1  // skip '{'
+            while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            if TK[EP as usize] == 9 { EP = EP + 1 }  // skip '}'
+            em(0xe9); em32(lp_top - (CL + 4))  // jmp back to loop top
+            var lp_bi: i64 = lp_saved_bc
+            while lp_bi < BREAK_COUNT { patch32(BREAK_PATCH[lp_bi as usize], CL); lp_bi = lp_bi + 1 }
+            BREAK_COUNT = lp_saved_bc
+            LOOP_DEPTH = LOOP_DEPTH - 1
+            LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            return
+        }
         // ── Phase 1.5: while let <pattern> = <expr> { ... } ──
         if TK[EP as usize] == 11 {
             EP = EP + 1  // skip 'let'
@@ -23734,8 +23810,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 // so that .1 field access computes the correct byte offset.
                 // Hash format: tcount * 1000000 + first_nslots * 1000 + total_nslots
                 if scan_ret_ty == 6 && TK[q as usize] == 6 {
-                    let tcount_enc = scan_ret_hash / 1000000
-                    let first_enc_check = (scan_ret_hash % 1000000) / 1000
+                    // Strip prior perturbation (if any) before decoding tcount_enc.
+                    let clean_scan_ret_hash = scan_ret_hash % 1000000000
+                    let tcount_enc = clean_scan_ret_hash / 1000000
+                    let first_enc_check = (clean_scan_ret_hash % 1000000) / 1000
                     if first_enc_check == 0 {
                         scan_type(q + 1)
                         let sig_first_ty = SCAN_TY
@@ -23748,7 +23826,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         let sig_last_hash = SCAN_TY_HASH
                         let last_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
                         let total_nslots = first_nslots + last_nslots
-                        scan_ret_hash = tcount_enc * 1000000 + first_nslots * 1000 + total_nslots
+                        scan_ret_hash = tcount_enc * 1000000 + first_nslots * 1000 + total_nslots + tup_perturbation(sig_first_hash, sig_last_hash)
                         tup_cache_register(scan_ret_hash, sig_first_ty, sig_first_hash, sig_last_ty, sig_last_hash)
                         SCAN_TY = scan_ret_ty
                         SCAN_TY_HASH = scan_ret_hash
@@ -28234,7 +28312,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            if src_match(ns, ne - ns, "read_i64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_i64") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 2, 0)
@@ -28261,7 +28339,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            if src_match(ns, ne - ns, "read_f64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_f64") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 2, 0)
@@ -28288,7 +28366,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            if src_match(ns, ne - ns, "write_i64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "write_i64") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 3, 0)
@@ -28311,7 +28389,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            if src_match(ns, ne - ns, "write_f64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "write_f64") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 3, 0)
