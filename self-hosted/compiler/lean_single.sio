@@ -2334,6 +2334,20 @@ fn current_fn_allows_mutation() -> bool with Panic, Mut {
     return (FN_EFFECTS[CURRENT_FN as usize] & 2) != 0
 }
 
+// A store requires the Mut effect only when it ESCAPES the function: writing
+// through a reference (`&!` param / pointer-like local) or to a module-level
+// global. Mutating a plain local `var` struct/array is not observable outside
+// the function, so it does not need `with Mut`. ns/ne is the store base name
+// token; for deref stores (`*p`, `(*p).f`) the base token isn't a var name, so
+// var_find_idx misses and we conservatively keep the Mut requirement.
+fn store_escapes(ns: i64, ne: i64) -> bool with Panic, Mut, Div {
+    let vi = var_find_idx(ns, ne)
+    if vi >= 0 {
+        return type_is_pointer_like(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize])
+    }
+    return true
+}
+
 fn stmt_is_gpu_launch_perform(p0: i64) -> bool with Panic, Mut {
     if token_is_ident_text(p0, "perform") == false { return false }
     if token_is_ident_text(p0 + 1, "GPU") == false { return false }
@@ -18749,7 +18763,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
 
     // x.field[outer][inner] = expr (nested array double-subscript store)
     if stmt_is_field_array_array_store(EP) {
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         compile_field_array_array_store_x86()
@@ -18758,7 +18772,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
 
     // x.field[idx] = expr
     if stmt_is_field_array_store(EP) {
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         compile_field_array_store_x86()
@@ -18767,7 +18781,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
 
     // x.array_field[idx].field = expr
     if stmt_is_indexed_field_field_store(EP) {
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         compile_indexed_field_field_store_x86()
@@ -18776,7 +18790,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
 
     // x.field.field(.field)*( [idx] )? = expr (nested inline-struct field store)
     if stmt_is_nested_field_store(EP) {
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         compile_nested_field_store_x86()
@@ -18786,7 +18800,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // x.field = expr (struct field write)
     if k == 3 && TK[(EP + 1) as usize] == 50 && TK[(EP + 3) as usize] == 16 {
         let name_tok = EP
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]
@@ -18850,7 +18864,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // x = expr (local or global scalar assignment)
     if k == 3 && TK[(EP + 1) as usize] == 16 {
         let name_tok = EP
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]
@@ -18953,7 +18967,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // ARRAY[idx] = expr (global array write)
     if stmt_is_array_store(EP) {
         let name_tok = EP
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]
@@ -19027,7 +19041,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // (*ARRAY_PTR)[idx] = expr
     if stmt_is_deref_array_store(EP) {
         let name_tok = EP + 2
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[(EP + 2) as usize]
@@ -19059,7 +19073,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // *PTR = expr
     if stmt_is_deref_store(EP) {
         let name_tok = EP + 1
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[(EP + 1) as usize]
@@ -19091,7 +19105,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     if stmt_is_deref_field_store(EP) {
         let name_tok = EP + 2
         let field_tok = EP + 5
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(field_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[name_tok as usize]
@@ -30996,7 +31010,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     }
     // x.field[idx] = expr
     if stmt_is_field_array_store(EP) {
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         compile_field_array_store_a64()
@@ -31005,7 +31019,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
 
     // x.field.field(.field)*( [idx] )? = expr (nested inline-struct field store)
     if stmt_is_nested_field_store(EP) {
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         compile_nested_field_store_a64()
@@ -31015,7 +31029,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // x.field = expr
     if k == 3 && TK[(EP + 1) as usize] == 50 && TK[(EP + 3) as usize] == 16 {
         let name_tok = EP
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]; let ne = TE[EP as usize]
@@ -31071,7 +31085,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // x = expr
     if k == 3 && TK[(EP + 1) as usize] == 16 {
         let name_tok = EP
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]; let ne = TE[EP as usize]
@@ -31157,7 +31171,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // ARRAY[idx] = expr
     if stmt_is_array_store(EP) {
         let name_tok = EP
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[EP as usize]; let ne = TE[EP as usize]
@@ -31219,7 +31233,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // (*ARRAY_PTR)[idx] = expr
     if stmt_is_deref_array_store(EP) {
         let name_tok = EP + 2
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[(EP + 2) as usize]; let ne = TE[(EP + 2) as usize]
@@ -31247,7 +31261,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     // *PTR = expr
     if stmt_is_deref_store(EP) {
         let name_tok = EP + 1
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[(EP + 1) as usize]
@@ -31279,7 +31293,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     if stmt_is_deref_field_store(EP) {
         let name_tok = EP + 2
         let field_tok = EP + 5
-        if current_fn_allows_mutation() == false {
+        if current_fn_allows_mutation() == false && store_escapes(TS[EP as usize], TE[EP as usize]) {
             tc_effect_violation(field_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
         }
         let ns = TS[name_tok as usize]

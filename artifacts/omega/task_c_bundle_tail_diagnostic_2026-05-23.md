@@ -598,3 +598,91 @@ IN-CORE in pe_coff.sio) — so core has no undefined refs into the missing files
 - the bulk of "unknown identifier at line" (unnamed) needs per-site inspection.
 
 Bundle-completeness as an error-reduction lever is now exhausted. Baseline 1069.
+
+---
+
+## effect-not-declared bottom-up attempt (2026-05-24) — CASCADE confirmed at scale, reverted
+
+Instrumented the 3 `tc_*_effect*` emission sites to dump CURRENT_FN + needed-effect
+mask. Got 48 distinct flagged functions (need: 2=Mut, 6=Mut+Panic, 14=Mut+Panic+Div),
+dominated by builders/test-helpers (ph_*, a64_preview_*, *_new, *make_test_module).
+Batch-added the missing effects to all 48 (script-driven). Rebuilt (fixed point holds
+a0e0184f).
+
+**Result: effect-not-declared 189 → 375 (+186), total 1069 → 1069 (net 0).** Adding
+Mut to 48 leaf functions exposed ALL their callers (now missing Mut) → more errors,
+not fewer. Confirms (at scale) the reloc proof: this is a CASCADE up the call graph.
+Reverted (kept the clean 1069 baseline).
+
+**Takeaway / decision for next session:** incremental bottom-up does NOT converge —
+the mutation-transitive-closure (every fn that mutates a local struct OR calls one,
+up to main) is most of the bundle. Two viable paths, both deliberate:
+1. **Annotate the whole closure in one coordinated script pass** (compute reachable
+   mutators + all transitive callers, add Mut everywhere, rebuild once). Big but
+   convergent.
+2. **Relax the effect rule in lean_single** — requiring `Mut` for *local-only* struct
+   field mutation (value never escapes) is unusually strict; if local mutation isn't
+   an observable effect, the checker could stop requiring it, clearing all 189+ at the
+   ROOT without touching source. Semantic decision (verify it doesn't weaken real
+   effect checking) — likely the higher-leverage, lower-churn fix.
+
+Recommend evaluating path 2 first. Baseline stays 1069.
+
+---
+
+## relax-rule evaluation (2026-05-24) — VIABLE, high-leverage; recommend local-only refinement
+
+Mut (effect 2) is required at 18 store-site checks (`current_fn_allows_mutation()
+== false → tc_effect_violation(EP, 2, ...)`, lean_single.sio ~18717–19059) covering
+field/array/nested/indexed stores. `current_fn_allows_mutation()` (2331) only checks
+`FN_EFFECTS[CURRENT_FN] & 2` — no info about whether the store target escapes.
+
+**Ceiling experiment** — made `current_fn_allows_mutation()` return true (blanket),
+rebuilt: **total 1069 → 766 (-303), effect-not-declared 189 → 72 (-117), fixed point
+HOLDS (52cb6ad6).** Key: the Mut effect does NOT affect codegen (self-compile stays
+bit-identical) — it's purely a check; relaxing it changes what's *rejected*, not
+what's *produced*. Reverted (blanket guts a real language guarantee).
+
+**Verdict:** relax-rule is clearly the right lever (−303, no codegen risk, fixed
+point intact) — far better than annotating the cascade closure. But blanket-relax
+removes Mut checking for genuinely-observable mutation (`&!` ref params, globals),
+which is a language-design overreach.
+
+**Recommended implementation — local-only relax:** require Mut only when the store
+target ESCAPES (base var is pointer-like = a `&!` ref, OR a global). Local `var
+S` field/array mutation doesn't escape → no Mut needed. Add a helper
+`store_escapes(ns,ne) -> bool` (var_find_idx + type_is_pointer_like; gl_find for
+globals; conservative-true on unknown) and gate the 18 sites:
+`if !current_fn_allows_mutation() && store_escapes(...) { tc_effect_violation(...) }`.
+This clears the local-struct false-positives (the bulk of the 189) while preserving
+Mut for observable mutation. ~18 careful site edits + 1 rebuild; the base name (ns/ne)
+is available at each store site (some computed just after the current check — minor
+reorder). Remaining 72 effect-not-declared after the Mut relax are OTHER effects
+(IO/Div/Panic/Alloc), separate per-case.
+
+Baseline stays 1069 (experiment reverted).
+
+---
+
+## 72 remaining effect-not-declared (2026-05-24) — genuine effect-propagation, mostly test code
+
+After the Mut local-store relax (1069→766), 72 effect-not-declared remain. These are
+NOT relaxable like local-Mut — they're genuine effect *propagation*: calling a
+function that has Mut/Panic/Div requires the caller to declare it.
+
+Breakdown: ~40 are calls to `ph_add_instr`/`ph_add_imm_instr` (peephole.sio, signature
+`(w: &! PhWindow, ...) with Mut, Panic` — Mut is CORRECT, it writes through a `&!` ref
+= escaping). The callers are ~80 `ph_test_*` TEST functions + `ph_run_all_tests` /
+`ph_optimize` that lack the propagated effects. Plus ~5 `/` division (genuine Div) and
+a few `orbit_*`/`_emit_*`/`name_is_*` call cascades.
+
+**Root: these are TEST functions pulled into core via the bundle-completeness add of
+peephole.sio** (codegen needs ph_optimize/ph_run_on_func; the ~80 ph_test_* tests came
+along). The effects are real (Mut via `&!`, Panic, Div) so they must be declared, but
+it's a propagation cascade through ~80 mechanical annotations of low-value test code.
+
+Options (next session): (a) annotate the ph_* call-chain per-file (mechanical, ~80 fns,
+cascades within peephole.sio); (b) a call-site relax — calling a Mut fn with only
+LOCAL `&!` args doesn't propagate Mut — but that's interprocedurally unsound (the
+callee could touch a global), so risky; (c) accept these as test-code artifacts.
+Not a clean systematic win like the local-store relax. Baseline stays 766.
