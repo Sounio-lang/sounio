@@ -479,6 +479,11 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/native/lower_hir.sio
     self-hosted/native/elf.sio
     self-hosted/native/machine_ir.sio
+    self-hosted/native/runtime_context.sio
+    self-hosted/native/target_policy.sio
+    self-hosted/native/gc.sio
+    self-hosted/native/stack_maps.sio
+    self-hosted/native/peephole.sio
     self-hosted/native/codegen.sio
     self-hosted/native/lower_ir.sio
     self-hosted/native/riscv.sio
