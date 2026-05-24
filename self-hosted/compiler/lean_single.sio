@@ -5260,6 +5260,7 @@ fn lex_all() with IO, Mut, Panic, Div {
             if src_match(s, l, "if") { k = 13 }
             if src_match(s, l, "else") { k = 14 }
             if src_match(s, l, "while") { k = 15 }
+            if src_match(s, l, "loop") { k = 15 }  // loop {} ≡ while true {} — handled in k==15 via leading '{'
             if src_match(s, l, "continue") { k = 33 }
             if src_match(s, l, "break") { k = 34 }
             if src_match(s, l, "for") { k = 54 }
@@ -19391,6 +19392,24 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // while expr { stmts }
     if k == 15 {
         EP = EP + 1
+        // ── 'loop { body }' — infinite loop (no condition), exits only via break ──
+        if TK[EP as usize] == 8 {
+            let lp_top = CL
+            LOOP_TOP[LOOP_DEPTH as usize] = lp_top
+            LOOP_DEPTH = LOOP_DEPTH + 1
+            let lp_saved_bc = BREAK_COUNT
+            gtt_loop_snapshot()
+            EP = EP + 1  // skip '{'
+            while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+            if TK[EP as usize] == 9 { EP = EP + 1 }  // skip '}'
+            em(0xe9); em32(lp_top - (CL + 4))  // jmp back to loop top
+            var lp_bi: i64 = lp_saved_bc
+            while lp_bi < BREAK_COUNT { patch32(BREAK_PATCH[lp_bi as usize], CL); lp_bi = lp_bi + 1 }
+            BREAK_COUNT = lp_saved_bc
+            LOOP_DEPTH = LOOP_DEPTH - 1
+            LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
+            return
+        }
         // ── Phase 1.5: while let <pattern> = <expr> { ... } ──
         if TK[EP as usize] == 11 {
             EP = EP + 1  // skip 'let'
