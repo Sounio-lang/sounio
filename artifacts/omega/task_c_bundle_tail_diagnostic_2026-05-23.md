@@ -661,3 +661,28 @@ reorder). Remaining 72 effect-not-declared after the Mut relax are OTHER effects
 (IO/Div/Panic/Alloc), separate per-case.
 
 Baseline stays 1069 (experiment reverted).
+
+---
+
+## 72 remaining effect-not-declared (2026-05-24) — genuine effect-propagation, mostly test code
+
+After the Mut local-store relax (1069→766), 72 effect-not-declared remain. These are
+NOT relaxable like local-Mut — they're genuine effect *propagation*: calling a
+function that has Mut/Panic/Div requires the caller to declare it.
+
+Breakdown: ~40 are calls to `ph_add_instr`/`ph_add_imm_instr` (peephole.sio, signature
+`(w: &! PhWindow, ...) with Mut, Panic` — Mut is CORRECT, it writes through a `&!` ref
+= escaping). The callers are ~80 `ph_test_*` TEST functions + `ph_run_all_tests` /
+`ph_optimize` that lack the propagated effects. Plus ~5 `/` division (genuine Div) and
+a few `orbit_*`/`_emit_*`/`name_is_*` call cascades.
+
+**Root: these are TEST functions pulled into core via the bundle-completeness add of
+peephole.sio** (codegen needs ph_optimize/ph_run_on_func; the ~80 ph_test_* tests came
+along). The effects are real (Mut via `&!`, Panic, Div) so they must be declared, but
+it's a propagation cascade through ~80 mechanical annotations of low-value test code.
+
+Options (next session): (a) annotate the ph_* call-chain per-file (mechanical, ~80 fns,
+cascades within peephole.sio); (b) a call-site relax — calling a Mut fn with only
+LOCAL `&!` args doesn't propagate Mut — but that's interprocedurally unsound (the
+callee could touch a global), so risky; (c) accept these as test-code artifacts.
+Not a clean systematic win like the local-store relax. Baseline stays 766.
