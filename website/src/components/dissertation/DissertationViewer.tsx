@@ -401,7 +401,7 @@ export default function DissertationViewer() {
         </div>
 
         {/* Right: side panel — tour controls, GUM bar, confidence gate, Hessian */}
-        <aside className="flex flex-col gap-4 p-4 border-t lg:border-t-0 lg:border-l border-[var(--glass-border)] bg-[rgba(0,0,0,0.2)] text-white">
+        <aside className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-6 lg:gap-4 p-4 lg:p-6 border-t lg:border-t-0 lg:border-l border-[var(--glass-border)] bg-[rgba(0,0,0,0.2)] text-white">
           <TourControls
             tours={drugTours}
             activeTourId={activeTourId}
@@ -410,15 +410,15 @@ export default function DissertationViewer() {
             onStart={handleTourStart}
             onStop={handleTourStop}
           />
-          <hr className="border-white/10" />
+          <hr className="hidden lg:block border-white/10" />
           <TmddPanel drug={drug} rfree={simState.rfree} dr={simState.dr} />
-          <hr className="border-white/10" />
+          <hr className="hidden lg:block border-white/10" />
           <PdReadoutPanel drug={drug} pdA={simState.pdA} pdN={simState.pdN} />
-          <hr className="border-white/10" />
+          <hr className="hidden lg:block border-white/10" />
           <ConfidenceGate drug={drug} params={params} />
-          <hr className="border-white/10" />
+          <hr className="hidden lg:block border-white/10" />
           <GumBudgetBar />
-          <hr className="border-white/10" />
+          <hr className="hidden lg:block border-white/10" />
           <HessianHeatmap />
         </aside>
       </div>

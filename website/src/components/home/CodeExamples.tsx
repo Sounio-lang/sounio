@@ -221,7 +221,7 @@ export default function CodeExamples() {
               </span>
             </div>
             <div className={isScientist ? `code-collapsible ${isExpanded ? 'expanded' : 'collapsed'}` : ''}>
-              <pre className="p-6 bg-[#0d1117] text-sm leading-relaxed overflow-x-auto min-h-[400px]">
+              <pre className="p-4 md:p-6 bg-[#0d1117] text-xs md:text-sm leading-relaxed overflow-x-auto min-h-[320px] md:min-h-[400px]">
                 <code className="text-[#e6edf3]">{activeExample.python}</code>
               </pre>
             </div>
@@ -240,7 +240,7 @@ export default function CodeExamples() {
               </span>
             </div>
             <div className={isScientist ? `code-collapsible ${isExpanded ? 'expanded' : 'collapsed'}` : ''}>
-              <pre className="p-6 bg-[#0d1117] text-sm leading-relaxed overflow-x-auto min-h-[400px]">
+              <pre className="p-4 md:p-6 bg-[#0d1117] text-xs md:text-sm leading-relaxed overflow-x-auto min-h-[320px] md:min-h-[400px]">
                 <code className="text-[#e6edf3]">{activeExample.sounio}</code>
               </pre>
             </div>
