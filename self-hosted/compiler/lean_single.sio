@@ -12086,7 +12086,6 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let uslot_v = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 compile_or()  // value
-                seq_materialize_push_value_x86(VAR_TY_HASH[ulvi as usize])
                 emit_store_var(uslot_v)
                 if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 4, 2) }
                 let uslot_conf = NEXT_SLOT
@@ -12099,6 +12098,22 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 compile_or()  // variance (f64)
                 emit_store_var(uslot_var)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
+                // For a Knowledge-inner seq, the element must be a heap Knowledge
+                // block {value@0, variance@8, confidence@16} (same representation as
+                // .push(measure(..))), NOT the raw f64 value — otherwise seq reads
+                // deref the f64 bits as a pointer and crash. Assemble it from the
+                // scalars and materialize (heap-copy 24B), leaving the ptr in uslot_v.
+                let uin_hash = seq_hash_inner_hash(VAR_TY_HASH[ulvi as usize])
+                if knowledge_hash_is(uin_hash) {
+                    let ukb = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 3
+                    emit_load_var(uslot_v);    emit_store_var(ukb + 2)   // value      @ +0
+                    emit_load_var(uslot_var);  emit_store_var(ukb + 1)   // variance   @ +8
+                    emit_load_var(uslot_conf); emit_store_var(ukb + 0)   // confidence @ +16
+                    emit_lea_var(ukb + 2)                                // rax = &block (value slot)
+                    materialize_struct_value_x86(uin_hash)               // heap-copy 24B; ptr in rax
+                    emit_store_var(uslot_v)                              // element = heap block ptr
+                }
                 emit_seq_push_uncertain_slots_x86(uslot_s, uslot_v, uslot_conf, uslot_var)
                 EXPR_IS_F64 = 0
                 EXPR_TY = 5
@@ -30016,7 +30031,6 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let auslot_v = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 compile_or_a64()
-                seq_materialize_push_value_a64(VAR_TY_HASH[aulvi as usize])
                 emit_store_var_a64(auslot_v)
                 if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 4, 2) }
                 let auslot_conf = NEXT_SLOT
@@ -30029,6 +30043,20 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 compile_or_a64()
                 emit_store_var_a64(auslot_var)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
+                // Knowledge-inner: assemble a heap Knowledge block {value@0,var@8,conf@16}
+                // from the scalars (see x86 path); the raw f64 must not be pushed as a
+                // Knowledge pointer or reads crash.
+                let auin_hash = seq_hash_inner_hash(VAR_TY_HASH[aulvi as usize])
+                if knowledge_hash_is(auin_hash) {
+                    let aukb = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 3
+                    emit_load_var_a64(auslot_v);    emit_store_var_a64(aukb + 2)   // value      @ +0
+                    emit_load_var_a64(auslot_var);  emit_store_var_a64(aukb + 1)   // variance   @ +8
+                    emit_load_var_a64(auslot_conf); emit_store_var_a64(aukb + 0)   // confidence @ +16
+                    emit_lea_var_a64(aukb + 2)                                     // x0 = &block
+                    materialize_struct_value_a64(auin_hash)                        // heap-copy 24B; ptr in x0
+                    emit_store_var_a64(auslot_v)                                   // element = heap block ptr
+                }
                 emit_seq_push_uncertain_slots_a64(auslot_s, auslot_v, auslot_conf, auslot_var)
                 EXPR_IS_F64 = 0; EXPR_TY = 5; EXPR_TY_HASH = 0; return
             }
