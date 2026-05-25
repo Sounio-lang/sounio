@@ -64,6 +64,33 @@ BUILD_WRAPPER="$ROOT_DIR/scripts/ci/build_ontology_validation_souc.sh"
 GENERATED_ONTOLOGY_GATE="$ROOT_DIR/scripts/ci/generated_ontology_gate.sh"
 REBUILT_GATE_INACTIVE_RC=97
 
+ONTOLOGY_COMPILE_GATES=(
+    ontology_cache_compile_gate.sh
+    ontology_cli_smoke_gate.sh
+    ontology_model_compile_gate.sh
+    ontology_query_compile_gate.sh
+    ontology_reasoner_compile_gate.sh
+    ontology_typed_bridge_gate.sh
+)
+
+run_ontology_compile_gates() {
+    if [[ "${SOUNIO_ONTOLOGY_COMPILE_GATES:-1}" == "0" ]]; then
+        echo "[ontology-validation] skipping compile gate bundle (SOUNIO_ONTOLOGY_COMPILE_GATES=0)"
+        return 0
+    fi
+
+    local gate script
+    for gate in "${ONTOLOGY_COMPILE_GATES[@]}"; do
+        script="$ROOT_DIR/scripts/ci/$gate"
+        if [[ ! -f "$script" ]]; then
+            echo "error: missing ontology compile gate: $script" >&2
+            exit 2
+        fi
+        echo "[ontology-validation] running $gate"
+        bash "$script"
+    done
+}
+
 prepare_generated_ontology() {
     if [[ "${SOUNIO_ONTOLOGY_PREPARE_GENERATED:-1}" == "0" ]]; then
         return 0
@@ -310,6 +337,7 @@ emit_structured_summary() {
 }
 
 prepare_generated_ontology
+run_ontology_compile_gates
 
 if [[ "$MODE" != "diff" ]]; then
     run_mode "$MODE" ""
