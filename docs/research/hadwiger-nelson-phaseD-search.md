@@ -22,9 +22,13 @@ that same graph become non-5-colourable? `scripts/research/heule510_phaseD_searc
 
 ## Result (bounded negative)
 Closure to **2600 vertices / 11545 exact unit edges** (radius 6) → **5-colourable**.
-No 6-chromatic graph in this region. (A larger 6000-vertex / radius-9 sweep was run as
-corroboration.) This is the expected outcome and is consistent with every published
-result: the ambient de Grey graph's finite chunks remain 5-colourable.
+No 6-chromatic graph in this region. (A larger 6000-vertex / radius-9 sweep built the
+closure but its exact edge computation did **not** finish in the session time budget, so
+there is **no colourability verdict at 6000** — the substantive, completed negative is the
+2600-vertex result above; the 6000 attempt only confirms the closure scales and that the
+exact all-pairs edge step is the bottleneck to optimise.) The 2600 outcome is the expected
+one and is consistent with every published result: the ambient de Grey graph's finite
+chunks remain 5-colourable.
 
 ## What a real attempt requires (and a session cannot do)
 - **Sustained compute** over far larger chunks / many seed structures (Polymath tested
