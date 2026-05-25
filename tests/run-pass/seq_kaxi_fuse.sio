@@ -1,0 +1,68 @@
+//@ run-pass
+//@ description: K-axis batched epistemic op — inverse-variance fusion over Seq<Knowledge<f64>>
+//
+// Lane C deliverable. Builds a batch of epistemic measurements with
+// seq_push_uncertain (value, confidence, variance), then reduces them with the
+// precision-weighted (inverse-variance) fusion that combines independent
+// Gaussian estimates:
+//     w_i      = 1 / var_i
+//     var_post = 1 / Σ w_i
+//     mean_post= var_post · Σ (v_i · w_i)
+//     conf_post= min_i conf_i        (conservative band)
+// Per-element value/variance/confidence are read back via Knowledge field
+// access (.value / .variance / .confidence) — these work on seq elements only
+// because each element is now a materialized Knowledge block (the seq_push_uncertain
+// SIGSEGV fix). No compiler change: pure-Sounio reduction.
+
+fn kaxi_fused_mean(s: Seq<Knowledge<f64>>) -> f64 with IO, Alloc, Mut, Epistemic, Div {
+    var sw: f64 = 0.0
+    var swv: f64 = 0.0
+    var i: i64 = 0
+    while i < s.count() {
+        let w: f64 = 1.0 / s[i].variance
+        sw = sw + w
+        swv = swv + s[i].value * w
+        i = i + 1
+    }
+    return (1.0 / sw) * swv
+}
+
+fn kaxi_fused_variance(s: Seq<Knowledge<f64>>) -> f64 with IO, Alloc, Mut, Epistemic, Div {
+    var sw: f64 = 0.0
+    var i: i64 = 0
+    while i < s.count() {
+        sw = sw + 1.0 / s[i].variance
+        i = i + 1
+    }
+    return 1.0 / sw
+}
+
+fn kaxi_min_confidence(s: Seq<Knowledge<f64>>) -> f64 with IO, Alloc, Mut, Epistemic, Div {
+    var m: f64 = 1.0
+    var i: i64 = 0
+    while i < s.count() {
+        let c: f64 = s[i].confidence
+        if c < m { m = c }
+        i = i + 1
+    }
+    return m
+}
+
+fn main() with IO, Alloc, Mut, Epistemic, Div {
+    var s: Seq<Knowledge<f64>> = seq_new()
+    seq_push_uncertain(s, 10.0, 0.90, 4.0)    // w = 0.25
+    seq_push_uncertain(s, 20.0, 0.80, 1.0)    // w = 1.0
+    seq_push_uncertain(s, 30.0, 0.95, 0.25)   // w = 4.0
+
+    let mean: f64 = kaxi_fused_mean(s)        // 142.5 / 5.25 = 27.142857…
+    let vp: f64   = kaxi_fused_variance(s)    // 1 / 5.25     = 0.190476…
+    let conf: f64 = kaxi_min_confidence(s)    // min(.9,.8,.95)= 0.80
+
+    var ok: i64 = 1
+    if s.count() != 3 { ok = 0 }
+    if mean < 27.142 || mean > 27.143 { ok = 0 }
+    if vp   < 0.1904 || vp   > 0.1905 { ok = 0 }
+    if conf < 0.7999 || conf > 0.8001 { ok = 0 }
+
+    if ok == 1 { print("seq_kaxi_fuse: PASS\n") } else { print("seq_kaxi_fuse: FAIL\n") }
+}
