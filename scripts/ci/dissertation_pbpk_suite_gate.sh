@@ -76,6 +76,7 @@ TESTS=(
   "rapamycin_epistemic_pbpk     tests/run-pass/rapamycin_epistemic_pbpk.sio"
   "rapamycin_epistemic_adaptive tests/run-pass/rapamycin_epistemic_adaptive.sio"
   "rapamycin_gum_vs_mc          tests/run-pass/rapamycin_gum_vs_mc.sio"
+  "rapamycin_kaxi_fuse_prior    tests/run-pass/rapamycin_kaxi_fuse_prior.sio"
   "biomaterial_release          stdlib/darwin_pbpk/release/biomaterial_release.sio"
   "rapamycin_clinical           stdlib/darwin_pbpk/validation/rapamycin_clinical.sio"
   "gum_vs_mc                    stdlib/darwin_pbpk/validation/gum_vs_mc.sio"
