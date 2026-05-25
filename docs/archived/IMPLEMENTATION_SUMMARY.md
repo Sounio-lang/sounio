@@ -1,15 +1,15 @@
 <!-- docs:meta
-topic_id: repo.docs.implementation.implementation-summary
-authority: historical
+topic_id: repo.docs.archived.implementation-summary
+authority: archived
 audience: maintainers
 last_validated: 2026-03-07
 validated_by: A7
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.implementation-summary
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.implementation-summary
 -->
 
 
 <!-- docs:status-note:start -->
-> Docs status: `historical`
+> Docs status: `archived`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
 <!-- docs:status-note:end -->
 

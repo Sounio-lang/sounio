@@ -13,6 +13,20 @@ use check::borrow::*
 use check::units::*
 use check::traits::*
 use check::ownership::*
+use check::ontology_side_table_cache::{
+    ontology_side_table_cache_source_disjoint_axiom_count,
+    ontology_side_table_cache_source_disjoint_object0,
+    ontology_side_table_cache_source_disjoint_subject0,
+    ontology_side_table_cache_source_plan_valid,
+    ontology_side_table_cache_source_slot_at,
+    ontology_side_table_cache_source_slot_count,
+    ontology_side_table_cache_source_subclass_axiom_count,
+    ontology_side_table_cache_source_subclass_object_at,
+    ontology_side_table_cache_source_subclass_subject_at,
+    ontology_side_table_cache_verdict_invalid_cache,
+    ontology_side_table_cache_verdict_ok,
+    ontology_side_table_cache_verdict_reject,
+}
 use parser::ast::*
 use ir::ir::*
 
@@ -96,6 +110,9 @@ struct Checker {
     studies: StudyTable,
     ontologies: OntologyTable,
     ontology_kernel: OntologyKernel,
+    ontology_cache_shadow_slot_count: i64,
+    ontology_cache_shadow_slots: [i64; 6],
+    ontology_cache_shadow_subclass_matrix: [bool; 36],
     hyper_exprs: HyperExprTable,
     models: ModelTable,
     model_families: ModelFamilyTable,
@@ -253,6 +270,16 @@ struct CheckArrayElemsResult {
     count: i64,
 }
 
+struct CheckArrayRestResult {
+    checker: Checker,
+    count: i64,
+}
+
+struct CheckTupleElemsResult {
+    checker: Checker,
+    elems: Option<Box<TypeEntryList>>,
+}
+
 struct CollectClosureParamsResult {
     checker: Checker,
     params: Option<Box<FnParamList>>,
@@ -300,6 +327,55 @@ struct CollectAlternativeCandidatesResult {
     checker: Checker,
     candidates: [i64; 16],
     count: i64,
+}
+
+struct CollectAlternativeObjectivesResult {
+    checker: Checker,
+    metric_ids: [i64; 8],
+    directions: [i64; 8],
+    count: i64,
+}
+
+struct CollectAlternativeCandidateMetricsResult {
+    checker: Checker,
+    known: [i64; 8],
+    values: [f64; 8],
+}
+
+struct CollectAuditSectionsResult {
+    checker: Checker,
+    info: AuditInfo,
+    seen: [i64; 4],
+}
+
+struct CollectAuditMetricsSectionResult {
+    checker: Checker,
+    info: AuditInfo,
+    seen: [i64; 8],
+}
+
+struct CollectAuditIdResult {
+    checker: Checker,
+    id: i64,
+}
+
+struct CollectAuditMechanisticFieldsResult {
+    checker: Checker,
+    seen: [i64; 6],
+    values: [f64; 6],
+}
+
+struct CollectAuditCounterexampleFieldsResult {
+    checker: Checker,
+    seen: [i64; 6],
+    names: [Name; 6],
+    values: [f64; 6],
+}
+
+struct CollectAuditPosteriorWeightFieldsResult {
+    checker: Checker,
+    seen: [i64; 16],
+    weights: [f64; 16],
 }
 
 
@@ -430,15 +506,20 @@ fn monomorphize_fields(
     args: TypeEntryList,
 ) -> (Option<Box<FieldInfoList> >, i64) with Mut, Panic, Div, Alloc {
     match fields {
-        None => (None, 0)
+        None => {
+            let empty_fields: Option<Box<FieldInfoList> > = None
+            return (empty_fields, 0)
+        }
         Some(fl) => {
             let head = (*fl).head
             let new_ty = substitute_type_param(head.ty, tp_count, tp_names, args)
             let new_head = FieldInfo { name: head.name, ty: new_ty }
             let rest = monomorphize_fields((*fl).tail, tp_count, tp_names, args)
-            (Some(Box::new(FieldInfoList { head: new_head, tail: rest.0 })), 1 + rest.1)
+            return (Some(Box::new(FieldInfoList { head: new_head, tail: rest.0 })), 1 + rest.1)
         }
     }
+    let empty_fields: Option<Box<FieldInfoList> > = None
+    (empty_fields, 0)
 }
 
 // If ty is a TyNamed whose name matches a type parameter, replace with the concrete type.
@@ -488,6 +569,9 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         studies: empty_study_table(),
         ontologies: empty_ontology_table(),
         ontology_kernel: ontology_kernel_empty(),
+        ontology_cache_shadow_slot_count: 0,
+        ontology_cache_shadow_slots: [0; 6],
+        ontology_cache_shadow_subclass_matrix: [false; 36],
         hyper_exprs: hyper_expr_table_new(),
         models: model_table_new(),
         model_families: model_family_table_new(),
@@ -542,7 +626,7 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         type_depth: 0,
         expr_depth: 0,
         complexity_budget: 0,
-        const_int_name_bufs: [0; 16384],
+        const_int_name_bufs: [0 as i8; 16384],
         const_int_name_lens: [0; 128],
         const_int_values: [0; 128],
         const_int_known: [0; 128],
@@ -575,6 +659,9 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).studies = empty_study_table()
     (*raw).ontologies = empty_ontology_table()
     (*raw).ontology_kernel = ontology_kernel_empty()
+    (*raw).ontology_cache_shadow_slot_count = 0
+    (*raw).ontology_cache_shadow_slots = [0; 6]
+    (*raw).ontology_cache_shadow_subclass_matrix = [false; 36]
     (*raw).hyper_exprs = hyper_expr_table_new()
     (*raw).models = model_table_new()
     (*raw).model_families = model_family_table_new()
@@ -629,7 +716,11 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).type_depth = 0
     (*raw).expr_depth = 0
     (*raw).complexity_budget = 0
-    (*raw).const_int_name_bufs = [0; 16384]
+    var const_name_buf_i: i64 = 0
+    while const_name_buf_i < 16384 {
+        (*raw).const_int_name_bufs[const_name_buf_i as usize] = 0 as i8
+        const_name_buf_i = const_name_buf_i + 1
+    }
     (*raw).const_int_name_lens = [0; 128]
     (*raw).const_int_values = [0; 128]
     (*raw).const_int_known = [0; 128]
@@ -661,6 +752,9 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).studies = src.studies
     (*dst).ontologies = src.ontologies
     (*dst).ontology_kernel = src.ontology_kernel
+    (*dst).ontology_cache_shadow_slot_count = src.ontology_cache_shadow_slot_count
+    (*dst).ontology_cache_shadow_slots = src.ontology_cache_shadow_slots
+    (*dst).ontology_cache_shadow_subclass_matrix = src.ontology_cache_shadow_subclass_matrix
     (*dst).hyper_exprs = src.hyper_exprs
     (*dst).models = src.models
     (*dst).model_families = src.model_families
@@ -735,6 +829,286 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).refine_cond_env = src.refine_cond_env
 }
 
+fn checker_note_type_error_mut(c: *mut Checker) with Mut {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+}
+
+fn checker_enter_type_expr_mut(c: *mut Checker) -> bool with Mut, Panic, Div {
+    if (*c).type_depth >= MAX_TYPE_DEPTH {
+        checker_note_type_error_mut(c)
+        return false
+    }
+    if (*c).complexity_budget + 1 > MAX_TYPE_COMPLEXITY {
+        checker_note_type_error_mut(c)
+        return false
+    }
+    (*c).type_depth = (*c).type_depth + 1
+    (*c).complexity_budget = (*c).complexity_budget + 1
+    true
+}
+
+fn checker_exit_type_expr_mut(c: *mut Checker) with Mut {
+    if (*c).type_depth > 0 {
+        (*c).type_depth = (*c).type_depth - 1
+    }
+}
+
+fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry with Mut, Panic, Div, Alloc {
+    let name = checker_copy_string_list_to_name(path.segments)
+    if name_is_i8(name) {
+        ty_i8()
+    } else if name_is_i32(name) {
+        ty_i32()
+    } else if name_is_i64(name) {
+        ty_i64()
+    } else if name_is_u8(name) {
+        ty_u8()
+    } else if name_is_u32(name) {
+        ty_u32()
+    } else if name_is_u64(name) {
+        ty_u64()
+    } else if name_is_f32(name) {
+        ty_f32()
+    } else if name_is_f64(name) {
+        ty_f64()
+    } else if name_is_bool(name) {
+        ty_bool()
+    } else if name_is_string(name) {
+        ty_string()
+    } else if name_is_char(name) {
+        ty_char()
+    } else {
+        let bound_ty = (*c).env.lookup(name)
+        if bound_ty.kind != TypeKind::TyError || bound_ty.ontology_id >= 0 {
+            bound_ty
+        } else {
+            ty_named(name)
+        }
+    }
+}
+
+fn checker_lower_single_wrapper_arg_mut(c: *mut Checker, opt: Option<Box<TypeExprList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(args) => {
+            match (*args).tail {
+                None => checker_lower_type_expr_mut(c, (*args).head)
+                Some(_) => {
+                    checker_note_type_error_mut(c)
+                    ty_error()
+                }
+            }
+        }
+        None => {
+            checker_note_type_error_mut(c)
+            ty_error()
+        }
+    }
+}
+
+fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTypeInfo> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(info_box) => {
+            let info = *info_box
+            let inner_ty = checker_lower_type_expr_mut(c, *info.inner_type)
+            if !knowledge_metadata_is_valid(info.validity) {
+                checker_note_type_error_mut(c)
+            }
+            let meta = knowledge_meta_from_type_info(info)
+            if !knowledge_meta_is_valid(meta) {
+                checker_note_type_error_mut(c)
+            }
+            var eps_val: f64 = -1.0
+            match info.epsilon {
+                Some(eb) => {
+                    let bound = *eb
+                    if bound.value < 0.0 || bound.value > 1.0 {
+                        checker_note_type_error_mut(c)
+                    } else {
+                        eps_val = bound.value
+                    }
+                }
+                None => {}
+            }
+            ty_knowledge(inner_ty, eps_val)
+        }
+        None => {
+            checker_note_type_error_mut(c)
+            ty_error()
+        }
+    }
+}
+
+fn checker_lower_contest_type_mut(c: *mut Checker, opt: Option<Box<TypeExprList> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(args) => {
+            match (*args).tail {
+                None => {
+                    let inner_ty = checker_lower_type_expr_mut(c, (*args).head)
+                    if inner_ty.kind == TypeKind::TyError {
+                        ty_error()
+                    } else {
+                        ty_contest(inner_ty, -1)
+                    }
+                }
+                Some(rest) => {
+                    match (*rest).tail {
+                        Some(last) => {
+                            match (*last).tail {
+                                Some(_) => {
+                                    checker_note_type_error_mut(c)
+                                    ty_error()
+                                }
+                                None => {
+                                    let inner_ty = checker_lower_type_expr_mut(c, (*args).head)
+                                    let family_ty = checker_lower_type_expr_mut(c, (*rest).head)
+                                    let policy_ty = checker_lower_type_expr_mut(c, (*last).head)
+                                    if inner_ty.kind == TypeKind::TyError || family_ty.kind == TypeKind::TyError || policy_ty.kind == TypeKind::TyError {
+                                        return ty_error()
+                                    }
+                                    if family_ty.kind != TypeKind::TyModelFamily {
+                                        checker_note_type_error_mut(c)
+                                        return ty_error()
+                                    }
+                                    if policy_ty.kind != TypeKind::TyPolicy {
+                                        checker_note_type_error_mut(c)
+                                        return ty_error()
+                                    }
+                                    if !types_compatible(model_output_ty(family_ty), inner_ty) || !types_compatible(knowledge_inner(policy_ty), inner_ty) {
+                                        checker_note_type_error_mut(c)
+                                        return ty_error()
+                                    }
+                                    if family_ty.epistemic_meta_id < 0 || family_ty.epistemic_meta_id >= (*c).model_families.count {
+                                        checker_note_type_error_mut(c)
+                                        return ty_error()
+                                    }
+                                    let family_info = (*c).model_families.get(family_ty.epistemic_meta_id)
+                                    var info = contest_info_from_family_signature(family_info, policy_ty.epistemic_meta_id)
+                                    info = contest_info_attach_span(info, span)
+                                    info = contest_info_attach_family_id(info, family_ty.epistemic_meta_id)
+                                    let add_result = (*c).contests.add(info)
+                                    (*c).contests = add_result.0
+                                    ty_contest(inner_ty, add_result.1)
+                                }
+                            }
+                        }
+                        None => {
+                            checker_note_type_error_mut(c)
+                            ty_error()
+                        }
+                    }
+                }
+            }
+        }
+        None => {
+            checker_note_type_error_mut(c)
+            ty_error()
+        }
+    }
+}
+
+fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if !checker_enter_type_expr_mut(c) {
+        return ty_error()
+    }
+
+    let lowered = match te.kind {
+        TypeExprKind::TypeNamed => checker_lower_named_type_mut(c, te.path)
+        TypeExprKind::TypeUnit => ty_unit()
+        TypeExprKind::TypeNever => ty_never()
+        TypeExprKind::TypeInfer => ty_unknown()
+        TypeExprKind::TypeSelfUpper => (*c).current_impl_type
+        TypeExprKind::TypeKnowledge => checker_lower_knowledge_type_mut(c, te.knowledge_info)
+        TypeExprKind::TypePolicy => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_policy(inner_ty, -1) }
+        }
+        TypeExprKind::TypeDecisionPolicy => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_decision_policy(inner_ty, -1) }
+        }
+        TypeExprKind::TypeDeferralPolicy => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_deferral_policy(inner_ty, -1) }
+        }
+        TypeExprKind::TypeAcquisitionPolicy => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_acquisition_policy(inner_ty, -1) }
+        }
+        TypeExprKind::TypeAcquisitionPlan => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_acquisition_plan(inner_ty, -1) }
+        }
+        TypeExprKind::TypeRecoursePolicy => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_recourse_policy(inner_ty, -1) }
+        }
+        TypeExprKind::TypeRecoursePlan => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_recourse_plan(inner_ty, -1) }
+        }
+        TypeExprKind::TypeTransitionPolicy => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_transition_policy(inner_ty, -1) }
+        }
+        TypeExprKind::TypeTransitionPlan => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_transition_plan(inner_ty, -1) }
+        }
+        TypeExprKind::TypeMonitoringPolicy => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_monitoring_policy(inner_ty, -1) }
+        }
+        TypeExprKind::TypeObservedTransition => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_observed_transition(inner_ty, -1) }
+        }
+        TypeExprKind::TypeRollbackCertificate => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_rollback_certificate(inner_ty, -1) }
+        }
+        TypeExprKind::TypeAlternativePolicy => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_alternative_policy(inner_ty, -1) }
+        }
+        TypeExprKind::TypeAlternativeSet => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_alternative_set(inner_ty, -1) }
+        }
+        TypeExprKind::TypeAlternativeOption => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_alternative_option(inner_ty, -1) }
+        }
+        TypeExprKind::TypeAdmissible => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_admissible(inner_ty, -1) }
+        }
+        TypeExprKind::TypeDeferred => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_deferred(inner_ty, -1) }
+        }
+        TypeExprKind::TypeContest => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_contest(inner_ty, -1) }
+        }
+        TypeExprKind::TypeRobust => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_robust(inner_ty, -1, -1, -1) }
+        }
+        TypeExprKind::TypeValidated => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_validated(inner_ty, -1.0) }
+        }
+        _ => {
+            checker_note_type_error_mut(c)
+            ty_error()
+        }
+    }
+
+    checker_exit_type_expr_mut(c)
+    lowered
+}
+
 fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
     let next = (*c).collect_items(items)
     checker_store_from_value(c, next)
@@ -743,6 +1117,826 @@ fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) wit
 fn checker_check_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
     let next = (*c).check_items(items)
     checker_store_from_value(c, next)
+}
+
+fn checker_check_expr_mut(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let pair = (*c).check_expr(e)
+    checker_store_from_value(c, pair.0)
+    pair.1
+}
+
+fn checker_check_contest_expr_expected_mut(c: *mut Checker, e: Expr, expected_contest_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if expected_contest_ty.kind != TypeKind::TyContest {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if !contest_model_list_present(e.args) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    var subject_ty = ty_error()
+    match e.left {
+        Some(subject_expr) => {
+            if (*subject_expr).kind == ExprKind::ExprIdent {
+                subject_ty = (*c).env.lookup((*subject_expr).name)
+            } else {
+                checker_note_type_error_mut(c)
+                return ty_error()
+            }
+        }
+        None => {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+    }
+    if !types_compatible(subject_ty, knowledge_inner(expected_contest_ty)) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    var info = contest_info_from_expr_models(e.args)
+    info = contest_info_attach_span(info, e.span)
+    if expected_contest_ty.epistemic_meta_id >= 0 && expected_contest_ty.epistemic_meta_id < (*c).contests.count {
+        let expected_info = (*c).contests.get(expected_contest_ty.epistemic_meta_id)
+        info.family_id = expected_info.family_id
+        info.policy_id = expected_info.policy_id
+        info.audit_id = expected_info.audit_id
+        var i: i64 = 0
+        while i < 8 {
+            info.metric_known[i as usize] = expected_info.metric_known[i as usize]
+            info.metric_values[i as usize] = expected_info.metric_values[i as usize]
+            i = i + 1
+        }
+        info.mechanistic_report_id = expected_info.mechanistic_report_id
+        info.posterior_weights_id = expected_info.posterior_weights_id
+        info.counterexample_id = expected_info.counterexample_id
+        info.provenance_bundle_id = expected_info.provenance_bundle_id
+        if expected_info.family_id >= 0 {
+            if expected_info.family_id >= (*c).model_families.count {
+                checker_note_type_error_mut(c)
+                return ty_error()
+            }
+            let family_info = (*c).model_families.get(expected_info.family_id)
+            if !contest_model_lists_match(e.args, family_info, 0) {
+                checker_note_type_error_mut(c)
+                return ty_error()
+            }
+            if !types_compatible(subject_ty, family_info.input_ty) {
+                checker_note_type_error_mut(c)
+                return ty_error()
+            }
+        }
+        (*c).contests.entries[expected_contest_ty.epistemic_meta_id as usize] = info
+        ty_contest(knowledge_inner(expected_contest_ty), expected_contest_ty.epistemic_meta_id)
+    } else {
+        let add_result = (*c).contests.add(info)
+        (*c).contests = add_result.0
+        ty_contest(knowledge_inner(expected_contest_ty), add_result.1)
+    }
+}
+
+fn checker_check_contest_witness_names_mut(c: *mut Checker, witness_name: Name, contest_name: Name, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc {
+    let witness_kind = contest_witness_kind_from_name(witness_name)
+    if witness_kind < 0 {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let contest_ty = (*c).env.lookup(contest_name)
+    if contest_ty.kind != TypeKind::TyContest {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if contest_ty.epistemic_meta_id < 0 || contest_ty.epistemic_meta_id >= (*c).contests.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let contest_id = contest_ty.epistemic_meta_id
+    let contest_info = (*c).contests.get(contest_id)
+    if contest_info.family_id < 0 || contest_info.policy_id < 0 {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if contest_witness_requires_metric(witness_kind) {
+        let metric_id = contest_witness_metric_id(witness_kind)
+        if metric_id < 0 || contest_info.metric_known[metric_id as usize] == 0 {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+    }
+    if contest_witness_requires_mechanistic(witness_kind) {
+        if contest_info.mechanistic_report_id < 0 || contest_info.mechanistic_report_id >= (*c).mechanistic_reports.count {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+    }
+    if witness_kind == CONTEST_WITNESS_DISAGREEMENT {
+        if contest_info.metric_known[CONTEST_METRIC_SIGN_CONSENSUS as usize] == 0
+        || contest_info.metric_known[CONTEST_METRIC_RELATIVE_BAND as usize] == 0
+        || contest_info.metric_known[CONTEST_METRIC_MAX_TAIL_RISK as usize] == 0
+        || contest_info.metric_known[CONTEST_METRIC_IDENTIFIABILITY_FLOOR as usize] == 0 {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+        if contest_info.counterexample_id < 0 || contest_info.counterexample_id >= (*c).counterexamples.count {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+        if contest_info.posterior_weights_id < 0 || contest_info.posterior_weights_id >= (*c).posterior_weights.count {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+    }
+    if witness_kind == CONTEST_WITNESS_COUNTEREXAMPLE {
+        if contest_info.counterexample_id < 0 || contest_info.counterexample_id >= (*c).counterexamples.count {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+    }
+    if witness_kind == CONTEST_WITNESS_POSTERIOR_WEIGHTS {
+        if contest_info.posterior_weights_id < 0 || contest_info.posterior_weights_id >= (*c).posterior_weights.count {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+    }
+    let add_result = (*c).contest_witnesses.add(contest_witness_info_new(span, witness_kind, contest_id))
+    (*c).contest_witnesses = add_result.0
+    contest_witness_result_type(witness_kind)
+}
+
+fn checker_decision_policy_requirements_hold_mut(c: *mut Checker, reqs: Option<Box<PolicyRequirementInfoList> >, proof_info: RobustProofInfo) -> bool with Mut, Panic, Div, Alloc {
+    var cursor = reqs
+    while true {
+        match cursor {
+            Some(list) => {
+                let req = (*list).head
+                if req.metric_id < 0 || proof_info.metric_known[req.metric_id as usize] == 0 {
+                    checker_note_type_error_mut(c)
+                    return false
+                }
+                let metric_value = proof_info.metric_values[req.metric_id as usize]
+                if !policy_requirement_holds(metric_value, req.op, req.threshold) {
+                    checker_note_type_error_mut(c)
+                    return false
+                }
+                cursor = (*list).tail
+            }
+            None => {
+                return true
+            }
+        }
+    }
+    true
+}
+
+fn checker_admit_action_names_mut(c: *mut Checker, value_name: Name, robust_ty: TypeEntry, decision_name: Name, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc {
+    let value_ty = (*c).env.lookup(value_name)
+    if robust_ty.kind != TypeKind::TyRobust {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if robust_ty.robustness_level_id < 0 || robust_ty.robustness_scope_id < 0 {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if robust_ty.epistemic_meta_id < 0 || robust_ty.epistemic_meta_id >= (*c).robust_proofs.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let decision_ty = (*c).env.lookup(decision_name)
+    if decision_ty.kind != TypeKind::TyDecisionPolicy {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if decision_ty.epistemic_meta_id < 0 || decision_ty.epistemic_meta_id >= (*c).decision_policies.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let inner_ty = knowledge_inner(robust_ty)
+    if !types_compatible(inner_ty, value_ty) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let policy_info = (*c).decision_policies.get(decision_ty.epistemic_meta_id)
+    if !types_compatible(policy_info.target_ty, inner_ty) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let proof_info = (*c).robust_proofs.get(robust_ty.epistemic_meta_id)
+    if policy_info.requirement_count > 0 {
+        if !checker_decision_policy_requirements_hold_mut(c, policy_info.requirements, proof_info) {
+            return ty_error()
+        }
+    }
+    let cert_info = DecisionCertificateInfo {
+        span_start: span.start,
+        span_end: span.end,
+        audit_id: proof_info.audit_id,
+        robust_proof_id: robust_ty.epistemic_meta_id,
+        decision_policy_id: decision_ty.epistemic_meta_id,
+        inner_ty: inner_ty,
+        metric_known: proof_info.metric_known,
+        metric_values: proof_info.metric_values,
+    }
+    let add_result = (*c).decision_certificates.add(cert_info)
+    (*c).decision_certificates = add_result.0
+    ty_admissible(inner_ty, add_result.1)
+}
+
+fn checker_defer_action_with_evidence_mut(c: *mut Checker, value_name: Name, evidence_ty: TypeEntry, deferral_name: Name, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc {
+    let value_ty = (*c).env.lookup(value_name)
+    let policy_ty = (*c).env.lookup(deferral_name)
+    if policy_ty.kind != TypeKind::TyDeferralPolicy {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if policy_ty.epistemic_meta_id < 0 || policy_ty.epistemic_meta_id >= (*c).deferral_policies.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let policy_info = (*c).deferral_policies.get(policy_ty.epistemic_meta_id)
+
+    if evidence_ty.kind == TypeKind::TyContest {
+        let inner_ty = knowledge_inner(evidence_ty)
+        if !types_compatible(inner_ty, value_ty) || !types_compatible(policy_info.target_ty, inner_ty) {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+        if evidence_ty.epistemic_meta_id < 0 || evidence_ty.epistemic_meta_id >= (*c).contests.count {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+        let contest_info = (*c).contests.get(evidence_ty.epistemic_meta_id)
+        if contest_info.family_id < 0 || contest_info.policy_id < 0 {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+        if policy_info.requirement_count > 0 {
+            if !checker_policy_requirements_hold_mut(c, policy_info.requirements, evidence_ty.epistemic_meta_id) {
+                return ty_error()
+            }
+        }
+        let cert_info = DeferredCertificateInfo {
+            span_start: span.start,
+            span_end: span.end,
+            audit_id: contest_info.audit_id,
+            contest_id: evidence_ty.epistemic_meta_id,
+            robust_proof_id: -1,
+            deferral_policy_id: policy_ty.epistemic_meta_id,
+            evidence_kind: DEFERRAL_EVIDENCE_CONTEST,
+            reason_code: DEFERRAL_REASON_STRUCTURAL_DISAGREEMENT,
+            inner_ty: inner_ty,
+            metric_known: contest_info.metric_known,
+            metric_values: contest_info.metric_values,
+        }
+        let add_result = (*c).deferred_certificates.add(cert_info)
+        (*c).deferred_certificates = add_result.0
+        return ty_deferred(inner_ty, add_result.1)
+    }
+
+    if evidence_ty.kind == TypeKind::TyRobust {
+        let inner_ty = knowledge_inner(evidence_ty)
+        if !types_compatible(inner_ty, value_ty) || !types_compatible(policy_info.target_ty, inner_ty) {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+        if evidence_ty.robustness_level_id < 0 || evidence_ty.robustness_scope_id < 0 {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+        if evidence_ty.epistemic_meta_id < 0 || evidence_ty.epistemic_meta_id >= (*c).robust_proofs.count {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+        let proof_info = (*c).robust_proofs.get(evidence_ty.epistemic_meta_id)
+        if proof_info.contest_id < 0 {
+            checker_note_type_error_mut(c)
+            return ty_error()
+        }
+        if policy_info.requirement_count > 0 {
+            if !checker_decision_policy_requirements_hold_mut(c, policy_info.requirements, proof_info) {
+                return ty_error()
+            }
+        }
+        let cert_info = DeferredCertificateInfo {
+            span_start: span.start,
+            span_end: span.end,
+            audit_id: proof_info.audit_id,
+            contest_id: proof_info.contest_id,
+            robust_proof_id: evidence_ty.epistemic_meta_id,
+            deferral_policy_id: policy_ty.epistemic_meta_id,
+            evidence_kind: DEFERRAL_EVIDENCE_ROBUST,
+            reason_code: DEFERRAL_REASON_STRUCTURAL_DISAGREEMENT,
+            inner_ty: inner_ty,
+            metric_known: proof_info.metric_known,
+            metric_values: proof_info.metric_values,
+        }
+        let add_result = (*c).deferred_certificates.add(cert_info)
+        (*c).deferred_certificates = add_result.0
+        return ty_deferred(inner_ty, add_result.1)
+    }
+
+    checker_note_type_error_mut(c)
+    ty_error()
+}
+
+fn checker_deferral_reason_from_deferred_mut(c: *mut Checker, deferred_ty: TypeEntry, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if deferred_ty.kind != TypeKind::TyDeferred {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if deferred_ty.epistemic_meta_id < 0 || deferred_ty.epistemic_meta_id >= (*c).deferred_certificates.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let info = DeferredReasonWitnessInfo {
+        span_start: span.start,
+        span_end: span.end,
+        deferred_certificate_id: deferred_ty.epistemic_meta_id,
+    }
+    let add_result = (*c).deferred_reason_witnesses.add(info)
+    (*c).deferred_reason_witnesses = add_result.0
+    ty_named(deferral_reason_type_name())
+}
+
+fn checker_transition_step_value_ty_mut(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if e.kind == ExprKind::ExprIntLit {
+        return ty_i64()
+    }
+    if e.kind == ExprKind::ExprFloatLit {
+        return ty_f64()
+    }
+    if e.kind == ExprKind::ExprIdent || e.kind == ExprKind::ExprPath {
+        return (*c).env.lookup(contest_model_name(e))
+    }
+    ty_error()
+}
+
+fn checker_transition_expr_value_repr_mut(e: Expr) -> Name with Mut, Panic, Div, Alloc {
+    if e.kind == ExprKind::ExprIdent || e.kind == ExprKind::ExprPath {
+        return contest_model_name(e)
+    }
+    if e.kind == ExprKind::ExprIntLit || e.kind == ExprKind::ExprFloatLit {
+        return make_name("literal")
+    }
+    make_name("transition_value")
+}
+
+fn checker_transition_expr_value_matches_candidate_mut(step_expr: Expr, candidate_expr: Expr) -> bool with Mut, Panic, Div, Alloc {
+    if step_expr.kind == ExprKind::ExprIntLit && candidate_expr.kind == ExprKind::ExprIntLit {
+        return step_expr.int_val == candidate_expr.int_val
+    }
+    if step_expr.kind == ExprKind::ExprFloatLit && candidate_expr.kind == ExprKind::ExprFloatLit {
+        return step_expr.float_val == candidate_expr.float_val
+    }
+    if step_expr.kind == ExprKind::ExprIntLit && candidate_expr.kind == ExprKind::ExprFloatLit {
+        return (step_expr.int_val as f64) == candidate_expr.float_val
+    }
+    if step_expr.kind == ExprKind::ExprFloatLit && candidate_expr.kind == ExprKind::ExprIntLit {
+        return step_expr.float_val == (candidate_expr.int_val as f64)
+    }
+    if (step_expr.kind == ExprKind::ExprIdent || step_expr.kind == ExprKind::ExprPath)
+        && (candidate_expr.kind == ExprKind::ExprIdent || candidate_expr.kind == ExprKind::ExprPath) {
+        return name_eq(contest_model_name(step_expr), contest_model_name(candidate_expr))
+    }
+    false
+}
+
+fn checker_transition_metric_from_candidate_mut(candidate: AlternativeCandidateInfo, metric_id: i64) -> (i64, f64) with Mut, Panic, Div {
+    if metric_id == TRANSITION_METRIC_INTERVENTION_COST {
+        if candidate.metric_known[ALTERNATIVE_METRIC_INTERVENTION_COST as usize] == 1 {
+            return (1, candidate.metric_values[ALTERNATIVE_METRIC_INTERVENTION_COST as usize])
+        }
+    }
+    if metric_id == TRANSITION_METRIC_RESIDUAL_TAIL_RISK {
+        if candidate.metric_known[ALTERNATIVE_METRIC_RESIDUAL_TAIL_RISK as usize] == 1 {
+            return (1, candidate.metric_values[ALTERNATIVE_METRIC_RESIDUAL_TAIL_RISK as usize])
+        }
+    }
+    if metric_id == TRANSITION_METRIC_MECHANISTIC_DIVERGENCE {
+        if candidate.metric_known[ALTERNATIVE_METRIC_MECHANISTIC_DIVERGENCE as usize] == 1 {
+            return (1, candidate.metric_values[ALTERNATIVE_METRIC_MECHANISTIC_DIVERGENCE as usize])
+        }
+    }
+    if metric_id == TRANSITION_METRIC_ADMISSIBILITY_MARGIN {
+        if candidate.metric_known[ALTERNATIVE_METRIC_ADMISSIBILITY_MARGIN as usize] == 1 {
+            return (1, candidate.metric_values[ALTERNATIVE_METRIC_ADMISSIBILITY_MARGIN as usize])
+        }
+    }
+    (0, 0.0)
+}
+
+fn checker_transition_requirements_hold_mut(c: *mut Checker, reqs: Option<Box<PolicyRequirementInfoList> >, candidate: AlternativeCandidateInfo) -> bool with Mut, Panic, Div, Alloc {
+    var cursor = reqs
+    while true {
+        match cursor {
+            Some(list) => {
+                let req = (*list).head
+                let metric_pair = checker_transition_metric_from_candidate_mut(candidate, req.metric_id)
+                if metric_pair.0 == 0 {
+                    checker_note_type_error_mut(c)
+                    return false
+                }
+                if !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
+                    checker_note_type_error_mut(c)
+                    return false
+                }
+                cursor = (*list).tail
+            }
+            None => {
+                return true
+            }
+        }
+    }
+    true
+}
+
+fn checker_transition_metric_from_plan_mut(plan: TransitionPlanInfo, metric_id: i64) -> (i64, f64) with Mut, Panic, Div {
+    if metric_id == TRANSITION_METRIC_INTERVENTION_COST {
+        if plan.metric_known[ALTERNATIVE_METRIC_INTERVENTION_COST as usize] == 1 {
+            return (1, plan.metric_values[ALTERNATIVE_METRIC_INTERVENTION_COST as usize])
+        }
+    }
+    if metric_id == TRANSITION_METRIC_RESIDUAL_TAIL_RISK {
+        if plan.metric_known[ALTERNATIVE_METRIC_RESIDUAL_TAIL_RISK as usize] == 1 {
+            return (1, plan.metric_values[ALTERNATIVE_METRIC_RESIDUAL_TAIL_RISK as usize])
+        }
+    }
+    if metric_id == TRANSITION_METRIC_MECHANISTIC_DIVERGENCE {
+        if plan.metric_known[ALTERNATIVE_METRIC_MECHANISTIC_DIVERGENCE as usize] == 1 {
+            return (1, plan.metric_values[ALTERNATIVE_METRIC_MECHANISTIC_DIVERGENCE as usize])
+        }
+    }
+    if metric_id == TRANSITION_METRIC_ADMISSIBILITY_MARGIN {
+        if plan.metric_known[ALTERNATIVE_METRIC_ADMISSIBILITY_MARGIN as usize] == 1 {
+            return (1, plan.metric_values[ALTERNATIVE_METRIC_ADMISSIBILITY_MARGIN as usize])
+        }
+    }
+    (0, 0.0)
+}
+
+fn checker_monitoring_requirements_hold_mut(c: *mut Checker, reqs: Option<Box<PolicyRequirementInfoList> >, plan: TransitionPlanInfo) -> bool with Mut, Panic, Div, Alloc {
+    var cursor = reqs
+    while true {
+        match cursor {
+            Some(list) => {
+                let req = (*list).head
+                let metric_pair = checker_transition_metric_from_plan_mut(plan, req.metric_id)
+                if metric_pair.0 == 0 {
+                    checker_note_type_error_mut(c)
+                    return false
+                }
+                if !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
+                    checker_note_type_error_mut(c)
+                    return false
+                }
+                cursor = (*list).tail
+            }
+            None => {
+                return true
+            }
+        }
+    }
+    true
+}
+
+fn checker_monitoring_requirements_hold_silent_mut(reqs: Option<Box<PolicyRequirementInfoList> >, plan: TransitionPlanInfo) -> bool with Mut, Panic, Div {
+    var cursor = reqs
+    while true {
+        match cursor {
+            Some(list) => {
+                let req = (*list).head
+                let metric_pair = checker_transition_metric_from_plan_mut(plan, req.metric_id)
+                if metric_pair.0 == 0 {
+                    return false
+                }
+                if !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
+                    return false
+                }
+                cursor = (*list).tail
+            }
+            None => {
+                return true
+            }
+        }
+    }
+    true
+}
+
+fn checker_monitoring_reason_code_from_reqs_mut(reqs: Option<Box<PolicyRequirementInfoList> >, plan: TransitionPlanInfo) -> i64 with Mut, Panic, Div {
+    var cursor = reqs
+    while true {
+        match cursor {
+            Some(list) => {
+                let req = (*list).head
+                let metric_pair = checker_transition_metric_from_plan_mut(plan, req.metric_id)
+                if metric_pair.0 == 0 || !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
+                    if req.metric_id == TRANSITION_METRIC_MECHANISTIC_DIVERGENCE {
+                        return DEFERRAL_REASON_MECHANISTIC_CONFLICT
+                    }
+                    if req.metric_id == TRANSITION_METRIC_RESIDUAL_TAIL_RISK {
+                        return DEFERRAL_REASON_TAIL_RISK
+                    }
+                    return DEFERRAL_REASON_POLICY_INCOMPLETE
+                }
+                cursor = (*list).tail
+            }
+            None => {
+                return DEFERRAL_REASON_POLICY_INCOMPLETE
+            }
+        }
+    }
+    DEFERRAL_REASON_POLICY_INCOMPLETE
+}
+
+fn checker_commit_alternative_names_mut(c: *mut Checker, value_name: Name, option_name: Name, protocol_name: Name, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc {
+    let value_ty = (*c).env.lookup(value_name)
+    let option_ty = (*c).env.lookup(option_name)
+    if option_ty.kind != TypeKind::TyAlternativeOption
+        || option_ty.epistemic_meta_id < 0
+        || option_ty.epistemic_meta_id >= (*c).alternative_candidates.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let candidate_info = (*c).alternative_candidates.get(option_ty.epistemic_meta_id)
+    let inner_ty = knowledge_inner(option_ty)
+    if !types_compatible(inner_ty, value_ty) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let protocol_id = (*c).transition_protocols.find(protocol_name)
+    if protocol_id < 0 || protocol_id >= (*c).transition_protocols.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let protocol_info = (*c).transition_protocols.get(protocol_id)
+    if !types_compatible(protocol_info.target_ty, option_ty) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let policy_id = protocol_info.transition_policy_id
+    if policy_id < 0 || policy_id >= (*c).transition_policies.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let policy_info = (*c).transition_policies.get(policy_id)
+    if !types_compatible(policy_info.target_ty, inner_ty) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if policy_info.max_steps >= 0 && protocol_info.step_count > policy_info.max_steps {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if policy_info.requirement_count > 0 {
+        if !checker_transition_requirements_hold_mut(c, policy_info.requirements, candidate_info) {
+            return ty_error()
+        }
+    }
+
+    var final_step_expr = candidate_info.value_expr
+    var final_step_repr = candidate_info.value_repr
+    var i: i64 = 0
+    while i < protocol_info.step_count && i < 16 {
+        let step_id = protocol_info.step_ids[i as usize]
+        if step_id >= 0 && step_id < (*c).transition_steps.count {
+            let step_info = (*c).transition_steps.get(step_id)
+            let step_value_ty = checker_transition_step_value_ty_mut(c, step_info.value_expr)
+            if !types_compatible(inner_ty, step_value_ty) {
+                checker_note_type_error_mut(c)
+                return ty_error()
+            }
+            if step_info.requirement_count > 0 {
+                if !checker_transition_requirements_hold_mut(c, step_info.requirements, candidate_info) {
+                    return ty_error()
+                }
+            }
+            final_step_expr = step_info.value_expr
+            final_step_repr = checker_transition_expr_value_repr_mut(step_info.value_expr)
+        }
+        i = i + 1
+    }
+    if protocol_info.step_count <= 0 || !checker_transition_expr_value_matches_candidate_mut(final_step_expr, candidate_info.value_expr) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+
+    let plan_info = TransitionPlanInfo {
+        span_start: span.start,
+        span_end: span.end,
+        transition_policy_id: policy_id,
+        transition_protocol_id: protocol_id,
+        alternative_option_id: option_ty.epistemic_meta_id,
+        audit_id: candidate_info.audit_id,
+        contest_id: candidate_info.contest_id,
+        route_name: policy_info.route_name,
+        rollback_route_name: policy_info.rollback_route_name,
+        step_count: protocol_info.step_count,
+        final_value_repr: final_step_repr,
+        inner_ty: inner_ty,
+        metric_known: candidate_info.metric_known,
+        metric_values: candidate_info.metric_values,
+    }
+    let add_result = (*c).transition_plans.add(plan_info)
+    (*c).transition_plans = add_result.0
+    ty_transition_plan(inner_ty, add_result.1)
+}
+
+fn checker_transition_reason_from_plan_mut(c: *mut Checker, plan_ty: TypeEntry, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if plan_ty.kind != TypeKind::TyTransitionPlan {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if plan_ty.epistemic_meta_id < 0 || plan_ty.epistemic_meta_id >= (*c).transition_plans.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let info = TransitionReasonWitnessInfo {
+        span_start: span.start,
+        span_end: span.end,
+        transition_plan_id: plan_ty.epistemic_meta_id,
+    }
+    let add_result = (*c).transition_reason_witnesses.add(info)
+    (*c).transition_reason_witnesses = add_result.0
+    ty_named(transition_reason_type_name())
+}
+
+fn checker_observe_transition_names_mut(c: *mut Checker, value_name: Name, plan_ty: TypeEntry, monitoring_name: Name, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc {
+    let value_ty = (*c).env.lookup(value_name)
+    if plan_ty.kind != TypeKind::TyTransitionPlan
+        || plan_ty.epistemic_meta_id < 0
+        || plan_ty.epistemic_meta_id >= (*c).transition_plans.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let inner_ty = knowledge_inner(plan_ty)
+    if !types_compatible(inner_ty, value_ty) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let policy_ty = (*c).env.lookup(monitoring_name)
+    if policy_ty.kind != TypeKind::TyMonitoringPolicy
+        || policy_ty.epistemic_meta_id < 0
+        || policy_ty.epistemic_meta_id >= (*c).monitoring_policies.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let plan_info = (*c).transition_plans.get(plan_ty.epistemic_meta_id)
+    let policy_info = (*c).monitoring_policies.get(policy_ty.epistemic_meta_id)
+    if !types_compatible(policy_info.target_ty, inner_ty) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if policy_info.requirement_count > 0 {
+        if !checker_monitoring_requirements_hold_mut(c, policy_info.requirements, plan_info) {
+            return ty_error()
+        }
+    }
+    let observed_info = ObservedTransitionInfo {
+        span_start: span.start,
+        span_end: span.end,
+        transition_plan_id: plan_ty.epistemic_meta_id,
+        monitoring_policy_id: policy_ty.epistemic_meta_id,
+        audit_id: plan_info.audit_id,
+        contest_id: plan_info.contest_id,
+        route_name: if !name_is_empty(policy_info.route_name) { policy_info.route_name } else { plan_info.route_name },
+        rollback_route_name: if !name_is_empty(policy_info.rollback_route_name) { policy_info.rollback_route_name } else { plan_info.rollback_route_name },
+        inner_ty: inner_ty,
+        metric_known: plan_info.metric_known,
+        metric_values: plan_info.metric_values,
+    }
+    let add_result = (*c).observed_transitions.add(observed_info)
+    (*c).observed_transitions = add_result.0
+    ty_observed_transition(inner_ty, add_result.1)
+}
+
+fn checker_rollback_transition_names_mut(c: *mut Checker, value_name: Name, plan_ty: TypeEntry, monitoring_name: Name, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc {
+    let value_ty = (*c).env.lookup(value_name)
+    if plan_ty.kind != TypeKind::TyTransitionPlan
+        || plan_ty.epistemic_meta_id < 0
+        || plan_ty.epistemic_meta_id >= (*c).transition_plans.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let inner_ty = knowledge_inner(plan_ty)
+    if !types_compatible(inner_ty, value_ty) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let policy_ty = (*c).env.lookup(monitoring_name)
+    if policy_ty.kind != TypeKind::TyMonitoringPolicy
+        || policy_ty.epistemic_meta_id < 0
+        || policy_ty.epistemic_meta_id >= (*c).monitoring_policies.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let plan_info = (*c).transition_plans.get(plan_ty.epistemic_meta_id)
+    let policy_info = (*c).monitoring_policies.get(policy_ty.epistemic_meta_id)
+    if !types_compatible(policy_info.target_ty, inner_ty) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if policy_info.requirement_count <= 0 || checker_monitoring_requirements_hold_silent_mut(policy_info.requirements, plan_info) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let rollback_info = RollbackCertificateInfo {
+        span_start: span.start,
+        span_end: span.end,
+        transition_plan_id: plan_ty.epistemic_meta_id,
+        monitoring_policy_id: policy_ty.epistemic_meta_id,
+        audit_id: plan_info.audit_id,
+        contest_id: plan_info.contest_id,
+        route_name: if !name_is_empty(policy_info.route_name) { policy_info.route_name } else { plan_info.route_name },
+        rollback_route_name: if !name_is_empty(policy_info.rollback_route_name) { policy_info.rollback_route_name } else { plan_info.rollback_route_name },
+        reason_code: checker_monitoring_reason_code_from_reqs_mut(policy_info.requirements, plan_info),
+        inner_ty: inner_ty,
+        metric_known: plan_info.metric_known,
+        metric_values: plan_info.metric_values,
+    }
+    let add_result = (*c).rollback_certificates.add(rollback_info)
+    (*c).rollback_certificates = add_result.0
+    ty_rollback_certificate(inner_ty, add_result.1)
+}
+
+fn checker_policy_requirements_hold_mut(c: *mut Checker, reqs: Option<Box<PolicyRequirementInfoList> >, contest_id: i64) -> bool with Mut, Panic, Div, Alloc {
+    var cursor = reqs
+    while true {
+        match cursor {
+            Some(list) => {
+                let req = (*list).head
+                if req.metric_id < 0 || contest_id < 0 || contest_id >= (*c).contests.count {
+                    checker_note_type_error_mut(c)
+                    return false
+                }
+                let contest_info = (*c).contests.get(contest_id)
+                if contest_info.metric_known[req.metric_id as usize] != 1 {
+                    checker_note_type_error_mut(c)
+                    return false
+                }
+                let metric_value = contest_info.metric_values[req.metric_id as usize]
+                if !policy_requirement_holds(metric_value, req.op, req.threshold) {
+                    checker_note_type_error_mut(c)
+                    return false
+                }
+                cursor = (*list).tail
+            }
+            None => {
+                return true
+            }
+        }
+    }
+    true
+}
+
+fn checker_prove_robust_names_mut(c: *mut Checker, contest_name: Name, policy_name: Name, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let policy_ty = (*c).env.lookup(policy_name)
+    if policy_ty.kind != TypeKind::TyPolicy {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if policy_ty.epistemic_meta_id < 0 || policy_ty.epistemic_meta_id >= (*c).policies.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let policy_info = (*c).policies.get(policy_ty.epistemic_meta_id)
+    if policy_info.level_id < 0 || policy_info.scope_id < 0 {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+
+    let contest_ty = (*c).env.lookup(contest_name)
+    if contest_ty.kind != TypeKind::TyContest {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let contest_inner = knowledge_inner(policy_ty)
+    if !types_compatible(knowledge_inner(contest_ty), contest_inner) {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if contest_ty.epistemic_meta_id < 0 || contest_ty.epistemic_meta_id >= (*c).contests.count {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    let contest_info = (*c).contests.get(contest_ty.epistemic_meta_id)
+    if contest_info.family_id < 0 {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    if contest_info.policy_id >= 0 && contest_info.policy_id != policy_ty.epistemic_meta_id {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+
+    if policy_info.requirement_count > 0 {
+        if !checker_policy_requirements_hold_mut(c, policy_info.requirements, contest_ty.epistemic_meta_id) {
+            return ty_error()
+        }
+    }
+
+    let proof_info = robust_proof_info_from_contest(contest_ty.epistemic_meta_id, contest_info, policy_info, span)
+    let add_result = (*c).robust_proofs.add(proof_info)
+    (*c).robust_proofs = add_result.0
+    ty_robust(contest_inner, add_result.1, policy_info.level_id, policy_info.scope_id)
 }
 
 fn checker_check_items_inner_return_error_count_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
@@ -794,6 +1988,159 @@ fn checker_collect_then_check_inner_emit_status_mut(c: *mut Checker, items: Opti
 
 fn checker_error_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
     (*c).error_count
+}
+
+fn checker_ontology_cache_slot_name(idx: i64) -> Name with Mut, Panic, Div {
+    if idx == 0 { return make_name("cache_slot0") }
+    if idx == 1 { return make_name("cache_slot1") }
+    if idx == 2 { return make_name("cache_slot2") }
+    if idx == 3 { return make_name("cache_slot3") }
+    if idx == 4 { return make_name("cache_slot4") }
+    if idx == 5 { return make_name("cache_slot5") }
+    make_name("cache_slot")
+}
+
+fn checker_ontology_cache_slot_index(source_path: string, id: i64) -> i64 with IO, Mut, Panic, Div {
+    let count = ontology_side_table_cache_source_slot_count(source_path)
+    var i: i64 = 0
+    while i < count && i < 6 {
+        if ontology_side_table_cache_source_slot_at(source_path, i) == id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn checker_hydrate_ontology_kernel_from_side_table_cache(checker: Checker, source_path: string) -> Checker with IO, Mut, Panic, Div, Alloc {
+    var c = checker
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return c
+    }
+
+    c.ontology_kernel = ontology_kernel_empty()
+    let slot_count = ontology_side_table_cache_source_slot_count(source_path)
+    var i: i64 = 0
+    while i < slot_count && i < 6 {
+        let pair = ontology_kernel_add_class(c.ontology_kernel, checker_ontology_cache_slot_name(i), make_name("cache"))
+        c.ontology_kernel = pair.0
+        i = i + 1
+    }
+
+    let subclass_count = ontology_side_table_cache_source_subclass_axiom_count(source_path)
+    i = 0
+    while i < subclass_count && i < 4 {
+        let subject = ontology_side_table_cache_source_subclass_subject_at(source_path, i)
+        let object = ontology_side_table_cache_source_subclass_object_at(source_path, i)
+        c.ontology_kernel = ontology_kernel_add_axiom(c.ontology_kernel, OntologyAxiom {
+            axiom_type: owl_subclass_of(),
+            subject_idx: subject,
+            object_idx: object,
+            refinement_ref_id: 0 - 1,
+            property_name: empty_name(),
+            is_property_axiom: false,
+        })
+        i = i + 1
+    }
+
+    if ontology_side_table_cache_source_disjoint_axiom_count(source_path) > 0 {
+        c.ontology_kernel = ontology_kernel_add_axiom(c.ontology_kernel, OntologyAxiom {
+            axiom_type: owl_disjoint_classes(),
+            subject_idx: ontology_side_table_cache_source_disjoint_subject0(source_path),
+            object_idx: ontology_side_table_cache_source_disjoint_object0(source_path),
+            refinement_ref_id: 0 - 1,
+            property_name: empty_name(),
+            is_property_axiom: false,
+        })
+    }
+
+    c.ontology_kernel = ontology_kernel_materialize(c.ontology_kernel)
+    c.ontology_kernel.profile = ontology_kernel_check_profile(c.ontology_kernel)
+    c
+}
+
+pub fn checker_ontology_side_table_cache_kernel_subclass_verdict(source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    let child_idx = checker_ontology_cache_slot_index(source_path, child_id)
+    let parent_idx = checker_ontology_cache_slot_index(source_path, parent_id)
+    if child_idx < 0 || parent_idx < 0 {
+        return ontology_side_table_cache_verdict_reject()
+    }
+    var checker = checker_new()
+    checker = checker_hydrate_ontology_kernel_from_side_table_cache(checker, source_path)
+    if ontology_kernel_is_subclass(checker.ontology_kernel, child_idx, parent_idx) {
+        return ontology_side_table_cache_verdict_ok()
+    }
+    ontology_side_table_cache_verdict_reject()
+}
+
+pub fn checker_ontology_side_table_cache_kernel_disjoint_verdict(source_path: string, left_id: i64, right_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    let left_idx = checker_ontology_cache_slot_index(source_path, left_id)
+    let right_idx = checker_ontology_cache_slot_index(source_path, right_id)
+    if left_idx < 0 || right_idx < 0 {
+        return ontology_side_table_cache_verdict_reject()
+    }
+    var checker = checker_new()
+    checker = checker_hydrate_ontology_kernel_from_side_table_cache(checker, source_path)
+    if ontology_kernel_is_disjoint(checker.ontology_kernel, left_idx, right_idx) {
+        return ontology_side_table_cache_verdict_ok()
+    }
+    ontology_side_table_cache_verdict_reject()
+}
+
+pub fn checker_check_items_with_ontology_cache_subclass_verdict(items: Option<Box<ItemList> >, source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    print("checker_check_items_with_ontology_cache_subclass_verdict=enter\n")
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    print("checker_check_items_with_ontology_cache_subclass_verdict=cache_valid\n")
+    let child_idx = checker_ontology_cache_slot_index(source_path, child_id)
+    let parent_idx = checker_ontology_cache_slot_index(source_path, parent_id)
+    if child_idx < 0 || parent_idx < 0 {
+        return ontology_side_table_cache_verdict_reject()
+    }
+    print("checker_check_items_with_ontology_cache_subclass_verdict=idx_ok\n")
+    var checker = checker_new()
+    checker = checker.collect_items(items)
+    print("checker_check_items_with_ontology_cache_subclass_verdict=collect_ok\n")
+    checker = checker_hydrate_ontology_kernel_from_side_table_cache(checker, source_path)
+    print("checker_check_items_with_ontology_cache_subclass_verdict=hydrate_ok\n")
+    checker = checker.check_items(items)
+    print("checker_check_items_with_ontology_cache_subclass_verdict=check_ok\n")
+    if checker.had_error {
+        return 1
+    }
+    if ontology_kernel_is_subclass(checker.ontology_kernel, child_idx, parent_idx) {
+        return ontology_side_table_cache_verdict_ok()
+    }
+    ontology_side_table_cache_verdict_reject()
+}
+
+pub fn checker_check_items_with_ontology_cache_disjoint_verdict(items: Option<Box<ItemList> >, source_path: string, left_id: i64, right_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    let left_idx = checker_ontology_cache_slot_index(source_path, left_id)
+    let right_idx = checker_ontology_cache_slot_index(source_path, right_id)
+    if left_idx < 0 || right_idx < 0 {
+        return ontology_side_table_cache_verdict_reject()
+    }
+    var checker = checker_new()
+    checker = checker.collect_items(items)
+    checker = checker_hydrate_ontology_kernel_from_side_table_cache(checker, source_path)
+    checker = checker.check_items(items)
+    if checker.had_error {
+        return 1
+    }
+    if ontology_kernel_is_disjoint(checker.ontology_kernel, left_idx, right_idx) {
+        return ontology_side_table_cache_verdict_ok()
+    }
+    ontology_side_table_cache_verdict_reject()
 }
 
 fn checker_warning_count_scalar(c: *mut Checker) -> i64 with Mut, Panic, Div, Alloc, IO {
@@ -6452,48 +7799,52 @@ fn expr_is_half_open_range(opt: Option<Box<Expr> >) -> bool {
     }
 }
 
-fn eval_const_int_opt_expr(c: Checker, opt: Option<Box<Expr> >) -> (bool, i64) with Mut, Panic, Div, Alloc {
+fn eval_const_int_opt_expr(c: Checker, opt: Option<Box<Expr> >) -> (i64, i64) with Mut, Panic, Div, Alloc {
     match opt {
         Some(inner) => {
             let e = *inner
             if e.kind == ExprKind::ExprIntLit {
-                return (true, e.int_val)
+                return (1, e.int_val)
             }
             if e.kind == ExprKind::ExprIdent {
-                return c.const_int_lookup(e.name)
+                let lookup_pair = c.const_int_lookup(e.name)
+                if lookup_pair.0 != 0 {
+                    return (1, lookup_pair.1)
+                }
+                return (0, 0)
             }
             if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
                 let inner_pair = eval_const_int_opt_expr(c, e.left)
-                if inner_pair.0 {
-                    return (true, 0 - inner_pair.1)
+                if inner_pair.0 != 0 {
+                    return (1, 0 - inner_pair.1)
                 }
-                return (false, 0)
+                return (0, 0)
             }
             if e.kind == ExprKind::ExprBinary {
                 let left_pair = eval_const_int_opt_expr(c, e.left)
                 let right_pair = eval_const_int_opt_expr(c, e.right)
                 if left_pair.0 == 0 || right_pair.0 == 0 {
-                    return (false, 0)
+                    return (0, 0)
                 }
                 let lv = left_pair.1
                 let rv = right_pair.1
                 if e.bin_op == BinaryOp::OpAdd {
-                    return (true, lv + rv)
+                    return (1, lv + rv)
                 } else if e.bin_op == BinaryOp::OpSub {
-                    return (true, lv - rv)
+                    return (1, lv - rv)
                 } else if e.bin_op == BinaryOp::OpMul {
-                    return (true, lv * rv)
+                    return (1, lv * rv)
                 } else if e.bin_op == BinaryOp::OpDiv {
-                    if rv == 0 { return (false, 0) }
-                    return (true, lv / rv)
+                    if rv == 0 { return (0, 0) }
+                    return (1, lv / rv)
                 } else if e.bin_op == BinaryOp::OpRem {
-                    if rv == 0 { return (false, 0) }
-                    return (true, lv % rv)
+                    if rv == 0 { return (0, 0) }
+                    return (1, lv % rv)
                 }
             }
-            (false, 0)
+            (0, 0)
         }
-        None => (false, 0)
+        None => (0, 0)
     }
 }
 
@@ -6646,8 +7997,11 @@ impl Checker {
                 // Hyper<Algebra, T> — checker-level hyper type now lowered from source.
                 if name_matches_str5(name, 72, 121, 112, 101, 114) {
                     let alg_expr = (*args).head
-                    let elem_expr = match (*args).tail {
-                        Some(rest) => (*rest).head
+                    var elem_expr = alg_expr
+                    match (*args).tail {
+                        Some(rest) => {
+                            elem_expr = (*rest).head
+                        }
                         None => {
                             let c = self.report_error_at(alg_expr.span, 1, 0, 0, 0)
                             return (c, ty_error())
@@ -7641,9 +8995,8 @@ impl Checker {
                 var c = self
                 let eid = 100 + c.effects.count
                 let first_op_id = c.effect_ops.count
-                let op_pair = c.collect_effect_op_defs((*edef).ops, eid)
-                c = op_pair.0
-                let op_count = op_pair.1
+                c = c.collect_effect_op_defs((*edef).ops, eid)
+                let op_count = c.effect_ops.count - first_op_id
                 let info = EffectInfo {
                     name: (*edef).name,
                     op_count: op_count,
@@ -7656,9 +9009,9 @@ impl Checker {
         }
     }
 
-    fn collect_effect_op_defs(self, opt: Option<Box<EffectOpDefList> >, effect_id: i64) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
+    fn collect_effect_op_defs(self, opt: Option<Box<EffectOpDefList> >, effect_id: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
-            None => (self, 0)
+            None => self
             Some(node) => {
                 var c = self
                 let head = (*node).head
@@ -7676,10 +9029,7 @@ impl Checker {
                 }
                 let add_result = c.effect_ops.add(op_info)
                 c.effect_ops = add_result.0
-                let tail_pair = c.collect_effect_op_defs((*node).tail, effect_id)
-                c = tail_pair.0
-                let count = 1 + tail_pair.1
-                (c, count)
+                c.collect_effect_op_defs((*node).tail, effect_id)
             }
         }
     }
@@ -7900,8 +9250,8 @@ impl Checker {
                     name: name,
                     target_ty: target_ty,
                     route_name: (*tp).route_name,
-                    requirements: req_pair.1,
-                    requirement_count: req_pair.2,
+                    requirements: req_pair.requirements,
+                    requirement_count: req_pair.count,
                     max_steps: (*tp).max_steps,
                     rollback_route_name: (*tp).rollback_route_name,
                 }
@@ -7927,8 +9277,8 @@ impl Checker {
                     name: name,
                     target_ty: target_ty,
                     route_name: (*mp).route_name,
-                    requirements: req_pair.1,
-                    requirement_count: req_pair.2,
+                    requirements: req_pair.requirements,
+                    requirement_count: req_pair.count,
                     rollback_route_name: (*mp).rollback_route_name,
                 }
                 let add_result = c.monitoring_policies.add(info)
@@ -7979,8 +9329,8 @@ impl Checker {
                 c = c.const_int_bind_unknown(name)
 
                 var i: i64 = 0
-                while i < step_pair.2 && i < 16 {
-                    let step_id = step_pair.1[i as usize]
+                while i < step_pair.count && i < 16 {
+                    let step_id = step_pair.steps[i as usize]
                     if step_id >= 0 && step_id < c.transition_steps.count {
                         var step_info = c.transition_steps.get(step_id)
                         step_info.protocol_id = add_result.1
@@ -8099,14 +9449,14 @@ impl Checker {
                 let seed_metric_ids: [i64; 8] = [-1; 8]
                 let seed_directions: [i64; 8] = [0; 8]
                 let obj_pair = c.collect_alternative_objectives((*ap).objectives, seed_metric_ids, seed_directions, 0)
-                c = obj_pair.0
+                c = obj_pair.checker
                 let info = AlternativePolicyInfo {
                     name: name,
                     target_ty: target_ty,
                     frontier_name: (*ap).frontier_name,
-                    objective_metric_ids: obj_pair.1,
-                    objective_directions: obj_pair.2,
-                    objective_count: obj_pair.3,
+                    objective_metric_ids: obj_pair.metric_ids,
+                    objective_directions: obj_pair.directions,
+                    objective_count: obj_pair.count,
                     max_options: (*ap).max_options,
                 }
                 let add_result = c.alternative_policies.add(info)
@@ -8171,7 +9521,7 @@ impl Checker {
         metric_ids: [i64; 8],
         directions: [i64; 8],
         count: i64
-    ) -> (Checker, [i64; 8], [i64; 8], i64) with Mut, Panic, Div, Alloc, IO {
+    ) -> CollectAlternativeObjectivesResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 var c = self
@@ -8189,7 +9539,7 @@ impl Checker {
                 }
                 c.collect_alternative_objectives((*list).tail, mids, dirs, next_count)
             }
-            None => (self, metric_ids, directions, count)
+            None => CollectAlternativeObjectivesResult { checker: self, metric_ids: metric_ids, directions: directions, count: count }
         }
     }
 
@@ -8204,7 +9554,7 @@ impl Checker {
                     let seed_known: [i64; 8] = [0; 8]
                     let seed_values: [f64; 8] = [0.0; 8]
                     let metric_pair = c.collect_alternative_candidate_metrics((*list).head.metrics, seed_known, seed_values)
-                    c = metric_pair.0
+                    c = metric_pair.checker
                     let info = AlternativeCandidateInfo {
                         span_start: (*list).head.span.start,
                         span_end: (*list).head.span.end,
@@ -8214,8 +9564,8 @@ impl Checker {
                         uses_via: (*list).head.uses_via,
                         value_expr: (*list).head.value_expr,
                         value_repr: empty_name(),
-                        metric_known: metric_pair.1,
-                        metric_values: metric_pair.2,
+                        metric_known: metric_pair.known,
+                        metric_values: metric_pair.values,
                         source_kind: -1,
                         deferred_certificate_id: -1,
                         source_policy_id: -1,
@@ -8242,7 +9592,7 @@ impl Checker {
         opt: Option<Box<AuditFieldEntryList> >,
         known: [i64; 8],
         values: [f64; 8]
-    ) -> (Checker, [i64; 8], [f64; 8]) with Mut, Panic, Div, Alloc, IO {
+    ) -> CollectAlternativeCandidateMetricsResult with Mut, Panic, Div, Alloc, IO {
         var c = self
         var out_known = known
         var out_values = values
@@ -8268,7 +9618,7 @@ impl Checker {
                 }
             }
         }
-        (c, out_known, out_values)
+        CollectAlternativeCandidateMetricsResult { checker: c, known: out_known, values: out_values }
     }
 
     fn collect_decision_policy_def(self, name: Name, opt: Option<Box<DecisionPolicyDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
@@ -8457,8 +9807,8 @@ impl Checker {
                 info.policy_id = policy_id
 
                 let sec_pair = c.collect_audit_sections(name, (*ad).sections, info, [0; 4])
-                c = sec_pair.0
-                info = sec_pair.1
+                c = sec_pair.checker
+                info = sec_pair.info
 
                 let add_result = c.audits.add(info)
                 c.audits = add_result.0
@@ -8474,7 +9824,7 @@ impl Checker {
         opt: Option<Box<AuditSectionList> >,
         seed: AuditInfo,
         section_seen: [i64; 4]
-    ) -> (Checker, AuditInfo, [i64; 4]) with Mut, Panic, Div, Alloc, IO {
+    ) -> CollectAuditSectionsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let section = (*list).head
@@ -8496,22 +9846,22 @@ impl Checker {
                     seen[section_idx as usize] = 1
                     if section.kind == AuditSectionKind::AuditSectionMetrics {
                         let pair = c.collect_audit_metrics_section(section.name, section.fields, info, [0; 8])
-                        c = pair.0
-                        info = pair.1
+                        c = pair.checker
+                        info = pair.info
                     } else if section.kind == AuditSectionKind::AuditSectionMechanistic {
                         let pair = c.collect_audit_mechanistic_section(audit_name, section.name, section.fields)
-                        c = pair.0
-                        info.mechanistic_report_id = pair.1
-                        if pair.1 >= 0 && pair.1 < c.mechanistic_reports.count {
-                            let report = c.mechanistic_reports.get(pair.1)
+                        c = pair.checker
+                        info.mechanistic_report_id = pair.id
+                        if pair.id >= 0 && pair.id < c.mechanistic_reports.count {
+                            let report = c.mechanistic_reports.get(pair.id)
                             info.metric_known[CONTEST_METRIC_MECHANISTIC_DIVERGENCE as usize] = 1
                             info.metric_values[CONTEST_METRIC_MECHANISTIC_DIVERGENCE as usize] = report.aggregate_divergence
                         }
                     } else if section.kind == AuditSectionKind::AuditSectionCounterexample {
                         let pair = c.collect_audit_counterexample_section(audit_name, section.name, section.fields)
-                        c = pair.0
-                        info.counterexample_id = pair.1
-                        if pair.1 >= 0 {
+                        c = pair.checker
+                        info.counterexample_id = pair.id
+                        if pair.id >= 0 {
                             info.metric_known[CONTEST_METRIC_COUNTEREXAMPLE_PRESENT as usize] = 1
                             info.metric_values[CONTEST_METRIC_COUNTEREXAMPLE_PRESENT as usize] = 1.0
                         }
@@ -8521,14 +9871,14 @@ impl Checker {
                         } else {
                             let family = c.model_families.get(info.family_id)
                             let pair = c.collect_audit_posterior_weights_section(audit_name, section.name, family, section.fields)
-                            c = pair.0
-                            info.posterior_weights_id = pair.1
+                            c = pair.checker
+                            info.posterior_weights_id = pair.id
                         }
                     }
                 }
                 c.collect_audit_sections(audit_name, (*list).tail, info, seen)
             }
-            None => (self, seed, section_seen)
+            None => CollectAuditSectionsResult { checker: self, info: seed, seen: section_seen }
         }
     }
 
@@ -8538,7 +9888,7 @@ impl Checker {
         opt: Option<Box<AuditFieldEntryList> >,
         seed: AuditInfo,
         seen_fields: [i64; 8]
-    ) -> (Checker, AuditInfo, [i64; 8]) with Mut, Panic, Div, Alloc, IO {
+    ) -> CollectAuditMetricsSectionResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let field = (*list).head
@@ -8557,7 +9907,7 @@ impl Checker {
                 }
                 c.collect_audit_metrics_section(section_name, (*list).tail, info, seen)
             }
-            None => (self, seed, seen_fields)
+            None => CollectAuditMetricsSectionResult { checker: self, info: seed, seen: seen_fields }
         }
     }
 
@@ -8566,16 +9916,16 @@ impl Checker {
         audit_name: Name,
         section_name: Name,
         opt: Option<Box<AuditFieldEntryList> >
-    ) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
+    ) -> CollectAuditIdResult with Mut, Panic, Div, Alloc, IO {
         let pair = self.collect_audit_mechanistic_fields(section_name, opt, [0; 6], [0.0; 6])
-        var c = pair.0
-        let seen = pair.1
-        let values = pair.2
+        var c = pair.checker
+        let seen = pair.seen
+        let values = pair.values
         var i: i64 = 0
         while i < 6 {
             if seen[i as usize] != 1 {
                 c = c.report_audit_mechanistic_incomplete(Span { file_id: 0, start: 0, end: 0 }, audit_name)
-                return (c, -1)
+                return CollectAuditIdResult { checker: c, id: -1 }
             }
             i = i + 1
         }
@@ -8589,7 +9939,7 @@ impl Checker {
         }
         let add_result = c.mechanistic_reports.add(report)
         c.mechanistic_reports = add_result.0
-        (c, add_result.1)
+        CollectAuditIdResult { checker: c, id: add_result.1 }
     }
 
     fn collect_audit_mechanistic_fields(
@@ -8598,7 +9948,7 @@ impl Checker {
         opt: Option<Box<AuditFieldEntryList> >,
         seen_fields: [i64; 6],
         values: [f64; 6]
-    ) -> (Checker, [i64; 6], [f64; 6]) with Mut, Panic, Div, Alloc, IO {
+    ) -> CollectAuditMechanisticFieldsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let field = (*list).head
@@ -8616,7 +9966,7 @@ impl Checker {
                 }
                 c.collect_audit_mechanistic_fields(section_name, (*list).tail, seen, vals)
             }
-            None => (self, seen_fields, values)
+            None => CollectAuditMechanisticFieldsResult { checker: self, seen: seen_fields, values: values }
         }
     }
 
@@ -8625,7 +9975,7 @@ impl Checker {
         audit_name: Name,
         section_name: Name,
         opt: Option<Box<AuditFieldEntryList> >
-    ) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
+    ) -> CollectAuditIdResult with Mut, Panic, Div, Alloc, IO {
         let pair = self.collect_audit_counterexample_fields(
             section_name,
             opt,
@@ -8633,15 +9983,15 @@ impl Checker {
             [Name { buf: [0; 128], len: 0 }; 6],
             [0.0; 6]
         )
-        var c = pair.0
-        let seen = pair.1
-        let names = pair.2
-        let values = pair.3
+        var c = pair.checker
+        let seen = pair.seen
+        let names = pair.names
+        let values = pair.values
         var i: i64 = 0
         while i < 6 {
             if seen[i as usize] != 1 {
                 c = c.report_audit_counterexample_incomplete(Span { file_id: 0, start: 0, end: 0 }, audit_name)
-                return (c, -1)
+                return CollectAuditIdResult { checker: c, id: -1 }
             }
             i = i + 1
         }
@@ -8655,7 +10005,7 @@ impl Checker {
         }
         let add_result = c.counterexamples.add(info)
         c.counterexamples = add_result.0
-        (c, add_result.1)
+        CollectAuditIdResult { checker: c, id: add_result.1 }
     }
 
     fn collect_audit_counterexample_fields(
@@ -8665,7 +10015,7 @@ impl Checker {
         seen_fields: [i64; 6],
         names: [Name; 6],
         values: [f64; 6]
-    ) -> (Checker, [i64; 6], [Name; 6], [f64; 6]) with Mut, Panic, Div, Alloc, IO {
+    ) -> CollectAuditCounterexampleFieldsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let field = (*list).head
@@ -8690,7 +10040,7 @@ impl Checker {
                 }
                 c.collect_audit_counterexample_fields(section_name, (*list).tail, seen, next_names, next_values)
             }
-            None => (self, seen_fields, names, values)
+            None => CollectAuditCounterexampleFieldsResult { checker: self, seen: seen_fields, names: names, values: values }
         }
     }
 
@@ -8700,28 +10050,28 @@ impl Checker {
         section_name: Name,
         family: ModelFamilyInfo,
         opt: Option<Box<AuditFieldEntryList> >
-    ) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
+    ) -> CollectAuditIdResult with Mut, Panic, Div, Alloc, IO {
         if family.model_count > 16 {
             let c = self.report_audit_weights_family_mismatch(Span { file_id: 0, start: 0, end: 0 }, audit_name)
-            return (c, -1)
+            return CollectAuditIdResult { checker: c, id: -1 }
         }
         let pair = self.collect_audit_posterior_weight_fields(section_name, family, opt, [0; 16], [0.0; 16])
-        var c = pair.0
-        let seen = pair.1
-        let weights = pair.2
+        var c = pair.checker
+        let seen = pair.seen
+        let weights = pair.weights
         var i: i64 = 0
         var total: f64 = 0.0
         while i < family.model_count && i < 16 {
             if seen[i as usize] != 1 {
                 c = c.report_audit_weights_family_mismatch(Span { file_id: 0, start: 0, end: 0 }, audit_name)
-                return (c, -1)
+                return CollectAuditIdResult { checker: c, id: -1 }
             }
             total = total + weights[i as usize]
             i = i + 1
         }
         if audit_abs_f64(total - 1.0) > 0.000001 {
             c = c.report_audit_weights_not_normalized(Span { file_id: 0, start: 0, end: 0 }, audit_name, total)
-            return (c, -1)
+            return CollectAuditIdResult { checker: c, id: -1 }
         }
         let info = PosteriorWeightsInfo {
             model_names: family.model_names,
@@ -8730,7 +10080,7 @@ impl Checker {
         }
         let add_result = c.posterior_weights.add(info)
         c.posterior_weights = add_result.0
-        (c, add_result.1)
+        CollectAuditIdResult { checker: c, id: add_result.1 }
     }
 
     fn collect_audit_posterior_weight_fields(
@@ -8740,7 +10090,7 @@ impl Checker {
         opt: Option<Box<AuditFieldEntryList> >,
         seen_fields: [i64; 16],
         weights: [f64; 16]
-    ) -> (Checker, [i64; 16], [f64; 16]) with Mut, Panic, Div, Alloc, IO {
+    ) -> CollectAuditPosteriorWeightFieldsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let field = (*list).head
@@ -8762,7 +10112,7 @@ impl Checker {
                 }
                 c.collect_audit_posterior_weight_fields(section_name, family, (*list).tail, seen, next_weights)
             }
-            None => (self, seen_fields, weights)
+            None => CollectAuditPosteriorWeightFieldsResult { checker: self, seen: seen_fields, weights: weights }
         }
     }
 
@@ -9098,9 +10448,9 @@ impl Checker {
         match opt {
             Some(ed) => {
                 let pair = self.collect_variants((*ed).variants)
-                var c = pair.0
-                let variants = pair.1
-                let variant_count = pair.2
+                var c = pair.checker
+                let variants = pair.variants
+                let variant_count = pair.count
                 let info = EnumInfo {
                     name: name,
                     variants: variants,
@@ -10276,7 +11626,7 @@ impl Checker {
         let const_pair = eval_const_int_opt_expr(c, s.expr)
         let cur_env = c.env
         c.env = cur_env.bind(s.name, bind_ty, false)
-        if const_pair.0 {
+        if const_pair.0 != 0 {
             c = c.const_int_bind_value(s.name, const_pair.1)
         } else {
             c = c.const_int_bind_unknown(s.name)
@@ -10327,7 +11677,7 @@ impl Checker {
         c = c.check_refinement_literal(s.span, bind_ty)
         let const_pair = eval_const_int_opt_expr(c, s.expr)
         c.env = c.env.bind(s.name, bind_ty, true)
-        if const_pair.0 {
+        if const_pair.0 != 0 {
             c = c.const_int_bind_value(s.name, const_pair.1)
         } else {
             c = c.const_int_bind_unknown(s.name)
@@ -10410,7 +11760,7 @@ impl Checker {
             Some(target) => {
                 if (*target).kind == ExprKind::ExprIdent {
                     let rhs_pair = eval_const_int_opt_expr(c, s.expr)
-                    if rhs_pair.0 {
+                    if rhs_pair.0 != 0 {
                         c = c.const_int_bind_value((*target).name, rhs_pair.1)
                     } else {
                         c = c.const_int_bind_unknown((*target).name)
@@ -10667,12 +12017,12 @@ impl Checker {
         // Division/modulo by zero: detect denominators that fold to a constant integer zero.
         if e.bin_op == BinaryOp::OpDiv {
             let denom_pair = eval_const_int_opt_expr(c, e.right)
-            if denom_pair.0 && denom_pair.1 == 0 {
+            if denom_pair.0 != 0 && denom_pair.1 == 0 {
                 c = c.report_error_at(e.span, 56, 0, 0, 0)
             }
         } else if e.bin_op == BinaryOp::OpRem {
             let denom_pair = eval_const_int_opt_expr(c, e.right)
-            if denom_pair.0 && denom_pair.1 == 0 {
+            if denom_pair.0 != 0 && denom_pair.1 == 0 {
                 c = c.report_error_at(e.span, 57, 0, 0, 0)
             }
         }
@@ -11956,40 +13306,43 @@ impl Checker {
         }
     }
 
-    fn transition_candidate_metric_pair(self, candidate: AlternativeCandidateInfo, metric_id: i64) -> (bool, f64) with Mut, Panic, Div {
-        if self.transition_metric_is_candidate(metric_id) {
-            let alt_metric_id = self.transition_metric_to_candidate_metric(metric_id)
+    fn transition_candidate_metric_pair(self, candidate: AlternativeCandidateInfo, metric_id: i64) -> (i64, f64) with Mut, Panic, Div {
+        if transition_metric_is_candidate(metric_id) {
+            let alt_metric_id = transition_metric_to_candidate_metric(metric_id)
             if alt_metric_id >= 0 && alt_metric_id < 8 && candidate.metric_known[alt_metric_id as usize] == 1 {
-                return (true, candidate.metric_values[alt_metric_id as usize])
+                return (1, candidate.metric_values[alt_metric_id as usize])
             }
-            return (false, 0.0)
+            return (0, 0.0)
         }
 
         if candidate.source_kind == ALTERNATIVE_SOURCE_DEFERRED {
             if candidate.deferred_certificate_id >= 0 && candidate.deferred_certificate_id < self.deferred_certificates.count {
-                return deferred_certificate_get_metric(self.deferred_certificates.get(candidate.deferred_certificate_id), metric_id)
+                let pair = deferred_certificate_get_metric(self.deferred_certificates.get(candidate.deferred_certificate_id), metric_id)
+                if pair.0 != 0 {
+                    return (1, pair.1)
+                }
             }
-            return (false, 0.0)
+            return (0, 0.0)
         }
 
         if candidate.source_kind == ALTERNATIVE_SOURCE_RECOURSE_PLAN {
             if candidate.source_plan_id >= 0 && candidate.source_plan_id < self.recourse_plans.count {
                 let plan_info = self.recourse_plans.get(candidate.source_plan_id)
                 if metric_id >= 0 && metric_id < 8 && plan_info.metric_known[metric_id as usize] == 1 {
-                    return (true, plan_info.metric_values[metric_id as usize])
+                    return (1, plan_info.metric_values[metric_id as usize])
                 }
             }
-            return (false, 0.0)
+            return (0, 0.0)
         }
 
-        (false, 0.0)
+        (0, 0.0)
     }
 
-    fn transition_plan_metric_pair(self, plan: TransitionPlanInfo, metric_id: i64) -> (bool, f64) with Mut, Panic, Div {
-        if self.transition_metric_is_candidate(metric_id) {
-            let alt_metric_id = self.transition_metric_to_candidate_metric(metric_id)
+    fn transition_plan_metric_pair(self, plan: TransitionPlanInfo, metric_id: i64) -> (i64, f64) with Mut, Panic, Div {
+        if transition_metric_is_candidate(metric_id) {
+            let alt_metric_id = transition_metric_to_candidate_metric(metric_id)
             if alt_metric_id >= 0 && alt_metric_id < 8 && plan.metric_known[alt_metric_id as usize] == 1 {
-                return (true, plan.metric_values[alt_metric_id as usize])
+                return (1, plan.metric_values[alt_metric_id as usize])
             }
         }
 
@@ -11998,10 +13351,13 @@ impl Checker {
         }
 
         if plan.contest_id >= 0 && plan.contest_id < self.contests.count {
-            return contest_info_get_metric(self.contests.get(plan.contest_id), metric_id)
+            let pair = contest_info_get_metric(self.contests.get(plan.contest_id), metric_id)
+            if pair.0 != 0 {
+                return (1, pair.1)
+            }
         }
 
-        (false, 0.0)
+        (0, 0.0)
     }
 
     fn transition_expr_value_repr(self, e: Expr) -> Name with Mut, Panic, Div, Alloc {
@@ -12179,7 +13535,7 @@ impl Checker {
             return true
         }
         let metric_pair = contest_info_get_metric(contest_info, CONTEST_METRIC_COUNTEREXAMPLE_PRESENT)
-        metric_pair.0 && metric_pair.1 > 0.0
+        metric_pair.0 != 0 && metric_pair.1 > 0.0
     }
 
     fn deferred_certificate_attach_resolution_metrics(self, cert: DeferredCertificateInfo) -> DeferredCertificateInfo with Mut, Panic, Div {
@@ -12668,7 +14024,7 @@ impl Checker {
                 let template = c.alternative_candidates.get(candidate_id)
                 let complete_pair = c.alternative_candidate_metrics_complete(template, policy_info)
                 if complete_pair.0 == 0 {
-                    return (c.report_alternative_candidate_metrics_incomplete(e.span, template.name, c.alternative_metric_name(complete_pair.1)), ty_error())
+                    return (c.report_alternative_candidate_metrics_incomplete(e.span, template.name, alternative_metric_name(complete_pair.1)), ty_error())
                 }
 
                 let value_check = c.check_expr(template.value_expr)
@@ -12959,7 +14315,7 @@ impl Checker {
     ) -> bool with Mut, Panic, Div, Alloc {
         var cur = opt
         var done = false
-        while done == 0 {
+        while !done {
             match cur {
                 Some(list) => {
                     let req = (*list).head
@@ -12967,7 +14323,7 @@ impl Checker {
                     if metric_pair.0 == 0 {
                         return true
                     }
-                    if policy_requirement_holds(metric_pair.1, req.op, req.threshold) == 0 {
+                    if !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
                         return true
                     }
                     cur = (*list).tail
@@ -12987,12 +14343,15 @@ impl Checker {
     ) -> i64 with Mut, Panic, Div, Alloc {
         var cur = opt
         var done = false
-        while done == 0 {
+        while !done {
             match cur {
                 Some(list) => {
                     let req = (*list).head
                     let metric_pair = self.transition_plan_metric_pair(plan_info, req.metric_id)
-                    if metric_pair.0 == 0 || policy_requirement_holds(metric_pair.1, req.op, req.threshold) == 0 {
+                    if metric_pair.0 == 0 {
+                        return self.deferral_reason_code_from_metric_id(req.metric_id)
+                    }
+                    if !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
                         return self.deferral_reason_code_from_metric_id(req.metric_id)
                     }
                     cur = (*list).tail
@@ -13012,7 +14371,7 @@ impl Checker {
     ) -> bool with Mut, Panic, Div, Alloc {
         var cur = opt
         var done = false
-        while done == 0 {
+        while !done {
             match cur {
                 Some(list) => {
                     let req = (*list).head
@@ -13020,7 +14379,7 @@ impl Checker {
                     if metric_pair.0 == 0 {
                         return false
                     }
-                    if policy_requirement_holds(metric_pair.1, req.op, req.threshold) == 0 {
+                    if !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
                         return false
                     }
                     cur = (*list).tail
@@ -13251,7 +14610,7 @@ impl Checker {
                 return (c, ty_error())
             }
             let ident_pair = contest_info_get_metric(contest_info, CONTEST_METRIC_IDENTIFIABILITY_FLOOR)
-            if !ident_pair.0 {
+            if ident_pair.0 == 0 {
                 c = c.report_contest_metric_unavailable(e.span, CONTEST_METRIC_IDENTIFIABILITY_FLOOR, contest_id)
                 return (c, ty_error())
             }
@@ -13472,7 +14831,7 @@ impl Checker {
         // Try known-constant lookup for identifiers
         if arg_expr.kind == ExprKind::ExprIdent {
             let const_result = c.const_int_lookup(arg_expr.name)
-            if const_result.0 {
+            if const_result.0 != 0 {
                 let result = refine_static_check_int_literal(expected_ref.predicate, const_result.1)
                 if result == refine_static_result_proved() {
                     c.refine_static_proved = c.refine_static_proved + 1
@@ -13765,7 +15124,7 @@ impl Checker {
         // The saved env is restored after both branches so guards don't leak.
         let saved_cond_env = c.refine_cond_env
         let cond_guard = if_cond_extract_pred(e.left)
-        if cond_guard.0 {
+        if cond_guard.0 != 0 {
             c.refine_cond_env = refine_static_env_push(c.refine_cond_env, cond_guard.1)
         }
         // Check then block (with narrowed env)
@@ -14225,9 +15584,9 @@ impl Checker {
                 let first_ty = pair.1
                 let rest = c.check_array_rest((*list).tail, first_ty)
                 CheckArrayElemsResult {
-                    checker: rest.0,
+                    checker: rest.checker,
                     ty: first_ty,
-                    count: 1 + rest.1,
+                    count: (1 as i64) + rest.count,
                 }
             }
             None => CheckArrayElemsResult {
@@ -14238,7 +15597,7 @@ impl Checker {
         }
     }
 
-    fn check_array_rest(self, opt: Option<Box<ExprList> >, expected: TypeEntry) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
+    fn check_array_rest(self, opt: Option<Box<ExprList> >, expected: TypeEntry) -> CheckArrayRestResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
                 let pair = self.check_expr((*list).head)
@@ -14248,9 +15607,9 @@ impl Checker {
                     c = c.report_mismatch((*list).head.span, 20, expected, elem_ty)
                 }
                 let rest = c.check_array_rest((*list).tail, expected)
-                (rest.0, 1 + rest.1)
+                CheckArrayRestResult { checker: rest.checker, count: (1 as i64) + rest.count }
             }
-            None => (self, 0)
+            None => CheckArrayRestResult { checker: self, count: 0 }
         }
     }
 
@@ -14260,14 +15619,14 @@ impl Checker {
 
     fn check_tuple_lit(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.check_tuple_elems(e.args)
-        let c = pair.0
-        match pair.1 {
+        let c = pair.checker
+        match pair.elems {
             Some(elem_list) => (c, ty_tuple(*elem_list))
             None => (c, ty_unit())
         }
     }
 
-    fn check_tuple_elems(self, opt: Option<Box<ExprList> >) -> (Checker, Option<Box<TypeEntryList> >) with Mut, Panic, Div, Alloc, IO {
+    fn check_tuple_elems(self, opt: Option<Box<ExprList> >) -> CheckTupleElemsResult with Mut, Panic, Div, Alloc, IO {
         // Iterative: collect element types into array, then build list in reverse.
         // Avoids recursive Checker copies that overflow the SOBC VM stack.
         var c = self
@@ -14294,7 +15653,7 @@ impl Checker {
             }
         }
         if count == 0 {
-            return (c, None)
+            return CheckTupleElemsResult { checker: c, elems: None }
         }
         // Build TypeEntryList in reverse order (last element first)
         var result: Option<Box<TypeEntryList> > = None
@@ -14303,7 +15662,7 @@ impl Checker {
             result = Some(Box::new(TypeEntryList { head: types[j], tail: result }))
             j = j - 1
         }
-        (c, result)
+        CheckTupleElemsResult { checker: c, elems: result }
     }
 
     // --------------------------------------------------------
@@ -14460,8 +15819,8 @@ impl Checker {
         }
 
         // Get inferred effects from current_effects
-        let inferred_effects = c.current_effects
-        let inferred_effect_count = c.current_effect_count
+        var inferred_effects = c.current_effects
+        var inferred_effect_count = c.current_effect_count
 
         // Pop scope
         c = c.pop_const_scope()
@@ -14624,8 +15983,8 @@ fn struct_field_list_count(opt: Option<Box<StructFieldList> >) -> i64 with Mut, 
 // and OR disjunctions (x < 0 || x > 100) by recursing on both sides.
 // Partial extraction: if only one side of a compound is recognisable, that
 // side's predicate is returned (conservative but sound under-approximation).
-fn if_cond_extract_pred(opt: Option<Box<Expr> >) -> (bool, RefinementPred) with Mut, Panic, Div, Alloc {
-    let no_pred = (false, empty_refinement_pred())
+fn if_cond_extract_pred(opt: Option<Box<Expr> >) -> (i64, RefinementPred) with Mut, Panic, Div, Alloc {
+    let no_pred = (0, empty_refinement_pred())
     match opt {
         None => no_pred
         Some(e) => {
@@ -14641,16 +16000,16 @@ fn if_cond_extract_pred(opt: Option<Box<Expr> >) -> (bool, RefinementPred) with 
                 let pred_l  = left_pair.1
                 let found_r = right_pair.0
                 let pred_r  = right_pair.1
-                if found_l && found_r {
+                if found_l != 0 && found_r != 0 {
                     let combined = if expr.bin_op == BinaryOp::OpAnd {
                         pred_and(pred_l, pred_r)
                     } else {
                         pred_or(pred_l, pred_r)
                     }
-                    return (true, combined)
+                    return (1, combined)
                 }
-                if found_l { return (true, pred_l) }
-                if found_r { return (true, pred_r) }
+                if found_l != 0 { return (1, pred_l) }
+                if found_r != 0 { return (1, pred_r) }
                 return no_pred
             }
             // LHS must be an identifier
@@ -14696,7 +16055,7 @@ fn if_cond_extract_pred(opt: Option<Box<Expr> >) -> (bool, RefinementPred) with 
             if op == refinement_op_none() {
                 return no_pred
             }
-            (true, pred_make_int(op, lhs_name, rhs_val))
+            (1, pred_make_int(op, lhs_name, rhs_val))
         }
     }
 }

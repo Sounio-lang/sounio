@@ -21,6 +21,8 @@ impl Parser {
             self.parse_ref_mut_type()
         } else if k == TokenKind::LBracket {
             self.parse_array_type()
+        } else if k == TokenKind::LBrace {
+            self.parse_refinement_type()
         } else if k == TokenKind::LParen {
             self.parse_tuple_or_fn_type()
         } else if k == TokenKind::Bang {
@@ -316,6 +318,84 @@ impl Parser {
     }
 
     // ============================================================
+    // Refinement type: { v: T | v >= literal }
+    // ============================================================
+
+    fn parse_refinement_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        var var_name = empty_name()
+        if parser_peek(p) == TokenKind::Ident {
+            var_name = p.current_name()
+            p = p.advance()
+        }
+        p = p.expect(TokenKind::Colon)
+        let base_pair = p.parse_type()
+        p = base_pair.0
+        let base_ty = base_pair.1
+        p = p.expect(TokenKind::Pipe)
+
+        if parser_peek(p) == TokenKind::Ident {
+            p = p.advance()
+        }
+
+        var pred_op: i64 = 5
+        let op = parser_peek(p)
+        if op == TokenKind::Gt {
+            pred_op = 1
+            p = p.advance()
+        } else if op == TokenKind::GtEq {
+            pred_op = 2
+            p = p.advance()
+        } else if op == TokenKind::Lt {
+            pred_op = 3
+            p = p.advance()
+        } else if op == TokenKind::LtEq {
+            pred_op = 4
+            p = p.advance()
+        } else if op == TokenKind::EqEq || op == TokenKind::Eq {
+            pred_op = 5
+            p = p.advance()
+        }
+
+        var pred_int_val: i64 = 0
+        var pred_float_val: f64 = 0.0
+        var pred_is_float = false
+        if parser_peek(p) == TokenKind::FloatLit {
+            pred_float_val = p.current().float_value
+            pred_is_float = true
+            p = p.advance()
+        } else if parser_peek(p) == TokenKind::IntLit {
+            pred_int_val = p.current().int_value
+            pred_float_val = p.current().int_value as f64
+            pred_is_float = false
+            p = p.advance()
+        }
+
+        p = p.expect(TokenKind::RBrace)
+        let span = p.span_from(start)
+        let info = RefinementInfo {
+            var_name: var_name,
+            base_type: Some(Box::new(base_ty)),
+            pred_op: pred_op,
+            pred_int_val: pred_int_val,
+            pred_float_val: pred_float_val,
+            pred_is_float: pred_is_float,
+        }
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeRefinement,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: None,
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: Some(Box::new(info)),
+        })
+    }
+
+    // ============================================================
     // Array or slice element type: [T; N] or [T]
     // ============================================================
 
@@ -532,6 +612,98 @@ impl Parser {
     // Knowledge type: Knowledge<T> or Knowledge[T, ε < 0.05, Valid(...), Derived]
     // ============================================================
 
+    fn parse_knowledge_constraint(self) -> (Parser, KnowledgeConstraint) with Mut, IO, Panic, Div, Alloc {
+        var p = self
+        var constraint = KnowledgeConstraint {
+            field: empty_name(),
+            kind: KnowledgeConstraintKind::KnowledgeConstraintEq,
+            target_name: empty_name(),
+            unit_name: empty_name(),
+            int_value: 0,
+            float_value: 0.0,
+            value_kind: KnowledgeConstraintValueKind::KnowledgeConstraintValueNone,
+        }
+
+        if parser_peek(p) == TokenKind::Ident {
+            constraint.field = p.current_name()
+            p = p.advance()
+        }
+
+        if parser_peek(p) == TokenKind::Ident && name_eq(p.current_name(), make_name("subclass_of")) {
+            constraint.kind = KnowledgeConstraintKind::KnowledgeConstraintSubclassOf
+            p = p.advance()
+            if parser_peek(p) == TokenKind::Ident {
+                constraint.target_name = p.current_name()
+                constraint.value_kind = KnowledgeConstraintValueKind::KnowledgeConstraintValueName
+                p = p.advance()
+            }
+            return (p, constraint)
+        }
+
+        let op = parser_peek(p)
+        if op == TokenKind::GtEq {
+            constraint.kind = KnowledgeConstraintKind::KnowledgeConstraintGe
+            p = p.advance()
+        } else if op == TokenKind::Gt {
+            constraint.kind = KnowledgeConstraintKind::KnowledgeConstraintGt
+            p = p.advance()
+        } else if op == TokenKind::LtEq {
+            constraint.kind = KnowledgeConstraintKind::KnowledgeConstraintLe
+            p = p.advance()
+        } else if op == TokenKind::Lt {
+            constraint.kind = KnowledgeConstraintKind::KnowledgeConstraintLt
+            p = p.advance()
+        } else if op == TokenKind::EqEq || op == TokenKind::Eq {
+            constraint.kind = KnowledgeConstraintKind::KnowledgeConstraintEq
+            p = p.advance()
+        }
+
+        if parser_peek(p) == TokenKind::IntLit {
+            constraint.int_value = p.current().int_value
+            constraint.float_value = p.current().int_value as f64
+            constraint.value_kind = KnowledgeConstraintValueKind::KnowledgeConstraintValueInt
+            p = p.advance()
+        } else if parser_peek(p) == TokenKind::FloatLit {
+            constraint.float_value = p.current().float_value
+            constraint.value_kind = KnowledgeConstraintValueKind::KnowledgeConstraintValueFloat
+            p = p.advance()
+        } else if parser_peek(p) == TokenKind::Ident {
+            constraint.target_name = p.current_name()
+            constraint.value_kind = KnowledgeConstraintValueKind::KnowledgeConstraintValueName
+            p = p.advance()
+        }
+
+        if parser_peek(p) == TokenKind::Lt {
+            p = p.advance()
+            if parser_peek(p) == TokenKind::Ident {
+                constraint.unit_name = p.current_name()
+                p = p.advance()
+            }
+            p = p.expect(TokenKind::Gt)
+        }
+
+        (p, constraint)
+    }
+
+    fn parse_knowledge_constraint_list(self) -> (Parser, Option<Box<KnowledgeConstraintList> >) with Mut, IO, Panic, Div, Alloc {
+        var p = self.expect(TokenKind::LBrace)
+        var out: Option<Box<KnowledgeConstraintList> > = None
+
+        while parser_peek(p) != TokenKind::RBrace && !parser_at_eof(p) {
+            let parsed = p.parse_knowledge_constraint()
+            p = parsed.0
+            out = Some(Box::new(KnowledgeConstraintList { head: parsed.1, tail: out }))
+            if parser_peek(p) == TokenKind::Comma {
+                p = p.advance()
+            } else if parser_peek(p) == TokenKind::Semi {
+                p = p.advance()
+            }
+        }
+
+        p = p.expect(TokenKind::RBrace)
+        (p, out)
+    }
+
     fn parse_knowledge_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'Knowledge'
@@ -555,6 +727,14 @@ impl Parser {
         var epsilon_opt: Option<Box<EpsilonBound>> = None
         var validity_opt: Option<Box<ValidityCondition>> = None
         var provenance_opt: Option<Box<AstProvenanceKind>> = None
+        var proof_constraints_opt: Option<Box<KnowledgeConstraintList> > = None
+
+        if parser_peek(p) == TokenKind::Where {
+            p = p.advance()
+            let constraint_pair = p.parse_knowledge_constraint_list()
+            p = constraint_pair.0
+            proof_constraints_opt = constraint_pair.1
+        }
 
         if use_bracket {
             while parser_peek(p) == TokenKind::Comma {
@@ -650,6 +830,7 @@ impl Parser {
             epsilon: epsilon_opt,
             validity: validity_opt,
             provenance: provenance_opt,
+            proof_constraints: proof_constraints_opt,
         }
         (p, TypeExpr {
             kind: TypeExprKind::TypeKnowledge,
@@ -916,6 +1097,7 @@ impl Parser {
             epsilon: epsilon_opt,
             validity: validity_opt,
             provenance: provenance_opt,
+            proof_constraints: None,
         }
         (p, TypeExpr {
             kind: wrapper_kind,

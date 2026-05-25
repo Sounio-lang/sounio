@@ -17,7 +17,7 @@ mkdir -p "$RUN_PASS_DIR" "$COMPILE_FAIL_DIR"
 "$ROOT_DIR/scripts/ontology/build_dontology_ffi_importer.sh" "$IMPORTER" >/dev/null
 
 {
-    printf 'bundle\tstub\tontology\tclass_count\tclass_limit\tconst_count\tdisjoint_count\tdisjoint_limit\tsurface\tpositive_witness\tnegative_witnesses\n'
+    printf 'bundle\tstub\tontology\tclass_count\tclass_limit\tconst_count\tdisjoint_count\tdisjoint_limit\tsurface\tpositive_witness\tnegative_witnesses\ttyped_bridge\ttyped_witness\n'
 } >"$MANIFEST"
 
 extract_ontology_block() {
@@ -386,7 +386,7 @@ generate_one() {
         negative_witnesses="$disjoint_negative"
     fi
 
-    printf '%s\t%s\t%s\t%s\t64\t%s\t%s\t64\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t64\t%s\t%s\t64\t%s\t%s\t%s\t%s\t%s\n' \
         "$bundle" \
         "stdlib/ontology/generated/$stem.sio" \
         "$ontology_name" \
@@ -395,7 +395,9 @@ generate_one() {
         "$disjoint_count" \
         "$surface" \
         "$positive_witness" \
-        "$negative_witnesses" >>"$MANIFEST"
+        "$negative_witnesses" \
+        "stdlib/ontology/typed/$stem.sio" \
+        "tests/run-pass/ontology_typed_bridge_$stem.sio" >>"$MANIFEST"
 }
 
 generate_one alg ALGGenerated

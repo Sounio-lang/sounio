@@ -1,5 +1,16 @@
 .PHONY: build check test test-stdlib clean fmt install help lint lint-fix lint-docs \
          docs-gen generated-ontology test-generated-ontology \
+         test-generated-ontology-manifest test-generated-ontology-fresh \
+         test-ontology-bundle-directive-native-scan \
+         test-ontology-cache-frontend-composition \
+         test-unit-types test-unit-types-derived test-ontology-unit-metadata \
+         test-unit-types-clinical-current-source \
+         test-knowledge-context-phase2 test-knowledge-unit-constraints \
+         test-knowledge-numeric-constraints test-knowledge-composite \
+         test-knowledge-static-values test-knowledge-runtime-obligations \
+         test-knowledge-runtime-guards \
+         test-knowledge-context-static \
+         test-semantic-knowledge-spine \
          ops-guardrail-local ops-infra-up ops-strict-up ops-status \
          website-verified-snapshot
 
@@ -75,15 +86,77 @@ generated-ontology:  ## Regenerate .dontology bundles and generated ontology .si
 	@python3 scripts/ontology/build_bundle.py \
 		--source-dir stdlib/data/data/ontology/source \
 		--output-dir stdlib/data/data/ontology/bundles
-	@echo "→ Validating .dontology bundles and SSSOM mapping shards"
+	@echo "→ Validating stable public .dontology bundles and SSSOM mapping shards"
 	@python3 scripts/ontology/validate_bundle.py \
-		--bundle-dir stdlib/data/data/ontology/bundles \
+		--bundle stdlib/data/data/ontology/bundles/alg.dontology \
+		--bundle stdlib/data/data/ontology/bundles/chebi.dontology \
+		--bundle stdlib/data/data/ontology/bundles/go.dontology \
+		--bundle stdlib/data/data/ontology/bundles/hpo.dontology \
+		--bundle stdlib/data/data/ontology/bundles/loinc.dontology \
+		--bundle stdlib/data/data/ontology/bundles/part.dontology \
+		--bundle stdlib/data/data/ontology/bundles/phys.dontology \
+		--bundle stdlib/data/data/ontology/bundles/qm.dontology \
+		--bundle stdlib/data/data/ontology/bundles/snomed.dontology \
 		--mapping-dir stdlib/data/data/ontology/bundles/mappings
 	@echo "→ Generating stdlib ontology stubs via the C FFI importer"
 	@bash scripts/ontology/generate_dontology_stubs.sh
 
 test-generated-ontology: generated-ontology ## Regenerate ontology stubs and run generated ontology witnesses
 	@bash scripts/run_sio_test_suite.sh ontology_generated --verbose
+
+test-generated-ontology-manifest: generated-ontology ## Validate generated ontology manifest coverage
+	@bash scripts/ci/generated_ontology_manifest_gate.sh
+
+test-generated-ontology-fresh: ## Regenerate ontology artifacts and fail if generated outputs drift
+	@bash scripts/ci/generated_ontology_gate.sh --check
+
+test-ontology-bundle-directive: ## Expand //@ ontology-bundle directives through the C importer and test witnesses
+	@bash scripts/ci/ontology_bundle_directive_gate.sh
+
+test-ontology-bundle-directive-native-scan: ## Run compiler-side //@ ontology-bundle directive scanner gate
+	@bash scripts/ci/ontology_bundle_directive_native_scan_gate.sh
+
+test-ontology-cache-frontend-composition: ## Run focused .ontocache + Knowledge<T> frontend composition gate
+	@bash scripts/ci/ontology_cache_frontend_composition_gate.sh
+
+test-unit-types: ## Run focused unit/dimensional analysis Phase 1 gate
+	@bash scripts/ci/unit_types_phase1_gate.sh
+
+test-unit-types-derived: ## Run derived/current-source unit dimensional analysis gate
+	@bash scripts/ci/unit_types_derived_gate.sh
+
+test-unit-types-clinical-current-source: ## Run current-source internal label dimensional analysis gate
+	@bash scripts/ci/unit_types_clinical_current_source_gate.sh
+
+test-ontology-unit-metadata: ## Validate ontology-linked internal dimension-label metadata
+	@bash scripts/ci/ontology_unit_metadata_gate.sh
+
+test-knowledge-context-phase2: ## Run static ontology Knowledge<T> proof-context gate
+	@bash scripts/ci/knowledge_context_phase2_ontology_gate.sh
+
+test-knowledge-unit-constraints: ## Run static Knowledge<T> unit proof-context gate
+	@bash scripts/ci/knowledge_context_unit_gate.sh
+
+test-knowledge-numeric-constraints: ## Run static Knowledge<T> numeric proof-context gate
+	@bash scripts/ci/knowledge_context_numeric_gate.sh
+
+test-knowledge-composite: ## Run static composite ontology+unit+numeric Knowledge<T> gate
+	@bash scripts/ci/knowledge_context_composite_gate.sh
+
+test-knowledge-static-values: ## Run static Knowledge<T> value-initializer gate
+	@bash scripts/ci/knowledge_context_static_value_gate.sh
+
+test-knowledge-runtime-obligations: ## Run dynamic Knowledge<T> runtime obligation gate
+	@bash scripts/ci/knowledge_context_runtime_obligation_gate.sh
+
+test-knowledge-runtime-guards: ## Run pre-native dynamic Knowledge<T> runtime guard expansion gate
+	@bash scripts/ci/knowledge_runtime_guard_expansion_gate.sh
+
+test-knowledge-context-static: ## Run static Knowledge<T> umbrella gate
+	@bash scripts/ci/knowledge_context_static_gate.sh
+
+test-semantic-knowledge-spine: ## Run the focused ontology -> units -> Knowledge<T> umbrella gate
+	@bash scripts/ci/semantic_knowledge_spine_gate.sh
 
 website-verified-snapshot: ## Run stdlib reliability gate + refresh website verified-snapshot.json (needs SOUC_BIN)
 	@echo "→ SOUC_BIN must point to a working souc (e.g. export SOUC_BIN=/tmp/souc.elf)"

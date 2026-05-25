@@ -232,3 +232,21 @@ lean_lib «SounioFanoArcsBlocking» where
 -- See docs/research/sunflower-168-sounio-note.md
 @[default_target]
 lean_lib «SounioSunflower» where
+
+-- Erdős [90] CLASSICAL planar attack: exact triangular-lattice (Eisenstein ℤ[ω]) lower
+-- bound u(n) ≥ ⌊3n−√(12n−3)⌋, witnessed. Baseline for the cluster search.
+-- See docs/research/erdos-90-planar-search-plan.md
+@[default_target]
+lean_lib «SounioErdos90PlanarLowerBound» where
+
+-- Erdős [90] unit-distance count spectrum on the 168/ZD structure (7-vertex probe):
+-- associator lever beats linear (max 12 vs 9, 6 vs 2 distinct counts) + interleaved-
+-- star count-growth (gap 6<20<26). See docs/research/erdos-90-168-spectrum-note.md
+@[default_target]
+lean_lib «SounioErdos90UnitSpectrum» where
+
+-- Erdős [90] refinement: the count-growth separation lifted to the pathion level
+-- (32-D, Cayley-Dickson 5). Pathion associator star breaks the sedenion ceiling of 40
+-- (reaches 44 at 15 verts, 168 at 31), 3696 verified pathion ZD pairs.
+@[default_target]
+lean_lib «SounioErdos90PathionGrowth» where

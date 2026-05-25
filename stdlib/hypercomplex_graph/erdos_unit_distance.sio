@@ -1,0 +1,390 @@
+// hypercomplex_graph/erdos_unit_distance — Sounio attack on Erdős #508 and #704
+//
+// Objective: Use the verified 168 Theorem / ZD bridge structure to generate
+// algebraic unit-distance graphs and measure whether zero-divisor "surgery"
+// (right-multiplication by a primitive ZD element) can change their chromatic
+// number — the first computable, reproducible step toward:
+//
+//   #508: Chromatic number of the plane (Hadwiger–Nelson)
+//   #704: Chromatic number of unit-distance graphs in R^d
+//
+// HONEST MATHEMATICAL FRAME (verified, not assumed):
+// - A point set with integer coordinates whose edges are pairs at squared
+//   Euclidean distance == 1 is ALWAYS bipartite (chromatic number <= 2): it is
+//   a subgraph of the integer lattice Z^16, 2-colored by parity of coord sum.
+// - So the real, non-trivial question is: can a ZD surgery break that
+//   bipartite structure (force chromatic number >= 3)?
+//
+// MECHANISM (confirmed = "ZD surgery / 4D annihilator", not the associator
+// route): right-multiply each point by a primitive ZD element v = e_lo ± e_hi.
+// This is a linear map on the sedenions with a non-trivial kernel (sedenions
+// are NOT norm-multiplicative — the whole point of zero-divisors). Some unit
+// edges survive, some are lost (kernel), and some new pairs become "unit".
+//
+// SOURCE OF TRUTH for the algebra (mirrored exactly, no invented mappings):
+//   formal/lean4/SounioZeroDivisorBridge.lean   — PrimSed / validPrims (84) /
+//                                                   168 unordered ZD pairs
+//   formal/lean4/SounioCayleyDickson.lean        — cdSigma (sign function)
+//   self-hosted/check/cayley_dickson.sio         — cd_sigma_ct (same function)
+//
+// Self-contained (no imports — matches the oct_graph.sio pattern; the run-pass
+// harness cannot resolve imports).
+
+module hypercomplex_graph::erdos_unit_distance
+
+// ============================================================================
+// Cayley–Dickson sign function  (e_a · e_b = cd_sigma_ct(a,b,4) · e_{a^b} in S)
+// Verbatim from self-hosted/check/cayley_dickson.sio (== Lean cdSigma a b 4).
+// ============================================================================
+
+fn cd_sigma_ct(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_ct(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_ct(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_ct(a_lo, b_lo, bits - 1) }
+        else { return 0 - cd_sigma_ct(a_lo, b_lo, bits - 1) }
+    }
+    // both hi
+    if b_lo == 0 { return 0 - cd_sigma_ct(b_lo, a_lo, bits - 1) }
+    return cd_sigma_ct(b_lo, a_lo, bits - 1)
+}
+
+fn sed_sigma(a: i64, b: i64) -> i64 { return cd_sigma_ct(a, b, 4) }
+
+fn near(a: f64, b: f64, tol: f64) -> i64 {
+    let d = a - b
+    let d2 = if d < 0.0 { 0.0 - d } else { d }
+    if d2 <= tol { 1 } else { 0 }
+}
+
+// ============================================================================
+// State (fixed-size flat buffers — native compiler has no dynamic arrays)
+// ============================================================================
+
+// 84 valid primitive imaginary sedenions  v = e_lo ± e_hi
+var PRIM_LO:  [i64; 84] = [0; 84]
+var PRIM_HI:  [i64; 84] = [0; 84]
+var PRIM_NEG: [i64; 84] = [0; 84]   // 1 => sign of e_hi is -1
+var NPRIM:    i64 = 0
+
+// Probe: NPTS points × 16 coords, flat
+var PROBE: [f64; 112] = [0.0; 112]   // 7 * 16
+var NPTS:  i64 = 7
+
+// Scratch
+var DIFF: [f64; 16] = [0.0; 16]
+var TW:   [f64; 16] = [0.0; 16]
+
+// Conflict-graph adjacency (NPTS x NPTS), 1 = edge
+var ADJ: [i64; 49] = [0; 49]   // 7 * 7
+var CLASSIC: [i64; 49] = [0; 49]   // saved classical adjacency for edge diffing
+
+// Coloring odometer
+var COLORS: [i64; 7] = [0; 7]
+
+// ============================================================================
+// §1. Enumerate the 84 valid primitives  (mirror validPrims from the bridge)
+//     lo in 1..7, hi in 9..15, exclude (lo ^ hi) == 8.  7*7*2 - 14 = 84.
+// ============================================================================
+
+pub fn build_prims() with Mut {
+    NPRIM = 0
+    var lo = 1
+    while lo <= 7 {
+        var hi = 9
+        while hi <= 15 {
+            if (lo ^ hi) != 8 {
+                // +1 variant
+                PRIM_LO[NPRIM as usize] = lo
+                PRIM_HI[NPRIM as usize] = hi
+                PRIM_NEG[NPRIM as usize] = 0
+                NPRIM = NPRIM + 1
+                // -1 variant
+                PRIM_LO[NPRIM as usize] = lo
+                PRIM_HI[NPRIM as usize] = hi
+                PRIM_NEG[NPRIM as usize] = 1
+                NPRIM = NPRIM + 1
+            }
+            hi = hi + 1
+        }
+        lo = lo + 1
+    }
+}
+
+// ============================================================================
+// §2. Probe configuration (7 vertices in 16D, integer coords).
+//     Mirrors moser7_probe in SounioErdosUnitDistance.lean for Sounio<->Lean
+//     parity.  Classical (untwisted) graph is necessarily bipartite.
+// ============================================================================
+
+fn set_coord(pt: i64, k: i64, v: f64) with Mut {
+    PROBE[(pt * 16 + k) as usize] = v
+}
+
+pub fn init_probe() with Mut {
+    var i = 0
+    while i < 112 { PROBE[i as usize] = 0.0; i = i + 1 }
+    NPTS = 7
+    // Enriched probe: spans BOTH sedenion halves so pairwise xors hit the
+    // active ZD fiber labels {9..15}. (A probe using only indices 0..7 makes
+    // every surgery act trivially — cross terms vanish, twisted ≡ classical.)
+    set_coord(0, 0, 1.0)                        // v0 = e0
+    set_coord(1, 1, 1.0)                        // v1 = e1
+    set_coord(2, 0, 1.0); set_coord(2, 1, 1.0)  // v2 = e0 + e1
+    set_coord(3, 9, 1.0)                        // v3 = e9
+    set_coord(4, 10, 1.0)                       // v4 = e10
+    set_coord(5, 9, 1.0); set_coord(5, 10, 1.0) // v5 = e9 + e10
+    set_coord(6, 1, 1.0); set_coord(6, 9, 1.0)  // v6 = e1 + e9 (cross-half bridge)
+}
+
+// DIFF <- PROBE[i] - PROBE[j]
+fn point_diff(i: i64, j: i64) with Mut {
+    var k = 0
+    while k < 16 {
+        DIFF[k as usize] = PROBE[(i*16 + k) as usize] - PROBE[(j*16 + k) as usize]
+        k = k + 1
+    }
+}
+
+fn norm_sq(buf: &[f64; 16]) -> f64 {
+    var s = 0.0
+    var k = 0
+    while k < 16 { s = s + (*buf)[k as usize] * (*buf)[k as usize]; k = k + 1 }
+    return s
+}
+
+// ============================================================================
+// §3. ZD surgery: TW <- DIFF · v_idx   (right-multiplication by primitive)
+//     (x · e_j)_k = x_{k^j} · sigma(k^j, j);  v = e_lo ± e_hi  => sum of two.
+// ============================================================================
+
+fn rmul_prim(idx: i64) with Mut, Panic {
+    let lo = PRIM_LO[idx as usize]
+    let hi = PRIM_HI[idx as usize]
+    let s = if PRIM_NEG[idx as usize] == 1 { 0.0 - 1.0 } else { 1.0 }
+    var k = 0
+    while k < 16 {
+        let klo = k ^ lo
+        let khi = k ^ hi
+        let t1 = DIFF[klo as usize] * (cd_sigma_ct(klo, lo, 4) as f64)
+        let t2 = DIFF[khi as usize] * (cd_sigma_ct(khi, hi, 4) as f64)
+        TW[k as usize] = t1 + s * t2
+        k = k + 1
+    }
+}
+
+// ||v||^2 = 2 for every primitive (two unit components). Twisted "unit" target.
+fn prim_norm_sq() -> f64 { return 2.0 }
+
+// ============================================================================
+// §4. Conflict graphs + exact chromatic number (brute force; n <= 7)
+// ============================================================================
+
+fn clear_adj() with Mut {
+    var i = 0
+    while i < 49 { ADJ[i as usize] = 0; i = i + 1 }
+}
+
+// Classical: edge iff squared Euclidean distance == 1.
+fn build_classical_adj() with Mut, Panic {
+    clear_adj()
+    var i = 0
+    while i < NPTS {
+        var j = i + 1
+        while j < NPTS {
+            point_diff(i, j)
+            let d = norm_sq(&DIFF)
+            if near(d, 1.0, 1.0e-9) == 1 {
+                ADJ[(i*7 + j) as usize] = 1
+                ADJ[(j*7 + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Twisted by primitive idx: edge iff ||(p_i - p_j)·v||^2 == ||v||^2 (== 2).
+fn build_twisted_adj(idx: i64) with Mut, Panic {
+    clear_adj()
+    let target = prim_norm_sq()
+    var i = 0
+    while i < NPTS {
+        var j = i + 1
+        while j < NPTS {
+            point_diff(i, j)
+            rmul_prim(idx)
+            let d = norm_sq(&TW)
+            if near(d, target, 1.0e-9) == 1 {
+                ADJ[(i*7 + j) as usize] = 1
+                ADJ[(j*7 + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Is the current ADJ graph (n vertices) properly k-colorable? Brute force.
+fn colorable(n: i64, k: i64) -> i64 with Mut, Panic {
+    var i = 0
+    while i < n { COLORS[i as usize] = 0; i = i + 1 }
+    var done = 0
+    while done == 0 {
+        // check current assignment
+        var ok = 1
+        var a = 0
+        while a < n {
+            var b = a + 1
+            while b < n {
+                if ADJ[(a*7 + b) as usize] == 1 {
+                    if COLORS[a as usize] == COLORS[b as usize] { ok = 0 }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+        if ok == 1 { return 1 }
+        // odometer increment (base k, n digits)
+        var pos = 0
+        var carry = 1
+        while pos < n && carry == 1 {
+            COLORS[pos as usize] = COLORS[pos as usize] + 1
+            if COLORS[pos as usize] >= k {
+                COLORS[pos as usize] = 0
+                pos = pos + 1
+            } else {
+                carry = 0
+            }
+        }
+        if carry == 1 { done = 1 }
+    }
+    return 0
+}
+
+pub fn chromatic_number(n: i64) -> i64 with Mut, Panic {
+    var k = 1
+    while k <= n {
+        if colorable(n, k) == 1 { return k }
+        k = k + 1
+    }
+    return n
+}
+
+// Count current-ADJ edges (upper triangle).
+fn count_edges() -> i64 {
+    var c = 0
+    var i = 0
+    while i < NPTS {
+        var j = i + 1
+        while j < NPTS {
+            if ADJ[(i*7 + j) as usize] == 1 { c = c + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+// ============================================================================
+// §5. Spot-check: known ZD pair (e3+e10)·(e6-e15) == 0  (sed_zd_z * sed_zd_w)
+// ============================================================================
+
+pub fn zd_pair_self_check() -> i64 with Mut, Panic {
+    // u = e3 + e10 ; w = e6 - e15.  (u·w)_k summed over the four cross terms.
+    var ok = 1
+    var k = 0
+    while k < 16 {
+        var acc = 0
+        if (3 ^ 6) == k  { acc = acc + cd_sigma_ct(3, 6, 4) }    // e3 · e6
+        if (3 ^ 15) == k { acc = acc - cd_sigma_ct(3, 15, 4) }   // e3 · (-e15)
+        if (10 ^ 6) == k { acc = acc + cd_sigma_ct(10, 6, 4) }   // e10 · e6
+        if (10 ^ 15) == k { acc = acc - cd_sigma_ct(10, 15, 4) } // e10 · (-e15)
+        if acc != 0 { ok = 0 }
+        k = k + 1
+    }
+    return ok
+}
+
+// ============================================================================
+// §6. The 84-surgery chromatic spectrum + honest report
+// ============================================================================
+
+// Full demo: classical chi, then chi spectrum over all 84 ZD surgeries.
+// Prints reproducible integers. Returns number of surgeries that raise chi
+// above the classical (bipartite-breaking) value.
+pub fn erdos_run_demo() -> i64 with IO, Mut, Panic, Div {
+    build_prims()
+    init_probe()
+
+    print("=== Erdos #508/#704 — ZD-surgery chromatic probe (7 vertices, 16D) ===\n")
+    print("valid primitives (validPrims, must be 84): "); print_int(NPRIM); print("\n")
+    print("known ZD pair (e3+e10)(e6-e15)==0 self-check: "); print_int(zd_pair_self_check()); print("\n")
+
+    build_classical_adj()
+    let classical_edges = count_edges()
+    // save classical adjacency for per-surgery edge diffing
+    var ci = 0
+    while ci < 49 { CLASSIC[ci as usize] = ADJ[ci as usize]; ci = ci + 1 }
+    let chi0 = chromatic_number(NPTS)
+    print("classical: edges="); print_int(classical_edges)
+    print("  chromatic_number="); print_int(chi0)
+    print("  (integer dist^2==1 => bipartite, expect <= 2)\n")
+
+    var chi_min = NPTS + 1
+    var chi_max = 0
+    var n_raise = 0       // surgeries with chi > classical
+    var n_change = 0      // surgeries with chi != classical
+    var edges_min = 99
+    var edges_max = 0
+    var n_edge_change = 0 // surgeries whose edge set differs from classical
+    var idx = 0
+    while idx < NPRIM {
+        build_twisted_adj(idx)
+        let chi = chromatic_number(NPTS)
+        let e = count_edges()
+        // edge diff vs classical (upper triangle)
+        var lost = 0; var gained = 0
+        var a = 0
+        while a < NPTS {
+            var b = a + 1
+            while b < NPTS {
+                let cl = CLASSIC[(a*7 + b) as usize]
+                let tw = ADJ[(a*7 + b) as usize]
+                if cl == 1 && tw == 0 { lost = lost + 1 }
+                if cl == 0 && tw == 1 { gained = gained + 1 }
+                b = b + 1
+            }
+            a = a + 1
+        }
+        if e < edges_min { edges_min = e }
+        if e > edges_max { edges_max = e }
+        if lost > 0 || gained > 0 { n_edge_change = n_edge_change + 1 }
+        if chi < chi_min { chi_min = chi }
+        if chi > chi_max { chi_max = chi }
+        if chi != chi0 { n_change = n_change + 1 }
+        if chi > chi0 { n_raise = n_raise + 1 }
+        idx = idx + 1
+    }
+
+    print("twisted spectrum over "); print_int(NPRIM); print(" ZD surgeries:\n")
+    print("  edges_min="); print_int(edges_min)
+    print("  edges_max="); print_int(edges_max)
+    print("  surgeries changing edge set: "); print_int(n_edge_change); print("\n")
+    print("  chi_min="); print_int(chi_min)
+    print("  chi_max="); print_int(chi_max); print("\n")
+    print("  surgeries changing chi: "); print_int(n_change); print("\n")
+    print("  surgeries raising chi (breaking bipartite): "); print_int(n_raise); print("\n")
+    print("algebraic invariant from bridge: 84 surgery maps acting through ")
+    print("168 unordered ZD-pair classes (7 fibers x 24)\n")
+    return n_raise
+}
+
+pub fn erdos_unit_distance_module_ready() -> i32 { 1 }
