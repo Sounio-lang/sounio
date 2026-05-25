@@ -13,73 +13,71 @@ const examples: TabExample[] = [
   {
     id: 'uncertainty',
     label: 'Uncertainty',
-    python: `# Python: bare floats, no uncertainty
-mass = 75.3        # kg... probably?
-height = 1.82      # meters... maybe?
+    python: `# Python: bare floats, no uncertainty tracking
+mass = 75.3        # kg (measurement from standard scale)
+height = 1.82      # meters (measurement from laser)
 
 bmi = mass / (height ** 2)
 # bmi = 22.74
-# No idea how confident we are
-# No idea where the data came from
-
-if bmi < 25:
-    print("Normal weight")
-# What if the scale was off by 2kg?`,
-    sounio: `// Sounio: epistemic computing
-// \u03B5 is the confidence level (0.0 to 1.0)
+# Problem: We have no idea how accurate this result is.
+# If the scale had a 1.5kg drift and stadiometer was uncalibrated,
+# is this patient still safely below the overweight threshold?
+# Traditional programming leaves you in the dark.`,
+    sounio: `// Sounio: built-in uncertainty (ISO GUM propagation)
+// ε is the epistemic confidence level (0.00 to 1.00)
 let mass: Knowledge<f64> = Knowledge(
     75.3,
-    \u03B5=0.98,
-    prov="clinical_scale_001"
+    ε=0.98,
+    prov="clinical_scale_model_B"
 )
 
 let height: Knowledge<f64> = Knowledge(
     1.82,
-    \u03B5=0.99,
-    prov="stadiometer_001"
+    ε=0.99,
+    prov="laser_stadiometer_calibrated"
 )
 
-// GUM Uncertainty propagates automatically:
-// \u03B5(a/b) = \u03B5(a) \u00D7 \u03B5(b)
+// The mathematical division automatically propagates uncertainty:
 let bmi: Knowledge<f64> = mass / (height * height)
-// bmi.value = 22.74, bmi.\u03B5 = 0.96
+// bmi.value = 22.74, bmi.ε = 0.96 (computed rigorously!)
 
-if bmi.\u03B5 >= 0.95 {
-    println("Confidence sufficient for diagnosis")
+if bmi.ε >= 0.95 {
+    println("Confidence high enough for diagnostic decision.")
 } else {
-    println("Request remeasurement")
+    println("WARNING: Uncertainty is too high. Please remeasure.")
 }`,
   },
   {
     id: 'causality',
-    label: 'Causal Types',
-    python: `# Python: implicit causality, no type safety
-import dowhy
+    label: 'Causal Safety',
+    python: `# Python: plain numbers representing interventions
+# No guarantee of causal consistency or confounding controls.
+def calculate_treatment_effect(data):
+    # Just a mathematical average, has no concept of confounding
+    return data['outcome'].mean() - data['control'].mean()
 
-# Intervention is a plain dict \u2014 no type check
-model = CausalModel(data=df,
-    graph="digraph {Education -> Earnings}")
-do_result = model.do({"Education": 1})
+# Problem: Traditional programming cannot distinguish
+# correlation from causation. You can easily mistake an association
+# for a clinical treatment effect and prescribe wrong treatments.`,
+    sounio: `// Sounio: Pearl's Causal do-calculus built into the type system
+// Intervention<T> and Counterfactual<T> are language keywords.
 
-# Counterfactual: manual estimate, no confidence
-cf_earnings = predict_cf(do_result)
-# Was cf_earnings reliable? The type won't say.
-# No way to gate on causal confidence.`,
-    sounio: `// Sounio: Intervention<T> and Counterfactual<T>
-// are language-level types (compiler keywords)
+fn main() -> i32 with IO {
+    // 1. Build a causal DAG representing biological pathways
+    var dag = causal_dag_new()
+    dag = dag_add_node(dag, 0) // Drug treatment node
+    dag = dag_add_node(dag, 1) // Patient recovery node
+    
+    // 2. Add causal influence edge with epistemic uncertainty
+    dag = dag_add_edge(dag, 0, 1, beta(8.0, 2.0), uncertainty: 0.1)
 
-// Build a causal DAG with epistemic edge uncertainty
-var dag = causal_dag_new()
-dag = dag_add_node(dag, 0)  // treatment
-dag = dag_add_node(dag, 1)  // outcome
-dag = dag_add_edge(dag, 0, 1,
-    ec_beta_new(8.0, 2.0), 0.5, 0.1)
-
-// Pearl's do-operator removes confounding
-let intervened = do_intervention(dag, 1)
-
-// Average treatment effect with epistemic uncertainty
-let ate = average_treatment_effect(dag, 0, 1)`,
+    // 3. Apply Pearl's do-operator to mathematically isolate 
+    // the causal effect from confounding variables
+    let effect: Counterfactual<f64> = do_intervention(dag, treatment: 0, outcome: 1)
+    
+    println("Rigorous, confounder-free causal effect computed.")
+    0
+}`,
   },
   {
     id: 'resources',
@@ -159,7 +157,11 @@ fn norm_sq(x0: f64, x1: f64, x2: f64, x3: f64,
   },
 ];
 
-export default function CodeExamples() {
+interface CodeExamplesProps {
+  locale?: string;
+}
+
+export default function CodeExamples({ locale = 'en' }: CodeExamplesProps) {
   const [activeTab, setActiveTab] = useState('uncertainty');
   const [codeExpanded, setCodeExpanded] = useState<Record<string, boolean>>({});
   const { audience } = useAudience();
@@ -167,7 +169,41 @@ export default function CodeExamples() {
   const activeExample = examples.find((e) => e.id === activeTab) || examples[0];
   const isScientist = audience === 'scientist';
   const isExpanded = codeExpanded[activeTab] ?? !isScientist;
-  const explanation = codeExplanations[activeTab];
+
+  const ptExplanations: Record<string, string> = {
+    uncertainty:
+      'O que isto significa: Cada medição médica carrega seu próprio nível de confiança epistêmica (ε) e sua proveniência (prov - ex: o modelo do aparelho ou balança). Ao calcular o IMC, o Sounio propaga e calcula de forma matematicamente rigorosa a incerteza combinada final. Se a incerteza for muito alta para garantir uma tomada de decisão médica segura, o sistema alerta o profissional para refazer a medição.',
+    causality:
+      'O que isto significa: Ao contrário das linguagens comuns que tratam números causais como meros floats isolados, o Sounio integra o do-calculus de Pearl nativamente. Você define grafos causais de caminhos biológicos e, ao aplicar a intervenção, o tipo Counterfactual garante o controle de confundidores e calcula a incerteza real do efeito do tratamento antes de aplicá-lo ao paciente.',
+    resources:
+      'O que isto significa: Ao lidar com recursos críticos (como conexões a prontuários, monitores ou arquivos), os tipos lineares do Sounio garantem que um recurso seja fechado exatamente uma vez. Se você esquecer de liberar, ou tentar usar após fechar, o compilador rejeita o código na hora, evitando travamentos e vazamentos no hospital.',
+    algebra:
+      'O que isto significa: O Sounio permite expressar leis matemáticas diretamente nos tipos (ex: a não-associatividade de redes neurais baseadas em octoniões). O compilador impede otimizações matemáticas automáticas incorretas que outras ferramentas (como NumPy ou PyTorch) fazem por assumir que floats tradicionais são sempre associativos.',
+  };
+
+  const explanations = locale === 'pt' ? ptExplanations : codeExplanations;
+  const explanation = explanations[activeTab];
+
+  const trans = {
+    en: {
+      title: 'See the difference',
+      descScientist: 'Your current tools compute the number. Sounio computes what you can trust about that number.',
+      descTechnical: 'Python computes the number. Sounio computes what you can trust.',
+      showCode: 'Show Sounio code',
+      hideCode: 'Hide code',
+      plainLanguage: 'In plain language: '
+    },
+    pt: {
+      title: 'Veja a diferença prática',
+      descScientist: 'As suas ferramentas atuais calculam apenas o número. O Sounio calcula o quanto você pode confiar nesse número.',
+      descTechnical: 'O Python calcula o número. O Sounio calcula a confiança.',
+      showCode: 'Mostrar código Sounio',
+      hideCode: 'Ocultar código',
+      plainLanguage: 'Em termos simples: '
+    }
+  };
+
+  const d = trans[locale === 'pt' ? 'pt' : 'en'];
 
   const toggleCode = () => {
     setCodeExpanded((prev) => ({ ...prev, [activeTab]: !isExpanded }));
@@ -178,12 +214,10 @@ export default function CodeExamples() {
       <div className="container">
         <div className="mb-[2.4rem] grid gap-[0.5rem]">
           <h2 className="font-sans text-[clamp(1.7rem,4.2vw,3rem)] font-[750] leading-[1.1] tracking-[-0.025em] text-[var(--color-text-primary)]">
-            See the difference
+            {d.title}
           </h2>
           <p className="text-[clamp(0.96rem,2.1vw,1.1rem)] text-[var(--color-text-secondary)] max-w-[68ch]">
-            {isScientist
-              ? 'Your current tools compute the number. Sounio computes what you can trust about that number.'
-              : 'Python computes the number. Sounio computes what you can trust.'}
+            {isScientist ? d.descScientist : d.descTechnical}
           </p>
         </div>
 
@@ -250,7 +284,7 @@ export default function CodeExamples() {
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d={isExpanded ? "M19 9l-7 7-7-7" : "M9 5l7 7-7 7"} />
                   </svg>
-                  {isExpanded ? 'Hide code' : 'Show code'}
+                  {isExpanded ? d.hideCode : d.showCode}
                 </button>
               </div>
             )}
@@ -260,7 +294,7 @@ export default function CodeExamples() {
         {/* Explanation panel for scientist mode */}
         {isScientist && explanation && (
           <div className="explanation-panel rounded-2xl mt-4 max-w-6xl mx-auto">
-            <strong>In plain language: </strong>{explanation}
+            <strong>{d.plainLanguage}</strong>{explanation}
           </div>
         )}
 
