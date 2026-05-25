@@ -15,12 +15,17 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 <h3 align="center"><em>A self-hosted systems + scientific programming language for epistemic computing, uncertainty propagation, and algebraic effects</em></h3>
 
 <p align="center">
+  <a href="https://www.souniolang.org"><img src="https://img.shields.io/badge/website-souniolang.org-blue.svg" alt="Sounio Website"/></a>
+  <a href="https://www.souniolang.org/playground"><img src="https://img.shields.io/badge/playground-wasm-purple.svg" alt="Playground"/></a>
   <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.0.0--beta.6-orange.svg" alt="Version 1.0.0-beta.6"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-gold.svg" alt="Apache-2.0 License"/></a>
   <a href="#honest-status"><img src="https://img.shields.io/badge/scale-4.2k%20.sio%20files-informational.svg" alt="~4.2k tracked .sio files; see SCALE.md"/></a>
 </p>
 
 <p align="center">
+  <a href="https://www.souniolang.org">Website</a> ·
+  <a href="https://www.souniolang.org/playground">Playground</a> ·
+  <a href="https://www.souniolang.org/docs/">Documentation</a> ·
   <a href="docs/MANIFESTO.md">Manifesto</a> ·
   <a href="#quick-taste">Examples</a> ·
   <a href="#honest-status">Status</a> ·
@@ -32,6 +37,17 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 **Sounio** is a systems programming language for epistemic computing — its type system tracks not just what your data *is*, but how much you should *trust* it. Uncertainty propagation, provenance tracking, and confidence-gated execution are built into the type system, not bolted on as libraries.
 
 **Keywords:** systems programming language, scientific computing language, epistemic types, uncertainty propagation, algebraic effects, self-hosted compiler, formal verification, non-associative algebra, octonions, e-graphs.
+
+### Technical Pillars & Core Keywords
+
+| Pillar | Description | Key Search Terms |
+| :--- | :--- | :--- |
+| **Epistemic Computing** | Built-in confidence-gated execution tracking and provenance tracking. | `epistemic-computing`, `Knowledge[T]`, `confidence-threshold` |
+| **Uncertainty Propagation** | GUM-compliant (Guide to the Expression of Uncertainty in Measurement) error propagation. | `uncertainty-propagation`, `GUM-compliance`, `error-propagation` |
+| **Systems & Science** | Native x86_64 ELF compilation, self-hosted compiler loop, PTX/GPU acceleration. | `systems-programming`, `scientific-computing`, `ptx-codegen` |
+| **Algebraic Effects** | Explicit side-effects declarations (`IO`, `Mut`, `Div`, `Panic`, `Alloc`). | `algebraic-effects`, `effect-system`, `effects-with` |
+| **Mathematical Rigor** | Non-associative octonion basis associators, formalized Lean 4 proofs of invariants. | `non-associative-algebra`, `octonions`, `lean4-proofs` |
+| **Dimensional Analysis** | Compile-time unit checking (`VAR_UNIT_DIM`) to prevent physical dimension errors. | `dimensional-analysis`, `unit-types`, `compile-time-units` |
 
 The compiler is **self-hosted**: Sounio compiles itself, bootstrapped from a [2000-line C compiler](bootstrap/stage0.c) through a multi-stage chain to a true fixed-point where stage N and stage N+1 produce bit-identical binaries. It was used to computationally verify a new result in algebra — that the count of nonzero octonion basis associators equals |PSL(2,7)| = 168 — now [submitted for publication](#the-168-theorem).
 
