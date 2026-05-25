@@ -88,6 +88,7 @@ export function DrugSelector({
       })}
       <div
         aria-hidden
+        className="hidden sm:block"
         style={{
           fontSize: 11,
           color: '#94a3b8',

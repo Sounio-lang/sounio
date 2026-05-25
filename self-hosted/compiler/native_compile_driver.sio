@@ -11,6 +11,12 @@
 
 use lexer::mod::{lex_file_to_globals}
 use lexer::cursor::*
+use knowledge_runtime_guard_lowering_plan::{
+    knowledge_runtime_guard_lowering_plan_build,
+    knowledge_runtime_guard_lowering_plan_row_at,
+    knowledge_runtime_guard_native_emission_plan_at,
+    knowledge_runtime_guard_native_emission_step_from_plan,
+}
 use parser::ast::{Name, BinaryOp, make_name, empty_name, name_eq}
 use parser::parser::{pt_read_kind_code, pt_read_start, pt_read_end, pt_read_int_value}
 use ir::ir::*
@@ -133,6 +139,17 @@ var V2_LOCAL_IS_REF: [i64; 64] = [0; 64]
 var V2_LOCAL_ALEN: [i64; 64] = [0; 64]
 var V2_LOCAL_IS_BSS: [i64; 64] = [0; 64]
 var V2_LOCAL_BSS_IDX: [i64; 64] = [0; 64]
+var V2_LOCAL_KNOWLEDGE_GUARD_ENABLED: [i64; 64] = [0; 64]
+var V2_LOCAL_KNOWLEDGE_GUARD_COUNT: [i64; 64] = [0; 64]
+var V2_LOCAL_KNOWLEDGE_GUARD_FIELD_OFFSET: [i64; 64] = [0; 64]
+var V2_LOCAL_KNOWLEDGE_GUARD_CMP_CODE: [i64; 64] = [0; 64]
+var V2_LOCAL_KNOWLEDGE_GUARD_THRESHOLD: [i64; 64] = [0; 64]
+var V2_LOCAL_KNOWLEDGE_GUARD_TYPE_STRUCT_IDX: [i64; 64] = [0; 64]
+var V2_LOCAL_KNOWLEDGE_GUARD_ROW_FIELD_OFFSET: [i64; 256] = [0; 256]
+var V2_LOCAL_KNOWLEDGE_GUARD_ROW_CMP_CODE: [i64; 256] = [0; 256]
+var V2_LOCAL_KNOWLEDGE_GUARD_ROW_THRESHOLD: [i64; 256] = [0; 256]
+var V2_LOCAL_KNOWLEDGE_GUARD_ROW_THRESHOLD_SCALE: [i64; 256] = [0; 256]
+var V2_LOCAL_KNOWLEDGE_GUARD_ROW_THRESHOLD_KIND: [i64; 256] = [0; 256]
 var V2_LOCAL_COUNT: i64 = 0
 var V2_NEXT_REG: i64 = 0
 var V2_BREAK_LABEL: i64 = -1
@@ -332,6 +349,46 @@ var ENUM_VARIANT_TOTAL: i64 = 0
 var V2_USER_FN_RETURN_STRUCT_IDX: [i64; 512] = [0; 512]
 var V2_USER_FN_RETURN_IS_F64: [i64; 512] = [0; 512]
 var V2_USER_FN_RETURN_ARR_SIZE: [i64; 512] = [0; 512]
+// First direct native Knowledge<T> guard slice: integer proof-context guards
+// at call boundaries and returned values, with up to four conjunctive rows.
+// Assignment-site local guards use the parallel V2_LOCAL_KNOWLEDGE_GUARD_* table above.
+var V2_USER_FN_KNOWLEDGE_GUARD_ENABLED: [i64; 512] = [0; 512]
+var V2_USER_FN_KNOWLEDGE_GUARD_SITE: [i64; 512] = [0; 512]
+var V2_USER_FN_KNOWLEDGE_GUARD_COUNT: [i64; 512] = [0; 512]
+var V2_USER_FN_KNOWLEDGE_GUARD_FIELD_TOK: [i64; 512] = [0; 512]
+var V2_USER_FN_KNOWLEDGE_GUARD_FIELD_OFFSET: [i64; 512] = [0; 512]
+var V2_USER_FN_KNOWLEDGE_GUARD_CMP_CODE: [i64; 512] = [0; 512]
+var V2_USER_FN_KNOWLEDGE_GUARD_THRESHOLD: [i64; 512] = [0; 512]
+var V2_USER_FN_KNOWLEDGE_GUARD_TYPE_STRUCT_IDX: [i64; 512] = [0; 512]
+var V2_USER_FN_KNOWLEDGE_GUARD_ROW_FIELD_OFFSET: [i64; 2048] = [0; 2048]
+var V2_USER_FN_KNOWLEDGE_GUARD_ROW_CMP_CODE: [i64; 2048] = [0; 2048]
+var V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD: [i64; 2048] = [0; 2048]
+var V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD_SCALE: [i64; 2048] = [0; 2048]
+var V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD_KIND: [i64; 2048] = [0; 2048]
+var V2_DIRECT_KNOWLEDGE_GUARD_EMITTED: i64 = 0
+
+// Row-stream step-walk backend: set by drv_precompute_knowledge_guard_step_walk before
+// driver_lex_file_to_globals. When true, all Knowledge<T> guard emissions use the
+// 7-step sequence driven by the lowering plan's native emission API.
+var V2_ROW_STREAM_READY: bool = false
+var V2_ROW_STREAM_BACKEND_COUNT: i64 = 0
+var V2_ROW_STREAM_PAYLOAD_READY: bool = false
+var V2_ROW_STREAM_PAYLOAD_COUNT: i64 = 0
+var V2_ROW_STREAM_PAYLOAD_THRESHOLD_COUNT: i64 = 0
+var V2_ROW_STREAM_PAYLOAD_GUARD_EMITTED: i64 = 0
+var V2_ROW_STREAM_ROW_READY: [i64; 256] = [0; 256]
+var V2_ROW_STREAM_ROW_THRESHOLD_READY: [i64; 256] = [0; 256]
+var V2_ROW_STREAM_ROW_SITE_KIND: [i64; 256] = [0; 256]
+var V2_ROW_STREAM_ROW_TYPE_STRUCT_IDX: [i64; 256] = [0; 256]
+var V2_ROW_STREAM_ROW_FIELD_OFFSET: [i64; 256] = [0; 256]
+var V2_ROW_STREAM_ROW_CMP_CODE: [i64; 256] = [0; 256]
+var V2_ROW_STREAM_ROW_THRESHOLD: [i64; 256] = [0; 256]
+var V2_ROW_STREAM_ROW_THRESHOLD_SCALE: [i64; 256] = [0; 256]
+var V2_ROW_STREAM_ROW_THRESHOLD_KIND: [i64; 256] = [0; 256]
+// Step-op pre-computed from step_at(i,j): op_kind for each of up to 10 steps per row.
+// Flat layout: slot = row_idx * 10 + step_idx. Populated during hydration.
+var V2_ROW_STREAM_ROW_STEP_COUNT: [i64; 256] = [0; 256]
+var V2_ROW_STREAM_STEP_OP: [i64; 2560] = [0; 2560]
 
 // Non-capturing closure literals are lowered to generated native-v2 functions.
 var V2_CLOSURE_START_TOK: [i64; 128] = [0; 128]
@@ -547,6 +604,12 @@ fn remember_local_tok(ctx: &! V2DriverContext, tok_idx: i64, reg: i64) with Mut,
         V2_LOCAL_IS_REF[idx as usize] = 0
         V2_LOCAL_ALEN[idx as usize] = 0
         V2_LOCAL_IS_BSS[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_ENABLED[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_COUNT[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_FIELD_OFFSET[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_CMP_CODE[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_THRESHOLD[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_TYPE_STRUCT_IDX[idx as usize] = -1
         V2_LOCAL_COUNT = idx + 1
     }
 }
@@ -560,6 +623,12 @@ fn remember_local_arr_tok(ctx: &! V2DriverContext, tok_idx: i64, base_reg: i64, 
         V2_LOCAL_IS_REF[idx as usize] = 0
         V2_LOCAL_ALEN[idx as usize] = alen
         V2_LOCAL_IS_BSS[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_ENABLED[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_COUNT[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_FIELD_OFFSET[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_CMP_CODE[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_THRESHOLD[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_TYPE_STRUCT_IDX[idx as usize] = -1
         V2_LOCAL_COUNT = idx + 1
     }
 }
@@ -574,6 +643,12 @@ fn remember_local_arr_tok_bss(ctx: &! V2DriverContext, tok_idx: i64, dummy_reg: 
         V2_LOCAL_ALEN[idx as usize] = alen
         V2_LOCAL_IS_BSS[idx as usize] = 1
         V2_LOCAL_BSS_IDX[idx as usize] = bss_idx
+        V2_LOCAL_KNOWLEDGE_GUARD_ENABLED[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_COUNT[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_FIELD_OFFSET[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_CMP_CODE[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_THRESHOLD[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_TYPE_STRUCT_IDX[idx as usize] = -1
         V2_LOCAL_COUNT = idx + 1
     }
 }
@@ -622,6 +697,12 @@ fn remember_struct_local_tok(ctx: &! V2DriverContext, tok_idx: i64, base_reg: i6
         V2_LOCAL_STRUCT_IDX[idx as usize] = sidx
         V2_LOCAL_IS_REF[idx as usize] = 0
         V2_LOCAL_IS_BSS[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_ENABLED[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_COUNT[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_FIELD_OFFSET[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_CMP_CODE[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_THRESHOLD[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_TYPE_STRUCT_IDX[idx as usize] = -1
         V2_LOCAL_COUNT = idx + 1
     }
 }
@@ -634,6 +715,12 @@ fn remember_ref_struct_local_tok(ctx: &! V2DriverContext, tok_idx: i64, reg: i64
         V2_LOCAL_STRUCT_IDX[idx as usize] = sidx
         V2_LOCAL_IS_REF[idx as usize] = 1
         V2_LOCAL_IS_BSS[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_ENABLED[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_COUNT[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_FIELD_OFFSET[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_CMP_CODE[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_THRESHOLD[idx as usize] = 0
+        V2_LOCAL_KNOWLEDGE_GUARD_TYPE_STRUCT_IDX[idx as usize] = -1
         V2_LOCAL_COUNT = idx + 1
     }
 }
@@ -658,6 +745,20 @@ fn lookup_local_is_ref_tok(ctx: &! V2DriverContext, tok_idx: i64) -> i64 with Mu
         i = i - 1
     }
     0
+}
+
+fn lookup_local_knowledge_guard_index(ctx: &! V2DriverContext, tok_idx: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = V2_LOCAL_COUNT - 1
+    while i >= 0 {
+        if toks_ident_eq(V2_LOCAL_TOK_IDX[i as usize], tok_idx) {
+            if V2_LOCAL_KNOWLEDGE_GUARD_ENABLED[i as usize] != 0 {
+                return i
+            }
+            return -1
+        }
+        i = i - 1
+    }
+    -1
 }
 
 fn toks_ident_eq(a: i64, b: i64) -> bool with Mut, Panic, Div {
@@ -1741,6 +1842,39 @@ fn lookup_user_fn_return_arr_size(fn_id: i64) -> i64 with Mut {
     0
 }
 
+fn lookup_user_fn_knowledge_guard_index(fn_id: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while i < V2_USER_FN_COUNT {
+        if V2_USER_FN_IDS[i as usize] == fn_id {
+            if V2_USER_FN_KNOWLEDGE_GUARD_ENABLED[i as usize] != 0 {
+                return i
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn user_fn_knowledge_guard_site(guard_idx: i64) -> i64 {
+    if guard_idx < 0 || guard_idx >= 512 {
+        return 0
+    }
+    return V2_USER_FN_KNOWLEDGE_GUARD_SITE[guard_idx as usize]
+}
+
+fn native_v2_direct_knowledge_guard_count() -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < V2_USER_FN_COUNT {
+        if V2_USER_FN_KNOWLEDGE_GUARD_ENABLED[i as usize] != 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
 fn lookup_user_fn_return_is_fnref(fn_id: i64) -> bool with Mut {
     var i: i64 = 0
     while i < V2_USER_FN_COUNT {
@@ -1999,12 +2133,35 @@ fn find_struct_idx_tok(name_tok: i64) -> i64 with Mut, Panic, Div {
     -1
 }
 
+fn find_struct_idx_name(name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < STRUCT_COUNT {
+        if name_eq(token_name(STRUCT_NAME_TOKS[i as usize]), name) { return i }
+        i = i + 1
+    }
+    -1
+}
+
 fn struct_field_offset_tok(sidx: i64, field_tok: i64) -> i64 with Mut, Panic, Div {
     let start = STRUCT_FIELD_START[sidx as usize]
     let count = STRUCT_FIELD_COUNT[sidx as usize]
     var fi: i64 = 0
     while fi < count {
         if toks_ident_eq(STRUCT_FIELDS[(start + fi) as usize], field_tok) {
+            return STRUCT_FIELD_FLAT_OFFSET[(start + fi) as usize]
+        }
+        fi = fi + 1
+    }
+    -1
+}
+
+fn struct_field_offset_name(sidx: i64, field_name: Name) -> i64 with Mut, Panic, Div {
+    if sidx < 0 || sidx >= STRUCT_COUNT { return -1 }
+    let start = STRUCT_FIELD_START[sidx as usize]
+    let count = STRUCT_FIELD_COUNT[sidx as usize]
+    var fi: i64 = 0
+    while fi < count {
+        if name_eq(token_name(STRUCT_FIELDS[(start + fi) as usize]), field_name) {
             return STRUCT_FIELD_FLAT_OFFSET[(start + fi) as usize]
         }
         fi = fi + 1
@@ -2413,6 +2570,339 @@ fn ufn_record_call(dst: i64, fn_id_val: i64, arg0: i64, argc: i64) with Mut {
         V2_UFN_SRC1[idx as usize] = arg0
         V2_UFN_IMM[idx as usize] = argc
         V2_UFN_COUNT = idx + 1
+    }
+}
+
+fn ufn_emit_direct_knowledge_runtime_guard_values_step_walk(ctx: &! V2DriverContext, base_reg: i64, field_offset: i64, cmp_code: i64, threshold: i64, threshold_scale: i64, threshold_kind: i64, row_idx: i64) with Mut {
+    if base_reg < 0 || field_offset < 0 {
+        return
+    }
+    let value_reg = base_reg + field_offset
+    var step_count: i64 = 0
+    if row_idx >= 0 && row_idx < 256 {
+        step_count = V2_ROW_STREAM_ROW_STEP_COUNT[row_idx as usize]
+    }
+    if step_count > 0 {
+        // True step_at(row_idx, j) driven emission: pre-computed op sequence.
+        let threshold_reg = alloc_reg(ctx)
+        let ratio_reg = alloc_reg(ctx)
+        let one_reg = alloc_reg(ctx)
+        let cmp_reg = alloc_reg(ctx)
+        let zero_reg = alloc_reg(ctx)
+        let eq_zero = alloc_reg(ctx)
+        let fail_dst = alloc_reg(ctx)
+        let label_ok = alloc_label()
+        var saw_divide: bool = false
+        var j: i64 = 0
+        while j < step_count {
+            let step_slot = row_idx * 10 + j
+            let op_kind = V2_ROW_STREAM_STEP_OP[step_slot as usize]
+            if op_kind == 1 {
+                if threshold_kind == 3 || threshold_kind == 2 {
+                    ufn_record_load_f64_scaled(threshold_reg, threshold, threshold_scale)
+                } else {
+                    ufn_record_load_imm(threshold_reg, threshold)
+                }
+            } else if op_kind == 8 {
+                ufn_record_f64_binop(ratio_reg, value_reg, 4, threshold_reg)
+                saw_divide = true
+            } else if op_kind == 9 {
+                ufn_record_load_f64_scaled(one_reg, 1, 1)
+            } else if op_kind == 2 {
+                if saw_divide {
+                    ufn_record_f64_binop(cmp_reg, ratio_reg, cmp_code, one_reg)
+                } else if threshold_kind == 2 || threshold_kind == 3 {
+                    ufn_record_f64_binop(cmp_reg, value_reg, cmp_code, threshold_reg)
+                } else {
+                    ufn_record_binop(cmp_reg, value_reg, cmp_code, threshold_reg)
+                }
+            } else if op_kind == 3 {
+                ufn_record_load_imm(zero_reg, 0)
+            } else if op_kind == 4 {
+                ufn_record_binop(eq_zero, cmp_reg, 5, zero_reg)
+            } else if op_kind == 5 {
+                ufn_record_branch_false(eq_zero, label_ok)
+            } else if op_kind == 6 {
+                ufn_record_call(fail_dst, V2_BUILTIN_SYS_EXIT_1, 0, 0)
+            } else if op_kind == 7 {
+                ufn_record_label(label_ok)
+            }
+            j = j + 1
+        }
+        V2_DIRECT_KNOWLEDGE_GUARD_EMITTED = V2_DIRECT_KNOWLEDGE_GUARD_EMITTED + 1
+        return
+    }
+    // Fallback: inline emission (used when step data not yet hydrated).
+    let cmp_reg2 = alloc_reg(ctx)
+    if threshold_kind == 3 && threshold != 0 {
+        let threshold_reg2 = alloc_reg(ctx)
+        ufn_record_load_f64_scaled(threshold_reg2, threshold, threshold_scale)
+        let ratio_reg2 = alloc_reg(ctx)
+        ufn_record_f64_binop(ratio_reg2, value_reg, 4, threshold_reg2)
+        let one_reg2 = alloc_reg(ctx)
+        ufn_record_load_f64_scaled(one_reg2, 1, 1)
+        ufn_record_f64_binop(cmp_reg2, ratio_reg2, cmp_code, one_reg2)
+    } else if threshold_kind == 2 || threshold_kind == 3 {
+        let threshold_reg2 = alloc_reg(ctx)
+        ufn_record_load_f64_scaled(threshold_reg2, threshold, threshold_scale)
+        ufn_record_f64_binop(cmp_reg2, value_reg, cmp_code, threshold_reg2)
+    } else {
+        let threshold_reg2 = alloc_reg(ctx)
+        ufn_record_load_imm(threshold_reg2, threshold)
+        ufn_record_binop(cmp_reg2, value_reg, cmp_code, threshold_reg2)
+    }
+    let zero_reg2 = alloc_reg(ctx)
+    ufn_record_load_imm(zero_reg2, 0)
+    let eq_zero2 = alloc_reg(ctx)
+    ufn_record_binop(eq_zero2, cmp_reg2, 5, zero_reg2)
+    let label_ok2 = alloc_label()
+    ufn_record_branch_false(eq_zero2, label_ok2)
+    let fail_dst2 = alloc_reg(ctx)
+    ufn_record_call(fail_dst2, V2_BUILTIN_SYS_EXIT_1, 0, 0)
+    ufn_record_label(label_ok2)
+    V2_DIRECT_KNOWLEDGE_GUARD_EMITTED = V2_DIRECT_KNOWLEDGE_GUARD_EMITTED + 1
+}
+
+fn drv_precompute_knowledge_guard_step_walk(source_path: string) with IO, Mut, Panic, Div, Alloc {
+    let plan = knowledge_runtime_guard_lowering_plan_build(source_path)
+    if plan.native_lowering_ready {
+        V2_ROW_STREAM_READY = true
+        V2_ROW_STREAM_BACKEND_COUNT = plan.backend_guard_count
+        print("native_compile: row_stream_step_walk_ready=1 backend_guard_count=")
+        print_int(V2_ROW_STREAM_BACKEND_COUNT)
+        print("\n")
+    }
+}
+
+fn drv_hydrate_knowledge_guard_row_stream_payloads(source_path: string) with IO, Mut, Panic, Div, Alloc {
+    V2_ROW_STREAM_PAYLOAD_READY = false
+    V2_ROW_STREAM_PAYLOAD_COUNT = 0
+    V2_ROW_STREAM_PAYLOAD_THRESHOLD_COUNT = 0
+    var clear_i: i64 = 0
+    while clear_i < 256 {
+        V2_ROW_STREAM_ROW_READY[clear_i as usize] = 0
+        V2_ROW_STREAM_ROW_THRESHOLD_READY[clear_i as usize] = 0
+        V2_ROW_STREAM_ROW_SITE_KIND[clear_i as usize] = 0
+        V2_ROW_STREAM_ROW_TYPE_STRUCT_IDX[clear_i as usize] = -1
+        V2_ROW_STREAM_ROW_FIELD_OFFSET[clear_i as usize] = -1
+        V2_ROW_STREAM_ROW_CMP_CODE[clear_i as usize] = 0
+        V2_ROW_STREAM_ROW_THRESHOLD[clear_i as usize] = 0
+        V2_ROW_STREAM_ROW_THRESHOLD_SCALE[clear_i as usize] = 1
+        V2_ROW_STREAM_ROW_THRESHOLD_KIND[clear_i as usize] = 0
+        V2_ROW_STREAM_ROW_STEP_COUNT[clear_i as usize] = 0
+        clear_i = clear_i + 1
+    }
+    if !V2_ROW_STREAM_READY {
+        return
+    }
+    var limit = V2_ROW_STREAM_BACKEND_COUNT
+    if limit > 256 { limit = 256 }
+    var i: i64 = 0
+    while i < limit {
+        let row = knowledge_runtime_guard_lowering_plan_row_at(source_path, i)
+        if row.row_ready {
+            let type_sidx = find_struct_idx_name(row.type_name)
+            let field_offset = struct_field_offset_name(type_sidx, row.field_name)
+            if type_sidx >= 0 && field_offset >= 0 {
+                V2_ROW_STREAM_ROW_READY[i as usize] = 1
+                V2_ROW_STREAM_ROW_SITE_KIND[i as usize] = row.site_kind
+                V2_ROW_STREAM_ROW_TYPE_STRUCT_IDX[i as usize] = type_sidx
+                V2_ROW_STREAM_ROW_FIELD_OFFSET[i as usize] = field_offset
+                V2_ROW_STREAM_ROW_CMP_CODE[i as usize] = row.native_cmp_code
+                V2_ROW_STREAM_ROW_THRESHOLD_SCALE[i as usize] = row.value_scale
+                V2_ROW_STREAM_ROW_THRESHOLD_KIND[i as usize] = row.threshold_kind
+                V2_ROW_STREAM_PAYLOAD_COUNT = V2_ROW_STREAM_PAYLOAD_COUNT + 1
+                if row.threshold_kind == 1 || row.threshold_kind == 2 || row.threshold_kind == 3 {
+                    V2_ROW_STREAM_ROW_THRESHOLD_READY[i as usize] = 1
+                    V2_ROW_STREAM_ROW_THRESHOLD[i as usize] = row.scaled_value
+                    V2_ROW_STREAM_PAYLOAD_THRESHOLD_COUNT = V2_ROW_STREAM_PAYLOAD_THRESHOLD_COUNT + 1
+                }
+                // Walk step_at(i, j) to pre-compute op sequence for step-driven emission.
+                let emplan = knowledge_runtime_guard_native_emission_plan_at(source_path, i)
+                if emplan.plan_ready {
+                    var sc = emplan.native_step_count
+                    if sc > 10 { sc = 10 }
+                    V2_ROW_STREAM_ROW_STEP_COUNT[i as usize] = sc
+                    var j: i64 = 0
+                    while j < sc {
+                        let step = knowledge_runtime_guard_native_emission_step_from_plan(emplan, j)
+                        let step_slot = i * 10 + j
+                        V2_ROW_STREAM_STEP_OP[step_slot as usize] = step.op_kind
+                        j = j + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if V2_ROW_STREAM_PAYLOAD_COUNT > 0 {
+        V2_ROW_STREAM_PAYLOAD_READY = true
+        print("native_compile: row_stream_payload_ready=1 count=")
+        print_int(V2_ROW_STREAM_PAYLOAD_COUNT)
+        print(" threshold_payload_count=")
+        print_int(V2_ROW_STREAM_PAYLOAD_THRESHOLD_COUNT)
+        print("\n")
+    }
+}
+
+fn row_stream_site_kind_for_user_guard_site(site: i64) -> i64 {
+    if site == 1 { return 2 }
+    if site == 2 { return 1 }
+    0
+}
+
+fn row_stream_local_site_matches(site: i64) -> bool {
+    return site == 3 || site == 4
+}
+
+fn ufn_emit_row_stream_payload_guard(ctx: &! V2DriverContext, base_reg: i64, wanted_site_kind: i64, wanted_type_sidx: i64, guard_count: i64, allow_local_site: i64) -> bool with Mut {
+    if !V2_ROW_STREAM_PAYLOAD_READY || wanted_type_sidx < 0 {
+        return false
+    }
+    var max_rows = guard_count
+    if max_rows <= 0 { max_rows = 1 }
+    if max_rows > 4 { max_rows = 4 }
+    var emitted: i64 = 0
+    var i: i64 = 0
+    var limit = V2_ROW_STREAM_BACKEND_COUNT
+    if limit > 256 { limit = 256 }
+    while i < limit && emitted < max_rows {
+        if V2_ROW_STREAM_ROW_READY[i as usize] != 0 &&
+           V2_ROW_STREAM_ROW_THRESHOLD_READY[i as usize] != 0 &&
+           V2_ROW_STREAM_ROW_TYPE_STRUCT_IDX[i as usize] == wanted_type_sidx {
+            var site_matches = V2_ROW_STREAM_ROW_SITE_KIND[i as usize] == wanted_site_kind
+            if allow_local_site != 0 {
+                site_matches = row_stream_local_site_matches(V2_ROW_STREAM_ROW_SITE_KIND[i as usize])
+            }
+            if site_matches {
+                ufn_emit_direct_knowledge_runtime_guard_values_step_walk(
+                    ctx,
+                    base_reg,
+                    V2_ROW_STREAM_ROW_FIELD_OFFSET[i as usize],
+                    V2_ROW_STREAM_ROW_CMP_CODE[i as usize],
+                    V2_ROW_STREAM_ROW_THRESHOLD[i as usize],
+                    V2_ROW_STREAM_ROW_THRESHOLD_SCALE[i as usize],
+                    V2_ROW_STREAM_ROW_THRESHOLD_KIND[i as usize],
+                    i
+                )
+                V2_ROW_STREAM_PAYLOAD_GUARD_EMITTED = V2_ROW_STREAM_PAYLOAD_GUARD_EMITTED + 1
+                emitted = emitted + 1
+            }
+        }
+        i = i + 1
+    }
+    return emitted > 0
+}
+
+fn ufn_emit_direct_knowledge_runtime_guard_values(ctx: &! V2DriverContext, base_reg: i64, field_offset: i64, cmp_code: i64, threshold: i64, threshold_scale: i64, threshold_kind: i64) with Mut {
+    if base_reg < 0 || field_offset < 0 {
+        return
+    }
+    if V2_ROW_STREAM_READY && threshold_kind > 0 {
+        ufn_emit_direct_knowledge_runtime_guard_values_step_walk(ctx, base_reg, field_offset, cmp_code, threshold, threshold_scale, threshold_kind, 0 - 1)
+        return
+    }
+    let value_reg = base_reg + field_offset
+    let cmp_reg = alloc_reg(ctx)
+    if threshold_kind == 3 && threshold != 0 {
+        let threshold_reg = alloc_reg(ctx)
+        ufn_record_load_f64_scaled(threshold_reg, threshold, threshold_scale)
+        let ratio_reg = alloc_reg(ctx)
+        ufn_record_f64_binop(ratio_reg, value_reg, 4, threshold_reg)
+        let one_reg = alloc_reg(ctx)
+        ufn_record_load_f64_scaled(one_reg, 1, 1)
+        ufn_record_f64_binop(cmp_reg, ratio_reg, cmp_code, one_reg)
+    } else if threshold_kind == 2 || threshold_kind == 3 {
+        let threshold_reg = alloc_reg(ctx)
+        ufn_record_load_f64_scaled(threshold_reg, threshold, threshold_scale)
+        ufn_record_f64_binop(cmp_reg, value_reg, cmp_code, threshold_reg)
+    } else {
+        let threshold_reg = alloc_reg(ctx)
+        ufn_record_load_imm(threshold_reg, threshold)
+        ufn_record_binop(cmp_reg, value_reg, cmp_code, threshold_reg)
+    }
+    let zero_reg = alloc_reg(ctx)
+    ufn_record_load_imm(zero_reg, 0)
+    let eq_zero = alloc_reg(ctx)
+    ufn_record_binop(eq_zero, cmp_reg, 5, zero_reg)
+    let label_ok = alloc_label()
+    ufn_record_branch_false(eq_zero, label_ok)
+    let fail_dst = alloc_reg(ctx)
+    ufn_record_call(fail_dst, V2_BUILTIN_SYS_EXIT_1, 0, 0)
+    ufn_record_label(label_ok)
+    V2_DIRECT_KNOWLEDGE_GUARD_EMITTED = V2_DIRECT_KNOWLEDGE_GUARD_EMITTED + 1
+}
+
+fn ufn_emit_direct_knowledge_runtime_guard(ctx: &! V2DriverContext, guard_idx: i64, base_reg: i64) with Mut {
+    if guard_idx < 0 || guard_idx >= 512 {
+        return
+    }
+    if V2_USER_FN_KNOWLEDGE_GUARD_ENABLED[guard_idx as usize] == 0 {
+        return
+    }
+    var guard_count = V2_USER_FN_KNOWLEDGE_GUARD_COUNT[guard_idx as usize]
+    if guard_count <= 0 { guard_count = 1 }
+    if guard_count > 4 { guard_count = 4 }
+    let row_stream_site = row_stream_site_kind_for_user_guard_site(V2_USER_FN_KNOWLEDGE_GUARD_SITE[guard_idx as usize])
+    if ufn_emit_row_stream_payload_guard(
+        ctx,
+        base_reg,
+        row_stream_site,
+        V2_USER_FN_KNOWLEDGE_GUARD_TYPE_STRUCT_IDX[guard_idx as usize],
+        guard_count,
+        0
+    ) {
+        return
+    }
+    var slot: i64 = 0
+    while slot < guard_count {
+        let row = guard_idx * 4 + slot
+        ufn_emit_direct_knowledge_runtime_guard_values(
+            ctx,
+            base_reg,
+            V2_USER_FN_KNOWLEDGE_GUARD_ROW_FIELD_OFFSET[row as usize],
+            V2_USER_FN_KNOWLEDGE_GUARD_ROW_CMP_CODE[row as usize],
+            V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD[row as usize],
+            V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD_SCALE[row as usize],
+            V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD_KIND[row as usize]
+        )
+        slot = slot + 1
+    }
+}
+
+fn ufn_emit_local_knowledge_runtime_guard(ctx: &! V2DriverContext, guard_idx: i64, base_reg: i64) with Mut {
+    if guard_idx < 0 || guard_idx >= 64 {
+        return
+    }
+    if V2_LOCAL_KNOWLEDGE_GUARD_ENABLED[guard_idx as usize] == 0 {
+        return
+    }
+    var guard_count = V2_LOCAL_KNOWLEDGE_GUARD_COUNT[guard_idx as usize]
+    if guard_count <= 0 { guard_count = 1 }
+    if guard_count > 4 { guard_count = 4 }
+    if ufn_emit_row_stream_payload_guard(
+        ctx,
+        base_reg,
+        0,
+        V2_LOCAL_KNOWLEDGE_GUARD_TYPE_STRUCT_IDX[guard_idx as usize],
+        guard_count,
+        1
+    ) {
+        return
+    }
+    var slot: i64 = 0
+    while slot < guard_count {
+        let row = guard_idx * 4 + slot
+        ufn_emit_direct_knowledge_runtime_guard_values(
+            ctx,
+            base_reg,
+            V2_LOCAL_KNOWLEDGE_GUARD_ROW_FIELD_OFFSET[row as usize],
+            V2_LOCAL_KNOWLEDGE_GUARD_ROW_CMP_CODE[row as usize],
+            V2_LOCAL_KNOWLEDGE_GUARD_ROW_THRESHOLD[row as usize],
+            V2_LOCAL_KNOWLEDGE_GUARD_ROW_THRESHOLD_SCALE[row as usize],
+            V2_LOCAL_KNOWLEDGE_GUARD_ROW_THRESHOLD_KIND[row as usize]
+        )
+        slot = slot + 1
     }
 }
 
@@ -3468,6 +3958,11 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         if reg_is_fnref_f64(indirect_fn_reg) { mark_reg_f64(dst_ind) }
         return ExprParse { ok: 1, reg: dst_ind, next: cur + 1}
     }
+    let knowledge_guard_idx = lookup_user_fn_knowledge_guard_index(fn_id)
+    let knowledge_guard_site = user_fn_knowledge_guard_site(knowledge_guard_idx)
+    if knowledge_guard_idx >= 0 && knowledge_guard_site == 1 {
+        ufn_emit_direct_knowledge_runtime_guard(ctx, knowledge_guard_idx, arg0_reg)
+    }
     // check if callee returns a struct
     let ret_sidx = lookup_user_fn_return_struct_idx(fn_id)
     if ret_sidx >= 0 {
@@ -3476,6 +3971,9 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         var ri: i64 = 1
         while ri < ret_flat { let _ = alloc_reg(ctx); ri = ri + 1 }
         ufn_record_call_struct_result(dst, fn_id, arg0_reg, total_argc, ret_flat)
+        if knowledge_guard_idx >= 0 && knowledge_guard_site == 2 {
+            ufn_emit_direct_knowledge_runtime_guard(ctx, knowledge_guard_idx, dst)
+        }
         V2_LAST_STRUCT_IDX = ret_sidx
         if lookup_user_fn_return_is_f64(fn_id) {
             mark_struct_scalar_regs_f64(dst, ret_sidx)
@@ -4416,6 +4914,8 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
             while bi < flat_size { let _ = alloc_reg(ctx); bi = bi + 1 }
             ufn_record_bulk_copy(bind_base, let_reg, flat_size)
             remember_struct_local_tok(ctx, p + 1, bind_base, bind_sidx)
+            let bind_guard_idx = V2_LOCAL_COUNT - 1
+            scan_local_knowledge_guard_type(bind_guard_idx, p + 3, eq_pos)
             V2_LAST_STRUCT_IDX = -1
             return let_next
         }
@@ -4429,6 +4929,8 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
         let bind_reg = alloc_reg(ctx)
         ufn_record_copy(bind_reg, let_reg)
         remember_local_tok(ctx, p + 1, bind_reg)
+        let scalar_bind_guard_idx = V2_LOCAL_COUNT - 1
+        scan_local_knowledge_guard_type(scalar_bind_guard_idx, p + 3, eq_pos)
         return let_next
     }
 
@@ -4648,6 +5150,7 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
     if k == TK_IDENT && token_kind(p + 1) == TK_EQ {
         let early_old_reg = lookup_local_tok(ctx, p)
         if early_old_reg >= 0 {
+            let early_assignment_guard_idx = lookup_local_knowledge_guard_index(ctx, p)
             V2_LAST_STRUCT_IDX = -1
             let early_asn = parse_expr_ir(func, ctx, p + 2)
             if early_asn.ok != 0 {
@@ -4657,11 +5160,17 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                     if early_asn.reg != early_old_reg {
                         ufn_record_bulk_copy(early_old_reg, early_asn.reg, early_asn_flat)
                     }
+                    if early_assignment_guard_idx >= 0 {
+                        ufn_emit_local_knowledge_runtime_guard(ctx, early_assignment_guard_idx, early_old_reg)
+                    }
                     V2_LAST_STRUCT_IDX = -1
                     return early_asn.next
                 }
                 if early_asn.reg != early_old_reg {
                     ufn_record_copy(early_old_reg, early_asn.reg)
+                }
+                if early_assignment_guard_idx >= 0 {
+                    ufn_emit_local_knowledge_runtime_guard(ctx, early_assignment_guard_idx, early_old_reg)
                 }
                 return early_asn.next
             }
@@ -4901,6 +5410,7 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
     if k == TK_IDENT && token_kind(p + 1) == TK_EQ {
         let old_reg = lookup_local_tok(ctx, p)
         if old_reg >= 0 {
+            let assignment_guard_idx = lookup_local_knowledge_guard_index(ctx, p)
             V2_LAST_STRUCT_IDX = -1
             let parsed = parse_expr_ir(func, ctx, p + 2)
             if parsed.ok != 0 {
@@ -4911,11 +5421,17 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
                     if parsed.reg != old_reg {
                         ufn_record_bulk_copy(old_reg, parsed.reg, asn_flat)
                     }
+                    if assignment_guard_idx >= 0 {
+                        ufn_emit_local_knowledge_runtime_guard(ctx, assignment_guard_idx, old_reg)
+                    }
                     V2_LAST_STRUCT_IDX = -1
                     return parsed.next
                 }
                 if parsed.reg != old_reg {
                     ufn_record_copy(old_reg, parsed.reg)
+                }
+                if assignment_guard_idx >= 0 {
+                    ufn_emit_local_knowledge_runtime_guard(ctx, assignment_guard_idx, old_reg)
                 }
                 return parsed.next
             }
@@ -4981,13 +5497,18 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
 fn find_fn_lbrace(token_count: i64, name_str_pos: i64) -> i64 with Mut, Panic, Div {
     var j = name_str_pos + 1
     var paren_depth: i64 = 0
+    var angle_depth: i64 = 0
     while j < token_count {
         let k = token_kind(j)
         if k == TK_LPAREN {
             paren_depth = paren_depth + 1
         } else if k == TK_RPAREN {
             if paren_depth > 0 { paren_depth = paren_depth - 1 }
-        } else if k == TK_LBRACE && paren_depth == 0 {
+        } else if k == TK_LT {
+            angle_depth = angle_depth + 1
+        } else if k == TK_GT {
+            if angle_depth > 0 { angle_depth = angle_depth - 1 }
+        } else if k == TK_LBRACE && paren_depth == 0 && angle_depth == 0 {
             return j
         }
         if k == TK_FN && j + 1 < token_count && token_kind(j + 1) == TK_IDENT {
@@ -5113,8 +5634,173 @@ fn scan_user_globals(token_count: i64) with Mut, Panic, Div {
     }
 }
 
+fn scan_user_fn_knowledge_guard_signature(reg_idx: i64, sig_start: i64, sig_end: i64) with Mut, Panic, Div {
+    if reg_idx < 0 || reg_idx >= 512 {
+        return
+    }
+    var p = sig_start
+    var seen_arrow: i64 = 0
+    while p + 9 < sig_end {
+        if token_kind(p) == TK_ARROW {
+            seen_arrow = 1
+        }
+        if token_kind(p) == TK_IDENT && token_text_eq(p, "Knowledge") &&
+           token_kind(p + 1) == TK_LT &&
+           token_kind(p + 2) == TK_IDENT &&
+           token_kind(p + 3) == TK_IDENT && token_text_eq(p + 3, "where") &&
+           token_kind(p + 4) == TK_LBRACE {
+            let value_sidx = find_struct_idx_tok(p + 2)
+            var guard_count: i64 = 0
+            var q = p + 5
+            while value_sidx >= 0 && q + 2 < sig_end && token_kind(q) != TK_RBRACE && guard_count < 4 {
+                if token_kind(q) == TK_IDENT &&
+                   is_cmp_op(token_kind(q + 1)) &&
+                   (token_kind(q + 2) == TK_INT || token_kind(q + 2) == TK_FLOAT) {
+                    let field_offset = struct_field_offset_tok(value_sidx, q)
+                    if field_offset >= 0 {
+                        var threshold_value: i64 = 0
+                        var threshold_scale: i64 = 1
+                        var threshold_kind: i64 = 0
+                        if token_kind(q + 2) == TK_FLOAT {
+                            threshold_value = token_float_mantissa(q + 2)
+                            threshold_scale = token_float_scale(q + 2)
+                            threshold_kind = 2
+                        } else {
+                            threshold_value = pt_read_int_value(q + 2)
+                        }
+                        var unit_suffix_pos = q + 3
+                        if token_kind(q + 2) == TK_INT &&
+                           q + 4 < sig_end &&
+                           token_kind(q + 3) == TK_DOT &&
+                           token_kind(q + 4) == TK_INT {
+                            threshold_scale = decimal_scale_for_digits(token_decimal_digit_count(q + 4))
+                            threshold_value = (pt_read_int_value(q + 2) * threshold_scale) + pt_read_int_value(q + 4)
+                            threshold_kind = 2
+                            unit_suffix_pos = q + 5
+                        }
+                        if unit_suffix_pos + 2 < sig_end &&
+                           token_kind(unit_suffix_pos) == TK_LT &&
+                           token_kind(unit_suffix_pos + 1) == TK_IDENT &&
+                           token_kind(unit_suffix_pos + 2) == TK_GT {
+                            threshold_kind = 3
+                        }
+                        let row = reg_idx * 4 + guard_count
+                        V2_USER_FN_KNOWLEDGE_GUARD_ROW_FIELD_OFFSET[row as usize] = field_offset
+                        V2_USER_FN_KNOWLEDGE_GUARD_ROW_CMP_CODE[row as usize] = cmp_op_to_code(token_kind(q + 1))
+                        V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD[row as usize] = threshold_value
+                        V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD_SCALE[row as usize] = threshold_scale
+                        V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD_KIND[row as usize] = threshold_kind
+                        if guard_count == 0 {
+                            V2_USER_FN_KNOWLEDGE_GUARD_FIELD_TOK[reg_idx as usize] = q
+                            V2_USER_FN_KNOWLEDGE_GUARD_FIELD_OFFSET[reg_idx as usize] = field_offset
+                            V2_USER_FN_KNOWLEDGE_GUARD_CMP_CODE[reg_idx as usize] = cmp_op_to_code(token_kind(q + 1))
+                            V2_USER_FN_KNOWLEDGE_GUARD_THRESHOLD[reg_idx as usize] = threshold_value
+                        }
+                        guard_count = guard_count + 1
+                    }
+                }
+                q = q + 1
+            }
+            if guard_count > 0 {
+                V2_USER_FN_KNOWLEDGE_GUARD_ENABLED[reg_idx as usize] = 1
+                V2_USER_FN_KNOWLEDGE_GUARD_COUNT[reg_idx as usize] = guard_count
+                V2_USER_FN_KNOWLEDGE_GUARD_TYPE_STRUCT_IDX[reg_idx as usize] = value_sidx
+                if seen_arrow != 0 { V2_USER_FN_KNOWLEDGE_GUARD_SITE[reg_idx as usize] = 2 }
+                else { V2_USER_FN_KNOWLEDGE_GUARD_SITE[reg_idx as usize] = 1 }
+                return
+            }
+        }
+        p = p + 1
+    }
+}
+
+fn scan_local_knowledge_guard_type(local_idx: i64, type_start: i64, type_end: i64) with Mut, Panic, Div {
+    if local_idx < 0 || local_idx >= 64 {
+        return
+    }
+    var p = type_start
+    while p + 9 < type_end {
+        if token_kind(p) == TK_IDENT && token_text_eq(p, "Knowledge") &&
+           token_kind(p + 1) == TK_LT &&
+           token_kind(p + 2) == TK_IDENT &&
+           token_kind(p + 3) == TK_IDENT && token_text_eq(p + 3, "where") &&
+           token_kind(p + 4) == TK_LBRACE {
+            let value_sidx = find_struct_idx_tok(p + 2)
+            var guard_count: i64 = 0
+            var q = p + 5
+            while value_sidx >= 0 && q + 2 < type_end && token_kind(q) != TK_RBRACE && guard_count < 4 {
+                if token_kind(q) == TK_IDENT &&
+                   is_cmp_op(token_kind(q + 1)) &&
+                   (token_kind(q + 2) == TK_INT || token_kind(q + 2) == TK_FLOAT) {
+                    let field_offset = struct_field_offset_tok(value_sidx, q)
+                    if field_offset >= 0 {
+                        var threshold_value: i64 = 0
+                        var threshold_scale: i64 = 1
+                        var threshold_kind: i64 = 0
+                        if token_kind(q + 2) == TK_FLOAT {
+                            threshold_value = token_float_mantissa(q + 2)
+                            threshold_scale = token_float_scale(q + 2)
+                            threshold_kind = 2
+                        } else {
+                            threshold_value = pt_read_int_value(q + 2)
+                        }
+                        var unit_suffix_pos = q + 3
+                        if token_kind(q + 2) == TK_INT &&
+                           q + 4 < type_end &&
+                           token_kind(q + 3) == TK_DOT &&
+                           token_kind(q + 4) == TK_INT {
+                            threshold_scale = decimal_scale_for_digits(token_decimal_digit_count(q + 4))
+                            threshold_value = (pt_read_int_value(q + 2) * threshold_scale) + pt_read_int_value(q + 4)
+                            threshold_kind = 2
+                            unit_suffix_pos = q + 5
+                        }
+                        if unit_suffix_pos + 2 < type_end &&
+                           token_kind(unit_suffix_pos) == TK_LT &&
+                           token_kind(unit_suffix_pos + 1) == TK_IDENT &&
+                           token_kind(unit_suffix_pos + 2) == TK_GT {
+                            threshold_kind = 3
+                        }
+                        let row = local_idx * 4 + guard_count
+                        V2_LOCAL_KNOWLEDGE_GUARD_ROW_FIELD_OFFSET[row as usize] = field_offset
+                        V2_LOCAL_KNOWLEDGE_GUARD_ROW_CMP_CODE[row as usize] = cmp_op_to_code(token_kind(q + 1))
+                        V2_LOCAL_KNOWLEDGE_GUARD_ROW_THRESHOLD[row as usize] = threshold_value
+                        V2_LOCAL_KNOWLEDGE_GUARD_ROW_THRESHOLD_SCALE[row as usize] = threshold_scale
+                        V2_LOCAL_KNOWLEDGE_GUARD_ROW_THRESHOLD_KIND[row as usize] = threshold_kind
+                        if guard_count == 0 {
+                            V2_LOCAL_KNOWLEDGE_GUARD_FIELD_OFFSET[local_idx as usize] = field_offset
+                            V2_LOCAL_KNOWLEDGE_GUARD_CMP_CODE[local_idx as usize] = cmp_op_to_code(token_kind(q + 1))
+                            V2_LOCAL_KNOWLEDGE_GUARD_THRESHOLD[local_idx as usize] = threshold_value
+                        }
+                        guard_count = guard_count + 1
+                    }
+                }
+                q = q + 1
+            }
+            if guard_count > 0 {
+                V2_LOCAL_KNOWLEDGE_GUARD_ENABLED[local_idx as usize] = 1
+                V2_LOCAL_KNOWLEDGE_GUARD_COUNT[local_idx as usize] = guard_count
+                V2_LOCAL_KNOWLEDGE_GUARD_TYPE_STRUCT_IDX[local_idx as usize] = value_sidx
+                return
+            }
+        }
+        p = p + 1
+    }
+}
+
 fn scan_user_fns(token_count: i64, first_fn_id: i64) with Mut, Panic, Div {
     V2_USER_FN_COUNT = 0
+    var reset_i: i64 = 0
+    while reset_i < 512 {
+        V2_USER_FN_KNOWLEDGE_GUARD_ENABLED[reset_i as usize] = 0
+        V2_USER_FN_KNOWLEDGE_GUARD_SITE[reset_i as usize] = 0
+        V2_USER_FN_KNOWLEDGE_GUARD_COUNT[reset_i as usize] = 0
+        V2_USER_FN_KNOWLEDGE_GUARD_FIELD_TOK[reset_i as usize] = 0
+        V2_USER_FN_KNOWLEDGE_GUARD_FIELD_OFFSET[reset_i as usize] = 0
+        V2_USER_FN_KNOWLEDGE_GUARD_CMP_CODE[reset_i as usize] = 0
+        V2_USER_FN_KNOWLEDGE_GUARD_THRESHOLD[reset_i as usize] = 0
+        V2_USER_FN_KNOWLEDGE_GUARD_TYPE_STRUCT_IDX[reset_i as usize] = -1
+        reset_i = reset_i + 1
+    }
     var i: i64 = 0
     var next_id = first_fn_id
     while i + 1 < token_count {
@@ -5125,20 +5811,24 @@ fn scan_user_fns(token_count: i64, first_fn_id: i64) with Mut, Panic, Div {
             var has_body: bool = false
             var kb: i64 = i + 2
             var kb_depth: i64 = 0
+            var kb_angle_depth: i64 = 0
             while kb < token_count {
                 let kbk = token_kind(kb)
                 if kbk == TK_LPAREN || kbk == TK_LBRACKET { kb_depth = kb_depth + 1 }
                 else if kbk == TK_RPAREN || kbk == TK_RBRACKET { if kb_depth > 0 { kb_depth = kb_depth - 1 } }
-                else if kbk == TK_LBRACE && kb_depth == 0 { has_body = true; break }
-                else if kbk == TK_SEMI && kb_depth == 0 { break }
-                else if kbk == TK_RBRACE && kb_depth == 0 { break }
-                else if kbk == TK_FN && kb_depth == 0 && token_kind(kb + 1) == TK_IDENT { break }
+                else if kbk == TK_LT { kb_angle_depth = kb_angle_depth + 1 }
+                else if kbk == TK_GT { if kb_angle_depth > 0 { kb_angle_depth = kb_angle_depth - 1 } }
+                else if kbk == TK_LBRACE && kb_depth == 0 && kb_angle_depth == 0 { has_body = true; break }
+                else if kbk == TK_SEMI && kb_depth == 0 && kb_angle_depth == 0 { break }
+                else if kbk == TK_RBRACE && kb_depth == 0 && kb_angle_depth == 0 { break }
+                else if kbk == TK_FN && kb_depth == 0 && kb_angle_depth == 0 && token_kind(kb + 1) == TK_IDENT { break }
                 kb = kb + 1
             }
             if !has_body { i = i + 2; continue }
             if !token_text_eq(i + 1, "main") && !skip_native_v2_driver_helper_fn(i + 1) {
                 let reg_idx = V2_USER_FN_COUNT
                 register_user_fn(i + 1, next_id)
+                scan_user_fn_knowledge_guard_signature(reg_idx, i + 2, kb)
                 // scan for -> ReturnType to detect struct/array return
                 var ret_sidx: i64 = -1
                 var ret_is_f64: i64 = 0
@@ -7903,6 +8593,8 @@ fn compile_ir_module_to_elf(output_path: string, token_count: i64) -> i64 with I
     let user_fn_count = V2_USER_FN_COUNT
     let main_fn_id = V2_FIRST_USER_FN_ID + user_fn_count
     let total_fn_count = main_fn_id + 1 + V2_CLOSURE_COUNT
+    V2_DIRECT_KNOWLEDGE_GUARD_EMITTED = 0
+    V2_ROW_STREAM_PAYLOAD_GUARD_EMITTED = 0
 
     drv_reset_codegen(total_fn_count)
 
@@ -7913,7 +8605,9 @@ fn compile_ir_module_to_elf(output_path: string, token_count: i64) -> i64 with I
         drv_emit_builtin_write_elf(V2_BUILTIN_DRIVER_WRITE_ELF)
         drv_emit_builtin_chmod(V2_BUILTIN_DRIVER_CHMOD)
     }
-    if source_uses_ident(token_count, "assert") {
+    let direct_knowledge_guard_count = native_v2_direct_knowledge_guard_count()
+    let source_may_need_knowledge_guard = source_uses_ident(token_count, "Knowledge") && source_uses_ident(token_count, "where")
+    if source_uses_ident(token_count, "assert") || direct_knowledge_guard_count > 0 || source_may_need_knowledge_guard {
         drv_emit_builtin_sys_exit_1(V2_BUILTIN_SYS_EXIT_1)
     }
 
@@ -7990,6 +8684,16 @@ fn compile_ir_module_to_elf(output_path: string, token_count: i64) -> i64 with I
     print(" size=")
     print_int(elf_len)
     print("\n")
+    if V2_DIRECT_KNOWLEDGE_GUARD_EMITTED > 0 {
+        print("native_compile: knowledge_runtime_guards_direct=1 count=")
+        print_int(V2_DIRECT_KNOWLEDGE_GUARD_EMITTED)
+        print("\n")
+    }
+    if V2_ROW_STREAM_PAYLOAD_GUARD_EMITTED > 0 {
+        print("native_compile: row_stream_payload_guards=1 count=")
+        print_int(V2_ROW_STREAM_PAYLOAD_GUARD_EMITTED)
+        print("\n")
+    }
     0
 }
 
@@ -8233,7 +8937,16 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         }
     }
 
-    let token_count = driver_lex_file_to_globals(source_path)
+    drv_precompute_knowledge_guard_step_walk(source_path)
+    var token_count = driver_lex_file_to_globals(source_path)
+    if token_count <= 0 {
+        print("native_compile: lex_error\n")
+        return 1
+    }
+    V2_TOKEN_COUNT = token_count
+    scan_struct_decls(token_count)
+    drv_hydrate_knowledge_guard_row_stream_payloads(source_path)
+    token_count = driver_lex_file_to_globals(source_path)
     if token_count <= 0 {
         print("native_compile: lex_error\n")
         return 1

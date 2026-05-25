@@ -132,7 +132,25 @@ let time: f64<s> = 9.58 s
 let speed = distance / time
 ```
 
-### 5. Effects
+### 5. Demos Interativas Rápidas (PPM / Unidades / GUM / Portas)
+
+Para experimentar os recursos únicos de ciência e metrologia do Sounio diretamente neste checkout, execute as seguintes demonstrações interativas nativas:
+
+```bash
+# Demo 1: Verificação dimensional estática (compilação aceita)
+./bin/souc run demo_unidades.sio
+
+# Demo 2: Propagação analítica de incertezas em tempo real (ISO GUM)
+./bin/souc run demo_incerteza.sio
+
+# Demo 3: Portas de confiança dinâmicas (Sucesso - guarda aceita)
+bash scripts/ontology/expand_knowledge_runtime_guards.sh demo_portas_sucesso.sio /tmp/demo3_sucesso.sio && ./bin/souc run /tmp/demo3_sucesso.sio
+
+# Demo 4: Portas de confiança dinâmicas (Rejeição - asserção falha no runtime)
+bash scripts/ontology/expand_knowledge_runtime_guards.sh demo_portas_rejeicao.sio /tmp/demo3_rejeicao.sio && ./bin/souc run /tmp/demo3_rejeicao.sio
+```
+
+### 6. Effects
 
 ```sounio
 fn read_file(path: &str) -> String with IO {

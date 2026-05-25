@@ -175,7 +175,7 @@ export default function CodeExamples() {
 
   return (
     <section id="code" className="py-[clamp(3.5rem,7vw,6rem)] bg-[color-mix(in_srgb,var(--color-bg-alt)_74%,transparent)] border-y border-[var(--glass-border)]">
-      <div className="container px-4">
+      <div className="container">
         <div className="mb-[2.4rem] grid gap-[0.5rem]">
           <h2 className="font-sans text-[clamp(1.7rem,4.2vw,3rem)] font-[750] leading-[1.1] tracking-[-0.025em] text-[var(--color-text-primary)]">
             See the difference
@@ -188,13 +188,13 @@ export default function CodeExamples() {
         </div>
 
         {/* Tab bar */}
-        <div className="flex justify-center mb-8">
-          <div className="inline-flex gap-1 p-1 rounded-full glass">
+        <div className="flex justify-start md:justify-center mb-8 overflow-x-auto no-scrollbar max-w-full px-4 md:px-0">
+          <div className="inline-flex gap-1 p-1 rounded-full glass whitespace-nowrap">
             {examples.map((example) => (
               <button
                 key={example.id}
                 onClick={() => setActiveTab(example.id)}
-                className={`px-6 py-2.5 rounded-full text-sm font-medium transition-all duration-200 ${
+                className={`px-4 md:px-6 py-2 md:py-2.5 rounded-full text-xs md:text-sm font-medium transition-all duration-200 ${
                   activeTab === example.id
                     ? 'bg-[var(--color-text-primary)] text-[var(--color-surface-primary)]'
                     : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
@@ -209,7 +209,7 @@ export default function CodeExamples() {
         {/* Side-by-side comparison */}
         <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Python panel */}
-          <div className="rounded-2xl overflow-hidden border border-[var(--glass-border)]">
+          <div className="rounded-2xl overflow-hidden border border-[var(--glass-border)] min-w-0">
             <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(255,255,255,0.03)] border-b border-[var(--glass-border)]">
               <div className="flex gap-1.5">
                 <div className="w-3 h-3 rounded-full bg-[#ff5f57]"></div>
@@ -221,14 +221,14 @@ export default function CodeExamples() {
               </span>
             </div>
             <div className={isScientist ? `code-collapsible ${isExpanded ? 'expanded' : 'collapsed'}` : ''}>
-              <pre className="p-6 bg-[#0d1117] text-sm leading-relaxed overflow-x-auto min-h-[400px]">
+              <pre className="p-4 md:p-6 bg-[#0d1117] text-xs md:text-sm leading-relaxed overflow-x-auto min-h-[320px] md:min-h-[400px]">
                 <code className="text-[#e6edf3]">{activeExample.python}</code>
               </pre>
             </div>
           </div>
 
           {/* Sounio panel */}
-          <div className="rounded-2xl overflow-hidden border border-[var(--color-accent-gold)]/20">
+          <div className="rounded-2xl overflow-hidden border border-[var(--color-accent-gold)]/20 min-w-0">
             <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(201,169,110,0.05)] border-b border-[var(--color-accent-gold)]/20">
               <div className="flex gap-1.5">
                 <div className="w-3 h-3 rounded-full bg-[#ff5f57]"></div>
@@ -240,7 +240,7 @@ export default function CodeExamples() {
               </span>
             </div>
             <div className={isScientist ? `code-collapsible ${isExpanded ? 'expanded' : 'collapsed'}` : ''}>
-              <pre className="p-6 bg-[#0d1117] text-sm leading-relaxed overflow-x-auto min-h-[400px]">
+              <pre className="p-4 md:p-6 bg-[#0d1117] text-xs md:text-sm leading-relaxed overflow-x-auto min-h-[320px] md:min-h-[400px]">
                 <code className="text-[#e6edf3]">{activeExample.sounio}</code>
               </pre>
             </div>

@@ -1,0 +1,2934 @@
+module check::knowledge_context
+
+use parser::ast::*
+use ir::ir::{ir_name_eq}
+use check::units::*
+use check::refinement::*
+
+fn knowledge_context_path_first_name(path: AstPath) -> Name {
+    Name {
+        buf: path.segments.head_buf,
+        len: path.segments.head_len,
+    }
+}
+
+fn knowledge_context_empty_name() -> Name {
+    Name { buf: [0; 128], len: 0 }
+}
+
+fn knowledge_context_field_type_in_fields(fields: Option<Box<FieldDefList> >, field_name: Name) -> Name with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            let field = (*list).head
+            if ir_name_eq(field.name, field_name) {
+                if field.ty.kind == TypeExprKind::TypeNamed {
+                    return knowledge_context_path_first_name(field.ty.path)
+                }
+                return knowledge_context_empty_name()
+            }
+            knowledge_context_field_type_in_fields((*list).tail, field_name)
+        }
+        None => knowledge_context_empty_name()
+    }
+}
+
+fn knowledge_context_field_type_expr_in_fields(fields: Option<Box<FieldDefList> >, field_name: Name) -> Option<Box<TypeExpr> > with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            let field = (*list).head
+            if ir_name_eq(field.name, field_name) {
+                return Some(Box::new(field.ty))
+            }
+            knowledge_context_field_type_expr_in_fields((*list).tail, field_name)
+        }
+        None => None
+    }
+}
+
+fn knowledge_context_find_struct_field_type(items: Option<Box<ItemList> >, struct_name: Name, field_name: Name) -> Name with Mut, Panic, Div, Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemStruct && ir_name_eq(item.name, struct_name) {
+                match item.struct_def {
+                    Some(sd) => knowledge_context_field_type_in_fields((*sd).fields, field_name)
+                    None => knowledge_context_empty_name()
+                }
+            } else {
+                knowledge_context_find_struct_field_type((*list).tail, struct_name, field_name)
+            }
+        }
+        None => knowledge_context_empty_name()
+    }
+}
+
+fn knowledge_context_find_struct_field_type_expr(items: Option<Box<ItemList> >, struct_name: Name, field_name: Name) -> Option<Box<TypeExpr> > with Mut, Panic, Div, Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemStruct && ir_name_eq(item.name, struct_name) {
+                match item.struct_def {
+                    Some(sd) => knowledge_context_field_type_expr_in_fields((*sd).fields, field_name)
+                    None => None
+                }
+            } else {
+                knowledge_context_find_struct_field_type_expr((*list).tail, struct_name, field_name)
+            }
+        }
+        None => None
+    }
+}
+
+fn knowledge_context_find_type_alias_expr(items: Option<Box<ItemList> >, alias_name: Name) -> Option<Box<TypeExpr> > with Mut, Panic, Div, Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemTypeAlias && ir_name_eq(item.name, alias_name) {
+                return item.type_alias_ty
+            }
+            knowledge_context_find_type_alias_expr((*list).tail, alias_name)
+        }
+        None => None
+    }
+}
+
+fn knowledge_context_class_is_subclass_from(root: Option<Box<OntologyClassDeclList> >, cursor: Option<Box<OntologyClassDeclList> >, sub_name: Name, super_name: Name, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if ir_name_eq(sub_name, super_name) {
+        return true
+    }
+    if depth > 8 {
+        return false
+    }
+    match cursor {
+        Some(list) => {
+            let decl = (*list).head
+            if ir_name_eq(decl.name, sub_name) {
+                var i: i64 = 0
+                while i < decl.superclass_count && i < 8 {
+                    let parent = decl.superclass_names[i as usize]
+                    if ir_name_eq(parent, super_name) {
+                        return true
+                    }
+                    if knowledge_context_class_is_subclass_from(root, root, parent, super_name, depth + 1) {
+                        return true
+                    }
+                    i = i + 1
+                }
+                return false
+            }
+            knowledge_context_class_is_subclass_from(root, (*list).tail, sub_name, super_name, depth)
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_class_is_subclass(classes: Option<Box<OntologyClassDeclList> >, sub_name: Name, super_name: Name) -> bool with Mut, Panic, Div, Alloc {
+    knowledge_context_class_is_subclass_from(classes, classes, sub_name, super_name, 0)
+}
+
+fn knowledge_context_is_subclass(items: Option<Box<ItemList> >, sub_name: Name, super_name: Name) -> bool with Mut, Panic, Div, Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemOntology {
+                match item.ontology_def {
+                    Some(odef) => {
+                        if knowledge_context_class_is_subclass((*odef).classes, sub_name, super_name) {
+                            return true
+                        }
+                    }
+                    None => {}
+                }
+            }
+            knowledge_context_is_subclass((*list).tail, sub_name, super_name)
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_disjoint_in_list(disjoints: Option<Box<OntologyDisjointDeclList> >, a_name: Name, b_name: Name) -> bool with Mut, Panic, Div, Alloc {
+    match disjoints {
+        Some(list) => {
+            let decl = (*list).head
+            if (ir_name_eq(decl.name_a, a_name) && ir_name_eq(decl.name_b, b_name)) ||
+               (ir_name_eq(decl.name_a, b_name) && ir_name_eq(decl.name_b, a_name)) {
+                return true
+            }
+            knowledge_context_disjoint_in_list((*list).tail, a_name, b_name)
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_are_disjoint(items: Option<Box<ItemList> >, a_name: Name, b_name: Name) -> bool with Mut, Panic, Div, Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemOntology {
+                match item.ontology_def {
+                    Some(odef) => {
+                        if knowledge_context_disjoint_in_list((*odef).disjoints, a_name, b_name) {
+                            return true
+                        }
+                    }
+                    None => {}
+                }
+            }
+            knowledge_context_are_disjoint((*list).tail, a_name, b_name)
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_unit_dim_from_type_expr(reg: UnitRegistry, ty: TypeExpr) -> UnitDim with Mut, Panic, Div, Alloc {
+    let base_name = knowledge_context_path_first_name(ty.path)
+    let base_idx = reg.find(base_name)
+    var base_dim = unit_dim_dimensionless()
+    if base_idx >= 0 {
+        base_dim = reg.get_dim(base_idx)
+    }
+    match ty.type_args {
+        Some(args) => {
+            base_dim = knowledge_context_unit_dim_from_type_expr(reg, (*args).head)
+        }
+        None => {}
+    }
+
+    if ty.kind == TypeExprKind::TypeReference {
+        match ty.inner {
+            Some(inner) => unit_dim_div(base_dim, knowledge_context_unit_dim_from_type_expr(reg, *inner)),
+            None => base_dim
+        }
+    } else if ty.kind == TypeExprKind::TypeRefMut {
+        match ty.inner {
+            Some(inner) => unit_dim_mul(base_dim, knowledge_context_unit_dim_from_type_expr(reg, *inner)),
+            None => base_dim
+        }
+    } else {
+        base_dim
+    }
+}
+
+fn knowledge_context_collect_units(reg: UnitRegistry, items: Option<Box<ItemList> >) -> UnitRegistry with Mut, Panic, Div, Alloc {
+    var out = reg
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemUnit {
+                var dim = unit_dim_dimensionless()
+                match item.type_alias_ty {
+                    Some(expr) => {
+                        dim = knowledge_context_unit_dim_from_type_expr(out, *expr)
+                    }
+                    None => {
+                        let existing_idx = out.find(item.name)
+                        if existing_idx >= 0 {
+                            dim = out.get_dim(existing_idx)
+                        }
+                    }
+                }
+                out = out.register(item.name, dim)
+            }
+            knowledge_context_collect_units(out, (*list).tail)
+        }
+        None => out
+    }
+}
+
+fn knowledge_context_validate_unit_constraint(items: Option<Box<ItemList> >, units: UnitRegistry, inner_name: Name, constraint: KnowledgeConstraint) -> i64 with Mut, Panic, Div, Alloc {
+    if constraint.unit_name.len <= 0 {
+        return 0
+    }
+    let field_type_name = knowledge_context_find_struct_field_type(items, inner_name, constraint.field)
+    if field_type_name.len <= 0 {
+        return 1
+    }
+    let field_unit_idx = units.find(field_type_name)
+    let target_unit_idx = units.find(constraint.unit_name)
+    if field_unit_idx < 0 || target_unit_idx < 0 {
+        return 1
+    }
+    let field_dim = units.get_dim(field_unit_idx)
+    let target_dim = units.get_dim(target_unit_idx)
+    if unit_dim_compatible(field_dim, target_dim) {
+        return 0
+    }
+    1
+}
+
+fn knowledge_context_constraint_is_numeric(constraint: KnowledgeConstraint) -> bool {
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintGt {
+        return true
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintGe {
+        return true
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintLt {
+        return true
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintLe {
+        return true
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintEq {
+        if constraint.value_kind == KnowledgeConstraintValueKind::KnowledgeConstraintValueInt ||
+           constraint.value_kind == KnowledgeConstraintValueKind::KnowledgeConstraintValueFloat ||
+           constraint.unit_name.len > 0 {
+            return true
+        }
+    }
+    false
+}
+
+fn knowledge_context_constraint_has_numeric_value(constraint: KnowledgeConstraint) -> bool {
+    constraint.value_kind == KnowledgeConstraintValueKind::KnowledgeConstraintValueInt ||
+    constraint.value_kind == KnowledgeConstraintValueKind::KnowledgeConstraintValueFloat
+}
+
+fn knowledge_context_pred_op_from_constraint_kind(kind: KnowledgeConstraintKind) -> i64 {
+    if kind == KnowledgeConstraintKind::KnowledgeConstraintGt {
+        return refinement_op_gt()
+    }
+    if kind == KnowledgeConstraintKind::KnowledgeConstraintGe {
+        return refinement_op_gt_eq()
+    }
+    if kind == KnowledgeConstraintKind::KnowledgeConstraintLt {
+        return refinement_op_lt()
+    }
+    if kind == KnowledgeConstraintKind::KnowledgeConstraintLe {
+        return refinement_op_lt_eq()
+    }
+    if kind == KnowledgeConstraintKind::KnowledgeConstraintEq {
+        return refinement_op_eq()
+    }
+    refinement_op_none()
+}
+
+fn knowledge_context_pred_from_refinement_info(ri: RefinementInfo) -> RefinementPred {
+    if ri.pred_is_float {
+        return pred_make_float(ri.pred_op, ri.var_name, ri.pred_float_val)
+    }
+    pred_make_int(ri.pred_op, ri.var_name, ri.pred_int_val)
+}
+
+fn knowledge_context_pred_from_numeric_constraint(constraint: KnowledgeConstraint) -> RefinementPred {
+    let op = knowledge_context_pred_op_from_constraint_kind(constraint.kind)
+    if constraint.value_kind == KnowledgeConstraintValueKind::KnowledgeConstraintValueFloat {
+        return pred_make_float(op, constraint.field, constraint.float_value)
+    }
+    pred_make_int(op, constraint.field, constraint.int_value)
+}
+
+fn knowledge_context_refinement_type_implies_constraint(ty: TypeExpr, constraint: KnowledgeConstraint) -> bool with Mut, Panic, Div {
+    if ty.kind != TypeExprKind::TypeRefinement {
+        return false
+    }
+    match ty.refinement_info {
+        Some(ri_box) => {
+            let source = knowledge_context_pred_from_refinement_info(*ri_box)
+            let target = knowledge_context_pred_from_numeric_constraint(constraint)
+            pred_implies_structural(source, target)
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_type_expr_or_alias_implies_constraint(items: Option<Box<ItemList> >, ty: TypeExpr, constraint: KnowledgeConstraint) -> bool with Mut, Panic, Div, Alloc {
+    if knowledge_context_refinement_type_implies_constraint(ty, constraint) {
+        return true
+    }
+    if ty.kind == TypeExprKind::TypeNamed {
+        let alias_name = knowledge_context_path_first_name(ty.path)
+        match knowledge_context_find_type_alias_expr(items, alias_name) {
+            Some(alias_ty) => knowledge_context_refinement_type_implies_constraint(*alias_ty, constraint)
+            None => false
+        }
+    } else {
+        false
+    }
+}
+
+fn knowledge_context_name_is_builtin_numeric(name: Name) -> bool with Mut, Panic, Div {
+    if ir_name_eq(name, make_name("i8")) { return true }
+    if ir_name_eq(name, make_name("i32")) { return true }
+    if ir_name_eq(name, make_name("i64")) { return true }
+    if ir_name_eq(name, make_name("u8")) { return true }
+    if ir_name_eq(name, make_name("u32")) { return true }
+    if ir_name_eq(name, make_name("u64")) { return true }
+    if ir_name_eq(name, make_name("f32")) { return true }
+    if ir_name_eq(name, make_name("f64")) { return true }
+    false
+}
+
+fn knowledge_context_validate_numeric_constraint(items: Option<Box<ItemList> >, units: UnitRegistry, inner_name: Name, constraint: KnowledgeConstraint) -> i64 with Mut, Panic, Div, Alloc {
+    if !knowledge_context_constraint_is_numeric(constraint) {
+        return 0
+    }
+    if !knowledge_context_constraint_has_numeric_value(constraint) {
+        return 1
+    }
+    match knowledge_context_find_struct_field_type_expr(items, inner_name, constraint.field) {
+        Some(field_ty_box) => {
+            if knowledge_context_type_expr_or_alias_implies_constraint(items, *field_ty_box, constraint) {
+                return 0
+            }
+        }
+        None => {}
+    }
+    let field_type_name = knowledge_context_find_struct_field_type(items, inner_name, constraint.field)
+    if field_type_name.len <= 0 {
+        return 1
+    }
+    if knowledge_context_name_is_builtin_numeric(field_type_name) {
+        return 0
+    }
+    if units.find(field_type_name) >= 0 {
+        return 0
+    }
+    1
+}
+
+fn knowledge_context_constraints_have_unit(opt: Option<Box<KnowledgeConstraintList> >) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            if (*list).head.unit_name.len > 0 {
+                return true
+            }
+            knowledge_context_constraints_have_unit((*list).tail)
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_constraints_need_static_value_validation(opt: Option<Box<KnowledgeConstraintList> >) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            if (*list).head.unit_name.len > 0 || knowledge_context_constraint_is_numeric((*list).head) {
+                return true
+            }
+            knowledge_context_constraints_need_static_value_validation((*list).tail)
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_type_has_unit_constraint(ty: TypeExpr) -> bool with Mut, Panic, Div, Alloc {
+    if ty.kind == TypeExprKind::TypeKnowledge {
+        match ty.knowledge_info {
+            Some(info) => knowledge_context_constraints_need_static_value_validation((*info).proof_constraints)
+            None => false
+        }
+    } else {
+        false
+    }
+}
+
+fn knowledge_context_params_have_unit_constraint(params: Option<Box<ParamList> >) -> bool with Mut, Panic, Div, Alloc {
+    match params {
+        Some(list) => {
+            if knowledge_context_type_has_unit_constraint((*list).head.ty) {
+                return true
+            }
+            knowledge_context_params_have_unit_constraint((*list).tail)
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_fn_has_unit_constraint(opt: Option<Box<FnDef> >) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => {
+            if knowledge_context_params_have_unit_constraint((*fd).params) {
+                return true
+            }
+            match (*fd).return_type {
+                Some(ret_ty) => knowledge_context_type_has_unit_constraint(*ret_ty)
+                None => false
+            }
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_items_have_unit_constraint(items: Option<Box<ItemList> >) -> bool with Mut, Panic, Div, Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn {
+                if knowledge_context_fn_has_unit_constraint(item.fn_def) {
+                    return true
+                }
+            }
+            knowledge_context_items_have_unit_constraint((*list).tail)
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_validate_constraints_ontology(items: Option<Box<ItemList> >, inner_name: Name, constraints: Option<Box<KnowledgeConstraintList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                let field_type_name = knowledge_context_find_struct_field_type(items, inner_name, constraint.field)
+                if field_type_name.len <= 0 {
+                    return 1
+                }
+                if knowledge_context_is_subclass(items, field_type_name, constraint.target_name) {
+                    return knowledge_context_validate_constraints_ontology(items, inner_name, (*list).tail)
+                }
+                if knowledge_context_are_disjoint(items, field_type_name, constraint.target_name) {
+                    return 1
+                }
+                return 1
+            }
+            knowledge_context_validate_constraints_ontology(items, inner_name, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_type_ontology(items: Option<Box<ItemList> >, ty: TypeExpr) -> i64 with Mut, Panic, Div, Alloc {
+    if ty.kind != TypeExprKind::TypeKnowledge {
+        return 0
+    }
+    match ty.knowledge_info {
+        Some(info) => {
+            let inner_ty = *(*info).inner_type
+            if inner_ty.kind != TypeExprKind::TypeNamed {
+                return 1
+            }
+            let inner_name = knowledge_context_path_first_name(inner_ty.path)
+            knowledge_context_validate_constraints_ontology(items, inner_name, (*info).proof_constraints)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_params_ontology(items: Option<Box<ItemList> >, params: Option<Box<ParamList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match params {
+        Some(list) => {
+            if knowledge_context_validate_type_ontology(items, (*list).head.ty) != 0 {
+                return 1
+            }
+            knowledge_context_validate_params_ontology(items, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_fn_ontology(items: Option<Box<ItemList> >, opt: Option<Box<FnDef> >) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => {
+            if knowledge_context_validate_params_ontology(items, (*fd).params) != 0 {
+                return 1
+            }
+            match (*fd).return_type {
+                Some(ret_ty) => knowledge_context_validate_type_ontology(items, *ret_ty)
+                None => 0
+            }
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_from_ontology(root: Option<Box<ItemList> >, cursor: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match cursor {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn {
+                if knowledge_context_validate_fn_ontology(root, item.fn_def) != 0 {
+                    return 1
+                }
+            }
+            knowledge_context_validate_from_ontology(root, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_constraints(items: Option<Box<ItemList> >, units: UnitRegistry, inner_name: Name, constraints: Option<Box<KnowledgeConstraintList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                let field_type_name = knowledge_context_find_struct_field_type(items, inner_name, constraint.field)
+                if field_type_name.len <= 0 {
+                    return 1
+                }
+                if knowledge_context_is_subclass(items, field_type_name, constraint.target_name) {
+                    return knowledge_context_validate_constraints(items, units, inner_name, (*list).tail)
+                }
+                if knowledge_context_are_disjoint(items, field_type_name, constraint.target_name) {
+                    return 1
+                }
+                return 1
+            } else if knowledge_context_validate_unit_constraint(items, units, inner_name, constraint) != 0 {
+                return 1
+            } else if knowledge_context_validate_numeric_constraint(items, units, inner_name, constraint) != 0 {
+                return 1
+            }
+            knowledge_context_validate_constraints(items, units, inner_name, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_value_constraints(items: Option<Box<ItemList> >, units: UnitRegistry, inner_name: Name, constraints: Option<Box<KnowledgeConstraintList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            if constraint.kind != KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                if knowledge_context_validate_unit_constraint(items, units, inner_name, constraint) != 0 {
+                    return 1
+                }
+                if knowledge_context_validate_numeric_constraint(items, units, inner_name, constraint) != 0 {
+                    return 1
+                }
+            }
+            knowledge_context_validate_value_constraints(items, units, inner_name, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_type(items: Option<Box<ItemList> >, units: UnitRegistry, ty: TypeExpr) -> i64 with Mut, Panic, Div, Alloc {
+    if ty.kind != TypeExprKind::TypeKnowledge {
+        return 0
+    }
+    match ty.knowledge_info {
+        Some(info) => {
+            let inner_ty = *(*info).inner_type
+            if inner_ty.kind != TypeExprKind::TypeNamed {
+                return 1
+            }
+            let inner_name = knowledge_context_path_first_name(inner_ty.path)
+            if knowledge_context_validate_constraints_ontology(items, inner_name, (*info).proof_constraints) != 0 {
+                return 1
+            }
+            knowledge_context_validate_value_constraints(items, units, inner_name, (*info).proof_constraints)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_params(items: Option<Box<ItemList> >, units: UnitRegistry, params: Option<Box<ParamList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match params {
+        Some(list) => {
+            if knowledge_context_validate_type(items, units, (*list).head.ty) != 0 {
+                return 1
+            }
+            knowledge_context_validate_params(items, units, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_fn(items: Option<Box<ItemList> >, units: UnitRegistry, opt: Option<Box<FnDef> >) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => {
+            if knowledge_context_validate_params(items, units, (*fd).params) != 0 {
+                return 1
+            }
+            match (*fd).return_type {
+                Some(ret_ty) => knowledge_context_validate_type(items, units, *ret_ty)
+                None => 0
+            }
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_from(root: Option<Box<ItemList> >, units: UnitRegistry, cursor: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match cursor {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn {
+                if knowledge_context_validate_fn(root, units, item.fn_def) != 0 {
+                    return 1
+                }
+            }
+            knowledge_context_validate_from(root, units, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_type_values_only(items: Option<Box<ItemList> >, units: UnitRegistry, ty: TypeExpr) -> i64 with Mut, Panic, Div, Alloc {
+    if ty.kind != TypeExprKind::TypeKnowledge {
+        return 0
+    }
+    match ty.knowledge_info {
+        Some(info) => {
+            let inner_ty = *(*info).inner_type
+            if inner_ty.kind != TypeExprKind::TypeNamed {
+                return 1
+            }
+            let inner_name = knowledge_context_path_first_name(inner_ty.path)
+            knowledge_context_validate_value_constraints(items, units, inner_name, (*info).proof_constraints)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_params_values_only(items: Option<Box<ItemList> >, units: UnitRegistry, params: Option<Box<ParamList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match params {
+        Some(list) => {
+            if knowledge_context_validate_type_values_only(items, units, (*list).head.ty) != 0 {
+                return 1
+            }
+            knowledge_context_validate_params_values_only(items, units, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_fn_values_only(items: Option<Box<ItemList> >, units: UnitRegistry, opt: Option<Box<FnDef> >) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => {
+            if knowledge_context_validate_params_values_only(items, units, (*fd).params) != 0 {
+                return 1
+            }
+            match (*fd).return_type {
+                Some(ret_ty) => knowledge_context_validate_type_values_only(items, units, *ret_ty)
+                None => 0
+            }
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_from_values_only(root: Option<Box<ItemList> >, units: UnitRegistry, cursor: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match cursor {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn {
+                if knowledge_context_validate_fn_values_only(root, units, item.fn_def) != 0 {
+                    return 1
+                }
+            }
+            knowledge_context_validate_from_values_only(root, units, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_struct_field_value_in_fields(fields: Option<Box<StructFieldList> >, field_name: Name) -> Option<Box<Expr> > with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            let field = (*list).head
+            if ir_name_eq(field.name, field_name) {
+                return Some(Box::new(field.value))
+            }
+            knowledge_context_struct_field_value_in_fields((*list).tail, field_name)
+        }
+        None => None
+    }
+}
+
+fn knowledge_context_i64_satisfies_constraint(value: i64, constraint: KnowledgeConstraint) -> bool {
+    if constraint.value_kind == KnowledgeConstraintValueKind::KnowledgeConstraintValueFloat {
+        return knowledge_context_f64_satisfies_constraint(value as f64, constraint)
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintGt {
+        return value > constraint.int_value
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintGe {
+        return value >= constraint.int_value
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintLt {
+        return value < constraint.int_value
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintLe {
+        return value <= constraint.int_value
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintEq {
+        return value == constraint.int_value
+    }
+    true
+}
+
+fn knowledge_context_f64_satisfies_constraint(value: f64, constraint: KnowledgeConstraint) -> bool {
+    var target = constraint.float_value
+    if constraint.value_kind == KnowledgeConstraintValueKind::KnowledgeConstraintValueInt {
+        target = constraint.int_value as f64
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintGt {
+        return value > target
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintGe {
+        return value >= target
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintLt {
+        return value < target
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintLe {
+        return value <= target
+    }
+    if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintEq {
+        return value == target
+    }
+    true
+}
+
+fn knowledge_context_validate_literal_value_constraint(expr: Expr, constraint: KnowledgeConstraint) -> i64 {
+    if !knowledge_context_constraint_is_numeric(constraint) {
+        return 0
+    }
+    if !knowledge_context_constraint_has_numeric_value(constraint) {
+        return 1
+    }
+    if expr.kind == ExprKind::ExprIntLit {
+        if knowledge_context_i64_satisfies_constraint(expr.int_val, constraint) {
+            return 0
+        }
+        return 1
+    }
+    if expr.kind == ExprKind::ExprFloatLit {
+        if knowledge_context_f64_satisfies_constraint(expr.float_val, constraint) {
+            return 0
+        }
+        return 1
+    }
+    0
+}
+
+fn knowledge_context_validate_static_value_constraints_from_struct_lit(items: Option<Box<ItemList> >, units: UnitRegistry, inner_name: Name, value_expr: Expr, constraints: Option<Box<KnowledgeConstraintList> >) -> i64 with Mut, Panic, Div, Alloc {
+    if value_expr.kind != ExprKind::ExprStructLit {
+        return 0
+    }
+    let value_name = knowledge_context_path_first_name(value_expr.path)
+    if !ir_name_eq(value_name, inner_name) {
+        return 1
+    }
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            if constraint.kind != KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                match knowledge_context_struct_field_value_in_fields(value_expr.fields, constraint.field) {
+                    Some(field_expr) => {
+                        if knowledge_context_validate_literal_value_constraint(*field_expr, constraint) != 0 {
+                            return 1
+                        }
+                    }
+                    None => return 1
+                }
+            }
+            knowledge_context_validate_static_value_constraints_from_struct_lit(items, units, inner_name, value_expr, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_value_field_from_knowledge_literal(init_expr: Expr) -> Option<Box<Expr> > with Mut, Panic, Div, Alloc {
+    if init_expr.kind != ExprKind::ExprStructLit {
+        return None
+    }
+    let lit_name = knowledge_context_path_first_name(init_expr.path)
+    if !ir_name_eq(lit_name, make_name("Knowledge")) {
+        return None
+    }
+    knowledge_context_struct_field_value_in_fields(init_expr.fields, make_name("value"))
+}
+
+fn knowledge_context_validate_static_value_init(items: Option<Box<ItemList> >, units: UnitRegistry, ty: TypeExpr, init_expr: Expr) -> i64 with Mut, Panic, Div, Alloc {
+    if ty.kind != TypeExprKind::TypeKnowledge {
+        return 0
+    }
+    match ty.knowledge_info {
+        Some(info) => {
+            let inner_ty = *(*info).inner_type
+            if inner_ty.kind != TypeExprKind::TypeNamed {
+                return 1
+            }
+            let inner_name = knowledge_context_path_first_name(inner_ty.path)
+            match knowledge_context_value_field_from_knowledge_literal(init_expr) {
+                Some(value_expr) => {
+                    knowledge_context_validate_static_value_constraints_from_struct_lit(items, units, inner_name, *value_expr, (*info).proof_constraints)
+                }
+                None => knowledge_context_validate_generated_static_value_init(items, units, inner_name, (*info).proof_constraints, init_expr)
+            }
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_find_fn_def(items: Option<Box<ItemList> >, fn_name: Name) -> Option<Box<FnDef> > with Mut, Panic, Div, Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn && ir_name_eq(item.name, fn_name) {
+                return item.fn_def
+            }
+            knowledge_context_find_fn_def((*list).tail, fn_name)
+        }
+        None => None
+    }
+}
+
+fn knowledge_context_expr_callee_name(expr: Expr) -> Name {
+    if expr.kind == ExprKind::ExprIdent {
+        return expr.name
+    }
+    if expr.kind == ExprKind::ExprPath {
+        return knowledge_context_path_first_name(expr.path)
+    }
+    knowledge_context_empty_name()
+}
+
+fn knowledge_context_arg_for_param(params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, param_name: Name) -> Option<Box<Expr> > with Mut, Panic, Div, Alloc {
+    match params {
+        Some(param_list) => {
+            match args {
+                Some(arg_list) => {
+                    if ir_name_eq((*param_list).head.name, param_name) {
+                        return Some(Box::new((*arg_list).head))
+                    }
+                    knowledge_context_arg_for_param((*param_list).tail, (*arg_list).tail, param_name)
+                }
+                None => None
+            }
+        }
+        None => None
+    }
+}
+
+fn knowledge_context_local_init_for_name(stmts: Option<Box<StmtList> >, local_name: Name) -> Option<Box<Expr> > with Mut, Panic, Div, Alloc {
+    match stmts {
+        Some(list) => {
+            let stmt = (*list).head
+            if (stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar) && ir_name_eq(stmt.name, local_name) {
+                return stmt.expr
+            }
+            knowledge_context_local_init_for_name((*list).tail, local_name)
+        }
+        None => None
+    }
+}
+
+fn knowledge_context_stmt_is_return(stmt: Stmt) -> bool {
+    if stmt.kind != StmtKind::StmtExpr {
+        return false
+    }
+    match stmt.expr {
+        Some(expr_box) => {
+            let expr = *expr_box
+            expr.kind == ExprKind::ExprReturn
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_stmt_is_if_expr(stmt: Stmt) -> bool {
+    if stmt.kind != StmtKind::StmtExpr {
+        return false
+    }
+    match stmt.expr {
+        Some(expr_box) => {
+            let expr = *expr_box
+            expr.kind == ExprKind::ExprIf
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_has_branch_before_return(stmts: Option<Box<StmtList> >) -> bool with Mut, Panic, Div, Alloc {
+    match stmts {
+        Some(list) => {
+            let stmt = (*list).head
+            if knowledge_context_stmt_is_return(stmt) {
+                return false
+            }
+            if knowledge_context_stmt_is_if_expr(stmt) {
+                return true
+            }
+            knowledge_context_has_branch_before_return((*list).tail)
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_assign_target_matches(stmt: Stmt, local_name: Name) -> bool with Mut, Panic, Div, Alloc {
+    if stmt.kind != StmtKind::StmtAssign {
+        return false
+    }
+    match stmt.target {
+        Some(target_box) => {
+            let target = *target_box
+            if target.kind == ExprKind::ExprIdent {
+                return ir_name_eq(target.name, local_name)
+            }
+            false
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_local_value_before_return(stmts: Option<Box<StmtList> >, local_name: Name) -> Option<Box<Expr> > with Mut, Panic, Div, Alloc {
+    match stmts {
+        Some(list) => {
+            let stmt = (*list).head
+            if knowledge_context_stmt_is_return(stmt) {
+                return None
+            }
+            match knowledge_context_local_value_before_return((*list).tail, local_name) {
+                Some(tail_expr) => return Some(tail_expr)
+                None => {}
+            }
+            if knowledge_context_assign_target_matches(stmt, local_name) {
+                return stmt.expr
+            }
+            if (stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar) && ir_name_eq(stmt.name, local_name) {
+                return stmt.expr
+            }
+            None
+        }
+        None => None
+    }
+}
+
+fn knowledge_context_numeric_literal_expr_from_value(template: Expr, value: f64) -> Expr {
+    Expr {
+        kind: ExprKind::ExprFloatLit,
+        span: template.span,
+        int_val: value as i64,
+        float_val: value,
+        name: knowledge_context_empty_name(),
+        path: empty_path(),
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        left: None,
+        right: None,
+        block: None,
+        else_expr: None,
+        args: None,
+        arms: None,
+        fields: None,
+        cast_type: None,
+        handler_block: None,
+        closure_params: None,
+        closure_return: None,
+        closure_effects: None,
+        closure_body: None,
+        type_args: None,
+    }
+}
+
+fn knowledge_context_apply_assign_numeric_value(op: AssignOp, current_value: f64, rhs_value: f64) -> (i64, f64) {
+    if op == AssignOp::AssignEq {
+        return (1, rhs_value)
+    }
+    if op == AssignOp::AssignAdd {
+        return (1, current_value + rhs_value)
+    }
+    if op == AssignOp::AssignSub {
+        return (1, current_value - rhs_value)
+    }
+    if op == AssignOp::AssignMul {
+        return (1, current_value * rhs_value)
+    }
+    if op == AssignOp::AssignDiv {
+        if rhs_value == 0.0 {
+            return (0, 0.0)
+        }
+        return (1, current_value / rhs_value)
+    }
+    (0, 0.0)
+}
+
+fn knowledge_context_resolve_numeric_arg_expr(items: Option<Box<ItemList> >, expr: Expr, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, depth: i64) -> Expr with Mut, Panic, Div, Alloc {
+    let value = knowledge_context_eval_generated_numeric_expr_avoiding(items, expr, params, args, locals, depth - 1, knowledge_context_empty_name(), false)
+    if value.0 != 0 {
+        return knowledge_context_numeric_literal_expr_from_value(expr, value.1)
+    }
+    expr
+}
+
+fn knowledge_context_resolve_numeric_arg_list(items: Option<Box<ItemList> >, call_args: Option<Box<ExprList> >, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, depth: i64) -> Option<Box<ExprList> > with Mut, Panic, Div, Alloc {
+    if depth <= 0 {
+        return call_args
+    }
+    match call_args {
+        Some(list) => {
+            let resolved_head = knowledge_context_resolve_numeric_arg_expr(items, (*list).head, params, args, locals, depth - 1)
+            let resolved_tail = knowledge_context_resolve_numeric_arg_list(items, (*list).tail, params, args, locals, depth - 1)
+            Some(Box::new(ExprList { label: (*list).label, head: resolved_head, tail: resolved_tail }))
+        }
+        None => None
+    }
+}
+
+fn knowledge_context_eval_static_bool_expr(items: Option<Box<ItemList> >, expr: Expr, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, depth: i64) -> (i64, i64) with Mut, Panic, Div, Alloc {
+    if depth <= 0 {
+        return (0, 0)
+    }
+    if expr.kind == ExprKind::ExprBoolTrue {
+        return (1, 1)
+    }
+    if expr.kind == ExprKind::ExprBoolFalse {
+        return (1, 0)
+    }
+    if expr.kind == ExprKind::ExprUnary {
+        if expr.un_op == UnaryOp::OpNot {
+            match expr.left {
+                Some(inner_box) => {
+                    let inner = knowledge_context_eval_static_bool_expr(items, *inner_box, params, args, locals, depth - 1)
+                    if inner.0 == 0 {
+                        return (0, 0)
+                    }
+                    if inner.1 == 0 {
+                        return (1, 1)
+                    }
+                    return (1, 0)
+                }
+                None => return (0, 0)
+            }
+        }
+    }
+    if expr.kind == ExprKind::ExprBinary {
+        if expr.bin_op == BinaryOp::OpAnd || expr.bin_op == BinaryOp::OpOr {
+            match expr.left {
+                Some(left_box) => {
+                    match expr.right {
+                        Some(right_box) => {
+                            let left_bool = knowledge_context_eval_static_bool_expr(items, *left_box, params, args, locals, depth - 1)
+                            let right_bool = knowledge_context_eval_static_bool_expr(items, *right_box, params, args, locals, depth - 1)
+                            if left_bool.0 == 0 || right_bool.0 == 0 {
+                                return (0, 0)
+                            }
+                            if expr.bin_op == BinaryOp::OpAnd {
+                                if left_bool.1 != 0 && right_bool.1 != 0 {
+                                    return (1, 1)
+                                }
+                                return (1, 0)
+                            }
+                            if left_bool.1 != 0 || right_bool.1 != 0 {
+                                return (1, 1)
+                            }
+                            return (1, 0)
+                        }
+                        None => return (0, 0)
+                    }
+                }
+                None => return (0, 0)
+            }
+        }
+        match expr.left {
+            Some(left_num_box) => {
+                match expr.right {
+                    Some(right_num_box) => {
+                        let left_num = knowledge_context_eval_generated_numeric_expr_avoiding(items, *left_num_box, params, args, locals, depth - 1, knowledge_context_empty_name(), false)
+                        let right_num = knowledge_context_eval_generated_numeric_expr_avoiding(items, *right_num_box, params, args, locals, depth - 1, knowledge_context_empty_name(), false)
+                        if left_num.0 == 0 || right_num.0 == 0 {
+                            return (0, 0)
+                        }
+                        if expr.bin_op == BinaryOp::OpEq {
+                            if left_num.1 == right_num.1 {
+                                return (1, 1)
+                            }
+                            return (1, 0)
+                        }
+                        if expr.bin_op == BinaryOp::OpNe {
+                            if left_num.1 != right_num.1 {
+                                return (1, 1)
+                            }
+                            return (1, 0)
+                        }
+                        if expr.bin_op == BinaryOp::OpLt {
+                            if left_num.1 < right_num.1 {
+                                return (1, 1)
+                            }
+                            return (1, 0)
+                        }
+                        if expr.bin_op == BinaryOp::OpLe {
+                            if left_num.1 <= right_num.1 {
+                                return (1, 1)
+                            }
+                            return (1, 0)
+                        }
+                        if expr.bin_op == BinaryOp::OpGt {
+                            if left_num.1 > right_num.1 {
+                                return (1, 1)
+                            }
+                            return (1, 0)
+                        }
+                        if expr.bin_op == BinaryOp::OpGe {
+                            if left_num.1 >= right_num.1 {
+                                return (1, 1)
+                            }
+                            return (1, 0)
+                        }
+                        return (0, 0)
+                    }
+                    None => return (0, 0)
+                }
+            }
+            None => return (0, 0)
+        }
+    }
+    (0, 0)
+}
+
+fn knowledge_context_eval_local_numeric_from_static_else_expr(items: Option<Box<ItemList> >, expr: Expr, local_name: Name, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, depth: i64, has_value: i64, current_value: f64) -> (i64, f64) with Mut, Panic, Div, Alloc {
+    if expr.kind == ExprKind::ExprBlock {
+        match expr.block {
+            Some(block_box) => return knowledge_context_eval_local_numeric_before_return(items, (*block_box).stmts, local_name, params, args, locals, depth - 1, has_value, current_value)
+            None => return (has_value, current_value)
+        }
+    }
+    if expr.kind == ExprKind::ExprIf {
+        return knowledge_context_eval_local_numeric_from_static_if(items, expr, local_name, params, args, locals, depth - 1, has_value, current_value)
+    }
+    (0, 0.0)
+}
+
+fn knowledge_context_eval_local_numeric_from_static_if(items: Option<Box<ItemList> >, expr: Expr, local_name: Name, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, depth: i64, has_value: i64, current_value: f64) -> (i64, f64) with Mut, Panic, Div, Alloc {
+    if depth <= 0 {
+        return (0, 0.0)
+    }
+    if expr.kind != ExprKind::ExprIf {
+        return (0, 0.0)
+    }
+    match expr.left {
+        Some(cond_box) => {
+            let cond = *cond_box
+            let cond_value = knowledge_context_eval_static_bool_expr(items, cond, params, args, locals, depth - 1)
+            if cond_value.0 != 0 && cond_value.1 != 0 {
+                match expr.block {
+                    Some(block_box) => return knowledge_context_eval_local_numeric_before_return(items, (*block_box).stmts, local_name, params, args, locals, depth - 1, has_value, current_value)
+                    None => return (has_value, current_value)
+                }
+            }
+            if cond_value.0 != 0 && cond_value.1 == 0 {
+                match expr.else_expr {
+                    Some(else_box) => return knowledge_context_eval_local_numeric_from_static_else_expr(items, *else_box, local_name, params, args, locals, depth - 1, has_value, current_value)
+                    None => return (has_value, current_value)
+                }
+            }
+            (0, 0.0)
+        }
+        None => (0, 0.0)
+    }
+}
+
+fn knowledge_context_eval_local_numeric_before_return(items: Option<Box<ItemList> >, stmts: Option<Box<StmtList> >, local_name: Name, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, depth: i64, has_value: i64, current_value: f64) -> (i64, f64) with Mut, Panic, Div, Alloc {
+    if depth <= 0 {
+        return (0, 0.0)
+    }
+    match stmts {
+        Some(list) => {
+            let stmt = (*list).head
+            if knowledge_context_stmt_is_return(stmt) {
+                return (has_value, current_value)
+            }
+            var next_has = has_value
+            var next_value = current_value
+            if (stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar) && ir_name_eq(stmt.name, local_name) {
+                match stmt.expr {
+                    Some(init_box) => {
+                        let init_value = knowledge_context_eval_generated_numeric_expr_avoiding(items, *init_box, params, args, locals, depth - 1, local_name, true)
+                        if init_value.0 != 0 {
+                            next_has = 1
+                            next_value = init_value.1
+                        }
+                    }
+                    None => {}
+                }
+            } else if stmt.kind == StmtKind::StmtAssign {
+                if knowledge_context_assign_target_matches(stmt, local_name) {
+                    match stmt.expr {
+                        Some(rhs_box) => {
+                            let rhs_value = knowledge_context_eval_generated_numeric_expr_avoiding(items, *rhs_box, params, args, locals, depth - 1, local_name, true)
+                            if rhs_value.0 != 0 {
+                                if stmt.assign_op == AssignOp::AssignEq {
+                                    next_has = 1
+                                    next_value = rhs_value.1
+                                } else if next_has != 0 {
+                                    let assigned_value = knowledge_context_apply_assign_numeric_value(stmt.assign_op, next_value, rhs_value.1)
+                                    if assigned_value.0 != 0 {
+                                        next_has = 1
+                                        next_value = assigned_value.1
+                                    } else {
+                                        next_has = 0
+                                        next_value = 0.0
+                                    }
+                                }
+                            } else {
+                                next_has = 0
+                                next_value = 0.0
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            } else if stmt.kind == StmtKind::StmtExpr {
+                match stmt.expr {
+                    Some(expr_box) => {
+                        let expr = *expr_box
+                        if expr.kind == ExprKind::ExprIf {
+                            let branch_value = knowledge_context_eval_local_numeric_from_static_if(items, expr, local_name, params, args, locals, depth - 1, next_has, next_value)
+                            if branch_value.0 != 0 {
+                                next_has = branch_value.0
+                                next_value = branch_value.1
+                            } else {
+                                next_has = 0
+                                next_value = 0.0
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            knowledge_context_eval_local_numeric_before_return(items, (*list).tail, local_name, params, args, locals, depth - 1, next_has, next_value)
+        }
+        None => (has_value, current_value)
+    }
+}
+
+fn knowledge_context_eval_generated_numeric_expr_avoiding(items: Option<Box<ItemList> >, expr: Expr, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, depth: i64, avoid_name: Name, avoid_active: bool) -> (i64, f64) with Mut, Panic, Div, Alloc {
+    if depth <= 0 {
+        return (0, 0.0)
+    }
+    if expr.kind == ExprKind::ExprIntLit {
+        return (1, expr.int_val as f64)
+    }
+    if expr.kind == ExprKind::ExprFloatLit {
+        return (1, expr.float_val)
+    }
+    if expr.kind == ExprKind::ExprIdent {
+        match knowledge_context_arg_for_param(params, args, expr.name) {
+            Some(arg_expr) => return knowledge_context_eval_generated_numeric_expr_avoiding(items, *arg_expr, params, args, locals, depth - 1, avoid_name, avoid_active)
+            None => {
+                if avoid_active && ir_name_eq(expr.name, avoid_name) {
+                    match knowledge_context_local_init_for_name(locals, expr.name) {
+                        Some(init_expr) => return knowledge_context_eval_generated_numeric_expr_avoiding(items, *init_expr, params, args, locals, depth - 1, avoid_name, avoid_active)
+                        None => return (0, 0.0)
+                    }
+                } else {
+                    let local_value = knowledge_context_eval_local_numeric_before_return(items, locals, expr.name, params, args, locals, depth - 1, 0, 0.0)
+                    if local_value.0 != 0 {
+                        return local_value
+                    }
+                    if knowledge_context_has_branch_before_return(locals) {
+                        return (0, 0.0)
+                    }
+                    match knowledge_context_local_value_before_return(locals, expr.name) {
+                        Some(local_expr) => return knowledge_context_eval_generated_numeric_expr_avoiding(items, *local_expr, params, args, locals, depth - 1, expr.name, true)
+                        None => return (0, 0.0)
+                    }
+                }
+            }
+        }
+    }
+    if expr.kind == ExprKind::ExprCall {
+        match expr.args {
+            Some(arg_list) => {}
+            None => return (0, 0.0)
+        }
+        match expr.left {
+            Some(callee_box) => {
+                let callee_name = knowledge_context_expr_callee_name(*callee_box)
+                if callee_name.len <= 0 {
+                    return (0, 0.0)
+                }
+                match knowledge_context_find_fn_def(items, callee_name) {
+                    Some(fn_box) => {
+                        let fn_def = *fn_box
+                        let resolved_args = knowledge_context_resolve_numeric_arg_list(items, expr.args, params, args, locals, depth - 1)
+                        match knowledge_context_direct_return_value_from_stmts_with_context(items, fn_def.body.stmts, fn_def.params, resolved_args, fn_def.body.stmts, depth - 1) {
+                            Some(return_expr_box) => {
+                                return knowledge_context_eval_generated_numeric_expr_avoiding(items, *return_expr_box, fn_def.params, resolved_args, fn_def.body.stmts, depth - 1, knowledge_context_empty_name(), false)
+                            }
+                            None => return (0, 0.0)
+                        }
+                    }
+                    None => return (0, 0.0)
+                }
+            }
+            None => return (0, 0.0)
+        }
+    }
+    if expr.kind == ExprKind::ExprBinary {
+        match expr.left {
+            Some(left_box) => {
+                match expr.right {
+                    Some(right_box) => {
+                        let left_value = knowledge_context_eval_generated_numeric_expr_avoiding(items, *left_box, params, args, locals, depth - 1, avoid_name, avoid_active)
+                        let right_value = knowledge_context_eval_generated_numeric_expr_avoiding(items, *right_box, params, args, locals, depth - 1, avoid_name, avoid_active)
+                        if left_value.0 == 0 || right_value.0 == 0 {
+                            return (0, 0.0)
+                        }
+                        if expr.bin_op == BinaryOp::OpAdd {
+                            return (1, left_value.1 + right_value.1)
+                        }
+                        if expr.bin_op == BinaryOp::OpSub {
+                            return (1, left_value.1 - right_value.1)
+                        }
+                        if expr.bin_op == BinaryOp::OpMul {
+                            return (1, left_value.1 * right_value.1)
+                        }
+                        if expr.bin_op == BinaryOp::OpDiv {
+                            if right_value.1 == 0.0 {
+                                return (0, 0.0)
+                            }
+                            return (1, left_value.1 / right_value.1)
+                        }
+                        return (0, 0.0)
+                    }
+                    None => return (0, 0.0)
+                }
+            }
+            None => return (0, 0.0)
+        }
+    }
+    (0, 0.0)
+}
+
+fn knowledge_context_eval_generated_numeric_expr(items: Option<Box<ItemList> >, expr: Expr, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, depth: i64) -> (i64, f64) with Mut, Panic, Div, Alloc {
+    knowledge_context_eval_generated_numeric_expr_avoiding(items, expr, params, args, locals, depth, knowledge_context_empty_name(), false)
+}
+
+fn knowledge_context_validate_generated_value_constraint(items: Option<Box<ItemList> >, expr: Expr, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, constraint: KnowledgeConstraint) -> i64 with Mut, Panic, Div, Alloc {
+    if knowledge_context_validate_literal_value_constraint(expr, constraint) != 0 {
+        return 1
+    }
+    let eval_value = knowledge_context_eval_generated_numeric_expr(items, expr, params, args, locals, 16)
+    if eval_value.0 != 0 {
+        if knowledge_context_f64_satisfies_constraint(eval_value.1, constraint) {
+            return 0
+        }
+        return 1
+    }
+    0
+}
+
+fn knowledge_context_validate_static_value_constraints_from_generated_struct_lit(items: Option<Box<ItemList> >, units: UnitRegistry, inner_name: Name, value_expr: Expr, constraints: Option<Box<KnowledgeConstraintList> >, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >) -> i64 with Mut, Panic, Div, Alloc {
+    if value_expr.kind != ExprKind::ExprStructLit {
+        return 0
+    }
+    let value_name = knowledge_context_path_first_name(value_expr.path)
+    if !ir_name_eq(value_name, inner_name) {
+        return 1
+    }
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            if constraint.kind != KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                match knowledge_context_struct_field_value_in_fields(value_expr.fields, constraint.field) {
+                    Some(field_expr) => {
+                        if knowledge_context_validate_generated_value_constraint(items, *field_expr, params, args, locals, constraint) != 0 {
+                            return 1
+                        }
+                    }
+                    None => return 1
+                }
+            }
+            knowledge_context_validate_static_value_constraints_from_generated_struct_lit(items, units, inner_name, value_expr, (*list).tail, params, args, locals)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_fn_return_matches_inner(fn_def: FnDef, inner_name: Name) -> bool with Mut, Panic, Div, Alloc {
+    match fn_def.return_type {
+        Some(ret_box) => {
+            let ret_ty = *ret_box
+            if ret_ty.kind != TypeExprKind::TypeKnowledge {
+                return false
+            }
+            match ret_ty.knowledge_info {
+                Some(info) => {
+                    let ret_inner_ty = *(*info).inner_type
+                    if ret_inner_ty.kind != TypeExprKind::TypeNamed {
+                        return false
+                    }
+                    let ret_inner_name = knowledge_context_path_first_name(ret_inner_ty.path)
+                    ir_name_eq(ret_inner_name, inner_name)
+                }
+                None => false
+            }
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_direct_return_value_from_stmts_with_context(items: Option<Box<ItemList> >, stmts: Option<Box<StmtList> >, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, depth: i64) -> Option<Box<Expr> > with Mut, Panic, Div, Alloc {
+    if depth <= 0 {
+        return None
+    }
+    match stmts {
+        Some(list) => {
+            let stmt = (*list).head
+            if stmt.kind == StmtKind::StmtExpr {
+                match stmt.expr {
+                    Some(expr_box) => {
+                        let expr = *expr_box
+                        if expr.kind == ExprKind::ExprReturn {
+                            match expr.left {
+                                Some(value_box) => return Some(value_box)
+                                None => {}
+                            }
+                        } else if expr.kind == ExprKind::ExprIf {
+                            match knowledge_context_direct_return_value_from_static_if_with_context(items, expr, params, args, locals, depth - 1) {
+                                Some(value_box) => return Some(value_box)
+                                None => {}
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            knowledge_context_direct_return_value_from_stmts_with_context(items, (*list).tail, params, args, locals, depth - 1)
+        }
+        None => None
+    }
+}
+
+fn knowledge_context_direct_return_value_from_stmts(stmts: Option<Box<StmtList> >) -> Option<Box<Expr> > with Mut, Panic, Div, Alloc {
+    knowledge_context_direct_return_value_from_stmts_with_context(None, stmts, None, None, stmts, 16)
+}
+
+fn knowledge_context_direct_return_value_from_block_with_context(items: Option<Box<ItemList> >, block: Block, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, depth: i64) -> Option<Box<Expr> > with Mut, Panic, Div, Alloc {
+    knowledge_context_direct_return_value_from_stmts_with_context(items, block.stmts, params, args, locals, depth - 1)
+}
+
+fn knowledge_context_direct_return_value_from_static_else_expr_with_context(items: Option<Box<ItemList> >, expr: Expr, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, depth: i64) -> Option<Box<Expr> > with Mut, Panic, Div, Alloc {
+    if expr.kind == ExprKind::ExprBlock {
+        match expr.block {
+            Some(block_box) => return knowledge_context_direct_return_value_from_block_with_context(items, *block_box, params, args, locals, depth - 1)
+            None => return None
+        }
+    }
+    if expr.kind == ExprKind::ExprIf {
+        return knowledge_context_direct_return_value_from_static_if_with_context(items, expr, params, args, locals, depth - 1)
+    }
+    None
+}
+
+fn knowledge_context_direct_return_value_from_static_if_with_context(items: Option<Box<ItemList> >, expr: Expr, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, depth: i64) -> Option<Box<Expr> > with Mut, Panic, Div, Alloc {
+    if depth <= 0 {
+        return None
+    }
+    if expr.kind != ExprKind::ExprIf {
+        return None
+    }
+    match expr.left {
+        Some(cond_box) => {
+            let cond = *cond_box
+            let cond_value = knowledge_context_eval_static_bool_expr(items, cond, params, args, locals, depth - 1)
+            if cond_value.0 != 0 && cond_value.1 != 0 {
+                match expr.block {
+                    Some(block_box) => return knowledge_context_direct_return_value_from_block_with_context(items, *block_box, params, args, locals, depth - 1)
+                    None => return None
+                }
+            }
+            if cond_value.0 != 0 && cond_value.1 == 0 {
+                match expr.else_expr {
+                    Some(else_box) => return knowledge_context_direct_return_value_from_static_else_expr_with_context(items, *else_box, params, args, locals, depth - 1)
+                    None => return None
+                }
+            }
+            None
+        }
+        None => None
+    }
+}
+
+fn knowledge_context_validate_generated_static_value_init(items: Option<Box<ItemList> >, units: UnitRegistry, inner_name: Name, constraints: Option<Box<KnowledgeConstraintList> >, init_expr: Expr) -> i64 with Mut, Panic, Div, Alloc {
+    if init_expr.kind != ExprKind::ExprCall {
+        return 0
+    }
+    match init_expr.left {
+        Some(callee_box) => {
+            let callee_name = knowledge_context_expr_callee_name(*callee_box)
+            if callee_name.len <= 0 {
+                return 0
+            }
+            match knowledge_context_find_fn_def(items, callee_name) {
+                Some(fn_box) => {
+                    let fn_def = *fn_box
+                    if !knowledge_context_fn_return_matches_inner(fn_def, inner_name) {
+                        return 0
+                    }
+                    match knowledge_context_direct_return_value_from_stmts_with_context(items, fn_def.body.stmts, fn_def.params, init_expr.args, fn_def.body.stmts, 16) {
+                        Some(return_expr_box) => {
+                            match knowledge_context_value_field_from_knowledge_literal(*return_expr_box) {
+                                Some(value_expr) => knowledge_context_validate_static_value_constraints_from_generated_struct_lit(items, units, inner_name, *value_expr, constraints, fn_def.params, init_expr.args, fn_def.body.stmts)
+                                None => 0
+                            }
+                        }
+                        None => 0
+                    }
+                }
+                None => 0
+            }
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_call_args_static_values(items: Option<Box<ItemList> >, units: UnitRegistry, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match args {
+        Some(arg_list) => {
+            match params {
+                Some(param_list) => {
+                    if knowledge_context_validate_static_value_init(items, units, (*param_list).head.ty, (*arg_list).head) != 0 {
+                        return 1
+                    }
+                    knowledge_context_validate_call_args_static_values(items, units, (*param_list).tail, (*arg_list).tail)
+                }
+                None => 0
+            }
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_expr_list_static_values(items: Option<Box<ItemList> >, units: UnitRegistry, exprs: Option<Box<ExprList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match exprs {
+        Some(list) => {
+            if knowledge_context_validate_expr_static_values(items, units, (*list).head) != 0 {
+                return 1
+            }
+            knowledge_context_validate_expr_list_static_values(items, units, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_struct_field_values_static_values(items: Option<Box<ItemList> >, units: UnitRegistry, fields: Option<Box<StructFieldList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            if knowledge_context_validate_expr_static_values(items, units, (*list).head.value) != 0 {
+                return 1
+            }
+            knowledge_context_validate_struct_field_values_static_values(items, units, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_expr_static_values(items: Option<Box<ItemList> >, units: UnitRegistry, expr: Expr) -> i64 with Mut, Panic, Div, Alloc {
+    if expr.kind == ExprKind::ExprCall {
+        match expr.left {
+            Some(callee_box) => {
+                let callee_name = knowledge_context_expr_callee_name(*callee_box)
+                if callee_name.len > 0 {
+                    match knowledge_context_find_fn_def(items, callee_name) {
+                        Some(fn_box) => {
+                            if knowledge_context_validate_call_args_static_values(items, units, (*fn_box).params, expr.args) != 0 {
+                                return 1
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    if knowledge_context_validate_expr_list_static_values(items, units, expr.args) != 0 {
+        return 1
+    }
+    if knowledge_context_validate_struct_field_values_static_values(items, units, expr.fields) != 0 {
+        return 1
+    }
+    match expr.left {
+        Some(left_box) => {
+            if knowledge_context_validate_expr_static_values(items, units, *left_box) != 0 {
+                return 1
+            }
+        }
+        None => {}
+    }
+    match expr.right {
+        Some(right_box) => {
+            if knowledge_context_validate_expr_static_values(items, units, *right_box) != 0 {
+                return 1
+            }
+        }
+        None => {}
+    }
+    match expr.else_expr {
+        Some(else_box) => knowledge_context_validate_expr_static_values(items, units, *else_box)
+        None => 0
+    }
+}
+
+fn knowledge_context_find_local_binding_type(stmts: Option<Box<StmtList> >, binding_name: Name) -> Option<Box<TypeExpr> > with Mut, Panic, Div, Alloc {
+    match stmts {
+        Some(list) => {
+            let stmt = (*list).head
+            if (stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar) && ir_name_eq(stmt.name, binding_name) {
+                return stmt.ty
+            }
+            knowledge_context_find_local_binding_type((*list).tail, binding_name)
+        }
+        None => None
+    }
+}
+
+fn knowledge_context_assignment_target_name(target: Option<Box<Expr> >) -> Name {
+    match target {
+        Some(target_box) => {
+            let expr = *target_box
+            if expr.kind == ExprKind::ExprIdent {
+                return expr.name
+            }
+            knowledge_context_empty_name()
+        }
+        None => knowledge_context_empty_name()
+    }
+}
+
+fn knowledge_context_validate_assignment_static_value(items: Option<Box<ItemList> >, units: UnitRegistry, fn_stmts: Option<Box<StmtList> >, stmt: Stmt) -> i64 with Mut, Panic, Div, Alloc {
+    let target_name = knowledge_context_assignment_target_name(stmt.target)
+    if target_name.len <= 0 {
+        return 0
+    }
+    match knowledge_context_find_local_binding_type(fn_stmts, target_name) {
+        Some(ty_box) => {
+            match stmt.expr {
+                Some(expr_box) => knowledge_context_validate_static_value_init(items, units, *ty_box, *expr_box)
+                None => 0
+            }
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_stmt_static_values(items: Option<Box<ItemList> >, units: UnitRegistry, stmt: Stmt, return_ty: Option<Box<TypeExpr> >, fn_stmts: Option<Box<StmtList> >) -> i64 with Mut, Panic, Div, Alloc {
+    if stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar {
+        var init_status = 0
+        match stmt.ty {
+            Some(ty_box) => {
+                match stmt.expr {
+                    Some(expr_box) => {
+                        init_status = knowledge_context_validate_static_value_init(items, units, *ty_box, *expr_box)
+                        if init_status != 0 {
+                            return 1
+                        }
+                        knowledge_context_validate_expr_static_values(items, units, *expr_box)
+                    }
+                    None => 0
+                }
+            }
+            None => {
+                match stmt.expr {
+                    Some(expr_box) => knowledge_context_validate_expr_static_values(items, units, *expr_box)
+                    None => 0
+                }
+            }
+        }
+    } else if stmt.kind == StmtKind::StmtExpr {
+        match stmt.expr {
+            Some(expr_box) => {
+                let expr = *expr_box
+                if expr.kind == ExprKind::ExprReturn {
+                    match return_ty {
+                        Some(ret_box) => {
+                            match expr.left {
+                                Some(value_box) => {
+                                    if knowledge_context_validate_static_value_init(items, units, *ret_box, *value_box) != 0 {
+                                        return 1
+                                    }
+                                    knowledge_context_validate_expr_static_values(items, units, *value_box)
+                                }
+                                None => knowledge_context_validate_expr_static_values(items, units, expr)
+                            }
+                        }
+                        None => knowledge_context_validate_expr_static_values(items, units, expr)
+                    }
+                } else {
+                    knowledge_context_validate_expr_static_values(items, units, expr)
+                }
+            }
+            None => 0
+        }
+    } else if stmt.kind == StmtKind::StmtAssign {
+        if knowledge_context_validate_assignment_static_value(items, units, fn_stmts, stmt) != 0 {
+            return 1
+        }
+        match stmt.expr {
+            Some(expr_box) => knowledge_context_validate_expr_static_values(items, units, *expr_box)
+            None => 0
+        }
+    } else {
+        0
+    }
+}
+
+fn knowledge_context_validate_stmt_list_static_values(items: Option<Box<ItemList> >, units: UnitRegistry, fn_stmts: Option<Box<StmtList> >, stmts: Option<Box<StmtList> >, return_ty: Option<Box<TypeExpr> >) -> i64 with Mut, Panic, Div, Alloc {
+    match stmts {
+        Some(list) => {
+            if knowledge_context_validate_stmt_static_values(items, units, (*list).head, return_ty, fn_stmts) != 0 {
+                return 1
+            }
+            knowledge_context_validate_stmt_list_static_values(items, units, fn_stmts, (*list).tail, return_ty)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_fn_static_values(items: Option<Box<ItemList> >, units: UnitRegistry, opt: Option<Box<FnDef> >) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => knowledge_context_validate_stmt_list_static_values(items, units, (*fd).body.stmts, (*fd).body.stmts, (*fd).return_type)
+        None => 0
+    }
+}
+
+fn knowledge_context_validate_static_values_from(root: Option<Box<ItemList> >, units: UnitRegistry, cursor: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match cursor {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn {
+                if knowledge_context_validate_fn_static_values(root, units, item.fn_def) != 0 {
+                    return 1
+                }
+            }
+            knowledge_context_validate_static_values_from(root, units, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_direct_field_needs_runtime_obligation(expr: Expr, constraint: KnowledgeConstraint) -> i64 {
+    if !knowledge_context_constraint_is_numeric(constraint) {
+        return 0
+    }
+    if !knowledge_context_constraint_has_numeric_value(constraint) {
+        return 0
+    }
+    if expr.kind == ExprKind::ExprIntLit || expr.kind == ExprKind::ExprFloatLit {
+        return 0
+    }
+    1
+}
+
+fn knowledge_context_generated_field_needs_runtime_obligation(items: Option<Box<ItemList> >, expr: Expr, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, constraint: KnowledgeConstraint) -> i64 with Mut, Panic, Div, Alloc {
+    if !knowledge_context_constraint_is_numeric(constraint) {
+        return 0
+    }
+    if !knowledge_context_constraint_has_numeric_value(constraint) {
+        return 0
+    }
+    if expr.kind == ExprKind::ExprIntLit || expr.kind == ExprKind::ExprFloatLit {
+        return 0
+    }
+    let eval_value = knowledge_context_eval_generated_numeric_expr(items, expr, params, args, locals, 16)
+    if eval_value.0 != 0 {
+        return 0
+    }
+    1
+}
+
+fn knowledge_context_count_direct_runtime_obligations_from_struct_lit(inner_name: Name, value_expr: Expr, constraints: Option<Box<KnowledgeConstraintList> >) -> i64 with Mut, Panic, Div, Alloc {
+    if value_expr.kind != ExprKind::ExprStructLit {
+        return 0
+    }
+    let value_name = knowledge_context_path_first_name(value_expr.path)
+    if !ir_name_eq(value_name, inner_name) {
+        return 0
+    }
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            var count: i64 = 0
+            if constraint.kind != KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                match knowledge_context_struct_field_value_in_fields(value_expr.fields, constraint.field) {
+                    Some(field_expr) => {
+                        count = knowledge_context_direct_field_needs_runtime_obligation(*field_expr, constraint)
+                    }
+                    None => {}
+                }
+            }
+            count + knowledge_context_count_direct_runtime_obligations_from_struct_lit(inner_name, value_expr, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_count_generated_runtime_obligations_from_struct_lit(items: Option<Box<ItemList> >, inner_name: Name, value_expr: Expr, constraints: Option<Box<KnowledgeConstraintList> >, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >) -> i64 with Mut, Panic, Div, Alloc {
+    if value_expr.kind != ExprKind::ExprStructLit {
+        return 0
+    }
+    let value_name = knowledge_context_path_first_name(value_expr.path)
+    if !ir_name_eq(value_name, inner_name) {
+        return 0
+    }
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            var count: i64 = 0
+            if constraint.kind != KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                match knowledge_context_struct_field_value_in_fields(value_expr.fields, constraint.field) {
+                    Some(field_expr) => {
+                        count = knowledge_context_generated_field_needs_runtime_obligation(items, *field_expr, params, args, locals, constraint)
+                    }
+                    None => {}
+                }
+            }
+            count + knowledge_context_count_generated_runtime_obligations_from_struct_lit(items, inner_name, value_expr, (*list).tail, params, args, locals)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_count_generated_runtime_obligations_init(items: Option<Box<ItemList> >, inner_name: Name, constraints: Option<Box<KnowledgeConstraintList> >, init_expr: Expr) -> i64 with Mut, Panic, Div, Alloc {
+    if init_expr.kind != ExprKind::ExprCall {
+        return 0
+    }
+    match init_expr.left {
+        Some(callee_box) => {
+            let callee_name = knowledge_context_expr_callee_name(*callee_box)
+            if callee_name.len <= 0 {
+                return 0
+            }
+            match knowledge_context_find_fn_def(items, callee_name) {
+                Some(fn_box) => {
+                    let fn_def = *fn_box
+                    if !knowledge_context_fn_return_matches_inner(fn_def, inner_name) {
+                        return 0
+                    }
+                    match knowledge_context_direct_return_value_from_stmts_with_context(items, fn_def.body.stmts, fn_def.params, init_expr.args, fn_def.body.stmts, 16) {
+                        Some(return_expr_box) => {
+                            match knowledge_context_value_field_from_knowledge_literal(*return_expr_box) {
+                                Some(value_expr) => knowledge_context_count_generated_runtime_obligations_from_struct_lit(items, inner_name, *value_expr, constraints, fn_def.params, init_expr.args, fn_def.body.stmts)
+                                None => 0
+                            }
+                        }
+                        None => 0
+                    }
+                }
+                None => 0
+            }
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_count_runtime_obligations_init(items: Option<Box<ItemList> >, ty: TypeExpr, init_expr: Expr) -> i64 with Mut, Panic, Div, Alloc {
+    if ty.kind != TypeExprKind::TypeKnowledge {
+        return 0
+    }
+    match ty.knowledge_info {
+        Some(info) => {
+            let inner_ty = *(*info).inner_type
+            if inner_ty.kind != TypeExprKind::TypeNamed {
+                return 0
+            }
+            let inner_name = knowledge_context_path_first_name(inner_ty.path)
+            match knowledge_context_value_field_from_knowledge_literal(init_expr) {
+                Some(value_expr) => knowledge_context_count_direct_runtime_obligations_from_struct_lit(inner_name, *value_expr, (*info).proof_constraints)
+                None => knowledge_context_count_generated_runtime_obligations_init(items, inner_name, (*info).proof_constraints, init_expr)
+            }
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_count_call_args_runtime_obligations(items: Option<Box<ItemList> >, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match args {
+        Some(arg_list) => {
+            match params {
+                Some(param_list) => {
+                    let here = knowledge_context_count_runtime_obligations_init(items, (*param_list).head.ty, (*arg_list).head)
+                    here + knowledge_context_count_call_args_runtime_obligations(items, (*param_list).tail, (*arg_list).tail)
+                }
+                None => 0
+            }
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_count_expr_list_runtime_obligations(items: Option<Box<ItemList> >, exprs: Option<Box<ExprList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match exprs {
+        Some(list) => {
+            knowledge_context_count_expr_runtime_obligations(items, (*list).head) +
+            knowledge_context_count_expr_list_runtime_obligations(items, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_count_struct_field_runtime_obligations(items: Option<Box<ItemList> >, fields: Option<Box<StructFieldList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            knowledge_context_count_expr_runtime_obligations(items, (*list).head.value) +
+            knowledge_context_count_struct_field_runtime_obligations(items, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_count_expr_runtime_obligations(items: Option<Box<ItemList> >, expr: Expr) -> i64 with Mut, Panic, Div, Alloc {
+    var count: i64 = 0
+    if expr.kind == ExprKind::ExprCall {
+        match expr.left {
+            Some(callee_box) => {
+                let callee_name = knowledge_context_expr_callee_name(*callee_box)
+                if callee_name.len > 0 {
+                    match knowledge_context_find_fn_def(items, callee_name) {
+                        Some(fn_box) => {
+                            count = count + knowledge_context_count_call_args_runtime_obligations(items, (*fn_box).params, expr.args)
+                        }
+                        None => {}
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    count = count + knowledge_context_count_expr_list_runtime_obligations(items, expr.args)
+    count = count + knowledge_context_count_struct_field_runtime_obligations(items, expr.fields)
+    match expr.left {
+        Some(left_box) => {
+            count = count + knowledge_context_count_expr_runtime_obligations(items, *left_box)
+        }
+        None => {}
+    }
+    match expr.right {
+        Some(right_box) => {
+            count = count + knowledge_context_count_expr_runtime_obligations(items, *right_box)
+        }
+        None => {}
+    }
+    match expr.else_expr {
+        Some(else_box) => {
+            count = count + knowledge_context_count_expr_runtime_obligations(items, *else_box)
+        }
+        None => {}
+    }
+    count
+}
+
+fn knowledge_context_count_assignment_runtime_obligations(items: Option<Box<ItemList> >, fn_stmts: Option<Box<StmtList> >, stmt: Stmt) -> i64 with Mut, Panic, Div, Alloc {
+    let target_name = knowledge_context_assignment_target_name(stmt.target)
+    if target_name.len <= 0 {
+        return 0
+    }
+    match knowledge_context_find_local_binding_type(fn_stmts, target_name) {
+        Some(ty_box) => {
+            match stmt.expr {
+                Some(expr_box) => knowledge_context_count_runtime_obligations_init(items, *ty_box, *expr_box)
+                None => 0
+            }
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_count_stmt_runtime_obligations(items: Option<Box<ItemList> >, stmt: Stmt, return_ty: Option<Box<TypeExpr> >, fn_stmts: Option<Box<StmtList> >) -> i64 with Mut, Panic, Div, Alloc {
+    if stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar {
+        match stmt.expr {
+            Some(expr_box) => {
+                var count: i64 = 0
+                match stmt.ty {
+                    Some(ty_box) => {
+                        count = knowledge_context_count_runtime_obligations_init(items, *ty_box, *expr_box)
+                    }
+                    None => {}
+                }
+                count + knowledge_context_count_expr_runtime_obligations(items, *expr_box)
+            }
+            None => 0
+        }
+    } else if stmt.kind == StmtKind::StmtExpr {
+        match stmt.expr {
+            Some(expr_box) => {
+                let expr = *expr_box
+                if expr.kind == ExprKind::ExprReturn {
+                    var count: i64 = 0
+                    match return_ty {
+                        Some(ret_box) => {
+                            match expr.left {
+                                Some(value_box) => {
+                                    count = knowledge_context_count_runtime_obligations_init(items, *ret_box, *value_box)
+                                }
+                                None => {}
+                            }
+                        }
+                        None => {}
+                    }
+                    count + knowledge_context_count_expr_runtime_obligations(items, expr)
+                } else {
+                    knowledge_context_count_expr_runtime_obligations(items, expr)
+                }
+            }
+            None => 0
+        }
+    } else if stmt.kind == StmtKind::StmtAssign {
+        var count: i64 = knowledge_context_count_assignment_runtime_obligations(items, fn_stmts, stmt)
+        match stmt.expr {
+            Some(expr_box) => count + knowledge_context_count_expr_runtime_obligations(items, *expr_box)
+            None => count
+        }
+    } else {
+        0
+    }
+}
+
+fn knowledge_context_count_stmt_list_runtime_obligations(items: Option<Box<ItemList> >, fn_stmts: Option<Box<StmtList> >, stmts: Option<Box<StmtList> >, return_ty: Option<Box<TypeExpr> >) -> i64 with Mut, Panic, Div, Alloc {
+    match stmts {
+        Some(list) => {
+            knowledge_context_count_stmt_runtime_obligations(items, (*list).head, return_ty, fn_stmts) +
+            knowledge_context_count_stmt_list_runtime_obligations(items, fn_stmts, (*list).tail, return_ty)
+        }
+        None => 0
+    }
+}
+
+fn knowledge_context_count_fn_runtime_obligations(items: Option<Box<ItemList> >, opt: Option<Box<FnDef> >) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => knowledge_context_count_stmt_list_runtime_obligations(items, (*fd).body.stmts, (*fd).body.stmts, (*fd).return_type)
+        None => 0
+    }
+}
+
+fn knowledge_context_count_runtime_obligations_from(root: Option<Box<ItemList> >, cursor: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match cursor {
+        Some(list) => {
+            let item = (*list).head
+            var count: i64 = 0
+            if item.kind == ItemKind::ItemFn {
+                count = knowledge_context_count_fn_runtime_obligations(root, item.fn_def)
+            }
+            count + knowledge_context_count_runtime_obligations_from(root, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+pub fn knowledge_context_count_runtime_obligations_items(items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc {
+    knowledge_context_count_runtime_obligations_from(items, items)
+}
+
+pub struct KnowledgeRuntimeObligationDescriptor {
+    found: bool,
+    site_kind: i64,
+    type_name: Name,
+    field_name: Name,
+    constraint_kind: i64,
+    value_kind: i64,
+    int_value: i64,
+    float_value: f64,
+    unit_name: Name,
+    dynamic_expr_kind: i64,
+}
+
+pub fn knowledge_context_empty_runtime_obligation_descriptor() -> KnowledgeRuntimeObligationDescriptor {
+    KnowledgeRuntimeObligationDescriptor {
+        found: false,
+        site_kind: 0,
+        type_name: empty_name(),
+        field_name: empty_name(),
+        constraint_kind: 0,
+        value_kind: 0,
+        int_value: 0,
+        float_value: 0.0,
+        unit_name: empty_name(),
+        dynamic_expr_kind: 0,
+    }
+}
+
+pub fn knowledge_context_runtime_obligation_site_return() -> i64 { 1 }
+pub fn knowledge_context_runtime_obligation_site_call_arg() -> i64 { 2 }
+pub fn knowledge_context_runtime_obligation_site_assignment() -> i64 { 3 }
+pub fn knowledge_context_runtime_obligation_site_binding() -> i64 { 4 }
+
+fn knowledge_context_runtime_obligation_descriptor_from_constraint(site_kind: i64, inner_name: Name, constraint: KnowledgeConstraint, expr: Expr) -> KnowledgeRuntimeObligationDescriptor {
+    KnowledgeRuntimeObligationDescriptor {
+        found: true,
+        site_kind: site_kind,
+        type_name: inner_name,
+        field_name: constraint.field,
+        constraint_kind: constraint.kind as i64,
+        value_kind: constraint.value_kind as i64,
+        int_value: constraint.int_value,
+        float_value: constraint.float_value,
+        unit_name: constraint.unit_name,
+        dynamic_expr_kind: expr.kind as i64,
+    }
+}
+
+fn knowledge_context_runtime_obligation_descriptor_found(desc: KnowledgeRuntimeObligationDescriptor) -> bool {
+    desc.found
+}
+
+pub struct KnowledgeRuntimeObligationCursor {
+    desc: KnowledgeRuntimeObligationDescriptor,
+    remaining_index: i64,
+}
+
+fn knowledge_context_runtime_obligation_cursor_empty(remaining_index: i64) -> KnowledgeRuntimeObligationCursor {
+    KnowledgeRuntimeObligationCursor {
+        desc: knowledge_context_empty_runtime_obligation_descriptor(),
+        remaining_index: remaining_index,
+    }
+}
+
+fn knowledge_context_runtime_obligation_cursor_found(desc: KnowledgeRuntimeObligationDescriptor) -> KnowledgeRuntimeObligationCursor {
+    KnowledgeRuntimeObligationCursor {
+        desc: desc,
+        remaining_index: 0,
+    }
+}
+
+fn knowledge_context_first_direct_runtime_obligation_from_struct_lit(site_kind: i64, inner_name: Name, value_expr: Expr, constraints: Option<Box<KnowledgeConstraintList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if value_expr.kind != ExprKind::ExprStructLit {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    let value_name = knowledge_context_path_first_name(value_expr.path)
+    if !ir_name_eq(value_name, inner_name) {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            if constraint.kind != KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                match knowledge_context_struct_field_value_in_fields(value_expr.fields, constraint.field) {
+                    Some(field_expr) => {
+                        if knowledge_context_direct_field_needs_runtime_obligation(*field_expr, constraint) != 0 {
+                            return knowledge_context_runtime_obligation_descriptor_from_constraint(site_kind, inner_name, constraint, *field_expr)
+                        }
+                    }
+                    None => {}
+                }
+            }
+            knowledge_context_first_direct_runtime_obligation_from_struct_lit(site_kind, inner_name, value_expr, (*list).tail)
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_generated_runtime_obligation_from_struct_lit(items: Option<Box<ItemList> >, site_kind: i64, inner_name: Name, value_expr: Expr, constraints: Option<Box<KnowledgeConstraintList> >, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if value_expr.kind != ExprKind::ExprStructLit {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    let value_name = knowledge_context_path_first_name(value_expr.path)
+    if !ir_name_eq(value_name, inner_name) {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            if constraint.kind != KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                match knowledge_context_struct_field_value_in_fields(value_expr.fields, constraint.field) {
+                    Some(field_expr) => {
+                        if knowledge_context_generated_field_needs_runtime_obligation(items, *field_expr, params, args, locals, constraint) != 0 {
+                            return knowledge_context_runtime_obligation_descriptor_from_constraint(site_kind, inner_name, constraint, *field_expr)
+                        }
+                    }
+                    None => {}
+                }
+            }
+            knowledge_context_first_generated_runtime_obligation_from_struct_lit(items, site_kind, inner_name, value_expr, (*list).tail, params, args, locals)
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_generated_runtime_obligation_init(items: Option<Box<ItemList> >, site_kind: i64, inner_name: Name, constraints: Option<Box<KnowledgeConstraintList> >, init_expr: Expr) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if init_expr.kind != ExprKind::ExprCall {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    match init_expr.left {
+        Some(callee_box) => {
+            let callee_name = knowledge_context_expr_callee_name(*callee_box)
+            if callee_name.len <= 0 {
+                return knowledge_context_empty_runtime_obligation_descriptor()
+            }
+            match knowledge_context_find_fn_def(items, callee_name) {
+                Some(fn_box) => {
+                    let fn_def = *fn_box
+                    if !knowledge_context_fn_return_matches_inner(fn_def, inner_name) {
+                        return knowledge_context_empty_runtime_obligation_descriptor()
+                    }
+                    match knowledge_context_direct_return_value_from_stmts_with_context(items, fn_def.body.stmts, fn_def.params, init_expr.args, fn_def.body.stmts, 16) {
+                        Some(return_expr_box) => {
+                            match knowledge_context_value_field_from_knowledge_literal(*return_expr_box) {
+                                Some(value_expr) => knowledge_context_first_generated_runtime_obligation_from_struct_lit(items, site_kind, inner_name, *value_expr, constraints, fn_def.params, init_expr.args, fn_def.body.stmts)
+                                None => knowledge_context_empty_runtime_obligation_descriptor()
+                            }
+                        }
+                        None => knowledge_context_empty_runtime_obligation_descriptor()
+                    }
+                }
+                None => knowledge_context_empty_runtime_obligation_descriptor()
+            }
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_runtime_obligation_init(items: Option<Box<ItemList> >, site_kind: i64, ty: TypeExpr, init_expr: Expr) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if ty.kind != TypeExprKind::TypeKnowledge {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    match ty.knowledge_info {
+        Some(info) => {
+            let inner_ty = *(*info).inner_type
+            if inner_ty.kind != TypeExprKind::TypeNamed {
+                return knowledge_context_empty_runtime_obligation_descriptor()
+            }
+            let inner_name = knowledge_context_path_first_name(inner_ty.path)
+            match knowledge_context_value_field_from_knowledge_literal(init_expr) {
+                Some(value_expr) => knowledge_context_first_direct_runtime_obligation_from_struct_lit(site_kind, inner_name, *value_expr, (*info).proof_constraints)
+                None => knowledge_context_first_generated_runtime_obligation_init(items, site_kind, inner_name, (*info).proof_constraints, init_expr)
+            }
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_call_arg_runtime_obligation(items: Option<Box<ItemList> >, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    match args {
+        Some(arg_list) => {
+            match params {
+                Some(param_list) => {
+                    let here = knowledge_context_first_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_call_arg(), (*param_list).head.ty, (*arg_list).head)
+                    if knowledge_context_runtime_obligation_descriptor_found(here) {
+                        return here
+                    }
+                    knowledge_context_first_call_arg_runtime_obligation(items, (*param_list).tail, (*arg_list).tail)
+                }
+                None => knowledge_context_empty_runtime_obligation_descriptor()
+            }
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_expr_list_runtime_obligation(items: Option<Box<ItemList> >, exprs: Option<Box<ExprList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    match exprs {
+        Some(list) => {
+            let head = knowledge_context_first_expr_runtime_obligation(items, (*list).head)
+            if knowledge_context_runtime_obligation_descriptor_found(head) {
+                return head
+            }
+            knowledge_context_first_expr_list_runtime_obligation(items, (*list).tail)
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_struct_field_runtime_obligation(items: Option<Box<ItemList> >, fields: Option<Box<StructFieldList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            let head = knowledge_context_first_expr_runtime_obligation(items, (*list).head.value)
+            if knowledge_context_runtime_obligation_descriptor_found(head) {
+                return head
+            }
+            knowledge_context_first_struct_field_runtime_obligation(items, (*list).tail)
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_expr_runtime_obligation(items: Option<Box<ItemList> >, expr: Expr) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if expr.kind == ExprKind::ExprCall {
+        match expr.left {
+            Some(callee_box) => {
+                let callee_name = knowledge_context_expr_callee_name(*callee_box)
+                if callee_name.len > 0 {
+                    match knowledge_context_find_fn_def(items, callee_name) {
+                        Some(fn_box) => {
+                            let call_arg = knowledge_context_first_call_arg_runtime_obligation(items, (*fn_box).params, expr.args)
+                            if knowledge_context_runtime_obligation_descriptor_found(call_arg) {
+                                return call_arg
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    let args = knowledge_context_first_expr_list_runtime_obligation(items, expr.args)
+    if knowledge_context_runtime_obligation_descriptor_found(args) {
+        return args
+    }
+    let fields = knowledge_context_first_struct_field_runtime_obligation(items, expr.fields)
+    if knowledge_context_runtime_obligation_descriptor_found(fields) {
+        return fields
+    }
+    match expr.left {
+        Some(left_box) => {
+            let left = knowledge_context_first_expr_runtime_obligation(items, *left_box)
+            if knowledge_context_runtime_obligation_descriptor_found(left) {
+                return left
+            }
+        }
+        None => {}
+    }
+    match expr.right {
+        Some(right_box) => {
+            let right = knowledge_context_first_expr_runtime_obligation(items, *right_box)
+            if knowledge_context_runtime_obligation_descriptor_found(right) {
+                return right
+            }
+        }
+        None => {}
+    }
+    match expr.else_expr {
+        Some(else_box) => knowledge_context_first_expr_runtime_obligation(items, *else_box)
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_assignment_runtime_obligation(items: Option<Box<ItemList> >, fn_stmts: Option<Box<StmtList> >, stmt: Stmt) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    let target_name = knowledge_context_assignment_target_name(stmt.target)
+    if target_name.len <= 0 {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    match knowledge_context_find_local_binding_type(fn_stmts, target_name) {
+        Some(ty_box) => {
+            match stmt.expr {
+                Some(expr_box) => knowledge_context_first_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_assignment(), *ty_box, *expr_box)
+                None => knowledge_context_empty_runtime_obligation_descriptor()
+            }
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_stmt_runtime_obligation(items: Option<Box<ItemList> >, stmt: Stmt, return_ty: Option<Box<TypeExpr> >, fn_stmts: Option<Box<StmtList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar {
+        match stmt.expr {
+            Some(expr_box) => {
+                match stmt.ty {
+                    Some(ty_box) => {
+                        let here = knowledge_context_first_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_binding(), *ty_box, *expr_box)
+                        if knowledge_context_runtime_obligation_descriptor_found(here) {
+                            return here
+                        }
+                    }
+                    None => {}
+                }
+                knowledge_context_first_expr_runtime_obligation(items, *expr_box)
+            }
+            None => knowledge_context_empty_runtime_obligation_descriptor()
+        }
+    } else if stmt.kind == StmtKind::StmtExpr {
+        match stmt.expr {
+            Some(expr_box) => {
+                let expr = *expr_box
+                if expr.kind == ExprKind::ExprReturn {
+                    match return_ty {
+                        Some(ret_box) => {
+                            match expr.left {
+                                Some(value_box) => {
+                                    let here = knowledge_context_first_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_return(), *ret_box, *value_box)
+                                    if knowledge_context_runtime_obligation_descriptor_found(here) {
+                                        return here
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                knowledge_context_first_expr_runtime_obligation(items, expr)
+            }
+            None => knowledge_context_empty_runtime_obligation_descriptor()
+        }
+    } else if stmt.kind == StmtKind::StmtAssign {
+        let here = knowledge_context_first_assignment_runtime_obligation(items, fn_stmts, stmt)
+        if knowledge_context_runtime_obligation_descriptor_found(here) {
+            return here
+        }
+        match stmt.expr {
+            Some(expr_box) => knowledge_context_first_expr_runtime_obligation(items, *expr_box)
+            None => knowledge_context_empty_runtime_obligation_descriptor()
+        }
+    } else {
+        knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_stmt_list_runtime_obligation(items: Option<Box<ItemList> >, fn_stmts: Option<Box<StmtList> >, stmts: Option<Box<StmtList> >, return_ty: Option<Box<TypeExpr> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    match stmts {
+        Some(list) => {
+            let head = knowledge_context_first_stmt_runtime_obligation(items, (*list).head, return_ty, fn_stmts)
+            if knowledge_context_runtime_obligation_descriptor_found(head) {
+                return head
+            }
+            knowledge_context_first_stmt_list_runtime_obligation(items, fn_stmts, (*list).tail, return_ty)
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_fn_runtime_obligation(items: Option<Box<ItemList> >, opt: Option<Box<FnDef> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => knowledge_context_first_stmt_list_runtime_obligation(items, (*fd).body.stmts, (*fd).body.stmts, (*fd).return_type)
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_runtime_obligation_from(root: Option<Box<ItemList> >, cursor: Option<Box<ItemList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    match cursor {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn {
+                let here = knowledge_context_first_fn_runtime_obligation(root, item.fn_def)
+                if knowledge_context_runtime_obligation_descriptor_found(here) {
+                    return here
+                }
+            }
+            knowledge_context_first_runtime_obligation_from(root, (*list).tail)
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+pub fn knowledge_context_first_runtime_obligation_items(items: Option<Box<ItemList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    knowledge_context_first_runtime_obligation_from(items, items)
+}
+
+fn knowledge_context_nth_direct_runtime_obligation_from_struct_lit(site_kind: i64, inner_name: Name, value_expr: Expr, constraints: Option<Box<KnowledgeConstraintList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    if target_index < 0 {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    if value_expr.kind != ExprKind::ExprStructLit {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    let value_name = knowledge_context_path_first_name(value_expr.path)
+    if !ir_name_eq(value_name, inner_name) {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            var remaining = target_index
+            if constraint.kind != KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                match knowledge_context_struct_field_value_in_fields(value_expr.fields, constraint.field) {
+                    Some(field_expr) => {
+                        if knowledge_context_direct_field_needs_runtime_obligation(*field_expr, constraint) != 0 {
+                            if remaining == 0 {
+                                return knowledge_context_runtime_obligation_cursor_found(knowledge_context_runtime_obligation_descriptor_from_constraint(site_kind, inner_name, constraint, *field_expr))
+                            }
+                            remaining = remaining - 1
+                        }
+                    }
+                    None => {}
+                }
+            }
+            knowledge_context_nth_direct_runtime_obligation_from_struct_lit(site_kind, inner_name, value_expr, (*list).tail, remaining)
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_generated_runtime_obligation_from_struct_lit(items: Option<Box<ItemList> >, site_kind: i64, inner_name: Name, value_expr: Expr, constraints: Option<Box<KnowledgeConstraintList> >, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    if target_index < 0 {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    if value_expr.kind != ExprKind::ExprStructLit {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    let value_name = knowledge_context_path_first_name(value_expr.path)
+    if !ir_name_eq(value_name, inner_name) {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            var remaining = target_index
+            if constraint.kind != KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                match knowledge_context_struct_field_value_in_fields(value_expr.fields, constraint.field) {
+                    Some(field_expr) => {
+                        if knowledge_context_generated_field_needs_runtime_obligation(items, *field_expr, params, args, locals, constraint) != 0 {
+                            if remaining == 0 {
+                                return knowledge_context_runtime_obligation_cursor_found(knowledge_context_runtime_obligation_descriptor_from_constraint(site_kind, inner_name, constraint, *field_expr))
+                            }
+                            remaining = remaining - 1
+                        }
+                    }
+                    None => {}
+                }
+            }
+            knowledge_context_nth_generated_runtime_obligation_from_struct_lit(items, site_kind, inner_name, value_expr, (*list).tail, params, args, locals, remaining)
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_generated_runtime_obligation_init(items: Option<Box<ItemList> >, site_kind: i64, inner_name: Name, constraints: Option<Box<KnowledgeConstraintList> >, init_expr: Expr, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    if init_expr.kind != ExprKind::ExprCall {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    match init_expr.left {
+        Some(callee_box) => {
+            let callee_name = knowledge_context_expr_callee_name(*callee_box)
+            if callee_name.len <= 0 {
+                return knowledge_context_runtime_obligation_cursor_empty(target_index)
+            }
+            match knowledge_context_find_fn_def(items, callee_name) {
+                Some(fn_box) => {
+                    let fn_def = *fn_box
+                    if !knowledge_context_fn_return_matches_inner(fn_def, inner_name) {
+                        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+                    }
+                    match knowledge_context_direct_return_value_from_stmts_with_context(items, fn_def.body.stmts, fn_def.params, init_expr.args, fn_def.body.stmts, 16) {
+                        Some(return_expr_box) => {
+                            match knowledge_context_value_field_from_knowledge_literal(*return_expr_box) {
+                                Some(value_expr) => knowledge_context_nth_generated_runtime_obligation_from_struct_lit(items, site_kind, inner_name, *value_expr, constraints, fn_def.params, init_expr.args, fn_def.body.stmts, target_index)
+                                None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+                            }
+                        }
+                        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+                    }
+                }
+                None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+            }
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_runtime_obligation_init(items: Option<Box<ItemList> >, site_kind: i64, ty: TypeExpr, init_expr: Expr, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    if ty.kind != TypeExprKind::TypeKnowledge {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    match ty.knowledge_info {
+        Some(info) => {
+            let inner_ty = *(*info).inner_type
+            if inner_ty.kind != TypeExprKind::TypeNamed {
+                return knowledge_context_runtime_obligation_cursor_empty(target_index)
+            }
+            let inner_name = knowledge_context_path_first_name(inner_ty.path)
+            match knowledge_context_value_field_from_knowledge_literal(init_expr) {
+                Some(value_expr) => knowledge_context_nth_direct_runtime_obligation_from_struct_lit(site_kind, inner_name, *value_expr, (*info).proof_constraints, target_index)
+                None => knowledge_context_nth_generated_runtime_obligation_init(items, site_kind, inner_name, (*info).proof_constraints, init_expr, target_index)
+            }
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_call_arg_runtime_obligation(items: Option<Box<ItemList> >, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    match args {
+        Some(arg_list) => {
+            match params {
+                Some(param_list) => {
+                    let here = knowledge_context_nth_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_call_arg(), (*param_list).head.ty, (*arg_list).head, target_index)
+                    if knowledge_context_runtime_obligation_descriptor_found(here.desc) {
+                        return here
+                    }
+                    knowledge_context_nth_call_arg_runtime_obligation(items, (*param_list).tail, (*arg_list).tail, here.remaining_index)
+                }
+                None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+            }
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_expr_list_runtime_obligation(items: Option<Box<ItemList> >, exprs: Option<Box<ExprList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    match exprs {
+        Some(list) => {
+            let head = knowledge_context_nth_expr_runtime_obligation(items, (*list).head, target_index)
+            if knowledge_context_runtime_obligation_descriptor_found(head.desc) {
+                return head
+            }
+            knowledge_context_nth_expr_list_runtime_obligation(items, (*list).tail, head.remaining_index)
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_struct_field_runtime_obligation(items: Option<Box<ItemList> >, fields: Option<Box<StructFieldList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            let head = knowledge_context_nth_expr_runtime_obligation(items, (*list).head.value, target_index)
+            if knowledge_context_runtime_obligation_descriptor_found(head.desc) {
+                return head
+            }
+            knowledge_context_nth_struct_field_runtime_obligation(items, (*list).tail, head.remaining_index)
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_expr_runtime_obligation(items: Option<Box<ItemList> >, expr: Expr, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    var remaining = target_index
+    if expr.kind == ExprKind::ExprCall {
+        match expr.left {
+            Some(callee_box) => {
+                let callee_name = knowledge_context_expr_callee_name(*callee_box)
+                if callee_name.len > 0 {
+                    match knowledge_context_find_fn_def(items, callee_name) {
+                        Some(fn_box) => {
+                            let call_arg = knowledge_context_nth_call_arg_runtime_obligation(items, (*fn_box).params, expr.args, remaining)
+                            if knowledge_context_runtime_obligation_descriptor_found(call_arg.desc) {
+                                return call_arg
+                            }
+                            remaining = call_arg.remaining_index
+                        }
+                        None => {}
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    let args = knowledge_context_nth_expr_list_runtime_obligation(items, expr.args, remaining)
+    if knowledge_context_runtime_obligation_descriptor_found(args.desc) {
+        return args
+    }
+    remaining = args.remaining_index
+
+    let fields = knowledge_context_nth_struct_field_runtime_obligation(items, expr.fields, remaining)
+    if knowledge_context_runtime_obligation_descriptor_found(fields.desc) {
+        return fields
+    }
+    remaining = fields.remaining_index
+
+    match expr.left {
+        Some(left_box) => {
+            let left = knowledge_context_nth_expr_runtime_obligation(items, *left_box, remaining)
+            if knowledge_context_runtime_obligation_descriptor_found(left.desc) {
+                return left
+            }
+            remaining = left.remaining_index
+        }
+        None => {}
+    }
+    match expr.right {
+        Some(right_box) => {
+            let right = knowledge_context_nth_expr_runtime_obligation(items, *right_box, remaining)
+            if knowledge_context_runtime_obligation_descriptor_found(right.desc) {
+                return right
+            }
+            remaining = right.remaining_index
+        }
+        None => {}
+    }
+    match expr.else_expr {
+        Some(else_box) => knowledge_context_nth_expr_runtime_obligation(items, *else_box, remaining)
+        None => knowledge_context_runtime_obligation_cursor_empty(remaining)
+    }
+}
+
+fn knowledge_context_nth_assignment_runtime_obligation(items: Option<Box<ItemList> >, fn_stmts: Option<Box<StmtList> >, stmt: Stmt, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    let target_name = knowledge_context_assignment_target_name(stmt.target)
+    if target_name.len <= 0 {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    match knowledge_context_find_local_binding_type(fn_stmts, target_name) {
+        Some(ty_box) => {
+            match stmt.expr {
+                Some(expr_box) => knowledge_context_nth_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_assignment(), *ty_box, *expr_box, target_index)
+                None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+            }
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_stmt_runtime_obligation(items: Option<Box<ItemList> >, stmt: Stmt, return_ty: Option<Box<TypeExpr> >, fn_stmts: Option<Box<StmtList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    if stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar {
+        match stmt.expr {
+            Some(expr_box) => {
+                var remaining = target_index
+                match stmt.ty {
+                    Some(ty_box) => {
+                        let here = knowledge_context_nth_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_binding(), *ty_box, *expr_box, remaining)
+                        if knowledge_context_runtime_obligation_descriptor_found(here.desc) {
+                            return here
+                        }
+                        remaining = here.remaining_index
+                    }
+                    None => {}
+                }
+                knowledge_context_nth_expr_runtime_obligation(items, *expr_box, remaining)
+            }
+            None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+        }
+    } else if stmt.kind == StmtKind::StmtExpr {
+        match stmt.expr {
+            Some(expr_box) => {
+                let expr = *expr_box
+                var remaining = target_index
+                if expr.kind == ExprKind::ExprReturn {
+                    match return_ty {
+                        Some(ret_box) => {
+                            match expr.left {
+                                Some(value_box) => {
+                                    let here = knowledge_context_nth_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_return(), *ret_box, *value_box, remaining)
+                                    if knowledge_context_runtime_obligation_descriptor_found(here.desc) {
+                                        return here
+                                    }
+                                    remaining = here.remaining_index
+                                }
+                                None => {}
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                knowledge_context_nth_expr_runtime_obligation(items, expr, remaining)
+            }
+            None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+        }
+    } else if stmt.kind == StmtKind::StmtAssign {
+        let here = knowledge_context_nth_assignment_runtime_obligation(items, fn_stmts, stmt, target_index)
+        if knowledge_context_runtime_obligation_descriptor_found(here.desc) {
+            return here
+        }
+        match stmt.expr {
+            Some(expr_box) => knowledge_context_nth_expr_runtime_obligation(items, *expr_box, here.remaining_index)
+            None => knowledge_context_runtime_obligation_cursor_empty(here.remaining_index)
+        }
+    } else {
+        knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_stmt_list_runtime_obligation(items: Option<Box<ItemList> >, fn_stmts: Option<Box<StmtList> >, stmts: Option<Box<StmtList> >, return_ty: Option<Box<TypeExpr> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    match stmts {
+        Some(list) => {
+            let head = knowledge_context_nth_stmt_runtime_obligation(items, (*list).head, return_ty, fn_stmts, target_index)
+            if knowledge_context_runtime_obligation_descriptor_found(head.desc) {
+                return head
+            }
+            knowledge_context_nth_stmt_list_runtime_obligation(items, fn_stmts, (*list).tail, return_ty, head.remaining_index)
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_fn_runtime_obligation(items: Option<Box<ItemList> >, opt: Option<Box<FnDef> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => knowledge_context_nth_stmt_list_runtime_obligation(items, (*fd).body.stmts, (*fd).body.stmts, (*fd).return_type, target_index)
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_runtime_obligation_from(root: Option<Box<ItemList> >, cursor: Option<Box<ItemList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    match cursor {
+        Some(list) => {
+            let item = (*list).head
+            var remaining = target_index
+            if item.kind == ItemKind::ItemFn {
+                let here = knowledge_context_nth_fn_runtime_obligation(root, item.fn_def, remaining)
+                if knowledge_context_runtime_obligation_descriptor_found(here.desc) {
+                    return here
+                }
+                remaining = here.remaining_index
+            }
+            knowledge_context_nth_runtime_obligation_from(root, (*list).tail, remaining)
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+pub fn knowledge_context_nth_runtime_obligation_items(items: Option<Box<ItemList> >, target_index: i64) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if target_index < 0 {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    let cursor = knowledge_context_nth_runtime_obligation_from(items, items, target_index)
+    cursor.desc
+}
+
+fn knowledge_context_stmt_has_static_value_constraint(stmt: Stmt, return_ty: Option<Box<TypeExpr> >) -> bool with Mut, Panic, Div, Alloc {
+    if stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar {
+        match stmt.ty {
+            Some(ty_box) => knowledge_context_type_has_unit_constraint(*ty_box)
+            None => false
+        }
+    } else if stmt.kind == StmtKind::StmtExpr {
+        match stmt.expr {
+            Some(expr_box) => {
+                if (*expr_box).kind == ExprKind::ExprReturn {
+                    match return_ty {
+                        Some(ret_box) => knowledge_context_type_has_unit_constraint(*ret_box)
+                        None => false
+                    }
+                } else {
+                    false
+                }
+            }
+            None => false
+        }
+    } else {
+        false
+    }
+}
+
+fn knowledge_context_stmt_list_has_static_value_constraint(stmts: Option<Box<StmtList> >, return_ty: Option<Box<TypeExpr> >) -> bool with Mut, Panic, Div, Alloc {
+    match stmts {
+        Some(list) => {
+            if knowledge_context_stmt_has_static_value_constraint((*list).head, return_ty) {
+                return true
+            }
+            knowledge_context_stmt_list_has_static_value_constraint((*list).tail, return_ty)
+        }
+        None => false
+    }
+}
+
+fn knowledge_context_fn_has_static_value_constraint(opt: Option<Box<FnDef> >) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => knowledge_context_stmt_list_has_static_value_constraint((*fd).body.stmts, (*fd).return_type)
+        None => false
+    }
+}
+
+fn knowledge_context_items_have_static_value_constraint(items: Option<Box<ItemList> >) -> bool with Mut, Panic, Div, Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn {
+                if knowledge_context_fn_has_static_value_constraint(item.fn_def) {
+                    return true
+                }
+            }
+            knowledge_context_items_have_static_value_constraint((*list).tail)
+        }
+        None => false
+    }
+}
+
+pub fn knowledge_context_validate_items(items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc {
+    if !knowledge_context_items_have_unit_constraint(items) && !knowledge_context_items_have_static_value_constraint(items) {
+        return knowledge_context_validate_from_ontology(items, items)
+    }
+    let units = knowledge_context_collect_units(register_builtin_units(unit_registry_new()), items)
+    if knowledge_context_validate_from(items, units, items) != 0 {
+        return 1
+    }
+    knowledge_context_validate_static_values_from(items, units, items)
+}
+
+pub fn knowledge_context_validate_items_values_only(items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc {
+    if !knowledge_context_items_have_unit_constraint(items) && !knowledge_context_items_have_static_value_constraint(items) {
+        return 0
+    }
+    let units = knowledge_context_collect_units(register_builtin_units(unit_registry_new()), items)
+    if knowledge_context_validate_from_values_only(items, units, items) != 0 {
+        return 1
+    }
+    knowledge_context_validate_static_values_from(items, units, items)
+}
+
+pub fn knowledge_context_unit_derived_semantic_probe_items(items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc {
+    let units = knowledge_context_collect_units(register_builtin_units(unit_registry_new()), items)
+    let idx = units.find(make_name("acceleration"))
+    if idx < 0 {
+        return 1
+    }
+    let velocity_dim = unit_dim_div(unit_dim_length(), unit_dim_time())
+    let expected_dim = unit_dim_div(velocity_dim, unit_dim_time())
+    let actual_dim = units.get_dim(idx)
+    if unit_dim_compatible(actual_dim, expected_dim) {
+        print("checker_unit_derived_semantic_probe=ok\n")
+        return 0
+    }
+    1
+}

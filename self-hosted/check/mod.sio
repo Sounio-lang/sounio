@@ -11,6 +11,22 @@ module check::mod
 use ir::ir::*
 use parser::ast::*
 use check::types::{TypeEntry, TypeEntryList, TypeKind}
+use check::ontology_side_table_cache::{
+    ontology_side_table_cache_disjoint_verdict,
+    ontology_side_table_cache_subclass_verdict,
+    ontology_side_table_cache_source_disjoint_axiom_count,
+    ontology_side_table_cache_source_disjoint_object0,
+    ontology_side_table_cache_source_disjoint_subject0,
+    ontology_side_table_cache_source_plan_valid,
+    ontology_side_table_cache_source_slot_at,
+    ontology_side_table_cache_source_slot_count,
+    ontology_side_table_cache_source_subclass_axiom_count,
+    ontology_side_table_cache_source_subclass_object_at,
+    ontology_side_table_cache_source_subclass_subject_at,
+    ontology_side_table_cache_verdict_invalid_cache,
+    ontology_side_table_cache_verdict_ok,
+    ontology_side_table_cache_verdict_reject,
+}
 
 struct CheckResult {
     error_count: i64,
@@ -34,6 +50,12 @@ struct CheckBoxedEpistemicResult {
     had_error: bool,
     epistemic: Box<IrEpistemicSection>,
 }
+
+var CHECK_MOD_ONTOCACHE_SIDECAR_VALID: bool = false
+var CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT: i64 = 0
+var CHECK_MOD_ONTOCACHE_SIDECAR_SLOTS: [i64; 6] = [0; 6]
+var CHECK_MOD_ONTOCACHE_SIDECAR_SUBCLASS: [bool; 36] = [false; 36]
+var CHECK_MOD_ONTOCACHE_SIDECAR_DISJOINT: [bool; 36] = [false; 36]
 
 fn check_policy_requirements_to_ir(
     opt: Option<Box<PolicyRequirementInfoList>>,
@@ -174,62 +196,65 @@ fn checker_more_restrictive_alg_kind(a: i64, b: i64) -> i64 {
     return a
 }
 
+struct CheckerHyperAlgCollectState {
+    found_alg: i64,
+    found_any: i64,
+    ambiguous: i64,
+}
+
 fn checker_collect_hyper_alg_from_type_list(
     elems: Option<Box<TypeEntryList>>,
-    found_alg: &! i64,
-    found_any: &! i64,
-    ambiguous: &! i64
-) with Mut, Panic, Div, Alloc {
+    state: CheckerHyperAlgCollectState
+) -> CheckerHyperAlgCollectState with Mut, Panic, Div, Alloc {
     match elems {
-        None => {}
+        None => state
         Some(list) => {
-            checker_collect_hyper_alg_from_type((*list).head, &! found_alg, &! found_any, &! ambiguous)
-            checker_collect_hyper_alg_from_type_list((*list).tail, &! found_alg, &! found_any, &! ambiguous)
+            let after_head = checker_collect_hyper_alg_from_type((*list).head, state)
+            checker_collect_hyper_alg_from_type_list((*list).tail, after_head)
         }
     }
 }
 
 fn checker_collect_hyper_alg_from_type(
     ty: TypeEntry,
-    found_alg: &! i64,
-    found_any: &! i64,
-    ambiguous: &! i64
-) with Mut, Panic, Div, Alloc {
+    state: CheckerHyperAlgCollectState
+) -> CheckerHyperAlgCollectState with Mut, Panic, Div, Alloc {
+    var out = state
     if ty.kind == TypeKind::TyHyper {
-        if *found_any == 0 {
-            *found_any = 1
-            *found_alg = ty.algebra_kind
-        } else if *found_alg != ty.algebra_kind {
+        if out.found_any == 0 {
+            out.found_any = 1
+            out.found_alg = ty.algebra_kind
+        } else if out.found_alg != ty.algebra_kind {
             // Mixed-Hyper: record as ambiguous but keep the more restrictive kind
             // so that callers can apply intersection strategy instead of bailing.
-            *ambiguous = 1
-            *found_alg = checker_more_restrictive_alg_kind(*found_alg, ty.algebra_kind)
+            out.ambiguous = 1
+            out.found_alg = checker_more_restrictive_alg_kind(out.found_alg, ty.algebra_kind)
         }
     }
     match ty.inner {
         None => {}
-        Some(inner) => checker_collect_hyper_alg_from_type(*inner, &! found_alg, &! found_any, &! ambiguous)
+        Some(inner) => {
+            out = checker_collect_hyper_alg_from_type(*inner, out)
+        }
     }
-    checker_collect_hyper_alg_from_type_list(ty.tuple_elems, &! found_alg, &! found_any, &! ambiguous)
+    checker_collect_hyper_alg_from_type_list(ty.tuple_elems, out)
 }
 
 fn checker_infer_fn_hyper_algebra(checker: &Checker, fn_name: Name) -> i64 with Mut, Panic, Div, Alloc {
     let sig_idx = checker.fn_sigs.find(fn_name)
     if sig_idx < 0 { return -1 }
     let sig = checker.fn_sigs.get(sig_idx)
-    var found_alg: i64 = -1
-    var found_any: i64 = 0
-    var ambiguous: i64 = 0
+    var state = CheckerHyperAlgCollectState { found_alg: -1, found_any: 0, ambiguous: 0 }
 
-    checker_collect_hyper_alg_from_type(sig.return_type, &! found_alg, &! found_any, &! ambiguous)
+    state = checker_collect_hyper_alg_from_type(sig.return_type, state)
     if sig.is_method {
-        checker_collect_hyper_alg_from_type(sig.self_type_entry, &! found_alg, &! found_any, &! ambiguous)
+        state = checker_collect_hyper_alg_from_type(sig.self_type_entry, state)
     }
 
     var i: i64 = 0
     while i < sig.param_count {
         let param = fn_param_list_get(sig.params, i)
-        checker_collect_hyper_alg_from_type(param.ty, &! found_alg, &! found_any, &! ambiguous)
+        state = checker_collect_hyper_alg_from_type(param.ty, state)
         i = i + 1
     }
 
@@ -237,8 +262,8 @@ fn checker_infer_fn_hyper_algebra(checker: &Checker, fn_name: Name) -> i64 with 
     // most-restrictive kind computed by checker_collect_hyper_alg_from_type rather
     // than bailing with -1.  The optimizer (ocp_configure_small_context) then applies
     // the conservative intersection strategy for that kind.
-    if found_any == 0 { return -1 }
-    found_alg  // single kind OR most-restrictive kind when ambiguous
+    if state.found_any == 0 { return -1 }
+    state.found_alg  // single kind OR most-restrictive kind when ambiguous
 }
 
 pub fn checker_apply_ir_metadata(checker: &Checker, module: &! IrModule) with Mut, Panic, Div, Alloc {
@@ -445,6 +470,991 @@ pub fn check_items_verdict_boot4(items: Option<Box<ItemList>>) -> i64 with Mut, 
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
     if had_error == 1 { return 1 }
     0
+}
+
+pub fn check_ontology_side_table_cache_subclass_verdict_probe(source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div {
+    ontology_side_table_cache_subclass_verdict(source_path, child_id, parent_id)
+}
+
+pub fn check_ontology_side_table_cache_disjoint_verdict_probe(source_path: string, left_id: i64, right_id: i64) -> i64 with IO, Mut, Panic, Div {
+    ontology_side_table_cache_disjoint_verdict(source_path, left_id, right_id)
+}
+
+fn check_mod_ontology_cache_slot_name(idx: i64) -> Name with Mut, Panic, Div {
+    if idx == 0 { return make_name("cache_slot0") }
+    if idx == 1 { return make_name("cache_slot1") }
+    if idx == 2 { return make_name("cache_slot2") }
+    if idx == 3 { return make_name("cache_slot3") }
+    if idx == 4 { return make_name("cache_slot4") }
+    if idx == 5 { return make_name("cache_slot5") }
+    make_name("cache_slot")
+}
+
+fn check_mod_ontology_cache_slot_index(source_path: string, id: i64) -> i64 with IO, Mut, Panic, Div {
+    let count = ontology_side_table_cache_source_slot_count(source_path)
+    var i: i64 = 0
+    while i < count && i < 6 {
+        if ontology_side_table_cache_source_slot_at(source_path, i) == id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn check_mod_hydrate_ontology_kernel_from_side_table_cache(checker: Checker, source_path: string) -> Checker with IO, Mut, Panic, Div, Alloc {
+    var c = checker
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return c
+    }
+
+    c.ontology_kernel = ontology_kernel_empty()
+    let slot_count = ontology_side_table_cache_source_slot_count(source_path)
+    var i: i64 = 0
+    while i < slot_count && i < 6 {
+        let pair = ontology_kernel_add_class(c.ontology_kernel, check_mod_ontology_cache_slot_name(i), make_name("cache"))
+        c.ontology_kernel = pair.0
+        i = i + 1
+    }
+
+    let subclass_count = ontology_side_table_cache_source_subclass_axiom_count(source_path)
+    i = 0
+    while i < subclass_count && i < 4 {
+        let subject = ontology_side_table_cache_source_subclass_subject_at(source_path, i)
+        let object = ontology_side_table_cache_source_subclass_object_at(source_path, i)
+        c.ontology_kernel = ontology_kernel_add_axiom(c.ontology_kernel, OntologyAxiom {
+            axiom_type: owl_subclass_of(),
+            subject_idx: subject,
+            object_idx: object,
+            refinement_ref_id: 0 - 1,
+            property_name: empty_name(),
+            is_property_axiom: false,
+        })
+        i = i + 1
+    }
+
+    if ontology_side_table_cache_source_disjoint_axiom_count(source_path) > 0 {
+        c.ontology_kernel = ontology_kernel_add_axiom(c.ontology_kernel, OntologyAxiom {
+            axiom_type: owl_disjoint_classes(),
+            subject_idx: ontology_side_table_cache_source_disjoint_subject0(source_path),
+            object_idx: ontology_side_table_cache_source_disjoint_object0(source_path),
+            refinement_ref_id: 0 - 1,
+            property_name: empty_name(),
+            is_property_axiom: false,
+        })
+    }
+
+    c.ontology_kernel = ontology_kernel_materialize(c.ontology_kernel)
+    c.ontology_kernel.profile = ontology_kernel_check_profile(c.ontology_kernel)
+    c
+}
+
+fn check_mod_hydrate_ontology_kernel_ptr_from_side_table_cache(checker_ptr: *mut Checker, source_path: string) with IO, Mut, Panic, Div, Alloc {
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return
+    }
+
+    (*checker_ptr).ontology_kernel.classes.count = 0
+    (*checker_ptr).ontology_kernel.properties.count = 0
+    (*checker_ptr).ontology_kernel.axioms.count = 0
+    (*checker_ptr).ontology_kernel.profile.is_el = true
+    (*checker_ptr).ontology_kernel.profile.is_ql = true
+    (*checker_ptr).ontology_kernel.profile.is_rl = true
+    (*checker_ptr).ontology_kernel.profile.is_dl = true
+
+    var clear_idx: i64 = 0
+    while clear_idx < 4096 {
+        (*checker_ptr).ontology_kernel.materialized.subclass_matrix[clear_idx as usize] = false
+        (*checker_ptr).ontology_kernel.materialized.disjoint_matrix[clear_idx as usize] = false
+        clear_idx = clear_idx + 1
+    }
+
+    clear_idx = 0
+    while clear_idx < 1024 {
+        (*checker_ptr).ontology_kernel.materialized.sub_property_matrix[clear_idx as usize] = false
+        clear_idx = clear_idx + 1
+    }
+
+    clear_idx = 0
+    while clear_idx < 512 {
+        (*checker_ptr).ontology_kernel.materialized.class_property_axioms[clear_idx as usize] = 0 - 1
+        clear_idx = clear_idx + 1
+    }
+
+    clear_idx = 0
+    while clear_idx < 64 {
+        (*checker_ptr).ontology_kernel.materialized.class_property_counts[clear_idx as usize] = 0
+        clear_idx = clear_idx + 1
+    }
+
+    let slot_count = ontology_side_table_cache_source_slot_count(source_path)
+    var i: i64 = 0
+    while i < slot_count && i < 6 {
+        (*checker_ptr).ontology_kernel.classes.entries[i as usize] = OntologyClassEntry {
+            name: check_mod_ontology_cache_slot_name(i),
+            ontology_name: make_name("cache"),
+            class_index: i,
+            is_valid: true,
+        }
+        (*checker_ptr).ontology_kernel.classes.count = i + 1
+        i = i + 1
+    }
+
+    let subclass_count = ontology_side_table_cache_source_subclass_axiom_count(source_path)
+    i = 0
+    while i < subclass_count && i < 4 {
+        let subject = ontology_side_table_cache_source_subclass_subject_at(source_path, i)
+        let object = ontology_side_table_cache_source_subclass_object_at(source_path, i)
+        (*checker_ptr).ontology_kernel.axioms.axioms[(*checker_ptr).ontology_kernel.axioms.count as usize] = OntologyAxiom {
+            axiom_type: owl_subclass_of(),
+            subject_idx: subject,
+            object_idx: object,
+            refinement_ref_id: 0 - 1,
+            property_name: empty_name(),
+            is_property_axiom: false,
+        }
+        (*checker_ptr).ontology_kernel.axioms.count = (*checker_ptr).ontology_kernel.axioms.count + 1
+        i = i + 1
+    }
+
+    if ontology_side_table_cache_source_disjoint_axiom_count(source_path) > 0 {
+        (*checker_ptr).ontology_kernel.axioms.axioms[(*checker_ptr).ontology_kernel.axioms.count as usize] = OntologyAxiom {
+            axiom_type: owl_disjoint_classes(),
+            subject_idx: ontology_side_table_cache_source_disjoint_subject0(source_path),
+            object_idx: ontology_side_table_cache_source_disjoint_object0(source_path),
+            refinement_ref_id: 0 - 1,
+            property_name: empty_name(),
+            is_property_axiom: false,
+        }
+        (*checker_ptr).ontology_kernel.axioms.count = (*checker_ptr).ontology_kernel.axioms.count + 1
+    }
+
+    i = 0
+    while i < (*checker_ptr).ontology_kernel.classes.count {
+        (*checker_ptr).ontology_kernel.materialized.subclass_matrix[ontology_kernel_class_matrix_index(i, i) as usize] = true
+        i = i + 1
+    }
+
+    i = 0
+    while i < (*checker_ptr).ontology_kernel.axioms.count {
+        let ax = (*checker_ptr).ontology_kernel.axioms.axioms[i as usize]
+        if ax.axiom_type == owl_subclass_of() {
+            if ax.subject_idx >= 0 && ax.subject_idx < (*checker_ptr).ontology_kernel.classes.count && ax.object_idx >= 0 && ax.object_idx < (*checker_ptr).ontology_kernel.classes.count {
+                (*checker_ptr).ontology_kernel.materialized.subclass_matrix[ontology_kernel_class_matrix_index(ax.subject_idx, ax.object_idx) as usize] = true
+            }
+        }
+        else if ax.axiom_type == owl_disjoint_classes() {
+            if ax.subject_idx >= 0 && ax.subject_idx < (*checker_ptr).ontology_kernel.classes.count && ax.object_idx >= 0 && ax.object_idx < (*checker_ptr).ontology_kernel.classes.count {
+                (*checker_ptr).ontology_kernel.materialized.disjoint_matrix[ontology_kernel_class_matrix_index(ax.subject_idx, ax.object_idx) as usize] = true
+                (*checker_ptr).ontology_kernel.materialized.disjoint_matrix[ontology_kernel_class_matrix_index(ax.object_idx, ax.subject_idx) as usize] = true
+                (*checker_ptr).ontology_kernel.profile.is_el = false
+            }
+        }
+        i = i + 1
+    }
+
+    var mid: i64 = 0
+    while mid < (*checker_ptr).ontology_kernel.classes.count {
+        var src: i64 = 0
+        while src < (*checker_ptr).ontology_kernel.classes.count {
+            if (*checker_ptr).ontology_kernel.materialized.subclass_matrix[ontology_kernel_class_matrix_index(src, mid) as usize] {
+                var dst: i64 = 0
+                while dst < (*checker_ptr).ontology_kernel.classes.count {
+                    if (*checker_ptr).ontology_kernel.materialized.subclass_matrix[ontology_kernel_class_matrix_index(mid, dst) as usize] {
+                        (*checker_ptr).ontology_kernel.materialized.subclass_matrix[ontology_kernel_class_matrix_index(src, dst) as usize] = true
+                    }
+                    dst = dst + 1
+                }
+            }
+            src = src + 1
+        }
+        mid = mid + 1
+    }
+
+    var x: i64 = 0
+    while x < (*checker_ptr).ontology_kernel.classes.count {
+        var a: i64 = 0
+        while a < (*checker_ptr).ontology_kernel.classes.count {
+            if (*checker_ptr).ontology_kernel.materialized.subclass_matrix[ontology_kernel_class_matrix_index(x, a) as usize] {
+                var b: i64 = 0
+                while b < (*checker_ptr).ontology_kernel.classes.count {
+                    if (*checker_ptr).ontology_kernel.materialized.disjoint_matrix[ontology_kernel_class_matrix_index(a, b) as usize] {
+                        (*checker_ptr).ontology_kernel.materialized.disjoint_matrix[ontology_kernel_class_matrix_index(x, b) as usize] = true
+                        (*checker_ptr).ontology_kernel.materialized.disjoint_matrix[ontology_kernel_class_matrix_index(b, x) as usize] = true
+                    }
+                    b = b + 1
+                }
+            }
+            a = a + 1
+        }
+        x = x + 1
+    }
+}
+
+fn check_mod_ontology_kernel_ptr_is_subclass(checker_ptr: *mut Checker, child_idx: i64, parent_idx: i64) -> bool with Mut, Panic, Div {
+    if child_idx < 0 || parent_idx < 0 || child_idx >= (*checker_ptr).ontology_kernel.classes.count || parent_idx >= (*checker_ptr).ontology_kernel.classes.count {
+        return false
+    }
+    (*checker_ptr).ontology_kernel.materialized.subclass_matrix[ontology_kernel_class_matrix_index(child_idx, parent_idx) as usize]
+}
+
+fn check_mod_ontology_kernel_ptr_is_disjoint(checker_ptr: *mut Checker, left_idx: i64, right_idx: i64) -> bool with Mut, Panic, Div {
+    if left_idx < 0 || right_idx < 0 || left_idx >= (*checker_ptr).ontology_kernel.classes.count || right_idx >= (*checker_ptr).ontology_kernel.classes.count {
+        return false
+    }
+    (*checker_ptr).ontology_kernel.materialized.disjoint_matrix[ontology_kernel_class_matrix_index(left_idx, right_idx) as usize]
+}
+
+fn check_mod_cache_shadow_matrix_index(child_idx: i64, parent_idx: i64) -> i64 {
+    child_idx * 6 + parent_idx
+}
+
+fn check_mod_ontocache_sidecar_reset() with Mut {
+    CHECK_MOD_ONTOCACHE_SIDECAR_VALID = false
+    CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT = 0
+    var i: i64 = 0
+    while i < 6 {
+        CHECK_MOD_ONTOCACHE_SIDECAR_SLOTS[i as usize] = 0 - 1
+        i = i + 1
+    }
+    i = 0
+    while i < 36 {
+        CHECK_MOD_ONTOCACHE_SIDECAR_SUBCLASS[i as usize] = false
+        CHECK_MOD_ONTOCACHE_SIDECAR_DISJOINT[i as usize] = false
+        i = i + 1
+    }
+}
+
+fn check_mod_ontocache_sidecar_hydrate_from_source(source_path: string) with IO, Mut, Panic, Div {
+    check_mod_ontocache_sidecar_reset()
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return
+    }
+
+    let slot_count = ontology_side_table_cache_source_slot_count(source_path)
+    var i: i64 = 0
+    while i < slot_count && i < 6 {
+        CHECK_MOD_ONTOCACHE_SIDECAR_SLOTS[i as usize] = ontology_side_table_cache_source_slot_at(source_path, i)
+        CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT = i + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT {
+        CHECK_MOD_ONTOCACHE_SIDECAR_SUBCLASS[check_mod_cache_shadow_matrix_index(i, i) as usize] = true
+        i = i + 1
+    }
+
+    let subclass_count = ontology_side_table_cache_source_subclass_axiom_count(source_path)
+    i = 0
+    while i < subclass_count && i < 4 {
+        let subject = ontology_side_table_cache_source_subclass_subject_at(source_path, i)
+        let object = ontology_side_table_cache_source_subclass_object_at(source_path, i)
+        if subject >= 0 && subject < CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT && object >= 0 && object < CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT {
+            CHECK_MOD_ONTOCACHE_SIDECAR_SUBCLASS[check_mod_cache_shadow_matrix_index(subject, object) as usize] = true
+        }
+        i = i + 1
+    }
+
+    if ontology_side_table_cache_source_disjoint_axiom_count(source_path) > 0 {
+        let left = ontology_side_table_cache_source_disjoint_subject0(source_path)
+        let right = ontology_side_table_cache_source_disjoint_object0(source_path)
+        if left >= 0 && left < CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT && right >= 0 && right < CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT {
+            CHECK_MOD_ONTOCACHE_SIDECAR_DISJOINT[check_mod_cache_shadow_matrix_index(left, right) as usize] = true
+            CHECK_MOD_ONTOCACHE_SIDECAR_DISJOINT[check_mod_cache_shadow_matrix_index(right, left) as usize] = true
+        }
+    }
+
+    var mid: i64 = 0
+    while mid < CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT {
+        var src: i64 = 0
+        while src < CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT {
+            if CHECK_MOD_ONTOCACHE_SIDECAR_SUBCLASS[check_mod_cache_shadow_matrix_index(src, mid) as usize] {
+                var dst: i64 = 0
+                while dst < CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT {
+                    if CHECK_MOD_ONTOCACHE_SIDECAR_SUBCLASS[check_mod_cache_shadow_matrix_index(mid, dst) as usize] {
+                        CHECK_MOD_ONTOCACHE_SIDECAR_SUBCLASS[check_mod_cache_shadow_matrix_index(src, dst) as usize] = true
+                    }
+                    dst = dst + 1
+                }
+            }
+            src = src + 1
+        }
+        mid = mid + 1
+    }
+
+    var x: i64 = 0
+    while x < CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT {
+        var a: i64 = 0
+        while a < CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT {
+            if CHECK_MOD_ONTOCACHE_SIDECAR_SUBCLASS[check_mod_cache_shadow_matrix_index(x, a) as usize] {
+                var b: i64 = 0
+                while b < CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT {
+                    if CHECK_MOD_ONTOCACHE_SIDECAR_DISJOINT[check_mod_cache_shadow_matrix_index(a, b) as usize] {
+                        CHECK_MOD_ONTOCACHE_SIDECAR_DISJOINT[check_mod_cache_shadow_matrix_index(x, b) as usize] = true
+                        CHECK_MOD_ONTOCACHE_SIDECAR_DISJOINT[check_mod_cache_shadow_matrix_index(b, x) as usize] = true
+                    }
+                    b = b + 1
+                }
+            }
+            a = a + 1
+        }
+        x = x + 1
+    }
+
+    CHECK_MOD_ONTOCACHE_SIDECAR_VALID = CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT > 0
+}
+
+fn check_mod_ontocache_sidecar_slot_index(id: i64) -> i64 {
+    var i: i64 = 0
+    while i < CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT && i < 6 {
+        if CHECK_MOD_ONTOCACHE_SIDECAR_SLOTS[i as usize] == id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn check_mod_ontocache_sidecar_is_subclass(child_id: i64, parent_id: i64) -> bool {
+    if !CHECK_MOD_ONTOCACHE_SIDECAR_VALID {
+        return false
+    }
+    let child_idx = check_mod_ontocache_sidecar_slot_index(child_id)
+    let parent_idx = check_mod_ontocache_sidecar_slot_index(parent_id)
+    if child_idx < 0 || parent_idx < 0 {
+        return false
+    }
+    CHECK_MOD_ONTOCACHE_SIDECAR_SUBCLASS[check_mod_cache_shadow_matrix_index(child_idx, parent_idx) as usize]
+}
+
+fn check_mod_ontocache_sidecar_is_disjoint(left_id: i64, right_id: i64) -> bool {
+    if !CHECK_MOD_ONTOCACHE_SIDECAR_VALID {
+        return false
+    }
+    let left_idx = check_mod_ontocache_sidecar_slot_index(left_id)
+    let right_idx = check_mod_ontocache_sidecar_slot_index(right_id)
+    if left_idx < 0 || right_idx < 0 {
+        return false
+    }
+    CHECK_MOD_ONTOCACHE_SIDECAR_DISJOINT[check_mod_cache_shadow_matrix_index(left_idx, right_idx) as usize]
+}
+
+fn check_mod_hydrate_cache_shadow_ptr_from_side_table_cache(checker_ptr: *mut Checker, source_path: string) with IO, Mut, Panic, Div, Alloc {
+    (*checker_ptr).ontology_cache_shadow_slot_count = 0
+    (*checker_ptr).ontology_cache_shadow_slots = [0; 6]
+    (*checker_ptr).ontology_cache_shadow_subclass_matrix = [false; 36]
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return
+    }
+
+    let slot_count = ontology_side_table_cache_source_slot_count(source_path)
+    var i: i64 = 0
+    while i < slot_count && i < 6 {
+        (*checker_ptr).ontology_cache_shadow_slots[i as usize] = ontology_side_table_cache_source_slot_at(source_path, i)
+        (*checker_ptr).ontology_cache_shadow_slot_count = i + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < (*checker_ptr).ontology_cache_shadow_slot_count {
+        (*checker_ptr).ontology_cache_shadow_subclass_matrix[check_mod_cache_shadow_matrix_index(i, i) as usize] = true
+        i = i + 1
+    }
+
+    let subclass_count = ontology_side_table_cache_source_subclass_axiom_count(source_path)
+    i = 0
+    while i < subclass_count && i < 4 {
+        let subject = ontology_side_table_cache_source_subclass_subject_at(source_path, i)
+        let object = ontology_side_table_cache_source_subclass_object_at(source_path, i)
+        if subject >= 0 && subject < (*checker_ptr).ontology_cache_shadow_slot_count && object >= 0 && object < (*checker_ptr).ontology_cache_shadow_slot_count {
+            (*checker_ptr).ontology_cache_shadow_subclass_matrix[check_mod_cache_shadow_matrix_index(subject, object) as usize] = true
+        }
+        i = i + 1
+    }
+
+    var mid: i64 = 0
+    while mid < (*checker_ptr).ontology_cache_shadow_slot_count {
+        var src: i64 = 0
+        while src < (*checker_ptr).ontology_cache_shadow_slot_count {
+            if (*checker_ptr).ontology_cache_shadow_subclass_matrix[check_mod_cache_shadow_matrix_index(src, mid) as usize] {
+                var dst: i64 = 0
+                while dst < (*checker_ptr).ontology_cache_shadow_slot_count {
+                    if (*checker_ptr).ontology_cache_shadow_subclass_matrix[check_mod_cache_shadow_matrix_index(mid, dst) as usize] {
+                        (*checker_ptr).ontology_cache_shadow_subclass_matrix[check_mod_cache_shadow_matrix_index(src, dst) as usize] = true
+                    }
+                    dst = dst + 1
+                }
+            }
+            src = src + 1
+        }
+        mid = mid + 1
+    }
+}
+
+fn check_mod_cache_shadow_ptr_is_subclass(checker_ptr: *mut Checker, child_id: i64, parent_id: i64) -> bool with Mut, Panic, Div {
+    var child_idx: i64 = 0 - 1
+    var parent_idx: i64 = 0 - 1
+    var i: i64 = 0
+    while i < (*checker_ptr).ontology_cache_shadow_slot_count && i < 6 {
+        if (*checker_ptr).ontology_cache_shadow_slots[i as usize] == child_id {
+            child_idx = i
+        }
+        if (*checker_ptr).ontology_cache_shadow_slots[i as usize] == parent_id {
+            parent_idx = i
+        }
+        i = i + 1
+    }
+    if child_idx < 0 || parent_idx < 0 {
+        return false
+    }
+    (*checker_ptr).ontology_cache_shadow_subclass_matrix[check_mod_cache_shadow_matrix_index(child_idx, parent_idx) as usize]
+}
+
+pub fn check_ontology_side_table_cache_sourcecheck_subclass_verdict_probe(items: Option<Box<ItemList>>, source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    print("check_mod_sourcecheck_cache_subclass_verdict=enter\n")
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    print("check_mod_sourcecheck_cache_subclass_verdict=cache_valid\n")
+    let child_idx = check_mod_ontology_cache_slot_index(source_path, child_id)
+    let parent_idx = check_mod_ontology_cache_slot_index(source_path, parent_id)
+    print("check_mod_sourcecheck_cache_subclass_verdict=child_idx=")
+    print_int(child_idx)
+    print("\n")
+    print("check_mod_sourcecheck_cache_subclass_verdict=parent_idx=")
+    print_int(parent_idx)
+    print("\n")
+    if child_idx < 0 || parent_idx < 0 {
+        return ontology_side_table_cache_verdict_reject()
+    }
+    print("check_mod_sourcecheck_cache_subclass_verdict=idx_ok\n")
+    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    checker_init_in_place(checker_ptr)
+    checker_collect_items_mut(checker_ptr, items)
+    print("check_mod_sourcecheck_cache_subclass_verdict=collect_ok\n")
+    let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
+    print("check_mod_sourcecheck_cache_subclass_verdict=check_ok\n")
+    if had_error == 1 {
+        return 1
+    }
+    var cache_checker = checker_new()
+    cache_checker = check_mod_hydrate_ontology_kernel_from_side_table_cache(cache_checker, source_path)
+    print("check_mod_sourcecheck_cache_subclass_verdict=hydrate_ok\n")
+    print("check_mod_sourcecheck_cache_subclass_verdict=query_enter\n")
+    if ontology_kernel_is_subclass(cache_checker.ontology_kernel, child_idx, parent_idx) {
+        print("check_mod_sourcecheck_cache_subclass_verdict=query_ok\n")
+        return ontology_side_table_cache_verdict_ok()
+    }
+    print("check_mod_sourcecheck_cache_subclass_verdict=query_reject\n")
+    ontology_side_table_cache_verdict_reject()
+}
+
+pub fn check_ontology_side_table_cache_sourcecheck_subclass_verdict_v2_probe(items: Option<Box<ItemList>>, source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    print("check_mod_sourcecheck_cache_subclass_verdict_v2=enter\n")
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    print("check_mod_sourcecheck_cache_subclass_verdict_v2=cache_valid\n")
+    let child_idx = check_mod_ontology_cache_slot_index(source_path, child_id)
+    let parent_idx = check_mod_ontology_cache_slot_index(source_path, parent_id)
+    if child_idx < 0 || parent_idx < 0 {
+        return ontology_side_table_cache_verdict_reject()
+    }
+    print("check_mod_sourcecheck_cache_subclass_verdict_v2=idx_ok\n")
+    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    checker_init_in_place(checker_ptr)
+    checker_collect_items_mut(checker_ptr, items)
+    print("check_mod_sourcecheck_cache_subclass_verdict_v2=collect_ok\n")
+    let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
+    print("check_mod_sourcecheck_cache_subclass_verdict_v2=check_ok\n")
+    if had_error == 1 {
+        return 1
+    }
+    ontology_side_table_cache_subclass_verdict(source_path, child_id, parent_id)
+}
+
+pub fn check_ontology_side_table_cache_same_checker_kernel_subclass_verdict_v1_probe(items: Option<Box<ItemList>>, source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    print("check_mod_same_checker_cache_kernel_v1=enter\n")
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    print("check_mod_same_checker_cache_kernel_v1=cache_valid\n")
+    let child_idx = check_mod_ontology_cache_slot_index(source_path, child_id)
+    let parent_idx = check_mod_ontology_cache_slot_index(source_path, parent_id)
+    if child_idx < 0 || parent_idx < 0 {
+        return ontology_side_table_cache_verdict_reject()
+    }
+    print("check_mod_same_checker_cache_kernel_v1=idx_ok\n")
+    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    checker_init_in_place(checker_ptr)
+    checker_collect_items_mut(checker_ptr, items)
+    print("check_mod_same_checker_cache_kernel_v1=collect_ok\n")
+    let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
+    print("check_mod_same_checker_cache_kernel_v1=check_ok\n")
+    if had_error == 1 {
+        return 1
+    }
+    check_mod_hydrate_ontology_kernel_ptr_from_side_table_cache(checker_ptr, source_path)
+    print("check_mod_same_checker_cache_kernel_v1=hydrate_ok\n")
+    if ontology_kernel_is_subclass((*checker_ptr).ontology_kernel, child_idx, parent_idx) {
+        print("check_mod_same_checker_cache_kernel_v1=query_ok\n")
+        return ontology_side_table_cache_verdict_ok()
+    }
+    print("check_mod_same_checker_cache_kernel_v1=query_reject\n")
+    ontology_side_table_cache_verdict_reject()
+}
+
+pub fn check_ontology_side_table_cache_same_checker_kernel_subclass_verdict_v2_probe(items: Option<Box<ItemList>>, source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    print("check_mod_same_checker_cache_kernel_v2=enter\n")
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    print("check_mod_same_checker_cache_kernel_v2=cache_valid\n")
+    let child_idx = check_mod_ontology_cache_slot_index(source_path, child_id)
+    let parent_idx = check_mod_ontology_cache_slot_index(source_path, parent_id)
+    if child_idx < 0 || parent_idx < 0 {
+        return ontology_side_table_cache_verdict_reject()
+    }
+    print("check_mod_same_checker_cache_kernel_v2=idx_ok\n")
+    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    checker_init_in_place(checker_ptr)
+    checker_collect_items_mut(checker_ptr, items)
+    print("check_mod_same_checker_cache_kernel_v2=collect_ok\n")
+    let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
+    print("check_mod_same_checker_cache_kernel_v2=check_ok\n")
+    if had_error == 1 {
+        return 1
+    }
+    var cache_checker = checker_new()
+    cache_checker = check_mod_hydrate_ontology_kernel_from_side_table_cache(cache_checker, source_path)
+    print("check_mod_same_checker_cache_kernel_v2=local_hydrate_ok\n")
+    (*checker_ptr).ontology_kernel = cache_checker.ontology_kernel
+    print("check_mod_same_checker_cache_kernel_v2=copy_ok\n")
+    if ontology_kernel_is_subclass((*checker_ptr).ontology_kernel, child_idx, parent_idx) {
+        print("check_mod_same_checker_cache_kernel_v2=query_ok\n")
+        return ontology_side_table_cache_verdict_ok()
+    }
+    print("check_mod_same_checker_cache_kernel_v2=query_reject\n")
+    ontology_side_table_cache_verdict_reject()
+}
+
+pub fn check_ontology_side_table_cache_same_checker_kernel_subclass_verdict_v3_probe(items: Option<Box<ItemList>>, source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    print("check_mod_same_checker_cache_kernel_v3=enter\n")
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    print("check_mod_same_checker_cache_kernel_v3=cache_valid\n")
+    let child_idx = check_mod_ontology_cache_slot_index(source_path, child_id)
+    let parent_idx = check_mod_ontology_cache_slot_index(source_path, parent_id)
+    if child_idx < 0 || parent_idx < 0 {
+        return ontology_side_table_cache_verdict_reject()
+    }
+    print("check_mod_same_checker_cache_kernel_v3=idx_ok\n")
+    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    checker_init_in_place(checker_ptr)
+    checker_collect_items_mut(checker_ptr, items)
+    print("check_mod_same_checker_cache_kernel_v3=collect_ok\n")
+    let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
+    print("check_mod_same_checker_cache_kernel_v3=check_ok\n")
+    if had_error == 1 {
+        return 1
+    }
+    var cache_checker = checker_new()
+    cache_checker = check_mod_hydrate_ontology_kernel_from_side_table_cache(cache_checker, source_path)
+    print("check_mod_same_checker_cache_kernel_v3=local_hydrate_ok\n")
+    (*checker_ptr).ontology_kernel = cache_checker.ontology_kernel
+    print("check_mod_same_checker_cache_kernel_v3=copy_ok\n")
+    if check_mod_ontology_kernel_ptr_is_subclass(checker_ptr, child_idx, parent_idx) {
+        print("check_mod_same_checker_cache_kernel_v3=query_ok\n")
+        return ontology_side_table_cache_verdict_ok()
+    }
+    print("check_mod_same_checker_cache_kernel_v3=query_reject\n")
+    ontology_side_table_cache_verdict_reject()
+}
+
+pub fn check_ontology_side_table_cache_same_checker_kernel_precheck_subclass_verdict_probe(items: Option<Box<ItemList>>, source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    print("check_mod_same_checker_cache_kernel_precheck=enter\n")
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    print("check_mod_same_checker_cache_kernel_precheck=cache_valid\n")
+    let child_idx = check_mod_ontology_cache_slot_index(source_path, child_id)
+    let parent_idx = check_mod_ontology_cache_slot_index(source_path, parent_id)
+    if child_idx < 0 || parent_idx < 0 {
+        return ontology_side_table_cache_verdict_reject()
+    }
+    print("check_mod_same_checker_cache_kernel_precheck=idx_ok\n")
+    var checker = checker_new()
+    checker = checker.collect_items(items)
+    print("check_mod_same_checker_cache_kernel_precheck=collect_ok\n")
+    checker = check_mod_hydrate_ontology_kernel_from_side_table_cache(checker, source_path)
+    print("check_mod_same_checker_cache_kernel_precheck=hydrate_ok\n")
+    print("check_mod_same_checker_cache_kernel_precheck=class_count=")
+    print_int(checker.ontology_kernel.classes.count)
+    print("\n")
+    if !ontology_kernel_is_subclass(checker.ontology_kernel, child_idx, parent_idx) {
+        print("check_mod_same_checker_cache_kernel_precheck=query_reject\n")
+        return ontology_side_table_cache_verdict_reject()
+    }
+    print("check_mod_same_checker_cache_kernel_precheck=query_ok\n")
+    checker = checker.check_items(items)
+    print("check_mod_same_checker_cache_kernel_precheck=check_ok\n")
+    if checker.had_error {
+        return 1
+    }
+    ontology_side_table_cache_verdict_ok()
+}
+
+pub fn check_ontology_side_table_cache_same_checker_shadow_subclass_verdict_v1_probe(items: Option<Box<ItemList>>, source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    print("check_mod_same_checker_cache_shadow_v1=enter\n")
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    print("check_mod_same_checker_cache_shadow_v1=cache_valid\n")
+    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    checker_init_in_place(checker_ptr)
+    checker_collect_items_mut(checker_ptr, items)
+    print("check_mod_same_checker_cache_shadow_v1=collect_ok\n")
+    let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
+    print("check_mod_same_checker_cache_shadow_v1=check_ok\n")
+    if had_error == 1 {
+        return 1
+    }
+    check_mod_hydrate_cache_shadow_ptr_from_side_table_cache(checker_ptr, source_path)
+    print("check_mod_same_checker_cache_shadow_v1=hydrate_ok\n")
+    print("check_mod_same_checker_cache_shadow_v1=shadow_count=")
+    print_int((*checker_ptr).ontology_cache_shadow_slot_count)
+    print("\n")
+    if (*checker_ptr).ontology_cache_shadow_slot_count <= 0 {
+        print("check_mod_same_checker_cache_shadow_v1=shadow_empty\n")
+        return ontology_side_table_cache_verdict_reject()
+    }
+    print("check_mod_same_checker_cache_shadow_v1=shadow_slot0=")
+    print_int((*checker_ptr).ontology_cache_shadow_slots[0])
+    print("\n")
+    print("check_mod_same_checker_cache_shadow_v1=shadow_slot3=")
+    print_int((*checker_ptr).ontology_cache_shadow_slots[3])
+    print("\n")
+    print("check_mod_same_checker_cache_shadow_v1=shadow_3_0=")
+    if (*checker_ptr).ontology_cache_shadow_subclass_matrix[check_mod_cache_shadow_matrix_index(3, 0) as usize] { print_int(1) } else { print_int(0) }
+    print("\n")
+    if check_mod_cache_shadow_ptr_is_subclass(checker_ptr, child_id, parent_id) {
+        print("check_mod_same_checker_cache_shadow_v1=query_ok\n")
+        return ontology_side_table_cache_verdict_ok()
+    }
+    print("check_mod_same_checker_cache_shadow_v1=query_reject\n")
+    ontology_side_table_cache_verdict_reject()
+}
+
+pub fn check_ontology_side_table_cache_same_checker_sidecar_subclass_verdict_probe(items: Option<Box<ItemList>>, source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    print("check_mod_same_checker_cache_sidecar=enter\n")
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    print("check_mod_same_checker_cache_sidecar=cache_valid\n")
+    let child_idx = check_mod_ontology_cache_slot_index(source_path, child_id)
+    let parent_idx = check_mod_ontology_cache_slot_index(source_path, parent_id)
+    if child_idx < 0 || parent_idx < 0 {
+        return ontology_side_table_cache_verdict_reject()
+    }
+    print("check_mod_same_checker_cache_sidecar=idx_ok\n")
+    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    checker_init_in_place(checker_ptr)
+    checker_collect_items_mut(checker_ptr, items)
+    print("check_mod_same_checker_cache_sidecar=collect_ok\n")
+    let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
+    print("check_mod_same_checker_cache_sidecar=check_ok\n")
+    if had_error == 1 {
+        return 1
+    }
+    check_mod_ontocache_sidecar_hydrate_from_source(source_path)
+    print("check_mod_same_checker_cache_sidecar=sidecar_hydrate_ok\n")
+    print("check_mod_same_checker_cache_sidecar=sidecar_count=")
+    print_int(CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT)
+    print("\n")
+    if check_mod_ontocache_sidecar_is_subclass(child_id, parent_id) {
+        print("check_mod_same_checker_cache_sidecar=query_ok\n")
+        return ontology_side_table_cache_verdict_ok()
+    }
+    print("check_mod_same_checker_cache_sidecar=query_reject\n")
+    ontology_side_table_cache_verdict_reject()
+}
+
+pub fn check_ontology_side_table_cache_same_checker_sidecar_disjoint_verdict_probe(items: Option<Box<ItemList>>, source_path: string, left_id: i64, right_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    print("check_mod_same_checker_cache_sidecar_disjoint=enter\n")
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    print("check_mod_same_checker_cache_sidecar_disjoint=cache_valid\n")
+    let left_idx = check_mod_ontology_cache_slot_index(source_path, left_id)
+    let right_idx = check_mod_ontology_cache_slot_index(source_path, right_id)
+    if left_idx < 0 || right_idx < 0 {
+        return ontology_side_table_cache_verdict_reject()
+    }
+    print("check_mod_same_checker_cache_sidecar_disjoint=idx_ok\n")
+    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    checker_init_in_place(checker_ptr)
+    checker_collect_items_mut(checker_ptr, items)
+    print("check_mod_same_checker_cache_sidecar_disjoint=collect_ok\n")
+    let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
+    print("check_mod_same_checker_cache_sidecar_disjoint=check_ok\n")
+    if had_error == 1 {
+        return 1
+    }
+    check_mod_ontocache_sidecar_hydrate_from_source(source_path)
+    print("check_mod_same_checker_cache_sidecar_disjoint=sidecar_hydrate_ok\n")
+    print("check_mod_same_checker_cache_sidecar_disjoint=sidecar_count=")
+    print_int(CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT)
+    print("\n")
+    if check_mod_ontocache_sidecar_is_disjoint(left_id, right_id) {
+        print("check_mod_same_checker_cache_sidecar_disjoint=query_ok\n")
+        return ontology_side_table_cache_verdict_ok()
+    }
+    print("check_mod_same_checker_cache_sidecar_disjoint=query_reject\n")
+    ontology_side_table_cache_verdict_reject()
+}
+
+fn check_mod_ontocache_knowledge_path_first_name(path: AstPath) -> Name {
+    Name {
+        buf: path.segments.head_buf,
+        len: path.segments.head_len,
+    }
+}
+
+fn check_mod_ontocache_knowledge_empty_name() -> Name {
+    Name { buf: [0; 128], len: 0 }
+}
+
+fn check_mod_ontocache_knowledge_is_digit(ch: i8) -> bool {
+    ch >= (48 as i8) && ch <= (57 as i8)
+}
+
+fn check_mod_ontocache_knowledge_suffix_id(name: Name) -> i64 {
+    if name.len <= 2 {
+        return 0 - 1
+    }
+
+    var end = name.len - 1
+    if end >= 128 {
+        end = 127
+    }
+    if !check_mod_ontocache_knowledge_is_digit(name.buf[end as usize]) {
+        return 0 - 1
+    }
+
+    var start = end
+    while start >= 0 && check_mod_ontocache_knowledge_is_digit(name.buf[start as usize]) {
+        start = start - 1
+    }
+    if start < 0 || name.buf[start as usize] != (95 as i8) {
+        return 0 - 1
+    }
+
+    var value: i64 = 0
+    var i = start + 1
+    while i <= end {
+        value = (value * 10) + ((name.buf[i as usize] as i64) - 48)
+        i = i + 1
+    }
+    value
+}
+
+fn check_mod_ontocache_knowledge_name_to_id(name: Name) -> i64 with Mut, Panic, Div {
+    if ir_name_eq(name, make_name("cache_slot0")) { return CHECK_MOD_ONTOCACHE_SIDECAR_SLOTS[0] }
+    if ir_name_eq(name, make_name("cache_slot1")) { return CHECK_MOD_ONTOCACHE_SIDECAR_SLOTS[1] }
+    if ir_name_eq(name, make_name("cache_slot2")) { return CHECK_MOD_ONTOCACHE_SIDECAR_SLOTS[2] }
+    if ir_name_eq(name, make_name("cache_slot3")) { return CHECK_MOD_ONTOCACHE_SIDECAR_SLOTS[3] }
+    if ir_name_eq(name, make_name("cache_slot4")) { return CHECK_MOD_ONTOCACHE_SIDECAR_SLOTS[4] }
+    if ir_name_eq(name, make_name("cache_slot5")) { return CHECK_MOD_ONTOCACHE_SIDECAR_SLOTS[5] }
+    check_mod_ontocache_knowledge_suffix_id(name)
+}
+
+fn check_mod_ontocache_knowledge_field_type_in_fields(fields: Option<Box<FieldDefList> >, field_name: Name) -> Name with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            let field = (*list).head
+            if ir_name_eq(field.name, field_name) {
+                if field.ty.kind == TypeExprKind::TypeNamed {
+                    return check_mod_ontocache_knowledge_path_first_name(field.ty.path)
+                }
+                return check_mod_ontocache_knowledge_empty_name()
+            }
+            check_mod_ontocache_knowledge_field_type_in_fields((*list).tail, field_name)
+        }
+        None => check_mod_ontocache_knowledge_empty_name()
+    }
+}
+
+fn check_mod_ontocache_knowledge_find_struct_field_type(items: Option<Box<ItemList> >, struct_name: Name, field_name: Name) -> Name with Mut, Panic, Div, Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemStruct && ir_name_eq(item.name, struct_name) {
+                match item.struct_def {
+                    Some(sd) => check_mod_ontocache_knowledge_field_type_in_fields((*sd).fields, field_name)
+                    None => check_mod_ontocache_knowledge_empty_name()
+                }
+            } else {
+                check_mod_ontocache_knowledge_find_struct_field_type((*list).tail, struct_name, field_name)
+            }
+        }
+        None => check_mod_ontocache_knowledge_empty_name()
+    }
+}
+
+fn check_mod_ontocache_knowledge_validate_constraints(items: Option<Box<ItemList> >, inner_name: Name, constraints: Option<Box<KnowledgeConstraintList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            if constraint.kind == KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                let field_type_name = check_mod_ontocache_knowledge_find_struct_field_type(items, inner_name, constraint.field)
+                let field_id = check_mod_ontocache_knowledge_name_to_id(field_type_name)
+                let target_id = check_mod_ontocache_knowledge_name_to_id(constraint.target_name)
+                if field_id < 0 || target_id < 0 {
+                    return 1
+                }
+                if check_mod_ontocache_sidecar_is_subclass(field_id, target_id) {
+                    return check_mod_ontocache_knowledge_validate_constraints(items, inner_name, (*list).tail)
+                }
+                if check_mod_ontocache_sidecar_is_disjoint(field_id, target_id) {
+                    return 1
+                }
+                return 1
+            }
+            check_mod_ontocache_knowledge_validate_constraints(items, inner_name, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn check_mod_ontocache_knowledge_validate_type(items: Option<Box<ItemList> >, ty: TypeExpr) -> i64 with Mut, Panic, Div, Alloc {
+    if ty.kind != TypeExprKind::TypeKnowledge {
+        return 0
+    }
+    match ty.knowledge_info {
+        Some(info) => {
+            let inner_ty = *(*info).inner_type
+            if inner_ty.kind != TypeExprKind::TypeNamed {
+                return 1
+            }
+            let inner_name = check_mod_ontocache_knowledge_path_first_name(inner_ty.path)
+            check_mod_ontocache_knowledge_validate_constraints(items, inner_name, (*info).proof_constraints)
+        }
+        None => 0
+    }
+}
+
+fn check_mod_ontocache_knowledge_validate_params(items: Option<Box<ItemList> >, params: Option<Box<ParamList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match params {
+        Some(list) => {
+            if check_mod_ontocache_knowledge_validate_type(items, (*list).head.ty) != 0 {
+                return 1
+            }
+            check_mod_ontocache_knowledge_validate_params(items, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+fn check_mod_ontocache_knowledge_validate_fn(items: Option<Box<ItemList> >, opt: Option<Box<FnDef> >) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => {
+            if check_mod_ontocache_knowledge_validate_params(items, (*fd).params) != 0 {
+                return 1
+            }
+            match (*fd).return_type {
+                Some(ret_ty) => check_mod_ontocache_knowledge_validate_type(items, *ret_ty)
+                None => 0
+            }
+        }
+        None => 0
+    }
+}
+
+fn check_mod_ontocache_knowledge_validate_from(root: Option<Box<ItemList> >, cursor: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match cursor {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn {
+                if check_mod_ontocache_knowledge_validate_fn(root, item.fn_def) != 0 {
+                    return 1
+                }
+            }
+            check_mod_ontocache_knowledge_validate_from(root, (*list).tail)
+        }
+        None => 0
+    }
+}
+
+pub fn check_knowledge_context_ontocache_sidecar_verdict_probe(items: Option<Box<ItemList>>, source_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    print("check_mod_knowledge_context_ontocache_sidecar=enter\n")
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    print("check_mod_knowledge_context_ontocache_sidecar=cache_valid\n")
+    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    checker_init_in_place(checker_ptr)
+    checker_collect_items_mut(checker_ptr, items)
+    print("check_mod_knowledge_context_ontocache_sidecar=collect_ok\n")
+    let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
+    print("check_mod_knowledge_context_ontocache_sidecar=check_ok\n")
+    if had_error == 1 {
+        return 1
+    }
+    check_mod_ontocache_sidecar_hydrate_from_source(source_path)
+    print("check_mod_knowledge_context_ontocache_sidecar=sidecar_hydrate_ok\n")
+    print("check_mod_knowledge_context_ontocache_sidecar=sidecar_count=")
+    print_int(CHECK_MOD_ONTOCACHE_SIDECAR_SLOT_COUNT)
+    print("\n")
+    if check_mod_ontocache_knowledge_validate_from(items, items) == 0 {
+        print("check_mod_knowledge_context_ontocache_sidecar=query_ok\n")
+        return ontology_side_table_cache_verdict_ok()
+    }
+    print("check_mod_knowledge_context_ontocache_sidecar=query_reject\n")
+    ontology_side_table_cache_verdict_reject()
+}
+
+pub fn check_items_verdict_boot4_with_ontocache_sidecar(items: Option<Box<ItemList>>, source_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    checker_init_in_place(checker_ptr)
+    checker_collect_items_mut(checker_ptr, items)
+    let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
+    if had_error == 1 {
+        return 1
+    }
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return 0
+    }
+    check_mod_ontocache_sidecar_hydrate_from_source(source_path)
+    if check_mod_ontocache_knowledge_validate_from(items, items) != 0 {
+        return 1
+    }
+    0
+}
+
+pub fn check_ontology_side_table_cache_sourcecheck_disjoint_verdict_probe(items: Option<Box<ItemList>>, source_path: string, left_id: i64, right_id: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    if !ontology_side_table_cache_source_plan_valid(source_path) {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    let left_idx = check_mod_ontology_cache_slot_index(source_path, left_id)
+    let right_idx = check_mod_ontology_cache_slot_index(source_path, right_id)
+    if left_idx < 0 || right_idx < 0 {
+        return ontology_side_table_cache_verdict_reject()
+    }
+    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    checker_init_in_place(checker_ptr)
+    checker_collect_items_mut(checker_ptr, items)
+    let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
+    if had_error == 1 {
+        return 1
+    }
+    var cache_checker = checker_new()
+    cache_checker = check_mod_hydrate_ontology_kernel_from_side_table_cache(cache_checker, source_path)
+    if ontology_kernel_is_disjoint(cache_checker.ontology_kernel, left_idx, right_idx) {
+        return ontology_side_table_cache_verdict_ok()
+    }
+    ontology_side_table_cache_verdict_reject()
 }
 
 pub fn check_items_witness_from_seed(items: Option<Box<ItemList>>, seed: i64) -> i64 with Mut, Panic, Div, Alloc, IO {

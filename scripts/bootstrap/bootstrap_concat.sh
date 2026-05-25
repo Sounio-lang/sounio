@@ -15,7 +15,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-PINNED_BIN="${PINNED_BIN:-artifacts/omega/souc-bin/souc-linux-x86_64}"
+PINNED_BIN="${PINNED_BIN:-bin/souc-linux-x86_64}"
 if [ ! -x "$PINNED_BIN" ]; then
   JIT_FALLBACK="bin/souc"
   if [ -x "$JIT_FALLBACK" ]; then
@@ -83,6 +83,7 @@ FILES=(
   self-hosted/check/effects.sio
   self-hosted/check/refinement.sio
   self-hosted/check/compat.sio
+  self-hosted/check/ontology_side_table_cache.sio
   self-hosted/check/check.sio
   self-hosted/check/mod.sio
   self-hosted/check/patterns.sio
@@ -415,6 +416,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/check/effects.sio
     self-hosted/check/refinement.sio
     self-hosted/check/compat.sio
+    self-hosted/check/ontology_side_table_cache.sio
     self-hosted/check/check.sio
     self-hosted/check/mod.sio
     self-hosted/check/patterns.sio
