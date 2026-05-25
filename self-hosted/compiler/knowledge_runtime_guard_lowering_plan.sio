@@ -1,0 +1,208 @@
+// self-hosted::compiler::knowledge_runtime_guard_lowering_plan
+//
+// Compiler-side planning surface for dynamic Knowledge<T> runtime guards. This
+// joins the raw-source directive intent with checker-visible runtime obligation
+// counting. It is the last explicit staging rung before real backend lowering:
+// native_lowering_ready remains false until obligations are emitted as backend
+// guards/traps rather than pre-native source expansion.
+
+use lexer::mod::{lex_file_parse_items}
+use parser::ast::{Name, empty_name}
+use parser::parser::{parser_last_error_count}
+use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_count_runtime_obligations_items, knowledge_context_first_runtime_obligation_items, knowledge_context_nth_runtime_obligation_items}
+use knowledge_runtime_guard_directive::{knowledge_runtime_guard_directive_build_intent}
+
+pub struct KnowledgeRuntimeGuardLoweringPlan {
+    directive_found: bool,
+    directive_count: i64,
+    directive_malformed: bool,
+    parse_errors: i64,
+    semantic_verdict: i64,
+    runtime_obligation_count: i64,
+    needs_runtime_guards: bool,
+    pre_native_guard_expansion_requested: bool,
+    pre_native_guard_plan_ready: bool,
+    native_lowering_ready: bool,
+    backend_guard_count: i64,
+    first_obligation_found: bool,
+    first_obligation_site_kind: i64,
+    first_obligation_type_name: Name,
+    first_obligation_field_name: Name,
+    first_obligation_constraint_kind: i64,
+    first_obligation_value_kind: i64,
+    first_obligation_int_value: i64,
+    first_obligation_float_value: f64,
+    first_obligation_unit_name: Name,
+    first_obligation_dynamic_expr_kind: i64,
+    first_backend_guard_row_ready: bool,
+    first_backend_guard_compare_opcode: i64,
+    first_backend_guard_threshold_kind: i64,
+    first_backend_guard_trap_exit_code: i64,
+    second_obligation_found: bool,
+    second_obligation_site_kind: i64,
+    second_obligation_type_name: Name,
+    second_obligation_field_name: Name,
+    second_obligation_constraint_kind: i64,
+    second_obligation_value_kind: i64,
+    second_obligation_int_value: i64,
+    second_obligation_float_value: f64,
+    second_obligation_unit_name: Name,
+    second_obligation_dynamic_expr_kind: i64,
+    second_backend_guard_row_ready: bool,
+    second_backend_guard_compare_opcode: i64,
+    second_backend_guard_threshold_kind: i64,
+    second_backend_guard_trap_exit_code: i64,
+    staged_backend_guard_row_count: i64,
+}
+
+pub fn knowledge_runtime_guard_backend_compare_none() -> i64 { 0 }
+pub fn knowledge_runtime_guard_backend_compare_eq() -> i64 { 1 }
+pub fn knowledge_runtime_guard_backend_compare_ge() -> i64 { 2 }
+pub fn knowledge_runtime_guard_backend_compare_gt() -> i64 { 3 }
+pub fn knowledge_runtime_guard_backend_compare_le() -> i64 { 4 }
+pub fn knowledge_runtime_guard_backend_compare_lt() -> i64 { 5 }
+
+pub fn knowledge_runtime_guard_backend_threshold_none() -> i64 { 0 }
+pub fn knowledge_runtime_guard_backend_threshold_int() -> i64 { 1 }
+pub fn knowledge_runtime_guard_backend_threshold_float() -> i64 { 2 }
+
+fn knowledge_runtime_guard_compare_opcode_from_constraint_kind(kind: i64) -> i64 {
+    if kind == 1 { return knowledge_runtime_guard_backend_compare_eq() }
+    if kind == 2 { return knowledge_runtime_guard_backend_compare_ge() }
+    if kind == 3 { return knowledge_runtime_guard_backend_compare_gt() }
+    if kind == 4 { return knowledge_runtime_guard_backend_compare_le() }
+    if kind == 5 { return knowledge_runtime_guard_backend_compare_lt() }
+    knowledge_runtime_guard_backend_compare_none()
+}
+
+fn knowledge_runtime_guard_threshold_kind_from_value_kind(kind: i64) -> i64 {
+    if kind == 2 { return knowledge_runtime_guard_backend_threshold_int() }
+    if kind == 3 { return knowledge_runtime_guard_backend_threshold_float() }
+    knowledge_runtime_guard_backend_threshold_none()
+}
+
+pub fn knowledge_runtime_guard_lowering_plan_empty() -> KnowledgeRuntimeGuardLoweringPlan {
+    KnowledgeRuntimeGuardLoweringPlan {
+        directive_found: false,
+        directive_count: 0,
+        directive_malformed: false,
+        parse_errors: 0,
+        semantic_verdict: 0,
+        runtime_obligation_count: 0,
+        needs_runtime_guards: false,
+        pre_native_guard_expansion_requested: false,
+        pre_native_guard_plan_ready: false,
+        native_lowering_ready: false,
+        backend_guard_count: 0,
+        first_obligation_found: false,
+        first_obligation_site_kind: 0,
+        first_obligation_type_name: empty_name(),
+        first_obligation_field_name: empty_name(),
+        first_obligation_constraint_kind: 0,
+        first_obligation_value_kind: 0,
+        first_obligation_int_value: 0,
+        first_obligation_float_value: 0.0,
+        first_obligation_unit_name: empty_name(),
+        first_obligation_dynamic_expr_kind: 0,
+        first_backend_guard_row_ready: false,
+        first_backend_guard_compare_opcode: 0,
+        first_backend_guard_threshold_kind: 0,
+        first_backend_guard_trap_exit_code: 0,
+        second_obligation_found: false,
+        second_obligation_site_kind: 0,
+        second_obligation_type_name: empty_name(),
+        second_obligation_field_name: empty_name(),
+        second_obligation_constraint_kind: 0,
+        second_obligation_value_kind: 0,
+        second_obligation_int_value: 0,
+        second_obligation_float_value: 0.0,
+        second_obligation_unit_name: empty_name(),
+        second_obligation_dynamic_expr_kind: 0,
+        second_backend_guard_row_ready: false,
+        second_backend_guard_compare_opcode: 0,
+        second_backend_guard_threshold_kind: 0,
+        second_backend_guard_trap_exit_code: 0,
+        staged_backend_guard_row_count: 0,
+    }
+}
+
+pub fn knowledge_runtime_guard_lowering_plan_build(source_path: string) -> KnowledgeRuntimeGuardLoweringPlan with IO, Mut, Panic, Div, Alloc {
+    let intent = knowledge_runtime_guard_directive_build_intent(source_path)
+    var plan = knowledge_runtime_guard_lowering_plan_empty()
+    plan.directive_found = intent.found
+    plan.directive_count = intent.count
+    plan.directive_malformed = intent.malformed
+    plan.pre_native_guard_expansion_requested = intent.enable_pre_native_guard_expansion
+    plan.native_lowering_ready = intent.native_lowering_ready
+
+    if intent.malformed {
+        return plan
+    }
+
+    let items = lex_file_parse_items(source_path)
+    plan.parse_errors = parser_last_error_count()
+    if plan.parse_errors > 0 {
+        return plan
+    }
+
+    plan.semantic_verdict = knowledge_context_validate_items(items)
+    if plan.semantic_verdict != 0 {
+        return plan
+    }
+
+    plan.runtime_obligation_count = knowledge_context_count_runtime_obligations_items(items)
+    let first_obligation = knowledge_context_first_runtime_obligation_items(items)
+    plan.first_obligation_found = first_obligation.found
+    plan.first_obligation_site_kind = first_obligation.site_kind
+    plan.first_obligation_type_name = first_obligation.type_name
+    plan.first_obligation_field_name = first_obligation.field_name
+    plan.first_obligation_constraint_kind = first_obligation.constraint_kind
+    plan.first_obligation_value_kind = first_obligation.value_kind
+    plan.first_obligation_int_value = first_obligation.int_value
+    plan.first_obligation_float_value = first_obligation.float_value
+    plan.first_obligation_unit_name = first_obligation.unit_name
+    plan.first_obligation_dynamic_expr_kind = first_obligation.dynamic_expr_kind
+    if first_obligation.found {
+        plan.first_backend_guard_compare_opcode = knowledge_runtime_guard_compare_opcode_from_constraint_kind(first_obligation.constraint_kind)
+        plan.first_backend_guard_threshold_kind = knowledge_runtime_guard_threshold_kind_from_value_kind(first_obligation.value_kind)
+        plan.first_backend_guard_trap_exit_code = 1
+        plan.first_backend_guard_row_ready =
+            plan.first_backend_guard_compare_opcode != knowledge_runtime_guard_backend_compare_none() &&
+            plan.first_backend_guard_threshold_kind != knowledge_runtime_guard_backend_threshold_none()
+        if plan.first_backend_guard_row_ready {
+            plan.staged_backend_guard_row_count = plan.runtime_obligation_count
+        }
+    }
+    let second_obligation = knowledge_context_nth_runtime_obligation_items(items, 1)
+    plan.second_obligation_found = second_obligation.found
+    plan.second_obligation_site_kind = second_obligation.site_kind
+    plan.second_obligation_type_name = second_obligation.type_name
+    plan.second_obligation_field_name = second_obligation.field_name
+    plan.second_obligation_constraint_kind = second_obligation.constraint_kind
+    plan.second_obligation_value_kind = second_obligation.value_kind
+    plan.second_obligation_int_value = second_obligation.int_value
+    plan.second_obligation_float_value = second_obligation.float_value
+    plan.second_obligation_unit_name = second_obligation.unit_name
+    plan.second_obligation_dynamic_expr_kind = second_obligation.dynamic_expr_kind
+    if second_obligation.found {
+        plan.second_backend_guard_compare_opcode = knowledge_runtime_guard_compare_opcode_from_constraint_kind(second_obligation.constraint_kind)
+        plan.second_backend_guard_threshold_kind = knowledge_runtime_guard_threshold_kind_from_value_kind(second_obligation.value_kind)
+        plan.second_backend_guard_trap_exit_code = 1
+        plan.second_backend_guard_row_ready =
+            plan.second_backend_guard_compare_opcode != knowledge_runtime_guard_backend_compare_none() &&
+            plan.second_backend_guard_threshold_kind != knowledge_runtime_guard_backend_threshold_none()
+    }
+    plan.needs_runtime_guards = plan.runtime_obligation_count > 0
+    plan.pre_native_guard_plan_ready =
+        plan.pre_native_guard_expansion_requested &&
+        plan.needs_runtime_guards &&
+        !plan.native_lowering_ready
+
+    if plan.native_lowering_ready {
+        plan.backend_guard_count = plan.runtime_obligation_count
+    } else {
+        plan.backend_guard_count = 0
+    }
+
+    plan
+}

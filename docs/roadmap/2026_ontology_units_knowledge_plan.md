@@ -345,8 +345,47 @@ Subgoals:
   generated guard helpers.
 - [x] Add an optional deterministic runtime-guard diagnostic manifest artifact
   for pre-native guard expansion, keyed by the same input/expander hashes as
-  the `.guardcache` path and listing the guarded `Type.field op threshold`
-  constraints for audit.
+  the `.guardcache` path and listing guarded constraints as structured
+  `type`, `field`, `op`, `threshold`, `unit`, and `constraint` TSV columns for
+  audit.
+- [x] Prove pre-native generated `Knowledge<T>` guard assertions lower through
+  the existing native backend `assert`/trap path for satisfying and violating
+  witnesses, with the violating native binary exiting 1. This is native
+  execution coverage for generated guards, not direct native lowering of
+  checker-visible proof obligations.
+- [x] Bridge checker-visible runtime obligations to pre-native generated
+  guards for the first lower-bound positive/reject pair by proving the original
+  sources report nonzero obligations and the expanded sources report zero
+  obligations after guard insertion and proof-context lowering.
+- [x] Extend that runtime-obligation-to-guard bridge to call-boundary and
+  assignment sites, with positive/reject witnesses that drain checker-visible
+  obligations to zero after expansion and lower through the native `assert`/trap
+  path.
+- [x] Extend obligation-drain and native `assert`/trap coverage across the
+  supported pre-native runtime guard families: conjunctive lower bounds,
+  upper bounds, equality, unit-suffixed thresholds, and internal validation-data
+  unit labels.
+- [x] Add an opt-in `bin/souc` launcher bridge,
+  `SOUNIO_KNOWLEDGE_RUNTIME_GUARDS=1`, for compile/build/run so the pre-native
+  generated guard path can be invoked without manually calling the expander.
+- [x] Add a source-level `//@ knowledge-runtime-guards` directive that enables
+  the same launcher bridge for compile/build/run without requiring an
+  environment variable.
+- [x] Add a compiler-side raw-source scanner for
+  `//@ knowledge-runtime-guards` that classifies pre-native expansion intent
+  before ordinary lexing drops comments, and keeps direct native proof-obligation
+  lowering explicitly marked as not ready.
+- [x] Add a compiler-side `Knowledge<T>` runtime guard lowering-plan surface
+  that joins directive intent, parser/checker semantic acceptance, and
+  checker-visible runtime obligation counts while preserving the first
+  obligation payload (`site`, `type`, `field`, `op`, `value`, `unit`) and
+  mapping it to a staged backend-guard row (`compare_opcode`,
+  `threshold_kind`, `trap_exit_code`) while leaving emitted backend guards
+  explicitly at zero until direct native lowering exists.
+- [x] Extend that lowering-plan staging from a single representative row to a
+  real staged backend-guard row count for all checker-visible obligations in a
+  conjunctive dynamic proof context, while still keeping emitted backend guards
+  at zero until direct native lowering exists.
 - [ ] Lower checker-visible runtime proof obligations into native backend
   guards/traps.
 - [ ] Add `//@ ontology-bundle: "..."` as a compile-time bundle directive.

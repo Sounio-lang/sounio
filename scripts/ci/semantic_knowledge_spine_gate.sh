@@ -23,8 +23,17 @@ spine:
   6. ontology-linked unit metadata as validation data;
   7. static Knowledge<T> proof-context gates;
   8. dynamic Knowledge<T> runtime-obligation classification;
-  9. pre-native dynamic Knowledge<T> runtime guard expansion;
- 10. optional K2 check::check bridge classifier when --with-k2-classifier is set.
+  9. pre-native dynamic Knowledge<T> runtime guard expansion, including
+     checker-obligation drain coverage across return/call/assignment sites and
+     supported guard families, plus native compile/run coverage for generated
+     guard assertions, opt-in bin/souc launcher integration, and the
+     source-level knowledge-runtime-guards directive;
+ 10. compiler-side raw-source scanning for the knowledge-runtime-guards
+     directive as an intent classifier for pre-native expansion;
+ 11. compiler-side Knowledge<T> runtime guard lowering-plan classification
+     joining directive intent, semantic verdicts, runtime obligations, and
+     first-obligation payload extraction plus staged backend-guard row counts;
+ 12. optional K2 check::check bridge classifier when --with-k2-classifier is set.
 
 This is an umbrella gate, not a claim that runtime guard/trap insertion,
 ordinary source-file checker-kernel cache hydration, same-Checker
@@ -71,6 +80,8 @@ bash scripts/ci/ontology_unit_metadata_gate.sh
 bash scripts/ci/knowledge_context_static_gate.sh
 bash scripts/ci/knowledge_context_runtime_obligation_gate.sh
 bash scripts/ci/knowledge_runtime_guard_expansion_gate.sh
+bash scripts/ci/knowledge_runtime_guard_directive_native_scan_gate.sh
+bash scripts/ci/knowledge_runtime_guard_lowering_plan_gate.sh
 if [[ "$WITH_K2_CLASSIFIER" -eq 1 ]]; then
   bash scripts/ci/k2_check_import_bridge_classifier.sh
 fi
@@ -118,10 +129,25 @@ shadow_count=0/empty shadow state, alongside
 static Knowledge<T> proof contexts, checker-visible runtime obligations for
 dynamic Knowledge<T> proof-context values and a pre-native executable runtime
 guard expansion for numeric lower-bound, upper-bound, and equality comparison
-slices. The
+slices, including checker-obligation drain coverage across return,
+call-boundary, assignment, conjunctive, upper-bound, equality, unit-suffixed,
+and internal-label guard families plus native compile/run coverage for those
+generated assertion paths after pre-native expansion, including the opt-in
+SOUNIO_KNOWLEDGE_RUNTIME_GUARDS=1 launcher bridge and the source-level
+//@ knowledge-runtime-guards directive for compile/run, plus a compiler-side
+raw-source scanner that sees that directive before comments are dropped and
+classifies it as pre-native expansion intent while explicitly reporting
+native_lowering_ready=0, plus a compiler-side runtime guard lowering-plan
+surface that joins that intent with ordinary parser/checker semantic acceptance
+and checker-visible runtime obligation counts, preserving first-obligation
+payload for return/call/assignment sites and unit-suffixed constraints, and
+mapping dynamic descriptors to staged backend-guard rows with comparison
+opcode, threshold kind, and trap exit code, including one staged row per
+checker-visible obligation in conjunctive dynamic proof contexts, while keeping emitted
+backend_guard_count=0 until direct native lowering exists. The
 standalone K2 check::check import bridge classifier is intentionally optional
-because it tracks a separate modular-checker bridge gap. Native backend runtime
-guard/trap lowering for those obligations, same-Checker ontology-kernel or
+because it tracks a separate modular-checker bridge gap. Direct native backend
+proof-obligation guard/trap lowering, same-Checker ontology-kernel or
 shadow-field cache hydration, and ordinary source-file checker-kernel cache
 hydration remain future work.
 MSG

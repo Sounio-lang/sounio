@@ -170,9 +170,45 @@ Current live blockers:
   equality, named-unit, and internal-label constraints as source comments near
   the generated assertions, without adding `IO` effects to guard helpers. The
   expander can also emit a deterministic guard diagnostic manifest keyed by
-  the same input/expander hashes and listing the guarded
-  `Type.field op threshold` constraints for audit; native backend lowering and
-  runtime diagnostic emission remain future work.
+  the same input/expander hashes, with structured `type`, `field`, `op`,
+  `threshold`, `unit`, and `constraint` TSV columns for audit. The first
+  generated lower-bound guard pair is also compiled through the default native
+  backend: the satisfying witness exits 0 and the violating witness exits 1
+  through the native `assert`/trap path. Lower-bound return, call-boundary,
+  and assignment positive/reject pairs now also run through the checker
+  runtime-obligation probe before and after expansion: original sources report
+  nonzero runtime obligations, and expanded sources report zero obligations
+  after guard insertion and proof-context lowering. The call-boundary and
+  assignment pairs also compile through the default native backend after
+  pre-native expansion, with their violating native binaries exiting 1 through
+  the same native `assert`/trap path. The obligation-drain and native
+  compile/run shape now also covers conjunctive lower bounds, upper bounds,
+  equality, unit-suffixed thresholds, and internal validation-data unit labels.
+  The checked `bin/souc` launcher now also has an opt-in bridge,
+  `SOUNIO_KNOWLEDGE_RUNTIME_GUARDS=1`, that applies the pre-native expansion
+  for compile/build/run before invoking the usual selected compiler path; the
+  default launcher behavior is unchanged. Source files can also opt into the
+  same launcher bridge with `//@ knowledge-runtime-guards`, which keeps the
+  runtime guard intent next to the `Knowledge<T>` code while still using the
+  pre-native expansion path. The self-hosted compiler side now also has a
+  raw-source scanner/probe for the same directive, proving the compiler can see
+  the intent before ordinary lexing drops comments. That scanner currently
+  classifies pre-native expansion intent only and reports
+  `native_lowering_ready=0`. A compiler-side lowering-plan probe now joins that
+  directive intent with ordinary parser/checker semantic acceptance and the
+  checker-visible runtime obligation count plus first-obligation payload
+  extraction. Directive-bearing dynamic sources become ready for the existing
+  pre-native guard expansion plan; ordinary dynamic sources still expose
+  obligations without opt-in expansion intent; return/call/assignment sites
+  preserve their first obligation payload; unit-suffixed constraints preserve
+  their unit label; and dynamic descriptors map to staged backend-guard rows
+  carrying comparison opcode, threshold kind, and trap exit code. Conjunctive
+  dynamic proof contexts now stage one backend guard row per checker-visible
+  obligation instead of only the first representative row. Statically
+  discharged sources produce no guard plan. The plan still reports emitted
+  `backend_guard_count=0` until real native lowering exists.
+  Direct native lowering of checker-visible proof obligations and runtime
+  diagnostic emission remain future work.
 
 The repo already has generated ontology artifacts and witnesses under:
 
@@ -487,7 +523,37 @@ Evidence class:
   constraint for lower-bound, conjunctive, upper-bound, equality, named-unit,
   and internal-label slices without making the helper `IO`-effectful.
 - optional guard diagnostic manifests record the same guarded constraints in a
-  deterministic TSV-like audit artifact with input and expander hashes.
+  deterministic TSV audit artifact with input/expander hashes and structured
+  `type`, `field`, `op`, `threshold`, `unit`, and `constraint` columns.
+- native compile/run witnesses prove pre-native generated guard assertions
+  lower through the existing backend `assert`/trap path, with the violating
+  native binary exiting 1.
+- checker-obligation drain witnesses prove the same positive/reject sources
+  emit nonzero runtime obligations before expansion and zero obligations after
+  generated guard insertion plus proof-context lowering.
+- call-boundary and assignment positive/reject witnesses prove the same
+  obligation-drain and generated-guard native trap shape beyond return sites.
+- conjunctive lower-bound, upper-bound, equality, unit-suffixed, and
+  internal-label positive/reject witnesses prove obligation-drain and
+  generated-guard native trap coverage across the supported guard families.
+- an opt-in launcher witness proves `SOUNIO_KNOWLEDGE_RUNTIME_GUARDS=1
+  bin/souc run|compile <source>` invokes the generated guard path without a
+  manual expander call, accepting the positive call-boundary witness and
+  trapping the rejecting witness with exit code 1.
+- source-directive witnesses prove `//@ knowledge-runtime-guards` enables the
+  same launcher path for `bin/souc run|compile <source>` without an environment
+  variable.
+- compiler-side raw-source scanner witnesses prove the self-hosted compiler can
+  detect `//@ knowledge-runtime-guards` before comments are dropped, leave
+  ordinary sources inactive, classify payload-bearing malformed directives, and
+  explicitly report `native_lowering_ready=0`.
+- compiler-side lowering-plan witnesses prove directive intent, parser/checker
+  semantic acceptance, and runtime obligation counts are joined in Sounio before
+  backend lowering: directive-bearing dynamic sources are ready for pre-native
+  expansion, ordinary dynamic sources expose obligations without opt-in intent,
+  return/call/assignment sites preserve first-obligation payload, unit-suffixed
+  constraints preserve their unit label, dynamic descriptors map to staged
+  backend-guard rows, and statically discharged sources produce no guard plan.
 
 Status:
 
@@ -506,20 +572,74 @@ Status:
   the expanded source for representative runtime guard families;
 - extended on 2026-05-25 with optional guard diagnostic manifest emission and
   gate coverage for conjunctive, named-unit, and internal-label entries;
-- this is intentionally pre-native and does not claim native backend
-  guard/trap lowering or runtime diagnostic emission yet.
+- extended on 2026-05-25 with native compile/run coverage for the generated
+  lower-bound guard assertion path; this proves native trap execution after
+  pre-native expansion, not direct native lowering of proof obligations;
+- extended on 2026-05-25 with checker-obligation drain coverage for the
+  generated lower-bound guard pair; this proves the pre-native expansion
+  consumes the checker-visible obligations it handles;
+- extended on 2026-05-25 with call-boundary and assignment positive/reject
+  lower-bound guard witnesses, including obligation-drain and native
+  compile/run trap coverage;
+- extended on 2026-05-25 with obligation-drain and native compile/run trap
+  coverage across conjunctive lower-bound, upper-bound, equality,
+  unit-suffixed, and internal-label guard families;
+- extended on 2026-05-25 with an opt-in `bin/souc` launcher bridge for
+  pre-native Knowledge runtime guard expansion in compile/build/run modes;
+- extended on 2026-05-25 with a source-level `//@ knowledge-runtime-guards`
+  launcher directive for the same pre-native bridge;
+- extended on 2026-05-25 with a compiler-side raw-source scanner for
+  `//@ knowledge-runtime-guards` as a pre-native intent classifier;
+- extended on 2026-05-25 with a compiler-side lowering-plan surface joining
+  directive intent, semantic verdicts, runtime obligation counts, and
+  first-obligation payload extraction plus staged backend-guard rows while
+  keeping emitted `backend_guard_count=0`;
+- extended on 2026-05-25 so conjunctive dynamic proof contexts stage one
+  backend-guard row per checker-visible runtime obligation instead of only a
+  single representative row;
+- this is intentionally pre-native and does not claim direct native backend
+  proof-obligation lowering or runtime diagnostic emission yet.
 - command output now includes:
+  - `PASS compiler-side Knowledge runtime guard lowering plan is ready for directive pre-native expansion`;
+  - `PASS compiler-side Knowledge runtime guard lowering plan sees ordinary dynamic obligations without opt-in intent`;
+  - `PASS compiler-side Knowledge runtime guard lowering plan maps return-site obligation payload to staged backend guard row`;
+  - `PASS compiler-side Knowledge runtime guard lowering plan maps assignment-site obligation payload to staged backend guard row`;
+  - `PASS compiler-side Knowledge runtime guard lowering plan maps unit-suffixed obligation payload to staged backend guard row`;
+  - `PASS compiler-side Knowledge runtime guard lowering plan stages all checker-visible conjunctive backend guard rows`;
+  - `PASS compiler-side Knowledge runtime guard lowering plan leaves statically discharged source empty`;
+  - `PASS compiler-side knowledge-runtime-guards directive scanner detected valid raw-source intent`;
+  - `PASS compiler-side knowledge-runtime-guards directive scanner leaves ordinary sources inactive`;
+  - `PASS compiler-side knowledge-runtime-guards directive scanner classified malformed payload-bearing directive`;
   - `PASS Knowledge runtime guard expansion wrote auditable guard diagnostic manifests`;
+  - `PASS Knowledge runtime guard expansion consumes checker-visible runtime obligations across dynamic sites and supported guard families`;
   - `PASS tests/frontend/knowledge_runtime_guard_positive.sio expanded with a generated Knowledge<T> runtime guard helper and diagnostic`;
+  - `PASS tests/frontend/knowledge_runtime_guard_positive.sio lowered the generated Knowledge<T> runtime guard through native assert/trap path`;
+  - `PASS tests/frontend/knowledge_runtime_guard_reject.sio trapped through native assert path with exit code 1`;
+  - `PASS call-boundary and assignment witnesses expanded with generated Knowledge<T> runtime guards`;
+  - `PASS tests/frontend/knowledge_runtime_guard_call_positive.sio accepted call-boundary dynamic value satisfying generated runtime guard`;
+  - `PASS tests/frontend/knowledge_runtime_guard_call_reject.sio failed the generated call-boundary Knowledge<T> runtime guard`;
+  - `PASS tests/frontend/knowledge_runtime_guard_assign_positive.sio accepted assignment dynamic value satisfying generated runtime guard`;
+  - `PASS tests/frontend/knowledge_runtime_guard_assign_reject.sio failed the generated assignment Knowledge<T> runtime guard`;
+  - `PASS call-boundary reject generated guard witness trapped through native assert path with exit code 1`;
+  - `PASS assignment reject generated guard witness trapped through native assert path with exit code 1`;
+  - `PASS call-boundary launcher opt-in run trapped reject generated guard witness with exit code 1`;
+  - `PASS call-boundary launcher opt-in compile produced reject native guard witness trapping with exit code 1`;
+  - `PASS source-directive directive run trapped reject generated guard witness with exit code 1`;
+  - `PASS source-directive directive compile produced reject native guard witness trapping with exit code 1`;
   - `PASS tests/frontend/knowledge_runtime_guard_multi_positive.sio expanded with conjunctive Knowledge<T> runtime guards and diagnostics`;
+  - `PASS conjunctive-lower-bound reject generated guard witness trapped through native assert path with exit code 1`;
   - `PASS tests/frontend/knowledge_runtime_guard_upper_positive.sio expanded with an upper-bound Knowledge<T> runtime guard and diagnostic`;
   - `PASS tests/frontend/knowledge_runtime_guard_upper_positive.sio accepted dynamic value satisfying generated upper-bound runtime guard`;
   - `PASS tests/frontend/knowledge_runtime_guard_upper_reject.sio failed the generated upper-bound Knowledge<T> runtime guard`;
+  - `PASS upper-bound reject generated guard witness trapped through native assert path with exit code 1`;
   - `PASS tests/frontend/knowledge_runtime_guard_eq_positive.sio expanded with an equality Knowledge<T> runtime guard and diagnostic`;
   - `PASS tests/frontend/knowledge_runtime_guard_eq_positive.sio accepted dynamic value satisfying generated equality runtime guard`;
   - `PASS tests/frontend/knowledge_runtime_guard_eq_reject.sio failed the generated equality Knowledge<T> runtime guard`;
+  - `PASS equality reject generated guard witness trapped through native assert path with exit code 1`;
   - `PASS tests/frontend/knowledge_runtime_guard_unit_positive.sio expanded with a unit-suffixed Knowledge<T> runtime guard and diagnostic`;
-  - `PASS tests/frontend/knowledge_runtime_guard_internal_label_positive.sio expanded with an internal-label unit Knowledge<T> runtime guard and diagnostic`.
+  - `PASS unit-suffixed reject generated guard witness trapped through native assert path with exit code 1`;
+  - `PASS tests/frontend/knowledge_runtime_guard_internal_label_positive.sio expanded with an internal-label unit Knowledge<T> runtime guard and diagnostic`;
+  - `PASS internal-label-unit reject generated guard witness trapped through native assert path with exit code 1`.
 
 ### Ontology Bundle Directive Expansion
 

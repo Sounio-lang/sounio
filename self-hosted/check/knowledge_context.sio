@@ -2103,6 +2103,739 @@ pub fn knowledge_context_count_runtime_obligations_items(items: Option<Box<ItemL
     knowledge_context_count_runtime_obligations_from(items, items)
 }
 
+pub struct KnowledgeRuntimeObligationDescriptor {
+    found: bool,
+    site_kind: i64,
+    type_name: Name,
+    field_name: Name,
+    constraint_kind: i64,
+    value_kind: i64,
+    int_value: i64,
+    float_value: f64,
+    unit_name: Name,
+    dynamic_expr_kind: i64,
+}
+
+pub fn knowledge_context_empty_runtime_obligation_descriptor() -> KnowledgeRuntimeObligationDescriptor {
+    KnowledgeRuntimeObligationDescriptor {
+        found: false,
+        site_kind: 0,
+        type_name: empty_name(),
+        field_name: empty_name(),
+        constraint_kind: 0,
+        value_kind: 0,
+        int_value: 0,
+        float_value: 0.0,
+        unit_name: empty_name(),
+        dynamic_expr_kind: 0,
+    }
+}
+
+pub fn knowledge_context_runtime_obligation_site_return() -> i64 { 1 }
+pub fn knowledge_context_runtime_obligation_site_call_arg() -> i64 { 2 }
+pub fn knowledge_context_runtime_obligation_site_assignment() -> i64 { 3 }
+pub fn knowledge_context_runtime_obligation_site_binding() -> i64 { 4 }
+
+fn knowledge_context_runtime_obligation_descriptor_from_constraint(site_kind: i64, inner_name: Name, constraint: KnowledgeConstraint, expr: Expr) -> KnowledgeRuntimeObligationDescriptor {
+    KnowledgeRuntimeObligationDescriptor {
+        found: true,
+        site_kind: site_kind,
+        type_name: inner_name,
+        field_name: constraint.field,
+        constraint_kind: constraint.kind as i64,
+        value_kind: constraint.value_kind as i64,
+        int_value: constraint.int_value,
+        float_value: constraint.float_value,
+        unit_name: constraint.unit_name,
+        dynamic_expr_kind: expr.kind as i64,
+    }
+}
+
+fn knowledge_context_runtime_obligation_descriptor_found(desc: KnowledgeRuntimeObligationDescriptor) -> bool {
+    desc.found
+}
+
+pub struct KnowledgeRuntimeObligationCursor {
+    desc: KnowledgeRuntimeObligationDescriptor,
+    remaining_index: i64,
+}
+
+fn knowledge_context_runtime_obligation_cursor_empty(remaining_index: i64) -> KnowledgeRuntimeObligationCursor {
+    KnowledgeRuntimeObligationCursor {
+        desc: knowledge_context_empty_runtime_obligation_descriptor(),
+        remaining_index: remaining_index,
+    }
+}
+
+fn knowledge_context_runtime_obligation_cursor_found(desc: KnowledgeRuntimeObligationDescriptor) -> KnowledgeRuntimeObligationCursor {
+    KnowledgeRuntimeObligationCursor {
+        desc: desc,
+        remaining_index: 0,
+    }
+}
+
+fn knowledge_context_first_direct_runtime_obligation_from_struct_lit(site_kind: i64, inner_name: Name, value_expr: Expr, constraints: Option<Box<KnowledgeConstraintList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if value_expr.kind != ExprKind::ExprStructLit {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    let value_name = knowledge_context_path_first_name(value_expr.path)
+    if !ir_name_eq(value_name, inner_name) {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            if constraint.kind != KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                match knowledge_context_struct_field_value_in_fields(value_expr.fields, constraint.field) {
+                    Some(field_expr) => {
+                        if knowledge_context_direct_field_needs_runtime_obligation(*field_expr, constraint) != 0 {
+                            return knowledge_context_runtime_obligation_descriptor_from_constraint(site_kind, inner_name, constraint, *field_expr)
+                        }
+                    }
+                    None => {}
+                }
+            }
+            knowledge_context_first_direct_runtime_obligation_from_struct_lit(site_kind, inner_name, value_expr, (*list).tail)
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_generated_runtime_obligation_from_struct_lit(items: Option<Box<ItemList> >, site_kind: i64, inner_name: Name, value_expr: Expr, constraints: Option<Box<KnowledgeConstraintList> >, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if value_expr.kind != ExprKind::ExprStructLit {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    let value_name = knowledge_context_path_first_name(value_expr.path)
+    if !ir_name_eq(value_name, inner_name) {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            if constraint.kind != KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                match knowledge_context_struct_field_value_in_fields(value_expr.fields, constraint.field) {
+                    Some(field_expr) => {
+                        if knowledge_context_generated_field_needs_runtime_obligation(items, *field_expr, params, args, locals, constraint) != 0 {
+                            return knowledge_context_runtime_obligation_descriptor_from_constraint(site_kind, inner_name, constraint, *field_expr)
+                        }
+                    }
+                    None => {}
+                }
+            }
+            knowledge_context_first_generated_runtime_obligation_from_struct_lit(items, site_kind, inner_name, value_expr, (*list).tail, params, args, locals)
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_generated_runtime_obligation_init(items: Option<Box<ItemList> >, site_kind: i64, inner_name: Name, constraints: Option<Box<KnowledgeConstraintList> >, init_expr: Expr) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if init_expr.kind != ExprKind::ExprCall {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    match init_expr.left {
+        Some(callee_box) => {
+            let callee_name = knowledge_context_expr_callee_name(*callee_box)
+            if callee_name.len <= 0 {
+                return knowledge_context_empty_runtime_obligation_descriptor()
+            }
+            match knowledge_context_find_fn_def(items, callee_name) {
+                Some(fn_box) => {
+                    let fn_def = *fn_box
+                    if !knowledge_context_fn_return_matches_inner(fn_def, inner_name) {
+                        return knowledge_context_empty_runtime_obligation_descriptor()
+                    }
+                    match knowledge_context_direct_return_value_from_stmts_with_context(items, fn_def.body.stmts, fn_def.params, init_expr.args, fn_def.body.stmts, 16) {
+                        Some(return_expr_box) => {
+                            match knowledge_context_value_field_from_knowledge_literal(*return_expr_box) {
+                                Some(value_expr) => knowledge_context_first_generated_runtime_obligation_from_struct_lit(items, site_kind, inner_name, *value_expr, constraints, fn_def.params, init_expr.args, fn_def.body.stmts)
+                                None => knowledge_context_empty_runtime_obligation_descriptor()
+                            }
+                        }
+                        None => knowledge_context_empty_runtime_obligation_descriptor()
+                    }
+                }
+                None => knowledge_context_empty_runtime_obligation_descriptor()
+            }
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_runtime_obligation_init(items: Option<Box<ItemList> >, site_kind: i64, ty: TypeExpr, init_expr: Expr) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if ty.kind != TypeExprKind::TypeKnowledge {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    match ty.knowledge_info {
+        Some(info) => {
+            let inner_ty = *(*info).inner_type
+            if inner_ty.kind != TypeExprKind::TypeNamed {
+                return knowledge_context_empty_runtime_obligation_descriptor()
+            }
+            let inner_name = knowledge_context_path_first_name(inner_ty.path)
+            match knowledge_context_value_field_from_knowledge_literal(init_expr) {
+                Some(value_expr) => knowledge_context_first_direct_runtime_obligation_from_struct_lit(site_kind, inner_name, *value_expr, (*info).proof_constraints)
+                None => knowledge_context_first_generated_runtime_obligation_init(items, site_kind, inner_name, (*info).proof_constraints, init_expr)
+            }
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_call_arg_runtime_obligation(items: Option<Box<ItemList> >, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    match args {
+        Some(arg_list) => {
+            match params {
+                Some(param_list) => {
+                    let here = knowledge_context_first_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_call_arg(), (*param_list).head.ty, (*arg_list).head)
+                    if knowledge_context_runtime_obligation_descriptor_found(here) {
+                        return here
+                    }
+                    knowledge_context_first_call_arg_runtime_obligation(items, (*param_list).tail, (*arg_list).tail)
+                }
+                None => knowledge_context_empty_runtime_obligation_descriptor()
+            }
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_expr_list_runtime_obligation(items: Option<Box<ItemList> >, exprs: Option<Box<ExprList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    match exprs {
+        Some(list) => {
+            let head = knowledge_context_first_expr_runtime_obligation(items, (*list).head)
+            if knowledge_context_runtime_obligation_descriptor_found(head) {
+                return head
+            }
+            knowledge_context_first_expr_list_runtime_obligation(items, (*list).tail)
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_struct_field_runtime_obligation(items: Option<Box<ItemList> >, fields: Option<Box<StructFieldList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            let head = knowledge_context_first_expr_runtime_obligation(items, (*list).head.value)
+            if knowledge_context_runtime_obligation_descriptor_found(head) {
+                return head
+            }
+            knowledge_context_first_struct_field_runtime_obligation(items, (*list).tail)
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_expr_runtime_obligation(items: Option<Box<ItemList> >, expr: Expr) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if expr.kind == ExprKind::ExprCall {
+        match expr.left {
+            Some(callee_box) => {
+                let callee_name = knowledge_context_expr_callee_name(*callee_box)
+                if callee_name.len > 0 {
+                    match knowledge_context_find_fn_def(items, callee_name) {
+                        Some(fn_box) => {
+                            let call_arg = knowledge_context_first_call_arg_runtime_obligation(items, (*fn_box).params, expr.args)
+                            if knowledge_context_runtime_obligation_descriptor_found(call_arg) {
+                                return call_arg
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    let args = knowledge_context_first_expr_list_runtime_obligation(items, expr.args)
+    if knowledge_context_runtime_obligation_descriptor_found(args) {
+        return args
+    }
+    let fields = knowledge_context_first_struct_field_runtime_obligation(items, expr.fields)
+    if knowledge_context_runtime_obligation_descriptor_found(fields) {
+        return fields
+    }
+    match expr.left {
+        Some(left_box) => {
+            let left = knowledge_context_first_expr_runtime_obligation(items, *left_box)
+            if knowledge_context_runtime_obligation_descriptor_found(left) {
+                return left
+            }
+        }
+        None => {}
+    }
+    match expr.right {
+        Some(right_box) => {
+            let right = knowledge_context_first_expr_runtime_obligation(items, *right_box)
+            if knowledge_context_runtime_obligation_descriptor_found(right) {
+                return right
+            }
+        }
+        None => {}
+    }
+    match expr.else_expr {
+        Some(else_box) => knowledge_context_first_expr_runtime_obligation(items, *else_box)
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_assignment_runtime_obligation(items: Option<Box<ItemList> >, fn_stmts: Option<Box<StmtList> >, stmt: Stmt) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    let target_name = knowledge_context_assignment_target_name(stmt.target)
+    if target_name.len <= 0 {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    match knowledge_context_find_local_binding_type(fn_stmts, target_name) {
+        Some(ty_box) => {
+            match stmt.expr {
+                Some(expr_box) => knowledge_context_first_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_assignment(), *ty_box, *expr_box)
+                None => knowledge_context_empty_runtime_obligation_descriptor()
+            }
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_stmt_runtime_obligation(items: Option<Box<ItemList> >, stmt: Stmt, return_ty: Option<Box<TypeExpr> >, fn_stmts: Option<Box<StmtList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar {
+        match stmt.expr {
+            Some(expr_box) => {
+                match stmt.ty {
+                    Some(ty_box) => {
+                        let here = knowledge_context_first_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_binding(), *ty_box, *expr_box)
+                        if knowledge_context_runtime_obligation_descriptor_found(here) {
+                            return here
+                        }
+                    }
+                    None => {}
+                }
+                knowledge_context_first_expr_runtime_obligation(items, *expr_box)
+            }
+            None => knowledge_context_empty_runtime_obligation_descriptor()
+        }
+    } else if stmt.kind == StmtKind::StmtExpr {
+        match stmt.expr {
+            Some(expr_box) => {
+                let expr = *expr_box
+                if expr.kind == ExprKind::ExprReturn {
+                    match return_ty {
+                        Some(ret_box) => {
+                            match expr.left {
+                                Some(value_box) => {
+                                    let here = knowledge_context_first_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_return(), *ret_box, *value_box)
+                                    if knowledge_context_runtime_obligation_descriptor_found(here) {
+                                        return here
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                knowledge_context_first_expr_runtime_obligation(items, expr)
+            }
+            None => knowledge_context_empty_runtime_obligation_descriptor()
+        }
+    } else if stmt.kind == StmtKind::StmtAssign {
+        let here = knowledge_context_first_assignment_runtime_obligation(items, fn_stmts, stmt)
+        if knowledge_context_runtime_obligation_descriptor_found(here) {
+            return here
+        }
+        match stmt.expr {
+            Some(expr_box) => knowledge_context_first_expr_runtime_obligation(items, *expr_box)
+            None => knowledge_context_empty_runtime_obligation_descriptor()
+        }
+    } else {
+        knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_stmt_list_runtime_obligation(items: Option<Box<ItemList> >, fn_stmts: Option<Box<StmtList> >, stmts: Option<Box<StmtList> >, return_ty: Option<Box<TypeExpr> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    match stmts {
+        Some(list) => {
+            let head = knowledge_context_first_stmt_runtime_obligation(items, (*list).head, return_ty, fn_stmts)
+            if knowledge_context_runtime_obligation_descriptor_found(head) {
+                return head
+            }
+            knowledge_context_first_stmt_list_runtime_obligation(items, fn_stmts, (*list).tail, return_ty)
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_fn_runtime_obligation(items: Option<Box<ItemList> >, opt: Option<Box<FnDef> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => knowledge_context_first_stmt_list_runtime_obligation(items, (*fd).body.stmts, (*fd).body.stmts, (*fd).return_type)
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+fn knowledge_context_first_runtime_obligation_from(root: Option<Box<ItemList> >, cursor: Option<Box<ItemList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    match cursor {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn {
+                let here = knowledge_context_first_fn_runtime_obligation(root, item.fn_def)
+                if knowledge_context_runtime_obligation_descriptor_found(here) {
+                    return here
+                }
+            }
+            knowledge_context_first_runtime_obligation_from(root, (*list).tail)
+        }
+        None => knowledge_context_empty_runtime_obligation_descriptor()
+    }
+}
+
+pub fn knowledge_context_first_runtime_obligation_items(items: Option<Box<ItemList> >) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    knowledge_context_first_runtime_obligation_from(items, items)
+}
+
+fn knowledge_context_nth_direct_runtime_obligation_from_struct_lit(site_kind: i64, inner_name: Name, value_expr: Expr, constraints: Option<Box<KnowledgeConstraintList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    if target_index < 0 {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    if value_expr.kind != ExprKind::ExprStructLit {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    let value_name = knowledge_context_path_first_name(value_expr.path)
+    if !ir_name_eq(value_name, inner_name) {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            var remaining = target_index
+            if constraint.kind != KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                match knowledge_context_struct_field_value_in_fields(value_expr.fields, constraint.field) {
+                    Some(field_expr) => {
+                        if knowledge_context_direct_field_needs_runtime_obligation(*field_expr, constraint) != 0 {
+                            if remaining == 0 {
+                                return knowledge_context_runtime_obligation_cursor_found(knowledge_context_runtime_obligation_descriptor_from_constraint(site_kind, inner_name, constraint, *field_expr))
+                            }
+                            remaining = remaining - 1
+                        }
+                    }
+                    None => {}
+                }
+            }
+            knowledge_context_nth_direct_runtime_obligation_from_struct_lit(site_kind, inner_name, value_expr, (*list).tail, remaining)
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_generated_runtime_obligation_from_struct_lit(items: Option<Box<ItemList> >, site_kind: i64, inner_name: Name, value_expr: Expr, constraints: Option<Box<KnowledgeConstraintList> >, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, locals: Option<Box<StmtList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    if target_index < 0 {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    if value_expr.kind != ExprKind::ExprStructLit {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    let value_name = knowledge_context_path_first_name(value_expr.path)
+    if !ir_name_eq(value_name, inner_name) {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    match constraints {
+        Some(list) => {
+            let constraint = (*list).head
+            var remaining = target_index
+            if constraint.kind != KnowledgeConstraintKind::KnowledgeConstraintSubclassOf {
+                match knowledge_context_struct_field_value_in_fields(value_expr.fields, constraint.field) {
+                    Some(field_expr) => {
+                        if knowledge_context_generated_field_needs_runtime_obligation(items, *field_expr, params, args, locals, constraint) != 0 {
+                            if remaining == 0 {
+                                return knowledge_context_runtime_obligation_cursor_found(knowledge_context_runtime_obligation_descriptor_from_constraint(site_kind, inner_name, constraint, *field_expr))
+                            }
+                            remaining = remaining - 1
+                        }
+                    }
+                    None => {}
+                }
+            }
+            knowledge_context_nth_generated_runtime_obligation_from_struct_lit(items, site_kind, inner_name, value_expr, (*list).tail, params, args, locals, remaining)
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_generated_runtime_obligation_init(items: Option<Box<ItemList> >, site_kind: i64, inner_name: Name, constraints: Option<Box<KnowledgeConstraintList> >, init_expr: Expr, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    if init_expr.kind != ExprKind::ExprCall {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    match init_expr.left {
+        Some(callee_box) => {
+            let callee_name = knowledge_context_expr_callee_name(*callee_box)
+            if callee_name.len <= 0 {
+                return knowledge_context_runtime_obligation_cursor_empty(target_index)
+            }
+            match knowledge_context_find_fn_def(items, callee_name) {
+                Some(fn_box) => {
+                    let fn_def = *fn_box
+                    if !knowledge_context_fn_return_matches_inner(fn_def, inner_name) {
+                        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+                    }
+                    match knowledge_context_direct_return_value_from_stmts_with_context(items, fn_def.body.stmts, fn_def.params, init_expr.args, fn_def.body.stmts, 16) {
+                        Some(return_expr_box) => {
+                            match knowledge_context_value_field_from_knowledge_literal(*return_expr_box) {
+                                Some(value_expr) => knowledge_context_nth_generated_runtime_obligation_from_struct_lit(items, site_kind, inner_name, *value_expr, constraints, fn_def.params, init_expr.args, fn_def.body.stmts, target_index)
+                                None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+                            }
+                        }
+                        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+                    }
+                }
+                None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+            }
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_runtime_obligation_init(items: Option<Box<ItemList> >, site_kind: i64, ty: TypeExpr, init_expr: Expr, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    if ty.kind != TypeExprKind::TypeKnowledge {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    match ty.knowledge_info {
+        Some(info) => {
+            let inner_ty = *(*info).inner_type
+            if inner_ty.kind != TypeExprKind::TypeNamed {
+                return knowledge_context_runtime_obligation_cursor_empty(target_index)
+            }
+            let inner_name = knowledge_context_path_first_name(inner_ty.path)
+            match knowledge_context_value_field_from_knowledge_literal(init_expr) {
+                Some(value_expr) => knowledge_context_nth_direct_runtime_obligation_from_struct_lit(site_kind, inner_name, *value_expr, (*info).proof_constraints, target_index)
+                None => knowledge_context_nth_generated_runtime_obligation_init(items, site_kind, inner_name, (*info).proof_constraints, init_expr, target_index)
+            }
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_call_arg_runtime_obligation(items: Option<Box<ItemList> >, params: Option<Box<ParamList> >, args: Option<Box<ExprList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    match args {
+        Some(arg_list) => {
+            match params {
+                Some(param_list) => {
+                    let here = knowledge_context_nth_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_call_arg(), (*param_list).head.ty, (*arg_list).head, target_index)
+                    if knowledge_context_runtime_obligation_descriptor_found(here.desc) {
+                        return here
+                    }
+                    knowledge_context_nth_call_arg_runtime_obligation(items, (*param_list).tail, (*arg_list).tail, here.remaining_index)
+                }
+                None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+            }
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_expr_list_runtime_obligation(items: Option<Box<ItemList> >, exprs: Option<Box<ExprList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    match exprs {
+        Some(list) => {
+            let head = knowledge_context_nth_expr_runtime_obligation(items, (*list).head, target_index)
+            if knowledge_context_runtime_obligation_descriptor_found(head.desc) {
+                return head
+            }
+            knowledge_context_nth_expr_list_runtime_obligation(items, (*list).tail, head.remaining_index)
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_struct_field_runtime_obligation(items: Option<Box<ItemList> >, fields: Option<Box<StructFieldList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            let head = knowledge_context_nth_expr_runtime_obligation(items, (*list).head.value, target_index)
+            if knowledge_context_runtime_obligation_descriptor_found(head.desc) {
+                return head
+            }
+            knowledge_context_nth_struct_field_runtime_obligation(items, (*list).tail, head.remaining_index)
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_expr_runtime_obligation(items: Option<Box<ItemList> >, expr: Expr, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    var remaining = target_index
+    if expr.kind == ExprKind::ExprCall {
+        match expr.left {
+            Some(callee_box) => {
+                let callee_name = knowledge_context_expr_callee_name(*callee_box)
+                if callee_name.len > 0 {
+                    match knowledge_context_find_fn_def(items, callee_name) {
+                        Some(fn_box) => {
+                            let call_arg = knowledge_context_nth_call_arg_runtime_obligation(items, (*fn_box).params, expr.args, remaining)
+                            if knowledge_context_runtime_obligation_descriptor_found(call_arg.desc) {
+                                return call_arg
+                            }
+                            remaining = call_arg.remaining_index
+                        }
+                        None => {}
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    let args = knowledge_context_nth_expr_list_runtime_obligation(items, expr.args, remaining)
+    if knowledge_context_runtime_obligation_descriptor_found(args.desc) {
+        return args
+    }
+    remaining = args.remaining_index
+
+    let fields = knowledge_context_nth_struct_field_runtime_obligation(items, expr.fields, remaining)
+    if knowledge_context_runtime_obligation_descriptor_found(fields.desc) {
+        return fields
+    }
+    remaining = fields.remaining_index
+
+    match expr.left {
+        Some(left_box) => {
+            let left = knowledge_context_nth_expr_runtime_obligation(items, *left_box, remaining)
+            if knowledge_context_runtime_obligation_descriptor_found(left.desc) {
+                return left
+            }
+            remaining = left.remaining_index
+        }
+        None => {}
+    }
+    match expr.right {
+        Some(right_box) => {
+            let right = knowledge_context_nth_expr_runtime_obligation(items, *right_box, remaining)
+            if knowledge_context_runtime_obligation_descriptor_found(right.desc) {
+                return right
+            }
+            remaining = right.remaining_index
+        }
+        None => {}
+    }
+    match expr.else_expr {
+        Some(else_box) => knowledge_context_nth_expr_runtime_obligation(items, *else_box, remaining)
+        None => knowledge_context_runtime_obligation_cursor_empty(remaining)
+    }
+}
+
+fn knowledge_context_nth_assignment_runtime_obligation(items: Option<Box<ItemList> >, fn_stmts: Option<Box<StmtList> >, stmt: Stmt, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    let target_name = knowledge_context_assignment_target_name(stmt.target)
+    if target_name.len <= 0 {
+        return knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+    match knowledge_context_find_local_binding_type(fn_stmts, target_name) {
+        Some(ty_box) => {
+            match stmt.expr {
+                Some(expr_box) => knowledge_context_nth_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_assignment(), *ty_box, *expr_box, target_index)
+                None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+            }
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_stmt_runtime_obligation(items: Option<Box<ItemList> >, stmt: Stmt, return_ty: Option<Box<TypeExpr> >, fn_stmts: Option<Box<StmtList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    if stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar {
+        match stmt.expr {
+            Some(expr_box) => {
+                var remaining = target_index
+                match stmt.ty {
+                    Some(ty_box) => {
+                        let here = knowledge_context_nth_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_binding(), *ty_box, *expr_box, remaining)
+                        if knowledge_context_runtime_obligation_descriptor_found(here.desc) {
+                            return here
+                        }
+                        remaining = here.remaining_index
+                    }
+                    None => {}
+                }
+                knowledge_context_nth_expr_runtime_obligation(items, *expr_box, remaining)
+            }
+            None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+        }
+    } else if stmt.kind == StmtKind::StmtExpr {
+        match stmt.expr {
+            Some(expr_box) => {
+                let expr = *expr_box
+                var remaining = target_index
+                if expr.kind == ExprKind::ExprReturn {
+                    match return_ty {
+                        Some(ret_box) => {
+                            match expr.left {
+                                Some(value_box) => {
+                                    let here = knowledge_context_nth_runtime_obligation_init(items, knowledge_context_runtime_obligation_site_return(), *ret_box, *value_box, remaining)
+                                    if knowledge_context_runtime_obligation_descriptor_found(here.desc) {
+                                        return here
+                                    }
+                                    remaining = here.remaining_index
+                                }
+                                None => {}
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                knowledge_context_nth_expr_runtime_obligation(items, expr, remaining)
+            }
+            None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+        }
+    } else if stmt.kind == StmtKind::StmtAssign {
+        let here = knowledge_context_nth_assignment_runtime_obligation(items, fn_stmts, stmt, target_index)
+        if knowledge_context_runtime_obligation_descriptor_found(here.desc) {
+            return here
+        }
+        match stmt.expr {
+            Some(expr_box) => knowledge_context_nth_expr_runtime_obligation(items, *expr_box, here.remaining_index)
+            None => knowledge_context_runtime_obligation_cursor_empty(here.remaining_index)
+        }
+    } else {
+        knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_stmt_list_runtime_obligation(items: Option<Box<ItemList> >, fn_stmts: Option<Box<StmtList> >, stmts: Option<Box<StmtList> >, return_ty: Option<Box<TypeExpr> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    match stmts {
+        Some(list) => {
+            let head = knowledge_context_nth_stmt_runtime_obligation(items, (*list).head, return_ty, fn_stmts, target_index)
+            if knowledge_context_runtime_obligation_descriptor_found(head.desc) {
+                return head
+            }
+            knowledge_context_nth_stmt_list_runtime_obligation(items, fn_stmts, (*list).tail, return_ty, head.remaining_index)
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_fn_runtime_obligation(items: Option<Box<ItemList> >, opt: Option<Box<FnDef> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(fd) => knowledge_context_nth_stmt_list_runtime_obligation(items, (*fd).body.stmts, (*fd).body.stmts, (*fd).return_type, target_index)
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+fn knowledge_context_nth_runtime_obligation_from(root: Option<Box<ItemList> >, cursor: Option<Box<ItemList> >, target_index: i64) -> KnowledgeRuntimeObligationCursor with Mut, Panic, Div, Alloc {
+    match cursor {
+        Some(list) => {
+            let item = (*list).head
+            var remaining = target_index
+            if item.kind == ItemKind::ItemFn {
+                let here = knowledge_context_nth_fn_runtime_obligation(root, item.fn_def, remaining)
+                if knowledge_context_runtime_obligation_descriptor_found(here.desc) {
+                    return here
+                }
+                remaining = here.remaining_index
+            }
+            knowledge_context_nth_runtime_obligation_from(root, (*list).tail, remaining)
+        }
+        None => knowledge_context_runtime_obligation_cursor_empty(target_index)
+    }
+}
+
+pub fn knowledge_context_nth_runtime_obligation_items(items: Option<Box<ItemList> >, target_index: i64) -> KnowledgeRuntimeObligationDescriptor with Mut, Panic, Div, Alloc {
+    if target_index < 0 {
+        return knowledge_context_empty_runtime_obligation_descriptor()
+    }
+    let cursor = knowledge_context_nth_runtime_obligation_from(items, items, target_index)
+    cursor.desc
+}
+
 fn knowledge_context_stmt_has_static_value_constraint(stmt: Stmt, return_ty: Option<Box<TypeExpr> >) -> bool with Mut, Panic, Div, Alloc {
     if stmt.kind == StmtKind::StmtLet || stmt.kind == StmtKind::StmtVar {
         match stmt.ty {

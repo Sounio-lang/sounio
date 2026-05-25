@@ -8,7 +8,8 @@
          test-knowledge-context-phase2 test-knowledge-unit-constraints \
          test-knowledge-numeric-constraints test-knowledge-composite \
          test-knowledge-static-values test-knowledge-runtime-obligations \
-         test-knowledge-runtime-guards \
+         test-knowledge-runtime-guards test-knowledge-runtime-guard-directive \
+         test-knowledge-runtime-guard-lowering-plan \
          test-knowledge-context-static \
          test-semantic-knowledge-spine \
          ops-guardrail-local ops-infra-up ops-strict-up ops-status \
@@ -149,8 +150,16 @@ test-knowledge-static-values: ## Run static Knowledge<T> value-initializer gate
 test-knowledge-runtime-obligations: ## Run dynamic Knowledge<T> runtime obligation gate
 	@bash scripts/ci/knowledge_context_runtime_obligation_gate.sh
 
-test-knowledge-runtime-guards: ## Run pre-native dynamic Knowledge<T> runtime guard expansion gate
+test-knowledge-runtime-guards: ## Run pre-native dynamic Knowledge<T> runtime guard expansion and directive scanner gates
 	@bash scripts/ci/knowledge_runtime_guard_expansion_gate.sh
+	@bash scripts/ci/knowledge_runtime_guard_directive_native_scan_gate.sh
+	@bash scripts/ci/knowledge_runtime_guard_lowering_plan_gate.sh
+
+test-knowledge-runtime-guard-directive: ## Run compiler-side //@ knowledge-runtime-guards scanner gate
+	@bash scripts/ci/knowledge_runtime_guard_directive_native_scan_gate.sh
+
+test-knowledge-runtime-guard-lowering-plan: ## Run compiler-side Knowledge<T> runtime guard lowering-plan gate
+	@bash scripts/ci/knowledge_runtime_guard_lowering_plan_gate.sh
 
 test-knowledge-context-static: ## Run static Knowledge<T> umbrella gate
 	@bash scripts/ci/knowledge_context_static_gate.sh
