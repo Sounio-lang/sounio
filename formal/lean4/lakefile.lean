@@ -238,3 +238,8 @@ lean_lib «SounioSunflower» where
 -- never exceeds size 3. See docs/research/associator-shadow-experiment.md
 @[default_target]
 lean_lib «SounioAssociatorShadow» where
+
+-- Hadwiger-Nelson #508: exact unit-distance + chromatic certifier (Moser spindle
+-- chi=4 over Q(sqrt3,sqrt11)). See docs/research/hadwiger-nelson-508-program.md
+@[default_target]
+lean_lib «SounioUnitDistanceExact» where
