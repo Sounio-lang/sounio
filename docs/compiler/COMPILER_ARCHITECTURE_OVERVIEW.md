@@ -31,7 +31,8 @@ On the current snapshot, `souc info` for the default JIT profile reports:
 - Cranelift JIT enabled
 - LLVM disabled in the checked artifact
 - GPU codegen disabled in the checked JIT artifact
-- LSP, SMT, ontology, distributed, and package-manager features disabled in the checked artifact
+- LSP, SMT, distributed, and package-manager features disabled in the checked artifact
+- ontology resolution CLI enabled natively via `souc ontology <resolve|search|ancestors|is-subclass>`
 
 For the separate checked GPU profile, `souc info` reports:
 

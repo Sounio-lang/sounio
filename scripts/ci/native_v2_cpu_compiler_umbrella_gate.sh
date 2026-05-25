@@ -212,6 +212,55 @@ run_phase_j() {
   append_gate_row "$gate" "$rc" "$gate_dir" "-" "$log_path"
 }
 
+# K-AXI meta-gate: structural emitter + witness/certificate closure for all
+# supported profiles. CPU-only except for the final PTX golden drift oracle.
+# Skippable for fast umbrella runs via SOUNIO_KRETIKOS_KAXI_GATE_SKIP=1.
+run_kretikos_kaxi_meta() {
+  local gate="kretikos_kaxi_meta"
+  local gate_dir="$OUT_DIR/$gate"
+  local log_path="$LOG_DIR/$gate.log"
+
+  mkdir -p "$gate_dir"
+  echo "[native-v2-cpu-compiler] running $gate"
+
+  if [[ "${SOUNIO_KRETIKOS_KAXI_GATE_SKIP:-0}" == "1" ]]; then
+    printf 'skipped_by_env\n' >"$log_path"
+    append_gate_row "$gate" "0" "$gate_dir" "-" "$log_path"
+    return 0
+  fi
+
+  set +e
+  SOUNIO_KRETIKOS_KAXI_GATE_DIR="$gate_dir" \
+    bash scripts/ci/kretikos_kaxi_gate.sh >"$log_path" 2>&1
+  local rc=$?
+  set -e
+  append_gate_row "$gate" "$rc" "$gate_dir" "-" "$log_path"
+}
+
+# Native-v2 struct orchestrator: examples/native struct regressions plus imported
+# ABI and metal lanes. Skippable via SOUNIO_NATIVE_V2_STRUCT_GATE_SKIP=1.
+run_struct_orchestrator() {
+  local gate="struct_orchestrator"
+  local gate_dir="$OUT_DIR/$gate"
+  local log_path="$LOG_DIR/$gate.log"
+
+  mkdir -p "$gate_dir"
+  echo "[native-v2-cpu-compiler] running $gate"
+
+  if [[ "${SOUNIO_NATIVE_V2_STRUCT_GATE_SKIP:-0}" == "1" ]]; then
+    printf 'skipped_by_env\n' >"$log_path"
+    append_gate_row "$gate" "0" "$gate_dir" "-" "$log_path"
+    return 0
+  fi
+
+  set +e
+  SOUNIO_NATIVE_V2_STRUCT_GATE_DIR="$gate_dir" \
+    bash scripts/ci/native_v2_struct_gate.sh >"$log_path" 2>&1
+  local rc=$?
+  set -e
+  append_gate_row "$gate" "$rc" "$gate_dir" "-" "$log_path"
+}
+
 # Dissertation PBPK suite: applied evidence layer for the rapamycin model.
 # 5 run-pass tests cover Euler+RK4 ISO budgets, BBB/Pgp clinical claims,
 # variance-aware adaptive integration, and GUM-vs-MC validation. CPU-only,
@@ -304,13 +353,15 @@ run_semantic_hardening
 run_lean_single_fixed_point
 run_imported_closure_boundary
 run_imported_captured_closure_boundary
+run_struct_orchestrator
 run_iso_budget
 run_phase_j
+run_kretikos_kaxi_meta
 run_phase_y
 run_dissertation_pbpk_suite
 
 if emit_summary_json; then
-  echo "[native-v2-cpu-compiler] PASS: driver self-compile, science spine, f64 ladder, GUM primitives, semantic hardening, lean_single fixed-point, imported_closure_boundary, imported_captured_closure_boundary, iso_budget, phase_j_conf_gate, phase_y_gum_pbpk, dissertation_pbpk_suite"
+  echo "[native-v2-cpu-compiler] PASS: driver self-compile, science spine, f64 ladder, GUM primitives, semantic hardening, lean_single fixed-point, imported_closure_boundary, imported_captured_closure_boundary, struct_orchestrator, iso_budget, phase_j_conf_gate, kretikos_kaxi_meta, phase_y_gum_pbpk, dissertation_pbpk_suite"
   echo "[native-v2-cpu-compiler] summary=$SUMMARY_JSON"
 else
   echo "[native-v2-cpu-compiler] FAIL: see summary=$SUMMARY_JSON" >&2
