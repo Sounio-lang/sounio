@@ -57,9 +57,26 @@ core). Cube-and-conquer (Heule's method) splits ONE instance across many cores, 
   clique, writes `cubes_<n>.jsonl`; a SLURM array runs `cnp_cube.py solve` per cube;
   aggregate — any SAT ⇒ k-colourable, all UNSAT ⇒ χ≥k+1 (then verify with drat-trim +
   the Lean `bv_decide` pipeline before any claim).
-- Run 20260525: 20k instance (150224 edges) → clique [84,90,96] → 60 cubes fanned across
-  cpuops-t560 / 5860 / r770 — verdict in minutes vs ~50 min single-core.
+- Run 20260525 (NEGATIVE on the approach): 20k instance (150224 edges) → clique
+  [84,90,96] → 60 cubes. EMPIRICALLY THIS DID NOT ACCELERATE: each cube still ran >2 h
+  (hit the SBATCH time limit, killed, empty results). Fixing a 3-clique (3 of 20000
+  vertices) prunes almost nothing — the instance's hardness is GLOBAL, not localized to a
+  small clique. A naive coarse cube split is the wrong tool here.
 
-Note: bounded by the cluster's ~20 allocatable CPUs (DYNAMIC CfgTRES caps), so cubes run
-in ~3 waves; still a large speedup and the correct architecture if a χ≥6 candidate ever
-needs its UNSAT cracked + certified.
+## What actually works (revised after the negative run)
+Coarse clique-cubes don't prune a globally-hard near-threshold instance. Genuine parallel
+acceleration needs ONE of:
+1. a real **cuber** (`march_cu`, or CaDiCaL `--cubing` / lingeling iterative cubing) that
+   picks high-propagation branch variables and emits *thousands* of fine cubes — none are
+   installed on the nodes, and the login pod has no gcc, so this needs a prebuilt/static
+   binary staged in;
+2. a **parallel SAT solver** (Mallob / painless / plingeling) — also needs a binary;
+3. accept the hardness: run the big sizes single-threaded with long walltime (the array
+   already did the small/medium sizes — 2600/5000/10000 all 5-colourable, sound).
+
+Also fix: the worker/cube `--timeout` must actually bound the pysat solve (currently not
+enforced → jobs silently hit SBATCH `--time`), and any aggregator must treat an EMPTY
+result file as "no verdict", never as UNSAT (a 60-empty-files run must NOT be read as
+χ≥6). Both were live bugs in the 20260525 run.
+
+Bounded throughout by the cluster's ~20 allocatable CPUs (DYNAMIC CfgTRES caps).
