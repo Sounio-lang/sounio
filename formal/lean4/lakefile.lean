@@ -232,3 +232,9 @@ lean_lib «SounioFanoArcsBlocking» where
 -- See docs/research/sunflower-168-sounio-note.md
 @[default_target]
 lean_lib «SounioSunflower» where
+
+-- The associator-shadow experiment: the non-associative lever ((p·u)·v, u·v=0)
+-- escapes the 7-hyperoval trap of linear surgery (reaches all 7 Fano lines) but
+-- never exceeds size 3. See docs/research/associator-shadow-experiment.md
+@[default_target]
+lean_lib «SounioAssociatorShadow» where
