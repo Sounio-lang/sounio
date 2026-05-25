@@ -1,5 +1,13 @@
 # Phase D — search for a 6-chromatic unit-distance graph (χ(plane) ≥ 6)
 
+> **⚠ SUPERSEDED (edge-detection bug).** This probe detected edges with a `round()`-based
+> spatial hash that misses unit pairs near cell boundaries — it reported 11545 edges on the
+> 2600-vertex closure where the **complete** count is **11553**. Missing edges only make a
+> graph *easier* to colour, so the "5-colourable" negative here was tested on a *subgraph*
+> and is **unsound**. Corrected, sound engine + result:
+> `hadwiger-nelson-phaseD-campaign.md` (complete `floor`-grid edges; 2600/11553 still
+> 5-colourable, soundly). This file is kept for lineage only.
+
 **This is the open frontier and the long-odds gamble**, stated plainly: no 6-chromatic
 unit-distance graph is known; de Grey, Heule, Parts and the entire Polymath16 effort
 (2018–2021) searched hard and never reached χ ≥ 6; χ(plane) might genuinely be 5. A
