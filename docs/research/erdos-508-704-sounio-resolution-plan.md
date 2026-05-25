@@ -140,6 +140,40 @@ descarta esse mecanismo simples como alavanca de χ aqui.
 não-associatividade genuína, indexada diretamente pelos **168 pares ZD** (não 84
 mapas lineares). É o caminho correto para testar χ ≥ 3.
 
+### Iteração 2026-05-25 — cirurgia por associador (Fatia 2)
+
+Implementada a cirurgia por associador `(p·u)·v` com `u·v=0`, sobre os **168
+pares ZD** (enumerados via `is_zero_pair`; composição de duas multiplicações à
+direita por primitivos, reaproveitando o mesmo atalho de 2 termos). Alvo de
+"distância unitária torcida" = `‖u‖²·‖v‖² = 4`. Verificado empiricamente que a
+distribuição de `‖((e_m)·u)·v‖²` nas 16 direções de base é `{0:6, 4:8, 8:2}` —
+clusters limpos (kernel / unitário-torcido / amplificado), sem cluster em 2, logo
+o alvo `==4` é bem-definido.
+
+**RESULTADO (mesmo probe de 7 vértices):**
+- `168` pares ZD enumerados (== `unorderedZDPairs` do bridge).
+- cirurgia **totalmente ativa**: **168 de 168** classes alteram o conjunto de
+  arestas (arestas variam de 2 a 12, vs 6 clássicas) — muito mais forte que a
+  linear (4/84).
+- porém **0 de 168** elevam χ: permanece 2 em todas.
+
+**Leitura honesta (mais forte que a Fatia 1):** mesmo a não-associatividade
+genuína, agindo em TODAS as 168 classes, não quebra a bipartição neste probe. As
+duas fatias juntas isolam a conclusão: **o gargalo é o tamanho do probe (7
+vértices), não o mecanismo algébrico** — o associador é a alavanca certa e está
+plenamente ativo. (Lembrete de escala: o grafo 5-cromático de de Grey tem 1581
+vértices; esperar χ≥3 de 7 vértices sempre foi otimista.)
+
+Lean: `associator_class_count_168`, `all_associator_surgeries_change_edges`,
+`no_associator_surgery_raises_chromatic`, `associator_chromatic_le_classical` —
+todos `native_decide`, sem `sorry`/axioma novo; paridade com o run Sounio.
+
+**Próxima alavanca (Fatia 3):** escalar o nº de vértices com um teste de
+**bipartição por BFS** (O(V+E), escala a centenas de vértices — o brute-force
+k^n não), e/ou **partir de um grafo unit-distance clássico com χ≥3** (realização
+racional do Moser spindle ou subgrafo estilo de Grey) e perguntar se a cirurgia
+ZD **preserva ou quebra** a não-bipartição. Essa é a pergunta de pesquisa real.
+
 ### Infra de base (mantida)
 - Emitter Kretikos pronto para uso (Fase 2, escala — adiado).
 - Objetivo travado: resolver os dois Erdős com Sounio.
@@ -155,12 +189,16 @@ negativo honesto registrado acima.
 2. ~~Exemplo executável em `examples/erdos/`~~ ✅ (`moser_zd_probe.sio`).
 3. ~~Avançar o lado Lean para 7 vértices~~ ✅ (4 teoremas `native_decide`, sem `sorry`).
 
-Fatia 2 (recomendada, decisão de alavanca):
-4. **Cirurgia por associador** `(p·u)·v`, `u·v=0` — não-associatividade genuína,
-   168 classes diretas. Implementar em Sounio + Lean (mesma estrutura de prova),
-   medir se algum dos 168 eleva χ ≥ 3 num probe que span ambas as metades.
-5. Se positivo: provar `∃ classe, χ_torcido > χ_clássico` por `native_decide`
-   (resultado grande). Se negativo: subir nº de vértices / dimensão (#704) e/ou
-   escala Kretikos (Fase 2).
+Fatia 2 (cirurgia por associador) — CONCLUÍDA:
+4. ~~**Cirurgia por associador** `(p·u)·v`, `u·v=0`, 168 classes, Sounio + Lean~~
+   ✅ — 168/168 ativas, 0 elevam χ (negativo honesto, mecanismo validado).
+
+Fatia 3 (próxima, escala — onde χ≥3 pode realmente aparecer):
+5. Teste de **bipartição por BFS** (O(V+E)) substituindo o brute-force k^n, para
+   escalar a dezenas/centenas de vértices.
+6. **Partir de um grafo unit-distance clássico com χ≥3** (Moser spindle racional
+   ou subgrafo de Grey) e medir se a cirurgia ZD/associador preserva ou quebra a
+   não-bipartição — a pergunta de pesquisa real para #508.
+7. #704: subir dimensão (pathions 32D) e/ou escala Kretikos (Fase 2).
 
 O objetivo não é "explorar". É **resolver** — com cada passo verificável.

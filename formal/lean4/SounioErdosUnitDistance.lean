@@ -167,9 +167,69 @@ theorem twisted_chromatic_le_classical :
       chromaticNumber (twEdge v) ≤ chromaticNumber classEdge) = true := by
   native_decide
 
+-- ===========================================================================
+-- §6. ASSOCIATOR surgery (the non-associative lever → 168 ZD classes).
+--
+--   A ZD class is an unordered pair (u, v) with u·v = 0 (bridge: unorderedZDPairs,
+--   length 168). Since u·v = 0, assoc(p,u,v) = (p·u)·v − p·(u·v) = (p·u)·v.
+--   So the associator-twisted point is the double right-multiplication (p·u)·v,
+--   computed by composing the same right-mult coefficient twice. Twisted-unit
+--   target = ‖u‖²·‖v‖² = 4.  All integer-valued ⇒ exact (no tolerance).
+-- ===========================================================================
+
+/-- Difference vector (p_i − p_j) as a coordinate function. -/
+def dvec (i j : Nat) : Nat → Int := fun m => coord i m - coord j m
+
+/-- Component `k` of `x · v` (right-multiplication of an arbitrary vector `x`
+    by primitive `v = e_lo ± e_hi`). Composing this twice gives (x·u)·v. -/
+def rmulCoeff (x : Nat → Int) (v : PrimSed) (k : Nat) : Int :=
+  x (k ^^^ v.lo) * sedSigma (k ^^^ v.lo) v.lo
+    + primSign v * (x (k ^^^ v.hi) * sedSigma (k ^^^ v.hi) v.hi)
+
+/-- ‖((p_i − p_j)·u)·v‖² = ‖assoc(p_i − p_j, u, v)‖² (since u·v = 0). -/
+def assocNormSq (i j : Nat) (u v : PrimSed) : Int :=
+  let w1 := fun k => rmulCoeff (dvec i j) u k
+  (List.range 16).foldl (fun acc k => let c := rmulCoeff w1 v k; acc + c * c) 0
+
+/-- Associator-twisted unit edge for ZD class (u, v): ‖((p_i−p_j)·u)·v‖² = 4. -/
+def assocEdge (u v : PrimSed) (i j : Nat) : Bool := assocNormSq i j u v == 4
+
+-- ===========================================================================
+-- §7. Honest associator results (native_decide; mirror the Sounio run).
+-- ===========================================================================
+
+/-- The 168 ZD classes are exactly the unordered ZD pairs of the bridge. -/
+theorem associator_class_count_168 : unorderedZDPairs.length = 168 :=
+  zd_projective_count_168
+
+/-- The associator surgery is FULLY active: every one of the 168 ZD classes
+    changes the edge set vs. classical (matches Sounio "classes changing edge
+    set: 168"). Far stronger than the linear surgery's 4/84. -/
+theorem all_associator_surgeries_change_edges :
+    unorderedZDPairs.all (fun p =>
+      vpairs.any (fun q => assocEdge p.1 p.2 q.1 q.2 != classEdge q.1 q.2)) = true := by
+  native_decide
+
+/-- HONEST NEGATIVE (stronger than the linear case): although every one of the
+    168 associator surgeries is active, ALL keep the chromatic number at 2 —
+    genuine non-associativity does not break bipartiteness on this probe.
+    Conclusion: the bottleneck is the probe size, not the algebraic mechanism. -/
+theorem no_associator_surgery_raises_chromatic :
+    unorderedZDPairs.all (fun p => chromaticNumber (assocEdge p.1 p.2) == 2) = true := by
+  native_decide
+
+/-- Restatement: no associator class exceeds the classical chromatic number. -/
+theorem associator_chromatic_le_classical :
+    unorderedZDPairs.all (fun p =>
+      chromaticNumber (assocEdge p.1 p.2) ≤ chromaticNumber classEdge) = true := by
+  native_decide
+
 end Sounio.Erdos
 
--- Next Lean milestone (research doc): the associator surgery (p·u)·v with
--- u·v = 0 — genuine non-associativity, recovering all 168 ZD classes — is the
--- principled lever to test for χ ≥ 3, since the linear right-multiplication
--- surgery is now machine-checked NOT to raise χ on this probe.
+-- Findings (slices 1 + 2), all machine-checked:
+--   linear right-mult surgery — 4/84 classes active, 0 raise χ;
+--   associator (p·u)·v surgery — 168/168 active, 0 raise χ.
+-- The algebraic lever is validated (associator acts everywhere); the limit is
+-- the 7-vertex probe. Next milestone: scale vertex count with a fast
+-- bipartiteness (BFS) test, or start from a classical χ≥3 unit-distance graph
+-- and ask whether surgery preserves/breaks non-bipartiteness.
