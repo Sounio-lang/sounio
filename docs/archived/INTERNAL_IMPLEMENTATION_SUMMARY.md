@@ -1,11 +1,16 @@
 <!-- docs:meta
-topic_id: repo.docs.internal.implementation.implementation-summary
-authority: repo_only
-audience: users
+topic_id: repo.docs.archived.internal-implementation-summary
+authority: archived
+audience: maintainers
 last_validated: 2026-03-07
-validated_by: A2
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.implementation-summary
+validated_by: A7
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.internal-implementation-summary
 -->
+
+<!-- docs:status-note:start -->
+> Docs status: `archived`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
 
 # Sounio Tier-1 Mathematical Theories Implementation Summary
 

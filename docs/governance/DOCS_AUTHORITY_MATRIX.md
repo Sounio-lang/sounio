@@ -205,11 +205,13 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.guide.egc-depth-guide | repo_only | docs/guide/EGC_DEPTH_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.installation | repo_only | docs/guide/installation.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.llm-programming-guide | repo_only | docs/guide/LLM_PROGRAMMING_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.guide.llm-programming-guide-pt | repo_only | docs/guide/LLM_PROGRAMMING_GUIDE_PT.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.minimum-viable-sounio | repo_only | docs/guide/MINIMUM_VIABLE_SOUNIO.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.programming | repo_only | docs/guide/programming.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.qnn-performance-guide | repo_only | docs/guide/QNN_PERFORMANCE_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.sounio-definitive-guide | repo_only | docs/guide/SOUNIO_DEFINITIVE_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.sounio-gotchas | repo_only | docs/guide/SOUNIO_GOTCHAS.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.guide.sounio-gotchas-pt | repo_only | docs/guide/SOUNIO_GOTCHAS_PT.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.sounio-quick-start | repo_only | docs/guide/SOUNIO_QUICK_START.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.sounio-style-guide | repo_only | docs/guide/SOUNIO_STYLE_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.tutorial | repo_only | docs/guide/tutorial.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -302,7 +304,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.papers.epistemic-types.benchmarks.nvidia-l4-benchmarks | repo_only | docs/papers/epistemic-types/benchmarks/NVIDIA_L4_BENCHMARKS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.epistemic-types.readme | repo_only | docs/papers/epistemic-types/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.kybernetes-second-order | repo_only | docs/papers/kybernetes-second-order.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.papers.main.168-dual-pathway-correction | repo_only | docs/papers/main/168-dual-pathway-correction.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.168-revision-notes | repo_only | docs/papers/main/168-revision-notes.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.168-theorem-preprint | repo_only | docs/papers/main/168-theorem-preprint.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.cpt-psp.outline | repo_only | docs/papers/main/cpt-psp/outline.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -367,8 +368,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.commutator-associator-identity | historical | docs/research/commutator_associator_identity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.delta-epistemic-gradual-compilation-paper | historical | docs/research/delta_epistemic_gradual_compilation_paper.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-algebra-review | repo_only | docs/research/epistemic_algebra_review.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.research.erdos-508-704-sounio-resolution-plan | historical | docs/research/erdos-508-704-sounio-resolution-plan.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.research.erdos-90-168-spectrum-note | historical | docs/research/erdos-90-168-spectrum-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fano-arcs-blocking-sounio-note | historical | docs/research/fano-arcs-blocking-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fisher-matrix-fix | historical | docs/research/FISHER_MATRIX_FIX.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.gradual-epistemic-positioning | historical | docs/research/gradual_epistemic_positioning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -390,10 +389,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.m0-baseline-inventory | historical | docs/research/m0_baseline_inventory.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m3-naturality-residual | historical | docs/research/m3_naturality_residual.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m4-validation-framework | historical | docs/research/m4_validation_framework.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.research.moonshot-a-abide-f32-cohort-analysis | historical | docs/research/moonshot-a-abide-f32-cohort-analysis.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.research.moonshot-a-abide-transport-conditioned-orc | historical | docs/research/moonshot-a-abide-transport-conditioned-orc.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.research.moonshot-a-orc-implementation-decision | historical | docs/research/moonshot-a-orc-implementation-decision.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.research.moonshot-a-slurm-blocker-handoff | historical | docs/research/moonshot-a-slurm-blocker-handoff.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ocssm-annotation-manual-v0 | historical | docs/research/ocssm_annotation_manual_v0.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ocssm-functoriality-check-toy | historical | docs/research/ocssm_functoriality_check_toy.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ocssm-g2-invariance-proof | historical | docs/research/ocssm_g2_invariance_proof.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -424,7 +419,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.zeta-variance-deep-investigation | historical | docs/research/zeta_variance_deep_investigation.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zeta-variance-fix-plan | historical | docs/research/zeta_variance_fix_plan.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.roadmap.2026-ontology-units-knowledge-plan | repo_only | docs/roadmap/2026_ontology_units_knowledge_plan.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.roadmap.2026-ontology-units-knowledge-status | repo_only | docs/roadmap/2026_ontology_units_knowledge_status.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.roadmap.2026-q2-research-milestones | repo_only | docs/roadmap/2026_Q2_research_milestones.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.serious-language.compiler-maturity-snapshot | repo_only | docs/serious-language/compiler-maturity-snapshot.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.serious-language.conformance-spine | repo_only | docs/serious-language/conformance-spine.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -464,6 +458,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.examples.neuroreceptor-pet.results.readme | repo_only | examples/neuroreceptor_pet/results/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.pbpk.readme | repo_only | examples/pbpk/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.real-world.readme | repo_only | examples/real_world/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.examples.semantic-orc.readme | repo_only | examples/semantic_orc/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.showcase.readme | repo_only | examples/showcase/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.visual.readme | repo_only | examples/visual/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.frontdoor.docs-index | repo_only | docs/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
