@@ -175,7 +175,7 @@ export default function CodeExamples() {
 
   return (
     <section id="code" className="py-[clamp(3.5rem,7vw,6rem)] bg-[color-mix(in_srgb,var(--color-bg-alt)_74%,transparent)] border-y border-[var(--glass-border)]">
-      <div className="container px-4">
+      <div className="container">
         <div className="mb-[2.4rem] grid gap-[0.5rem]">
           <h2 className="font-sans text-[clamp(1.7rem,4.2vw,3rem)] font-[750] leading-[1.1] tracking-[-0.025em] text-[var(--color-text-primary)]">
             See the difference
@@ -209,7 +209,7 @@ export default function CodeExamples() {
         {/* Side-by-side comparison */}
         <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Python panel */}
-          <div className="rounded-2xl overflow-hidden border border-[var(--glass-border)]">
+          <div className="rounded-2xl overflow-hidden border border-[var(--glass-border)] min-w-0">
             <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(255,255,255,0.03)] border-b border-[var(--glass-border)]">
               <div className="flex gap-1.5">
                 <div className="w-3 h-3 rounded-full bg-[#ff5f57]"></div>
@@ -228,7 +228,7 @@ export default function CodeExamples() {
           </div>
 
           {/* Sounio panel */}
-          <div className="rounded-2xl overflow-hidden border border-[var(--color-accent-gold)]/20">
+          <div className="rounded-2xl overflow-hidden border border-[var(--color-accent-gold)]/20 min-w-0">
             <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(201,169,110,0.05)] border-b border-[var(--color-accent-gold)]/20">
               <div className="flex gap-1.5">
                 <div className="w-3 h-3 rounded-full bg-[#ff5f57]"></div>
