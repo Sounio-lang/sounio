@@ -1050,4 +1050,385 @@ pub fn assoc_conflict_witness(cidx: i64) -> i64 with IO, Mut, Panic, Div {
     return maxc
 }
 
+// Exploratory (geometric-bridge gating): chromatic window of the associator
+// conflict graph via greedy max-clique (lower bound on χ) + DSATUR (upper
+// bound). HEURISTIC bounds only. Finding: at T=4 the graph is clique-driven —
+// χ ∈ [8, ~11] with a large clique (ω≥8), i.e. high χ the trivial (near-simplex)
+// way, NOT a route to a new Erdős bound. Motivated the sparse hunt + §11.
+var SAT: [i64; 300] = [0; 300]
+var CLQ: [i64; 300] = [0; 300]
+var BESTCLQ: [i64; 300] = [0; 300]
+var BESTCLEN: i64 = 0
+fn adj(a: i64, b: i64) -> i64 { return BADJ[(a*BIGN + b) as usize] }
+
+fn greedy_clique_size() -> i64 with Mut, Panic {
+    var best = 0
+    BESTCLEN = 0
+    var s = 0
+    while s < BIGN {
+        // build a clique greedily seeded at s
+        var clen = 0
+        CLQ[clen as usize] = s; clen = clen + 1
+        var v = 0
+        while v < BIGN {
+            if v != s {
+                // v adjacent to all current clique members?
+                var ok = 1
+                var t = 0
+                while t < clen { if adj(v, CLQ[t as usize]) == 0 { ok = 0 }; t = t + 1 }
+                if ok == 1 { CLQ[clen as usize] = v; clen = clen + 1 }
+            }
+            v = v + 1
+        }
+        if clen > best {
+            best = clen
+            BESTCLEN = clen
+            var q = 0
+            while q < clen { BESTCLQ[q as usize] = CLQ[q as usize]; q = q + 1 }
+        }
+        s = s + 1
+    }
+    return best
+}
+
+fn dsatur_chi() -> i64 with Mut, Panic {
+    var v = 0
+    while v < BIGN { GCOLOR[v as usize] = 0 - 1; SAT[v as usize] = 0; v = v + 1 }
+    var maxc = 0
+    var done = 0
+    while done < BIGN {
+        // pick uncolored vertex with max saturation, tie -> max degree-ish (first)
+        var pick = 0 - 1; var bestsat = 0 - 1
+        var i = 0
+        while i < BIGN {
+            if GCOLOR[i as usize] < 0 {
+                if SAT[i as usize] > bestsat { bestsat = SAT[i as usize]; pick = i }
+            }
+            i = i + 1
+        }
+        // smallest color not used by neighbors of pick
+        var col = 0; var found = 0
+        while found == 0 {
+            var clash = 0; var w = 0
+            while w < BIGN {
+                if adj(pick, w) == 1 && GCOLOR[w as usize] == col { clash = 1 }
+                w = w + 1
+            }
+            if clash == 0 { found = 1 } else { col = col + 1 }
+        }
+        GCOLOR[pick as usize] = col
+        if col + 1 > maxc { maxc = col + 1 }
+        // update saturation of neighbors (recompute distinct neighbor-colors)
+        var n = 0
+        while n < BIGN {
+            if adj(pick, n) == 1 && GCOLOR[n as usize] < 0 {
+                // count distinct colors among n's neighbors
+                var cnt = 0; var col2 = 0
+                while col2 <= maxc {
+                    var used = 0; var m = 0
+                    while m < BIGN { if adj(n, m) == 1 && GCOLOR[m as usize] == col2 { used = 1 }; m = m + 1 }
+                    if used == 1 { cnt = cnt + 1 }
+                    col2 = col2 + 1
+                }
+                SAT[n as usize] = cnt
+            }
+            n = n + 1
+        }
+        done = done + 1
+    }
+    return maxc
+}
+
+pub fn assoc_chi_window(cidx: i64) -> i64 with IO, Mut, Panic, Div {
+    build_prims(); build_big_probe()
+    build_assoc_conflict_adj(cidx)
+    let lo = greedy_clique_size()
+    let hi = dsatur_chi()
+    print("c="); print_int(cidx); print(": chi in ["); print_int(lo)
+    print(" (clique), "); print_int(hi); print(" (DSATUR)]  edges="); print_int(badj_edges()); print("\n")
+    print("  clique vertices: ")
+    var q = 0
+    while q < BESTCLEN { print_int(BESTCLQ[q as usize]); print(" "); q = q + 1 }
+    print("\n")
+    return hi
+}
+
+// Exploratory: per-target (T, edges, clique, DSATUR) scan looking for χ ≫ ω.
+// Builds the symmetrized conflict graph at each T. (Heuristic bounds; the
+// rigorous sparse gap is §11.)
+fn build_assoc_conflict_adj_T(cidx: i64, T: f64) with Mut, Panic {
+    clear_badj()
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN {
+            let d1 = assoc_normsq(i, j, cidx)
+            let d2 = assoc_normsq(j, i, cidx)
+            if near(d1, T, 1.0e-9) == 1 || near(d2, T, 1.0e-9) == 1 {
+                BADJ[(i*BIGN + j) as usize] = 1
+                BADJ[(j*BIGN + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+pub fn assoc_sparse_hunt(cidx: i64) -> i64 with IO, Mut, Panic, Div {
+    build_prims(); build_big_probe()
+    print("=== sparse-regime hunt (c="); print_int(cidx); print("): chi vs clique per target T ===\n")
+    // candidate targets (exact integer ‖assoc‖² values; scan a fixed honest set)
+    let targets: [i64; 10] = [2, 4, 6, 8, 12, 16, 24, 32, 48, 64]
+    var bestgap = 0
+    var ti = 0
+    while ti < 10 {
+        let T = targets[ti as usize]
+        build_assoc_conflict_adj_T(cidx, T as f64)
+        let e = badj_edges()
+        if e > 0 {
+            let w = greedy_clique_size()
+            let chi = dsatur_chi()
+            let gap = chi - w
+            if gap > bestgap { bestgap = gap }
+            print("  T="); print_int(T); print(": edges="); print_int(e)
+            print(" clique="); print_int(w); print(" chi<="); print_int(chi)
+            print(" gap(chi-clique)="); print_int(gap); print("\n")
+        }
+        ti = ti + 1
+    }
+    print("best (DSATUR-upper - clique-lower) over targets: "); print_int(bestgap)
+    print("  NOTE: heuristic BOUNDS only — NOT a proven chi>omega gap (DSATUR is an\n")
+    print("  upper bound, greedy clique a lower bound). For a RIGOROUS sparse gap see\n")
+    print("  erdos_run_sparse_gap (triangle-free induced subgraph, exact).\n")
+    return bestgap
+}
+
+// Exact max-clique via backtracking (feasible: bounded clique size on these
+// graphs). Gives a rigorous ω; combined with bfs_bipartite (exact χ≥3 test) it
+// pins the χ≥3 part. NOTE: exact χ itself is NOT computed — proving
+// non-k-colorability by backtracking is exponential and infeasible at 137
+// vertices (empirically times out), so χ>ω cannot be certified at this scale;
+// the per-target scan above reports only heuristic (clique, DSATUR) BOUNDS.
+var MAXCLQ: i64 = 0
+fn clique_extend(depth: i64, last: i64) with Mut, Panic {
+    var v = last + 1
+    while v < BIGN {
+        var ok = 1; var t = 0
+        while t < depth { if adj(v, CLQ[t as usize]) == 0 { ok = 0 }; t = t + 1 }
+        if ok == 1 {
+            CLQ[depth as usize] = v
+            if depth + 1 > MAXCLQ { MAXCLQ = depth + 1 }
+            clique_extend(depth + 1, v)
+        }
+        v = v + 1
+    }
+}
+fn exact_max_clique() -> i64 with Mut, Panic { MAXCLQ = 0; clique_extend(0, 0 - 1); return MAXCLQ }
+
+// ============================================================================
+// §11. SPARSE rigorous gap (slice 5): a TRIANGLE-FREE induced subgraph (ω=2)
+//      that is NON-bipartite (χ≥3) is a rigorous χ>ω witness in the sparse
+//      regime — both checks exact (triangle-free by construction; bipartite by
+//      BFS). This is the χ≫ω territory the clique-driven χ≥8 was NOT.
+// ============================================================================
+var SUBV: [i64; 137] = [0; 137]
+var NSUB: i64 = 0
+var SADJ: [i64; 18769] = [0; 18769]   // NSUB×NSUB induced sub-adjacency
+var SCOLOR: [i64; 137] = [0; 137]
+var SQUEUE: [i64; 137] = [0; 137]
+
+fn sadj(a: i64, b: i64) -> i64 { return SADJ[(a*NSUB + b) as usize] }
+
+// Greedily extract a maximal triangle-free induced subgraph from BADJ.
+fn extract_triangle_free() with Mut, Panic {
+    NSUB = 0
+    var v = 0
+    while v < BIGN {
+        var okv = 1
+        var a = 0
+        while a < NSUB {
+            if adj(v, SUBV[a as usize]) == 1 {
+                var b = a + 1
+                while b < NSUB {
+                    if adj(v, SUBV[b as usize]) == 1 && adj(SUBV[a as usize], SUBV[b as usize]) == 1 { okv = 0 }
+                    b = b + 1
+                }
+            }
+            a = a + 1
+        }
+        if okv == 1 { SUBV[NSUB as usize] = v; NSUB = NSUB + 1 }
+        v = v + 1
+    }
+    var i = 0
+    while i < NSUB {
+        var j = 0
+        while j < NSUB { SADJ[(i*NSUB + j) as usize] = adj(SUBV[i as usize], SUBV[j as usize]); j = j + 1 }
+        i = i + 1
+    }
+}
+
+fn sub_edges() -> i64 {
+    var c = 0; var i = 0
+    while i < NSUB { var j = i + 1; while j < NSUB { if sadj(i, j) == 1 { c = c + 1 }; j = j + 1 } i = i + 1 }
+    return c
+}
+
+// Verify the subgraph is triangle-free (ω ≤ 2). Returns 1 if triangle-free.
+fn sub_triangle_free() -> i64 {
+    var i = 0
+    while i < NSUB {
+        var j = i + 1
+        while j < NSUB {
+            if sadj(i, j) == 1 {
+                var k = j + 1
+                while k < NSUB { if sadj(i, k) == 1 && sadj(j, k) == 1 { return 0 }; k = k + 1 }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+// BFS bipartiteness on SADJ. 1 = bipartite, 0 = non-bipartite (χ≥3).
+fn sub_bipartite() -> i64 with Mut, Panic {
+    var i = 0
+    while i < NSUB { SCOLOR[i as usize] = 2; i = i + 1 }
+    var comp = 0
+    while comp < NSUB {
+        if SCOLOR[comp as usize] == 2 {
+            SCOLOR[comp as usize] = 0
+            var head = 0; var tail = 0
+            SQUEUE[tail as usize] = comp; tail = tail + 1
+            while head < tail {
+                let cur = SQUEUE[head as usize]; head = head + 1
+                var w = 0
+                while w < NSUB {
+                    if sadj(cur, w) == 1 {
+                        if SCOLOR[w as usize] == 2 { SCOLOR[w as usize] = 1 - SCOLOR[cur as usize]; SQUEUE[tail as usize] = w; tail = tail + 1 }
+                        else { if SCOLOR[w as usize] == SCOLOR[cur as usize] { return 0 } }
+                    }
+                    w = w + 1
+                }
+            }
+        }
+        comp = comp + 1
+    }
+    return 1
+}
+
+var SDIST: [i64; 137] = [0; 137]
+var SPAR:  [i64; 137] = [0; 137]
+var CYC:   [i64; 137] = [0; 137]
+var CYCLEN: i64 = 0
+var P1: [i64; 137] = [0; 137]
+var P2: [i64; 137] = [0; 137]
+
+// Find a shortest odd cycle in the triangle-free subgraph SADJ (chordless ⇒
+// induced). Fills CYC[0..CYCLEN) with sub-indices; returns length (0 if none).
+fn shortest_odd_cycle() -> i64 with Mut, Panic {
+    var best = 1000000; var bu = 0 - 1; var bw = 0 - 1; var bs = 0 - 1
+    var s = 0
+    while s < NSUB {
+        var i = 0
+        while i < NSUB { SDIST[i as usize] = 0 - 1; i = i + 1 }
+        SDIST[s as usize] = 0
+        var head = 0; var tail = 0; SQUEUE[0 as usize] = s; tail = 1
+        while head < tail {
+            let cur = SQUEUE[head as usize]; head = head + 1
+            var w = 0
+            while w < NSUB {
+                if sadj(cur, w) == 1 && SDIST[w as usize] < 0 {
+                    SDIST[w as usize] = SDIST[cur as usize] + 1; SQUEUE[tail as usize] = w; tail = tail + 1
+                }
+                w = w + 1
+            }
+        }
+        var u = 0
+        while u < NSUB {
+            var w = u + 1
+            while w < NSUB {
+                if sadj(u, w) == 1 && SDIST[u as usize] >= 0 && SDIST[u as usize] == SDIST[w as usize] {
+                    let len = 2 * SDIST[u as usize] + 1
+                    if len < best { best = len; bu = u; bw = w; bs = s }
+                }
+                w = w + 1
+            }
+            u = u + 1
+        }
+        s = s + 1
+    }
+    if bu < 0 { CYCLEN = 0; return 0 }
+    // rebuild BFS tree from bs with parents
+    var i2 = 0
+    while i2 < NSUB { SDIST[i2 as usize] = 0 - 1; SPAR[i2 as usize] = 0 - 1; i2 = i2 + 1 }
+    SDIST[bs as usize] = 0
+    var h2 = 0; var t2 = 0; SQUEUE[0 as usize] = bs; t2 = 1
+    while h2 < t2 {
+        let cur = SQUEUE[h2 as usize]; h2 = h2 + 1
+        var w = 0
+        while w < NSUB {
+            if sadj(cur, w) == 1 && SDIST[w as usize] < 0 {
+                SDIST[w as usize] = SDIST[cur as usize] + 1; SPAR[w as usize] = cur; SQUEUE[t2 as usize] = w; t2 = t2 + 1
+            }
+            w = w + 1
+        }
+    }
+    // P1 = bu..bs, P2 = bw..bs
+    var l1 = 0; var x = bu
+    while x >= 0 { P1[l1 as usize] = x; l1 = l1 + 1; x = SPAR[x as usize] }
+    var l2 = 0; var y = bw
+    while y >= 0 { P2[l2 as usize] = y; l2 = l2 + 1; y = SPAR[y as usize] }
+    // cycle = P1 (bu..bs) then P2 reversed excluding bs (i.e., from index l2-2 down to 0)
+    CYCLEN = 0
+    var a = 0
+    while a < l1 { CYC[CYCLEN as usize] = P1[a as usize]; CYCLEN = CYCLEN + 1; a = a + 1 }
+    var b = l2 - 2
+    while b >= 0 { CYC[CYCLEN as usize] = P2[b as usize]; CYCLEN = CYCLEN + 1; b = b - 1 }
+    return CYCLEN
+}
+
+// 1 if CYC is an induced (chordless) cycle in SADJ, else 0.
+fn cycle_is_induced() -> i64 {
+    var i = 0
+    while i < CYCLEN {
+        var j = i + 1
+        while j < CYCLEN {
+            let adjacent = sadj(CYC[i as usize], CYC[j as usize])
+            // consecutive (incl wrap) must be edges; non-consecutive must be non-edges
+            let consec = if (j == i + 1) || (i == 0 && j == CYCLEN - 1) { 1 } else { 0 }
+            if consec == 1 && adjacent == 0 { return 0 }
+            if consec == 0 && adjacent == 1 { return 0 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+pub fn erdos_run_sparse_gap(cidx: i64, T: i64) -> i64 with IO, Mut, Panic, Div {
+    build_prims(); build_big_probe()
+    build_assoc_conflict_adj_T(cidx, T as f64)
+    extract_triangle_free()
+    let tf = sub_triangle_free()
+    let bip = sub_bipartite()
+    print("=== sparse rigorous gap (c="); print_int(cidx); print(" T="); print_int(T); print(") ===\n")
+    print("triangle-free induced subgraph: NSUB="); print_int(NSUB)
+    print(" sub-edges="); print_int(sub_edges())
+    print(" triangle_free="); print_int(tf); print(" bipartite="); print_int(bip); print("\n")
+    if tf == 1 && bip == 0 {
+        print("=> RIGOROUS sparse gap: triangle-free (omega=2) AND non-bipartite (chi>=3). chi>omega.\n")
+        let L = shortest_odd_cycle()
+        let ind = cycle_is_induced()
+        print("   shortest odd cycle length="); print_int(L); print(" induced="); print_int(ind); print("\n")
+        print("   cycle probe-vertex indices: ")
+        var q = 0
+        while q < CYCLEN { print_int(SUBV[CYC[q as usize] as usize]); print(" "); q = q + 1 }
+        print("\n")
+        return 1
+    }
+    print("=> no proven sparse gap from this (c,T).\n")
+    return 0
+}
+
 pub fn erdos_unit_distance_module_ready() -> i32 { 1 }

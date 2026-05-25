@@ -261,6 +261,38 @@ crescer probe); (b) ligar essa obstrução cromática algébrica de volta a uma
 construção geométrica unit-distance (a ponte real para #508/#704); (c) #704 em
 pathions 32D.
 
+### Iteração 2026-05-25 — ponte alg→geom + regime esparso χ>ω (Fatia 5)
+
+**Gating honesto da ponte (por que χ≥3 não basta):** um grafo unit-distance
+clássico com χ≥3 e coords inteiras é impossível; e mesmo realizando o grafo de
+conflito como unit-distance, χ≥3 não diz nada novo (χ(ℝ²)≥5 já é conhecido). A
+ponte só importa se χ for alto E o regime for o "difícil".
+
+**χ do grafo de conflito é alto mas CLIQUE-DRIVEN.** Medições (clique guloso +
+DSATUR, heurísticas): χ ∈ [8, ~11], com clique ω≥8 (uma K₈ concreta em
+`{e₃,e₁₂,e₁₃,…}`). χ≈ω ⇒ o χ alto vem de uma clique — o regime TRIVIAL para
+unit-distance (K₈ = 7-simplex regular, dá só χ(ℝ⁷)≥8, o bound trivial d+1). O
+regime de Erdős é **χ≫ω** (esparso, clique-poor). χ exato em 137 vértices é
+inviável (provar não-k-colorabilidade por backtracking é exponencial; timeout).
+
+**Resultado RIGOROSO no regime esparso (χ>ω):** extraíndo um subgrafo induzido
+**triangle-free** (ω=2, por construção + verificado) que é **não-bipartido**
+(χ≥3, BFS exato) ⇒ χ>ω com a MENOR clique possível. Concretamente, no grafo de
+conflito T=8 existe um **C₅ induzido** (pentágono sem cordas) em
+`{e₃, e₂+e₆, e₂, e₄, e₈}` ⇒ ω=2, χ=3. Provado em Lean
+(`associator_conflict_induced_C5`: 5 arestas presentes + 5 cordas ausentes,
+`native_decide`, sem `sorry`) e `cWit_is_first`.
+
+**Leitura honesta:** alcançamos o regime esparso χ>ω de forma RIGOROSA — distinto
+do χ≥8 clique-driven. Mas continua sendo separação ALGÉBRICA (Nível 2): um C₅ é
+um pentágono unit-distance trivial; isto NÃO é (ainda) um bound geométrico novo
+para #508/#704. A ponte alg→geom genuína exige χ≫ω **grande** num grafo
+realizável — exatamente a dificuldade do problema aberto, não resolvida aqui.
+
+**Honestidade sobre a fronteira:** as 5 fatias mapearam o que a estrutura
+168/ZD/associador faz para o número cromático (rigorosamente), e onde ela esbarra
+na dificuldade real de Erdős. Não há overclaim de resolução.
+
 ### Infra de base (mantida)
 - Emitter Kretikos pronto para uso (Fase 2, escala — adiado).
 - Objetivo travado: resolver os dois Erdős com Sounio.
@@ -293,12 +325,19 @@ Fatia 4 (quebrar a paridade) — CONCLUÍDA:
    **χ≥3 atingido** (84/84 c, triângulo `{e1,e2,e3}` provado em Lean); paridade
    quebrada. Primeiro χ≥3 do programa; não-associatividade é essencial.
 
-Fatia 5 (próxima — subir χ e ligar à geometria):
-9.  Quão alto vai χ do grafo de conflito (clique/χ exato; crescer probe/dimensão).
-10. **Ponte para unit-distance geométrico** — ligar a obstrução cromática
-    algébrica a uma construção no plano/ℝ^d (o passo real para #508/#704).
-11. 2-coloração explícita do caso associador-DISTÂNCIA (ainda em aberto, menor
-    prioridade — é o lado bipartido).
-12. #704: pathions 32D / escala Kretikos.
+Fatia 5 (ponte + regime esparso) — PARCIAL:
+9.  ~~Quão alto vai χ do grafo de conflito~~ ✅ — χ∈[8,11] mas CLIQUE-driven
+    (ω≥8), regime trivial; χ exato inviável em 137 vts.
+10. ~~Atingir o regime esparso χ>ω rigorosamente~~ ✅ — C₅ induzido (ω=2, χ=3)
+    no T=8, provado em Lean. Foothold no regime difícil.
+11. **Ponte geométrica genuína** (EM ABERTO, o passo real para Erdős): χ≫ω
+    GRANDE num grafo realizável como unit-distance — a dificuldade do problema
+    aberto. Não resolvida.
 
-O objetivo não é "explorar". É **resolver** — com cada passo verificável.
+Fatia 6+ (frente aberta):
+12. Subir o gap χ−ω (procurar subgrafo triangle-free χ=4 tipo Grötzsch; crescer
+    probe/dimensão mantendo clique pequena).
+13. #704: pathions 32D / escala Kretikos.
+
+O objetivo não é "explorar". É **resolver** — com cada passo verificável, e sem
+overclaim quando a fronteira real do problema é atingida.

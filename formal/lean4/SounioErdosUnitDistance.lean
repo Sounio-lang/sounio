@@ -333,6 +333,40 @@ theorem associator_conflict_triangle :
     ∧ assocEdgeWit (e16 1) (e16 3) = true
     ∧ assocEdgeWit (e16 2) (e16 3) = true := by native_decide
 
+-- ===========================================================================
+-- §11. SPARSE rigorous gap (slice 5): the χ≥8 above is CLIQUE-driven (χ≈ω),
+--      the trivial regime for unit-distance. The Erdős-hard regime is χ ≫ ω
+--      (sparse, clique-poor). Here we certify an INDUCED 5-CYCLE in the T=8
+--      associator conflict graph: a pentagon has ω = 2 and χ = 3, so χ > ω with
+--      the *smallest possible* clique — a rigorous foothold in the sparse regime.
+--      (Sounio finds, exactly, a triangle-free induced subgraph that is
+--      non-bipartite; this C₅ is its shortest odd cycle.)
+-- ===========================================================================
+
+/-- Associator-conflict edge at target T=8 (symmetrized), c = cWit. -/
+def assocEdge8 (x y : Nat → Int) : Bool :=
+  (assocNormSqL x y cWit == 8) || (assocNormSqL y x cWit == 8)
+
+/-- THEOREM (slice 5): the five points e₃, e₂+e₆, e₂, e₄, e₈ form an INDUCED
+    5-cycle in the T=8 associator conflict graph (5 cycle edges present, all 5
+    chords absent). An induced C₅ is triangle-free (ω = 2) and non-bipartite
+    (χ = 3), so χ > ω. This is a rigorous witness in the sparse (clique-poor)
+    regime — distinct from the clique-driven χ≥8, and the regime that actually
+    matters for unit-distance chromatic problems. -/
+theorem associator_conflict_induced_C5 :
+    -- 5 cycle edges (e₃ — e₂+e₆ — e₂ — e₄ — e₈ — e₃)
+    assocEdge8 (e16 3) (pair16 2 6) = true
+    ∧ assocEdge8 (pair16 2 6) (e16 2) = true
+    ∧ assocEdge8 (e16 2) (e16 4) = true
+    ∧ assocEdge8 (e16 4) (e16 8) = true
+    ∧ assocEdge8 (e16 8) (e16 3) = true
+    -- 5 chords absent ⇒ chordless ⇒ triangle-free (ω = 2)
+    ∧ assocEdge8 (e16 3) (e16 2) = false
+    ∧ assocEdge8 (e16 3) (e16 4) = false
+    ∧ assocEdge8 (pair16 2 6) (e16 4) = false
+    ∧ assocEdge8 (pair16 2 6) (e16 8) = false
+    ∧ assocEdge8 (e16 2) (e16 8) = false := by native_decide
+
 end Sounio.Erdos
 
 -- Findings, all machine-checked:
