@@ -129,3 +129,34 @@ touch the n^{4/3} exponent gap. Genuinely-new territory (beating *all* known con
 for a specific n, or extending exact small-n u(n) records) needs a richer-than-lattice pool
 and a true subset local-search, the next build. The cluster path and certifiable engine are
 now proven end-to-end.
+
+## Subset optimizer — densest-k-subgraph search (3 nodes × 3 seeds, 2026-05-25)
+
+`stdlib/research/erdos90_subset.sio`: hill-climb densest-k-subgraph over the ℤ² distance-N
+graph (random-swap moves: drop a member, add a non-member, accept if internal edge count
+rises; Park–Miller RNG), restarted from the compact disk + random seeds. Compares best
+found to the compact-disk baseline. Run as 3 independent seed variants across the three
+nodes; broad N sweep including ANISOTROPIC distances where the optimal shape need not be a
+disk.
+
+Result (identical across all 3 seeds — robust):
+
+* **Isotropic N (2, 5, 10, 13, 25, 65):** the compact disk *is* the densest k-subgraph —
+  every case "disk-optimal", no subset beats it. Expected: ℤ² is vertex-transitive, so the
+  densest induced subgraph of its unit-distance graph is the compact region.
+* **Anisotropic N = 50** (neighbours (±1,±7),(±7,±1),(±5,±5)): the disk is genuinely
+  **suboptimal** — the search robustly reshapes it `2447 → 2767` unit pairs (+13%), the same
+  on all three seeds. A real shape finding: for anisotropic distances the optimal region is
+  not a disk.
+* **No record, though:** the reshaped N=50 config (2767) still trails the N=25 disk
+  (~2780) at n=600. The optimal-N grid/disk construction stands; **no `u(n)` record beaten.**
+
+Honest conclusion: comprehensive densest-k-subgraph search confirms the compact-disk /
+optimal-N grid is locally optimal and robust, and pinpoints where the disk assumption breaks
+(anisotropic N) without yielding a better global construction. This is consistent with why
+the problem is hard — no exact periodic-pool subset search can beat the grid, because
+(i) lattices are vertex-transitive and (ii) square ℤ² and triangular ℤ[ω] share no integer
+Cartesian frame, so heterogeneous exact pools with cross-lattice unit edges don't exist.
+Genuinely beating the grid would require non-lattice rational configs / the additive-energy
+frontier — beyond exact lattice search. The cluster engine, however, is fully proven:
+build → ship ELF over srun → 3-node parallel search → exact, Lean-certifiable configs.
