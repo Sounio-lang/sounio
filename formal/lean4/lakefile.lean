@@ -248,3 +248,8 @@ lean_lib «SounioUnitDistanceExact» where
 -- K=Q(sqrt3,sqrt5,sqrt7,sqrt11) (deg 16); fixture ladder + per-axis witnesses.
 @[default_target]
 lean_lib «SounioUnitDistanceField» where
+
+-- HeuleGraph510: machine-checked exact unit-distance certification (auto-generated
+-- from Heule CNP-SAT vtx/edge). Soundness + converse audit in Q(√3,√5,√11).
+@[default_target]
+lean_lib «SounioHeule510» where
