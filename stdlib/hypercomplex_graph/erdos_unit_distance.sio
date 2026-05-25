@@ -561,4 +561,248 @@ pub fn erdos_run_assoc_demo() -> i64 with IO, Mut, Panic, Div {
 // cluster, so the == 4 target is well-defined and captures the surviving
 // unit-distance directions.
 
+// ============================================================================
+// §8. SCALE (slice 3): does ANY surgery produce a NON-bipartite twisted graph
+//     (χ ≥ 3) on a larger integer probe? Verified empirically that the assoc
+//     value histogram {0:6, 4:8, 8:2} is identical across all 168 pairs (the
+//     classes are PSL(2,7)-symmetric), so the ==4 target is universal.
+//
+//     Probe = the COMPLETE set of weight-≤2 binary 16D vectors (1 + 16 + 120 =
+//     137 points) — exhaustive over a natural bounded family, not cherry-picked.
+//     Twisted graph built directly (no lifting), bipartiteness via BFS (O(V+E),
+//     scales; the k^n brute force does not). χ≥3 ⟺ an odd cycle exists.
+// ============================================================================
+
+// Sized for both probes: binary weight-≤2 (137 pts) and signed weight-≤2
+// ({0} ∪ {±e_i} ∪ {e_i+e_j} ∪ {e_i−e_j} = 1+32+120+120 = 273 pts).
+var BIGPROBE: [f64; 4800] = [0.0; 4800]   // up to 300 * 16
+var BIGN:     i64 = 0
+var BADJ:     [i64; 90000] = [0; 90000]   // up to 300 * 300 adjacency
+var BCOLOR:   [i64; 300] = [0; 300]       // 2 = unvisited, else 0/1
+var BQUEUE:   [i64; 300] = [0; 300]
+
+pub fn build_big_probe() with Mut {
+    var i = 0
+    while i < 2192 { BIGPROBE[i as usize] = 0.0; i = i + 1 }
+    BIGN = 1                                  // point 0 = zero vector
+    var a = 0
+    while a < 16 {                            // weight-1
+        BIGPROBE[(BIGN*16 + a) as usize] = 1.0
+        BIGN = BIGN + 1
+        a = a + 1
+    }
+    a = 0
+    while a < 16 {                            // weight-2
+        var b = a + 1
+        while b < 16 {
+            BIGPROBE[(BIGN*16 + a) as usize] = 1.0
+            BIGPROBE[(BIGN*16 + b) as usize] = 1.0
+            BIGN = BIGN + 1
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+// Signed weight-≤2 family: {0} ∪ {±e_i} ∪ {e_i+e_j} ∪ {e_i−e_j} = 273 points.
+pub fn build_big_probe_signed() with Mut {
+    var i = 0
+    while i < 4800 { BIGPROBE[i as usize] = 0.0; i = i + 1 }
+    BIGN = 1                                  // point 0 = zero vector
+    var a = 0
+    while a < 16 {                            // ±e_i
+        BIGPROBE[(BIGN*16 + a) as usize] = 1.0;  BIGN = BIGN + 1
+        BIGPROBE[(BIGN*16 + a) as usize] = 0.0 - 1.0;  BIGN = BIGN + 1
+        a = a + 1
+    }
+    a = 0
+    while a < 16 {                            // e_i + e_j and e_i − e_j
+        var b = a + 1
+        while b < 16 {
+            BIGPROBE[(BIGN*16 + a) as usize] = 1.0; BIGPROBE[(BIGN*16 + b) as usize] = 1.0
+            BIGN = BIGN + 1
+            BIGPROBE[(BIGN*16 + a) as usize] = 1.0; BIGPROBE[(BIGN*16 + b) as usize] = 0.0 - 1.0
+            BIGN = BIGN + 1
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+fn big_point_diff(i: i64, j: i64) with Mut {
+    var k = 0
+    while k < 16 {
+        DIFF[k as usize] = BIGPROBE[(i*16 + k) as usize] - BIGPROBE[(j*16 + k) as usize]
+        k = k + 1
+    }
+}
+
+fn clear_badj() with Mut {
+    var i = 0
+    let n2 = BIGN * BIGN
+    while i < n2 { BADJ[i as usize] = 0; i = i + 1 }
+}
+
+// Linear twisted graph on the big probe for primitive idx: edge iff ||d·v||²==2.
+fn build_big_linear_adj(idx: i64) with Mut, Panic {
+    clear_badj()
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN {
+            big_point_diff(i, j)
+            rmul_into(&DIFF, idx, &!TW)
+            if near(norm_sq(&TW), 2.0, 1.0e-9) == 1 {
+                BADJ[(i*BIGN + j) as usize] = 1
+                BADJ[(j*BIGN + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Associator twisted graph on the big probe for ZD pair p: edge iff ||(d·u)·v||²==4.
+fn build_big_assoc_adj(pair_idx: i64) with Mut, Panic {
+    clear_badj()
+    let u = PAIR_U[pair_idx as usize]
+    let v = PAIR_V[pair_idx as usize]
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN {
+            big_point_diff(i, j)
+            rmul_into(&DIFF, u, &!TMP)
+            rmul_into(&TMP, v, &!TW2)
+            if near(norm_sq(&TW2), 4.0, 1.0e-9) == 1 {
+                BADJ[(i*BIGN + j) as usize] = 1
+                BADJ[(j*BIGN + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// BFS 2-coloring of BADJ. Returns 1 if bipartite (χ ≤ 2), 0 if an odd cycle
+// exists (χ ≥ 3). O(V + E), scales to the full 137-vertex graph.
+fn bfs_bipartite() -> i64 with Mut, Panic {
+    var i = 0
+    while i < BIGN { BCOLOR[i as usize] = 2; i = i + 1 }
+    var comp = 0
+    while comp < BIGN {
+        if BCOLOR[comp as usize] == 2 {
+            BCOLOR[comp as usize] = 0
+            var head = 0
+            var tail = 0
+            BQUEUE[tail as usize] = comp; tail = tail + 1
+            while head < tail {
+                let cur = BQUEUE[head as usize]; head = head + 1
+                var w = 0
+                while w < BIGN {
+                    if BADJ[(cur*BIGN + w) as usize] == 1 {
+                        if BCOLOR[w as usize] == 2 {
+                            BCOLOR[w as usize] = 1 - BCOLOR[cur as usize]
+                            BQUEUE[tail as usize] = w; tail = tail + 1
+                        } else {
+                            if BCOLOR[w as usize] == BCOLOR[cur as usize] { return 0 }
+                        }
+                    }
+                    w = w + 1
+                }
+            }
+        }
+        comp = comp + 1
+    }
+    return 1
+}
+
+// Count edges in current BADJ (upper triangle).
+fn badj_edges() -> i64 {
+    var c = 0
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN { if BADJ[(i*BIGN + j) as usize] == 1 { c = c + 1 }; j = j + 1 }
+        i = i + 1
+    }
+    return c
+}
+
+// Scan all 84 linear + 168 associator surgeries on the 137-point probe.
+// Returns total number of surgeries whose twisted graph is NON-bipartite (χ≥3).
+pub fn erdos_run_scale_search() -> i64 with IO, Mut, Panic, Div {
+    build_prims()
+    build_zd_pairs()
+
+    print("=== Erdos #508/#704 — SCALE search for chi>=3 (odd cycle, BFS) ===\n")
+    print("[binary weight-<=2 family, complete (expect 137)]\n")
+    build_big_probe()
+    let nb_bin = scan_current_probe()
+    print("[signed weight-<=2 family, complete (expect 273)]\n")
+    build_big_probe_signed()
+    let nb_sgn = scan_current_probe()
+
+    let total = nb_bin + nb_sgn
+    print("TOTAL surgeries producing chi>=3 (non-bipartite) across both probes: ")
+    print_int(total); print("\n")
+    return total
+}
+
+// Parity of nonzero coords of probe point `pt` in index range [a,b).
+fn range_parity(pt: i64, a: i64, b: i64) -> i64 {
+    var s = 0; var k = a
+    while k < b { if BIGPROBE[(pt*16 + k) as usize] != 0.0 { s = s + 1 }; k = k + 1 }
+    return s - (s / 2) * 2
+}
+
+// Does coloring-by-(total coord-count parity) properly 2-color current BADJ?
+fn total_parity_2colors() -> i64 {
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN {
+            if BADJ[(i*BIGN + j) as usize] == 1 {
+                if range_parity(i,0,16) == range_parity(j,0,16) { return 0 }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+// Scan both surgery families on the CURRENT big probe; returns # non-bipartite.
+// Also reports how many LINEAR graphs are 2-colored by total coord-sum parity.
+fn scan_current_probe() -> i64 with IO, Mut, Panic, Div {
+    print("  BIGN="); print_int(BIGN); print(":\n")
+    var lin_nb = 0; var lin_totalpar = 0; var le_min = 1000000; var le_max = 0
+    var idx = 0
+    while idx < NPRIM {
+        build_big_linear_adj(idx)
+        let e = badj_edges()
+        if e < le_min { le_min = e }
+        if e > le_max { le_max = e }
+        if bfs_bipartite() == 0 { lin_nb = lin_nb + 1 }
+        if total_parity_2colors() == 1 { lin_totalpar = lin_totalpar + 1 }
+        idx = idx + 1
+    }
+    print("  linear(84):  edges["); print_int(le_min); print(".."); print_int(le_max)
+    print("] non-bip="); print_int(lin_nb)
+    print(" total-parity-2colors="); print_int(lin_totalpar); print("/84\n")
+    var as_nb = 0; var ae_min = 1000000; var ae_max = 0
+    var p = 0
+    while p < NPAIR {
+        build_big_assoc_adj(p)
+        let e = badj_edges()
+        if e < ae_min { ae_min = e }
+        if e > ae_max { ae_max = e }
+        if bfs_bipartite() == 0 { as_nb = as_nb + 1 }
+        p = p + 1
+    }
+    print("  assoc(168):  edges["); print_int(ae_min); print(".."); print_int(ae_max)
+    print("] non-bip="); print_int(as_nb); print("\n")
+    return lin_nb + as_nb
+}
+
 pub fn erdos_unit_distance_module_ready() -> i32 { 1 }

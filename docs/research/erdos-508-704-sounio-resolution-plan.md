@@ -174,6 +174,44 @@ k^n não), e/ou **partir de um grafo unit-distance clássico com χ≥3** (reali
 racional do Moser spindle ou subgrafo estilo de Grey) e perguntar se a cirurgia
 ZD **preserva ou quebra** a não-bipartição. Essa é a pergunta de pesquisa real.
 
+### Iteração 2026-05-25 — escala + busca de χ≥3 (Fatia 3)
+
+Nota: um grafo unit-distance **clássico** com χ≥3 e coords **inteiras** é
+impossível (dist²=1 inteiro ⟹ bipartido; o spindle precisa de coords
+irracionais, que quebram a exatidão do `native_decide`). Então a pergunta foi
+reformulada para o objeto que NÃO é reticulado: o **grafo torcido** (aresta ⟺
+‖M_v(p_i−p_j)‖²==alvo). Como `M_v` é um mapa linear fixo, esse grafo pode em
+princípio conter triângulos (existem três pontos inteiros a dist² mútua 2).
+
+Teste por **bipartição BFS** (O(V+E), escala; o brute-force k^n não), sobre duas
+famílias inteiras **completas** (não cherry-picked):
+- binária peso-≤2: `{0} ∪ {e_i} ∪ {e_i+e_j}` = **137** pontos;
+- com sinal peso-≤2: `{0} ∪ {±e_i} ∪ {e_i±e_j}` = **273** pontos.
+
+**RESULTADO (504 grafos = 252 cirurgias × 2 famílias):**
+- **0 não-bipartidos.** Nenhuma cirurgia (linear ou associador) força χ≥3.
+- Contagens de arestas constantes por família e simetria PSL(2,7) (linear 340 /
+  856; associador 1862 binário, 6528–6692 com sinal — grafos genuinamente
+  distintos, hashes diferentes, exclui bug).
+- **Linear: bipartição é ESTRUTURAL** — a paridade do peso de Hamming total é
+  uma 2-coloração própria de TODOS os 84 grafos lineares em AMBAS as famílias
+  (84/84). Provado em Lean (`linear_surgery_total_parity_2colors`, `native_decide`,
+  sobre o probe binário completo de 137) — não é acidente de tamanho.
+- **Associador: bipartido (BFS) em todos**, mas paridade total/meia-graduação
+  NÃO 2-colore — a 2-coloração explícita é não-óbvia (em aberto).
+
+**Leitura honesta:** as três fatias juntas mostram que a alavanca algébrica está
+validada (o associador age em toda classe) mas a cirurgia baseada em distância,
+sozinha, **não quebra a bipartição** de probes inteiros — para o linear isso é um
+teorema (2-coloração por paridade). Forçar χ≥3 exige quebrar essa paridade.
+
+**Próxima alavanca (Fatia 4):**
+- provar a 2-coloração explícita do caso **associador** (ou achar o invariante);
+- mecanismos que QUEBRAM a paridade total: multiplicação à **esquerda**, ou uma
+  construção de grafo que não seja distância-torcida (rótulo de associador /
+  wave como restrição de cor, curvatura ORC modulada);
+- #704: subir dimensão (pathions 32D) / escala Kretikos.
+
 ### Infra de base (mantida)
 - Emitter Kretikos pronto para uso (Fase 2, escala — adiado).
 - Objetivo travado: resolver os dois Erdős com Sounio.
@@ -193,12 +231,17 @@ Fatia 2 (cirurgia por associador) — CONCLUÍDA:
 4. ~~**Cirurgia por associador** `(p·u)·v`, `u·v=0`, 168 classes, Sounio + Lean~~
    ✅ — 168/168 ativas, 0 elevam χ (negativo honesto, mecanismo validado).
 
-Fatia 3 (próxima, escala — onde χ≥3 pode realmente aparecer):
-5. Teste de **bipartição por BFS** (O(V+E)) substituindo o brute-force k^n, para
-   escalar a dezenas/centenas de vértices.
-6. **Partir de um grafo unit-distance clássico com χ≥3** (Moser spindle racional
-   ou subgrafo de Grey) e medir se a cirurgia ZD/associador preserva ou quebra a
-   não-bipartição — a pergunta de pesquisa real para #508.
-7. #704: subir dimensão (pathions 32D) e/ou escala Kretikos (Fase 2).
+Fatia 3 (escala + busca BFS) — CONCLUÍDA:
+5. ~~Teste de **bipartição por BFS** (O(V+E)) substituindo o brute-force k^n~~ ✅
+   (137 + 273 pontos, 504 grafos, 0 não-bipartidos).
+6. ~~Busca de χ≥3 sobre famílias inteiras completas~~ ✅ — negativo; linear é
+   bipartido por teorema (2-coloração de paridade, provado em Lean).
+
+Fatia 4 (próxima — quebrar a paridade ou caracterizar o invariante):
+7. Provar/achar a 2-coloração explícita do caso **associador** (em aberto).
+8. Mecanismos que QUEBRAM a paridade total: mult. à **esquerda**, two-sided, ou
+   construção de grafo não-distância (rótulo associador/wave como restrição de
+   cor; curvatura ORC modulada via sinkhorn16).
+9. #704: subir dimensão (pathions 32D) e/ou escala Kretikos (Fase 2).
 
 O objetivo não é "explorar". É **resolver** — com cada passo verificável.
