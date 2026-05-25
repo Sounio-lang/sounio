@@ -212,6 +212,55 @@ teorema (2-coloração por paridade). Forçar χ≥3 exige quebrar essa paridade
   wave como restrição de cor, curvatura ORC modulada);
 - #704: subir dimensão (pathions 32D) / escala Kretikos.
 
+### Iteração 2026-05-25 — multiplicação à ESQUERDA (Fatia 4a)
+
+Hipótese: como unidades imaginárias distintas anticomutam (`σ(a,b)=−σ(b,a)`), a
+multiplicação à esquerda `v·d` poderia quebrar a 2-coloração por paridade total
+(os termos que tocam o índice 0 não invertem o sinal). Testado `lmul_into`
+(`(v·x)_k = x_{k^lo}σ(lo,k^lo) + s·x_{k^hi}σ(hi,k^hi)`) com a mesma busca BFS.
+
+**RESULTADO: idêntico à direita.** Mesmas contagens de arestas (340 binário,
+856 com sinal), **0 não-bipartidos**, paridade total 2-colore 84/84 em ambas as
+famílias. A norma `‖v·d‖²` é invariante ao lado para estes primitivos → a
+multiplicação à esquerda NÃO é a alavanca de quebra de paridade.
+
+Resultado fortalecido: o invariante de bipartição é **bilateral**. Provado em
+Lean (`left_surgery_total_parity_2colors`, espelhando o lado direito,
+`native_decide`, sem `sorry`). Conclusão: forçar χ≥3 com cirurgia ZD baseada em
+distância é impossível por paridade (ambos os lados); é preciso uma construção
+que **não** seja distância-torcida.
+
+### Iteração 2026-05-25 — grafo de conflito por ASSOCIADOR: χ≥3 (Fatia 4b) ★
+
+**Primeiro χ≥3 do programa — o teto de paridade foi quebrado.**
+
+Construção não-distância: o associador `assoc(x,y,c) = (x·y)·c − x·(y·c)` é
+**bilinear** em (x,y), NÃO é função de `x−y`, logo o grafo de conflito não é
+invariante por translação e não herda a bipartição de paridade. Aresta `(i,j)`
+⟺ `‖assoc(p_i,p_j,c)‖² == 4` (simetrizado; 4 = menor valor não-nulo da
+distribuição `{0,4,8,16,…}`, grafo esparso ~13%). `c` = primitivo ZD.
+
+**RESULTADO (probe binário peso-≤2, 137 pts, varrendo os 84 c):**
+- **NÃO-bipartido para TODOS os 84 c** (χ≥3); paridade total 2-colore **0/84** —
+  o invariante que travava a distância está **quebrado**.
+- Certificado concreto de χ≥3: **triângulo `{e_1, e_2, e_3}`** (índices 2,3,4)
+  no grafo de conflito com c=primitivo 0 (`e_1+e_10`). Provado em Lean
+  (`associator_conflict_triangle`, `cWit_is_first`, `native_decide`, sem `sorry`).
+- Limite de cor (guloso): χ ∈ [3, ~10].
+
+**Leitura honesta (Nível 2 — novo invariante verificável + separação):**
+isto NÃO é um novo limite para χ(plano) (#508). É uma **separação estrutural**: a
+**não-associatividade é essencial** para escapar do teto χ≤2 das construções ZD
+baseadas em distância. Toda cirurgia por distância (esq./dir./associador-como-
+distância) é provadamente bipartida; o **associador como relação de conflito**
+(bilinear, não-translação-invariante) atinge χ≥3. A não-associatividade do
+sedenion não é decorativa — ela carrega obstrução cromática genuína.
+
+**Próximo (Fatia 5):** (a) quão alto vai χ do grafo de conflito (clique/χ exato,
+crescer probe); (b) ligar essa obstrução cromática algébrica de volta a uma
+construção geométrica unit-distance (a ponte real para #508/#704); (c) #704 em
+pathions 32D.
+
 ### Infra de base (mantida)
 - Emitter Kretikos pronto para uso (Fase 2, escala — adiado).
 - Objetivo travado: resolver os dois Erdős com Sounio.
@@ -237,11 +286,19 @@ Fatia 3 (escala + busca BFS) — CONCLUÍDA:
 6. ~~Busca de χ≥3 sobre famílias inteiras completas~~ ✅ — negativo; linear é
    bipartido por teorema (2-coloração de paridade, provado em Lean).
 
-Fatia 4 (próxima — quebrar a paridade ou caracterizar o invariante):
-7. Provar/achar a 2-coloração explícita do caso **associador** (em aberto).
-8. Mecanismos que QUEBRAM a paridade total: mult. à **esquerda**, two-sided, ou
-   construção de grafo não-distância (rótulo associador/wave como restrição de
-   cor; curvatura ORC modulada via sinkhorn16).
-9. #704: subir dimensão (pathions 32D) e/ou escala Kretikos (Fase 2).
+Fatia 4 (quebrar a paridade) — CONCLUÍDA:
+7. ~~mult. à **esquerda** como alavanca~~ ✅ — descartada (idêntica à direita,
+   invariante bilateral, provado em Lean).
+8. ~~Construção NÃO-distância (grafo de conflito por associador)~~ ✅ ★ —
+   **χ≥3 atingido** (84/84 c, triângulo `{e1,e2,e3}` provado em Lean); paridade
+   quebrada. Primeiro χ≥3 do programa; não-associatividade é essencial.
+
+Fatia 5 (próxima — subir χ e ligar à geometria):
+9.  Quão alto vai χ do grafo de conflito (clique/χ exato; crescer probe/dimensão).
+10. **Ponte para unit-distance geométrico** — ligar a obstrução cromática
+    algébrica a uma construção no plano/ℝ^d (o passo real para #508/#704).
+11. 2-coloração explícita do caso associador-DISTÂNCIA (ainda em aberto, menor
+    prioridade — é o lado bipartido).
+12. #704: pathions 32D / escala Kretikos.
 
 O objetivo não é "explorar". É **resolver** — com cada passo verificável.

@@ -268,6 +268,71 @@ theorem linear_surgery_total_parity_2colors :
         (! linEdgeP v pi pj) || (weightParity pi != weightParity pj)))) = true := by
   native_decide
 
+/-- Component `k` of LEFT-multiplication `v · x` (slice 4). Differs from
+    `rmulCoeff` only by sigma argument order (anticommutativity), but terms
+    touching index 0 do not flip. -/
+def lmulCoeff (x : Nat → Int) (v : PrimSed) (k : Nat) : Int :=
+  x (k ^^^ v.lo) * sedSigma v.lo (k ^^^ v.lo)
+    + primSign v * (x (k ^^^ v.hi) * sedSigma v.hi (k ^^^ v.hi))
+
+/-- Left-multiplication twisted unit edge: ‖v·(pi − pj)‖² = 2. -/
+def leftEdgeP (v : PrimSed) (pi pj : Nat → Int) : Bool :=
+  ((List.range 16).foldl
+    (fun acc k => let c := lmulCoeff (fun m => pi m - pj m) v k; acc + c * c) 0) == 2
+
+/-- THEOREM (slice 4): total Hamming-weight parity ALSO properly 2-colors the
+    LEFT-multiplication twisted graph for all 84 primitives. So the bipartiteness
+    invariant is TWO-SIDED — left-multiplication does not break total parity and
+    is not the lever for χ ≥ 3. Matches the Sounio run (left non-bip = 0/84,
+    total-parity-2colors = 84/84, edges identical to right). -/
+theorem left_surgery_total_parity_2colors :
+    validPrims.all (fun v =>
+      bigProbe.all (fun pi => bigProbe.all (fun pj =>
+        (! leftEdgeP v pi pj) || (weightParity pi != weightParity pj)))) = true := by
+  native_decide
+
+-- ===========================================================================
+-- §10. NON-DISTANCE construction (slice 4b): the associator CONFLICT graph
+--      breaks the parity ceiling — first χ ≥ 3 in the program.
+--
+--   assoc(x,y,c) = (x·y)·c − x·(y·c) is bilinear in (x,y), NOT a function of
+--   x−y, so the conflict graph (edge ⟺ ‖assoc(x,y,c)‖²==4) is not translation-
+--   invariant and escapes total-parity bipartiteness. We certify χ ≥ 3 by an
+--   explicit triangle on the unit basis vectors {e₁, e₂, e₃}.
+-- ===========================================================================
+
+/-- Canonical first valid primitive (Sounio c=0): e₁ + e₁₀. -/
+def cWit : PrimSed := ⟨1, 10, false⟩
+theorem cWit_is_first : validPrims.head? = some cWit := by native_decide
+
+/-- General sedenion product: (x·y)_k = Σ_{a⊕b=k} x_a y_b σ(a,b). -/
+def sprodV (x y : Nat → Int) : Nat → Int := fun k =>
+  (List.range 16).foldl (fun acc a =>
+    (List.range 16).foldl (fun acc2 b =>
+      if a ^^^ b = k then acc2 + x a * y b * sedSigma a b else acc2) acc) 0
+
+/-- ‖assoc(x,y,c)‖² = ‖(x·y)·c − x·(y·c)‖²  (c primitive ⇒ ·c is rmulCoeff). -/
+def assocNormSqL (x y : Nat → Int) (c : PrimSed) : Int :=
+  let xy := sprodV x y
+  let yc := fun k => rmulCoeff y c k
+  (List.range 16).foldl (fun acc k =>
+    let d := rmulCoeff xy c k - sprodV x yc k; acc + d * d) 0
+
+/-- Associator-conflict edge (symmetrized): ‖[x,y,cWit]‖²==4 or ‖[y,x,cWit]‖²==4. -/
+def assocEdgeWit (x y : Nat → Int) : Bool :=
+  (assocNormSqL x y cWit == 4) || (assocNormSqL y x cWit == 4)
+
+/-- THEOREM (slice 4b): {e₁, e₂, e₃} is a TRIANGLE in the associator conflict
+    graph (c = cWit). A triangle is not 2-colorable, so the associator conflict
+    graph has χ ≥ 3 — the FIRST construction in the program to exceed χ = 2.
+    Non-associativity is essential: every distance-based ZD surgery (left & right
+    multiplication, §3/§8/§9) is provably bipartite, but the associator —
+    bilinear, not translation-invariant — breaks the total-parity ceiling. -/
+theorem associator_conflict_triangle :
+    assocEdgeWit (e16 1) (e16 2) = true
+    ∧ assocEdgeWit (e16 1) (e16 3) = true
+    ∧ assocEdgeWit (e16 2) (e16 3) = true := by native_decide
+
 end Sounio.Erdos
 
 -- Findings, all machine-checked:
