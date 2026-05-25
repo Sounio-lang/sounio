@@ -40,6 +40,9 @@ def closure(V0, MOVES, maxv, rcap):
     return order
 
 def complete_edges(VV):
+    # complete + fast: floor-grid candidates -> cheap float screen -> exact verify.
+    # float screen tol 1e-6 >> float error (~1e-12) so NO true unit pair is skipped;
+    # exact ‖·‖²=1 in Q(√3,√5,√11) confirms. Validated == the all-exact method (11553 @2600).
     nums=[(numv(P[0]),numv(P[1])) for P in VV]
     import collections
     grid=collections.defaultdict(list)
@@ -51,6 +54,8 @@ def complete_edges(VV):
             for dy in(-1,0,1): cand.update(grid.get((math.floor(xi)+dx,math.floor(yi)+dy),[]))
         for j in cand:
             if j<=i: continue
+            fx=xi-nums[j][0]; fy=yi-nums[j][1]
+            if abs(fx*fx+fy*fy-1.0)>1e-6: continue
             dd=(VV[i][0]-VV[j][0],VV[i][1]-VV[j][1])
             if is_one(dd[0]*dd[0]+dd[1]*dd[1]): edges.append((i,j))
     return edges
@@ -72,7 +77,7 @@ def main():
     log=open('/tmp/campaign.log','a')
     def emit(s): log.write(s+'\n'); log.flush(); print(s,flush=True)
     emit(f"# campaign start {time.strftime('%Y-%m-%dT%H:%M:%S')}  seed={len(V0)} moves={len(MOVES)}")
-    for (maxv,rcap) in [(2600,6.0),(5000,8.0),(9000,11.0),(15000,15.0),(25000,20.0)]:
+    for (maxv,rcap) in [(2600,6.0),(5000,8.0),(10000,12.0),(20000,18.0),(40000,28.0),(70000,40.0)]:
         t0=time.time()
         VV=closure(V0,MOVES,maxv,rcap); n=len(VV)
         E=complete_edges(VV); te=time.time()

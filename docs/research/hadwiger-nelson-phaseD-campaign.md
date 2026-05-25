@@ -24,20 +24,29 @@ result was **unsound** (it tested a subgraph). It is superseded here.
   **UNSAT ⇒ χ ≥ 6** — on a hit the CNF is dumped and verified by drat-trim + `bv_decide`
   (the Phase C/C.1 pipeline), never trusted raw.
 
-## Sweep result (complete edges)
-Confirmed: size **2600 / 11553** edges → **5-colourable** (sound; corrects the buggy 11545
-figure). Only sizes whose run log actually reports `5col=True` are claimed — no size is
-assumed (the earlier 6000 over-claim taught that). A larger sweep (5k → 25k) runs in the
-background and appends each completed size to the log; any `5col=False` triggers immediate
-drat-trim + `bv_decide` verification before any claim.
+## Edge-detection bottleneck — FIXED
+The first cut did exact field arithmetic on *every* candidate pair in dense cells: **79 s**
+at 2600 vertices. Fix: a **cheap float screen before the exact check** — a true unit pair
+has `float ‖Δ‖² = 1 ± ~1e-12`, so screening `|float‖Δ‖² − 1| < 1e-6` (tolerance ≫ float
+error, so **no true edge is skipped**) sends only near-unit pairs to the exact `‖·‖²=1`
+verifier. Validated: identical edge set to the all-exact method (11553 @ 2600), and the
+exact verifier is now called only ~once per real edge.
 
-**Key engineering finding — the bottleneck is exact edge detection, not SAT.** At 2600
-vertices the complete-edge step took **79 s** while the 5-colourability SAT solve took **<1 s**.
-The floor-grid is quadratic in cell occupancy, and the de Grey graph is *dense* near the
-origin (cells hold many points), so edge detection — not colouring — is what blocks scale.
-A real campaign must first replace it with a structure-aware method (move-translate bulk +
-targeted non-move check, a k-d tree, or exploiting the lattice). This is concrete,
-bounded engineering and is the first thing the campaign needs before more compute helps.
+Result: **79.2 s → 0.61 s at 2600 (≈130×)**; the cost is now the SAT solve, as it should be.
+
+## Sweep result (complete edges, fast)
+Confirmed `5col=True` (sound, complete edges) — only sizes the run log actually reports:
+
+| vertices | edges | edge time | SAT time | 5-colourable |
+|---|---|---|---|---|
+| 2 600 | 11 553 | 1 s | <1 s | yes |
+| 5 000 | 21 313 | 2 s | <1 s | yes |
+| 10 000 | 56 925 | 6 s | 24 s | yes |
+
+Larger sizes (20k, 40k, 70k) continue in the background; each is appended only when the log
+confirms it. Any `5col=False` triggers immediate drat-trim + `bv_decide` verification before
+any claim. With edges fixed, **SAT 5-colourability is now the scaling cost** (24 s at 10k and
+growing) — the next bottleneck a real campaign hits.
 
 ## What a genuine campaign still needs (and a session cannot supply)
 - **Sustained compute** at Polymath scale (10⁴–10⁶ vertices) and beyond brute enlargement.
