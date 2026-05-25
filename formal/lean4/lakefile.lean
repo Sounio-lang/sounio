@@ -258,3 +258,9 @@ lean_lib «SounioHeule510» where
 -- χ≥5 is the external drat-trim-VERIFIED UNSAT cert (different trust base).
 @[default_target]
 lean_lib «SounioHeule510Chromatic» where
+
+-- HeuleGraph510 NOT 4-colourable, Lean-verified-checker grade (bv_decide:
+-- bitblast + cadical + verified-in-Lean LRAT check). χ≥5 Phase C.1 — same
+-- compiled-reflection trust as native_decide, no external drat-trim/HOL4.
+@[default_target]
+lean_lib «SounioHeule510NotColorable» where
