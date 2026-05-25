@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.sunflower-168-sounio-note
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.sunflower-168-sounio-note
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Sunflowers on the Verified 168 / ZD / Surgical Set System (Erdős [20])
 
 **Status:** Level 1 (conceptual dictionary) + Level 2 (machine-checked witnesses)

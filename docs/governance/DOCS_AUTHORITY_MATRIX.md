@@ -26,7 +26,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.architects-guide | repo_only | docs/ARCHITECTS_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.async-runtime | repo_only | docs/architecture/ASYNC_RUNTIME.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.compiler-maturity-blueprint | repo_only | docs/architecture/compiler-maturity-blueprint.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.architecture.compiler-roadmap | repo_only | docs/architecture/COMPILER_ROADMAP.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.cps-pipeline-integration | repo_only | docs/architecture/CPS_PIPELINE_INTEGRATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.cybernetics-api-reference | repo_only | docs/architecture/CYBERNETICS_API_REFERENCE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.cybernetics-layer-2 | repo_only | docs/architecture/CYBERNETICS_LAYER_2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -49,6 +48,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.architecture.truth-frontier | repo_only | docs/architecture/truth-frontier.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.truth-layers | repo_only | docs/architecture/truth-layers.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.announcement | archived | docs/archived/ANNOUNCEMENT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.archived.architecture | archived | docs/archived/ARCHITECTURE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.archived.compiler-roadmap | archived | docs/archived/COMPILER_ROADMAP.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.garden-rosetta | archived | docs/archived/GARDEN_ROSETTA.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.gemini | archived | docs/archived/GEMINI.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.getting-started-duplicates.check-sounio-guide | archived | docs/archived/getting-started-duplicates/CHECK_SOUNIO_GUIDE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -59,9 +60,13 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.archived.getting-started-duplicates.sounio-style-guide | archived | docs/archived/getting-started-duplicates/SOUNIO_STYLE_GUIDE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.handoff | archived | docs/archived/HANDOFF.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.history | archived | docs/archived/HISTORY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.archived.implementation-summary | archived | docs/archived/IMPLEMENTATION_SUMMARY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.integracao-modelos-cientificos | archived | docs/archived/INTEGRACAO_MODELOS_CIENTIFICOS.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.archived.internal-implementation-summary | archived | docs/archived/INTERNAL_IMPLEMENTATION_SUMMARY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.archived.internal-plan-typesystem-performance-staticanalysis-migration | archived | docs/archived/INTERNAL_PLAN_TypeSystem_Performance_StaticAnalysis_Migration.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.lsp-llm-ready-plan | archived | docs/archived/LSP_LLM_READY_PLAN.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.plan-original | archived | docs/archived/PLAN_ORIGINAL.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.archived.plan-typesystem-performance-staticanalysis-migration | archived | docs/archived/PLAN_TypeSystem_Performance_StaticAnalysis_Migration.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.roadmap-18-month | archived | docs/archived/ROADMAP_18_MONTH.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.roadmap-proximos-passos | archived | docs/archived/ROADMAP_PROXIMOS_PASSOS.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.roadmap-v0.5.0-part3 | archived | docs/archived/ROADMAP_v0.5.0_PART3.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -91,6 +96,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.r3-0-transitive-alias-chain.synthesis | repo_only | docs/audit/r3_0_transitive_alias_chain/SYNTHESIS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r3-1-tup-cache-collision-fix.dispatch | repo_only | docs/audit/r3_1_tup_cache_collision_fix/DISPATCH.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r3-1-tup-cache-collision-fix.synthesis | repo_only | docs/audit/r3_1_tup_cache_collision_fix/SYNTHESIS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.readme | repo_only | docs/audit/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-hessian-diagonal | repo_only | docs/audit/windows_assert_a64_parity/AD_HESSIAN_DIAGONAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-hessian-offdiagonal | repo_only | docs/audit/windows_assert_a64_parity/AD_HESSIAN_OFFDIAGONAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-shadows-first-order | repo_only | docs/audit/windows_assert_a64_parity/AD_SHADOWS_FIRST_ORDER.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -105,7 +111,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.brand.sounio-brand-pack-v4-complete.00-readme.font-licenses | repo_only | docs/brand/Sounio_Brand_Pack_v4_COMPLETE/00_README/FONT_LICENSES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.brand.sounio-brand-pack-v4-complete.00-readme.readme | repo_only | docs/brand/Sounio_Brand_Pack_v4_COMPLETE/00_README/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.competitive-position-2026 | repo_only | docs/COMPETITIVE_POSITION_2026.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.compiler.architecture | repo_only | docs/compiler/ARCHITECTURE.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.async-design | repo_only | docs/compiler/ASYNC_DESIGN.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.closure-type-theory | repo_only | docs/compiler/CLOSURE_TYPE_THEORY.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.confidence-effect-design | repo_only | docs/compiler/CONFIDENCE_EFFECT_DESIGN.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -200,11 +205,13 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.guide.egc-depth-guide | repo_only | docs/guide/EGC_DEPTH_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.installation | repo_only | docs/guide/installation.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.llm-programming-guide | repo_only | docs/guide/LLM_PROGRAMMING_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.guide.llm-programming-guide-pt | repo_only | docs/guide/LLM_PROGRAMMING_GUIDE_PT.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.minimum-viable-sounio | repo_only | docs/guide/MINIMUM_VIABLE_SOUNIO.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.programming | repo_only | docs/guide/programming.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.qnn-performance-guide | repo_only | docs/guide/QNN_PERFORMANCE_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.sounio-definitive-guide | repo_only | docs/guide/SOUNIO_DEFINITIVE_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.sounio-gotchas | repo_only | docs/guide/SOUNIO_GOTCHAS.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.guide.sounio-gotchas-pt | repo_only | docs/guide/SOUNIO_GOTCHAS_PT.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.sounio-quick-start | repo_only | docs/guide/SOUNIO_QUICK_START.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.sounio-style-guide | repo_only | docs/guide/SOUNIO_STYLE_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.tutorial | repo_only | docs/guide/tutorial.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -218,7 +225,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.implementation.gpu-compiler-contracts | repo_only | docs/implementation/GPU_COMPILER_CONTRACTS.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.hot-reload-complete | historical | docs/implementation/HOT_RELOAD_COMPLETE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.implementation-complete-report | historical | docs/implementation/IMPLEMENTATION_COMPLETE_REPORT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.implementation.implementation-summary | historical | docs/implementation/IMPLEMENTATION_SUMMARY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.migration-guide | historical | docs/implementation/MIGRATION_GUIDE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.mv-core-checklist | repo_only | docs/implementation/MV_CORE_CHECKLIST.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.native-backend-sovereignty | historical | docs/implementation/NATIVE_BACKEND_SOVEREIGNTY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -227,7 +233,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.implementation.paper-artifact-packaging-spec | repo_only | docs/implementation/PAPER_ARTIFACT_PACKAGING_SPEC.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.phase3-swarm-parallel-summary | historical | docs/implementation/PHASE3_SWARM_PARALLEL_SUMMARY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.phase3-validation | historical | docs/implementation/PHASE3_VALIDATION.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.implementation.plan-typesystem-performance-staticanalysis-migration | historical | docs/implementation/PLAN_TypeSystem_Performance_StaticAnalysis_Migration.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.production-readyness | repo_only | docs/implementation/PRODUCTION_READYNESS.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.quick-fixes-summary | historical | docs/implementation/QUICK_FIXES_SUMMARY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.rustless-complete | historical | docs/implementation/RUSTLESS_COMPLETE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -256,7 +261,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.implementation.gpu-compiler-contracts | repo_only | docs/internal/implementation/GPU_COMPILER_CONTRACTS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.hot-reload-complete | repo_only | docs/internal/implementation/HOT_RELOAD_COMPLETE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.implementation-complete-report | repo_only | docs/internal/implementation/IMPLEMENTATION_COMPLETE_REPORT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.internal.implementation.implementation-summary | repo_only | docs/internal/implementation/IMPLEMENTATION_SUMMARY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.migration-guide | repo_only | docs/internal/implementation/MIGRATION_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.mv-core-checklist | repo_only | docs/internal/implementation/MV_CORE_CHECKLIST.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.native-backend-sovereignty | repo_only | docs/internal/implementation/NATIVE_BACKEND_SOVEREIGNTY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -265,7 +269,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.implementation.paper-artifact-packaging-spec | repo_only | docs/internal/implementation/PAPER_ARTIFACT_PACKAGING_SPEC.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.phase3-swarm-parallel-summary | repo_only | docs/internal/implementation/PHASE3_SWARM_PARALLEL_SUMMARY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.phase3-validation | repo_only | docs/internal/implementation/PHASE3_VALIDATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.internal.implementation.plan-typesystem-performance-staticanalysis-migration | repo_only | docs/internal/implementation/PLAN_TypeSystem_Performance_StaticAnalysis_Migration.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.production-readyness | repo_only | docs/internal/implementation/PRODUCTION_READYNESS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.quick-fixes-summary | repo_only | docs/internal/implementation/QUICK_FIXES_SUMMARY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.rustless-complete | repo_only | docs/internal/implementation/RUSTLESS_COMPLETE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -365,6 +368,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.commutator-associator-identity | historical | docs/research/commutator_associator_identity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.delta-epistemic-gradual-compilation-paper | historical | docs/research/delta_epistemic_gradual_compilation_paper.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-algebra-review | repo_only | docs/research/epistemic_algebra_review.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.fano-arcs-blocking-sounio-note | historical | docs/research/fano-arcs-blocking-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fisher-matrix-fix | historical | docs/research/FISHER_MATRIX_FIX.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.gradual-epistemic-positioning | historical | docs/research/gradual_epistemic_positioning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.hyper-uncertainty-parenthesization-report | historical | docs/research/HYPER_UNCERTAINTY_PARENTHESIZATION_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -409,10 +413,12 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.subptx-fmad-invariance | historical | docs/research/subptx_fmad_invariance.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-phase-h-complete | historical | docs/research/subptx_phase_h_complete.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-sinkhorn16-2iter | historical | docs/research/subptx_sinkhorn16_2iter.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.sunflower-168-sounio-note | historical | docs/research/sunflower-168-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.variance-of-associator | historical | docs/research/variance_of_associator.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.while-loop-bug-investigation | historical | docs/research/WHILE_LOOP_BUG_INVESTIGATION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zeta-variance-deep-investigation | historical | docs/research/zeta_variance_deep_investigation.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zeta-variance-fix-plan | historical | docs/research/zeta_variance_fix_plan.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.roadmap.2026-ontology-units-knowledge-plan | repo_only | docs/roadmap/2026_ontology_units_knowledge_plan.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.roadmap.2026-q2-research-milestones | repo_only | docs/roadmap/2026_Q2_research_milestones.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.serious-language.compiler-maturity-snapshot | repo_only | docs/serious-language/compiler-maturity-snapshot.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.serious-language.conformance-spine | repo_only | docs/serious-language/conformance-spine.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -452,6 +458,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.examples.neuroreceptor-pet.results.readme | repo_only | examples/neuroreceptor_pet/results/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.pbpk.readme | repo_only | examples/pbpk/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.real-world.readme | repo_only | examples/real_world/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.examples.semantic-orc.readme | repo_only | examples/semantic_orc/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.showcase.readme | repo_only | examples/showcase/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.visual.readme | repo_only | examples/visual/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.frontdoor.docs-index | repo_only | docs/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
