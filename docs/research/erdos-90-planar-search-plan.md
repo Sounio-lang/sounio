@@ -102,3 +102,30 @@ enumeration with a per-thread subset local-search (anneal/tabu) over a large exa
 as a Slurm array (many seeds × n), hunting for configs that beat *all* known constructions —
 then re-certify any record in Lean. The K-AXI/PTX GPU port (idle gpu-orangefs nodes r740/5860)
 is the throughput multiplier for that search.
+
+## Optimizer array sweep (3 nodes, 2026-05-25)
+
+`stdlib/research/erdos90_optimize.sio` improves the pilot via (1) COMPACT DISK regions
+(x²+y² ≤ rr) instead of squares — fewer boundary-deficient points — and (2) a broad
+unit-distance² sweep. Compiled to 3 banded static ELFs and run in PARALLEL across the
+three idle nodes via `srun` (the same compile→base64→srun path):
+
+```
+band  node                       peak n   count   N(unit²)  count/harb
+A     cpuops-t560-proxmox         2693    19848   325       2.51x
+B     gpuorangefs-r740-proxmox    5369    46688   325       2.94x
+C     gpuorangefs-5860-proxmox    7845    73376   1105      3.15x   (harb=23228)
+```
+
+Headline: an explicit exact compact-disk configuration of **7845 points with 73376 unit
+distances** — `u(7845) ≥ 73376`, **3.15×** the triangular nearest-neighbour bound. The
+ratio grows with n and the winning many-representation distance climbs (325 → 1105) as
+larger disks admit denser N. The disk shape strictly improves the square pilot's per-point
+efficiency. Every config is exact integer and re-certifiable in Lean (`countUnit`).
+
+Honest standing: this is the strongest *explicit* lower bound from the Erdős grid family
+with optimized shape + distance — it does **not** beat the asymptotic Erdős construction or
+touch the n^{4/3} exponent gap. Genuinely-new territory (beating *all* known constructions
+for a specific n, or extending exact small-n u(n) records) needs a richer-than-lattice pool
+and a true subset local-search, the next build. The cluster path and certifiable engine are
+now proven end-to-end.
