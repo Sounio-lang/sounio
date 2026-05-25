@@ -144,4 +144,64 @@ theorem moser_spindle_certified :
     (chromaticNumber = 4) := by
   exact ⟨unit_pairs_are_the_11_edges, spindle_edge_count, spindle_chromatic_eq_4⟩
 
+-- ===========================================================================
+-- §6. Second fixture: de Grey's base graph H (unit hexagon + centre).
+--     "The 7 points of the hexagonal lattice of norm ≤ 1": centre O plus the 6
+--     vertices of a UNIT-side regular hexagon (circumradius 1). 12 unit edges
+--     (6 spokes + 6 sides), χ = 3. Lives in ℚ(√3); coords scaled ×2 ⇒ a unit
+--     edge has exact squared length 4. This self-test fixture validates the
+--     certifier (and the converse audit) on de Grey's own named base graph
+--     before it is pointed at a full χ ≥ 5 construction (Phase B′).
+-- ===========================================================================
+
+/-- de Grey's H: centre + unit-hexagon vertices, scaled ×2 (integer ℚ(√3) coords). -/
+def coordsH : Nat → Pt
+  | 0 => ((0,0,0,0),  (0,0,0,0))    -- O = centre
+  | 1 => ((2,0,0,0),  (0,0,0,0))    -- (1,0)·2
+  | 2 => ((1,0,0,0),  (0,1,0,0))    -- (1/2, √3/2)·2  = (1, √3)
+  | 3 => ((-1,0,0,0), (0,1,0,0))    -- (-1/2, √3/2)·2 = (-1, √3)
+  | 4 => ((-2,0,0,0), (0,0,0,0))    -- (-1,0)·2
+  | 5 => ((-1,0,0,0), (0,-1,0,0))   -- (-1/2,-√3/2)·2 = (-1,-√3)
+  | 6 => ((1,0,0,0),  (0,-1,0,0))   -- (1/2,-√3/2)·2  = (1,-√3)
+  | _ => ((0,0,0,0),  (0,0,0,0))
+
+/-- Unit edge in H's ×2 scaling has squared length 2² = 4. -/
+def unit4 : K := (4, 0, 0, 0)
+def isUnitH (i j : Nat) : Bool := d2 (coordsH i) (coordsH j) == unit4
+
+/-- The 12 edges of H (lex order): 6 spokes O–k and 6 hexagon sides. -/
+def claimedEdgesH : List (Nat × Nat) :=
+  [(0,1),(0,2),(0,3),(0,4),(0,5),(0,6),(1,2),(1,6),(2,3),(3,4),(4,5),(5,6)]
+
+/-- **Exactness + converse audit for H.** The exact unit-distance pairs among the
+    7 vertices are *exactly* the 12 claimed edges — no missing edge, and (the
+    subtler condition) no undeclared pair sits at exact distance 1. -/
+theorem degrey_H_unit_edges :
+    pairs.filter (fun p => isUnitH p.1 p.2) = claimedEdgesH := by native_decide
+
+theorem degrey_H_edge_count :
+    (pairs.filter (fun p => isUnitH p.1 p.2)).length = 12 := by native_decide
+
+def properAssignH (a k : Nat) : Bool :=
+  pairs.all (fun p => (! isUnitH p.1 p.2) || colorOf a k p.1 != colorOf a k p.2)
+def kColorableH (k : Nat) : Bool :=
+  (List.range (k ^ nverts)).any (fun a => properAssignH a k)
+def chromaticNumberH : Nat :=
+  ((List.range (nverts + 1)).find? (fun k => kColorableH k)).getD nverts
+
+/-- **χ(H) = 3.** -/
+theorem degrey_H_chromatic_eq_3 : chromaticNumberH = 3 := by native_decide
+
+/-- **Both fixtures certified.** The exact unit-distance + chromatic certifier is
+    validated on the two hand-checkable landmarks: the Moser spindle (χ=4, ℚ(√3,√11))
+    and de Grey's base graph H (χ=3, ℚ(√3)) — each with the full converse audit
+    (the exact unit-distance graph equals exactly the claimed edge set). The
+    certifier is ready to be pointed at a real χ ≥ 5 construction once its exact
+    coordinates / generator field are supplied. -/
+theorem fixtures_certified :
+    (pairs.filter (fun p => isUnit p.1 p.2) = claimedEdges) ∧ (chromaticNumber = 4) ∧
+    (pairs.filter (fun p => isUnitH p.1 p.2) = claimedEdgesH) ∧ (chromaticNumberH = 3) := by
+  exact ⟨unit_pairs_are_the_11_edges, spindle_chromatic_eq_4,
+         degrey_H_unit_edges, degrey_H_chromatic_eq_3⟩
+
 end Sounio.UnitDistanceExact
