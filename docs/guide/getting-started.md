@@ -86,7 +86,7 @@ Compile it:
 
 The gate-backed public summary in this repo is:
 
-- `artifacts/stdlib/stdlib_reliability_status.v1.json`: `81 pass / 0 fail / 1 skip / 82 total`
+- `artifacts/stdlib/stdlib_reliability_status.v1.json`: `251 pass / 0 fail / 0 skip / 251 total`
 - `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`: `pass` for `fmri` and `darwin_pbpk`
 - `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`: `pass` for 7 required hyper lanes
 - `artifacts/omega/gpu_runtime_attest_gate.v1.json`: `pass` for the current GPU runtime smoke set on the checked GPU lane

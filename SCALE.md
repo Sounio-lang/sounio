@@ -11,14 +11,14 @@ bash scripts/dev/measure_repo_scale.sh --json artifacts/audit/repo_scale.v1.json
 
 | Metric | Typical measured value |
 |---|---:|
-| Tracked `.sio` files | 4,233 |
-| Tracked `.sio` lines | ~1,841,736 |
-| `self-hosted/` lines | ~541,761 |
-| `stdlib/` lines | ~306,630 |
-| `tests/` lines | ~141,519 |
+| Tracked `.sio` files | 4,246 |
+| Tracked `.sio` lines | ~1,845,161 |
+| `self-hosted/` lines | ~545,760 |
+| `stdlib/` lines | ~305,586 |
+| `tests/` lines | ~141,770 |
 | `examples/` lines | ~70,400 |
-| CI gate scripts (`scripts/ci/*gate*.sh`) | 129 |
-| Working tree disk | ~8 GB (includes artifacts, formal/.lake, etc.) |
+| CI gate scripts (`scripts/ci/*gate*.sh`) | 142 |
+| Working tree disk | ~8.2 GB (includes artifacts, formal/.lake, etc.) |
 
 ## What people get wrong
 
