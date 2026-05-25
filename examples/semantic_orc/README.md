@@ -1,10 +1,10 @@
 <!-- docs:meta
 topic_id: repo.examples.semantic-orc.readme
 authority: repo_only
-audience: researchers
-last_validated: 2026-05-25
-validated_by: Codex
-source_of_truth: examples/semantic_orc/
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.semantic-orc.readme
 -->
 
 # Semantic Entropic Transport for Ollivier-Ricci Curvature, Sounio-Native Lane
