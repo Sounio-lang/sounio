@@ -74,3 +74,31 @@ kernel tests candidate `N` as literals (`consider(N)`), not via an `NCAND[]` arr
   specific `n`, or extending exact `u(n)` records — the high-risk prize.
 * The GPU is a **proposer**, not a prover: every reported config is re-certified in Lean.
 * This does **not** touch the `n^{4/3}` exponent gap; that is not finite-search-accessible.
+
+## Cluster run (validated, 2026-05-25)
+
+The Sounio search ELF ran on the live Slurm cluster via `slurm-jobs/erdos90/run_on_cluster.sh`
+(direct-srun fallback; the BeagleCockpit MCP tools were not loaded this session). Topology
+discovered: compute nodes do **not** mount `/workspace` — the only shared FS is OrangeFS at
+`/orangefs/training` (pvfs2), invisible to the login container. Path used: compile to a
+static self-contained ELF locally → ship bytes over `srun` stdin as base64 → decode + run on
+the node → results on stdout.
+
+Scaled cluster run on `cpuops-t560-proxmox` (8 cores), n up to 16384, wall = 8s:
+
+```
+n       harb(n)   bestGrid   N(unit²)   ratio
+9216    27315     88320      1105       3.23x
+12544   37244     130816     1105       3.51x
+16384   48708     181504     1105       3.69x   (N=1105=5·13·17, r₂=32)
+```
+
+The grid-over-triangular margin grows with `n` (the winning many-representation distance
+climbs 5→25→65→325→1105 as `r₂(N)` increases), exactly the Erdős phenomenon at scale — an
+explicit large-`n` lower bound `u(16384) ≥ 181504`, in exact integer arithmetic.
+
+Next (genuine open frontier, needs the array-job/optimizer build): replace the full-square
+enumeration with a per-thread subset local-search (anneal/tabu) over a large exact pool, run
+as a Slurm array (many seeds × n), hunting for configs that beat *all* known constructions —
+then re-certify any record in Lean. The K-AXI/PTX GPU port (idle gpu-orangefs nodes r740/5860)
+is the throughput multiplier for that search.
