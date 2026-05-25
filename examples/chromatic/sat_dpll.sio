@@ -1,0 +1,153 @@
+// Native Sounio DPLL SAT core (complete: unit propagation + decision/backtrack).
+// Decides k-colourability CNFs.  Test: K_V 4-colouring.
+//   V=5 (K5, chi=5) -> NOT 4-colourable -> UNSAT (prints 0)
+//   V=4 (K4, chi=4) -> 4-colourable     -> SAT   (prints 1)
+// CNF stored flat: `lits` with 0-terminated clauses. var id = vertex*4 + colour + 1.
+// All state is local (Sounio arrays pass by value), flat arrays per native codegen.
+
+fn main() -> i64 with IO, Mut {
+    let V: i64 = 5          // <- set 5 (UNSAT) or 4 (SAT)
+    let K: i64 = 4          // colours
+    let N: i64 = V * K      // number of boolean vars (1..N)
+
+    var lits: [i64; 4000] = [0; 4000]
+    var lp: i64 = 0         // write cursor into lits
+
+    // at-least-one colour per vertex
+    var v: i64 = 0
+    while v < V {
+        var cc: i64 = 0
+        while cc < K { lits[lp] = v*K + cc + 1; lp = lp + 1; cc = cc + 1 }
+        lits[lp] = 0; lp = lp + 1
+        v = v + 1
+    }
+    // at-most-one colour per vertex
+    v = 0
+    while v < V {
+        var a: i64 = 0
+        while a < K {
+            var b: i64 = a + 1
+            while b < K {
+                lits[lp] = 0 - (v*K + a + 1); lp = lp + 1
+                lits[lp] = 0 - (v*K + b + 1); lp = lp + 1
+                lits[lp] = 0; lp = lp + 1
+                b = b + 1
+            }
+            a = a + 1
+        }
+        v = v + 1
+    }
+    // edges of K_V (all pairs): endpoints differ in every colour
+    var x: i64 = 0
+    while x < V {
+        var y: i64 = x + 1
+        while y < V {
+            var cc2: i64 = 0
+            while cc2 < K {
+                lits[lp] = 0 - (x*K + cc2 + 1); lp = lp + 1
+                lits[lp] = 0 - (y*K + cc2 + 1); lp = lp + 1
+                lits[lp] = 0; lp = lp + 1
+                cc2 = cc2 + 1
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+    let litlen: i64 = lp
+
+    // ---- DPLL ----
+    var assign: [i64; 256] = [0; 256]   // 0 unassigned, 1 true, 2 false ; index by var
+    var tvar: [i64; 256] = [0; 256]
+    var tkind: [i64; 256] = [0; 256]    // 1 decision, 0 implied
+    var tlen: i64 = 0
+    var result: i64 = 0 - 1             // -1 unknown
+
+    while result == (0 - 1) {
+        // unit propagation to fixpoint or conflict
+        var conflict: i64 = 0
+        var changed: i64 = 1
+        while changed == 1 {
+            if conflict == 1 { changed = 0 }
+            else {
+                changed = 0
+                var ci: i64 = 0
+                while ci < litlen {
+                    if conflict == 1 { ci = litlen }
+                    else {
+                        var k: i64 = ci
+                        var sat: i64 = 0
+                        var nun: i64 = 0
+                        var lastlit: i64 = 0
+                        while lits[k] != 0 {
+                            let lit = lits[k]
+                            var vr: i64 = lit
+                            if lit < 0 { vr = 0 - lit }
+                            var want: i64 = 1
+                            if lit < 0 { want = 2 }
+                            let av = assign[vr]
+                            if av == want { sat = 1 }
+                            else {
+                                if av == 0 { nun = nun + 1; lastlit = lit }
+                            }
+                            k = k + 1
+                        }
+                        if sat == 0 {
+                            if nun == 0 { conflict = 1 }
+                            else {
+                                if nun == 1 {
+                                    var vr2: i64 = lastlit
+                                    if lastlit < 0 { vr2 = 0 - lastlit }
+                                    var val: i64 = 1
+                                    if lastlit < 0 { val = 2 }
+                                    assign[vr2] = val
+                                    tvar[tlen] = vr2; tkind[tlen] = 0; tlen = tlen + 1
+                                    changed = 1
+                                }
+                            }
+                        }
+                        ci = k + 1
+                    }
+                }
+            }
+        }
+
+        if conflict == 1 {
+            // backtrack: pop implied; at the last decision, flip it to implied and resume
+            var done: i64 = 0
+            while done == 0 {
+                if tlen == 0 { result = 0; done = 1 }     // no decision left -> UNSAT
+                else {
+                    tlen = tlen - 1
+                    let vv = tvar[tlen]
+                    if tkind[tlen] == 1 {
+                        var old: i64 = assign[vv]
+                        var nv: i64 = 1
+                        if old == 1 { nv = 2 }
+                        assign[vv] = nv
+                        tvar[tlen] = vv
+                        tkind[tlen] = 0
+                        tlen = tlen + 1
+                        done = 1
+                    } else {
+                        assign[vv] = 0
+                    }
+                }
+            }
+        } else {
+            // pick unassigned var
+            var u: i64 = 0
+            var vv2: i64 = 1
+            while vv2 <= N {
+                if u == 0 { if assign[vv2] == 0 { u = vv2 } }
+                vv2 = vv2 + 1
+            }
+            if u == 0 { result = 1 }           // SAT
+            else {
+                assign[u] = 1
+                tvar[tlen] = u; tkind[tlen] = 1; tlen = tlen + 1
+            }
+        }
+    }
+    println(result)
+    result
+}
