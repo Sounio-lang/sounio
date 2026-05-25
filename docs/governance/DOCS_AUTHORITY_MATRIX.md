@@ -184,6 +184,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.dissertation.results.prior-evolution-sprint-summary-v1 | repo_only | docs/dissertation/results/prior_evolution_sprint_summary_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.prior-evolution-sprint-summary-v2 | repo_only | docs/dissertation/results/prior_evolution_sprint_summary_v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.sobol-pce-semaglutide-v1 | repo_only | docs/dissertation/results/sobol_pce_semaglutide_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.visao-geral | repo_only | docs/dissertation/VISAO_GERAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.curated-packages | repo_only | docs/ecosystem/CURATED_PACKAGES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.ecosystem-roadmap-2026 | repo_only | docs/ecosystem/ECOSYSTEM_ROADMAP_2026.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.pkg-manager-sota-position | repo_only | docs/ecosystem/PKG_MANAGER_SOTA_POSITION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -204,6 +205,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.governance.docs-conventions | repo_only | docs/governance/DOCS_CONVENTIONS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.check-sounio-guide | repo_only | docs/guide/CHECK_SOUNIO_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.egc-depth-guide | repo_only | docs/guide/EGC_DEPTH_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.guide.getting-started-pt | repo_only | docs/guide/getting-started_PT.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.installation | repo_only | docs/guide/installation.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.llm-programming-guide | repo_only | docs/guide/LLM_PROGRAMMING_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.llm-programming-guide-pt | repo_only | docs/guide/LLM_PROGRAMMING_GUIDE_PT.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
