@@ -293,6 +293,32 @@ realizável — exatamente a dificuldade do problema aberto, não resolvida aqui
 168/ZD/associador faz para o número cromático (rigorosamente), e onde ela esbarra
 na dificuldade real de Erdős. Não há overclaim de resolução.
 
+### Iteração 2026-05-25 — χ−ω num grafo REALIZÁVEL (Fatia 6): NULL informativo
+
+Insight: um grafo com aresta ⟺ `‖p_i−p_j‖²==T` sobre pontos INTEIROS em ℝ¹⁶ É um
+grafo unit-distance (escala 1/√T → arestas = distância 1) — **realizável** e
+exato, ao contrário do grafo de conflito por associador (não-distância). Ponto
+natural Sounio: os **84 primitivos** `e_lo±e_hi`.
+
+Distribuição de `‖diff‖²` (84 primitivos): T=2 (630), **T=4 (2646, denso)**, T=6
+(210, mais esparso). Buscando χ>ω esparso (subgrafo triangle-free não-bipartido):
+- T=6: grafo INTEIRO triangle-free mas **bipartido** (χ=2).
+- T=2, T=4: **clique-driven** (têm triângulos); a parte triangle-free é bipartida.
+- Contraste no conjunto genérico 137-binário (Euclidiano): **idem** — bipartido /
+  clique-driven em T=2,4,6.
+
+**RESULTADO: NULL.** Nenhum grafo unit-distance realizável (primitivos OU genérico)
+exibe χ>ω no regime esparso. O χ>2 só aparece via cliques (triângulos).
+
+**Leitura honesta (e o porquê da ponte falhar, com precisão):** o gap esparso
+χ>ω existe SÓ na relação de **associador (não-distância, não-realizável)** —
+slice 5, C₅ induzido. As versões **realizáveis** (distância Euclidiana) perdem
+esse gap: suas regiões triangle-free são bipartidas; χ>2 só clique-driven. Ou
+seja, a não-associatividade que cria ciclos ímpares clique-poor é **incompatível
+com a realizabilidade Euclidiana** neste conjunto de pontos. Essa é a obstrução
+estrutural concreta à ponte — não "não achei", mas "o gap mora exatamente na
+parte não-realizável".
+
 ### Infra de base (mantida)
 - Emitter Kretikos pronto para uso (Fase 2, escala — adiado).
 - Objetivo travado: resolver os dois Erdős com Sounio.
@@ -334,10 +360,17 @@ Fatia 5 (ponte + regime esparso) — PARCIAL:
     GRANDE num grafo realizável como unit-distance — a dificuldade do problema
     aberto. Não resolvida.
 
-Fatia 6+ (frente aberta):
-12. Subir o gap χ−ω (procurar subgrafo triangle-free χ=4 tipo Grötzsch; crescer
-    probe/dimensão mantendo clique pequena).
-13. #704: pathions 32D / escala Kretikos.
+Fatia 6 (χ−ω em grafo realizável) — NULL informativo:
+12. ~~Grafo unit-distance realizável (Euclidiano) sobre os 84 primitivos / 137~~
+    ✅ — bipartido (T=6) ou clique-driven (T=2,4); SEM χ>ω esparso. O gap mora
+    só na relação de associador NÃO-realizável (slice 5). Obstrução à ponte
+    identificada com precisão.
+
+Frente aberta (não resolvida):
+13. Construir o gap χ>ω num grafo genuinamente realizável — exige uma relação
+    realizável que herde a estrutura de ciclo-ímpar clique-poor do associador
+    (não óbvio que exista; é a dificuldade do problema aberto).
+14. #704: pathions 32D / escala Kretikos.
 
 O objetivo não é "explorar". É **resolver** — com cada passo verificável, e sem
 overclaim quando a fronteira real do problema é atingida.
