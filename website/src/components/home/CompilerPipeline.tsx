@@ -1,4 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
+import { publicContract } from '../../data/artifactStatus';
+
+const { bootstrap } = publicContract;
+const hashLabel = bootstrap.recordedSha256
+  ? `SHA-256 ${bootstrap.recordedSha256.slice(0, 12)}…`
+  : 'gen2 == gen3 parity verified';
 
 const STAGES = [
   {
@@ -61,7 +67,7 @@ const STAGES = [
     sub: 'x86-64',
     color: 'var(--color-accent-gold)',
     icon: '⚙',
-    desc: 'Register allocation + instruction selection targeting x86-64 System V ABI. Emits .text, .data, .bss sections. No LLVM dependency — the backend is written in Sounio.',
+    desc: 'Register allocation + instruction selection targeting x86-64 System V ABI via the self-hosted native backend. No LLVM required for the default bin/souc workflow.',
     example: 'mov rax, [rsp+8]  ; load Knowledge value',
   },
   {
@@ -70,8 +76,8 @@ const STAGES = [
     sub: 'verified fixed point',
     color: '#22c55e',
     icon: '✓',
-    desc: 'Self-contained x86-64 ELF. The compiler compiles itself: stage2 == stage3 byte-for-byte (md5=7b91e249). A fixed-point self-hosting chain is the strongest evidence of semantic consistency.',
-    example: 'md5(gen2.elf) == md5(gen3.elf)',
+    desc: `Self-contained x86-64 ELF. The compiler compiles itself: ${bootstrap.fixedPointChain}. Recorded ${hashLabel}. A fixed-point self-hosting chain is the strongest evidence of semantic consistency.`,
+    example: 'sha256(gen2.elf) == sha256(gen3.elf)',
   },
 ];
 

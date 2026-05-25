@@ -62,7 +62,8 @@ On the current repository snapshot, `souc info` for that JIT artifact reports:
 - Cranelift JIT enabled
 - LLVM disabled in the checked artifact
 - GPU codegen disabled in the checked JIT artifact
-- LSP, SMT, ontology, distributed, and package-manager features disabled in the checked artifact
+- LSP, SMT, distributed, and package-manager features disabled in the checked artifact
+- ontology resolution CLI enabled natively via `souc ontology <resolve|search|ancestors|is-subclass>`
 
 The repository also ships a separate checked GPU artifact:
 
