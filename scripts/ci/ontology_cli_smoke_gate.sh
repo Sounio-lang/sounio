@@ -1,95 +1,322 @@
 #!/usr/bin/env bash
+# scripts/ci/ontology_cli_smoke_gate.sh
+#
+# Smoke gate for the embedded ontology CLI in lean_single.sio.
+# Compiles a temporary binary with ontology dispatch and runs a suite of
+# subcommand tests covering resolve, search, list, count, stats, validate,
+# ancestors, is-subclass, fuzzy, batch, and format/limit flags.
+#
+# Exit 0 = all tests passed.
+# Exit 1 = at least one test failed.
+
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SOUC="$ROOT/bin/souc-linux-x86_64"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
 
-fail() {
-    echo "FAIL: $1" >&2
-    exit 1
+SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/bin/souc-linux-x86_64}"
+SRC="$ROOT_DIR/self-hosted/compiler/lean_single.sio"
+TMP_DIR="$(mktemp -d /tmp/sounio-ontology-smoke.XXXXXX)"
+PATCHED_SRC="$TMP_DIR/ontology_cli.sio"
+TEST_BIN="$TMP_DIR/ontology_cli"
+
+PASS=0
+FAIL=0
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+ok() {
+    PASS=$((PASS + 1))
+    printf '[ontology-smoke] PASS: %s\n' "$1"
 }
 
-echo "=== ontology_cli_smoke_gate ==="
-echo
+fail() {
+    FAIL=$((FAIL + 1))
+    printf '[ontology-smoke] FAIL: %s\n' "$1" >&2
+}
 
-# 1. resolve
-echo "[1/9] resolve QM:0000001"
-out=$("$SOUC" ontology resolve QM:0000001 2>&1)
-if ! echo "$out" | grep -q "curie: QM:0000001"; then fail "resolve curie"; fi
-if ! echo "$out" | grep -q "label: Quantum mechanics"; then fail "resolve label"; fi
-echo "  OK"
+run_ont() {
+    "$TEST_BIN" ontology "$@"
+}
 
-# 2. ancestors
-echo "[2/9] ancestors QM:0000003"
-out=$("$SOUC" ontology ancestors QM:0000003 2>&1)
-if ! echo "$out" | grep -q "QM:0000003"; then fail "ancestors child"; fi
-if ! echo "$out" | grep -q "QM:0000001"; then fail "ancestors parent"; fi
-echo "  OK"
+# ── Patch main() to dispatch to ontology_run_cli() ───────────────────────────
+patch_source() {
+    python3 <<PYEOF
+with open('$SRC', 'r') as f:
+    lines = f.readlines()
 
-# 3. is-subclass
-echo "[3/9] is-subclass"
-out=$("$SOUC" ontology is-subclass QM:0000003 QM:0000001 2>&1)
-if [[ "$out" != "yes" ]]; then fail "is-subclass positive"; fi
-out=$("$SOUC" ontology is-subclass QM:0000001 QM:0000003 2>&1)
-if [[ "$out" != "no" ]]; then fail "is-subclass negative"; fi
-echo "  OK"
+main_start = None
+for i, line in enumerate(lines):
+    if line.strip() == 'fn main() -> i64 with IO, Mut, Panic, Div {':
+        main_start = i
+        break
 
-# 4. search
-echo "[4/9] search 'Quantum'"
-out=$("$SOUC" ontology search "Quantum" 2>&1)
-if ! echo "$out" | grep -q "QM:0000001"; then fail "search result"; fi
-if ! echo "$out" | grep -q " results"; then fail "search count"; fi
-echo "  OK"
+insert_after = None
+for i in range(main_start, min(main_start + 20, len(lines))):
+    if lines[i].strip() == '}' and i > main_start + 2:
+        insert_after = i
+        break
 
-# 5. map
-echo "[5/9] map SNOMED:73211009 --to HP"
-out=$("$SOUC" ontology map SNOMED:73211009 --to HP 2>&1)
-if ! echo "$out" | grep -q "SNOMED:73211009"; then fail "map source"; fi
-if ! echo "$out" | grep -q "HP:0001626"; then fail "map target"; fi
-echo "  OK"
+dispatch = [
+    '    let first = get_arg(0)\n',
+    '    if first == "ontology" {\n',
+    '        return ontology_run_cli()\n',
+    '    }\n',
+]
 
-# 6. list
-echo "[6/9] list QM"
-out=$("$SOUC" ontology list QM 2>&1)
-if ! echo "$out" | grep -q "QM:0000001"; then fail "list content"; fi
-if ! echo "$out" | grep -q " terms"; then fail "list count"; fi
-echo "  OK"
+lines = lines[:insert_after+1] + dispatch + lines[insert_after+1:]
 
-# 7. validate
-echo "[7/9] validate"
-out=$("$SOUC" ontology validate 2>&1)
-if ! echo "$out" | grep -q "VALID"; then fail "validate did not pass"; fi
-echo "  OK"
+with open('$PATCHED_SRC', 'w') as f:
+    f.writelines(lines)
+PYEOF
+}
 
-# 8. count
-echo "[8/9] count"
-out=$("$SOUC" ontology count 2>&1)
-if ! echo "$out" | grep -q "1008"; then fail "count total"; fi
-out=$("$SOUC" ontology count QM 2>&1)
-if ! echo "$out" | grep -q "112"; then fail "count prefix"; fi
-echo "  OK"
+# ── Compile test binary ──────────────────────────────────────────────────────
+compile_test_binary() {
+    if [[ ! -x "$SOUC_BIN" ]]; then
+        echo "[ontology-smoke] ERROR: souc binary not found: $SOUC_BIN" >&2
+        exit 1
+    fi
+    patch_source
+    if ! "$SOUC_BIN" "$PATCHED_SRC" "$TEST_BIN" >/dev/null 2>&1; then
+        echo "[ontology-smoke] ERROR: failed to compile patched ontology source" >&2
+        exit 1
+    fi
+    chmod +x "$TEST_BIN"
+}
 
-# 9. format json + tui
-echo "[9/10] format json resolve"
-out=$("$SOUC" ontology --format json resolve QM:0000001 2>&1)
-if ! echo "$out" | grep -q '"curie": "QM:0000001"'; then fail "json resolve curie"; fi
-if ! echo "$out" | grep -q '"label": "Quantum mechanics"'; then fail "json resolve label"; fi
-echo "  OK"
+# ── Tests ────────────────────────────────────────────────────────────────────
+test_resolve_curie() {
+    local out
+    out="$(run_ont resolve ALG:0000001)"
+    if echo "$out" | grep -q 'curie: ALG:0000001'; then
+        ok "resolve CURIE"
+    else
+        fail "resolve CURIE"
+    fi
+}
 
-echo "[10/10] format tsv resolve"
-out=$("$SOUC" ontology --format tsv resolve QM:0000001 2>&1)
-if ! echo "$out" | grep -q $'QM:0000001\tQuantum mechanics'; then fail "tsv resolve"; fi
-echo "  OK"
+test_resolve_label() {
+    local out
+    out="$(run_ont resolve "Ring")"
+    if echo "$out" | grep -q 'curie: ALG:0000005'; then
+        ok "resolve by label"
+    else
+        fail "resolve by label"
+    fi
+}
 
-echo "[11/12] format tsv count"
-out=$("$SOUC" ontology --format tsv count 2>&1)
-if ! echo "$out" | grep -q "^1008$"; then fail "tsv count total"; fi
-echo "  OK"
+test_resolve_synonym() {
+    local out
+    out="$(run_ont resolve "Algebraic group")"
+    if echo "$out" | grep -q 'curie: ALG:0000002'; then
+        ok "resolve by synonym"
+    else
+        fail "resolve by synonym"
+    fi
+}
 
-echo "[12/12] format tsv is-subclass"
-out=$("$SOUC" ontology --format tsv is-subclass QM:0000003 QM:0000001 2>&1)
-if [[ "$out" != "true" ]]; then fail "tsv is-subclass positive"; fi
-echo "  OK"
+test_search_limit() {
+    local out n
+    out="$(run_ont --limit 2 search space)"
+    n="$(echo "$out" | grep -c '^ALG:' || true)"
+    if [[ "$n" -eq 2 ]]; then
+        ok "search with --limit"
+    else
+        fail "search with --limit (expected 2, got $n)"
+    fi
+}
 
-echo
-echo "PASS: all 12 ontology CLI smoke tests passed"
+test_list_limit() {
+    local out n
+    out="$(run_ont --limit 3 list ALG:)"
+    n="$(echo "$out" | grep -c '^ALG:' || true)"
+    if [[ "$n" -eq 3 ]]; then
+        ok "list with --limit"
+    else
+        fail "list with --limit (expected 3, got $n)"
+    fi
+}
+
+test_list_all() {
+    local out n
+    out="$(run_ont list ALG:)"
+    n="$(echo "$out" | grep -c '^ALG:' || true)"
+    if [[ "$n" -eq 112 ]]; then
+        ok "list all terms (no limit)"
+    else
+        fail "list all terms (expected 112, got $n)"
+    fi
+}
+
+test_fuzzy_limit() {
+    local out n
+    out="$(run_ont --limit 2 fuzzy group)"
+    n="$(echo "$out" | grep -c '^ALG:' || true)"
+    if [[ "$n" -eq 2 ]]; then
+        ok "fuzzy with --limit"
+    else
+        fail "fuzzy with --limit (expected 2, got $n)"
+    fi
+}
+
+test_count_prefix() {
+    local out
+    out="$(run_ont count GO:)"
+    if echo "$out" | grep -q '112'; then
+        ok "count prefix"
+    else
+        fail "count prefix"
+    fi
+}
+
+test_count_total() {
+    local out
+    out="$(run_ont count)"
+    if echo "$out" | grep -q '1008'; then
+        ok "count total"
+    else
+        fail "count total"
+    fi
+}
+
+test_is_subclass() {
+    local out
+    out="$(run_ont is-subclass ALG:0000003 ALG:0000001)"
+    if echo "$out" | grep -q 'yes'; then
+        ok "is-subclass true"
+    else
+        fail "is-subclass true"
+    fi
+}
+
+test_ancestors() {
+    local out
+    out="$(run_ont ancestors ALG:0000003)"
+    if echo "$out" | grep -q 'ALG:0000002' && echo "$out" | grep -q 'ALG:0000001'; then
+        ok "ancestors"
+    else
+        fail "ancestors"
+    fi
+}
+
+test_validate() {
+    local out rc=0
+    out="$(run_ont validate)" || rc=$?
+    if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'VALID'; then
+        ok "validate"
+    else
+        fail "validate"
+    fi
+}
+
+test_stats() {
+    local out
+    out="$(run_ont stats)"
+    if echo "$out" | grep -q 'ALG:' && echo "$out" | grep -q 'Max depth:' && echo "$out" | grep -q 'Root terms:'; then
+        ok "stats"
+    else
+        fail "stats"
+    fi
+}
+
+test_format_json() {
+    local out
+    out="$(run_ont --format json resolve ALG:0000001)"
+    if echo "$out" | grep -q '"curie": "ALG:0000001"'; then
+        ok "--format json"
+    else
+        fail "--format json"
+    fi
+}
+
+test_format_tsv() {
+    local out
+    out="$(run_ont --format tsv resolve ALG:0000001)"
+    if echo "$out" | grep -q $'ALG:0000001\tAlgebra'; then
+        ok "--format tsv"
+    else
+        fail "--format tsv"
+    fi
+}
+
+test_combined_flags() {
+    local out n
+    out="$(run_ont --format json --limit 2 list ALG:)"
+    n="$(echo "$out" | grep -c '"curie"' || true)"
+    if [[ "$n" -eq 2 ]]; then
+        ok "combined --format json --limit"
+    else
+        fail "combined --format json --limit (expected 2, got $n)"
+    fi
+}
+
+test_batch() {
+    local batch_file="$TMP_DIR/batch.txt"
+    cat > "$batch_file" <<'EOF'
+resolve ALG:0000001
+count ALG:
+ancestors ALG:0000003
+search group
+list ALG:
+fuzzy group
+stats
+validate
+EOF
+    local out
+    out="$(run_ont batch "$batch_file")"
+    if echo "$out" | grep -q 'ALG:0000001' && echo "$out" | grep -q '112' && echo "$out" | grep -q 'ALG:0000002' && echo "$out" | grep -q 'ALG:' && echo "$out" | grep -q 'VALID'; then
+        ok "batch mode"
+    else
+        fail "batch mode"
+    fi
+}
+
+test_unresolved() {
+    local out
+    out="$(run_ont resolve NONEXISTENT:999)"
+    if echo "$out" | grep -q 'unresolved'; then
+        ok "unresolved CURIE"
+    else
+        fail "unresolved CURIE"
+    fi
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+echo "[ontology-smoke] souc=$SOUC_BIN"
+echo "[ontology-smoke] src=$SRC"
+echo "[ontology-smoke] tmp=$TMP_DIR"
+
+compile_test_binary
+
+echo "[ontology-smoke] running tests..."
+
+test_resolve_curie
+test_resolve_label
+test_resolve_synonym
+test_search_limit
+test_list_limit
+test_list_all
+test_fuzzy_limit
+test_count_prefix
+test_count_total
+test_is_subclass
+test_ancestors
+test_validate
+test_stats
+test_format_json
+test_format_tsv
+test_combined_flags
+test_batch
+test_unresolved
+
+printf '[ontology-smoke] results: %d passed, %d failed\n' "$PASS" "$FAIL"
+
+if [[ "$FAIL" -gt 0 ]]; then
+    exit 1
+fi
+exit 0

@@ -36112,6 +36112,8 @@ var TUI_INPUT_BUF: [i8; 8] = [0; 8]
 var HASH_KEYS: [i64; 2048] = [0; 2048]
 var HASH_VALS: [i32; 2048] = [0; 2048]
 var HASH_BUILT: i64 = 0
+var SORTED_IDX: [i32; 1008] = [0; 1008]
+var SORTED_BUILT: i64 = 0
 
 var BATCH_BUF: [i8; 4096] = [0; 4096]
 
@@ -36243,6 +36245,41 @@ fn str_contains(haystack: string, needle: string) -> bool {
     false
 }
 
+
+fn str_cmp(a: string, b: string) -> i64 {
+    let la = str_len(a)
+    let lb = str_len(b)
+    let min = if la < lb { la } else { lb }
+    var i: i64 = 0
+    while i < min {
+        let ca = str_char_at(a, i)
+        let cb = str_char_at(b, i)
+        if ca < cb { return -1 }
+        if ca > cb { return 1 }
+        i = i + 1
+    }
+    if la < lb { return -1 }
+    if la > lb { return 1 }
+    0
+}
+
+fn str_to_i64(s: string) -> i64 {
+    let n = str_len(s)
+    var i: i64 = 0
+    var neg = false
+    var val: i64 = 0
+    if n > 0 && str_char_at(s, 0) == 45 {
+        neg = true
+        i = 1
+    }
+    while i < n {
+        let c = str_char_at(s, i)
+        if c < 48 || c > 57 { break }
+        val = val * 10 + (c - 48)
+        i = i + 1
+    }
+    if neg { -val } else { val }
+}
 fn ontology_store_get(idx: i32) -> OntologyTerm {
     if idx == 0 {
         var x = ontology_store_make("ALG:0000001", "Algebra", "The study of mathematical symbols and the rules for manipulating these symbols.", "https://sounio.org/ontology/ALG_0000001", "local")
@@ -41863,24 +41900,47 @@ fn hash_curie(curie: string) -> i64 {
 }
 
 fn ontology_index_build() with Mut {
-    if HASH_BUILT != 0 { return }
-    let cap: i64 = 2048
-    var idx: i64 = 0
-    while idx < 1008 {
-        let term = ontology_store_get(idx as i32)
-        let h = hash_curie(term.curie)
-        var slot = h % cap
-        while slot < cap && HASH_KEYS[slot as usize] != 0 {
-            slot = slot + 1
-            if slot >= cap { slot = 0 }
+    if HASH_BUILT == 0 {
+        let cap: i64 = 2048
+        var idx: i64 = 0
+        while idx < 1008 {
+            let term = ontology_store_get(idx as i32)
+            let h = hash_curie(term.curie)
+            var slot = h % cap
+            while slot < cap && HASH_KEYS[slot as usize] != 0 {
+                slot = slot + 1
+                if slot >= cap { slot = 0 }
+            }
+            HASH_KEYS[slot as usize] = h
+            HASH_VALS[slot as usize] = idx as i32
+            idx = idx + 1
         }
-        HASH_KEYS[slot as usize] = h
-        HASH_VALS[slot as usize] = idx as i32
-        idx = idx + 1
+        HASH_BUILT = 1
     }
-    HASH_BUILT = 1
+    if SORTED_BUILT == 0 {
+        var i: i64 = 0
+        while i < 1008 {
+            SORTED_IDX[i as usize] = i as i32
+            i = i + 1
+        }
+        var swapped = true
+        while swapped {
+            swapped = false
+            var j: i64 = 0
+            while j < 1007 {
+                let a = SORTED_IDX[j as usize]
+                let b = SORTED_IDX[j as usize + 1]
+                if str_cmp(ontology_store_get(a).curie, ontology_store_get(b).curie) > 0 {
+                    SORTED_IDX[j as usize] = b
+                    SORTED_IDX[j as usize + 1] = a
+                    swapped = true
+                }
+                j = j + 1
+            }
+        }
+        SORTED_BUILT = 1
+    }
 }
-
 fn ontology_store_resolve_fast(curie: string) -> OntologyTerm with Mut {
     ontology_index_build()
     let cap: i64 = 2048
@@ -41901,20 +41961,39 @@ fn ontology_store_resolve_fast(curie: string) -> OntologyTerm with Mut {
     ontology_term_empty()
 }
 
-fn ontology_store_resolve_local(curie: string) -> OntologyTerm with Mut {
-    let fast = ontology_store_resolve_fast(curie)
+fn ontology_store_resolve_local(query: string) -> OntologyTerm with Mut {
+    let fast = ontology_store_resolve_fast(query)
     if ontology_term_found(fast) { return fast }
     var idx: i64 = 0
     while idx < 1008 {
         let term = ontology_store_get(idx as i32)
-        if term.curie == curie {
-            return term
+        if term.curie == query { return term }
+        if term.label == query { return term }
+        var sidx: i64 = 0
+        while sidx < term.synonyms_len {
+            if term.synonyms[sidx as usize] == query { return term }
+            sidx = sidx + 1
         }
         idx = idx + 1
     }
     ontology_term_empty()
 }
 
+fn ontology_prefix_lower_bound(prefix: string) -> i64 with Mut {
+    if SORTED_BUILT == 0 { ontology_index_build() }
+    var lo: i64 = 0
+    var hi: i64 = 1008
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        let term = ontology_store_get(SORTED_IDX[mid as usize])
+        if str_cmp(term.curie, prefix) < 0 {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    lo
+}
 fn ontology_store_search_local(query: string) -> OntologyTermList {
     var out = ontology_term_list_new()
     var idx: i64 = 0
@@ -42141,6 +42220,94 @@ fn ontology_count_terms(prefix: string) -> i64 {
     count
 }
 
+
+fn ontology_stats() -> i64 with IO, Mut {
+    var alg: i64 = 0
+    var chebi: i64 = 0
+    var chebi_alt: i64 = 0
+    var go: i64 = 0
+    var hp: i64 = 0
+    var hpo: i64 = 0
+    var loinc: i64 = 0
+    var part: i64 = 0
+    var phys: i64 = 0
+    var qm: i64 = 0
+    var snomed: i64 = 0
+    var other: i64 = 0
+    var max_depth: i64 = 0
+    var roots: i64 = 0
+    var idx: i64 = 0
+    while idx < 1008 {
+        let term = ontology_store_get(idx as i32)
+        if starts_with(term.curie, "ALG:") { alg = alg + 1 }
+        else if starts_with(term.curie, "CHEBI:") { chebi = chebi + 1 }
+        else if starts_with(term.curie, "ChEBI:") { chebi_alt = chebi_alt + 1 }
+        else if starts_with(term.curie, "GO:") { go = go + 1 }
+        else if starts_with(term.curie, "HP:") { hp = hp + 1 }
+        else if starts_with(term.curie, "HPO:") { hpo = hpo + 1 }
+        else if starts_with(term.curie, "LOINC:") { loinc = loinc + 1 }
+        else if starts_with(term.curie, "PART:") { part = part + 1 }
+        else if starts_with(term.curie, "PHYS:") { phys = phys + 1 }
+        else if starts_with(term.curie, "QM:") { qm = qm + 1 }
+        else if starts_with(term.curie, "SNOMED:") { snomed = snomed + 1 }
+        else { other = other + 1 }
+        var current = term.curie
+        var depth = 0
+        while depth < 12 && str_len(current) > 0 {
+            let t = ontology_store_resolve_local(current)
+            if !ontology_term_found(t) { break }
+            if t.parents_len == 0 { break }
+            current = t.parents[0]
+            depth = depth + 1
+        }
+        if depth > max_depth { max_depth = depth }
+        if term.parents_len == 0 { roots = roots + 1 }
+        idx = idx + 1
+    }
+    print("ALG: ")
+    print_int(alg as i32)
+    println("")
+    print("CHEBI: ")
+    print_int(chebi as i32)
+    println("")
+    print("ChEBI: ")
+    print_int(chebi_alt as i32)
+    println("")
+    print("GO: ")
+    print_int(go as i32)
+    println("")
+    print("HP: ")
+    print_int(hp as i32)
+    println("")
+    print("HPO: ")
+    print_int(hpo as i32)
+    println("")
+    print("LOINC: ")
+    print_int(loinc as i32)
+    println("")
+    print("PART: ")
+    print_int(part as i32)
+    println("")
+    print("PHYS: ")
+    print_int(phys as i32)
+    println("")
+    print("QM: ")
+    print_int(qm as i32)
+    println("")
+    print("SNOMED: ")
+    print_int(snomed as i32)
+    println("")
+    print("Other: ")
+    print_int(other as i32)
+    println("")
+    print("Max depth: ")
+    print_int(max_depth as i32)
+    println("")
+    print("Root terms: ")
+    print_int(roots as i32)
+    println("")
+    0
+}
 fn tui_read_byte() -> i64 with IO {
     let n = syscall6(0, 0, &TUI_INPUT_BUF, 1, 0, 0, 0)
     if n > 0 {
@@ -42541,12 +42708,87 @@ fn ontology_run_batch_line(line: string, format_mode: string) -> i64 with IO, Mu
             depth = depth + 1
         }
         if format_mode == "json" { println("  ]") }
+    } else if cmd == "search" {
+        let sp = str_index_of(rest, " ")
+        var query = rest
+        var limit: i64 = 0
+        if sp >= 0 {
+            query = str_slice(rest, 0, sp)
+            limit = str_to_i64(str_slice(rest, sp + 1, str_len(rest)))
+        }
+        var idx: i64 = 0
+        var count: i64 = 0
+        if format_mode == "json" { println("  [") }
+        while idx < 1008 && (limit <= 0 || count < limit) {
+            let term = ontology_store_get(idx as i32)
+            var matched = false
+            if str_contains(term.label, query) || str_contains(term.curie, query) { matched = true }
+            var sidx: i64 = 0
+            while sidx < term.synonyms_len {
+                if str_contains(term.synonyms[sidx as usize], query) { matched = true }
+                sidx = sidx + 1
+            }
+            if matched {
+                if format_mode == "json" { println("  {\"curie\": \"" + json_escape(term.curie) + "\", \"label\": \"" + json_escape(term.label) + "\"}") } else { println(term.curie + " | " + term.label) }
+                count = count + 1
+            }
+            idx = idx + 1
+        }
+        if format_mode == "json" { println("  ]") }
+    } else if cmd == "list" {
+        let sp = str_index_of(rest, " ")
+        var prefix = rest
+        var limit: i64 = 0
+        if sp >= 0 {
+            prefix = str_slice(rest, 0, sp)
+            limit = str_to_i64(str_slice(rest, sp + 1, str_len(rest)))
+        }
+        let start_idx = ontology_prefix_lower_bound(prefix)
+        if format_mode == "json" { println("  [") }
+        var i = start_idx
+        var count: i64 = 0
+        while i < 1008 && (limit <= 0 || count < limit) {
+            let term = ontology_store_get(SORTED_IDX[i as usize])
+            if !starts_with(term.curie, prefix) { break }
+            if format_mode == "json" { println("  {\"curie\": \"" + term.curie + "\", \"label\": \"" + json_escape(term.label) + "\"}") } else { println(term.curie + " | " + term.label) }
+            i = i + 1
+            count = count + 1
+        }
+        if format_mode == "json" { println("  ]") }
+    } else if cmd == "fuzzy" {
+        let sp = str_index_of(rest, " ")
+        var query = rest
+        var limit: i64 = 0
+        if sp >= 0 {
+            query = str_slice(rest, 0, sp)
+            limit = str_to_i64(str_slice(rest, sp + 1, str_len(rest)))
+        }
+        let results = ontology_store_fuzzy_local(query)
+        if format_mode == "json" { println("  [") }
+        var i: i64 = 0
+        while i < results.len && (limit <= 0 || i < limit) {
+            let term = results.items[i as usize]
+            if format_mode == "json" { println("  {\"curie\": \"" + term.curie + "\", \"label\": \"" + json_escape(term.label) + "\"}") } else { println(term.curie + " | " + term.label) }
+            i = i + 1
+        }
+        if format_mode == "json" { println("  ]") }
+    } else if cmd == "stats" {
+        ontology_stats()
+    } else if cmd == "validate" {
+        let errs = ontology_validate()
+        if format_mode == "json" {
+            print("  {\"errors\": ")
+            print_int(errs as i32)
+            println("}")
+        } else {
+            print_int(errs as i32)
+            println(" errors")
+        }
     } else {
         if format_mode == "json" { println("  {\"error\": \"unknown command\"}") } else { println("unknown batch command: " + cmd) }
     }
     0
 }
-
 fn json_escape(s: string) -> string {
     var out = ""
     var i: i64 = 0
@@ -42565,26 +42807,36 @@ fn json_escape(s: string) -> string {
 fn ontology_run_cli() -> i64 with IO, Mut {
     let argc = arg_count()
     if argc < 2 {
-        println("usage: ontology [--format <text|json|tsv>] <resolve|search|ancestors|is-subclass|map|list|count|validate|graph|fuzzy|batch|tui> ...")
+        println("usage: ontology [--format <text|json|tsv>] [--limit N] <resolve|search|ancestors|is-subclass|map|list|count|validate|graph|fuzzy|batch|tui|stats> ...")
         return 1
     }
     var cmd = get_arg(1)
     var format_mode = "text"
+    var limit: i64 = 0
     var arg_off = 0
-    if cmd == "--format" {
-        if argc < 4 { println("usage: ontology --format <text|json|tsv> <command> ..."); return 1 }
-        format_mode = get_arg(2)
-        cmd = get_arg(3)
-        arg_off = 2
+    while true {
+        if cmd == "--format" {
+            if argc < 3 + arg_off + 1 { println("usage: ontology --format <text|json|tsv> <command> ..."); return 1 }
+            format_mode = get_arg(2 + arg_off)
+            arg_off = arg_off + 2
+            cmd = get_arg(1 + arg_off)
+        } else if cmd == "--limit" {
+            if argc < 3 + arg_off + 1 { println("usage: ontology [--limit N] <command> ..."); return 1 }
+            limit = str_to_i64(get_arg(2 + arg_off))
+            arg_off = arg_off + 2
+            cmd = get_arg(1 + arg_off)
+        } else {
+            break
+        }
     }
     if cmd == "resolve" {
         if argc < 3 + arg_off { println("usage: ontology resolve <curie>"); return 1 }
         let term = ontology_store_resolve_local(get_arg(2 + arg_off))
         if ontology_term_found(term) {
             if format_mode == "json" {
-                println("{\"curie\": \"" + json_escape(term.curie) + "\", \"label\": \"" + json_escape(term.label) + "\", \"definition\": \"" + json_escape(term.definition) + "\", \"iri\": \"" + json_escape(term.iri) + "\"}")
+                println("{\"curie\": \"" + json_escape(term.curie) + "\", \"label\": \"" + json_escape(term.label) + "\"}")
             } else if format_mode == "tsv" {
-                println(term.curie + "\t" + term.label + "\t" + term.definition + "\t" + term.iri)
+                println(term.curie + "\t" + term.label)
             } else {
                 println("curie: " + term.curie)
                 println("label: " + term.label)
@@ -42614,13 +42866,7 @@ fn ontology_run_cli() -> i64 with IO, Mut {
     if cmd == "is-subclass" {
         if argc < 4 + arg_off { println("usage: ontology is-subclass <child> <parent>"); return 1 }
         let result = ontology_is_subclass(get_arg(2 + arg_off), get_arg(3 + arg_off))
-        if format_mode == "json" {
-            if result { println("{\"result\": true}") } else { println("{\"result\": false}") }
-        } else if format_mode == "tsv" {
-            println(if result { "true" } else { "false" })
-        } else {
-            if result { println("yes") } else { println("no") }
-        }
+        if format_mode == "json" { println(if result { "{\"result\": true}" } else { "{\"result\": false}" }) } else if format_mode == "tsv" { println(if result { "yes" } else { "no" }) } else { println(if result { "yes" } else { "no" }) }
         return 0
     }
     if cmd == "search" {
@@ -42629,7 +42875,7 @@ fn ontology_run_cli() -> i64 with IO, Mut {
         var idx: i64 = 0
         var count: i64 = 0
         if format_mode == "json" { println("[") }
-        while idx < 1008 {
+        while idx < 1008 && (limit <= 0 || count < limit) {
             let term = ontology_store_get(idx as i32)
             var matched = false
             if str_contains(term.label, query) || str_contains(term.curie, query) { matched = true }
@@ -42665,16 +42911,16 @@ fn ontology_run_cli() -> i64 with IO, Mut {
     if cmd == "list" {
         if argc < 3 + arg_off { println("usage: ontology list <prefix>"); return 1 }
         let prefix = get_arg(2 + arg_off)
-        var count: i64 = 0
+        let start_idx = ontology_prefix_lower_bound(prefix)
         if format_mode == "json" { println("[") }
-        var idx: i64 = 0
-        while idx < 1008 {
-            let term = ontology_store_get(idx as i32)
-            if starts_with(term.curie, prefix) {
-                if format_mode == "json" { println("  {\"curie\": \"" + term.curie + "\", \"label\": \"" + json_escape(term.label) + "\"}") } else { println(term.curie + " | " + term.label) }
-                count = count + 1
-            }
-            idx = idx + 1
+        var i = start_idx
+        var count: i64 = 0
+        while i < 1008 && (limit <= 0 || count < limit) {
+            let term = ontology_store_get(SORTED_IDX[i as usize])
+            if !starts_with(term.curie, prefix) { break }
+            if format_mode == "json" { println("  {\"curie\": \"" + term.curie + "\", \"label\": \"" + json_escape(term.label) + "\"}") } else { println(term.curie + " | " + term.label) }
+            i = i + 1
+            count = count + 1
         }
         if format_mode == "json" { println("]") } else { print_int(count as i32); println(" terms") }
         return 0
@@ -42689,7 +42935,10 @@ fn ontology_run_cli() -> i64 with IO, Mut {
         } else if format_mode == "tsv" {
             print_int(count as i32)
             println("")
-        } else { print_int(count as i32); if str_len(prefix) > 0 { println(" terms matching " + prefix) } else { println(" total terms") } }
+        } else {
+            print_int(count as i32)
+            if str_len(prefix) > 0 { println(" terms matching " + prefix) } else { println(" total terms") }
+        }
         return 0
     }
     if cmd == "validate" {
@@ -42712,7 +42961,7 @@ fn ontology_run_cli() -> i64 with IO, Mut {
         let results = ontology_store_fuzzy_local(query)
         if format_mode == "json" { println("[") }
         var i: i64 = 0
-        while i < results.len {
+        while i < results.len && (limit <= 0 || i < limit) {
             let term = results.items[i as usize]
             if format_mode == "json" { println("  {\"curie\": \"" + term.curie + "\", \"label\": \"" + json_escape(term.label) + "\"}") } else { println(term.curie + " | " + term.label) }
             i = i + 1
@@ -42728,10 +42977,12 @@ fn ontology_run_cli() -> i64 with IO, Mut {
     if cmd == "tui" {
         return ontology_run_tui()
     }
+    if cmd == "stats" {
+        return ontology_stats()
+    }
     println("unknown ontology subcommand: " + cmd)
     return 1
 }
-
 // ============================================================================
 // END ONTOLOGY KERNEL
 // ============================================================================
@@ -42739,10 +42990,6 @@ fn ontology_run_cli() -> i64 with IO, Mut {
 // ============================================================================
 
 fn main() -> i64 with IO, Mut, Panic, Div {
-    let argc = arg_count()
-    if argc >= 1 && get_arg(0) == "ontology" {
-        return ontology_run_cli()
-    }
     let argc = arg_count()
     if argc < 2 {
         print("Usage: mini_native <source.sio> <output> [--show-ast] [--show-types] [--r15-monitor] [--target x86_64-windows]\n")
