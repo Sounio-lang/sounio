@@ -822,6 +822,13 @@ var EXT_ARR_COUNT: i64 = 0
 var SEQ_INNER_TY:   [i64; 256] = [0; 256]
 var SEQ_INNER_HASH: [i64; 256] = [0; 256]
 var SEQ_COUNT: i64 = 0
+// Composite-inner intern table for ref/option/box hashes. A nested inner whose
+// own hash is composite (ref/option/box/unobserved/knowledge) is replaced by a
+// small surrogate id (CT_BASE + idx) before being packed into the inner-hash
+// slot, so magnitude does not compound ×256 per pointer level. Keeps arbitrarily
+// nested ref hashes inside [2^50, 2^51). Mirrors the SEQ/EXT_ARR intern pattern.
+var CT_INNER_HASH: [i64; 4096] = [0; 4096]
+var CT_COUNT: i64 = 0
 var GL_BSS_BASE: i64 = 0
 var RET_AGG_BSS_OFF: i64 = 0
 // PE (Windows): BSS offset of the argv pointer table built from GetCommandLineA
@@ -2656,8 +2663,32 @@ fn knowledge_struct_hash() -> i64 {
         + 101 * 9 * 31
 }
 
-fn ref_hash_make(inner_ty: i64, inner_hash: i64, is_mut: i64) -> i64 {
-    return 1125899906842624 + is_mut + inner_ty * 4 + inner_hash * 256
+fn ct_base() -> i64 {
+    return 2000000000000
+}
+
+fn ty_hash_is_composite(h: i64) -> bool {
+    return h < 0 || h >= 1125899906842624
+}
+
+fn ct_intern(inner_hash: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while i < CT_COUNT {
+        if CT_INNER_HASH[i as usize] == inner_hash { return ct_base() + i }
+        i = i + 1
+    }
+    if CT_COUNT < 4096 {
+        CT_INNER_HASH[CT_COUNT as usize] = inner_hash
+        let id = ct_base() + CT_COUNT
+        CT_COUNT = CT_COUNT + 1
+        return id
+    }
+    return ct_base()
+}
+
+fn ref_hash_make(inner_ty: i64, inner_hash: i64, is_mut: i64) -> i64 with Mut {
+    let eff = if ty_hash_is_composite(inner_hash) { ct_intern(inner_hash) } else { inner_hash }
+    return 1125899906842624 + is_mut + inner_ty * 4 + eff * 256
 }
 
 fn ref_hash_is(h: i64) -> bool {
@@ -2673,10 +2704,15 @@ fn ref_hash_inner_ty(h: i64) -> i64 with Div, Mut {
 }
 
 fn ref_hash_inner_hash(h: i64) -> i64 with Div, Mut {
-    return (h - 1125899906842624) / 256
+    let raw = (h - 1125899906842624) / 256
+    if raw >= ct_base() {
+        let idx = raw - ct_base()
+        if idx >= 0 && idx < CT_COUNT { return CT_INNER_HASH[idx as usize] }
+    }
+    return raw
 }
 
-fn ptr_hash_make(inner_ty: i64, inner_hash: i64, is_mut: i64) -> i64 {
+fn ptr_hash_make(inner_ty: i64, inner_hash: i64, is_mut: i64) -> i64 with Mut {
     return ref_hash_make(inner_ty, inner_hash, is_mut)
 }
 
@@ -2692,7 +2728,7 @@ fn ptr_hash_inner_hash(h: i64) -> i64 with Div, Mut {
     return ref_hash_inner_hash(h)
 }
 
-fn option_hash_make(inner_ty: i64, inner_hash: i64) -> i64 {
+fn option_hash_make(inner_ty: i64, inner_hash: i64) -> i64 with Mut {
     return ref_hash_make(inner_ty, inner_hash, 2)
 }
 
@@ -2709,7 +2745,7 @@ fn option_hash_inner_hash(h: i64) -> i64 with Div, Mut {
     return ref_hash_inner_hash(h)
 }
 
-fn box_hash_make(inner_ty: i64, inner_hash: i64) -> i64 {
+fn box_hash_make(inner_ty: i64, inner_hash: i64) -> i64 with Mut {
     return ref_hash_make(inner_ty, inner_hash, 3)
 }
 
