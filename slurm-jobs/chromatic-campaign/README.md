@@ -43,3 +43,23 @@ worker is validated locally, but the sbatch/login-pod path needs a live cluster 
 Per-instance **cube-and-conquer** (march_cu split → parallel cadical leaves) for the
 near-threshold sizes — the 20k local solve ran >50 min single-core, exactly the case
 cube-and-conquer across many cores is built for.
+
+## Cube-and-conquer (parallel SAT per hard instance) — `cnp_cube.py`, `cnp_prep.py`
+Single-threaded SAT is the wrong tool near the 5-colouring threshold (20k took ~50 min/1
+core). Cube-and-conquer (Heule's method) splits ONE instance across many cores, soundly:
+- **Cubes = the proper k-colourings of a clique** in the graph. Every proper colouring of
+  G restricts to one, so the cubes cover all cases: **G is k-colourable ⇔ some (CNF+cube)
+  is SAT; ALL cubes UNSAT ⇔ G is NOT k-colourable**. A triangle gives `k·(k-1)·(k-2)=60`
+  cubes (k=5); each cube fixes 3 vertices, pruning the search hugely.
+- **Soundness self-test** (`python3 cnp_cube.py selftest`): K₆ (χ=6) → all 60 cubes UNSAT
+  → "NOT 5-colourable" ✓ ; K₃ → SAT ✓.
+- **Pipeline:** `cnp_prep.py` builds the closure graph, dumps `edges_<n>.json`, finds a
+  clique, writes `cubes_<n>.jsonl`; a SLURM array runs `cnp_cube.py solve` per cube;
+  aggregate — any SAT ⇒ k-colourable, all UNSAT ⇒ χ≥k+1 (then verify with drat-trim +
+  the Lean `bv_decide` pipeline before any claim).
+- Run 20260525: 20k instance (150224 edges) → clique [84,90,96] → 60 cubes fanned across
+  cpuops-t560 / 5860 / r770 — verdict in minutes vs ~50 min single-core.
+
+Note: bounded by the cluster's ~20 allocatable CPUs (DYNAMIC CfgTRES caps), so cubes run
+in ~3 waves; still a large speedup and the correct architecture if a χ≥6 candidate ever
+needs its UNSAT cracked + certified.
