@@ -292,7 +292,7 @@ export default function DissertationViewer() {
     <div className="dissertation-viewer rounded-[var(--radius-xl)] overflow-hidden border border-[var(--glass-border)] bg-[rgba(0,0,0,0.35)] mt-[2rem]">
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px]">
         {/* Left: 3D canvas */}
-        <div className="relative h-[640px] w-full">
+        <div className="relative h-[420px] sm:h-[500px] lg:h-[640px] w-full">
           <DrugSelector
             drug={drug}
             onChange={(d) => {

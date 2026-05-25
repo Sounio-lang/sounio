@@ -188,13 +188,13 @@ export default function CodeExamples() {
         </div>
 
         {/* Tab bar */}
-        <div className="flex justify-center mb-8">
-          <div className="inline-flex gap-1 p-1 rounded-full glass">
+        <div className="flex justify-start md:justify-center mb-8 overflow-x-auto no-scrollbar max-w-full px-4 md:px-0">
+          <div className="inline-flex gap-1 p-1 rounded-full glass whitespace-nowrap">
             {examples.map((example) => (
               <button
                 key={example.id}
                 onClick={() => setActiveTab(example.id)}
-                className={`px-6 py-2.5 rounded-full text-sm font-medium transition-all duration-200 ${
+                className={`px-4 md:px-6 py-2 md:py-2.5 rounded-full text-xs md:text-sm font-medium transition-all duration-200 ${
                   activeTab === example.id
                     ? 'bg-[var(--color-text-primary)] text-[var(--color-surface-primary)]'
                     : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
