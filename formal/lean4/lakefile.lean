@@ -253,3 +253,8 @@ lean_lib «SounioUnitDistanceField» where
 -- from Heule CNP-SAT vtx/edge). Soundness + converse audit in Q(√3,√5,√11).
 @[default_target]
 lean_lib «SounioHeule510» where
+
+-- HeuleGraph510 chromatic number = 5: kernel-checked χ≤5 (proper 5-colouring).
+-- χ≥5 is the external drat-trim-VERIFIED UNSAT cert (different trust base).
+@[default_target]
+lean_lib «SounioHeule510Chromatic» where
