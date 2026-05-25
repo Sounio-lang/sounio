@@ -226,3 +226,9 @@ lean_lib «SounioNaturalityG2Runtime» where
 -- Sibling of SounioErdosUnitDistance; see docs/research/fano-arcs-blocking-sounio-note.md
 @[default_target]
 lean_lib «SounioFanoArcsBlocking» where
+
+-- Erdős [20] sunflower conjecture, read on the 168/ZD/Surgical set system:
+-- 4-regular ⇒ uniform 4-petal stars; intra-fiber ⇒ bounded cross-sunflowers.
+-- See docs/research/sunflower-168-sounio-note.md
+@[default_target]
+lean_lib «SounioSunflower» where
