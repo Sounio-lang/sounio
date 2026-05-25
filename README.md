@@ -15,12 +15,17 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 <h3 align="center"><em>A self-hosted systems + scientific programming language for epistemic computing, uncertainty propagation, and algebraic effects</em></h3>
 
 <p align="center">
+  <a href="https://www.souniolang.org"><img src="https://img.shields.io/badge/website-souniolang.org-blue.svg" alt="Sounio Website"/></a>
+  <a href="https://www.souniolang.org/playground"><img src="https://img.shields.io/badge/playground-wasm-purple.svg" alt="Playground"/></a>
   <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.0.0--beta.6-orange.svg" alt="Version 1.0.0-beta.6"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-gold.svg" alt="Apache-2.0 License"/></a>
-  <a href="#honest-status"><img src="https://img.shields.io/badge/stdlib-90%25%20tests%20pass-blue.svg" alt="stdlib 90% tests pass (814/910)"/></a>
+  <a href="#honest-status"><img src="https://img.shields.io/badge/scale-4.2k%20.sio%20files-informational.svg" alt="~4.2k tracked .sio files; see SCALE.md"/></a>
 </p>
 
 <p align="center">
+  <a href="https://www.souniolang.org">Website</a> ·
+  <a href="https://www.souniolang.org/playground">Playground</a> ·
+  <a href="https://www.souniolang.org/docs/">Documentation</a> ·
   <a href="docs/MANIFESTO.md">Manifesto</a> ·
   <a href="#quick-taste">Examples</a> ·
   <a href="#honest-status">Status</a> ·
@@ -32,6 +37,17 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 **Sounio** is a systems programming language for epistemic computing — its type system tracks not just what your data *is*, but how much you should *trust* it. Uncertainty propagation, provenance tracking, and confidence-gated execution are built into the type system, not bolted on as libraries.
 
 **Keywords:** systems programming language, scientific computing language, epistemic types, uncertainty propagation, algebraic effects, self-hosted compiler, formal verification, non-associative algebra, octonions, e-graphs.
+
+### Technical Pillars & Core Keywords
+
+| Pillar | Description | Key Search Terms |
+| :--- | :--- | :--- |
+| **Epistemic Computing** | Built-in confidence-gated execution tracking and provenance tracking. | `epistemic-computing`, `Knowledge[T]`, `confidence-threshold` |
+| **Uncertainty Propagation** | GUM-compliant (Guide to the Expression of Uncertainty in Measurement) error propagation. | `uncertainty-propagation`, `GUM-compliance`, `error-propagation` |
+| **Systems & Science** | Native x86_64 ELF compilation, self-hosted compiler loop, PTX/GPU acceleration. | `systems-programming`, `scientific-computing`, `ptx-codegen` |
+| **Algebraic Effects** | Explicit side-effects declarations (`IO`, `Mut`, `Div`, `Panic`, `Alloc`). | `algebraic-effects`, `effect-system`, `effects-with` |
+| **Mathematical Rigor** | Non-associative octonion basis associators, formalized Lean 4 proofs of invariants. | `non-associative-algebra`, `octonions`, `lean4-proofs` |
+| **Dimensional Analysis** | Compile-time unit checking (`VAR_UNIT_DIM`) to prevent physical dimension errors. | `dimensional-analysis`, `unit-types`, `compile-time-units` |
 
 The compiler is **self-hosted**: Sounio compiles itself, bootstrapped from a [2000-line C compiler](bootstrap/stage0.c) through a multi-stage chain to a true fixed-point where stage N and stage N+1 produce bit-identical binaries. It was used to computationally verify a new result in algebra — that the count of nonzero octonion basis associators equals |PSL(2,7)| = 168 — now [submitted for publication](#the-168-theorem).
 
@@ -75,6 +91,8 @@ From the Sounio repo root:
   7. Treat `/workspace/sounio` as the active remote-first workspace path
   8. Do not propose destructive reset/clean/rebase flows to "simplify" recovery state
 - Prompt surface: [llms.txt](llms.txt)
+- **Repository scale (read before estimating size):** [SCALE.md](SCALE.md) · [docs/audit/README.md](docs/audit/README.md)
+- Regenerate numbers: `bash scripts/dev/measure_repo_scale.sh`
 - Repository guide: [CLAUDE.md](CLAUDE.md)
 - Syntax and workflow guide: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md)
 - Live Hugging Face dataset: <https://huggingface.co/datasets/chiuratto-AIgourakis/sounio-code-examples>
@@ -160,55 +178,40 @@ linear struct FileHandle { fd: i32 }   // must be consumed exactly once
 
 ## Honest Status
 
-This is an active research repository. Here's what actually works and what doesn't.
+This is an active research repository. Public claims are registry-backed; see [docs/serious-language/public-claim-registry.v1.tsv](docs/serious-language/public-claim-registry.v1.tsv).
 
-### What WORKS (production-tested)
+**Scale (measured, 2026-05):** **4,233** tracked `.sio` files, **~1.84M** lines (`bash scripts/dev/measure_repo_scale.sh`). The self-hosted compiler alone is **~542k** lines — not a small experiment. Full audit: [docs/audit/README.md](docs/audit/README.md) · [SCALE.md](SCALE.md).
+
+### What WORKS (evidence-backed lanes)
 
 | Component | Status | Evidence |
 |---|---|---|
-| **Epistemic core** | `Knowledge[T]` + GUM propagation + provenance | 52 files, tested, dissertation-grade |
-| **Self-hosted compiler** | Lexer, parser, checker, codegen — compiles itself | Fixed-point verified (stage2 == stage3) |
-| **Algebra** | Clifford Cl(p,q), Cayley-Dickson CD(k), Jordan J₃(O), octonions | Verified the 168 theorem |
-| **Ontology** | OWL2 model + reasoner + query engine | 40 tests passing |
-| **Native codegen** | Linux ELF plus current Mach-O output lanes from the self-hosted lean driver | Linux fixed-point verified; checked macOS artifact lane present |
-| **Core stdlib** | Stats, linalg, ODE solvers, signal processing, CSV, JSON | Gate: 81 pass / 0 fail / 5 skip |
-| **Optimizer** | 1000+ e-graph rewrite rules, GVN, LICM, load sinking | 1003 tests, all FAIL=0 |
-| **Language server** | LSP 3.17 — hover, def/decl/typeDef/impl, refs, rename + prepare, formatting (full / range / onType), 3 codeAction kinds (`quickfix` + `source.fixAll` + `refactor.extract`), inlay hints + resolve, semanticTokens (`full` + `range`), call hierarchy, push + pull diagnostics, codeLens | [v0.3.0 release](https://github.com/Sounio-lang/sounio/releases/tag/sounio-lsp-v0.3.0-r1) — 32/39 methods RESPONDS_OK; 88/88 protocol tests pass; binary asset attached |
+| **Epistemic core** | `Knowledge[T]` + GUM + provenance | Named package / conformance gates |
+| **Self-hosted compiler** | Lexer → codegen; fixed-point bootstrap | `lean_single` fixed-point + native-v2 spine gates |
+| **Ontology** | Generated bundles + validation harness | `run_ontology_validation.sh` + compile gates |
+| **Native codegen** | Linux ELF; Mach-O artifact lane | Self-host + native-v2 gates |
+| **Core stdlib slices** | Stats, linalg, ODE, etc. | `stdlib_science_pipeline_gate`, reliability inventory |
+| **Language server** | LSP 3.17 subset | Release binary + protocol tests (prototype per registry) |
 
-### What's SCAFFOLDING (looks big, mostly empty)
+### What's SCAFFOLDING or PARTIAL
 
 | Component | Reality |
 |---|---|
-| **Theorem prover** | 9,600 lines — but NO inference logic, just arena + data structures |
-| **~70% of epistemic modules** | Function signatures with minimal bodies |
-| **Neural networks** (quaternion/octonion) | Compilation errors, won't run |
-| **Genomics** | 11 files are single-line stubs (disabled on parser limitations) |
-| **Async runtime** | 12 files, mostly <10 lines each |
-| **Geometry engine** | 100% disabled |
+| **~46% of stdlib modules** | Classified scaffold in [audit A.2](docs/audit/README.md) — code without executable proof |
+| **32 stdlib smoke tests** | Print `FOO_OK` only; do not exercise module logic |
+| **129 CI gate scripts** | Most are **not** on `make check` / GitHub CI (audit A.4) |
+| **GPU CLI path** | PTX/kaxi code exists; end-to-end CLI path incomplete |
+| **Theorem prover / async / geometry** | Large or stub surfaces — see module audit JSON |
 
-### What's MISSING entirely
+### Stdlib module audit (A.2, not file-count folklore)
 
-| Gap | Detail |
-|---|---|
-| **Epistemic ODE solver** | Only does exponential decay, not general RHS (needed for PBPK) |
-| **Ontology federation** | Has 8 hardcoded CURIEs, NOT 15M terms — federation is a stub |
-| **GPU entry point** | `gpu/lib.sio` is empty. PTX codegen exists but no end-to-end path. |
-| **Windows** | No pre-built .exe checked in; PE/COFF backend (3,508 lines) is production-grade — cross-compile with `--target x86_64-windows` |
-| **AArch64 native-v2 parity** | Newer `aarch64` native-v2 lowering still has unsupported opcodes; checked macOS support currently uses the self-hosted Mach-O artifact lane. |
+| Tier | Modules | Meaning |
+|---|---:|---|
+| **works** | 66 | Tests, gates, or mass with executable evidence |
+| **scaffold** | 59 | Code present; no direct executable proof in tree |
+| **doc-only roots** | 3 | Non-module files at `stdlib/` root |
 
-*Previously listed and now resolved: `Knowledge<T>` struct generics (implemented), closure literals `|x| x + 1` (15 test files passing), struct-level generics (working).*
-
-### Stdlib by the numbers
-
-| Category | Files | Test pass rate |
-|---|---|---|
-| **Complete** (working, tested) | 402 | |
-| **Partial** (some functions work) | 175 | |
-| **Skeleton** (types only, no logic) | 95 | |
-| **Stub** (1-line placeholder) | 38 | |
-| **Total** | 710 files | |
-
-**Test-based: 814 / 910 tests pass (89%)** — file count (402/710 = 57%) is a different metric.
+Do **not** cite **814/910 (89%)** as "stdlib completeness" — that is harness inventory, mixes real tests with smoke placeholders, and differs from the reliability gate inventory. See audit artifacts under `artifacts/audit/`.
 
 ---
 
@@ -237,7 +240,7 @@ cd sounio
 export SOUC="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
-$SOUC --version                              # souc 1.0.0-beta.5
+$SOUC --version                              # souc 1.0.0-beta.6
 $SOUC info                                   # selected host artifact + wrapper contract
 $SOUC check examples/hello.sio               # type-check via checked self-hosted lane
 $SOUC compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next

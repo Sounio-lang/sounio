@@ -31,7 +31,8 @@ On the current snapshot, `souc info` for the default JIT profile reports:
 - Cranelift JIT enabled
 - LLVM disabled in the checked artifact
 - GPU codegen disabled in the checked JIT artifact
-- LSP, SMT, ontology, distributed, and package-manager features disabled in the checked artifact
+- LSP, SMT, distributed, and package-manager features disabled in the checked artifact
+- ontology resolution CLI enabled natively via `souc ontology <resolve|search|ancestors|is-subclass>`
 
 For the separate checked GPU profile, `souc info` reports:
 
@@ -134,11 +135,11 @@ The most useful committed status signals today are:
 
 Current status:
 
-- stdlib reliability totals: `81 pass / 0 fail / 1 skip / 82 total`
-- stdlib inventory: `604` `.sio` files, `111` disabled files, `44` stub module files, `92` active module entrypoints
+- stdlib reliability totals: `251 pass / 0 fail / 0 skip / 251 total`
+- stdlib inventory: `927` `.sio` files, `0` disabled files, `0` stub module files, `119` active module entrypoints
 - science pipeline: `2/2` required lanes passing
 - hyper execution: `7/7` required lanes passing (`nn`, `onn`, `qnn`, `snn`, `spnn`, `quantnn`, `math`)
-- science runtime regressions remain tracked separately and currently show `4` failures under soft local enforcement
+- science runtime regressions remain tracked separately and currently show `0` failures under soft local enforcement
 
 These artifacts matter more than aspirational architecture diagrams when you are documenting what is reliable right now.
 

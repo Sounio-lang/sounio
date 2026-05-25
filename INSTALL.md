@@ -79,7 +79,7 @@ This resolves a pinned release binary and falls back to a local executable only 
 
 The current gate-backed status in this repo is:
 
-- `artifacts/stdlib/stdlib_reliability_status.v1.json`: `81 pass / 0 fail / 1 skip / 82 total`
+- `artifacts/stdlib/stdlib_reliability_status.v1.json`: `251 pass / 0 fail / 0 skip / 251 total`
 - `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`: `pass` for `fmri` and `darwin_pbpk`
 - `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`: `pass` for 7 required hyper lanes
 

@@ -1,15 +1,14 @@
 <!-- docs:meta
-topic_id: repo.docs.implementation.plan-typesystem-performance-staticanalysis-migration
-authority: historical
+topic_id: repo.docs.archived.internal-plan-typesystem-performance-staticanalysis-migration
+authority: archived
 audience: maintainers
 last_validated: 2026-03-07
 validated_by: A7
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.plan-typesystem-performance-staticanalysis-migration
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.internal-plan-typesystem-performance-staticanalysis-migration
 -->
 
-
 <!-- docs:status-note:start -->
-> Docs status: `historical`
+> Docs status: `archived`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
 <!-- docs:status-note:end -->
 

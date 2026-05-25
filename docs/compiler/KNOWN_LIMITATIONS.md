@@ -90,6 +90,10 @@ The following bugs were fixed in `lean_single.sio` and are active in the current
 
 **Effect propagation** (verified): Call-site effect checking (`check_callee_effects`) validates that callee effects are a subset of the caller's declared effects, reporting E035 on violations.
 
+### Strict Numerical Regressions and Mathematical Rigor Policy
+
+Numerical regressions in pharmacokinetics, GUM uncertainty propagation, and clinical pathways are strictly monitored. It is an absolute policy that regression tolerances must never be loosened or "afrouxadas" through artificial modifications simply to make tests pass. If a physical model test or mathematical/clinical verification fails, the underlying compiler code or the physical model itself must be fixed honestly.
+
 ### Pruned/Experimental Modules
 
 The following stdlib modules are stubs or incomplete:

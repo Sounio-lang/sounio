@@ -76,6 +76,7 @@ TESTS=(
   "rapamycin_epistemic_pbpk     tests/run-pass/rapamycin_epistemic_pbpk.sio"
   "rapamycin_epistemic_adaptive tests/run-pass/rapamycin_epistemic_adaptive.sio"
   "rapamycin_gum_vs_mc          tests/run-pass/rapamycin_gum_vs_mc.sio"
+  "rapamycin_kaxi_fuse_prior    tests/run-pass/rapamycin_kaxi_fuse_prior.sio"
   "biomaterial_release          stdlib/darwin_pbpk/release/biomaterial_release.sio"
   "rapamycin_clinical           stdlib/darwin_pbpk/validation/rapamycin_clinical.sio"
   "gum_vs_mc                    stdlib/darwin_pbpk/validation/gum_vs_mc.sio"
@@ -130,7 +131,21 @@ TESTS_SMOKE=(
   "dissertation_pop_demo      examples/dissertation_pop_pbpk_pd_demo.sio"
 )
 
+# Clinical-validation modules: registered NOW (run every build for compile+run
+# health) but PENDING-aware — they only ENFORCE validation once observed data
+# lands. While obs_n()==0 each emits *_CLINICAL_PENDING_OBSERVED and is reported
+# as PENDING (counts as neither pass nor fail; gate stays green). When the
+# literature-MCP session fills the observed arrays + study design, the same
+# module emits *_CLINICAL_PASS (counts as pass) or *_CLINICAL_FAIL_HONEST (fails
+# the gate — green means validated against clinical data). Registration thus
+# self-activates with zero further edits here.
+TESTS_PENDING=(
+  "pbpk28_rapamycin_clinical    stdlib/darwin_pbpk/validation/pbpk28_rapamycin_clinical.sio"
+  "pbpk28_semaglutide_clinical  stdlib/darwin_pbpk/validation/pbpk28_semaglutide_clinical.sio"
+)
+
 fails=0
+pending=0
 results=()
 
 for entry in "${TESTS[@]}"; do
@@ -217,7 +232,58 @@ for entry in "${TESTS_SMOKE[@]}"; do
   results+=("PASS  $name (smoke)")
 done
 
-total=$((${#TESTS[@]} + ${#TESTS_SMOKE[@]}))
+# Clinical-validation modules: PENDING-aware enforcement (see TESTS_PENDING).
+for entry in "${TESTS_PENDING[@]}"; do
+  name="${entry%% *}"
+  src="${entry##* }"
+  log="$STAGE_DIR/$name.log"
+
+  echo ""
+  echo "[$name] (clinical validation, pending-aware)"
+  echo "  src=$src"
+
+  if [[ ! -f "$src" ]]; then
+    echo "  FAIL: source missing"
+    fails=$((fails + 1))
+    results+=("FAIL  $name  source_missing")
+    continue
+  fi
+
+  set +e
+  timeout "$TIMEOUT_SECONDS" "$SOUC_BIN" run "$src" >"$log" 2>&1
+  rc=$?
+  set -e
+
+  if [[ $rc -ne 0 ]]; then
+    echo "  FAIL: rc=$rc (timeout=$TIMEOUT_SECONDS)"
+    tail -5 "$log" | sed 's/^/    /'
+    fails=$((fails + 1))
+    results+=("FAIL  $name  rc=$rc")
+    continue
+  fi
+
+  if grep -qE "_CLINICAL_PASS$" "$log"; then
+    echo "  PASS (predicted-vs-observed validation passed, log=$log)"
+    results+=("PASS  $name (clinical validation)")
+  elif grep -qE "_CLINICAL_FAIL_HONEST$" "$log"; then
+    echo "  FAIL: clinical validation failed honestly — predicted-vs-observed"
+    echo "        GMFE outside FDA/EMA acceptance (model != clinical data)."
+    tail -8 "$log" | sed 's/^/    /'
+    fails=$((fails + 1))
+    results+=("FAIL  $name  clinical_fail_honest")
+  elif grep -qE "_CLINICAL_PENDING_OBSERVED$" "$log"; then
+    echo "  PENDING: registered, awaiting observed data (obs_n()==0) — not yet validating"
+    pending=$((pending + 1))
+    results+=("PEND  $name  awaiting_observed_data")
+  else
+    echo "  FAIL: no recognized clinical-validation marker (PASS / FAIL_HONEST / PENDING_OBSERVED)"
+    tail -5 "$log" | sed 's/^/    /'
+    fails=$((fails + 1))
+    results+=("FAIL  $name  no_marker")
+  fi
+done
+
+total=$((${#TESTS[@]} + ${#TESTS_SMOKE[@]} + ${#TESTS_PENDING[@]}))
 
 echo ""
 echo "=== Summary ==="
@@ -232,4 +298,8 @@ if [[ $fails -ne 0 ]]; then
 fi
 
 echo ""
-echo "dissertation_pbpk_suite_gate: PASS ($total/$total rapamycin PBPK tests + smoke demos)"
+if [[ $pending -ne 0 ]]; then
+  echo "dissertation_pbpk_suite_gate: PASS ($((total - pending))/$total active; $pending clinical-validation module(s) PENDING — registered, awaiting observed data)"
+else
+  echo "dissertation_pbpk_suite_gate: PASS ($total/$total PBPK tests + smoke demos)"
+fi

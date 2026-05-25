@@ -57,13 +57,13 @@ backend contract:
 
 Source: `artifacts/stdlib/stdlib_reliability_status.v1.json`
 
-- totals: `pass=81 fail=0 skip=1 total=82`
+- totals: `pass=251 fail=0 skip=0 total=251`
 - gate status: `status_summary=pass`
 - inventory:
-  - `604` `.sio` files
-  - `111` disabled files
-  - `44` stub module files
-  - `92` active module entrypoints
+  - `927` `.sio` files
+  - `0` disabled files
+  - `0` stub module files
+  - `119` active module entrypoints
 
 ### 3. STDLIB science pipeline
 
@@ -77,7 +77,7 @@ Additional reliability detail from `artifacts/stdlib/stdlib_reliability_status.v
 
 - runtime regression enforcement is `soft` locally
 - runtime regression summary currently shows `fail`
-- recorded runtime regression failures: `4`
+- recorded runtime regression failures: `0`
 - strict enforcement should still be treated as release-blocking when enabled
 
 ### 4. STDLIB hyper execution lane

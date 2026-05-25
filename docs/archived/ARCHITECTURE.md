@@ -1,11 +1,16 @@
 <!-- docs:meta
-topic_id: repo.docs.compiler.architecture
-authority: repo_only
-audience: contributors
+topic_id: repo.docs.archived.architecture
+authority: archived
+audience: maintainers
 last_validated: 2026-03-07
-validated_by: A4
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.architecture
+validated_by: A7
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.architecture
 -->
+
+<!-- docs:status-note:start -->
+> Docs status: `archived`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
 
 > Status note: this page describes an older Rust-first architecture map. For the
 > current contributor-facing compiler map, start with
