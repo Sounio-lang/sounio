@@ -376,6 +376,9 @@ var UNIT_DIM_TABLE:  [i64; 2048] = [0; 2048]
 var TU: [i64; 1048576] = [0; 1048576]
 // Packed dimension vector of the current compiled expression (0 = dimensionless/unknown)
 var EXPR_UNIT_DIM: i64 = 0
+// Scratch result for parsing f64<UnitExpr> type annotations.
+var SCAN_UNIT_EXPR_DIM: i64 = 0
+var SCAN_UNIT_EXPR_NEXT: i64 = 0
 
 // ─── Phase 7: Epistemic Type System (Knowledge<Type>) ───
 // Every type carries Confidence (0–1000) and GUM Uncertainty (0–1000).
@@ -1159,12 +1162,57 @@ fn unit_lookup_dim(h: i64) -> i64 with Panic, Mut, Div {
     return 0
 }
 
+fn unit_is_registered_h(h: i64) -> bool with Panic, Mut, Div {
+    if h == 0 { return false }
+    var idx: i64 = h % 2048
+    if idx < 0 { idx = idx + 2048 }
+    var probe: i64 = idx
+    var iters: i64 = 0
+    while iters < 2048 {
+        if UNIT_HASH_TABLE[probe as usize] == 0 { return false }
+        if UNIT_HASH_TABLE[probe as usize] == h { return true }
+        probe = probe + 1
+        if probe >= 2048 { probe = 0 }
+        iters = iters + 1
+    }
+    return false
+}
+
+fn unit_type_hash_base() -> i64 { return 900000000000 }
+
+fn unit_type_hash_make(dim: i64) -> i64 {
+    return unit_type_hash_base() + dim
+}
+
+fn unit_type_hash_is(h: i64) -> bool {
+    return h >= unit_type_hash_base() && h < 901000000000
+}
+
+fn unit_type_hash_dim(h: i64) -> i64 {
+    if unit_type_hash_is(h) == false { return 0 }
+    return h - unit_type_hash_base()
+}
+
+fn type_hash_unit_dim(h: i64) -> i64 with Panic, Mut, Div {
+    if unit_type_hash_is(h) { return unit_type_hash_dim(h) }
+    return unit_lookup_dim(h)
+}
+
 fn unit_call_arg_mismatch(param_hash: i64, expr_unit: i64, expr_dim: i64) -> bool with Panic, Mut, Div {
-    let param_dim = unit_lookup_dim(param_hash)
+    let param_dim = type_hash_unit_dim(param_hash)
     if param_dim == 0 { return false }
     if expr_unit == param_hash { return false }
     if expr_dim != 0 && expr_dim == param_dim { return false }
     return true
+}
+
+fn expr_set_unit_from_type(ty: i64, ty_hash: i64) with Panic, Mut, Div {
+    EXPR_UNIT = 0
+    EXPR_UNIT_DIM = 0
+    if ty == 2 && ty_hash != 0 {
+        EXPR_UNIT = ty_hash
+        EXPR_UNIT_DIM = type_hash_unit_dim(ty_hash)
+    }
 }
 
 // Compute gl_name_hash from raw byte values (for init_unit_table without src buffer)
@@ -3212,7 +3260,14 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
     }
     if k1 != k2 { return false }
     if k1 == 2 {
-        if h1 != 0 && h2 != 0 { return h1 == h2 }
+        if h1 != 0 && h2 != 0 {
+            if unit_type_hash_is(h1) || unit_type_hash_is(h2) {
+                let d1 = type_hash_unit_dim(h1)
+                let d2 = type_hash_unit_dim(h2)
+                return d1 != 0 && d1 == d2
+            }
+            return h1 == h2
+        }
         return true
     }
     if k1 == 6 || k1 == 7 {
@@ -4318,6 +4373,59 @@ fn skip_type_meta_item(p0: i64, close_tk: i64) -> i64 with Panic, Mut {
     return p
 }
 
+fn scan_unit_type_expr(p0: i64, close_tk: i64) with IO, Panic, Mut, Div {
+    var p = p0
+    var dim: i64 = 0
+    var saw_unit: i64 = 0
+    var expect_unit: i64 = 1
+    var op: i64 = 19
+    while p < TC && TK[p as usize] != close_tk && TK[p as usize] != 39 && TK[p as usize] != 0 {
+        if expect_unit != 0 {
+            if TK[p as usize] != 3 {
+                tc_error(p, "malformed f64<UnitExpr> annotation")
+                SCAN_UNIT_EXPR_DIM = 0
+                SCAN_UNIT_EXPR_NEXT = -1
+                return
+            }
+            let uh = gl_name_hash(TS[p as usize], TE[p as usize])
+            if !unit_is_registered_h(uh) {
+                tc_error(p, "unknown unit in f64<UnitExpr> annotation")
+                SCAN_UNIT_EXPR_DIM = 0
+                SCAN_UNIT_EXPR_NEXT = -1
+                return
+            }
+            let ud = unit_lookup_dim(uh)
+            if saw_unit == 0 {
+                dim = ud
+            } else {
+                if op == 19 { dim = dim_add(dim, ud) }
+                else { dim = dim_sub(dim, ud) }
+            }
+            saw_unit = 1
+            expect_unit = 0
+            p = p + 1
+        } else {
+            if TK[p as usize] != 19 && TK[p as usize] != 20 {
+                tc_error(p, "malformed f64<UnitExpr> annotation")
+                SCAN_UNIT_EXPR_DIM = 0
+                SCAN_UNIT_EXPR_NEXT = -1
+                return
+            }
+            op = TK[p as usize]
+            expect_unit = 1
+            p = p + 1
+        }
+    }
+    if saw_unit == 0 || expect_unit != 0 {
+        tc_error(p, "malformed f64<UnitExpr> annotation")
+        SCAN_UNIT_EXPR_DIM = 0
+        SCAN_UNIT_EXPR_NEXT = -1
+        return
+    }
+    SCAN_UNIT_EXPR_DIM = dim
+    SCAN_UNIT_EXPR_NEXT = p
+}
+
 fn src_line_of(pos: i64) -> i64 with Panic, Mut {
     var line: i64 = 1
     var i: i64 = 0
@@ -4980,6 +5088,27 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                 }
             }
             }
+        }
+        if src_match(ns, ne - ns, "f64") && TK[(p + 1) as usize] == 23 {
+            p = p + 2
+            scan_unit_type_expr(p, 24)
+            if SCAN_UNIT_EXPR_NEXT < 0 {
+                SCAN_TY = 2
+                SCAN_TY_HASH = 0
+                SCAN_TY_NEXT = p
+                return
+            }
+            p = SCAN_UNIT_EXPR_NEXT
+            if TK[p as usize] == 24 { p = p + 1 }
+            else if TK[p as usize] == 39 {
+                TK[p as usize] = 24
+                TS[p as usize] = TS[p as usize] + 1
+                p = p + 1
+            }
+            SCAN_TY = 2
+            SCAN_TY_HASH = unit_type_hash_make(SCAN_UNIT_EXPR_DIM)
+            SCAN_TY_NEXT = p
+            return
         }
         // Option<T> → pointer-sized (tag + value); in struct fields, 2 qwords
         if src_match(ns, ne - ns, "Option") && TK[(p + 1) as usize] == 23 {
@@ -9723,6 +9852,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     EXPR_CH_SET = 0
     EXPR_PARAM_USED = 0
     EXPR_UNIT = 0
+    EXPR_UNIT_DIM = 0
     LAST_IS_LITERAL = 0
     LAST_IS_LITERAL_F64 = 0
     EXPR_VSHADOW = -1
@@ -9996,6 +10126,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                             VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                             VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                             if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                            if (SCAN_TY == 0 || SCAN_TY == 2) && type_hash_unit_dim(SCAN_TY_HASH) != 0 {
+                                VAR_UNIT[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                                VAR_UNIT_DIM[(VAR_COUNT - 1) as usize] = type_hash_unit_dim(SCAN_TY_HASH)
+                            }
                             if SCAN_TY == 8 {
                                 VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
                                 VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
@@ -10846,6 +10980,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     }
                     EXPR_TY = FN_RET_TY[static_mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[static_mfi as usize]
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     return
                 }
@@ -13460,6 +13595,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 }
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
+                expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 // β⁹ GTT: union of argument channel sets becomes the return
                 // value's topology. Conservative upper bound; matches the
@@ -13613,6 +13749,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         EXPR_TY = 0
                         EXPR_TY_HASH = 0
                     }
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     // β⁹ GTT week-9: closure / fn-ref indirect call topology.
                     // Callee body is unknown so body-precision is unavailable;
@@ -14171,8 +14308,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 tc_epistemic_cast_blocked(tp)
             }
             if src_ty == 2 && cast_ty == 2 && src_hash != 0 && cast_hash != 0 && src_hash != cast_hash {
-                let src_dim = unit_lookup_dim(src_hash)
-                let cast_dim = unit_lookup_dim(cast_hash)
+                let src_dim = type_hash_unit_dim(src_hash)
+                let cast_dim = type_hash_unit_dim(cast_hash)
                 // Same-dimension casts (mg→kg, s→ms) are allowed; cross-dimension (mg→s) are not
                 if src_dim == 0 || cast_dim == 0 || src_dim != cast_dim {
                     tc_arity_error(tp, "incompatible unit dimensions")
@@ -14194,6 +14331,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             if cast_ty == 3 && src_is_f64 == 0 { EP = SCAN_TY_NEXT; continue }
             EXPR_TY = cast_ty
             EXPR_TY_HASH = cast_hash
+            expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
             if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             EP = SCAN_TY_NEXT
             continue
@@ -15047,6 +15185,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     }
                     EXPR_TY = FN_RET_TY[mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     continue
                 }
@@ -19854,9 +19993,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 VAR_AFFINE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_AFFINE
                 // Set unit hash for unit-typed variables (e.g. let mass: mg = 5.0)
                 // decl_ty == 2 and decl_ty_hash == hash("mg") for unit annotations
-                if decl_ty_hash != 0 && unit_lookup_dim(decl_ty_hash) != 0 {
+                if decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = decl_ty_hash
-                    VAR_UNIT_DIM[(VAR_COUNT - 1) as usize] = unit_lookup_dim(decl_ty_hash)
+                    VAR_UNIT_DIM[(VAR_COUNT - 1) as usize] = type_hash_unit_dim(decl_ty_hash)
                     // Gen 19: also propagate RHS expression unit dim if annotation is a known unit
                     // (unit_lookup_dim returns 0 for unknown names — no-op in that case)
                 } else if decl_ty == 0 && decl_ty_hash == 0 && EXPR_UNIT != 0 {
@@ -25726,6 +25865,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                         VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                         if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                        if (SCAN_TY == 0 || SCAN_TY == 2) && type_hash_unit_dim(SCAN_TY_HASH) != 0 {
+                            VAR_UNIT[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                            VAR_UNIT_DIM[(VAR_COUNT - 1) as usize] = type_hash_unit_dim(SCAN_TY_HASH)
+                        }
                         // fn-type parameters are always called with closure ABI (env_ptr in rdi)
                         if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 1 }
                         if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
@@ -28711,6 +28854,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                             VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                             VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                             if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                            if (SCAN_TY == 0 || SCAN_TY == 2) && type_hash_unit_dim(SCAN_TY_HASH) != 0 {
+                                VAR_UNIT[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                                VAR_UNIT_DIM[(VAR_COUNT - 1) as usize] = type_hash_unit_dim(SCAN_TY_HASH)
+                            }
                             if SCAN_TY == 8 {
                                 VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
                                 VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
@@ -30867,6 +31014,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 em32(0x94000000)
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
+                expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 // β⁹ GTT a64: union of argument channel sets becomes the return
                 // value's topology (mirror of x86 compile_primary at ~10313).
@@ -31010,6 +31158,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         EXPR_TY = 0
                         EXPR_TY_HASH = 0
                     }
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     // β⁹ GTT week-9 (a64 mirror): closure / fn-ref indirect
                     // call topology — conservative union of in-range
@@ -31434,8 +31583,8 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                 tc_epistemic_cast_blocked(tp)
             }
             if src_ty == 2 && cast_ty == 2 && src_hash != 0 && cast_hash != 0 && src_hash != cast_hash {
-                let src_dim = unit_lookup_dim(src_hash)
-                let cast_dim = unit_lookup_dim(cast_hash)
+                let src_dim = type_hash_unit_dim(src_hash)
+                let cast_dim = type_hash_unit_dim(cast_hash)
                 // Same-dimension casts (mg→kg, s→ms) are allowed; cross-dimension (mg→s) are not
                 if src_dim == 0 || cast_dim == 0 || src_dim != cast_dim {
                     tc_arity_error(tp, "incompatible unit dimensions")
@@ -31454,6 +31603,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             }
             EXPR_TY = cast_ty
             EXPR_TY_HASH = cast_hash
+            expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
             if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             EP = SCAN_TY_NEXT
             continue
@@ -31817,6 +31967,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     em32(0x94000000)
                     EXPR_TY = FN_RET_TY[mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     continue
                 }
@@ -34104,6 +34255,10 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                         VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                         VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                         if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                        if (SCAN_TY == 0 || SCAN_TY == 2) && type_hash_unit_dim(SCAN_TY_HASH) != 0 {
+                            VAR_UNIT[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                            VAR_UNIT_DIM[(VAR_COUNT - 1) as usize] = type_hash_unit_dim(SCAN_TY_HASH)
+                        }
                         if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 1 }
                         if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
                             let len_slot = VAR_SLOT[(VAR_COUNT - 1) as usize]

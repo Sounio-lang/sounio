@@ -14,6 +14,7 @@ import csv
 import hashlib
 import json
 import math
+import struct
 from pathlib import Path
 
 
@@ -166,6 +167,152 @@ def write_manifest(
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+
+def write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def f32(value: float) -> float:
+    return struct.unpack("<f", struct.pack("<f", float(value)))[0]
+
+
+def validate_fixture_arrays(mu: list[float], nu: list[float], cost: list[float]) -> None:
+    if len(mu) != 16 or len(nu) != 16 or len(cost) != 256:
+        raise RuntimeError("fixture arrays must be 16, 16, and 256 values")
+    if any(value <= 0.0 or not math.isfinite(value) for value in mu + nu):
+        raise RuntimeError("fixture marginals must be finite and strictly positive")
+    if abs(sum(mu) - 1.0) > 1e-9 or abs(sum(nu) - 1.0) > 1e-9:
+        raise RuntimeError("fixture marginals must be normalized")
+    for i in range(16):
+        if abs(cost[i * 16 + i]) > 1e-12:
+            raise RuntimeError("fixture cost diagonal must be zero")
+        for j in range(16):
+            cij = cost[i * 16 + j]
+            if cij < 0.0 or not math.isfinite(cij):
+                raise RuntimeError("fixture cost values must be finite and nonnegative")
+            if abs(cij - cost[j * 16 + i]) > 1e-9:
+                raise RuntimeError("fixture cost matrix must be symmetric")
+            for k in range(16):
+                if cij > cost[i * 16 + k] + cost[k * 16 + j] + 1e-9:
+                    raise RuntimeError("fixture cost matrix must satisfy triangle inequality")
+
+
+def _logsumexp(values: list[float], *, base2: bool) -> float:
+    peak = max(values)
+    if base2:
+        return peak + math.log2(sum(2.0 ** (value - peak) for value in values))
+    return peak + math.log(sum(math.exp(value - peak) for value in values))
+
+
+def _exp_log(value: float, *, base2: bool) -> float:
+    return 2.0**value if base2 else math.exp(value)
+
+
+def sinkhorn_oracle_from_logs(
+    mu: list[float],
+    nu: list[float],
+    la: list[float],
+    lb: list[float],
+    k_log: list[float],
+    *,
+    iterations: int,
+    base2: bool,
+) -> dict[str, object]:
+    validate_fixture_arrays(mu, nu, [0.0 if i == j else 0.02 for i in range(16) for j in range(16)])
+    u = [0.0] * 16
+    v = [0.0] * 16
+    for _ in range(iterations):
+        for i in range(16):
+            u[i] = la[i] - _logsumexp([k_log[i * 16 + j] + v[j] for j in range(16)], base2=base2)
+        for j in range(16):
+            v[j] = lb[j] - _logsumexp([k_log[i * 16 + j] + u[i] for i in range(16)], base2=base2)
+
+    plan: list[float] = []
+    rows = [0.0] * 16
+    cols = [0.0] * 16
+    mass = 0.0
+    for i in range(16):
+        for j in range(16):
+            value = _exp_log(u[i] + k_log[i * 16 + j] + v[j], base2=base2)
+            plan.append(value)
+            rows[i] += value
+            cols[j] += value
+            mass += value
+
+    next_u = [
+        la[i] - _logsumexp([k_log[i * 16 + j] + v[j] for j in range(16)], base2=base2)
+        for i in range(16)
+    ]
+    next_v = [
+        lb[j] - _logsumexp([k_log[i * 16 + j] + u[i] for i in range(16)], base2=base2)
+        for j in range(16)
+    ]
+    max_fixed = max(
+        max(abs(next_u[i] - u[i]) for i in range(16)),
+        max(abs(next_v[j] - v[j]) for j in range(16)),
+    )
+    return {
+        "iterations": iterations,
+        "mass": mass,
+        "max_row_err": max(abs(rows[i] - mu[i]) for i in range(16)),
+        "max_col_err": max(abs(cols[j] - nu[j]) for j in range(16)),
+        "max_fixed_err": max_fixed,
+        "max_fixed_self_consistency_residual": max_fixed,
+        "plan": plan,
+        "u": u,
+        "v": v,
+    }
+
+
+def sinkhorn_oracle(
+    mu: list[float],
+    nu: list[float],
+    k_log: list[float],
+    *,
+    iterations: int,
+    base2: bool,
+) -> dict[str, object]:
+    if base2:
+        la = [math.log2(value) for value in mu]
+        lb = [math.log2(value) for value in nu]
+    else:
+        la = [math.log(value) for value in mu]
+        lb = [math.log(value) for value in nu]
+    return sinkhorn_oracle_from_logs(mu, nu, la, lb, k_log, iterations=iterations, base2=base2)
+
+
+def plan_transport_cost(plan: list[float], cost: list[float]) -> float:
+    if len(plan) != len(cost):
+        raise RuntimeError("plan and cost length mismatch")
+    return sum(p * c for p, c in zip(plan, cost))
+
+
+def emit_sounio_source(
+    mu: list[float],
+    nu: list[float],
+    cost: list[float],
+    node_ids: list[int],
+    node_names: list[str],
+) -> str:
+    prefix = template_prefix(DEFAULT_TEMPLATE)
+    rows = [{"node": name} for name in node_names]
+    text = emit_source(prefix, node_ids, rows, mu, nu, cost, "graph_edge_fixture")
+    if 'println("approx_math_runtime_gate=true")' not in text:
+        text = text.replace(
+            'println("swow16_marginal_gate=true")',
+            'println("swow16_marginal_gate=true")\n'
+            '        println("approx_math_runtime_gate=true")',
+        )
+    if 'println("biomarker_claims_not_enforced=true")' not in text:
+        text = text.replace(
+            'println("clinical_claims_not_enforced=true")',
+            'println("clinical_claims_not_enforced=true")\n'
+            '        println("biomarker_claims_not_enforced=true")\n'
+            '        println("statistical_inference_claims_not_enforced=true")',
+        )
+    return text
 
 
 def emit_source(

@@ -25,6 +25,14 @@ This prototype does not compute exact `W1`; it computes small
 entropic-regularized transport instances that are precursors for an ORC
 pipeline.
 
+For the current SWOW16 graph-edge fixture lane, the `ORC` name marks the
+intended research direction only. The current artifacts do not compute
+Ollivier-Ricci curvature, do not estimate Ollivier-Ricci curvature, do not
+report curvature values, do not compute or approximate Wasserstein-1 distance,
+and do not make biomarker, clinical, statistical-inference, population-level,
+GPU-runtime, or generalizability claims unless a specific manifest below says
+otherwise.
+
 This directory is an early Sounio-native prototype for moving
 `agourakis82/hyperbolic-semantic-networks` beyond a Python/Julia mirror and
 into Sounio's own epistemic compiler surface.
@@ -120,7 +128,93 @@ bash scripts/ci/semantic_orc_swow16_fixture_gate.sh
 SOUNIO_SEMANTIC_ORC_REGIME=anxious bash scripts/ci/semantic_orc_swow16_fixture_gate.sh
 SOUNIO_SEMANTIC_ORC_REGIME=ruminative bash scripts/ci/semantic_orc_swow16_fixture_gate.sh
 SOUNIO_SEMANTIC_ORC_REGIME=psychotic bash scripts/ci/semantic_orc_swow16_fixture_gate.sh
+bash scripts/ci/semantic_orc_swow16_kaxi_pack_gate.sh
+bash scripts/ci/semantic_orc_swow16_multisupport_gate.sh
+bash scripts/ci/semantic_orc_swow16_permutation_fixture_gate.sh
+bash scripts/ci/semantic_orc_swow16_graph_edge_kaxi_pack_gate.sh
+bash scripts/ci/semantic_orc_swow16_graph_edge_multifixture_gate.sh
+bash scripts/ci/semantic_orc_swow16_graph_edge_tile_gate.sh
+bash scripts/ci/semantic_orc_swow16_graph_edge_tile_matrix_gate.sh
+bash scripts/ci/semantic_orc_swow16_graph_edge_tile_matrix_reducer_gate.sh
+bash scripts/ci/semantic_orc_swow16_graph_degree_shuffle_fixture_gate.sh
 ```
+
+## Current Deep Lane Evidence
+
+All values in this section are engineering acceptance metrics for bounded
+fixtures. They are not clinical cohort comparisons, biomarker effects,
+diagnostic separations, psychiatric group rankings, exact transport distances,
+or ORC values. Paths under `/orangefs` are internal persistent run artifacts
+for this workspace, not standalone public reproduction packages.
+
+The Slurm GPU path passed on 2026-05-25 for four CPC/SWOW export labels using
+pre-emitted `sinkhorn16` PTX and a prebuilt K-AXI runner:
+
+- manifest:
+  `/orangefs/training/sounio/moonshot-a-runtime/moonshot-a-phase-status-codex-20260524T2038/sounio/artifacts/semantic_orc/slurm/swow16-kaxi-four-regime-20260525T1130Z.json`
+- runtime results: 4/4 `launch_pass`
+- worst GPU-vs-pack-oracle differences:
+  `maxdu=7.419522394691569e-06`,
+  `maxdv=6.17755054155289e-06`
+
+The multisupport Slurm GPU path also passed on 2026-05-25:
+
+- manifest:
+  `/orangefs/training/sounio/moonshot-a-runtime/moonshot-a-phase-status-codex-20260524T2038/sounio/artifacts/semantic_orc/slurm/swow16-kaxi-multisupport-20260525T114751Z/swow16_kaxi_slurm_multisupport_manifest.json`
+- runtime results: 16/16 `launch_pass`
+- tolerance: `0.005` for both `maxdu_vs_pack_oracle` and
+  `maxdv_vs_pack_oracle`
+- worst GPU-vs-pack-oracle differences:
+  `maxdu=4.238789615307326e-05`,
+  `maxdv=5.941514330753961e-06`
+
+The edge-by-tile matrix gate passed on 2026-05-25:
+
+- manifest:
+  `/orangefs/training/sounio/moonshot-a-runtime/moonshot-a-phase-status-codex-20260524T2038/sounio/artifacts/semantic_orc/graph_tile_matrix/swow16-graph-tile-matrix-20260525T131852Z/swow16_graph_edge_tile_matrix_manifest.json`
+- schema: `sounio.semantic_orc.swow16_graph_edge_tile_matrix_manifest.v1`
+- edges: 4 deterministic real SWOW edges using edge stride `13`
+- tiles per edge: 8 deterministic 16-node support tiles
+- total fixtures: 32 generated Sounio/K-AXI support tiles
+- edge labels in this run: `age -> old`, `amazing -> great`,
+  `animal -> horse`, `area -> square`
+- endpoint-free matrix enumeration: 309 unique endpoint-free nodes out of 448
+  endpoint-free tile positions
+- runtime result: 32/32 graph-edge support tiles passed `check`/`run` and K-AXI
+  pack validation
+- matrix manifest sentinel:
+  `numerical_values_are_engineering_diagnostics_only=true`
+
+The edge-by-tile matrix values are deterministic fixture-enumeration and
+packaging evidence only. Edge stride and tile stride are deterministic
+engineering enumeration parameters, not sampling, coverage, or
+representativeness designs. The current evidence proves only the recorded
+4-edge x 8-tile parameter point, not a sweep over other settings.
+
+The Sounio-native reducer over that matrix also passed on 2026-05-25:
+
+- manifest:
+  `/orangefs/training/sounio/moonshot-a-runtime/moonshot-a-phase-status-codex-20260524T2038/sounio/artifacts/semantic_orc/graph_tile_matrix_reducer/swow16-graph-tile-matrix-reducer-20260525T133730Z/swow16_graph_edge_tile_matrix_reducer_manifest.json`
+- schema:
+  `sounio.semantic_orc.swow16_graph_edge_tile_matrix_reducer_manifest.v1`
+- reducer role: generated Sounio manifest-invariant check only; not transport
+  recomputation, not exact Wasserstein-1, not exact ORC, not an ORC estimator,
+  not GPU runtime evidence, not statistical inference, and not biomarker or
+  clinical evidence
+- generated Sounio runtime result: `check` and `run` passed and emitted
+  `SOUNIO_SWOW16_GRAPH_EDGE_TILE_MATRIX_REDUCER_PASS`
+- matrix invariant summary: 4 deterministic real SWOW edges, 8 support tiles
+  per edge, 32 total fixtures, 309 unique endpoint-free nodes out of 448
+  endpoint-free tile positions
+
+The reducer intentionally checks shape, source-manifest hash, diagnostic-only
+sentinels, and claim-boundary tokens. It records upstream matrix diagnostics
+but does not revalidate transport residuals and is not a scientific reducer,
+exact transport solver, curvature estimator, null-model analysis, GPU result,
+or clinical validation.
+The reducer's endpoint-free invariant is tied to this fixture schema: every
+support tile has 16 nodes, of which two are the selected SWOW edge endpoints,
+leaving exactly 14 endpoint-free tile positions per fixture.
 
 ## Why This Is More Sounio Than A Port
 

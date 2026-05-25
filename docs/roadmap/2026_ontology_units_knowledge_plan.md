@@ -396,6 +396,9 @@ TODOs:
 - [x] Prove same-unit division cancels to a dimensionless scalar.
 - [x] Preserve registered named dimensions for non-cancelling
   multiplication/division results in the current-source `lean_single` path.
+- [x] Parse first-rung `f64<UnitExpr>` annotations in the current-source
+  `lean_single` path, where `UnitExpr` is a registered unit identifier chain
+  joined by `*` and `/`.
 - [x] Preserve units through scalar multiplication.
 - [x] Reject incompatible unit-typed function arguments.
 - [x] Accept compatible unit casts and reject incompatible unit casts.

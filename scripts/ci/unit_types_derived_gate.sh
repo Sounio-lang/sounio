@@ -50,6 +50,9 @@ DERIVED_OK="tests/frontend/unit_derived_velocity_decl_current_source.sio"
 DERIVED_REJECT="tests/compile-fail/unit_derived_velocity_reject_length.sio"
 DERIVED_CHAIN_OK="tests/frontend/unit_derived_acceleration_chain_current_source.sio"
 DERIVED_CHAIN_REJECT="tests/compile-fail/unit_derived_acceleration_reject_velocity.sio"
+F64_UNIT_EXPR_OK="tests/frontend/unit_f64_unit_expr_velocity_current_source.sio"
+F64_UNIT_EXPR_REJECT="tests/compile-fail/unit_f64_unit_expr_reject_length.sio"
+F64_UNIT_EXPR_UNKNOWN_REJECT="tests/compile-fail/unit_f64_unit_expr_unknown_reject.sio"
 LITERAL_SUFFIX_OK="tests/frontend/unit_literal_suffix_current_source.sio"
 LITERAL_SUFFIX_REJECT="tests/compile-fail/unit_literal_suffix_reject_length_as_mass.sio"
 CLINICAL_LITERAL_OK="tests/frontend/unit_literal_clinical_current_source.sio"
@@ -102,6 +105,44 @@ if grep -q 'unit mismatch in call argument' "$DERIVED_CHAIN_REJECT_LOG"; then
 else
   printf 'FAIL  %s failed without the expected unit mismatch diagnostic\n' "$DERIVED_CHAIN_REJECT" >&2
   cat "$DERIVED_CHAIN_REJECT_LOG" >&2
+  exit 1
+fi
+
+F64_UNIT_EXPR_OK_LOG="$TMP_DIR/unit-f64-unit-expr.log"
+if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run "$F64_UNIT_EXPR_OK" >"$F64_UNIT_EXPR_OK_LOG" 2>&1 &&
+   grep -q 'unit f64 unit expr: PASS' "$F64_UNIT_EXPR_OK_LOG"; then
+  printf 'PASS  %s accepted f64<UnitExpr> derived dimensions\n' "$F64_UNIT_EXPR_OK"
+else
+  printf 'FAIL  %s did not accept f64<UnitExpr> derived dimensions\n' "$F64_UNIT_EXPR_OK" >&2
+  cat "$F64_UNIT_EXPR_OK_LOG" >&2
+  exit 1
+fi
+
+F64_UNIT_EXPR_REJECT_LOG="$TMP_DIR/unit-f64-unit-expr-reject.log"
+if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$F64_UNIT_EXPR_REJECT" >"$F64_UNIT_EXPR_REJECT_LOG" 2>&1; then
+  printf 'FAIL  %s unexpectedly accepted length as f64<m/s>\n' "$F64_UNIT_EXPR_REJECT" >&2
+  cat "$F64_UNIT_EXPR_REJECT_LOG" >&2
+  exit 1
+fi
+if grep -q 'unit mismatch in call argument' "$F64_UNIT_EXPR_REJECT_LOG"; then
+  printf 'PASS  %s rejected length where f64<m/s> is required\n' "$F64_UNIT_EXPR_REJECT"
+else
+  printf 'FAIL  %s failed without the expected f64<UnitExpr> diagnostic\n' "$F64_UNIT_EXPR_REJECT" >&2
+  cat "$F64_UNIT_EXPR_REJECT_LOG" >&2
+  exit 1
+fi
+
+F64_UNIT_EXPR_UNKNOWN_LOG="$TMP_DIR/unit-f64-unit-expr-unknown.log"
+if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$F64_UNIT_EXPR_UNKNOWN_REJECT" >"$F64_UNIT_EXPR_UNKNOWN_LOG" 2>&1; then
+  printf 'FAIL  %s unexpectedly accepted an unknown f64<UnitExpr> unit\n' "$F64_UNIT_EXPR_UNKNOWN_REJECT" >&2
+  cat "$F64_UNIT_EXPR_UNKNOWN_LOG" >&2
+  exit 1
+fi
+if grep -q 'unknown unit in f64<UnitExpr> annotation' "$F64_UNIT_EXPR_UNKNOWN_LOG"; then
+  printf 'PASS  %s rejected an unknown f64<UnitExpr> unit\n' "$F64_UNIT_EXPR_UNKNOWN_REJECT"
+else
+  printf 'FAIL  %s failed without the expected unknown-unit diagnostic\n' "$F64_UNIT_EXPR_UNKNOWN_REJECT" >&2
+  cat "$F64_UNIT_EXPR_UNKNOWN_LOG" >&2
   exit 1
 fi
 

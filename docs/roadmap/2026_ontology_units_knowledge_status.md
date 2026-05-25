@@ -1002,6 +1002,7 @@ Positive witness:
 
 - `tests/frontend/unit_derived_velocity_decl_current_source.sio`
 - `tests/frontend/unit_derived_acceleration_chain_current_source.sio`
+- `tests/frontend/unit_f64_unit_expr_velocity_current_source.sio`
 - `tests/frontend/unit_literal_suffix_current_source.sio`
 - `tests/frontend/unit_literal_clinical_current_source.sio`
 - `tests/run-pass/unit_energy_explicit_conversion.sio`
@@ -1010,6 +1011,8 @@ Negative witness:
 
 - `tests/compile-fail/unit_derived_velocity_reject_length.sio`
 - `tests/compile-fail/unit_derived_acceleration_reject_velocity.sio`
+- `tests/compile-fail/unit_f64_unit_expr_reject_length.sio`
+- `tests/compile-fail/unit_f64_unit_expr_unknown_reject.sio`
 - `tests/compile-fail/unit_literal_suffix_reject_length_as_mass.sio`
 - `tests/compile-fail/unit_literal_clinical_reject_mass_as_amount_concentration.sio`
 - `tests/compile-fail/unit_energy_requires_explicit_conversion.sio`
@@ -1026,6 +1029,9 @@ Evidence class:
 - dimension-vector propagation through division;
 - named-unit recovery for a non-cancelling quotient when a compatible derived
   unit is registered;
+- first-rung `f64<UnitExpr>` annotations for registered unit identifiers joined
+  by `*` and `/`, including rejection of wrong dimensions and unknown unit
+  identifiers;
 - compile-fail diagnostics when a plain length is passed where velocity is
   required and when velocity is passed where acceleration is required.
 - current-source named numeric literal suffixes such as `200.0<mg>` and
