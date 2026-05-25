@@ -1,0 +1,304 @@
+// Native Sounio CDCL+VSIDS with 2-WATCHED-LITERAL propagation. Full pipeline:
+// 2WL propagation, 1-UIP learning, non-chronological backjump, VSIDS, restarts.
+// Test: K_V 4-colouring. V=5 -> 0(UNSAT), V=4 -> 1(SAT).
+// litcode(lit): var=abs; pos -> 2*var, neg -> 2*var+1. trail holds signed lits.
+
+fn main() -> i64 with IO, Mut {
+    let V: i64 = 5
+    let K: i64 = 4
+    let N: i64 = V * K
+
+    var cl: [i64; 200000] = [0; 200000]
+    var cstart: [i64; 40000] = [0; 40000]
+    var clen: [i64; 40000] = [0; 40000]
+    var nclauses: i64 = 0
+    var lp: i64 = 0
+
+    var v0: i64 = 0
+    while v0 < V {
+        cstart[nclauses] = lp
+        var cc: i64 = 0
+        while cc < K { cl[lp] = v0*K + cc + 1; lp = lp + 1; cc = cc + 1 }
+        clen[nclauses] = K; nclauses = nclauses + 1
+        v0 = v0 + 1
+    }
+    v0 = 0
+    while v0 < V {
+        var a: i64 = 0
+        while a < K {
+            var b: i64 = a + 1
+            while b < K {
+                cstart[nclauses] = lp
+                cl[lp] = 0 - (v0*K + a + 1); lp = lp + 1
+                cl[lp] = 0 - (v0*K + b + 1); lp = lp + 1
+                clen[nclauses] = 2; nclauses = nclauses + 1
+                b = b + 1
+            }
+            a = a + 1
+        }
+        v0 = v0 + 1
+    }
+    var xx: i64 = 0
+    while xx < V {
+        var yy: i64 = xx + 1
+        while yy < V {
+            var cc2: i64 = 0
+            while cc2 < K {
+                cstart[nclauses] = lp
+                cl[lp] = 0 - (xx*K + cc2 + 1); lp = lp + 1
+                cl[lp] = 0 - (yy*K + cc2 + 1); lp = lp + 1
+                clen[nclauses] = 2; nclauses = nclauses + 1
+                cc2 = cc2 + 1
+            }
+            yy = yy + 1
+        }
+        xx = xx + 1
+    }
+
+    // ---- watches (linked lists; rebuilt with head/tail on traverse) ----
+    var whead: [i64; 16384] = [0 - 1; 16384]
+    var wcl:   [i64; 400000] = [0; 400000]
+    var wnx:   [i64; 400000] = [0 - 1; 400000]
+    var wp: i64 = 0
+    var ic: i64 = 0
+    while ic < nclauses {
+        var w0 = cl[cstart[ic]]
+        var w1 = cl[cstart[ic] + 1]
+        var d0 = w0 * 2; if w0 < 0 { d0 = (0 - w0) * 2 + 1 }
+        var d1 = w1 * 2; if w1 < 0 { d1 = (0 - w1) * 2 + 1 }
+        wcl[wp] = ic; wnx[wp] = whead[d0]; whead[d0] = wp; wp = wp + 1
+        wcl[wp] = ic; wnx[wp] = whead[d1]; whead[d1] = wp; wp = wp + 1
+        ic = ic + 1
+    }
+
+    var value: [i64; 4096] = [0; 4096]
+    var level: [i64; 4096] = [0; 4096]
+    var reason: [i64; 4096] = [0 - 1; 4096]
+    var act: [i64; 4096] = [0; 4096]
+    var seen: [i64; 4096] = [0; 4096]
+    var trail: [i64; 4096] = [0; 4096]
+    var tlen: i64 = 0
+    var qhead: i64 = 0
+    var triallim: [i64; 4096] = [0; 4096]
+    var dlevel: i64 = 0
+    var lrn: [i64; 4096] = [0; 4096]
+    var varinc: i64 = 1
+    var result: i64 = 0 - 1
+    var conflicts: i64 = 0
+    var nextrestart: i64 = 100
+
+    while result == (0 - 1) {
+        // ---------- 2WL propagate ----------
+        var confl: i64 = 0 - 1
+        while qhead < tlen {
+            if confl != (0 - 1) { qhead = tlen }
+            else {
+                let plit = trail[qhead]; qhead = qhead + 1
+                var pvar: i64 = plit; if plit < 0 { pvar = 0 - plit }
+                // falsified literal code = code(¬plit)
+                var fcode: i64 = pvar * 2          // plit<0 -> +pvar false -> code 2*pvar
+                if plit > 0 { fcode = pvar * 2 + 1 }
+                var oldl = whead[fcode]; whead[fcode] = 0 - 1
+                var nh = 0 - 1
+                var nt = 0 - 1
+                var e = oldl
+                while e != (0 - 1) {
+                    let c = wcl[e]
+                    let nexte = wnx[e]
+                    let cs = cstart[c]
+                    var s0 = cl[cs]
+                    var c0 = s0 * 2; if s0 < 0 { c0 = (0 - s0) * 2 + 1 }
+                    if c0 == fcode {
+                        let tmp = cl[cs]; cl[cs] = cl[cs + 1]; cl[cs + 1] = tmp
+                    }
+                    let other = cl[cs]
+                    var ovar = other; if other < 0 { ovar = 0 - other }
+                    let oval = value[ovar]
+                    var otrue = 0
+                    if other > 0 { if oval == 1 { otrue = 1 } } else { if oval == 2 { otrue = 1 } }
+                    var moved = 0
+                    if otrue == 1 { moved = 0 }
+                    else {
+                        var found = 0 - 1
+                        var k = 2
+                        while k < clen[c] {
+                            let lit = cl[cs + k]
+                            var lvar = lit; if lit < 0 { lvar = 0 - lit }
+                            let lval = value[lvar]
+                            var lfalse = 0
+                            if lit > 0 { if lval == 2 { lfalse = 1 } } else { if lval == 1 { lfalse = 1 } }
+                            if lfalse == 0 { found = k; k = clen[c] } else { k = k + 1 }
+                        }
+                        if found != (0 - 1) {
+                            let newlit = cl[cs + found]
+                            cl[cs + found] = cl[cs + 1]
+                            cl[cs + 1] = newlit
+                            var nc = newlit * 2; if newlit < 0 { nc = (0 - newlit) * 2 + 1 }
+                            wnx[e] = whead[nc]; whead[nc] = e
+                            moved = 1
+                        } else {
+                            var ofalse = 0
+                            if other > 0 { if oval == 2 { ofalse = 1 } } else { if oval == 1 { ofalse = 1 } }
+                            if ofalse == 1 { confl = c }
+                            else {
+                                value[ovar] = 1; if other < 0 { value[ovar] = 2 }
+                                level[ovar] = dlevel
+                                reason[ovar] = c
+                                trail[tlen] = other; tlen = tlen + 1
+                            }
+                        }
+                    }
+                    if moved == 0 {
+                        wnx[e] = 0 - 1
+                        if nh == (0 - 1) { nh = e; nt = e } else { wnx[nt] = e; nt = e }
+                    }
+                    if confl != (0 - 1) {
+                        if nexte != (0 - 1) {
+                            if nh == (0 - 1) { nh = nexte } else { wnx[nt] = nexte }
+                        }
+                        e = 0 - 1
+                    } else { e = nexte }
+                }
+                whead[fcode] = nh
+            }
+        }
+
+        if confl != (0 - 1) {
+            conflicts = conflicts + 1
+            if dlevel == 0 { result = 0 }
+            else {
+                // ---- 1-UIP ----
+                var lrnlen: i64 = 1
+                var pathc: i64 = 0
+                var idx: i64 = tlen - 1
+                var cc3: i64 = confl
+                var pivot: i64 = 0
+                var uip: i64 = 0
+                var done: i64 = 0
+                while done == 0 {
+                    let cs = cstart[cc3]
+                    let ce = cs + clen[cc3]
+                    var k: i64 = cs
+                    while k < ce {
+                        let q = cl[k]
+                        var qv: i64 = q; if q < 0 { qv = 0 - q }
+                        if qv != pivot {
+                            if seen[qv] == 0 {
+                                if level[qv] > 0 {
+                                    seen[qv] = 1
+                                    act[qv] = act[qv] + varinc
+                                    if level[qv] >= dlevel { pathc = pathc + 1 }
+                                    else { lrn[lrnlen] = q; lrnlen = lrnlen + 1 }
+                                }
+                            }
+                        }
+                        k = k + 1
+                    }
+                    var keep: i64 = 1
+                    while keep == 1 {
+                        var tv: i64 = trail[idx]; if trail[idx] < 0 { tv = 0 - trail[idx] }
+                        if seen[tv] == 0 { idx = idx - 1 } else { keep = 0 }
+                    }
+                    let plit2 = trail[idx]
+                    var pv: i64 = plit2; if plit2 < 0 { pv = 0 - plit2 }
+                    idx = idx - 1
+                    seen[pv] = 0
+                    pathc = pathc - 1
+                    if pathc == 0 { uip = plit2; done = 1 }
+                    else { cc3 = reason[pv]; pivot = pv }
+                }
+                lrn[0] = 0 - uip
+                // reorder: lrn[1] = max-level literal (for correct 2WL watch post-backjump)
+                var bj: i64 = 0
+                var maxpos: i64 = 0
+                var t: i64 = 1
+                while t < lrnlen {
+                    var lv2: i64 = lrn[t]; if lrn[t] < 0 { lv2 = 0 - lrn[t] }
+                    let lev = level[lv2]
+                    if lev > bj { bj = lev; maxpos = t }
+                    t = t + 1
+                }
+                if maxpos > 1 {
+                    let tmp = lrn[1]; lrn[1] = lrn[maxpos]; lrn[maxpos] = tmp
+                }
+                // clear seen
+                t = 1
+                while t < lrnlen {
+                    var lv3: i64 = lrn[t]; if lrn[t] < 0 { lv3 = 0 - lrn[t] }
+                    seen[lv3] = 0
+                    t = t + 1
+                }
+                // VSIDS decay
+                varinc = varinc + (varinc / 20) + 1
+                if varinc > 1000000000000 {
+                    var rv: i64 = 1
+                    while rv <= N { act[rv] = act[rv] / 1000000; rv = rv + 1 }
+                    varinc = varinc / 1000000
+                    if varinc < 1 { varinc = 1 }
+                }
+                // ---- backjump ----
+                while tlen > triallim[bj + 1] {
+                    tlen = tlen - 1
+                    var uv: i64 = trail[tlen]; if trail[tlen] < 0 { uv = 0 - trail[tlen] }
+                    value[uv] = 0
+                    reason[uv] = 0 - 1
+                }
+                dlevel = bj
+                qhead = tlen
+                // ---- store learned clause + watch it ----
+                var newc: i64 = nclauses
+                cstart[newc] = lp
+                var w: i64 = 0
+                while w < lrnlen { cl[lp] = lrn[w]; lp = lp + 1; w = w + 1 }
+                clen[newc] = lrnlen
+                nclauses = nclauses + 1
+                if lrnlen >= 2 {
+                    var lw0 = lrn[0]
+                    var lw1 = lrn[1]
+                    var e0 = lw0 * 2; if lw0 < 0 { e0 = (0 - lw0) * 2 + 1 }
+                    var e1 = lw1 * 2; if lw1 < 0 { e1 = (0 - lw1) * 2 + 1 }
+                    wcl[wp] = newc; wnx[wp] = whead[e0]; whead[e0] = wp; wp = wp + 1
+                    wcl[wp] = newc; wnx[wp] = whead[e1]; whead[e1] = wp; wp = wp + 1
+                }
+                // ---- assert uip ----
+                var uv2: i64 = uip; if uip < 0 { uv2 = 0 - uip }
+                value[uv2] = 1; if uip < 0 { value[uv2] = 2 }
+                level[uv2] = bj
+                reason[uv2] = newc
+                trail[tlen] = uip; tlen = tlen + 1
+
+                if conflicts >= nextrestart {
+                    while tlen > triallim[1] {
+                        tlen = tlen - 1
+                        var rv2: i64 = trail[tlen]; if trail[tlen] < 0 { rv2 = 0 - trail[tlen] }
+                        value[rv2] = 0
+                        reason[rv2] = 0 - 1
+                    }
+                    dlevel = 0
+                    qhead = tlen
+                    nextrestart = conflicts + 100
+                }
+            }
+        } else {
+            // ---- decide (VSIDS) ----
+            var best: i64 = 0
+            var bestact: i64 = 0 - 1
+            var vv: i64 = 1
+            while vv <= N {
+                if value[vv] == 0 { if act[vv] > bestact { bestact = act[vv]; best = vv } }
+                vv = vv + 1
+            }
+            if best == 0 { result = 1 }
+            else {
+                dlevel = dlevel + 1
+                triallim[dlevel] = tlen
+                value[best] = 1
+                level[best] = dlevel
+                reason[best] = 0 - 1
+                trail[tlen] = best; tlen = tlen + 1
+            }
+        }
+    }
+    println(result)
+    result
+}
