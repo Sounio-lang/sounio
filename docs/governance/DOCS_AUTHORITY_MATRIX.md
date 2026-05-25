@@ -429,6 +429,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.serious-language.sunil-brief | repo_only | docs/serious-language/sunil-brief.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.sounio-vs-python | repo_only | docs/sounio_vs_python.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.spec.language-specification | repo_only | docs/spec/LANGUAGE_SPECIFICATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.spec.unit-dimensions | repo_only | docs/spec/UNIT_DIMENSIONS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.stdlib.linalg.blas-ffi | repo_only | docs/stdlib/linalg/BLAS_FFI.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.stdlib.stdlib-api-reference | repo_only | docs/stdlib/STDLIB_API_REFERENCE.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.stdlib.stdlib-language-limitations | repo_only | docs/stdlib/STDLIB_LANGUAGE_LIMITATIONS.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
