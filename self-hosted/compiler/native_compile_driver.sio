@@ -385,6 +385,10 @@ var V2_ROW_STREAM_ROW_CMP_CODE: [i64; 256] = [0; 256]
 var V2_ROW_STREAM_ROW_THRESHOLD: [i64; 256] = [0; 256]
 var V2_ROW_STREAM_ROW_THRESHOLD_SCALE: [i64; 256] = [0; 256]
 var V2_ROW_STREAM_ROW_THRESHOLD_KIND: [i64; 256] = [0; 256]
+// Step-op pre-computed from step_at(i,j): op_kind for each of up to 10 steps per row.
+// Flat layout: slot = row_idx * 10 + step_idx. Populated during hydration.
+var V2_ROW_STREAM_ROW_STEP_COUNT: [i64; 256] = [0; 256]
+var V2_ROW_STREAM_STEP_OP: [i64; 2560] = [0; 2560]
 
 // Non-capturing closure literals are lowered to generated native-v2 functions.
 var V2_CLOSURE_START_TOK: [i64; 128] = [0; 128]
@@ -2569,38 +2573,93 @@ fn ufn_record_call(dst: i64, fn_id_val: i64, arg0: i64, argc: i64) with Mut {
     }
 }
 
-fn ufn_emit_direct_knowledge_runtime_guard_values_step_walk(ctx: &! V2DriverContext, base_reg: i64, field_offset: i64, cmp_code: i64, threshold: i64, threshold_scale: i64, threshold_kind: i64) with Mut {
+fn ufn_emit_direct_knowledge_runtime_guard_values_step_walk(ctx: &! V2DriverContext, base_reg: i64, field_offset: i64, cmp_code: i64, threshold: i64, threshold_scale: i64, threshold_kind: i64, row_idx: i64) with Mut {
     if base_reg < 0 || field_offset < 0 {
         return
     }
     let value_reg = base_reg + field_offset
-    let cmp_reg = alloc_reg(ctx)
-    if threshold_kind == 3 && threshold != 0 {
-        let threshold_reg = alloc_reg(ctx)
-        ufn_record_load_f64_scaled(threshold_reg, threshold, threshold_scale)
-        let ratio_reg = alloc_reg(ctx)
-        ufn_record_f64_binop(ratio_reg, value_reg, 4, threshold_reg)
-        let one_reg = alloc_reg(ctx)
-        ufn_record_load_f64_scaled(one_reg, 1, 1)
-        ufn_record_f64_binop(cmp_reg, ratio_reg, cmp_code, one_reg)
-    } else if threshold_kind == 2 || threshold_kind == 3 {
-        let threshold_reg = alloc_reg(ctx)
-        ufn_record_load_f64_scaled(threshold_reg, threshold, threshold_scale)
-        ufn_record_f64_binop(cmp_reg, value_reg, cmp_code, threshold_reg)
-    } else {
-        let threshold_reg = alloc_reg(ctx)
-        ufn_record_load_imm(threshold_reg, threshold)
-        ufn_record_binop(cmp_reg, value_reg, cmp_code, threshold_reg)
+    var step_count: i64 = 0
+    if row_idx >= 0 && row_idx < 256 {
+        step_count = V2_ROW_STREAM_ROW_STEP_COUNT[row_idx as usize]
     }
-    let zero_reg = alloc_reg(ctx)
-    ufn_record_load_imm(zero_reg, 0)
-    let eq_zero = alloc_reg(ctx)
-    ufn_record_binop(eq_zero, cmp_reg, 5, zero_reg)
-    let label_ok = alloc_label()
-    ufn_record_branch_false(eq_zero, label_ok)
-    let fail_dst = alloc_reg(ctx)
-    ufn_record_call(fail_dst, V2_BUILTIN_SYS_EXIT_1, 0, 0)
-    ufn_record_label(label_ok)
+    if step_count > 0 {
+        // True step_at(row_idx, j) driven emission: pre-computed op sequence.
+        let threshold_reg = alloc_reg(ctx)
+        let ratio_reg = alloc_reg(ctx)
+        let one_reg = alloc_reg(ctx)
+        let cmp_reg = alloc_reg(ctx)
+        let zero_reg = alloc_reg(ctx)
+        let eq_zero = alloc_reg(ctx)
+        let fail_dst = alloc_reg(ctx)
+        let label_ok = alloc_label()
+        var saw_divide: bool = false
+        var j: i64 = 0
+        while j < step_count {
+            let step_slot = row_idx * 10 + j
+            let op_kind = V2_ROW_STREAM_STEP_OP[step_slot as usize]
+            if op_kind == 1 {
+                if threshold_kind == 3 || threshold_kind == 2 {
+                    ufn_record_load_f64_scaled(threshold_reg, threshold, threshold_scale)
+                } else {
+                    ufn_record_load_imm(threshold_reg, threshold)
+                }
+            } else if op_kind == 8 {
+                ufn_record_f64_binop(ratio_reg, value_reg, 4, threshold_reg)
+                saw_divide = true
+            } else if op_kind == 9 {
+                ufn_record_load_f64_scaled(one_reg, 1, 1)
+            } else if op_kind == 2 {
+                if saw_divide {
+                    ufn_record_f64_binop(cmp_reg, ratio_reg, cmp_code, one_reg)
+                } else if threshold_kind == 2 || threshold_kind == 3 {
+                    ufn_record_f64_binop(cmp_reg, value_reg, cmp_code, threshold_reg)
+                } else {
+                    ufn_record_binop(cmp_reg, value_reg, cmp_code, threshold_reg)
+                }
+            } else if op_kind == 3 {
+                ufn_record_load_imm(zero_reg, 0)
+            } else if op_kind == 4 {
+                ufn_record_binop(eq_zero, cmp_reg, 5, zero_reg)
+            } else if op_kind == 5 {
+                ufn_record_branch_false(eq_zero, label_ok)
+            } else if op_kind == 6 {
+                ufn_record_call(fail_dst, V2_BUILTIN_SYS_EXIT_1, 0, 0)
+            } else if op_kind == 7 {
+                ufn_record_label(label_ok)
+            }
+            j = j + 1
+        }
+        V2_DIRECT_KNOWLEDGE_GUARD_EMITTED = V2_DIRECT_KNOWLEDGE_GUARD_EMITTED + 1
+        return
+    }
+    // Fallback: inline emission (used when step data not yet hydrated).
+    let cmp_reg2 = alloc_reg(ctx)
+    if threshold_kind == 3 && threshold != 0 {
+        let threshold_reg2 = alloc_reg(ctx)
+        ufn_record_load_f64_scaled(threshold_reg2, threshold, threshold_scale)
+        let ratio_reg2 = alloc_reg(ctx)
+        ufn_record_f64_binop(ratio_reg2, value_reg, 4, threshold_reg2)
+        let one_reg2 = alloc_reg(ctx)
+        ufn_record_load_f64_scaled(one_reg2, 1, 1)
+        ufn_record_f64_binop(cmp_reg2, ratio_reg2, cmp_code, one_reg2)
+    } else if threshold_kind == 2 || threshold_kind == 3 {
+        let threshold_reg2 = alloc_reg(ctx)
+        ufn_record_load_f64_scaled(threshold_reg2, threshold, threshold_scale)
+        ufn_record_f64_binop(cmp_reg2, value_reg, cmp_code, threshold_reg2)
+    } else {
+        let threshold_reg2 = alloc_reg(ctx)
+        ufn_record_load_imm(threshold_reg2, threshold)
+        ufn_record_binop(cmp_reg2, value_reg, cmp_code, threshold_reg2)
+    }
+    let zero_reg2 = alloc_reg(ctx)
+    ufn_record_load_imm(zero_reg2, 0)
+    let eq_zero2 = alloc_reg(ctx)
+    ufn_record_binop(eq_zero2, cmp_reg2, 5, zero_reg2)
+    let label_ok2 = alloc_label()
+    ufn_record_branch_false(eq_zero2, label_ok2)
+    let fail_dst2 = alloc_reg(ctx)
+    ufn_record_call(fail_dst2, V2_BUILTIN_SYS_EXIT_1, 0, 0)
+    ufn_record_label(label_ok2)
     V2_DIRECT_KNOWLEDGE_GUARD_EMITTED = V2_DIRECT_KNOWLEDGE_GUARD_EMITTED + 1
 }
 
@@ -2630,6 +2689,7 @@ fn drv_hydrate_knowledge_guard_row_stream_payloads(source_path: string) with IO,
         V2_ROW_STREAM_ROW_THRESHOLD[clear_i as usize] = 0
         V2_ROW_STREAM_ROW_THRESHOLD_SCALE[clear_i as usize] = 1
         V2_ROW_STREAM_ROW_THRESHOLD_KIND[clear_i as usize] = 0
+        V2_ROW_STREAM_ROW_STEP_COUNT[clear_i as usize] = 0
         clear_i = clear_i + 1
     }
     if !V2_ROW_STREAM_READY {
@@ -2656,6 +2716,20 @@ fn drv_hydrate_knowledge_guard_row_stream_payloads(source_path: string) with IO,
                     V2_ROW_STREAM_ROW_THRESHOLD_READY[i as usize] = 1
                     V2_ROW_STREAM_ROW_THRESHOLD[i as usize] = row.scaled_value
                     V2_ROW_STREAM_PAYLOAD_THRESHOLD_COUNT = V2_ROW_STREAM_PAYLOAD_THRESHOLD_COUNT + 1
+                }
+                // Walk step_at(i, j) to pre-compute op sequence for step-driven emission.
+                let emplan = knowledge_runtime_guard_native_emission_plan_at(source_path, i)
+                if emplan.plan_ready {
+                    var sc = emplan.native_step_count
+                    if sc > 10 { sc = 10 }
+                    V2_ROW_STREAM_ROW_STEP_COUNT[i as usize] = sc
+                    var j: i64 = 0
+                    while j < sc {
+                        let step = knowledge_runtime_guard_native_emission_step_from_plan(emplan, j)
+                        let step_slot = i * 10 + j
+                        V2_ROW_STREAM_STEP_OP[step_slot as usize] = step.op_kind
+                        j = j + 1
+                    }
                 }
             }
         }
@@ -2708,7 +2782,8 @@ fn ufn_emit_row_stream_payload_guard(ctx: &! V2DriverContext, base_reg: i64, wan
                     V2_ROW_STREAM_ROW_CMP_CODE[i as usize],
                     V2_ROW_STREAM_ROW_THRESHOLD[i as usize],
                     V2_ROW_STREAM_ROW_THRESHOLD_SCALE[i as usize],
-                    V2_ROW_STREAM_ROW_THRESHOLD_KIND[i as usize]
+                    V2_ROW_STREAM_ROW_THRESHOLD_KIND[i as usize],
+                    i
                 )
                 V2_ROW_STREAM_PAYLOAD_GUARD_EMITTED = V2_ROW_STREAM_PAYLOAD_GUARD_EMITTED + 1
                 emitted = emitted + 1
@@ -2724,7 +2799,7 @@ fn ufn_emit_direct_knowledge_runtime_guard_values(ctx: &! V2DriverContext, base_
         return
     }
     if V2_ROW_STREAM_READY && threshold_kind > 0 {
-        ufn_emit_direct_knowledge_runtime_guard_values_step_walk(ctx, base_reg, field_offset, cmp_code, threshold, threshold_scale, threshold_kind)
+        ufn_emit_direct_knowledge_runtime_guard_values_step_walk(ctx, base_reg, field_offset, cmp_code, threshold, threshold_scale, threshold_kind, 0 - 1)
         return
     }
     let value_reg = base_reg + field_offset
