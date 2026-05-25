@@ -198,7 +198,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.features.smt-integration-guide | repo_only | docs/features/SMT_INTEGRATION_GUIDE.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.features.visual-showcase-integration | repo_only | docs/features/VISUAL_SHOWCASE_INTEGRATION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.getting-started | repo_only | docs/GETTING_STARTED.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.github.profile.readme | repo_only | docs/github/profile/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.glossary | repo_only | docs/GLOSSARY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.governance.data-access-credentials | repo_only | docs/governance/data_access_credentials.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.governance.docs-conventions | repo_only | docs/governance/DOCS_CONVENTIONS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -429,7 +428,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.serious-language.real-world-defensibility | repo_only | docs/serious-language/real-world-defensibility.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.serious-language.sunil-brief | repo_only | docs/serious-language/sunil-brief.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.sounio-vs-python | repo_only | docs/sounio_vs_python.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.spec.knowledge-proof-contexts | repo_only | docs/spec/KNOWLEDGE_PROOF_CONTEXTS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.spec.language-specification | repo_only | docs/spec/LANGUAGE_SPECIFICATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.spec.unit-dimensions | repo_only | docs/spec/UNIT_DIMENSIONS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.stdlib.linalg.blas-ffi | repo_only | docs/stdlib/linalg/BLAS_FFI.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
