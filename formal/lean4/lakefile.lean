@@ -243,3 +243,8 @@ lean_lib «SounioAssociatorShadow» where
 -- chi=4 over Q(sqrt3,sqrt11)). See docs/research/hadwiger-nelson-508-program.md
 @[default_target]
 lean_lib «SounioUnitDistanceExact» where
+
+-- Hadwiger-Nelson #508 Phase B: exact certifier over the full de Grey field
+-- K=Q(sqrt3,sqrt5,sqrt7,sqrt11) (deg 16); fixture ladder + per-axis witnesses.
+@[default_target]
+lean_lib «SounioUnitDistanceField» where
