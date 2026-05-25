@@ -28,30 +28,34 @@ POSITIVE_EXPANDED="$TMP_DIR/knowledge_runtime_guard_positive.expanded.sio"
 NEGATIVE_EXPANDED="$TMP_DIR/knowledge_runtime_guard_reject.expanded.sio"
 MULTI_POSITIVE_EXPANDED_FIRST="$TMP_DIR/knowledge_runtime_guard_multi_positive.first.expanded.sio"
 MULTI_POSITIVE_EXPANDED="$TMP_DIR/knowledge_runtime_guard_multi_positive.expanded.sio"
+MULTI_POSITIVE_MANIFEST_FIRST="$TMP_DIR/knowledge_runtime_guard_multi_positive.first.guardmanifest.tsv"
+MULTI_POSITIVE_MANIFEST="$TMP_DIR/knowledge_runtime_guard_multi_positive.guardmanifest.tsv"
 MULTI_NEGATIVE_EXPANDED="$TMP_DIR/knowledge_runtime_guard_multi_reject.expanded.sio"
 UPPER_POSITIVE_EXPANDED="$TMP_DIR/knowledge_runtime_guard_upper_positive.expanded.sio"
 UPPER_NEGATIVE_EXPANDED="$TMP_DIR/knowledge_runtime_guard_upper_reject.expanded.sio"
 EQ_POSITIVE_EXPANDED="$TMP_DIR/knowledge_runtime_guard_eq_positive.expanded.sio"
 EQ_NEGATIVE_EXPANDED="$TMP_DIR/knowledge_runtime_guard_eq_reject.expanded.sio"
 UNIT_POSITIVE_EXPANDED="$TMP_DIR/knowledge_runtime_guard_unit_positive.expanded.sio"
+UNIT_POSITIVE_MANIFEST="$TMP_DIR/knowledge_runtime_guard_unit_positive.guardmanifest.tsv"
 UNIT_NEGATIVE_EXPANDED="$TMP_DIR/knowledge_runtime_guard_unit_reject.expanded.sio"
 INTERNAL_LABEL_POSITIVE_EXPANDED="$TMP_DIR/knowledge_runtime_guard_internal_label_positive.expanded.sio"
+INTERNAL_LABEL_POSITIVE_MANIFEST="$TMP_DIR/knowledge_runtime_guard_internal_label_positive.guardmanifest.tsv"
 INTERNAL_LABEL_NEGATIVE_EXPANDED="$TMP_DIR/knowledge_runtime_guard_internal_label_reject.expanded.sio"
 MULTI_POSITIVE_CACHE_MISS_LOG="$TMP_DIR/multi-positive-cache-miss.log"
 MULTI_POSITIVE_CACHE_HIT_LOG="$TMP_DIR/multi-positive-cache-hit.log"
 
 bash "$EXPANDER" "$POSITIVE" "$POSITIVE_EXPANDED"
 bash "$EXPANDER" "$NEGATIVE" "$NEGATIVE_EXPANDED"
-bash "$EXPANDER" --cache-dir "$CACHE_DIR" "$MULTI_POSITIVE" "$MULTI_POSITIVE_EXPANDED_FIRST" 2>"$MULTI_POSITIVE_CACHE_MISS_LOG"
-bash "$EXPANDER" --cache-dir "$CACHE_DIR" "$MULTI_POSITIVE" "$MULTI_POSITIVE_EXPANDED" 2>"$MULTI_POSITIVE_CACHE_HIT_LOG"
+bash "$EXPANDER" --cache-dir "$CACHE_DIR" --manifest "$MULTI_POSITIVE_MANIFEST_FIRST" "$MULTI_POSITIVE" "$MULTI_POSITIVE_EXPANDED_FIRST" 2>"$MULTI_POSITIVE_CACHE_MISS_LOG"
+bash "$EXPANDER" --cache-dir "$CACHE_DIR" --manifest "$MULTI_POSITIVE_MANIFEST" "$MULTI_POSITIVE" "$MULTI_POSITIVE_EXPANDED" 2>"$MULTI_POSITIVE_CACHE_HIT_LOG"
 bash "$EXPANDER" "$MULTI_NEGATIVE" "$MULTI_NEGATIVE_EXPANDED"
 bash "$EXPANDER" "$UPPER_POSITIVE" "$UPPER_POSITIVE_EXPANDED"
 bash "$EXPANDER" "$UPPER_NEGATIVE" "$UPPER_NEGATIVE_EXPANDED"
 bash "$EXPANDER" "$EQ_POSITIVE" "$EQ_POSITIVE_EXPANDED"
 bash "$EXPANDER" "$EQ_NEGATIVE" "$EQ_NEGATIVE_EXPANDED"
-bash "$EXPANDER" "$UNIT_POSITIVE" "$UNIT_POSITIVE_EXPANDED"
+bash "$EXPANDER" --manifest "$UNIT_POSITIVE_MANIFEST" "$UNIT_POSITIVE" "$UNIT_POSITIVE_EXPANDED"
 bash "$EXPANDER" "$UNIT_NEGATIVE" "$UNIT_NEGATIVE_EXPANDED"
-bash "$EXPANDER" "$INTERNAL_LABEL_POSITIVE" "$INTERNAL_LABEL_POSITIVE_EXPANDED"
+bash "$EXPANDER" --manifest "$INTERNAL_LABEL_POSITIVE_MANIFEST" "$INTERNAL_LABEL_POSITIVE" "$INTERNAL_LABEL_POSITIVE_EXPANDED"
 bash "$EXPANDER" "$INTERNAL_LABEL_NEGATIVE" "$INTERNAL_LABEL_NEGATIVE_EXPANDED"
 
 if grep -q 'knowledge-runtime-guard cache MISS' "$MULTI_POSITIVE_CACHE_MISS_LOG" &&
@@ -67,11 +71,30 @@ else
   exit 1
 fi
 
-if grep -q '__sounio_knowledge_guard_PatientRuntimeGuardPositive_age_ge_18' "$POSITIVE_EXPANDED" &&
-   grep -q 'assert(value.age >= 18)' "$POSITIVE_EXPANDED"; then
-  printf 'PASS  %s expanded with a generated Knowledge<T> runtime guard helper\n' "$POSITIVE"
+if grep -q '^# Sounio Knowledge runtime guard diagnostics manifest v1$' "$MULTI_POSITIVE_MANIFEST" &&
+   grep -q '^type	field	op	threshold	unit	constraint$' "$MULTI_POSITIVE_MANIFEST" &&
+   awk -F '\t' '$1=="PatientRuntimeGuardMultiPositive" && $2=="age" && $3==">=" && $4=="18" && $5=="" && $6=="PatientRuntimeGuardMultiPositive.age >= 18" { found=1 } END { exit(found ? 0 : 1) }' "$MULTI_POSITIVE_MANIFEST" &&
+   awk -F '\t' '$1=="PatientRuntimeGuardMultiPositive" && $2=="glucose" && $3==">=" && $4=="126" && $5=="" && $6=="PatientRuntimeGuardMultiPositive.glucose >= 126" { found=1 } END { exit(found ? 0 : 1) }' "$MULTI_POSITIVE_MANIFEST" &&
+   awk -F '\t' '$1=="DoseRuntimeGuardUnitPositive" && $2=="amount" && $3==">=" && $4=="500" && $5=="mg" && $6=="DoseRuntimeGuardUnitPositive.amount >= 500 <mg>" { found=1 } END { exit(found ? 0 : 1) }' "$UNIT_POSITIVE_MANIFEST" &&
+   awk -F '\t' '$1=="PatientRuntimeGuardInternalLabelPositive" && $2=="glucose" && $3==">=" && $4=="126.0" && $5=="mg_dL" && $6=="PatientRuntimeGuardInternalLabelPositive.glucose >= 126.0 <mg_dL>" { found=1 } END { exit(found ? 0 : 1) }' "$INTERNAL_LABEL_POSITIVE_MANIFEST"; then
+  printf 'PASS  Knowledge runtime guard expansion wrote auditable guard diagnostic manifests\n'
 else
-  printf 'FAIL  %s did not expand to a generated Knowledge<T> runtime guard helper\n' "$POSITIVE" >&2
+  printf 'FAIL  Knowledge runtime guard expansion did not write the expected guard diagnostic manifests\n' >&2
+  printf '%s\n' '--- multi manifest ---' >&2
+  cat "$MULTI_POSITIVE_MANIFEST" >&2
+  printf '%s\n' '--- unit manifest ---' >&2
+  cat "$UNIT_POSITIVE_MANIFEST" >&2
+  printf '%s\n' '--- internal-label manifest ---' >&2
+  cat "$INTERNAL_LABEL_POSITIVE_MANIFEST" >&2
+  exit 1
+fi
+
+if grep -q '__sounio_knowledge_guard_PatientRuntimeGuardPositive_age_ge_18' "$POSITIVE_EXPANDED" &&
+   grep -q 'Knowledge runtime guard diagnostic: PatientRuntimeGuardPositive.age >= 18' "$POSITIVE_EXPANDED" &&
+   grep -q 'assert(value.age >= 18)' "$POSITIVE_EXPANDED"; then
+  printf 'PASS  %s expanded with a generated Knowledge<T> runtime guard helper and diagnostic\n' "$POSITIVE"
+else
+  printf 'FAIL  %s did not expand to a generated Knowledge<T> runtime guard helper with diagnostic\n' "$POSITIVE" >&2
   cat "$POSITIVE_EXPANDED" >&2
   exit 1
 fi
@@ -95,11 +118,13 @@ else
 fi
 
 if grep -q '__sounio_knowledge_guard_PatientRuntimeGuardMultiPositive_age_ge_18_glucose_ge_126' "$MULTI_POSITIVE_EXPANDED" &&
+   grep -q 'Knowledge runtime guard diagnostic: PatientRuntimeGuardMultiPositive.age >= 18' "$MULTI_POSITIVE_EXPANDED" &&
+   grep -q 'Knowledge runtime guard diagnostic: PatientRuntimeGuardMultiPositive.glucose >= 126' "$MULTI_POSITIVE_EXPANDED" &&
    grep -q 'assert(value.age >= 18)' "$MULTI_POSITIVE_EXPANDED" &&
    grep -q 'assert(value.glucose >= 126)' "$MULTI_POSITIVE_EXPANDED"; then
-  printf 'PASS  %s expanded with conjunctive Knowledge<T> runtime guards\n' "$MULTI_POSITIVE"
+  printf 'PASS  %s expanded with conjunctive Knowledge<T> runtime guards and diagnostics\n' "$MULTI_POSITIVE"
 else
-  printf 'FAIL  %s did not expand to conjunctive Knowledge<T> runtime guards\n' "$MULTI_POSITIVE" >&2
+  printf 'FAIL  %s did not expand to conjunctive Knowledge<T> runtime guards with diagnostics\n' "$MULTI_POSITIVE" >&2
   cat "$MULTI_POSITIVE_EXPANDED" >&2
   exit 1
 fi
@@ -123,10 +148,11 @@ else
 fi
 
 if grep -q '__sounio_knowledge_guard_ScoreRuntimeGuardUpperPositive_score_le_100' "$UPPER_POSITIVE_EXPANDED" &&
+   grep -q 'Knowledge runtime guard diagnostic: ScoreRuntimeGuardUpperPositive.score <= 100' "$UPPER_POSITIVE_EXPANDED" &&
    grep -q 'assert(value.score <= 100)' "$UPPER_POSITIVE_EXPANDED"; then
-  printf 'PASS  %s expanded with an upper-bound Knowledge<T> runtime guard\n' "$UPPER_POSITIVE"
+  printf 'PASS  %s expanded with an upper-bound Knowledge<T> runtime guard and diagnostic\n' "$UPPER_POSITIVE"
 else
-  printf 'FAIL  %s did not expand to an upper-bound Knowledge<T> runtime guard\n' "$UPPER_POSITIVE" >&2
+  printf 'FAIL  %s did not expand to an upper-bound Knowledge<T> runtime guard with diagnostic\n' "$UPPER_POSITIVE" >&2
   cat "$UPPER_POSITIVE_EXPANDED" >&2
   exit 1
 fi
@@ -150,10 +176,11 @@ else
 fi
 
 if grep -q '__sounio_knowledge_guard_AssayRuntimeGuardEqPositive_repeats_eq_3' "$EQ_POSITIVE_EXPANDED" &&
+   grep -q 'Knowledge runtime guard diagnostic: AssayRuntimeGuardEqPositive.repeats == 3' "$EQ_POSITIVE_EXPANDED" &&
    grep -q 'assert(value.repeats == 3)' "$EQ_POSITIVE_EXPANDED"; then
-  printf 'PASS  %s expanded with an equality Knowledge<T> runtime guard\n' "$EQ_POSITIVE"
+  printf 'PASS  %s expanded with an equality Knowledge<T> runtime guard and diagnostic\n' "$EQ_POSITIVE"
 else
-  printf 'FAIL  %s did not expand to an equality Knowledge<T> runtime guard\n' "$EQ_POSITIVE" >&2
+  printf 'FAIL  %s did not expand to an equality Knowledge<T> runtime guard with diagnostic\n' "$EQ_POSITIVE" >&2
   cat "$EQ_POSITIVE_EXPANDED" >&2
   exit 1
 fi
@@ -177,11 +204,12 @@ else
 fi
 
 if grep -q '__sounio_knowledge_guard_DoseRuntimeGuardUnitPositive_amount_ge_500_mg' "$UNIT_POSITIVE_EXPANDED" &&
+   grep -q 'Knowledge runtime guard diagnostic: DoseRuntimeGuardUnitPositive.amount >= 500 <mg>' "$UNIT_POSITIVE_EXPANDED" &&
    grep -q 'let __sounio_threshold_amount: mg = 500.0' "$UNIT_POSITIVE_EXPANDED" &&
    grep -q 'assert(__sounio_ratio_amount >= 1.0)' "$UNIT_POSITIVE_EXPANDED"; then
-  printf 'PASS  %s expanded with a unit-suffixed Knowledge<T> runtime guard\n' "$UNIT_POSITIVE"
+  printf 'PASS  %s expanded with a unit-suffixed Knowledge<T> runtime guard and diagnostic\n' "$UNIT_POSITIVE"
 else
-  printf 'FAIL  %s did not expand to a unit-suffixed Knowledge<T> runtime guard\n' "$UNIT_POSITIVE" >&2
+  printf 'FAIL  %s did not expand to a unit-suffixed Knowledge<T> runtime guard with diagnostic\n' "$UNIT_POSITIVE" >&2
   cat "$UNIT_POSITIVE_EXPANDED" >&2
   exit 1
 fi
@@ -205,11 +233,12 @@ else
 fi
 
 if grep -q '__sounio_knowledge_guard_PatientRuntimeGuardInternalLabelPositive_glucose_ge_126_0_mg_dL' "$INTERNAL_LABEL_POSITIVE_EXPANDED" &&
+   grep -q 'Knowledge runtime guard diagnostic: PatientRuntimeGuardInternalLabelPositive.glucose >= 126.0 <mg_dL>' "$INTERNAL_LABEL_POSITIVE_EXPANDED" &&
    grep -q 'let __sounio_threshold_glucose: mg_dL = 126.0' "$INTERNAL_LABEL_POSITIVE_EXPANDED" &&
    grep -q 'assert(__sounio_ratio_glucose >= 1.0)' "$INTERNAL_LABEL_POSITIVE_EXPANDED"; then
-  printf 'PASS  %s expanded with an internal-label unit Knowledge<T> runtime guard\n' "$INTERNAL_LABEL_POSITIVE"
+  printf 'PASS  %s expanded with an internal-label unit Knowledge<T> runtime guard and diagnostic\n' "$INTERNAL_LABEL_POSITIVE"
 else
-  printf 'FAIL  %s did not expand to an internal-label unit Knowledge<T> runtime guard\n' "$INTERNAL_LABEL_POSITIVE" >&2
+  printf 'FAIL  %s did not expand to an internal-label unit Knowledge<T> runtime guard with diagnostic\n' "$INTERNAL_LABEL_POSITIVE" >&2
   cat "$INTERNAL_LABEL_POSITIVE_EXPANDED" >&2
   exit 1
 fi
@@ -253,6 +282,9 @@ bound checks only, and an equality slice with `==`. Unit-suffixed numeric thresh
 also guarded at runtime after the unit-typed field has been materialized by the
 existing compiler. A current-source slice also covers internal validation-data
 unit labels such as mg_dL without making clinical, conversion, UCUM, LOINC,
-ChEBI, dosing, or regulatory-exchange claims. Native backend guard/trap
-lowering remains future work.
+ChEBI, dosing, or regulatory-exchange claims. The expanded source now preserves
+stable guard diagnostics for representative lower-bound, conjunctive,
+upper-bound, equality, named-unit, and internal-label constraints, and can emit
+small deterministic guard diagnostic manifests for audit. Native backend
+guard/trap lowering remains future work.
 MSG

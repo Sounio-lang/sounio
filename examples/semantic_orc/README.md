@@ -47,9 +47,10 @@ The first executable step is `sinkhorn_lse_orc.sio` in this same directory:
   not a confidence interval for `W1`;
 - emits an explicit runtime-gate token,
   `claim_level=semantic_orc_lse_runtime_gate`;
-- checks two bounded sanity cases: identical local support costs produce
-  positive ORC, while a 1D metric semantic-distance case with transport cost
-  above the observed edge scale produces negative ORC;
+- checks two bounded transport-ratio sanity cases: identical local support
+  costs produce a positive curvature-style diagnostic token, while a 1D metric
+  semantic-distance case with transport cost above the observed edge scale
+  produces a negative curvature-style diagnostic token;
 - checks mass plus row/column marginal constraints;
 - applies 64 fixed Sinkhorn-LSE iterations to the 4x4 non-uniform marginal
   case, then checks whether the fixed-point residual is below tolerance;
@@ -136,6 +137,7 @@ bash scripts/ci/semantic_orc_swow16_graph_edge_multifixture_gate.sh
 bash scripts/ci/semantic_orc_swow16_graph_edge_tile_gate.sh
 bash scripts/ci/semantic_orc_swow16_graph_edge_tile_matrix_gate.sh
 bash scripts/ci/semantic_orc_swow16_graph_edge_tile_matrix_reducer_gate.sh
+bash scripts/ci/semantic_orc_swow16_graph_edge_tile_matrix_parameter_sweep_gate.sh
 bash scripts/ci/semantic_orc_swow16_graph_degree_shuffle_fixture_gate.sh
 ```
 
@@ -216,6 +218,60 @@ The reducer's endpoint-free invariant is tied to this fixture schema: every
 support tile has 16 nodes, of which two are the selected SWOW edge endpoints,
 leaving exactly 14 endpoint-free tile positions per fixture.
 
+The explicit graph-edge/tile green-point parameter check passed on 2026-05-25:
+
+- manifest:
+  `/orangefs/training/sounio/moonshot-a-runtime/moonshot-a-phase-status-codex-20260524T2038/sounio/artifacts/semantic_orc/graph_tile_matrix_parameter_sweep/swow16-graph-tile-matrix-parameter-sweep-final-20260525T135220Z/swow16_graph_edge_tile_matrix_parameter_sweep_manifest.json`
+- schema:
+  `sounio.semantic_orc.swow16_graph_edge_tile_matrix_parameter_sweep_manifest.v1`
+- explicit parameter points: `2x4`, `4x4`, and `4x8`
+- point count: 3
+- total edge/tile fixtures across points: 56
+- upstream pack-oracle row/column tolerance used by this lane: `0.015`
+- runtime result:
+  `3/3 explicit parameter points passed generated Sounio reducer gates`
+- worst inherited K-AXI oracle diagnostics across the passed points:
+  `max_row_err=0.014439138319142952`,
+  `max_col_err=1.3569757706388685e-08`
+- local and OrangeFS executions both passed with the same default point set
+
+This sweep proves only the exact edge-count x tile-count points recorded in
+the manifest. It is not interpolation, extrapolation, random sampling,
+coverage, representativeness, or a full sweep over the SWOW graph. It also
+does not compute or approximate exact Wasserstein-1 distance, exact
+Ollivier-Ricci curvature, an ORC estimator, a biomarker, a clinical result,
+statistical inference, GPU-runtime evidence, population-level evidence, or
+generalizability evidence.
+
+Default execution is intentionally restricted to the recorded green points
+`2x4`, `4x4`, and `4x8` because the nearby `8x4` expansion point currently
+fails. Exploratory non-default points require
+`SOUNIO_SEMANTIC_ORC_ALLOW_EXPERIMENTAL_POINTS=1` and, even if they pass, are
+still exact-point evidence only. The aggregation gate cross-checks each point's
+recorded edge count, tile count, edge stride, tile stride, manifest digests,
+diagnostic-only sentinels, Sounio reducer PASS token, and inherited
+pack-oracle row/column diagnostics. It delegates transport-quality checks to
+the upstream graph-edge tile and matrix gates; it does not recompute transport
+or independently revalidate residuals at the aggregation level.
+
+The `max_row_err` and `max_col_err` values in this subsection are inherited
+K-AXI pack-oracle diagnostics from the graph-edge tile lane, whose explicit
+prototype acceptance threshold is `0.015` for row and column errors in this
+lane. They are not the same tolerance family as the hand-written
+`sinkhorn_lse_orc.sio` 16x16 neighborhood proxy. The row/column asymmetry is
+therefore recorded as an engineering diagnostic for the fixed-iteration
+pack-oracle surface, not interpreted as transport quality, curvature, or
+clinical evidence.
+
+An attempted local expansion point, `8x4`, did not pass this prototype
+tolerance: it failed at `edge_index=4`, `tile_index=1` with
+`K-AXI oracle row error is outside prototype tolerance`. That failed point is
+the next expansion blocker, not part of the green sweep evidence above. Its
+root cause has not yet been classified; the next rung is to determine whether
+it is numerical tolerance pressure, graph-topology sensitivity, fixture
+generation behavior, or a real limitation of the fixed-iteration K-AXI oracle
+surface.
+
 ## Why This Is More Sounio Than A Port
 
 The historical note
@@ -279,13 +335,14 @@ evidence before any marker or biomarker wording.
 
 ## Next Rungs
 
-1. Replace generated fixed arrays with a Sounio-owned fixture reader or a
-   canonical generated-source manifest with checksums.
-2. Add residual-monitoring gates for the 4x4 and N=16 non-uniform cases.
-3. Add a multi-regime fixture manifest that records selected node ids, measure
+1. Classify and repair, relax, or explicitly parameterize the `8x4` expansion
+   blocker before claiming a wider edge/tile parameter envelope.
+2. Replace generated fixed arrays with a Sounio-owned fixture reader or a
+   typed Sounio module that preserves the existing checksum manifest contract.
+3. Add residual-monitoring gates for the 4x4 and N=16 non-uniform cases.
+4. Add a multi-regime fixture manifest that records selected node ids, measure
    construction, cost construction, and gate output per regime.
-4. Recompute the small random-regular curvature transition witness with CPU
+5. Recompute the small random-regular curvature transition witness with CPU
    Sinkhorn-LSE and define the transition criterion explicitly.
-5. Pack the same N=16 inputs for the K-AXI Sinkhorn16 GPU kernel.
 6. Attach null-model and size-control gates before reintroducing depression
    severity interpretation.

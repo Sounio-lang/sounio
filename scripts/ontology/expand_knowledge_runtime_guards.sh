@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash scripts/ontology/expand_knowledge_runtime_guards.sh [--cache-dir DIR] <input.sio> <output.sio>
+  bash scripts/ontology/expand_knowledge_runtime_guards.sh [--cache-dir DIR] [--manifest FILE] <input.sio> <output.sio>
 
 Pre-native bridge for dynamic Knowledge<T where {...}> runtime guards.
 
@@ -32,6 +32,9 @@ After inserting the guard, the expander lowers the proof-context type to plain
 When --cache-dir is supplied, the fully expanded source is cached as a
 deterministic text .guardcache keyed by the input bytes and this expander's
 source bytes. This is still a pre-native cache, not backend guard metadata.
+
+When --manifest is supplied, the expander writes a small deterministic TSV
+audit manifest listing the guard diagnostics preserved in the expanded source.
 EOF
 }
 
@@ -39,6 +42,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT_PATH="$ROOT_DIR/scripts/ontology/expand_knowledge_runtime_guards.sh"
 
 cache_dir=""
+manifest_path=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cache-dir)
@@ -47,6 +51,14 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       cache_dir="$2"
+      shift 2
+      ;;
+    --manifest)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --manifest requires a file path" >&2
+        exit 2
+      fi
+      manifest_path="$2"
       shift 2
       ;;
     -h|--help)
@@ -84,6 +96,14 @@ case "$OUTPUT" in
   /*) OUTPUT_ABS="$OUTPUT" ;;
   *) OUTPUT_ABS="$ROOT_DIR/$OUTPUT" ;;
 esac
+if [[ -n "$manifest_path" ]]; then
+  case "$manifest_path" in
+    /*) MANIFEST_ABS="$manifest_path" ;;
+    *) MANIFEST_ABS="$ROOT_DIR/$manifest_path" ;;
+  esac
+else
+  MANIFEST_ABS=""
+fi
 
 if [[ ! -f "$INPUT_ABS" ]]; then
   echo "error: input not found: $INPUT" >&2
@@ -96,6 +116,38 @@ hash_file() {
   else
     shasum -a 256 "$1" | awk '{print $1}'
   fi
+}
+
+write_guard_manifest() {
+  local expanded_file="$1"
+  local manifest_file="$2"
+  if [[ -z "$manifest_file" ]]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$manifest_file")"
+  local manifest_input_hash="${input_hash:-}"
+  local manifest_expander_hash="${expander_hash:-}"
+  if [[ -z "$manifest_input_hash" ]]; then
+    manifest_input_hash="$(hash_file "$INPUT_ABS")"
+  fi
+  if [[ -z "$manifest_expander_hash" ]]; then
+    manifest_expander_hash="$(hash_file "$SCRIPT_PATH")"
+  fi
+  {
+    printf '# Sounio Knowledge runtime guard diagnostics manifest v1\n'
+    printf '# input: %s\n' "$INPUT"
+    printf '# output: %s\n' "$OUTPUT"
+    printf '# input_sha256: %s\n' "$manifest_input_hash"
+    printf '# expander_sha256: %s\n' "$manifest_expander_hash"
+    printf 'type\tfield\top\tthreshold\tunit\tconstraint\n'
+    while IFS= read -r guard_constraint; do
+      if [[ "$guard_constraint" =~ ^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*(\>\=|\>|\<\=|\<|\=\=)[[:space:]]*([^[:space:]]+)([[:space:]]*\<([A-Za-z_][A-Za-z0-9_]*)\>)?$ ]]; then
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}" "${BASH_REMATCH[6]:-}" "$guard_constraint"
+      else
+        printf 'unknown\tunknown\tunknown\tunknown\t\t%s\n' "$guard_constraint"
+      fi
+    done < <(sed -n 's/.*Knowledge runtime guard diagnostic: //p' "$expanded_file")
+  } >"$manifest_file"
 }
 
 if [[ -n "$cache_dir" ]]; then
@@ -111,6 +163,7 @@ if [[ -n "$cache_dir" ]]; then
   if [[ -f "$cache_file" ]]; then
     mkdir -p "$(dirname "$OUTPUT_ABS")"
     cp "$cache_file" "$OUTPUT_ABS"
+    write_guard_manifest "$OUTPUT_ABS" "$MANIFEST_ABS"
     printf 'knowledge-runtime-guard cache HIT %s\n' "$cache_file" >&2
     exit 0
   fi
@@ -146,6 +199,7 @@ BEGIN { in_match = 0; text = "" }
 if [[ -z "$MATCH_TEXT" ]]; then
   mkdir -p "$(dirname "$OUTPUT_ABS")"
   cp "$INPUT_ABS" "$OUTPUT_ABS"
+  write_guard_manifest "$OUTPUT_ABS" "$MANIFEST_ABS"
   exit 0
 fi
 
@@ -162,6 +216,7 @@ THRESHOLDS=()
 UNITS=()
 OPS=()
 OP_NAMES=()
+FAIL_OPS=()
 while IFS= read -r raw_constraint; do
   constraint="$(printf '%s\n' "$raw_constraint" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
   if [[ -z "$constraint" ]]; then
@@ -173,30 +228,35 @@ while IFS= read -r raw_constraint; do
     UNITS+=("${BASH_REMATCH[5]:-}")
     OPS+=(">=")
     OP_NAMES+=("ge")
+    FAIL_OPS+=("<")
   elif [[ "$constraint" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\>[[:space:]]*([0-9]+([.][0-9]+)?)([[:space:]]*\<([A-Za-z_][A-Za-z0-9_]*)\>)?$ ]]; then
     FIELDS+=("${BASH_REMATCH[1]}")
     THRESHOLDS+=("${BASH_REMATCH[2]}")
     UNITS+=("${BASH_REMATCH[5]:-}")
     OPS+=(">")
     OP_NAMES+=("gt")
+    FAIL_OPS+=("<=")
   elif [[ "$constraint" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\<\=[[:space:]]*([0-9]+([.][0-9]+)?)([[:space:]]*\<([A-Za-z_][A-Za-z0-9_]*)\>)?$ ]]; then
     FIELDS+=("${BASH_REMATCH[1]}")
     THRESHOLDS+=("${BASH_REMATCH[2]}")
     UNITS+=("${BASH_REMATCH[5]:-}")
     OPS+=("<=")
     OP_NAMES+=("le")
+    FAIL_OPS+=(">")
   elif [[ "$constraint" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\<[[:space:]]*([0-9]+([.][0-9]+)?)([[:space:]]*\<([A-Za-z_][A-Za-z0-9_]*)\>)?$ ]]; then
     FIELDS+=("${BASH_REMATCH[1]}")
     THRESHOLDS+=("${BASH_REMATCH[2]}")
     UNITS+=("${BASH_REMATCH[5]:-}")
     OPS+=("<")
     OP_NAMES+=("lt")
+    FAIL_OPS+=(">=")
   elif [[ "$constraint" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*(==|=)[[:space:]]*([0-9]+([.][0-9]+)?)([[:space:]]*\<([A-Za-z_][A-Za-z0-9_]*)\>)?$ ]]; then
     FIELDS+=("${BASH_REMATCH[1]}")
     THRESHOLDS+=("${BASH_REMATCH[3]}")
     UNITS+=("${BASH_REMATCH[6]:-}")
     OPS+=("==")
     OP_NAMES+=("eq")
+    FAIL_OPS+=("!=")
   elif [[ "$constraint" =~ subclass_of ]]; then
     continue
   else
@@ -208,6 +268,7 @@ done < <(printf '%s\n' "$CONSTRAINT_TEXT" | tr ',;' '\n')
 if [[ "${#FIELDS[@]}" -eq 0 ]]; then
   mkdir -p "$(dirname "$OUTPUT_ABS")"
   cp "$INPUT_ABS" "$OUTPUT_ABS"
+  write_guard_manifest "$OUTPUT_ABS" "$MANIFEST_ABS"
   exit 0
 fi
 
@@ -298,9 +359,15 @@ awk -v type_name="$TYPE_NAME" '
       printf '    let __sounio_value_%s: %s = value.%s\n' "${FIELDS[$idx]}" "${UNITS[$idx]}" "${FIELDS[$idx]}"
       printf '    let __sounio_threshold_%s: %s = %s\n' "${FIELDS[$idx]}" "${UNITS[$idx]}" "$threshold_literal"
       printf '    let __sounio_ratio_%s = __sounio_value_%s / __sounio_threshold_%s\n' "${FIELDS[$idx]}" "${FIELDS[$idx]}" "${FIELDS[$idx]}"
-      printf '    assert(__sounio_ratio_%s %s 1.0)\n' "${FIELDS[$idx]}" "${OPS[$idx]}"
+      printf '    if __sounio_ratio_%s %s 1.0 {\n' "${FIELDS[$idx]}" "${FAIL_OPS[$idx]}"
+      printf '        // Knowledge runtime guard diagnostic: %s.%s %s %s <%s>\n' "$TYPE_NAME" "${FIELDS[$idx]}" "${OPS[$idx]}" "${THRESHOLDS[$idx]}" "${UNITS[$idx]}"
+      printf '        assert(__sounio_ratio_%s %s 1.0)\n' "${FIELDS[$idx]}" "${OPS[$idx]}"
+      printf '    }\n'
     else
-      printf '    assert(value.%s %s %s)\n' "${FIELDS[$idx]}" "${OPS[$idx]}" "${THRESHOLDS[$idx]}"
+      printf '    if value.%s %s %s {\n' "${FIELDS[$idx]}" "${FAIL_OPS[$idx]}" "${THRESHOLDS[$idx]}"
+      printf '        // Knowledge runtime guard diagnostic: %s.%s %s %s\n' "$TYPE_NAME" "${FIELDS[$idx]}" "${OPS[$idx]}" "${THRESHOLDS[$idx]}"
+      printf '        assert(value.%s %s %s)\n' "${FIELDS[$idx]}" "${OPS[$idx]}" "${THRESHOLDS[$idx]}"
+      printf '    }\n'
     fi
   done
   printf '    return value\n'
@@ -320,7 +387,9 @@ if [[ -n "$CACHE_DIR_ABS" ]]; then
   } >"$tmp_cache"
   mv "$tmp_cache" "$cache_file"
   cp "$cache_file" "$OUTPUT_ABS"
+  write_guard_manifest "$OUTPUT_ABS" "$MANIFEST_ABS"
   printf 'knowledge-runtime-guard cache MISS %s\n' "$cache_file" >&2
 else
   cp "$TMP_EXPANDED" "$OUTPUT_ABS"
+  write_guard_manifest "$OUTPUT_ABS" "$MANIFEST_ABS"
 fi

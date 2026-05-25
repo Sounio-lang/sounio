@@ -339,6 +339,14 @@ Subgoals:
   `{ score <= 100 }`, with positive and violating dynamic witnesses.
 - [x] Add executable equality guards such as `{ repeats == 3 }`, matching the
   parser/checker proof-context surface for numeric equality constraints.
+- [x] Preserve stable pre-native runtime guard diagnostics in the expanded
+  source for representative lower-bound, conjunctive, upper-bound, equality,
+  named-unit, and internal-label constraints without adding `IO` effects to
+  generated guard helpers.
+- [x] Add an optional deterministic runtime-guard diagnostic manifest artifact
+  for pre-native guard expansion, keyed by the same input/expander hashes as
+  the `.guardcache` path and listing the guarded `Type.field op threshold`
+  constraints for audit.
 - [ ] Lower checker-visible runtime proof obligations into native backend
   guards/traps.
 - [ ] Add `//@ ontology-bundle: "..."` as a compile-time bundle directive.
@@ -609,8 +617,9 @@ TODOs:
   of relying on pre-native source expansion.
 - [ ] Broaden dynamic runtime checks beyond the current numeric comparison
   slice once the native guard/trap path exists.
-- [ ] Preserve proof evidence or diagnostics explaining which constraint was
-  satisfied or failed.
+- [ ] Preserve proof evidence or runtime diagnostics explaining which
+  constraint was satisfied or failed across the eventual native guard/trap
+  path.
 - [x] Include the pre-native runtime guard expansion gate in the static spine
   umbrella as the first executable dynamic-check rung.
 - [ ] Extend the umbrella `Knowledge<T>` gate to native backend dynamic-check

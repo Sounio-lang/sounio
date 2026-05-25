@@ -165,7 +165,14 @@ Current live blockers:
   such as `mg_dL` under the same
   no-clinical-authority boundary as the metadata/unit-label gates. The expander
   now also has deterministic pre-native text `.guardcache` reuse keyed by
-  source bytes and expander bytes; native backend lowering remains future work.
+  source bytes and expander bytes. The expanded source now preserves stable
+  guard diagnostics for representative lower-bound, conjunctive, upper-bound,
+  equality, named-unit, and internal-label constraints as source comments near
+  the generated assertions, without adding `IO` effects to guard helpers. The
+  expander can also emit a deterministic guard diagnostic manifest keyed by
+  the same input/expander hashes and listing the guarded
+  `Type.field op threshold` constraints for audit; native backend lowering and
+  runtime diagnostic emission remain future work.
 
 The repo already has generated ontology artifacts and witnesses under:
 
@@ -476,6 +483,11 @@ Evidence class:
   materialized and checked through a dimensionless ratio.
 - current-source internal-label positive and negative witnesses prove the same
   ratio guard shape for `mg_dL` without making clinical or standards claims.
+- generated source diagnostics identify the guarded `Type.field op threshold`
+  constraint for lower-bound, conjunctive, upper-bound, equality, named-unit,
+  and internal-label slices without making the helper `IO`-effectful.
+- optional guard diagnostic manifests record the same guarded constraints in a
+  deterministic TSV-like audit artifact with input and expander hashes.
 
 Status:
 
@@ -490,15 +502,24 @@ Status:
 - extended on 2026-05-25 with a current-source `mg_dL` internal-label guard
   slice, explicitly without clinical, conversion, UCUM, LOINC, ChEBI, dosing,
   or regulatory-exchange authority;
+- extended on 2026-05-25 with stable pre-native guard diagnostics preserved in
+  the expanded source for representative runtime guard families;
+- extended on 2026-05-25 with optional guard diagnostic manifest emission and
+  gate coverage for conjunctive, named-unit, and internal-label entries;
 - this is intentionally pre-native and does not claim native backend
-  guard/trap lowering yet.
+  guard/trap lowering or runtime diagnostic emission yet.
 - command output now includes:
-  - `PASS tests/frontend/knowledge_runtime_guard_upper_positive.sio expanded with an upper-bound Knowledge<T> runtime guard`;
+  - `PASS Knowledge runtime guard expansion wrote auditable guard diagnostic manifests`;
+  - `PASS tests/frontend/knowledge_runtime_guard_positive.sio expanded with a generated Knowledge<T> runtime guard helper and diagnostic`;
+  - `PASS tests/frontend/knowledge_runtime_guard_multi_positive.sio expanded with conjunctive Knowledge<T> runtime guards and diagnostics`;
+  - `PASS tests/frontend/knowledge_runtime_guard_upper_positive.sio expanded with an upper-bound Knowledge<T> runtime guard and diagnostic`;
   - `PASS tests/frontend/knowledge_runtime_guard_upper_positive.sio accepted dynamic value satisfying generated upper-bound runtime guard`;
   - `PASS tests/frontend/knowledge_runtime_guard_upper_reject.sio failed the generated upper-bound Knowledge<T> runtime guard`;
-  - `PASS tests/frontend/knowledge_runtime_guard_eq_positive.sio expanded with an equality Knowledge<T> runtime guard`;
+  - `PASS tests/frontend/knowledge_runtime_guard_eq_positive.sio expanded with an equality Knowledge<T> runtime guard and diagnostic`;
   - `PASS tests/frontend/knowledge_runtime_guard_eq_positive.sio accepted dynamic value satisfying generated equality runtime guard`;
-  - `PASS tests/frontend/knowledge_runtime_guard_eq_reject.sio failed the generated equality Knowledge<T> runtime guard`.
+  - `PASS tests/frontend/knowledge_runtime_guard_eq_reject.sio failed the generated equality Knowledge<T> runtime guard`;
+  - `PASS tests/frontend/knowledge_runtime_guard_unit_positive.sio expanded with a unit-suffixed Knowledge<T> runtime guard and diagnostic`;
+  - `PASS tests/frontend/knowledge_runtime_guard_internal_label_positive.sio expanded with an internal-label unit Knowledge<T> runtime guard and diagnostic`.
 
 ### Ontology Bundle Directive Expansion
 
