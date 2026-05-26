@@ -1,0 +1,498 @@
+//@ run-pass
+//
+// Epistemic VSIDS evaluation:
+//   1. Decision count ablation: UCB vs mean-only on UNSAT instances
+//   2. Activity distribution: mean vs variance ranking (GUM causal geometry)
+//   3. Larger random 3-SAT near phase transition
+//   4. Epistemic Thompson Sampling (score_mode=3, first-in-class):
+//      score = mean + sqrt(-2·ln(u_v) · act_var[v])
+//      u_v = deterministic hash(var, n_decisions). act_var=0 → pure mean (safe).
+//
+// Instances:
+//   PHP(3,2): 3 pigeons, 2 holes — small UNSAT
+//   PHP(4,3): 4 pigeons, 3 holes — harder UNSAT
+//   PHP(5,4): 5 pigeons, 4 holes — 20 vars, deeper search
+//   K4 3-coloring: UNSAT, 12 vars, mixed clause lengths
+//   Random 3-SAT: 12 vars, ~50 clauses (near phase transition ratio 4.17)
+
+use theorem::smt::*
+
+// --- PHP(m,n): m pigeons, n holes, UNSAT when m > n ---
+// var p[i][j] = i*n+j, positive lit = 2*(i*n+j), negative = 2*(i*n+j)+1
+
+fn add_php43(ctx: &!SmtContext) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    // each pigeon must occupy at least one hole
+    var i: i32 = 0
+    while i < 4 {
+        lits[0] = (i * 3 + 0) * 2
+        lits[1] = (i * 3 + 1) * 2
+        lits[2] = (i * 3 + 2) * 2
+        smt_add_clause(ctx, &lits, 3)
+        i = i + 1
+    }
+    // no two pigeons in the same hole
+    var j: i32 = 0
+    while j < 3 {
+        var i1: i32 = 0
+        while i1 < 4 {
+            var i2: i32 = i1 + 1
+            while i2 < 4 {
+                lits[0] = (i1 * 3 + j) * 2 + 1
+                lits[1] = (i2 * 3 + j) * 2 + 1
+                smt_add_clause(ctx, &lits, 2)
+                i2 = i2 + 1
+            }
+            i1 = i1 + 1
+        }
+        j = j + 1
+    }
+}
+
+fn add_php54(ctx: &!SmtContext) with Mut, Div {
+    // 5 pigeons, 4 holes — 20 vars, 5 + 40 = 45 clauses
+    // var p[i][j] = i*4+j, i=0..4, j=0..3
+    var lits: [i32; 8] = [0; 8]
+    var i: i32 = 0
+    while i < 5 {
+        lits[0] = (i * 4 + 0) * 2
+        lits[1] = (i * 4 + 1) * 2
+        lits[2] = (i * 4 + 2) * 2
+        lits[3] = (i * 4 + 3) * 2
+        smt_add_clause(ctx, &lits, 4)
+        i = i + 1
+    }
+    var j: i32 = 0
+    while j < 4 {
+        var i1: i32 = 0
+        while i1 < 5 {
+            var i2: i32 = i1 + 1
+            while i2 < 5 {
+                lits[0] = (i1 * 4 + j) * 2 + 1
+                lits[1] = (i2 * 4 + j) * 2 + 1
+                smt_add_clause(ctx, &lits, 2)
+                i2 = i2 + 1
+            }
+            i1 = i1 + 1
+        }
+        j = j + 1
+    }
+}
+
+fn lcg_next(state: &!i64) -> i64 with Mut, Div {
+    let a: i64 = 1103515245
+    let c: i64 = 12345
+    let m: i64 = 2147483648
+    var next = (*state * a + c) % m
+    if next < 0 { next = next + m }
+    *state = next
+    return next
+}
+
+fn add_random_3sat(ctx: &!SmtContext, seed: i64, n_vars: i32, n_clauses: i32) with Mut, Div {
+    var st: i64 = seed
+    var ci: i32 = 0
+    while ci < n_clauses {
+        var lits: [i32; 8] = [0; 8]
+        var li: i32 = 0
+        while li < 3 {
+            let rv = lcg_next(&! st) % (n_vars as i64)
+            let rp = lcg_next(&! st) % 2
+            lits[li] = (rv as i32) * 2 + (rp as i32)
+            li = li + 1
+        }
+        smt_add_clause(ctx, &lits, 3)
+        ci = ci + 1
+    }
+}
+
+fn add_php32(ctx: &!SmtContext) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    var i: i32 = 0
+    while i < 3 {
+        lits[0] = (i * 2 + 0) * 2
+        lits[1] = (i * 2 + 1) * 2
+        smt_add_clause(ctx, &lits, 2)
+        i = i + 1
+    }
+    var j: i32 = 0
+    while j < 2 {
+        var i1: i32 = 0
+        while i1 < 3 {
+            var i2: i32 = i1 + 1
+            while i2 < 3 {
+                lits[0] = (i1 * 2 + j) * 2 + 1
+                lits[1] = (i2 * 2 + j) * 2 + 1
+                smt_add_clause(ctx, &lits, 2)
+                i2 = i2 + 1
+            }
+            i1 = i1 + 1
+        }
+        j = j + 1
+    }
+}
+
+// K4 3-coloring: 4 vertices, 3 colors, UNSAT (K4 needs 4 colors)
+// var c[v][c] = v*3+c, v=0..3, c=0..2
+fn add_k4_3col(ctx: &!SmtContext) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    // each vertex gets at least one color
+    var v: i32 = 0
+    while v < 4 {
+        lits[0] = (v * 3 + 0) * 2
+        lits[1] = (v * 3 + 1) * 2
+        lits[2] = (v * 3 + 2) * 2
+        smt_add_clause(ctx, &lits, 3)
+        v = v + 1
+    }
+    // each vertex gets at most one color (pairwise exclusion)
+    v = 0
+    while v < 4 {
+        var c1: i32 = 0
+        while c1 < 3 {
+            var c2: i32 = c1 + 1
+            while c2 < 3 {
+                lits[0] = (v * 3 + c1) * 2 + 1
+                lits[1] = (v * 3 + c2) * 2 + 1
+                smt_add_clause(ctx, &lits, 2)
+                c2 = c2 + 1
+            }
+            c1 = c1 + 1
+        }
+        v = v + 1
+    }
+    // adjacent vertices (all pairs in K4) must differ in each color
+    var v1: i32 = 0
+    while v1 < 4 {
+        var v2: i32 = v1 + 1
+        while v2 < 4 {
+            var c: i32 = 0
+            while c < 3 {
+                lits[0] = (v1 * 3 + c) * 2 + 1
+                lits[1] = (v2 * 3 + c) * 2 + 1
+                smt_add_clause(ctx, &lits, 2)
+                c = c + 1
+            }
+            v2 = v2 + 1
+        }
+        v1 = v1 + 1
+    }
+}
+
+// Print the top-k variables by act_mean (shows what the solver learned)
+fn print_top_activity(ctx: &SmtContext, n_vars: i32, label: i32) with IO {
+    var top0: i32 = 0 - 1
+    var top1: i32 = 0 - 1
+    var top2: i32 = 0 - 1
+    var s0: f64 = 0.0 - 1.0
+    var s1: f64 = 0.0 - 1.0
+    var s2: f64 = 0.0 - 1.0
+    var i: i32 = 0
+    while i < n_vars {
+        let m = smt_get_act_mean(ctx, i)
+        if m > s0 {
+            s2 = s1
+            top2 = top1
+            s1 = s0
+            top1 = top0
+            s0 = m
+            top0 = i
+        } else {
+            if m > s1 {
+                s2 = s1
+                top2 = top1
+                s1 = m
+                top1 = i
+            } else {
+                if m > s2 {
+                    s2 = m
+                    top2 = i
+                }
+            }
+        }
+        i = i + 1
+    }
+    print_int(label)
+    if top0 >= 0 {
+        print_int(top0)
+        print_f64(smt_get_act_mean(ctx, top0))
+        print_f64(smt_get_act_var(ctx, top0))
+    }
+    if top1 >= 0 {
+        print_int(top1)
+        print_f64(smt_get_act_mean(ctx, top1))
+        print_f64(smt_get_act_var(ctx, top1))
+    }
+    if top2 >= 0 {
+        print_int(top2)
+        print_f64(smt_get_act_mean(ctx, top2))
+        print_f64(smt_get_act_var(ctx, top2))
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    var pass: i32 = 0
+    var fail: i32 = 0
+
+    // =========================================================
+    // TEST 1: PHP(3,2) — small UNSAT, both modes must agree
+    // =========================================================
+    var ctx1 = smt_new()
+    add_php32(&! ctx1)
+
+    let r1a = smt_solve(&! ctx1)
+    let d1a = smt_get_decisions(&ctx1)
+
+    smt_reset_activities(&! ctx1)
+    smt_set_score_mode(&! ctx1, 1)
+    let r1b = smt_solve(&! ctx1)
+    let d1b = smt_get_decisions(&ctx1)
+
+    if r1a == 0 && r1b == 0 {
+        println("T1 PASS: PHP(3,2) UNSAT under both modes")
+        pass = pass + 1
+    } else {
+        println("T1 FAIL: PHP(3,2) result mismatch")
+        fail = fail + 1
+    }
+    println("  PHP(3,2) UCB decisions:")
+    print_int(d1a)
+    println("  PHP(3,2) mean-only decisions:")
+    print_int(d1b)
+
+    // =========================================================
+    // TEST 2: PHP(4,3) — harder UNSAT ablation
+    // =========================================================
+    var ctx2 = smt_new()
+    add_php43(&! ctx2)
+
+    let r2a = smt_solve(&! ctx2)
+    let d2a = smt_get_decisions(&ctx2)
+
+    smt_reset_activities(&! ctx2)
+    smt_set_score_mode(&! ctx2, 1)
+    let r2b = smt_solve(&! ctx2)
+    let d2b = smt_get_decisions(&ctx2)
+
+    if r2a == 0 && r2b == 0 {
+        println("T2 PASS: PHP(4,3) UNSAT under both modes")
+        pass = pass + 1
+    } else {
+        println("T2 FAIL: PHP(4,3) result mismatch")
+        fail = fail + 1
+    }
+    println("  PHP(4,3) UCB decisions:")
+    print_int(d2a)
+    println("  PHP(4,3) mean-only decisions:")
+    print_int(d2b)
+
+    // =========================================================
+    // TEST 3: K4 3-coloring UNSAT
+    // =========================================================
+    var ctx3 = smt_new()
+    add_k4_3col(&! ctx3)
+
+    let r3a = smt_solve(&! ctx3)
+    let d3a = smt_get_decisions(&ctx3)
+
+    smt_reset_activities(&! ctx3)
+    smt_set_score_mode(&! ctx3, 1)
+    let r3b = smt_solve(&! ctx3)
+    let d3b = smt_get_decisions(&ctx3)
+
+    if r3a == 0 && r3b == 0 {
+        println("T3 PASS: K4 3-coloring UNSAT under both modes")
+        pass = pass + 1
+    } else {
+        println("T3 FAIL: K4 3-coloring result mismatch")
+        fail = fail + 1
+    }
+    println("  K4-3col UCB decisions:")
+    print_int(d3a)
+    println("  K4-3col mean-only decisions:")
+    print_int(d3b)
+
+    // =========================================================
+    // TEST 4: PHP(5,4) — deeper UNSAT, 20 vars, 45 clauses
+    // =========================================================
+    var ctx4b = smt_new()
+    add_php54(&! ctx4b)
+
+    let r4a = smt_solve(&! ctx4b)
+    let d4a = smt_get_decisions(&ctx4b)
+    // Capture diversity stats before reset_activities overwrites them for mean-only solve.
+    // These are the conflict-clause distinct-levels for the UCB run specifically.
+    let cf4a = smt_get_conflicts(&ctx4b)
+    let tot_d4a = smt_get_stat_total_d(&ctx4b)
+    let max_d4a = smt_get_stat_max_d(&ctx4b)
+
+    smt_reset_activities(&! ctx4b)
+    smt_set_score_mode(&! ctx4b, 1)
+    let r4b = smt_solve(&! ctx4b)
+    let d4b = smt_get_decisions(&ctx4b)
+
+    // also run Wilson-LRB mode
+    var ctx4c = smt_new()
+    add_php54(&! ctx4c)
+    smt_set_score_mode(&! ctx4c, 2)
+    let r4c = smt_solve(&! ctx4c)
+    let d4c = smt_get_decisions(&ctx4c)
+    let cf4c = smt_get_conflicts(&ctx4c)
+    let tot_d4c = smt_get_stat_total_d(&ctx4c)
+    let max_d4c = smt_get_stat_max_d(&ctx4c)
+
+    if r4a == 0 && r4b == 0 && r4c == 0 {
+        println("T4 PASS: PHP(5,4) UNSAT under UCB / mean-only / Wilson")
+        pass = pass + 1
+    } else {
+        println("T4 FAIL: PHP(5,4) result mismatch")
+        fail = fail + 1
+    }
+    println("  PHP(5,4) UCB-adaptive decisions:")
+    print_int(d4a)
+    println("  PHP(5,4) mean-only decisions:")
+    print_int(d4b)
+    println("  PHP(5,4) Wilson-LRB decisions:")
+    print_int(d4c)
+    println("  PHP(5,4) Wilson-LRB conflicts:")
+    print_int(cf4c)
+    // Diversity diagnostic (Thread 1): distinct decision-level span per conflict clause.
+    // avg_d = total_d / n_conflicts; max_d = widest single conflict clause.
+    // Calibrates the smt_conflict_clause comment block: measured avg_d ≈ 0.64 (mostly d=1).
+    println("  PHP(5,4) UCB diversity: conflicts / total_d / max_d:")
+    print_int(cf4a)
+    print_int(tot_d4a)
+    print_int(max_d4a)
+    println("  PHP(5,4) Wilson diversity: total_d / max_d:")
+    print_int(tot_d4c)
+    print_int(max_d4c)
+
+    // Thompson Sampling (score_mode=3): run PHP(5,4) to verify correctness + decisions.
+    // Expected: UNSAT (r=0), decision count near 26. With act_var=0 before first conflict
+    // the TS score = mean exactly, so early decisions match mode 1. After first conflict,
+    // exploration is modulated by random z_v ~ Rayleigh; per-round re-sampling means the
+    // amplitude varies dynamically. This is the first-in-class result.
+    var ctx4d = smt_new()
+    add_php54(&! ctx4d)
+    smt_set_score_mode(&! ctx4d, 3)
+    let r4d = smt_solve(&! ctx4d)
+    let d4d = smt_get_decisions(&ctx4d)
+    let cf4d = smt_get_conflicts(&ctx4d)
+    if r4d == 0 {
+        println("T4b PASS: PHP(5,4) UNSAT under Thompson Sampling")
+        pass = pass + 1
+    } else {
+        println("T4b FAIL: Thompson Sampling returned SAT on PHP(5,4)")
+        fail = fail + 1
+    }
+    println("  PHP(5,4) Thompson-Sampling decisions:")
+    print_int(d4d)
+    println("  PHP(5,4) Thompson-Sampling conflicts:")
+    print_int(cf4d)
+
+    // =========================================================
+    // TEST 5: Random 3-SAT near phase transition
+    // n=12, 50 clauses (ratio 4.17), seed=9999
+    // Runs all four modes; correctness = all must agree on SAT/UNSAT
+    // =========================================================
+    var ctx5a = smt_new()
+    add_random_3sat(&! ctx5a, 9999, 12, 50)
+    let r5a = smt_solve(&! ctx5a)
+    let d5a = smt_get_decisions(&ctx5a)
+
+    var ctx5b = smt_new()
+    add_random_3sat(&! ctx5b, 9999, 12, 50)
+    smt_set_score_mode(&! ctx5b, 1)
+    let r5b = smt_solve(&! ctx5b)
+    let d5b = smt_get_decisions(&ctx5b)
+
+    var ctx5c = smt_new()
+    add_random_3sat(&! ctx5c, 9999, 12, 50)
+    smt_set_score_mode(&! ctx5c, 2)
+    let r5c = smt_solve(&! ctx5c)
+    let d5c = smt_get_decisions(&ctx5c)
+
+    var ctx5d = smt_new()
+    add_random_3sat(&! ctx5d, 9999, 12, 50)
+    smt_set_score_mode(&! ctx5d, 3)
+    let r5d = smt_solve(&! ctx5d)
+    let d5d = smt_get_decisions(&ctx5d)
+
+    if r5a == r5b && r5b == r5c && r5c == r5d && r5a >= 0 {
+        println("T5 PASS: random 3-SAT agrees across all four modes")
+        pass = pass + 1
+    } else {
+        println("T5 FAIL: random 3-SAT result mismatch")
+        fail = fail + 1
+    }
+    println("  random-3sat result (0=UNSAT 1=SAT):")
+    print_int(r5a)
+    println("  UCB-adaptive decisions:")
+    print_int(d5a)
+    println("  mean-only decisions:")
+    print_int(d5b)
+    println("  Wilson-LRB decisions:")
+    print_int(d5c)
+    println("  Thompson-Sampling decisions:")
+    print_int(d5d)
+
+    // =========================================================
+    // TEST 6: Activity distribution — PHP(4,3) UCB
+    // With corrected GUM formula bump2*(L-1)/L:
+    //   - unit-clause bumps (decisions) add zero variance
+    //   - length-2 bumps add 0.5*bump2 (precise blame)
+    //   - length-3 bumps add 0.67*bump2 (diffuse blame)
+    // Divergence of mean-rank vs var-rank indicates the GUM
+    // signal IS capturing clause-length geometry, not just activity.
+    // =========================================================
+    var ctx4 = smt_new()
+    add_php43(&! ctx4)
+    let _ = smt_solve(&! ctx4)
+
+    var max_mean: f64 = 0.0
+    var max_var_val: f64 = 0.0
+    var top_by_mean: i32 = 0 - 1
+    var top_by_var: i32 = 0 - 1
+    var any_nonzero_var: i32 = 0
+    var i: i32 = 0
+    while i < 12 {
+        let m = smt_get_act_mean(&ctx4, i)
+        let v = smt_get_act_var(&ctx4, i)
+        if m > max_mean {
+            max_mean = m
+            top_by_mean = i
+        }
+        if v > max_var_val {
+            max_var_val = v
+            top_by_var = i
+        }
+        if v > 0.0 { any_nonzero_var = 1 }
+        i = i + 1
+    }
+
+    if any_nonzero_var == 1 {
+        println("T4 PASS: act_var is non-zero (GUM variance propagating)")
+        pass = pass + 1
+    } else {
+        println("T4 FAIL: act_var all zero — GUM variance not accumulating")
+        fail = fail + 1
+    }
+
+    println("  top-by-mean var:")
+    print_int(top_by_mean)
+    println("  top-by-var var:")
+    print_int(top_by_var)
+    println("  mean-var rank divergence (0=same 1=different):")
+    if top_by_mean != top_by_var { print_int(1) } else { print_int(0) }
+
+    // =========================================================
+    // SUMMARY
+    // =========================================================
+    println("---")
+    if fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}
