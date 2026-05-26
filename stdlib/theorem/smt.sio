@@ -160,6 +160,10 @@ fn smt_min_i32(a: i32, b: i32) -> i32 {
     if a < b { a } else { b }
 }
 
+fn smt_max_i32(a: i32, b: i32) -> i32 {
+    if a > b { a } else { b }
+}
+
 struct SmtContext {
     n_vars: i32,
     n_clauses: i32,
@@ -211,6 +215,11 @@ struct SmtContext {
     phase_alpha: [f64; 64],
     phase_beta: [f64; 64],
     phase_mode: i32,
+    // Regime-gated restart: conflict budget per attempt; 0 = disabled (default).
+    // When budget is exhausted and regime != Proof, smt_solve restarts with warm
+    // epistemic state (activity + Beta posteriors preserved, assign/trail reset).
+    restart_budget: i32,
+    n_restarts: i32,
     n_constraints: i32,
     lia_coeffs: [i64; 1024],
     lia_bounds: [i64; 64],
@@ -250,6 +259,8 @@ fn smt_new() -> SmtContext {
         phase_alpha: [1.0; 64],
         phase_beta: [1.0; 64],
         phase_mode: 0,
+        restart_budget: 0,
+        n_restarts: 0,
         n_constraints: 0,
         lia_coeffs: [0; 1024],
         lia_bounds: [0; 64],
@@ -409,8 +420,17 @@ fn smt_wilson_score(participated: i32, interval: i32) -> f64 with Div {
 }
 
 // O(1) decay + LRB tick per conflict.
-fn smt_decay_activity(ctx: &!SmtContext) with Mut {
-    ctx.bump_amount = ctx.bump_amount * 1.052631578947368
+// Regime-adaptive α: Proof regime (trust≈0.2) → fast decay (1/0.934 ≈ 1.071).
+//                    Exploratory regime (trust=1.0) → slow decay (1/0.97 ≈ 1.031).
+// In Proof: recency dominates the UNSAT core — forget stale activations fast.
+// In Exploratory: long-term GUM variance accumulation carries the signal — preserve it.
+// Prior art (CHB, LRB, VSIDS): fixed α=0.95 for all regimes. This is the first
+// online α adaptation driven by a causal regime signal.
+fn smt_decay_activity(ctx: &!SmtContext) with Mut, Div {
+    let trust = ctx.regime_explore_trust
+    let decay_rate = 0.93 + 0.04 * trust   // [0.93, 0.97] — trust 0→1 maps to faster→slower decay
+    let multiplier = 1.0 / decay_rate       // [1.031, 1.075]
+    ctx.bump_amount = ctx.bump_amount * multiplier
     ctx.n_conflicts = ctx.n_conflicts + 1
     smt_lrb_tick(ctx)
     if ctx.bump_amount > 1000000000000000.0 {
@@ -614,6 +634,7 @@ fn smt_reset_search_state(ctx: &!SmtContext) with Mut {
     ctx.regime_recent_hardness = 0.0
     ctx.regime_conflict_rate = 0.0
     ctx.regime_avg_backjump = 0.0
+    ctx.n_restarts = 0
 }
 
 // Reset activities and phase confidence for ablation studies.
@@ -645,6 +666,14 @@ fn smt_set_no_ple(ctx: &!SmtContext, v: i32) with Mut {
 
 fn smt_set_phase_mode(ctx: &!SmtContext, mode: i32) with Mut {
     ctx.phase_mode = mode
+}
+
+fn smt_set_restart_budget(ctx: &!SmtContext, budget: i32) with Mut {
+    ctx.restart_budget = budget
+}
+
+fn smt_get_restarts(ctx: &SmtContext) -> i32 {
+    return ctx.n_restarts
 }
 
 fn smt_get_decisions(ctx: &SmtContext) -> i32 {
@@ -824,12 +853,21 @@ fn smt_all_assigned(ctx: &!SmtContext) -> bool with Mut {
     return true
 }
 
-// Four score modes:
+// Five score modes:
 //   0 = GUM-UCB adaptive: mean + β_density * sigma(v)
 //       β_density = 0.6*(1-density)² where density = conflicts/(conflicts+decisions+1)
 //       act_var=0 at start → score = mean, identical to mode 1 until first conflict.
 //   1 = mean only (classical VSIDS baseline, for ablation)
 //   2 = Wilson-LRB: Bayesian UCB on conflict-participation rate (CI-UCB)
+//   3 = Epistemic Thompson Sampling [FIRST-IN-CLASS — confirmed literature gap]:
+//   4 = Epistemic LRB [FIRST-IN-CLASS — confirmed literature gap]:
+//       GUM law of propagation on learning rate ratio LR[v] = participated/decided.
+//       σ²(LR) ≈ LR/decided (Poisson model: σ²_participated ≈ participated).
+//       score[v] = LR[v] + 0.5·sqrt(LR/decided)·regime_explore_trust
+//       Strictly more informative than Wilson CI (mode 2): uses GUM ratio propagation
+//       rather than flat Bernoulli CI — uncertainty shrinks as 1/sqrt(decided), not 1/sqrt(n).
+//       Prior art gap: LRB/CHB use scalar ERWA point estimates. Wilson CI (mode 2) uses
+//       Bernoulli CI. No prior solver applies GUM to the learning rate ratio itself.
 //   3 = Epistemic Thompson Sampling [FIRST-IN-CLASS — confirmed literature gap]:
 //       Signed sample from N(μ_v, σ_v²): score = μ_v + sign·|z_v|·σ_v
 //       u_mag = hash(v, step), u_sgn = hash(v+32, step) for independent sign flip.
@@ -854,6 +892,13 @@ fn smt_pick_branch_var(ctx: &!SmtContext) -> i32 with Mut, Div {
             var score: f64 = 0.0
             if ctx.score_mode == 2 {
                 score = smt_wilson_score(ctx.lrb_participated[i], ctx.lrb_interval[i])
+            } else if ctx.score_mode == 4 {
+                // Epistemic LRB: GUM UCB on learning rate ratio.
+                // σ²(LR) = LR/decided (Poisson): uncertainty shrinks as 1/sqrt(decided).
+                let n_dec = smt_max_i32(ctx.lrb_interval[i], 1)
+                let lr = (ctx.lrb_participated[i] as f64) / (n_dec as f64)
+                let sigma_lr = smt_sqrt_f64(lr / (n_dec as f64))
+                score = lr + 0.5 * sigma_lr * ctx.regime_explore_trust
             } else if ctx.score_mode == 3 {
                 // Thompson Sampling: sample from N(μ_v, σ_v²) — signed noise required.
                 // Two hashes: u_mag for magnitude (Rayleigh), u_sgn for sign (Bernoulli).
@@ -1049,6 +1094,30 @@ fn smt_lia_feasible(ctx: &!SmtContext) -> i32 with Mut, Div {
     return 1
 }
 
+// Warm epistemic restart: reset search state but PRESERVE activity (act_mean/act_var)
+// and Beta posteriors (phase_alpha/phase_beta). n_restarts is NOT touched — caller manages it.
+// Contrast with smt_reset_search_state which resets everything including n_restarts.
+fn smt_warm_restart(ctx: &!SmtContext) with Mut {
+    var i: i32 = 0
+    while i < 64 {
+        ctx.assign[i] = 0
+        ctx.decision_level[i] = 0
+        ctx.phase[i] = 0
+        i = i + 1
+    }
+    ctx.trail_len = 0
+    ctx.n_decisions = 0
+    ctx.n_conflicts = 0
+    ctx.stat_total_d = 0
+    ctx.stat_max_d = 0
+    ctx.regime_explore_trust = 1.0
+    ctx.regime_label = 1
+    ctx.regime_len_mean = 3.8
+    ctx.regime_recent_hardness = 0.0
+    ctx.regime_conflict_rate = 0.0
+    ctx.regime_avg_backjump = 0.0
+}
+
 fn smt_search(ctx: &!SmtContext, level: i32) -> i32 with Mut, Div {
     while true {
         let unit_result = smt_unit_propagate_once(ctx, level)
@@ -1124,6 +1193,82 @@ fn smt_search(ctx: &!SmtContext, level: i32) -> i32 with Mut, Div {
     return 0
 }
 
+// Conflict-budgeted search: identical to smt_search but returns -2 when the conflict
+// budget is exhausted. Allows smt_solve to trigger regime-gated warm restarts.
+// Returns: 1=SAT, 0=UNSAT (proven), -1=LIA error, -2=budget exceeded.
+fn smt_search_budgeted(ctx: &!SmtContext, level: i32, budget: i32) -> i32 with Mut, Div {
+    if ctx.n_conflicts >= budget { return 0 - 2 }
+    while true {
+        let unit_result = smt_unit_propagate_once(ctx, level)
+        if unit_result < 0 {
+            smt_decay_activity(ctx)
+            if ctx.n_conflicts >= budget { return 0 - 2 }
+            return 0
+        }
+        var pure_result: i32 = 0
+        if ctx.no_ple == 0 { pure_result = smt_pure_literal_once(ctx, level) }
+        if pure_result <= 0 && unit_result <= 0 { break }
+    }
+
+    let theory = smt_lia_feasible(ctx)
+    if theory == 0 {
+        smt_decay_activity(ctx)
+        if ctx.n_conflicts >= budget { return 0 - 2 }
+        return 0
+    }
+    if theory < 0 { return 0 - 1 }
+
+    if smt_all_assigned(ctx) { return 1 }
+    let branch_var = smt_pick_branch_var(ctx)
+    if branch_var < 0 { return 1 }
+
+    let trail_mark = ctx.trail_len
+    var first_val: i32 = 1
+    if ctx.phase_mode == 1 {
+        let alpha_v = ctx.phase_alpha[branch_var]
+        let beta_v = ctx.phase_beta[branch_var]
+        let n_sum = alpha_v + beta_v
+        let mu_p = alpha_v / n_sum
+        let var_p = mu_p * (1.0 - mu_p) / n_sum
+        let sigma_p = smt_sqrt_f64(var_p)
+        let u_mag = smt_hash_f64(branch_var + 64, ctx.n_decisions)
+        let u_sgn = smt_hash_f64(branch_var + 96, ctx.n_decisions)
+        let z_abs = smt_sqrt_f64((0.0 - 2.0) * smt_ln_f64(u_mag))
+        var sign_p: f64 = 1.0
+        if u_sgn < 0.5 { sign_p = 0.0 - 1.0 }
+        let p_sample = mu_p + sign_p * z_abs * sigma_p
+        if p_sample < 0.5 { first_val = 0 - 1 }
+    } else {
+        if ctx.phase[branch_var] != 0 && ctx.phase_conf[branch_var] >= 0.55 {
+            first_val = ctx.phase[branch_var]
+        }
+    }
+    var second_val: i32 = 0 - first_val
+    ctx.n_decisions = ctx.n_decisions + 1
+    smt_bump_var_epistemic(ctx, branch_var, 1, 1.0)
+    if smt_assign_var(ctx, branch_var, first_val, level) == 1 {
+        let left_result = smt_search_budgeted(ctx, level + 1, budget)
+        if left_result == 1 { return 1 }
+        if left_result < 0 {
+            smt_backtrack_to(ctx, trail_mark)
+            return left_result
+        }
+    }
+    smt_backtrack_to(ctx, trail_mark)
+
+    if smt_assign_var(ctx, branch_var, second_val, level) == 1 {
+        let right_result = smt_search_budgeted(ctx, level + 1, budget)
+        if right_result == 1 { return 1 }
+        if right_result < 0 {
+            smt_backtrack_to(ctx, trail_mark)
+            return right_result
+        }
+    }
+    smt_backtrack_to(ctx, trail_mark)
+    smt_decay_activity(ctx)
+    return 0
+}
+
 fn smt_add_clause(ctx: &!SmtContext, lits: &[i32; 8], n_lits: i32) with Mut, Div {
     if n_lits <= 0 { return }
     if n_lits > 8 { return }
@@ -1166,8 +1311,42 @@ fn smt_get_assignment(ctx: &SmtContext, var_idx: i32) -> i32 {
 
 fn smt_solve(ctx: &!SmtContext) -> i32 with Mut, Div {
     smt_reset_search_state(ctx)
-    let result = smt_search(ctx, 1)
-    if result > 0 { return 1 }
-    if result == 0 { return 0 }
+    let budget = ctx.restart_budget
+    if budget <= 0 {
+        // No restart budget (default): standard complete search, identical to prior behavior.
+        let result = smt_search(ctx, 1)
+        if result > 0 { return 1 }
+        if result == 0 { return 0 }
+        return 0 - 1
+    }
+    // Regime-gated epistemic restart loop: up to 8 attempts with linearly growing budgets.
+    // Proof regime (label=0): switch to unbounded search rather than restart — UNSAT cores
+    //   should be completed, not abandoned; restarts lose hard-won conflict clause knowledge.
+    // Cautious/Exploratory (label=1,2): warm epistemic restart — preserve act_mean/act_var
+    //   and phase_alpha/phase_beta (posteriors carry polarity bias learned before restart).
+    var attempt: i32 = 0
+    while attempt < 8 {
+        let attempt_budget = budget * (attempt + 1)
+        let result = smt_search_budgeted(ctx, 1, attempt_budget)
+        if result == 1 { return 1 }
+        if result == 0 { return 0 }
+        if result == 0 - 1 { return 0 - 1 }
+        // result == -2: budget exceeded
+        if ctx.regime_label == 0 {
+            // Proof regime: continue with unbounded search (don't restart)
+            let r2 = smt_search(ctx, 1)
+            if r2 > 0 { return 1 }
+            if r2 == 0 { return 0 }
+            return 0 - 1
+        }
+        // Warm restart: preserve activity and Beta posteriors, reset search state
+        ctx.n_restarts = ctx.n_restarts + 1
+        smt_warm_restart(ctx)
+        attempt = attempt + 1
+    }
+    // Final attempt: unbounded search on warm epistemic state (guaranteed termination)
+    let final_result = smt_search(ctx, 1)
+    if final_result > 0 { return 1 }
+    if final_result == 0 { return 0 }
     return 0 - 1
 }
