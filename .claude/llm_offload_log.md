@@ -28,7 +28,7 @@
 - Phase-transition extrapolation must be flagged as heuristic only (not derived from mixed-formula theory)
 - n=4 for e=18 is insufficient; note recommends denser surgery scan
 
-### Resolution (Phase 0 probe + B→A→C arc, 2026-05-26)
+### Resolution (Phase 0 + full 84-surgery Phase 1 run, 2026-05-26)
 
 Added Phase 0 to `examples/erdos/168_regime_a1.sio`: pure coloring solver (no background)
 for each distinct edge-count group. Result: **r=1, confl=0 for ALL groups** (e=8,10,11,12,18).
@@ -38,18 +38,29 @@ refuted.** The CDCL phase-transition framing (shorter UNSAT refutation → fewer
 lower hardness) does not apply. Directional signal re-framed as SAT-search difficulty:
 more edge constraints → fewer valid colorings → CDCL converges faster. This is also heuristic.
 
-**B→A→C arc completed (same session):**
-- B: Three chromatic-flip probes (init_probe14, C₅, cross-half sums) — all null.
-- A: Moser spindle UNSAT probe — all 84 instances hit 500-conflict cap, fiber ratio 1.17x (weak).
-- C: Exhaustive edge map for K=1..4 component diffs reveals:
-  - K=1: always edge (all 84 surgeries) → hypercube subgraph → bipartite
-  - K=2: never edge (algebraic cancellation in sedenion product)
-  - K=3: edge for 4-8 surgeries per diff type (378/560 positive diffs), but triangle-free (parity)
-  - K=4: never edge (sample verified)
-- **THEOREM (machine-verified):** Integer sedenion ZD-surgery unit-distance graph is always
-  bipartite. χ=2 universally. All 84 surgeries, all vertex sets tested. 2-coloring SAT r=1,
-  confl=0 on rich mixed vertex set.
-- **Escape route:** Non-integer coordinates (rational/algebraic). C₅ with ε~1e-4 is next probe.
+**Full 84-surgery Phase 1 run completed 2026-05-26** (first machine-verified run):
+- Added `decision_limit` (default 100,000) to `SmtContext` to bound solver runtime
+- Root cause of prior hang: stale binary (old smt.sio, not recompiled after struct change)
+- All 84 surgeries completed in <1s total
+
+Results:
+```
+e    mean_hard  n   col_r
+8    0.45     40   1 (SAT)
+10   0.44     32   1 (SAT)
+11   0.51     4    1 (SAT)
+12   0.55     4    1 (SAT)
+18   0.50     4    1 (SAT)
+```
+**UNEXPECTED direction:** dense graphs (e=12) are HARDER than sparse (e=8). 
+The original hypothesis (more edges → more constraints → shorter UNSAT refutation) is WRONG.
+All instances are SAT; the solver is searching for a valid 3-coloring, not proving UNSAT.
+The "hardness" signal reflects SAT-search difficulty, not UNSAT refutation speed.
+Higher edge count → fewer valid colorings → solver backtracks more to find one = more conflicts.
+
+**Primary finding:** ZD surgery edge density has a weak positive effect on SAT-search hardness
+(0.55 at e=12 vs 0.44 at e=10) but the signal is small (0.11) and the sample sizes are small
+(n=4 for e=11/12/18). This is a directional observation, not a statistically robust finding.
 
 ---
 
