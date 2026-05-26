@@ -89,21 +89,20 @@ creatinine = patient_record['creatinine']
 # Problem: Is this data from a calibrated Abbott or Beckman analyzer?
 # What calibration offset was applied? Did someone edit this manually?
 # Standard programming treats this value as a raw, untraceable number.`,
-    sounio: `// Sounio: data with cryptographic provenance built into types
+    sounio: `// Sounio: provenance metadata travels with Knowledge<T>
 struct LabResult {
     creatinine: f64
 }
 
-fn process_lab(res: Provenance<LabResult>) with IO {
-    // res.device contains cryptographic signature of the analyzer
-    // res.calibration contains last calibration date and offset
-    // res.timestamp is guaranteed by institutional blockchain
+fn process_lab(res: Knowledge<LabResult>) with IO, Panic {
+    // res.prov records source instrument / run id (string metadata)
+    // res.epsilon tracks measurement confidence after GUM propagation
     
-    if res.device == "Beckman_Access_2" && res.calibration_offset < 0.02 {
+    if res.prov == "lab_run_042" && res.epsilon >= 0.90 {
         let val = res.value.creatinine
-        println("Valid and trusted laboratory result processed.")
+        println("Laboratory result with auditable metadata processed.")
     } else {
-        panic("Untrusted device or expired calibration. Rejected.")
+        panic("Insufficient confidence or missing provenance. Rejected.")
     }
 }`,
   },
@@ -261,6 +260,62 @@ interface CodeExamplesProps {
   locale?: string;
 }
 
+const tabLabelsByLocale: Record<string, Record<string, string>> = {
+  en: {
+    'Uncertainty (ISO GUM)': 'Uncertainty (ISO GUM)',
+    'Causal Decisions': 'Causal Decisions',
+    'Clinical Provenance': 'Clinical Provenance',
+    Uncertainty: 'Uncertainty',
+    Resources: 'Resources',
+    Algebra: 'Algebra',
+  },
+  pt: {
+    'Uncertainty (ISO GUM)': 'Incerteza (ISO GUM)',
+    'Causal Decisions': 'Decisões Causais',
+    'Clinical Provenance': 'Proveniência Clínica',
+    Uncertainty: 'Incerteza',
+    Resources: 'Recursos',
+    Algebra: 'Álgebra',
+  },
+  es: {
+    'Uncertainty (ISO GUM)': 'Incertidumbre (ISO GUM)',
+    'Causal Decisions': 'Decisiones Causales',
+    'Clinical Provenance': 'Procedencia Clínica',
+    Uncertainty: 'Incertidumbre',
+    Resources: 'Recursos',
+    Algebra: 'Álgebra',
+  },
+  el: {
+    'Uncertainty (ISO GUM)': 'Αβεβαιότητα (ISO GUM)',
+    'Causal Decisions': 'Αιτιώδεις Αποφάσεις',
+    'Clinical Provenance': 'Κλινική Προέλευση',
+    Uncertainty: 'Αβεβαιότητα',
+    Resources: 'Πόροι',
+    Algebra: 'Άλγεβρα',
+  },
+  zh: {
+    'Uncertainty (ISO GUM)': '不确定性 (ISO GUM)',
+    'Causal Decisions': '因果决策',
+    'Clinical Provenance': '临床溯源',
+    Uncertainty: '不确定性',
+    Resources: '资源',
+    Algebra: '代数',
+  },
+  ja: {
+    'Uncertainty (ISO GUM)': '不確実性 (ISO GUM)',
+    'Causal Decisions': '因果的決定',
+    'Clinical Provenance': '臨床プロベナンス',
+    Uncertainty: '不確実性',
+    Resources: 'リソース',
+    Algebra: '代数',
+  },
+};
+
+function localizeTabLabel(label: string, locale: string): string {
+  const map = tabLabelsByLocale[locale] ?? tabLabelsByLocale.en;
+  return map[label] ?? label;
+}
+
 export default function CodeExamples({ locale = 'en' }: CodeExamplesProps) {
   const [activeTab, setActiveTab] = useState('uncertainty');
   const [codeExpanded, setCodeExpanded] = useState<Record<string, boolean>>({});
@@ -282,7 +337,7 @@ export default function CodeExamples({ locale = 'en' }: CodeExamplesProps) {
     causality:
       'O que isto significa: Ao contrário das linguagens comuns que tratam números causais como meros floats isolados, o Sounio integra o do-calculus de Pearl nativamente. Você define grafos causais de caminhos biológicos e, ao aplicar a intervenção, o tipo Counterfactual garante o controle de confundidores e calcula a incerteza real do efeito do tratamento antes de aplicá-lo ao paciente.',
     provenance:
-      'O que isto significa: Cada resultado laboratorial carrega metadados criptográficos imutáveis rastreando o dispositivo de origem, registro de calibração e carimbo de data/hora clínico. Crie trilhas de auditoria prontas para agências reguladoras (FDA, EMA) e comitês de ética, sem a necessidade de planilhas inseguras ou scripts avulsos.',
+      'O que isto significa: Valores clínicos podem carregar metadados de proveniência (prov) e confiança epistémica (ε) no tipo Knowledge<T>. Isto permite trilhas de auditoria reproduzíveis no código — não promete integração hospitalar, blockchain institucional ou conformidade regulatória pronta a usar.',
     resources:
       'O que isto significa: Ao lidar com recursos críticos (como conexões a prontuários, monitores ou arquivos), os tipos lineares do Sounio garantem que um recurso seja fechado exatamente uma vez. Se você esquecer de liberar, ou tentar usar após fechar, o compilador rejeita o código na hora, evitando travamentos e vazamentos no hospital.',
     algebra:
@@ -292,7 +347,7 @@ export default function CodeExamples({ locale = 'en' }: CodeExamplesProps) {
   const enExplanations: Record<string, string> = {
     ...codeExplanations,
     provenance:
-      'What this means: Every patient value and laboratory result carries immutable cryptographic metadata tracking its source device, calibration record, and clinical timestamp. Create audit trails that satisfy FDA, EMA, and institutional review boards out of the box.'
+      'What this means: Clinical values can carry provenance metadata (prov) and epistemic confidence (ε) on Knowledge<T>. This supports auditable, reproducible trails in code — it does not promise hospital integration, institutional blockchain, or turnkey regulatory compliance.'
   };
 
   const explanations = locale === 'pt' ? ptExplanations : enExplanations;
@@ -348,7 +403,7 @@ export default function CodeExamples({ locale = 'en' }: CodeExamplesProps) {
                     : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
                 }`}
               >
-                {example.label}
+                {localizeTabLabel(example.label, locale)}
               </button>
             ))}
           </div>

@@ -290,9 +290,12 @@ export default function DissertationViewer() {
 
   return (
     <div className="dissertation-viewer rounded-[var(--radius-xl)] overflow-hidden border border-[var(--glass-border)] bg-[rgba(0,0,0,0.35)] mt-[2rem]">
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px]">
+      <p className="lg:hidden px-3 sm:px-4 py-2.5 text-[0.82rem] leading-relaxed text-[var(--color-text-secondary)] border-b border-[var(--glass-border)] bg-[rgba(0,0,0,0.25)]">
+        Demo PBPK interactiva — toque nos órgãos, avance o tempo e altere o perfil do doente nos controlos abaixo.
+      </p>
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_280px] xl:grid-cols-[1fr_320px]">
         {/* Left: 3D canvas */}
-        <div className="relative h-[420px] sm:h-[500px] lg:h-[640px] w-full">
+        <div className="relative h-[380px] sm:h-[500px] lg:h-[640px] w-full max-w-full overflow-hidden">
           <DrugSelector
             drug={drug}
             onChange={(d) => {
@@ -401,7 +404,7 @@ export default function DissertationViewer() {
         </div>
 
         {/* Right: side panel — tour controls, GUM bar, confidence gate, Hessian */}
-        <aside className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-6 lg:gap-4 p-4 lg:p-6 border-t lg:border-t-0 lg:border-l border-[var(--glass-border)] bg-[rgba(0,0,0,0.2)] text-white">
+        <aside className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-3 sm:gap-4 lg:gap-4 p-3 sm:p-4 lg:p-6 border-t lg:border-t-0 lg:border-l border-[var(--glass-border)] bg-[rgba(0,0,0,0.2)] text-white">
           <TourControls
             tours={drugTours}
             activeTourId={activeTourId}
