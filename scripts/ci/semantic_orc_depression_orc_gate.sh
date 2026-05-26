@@ -77,29 +77,24 @@ echo "✓ minimum CI negative-definite"
 
 echo ""
 
-# ---- Program 3: Real SWOW-EN subgraph ORC ----
-REAL_SRC="${REPO_ROOT}/examples/semantic_orc/depression_real_orc.sio"
-if [ -f "${REAL_SRC}" ]; then
-    echo "--- depression_real_orc.sio ---"
-    REAL_OUT="$("${SOUC}" run "${REAL_SRC}" 2>&1)" || fail "depression_real_orc.sio crashed (exit $?)"
-    echo "${REAL_OUT}"
-    echo ""
+# ---- Program 3: Epistemic layer over exact-OT curvature (replaces depression_real_orc.sio) ----
+# depression_real_orc.sio was removed: it read the wrong base graph (depression_networks/
+# 310-node dense instead of depression_networks_optimal/ 1634-node hyperbolic) and selected
+# nodes from an unrelated 438-node SWOW core. Replaced by the exact-OT epistemic layer.
+EPI_SRC="${REPO_ROOT}/examples/semantic_orc/depression_epistemic_orc.sio"
+echo "--- depression_epistemic_orc.sio ---"
+EPI_OUT="$("${SOUC}" run "${EPI_SRC}" 2>&1)" || fail "depression_epistemic_orc.sio crashed (exit $?)"
+echo "${EPI_OUT}"
+echo ""
 
-    echo "${REAL_OUT}" | grep -q "SOUNIO_DEPRESSION_REAL_ORC_PASS" \
-        || fail "token SOUNIO_DEPRESSION_REAL_ORC_PASS not found"
-    echo "✓ SOUNIO_DEPRESSION_REAL_ORC_PASS present"
+echo "${EPI_OUT}" | grep -q "SOUNIO_DEPRESSION_EPISTEMIC_ORC_PASS" \
+    || fail "token SOUNIO_DEPRESSION_EPISTEMIC_ORC_PASS not found"
+echo "✓ SOUNIO_DEPRESSION_EPISTEMIC_ORC_PASS present"
 
-    # minimum should have fewest edges (most restricted activation)
-    MIN_EDGES="$(echo "${REAL_OUT}" | grep "minimum" | grep -oP 'edges=\K[0-9]+')"
-    MILD_EDGES="$(echo "${REAL_OUT}" | grep "mild" | grep -oP 'edges=\K[0-9]+')"
-    if [ -n "${MIN_EDGES}" ] && [ -n "${MILD_EDGES}" ]; then
-        if [ "${MIN_EDGES}" -lt "${MILD_EDGES}" ]; then
-            echo "✓ minimum has fewer edges than mild in hyperbolic core (${MIN_EDGES} < ${MILD_EDGES})"
-        else
-            echo "NOTE: minimum edges (${MIN_EDGES}) >= mild edges (${MILD_EDGES}) — seed/data dependent"
-        fi
-    fi
-    echo ""
-fi
+# Density-matched separation gate must verify (effect survives density control)
+echo "${EPI_OUT}" | grep -q "VERIFIED: subclinical most hyperbolic" \
+    || fail "density-matched separation gate not verified"
+echo "✓ subclinical-most-hyperbolic separation verified at matched density"
+echo ""
 
 echo "=== semantic_orc_depression_orc_gate: PASS ==="
