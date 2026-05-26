@@ -59,6 +59,21 @@
 //!         Expected score = act_mean (correct TS property: E[sample] = posterior mean).
 //!         act_var=0 → score = mean exactly (safe fallback, cannot regress vs mode 1).
 //!         Prior art gap: LRB/CHB are scalar ERWA, no second moment, no sampling.
+//
+//! REGIME DETECTOR (Thread 2 full design, Erdős-critical):
+//!   When this solver is used inside Erdős 90 attacks (168-guided ZD surgeries
+//!   for chromatic lower bounds, or maximality subproblems in unit-distance pool
+//!   search), the inner search goes through long "Proof" phases (hard unsat cores
+//!   after a surgery or deep in a high-quality configuration) and occasional
+//!   "Exploratory" pockets (after a twist that creates heterogeneous blame
+//!   precision — exactly the mixed-length regime where GUM-TS won 57.7% in
+//!   the 500-seed characterization).
+//!   The detector (explore_trust scalar + discrete label) will modulate β and
+//!   whether TS is allowed, using signals we already compute (stat_total_d/avg d,
+//!   conflict rate, backjumps) plus cheap EWMAs.
+//!   Insertion map: docs/research/erdos90-regime-detector-insertion-map.md
+//!   This is the concrete mechanism that lets the 168 algebraic structure and
+//!   the epistemic decision engine talk to each other at runtime.
 //!
 //!   n_decisions + n_conflicts reset each smt_solve(); density drives adaptive β.
 
@@ -166,6 +181,15 @@ struct SmtContext {
     stat_total_d: i32,
     stat_max_d: i32,
     no_ple: i32,
+    // Regime estimator: continuous explore_trust signal + discrete label.
+    // Computed from EWMA conflict signals; modulates UCB β and TS sigma.
+    // reset at each smt_solve() call.
+    regime_explore_trust: f64,   // [0,1] variance-signal trustworthiness
+    regime_label: i32,            // 0=Proof, 1=Cautious, 2=Exploratory
+    regime_len_mean: f64,         // EWMA of (len + 0.8*d) at conflicts
+    regime_recent_hardness: f64,  // EWMA of |len + 0.8*d - regime_len_mean|
+    regime_conflict_rate: f64,    // EWMA of n_conflicts/(n_conflicts+n_decisions+1)
+    regime_avg_backjump: f64,     // EWMA of level at conflict (backjump proxy)
     n_constraints: i32,
     lia_coeffs: [i64; 1024],
     lia_bounds: [i64; 64],
@@ -196,6 +220,12 @@ fn smt_new() -> SmtContext {
         stat_total_d: 0,
         stat_max_d: 0,
         no_ple: 0,
+        regime_explore_trust: 1.0,
+        regime_label: 1,
+        regime_len_mean: 3.8,
+        regime_recent_hardness: 0.0,
+        regime_conflict_rate: 0.0,
+        regime_avg_backjump: 0.0,
         n_constraints: 0,
         lia_coeffs: [0; 1024],
         lia_bounds: [0; 64],
@@ -372,6 +402,75 @@ fn smt_decay_activity(ctx: &!SmtContext) with Mut {
     }
 }
 
+// Regime estimator: update EWMA signals and recompute explore_trust + label.
+// Called from smt_conflict_clause after stat updates (n_conflicts not yet incremented).
+//   len:   conflict clause length (primary length-diversity signal)
+//   d:     distinct decision levels in conflict clause (depth spread proxy)
+//   level: current search depth (backjump depth proxy)
+//
+// Signal derivation:
+//   base = len + 0.8*d
+//   regime_len_mean tracks EWMA of base — the "expected" combined length-depth base.
+//   hardness deviation = |base - regime_len_mean| measures how much this conflict
+//   deviates from the running baseline. On uniform-length formulas (pure 3-SAT),
+//   base clusters tightly → deviation → 0 → trust low (GUM variance uninformative).
+//   On mixed-length formulas (len-2 + len-5), base oscillates widely → deviation high
+//   → trust high (GUM variance IS informative for ranking).
+//   conflict_rate EWMA tracks density = n_conflicts/(n_conflicts+n_decisions+1).
+//   On hard UNSAT (PHP), density → 1 → UCB exploration counterproductive → trust drops.
+//
+// Trust floor: 0.2 once n_conflicts ≥ 3 — prevents complete TS suppression on
+// mixed instances (protects divergence-signal in epistemic eval tests).
+fn smt_update_regime(ctx: &!SmtContext, len: i32, d: i32, level: i32) with Mut, Div {
+    let inv_alpha: f64 = 0.9
+    let alpha: f64 = 0.1
+
+    let len_f = len as f64
+    let d_f = d as f64
+    let base = len_f + 0.8 * d_f
+
+    // Deviation computed before updating len_mean (against current baseline)
+    var dev = base - ctx.regime_len_mean
+    if dev < 0.0 { dev = 0.0 - dev }
+
+    ctx.regime_len_mean = inv_alpha * ctx.regime_len_mean + alpha * base
+    ctx.regime_recent_hardness = inv_alpha * ctx.regime_recent_hardness + alpha * dev
+
+    let level_f = level as f64
+    ctx.regime_avg_backjump = inv_alpha * ctx.regime_avg_backjump + alpha * level_f
+
+    // Conflict density (n_conflicts not yet incremented at this call site)
+    let total = ctx.n_conflicts + ctx.n_decisions + 1
+    let density = (ctx.n_conflicts as f64) / (total as f64)
+    ctx.regime_conflict_rate = inv_alpha * ctx.regime_conflict_rate + alpha * density
+
+    // explore_trust = hardness_signal - density_penalty
+    // hs scale 0.4: mixed-length typical hardness ~1.3 → hs ~0.52
+    // dp = conflict_rate [0,1]
+    let hs = ctx.regime_recent_hardness * 0.4
+    let dp = ctx.regime_conflict_rate
+    var raw_trust = hs - dp
+    if raw_trust < 0.0 { raw_trust = 0.0 }
+    if raw_trust > 1.0 { raw_trust = 1.0 }
+
+    // Floor: once conflict data exists, never fully suppress variance signal
+    if ctx.n_conflicts >= 3 {
+        if raw_trust < 0.2 { raw_trust = 0.2 }
+    }
+    ctx.regime_explore_trust = raw_trust
+
+    // Discrete label
+    if ctx.regime_conflict_rate > 0.5 && ctx.regime_explore_trust < 0.3 {
+        ctx.regime_label = 0
+    } else {
+        if ctx.regime_explore_trust > 0.6 {
+            ctx.regime_label = 2
+        } else {
+            ctx.regime_label = 1
+        }
+    }
+}
+
 // Cut phase confidence for a blamed variable: its saved polarity was suspect.
 fn smt_blame_var_phase(ctx: &!SmtContext, var_idx: i32) with Mut {
     if var_idx < 0 { return }
@@ -414,6 +513,8 @@ fn smt_conflict_clause(ctx: &!SmtContext, clause_idx: i32, level: i32) with Mut,
     let d = smt_clause_distinct_levels(ctx, clause_idx)
     ctx.stat_total_d = ctx.stat_total_d + d
     if d > ctx.stat_max_d { ctx.stat_max_d = d }
+    // Update regime estimator before bumping (n_conflicts not yet incremented)
+    smt_update_regime(ctx, len, d, level)
     var i: i32 = 0
     while i < len {
         let lit = ctx.clause_data[start + i]
@@ -473,6 +574,12 @@ fn smt_reset_search_state(ctx: &!SmtContext) with Mut {
     ctx.n_conflicts = 0
     ctx.stat_total_d = 0
     ctx.stat_max_d = 0
+    ctx.regime_explore_trust = 1.0
+    ctx.regime_label = 1
+    ctx.regime_len_mean = 3.8
+    ctx.regime_recent_hardness = 0.0
+    ctx.regime_conflict_rate = 0.0
+    ctx.regime_avg_backjump = 0.0
 }
 
 // Reset activities and phase confidence for ablation studies.
@@ -540,6 +647,26 @@ fn smt_get_act_var(ctx: &SmtContext, var_idx: i32) -> f64 {
     if var_idx < 0 { return 0.0 }
     if var_idx >= 64 { return 0.0 }
     return ctx.act_var[var_idx]
+}
+
+fn smt_get_explore_trust(ctx: &SmtContext) -> f64 {
+    return ctx.regime_explore_trust
+}
+
+fn smt_get_regime_label(ctx: &SmtContext) -> i32 {
+    return ctx.regime_label
+}
+
+fn smt_get_regime_hardness(ctx: &SmtContext) -> f64 {
+    return ctx.regime_recent_hardness
+}
+
+fn smt_get_regime_rate(ctx: &SmtContext) -> f64 {
+    return ctx.regime_conflict_rate
+}
+
+fn smt_get_regime_backjump(ctx: &SmtContext) -> f64 {
+    return ctx.regime_avg_backjump
 }
 
 fn smt_unit_propagate_once(ctx: &!SmtContext, level: i32) -> i32 with Mut, Div {
@@ -667,7 +794,7 @@ fn smt_pick_branch_var(ctx: &!SmtContext) -> i32 with Mut, Div {
     var best_score: f64 = 0.0 - 1.0
     var global_beta: f64 = 0.0
     if ctx.score_mode == 0 {
-        global_beta = smt_adaptive_beta_v2(ctx)
+        global_beta = smt_adaptive_beta_v2(ctx) * ctx.regime_explore_trust
     }
     var i: i32 = 0
     while i < ctx.n_vars {
@@ -682,7 +809,7 @@ fn smt_pick_branch_var(ctx: &!SmtContext) -> i32 with Mut, Div {
                 let u_mag = smt_hash_f64(i, ctx.n_decisions)
                 let u_sgn = smt_hash_f64(i + 32, ctx.n_decisions)
                 let z_abs = smt_sqrt_f64((0.0 - 2.0) * smt_ln_f64(u_mag))
-                let sigma = smt_sqrt_f64(ctx.act_var[i])
+                let sigma = smt_sqrt_f64(ctx.act_var[i]) * ctx.regime_explore_trust
                 var sign: f64 = 1.0
                 if u_sgn < 0.5 { sign = 0.0 - 1.0 }
                 score = ctx.act_mean[i] + sign * z_abs * sigma
