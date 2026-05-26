@@ -167,8 +167,8 @@ fn smt_max_i32(a: i32, b: i32) -> i32 {
 struct SmtContext {
     n_vars: i32,
     n_clauses: i32,
-    clause_start: [i64; 128],
-    clause_len: [i64; 128],
+    clause_start: [i64; 256],
+    clause_len: [i64; 256],
     clause_data: [i64; 1024],
     assign: [i32; 64],
     decision_level: [i32; 64],
@@ -220,6 +220,7 @@ struct SmtContext {
     // epistemic state (activity + Beta posteriors preserved, assign/trail reset).
     restart_budget: i32,
     n_restarts: i32,
+    decision_limit: i32,
     n_constraints: i32,
     lia_coeffs: [i64; 1024],
     lia_bounds: [i64; 64],
@@ -230,8 +231,8 @@ fn smt_new() -> SmtContext {
     return SmtContext {
         n_vars: 0,
         n_clauses: 0,
-        clause_start: [0; 128],
-        clause_len: [0; 128],
+        clause_start: [0; 256],
+        clause_len: [0; 256],
         clause_data: [0; 1024],
         assign: [0; 64],
         decision_level: [0; 64],
@@ -261,6 +262,7 @@ fn smt_new() -> SmtContext {
         phase_mode: 0,
         restart_budget: 0,
         n_restarts: 0,
+        decision_limit: 100000,
         n_constraints: 0,
         lia_coeffs: [0; 1024],
         lia_bounds: [0; 64],
@@ -666,6 +668,10 @@ fn smt_set_no_ple(ctx: &!SmtContext, v: i32) with Mut {
 
 fn smt_set_phase_mode(ctx: &!SmtContext, mode: i32) with Mut {
     ctx.phase_mode = mode
+}
+
+fn smt_set_decision_limit(ctx: &!SmtContext, limit: i32) with Mut {
+    ctx.decision_limit = limit
 }
 
 fn smt_set_restart_budget(ctx: &!SmtContext, budget: i32) with Mut {
@@ -1119,6 +1125,9 @@ fn smt_warm_restart(ctx: &!SmtContext) with Mut {
 }
 
 fn smt_search(ctx: &!SmtContext, level: i32) -> i32 with Mut, Div {
+    if ctx.decision_limit > 0 && ctx.n_decisions >= ctx.decision_limit {
+        return 2
+    }
     while true {
         let unit_result = smt_unit_propagate_once(ctx, level)
         if unit_result < 0 {
@@ -1173,6 +1182,7 @@ fn smt_search(ctx: &!SmtContext, level: i32) -> i32 with Mut, Div {
     if smt_assign_var(ctx, branch_var, first_val, level) == 1 {
         let left_result = smt_search(ctx, level + 1)
         if left_result == 1 { return 1 }
+        if left_result == 2 { smt_backtrack_to(ctx, trail_mark); return 2 }
         if left_result < 0 {
             smt_backtrack_to(ctx, trail_mark)
             return 0 - 1
@@ -1180,9 +1190,12 @@ fn smt_search(ctx: &!SmtContext, level: i32) -> i32 with Mut, Div {
     }
     smt_backtrack_to(ctx, trail_mark)
 
+    if ctx.decision_limit > 0 && ctx.n_decisions >= ctx.decision_limit { return 2 }
+
     if smt_assign_var(ctx, branch_var, second_val, level) == 1 {
         let right_result = smt_search(ctx, level + 1)
         if right_result == 1 { return 1 }
+        if right_result == 2 { return 2 }
         if right_result < 0 {
             smt_backtrack_to(ctx, trail_mark)
             return 0 - 1
@@ -1272,7 +1285,7 @@ fn smt_search_budgeted(ctx: &!SmtContext, level: i32, budget: i32) -> i32 with M
 fn smt_add_clause(ctx: &!SmtContext, lits: &[i32; 8], n_lits: i32) with Mut, Div {
     if n_lits <= 0 { return }
     if n_lits > 8 { return }
-    if ctx.n_clauses >= 128 { return }
+    if ctx.n_clauses >= 256 { return }
     let clause_idx = ctx.n_clauses
     let start = smt_clause_end(ctx)
     if start + (n_lits as i64) > 1024 { return }
@@ -1315,7 +1328,8 @@ fn smt_solve(ctx: &!SmtContext) -> i32 with Mut, Div {
     if budget <= 0 {
         // No restart budget (default): standard complete search, identical to prior behavior.
         let result = smt_search(ctx, 1)
-        if result > 0 { return 1 }
+        if result == 1 { return 1 }
+        if result == 2 { return 2 }
         if result == 0 { return 0 }
         return 0 - 1
     }
