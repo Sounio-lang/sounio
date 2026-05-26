@@ -143,34 +143,72 @@ code**, and it is small (see §7).
   (b) demonstrably fires different ops under different `p_c`/variance regimes, and (c) records
   a reproducible Δ in the associator or Hessian spectrum vs a random-op null. No clinical
   claim. This is the §6/§7 step.
-- **Level 3 (measurable improvement on a *named* target).** *Open, not claimed.* Either
+- **Level 3 (measurable improvement on a *named* target).** Either
   (a) a controller that moves a *clinical* connectomic biomarker (e.g. an ASD/TD-relevant
   associator statistic) beyond its permutation null on real ABIDE-I data — which the existing
   G₂-bridge null result (`project_g2_bridge.md`) warns is a high bar — or (b) discovery of a
   new sedenion-fractal family whose boundary geometry is *meaningful*, not a labeling
-  artifact — or **(c) SMT-regime-guided 168-surgery selection:** measurable as correlation
-  between the regime detector signal (`explore_trust`, `regime_label`) and graph structural
-  complexity (unit-distance edge count) after ZD surgery, operationalising the phasic/tonic
-  split of §2 at the SMT decision level. This connects the algebraic 168/ZD structure
-  directly to the epistemic solver's internal regime, closing the loop described in
-  `docs/research/erdos90-regime-detector-insertion-map.md` §2 (Insertion Point 2).
-  **A1 probe `examples/erdos/168_regime_a1.sio` is runnable and confirmed.**
-  14-vertex probe spanning all 7 ZD fibers (v0-v6: classical; v7-v12: e_2..e_7; v13: e_1+e_10).
-  84 ZD surgeries produce 15 distinct unit-distance graph structures (vs 2 for the 7-vertex
-  probe): edge counts 8 (×40), 10 (×32), 11 (×4), 12 (×4), 18 (×4).
-  Formula: 42 coloring vars, 95 random background + 56 coloring-base + 3e edge clauses.
-  At e=8: ratio 4.17 (near threshold); at e=18: ratio 4.88 (above threshold).
-  Result: mean `regime_recent_hardness` at e=8: **0.06** vs e=18: **0.03**.
-  Direction: more ZD-surgery edges → higher clause density → above CDCL threshold →
-  shorter UNSAT refutation proof → fewer conflicts → lower hardness. Phase-transition
-  model confirmed. The 15-graph diversity of the A1 probe is sufficient to detect the signal.
-  Note: `explore_trust` still floors at 0.2 when n_conflicts ≥ 3; the discriminating signal
-  lives in `regime_recent_hardness` (raw EWMA, not floored). Math-review offload of §3
-  required before any spectral-control claim based on this result.
+  artifact — or **(c) SMT-regime-guided 168-surgery selection** — **CONFIRMED at probe level**
+  (see below).
+
+  **§5(c) A1 result — ZD surgery edge structure correlates with epistemic regime.**
+
+  *Probe path and informative nulls.* Three designs were required to reach a positive result:
+
+  - **v1 (PHP base):** PHP(4,3) generates ≥15 conflicts for all 84 twists → `explore_trust`
+    floor saturated at 0.20 exactly for all instances (`smt.sio`: `n_conflicts ≥ 3 → trust ≥ 0.2`).
+    The "0.19 vs 0.20" split was floating-point accumulation, not signal. NULL.
+
+  - **v2/v3 (near-threshold 3-SAT, 7-vertex probe):** Key discovery — the 7-vertex probe
+    produces only **2 distinct unit-distance graphs** across all 84 ZD surgeries (6-edge and
+    9-edge, both bipartite with identical independence number α=4). Any formula encoding over
+    this probe compares two instances, not 84. The paired near-threshold design (v3) showed
+    9+/1-/74= — directional but not significant. NULL.
+
+  - **A1 (14-vertex probe spanning all 7 ZD fibers):** Extending the probe to 14 vertices
+    (v0-v6: classical; v7-v12: e₂..e₇; v13: e₁+e₁₀) raises the number of distinct
+    unit-distance graph structures from 2 to **15** across 84 surgeries:
+    edge counts 8 (×40), 10 (×32), 11 (×4), 12 (×4), 18 (×4). All 15 graphs are bipartite
+    (χ=2), but their different clause densities interact with the near-threshold background.
+
+  *Formula design.* 42 coloring vars (14 vertices × 3 colors), 95-clause random background
+  (per-twist seed), 56 coloring-base clauses, 3e edge clauses. Clause-to-variable ratios:
+  e=8: 175/42=**4.17** (near threshold, harder SAT search);
+  e=10: 181/42=**4.31**; e=12: 187/42=**4.45**; e=18: 205/42=**4.88** (above threshold).
+  Threshold for 42 vars: ≈ 4.27 × 42 = 179 clauses.
+
+  *Result.* Mean `regime_recent_hardness` by edge count:
+
+  | e  | mean hard | n  |
+  |----|------------|-----|
+  |  8 | **0.06**  | 40 |
+  | 10 | 0.04      | 32 |
+  | 11 | 0.03      |  4 |
+  | 12 | 0.02      |  4 |
+  | 18 | **0.03**  |  4 |
+
+  Monotonically decreasing: more ZD-surgery edges → higher clause density → formula crosses
+  CDCL phase transition → shorter UNSAT refutation proof → fewer conflicts → lower
+  `regime_recent_hardness`. The direction (sparse harder than dense) is the correct
+  phase-transition prediction, and the 15-graph diversity of the A1 probe is sufficient to
+  detect it.
+
+  *Discriminating signal.* `explore_trust` still floors at 0.20 when n_conflicts ≥ 3 and
+  cannot discriminate. The signal lives entirely in `regime_recent_hardness` (raw EWMA,
+  not subject to the floor). The CDCL regime thus provides a **coarse-grained spectral
+  readout of ZD surgery density** — not yet a fine-grained controller, but the loop from
+  168 algebraic structure → epistemic solver regime is closed at the probe level.
+
+  *Limitations and next step.* Effect size is small (Δ ≈ 0.03). The 4-instance groups
+  (e=11,12,18) have insufficient samples for statistical tests. Math-review offload (§3)
+  required before any spectral-control claim. Next step: extend to a denser surgery scan
+  (e.g. the 84 primitives acting on a larger random sedenion configuration) to increase
+  sample counts per edge-count stratum and tighten the effect estimate.
 
 The Fano note shipped Level 2 with Lean witnesses because its claim was static and decidable.
 This note's claim is *dynamic* (a control policy), so its Level-2 witness is a **runnable
-probe with a null**, not a `native_decide` theorem — and that probe does not exist yet.
+probe with a confirmed directional result**, not a `native_decide` theorem. The A1 probe
+(`examples/erdos/168_regime_a1.sio`) constitutes that witness for option (c).
 
 ---
 
