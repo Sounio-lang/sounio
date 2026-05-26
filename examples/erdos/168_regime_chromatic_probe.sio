@@ -1,0 +1,275 @@
+// examples/erdos/168_regime_chromatic_probe.sio
+//
+// Level-3 probe: connect ZD surgery edge structure to epistemic SMT regime signal.
+//
+// For each of 84 ZD primitives (7 ZD fibers × 12, matching validPrims in
+// SounioZeroDivisorBridge.lean), applies right-multiplication surgery to the
+// 7-vertex sedenion probe from erdos_unit_distance, counts unit-distance edges,
+// then solves PHP(4,3) + 3-coloring CNF with the epistemic SMT engine and reads
+// the regime label (0=Proof, 1=Cautious, 2=Exploratory).
+//
+// Formula layout:
+//   Vars  0-11: PHP(4,3) — pigeon p, hole h → var = p*3+h.   Always UNSAT.
+//   Vars 12-32: 3-coloring — vertex v, color c → var = 12+v*3+c.  SAT for χ≤3.
+//   Combined: UNSAT (from PHP). Clause lengths vary with edge count.
+//
+// Falsifiable prediction:
+//   More edges after twist → more length-2 edge clauses →
+//   conflicts deviate more from EWMA mean (3.8 initial) →
+//   higher explore_trust → Exploratory label more likely.
+//
+// Connection to note §5(c):
+//   docs/research/locus-coeruleus-surgical-controller-sounio-note.md
+//   docs/research/erdos90-regime-detector-insertion-map.md §2 (Insertion Point 2)
+//
+// NO quantitative spectral claims. All results reported, not bounded.
+// Math-review required before any spectral-control assertion:
+//   bin/llm-offload -t math-review -p xai | logged in .claude/llm_offload_log.md
+
+use hypercomplex_graph::erdos_unit_distance::*
+use theorem::smt::*
+
+// Inline integer printer without trailing newline.
+fn pri(x: i32) with IO, Div, Panic {
+    if x < 0 { print("-"); pri(0 - x); return }
+    if x == 0 { print("0"); return }
+    if x >= 10 { pri(x / 10) }
+    let d = x - (x / 10) * 10
+    if d == 0 { print("0") }
+    if d == 1 { print("1") }
+    if d == 2 { print("2") }
+    if d == 3 { print("3") }
+    if d == 4 { print("4") }
+    if d == 5 { print("5") }
+    if d == 6 { print("6") }
+    if d == 7 { print("7") }
+    if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+// 2-decimal f64 printer without trailing newline.
+fn prf(x: f64) with IO, Mut, Div, Panic {
+    if x < 0.0 { print("-"); prf(0.0 - x); return }
+    let ip = x as i32
+    pri(ip)
+    print(".")
+    let f0 = (x - (ip as f64)) * 10.0
+    let d0 = f0 as i32
+    let f1 = (f0 - (d0 as f64)) * 10.0
+    let d1 = f1 as i32
+    pri(d0)
+    pri(d1)
+}
+
+// Add a length-2 clause [a, b] to ctx.
+fn add2(ctx: &!SmtContext, a: i32, b: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    lits[0] = a
+    lits[1] = b
+    smt_add_clause(ctx, &lits, 2)
+}
+
+// Add a length-3 clause [a, b, c] to ctx.
+fn add3(ctx: &!SmtContext, a: i32, b: i32, c: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    lits[0] = a
+    lits[1] = b
+    lits[2] = c
+    smt_add_clause(ctx, &lits, 3)
+}
+
+fn main() with IO, Mut, Div, Panic {
+    build_prims()
+    init_probe()
+
+    print("=== 168 ZD Regime Chromatic Probe ===\n")
+    print("PHP(4,3) [vars 0-11] + 3-color [vars 12-32] of twisted 7-vertex sedenion probe\n")
+    print("Regime: 0=Proof  1=Cautious  2=Exploratory\n")
+    print("idx edges clauses confl label trust\n")
+    print("--- ----- ------- ----- ----- -----\n")
+
+    var n_proof: i32 = 0
+    var n_cautious: i32 = 0
+    var n_exploratory: i32 = 0
+    var trust_lo_sum: f64 = 0.0
+    var trust_hi_sum: f64 = 0.0
+    var hard_lo_sum: f64 = 0.0
+    var hard_hi_sum: f64 = 0.0
+    var n_lo: i32 = 0
+    var n_hi: i32 = 0
+    var n_floor: i32 = 0
+
+    var idx: i64 = 0
+    while idx < 84 {
+        build_twisted_adj_pub(idx)
+        let e = count_edges_pub() as i32
+
+        var ctx = smt_new()
+
+        // --- PHP(4,3): vars 0..11, always UNSAT ---
+        // Pigeon clauses (length 3): pigeon p in at least one of holes {0,1,2}
+        var p: i32 = 0
+        while p < 4 {
+            add3(&! ctx, (p*3+0)*2, (p*3+1)*2, (p*3+2)*2)
+            p = p + 1
+        }
+        // Hole clauses (length 2): no two pigeons share a hole
+        var h: i32 = 0
+        while h < 3 {
+            var p1: i32 = 0
+            while p1 < 4 {
+                var p2: i32 = p1 + 1
+                while p2 < 4 {
+                    add2(&! ctx, (p1*3+h)*2+1, (p2*3+h)*2+1)
+                    p2 = p2 + 1
+                }
+                p1 = p1 + 1
+            }
+            h = h + 1
+        }
+
+        // --- 3-coloring (vars 12..32, offset off=12): length-3 + length-2 ---
+        let off: i32 = 12
+        var v: i32 = 0
+        while v < 7 {
+            // At-least-one color (length 3)
+            add3(&! ctx, (off+v*3+0)*2, (off+v*3+1)*2, (off+v*3+2)*2)
+            // At-most-one: three negative pairs (length 2)
+            add2(&! ctx, (off+v*3+0)*2+1, (off+v*3+1)*2+1)
+            add2(&! ctx, (off+v*3+0)*2+1, (off+v*3+2)*2+1)
+            add2(&! ctx, (off+v*3+1)*2+1, (off+v*3+2)*2+1)
+            v = v + 1
+        }
+        // Edge constraints: for each edge (u,w) and each color c,
+        // add ¬color(u,c) ∨ ¬color(w,c)  (length 2, count = 3 * edge_count)
+        var ui: i64 = 0
+        while ui < 7 {
+            var wi: i64 = ui + 1
+            while wi < 7 {
+                if get_adj_edge(ui, wi) == 1 {
+                    var c: i32 = 0
+                    while c < 3 {
+                        let uv = off + (ui as i32) * 3 + c
+                        let wv = off + (wi as i32) * 3 + c
+                        add2(&! ctx, uv*2+1, wv*2+1)
+                        c = c + 1
+                    }
+                }
+                wi = wi + 1
+            }
+            ui = ui + 1
+        }
+
+        // clause count = 4+18 (PHP) + 7+21 (3-color base) + 3*e (edge) = 50+3*e
+        let n_clauses: i32 = 50 + e * 3
+
+        smt_set_score_mode(&! ctx, 3)  // Epistemic Thompson Sampling
+        smt_set_no_ple(&! ctx, 1)      // disable pure-literal elimination: more decisions, more conflicts
+        let _result = smt_solve(&! ctx)
+
+        let confl = smt_get_conflicts(&ctx)
+        let label = smt_get_regime_label(&ctx)
+        let trust = smt_get_explore_trust(&ctx)
+        let hard = smt_get_regime_hardness(&ctx)
+
+        if label == 0 { n_proof = n_proof + 1 }
+        if label == 1 { n_cautious = n_cautious + 1 }
+        if label == 2 { n_exploratory = n_exploratory + 1 }
+
+        // Track floor saturation: trust == 0.2 exactly when n_conflicts >= 3
+        if trust < 0.201 && trust > 0.199 { n_floor = n_floor + 1 }
+
+        // Bucket by edge count for correlation measurement
+        if e <= 6 {
+            trust_lo_sum = trust_lo_sum + trust
+            hard_lo_sum = hard_lo_sum + hard
+            n_lo = n_lo + 1
+        }
+        if e >= 8 {
+            trust_hi_sum = trust_hi_sum + trust
+            hard_hi_sum = hard_hi_sum + hard
+            n_hi = n_hi + 1
+        }
+
+        // Print one line per twist
+        pri(idx as i32); print(" ")
+        pri(e); print("     ")
+        pri(n_clauses); print("      ")
+        pri(confl); print("     ")
+        pri(label); print("     ")
+        prf(trust); print("\n")
+
+        idx = idx + 1
+    }
+
+    print("\n=== Summary ===\n")
+    print("Proof (0): "); pri(n_proof); print("\n")
+    print("Cautious (1): "); pri(n_cautious); print("\n")
+    print("Exploratory (2): "); pri(n_exploratory); print("\n")
+    print("\n")
+
+    print("Trust floor (0.20 exact): "); pri(n_floor); print(" / 84\n")
+    print("\n")
+
+    if n_lo > 0 {
+        print("Avg trust e<=6 (n=")
+        pri(n_lo)
+        print("): ")
+        prf(trust_lo_sum / (n_lo as f64))
+        print("   avg hardness: ")
+        prf(hard_lo_sum / (n_lo as f64))
+        print("\n")
+    }
+    if n_hi > 0 {
+        print("Avg trust e>=8 (n=")
+        pri(n_hi)
+        print("): ")
+        prf(trust_hi_sum / (n_hi as f64))
+        print("   avg hardness: ")
+        prf(hard_hi_sum / (n_hi as f64))
+        print("\n")
+    }
+
+    print("\n--- Verdict ---\n")
+    // Floor saturation check: if nearly all instances hit the 0.2 trust floor,
+    // the trust signal is saturated and cannot discriminate edge count.
+    // PHP(4,3) always generates >= 15 conflicts → conflict_rate dp term
+    // dominates → raw_trust < 0.2 → floor triggered for every instance.
+    // Compare regime_recent_hardness (raw EWMA, not floored) instead.
+    if n_floor >= 80 {
+        print("NULL — trust floor saturated: ")
+        pri(n_floor)
+        print("/84 at exactly 0.20 (smt.sio floor: n_conflicts>=3 -> trust>=0.2).\n")
+        print("PHP conflict density dominates dp term; explore_trust cannot discriminate edge count.\n")
+        if n_lo > 0 && n_hi > 0 {
+            let lo_hard = hard_lo_sum / (n_lo as f64)
+            let hi_hard = hard_hi_sum / (n_hi as f64)
+            print("Hardness (EWMA, unflored): e<=6 avg=")
+            prf(lo_hard)
+            print("  e>=8 avg=")
+            prf(hi_hard)
+            print("\n")
+            if hi_hard > lo_hard {
+                print("Hardness directional (hi>lo): weak edge-count signal survives in raw EWMA.\n")
+            } else {
+                print("Hardness also flat: PHP fully dominates regime signal at this formula design.\n")
+            }
+        }
+        print("To isolate edge-count signal: replace PHP base with a satisfiable hard formula\n")
+        print("(e.g., random 3-SAT near threshold) where coloring conflicts can dominate.\n")
+    } else {
+        // Trust not fully floored — original directional test meaningful
+        if n_lo > 0 && n_hi > 0 {
+            let lo_avg = trust_lo_sum / (n_lo as f64)
+            let hi_avg = trust_hi_sum / (n_hi as f64)
+            if hi_avg > lo_avg {
+                print("CONFIRMED: explore_trust higher for more edges (floor not saturated).\n")
+            } else {
+                print("NOT CONFIRMED: no trust increase with edge count.\n")
+            }
+        }
+    }
+
+    print("\nRegime-Chromatic Probe complete.\n")
+    print("See: docs/research/locus-coeruleus-surgical-controller-sounio-note.md §5\n")
+}
