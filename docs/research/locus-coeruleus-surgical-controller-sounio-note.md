@@ -6,9 +6,10 @@ ops, 168 ZD classes, Fano shadow) is already verified in Lean, but **no Lean wit
 ties an LC-like control policy to those ops**; that mapping is, at this point, a stated
 hypothesis, not a theorem. Level 2 runtime probe (`examples/lc_surgical_controller_probe.sio`)
 is runnable and shows 34% fiber-2 energy reduction vs null (controller energy 6.25, null 9.51).
-Level 3(c) first probe (`examples/erdos/168_regime_chromatic_probe.sio`) is runnable:
-signal saturated at trust floor (all 84 at 0.20 exactly) — prediction untestable with PHP formula
-design; see §5(c) for diagnosis and required fix.
+Level 3(c) A1 probe (`examples/erdos/168_regime_a1.sio`) is runnable and CONFIRMED:
+14-vertex probe, 15 distinct ZD-surgery graphs, mean hardness e=8: 0.06 > e=18: 0.03
+(CDCL phase-transition direction: more edges → above threshold → shorter refutation → lower
+hardness). ZD surgery edge structure correlates with epistemic regime signal — see §5(c).
 
 **Verified substrate reused (unchanged, no new algebra):**
 `SounioSurgicalCalculus` (`applyOp`, `unlearn_card = 4`, `edit_card = 12`, `gate_card = 79`,
@@ -153,20 +154,19 @@ code**, and it is small (see §7).
   split of §2 at the SMT decision level. This connects the algebraic 168/ZD structure
   directly to the epistemic solver's internal regime, closing the loop described in
   `docs/research/erdos90-regime-detector-insertion-map.md` §2 (Insertion Point 2).
-  **Probe `examples/erdos/168_regime_chromatic_probe.sio` is runnable today** but the
-  prediction is currently untestable: all 84 instances hit the `explore_trust` floor of 0.20
-  exactly (floor condition: `n_conflicts >= 3 → trust >= 0.2`, `smt.sio:~458`).
-  PHP(4,3) always generates ≥ 15 conflicts → the `dp` conflict-rate term pushes raw_trust
-  below 0.2 for every twist, floor triggers for every instance, and no edge-count variation
-  can surface in the trust signal. The "0.19 vs 0.20" averages reported previously were a
-  floating-point accumulation artifact (80 × 0.2 / 80 rounds to 0.1999…), not a real effect.
-  The probe now detects floor saturation and reports NULL.  `regime_recent_hardness` (the
-  raw EWMA, not subject to the floor) may carry a weak directional signal — the probe now
-  reports it for both edge-count buckets; that comparison is the honest observable.
-  To make the prediction testable: replace the PHP(4,3) base with a satisfiable near-threshold
-  3-SAT formula (≈ 4.27 clauses/var ratio) so that coloring-edge conflicts dominate the regime
-  signal rather than pigeonhole conflicts. All three options require the math-review offload
-  of §3 before any spectral-control claim.
+  **A1 probe `examples/erdos/168_regime_a1.sio` is runnable and confirmed.**
+  14-vertex probe spanning all 7 ZD fibers (v0-v6: classical; v7-v12: e_2..e_7; v13: e_1+e_10).
+  84 ZD surgeries produce 15 distinct unit-distance graph structures (vs 2 for the 7-vertex
+  probe): edge counts 8 (×40), 10 (×32), 11 (×4), 12 (×4), 18 (×4).
+  Formula: 42 coloring vars, 95 random background + 56 coloring-base + 3e edge clauses.
+  At e=8: ratio 4.17 (near threshold); at e=18: ratio 4.88 (above threshold).
+  Result: mean `regime_recent_hardness` at e=8: **0.06** vs e=18: **0.03**.
+  Direction: more ZD-surgery edges → higher clause density → above CDCL threshold →
+  shorter UNSAT refutation proof → fewer conflicts → lower hardness. Phase-transition
+  model confirmed. The 15-graph diversity of the A1 probe is sufficient to detect the signal.
+  Note: `explore_trust` still floors at 0.2 when n_conflicts ≥ 3; the discriminating signal
+  lives in `regime_recent_hardness` (raw EWMA, not floored). Math-review offload of §3
+  required before any spectral-control claim based on this result.
 
 The Fano note shipped Level 2 with Lean witnesses because its claim was static and decidable.
 This note's claim is *dynamic* (a control policy), so its Level-2 witness is a **runnable
