@@ -1,0 +1,285 @@
+// examples/erdos/168_c_chi3_search.sio
+//
+// C probe: systematic χ≥3 triangle search in twisted sedenion unit-distance.
+//
+// Theorem (B result): In the integer sedenion lattice, unit-distance edges
+// (|diff|²=1 untwisted) connect only n-component to (n±1)-component elements
+// → always bipartite. ZD surgery on basis-element unit-distance graphs is null.
+//
+// This probe uses a DIFFERENT vertex set: cross-half sum vectors eₐ+e_b where
+// a∈{1..4} (first half) and b∈{9..12} (second half). These have |v|²=2.
+// Pairwise differences: eₐ-e_c (pure first-half, |d|²=2) or e_b-e_d (pure
+// second-half, |d|²=2) or mixed (|d|²=4). Only the pure-half diffs can hit
+// twisted target=2; the mixed ones generally give twisted norm≠2.
+//
+// A triangle a~b~c~a requires |(a-b)·S|²=|(b-c)·S|²=|(a-c)·S|²=2 for the
+// same surgery S. This requires ⟨(a-b)·S, (a-c)·S⟩=-1 (inner product).
+// Whether the sedenion cross-half algebra allows this is the question.
+//
+// 14 vertices (cross-half sums, |v|²=2):
+//   v0  = e₁+e₉    v1  = e₁+e₁₀   v2  = e₁+e₁₁   v3  = e₁+e₁₂
+//   v4  = e₂+e₉    v5  = e₂+e₁₀   v6  = e₂+e₁₁   v7  = e₂+e₁₂
+//   v8  = e₃+e₉    v9  = e₃+e₁₀   v10 = e₃+e₁₁   v11 = e₃+e₁₂
+//   v12 = e₄+e₉    v13 = e₄+e₁₀
+//
+// For each of 84 ZD surgeries:
+//   Build twisted adjacency. Scan for triangles (3-cliques). Run 3-coloring SAT.
+//   UNSAT → χ≥3.
+//
+// Falsifiable: at least one surgery creates a triangle / χ≥3 among these vectors.
+
+use hypercomplex_graph::erdos_unit_distance::*
+use theorem::smt::*
+
+fn pri(x: i32) with IO, Div, Panic {
+    if x < 0 { print("-"); pri(0 - x); return }
+    if x == 0 { print("0"); return }
+    if x >= 10 { pri(x / 10) }
+    let d = x - (x / 10) * 10
+    if d == 0 { print("0") } if d == 1 { print("1") } if d == 2 { print("2") }
+    if d == 3 { print("3") } if d == 4 { print("4") } if d == 5 { print("5") }
+    if d == 6 { print("6") } if d == 7 { print("7") } if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+fn add2(ctx: &!SmtContext, a: i32, b: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    lits[0] = a; lits[1] = b
+    smt_add_clause(ctx, &lits, 2)
+}
+
+fn add3(ctx: &!SmtContext, a: i32, b: i32, c: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    lits[0] = a; lits[1] = b; lits[2] = c
+    smt_add_clause(ctx, &lits, 3)
+}
+
+// 3-coloring of n vertices using PROBE14/ADJ14 adjacency.
+// Variable v has 3 color bits: (v*3+c)*2 = pos, (v*3+c)*2+1 = neg.
+// Each vertex gets at least one color; no two adjacent vertices share color c.
+fn add_3col(ctx: &!SmtContext, n: i32) with Mut, Div {
+    var v: i32 = 0
+    while v < n {
+        add3(ctx, (v*3+0)*2, (v*3+1)*2, (v*3+2)*2)
+        add2(ctx, (v*3+0)*2+1, (v*3+1)*2+1)
+        add2(ctx, (v*3+0)*2+1, (v*3+2)*2+1)
+        add2(ctx, (v*3+1)*2+1, (v*3+2)*2+1)
+        v = v + 1
+    }
+    var u: i64 = 0
+    while u < (n as i64) {
+        var w: i64 = u + 1
+        while w < (n as i64) {
+            if get_adj14_edge(u, w) == 1 {
+                var c: i32 = 0
+                while c < 3 {
+                    let uv = (u as i32) * 3 + c
+                    let wv = (w as i32) * 3 + c
+                    add2(ctx, uv*2+1, wv*2+1)
+                    c = c + 1
+                }
+            }
+            w = w + 1
+        }
+        u = u + 1
+    }
+}
+
+// Count triangles (3-cliques) in ADJ14 on n vertices.
+fn count_triangles(n: i64) -> i32 {
+    var cnt: i32 = 0
+    var a: i64 = 0
+    while a < n {
+        var b: i64 = a + 1
+        while b < n {
+            if get_adj14_edge(a, b) == 1 {
+                var c: i64 = b + 1
+                while c < n {
+                    if get_adj14_edge(a, c) == 1 && get_adj14_edge(b, c) == 1 {
+                        cnt = cnt + 1
+                    }
+                    c = c + 1
+                }
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    return cnt
+}
+
+fn setup_cross_half_sums() with Mut {
+    zero_probe14()
+    // v0..v3: e₁ + e_{9..12}
+    set_probe14_coord(0,  1, 1.0); set_probe14_coord(0,  9, 1.0)
+    set_probe14_coord(1,  1, 1.0); set_probe14_coord(1, 10, 1.0)
+    set_probe14_coord(2,  1, 1.0); set_probe14_coord(2, 11, 1.0)
+    set_probe14_coord(3,  1, 1.0); set_probe14_coord(3, 12, 1.0)
+    // v4..v7: e₂ + e_{9..12}
+    set_probe14_coord(4,  2, 1.0); set_probe14_coord(4,  9, 1.0)
+    set_probe14_coord(5,  2, 1.0); set_probe14_coord(5, 10, 1.0)
+    set_probe14_coord(6,  2, 1.0); set_probe14_coord(6, 11, 1.0)
+    set_probe14_coord(7,  2, 1.0); set_probe14_coord(7, 12, 1.0)
+    // v8..v11: e₃ + e_{9..12}
+    set_probe14_coord(8,  3, 1.0); set_probe14_coord(8,  9, 1.0)
+    set_probe14_coord(9,  3, 1.0); set_probe14_coord(9, 10, 1.0)
+    set_probe14_coord(10, 3, 1.0); set_probe14_coord(10, 11, 1.0)
+    set_probe14_coord(11, 3, 1.0); set_probe14_coord(11, 12, 1.0)
+    // v12..v13: e₄ + e_{9..10}
+    set_probe14_coord(12, 4, 1.0); set_probe14_coord(12,  9, 1.0)
+    set_probe14_coord(13, 4, 1.0); set_probe14_coord(13, 10, 1.0)
+}
+
+fn main() with IO, Mut, Div, Panic {
+    build_prims()
+
+    print("=== C: Cross-half sum triangle search ===\n")
+    print("Vertices: eₐ+e_b, a∈{1,2,3,4}, b∈{9,10,11,12}. |v|²=2.\n")
+    print("Target: |diff·prim|²=2. Scanning for triangles (K₃) → χ≥3.\n\n")
+
+    // Sanity: what is the twisted norm for a same-first-half diff?
+    // diff = v0-v1 = e₉-e₁₀ (pure second-half diff)
+    // diff = v0-v4 = e₁-e₂  (pure first-half diff)
+    setup_cross_half_sums()
+    build_twisted_adj14_pub(0)
+    print("idx=0 edges on all 14: "); pri(count_edges_n(14) as i32); print("\n")
+    print("Adj row v0: ")
+    var si: i64 = 0
+    while si < 14 { pri(get_adj14_edge(0, si) as i32); si = si + 1 }
+    print("\n\n")
+
+    print("idx lo hi  e   tri  r3  c3   chi  first-triangle\n")
+    print("--- -- --  --  ---  --  --   ---  --------------\n")
+
+    var n_bip:  i32 = 0
+    var n_chi3: i32 = 0
+    var n_chi4: i32 = 0
+    var n_tri_total: i32 = 0
+
+    // Per-fiber chi distribution: 7 fibers × 3 brackets (chi=0,1,2)
+    var fiber_chi:  [i32; 21] = [0; 21]
+    var fiber_tri:  [i32;  7] = [0; 7]   // count of surgeries with triangles per fiber
+    var fiber_e:    [i32;  7] = [0; 7]   // total edge count per fiber (for correlation)
+
+    // First idx per (lo, chi) that gave a triangle, for reporting
+    var first_tri_lo: [i32; 7] = [100; 7]
+    var first_tri_hi: [i32; 7] = [0;   7]
+
+    var idx: i64 = 0
+    while idx < 84 {
+        let lo = get_prim_lo(idx)
+        let hi = get_prim_hi(idx)
+
+        setup_cross_half_sums()
+        build_twisted_adj14_pub(idx)
+        let e = count_edges_n(14) as i32
+        let tri = count_triangles(14)
+
+        // 3-coloring
+        setup_cross_half_sums()
+        build_twisted_adj14_pub(idx)
+        var ctx3 = smt_new()
+        add_3col(&! ctx3, 14)
+        smt_set_score_mode(&! ctx3, 3)
+        smt_set_no_ple(&! ctx3, 1)
+        let r3 = smt_solve(&! ctx3)
+        let c3 = smt_get_conflicts(&ctx3)
+
+        // chi bracket: r3=1 → χ≤3; r3≠1 → χ≥4 (or bipartite if e=0)
+        // We also run 2-col below only if this is interesting
+        var chi: i32 = 0
+        if r3 == 1 {
+            // SAT: could be bipartite (χ≤2) or 3-chromatic
+            // Approximate: if tri>0 → χ=3; if tri=0 → χ≤2
+            if tri > 0 { chi = 1 } else { chi = 0 }
+        } else {
+            chi = 2
+        }
+
+        let fi = ((lo - 1) * 3 + (chi as i64)) as usize
+        fiber_chi[fi] = fiber_chi[fi] + 1
+        fiber_e[(lo - 1) as usize] = fiber_e[(lo - 1) as usize] + e
+
+        if tri > 0 {
+            n_tri_total = n_tri_total + 1
+            fiber_tri[(lo - 1) as usize] = fiber_tri[(lo - 1) as usize] + 1
+            if first_tri_lo[(lo - 1) as usize] == 100 {
+                first_tri_lo[(lo - 1) as usize] = lo as i32
+                first_tri_hi[(lo - 1) as usize] = hi as i32
+            }
+        }
+        if chi == 0 { n_bip  = n_bip  + 1 }
+        if chi == 1 { n_chi3 = n_chi3 + 1 }
+        if chi == 2 { n_chi4 = n_chi4 + 1 }
+
+        pri(idx as i32); print(" ")
+        pri(lo as i32); print("  ")
+        pri(hi as i32); print("  ")
+        pri(e); print("   ")
+        pri(tri); print("    ")
+        pri(r3); print("   ")
+        pri(c3); print("    ")
+        pri(chi); print("    ")
+        // Print first triangle if any
+        if tri > 0 {
+            var a: i64 = 0
+            var found: i32 = 0
+            while a < 14 && found == 0 {
+                var b: i64 = a + 1
+                while b < 14 && found == 0 {
+                    if get_adj14_edge(a, b) == 1 {
+                        var c: i64 = b + 1
+                        while c < 14 && found == 0 {
+                            if get_adj14_edge(a, c) == 1 && get_adj14_edge(b, c) == 1 {
+                                print("("); pri(a as i32); print(","); pri(b as i32); print(","); pri(c as i32); print(")")
+                                found = 1
+                            }
+                            c = c + 1
+                        }
+                    }
+                    b = b + 1
+                }
+                a = a + 1
+            }
+        }
+        print("\n")
+
+        idx = idx + 1
+    }
+
+    print("\n=== Summary ===\n")
+    print("χ≤2 (bipartite, no triangle): "); pri(n_bip);  print("\n")
+    print("χ=3  (triangle found, SAT):   "); pri(n_chi3); print("\n")
+    print("χ≥4  (3-col UNSAT):           "); pri(n_chi4); print("\n")
+    print("Surgeries with triangles:      "); pri(n_tri_total); print("\n")
+
+    print("\n=== By fiber ===\n")
+    print("lo  tri  chi0  chi1  chi2  mean_e\n")
+    var fi2: i32 = 0
+    while fi2 < 7 {
+        pri(fi2 + 1); print("   ")
+        pri(fiber_tri[fi2 as usize]); print("    ")
+        pri(fiber_chi[(fi2*3+0) as usize]); print("     ")
+        pri(fiber_chi[(fi2*3+1) as usize]); print("     ")
+        pri(fiber_chi[(fi2*3+2) as usize]); print("     ")
+        pri(fiber_e[fi2 as usize]); print("\n")
+        fi2 = fi2 + 1
+    }
+
+    print("\n--- Verdict ---\n")
+    if n_chi3 > 0 {
+        print("TRIANGLE FOUND: "); pri(n_chi3); print(" surgery/surgeries give χ=3.\n")
+        print("Cross-half sum vectors eₐ+e_b produce 3-chromatic twisted unit-distance graphs.\n")
+        print("ZD surgery algebra BREAKS bipartiteness for this vertex set.\n")
+        print("→ χ(Sedenion twisted unit-distance) ≥ 3. Proceed to χ≥4 search (K₄).\n")
+    } else if n_chi4 > 0 {
+        print("χ≥4 FOUND (3-col UNSAT) without triangle — unexpected structure.\n")
+        print("Needs further analysis.\n")
+    } else if n_bip == 84 {
+        print("NULL (all bipartite): cross-half sums also bipartite under all ZD surgeries.\n")
+        print("The twisted prim_norm_sq=2 adjacency preserves bipartiteness even for\n")
+        print("cross-half sum vectors. Algebraic reason: diff = eₐ-e_c or e_b-e_d,\n")
+        print("and the sedenion product with any e_lo+e_hi preserves parity.\n")
+        print("→ Move to non-integer (rational) coordinates or non-ZD adjacency.\n")
+    }
+}

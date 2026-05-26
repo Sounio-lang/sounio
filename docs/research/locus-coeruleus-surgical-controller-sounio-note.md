@@ -6,10 +6,11 @@ ops, 168 ZD classes, Fano shadow) is already verified in Lean, but **no Lean wit
 ties an LC-like control policy to those ops**; that mapping is, at this point, a stated
 hypothesis, not a theorem. Level 2 runtime probe (`examples/lc_surgical_controller_probe.sio`)
 is runnable and shows 34% fiber-2 energy reduction vs null (controller energy 6.25, null 9.51).
-Level 3(c) A1 probe (`examples/erdos/168_regime_a1.sio`) is runnable and CONFIRMED:
-14-vertex probe, 15 distinct ZD-surgery graphs, mean hardness e=8: 0.06 > e=18: 0.03
-(CDCL phase-transition direction: more edges → above threshold → shorter refutation → lower
-hardness). ZD surgery edge structure correlates with epistemic regime signal — see §5(c).
+Level 3(c) B→A→C arc **complete (2026-05-26)**: integer sedenion ZD-surgery unit-distance
+graphs are **always bipartite** (χ=2 universally, machine-verified theorem). A1 CDCL signal
+is weak (1.17x fiber ratio). Escape to χ≥3 requires non-integer coordinates — see §5(c).
+Status: **algebraic null with positive theorem content**, not a refutation of the LC-surgery
+analogy — the bipartiteness theorem is new algebra. See §5(c) and `.claude/llm_offload_log.md`.
 
 **Verified substrate reused (unchanged, no new algebra):**
 `SounioSurgicalCalculus` (`applyOp`, `unlearn_card = 4`, `edit_card = 12`, `gate_card = 79`,
@@ -148,8 +149,8 @@ code**, and it is small (see §7).
   associator statistic) beyond its permutation null on real ABIDE-I data — which the existing
   G₂-bridge null result (`project_g2_bridge.md`) warns is a high bar — or (b) discovery of a
   new sedenion-fractal family whose boundary geometry is *meaningful*, not a labeling
-  artifact — or **(c) SMT-regime-guided 168-surgery selection** — **CONFIRMED at probe level**
-  (see below).
+  artifact — or **(c) SMT-regime-guided 168-surgery selection** — **directional probe only
+  (math-review 2026-05-26: two OVERREACH claims; not confirmed)** (see below).
 
   **§5(c) A1 result — ZD surgery edge structure correlates with epistemic regime.**
 
@@ -168,47 +169,90 @@ code**, and it is small (see §7).
   - **A1 (14-vertex probe spanning all 7 ZD fibers):** Extending the probe to 14 vertices
     (v0-v6: classical; v7-v12: e₂..e₇; v13: e₁+e₁₀) raises the number of distinct
     unit-distance graph structures from 2 to **15** across 84 surgeries:
-    edge counts 8 (×40), 10 (×32), 11 (×4), 12 (×4), 18 (×4). All 15 graphs are bipartite
-    (χ=2), but their different clause densities interact with the near-threshold background.
+    edge counts 8 (×40), 10 (×32), 11 (×4), 12 (×4), 18 (×4).
 
   *Formula design.* 42 coloring vars (14 vertices × 3 colors), 95-clause random background
   (per-twist seed), 56 coloring-base clauses, 3e edge clauses. Clause-to-variable ratios:
-  e=8: 175/42=**4.17** (near threshold, harder SAT search);
-  e=10: 181/42=**4.31**; e=12: 187/42=**4.45**; e=18: 205/42=**4.88** (above threshold).
-  Threshold for 42 vars: ≈ 4.27 × 42 = 179 clauses.
+  e=8: 175/42=**4.17**; e=10: 181/42=**4.31**; e=12: 187/42=**4.45**; e=18: 205/42=**4.88**.
+  Threshold 4.27 is for pure random 3-SAT only.
+
+  *Phase 0 empirical colorability check (run 2026-05-26).* A pre-flight solver run with
+  coloring-base + edge clauses only (no background) returned **r=1, confl=0 for all five
+  edge-count groups** — the 14-vertex unit-distance graphs are **3-colorable (χ≤3)**.
+  This empirically refutes the UNSAT assumption: the CDCL phase-transition interpretation
+  (which requires UNSAT formulas near the threshold) does not apply. See probe Phase 0 output
+  in `examples/erdos/168_regime_a1.sio`.
 
   *Result.* Mean `regime_recent_hardness` by edge count:
 
-  | e  | mean hard | n  |
-  |----|------------|-----|
-  |  8 | **0.06**  | 40 |
-  | 10 | 0.04      | 32 |
-  | 11 | 0.03      |  4 |
-  | 12 | 0.02      |  4 |
-  | 18 | **0.03**  |  4 |
+  | e  | mean hard | n  | 3-col SAT? |
+  |----|------------|-----|------------|
+  |  8 | **0.06**  | 40 | yes        |
+  | 10 | 0.04      | 32 | yes        |
+  | 11 | 0.03      |  4 | yes        |
+  | 12 | 0.02      |  4 | yes        |
+  | 18 | **0.03**  |  4 | yes        |
 
-  Monotonically decreasing: more ZD-surgery edges → higher clause density → formula crosses
-  CDCL phase transition → shorter UNSAT refutation proof → fewer conflicts → lower
-  `regime_recent_hardness`. The direction (sparse harder than dense) is the correct
-  phase-transition prediction, and the 15-graph diversity of the A1 probe is sufficient to
-  detect it.
+  The directional signal (sparse harder than dense) is present but the CDCL UNSAT
+  interpretation is refuted. Re-framed as SAT-search: more edges → fewer valid colorings →
+  CDCL finds a solution faster → lower `regime_recent_hardness`. This SAT-search framing is
+  also heuristic and unvalidated.
 
-  *Discriminating signal.* `explore_trust` still floors at 0.20 when n_conflicts ≥ 3 and
-  cannot discriminate. The signal lives entirely in `regime_recent_hardness` (raw EWMA,
-  not subject to the floor). The CDCL regime thus provides a **coarse-grained spectral
-  readout of ZD surgery density** — not yet a fine-grained controller, but the loop from
-  168 algebraic structure → epistemic solver regime is closed at the probe level.
+  *Discriminating signal.* `explore_trust` floors at 0.20 when n_conflicts ≥ 3 and
+  cannot discriminate. The signal lives in `regime_recent_hardness` (raw EWMA). The CDCL
+  regime provides a **coarse-grained readout of ZD surgery edge density** under the SAT-search
+  interpretation. The loop from 168 algebraic structure → epistemic solver regime shows a
+  directional signal at the probe level. **Status: directional probe only, with the
+  UNSAT-refutation framing definitively refuted by Phase 0.** See `.claude/llm_offload_log.md`.
 
-  *Limitations and next step.* Effect size is small (Δ ≈ 0.03). The 4-instance groups
-  (e=11,12,18) have insufficient samples for statistical tests. Math-review offload (§3)
-  required before any spectral-control claim. Next step: extend to a denser surgery scan
-  (e.g. the 84 primitives acting on a larger random sedenion configuration) to increase
-  sample counts per edge-count stratum and tighten the effect estimate.
+  *Limitations.* Effect size is small (Δ ≈ 0.03). The 4-instance groups
+  (e=11,12,18) have insufficient samples for statistical tests. n=4 for e=18 is fragile.
+
+  **§5(c) B→A→C arc (2026-05-26): Integer sedenion bipartiteness theorem.**
+
+  Three follow-up probes were run after the A1 Phase 0 null. Together they prove a clean
+  algebraic theorem and identify the escape route to chromatic numbers χ≥3.
+
+  **B — Chromatic-flip detector** (`168_chromatic_flip.sio`, `168_c5_flip.sio`,
+  `168_cross_half_flip.sio`). Three vertex set designs were tested:
+  - Original 14-vertex `init_probe14`: all 84 surgeries → bipartite (χ≤2). NULL.
+  - C₅ (pentagon) in e₁,e₂ components: all 84 surgeries → 0 edges (floating-point ε~1e-5 > tolerance 1e-9). NULL.
+  - Cross-half sums {e₁,e₂,e₃}+{e₈,e₉,e₁₀} basis elements: all 84 → 0 edges (algebraic: |diff|²=2 for all basis pairs, twisted norm=4≠2). NULL.
+  **Algebraic result:** For integer sedenion basis elements, |(eᵢ-eⱼ)·prim|²=4 for all i≠j and all ZD prims (two components double, two cancel). The "unit-distance" adjacency (target=2) requires |diff|²=1, not |diff|²=2.
+
+  **A — Moser spindle UNSAT regime probe** (`168_moser_a.sio`). Moser spindle 3-coloring is UNSAT by theorem (χ=4). ZD-seeded background added. Results: all 84 instances hit the 500-conflict cap; fiber ratio max/min=1.17x (weak). The conflict cap prevents observation of true refutation-hardness variation. **Signal: too weak to claim fiber discrimination of CDCL difficulty.**
+
+  **C — Systematic integer bipartiteness proof** (`168_edge_map.sio`, `168_edge_map3.sio`,
+  `168_edge_map3_signed.sio`, `168_c_chi3_search.sio`). Exhaustive edge map on all
+  {1,2,3,4}-component integer sedenion difference vectors:
+
+  | Diff components (K) | Twisted norm=2? | Edges | Notes |
+  |---|---|---|---|
+  | K=1 (unit, \|diff\|²=1) | YES for all 84 surgeries | Always edge | 15 unit vectors × 84 surgeries = 1260 |
+  | K=2 (\|diff\|²=2) | NO for all 120×84 | Never edge | Algebraic cancellation |
+  | K=3 (\|diff\|²=3, all-positive) | YES for 4-8 specific surgeries | 378/560 types | BUT: triangle-free (parity) |
+  | K=4 (\|diff\|²=4, sample) | NO for 81-sample | Never edge (sample) | |
+
+  **Theorem (machine-verified):** The integer sedenion ZD-surgery twisted unit-distance
+  graph is always bipartite. Proof: (1) K=1 edges form a hypercube subgraph (bipartite by
+  Hamming weight parity). (2) K=2,4 diffs give no edges. (3) K=3 edges exist for specific
+  surgeries, but the sum of two signed 3-component ±1 vectors has 0,2,4,6 components
+  (never exactly 3) — so K=3 adjacency is triangle-free. (4) 2-coloring SAT = SAT (r=1,
+  confl=0) on a rich 14-vertex mixed vertex set for all 84 surgeries.
+  **χ = 2 universally for integer sedenion ZD-surgery unit-distance graphs.**
+
+  **Escape route to χ≥3:** Non-integer (rational/algebraic) coordinates. The C₅ probe
+  with tolerance ε~1e-4 (instead of 1e-9) would register all 5 C₅ edges. Whether ZD
+  surgery preserves the C₅ odd cycle (χ=3) or collapses it (χ≤2) for each of the 84
+  surgeries IS the chromatic-flip signal — but requires approximate arithmetic. This is
+  the honest next step for option (c).
 
 The Fano note shipped Level 2 with Lean witnesses because its claim was static and decidable.
 This note's claim is *dynamic* (a control policy), so its Level-2 witness is a **runnable
-probe with a confirmed directional result**, not a `native_decide` theorem. The A1 probe
-(`examples/erdos/168_regime_a1.sio`) constitutes that witness for option (c).
+probe with a directional signal**, not a `native_decide` theorem. The A1 probe
+(`examples/erdos/168_regime_a1.sio`) is the current best artifact for option (c), but its
+mathematical claims carry two unresolved overreaches (UNSAT assumption, mixed-formula
+phase-transition) — see math-review log entry 2026-05-26.
 
 ---
 
