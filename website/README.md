@@ -4,7 +4,7 @@ Astro 5 site for **https://www.souniolang.org** — documentation, tutorials, bl
 
 ## Requirements
 
-- Node.js 20+
+- Node.js **22.12+** (see `package.json` `engines`)
 - npm 10+
 
 ## Local Development
@@ -81,7 +81,7 @@ Dark-first brand navy (`#0B1E3A`), gold accents (`#D6B35A`), glass surfaces — 
 
 Examples: `CustomCursor.tsx` (desktop-only; disabled when `prefers-reduced-motion: reduce`), `KineticText.tsx`, `MCQBlock.tsx`, `AudienceSelector.tsx`, `RenderPreview.astro`.
 
-Homepage demos live under `src/components/home/` (WebGPU, playground, charts, etc.).
+Homepage demos live under `src/components/home/` (code examples, charts, dissertation viewer, etc.). Legacy WebGPU experiments are archived under `src/components/_archive/`.
 
 ### Contributing to styles
 

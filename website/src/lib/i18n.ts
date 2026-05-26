@@ -15,7 +15,7 @@ export const localeNames: Record<Locale, string> = {
 };
 
 export const defaultLocale: Locale = 'en';
-export const fullyLocalizedLocales = new Set<Locale>(['en']);
+export const fullyLocalizedLocales = new Set<Locale>(['en', 'pt']);
 
 // Translation type (inferred from en.json structure)
 export type Translations = typeof import('../i18n/en.json');
