@@ -1,0 +1,185 @@
+// examples/erdos/nsat_smoke.sio
+//
+// Smoke: verify module-level LCG + near-threshold 3-SAT baseline before
+// committing to the full 84-sweep redesign.
+//
+// Tests idx = 0 (e=6), 46 (e=9), 57 (e=9) with three background densities:
+//   A: 10 cls / 21 vars = ratio 0.48  (far below threshold, easy SAT base)
+//   B: 40 cls / 21 vars = ratio 1.90  (below threshold, SAT base)
+//   C: 70 cls / 21 vars = ratio 3.33  (near threshold after adding coloring)
+//
+// Goal: find the density where confl/hardness discriminates e=6 vs e=9.
+// If all three show flat hardness, the signal is in d, not clauses, and
+// we need a different encoding.
+
+use hypercomplex_graph::erdos_unit_distance::*
+use theorem::smt::*
+
+// Module-level LCG state — reset to fixed seed at each twist.
+var lcg_state: i64 = 0
+
+fn lcg_next() -> i64 with Mut {
+    lcg_state = (lcg_state * 1664525 + 1013904223) & 0x7FFFFFFF
+    return lcg_state
+}
+
+fn lrand(n: i64) -> i64 with Mut {
+    return lcg_next() % n
+}
+
+fn pri(x: i32) with IO, Div, Panic {
+    if x < 0 { print("-"); pri(0 - x); return }
+    if x == 0 { print("0"); return }
+    if x >= 10 { pri(x / 10) }
+    let d = x - (x / 10) * 10
+    if d == 0 { print("0") }
+    if d == 1 { print("1") }
+    if d == 2 { print("2") }
+    if d == 3 { print("3") }
+    if d == 4 { print("4") }
+    if d == 5 { print("5") }
+    if d == 6 { print("6") }
+    if d == 7 { print("7") }
+    if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+fn prf(x: f64) with IO, Mut, Div, Panic {
+    if x < 0.0 { print("-"); prf(0.0 - x); return }
+    let ip = x as i32
+    pri(ip)
+    print(".")
+    let f0 = (x - (ip as f64)) * 10.0
+    let d0 = f0 as i32
+    let f1 = (f0 - (d0 as f64)) * 10.0
+    let d1 = f1 as i32
+    pri(d0)
+    pri(d1)
+}
+
+fn add2(ctx: &!SmtContext, a: i32, b: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    lits[0] = a
+    lits[1] = b
+    smt_add_clause(ctx, &lits, 2)
+}
+
+fn add3(ctx: &!SmtContext, a: i32, b: i32, c: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    lits[0] = a
+    lits[1] = b
+    lits[2] = c
+    smt_add_clause(ctx, &lits, 3)
+}
+
+// Generate n_cls random 3-clauses over vars [0, n_vars).
+// LCG must be seeded before calling.
+fn add_background(ctx: &!SmtContext, n_vars: i32, n_cls: i32) with Mut, Div {
+    var i: i32 = 0
+    while i < n_cls {
+        let v0 = (lrand(n_vars as i64)) as i32
+        let s0 = (lrand(2)) as i32
+        let v1 = (lrand(n_vars as i64)) as i32
+        let s1 = (lrand(2)) as i32
+        let v2 = (lrand(n_vars as i64)) as i32
+        let s2 = (lrand(2)) as i32
+        add3(ctx, v0*2 + s0, v1*2 + s1, v2*2 + s2)
+        i = i + 1
+    }
+}
+
+// Add 3-coloring clauses for a 7-vertex graph (vars 0..20).
+// Edge constraints depend on the current ADJ (set by build_twisted_adj_pub).
+fn add_coloring(ctx: &!SmtContext) with Mut, Div {
+    var v: i32 = 0
+    while v < 7 {
+        add3(ctx, (v*3+0)*2, (v*3+1)*2, (v*3+2)*2)
+        add2(ctx, (v*3+0)*2+1, (v*3+1)*2+1)
+        add2(ctx, (v*3+0)*2+1, (v*3+2)*2+1)
+        add2(ctx, (v*3+1)*2+1, (v*3+2)*2+1)
+        v = v + 1
+    }
+    var ui: i64 = 0
+    while ui < 7 {
+        var wi: i64 = ui + 1
+        while wi < 7 {
+            if get_adj_edge(ui, wi) == 1 {
+                var c: i32 = 0
+                while c < 3 {
+                    let uv = (ui as i32) * 3 + c
+                    let wv = (wi as i32) * 3 + c
+                    add2(ctx, uv*2+1, wv*2+1)
+                    c = c + 1
+                }
+            }
+            wi = wi + 1
+        }
+        ui = ui + 1
+    }
+}
+
+// Run one twist with a given background density; print one result line.
+fn run_twist(idx: i64, n_bg: i32) with IO, Mut, Div, Panic {
+    build_twisted_adj_pub(idx)
+    let e = count_edges_pub() as i32
+
+    lcg_state = 0xABCD1234   // same background for all twists
+    var ctx = smt_new()
+    add_background(&! ctx, 21, n_bg)
+    add_coloring(&! ctx)
+    smt_set_score_mode(&! ctx, 3)
+    smt_set_no_ple(&! ctx, 1)
+    let _r = smt_solve(&! ctx)
+
+    let confl  = smt_get_conflicts(&ctx)
+    let label  = smt_get_regime_label(&ctx)
+    let trust  = smt_get_explore_trust(&ctx)
+    let hard   = smt_get_regime_hardness(&ctx)
+
+    print("  idx="); pri(idx as i32)
+    print(" e="); pri(e)
+    print(" bg="); pri(n_bg)
+    print(" cls="); pri(n_bg + 28 + e * 3)
+    print(" confl="); pri(confl)
+    print(" lbl="); pri(label)
+    print(" trust="); prf(trust)
+    print(" hard="); prf(hard)
+    print("\n")
+}
+
+fn main() with IO, Mut, Div, Panic {
+    build_prims()
+    init_probe()
+
+    // Verify LCG is alive: print first 3 values from seed 1.
+    lcg_state = 1
+    print("LCG check (seed=1): ")
+    pri(lcg_next() as i32); print(" ")
+    pri(lcg_next() as i32); print(" ")
+    pri(lcg_next() as i32); print("\n")
+
+    print("\n=== Near-threshold 3-SAT smoke: idx {0,46,57} x bg {10,40,70} ===\n")
+    print("idx e  bg  cls  confl lbl trust hard\n")
+    print("-----------------------------------------------------------\n")
+
+    // Three probe twists: idx=0 (e=6), idx=46 (e=9), idx=57 (e=9)
+    var bg_idx: i32 = 0
+    while bg_idx < 3 {
+        var n_bg: i32 = 0
+        if bg_idx == 0 { n_bg = 10 }
+        if bg_idx == 1 { n_bg = 40 }
+        if bg_idx == 2 { n_bg = 70 }
+        run_twist(0, n_bg)
+        run_twist(46, n_bg)
+        run_twist(57, n_bg)
+        print("\n")
+        bg_idx = bg_idx + 1
+    }
+
+    print("Ratios (total_cls / 21 vars):\n")
+    print("  bg=10: e=6 -> "); prf((10.0 + 28.0 + 18.0) / 21.0); print("  e=9 -> "); prf((10.0 + 28.0 + 27.0) / 21.0); print("\n")
+    print("  bg=40: e=6 -> "); prf((40.0 + 28.0 + 18.0) / 21.0); print("  e=9 -> "); prf((40.0 + 28.0 + 27.0) / 21.0); print("\n")
+    print("  bg=70: e=6 -> "); prf((70.0 + 28.0 + 18.0) / 21.0); print("  e=9 -> "); prf((70.0 + 28.0 + 27.0) / 21.0); print("\n")
+    print("\nThreshold for 21 vars: ~4.27 (90 clauses)\n")
+    print("Pick the bg where confl/hard differs between e=6 and e=9.\n")
+}
