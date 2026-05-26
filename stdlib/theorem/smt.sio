@@ -59,6 +59,16 @@
 //!         Expected score = act_mean (correct TS property: E[sample] = posterior mean).
 //!         act_var=0 → score = mean exactly (safe fallback, cannot regress vs mode 1).
 //!         Prior art gap: LRB/CHB are scalar ERWA, no second moment, no sampling.
+//!
+//! POLARITY TS (phase_mode=1) [FIRST-IN-CLASS — second confirmed literature gap]:
+//!   Beta-Bernoulli Thompson Sampling for polarity selection.
+//!   Models P(true is good for v) as Beta(phase_alpha[v], phase_beta[v]).
+//!   Prior: Uniform Beta(1,1). Update on conflict (clause is falsified):
+//!     assign[v]>0 (true was bad) → phase_beta[v] += 1.0
+//!     assign[v]<0 (false was bad) → phase_alpha[v] += 1.0
+//!   Sampling: normal approximation N(μ_p, σ²_p) at each decision.
+//!   Combined with score_mode=3 = first fully epistemic DPLL:
+//!     variable selection AND polarity selection both driven by posterior sampling.
 //
 //! REGIME DETECTOR (Thread 2 full design, Erdős-critical):
 //!   When this solver is used inside Erdős 90 attacks (168-guided ZD surgeries
@@ -190,6 +200,17 @@ struct SmtContext {
     regime_recent_hardness: f64,  // EWMA of |len + 0.8*d - regime_len_mean|
     regime_conflict_rate: f64,    // EWMA of n_conflicts/(n_conflicts+n_decisions+1)
     regime_avg_backjump: f64,     // EWMA of level at conflict (backjump proxy)
+    // Beta-Bernoulli polarity TS [FIRST-IN-CLASS — confirmed literature gap]:
+    //   phase_alpha[v] / (phase_alpha[v] + phase_beta[v]) = posterior P(true is good for v)
+    //   Updated on conflict: if assign[v]>0 (true was bad) → phase_beta[v]+=1;
+    //                        if assign[v]<0 (false was bad) → phase_alpha[v]+=1.
+    //   Prior: alpha=beta=1 (uniform, no preference). Persists across smt_solve() calls.
+    //   Sampling: normal approximation N(μ_p, σ²_p), σ_p=sqrt(μ(1-μ)/n_sum).
+    //   phase_mode=0: classic saved-phase+confidence (default).
+    //   phase_mode=1: Beta-TS polarity selection — first fully epistemic DPLL.
+    phase_alpha: [f64; 64],
+    phase_beta: [f64; 64],
+    phase_mode: i32,
     n_constraints: i32,
     lia_coeffs: [i64; 1024],
     lia_bounds: [i64; 64],
@@ -226,6 +247,9 @@ fn smt_new() -> SmtContext {
         regime_recent_hardness: 0.0,
         regime_conflict_rate: 0.0,
         regime_avg_backjump: 0.0,
+        phase_alpha: [1.0; 64],
+        phase_beta: [1.0; 64],
+        phase_mode: 0,
         n_constraints: 0,
         lia_coeffs: [0; 1024],
         lia_bounds: [0; 64],
@@ -522,6 +546,16 @@ fn smt_conflict_clause(ctx: &!SmtContext, clause_idx: i32, level: i32) with Mut,
         smt_bump_var_epistemic(ctx, var_idx, len, 1.0)
         smt_blame_var_phase(ctx, var_idx)
         smt_lrb_blame(ctx, var_idx)
+        // Beta-Bernoulli update: penalise the polarity that contributed to this conflict.
+        // Conflict clause is falsified, so assign[v] tells us which polarity was assigned.
+        if var_idx >= 0 && var_idx < 64 {
+            if ctx.assign[var_idx] > 0 {
+                ctx.phase_beta[var_idx] = ctx.phase_beta[var_idx] + 1.0
+            }
+            if ctx.assign[var_idx] < 0 {
+                ctx.phase_alpha[var_idx] = ctx.phase_alpha[var_idx] + 1.0
+            }
+        }
         i = i + 1
     }
 }
@@ -592,6 +626,8 @@ fn smt_reset_activities(ctx: &!SmtContext) with Mut {
         ctx.phase_conf[i] = 0.5
         ctx.lrb_participated[i] = 0
         ctx.lrb_interval[i] = 0
+        ctx.phase_alpha[i] = 1.0
+        ctx.phase_beta[i] = 1.0
         i = i + 1
     }
     ctx.bump_amount = 1.0
@@ -605,6 +641,10 @@ fn smt_set_score_mode(ctx: &!SmtContext, mode: i32) with Mut {
 // When set, smt_search uses only unit propagation + branching — classical DPLL.
 fn smt_set_no_ple(ctx: &!SmtContext, v: i32) with Mut {
     ctx.no_ple = v
+}
+
+fn smt_set_phase_mode(ctx: &!SmtContext, mode: i32) with Mut {
+    ctx.phase_mode = mode
 }
 
 fn smt_get_decisions(ctx: &SmtContext) -> i32 {
@@ -667,6 +707,18 @@ fn smt_get_regime_rate(ctx: &SmtContext) -> f64 {
 
 fn smt_get_regime_backjump(ctx: &SmtContext) -> f64 {
     return ctx.regime_avg_backjump
+}
+
+fn smt_get_phase_alpha(ctx: &SmtContext, var_idx: i32) -> f64 {
+    if var_idx < 0 { return 1.0 }
+    if var_idx >= 64 { return 1.0 }
+    return ctx.phase_alpha[var_idx]
+}
+
+fn smt_get_phase_beta(ctx: &SmtContext, var_idx: i32) -> f64 {
+    if var_idx < 0 { return 1.0 }
+    if var_idx >= 64 { return 1.0 }
+    return ctx.phase_beta[var_idx]
 }
 
 fn smt_unit_propagate_once(ctx: &!SmtContext, level: i32) -> i32 with Mut, Div {
@@ -1023,9 +1075,27 @@ fn smt_search(ctx: &!SmtContext, level: i32) -> i32 with Mut, Div {
 
     let trail_mark = ctx.trail_len
     var first_val: i32 = 1
-    // use saved phase only when confidence is sufficient (threshold 0.55)
-    if ctx.phase[branch_var] != 0 && ctx.phase_conf[branch_var] >= 0.55 {
-        first_val = ctx.phase[branch_var]
+    if ctx.phase_mode == 1 {
+        // Beta-Bernoulli TS: sample from N(μ_p, σ²_p), choose true if sample ≥ 0.5.
+        // μ_p = α/(α+β); σ_p = sqrt(μ(1-μ)/n_sum). Prior α=β=1 → uniform at start.
+        let alpha_v = ctx.phase_alpha[branch_var]
+        let beta_v = ctx.phase_beta[branch_var]
+        let n_sum = alpha_v + beta_v
+        let mu_p = alpha_v / n_sum
+        let var_p = mu_p * (1.0 - mu_p) / n_sum
+        let sigma_p = smt_sqrt_f64(var_p)
+        let u_mag = smt_hash_f64(branch_var + 64, ctx.n_decisions)
+        let u_sgn = smt_hash_f64(branch_var + 96, ctx.n_decisions)
+        let z_abs = smt_sqrt_f64((0.0 - 2.0) * smt_ln_f64(u_mag))
+        var sign_p: f64 = 1.0
+        if u_sgn < 0.5 { sign_p = 0.0 - 1.0 }
+        let p_sample = mu_p + sign_p * z_abs * sigma_p
+        if p_sample < 0.5 { first_val = 0 - 1 }
+    } else {
+        // use saved phase only when confidence is sufficient (threshold 0.55)
+        if ctx.phase[branch_var] != 0 && ctx.phase_conf[branch_var] >= 0.55 {
+            first_val = ctx.phase[branch_var]
+        }
     }
     var second_val: i32 = 0 - first_val
     ctx.n_decisions = ctx.n_decisions + 1
