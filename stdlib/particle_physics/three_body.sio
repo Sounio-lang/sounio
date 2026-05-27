@@ -1,0 +1,221 @@
+// stdlib/particle_physics/three_body.sio
+//
+// Three-body decay widths and phase-space kinematics.
+//
+// References:
+//   - PDG 2024, Kinematics
+//   - Peskin & Schroeder, Ch. 4
+
+module particle_physics::three_body
+
+use particle_physics::sm_params::*;
+use particle_physics::kinematics::*;
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+}
+
+// ============================================================================
+// MUON DECAY: μ⁻ → e⁻ ν̄ₑ νμ
+// ============================================================================
+
+/// Tree-level muon decay width.
+///
+/// Γ(μ⁻ → e⁻ ν̄ₑ νμ) = G_F² m_μ⁵ / (192 π³)
+///
+/// # Parameters
+/// - `m_mu`: Muon mass in GeV.
+/// - `m_e`: Electron mass in GeV (kept for completeness; negligible).
+/// - `G_F`: Fermi constant in GeV⁻².
+///
+/// # Returns
+/// Decay width in GeV.
+pub fn muon_decay_width(m_mu: f64, m_e: f64, G_F: f64) -> f64 with Mut, Div, Panic {
+    if m_mu <= m_e { return 0.0 }
+    let pi = 3.141592653589793
+    // Neglect m_e/m_μ (0.5% correction)
+    let rho = 1.0  // phase-space factor ≈ 1 for m_e << m_μ
+    G_F * G_F * m_mu * m_mu * m_mu * m_mu * m_mu * rho / (192.0 * pi * pi * pi)
+}
+
+/// Muon lifetime from decay width.
+/// τ = ℏ / Γ where ℏ = 6.582e-25 GeV·s.
+pub fn muon_lifetime(m_mu: f64, m_e: f64, G_F: f64) -> f64 with Mut, Div, Panic {
+    let gamma = muon_decay_width(m_mu, m_e, G_F)
+    if gamma <= 0.0 { return 0.0 }
+    6.582119569e-25 / gamma
+}
+
+// ============================================================================
+// TAU DECAY: τ⁻ → l⁻ ν̄_l ντ  and  τ⁻ → hadrons + ντ
+// ============================================================================
+
+/// Leptonic tau decay width: τ⁻ → l⁻ ν̄_l ντ.
+///
+/// Γ = G_F² m_τ⁵ / (192 π³) × f(m_l²/m_τ²)
+/// where f(ρ) = 1 - 8ρ + 8ρ³ - ρ⁴ - 12ρ² ln(ρ)
+///
+/// # Parameters
+/// - `m_tau`: Tau mass in GeV.
+/// - `m_l`: Daughter lepton mass in GeV (e or μ).
+/// - `G_F`: Fermi constant in GeV⁻².
+pub fn tau_decay_width_leptonic(m_tau: f64, m_l: f64, G_F: f64) -> f64 with Mut, Div, Panic {
+    if m_tau <= m_l { return 0.0 }
+    let pi = 3.141592653589793
+    let rho = (m_l / m_tau) * (m_l / m_tau)
+    let phase_space = 1.0 - 8.0 * rho + 8.0 * rho * rho * rho - rho * rho * rho * rho
+    // ln(ρ) is negative; -12ρ² ln(ρ) is positive
+    let ln_rho = ln_f64(rho)
+    let phase_space_full = phase_space - 12.0 * rho * rho * ln_rho
+    G_F * G_F * m_tau * m_tau * m_tau * m_tau * m_tau * phase_space_full / (192.0 * pi * pi * pi)
+}
+
+/// Hadronic tau decay width: τ⁻ → (q q̄) + ντ.
+///
+/// Approximate formula for τ → hadrons:
+/// Γ_had = N_c × |V_qq|² × Γ_μ × (1 + δ_QCD)
+/// where Γ_μ is the muonic width and δ_QCD ≈ 0.2 is a QCD correction.
+///
+/// # Parameters
+/// - `m_tau`: Tau mass in GeV.
+/// - `n_c`: Number of colors (3 for ud, us; 3 for cd, cs).
+/// - `ckm_sq`: |V_qq|² CKM element squared.
+/// - `G_F`: Fermi constant in GeV⁻².
+pub fn tau_decay_width_hadronic(m_tau: f64, n_c: f64, ckm_sq: f64, G_F: f64) -> f64 with Mut, Div, Panic {
+    let gamma_mu = tau_decay_width_leptonic(m_tau, mass_muon().val(), G_F)
+    let delta_qcd = 0.2
+    n_c * ckm_sq * gamma_mu * (1.0 + delta_qcd)
+}
+
+/// Total tau decay width (leptonic + hadronic).
+pub fn tau_total_width(m_tau: f64, G_F: f64) -> f64 with Mut, Div, Panic {
+    let m_mu = mass_muon().val()
+    let m_e = mass_electron().val()
+    // Leptonic: e and μ channels
+    let gamma_e = tau_decay_width_leptonic(m_tau, m_e, G_F)
+    let gamma_mu = tau_decay_width_leptonic(m_tau, m_mu, G_F)
+    // Hadronic: τ → π ν, τ → ρ ν, etc.
+    // Use approximate total: sum of known channels
+    // π channel: |V_ud|² × 1-color factor
+    let ckm_ud_sq = 0.95
+    let gamma_pi = tau_decay_width_hadronic(m_tau, 1.0, ckm_ud_sq, G_F)
+    // Multipion/higher hadronic: scale by ~5 relative to π
+    let gamma_had_total = 5.0 * gamma_pi
+    gamma_e + gamma_mu + gamma_had_total
+}
+
+/// Tau lifetime from total width.
+pub fn tau_lifetime(m_tau: f64, G_F: f64) -> f64 with Mut, Div, Panic {
+    let gamma = tau_total_width(m_tau, G_F)
+    if gamma <= 0.0 { return 0.0 }
+    6.582119569e-25 / gamma
+}
+
+// ============================================================================
+// TOP QUARK DECAY: t → b W⁺
+// ============================================================================
+
+/// Tree-level top decay width: t → b W⁺.
+///
+/// Γ(t → b W⁺) = (G_F m_t³) / (8π√2) × (1 - M_W²/M_t²)² × (1 + 2M_W²/M_t²)
+///
+/// # Parameters
+/// - `m_t`: Top mass in GeV.
+/// - `m_w`: W mass in GeV.
+/// - `m_b`: Bottom mass in GeV.
+/// - `G_F`: Fermi constant in GeV⁻².
+///
+/// # Returns
+/// Decay width in GeV.
+pub fn top_decay_width(m_t: f64, m_w: f64, m_b: f64, G_F: f64) -> f64 with Mut, Div, Panic {
+    if m_t <= m_w + m_b { return 0.0 }
+    let pi = 3.141592653589793
+    let rw = (m_w / m_t) * (m_w / m_t)
+    let factor = (1.0 - rw) * (1.0 - rw) * (1.0 + 2.0 * rw)
+    // Phase-space suppression from m_b (very small, ~0.3%)
+    let pb = (m_b / m_t) * (m_b / m_t)
+    let phase_space = sqrt_f64(kallen_lambda(1.0, rw, pb))
+    G_F * m_t * m_t * m_t * factor * phase_space / (8.0 * pi * 1.4142135623730951)
+}
+
+/// Top quark lifetime.
+pub fn top_lifetime(m_t: f64, m_w: f64, m_b: f64, G_F: f64) -> f64 with Mut, Div, Panic {
+    let gamma = top_decay_width(m_t, m_w, m_b, G_F)
+    if gamma <= 0.0 { return 0.0 }
+    6.582119569e-25 / gamma
+}
+
+// ============================================================================
+// DALITZ PLOT KINEMATICS
+// ============================================================================
+
+/// Dalitz plot boundaries for a 3-body decay A → 1 + 2 + 3.
+///
+/// Returns the minimum and maximum of the invariant mass squared m₁₂²
+/// where particles 1 and 2 are paired.
+///
+/// # Parameters
+/// - `m_parent`: Parent mass.
+/// - `m1`, `m2`, `m3`: Final-state masses.
+///
+/// # Returns
+/// (m12_min, m12_max) in GeV².
+pub fn dalitz_m12_bounds(m_parent: f64, m1: f64, m2: f64, m3: f64) -> (f64, f64) with Mut, Panic, Div {
+    let e2_star = (m_parent * m_parent + m2 * m2 - (m1 + m3) * (m1 + m3)) / (2.0 * m_parent)
+    let p2_star = e2_star * e2_star - m2 * m2
+    let p2 = if p2_star > 0.0 { sqrt_f64(p2_star) } else { 0.0 }
+    let e1 = (m_parent * m_parent + m1 * m1 - (m2 + m3) * (m2 + m3)) / (2.0 * m_parent)
+    let m12_min = (m1 + m2) * (m1 + m2)
+    let m12_max = (e1 + e2_star) * (e1 + e2_star) - p2 * p2
+    (m12_min, m12_max)
+}
+
+/// Full Dalitz plot boundary check: whether (m12², m23²) is kinematically allowed.
+pub fn dalitz_point_allowed(m_parent: f64, m1: f64, m2: f64, m3: f64, m12_sq: f64, m23_sq: f64) -> bool with Mut, Panic, Div {
+    let (m12_min, m12_max) = dalitz_m12_bounds(m_parent, m1, m2, m3)
+    let (m23_min, m23_max) = dalitz_m12_bounds(m_parent, m2, m3, m1)
+    if m12_sq < m12_min || m12_sq > m12_max { return false }
+    if m23_sq < m23_min || m23_sq > m23_max { return false }
+    // Additional constraint from energy-momentum conservation
+    let e2 = (m12_sq - m1 * m1 + m2 * m2) / (2.0 * sqrt_f64(m12_sq))
+    let e3 = (m_parent * m_parent - m12_sq - m3 * m3) / (2.0 * sqrt_f64(m12_sq))
+    let m23_check = (e2 + e3) * (e2 + e3) - (e2 * e2 - m2 * m2)
+    let tol = 1e-6
+    abs_f64(m23_check - m23_sq) < tol + tol * abs_f64(m23_sq)
+}
+
+// ============================================================================
+// LOCAL HELPERS
+// ============================================================================
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x
+    if x > 1.0 { guess = x * 0.5 }
+    var i: i64 = 0
+    while i < 60 {
+        guess = 0.5 * (guess + x / guess)
+        i = i + 1
+    }
+    guess
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    let ln2 = 0.6931471805599453
+    (e as f64) * ln2 + 2.0 * sum
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
