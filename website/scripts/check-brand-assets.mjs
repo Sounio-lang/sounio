@@ -32,12 +32,11 @@ const sourceChecks = [
     ],
   },
   {
-    file: 'src/pages/science/index.astro',
-    mustContain: ['/assets/original-artworks/yiayia_hero'],
-  },
-  {
-    file: 'src/pages/about/index.astro',
-    mustContain: ['/assets/original-artworks/pappou_hero'],
+    file: 'src/components/common/PageHero.astro',
+    mustContain: [
+      'assets/original-artworks/pappou_hero',
+      'assets/original-artworks/yiayia_hero',
+    ],
   },
   // src/pages/about/vision.astro previously rendered the emblem inline; in
   // a8aecce5 it was refactored to a single <VisionScroll /> mount so the
