@@ -33,7 +33,7 @@
 module particle_physics::nonunitary
 
 use epistemic::knowledge::{Epistemic}
-use particle_physics::sm_params::{mass_z, mass_w, mass_h, coupling_g, sin2_theta_w}
+use particle_physics::sm_params::{mass_z, mass_w, mass_h, mass_top, coupling_g, sin2_theta_w, alpha_s_mz}
 use particle_physics::vertex::{nc_coupling_electron, nc_coupling_muon}
 
 let NU_PI: f64 = 3.14159265358979323846
@@ -221,6 +221,26 @@ pub fn nu_higgs_propagator(s: f64, gamma_h: f64) -> NonUnitary with Mut, Div, Pa
     NonUnitary { amp_sq: amp, denom_re: denom_re, denom_im: denom_im, particle: NU_HIGGS() }
 }
 
+// Top quark Breit-Wigner propagator factor.
+// m_t = 172.69 ± 0.30 GeV (PDG 2024).
+// Γ_t ≈ 1.42 GeV (PDG 2024).
+pub fn nu_top_propagator(s: f64, gamma_top: f64) -> NonUnitary with Mut, Div, Panic {
+    let mt = mass_top()
+    let mt_val = mt.val()
+    let denom_re = s - mt_val * mt_val
+    let denom_im = mt_val * gamma_top
+    let denom = denom_re * denom_re + denom_im * denom_im
+    if denom == 0.0 {
+        return NonUnitary { amp_sq: Epistemic::certain(0.0), denom_re: 0.0, denom_im: denom_im, particle: NU_TOP() }
+    }
+    let prop_val = 1.0 / denom
+    let dd_dmt = 2.0 * mt_val * (0.0 - 2.0 * denom_re + gamma_top * gamma_top)
+    let dp_dmt = 0.0 - dd_dmt / (denom * denom)
+    let prop_var = dp_dmt * dp_dmt * mt.variance()
+    let amp = Epistemic::new(prop_val, prop_var, 950)
+    NonUnitary { amp_sq: amp, denom_re: denom_re, denom_im: denom_im, particle: NU_TOP() }
+}
+
 // ============================================================================
 // Effect-typed Z amplitude (the flagship chain)
 // ============================================================================
@@ -280,6 +300,66 @@ pub fn eemm_z_peak_xsec_nu(gamma_ee: f64, gamma_mumu: f64, gamma_z: f64) -> Epis
     let sigma_var = d_sigma_d_mz * d_sigma_d_mz * mz.variance()
     let _flag = nu_approx_sentinel()
     Epistemic::new(sigma_val, sigma_var, 950)
+}
+
+// ============================================================================
+// Effect-typed tt̄ pair amplitude (gg → tt̄)
+// ============================================================================
+//
+// Top-pair production amplitude via gluon fusion at leading order.
+// Uses the top Breit-Wigner propagator and LO threshold expansion.
+//
+// Formula (simplified LO):
+//   |M|² ≈ C × α_s² × (s − 4m_t²) / s²
+// where C = 16π²/3 (color + spin average for gg→qq̄).
+//
+// GUM variance sources:
+//   - α_s(M_Z) ± 0.0009 (dominant, 2σ_αs/αs relative)
+//   - m_t ± 0.30 GeV (via ∂num/∂m_t = −8m_t × num / (s − 4m_t²))
+//
+// Combines with top propagator via .mul(&num_ep) to get final NonUnitary.
+// Below threshold (s ≤ 4m_t²), returns zero amplitude.
+pub fn tt_pair_amplitude_nu(s: f64, gamma_top: f64) -> NonUnitary with Mut, Div, Panic {
+    let mt = mass_top()
+    let mt_val = mt.val()
+    let mt2 = mt_val * mt_val
+    let four_mt2 = 4.0 * mt2
+
+    // Below-threshold cutoff
+    if s <= four_mt2 {
+        return NonUnitary {
+            amp_sq: Epistemic::certain(0.0),
+            denom_re: s - mt2,
+            denom_im: mt_val * gamma_top,
+            particle: NU_TOP(),
+        }
+    }
+
+    // Numerator: C × α_s² × (s − 4m_t²) / s²
+    // C = 16π²/3
+    let as_ep = alpha_s_mz()
+    let as_val = as_ep.val()
+    let num_val = (16.0 / 3.0) * NU_PI * NU_PI * as_val * as_val * (s - four_mt2) / (s * s)
+
+    // GUM variance on numerator:
+    //   ∂num/∂α_s = 2 × num / α_s
+    //   ∂num/∂m_t = −8m_t × num / (s − 4m_t²)
+    let d_num_d_as = 2.0 * num_val / as_val
+    let d_num_d_mt = 0.0 - 8.0 * mt_val * num_val / (s - four_mt2)
+    let num_var = d_num_d_as * d_num_d_as * as_ep.variance() + d_num_d_mt * d_num_d_mt * mt.variance()
+    let num_ep = Epistemic::new(num_val, num_var, 900)
+
+    // Top propagator: NonUnitary with m_t GUM
+    let prop = nu_top_propagator(s, gamma_top)
+
+    // Combine: GUM mul (num × prop, both uncertain)
+    let combined = prop.amp_sq.mul(&num_ep)
+    NonUnitary {
+        amp_sq: combined,
+        denom_re: prop.denom_re,
+        denom_im: prop.denom_im,
+        particle: NU_TOP(),
+    }
 }
 
 // ============================================================================
@@ -428,6 +508,44 @@ pub fn run_nonunitary_tests() with NonUnitary, Mut, Div, Panic {
 
     // T20: nu_sqrt internal — √(4) = 2
     nu_chk(nu_near(nu_sqrt(4.0), 2.0, 1.0e-12), 20)
+
+    // Top quark tests (T21–T28)
+    let mt = mass_top().val()
+    let gamma_top = 1.42
+
+    // T21: top propagator at pole — deficit ≈ 1.0
+    let prop_t_pole = nu_top_propagator(mt * mt, gamma_top)
+    let def_t_pole = nu_deficit(prop_t_pole)
+    nu_chk(nu_near(def_t_pole, 1.0, 0.01), 21)
+
+    // T22: top propagator far from pole — small deficit (< 0.01)
+    let prop_t_far = nu_top_propagator(1.0, gamma_top)
+    let def_t_far = nu_deficit(prop_t_far)
+    nu_chk(def_t_far < 0.01, 22)
+
+    // T23: top propagator at pole has positive GUM variance
+    nu_chk(prop_t_pole.amp_sq.variance() > 0.0, 23)
+
+    // T24: top propagator confidence = 950
+    nu_chk(prop_t_pole.amp_sq.confidence() == 950, 24)
+
+    // T25: tt̄ amplitude below threshold → amp_sq.val() == 0.0
+    let tt_below = tt_pair_amplitude_nu(1.0, gamma_top)
+    nu_chk(tt_below.amp_sq.val() == 0.0, 25)
+
+    // T26: tt̄ amplitude above threshold (s = 250000 GeV²) → amp_sq.val() > 0.0
+    let s_above = 250000.0
+    let tt_above = tt_pair_amplitude_nu(s_above, gamma_top)
+    nu_chk(tt_above.amp_sq.val() > 0.0, 26)
+
+    // T27: tt̄ amplitude above threshold → positive GUM variance
+    nu_chk(tt_above.amp_sq.variance() > 0.0, 27)
+
+    // T28: tt̄ amplitude at pole (s = m_t²) approaches threshold, deficit ≈ 1.0
+    // Actually at threshold s = (2m_t)² = 4m_t², test slightly above
+    let s_near_thresh = 4.0 * mt * mt + 10.0
+    let tt_thresh = tt_pair_amplitude_nu(s_near_thresh, gamma_top)
+    nu_chk(tt_thresh.amp_sq.val() > 0.0, 28)
 
     let total = NU_PASS[0] + NU_PASS[1]
     print("NonUnitary: ")
