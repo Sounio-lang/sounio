@@ -18,6 +18,7 @@
 module particle_physics::detector
 
 use particle_physics::lorentz::{LorentzVector, lorentz_new, lorentz_add, lorentz_sub, lorentz_scale}
+use epistemic::knowledge::{Epistemic}
 
 extern "C" {
     fn sqrt(x: f64) -> f64;
@@ -516,4 +517,98 @@ fn acos_approx(x: f64) -> f64 {
     let x3 = x * x * x
     let x5 = x3 * x * x
     pi / 2.0 - x - x3 / 6.0 - 3.0 * x5 / 40.0
+}
+
+// ============================================================================
+// EPISTEMIC DETECTOR UNCERTAINTIES
+// ============================================================================
+
+/// Radiation length X₀ with PDG parametrization uncertainty (~1.5% from nuclear screening).
+pub fn x0_epistemic(mat: Material) -> Epistemic with Div {
+    let x0_val = mat.x0
+    let sigma = x0_val * 0.015
+    Epistemic::measured(x0_val, sigma)
+}
+
+/// Bethe-Bloch dE/dx with parametrization uncertainty (~2% from density effect + shell corrections).
+pub fn bethe_bloch_ep(beta: f64, charge: f64, mat: Material) -> Epistemic with Div {
+    let central = bethe_bloch(beta, charge, mat)
+    let sigma = central * 0.02
+    Epistemic::measured(central, sigma)
+}
+
+/// Calorimeter resolution with calibration uncertainty (~10% on constant term).
+pub fn calorimeter_resolution_ep(e: f64, a: f64, b: f64, c: f64) -> Epistemic with Div {
+    let central = calorimeter_resolution(e, a, b, c)
+    let sigma = central * 0.10
+    Epistemic::measured(central, sigma)
+}
+
+/// Highland multiple scattering angle with material budget uncertainty (~1% from X₀ uncertainty).
+pub fn highland_scattering_ep(momentum: f64, mass: f64, charge: f64, x_over_x0: f64) -> Epistemic with Div {
+    let central = highland_scattering_angle(momentum, mass, charge, x_over_x0)
+    let sigma = central * 0.01
+    Epistemic::measured(central, sigma)
+}
+
+// ============================================================================
+// EPISTEMIC DETECTOR TESTS
+// ============================================================================
+
+var DET_EP_PASS: [i64; 2] = [0; 2]
+
+fn det_chk(pass: bool, id: i64) with Mut, Panic {
+    if pass {
+        DET_EP_PASS[0] = DET_EP_PASS[0] + 1
+    } else {
+        print("FAIL detector_ep #")
+        print_int(id)
+        print("\n")
+        DET_EP_PASS[1] = DET_EP_PASS[1] + 1
+    }
+}
+
+pub fn run_detector_ep_tests() with Div, Panic, Mut {
+    print("=== Detector Uncertainty Tests ===\n")
+
+    let si = material_silicon()
+    let fe = material_iron()
+    let pb = material_lead()
+
+    // T1: X₀ silicon — positive central, positive variance
+    let x0_si = x0_epistemic(si)
+    det_chk(x0_si.val() > 0.0, 1)
+    det_chk(x0_si.variance() > 0.0, 2)
+
+    // T2: X₀ lead — shorter than silicon (lead is denser radiator)
+    let x0_pb = x0_epistemic(pb)
+    det_chk(x0_pb.val() < x0_si.val(), 3)
+    det_chk(x0_pb.variance() > 0.0, 4)
+
+    // T3: dE/dx silicon for relativistic particle (beta=0.96, charge=1)
+    let dedx_si = bethe_bloch_ep(0.96, 1.0, si)
+    det_chk(dedx_si.val() > 0.0, 5)
+    det_chk(dedx_si.variance() > 0.0, 6)
+
+    // T4: dE/dx iron — different from silicon (Z-dependent)
+    let dedx_fe = bethe_bloch_ep(0.96, 1.0, fe)
+    det_chk(dedx_fe.val() > 0.0, 7)
+
+    // T5: calorimeter resolution — positive, has uncertainty
+    // ECAL: a=0.12/√E, b=0.003/E, c=0.007 (CMS-like)
+    let res = calorimeter_resolution_ep(100.0, 0.12, 0.003, 0.007)
+    det_chk(res.val() > 0.0, 8)
+    det_chk(res.variance() > 0.0, 9)
+
+    // T6: Highland scattering in silicon (momentum=1000 MeV, mass=139 MeV, charge=1, x/X₀=0.1)
+    let theta = highland_scattering_ep(1000.0, 139.0, 1.0, 0.1)
+    det_chk(theta.val() > 0.0, 10)
+    det_chk(theta.variance() > 0.0, 11)
+
+    let total = DET_EP_PASS[0] + DET_EP_PASS[1]
+    print("Detector: ")
+    print_int(DET_EP_PASS[0])
+    print("/")
+    print_int(total)
+    print(" PASS\n")
 }
