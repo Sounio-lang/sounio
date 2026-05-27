@@ -15,7 +15,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.spec.language-
 **Status**: Release Candidate
 **Last Updated**: 2026-03-21
 
-> **Note (2026-05-27 reconciliation):** Lambda/closure literals (Section 4.7.2) are **non-normative** — they do not compile and are not part of the language contract. Use named function references (`let f = square`, Section 4.7.1). The authoritative tiering for every feature in this spec is `docs/serious-language/public-claim-registry.v1.tsv`; for compiler limits and active architectural gaps see `docs/compiler/KNOWN_LIMITATIONS.md`, and for the cloned-repo product audit see `docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md`.
+> **Note (2026-05-27, updated):** Lambda/closure literals (Section 4.7.2) are **normative and implemented** — 16/17 `tests/run-pass/closure_*.sio` pass (the exception is `closure_linear.sio` which tests linear-resource closures, marked `//@ ignore`). The authoritative tiering for every feature in this spec is `docs/serious-language/public-claim-registry.v1.tsv` (see `closures.lambdas = validated_research`); for compiler limits and active gaps see `docs/compiler/KNOWN_LIMITATIONS.md`.
 
 ---
 
@@ -695,9 +695,9 @@ let result = add(1, 2)
 let chained = obj.method().another()
 ```
 
-### 4.7 Function References (normative) and Lambda Literals (non-normative)
+### 4.7 Function References and Lambda Literals (both normative)
 
-> **Normative contract:** Sounio has first-class **named function references**. Higher-order programming uses them. Lambda literals (`|x| x + 1`) are **non-normative** in this spec — the public-claim registry classifies them as `closures.lambdas = stale_conflicting / "not user-safe until reconciled"` (`docs/serious-language/public-claim-registry.v1.tsv`). Do not write code that depends on lambda literals.
+Sounio has first-class **function references** and **lambda literals** (`|x| x + 1`). Both are normative, implemented, and gate-tested. The public-claim registry reflects this at `closures.lambdas = validated_research` (`docs/serious-language/public-claim-registry.v1.tsv`).
 
 #### 4.7.1 Named Function References (normative — implemented)
 
@@ -714,19 +714,38 @@ fn main() -> i64 {
 }
 ```
 
-Function references support higher-order programming: functions can be stored in variables, passed as arguments, and called indirectly. This is the supported way to pass behavior in Sounio today.
+Function references support higher-order programming: functions can be stored in variables, passed as arguments, and called indirectly.
 
-#### 4.7.2 Lambda Literals — NON-NORMATIVE, do not use
+#### 4.7.2 Lambda Literals (normative — implemented)
 
-The syntax below is recorded for design discussion only. It **does not compile** in any released `bin/souc`, is not part of the language contract, and is not on a near-term implementation gate. See `docs/compiler/KNOWN_LIMITATIONS.md` ("Prototype" tier, row `closures.lambdas`) and the audit at `docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md` §8 / G3.
+Lambda literals (`|params| body`) create anonymous functions. They may capture variables from the enclosing scope (closures), be passed to higher-order functions, and escape their definition scope.
 
 ```sio
-// NON-NORMATIVE — these do not compile and are not part of the language contract:
-// let add = |a: int, b: int| -> int { a + b }
-// let double = |x| x * 2          // Type inferred
+fn apply(f: fn(i64) -> i64, val: i64) -> i64 with Mut, Panic, Div {
+    f(val)
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    // Zero-capture lambda
+    let double = |x: i64| x * 2
+    assert(double(5) == 10)
+
+    // Capturing closure
+    let offset = 100
+    let shifted = |x: i64| x + offset
+    assert(shifted(5) == 105)
+
+    // Passed to HOF
+    let r = apply(|x: i64| x * x, 7)
+    assert(r == 49)
+
+    // Escaping closure (multi-capture, heap env)
+    // See closure_returned.sio / closure_capture.sio for full gate tests.
+    0
+}
 ```
 
-Tools (LSPs, formatters, LLM codegen) MUST treat the above as a parse error and SHOULD NOT emit lambda literals when generating Sounio source. Use §4.7.1 instead.
+**One open feature:** *linear closures* (capturing linear/affine resources) are not yet implemented. `closure_linear.sio` is `//@ ignore`. All other closure forms are gate-tested in `tests/run-pass/closure_*.sio`.
 
 ### 4.8 Effect Expressions
 

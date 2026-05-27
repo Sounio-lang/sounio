@@ -61,7 +61,7 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 | **REPL** | `tooling.editor = prototype` | `tools/repl.sh` is a thin Bash wrapper; not exposed as a `souc` subcommand. |
 | **Package manager / registry** | `tooling.package = prototype` | Local `~/.sounio/registry/` only. No public registry. |
 | **Generic structs/functions/traits** | `generics.* = prototype` | 1–2 type params work; do not claim a mature trait ecosystem. Trait bounds are parsed but not enforced at call sites. No trait objects. |
-| **Closures / lambda literals** | `closures.lambdas = stale_conflicting` | **Not user-safe.** Spec §4.7 promises lambda literals; the compiler refuses them. See `[[lambda-spec-reconciliation]]` below. Function references are first-class and work — that is the supported idiom today. |
+| **Linear closures** | `closures.lambdas = validated_research` | Regular closures (capture, HOF, escape) are **implemented and gate-tested** (16/17 `tests/run-pass/closure_*.sio`). **Linear closures** (capturing linear resources, `closure_linear.sio`) are the one open feature — marked `//@ ignore`, tracked separately. |
 | **Units of measure** | `units.measure = prototype` | Fixture-backed prototype surface. |
 | **Refinement types (general)** | `refinement.types = prototype` | Beta/prototype; runtime fallback dominates non-trivial predicates. |
 | **Hypercomplex NN (broad)** | `hypercomplex.nn = prototype` | Research/prototype unless a named gate covers the exact behavior. |
@@ -93,9 +93,9 @@ This file previously claimed several rows as "Production" that the public-claim 
 - **Added:** "Active Known Bugs / Architectural Gaps" section enumerating the three bundle-compile roots.
 - **Fixed:** CLI exit-code contract — `souc check` now propagates typecheck failures (G2). Probed before/after in the audit. The wrapper `bin/souc` had `exit 0` in each dispatch arm; replaced with explicit `exit "$_rc"`.
 
-### lambda-spec-reconciliation
+### lambda-spec-reconciliation (RESOLVED 2026-05-27)
 
-`docs/spec/LANGUAGE_SPECIFICATION.md` §4.7 ("Lambda Expressions") promises `|x| x+1` syntax. The compiler refuses it. The public-claim registry marks `closures.lambdas = stale_conflicting / "not user-safe until reconciled."` Until the compiler ships lambdas, the spec section has been annotated as **non-normative / aspirational** with a pointer to the registry row. (See spec §4.7 itself.)
+`closures.lambdas` was previously marked `stale_conflicting`. Probe on 2026-05-27 confirmed that lambda literals (capture, HOF, escape, arity-2) compile and run correctly — 16/17 `tests/run-pass/closure_*.sio` pass. The registry is updated to `validated_research/closed`. Spec §4.7 is now fully normative. The one open item is linear closures (`closure_linear.sio`, `//@ ignore`).
 
 ### Fixed in Self-Hosted Compiler — All Bugs Closed
 

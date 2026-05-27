@@ -250,3 +250,11 @@ lean_lib «SounioErdos90UnitSpectrum» where
 -- (reaches 44 at 15 verts, 168 at 31), 3696 verified pathion ZD pairs.
 @[default_target]
 lean_lib «SounioErdos90PathionGrowth» where
+
+-- Slice D of the SOTA push: Lean soundness sketch of the
+-- epistemic-effect calculus. Backs the registered SOTA claim that
+-- epistemic gradual compilation is the language-level contribution
+-- (see project_pl_contribution_sota; docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md §3).
+-- Open obligation: effect_preservation/subst_preserves_typing (see SounioSubstitution.lean).
+@[default_target]
+lean_lib «EpistemicEffects» where
