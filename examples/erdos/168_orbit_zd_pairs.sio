@@ -1,0 +1,215 @@
+// examples/erdos/168_orbit_zd_pairs.sio
+//
+// ZD pair orbit chromatic spectrum: all 7 zero-divisor pairs.
+//
+// ZD pairs: (a, a XOR 8) for a in {1..7}:
+//   (1,9), (2,10), (3,11), (4,12), (5,13), (6,14), (7,15)
+// For each pair (a,b): x = e_a + e_b is a sedenion zero-divisor (x*x=0).
+// Orbit: {x*prim_i : i=0..13} in R^16.
+// Distance spectrum at d^2=4 and d^2=8.
+// 2-coloring UNSAT -> chi>=3.  3-coloring SAT -> chi=3 exactly.
+//
+// HYPOTHESIS: All 7 ZD pairs give orbit graphs with chi>=3 at d^2=4.
+// This would extend the first chi>=3 result to a parametric FAMILY of graphs
+// on ZD(S) = V2(R^7), establishing a systematic chromatic gap.
+
+use hypercomplex_graph::erdos_unit_distance::*
+use theorem::smt::*
+
+fn pri(x: i32) with IO, Div, Panic {
+    if x < 0 { print("-"); pri(0 - x); return }
+    if x == 0 { print("0"); return }
+    if x >= 10 { pri(x / 10) }
+    let d = x - (x / 10) * 10
+    if d == 0 { print("0") } if d == 1 { print("1") } if d == 2 { print("2") }
+    if d == 3 { print("3") } if d == 4 { print("4") } if d == 5 { print("5") }
+    if d == 6 { print("6") } if d == 7 { print("7") } if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+// Global orbit array for 14 points in R^16
+var V: [f64; 224] = [0.0; 224]
+
+fn vdist(i: i64, j: i64) -> f64 {
+    var s: f64 = 0.0; var k: i64 = 0
+    while k < 16 {
+        let d = V[(i*16+k) as usize] - V[(j*16+k) as usize]
+        s = s + d*d; k = k + 1
+    }
+    return s
+}
+
+// Build orbit for x = e_a + e_b (where a XOR b = 8, so x is a ZD element)
+fn build_orbit_pair(xa: i64, xb: i64) with Mut {
+    var vi: i64 = 0
+    while vi < 224 { V[vi as usize] = 0.0; vi = vi + 1 }
+    var oidx: i64 = 0
+    while oidx < 14 {
+        let lo = get_prim_lo(oidx); let hi = get_prim_hi(oidx)
+        let neg = get_prim_neg(oidx)
+        let s_hi: f64 = if neg == 1 { 0.0 - 1.0 } else { 1.0 }
+        // x = e_xa + e_xb
+        // (x * e_lo)_k = x[k^lo] * cd_sigma(k^lo, lo)
+        // Nonzero at k = xa^lo, xb^lo (from low sedenion part)
+        // (x * e_hi)_k = ... Nonzero at k = xa^hi, xb^hi (from high part, with sign s_hi)
+        let kalo = xa ^ lo; let kblo = xb ^ lo
+        let kahi = xa ^ hi; let kbhi = xb ^ hi
+        let sigalo = cd_sigma_pub(kalo, lo) as f64
+        let sigblo = cd_sigma_pub(kblo, lo) as f64
+        let sigahi = s_hi * (cd_sigma_pub(kahi, hi) as f64)
+        let sigbhi = s_hi * (cd_sigma_pub(kbhi, hi) as f64)
+        let base: i64 = oidx * 16
+        V[(base + kalo) as usize] = V[(base + kalo) as usize] + sigalo
+        V[(base + kblo) as usize] = V[(base + kblo) as usize] + sigblo
+        V[(base + kahi) as usize] = V[(base + kahi) as usize] + sigahi
+        V[(base + kbhi) as usize] = V[(base + kbhi) as usize] + sigbhi
+        oidx = oidx + 1
+    }
+}
+
+fn clause2(ctx: &!SmtContext, a: i32, b: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]; lits[0] = a; lits[1] = b
+    smt_add_clause(ctx, &lits, 2)
+}
+
+fn clause3(ctx: &!SmtContext, a: i32, b: i32, c: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]; lits[0] = a; lits[1] = b; lits[2] = c
+    smt_add_clause(ctx, &lits, 3)
+}
+
+fn add_2col(ctx: &!SmtContext, n: i32) with Mut, Div {
+    var u: i64 = 0
+    while u < (n as i64) {
+        var w: i64 = u + 1
+        while w < (n as i64) {
+            if get_adj14_edge(u, w) == 1 {
+                let ul = (u as i32) * 2; let wl = (w as i32) * 2
+                clause2(ctx, ul+1, wl+1); clause2(ctx, ul, wl)
+            }
+            w = w + 1
+        }
+        u = u + 1
+    }
+}
+
+fn add_3col(ctx: &!SmtContext, n: i32) with Mut, Div {
+    var v: i64 = 0
+    while v < (n as i64) {
+        let p0 = ((v*3)*2 + 1) as i32; let p1 = ((v*3+1)*2 + 1) as i32; let p2 = ((v*3+2)*2 + 1) as i32
+        clause3(ctx, p0, p1, p2)
+        let n0 = ((v*3)*2) as i32; let n1 = ((v*3+1)*2) as i32; let n2 = ((v*3+2)*2) as i32
+        clause2(ctx, n0, n1); clause2(ctx, n0, n2); clause2(ctx, n1, n2)
+        v = v + 1
+    }
+    var u: i64 = 0
+    while u < (n as i64) {
+        var w: i64 = u + 1
+        while w < (n as i64) {
+            if get_adj14_edge(u, w) == 1 {
+                var c: i64 = 0
+                while c < 3 {
+                    clause2(ctx, ((u*3+c)*2) as i32, ((w*3+c)*2) as i32)
+                    c = c + 1
+                }
+            }
+            w = w + 1
+        }
+        u = u + 1
+    }
+}
+
+// Check a ZD pair and return chi estimate (2 or 3)
+fn check_pair(xa: i64, xb: i64) with IO, Mut, Div, Panic {
+    build_orbit_pair(xa, xb)
+
+    // Distance spectrum at d^2=4 and d^2=8
+    var cnt4: i64 = 0; var cnt8: i64 = 0; var cntother: i64 = 0
+    var i: i64 = 0
+    while i < 14 {
+        var j: i64 = i + 1
+        while j < 14 {
+            let dsq = vdist(i, j) as i64
+            if dsq == 4 { cnt4 = cnt4 + 1 }
+            else if dsq == 8 { cnt8 = cnt8 + 1 }
+            else { cntother = cntother + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Build adj at d^2=4 and run colorings
+    clear_adj14()
+    i = 0
+    while i < 14 {
+        var j: i64 = i + 1
+        while j < 14 {
+            if vdist(i, j) as i64 == 4 { set_adj14_edge(i, j, 1) }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let nedges = count_edges_n(14) as i32
+
+    var ctx2 = smt_new()
+    add_2col(&! ctx2, 14)
+    smt_set_score_mode(&! ctx2, 3); smt_set_no_ple(&! ctx2, 1)
+    let r2 = smt_solve(&! ctx2)
+
+    var ctx3 = smt_new()
+    add_3col(&! ctx3, 14)
+    smt_set_score_mode(&! ctx3, 3); smt_set_no_ple(&! ctx3, 1)
+    let r3 = smt_solve(&! ctx3)
+
+    // Triangle search
+    var tri: i32 = 0
+    var ta: i64 = 0
+    while ta < 14 && tri == 0 {
+        var tb: i64 = ta + 1
+        while tb < 14 && tri == 0 {
+            if get_adj14_edge(ta, tb) == 1 {
+                var tc: i64 = tb + 1
+                while tc < 14 && tri == 0 {
+                    if get_adj14_edge(ta, tc) == 1 && get_adj14_edge(tb, tc) == 1 { tri = 1 }
+                    tc = tc + 1
+                }
+            }
+            tb = tb + 1
+        }
+        ta = ta + 1
+    }
+
+    print("(e"); pri(xa as i32); print("+e"); pri(xb as i32); print(")")
+    print("  d4="); pri(cnt4 as i32); print(" d8="); pri(cnt8 as i32); print(" other="); pri(cntother as i32)
+    print("  edges@d4="); pri(nedges)
+    print("  tri="); pri(tri)
+    print("  2col=")
+    if r2 == 1 { print("SAT") } else { print("UNSAT") }
+    print("  3col=")
+    if r3 == 1 { print("SAT -> chi=3") } else { print("UNSAT -> chi>=4") }
+    print("\n")
+}
+
+fn main() with IO, Mut, Div, Panic {
+    build_prims()
+
+    print("=== ZD pair orbit chromatic spectrum ===\n")
+    print("All 7 ZD pairs: x = e_a + e_{a^8}, orbit {x*prim_i : i=0..13} in R^16.\n")
+    print("Testing 2-coloring and 3-coloring of Euclidean graph at d^2=4.\n\n")
+    print("Pair                d4  d8  other  edges  tri  2col     3col\n")
+
+    // All 7 ZD pairs: a XOR 8 in {1..7} -> b in {9..15}
+    check_pair(1, 9)
+    check_pair(2, 10)
+    check_pair(3, 11)
+    check_pair(4, 12)
+    check_pair(5, 13)
+    check_pair(6, 14)
+    check_pair(7, 15)
+
+    print("\n=== Interpretation ===\n")
+    print("If all 7 pairs give UNSAT 2-col and SAT 3-col:\n")
+    print("  chi=3 is universal across the full ZD pair family.\n")
+    print("  Every ZD element x in {e_a+e_{a^8}} generates a chi=3 orbit graph on V2(R^7).\n")
+    print("This is a parametric family of 3-chromatic unit-distance graphs\n")
+    print("canonically embedded in the sedenion ZD manifold ZD(S) = V2(R^7).\n")
+}

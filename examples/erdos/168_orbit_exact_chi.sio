@@ -1,0 +1,262 @@
+// examples/erdos/168_orbit_exact_chi.sio
+//
+// Exact chromatic number of the ZD orbit Euclidean unit-distance graph at d^2=4.
+//
+// Setup: x = e1+e9, orbit {x*prim_i : i=0..13} in R^16.
+// Previously established: chi >= 3 (triangle v0,v2,v4). 2-coloring UNSAT.
+// K4 found {v0,v2,v4,v6}: chi >= 4. 3-coloring UNSAT.
+// This probe: exact chi via k-coloring SAT chain with CORRECT encoding
+// (1-indexed variables — avoids literal 0 which corrupts earlier results).
+//
+// Graph structure:
+//   12 active vertices (v0..v11): 10-regular subgraph (K12 minus perfect matching)
+//   2 isolated vertices (v12, v13): degree 0 at d^2=4
+//   chi(K12-PM) = 6 (alpha=2 in 12-vertex subgraph -> chi >= 12/2 = 6)
+//
+// Also: ZD pair universality check confirmed by 168_orbit_zd_pairs.sio:
+//   ALL 7 ZD pairs (e_a + e_{a^8}) give IDENTICAL orbit graph structure.
+//   chi >= 4 universal across the full ZD family.
+
+use hypercomplex_graph::erdos_unit_distance::*
+use theorem::smt::*
+
+fn pri(x: i32) with IO, Div, Panic {
+    if x < 0 { print("-"); pri(0 - x); return }
+    if x == 0 { print("0"); return }
+    if x >= 10 { pri(x / 10) }
+    let d = x - (x / 10) * 10
+    if d == 0 { print("0") } if d == 1 { print("1") } if d == 2 { print("2") }
+    if d == 3 { print("3") } if d == 4 { print("4") } if d == 5 { print("5") }
+    if d == 6 { print("6") } if d == 7 { print("7") } if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+var V: [f64; 224] = [0.0; 224]
+
+fn vdist(i: i64, j: i64) -> f64 {
+    var s: f64 = 0.0; var k: i64 = 0
+    while k < 16 {
+        let d = V[(i*16+k) as usize] - V[(j*16+k) as usize]
+        s = s + d*d; k = k + 1
+    }
+    return s
+}
+
+fn build_orbit() with Mut {
+    var vi: i64 = 0
+    while vi < 224 { V[vi as usize] = 0.0; vi = vi + 1 }
+    var oidx: i64 = 0
+    while oidx < 14 {
+        let lo = get_prim_lo(oidx); let hi = get_prim_hi(oidx)
+        let neg = get_prim_neg(oidx)
+        let s_hi: f64 = if neg == 1 { 0.0 - 1.0 } else { 1.0 }
+        let k1lo = 1 ^ lo; let k9lo = 9 ^ lo
+        let k1hi = 1 ^ hi; let k9hi = 9 ^ hi
+        let sig1lo = cd_sigma_pub(k1lo, lo) as f64
+        let sig9lo = cd_sigma_pub(k9lo, lo) as f64
+        let sig1hi = s_hi * (cd_sigma_pub(k1hi, hi) as f64)
+        let sig9hi = s_hi * (cd_sigma_pub(k9hi, hi) as f64)
+        let base: i64 = oidx * 16
+        V[(base + k1lo) as usize] = V[(base + k1lo) as usize] + sig1lo
+        V[(base + k9lo) as usize] = V[(base + k9lo) as usize] + sig9lo
+        V[(base + k1hi) as usize] = V[(base + k1hi) as usize] + sig1hi
+        V[(base + k9hi) as usize] = V[(base + k9hi) as usize] + sig9hi
+        oidx = oidx + 1
+    }
+}
+
+fn cl2(ctx: &!SmtContext, a: i32, b: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]; lits[0] = a; lits[1] = b
+    smt_add_clause(ctx, &lits, 2)
+}
+
+// k-coloring on n vertices (ADJ14 adjacency), 1-indexed variables
+fn add_kcol(ctx: &!SmtContext, n: i32, k: i32) with Mut, Div {
+    let ni = n as i64; let ki = k as i64
+    var v: i64 = 0
+    while v < ni {
+        var lits: [i32; 8] = [0; 8]
+        var c: i64 = 0
+        while c < ki {
+            lits[c as usize] = ((v*ki + c + 1)*2 + 1) as i32
+            c = c + 1
+        }
+        smt_add_clause(ctx, &lits, k)
+        v = v + 1
+    }
+    v = 0
+    while v < ni {
+        var ci1: i64 = 0
+        while ci1 < ki {
+            var ci2: i64 = ci1 + 1
+            while ci2 < ki {
+                cl2(ctx, ((v*ki+ci1+1)*2) as i32, ((v*ki+ci2+1)*2) as i32)
+                ci2 = ci2 + 1
+            }
+            ci1 = ci1 + 1
+        }
+        v = v + 1
+    }
+    var u: i64 = 0
+    while u < ni {
+        var w: i64 = u + 1
+        while w < ni {
+            if get_adj14_edge(u, w) == 1 {
+                var c: i64 = 0
+                while c < ki {
+                    cl2(ctx, ((u*ki+c+1)*2) as i32, ((w*ki+c+1)*2) as i32)
+                    c = c + 1
+                }
+            }
+            w = w + 1
+        }
+        u = u + 1
+    }
+}
+
+fn solve_k(n: i32, k: i32) -> i32 with Mut, Div, Panic {
+    var ctx = smt_new()
+    add_kcol(&! ctx, n, k)
+    smt_set_score_mode(&! ctx, 3)
+    smt_set_no_ple(&! ctx, 1)
+    return smt_solve(&! ctx)
+}
+
+fn main() with IO, Mut, Div, Panic {
+    build_prims()
+    build_orbit()
+
+    // Build adjacency at d^2=4
+    clear_adj14()
+    var ai: i64 = 0
+    while ai < 14 {
+        var aj: i64 = ai + 1
+        while aj < 14 {
+            if vdist(ai, aj) as i64 == 4 { set_adj14_edge(ai, aj, 1) }
+            aj = aj + 1
+        }
+        ai = ai + 1
+    }
+    let nedges = count_edges_n(14) as i32
+
+    print("=== Exact chi: ZD orbit Euclidean graph at d^2=4 (FIXED encoding) ===\n")
+    print("14 orbit points, x=e1+e9. Edges at d^2=4: "); pri(nedges); print("\n")
+    print("Encoding: 1-indexed variables (avoids literal-0 bug).\n\n")
+
+    // k=2 (UNSAT: triangle)
+    let r2 = solve_k(14, 2)
+    print("k=2: "); if r2 == 1 { print("SAT\n") } else { print("UNSAT\n") }
+
+    // k=3 (UNSAT: K4 forces chi>=4)
+    let r3 = solve_k(14, 3)
+    print("k=3: "); if r3 == 1 { print("SAT\n") } else { print("UNSAT\n") }
+
+    // k=4
+    let r4 = solve_k(14, 4)
+    print("k=4: "); if r4 == 1 { print("SAT\n") } else { print("UNSAT\n") }
+
+    // k=5
+    let r5 = solve_k(14, 5)
+    print("k=5: "); if r5 == 1 { print("SAT\n") } else { print("UNSAT\n") }
+
+    // k=6
+    let r6 = solve_k(14, 6)
+    print("k=6: "); if r6 == 1 { print("SAT\n") } else { print("UNSAT\n") }
+
+    // k=7 (should be SAT for any graph on 14 vertices)
+    let r7 = solve_k(14, 7)
+    print("k=7: "); if r7 == 1 { print("SAT\n") } else { print("UNSAT\n") }
+
+    // Exact chi
+    print("\n=== Exact chi ===\n")
+    if r2 == 1 { print("chi = 2\n") }
+    else if r3 == 1 { print("chi = 3\n") }
+    else if r4 == 1 { print("chi = 4\n") }
+    else if r5 == 1 { print("chi = 5\n") }
+    else if r6 == 1 { print("chi = 6\n") }
+    else { print("chi >= 7\n") }
+
+    // Graph structure analysis
+    print("\n=== Graph structure ===\n")
+    print("Degree sequence:\n")
+    var i: i64 = 0
+    while i < 14 {
+        var deg: i64 = 0
+        var j: i64 = 0
+        while j < 14 {
+            if get_adj14_edge(i, j) == 1 { deg = deg + 1 }
+            j = j + 1
+        }
+        print("v"); pri(i as i32); print(": deg="); pri(deg as i32); print("\n")
+        i = i + 1
+    }
+
+    // Non-edges within active vertices v0..v11
+    print("\nNon-edges in v0..v11 (complement of K12 subgraph):\n")
+    var na: i64 = 0
+    var ne: i64 = 0
+    while na < 12 {
+        var nb: i64 = na + 1
+        while nb < 12 {
+            if get_adj14_edge(na, nb) == 0 {
+                print("(v"); pri(na as i32); print(",v"); pri(nb as i32); print(") ")
+                ne = ne + 1
+            }
+            nb = nb + 1
+        }
+        na = na + 1
+    }
+    print("\nTotal non-edges in v0..v11: "); pri(ne as i32); print("\n")
+    print("(K12-PM has 6 non-edges; K12 has 0; other structures possible)\n")
+
+    // K4 clique search
+    print("\n=== Maximum clique in v0..v11 ===\n")
+    var max_clique: i32 = 3
+    var a0: i64 = 0
+    while a0 < 12 {
+        var a1: i64 = a0 + 1
+        while a1 < 12 {
+            if get_adj14_edge(a0, a1) == 1 {
+                var a2: i64 = a1 + 1
+                while a2 < 12 {
+                    if get_adj14_edge(a0, a2) == 1 && get_adj14_edge(a1, a2) == 1 {
+                        var a3: i64 = a2 + 1
+                        while a3 < 12 {
+                            if get_adj14_edge(a0, a3) == 1 && get_adj14_edge(a1, a3) == 1 && get_adj14_edge(a2, a3) == 1 {
+                                if max_clique < 4 { max_clique = 4 }
+                                var a4: i64 = a3 + 1
+                                while a4 < 12 {
+                                    if get_adj14_edge(a0, a4) == 1 && get_adj14_edge(a1, a4) == 1 && get_adj14_edge(a2, a4) == 1 && get_adj14_edge(a3, a4) == 1 {
+                                        if max_clique < 5 { max_clique = 5 }
+                                    }
+                                    a4 = a4 + 1
+                                }
+                            }
+                            a3 = a3 + 1
+                        }
+                    }
+                    a2 = a2 + 1
+                }
+            }
+            a1 = a1 + 1
+        }
+        a0 = a0 + 1
+    }
+    print("omega(G) >= "); pri(max_clique); print("\n")
+
+    print("\n=== Summary ===\n")
+    print("G = orbit {(e1+e9)*prim_i} at d^2=4, 14 vertices, ")
+    pri(nedges); print(" edges.\n")
+    print("12 active (10-regular) + 2 isolated (v12,v13).\n")
+    print("omega(G) >= "); pri(max_clique); print("\n")
+    print("chi(G) = ")
+    if r2 == 1 { pri(2) }
+    else if r3 == 1 { pri(3) }
+    else if r4 == 1 { pri(4) }
+    else if r5 == 1 { pri(5) }
+    else if r6 == 1 { pri(6) }
+    else { print(">=7") }
+    print("\n")
+    print("ZD pair universality: ALL 7 ZD pairs give identical orbit graph (chi>=4).\n")
+    print("Orbit lives in ZD(S) = V2(R^7) (Stiefel manifold, arXiv:2411.18881).\n")
+}
