@@ -10,6 +10,7 @@ module particle_physics::three_body
 
 use particle_physics::sm_params::*;
 use particle_physics::kinematics::*;
+use epistemic::knowledge::{Epistemic}
 
 extern "C" {
     fn sqrt(x: f64) -> f64;
@@ -218,4 +219,135 @@ fn ln_f64(x: f64) -> f64 with Mut, Div, Panic {
 
 fn abs_f64(x: f64) -> f64 {
     if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// EPISTEMIC EXTENSIONS — GUM-exact uncertainty propagation from PDG inputs
+// ============================================================================
+
+/// GUM-exact muon decay width from G_F and m_μ uncertainties.
+/// Γ(μ⁻→e⁻ν̄ₑνμ) = G_F² m_μ⁵ / (192π³).
+/// PDG 2024: G_F = 1.1663787(6) × 10⁻⁵ GeV⁻², m_μ = 0.10566 GeV (negligible σ).
+/// σ(Γ)/Γ ≈ 1 ppm from G_F (dominates); m_μ contribution is sub-ppb.
+pub fn muon_decay_width_ep() -> Epistemic with Mut, Div, Panic {
+    let pi3_192 = 192.0 * 3.141592653589793 * 3.141592653589793 * 3.141592653589793
+    let gf_val = 1.1663787e-5
+    let gf_var = 6.0e-12 * 6.0e-12   // σ(G_F) = 6e-12 GeV⁻²
+    let mmu = mass_muon()
+    let mmu_val = mmu.val()
+    let gamma_val = gf_val * gf_val * mmu_val * mmu_val * mmu_val * mmu_val * mmu_val / pi3_192
+    // GUM: ∂Γ/∂G_F = 2Γ/G_F,  ∂Γ/∂m_μ = 5Γ/m_μ
+    let dgf = 2.0 * gamma_val / gf_val
+    let dmu = 5.0 * gamma_val / mmu_val
+    let total_var = dgf * dgf * gf_var + dmu * dmu * mmu.variance()
+    Epistemic::new(gamma_val, total_var, 950)
+}
+
+/// GUM-exact muon lifetime with uncertainty propagated from Γ_μ.
+/// τ_μ = ℏ / Γ_μ.
+pub fn muon_lifetime_ep() -> Epistemic with Mut, Div, Panic {
+    let hbar = 6.582119569e-25   // GeV·s
+    let gamma = muon_decay_width_ep()
+    let gv = gamma.val()
+    if gv <= 0.0 { return Epistemic::certain(0.0) }
+    let tau_val = hbar / gv
+    // ∂τ/∂Γ = -τ/Γ → Var(τ) = (τ/Γ)² Var(Γ)
+    let dtau_dg = 0.0 - tau_val / gv
+    Epistemic::new(tau_val, dtau_dg * dtau_dg * gamma.variance(), 950)
+}
+
+/// GUM-exact t → bW⁺ decay width from m_t (dominant) and M_W uncertainties.
+/// Γ(t→bW) = G_F m_t³ (1-r_W)²(1+2r_W) √λ(1,r_W,r_b) / (8π√2).
+/// PDG 2024: m_t = 172.69 ± 0.30 GeV, M_W = 80.377 ± 0.012 GeV.
+/// GUM result: σ(Γ)/Γ ≈ 0.7% from m_t; M_W contributes < 0.02%.
+pub fn top_decay_width_ep() -> Epistemic with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    let sqrt2 = 1.4142135623730951
+    let gf = 1.1663787e-5
+    let mt = mass_top()
+    let mw = mass_w()
+    let mb = mass_bottom().val()
+    let mt_val = mt.val()
+    let mw_val = mw.val()
+    if mt_val <= mw_val + mb { return Epistemic::certain(0.0) }
+    let rw = (mw_val * mw_val) / (mt_val * mt_val)
+    let rb = (mb * mb) / (mt_val * mt_val)
+    let one_m_rw = 1.0 - rw
+    let f = one_m_rw * one_m_rw * (1.0 + 2.0 * rw)
+    let lam = kallen_lambda(1.0, rw, rb)
+    let g = sqrt_f64(lam)
+    let prefactor = gf / (8.0 * pi * sqrt2)
+    let gamma_val = prefactor * mt_val * mt_val * mt_val * f * g
+    // GUM partial derivatives via chain rule.
+    // df/dr_W = -6 r_W (1-r_W)
+    let df_drw = (0.0 - 6.0) * rw * one_m_rw
+    // kallen(1,x,y) = 1+x²+y²-2x-2y-2xy → dλ/dr_W = 2r_W - 2 - 2r_b
+    let dlam_drw = 2.0 * rw - 2.0 - 2.0 * rb
+    let dg_drw = if g > 0.0 { 0.5 * dlam_drw / g } else { 0.0 }
+    let dfg_drw = df_drw * g + f * dg_drw
+    // dr_W/dm_t = -2r_W/m_t,  dr_W/dM_W = 2r_W/M_W
+    let drw_dmt = (0.0 - 2.0) * rw / mt_val
+    let drw_dmw = 2.0 * rw / mw_val
+    // dΓ/dm_t = pf × m_t² × (3fg + m_t × dfg_drw × drw_dmt)
+    let dgamma_dmt = prefactor * mt_val * mt_val * (3.0 * f * g + mt_val * dfg_drw * drw_dmt)
+    // dΓ/dM_W = pf × m_t³ × dfg_drw × drw_dmw
+    let dgamma_dmw = prefactor * mt_val * mt_val * mt_val * dfg_drw * drw_dmw
+    let total_var = dgamma_dmt * dgamma_dmt * mt.variance() + dgamma_dmw * dgamma_dmw * mw.variance()
+    Epistemic::new(gamma_val, total_var, 900)
+}
+
+/// GUM-exact top quark lifetime τ_t = ℏ / Γ(t→bW).
+pub fn top_lifetime_ep() -> Epistemic with Mut, Div, Panic {
+    let hbar = 6.582119569e-25
+    let gamma = top_decay_width_ep()
+    let gv = gamma.val()
+    if gv <= 0.0 { return Epistemic::certain(0.0) }
+    let tau_val = hbar / gv
+    let dtau_dg = 0.0 - tau_val / gv
+    Epistemic::new(tau_val, dtau_dg * dtau_dg * gamma.variance(), 900)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+var TB_PASS: [i64; 2] = [0, 0]
+
+fn tb_chk(id: i64, ok: bool) with IO {
+    if ok {
+        TB_PASS[0] = TB_PASS[0] + 1
+    } else {
+        TB_PASS[1] = TB_PASS[1] + 1
+        println("FAIL: three_body_ep")
+    }
+}
+
+fn tb_near(a: f64, b: f64, rel: f64) -> bool {
+    let diff = if a > b { a - b } else { b - a }
+    let ref_val = if b > 0.0 { b } else { if a > 0.0 { a } else { 1.0 } }
+    diff < rel * ref_val
+}
+
+pub fn run_three_body_ep_tests() with IO, Mut, Div, Panic {
+    TB_PASS[0] = 0
+    TB_PASS[1] = 0
+    // Muon decay: LO Γ_μ ≈ 3.009e-19 GeV (PDG 2.996e-19, 0.4% off from QED corrections)
+    let gmu = muon_decay_width_ep()
+    tb_chk(1, tb_near(gmu.val(), 3.0e-19, 0.02))
+    tb_chk(2, gmu.variance() > 0.0)
+    tb_chk(3, gmu.confidence() >= 900)
+    // Muon lifetime: τ_LO ≈ 2.19e-6 s (PDG 2.197e-6 s)
+    let tau_mu = muon_lifetime_ep()
+    tb_chk(4, tb_near(tau_mu.val(), 2.197e-6, 0.02))
+    tb_chk(5, tau_mu.variance() > 0.0)
+    // Top decay: Γ_LO ≈ 1.16 GeV (PDG 1.42 GeV adds NLO K-factor)
+    let gt = top_decay_width_ep()
+    tb_chk(6, tb_near(gt.val(), 1.16, 0.05))
+    tb_chk(7, gt.variance() > 0.0)
+    // GUM variance in sane range: σ(Γ_top) ~ 8 MeV → Var ~ 6e-5 GeV²
+    tb_chk(8, gt.variance() > 1e-6 && gt.variance() < 1e-3)
+    // Top lifetime: ~5.7e-25 s
+    let tau_t = top_lifetime_ep()
+    tb_chk(9, tau_t.val() > 1e-26 && tau_t.val() < 1e-23)
+    tb_chk(10, tau_t.variance() > 0.0)
 }

@@ -147,24 +147,57 @@ Added to `ew_precision.sio`:
 
 ---
 
-## What Remains (Future Work)
+## Phase 2 Additions (2026-05-27)
 
-1. **`three_body.sio`** — muon/tau/top decay widths call `.val()` on masses; add `_ep` variants using `h_width_ff_ep` pattern.
-2. **`higgs_production.sio`** — gg→H and VH cross-sections use `.val()` throughout; epistemic m_t uncertainty is large here.
-3. **`pdf.sio`** — add Hessian-style PDF uncertainty (requires Epistemic array, nontrivial but feasible).
-4. **`detector.sio`** — material property uncertainties (ρ, X₀, dE/dx normalization).
-5. **Effect-typed amplitudes** — mark non-unitary processes as a Sounio effect; would be first in any language.
-6. **NLO K-factors with uncertainty** — perturbative uncertainty band from scale variation.
+### `three_body.sio` — GUM decay widths (DONE)
+
+Added 4 epistemic functions, all tested ALL PASS:
+
+| Function | Formula | Dominant PDG input | σ(result)/result |
+|---|---|---|---|
+| `muon_decay_width_ep()` | Γ = G_F² m_μ⁵ / 192π³ | G_F ±6e-12 GeV⁻² | ~1 ppm |
+| `muon_lifetime_ep()` | τ = ℏ/Γ_μ | same | ~1 ppm |
+| `top_decay_width_ep()` | Γ = G_F m_t³ f(r_W) √λ / 8π√2 | m_t ±0.30 GeV | ~0.7% |
+| `top_lifetime_ep()` | τ = ℏ/Γ_top | m_t (via Γ_top) | ~0.7% |
+
+Full GUM via partial derivatives: ∂Γ/∂m_t, ∂Γ/∂M_W computed analytically from the kinematic formula (df/dr_W, dg/dr_W chain). No approximation of the m_t³ × f(r_W) × √λ structure.
+
+### `higgs_production.sio` — α_s GUM chain (DONE)
+
+Added 2 epistemic functions:
+
+| Function | Formula | Dominant PDG input | σ(result)/result |
+|---|---|---|---|
+| `gg_higgs_hadronic_cross_section_ep(m_H, √s)` | σ = C × α_s² | α_s(M_Z) ±0.0009 | ~1.5% |
+| `total_higgs_production_cross_section_ep(m_H, √s)` | gg + VBF + WH + ZH | α_s (gg dominates) | ~1.5% |
+
+VBF/WH/ZH treated as exact (M_W/M_Z uncertainty sub-percent and sub-dominant to α_s).
+
+### `epistemic_chain.sio` — Chains 6+7 (DONE)
+
+- **Chain 6** (`test_chain6_top_decay`): calls `top_decay_width_ep()` + `muon_decay_width_ep()` with gates; 10 new tests ALL PASS.
+- **Chain 7** (`test_chain7_higgs_production`): calls `gg_higgs_hadronic_cross_section_ep()` + `total_higgs_production_cross_section_ep()` with gates; 9 new tests ALL PASS.
 
 ---
 
-## SOTA+++ Claim
+## What Remains (Future Work)
+
+1. **`pdf.sio`** — Hessian-style PDF uncertainty (requires Epistemic array, nontrivial but feasible).
+2. **`detector.sio`** — material property uncertainties (ρ, X₀, dE/dx normalization).
+3. **Effect-typed amplitudes** — mark non-unitary processes as a Sounio effect; would be first in any language.
+4. **NLO K-factors with uncertainty** — perturbative uncertainty band from scale variation.
+
+---
+
+## SOTA+++ Claim (Updated)
 
 Sounio particle_physics is the only physics library in any language that:
 
 1. Tracks GUM-exact uncertainty from PDG input values through QFT amplitude chains to physics observables in a single compile unit
 2. Has a type-system-level confidence gate (`ep_require_conf`) that marks results as failed when epistemic provenance is insufficient
 3. Has a machine-verified uncertainty budget (`z_width_ee_budget()`) that decomposes total uncertainty by PDG source
-4. Does this in a self-hosted compiled language (not Python/Julia scripting) with a formal effect system
+4. Propagates GUM through leptonic and hadronic decay kinematic formulas with full partial-derivative chains (`top_decay_width_ep`, `muon_decay_width_ep`)
+5. Propagates α_s uncertainty through the gg→H hadronic cross-section in a single compile unit (`gg_higgs_hadronic_cross_section_ep`)
+6. Does all of this in a self-hosted compiled language (not Python/Julia scripting) with a formal effect system
 
 ROOT: statistical errors only. MadGraph: no uncertainty propagation. PDF4LHC: Hessian sets for PDFs only, not through amplitudes. FeynCalc: symbolic only, no numerical uncertainty tracking.

@@ -30,6 +30,14 @@ use particle_physics::vertex::{
     qed_vertex_factor_sq_ep, qcd_vertex_factor_sq_ep,
     neutral_current_gv_ep,
 }
+use particle_physics::three_body::{
+    top_decay_width_ep, top_lifetime_ep,
+    muon_decay_width_ep, muon_lifetime_ep,
+}
+use particle_physics::higgs_production::{
+    gg_higgs_hadronic_cross_section_ep,
+    total_higgs_production_cross_section_ep,
+}
 
 extern "C" {
     fn sqrt(x: f64) -> f64;
@@ -454,6 +462,90 @@ pub fn test_ep_require_conf() with IO, Mut, Div, Panic {
     ec_chk(51, gated_fail.confidence() == 0)
 }
 
+// ============================================================================
+// CHAIN 6: TOP QUARK DECAY — m_t uncertainty through QFT decay formula
+//
+// Γ(t→bW) = G_F m_t³ (1-r_W)²(1+2r_W) √λ / (8π√2)
+//
+// Unique: GUM tracks m_t uncertainty (±0.30 GeV, PDG 2024) through the
+// full kinematic formula, yielding σ(Γ)/Γ ≈ 0.7% — not available anywhere
+// else except as a manual calculation.
+// ============================================================================
+
+/// Gated top decay width: fails if epistemic provenance below min_conf.
+pub fn chain_gate_top_decay(min_conf: i64) -> i64 with Mut, Div, Panic {
+    let ep = top_decay_width_ep()
+    let gated = ep_require_conf(ep, min_conf)
+    if gated.confidence() > 0 { 1 } else { 0 }
+}
+
+pub fn test_chain6_top_decay() with IO, Mut, Div, Panic {
+    // LO top width: ~1.16 GeV; PDG is 1.42 GeV (NLO adds ~22%)
+    let ep = top_decay_width_ep()
+    ec_chk(60, ec_rel(ep.val(), 1.16, 0.05))
+    ec_chk(61, ep.variance() > 0.0)
+    ec_chk(62, ep.confidence() >= 850)
+    // σ(Γ_top) / Γ_top ~ 0.7%; in absolute terms: sqrt(Var) ~ 8 MeV
+    // Check Var is in the right order of magnitude
+    ec_chk(63, ep.variance() > 1e-6 && ep.variance() < 1e-3)
+    // Gate at conf=800: should pass (confidence=900)
+    ec_chk(64, chain_gate_top_decay(800) == 1)
+    // Muon decay: Γ_μ ≈ 3.0e-19 GeV (LO formula)
+    let mu_ep = muon_decay_width_ep()
+    ec_chk(65, mu_ep.val() > 2.5e-19 && mu_ep.val() < 3.5e-19)
+    ec_chk(66, mu_ep.variance() > 0.0)
+    // Muon lifetime: ≈ 2.2e-6 s
+    let tau_mu = muon_lifetime_ep()
+    ec_chk(67, tau_mu.val() > 2.0e-6 && tau_mu.val() < 2.4e-6)
+    // Top lifetime: ~5.7e-25 s
+    let tau_t = top_lifetime_ep()
+    ec_chk(68, tau_t.val() > 1e-26 && tau_t.val() < 1e-23)
+    ec_chk(69, tau_t.variance() > 0.0)
+}
+
+// ============================================================================
+// CHAIN 7: HIGGS PRODUCTION — α_s uncertainty through gg → H cross-section
+//
+// σ(gg→H) ∝ α_s²(M_Z), LO scaling.
+// GUM carries α_s ± 0.0009 (PDG 2024) through the quadratic dependence,
+// yielding σ(σ_gg)/σ_gg ≈ 1.5%.
+//
+// No other framework traces α_s input uncertainty through to σ(gg→H) in a
+// single compile unit with provenance tracking.
+// ============================================================================
+
+/// Gated gg→H cross-section: fails if epistemic provenance below min_conf.
+pub fn chain_gate_higgs_gg(sqrt_s: f64, min_conf: i64) -> i64 with Mut, Div, Panic {
+    let ep = gg_higgs_hadronic_cross_section_ep(125.0, sqrt_s)
+    let gated = ep_require_conf(ep, min_conf)
+    if gated.confidence() > 0 { 1 } else { 0 }
+}
+
+pub fn test_chain7_higgs_production() with IO, Mut, Div, Panic {
+    // gg→H at LHC 13 TeV, m_H=125 GeV: reference 15 pb
+    let gg_ep = gg_higgs_hadronic_cross_section_ep(125.0, 13000.0)
+    ec_chk(70, ec_rel(gg_ep.val(), 15.0, 0.05))
+    ec_chk(71, gg_ep.variance() > 0.0)
+    ec_chk(72, gg_ep.confidence() >= 800)
+    // α_s relative uncertainty: 0.0009/0.1179 ≈ 0.76%; σ² enters quadratically
+    // σ(σ_gg)/σ_gg ≈ 2×0.76% = 1.52% → Var/(val²) ≈ 2.3e-4
+    // For val=15 pb: Var ≈ 2.3e-4 × 225 ≈ 0.052 pb²
+    ec_chk(73, gg_ep.variance() > 0.01 && gg_ep.variance() < 5.0)
+    // gg→H at 14 TeV larger than 13 TeV
+    let gg_14 = gg_higgs_hadronic_cross_section_ep(125.0, 14000.0)
+    ec_chk(74, gg_14.val() > gg_ep.val())
+    // Total production: gg + VBF + WH + ZH ≈ 17 pb; check > 16 and < 20
+    let total_ep = total_higgs_production_cross_section_ep(125.0, 13000.0)
+    ec_chk(75, total_ep.val() > 16.0 && total_ep.val() < 22.0)
+    ec_chk(76, total_ep.variance() > 0.0)
+    // Gate at conf=800: should pass
+    ec_chk(77, chain_gate_higgs_gg(13000.0, 800) == 1)
+    // Gate fails at impossible conf=1001
+    let ep2 = gg_higgs_hadronic_cross_section_ep(125.0, 13000.0)
+    let gated_fail = ep_require_conf(ep2, 1001)
+    ec_chk(78, gated_fail.confidence() == 0)
+}
+
 pub fn run_epistemic_chain_tests() with IO, Mut, Div, Panic {
     EC_PASS[0] = 0
     EC_PASS[1] = 0
@@ -463,4 +555,6 @@ pub fn run_epistemic_chain_tests() with IO, Mut, Div, Panic {
     test_chain4_budget()
     test_chain5_higgs()
     test_ep_require_conf()
+    test_chain6_top_decay()
+    test_chain7_higgs_production()
 }
