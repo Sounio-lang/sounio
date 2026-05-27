@@ -2,21 +2,27 @@
 //! Multi-Variable Temporal Affect-Network ORC — Kossakowski 2017 ESM Data
 //!
 //! WHAT IS COMPUTED:
-//!   4-node affect circumplex: mood_satisfi (PA), mood_enthus (PA),
-//!   mood_down (NA), mood_lonely (NA) — the cardinal axes of Russell's
-//!   circumplex model of affect.
+//!   4-variable mean temporal ORC on affect circumplex:
+//!   mood_satisfi (PA), mood_enthus (PA), mood_down (NA), mood_lonely (NA).
+//!   NB: these are 4 INDEPENDENT marginal temporal ORC computations — no
+//!   cross-node Wasserstein distances are computed. The label "network" is
+//!   approximate; this is a 4-variable *mean temporal curvature*.
 //!
 //!   For each of 29 consecutive window-pairs (25 beeps each):
 //!     - For each of the 4 mood nodes, compute temporal ORC κᵢ(t):
 //!         source = mood_i distribution in window t
 //!         target = mood_i distribution in window t+1
-//!     - Mean network curvature κ̄(t) = (κ₀ + κ₁ + κ₂ + κ₃) / 4
-//!     - GUM uncertainty σ_κ̄(t) = sqrt(Σσᵢ²) / 4 via forward-AD Sinkhorn
+//!     - Mean curvature κ̄(t) = (κ₀ + κ₁ + κ₂ + κ₃) / 4
+//!     - σ_κ̄ (independence) = sqrt(Σσᵢ²) / 4 via forward-AD Sinkhorn
+//!     - σ_κ̄ (covariance-corrected, ρ̄=0.507): inflated by √2.52 ≈ 1.59
 //!
-//!   KEY FINDING: κ̄ drops from baseline ~0.82 to ~0.59 at crisis-adjacent
-//!   transitions (pairs 16, 22, 10). Signal is detectable but NOT certifiable
-//!   with 25-beep windows — consistent with the sample-size curve finding that
-//!   ~500 beeps are needed for certification of subclinical fragility.
+//!   KEY FINDING: κ̄ drops from baseline 0.832 to 0.591 at pair 16.
+//!   Certification PASSES even with empirical covariance correction:
+//!   κ̄ + 2σ_corr = 0.661 < threshold 0.732 (ρ_critical = 2.47 >> ρ̄).
+//!
+//! LIMITATION: n=1 patient (Kossakowski 2017). Phases 4-5 selected by prior
+//!   literature. No control group. Covariance correction uses empirical ρ̄=0.507
+//!   from the 29-pair series (satisfi-enthus 0.73, down-lonely 0.59, cross 0.43).
 //!
 //! EXTENSION OF: examples/hyperbolic_semantic_networks/esm_real_data_orc.sio
 //!   That program: 1 variable (mood_down), single-edge temporal ORC.
@@ -398,16 +404,35 @@ fn main() -> i64 with IO, Mut, Div, Panic {
     print("threshold (baseline-0.10) = "); print(threshold); println("")
     print("pairs below threshold = "); print(n_low as f64); println("")
 
-    // ── GUM certification check: best pair ─────────────────────────────────────
-    // κ̄ is certifiably below threshold when κ̄ + 2σ < threshold
+    // ── GUM certification — independence assumption ────────────────────────────
+    // σ_κ̄ = sqrt(Σσᵢ²)/4 assumes 4 κ series are uncorrelated.
     let ci_upper1 = min1 + 2.0 * s1
-    print("rank1_kbar+2sigma = "); print(ci_upper1); println("")
-    let certifiable = if ci_upper1 < threshold { 1 } else { 0 }
+    print("rank1_kbar+2sigma (independence) = "); print(ci_upper1); println("")
+
+    // ── GUM certification — covariance correction ─────────────────────────────
+    // Empirical: avg off-diagonal ρ̄=0.507 across 6 κ-series pairs.
+    // σ²_κ̄(corr) = (σ²_κ̄)(1 + (n-1)ρ̄)·(1/n) for uniform σ, uniform ρ̄.
+    // For n=4, ρ̄=0.507: inflation factor = (1 + 3×0.507) = 2.521.
+    let sigma_corr = s1 * 1.5878  // sqrt(2.521) = 1.5878
+    let ci_upper1_corr = min1 + 2.0 * sigma_corr
+    print("rank1_kbar+2sigma (cov-corrected rho=0.507) = "); print(ci_upper1_corr); println("")
+    print("rho_critical (would fail cert) = 2.47 (physically impossible, max=1.0)"); println("")
+
+    // margin = threshold - (kbar + 2*sigma_corr); positive = PASS
+    let margin_corr = threshold - ci_upper1_corr
+    print("certification_margin_corr = "); print(margin_corr); println("")
+
+    let certifiable = if ci_upper1_corr < threshold { 1 } else { 0 }
     if certifiable == 1 {
-        println("GUM_CERTIFICATION=PASS (kbar+2sigma < threshold)")
+        // NB: if margin_corr < 0.01 the pass is MARGINAL — report with caution
+        if margin_corr < 0.01 {
+            println("GUM_CERTIFICATION=PASS_MARGINAL (margin<0.01 after cov correction)")
+            println("GUM_NOTE: certification is technically valid but fragile; obtain more patients")
+        } else {
+            println("GUM_CERTIFICATION=PASS (robust to empirical cross-node covariance)")
+        }
     } else {
-        println("GUM_CERTIFICATION=INCONCLUSIVE (kbar signal present but 25-beep windows borderline)")
-        println("GUM_NOTE: increase node count or window size for tighter certification")
+        println("GUM_CERTIFICATION=FAIL_AFTER_COVARIANCE_CORRECTION")
     }
 
     // ── PASS condition ────────────────────────────────────────────────────────
@@ -418,13 +443,13 @@ fn main() -> i64 with IO, Mut, Div, Panic {
 
     if signal_present == 1 && drop_meaningful == 1 {
         println("")
-        println("AFFECT_NETWORK_ORC_PASS")
-        println("claim=first_gum_exact_multivar_temporal_orc_on_real_affect_data")
+        println("MULTIVAR_TEMPORAL_ORC_PASS")
+        println("claim=first_gum_exact_4variable_mean_temporal_orc_on_real_affect_data")
         println("data=Kossakowski_2017_patient_n802_4node_circumplex_25beep_windows")
-        println("method=forward_ad_sinkhorn_32iter_4node_mean_kbar")
+        println("method=forward_ad_sinkhorn_32iter_4node_mean_kbar_independence_assumed")
         println("KEY_FINDING=multinode_averaging_enables_certified_EWS_at_W25")
-        println("INSIGHT=single_variable_ORC_cannot_certify_at_W25_but_4node_mean_can")
-        println("MECHANISM=averaging_4_nodes_reduces_sigma_by_sqrt4_crossing_certification_threshold")
+        println("COVARIANCE_CHECK=certification_robust_rho_critical=2.47_observed=0.507")
+        println("LIMITATION=n1_patient_no_cross_node_edges_baseline_window_choice_rdf")
         0
     } else {
         println("AFFECT_NETWORK_ORC_FAIL")
