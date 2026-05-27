@@ -15,7 +15,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.spec.language-
 **Status**: Release Candidate
 **Last Updated**: 2026-03-21
 
-> Note: Lambda/closure literals (Section 4.7) are specified but not yet implemented — use named function references instead (`let f = square`). All other features in this spec are implemented and tested. For the compiler’s current behavior and supported syntax, see `docs/compiler/KNOWN_LIMITATIONS.md`, `docs/MV_CORE_CHECKLIST.md`, and the runnable fixtures under `tests/`.
+> **Note (2026-05-27 reconciliation):** Lambda/closure literals (Section 4.7.2) are **non-normative** — they do not compile and are not part of the language contract. Use named function references (`let f = square`, Section 4.7.1). The authoritative tiering for every feature in this spec is `docs/serious-language/public-claim-registry.v1.tsv`; for compiler limits and active architectural gaps see `docs/compiler/KNOWN_LIMITATIONS.md`, and for the cloned-repo product audit see `docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md`.
 
 ---
 
@@ -695,11 +695,11 @@ let result = add(1, 2)
 let chained = obj.method().another()
 ```
 
-### 4.7 Lambda Expressions and Function References
+### 4.7 Function References (normative) and Lambda Literals (non-normative)
 
-> **Implementation status**: Lambda/closure literals (`|x| x + 1`) are specified but **not yet implemented**. The compiler supports named function references as an alternative. See `docs/compiler/KNOWN_LIMITATIONS.md`.
+> **Normative contract:** Sounio has first-class **named function references**. Higher-order programming uses them. Lambda literals (`|x| x + 1`) are **non-normative** in this spec — the public-claim registry classifies them as `closures.lambdas = stale_conflicting / "not user-safe until reconciled"` (`docs/serious-language/public-claim-registry.v1.tsv`). Do not write code that depends on lambda literals.
 
-#### 4.7.1 Named Function References (Implemented)
+#### 4.7.1 Named Function References (normative — implemented)
 
 ```sio
 fn square(x: i64) -> i64 { x * x }
@@ -714,15 +714,19 @@ fn main() -> i64 {
 }
 ```
 
-Function references support higher-order programming: functions can be stored in variables, passed as arguments, and called indirectly.
+Function references support higher-order programming: functions can be stored in variables, passed as arguments, and called indirectly. This is the supported way to pass behavior in Sounio today.
 
-#### 4.7.2 Lambda Expressions (Planned, Not Yet Implemented)
+#### 4.7.2 Lambda Literals — NON-NORMATIVE, do not use
+
+The syntax below is recorded for design discussion only. It **does not compile** in any released `bin/souc`, is not part of the language contract, and is not on a near-term implementation gate. See `docs/compiler/KNOWN_LIMITATIONS.md` ("Prototype" tier, row `closures.lambdas`) and the audit at `docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md` §8 / G3.
 
 ```sio
-// These are SPECIFIED but do NOT compile yet:
-let add = |a: int, b: int| -> int { a + b }
-let double = |x| x * 2          // Type inferred
+// NON-NORMATIVE — these do not compile and are not part of the language contract:
+// let add = |a: int, b: int| -> int { a + b }
+// let double = |x| x * 2          // Type inferred
 ```
+
+Tools (LSPs, formatters, LLM codegen) MUST treat the above as a parse error and SHOULD NOT emit lambda literals when generating Sounio source. Use §4.7.1 instead.
 
 ### 4.8 Effect Expressions
 

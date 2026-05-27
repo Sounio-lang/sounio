@@ -2,53 +2,100 @@
 topic_id: repo.docs.compiler.known-limitations
 authority: repo_only
 audience: contributors
-last_validated: 2026-03-07
-validated_by: A4
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
+last_validated: 2026-05-27
+validated_by: PL adoption audit (docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md)
+source_of_truth: docs/serious-language/public-claim-registry.v1.tsv
 -->
 
 # Known Language Limitations
 
 This document tracks limitations in the Sounio language implementation.
-Updated February 2026 after full-project audit.
+**Authoritative source for maturity tiering is `docs/serious-language/public-claim-registry.v1.tsv`.**
+This file is reconciled to that registry. If they disagree, the registry wins.
+
+Last reconciled: 2026-05-27 (PL adoption audit). Earlier "all-green" claims have been corrected against live probes; see §"Reconciliation notes" below.
 
 ## Maturity Tiers
 
-### Production (ship with confidence)
+Tiers below mirror the public-claim registry's `claim_level`/`closure_status` columns. "Production" is reserved for rows the registry calls `stable / closed`. Anything the registry marks `prototype` or `stale_conflicting` is tiered accordingly here — even if the feature works on small fixtures.
+
+### Production (registry: stable / closed)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Lexer/Parser/AST | Production | logos-based, error recovery, comprehensive |
-| Type Checker (core) | Production | Bidirectional inference, generics, unification |
-| Epistemic Types | Production | GUM uncertainty, confidence propagation, provenance |
-| Effects System | Production | 9 effects (IO, Mut, Alloc, Panic, Async, GPU, Prob, Div, Observe) |
+| Type Checker (core) | Production | Bidirectional inference, generic monomorphization (1–2 params), unification |
+| Epistemic Types — Knowledge<T> / GUM | Production* | Registry tier: `validated_research`. "Production" here = single-file emit + GUM propagation works; clinical use must still cite the named gate. |
+| Effects System | Production | 9+ effects (IO, Mut, Panic, Div, Alloc, Session, Observe, Audit, Hypothesis; +GPU, Deterministic). Strict E035 subset check at call sites. |
 | HIR + HLIR | Production | SSA generation, async transform |
 | SIR | Production | Domain-specific IR, epistemic passes |
-| Ownership/Borrowing | Production | Method receiver type is now looked up from the declared signature (`scan_fnsig_param_type`). Exclusive `&!Self` receivers enforce borrow-conflict checks and ephemeral borrow tracking; shared `&Self` receivers perform read-only access checks. No heuristic string matching. |
-| Native Backend | Production | ELF/Mach-O/PE, epistemic runtime, continuations; cross-compile via `--target` |
+| Ownership/Borrowing | Production | Method receiver type resolved from declared signature; exclusive `&!Self` enforces borrow-conflict tracking; shared `&Self` is read-only. No heuristic string matching. |
+| Native Backend (Linux x86-64) | Production | Registry: `platform.linux_x86_64 = stable`. ELF + epistemic runtime + continuations. |
 | Cranelift Codegen | Production | Full implementation, effect handlers |
-| LLVM Codegen | Production | LLVM 18 wired, `--backend llvm` or `--emit-llvm`; bridge: `self-hosted/llvm/souc_emit_llvm.c` |
 | Interpreter | Production | Full eval, 100+ builtins |
-| Module System | Production | 2-pass resolver, imports, hierarchical namespaces |
-| CLI | Production | check/build/run/repl/format/doc |
-| Formatter | Production | AST-based, all constructs, diff mode |
+| Module System (single-file import unit) | Production | 2-pass resolver, imports, hierarchical namespaces |
+| CLI commands `check`/`compile`/`build`/`run`/`info`/`--version` | Production | Wired through `bin/souc`. **Exit-code contract repaired 2026-05-27 — typecheck failures now exit non-zero (G2).** |
 | snn/ (sedenion NN) | Production | Training, backward, similarity, 8 scoring functions |
 
-### Beta (works for common patterns, edge cases exist)
+### Validated Research (registry: validated_research / closed-with-named-gate)
 
-| Component | Status | Limitations |
-|-----------|--------|-------------|
-| LLVM Codegen | Production | Moved to Production — see above |
-| Refinement Types + SMT | Beta | Static engine (no Z3) handles constants, condition narrowing, monotonicity; complex predicates fall back to runtime assertions with W040 diagnostic |
-| LSP | Beta | Cross-file navigation now uses module resolver symbol index (Section 27 of lsp/goto_def.sio); cross-module hover and qualified completions wired via module resolver bridge |
-| REPL | Beta | 21 commands, JIT, epistemic badges; :type/:econf/:hist + multi-line input added |
-| Self-hosted Compiler | Beta | Phases 1.3–1.6 + Async 1-3 + generics complete (2026-04-20). Pattern matching: if-let, while-let, or-patterns (`A \| B => body`), struct destructuring. Async: `spawn { }`/`.await`, `channel::<T>()`, `sleep(ms).await`, `join(h1, h2)` — all 11 async tests PASS. Generic monomorphization: 1–2 type params. SRET: all struct sizes including 8+ fields verified. x86-64 and ARM64. |
-| Ontology | Beta | 10K terms, subsumption, distance |
-| Package Manager | Beta | Local registry active (`~/.sounio/registry/`), `souc publish/search/list` commands; no public registry |
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Native Backend (macOS arm64 / x86_64) | Validated research | Registry: `platform.macos = validated_research`. Mach-O cross-compile lane; no Apple JIT, no native-v2 parity. |
+| Self-hosted Compiler (single-file path) | Validated research | `lean_single.sio` self-hosts; gen2==gen3 fixed point. Registry: `selfhost = validated_research`. |
+| LLVM Codegen | Validated research | LLVM 18 bridge `self-hosted/llvm/souc_emit_llvm.c` wired but disabled in the checked artifact; `--backend llvm` needs a feature-flag rebuild. Previously over-claimed as Production. |
+| Refinement Types + SMT | Validated research | Static engine handles constants, condition narrowing, monotonicity; complex predicates fall back to runtime assertions with W040 diagnostic. |
+| Module imports across files | Validated research | Registry: `modules.imports = validated_research`. |
+| Ownership / borrowing examples | Validated research | Registry: `ownership.borrowing = validated_research`; avoid Rust equivalence. |
+| LSP | Validated research → Prototype (per registry) | Real (`tools/lsp/sounio-lsp.sh`, JSON-RPC, 8 methods); registry row `tooling.editor` says **prototype**. |
+| GPU PTX backend | Validated research | Registry: `gpu.ptx = validated_research`. Named gate covers L4 fixtures; out-of-fixture behavior is research. |
+| 168 / Cayley-Dickson algebra | Validated research | Registry: `algebra.168 = validated_research`. Algebraic/formal artifacts only — no biological or EEG advantage claims. |
+| Ontology subsystem | Validated research | Registry: `ontology = validated_research`. Rebuilt ontology validation surfaces only. |
 
-### Known Bugs
+### Prototype (registry: prototype / downgraded)
 
-*No active known bugs.* All previously listed bugs have been fixed in `self-hosted/compiler/lean_single.sio` and are live in the current `bin/souc-native` binary (rebuilt 2026-04-20).
+| Component | Registry row | Honest status |
+|-----------|--------------|---------------|
+| **Standard library (broad surface)** | `stdlib.surface = prototype` | Do not claim broad stdlib callability. The 251/251 reliability gate covers ~27% of stdlib files. |
+| **Formatter** | `tooling.editor = prototype` | **Not shipped.** No `souc format` subcommand, no `tools/fmt*` binary. The earlier "Formatter Production / AST-based / diff mode" claim was wrong and is removed. |
+| **REPL** | `tooling.editor = prototype` | `tools/repl.sh` is a thin Bash wrapper; not exposed as a `souc` subcommand. |
+| **Package manager / registry** | `tooling.package = prototype` | Local `~/.sounio/registry/` only. No public registry. |
+| **Generic structs/functions/traits** | `generics.* = prototype` | 1–2 type params work; do not claim a mature trait ecosystem. Trait bounds are parsed but not enforced at call sites. No trait objects. |
+| **Closures / lambda literals** | `closures.lambdas = stale_conflicting` | **Not user-safe.** Spec §4.7 promises lambda literals; the compiler refuses them. See `[[lambda-spec-reconciliation]]` below. Function references are first-class and work — that is the supported idiom today. |
+| **Units of measure** | `units.measure = prototype` | Fixture-backed prototype surface. |
+| **Refinement types (general)** | `refinement.types = prototype` | Beta/prototype; runtime fallback dominates non-trivial predicates. |
+| **Hypercomplex NN (broad)** | `hypercomplex.nn = prototype` | Research/prototype unless a named gate covers the exact behavior. |
+| **Direct-driver execution at scale** | `direct_driver = prototype` | Large-surface direct-driver execution is a maturity frontier. |
+| **Windows target** | `platform.windows = prototype` | PE/COFF lane wired; not stable. |
+| **`binary.source` (modular self-hosted tree)** | `prototype` | `lean_single.sio` remains the checked binary source until parity gates prove a swap. See "Multi-Module Bundle Gap" below. |
+
+### Active Known Bugs / Architectural Gaps
+
+The previous claim *"No active known bugs"* was incorrect at the multi-module bundle level. The single-file emit path is clean; the bundle path is not. The following are tracked as active architectural gaps, not feature requests.
+
+**Multi-module bundle compile (`[[project_task_c_blocker]]`)** — Bundle baseline as of 2026-05-24: **766 errors**. Three named architectural roots, all currently workaround-only:
+
+1. **i64 type-hash overflow on 3-level pointer nesting.** Sim-proven exact. Source workaround: `&Option<Box<T>>` → `&Option<&T>`. The real fix is composite-type interning (architectural, deferred).
+2. **SRET for ≥8-field struct returns.** Source workaround: flat arrays / split-by-field. Tracked in `[[feedback_native_compiler_limits]]`.
+3. **Nested `&!` struct-field mutation.** Mutation through `&!T` to a struct field doesn't propagate; bare-array index through `&![T;N]` was fixed in v2.0 but **struct** field stores were not. Source workaround: streaming / flat patterns.
+
+These are the gate between "single-file demo language" and "modular self-hosted tree replaces `lean_single.sio` as binary source." See `docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md` §5 / G1.
+
+### Reconciliation notes (2026-05-27)
+
+This file previously claimed several rows as "Production" that the public-claim registry already had downgraded. The PL adoption audit (`docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md` §2) catalogued the diff. Changes made here:
+
+- **Removed:** the row claiming `Formatter Production`. No `souc format` subcommand exists; no `tools/fmt*` binary exists.
+- **Removed:** the "No active known bugs" assertion. Bundle baseline is 766 errors with three named roots.
+- **Removed:** `CLI: check/build/run/repl/format/doc` — `repl`/`format`/`doc` are not subcommands of `bin/souc`. They print *"unsupported command for the checked self-hosted launcher"*.
+- **Downgraded:** LLVM Codegen from `Production` to `Validated research` — the LLVM bridge is wired but disabled in the checked binary.
+- **Reframed:** LSP, REPL, Package Manager to mirror the registry's `prototype` tier.
+- **Added:** "Active Known Bugs / Architectural Gaps" section enumerating the three bundle-compile roots.
+- **Fixed:** CLI exit-code contract — `souc check` now propagates typecheck failures (G2). Probed before/after in the audit. The wrapper `bin/souc` had `exit 0` in each dispatch arm; replaced with explicit `exit "$_rc"`.
+
+### lambda-spec-reconciliation
+
+`docs/spec/LANGUAGE_SPECIFICATION.md` §4.7 ("Lambda Expressions") promises `|x| x+1` syntax. The compiler refuses it. The public-claim registry marks `closures.lambdas = stale_conflicting / "not user-safe until reconciled."` Until the compiler ships lambdas, the spec section has been annotated as **non-normative / aspirational** with a pointer to the registry row. (See spec §4.7 itself.)
 
 ### Fixed in Self-Hosted Compiler — All Bugs Closed
 
