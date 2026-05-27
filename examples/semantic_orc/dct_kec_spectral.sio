@@ -1,0 +1,313 @@
+//! ORIGINAL KEC (spectral half) on the DCT — E = von Neumann spectral entropy, C = lambda2.
+//! Concatenated after a generated dct_kec_wave{N}_data.sio. Reuses the verified Jacobi idiom from
+//! kec_spectral.sio, generalized to N up to 288 (max proximal-set size observed = 286).
+//!
+//! Per subject: build the PROXIMAL-INDUCED subgraph of the shared embedding graph (nodes = words the
+//! subject chose "this"; edges = embedding kNN edges with both endpoints proximal, original weights),
+//! then compute E = von Neumann spectral entropy of its Laplacian (normalized by ln m) and
+//! C = lambda2 (algebraic connectivity). One Laplacian array allocated once in main, reused per subject.
+//!
+//! The eigensolver is self-verified on K12 / C8 / K20 closed forms BEFORE any real data each run.
+
+fn ks_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn ks_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x; var i: i64 = 0
+    while i < 40 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn ks_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return -1000000.0 }
+    let ln2 = 0.6931471805599453
+    var v = x; var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = (v - 1.0) / (v + 1.0); let yy = y * y
+    var result = 0.0; var power = y; var i: i64 = 1
+    while i <= 29 { result = result + power / (i as f64); power = power * yy; i = i + 2 }
+    2.0 * result + (k as f64) * ln2
+}
+
+// Jacobi cyclic eigenvalue solver on symmetric L (row-major stride n) into eig[0..n) ascending.
+fn jacobi_eig(L: &![f64; 82944], n: i64, eig: &![f64; 288], sweeps: i64) with Mut, Div, Panic {
+    var sweep: i64 = 0
+    while sweep < sweeps {
+        var p: i64 = 0
+        while p < n {
+            var q: i64 = p + 1
+            while q < n {
+                let apq = L[p * n + q]
+                if ks_abs(apq) > 1e-12 {
+                    let app = L[p * n + p]; let aqq = L[q * n + q]
+                    let theta = (aqq - app) / (2.0 * apq)
+                    let denom = ks_abs(theta) + ks_sqrt(theta * theta + 1.0)
+                    var t = 1.0 / denom
+                    if theta < 0.0 { t = 0.0 - t }
+                    let c = 1.0 / ks_sqrt(t * t + 1.0); let s = t * c
+                    var kk: i64 = 0
+                    while kk < n {
+                        let lkp = L[kk * n + p]; let lkq = L[kk * n + q]
+                        L[kk * n + p] = c * lkp - s * lkq
+                        L[kk * n + q] = s * lkp + c * lkq
+                        kk = kk + 1
+                    }
+                    kk = 0
+                    while kk < n {
+                        let lpk = L[p * n + kk]; let lqk = L[q * n + kk]
+                        L[p * n + kk] = c * lpk - s * lqk
+                        L[q * n + kk] = s * lpk + c * lqk
+                        kk = kk + 1
+                    }
+                }
+                q = q + 1
+            }
+            p = p + 1
+        }
+        sweep = sweep + 1
+    }
+    var i: i64 = 0
+    while i < n { eig[i] = L[i * n + i]; i = i + 1 }
+    // insertion sort ascending
+    i = 1
+    while i < n {
+        let key = eig[i]; var j: i64 = i - 1
+        while j >= 0 && eig[j] > key { eig[j + 1] = eig[j]; j = j - 1 }
+        eig[j + 1] = key; i = i + 1
+    }
+}
+
+// von Neumann entropy (normalized by ln n) and lambda2 from a sorted spectrum.
+fn entropy_norm(eig: &[f64; 288], n: i64) -> f64 with Mut, Div, Panic {
+    var total = 0.0; var i: i64 = 0
+    while i < n { if eig[i] > 1e-9 { total = total + eig[i] }; i = i + 1 }
+    if total <= 0.0 { return 0.0 }
+    var S = 0.0; i = 0
+    while i < n { if eig[i] > 1e-9 { let pi = eig[i] / total; S = S - pi * ks_ln(pi) } ; i = i + 1 }
+    if n <= 1 { return 0.0 }
+    S / ks_ln(n as f64)
+}
+
+// build a test graph Laplacian (mode 0 = K_n, mode 1 = C_n) into L (stride n).
+fn build_test(mode: i64, n: i64, L: &![f64; 82944]) with Mut {
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = 0
+        while j < n {
+            var a = 0.0
+            if i != j {
+                if mode == 0 { a = 1.0 }
+                else { let d1 = if i > j { i - j } else { j - i }; if d1 == 1 || d1 == (n - 1) { a = 1.0 } }
+            }
+            L[i * n + j] = 0.0 - a
+            j = j + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        var deg = 0.0; var j: i64 = 0
+        while j < n { if j != i { deg = deg - L[i * n + j] }; j = j + 1 }
+        L[i * n + i] = deg; i = i + 1
+    }
+}
+
+// ---- cross-subject stats (sized for S up to 1024) ----
+fn rank_into(x: &[f64; 1024], n: i64, r: &![f64; 1024]) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n {
+        var less = 0.0; var eq = 0.0; var j: i64 = 0
+        while j < n {
+            if x[j] < x[i] { less = less + 1.0 } else { if x[j] == x[i] { eq = eq + 1.0 } }
+            j = j + 1
+        }
+        r[i] = less + (eq + 1.0) / 2.0; i = i + 1
+    }
+}
+fn pearson(a: &[f64; 1024], b: &[f64; 1024], n: i64) -> f64 with Mut, Div, Panic {
+    var sx=0.0; var sy=0.0; var sxx=0.0; var syy=0.0; var sxy=0.0; var i: i64 = 0
+    while i < n { sx=sx+a[i]; sy=sy+b[i]; sxx=sxx+a[i]*a[i]; syy=syy+b[i]*b[i]; sxy=sxy+a[i]*b[i]; i=i+1 }
+    let nf = n as f64; let cov = nf*sxy - sx*sy
+    let dx = ks_sqrt(nf*sxx - sx*sx); let dy = ks_sqrt(nf*syy - sy*sy)
+    if dx <= 0.0 || dy <= 0.0 { return 0.0 }
+    cov / (dx*dy)
+}
+fn spearman(x: &[f64; 1024], y: &[f64; 1024], n: i64, rx: &![f64; 1024], ry: &![f64; 1024]) -> f64 with Mut, Div, Panic {
+    rank_into(x, n, rx); rank_into(y, n, ry); pearson(rx, ry, n)
+}
+fn partial_spearman4(rc: &[f64; 4096], n: i64) -> f64 with Mut, Div, Panic {
+    var M: [f64; 16] = [0.0; 16]; var a: [f64; 1024] = [0.0; 1024]; var b: [f64; 1024] = [0.0; 1024]
+    var ci: i64 = 0
+    while ci < 4 {
+        var cj: i64 = 0
+        while cj < 4 {
+            var t: i64 = 0; while t < n { a[t]=rc[ci*1024+t]; b[t]=rc[cj*1024+t]; t=t+1 }
+            M[ci*4+cj] = pearson(&a, &b, n); cj = cj + 1
+        }
+        ci = ci + 1
+    }
+    var A: [f64; 16] = [0.0; 16]; var Inv: [f64; 16] = [0.0; 16]
+    var p: i64 = 0; while p < 16 { A[p]=M[p]; p=p+1 }
+    p = 0; while p < 4 { var q: i64 = 0; while q < 4 { Inv[p*4+q] = if p==q {1.0} else {0.0}; q=q+1 }; p=p+1 }
+    var col: i64 = 0
+    while col < 4 {
+        let piv = A[col*4+col]; let ipv = if ks_abs(piv) > 1e-12 { 1.0/piv } else { 0.0 }
+        var q: i64 = 0; while q < 4 { A[col*4+q]=A[col*4+q]*ipv; Inv[col*4+q]=Inv[col*4+q]*ipv; q=q+1 }
+        var row: i64 = 0
+        while row < 4 {
+            if row != col {
+                let f = A[row*4+col]; var qq: i64 = 0
+                while qq < 4 { A[row*4+qq]=A[row*4+qq]-f*A[col*4+qq]; Inv[row*4+qq]=Inv[row*4+qq]-f*Inv[col*4+qq]; qq=qq+1 }
+            }
+            row = row + 1
+        }
+        col = col + 1
+    }
+    let num = 0.0 - Inv[1]; let den = ks_sqrt(Inv[0]*Inv[5])
+    if den <= 0.0 { return 0.0 }
+    num / den
+}
+fn mean_of(x: &[f64; 1024], n: i64) -> f64 with Mut, Div { var s=0.0; var i: i64 = 0; while i < n { s=s+x[i]; i=i+1 }; s/(n as f64) }
+fn print_kv(k: string, v: f64) with IO { print(k); print("="); print(v); println("") }
+
+fn field_bit(field: &[i64; 8192], base: i64, v: i64) -> i64 { (field[base + (v >> 6)] >> (v & 63)) & 1 }
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    // ---- self-verify the generalized eigensolver ----
+    var L: [f64; 82944] = [0.0; 82944]
+    var eig: [f64; 288] = [0.0; 288]
+    build_test(0, 12, &!L); jacobi_eig(&!L, 12, &!eig, 40)
+    let k12_l2 = eig[1]; let k12_s = entropy_norm(&eig, 12)
+    build_test(1, 8, &!L); jacobi_eig(&!L, 8, &!eig, 40)
+    let c8_l2 = eig[1]
+    build_test(0, 20, &!L); jacobi_eig(&!L, 20, &!eig, 40)
+    let k20_l2 = eig[1]
+    let ln11 = 2.3978952727983707
+    let verify_ok = ks_abs(k12_l2 - 12.0) < 1e-2 && ks_abs(k12_s - ln11/ks_ln(12.0)) < 1e-2
+                    && ks_abs(c8_l2 - 0.5857864376) < 1e-2 && ks_abs(k20_l2 - 20.0) < 1e-2
+    print("eigensolver_verify K12_l2="); print(k12_l2); print(" C8_l2="); print(c8_l2)
+    print(" K20_l2="); print(k20_l2); println("")
+    if !verify_ok { println("EIGENSOLVER_VERIFY_FAIL"); return 1 }
+    println("eigensolver_verify=PASS")
+
+    // ---- load fixture ----
+    let n_words = fx_n_words(); let stride = fx_stride(); let S = fx_n_subj(); let nE = fx_n_edges()
+    var ei: [i64; 6144] = [0; 6144]; var ej: [i64; 6144] = [0; 6144]; var ew: [f64; 6144] = [0.0; 6144]
+    var valence: [f64; 512] = [0.0; 512]; var field: [i64; 8192] = [0; 8192]
+    var phq: [f64; 1024] = [0.0; 1024]; var cls: [i64; 1024] = [0; 1024]
+    load_ei(&!ei); load_ej(&!ej); load_ew(&!ew); load_valence(&!valence); load_field(&!field)
+    load_phq(&!phq); load_phqclass(&!cls)
+
+    // per-subject spectral E, C on the proximal-induced subgraph
+    var Evn: [f64; 1024] = [0.0; 1024]
+    var Cl2: [f64; 1024] = [0.0; 1024]
+    var prox: [f64; 1024] = [0.0; 1024]
+    var Psz: [f64; 1024] = [0.0; 1024]
+    var local: [i64; 512] = [0; 512]   // global word -> local index, or -1
+    var s: i64 = 0
+    while s < S {
+        let base = s * stride
+        // assign local indices to proximal words (bit==0)
+        var m: i64 = 0; var w: i64 = 0
+        while w < n_words {
+            if field_bit(&field, base, w) == 0 { local[w] = m; m = m + 1 } else { local[w] = -1 }
+            w = w + 1
+        }
+        prox[s] = (m as f64) / (n_words as f64); Psz[s] = m as f64
+        // zero m x m Laplacian
+        var z: i64 = 0; let mm = m * m
+        while z < mm { L[z] = 0.0; z = z + 1 }
+        // accumulate induced edges (both endpoints proximal)
+        var e: i64 = 0
+        while e < nE {
+            let a = local[ei[e]]; let b = local[ej[e]]
+            if a >= 0 && b >= 0 {
+                let wv = ew[e]
+                L[a * m + b] = L[a * m + b] - wv
+                L[b * m + a] = L[b * m + a] - wv
+                L[a * m + a] = L[a * m + a] + wv
+                L[b * m + b] = L[b * m + b] + wv
+            }
+            e = e + 1
+        }
+        if m >= 2 {
+            jacobi_eig(&!L, m, &!eig, 30)
+            Evn[s] = entropy_norm(&eig, m)
+            Cl2[s] = eig[1]
+        } else { Evn[s] = 0.0; Cl2[s] = 0.0 }
+        s = s + 1
+    }
+
+    println("=== original-KEC spectral (proximal-induced subgraph) ===")
+    print_kv("n_subjects", S as f64)
+    print_kv("E_vonneumann_mean", mean_of(&Evn, S))
+    print_kv("C_lambda2_mean", mean_of(&Cl2, S))
+    print_kv("prox_size_mean", mean_of(&Psz, S))
+
+    var rx: [f64; 1024] = [0.0; 1024]; var ry: [f64; 1024] = [0.0; 1024]
+    // valence_bias per subject (reuse field): corr(s, valence)
+    var vbias: [f64; 1024] = [0.0; 1024]
+    s = 0
+    while s < S {
+        let base = s * stride
+        var nn=0.0; var sx=0.0; var sy=0.0; var sxx=0.0; var syy=0.0; var sxy=0.0; var w: i64 = 0
+        while w < n_words {
+            let val = valence[w]
+            if val < 900.0 {
+                let sv = if field_bit(&field, base, w) == 1 { 1.0 } else { -1.0 }
+                nn=nn+1.0; sx=sx+sv; sy=sy+val; sxx=sxx+sv*sv; syy=syy+val*val; sxy=sxy+sv*val
+            }
+            w = w + 1
+        }
+        let cov = nn*sxy - sx*sy; let dx = ks_sqrt(nn*sxx-sx*sx); let dy = ks_sqrt(nn*syy-sy*sy)
+        vbias[s] = if dx>0.0 && dy>0.0 { cov/(dx*dy) } else { 0.0 }
+        s = s + 1
+    }
+
+    println("=== correlations vs PHQ9 ===")
+    print_kv("spearman_E_phq", spearman(&Evn, &phq, S, &!rx, &!ry))
+    print_kv("spearman_C_phq", spearman(&Cl2, &phq, S, &!rx, &!ry))
+    print_kv("spearman_E_psize", spearman(&Evn, &Psz, S, &!rx, &!ry))
+    print_kv("spearman_C_psize", spearman(&Cl2, &Psz, S, &!rx, &!ry))
+
+    // partial spearman for E and for C, controlling {prox, vbias}
+    var rc: [f64; 4096] = [0.0; 4096]
+    var t: i64 = 0
+    rank_into(&prox, S, &!rx); t=0; while t<S { rc[2*1024+t]=rx[t]; t=t+1 }
+    rank_into(&vbias, S, &!rx); t=0; while t<S { rc[3*1024+t]=rx[t]; t=t+1 }
+    rank_into(&phq, S, &!rx); t=0; while t<S { rc[1*1024+t]=rx[t]; t=t+1 }
+    rank_into(&Evn, S, &!rx); t=0; while t<S { rc[0*1024+t]=rx[t]; t=t+1 }
+    let rpart_E = partial_spearman4(&rc, S)
+    print_kv("partial_E_phq_given_prox_vbias", rpart_E)
+    rank_into(&Cl2, S, &!rx); t=0; while t<S { rc[0*1024+t]=rx[t]; t=t+1 }
+    let rpart_C = partial_spearman4(&rc, S)
+    print_kv("partial_C_phq_given_prox_vbias", rpart_C)
+
+    // permutation null on the larger of the two partials (by |.|)
+    let target = if ks_abs(rpart_E) >= ks_abs(rpart_C) { rpart_E } else { rpart_C }
+    let useE = ks_abs(rpart_E) >= ks_abs(rpart_C)
+    // rebuild rc col0 with the chosen metric
+    if useE { rank_into(&Evn, S, &!rx) } else { rank_into(&Cl2, S, &!rx) }
+    t=0; while t<S { rc[0*1024+t]=rx[t]; t=t+1 }
+    var seed: i64 = 1234567; let B: i64 = 500; var ge: i64 = 0
+    var phqp: [f64; 1024] = [0.0; 1024]; var bi: i64 = 0
+    while bi < B {
+        t=0; while t<S { phqp[t]=phq[t]; t=t+1 }
+        var k: i64 = S - 1
+        while k > 0 {
+            seed = (seed * 1103515245 + 12345) & 2147483647
+            let j = seed % (k + 1)
+            let tmp = phqp[k]; phqp[k] = phqp[j]; phqp[j] = tmp
+            k = k - 1
+        }
+        rank_into(&phqp, S, &!rx); t=0; while t<S { rc[1*1024+t]=rx[t]; t=t+1 }
+        let rp = partial_spearman4(&rc, S)
+        if ks_abs(rp) >= ks_abs(target) { ge = ge + 1 }
+        bi = bi + 1
+    }
+    let pval = ((ge + 1) as f64) / ((B + 1) as f64)
+    print("perm_target="); if useE { print("E") } else { print("C") }; println("")
+    print_kv("perm_p_two_sided", pval)
+
+    println("KEC_SPECTRAL_DONE")
+    0
+}
