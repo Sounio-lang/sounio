@@ -90,6 +90,15 @@ var CLASSIC: [i64; 49] = [0; 49]   // saved classical adjacency for edge diffing
 var COLORS: [i64; 7] = [0; 7]
 
 // ============================================================================
+// A1 extension: 14-vertex probe covering all 7 ZD fibers (lo=1..7).
+//   v0-v6:  same as classical probe  (e0, e1, e0+e1, e9, e10, e9+e10, e1+e9)
+//   v7-v12: first-half spanning  e2, e3, e4, e5, e6, e7
+//   v13:    cross-half bridge    e1+e10  (lo=1,hi=10, a valid ZD prim pair)
+// ============================================================================
+var PROBE14: [f64; 224] = [0.0; 224]   // 14 * 16
+var ADJ14:   [i64; 196] = [0; 196]     // 14 * 14
+
+// ============================================================================
 // §1. Enumerate the 84 valid primitives  (mirror validPrims from the bridge)
 //     lo in 1..7, hi in 9..15, exclude (lo ^ hi) == 8.  7*7*2 - 14 = 84.
 // ============================================================================
@@ -186,6 +195,18 @@ fn prim_norm_sq() -> f64 { return 2.0 }
 // ============================================================================
 // §4. Conflict graphs + exact chromatic number (brute force; n <= 7)
 // ============================================================================
+//
+// REGIME DETECTOR INSERTION POINT (Erdős 90 + 168):
+// When we move beyond brute-force n<=7 chromatic to real lower-bound proofs
+// (is the twisted graph 4-colorable? 5-colorable?), the encoding becomes a
+// non-trivial SMT instance (CNF + possible LIA coordinate constraints).
+// The full regime-aware controller in theorem/smt.sio will modulate whether
+// the inner solver runs in aggressive Proof mode (suppress TS/exploration
+// after detecting high conflict rate + low avg d) or allows controlled
+// epistemic exploration when the ZD surgery has produced heterogeneous
+// clause structure (the regime where GUM-TS showed 57.7% win rate).
+// This is the concrete bridge from 168 surgeries to the epistemic decision engine.
+// Full mapping: docs/research/erdos90-regime-detector-insertion-map.md
 
 fn clear_adj() with Mut {
     var i = 0
@@ -388,3 +409,119 @@ pub fn erdos_run_demo() -> i64 with IO, Mut, Panic, Div {
 }
 
 pub fn erdos_unit_distance_module_ready() -> i32 { 1 }
+
+// Public surface for the regime-chromatic probe (Level-3 LC-surgical connection).
+// These expose the per-surgery adjacency data that erdos_run_demo uses internally.
+pub fn build_twisted_adj_pub(idx: i64) with Mut, Panic { build_twisted_adj(idx) }
+pub fn count_edges_pub() -> i64 { count_edges() }
+pub fn get_adj_edge(i: i64, j: i64) -> i64 { ADJ[(i * 7 + j) as usize] }
+
+// ZD primitive coordinate getters — for A2/A1 regime probes.
+pub fn get_prim_lo(i: i64) -> i64  { PRIM_LO[i as usize] }
+pub fn get_prim_hi(i: i64) -> i64  { PRIM_HI[i as usize] }
+pub fn get_prim_neg(i: i64) -> i64 { PRIM_NEG[i as usize] }
+
+// ============================================================================
+// A1 probe: 14-vertex unit-distance graph spanning all 7 ZD fibers.
+// ============================================================================
+
+fn set_coord14(pt: i64, k: i64, v: f64) with Mut {
+    PROBE14[(pt * 16 + k) as usize] = v
+}
+
+pub fn init_probe14() with Mut {
+    var i = 0
+    while i < 224 { PROBE14[i as usize] = 0.0; i = i + 1 }
+    // v0-v6: identical to classical 7-vertex probe
+    set_coord14(0, 0, 1.0)
+    set_coord14(1, 1, 1.0)
+    set_coord14(2, 0, 1.0); set_coord14(2, 1, 1.0)
+    set_coord14(3, 9, 1.0)
+    set_coord14(4, 10, 1.0)
+    set_coord14(5, 9, 1.0); set_coord14(5, 10, 1.0)
+    set_coord14(6, 1, 1.0); set_coord14(6, 9, 1.0)
+    // v7-v12: first-half basis elements spanning lo=2..7
+    set_coord14(7, 2, 1.0)
+    set_coord14(8, 3, 1.0)
+    set_coord14(9, 4, 1.0)
+    set_coord14(10, 5, 1.0)
+    set_coord14(11, 6, 1.0)
+    set_coord14(12, 7, 1.0)
+    // v13: cross-half bridge for lo=1,hi=10 (a valid ZD prim pair, 1^10=11≠8)
+    set_coord14(13, 1, 1.0); set_coord14(13, 10, 1.0)
+}
+
+// DIFF <- PROBE14[i] - PROBE14[j]  (reuses DIFF scratch buffer)
+fn point_diff14(i: i64, j: i64) with Mut {
+    var k = 0
+    while k < 16 {
+        DIFF[k as usize] = PROBE14[(i*16 + k) as usize] - PROBE14[(j*16 + k) as usize]
+        k = k + 1
+    }
+}
+
+// Build 14x14 adjacency after ZD surgery idx.
+// Reuses rmul_prim (reads DIFF, writes TW) and norm_sq.
+fn build_twisted_adj14(idx: i64) with Mut, Panic {
+    var i = 0
+    while i < 196 { ADJ14[i as usize] = 0; i = i + 1 }
+    let target = prim_norm_sq()
+    i = 0
+    while i < 14 {
+        var j = i + 1
+        while j < 14 {
+            point_diff14(i, j)
+            rmul_prim(idx)
+            let d = norm_sq(&TW)
+            if near(d, target, 1.0e-9) == 1 {
+                ADJ14[(i*14 + j) as usize] = 1
+                ADJ14[(j*14 + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn count_edges14() -> i64 {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < 14 {
+        var j: i64 = i + 1
+        while j < 14 {
+            if ADJ14[(i*14 + j) as usize] == 1 { n = n + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+pub fn init_probe14_pub() with Mut { init_probe14() }
+pub fn build_twisted_adj14_pub(idx: i64) with Mut, Panic { build_twisted_adj14(idx) }
+pub fn count_edges14_pub() -> i64 { count_edges14() }
+pub fn get_adj14_edge(i: i64, j: i64) -> i64 { ADJ14[(i*14 + j) as usize] }
+
+// Custom-vertex API: caller sets coordinates directly, then calls build_twisted_adj14_pub.
+pub fn zero_probe14() with Mut {
+    var i = 0
+    while i < 224 { PROBE14[i as usize] = 0.0; i = i + 1 }
+}
+pub fn set_probe14_coord(pt: i64, k: i64, v: f64) with Mut {
+    PROBE14[(pt * 16 + k) as usize] = v
+}
+
+// Count edges among the first n vertices only (for sub-probes smaller than 14).
+pub fn count_edges_n(n: i64) -> i64 {
+    var cnt: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = i + 1
+        while j < n {
+            if ADJ14[(i*14 + j) as usize] == 1 { cnt = cnt + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return cnt
+}
