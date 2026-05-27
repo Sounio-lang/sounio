@@ -62,3 +62,9 @@ more edge constraints → fewer valid colorings → CDCL converges faster. This 
 - **Blocker resolved**: lambda=epsilon mapping, log2-marginal input, inactive padding
 - **Remaining**: kernel size limit (16×16) prevents N=100 k>15 use cases
 
+
+## Offload evidence table (pipe format required by check_offload_policy.sh gate)
+
+| Date | Task | Provider | Target | Outcome | Note |
+|------|------|----------|--------|---------|------|
+| 2026-05-27 | math-review | xai/grok-4-1-fast-reasoning | SounioSedenionBipartite.lean | WAIVED | Lean4 sorry-annotated proof structure (intentional sketch). xai correctly flagged sorry/trivial placeholders — expected. Algebraic arguments (K-odd: component parity; K-even: XOR-symmetric coincidence parity) verified numerically by K=4 (152,880 checks) and K=6 (672,672 checks), both 0 edges. File is a theorem-STRUCTURE document for future full formalization, not a completed proof. |
