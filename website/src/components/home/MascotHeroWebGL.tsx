@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { createSignal, onMount, onCleanup } from 'solid-js';
 import * as THREE from 'three';
 

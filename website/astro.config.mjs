@@ -2,6 +2,7 @@
 import { defineConfig } from 'astro/config';
 
 import react from '@astrojs/react';
+import solidJs from '@astrojs/solid-js';
 import tailwindcss from '@tailwindcss/vite';
 import mdx from '@astrojs/mdx';
 import sitemap from '@astrojs/sitemap';
@@ -12,7 +13,8 @@ export default defineConfig({
   site: 'https://www.souniolang.org',
 
   integrations: [
-    react(),
+    react({ include: ['**/components/common/**', '**/components/docs/**', '**/components/home/CodeExamples.tsx', '**/components/playground/**', '**/components/science-simulators/**', '**/components/about/**'] }),
+    solidJs({ include: ['**/components/home/MascotHeroWebGL.tsx'] }),
     sitemap({
       i18n: {
         defaultLocale: 'en',
