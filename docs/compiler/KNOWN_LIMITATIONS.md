@@ -57,8 +57,8 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 | Component | Registry row | Honest status |
 |-----------|--------------|---------------|
 | **Standard library (broad surface)** | `stdlib.surface = prototype` | Do not claim broad stdlib callability. The 251/251 reliability gate covers ~27% of stdlib files. |
-| **Formatter — Phase 1 (token-level)** | `tooling.editor = prototype` | **Shipped.** `souc format <file>` dispatches to `tools/fmt/sounio-fmt.sh`. Idempotency gate: `scripts/gates/g5a_formatter_idempotent.sh` (4/4 PASS on stdlib + fixture). Phase 1 rules: tab→4-space expansion, trailing-whitespace strip, ≥3 blank lines collapsed to 1, `,` and `->` spacing normalised outside strings/comments. **Deferred to Phase 2:** operator spacing for `+`, `-`, `*`, `/`, `:`, `=` (ambiguous without a parse tree); AST-based indentation; diff-mode output. No AST round-trip guarantee — use `souc check` to verify file validity after formatting. |
-| **REPL** | `tooling.editor = prototype` | `tools/repl.sh` is a thin Bash wrapper; not exposed as a `souc` subcommand. |
+| **Formatter — Phase 1 (token-level)** | `tooling.editor = prototype` | **G5a landed 2026-05-28.** `souc format <file>` / `souc fmt` dispatches to `tools/fmt/sounio-fmt.sh`. Phase 1 rules (tab→4-space expansion, trailing-whitespace strip, ≥3 blank lines collapsed to 1, `,` + `->` spacing) normalised outside strings/comments. Idempotency gate `scripts/gates/g5a_formatter_idempotent.sh` (4/4 PASS on stdlib + fixture). **Deferred to Phase 2:** operator spacing for `+`, `-`, `*`, `/`, `:`, `=` (ambiguous without a parse tree); AST-based indentation; diff-mode output. No AST round-trip guarantee — use `souc check` to verify file validity after formatting. |
+| **REPL** | `tooling.editor = prototype` | **G5b landed 2026-05-28.** `souc repl` dispatches to `tools/repl.sh`, a souc-native file-based eval loop (each input is compiled and executed by *this* `souc` binary, not a separate Rust reimplementation). Gate: `scripts/gates/g5b_repl_eval.sh` PASS. Open: fully-Sounio eval loop in `self-hosted/repl/` deferred (needs process-spawn primitives). |
 | **Package manager / registry** | `tooling.package = prototype` | Local `~/.sounio/registry/` only. No public registry. |
 | **Generic structs/functions/traits** | `generics.* = prototype` | 1–2 type params work; do not claim a mature trait ecosystem. Trait bounds are parsed but not enforced at call sites. No trait objects. |
 | **Linear closures** | `closures.lambdas = validated_research` | Regular closures (capture, HOF, escape) are **implemented and gate-tested** (16/17 `tests/run-pass/closure_*.sio`). **Linear closures** (capturing linear resources, `closure_linear.sio`) are the one open feature — marked `//@ ignore`, tracked separately. |
@@ -87,8 +87,10 @@ This file previously claimed several rows as "Production" that the public-claim 
 
 - **Removed:** the row claiming `Formatter Production`. No `souc format` subcommand exists; no `tools/fmt*` binary exists.
 - **Removed:** the "No active known bugs" assertion. Bundle baseline is 766 errors with three named roots.
-- **Removed:** `CLI: check/build/run/repl/format/doc` — `repl`/`format`/`doc` are not subcommands of `bin/souc`. They print *"unsupported command for the checked self-hosted launcher"*.
-- **Updated (2026-05-28):** formatter row revised — G5a Phase 1 token-level formatter shipped (`tools/fmt/sounio-fmt.sh`, `souc format` subcommand). See formatter row above for Phase 1 scope and Phase 2 deferrals.
+- **Removed:** `CLI: check/build/run/repl/format/doc` — was wrong about `repl` and `format` (both now wired 2026-05-28, see G5a/G5b rows above). `doc` remains unimplemented in this checkout.
+- **Added 2026-05-28:** G5a formatter shipped (`tools/fmt/sounio-fmt.sh`, `souc format` subcommand). See formatter row above for Phase 1 scope and Phase 2 deferrals.
+- **Added 2026-05-28:** G5b REPL shipped (`souc repl` → `tools/repl.sh`, souc-native eval loop).
+- **Added 2026-05-28:** G6 public install path — `scripts/install.sh` + `scripts/release.sh` stage compiler + stdlib + launcher into arbitrary `--prefix`. Discriminator: `bash scripts/install.sh --prefix=/tmp/t && /tmp/t/bin/souc --version`.
 - **Downgraded:** LLVM Codegen from `Production` to `Validated research` — the LLVM bridge is wired but disabled in the checked binary.
 - **Reframed:** LSP, REPL, Package Manager to mirror the registry's `prototype` tier.
 - **Added:** "Active Known Bugs / Architectural Gaps" section enumerating the three bundle-compile roots.
