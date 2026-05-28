@@ -2294,6 +2294,26 @@ impl Parser {
         }
     }
 
+    fn parse_policy_compare_op(self) -> (Parser, CompareOp) with Mut, IO, Panic, Div {
+        let op_tok = self.peek()
+        if op_tok == TokenKind::Lt {
+            (self.advance(), CompareOp::CmpLt)
+        } else if op_tok == TokenKind::LtEq {
+            (self.advance(), CompareOp::CmpLe)
+        } else if op_tok == TokenKind::Gt {
+            (self.advance(), CompareOp::CmpGt)
+        } else if op_tok == TokenKind::GtEq {
+            (self.advance(), CompareOp::CmpGe)
+        } else if op_tok == TokenKind::EqEq {
+            (self.advance(), CompareOp::CmpEq)
+        } else {
+            var p = self
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            (p.advance(), CompareOp::CmpEq)
+        }
+    }
+
     fn parse_policy_requirement(self) -> (Parser, PolicyRequirement) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.expect(TokenKind::Require)
@@ -2301,9 +2321,28 @@ impl Parser {
         let metric_name = p.current_name()
         p = p.expect_ident()
 
-        let cmp_pair = p.parse_policy_compare_op()
-        p = cmp_pair.0
-        let cmp_op = cmp_pair.1
+        var cmp_op: CompareOp = CompareOp::CmpEq
+        let op_tok = parser_peek(p)
+        if op_tok == TokenKind::Lt {
+            cmp_op = CompareOp::CmpLt
+            p = p.advance()
+        } else if op_tok == TokenKind::LtEq {
+            cmp_op = CompareOp::CmpLe
+            p = p.advance()
+        } else if op_tok == TokenKind::Gt {
+            cmp_op = CompareOp::CmpGt
+            p = p.advance()
+        } else if op_tok == TokenKind::GtEq {
+            cmp_op = CompareOp::CmpGe
+            p = p.advance()
+        } else if op_tok == TokenKind::EqEq {
+            cmp_op = CompareOp::CmpEq
+            p = p.advance()
+        } else {
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            p = p.advance()
+        }
 
         var threshold: f64 = 0.0
         var threshold_kind: i64 = 0
@@ -2347,123 +2386,9 @@ impl Parser {
         })
     }
 
-    fn parse_policy_compare_op(self) -> (Parser, CompareOp) with Mut, IO, Panic, Div {
-        let op_tok = self.peek()
-        if op_tok == TokenKind::Lt {
-            (self.advance(), CompareOp::CmpLt)
-        } else if op_tok == TokenKind::LtEq {
-            (self.advance(), CompareOp::CmpLe)
-        } else if op_tok == TokenKind::Gt {
-            (self.advance(), CompareOp::CmpGt)
-        } else if op_tok == TokenKind::GtEq {
-            (self.advance(), CompareOp::CmpGe)
-        } else if op_tok == TokenKind::EqEq {
-            (self.advance(), CompareOp::CmpEq)
-        } else {
-            var p = self
-            p.had_error = true
-            p.error_count = p.error_count + 1
-            (p.advance(), CompareOp::CmpEq)
-        }
-    }
-
     // ============================================================
     // Refinement type: { var: Type | var op value }
     // ============================================================
-
-    fn parse_refinement_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
-        let start = self.current_span()
-        var p = self.advance()  // skip '{'
-
-        // Parse: var_name : BaseType
-        let var_name = p.current_name()
-        p = p.expect_ident()
-        p = p.expect(TokenKind::Colon)
-        let type_pair = p.parse_type()
-        p = type_pair.0
-        let base_ty = type_pair.1
-
-        // Expect '|'
-        p = p.expect(TokenKind::Pipe)
-
-        // Parse predicate: var_name op literal_value
-        // Skip the variable reference (should match var_name)
-        p = p.advance()  // skip var ident in predicate
-
-        // Parse comparison operator
-        var pred_op: i64 = 0
-        let op_tok = parser_peek(p)
-        if op_tok == TokenKind::Gt {
-            pred_op = 1  // refinement_op_gt
-            p = p.advance()
-        } else if op_tok == TokenKind::GtEq {
-            pred_op = 2  // refinement_op_gt_eq
-            p = p.advance()
-        } else if op_tok == TokenKind::Lt {
-            pred_op = 3  // refinement_op_lt
-            p = p.advance()
-        } else if op_tok == TokenKind::LtEq {
-            pred_op = 4  // refinement_op_lt_eq
-            p = p.advance()
-        } else if op_tok == TokenKind::EqEq {
-            pred_op = 5  // refinement_op_eq
-            p = p.advance()
-        } else if op_tok == TokenKind::BangEq {
-            pred_op = 6  // refinement_op_neq
-            p = p.advance()
-        } else {
-            // Unexpected token — flag error and continue
-            p.had_error = true
-            p.error_count = p.error_count + 1
-            p = p.advance()
-        }
-
-        // Parse literal value (int or float)
-        var pred_int_val: i64 = 0
-        var pred_float_val: f64 = 0.0
-        var pred_is_float = false
-        let val_tok = parser_peek(p)
-        if val_tok == TokenKind::IntLit {
-            let tok = p.current()
-            pred_int_val = tok.int_value
-            pred_float_val = pred_int_val as f64
-            p = p.advance()
-        } else if val_tok == TokenKind::FloatLit {
-            let tok = p.current()
-            pred_float_val = tok.float_value
-            pred_int_val = pred_float_val as i64
-            pred_is_float = true
-            p = p.advance()
-        } else {
-            p.had_error = true
-            p.error_count = p.error_count + 1
-            p = p.advance()
-        }
-
-        // Expect '}'
-        p = p.expect(TokenKind::RBrace)
-
-        let span = p.span_from(start)
-        let ri = RefinementInfo {
-            var_name: var_name,
-            base_type: Some(Box::new(base_ty)),
-            pred_op: pred_op,
-            pred_int_val: pred_int_val,
-            pred_float_val: pred_float_val,
-            pred_is_float: pred_is_float,
-        }
-        (p, TypeExpr {
-            kind: TypeExprKind::TypeRefinement,
-            span: span,
-            path: empty_path(),
-            type_args: None,
-            inner: None,
-            array_size: None,
-            effects: None,
-            knowledge_info: None,
-            refinement_info: Some(Box::new(ri)),
-        })
-    }
 
     // ============================================================
     // Use declaration: use path::to::module [::*]
@@ -2995,6 +2920,24 @@ fn reverse_variant_def_list_loop(
             let next = (*node).tail
             let rev_node = VariantDefList { head: (*node).head, tail: acc }
             reverse_variant_def_list_loop(next, Some(Box::new(rev_node)))
+        },
+    }
+}
+
+fn reverse_item_list_opt(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
+    reverse_item_list_loop(items, None)
+}
+
+fn reverse_item_list_loop(
+    current: Option<Box<ItemList>>,
+    acc: Option<Box<ItemList>>,
+) -> Option<Box<ItemList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = ItemList { head: (*node).head, tail: acc }
+            reverse_item_list_loop(next, Some(Box::new(rev_node)))
         },
     }
 }
