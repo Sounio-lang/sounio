@@ -1,4 +1,7 @@
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
+import gsap from 'gsap';
+import { ScrollTrigger } from 'gsap/ScrollTrigger';
+gsap.registerPlugin(ScrollTrigger);
 
 export interface SimulatorShellProps {
   title: string;
@@ -17,8 +20,23 @@ export function SimulatorShell({
   logLines,
   isHalted,
 }: SimulatorShellProps) {
+  const shellRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = shellRef.current;
+    if (!el) return;
+    const mm = gsap.matchMedia();
+    mm.add('(prefers-reduced-motion: no-preference)', () => {
+      gsap.from(el, {
+        y: 36, opacity: 0, duration: 0.8, ease: 'power2.out',
+        scrollTrigger: { trigger: el, start: 'top 82%', once: true },
+      });
+    });
+    return () => mm.revert();
+  }, []);
+
   return (
-    <div className="simulator-shell glass glass-specular rounded-[var(--radius-xl)] overflow-hidden flex flex-col mt-[3rem] mb-[2rem] border border-[var(--glass-border)] relative z-10">
+    <div ref={shellRef} className="simulator-shell glass glass-specular rounded-[var(--radius-xl)] overflow-hidden flex flex-col mt-[3rem] mb-[2rem] border border-[var(--glass-border)] relative z-10">
       <div className="p-[1.5rem] border-b border-[var(--glass-border)] bg-[rgba(255,255,255,0.02)]">
         <h3 className="text-[1.25rem] font-[600] text-[var(--color-text-primary)] mb-[0.25rem]">
           {title}

@@ -10,6 +10,7 @@
          test-knowledge-static-values test-knowledge-runtime-obligations \
          test-knowledge-runtime-guards test-knowledge-runtime-guard-directive \
          test-knowledge-runtime-guard-lowering-plan \
+         test-knowledge-runtime-guard-native-lowering \
          test-knowledge-context-static \
          test-semantic-knowledge-spine \
          ops-guardrail-local ops-infra-up ops-strict-up ops-status \
@@ -160,6 +161,9 @@ test-knowledge-runtime-guard-directive: ## Run compiler-side //@ knowledge-runti
 
 test-knowledge-runtime-guard-lowering-plan: ## Run compiler-side Knowledge<T> runtime guard lowering-plan gate
 	@bash scripts/ci/knowledge_runtime_guard_lowering_plan_gate.sh
+
+test-knowledge-runtime-guard-native-lowering: ## Run Sounio-native expander → compile → run gate (14 cases, replaces bash expander)
+	@bash scripts/ci/knowledge_runtime_guard_native_lowering_gate.sh
 
 test-knowledge-context-static: ## Run static Knowledge<T> umbrella gate
 	@bash scripts/ci/knowledge_context_static_gate.sh

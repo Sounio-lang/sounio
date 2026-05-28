@@ -294,45 +294,101 @@ A live probe against `tests/run-pass/closure_*.sio` (17 files) on 2026-05-27 sho
 - Three new run-pass fixtures: `closure_arity_2.sio`, `closure_returned.sio`, `type_hash_3level_nesting.sio`
 - Open: `closure_linear.sio` (`//@ ignore`) — linear closures not yet implemented (E001 at line 13)
 
-### G4 — LSP-grade diagnostic catalog (CLOSED, commit `06d93d628`)
+### G4 — LSP-grade diagnostic catalog (CLOSED, commit `7e9da3253`)
 
-Every priority compiler diagnostic in `lean_single.sio` now carries a stable `E-code`. `souc check --json` emits the full `sounio.diagnostic.v1` shape with codes populated. `souc explain <CODE>` is a new subcommand.
+All `error:` emit sites in `lean_single.sio` now carry stable `E-codes`. `souc check --json` emits `sounio.diagnostic.v1` JSON. `souc explain <CODE>` prints per-code explanations.
 
-**Codes assigned (priority set):**
+**Codes newly assigned (this session, E208–E228):**
 
 | Code | Diagnostic |
 |------|-----------|
-| E001 | Type mismatch / linear constraint violation |
-| E006 | Arity mismatch |
-| E007 | Too many local variables |
-| E008 | Too many globals |
-| E035 | Effect not declared in function signature (3 emit sites) |
-| E036 | Unobserved\<T\> crosses observation boundary (2 emit sites) |
-| E040 | Rust `let mut` syntax — use `var` |
-| E041 | Rust `&mut` syntax — use `&!` |
-| E042 | Rust attribute `#[...]` |
-| E043 | Rust macro `ident!(...)` |
-| E067–E072, E170–E171, E201–E207 | pre-existing codes, preserved |
+| E208 | Refinement type violation — integer value |
+| E209 | Refinement type violation — f64 value |
+| E210 | Algebra property violation |
+| E211 | Study block requires at least one hypothesis |
+| E212 | Hessian AD over a non-associative algebra |
+| E213 | Tuple destructure arity mismatch |
+| E214 | Confidence gate violation |
+| E215 | EpistemicComplete violation |
+| E216 | Infinite recursive type |
+| E217 | Invalid function body span (codegen) |
+| E218 | Tail type mismatch (codegen) |
+| E219 | Function pass mismatch (codegen) |
+| E220 | Unresolved function body for call target (linker) |
+| E221 | No main function |
+| E222 | Code buffer overflow |
+| E223 | Too many ExitProcess call sites (PE/Windows) |
+| E224 | Unreadable import |
+| E225 | Import dedup table full |
+| E226 | Import path table full |
+| E227 | Import too large for SRC buffer |
+| E228 | Import copy truncated |
+| E001–E207 | pre-existing codes, preserved and unchanged |
 
 **Artifacts:**
-- `docs/llm-guide/error-catalog.md`: machine-parseable 21-row table appended (code, component, severity, gloss, link)
-- `docs/llm-guide/explanations/`: 22 new per-code `.md` files (E001, E006-E008, E035-E036, E040-E043, E067, E070, E072, E170-E171, E201-E207)
-- `bin/souc emit_diagnostics_json`: rewritten to parse `error[Exxxx]: msg at line N` with code field populated; legacy `error: msg at line N` falls back to E000
+- `docs/llm-guide/error-catalog.md`: 21 new rows appended (E208–E228)
+- `docs/llm-guide/explanations/E208–E228.md`: 21 new per-code explanation files
+- `bin/souc`: replaced with shell driver; routes `check [--json]` and `explain <CODE>` subcommands; delegates to `souc-linux-x86_64` for compilation
+- `tests/compile-fail/diagnostic_codes_*.sio`: 3 new fixtures (E208, E216, E221) verified
 
 **Gates passed (2026-05-28):**
 ```
-$ ./bin/souc check examples/async_demo.sio --json
-  → valid sounio.diagnostic.v1 JSON, code field populated
-$ ./bin/souc explain E035
+$ ./bin/souc check tests/run-pass/type_hash_3level_nesting.sio --json
+  → {"version":"sounio.diagnostic.v1","diagnostics":[]}
+$ ./bin/souc explain E221
   → explanation + minimal example + canonical fix printed
-$ ./bin/souc check self-hosted/compiler/lean_single.sio
-  → exit 0
-$ gen2 md5 == gen3 md5 == 18b21a085afb76546d18d3657ec181b5
+$ ./bin/souc check tests/compile-fail/diagnostic_codes_no_main.sio --json
+  → diagnostics: [{code:"E221",...}]
+$ gen2 md5 == gen3 md5 == 541bc868140beac2d54da976ba8ea976
 ```
 
 ### Remaining open gaps (unchanged)
 
-- **G1** — Multi-module bundle compile: 3 architectural roots still open (type-hash overflow on 3-level nesting, SRET ≥8-field, nested `&!` struct-field store). Composite-type intern table stub committed as test fixture `type_hash_3level_nesting.sio` (PASS) but the interning itself is not yet in the compiler.
+- **G1** — Multi-module bundle compile: 2 architectural roots remain (SRET ≥8-field, nested `&!` struct-field store). The third root (composite-type hash overflow) was closed in this session — see §12 addendum G1 below.
 - **G5** — Formatter / native REPL: unchanged.
+
+### G1 — Composite-type intern table (CLOSED for type-hash root, commit `fcce29dd3`)
+
+The type-hash arithmetic overflow on 3-level pointer nesting (`&Option<Box<Struct>>`) was fixed by replacing the arithmetic formula with a hash-cons intern table (`ct_register`). `CT_INNER_HASH/CT_KIND/CT_INNER_TY` arrays bumped 4096→16384. Regression fixture `tests/run-pass/type_hash_3level_nesting.sio` PASS. gen2==gen3 preserved.
+
+Remaining G1 roots: SRET ≥8-field struct return, nested `&!` struct-field store.
 - **G6** — Public install path: unchanged.
 - **EpistemicEffects.lean** (commit `848b8526c`): 589-line Lean 4 soundness sketch of the epistemic effect calculus. `lake build` green. Two `sorry` obligations documented: substitution lemma for beta reduction, and indexed-induction issue for the progress theorem.
+
+## Bundle addendum — 2026-05-28 session (struct array subscript + N-ary tuple)
+
+Commits `b7eafd745` + `8a62ff231` landed struct array subscript indexing and N-ary tuple (`.2`+) support. Binary md5 `a124c122e3e01f64ef56a71d23403e2b`. Bundle baseline: **269 errors** (down from 389).
+
+### Current error breakdown (269 total, binary md5 `a124c122e3e01f64ef56a71d23403e2b`)
+
+| Count | Error |
+|-------|-------|
+| 137 | assignment type mismatch — multi-slot struct array element stores (stride > 8; architectural) |
+| 26 | ordered comparison requires matching numeric operands |
+| 22 | if condition must be bool |
+| 17 | logical not requires bool operand |
+| 14 | unknown field access (genuine per-case Cat-D) |
+| 13 | arithmetic operands must have matching numeric types |
+| 10 | field initializer type does not match struct field |
+| 7 | logical and requires bool operands |
+| 6 | comparison operands must have the same type |
+| 5 | match must be exhaustive |
+| 7 | other (tail/return/if-arm/initializer/immutable) |
+
+### Fix attempts — all net-neutral or negative; reverted
+
+Three fixes were attempted in this session against `lean_single.sio`. All were reverted after producing 269→289→271 results (no convergence):
+
+1. **Fix A — bool in scalar tuple element path**: Added `else if r29_elem_ty == 4 { EXPR_TY = 4 }` to the scalar path at line ~15560. Result: 289 errors (worse). Root cause of regression: pre-existing TUP_CACHE hash collisions — when the bool-aware path ran, it correctly returned ty=4 for a bool element, but a different tuple that collided to the same cache slot had registered a bool entry first; that then caused `o_id < 0` comparisons to fail as "ordered comparison requires matching numeric operands" (left_ty=4 is not numeric). Fix A is structurally correct but exposes pre-existing hash collisions.
+
+2. **Fix B — ty_eq zero-hash for forward refs**: Added `if h1 == 0 || h2 == 0 { return true }` in `ty_eq` for k=6/7 (struct/enum). Result: net −27 closed / +51 opened = +24 more errors. The -27 were real fixes; the +51 were downstream errors previously masked by the type mismatch acting as a barrier. A separate workstream.
+
+3. **Fix C — TUP_CACHE size 4096→16384**: No measurable effect. The cache was not overflowing for the current bundle; collisions are a hash-function problem, not a capacity problem.
+
+### Named root cause for next session
+
+**TUP_CACHE hash collision.** The tuple hash function `tcount * 100000000 + ...` produces collisions between distinct tuple types. First writer wins; `(SomeType, bool)` registered before `(StringInterner, i64)` stores LAST_TY=4 (bool) for a slot that should hold ty=1 (i64). Any bool-aware consumer (Fix A) then incorrectly classifies what is actually i64 as bool, producing ordered-comparison / arithmetic errors.
+
+The fix must be in the hash function: widen it, reduce structural collision probability, or — as Slice A of the SOTA push plan proposes — switch tuple identity to interned structural IDs (analogous to CT_INNER_HASH for composite pointer types, committed `PR #197`). The interning approach guarantees identity equality and eliminates collision by construction.
+
+The 46 errors in the logical-not / if-condition / comparison categories (26+22+17+7+6 = 78 errors) are plausibly all rooted in TUP_CACHE collision or the bool-tuple-element path. The 137 assignment-type-mismatch and 14 unknown-field are separate architectural roots.
