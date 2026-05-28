@@ -1,0 +1,134 @@
+// examples/erdos/native_sat_scale_demo.sio
+//
+// Demonstrates the native CDCL solver (theorem::smt) AFTER raising its capacity
+// caps (vars 64→256, clauses 256→4096, literals 1024→16384). Every instance here
+// needs MORE THAN 64 boolean variables, so it was impossible before the bump.
+//
+// All instances have rigorously known chromatic numbers, validating soundness at
+// scale (a wrong array bound would flip one of these):
+//   - K_18, 4-coloring   → UNSAT (72 vars).  K_n needs n colors.
+//   - even cycle C_80, 2-coloring → SAT  (160 vars). χ(even cycle)=2.
+//   - odd  cycle C_81, 2-coloring → UNSAT (162 vars). χ(odd cycle)=3.
+//
+// This is the de Grey-scale mechanism in miniature: the native UNSAT certificate
+// scales with the solver caps — no external SAT solver, no third-party DRAT.
+
+use theorem::smt::*
+
+var ADJ: [i64; 10000] = [0; 10000]   // up to 100 vertices, flat n*n (n<=100)
+var NV: i64 = 0
+
+fn clear_graph(n: i64) with Mut, Panic {
+    NV = n
+    var i = 0
+    while i < n*n { ADJ[i as usize] = 0  i = i + 1 }
+}
+
+fn add_edge(u: i64, w: i64) with Mut, Panic {
+    ADJ[(u*NV + w) as usize] = 1
+    ADJ[(w*NV + u) as usize] = 1
+}
+
+fn build_complete(n: i64) with Mut, Panic {
+    clear_graph(n)
+    var i = 0
+    while i < n {
+        var j = i + 1
+        while j < n { add_edge(i, j)  j = j + 1 }
+        i = i + 1
+    }
+}
+
+fn build_cycle(n: i64) with Mut, Panic {
+    clear_graph(n)
+    var i = 0
+    while i < n {
+        add_edge(i, (i + 1) - ((i + 1) / n) * n)   // (i+1) mod n without %
+        i = i + 1
+    }
+}
+
+// Native CDCL k-colorability of ADJ (NV vertices). 1=SAT, 0=UNSAT.
+fn sat_kcolorable(k: i64) -> i32 with Mut, Div, Panic {
+    var ctx = smt_new()
+    var v: i64 = 0
+    while v < NV {
+        var lits: [i32; 8] = [0; 8]
+        var c: i64 = 0
+        while c < k {
+            lits[c as usize] = ((v*k + c + 1)*2 + 1) as i32
+            c = c + 1
+        }
+        smt_add_clause(&! ctx, &lits, k as i32)
+        v = v + 1
+    }
+    v = 0
+    while v < NV {
+        var c1: i64 = 0
+        while c1 < k {
+            var c2: i64 = c1 + 1
+            while c2 < k {
+                var lp: [i32; 8] = [0; 8]
+                lp[0] = ((v*k + c1 + 1)*2) as i32
+                lp[1] = ((v*k + c2 + 1)*2) as i32
+                smt_add_clause(&! ctx, &lp, 2)
+                c2 = c2 + 1
+            }
+            c1 = c1 + 1
+        }
+        v = v + 1
+    }
+    var u: i64 = 0
+    while u < NV {
+        var w: i64 = u + 1
+        while w < NV {
+            if ADJ[(u*NV + w) as usize] == 1 {
+                var c: i64 = 0
+                while c < k {
+                    var le: [i32; 8] = [0; 8]
+                    le[0] = ((u*k + c + 1)*2) as i32
+                    le[1] = ((w*k + c + 1)*2) as i32
+                    smt_add_clause(&! ctx, &le, 2)
+                    c = c + 1
+                }
+            }
+            w = w + 1
+        }
+        u = u + 1
+    }
+    smt_set_score_mode(&! ctx, 3)
+    smt_set_no_ple(&! ctx, 1)
+    return smt_solve(&! ctx)
+}
+
+fn report(name: i64, n: i64, k: i64, expect_sat: i64) with IO, Mut, Div, Panic {
+    let r = sat_kcolorable(k)
+    print("  n="); print_int(n); print(" vertices, k="); print_int(k)
+    print(" colors => "); print_int(n*k); print(" vars: ")
+    if r == 1 { print("SAT") } else { print("UNSAT") }
+    print("  (expected "); if expect_sat == 1 { print("SAT") } else { print("UNSAT") }
+    print(")")
+    let ok = if r == expect_sat { 1 } else { 0 }
+    if ok == 1 { print("  [OK]\n") } else { print("  [MISMATCH]\n") }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("=== native SAT/UNSAT past the old 64-var cap (caps now 256/4096/16384) ===\n\n")
+
+    print("K_18, 4-coloring (K_n needs n colors):\n")
+    build_complete(18)
+    report(0, 18, 4, 0)        // UNSAT, 72 vars
+
+    print("even cycle C_80, 2-coloring (chi=2):\n")
+    build_cycle(80)
+    report(0, 80, 2, 1)        // SAT, 160 vars
+
+    print("odd cycle C_81, 2-coloring (chi=3):\n")
+    build_cycle(81)
+    report(0, 81, 2, 0)        // UNSAT, 162 vars
+
+    print("\nAll instances exceed 64 vars: impossible before the cap raise. The native\n")
+    print("UNSAT certificate now scales with the solver caps — the de Grey path stays\n")
+    print("inside Sounio (next step: caps to ~2048 vars for the full 5-chromatic graph).\n")
+    return 0
+}
