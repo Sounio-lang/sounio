@@ -399,3 +399,37 @@ Got an error?
 │
 └─ Undefined variable → Top-level let? Convert to fn constant
 ```
+
+---
+
+## Machine-Readable Error Code Reference
+
+Stable codes emitted by the compiler in `error[Exxxx]:` format. Parseable by `souc check --json` into `sounio.diagnostic.v1` JSON.
+
+Use `souc explain <CODE>` for a one-paragraph explanation + minimal example + canonical fix.
+
+| Code | Component | Severity | Gloss | Explanation |
+|------|-----------|----------|-------|-------------|
+| E000 | legacy | error | Unclassified error (legacy — no code assigned) | — |
+| E001 | type-checker | error | Type mismatch / linear constraint violation | [E001.md](explanations/E001.md) |
+| E006 | type-checker | error | Arity mismatch — wrong number of arguments | [E006.md](explanations/E006.md) |
+| E007 | codegen | error | Too many local variables in function | [E007.md](explanations/E007.md) |
+| E008 | codegen | error | Too many globals | [E008.md](explanations/E008.md) |
+| E035 | type-checker/effects | error | Effect not declared in function signature | [E035.md](explanations/E035.md) |
+| E036 | type-checker/effects | error | Unobserved\<T\> crosses observation boundary without Observe | [E036.md](explanations/E036.md) |
+| E040 | parser/compat | error | Rust `let mut` — use `var` instead | [E040.md](explanations/E040.md) |
+| E041 | parser/compat | error | Rust `&mut` — use `&!` instead | [E041.md](explanations/E041.md) |
+| E042 | parser/compat | error | Rust attribute `#[...]` not valid in Sounio | [E042.md](explanations/E042.md) |
+| E043 | parser/compat | error | Rust macro `ident!(...)` not valid in Sounio | [E043.md](explanations/E043.md) |
+| E067 | type-checker/epistemic | warning | Potential confounding in epistemic model | [E067.md](explanations/E067.md) |
+| E070 | type-checker/kernel | error | IO or Mut effect in kernel function | [E070.md](explanations/E070.md) |
+| E072 | type-checker/kernel | error | Kernel function must return unit `()` | [E072.md](explanations/E072.md) |
+| E170 | type-checker/epistemic | error | `.value` on `Knowledge<T>` requires `with Epistemic` | [E170.md](explanations/E170.md) |
+| E171 | type-checker/epistemic | error | Cannot cast epistemic type to its inner type | [E171.md](explanations/E171.md) |
+| E201 | type-checker/zero-divisor | error | `ExactlyPrivate<T>` requires `with ZD` | [E201.md](explanations/E201.md) |
+| E202 | type-checker/zero-divisor | error | `Editable<T>` requires `with ZD` | [E202.md](explanations/E202.md) |
+| E203 | type-checker/zero-divisor | error | `CapabilityGated<T>` requires `with ZD` | [E203.md](explanations/E203.md) |
+| E204 | type-checker/zero-divisor | error | `Composable<T>` requires `with ZD` | [E204.md](explanations/E204.md) |
+| E205 | type-checker/zero-divisor | error | `Audited<T>` requires `with ZD, Witness` | [E205.md](explanations/E205.md) |
+| E206 | type-checker/zero-divisor | error | `Revivable<T>` requires `with ZD, Temporal` | [E206.md](explanations/E206.md) |
+| E207 | type-checker/zero-divisor | error | `Interpretable<T>` requires `with ZD` | [E207.md](explanations/E207.md) |

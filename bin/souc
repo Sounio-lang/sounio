@@ -257,41 +257,66 @@ emit_diagnostics_json() {
   local source="$1"
   local log="$2"
 
-  # file:// URI: percent-encode spaces, leave everything else.
   local abs_path
   abs_path="$(readlink -f -- "$source" 2>/dev/null || echo "$source")"
   local uri="file://${abs_path// /%20}"
 
   local diags_buf=""
   local first=1
-  while IFS= read -r line; do
-    [[ "$line" =~ ^error:\ (.+)\ at\ line\ ([0-9]+)$ ]] || continue
-    local msg="${BASH_REMATCH[1]}"
-    local lineno="${BASH_REMATCH[2]}"
-    # LSP uses zero-based line numbers; souc reports one-based.
+  while IFS= read -r rawline; do
+    local code="" msg="" lineno=""
+    # Primary: error[Exxxx]: <msg> at line <N>
+    if [[ "$rawline" =~ ^error\[([A-Z][0-9]+)\]:\ (.+)\ at\ line\ ([0-9]+)$ ]]; then
+      code="${BASH_REMATCH[1]}"
+      msg="${BASH_REMATCH[2]}"
+      lineno="${BASH_REMATCH[3]}"
+    # Primary (no trailing line): error[Exxxx]: <msg>
+    elif [[ "$rawline" =~ ^error\[([A-Z][0-9]+)\]:\ (.+)$ ]]; then
+      code="${BASH_REMATCH[1]}"
+      msg="${BASH_REMATCH[2]}"
+      lineno="1"
+    # Legacy: error: <msg> at line <N>
+    elif [[ "$rawline" =~ ^error:\ (.+)\ at\ line\ ([0-9]+)$ ]]; then
+      code="E000"
+      msg="${BASH_REMATCH[1]}"
+      lineno="${BASH_REMATCH[2]}"
+    else
+      continue
+    fi
     local lsp_line=$(( lineno - 1 ))
     [[ $lsp_line -lt 0 ]] && lsp_line=0
-
-    # Escape backslash, double-quote, tab, CR in msg.
-    # NB: error lines never contain literal newlines (already
-    # split by `read -r`), so no `\n` escape needed.
     local esc
     esc=${msg//\\/\\\\}
     esc=${esc//\"/\\\"}
     esc=${esc//$'\t'/\\t}
     esc=${esc//$'\r'/\\r}
-
-    if [[ $first -eq 1 ]]; then
-      first=0
-    else
-      diags_buf="$diags_buf,"
-    fi
-    diags_buf+=$(printf '{"severity":1,"code":"E001","source":"sounio:type","message":"%s","range":{"start":{"line":%d,"character":0},"end":{"line":%d,"character":0}}}' \
-      "$esc" "$lsp_line" "$lsp_line")
+    if [[ $first -eq 1 ]]; then first=0; else diags_buf="$diags_buf,"; fi
+    diags_buf+=$(printf '{"severity":1,"code":"%s","source":"sounio","message":"%s","range":{"start":{"line":%d,"character":0},"end":{"line":%d,"character":0}}}' \
+      "$code" "$esc" "$lsp_line" "$lsp_line")
   done < "$log"
 
   printf '{"schema":"sounio.diagnostic.v1","uri":"%s","version":null,"diagnostics":[%s]}\n' \
     "$uri" "$diags_buf"
+}
+
+compat_explain() {
+  local code="${1:-}"
+  if [[ -z "$code" ]]; then
+    echo "usage: souc explain <CODE>   (e.g. souc explain E035)" >&2
+    exit 2
+  fi
+  code="${code^^}"
+  local SCRIPT_DIR
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local expl_dir="$SCRIPT_DIR/../docs/llm-guide/explanations"
+  local expl_file="$expl_dir/${code}.md"
+  if [[ -f "$expl_file" ]]; then
+    awk 'BEGIN{fm=0} /^---/{if(fm==0){fm=1;next}else if(fm==1){fm=2;next}} fm==2{print}' "$expl_file"
+  else
+    echo "No explanation available for $code." >&2
+    echo "Codes with explanations: E001 E006 E007 E008 E035 E036 E040 E041 E042 E043 E049 E067 E070 E072 E170 E171 E201 E202 E203 E204 E205 E206 E207" >&2
+    exit 1
+  fi
 }
 
 # souc inspect --pos LINE:COL <source.sio>
@@ -689,6 +714,10 @@ case "$1" in
     set -e
     exit "$_rc"
     ;;
+  explain)
+    shift
+    compat_explain "$@"
+    ;;
   inspect)
     shift
     set +e
@@ -711,7 +740,19 @@ case "$1" in
     fi
     exec "$LSP_BIN" "$@"
     ;;
-  repl|test|fmt|lint|analyze|diagnostics|sysroot|clean|watch|serve|bench|gpu-emit|emit)
+  repl)
+    REPL_BIN="$ROOT_DIR/tools/sounio-repl/target/release/sounio-repl"
+    if [[ ! -x "$REPL_BIN" ]]; then
+      REPL_BIN="$ROOT_DIR/tools/sounio-repl/target/debug/sounio-repl"
+    fi
+    if [[ ! -x "$REPL_BIN" ]]; then
+      echo "error: sounio-repl binary not found" >&2
+      echo "hint: build with: cd tools/sounio-repl && cargo build --release" >&2
+      exit 2
+    fi
+    exec "$REPL_BIN" "$@"
+    ;;
+  test|fmt|lint|analyze|diagnostics|sysroot|clean|watch|serve|bench|gpu-emit|emit)
     echo "error: unsupported command for the checked self-hosted launcher: $1" >&2
     echo "hint: use the richer omega/pinned CLI for that workflow" >&2
     exit 2
