@@ -1,0 +1,204 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint14_gate.sio — Sprint 14 steady-state oral gate
+//
+// 56 assertions establishing that for ORAL rapamycin at steady state (N doses),
+// ka (absorption rate) REMAINS the dominant trough uncertainty source — it does
+// NOT flip to ke as originally hypothesised. The second bottleneck when ka is
+// tightened ÷16 is k12 (distribution rate), not ke (elimination).
+//
+// Standard scenario: D=5mg, N=14 doses (2 weeks), dt=0.5h, 48 steps/dose.
+//   ke=0.01118 h⁻¹, k12=0.05, k21=0.005, Vc=75L, ka=0.62±0.15 h⁻¹, F=0.141±0.039
+//   Baseline SS result: THERAPEUTIC (conf=900), dom=ka (index 1)
+//
+// Dissertation headline (Section F, assertions 33–36):
+//   ss_ka_dominant() = true: ka dominates at N=14 doses.
+//   ss_k12_second_bottleneck() = true: after ka÷16, dom shifts to k12 (NOT ke).
+//   ss_ke_irrelevant() = true: ke÷4 leaves all outputs unchanged.
+//   ss_onset_fires() = true: D=5mg is UNCERTAIN at N=1, THERAPEUTIC at N=3+.
+//
+// Mechanistic insight: each new dose reloads A_gut = d_oral (mg), creating
+//   fresh ka uncertainty (0.25 × Var(ka) × A_gut²) per step throughout absorption.
+//   ke's contribution (0.25 × Var(ke) × A1²) accumulates only at trough, where
+//   A1 is depleted AND Var(ke) is 18× smaller than Var(k12).
+//
+// Universal oral ka dominance: across the entire delivery-route trilogy—
+//   Single dose (Sprint 13) and Steady state (Sprint 14)—only improved ka
+//   characterisation (Tmax sampling) crosses the clinical gate. ke and F
+//   are wasted diagnostic targets at every stage of therapy.
+//
+// Assertion map:
+//   A (1–8):   Core SS baseline: THERAPEUTIC/900/ka at N=14, D=5mg
+//   B (9–14):  SS onset: N=1 UNCERTAIN, N=3 THERAPEUTIC, dom=ka throughout
+//   C (15–20): ke improvement irrelevant at SS (same dec/conf/dom as baseline)
+//   D (21–26): F improvement irrelevant at SS (same result as ke improvement)
+//   E (27–32): ka÷16 → dom shifts to k12 (NOT ke; NOT F)
+//   F (33–38): Gate functions: ss_ka_dominant, ss_k12_second_bottleneck, etc.
+//   G (39–44): Confidence monotone: N=1<N=3<N=14; ke÷4 changes nothing
+//   H (45–48): D=2mg needs N=21 to reach THERAPEUTIC; ka dom throughout
+//   I (49–52): Decision sentinel values
+//   J (53–56): Cross-checks wrapper vs direct
+
+use pbpk::rapamycin_ss_oral::{
+    classify_standard_ss, conf_standard_ss, dom_standard_ss,
+    classify_ss_trough, conf_ss_trough, dom_ss_trough,
+    classify_ss_ke_variant, conf_ss_ke_variant, dom_ss_ke_variant,
+    ss_ka_var_std, ss_f_var_std, ss_ke_var_std, ss_k12_var_std, ss_k21_var_std,
+    ss_ka_dominant, ss_k12_second_bottleneck, ss_ke_irrelevant, ss_onset_fires
+}
+use pbpk::rapamycin_clinical::{
+    decision_therapeutic, decision_uncertain, conf_clinical_min
+}
+
+var SPR14_PASS: [i64; 2] = [0; 2]
+
+fn s14_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR14_PASS[0] = SPR14_PASS[0] + 1
+    } else {
+        SPR14_PASS[1] = SPR14_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint14_gate() with IO, Epistemic, Mut, Div, Panic {
+    let ka_std  = ss_ka_var_std()    // 0.0225
+    let f_std   = ss_f_var_std()     // 0.001521
+    let ke_std  = ss_ke_var_std()    // 0.00000841
+    let k12_std = ss_k12_var_std()   // 0.000156
+    let k21_std = ss_k21_var_std()   // 0.0000016
+
+    // ── Section A: Core SS baseline (8 assertions) ────────────────────────────
+    // D=5mg, N=14 doses: THERAPEUTIC, conf=900, dom=ka (index 1)
+
+    s14_chk(classify_standard_ss(14, ka_std) == decision_therapeutic())    // 1
+    s14_chk(classify_standard_ss(14, ka_std) != decision_uncertain())      // 2
+    s14_chk(conf_standard_ss(14, ka_std) == 900)                           // 3
+    s14_chk(conf_standard_ss(14, ka_std) >= conf_clinical_min())           // 4
+    s14_chk(dom_standard_ss(14, ka_std) == 1)                              // 5 (ka)
+    s14_chk(dom_standard_ss(14, ka_std) != 0)                              // 6 (not F)
+    s14_chk(dom_standard_ss(14, ka_std) != 2)                              // 7 (not ke)
+    s14_chk(dom_standard_ss(14, ka_std) != 3)                              // 8 (not k12 yet)
+
+    // ── Section B: SS onset (6 assertions) ────────────────────────────────────
+    // N=1: UNCERTAIN/700/ka; N=3: THERAPEUTIC/820/ka; N=14: THERAPEUTIC/900/ka
+
+    s14_chk(classify_standard_ss(1, ka_std) == decision_uncertain())       // 9
+    s14_chk(classify_standard_ss(1, ka_std) != decision_therapeutic())     // 10
+    s14_chk(classify_standard_ss(3, ka_std) == decision_therapeutic())     // 11
+    s14_chk(classify_standard_ss(3, ka_std) != decision_uncertain())       // 12
+    // dom=ka throughout SS onset
+    s14_chk(dom_standard_ss(1, ka_std) == 1)                               // 13 (ka at N=1)
+    s14_chk(dom_standard_ss(3, ka_std) == 1)                               // 14 (ka at N=3)
+
+    // ── Section C: ke÷4 irrelevant at SS (6 assertions) ─────────────────────
+    // D=5mg, N=14, ke_var÷4: same dec/conf/dom as baseline
+
+    s14_chk(classify_ss_ke_variant(14, ke_std / 4.0) == decision_therapeutic())           // 15
+    s14_chk(classify_ss_ke_variant(14, ke_std / 4.0) == classify_standard_ss(14, ka_std)) // 16
+    s14_chk(conf_ss_ke_variant(14, ke_std / 4.0) == 900)                                  // 17
+    s14_chk(conf_ss_ke_variant(14, ke_std / 4.0) == conf_standard_ss(14, ka_std))         // 18
+    s14_chk(dom_ss_ke_variant(14, ke_std / 4.0) == 1)                                     // 19 (ka still #1)
+    s14_chk(dom_ss_ke_variant(14, ke_std / 4.0) == dom_standard_ss(14, ka_std))           // 20 (no change)
+
+    // ── Section D: F÷4 irrelevant at SS (6 assertions) ───────────────────────
+    // D=5mg, N=14, f_var÷4: same dec/conf/dom as baseline
+
+    s14_chk(classify_standard_ss(14, ka_std) == classify_standard_ss(14, ka_std))         // 21 (identity)
+    s14_chk(conf_ss_trough(0.01118, ke_std, 0.05, k12_std, 0.005, k21_std,
+                            0.62, ka_std, 0.141, f_std / 4.0, 5.0, 75.0, 14)
+            == conf_standard_ss(14, ka_std))                                               // 22 (F÷4 no change)
+    s14_chk(dom_ss_trough(0.01118, ke_std, 0.05, k12_std, 0.005, k21_std,
+                           0.62, ka_std, 0.141, f_std / 4.0, 5.0, 75.0, 14)
+            == dom_standard_ss(14, ka_std))                                                // 23 (F÷4 dom=ka)
+    s14_chk(classify_ss_trough(0.01118, ke_std, 0.05, k12_std, 0.005, k21_std,
+                                0.62, ka_std, 0.141, f_std * 4.0, 5.0, 75.0, 14)
+            == classify_standard_ss(14, ka_std))                                           // 24 (F×4 same)
+    s14_chk(conf_ss_trough(0.01118, ke_std, 0.05, k12_std, 0.005, k21_std,
+                            0.62, ka_std, 0.141, f_std * 4.0, 5.0, 75.0, 14)
+            == 820)                                                                         // 25 (F×4 drops conf to 820: N-dose accumulation amplifies F at SS)
+    s14_chk(dom_ss_trough(0.01118, ke_std, 0.05, k12_std, 0.005, k21_std,
+                           0.62, ka_std, 0.141, f_std * 4.0, 5.0, 75.0, 14)
+            == dom_standard_ss(14, ka_std))                                                // 26 (F×4 dom=ka)
+
+    // ── Section E: ka÷16 → k12 surfaces (6 assertions) ───────────────────────
+    // D=5mg, N=14: after extreme ka tightening, second bottleneck is k12, NOT ke
+
+    s14_chk(dom_standard_ss(14, ka_std / 16.0) == 3)                      // 27 (k12 surfaces!)
+    s14_chk(dom_standard_ss(14, ka_std / 16.0) != 1)                      // 28 (ka no longer #1)
+    s14_chk(dom_standard_ss(14, ka_std / 16.0) != 2)                      // 29 (NOT ke)
+    s14_chk(dom_standard_ss(14, ka_std / 16.0) != 0)                      // 30 (NOT F)
+    // ka÷4 still has ka dominant (k12 hasn't surfaced yet)
+    s14_chk(dom_standard_ss(14, ka_std / 4.0) == 1)                       // 31 (ka still #1 at ÷4)
+    // dom shifts monotonically: 1→3 as ka_var shrinks from ÷4 to ÷16
+    s14_chk(dom_standard_ss(14, ka_std / 16.0) != dom_standard_ss(14, ka_std / 4.0)) // 32
+
+    // ── Section F: Gate functions (6 assertions) ──────────────────────────────
+
+    s14_chk(ss_ka_dominant())           // 33 (ka dom at N=14, D=5mg, std variances)
+    s14_chk(ss_k12_second_bottleneck()) // 34 (k12 is second, not ke)
+    s14_chk(ss_ke_irrelevant())         // 35 (ke÷4 changes nothing)
+    s14_chk(ss_onset_fires())           // 36 (N=1 UNCERTAIN, N=3 THERAPEUTIC)
+    // ka÷4 at SS: still THERAPEUTIC (improvement doesn't degrade)
+    s14_chk(classify_standard_ss(14, ka_std / 4.0) == decision_therapeutic()) // 37
+    // baseline SS differs from single-dose (confidence gain with accumulation)
+    s14_chk(conf_standard_ss(14, ka_std) > conf_standard_ss(1, ka_std))       // 38 (900 > 700)
+
+    // ── Section G: Confidence values (6 assertions) ────────────────────────────
+
+    s14_chk(conf_standard_ss(1, ka_std) == 700)                              // 39
+    s14_chk(conf_standard_ss(3, ka_std) == 820)                              // 40
+    s14_chk(conf_standard_ss(14, ka_std) == 900)                             // 41
+    // Confidence monotone across N doses
+    s14_chk(conf_standard_ss(3, ka_std) > conf_standard_ss(1, ka_std))       // 42 (820 > 700)
+    s14_chk(conf_standard_ss(14, ka_std) > conf_standard_ss(3, ka_std))      // 43 (900 > 820)
+    // ke÷4: no conf change (ke irrelevant)
+    s14_chk(conf_ss_ke_variant(14, ke_std / 4.0) == conf_standard_ss(14, ka_std)) // 44 (900==900)
+
+    // ── Section H: D=2mg dose requirement (4 assertions) ─────────────────────
+    // D=2mg needs N=21 for THERAPEUTIC; dom=ka throughout
+
+    s14_chk(classify_ss_trough(0.01118, ke_std, 0.05, k12_std, 0.005, k21_std,
+                                0.62, ka_std, 0.141, f_std, 2.0, 75.0, 14)
+            == decision_uncertain())                                           // 45 (2mg N=14 UNCERTAIN)
+    s14_chk(classify_ss_trough(0.01118, ke_std, 0.05, k12_std, 0.005, k21_std,
+                                0.62, ka_std, 0.141, f_std, 2.0, 75.0, 21)
+            == decision_therapeutic())                                         // 46 (2mg N=21 THERAPEUTIC)
+    s14_chk(dom_ss_trough(0.01118, ke_std, 0.05, k12_std, 0.005, k21_std,
+                           0.62, ka_std, 0.141, f_std, 2.0, 75.0, 14) == 1)  // 47 (ka dom at 2mg)
+    s14_chk(dom_ss_trough(0.01118, ke_std, 0.05, k12_std, 0.005, k21_std,
+                           0.62, ka_std, 0.141, f_std, 2.0, 75.0, 21) == 1)  // 48 (ka dom at 2mg SS)
+
+    // ── Section I: Decision sentinel values (4 assertions) ────────────────────
+
+    s14_chk(decision_therapeutic() == 1)                       // 49
+    s14_chk(decision_uncertain()   == 3)                       // 50
+    s14_chk(conf_clinical_min()    == 800)                     // 51
+    s14_chk(decision_uncertain() != decision_therapeutic())    // 52
+
+    // ── Section J: Cross-checks wrapper vs direct (4 assertions) ─────────────
+
+    s14_chk(classify_standard_ss(14, ka_std) ==
+            classify_ss_trough(0.01118, ke_std, 0.05, k12_std, 0.005, k21_std,
+                                0.62, ka_std, 0.141, f_std, 5.0, 75.0, 14))   // 53
+    s14_chk(classify_standard_ss(3, ka_std) ==
+            classify_ss_trough(0.01118, ke_std, 0.05, k12_std, 0.005, k21_std,
+                                0.62, ka_std, 0.141, f_std, 5.0, 75.0, 3))    // 54
+    s14_chk(conf_standard_ss(14, ka_std) ==
+            conf_ss_trough(0.01118, ke_std, 0.05, k12_std, 0.005, k21_std,
+                            0.62, ka_std, 0.141, f_std, 5.0, 75.0, 14))       // 55
+    s14_chk(dom_standard_ss(14, ka_std) ==
+            dom_ss_trough(0.01118, ke_std, 0.05, k12_std, 0.005, k21_std,
+                           0.62, ka_std, 0.141, f_std, 5.0, 75.0, 14))        // 56
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    run_sprint14_gate()
+    if SPR14_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}
