@@ -244,6 +244,21 @@ def test_handle_magic_time():
     assert "CPU time:" in result
 
 
+def test_reset_magic():
+    """Test %reset magic clears the session."""
+    mock_kernel = Mock()
+    mock_executor = Mock()
+    mock_executor.reset_session = Mock()
+    mock_kernel.executor = mock_executor
+
+    magics = SounioMagics(mock_kernel)
+    handled, result = magics.handle_magic("%reset")
+
+    assert handled is True
+    assert "reset" in result.lower()
+    mock_executor.reset_session.assert_called_once()
+
+
 def test_ontology_search_magic():
     """Test %ontology_search uses ontology API and formats JSON."""
     mock_kernel = Mock()
