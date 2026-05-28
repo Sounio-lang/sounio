@@ -455,6 +455,166 @@ fn ocp_binop_to_ra_key(op: BinaryOp) -> i64 {
 // Pass 1: Constant propagation + folding
 // ============================================================================
 
+// Per-function constant-fold state. Bundled so helpers can take &!OcpConstFoldState
+// instead of dozens of [T; 256] params — avoids the JIT bare-array mutation bug
+// (see CLAUDE.md §13) and keeps caller-fn local count under local_cap()=1024.
+// Field order matches the original var-declaration order in ocp_const_fold.
+struct OcpConstFoldState {
+    // Core constant lattice (read by every op class).
+    is_const:   [bool; 256],
+    const_val:  [i64; 256],
+    def_at:     [i64; 256],
+    // Sprint 84 Block L: associative chain — r = (ra_base[r] assoc_op ra_const_val[r]).
+    has_ra:        [bool; 256],
+    ra_base:       [i64; 256],
+    ra_const_val:  [i64; 256],
+    ra_op:         [i64; 256],
+    // Sprint 86 Block M: negation tracking (double-neg + neg-arithmetic).
+    is_neg:    [bool; 256],
+    neg_src:   [i64; 256],
+    // Sprint 112 Block AI: bitwise NOT via XOR(-1).
+    is_bnot:   [bool; 256],
+    bnot_src:  [i64; 256],
+    // Sprint 88 Block O: mul-div cancellation — r = x * C (partial-const mul).
+    mul_valid:    [bool; 256],
+    mul_var_src:  [i64; 256],
+    mul_const_v:  [i64; 256],
+    // Sprint 89 Block P: add-sub / sub-add cancellation — r = x +/- C.
+    as_valid:    [bool; 256],
+    as_var_src:  [i64; 256],
+    as_const_v:  [i64; 256],
+    as_is_add:   [bool; 256],
+    // Sprint 96 Block T: shift-chain — r = x << C or r = x >> C.
+    sh_valid:    [bool; 256],
+    sh_var_src:  [i64; 256],
+    sh_amount:   [i64; 256],
+    sh_is_left:  [bool; 256],
+    // Sprint 101 Block Y: comparison-result tracking.
+    is_cmp_result: [bool; 256],
+    cmp_orig_src:  [i64; 256],
+    cmp_op_code:   [i64; 256],
+    // Sprint 108 Block AE: AND-mask fold — r = x & C.
+    and_valid:     [bool; 256],
+    and_var_src:   [i64; 256],
+    and_const_val: [i64; 256],
+    // Sprint 115 Block AL: sub-tracking for neg reversal.
+    al_is_sub:   [bool; 256],
+    al_sub_lhs:  [i64; 256],
+    al_sub_rhs:  [i64; 256],
+    // Sprint 116 Block AM: OR-mask tracking for superset elimination.
+    am_or_valid:      [bool; 256],
+    am_or_var_src:    [i64; 256],
+    am_or_const_val:  [i64; 256],
+    // Sprint 127 Block AO: register-register AND/OR for absorption (Huntington 1904).
+    ao_and_rr_valid: [bool; 256],
+    ao_and_rr_lhs:   [i64; 256],
+    ao_and_rr_rhs:   [i64; 256],
+    ao_or_rr_valid:  [bool; 256],
+    ao_or_rr_lhs:    [i64; 256],
+    ao_or_rr_rhs:    [i64; 256],
+    // Sprint 129 Block AQ: register-register add/mul for inverse cancellation.
+    aq_add_rr_valid: [bool; 256],
+    aq_add_rr_lhs:   [i64; 256],
+    aq_add_rr_rhs:   [i64; 256],
+    aq_mul_rr_valid: [bool; 256],
+    aq_mul_rr_lhs:   [i64; 256],
+    aq_mul_rr_rhs:   [i64; 256],
+    // Sprint 131 Block AS: register-register XOR for self-inverse cancellation.
+    as_xor_rr_valid: [bool; 256],
+    as_xor_rr_lhs:   [i64; 256],
+    as_xor_rr_rhs:   [i64; 256],
+    // Sprint 149 Block BK: consecutive same-direction shift folding.
+    bk_shl_valid: [bool; 256],
+    bk_shl_src:   [i64; 256],
+    bk_shl_amt:   [i64; 256],
+    bk_shr_valid: [bool; 256],
+    bk_shr_src:   [i64; 256],
+    bk_shr_amt:   [i64; 256],
+    // Sprint 151 Block BM: XOR constant-chain — (x ^ C1) ^ C2 -> x ^ (C1^C2).
+    bm_xor_valid: [bool; 256],
+    bm_xor_src:   [i64; 256],
+    bm_xor_cval:  [i64; 256],
+    // Sprint 157 Block BS: consecutive subtract-constant — (x - C1) - C2 -> x - (C1+C2).
+    bs_sub_valid: [bool; 256],
+    bs_sub_src:   [i64; 256],
+    bs_sub_cval:  [i64; 256],
+    // Sprint 158 Block BT: consecutive add-constant — (x + C1) + C2 -> x + (C1+C2).
+    bt_add_valid: [bool; 256],
+    bt_add_src:   [i64; 256],
+    bt_add_cval:  [i64; 256],
+}
+
+// Initialise a fresh OcpConstFoldState. Field order matches struct declaration.
+// All `[-1; N]` initialisers are written as `[0 - 1; N]` per CLAUDE.md §7 (no unary minus).
+fn ocp_cf_state_init() -> OcpConstFoldState {
+    OcpConstFoldState {
+        is_const:   [false; 256],
+        const_val:  [0; 256],
+        def_at:     [0 - 1; 256],
+        has_ra:        [false; 256],
+        ra_base:       [0 - 1; 256],
+        ra_const_val:  [0; 256],
+        ra_op:         [0; 256],
+        is_neg:    [false; 256],
+        neg_src:   [0 - 1; 256],
+        is_bnot:   [false; 256],
+        bnot_src:  [0 - 1; 256],
+        mul_valid:    [false; 256],
+        mul_var_src:  [0 - 1; 256],
+        mul_const_v:  [0; 256],
+        as_valid:    [false; 256],
+        as_var_src:  [0 - 1; 256],
+        as_const_v:  [0; 256],
+        as_is_add:   [false; 256],
+        sh_valid:    [false; 256],
+        sh_var_src:  [0 - 1; 256],
+        sh_amount:   [0; 256],
+        sh_is_left:  [false; 256],
+        is_cmp_result: [false; 256],
+        cmp_orig_src:  [0 - 1; 256],
+        cmp_op_code:   [0; 256],
+        and_valid:     [false; 256],
+        and_var_src:   [0 - 1; 256],
+        and_const_val: [0; 256],
+        al_is_sub:   [false; 256],
+        al_sub_lhs:  [0 - 1; 256],
+        al_sub_rhs:  [0 - 1; 256],
+        am_or_valid:      [false; 256],
+        am_or_var_src:    [0 - 1; 256],
+        am_or_const_val:  [0; 256],
+        ao_and_rr_valid: [false; 256],
+        ao_and_rr_lhs:   [0 - 1; 256],
+        ao_and_rr_rhs:   [0 - 1; 256],
+        ao_or_rr_valid:  [false; 256],
+        ao_or_rr_lhs:    [0 - 1; 256],
+        ao_or_rr_rhs:    [0 - 1; 256],
+        aq_add_rr_valid: [false; 256],
+        aq_add_rr_lhs:   [0 - 1; 256],
+        aq_add_rr_rhs:   [0 - 1; 256],
+        aq_mul_rr_valid: [false; 256],
+        aq_mul_rr_lhs:   [0 - 1; 256],
+        aq_mul_rr_rhs:   [0 - 1; 256],
+        as_xor_rr_valid: [false; 256],
+        as_xor_rr_lhs:   [0 - 1; 256],
+        as_xor_rr_rhs:   [0 - 1; 256],
+        bk_shl_valid: [false; 256],
+        bk_shl_src:   [0 - 1; 256],
+        bk_shl_amt:   [0; 256],
+        bk_shr_valid: [false; 256],
+        bk_shr_src:   [0 - 1; 256],
+        bk_shr_amt:   [0; 256],
+        bm_xor_valid: [false; 256],
+        bm_xor_src:   [0 - 1; 256],
+        bm_xor_cval:  [0; 256],
+        bs_sub_valid: [false; 256],
+        bs_sub_src:   [0 - 1; 256],
+        bs_sub_cval:  [0; 256],
+        bt_add_valid: [false; 256],
+        bt_add_src:   [0 - 1; 256],
+        bt_add_cval:  [0; 256],
+    }
+}
+
 // Run constant propagation + folding on a single function.
 // Tracks integer constants in a fixed-size register map (256 regs max).
 // Folds IrBinOp when both src operands are known integer constants.
