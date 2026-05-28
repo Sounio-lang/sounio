@@ -902,7 +902,9 @@ var SEQ_COUNT: i64 = 0
 // small surrogate id (CT_BASE + idx) before being packed into the inner-hash
 // slot, so magnitude does not compound ×256 per pointer level. Keeps arbitrarily
 // nested ref hashes inside [2^50, 2^51). Mirrors the SEQ/EXT_ARR intern pattern.
-var CT_INNER_HASH: [i64; 4096] = [0; 4096]
+var CT_INNER_HASH: [i64; 16384] = [0; 16384]
+var CT_KIND: [i64; 16384] = [0; 16384]
+var CT_INNER_TY: [i64; 16384] = [0; 16384]
 var CT_COUNT: i64 = 0
 var GL_BSS_BASE: i64 = 0
 var RET_AGG_BSS_OFF: i64 = 0
@@ -2811,17 +2813,21 @@ fn ct_base() -> i64 {
     return 2000000000000
 }
 
-fn ty_hash_is_composite(h: i64) -> bool {
-    return h < 0 || h >= 1125899906842624
-}
-
-fn ct_intern(inner_hash: i64) -> i64 with Mut {
+// Register a composite type (ref/option/box) by structural identity.
+// kind: 0=&T 1=&!T 2=Option<T> 3=Box<T>
+// Returns ct_base() + sequential_id. Deduplicates by (kind, inner_ty, inner_hash).
+// All decode functions are O(1) table lookups — no arithmetic, no overflow possible.
+fn ct_register(kind: i64, inner_ty: i64, inner_hash: i64) -> i64 with Mut {
     var i: i64 = 0
     while i < CT_COUNT {
-        if CT_INNER_HASH[i as usize] == inner_hash { return ct_base() + i }
+        if CT_KIND[i as usize] == kind && CT_INNER_TY[i as usize] == inner_ty && CT_INNER_HASH[i as usize] == inner_hash {
+            return ct_base() + i
+        }
         i = i + 1
     }
-    if CT_COUNT < 4096 {
+    if CT_COUNT < 16384 {
+        CT_KIND[CT_COUNT as usize] = kind
+        CT_INNER_TY[CT_COUNT as usize] = inner_ty
         CT_INNER_HASH[CT_COUNT as usize] = inner_hash
         let id = ct_base() + CT_COUNT
         CT_COUNT = CT_COUNT + 1
@@ -2831,44 +2837,45 @@ fn ct_intern(inner_hash: i64) -> i64 with Mut {
 }
 
 fn ref_hash_make(inner_ty: i64, inner_hash: i64, is_mut: i64) -> i64 with Mut {
-    let eff = if ty_hash_is_composite(inner_hash) { ct_intern(inner_hash) } else { inner_hash }
-    return 1125899906842624 + is_mut + inner_ty * 4 + eff * 256
+    return ct_register(is_mut, inner_ty, inner_hash)
 }
 
-fn ref_hash_is(h: i64) -> bool {
-    return h >= 1125899906842624
+fn ref_hash_is(h: i64) -> bool with Mut {
+    if h < ct_base() { return false }
+    let idx = h - ct_base()
+    if idx < 0 || idx >= CT_COUNT { return false }
+    let k = CT_KIND[idx as usize]
+    return k == 0 || k == 1
 }
 
-fn ref_hash_mut(h: i64) -> i64 with Div, Mut {
-    return (h - 1125899906842624) % 4
+fn ref_hash_mut(h: i64) -> i64 with Mut {
+    let idx = h - ct_base()
+    return CT_KIND[idx as usize]
 }
 
-fn ref_hash_inner_ty(h: i64) -> i64 with Div, Mut {
-    return ((h - 1125899906842624) / 4) % 64
+fn ref_hash_inner_ty(h: i64) -> i64 with Mut {
+    let idx = h - ct_base()
+    return CT_INNER_TY[idx as usize]
 }
 
-fn ref_hash_inner_hash(h: i64) -> i64 with Div, Mut {
-    let raw = (h - 1125899906842624) / 256
-    if raw >= ct_base() {
-        let idx = raw - ct_base()
-        if idx >= 0 && idx < CT_COUNT { return CT_INNER_HASH[idx as usize] }
-    }
-    return raw
+fn ref_hash_inner_hash(h: i64) -> i64 with Mut {
+    let idx = h - ct_base()
+    return CT_INNER_HASH[idx as usize]
 }
 
 fn ptr_hash_make(inner_ty: i64, inner_hash: i64, is_mut: i64) -> i64 with Mut {
     return ref_hash_make(inner_ty, inner_hash, is_mut)
 }
 
-fn ptr_hash_mut(h: i64) -> i64 with Div, Mut {
+fn ptr_hash_mut(h: i64) -> i64 with Mut {
     return ref_hash_mut(h)
 }
 
-fn ptr_hash_inner_ty(h: i64) -> i64 with Div, Mut {
+fn ptr_hash_inner_ty(h: i64) -> i64 with Mut {
     return ref_hash_inner_ty(h)
 }
 
-fn ptr_hash_inner_hash(h: i64) -> i64 with Div, Mut {
+fn ptr_hash_inner_hash(h: i64) -> i64 with Mut {
     return ref_hash_inner_hash(h)
 }
 
@@ -2876,16 +2883,18 @@ fn option_hash_make(inner_ty: i64, inner_hash: i64) -> i64 with Mut {
     return ref_hash_make(inner_ty, inner_hash, 2)
 }
 
-fn option_hash_is(h: i64) -> bool with Div, Mut {
-    if h < 1125899906842624 { return false }
-    return ref_hash_mut(h) == 2
+fn option_hash_is(h: i64) -> bool with Mut {
+    if h < ct_base() { return false }
+    let idx = h - ct_base()
+    if idx < 0 || idx >= CT_COUNT { return false }
+    return CT_KIND[idx as usize] == 2
 }
 
-fn option_hash_inner_ty(h: i64) -> i64 with Div, Mut {
+fn option_hash_inner_ty(h: i64) -> i64 with Mut {
     return ref_hash_inner_ty(h)
 }
 
-fn option_hash_inner_hash(h: i64) -> i64 with Div, Mut {
+fn option_hash_inner_hash(h: i64) -> i64 with Mut {
     return ref_hash_inner_hash(h)
 }
 
@@ -2893,9 +2902,11 @@ fn box_hash_make(inner_ty: i64, inner_hash: i64) -> i64 with Mut {
     return ref_hash_make(inner_ty, inner_hash, 3)
 }
 
-fn box_hash_is(h: i64) -> bool with Div, Mut {
-    if h < 1125899906842624 { return false }
-    return ref_hash_mut(h) == 3
+fn box_hash_is(h: i64) -> bool with Mut {
+    if h < ct_base() { return false }
+    let idx = h - ct_base()
+    if idx < 0 || idx >= CT_COUNT { return false }
+    return CT_KIND[idx as usize] == 3
 }
 
 // ── Seq<T> type hash (TY_SEQ = 12) ──────────────────────────────────────────
