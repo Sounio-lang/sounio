@@ -323,33 +323,6 @@ export function releaseRateAt(tHours, params) {
   return params.higuchiScale * kH / (2 * Math.sqrt(t));
 }
 
-/**
- * Exact analytical solve of the per-organ PS-coupling ODE for duration τ at
- * frozen C_blood (which doesn't enter the PS sub-operator at all):
- *   V_v · dC_v/dt = - PS · (C_v - C_t/Kp)
- *   V_t · dC_t/dt = + PS · (C_v - C_t/Kp)
- *
- * Conserved: M = V_v·C_v + V_t·C_t  (mass in organ).
- * Decay rate: λ = PS · (1/V_v + 1/(V_t·Kp))
- * Equilibrium: Cv_eq = M / (V_v + V_t·Kp), Ct_eq = Kp · Cv_eq.
- * Solution: C(τ) = C_eq + (C(0) - C_eq) · exp(-λ·τ).
- *
- * Mutates Cv[i], Ct[i] in place for one organ.
- */
-function psRelaxOrgan(Cv, Ct, i, Vv, Vt, Kp, PS, dt) {
-  if (PS <= 0 || Vv <= 0 || Vt <= 0 || Kp <= 0) return;
-  // Equilibrium: Cv = Ct/Kp ⇒ Ct_eq = Kp · Cv_eq.
-  // Mass conservation: Vv·Cv + Vt·Ct = M ⇒ Cv_eq = M / (Vv + Vt·Kp).
-  const mass = Vv * Cv[i] + Vt * Ct[i];
-  const denom = Vv + Vt * Kp;
-  const cvEq = mass / denom;
-  const ctEq = Kp * cvEq;
-  // Decay rate of z = Cv - Ct/Kp: λ = PS · (1/Vv + 1/(Vt·Kp)).
-  const lambda = PS * (1.0 / Vv + 1.0 / (Vt * Kp));
-  const decay = Math.exp(-lambda * dt);
-  Cv[i] = cvEq + (Cv[i] - cvEq) * decay;
-  Ct[i] = ctEq + (Ct[i] - ctEq) * decay;
-}
 
 /**
  * Fully-coupled Crank-Nicolson step on the **27-state** PBPK28 system.
