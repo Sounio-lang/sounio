@@ -14202,7 +14202,17 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 let esz = GL[(gi * 4 + 2) as usize]
                 var elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize])
                 let elem_hash = arr_hash_elem_hash(GL_TY_HASH[gi as usize])
-                if esz == 8 {
+                if elem_ty == 6 {
+                    // struct element: rax = base + rax * stride (pointer to element)
+                    let gl_stride = struct_like_nslots(elem_hash) * 8
+                    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
+                    em(0x48); em(0xb8); em64(base)  // mov rax, base
+                    em(0x48); em(0x69); em(0xc9); em32(gl_stride)  // imul rcx, rcx, stride
+                    em(0x48); em(0x01); em(0xc8)                    // add rax, rcx
+                    EXPR_TY = 6
+                    EXPR_TY_HASH = elem_hash
+                    EXPR_IS_F64 = 0
+                } else if esz == 8 {
                     // mov rcx, rax; mov rax, base; mov rax, [rax + rcx*8]
                     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
                     em(0x48); em(0xb8); em64(base)  // mov rax, base
@@ -14256,7 +14266,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         patch32(slice_ok_local, slice_ok_local_target)
                     }
                     emit_load_var(slot)  // load ptr into rax
-                    if is_arr_ty == 1 && lesiz == 8 {
+                    if is_arr_ty == 1 && elem_ty == 6 {
+                        // struct element: rax = rax + rcx * stride (pointer to element)
+                        let lv_stride = struct_like_nslots(elem_hash) * 8
+                        em(0x48); em(0x69); em(0xc9); em32(lv_stride)  // imul rcx, rcx, stride
+                        em(0x48); em(0x01); em(0xc8)                    // add rax, rcx
+                        EXPR_TY = 6
+                        EXPR_TY_HASH = elem_hash
+                        EXPR_IS_F64 = 0
+                    } else if is_arr_ty == 1 && lesiz == 8 {
                         em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
                         EXPR_TY = elem_ty
                         EXPR_TY_HASH = elem_hash
@@ -14618,6 +14636,14 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_TY = 8
                     EXPR_TY_HASH = elem_hash
                     EXPR_IS_F64 = 0
+                } else if elem_ty == 6 {
+                    // struct element: rax = rcx + rdx * stride (pointer to element)
+                    let p8_stride = struct_like_nslots(elem_hash) * 8
+                    em(0x48); em(0x69); em(0xd2); em32(p8_stride)  // imul rdx, rdx, stride
+                    em(0x48); em(0x8d); em(0x04); em(0x11)          // lea rax, [rcx + rdx]
+                    EXPR_TY = 6
+                    EXPR_TY_HASH = elem_hash
+                    EXPR_IS_F64 = 0
                 } else if esiz == 8 {
                     em(0x48); em(0x8b); em(0x04); em(0xd1)  // mov rax, [rcx + rdx*8]
                     EXPR_TY = elem_ty
@@ -14670,6 +14696,31 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_TY = 1
                     EXPR_TY_HASH = 0
                     EXPR_IS_F64 = 0
+                }
+            } else if type_is_array_ref(base_ty, base_hash) {
+                // Fixed-size array ref: rcx = ptr to array, rdx = index
+                let ar_inner_hash = ref_hash_inner_hash(base_hash)
+                let ar_esiz = arr_hash_esiz(ar_inner_hash)
+                var ar_elem_ty = arr_hash_elem_ty(ar_inner_hash)
+                let ar_elem_hash = arr_hash_elem_hash(ar_inner_hash)
+                LAST_ALEN = arr_hash_alen(ar_inner_hash)
+                if ar_elem_ty == 8 && ar_elem_hash != 0 {
+                    // nested array: load pointer-per-slot
+                    em(0x48); em(0x8b); em(0x04); em(0xd1)  // mov rax, [rcx + rdx*8]
+                    EXPR_TY = 8; EXPR_TY_HASH = ar_elem_hash; EXPR_IS_F64 = 0
+                } else if ar_elem_ty == 6 {
+                    // struct element: rax = rcx + rdx * stride
+                    let ar_stride = struct_like_nslots(ar_elem_hash) * 8
+                    em(0x48); em(0x69); em(0xd2); em32(ar_stride)  // imul rdx, rdx, stride
+                    em(0x48); em(0x8d); em(0x04); em(0x11)          // lea rax, [rcx + rdx]
+                    EXPR_TY = 6; EXPR_TY_HASH = ar_elem_hash; EXPR_IS_F64 = 0
+                } else if ar_esiz == 8 {
+                    em(0x48); em(0x8b); em(0x04); em(0xd1)  // mov rax, [rcx + rdx*8]
+                    EXPR_TY = ar_elem_ty; EXPR_TY_HASH = ar_elem_hash
+                    if ar_elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                } else {
+                    em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x11)  // movsx rax, byte [rcx+rdx]
+                    EXPR_TY = 1; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
                 }
             } else {
                 if base_ty != 0 && base_ty != 3 {
