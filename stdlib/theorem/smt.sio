@@ -170,15 +170,15 @@ struct SmtContext {
     clause_start: [i64; 4096],
     clause_len: [i64; 4096],
     clause_data: [i64; 16384],
-    assign: [i32; 256],
-    decision_level: [i32; 256],
-    trail: [i32; 256],
+    assign: [i32; 1024],
+    decision_level: [i32; 1024],
+    trail: [i32; 1024],
     trail_len: i32,
-    act_mean: [f64; 256],
-    act_var: [f64; 256],
+    act_mean: [f64; 1024],
+    act_var: [f64; 1024],
     bump_amount: f64,
-    phase: [i32; 256],
-    phase_conf: [f64; 256],
+    phase: [i32; 1024],
+    phase_conf: [f64; 1024],
     n_decisions: i32,
     n_conflicts: i32,
     score_mode: i32,
@@ -186,8 +186,8 @@ struct SmtContext {
     //   lrb_participated[v] — conflicts since v last became free in which v was blamed
     //   lrb_interval[v]     — decisions+conflicts observed while v was free (sample size)
     //   Wilson CI UCB = p_hat + z*sqrt(p_hat*(1-p_hat)/(N+z²)) where p_hat = n/N, z≈1
-    lrb_participated: [i32; 256],
-    lrb_interval: [i32; 256],
+    lrb_participated: [i32; 1024],
+    lrb_interval: [i32; 1024],
     // Distinct-levels diversity diagnostics (Thread 1, not in live heuristic path):
     //   stat_total_d — sum of smt_clause_distinct_levels across all conflict firings
     //   stat_max_d   — maximum d seen in any single conflict clause
@@ -212,8 +212,8 @@ struct SmtContext {
     //   Sampling: normal approximation N(μ_p, σ²_p), σ_p=sqrt(μ(1-μ)/n_sum).
     //   phase_mode=0: classic saved-phase+confidence (default).
     //   phase_mode=1: Beta-TS polarity selection — first fully epistemic DPLL.
-    phase_alpha: [f64; 256],
-    phase_beta: [f64; 256],
+    phase_alpha: [f64; 1024],
+    phase_beta: [f64; 1024],
     phase_mode: i32,
     // Regime-gated restart: conflict budget per attempt; 0 = disabled (default).
     // When budget is exhausted and regime != Proof, smt_solve restarts with warm
@@ -234,20 +234,20 @@ fn smt_new() -> SmtContext {
         clause_start: [0; 4096],
         clause_len: [0; 4096],
         clause_data: [0; 16384],
-        assign: [0; 256],
-        decision_level: [0; 256],
-        trail: [0; 256],
+        assign: [0; 1024],
+        decision_level: [0; 1024],
+        trail: [0; 1024],
         trail_len: 0,
-        act_mean: [0.0; 256],
-        act_var: [0.0; 256],
+        act_mean: [0.0; 1024],
+        act_var: [0.0; 1024],
         bump_amount: 1.0,
-        phase: [0; 256],
-        phase_conf: [0.5; 256],
+        phase: [0; 1024],
+        phase_conf: [0.5; 1024],
         n_decisions: 0,
         n_conflicts: 0,
         score_mode: 0,
-        lrb_participated: [0; 256],
-        lrb_interval: [1; 256],
+        lrb_participated: [0; 1024],
+        lrb_interval: [1; 1024],
         stat_total_d: 0,
         stat_max_d: 0,
         no_ple: 0,
@@ -257,8 +257,8 @@ fn smt_new() -> SmtContext {
         regime_recent_hardness: 0.0,
         regime_conflict_rate: 0.0,
         regime_avg_backjump: 0.0,
-        phase_alpha: [1.0; 256],
-        phase_beta: [1.0; 256],
+        phase_alpha: [1.0; 1024],
+        phase_beta: [1.0; 1024],
         phase_mode: 0,
         restart_budget: 0,
         n_restarts: 0,
@@ -287,7 +287,7 @@ fn smt_lit_is_neg(lit: i64) -> bool with Div {
 fn smt_lit_value(ctx: &!SmtContext, lit: i64) -> i32 with Div {
     let var_idx = smt_lit_var(lit)
     if var_idx < 0 { return 0 }
-    if var_idx >= 256 { return 0 }
+    if var_idx >= 1024 { return 0 }
     let val = ctx.assign[var_idx]
     if val == 0 { return 0 }
     if smt_lit_is_neg(lit) {
@@ -306,7 +306,7 @@ fn smt_lit_value(ctx: &!SmtContext, lit: i64) -> i32 with Div {
 // causal spread → div_mult ∈ (1,2). Replaces the unablated level*0.05 depth_weight.
 fn smt_bump_var_epistemic(ctx: &!SmtContext, var_idx: i32, clause_len: i32, div_mult: f64) with Mut, Div {
     if var_idx < 0 { return }
-    if var_idx >= 256 { return }
+    if var_idx >= 1024 { return }
     let len_f = clause_len as f64
     ctx.act_mean[var_idx] = ctx.act_mean[var_idx] + ctx.bump_amount
     let var_frac = (len_f - 1.0) / len_f
@@ -319,7 +319,7 @@ fn smt_bump_var_epistemic(ctx: &!SmtContext, var_idx: i32, clause_len: i32, div_
 // d>1: lits originate from multiple independent decision epochs (genuine spread).
 // Returns 1 if all vars are at level 0 or clause has no assigned vars.
 fn smt_clause_distinct_levels(ctx: &!SmtContext, clause_idx: i32) -> i32 with Mut, Div {
-    var seen: [i32; 256] = [0; 256]
+    var seen: [i32; 1024] = [0; 1024]
     var count: i32 = 0
     let start = ctx.clause_start[clause_idx] as i32
     let len = ctx.clause_len[clause_idx] as i32
@@ -327,9 +327,9 @@ fn smt_clause_distinct_levels(ctx: &!SmtContext, clause_idx: i32) -> i32 with Mu
     while i < len {
         let lit = ctx.clause_data[start + i]
         let v = smt_lit_var(lit)
-        if v >= 0 && v < 256 {
+        if v >= 0 && v < 1024 {
             let lv = ctx.decision_level[v]
-            if lv >= 0 && lv < 256 {
+            if lv >= 0 && lv < 1024 {
                 if seen[lv] == 0 {
                     seen[lv] = 1
                     count = count + 1
@@ -353,7 +353,7 @@ fn smt_diversity_mult(d: i32) -> f64 with Div {
 // LRB tracking: variable participated in a conflict — increment participated count.
 fn smt_lrb_blame(ctx: &!SmtContext, var_idx: i32) with Mut {
     if var_idx < 0 { return }
-    if var_idx >= 256 { return }
+    if var_idx >= 1024 { return }
     ctx.lrb_participated[var_idx] = ctx.lrb_participated[var_idx] + 1
 }
 
@@ -520,7 +520,7 @@ fn smt_update_regime(ctx: &!SmtContext, len: i32, d: i32, level: i32) with Mut, 
 // Cut phase confidence for a blamed variable: its saved polarity was suspect.
 fn smt_blame_var_phase(ctx: &!SmtContext, var_idx: i32) with Mut {
     if var_idx < 0 { return }
-    if var_idx >= 256 { return }
+    if var_idx >= 1024 { return }
     ctx.phase_conf[var_idx] = ctx.phase_conf[var_idx] * 0.5
 }
 
@@ -570,7 +570,7 @@ fn smt_conflict_clause(ctx: &!SmtContext, clause_idx: i32, level: i32) with Mut,
         smt_lrb_blame(ctx, var_idx)
         // Beta-Bernoulli update: penalise the polarity that contributed to this conflict.
         // Conflict clause is falsified, so assign[v] tells us which polarity was assigned.
-        if var_idx >= 0 && var_idx < 256 {
+        if var_idx >= 0 && var_idx < 1024 {
             if ctx.assign[var_idx] > 0 {
                 ctx.phase_beta[var_idx] = ctx.phase_beta[var_idx] + 1.0
             }
@@ -584,10 +584,10 @@ fn smt_conflict_clause(ctx: &!SmtContext, clause_idx: i32, level: i32) with Mut,
 
 fn smt_assign_var(ctx: &!SmtContext, var_idx: i32, value: i32, level: i32) -> i32 with Mut {
     if var_idx < 0 { return 0 }
-    if var_idx >= 256 { return 0 }
+    if var_idx >= 1024 { return 0 }
     if ctx.assign[var_idx] == value { return 1 }
     if ctx.assign[var_idx] != 0 { return 0 }
-    if ctx.trail_len >= 256 { return 0 }
+    if ctx.trail_len >= 1024 { return 0 }
     ctx.assign[var_idx] = value
     ctx.phase[var_idx] = value
     ctx.phase_conf[var_idx] = ctx.phase_conf[var_idx] * 0.95 + 0.05
@@ -609,7 +609,7 @@ fn smt_backtrack_to(ctx: &!SmtContext, trail_target: i32) with Mut {
     while ctx.trail_len > trail_target {
         let trail_idx = ctx.trail_len - 1
         let var_idx = ctx.trail[trail_idx]
-        if var_idx >= 0 && var_idx < 256 {
+        if var_idx >= 0 && var_idx < 1024 {
             ctx.assign[var_idx] = 0
             ctx.decision_level[var_idx] = 0
         }
@@ -619,7 +619,7 @@ fn smt_backtrack_to(ctx: &!SmtContext, trail_target: i32) with Mut {
 
 fn smt_reset_search_state(ctx: &!SmtContext) with Mut {
     var i: i32 = 0
-    while i < 256 {
+    while i < 1024 {
         ctx.assign[i] = 0
         ctx.decision_level[i] = 0
         ctx.phase[i] = 0
@@ -643,7 +643,7 @@ fn smt_reset_search_state(ctx: &!SmtContext) with Mut {
 // Does NOT reset clauses, constraints, or score_mode.
 fn smt_reset_activities(ctx: &!SmtContext) with Mut {
     var i: i32 = 0
-    while i < 256 {
+    while i < 1024 {
         ctx.act_mean[i] = 0.0
         ctx.act_var[i] = 0.0
         ctx.phase_conf[i] = 0.5
@@ -702,25 +702,25 @@ fn smt_get_stat_max_d(ctx: &SmtContext) -> i32 {
 
 fn smt_get_lrb_participated(ctx: &SmtContext, var_idx: i32) -> i32 {
     if var_idx < 0 { return 0 }
-    if var_idx >= 256 { return 0 }
+    if var_idx >= 1024 { return 0 }
     return ctx.lrb_participated[var_idx]
 }
 
 fn smt_get_lrb_interval(ctx: &SmtContext, var_idx: i32) -> i32 {
     if var_idx < 0 { return 0 }
-    if var_idx >= 256 { return 0 }
+    if var_idx >= 1024 { return 0 }
     return ctx.lrb_interval[var_idx]
 }
 
 fn smt_get_act_mean(ctx: &SmtContext, var_idx: i32) -> f64 {
     if var_idx < 0 { return 0.0 }
-    if var_idx >= 256 { return 0.0 }
+    if var_idx >= 1024 { return 0.0 }
     return ctx.act_mean[var_idx]
 }
 
 fn smt_get_act_var(ctx: &SmtContext, var_idx: i32) -> f64 {
     if var_idx < 0 { return 0.0 }
-    if var_idx >= 256 { return 0.0 }
+    if var_idx >= 1024 { return 0.0 }
     return ctx.act_var[var_idx]
 }
 
@@ -746,13 +746,13 @@ fn smt_get_regime_backjump(ctx: &SmtContext) -> f64 {
 
 fn smt_get_phase_alpha(ctx: &SmtContext, var_idx: i32) -> f64 {
     if var_idx < 0 { return 1.0 }
-    if var_idx >= 256 { return 1.0 }
+    if var_idx >= 1024 { return 1.0 }
     return ctx.phase_alpha[var_idx]
 }
 
 fn smt_get_phase_beta(ctx: &SmtContext, var_idx: i32) -> f64 {
     if var_idx < 0 { return 1.0 }
-    if var_idx >= 256 { return 1.0 }
+    if var_idx >= 1024 { return 1.0 }
     return ctx.phase_beta[var_idx]
 }
 
@@ -799,8 +799,8 @@ fn smt_unit_propagate_once(ctx: &!SmtContext, level: i32) -> i32 with Mut, Div {
 }
 
 fn smt_pure_literal_once(ctx: &!SmtContext, level: i32) -> i32 with Mut, Div {
-    var pos_seen: [i32; 256] = [0; 256]
-    var neg_seen: [i32; 256] = [0; 256]
+    var pos_seen: [i32; 1024] = [0; 1024]
+    var neg_seen: [i32; 1024] = [0; 1024]
     var clause_idx: i32 = 0
     while clause_idx < ctx.n_clauses {
         let start = ctx.clause_start[clause_idx] as i32
@@ -821,7 +821,7 @@ fn smt_pure_literal_once(ctx: &!SmtContext, level: i32) -> i32 with Mut, Div {
             while i < len {
                 let lit = ctx.clause_data[start + i]
                 let var_idx = smt_lit_var(lit)
-                if var_idx >= 0 && var_idx < 256 && ctx.assign[var_idx] == 0 {
+                if var_idx >= 0 && var_idx < 1024 && ctx.assign[var_idx] == 0 {
                     if smt_lit_is_neg(lit) {
                         neg_seen[var_idx] = 1
                     } else {
@@ -1105,7 +1105,7 @@ fn smt_lia_feasible(ctx: &!SmtContext) -> i32 with Mut, Div {
 // Contrast with smt_reset_search_state which resets everything including n_restarts.
 fn smt_warm_restart(ctx: &!SmtContext) with Mut {
     var i: i32 = 0
-    while i < 256 {
+    while i < 1024 {
         ctx.assign[i] = 0
         ctx.decision_level[i] = 0
         ctx.phase[i] = 0
@@ -1297,7 +1297,7 @@ fn smt_add_clause(ctx: &!SmtContext, lits: &[i32; 8], n_lits: i32) with Mut, Div
         ctx.clause_data[(start as i32) + i] = lit
         let var_idx = smt_lit_var(lit)
         if var_idx + 1 > ctx.n_vars {
-            ctx.n_vars = smt_min_i32(var_idx + 1, 256)
+            ctx.n_vars = smt_min_i32(var_idx + 1, 1024)
         }
         i = i + 1
     }
@@ -1318,7 +1318,7 @@ fn smt_add_lia(ctx: &!SmtContext, coeffs: &[i64; 16], bound: i64) with Mut {
 
 fn smt_get_assignment(ctx: &SmtContext, var_idx: i32) -> i32 {
     if var_idx < 0 { return 0 }
-    if var_idx >= 256 { return 0 }
+    if var_idx >= 1024 { return 0 }
     return ctx.assign[var_idx]
 }
 
