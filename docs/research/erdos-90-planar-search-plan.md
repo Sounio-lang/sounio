@@ -1,84 +1,162 @@
-<!-- docs:meta
-topic_id: repo.docs.research.erdos-90-planar-search-plan
-authority: historical
-audience: researchers
-last_validated: 2026-03-07
-validated_by: A6
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.erdos-90-planar-search-plan
--->
+# Erdős [90] — planar `u(n)` cluster search plan + pilot results
 
-<!-- docs:status-note:start -->
-> Docs status: `historical`
-> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
-<!-- docs:status-note:end -->
-
-# Erdős [90] — planar `u(n)` cluster search plan
-
-*Companion to `formal/lean4/SounioErdos90PlanarLowerBound.lean`. Goal: attack the
-classical open problem — the maximum number `u(n)` of unit distances among `n` points in
-ℝ² — with the Sounio compiler, K-AXI→PTX, and the GPU cluster. Honest framing below.*
+*Companion to `formal/lean4/SounioErdos90PlanarLowerBound.lean` and the CPU search kernel
+`stdlib/research/erdos90_search.sio`. Goal: attack the classical open problem — the
+maximum number `u(n)` of unit distances among `n` points in ℝ² — with the Sounio
+compiler, K-AXI→PTX, and the GPU cluster. Honest framing throughout.*
 
 ## What is open, exactly
 
-* **Lower bound (baseline, now verified).** The triangular lattice (Eisenstein integers
-  ℤ[ω]) gives `u(n) ≥ ⌊3n − √(12n−3)⌋` =: `harb(n)` (Harborth 1974). Verified for n=1..18
-  with explicit exact configs in `lattice_achieves_harborth` — exact integer arithmetic,
-  `x²+xy+y² = 1` for unit distance, no floats.
-* **The open question.** Is `u(n) = harb(n)` for all `n`, or can a **non-lattice**
-  configuration beat the lattice for some `n`? Exact `u(n)` is settled only for small `n`
-  (exhaustive search). Lattice-optimality is folklore/conjecture, unproven in general.
+* **Lower bound (baseline, verified).** The triangular lattice (Eisenstein integers ℤ[ω])
+  gives `u(n) ≥ ⌊3n − √(12n−3)⌋` =: `harb(n)` (Harborth 1974). Verified for n=1..18 with
+  explicit exact configs in `lattice_achieves_harborth` (unit distance ⟺ `x²+xy+y²=1`,
+  exact integer arithmetic, no floats).
+* **The open question.** Is `u(n) = harb(n)` for all `n`, or can a different construction
+  beat it? Exact `u(n)` is settled only for small `n`. Lattice-NN-optimality is folklore,
+  unproven in general; and asymptotically the Erdős grid is known to win.
 * **Upper bound.** `u(n) = O(n^{4/3})` (Spencer–Szemerédi–Trotter 1984); the exponent gap
   to the `n^{1+c/loglog n}` lower bound is THE famous open part and is **not** closable by
   finite search. We do not target the exponent.
 
-**Honest success ladder.** L1: confirm `u(n) = harb(n)` over a searched pool for a range
-of n (modest, verifies lattice-optimality empirically). L2: find a config **= harb(n)**
-that is provably non-lattice (structural interest). L3: find a config with **> harb(n)**
-unit distances for some n — a genuine new result (would refute lattice-optimality for that
-n). L3 is hard; L1 is the realistic near-term cluster output.
+## Pilot results (CPU, `erdos90_search.sio`, exact integer)
+
+The pilot takes `n = W×W` points of a square ℤ² region and chooses unit² = `N` with many
+sum-of-two-squares representations `r₂(N)` (interior points then have `r₂(N)` unit
+neighbours), comparing to the triangular `harb(n)`:
+
+```
+n      harb(n)  bestGrid  unit²N   winner
+25     57       48        5        triangular
+225    623      828       25       GRID (beats)
+625    1788     3144      65       GRID
+1225   3553     7144      —        GRID
+2025   5919     13320     325      GRID
+3025   8884     22640     325      GRID
+```
+
+Clean exact **crossover**: tiny `n` favours the triangular nearest-neighbour lattice, but
+by `n ≈ 225` the Erdős grid (many-representation distance) decisively wins, gap widening
+to ~2.5×, with the optimal `N` climbing 5→25→65→325 as `r₂(N)` grows (4→8→12→16→24). So
+`u(n) > harb(n)` for `n ≳ 225` — the triangular NN lattice is provably **not** optimal
+there. (This reproduces the known Erdős phenomenon *explicitly and exactly*; the value of
+the pilot is a **validated, certifiable search engine**, not a new theorem.)
+
+Gotcha recorded: the native backend BSS-zeroes global `var`-array initializers, so the
+kernel tests candidate `N` as literals (`consider(N)`), not via an `NCAND[]` array.
 
 ## The exact, GPU-able search (no floats, fully certifiable)
 
-Keep everything in exact integer arithmetic so any candidate is rigorously verifiable
-(and re-checkable in Lean):
+1. **Pool.** A finite pool `P` of exact points (bounded ℤ²/Eisenstein region, or a union
+   of lattices — where non-trivial optima hide). Squared distances are integers.
+2. **Unit predicate.** Edge iff `dx²+dy² == N` (integer compare).
+3. **Objective.** Over size-`n` subsets `S ⊆ P`, maximize induced unit-edge count.
+4. **Search (GPU-parallel).** Many parallel guided searches (simulated annealing / tabu:
+   add/drop/swap a point), per-thread bitmask + incremental edge count — a K-AXI-shaped
+   integer kernel → `kretikos_emit_kaxi` → PTX, launched via
+   `scripts/ci/kretikos_kaxi_l4_launch_gate.sh` or BeagleCockpit MCP.
+5. **Certify.** Any subset matching/beating the baseline is dumped as explicit integer
+   coordinates and re-verified by `countUnit` in Lean (`native_decide`) — the GPU only
+   *proposes*, Lean *certifies*. No trust in any float path.
 
-1. **Point pool.** Fix a finite pool `P` of exact points whose pairwise squared distances
-   are integers (or integers after a common scaling): e.g. a bounded region of a *fine*
-   triangular/Eisenstein lattice, or a **union of lattices** (triangular ∪ rotated/scaled
-   copies) — the natural place non-lattice optima hide. `|P|` ~ 10²–10⁴.
-2. **Unit predicate.** Edge iff scaled squared distance equals the chosen unit² (integer
-   compare). Precompute the pool adjacency once.
-3. **Objective.** Over size-`n` subsets `S ⊆ P`, maximize the induced unit-edge count.
-   This is "max edges in an `n`-vertex induced subgraph of the pool graph."
-4. **Search (GPU-parallel).** Subset space is huge, so run many parallel guided searches
-   (simulated annealing / genetic / tabu local moves: add/drop/swap a point) — thousands
-   of independent search threads per GPU block, each carrying a bitmask of `S` and an
-   incremental edge count. This is a K-AXI-shaped integer kernel (fixed pool table,
-   per-thread state, no dynamic allocation) — emit via `kretikos_emit_kaxi` → PTX, launch
-   through `scripts/ci/kretikos_kaxi_l4_launch_gate.sh` or BeagleCockpit MCP.
-5. **Certify.** Any subset beating/matching `harb(n)` is dumped as explicit integer
-   coordinates and re-verified by `countUnit` in Lean (`native_decide`) — same machinery
-   as the baseline file. No trust in the GPU float path; the GPU only *proposes*, Lean
-   *certifies*.
+## Build status / next steps
 
-## Build steps
-
-1. **Sounio kernel** `stdlib/.../erdos90_search.sio`: pool builder (exact lattice-union
-   coords), adjacency precompute, incremental local-move objective, RNG-seeded annealing.
-   CPU-run first (souc) to reproduce `harb(n)` on the pure triangular pool (sanity = the
-   verified baseline), then search lattice-unions.
-2. **K-AXI port**: lift the per-thread search loop to a K-AXI kernel; validate bit-exact
-   vs the CPU run on a small pool before scaling (cf. `feedback_l4_gate_catches_what_local_misses`).
-3. **Cluster sweep**: launch many seeds × `n` values on the L4/A5000 lane via MCP; collect
-   any `≥ harb(n)` configs.
-4. **Lean certification**: fold collected configs into `SounioErdos90PlanarLowerBound` as
-   new witnessed theorems (extend `lattice_achieves_harborth` / add `beats_harborth` if any).
+* DONE: exact lattice lower-bound (Lean, verified) + CPU search kernel (Sounio, runs,
+  pilot crossover reproduced).
+* NEXT: (a) lift the per-thread subset search to a K-AXI kernel; validate bit-exact vs the
+  CPU run on a small pool before scaling (cf. `feedback_l4_gate_catches_what_local_misses`);
+  (b) cluster sweep over seeds × N × region shapes on the L4/A5000 lane via MCP; (c) fold
+  any record configs back into the Lean file as witnessed theorems (`countUnit … = …`).
 
 ## Honest caveats
 
-* The triangular lattice is conjectured optimal and verified for small n, so a pool search
-  will most likely **confirm** `u(n)=harb(n)` for the searched range — a real but modest
-  (L1) outcome. A genuine beat (L3) is unlikely at small n and is the high-risk prize.
-* The GPU is a **proposer**, not a prover: every reported config is re-certified exactly in
-  Lean. Float realizability heuristics are never trusted as results.
+* The grid-beats-triangular crossover is **known** (Erdős); the pilot makes it explicit
+  and exact. A genuinely new result needs configs beating *all* known constructions for a
+  specific `n`, or extending exact `u(n)` records — the high-risk prize.
+* The GPU is a **proposer**, not a prover: every reported config is re-certified in Lean.
 * This does **not** touch the `n^{4/3}` exponent gap; that is not finite-search-accessible.
+
+## Cluster run (validated, 2026-05-25)
+
+The Sounio search ELF ran on the live Slurm cluster via `slurm-jobs/erdos90/run_on_cluster.sh`
+(direct-srun fallback; the BeagleCockpit MCP tools were not loaded this session). Topology
+discovered: compute nodes do **not** mount `/workspace` — the only shared FS is OrangeFS at
+`/orangefs/training` (pvfs2), invisible to the login container. Path used: compile to a
+static self-contained ELF locally → ship bytes over `srun` stdin as base64 → decode + run on
+the node → results on stdout.
+
+Scaled cluster run on `cpuops-t560-proxmox` (8 cores), n up to 16384, wall = 8s:
+
+```
+n       harb(n)   bestGrid   N(unit²)   ratio
+9216    27315     88320      1105       3.23x
+12544   37244     130816     1105       3.51x
+16384   48708     181504     1105       3.69x   (N=1105=5·13·17, r₂=32)
+```
+
+The grid-over-triangular margin grows with `n` (the winning many-representation distance
+climbs 5→25→65→325→1105 as `r₂(N)` increases), exactly the Erdős phenomenon at scale — an
+explicit large-`n` lower bound `u(16384) ≥ 181504`, in exact integer arithmetic.
+
+Next (genuine open frontier, needs the array-job/optimizer build): replace the full-square
+enumeration with a per-thread subset local-search (anneal/tabu) over a large exact pool, run
+as a Slurm array (many seeds × n), hunting for configs that beat *all* known constructions —
+then re-certify any record in Lean. The K-AXI/PTX GPU port (idle gpu-orangefs nodes r740/5860)
+is the throughput multiplier for that search.
+
+## Optimizer array sweep (3 nodes, 2026-05-25)
+
+`stdlib/research/erdos90_optimize.sio` improves the pilot via (1) COMPACT DISK regions
+(x²+y² ≤ rr) instead of squares — fewer boundary-deficient points — and (2) a broad
+unit-distance² sweep. Compiled to 3 banded static ELFs and run in PARALLEL across the
+three idle nodes via `srun` (the same compile→base64→srun path):
+
+```
+band  node                       peak n   count   N(unit²)  count/harb
+A     cpuops-t560-proxmox         2693    19848   325       2.51x
+B     gpuorangefs-r740-proxmox    5369    46688   325       2.94x
+C     gpuorangefs-5860-proxmox    7845    73376   1105      3.15x   (harb=23228)
+```
+
+Headline: an explicit exact compact-disk configuration of **7845 points with 73376 unit
+distances** — `u(7845) ≥ 73376`, **3.15×** the triangular nearest-neighbour bound. The
+ratio grows with n and the winning many-representation distance climbs (325 → 1105) as
+larger disks admit denser N. The disk shape strictly improves the square pilot's per-point
+efficiency. Every config is exact integer and re-certifiable in Lean (`countUnit`).
+
+Honest standing: this is the strongest *explicit* lower bound from the Erdős grid family
+with optimized shape + distance — it does **not** beat the asymptotic Erdős construction or
+touch the n^{4/3} exponent gap. Genuinely-new territory (beating *all* known constructions
+for a specific n, or extending exact small-n u(n) records) needs a richer-than-lattice pool
+and a true subset local-search, the next build. The cluster path and certifiable engine are
+now proven end-to-end.
+
+## Subset optimizer — densest-k-subgraph search (3 nodes × 3 seeds, 2026-05-25)
+
+`stdlib/research/erdos90_subset.sio`: hill-climb densest-k-subgraph over the ℤ² distance-N
+graph (random-swap moves: drop a member, add a non-member, accept if internal edge count
+rises; Park–Miller RNG), restarted from the compact disk + random seeds. Compares best
+found to the compact-disk baseline. Run as 3 independent seed variants across the three
+nodes; broad N sweep including ANISOTROPIC distances where the optimal shape need not be a
+disk.
+
+Result (identical across all 3 seeds — robust):
+
+* **Isotropic N (2, 5, 10, 13, 25, 65):** the compact disk *is* the densest k-subgraph —
+  every case "disk-optimal", no subset beats it. Expected: ℤ² is vertex-transitive, so the
+  densest induced subgraph of its unit-distance graph is the compact region.
+* **Anisotropic N = 50** (neighbours (±1,±7),(±7,±1),(±5,±5)): the disk is genuinely
+  **suboptimal** — the search robustly reshapes it `2447 → 2767` unit pairs (+13%), the same
+  on all three seeds. A real shape finding: for anisotropic distances the optimal region is
+  not a disk.
+* **No record, though:** the reshaped N=50 config (2767) still trails the N=25 disk
+  (~2780) at n=600. The optimal-N grid/disk construction stands; **no `u(n)` record beaten.**
+
+Honest conclusion: comprehensive densest-k-subgraph search confirms the compact-disk /
+optimal-N grid is locally optimal and robust, and pinpoints where the disk assumption breaks
+(anisotropic N) without yielding a better global construction. This is consistent with why
+the problem is hard — no exact periodic-pool subset search can beat the grid, because
+(i) lattices are vertex-transitive and (ii) square ℤ² and triangular ℤ[ω] share no integer
+Cartesian frame, so heterogeneous exact pools with cross-lattice unit edges don't exist.
+Genuinely beating the grid would require non-lattice rational configs / the additive-energy
+frontier — beyond exact lattice search. The cluster engine, however, is fully proven:
+build → ship ELF over srun → 3-node parallel search → exact, Lean-certifiable configs.

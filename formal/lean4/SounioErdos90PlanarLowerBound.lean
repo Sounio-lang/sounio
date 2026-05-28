@@ -1,42 +1,32 @@
 /-!
 # Sounio — Erdős [90] planar unit distances: the exact lattice lower bound
 
-The previous Erdős-[90] files (`SounioErdos90UnitSpectrum`, `SounioErdos90PathionGrowth`)
-studied an algebraic *high-dimensional* twisted-graph invariant and proved the associator
-graphs are **non-planar** (K₂,₃). This file turns to the **classical planar problem
-itself**: `u(n)` = the maximum number of unit-distance pairs among `n` points in ℝ².
-
-## Exact arithmetic on the triangular lattice (Eisenstein integers ℤ[ω])
-
-The extremal lower-bound configurations live on the triangular lattice. In axial integer
-coordinates `(a,b)` (point `= a·(1,0) + b·(1/2, √3/2)`), the squared Euclidean distance
-is the **integer** Eisenstein norm
+`u(n)` = the maximum number of unit-distance pairs among `n` points in ℝ². The
+extremal lower-bound configurations live on the triangular lattice (Eisenstein
+integers ℤ[ω]). In axial integer coordinates `(a,b)` (point `= a·(1,0) + b·(1/2,√3/2)`),
+the squared Euclidean distance is the **integer** Eisenstein norm
 
 > `‖(a,b) − (c,d)‖² = x² + xy + y²,  x=a−c, y=b−d`
 
-so a *unit distance* is exactly `x²+xy+y² = 1` (the six units of ℤ[ω], the 6th roots of
-unity). Everything here is exact integer arithmetic — no floats, fully `native_decide`.
-(Faint tie to the hypercomplex program: ℤ[ω] ⊂ ℂ, the level-1 Cayley–Dickson algebra.)
+so a *unit distance* is exactly `x²+xy+y² = 1` (the six units of ℤ[ω]). Exact integer
+arithmetic, fully `native_decide`. (ℤ[ω] ⊂ ℂ = level-1 Cayley–Dickson algebra.)
 
-## What this proves
-
-`greedy R n` selects `n` lattice cells by maximal marginal unit-edge gain (a deterministic
-exact construction). `harb n = ⌊3n − √(12n−3)⌋` is Harborth's lattice formula.
+`greedy R n` selects `n` lattice cells by maximal marginal unit-edge gain (deterministic,
+exact). `harb n = ⌊3n − √(12n−3)⌋` is Harborth's triangular-lattice formula.
 
 * `lattice_achieves_harborth` : for `n = 1..18` the greedy config has **exactly** `harb n`
-  unit-distance pairs — an explicit, exact, planar witness. Hence the classical lower
-  bound `u(n) ≥ ⌊3n − √(12n−3)⌋`, machine-checked with concrete configurations.
+  unit-distance pairs — an explicit, exact, planar witness. Hence `u(n) ≥ ⌊3n−√(12n−3)⌋`,
+  machine-checked with concrete configurations.
 
-This is the rigorous **baseline** — the number a search must beat. Whether `u(n)` can
-*exceed* `harb n` for some `n` (a non-lattice configuration) is the genuinely open
-frontier this baseline is built to attack on the cluster (see the Sounio search kernel /
-`docs/research/erdos-90-planar-search-plan.md`).
+This is the rigorous **baseline** the cluster search must beat. The CPU search pilot
+(`stdlib/research/erdos90_search.sio`) shows the Erdős ℤ² grid construction exceeds this
+triangular nearest-neighbour bound for `n ≳ 225` (e.g. n=225: 828 > 623), reproducing the
+known crossover explicitly and exactly. See `docs/research/erdos-90-planar-search-plan.md`.
 -/
 
 namespace Sounio.Erdos90Planar
 
-/-- Squared Euclidean distance on the triangular lattice (Eisenstein norm of the
-    difference), an exact integer. -/
+/-- Squared Euclidean distance on the triangular lattice (Eisenstein norm), exact integer. -/
 def d2 (a b : Int × Int) : Int := let x := a.1 - b.1; let y := a.2 - b.2; x*x + x*y + y*y
 
 /-- Hex (graph) distance of a lattice cell from the origin. -/
@@ -50,12 +40,12 @@ def cells (R : Nat) : List (Int × Int) :=
     let b : Int := (Int.ofNat j) - (Int.ofNat R)
     if hexdist (a,b) ≤ (Int.ofNat R) then some (a,b) else none))
 
-/-- Number of already-chosen cells at unit distance from `p` (its degree if added). -/
+/-- Number of already-chosen cells at unit distance from `p`. -/
 def deg (p : Int × Int) (chosen : List (Int × Int)) : Nat :=
   (chosen.filter (fun q => d2 p q == 1)).length
 
-/-- Greedy construction: repeatedly add the unchosen cell of `cells R` that gains the most
-    new unit edges (ties → smaller hex-distance, then lexicographic). Deterministic. -/
+/-- Greedy: repeatedly add the unchosen cell of `cells R` gaining the most unit edges
+    (ties → smaller hex-distance, then lexicographic). Deterministic. -/
 def greedy (R : Nat) (n : Nat) : List (Int × Int) :=
   (List.range n).foldl (fun chosen _ =>
     let cand := (cells R).filter (fun p => ¬ chosen.contains p)
@@ -84,7 +74,7 @@ def harb (n : Nat) : Nat := 3*n - (let s := isqrt (12*n - 3); if s*s < 12*n - 3 
 /-- **Planar lower bound `u(n) ≥ ⌊3n − √(12n−3)⌋`, witnessed.** For every `n = 1..18` the
     greedy triangular-lattice configuration realizes *exactly* `harb n` unit distances
     (exact Eisenstein arithmetic). So `u(n)` is at least the Harborth value, certified by
-    explicit configurations. This is the rigorous baseline for the cluster search. -/
+    explicit configurations. The rigorous baseline for the cluster search. -/
 theorem lattice_achieves_harborth :
     ((List.range 18).map (·+1)).all (fun n => countUnit (greedy 4 n) == harb n) = true := by
   native_decide
