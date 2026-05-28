@@ -199,6 +199,21 @@ var TUP_CACHE_LAST_TY: [i64; 4096] = [0; 4096]
 var TUP_CACHE_LAST_HASH: [i64; 4096] = [0; 4096]
 var TUP_CACHE_COUNT: i64 = 0
 
+// Extended TUP_CACHE for N-ary tuples (>2 elements)
+var TUP_CACHE_NELEM: [i64; 4096] = [0; 4096]
+// Middle elements (indices 1..nelem-2): stored at [cache_idx * 6 + (elem_idx - 1)]
+// Max 6 middle elements -> supports tuples up to 8 elements
+var TUP_CACHE_MID_TY: [i64; 24576] = [0; 24576]
+var TUP_CACHE_MID_HASH: [i64; 24576] = [0; 24576]
+var TUP_CACHE_MID_NSLOTS: [i64; 24576] = [0; 24576]
+// Tuple literal construction staging (depth-indexed to handle nested tuple literals)
+// Indexed as [depth * 16 + elem_idx]; supports 8 nesting depths x 16 elements
+var TUP_STAGE_DEPTH: i64 = 0
+var TUP_STAGE_TY: [i64; 128] = [0; 128]
+var TUP_STAGE_HASH: [i64; 128] = [0; 128]
+var TUP_STAGE_NSLOTS: [i64; 128] = [0; 128]
+var TUP_STAGE_SAVE: [i64; 128] = [0; 128]
+
 // Generic function second type-param (for fn f<T, U>)
 var GEN_FN_TP2_S: [i64; 64] = [0; 32]
 var GEN_FN_TP2_E: [i64; 64] = [0; 32]
@@ -686,21 +701,23 @@ fn tup_perturbation(first_hash: i64, last_hash: i64) -> i64 with Mut {
     mix * 1000000000
 }
 
-fn tup_cache_register(tup_hash: i64, first_ty: i64, first_hash: i64, last_ty: i64, last_hash: i64) with Panic, Mut {
-    if tup_hash == 0 { return }
+fn tup_cache_register(tup_hash: i64, first_ty: i64, first_hash: i64, last_ty: i64, last_hash: i64) -> i64 with Panic, Mut {
+    if tup_hash == 0 { return -1 }
     var i: i64 = 0
     while i < TUP_CACHE_COUNT {
-        if TUP_CACHE_KEY[i as usize] == tup_hash { return }
+        if TUP_CACHE_KEY[i as usize] == tup_hash { return i }
         i = i + 1
     }
-    if TUP_CACHE_COUNT >= 4096 { return }
+    if TUP_CACHE_COUNT >= 4096 { return -1 }
     let idx = TUP_CACHE_COUNT
     TUP_CACHE_KEY[idx as usize] = tup_hash
     TUP_CACHE_FIRST_TY[idx as usize] = first_ty
     TUP_CACHE_FIRST_HASH[idx as usize] = first_hash
     TUP_CACHE_LAST_TY[idx as usize] = last_ty
     TUP_CACHE_LAST_HASH[idx as usize] = last_hash
+    TUP_CACHE_NELEM[idx as usize] = 2
     TUP_CACHE_COUNT = TUP_CACHE_COUNT + 1
+    return idx
 }
 
 fn tup_cache_lookup(tup_hash: i64) -> i64 with Panic, Mut {
@@ -710,6 +727,53 @@ fn tup_cache_lookup(tup_hash: i64) -> i64 with Panic, Mut {
         i = i + 1
     }
     return -1
+}
+
+fn tup_cache_set_mid(ci: i64, mid_idx: i64, ty: i64, hash: i64, nslots: i64) with Panic, Mut {
+    if ci < 0 || ci >= 4096 { return }
+    if mid_idx < 0 || mid_idx >= 6 { return }
+    TUP_CACHE_MID_TY[(ci * 6 + mid_idx) as usize] = ty
+    TUP_CACHE_MID_HASH[(ci * 6 + mid_idx) as usize] = hash
+    TUP_CACHE_MID_NSLOTS[(ci * 6 + mid_idx) as usize] = nslots
+    let cur = TUP_CACHE_NELEM[ci as usize]
+    let needed = mid_idx + 3
+    if cur < needed { TUP_CACHE_NELEM[ci as usize] = needed }
+}
+
+fn tup_cache_elem_ty(ci: i64, elem_idx: i64) -> i64 with Panic, Mut {
+    if ci < 0 { return 1 }
+    let nelem = TUP_CACHE_NELEM[ci as usize]
+    if elem_idx == 0 { return TUP_CACHE_FIRST_TY[ci as usize] }
+    if elem_idx == nelem - 1 { return TUP_CACHE_LAST_TY[ci as usize] }
+    let mid_idx = elem_idx - 1
+    if mid_idx < 0 || mid_idx >= 6 { return 1 }
+    return TUP_CACHE_MID_TY[(ci * 6 + mid_idx) as usize]
+}
+
+fn tup_cache_elem_hash(ci: i64, elem_idx: i64) -> i64 with Panic, Mut {
+    if ci < 0 { return 0 }
+    let nelem = TUP_CACHE_NELEM[ci as usize]
+    if elem_idx == 0 { return TUP_CACHE_FIRST_HASH[ci as usize] }
+    if elem_idx == nelem - 1 { return TUP_CACHE_LAST_HASH[ci as usize] }
+    let mid_idx = elem_idx - 1
+    if mid_idx < 0 || mid_idx >= 6 { return 0 }
+    return TUP_CACHE_MID_HASH[(ci * 6 + mid_idx) as usize]
+}
+
+fn tup_cache_elem_nslots(ci: i64, elem_idx: i64) -> i64 with Panic, Div, Mut {
+    if ci < 0 { return 1 }
+    let nelem = TUP_CACHE_NELEM[ci as usize]
+    if elem_idx == 0 {
+        let fh = TUP_CACHE_FIRST_HASH[ci as usize]
+        return ty_slot_count(TUP_CACHE_FIRST_TY[ci as usize], fh)
+    }
+    if elem_idx == nelem - 1 {
+        let lh = TUP_CACHE_LAST_HASH[ci as usize]
+        return ty_slot_count(TUP_CACHE_LAST_TY[ci as usize], lh)
+    }
+    let mid_idx = elem_idx - 1
+    if mid_idx < 0 || mid_idx >= 6 { return 1 }
+    return TUP_CACHE_MID_NSLOTS[(ci * 6 + mid_idx) as usize]
 }
 
 fn ty_slot_count(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
@@ -4759,10 +4823,16 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         var first_f64: i64 = 0
         if first_ty == 2 { first_f64 = 1 }
         var first_nslots: i64 = ty_slot_count(first_ty, first_hash)
-        // Skip balanced parens, count elements, track last element start.
+        // Skip balanced parens, count elements, record element start positions.
         var td: i64 = 1
         var tcount: i64 = 1
         var last_elem_start: i64 = first_elem_start
+        var elem_starts_1: i64 = 0
+        var elem_starts_2: i64 = 0
+        var elem_starts_3: i64 = 0
+        var elem_starts_4: i64 = 0
+        var elem_starts_5: i64 = 0
+        var elem_starts_6: i64 = 0
         p = p + 1
         while p < TC && td > 0 {
             if TK[p as usize] == 6 { td = td + 1 }
@@ -4770,6 +4840,12 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             if td == 1 && TK[p as usize] == 28 {
                 tcount = tcount + 1
                 last_elem_start = p + 1
+                if tcount == 2 { elem_starts_1 = p + 1 }
+                if tcount == 3 { elem_starts_2 = p + 1 }
+                if tcount == 4 { elem_starts_3 = p + 1 }
+                if tcount == 5 { elem_starts_4 = p + 1 }
+                if tcount == 6 { elem_starts_5 = p + 1 }
+                if tcount == 7 { elem_starts_6 = p + 1 }
             }
             p = p + 1
         }
@@ -4785,13 +4861,84 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             if last_ty == 2 { last_f64 = 1 } else { last_f64 = 0 }
             last_nslots = ty_slot_count(last_ty, last_hash)
         }
-        let total_nslots = first_nslots + last_nslots
+        // Scan middle elements and accumulate total_nslots
+        var total_nslots: i64 = first_nslots + last_nslots
+        var mid_ty_0: i64 = 0
+        var mid_hash_0: i64 = 0
+        var mid_nslots_0: i64 = 0
+        var mid_ty_1: i64 = 0
+        var mid_hash_1: i64 = 0
+        var mid_nslots_1: i64 = 0
+        var mid_ty_2: i64 = 0
+        var mid_hash_2: i64 = 0
+        var mid_nslots_2: i64 = 0
+        var mid_ty_3: i64 = 0
+        var mid_hash_3: i64 = 0
+        var mid_nslots_3: i64 = 0
+        var mid_ty_4: i64 = 0
+        var mid_hash_4: i64 = 0
+        var mid_nslots_4: i64 = 0
+        var mid_ty_5: i64 = 0
+        var mid_hash_5: i64 = 0
+        var mid_nslots_5: i64 = 0
+        if tcount >= 3 && elem_starts_1 != 0 && elem_starts_1 != last_elem_start {
+            scan_type(elem_starts_1)
+            mid_ty_0 = SCAN_TY
+            mid_hash_0 = SCAN_TY_HASH
+            mid_nslots_0 = ty_slot_count(mid_ty_0, mid_hash_0)
+            total_nslots = total_nslots + mid_nslots_0
+        }
+        if tcount >= 4 && elem_starts_2 != 0 && elem_starts_2 != last_elem_start {
+            scan_type(elem_starts_2)
+            mid_ty_1 = SCAN_TY
+            mid_hash_1 = SCAN_TY_HASH
+            mid_nslots_1 = ty_slot_count(mid_ty_1, mid_hash_1)
+            total_nslots = total_nslots + mid_nslots_1
+        }
+        if tcount >= 5 && elem_starts_3 != 0 && elem_starts_3 != last_elem_start {
+            scan_type(elem_starts_3)
+            mid_ty_2 = SCAN_TY
+            mid_hash_2 = SCAN_TY_HASH
+            mid_nslots_2 = ty_slot_count(mid_ty_2, mid_hash_2)
+            total_nslots = total_nslots + mid_nslots_2
+        }
+        if tcount >= 6 && elem_starts_4 != 0 && elem_starts_4 != last_elem_start {
+            scan_type(elem_starts_4)
+            mid_ty_3 = SCAN_TY
+            mid_hash_3 = SCAN_TY_HASH
+            mid_nslots_3 = ty_slot_count(mid_ty_3, mid_hash_3)
+            total_nslots = total_nslots + mid_nslots_3
+        }
+        if tcount >= 7 && elem_starts_5 != 0 && elem_starts_5 != last_elem_start {
+            scan_type(elem_starts_5)
+            mid_ty_4 = SCAN_TY
+            mid_hash_4 = SCAN_TY_HASH
+            mid_nslots_4 = ty_slot_count(mid_ty_4, mid_hash_4)
+            total_nslots = total_nslots + mid_nslots_4
+        }
+        if tcount >= 8 && elem_starts_6 != 0 && elem_starts_6 != last_elem_start {
+            scan_type(elem_starts_6)
+            mid_ty_5 = SCAN_TY
+            mid_hash_5 = SCAN_TY_HASH
+            mid_nslots_5 = ty_slot_count(mid_ty_5, mid_hash_5)
+            total_nslots = total_nslots + mid_nslots_5
+        }
         SCAN_TY = 6
         // Hash: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
         // + element-hash perturbation in bits >=30 (multiple of 1B) so cache keys
         // disambiguate same-shape tuples whose element types differ.
         SCAN_TY_HASH = tcount * 100000000 + first_f64 * 10000000 + last_f64 * 1000000 + first_nslots * 1000 + total_nslots + tup_perturbation(first_hash, last_hash)
         tup_cache_register(SCAN_TY_HASH, first_ty, first_hash, last_ty, last_hash)
+        let scan_tup_ci = tup_cache_lookup(SCAN_TY_HASH)
+        if scan_tup_ci >= 0 {
+            TUP_CACHE_NELEM[scan_tup_ci as usize] = tcount
+            if tcount >= 3 && mid_ty_0 != 0 { tup_cache_set_mid(scan_tup_ci, 0, mid_ty_0, mid_hash_0, mid_nslots_0) }
+            if tcount >= 4 && mid_ty_1 != 0 { tup_cache_set_mid(scan_tup_ci, 1, mid_ty_1, mid_hash_1, mid_nslots_1) }
+            if tcount >= 5 && mid_ty_2 != 0 { tup_cache_set_mid(scan_tup_ci, 2, mid_ty_2, mid_hash_2, mid_nslots_2) }
+            if tcount >= 6 && mid_ty_3 != 0 { tup_cache_set_mid(scan_tup_ci, 3, mid_ty_3, mid_hash_3, mid_nslots_3) }
+            if tcount >= 7 && mid_ty_4 != 0 { tup_cache_set_mid(scan_tup_ci, 4, mid_ty_4, mid_hash_4, mid_nslots_4) }
+            if tcount >= 8 && mid_ty_5 != 0 { tup_cache_set_mid(scan_tup_ci, 5, mid_ty_5, mid_hash_5, mid_nslots_5) }
+        }
         SCAN_TY_NEXT = p
         return
     }
@@ -10484,71 +10631,118 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EP = EP + 1
         compile_or()
         if TK[EP as usize] == 28 {
-            // Tuple literal: (expr1, expr2, ...)
-            // First element already compiled (rax = value or pointer).
-            // Layout requirement: .0 at lowest address (highest slot), .1 above.
-            // Problem: we don't know total_slots until all elements are compiled.
-            // Strategy:
-            //   1. Save first element's rax to a temp slot.
-            //   2. Compile remaining elements (last element stays in rax).
-            //   3. Allocate tuple buffer now that total_slots is known.
-            //   4. Store last element to low slots (dst_start = tup_base + last_nslots - 1).
-            //   5. Restore first element rax; store to high slots (dst_start = tup_base + total - 1).
-            //   6. LEA = rbp - (tup_base + total - 1)*8 → pointer to first element.
-            let first_ty = EXPR_TY
-            let first_hash = EXPR_TY_HASH
-            let first_nslots = ty_slot_count(first_ty, first_hash)
-            // Save first element's rax before second-element compilation clobbers it
-            let first_save = NEXT_SLOT
+            // Tuple literal: (expr1, expr2, ...) — N-ary staging approach
+            // Strategy: compile each element, saving rax+metadata to staging array.
+            // Then allocate buffer and fill from last→first.
+            // Layout: element 0 at LOWEST address (HIGHEST slot index = tup_base + total - 1).
+            let my_depth = TUP_STAGE_DEPTH
+            TUP_STAGE_DEPTH = TUP_STAGE_DEPTH + 1
+            let stg_base = my_depth * 16
+            // Stage element 0 (already compiled, rax = value/pointer)
+            TUP_STAGE_TY[stg_base as usize] = EXPR_TY
+            TUP_STAGE_HASH[stg_base as usize] = EXPR_TY_HASH
+            TUP_STAGE_NSLOTS[stg_base as usize] = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+            let stg0_save = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
-            emit_store_var(first_save)
+            emit_store_var(stg0_save)
+            TUP_STAGE_SAVE[stg_base as usize] = stg0_save
             var tup_count: i64 = 1
-            // Compile remaining elements; track the last one's type info
-            var last_ty: i64 = 0
-            var last_hash: i64 = 0
-            var last_nslots: i64 = 0
+            // Compile remaining elements into staging
             while ep_before_body_close() && TK[EP as usize] == 28 {
                 EP = EP + 1  // skip ,
                 if TK[EP as usize] == 7 { break }  // trailing comma
                 compile_or()
-                last_ty = EXPR_TY
-                last_hash = EXPR_TY_HASH
-                last_nslots = ty_slot_count(last_ty, last_hash)
+                let stg_i = stg_base + tup_count
+                TUP_STAGE_TY[stg_i as usize] = EXPR_TY
+                TUP_STAGE_HASH[stg_i as usize] = EXPR_TY_HASH
+                TUP_STAGE_NSLOTS[stg_i as usize] = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+                let stg_save = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(stg_save)
+                TUP_STAGE_SAVE[stg_i as usize] = stg_save
                 tup_count = tup_count + 1
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
-            // Allocate the tuple buffer (all sizes now known)
-            let total_slots = first_nslots + last_nslots
+            // Compute total_slots by summing all element slot counts
+            var total_slots: i64 = 0
+            var si: i64 = 0
+            while si < tup_count {
+                total_slots = total_slots + TUP_STAGE_NSLOTS[(stg_base + si) as usize]
+                si = si + 1
+            }
             let tup_base = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + total_slots
-            // Store last element (rax) to low slots: dst_start = tup_base + last_nslots - 1
-            if last_nslots > 1 {
-                copy_agg_into_struct_slots_x86(tup_base + last_nslots - 1, last_ty, last_hash)
-            } else {
-                emit_store_var(tup_base + last_nslots - 1)
+            // Fill buffer from last→first element
+            // Element i goes at offset = sum(nslots[0..i-1]) * 8 from base
+            // i.e. element i starts at slot index tup_base + sum(nslots[0..i])
+            // Reversed: element last at low slots, element 0 at highest slots
+            var fill_i: i64 = tup_count - 1
+            var cum_slots: i64 = 0
+            while fill_i >= 0 {
+                let fi_ty = TUP_STAGE_TY[(stg_base + fill_i) as usize]
+                let fi_hash = TUP_STAGE_HASH[(stg_base + fill_i) as usize]
+                let fi_nslots = TUP_STAGE_NSLOTS[(stg_base + fill_i) as usize]
+                let fi_save = TUP_STAGE_SAVE[(stg_base + fill_i) as usize]
+                // Restore this element from its saved slot
+                em(0x48); em(0x8b); em(0x85); em32(0 - fi_save * 8)
+                // dst_start = tup_base + cum_slots + fi_nslots - 1 (highest-indexed slot for this elem)
+                let dst_start = tup_base + cum_slots + fi_nslots - 1
+                if fi_nslots > 1 {
+                    copy_agg_into_struct_slots_x86(dst_start, fi_ty, fi_hash)
+                } else {
+                    emit_store_var(dst_start)
+                }
+                cum_slots = cum_slots + fi_nslots
+                fill_i = fill_i - 1
             }
-            // Restore first element's rax from temp slot
-            em(0x48); em(0x8b); em(0x85); em32(0 - first_save * 8)
-            // Store first element to high slots: dst_start = tup_base + total_slots - 1
-            if first_nslots > 1 {
-                copy_agg_into_struct_slots_x86(tup_base + total_slots - 1, first_ty, first_hash)
-            } else {
-                emit_store_var(tup_base + total_slots - 1)
-            }
-            // Return pointer to first element (lowest address = highest slot)
+            // Return pointer to first element (lowest address = highest slot index)
             em(0x48); em(0x8d); em(0x85)
             em32(0 - (tup_base + total_slots - 1) * 8)
             EXPR_IS_F64 = 0
             EXPR_TY = 6
-            // Encode first_nslots, total_slots, and per-element f64-ness.
-            // Format: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
-            let first_actual = if first_nslots > 1 { first_nslots } else { 1 }
-            var first_f64_flag: i64 = 0
-            if first_ty == 2 { first_f64_flag = 1 }
-            var last_f64_flag: i64 = 0
-            if last_ty == 2 { last_f64_flag = 1 }
-            EXPR_TY_HASH = tup_count * 100000000 + first_f64_flag * 10000000 + last_f64_flag * 1000000 + first_actual * 1000 + total_slots + tup_perturbation(first_hash, last_hash)
-            tup_cache_register(EXPR_TY_HASH, first_ty, first_hash, last_ty, last_hash)
+            // Build hash: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
+            let lit_first_ty = TUP_STAGE_TY[stg_base as usize]
+            let lit_first_hash = TUP_STAGE_HASH[stg_base as usize]
+            let lit_first_nslots = TUP_STAGE_NSLOTS[stg_base as usize]
+            let lit_last_i = stg_base + tup_count - 1
+            let lit_last_ty = TUP_STAGE_TY[lit_last_i as usize]
+            let lit_last_hash = TUP_STAGE_HASH[lit_last_i as usize]
+            var lit_first_f64: i64 = 0
+            if lit_first_ty == 2 { lit_first_f64 = 1 }
+            var lit_last_f64: i64 = 0
+            if lit_last_ty == 2 { lit_last_f64 = 1 }
+            let lit_first_actual = if lit_first_nslots > 1 { lit_first_nslots } else { 1 }
+            EXPR_TY_HASH = tup_count * 100000000 + lit_first_f64 * 10000000 + lit_last_f64 * 1000000 + lit_first_actual * 1000 + total_slots + tup_perturbation(lit_first_hash, lit_last_hash)
+            tup_cache_register(EXPR_TY_HASH, lit_first_ty, lit_first_hash, lit_last_ty, lit_last_hash)
+            let lit_tup_ci = tup_cache_lookup(EXPR_TY_HASH)
+            if lit_tup_ci >= 0 {
+                TUP_CACHE_NELEM[lit_tup_ci as usize] = tup_count
+                if tup_count >= 3 {
+                    let lm0 = stg_base + 1
+                    if TUP_STAGE_TY[lm0 as usize] != 0 { tup_cache_set_mid(lit_tup_ci, 0, TUP_STAGE_TY[lm0 as usize], TUP_STAGE_HASH[lm0 as usize], TUP_STAGE_NSLOTS[lm0 as usize]) }
+                }
+                if tup_count >= 4 {
+                    let lm1 = stg_base + 2
+                    if TUP_STAGE_TY[lm1 as usize] != 0 { tup_cache_set_mid(lit_tup_ci, 1, TUP_STAGE_TY[lm1 as usize], TUP_STAGE_HASH[lm1 as usize], TUP_STAGE_NSLOTS[lm1 as usize]) }
+                }
+                if tup_count >= 5 {
+                    let lm2 = stg_base + 3
+                    if TUP_STAGE_TY[lm2 as usize] != 0 { tup_cache_set_mid(lit_tup_ci, 2, TUP_STAGE_TY[lm2 as usize], TUP_STAGE_HASH[lm2 as usize], TUP_STAGE_NSLOTS[lm2 as usize]) }
+                }
+                if tup_count >= 6 {
+                    let lm3 = stg_base + 4
+                    if TUP_STAGE_TY[lm3 as usize] != 0 { tup_cache_set_mid(lit_tup_ci, 3, TUP_STAGE_TY[lm3 as usize], TUP_STAGE_HASH[lm3 as usize], TUP_STAGE_NSLOTS[lm3 as usize]) }
+                }
+                if tup_count >= 7 {
+                    let lm4 = stg_base + 5
+                    if TUP_STAGE_TY[lm4 as usize] != 0 { tup_cache_set_mid(lit_tup_ci, 4, TUP_STAGE_TY[lm4 as usize], TUP_STAGE_HASH[lm4 as usize], TUP_STAGE_NSLOTS[lm4 as usize]) }
+                }
+                if tup_count >= 8 {
+                    let lm5 = stg_base + 6
+                    if TUP_STAGE_TY[lm5 as usize] != 0 { tup_cache_set_mid(lit_tup_ci, 5, TUP_STAGE_TY[lm5 as usize], TUP_STAGE_HASH[lm5 as usize], TUP_STAGE_NSLOTS[lm5 as usize]) }
+                }
+            }
+            TUP_STAGE_DEPTH = my_depth
             return
         }
         if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -15253,52 +15447,40 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     continue
                 }
             }
-            // Tuple field access: expr.0, expr.1
+            // Tuple field access: expr.0, expr.1, expr.2, ... (N-ary)
             // For scalar (nslots=1) elements: load the VALUE into rax (i64 semantics).
             // For aggregate (nslots>1) elements: copy tuple element to fresh slots and
             // leave rax as pointer to the copy (so subsequent SRET calls don't clobber).
             if TK[EP as usize] == 4 {
                 let tup_idx = TV[EP as usize]
                 EP = EP + 1
-                if tup_idx > 1 {
-                    tc_error_hard(method_tok, "tuple index out of bounds")
+                let acc_tup_ci = tup_cache_lookup(EXPR_TY_HASH)
+                // Compute byte offset for element tup_idx by summing nslots of elements 0..tup_idx-1
+                var byte_offset: i64 = 0
+                var off_i: i64 = 0
+                while off_i < tup_idx {
+                    let os = tup_cache_elem_nslots(acc_tup_ci, off_i)
+                    byte_offset = byte_offset + os * 8
+                    off_i = off_i + 1
                 }
-                let tup_first_slots = (EXPR_TY_HASH % 1000000) / 1000
-                let tup_total_slots = EXPR_TY_HASH % 1000
-                let tup_last_slots = tup_total_slots - tup_first_slots
-                let elem_slots = if tup_idx == 0 { tup_first_slots } else { tup_last_slots }
-                if tup_idx == 0 {
-                    // rax already points to first element, keep as-is for now
-                } else {
-                    let byte_offset = tup_first_slots * 8
-                    if byte_offset > 0 && byte_offset < 8192 {
-                        em(0x48); em(0x05); em32(byte_offset)  // add rax, offset
-                    }
+                if byte_offset > 0 && byte_offset < 65536 {
+                    em(0x48); em(0x05); em32(byte_offset)  // add rax, offset
                 }
+                let elem_slots = tup_cache_elem_nslots(acc_tup_ci, tup_idx)
                 if elem_slots == 1 {
                     // Scalar element: dereference the pointer so rax holds the value.
-                    let tup_first_f64 = (EXPR_TY_HASH / 10000000) % 10
-                    let tup_last_f64 = (EXPR_TY_HASH / 1000000) % 10
-                    let elem_is_f64 = if tup_idx == 0 { tup_first_f64 } else { tup_last_f64 }
                     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
                     // R.2.9: preserve nominal struct type for 1-field-struct elements.
-                    // Without this, `let r = step(x); var sm: SplitMix64 = ...; sm = r.0`
-                    // fails type-check because EXPR_TY=1 (i64) is recorded even though
-                    // the slot holds a 1-field struct. tup_cache (registered by both
-                    // tuple-literal construction and Pass 1 / Pass 1c.5 fn-return scan)
-                    // carries the correct (first_ty, first_hash) — consult it.
-                    let r29_tup_ci = tup_cache_lookup(EXPR_TY_HASH)
-                    var r29_elem_ty: i64 = -1
-                    var r29_elem_hash: i64 = 0
-                    if r29_tup_ci >= 0 {
-                        if tup_idx == 0 {
-                            r29_elem_ty = TUP_CACHE_FIRST_TY[r29_tup_ci as usize]
-                            r29_elem_hash = TUP_CACHE_FIRST_HASH[r29_tup_ci as usize]
-                        } else {
-                            r29_elem_ty = TUP_CACHE_LAST_TY[r29_tup_ci as usize]
-                            r29_elem_hash = TUP_CACHE_LAST_HASH[r29_tup_ci as usize]
-                        }
-                    }
+                    let r29_elem_ty = tup_cache_elem_ty(acc_tup_ci, tup_idx)
+                    let r29_elem_hash = tup_cache_elem_hash(acc_tup_ci, tup_idx)
+                    let tup_first_f64 = (EXPR_TY_HASH / 10000000) % 10
+                    let tup_last_f64 = (EXPR_TY_HASH / 1000000) % 10
+                    let tup_total_slots = EXPR_TY_HASH % 1000
+                    let tup_count_enc = EXPR_TY_HASH / 100000000
+                    var elem_is_f64: i64 = 0
+                    if tup_idx == 0 { elem_is_f64 = tup_first_f64 }
+                    if tup_idx == tup_count_enc - 1 { elem_is_f64 = tup_last_f64 }
+                    if r29_elem_ty == 2 { elem_is_f64 = 1 }
                     if elem_is_f64 == 1 {
                         EXPR_IS_F64 = 1
                         EXPR_TY = 2
@@ -15316,22 +15498,12 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 } else {
                     // Aggregate element: materialize into fresh slots; rax is pointer.
                     EXPR_IS_F64 = 0
-                    let tup_ci = tup_cache_lookup(EXPR_TY_HASH)
-                    if tup_ci >= 0 {
-                        if tup_idx == 0 {
-                            EXPR_TY = TUP_CACHE_FIRST_TY[tup_ci as usize]
-                            EXPR_TY_HASH = TUP_CACHE_FIRST_HASH[tup_ci as usize]
-                        } else {
-                            EXPR_TY = TUP_CACHE_LAST_TY[tup_ci as usize]
-                            EXPR_TY_HASH = TUP_CACHE_LAST_HASH[tup_ci as usize]
-                        }
+                    if acc_tup_ci >= 0 {
+                        EXPR_TY = tup_cache_elem_ty(acc_tup_ci, tup_idx)
+                        EXPR_TY_HASH = tup_cache_elem_hash(acc_tup_ci, tup_idx)
                     } else {
                         EXPR_TY = 6
-                        if tup_idx == 0 {
-                            if tup_first_slots > 0 { EXPR_TY_HASH = 1000000007 + tup_first_slots } else { EXPR_TY_HASH = 0 }
-                        } else {
-                            if tup_last_slots > 0 { EXPR_TY_HASH = 1000000007 + tup_last_slots } else { EXPR_TY_HASH = 0 }
-                        }
+                        if elem_slots > 0 { EXPR_TY_HASH = 1000000007 + elem_slots } else { EXPR_TY_HASH = 0 }
                     }
                     var tup_mat_n: i64 = 128
                     if elem_slots > 0 { tup_mat_n = elem_slots }
@@ -25298,16 +25470,62 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         scan_type(q + 1)
                         let sig_first_ty = SCAN_TY
                         let sig_first_hash = SCAN_TY_HASH
-                        let first_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
-                        var second_q = SCAN_TY_NEXT
-                        if TK[second_q as usize] == 28 { second_q = second_q + 1 }
-                        scan_type(second_q)
-                        let sig_last_ty = SCAN_TY
-                        let sig_last_hash = SCAN_TY_HASH
-                        let last_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
-                        let total_nslots = first_nslots + last_nslots
-                        scan_ret_hash = tcount_enc * 1000000 + first_nslots * 1000 + total_nslots + tup_perturbation(sig_first_hash, sig_last_hash)
-                        tup_cache_register(scan_ret_hash, sig_first_ty, sig_first_hash, sig_last_ty, sig_last_hash)
+                        let p1_first_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
+                        // Walk all elements to find last and middle elements
+                        var p1_cur_q: i64 = SCAN_TY_NEXT
+                        var p1_last_ty: i64 = sig_first_ty
+                        var p1_last_hash: i64 = sig_first_hash
+                        var p1_last_nslots: i64 = p1_first_nslots
+                        var p1_total_nslots: i64 = p1_first_nslots
+                        var p1_elem_count: i64 = 1
+                        var p1_mid_ty_0: i64 = 0
+                        var p1_mid_hash_0: i64 = 0
+                        var p1_mid_nslots_0: i64 = 0
+                        var p1_mid_ty_1: i64 = 0
+                        var p1_mid_hash_1: i64 = 0
+                        var p1_mid_nslots_1: i64 = 0
+                        var p1_mid_ty_2: i64 = 0
+                        var p1_mid_hash_2: i64 = 0
+                        var p1_mid_nslots_2: i64 = 0
+                        var p1_mid_ty_3: i64 = 0
+                        var p1_mid_hash_3: i64 = 0
+                        var p1_mid_nslots_3: i64 = 0
+                        var p1_mid_ty_4: i64 = 0
+                        var p1_mid_hash_4: i64 = 0
+                        var p1_mid_nslots_4: i64 = 0
+                        var p1_mid_ty_5: i64 = 0
+                        var p1_mid_hash_5: i64 = 0
+                        var p1_mid_nslots_5: i64 = 0
+                        while TK[p1_cur_q as usize] == 28 {
+                            p1_cur_q = p1_cur_q + 1  // skip comma
+                            // Save previous last as middle before overwriting
+                            let p1_mid_idx = p1_elem_count - 1
+                            if p1_mid_idx == 1 { p1_mid_ty_0 = p1_last_ty; p1_mid_hash_0 = p1_last_hash; p1_mid_nslots_0 = p1_last_nslots }
+                            if p1_mid_idx == 2 { p1_mid_ty_1 = p1_last_ty; p1_mid_hash_1 = p1_last_hash; p1_mid_nslots_1 = p1_last_nslots }
+                            if p1_mid_idx == 3 { p1_mid_ty_2 = p1_last_ty; p1_mid_hash_2 = p1_last_hash; p1_mid_nslots_2 = p1_last_nslots }
+                            if p1_mid_idx == 4 { p1_mid_ty_3 = p1_last_ty; p1_mid_hash_3 = p1_last_hash; p1_mid_nslots_3 = p1_last_nslots }
+                            if p1_mid_idx == 5 { p1_mid_ty_4 = p1_last_ty; p1_mid_hash_4 = p1_last_hash; p1_mid_nslots_4 = p1_last_nslots }
+                            if p1_mid_idx == 6 { p1_mid_ty_5 = p1_last_ty; p1_mid_hash_5 = p1_last_hash; p1_mid_nslots_5 = p1_last_nslots }
+                            scan_type(p1_cur_q)
+                            p1_last_ty = SCAN_TY
+                            p1_last_hash = SCAN_TY_HASH
+                            p1_last_nslots = ty_slot_count(p1_last_ty, p1_last_hash)
+                            p1_total_nslots = p1_total_nslots + p1_last_nslots
+                            p1_elem_count = p1_elem_count + 1
+                            p1_cur_q = SCAN_TY_NEXT
+                        }
+                        scan_ret_hash = tcount_enc * 1000000 + p1_first_nslots * 1000 + p1_total_nslots + tup_perturbation(sig_first_hash, p1_last_hash)
+                        tup_cache_register(scan_ret_hash, sig_first_ty, sig_first_hash, p1_last_ty, p1_last_hash)
+                        let p1_tup_ci = tup_cache_lookup(scan_ret_hash)
+                        if p1_tup_ci >= 0 {
+                            TUP_CACHE_NELEM[p1_tup_ci as usize] = p1_elem_count
+                            if p1_elem_count >= 3 && p1_mid_ty_0 != 0 { tup_cache_set_mid(p1_tup_ci, 0, p1_mid_ty_0, p1_mid_hash_0, p1_mid_nslots_0) }
+                            if p1_elem_count >= 4 && p1_mid_ty_1 != 0 { tup_cache_set_mid(p1_tup_ci, 1, p1_mid_ty_1, p1_mid_hash_1, p1_mid_nslots_1) }
+                            if p1_elem_count >= 5 && p1_mid_ty_2 != 0 { tup_cache_set_mid(p1_tup_ci, 2, p1_mid_ty_2, p1_mid_hash_2, p1_mid_nslots_2) }
+                            if p1_elem_count >= 6 && p1_mid_ty_3 != 0 { tup_cache_set_mid(p1_tup_ci, 3, p1_mid_ty_3, p1_mid_hash_3, p1_mid_nslots_3) }
+                            if p1_elem_count >= 7 && p1_mid_ty_4 != 0 { tup_cache_set_mid(p1_tup_ci, 4, p1_mid_ty_4, p1_mid_hash_4, p1_mid_nslots_4) }
+                            if p1_elem_count >= 8 && p1_mid_ty_5 != 0 { tup_cache_set_mid(p1_tup_ci, 5, p1_mid_ty_5, p1_mid_hash_5, p1_mid_nslots_5) }
+                        }
                         SCAN_TY = scan_ret_ty
                         SCAN_TY_HASH = scan_ret_hash
                         SCAN_TY_NEXT = scan_ret_next
@@ -25749,15 +25967,50 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     scan_type(rp_tok + 1)
                     let re_first_ty = SCAN_TY
                     let re_first_hash = SCAN_TY_HASH
-                    let re_first_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
-                    var second_q2 = SCAN_TY_NEXT
-                    if TK[second_q2 as usize] == 28 { second_q2 = second_q2 + 1 }
-                    scan_type(second_q2)
-                    let re_last_ty = SCAN_TY
-                    let re_last_hash = SCAN_TY_HASH
-                    let re_last_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
-                    let re_total = re_first_nslots + re_last_nslots
-                    re_ret_hash = tcount_enc2 * 1000000 + re_first_nslots * 1000 + re_total
+                    let p15_first_nslots = ty_slot_count(SCAN_TY, SCAN_TY_HASH)
+                    // Walk all elements to find last and middle elements
+                    var p15_cur_q: i64 = SCAN_TY_NEXT
+                    var p15_last_ty: i64 = re_first_ty
+                    var p15_last_hash: i64 = re_first_hash
+                    var p15_last_nslots: i64 = p15_first_nslots
+                    var p15_total: i64 = p15_first_nslots
+                    var p15_elem_count: i64 = 1
+                    var p15_mid_ty_0: i64 = 0
+                    var p15_mid_hash_0: i64 = 0
+                    var p15_mid_nslots_0: i64 = 0
+                    var p15_mid_ty_1: i64 = 0
+                    var p15_mid_hash_1: i64 = 0
+                    var p15_mid_nslots_1: i64 = 0
+                    var p15_mid_ty_2: i64 = 0
+                    var p15_mid_hash_2: i64 = 0
+                    var p15_mid_nslots_2: i64 = 0
+                    var p15_mid_ty_3: i64 = 0
+                    var p15_mid_hash_3: i64 = 0
+                    var p15_mid_nslots_3: i64 = 0
+                    var p15_mid_ty_4: i64 = 0
+                    var p15_mid_hash_4: i64 = 0
+                    var p15_mid_nslots_4: i64 = 0
+                    var p15_mid_ty_5: i64 = 0
+                    var p15_mid_hash_5: i64 = 0
+                    var p15_mid_nslots_5: i64 = 0
+                    while TK[p15_cur_q as usize] == 28 {
+                        p15_cur_q = p15_cur_q + 1  // skip comma
+                        let p15_mid_idx = p15_elem_count - 1
+                        if p15_mid_idx == 1 { p15_mid_ty_0 = p15_last_ty; p15_mid_hash_0 = p15_last_hash; p15_mid_nslots_0 = p15_last_nslots }
+                        if p15_mid_idx == 2 { p15_mid_ty_1 = p15_last_ty; p15_mid_hash_1 = p15_last_hash; p15_mid_nslots_1 = p15_last_nslots }
+                        if p15_mid_idx == 3 { p15_mid_ty_2 = p15_last_ty; p15_mid_hash_2 = p15_last_hash; p15_mid_nslots_2 = p15_last_nslots }
+                        if p15_mid_idx == 4 { p15_mid_ty_3 = p15_last_ty; p15_mid_hash_3 = p15_last_hash; p15_mid_nslots_3 = p15_last_nslots }
+                        if p15_mid_idx == 5 { p15_mid_ty_4 = p15_last_ty; p15_mid_hash_4 = p15_last_hash; p15_mid_nslots_4 = p15_last_nslots }
+                        if p15_mid_idx == 6 { p15_mid_ty_5 = p15_last_ty; p15_mid_hash_5 = p15_last_hash; p15_mid_nslots_5 = p15_last_nslots }
+                        scan_type(p15_cur_q)
+                        p15_last_ty = SCAN_TY
+                        p15_last_hash = SCAN_TY_HASH
+                        p15_last_nslots = ty_slot_count(p15_last_ty, p15_last_hash)
+                        p15_total = p15_total + p15_last_nslots
+                        p15_elem_count = p15_elem_count + 1
+                        p15_cur_q = SCAN_TY_NEXT
+                    }
+                    re_ret_hash = tcount_enc2 * 1000000 + p15_first_nslots * 1000 + p15_total + tup_perturbation(re_first_hash, p15_last_hash)
                     // R.3.1: TUP_CACHE_KEY collides across distinct structs with same slot signature
                     // (e.g. two 4-field structs both producing `(S, i64)` → hash 200004005).
                     // tup_cache_register is idempotent on key — first writer wins. When Pass 1c.5
@@ -25766,14 +26019,31 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     // the existing element types disagree with what alias resolution just produced.
                     let r31_existing_ci = tup_cache_lookup(re_ret_hash)
                     if r31_existing_ci >= 0 {
-                        if TUP_CACHE_FIRST_HASH[r31_existing_ci as usize] != re_first_hash || TUP_CACHE_LAST_HASH[r31_existing_ci as usize] != re_last_hash {
+                        if TUP_CACHE_FIRST_HASH[r31_existing_ci as usize] != re_first_hash || TUP_CACHE_LAST_HASH[r31_existing_ci as usize] != p15_last_hash {
                             TUP_CACHE_FIRST_TY[r31_existing_ci as usize] = re_first_ty
                             TUP_CACHE_FIRST_HASH[r31_existing_ci as usize] = re_first_hash
-                            TUP_CACHE_LAST_TY[r31_existing_ci as usize] = re_last_ty
-                            TUP_CACHE_LAST_HASH[r31_existing_ci as usize] = re_last_hash
+                            TUP_CACHE_LAST_TY[r31_existing_ci as usize] = p15_last_ty
+                            TUP_CACHE_LAST_HASH[r31_existing_ci as usize] = p15_last_hash
+                            TUP_CACHE_NELEM[r31_existing_ci as usize] = p15_elem_count
+                            if p15_elem_count >= 3 && p15_mid_ty_0 != 0 { tup_cache_set_mid(r31_existing_ci, 0, p15_mid_ty_0, p15_mid_hash_0, p15_mid_nslots_0) }
+                            if p15_elem_count >= 4 && p15_mid_ty_1 != 0 { tup_cache_set_mid(r31_existing_ci, 1, p15_mid_ty_1, p15_mid_hash_1, p15_mid_nslots_1) }
+                            if p15_elem_count >= 5 && p15_mid_ty_2 != 0 { tup_cache_set_mid(r31_existing_ci, 2, p15_mid_ty_2, p15_mid_hash_2, p15_mid_nslots_2) }
+                            if p15_elem_count >= 6 && p15_mid_ty_3 != 0 { tup_cache_set_mid(r31_existing_ci, 3, p15_mid_ty_3, p15_mid_hash_3, p15_mid_nslots_3) }
+                            if p15_elem_count >= 7 && p15_mid_ty_4 != 0 { tup_cache_set_mid(r31_existing_ci, 4, p15_mid_ty_4, p15_mid_hash_4, p15_mid_nslots_4) }
+                            if p15_elem_count >= 8 && p15_mid_ty_5 != 0 { tup_cache_set_mid(r31_existing_ci, 5, p15_mid_ty_5, p15_mid_hash_5, p15_mid_nslots_5) }
                         }
                     } else {
-                        tup_cache_register(re_ret_hash, re_first_ty, re_first_hash, re_last_ty, re_last_hash)
+                        tup_cache_register(re_ret_hash, re_first_ty, re_first_hash, p15_last_ty, p15_last_hash)
+                        let p15_new_ci = tup_cache_lookup(re_ret_hash)
+                        if p15_new_ci >= 0 {
+                            TUP_CACHE_NELEM[p15_new_ci as usize] = p15_elem_count
+                            if p15_elem_count >= 3 && p15_mid_ty_0 != 0 { tup_cache_set_mid(p15_new_ci, 0, p15_mid_ty_0, p15_mid_hash_0, p15_mid_nslots_0) }
+                            if p15_elem_count >= 4 && p15_mid_ty_1 != 0 { tup_cache_set_mid(p15_new_ci, 1, p15_mid_ty_1, p15_mid_hash_1, p15_mid_nslots_1) }
+                            if p15_elem_count >= 5 && p15_mid_ty_2 != 0 { tup_cache_set_mid(p15_new_ci, 2, p15_mid_ty_2, p15_mid_hash_2, p15_mid_nslots_2) }
+                            if p15_elem_count >= 6 && p15_mid_ty_3 != 0 { tup_cache_set_mid(p15_new_ci, 3, p15_mid_ty_3, p15_mid_hash_3, p15_mid_nslots_3) }
+                            if p15_elem_count >= 7 && p15_mid_ty_4 != 0 { tup_cache_set_mid(p15_new_ci, 4, p15_mid_ty_4, p15_mid_hash_4, p15_mid_nslots_4) }
+                            if p15_elem_count >= 8 && p15_mid_ty_5 != 0 { tup_cache_set_mid(p15_new_ci, 5, p15_mid_ty_5, p15_mid_hash_5, p15_mid_nslots_5) }
+                        }
                     }
                 }
                 FN_RET_TY[rp_i as usize] = re_ret_ty
