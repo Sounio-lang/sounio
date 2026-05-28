@@ -271,3 +271,68 @@ $ ls tools/                                           → no formatter; tools/re
 - Stdlib gates (two of them): `artifacts/stdlib/stdlib_reliability_status.v1.json` (251/251); memory `[[sounio_stdlib_audit]]` (540/777)
 
 — end —
+
+---
+
+## 12. Addendum — 2026-05-28 SOTA push closures (gaps G2, G3, G4 closed)
+
+**Author:** Claude Sonnet 4.6 via Claude Code session  
+**Branch at time of writing:** `feat/privacy-linear-budget-phase1` (contains `feat/pp-phase4` merge)  
+**Global gate result:** 1041/1085 PASS, 4 pre-existing failures (unchanged from prior run), gen2==gen3 md5 `18b21a085afb76546d18d3657ec181b5`
+
+### G2 — `souc check` exit-code contract (CLOSED, prior commit `e2744c074`)
+
+Probed and fixed in the 2026-05-27 audit commit. `souc check` now returns non-zero on typecheck failure. This addendum confirms the fix holds: `souc check examples/async_demo.sio` returns exit 1 with the new diagnostic JSON shape.
+
+### G3 — Closure literals `stale_conflicting` (CLOSED, commit `848b8526c`)
+
+A live probe against `tests/run-pass/closure_*.sio` (17 files) on 2026-05-27 showed 16/17 pass. The `stale_conflicting` registry entry and non-normative spec annotation in §4.7.2 were wrong — closures have been implemented. Changes committed:
+
+- `docs/serious-language/public-claim-registry.v1.tsv`: `closures.lambdas` → `validated_research/closed`
+- `docs/spec/LANGUAGE_SPECIFICATION.md` §4.7.2: now normative with live code examples
+- `docs/compiler/KNOWN_LIMITATIONS.md`: "compiler refuses lambdas" row removed; linear-closures note added
+- Three new run-pass fixtures: `closure_arity_2.sio`, `closure_returned.sio`, `type_hash_3level_nesting.sio`
+- Open: `closure_linear.sio` (`//@ ignore`) — linear closures not yet implemented (E001 at line 13)
+
+### G4 — LSP-grade diagnostic catalog (CLOSED, commit `06d93d628`)
+
+Every priority compiler diagnostic in `lean_single.sio` now carries a stable `E-code`. `souc check --json` emits the full `sounio.diagnostic.v1` shape with codes populated. `souc explain <CODE>` is a new subcommand.
+
+**Codes assigned (priority set):**
+
+| Code | Diagnostic |
+|------|-----------|
+| E001 | Type mismatch / linear constraint violation |
+| E006 | Arity mismatch |
+| E007 | Too many local variables |
+| E008 | Too many globals |
+| E035 | Effect not declared in function signature (3 emit sites) |
+| E036 | Unobserved\<T\> crosses observation boundary (2 emit sites) |
+| E040 | Rust `let mut` syntax — use `var` |
+| E041 | Rust `&mut` syntax — use `&!` |
+| E042 | Rust attribute `#[...]` |
+| E043 | Rust macro `ident!(...)` |
+| E067–E072, E170–E171, E201–E207 | pre-existing codes, preserved |
+
+**Artifacts:**
+- `docs/llm-guide/error-catalog.md`: machine-parseable 21-row table appended (code, component, severity, gloss, link)
+- `docs/llm-guide/explanations/`: 22 new per-code `.md` files (E001, E006-E008, E035-E036, E040-E043, E067, E070, E072, E170-E171, E201-E207)
+- `bin/souc emit_diagnostics_json`: rewritten to parse `error[Exxxx]: msg at line N` with code field populated; legacy `error: msg at line N` falls back to E000
+
+**Gates passed (2026-05-28):**
+```
+$ ./bin/souc check examples/async_demo.sio --json
+  → valid sounio.diagnostic.v1 JSON, code field populated
+$ ./bin/souc explain E035
+  → explanation + minimal example + canonical fix printed
+$ ./bin/souc check self-hosted/compiler/lean_single.sio
+  → exit 0
+$ gen2 md5 == gen3 md5 == 18b21a085afb76546d18d3657ec181b5
+```
+
+### Remaining open gaps (unchanged)
+
+- **G1** — Multi-module bundle compile: 3 architectural roots still open (type-hash overflow on 3-level nesting, SRET ≥8-field, nested `&!` struct-field store). Composite-type intern table stub committed as test fixture `type_hash_3level_nesting.sio` (PASS) but the interning itself is not yet in the compiler.
+- **G5** — Formatter / native REPL: unchanged.
+- **G6** — Public install path: unchanged.
+- **EpistemicEffects.lean** (commit `848b8526c`): 589-line Lean 4 soundness sketch of the epistemic effect calculus. `lake build` green. Two `sorry` obligations documented: substitution lemma for beta reduction, and indexed-induction issue for the progress theorem.
