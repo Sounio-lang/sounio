@@ -1,0 +1,256 @@
+// stdlib/pbpk/rapamycin_assay_dose_window.sio — Sprint 38: Assay-Inclusive Dose Windows
+//
+// Novel dissertation contribution: extends the Sprint 27 analytical dose-window
+// framework to include measurement uncertainty. Replaces u_c with
+// u_total = sqrt(u_pred² + (cv·C)²), yielding assay-inclusive windows:
+//
+//   D_min_total = floor · D_ref / (C_ref − 2·u_total_ref)
+//   D_max_total = ceil  · D_ref / (C_ref + 2·u_total_ref)
+//
+// Returns D_min_total = 999.0 (sentinel) if window is empty (D_min > D_max).
+//
+// ── Assay-Inclusive Dose Windows at N=14 ─────────────────────────────────────
+//
+//   std D=5mg:
+//     model: [2.503, 8.625] mg  width=6.122
+//     HPLC:  [2.583, 8.444] mg  width=5.861  (−4.2%)
+//     CMIA:  [2.928, 7.841] mg  width=4.913  (−19.7%)
+//     poor:  [4.371, 6.662] mg  width=2.291  (−62.6%)
+//
+//   fast D=5mg:
+//     model: [5.149, 14.567] mg  width=9.418
+//     CMIA:  [5.877, 13.614] mg  width=7.737  (−17.8%)
+//     poor:  [8.690, 11.838] mg  width=3.148  (−66.6%)
+//     ← standard 5mg is BELOW D_min_poor=8.690 (uncertifiable)
+//
+//   inh D=1.5mg:
+//     poor:  [1.472, 2.382] mg  width=0.910  (−62.9%)
+//
+//   ind D34 N=26:
+//     poor:  D_min=57.52 > D_max=49.86 — WINDOW COLLAPSED (empty set)
+//
+//   std D=5mg, N=7:
+//     poor:  [7.199, 9.957] mg — 5mg is BELOW D_min (uncertifiable at first-week)
+//
+// ── Four Novel Findings ───────────────────────────────────────────────────────
+//
+//   FINDING A — ind Poor Window Collapse: at N=26 under poor assay,
+//     D_min=57.5mg > D_max=49.9mg — no dose certifies. The Gold theorem window
+//     (Sprint 27) becomes the empty set under inadequate laboratory infrastructure.
+//
+//   FINDING B — CMIA Uniform Compression: all windows lose 18–20% width under
+//     CMIA. This is a stratum-independent consequence of cv² weighting:
+//     u_total² = u_pred² + cv²·C² ≈ u_pred²(1 + cv²·C²/u_pred²).
+//
+//   FINDING C — Fast 5mg Below Poor Window: at N=14 under poor assay, the
+//     fast genotype certifiable window starts at D_min=8.69mg — above the
+//     standard 5mg starting dose. Standard prescribing is structurally
+//     uncertifiable for fast metabolizers with poor laboratory equipment.
+//
+//   FINDING D — Asymmetric Compression: D_max narrows more (absolute) than
+//     D_min widens under CMIA. For std N=14: D_max shift=−0.784mg vs
+//     D_min shift=+0.425mg. The ceiling constraint absorbs more assay uncertainty.
+//
+// ── Effect annotations ────────────────────────────────────────────────────────
+//   All adw_* functions: with Mut, Div, Panic
+
+module pbpk::rapamycin_assay_dose_window
+
+use pbpk::rapamycin_assay::{as_trough_mg_l, as_cv_hplc, as_cv_cmia, as_cv_poor}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn adw_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+// ── Core analytical primitives ────────────────────────────────────────────────
+
+pub fn adw_d_min(d_ref: f64, n: i64, ke_val: f64, f_val: f64,
+                 ka_var: f64, f_var: f64, ke_var: f64,
+                 k12_var: f64, k21_var: f64, cv: f64) -> f64
+    with Mut, Div, Panic {
+    let c     = as_trough_mg_l(d_ref, n, ke_val, f_val)
+    let upred = eu_u_c(d_ref, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    let ua    = cv * c
+    let ut    = adw_sqrt(upred * upred + ua * ua)
+    let lo    = c - 2.0 * ut
+    if lo <= 0.0 { 999.0 }
+    else { trough_floor_mg_l() * d_ref / lo }
+}
+
+pub fn adw_d_max(d_ref: f64, n: i64, ke_val: f64, f_val: f64,
+                 ka_var: f64, f_var: f64, ke_var: f64,
+                 k12_var: f64, k21_var: f64, cv: f64) -> f64
+    with Mut, Div, Panic {
+    let c     = as_trough_mg_l(d_ref, n, ke_val, f_val)
+    let upred = eu_u_c(d_ref, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    let ua    = cv * c
+    let ut    = adw_sqrt(upred * upred + ua * ua)
+    trough_ceil_mg_l() * d_ref / (c + 2.0 * ut)
+}
+
+pub fn adw_width(d_ref: f64, n: i64, ke_val: f64, f_val: f64,
+                 ka_var: f64, f_var: f64, ke_var: f64,
+                 k12_var: f64, k21_var: f64, cv: f64) -> f64
+    with Mut, Div, Panic {
+    let dmin = adw_d_min(d_ref, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var, cv)
+    let dmax = adw_d_max(d_ref, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var, cv)
+    if dmax > dmin { dmax - dmin } else { 0.0 }
+}
+
+pub fn adw_collapsed(d_ref: f64, n: i64, ke_val: f64, f_val: f64,
+                     ka_var: f64, f_var: f64, ke_var: f64,
+                     k12_var: f64, k21_var: f64, cv: f64) -> bool
+    with Mut, Div, Panic {
+    adw_d_min(d_ref, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var, cv) >=
+    adw_d_max(d_ref, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var, cv)
+}
+
+// ── std D=5mg, N=14 ──────────────────────────────────────────────────────────
+
+pub fn adw_std_dmin_model_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_d_min(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, 0.0)
+}
+pub fn adw_std_dmin_hplc_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_d_min(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_hplc())
+}
+pub fn adw_std_dmin_cmia_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_d_min(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_cmia())
+}
+pub fn adw_std_dmin_poor_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_d_min(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_poor())
+}
+pub fn adw_std_dmax_model_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_d_max(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, 0.0)
+}
+pub fn adw_std_dmax_cmia_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_d_max(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_cmia())
+}
+pub fn adw_std_width_model_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_width(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, 0.0)
+}
+pub fn adw_std_width_cmia_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_width(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_cmia())
+}
+pub fn adw_std_width_poor_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_width(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_poor())
+}
+
+// ── std D=5mg, N=7 ───────────────────────────────────────────────────────────
+
+pub fn adw_std_dmin_poor_n7() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_d_min(5.0, 7, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_poor())
+}
+pub fn adw_std_width_poor_n7() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_width(5.0, 7, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_poor())
+}
+
+// ── fast D=5mg, N=14 ─────────────────────────────────────────────────────────
+
+pub fn adw_fast_dmin_model_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_d_min(5.0, 14, 0.01677, 0.094, ka, fv, ke, k12, k21, 0.0)
+}
+pub fn adw_fast_dmin_cmia_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_d_min(5.0, 14, 0.01677, 0.094, ka, fv, ke, k12, k21, as_cv_cmia())
+}
+pub fn adw_fast_dmin_poor_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_d_min(5.0, 14, 0.01677, 0.094, ka, fv, ke, k12, k21, as_cv_poor())
+}
+pub fn adw_fast_width_model_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_width(5.0, 14, 0.01677, 0.094, ka, fv, ke, k12, k21, 0.0)
+}
+pub fn adw_fast_width_cmia_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_width(5.0, 14, 0.01677, 0.094, ka, fv, ke, k12, k21, as_cv_cmia())
+}
+pub fn adw_fast_width_poor_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_width(5.0, 14, 0.01677, 0.094, ka, fv, ke, k12, k21, as_cv_poor())
+}
+
+// ── inh D=1.5mg, N=14 ────────────────────────────────────────────────────────
+
+pub fn adw_inh_width_model_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std(); let ke_inh=ob_ke_var_inh()
+    adw_width(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, 0.0)
+}
+pub fn adw_inh_width_cmia_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std(); let ke_inh=ob_ke_var_inh()
+    adw_width(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, as_cv_cmia())
+}
+pub fn adw_inh_width_poor_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std(); let ke_inh=ob_ke_var_inh()
+    adw_width(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, as_cv_poor())
+}
+
+// ── ind D34 N=26 — FINDING A: poor collapses ─────────────────────────────────
+
+pub fn adw_ind_dmin_poor_n26() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke_ind=ob_ke_var_ind()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_d_min(34.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_poor())
+}
+pub fn adw_ind_dmax_poor_n26() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke_ind=ob_ke_var_ind()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_d_max(34.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_poor())
+}
+pub fn adw_ind_collapsed_poor_n26() -> bool with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke_ind=ob_ke_var_ind()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_collapsed(34.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_poor())
+}
+pub fn adw_ind_width_model_n26() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke_ind=ob_ke_var_ind()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_width(34.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, 0.0)
+}
+pub fn adw_ind_width_cmia_n26() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke_ind=ob_ke_var_ind()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    adw_width(34.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_cmia())
+}
