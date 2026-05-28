@@ -1,0 +1,209 @@
+// stdlib/pbpk/rapamycin_assay_impact.sio — Sprint 36: Assay-Inclusive Sigma-Distance
+//
+// Novel dissertation contribution: extends the Sprint 34 sigma-distance framework
+// to include measurement uncertainty (u_assay = cv × C), computing the total
+// uncertainty u_total = sqrt(u_pred² + u_assay²) and the corresponding
+// assay-inclusive Z-margins for each stratum × checkpoint × assay method.
+//
+// ── Assay-Inclusive Sigma-Distance ───────────────────────────────────────────
+//
+//   u_assay(N) = cv × C(N)                   assay measurement uncertainty
+//   u_total(N) = sqrt(u_pred(N)² + u_assay(N)²)   GUM §5.1.2 combined
+//   Z_floor_total = (C − floor) / u_total
+//   Z_ceil_total  = (ceil − C)  / u_total
+//
+//   Assay methods:
+//     HPLC-MS/MS (gold standard):  cv = 5%
+//     CMIA / immunoassay (routine): cv = 12%
+//     Poor assay:                   cv = 25%
+//
+// ── Assay Matrix — Which Certifications Survive? ─────────────────────────────
+//
+//   Stratum/N      | model  | HPLC   | CMIA   | poor
+//   std N=7        | CERT   | CERT   | CERT   | FAIL (Z=1.327)
+//   inh N=7        | CERT   | CERT   | FAIL   | FAIL (Z=1.622, Z=0.868)
+//   fast N=15      | CERT   | CERT   | FAIL   | FAIL (Z=2.003, Z=1.591)
+//   ind D34 N=26   | CERT   | FAIL   | FAIL   | FAIL (Z=1.976 — Gold theorem)
+//
+// ── Four Novel Findings ───────────────────────────────────────────────────────
+//
+//   FINDING A — Gold Theorem Fragility: ind D34 N=26 certified by the model
+//     (Z=2.015, 0.015σ above threshold) fails even under gold-standard HPLC
+//     (Z=1.976). The compilation-certified dose requires an ideal assay that
+//     does not exist in routine clinical practice.
+//
+//   FINDING B — Fast N=15 HPLC Survivor: CERT under HPLC (Z=2.003, margin=0.003σ),
+//     FAIL under CMIA (Z=1.591). The one-dose transition discovered in Sprint 34
+//     only survives with best-available laboratory infrastructure.
+//
+//   FINDING C — Inh CMIA Failure: inhibitor N=7 CERT under HPLC (Z=2.615) but
+//     FAIL under routine CMIA (Z=1.622). Routine immunoassay is incompatible with
+//     first-week review certification for CYP3A4 inhibitor patients.
+//
+//   FINDING D — Std Poor-Assay Failure: standard at N=7 certified by model,
+//     HPLC, and CMIA, but fails under poor assay (Z=1.327). Poor equipment
+//     invalidates even the most routine checkpoint.
+//
+// ── Effect annotations ────────────────────────────────────────────────────────
+//   All ai_* functions: with Mut, Div, Panic
+
+module pbpk::rapamycin_assay_impact
+
+use pbpk::rapamycin_assay::{as_trough_mg_l, as_cv_hplc, as_cv_cmia, as_cv_poor}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn ai_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+// ── Core primitives ───────────────────────────────────────────────────────────
+
+pub fn ai_u_total(d_oral: f64, n: i64, ke_val: f64, f_val: f64,
+                  ka_var: f64, f_var: f64, ke_var: f64,
+                  k12_var: f64, k21_var: f64, cv: f64) -> f64
+    with Mut, Div, Panic {
+    let c     = as_trough_mg_l(d_oral, n, ke_val, f_val)
+    let upred = eu_u_c(d_oral, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    let ua    = cv * c
+    ai_sqrt(upred * upred + ua * ua)
+}
+
+pub fn ai_z_floor(d_oral: f64, n: i64, ke_val: f64, f_val: f64,
+                  ka_var: f64, f_var: f64, ke_var: f64,
+                  k12_var: f64, k21_var: f64, cv: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d_oral, n, ke_val, f_val)
+    let ut = ai_u_total(d_oral, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var, cv)
+    (c - trough_floor_mg_l()) / ut
+}
+
+pub fn ai_z_ceil(d_oral: f64, n: i64, ke_val: f64, f_val: f64,
+                 ka_var: f64, f_var: f64, ke_var: f64,
+                 k12_var: f64, k21_var: f64, cv: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d_oral, n, ke_val, f_val)
+    let ut = ai_u_total(d_oral, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var, cv)
+    (trough_ceil_mg_l() - c) / ut
+}
+
+// ── std N=7 (HPLC CERT, CMIA CERT, poor FAIL) ────────────────────────────────
+
+pub fn ai_std_zf_hplc_n7() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(5.0, 7, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_hplc())
+}
+pub fn ai_std_zf_cmia_n7() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(5.0, 7, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_cmia())
+}
+pub fn ai_std_zf_poor_n7() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(5.0, 7, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_poor())
+}
+
+// ── std N=14 (all CERT under any assay) ──────────────────────────────────────
+
+pub fn ai_std_zf_hplc_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_hplc())
+}
+pub fn ai_std_zf_cmia_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_cmia())
+}
+pub fn ai_std_zf_poor_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_poor())
+}
+
+// ── inh N=7 (HPLC CERT, CMIA FAIL) ──────────────────────────────────────────
+
+pub fn ai_inh_zf_hplc_n7() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std(); let ke_inh=ob_ke_var_inh()
+    ai_z_floor(1.5, 7, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, as_cv_hplc())
+}
+pub fn ai_inh_zf_cmia_n7() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std(); let ke_inh=ob_ke_var_inh()
+    ai_z_floor(1.5, 7, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, as_cv_cmia())
+}
+pub fn ai_inh_zf_poor_n7() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std(); let ke_inh=ob_ke_var_inh()
+    ai_z_floor(1.5, 7, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, as_cv_poor())
+}
+pub fn ai_inh_zf_hplc_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std(); let ke_inh=ob_ke_var_inh()
+    ai_z_floor(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, as_cv_hplc())
+}
+
+// ── fast N=15 (HPLC barely CERT, CMIA FAIL) ──────────────────────────────────
+
+pub fn ai_fast_zf_hplc_n15() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(5.0, 15, 0.01677, 0.094, ka, fv, ke, k12, k21, as_cv_hplc())
+}
+pub fn ai_fast_zf_cmia_n15() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(5.0, 15, 0.01677, 0.094, ka, fv, ke, k12, k21, as_cv_cmia())
+}
+pub fn ai_fast_zf_poor_n15() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(5.0, 15, 0.01677, 0.094, ka, fv, ke, k12, k21, as_cv_poor())
+}
+
+// ── ind D34 N=26 (CERT under model, FAIL under ALL assays — Gold theorem) ────
+
+pub fn ai_ind_zf_hplc_n26() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke_ind=ob_ke_var_ind()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(34.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_hplc())
+}
+pub fn ai_ind_zf_cmia_n26() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke_ind=ob_ke_var_ind()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(34.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_cmia())
+}
+pub fn ai_ind_zf_poor_n26() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke_ind=ob_ke_var_ind()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(34.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_poor())
+}
+pub fn ai_ind_zc_hplc_n26() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke_ind=ob_ke_var_ind()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_ceil(34.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_hplc())
+}
+
+// ── slow N=14 (robustly CERT — large margins survive all assays) ──────────────
+
+pub fn ai_slow_zf_hplc_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(5.0, 14, 0.00838, 0.188, ka, fv, ke, k12, k21, as_cv_hplc())
+}
+pub fn ai_slow_zf_poor_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ai_z_floor(5.0, 14, 0.00838, 0.188, ka, fv, ke, k12, k21, as_cv_poor())
+}
