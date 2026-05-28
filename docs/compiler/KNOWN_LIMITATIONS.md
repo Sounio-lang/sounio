@@ -57,7 +57,7 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 | Component | Registry row | Honest status |
 |-----------|--------------|---------------|
 | **Standard library (broad surface)** | `stdlib.surface = prototype` | Do not claim broad stdlib callability. The 251/251 reliability gate covers ~27% of stdlib files. |
-| **Formatter** | `tooling.editor = prototype` | **Not shipped.** No `souc format` subcommand, no `tools/fmt*` binary. The earlier "Formatter Production / AST-based / diff mode" claim was wrong and is removed. |
+| **Formatter — Phase 1 (token-level)** | `tooling.editor = prototype` | **Shipped.** `souc format <file>` dispatches to `tools/fmt/sounio-fmt.sh`. Idempotency gate: `scripts/gates/g5a_formatter_idempotent.sh` (4/4 PASS on stdlib + fixture). Phase 1 rules: tab→4-space expansion, trailing-whitespace strip, ≥3 blank lines collapsed to 1, `,` and `->` spacing normalised outside strings/comments. **Deferred to Phase 2:** operator spacing for `+`, `-`, `*`, `/`, `:`, `=` (ambiguous without a parse tree); AST-based indentation; diff-mode output. No AST round-trip guarantee — use `souc check` to verify file validity after formatting. |
 | **REPL** | `tooling.editor = prototype` | `tools/repl.sh` is a thin Bash wrapper; not exposed as a `souc` subcommand. |
 | **Package manager / registry** | `tooling.package = prototype` | Local `~/.sounio/registry/` only. No public registry. |
 | **Generic structs/functions/traits** | `generics.* = prototype` | 1–2 type params work; do not claim a mature trait ecosystem. Trait bounds are parsed but not enforced at call sites. No trait objects. |
@@ -88,6 +88,7 @@ This file previously claimed several rows as "Production" that the public-claim 
 - **Removed:** the row claiming `Formatter Production`. No `souc format` subcommand exists; no `tools/fmt*` binary exists.
 - **Removed:** the "No active known bugs" assertion. Bundle baseline is 766 errors with three named roots.
 - **Removed:** `CLI: check/build/run/repl/format/doc` — `repl`/`format`/`doc` are not subcommands of `bin/souc`. They print *"unsupported command for the checked self-hosted launcher"*.
+- **Updated (2026-05-28):** formatter row revised — G5a Phase 1 token-level formatter shipped (`tools/fmt/sounio-fmt.sh`, `souc format` subcommand). See formatter row above for Phase 1 scope and Phase 2 deferrals.
 - **Downgraded:** LLVM Codegen from `Production` to `Validated research` — the LLVM bridge is wired but disabled in the checked binary.
 - **Reframed:** LSP, REPL, Package Manager to mirror the registry's `prototype` tier.
 - **Added:** "Active Known Bugs / Architectural Gaps" section enumerating the three bundle-compile roots.
