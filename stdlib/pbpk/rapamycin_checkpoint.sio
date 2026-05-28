@@ -1,0 +1,264 @@
+// stdlib/pbpk/rapamycin_checkpoint.sio — Sprint 32: Protocol Checkpoint Matrix
+//
+// Novel dissertation contribution: compile-time certification of all cells in the
+// (stratum × checkpoint) safety matrix at the three canonical TDM review points
+// N=7 (first-week review), N=14 (steady-state assessment), N=26 (extended monitoring).
+//
+// ── Protocol Checkpoint Matrix ────────────────────────────────────────────────
+//
+//   Stratum   │ N=7    │ N=14   │ N=26
+//   ──────────┼────────┼────────┼──────────────────────────────
+//   Standard  │ CERT   │ CERT   │ CERT
+//   Slow      │ CERT   │ CERT   │ FAIL ← C=22.1 ng/mL > ceil (TOXIC accumulation)
+//   Fast      │ FAIL   │ FAIL   │ CERT  ← one dose short at N=14 (N_crit=15)
+//   Inhibitor │ CERT*  │ CERT   │ CERT  ← *N_crit=7: certifies exactly at first review
+//   Ind D20   │ FAIL   │ FAIL   │ FAIL  ← structurally uncertifiable at D=20mg
+//   Ind D34   │ FAIL   │ FAIL   │ CERT  ← certifies exactly at N=26 (Gold theorem)
+//
+// ── Key Safety Findings ───────────────────────────────────────────────────────
+//
+//   1. FAST GAP (Sprint 32, Finding A): The fast metabolizer at D=5mg standard
+//      dose is NOT CI-certified at the canonical N=14 steady-state checkpoint.
+//      N_crit=15 means exactly ONE dose beyond the standard protocol is needed.
+//      Compile-time-detectable: eu_fully_in_range(5.0, 14, fast...) = false.
+//
+//   2. SLOW ACCUMULATION HAZARD (Sprint 32, Finding B): Slow metabolizer at D=5mg
+//      has C=22.064 ng/mL at N=26 — above the therapeutic ceiling of 20 ng/mL.
+//      The ODE predicts cumulative drug loading that exceeds safe trough levels
+//      at the extended monitoring checkpoint. This is not a CI failure; it is a
+//      point-estimate-toxic finding: the drug is over-accumulated.
+//      Compile-time-detectable: as_trough_mg_l(5.0, 26, slow...) > trough_ceil.
+//
+//   3. INHIBITOR EXACT BOUNDARY (Sprint 32, Finding C): N_crit=7 means the inhibitor
+//      certifies PRECISELY at the first standard review. One fewer dose and it
+//      would fail; one more is redundant for CI certification.
+//
+//   4. INDUCER GOLD CROSS-CHECK (Sprint 32, Finding D): Ind D=34mg certifies at
+//      N=26 exactly — verifying the Sprint 29/30 Gold Theorem from a third angle.
+//
+// ── Expanded Uncertainty at Checkpoints (mg/L) ───────────────────────────────
+//
+//   Stratum   │ U(N=7)   │ U(N=14)  │ U(N=26)  [U = 2·u_c]
+//   ──────────┼──────────┼──────────┼──────────
+//   Standard  │ 0.001709 │ 0.001801 │ 0.001990
+//   Slow      │ 0.001893 │ 0.002075 │ 0.002452
+//   Fast      │ 0.001459 │ 0.001490 │ 0.001552
+//   Inhibitor │ 0.000726 │ 0.000880 │ 0.001209
+//   Ind D20   │ 0.002306 │ 0.002319 │ 0.002336
+//   Ind D34   │ 0.003920 │ 0.003942 │ 0.003971
+//
+//   U increases with N for all strata (absolute variance grows as drug accumulates).
+//   RSU still decreases (C grows faster) — consistent with Sprint 31.
+//
+// ── Effect annotations ────────────────────────────────────────────────────────
+//   All cp_* functions: with Mut, Div, Panic
+
+module pbpk::rapamycin_checkpoint
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_fully_in_range, eu_u_c}
+use pbpk::rapamycin_clinical::{trough_ceil_mg_l, trough_floor_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+// ── Core checkpoint primitives ────────────────────────────────────────────────
+
+pub fn cp_certified(d_oral: f64, n: i64, ke_val: f64, f_val: f64,
+                    ka_var: f64, f_var: f64, ke_var: f64,
+                    k12_var: f64, k21_var: f64) -> bool
+    with Mut, Div, Panic {
+    eu_fully_in_range(d_oral, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+}
+
+pub fn cp_expanded_u(d_oral: f64, n: i64, ke_val: f64, f_val: f64,
+                      ka_var: f64, f_var: f64, ke_var: f64,
+                      k12_var: f64, k21_var: f64) -> f64
+    with Mut, Div, Panic {
+    2.0 * eu_u_c(d_oral, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+}
+
+pub fn cp_c_above_ceil(d_oral: f64, n: i64, ke_val: f64, f_val: f64) -> bool
+    with Mut, Div, Panic {
+    as_trough_mg_l(d_oral, n, ke_val, f_val) > trough_ceil_mg_l()
+}
+
+pub fn cp_c_below_floor(d_oral: f64, n: i64, ke_val: f64, f_val: f64) -> bool
+    with Mut, Div, Panic {
+    as_trough_mg_l(d_oral, n, ke_val, f_val) < trough_floor_mg_l()
+}
+
+// True iff U(n2) > U(n1) — expanded uncertainty grows with N (absolute).
+pub fn cp_u_grows(d_oral: f64, n1: i64, n2: i64, ke_val: f64, f_val: f64,
+                  ka_var: f64, f_var: f64, ke_var: f64,
+                  k12_var: f64, k21_var: f64) -> bool
+    with Mut, Div, Panic {
+    let u1 = cp_expanded_u(d_oral, n1, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    let u2 = cp_expanded_u(d_oral, n2, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    u2 > u1
+}
+
+// ── Standard genotype (D=5mg) ─────────────────────────────────────────────────
+
+pub fn cp_std_cert_n7()  -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_certified(5.0, 7, 0.01118, 0.141, ka, fv, ke, k12, k21)
+}
+pub fn cp_std_cert_n14() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_certified(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21)
+}
+pub fn cp_std_cert_n26() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_certified(5.0, 26, 0.01118, 0.141, ka, fv, ke, k12, k21)
+}
+
+// ── Slow genotype (D=5mg) ─────────────────────────────────────────────────────
+
+pub fn cp_slow_cert_n7()  -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_certified(5.0, 7, 0.00838, 0.188, ka, fv, ke, k12, k21)
+}
+pub fn cp_slow_cert_n14() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_certified(5.0, 14, 0.00838, 0.188, ka, fv, ke, k12, k21)
+}
+pub fn cp_slow_cert_n26() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_certified(5.0, 26, 0.00838, 0.188, ka, fv, ke, k12, k21)
+}
+// Finding B: slow D=5mg C > ceil at N=26 (toxic accumulation)
+pub fn cp_slow_toxic_n26() -> bool with Mut, Div, Panic {
+    cp_c_above_ceil(5.0, 26, 0.00838, 0.188)
+}
+
+// ── Fast genotype (D=5mg) ─────────────────────────────────────────────────────
+
+pub fn cp_fast_cert_n7()  -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_certified(5.0, 7, 0.01677, 0.094, ka, fv, ke, k12, k21)
+}
+pub fn cp_fast_cert_n14() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_certified(5.0, 14, 0.01677, 0.094, ka, fv, ke, k12, k21)
+}
+pub fn cp_fast_cert_n15() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_certified(5.0, 15, 0.01677, 0.094, ka, fv, ke, k12, k21)
+}
+pub fn cp_fast_cert_n26() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_certified(5.0, 26, 0.01677, 0.094, ka, fv, ke, k12, k21)
+}
+
+// ── CYP3A4 inhibitor (D=1.5mg) ───────────────────────────────────────────────
+
+pub fn cp_inh_cert_n7()  -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    cp_certified(1.5, 7, 0.002236, 0.282, ka, fv, ke_inh, k12, k21)
+}
+pub fn cp_inh_cert_n14() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    cp_certified(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12, k21)
+}
+pub fn cp_inh_cert_n26() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    cp_certified(1.5, 26, 0.002236, 0.282, ka, fv, ke_inh, k12, k21)
+}
+
+// ── CYP3A4 inducer (D=20mg) ───────────────────────────────────────────────────
+
+pub fn cp_ind_d20_cert_n7()  -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_ind = ob_ke_var_ind()
+    cp_certified(20.0, 7, 0.05590, 0.047, ka, fv, ke_ind, k12, k21)
+}
+pub fn cp_ind_d20_cert_n14() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_ind = ob_ke_var_ind()
+    cp_certified(20.0, 14, 0.05590, 0.047, ka, fv, ke_ind, k12, k21)
+}
+pub fn cp_ind_d20_cert_n26() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_ind = ob_ke_var_ind()
+    cp_certified(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21)
+}
+
+// ── CYP3A4 inducer (D=34mg — Gold theorem) ───────────────────────────────────
+
+pub fn cp_ind_d34_cert_n14() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_ind = ob_ke_var_ind()
+    cp_certified(34.0, 14, 0.05590, 0.047, ka, fv, ke_ind, k12, k21)
+}
+pub fn cp_ind_d34_cert_n26() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_ind = ob_ke_var_ind()
+    cp_certified(34.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21)
+}
+
+// ── Expanded uncertainty at checkpoints ──────────────────────────────────────
+
+pub fn cp_std_u_n7()  -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_expanded_u(5.0, 7, 0.01118, 0.141, ka, fv, ke, k12, k21)
+}
+pub fn cp_std_u_n14() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_expanded_u(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21)
+}
+pub fn cp_std_u_n26() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_expanded_u(5.0, 26, 0.01118, 0.141, ka, fv, ke, k12, k21)
+}
+
+pub fn cp_inh_u_n7()  -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    cp_expanded_u(1.5, 7, 0.002236, 0.282, ka, fv, ke_inh, k12, k21)
+}
+pub fn cp_inh_u_n26() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    cp_expanded_u(1.5, 26, 0.002236, 0.282, ka, fv, ke_inh, k12, k21)
+}
+
+pub fn cp_fast_u_n14() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    cp_expanded_u(5.0, 14, 0.01677, 0.094, ka, fv, ke, k12, k21)
+}
+
+pub fn cp_ind_d20_u_n26() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_ind = ob_ke_var_ind()
+    cp_expanded_u(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21)
+}
