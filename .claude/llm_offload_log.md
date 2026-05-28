@@ -1,5 +1,64 @@
 # LLM Offload Log
 
+## 2026-05-28: Exact Moser spindle over Q(√3,√11) — Erdős #508 (math-review)
+
+- **Task**: math-review
+- **Provider**: xai / **Model**: Grok 4.1 (grok-4-1-fast-reasoning)
+- **Target**: `examples/erdos/degrey_q3q11_spindle.sio` — exact Q(√3,√11) integer
+  arithmetic kernel realizing the Moser spindle (χ=4), the de-cage from the Z^16
+  bipartite ceiling and the atomic building block of de Grey's 5-chromatic graph.
+
+### Verdict
+
+```
+[OK]        1. Q(√3,√11) multiplication/squaring formulas — match ring relations
+[OK]        2. Coordinates realize |C−F|=1 exactly (cos φ=5/6, sin φ=√11/6; 3·4+33·4=144)
+[OK]        3. Edge set = exactly the 11 Moser edges (exhaustive exact check over 21 pairs)
+[OK]        4. χ=4 — standard Moser-spindle fact; 4^7 brute force decisive
+[OVERREACH] 5. "de Grey's 1581-vertex graph lies in Q(√3,√11)" — rotations preserve the
+            field individually, but gluing spindles at non-Moser vertices may introduce an
+            auxiliary surd; UNVERIFIED in artifact.
+[OK]        6. Division of labour: exact distance-1 geometry is native-decidable;
+            non-4-colorability of 1581 vertices needs SAT + checked DRAT (not native_decide).
+```
+
+### Action
+
+- Claims 1–4, 6 stand (machine-run: 11 edges, all dist²=144 with zero √-parts; χ=4).
+- Claim 5 softened in the file (header comment + printed RESULT) to flag the field-closure
+  check as the first task when scaling toward de Grey. No overclaim of the full-graph field.
+- Not committed yet (operator has not requested commit). Math-review evidence logged per policy.
+
+## 2026-05-28: Erdős #90 planar-search foreclosure audit (math-review)
+
+- **Task**: math-review
+- **Provider**: xai / **Model**: Grok 4.1 (grok-4-1-fast-reasoning)
+- **Target**: foreclosure argument in `docs/research/erdos-90-planar-search-plan.md`
+  (lines ~157-159), cross-checking an adversarial-audit finding before the operator acts.
+- **Why**: this doc was NOT part of the 2026-05-25 xai review of the chromatic
+  corpus (`erdos-168-chromatic-separation.md`), so the foreclosure claim was unreviewed.
+
+### Verdict
+
+```
+[OK]          Claim A — cross-lattice exact unit distances exist in ℚ(√3):
+              (0,0)∈ℤ² and (½,√3/2)∈ℤ[ω] satisfy d²=1 exactly.
+[OK]          Claim B — per-lattice vertex-transitivity imposes no symmetry on a
+              heterogeneous union.
+[OVERREACH]   quoted foreclosure correct ONLY under unstated "integer Cartesian
+              coordinates" restriction; as written it falsely rules out algebraic exactness.
+[TIGHTENABLE] triangular lattice = best explicit lower bound (Harborth); whether it
+              maximizes u(n) among periodic sets is OPEN.
+[WRONG]       "no exact periodic-pool subset search can beat the grid". Minimal fix:
+              "no search confined to a single integer lattice can beat the triangular lattice."
+```
+
+### Action
+
+- Audit finding **confirmed by orthogonal reviewer**. The foreclosure as written is a
+  non-sequitur; recommend rewording per Grok's minimal correction before the plan is
+  used to justify stopping the search. No code/commit touched in this session (audit only).
+
 ## 2026-05-26: A1 probe math-review (168_regime_a1.sio)
 
 - **Task**: math-review
