@@ -1,0 +1,244 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint6_gate.sio — Sprint 6 analytical validation gate
+//
+// 56 assertions validating the GUM-Euler ODE implementation against
+// analytically exact results derived from ISO Guide 98-3 §5.1.2.
+//
+// This gate answers the examiner question: "How do you know your GUM
+// propagation is correct, not just internally consistent?"
+// The answer: it matches closed-form derivations to machine precision.
+//
+// Assertion map:
+//   A (1–11):  val_1cmt_params field correctness
+//   B (12–18): val_zero_var_params preserves estimates, zeroes variances
+//   C (19–22): val_1cmt_k12var_params field correctness
+//   D (23–28): Zero-variance invariant (algebraic, exact)
+//   E (29–34): First-step concentration error < 1e-10
+//   F (35–40): First-step GUM variance error < 1e-10
+//   G (41–43): ke_val does NOT affect first-step variance
+//   H (44–49): Monotonic decay under ke-only dynamics
+//   I (50–53): Additive variance — ke_var + k12_var (ISO §5.1.2)
+//   J (54–56): D-scaling law — variance ∝ D²
+
+use pbpk::rapamycin_validation::{
+    val_1cmt_params, val_1cmt_k12var_params, val_zero_var_params,
+    val_zero_var_invariant, val_conc_step1_err, val_var_step1_err,
+    val_monotonic_decay
+}
+use pbpk::rapamycin_2cmt::{Rap2CmtParams, simulate}
+
+var SPR6_PASS: [i64; 2] = [0; 2]
+
+fn s6_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR6_PASS[0] = SPR6_PASS[0] + 1
+    } else {
+        SPR6_PASS[1] = SPR6_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint6_gate() with IO, Mut, Div, Panic {
+
+    // ── Section A: val_1cmt_params field correctness (11 assertions) ─────────
+
+    let a_p = val_1cmt_params(0.1, 0.01, 70.0)
+    s6_chk(a_p.ke_val == 0.1)                                    // 1
+    s6_chk(a_p.ke_var == 0.01)                                   // 2
+    s6_chk(a_p.k12_val == 0.0)                                   // 3
+    s6_chk(a_p.k12_var == 0.0)                                   // 4
+    s6_chk(a_p.k21_val == 0.0)                                   // 5
+    s6_chk(a_p.k21_var == 0.0)                                   // 6
+    s6_chk(a_p.vc_val == 70.0)                                   // 7
+    s6_chk(a_p.krel_val == 0.0)                                  // 8
+    s6_chk(a_p.krel_var == 0.0)                                  // 9
+    s6_chk(a_p.a_poly0 == 0.0)                                   // 10
+    s6_chk(a_p.a_poly0_var == 0.0)                               // 11
+
+    // ── Section B: val_zero_var_params (7 assertions) ─────────────────────────
+
+    let b_src = val_1cmt_params(0.05, 0.005, 50.0)
+    let b_zp  = val_zero_var_params(&b_src)
+    s6_chk(b_zp.ke_val == 0.05)                                  // 12
+    s6_chk(b_zp.ke_var == 0.0)                                   // 13
+    s6_chk(b_zp.k12_var == 0.0)                                  // 14
+    s6_chk(b_zp.k21_var == 0.0)                                  // 15
+    s6_chk(b_zp.krel_var == 0.0)                                 // 16
+    s6_chk(b_zp.a_poly0_var == 0.0)                              // 17
+    s6_chk(b_zp.vc_val == 50.0)                                  // 18
+
+    // ── Section C: val_1cmt_k12var_params (4 assertions) ──────────────────────
+
+    let c_p = val_1cmt_k12var_params(0.1, 0.01, 0.02, 70.0)
+    s6_chk(c_p.ke_var == 0.01)                                   // 19
+    s6_chk(c_p.k12_var == 0.02)                                  // 20
+    s6_chk(c_p.k12_val == 0.0)                                   // 21
+    s6_chk(c_p.k21_val == 0.0)                                   // 22
+
+    // ── Section D: Zero-variance invariant — all std = 0.0 exactly (6) ────────
+
+    let d_zp1 = val_1cmt_params(0.1, 0.0, 70.0)
+    s6_chk(val_zero_var_invariant(&d_zp1, 100.0, 48))            // 23
+    s6_chk(val_zero_var_invariant(&d_zp1, 1.0, 48))              // 24
+    s6_chk(val_zero_var_invariant(&d_zp1, 0.0, 48))              // 25 (D=0 trivial)
+
+    let d_src = val_1cmt_params(0.05, 0.005, 50.0)
+    let d_zp2 = val_zero_var_params(&d_src)
+    s6_chk(val_zero_var_invariant(&d_zp2, 50.0, 48))             // 26
+
+    let d_zp3 = val_1cmt_params(0.2, 0.0, 100.0)
+    s6_chk(val_zero_var_invariant(&d_zp3, 200.0, 48))            // 27
+
+    let d_zp4 = val_1cmt_params(0.01, 0.0, 30.0)
+    s6_chk(val_zero_var_invariant(&d_zp4, 10.0, 20))             // 28
+
+    // ── Section E: First-step concentration error < 1e-10 (6 assertions) ──────
+    // val_conc_step1_err(ke_val, vc, d_bolus, dt)
+    // Exact Euler formula: C(dt) = D·(1 − ke·dt) / Vc
+
+    s6_chk(val_conc_step1_err(0.1, 70.0, 100.0, 1.0) < 0.0000000001)    // 29
+    s6_chk(val_conc_step1_err(0.05, 50.0, 50.0, 1.0) < 0.0000000001)    // 30
+    s6_chk(val_conc_step1_err(0.2, 100.0, 200.0, 0.5) < 0.0000000001)   // 31
+    s6_chk(val_conc_step1_err(0.1, 70.0, 0.0, 1.0) < 0.0000000001)      // 32 (D=0)
+    s6_chk(val_conc_step1_err(0.01, 30.0, 10.0, 1.0) < 0.0000000001)    // 33
+    s6_chk(val_conc_step1_err(0.1, 70.0, 100.0, 0.1) < 0.0000000001)    // 34 (small dt)
+
+    // ── Section F: First-step GUM variance error < 1e-10 (6 assertions) ───────
+    // val_var_step1_err(ke_val, ke_var, vc, d_bolus, dt)
+    // ISO §5.1.2 exact: std_c(dt)² · Vc² = dt² · ke_var · D²
+
+    s6_chk(val_var_step1_err(0.1, 0.01, 70.0, 100.0, 1.0) < 0.0000000001)    // 35
+    s6_chk(val_var_step1_err(0.05, 0.005, 50.0, 50.0, 1.0) < 0.0000000001)   // 36
+    s6_chk(val_var_step1_err(0.2, 0.04, 100.0, 200.0, 0.5) < 0.0000000001)   // 37
+    s6_chk(val_var_step1_err(0.1, 0.001, 70.0, 100.0, 1.0) < 0.0000000001)   // 38 (small var)
+    s6_chk(val_var_step1_err(0.1, 0.01, 70.0, 100.0, 0.5) < 0.0000000001)    // 39 (half dt)
+    s6_chk(val_var_step1_err(0.3, 0.09, 80.0, 150.0, 1.0) < 0.0000000001)   // 40
+
+    // ── Section G: ke_val does NOT affect first-step variance (3 assertions) ───
+    // Same ke_var=0.01, D=100, Vc=70, dt=1 but three distinct ke_val values.
+    // All three should yield identical expected_v = 1·0.01·10000 = 100.0,
+    // and errors should be equally small. This catches any accidental ke_val
+    // term in the variance formula.
+
+    s6_chk(val_var_step1_err(0.1, 0.01, 70.0, 100.0, 1.0) < 0.0000000001)   // 41 (ke=0.1)
+    s6_chk(val_var_step1_err(0.2, 0.01, 70.0, 100.0, 1.0) < 0.0000000001)   // 42 (ke=0.2)
+    s6_chk(val_var_step1_err(0.4, 0.01, 70.0, 100.0, 1.0) < 0.0000000001)   // 43 (ke=0.4)
+
+    // ── Section H: Monotonic decay under ke-only dynamics (6 assertions) ───────
+    // val_monotonic_decay(ke_val, vc, d_bolus, n)
+    // ke·dt < 1 is sufficient for Euler preservation of monotone decrease.
+
+    s6_chk(val_monotonic_decay(0.1, 70.0, 100.0, 48))                        // 44
+    s6_chk(val_monotonic_decay(0.05, 50.0, 50.0, 30))                        // 45
+    s6_chk(val_monotonic_decay(0.2, 100.0, 200.0, 48))                       // 46
+    s6_chk(val_monotonic_decay(0.01, 30.0, 10.0, 20))                        // 47
+    s6_chk(val_monotonic_decay(0.3, 80.0, 150.0, 48))                        // 48
+    s6_chk(val_monotonic_decay(0.1, 70.0, 0.0, 48))                          // 49 (D=0)
+
+    // ── Section I: Additive variance — (ke_var + k12_var)·D²·dt² (4) ──────────
+    // Run simulate directly with val_1cmt_k12var_params.
+    // ISO §5.1.2: V1 = dt²·(ke_var + k12_var)·D²  when k12_val=k21_val=0, V_init=0.
+
+    var si_t = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var si_c = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var si_s = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    // Test I-a: ke_var=0.01, k12_var=0.01, D=100, Vc=70, dt=1
+    //   expected_v = 1²·(0.01+0.01)·100² = 200.0
+    let i_p1   = val_1cmt_k12var_params(0.1, 0.01, 0.01, 70.0)
+    simulate(1.0, 1.0, 100.0, 0.0, &i_p1, 2, &!si_t, &!si_c, &!si_s)
+    let i_act1 = si_s[1] * si_s[1] * 70.0 * 70.0
+    let i_exp1 = 200.0
+    let i_d1   = if i_act1 - i_exp1 < 0.0 { 0.0 - (i_act1 - i_exp1) } else { i_act1 - i_exp1 }
+    s6_chk(i_d1 < 0.0000000001)                                              // 50
+
+    // Test I-b: ke_var=0.01, k12_var=0.02, D=100, Vc=70, dt=1
+    //   expected_v = 0.03·10000 = 300.0
+    let i_p2   = val_1cmt_k12var_params(0.1, 0.01, 0.02, 70.0)
+    simulate(1.0, 1.0, 100.0, 0.0, &i_p2, 2, &!si_t, &!si_c, &!si_s)
+    let i_act2 = si_s[1] * si_s[1] * 70.0 * 70.0
+    let i_exp2 = 300.0
+    let i_d2   = if i_act2 - i_exp2 < 0.0 { 0.0 - (i_act2 - i_exp2) } else { i_act2 - i_exp2 }
+    s6_chk(i_d2 < 0.0000000001)                                              // 51
+
+    // Test I-c: ke_var=0.0, k12_var=0.02, D=50, Vc=50, dt=1
+    //   expected_v = 0.02·2500 = 50.0 (k12_var alone drives variance)
+    let i_p3   = val_1cmt_k12var_params(0.1, 0.0, 0.02, 50.0)
+    simulate(1.0, 1.0, 50.0, 0.0, &i_p3, 2, &!si_t, &!si_c, &!si_s)
+    let i_act3 = si_s[1] * si_s[1] * 50.0 * 50.0
+    let i_exp3 = 50.0
+    let i_d3   = if i_act3 - i_exp3 < 0.0 { 0.0 - (i_act3 - i_exp3) } else { i_act3 - i_exp3 }
+    s6_chk(i_d3 < 0.0000000001)                                              // 52
+
+    // Test I-d: symmetry — (ke_var=0.02, k12_var=0.01) gives same V1 as I-b
+    let i_p4   = val_1cmt_k12var_params(0.1, 0.02, 0.01, 70.0)
+    simulate(1.0, 1.0, 100.0, 0.0, &i_p4, 2, &!si_t, &!si_c, &!si_s)
+    let i_act4 = si_s[1] * si_s[1] * 70.0 * 70.0
+    let i_d4   = if i_act4 - i_exp2 < 0.0 { 0.0 - (i_act4 - i_exp2) } else { i_act4 - i_exp2 }
+    s6_chk(i_d4 < 0.0000000001)                                              // 53
+
+    // ── Section J: D-scaling law — variance ∝ D² (3 assertions) ───────────────
+    // V1 = dt²·ke_var·D² ⟹ std²(2D) = 4·std²(D), std²(D/2) = std²(D)/4.
+
+    var sj_t = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var sj_c = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var sj_s = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    let j_p = val_1cmt_params(0.1, 0.01, 70.0)
+
+    // D=100 → baseline variance in C (not multiplied by Vc²; just std²)
+    simulate(1.0, 1.0, 100.0, 0.0, &j_p, 2, &!sj_t, &!sj_c, &!sj_s)
+    let j_v1 = sj_s[1] * sj_s[1]
+
+    // D=200 → std² must equal 4·j_v1 (|j_v2 − 4·j_v1| < 1e-13)
+    simulate(1.0, 1.0, 200.0, 0.0, &j_p, 2, &!sj_t, &!sj_c, &!sj_s)
+    let j_v2  = sj_s[1] * sj_s[1]
+    let j_d1  = if j_v2 - 4.0 * j_v1 < 0.0 { 0.0 - (j_v2 - 4.0 * j_v1) } else { j_v2 - 4.0 * j_v1 }
+    s6_chk(j_d1 < 0.0000000000001)                                           // 54
+
+    // D=50 → std² must equal j_v1/4 (|4·j_v3 − j_v1| < 1e-13)
+    simulate(1.0, 1.0, 50.0, 0.0, &j_p, 2, &!sj_t, &!sj_c, &!sj_s)
+    let j_v3  = sj_s[1] * sj_s[1]
+    let j_d2  = if j_v1 - 4.0 * j_v3 < 0.0 { 0.0 - (j_v1 - 4.0 * j_v3) } else { j_v1 - 4.0 * j_v3 }
+    s6_chk(j_d2 < 0.0000000000001)                                           // 55
+
+    // D=0 → std = 0.0 exactly (no input dose → no uncertainty)
+    simulate(1.0, 1.0, 0.0, 0.0, &j_p, 2, &!sj_t, &!sj_c, &!sj_s)
+    s6_chk(sj_s[1] == 0.0)                                                   // 56
+}
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    run_sprint6_gate()
+    if SPR6_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}
