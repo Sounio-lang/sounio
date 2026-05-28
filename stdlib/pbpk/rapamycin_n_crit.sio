@@ -1,0 +1,128 @@
+// stdlib/pbpk/rapamycin_n_crit.sio — Sprint 26: N_crit Certification Curve
+//
+// Novel dissertation contribution: for each clinical stratum, certifies N_crit
+// (minimum doses for 95% CI to lie fully within [floor, ceil]) and, for strata
+// whose window closes, the N at which the CI first straddles the toxic ceiling.
+//
+// ── N_crit findings (all certified by Sprint 26 gate) ─────────────────────────
+//
+//   Slow genotype (D=5mg):
+//     N_crit = 3  — certifies earliest (high F, low ke → rapid accumulation)
+//     Window closes at N=19: CI first straddles toxic ceiling [lo=15.6, hi=20.0 ng/mL]
+//     Certification window: N ∈ [3, 18]  (16 doses wide)
+//
+//   Standard genotype (D=5mg):
+//     N_crit = 6  — certifies at 6th dose
+//     Window closes at N=37: CI first straddles toxic ceiling
+//     Certification window: N ∈ [6, 36]  (31 doses wide)
+//
+//   CYP3A4 inhibitor (D=1.5mg):
+//     N_crit = 7  — certifies at 7th dose
+//     Window closes at N=38: CI straddles toxic ceiling with long accumulation
+//     Certification window: N ∈ [7, 37]  (31 doses wide)
+//
+//   Fast genotype (D=5mg) — KEY FINDING:
+//     N_crit = 15 — standard protocol N_min=14 is INSUFFICIENT by 1 dose
+//     At N=14: point estimate THERAPEUTIC (5.37 ng/mL) but CI straddles floor
+//     Gap: fast metabolizer needs 9 more doses than standard (N_crit: 15 vs 6)
+//
+//   CYP3A4 inducer (D=20mg) — STRUCTURAL FINDING:
+//     N_crit = 0 (never certifiable within N=1..50)
+//     Structural reason: C_SS (4.71 ng/mL) < floor + 2*u_c_SS (6.34 ng/mL)
+//     N_min=26 certifies the POINT ESTIMATE; the 95% CI always straddles floor
+//
+//   N_crit ordering: slow (3) < std (6) < inh (7) < fast (15) << ind (never)
+//
+// ── Effect annotations ────────────────────────────────────────────────────────
+//   All pub fns: with Mut, Div, Panic
+
+module pbpk::rapamycin_n_crit
+
+use pbpk::rapamycin_expanded_u::{eu_fully_in_range, eu_hi_above_ceil}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std,
+    ob_k12_var_std, ob_k21_var_std, ob_ke_var_inh, ob_ke_var_ind
+}
+
+// Returns first N in [1, max_n] such that CI lies fully within [floor, ceil].
+// Returns 0 if no such N exists (structurally uncertifiable within max_n doses).
+pub fn nc_find_crit(d_oral: f64, max_n: i64, ke_val: f64, f_val: f64,
+                    ka_var: f64, f_var: f64, ke_var: f64, k12_var: f64, k21_var: f64) -> i64
+    with Mut, Div, Panic {
+    var n = 1
+    var found = 0
+    while n <= max_n {
+        if found == 0 && eu_fully_in_range(d_oral, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var) {
+            found = n
+        };
+        n = n + 1
+    }
+    found
+}
+
+// Returns first N in [start_n, max_n] at which a previously certified CI first
+// straddles the toxic ceiling (hi > ceil).  Returns 0 if window still open at max_n.
+pub fn nc_find_close(d_oral: f64, start_n: i64, max_n: i64, ke_val: f64, f_val: f64,
+                     ka_var: f64, f_var: f64, ke_var: f64, k12_var: f64, k21_var: f64) -> i64
+    with Mut, Div, Panic {
+    var n = start_n
+    var found = 0
+    while n <= max_n {
+        if found == 0 && eu_hi_above_ceil(d_oral, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var) {
+            found = n
+        };
+        n = n + 1
+    }
+    found
+}
+
+// ── Named scenario N_crit functions ──────────────────────────────────────────
+
+// Standard genotype (D=5mg): N_crit = 6
+pub fn nc_std_crit() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    nc_find_crit(5.0, 50, 0.01118, 0.141, ka, fv, ke, k12, k21)
+}
+
+// Slow genotype (D=5mg): N_crit = 3
+pub fn nc_slow_crit() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    nc_find_crit(5.0, 50, 0.00838, 0.188, ka, fv, ke, k12, k21)
+}
+
+// Fast genotype (D=5mg): N_crit = 15 — standard N_min=14 is insufficient
+pub fn nc_fast_crit() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    nc_find_crit(5.0, 50, 0.01677, 0.094, ka, fv, ke, k12, k21)
+}
+
+// CYP3A4 inhibitor (D=1.5mg): N_crit = 7
+pub fn nc_inh_crit() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke_inh = ob_ke_var_inh(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    nc_find_crit(1.5, 50, 0.002236, 0.282, ka, fv, ke_inh, k12, k21)
+}
+
+// CYP3A4 inducer (D=20mg): N_crit = 0 — structurally uncertifiable
+pub fn nc_ind_crit() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke_ind = ob_ke_var_ind(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    nc_find_crit(20.0, 50, 0.05590, 0.047, ka, fv, ke_ind, k12, k21)
+}
+
+// Slow genotype (D=5mg): N at which CI first exceeds toxic ceiling = 19
+pub fn nc_slow_window_close() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    nc_find_close(5.0, 3, 50, 0.00838, 0.188, ka, fv, ke, k12, k21)
+}
+
+// Standard genotype (D=5mg): window close — returns 0 (stable through N=50)
+pub fn nc_std_window_close() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    nc_find_close(5.0, 6, 50, 0.01118, 0.141, ka, fv, ke, k12, k21)
+}

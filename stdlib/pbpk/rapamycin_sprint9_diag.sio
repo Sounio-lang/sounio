@@ -1,0 +1,146 @@
+// Sprint 9 diagnostic: budget-guided improvement.
+// Scenario: 1-cmt degenerate (k12_val=k21_val=0) with BOTH ke_var AND k12_var nonzero.
+// Budget fractions: ke_frac = ke_var/(ke_var+k12_var), k12_frac = k12_var/(ke_var+k12_var).
+// Goal: find ke_var, k12_var where baseline→UNCERTAIN, reduce-dominant→THERAPEUTIC,
+// reduce-non-dominant→still UNCERTAIN.
+
+use pbpk::rapamycin_validation::{val_1cmt_k12var_params}
+use pbpk::rapamycin_precision::{classify_iv_trough, conf_iv_trough}
+use pbpk::rapamycin_budget::{simulate_budget, budget_dominant, budget_sum_ok}
+use pbpk::rapamycin_clinical::{decision_therapeutic, decision_uncertain, conf_clinical_min, conf_from_rel, assess_trough}
+use pbpk::rapamycin_2cmt::{simulate}
+use epistemic::knowledge::{Epistemic}
+
+fn pi64(n: i64) with IO {
+    var m  = n
+    var dg = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var nd = 0
+    while m > 0 { dg[nd] = m - (m/10)*10; nd = nd + 1; m = m / 10 }
+    if nd == 0 { print("0") }
+    var ri = nd - 1
+    while ri >= 0 {
+        let d = dg[ri]
+        if d == 0 { print("0") } else if d == 1 { print("1") }
+        else if d == 2 { print("2") } else if d == 3 { print("3") }
+        else if d == 4 { print("4") } else if d == 5 { print("5") }
+        else if d == 6 { print("6") } else if d == 7 { print("7") }
+        else if d == 8 { print("8") } else { print("9") }
+        ri = ri - 1
+    }
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    // Scenario: ke=0.05, k12_val=0, k21_val=0, Vc=70, D=2, t=24h
+    // ke_var=0.003, k12_var=0.001 → total var source = 0.004
+
+    // === BASELINE ke_var=0.003, k12_var=0.001 ===
+    print("=== Baseline: ke_var=0.003, k12_var=0.001 ===\n")
+    print("classify: dec=") pi64(classify_iv_trough(0.05,0.003,70.0,2.0,24.0,1.0,25,24)) print("\n")
+    print("conf:     ")     pi64(conf_iv_trough(0.05,0.003,70.0,2.0,24.0,1.0,25,24))     print("\n")
+
+    // Budget fractions for baseline
+    let p_base = val_1cmt_k12var_params(0.05, 0.003, 0.001, 70.0)
+    var bt = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bc = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bs = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bf   = [0.0, 0.0, 0.0, 0.0, 0.0]
+    var bauc = [0.0, 0.0]
+    var bcmx = [0.0, 0.0, 0.0]
+    simulate_budget(24.0, 1.0, 2.0, 0.0, &p_base, 25, &!bt, &!bc, &!bs, &!bf, &!bauc, &!bcmx)
+    print("budget_dominant: ") pi64(budget_dominant(&bf)) print("\n")
+    print("budget_sum_ok:   ") if budget_sum_ok(&bf, 0.001) { print("true") } else { print("false") } print("\n")
+    // ke_frac≈0.75, k12_frac≈0.25 expected
+    // (can't print f64 easily, just check dominant and sum)
+
+    print("\n=== Targeted: reduce dominant ke_var 4x → 0.00075 ===\n")
+    print("classify: dec=") pi64(classify_iv_trough(0.05,0.00075,70.0,2.0,24.0,1.0,25,24)) print("\n")
+    print("conf:     ")     pi64(conf_iv_trough(0.05,0.00075,70.0,2.0,24.0,1.0,25,24))     print("\n")
+    // Note: classify_iv_trough uses 1-cmt (ke_var only). For 2-cmt with k12_var, need custom.
+    // Actually this test is wrong — must use full params including k12_var.
+    // Let me use val_1cmt_k12var_params for the classify calls below.
+
+    // For classify with combined ke_var+k12_var, I need to run simulate directly.
+    // But classify_iv_trough only takes ke_var (1-cmt via iv_bolus_params).
+    // Solution: run val_1cmt_k12var_params + simulate directly here.
+
+    print("\n=== NOTE: classify_iv_trough is 1-cmt. Need direct simulate for 2-cmt budget tests.\n")
+    print("=== The ke_var in classify_iv_trough already includes ONLY ke contribution.\n")
+    print("=== For combined test, we need: ke_var_eff = ke_var + k12_var for conf comparison.\n")
+
+    // Direct comparison: effective total ke_var
+    // Baseline: ke_var_eff = 0.003 + 0.001 = 0.004
+    print("\n=== Using effective variance: baseline ke_var_eff=0.004 ===\n")
+    print("classify (1-cmt, ke_var=0.004):  ") pi64(classify_iv_trough(0.05,0.004,70.0,2.0,24.0,1.0,25,24))  print("\n")
+    print("classify (1-cmt, ke_var=0.0025): ") pi64(classify_iv_trough(0.05,0.0025,70.0,2.0,24.0,1.0,25,24)) print("\n")
+
+    // Targeted: reduce ke_var from 0.003 to 0.00075, k12_var stays 0.001 → total=0.00175
+    print("classify (ke_var_eff=0.00175): ") pi64(classify_iv_trough(0.05,0.00175,70.0,2.0,24.0,1.0,25,24)) print("\n")
+    print("conf     (ke_var_eff=0.00175): ") pi64(conf_iv_trough(0.05,0.00175,70.0,2.0,24.0,1.0,25,24))     print("\n")
+
+    // Blind: reduce k12_var from 0.001 to 0.00025, ke_var stays 0.003 → total=0.00325
+    print("classify (ke_var_eff=0.00325): ") pi64(classify_iv_trough(0.05,0.00325,70.0,2.0,24.0,1.0,25,24)) print("\n")
+    print("conf     (ke_var_eff=0.00325): ") pi64(conf_iv_trough(0.05,0.00325,70.0,2.0,24.0,1.0,25,24))     print("\n")
+
+    // Also test with simulate directly using val_1cmt_k12var_params
+    // (This uses the actual 2-cmt GUM propagation including k12_var in variance)
+    var st = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var sc = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var ss = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var sf   = [0.0, 0.0, 0.0, 0.0, 0.0]
+    var sauc = [0.0, 0.0]
+    var scmx = [0.0, 0.0, 0.0]
+
+    print("\n=== Direct simulate with val_1cmt_k12var_params ===\n")
+
+    // Baseline: ke_var=0.003, k12_var=0.001
+    print("Baseline: ")
+    simulate(24.0,1.0,2.0,0.0,&p_base,25,&!st,&!sc,&!ss)
+    let c0   = sc[24]
+    let s0   = ss[24]
+    let cf0  = conf_from_rel(c0, s0)
+    let ep0  = Epistemic::new(c0, s0*s0, cf0)
+    let dec0 = assess_trough(&ep0)
+    print("dec=") pi64(dec0) print(" conf=") pi64(cf0) print("\n")
+
+    // Targeted: ke_var=0.00075, k12_var=0.001
+    let p_targ = val_1cmt_k12var_params(0.05, 0.00075, 0.001, 70.0)
+    print("Targeted (ke_var/4): ")
+    simulate(24.0,1.0,2.0,0.0,&p_targ,25,&!st,&!sc,&!ss)
+    let c1   = sc[24]
+    let s1   = ss[24]
+    let cf1  = conf_from_rel(c1, s1)
+    let ep1  = Epistemic::new(c1, s1*s1, cf1)
+    let dec1 = assess_trough(&ep1)
+    print("dec=") pi64(dec1) print(" conf=") pi64(cf1) print("\n")
+
+    // Blind: ke_var=0.003, k12_var=0.00025
+    let p_blind = val_1cmt_k12var_params(0.05, 0.003, 0.00025, 70.0)
+    print("Blind (k12_var/4): ")
+    simulate(24.0,1.0,2.0,0.0,&p_blind,25,&!st,&!sc,&!ss)
+    let c2   = sc[24]
+    let s2   = ss[24]
+    let cf2  = conf_from_rel(c2, s2)
+    let ep2  = Epistemic::new(c2, s2*s2, cf2)
+    let dec2 = assess_trough(&ep2)
+    print("dec=") pi64(dec2) print(" conf=") pi64(cf2) print("\n")
+
+    // Budget dominant for baseline
+    simulate_budget(24.0,1.0,2.0,0.0,&p_base,25,&!bt,&!bc,&!bs,&!bf,&!bauc,&!bcmx)
+    print("\nBudget dominant (0=ke, 1=k12): ") pi64(budget_dominant(&bf)) print("\n")
+    simulate_budget(24.0,1.0,2.0,0.0,&p_targ,25,&!bt,&!bc,&!bs,&!sf,&!sauc,&!scmx)
+    print("Budget dominant after targeting: ") pi64(budget_dominant(&sf)) print("\n")
+
+    0
+}

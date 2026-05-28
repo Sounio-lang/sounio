@@ -57,8 +57,8 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 | Component | Registry row | Honest status |
 |-----------|--------------|---------------|
 | **Standard library (broad surface)** | `stdlib.surface = prototype` | Do not claim broad stdlib callability. The 251/251 reliability gate covers ~27% of stdlib files. |
-| **Formatter** | `tooling.editor = prototype` | **Not shipped.** No `souc format` subcommand, no `tools/fmt*` binary. The earlier "Formatter Production / AST-based / diff mode" claim was wrong and is removed. |
-| **REPL** | `tooling.editor = prototype` | `tools/repl.sh` is a thin Bash wrapper; not exposed as a `souc` subcommand. |
+| **Formatter — Phase 1 (token-level)** | `tooling.editor = prototype` | **G5a landed 2026-05-28.** `souc format <file>` / `souc fmt` dispatches to `tools/fmt/sounio-fmt.sh`. Phase 1 rules (tab→4-space expansion, trailing-whitespace strip, ≥3 blank lines collapsed to 1, `,` + `->` spacing) normalised outside strings/comments. Idempotency gate `scripts/gates/g5a_formatter_idempotent.sh` (4/4 PASS on stdlib + fixture). **Deferred to Phase 2:** operator spacing for `+`, `-`, `*`, `/`, `:`, `=` (ambiguous without a parse tree); AST-based indentation; diff-mode output. No AST round-trip guarantee — use `souc check` to verify file validity after formatting. |
+| **REPL** | `tooling.editor = prototype` | **G5b landed 2026-05-28.** `souc repl` dispatches to `tools/repl.sh`, a souc-native file-based eval loop (each input is compiled and executed by *this* `souc` binary, not a separate Rust reimplementation). Gate: `scripts/gates/g5b_repl_eval.sh` PASS. Open: fully-Sounio eval loop in `self-hosted/repl/` deferred (needs process-spawn primitives). |
 | **Package manager / registry** | `tooling.package = prototype` | Local `~/.sounio/registry/` only. No public registry. |
 | **Generic structs/functions/traits** | `generics.* = prototype` | 1–2 type params work; do not claim a mature trait ecosystem. Trait bounds are parsed but not enforced at call sites. No trait objects. |
 | **Linear closures** | `closures.lambdas = validated_research` | Regular closures (capture, HOF, escape) are **implemented and gate-tested** (16/17 `tests/run-pass/closure_*.sio`). **Linear closures** (capturing linear resources, `closure_linear.sio`) are the one open feature — marked `//@ ignore`, tracked separately. |
@@ -76,7 +76,7 @@ The previous claim *"No active known bugs"* was incorrect at the multi-module bu
 **Multi-module bundle compile (`[[project_task_c_blocker]]`)** — Bundle baseline as of 2026-05-24: **766 errors**. Three named architectural roots, all currently workaround-only:
 
 1. **i64 type-hash overflow on 3-level pointer nesting.** Sim-proven exact. Source workaround: `&Option<Box<T>>` → `&Option<&T>`. The real fix is composite-type interning (architectural, deferred).
-2. **SRET for ≥8-field struct returns.** Source workaround: flat arrays / split-by-field. Tracked in `[[feedback_native_compiler_limits]]`.
+2. **SRET for ≥8-field struct returns — bundle path only.** No repro in the `lean_single.sio` single-file path (probed 2026-05-28, 14 scenarios up to 33-field i64/f64/mixed, all PASS including the `rep movsq` path). The bug is isolated to the multi-module bundle compile path where composite-type interning is absent. Regression test pinned: `tests/run-pass/sret_8_field_return.sio`. Source workaround for bundle path: flat arrays / split-by-field. Tracked in `[[feedback_native_compiler_limits]]`.
 3. **Nested `&!` struct-field mutation.** Mutation through `&!T` to a struct field doesn't propagate; bare-array index through `&![T;N]` was fixed in v2.0 but **struct** field stores were not. Source workaround: streaming / flat patterns.
 
 These are the gate between "single-file demo language" and "modular self-hosted tree replaces `lean_single.sio` as binary source." See `docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md` §5 / G1.
@@ -87,7 +87,10 @@ This file previously claimed several rows as "Production" that the public-claim 
 
 - **Removed:** the row claiming `Formatter Production`. No `souc format` subcommand exists; no `tools/fmt*` binary exists.
 - **Removed:** the "No active known bugs" assertion. Bundle baseline is 766 errors with three named roots.
-- **Removed:** `CLI: check/build/run/repl/format/doc` — `repl`/`format`/`doc` are not subcommands of `bin/souc`. They print *"unsupported command for the checked self-hosted launcher"*.
+- **Removed:** `CLI: check/build/run/repl/format/doc` — was wrong about `repl` and `format` (both now wired 2026-05-28, see G5a/G5b rows above). `doc` remains unimplemented in this checkout.
+- **Added 2026-05-28:** G5a formatter shipped (`tools/fmt/sounio-fmt.sh`, `souc format` subcommand). See formatter row above for Phase 1 scope and Phase 2 deferrals.
+- **Added 2026-05-28:** G5b REPL shipped (`souc repl` → `tools/repl.sh`, souc-native eval loop).
+- **Added 2026-05-28:** G6 public install path — `scripts/install.sh` + `scripts/release.sh` stage compiler + stdlib + launcher into arbitrary `--prefix`. Discriminator: `bash scripts/install.sh --prefix=/tmp/t && /tmp/t/bin/souc --version`.
 - **Downgraded:** LLVM Codegen from `Production` to `Validated research` — the LLVM bridge is wired but disabled in the checked binary.
 - **Reframed:** LSP, REPL, Package Manager to mirror the registry's `prototype` tier.
 - **Added:** "Active Known Bugs / Architectural Gaps" section enumerating the three bundle-compile roots.

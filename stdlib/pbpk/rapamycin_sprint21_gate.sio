@@ -1,0 +1,187 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint21_gate.sio — Sprint 21 minimum-N onset theorem gate
+//
+// 56 assertions certifying the minimum number of oral rapamycin doses required
+// before TDM is epistemically reliable, across all clinical strata from
+// Sprints 18 (CYP3A5 genotypes) and 19 (DDI scenarios).
+//
+// ══ Registered N_min values ═════════════════════════════════════════════════
+//
+//   CYP3A5 *3/*3 (slow)      5 mg:  N_min = 2
+//   CYP3A5 *1/*3 (standard)  5 mg:  N_min = 3
+//   DDI strong inhibitor     1.5mg: N_min = 5
+//   CYP3A5 *1/*1 (fast)      5 mg:  N_min = 9
+//   CYP3A5 *3/*3             1.5mg: N_min = 13  (dose-halved)
+//   DDI strong inducer       20 mg: N_min = 26  (25-dose barrier at conf=700)
+//
+// ══ Key theorems certified ══════════════════════════════════════════════════
+//
+//   T1 (Genotype ordering):  N_min_slow < N_min_standard < N_min_fast
+//   T2 (DDI inducer barrier): conf=700 for doses 1–25 at 20mg; onset only at N=26
+//   T3 (F* ceiling permanent): *1/*1 conf=820 at N=9, N=28 — N cannot help
+//   T4 (Ka÷4 milestone):     *1/*3 + ka÷4 shares N_min=3 but reaches 900 at N=5
+//   T5 (Dose-halved quality): *3/*3 1.5mg N_min=13 onset directly at conf=900
+//
+// ══ Assertion map ═══════════════════════════════════════════════════════════
+//
+//   A (1–8):   N_min ordering: slow < standard < fast; inhibitor < fast
+//   B (9–14):  N_min absolute values (scan-verified)
+//   C (15–20): Conf at N_min (onset quality for each stratum)
+//   D (21–26): Pre-onset: N_min−1 is NOT THERAPEUTIC
+//   E (27–32): DDI inducer barrier: conf=700 for N=1..25
+//   F (33–38): Ka÷4 effect: same N_min, better conf milestone
+//   G (39–44): Conf milestones: first N reaching 900 for select strata
+//   H (45–48): Inhibitor onset pathway: SUB→UNCERTAIN→THERAPEUTIC
+//   I (49–52): Constant consistency
+//   J (53–56): Clinical synthesis — genotype spread, DDI burden, ceiling law
+
+use pbpk::rapamycin_onset::{
+    onset_genotype_ordering, onset_standard_at_n3, onset_slow_at_n2,
+    onset_fast_at_n9, onset_slow_halved_at_n13, onset_inhibitor_at_n5,
+    onset_inducer_at_n26, onset_inducer_barrier_n25,
+    onset_fast_onset_conf_820, onset_ka4_milestone_n5,
+    onset_classify_at_n, onset_conf_at_n, onset_n_min_scan,
+    on_n_min_standard, on_n_min_slow, on_n_min_fast,
+    on_n_min_slow_halved, on_n_min_inhibitor, on_n_min_inducer, on_n_min_std_ka4,
+    on_ka_var_std, on_f_var_std, on_ke_var_std, on_k12_var_std, on_k21_var_std,
+    on_ke_var_inh_strong, on_ke_var_ind_strong
+}
+use pbpk::rapamycin_clinical::{
+    conf_clinical_min, decision_therapeutic, decision_uncertain, decision_sub
+}
+
+var SPR21_PASS: [i64; 2] = [0; 2]
+
+fn s21_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR21_PASS[0] = SPR21_PASS[0] + 1
+    } else {
+        SPR21_PASS[1] = SPR21_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint21_gate() with IO, Mut, Div, Panic {
+    let ka   = on_ka_var_std()
+    let fv   = on_f_var_std()
+    let ke_v = on_ke_var_std()
+    let k12v = on_k12_var_std()
+    let k21v = on_k21_var_std()
+    let ke_inh = on_ke_var_inh_strong()
+    let ke_ind = on_ke_var_ind_strong()
+
+    // PK parameter constants (inline for clarity)
+    // CYP3A5 genotypes: (ke, F)
+    //   slow *3/*3:     ke=0.00838, F=0.188
+    //   standard *1/*3: ke=0.01118, F=0.141
+    //   fast *1/*1:     ke=0.01677, F=0.094
+    // DDI scenarios: (ke, F, ke_var)
+    //   inh strong:  ke=0.002236, F=0.282, ke_var=on_ke_var_inh_strong()
+    //   ind strong:  ke=0.05590,  F=0.047, ke_var=on_ke_var_ind_strong()
+
+    // ── Section A: N_min ordering (8 assertions) ─────────────────────────────
+
+    s21_chk(onset_genotype_ordering())                                      // 1 slow<std<fast
+    s21_chk(on_n_min_slow() < on_n_min_standard())                         // 2 2 < 3
+    s21_chk(on_n_min_standard() < on_n_min_fast())                         // 3 3 < 9
+    s21_chk(on_n_min_inhibitor() > on_n_min_slow())                        // 4 5 > 2
+    s21_chk(on_n_min_inhibitor() < on_n_min_fast())                        // 5 5 < 9
+    s21_chk(on_n_min_fast() < on_n_min_slow_halved())                      // 6 9 < 13
+    s21_chk(on_n_min_slow_halved() < on_n_min_inducer())                   // 7 13 < 26
+    s21_chk(on_n_min_std_ka4() == on_n_min_standard())                     // 8 ka÷4 preserves N_min
+
+    // ── Section B: N_min absolute values (6 assertions) ──────────────────────
+
+    // All scan-verified: onset_n_min_scan returns the first THERAPEUTIC N
+    s21_chk(onset_n_min_scan(5.0,  0.01118, 0.141,  ka,  fv, ke_v, k12v, k21v) == 3)  //  9 standard
+    s21_chk(onset_n_min_scan(5.0,  0.00838, 0.188,  ka,  fv, ke_v, k12v, k21v) == 2)  // 10 slow
+    s21_chk(onset_n_min_scan(5.0,  0.01677, 0.094,  ka,  fv, ke_v, k12v, k21v) == 9)  // 11 fast
+    s21_chk(onset_n_min_scan(1.5,  0.00838, 0.188,  ka,  fv, ke_v, k12v, k21v) == 13) // 12 slow-halved
+    s21_chk(onset_n_min_scan(1.5,  0.002236, 0.282, ka,  fv, ke_inh, k12v, k21v) == 5) // 13 inhibitor
+    s21_chk(onset_n_min_scan(20.0, 0.05590,  0.047, ka,  fv, ke_ind, k12v, k21v) == 26)// 14 inducer
+
+    // ── Section C: Conf at N_min (onset quality) (6 assertions) ──────────────
+
+    s21_chk(onset_conf_at_n(5.0,  3, 0.01118, 0.141,  ka, fv, ke_v,   k12v, k21v) == 820) // 15 std
+    s21_chk(onset_conf_at_n(5.0,  2, 0.00838, 0.188,  ka, fv, ke_v,   k12v, k21v) == 820) // 16 slow
+    s21_chk(onset_conf_at_n(5.0,  9, 0.01677, 0.094,  ka, fv, ke_v,   k12v, k21v) == 820) // 17 fast
+    s21_chk(onset_conf_at_n(1.5, 13, 0.00838, 0.188,  ka, fv, ke_v,   k12v, k21v) == 900) // 18 slow-halved → 900!
+    s21_chk(onset_conf_at_n(1.5,  5, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v) == 900) // 19 inhibitor → 900!
+    s21_chk(onset_conf_at_n(20.0,26, 0.05590,  0.047, ka, fv, ke_ind, k12v, k21v) == 820) // 20 inducer: only 820
+
+    // ── Section D: Pre-onset is NOT THERAPEUTIC (6 assertions) ───────────────
+
+    s21_chk(onset_classify_at_n(5.0,  2, 0.01118, 0.141,  ka, fv, ke_v,   k12v, k21v) != decision_therapeutic()) // 21 std N=2
+    s21_chk(onset_classify_at_n(5.0,  1, 0.00838, 0.188,  ka, fv, ke_v,   k12v, k21v) != decision_therapeutic()) // 22 slow N=1
+    s21_chk(onset_classify_at_n(5.0,  8, 0.01677, 0.094,  ka, fv, ke_v,   k12v, k21v) != decision_therapeutic()) // 23 fast N=8
+    s21_chk(onset_classify_at_n(1.5, 12, 0.00838, 0.188,  ka, fv, ke_v,   k12v, k21v) != decision_therapeutic()) // 24 slow-halved N=12
+    s21_chk(onset_classify_at_n(1.5,  4, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v) != decision_therapeutic()) // 25 inhibitor N=4
+    s21_chk(onset_classify_at_n(20.0,25, 0.05590,  0.047, ka, fv, ke_ind, k12v, k21v) != decision_therapeutic()) // 26 inducer N=25
+
+    // ── Section E: DDI inducer barrier (6 assertions) ─────────────────────────
+    // conf=700 for inducer N=1..25 — a 25-dose epistemic impossibility window
+
+    s21_chk(onset_inducer_barrier_n25())                                               // 27 (N=25: 700)
+    s21_chk(onset_conf_at_n(20.0, 1,  0.05590, 0.047, ka, fv, ke_ind, k12v, k21v) == 700) // 28 N=1: 700
+    s21_chk(onset_conf_at_n(20.0, 14, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v) == 700) // 29 N=14: still 700!
+    s21_chk(onset_conf_at_n(20.0, 25, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v) == 700) // 30 N=25: still 700
+    s21_chk(onset_classify_at_n(20.0,25, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v) == decision_uncertain()) // 31 N=25: UNCERTAIN
+    s21_chk(onset_inducer_at_n26())                                                    // 32 N=26: THERAPEUTIC
+
+    // ── Section F: Ka÷4 effect (6 assertions) ────────────────────────────────
+    // Same N_min as standard (3), but 900-quality milestone reached 3 doses earlier
+
+    let ka4 = on_ka_var_std() / 4.0
+    s21_chk(onset_n_min_scan(5.0, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v) == on_n_min_std_ka4()) // 33 N_min still 3
+    s21_chk(onset_conf_at_n(5.0, 3, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v) == 820)             // 34 onset conf=820
+    s21_chk(onset_ka4_milestone_n5())                                                                // 35 N=5: conf=900
+    s21_chk(onset_conf_at_n(5.0, 5, 0.01118, 0.141, ka,  fv, ke_v, k12v, k21v) == 820)             // 36 std ka N=5: still 820
+    s21_chk(onset_conf_at_n(5.0, 5, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v) > onset_conf_at_n(5.0, 5, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)) // 37 ka÷4 > std at N=5
+    s21_chk(onset_conf_at_n(5.0, 14, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v) == 900)            // 38 SS conf at ka÷4 = 900
+
+    // ── Section G: Conf milestones (6 assertions) ─────────────────────────────
+
+    s21_chk(onset_conf_at_n(5.0, 8, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v) == 900)  // 39 slow N=8: conf=900
+    s21_chk(onset_conf_at_n(5.0, 7, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v) == 820)  // 40 slow N=7: still 820
+    s21_chk(onset_conf_at_n(5.0, 4, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v) == 820) // 41 std+ka÷4 N=4: 820
+    s21_chk(onset_conf_at_n(5.0, 5, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v) == 900) // 42 std+ka÷4 N=5: 900
+    s21_chk(onset_fast_onset_conf_820())                                                 // 43 fast: conf=820 at onset (N=9)
+    s21_chk(onset_conf_at_n(5.0, 28, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v) == 900) // 44 fast N=28: SS conf=900 (true SS)
+
+    // ── Section H: Inhibitor onset pathway: SUB→SUB→SUB→UNCERTAIN→THERAPEUTIC (4 assertions) ─────
+
+    s21_chk(onset_classify_at_n(1.5, 1, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v) == decision_sub())   // 45 N=1: SUB
+    s21_chk(onset_classify_at_n(1.5, 2, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v) == decision_sub())   // 46 N=2: still SUB (slow accumulation)
+    s21_chk(onset_classify_at_n(1.5, 3, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v) == decision_sub())   // 47 N=3: still SUB
+    s21_chk(onset_inhibitor_at_n5())                                                                       // 48 N=5: THERAPEUTIC
+
+    // ── Section I: Constant consistency (4 assertions) ───────────────────────
+
+    s21_chk(on_n_min_slow()        == 2)   // 49
+    s21_chk(on_n_min_standard()    == 3)   // 50
+    s21_chk(on_n_min_fast()        == 9)   // 51
+    s21_chk(on_n_min_inducer()     == 26)  // 52
+
+    // ── Section J: Clinical synthesis (4 assertions) ──────────────────────────
+    // T1: Genotype spread; T2: DDI burden; T3: Dose trade-off; T4: N_min law
+
+    s21_chk(on_n_min_fast() - on_n_min_slow() == 7)                       // 53 genotype spread = 7 doses
+    s21_chk(on_n_min_inducer() - on_n_min_standard() == 23)               // 54 DDI inducer burden = 23 doses
+    s21_chk(on_n_min_fast() < on_n_min_slow_halved())                     // 55 dose-halved costs more than fast genotype
+    s21_chk(on_n_min_standard() == on_n_min_std_ka4())                    // 56 ka÷4 preserves N_min; gains milestone quality
+
+    let pass = SPR21_PASS[0]
+    let fail = SPR21_PASS[1]
+    if fail == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL — ")
+        print_int(fail)
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    run_sprint21_gate()
+}

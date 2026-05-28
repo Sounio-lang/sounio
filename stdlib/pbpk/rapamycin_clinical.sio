@@ -1,0 +1,182 @@
+// stdlib/pbpk/rapamycin_clinical.sio — Compile-time confidence gates for rapamycin PBPK
+//
+// Novel dissertation contribution #2: compile-time uncertainty-awareness enforcement.
+//
+// Every function that participates in a clinical decision about rapamycin
+// concentration or exposure must declare 'with Epistemic'. This is enforced
+// at compile time through effect propagation (E035): calling ep_credible or
+// any function in this module from a function without 'with Epistemic' is a
+// compile error. The compiler thus guarantees that uncertainty information
+// cannot be silently discarded anywhere in the clinical decision pathway.
+//
+// Clinical context: Cypher® sirolimus-eluting coronary stent (Cordis/J&J).
+// Units: mg/L (concentration), mg·h/L (AUC), hours (time).
+//
+// Therapeutic window (systemic plasma):
+//   Trough: 4–20 ng/mL = 0.004–0.020 mg/L (immunosuppression reference range)
+//   Note: stent delivers locally; systemic levels are expected sub-therapeutic
+//   by design. The gate correctly flags this as DECISION_SUB, which is the
+//   appropriate clinical interpretation for local vascular drug delivery.
+//
+// Confidence scale (integer 0–1000):
+//   ≥ 950  instrument-grade precision (< 5% relative uncertainty)
+//   ≥ 900  clinical-grade (10% relative uncertainty, Epistemic::measured default)
+//   ≥ 800  CONF_CLINICAL threshold — minimum for a safe clinical classification
+//   < 800  DECISION_UNCERTAIN returned regardless of point estimate
+
+module pbpk::rapamycin_clinical
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_2cmt::{Rap2CmtParams, simulate}
+
+// ── Therapeutic thresholds (returned as functions — no global f64 in Sounio) ──
+
+pub fn trough_floor_mg_l()  -> f64 { 0.004  }   // 4 ng/mL — subtherapeutic below
+pub fn trough_ceil_mg_l()   -> f64 { 0.020  }   // 20 ng/mL — toxicity above
+pub fn auc_floor_mg_h_l()   -> f64 { 0.001  }   // minimum detectable AUC
+pub fn auc_ceil_mg_h_l()    -> f64 { 200.0  }   // safety ceiling
+pub fn conf_clinical_min()  -> i64 { 800    }   // minimum confidence for clinical decisions
+
+// ── Decision codes ────────────────────────────────────────────────────────────
+
+pub fn decision_sub()         -> i64 { 0 }   // below therapeutic floor
+pub fn decision_therapeutic() -> i64 { 1 }   // within therapeutic window
+pub fn decision_toxic()       -> i64 { 2 }   // above toxicity ceiling
+pub fn decision_uncertain()   -> i64 { 3 }   // confidence < CONF_CLINICAL or CI straddles threshold
+
+// ── Confidence gate ───────────────────────────────────────────────────────────
+
+// Returns true if ep has confidence ≥ conf_clinical_min() (≥ 800).
+//
+// COMPILE-TIME ENFORCEMENT: this function declares 'with Epistemic'.
+// Any function calling ep_credible must also declare 'with Epistemic' or the
+// compiler emits E035 (effect not declared). This propagates up the entire
+// clinical decision call stack, making uncertainty-awareness mandatory.
+pub fn ep_credible(ep: &Epistemic) -> bool with Epistemic {
+    ep.is_credible(conf_clinical_min())
+}
+
+// ── Trough assessment ─────────────────────────────────────────────────────────
+
+// Classify a plasma trough concentration (mg/L) with propagated GUM uncertainty.
+//
+// Classification uses the 95% CI [c − 1.96·σ, c + 1.96·σ]:
+//   • CI entirely below floor          → DECISION_SUB
+//   • CI entirely above ceiling        → DECISION_TOXIC
+//   • point estimate in window, CI ok  → DECISION_THERAPEUTIC
+//   • confidence < 800                 → DECISION_UNCERTAIN (gate fails first)
+//   • CI straddles a threshold         → DECISION_UNCERTAIN
+//
+// Callers must declare 'with Epistemic' (enforced by E035 via ep_credible call).
+pub fn assess_trough(c_ep: &Epistemic) -> i64 with Epistemic {
+    if !ep_credible(c_ep) {
+        decision_uncertain()
+    } else {
+        let c     = c_ep.val()
+        let std   = c_ep.std()
+        let k     = 1.96 * std
+        let lo    = c - k
+        let hi    = c + k
+        let floor = trough_floor_mg_l()
+        let ceil  = trough_ceil_mg_l()
+        if hi < floor {
+            decision_sub()
+        } else if lo > ceil {
+            decision_toxic()
+        } else if c >= floor && c <= ceil {
+            decision_therapeutic()
+        } else {
+            decision_uncertain()
+        }
+    }
+}
+
+// ── AUC assessment ────────────────────────────────────────────────────────────
+
+// Classify cumulative AUC (mg·h/L) with known uncertainty.
+// conf: confidence score (0–1000) for this AUC estimate.
+// auc_std: standard deviation of the AUC (from GUM propagation or budget).
+//
+// Callers must declare 'with Epistemic'.
+pub fn assess_auc(auc_val: f64, auc_std: f64, conf: i64) -> i64 with Epistemic {
+    let ep = Epistemic::new(auc_val, auc_std * auc_std, conf)
+    if !ep_credible(&ep) {
+        decision_uncertain()
+    } else {
+        let k     = 1.96 * auc_std
+        let lo    = auc_val - k
+        let hi    = auc_val + k
+        let floor = auc_floor_mg_h_l()
+        let ceil  = auc_ceil_mg_h_l()
+        if hi < floor {
+            decision_sub()
+        } else if lo > ceil {
+            decision_toxic()
+        } else if auc_val >= floor && auc_val <= ceil {
+            decision_therapeutic()
+        } else {
+            decision_uncertain()
+        }
+    }
+}
+
+// ── Confidence inference from GUM simulation output ───────────────────────────
+
+// Infer confidence score from relative uncertainty (std / val).
+// Uses a comparison chain to avoid f64→i64 casting.
+//   rel < 5%  → 950    rel < 10% → 900    rel < 25% → 820    else → 700
+pub fn conf_from_rel(val: f64, std: f64) -> i64 {
+    if val > 0.0 {
+        let th5  = val / 20.0    // std < val/20 means rel < 5%
+        let th10 = val / 10.0
+        let th25 = val / 4.0
+        if std < th5  { 950 }
+        else if std < th10 { 900 }
+        else if std < th25 { 820 }
+        else { 700 }
+    } else {
+        500
+    }
+}
+
+// ── Full clinical pipeline ────────────────────────────────────────────────────
+
+// Simulate 2-compartment GUM rapamycin PBPK, then classify the final trough
+// concentration and the approximate cumulative AUC.
+//
+// Runs simulate() with stent-only initial conditions (A1_init=0, A2_init=0).
+// Records 48 time points. Reads trough at index 47 (t = t_end).
+// AUC is approximated as C_final × t_end (rectangular, conservative lower bound).
+//
+// Outputs:
+//   trough_decision[0] : DECISION_* code for plasma trough concentration
+//   trough_conf[0]     : inferred confidence score (0–1000) for trough
+//   auc_decision[0]    : DECISION_* code for AUC
+//
+// Callers must declare 'with Epistemic' (propagates from assess_trough).
+pub fn rap_clinical_classify(
+    t_end:           f64,
+    dt:              f64,
+    p:               &Rap2CmtParams,
+    out_t:           &![f64; 50],
+    out_c:           &![f64; 50],
+    out_std:         &![f64; 50],
+    trough_decision: &![i64; 1],
+    trough_conf:     &![i64; 1],
+    auc_decision:    &![i64; 1]
+) with Epistemic, Mut, Div, Panic {
+    simulate(t_end, dt, 0.0, 0.0, p, 48, out_t, out_c, out_std)
+
+    let c_val = out_c[47]
+    let c_std = out_std[47]
+    let conf  = conf_from_rel(c_val, c_std)
+    trough_conf[0] = conf
+
+    let c_ep = Epistemic::new(c_val, c_std * c_std, conf)
+    trough_decision[0] = assess_trough(&c_ep)
+
+    // AUC proxy: C_final × t_end (rectangular lower bound; exact AUC via budget module)
+    let auc_proxy     = c_val * t_end
+    let auc_std_proxy = c_std * t_end
+    auc_decision[0] = assess_auc(auc_proxy, auc_std_proxy, conf)
+}

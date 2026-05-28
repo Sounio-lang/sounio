@@ -1,0 +1,171 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint10_gate.sio — Sprint 10 full 2-cmt sequential budget gate
+//
+// 56 assertions proving that the ISO §E.2 uncertainty budget identifies successive
+// bottlenecks in the full two-compartment (ke + k12 + k21) rapamycin model, and
+// that targeted improvement of each dominant source in turn promotes the gate.
+//
+// Standard 2-cmt scenario: ke=0.04 h⁻¹, k12=0.03 h⁻¹, k21=0.015 h⁻¹, Vc=70 L,
+// D=2 mg IV bolus, assessed at t=24h.
+//
+// Dissertation headline (Section E, assertions 25-30):
+//   budget_3stage_fires() → the sequential narrative holds as a single certified claim:
+//     Stage 1: baseline → UNCERTAIN (ke dominant, index 0)
+//     Stage 2: reduce ke_var÷4 → THERAPEUTIC (k12 becomes dominant, index 1)
+//     Stage 3: reduce ke_var÷4 + k12_var÷4 → THERAPEUTIC (k21 surfaces, index 2)
+//     Contrast: reduce k21_var÷4 only → UNCERTAIN (ke still dominates)
+//
+//   A naive point-estimate TDM tool cannot distinguish stages — it reports THERAPEUTIC
+//   or SUB based on C(24h) alone.  The epistemic system reports which measurement to
+//   improve and in what order.
+//
+// Assertion map:
+//   A (1–8):   full_2cmt_params struct field correctness
+//   B (9–14):  Baseline UNCERTAIN across variance combinations
+//   C (15–20): Stage 1 → targeted ke → THERAPEUTIC, dom shifts to k12
+//   D (21–26): Stage 3 → sequential ke+k12 → THERAPEUTIC, dom shifts to k21
+//   E (27–32): Blind k21 only → UNCERTAIN; budget_3stage_fires
+//   F (33–38): Targeted k12 alone also → THERAPEUTIC; asymmetry in dominant
+//   G (39–44): Confidence score sweep
+//   H (45–48): Full 2-cmt distinct from 1-cmt: three sources, dom can reach index 2
+//   I (49–52): Decision sentinel values
+//   J (53–56): Cross-checks wrapper vs direct
+
+use pbpk::rapamycin_2cmt_full::{
+    full_2cmt_params,
+    classify_full_2cmt, conf_full_2cmt, dominant_full_2cmt,
+    classify_standard_full, conf_standard_full, dominant_standard_full,
+    budget_3stage_fires
+}
+use pbpk::rapamycin_clinical::{decision_therapeutic, decision_uncertain, conf_clinical_min}
+
+var SPR10_PASS: [i64; 2] = [0; 2]
+
+fn s10_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR10_PASS[0] = SPR10_PASS[0] + 1
+    } else {
+        SPR10_PASS[1] = SPR10_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint10_gate() with IO, Epistemic, Mut, Div, Panic {
+
+    // ── Section A: full_2cmt_params field correctness (8 assertions) ──────────
+
+    let a_p = full_2cmt_params(0.04, 0.03, 0.015, 0.002, 0.002, 0.001, 70.0)
+    s10_chk(a_p.ke_val  == 0.04)     // 1
+    s10_chk(a_p.ke_var  == 0.002)    // 2
+    s10_chk(a_p.k12_val == 0.03)     // 3
+    s10_chk(a_p.k12_var == 0.002)    // 4
+    s10_chk(a_p.k21_val == 0.015)    // 5
+    s10_chk(a_p.k21_var == 0.001)    // 6
+    s10_chk(a_p.vc_val  == 70.0)     // 7
+    s10_chk(a_p.krel_val == 0.0)     // 8
+
+    // ── Section B: Baseline UNCERTAIN (6 assertions) ──────────────────────────
+    // ke_var=0.002, k12_var=0.002, k21_var=0.001 → combined → conf=700 → UNCERTAIN.
+
+    s10_chk(classify_standard_full(0.002, 0.002, 0.001) == decision_uncertain())    // 9
+    s10_chk(classify_standard_full(0.002, 0.002, 0.001) != decision_therapeutic()) // 10
+    s10_chk(conf_standard_full(0.002, 0.002, 0.001) == 700)                         // 11
+    s10_chk(conf_standard_full(0.002, 0.002, 0.001) < conf_clinical_min())          // 12
+    s10_chk(dominant_standard_full(0.002, 0.002, 0.001) == 0)                       // 13 (ke dominant)
+    s10_chk(dominant_standard_full(0.002, 0.002, 0.001) != 1)                       // 14 (not k12)
+
+    // ── Section C: Stage 1 — targeted ke → THERAPEUTIC, dom shifts to k12 (6) ─
+    // ke_var÷4=0.0005, k12_var and k21_var unchanged.
+
+    s10_chk(classify_standard_full(0.0005, 0.002, 0.001) == decision_therapeutic()) // 15
+    s10_chk(classify_standard_full(0.0005, 0.002, 0.001) != decision_uncertain())   // 16
+    s10_chk(conf_standard_full(0.0005, 0.002, 0.001) == 820)                        // 17
+    s10_chk(conf_standard_full(0.0005, 0.002, 0.001) >= conf_clinical_min())        // 18
+    s10_chk(dominant_standard_full(0.0005, 0.002, 0.001) == 1)                      // 19 (k12 now #1)
+    s10_chk(dominant_standard_full(0.0005, 0.002, 0.001) != 0)                      // 20
+
+    // ── Section D: Stage 3 — sequential ke+k12 → THERAPEUTIC, dom to k21 (6) ──
+    // ke_var÷4=0.0005, k12_var÷4=0.0005, k21_var unchanged.
+
+    s10_chk(classify_standard_full(0.0005, 0.0005, 0.001) == decision_therapeutic()) // 21
+    s10_chk(classify_standard_full(0.0005, 0.0005, 0.001) != decision_uncertain())   // 22
+    s10_chk(conf_standard_full(0.0005, 0.0005, 0.001) == 820)                        // 23
+    s10_chk(conf_standard_full(0.0005, 0.0005, 0.001) >= conf_clinical_min())        // 24
+    s10_chk(dominant_standard_full(0.0005, 0.0005, 0.001) == 2)                      // 25 (k21 now #1!)
+    s10_chk(dominant_standard_full(0.0005, 0.0005, 0.001) != 0)                      // 26
+
+    // ── Section E: Blind k21 + budget_3stage_fires (6 assertions) ─────────────
+    // Reducing only k21_var (weakest source) does not cross the clinical threshold.
+
+    s10_chk(classify_standard_full(0.002, 0.002, 0.00025) == decision_uncertain())  // 27
+    s10_chk(classify_standard_full(0.002, 0.002, 0.00025) != decision_therapeutic()) // 28
+    s10_chk(conf_standard_full(0.002, 0.002, 0.00025) == 700)                        // 29
+    s10_chk(dominant_standard_full(0.002, 0.002, 0.00025) == 0)                      // 30 (ke still #1)
+    s10_chk(budget_3stage_fires())                                                    // 31 (full narrative)
+    s10_chk(dominant_standard_full(0.0005, 0.0005, 0.001) != dominant_standard_full(0.002, 0.002, 0.001)) // 32
+
+    // ── Section F: Targeted k12 alone also → THERAPEUTIC (6 assertions) ───────
+    // ke_var=0.002 (unchanged), k12_var÷4=0.0005 → THERAPEUTIC because k12 was also large.
+    // Dominance: ke remains #1 (still 0.002), but below combined threshold.
+
+    s10_chk(classify_standard_full(0.002, 0.0005, 0.001) == decision_therapeutic()) // 33
+    s10_chk(classify_standard_full(0.002, 0.0005, 0.001) != decision_uncertain())   // 34
+    s10_chk(conf_standard_full(0.002, 0.0005, 0.001) == 820)                        // 35
+    s10_chk(dominant_standard_full(0.002, 0.0005, 0.001) == 0)                      // 36 (ke still #1)
+    // Both targeted paths (ke alone, k12 alone) reach THERAPEUTIC — different from 1-cmt degenerate
+    s10_chk(classify_standard_full(0.0005, 0.002, 0.001) == classify_standard_full(0.002, 0.0005, 0.001)) // 37 (both THERAPEUTIC)
+    // But their dominant sources differ (k12 vs ke)
+    s10_chk(dominant_standard_full(0.0005, 0.002, 0.001) != dominant_standard_full(0.002, 0.0005, 0.001)) // 38
+
+    // ── Section G: Confidence score sweep (6 assertions) ──────────────────────
+
+    s10_chk(conf_standard_full(0.002, 0.002, 0.001)   == 700)  // 39 (baseline)
+    s10_chk(conf_standard_full(0.0005, 0.002, 0.001)  == 820)  // 40 (stage 1)
+    s10_chk(conf_standard_full(0.0005, 0.0005, 0.001) == 820)  // 41 (stage 3)
+    s10_chk(conf_standard_full(0.002, 0.002, 0.00025) == 700)  // 42 (blind k21)
+    // Targeted gives better conf than baseline
+    s10_chk(conf_standard_full(0.0005, 0.002, 0.001) > conf_standard_full(0.002, 0.002, 0.001)) // 43
+    // Sequential gives same conf as stage 1 (both 820; k21 is still residual)
+    s10_chk(conf_standard_full(0.0005, 0.0005, 0.001) >= conf_standard_full(0.0005, 0.002, 0.001)) // 44
+
+    // ── Section H: Full 2-cmt properties (4 assertions) ──────────────────────
+    // Properties only observable in genuine 2-cmt (k12≠0, k21≠0):
+    // the dominant source can shift from ke(0) → k12(1) → k21(2) across stages.
+
+    s10_chk(dominant_standard_full(0.002, 0.002, 0.001)   == 0)  // 45 (ke dominates initially)
+    s10_chk(dominant_standard_full(0.0005, 0.002, 0.001)  == 1)  // 46 (k12 surfaces after ke improved)
+    s10_chk(dominant_standard_full(0.0005, 0.0005, 0.001) == 2)  // 47 (k21 surfaces after both improved)
+    // Dominance index rises monotonically through the sequential improvement stages
+    s10_chk(dominant_standard_full(0.002, 0.002, 0.001) <
+            dominant_standard_full(0.0005, 0.0005, 0.001))        // 48 (0 < 2)
+
+    // ── Section I: Decision sentinel values (4 assertions) ────────────────────
+
+    s10_chk(decision_therapeutic() == 1)    // 49
+    s10_chk(decision_uncertain()   == 3)    // 50
+    s10_chk(conf_clinical_min()    == 800)  // 51
+    s10_chk(decision_uncertain() != decision_therapeutic())  // 52
+
+    // ── Section J: Cross-checks wrapper vs direct (4 assertions) ─────────────
+
+    s10_chk(classify_standard_full(0.002, 0.002, 0.001) ==
+            classify_full_2cmt(0.04, 0.03, 0.015, 0.002, 0.002, 0.001, 70.0, 2.0, 24.0, 1.0, 25, 24))   // 53
+    s10_chk(classify_standard_full(0.0005, 0.002, 0.001) ==
+            classify_full_2cmt(0.04, 0.03, 0.015, 0.0005, 0.002, 0.001, 70.0, 2.0, 24.0, 1.0, 25, 24))  // 54
+    s10_chk(conf_standard_full(0.002, 0.002, 0.001) ==
+            conf_full_2cmt(0.04, 0.03, 0.015, 0.002, 0.002, 0.001, 70.0, 2.0, 24.0, 1.0, 25, 24))       // 55
+    s10_chk(dominant_standard_full(0.002, 0.002, 0.001) ==
+            dominant_full_2cmt(0.04, 0.03, 0.015, 0.002, 0.002, 0.001, 70.0, 2.0, 24.0, 1.0, 25))       // 56
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    run_sprint10_gate()
+    if SPR10_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}

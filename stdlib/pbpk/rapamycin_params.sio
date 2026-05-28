@@ -1,0 +1,318 @@
+// stdlib/pbpk/rapamycin_params.sio — Rapamycin (sirolimus) PK parameters
+//
+// GUM-exact (ISO Guide 98-3) epistemic parameters for rapamycin PBPK modelling.
+// Primary context: Cypher® sirolimus-eluting coronary stent, post-PCI pharmacokinetics.
+//
+// All uncertainties are population-level inter-individual variability (CV%→σ)
+// or measurement precision from the primary literature, expressed as standard
+// deviations so that GUM variance propagation is exact.
+//
+// Units convention:
+//   Masses   — mg
+//   Volumes  — L
+//   Time     — hours (h)
+//   Rates    — 1/h
+//   Conc.    — mg/L = μg/mL
+//
+// References:
+//   [1] Yatscoff et al., Clin Pharmacokinet 1995; 28(5):385-401
+//       Rapamycin whole-blood PK: CL, Vd, t½
+//   [2] Jusko et al., J Clin Pharmacol 2000; 40(2):198-208
+//       Population PK analysis; ka, F (whole-blood)
+//   [3] Kirchner et al., Clin Pharmacokinet 2004; 43(8):497-519
+//       Tissue:blood partition coefficients (Kp)
+//   [4] Vanhoof et al., Clin Transplant 2010; 24(4):578-585
+//       Protein binding (fu), renal excretion fraction
+//   [5] Cypher® prescribing information (Cordis/J&J, 2008)
+//       Stent-specific: dose per stent, release duration
+
+module pbpk::rapamycin_params
+
+use epistemic::knowledge::{Epistemic}
+
+// ============================================================================
+// ABSORPTION
+// ============================================================================
+
+/// Oral absorption rate constant ka (1/h).
+/// [2] ka = 0.62 ± 0.15 h⁻¹ (population mean ± SD from NONMEM fit, n=150).
+pub fn rap_ka() -> Epistemic {
+    Epistemic::measured(0.62, 0.15)
+}
+
+/// Oral bioavailability F (fraction absorbed, dimensionless).
+/// [2] F = 0.141 ± 0.039 (14.1% ± 2.8% CV, converted: 0.141×0.28 ≈ 0.039 SD).
+/// Low due to extensive CYP3A4/P-gp first-pass in gut wall + liver.
+pub fn rap_bioavailability() -> Epistemic {
+    Epistemic::measured(0.141, 0.039)
+}
+
+/// Lag time for oral absorption tlag (h).
+/// [2] Typical population value 0.5 h; SD from inter-individual variability 30% CV.
+pub fn rap_tlag() -> Epistemic {
+    Epistemic::measured(0.5, 0.15)
+}
+
+// ============================================================================
+// DISTRIBUTION
+// ============================================================================
+
+/// Apparent volume of distribution Vd/F (L) — whole blood, single-dose.
+/// [1] Vd/F = 12 ± 7.5 L/kg × 70 kg = 840 ± 525 L total.
+/// Extensive erythrocyte sequestration (blood:plasma ratio ≈ 36).
+pub fn rap_vd() -> Epistemic {
+    Epistemic::measured(840.0, 525.0)
+}
+
+/// Blood:plasma concentration ratio (dimensionless).
+/// [4] Ratio = 36 ± 8 (strongly partitions into red blood cells via FKBP12 binding).
+pub fn rap_blood_plasma_ratio() -> Epistemic {
+    Epistemic::measured(36.0, 8.0)
+}
+
+/// Unbound (free) plasma fraction fu (dimensionless).
+/// [4] fu ≈ 0.018 ± 0.004 (1.8%; highly protein-bound: FKBP12, albumin, α1-AGP).
+pub fn rap_fu() -> Epistemic {
+    Epistemic::measured(0.018, 0.004)
+}
+
+/// Whole-blood protein binding fraction fbound (dimensionless).
+/// [4] fbound ≈ 0.97 ± 0.01 (bound to FKBP12 in erythrocytes; very high).
+pub fn rap_fbound() -> Epistemic {
+    Epistemic::measured(0.97, 0.01)
+}
+
+// ============================================================================
+// ELIMINATION
+// ============================================================================
+
+/// Total apparent clearance CL/F (L/h) — whole blood.
+/// [1] CL/F = 173 ± 55 L/h (population mean ± SD; n=40 renal transplant patients).
+/// Hepatic CYP3A4 dominates; renal excretion < 3%.
+pub fn rap_cl() -> Epistemic {
+    Epistemic::measured(173.0, 55.0)
+}
+
+/// Hepatic CYP3A4 intrinsic clearance CLint (L/h).
+/// [1] CLint ≈ CL/F × 0.97 = 167.8 L/h; SD propagated from CL/F.
+/// 97% of elimination is hepatic CYP3A4/CYP3A5 metabolism.
+pub fn rap_cl_hepatic() -> Epistemic {
+    Epistemic::measured(167.8, 53.4)
+}
+
+/// Renal clearance CLr (L/h).
+/// [4] CLr ≈ 5.2 ± 1.8 L/h (< 3% of total dose excreted unchanged in urine).
+pub fn rap_cl_renal() -> Epistemic {
+    Epistemic::measured(5.2, 1.8)
+}
+
+/// Terminal elimination half-life t½ (h) — whole blood.
+/// [1] t½ = 62 ± 16 h (population mean; ranges 41–78 h in transplant cohorts).
+pub fn rap_t_half() -> Epistemic {
+    Epistemic::measured(62.0, 16.0)
+}
+
+/// Elimination rate constant ke = ln(2) / t½ (1/h).
+/// Derived: ke = 0.01118 ± 0.0029 h⁻¹.
+/// GUM variance: σ(ke) = (ln2/t½²) × σ(t½) = (0.6931/62²) × 16.
+pub fn rap_ke() -> Epistemic with Mut, Div, Panic {
+    let ln2 = 0.6931471805599453
+    let t_half = rap_t_half()
+    let ke_val = ln2 / t_half.val()
+    let dke = ln2 / (t_half.val() * t_half.val()) * t_half.std()
+    Epistemic::measured(ke_val, dke)
+}
+
+// ============================================================================
+// TISSUE PARTITION COEFFICIENTS (Kp = C_tissue / C_blood)
+// ============================================================================
+
+/// Kp for liver (dimensionless).
+/// [3] Kp_liver = 8.3 ± 2.1 (highest tissue accumulation; CYP3A4 site).
+pub fn rap_kp_liver() -> Epistemic {
+    Epistemic::measured(8.3, 2.1)
+}
+
+/// Kp for lung (dimensionless).
+/// [3] Kp_lung = 4.7 ± 1.5 (first-pass pulmonary sequestration post-IV).
+pub fn rap_kp_lung() -> Epistemic {
+    Epistemic::measured(4.7, 1.5)
+}
+
+/// Kp for coronary arterial wall (dimensionless).
+/// [5] Kp_wall ≈ 3.2 ± 1.1 (estimated from stent drug level vs blood level ratio;
+///     Cypher® stent data, porcine coronary model, 28-day timepoint).
+pub fn rap_kp_arterial_wall() -> Epistemic {
+    Epistemic::measured(3.2, 1.1)
+}
+
+/// Kp for fat / adipose (dimensionless).
+/// [3] Kp_fat = 12.6 ± 4.3 (lipophilic; logP ≈ 4.3).
+pub fn rap_kp_fat() -> Epistemic {
+    Epistemic::measured(12.6, 4.3)
+}
+
+/// Kp for muscle / peripheral tissue (dimensionless).
+/// [3] Kp_muscle = 2.1 ± 0.7 (generic peripheral compartment proxy).
+pub fn rap_kp_muscle() -> Epistemic {
+    Epistemic::measured(2.1, 0.7)
+}
+
+// ============================================================================
+// STENT-SPECIFIC PARAMETERS (Cypher® sirolimus-eluting stent)
+// ============================================================================
+
+/// Drug load per stent (mg).
+/// [5] 140 μg sirolimus per cm stent length; 18 mm stent = 140 × 1.8 = 252 μg = 0.000252 mg.
+/// Using a representative 28 mm stent: 140 × 2.8 = 392 μg ≈ 0.000392 mg ± 0.000020 mg.
+/// Uncertainty: manufacturing tolerance ±5%.
+pub fn rap_stent_dose_mg() -> Epistemic {
+    Epistemic::measured(0.000392, 0.000020)
+}
+
+/// Polymer elution rate constant krel (1/h).
+/// [5] Cypher® elutes ~80% in 30 days = 720 h; approximate first-order krel.
+/// ln(1/0.2) / 720 = 1.6094 / 720 ≈ 0.002235 h⁻¹ ± 0.000300 h⁻¹.
+pub fn rap_krel() -> Epistemic {
+    Epistemic::measured(0.002235, 0.000300)
+}
+
+/// Fraction of drug released from stent in 30 days (dimensionless).
+/// [5] ~80% released by day 30; remainder retained in polymer matrix.
+/// Uncertainty: ±5% based on in vitro elution variability.
+pub fn rap_f30d() -> Epistemic {
+    Epistemic::measured(0.80, 0.05)
+}
+
+/// Stent-to-arterial-wall transfer rate constant kst (1/h).
+/// Local tissue uptake from polymer matrix; estimated from mural drug concentration
+/// data in porcine coronary stenting model [5].
+/// kst ≈ 0.0046 ± 0.0015 h⁻¹.
+pub fn rap_kst() -> Epistemic {
+    Epistemic::measured(0.0046, 0.0015)
+}
+
+// ============================================================================
+// PHYSIOLOGICAL COMPARTMENT VOLUMES (reference 70 kg adult)
+// ============================================================================
+
+/// Liver volume (L) — reference adult.
+/// Standard PBPK value: 1.69 L ± 0.30 L (coefficient of variation ≈ 18%).
+pub fn phys_v_liver() -> Epistemic {
+    Epistemic::measured(1.69, 0.30)
+}
+
+/// Lung volume (L) — reference adult.
+pub fn phys_v_lung() -> Epistemic {
+    Epistemic::measured(0.53, 0.07)
+}
+
+/// Arterial blood volume (L) — reference adult.
+pub fn phys_v_arterial() -> Epistemic {
+    Epistemic::measured(1.4, 0.2)
+}
+
+/// Venous blood volume (L) — reference adult.
+pub fn phys_v_venous() -> Epistemic {
+    Epistemic::measured(3.7, 0.5)
+}
+
+/// Fat (adipose) volume (L) — reference 70 kg adult, 20% BF.
+pub fn phys_v_fat() -> Epistemic {
+    Epistemic::measured(14.0, 4.0)
+}
+
+/// Poorly perfused tissue (muscle + bone) volume (L) — reference adult.
+pub fn phys_v_muscle() -> Epistemic {
+    Epistemic::measured(29.0, 5.0)
+}
+
+// ============================================================================
+// BLOOD FLOWS (L/h, reference cardiac output 350 L/h)
+// ============================================================================
+
+/// Total cardiac output (L/h).
+pub fn phys_co() -> Epistemic {
+    Epistemic::measured(350.0, 50.0)
+}
+
+/// Hepatic arterial + portal blood flow (L/h).
+pub fn phys_q_liver() -> Epistemic {
+    Epistemic::measured(87.0, 13.0)
+}
+
+/// Pulmonary blood flow ≈ cardiac output (L/h).
+pub fn phys_q_lung() -> Epistemic {
+    Epistemic::measured(350.0, 50.0)
+}
+
+/// Coronary artery blood flow (L/h) — rest.
+pub fn phys_q_coronary() -> Epistemic {
+    Epistemic::measured(14.0, 3.0)
+}
+
+/// Adipose tissue blood flow (L/h).
+pub fn phys_q_fat() -> Epistemic {
+    Epistemic::measured(17.0, 5.0)
+}
+
+/// Skeletal muscle blood flow (L/h).
+pub fn phys_q_muscle() -> Epistemic {
+    Epistemic::measured(70.0, 15.0)
+}
+
+// ============================================================================
+// TWO-COMPARTMENT DISTRIBUTION PARAMETERS
+// ============================================================================
+
+/// Central volume of distribution Vc (L) — whole blood.
+/// [2] Jusko 2000 population 2-cmt fit: Vc = 75 ± 25 L.
+pub fn rap_vc() -> Epistemic {
+    Epistemic::measured(75.0, 25.0)
+}
+
+/// Peripheral volume Vp = Vd − Vc (L).
+/// GUM: σ(Vp) ≈ √(σ²(Vd) + σ²(Vc)) = √(525² + 25²) ≈ 525.6 L.
+pub fn rap_vp() -> Epistemic {
+    Epistemic::measured(765.0, 525.6)
+}
+
+/// Intercompartmental clearance Q (L/h).
+/// [2] Q = 3.75 ± 1.50 L/h from NONMEM 2-cmt fit.
+pub fn rap_q_intercompt() -> Epistemic {
+    Epistemic::measured(3.75, 1.50)
+}
+
+/// Rate constant central→peripheral k12 = Q / Vc (1/h).
+pub fn rap_k12() -> Epistemic with Mut, Div, Panic {
+    let q = rap_q_intercompt()
+    let vc = rap_vc()
+    let k12_val = q.val() / vc.val()
+    let rel_q  = q.std()  / q.val()
+    let rel_vc = vc.std() / vc.val()
+    let dk12 = k12_val * sqrt_f64(rel_q * rel_q + rel_vc * rel_vc)
+    Epistemic::measured(k12_val, dk12)
+}
+
+/// Rate constant peripheral→central k21 = Q / Vp (1/h).
+pub fn rap_k21() -> Epistemic with Mut, Div, Panic {
+    let q  = rap_q_intercompt()
+    let vp = rap_vp()
+    let k21_val = q.val() / vp.val()
+    let rel_q  = q.std()  / q.val()
+    let rel_vp = vp.std() / vp.val()
+    let dk21 = k21_val * sqrt_f64(rel_q * rel_q + rel_vp * rel_vp)
+    Epistemic::measured(k21_val, dk21)
+}
+
+// ============================================================================
+// LOCAL HELPERS
+// ============================================================================
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 24 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}

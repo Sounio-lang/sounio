@@ -1,0 +1,244 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint15_gate.sio — Sprint 15 loading-dose gate
+//
+// 56 assertions establishing the epistemic properties of the clinical loading-dose
+// + maintenance oral rapamycin protocol (6mg day 1, 2mg/day thereafter).
+//
+// Standard scenario: D_load=6mg, D_maint=2mg, N=14 doses (2 weeks).
+//   ke=0.01118 h⁻¹, k12=0.05, k21=0.005, Vc=75L, ka=0.62±0.15 h⁻¹, F=0.141±0.039
+//   Results: dec=1 (THERAPEUTIC), conf=900, dom=1 (ka)
+//
+// Dissertation headline (Section F, assertions 33–36):
+//   load_rescues_therapeutic() = true:
+//     uniform 2mg × 14 → UNCERTAIN; 6mg load + 2mg × 13 → THERAPEUTIC.
+//     Loading dose reduces required doses from N=21 (Sprint 14) to N=14.
+//   load_ka_dominant() = true: ka dominates across all loading scenarios.
+//   load_ka16_optimal() = true: ka÷16 at loaded SS → conf=950 (peak of trilogy).
+//
+// Mechanistic insight: the loading dose D_load > D_maint creates a larger initial
+//   A_gut(0) = D_load, which raises central concentration into the therapeutic
+//   window earlier. The loading dose also inflates initial gut variance via
+//   D_load² × Var(F), but this F-component decays rapidly during absorption
+//   (t_abs ≈ 1/ka ≈ 1.6h) and does not change the dominant source.
+//
+// Peak epistemic confidence: at loaded SS (N=14, D_load=6mg) with ka÷16,
+//   conf=950 — the highest value in the entire oral rapamycin trilogy,
+//   achievable because the improved concentration estimate combines loading-dose
+//   accumulation with mastered absorption-rate uncertainty.
+//
+// Assertion map:
+//   A (1–8):   Core: 6mg+2mg, N=14 → THERAPEUTIC/900/ka
+//   B (9–14):  Loading onset: N=1 UNCERTAIN, N=14 THERAPEUTIC, dom=ka
+//   C (15–20): Loading vs uniform 2mg: loaded rescues at N=14
+//   D (21–26): ke/F improvements irrelevant at loaded SS
+//   E (27–32): ka÷16 → conf=950, dom=k12 (second bottleneck consistent with S14)
+//   F (33–38): Gate functions: rescue, ka dominance, peak confidence
+//   G (39–44): Confidence values and protocol comparison
+//   H (45–48): 9mg+3mg higher-dose protocol reaches THERAPEUTIC at N=7
+//   I (49–52): Decision sentinel values
+//   J (53–56): Cross-checks wrapper vs direct
+
+use pbpk::rapamycin_load_oral::{
+    classify_standard_load, conf_standard_load, dom_standard_load,
+    classify_load_trough, conf_load_trough, dom_load_trough,
+    classify_uniform_2mg, conf_uniform_2mg,
+    load_ka_var_std, load_f_var_std, load_ke_var_std,
+    load_k12_var_std, load_k21_var_std,
+    load_rescues_therapeutic, load_ka_dominant, load_ka16_optimal
+}
+use pbpk::rapamycin_clinical::{
+    decision_therapeutic, decision_uncertain, conf_clinical_min
+}
+
+var SPR15_PASS: [i64; 2] = [0; 2]
+
+fn s15_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR15_PASS[0] = SPR15_PASS[0] + 1
+    } else {
+        SPR15_PASS[1] = SPR15_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint15_gate() with IO, Epistemic, Mut, Div, Panic {
+    let ka_std  = load_ka_var_std()    // 0.0225
+    let f_std   = load_f_var_std()     // 0.001521
+    let ke_std  = load_ke_var_std()    // 0.00000841
+    let k12_std = load_k12_var_std()   // 0.000156
+    let k21_std = load_k21_var_std()   // 0.0000016
+
+    // ── Section A: Core 6mg+2mg, N=14 (8 assertions) ─────────────────────────
+    // THERAPEUTIC, conf=900, dom=ka (index 1)
+
+    s15_chk(classify_standard_load(14, ka_std) == decision_therapeutic())   // 1
+    s15_chk(classify_standard_load(14, ka_std) != decision_uncertain())     // 2
+    s15_chk(conf_standard_load(14, ka_std) == 900)                          // 3
+    s15_chk(conf_standard_load(14, ka_std) >= conf_clinical_min())          // 4
+    s15_chk(dom_standard_load(14, ka_std) == 1)                             // 5 (ka)
+    s15_chk(dom_standard_load(14, ka_std) != 0)                             // 6 (not F)
+    s15_chk(dom_standard_load(14, ka_std) != 2)                             // 7 (not ke)
+    s15_chk(dom_standard_load(14, ka_std) != 3)                             // 8 (k12 not yet)
+
+    // ── Section B: Loading onset (6 assertions) ────────────────────────────────
+    // N=1 (loading day alone): UNCERTAIN/700/ka; N=14: THERAPEUTIC/900/ka
+
+    s15_chk(classify_standard_load(1, ka_std) == decision_uncertain())      // 9
+    s15_chk(classify_standard_load(1, ka_std) != decision_therapeutic())    // 10
+    s15_chk(conf_standard_load(1, ka_std) == 700)                           // 11
+    s15_chk(classify_standard_load(14, ka_std) == decision_therapeutic())   // 12 (gate crossed)
+    s15_chk(dom_standard_load(1, ka_std) == 1)                              // 13 (ka on day 1)
+    s15_chk(dom_standard_load(14, ka_std) == 1)                             // 14 (ka at SS)
+
+    // ── Section C: Loading rescue vs uniform 2mg (6 assertions) ──────────────
+    // Uniform 2mg × 14: UNCERTAIN; 6mg+2mg × 14: THERAPEUTIC (rescue!)
+
+    s15_chk(classify_uniform_2mg(14) == decision_uncertain())               // 15
+    s15_chk(classify_standard_load(14, ka_std) == decision_therapeutic())   // 16
+    // Loading strictly dominates uniform 2mg at N=14
+    s15_chk(classify_standard_load(14, ka_std) != classify_uniform_2mg(14)) // 17
+    // Both give conf=900 (same uncertainty level, different dec)
+    s15_chk(conf_standard_load(14, ka_std) == conf_uniform_2mg(14))         // 18 (900==900)
+    // At N=7: both still UNCERTAIN (loading hasn't crossed gate yet)
+    s15_chk(classify_standard_load(7, ka_std) == decision_uncertain())      // 19
+    s15_chk(classify_uniform_2mg(7) == decision_uncertain())                // 20
+
+    // ── Section D: ke/F irrelevant at loaded SS (6 assertions) ───────────────
+    // D_load=6, D_maint=2, N=14: ke÷4 and F÷4 unchanged
+
+    s15_chk(classify_load_trough(6.0, 2.0, 14,
+                                  0.01118, ke_std / 4.0, 0.05, k12_std,
+                                  0.005, k21_std, 0.62, ka_std,
+                                  0.141, f_std, 75.0)
+            == classify_standard_load(14, ka_std))                           // 21 (ke÷4 same dec)
+    s15_chk(conf_load_trough(6.0, 2.0, 14,
+                              0.01118, ke_std / 4.0, 0.05, k12_std,
+                              0.005, k21_std, 0.62, ka_std,
+                              0.141, f_std, 75.0)
+            == conf_standard_load(14, ka_std))                               // 22 (ke÷4 same conf)
+    s15_chk(dom_load_trough(6.0, 2.0, 14,
+                             0.01118, ke_std / 4.0, 0.05, k12_std,
+                             0.005, k21_std, 0.62, ka_std,
+                             0.141, f_std, 75.0)
+            == dom_standard_load(14, ka_std))                                // 23 (ke÷4 dom=ka)
+    s15_chk(conf_load_trough(6.0, 2.0, 14,
+                              0.01118, ke_std, 0.05, k12_std,
+                              0.005, k21_std, 0.62, ka_std,
+                              0.141, f_std / 4.0, 75.0)
+            == conf_standard_load(14, ka_std))                               // 24 (F÷4 same conf)
+    s15_chk(classify_load_trough(6.0, 2.0, 14,
+                                  0.01118, ke_std, 0.05, k12_std,
+                                  0.005, k21_std, 0.62, ka_std,
+                                  0.141, f_std / 4.0, 75.0)
+            == decision_therapeutic())                                        // 25 (F÷4 still THERAPEUTIC)
+    s15_chk(dom_load_trough(6.0, 2.0, 14,
+                             0.01118, ke_std, 0.05, k12_std,
+                             0.005, k21_std, 0.62, ka_std,
+                             0.141, f_std / 4.0, 75.0)
+            == 1)                                                             // 26 (F÷4 dom=ka)
+
+    // ── Section E: ka÷16 → conf=950, dom=k12 (6 assertions) ─────────────────
+    // Peak epistemic confidence in the oral rapamycin trilogy.
+
+    s15_chk(conf_standard_load(14, ka_std / 16.0) == 950)                   // 27 (peak conf!)
+    s15_chk(dom_standard_load(14, ka_std / 16.0) == 3)                      // 28 (k12 surfaces)
+    s15_chk(dom_standard_load(14, ka_std / 16.0) != 1)                      // 29 (ka no longer #1)
+    s15_chk(dom_standard_load(14, ka_std / 16.0) != 2)                      // 30 (NOT ke)
+    // ka÷4 still has ka dominant (k12 hasn't surfaced yet)
+    s15_chk(dom_standard_load(14, ka_std / 4.0) == 1)                       // 31 (ka still #1 at ÷4)
+    // 950 is strictly higher than the previous best (900)
+    s15_chk(conf_standard_load(14, ka_std / 16.0) > conf_standard_load(14, ka_std)) // 32
+
+    // ── Section F: Gate functions (6 assertions) ──────────────────────────────
+
+    s15_chk(load_rescues_therapeutic())  // 33 (loading makes N=14 THERAPEUTIC)
+    s15_chk(load_ka_dominant())          // 34 (ka dom at N=14, std variances)
+    s15_chk(load_ka16_optimal())         // 35 (ka÷16: conf=950, dom=k12)
+    // ka÷4 at loaded SS: still THERAPEUTIC
+    s15_chk(classify_standard_load(14, ka_std / 4.0) == decision_therapeutic()) // 36
+    // ka÷2 at loaded SS: check THERAPEUTIC
+    s15_chk(classify_standard_load(14, ka_std / 2.0) == decision_therapeutic()) // 37
+    // Loading strictly better than uniform 2mg at N=14 (THERAPEUTIC vs UNCERTAIN)
+    s15_chk(classify_standard_load(14, ka_std) != classify_uniform_2mg(14)) // 38
+
+    // ── Section G: Confidence values (6 assertions) ────────────────────────────
+
+    s15_chk(conf_standard_load(1, ka_std) == 700)                           // 39
+    s15_chk(conf_standard_load(14, ka_std) == 900)                          // 40
+    s15_chk(conf_standard_load(14, ka_std / 16.0) == 950)                   // 41
+    // Confidence monotone: N=1 < N=14; ka÷16 > baseline
+    s15_chk(conf_standard_load(14, ka_std) > conf_standard_load(1, ka_std)) // 42 (900 > 700)
+    s15_chk(conf_standard_load(14, ka_std / 16.0) > conf_standard_load(14, ka_std)) // 43 (950 > 900)
+    // ke÷4 no conf change
+    s15_chk(conf_load_trough(6.0, 2.0, 14,
+                              0.01118, ke_std / 4.0, 0.05, k12_std,
+                              0.005, k21_std, 0.62, ka_std,
+                              0.141, f_std, 75.0)
+            == conf_standard_load(14, ka_std))                               // 44 (900==900)
+
+    // ── Section H: 9mg+3mg higher-dose protocol (4 assertions) ───────────────
+    // Reaches THERAPEUTIC at N=7 (faster onset than 6mg+2mg); dom=ka throughout
+
+    s15_chk(classify_load_trough(9.0, 3.0, 7,
+                                  0.01118, ke_std, 0.05, k12_std,
+                                  0.005, k21_std, 0.62, ka_std,
+                                  0.141, f_std, 75.0)
+            == decision_therapeutic())                                        // 45 (9+3 N=7 THERAPEUTIC)
+    s15_chk(classify_load_trough(9.0, 3.0, 14,
+                                  0.01118, ke_std, 0.05, k12_std,
+                                  0.005, k21_std, 0.62, ka_std,
+                                  0.141, f_std, 75.0)
+            == decision_therapeutic())                                        // 46 (9+3 N=14 THERAPEUTIC)
+    s15_chk(dom_load_trough(9.0, 3.0, 14,
+                             0.01118, ke_std, 0.05, k12_std,
+                             0.005, k21_std, 0.62, ka_std,
+                             0.141, f_std, 75.0)
+            == 1)                                                             // 47 (9+3: ka dom)
+    s15_chk(dom_load_trough(9.0, 3.0, 7,
+                             0.01118, ke_std, 0.05, k12_std,
+                             0.005, k21_std, 0.62, ka_std,
+                             0.141, f_std, 75.0)
+            == 1)                                                             // 48 (9+3 N=7: ka dom)
+
+    // ── Section I: Decision sentinel values (4 assertions) ────────────────────
+
+    s15_chk(decision_therapeutic() == 1)                       // 49
+    s15_chk(decision_uncertain()   == 3)                       // 50
+    s15_chk(conf_clinical_min()    == 800)                     // 51
+    s15_chk(decision_uncertain() != decision_therapeutic())    // 52
+
+    // ── Section J: Cross-checks wrapper vs direct (4 assertions) ─────────────
+
+    s15_chk(classify_standard_load(14, ka_std) ==
+            classify_load_trough(6.0, 2.0, 14,
+                                  0.01118, ke_std, 0.05, k12_std,
+                                  0.005, k21_std, 0.62, ka_std,
+                                  0.141, f_std, 75.0))                       // 53
+    s15_chk(classify_standard_load(1, ka_std) ==
+            classify_load_trough(6.0, 2.0, 1,
+                                  0.01118, ke_std, 0.05, k12_std,
+                                  0.005, k21_std, 0.62, ka_std,
+                                  0.141, f_std, 75.0))                       // 54
+    s15_chk(conf_standard_load(14, ka_std) ==
+            conf_load_trough(6.0, 2.0, 14,
+                              0.01118, ke_std, 0.05, k12_std,
+                              0.005, k21_std, 0.62, ka_std,
+                              0.141, f_std, 75.0))                           // 55
+    s15_chk(dom_standard_load(14, ka_std) ==
+            dom_load_trough(6.0, 2.0, 14,
+                             0.01118, ke_std, 0.05, k12_std,
+                             0.005, k21_std, 0.62, ka_std,
+                             0.141, f_std, 75.0))                            // 56
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    run_sprint15_gate()
+    if SPR15_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}

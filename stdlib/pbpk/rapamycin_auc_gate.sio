@@ -1,0 +1,160 @@
+// stdlib/pbpk/rapamycin_auc_gate.sio — AUC-based epistemic confidence gate
+//
+// Demonstrates that the trough (C_plasma at t=24h) and AUC (0→24h) endpoints
+// have DIFFERENT epistemic thresholds under ke measurement uncertainty.
+//
+// At the ke_var where the trough gate fires (≥ 0.0025), the AUC endpoint
+// remains confidently THERAPEUTIC (conf=950).  The integral operator suppresses
+// relative uncertainty: AUC averaging over 24 time-steps damps the propagated
+// ke variance, while the single-point trough bears the full accumulated noise.
+//
+// ── Standard scenario ────────────────────────────────────────────────────────
+//
+//   IV bolus rapamycin: ke=0.05 h⁻¹, Vc=70 L, D=2 mg, t_end=24h, dt=1h.
+//   AUC(0→24h) ≈ 0.399 mg·h/L — inside [floor=0.001, ceil=200] mg·h/L.
+//
+//   Trough at t=24h:   C ≈ 0.00834 mg/L — inside [0.004, 0.020] mg/L.
+//   AUC GUM std:       grows slowly (integral dampening); relative std < 5%.
+//   Trough GUM std:    grows as √(n·dt²·ke_var); relative std can exceed 25%.
+//
+// ── Divergence point (the dissertation headline) ──────────────────────────────
+//
+//   ke_var < 0.0025  → trough THERAPEUTIC (conf ≥ 820)  AUC THERAPEUTIC (conf=950)
+//   ke_var ≥ 0.0025  → trough UNCERTAIN   (conf = 700)  AUC THERAPEUTIC (conf=950)
+//
+//   A clinician using ONLY trough monitoring will receive an UNCERTAIN verdict
+//   at ke_var=0.0025; one using AUC monitoring receives a confident THERAPEUTIC.
+//   Neither is "wrong" — the two endpoints expose DIFFERENT aspects of measurement
+//   quality.  The epistemic system makes this asymmetry explicit and compile-time-
+//   verified; a point-estimate tool cannot distinguish the two endpoints at all.
+//
+// Effect annotations:
+//   auc_iv_classify:       with Epistemic, Mut, Div, Panic
+//   auc_iv_conf:           with Mut, Div, Panic
+//   auc_dominant_standard: with Mut, Div, Panic
+//   auc_trough_diverge:    with Epistemic, Mut, Div, Panic
+
+module pbpk::rapamycin_auc_gate
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_2cmt::{Rap2CmtParams}
+use pbpk::rapamycin_budget::{simulate_budget, budget_dominant}
+use pbpk::rapamycin_precision::{iv_bolus_params, classify_iv_trough}
+use pbpk::rapamycin_clinical::{
+    assess_auc, conf_from_rel,
+    decision_therapeutic, decision_uncertain
+}
+
+// ── Core AUC classification ───────────────────────────────────────────────────
+
+// Classify cumulative AUC(0→t_end) via GUM budget propagation.
+// Runs simulate_budget and classifies the accumulated AUC (3rd state variable).
+pub fn auc_iv_classify(
+    ke_val:  f64,
+    ke_var:  f64,
+    vc:      f64,
+    d_bolus: f64,
+    t_end:   f64,
+    dt:      f64,
+    n:       i64
+) -> i64 with Epistemic, Mut, Div, Panic {
+    let p = iv_bolus_params(ke_val, ke_var, vc)
+    var bt = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bc = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bs = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bf   = [0.0, 0.0, 0.0, 0.0, 0.0]
+    var bauc = [0.0, 0.0]
+    var bcmx = [0.0, 0.0, 0.0]
+    simulate_budget(t_end, dt, d_bolus, 0.0, &p, n, &!bt, &!bc, &!bs, &!bf, &!bauc, &!bcmx)
+    let conf = conf_from_rel(bauc[0], bauc[1])
+    assess_auc(bauc[0], bauc[1], conf)
+}
+
+// Return confidence score for cumulative AUC (no gate).
+pub fn auc_iv_conf(
+    ke_val:  f64,
+    ke_var:  f64,
+    vc:      f64,
+    d_bolus: f64,
+    t_end:   f64,
+    dt:      f64,
+    n:       i64
+) -> i64 with Mut, Div, Panic {
+    let p = iv_bolus_params(ke_val, ke_var, vc)
+    var bt = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bc = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bs = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bf   = [0.0, 0.0, 0.0, 0.0, 0.0]
+    var bauc = [0.0, 0.0]
+    var bcmx = [0.0, 0.0, 0.0]
+    simulate_budget(t_end, dt, d_bolus, 0.0, &p, n, &!bt, &!bc, &!bs, &!bf, &!bauc, &!bcmx)
+    conf_from_rel(bauc[0], bauc[1])
+}
+
+// Return dominant uncertainty source index for the AUC endpoint.
+pub fn auc_dominant(
+    ke_val:  f64,
+    ke_var:  f64,
+    vc:      f64,
+    d_bolus: f64,
+    t_end:   f64,
+    dt:      f64,
+    n:       i64
+) -> i64 with Mut, Div, Panic {
+    let p = iv_bolus_params(ke_val, ke_var, vc)
+    var bt = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bc = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bs = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bf   = [0.0, 0.0, 0.0, 0.0, 0.0]
+    var bauc = [0.0, 0.0]
+    var bcmx = [0.0, 0.0, 0.0]
+    simulate_budget(t_end, dt, d_bolus, 0.0, &p, n, &!bt, &!bc, &!bs, &!bf, &!bauc, &!bcmx)
+    budget_dominant(&bf)
+}
+
+// ── Standard-scenario wrappers ────────────────────────────────────────────────
+//
+// ke=0.05, Vc=70, D=2mg, t_end=24h, dt=1h, n=25.
+
+pub fn classify_standard_auc(ke_var: f64) -> i64 with Epistemic, Mut, Div, Panic {
+    auc_iv_classify(0.05, ke_var, 70.0, 2.0, 24.0, 1.0, 25)
+}
+
+pub fn conf_standard_auc(ke_var: f64) -> i64 with Mut, Div, Panic {
+    auc_iv_conf(0.05, ke_var, 70.0, 2.0, 24.0, 1.0, 25)
+}
+
+pub fn auc_dominant_standard(ke_var: f64) -> i64 with Mut, Div, Panic {
+    auc_dominant(0.05, ke_var, 70.0, 2.0, 24.0, 1.0, 25)
+}
+
+// ── Divergence gate ───────────────────────────────────────────────────────────
+//
+// Returns true iff: AUC = THERAPEUTIC and trough = UNCERTAIN at this ke_var.
+//
+// This is the Sprint 11 dissertation claim: at the ke_var threshold where the
+// trough gate fires, the AUC endpoint remains confidently classified.  The two
+// endpoints diverge epistemically — a fact invisible to point-estimate TDM.
+pub fn auc_trough_diverge(ke_var: f64) -> bool with Epistemic, Mut, Div, Panic {
+    let dec_auc   = classify_standard_auc(ke_var)
+    let dec_trough = classify_iv_trough(0.05, ke_var, 70.0, 2.0, 24.0, 1.0, 25, 24)
+    dec_auc == decision_therapeutic() && dec_trough == decision_uncertain()
+}

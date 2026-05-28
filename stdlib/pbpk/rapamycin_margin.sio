@@ -1,0 +1,113 @@
+// stdlib/pbpk/rapamycin_margin.sio — Safety-margin analysis: dose-dependent classification
+//
+// Dissertation contribution #2 (compile-time confidence gates) provides a
+// mechanism the gate uses in two distinct ways:
+//
+//   Route A — confidence gate: relative std > 25% → conf = 700 < 800 → UNCERTAIN.
+//             Firing condition: ke_var too large relative to C(t).
+//             Example (Sprint 7): D=2mg, ke_var≥0.0025 at t=24h.
+//
+//   Route B — boundary proximity: point estimate near/below therapeutic floor,
+//             CI straddles the floor → else-branch UNCERTAIN in assess_trough.
+//             Firing condition: C(t) < trough_floor but hi > floor (CI overlap).
+//             Example (this module): D=0.9mg, ke_var=0.001 at t=24h.
+//
+// This module demonstrates Route B via a dose-comparison experiment:
+//   SAME ke_var=0.001, SAME conf=820, DIFFERENT dose D:
+//     D = 2.0 mg → C(24h) ≈ 0.00834 mg/L (inside window) → THERAPEUTIC
+//     D = 0.9 mg → C(24h) ≈ 0.00375 mg/L (below floor)   → UNCERTAIN
+//
+// The epistemic system thus detects that 0.9 mg cannot be confidently classified
+// as THERAPEUTIC: the concentration is below the therapeutic floor, but the
+// measurement uncertainty means it might actually be in-window.  A point-estimate
+// TDM tool would say SUB; the epistemic system correctly says UNCERTAIN —
+// "do not reduce the dose without a more precise ke measurement."
+//
+// ── Safety-margin intuition ───────────────────────────────────────────────────
+//
+//   margin = C(t) - trough_floor_mg_l()
+//   margin > 0: point estimate inside window; classification depends on ke_var
+//   margin < 0: point estimate below floor; classification depends on CI coverage
+//
+//   For Route B UNCERTAIN:
+//     margin < 0 AND hi > floor (i.e., |margin| < 1.96·std_c)
+//     → CI straddles floor; could be therapeutic or subtherapeutic
+//
+//   For Route A UNCERTAIN:
+//     margin > 0 but relative std > 25% → conf = 700 < 800 → gate fires
+//
+// Effect annotations:
+//   margin_above_floor: none (pure subtraction)
+//   classify_high/low_dose: with Epistemic, Mut, Div, Panic
+//   dose_gate_fires:      with Epistemic, Mut, Div, Panic
+//   dose_gate_standard:   with Epistemic, Mut, Div, Panic
+
+module pbpk::rapamycin_margin
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_precision::{classify_iv_trough, conf_iv_trough}
+use pbpk::rapamycin_clinical::{
+    trough_floor_mg_l, decision_therapeutic, decision_uncertain
+}
+
+// ── Pure margin metric ────────────────────────────────────────────────────────
+
+// Returns C - trough_floor_mg_l() (may be negative when below therapeutic floor).
+// Positive margin: point estimate safely inside window.
+// Negative margin: point estimate below floor (Route B UNCERTAIN territory).
+pub fn margin_above_floor(c_val: f64) -> f64 {
+    c_val - trough_floor_mg_l()
+}
+
+// ── Standard-scenario wrappers ────────────────────────────────────────────────
+//
+// Standard 24h scenario: ke=0.05 h⁻¹, Vc=70 L, dt=1h, n=25, assess at idx=24.
+//   High dose D=2.0 mg: C(24h) ≈ 0.00834 mg/L — positive margin (0.00434)
+//   Low  dose D=0.9 mg: C(24h) ≈ 0.00375 mg/L — negative margin (−0.00025)
+
+pub fn classify_high_dose(ke_var: f64) -> i64 with Epistemic, Mut, Div, Panic {
+    classify_iv_trough(0.05, ke_var, 70.0, 2.0, 24.0, 1.0, 25, 24)
+}
+
+pub fn classify_low_dose(ke_var: f64) -> i64 with Epistemic, Mut, Div, Panic {
+    classify_iv_trough(0.05, ke_var, 70.0, 0.9, 24.0, 1.0, 25, 24)
+}
+
+pub fn conf_high_dose(ke_var: f64) -> i64 with Mut, Div, Panic {
+    conf_iv_trough(0.05, ke_var, 70.0, 2.0, 24.0, 1.0, 25, 24)
+}
+
+pub fn conf_low_dose(ke_var: f64) -> i64 with Mut, Div, Panic {
+    conf_iv_trough(0.05, ke_var, 70.0, 0.9, 24.0, 1.0, 25, 24)
+}
+
+// ── Dose-pair gate ────────────────────────────────────────────────────────────
+
+// Returns true iff high dose → THERAPEUTIC and low dose → UNCERTAIN.
+//
+// This captures the full dissertation claim: the same ke measurement quality
+// (same ke_var) gives a confident THERAPEUTIC for the higher dose and a
+// well-reasoned UNCERTAIN for the lower dose.
+//
+// Clinically: "do not reduce from 2 mg to 0.9 mg without improving assay
+// precision — we cannot confirm the lower dose is therapeutic."
+pub fn dose_gate_fires(
+    ke_val:  f64,
+    ke_var:  f64,
+    vc:      f64,
+    d_high:  f64,
+    d_low:   f64,
+    t_end:   f64,
+    dt:      f64,
+    n:       i64,
+    idx:     i64
+) -> bool with Epistemic, Mut, Div, Panic {
+    let dec_high = classify_iv_trough(ke_val, ke_var, vc, d_high, t_end, dt, n, idx)
+    let dec_low  = classify_iv_trough(ke_val, ke_var, vc, d_low,  t_end, dt, n, idx)
+    dec_high == decision_therapeutic() && dec_low == decision_uncertain()
+}
+
+// Convenience wrapper for the standard dose pair (D_high=2.0, D_low=0.9).
+pub fn dose_gate_standard(ke_var: f64) -> bool with Epistemic, Mut, Div, Panic {
+    dose_gate_fires(0.05, ke_var, 70.0, 2.0, 0.9, 24.0, 1.0, 25, 24)
+}

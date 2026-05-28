@@ -1,0 +1,283 @@
+// stdlib/pbpk/rapamycin_assay.sio — Sprint 23: TDM Assay Quality Gate
+//
+// Novel dissertation contribution: epistemic certification of TDM assay adequacy.
+//
+// ── The clinical problem ───────────────────────────────────────────────────────
+//
+//   A point-estimate TDM tool reports C_trough and compares it to [4, 20] ng/mL.
+//   It ignores two independent uncertainty sources:
+//     V_pred   = GUM-propagated PK parameter variance (Sprints 18–22)
+//     V_assay  = TDM assay measurement variance = (CV_assay × C_trough)²
+//
+//   Total observation uncertainty: V_total = V_pred_conc + V_assay (independent, additive)
+//   Total std:                     σ_total = √V_total
+//   Epistemic confidence:          conf_total = conf_from_rel(C_trough, σ_total)
+//
+//   If V_assay is comparable to V_pred, the assay itself becomes the confidence bottleneck.
+//   The compile-time gate catches this: conf_total < conf_clinical_min → dosing blocked.
+//
+// ── Assay classes ─────────────────────────────────────────────────────────────
+//
+//   HPLC-MS/MS (gold standard): CV ≈ 5%   → as_cv_hplc() = 0.05
+//   CMIA / immunoassay (routine): CV ≈ 12% → as_cv_cmia() = 0.12
+//   Poor assay: CV ≈ 25%                  → as_cv_poor() = 0.25
+//
+// ── Key findings (certified by Sprint 23 gate) ────────────────────────────────
+//
+//   T1  Standard onset (N=3, rel=19.8%):
+//       HPLC and CMIA: invisible (V_assay << V_pred) → conf unchanged (820)
+//       Poor:          assay > PK (V_assay/V_pred = 1.60) → conf degrades to 700
+//
+//   T2  Standard SS (N=14, rel=9.2% — right at 10% boundary):
+//       HPLC:  V_assay/V_pred = 0.30 → total rel = 10.5% > 10% → conf 900→820
+//       CMIA:  V_assay/V_pred = 1.70 → total rel = 14.7% → conf 900→820
+//       Poor:  V_assay/V_pred = 7.39 → conf → 700
+//       Finding: NO standard assay preserves conf=900 at standard SS
+//                (PK sits at the boundary; any assay noise tips it)
+//
+//   T3  Slow genotype SS (rel < 9.2%):
+//       HPLC:  conf = 900 (preserved — more headroom than standard)
+//       CMIA:  conf = 820 (degraded)
+//
+//   T4  Inhibitor onset N=5 (rel=8.2%) and SS (rel=5.3%):
+//       HPLC:  900 preserved (room for 5% noise)
+//       CMIA:  820 (degraded at both onset and SS)
+//
+//   T5  Inducer N=26 (rel=24.8% — right at 25% boundary):
+//       Even HPLC tips over 25%: conf 820→700 — no standard assay is adequate
+//
+// ── Budget identity ───────────────────────────────────────────────────────────
+//
+//   V_total = V_pred_conc + V_assay   (exact, by GUM independence axiom)
+//   V_pred_conc = ob_v1_total(…) / Vc²   (amount²→concentration², Vc=75L)
+//   V_assay     = CV² × C_trough²         (proportional noise, IVD Reg. 2017)
+//
+// Effect annotations:
+//   as_sqrt:            with Mut, Div, Panic
+//   as_trough_mg_l:     with Mut, Div, Panic
+//   as_v_pred_conc:     with Mut, Div, Panic
+//   as_conf_total:      with Mut, Div, Panic
+//   Boolean gate fns:   with Mut, Div, Panic
+
+module pbpk::rapamycin_assay
+
+use pbpk::rapamycin_clinical::{conf_from_rel}
+use pbpk::rapamycin_oral_budget::{
+    ob_v1_total,
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+// ── Assay CV constants ────────────────────────────────────────────────────────
+
+// HPLC-MS/MS: gold-standard clinical TDM assay (CV ≈ 5%)
+pub fn as_cv_hplc() -> f64 { 0.05 }
+
+// CMIA / ECLIA immunoassay: routine hospital laboratory (CV ≈ 12%)
+pub fn as_cv_cmia() -> f64 { 0.12 }
+
+// Poor / unvalidated assay (CV ≈ 25%): below regulatory acceptance threshold
+pub fn as_cv_poor() -> f64 { 0.25 }
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+fn as_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x
+        var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+// ── Core functions ────────────────────────────────────────────────────────────
+
+// Assay variance for a given CV and trough concentration: V_assay = CV² × C²
+pub fn as_v_assay(cv: f64, c_mg_l: f64) -> f64 {
+    cv * cv * c_mg_l * c_mg_l
+}
+
+// Mean trough concentration (mg/L) after N doses.
+// Euler ODE: gut → central → peripheral, dt=0.5h, 48 steps/dose.
+// Parameters match rapamycin_oral_budget: ka=0.62, k12=0.05, k21=0.005, Vc=75L.
+pub fn as_trough_mg_l(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64) -> f64
+    with Mut, Div, Panic {
+    let k12_val = 0.05;   let k21_val = 0.005
+    let ka_val  = 0.62;   let vc      = 75.0
+    let j11 = 0.0 - (ke_val + k12_val)
+    let j12 = k21_val
+    let j21 = k12_val
+    let j22 = 0.0 - k21_val
+    var a_gut = d_oral
+    var a1    = 0.0
+    var a2    = 0.0
+    var dose  = 0
+    while dose < n_doses {
+        if dose > 0 { a_gut = a_gut + d_oral }
+        var step = 0
+        while step < 48 {
+            let flux   = f_val * ka_val * a_gut
+            let new_ag = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1 = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2 = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            a_gut = new_ag
+            a1    = new_a1
+            a2    = new_a2
+            step  = step + 1
+        }
+        dose = dose + 1
+    }
+    a1 / vc
+}
+
+// GUM prediction variance of trough concentration (mg/L)², from Sprint 22.
+// ob_v1_total returns variance in (mg)²; divide by Vc² to get (mg/L)².
+pub fn as_v_pred_conc(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64,
+                      ka_var: f64, f_var: f64, ke_var: f64,
+                      k12_var: f64, k21_var: f64) -> f64
+    with Mut, Div, Panic {
+    let vc = 75.0
+    ob_v1_total(d_oral, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+        / (vc * vc)
+}
+
+// Combined epistemic confidence: PK parameter uncertainty + TDM assay noise.
+// conf_total = conf_from_rel(C_pred, √(V_pred_conc + V_assay))
+pub fn as_conf_total(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64,
+                     ka_var: f64, f_var: f64, ke_var: f64,
+                     k12_var: f64, k21_var: f64, cv_assay: f64) -> i64
+    with Mut, Div, Panic {
+    let c      = as_trough_mg_l(d_oral, n_doses, ke_val, f_val)
+    let v_pred = as_v_pred_conc(d_oral, n_doses, ke_val, f_val,
+                                ka_var, f_var, ke_var, k12_var, k21_var)
+    let v_assay = cv_assay * cv_assay * c * c
+    let v_total = v_pred + v_assay
+    conf_from_rel(c, as_sqrt(v_total))
+}
+
+// PK-only confidence (no assay noise), for comparison.
+pub fn as_conf_pred(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64,
+                    ka_var: f64, f_var: f64, ke_var: f64,
+                    k12_var: f64, k21_var: f64) -> i64
+    with Mut, Div, Panic {
+    let c = as_trough_mg_l(d_oral, n_doses, ke_val, f_val)
+    let v = as_v_pred_conc(d_oral, n_doses, ke_val, f_val,
+                           ka_var, f_var, ke_var, k12_var, k21_var)
+    conf_from_rel(c, as_sqrt(v))
+}
+
+// ── T1: Standard onset (N=3) — HPLC/CMIA invisible, poor assay-limited ────────
+
+pub fn as_hplc_std_n3_unchanged() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    as_conf_total(5.0, 3, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_hplc()) == 820
+}
+
+pub fn as_cmia_std_n3_unchanged() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    as_conf_total(5.0, 3, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_cmia()) == 820
+}
+
+pub fn as_poor_std_n3_degrades() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    as_conf_total(5.0, 3, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_poor()) == 700
+}
+
+pub fn as_poor_n3_assay_exceeds_pk() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let c      = as_trough_mg_l(5.0, 3, 0.01118, 0.141)
+    let v_pred = as_v_pred_conc(5.0, 3, 0.01118, 0.141, ka, fv, ke, k12, k21)
+    let v_assay = as_cv_poor() * as_cv_poor() * c * c
+    v_assay > v_pred
+}
+
+// ── T2: Standard SS (N=14) — no assay preserves conf=900 ─────────────────────
+
+pub fn as_hplc_std_ss_degrades() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ct_hplc = as_conf_total(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_hplc())
+    let cp      = as_conf_pred(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21)
+    ct_hplc < cp
+}
+
+pub fn as_cmia_std_ss_degrades() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    as_conf_total(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_cmia()) == 820
+}
+
+pub fn as_hplc_std_ss_is_820() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    as_conf_total(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_hplc()) == 820
+}
+
+// ── T3: Slow genotype SS — HPLC preserves 900 ────────────────────────────────
+
+pub fn as_hplc_slow_ss_preserved() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    as_conf_total(5.0, 14, 0.00838, 0.188, ka, fv, ke, k12, k21, as_cv_hplc()) == 900
+}
+
+pub fn as_cmia_slow_ss_degrades() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    as_conf_total(5.0, 14, 0.00838, 0.188, ka, fv, ke, k12, k21, as_cv_cmia()) == 820
+}
+
+// ── T4: Inhibitor — HPLC preserves 900 at onset and SS ───────────────────────
+
+pub fn as_hplc_inh_onset_preserved() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    as_conf_total(1.5, 5, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, as_cv_hplc()) == 900
+}
+
+pub fn as_cmia_inh_onset_degrades() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    as_conf_total(1.5, 5, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, as_cv_cmia()) == 820
+}
+
+pub fn as_hplc_inh_ss_preserved() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    as_conf_total(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, as_cv_hplc()) == 900
+}
+
+pub fn as_cmia_inh_ss_degrades() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    as_conf_total(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, as_cv_cmia()) == 820
+}
+
+// ── T5: Inducer — even HPLC inadequate ────────────────────────────────────────
+
+pub fn as_hplc_ind_degrades() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_ind = ob_ke_var_ind()
+    let ct = as_conf_total(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_hplc())
+    let cp = as_conf_pred( 20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21)
+    ct < cp
+}
+
+pub fn as_all_assays_fail_inducer() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_ind = ob_ke_var_ind()
+    let ct_h = as_conf_total(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_hplc())
+    let ct_c = as_conf_total(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_cmia())
+    let ct_p = as_conf_total(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_poor())
+    ct_h == 700 && ct_c == 700 && ct_p == 700
+}

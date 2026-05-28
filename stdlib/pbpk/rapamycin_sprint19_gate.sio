@@ -1,0 +1,271 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint19_gate.sio — Sprint 19 DDI gate
+//
+// 56 assertions certifying that CYP3A4/P-gp drug-drug interactions change
+// the trough decision but not the dominant uncertainty source — ka remains
+// dominant for all realistic DDI scenarios. Certifies the ke_var crossover
+// threshold above which ke would dominate, and proves this threshold is
+// physiologically unreachable for rapamycin.
+//
+// ══ Finding 1: Ka universal across all DDI scenarios ═════════════════════════
+//
+//   Baseline + strong inhibitor + moderate inhibitor + strong inducer: dom=ka.
+//   ke_var scaling by (ke_val × CV)² does not flip dominance for any realistic DDI.
+//
+// ══ Finding 2: DDI creates decision cliffs, not dominance changes ═════════════
+//
+//   Strong inhibitor at 5mg → TOXIC (ke÷5 + F×2 accumulates drug)
+//   Strong inhibitor at 1–2mg → THERAPEUTIC/900/ka
+//   Strong inducer at any dose N=14 → UNCERTAIN (ke×5 + F÷3 clears drug)
+//   Strong inducer at 20mg N=28 → THERAPEUTIC/820/ka (4 weeks needed)
+//
+// ══ Finding 3: ke_var crossover threshold is physiologically unreachable ══════
+//
+//   ke_var = 0.001 (119× standard): dom = ka   (below crossover)
+//   ke_var = 0.002 (238× standard): dom = ke   (above crossover)
+//   Extreme inducer max ke_var = 8.44e-4 < 0.001 → ka still dominates
+//   Crossover ke_val ≈ 0.172 h⁻¹ at CV=26%: 15× standard, physiologically impossible
+//
+// ══ Finding 4: Measurement hierarchy survives DDI ═════════════════════════════
+//
+//   ka÷4 under inhibitor (1.5mg): conf=900→950 (global optimum, dom=k12)
+//   ke÷4 under inhibitor: conf unchanged, ke irrelevant
+//   ka÷4 with inducer at sub-therapeutic dose → still SUB: dosing is primary
+//
+// Assertion map:
+//   A (1–8):   DDI safety: inhibitor toxic at 5mg, inducer uncertain at N=14
+//   B (9–14):  Ka universal dominance: all 4 DDI scenarios dom=ka
+//   C (15–20): Dose adjustment: inhibitor safe range 1–2mg; inducer N=28 needed
+//   D (21–26): Ke irrelevant under inhibitor; ke/4 changes nothing
+//   E (27–32): Ka÷4 fires under inhibitor (conf=950); cannot rescue inducer underdose
+//   F (33–38): Ke_var crossover: threshold ≈ 0.002, extreme inducer below it
+//   G (39–44): Confidence ordering under DDI (inhibitor/inducer vs baseline)
+//   H (45–48): Decision sentinels and clinical key values
+//   I (49–52): Constant consistency
+//   J (53–56): Atlas extension — ke never dominates under DDI, crossover certified
+
+use pbpk::rapamycin_ddi::{
+    ddi_ka_universal, ddi_ke_irrelevant_inhibitor, ddi_ka4_fires_inhibitor,
+    ddi_inhibitor_toxic_at_standard, ddi_inhibitor_safe_at_1mg, ddi_inhibitor_safe_at_1p5mg,
+    ddi_inducer_uncertain_n14, ddi_inducer_therapeutic_n28,
+    ddi_ka4_cannot_rescue_underdose,
+    ddi_ke_var_below_threshold_dom_ka, ddi_ke_var_above_threshold_dom_ke,
+    ddi_extreme_inducer_still_ka,
+    classify_ddi_ss, conf_ddi_ss, dom_ddi_ss,
+    ddi_ke_baseline, ddi_f_baseline, ddi_ke_inh_strong, ddi_f_inh_strong,
+    ddi_ke_inh_mod, ddi_f_inh_mod, ddi_ke_ind_strong, ddi_f_ind_strong,
+    ddi_ke_ind_ext, ddi_f_ind_ext,
+    ddi_ka_var_std, ddi_ke_var_baseline, ddi_ke_var_inh, ddi_ke_var_inh_mod,
+    ddi_ke_var_ind, ddi_ke_var_ind_ext, ddi_f_var_std, ddi_k12_var_std, ddi_k21_var_std,
+    ddi_ke_var_below_crossover, ddi_ke_var_above_crossover
+}
+use pbpk::rapamycin_clinical::{
+    decision_therapeutic, decision_uncertain, decision_sub, decision_toxic,
+    conf_clinical_min
+}
+
+var SPR19_PASS: [i64; 2] = [0; 2]
+
+fn s19_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR19_PASS[0] = SPR19_PASS[0] + 1
+    } else {
+        SPR19_PASS[1] = SPR19_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint19_gate() with IO, Epistemic, Mut, Div, Panic {
+    let ka    = ddi_ka_var_std()
+    let fv    = ddi_f_var_std()
+    let k12   = ddi_k12_var_std()
+    let k21   = ddi_k21_var_std()
+    let ke_b  = ddi_ke_var_baseline()
+    let ke_i  = ddi_ke_var_inh()
+    let ke_im = ddi_ke_var_inh_mod()
+    let ke_d  = ddi_ke_var_ind()
+    let ke_de = ddi_ke_var_ind_ext()
+
+    // ── Section A: DDI safety — decision cliffs (8 assertions) ─────────────
+    // DDI changes dec without changing dom.
+
+    s19_chk(ddi_inhibitor_toxic_at_standard())        // 1 (strong inh 5mg: TOXIC)
+    s19_chk(ddi_inhibitor_safe_at_1mg())              // 2 (strong inh 1mg: THERAPEUTIC)
+    s19_chk(ddi_inducer_uncertain_n14())              // 3 (strong ind 20mg N=14: UNCERTAIN)
+    s19_chk(ddi_inducer_therapeutic_n28())            // 4 (strong ind 20mg N=28: THERAPEUTIC)
+    // Moderate inhibitor at 5mg: THERAPEUTIC (ke÷2 not as dangerous as ke÷5)
+    s19_chk(classify_ddi_ss(ddi_ke_inh_mod(), ddi_f_inh_mod(), 5.0, 14,
+                              ke_im, k12, k21, ka, fv) == decision_therapeutic())  // 5 (mod inh: THERAPEUTIC)
+    // Moderate inhibitor at 5mg: dec=THERAPEUTIC but confirm conf
+    s19_chk(conf_ddi_ss(ddi_ke_inh_mod(), ddi_f_inh_mod(), 5.0, 14,
+                         ke_im, k12, k21, ka, fv) == 900)                         // 6 (mod inh conf=900)
+    // Strong inducer N=14 at 5mg: UNCERTAIN
+    s19_chk(classify_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 5.0, 14,
+                              ke_d, k12, k21, ka, fv) == decision_uncertain())     // 7 (strong ind 5mg: UNCERTAIN)
+    // Strong inducer N=28 at 20mg: conf=820 (not 900 — inducer trough is marginal)
+    s19_chk(conf_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 20.0, 28,
+                         ke_d, k12, k21, ka, fv) == 820)                          // 8 (inducer N=28 conf=820)
+
+    // ── Section B: Ka universal dominance across DDI (6 assertions) ──────────
+    // dom=1 (ka) for all DDI scenarios regardless of ke scale.
+
+    s19_chk(dom_ddi_ss(ddi_ke_baseline(),   ddi_f_baseline(),   5.0, 14, ke_b,  k12, k21, ka, fv) == 1) // 9  (baseline)
+    s19_chk(dom_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 5.0, 14, ke_i,  k12, k21, ka, fv) == 1) // 10 (strong inh)
+    s19_chk(dom_ddi_ss(ddi_ke_inh_mod(),    ddi_f_inh_mod(),    5.0, 14, ke_im, k12, k21, ka, fv) == 1) // 11 (mod inh)
+    s19_chk(dom_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 5.0, 14, ke_d,  k12, k21, ka, fv) == 1) // 12 (strong ind)
+    s19_chk(dom_ddi_ss(ddi_ke_ind_ext(),    ddi_f_ind_ext(),    5.0, 14, ke_de, k12, k21, ka, fv) == 1) // 13 (extreme ind)
+    s19_chk(ddi_ka_universal())                                                                           // 14 (omnibus)
+
+    // ── Section C: Dose adjustment (6 assertions) ─────────────────────────────
+
+    s19_chk(ddi_inhibitor_safe_at_1p5mg())    // 15 (strong inh 1.5mg: conf=900)
+    // 2mg under inhibitor also therapeutic/900
+    s19_chk(conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 2.0, 14,
+                         ke_i, k12, k21, ka, fv) == 900)                          // 16 (inh 2mg: 900)
+    // 0.5mg under inhibitor: UNCERTAIN (concentration below floor)
+    s19_chk(classify_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 0.5, 14,
+                              ke_i, k12, k21, ka, fv) == decision_uncertain())    // 17 (inh 0.5mg: UNCERTAIN)
+    // inducer N=28 at 30mg: THERAPEUTIC (conf still 820)
+    s19_chk(conf_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 30.0, 28,
+                         ke_d, k12, k21, ka, fv) == 820)                          // 18 (ind 30mg N=28: 820)
+    // inducer N=14 at 40mg: still UNCERTAIN (N=14 insufficient regardless of dose)
+    s19_chk(classify_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 40.0, 14,
+                              ke_d, k12, k21, ka, fv) == decision_uncertain())    // 19 (ind 40mg N=14: UNCERTAIN)
+    // inducer N=28: dom stays ka (dosing doesn't flip dominance)
+    s19_chk(dom_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 20.0, 28,
+                        ke_d, k12, k21, ka, fv) == 1)                             // 20 (ind N=28: dom=ka)
+
+    // ── Section D: Ke irrelevant under inhibitor (6 assertions) ──────────────
+
+    s19_chk(ddi_ke_irrelevant_inhibitor())    // 21 (ke÷4 under inh: conf+dom unchanged)
+    // ke÷4 under inhibitor 1mg: conf unchanged
+    s19_chk(conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.0, 14,
+                         ke_i,       k12, k21, ka, fv) ==
+            conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.0, 14,
+                         ke_i/4.0,   k12, k21, ka, fv))                           // 22 (inh ke÷4 1mg: same)
+    // ke÷4 under moderate inhibitor: unchanged
+    s19_chk(conf_ddi_ss(ddi_ke_inh_mod(), ddi_f_inh_mod(), 5.0, 14,
+                         ke_im,     k12, k21, ka, fv) ==
+            conf_ddi_ss(ddi_ke_inh_mod(), ddi_f_inh_mod(), 5.0, 14,
+                         ke_im/4.0, k12, k21, ka, fv))                            // 23 (mod inh ke÷4: same)
+    // ke÷4 under inducer: dom still ka
+    s19_chk(dom_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 5.0, 14,
+                        ke_d/4.0, k12, k21, ka, fv) == 1)                         // 24 (ind ke÷4: dom=ka)
+    // ke÷4 + ke÷4 compound: same as ke÷4 alone (ke irrelevant × 2)
+    s19_chk(conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.5, 14,
+                         ke_i/4.0, k12, k21, ka, fv) ==
+            conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.5, 14,
+                         ke_i,     k12, k21, ka, fv))                             // 25 (ke÷4 adds nothing)
+    // ke÷64 under inhibitor: still unchanged (even extreme ke tightening)
+    s19_chk(conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.5, 14,
+                         ke_i/64.0, k12, k21, ka, fv) ==
+            conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.5, 14,
+                         ke_i,      k12, k21, ka, fv))                            // 26 (ke÷64 irrelevant)
+
+    // ── Section E: Ka÷4 hierarchy under DDI (6 assertions) ───────────────────
+
+    s19_chk(ddi_ka4_fires_inhibitor())         // 27 (inh 1.5mg ka÷4: conf=950 dom=k12)
+    // ka÷4 under inhibitor 1mg: conf=900→950
+    s19_chk(conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.0, 14,
+                         ke_i, k12, k21, ka/4.0, fv) == 950)                      // 28 (inh 1mg ka÷4: 950)
+    s19_chk(ddi_ka4_cannot_rescue_underdose()) // 29 (ind 5mg ka÷4: SUB — dose primary)
+    // ka÷4 under inducer at therapeutic dose (20mg N=28): conf=820 unchanged (F-ceiling)
+    // Low F=0.047 creates the same structural ceiling as *1/*1 (Sprint 18)
+    s19_chk(conf_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 20.0, 28,
+                         ke_d, k12, k21, ka/4.0, fv) == 820)                      // 30 (ind ka÷4: conf=820 — F-ceiling)
+    // ka÷4 under moderate inhibitor: conf=900 (already at ceiling with mod inh at 5mg)
+    s19_chk(conf_ddi_ss(ddi_ke_inh_mod(), ddi_f_inh_mod(), 5.0, 14,
+                         ke_im, k12, k21, ka/4.0, fv) == 950)                     // 31 (mod inh ka÷4: 950)
+    // ke÷4 + ka÷4 under inh: same as ka÷4 alone (ke÷4 contributes nothing)
+    s19_chk(conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.5, 14,
+                         ke_i/4.0, k12, k21, ka/4.0, fv) ==
+            conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.5, 14,
+                         ke_i,     k12, k21, ka/4.0, fv))                         // 32 (ke÷4 adds nothing to ka÷4)
+
+    // ── Section F: Ke_var crossover certification (6 assertions) ─────────────
+    // Certifies the physiological impossibility of ke dominance under DDI.
+
+    s19_chk(ddi_ke_var_below_threshold_dom_ka())   // 33 (ke_var=0.001: dom=ka, below threshold)
+    s19_chk(ddi_ke_var_above_threshold_dom_ke())   // 34 (ke_var=0.002: dom=ke, above threshold)
+    s19_chk(ddi_extreme_inducer_still_ka())        // 35 (extreme ind ke_var=8.44e-4: dom=ka)
+    // Extreme inducer ke_var < below-crossover value (8.44e-4 < 0.001)
+    // Certified indirectly: extreme inducer ke_var_ind_ext == 8.44e-4 < 0.001
+    // → same assertion as ddi_extreme_inducer_still_ka but via below_crossover check
+    s19_chk(dom_ddi_ss(ddi_ke_baseline(), ddi_f_baseline(), 5.0, 14,
+                        ddi_ke_var_ind_ext(), k12, k21, ka, fv) == 1)            // 36 (extreme ind ke_var at std ke/F: dom=ka)
+    // Strong inducer ke_var=2.11e-4 << crossover 0.001: far below threshold
+    s19_chk(dom_ddi_ss(ddi_ke_baseline(), ddi_f_baseline(), 5.0, 14,
+                        ddi_ke_var_ind(), k12, k21, ka, fv) == 1)                // 37 (ind ke_var=2.11e-4: dom=ka)
+    // ke dominates only when ke_var is 238× standard — extreme artificial scenario
+    s19_chk(dom_ddi_ss(ddi_ke_baseline(), ddi_f_baseline(), 5.0, 14,
+                        ddi_ke_var_above_crossover(), k12, k21, ka, fv) == 2)    // 38 (ke_var=0.002: ke dom confirmed)
+
+    // ── Section G: Confidence ordering under DDI (6 assertions) ──────────────
+
+    // Inhibitor 1.5mg conf=900 equals baseline 5mg conf=900 (dose-adjusted, same epistemic cert)
+    s19_chk(conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.5, 14,
+                         ke_i,  k12, k21, ka, fv) ==
+            conf_ddi_ss(ddi_ke_baseline(), ddi_f_baseline(), 5.0, 14,
+                         ke_b,  k12, k21, ka, fv))                                // 39 (inh 1.5mg == baseline 5mg conf)
+    // Inducer N=28 conf=820 < baseline conf=900
+    s19_chk(conf_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 20.0, 28,
+                         ke_d, k12, k21, ka, fv) <
+            conf_ddi_ss(ddi_ke_baseline(), ddi_f_baseline(), 5.0, 14,
+                         ke_b, k12, k21, ka, fv))                                 // 40 (ind N=28: 820 < 900)
+    // Inducer N=14 conf=700 < inducer N=28 conf=820
+    s19_chk(conf_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 20.0, 14,
+                         ke_d, k12, k21, ka, fv) <
+            conf_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 20.0, 28,
+                         ke_d, k12, k21, ka, fv))                                 // 41 (ind: N=14 700 < N=28 820)
+    // ka÷4 under inh 1.5mg: conf=950 > baseline 5mg conf=900
+    s19_chk(conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.5, 14,
+                         ke_i, k12, k21, ka/4.0, fv) >
+            conf_ddi_ss(ddi_ke_baseline(), ddi_f_baseline(), 5.0, 14,
+                         ke_b, k12, k21, ka, fv))                                 // 42 (inh ka÷4: 950 > baseline 900)
+    // Moderate inhibitor at 5mg conf=900 equals baseline conf=900
+    s19_chk(conf_ddi_ss(ddi_ke_inh_mod(), ddi_f_inh_mod(), 5.0, 14,
+                         ke_im, k12, k21, ka, fv) ==
+            conf_ddi_ss(ddi_ke_baseline(), ddi_f_baseline(), 5.0, 14,
+                         ke_b, k12, k21, ka, fv))                                 // 43 (mod inh 5mg == baseline conf)
+    // ke_var=0.001 inflated: conf drops to 820 (ke contributes more variance even below threshold)
+    s19_chk(conf_ddi_ss(ddi_ke_baseline(), ddi_f_baseline(), 5.0, 14,
+                         ddi_ke_var_below_crossover(), k12, k21, ka, fv) == 820) // 44 (ke_var=0.001: conf=820)
+
+    // ── Section H: Decision sentinels (4 assertions) ──────────────────────────
+
+    s19_chk(decision_therapeutic() == 1)                                // 45
+    s19_chk(decision_uncertain()   == 3)                                // 46
+    s19_chk(decision_sub()         == 0)                                // 47
+    s19_chk(decision_toxic()       == 2)                                // 48
+
+    // ── Section I: Constant consistency (4 assertions) ───────────────────────
+
+    s19_chk(conf_clinical_min()          == 800)                        // 49
+    s19_chk(ddi_ke_var_baseline()        == 0.00000841)                 // 50
+    s19_chk(ddi_ke_var_below_crossover() == 0.001)                      // 51
+    s19_chk(ddi_ke_var_above_crossover() == 0.002)                      // 52
+
+    // ── Section J: Atlas extension — DDI confirms ke never dominates (4 assertions) ──
+
+    s19_chk(dom_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 5.0, 14,
+                        ke_i,  k12, k21, ka, fv) != 2)                            // 53 (strong inh: ke not dom)
+    s19_chk(dom_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 5.0, 14,
+                        ke_d,  k12, k21, ka, fv) != 2)                            // 54 (strong ind: ke not dom)
+    s19_chk(dom_ddi_ss(ddi_ke_ind_ext(),    ddi_f_ind_ext(),    5.0, 14,
+                        ke_de, k12, k21, ka, fv) != 2)                            // 55 (extreme ind: ke not dom)
+    // Structural result: ke dominates only above crossover threshold (0.002)
+    // at any realistic ke_var — universal ka dominance is certified
+    s19_chk(ddi_ke_var_ind_ext() < ddi_ke_var_below_crossover())                  // 56 (8.44e-4 < 0.001: crossover unreachable)
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    run_sprint19_gate()
+    if SPR19_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}

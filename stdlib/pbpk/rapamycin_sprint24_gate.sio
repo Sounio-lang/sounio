@@ -1,0 +1,207 @@
+// stdlib/pbpk/rapamycin_sprint24_gate.sio — Sprint 24 release gate
+// 56 assertions across 10 sections (A–J).
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+module main
+
+use pbpk::rapamycin_clinical::{
+    trough_floor_mg_l, trough_ceil_mg_l, conf_clinical_min,
+    decision_sub, decision_therapeutic, decision_toxic, decision_uncertain
+}
+use pbpk::rapamycin_oral_budget::{
+    ob_v1_total,
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+use pbpk::rapamycin_assay::{as_trough_mg_l, as_v_pred_conc, as_conf_pred}
+use pbpk::rapamycin_dose_response::{
+    dr_classify, dr_proportional, dr_conf_dose_invariant,
+    dr_std_ss_d2_uncertain, dr_std_ss_d3_therapeutic,
+    dr_std_ss_d10_therapeutic, dr_std_ss_d11_toxic,
+    dr_slow_ss_d2_therapeutic, dr_slow_ss_d10_toxic,
+    dr_inh_ss_d15_therapeutic, dr_inh_ss_d5_toxic,
+    dr_ind_n26_d10_sub, dr_ind_n26_d15_uncertain, dr_ind_n26_d20_therapeutic
+}
+
+var SPR24_PASS: [i64; 2] = [0, 0]
+
+fn s24_chk(ok: bool) with Mut {
+    if ok { SPR24_PASS[0] = SPR24_PASS[0] + 1 }
+    else  { SPR24_PASS[1] = SPR24_PASS[1] + 1 }
+}
+
+fn run_sprint24_gate() with IO, Mut, Div, Panic {
+
+    let ka   = ob_ka_var_std()
+    let fv   = ob_f_var_std()
+    let ke_v = ob_ke_var_std()
+    let k12v = ob_k12_var_std()
+    let k21v = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    let ke_ind = ob_ke_var_ind()
+
+    // ── Section A: GUM dose-proportionality theorem — C∝D (8 assertions) ──────
+    // For a linear Euler ODE, C(D2) / C(D1) = D2 / D1 exactly.
+
+    // Standard SS: doubling dose doubles trough
+    let c5_std   = as_trough_mg_l(5.0,  14, 0.01118, 0.141)
+    let c10_std  = as_trough_mg_l(10.0, 14, 0.01118, 0.141)
+    s24_chk(c10_std > c5_std)                                               //  1 D=10mg > D=5mg (trivial)
+    s24_chk(c10_std * 10.0 > c5_std * 19.0)                                 //  2 C(10)/C(5) > 1.9
+    s24_chk(c10_std * 10.0 < c5_std * 21.0)                                 //  3 C(10)/C(5) < 2.1 (tight: 2×)
+    s24_chk(dr_proportional(5.0, 10.0, 14, 0.01118, 0.141))                 //  4 proportionality within 2%
+
+    // Slow SS: same proportionality law
+    let c5_slow  = as_trough_mg_l(5.0,  14, 0.00838, 0.188)
+    let c10_slow = as_trough_mg_l(10.0, 14, 0.00838, 0.188)
+    s24_chk(c10_slow * 10.0 > c5_slow * 19.0)                               //  5 slow: ratio > 1.9
+    s24_chk(c10_slow * 10.0 < c5_slow * 21.0)                               //  6 slow: ratio < 2.1
+
+    // Inhibitor: C(5mg)/C(1.5mg) = 5/1.5 = 3.33
+    let c15_inh  = as_trough_mg_l(1.5, 14, 0.002236, 0.282)
+    let c5_inh   = as_trough_mg_l(5.0, 14, 0.002236, 0.282)
+    s24_chk(c5_inh > c15_inh * 3.2)                                          //  7 inh: C(5)/C(1.5) > 3.2
+    s24_chk(c5_inh * 2.0 < c15_inh * 7.0)                                   //  8 inh: C(5)/C(1.5) < 3.5
+
+    // ── Section B: Confidence dose-invariance theorem (8 assertions) ───────────
+    // rel_std = sqrt(V)/C is dose-independent → conf is dose-independent.
+
+    // Standard SS: conf identical for D=2, 5, 10mg
+    s24_chk(dr_conf_dose_invariant(5.0, 10.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)) //  9
+    s24_chk(dr_conf_dose_invariant(5.0,  2.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)) // 10
+    s24_chk(dr_conf_dose_invariant(5.0,  3.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)) // 11
+
+    // Slow SS: conf identical for D=2, 5mg
+    s24_chk(dr_conf_dose_invariant(5.0, 2.0, 14, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v))  // 12
+
+    // Fast onset (N=9): conf identical for D=5, 10mg
+    s24_chk(dr_conf_dose_invariant(5.0, 10.0, 9, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v))  // 13
+
+    // Inhibitor SS: conf identical for D=1.5, 5mg (despite very different C!)
+    s24_chk(dr_conf_dose_invariant(1.5, 5.0, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)) // 14
+
+    // Inducer N=26: conf identical for D=20, 40mg
+    s24_chk(dr_conf_dose_invariant(20.0, 40.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v)) // 15
+
+    // V(10mg) > V(5mg): variance grows with dose (V ∝ D²)
+    let v5_std   = as_v_pred_conc(5.0,  14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)
+    let v10_std  = as_v_pred_conc(10.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)
+    s24_chk(v10_std > v5_std)                                               // 16 variance grows
+
+    // ── Section C: Standard SS dose-response (6 assertions) ──────────────────
+
+    s24_chk(dr_std_ss_d2_uncertain())                                        // 17 D=2mg → UNCERTAIN
+    s24_chk(dr_std_ss_d3_therapeutic())                                      // 18 D=3mg → THERAPEUTIC
+    let cp3_std_ss = as_conf_pred(3.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)
+    s24_chk(cp3_std_ss >= conf_clinical_min())                               // 19 D=3 conf ≥ 800
+    s24_chk(dr_std_ss_d10_therapeutic())                                     // 20 D=10mg → THERAPEUTIC
+    s24_chk(dr_std_ss_d11_toxic())                                           // 21 D=11mg → TOXIC
+    let c11_std  = as_trough_mg_l(11.0, 14, 0.01118, 0.141)
+    s24_chk(c11_std > trough_ceil_mg_l())                                    // 22 C(11mg) > ceil
+
+    // ── Section D: Slow genotype SS dose-response (6 assertions) ─────────────
+
+    s24_chk(dr_slow_ss_d2_therapeutic())                                     // 23 slow D=2mg → THERAPEUTIC
+    let c2_slow = as_trough_mg_l(2.0, 14, 0.00838, 0.188)
+    s24_chk(c2_slow > trough_floor_mg_l())                                   // 24 slow D=2: C > floor
+    let cp2_slow = as_conf_pred(2.0, 14, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v)
+    s24_chk(cp2_slow >= conf_clinical_min())                                 // 25 slow D=2: conf ≥ 800
+    // Slow accumulates more than standard at same dose (lower ke, higher F)
+    s24_chk(c5_slow > c5_std)                                               // 26 C(slow) > C(std) at D=5mg
+    s24_chk(dr_slow_ss_d10_toxic())                                          // 27 slow D=10mg → TOXIC
+    let c10_slow2 = as_trough_mg_l(10.0, 14, 0.00838, 0.188)
+    s24_chk(c10_slow2 > trough_ceil_mg_l())                                  // 28 slow C(10mg) > ceil
+
+    // ── Section E: Fast genotype dose-response (6 assertions) ────────────────
+
+    // Fast genotype has lowest C per dose (highest ke, lowest F)
+    let c5_fast  = as_trough_mg_l(5.0,  14, 0.01677, 0.094)
+    let c10_fast = as_trough_mg_l(10.0, 14, 0.01677, 0.094)
+    let c15_fast = as_trough_mg_l(15.0, 14, 0.01677, 0.094)
+    s24_chk(c5_fast < c5_std)                                               // 29 fast < std at D=5mg
+    s24_chk(c5_fast < c5_slow)                                              // 30 fast < slow at D=5mg
+    // All in [floor, ceil]
+    s24_chk(c5_fast  > trough_floor_mg_l())                                  // 31 fast D=5: > floor
+    s24_chk(c10_fast > trough_floor_mg_l() && c10_fast < trough_ceil_mg_l()) // 32 fast D=10: therapeutic range
+    s24_chk(c15_fast > trough_floor_mg_l() && c15_fast < trough_ceil_mg_l()) // 33 fast D=15: therapeutic range
+    // Dose-invariant confidence at fast onset (N=9)
+    let cp5_fast_n9  = as_conf_pred(5.0,  9, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v)
+    let cp10_fast_n9 = as_conf_pred(10.0, 9, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v)
+    s24_chk(cp5_fast_n9 == cp10_fast_n9)                                    // 34 fast N=9: conf invariant
+
+    // ── Section F: Inhibitor dose-response — critical safety (6 assertions) ───
+
+    s24_chk(dr_inh_ss_d15_therapeutic())                                     // 35 inh D=1.5 → THERAPEUTIC
+    // C(1.5mg inh) inside therapeutic window
+    s24_chk(c15_inh > trough_floor_mg_l() && c15_inh < trough_ceil_mg_l())  // 36 inh D=1.5: in range
+    // SAFETY: standard dose (5mg) is TOXIC for inhibitor patient
+    s24_chk(dr_inh_ss_d5_toxic())                                            // 37 inh D=5mg → TOXIC
+    s24_chk(c5_inh > trough_ceil_mg_l())                                     // 38 C(5mg inh) > ceil
+    // Inhibitor accumulates much more than standard at same dose
+    s24_chk(c5_inh > c5_std * 2.0)                                          // 39 C(inh D=5) > 2× C(std D=5)
+    // Dose-invariant confidence: same conf for 1.5mg and 5mg on inhibitor
+    let cp15_inh = as_conf_pred(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)
+    let cp5_inh  = as_conf_pred(5.0, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)
+    s24_chk(cp15_inh == cp5_inh)                                             // 40 inh: conf invariant
+
+    // ── Section G: Inducer dose-response (4 assertions) ──────────────────────
+
+    s24_chk(dr_ind_n26_d10_sub())                                            // 41 ind D=10 → SUB
+    s24_chk(dr_ind_n26_d15_uncertain())                                      // 42 ind D=15 → UNCERTAIN
+    s24_chk(dr_ind_n26_d20_therapeutic())                                    // 43 ind D=20 → THERAPEUTIC
+    let c40_ind  = as_trough_mg_l(40.0, 26, 0.05590, 0.047)
+    s24_chk(c40_ind > trough_floor_mg_l() && c40_ind < trough_ceil_mg_l())  // 44 ind D=40: in range
+
+    // ── Section H: Variance ∝ D² verified (4 assertions) ─────────────────────
+
+    // V(10mg) / V(5mg) ≈ 4 for standard SS (tight bounds ±10%)
+    s24_chk(v10_std > v5_std * 3.6)                                          // 45 V ratio > 3.6 (≈4)
+    s24_chk(v10_std < v5_std * 4.4)                                          // 46 V ratio < 4.4 (≈4)
+
+    // Slow: V(5mg, slow) vs V(5mg, std) — slow has more variance (higher C)
+    let v5_slow  = as_v_pred_conc(5.0, 14, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v)
+    s24_chk(v5_slow > v5_std)                                               // 47 V(slow) > V(std) at same dose
+
+    // Inhibitor: V(5mg, inh) / V(1.5mg, inh) ≈ (5/1.5)² = 11.11
+    let v15_inh  = as_v_pred_conc(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)
+    let v5_inh   = as_v_pred_conc(5.0, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)
+    s24_chk(v5_inh > v15_inh * 10.0 && v5_inh < v15_inh * 12.5)            // 48 V ratio ≈ 11.1
+
+    // ── Section I: Constants and therapeutic window (4 assertions) ────────────
+
+    s24_chk(trough_floor_mg_l() < 0.005)                                     // 49 floor < 5 ng/mL
+    s24_chk(trough_ceil_mg_l()  > 0.015)                                     // 50 ceil  > 15 ng/mL
+    s24_chk(trough_ceil_mg_l()  > trough_floor_mg_l() * 4.0)                 // 51 window > 4× floor
+    s24_chk(c5_std > trough_floor_mg_l() && c5_std < trough_ceil_mg_l())     // 52 std D=5 in range
+
+    // ── Section J: Clinical synthesis (4 assertions) ──────────────────────────
+
+    // Genotype ordering: slow > std > fast at same dose (ke determines accumulation)
+    s24_chk(c5_slow > c5_std && c5_std > c5_fast)                           // 53 slow > std > fast
+
+    // Therapeutic dose window narrows with slower clearance:
+    // inhibitor has narrowest window (even D=5mg is TOXIC), inducer has widest
+    let c5_ind = as_trough_mg_l(5.0, 26, 0.05590, 0.047)
+    s24_chk(c5_ind < trough_floor_mg_l())                                    // 54 inducer D=5: below floor
+
+    // The compile-time gate catches a canonical prescribing error:
+    // standard dose (5mg) + strong inhibitor = TOXIC at SS
+    s24_chk(dr_inh_ss_d5_toxic())                                            // 55 safety gate certifies inh D=5mg toxic
+
+    // Dose-invariance spans 7× dose range: conf(2mg) == conf(14mg) for std SS
+    s24_chk(dr_conf_dose_invariant(2.0, 14.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)) // 56
+
+    let pass = SPR24_PASS[0]
+    let fail = SPR24_PASS[1]
+    if fail == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL — ")
+        print_int(fail)
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    run_sprint24_gate()
+}
