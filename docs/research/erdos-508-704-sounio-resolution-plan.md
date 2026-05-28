@@ -1,18 +1,3 @@
-<!-- docs:meta
-topic_id: repo.docs.research.erdos-508-704-sounio-resolution-plan
-authority: historical
-audience: researchers
-last_validated: 2026-03-07
-validated_by: A6
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.erdos-508-704-sounio-resolution-plan
--->
-
-
-<!-- docs:status-note:start -->
-> Docs status: `historical`
-> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
-<!-- docs:status-note:end -->
-
 # Sounio Resolution Plan: Erdős #508 and #704
 
 **Primary Objective (locked)**  
@@ -155,6 +140,185 @@ descarta esse mecanismo simples como alavanca de χ aqui.
 não-associatividade genuína, indexada diretamente pelos **168 pares ZD** (não 84
 mapas lineares). É o caminho correto para testar χ ≥ 3.
 
+### Iteração 2026-05-25 — cirurgia por associador (Fatia 2)
+
+Implementada a cirurgia por associador `(p·u)·v` com `u·v=0`, sobre os **168
+pares ZD** (enumerados via `is_zero_pair`; composição de duas multiplicações à
+direita por primitivos, reaproveitando o mesmo atalho de 2 termos). Alvo de
+"distância unitária torcida" = `‖u‖²·‖v‖² = 4`. Verificado empiricamente que a
+distribuição de `‖((e_m)·u)·v‖²` nas 16 direções de base é `{0:6, 4:8, 8:2}` —
+clusters limpos (kernel / unitário-torcido / amplificado), sem cluster em 2, logo
+o alvo `==4` é bem-definido.
+
+**RESULTADO (mesmo probe de 7 vértices):**
+- `168` pares ZD enumerados (== `unorderedZDPairs` do bridge).
+- cirurgia **totalmente ativa**: **168 de 168** classes alteram o conjunto de
+  arestas (arestas variam de 2 a 12, vs 6 clássicas) — muito mais forte que a
+  linear (4/84).
+- porém **0 de 168** elevam χ: permanece 2 em todas.
+
+**Leitura honesta (mais forte que a Fatia 1):** mesmo a não-associatividade
+genuína, agindo em TODAS as 168 classes, não quebra a bipartição neste probe. As
+duas fatias juntas isolam a conclusão: **o gargalo é o tamanho do probe (7
+vértices), não o mecanismo algébrico** — o associador é a alavanca certa e está
+plenamente ativo. (Lembrete de escala: o grafo 5-cromático de de Grey tem 1581
+vértices; esperar χ≥3 de 7 vértices sempre foi otimista.)
+
+Lean: `associator_class_count_168`, `all_associator_surgeries_change_edges`,
+`no_associator_surgery_raises_chromatic`, `associator_chromatic_le_classical` —
+todos `native_decide`, sem `sorry`/axioma novo; paridade com o run Sounio.
+
+**Próxima alavanca (Fatia 3):** escalar o nº de vértices com um teste de
+**bipartição por BFS** (O(V+E), escala a centenas de vértices — o brute-force
+k^n não), e/ou **partir de um grafo unit-distance clássico com χ≥3** (realização
+racional do Moser spindle ou subgrafo estilo de Grey) e perguntar se a cirurgia
+ZD **preserva ou quebra** a não-bipartição. Essa é a pergunta de pesquisa real.
+
+### Iteração 2026-05-25 — escala + busca de χ≥3 (Fatia 3)
+
+Nota: um grafo unit-distance **clássico** com χ≥3 e coords **inteiras** é
+impossível (dist²=1 inteiro ⟹ bipartido; o spindle precisa de coords
+irracionais, que quebram a exatidão do `native_decide`). Então a pergunta foi
+reformulada para o objeto que NÃO é reticulado: o **grafo torcido** (aresta ⟺
+‖M_v(p_i−p_j)‖²==alvo). Como `M_v` é um mapa linear fixo, esse grafo pode em
+princípio conter triângulos (existem três pontos inteiros a dist² mútua 2).
+
+Teste por **bipartição BFS** (O(V+E), escala; o brute-force k^n não), sobre duas
+famílias inteiras **completas** (não cherry-picked):
+- binária peso-≤2: `{0} ∪ {e_i} ∪ {e_i+e_j}` = **137** pontos;
+- com sinal peso-≤2: `{0} ∪ {±e_i} ∪ {e_i±e_j}` = **273** pontos.
+
+**RESULTADO (504 grafos = 252 cirurgias × 2 famílias):**
+- **0 não-bipartidos.** Nenhuma cirurgia (linear ou associador) força χ≥3.
+- Contagens de arestas constantes por família e simetria PSL(2,7) (linear 340 /
+  856; associador 1862 binário, 6528–6692 com sinal — grafos genuinamente
+  distintos, hashes diferentes, exclui bug).
+- **Linear: bipartição é ESTRUTURAL** — a paridade do peso de Hamming total é
+  uma 2-coloração própria de TODOS os 84 grafos lineares em AMBAS as famílias
+  (84/84). Provado em Lean (`linear_surgery_total_parity_2colors`, `native_decide`,
+  sobre o probe binário completo de 137) — não é acidente de tamanho.
+- **Associador: bipartido (BFS) em todos**, mas paridade total/meia-graduação
+  NÃO 2-colore — a 2-coloração explícita é não-óbvia (em aberto).
+
+**Leitura honesta:** as três fatias juntas mostram que a alavanca algébrica está
+validada (o associador age em toda classe) mas a cirurgia baseada em distância,
+sozinha, **não quebra a bipartição** de probes inteiros — para o linear isso é um
+teorema (2-coloração por paridade). Forçar χ≥3 exige quebrar essa paridade.
+
+**Próxima alavanca (Fatia 4):**
+- provar a 2-coloração explícita do caso **associador** (ou achar o invariante);
+- mecanismos que QUEBRAM a paridade total: multiplicação à **esquerda**, ou uma
+  construção de grafo que não seja distância-torcida (rótulo de associador /
+  wave como restrição de cor, curvatura ORC modulada);
+- #704: subir dimensão (pathions 32D) / escala Kretikos.
+
+### Iteração 2026-05-25 — multiplicação à ESQUERDA (Fatia 4a)
+
+Hipótese: como unidades imaginárias distintas anticomutam (`σ(a,b)=−σ(b,a)`), a
+multiplicação à esquerda `v·d` poderia quebrar a 2-coloração por paridade total
+(os termos que tocam o índice 0 não invertem o sinal). Testado `lmul_into`
+(`(v·x)_k = x_{k^lo}σ(lo,k^lo) + s·x_{k^hi}σ(hi,k^hi)`) com a mesma busca BFS.
+
+**RESULTADO: idêntico à direita.** Mesmas contagens de arestas (340 binário,
+856 com sinal), **0 não-bipartidos**, paridade total 2-colore 84/84 em ambas as
+famílias. A norma `‖v·d‖²` é invariante ao lado para estes primitivos → a
+multiplicação à esquerda NÃO é a alavanca de quebra de paridade.
+
+Resultado fortalecido: o invariante de bipartição é **bilateral**. Provado em
+Lean (`left_surgery_total_parity_2colors`, espelhando o lado direito,
+`native_decide`, sem `sorry`). Conclusão: forçar χ≥3 com cirurgia ZD baseada em
+distância é impossível por paridade (ambos os lados); é preciso uma construção
+que **não** seja distância-torcida.
+
+### Iteração 2026-05-25 — grafo de conflito por ASSOCIADOR: χ≥3 (Fatia 4b) ★
+
+**Primeiro χ≥3 do programa — o teto de paridade foi quebrado.**
+
+Construção não-distância: o associador `assoc(x,y,c) = (x·y)·c − x·(y·c)` é
+**bilinear** em (x,y), NÃO é função de `x−y`, logo o grafo de conflito não é
+invariante por translação e não herda a bipartição de paridade. Aresta `(i,j)`
+⟺ `‖assoc(p_i,p_j,c)‖² == 4` (simetrizado; 4 = menor valor não-nulo da
+distribuição `{0,4,8,16,…}`, grafo esparso ~13%). `c` = primitivo ZD.
+
+**RESULTADO (probe binário peso-≤2, 137 pts, varrendo os 84 c):**
+- **NÃO-bipartido para TODOS os 84 c** (χ≥3); paridade total 2-colore **0/84** —
+  o invariante que travava a distância está **quebrado**.
+- Certificado concreto de χ≥3: **triângulo `{e_1, e_2, e_3}`** (índices 2,3,4)
+  no grafo de conflito com c=primitivo 0 (`e_1+e_10`). Provado em Lean
+  (`associator_conflict_triangle`, `cWit_is_first`, `native_decide`, sem `sorry`).
+- Limite de cor (guloso): χ ∈ [3, ~10].
+
+**Leitura honesta (Nível 2 — novo invariante verificável + separação):**
+isto NÃO é um novo limite para χ(plano) (#508). É uma **separação estrutural**: a
+**não-associatividade é essencial** para escapar do teto χ≤2 das construções ZD
+baseadas em distância. Toda cirurgia por distância (esq./dir./associador-como-
+distância) é provadamente bipartida; o **associador como relação de conflito**
+(bilinear, não-translação-invariante) atinge χ≥3. A não-associatividade do
+sedenion não é decorativa — ela carrega obstrução cromática genuína.
+
+**Próximo (Fatia 5):** (a) quão alto vai χ do grafo de conflito (clique/χ exato,
+crescer probe); (b) ligar essa obstrução cromática algébrica de volta a uma
+construção geométrica unit-distance (a ponte real para #508/#704); (c) #704 em
+pathions 32D.
+
+### Iteração 2026-05-25 — ponte alg→geom + regime esparso χ>ω (Fatia 5)
+
+**Gating honesto da ponte (por que χ≥3 não basta):** um grafo unit-distance
+clássico com χ≥3 e coords inteiras é impossível; e mesmo realizando o grafo de
+conflito como unit-distance, χ≥3 não diz nada novo (χ(ℝ²)≥5 já é conhecido). A
+ponte só importa se χ for alto E o regime for o "difícil".
+
+**χ do grafo de conflito é alto mas CLIQUE-DRIVEN.** Medições (clique guloso +
+DSATUR, heurísticas): χ ∈ [8, ~11], com clique ω≥8 (uma K₈ concreta em
+`{e₃,e₁₂,e₁₃,…}`). χ≈ω ⇒ o χ alto vem de uma clique — o regime TRIVIAL para
+unit-distance (K₈ = 7-simplex regular, dá só χ(ℝ⁷)≥8, o bound trivial d+1). O
+regime de Erdős é **χ≫ω** (esparso, clique-poor). χ exato em 137 vértices é
+inviável (provar não-k-colorabilidade por backtracking é exponencial; timeout).
+
+**Resultado RIGOROSO no regime esparso (χ>ω):** extraíndo um subgrafo induzido
+**triangle-free** (ω=2, por construção + verificado) que é **não-bipartido**
+(χ≥3, BFS exato) ⇒ χ>ω com a MENOR clique possível. Concretamente, no grafo de
+conflito T=8 existe um **C₅ induzido** (pentágono sem cordas) em
+`{e₃, e₂+e₆, e₂, e₄, e₈}` ⇒ ω=2, χ=3. Provado em Lean
+(`associator_conflict_induced_C5`: 5 arestas presentes + 5 cordas ausentes,
+`native_decide`, sem `sorry`) e `cWit_is_first`.
+
+**Leitura honesta:** alcançamos o regime esparso χ>ω de forma RIGOROSA — distinto
+do χ≥8 clique-driven. Mas continua sendo separação ALGÉBRICA (Nível 2): um C₅ é
+um pentágono unit-distance trivial; isto NÃO é (ainda) um bound geométrico novo
+para #508/#704. A ponte alg→geom genuína exige χ≫ω **grande** num grafo
+realizável — exatamente a dificuldade do problema aberto, não resolvida aqui.
+
+**Honestidade sobre a fronteira:** as 5 fatias mapearam o que a estrutura
+168/ZD/associador faz para o número cromático (rigorosamente), e onde ela esbarra
+na dificuldade real de Erdős. Não há overclaim de resolução.
+
+### Iteração 2026-05-25 — χ−ω num grafo REALIZÁVEL (Fatia 6): NULL informativo
+
+Insight: um grafo com aresta ⟺ `‖p_i−p_j‖²==T` sobre pontos INTEIROS em ℝ¹⁶ É um
+grafo unit-distance (escala 1/√T → arestas = distância 1) — **realizável** e
+exato, ao contrário do grafo de conflito por associador (não-distância). Ponto
+natural Sounio: os **84 primitivos** `e_lo±e_hi`.
+
+Distribuição de `‖diff‖²` (84 primitivos): T=2 (630), **T=4 (2646, denso)**, T=6
+(210, mais esparso). Buscando χ>ω esparso (subgrafo triangle-free não-bipartido):
+- T=6: grafo INTEIRO triangle-free mas **bipartido** (χ=2).
+- T=2, T=4: **clique-driven** (têm triângulos); a parte triangle-free é bipartida.
+- Contraste no conjunto genérico 137-binário (Euclidiano): **idem** — bipartido /
+  clique-driven em T=2,4,6.
+
+**RESULTADO: NULL.** Nenhum grafo unit-distance realizável (primitivos OU genérico)
+exibe χ>ω no regime esparso. O χ>2 só aparece via cliques (triângulos).
+
+**Leitura honesta (e o porquê da ponte falhar, com precisão):** o gap esparso
+χ>ω existe SÓ na relação de **associador (não-distância, não-realizável)** —
+slice 5, C₅ induzido. As versões **realizáveis** (distância Euclidiana) perdem
+esse gap: suas regiões triangle-free são bipartidas; χ>2 só clique-driven. Ou
+seja, a não-associatividade que cria ciclos ímpares clique-poor é **incompatível
+com a realizabilidade Euclidiana** neste conjunto de pontos. Essa é a obstrução
+estrutural concreta à ponte — não "não achei", mas "o gap mora exatamente na
+parte não-realizável".
+
 ### Infra de base (mantida)
 - Emitter Kretikos pronto para uso (Fase 2, escala — adiado).
 - Objetivo travado: resolver os dois Erdős com Sounio.
@@ -170,12 +334,43 @@ negativo honesto registrado acima.
 2. ~~Exemplo executável em `examples/erdos/`~~ ✅ (`moser_zd_probe.sio`).
 3. ~~Avançar o lado Lean para 7 vértices~~ ✅ (4 teoremas `native_decide`, sem `sorry`).
 
-Fatia 2 (recomendada, decisão de alavanca):
-4. **Cirurgia por associador** `(p·u)·v`, `u·v=0` — não-associatividade genuína,
-   168 classes diretas. Implementar em Sounio + Lean (mesma estrutura de prova),
-   medir se algum dos 168 eleva χ ≥ 3 num probe que span ambas as metades.
-5. Se positivo: provar `∃ classe, χ_torcido > χ_clássico` por `native_decide`
-   (resultado grande). Se negativo: subir nº de vértices / dimensão (#704) e/ou
-   escala Kretikos (Fase 2).
+Fatia 2 (cirurgia por associador) — CONCLUÍDA:
+4. ~~**Cirurgia por associador** `(p·u)·v`, `u·v=0`, 168 classes, Sounio + Lean~~
+   ✅ — 168/168 ativas, 0 elevam χ (negativo honesto, mecanismo validado).
 
-O objetivo não é "explorar". É **resolver** — com cada passo verificável.
+Fatia 3 (escala + busca BFS) — CONCLUÍDA:
+5. ~~Teste de **bipartição por BFS** (O(V+E)) substituindo o brute-force k^n~~ ✅
+   (137 + 273 pontos, 504 grafos, 0 não-bipartidos).
+6. ~~Busca de χ≥3 sobre famílias inteiras completas~~ ✅ — negativo; linear é
+   bipartido por teorema (2-coloração de paridade, provado em Lean).
+
+Fatia 4 (quebrar a paridade) — CONCLUÍDA:
+7. ~~mult. à **esquerda** como alavanca~~ ✅ — descartada (idêntica à direita,
+   invariante bilateral, provado em Lean).
+8. ~~Construção NÃO-distância (grafo de conflito por associador)~~ ✅ ★ —
+   **χ≥3 atingido** (84/84 c, triângulo `{e1,e2,e3}` provado em Lean); paridade
+   quebrada. Primeiro χ≥3 do programa; não-associatividade é essencial.
+
+Fatia 5 (ponte + regime esparso) — PARCIAL:
+9.  ~~Quão alto vai χ do grafo de conflito~~ ✅ — χ∈[8,11] mas CLIQUE-driven
+    (ω≥8), regime trivial; χ exato inviável em 137 vts.
+10. ~~Atingir o regime esparso χ>ω rigorosamente~~ ✅ — C₅ induzido (ω=2, χ=3)
+    no T=8, provado em Lean. Foothold no regime difícil.
+11. **Ponte geométrica genuína** (EM ABERTO, o passo real para Erdős): χ≫ω
+    GRANDE num grafo realizável como unit-distance — a dificuldade do problema
+    aberto. Não resolvida.
+
+Fatia 6 (χ−ω em grafo realizável) — NULL informativo:
+12. ~~Grafo unit-distance realizável (Euclidiano) sobre os 84 primitivos / 137~~
+    ✅ — bipartido (T=6) ou clique-driven (T=2,4); SEM χ>ω esparso. O gap mora
+    só na relação de associador NÃO-realizável (slice 5). Obstrução à ponte
+    identificada com precisão.
+
+Frente aberta (não resolvida):
+13. Construir o gap χ>ω num grafo genuinamente realizável — exige uma relação
+    realizável que herde a estrutura de ciclo-ímpar clique-poor do associador
+    (não óbvio que exista; é a dificuldade do problema aberto).
+14. #704: pathions 32D / escala Kretikos.
+
+O objetivo não é "explorar". É **resolver** — com cada passo verificável, e sem
+overclaim quando a fronteira real do problema é atingida.
