@@ -701,16 +701,18 @@ fn tup_perturbation(first_hash: i64, last_hash: i64) -> i64 with Mut {
     mix * 1000000000
 }
 
-fn tup_cache_register(tup_hash: i64, first_ty: i64, first_hash: i64, last_ty: i64, last_hash: i64) -> i64 with Panic, Mut {
-    if tup_hash == 0 { return -1 }
+fn tup_cache_register(first_ty: i64, first_hash: i64, last_ty: i64, last_hash: i64) -> i64 with Panic, Mut {
+    // Structural identity: scan by content — no arithmetic collision possible.
+    // N-ary tuples: mid elements not checked here; two N-ary tuples with same
+    // first/last but different mid share a slot (known pre-existing limitation).
     var i: i64 = 0
     while i < TUP_CACHE_COUNT {
-        if TUP_CACHE_KEY[i as usize] == tup_hash { return i }
+        if TUP_CACHE_FIRST_TY[i as usize] == first_ty && TUP_CACHE_FIRST_HASH[i as usize] == first_hash && TUP_CACHE_LAST_TY[i as usize] == last_ty && TUP_CACHE_LAST_HASH[i as usize] == last_hash { return i }
         i = i + 1
     }
     if TUP_CACHE_COUNT >= 4096 { return -1 }
     let idx = TUP_CACHE_COUNT
-    TUP_CACHE_KEY[idx as usize] = tup_hash
+    TUP_CACHE_KEY[idx as usize] = idx
     TUP_CACHE_FIRST_TY[idx as usize] = first_ty
     TUP_CACHE_FIRST_HASH[idx as usize] = first_hash
     TUP_CACHE_LAST_TY[idx as usize] = last_ty
@@ -721,12 +723,13 @@ fn tup_cache_register(tup_hash: i64, first_ty: i64, first_hash: i64, last_ty: i6
 }
 
 fn tup_cache_lookup(tup_hash: i64) -> i64 with Panic, Mut {
-    var i: i64 = 0
-    while i < TUP_CACHE_COUNT {
-        if TUP_CACHE_KEY[i as usize] == tup_hash { return i }
-        i = i + 1
-    }
-    return -1
+    // O(1): structural_id is encoded in the high bits (÷10^9).
+    // Sentinel guard: low 9 digits < 2*10^8 means not a real tuple hash
+    // (real tuples have tcount ≥ 2, so (hash % 10^9) / 10^8 ≥ 2).
+    if tup_hash % 1000000000 < 200000000 { return -1 }
+    let structural_id = tup_hash / 1000000000
+    if structural_id < 0 || structural_id >= TUP_CACHE_COUNT { return -1 }
+    return structural_id
 }
 
 fn tup_cache_set_mid(ci: i64, mid_idx: i64, ty: i64, hash: i64, nslots: i64) with Panic, Mut {
@@ -4924,12 +4927,11 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             total_nslots = total_nslots + mid_nslots_5
         }
         SCAN_TY = 6
-        // Hash: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
-        // + element-hash perturbation in bits >=30 (multiple of 1B) so cache keys
-        // disambiguate same-shape tuples whose element types differ.
-        SCAN_TY_HASH = tcount * 100000000 + first_f64 * 10000000 + last_f64 * 1000000 + first_nslots * 1000 + total_nslots + tup_perturbation(first_hash, last_hash)
-        tup_cache_register(SCAN_TY_HASH, first_ty, first_hash, last_ty, last_hash)
-        let scan_tup_ci = tup_cache_lookup(SCAN_TY_HASH)
+        // Hash: structural_id*10^9 + tcount*10^8 + first_f64*10^7 + last_f64*10^6
+        //       + first_nslots*10^3 + total_nslots.  structural_id is the interned
+        //       sequential index — identity by content, no arithmetic collision.
+        let scan_tup_ci = tup_cache_register(first_ty, first_hash, last_ty, last_hash)
+        SCAN_TY_HASH = scan_tup_ci * 1000000000 + tcount * 100000000 + first_f64 * 10000000 + last_f64 * 1000000 + first_nslots * 1000 + total_nslots
         if scan_tup_ci >= 0 {
             TUP_CACHE_NELEM[scan_tup_ci as usize] = tcount
             if tcount >= 3 && mid_ty_0 != 0 { tup_cache_set_mid(scan_tup_ci, 0, mid_ty_0, mid_hash_0, mid_nslots_0) }
@@ -10712,9 +10714,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
             var lit_last_f64: i64 = 0
             if lit_last_ty == 2 { lit_last_f64 = 1 }
             let lit_first_actual = if lit_first_nslots > 1 { lit_first_nslots } else { 1 }
-            EXPR_TY_HASH = tup_count * 100000000 + lit_first_f64 * 10000000 + lit_last_f64 * 1000000 + lit_first_actual * 1000 + total_slots + tup_perturbation(lit_first_hash, lit_last_hash)
-            tup_cache_register(EXPR_TY_HASH, lit_first_ty, lit_first_hash, lit_last_ty, lit_last_hash)
-            let lit_tup_ci = tup_cache_lookup(EXPR_TY_HASH)
+            let lit_tup_ci = tup_cache_register(lit_first_ty, lit_first_hash, lit_last_ty, lit_last_hash)
+            EXPR_TY_HASH = lit_tup_ci * 1000000000 + tup_count * 100000000 + lit_first_f64 * 10000000 + lit_last_f64 * 1000000 + lit_first_actual * 1000 + total_slots
             if lit_tup_ci >= 0 {
                 TUP_CACHE_NELEM[lit_tup_ci as usize] = tup_count
                 if tup_count >= 3 {
@@ -15521,30 +15522,18 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if elem_slots == 1 {
                     // Scalar element: dereference the pointer so rax holds the value.
                     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
-                    // R.2.9: preserve nominal struct type for 1-field-struct elements.
+                    // Use cache as authoritative source for element type — hash-decoded f64 flags
+                    // overflow for large structs (first_nslots*1000 bleeds into flag positions).
                     let r29_elem_ty = tup_cache_elem_ty(acc_tup_ci, tup_idx)
                     let r29_elem_hash = tup_cache_elem_hash(acc_tup_ci, tup_idx)
-                    let tup_first_f64 = (EXPR_TY_HASH / 10000000) % 10
-                    let tup_last_f64 = (EXPR_TY_HASH / 1000000) % 10
-                    let tup_total_slots = EXPR_TY_HASH % 1000
-                    let tup_count_enc = EXPR_TY_HASH / 100000000
-                    var elem_is_f64: i64 = 0
-                    if tup_idx == 0 { elem_is_f64 = tup_first_f64 }
-                    if tup_idx == tup_count_enc - 1 { elem_is_f64 = tup_last_f64 }
-                    if r29_elem_ty == 2 { elem_is_f64 = 1 }
-                    if elem_is_f64 == 1 {
+                    if r29_elem_ty == 2 {
                         EXPR_IS_F64 = 1
                         EXPR_TY = 2
                         EXPR_TY_HASH = 0
-                    } else if r29_elem_ty == 6 {
-                        // 1-field struct in this tuple slot — preserve nominal type.
-                        EXPR_IS_F64 = 0
-                        EXPR_TY = 6
-                        EXPR_TY_HASH = r29_elem_hash
                     } else {
                         EXPR_IS_F64 = 0
-                        EXPR_TY = 1
-                        EXPR_TY_HASH = 0
+                        EXPR_TY = r29_elem_ty
+                        EXPR_TY_HASH = r29_elem_hash
                     }
                 } else {
                     // Aggregate element: materialize into fresh slots; rax is pointer.
@@ -25565,9 +25554,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                             p1_elem_count = p1_elem_count + 1
                             p1_cur_q = SCAN_TY_NEXT
                         }
-                        scan_ret_hash = tcount_enc * 1000000 + p1_first_nslots * 1000 + p1_total_nslots + tup_perturbation(sig_first_hash, p1_last_hash)
-                        tup_cache_register(scan_ret_hash, sig_first_ty, sig_first_hash, p1_last_ty, p1_last_hash)
-                        let p1_tup_ci = tup_cache_lookup(scan_ret_hash)
+                        let p1_tup_ci = tup_cache_register(sig_first_ty, sig_first_hash, p1_last_ty, p1_last_hash)
+                        scan_ret_hash = p1_tup_ci * 1000000000 + tcount_enc * 1000000 + p1_first_nslots * 1000 + p1_total_nslots
                         if p1_tup_ci >= 0 {
                             TUP_CACHE_NELEM[p1_tup_ci as usize] = p1_elem_count
                             if p1_elem_count >= 3 && p1_mid_ty_0 != 0 { tup_cache_set_mid(p1_tup_ci, 0, p1_mid_ty_0, p1_mid_hash_0, p1_mid_nslots_0) }
@@ -26014,7 +26002,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 // Tuple return: redo the slot-count encoding so resolved
                 // alias-typed elements update first_nslots / total_nslots.
                 if re_ret_ty == 6 && TK[rp_tok as usize] == 6 {
-                    let tcount_enc2 = re_ret_hash / 1000000
+                    let tcount_enc2 = (re_ret_hash % 1000000000) / 1000000
                     scan_type(rp_tok + 1)
                     let re_first_ty = SCAN_TY
                     let re_first_hash = SCAN_TY_HASH
@@ -26061,40 +26049,16 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         p15_elem_count = p15_elem_count + 1
                         p15_cur_q = SCAN_TY_NEXT
                     }
-                    re_ret_hash = tcount_enc2 * 1000000 + p15_first_nslots * 1000 + p15_total + tup_perturbation(re_first_hash, p15_last_hash)
-                    // R.3.1: TUP_CACHE_KEY collides across distinct structs with same slot signature
-                    // (e.g. two 4-field structs both producing `(S, i64)` → hash 200004005).
-                    // tup_cache_register is idempotent on key — first writer wins. When Pass 1c.5
-                    // re-encodes an alias-resolved fn-ret tuple, the colliding entry may already be
-                    // owned by an unrelated struct registered first in Pass 1. Force-overwrite when
-                    // the existing element types disagree with what alias resolution just produced.
-                    let r31_existing_ci = tup_cache_lookup(re_ret_hash)
-                    if r31_existing_ci >= 0 {
-                        if TUP_CACHE_FIRST_HASH[r31_existing_ci as usize] != re_first_hash || TUP_CACHE_LAST_HASH[r31_existing_ci as usize] != p15_last_hash {
-                            TUP_CACHE_FIRST_TY[r31_existing_ci as usize] = re_first_ty
-                            TUP_CACHE_FIRST_HASH[r31_existing_ci as usize] = re_first_hash
-                            TUP_CACHE_LAST_TY[r31_existing_ci as usize] = p15_last_ty
-                            TUP_CACHE_LAST_HASH[r31_existing_ci as usize] = p15_last_hash
-                            TUP_CACHE_NELEM[r31_existing_ci as usize] = p15_elem_count
-                            if p15_elem_count >= 3 && p15_mid_ty_0 != 0 { tup_cache_set_mid(r31_existing_ci, 0, p15_mid_ty_0, p15_mid_hash_0, p15_mid_nslots_0) }
-                            if p15_elem_count >= 4 && p15_mid_ty_1 != 0 { tup_cache_set_mid(r31_existing_ci, 1, p15_mid_ty_1, p15_mid_hash_1, p15_mid_nslots_1) }
-                            if p15_elem_count >= 5 && p15_mid_ty_2 != 0 { tup_cache_set_mid(r31_existing_ci, 2, p15_mid_ty_2, p15_mid_hash_2, p15_mid_nslots_2) }
-                            if p15_elem_count >= 6 && p15_mid_ty_3 != 0 { tup_cache_set_mid(r31_existing_ci, 3, p15_mid_ty_3, p15_mid_hash_3, p15_mid_nslots_3) }
-                            if p15_elem_count >= 7 && p15_mid_ty_4 != 0 { tup_cache_set_mid(r31_existing_ci, 4, p15_mid_ty_4, p15_mid_hash_4, p15_mid_nslots_4) }
-                            if p15_elem_count >= 8 && p15_mid_ty_5 != 0 { tup_cache_set_mid(r31_existing_ci, 5, p15_mid_ty_5, p15_mid_hash_5, p15_mid_nslots_5) }
-                        }
-                    } else {
-                        tup_cache_register(re_ret_hash, re_first_ty, re_first_hash, p15_last_ty, p15_last_hash)
-                        let p15_new_ci = tup_cache_lookup(re_ret_hash)
-                        if p15_new_ci >= 0 {
-                            TUP_CACHE_NELEM[p15_new_ci as usize] = p15_elem_count
-                            if p15_elem_count >= 3 && p15_mid_ty_0 != 0 { tup_cache_set_mid(p15_new_ci, 0, p15_mid_ty_0, p15_mid_hash_0, p15_mid_nslots_0) }
-                            if p15_elem_count >= 4 && p15_mid_ty_1 != 0 { tup_cache_set_mid(p15_new_ci, 1, p15_mid_ty_1, p15_mid_hash_1, p15_mid_nslots_1) }
-                            if p15_elem_count >= 5 && p15_mid_ty_2 != 0 { tup_cache_set_mid(p15_new_ci, 2, p15_mid_ty_2, p15_mid_hash_2, p15_mid_nslots_2) }
-                            if p15_elem_count >= 6 && p15_mid_ty_3 != 0 { tup_cache_set_mid(p15_new_ci, 3, p15_mid_ty_3, p15_mid_hash_3, p15_mid_nslots_3) }
-                            if p15_elem_count >= 7 && p15_mid_ty_4 != 0 { tup_cache_set_mid(p15_new_ci, 4, p15_mid_ty_4, p15_mid_hash_4, p15_mid_nslots_4) }
-                            if p15_elem_count >= 8 && p15_mid_ty_5 != 0 { tup_cache_set_mid(p15_new_ci, 5, p15_mid_ty_5, p15_mid_hash_5, p15_mid_nslots_5) }
-                        }
+                    let p15_tup_ci = tup_cache_register(re_first_ty, re_first_hash, p15_last_ty, p15_last_hash)
+                    re_ret_hash = p15_tup_ci * 1000000000 + tcount_enc2 * 1000000 + p15_first_nslots * 1000 + p15_total
+                    if p15_tup_ci >= 0 {
+                        TUP_CACHE_NELEM[p15_tup_ci as usize] = p15_elem_count
+                        if p15_elem_count >= 3 && p15_mid_ty_0 != 0 { tup_cache_set_mid(p15_tup_ci, 0, p15_mid_ty_0, p15_mid_hash_0, p15_mid_nslots_0) }
+                        if p15_elem_count >= 4 && p15_mid_ty_1 != 0 { tup_cache_set_mid(p15_tup_ci, 1, p15_mid_ty_1, p15_mid_hash_1, p15_mid_nslots_1) }
+                        if p15_elem_count >= 5 && p15_mid_ty_2 != 0 { tup_cache_set_mid(p15_tup_ci, 2, p15_mid_ty_2, p15_mid_hash_2, p15_mid_nslots_2) }
+                        if p15_elem_count >= 6 && p15_mid_ty_3 != 0 { tup_cache_set_mid(p15_tup_ci, 3, p15_mid_ty_3, p15_mid_hash_3, p15_mid_nslots_3) }
+                        if p15_elem_count >= 7 && p15_mid_ty_4 != 0 { tup_cache_set_mid(p15_tup_ci, 4, p15_mid_ty_4, p15_mid_hash_4, p15_mid_nslots_4) }
+                        if p15_elem_count >= 8 && p15_mid_ty_5 != 0 { tup_cache_set_mid(p15_tup_ci, 5, p15_mid_ty_5, p15_mid_hash_5, p15_mid_nslots_5) }
                     }
                 }
                 FN_RET_TY[rp_i as usize] = re_ret_ty
