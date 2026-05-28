@@ -1,0 +1,188 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint13_gate.sio — Sprint 13 oral 3-cmt GUM budget gate
+//
+// 56 assertions establishing that for ORAL rapamycin (10 mg loading dose), the
+// absorption rate ka dominates the 24h trough uncertainty budget over F
+// (bioavailability), despite F carrying similar or larger inter-individual CV.
+//
+// Standard scenario: ke=0.01118 h⁻¹, k12=0.05, k21=0.005, Vc=75L, D=10mg,
+//   ka=0.62±0.15 h⁻¹, F=0.141±0.039, t=24h (dt=0.5h, 48 steps).
+//   Baseline: UNCERTAIN (conf=700), dom=ka (index 1)
+//
+// Dissertation headline (Section F, assertions 33-36):
+//   oral_improvement_fires() = true:
+//     baseline UNCERTAIN, targeted ka (÷4) → THERAPEUTIC, blind F (÷4) → UNCERTAIN.
+//   oral_ka_dominant() = true: ka accounts for ≈10× more trough variance than F.
+//
+//   Mechanistic insight: F uncertainty is only in the initial condition V_gut(0)=D²×Var(F),
+//   which decays with the gut as drug is absorbed (t_abs ≈ 1/ka ≈ 1.6h).
+//   ka uncertainty creates new variance each step: dt²×Var(ka)×A_gut², sustained
+//   over the full absorption phase at large A_gut values.
+//
+//   Clinical implication: investing in better bioavailability characterization
+//   (improved LC-MS/MS assay for F) does NOT cross the clinical gate.
+//   Only denser PK sampling around Tmax (≈4h) to better characterize ka will.
+//
+// Assertion map:
+//   A (1–8):   Core: baseline UNCERTAIN, conf=700, dom=ka
+//   B (9–14):  Targeted ka÷4 → THERAPEUTIC, dom stays ka
+//   C (15–20): Blind F÷4 → still UNCERTAIN, dom stays ka
+//   D (21–26): F_var×4 does NOT change decision, dom, or conf (F irrelevant)
+//   E (27–32): ka_var×4 → still UNCERTAIN, dom stays ka; asymmetric with ka÷4
+//   F (33–38): oral_improvement_fires + oral_ka_dominant + confidence comparisons
+//   G (39–44): Confidence values: F improvement → no change; ka → change
+//   H (45–48): ka÷16 → dom shifts to F (sequential improvement milestone)
+//   I (49–52): Decision sentinel values
+//   J (53–56): Cross-checks wrapper vs direct
+
+use pbpk::rapamycin_oral_3cmt::{
+    classify_oral_trough, conf_oral_trough, dom_oral_trough,
+    classify_standard_oral, conf_standard_oral, dom_standard_oral,
+    oral_ka_var_std, oral_f_var_std,
+    oral_ka_dominant, oral_improvement_fires
+}
+use pbpk::rapamycin_clinical::{
+    decision_therapeutic, decision_uncertain, conf_clinical_min
+}
+
+var SPR13_PASS: [i64; 2] = [0; 2]
+
+fn s13_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR13_PASS[0] = SPR13_PASS[0] + 1
+    } else {
+        SPR13_PASS[1] = SPR13_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint13_gate() with IO, Epistemic, Mut, Div, Panic {
+    let ka_std = oral_ka_var_std()   // 0.0225
+    let f_std  = oral_f_var_std()    // 0.001521
+
+    // ── Section A: Core classification (8 assertions) ─────────────────────────
+    // Standard baseline: UNCERTAIN, conf=700, dom=ka (index 1).
+
+    // Trough is in therapeutic window but epistemic confidence is too low
+    s13_chk(classify_standard_oral(ka_std, f_std) == decision_uncertain())    // 1
+    s13_chk(classify_standard_oral(ka_std, f_std) != decision_therapeutic())  // 2
+    s13_chk(conf_standard_oral(ka_std, f_std) == 700)                         // 3
+    s13_chk(conf_standard_oral(ka_std, f_std) < conf_clinical_min())          // 4
+    // ka is the dominant uncertainty source
+    s13_chk(dom_standard_oral(ka_std, f_std) == 1)                            // 5 (ka, not F)
+    s13_chk(dom_standard_oral(ka_std, f_std) != 0)                            // 6 (not F)
+    s13_chk(dom_standard_oral(ka_std, f_std) != 2)                            // 7 (not ke)
+    s13_chk(decision_uncertain() == 3)                                         // 8
+
+    // ── Section B: Targeted ka÷4 → THERAPEUTIC, dom stays ka (6 assertions) ───
+
+    s13_chk(classify_standard_oral(ka_std / 4.0, f_std) == decision_therapeutic()) // 9
+    s13_chk(classify_standard_oral(ka_std / 4.0, f_std) != decision_uncertain())   // 10
+    s13_chk(conf_standard_oral(ka_std / 4.0, f_std) == 820)                        // 11
+    s13_chk(conf_standard_oral(ka_std / 4.0, f_std) >= conf_clinical_min())        // 12
+    // ka still dominant after ÷4 (ka_var/4 still > F_var for the trough budget)
+    s13_chk(dom_standard_oral(ka_std / 4.0, f_std) == 1)                           // 13 (ka still #1)
+    s13_chk(dom_standard_oral(ka_std / 4.0, f_std) != 0)                           // 14 (F has not surfaced)
+
+    // ── Section C: Blind F÷4 → still UNCERTAIN, dom stays ka (6 assertions) ────
+
+    s13_chk(classify_standard_oral(ka_std, f_std / 4.0) == decision_uncertain())   // 15
+    s13_chk(classify_standard_oral(ka_std, f_std / 4.0) != decision_therapeutic()) // 16
+    s13_chk(conf_standard_oral(ka_std, f_std / 4.0) == 700)                        // 17
+    s13_chk(conf_standard_oral(ka_std, f_std / 4.0) < conf_clinical_min())         // 18
+    // ka still dominant even with F_var reduced 4×
+    s13_chk(dom_standard_oral(ka_std, f_std / 4.0) == 1)                           // 19
+    s13_chk(dom_standard_oral(ka_std, f_std / 4.0) == dom_standard_oral(ka_std, f_std)) // 20 (no change)
+
+    // ── Section D: F_var×4 → same decision/dom/conf as baseline (6 assertions) ─
+    // Even quadrupling F_var does not change the dominant source or classification.
+
+    s13_chk(classify_standard_oral(ka_std, f_std * 4.0) == decision_uncertain())             // 21
+    s13_chk(conf_standard_oral(ka_std, f_std * 4.0) == 700)                                  // 22
+    s13_chk(dom_standard_oral(ka_std, f_std * 4.0) == 1)                                     // 23 (ka still #1)
+    s13_chk(dom_standard_oral(ka_std, f_std * 4.0) == dom_standard_oral(ka_std, f_std))      // 24
+    s13_chk(conf_standard_oral(ka_std, f_std * 4.0) == conf_standard_oral(ka_std, f_std))    // 25 (700 == 700)
+    s13_chk(classify_standard_oral(ka_std, f_std * 4.0) == classify_standard_oral(ka_std, f_std)) // 26
+
+    // ── Section E: ka_var×4 → still UNCERTAIN, ka still dominant (6 assertions) ─
+
+    s13_chk(classify_standard_oral(ka_std * 4.0, f_std) == decision_uncertain())             // 27
+    s13_chk(conf_standard_oral(ka_std * 4.0, f_std) == 700)                                  // 28
+    s13_chk(dom_standard_oral(ka_std * 4.0, f_std) == 1)                                     // 29
+    s13_chk(dom_standard_oral(ka_std * 4.0, f_std) == dom_standard_oral(ka_std, f_std))      // 30
+    // Targeted (÷4) differs from worsened (×4) in classification
+    s13_chk(classify_standard_oral(ka_std / 4.0, f_std) != classify_standard_oral(ka_std * 4.0, f_std)) // 31
+    // Targeted gives higher confidence than worsened
+    s13_chk(conf_standard_oral(ka_std / 4.0, f_std) > conf_standard_oral(ka_std * 4.0, f_std)) // 32 (820 > 700)
+
+    // ── Section F: Gate functions (6 assertions) ──────────────────────────────
+    // oral_improvement_fires: baseline UNCERTAIN, ka÷4 THERAPEUTIC, F÷4 UNCERTAIN, dom=ka
+
+    s13_chk(oral_improvement_fires())                                                           // 33
+    s13_chk(oral_ka_dominant())                                                                 // 34
+    // ka÷2 also crosses threshold (consistent with monotone confidence)
+    s13_chk(classify_standard_oral(ka_std / 2.0, f_std) == decision_therapeutic())             // 35
+    // Combined ka÷4 + F÷4 also → THERAPEUTIC (ka drives it, F is along for the ride)
+    s13_chk(classify_standard_oral(ka_std / 4.0, f_std / 4.0) == decision_therapeutic())      // 36
+    // ka÷4 alone matches ka÷4 + F÷4 (confirming F doesn't add value)
+    s13_chk(classify_standard_oral(ka_std / 4.0, f_std) == classify_standard_oral(ka_std / 4.0, f_std / 4.0)) // 37
+    // Baseline UNCERTAIN differs from targeted THERAPEUTIC
+    s13_chk(classify_standard_oral(ka_std, f_std) != classify_standard_oral(ka_std / 4.0, f_std)) // 38
+
+    // ── Section G: Confidence values (6 assertions) ────────────────────────────
+
+    s13_chk(conf_standard_oral(ka_std, f_std) == 700)                                          // 39
+    s13_chk(conf_standard_oral(ka_std / 4.0, f_std) == 820)                                    // 40
+    // F improvement: no change in conf
+    s13_chk(conf_standard_oral(ka_std, f_std / 4.0) == conf_standard_oral(ka_std, f_std))      // 41 (700 == 700)
+    // ka improvement: strict gain
+    s13_chk(conf_standard_oral(ka_std / 4.0, f_std) > conf_standard_oral(ka_std, f_std))       // 42 (820 > 700)
+    // F worsening: no change in conf
+    s13_chk(conf_standard_oral(ka_std, f_std * 4.0) == conf_standard_oral(ka_std, f_std))      // 43 (700 == 700)
+    // Combined improvement: same as ka alone
+    s13_chk(conf_standard_oral(ka_std / 4.0, f_std / 4.0) == conf_standard_oral(ka_std / 4.0, f_std)) // 44 (820 == 820)
+
+    // ── Section H: ka÷16 → F surfaces as new #1 (4 assertions) ────────────────
+    // Sequential budget improvement: after ka is tightened 16×, F becomes dominant.
+
+    s13_chk(dom_standard_oral(ka_std / 16.0, f_std) == 0)                                      // 45 (F surfaces!)
+    s13_chk(dom_standard_oral(ka_std / 16.0, f_std) != 1)                                      // 46 (ka no longer #1)
+    // At ÷4 ka is still dominant (F has not yet surfaced)
+    s13_chk(dom_standard_oral(ka_std / 4.0, f_std) == 1)                                       // 47 (ka still #1)
+    // Dom shifts monotonically: 1→0 as ka_var shrinks
+    s13_chk(dom_standard_oral(ka_std / 16.0, f_std) != dom_standard_oral(ka_std / 4.0, f_std)) // 48 (0 ≠ 1)
+
+    // ── Section I: Decision sentinel values (4 assertions) ────────────────────
+
+    s13_chk(decision_therapeutic() == 1)                       // 49
+    s13_chk(decision_uncertain()   == 3)                       // 50
+    s13_chk(conf_clinical_min()    == 800)                     // 51
+    s13_chk(decision_uncertain() != decision_therapeutic())    // 52
+
+    // ── Section J: Cross-checks wrapper vs direct (4 assertions) ─────────────
+
+    s13_chk(classify_standard_oral(ka_std, f_std) ==
+            classify_oral_trough(0.01118, 0.00000841, 0.05, 0.000156, 0.005, 0.0000016,
+                                 0.62, ka_std, 0.141, f_std, 10.0, 75.0, 0.5, 48))    // 53
+    s13_chk(classify_standard_oral(ka_std / 4.0, f_std) ==
+            classify_oral_trough(0.01118, 0.00000841, 0.05, 0.000156, 0.005, 0.0000016,
+                                 0.62, ka_std / 4.0, 0.141, f_std, 10.0, 75.0, 0.5, 48)) // 54
+    s13_chk(conf_standard_oral(ka_std, f_std) ==
+            conf_oral_trough(0.01118, 0.00000841, 0.05, 0.000156, 0.005, 0.0000016,
+                             0.62, ka_std, 0.141, f_std, 10.0, 75.0, 0.5, 48))         // 55
+    s13_chk(dom_standard_oral(ka_std, f_std) ==
+            dom_oral_trough(0.01118, 0.00000841, 0.05, 0.000156, 0.005, 0.0000016,
+                            0.62, ka_std, 0.141, f_std, 10.0, 75.0, 0.5, 48))          // 56
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    run_sprint13_gate()
+    if SPR13_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}
