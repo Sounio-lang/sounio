@@ -76,7 +76,7 @@ The previous claim *"No active known bugs"* was incorrect at the multi-module bu
 **Multi-module bundle compile (`[[project_task_c_blocker]]`)** — Bundle baseline as of 2026-05-24: **766 errors**. Three named architectural roots, all currently workaround-only:
 
 1. **i64 type-hash overflow on 3-level pointer nesting.** Sim-proven exact. Source workaround: `&Option<Box<T>>` → `&Option<&T>`. The real fix is composite-type interning (architectural, deferred).
-2. **SRET for ≥8-field struct returns.** Source workaround: flat arrays / split-by-field. Tracked in `[[feedback_native_compiler_limits]]`.
+2. **SRET for ≥8-field struct returns — bundle path only.** No repro in the `lean_single.sio` single-file path (probed 2026-05-28, 14 scenarios up to 33-field i64/f64/mixed, all PASS including the `rep movsq` path). The bug is isolated to the multi-module bundle compile path where composite-type interning is absent. Regression test pinned: `tests/run-pass/sret_8_field_return.sio`. Source workaround for bundle path: flat arrays / split-by-field. Tracked in `[[feedback_native_compiler_limits]]`.
 3. **Nested `&!` struct-field mutation.** Mutation through `&!T` to a struct field doesn't propagate; bare-array index through `&![T;N]` was fixed in v2.0 but **struct** field stores were not. Source workaround: streaming / flat patterns.
 
 These are the gate between "single-file demo language" and "modular self-hosted tree replaces `lean_single.sio` as binary source." See `docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md` §5 / G1.
