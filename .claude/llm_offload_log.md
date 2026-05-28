@@ -27,7 +27,17 @@
 - Claims 1–4, 6 stand (machine-run: 11 edges, all dist²=144 with zero √-parts; χ=4).
 - Claim 5 softened in the file (header comment + printed RESULT) to flag the field-closure
   check as the first task when scaling toward de Grey. No overclaim of the full-graph field.
-- Not committed yet (operator has not requested commit). Math-review evidence logged per policy.
+
+### Addendum (same day): native SAT/UNSAT route added
+
+Operator noted Sounio has native SAT/UNSAT (`theorem::smt`, CDCL, 64-var cap). The
+prior "needs external SAT + DRAT" boundary was wrong: the χ certificate is produced
+INSIDE Sounio. Added route (b) to the artifact — 3-coloring = UNSAT, 4-coloring = SAT
+via `smt_solve`, cross-checking the already-reviewed brute-force χ=4 (two independent
+methods agree). No new math claim (χ=4 unchanged); the standard 3-SAT coloring encoding
+is empirically validated by agreement with brute force and with the K_n encoding test
+(`168_kgraph_coloring_test.sio`). de Grey-scale χ≥5 is now a native task: grow the
+solver's 64-var cap, not import a third-party solver.
 
 ## 2026-05-28: Erdős #90 planar-search foreclosure audit (math-review)
 

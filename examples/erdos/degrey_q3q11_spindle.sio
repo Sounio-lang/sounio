@@ -32,7 +32,15 @@
 // unit squared-distance target = 144. Vertices A,B,C,D (rhombus 1) and
 // A,E,F,G (rhombus 2 = rhombus 1 rotated by φ), with the edge C–F closing it.
 //
-// Self-contained (no imports — the run-pass harness cannot resolve them).
+// Native SAT/UNSAT: the chromatic certificate is produced INSIDE Sounio (no
+// external SAT solver, no third-party DRAT). χ=4 is certified two independent
+// ways: (a) exact base-k brute force, and (b) the native CDCL solver
+// theorem::smt — 3-coloring is UNSAT, 4-coloring is SAT. Route (b) is the
+// scalable mechanism that templates directly to de Grey's graph (the only limit
+// today is the solver's 64-variable cap; de Grey scale needs that grown, but the
+// path stays native and self-certifying).
+
+use theorem::smt::*
 
 struct Qf { a: i64, b: i64, c: i64, d: i64 }
 
@@ -200,6 +208,64 @@ fn chromatic_number() -> i64 with Mut, Panic {
     return 7
 }
 
+// Native CDCL k-colorability of ADJ (7 vertices). Returns smt_solve: 1=SAT, 0=UNSAT.
+// 1-indexed vars: var(v,c) = v*k + c + 1 ; positive lit = var*2+1, negative = var*2.
+// This is the SAME encoding de Grey's graph needs — only bigger (k*V vars).
+fn sat_kcolorable(k: i64) -> i32 with Mut, Div, Panic {
+    var ctx = smt_new()
+    // at-least-one color per vertex
+    var v: i64 = 0
+    while v < 7 {
+        var lits: [i32; 8] = [0; 8]
+        var c: i64 = 0
+        while c < k {
+            lits[c as usize] = ((v*k + c + 1)*2 + 1) as i32
+            c = c + 1
+        }
+        smt_add_clause(&! ctx, &lits, k as i32)
+        v = v + 1
+    }
+    // at-most-one color per vertex (pairwise negative clauses)
+    v = 0
+    while v < 7 {
+        var c1: i64 = 0
+        while c1 < k {
+            var c2: i64 = c1 + 1
+            while c2 < k {
+                var lp: [i32; 8] = [0; 8]
+                lp[0] = ((v*k + c1 + 1)*2) as i32
+                lp[1] = ((v*k + c2 + 1)*2) as i32
+                smt_add_clause(&! ctx, &lp, 2)
+                c2 = c2 + 1
+            }
+            c1 = c1 + 1
+        }
+        v = v + 1
+    }
+    // edge constraints: adjacent vertices cannot share a color
+    var u: i64 = 0
+    while u < 7 {
+        var w: i64 = u + 1
+        while w < 7 {
+            if ADJ[(u*7 + w) as usize] == 1 {
+                var c: i64 = 0
+                while c < k {
+                    var le: [i32; 8] = [0; 8]
+                    le[0] = ((u*k + c + 1)*2) as i32
+                    le[1] = ((w*k + c + 1)*2) as i32
+                    smt_add_clause(&! ctx, &le, 2)
+                    c = c + 1
+                }
+            }
+            w = w + 1
+        }
+        u = u + 1
+    }
+    smt_set_score_mode(&! ctx, 3)
+    smt_set_no_ple(&! ctx, 1)
+    return smt_solve(&! ctx)
+}
+
 fn print_edge(i: i64, j: i64) with IO, Panic {
     let d = dist2(i, j)
     print("  edge (")
@@ -236,7 +302,23 @@ fn main() -> i32 with IO, Mut, Panic {
     print_edge(0, 5)   // A–F: rotated long diagonal, dist² = 432
 
     let chi = chromatic_number()
-    print("\nchi(spindle) = "); print_int(chi); print("  (exact brute force over 4^7)\n")
+    print("\nchi(spindle) = "); print_int(chi); print("  (route a: exact brute force over 4^7)\n")
+
+    // Route (b): native CDCL SAT/UNSAT — the de Grey-scale mechanism, no external solver.
+    let s3 = sat_kcolorable(3)
+    let s4 = sat_kcolorable(4)
+    print("native SAT: 3-coloring = ")
+    if s3 == 1 { print("SAT") } else { print("UNSAT") }
+    print("  4-coloring = ")
+    if s4 == 1 { print("SAT") } else { print("UNSAT") }
+    print("\n")
+    if s3 == 0 && s4 == 1 {
+        print("=> chi=4 CERTIFIED natively: 3-col UNSAT (no 4th color avoidable) + 4-col SAT.\n")
+        print("   The UNSAT certificate is produced INSIDE Sounio. This is exactly the\n")
+        print("   de Grey mechanism: realize the graph exactly, then certify χ≥5 by a\n")
+        print("   native 4-coloring UNSAT. Today's only gap is the solver's 64-var cap.\n")
+    }
+
     if chi == 4 {
         print("RESULT: χ = 4 proved over EXACT Q(√3,√11) coordinates — the prior plan's\n")
         print("claim that the spindle's irrationals 'break native exactness' is REFUTED.\n")
