@@ -336,3 +336,41 @@ $ gen2 md5 == gen3 md5 == 18b21a085afb76546d18d3657ec181b5
 - **G5** — Formatter / native REPL: unchanged.
 - **G6** — Public install path: unchanged.
 - **EpistemicEffects.lean** (commit `848b8526c`): 589-line Lean 4 soundness sketch of the epistemic effect calculus. `lake build` green. Two `sorry` obligations documented: substitution lemma for beta reduction, and indexed-induction issue for the progress theorem.
+
+## Bundle addendum — 2026-05-28 session (struct array subscript + N-ary tuple)
+
+Commits `b7eafd745` + `8a62ff231` landed struct array subscript indexing and N-ary tuple (`.2`+) support. Binary md5 `a124c122e3e01f64ef56a71d23403e2b`. Bundle baseline: **269 errors** (down from 389).
+
+### Current error breakdown (269 total, binary md5 `a124c122e3e01f64ef56a71d23403e2b`)
+
+| Count | Error |
+|-------|-------|
+| 137 | assignment type mismatch — multi-slot struct array element stores (stride > 8; architectural) |
+| 26 | ordered comparison requires matching numeric operands |
+| 22 | if condition must be bool |
+| 17 | logical not requires bool operand |
+| 14 | unknown field access (genuine per-case Cat-D) |
+| 13 | arithmetic operands must have matching numeric types |
+| 10 | field initializer type does not match struct field |
+| 7 | logical and requires bool operands |
+| 6 | comparison operands must have the same type |
+| 5 | match must be exhaustive |
+| 7 | other (tail/return/if-arm/initializer/immutable) |
+
+### Fix attempts — all net-neutral or negative; reverted
+
+Three fixes were attempted in this session against `lean_single.sio`. All were reverted after producing 269→289→271 results (no convergence):
+
+1. **Fix A — bool in scalar tuple element path**: Added `else if r29_elem_ty == 4 { EXPR_TY = 4 }` to the scalar path at line ~15560. Result: 289 errors (worse). Root cause of regression: pre-existing TUP_CACHE hash collisions — when the bool-aware path ran, it correctly returned ty=4 for a bool element, but a different tuple that collided to the same cache slot had registered a bool entry first; that then caused `o_id < 0` comparisons to fail as "ordered comparison requires matching numeric operands" (left_ty=4 is not numeric). Fix A is structurally correct but exposes pre-existing hash collisions.
+
+2. **Fix B — ty_eq zero-hash for forward refs**: Added `if h1 == 0 || h2 == 0 { return true }` in `ty_eq` for k=6/7 (struct/enum). Result: net −27 closed / +51 opened = +24 more errors. The -27 were real fixes; the +51 were downstream errors previously masked by the type mismatch acting as a barrier. A separate workstream.
+
+3. **Fix C — TUP_CACHE size 4096→16384**: No measurable effect. The cache was not overflowing for the current bundle; collisions are a hash-function problem, not a capacity problem.
+
+### Named root cause for next session
+
+**TUP_CACHE hash collision.** The tuple hash function `tcount * 100000000 + ...` produces collisions between distinct tuple types. First writer wins; `(SomeType, bool)` registered before `(StringInterner, i64)` stores LAST_TY=4 (bool) for a slot that should hold ty=1 (i64). Any bool-aware consumer (Fix A) then incorrectly classifies what is actually i64 as bool, producing ordered-comparison / arithmetic errors.
+
+The fix must be in the hash function: widen it, reduce structural collision probability, or — as Slice A of the SOTA push plan proposes — switch tuple identity to interned structural IDs (analogous to CT_INNER_HASH for composite pointer types, committed `PR #197`). The interning approach guarantees identity equality and eliminates collision by construction.
+
+The 46 errors in the logical-not / if-condition / comparison categories (26+22+17+7+6 = 78 errors) are plausibly all rooted in TUP_CACHE collision or the bool-tuple-element path. The 137 assignment-type-mismatch and 14 unknown-field are separate architectural roots.
