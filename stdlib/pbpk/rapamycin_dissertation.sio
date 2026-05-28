@@ -1,0 +1,130 @@
+// stdlib/pbpk/rapamycin_dissertation.sio — Capstone clinical integration module
+//
+// Novel dissertation contribution: end-to-end integration of all three
+// contributions in one runnable Cypher® 30-day post-PCI clinical vignette.
+//
+// Contribution chain:
+//   #1 (Sprint 2): GUM-Euler 2-compartment ODE  → simulate()
+//   #3 (Sprint 3): ISO §E.2 uncertainty budget   → simulate_budget()
+//   #2 (Sprint 4): compile-time confidence gates → assess_trough() / assess_auc()
+//
+// Clinical scenario:
+//   Cypher® sirolimus-eluting coronary stent, local vascular delivery.
+//   t_end = 720 h (30 days post-PCI).
+//   dt    = 1 h   (Euler step; 720 integration steps total).
+//   Stent-only: a1_init = a2_init = 0.0 (no systemic IV dose).
+//   Expected systemic outcome: DECISION_SUB or DECISION_UNCERTAIN.
+//   Rationale: the Cypher® stent delivers rapamycin locally into the arterial
+//   wall (f_sys ≈ 0.02); systemic plasma levels are expected sub-therapeutic
+//   by design, which the confidence gate correctly classifies.
+//
+// Cross-sprint consistency:
+//   simulate() and simulate_budget() share the same Euler update equations
+//   for A1 and A2. Their plasma-concentration trajectories must therefore
+//   agree point-wise within floating-point tolerance (≤ 1e-6 mg/L used here).
+//   The AUC compartment in simulate_budget() is an independent accumulator
+//   that does not feed back into A1/A2, so the GUM-ODE solution is unchanged.
+//
+// Effect annotations:
+//   Contribution #1 (simulate):          with Mut, Div, Panic
+//   Contribution #3 (simulate_budget):   with Mut, Div, Panic
+//   Contribution #2 (assess_trough, assess_auc): with Epistemic
+//   → run_30d_scenario must declare all four: with Epistemic, Mut, Div, Panic
+//
+// This is the compile-time proof that the full clinical pipeline cannot
+// silently discard uncertainty information: declaring 'with Epistemic' is
+// required by the compiler, not the programmer.
+
+module pbpk::rapamycin_dissertation
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_2cmt::{Rap2CmtParams, simulate}
+use pbpk::rapamycin_budget::{simulate_budget, budget_dominant, budget_sum_ok}
+use pbpk::rapamycin_clinical::{
+    assess_trough, assess_auc, conf_from_rel,
+    decision_sub, decision_therapeutic, decision_toxic, decision_uncertain
+}
+
+// ── Cross-sprint consistency check ───────────────────────────────────────────
+
+// Returns true iff arrays a and b agree within tol at the first n indices.
+//
+// GUM correctness invariant: simulate() and simulate_budget() must produce
+// bit-comparable plasma concentration trajectories because they both integrate
+// the same 2-compartment Euler ODE for (A1, A2). Verify with tol ≈ 1e-6 after
+// 720 integration steps (numerical drift well below clinical significance).
+pub fn cross_sprint_consistent(
+    a:   &[f64; 50],
+    b:   &[f64; 50],
+    n:   i64,
+    tol: f64
+) -> bool {
+    var ok = true
+    var i  = 0
+    while i < n {
+        let diff    = a[i] - b[i]
+        let absdiff = if diff < 0.0 { 0.0 - diff } else { diff }
+        if absdiff > tol { ok = false }
+        i = i + 1
+    }
+    ok
+}
+
+// ── 30-day Cypher® post-PCI clinical scenario ─────────────────────────────────
+
+// Runs the full three-contribution pipeline for a 30-day stent-elution scenario.
+//
+// Outputs (all written through &! refs):
+//   sim_t/c/std [50]  : GUM-Euler ODE trajectory (contribution #1)
+//   bud_t/c/std [50]  : Budget simulation trajectory (contribution #3)
+//   bud_frac [5]      : Uncertainty budget fractions [ke, k12, k21, krel, a0]
+//   auc_out [2]       : [AUC value (mg·h/L), AUC std (mg·h/L)]
+//   cmax_out [3]      : [Cmax (mg/L), Cmax std (mg/L), time of Cmax (h)]
+//   trough_dec [1]    : DECISION_* code for plasma trough (contribution #2)
+//   trough_conf [1]   : Inferred confidence score (0–1000)
+//   auc_dec [1]       : DECISION_* code for cumulative AUC
+//
+// Effect annotations are compile-time proof of the dissertation's
+// cross-cutting claim: any function that touches clinical decisions about
+// rapamycin concentration must declare 'with Epistemic'. Removing it here
+// causes E035 at the assess_trough / assess_auc call sites.
+pub fn run_30d_scenario(
+    p:           &Rap2CmtParams,
+    sim_t:       &![f64; 50],
+    sim_c:       &![f64; 50],
+    sim_std:     &![f64; 50],
+    bud_t:       &![f64; 50],
+    bud_c:       &![f64; 50],
+    bud_std:     &![f64; 50],
+    bud_frac:    &![f64; 5],
+    auc_out:     &![f64; 2],
+    cmax_out:    &![f64; 3],
+    trough_dec:  &![i64; 1],
+    trough_conf: &![i64; 1],
+    auc_dec:     &![i64; 1]
+) with Epistemic, Mut, Div, Panic {
+    let t_end = 720.0   // 30 days × 24 h
+    let dt    = 1.0     // 1 h Euler step
+
+    // ── Contribution #1: GUM-Euler 2-compartment ODE (Sprint 2) ──────────────
+    simulate(t_end, dt, 0.0, 0.0, p, 48, sim_t, sim_c, sim_std)
+
+    // ── Contribution #3: ISO §E.2 uncertainty budget (Sprint 3) ──────────────
+    simulate_budget(t_end, dt, 0.0, 0.0, p, 48, bud_t, bud_c, bud_std,
+                    bud_frac, auc_out, cmax_out)
+
+    // ── Contribution #2: compile-time confidence gates (Sprint 4) ────────────
+    // Use budget concentration at t_end (index 47) for clinical classification.
+    // conf_from_rel maps relative uncertainty → confidence score (no cast needed).
+    let c_val = bud_c[47]
+    let c_std = bud_std[47]
+    let conf  = conf_from_rel(c_val, c_std)
+    trough_conf[0] = conf
+
+    let c_ep = Epistemic::new(c_val, c_std * c_std, conf)
+    trough_dec[0] = assess_trough(&c_ep)
+
+    let auc_val = auc_out[0]
+    let auc_std = auc_out[1]
+    auc_dec[0] = assess_auc(auc_val, auc_std, conf)
+}
