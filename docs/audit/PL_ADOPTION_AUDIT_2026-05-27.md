@@ -294,46 +294,64 @@ A live probe against `tests/run-pass/closure_*.sio` (17 files) on 2026-05-27 sho
 - Three new run-pass fixtures: `closure_arity_2.sio`, `closure_returned.sio`, `type_hash_3level_nesting.sio`
 - Open: `closure_linear.sio` (`//@ ignore`) — linear closures not yet implemented (E001 at line 13)
 
-### G4 — LSP-grade diagnostic catalog (CLOSED, commit `06d93d628`)
+### G4 — LSP-grade diagnostic catalog (CLOSED, commit `7e9da3253`)
 
-Every priority compiler diagnostic in `lean_single.sio` now carries a stable `E-code`. `souc check --json` emits the full `sounio.diagnostic.v1` shape with codes populated. `souc explain <CODE>` is a new subcommand.
+All `error:` emit sites in `lean_single.sio` now carry stable `E-codes`. `souc check --json` emits `sounio.diagnostic.v1` JSON. `souc explain <CODE>` prints per-code explanations.
 
-**Codes assigned (priority set):**
+**Codes newly assigned (this session, E208–E228):**
 
 | Code | Diagnostic |
 |------|-----------|
-| E001 | Type mismatch / linear constraint violation |
-| E006 | Arity mismatch |
-| E007 | Too many local variables |
-| E008 | Too many globals |
-| E035 | Effect not declared in function signature (3 emit sites) |
-| E036 | Unobserved\<T\> crosses observation boundary (2 emit sites) |
-| E040 | Rust `let mut` syntax — use `var` |
-| E041 | Rust `&mut` syntax — use `&!` |
-| E042 | Rust attribute `#[...]` |
-| E043 | Rust macro `ident!(...)` |
-| E067–E072, E170–E171, E201–E207 | pre-existing codes, preserved |
+| E208 | Refinement type violation — integer value |
+| E209 | Refinement type violation — f64 value |
+| E210 | Algebra property violation |
+| E211 | Study block requires at least one hypothesis |
+| E212 | Hessian AD over a non-associative algebra |
+| E213 | Tuple destructure arity mismatch |
+| E214 | Confidence gate violation |
+| E215 | EpistemicComplete violation |
+| E216 | Infinite recursive type |
+| E217 | Invalid function body span (codegen) |
+| E218 | Tail type mismatch (codegen) |
+| E219 | Function pass mismatch (codegen) |
+| E220 | Unresolved function body for call target (linker) |
+| E221 | No main function |
+| E222 | Code buffer overflow |
+| E223 | Too many ExitProcess call sites (PE/Windows) |
+| E224 | Unreadable import |
+| E225 | Import dedup table full |
+| E226 | Import path table full |
+| E227 | Import too large for SRC buffer |
+| E228 | Import copy truncated |
+| E001–E207 | pre-existing codes, preserved and unchanged |
 
 **Artifacts:**
-- `docs/llm-guide/error-catalog.md`: machine-parseable 21-row table appended (code, component, severity, gloss, link)
-- `docs/llm-guide/explanations/`: 22 new per-code `.md` files (E001, E006-E008, E035-E036, E040-E043, E067, E070, E072, E170-E171, E201-E207)
-- `bin/souc emit_diagnostics_json`: rewritten to parse `error[Exxxx]: msg at line N` with code field populated; legacy `error: msg at line N` falls back to E000
+- `docs/llm-guide/error-catalog.md`: 21 new rows appended (E208–E228)
+- `docs/llm-guide/explanations/E208–E228.md`: 21 new per-code explanation files
+- `bin/souc`: replaced with shell driver; routes `check [--json]` and `explain <CODE>` subcommands; delegates to `souc-linux-x86_64` for compilation
+- `tests/compile-fail/diagnostic_codes_*.sio`: 3 new fixtures (E208, E216, E221) verified
 
 **Gates passed (2026-05-28):**
 ```
-$ ./bin/souc check examples/async_demo.sio --json
-  → valid sounio.diagnostic.v1 JSON, code field populated
-$ ./bin/souc explain E035
+$ ./bin/souc check tests/run-pass/type_hash_3level_nesting.sio --json
+  → {"version":"sounio.diagnostic.v1","diagnostics":[]}
+$ ./bin/souc explain E221
   → explanation + minimal example + canonical fix printed
-$ ./bin/souc check self-hosted/compiler/lean_single.sio
-  → exit 0
-$ gen2 md5 == gen3 md5 == 18b21a085afb76546d18d3657ec181b5
+$ ./bin/souc check tests/compile-fail/diagnostic_codes_no_main.sio --json
+  → diagnostics: [{code:"E221",...}]
+$ gen2 md5 == gen3 md5 == 541bc868140beac2d54da976ba8ea976
 ```
 
 ### Remaining open gaps (unchanged)
 
-- **G1** — Multi-module bundle compile: 3 architectural roots still open (type-hash overflow on 3-level nesting, SRET ≥8-field, nested `&!` struct-field store). Composite-type intern table stub committed as test fixture `type_hash_3level_nesting.sio` (PASS) but the interning itself is not yet in the compiler.
+- **G1** — Multi-module bundle compile: 2 architectural roots remain (SRET ≥8-field, nested `&!` struct-field store). The third root (composite-type hash overflow) was closed in this session — see §12 addendum G1 below.
 - **G5** — Formatter / native REPL: unchanged.
+
+### G1 — Composite-type intern table (CLOSED for type-hash root, commit `fcce29dd3`)
+
+The type-hash arithmetic overflow on 3-level pointer nesting (`&Option<Box<Struct>>`) was fixed by replacing the arithmetic formula with a hash-cons intern table (`ct_register`). `CT_INNER_HASH/CT_KIND/CT_INNER_TY` arrays bumped 4096→16384. Regression fixture `tests/run-pass/type_hash_3level_nesting.sio` PASS. gen2==gen3 preserved.
+
+Remaining G1 roots: SRET ≥8-field struct return, nested `&!` struct-field store.
 - **G6** — Public install path: unchanged.
 - **EpistemicEffects.lean** (commit `848b8526c`): 589-line Lean 4 soundness sketch of the epistemic effect calculus. `lake build` green. Two `sorry` obligations documented: substitution lemma for beta reduction, and indexed-induction issue for the progress theorem.
 
