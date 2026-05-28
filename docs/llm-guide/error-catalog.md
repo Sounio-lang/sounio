@@ -433,3 +433,24 @@ Use `souc explain <CODE>` for a one-paragraph explanation + minimal example + ca
 | E205 | type-checker/zero-divisor | error | `Audited<T>` requires `with ZD, Witness` | [E205.md](explanations/E205.md) |
 | E206 | type-checker/zero-divisor | error | `Revivable<T>` requires `with ZD, Temporal` | [E206.md](explanations/E206.md) |
 | E207 | type-checker/zero-divisor | error | `Interpretable<T>` requires `with ZD` | [E207.md](explanations/E207.md) |
+| E208 | type-checker/refinement | error | refinement type violation — integer value violates predicate | [E208.md](explanations/E208.md) |
+| E209 | type-checker/refinement | error | refinement type violation — f64 value violates predicate | [E209.md](explanations/E209.md) |
+| E210 | type-checker/algebra | error | algebra property violation | [E210.md](explanations/E210.md) |
+| E211 | type-checker/study | error | study block requires at least one hypothesis | [E211.md](explanations/E211.md) |
+| E212 | type-checker/algebra | error | Hessian AD over a non-associative algebra | [E212.md](explanations/E212.md) |
+| E213 | type-checker/destructure | error | tuple destructure arity mismatch | [E213.md](explanations/E213.md) |
+| E214 | type-checker/epistemic | error | confidence gate violation | [E214.md](explanations/E214.md) |
+| E215 | type-checker/epistemic | error | EpistemicComplete violation | [E215.md](explanations/E215.md) |
+| E216 | type-checker/recursive-type | error | infinite recursive type | [E216.md](explanations/E216.md) |
+| E217 | codegen | error | invalid function body span | [E217.md](explanations/E217.md) |
+| E218 | codegen | error | tail type mismatch | [E218.md](explanations/E218.md) |
+| E219 | codegen | error | function pass mismatch | [E219.md](explanations/E219.md) |
+| E220 | codegen/linker | error | unresolved function body for call target | [E220.md](explanations/E220.md) |
+| E221 | codegen/linker | error | no main function | [E221.md](explanations/E221.md) |
+| E222 | codegen | error | code buffer overflow | [E222.md](explanations/E222.md) |
+| E223 | codegen/pe | error | too many ExitProcess call sites | [E223.md](explanations/E223.md) |
+| E224 | import | error | unreadable import | [E224.md](explanations/E224.md) |
+| E225 | import | error | import dedup table full | [E225.md](explanations/E225.md) |
+| E226 | import | error | import path table full | [E226.md](explanations/E226.md) |
+| E227 | import | error | import too large for SRC buffer | [E227.md](explanations/E227.md) |
+| E228 | import | error | import copy truncated | [E228.md](explanations/E228.md) |
