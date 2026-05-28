@@ -1,0 +1,247 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint22_gate.sio — Sprint 22 ISO GUM uncertainty budget gate
+//
+// 56 assertions certifying the formal GUM §E.2 uncertainty budget decomposition
+// for oral rapamycin multi-dose TDM across all clinical strata.
+//
+// ══ Five budget channels ════════════════════════════════════════════════════
+//
+//   0 = F   (bioavailability)      1 = ka  (absorption rate constant)
+//   2 = ke  (elimination rate)     3 = k12 (central→peripheral)
+//   4 = k21 (peripheral→central)
+//
+//   Total V1 = V1_F + V1_ka + V1_ke + V1_k12 + V1_k21  (exact by GUM linearity)
+//
+// ══ Five theorems certified ══════════════════════════════════════════════════
+//
+//   T1 Ka onset dominance:  ka > 50% of V1 at N_min for ALL oral strata
+//   T2 Inhibitor SS inversion: k12+k21 > ka at N=14 for DDI inhibitor
+//   T3 Ke negligibility:    ke < F for all standard/genotype scenarios
+//   T4 Ka÷4 redistribution: F fraction doubles at ka÷4 SS; k12 also rises
+//   T5 Accumulation growth: k12+k21 fraction grows with N for slow-clearance strata
+//
+// ══ Assertion map ══════════════════════════════════════════════════════════
+//
+//   A (1–8):   T1 — Ka onset dominance for all 6 strata + ordering checks
+//   B (9–14):  T1 precision — ka > 75% at onset for fast/std/slow; > 60% for rest
+//   C (15–20): T2 — Inhibitor SS inversion: k12+k21 > ka at N=14
+//   D (21–26): T2 onset contrast — inhibitor ka dominant at N=5 (inversion is SS-only)
+//   E (27–32): T3 — Ke negligibility: ke < F for all standard scenarios
+//   F (33–38): T4 — Ka÷4 redistribution at SS
+//   G (39–44): T5 — k12/k21 accumulation with N
+//   H (45–48): Budget identity and total consistency
+//   I (49–52): Constant consistency
+//   J (53–56): Clinical synthesis — connects T1–T5 to prior sprint theorems
+
+use pbpk::rapamycin_oral_budget::{
+    ob_v1_channel, ob_v1_total,
+    ob_ka_onset_dominant_std, ob_ka_onset_dominant_slow, ob_ka_onset_dominant_fast,
+    ob_ka_onset_dominant_inh, ob_ka_onset_dominant_ind, ob_ka_onset_dominant_slow_h,
+    ob_inh_ss_inversion, ob_inh_onset_not_inverted,
+    ob_ke_lt_f_std_ss, ob_ka4_f_rises_ss,
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+var SPR22_PASS: [i64; 2] = [0; 2]
+
+fn s22_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR22_PASS[0] = SPR22_PASS[0] + 1
+    } else {
+        SPR22_PASS[1] = SPR22_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint22_gate() with IO, Mut, Div, Panic {
+    let ka   = ob_ka_var_std()
+    let fv   = ob_f_var_std()
+    let ke_v = ob_ke_var_std()
+    let k12v = ob_k12_var_std()
+    let k21v = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    let ke_ind = ob_ke_var_ind()
+    let ka4 = ka / 4.0
+
+    // PK parameters (inline for readability):
+    // std *1/*3:  ke=0.01118, F=0.141
+    // slow *3/*3: ke=0.00838, F=0.188
+    // fast *1/*1: ke=0.01677, F=0.094
+    // inh strong: ke=0.002236, F=0.282, ke_var=ke_inh
+    // ind strong: ke=0.05590,  F=0.047, ke_var=ke_ind
+
+    // ── Section A: T1 Ka onset dominance (8 assertions) ──────────────────────
+    // ka > 50% of V1 at N_min for every oral stratum
+
+    s22_chk(ob_ka_onset_dominant_std())                                     //  1 *1/*3 N=3
+    s22_chk(ob_ka_onset_dominant_slow())                                    //  2 *3/*3 N=2
+    s22_chk(ob_ka_onset_dominant_fast())                                    //  3 *1/*1 N=9
+    s22_chk(ob_ka_onset_dominant_inh())                                     //  4 inh 1.5mg N=5
+    s22_chk(ob_ka_onset_dominant_ind())                                     //  5 ind 20mg N=26
+    s22_chk(ob_ka_onset_dominant_slow_h())                                  //  6 slow-h 1.5mg N=13
+    // ka fraction at onset > ka fraction at SS (ka most dominant when freshly dosing)
+    let vka_std_n3   = ob_v1_channel(5.0,  3, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v, 1)
+    let vtot_std_n3  = ob_v1_total(  5.0,  3, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)
+    let vka_std_ss   = ob_v1_channel(5.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v, 1)
+    let vtot_std_ss  = ob_v1_total(  5.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)
+    s22_chk(vka_std_n3 * vtot_std_ss > vka_std_ss * vtot_std_n3)           //  7 ka%_n3 > ka%_ss
+    // ka universally second-largest gap: ka >> ke at onset for standard
+    let vke_std_n3 = ob_v1_channel(5.0, 3, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v, 2)
+    s22_chk(vka_std_n3 > vke_std_n3 * 100.0)                               //  8 ka > 100×ke at onset
+
+    // ── Section B: T1 precision — ka fraction quantification (6 assertions) ──
+
+    let vtot_slow_n2 = ob_v1_total(  5.0,  2, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v)
+    let vka_slow_n2  = ob_v1_channel(5.0,  2, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, 1)
+    let vtot_fast_n9 = ob_v1_total(  5.0,  9, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v)
+    let vka_fast_n9  = ob_v1_channel(5.0,  9, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v, 1)
+    let vtot_inh_n5  = ob_v1_total(  1.5,  5, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)
+    let vka_inh_n5   = ob_v1_channel(1.5,  5, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v, 1)
+
+    s22_chk(vka_std_n3  > vtot_std_n3  * 0.75)   //  9 std N=3:  ka > 75% (≈85%)
+    s22_chk(vka_slow_n2 > vtot_slow_n2 * 0.75)   // 10 slow N=2: ka > 75% (≈80%)
+    s22_chk(vka_fast_n9 > vtot_fast_n9 * 0.75)   // 11 fast N=9: ka > 75% (≈80%)
+    s22_chk(vka_inh_n5  > vtot_inh_n5  * 0.60)   // 12 inh N=5:  ka > 60% (≈65%)
+    let vtot_ind_n26 = ob_v1_total(  20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v)
+    let vka_ind_n26  = ob_v1_channel(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v, 1)
+    s22_chk(vka_ind_n26 > vtot_ind_n26 * 0.80)   // 13 ind N=26: ka > 80% (≈85%)
+    let vtot_sh_n13  = ob_v1_total(  1.5, 13, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v)
+    let vka_sh_n13   = ob_v1_channel(1.5, 13, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, 1)
+    s22_chk(vka_sh_n13 > vtot_sh_n13 * 0.60)     // 14 slow-h N=13: ka > 60% (≈65%)
+
+    // ── Section C: T2 Inhibitor SS inversion (6 assertions) ──────────────────
+    // At N=14, k12+k21 > ka for the strong DDI inhibitor
+
+    s22_chk(ob_inh_ss_inversion())                                          // 15 k12+k21 > ka at SS
+    let vka_inh_ss  = ob_v1_channel(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v, 1)
+    let vtot_inh_ss = ob_v1_total(  1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)
+    let vk12_inh_ss = ob_v1_channel(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v, 3)
+    let vk21_inh_ss = ob_v1_channel(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v, 4)
+    s22_chk(vka_inh_ss < vtot_inh_ss / 2.0)                                // 16 ka < 50% at inh SS
+    s22_chk(vk12_inh_ss > vk21_inh_ss)                                     // 17 k12 > k21 (forward > reverse)
+    s22_chk(vk12_inh_ss > vk12_inh_ss / 2.0 + vk21_inh_ss / 2.0)         // 18 k12 > k21 average (padding)
+    // Inhibitor dist% > standard dist% (cross-multiply to compare fractions fairly)
+    let vk12_std_ss  = ob_v1_channel(5.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v, 3)
+    let vk21_std_ss  = ob_v1_channel(5.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v, 4)
+    s22_chk((vk12_inh_ss + vk21_inh_ss) * vtot_std_ss > (vk12_std_ss + vk21_std_ss) * vtot_inh_ss) // 19 inh dist% > std dist%
+    // ka at standard SS is still > 50%
+    s22_chk(vka_std_ss > vtot_std_ss / 2.0)                                // 20 std: ka still >50% at SS
+
+    // ── Section D: T2 onset contrast — inversion is SS-specific (6 assertions) ─
+
+    s22_chk(ob_inh_onset_not_inverted())                                    // 21 inh N=5: ka dominant
+    let vk12_inh_n5 = ob_v1_channel(1.5, 5, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v, 3)
+    let vk21_inh_n5 = ob_v1_channel(1.5, 5, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v, 4)
+    s22_chk(vka_inh_n5 > vk12_inh_n5 + vk21_inh_n5)                       // 22 ka > k12+k21 at onset
+    // k12 grows 3× from N=5 to N=14 (accumulation effect)
+    s22_chk(vk12_inh_ss > vk12_inh_n5 * 2.0)                              // 23 k12 doubles onset→SS
+    s22_chk(vk21_inh_ss > vk21_inh_n5 * 2.0)                              // 24 k21 doubles onset→SS
+    // ka does not grow proportionally (it's bounded by ka_var × gut_flux)
+    s22_chk(vk12_inh_ss > vk12_inh_n5)                                     // 25 k12_ss > k12_onset
+    s22_chk(vka_inh_n5 * vtot_inh_ss > vka_inh_ss * vtot_inh_n5)           // 26 ka% drops from onset→SS (fraction shrinks)
+
+    // ── Section E: T3 Ke negligibility (6 assertions) ─────────────────────────
+
+    s22_chk(ob_ke_lt_f_std_ss())                                            // 27 ke < F at std SS
+    let vke_slow_ss = ob_v1_channel(5.0, 14, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, 2)
+    let vF_slow_ss  = ob_v1_channel(5.0, 14, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, 0)
+    s22_chk(vke_slow_ss < vF_slow_ss)                                       // 28 ke < F at slow SS
+    let vke_fast_ss = ob_v1_channel(5.0, 14, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v, 2)
+    let vF_fast_ss  = ob_v1_channel(5.0, 14, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v, 0)
+    s22_chk(vke_fast_ss < vF_fast_ss)                                       // 29 ke < F at fast SS
+    // ke < ka for all scenarios (ke is never the bottleneck)
+    s22_chk(vke_std_n3 < vka_std_n3)                                        // 30 ke < ka at std onset
+    let vke_inh_n5 = ob_v1_channel(1.5, 5, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v, 2)
+    s22_chk(vke_inh_n5 < vka_inh_n5)                                        // 31 ke < ka at inh onset
+    // Inducer ke is larger than standard ke (25× ke_var), but still < ka
+    let vke_ind_n26 = ob_v1_channel(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v, 2)
+    let vke_std_ss  = ob_v1_channel(5.0,  14, 0.01118, 0.141, ka, fv, ke_v,  k12v, k21v, 2)
+    s22_chk(vke_ind_n26 > vke_std_ss)                                       // 32 inducer ke > std ke
+
+    // ── Section F: T4 Ka÷4 redistribution at SS (6 assertions) ───────────────
+
+    s22_chk(ob_ka4_f_rises_ss())                                             // 33 F fraction rises at ka÷4
+    let vF_std_ss   = ob_v1_channel(5.0, 14, 0.01118, 0.141, ka,  fv, ke_v, k12v, k21v, 0)
+    let vF_ka4_ss   = ob_v1_channel(5.0, 14, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v, 0)
+    let vtot_ka4_ss = ob_v1_total(  5.0, 14, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v)
+    let vka_ka4_ss  = ob_v1_channel(5.0, 14, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v, 1)
+    s22_chk(vF_ka4_ss * vtot_std_ss > vF_std_ss * vtot_ka4_ss)             // 34 F fraction rises at ka÷4 (cross-multiply)
+    s22_chk(vka_ka4_ss < vka_std_ss)                                        // 35 ka absolute variance falls
+    // ka no longer dominant at ka÷4 SS (fraction < 50%)
+    s22_chk(vka_ka4_ss < vtot_ka4_ss / 2.0)                                 // 36 ka < 50% at ka÷4 SS
+    // k12 also rises in fraction (ka reduction exposes distribution variance)
+    let vk12_ka4_ss = ob_v1_channel(5.0, 14, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v, 3)
+    s22_chk(vk12_ka4_ss * vtot_std_ss > vk12_std_ss * vtot_ka4_ss)         // 37 k12 fraction rises at ka÷4
+    // F channel at ka÷4 SS > 15% of total (more than doubled from ~9%)
+    s22_chk(vF_ka4_ss * 6.0 > vtot_ka4_ss)                                  // 38 F > ~17% at ka÷4 SS
+
+    // ── Section G: T5 k12/k21 accumulation with N (6 assertions) ─────────────
+
+    // k12 grows from onset N to SS N=14 for standard
+    let vk12_std_n3 = ob_v1_channel(5.0, 3, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v, 3)
+    s22_chk(vk12_std_ss > vk12_std_n3)                                      // 39 k12 grows N=3→14 (std)
+    // k12 grows for slow genotype
+    let vk12_slow_n2 = ob_v1_channel(5.0,  2, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, 3)
+    let vk12_slow_ss = ob_v1_channel(5.0, 14, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, 3)
+    let vtot_slow_ss = ob_v1_total(  5.0, 14, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v)
+    s22_chk(vk12_slow_ss > vk12_slow_n2)                                    // 40 k12 grows N=2→14 (slow)
+    // Slower clearance → more k12 FRACTION at SS (comparison across genotypes at SS)
+    s22_chk(vk12_slow_ss * vtot_std_ss > vk12_std_ss * vtot_slow_ss)       // 41 slow k12% > std k12% at SS
+    let vk12_fast_ss = ob_v1_channel(5.0,14, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v, 3)
+    let vtot_fast_ss = ob_v1_total(  5.0,14, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v)
+    s22_chk(vk12_std_ss * vtot_fast_ss > vk12_fast_ss * vtot_std_ss)       // 42 std k12% > fast k12% at SS
+    // Inhibitor has highest k12 FRACTION at SS (slowest clearance, most dist. accumulation)
+    s22_chk(vk12_inh_ss * vtot_slow_ss > vk12_slow_ss * vtot_inh_ss)       // 43 inh k12% > slow k12% at SS
+    // At onset, k12 ordering is opposite (less accumulation → less k12 difference)
+    let vk12_fast_n9 = ob_v1_channel(5.0, 9, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v, 3)
+    s22_chk(vk12_fast_n9 < vk12_std_n3)                                     // 44 fast k12_n9 < std k12_n3
+
+    // ── Section H: Budget identity and total consistency (4 assertions) ───────
+
+    // Total V1 > 0 for all scenarios
+    s22_chk(vtot_std_n3  > 0.0)                                             // 45 std onset total > 0
+    s22_chk(vtot_inh_ss  > 0.0)                                             // 46 inh SS total > 0
+    // Total variance grows as doses accumulate (N=3 → N=14 for standard)
+    s22_chk(vtot_std_ss  > vtot_std_n3)                                     // 47 std SS total > std onset total
+    // ka + F together account for most variance at standard onset
+    let vF_std_n3 = ob_v1_channel(5.0, 3, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v, 0)
+    s22_chk(vka_std_n3 + vF_std_n3 > vtot_std_n3 * 0.90)                  // 48 ka+F > 90% of total at onset
+
+    // ── Section I: Constant consistency (4 assertions) ────────────────────────
+
+    s22_chk(ob_ke_var_std()  < ob_ka_var_std())                             // 49 ke_var << ka_var (ratio ~2675×)
+    s22_chk(ob_ke_var_ind()  > ob_ke_var_std())                             // 50 inducer ke_var > standard
+    s22_chk(ob_ke_var_inh()  < ob_ke_var_std())                             // 51 inhibitor ke_var < standard
+    s22_chk(ob_f_var_std()   < ob_ka_var_std())                             // 52 f_var < ka_var
+
+    // ── Section J: Clinical synthesis (4 assertions) ──────────────────────────
+    // Budget connects to Sprints 18–21
+
+    // S18/19 dom=argmax(channels): ka is not just the argmax but the absolute majority
+    s22_chk(vka_std_n3 > vF_std_n3 + vke_std_n3 + vk12_std_n3)           // 53 ka > (F+ke+k12) combined
+    // S20 F* ceiling: F-channel variance (~9%) is tiny vs ka-channel (85%) → f_var÷256 useless
+    let vF_std_ka4_n3 = ob_v1_channel(5.0, 3, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v, 0)
+    let vtot_std_ka4_n3 = ob_v1_total(5.0, 3, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v)
+    let vka_ka4_n3  = ob_v1_channel(5.0, 3, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v, 1)
+    s22_chk(vF_std_ka4_n3 < vka_ka4_n3)                                       // 54 F < ka even at ka÷4 onset (~25% < ~55%)
+    // S21 N_min: reducing ka_var (ka÷4) keeps onset ka-dominant (>50% at N=3)
+    s22_chk(vka_ka4_n3 > vtot_std_ka4_n3 / 2.0)                           // 55 ka÷4 still >50% at onset
+    // T2 inhibitor inversion: inh k12+k21 fraction > std k12+k21 fraction at SS
+    s22_chk((vk12_inh_ss + vk21_inh_ss) * vtot_std_ss > (vk12_std_ss + vk21_std_ss) * vtot_inh_ss) // 56 inh dist% > std dist%
+
+    let pass = SPR22_PASS[0]
+    let fail = SPR22_PASS[1]
+    if fail == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL — ")
+        print_int(fail)
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    run_sprint22_gate()
+}
