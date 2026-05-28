@@ -1,5 +1,28 @@
 # LLM Offload Log
 
+## 2026-05-28: Exact arithmetic kernel over Q(√3,√5,√7,√11) — de Grey degree-16 field (#508)
+
+### math-review (xai / Grok 4.1) — field tower + XOR multiplication law
+
+- **Target**: `examples/erdos/degrey_fieldtower.sio` — extends the Q(√3,√11) spindle
+  kernel to the full degree-16 field Q(√3,√5,√7,√11) of de Grey's 1581-vertex graph
+  (N = Z[ω_1,ω_3,ω_4,ω_16]). 16-tuple representation indexed by 4-bit mask; the
+  multiplication law is pure XOR: basis i·j → basis (i^j) with rational coefficient
+  = ∏ primes in (i&j). Self-tests + exact unit-edge realizations of ω_4 (√5) and
+  ω_16 (√7).
+
+```
+[OK]  Claim 1  Field tower / angles / surds {3,5,7,11} exact; degree 16 from distinct primes.
+[OK]  Claim 2  XOR multiplication is the standard multiquadratic relation; pairwise
+               coprimality ⟹ linear independence over Q (no degree collapse).
+[OK]  Claim 3  (√15)²=15, √15·√35=5√21, (√3+√5)²=8+2√15 — all hold by direct expansion.
+[OK]  Claim 4  Both isosceles realizations satisfy law of cosines (base=1); ×4→16, ×8→64.
+[OK]  Claim 5  Scope honest: arithmetic kernel only, no χ≥5 graph claim.
+```
+
+Outcome: clean review, no OVERREACH flags. 5/5 runtime checks pass. The exact
+arithmetic foundation for de Grey's full 5-chromatic graph now exists in Sounio.
+
 ## 2026-05-28: Field-closure of de Grey spindle gluing + native SAT cap raise (#508)
 
 ### math-review (xai / Grok 4.1) — field closure under R_60 / R_φ
