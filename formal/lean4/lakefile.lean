@@ -258,3 +258,35 @@ lean_lib «SounioErdos90PathionGrowth» where
 -- Open obligation: effect_preservation/subst_preserves_typing (see SounioSubstitution.lean).
 @[default_target]
 lean_lib «EpistemicEffects» where
+
+-- The associator-shadow experiment: the non-associative lever ((p·u)·v, u·v=0)
+-- escapes the 7-hyperoval trap of linear surgery (reaches all 7 Fano lines) but
+-- never exceeds size 3. See docs/research/associator-shadow-experiment.md
+@[default_target]
+lean_lib «SounioAssociatorShadow» where
+
+-- Hadwiger-Nelson #508: exact unit-distance + chromatic certifier (Moser spindle
+-- chi=4 over Q(sqrt3,sqrt11)). See docs/research/hadwiger-nelson-508-program.md
+@[default_target]
+lean_lib «SounioUnitDistanceExact» where
+
+-- Hadwiger-Nelson #508 Phase B: exact certifier over the full de Grey field
+-- K=Q(sqrt3,sqrt5,sqrt7,sqrt11) (deg 16); fixture ladder + per-axis witnesses.
+@[default_target]
+lean_lib «SounioUnitDistanceField» where
+
+-- HeuleGraph510: machine-checked exact unit-distance certification (auto-generated
+-- from Heule CNP-SAT vtx/edge). Soundness + converse audit in Q(√3,√5,√11).
+@[default_target]
+lean_lib «SounioHeule510» where
+
+-- HeuleGraph510 chromatic number = 5: kernel-checked χ≤5 (proper 5-colouring).
+-- χ≥5 is the external drat-trim-VERIFIED UNSAT cert (different trust base).
+@[default_target]
+lean_lib «SounioHeule510Chromatic» where
+
+-- HeuleGraph510 NOT 4-colourable, Lean-verified-checker grade (bv_decide:
+-- bitblast + cadical + verified-in-Lean LRAT check). χ≥5 Phase C.1 — same
+-- compiled-reflection trust as native_decide, no external drat-trim/HOL4.
+@[default_target]
+lean_lib «SounioHeule510NotColorable» where

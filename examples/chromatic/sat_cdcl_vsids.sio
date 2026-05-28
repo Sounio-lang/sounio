@@ -1,0 +1,259 @@
+// Native Sounio CDCL SAT solver — 1-UIP clause learning + non-chronological
+// backjumping + VSIDS + Luby restarts. Scan-based unit propagation (correct;
+// 2WL is a later optimisation). All state flat-local (Sounio arrays pass by value).
+// Test: K_V 4-colouring.  V=5 -> UNSAT(0), V=4 -> SAT(1).
+// trail holds signed literals; value[v] in {0 unset,1 true,2 false}; reason[v] = clause
+// index that implied v (-1 = decision).
+
+fn main() -> i64 with IO, Mut {
+    let V: i64 = 5
+    let K: i64 = 4
+    let N: i64 = V * K
+
+    var cl: [i64; 200000] = [0; 200000]
+    var cstart: [i64; 40000] = [0; 40000]
+    var clen: [i64; 40000] = [0; 40000]
+    var nclauses: i64 = 0
+    var lp: i64 = 0
+
+    // ---- build K_V 4-colouring CNF ----
+    var v0: i64 = 0
+    while v0 < V {
+        cstart[nclauses] = lp
+        var cc: i64 = 0
+        while cc < K { cl[lp] = v0*K + cc + 1; lp = lp + 1; cc = cc + 1 }
+        clen[nclauses] = K; nclauses = nclauses + 1
+        v0 = v0 + 1
+    }
+    v0 = 0
+    while v0 < V {
+        var a: i64 = 0
+        while a < K {
+            var b: i64 = a + 1
+            while b < K {
+                cstart[nclauses] = lp
+                cl[lp] = 0 - (v0*K + a + 1); lp = lp + 1
+                cl[lp] = 0 - (v0*K + b + 1); lp = lp + 1
+                clen[nclauses] = 2; nclauses = nclauses + 1
+                b = b + 1
+            }
+            a = a + 1
+        }
+        v0 = v0 + 1
+    }
+    var xx: i64 = 0
+    while xx < V {
+        var yy: i64 = xx + 1
+        while yy < V {
+            var cc2: i64 = 0
+            while cc2 < K {
+                cstart[nclauses] = lp
+                cl[lp] = 0 - (xx*K + cc2 + 1); lp = lp + 1
+                cl[lp] = 0 - (yy*K + cc2 + 1); lp = lp + 1
+                clen[nclauses] = 2; nclauses = nclauses + 1
+                cc2 = cc2 + 1
+            }
+            yy = yy + 1
+        }
+        xx = xx + 1
+    }
+
+    // ---- state ----
+    var value: [i64; 4096] = [0; 4096]
+    var level: [i64; 4096] = [0; 4096]
+    var reason: [i64; 4096] = [0 - 1; 4096]
+    var act: [i64; 4096] = [0; 4096]
+    var seen: [i64; 4096] = [0; 4096]
+    var trail: [i64; 4096] = [0; 4096]     // signed literals
+    var tlen: i64 = 0
+    var triallim: [i64; 4096] = [0; 4096]
+    var dlevel: i64 = 0
+    var lrn: [i64; 4096] = [0; 4096]       // learned-clause buffer (signed lits)
+    var varinc: i64 = 1
+    var result: i64 = 0 - 1
+    var conflicts: i64 = 0
+    var lubybase: i64 = 100
+    var nextrestart: i64 = 100
+
+    while result == (0 - 1) {
+        // ---------- propagate to fixpoint ----------
+        var confl: i64 = 0 - 1
+        var changed: i64 = 1
+        while changed == 1 {
+            if confl != (0 - 1) { changed = 0 }
+            else {
+                changed = 0
+                var c: i64 = 0
+                while c < nclauses {
+                    if confl != (0 - 1) { c = nclauses }
+                    else {
+                        let cs = cstart[c]
+                        let ce = cs + clen[c]
+                        var sat: i64 = 0
+                        var nun: i64 = 0
+                        var lastlit: i64 = 0
+                        var k: i64 = cs
+                        while k < ce {
+                            let lit = cl[k]
+                            var vr: i64 = lit; if lit < 0 { vr = 0 - lit }
+                            let av = value[vr]
+                            if av == 0 { nun = nun + 1; lastlit = lit }
+                            else {
+                                var t: i64 = 0
+                                if lit > 0 { if av == 1 { t = 1 } } else { if av == 2 { t = 1 } }
+                                if t == 1 { sat = 1 }
+                            }
+                            k = k + 1
+                        }
+                        if sat == 0 {
+                            if nun == 0 { confl = c }
+                            else {
+                                if nun == 1 {
+                                    var vr2: i64 = lastlit; if lastlit < 0 { vr2 = 0 - lastlit }
+                                    value[vr2] = 1; if lastlit < 0 { value[vr2] = 2 }
+                                    level[vr2] = dlevel
+                                    reason[vr2] = c
+                                    trail[tlen] = lastlit; tlen = tlen + 1
+                                    changed = 1
+                                }
+                            }
+                        }
+                        c = c + 1
+                    }
+                }
+            }
+        }
+
+        if confl != (0 - 1) {
+            // ---------- conflict ----------
+            conflicts = conflicts + 1
+            if dlevel == 0 { result = 0 }     // UNSAT
+            else {
+                // ---- 1-UIP analysis ----
+                var lrnlen: i64 = 1            // lrn[0] reserved for asserting literal
+                var pathc: i64 = 0
+                var idx: i64 = tlen - 1
+                var cc3: i64 = confl
+                var pivot: i64 = 0            // var resolved out (skip in reason clauses)
+                var uip: i64 = 0
+                var done: i64 = 0
+                while done == 0 {
+                    // resolve lits of clause cc3 into the conflict side (skip pivot)
+                    let cs = cstart[cc3]
+                    let ce = cs + clen[cc3]
+                    var k: i64 = cs
+                    while k < ce {
+                        let q = cl[k]
+                        var qv: i64 = q; if q < 0 { qv = 0 - q }
+                        if qv != pivot {
+                            if seen[qv] == 0 {
+                                if level[qv] > 0 {
+                                    seen[qv] = 1
+                                    act[qv] = act[qv] + varinc
+                                    if level[qv] >= dlevel { pathc = pathc + 1 }
+                                    else { lrn[lrnlen] = q; lrnlen = lrnlen + 1 }
+                                }
+                            }
+                        }
+                        k = k + 1
+                    }
+                    // pick next seen var from trail top
+                    var keep: i64 = 1
+                    while keep == 1 {
+                        var tv: i64 = trail[idx]; if trail[idx] < 0 { tv = 0 - trail[idx] }
+                        if seen[tv] == 0 { idx = idx - 1 } else { keep = 0 }
+                    }
+                    let plit = trail[idx]
+                    var pv: i64 = plit; if plit < 0 { pv = 0 - plit }
+                    idx = idx - 1
+                    seen[pv] = 0
+                    pathc = pathc - 1
+                    if pathc == 0 { uip = plit; done = 1 }
+                    else { cc3 = reason[pv]; pivot = pv }
+                }
+                // asserting literal = negation of uip
+                lrn[0] = 0 - uip
+                // backjump level = max level among lrn[1..], else 0
+                var bj: i64 = 0
+                var t: i64 = 1
+                while t < lrnlen {
+                    var lv2: i64 = lrn[t]; if lrn[t] < 0 { lv2 = 0 - lrn[t] }
+                    let lev = level[lv2]
+                    if lev > bj { bj = lev }
+                    t = t + 1
+                }
+                // clear seen for learned lits (uip already cleared)
+                t = 1
+                while t < lrnlen {
+                    var lv3: i64 = lrn[t]; if lrn[t] < 0 { lv3 = 0 - lrn[t] }
+                    seen[lv3] = 0
+                    t = t + 1
+                }
+                // VSIDS decay
+                varinc = varinc + (varinc / 20) + 1
+                if varinc > 1000000000000 {
+                    var rv: i64 = 1
+                    while rv <= N { act[rv] = act[rv] / 1000000; rv = rv + 1 }
+                    varinc = varinc / 1000000
+                    if varinc < 1 { varinc = 1 }
+                }
+                // ---- backjump to level bj (undo everything above level bj) ----
+                while tlen > triallim[bj + 1] {
+                    tlen = tlen - 1
+                    var uv: i64 = trail[tlen]; if trail[tlen] < 0 { uv = 0 - trail[tlen] }
+                    value[uv] = 0
+                    reason[uv] = 0 - 1
+                }
+                dlevel = bj
+                // ---- store learned clause ----
+                var newc: i64 = nclauses
+                cstart[newc] = lp
+                var w: i64 = 0
+                while w < lrnlen { cl[lp] = lrn[w]; lp = lp + 1; w = w + 1 }
+                clen[newc] = lrnlen
+                nclauses = nclauses + 1
+                // ---- assert uip ----
+                var uv2: i64 = uip; if uip < 0 { uv2 = 0 - uip }
+                value[uv2] = 1; if uip < 0 { value[uv2] = 2 }
+                level[uv2] = bj
+                reason[uv2] = newc
+                trail[tlen] = uip; tlen = tlen + 1
+
+                // ---- restart? ----
+                if conflicts >= nextrestart {
+                    // backjump to 0
+                    while tlen > triallim[1] {
+                        tlen = tlen - 1
+                        var rv2: i64 = trail[tlen]; if trail[tlen] < 0 { rv2 = 0 - trail[tlen] }
+                        value[rv2] = 0
+                        reason[rv2] = 0 - 1
+                    }
+                    if dlevel > 0 { dlevel = 0 }
+                    nextrestart = conflicts + lubybase
+                }
+            }
+        } else {
+            // ---------- decide (VSIDS: max activity unassigned) ----------
+            var best: i64 = 0
+            var bestact: i64 = 0 - 1
+            var vv: i64 = 1
+            while vv <= N {
+                if value[vv] == 0 {
+                    if act[vv] > bestact { bestact = act[vv]; best = vv }
+                }
+                vv = vv + 1
+            }
+            if best == 0 { result = 1 }       // all assigned -> SAT
+            else {
+                dlevel = dlevel + 1
+                triallim[dlevel] = tlen
+                value[best] = 1               // phase: true
+                level[best] = dlevel
+                reason[best] = 0 - 1
+                trail[tlen] = best; tlen = tlen + 1
+            }
+        }
+    }
+    println(result)
+    result
+}
