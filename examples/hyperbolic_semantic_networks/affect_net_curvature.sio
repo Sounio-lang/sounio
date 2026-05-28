@@ -1,0 +1,193 @@
+//! Temporal discrete-curvature of the individual affect NETWORK — real Kossakowski 2017 ESM (MDD).
+//! Concatenated after generated affect_net_curv_data.sio. Extends affect_network_orc.sio (which did
+//! 4 independent per-node temporal self-transitions) to the TRUE between-item network: per sliding
+//! window, the 12-mood-item correlation graph, and its curvature tracked over ~the full study.
+//!
+//! NEW TOOL — Forman-Ricci curvature (weighted, Sreejith et al. 2016, node weights = 1):
+//!   F(e=(u,v)) = w_e * [ 2/w_e  - Σ_{e'~u, e'≠e} 1/√(w_e·w_{e'})  - Σ_{e'~v, e'≠e} 1/√(w_e·w_{e'}) ]
+//!   = 2 - Σ_{neighbor edges of u,v} √(w_e/w_{e'}).  Cheap (O(edges·deg)), scales to full networks,
+//!   complementary to Ollivier-Ricci. Mean F over edges = network curvature per window.
+//! ORIGINAL KEC C — algebraic connectivity λ₂ of the graph Laplacian (Jacobi), per window.
+//! Compared against classical critical-slowing-down baselines (within-window variance, lag-1 AC).
+//!
+//! Hypothesis (geometric early-warning): network curvature DROPS approaching the depressive
+//! transition (phase 3->4 medication reduction, ~window 26), before/with classical CSD rises.
+
+fn af_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn af_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x; var i: i64 = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn af_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return -1000000.0 }
+    let ln2 = 0.6931471805599453
+    var v = x; var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = (v - 1.0) / (v + 1.0); let yy = y * y
+    var result = 0.0; var power = y; var i: i64 = 1
+    while i <= 29 { result = result + power / (i as f64); power = power * yy; i = i + 2 }
+    2.0 * result + (k as f64) * ln2
+}
+
+// 12x12 dense Laplacian Jacobi (small, fast). Returns lambda2 (2nd smallest eigenvalue).
+fn lambda2_of(L: &![f64; 144], n: i64) -> f64 with Mut, Div, Panic {
+    var sweep: i64 = 0
+    while sweep < 40 {
+        var p: i64 = 0
+        while p < n {
+            var q: i64 = p + 1
+            while q < n {
+                let apq = L[p*n+q]
+                if af_abs(apq) > 1e-12 {
+                    let app = L[p*n+p]; let aqq = L[q*n+q]
+                    let theta = (aqq - app) / (2.0 * apq)
+                    let den = af_abs(theta) + af_sqrt(theta*theta + 1.0)
+                    var t = 1.0/den; if theta < 0.0 { t = 0.0 - t }
+                    let c = 1.0/af_sqrt(t*t+1.0); let s = t*c
+                    var kk: i64 = 0
+                    while kk < n { let a=L[kk*n+p]; let b=L[kk*n+q]; L[kk*n+p]=c*a-s*b; L[kk*n+q]=s*a+c*b; kk=kk+1 }
+                    kk = 0
+                    while kk < n { let a=L[p*n+kk]; let b=L[q*n+kk]; L[p*n+kk]=c*a-s*b; L[q*n+kk]=s*a+c*b; kk=kk+1 }
+                }
+                q = q + 1
+            }
+            p = p + 1
+        }
+        sweep = sweep + 1
+    }
+    var eig: [f64; 16] = [0.0; 16]; var i: i64 = 0
+    while i < n { eig[i] = L[i*n+i]; i = i + 1 }
+    i = 1
+    while i < n { let key=eig[i]; var j: i64 = i-1; while j>=0 && eig[j]>key { eig[j+1]=eig[j]; j=j-1 }; eig[j+1]=key; i=i+1 }
+    eig[1]
+}
+
+fn print_kv(k: string, v: f64) with IO { print(k); print("="); print(v); println("") }
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let K = fx_n_nodes()
+    let nW = fx_n_windows()
+    var ws: [i64; 256] = [0; 256]; var wn: [i64; 256] = [0; 256]; var wp: [i64; 256] = [0; 256]
+    var ei: [i64; 32768] = [0; 32768]; var ej: [i64; 32768] = [0; 32768]; var ew: [f64; 32768] = [0.0; 32768]
+    var varm: [f64; 256] = [0.0; 256]; var ac1: [f64; 256] = [0.0; 256]
+    load_win_start(&!ws); load_win_nedge(&!wn); load_win_phase(&!wp)
+    load_ei(&!ei); load_ej(&!ej); load_ew(&!ew)
+    load_var_mean(&!varm); load_ac1_mean(&!ac1)
+
+    var fmean: [f64; 256] = [0.0; 256]
+    var lam2: [f64; 256] = [0.0; 256]
+
+    println("win phase  meanForman   lambda2     var       ac1")
+    var w: i64 = 0
+    while w < nW {
+        let s0 = ws[w]; let ne = wn[w]
+        // adjacency + degree (strength)
+        var A: [f64; 144] = [0.0; 144]
+        var e: i64 = 0
+        while e < ne {
+            let u = ei[s0+e]; let v = ej[s0+e]; let wt = ew[s0+e]
+            A[u*K+v] = wt; A[v*K+u] = wt
+            e = e + 1
+        }
+        // Forman-Ricci per edge: F = 2 - Σ_{e'~u,≠e} √(w_e/w') - Σ_{e'~v,≠e} √(w_e/w')
+        var fsum = 0.0
+        e = 0
+        while e < ne {
+            let u = ei[s0+e]; let v = ej[s0+e]; let we = ew[s0+e]
+            var acc = 0.0
+            // neighbor edges of u (other than v)
+            var x: i64 = 0
+            while x < K {
+                if x != v && A[u*K+x] > 0.0 { acc = acc + af_sqrt(we / A[u*K+x]) }
+                x = x + 1
+            }
+            // neighbor edges of v (other than u)
+            x = 0
+            while x < K {
+                if x != u && A[v*K+x] > 0.0 { acc = acc + af_sqrt(we / A[v*K+x]) }
+                x = x + 1
+            }
+            fsum = fsum + (2.0 - acc)
+            e = e + 1
+        }
+        fmean[w] = if ne > 0 { fsum / (ne as f64) } else { 0.0 }
+
+        // Laplacian L = D - A, then lambda2
+        var L: [f64; 144] = [0.0; 144]
+        var i: i64 = 0
+        while i < K {
+            var deg = 0.0; var j: i64 = 0
+            while j < K { if j != i { L[i*K+j] = 0.0 - A[i*K+j]; deg = deg + A[i*K+j] } ; j = j + 1 }
+            L[i*K+i] = deg; i = i + 1
+        }
+        lam2[w] = lambda2_of(&!L, K)
+
+        // print row (cast i64 -> f64 to avoid print(i64) newline gotcha)
+        print(w as f64); print("  ph"); print(wp[w] as f64); print("  F="); print(fmean[w])
+        print("  l2="); print(lam2[w]); print("  var="); print(varm[w]); print("  ac1="); print(ac1[w]); println("")
+        w = w + 1
+    }
+
+    // summarize per phase-band: detect curvature drop around phase 3->4 boundary
+    // running baseline = mean of first 10 windows (phase 1-2, pre-reduction)
+    var base_f = 0.0; var base_l = 0.0; var nb = 0.0
+    var k: i64 = 0
+    while k < nW { if wp[k] <= 2 { base_f = base_f + fmean[k]; base_l = base_l + lam2[k]; nb = nb + 1.0 }; k = k + 1 }
+    base_f = base_f / nb; base_l = base_l / nb
+    // phase-4 mean (depressive transition band)
+    var p4_f = 0.0; var p4_l = 0.0; var n4 = 0.0
+    k = 0
+    while k < nW { if wp[k] == 4 { p4_f = p4_f + fmean[k]; p4_l = p4_l + lam2[k]; n4 = n4 + 1.0 }; k = k + 1 }
+    p4_f = p4_f / n4; p4_l = p4_l / n4
+    // baseline SD (phase 1-2) to express the phase-4 shift in z-units
+    var sf = 0.0; var sl = 0.0
+    k = 0
+    while k < nW { if wp[k] <= 2 { sf = sf + (fmean[k]-base_f)*(fmean[k]-base_f); sl = sl + (lam2[k]-base_l)*(lam2[k]-base_l) }; k = k + 1 }
+    let sd_f = af_sqrt(sf / nb); let sd_l = af_sqrt(sl / nb)
+
+    // co-movement of curvature with classical CSD over all windows (pearson)
+    var mf=0.0; var mv=0.0; var ma=0.0
+    k=0; while k<nW { mf=mf+fmean[k]; mv=mv+varm[k]; ma=ma+ac1[k]; k=k+1 }
+    mf=mf/(nW as f64); mv=mv/(nW as f64); ma=ma/(nW as f64)
+    var cfv=0.0; var cfa=0.0; var vf=0.0; var vv=0.0; var va=0.0
+    k=0
+    while k<nW {
+        let df=fmean[k]-mf; let dv=varm[k]-mv; let da=ac1[k]-ma
+        cfv=cfv+df*dv; cfa=cfa+df*da; vf=vf+df*df; vv=vv+dv*dv; va=va+da*da
+        k=k+1
+    }
+    let r_f_var = if vf>0.0 && vv>0.0 { cfv/af_sqrt(vf*vv) } else { 0.0 }
+    let r_f_ac1 = if vf>0.0 && va>0.0 { cfa/af_sqrt(vf*va) } else { 0.0 }
+
+    // recompute corr(Forman, ac1) EXCLUDING near-disconnected windows (lambda2 < 0.01)
+    var nkeep=0.0; var mf2=0.0; var ma2=0.0
+    k=0; while k<nW { if lam2[k] >= 0.01 { mf2=mf2+fmean[k]; ma2=ma2+ac1[k]; nkeep=nkeep+1.0 }; k=k+1 }
+    var r_f_ac1_conn = 0.0
+    if nkeep > 2.0 {
+        mf2=mf2/nkeep; ma2=ma2/nkeep
+        var cfa2=0.0; var vf2=0.0; var va2=0.0
+        k=0
+        while k<nW { if lam2[k] >= 0.01 { let df=fmean[k]-mf2; let da=ac1[k]-ma2; cfa2=cfa2+df*da; vf2=vf2+df*df; va2=va2+da*da }; k=k+1 }
+        r_f_ac1_conn = if vf2>0.0 && va2>0.0 { cfa2/af_sqrt(vf2*va2) } else { 0.0 }
+    }
+
+    println("=== phase-band summary ===")
+    print_kv("baseline_phase12_meanForman", base_f)
+    print_kv("phase4_meanForman", p4_f)
+    print_kv("delta_Forman_p4_minus_base", p4_f - base_f)
+    print_kv("delta_Forman_in_baseline_SD", if sd_f>0.0 { (p4_f-base_f)/sd_f } else { 0.0 })
+    print_kv("baseline_phase12_lambda2", base_l)
+    print_kv("phase4_lambda2", p4_l)
+    print_kv("delta_lambda2_p4_minus_base", p4_l - base_l)
+    print_kv("delta_lambda2_in_baseline_SD", if sd_l>0.0 { (p4_l-base_l)/sd_l } else { 0.0 })
+    print_kv("corr_Forman_vs_variance", r_f_var)
+    print_kv("corr_Forman_vs_ac1", r_f_ac1)
+    print_kv("corr_Forman_vs_ac1_connected_only", r_f_ac1_conn)
+    print_kv("n_windows_connected", nkeep)
+    print_kv("n_windows_total", nW as f64)
+    println("AFFECT_NET_CURVATURE_DONE")
+    0
+}

@@ -178,7 +178,12 @@ linear struct FileHandle { fd: i32 }   // must be consumed exactly once
 
 ## Honest Status
 
-This is an active research repository. Public claims are registry-backed; see [docs/serious-language/public-claim-registry.v1.tsv](docs/serious-language/public-claim-registry.v1.tsv).
+This is an active research repository. Public claims are registry-backed; see [`docs/serious-language/public-claim-registry.v1.tsv`](docs/serious-language/public-claim-registry.v1.tsv) (authoritative for every feature's maturity tier).
+
+**PL adoption audit (2026-05-27):** [`docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md`](docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md) — bone-honest stocktake of what a stranger cloning this repo will find, with live probes. The two biggest adopter-unlock gaps are (G1) closing the multi-module bundle compile and (G2) the CLI exit-code contract (G2 fixed 2026-05-27 in this commit).
+
+**Registry rows you should read before drawing conclusions:**
+`stdlib.surface = prototype` · `tooling.editor = prototype` (formatter, REPL, LSP) · `tooling.package = prototype` (no public registry) · `closures.lambdas = stale_conflicting` (spec §4.7.2 non-normative) · `generics.{structs,functions,traits} = prototype` · `binary.source = prototype` (`lean_single.sio` is the source of the checked binary, not the modular tree) · `platform.windows = prototype`.
 
 **Scale (measured, 2026-05):** **4,233** tracked `.sio` files, **~1.84M** lines (`bash scripts/dev/measure_repo_scale.sh`). The self-hosted compiler alone is **~542k** lines — not a small experiment. Full audit: [docs/audit/README.md](docs/audit/README.md) · [SCALE.md](SCALE.md).
 

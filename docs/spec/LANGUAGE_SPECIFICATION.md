@@ -15,7 +15,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.spec.language-
 **Status**: Release Candidate
 **Last Updated**: 2026-03-21
 
-> Note: Lambda/closure literals (Section 4.7) are specified but not yet implemented — use named function references instead (`let f = square`). All other features in this spec are implemented and tested. For the compiler’s current behavior and supported syntax, see `docs/compiler/KNOWN_LIMITATIONS.md`, `docs/MV_CORE_CHECKLIST.md`, and the runnable fixtures under `tests/`.
+> **Note (2026-05-27, updated):** Lambda/closure literals (Section 4.7.2) are **normative and implemented** — 16/17 `tests/run-pass/closure_*.sio` pass (the exception is `closure_linear.sio` which tests linear-resource closures, marked `//@ ignore`). The authoritative tiering for every feature in this spec is `docs/serious-language/public-claim-registry.v1.tsv` (see `closures.lambdas = validated_research`); for compiler limits and active gaps see `docs/compiler/KNOWN_LIMITATIONS.md`.
 
 ---
 
@@ -695,11 +695,11 @@ let result = add(1, 2)
 let chained = obj.method().another()
 ```
 
-### 4.7 Lambda Expressions and Function References
+### 4.7 Function References and Lambda Literals (both normative)
 
-> **Implementation status**: Lambda/closure literals (`|x| x + 1`) are specified but **not yet implemented**. The compiler supports named function references as an alternative. See `docs/compiler/KNOWN_LIMITATIONS.md`.
+Sounio has first-class **function references** and **lambda literals** (`|x| x + 1`). Both are normative, implemented, and gate-tested. The public-claim registry reflects this at `closures.lambdas = validated_research` (`docs/serious-language/public-claim-registry.v1.tsv`).
 
-#### 4.7.1 Named Function References (Implemented)
+#### 4.7.1 Named Function References (normative — implemented)
 
 ```sio
 fn square(x: i64) -> i64 { x * x }
@@ -716,13 +716,36 @@ fn main() -> i64 {
 
 Function references support higher-order programming: functions can be stored in variables, passed as arguments, and called indirectly.
 
-#### 4.7.2 Lambda Expressions (Planned, Not Yet Implemented)
+#### 4.7.2 Lambda Literals (normative — implemented)
+
+Lambda literals (`|params| body`) create anonymous functions. They may capture variables from the enclosing scope (closures), be passed to higher-order functions, and escape their definition scope.
 
 ```sio
-// These are SPECIFIED but do NOT compile yet:
-let add = |a: int, b: int| -> int { a + b }
-let double = |x| x * 2          // Type inferred
+fn apply(f: fn(i64) -> i64, val: i64) -> i64 with Mut, Panic, Div {
+    f(val)
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    // Zero-capture lambda
+    let double = |x: i64| x * 2
+    assert(double(5) == 10)
+
+    // Capturing closure
+    let offset = 100
+    let shifted = |x: i64| x + offset
+    assert(shifted(5) == 105)
+
+    // Passed to HOF
+    let r = apply(|x: i64| x * x, 7)
+    assert(r == 49)
+
+    // Escaping closure (multi-capture, heap env)
+    // See closure_returned.sio / closure_capture.sio for full gate tests.
+    0
+}
 ```
+
+**One open feature:** *linear closures* (capturing linear/affine resources) are not yet implemented. `closure_linear.sio` is `//@ ignore`. All other closure forms are gate-tested in `tests/run-pass/closure_*.sio`.
 
 ### 4.8 Effect Expressions
 

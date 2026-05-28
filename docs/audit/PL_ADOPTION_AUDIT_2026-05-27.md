@@ -1,0 +1,273 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.pl_adoption_2026_05_27
+authority: probe_grounded
+audience: internal+llm-codegen
+last_validated: 2026-05-27
+validated_by: live-probe + repo cross-reference
+-->
+
+# Sounio-as-a-PL Adoption Audit — 2026-05-27
+
+**Personas (in order):** (1) honest internal stocktake; (2) LLM-codegen consumer.
+**Scope:** the whole repo as a product a stranger could clone.
+**Tone:** bone-honest. Every numeric and status claim is anchored to a probe (`$ …`) or a file path.
+**Authoritative companion:** `docs/serious-language/public-claim-registry.v1.tsv` — the repo's own honest-claim downgrade table. This audit largely surfaces it and layers in live probes.
+
+---
+
+## 1. TL;DR
+
+**What Sounio is today.** A self-hosted research language with a singular, defensible identity: `Knowledge<T>` + GUM uncertainty propagated through the type system, a strict 9-effect calculus (E035 propagation, including `Observe`/`Audit`/`Hypothesis`), compile-time confidence tiering (PLATINUM/GOLD/SILVER/BRONZE at a 950/1000 gate), native ELF/Mach-O/PE/PTX codegen, and a self-hosting bootstrap fixed point (`lean_single.sio` → gen2==gen3). The checked binary (`bin/souc` 1.0.0-beta.5) compiles small-to-moderate single-file programs end-to-end; the bootstrap chain is real and reproducible. The identity surface — confidence gates, GUM, effects, PTX — has no peer in any mainstream PL ecosystem, and that is the only contribution worth defending publicly.
+
+**What Sounio isn't yet.** Generic-PL polish is the thinnest layer of the stack. Per the repo's own `public-claim-registry.v1.tsv`, the following are explicitly downgraded to *prototype* or *stale_conflicting*: `stdlib.surface`, `tooling.package`, `tooling.editor` (formatter, REPL, LSP), `closures.lambdas`, `generics.structs`, `generics.functions`, `generics.traits`, `units.measure`, `refinement.types`, `platform.windows`, `binary.source`. The single largest gap is **multi-module bundle compile**: single files lower cleanly, but the modular self-hosted tree is workaround-bound on three named architectural roots (i64 type-hash overflow at 3-level pointer nesting; SRET for ≥8-field structs; nested `&!` struct field-stores) per `[[project_task_c_blocker]]`. The CLI also has a contract leak: `souc check` returns exit 0 on a typecheck failure (probed below) — fatal for any LLM-codegen pipeline that relies on exit codes.
+
+**The biggest adopter-unlock lever.** Not closures, not a public registry, not a formatter. It is **(a) close the bundle compile and (b) make `souc check` honest about exit codes**. (a) is the gate between "single-file demo language" and "language a stranger could grow"; (b) is the gate between "language" and "language that LLMs can target deterministically." Everything else in §8 is secondary.
+
+---
+
+## 2. Reality-vs-Doc Diff
+
+Live probes 2026-05-27 against `bin/souc 1.0.0-beta.5` (`selected_bin=bin/souc-linux-x86_64`, `selected_interface=raw-self-hosted`).
+
+| Claim source | Claim | Probe / file | Reality | Severity |
+|---|---|---|---|---|
+| `docs/compiler/KNOWN_LIMITATIONS.md:32` | "**No active known bugs.** All previously listed bugs have been fixed." | `[[project_task_c_blocker]]` + memory: bundle baseline 766 errors; SRET-large, type-hash overflow, nested-`&!`-field-store. | **Overstated.** Single-file compile is clean; the modular bundle is not. KNOWN_LIMITATIONS reflects `lean_single.sio` only. | Doc-vs-reality gap |
+| `KNOWN_LIMITATIONS.md` ("CLI: check/build/run/repl/format/doc") | CLI includes `format/doc` and is Production. | `./bin/souc` usage banner: `check / compile / build / run / info / --version`. No `format`, no `doc`, no `repl`. | **Wrong.** The shipped CLI has no `format` and no `doc` verb. | Contract gap |
+| `KNOWN_LIMITATIONS.md` ("Formatter Production, AST-based, all constructs, diff mode") | Formatter is Production. | `find tools/ -iname '*fmt*'` → empty. No `souniofmt`, no `tools/fmt*`, no `souc format`. | **Absent.** | Adoption blocker if claimed publicly |
+| `KNOWN_LIMITATIONS.md` ("REPL Beta, 21 commands, JIT") | REPL is Beta. | `tools/repl.sh` is a Bash wrapper; not invokable through `souc`. | **Stub.** Per `public-claim-registry.v1.tsv` row `tooling.editor`: prototype. | Friction |
+| Spec `docs/spec/LANGUAGE_SPECIFICATION.md` §4.7 | Lambda expressions `|x| x+1`. | `public-claim-registry.v1.tsv` row `closures.lambdas` = **`stale_conflicting`**: "Treat closure/lambda claims as not user-safe until reconciled." Function-references work; lambda literals don't. | **Spec drift, registry-acknowledged.** | LLM-codegen footgun |
+| `KNOWN_LIMITATIONS.md` (Package Manager Beta) | `souc publish/search/list` against `~/.sounio/registry/`. | `tools/sounio-pkg/README.md`: external `sounio-pkg` binary; install path "git clone … (once available)". Registry row in claim-registry: **prototype**, "no public registry launch." | Matches the registry downgrade; KNOWN_LIMITATIONS is the rosier read. | Friction |
+| `KNOWN_LIMITATIONS.md` ("Async/await fully implemented; 11 tests PASS") | Async is real. | `ls tests/run-pass/async_*.sio` → **11 files**. `./bin/souc check examples/async_demo.sio` — typecheck **failed** with 6 effect-not-declared errors, but `EXIT=0`. | Async lowering exists; the demo example is stale **and** the check-exit contract is broken. | Mixed |
+| `souc check` semantics | `check` is a typecheck pass. | `./bin/souc check examples/hello_world.sio` → `error: no main`, `EXIT=1`. `./bin/souc check examples/async_demo.sio` → `typecheck: failed`, `EXIT=0`. | **CLI contract leak.** Typecheck failures do not set exit. `no main` does. Inconsistent severity → exit mapping. | **Blocker for LLM codegen / CI** |
+| `artifacts/stdlib/stdlib_reliability_status.v1.json` | `pass=251 fail=0 total=251`, gate `pass`. | Inventory: 927 `.sio` stdlib files, 119 entrypoints. 251/927 = **27% surface coverage**. | The gate is real but narrow. `public-claim-registry.v1.tsv` row `stdlib.surface` = **prototype**, "Do not claim broad stdlib callability." | Honest by registry; misleading if quoted standalone |
+| `[[sounio_stdlib_audit]]` memory | 540/777 PASS, 1 FAIL, 236 ignored (2026-04-20). | Different denominator and date than the reliability gate above. Two co-existing gates with different scopes. | Two truths; pick one when quoting. | Internal-only confusion |
+| Bootstrap | Self-hosting fixed point gen2==gen3. | `[[project_self_host_fixed_point]]` memory + `Makefile` 3-stage targets. `bin/souc-linux-x86_64` is the checked artifact. | **Real.** Singular and defensible. | — |
+| Stdlib single-file load | New stdlib module compiles. | `./bin/souc check stdlib/particle_physics/lib.sio` → `epistemic: 1396 expr, 1396 certain (100%)`, `PLATINUM=1396`, no errors. | **Real.** A fresh 40-file stdlib package lowers clean as a single import unit. | — |
+
+---
+
+## 3. The Identity Surface (defensibly real)
+
+These are the parts that justify a public claim of contribution and that a non-author user can actually touch.
+
+### 3.1 `Knowledge<T>` + GUM
+- **What you get.** Numeric values typed `Knowledge<f64>` (and `Knowledge<i64>`) carry value, GUM uncertainty (0–1000), and confidence (0–1000) through arithmetic. The compiler propagates the uncertainty algebra at compile time; runtime carries the bits.
+- **Where the seams show.** Variance for deep parallel chains overflows (`[[feedback_variance_deep_chains]]`); use in-place mutation + lookbehind control. `print_int` adds `\n` (`[[feedback_print_int_newline]]`); inline integer output needs a digit-loop.
+- **Registry status.** `epistemic.knowledge` = validated_research; `epistemic.gum` = validated_research. Honest.
+
+### 3.2 Effect system
+- **What you get.** `with IO, Mut, Panic, Div, Alloc, Session, Observe, Audit, Hypothesis` (+ `GPU`, `Deterministic`). Strict subset check at call sites; E035 on violation. Observe enforced for comparison, IO-arg, FFI-arg, pattern-match scrutinee in both x86-64 and ARM64 (per KNOWN_LIMITATIONS).
+- **Where the seams show.** Effect propagation diagnostics dominate the bundle-baseline error count (`[[project_task_c_blocker]]`: "effect-not-declared cascade (189)"). The probed `async_demo.sio` failure is exactly this class — six effect-not-declared errors out of a single example. Users who don't grok the calculus hit a wall fast.
+- **Registry status.** `effects.subtyping` + `effects.diagnostics` = stable; "Claim effects through checked positive and diagnostic cases, not full effect calculus maturity."
+
+### 3.3 Confidence gates / tier emission
+- **What you get.** `--emit-econf`, `--dump-conf-json`, `--emit-proofs`. Tier dist on every compile. 1396 PLATINUM on `stdlib/particle_physics/lib.sio` (probed). Below-threshold call sites emit a NOP marker.
+- **Registry status.** `epistemic.boundary` = validated_research.
+
+### 3.4 Codegen
+- **What you get.** ELF (x86-64 + ARM64 native), Mach-O (cross-compile), PE/COFF (cross-compile, prototype per registry), PTX (named gate, validated_research). Cranelift JIT default for `run`.
+- **Where the seams show.** Apple JIT not in the support contract. Windows downgraded to prototype. LLVM lane wired but disabled in the checked artifact — `--backend llvm` needs a feature-flag rebuild.
+- **Registry status.** `platform.linux_x86_64` = stable; `platform.macos` = validated_research; `platform.windows` = prototype; `gpu.ptx` = validated_research; `native_v2` = validated_research.
+
+### 3.5 Self-hosting fixed point
+- **What you get.** `lean_single.sio` → stage1 → stage2 → stage3, md5-identical at gen2/gen3. `Makefile` drives the chain.
+- **Where the seams show.** `binary.source` registry row = **prototype**, "State that lean_single remains the checked binary source until parity gates prove a swap." The modular self-hosted tree (`self-hosted/compiler/…`) is **not** the source of the checked binary. `lean_single.sio` is — a single 43k-line file. Growing the compiler means editing one giant file, not the tree.
+
+---
+
+## 4. The Generic-PL Surface (what an outside adopter benchmarks)
+
+### 4.1 Type system
+| Feature | Status | Note |
+|---|---|---|
+| Nominal types, structs, enums, `match` (or-patterns, struct destructure) | ✓ | Production |
+| Generics (1–2 type params) | prototype (registry) | 3+ params untracked |
+| Trait *definitions* and `impl Type {}` inherent methods | works | parsing + dispatch via `FN_RECV_HASH` |
+| Trait *bounds* (`T: Trait`) enforced at call sites | **No** | parsed, not enforced |
+| Trait objects (`&dyn Trait`) | **No** | not implemented |
+| Closures / lambda literals (`|x| …`) | **No** | registry: stale_conflicting; spec says yes, compiler says no |
+| Lifetimes / lifetime parameters | **No** | borrow tracking is per-call-site only |
+| Linear / affine via `linear`/`affine` struct keyword | ✓ | works; not a substitute for lifetimes |
+| Bidirectional inference | ✓ | local |
+| Refinement types | prototype | runtime fallback (W040) when static engine bails |
+
+### 4.2 Error handling, strings, I/O
+- No exceptions, no `?` operator. Result/Option enums by convention.
+- No growable string type; fixed `[i8; N]` buffers. `&string[..n]` and `.as_bytes()` work.
+- No unary minus (`-x`); spell as `0 - x`. Bit-shift RHS must be `u8` literal.
+
+### 4.3 Build / install
+- `bin/souc` is a Bash launcher; selects `bin/souc-linux-x86_64` (or one of the macOS lanes) by host.
+- No `curl|sh` installer. No checksummed cross-platform release tarball. No Homebrew, no apt, no `pip install sounio`. Install ≡ `git clone`.
+- `tools/sounio-pkg/`: separate Rust-ish CLI; `git clone "(once available)"`. No public registry.
+
+### 4.4 Tooling (probed, not docs-cited)
+| Tool | Probe | Reality |
+|---|---|---|
+| Formatter | `find tools -iname '*fmt*'` | **none.** KNOWN_LIMITATIONS overclaims. |
+| REPL | `tools/repl.sh` | Bash wrapper; not in `souc` verbs. Registry: prototype. |
+| LSP | `tools/lsp/sounio-lsp.sh` | real, Beta. JSON-RPC, 8 methods. |
+| Debugger | `tools/gdb/` | GDB metadata stub only. |
+| Package manager | `tools/sounio-pkg/` | local registry, no public; prototype. |
+| Test runner | `tools/test-framework/`, `Makefile` | real; multiple gates with different denominators. |
+| Doc generator | `tools/souniodoc/` | real. |
+| MCP server | `tools/mcp/` | real (this is what LLM codegen pipelines actually use). |
+| Editors | `tools/editors/vscode/` ✓; `helix/`, `neovim/` planned | VS Code only today. |
+
+### 4.5 CLI contract (the leak)
+Three small probes, big implication for any consumer (human or LLM):
+
+```
+$ ./bin/souc check examples/hello_world.sio   # output ends "error: no main"   EXIT=1
+$ ./bin/souc check examples/async_demo.sio    # output ends "typecheck: failed" EXIT=0   ← BUG
+$ ./bin/souc check stdlib/particle_physics/lib.sio   # clean   EXIT=0
+```
+
+A consumer using `souc check` as a precondition cannot distinguish "passed" from "had six typecheck errors." This is a single-digit-line fix in the CLI wrapper but it's a blocker for treating Sounio as an LLM codegen target.
+
+---
+
+## 5. The Multi-Module Reality (the bundle gap)
+
+`[[project_task_c_blocker]]` summary, current as of 2026-05-24:
+- Bundle baseline: **766 errors** (down from prior thousands).
+- Three named architectural roots, all workaround-only:
+  - **i64 type-hash overflow** at 3-level pointer nesting (e.g. `&Option<Box<Struct>>`). Sim-proven exact. Source workaround: `&Option<Box<T>>` → `&Option<&T>`. Real fix is composite-type interning — architectural, deferred.
+  - **SRET broken for ≥8-field structs.** Memory: `[[feedback_native_compiler_limits]]`. Workaround: flat arrays / split-by-field.
+  - **`&!` struct-field mutation** through references doesn't propagate. Workaround: streaming/flat patterns. (Bare-array index `arr[i] = v` through `&![T;N]` was fixed in v2.0; **struct** field stores were not.)
+- Recent fixes have already cut E200 from 505 → 191 by adding `machine_ir/runtime_context/target_policy/gc/stack_maps/peephole` to the core bundle (`[[project_task_c_blocker]]`).
+
+**Why this matters.** The modular `self-hosted/compiler/` tree is the path to growing the compiler in normal-sized files. As long as the checked binary is fed by one 43k-line `lean_single.sio`, every compiler change is a single-file diff and every new contributor inherits the world's largest .sio file. The registry's own row says it: `binary.source` = prototype.
+
+---
+
+## 6. The Stdlib Reality
+
+- **`artifacts/stdlib/stdlib_reliability_status.v1.json` (2026-05-12):** 251/251 PASS. **Denominator caveat:** stdlib inventory is 927 `.sio` files, 119 entrypoints. 251 tests cover ~27% of files.
+- **`[[sounio_stdlib_audit]]` (2026-04-20):** 540/777 PASS / 1 FAIL / 236 ignored. Different denominator, different date.
+- **Registry row:** `stdlib.surface` = prototype, "Do not claim broad stdlib callability."
+
+Domain libraries by evidence-anchored maturity (not by line count):
+
+| Domain | Evidence | Honest tier |
+|---|---|---|
+| `epistemic/` (Knowledge, GUM) | 19/19 knowledge tests PASS (`[[project_wave_f_type_checking]]`); JCGM 100:2008 conformance | **Mature** |
+| `linalg/`, `stats/` | benchmarks vs NumPy/SciPy, validated matmul/SVD/OLS | **Validated** |
+| `darwin_pbpk/` | clinical-stage; dissertation gate `[[project_masters_dissertation]]`; author-only | Author-validated |
+| `algebra/` octonion + sedenion | 20+ examples; integer-sedenion bipartiteness Lean-verified | Author-validated |
+| `gpu/` (PTX, K-AXI) | L4 job 59/59 PASS (`[[project_kaxi_octonion_sedenion]]`); 5.3 TFLOPS / 17.3% peak | Validated research |
+| `particle_physics/` (this branch) | 40 files, fresh; `lib.sio` lowers clean as a unit; epistemic chain present | **Unaudited new surface** |
+| `ssm/`, `onn/`, `snn/`, `qnn/` | research; few external consumers | Research |
+| `causal/`, `regulatory/` | scaffolding; do-calculus types planned 2027 | Scaffolding |
+
+---
+
+## 7. The LLM-Codegen Consumer View
+
+Zero-shot Sounio generation from a model trained on Rust/Python defaults will fail in deterministic, predictable ways. Each below is a recurrent footgun, with the right idiom adjacent:
+
+| Footgun (training-default) | Sounio reality | Symptom |
+|---|---|---|
+| `&mut T` for mutable ref | `&!T` (`[[feedback_lean_single_features]]`, `[[sounio_llm_training]]`) | E0xx unknown token / parse error |
+| `\|x\| x+1` closures | only function-refs (`let f = square`); registry: `closures.lambdas = stale_conflicting` | parse error |
+| `-x` unary minus | `0 - x` | parse error |
+| `x >> 4` bit shift | `x >> 4u8` (RHS must be `u8`) | type mismatch |
+| `print!("{}", n)` inline integer | `print_int(n)` adds `\n`; use digit-loop `kng_exp_print_i64` for inline (`[[feedback_print_int_newline]]`) | tests with golden output silently miscompare |
+| `Vec<T>` push-mutate | `Seq<T>` exists but field-store needs `with Mut`; struct-field mutation through `&!` is broken | runtime no-op, silent data loss |
+| Result + `?` | hand-written tuple unpack | code translation breaks; no clean error propagation |
+| `fn f(x: i32, y: i32) -> i32` no effects | must declare `with …`; otherwise E035 cascade | the **mode** of failure for `examples/async_demo.sio` (probed) |
+| `souc check && souc run …` in CI | `check` exits 0 on typecheck failure (probed) | LLM pipelines treat broken code as accepted |
+
+**Verdict for this persona.** The highest-ROI lever is not adding closures — it's:
+1. Fix `souc check` exit-code contract (one CLI patch).
+2. Publish a complete, machine-readable **error catalog** (E001–E069 are a start; not all diagnostics emit codes; some emit plain `error: …` strings — see `error: no main`, `error: effect not declared in function signature at line 171`).
+3. Pin the `[[sounio_llm_training]]` rules into `docs/llm-guide/` as a single canonical doc and link from `README.md`.
+
+---
+
+## 8. Discriminators (gaps ranked by adopter unlock, **not a roadmap**)
+
+For each: who unlocks if closed, severity, smallest evidence that would change the rating.
+
+**G1. Multi-module bundle compile.**
+*Who unlocks:* any contributor who'd grow the compiler outside `lean_single.sio`; any user with a non-trivial multi-file program; any reviewer expecting the modular tree to be the source.
+*Severity:* **blocker** for the "real PL" framing.
+*Smallest evidence to change:* `make selfhost-bundle` (or the right target) emits ≤50 errors on a single clean run, and the three named architectural roots are fixed (not worked around).
+
+**G2. Honest CLI contract.**
+*Who unlocks:* every LLM codegen consumer; every CI integrator.
+*Severity:* **blocker** for LLM codegen; friction otherwise.
+*Smallest evidence to change:* `souc check <file_with_typecheck_failure>` returns non-zero; documented mapping of severity → exit. One patch.
+
+**G3. Closure decision.**
+*Who unlocks:* anyone porting from Rust/Python/OCaml. Per registry, `closures.lambdas` is *stale_conflicting* — spec promises, compiler refuses.
+*Severity:* friction; mainly a credibility leak (spec claims a feature the compiler errors on).
+*Smallest evidence to change:* either (a) ship lambda literals lowered to anonymous function-refs at parse time, or (b) **remove §4.7** from the spec and add a section "Functions are first-class; no closure literals — use named functions." Either is honest. Today is neither.
+
+**G4. Diagnostic-catalog parity.**
+*Who unlocks:* LLM codegen, IDE UX, error suggestion. Spans exist; codes are partial; suggestions are uneven.
+*Severity:* friction.
+*Smallest evidence to change:* every diagnostic emits a stable `E0xxx` code; `souc check --json` returns a JSON diagnostic stream; `docs/llm-guide/error-catalog.md` exhaustive and linked.
+
+**G5. REPL + formatter honesty.**
+*Who unlocks:* casual evaluators. The registry already calls these prototype.
+*Severity:* cosmetic but visible — downgrade the KNOWN_LIMITATIONS rows to match the registry, or ship.
+*Smallest evidence to change:* either `souc format` exists in the CLI banner, or KNOWN_LIMITATIONS.md downgrades formatter from "Production."
+
+**G6. Public install path.**
+*Who unlocks:* anyone evaluating Sounio without cloning the monorepo.
+*Severity:* friction.
+*Smallest evidence to change:* one checksummed release tarball per platform on GitHub Releases, and `curl -fsSL … | sh`. Out of scope to design here; not a language change.
+
+---
+
+## 9. Things this audit deliberately does NOT recommend
+
+- **Don't drop the algebra / hypercomplex / connectomics work** to chase Python-comparable polish. The directive (`[[project_sounio_directive]]`) is explicit: the language *is* the SOTA contribution; capability work is the demo set, not the burden.
+- **Don't ship trait-object dynamic dispatch** to look more like Rust. The cost is high; the audience (epistemic scientific computing) does not need it; the registry already says "Do not claim a mature trait ecosystem."
+- **Don't open a public registry yet.** Local registry is honest. A premature public registry inherits a long deprecation tail.
+- **Don't compaction-clean `lean_single.sio` into the modular tree** until the bundle gap (G1) closes. The fixed point is the proof of life; do not break it for tidiness.
+- **Don't promise closures in the spec while the compiler refuses them.** Pick one. (G3.)
+- **Don't co-author papers "for credibility"** (`[[feedback_authorship_ethics]]`). This audit is internal; it doesn't argue for outside endorsement.
+
+---
+
+## 10. Probe log (full)
+
+```
+$ ./bin/souc --version            → souc 1.0.0-beta.5
+$ ./bin/souc info                 → host=Linux x86_64, selected_bin=bin/souc-linux-x86_64
+$ ./bin/souc check examples/hello_world.sio
+  ... epistemic: 1396 expr, 1396 certain (100%), PLATINUM=1396 ...
+  error: no main
+  EXIT=1
+$ ./bin/souc check examples/algebra_demo.sio          → EXIT=0
+$ ./bin/souc check examples/async_demo.sio
+  error: effect not declared in function signature at line 171
+  error: effect not declared in function signature at line 179
+  error: effect not declared in function signature at line 183
+  error: effect not declared in function signature at line 187
+  error: effect not declared in function signature at line 191
+  error: logical not requires bool operand at line 159
+  typecheck: failed
+  EXIT=0     ← CLI contract leak
+$ ./bin/souc check stdlib/particle_physics/lib.sio    → PLATINUM=1396, EXIT=0
+$ ls tests/run-pass/async_*.sio | wc -l               → 11
+$ ls tests/run-pass/ | wc -l                          → 504
+$ ls tests/compile-fail/ | wc -l                      → 246
+$ find tools -iname '*fmt*'                           → (empty)
+$ ls tools/                                           → no formatter; tools/repl.sh is a Bash wrapper
+```
+
+## 11. Anchor file paths
+
+- This audit: `docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md`
+- Honest claim registry: `docs/serious-language/public-claim-registry.v1.tsv`
+- Conservative contract: `docs/guide/MINIMUM_VIABLE_SOUNIO.md`
+- Known limitations (rosier read): `docs/compiler/KNOWN_LIMITATIONS.md`
+- Bundle blocker: memory `[[project_task_c_blocker]]`
+- Bootstrap fixed point: memory `[[project_self_host_fixed_point]]`
+- LLM training rules: memory `[[sounio_llm_training]]`, `docs/llm-guide/`
+- Stdlib gates (two of them): `artifacts/stdlib/stdlib_reliability_status.v1.json` (251/251); memory `[[sounio_stdlib_audit]]` (540/777)
+
+— end —
