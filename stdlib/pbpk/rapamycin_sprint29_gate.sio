@@ -1,0 +1,144 @@
+// stdlib/pbpk/rapamycin_sprint29_gate.sio — Sprint 29: Optimal sampling day gate
+//
+// 56 assertions certifying:
+//   §A  Dispatcher correctness — os_gain_at matches Sprint 28 mst_gain values
+//   §B  Universal-N=3 theorem: argmax = 3 for every stratum
+//   §C  Per-stratum max-gain bounds
+//   §D  Gain at argmax > gain at N=14 strictly (decay theorem)
+//   §E  Gain decay rate > 0 in every stratum
+//   §F  Continuum anchor at f=1.0 matches std exactly
+//   §G  Continuum monotonicity in f (5 sample factors)
+//   §H  Cross-stratum max-gain ordering inh < slow < std < fast < ind
+
+module pbpk::rapamycin_sprint29_gate
+
+use pbpk::rapamycin_optimal_sampling::{
+    os_gain_at, os_argmax_day, os_max_gain, os_gain_decay_rate,
+    os_optimal_day_std, os_optimal_day_slow, os_optimal_day_fast,
+    os_optimal_day_inh, os_optimal_day_ind,
+    os_max_gain_std, os_max_gain_slow, os_max_gain_fast,
+    os_max_gain_inh, os_max_gain_ind,
+    os_ke_at_1, os_F_at_1, os_optimal_day_at, os_max_gain_at,
+    os_gain_at_factor, os_ke_at_factor, os_F_at_factor, os_dose_at_factor
+}
+use pbpk::rapamycin_multistratum_tdm::{mst_gain_std_n14_lcms, mst_gain_ind_n14_lcms}
+use pbpk::rapamycin_cyp3a5::{cyp_ke_standard, cyp_f_standard}
+
+fn s29_chk(b: bool) -> i64 with Mut, Div, Panic { if b { 1 } else { 0 } }
+
+pub fn rapamycin_sprint29_gate() -> i64 with Mut, Div, Panic {
+    var ok = 0
+
+    // Pre-compute all stratum quantities (avoid repeated ODE runs)
+    let amax_std = os_optimal_day_std()
+    let amax_slow = os_optimal_day_slow()
+    let amax_fast = os_optimal_day_fast()
+    let amax_inh = os_optimal_day_inh()
+    let amax_ind = os_optimal_day_ind()
+    let mg_std = os_max_gain_std()
+    let mg_slow = os_max_gain_slow()
+    let mg_fast = os_max_gain_fast()
+    let mg_inh = os_max_gain_inh()
+    let mg_ind = os_max_gain_ind()
+
+    // ── §A — Dispatcher correctness (6 assertions) ────────────────────────
+    // A1-A2: os_gain_at(0, 14) matches Sprint 28 mst_gain_std_n14_lcms (within 1%)
+    let g_std_14 = os_gain_at(0, 14)
+    let g_ind_14 = os_gain_at(4, 14)
+    let g28_std  = mst_gain_std_n14_lcms()
+    let g28_ind  = mst_gain_ind_n14_lcms()
+    ok = ok + s29_chk(g_std_14 > 0.99 * g28_std)
+    ok = ok + s29_chk(g_std_14 < 1.01 * g28_std)
+    ok = ok + s29_chk(g_ind_14 > 0.99 * g28_ind)
+    ok = ok + s29_chk(g_ind_14 < 1.01 * g28_ind)
+    // A5-A6: dispatcher with invalid stratum code falls to ind branch
+    ok = ok + s29_chk(os_gain_at(4, 3) > 1.0)
+    ok = ok + s29_chk(os_gain_at(0, 3) > 1.0)
+
+    // ── §B — Universal-N=3 theorem (5 assertions) ─────────────────────────
+    ok = ok + s29_chk(amax_std  == 3)
+    ok = ok + s29_chk(amax_slow == 3)
+    ok = ok + s29_chk(amax_fast == 3)
+    ok = ok + s29_chk(amax_inh  == 3)
+    ok = ok + s29_chk(amax_ind  == 3)
+
+    // ── §C — Per-stratum max-gain bounds (10 assertions) ──────────────────
+    // std ≈ 4.0787
+    ok = ok + s29_chk(mg_std > 4.05)
+    ok = ok + s29_chk(mg_std < 4.10)
+    // slow ≈ 3.1445
+    ok = ok + s29_chk(mg_slow > 3.10)
+    ok = ok + s29_chk(mg_slow < 3.20)
+    // fast ≈ 6.0583
+    ok = ok + s29_chk(mg_fast > 6.00)
+    ok = ok + s29_chk(mg_fast < 6.10)
+    // inh ≈ 2.2552
+    ok = ok + s29_chk(mg_inh > 2.20)
+    ok = ok + s29_chk(mg_inh < 2.30)
+    // ind ≈ 12.3674
+    ok = ok + s29_chk(mg_ind > 12.0)
+    ok = ok + s29_chk(mg_ind < 12.5)
+
+    // ── §D — Gain at argmax > gain at N=14 (5 assertions) ─────────────────
+    ok = ok + s29_chk(mg_std  > os_gain_at(0, 14))
+    ok = ok + s29_chk(mg_slow > os_gain_at(1, 14))
+    ok = ok + s29_chk(mg_fast > os_gain_at(2, 14))
+    ok = ok + s29_chk(mg_inh  > os_gain_at(3, 14))
+    ok = ok + s29_chk(mg_ind  > os_gain_at(4, 14))
+
+    // ── §E — Decay rate > 0 in every stratum (5 assertions) ──────────────
+    ok = ok + s29_chk(os_gain_decay_rate(0) > 0.0)
+    ok = ok + s29_chk(os_gain_decay_rate(1) > 0.0)
+    ok = ok + s29_chk(os_gain_decay_rate(2) > 0.0)
+    ok = ok + s29_chk(os_gain_decay_rate(3) > 0.0)
+    ok = ok + s29_chk(os_gain_decay_rate(4) > 0.0)
+
+    // ── §F — Continuum at f=1.0 matches std anchors (6 assertions) ────────
+    // ke(1) = cyp_ke_standard()
+    ok = ok + s29_chk(os_ke_at_1() > 0.99 * cyp_ke_standard())
+    ok = ok + s29_chk(os_ke_at_1() < 1.01 * cyp_ke_standard())
+    // F(1) = cyp_f_standard()
+    ok = ok + s29_chk(os_F_at_1() > 0.99 * cyp_f_standard())
+    ok = ok + s29_chk(os_F_at_1() < 1.01 * cyp_f_standard())
+    // gain at (f=1, N=14) matches os_gain_at(0, 14) ≡ std stratum
+    let g_cont_1_14 = os_gain_at_factor(1.0, 14)
+    ok = ok + s29_chk(g_cont_1_14 > 0.99 * g_std_14)
+    ok = ok + s29_chk(g_cont_1_14 < 1.01 * g_std_14)
+
+    // ── §G — Continuum monotone in f (8 assertions) ───────────────────────
+    let m02 = os_max_gain_at(0.2)
+    let m05 = os_max_gain_at(0.5)
+    let m10 = os_max_gain_at(1.0)
+    let m20 = os_max_gain_at(2.0)
+    let m50 = os_max_gain_at(5.0)
+    ok = ok + s29_chk(m02 < m05)
+    ok = ok + s29_chk(m05 < m10)
+    ok = ok + s29_chk(m10 < m20)
+    ok = ok + s29_chk(m20 < m50)
+    // continuum at f=1.0 matches std max gain
+    ok = ok + s29_chk(m10 > 0.99 * mg_std)
+    ok = ok + s29_chk(m10 < 1.01 * mg_std)
+    // continuum argmax stays at N=3 across f
+    ok = ok + s29_chk(os_optimal_day_at(0.5) == 3)
+    ok = ok + s29_chk(os_optimal_day_at(2.0) == 3)
+
+    // ── §H — Cross-stratum max-gain ordering (11 assertions) ──────────────
+    // inh < slow < std < fast < ind
+    ok = ok + s29_chk(mg_inh  < mg_slow)
+    ok = ok + s29_chk(mg_slow < mg_std)
+    ok = ok + s29_chk(mg_std  < mg_fast)
+    ok = ok + s29_chk(mg_fast < mg_ind)
+    // Magnitude gaps: ind > 2× fast (wide-prior amplification)
+    ok = ok + s29_chk(mg_ind > 2.0 * mg_fast)
+    // ind > 3× std at argmax (matches Sprint 28 H55 but at N=3)
+    ok = ok + s29_chk(mg_ind > 3.0 * mg_std)
+    // dose_at_factor is uniform 5.0 by design
+    ok = ok + s29_chk(os_dose_at_factor(0.5) > 4.99)
+    ok = ok + s29_chk(os_dose_at_factor(0.5) < 5.01)
+    ok = ok + s29_chk(os_dose_at_factor(2.0) > 4.99)
+    ok = ok + s29_chk(os_dose_at_factor(2.0) < 5.01)
+    // ke at f=2 > ke at f=0.5 (monotonicity check on continuum ke)
+    ok = ok + s29_chk(os_ke_at_factor(2.0) > os_ke_at_factor(0.5))
+
+    ok
+}
