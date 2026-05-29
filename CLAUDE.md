@@ -112,6 +112,25 @@ Solo / self-hosted-only workflow (skip Cargo): set `SKIP_BUILD=1` for gate scrip
 
 For full lint, harness annotations, and test directory layout, see [`docs/guide/SOUNIO_DEFINITIVE_GUIDE.md`](docs/guide/SOUNIO_DEFINITIVE_GUIDE.md) and [`docs/guide/CHECK_SOUNIO_GUIDE.md`](docs/guide/CHECK_SOUNIO_GUIDE.md).
 
+### Concurrency discipline (workspace stability)
+
+The workspace pod is recycled by the k8s liveness probe under **CPU saturation**
+(not OOM, not disk). On 2026-05-29 the pod was evicted twice when multiple agents
+on the shared checkout each launched a full `souc main.sio` bundle build at once;
+the 15-min load hit ~153 on 64 cores. Two hard rules when more than one agent is
+active:
+
+1. **Serialize heavy builds.** Any full self-compile / bundle check
+   (`souc main.sio`, `lean_single.sio`, `make build`) MUST run through the global
+   build lock — never bare:
+   ```bash
+   scripts/dev/souc-build-lock.sh ./bin/souc self-hosted/compiler/main.sio /tmp/out.elf
+   ```
+   Cheap `souc check <file>` does not need the lock.
+2. **One worktree per agent.** Do not run a second agent directly on
+   `/workspace/sounio`. Use a dedicated worktree (see [`.claude/AGENT_HANDOFF.md`](.claude/AGENT_HANDOFF.md)).
+   Recommended ceiling: **≤2 agents doing compiler work at once** on this pod.
+
 ---
 
 ## 5. AI-native tooling

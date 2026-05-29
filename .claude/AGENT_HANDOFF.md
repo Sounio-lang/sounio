@@ -1,5 +1,18 @@
 # Claude Code Agent Handoff
 
+> **⚠️ WORKSPACE STABILITY (2026-05-29).** The pod was recycled twice by the k8s
+> liveness probe under CPU saturation — four agents were running directly on the
+> shared `/workspace/sounio` checkout, each firing a full `souc main.sio` bundle
+> build (15-min load ~153 on 64 cores). Two non-negotiable rules:
+>
+> 1. **One worktree per agent.** Never run a second agent on `/workspace/sounio`
+>    directly — that checkout is the integration-shepherd lane only. Each worker
+>    gets its own worktree (lane table below). Ceiling: **≤2 agents doing
+>    compiler work at once** on this pod.
+> 2. **Serialize heavy builds** through `scripts/dev/souc-build-lock.sh`
+>    (`souc main.sio` / `lean_single.sio` / `make build`). Bare full builds are
+>    what saturate CPU and trip the probe. Cheap `souc check` is exempt.
+
 ## 6-Agent Lane Activation — 2026-05-10T13:35Z
 
 **Authority**: human-approved at 2026-05-10 (this commit).
