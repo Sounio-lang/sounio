@@ -1,5 +1,36 @@
 # LLM Offload Log
 
+## 2026-05-29: CDCL (1-UIP) + DRUP emitter — adversarial logic review (`cdcl_proof.sio`)
+
+- **Target**: `examples/erdos/cdcl_proof.sio` — from-scratch conflict-driven
+  clause-learning solver (trail/levels/reasons, 1-UIP analysis, non-chronological
+  backjump) that emits DRUP, checked by the same native RUP verifier + drat-trim.
+- **xai (Grok 4.1) math-review**: `NO MATHEMATICAL CONTENT TO REVIEW` (treats the
+  file as code, not a formula) — re-routed to `review`.
+- **deepseek (devil's advocate) review**: 10 findings (2 BLOCKER, 5 MAJOR, 2 MINOR,
+  1 NIT). Adjudication below. **Decisive orthogonal evidence: external `drat-trim`
+  independently returned `s VERIFIED` on the CDCL-emitted K₇/6-col proof**, which
+  directly refutes every soundness BLOCKER and every "crash" claim (a crash or an
+  unsound proof cannot produce a drat-trim `s VERIFIED`).
+
+| # | sev | finding | verdict |
+|---|---|---|---|
+| 1 | BLOCKER | RUP checker `propagate_noenq` "unsound — partial assignment" | **REJECT.** `verify()` is the textbook RUP check: assign the negation of each lemma literal, UP over formula+prior-lemmas, expect conflict. drat-trim agrees. |
+| 2 | BLOCKER | `reason[-1]` read for decision UIP | **REJECT (invariant).** `reason` read only when `pathC>0` ⇒ `p` is propagated, never the lone decision (resolved last). K₄–K₁₀ ran clean. Added invariant comment. |
+| 3 | MAJOR | `seen` not zeroed before `analyze` | **REJECT.** `analyze` clears every `seen` it sets (current-level vars on pop; LEARNT vars in final loop). Enters all-zero. |
+| 4 | MAJOR | "missing semicolon" parse error | **REJECT.** Sounio has no semicolons; whitespace-separated statements are valid. File compiles. |
+| 5 | MAJOR | `db_add` no tautology/dup check breaks RUP | **REJECT.** Colouring CNFs are never tautological; RUP soundness does not require dedup; drat-trim parsed 133/133. |
+| 6 | MAJOR | `trail_lim[btlevel+1]` uninit when `btlevel==cur_level` | **REJECT (invariant).** UIP is the unique current-level literal ⇒ `btlevel < cur_level` always ⇒ index initialised during descent. Added invariant comment. |
+| 7 | MAJOR | `lit_var` i32 overflow for huge DIMACS lits | **ACK / out-of-scope.** vars bounded by MAXV=2048; no overflow in any instance built here. |
+| 8 | MINOR | `print_dec` buffer width / `i64::MIN` | **ACK cosmetic.** values positive & small; 24 digits ample. |
+| 9 | MINOR | DIMACS header count vs learned clauses | **REJECT.** Intentional DIMACS(originals)+DRAT(lemmas) split; drat-trim accepted it. |
+| 10 | NIT | "resolution consequence" vs RUP wording | **ACK.** 1-UIP clauses *are* resolution-derived (hence RUP); wording is accurate, kept. |
+
+Outcome: no change to logic required; two invariant comments added for
+auditability. As with the earlier `sat_proof_kernel.sio` review, DeepSeek
+mis-modelled the RUP mechanism and Sounio syntax; the independent drat-trim
+verification is the ground truth that settles the soundness questions.
+
 ## 2026-05-29: Erdős #90 — repcount engine + decoding OpenAI 2026 unit-distance disproof (math-review)
 
 ### math-review (xai / Grok 4.1) — r₂ doubling core + construction decoding
