@@ -103,6 +103,13 @@ lean_lib «SounioDeGreyUnitDistance» where
 @[default_target]
 lean_lib «SounioDeGreyChi5» where
 
+-- chi(R^2) >= 5 GEOMETRY-LEG-DISCHARGED: instantiates the SounioDeGreyChi5 reduction on the
+-- concrete G_529 over the exact symbolic field-plane QF×QF. Turns the geometry hypothesis into
+-- a PROVED fact (via the native_decide certificate), leaving only the SAT leg hypothetical.
+-- NOT a default_target: imports SounioDeGreyUnitDistance (~3 min native_decide) and runs its
+-- own native_decide; build on demand with `lake build SounioDeGreyChi5Concrete`.
+lean_lib «SounioDeGreyChi5Concrete» where
+
 -- M1: Vancomycin-Knightian thrust — Approx × Causal × Knowledge composition
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where

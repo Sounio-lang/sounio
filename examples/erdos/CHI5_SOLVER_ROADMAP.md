@@ -128,10 +128,26 @@ $SOUNIO_SOUC_BIN examples/erdos/degrey_geometry.sio /tmp/geo.elf && /tmp/geo.elf
   (G₅₂₉ not 4-colourable, `cake_lpr`-verified). Grok 4.1 math-review: "NO ERRORS; reduction
   leg is logically sound." This is the standard, honest SAT+ITP combination shape — the SAT
   fact cannot be brute-forced inside Lean (4^529), so it is fed in as a verified hypothesis.
-- **Remaining (staged):** formalising the ℚ(√3,√5,√7,√11)↪ℝ embedding flagged by the §1c
-  math-review (so the geometry leg's algebraic `dist²=1` becomes a *real-plane* unit-distance
-  statement inside Lean), and optionally importing the geometry file + axiomatising the
-  cake_lpr verdict to collapse the two hypotheses into one zero-hypothesis end-to-end theorem.
+- **Geometry leg DISCHARGED into the composition → Lean 4 (DONE, 2026-05-29).**
+  `formal/lean4/SounioDeGreyChi5Concrete.lean` instantiates the `SounioDeGreyChi5` reduction on
+  the concrete G₅₂₉ over the **exact symbolic field-plane** `QF × QF` (the ℚ(√3,√5,√7,√11)
+  16-tuple model). It defines the intrinsic unit relation `unitFP` (algebraic squared distance
+  = 1), proves `unitFP_emb` (it matches `edgeUnit` definitionally on embedded points), and so
+  turns the geometry leg from a hypothesis into the **PROVED** fact
+  `geom_all_edges_unitFP : ∀ e ∈ edges, unitFP (emb e.1) (emb e.2)` (discharged by the same
+  `native_decide` certificate). The headline
+  `g529_field_plane_needs_5_colours (h_sat : ¬ VColourable) : ¬ Nonempty (PlaneColouring (QF×QF) unitFP 4)`
+  therefore depends on **only `[propext, native_decide.ax]` — no `sorryAx`** (`lake build
+  SounioDeGreyChi5Concrete`), with the SAT leg the *sole* remaining hypothesis. Grok 4.1
+  math-review: "NO MATHEMATICAL ERRORS IN THE LEAN STATEMENTS."
+- **Remaining gap (the only one, staged):** the **isometric embedding `QF ↪ ℝ`**
+  (`b_mask ↦ √(∏ primes)`, a ring homomorphism) lifting "field-plane χ ≥ 5" to "χ(ℝ²) ≥ 5".
+  Honest scope (per the §1c + concrete-file math-reviews): what is machine-checked is the
+  **field-plane** statement (over `QF × QF`, `unitFP`); turning it into a *Euclidean* ℝ²
+  statement needs real analysis (ℝ, `Real.sqrt`, `ring`) — i.e. **Mathlib**, which is not
+  wired into this core-Lean project (`packages: []`, no `ring` tactic). Bringing Mathlib in
+  (or an in-tree real-radical model) is the deferred step; the multiquadratic field identities
+  themselves are standard.
 
 Honest framing (logged once, not repeated): finding/minimising the core was the hard work of
 de Grey/Heule/Parts. The Sounio contribution is the *exact + self-hosted + machine-checked*
