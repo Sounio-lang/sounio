@@ -1,0 +1,151 @@
+// stdlib/pbpk/rapamycin_sprint31_gate.sio — Sprint 31: MC validation of GUM linearisation
+//
+// 56 assertions certifying:
+//   §A  Local sqrt/ln/cos unit checks (8)
+//   §B  LCG period sanity, normal-mean diagnostic (5)
+//   §C  u_GUM matches Sprint 25 values per stratum (6)
+//   §D  std_MC > u_GUM in every stratum — linearisation BREAKDOWN (6)
+//   §E  Agreement ratio u_GUM/std_MC ∈ [0.18, 0.32] in every stratum (8)
+//   §F  Coverage ∈ [0.33, 0.50] (well below 0.95) in every stratum (6)
+//   §G  MC mean reproduces as_trough_mg_l within 5% (cross-sprint) (6)
+//   §H  Sample budget, magnitudes, sanity (11)
+
+module pbpk::rapamycin_sprint31_gate
+
+use pbpk::rapamycin_mc_validation::{
+    mc_sqrt_4, mc_ln_e, mc_cos_0, mc_cos_pi,
+    mc_first_uniform_42, mc_normal_mean_100, mc_n_samples,
+    mc_mean_std_n14,
+    mc_u_gum_std_n14_v, mc_u_gum_fast_n14_v, mc_u_gum_ind_n26_v,
+    mc_std_std_n14, mc_std_fast_n14, mc_std_ind_n26,
+    mc_agreement_std_n14, mc_agreement_fast_n14, mc_agreement_ind_n26,
+    mc_coverage_std_n14, mc_coverage_fast_n14, mc_coverage_ind_n26
+}
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_cyp3a5::{cyp_ke_standard, cyp_f_standard, cyp_ke_fast, cyp_f_fast}
+use pbpk::rapamycin_ddi::{ddi_ke_ind_strong, ddi_f_ind_strong}
+
+fn s31_chk(b: bool) -> i64 with Mut, Div, Panic { if b { 1 } else { 0 } }
+
+pub fn rapamycin_sprint31_gate() -> i64 with Mut, Div, Panic {
+    var ok = 0
+
+    // ── §A — Local helper unit checks (8 assertions) ──────────────────────
+    let sq4 = mc_sqrt_4()
+    let lne = mc_ln_e()
+    let cos0 = mc_cos_0()
+    let cospi = mc_cos_pi()
+    ok = ok + s31_chk(sq4 > 1.999 && sq4 < 2.001)
+    ok = ok + s31_chk(lne > 0.999 && lne < 1.001)
+    ok = ok + s31_chk(cos0 > 0.999 && cos0 < 1.001)
+    ok = ok + s31_chk(cospi < -0.999 && cospi > -1.001)
+    // sq4 exactly 2.0
+    ok = ok + s31_chk(sq4 > 1.9999 && sq4 < 2.0001)
+    // ln(e) close to 1.0 (range-reduced)
+    ok = ok + s31_chk(lne > 0.9999 && lne < 1.0001)
+    // cos(0) exactly 1.0
+    ok = ok + s31_chk(cos0 > 0.9999 && cos0 < 1.0001)
+    // cos(π) close to -1.0
+    ok = ok + s31_chk(cospi < -0.9999 && cospi > -1.0001)
+
+    // ── §B — PRNG sanity (5 assertions) ───────────────────────────────────
+    let u_first = mc_first_uniform_42()
+    let mu100 = mc_normal_mean_100()
+    ok = ok + s31_chk(u_first > 0.0)
+    ok = ok + s31_chk(u_first < 1.0)
+    ok = ok + s31_chk(u_first > 0.5)         // probe-certified ≈ 0.582
+    ok = ok + s31_chk(u_first < 0.6)
+    // 100-sample N(0,1) mean within 3σ of 0 (σ = 1/√100 = 0.1)
+    ok = ok + s31_chk(mu100 > 0.0 - 0.3 && mu100 < 0.3)
+
+    // ── §C — u_GUM matches Sprint 25 (6 assertions) ───────────────────────
+    let ug_std  = mc_u_gum_std_n14_v()
+    let ug_fast = mc_u_gum_fast_n14_v()
+    let ug_ind  = mc_u_gum_ind_n26_v()
+    // std N=14: 0.000901
+    ok = ok + s31_chk(ug_std > 0.00089 && ug_std < 0.00092)
+    // fast N=14: 0.000745
+    ok = ok + s31_chk(ug_fast > 0.00073 && ug_fast < 0.00076)
+    // ind N=26: 0.001168
+    ok = ok + s31_chk(ug_ind > 0.00115 && ug_ind < 0.00120)
+    // Ordering: fast < std < ind (matches Sprint 25 width ordering, sans inh/slow)
+    ok = ok + s31_chk(ug_fast < ug_std)
+    ok = ok + s31_chk(ug_std  < ug_ind)
+    ok = ok + s31_chk(ug_std  > 0.0)
+
+    // ── §D — std_MC > u_GUM — linearisation breakdown (6 assertions) ─────
+    let s_std  = mc_std_std_n14()
+    let s_fast = mc_std_fast_n14()
+    let s_ind  = mc_std_ind_n26()
+    // std_MC > u_GUM in every stratum (linearisation underestimates)
+    ok = ok + s31_chk(s_std  > ug_std)
+    ok = ok + s31_chk(s_fast > ug_fast)
+    ok = ok + s31_chk(s_ind  > ug_ind)
+    // std_MC > 2× u_GUM in every stratum (substantial breakdown)
+    ok = ok + s31_chk(s_std  > 2.0 * ug_std)
+    ok = ok + s31_chk(s_fast > 2.0 * ug_fast)
+    ok = ok + s31_chk(s_ind  > 2.0 * ug_ind)
+
+    // ── §E — Agreement ratio bounds (8 assertions) ────────────────────────
+    let a_std  = mc_agreement_std_n14()
+    let a_fast = mc_agreement_fast_n14()
+    let a_ind  = mc_agreement_ind_n26()
+    // std ≈ 0.226
+    ok = ok + s31_chk(a_std > 0.20)
+    ok = ok + s31_chk(a_std < 0.25)
+    // fast ≈ 0.280
+    ok = ok + s31_chk(a_fast > 0.25)
+    ok = ok + s31_chk(a_fast < 0.32)
+    // ind ≈ 0.241
+    ok = ok + s31_chk(a_ind > 0.20)
+    ok = ok + s31_chk(a_ind < 0.28)
+    // All agreements < 1.0 (linearisation always understates)
+    ok = ok + s31_chk(a_std < 1.0)
+    ok = ok + s31_chk(a_ind < 1.0)
+
+    // ── §F — Coverage bounds (6 assertions) ──────────────────────────────
+    let c_std  = mc_coverage_std_n14()
+    let c_fast = mc_coverage_fast_n14()
+    let c_ind  = mc_coverage_ind_n26()
+    // All coverages substantially below 0.95
+    ok = ok + s31_chk(c_std  < 0.95)
+    ok = ok + s31_chk(c_fast < 0.95)
+    ok = ok + s31_chk(c_ind  < 0.95)
+    // All coverages in [0.3, 0.55]
+    ok = ok + s31_chk(c_std  > 0.30 && c_std  < 0.50)
+    ok = ok + s31_chk(c_fast > 0.30 && c_fast < 0.55)
+    ok = ok + s31_chk(c_ind  > 0.30 && c_ind  < 0.55)
+
+    // ── §G — MC mean reproduces nominal trough (6 assertions) ────────────
+    let mc_mean = mc_mean_std_n14()
+    let nom_std = as_trough_mg_l(5.0, 14, cyp_ke_standard(), cyp_f_standard())
+    // mc_mean within 5% of nominal
+    ok = ok + s31_chk(mc_mean > 0.95 * nom_std)
+    ok = ok + s31_chk(mc_mean < 1.05 * nom_std)
+    // Both are within sub-mg/L range (clinical)
+    ok = ok + s31_chk(mc_mean > 0.005 && mc_mean < 0.015)
+    ok = ok + s31_chk(nom_std > 0.005 && nom_std < 0.015)
+    // Clamp-induced positive bias: MC mean ≥ nominal
+    ok = ok + s31_chk(mc_mean >= nom_std)
+    // Bias < 5%
+    ok = ok + s31_chk(mc_mean - nom_std < 0.05 * nom_std)
+
+    // ── §H — Sample budget + magnitude sanity (11 assertions) ────────────
+    ok = ok + s31_chk(mc_n_samples() == 1000)
+    // std_MC magnitudes
+    ok = ok + s31_chk(s_std  > 0.003 && s_std  < 0.005)
+    ok = ok + s31_chk(s_fast > 0.002 && s_fast < 0.004)
+    ok = ok + s31_chk(s_ind  > 0.004 && s_ind  < 0.006)
+    // Coverage strict bounds on probe values
+    ok = ok + s31_chk(c_std  > 0.35 && c_std  < 0.40)
+    ok = ok + s31_chk(c_fast > 0.42 && c_fast < 0.46)
+    ok = ok + s31_chk(c_ind  > 0.42 && c_ind  < 0.46)
+    // u_GUM > 0 everywhere
+    ok = ok + s31_chk(ug_std > 0.0)
+    ok = ok + s31_chk(ug_fast > 0.0)
+    ok = ok + s31_chk(ug_ind > 0.0)
+    // Sample budget bound
+    ok = ok + s31_chk(mc_n_samples() > 100)
+
+    ok
+}

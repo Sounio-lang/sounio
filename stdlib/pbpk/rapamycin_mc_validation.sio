@@ -1,0 +1,436 @@
+// stdlib/pbpk/rapamycin_mc_validation.sio — Sprint 31: Monte Carlo validation of GUM linearisation
+//
+// Novel dissertation contribution: validates the GUM first-order linearisation
+// (Sprints 22, 25) against Monte Carlo sampling of the 5-parameter trough.
+// All Sounio, no extern "C".  Box-Muller via local Newton sqrt + range-reduced
+// Taylor ln + 12-term Taylor cos.  LCG PRNG follows Numerical Recipes constants
+// (a=1103515245, c=12345, m=2^31), matching the rapamycin chain style and the
+// existing stdlib/epistemic/montecarlo.sio:57 (which we cannot import — its
+// Box-Muller pulls extern C sqrt/log/cos).
+//
+// ── Method ────────────────────────────────────────────────────────────────
+//
+//   For each scenario (stratum, N):
+//     1. Draw n_samples = 1000 samples θ ~ N(θ_nom, Σ_prior)
+//        Each draw: 5 independent normals → (ka, F, ke, k12, k21)
+//     2. Compute C(θ) via local di_trough_5p-style ODE (mirror of Sprint 30)
+//     3. Welford online mean/M2 → (mean_MC, std_MC)
+//     4. Compare with u_GUM = sqrt(as_v_pred_conc(...)) (Sprint 25)
+//     5. Agreement ratio = u_GUM / std_MC.  Linearisation valid when ≈ 1.
+//     6. Coverage = fraction of samples within [C_nom ± 2·u_GUM]
+//
+// ── Sample budget ────────────────────────────────────────────────────────
+//
+//   n_samples = 1000 per scenario.  Each sample requires 48·N Euler steps;
+//   for N=14, 672 steps; for N=26, 1248 steps.  Wall: ≈ 50 ms per scenario
+//   in the native compiler.  We keep the budget low so the gate stays fast.
+//
+// ── Probe-certified findings (/tmp/s31_probe2.sio) ─────────────────────────
+//
+//   GUM linearisation UNDERESTIMATES the true trough distribution width by
+//   ~4× in EVERY stratum — std, fast, and ind alike.  This holds at any N
+//   in the 2-compartment model with population-level CVs (ka 24%, k12 25%,
+//   k21 25%).  The first-order assumption is violated by:
+//
+//     1.  ka's quadratic appearance in flux × gut absorption coupling
+//     2.  k12 / k21's nonlinear redistribution dynamics
+//     3.  Inter-channel coupling not captured by Sprint 22's diagonal sum
+//
+//   Scenario       u_GUM (mg/L)   std_MC (mg/L)    u_GUM/std_MC   coverage
+//   std  N=14      0.000901       0.003984         0.226          0.369
+//   fast N=14      0.000745       0.002658         0.280          0.443
+//   ind  N=26      0.001168       0.004855         0.241          0.436
+//
+//   Implication: the Sprint 25 expanded-U intervals are useful as
+//   conservative-direction summaries but UNDER-estimate the true 95% coverage
+//   width.  TDM decisions made on the GUM CI alone overstate certification.
+//
+//   MC mean for std N=14 reproduces as_trough_mg_l within 3.3%: 0.010108 vs
+//   nominal 0.009792 mg/L — consistent with one-sided clamping shifting the
+//   MC mean slightly upward when ke or k21 samples would go negative.
+//
+//   This is exactly the JCGM 101:2008 (GUM Supplement 1) warning case — when
+//   input CVs are large or the model is nonlinear, first-order propagation
+//   fails and Monte Carlo is the reference method.
+//
+// ── Local helpers (no extern C) ──────────────────────────────────────────
+
+module pbpk::rapamycin_mc_validation
+
+use pbpk::rapamycin_assay::{as_trough_mg_l, as_v_pred_conc}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_cyp3a5::{
+    cyp_ke_standard, cyp_f_standard, cyp_ke_fast, cyp_f_fast
+}
+use pbpk::rapamycin_ddi::{
+    ddi_ke_ind_strong, ddi_f_ind_strong, ddi_ke_var_ind
+}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std,
+    ob_k12_var_std, ob_k21_var_std
+}
+
+// ── Pure-Sounio sqrt (50-iter Newton) ────────────────────────────────────
+
+fn mc_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x
+        var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+// ── Pure-Sounio ln via range reduction + artanh Taylor ───────────────────
+// ln(x) = ln(m · 2^e) = ln(m) + e·ln(2),  m ∈ [0.5, 2.0)
+// ln(m) = 2 · (t + t^3/3 + t^5/5 + …) where t = (m-1)/(m+1)
+fn mc_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0 - 1.0e30 } else if x == 1.0 { 0.0 } else {
+        var m = x
+        var e = 0
+        while m >= 2.0 { m = m / 2.0; e = e + 1 }
+        while m < 0.5  { m = m * 2.0; e = e - 1 }
+        let t = (m - 1.0) / (m + 1.0)
+        let t2 = t * t
+        var sum = t
+        var term = t
+        var k = 1
+        while k < 25 {
+            term = term * t2
+            sum = sum + term / ((2 * k + 1) as f64)
+            k = k + 1
+        }
+        2.0 * sum + (e as f64) * 0.6931471805599453
+    }
+}
+
+// ── Pure-Sounio cos via range reduction + Taylor (12 terms) ──────────────
+
+fn mc_cos(x: f64) -> f64 with Mut, Div, Panic {
+    let twopi = 6.28318530717958647692
+    let pi    = 3.14159265358979323846
+    var a = x
+    while a >= twopi { a = a - twopi }
+    while a < 0.0    { a = a + twopi }
+    if a > pi { a = a - twopi }
+    let a2 = a * a
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 15 {
+        term = 0.0 - term * a2 / (((2 * n - 1) * 2 * n) as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+// ── LCG PRNG (Numerical Recipes constants) ───────────────────────────────
+
+fn mc_uniform(state: i64) -> (f64, i64) {
+    let a: i64 = 1103515245
+    let c: i64 = 12345
+    let m: i64 = 2147483648    // 2^31
+    var next_state = a * state + c
+    next_state = next_state % m
+    if next_state < 0 { next_state = next_state + m };
+    let u = (next_state as f64) / (m as f64)
+    (u, next_state)
+}
+
+// Box-Muller: two uniforms → one standard normal
+fn mc_normal(state: i64) -> (f64, i64) with Mut, Div, Panic {
+    let r1 = mc_uniform(state)
+    let u1_raw = r1.0
+    let st2 = r1.1
+    let r2 = mc_uniform(st2)
+    let u2 = r2.0
+    let st3 = r2.1
+    let u1 = if u1_raw < 1.0e-10 { 1.0e-10 } else { u1_raw }
+    let r = mc_sqrt(0.0 - 2.0 * mc_ln(u1))
+    let theta = 2.0 * 3.14159265358979323846 * u2
+    (r * mc_cos(theta), st3)
+}
+
+// Generate normal with given mean and std
+fn mc_normal_params(state: i64, mean: f64, std: f64) -> (f64, i64) with Mut, Div, Panic {
+    let r = mc_normal(state)
+    (mean + std * r.0, r.1)
+}
+
+// ── 5-parameter trough ODE (mirror of Sprint 30 di_trough_5p) ────────────
+
+fn mc_trough_5p(d_oral: f64, n_doses: i64,
+                ka_val: f64, f_val: f64, ke_val: f64,
+                k12_val: f64, k21_val: f64) -> f64
+    with Mut, Div, Panic {
+    let vc = 75.0
+    let j11 = 0.0 - (ke_val + k12_val)
+    let j12 = k21_val
+    let j21 = k12_val
+    let j22 = 0.0 - k21_val
+    var a_gut = d_oral
+    var a1 = 0.0
+    var a2 = 0.0
+    var dose = 0
+    while dose < n_doses {
+        if dose > 0 { a_gut = a_gut + d_oral };
+        var step = 0
+        while step < 48 {
+            let flux = f_val * ka_val * a_gut
+            let new_ag = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1 = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2 = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            a_gut = new_ag
+            a1 = new_a1
+            a2 = new_a2
+            step = step + 1
+        }
+        dose = dose + 1
+    }
+    a1 / vc
+}
+
+// ── Sample-budget helpers ────────────────────────────────────────────────
+
+pub fn mc_n_samples() -> i64 { 1000 }
+
+// ── Core MC simulator — returns (mean_MC, std_MC) and coverage count ─────
+// Uses Welford online mean/M2; tracks how many samples are within ±2·u_GUM of C_nom.
+
+// 3-tuple returns proved buggy through nested call chains — use 3 separate
+// single-return entry-points sharing the same loop body.  Each runs an
+// independent MC pass; the seed is the same so the param trajectories match.
+
+pub fn mc_sim_mean(d: f64, n: i64,
+                   ka_m: f64, f_m: f64, ke_m: f64, k12_m: f64, k21_m: f64,
+                   ka_var: f64, f_var: f64, ke_var: f64,
+                   k12_var: f64, k21_var: f64,
+                   n_samples: i64, seed: i64) -> f64 with Mut, Div, Panic {
+    let ka_std  = mc_sqrt(ka_var)
+    let f_std   = mc_sqrt(f_var)
+    let ke_std  = mc_sqrt(ke_var)
+    let k12_std = mc_sqrt(k12_var)
+    let k21_std = mc_sqrt(k21_var)
+    var state = seed
+    var i = 0
+    var mean = 0.0
+    while i < n_samples {
+        let n1 = mc_normal(state)
+        let ka_s = ka_m + ka_std * n1.0
+        let n2 = mc_normal(n1.1)
+        let f_s = f_m + f_std * n2.0
+        let n3 = mc_normal(n2.1)
+        let ke_s = ke_m + ke_std * n3.0
+        let n4 = mc_normal(n3.1)
+        let k12_s = k12_m + k12_std * n4.0
+        let n5 = mc_normal(n4.1)
+        let k21_s = k21_m + k21_std * n5.0
+        state = n5.1
+        let ka_c  = if ka_s  <= 0.01   { 0.01   } else { ka_s  }
+        let f_c   = if f_s   <= 0.001  { 0.001  } else { f_s   }
+        let ke_c  = if ke_s  <= 0.0001 { 0.0001 } else { ke_s  }
+        let k12_c = if k12_s <= 0.0001 { 0.0001 } else { k12_s }
+        let k21_c = if k21_s <= 0.00001 { 0.00001 } else { k21_s }
+        let c_s = mc_trough_5p(d, n, ka_c, f_c, ke_c, k12_c, k21_c)
+        let nn = (i + 1) as f64
+        let delta = c_s - mean
+        mean = mean + delta / nn
+        i = i + 1
+    }
+    mean
+}
+
+pub fn mc_sim_std(d: f64, n: i64,
+                  ka_m: f64, f_m: f64, ke_m: f64, k12_m: f64, k21_m: f64,
+                  ka_var: f64, f_var: f64, ke_var: f64,
+                  k12_var: f64, k21_var: f64,
+                  n_samples: i64, seed: i64) -> f64 with Mut, Div, Panic {
+    let ka_std  = mc_sqrt(ka_var)
+    let f_std   = mc_sqrt(f_var)
+    let ke_std  = mc_sqrt(ke_var)
+    let k12_std = mc_sqrt(k12_var)
+    let k21_std = mc_sqrt(k21_var)
+    var state = seed
+    var i = 0
+    var mean = 0.0
+    var m2 = 0.0
+    while i < n_samples {
+        let n1 = mc_normal(state)
+        let ka_s = ka_m + ka_std * n1.0
+        let n2 = mc_normal(n1.1)
+        let f_s = f_m + f_std * n2.0
+        let n3 = mc_normal(n2.1)
+        let ke_s = ke_m + ke_std * n3.0
+        let n4 = mc_normal(n3.1)
+        let k12_s = k12_m + k12_std * n4.0
+        let n5 = mc_normal(n4.1)
+        let k21_s = k21_m + k21_std * n5.0
+        state = n5.1
+        let ka_c  = if ka_s  <= 0.01   { 0.01   } else { ka_s  }
+        let f_c   = if f_s   <= 0.001  { 0.001  } else { f_s   }
+        let ke_c  = if ke_s  <= 0.0001 { 0.0001 } else { ke_s  }
+        let k12_c = if k12_s <= 0.0001 { 0.0001 } else { k12_s }
+        let k21_c = if k21_s <= 0.00001 { 0.00001 } else { k21_s }
+        let c_s = mc_trough_5p(d, n, ka_c, f_c, ke_c, k12_c, k21_c)
+        let nn = (i + 1) as f64
+        let delta = c_s - mean
+        mean = mean + delta / nn
+        let delta2 = c_s - mean
+        m2 = m2 + delta * delta2
+        i = i + 1
+    }
+    if n_samples <= 1 { 0.0 } else { mc_sqrt(m2 / ((n_samples - 1) as f64)) }
+}
+
+pub fn mc_sim_in_band(d: f64, n: i64,
+                       ka_m: f64, f_m: f64, ke_m: f64, k12_m: f64, k21_m: f64,
+                       ka_var: f64, f_var: f64, ke_var: f64,
+                       k12_var: f64, k21_var: f64,
+                       n_samples: i64, seed: i64, band_lo: f64, band_hi: f64) -> i64
+    with Mut, Div, Panic {
+    let ka_std  = mc_sqrt(ka_var)
+    let f_std   = mc_sqrt(f_var)
+    let ke_std  = mc_sqrt(ke_var)
+    let k12_std = mc_sqrt(k12_var)
+    let k21_std = mc_sqrt(k21_var)
+    var state = seed
+    var i = 0
+    var in_band = 0
+    while i < n_samples {
+        let n1 = mc_normal(state)
+        let ka_s = ka_m + ka_std * n1.0
+        let n2 = mc_normal(n1.1)
+        let f_s = f_m + f_std * n2.0
+        let n3 = mc_normal(n2.1)
+        let ke_s = ke_m + ke_std * n3.0
+        let n4 = mc_normal(n3.1)
+        let k12_s = k12_m + k12_std * n4.0
+        let n5 = mc_normal(n4.1)
+        let k21_s = k21_m + k21_std * n5.0
+        state = n5.1
+        let ka_c  = if ka_s  <= 0.01   { 0.01   } else { ka_s  }
+        let f_c   = if f_s   <= 0.001  { 0.001  } else { f_s   }
+        let ke_c  = if ke_s  <= 0.0001 { 0.0001 } else { ke_s  }
+        let k12_c = if k12_s <= 0.0001 { 0.0001 } else { k12_s }
+        let k21_c = if k21_s <= 0.00001 { 0.00001 } else { k21_s }
+        let c_s = mc_trough_5p(d, n, ka_c, f_c, ke_c, k12_c, k21_c)
+        if c_s >= band_lo && c_s <= band_hi { in_band = in_band + 1 };
+        i = i + 1
+    }
+    in_band
+}
+
+// ── Named scenarios — std_MC, mean_MC, coverage ──────────────────────────
+
+pub fn mc_u_gum_std_n14_v() -> f64 with Mut, Div, Panic {
+    eu_u_c(5.0, 14, cyp_ke_standard(), cyp_f_standard(),
+           ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+           ob_k12_var_std(), ob_k21_var_std())
+}
+pub fn mc_u_gum_fast_n14_v() -> f64 with Mut, Div, Panic {
+    eu_u_c(5.0, 14, cyp_ke_fast(), cyp_f_fast(),
+           ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+           ob_k12_var_std(), ob_k21_var_std())
+}
+pub fn mc_u_gum_ind_n26_v() -> f64 with Mut, Div, Panic {
+    eu_u_c(20.0, 26, ddi_ke_ind_strong(), ddi_f_ind_strong(),
+           ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_ind(),
+           ob_k12_var_std(), ob_k21_var_std())
+}
+
+pub fn mc_mean_std_n14_v() -> f64 with Mut, Div, Panic {
+    mc_sim_mean(5.0, 14, 0.62, cyp_f_standard(), cyp_ke_standard(), 0.05, 0.005,
+                ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+                ob_k12_var_std(), ob_k21_var_std(),
+                mc_n_samples(), 42)
+}
+
+pub fn mc_std_std_n14() -> f64 with Mut, Div, Panic {
+    mc_sim_std(5.0, 14, 0.62, cyp_f_standard(), cyp_ke_standard(), 0.05, 0.005,
+               ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+               ob_k12_var_std(), ob_k21_var_std(),
+               mc_n_samples(), 42)
+}
+pub fn mc_std_fast_n14() -> f64 with Mut, Div, Panic {
+    mc_sim_std(5.0, 14, 0.62, cyp_f_fast(), cyp_ke_fast(), 0.05, 0.005,
+               ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+               ob_k12_var_std(), ob_k21_var_std(),
+               mc_n_samples(), 42)
+}
+pub fn mc_std_ind_n26() -> f64 with Mut, Div, Panic {
+    mc_sim_std(20.0, 26, 0.62, ddi_f_ind_strong(), ddi_ke_ind_strong(), 0.05, 0.005,
+               ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_ind(),
+               ob_k12_var_std(), ob_k21_var_std(),
+               mc_n_samples(), 42)
+}
+
+pub fn mc_agreement_std_n14() -> f64 with Mut, Div, Panic {
+    let s = mc_std_std_n14()
+    if s <= 0.0 { 1.0 } else { mc_u_gum_std_n14_v() / s }
+}
+pub fn mc_agreement_fast_n14() -> f64 with Mut, Div, Panic {
+    let s = mc_std_fast_n14()
+    if s <= 0.0 { 1.0 } else { mc_u_gum_fast_n14_v() / s }
+}
+pub fn mc_agreement_ind_n26() -> f64 with Mut, Div, Panic {
+    let s = mc_std_ind_n26()
+    if s <= 0.0 { 1.0 } else { mc_u_gum_ind_n26_v() / s }
+}
+
+pub fn mc_coverage_std_n14() -> f64 with Mut, Div, Panic {
+    let u_gum = mc_u_gum_std_n14_v()
+    let c_nom = mc_trough_5p(5.0, 14, 0.62, cyp_f_standard(), cyp_ke_standard(), 0.05, 0.005)
+    let n_in = mc_sim_in_band(5.0, 14, 0.62, cyp_f_standard(), cyp_ke_standard(), 0.05, 0.005,
+                              ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+                              ob_k12_var_std(), ob_k21_var_std(),
+                              mc_n_samples(), 42, c_nom - 2.0 * u_gum, c_nom + 2.0 * u_gum)
+    (n_in as f64) / (mc_n_samples() as f64)
+}
+pub fn mc_coverage_fast_n14() -> f64 with Mut, Div, Panic {
+    let u_gum = mc_u_gum_fast_n14_v()
+    let c_nom = mc_trough_5p(5.0, 14, 0.62, cyp_f_fast(), cyp_ke_fast(), 0.05, 0.005)
+    let n_in = mc_sim_in_band(5.0, 14, 0.62, cyp_f_fast(), cyp_ke_fast(), 0.05, 0.005,
+                              ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+                              ob_k12_var_std(), ob_k21_var_std(),
+                              mc_n_samples(), 42, c_nom - 2.0 * u_gum, c_nom + 2.0 * u_gum)
+    (n_in as f64) / (mc_n_samples() as f64)
+}
+pub fn mc_coverage_ind_n26() -> f64 with Mut, Div, Panic {
+    let u_gum = mc_u_gum_ind_n26_v()
+    let c_nom = mc_trough_5p(20.0, 26, 0.62, ddi_f_ind_strong(), ddi_ke_ind_strong(), 0.05, 0.005)
+    let n_in = mc_sim_in_band(20.0, 26, 0.62, ddi_f_ind_strong(), ddi_ke_ind_strong(), 0.05, 0.005,
+                              ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_ind(),
+                              ob_k12_var_std(), ob_k21_var_std(),
+                              mc_n_samples(), 42, c_nom - 2.0 * u_gum, c_nom + 2.0 * u_gum)
+    (n_in as f64) / (mc_n_samples() as f64)
+}
+
+// ── Unit checks for local helpers (used by gate §A) ──────────────────────
+
+pub fn mc_sqrt_4() -> f64 with Mut, Div, Panic { mc_sqrt(4.0) }     // expect 2.0
+pub fn mc_ln_e()   -> f64 with Mut, Div, Panic { mc_ln(2.71828182845904523536) }   // ≈ 1.0
+pub fn mc_cos_0()  -> f64 with Mut, Div, Panic { mc_cos(0.0) }      // expect 1.0
+pub fn mc_cos_pi() -> f64 with Mut, Div, Panic { mc_cos(3.14159265358979323846) }   // ≈ -1.0
+
+pub fn mc_first_uniform_42() -> f64 {
+    let r = mc_uniform(42)
+    r.0
+}
+
+// First-100 normal sample mean (CLT diagnostic)
+pub fn mc_normal_mean_100() -> f64 with Mut, Div, Panic {
+    var state = 12345
+    var sum = 0.0
+    var i = 0
+    while i < 100 {
+        let r = mc_normal(state)
+        sum = sum + r.0
+        state = r.1
+        i = i + 1
+    }
+    sum / 100.0
+}
+
+// MC mean reproduces as_trough_mg_l within ~1× u_GUM (cross-check)
+pub fn mc_mean_std_n14() -> f64 with Mut, Div, Panic { mc_mean_std_n14_v() }
