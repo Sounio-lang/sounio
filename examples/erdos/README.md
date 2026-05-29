@@ -53,6 +53,9 @@ So:
 | `spindle_proof_cert.sio` | exact ℚ(√3,√11) spindle geometry → 3-coloring CNF → DRUP proof → RUP + DIMACS/DRAT | ℚ(√3,√11) | χ(spindle) ≥ 4: native VERIFIED + external drat-trim `s VERIFIED` |
 | `dpll_scale_wall.sio` | scaling envelope of the DPLL→DRUP certifier on pigeonhole K_n/(n−1)-col | — | K₄–K₇ VERIFIED (17→6491 lemmas); K₈+ WALL; K₆ drat-trim `s VERIFIED` |
 | `cdcl_proof.sio` | **CDCL (1-UIP) clause-learning** solver emitting DRUP + same RUP checker | — | K₄–K₁₀ VERIFIED; breaks the DPLL wall (K₇: 485 vs 6491 lemmas); K₇ drat-trim `s VERIFIED` |
+| `cdcl_fast.sio` | production-shaped **two-watched-literal CDCL** + integer VSIDS + phase saving + inner/outer restarts + **LBD clause deletion** (DRUP with `d` lines); pigeonhole correctness gate | — | K₄–K₇ VERIFIED with deletion active; K₇ drat-trim `s VERIFIED` on a proof with **1136 `d` deletions**; non-vacuity rejected |
+| `degrey_chi5_fast.sio` | de Grey's **actual 1581-vertex graph** (data acquired, not fabricated): exact i64 fixed-point unit-distance check + 4-colouring CNF + the fast CDCL | i64 fixed-point | **7877/7877** unit edges exact; 8.6 M conflicts / 53 min at bounded memory — **χ ≥ 5 not closed** (honest non-result) |
+| `data/degrey/gen_solver.py` | generator emitting `cdcl_fast.sio` (php) and `degrey_chi5_fast.sio` (degrey) from the graph CSVs | — | — |
 | `erdos90_cubic_tower_base.sio` | explicit witness for the OpenAI-2026 #90 disproof's cubic tower base (Gauss periods) | cubic ⊂ ℚ(ζ_r) | 11/11 certified: field disc = r², r totally ramified |
 
 ### The degree-16 kernel (`degrey_fieldtower.sio`)
@@ -177,6 +180,93 @@ pigeonhole; there CDCL's learning is the decisive lever. The certifier pipeline
 (emit → native RUP → drat-trim) is now production-shaped and waits only on the
 de Grey graph data.
 
+### Production-shaped solver + de Grey's real graph — `cdcl_fast.sio`, `degrey_chi5_fast.sio`
+
+Two blockers from the previous section are now cleared:
+
+1. **The graph data is in the repo** (`data/degrey/`, acquired from the public
+   de Grey 2018 dataset — *not* fabricated). `degrey_chi5_fast.sio` reads the 1581
+   vertices / 7877 edges and **verifies the unit-distance property exactly** with
+   `i64` fixed-point arithmetic (scale 10⁷, integer squared distance vs `10¹⁴` within
+   tolerance): **7877 / 7877 edges confirmed unit-distance**, no floating point.
+2. **The clause-budget / large-struct SRET blocker is side-stepped.** The fast solver
+   uses flat module-level arrays (no by-value `SmtContext` return), so it scales to
+   **millions of clauses** with no SRET corruption. The 4-colouring CNF is 6324 vars /
+   33089 clauses and loads cleanly.
+
+`cdcl_fast.sio` is a from-scratch, production-shaped CDCL:
+
+- **two-watched-literal** unit propagation (each clause watches two literals; only
+  watched-literal lists are scanned — the standard modern propagation engine);
+- **integer VSIDS** decision heuristic with decay/rescale, **phase saving**;
+- **inner/outer (MiniSat-style) restarts** — keep restarts frequent and
+  well-distributed, far better for hard UNSAT than unbounded geometric growth;
+- **LBD-based clause deletion** (`reduce_db`): each learned clause is scored by
+  *Literal Block Distance* (distinct decision levels); periodic reductions at decision
+  level 0 keep all originals, glue clauses (LBD ≤ 3) and locked clauses, delete the
+  rest, **emit a DRUP `d` record for every deletion**, then compact the DB, remap
+  reasons and rebuild the watch lists.
+
+#### Soundness of clause deletion — the drat-trim arbiter
+
+Clause deletion is the part most likely to break a proof, so the **certificate's
+validity is anchored on the external checker, never on the solver**: a bug in
+deletion can only make `drat-trim` **reject** the proof, never falsely accept it.
+Two independent checks back this:
+
+- the **native RUP checker** *ignores* `d` records and stays sound (a lemma that is
+  RUP w.r.t. a superset DB is still RUP — it can only over-approximate, never wrongly
+  accept the empty-clause derivation);
+- **`drat-trim`** *processes* the deletions and replays the add/delete stream in
+  order.
+
+Gate (pigeonhole `K_n/(n−1)`-colouring, with deletion active):
+
+| instance | conflicts | restarts | reduces | clauses deleted | native RUP | drat-trim |
+|---|---:|---:|---:|---:|---|---|
+| K₄ / 3-col | 7 | 0 | 0 | 0 | VERIFIED | — |
+| K₅ / 4-col | 28 | 0 | 0 | 0 | VERIFIED | — |
+| K₆ / 5-col | 156 | 1 | 0 | 0 | VERIFIED | — |
+| K₇ / 6-col | 1 459 | 14 | 3 | **1 136** | VERIFIED | `s VERIFIED` (1067/1460 lemmas in core, 11 296 steps) |
+
+The K₇ certificate carries **1136 `d` deletion lines**; `drat-trim` returns
+`s VERIFIED`. Non-vacuity: corrupting one added lemma flips `drat-trim` to
+`s NOT VERIFIED`. So the deletion machinery is externally certified sound and the
+gate has teeth. (Pigeonhole is pathological for restart-heavy search — it needs to
+*retain* a large resolution refutation — so it is a deliberate *correctness* gate, not
+a performance proxy; the χ ≥ 5 regime is structured, where restarts + learning help.)
+
+#### de Grey's full graph on the cluster (SLURM)
+
+`degrey_chi5_fast.sio` was run on the Sounio HPC cluster (`cpu-ops` partition, single
+node, the binary shipped to the compute node over `srun` stdin and streamed back).
+Clause deletion changed the run from "hits the memory wall" to "bounded-memory steady
+state":
+
+| | old run (no deletion) | strengthened (deletion + inner/outer restarts) |
+|---|---|---|
+| conflicts in ≈ 50 min | 3.5 M (degrading) | **8.6 M** (steady ≈ 2700/s) |
+| restarts | 51 | **2534** |
+| live clause DB | ballooned to 3.5 M | **bounded 40 k–230 k** |
+| outcome | memory wall | bounded, still searching |
+
+**Honest non-result.** Even strengthened, the solver did **not** close de Grey's
+4-colouring UNSAT in 8.6 M conflicts: the `trail` keeps oscillating with no trend to a
+level-0 refutation. Two hard facts emerged:
+
+- a from-scratch CDCL (integer VSIDS, no inprocessing/vivification, no LRB/CHB, no
+  preprocessing) is **far behind industrial solvers** (kissat/CaDiCaL close this in
+  seconds); memory was never the real barrier — *search quality* is;
+- the in-memory DRUP buffer (`P_lits`, 1 G literals) **fills at ≈ 7.5 M conflicts**, so
+  even a much longer run cannot keep a verifiable proof — de Grey-scale certification
+  needs **streamed / compressed proofs (binary DRAT or LRAT on disk)**, not an
+  in-memory array.
+
+This sharpens the path to an actual χ ≥ 5 certificate (see
+[`CHI5_SOLVER_ROADMAP.md`](CHI5_SOLVER_ROADMAP.md)): the bottleneck is now a
+**competitive, proof-producing, ideally formally-verified solver**, plus
+**disk-backed proof infrastructure** — not graph data and not the clause budget.
+
 ### Solver scaling — status and BLOCKER
 
 `native_sat_scale_demo.sio` validates the solver past the old 256-variable cap on
@@ -206,13 +296,16 @@ UNSAT). Current state of `stdlib/theorem/smt.sio`:
 
 ### What is NOT done (honesty boundary)
 
-- We do **not** construct de Grey's actual 510/1581-vertex graph (its vertex data is
-  not in this repo and is **not** fabricated here).
-- We do **not** certify χ(ℝ²) ≥ 5. The pieces in place are: the exact field
-  arithmetic the construction requires, field-closure of spindle gluing, and a
-  native χ pipeline proven on small graphs and (sparsely) past 1000 vars. The gap to
-  a real χ ≥ 5 certificate is: (1) de Grey's graph data, (2) the clause-budget /
-  large-struct fix above.
+- We do **not** certify χ(ℝ²) ≥ 5. We now *do* have de Grey's actual 1581-vertex graph
+  (`data/degrey/`) and verify its 7877 unit edges **exactly** (`i64` fixed-point), and
+  we build and attack the 4-colouring CNF with a production-shaped, deletion-enabled,
+  externally-verified CDCL — but that solver does **not close the UNSAT** (8.6 M
+  conflicts, no refutation). No χ ≥ 5 certificate is claimed.
+- The remaining gap is no longer data or clause budget. It is **solver strength** (a
+  competitive CDCL on par with kissat/CaDiCaL) and **proof infrastructure** (streamed
+  binary-DRAT/LRAT instead of an in-memory buffer that fills at ≈ 7.5 M conflicts).
+  The staged plan to get there — and to make the Sounio solver genuinely *surpass*
+  kissat on a chosen front — is [`CHI5_SOLVER_ROADMAP.md`](CHI5_SOLVER_ROADMAP.md).
 
 ---
 

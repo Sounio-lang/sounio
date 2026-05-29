@@ -1,5 +1,33 @@
 # LLM Offload Log
 
+## 2026-05-29: Fast CDCL + LBD clause deletion — soundness review (`cdcl_fast.sio`)
+
+- **Target**: `examples/erdos/cdcl_fast.sio` — two-watched-literal CDCL with integer
+  VSIDS, phase saving, inner/outer restarts, and **LBD-based clause deletion**
+  emitting DRUP `d` (delete) records. Reviewed because clause deletion is the part
+  most able to corrupt a proof.
+- **xai (Grok 4.1) math-review**: `NO MATHEMATICAL CONTENT TO REVIEW` (code, not a
+  formula) — re-routed to `review`.
+- **deepseek (devil's advocate) review**: provider returned empty (0-byte response;
+  transient outage) — fell back to **xai (Grok 4.1) `review`** per offload policy.
+- **Decisive orthogonal evidence**: external `drat-trim` returns `s VERIFIED` on a
+  K₇/6-col proof **containing 1136 `d` deletion lines**, and `s NOT VERIFIED` when a
+  single added lemma is corrupted. drat-trim *processes* deletions, so it directly
+  validates the deletion machinery; no solver bug can yield a false `s VERIFIED`.
+
+| # | sev | finding | verdict |
+|---|---|---|---|
+| 1 | BLOCKER | `reset_all` clears arrays only up to the stale `nvars`, leaking VSIDS/phase/reason across `run_case` calls | **ACCEPT (robustness).** Empirically safe here (cases K₄<…<K₇ are monotonic, so higher slots stay pristine 0) but fragile. **Fixed**: clear the full static arrays (0..MAXV). |
+| 2 | BLOCKER | native `verify` ignores `d` records ⇒ over-approximating checker | **REJECT (intentional + sound).** A lemma RUP w.r.t. a *superset* DB is still RUP; the native checker can only over-approximate, never falsely accept ⊥. Deletions ARE respected by drat-trim, which returns `s VERIFIED`. Documented in-code. |
+| 3 | MAJOR | watch traversal leaves `prev` inconsistent on watch move | **REJECT.** Standard two-watch pattern: `prev` advances only when the node stays (other-true / unit), stays put when the node is spliced out (replacement found). Validated by drat-trim + the 7877/7877 de Grey propagation. |
+| 4 | MAJOR | `comp_lbd` reads `LEARNT[0]` before it is written | **REJECT.** `LEARNT[0] = 0 − p` is set right after the 1-UIP loop; `comp_lbd()` is called strictly later (end of `analyze`). Ordering is correct. |
+| 5 | MINOR | `reduce_db` may delete the just-added asserting clause ⇒ "add then delete" rejected by drat-trim | **REJECT.** add-then-delete is valid DRAT (common); the add is RUP-checked, the delete just removes it. After `cancel_to(0)` the clause is not needed for backjump (full restart). Empirically the K₇ gate fires `reduce_db` and drat-trim still returns `s VERIFIED`. |
+| 6 | NIT | `print_digit` only handles 0–9 | **REJECT.** Its sole caller `print_dec` feeds `x % 10` ∈ [0,9]. |
+
+Outcome: one robustness fix applied (#1, full-array `reset_all`); gate re-validated
+(`s VERIFIED`, 1136 deletions). All soundness BLOCKERs adjudicated against the
+deletion-respecting drat-trim ground truth.
+
 ## 2026-05-29: CDCL (1-UIP) + DRUP emitter — adversarial logic review (`cdcl_proof.sio`)
 
 - **Target**: `examples/erdos/cdcl_proof.sio` — from-scratch conflict-driven
