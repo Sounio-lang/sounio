@@ -281,7 +281,7 @@ var LAST_LITERAL_VAL: i64 = 0
 // PR-4: per-variable literal tracking. Packed as VAR_LIT_DATA[idx*2+0]=has_lit,
 // [idx*2+1]=lit_val. Lets immutable `let x = -5; takes_pos(x)` propagate the
 // known value to the call-site refinement check.
-var VAR_LIT_DATA: [i64; 2048] = [0; 2048]
+var VAR_LIT_DATA: [i64; 4096] = [0; 4096]
 var VAR_TY: [i64; 2048] = [0; 2048]
 var VAR_TY_HASH: [i64; 2048] = [0; 2048]
 var GL_TY: [i64; 2048] = [0; 2048]
@@ -2623,75 +2623,124 @@ fn knowledge_struct_hash() -> i64 {
         + 101 * 9 * 31
 }
 
-fn ref_hash_make(inner_ty: i64, inner_hash: i64, is_mut: i64) -> i64 {
+// Overflow-safe nested ref/option/box hash encoding.
+// Direct encoding: base + mut + ty*4 + hash*256. Each wrap level multiplies by 256
+// (8 bits). After 3 levels (e.g. &Option<Box<Struct>>), 37-bit name hashes overflow
+// i64. To prevent the overflow producing a negative value that collides with
+// knowledge_hash_is, we intern overflowing composites into a side-table; the
+// returned hash is a sentinel in [rh_intern_base, rh_intern_base+1024) which the
+// decoders look up rather than divide.
+var RH_INTERN_TY: [i64; 1024] = [0; 1024]
+var RH_INTERN_HASH: [i64; 1024] = [0; 1024]
+var RH_INTERN_MUT: [i64; 1024] = [0; 1024]
+var RH_INTERN_COUNT: i64 = 0
+
+fn rh_intern_base() -> i64 {
+    // 2^51 - 1024: sits above 2^50 (ref base) and below 2^51 (unobserved base).
+    return 2251799813684224
+}
+
+fn rh_intern_is(h: i64) -> bool {
+    return h >= rh_intern_base() && h < rh_intern_base() + 1024
+}
+
+fn rh_intern_make(inner_ty: i64, inner_hash: i64, is_mut: i64) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < RH_INTERN_COUNT {
+        if RH_INTERN_TY[i as usize] == inner_ty
+            && RH_INTERN_HASH[i as usize] == inner_hash
+            && RH_INTERN_MUT[i as usize] == is_mut {
+            return rh_intern_base() + i
+        }
+        i = i + 1
+    }
+    if RH_INTERN_COUNT >= 1024 { return 0 }
+    let idx = RH_INTERN_COUNT
+    RH_INTERN_TY[idx as usize] = inner_ty
+    RH_INTERN_HASH[idx as usize] = inner_hash
+    RH_INTERN_MUT[idx as usize] = is_mut
+    RH_INTERN_COUNT = RH_INTERN_COUNT + 1
+    return rh_intern_base() + idx
+}
+
+fn ref_hash_make(inner_ty: i64, inner_hash: i64, is_mut: i64) -> i64 with Mut, Panic {
+    // 2^55 is well clear of i64 overflow when multiplied by 256 and offset by base.
+    // Above the threshold, intern the composite instead of overflowing.
+    if inner_hash < 0 || inner_hash > 36028797018963967 {
+        return rh_intern_make(inner_ty, inner_hash, is_mut)
+    }
     return 1125899906842624 + is_mut + inner_ty * 4 + inner_hash * 256
 }
 
-fn ref_hash_is(h: i64) -> bool {
+fn ref_hash_is(h: i64) -> bool with Mut, Panic {
+    if rh_intern_is(h) { return true }
     return h >= 1125899906842624
 }
 
-fn ref_hash_mut(h: i64) -> i64 with Div, Mut {
+fn ref_hash_mut(h: i64) -> i64 with Div, Mut, Panic {
+    if rh_intern_is(h) { return RH_INTERN_MUT[(h - rh_intern_base()) as usize] }
     return (h - 1125899906842624) % 4
 }
 
-fn ref_hash_inner_ty(h: i64) -> i64 with Div, Mut {
+fn ref_hash_inner_ty(h: i64) -> i64 with Div, Mut, Panic {
+    if rh_intern_is(h) { return RH_INTERN_TY[(h - rh_intern_base()) as usize] }
     return ((h - 1125899906842624) / 4) % 64
 }
 
-fn ref_hash_inner_hash(h: i64) -> i64 with Div, Mut {
+fn ref_hash_inner_hash(h: i64) -> i64 with Div, Mut, Panic {
+    if rh_intern_is(h) { return RH_INTERN_HASH[(h - rh_intern_base()) as usize] }
     return (h - 1125899906842624) / 256
 }
 
-fn ptr_hash_make(inner_ty: i64, inner_hash: i64, is_mut: i64) -> i64 {
+fn ptr_hash_make(inner_ty: i64, inner_hash: i64, is_mut: i64) -> i64 with Mut, Panic {
     return ref_hash_make(inner_ty, inner_hash, is_mut)
 }
 
-fn ptr_hash_mut(h: i64) -> i64 with Div, Mut {
+fn ptr_hash_mut(h: i64) -> i64 with Div, Mut, Panic {
     return ref_hash_mut(h)
 }
 
-fn ptr_hash_inner_ty(h: i64) -> i64 with Div, Mut {
+fn ptr_hash_inner_ty(h: i64) -> i64 with Div, Mut, Panic {
     return ref_hash_inner_ty(h)
 }
 
-fn ptr_hash_inner_hash(h: i64) -> i64 with Div, Mut {
+fn ptr_hash_inner_hash(h: i64) -> i64 with Div, Mut, Panic {
     return ref_hash_inner_hash(h)
 }
 
-fn option_hash_make(inner_ty: i64, inner_hash: i64) -> i64 {
+fn option_hash_make(inner_ty: i64, inner_hash: i64) -> i64 with Mut, Panic {
     return ref_hash_make(inner_ty, inner_hash, 2)
 }
 
-fn option_hash_is(h: i64) -> bool with Div, Mut {
+fn option_hash_is(h: i64) -> bool with Div, Mut, Panic {
     if h < 1125899906842624 { return false }
     return ref_hash_mut(h) == 2
 }
 
-fn option_hash_inner_ty(h: i64) -> i64 with Div, Mut {
+fn option_hash_inner_ty(h: i64) -> i64 with Div, Mut, Panic {
     return ref_hash_inner_ty(h)
 }
 
-fn option_hash_inner_hash(h: i64) -> i64 with Div, Mut {
+fn option_hash_inner_hash(h: i64) -> i64 with Div, Mut, Panic {
     return ref_hash_inner_hash(h)
 }
 
-fn box_hash_make(inner_ty: i64, inner_hash: i64) -> i64 {
+fn box_hash_make(inner_ty: i64, inner_hash: i64) -> i64 with Mut, Panic {
     return ref_hash_make(inner_ty, inner_hash, 3)
 }
 
-fn box_hash_is(h: i64) -> bool with Div, Mut {
+fn box_hash_is(h: i64) -> bool with Div, Mut, Panic {
     if h < 1125899906842624 { return false }
     return ref_hash_mut(h) == 3
 }
 
-fn type_is_option_inline(ty: i64, ty_hash: i64) -> bool with Div, Mut {
+fn type_is_option_inline(ty: i64, ty_hash: i64) -> bool with Div, Mut, Panic {
     if ty != 11 { return false }
     if ty_hash == 0 { return true }
     return option_hash_is(ty_hash)
 }
 
-fn type_is_pointer_like(ty: i64, ty_hash: i64) -> bool with Div, Mut {
+fn type_is_pointer_like(ty: i64, ty_hash: i64) -> bool with Div, Mut, Panic {
     if ty == 10 { return true }
     if ty != 11 { return false }
     return type_is_option_inline(ty, ty_hash) == false
@@ -13986,7 +14035,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 6 {
                     tc_error_hard(method_tok, "unknown method")
                 } else {
-                    tc_error_hard(method_tok, "unknown field access")
+                    tc_error_hard(method_tok, "unknown field access SITE_A")
                 }
                 em(0x31); em(0xc0)
             }
