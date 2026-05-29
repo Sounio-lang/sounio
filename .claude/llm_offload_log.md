@@ -1,5 +1,28 @@
 # LLM Offload Log
 
+## 2026-05-29: Erdős #90 — repcount engine + decoding OpenAI 2026 unit-distance disproof (math-review)
+
+### math-review (xai / Grok 4.1) — r₂ doubling core + construction decoding
+
+- **Target**: `examples/erdos/erdos90_repcount_engine.sio` (exact integer check that
+  r₂(∏ q_i)=4·2^t for t distinct primes ≡1 mod4; ≡3 mod4 ⇒ 0) and the UPDATE section
+  of `docs/research/erdos-90-planar-search-plan.md` decoding the OpenAI 2026 Lean
+  disproof (github.com/logical-intelligence/erdos-unit-distance).
+
+```
+[OK] Claim 1  r₂(n)=4(d₁−d₃) ⇒ exactly 4·2^t for squarefree N (t primes ≡1 mod4);
+              ≡3 mod4 odd power ⇒ r₂=0.
+[OK] Claim 2  lens/overlap area 2R²·arccos(1/2R) − ½√(4R²−1) is the two-unit-separated-
+              disk intersection.
+[OK] Claim 3  fixed δ>0 on an infinite set falsifies n^{1+o(1)}; t·log2 vs log H
+              mechanism faithfully reproduced.
+[OK] Claim 4  scoping honest — verification limited to the finite r₂ count; class-field/
+              Golod–Shafarevich content explicitly disclaimed.
+```
+
+Outcome: clean, no OVERREACH. The .sio runs all-exact (8→16→32→64). No independent
+claim made on the exponent; OpenAI artifact flagged as days-old / not peer-reviewed.
+
 ## 2026-05-28: Exact arithmetic kernel over Q(√3,√5,√7,√11) — de Grey degree-16 field (#508)
 
 ### math-review (xai / Grok 4.1) — field tower + XOR multiplication law

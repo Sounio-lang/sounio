@@ -160,3 +160,68 @@ Cartesian frame, so heterogeneous exact pools with cross-lattice unit edges don'
 Genuinely beating the grid would require non-lattice rational configs / the additive-energy
 frontier — beyond exact lattice search. The cluster engine, however, is fully proven:
 build → ship ELF over srun → 3-node parallel search → exact, Lean-certifiable configs.
+
+## UPDATE 2026-05-29: the exponent gap has (allegedly) been closed — OpenAI 2026
+
+Throughout this plan we said the `n^{4/3}`-vs-`n^{1+c/loglog n}` **exponent** gap is
+"not finite-search-accessible" and "we do not target the exponent." On 2026-05-28 a
+Lean 4 formalization appeared claiming exactly that result:
+
+> **OpenAI (2026), *Disproof of Erdős's planar unit-distance conjecture*** —
+> `github.com/logical-intelligence/erdos-unit-distance` (Apache-2.0, Lean 4.29.1 +
+> Mathlib). The headline `main_theorem` proves
+> `∃ δ > 0, { n | νn(n) ≥ n^(1+δ) }.Infinite`, where `νn(n) = u(n)`. A **fixed** `δ>0`
+> infinitely often **contradicts** `u(n) = n^{1+o(1)}` (Erdős's conjecture).
+
+**Trust base (as published).** Conditional on two classical, well-cited hypotheses
+isolated in `main_theorem`'s signature: the Golod–Shafarevich inequality
+(`d(Q)² < 4 r(Q)`, NSW 3.9.7 / Serre) and Shafarevich's relation-rank bound (Mayer
+Thm 5.1, S=∅ / Koch 11.5+11.8). `#print axioms` reduces to `propext`,
+`Classical.choice`, `Quot.sound` — no bespoke axioms, no `sorry`; CI runs `lake build`
++ `leanchecker`, with a heavier `lean4export`+nanoda kernel pass locally.
+
+**The mechanism (decoded from the Lean source).** Not geometry of lattices —
+**class field towers.** Pick a cyclic cubic totally-real field `F` (a subfield of
+`ℚ(ζ_r)`, `r` prime `≡ 1 mod 3`) whose maximal **unramified pro-3 extension is
+infinite** (Golod–Shafarevich: `r ≤ d+2` from Shafarevich forces `d² < 4r` to fail
+for any finite quotient). This gives a tower of fields `L_j/F`, all unramified,
+`deg → ∞`. Set `K_j = L_j(i)` — that is the *plane* (the `i² = −1` complex place),
+`AdmissibleDatum` in the Lean. Fix `t` rational primes `q ≡ 1 (mod 4)` that split
+completely in `L`. The exponent excess is
+
+```
+γ = t·log 2 − log H > 0,      H = class-number growth base (h(K_j) ≤ H^f).
+```
+
+Each split prime `q ≡ 1 (mod 4)` **doubles** the count of algebraic elements of a
+given norm (factor 2 ⇒ the `t·log 2` term); the class number is the loss (`log H`).
+When `t·log 2 > log H`, the unit-distance count on `n` algebraic points of `K_j`
+beats `n^{1+o(1)}`. A geometric double-count (`overlapArea(R) = 2R²·arccos(1/2R) −
+½√(4R²−1)`, the lens area of two unit-separated disks) turns the algebraic
+representation count into the planar `u(n)` bound.
+
+**This is the infinite-degree lift of our pilot.** Our search repeatedly found the
+winning distance `N` climbing `5 → 65 → 325 → 1105` as the **sum-of-two-squares count
+`r₂(N)` grows** (the doc's own `r₂(N) = 32` at `N=1105=5·13·17`). That `r₂` doubling
+*is* the `t·log 2` engine — in the base plane `ℤ[i]`, `r₂(∏ q_i) = 4·2^t` for `t`
+distinct primes `q_i ≡ 1 (mod 4)`. We verify this exact-arithmetic core independently
+in `examples/erdos/erdos90_repcount_engine.sio` (8→16→32→64; and any `≡ 3 (mod 4)`
+factor sends `r₂` to 0 — the construction's `q_mod4` hypothesis). What our finite /
+lattice search **structurally cannot** do — and the OpenAI result makes precise — is
+let the *field degree* grow: the exponent lever is unbounded-degree number fields, not
+a cleverer planar lattice. Our "honest caveat" (`exponent gap is not
+finite-search-accessible`) is corroborated, and the actual key is now identified.
+
+**NB / correction.** The cross-lattice "foreclosure" remark in the densest-k-subgraph
+section above (ℤ² and ℤ[ω] sharing no integer Cartesian frame ⇒ heterogeneous unit
+edges "don't exist") was already found **invalid** in a 2026-05-28 `math-review`
+(logged in `.claude/llm_offload_log.md`); the OpenAI construction reinforces the
+correction — exact unit-distance richness lives in number fields of growing degree,
+not in any fixed integer frame.
+
+**Honest standing.** This is a **3-days-old, not-yet-peer-reviewed** artifact; the
+"OpenAI 2026" attribution and the result itself await community scrutiny, and two
+classical inputs are assumed (not proved) in Lean. We verify only the **finite
+combinatorial core** (`erdos90_repcount_engine.sio`), not the class field tower, which
+is infinitary and outside exact computation. We make **no** independent claim on the
+exponent.
