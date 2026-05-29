@@ -1,0 +1,196 @@
+// stdlib/pbpk/rapamycin_phenotype_audit.sio — Sprint 41
+//
+// Phenotype-naive fixed-dose protocol audit: what happens when every patient
+// receives the standard 5 mg/day regardless of CYP3A4 phenotype?
+//
+// Finding A: inh certify-then-toxify — undetected inhibitor certifies at N=1
+//            (first dose already sufficient); Z_ceil=2.303 at N=7 (barely safe);
+//            uncertifiable at N=8 (Z_ceil=1.011); overtly toxic at N=9
+//            (C=0.02027 mg/L > ceiling 0.020). Certification window = 7 doses.
+// Finding B: ind chronic sub-therapeutic — ind at D=5mg has Z_floor=-9.67 at
+//            N=26 (trough=0.001177 mg/L, 3.4× below floor=0.004); never
+//            certifies within 60 doses; trough drifts toward SS < 0.002 mg/L.
+// Finding C: slow delayed toxicity — certifies at N=3; uncertifiable at N=21
+//            (Z_ceil=0.801); overtly toxic at N=23 (N_tox=23 vs N_tox=45 for std).
+// Finding D: fast never toxic — fast certifies at N=15, never exceeds ceiling
+//            within 60 doses; std safe until N=45.
+
+module pbpk::rapamycin_phenotype_audit
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn pa_find_ncrit(d: f64, ke: f64, f: f64,
+                 ka_v: f64, f_v: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> i64
+    with Mut, Div, Panic {
+    let floor = trough_floor_mg_l(); let ceil = trough_ceil_mg_l()
+    var n = 1; var found = 0
+    while n <= 60 && found == 0 {
+        let c  = as_trough_mg_l(d, n, ke, f)
+        let uc = eu_u_c(d, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v)
+        if (c - floor) / uc >= 2.0 && (ceil - c) / uc >= 2.0 { found = n }
+        else { n = n + 1 }
+    }
+    found
+}
+
+// First N where trough concentration exceeds ceiling (overtly toxic). Returns 0 if never.
+fn pa_find_ntox(d: f64, ke: f64, f: f64) -> i64 with Mut, Div, Panic {
+    let ceil = trough_ceil_mg_l()
+    var n = 1; var found = 0
+    while n <= 60 && found == 0 {
+        if as_trough_mg_l(d, n, ke, f) > ceil { found = n }
+        else { n = n + 1 }
+    }
+    found
+}
+
+// Last N in the certification window starting from N_crit. Returns 0 if ncrit=0.
+fn pa_find_nlast_cert(d: f64, ke: f64, f: f64,
+                       ka_v: f64, f_v: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> i64
+    with Mut, Div, Panic {
+    let ncrit = pa_find_ncrit(d, ke, f, ka_v, f_v, ke_v, k12_v, k21_v)
+    if ncrit == 0 { 0 }
+    else {
+        let floor = trough_floor_mg_l(); let ceil = trough_ceil_mg_l()
+        var n = ncrit; var last = ncrit
+        while n <= 60 {
+            let c  = as_trough_mg_l(d, n, ke, f)
+            let uc = eu_u_c(d, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v)
+            if (c - floor) / uc >= 2.0 && (ceil - c) / uc >= 2.0 { last = n }
+            n = n + 1
+        }
+        last
+    }
+}
+
+fn pa_zceil(d: f64, n: i64, ke: f64, f: f64,
+            ka_v: f64, f_v: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d, n, ke, f)
+    let uc = eu_u_c(d, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v)
+    (trough_ceil_mg_l() - c) / uc
+}
+
+fn pa_zfloor(d: f64, n: i64, ke: f64, f: f64,
+             ka_v: f64, f_v: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d, n, ke, f)
+    let uc = eu_u_c(d, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v)
+    (c - trough_floor_mg_l()) / uc
+}
+
+// ── Correct-dose references ──────────────────────────────────────────────────
+pub fn pa_inh_correct_ncrit() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_find_ncrit(1.5,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+pub fn pa_ind_correct_ncrit() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_find_ncrit(34.0,0.05590,0.047, ka,fv,ob_ke_var_ind(),k12,k21)
+}
+
+// ── std at D=5mg (correct protocol) ─────────────────────────────────────────
+pub fn pa_std5_ncrit() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_find_ncrit(5.0,0.01118,0.141, ka,fv,ke,k12,k21)
+}
+pub fn pa_std5_ntox() -> i64 with Mut, Div, Panic {
+    pa_find_ntox(5.0,0.01118,0.141)
+}
+
+// ── slow at D=5mg (correct protocol for slow, but wrong stratum may not be identified) ──
+pub fn pa_slow5_ncrit() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_find_ncrit(5.0,0.00838,0.188, ka,fv,ke,k12,k21)
+}
+pub fn pa_slow5_ntox() -> i64 with Mut, Div, Panic {
+    pa_find_ntox(5.0,0.00838,0.188)
+}
+pub fn pa_slow5_zceil_n14() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_zceil(5.0,14,0.00838,0.188, ka,fv,ke,k12,k21)
+}
+pub fn pa_slow5_zceil_n21() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_zceil(5.0,21,0.00838,0.188, ka,fv,ke,k12,k21)
+}
+
+// ── fast at D=5mg (correct protocol) ────────────────────────────────────────
+pub fn pa_fast5_ncrit() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_find_ncrit(5.0,0.01677,0.094, ka,fv,ke,k12,k21)
+}
+pub fn pa_fast5_ntox() -> i64 with Mut, Div, Panic {
+    pa_find_ntox(5.0,0.01677,0.094)
+}
+
+// ── FINDING A: inh at D=5mg (overdose — should receive 1.5mg) ───────────────
+pub fn pa_inh5_ncrit() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_find_ncrit(5.0,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+pub fn pa_inh5_nlast_cert() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_find_nlast_cert(5.0,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+pub fn pa_inh5_ntox() -> i64 with Mut, Div, Panic {
+    pa_find_ntox(5.0,0.002236,0.282)
+}
+pub fn pa_inh5_cert_window() -> i64 with Mut, Div, Panic {
+    let ncrit  = pa_inh5_ncrit()
+    let nlast  = pa_inh5_nlast_cert()
+    if ncrit == 0 { 0 } else { nlast - ncrit + 1 }
+}
+pub fn pa_inh5_zceil_n7() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_zceil(5.0,7,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+pub fn pa_inh5_zceil_n8() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_zceil(5.0,8,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+pub fn pa_inh5_zceil_n9() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_zceil(5.0,9,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+
+// ── FINDING B: ind at D=5mg (underdose — should receive 34mg) ───────────────
+pub fn pa_ind5_ncrit() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_find_ncrit(5.0,0.05590,0.047, ka,fv,ob_ke_var_ind(),k12,k21)
+}
+pub fn pa_ind5_ntox() -> i64 with Mut, Div, Panic {
+    pa_find_ntox(5.0,0.05590,0.047)
+}
+pub fn pa_ind5_zfloor_n26() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_zfloor(5.0,26,0.05590,0.047, ka,fv,ob_ke_var_ind(),k12,k21)
+}
+pub fn pa_ind5_zfloor_n60() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pa_zfloor(5.0,60,0.05590,0.047, ka,fv,ob_ke_var_ind(),k12,k21)
+}
+pub fn pa_ind5_trough_n26() -> f64 with Mut, Div, Panic {
+    as_trough_mg_l(5.0,26,0.05590,0.047)
+}

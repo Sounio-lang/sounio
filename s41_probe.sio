@@ -1,0 +1,149 @@
+// Sprint 41 probe: phenotype-naive fixed 5mg protocol audit
+// What happens to each stratum when given the standard 5mg/day dose?
+// Key questions:
+//   inh at 5mg: certify-then-toxify? At what N?
+//   ind at 5mg: ever certify? Z_floor at N=26,60?
+//   slow at 5mg: already in Sprint 34 (toxic at N=26); confirm
+//   fast at 5mg: N_crit=15 (this is correct protocol)
+//   std at 5mg: N_crit=6 (reference)
+
+module main
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn find_ncrit(d: f64, ke: f64, f: f64,
+              ka_v: f64, f_v: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> i64
+    with Mut, Div, Panic {
+    let floor = trough_floor_mg_l(); let ceil = trough_ceil_mg_l()
+    var n = 1; var found = 0
+    while n <= 60 && found == 0 {
+        let c  = as_trough_mg_l(d, n, ke, f)
+        let uc = eu_u_c(d, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v)
+        let zf = (c - floor) / uc
+        let zc = (ceil - c)  / uc
+        if zf >= 2.0 && zc >= 2.0 { found = n }
+        else { n = n + 1 }
+    }
+    found
+}
+
+// First N where trough exceeds ceiling (Z_ceil < 0): toxic crossing
+fn find_ntox(d: f64, ke: f64, f: f64,
+             ka_v: f64, f_v: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> i64
+    with Mut, Div, Panic {
+    let ceil = trough_ceil_mg_l()
+    var n = 1; var found = 0
+    while n <= 60 && found == 0 {
+        let c = as_trough_mg_l(d, n, ke, f)
+        if c > ceil { found = n }
+        else { n = n + 1 }
+    }
+    found
+}
+
+fn pi(n: i64) with Mut, Div, Panic, IO {
+    if n == 0 { print("0") }
+    else {
+        var digits = [0, 0, 0, 0, 0, 0, 0, 0]
+        var num = n; var count = 0
+        while num > 0 { digits[count] = num - (num / 10) * 10; num = num / 10; count = count + 1 }
+        var idx = count - 1
+        while idx >= 0 {
+            if digits[idx] == 0 { print("0") } else if digits[idx] == 1 { print("1") }
+            else if digits[idx] == 2 { print("2") } else if digits[idx] == 3 { print("3") }
+            else if digits[idx] == 4 { print("4") } else if digits[idx] == 5 { print("5") }
+            else if digits[idx] == 6 { print("6") } else if digits[idx] == 7 { print("7") }
+            else if digits[idx] == 8 { print("8") } else { print("9") };
+            idx = idx - 1
+        }
+    }
+}
+
+fn main() with Mut, Div, Panic, IO {
+    let ka  = ob_ka_var_std()
+    let fv  = ob_f_var_std()
+    let ke  = ob_ke_var_std()
+    let k12 = ob_k12_var_std()
+    let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    let ke_ind = ob_ke_var_ind()
+
+    // === Reference: correct-dose N_crit ===
+    print("=== Correct-dose N_crit (reference) ===\n")
+    print("std D=5mg:   N_crit="); pi(find_ncrit(5.0,0.01118,0.141,ka,fv,ke,k12,k21)); print("\n")
+    print("slow D=5mg:  N_crit="); pi(find_ncrit(5.0,0.00838,0.188,ka,fv,ke,k12,k21)); print("\n")
+    print("fast D=5mg:  N_crit="); pi(find_ncrit(5.0,0.01677,0.094,ka,fv,ke,k12,k21)); print("\n")
+    print("inh  D=1.5mg:N_crit="); pi(find_ncrit(1.5,0.002236,0.282,ka,fv,ke_inh,k12,k21)); print("\n")
+    print("ind  D=34mg: N_crit="); pi(find_ncrit(34.0,0.05590,0.047,ka,fv,ke_ind,k12,k21)); print("\n")
+
+    // === Fixed D=5mg for ALL strata ===
+    print("\n=== Fixed D=5mg protocol (phenotype-naive) ===\n")
+
+    // std at 5mg: should certify at N=6 (correct dose)
+    print("std  5mg: N_crit="); pi(find_ncrit(5.0,0.01118,0.141,ka,fv,ke,k12,k21))
+    print(" N_tox="); pi(find_ntox(5.0,0.01118,0.141,ka,fv,ke,k12,k21)); print("\n")
+
+    // slow at 5mg: certifies early, goes toxic later
+    print("slow 5mg: N_crit="); pi(find_ncrit(5.0,0.00838,0.188,ka,fv,ke,k12,k21))
+    print(" N_tox="); pi(find_ntox(5.0,0.00838,0.188,ka,fv,ke,k12,k21)); print("\n")
+
+    // fast at 5mg: correct protocol
+    print("fast 5mg: N_crit="); pi(find_ncrit(5.0,0.01677,0.094,ka,fv,ke,k12,k21))
+    print(" N_tox="); pi(find_ntox(5.0,0.01677,0.094,ka,fv,ke,k12,k21)); print("\n")
+
+    // inh at 5mg: WRONG dose (should be 1.5mg), using inh ke_var
+    print("inh  5mg: N_crit="); pi(find_ncrit(5.0,0.002236,0.282,ka,fv,ke_inh,k12,k21))
+    print(" N_tox="); pi(find_ntox(5.0,0.002236,0.282,ka,fv,ke_inh,k12,k21)); print("\n")
+
+    // ind at 5mg: WRONG dose (should be 34mg)
+    print("ind  5mg: N_crit="); pi(find_ncrit(5.0,0.05590,0.047,ka,fv,ke_ind,k12,k21))
+    print(" N_tox="); pi(find_ntox(5.0,0.05590,0.047,ka,fv,ke_ind,k12,k21)); print("\n")
+
+    // === Detailed Z traces: inh at D=5mg ===
+    print("\n=== inh at D=5mg: Z_floor and Z_ceil trace ===\n")
+    var n = 1
+    while n <= 20 {
+        let c  = as_trough_mg_l(5.0, n, 0.002236, 0.282)
+        let uc = eu_u_c(5.0, n, 0.002236, 0.282, ka, fv, ke_inh, k12, k21)
+        let zf = (c - trough_floor_mg_l()) / uc
+        let zc = (trough_ceil_mg_l() - c)  / uc
+        print("N="); pi(n); print(": c="); print_f64(c)
+        print(" zf="); print_f64(zf); print(" zc="); print_f64(zc); print("\n")
+        n = n + 1
+    }
+
+    // === Detailed Z traces: ind at D=5mg ===
+    print("\n=== ind at D=5mg: Z_floor trace ===\n")
+    let ns = [1, 7, 14, 26, 40, 60]
+    var idx = 0
+    while idx < 6 {
+        let ni = ns[idx]
+        let c  = as_trough_mg_l(5.0, ni, 0.05590, 0.047)
+        let uc = eu_u_c(5.0, ni, 0.05590, 0.047, ka, fv, ke_ind, k12, k21)
+        let zf = (c - trough_floor_mg_l()) / uc
+        print("N="); pi(ni); print(": c="); print_f64(c)
+        print(" zf="); print_f64(zf); print("\n")
+        idx = idx + 1
+    }
+
+    // === slow Z_ceil at D=5mg: confirm toxic crossing ===
+    print("\n=== slow at D=5mg: Z_ceil trace ===\n")
+    let ns2 = [7, 14, 21, 26, 30]
+    var idx2 = 0
+    while idx2 < 5 {
+        let ni = ns2[idx2]
+        let c  = as_trough_mg_l(5.0, ni, 0.00838, 0.188)
+        let uc = eu_u_c(5.0, ni, 0.00838, 0.188, ka, fv, ke, k12, k21)
+        let zf = (c - trough_floor_mg_l()) / uc
+        let zc = (trough_ceil_mg_l() - c)  / uc
+        print("N="); pi(ni); print(": c="); print_f64(c)
+        print(" zf="); print_f64(zf); print(" zc="); print_f64(zc); print("\n")
+        idx2 = idx2 + 1
+    }
+}
