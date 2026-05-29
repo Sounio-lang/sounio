@@ -1,0 +1,360 @@
+// stdlib/pbpk/rapamycin_multistratum_tdm.sio — Sprint 28: Bayesian TDM measurement update
+//
+// Novel dissertation contribution: closes the measure -> certify loop.  A single
+// TDM observation at dose N updates the GUM-propagated prior to a posterior via
+// inverse-variance fusion (epistemic::knowledge::ep_merge).  The arc:
+//
+//   prior   = N( C_pred(D, N; stratum) , V_pred_conc(...) )       [Sprints 22-25]
+//   obs     = N( C_pred,                  V_assay = (cv * C)^2 )   [Sprint 23]
+//   post    = ep_merge(prior, obs)
+//   gain    = sqrt(V_pred / V_post) = sqrt(1 + V_pred / V_assay)
+//
+// ── LCMS <-> immuno equivalence theorem ─────────────────────────────────────
+//
+//   With k independent immuno observations at the same nominal value, the
+//   pooled likelihood variance is V_immuno / k.  Setting the k-immuno posterior
+//   variance equal to the 1-LCMS posterior variance gives
+//
+//     k = V_immuno / V_lcms = (cv_immuno * C)^2 / (cv_lcms * C)^2
+//                           = (cv_immuno / cv_lcms)^2
+//
+//   The trough concentration C cancels: the equivalence count is independent
+//   of stratum and dose.  With cv_lcms = as_cv_hplc()  = 0.05 and
+//                       cv_cmia = as_cv_cmia() = 0.12 the constant is
+//     mst_equiv_count(0.05, 0.12) = 5.76    (NOT 9 — see docstring note)
+//
+//   The widely-quoted "9 immuno = 1 LCMS" rule of thumb assumes cv_immuno ~ 0.15
+//   (FDA upper bound for tacrolimus-class IVDs).  Here we encode the constant
+//   that the existing as_cv_*() constants produce; the proof of invariance is
+//   the same.
+//
+// ── Key Sprint 28 findings (probe-certified by /tmp/s28_probe.sio) ──────────
+//
+//   §A  Equivalence theorem (stratum-invariant, dose-cancelling):
+//         mst_equiv_count(0.05, 0.12) = 5.7600  (probe L1)
+//         mst_equiv_count(0.05, 0.25) = 25.000  (probe L2)
+//         mst_equiv_count(0.12, 0.25) ≈ 4.3403  (probe L3)
+//
+//   §B  gain ≥ 1.0 in every (stratum, N, assay) cell — fusion never makes u worse.
+//       Minimum: inh N=14 CMIA = 1.0926.
+//
+//   §C  LCMS gain > CMIA gain in every cell — better assay informs more.
+//
+//   §D  u_post < u_pk strictly — measurement always reduces prior uncertainty:
+//         std N=14:  u_pk=0.000900, u_post_LCMS=0.000430, u_post_CMIA=0.000714
+//         ind N=14:  u_pk=0.001159, u_post_LCMS=0.000183
+//
+//   §E  Cross-stratum gain ordering at N=14 LCMS (narrow→wide u_pk):
+//         inh (1.4546) < slow (1.7470) < std (2.0936) < fast (2.9480) < ind (6.3231)
+//       The wider the prior, the more an LCMS observation tightens it.
+//
+//   §F  mst_k_to_match_lcms = 6 for both std and ind at N=14 — the equivalence
+//       count rounded up by 1 (5.76 → 6, the smallest integer k where pooled
+//       k-CMIA gain >= 1-LCMS gain).
+//
+//   §G  Gain at N=7 > gain at N=14 in EVERY stratum: early measurements are
+//       more informative because the assay variance V_assay = (cv·C)² grows
+//       faster with C-saturation than V_pred grows with accumulated doses.
+//       (Counter-intuitive but rigorous; flagged for math-review.)
+//
+//   §H  ep_merge averages prior and obs confidences (knowledge.sio:210).
+//       Posterior confidence ≥ min(prior, obs) − 50 in every cell.
+//
+// ── Effect annotations ──────────────────────────────────────────────────────
+//   All pub fns: with Mut, Div, Panic  (matches eu_*, dc_*, nc_* convention)
+
+module pbpk::rapamycin_multistratum_tdm
+
+use epistemic::knowledge::{Epistemic, ep_merge}
+use pbpk::rapamycin_assay::{
+    as_trough_mg_l, as_v_pred_conc, as_v_assay,
+    as_cv_hplc, as_cv_cmia, as_cv_poor
+}
+use pbpk::rapamycin_clinical::{conf_from_rel}
+use pbpk::rapamycin_cyp3a5::{
+    cyp_ke_slow, cyp_f_slow,
+    cyp_ke_standard, cyp_f_standard,
+    cyp_ke_fast, cyp_f_fast
+}
+use pbpk::rapamycin_ddi::{
+    ddi_ke_inh_strong, ddi_f_inh_strong,
+    ddi_ke_ind_strong, ddi_f_ind_strong,
+    ddi_ke_var_inh, ddi_ke_var_ind
+}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std,
+    ob_k12_var_std, ob_k21_var_std
+}
+
+// ── Local helpers ────────────────────────────────────────────────────────────
+
+fn mst_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x
+        var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+fn mst_min2_i64(a: i64, b: i64) -> i64 {
+    if a < b { a } else { b }
+}
+
+// ── 1. PRIOR — PK Epistemic at (D, N, stratum) ───────────────────────────────
+
+pub fn mst_prior(d: f64, n: i64, ke: f64, fv: f64,
+                 ka_var: f64, f_var: f64, ke_var: f64,
+                 k12_var: f64, k21_var: f64) -> Epistemic
+    with Mut, Div, Panic {
+    let c   = as_trough_mg_l(d, n, ke, fv)
+    let v   = as_v_pred_conc(d, n, ke, fv, ka_var, f_var, ke_var, k12_var, k21_var)
+    let std = mst_sqrt(v)
+    Epistemic::new(c, v, conf_from_rel(c, std))
+}
+
+// ── 2. OBSERVATION — Epistemic at the predicted nominal with V_assay ────────
+
+// We model a TDM reading that lands at the model prediction (best-case;
+// observation noise direction does not affect u-tightening analysis).
+pub fn mst_obs(c: f64, cv: f64) -> Epistemic with Mut, Div, Panic {
+    let v   = as_v_assay(cv, c)
+    let std = mst_sqrt(v)
+    Epistemic::new(c, v, conf_from_rel(c, std))
+}
+
+// ── 3. POSTERIOR — inverse-variance fusion ───────────────────────────────────
+
+pub fn mst_posterior(d: f64, n: i64, ke: f64, fv: f64,
+                     ka_var: f64, f_var: f64, ke_var: f64,
+                     k12_var: f64, k21_var: f64, cv: f64) -> Epistemic
+    with Mut, Div, Panic {
+    let prior = mst_prior(d, n, ke, fv, ka_var, f_var, ke_var, k12_var, k21_var)
+    let obs   = mst_obs(prior.val, cv)
+    ep_merge(&prior, &obs)
+}
+
+// ── 4. GAIN — analytic u_pk / u_post = sqrt(1 + V_pred / V_assay) ───────────
+
+pub fn mst_gain(d: f64, n: i64, ke: f64, fv: f64,
+                ka_var: f64, f_var: f64, ke_var: f64,
+                k12_var: f64, k21_var: f64, cv: f64) -> f64
+    with Mut, Div, Panic {
+    let c       = as_trough_mg_l(d, n, ke, fv)
+    let v_pred  = as_v_pred_conc(d, n, ke, fv, ka_var, f_var, ke_var, k12_var, k21_var)
+    let v_assay = cv * cv * c * c
+    if v_assay <= 0.0 { 1.0 } else { mst_sqrt(1.0 + v_pred / v_assay) }
+}
+
+// ── 5. EQUIVALENCE THEOREM — stratum-invariant k = (cv_immuno / cv_lcms)² ───
+
+pub fn mst_equiv_count(cv_lcms: f64, cv_immuno: f64) -> f64 {
+    let r = cv_immuno / cv_lcms
+    r * r
+}
+
+// ── 6. POOLED-k POSTERIOR — k independent observations at cv ────────────────
+
+// Posterior variance with k independent observations of variance V_assay = (cv·C)²:
+//   1/V_post = 1/V_pred + k/V_assay
+//   gain_k = sqrt(1 + k · V_pred / V_assay)
+pub fn mst_gain_pooled(d: f64, n: i64, ke: f64, fv: f64,
+                       ka_var: f64, f_var: f64, ke_var: f64,
+                       k12_var: f64, k21_var: f64, cv: f64, k: i64) -> f64
+    with Mut, Div, Panic {
+    let c       = as_trough_mg_l(d, n, ke, fv)
+    let v_pred  = as_v_pred_conc(d, n, ke, fv, ka_var, f_var, ke_var, k12_var, k21_var)
+    let v_assay = cv * cv * c * c
+    if v_assay <= 0.0 { 1.0 } else { mst_sqrt(1.0 + (k as f64) * v_pred / v_assay) }
+}
+
+// ── 7. mst_k_to_match_lcms — smallest k where k-CMIA gain >= 1-LCMS gain ────
+
+pub fn mst_k_to_match_lcms(d: f64, n: i64, ke: f64, fv: f64,
+                            ka_var: f64, f_var: f64, ke_var: f64,
+                            k12_var: f64, k21_var: f64) -> i64
+    with Mut, Div, Panic {
+    let g_lcms = mst_gain(d, n, ke, fv, ka_var, f_var, ke_var, k12_var, k21_var, as_cv_hplc())
+    var k = 1
+    var found = 0
+    while k <= 200 {
+        let g_k = mst_gain_pooled(d, n, ke, fv, ka_var, f_var, ke_var, k12_var, k21_var,
+                                  as_cv_cmia(), k)
+        if found == 0 && g_k >= g_lcms { found = k };
+        k = k + 1
+    }
+    found
+}
+
+// ── 8. Named scenarios — 5 strata x {N=7, N=14} x {LCMS, CMIA} = 20 cells ──
+
+// Helper bundles (Sounio has no f64 globals; inline once)
+fn mst_std_ke()    -> f64 { cyp_ke_standard() }
+fn mst_std_F()     -> f64 { cyp_f_standard() }
+fn mst_slow_ke()   -> f64 { cyp_ke_slow() }
+fn mst_slow_F()    -> f64 { cyp_f_slow() }
+fn mst_fast_ke()   -> f64 { cyp_ke_fast() }
+fn mst_fast_F()    -> f64 { cyp_f_fast() }
+fn mst_inh_ke()    -> f64 { ddi_ke_inh_strong() }
+fn mst_inh_F()     -> f64 { ddi_f_inh_strong() }
+fn mst_ind_ke()    -> f64 { ddi_ke_ind_strong() }
+fn mst_ind_F()     -> f64 { ddi_f_ind_strong() }
+
+fn mst_dose_std()  -> f64 { 5.0 }
+fn mst_dose_slow() -> f64 { 5.0 }
+fn mst_dose_fast() -> f64 { 5.0 }
+fn mst_dose_inh()  -> f64 { 1.5 }
+fn mst_dose_ind()  -> f64 { 20.0 }
+
+// std stratum (ke_var = std)
+pub fn mst_gain_std_n7_lcms()  -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_std(), 7, mst_std_ke(), mst_std_F(),
+             ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn mst_gain_std_n14_lcms() -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_std(), 14, mst_std_ke(), mst_std_F(),
+             ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn mst_gain_std_n7_cmia()  -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_std(), 7, mst_std_ke(), mst_std_F(),
+             ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_cmia())
+}
+pub fn mst_gain_std_n14_cmia() -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_std(), 14, mst_std_ke(), mst_std_F(),
+             ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_cmia())
+}
+
+// slow stratum
+pub fn mst_gain_slow_n7_lcms()  -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_slow(), 7, mst_slow_ke(), mst_slow_F(),
+             ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn mst_gain_slow_n14_lcms() -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_slow(), 14, mst_slow_ke(), mst_slow_F(),
+             ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn mst_gain_slow_n7_cmia()  -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_slow(), 7, mst_slow_ke(), mst_slow_F(),
+             ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_cmia())
+}
+pub fn mst_gain_slow_n14_cmia() -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_slow(), 14, mst_slow_ke(), mst_slow_F(),
+             ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_cmia())
+}
+
+// fast stratum
+pub fn mst_gain_fast_n7_lcms()  -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_fast(), 7, mst_fast_ke(), mst_fast_F(),
+             ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn mst_gain_fast_n14_lcms() -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_fast(), 14, mst_fast_ke(), mst_fast_F(),
+             ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn mst_gain_fast_n7_cmia()  -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_fast(), 7, mst_fast_ke(), mst_fast_F(),
+             ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_cmia())
+}
+pub fn mst_gain_fast_n14_cmia() -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_fast(), 14, mst_fast_ke(), mst_fast_F(),
+             ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_cmia())
+}
+
+// inh stratum (ke_var = inh)
+pub fn mst_gain_inh_n7_lcms()  -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_inh(), 7, mst_inh_ke(), mst_inh_F(),
+             ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_inh(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn mst_gain_inh_n14_lcms() -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_inh(), 14, mst_inh_ke(), mst_inh_F(),
+             ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_inh(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn mst_gain_inh_n7_cmia()  -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_inh(), 7, mst_inh_ke(), mst_inh_F(),
+             ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_inh(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_cmia())
+}
+pub fn mst_gain_inh_n14_cmia() -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_inh(), 14, mst_inh_ke(), mst_inh_F(),
+             ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_inh(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_cmia())
+}
+
+// ind stratum (ke_var = ind, D = 20mg per Sprint 27 baseline)
+pub fn mst_gain_ind_n7_lcms()  -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_ind(), 7, mst_ind_ke(), mst_ind_F(),
+             ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_ind(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn mst_gain_ind_n14_lcms() -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_ind(), 14, mst_ind_ke(), mst_ind_F(),
+             ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_ind(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn mst_gain_ind_n7_cmia()  -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_ind(), 7, mst_ind_ke(), mst_ind_F(),
+             ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_ind(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_cmia())
+}
+pub fn mst_gain_ind_n14_cmia() -> f64 with Mut, Div, Panic {
+    mst_gain(mst_dose_ind(), 14, mst_ind_ke(), mst_ind_F(),
+             ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_ind(),
+             ob_k12_var_std(), ob_k21_var_std(), as_cv_cmia())
+}
+
+// ── 9. Posterior u_post (mg/L) per cell — used by §D ────────────────────────
+
+pub fn mst_u_post_std_n14_lcms() -> f64 with Mut, Div, Panic {
+    mst_sqrt(mst_posterior(mst_dose_std(), 14, mst_std_ke(), mst_std_F(),
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+        ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc()).variance)
+}
+pub fn mst_u_post_std_n14_cmia() -> f64 with Mut, Div, Panic {
+    mst_sqrt(mst_posterior(mst_dose_std(), 14, mst_std_ke(), mst_std_F(),
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+        ob_k12_var_std(), ob_k21_var_std(), as_cv_cmia()).variance)
+}
+pub fn mst_u_post_ind_n14_lcms() -> f64 with Mut, Div, Panic {
+    mst_sqrt(mst_posterior(mst_dose_ind(), 14, mst_ind_ke(), mst_ind_F(),
+        ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_ind(),
+        ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc()).variance)
+}
+
+// Prior u_pk per cell — used by §D
+pub fn mst_u_pk_std_n14() -> f64 with Mut, Div, Panic {
+    mst_sqrt(as_v_pred_conc(mst_dose_std(), 14, mst_std_ke(), mst_std_F(),
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+        ob_k12_var_std(), ob_k21_var_std()))
+}
+pub fn mst_u_pk_ind_n14() -> f64 with Mut, Div, Panic {
+    mst_sqrt(as_v_pred_conc(mst_dose_ind(), 14, mst_ind_ke(), mst_ind_F(),
+        ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_ind(),
+        ob_k12_var_std(), ob_k21_var_std()))
+}
+
+// ── 10. k-to-match for ind (§F) ─────────────────────────────────────────────
+
+pub fn mst_k_to_match_lcms_ind_n14() -> i64 with Mut, Div, Panic {
+    mst_k_to_match_lcms(mst_dose_ind(), 14, mst_ind_ke(), mst_ind_F(),
+        ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_ind(),
+        ob_k12_var_std(), ob_k21_var_std())
+}
+pub fn mst_k_to_match_lcms_std_n14() -> i64 with Mut, Div, Panic {
+    mst_k_to_match_lcms(mst_dose_std(), 14, mst_std_ke(), mst_std_F(),
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+        ob_k12_var_std(), ob_k21_var_std())
+}
