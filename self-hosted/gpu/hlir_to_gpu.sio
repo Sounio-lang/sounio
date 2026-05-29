@@ -2119,6 +2119,7 @@ fn hlir_kernels_to_spirv(module: HlirModule) -> SpvBuf with Mut, Panic, Div, All
             var ops_src_a:   [i64; 256] = [0; 256]
             var ops_src_b:   [i64; 256] = [0; 256]
             var ops_types:   [i64; 256] = [0; 256]
+            var ops_imm:     [i64; 256] = [0; 256]
             var op_count: i64 = 0
             while op_count < gpu_kernel.op_count && op_count < 256 {
                 let op = gpu_kernel.ops[op_count as usize]
@@ -2132,7 +2133,7 @@ fn hlir_kernels_to_spirv(module: HlirModule) -> SpvBuf with Mut, Panic, Div, All
 
             let kname = name_to_string(gpu_kernel.kernel_name)
             let spv = gpu_lower_to_spirv(kname, gpu_kernel.param_count,
-                          ops_opcodes, ops_dst, ops_src_a, ops_src_b, ops_types, op_count)
+                          ops_opcodes, ops_dst, ops_src_a, ops_src_b, ops_types, ops_imm, op_count)
 
             // Append this kernel's words to combined output
             var wi: i64 = 0
@@ -2623,10 +2624,9 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
     }
 
     // Phase 3: Build dependency graph (adjacency list).
-    // Nested array literal [[0; 16]; 64] hits a souc parse bug ("array
-    // index must be integer") because the inner `[0; 16]` is read as
-    // an index target. Leave deps uninitialized — BSS zero-fill suffices.
-    var deps: [[i64; 16]; 64]
+    // Flat [i64; 1024] avoids souc's nested-array-type parse bug.
+    // deps[kernel_idx * 16 + dep_slot] stores the dependency kernel index.
+    var deps: [i64; 1024] = [0; 1024]
     var dep_count: [i64; 64] = [0; 64]
     var di: i64 = 0
     while di < actual {
@@ -2637,7 +2637,7 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
                 if overlap > 0 && prov_tags[di as usize] & prov_tags[dj as usize] != 0 {
                     // kernel dj depends on di
                     if dep_count[dj as usize] < 16 {
-                        deps[dj as usize][dep_count[dj as usize] as usize] = di
+                        deps[(dj * 16 + dep_count[dj as usize]) as usize] = di
                         dep_count[dj as usize] = dep_count[dj as usize] + 1
                     }
                 }
@@ -2683,7 +2683,7 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
         while fi < actual {
             var dci: i64 = 0
             while dci < dep_count[fi as usize] {
-                if deps[fi as usize][dci as usize] == node {
+                if deps[(fi * 16 + dci) as usize] == node {
                     in_degree[fi as usize] = in_degree[fi as usize] - 1
                     if in_degree[fi as usize] == 0 {
                         queue[rear as usize] = fi
@@ -2717,7 +2717,7 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
             var next_stream: i64 = 0
             var dci: i64 = 0
             while dci < dep_count[node as usize] {
-                let dep = deps[node as usize][dci as usize]
+                let dep = deps[(node * 16 + dci) as usize]
                 if stream_ids[dep as usize] == next_stream {
                     next_stream = next_stream + 1
                 }
@@ -2752,7 +2752,7 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
         var dci2: i64 = 0
         while dci2 < dep_count[di2 as usize] {
             combined = ptx_push_str(combined, "// SOUNIO_DEP from=")
-            combined = gpu_push_i64(combined, deps[di2 as usize][dci2 as usize])
+            combined = gpu_push_i64(combined, deps[(di2 * 16 + dci2) as usize])
             combined = ptx_push_str(combined, " to=")
             combined = gpu_push_i64(combined, di2)
             combined = ptx_push_str(combined, "\n")
