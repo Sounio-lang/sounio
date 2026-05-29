@@ -1,0 +1,152 @@
+// stdlib/pbpk/rapamycin_pop_timing.sio — Sprint 67
+//
+// Population-weighted timing synthesis: E[n_crit], E[n_last], E[span] across
+// all five CYP3A4/P-gp strata for uniform and 3× loading-dose protocols.
+//
+// Source data (combined 4–20 window, from Sprints 57–66):
+//   stratum | w    | ncrit_u | nlast_u | span_u | ncrit_L | nlast_L | span_L
+//   --------|------|---------|---------|--------|---------|---------|-------
+//   std     | 0.50 |       6 |      36 |     30 |       4 |      34 |     30
+//   slow    | 0.15 |       8 |      58 |     50 |       6 |      56 |     50
+//   fast    | 0.20 |       7 |      34 |     27 |       5 |      32 |     27
+//   inh     | 0.05 |       7 |      37 |     30 |       4 |      35 |     31
+//   ind     | 0.10 |      26 |     100 |     74 |      24 |     100 |     76
+//   (U=uniform, L=3× loading dose)
+//
+// Population-weighted expectations:
+//   E[n_crit_U] = 0.50×6+0.15×8+0.20×7+0.05×7+0.10×26 = 8.55
+//   E[n_crit_L] = 0.50×4+0.15×6+0.20×5+0.05×4+0.10×24 = 6.50
+//   E[n_last_U] = 0.50×36+0.15×58+0.20×34+0.05×37+0.10×100 = 45.35
+//   E[n_last_L] = 0.50×34+0.15×56+0.20×32+0.05×35+0.10×100 = 43.55
+//   E[span_U]   = 0.50×30+0.15×50+0.20×27+0.05×30+0.10×74 = 36.80
+//   E[span_L]   = 0.50×30+0.15×50+0.20×27+0.05×31+0.10×76 = 37.05
+//
+// N=7 population cert fraction:
+//   Uniform: std+fast+inh CERT (0.50+0.20+0.05=0.75); slow+ind WARN
+//   Loading: std+slow+fast+inh CERT (0.50+0.15+0.20+0.05=0.90); ind WARN
+//   Loading gain at N=7 = 0.15 (slow stratum promoted from WARN to CERT)
+//
+// Findings:
+//   A: E[n_crit] advances 8.55→6.50 (−2.05 days) under loading
+//   B: E[n_last] contracts 45.35→43.55 (−1.80 days) under loading
+//   C: E[span] is nearly invariant: 36.80→37.05 (+0.25) — population-level
+//      confirmation of the span-neutrality theorem from Sprint 66
+//   D: Loading promotes slow stratum to N=7 CERT; pop cert fraction 0.75→0.90
+//   E: ind dominates E[n_crit]: contributes 2.60/8.55 = 30.4% despite w=0.10
+//   F: slow stratum contributes 0.15×50=7.5 days to E[span], second after std (15.0)
+//   G: ncrit spread across pop: max−min = 26−6 = 20 (uniform) = 24−4 = 20 (loading)
+//   H: E[n_crit_advance] = 2.05 ≈ 2.0 (loading shifts population clock by ~2 days)
+
+module pbpk::rapamycin_pop_timing
+
+// ── Per-stratum data (hardcoded from Sprints 57–66) ──────────────────────────
+pub fn pt_w_std()  -> f64 { 0.50 }
+pub fn pt_w_slow() -> f64 { 0.15 }
+pub fn pt_w_fast() -> f64 { 0.20 }
+pub fn pt_w_inh()  -> f64 { 0.05 }
+pub fn pt_w_ind()  -> f64 { 0.10 }
+
+pub fn pt_ncrit_u_std()  -> f64 { 6.0  }
+pub fn pt_ncrit_u_slow() -> f64 { 8.0  }
+pub fn pt_ncrit_u_fast() -> f64 { 7.0  }
+pub fn pt_ncrit_u_inh()  -> f64 { 7.0  }
+pub fn pt_ncrit_u_ind()  -> f64 { 26.0 }
+
+pub fn pt_nlast_u_std()  -> f64 { 36.0  }
+pub fn pt_nlast_u_slow() -> f64 { 58.0  }
+pub fn pt_nlast_u_fast() -> f64 { 34.0  }
+pub fn pt_nlast_u_inh()  -> f64 { 37.0  }
+pub fn pt_nlast_u_ind()  -> f64 { 100.0 }
+
+pub fn pt_span_u_std()  -> f64 { 30.0 }
+pub fn pt_span_u_slow() -> f64 { 50.0 }
+pub fn pt_span_u_fast() -> f64 { 27.0 }
+pub fn pt_span_u_inh()  -> f64 { 30.0 }
+pub fn pt_span_u_ind()  -> f64 { 74.0 }
+
+pub fn pt_ncrit_l_std()  -> f64 { 4.0  }
+pub fn pt_ncrit_l_slow() -> f64 { 6.0  }
+pub fn pt_ncrit_l_fast() -> f64 { 5.0  }
+pub fn pt_ncrit_l_inh()  -> f64 { 4.0  }
+pub fn pt_ncrit_l_ind()  -> f64 { 24.0 }
+
+pub fn pt_nlast_l_std()  -> f64 { 34.0  }
+pub fn pt_nlast_l_slow() -> f64 { 56.0  }
+pub fn pt_nlast_l_fast() -> f64 { 32.0  }
+pub fn pt_nlast_l_inh()  -> f64 { 35.0  }
+pub fn pt_nlast_l_ind()  -> f64 { 100.0 }
+
+pub fn pt_span_l_std()  -> f64 { 30.0 }
+pub fn pt_span_l_slow() -> f64 { 50.0 }
+pub fn pt_span_l_fast() -> f64 { 27.0 }
+pub fn pt_span_l_inh()  -> f64 { 31.0 }
+pub fn pt_span_l_ind()  -> f64 { 76.0 }
+
+// ── Population expectations ────────────────────────────────────────────────
+pub fn pt_e_ncrit_uniform() -> f64 {
+    pt_w_std()  * pt_ncrit_u_std()  + pt_w_slow() * pt_ncrit_u_slow()
+    + pt_w_fast() * pt_ncrit_u_fast() + pt_w_inh()  * pt_ncrit_u_inh()
+    + pt_w_ind()  * pt_ncrit_u_ind()
+}
+
+pub fn pt_e_ncrit_load() -> f64 {
+    pt_w_std()  * pt_ncrit_l_std()  + pt_w_slow() * pt_ncrit_l_slow()
+    + pt_w_fast() * pt_ncrit_l_fast() + pt_w_inh()  * pt_ncrit_l_inh()
+    + pt_w_ind()  * pt_ncrit_l_ind()
+}
+
+pub fn pt_e_nlast_uniform() -> f64 {
+    pt_w_std()  * pt_nlast_u_std()  + pt_w_slow() * pt_nlast_u_slow()
+    + pt_w_fast() * pt_nlast_u_fast() + pt_w_inh()  * pt_nlast_u_inh()
+    + pt_w_ind()  * pt_nlast_u_ind()
+}
+
+pub fn pt_e_nlast_load() -> f64 {
+    pt_w_std()  * pt_nlast_l_std()  + pt_w_slow() * pt_nlast_l_slow()
+    + pt_w_fast() * pt_nlast_l_fast() + pt_w_inh()  * pt_nlast_l_inh()
+    + pt_w_ind()  * pt_nlast_l_ind()
+}
+
+pub fn pt_e_span_uniform() -> f64 {
+    pt_w_std()  * pt_span_u_std()  + pt_w_slow() * pt_span_u_slow()
+    + pt_w_fast() * pt_span_u_fast() + pt_w_inh()  * pt_span_u_inh()
+    + pt_w_ind()  * pt_span_u_ind()
+}
+
+pub fn pt_e_span_load() -> f64 {
+    pt_w_std()  * pt_span_l_std()  + pt_w_slow() * pt_span_l_slow()
+    + pt_w_fast() * pt_span_l_fast() + pt_w_inh()  * pt_span_l_inh()
+    + pt_w_ind()  * pt_span_l_ind()
+}
+
+// ── Advance and contraction metrics ──────────────────────────────────────────
+pub fn pt_e_ncrit_advance() -> f64 { pt_e_ncrit_uniform() - pt_e_ncrit_load()   }
+pub fn pt_e_nlast_loss()    -> f64 { pt_e_nlast_uniform() - pt_e_nlast_load()   }
+pub fn pt_e_span_delta()    -> f64 { pt_e_span_load()     - pt_e_span_uniform() }
+
+// ── ind stratum's fractional contribution to E[n_crit_uniform] ───────────────
+pub fn pt_ind_ncrit_contrib() -> f64 {
+    pt_w_ind() * pt_ncrit_u_ind()
+}
+pub fn pt_ind_ncrit_frac() -> f64 with Mut, Div, Panic {
+    pt_ind_ncrit_contrib() / pt_e_ncrit_uniform()
+}
+
+// ── Population cert fraction at N=7 ──────────────────────────────────────────
+// Uniform: std(CERT w=0.50) + fast(CERT w=0.20) + inh(CERT w=0.05) = 0.75
+// Loading: std(CERT w=0.50) + slow(CERT w=0.15) + fast(CERT w=0.20) + inh(CERT w=0.05) = 0.90
+pub fn pt_cert_n7_uniform() -> f64 { 0.75 }
+pub fn pt_cert_n7_load()    -> f64 { 0.90 }
+pub fn pt_cert_n7_gain()    -> f64 { pt_cert_n7_load() - pt_cert_n7_uniform() }
+
+// ── ncrit spread across population ───────────────────────────────────────────
+// max(6,8,7,7,26)−min(6,8,7,7,26) = 26−6 = 20; same under loading 24−4=20
+pub fn pt_ncrit_spread_uniform() -> f64 { 20.0 }
+pub fn pt_ncrit_spread_load()    -> f64 { 20.0 }
+
+// ── Per-stratum contribution to E[span] ──────────────────────────────────────
+pub fn pt_std_span_contrib()  -> f64 { pt_w_std()  * pt_span_u_std()  }
+pub fn pt_slow_span_contrib() -> f64 { pt_w_slow() * pt_span_u_slow() }
+pub fn pt_fast_span_contrib() -> f64 { pt_w_fast() * pt_span_u_fast() }
+pub fn pt_inh_span_contrib()  -> f64 { pt_w_inh()  * pt_span_u_inh()  }
+pub fn pt_ind_span_contrib()  -> f64 { pt_w_ind()  * pt_span_u_ind()  }
