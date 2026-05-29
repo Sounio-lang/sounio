@@ -49,6 +49,10 @@ So:
 | `degrey_fragment_q3q11.sio` | glues a 2nd spindle by a 60° rotation; checks field closure | ℚ(√3,√11) | 11-vtx graph, all unit edges dist²=576 exact, no auxiliary surd; native 3-col UNSAT / 4-col SAT |
 | `degrey_fieldtower.sio` | extends the kernel to the degree-16 field; XOR multiplication law; realizes ω₄ (√5) and ω₁₆ (√7) unit edges exactly | ℚ(√3,√5,√7,√11) | 5/5 arithmetic + rotation checks pass |
 | `native_sat_scale_demo.sio` | native CDCL on graphs of known χ past the old 256-var cap | — | 6/6 correct (cycles to 1022 vars) |
+| `sat_proof_kernel.sio` | from-scratch DPLL→**DRUP** emitter + independent **RUP checker**; demo K₄ not 3-colorable | — | VERIFIED UNSAT + 2 non-vacuity controls rejected; native **and** drat-trim `s VERIFIED` |
+| `spindle_proof_cert.sio` | exact ℚ(√3,√11) spindle geometry → 3-coloring CNF → DRUP proof → RUP + DIMACS/DRAT | ℚ(√3,√11) | χ(spindle) ≥ 4: native VERIFIED + external drat-trim `s VERIFIED` |
+| `dpll_scale_wall.sio` | scaling envelope of the DPLL→DRUP certifier on pigeonhole K_n/(n−1)-col | — | K₄–K₇ VERIFIED (17→6491 lemmas); K₈+ WALL; K₆ drat-trim `s VERIFIED` |
+| `erdos90_cubic_tower_base.sio` | explicit witness for the OpenAI-2026 #90 disproof's cubic tower base (Gauss periods) | cubic ⊂ ℚ(ζ_r) | 11/11 certified: field disc = r², r totally ramified |
 
 ### The degree-16 kernel (`degrey_fieldtower.sio`)
 
@@ -73,6 +77,72 @@ A `k`-colouring is encoded as boolean CNF (one var per vertex×colour; at-least-
 at-most-one per vertex; per-edge same-colour exclusion) and handed to the in-repo
 CDCL solver. χ ≥ k+1 is certified by a `k`-colouring **UNSAT**; a colouring exists
 iff **SAT**. The spindle's χ = 4 is `3-col UNSAT ∧ 4-col SAT`, both native.
+
+### Verifiable UNSAT certificates — "Sounio computes" → "Sounio *proves*"
+
+A bare UNSAT result is "trust the solver". `sat_proof_kernel.sio` and
+`spindle_proof_cert.sio` upgrade this to an **independently checkable proof**:
+
+- a from-scratch DPLL refutation **emits a DRUP proof** (a DPLL search tree is a
+  tree-resolution refutation; at every refuted node it emits `¬(decision literals
+  on the path)`, which is RUP; the root emits the **empty clause**, post-order so
+  each lemma is RUP w.r.t. the formula plus earlier lemmas);
+- an **independent native RUP checker** replays the proof with only unit
+  propagation (no shared state with solver heuristics) and **rejects** invalid
+  proofs (controls: empty proof and a bogus non-implied unit are both rejected);
+- the certificate is also emitted in **standard DIMACS + DRAT** for an external
+  checker.
+
+**External cross-check (verification-only C toolchain).** The Sounio-emitted
+certificates were verified by `drat-trim` (Marijn Heule; the canonical DRAT
+checker), built locally for *verification only* (no solver, no science in C):
+
+```bash
+./bin/souc examples/erdos/spindle_proof_cert.sio /tmp/spindle.elf && /tmp/spindle.elf > /tmp/out.txt
+awk '/^%%DIMACS%%/{f="cnf";next} /^%%DRAT%%/{f="drat";next} /^%%END%%/{f="";next} \
+     f=="cnf"{print > "/tmp/spindle.cnf"} f=="drat"{print > "/tmp/spindle.drat"}' /tmp/out.txt
+drat-trim /tmp/spindle.cnf /tmp/spindle.drat     # => s VERIFIED
+```
+
+| certificate | vars | clauses | DRUP lemmas | native RUP | drat-trim |
+|---|---:|---:|---:|---|---|
+| K₄ not 3-colorable (χ ≥ 4) | 12 | 22 | 17 | VERIFIED | `s VERIFIED` (22/22 core, 83 steps) |
+| Moser spindle not 3-colorable (χ ≥ 4) | 21 | 40 | 29 | VERIFIED | `s VERIFIED` (40/40 core, 241 steps) |
+
+The spindle's edges are **derived from exact ℚ(√3,√11) unit-distance arithmetic**,
+not hand-listed — the de Grey mechanism in miniature. (A two-reviewer disagreement
+on the DRUP-emission soundness, and its resolution, is logged in
+`.claude/llm_offload_log.md`.)
+
+### Scaling envelope and the CDCL wall — `dpll_scale_wall.sio`
+
+Two honest facts bound how far this DPLL→DRUP certifier reaches toward χ ≥ 5:
+
+1. **3-coloring UNSAT is *local*.** Any graph containing a Moser spindle is refuted
+   by the 7-vertex spindle alone, so the proof stays ~30 lemmas at any host size —
+   not evidence of the χ ≥ 5 regime.
+2. **The χ ≥ 5 regime is a *global* hard UNSAT** (a 4-coloring UNSAT on de Grey's
+   ~510-vertex graph). Measured against the global hard family `k`-coloring `K_n`
+   with `k = n−1` (= pigeonhole `PHP(n,n−1)`, exponential resolution lower bound,
+   Haken 1985):
+
+   | instance | clauses | DPLL nodes = DRUP lemmas | native RUP | drat-trim |
+   |---|---:|---:|---|---|
+   | K₄ / 3-col | 22 | 17 | VERIFIED | — |
+   | K₅ / 4-col | 45 | 103 | VERIFIED | — |
+   | K₆ / 5-col | 81 | 749 | VERIFIED | `s VERIFIED` (6275 steps) |
+   | K₇ / 6-col | 133 | 6 491 | VERIFIED | — |
+   | K₈ / 7-col | 204 | > 3 000 000 | WALL | — |
+   | K₉ / 8-col | 297 | > 3 000 000 | WALL | — |
+
+   The factorial blow-up (≈ ×6, ×7, ×9 per step) is the Haken bound made concrete.
+
+**Conclusion (path to χ ≥ 5).** Reaching de Grey's 510-vertex 4-coloring UNSAT
+needs (1) the graph data (not in this repo, not fabricated) and (2) **CDCL clause
+learning** in the emitter — chronological DPLL provably cannot produce a
+sub-exponential proof of a pigeonhole-hard instance. The native RUP checker and
+DIMACS/DRAT bridge already in place are reusable as-is; a CDCL upgrade changes only
+*how lemmas are produced*, not how they are checked.
 
 ### Solver scaling — status and BLOCKER
 
