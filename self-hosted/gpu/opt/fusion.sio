@@ -467,10 +467,10 @@ fn gpu_fusion_remap_op(op: GpuOp, off: GpuFusionRegOffsets) -> GpuOp with Mut, P
 fn gpu_fusion_build_param_map(
     left: GpuKernelIr,
     right: GpuKernelIr
-) -> (GpuKernelIr, [i64; 8], bool) with Mut, Panic, Div {
+) -> (GpuKernelIr, [i64; 8]) with Mut, Panic, Div {
     var fused = gpu_kernel_new()
     var map: [i64; 8] = [-1; 8]
-    var ok = true
+    var failed = false
 
     // Keep left kernel identity and params first.
     fused.kernel_name = left.kernel_name
@@ -495,7 +495,7 @@ fn gpu_fusion_build_param_map(
                 map[r as usize] = fused.param_count
                 fused.param_count = fused.param_count + 1
             } else {
-                ok = false
+                failed = true
                 map[r as usize] = 0
             }
         }
@@ -508,7 +508,10 @@ fn gpu_fusion_build_param_map(
         r = r + 1
     }
 
-    (fused, map, ok)
+    if failed {
+        fused.param_count = 0 - 1
+    }
+    (fused, map)
 }
 
 fn gpu_fusion_append_ops(
@@ -534,7 +537,7 @@ fn gpu_fusion_append_ops(
         remapped = gpu_fusion_remap_op_param_idx(remapped, param_map)
 
         let append = gpu_append_op_checked(out, remapped)
-        out = append.kernel
+        out = append.result_kernel
         if append.error == GpuError::GpuOpBufferOverflow {
             ok = false
             break
@@ -550,9 +553,8 @@ fn gpu_fuse_pair(left: GpuKernelIr, right: GpuKernelIr) -> (GpuKernelIr, bool) w
     let prepared = gpu_fusion_build_param_map(left, right)
     var fused = prepared.0
     let right_param_map = prepared.1
-    var ok = prepared.2
 
-    if !ok {
+    if fused.param_count < 0 {
         return (gpu_kernel_new(), false)
     }
 
@@ -608,8 +610,9 @@ fn gpu_fuse_pair(left: GpuKernelIr, right: GpuKernelIr) -> (GpuKernelIr, bool) w
     // If fusion removed left ret and right had no ret, append one.
     var has_ret = false
     var oi: i64 = 0
+    var fused_ops: [GpuOp; 1024] = fused.ops
     while oi < fused.op_count {
-        if fused.ops[oi as usize].opcode == GpuOpcode::GpuRet {
+        if fused_ops[oi as usize].opcode == GpuOpcode::GpuRet {
             has_ret = true
             break
         }
@@ -619,7 +622,7 @@ fn gpu_fuse_pair(left: GpuKernelIr, right: GpuKernelIr) -> (GpuKernelIr, bool) w
         var ret_op = gpu_op_new()
         ret_op.opcode = GpuOpcode::GpuRet
         let appended = gpu_append_op_checked(fused, ret_op)
-        fused = appended.kernel
+        fused = appended.result_kernel
         if appended.error == GpuError::GpuOpBufferOverflow {
             return (gpu_kernel_new(), false)
         }
@@ -636,28 +639,27 @@ fn gpu_fusion_apply_once(
     kernels: [GpuKernelIr; 64],
     count: i64,
     cfg: GpuFusionConfig
-) -> ([GpuKernelIr; 64], i64, bool) with Mut, Panic, Div {
+) -> ([GpuKernelIr; 64], i64) with Mut, Panic, Div {
     var out: [GpuKernelIr; 64] = kernels
-    var out_count = count
 
     let cand = gpu_fusion_find_best_adjacent(kernels, count, cfg)
     if !cand.can_fuse {
-        return (out, out_count, false)
+        return (out, -1)
     }
     if cand.score < cfg.min_benefit_score {
-        return (out, out_count, false)
+        return (out, -1)
     }
 
     let left_idx = cand.left_index
     let right_idx = cand.right_index
 
     if left_idx < 0 || right_idx < 0 || right_idx != (left_idx + 1) {
-        return (out, out_count, false)
+        return (out, -1)
     }
 
     let fused_pair = gpu_fuse_pair(kernels[left_idx as usize], kernels[right_idx as usize])
     if !fused_pair.1 {
-        return (out, out_count, false)
+        return (out, -1)
     }
 
     // Rebuild compact kernel list with the fused kernel replacing [left,right].
@@ -681,8 +683,7 @@ fn gpu_fusion_apply_once(
         dst = dst + 1
     }
 
-    out_count = count - 1
-    (out, out_count, true)
+    (out, count - 1)
 }
 
 fn gpu_fusion_run(
@@ -697,10 +698,10 @@ fn gpu_fusion_run(
     while round < cfg.max_rounds {
         let step = gpu_fusion_apply_once(current, current_count, cfg)
         current = step.0
-        current_count = step.1
-        if !step.2 {
+        if step.1 < 0 {
             break
         }
+        current_count = step.1
         round = round + 1
     }
 

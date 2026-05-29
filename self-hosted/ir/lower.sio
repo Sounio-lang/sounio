@@ -57,6 +57,12 @@ struct Lowerer {
     probe_mode: bool,
 }
 
+struct IrPreparedCallArgs {
+    lo: Lowerer,
+    args: Option<Box<IrRegList>>,
+    argc: i64,
+}
+
 pub struct IrProgramSummary {
     module: Box<IrModule>,
     enum_variants: Box<EnumVariantTable>,
@@ -234,7 +240,8 @@ fn ir_program_summary_from_lowerer(lo: Lowerer) -> IrProgramSummary {
 
 fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lo_in
-    let seed = &(*summary.module)
+    var seed_val = (*summary.module)
+    let seed = &seed_val
     var module = ir_empty_module()
     module.epistemic = (*lo.module).epistemic
     module.fn_count = seed.fn_count
@@ -688,7 +695,7 @@ fn ir_fast_summary_preseed_fn_signature(
     return_type: &Option<Box<TypeExpr>>,
     effects: &Option<Box<EffectList>>
 ) with Mut, Panic, Div, Alloc {
-    let fn_id = ir_fast_summary_find_or_add_fn_id(&! module, name)
+    let fn_id = ir_fast_summary_find_or_add_fn_id(module, name)
     if fn_id < 0 {
         return
     }
@@ -731,7 +738,7 @@ fn ir_fast_summary_preseed_impl_methods(
                         let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                         match *fn_def_opt_ref {
                             Some(fd) => {
-                                ir_fast_summary_preseed_fn_signature(&! module, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                                ir_fast_summary_preseed_fn_signature(module, mangled, &(*fd).params, &(*fd).return_type, &(*fd).effects)
                             }
                             _ => {}
                         }
@@ -761,7 +768,7 @@ fn ir_fast_summary_preseed_items(
                         let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                         match *fn_def_opt_ref {
                             Some(fd) => {
-                                ir_fast_summary_preseed_fn_signature(&! module, name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                                ir_fast_summary_preseed_fn_signature(module, name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
                             }
                             _ => {}
                         }
@@ -770,7 +777,7 @@ fn ir_fast_summary_preseed_items(
                     let impl_def_opt_ref: &Option<Box<ImplDef>> = &head.impl_def
                     match *impl_def_opt_ref {
                         Some(id) => {
-                            ir_fast_summary_preseed_impl_methods(&! module, name, &(*id).methods, skip_name)
+                            ir_fast_summary_preseed_impl_methods(module, name, &(*id).methods, skip_name)
                         }
                         _ => {}
                     }
@@ -2656,13 +2663,13 @@ impl Lowerer {
     fn field_idx_from_name(self, struct_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
         // Search layout table for the struct
         var si: i64 = 0
-        while si < self.struct_layouts.count {
-            if ir_name_eq(self.struct_layouts.entries[si].type_name, struct_name) {
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, struct_name) {
                 // Found struct — search its fields
                 var fi: i64 = 0
-                while fi < self.struct_layouts.entries[si].field_count {
-                    if ir_name_eq(self.struct_layouts.entries[si].fields[fi].name, field_name) {
-                        return self.struct_layouts.entries[si].fields[fi].index
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
+                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
                     }
                     fi = fi + 1
                 }
@@ -2729,9 +2736,9 @@ impl Lowerer {
     // Phase 3.1: Lookup enum variant discriminant by variant name
     fn lookup_variant_discriminant(self, variant_name: Name) -> i64 with Mut, Panic, Div {
         var i: i64 = 0
-        while i < self.enum_variants.count {
-            if ir_name_eq(self.enum_variants.entries[i].variant_name, variant_name) {
-                return self.enum_variants.entries[i].discriminant
+        while i < (*self.enum_variants).count {
+            if ir_name_eq((*self.enum_variants).entries[i as usize].variant_name, variant_name) {
+                return (*self.enum_variants).entries[i as usize].discriminant
             }
             i = i + 1
         }
@@ -3569,7 +3576,7 @@ impl Lowerer {
         fn_id: i64,
         args: Option<Box<IrRegList>>,
         argc: i64
-    ) -> (Lowerer, Option<Box<IrRegList>>, i64) with Mut, Panic, Div, Alloc, IO {
+    ) -> IrPreparedCallArgs with Mut, Panic, Div, Alloc, IO {
         let callee_strategy: i64 = if fn_id >= 0 && fn_id < self.module.fn_count {
             self.module.functions[fn_id as usize].compile_strategy
         } else {
@@ -3592,7 +3599,7 @@ impl Lowerer {
             }
             final_argc = final_argc + 1
         }
-        (lo, final_args, final_argc)
+        IrPreparedCallArgs { lo: lo, args: final_args, argc: final_argc }
     }
 
     fn lower_fn_item_owned(self, name: Name, fd: FnDef) -> Lowerer with Mut, Panic, Div, Alloc, IO {
@@ -5518,9 +5525,9 @@ impl Lowerer {
             // Forward caller param_regs[0] for instrumented->instrumented calls, otherwise
             // synthesize constant 1 for standard callers entering the dual-path world.
             let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args, argc)
-            let lo4 = pair_call.0
-            let final_args = pair_call.1
-            let final_argc = pair_call.2
+            let lo4 = pair_call.lo
+            let final_args = pair_call.args
+            let final_argc = pair_call.argc
             let lo5 = lo4.emit(ir_call(dst, fn_id, callee_name, final_args, final_argc))
             (lo5, dst)
         } else if e.kind == ExprKind::ExprBinary {
@@ -5589,9 +5596,9 @@ impl Lowerer {
             let lo3 = pair_fn.0
             let fn_id = pair_fn.1
             let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args2, arg_count + 1)
-            let lo4 = pair_call.0
-            let final_args = pair_call.1
-            let final_argc = pair_call.2
+            let lo4 = pair_call.lo
+            let final_args = pair_call.args
+            let final_argc = pair_call.argc
             let pair_d = lo4.fresh_reg()
             let lo5 = pair_d.0
             let dst = pair_d.1
