@@ -110,6 +110,14 @@ lean_lib «SounioDeGreyChi5» where
 -- own native_decide; build on demand with `lake build SounioDeGreyChi5Concrete`.
 lean_lib «SounioDeGreyChi5Concrete» where
 
+-- Multiquadratic-field faithfulness groundwork: ring laws for the QF kernel (qadd/qmul),
+-- proved WITHOUT Mathlib / `ring`. PROVED: qadd_comm, qadd_zero_{left,right}, qmul_comm
+-- (XOR-permutation symmetry via finite native_decide). OPEN (stated as Props, not assumed):
+-- qmul assoc/distrib/unit/neg. Standalone (no imports), checks fast → default_target.
+-- See docs/research/multiquad-faithfulness-note.md.
+@[default_target]
+lean_lib «SounioMultiquadRing» where
+
 -- M1: Vancomycin-Knightian thrust — Approx × Causal × Knowledge composition
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where

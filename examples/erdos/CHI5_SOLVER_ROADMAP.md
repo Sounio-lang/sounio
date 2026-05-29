@@ -145,9 +145,18 @@ $SOUNIO_SOUC_BIN examples/erdos/degrey_geometry.sio /tmp/geo.elf && /tmp/geo.elf
   Honest scope (per the §1c + concrete-file math-reviews): what is machine-checked is the
   **field-plane** statement (over `QF × QF`, `unitFP`); turning it into a *Euclidean* ℝ²
   statement needs real analysis (ℝ, `Real.sqrt`, `ring`) — i.e. **Mathlib**, which is not
-  wired into this core-Lean project (`packages: []`, no `ring` tactic). Bringing Mathlib in
+  wired into this core-Lean project (`packages: []`, no `ring` tactic).   Bringing Mathlib in
   (or an in-tree real-radical model) is the deferred step; the multiquadratic field identities
   themselves are standard.
+- **Mathlib-free ring groundwork (DONE, 2026-05-29).** `formal/lean4/SounioMultiquadRing.lean`
+  begins mechanising "QF is the multiquadratic field" *without* Mathlib or the `ring` tactic:
+  **proved** `qadd_comm`, `qadd_zero_{left,right}`, and `qmul_comm` (XOR-permutation symmetry via
+  a finite `native_decide` certificate) — `#print axioms` clean (no `sorryAx`); the harder laws
+  (`qmul` associativity/distributivity/unit/negation) are stated as explicit **open `Prop`
+  obligations**, not axiomatised. Honest wall (see `docs/research/multiquad-faithfulness-note.md`):
+  ℚ-linear independence + `QF↪ℝ` cannot even be *stated* in core Lean without constructing ℝ —
+  that is precisely the standard/textbook part Mathlib would mechanise, which is why the exact
+  symbolic field-plane statement is the honest self-hosted summit.
 
 Honest framing (logged once, not repeated): finding/minimising the core was the hard work of
 de Grey/Heule/Parts. The Sounio contribution is the *exact + self-hosted + machine-checked*
@@ -209,6 +218,20 @@ conflicts unchanged, 32 s unchanged within noise). The gap exceeds 100 too rarel
 on these LRB+Glucose runs to register. The mechanisms are wired correctly for
 other instance families; the missing kissat-parity lever is a richer
 blocker/lazy-watch + arena cache layout, staged as E4c.
+
+**E4c — profile-driven win (LRB pick cache).** Instrumented `propagate()` on G₅₂₉:
+`litval` dominates at **1.50 B** calls (≈22 per propagation), chrono-BT fires
+**0 times**, blocking literals already skip 54 % of watch nodes — so the chrono
+and richer-blocker levers are dead on this instance (the latter measured *slower*,
+reverted). The profile pointed at `pick()` doing an O(nvars) scan every decision;
+caching the current best LRB var (refreshed on bump/unassign, invalidated on
+assign) gives **G₅₂₉ 327,208 → 300,218 conflicts (−8.3 %) and 33.8 s → ~31 s
+(≈−10 %)**, drat-trim `s VERIFIED` (66 MB DRAT). K₈/₇ conflicts regressed +14 %
+(different but still-sound search trajectory) at neutral wall-time — an honest
+heuristic trade, not a pure no-op speedup. kissat/CaDiCaL were **not installed**
+in the sandbox, so no PAR-2 comparison was fabricated; that bench stays open.
+Next lever (profile-justified): inline `assign[]` reads in the propagate hot loop
+to cut the 1.5 B call overheads without changing search, or an LRB max-heap.
 
 **P1 — diversified portfolio.** `souc_sat.sio` doubles as a CLI worker
 (`souc_sat <seed> <clique_n> <lrb> <sb>`): the seed perturbs **only** search order
