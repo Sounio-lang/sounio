@@ -49,6 +49,149 @@ one.
 
 ---
 
+## 1a. FLAGSHIP RESULT — χ(G₅₂₉) ≥ 5 certified by the Sounio solver (2026-05-29)
+
+The self-hosted Sounio solver has closed the **real Heule 529-vertex de Grey core**:
+
+- `souc_sat.sio` reads `examples/erdos/data/degrey_529.edge` (Heule's G₅₂₉,
+  529 vertices / 2670 edges, from `github.com/marijnheule/CNP-SAT`) in a new
+  **DIMACS edge-file mode**, builds the 4-colouring CNF (529 at-least-one +
+  2670×4 edge clauses = 11 209) plus **one sound triangle-precolour** (3 units,
+  triangle 0,1,5 → colours 0,1,2; satisfiability-preserving), and **refutes it**.
+- Result: **UNSAT in ≈33 s, 327 208 conflicts**, a **72 MB streamed DRAT proof**,
+  and **`drat-trim s VERIFIED`** (9 776 / 11 212 clauses in core, 5 010 369
+  resolution steps). ⟹ **χ(G₅₂₉) ≥ 5** — the graph is not 4-colourable.
+- The triangle precolour is essential: **without it our CDCL does not close in
+  300 s** (>500 k conflicts and climbing); with it (complete S₄ colour-symmetry
+  break, since unit-distance ⟹ K₄-free ⟹ ω=3) it finishes in 33 s.
+
+```bash
+export SOUNIO_SOUC_BIN="$PWD/artifacts/self-hosted/souc-self-hosted-x86_64"
+$SOUNIO_SOUC_BIN examples/erdos/souc_sat.sio /tmp/souc_sat.elf
+cd /tmp && /tmp/souc_sat.elf 0 4 1 1 "$OLDPWD/examples/erdos/data/degrey_529.edge"
+drat-trim souc_sat_worker.cnf souc_sat_worker.drat        # s VERIFIED
+```
+
+This is **Part A** of the flagship (non-4-colourability of a real core, machine-checked
+by *our* solver + drat-trim). **Part B** (exact unit-distance realisation over
+ℚ(√3,√5,√11) from `degrey_529.vtx`, no floats ⟹ χ(ℝ²)≥5) and the **Lean V-track**
+(DRAT→LRAT→verified checker) remain. Honest framing: refuting a *given* core is the
+*easy* half (others did the hard finding/minimising); the Sounio novelty is the
+*exact + self-hosted + machine-checked* chain — Part A is the first leg.
+
+## 1b. Implemented & gated this iteration — `examples/erdos/souc_sat.sio`
+
+A hardened engine `souc_sat.sio` was forked from `cdcl_fast.sio` and three plan
+items were landed behind the external gate (`drat-trim s VERIFIED` on disk). All
+numbers below are re-runnable:
+
+```bash
+SOUC=./bin/souc
+$SOUC examples/erdos/souc_sat.sio /tmp/souc_sat.elf && chmod +x /tmp/souc_sat.elf
+/tmp/souc_sat.elf                      # pigeonhole gate K4..K7 + writes souc_sat_k76.{cnf,drat}
+drat-trim souc_sat_k76.cnf souc_sat_k76.drat      # external arbiter -> s VERIFIED
+/tmp/souc_sat.elf 0 8 1                 # streamed worker: K8/7, seed 0, LRB -> souc_sat_worker.{cnf,drat}
+/tmp/souc_sat.elf 0 8 0                 # same with VSIDS (arg3=0) for A/B
+drat-trim souc_sat_worker.cnf souc_sat_worker.drat        # 23 MB streamed proof -> s VERIFIED
+examples/erdos/portfolio.sh 8 8 $(command -v drat-trim)   # P1 portfolio on K8 (streaming+LRB)
+```
+
+**E0 — proof on disk + overflow guard, then TRULY STREAMED.** First a `write_file`
+buffered path with a refuse-on-overflow latch. Then the real fix: a **held
+`syscall6` fd + 64 KiB write buffer** (`s_open`/`wb_*`/`s_close`) so the worker
+streams DRAT **as it is produced** during `solve()` — RAM is O(1) in proof size.
+This **unblocks de Grey-scale**: K₈/₇ (impossible under any fixed buffer) now closes
+with a **23 MB streamed proof on disk that drat-trim verifies** (`s VERIFIED`).
+The CNF is streamed the same way. Negative control intact (unjustified ⊥ rejected).
+
+**E1b — LRB branching** (Learning-Rate Branching, Liang et al. 2016) in integer
+fixed-point: per-var participation rate folded into a learning-rate EMA `Q[v]`,
+branch on max `Q`; α decays 0.40→0.06. Toggle `USE_LRB` (worker arg 3) for A/B.
+**Decisive on structured UNSAT**: K₈/₇ conflicts **182,445 (VSIDS) → 46,165 (LRB),
+≈4×**, both drat-trim `s VERIFIED`.
+
+**E1 — recursive clause minimisation** (MiniSat `ccmin_mode=2`, iterative with
+the abstract-level signature prune) in `analyze()`. Drops redundant learned
+literals before the second-watch/btlevel choice; `seen[]` is restored via an
+explicit to-clear list. Soundness is arbitrated by drat-trim (a wrong removal
+makes the lemma non-RUP).
+
+**E2 — Glucose LBD-EMA dynamic restarts** with an integer recent-window vs
+global-average force condition and a **trail-EMA block** (postpone when the
+partial model is unusually large) to avoid the pigeonhole thrash naive restarts
+caused. Plus periodic rephasing.
+
+**P1 — diversified portfolio.** `souc_sat.sio` doubles as a CLI worker
+(`souc_sat <seed> <clique_n> <lrb> <sb>`): the seed perturbs **only** search order
+(initial phase, activity bias, restart cadence). `portfolio.sh` forks N workers in
+private dirs, first-to-UNSAT wins, and verifies the winner's cert with drat-trim;
+`portfolio_slurm.sbatch` is the SLURM-array cluster variant.
+
+**F2 — symmetry breaking + graph-colouring encoder (domain win).** Colours are
+interchangeable, so any proper colouring can be permuted to give a known clique
+vertex *i* colour *i* — a **satisfiability-preserving** predicate, hence
+*F∧SB* UNSAT ⟹ *F* UNSAT. Two surfaces landed:
+
+- `add_sb_units` precolours the first k-clique of the pigeonhole family. On K₈/₇
+  this collapses the search: **46,165 conflicts (LRB) → 1 conflict**, drat-trim
+  `s VERIFIED`. (`/tmp/souc_sat.elf 0 8 1 1`.)
+- An **edge-list k-colouring encoder** (`add_edge`, `add_atleast_one`,
+  `build_spindle_3col`) plus level-0 propagation of original **unit** clauses now
+  drives a *real unit-distance graph* through the whole stack. The **Moser
+  spindle 3-colouring is UNSAT ⟹ χ(spindle) ≥ 4**, certified end-to-end (encoder
+  → triangle-precolour SB → LRB CDCL → streamed DRAT → `drat-trim s VERIFIED`).
+  Verified **both with SB (2 conflicts) and without SB (13 conflicts)** — the
+  no-SB run independently confirms the graph is genuinely non-3-colourable, so SB
+  is sound here, not masking a colourable graph. (`/tmp/souc_sat.elf 0 0 1 1`.)
+
+This is the first **de Grey-pipeline** result on a real geometric graph: the
+same machinery (exact-edge graph → SB → CDCL → checked proof) that scales to a
+5-chromatic core, demonstrated on the canonical χ=4 unit-distance graph.
+
+**Value precedence** (Law–Lee 2004; `add_value_precedence`, `SB=2`/`SB=3`) also
+landed and is `drat-trim s VERIFIED` on spindle + K₈/₇. Honest finding from the
+A/B/C/D matrix: it is **redundant with triangle precolour for the de Grey k=4 case**
+— because unit-distance plane graphs are **K₄-free (ω=3)**, precolouring one
+triangle leaves residual colour symmetry S_{k−ω}=S₁ (trivial), so clique-precolour
+is *already complete*; VP gives identical conflict counts (spindle 13→2; K₈/₇
+46 165→1). VP is therefore kept as the **general** tool for k−ω≥2 (triangle-free
+graphs, k≥5), not as the χ≥5 lever. See `DEGREY_LITERATURE_REVIEW.md` §4 for the
+corrected analysis and the revised critical path (exact geometry + Lean V-track,
+*not* more symmetry breaking — refuting a given core is trivial for any CDCL).
+
+Measured on K₇/₆ (drat-trim core stats — the externally-checkable metric):
+
+| metric | `cdcl_fast` (base) | `souc_sat` E0+E1 | + E2 restarts | portfolio best (seed 2) |
+|---|---:|---:|---:|---:|
+| conflicts | 1459 | 1485 | 990 | **703** |
+| core lemmas | 1067 | 777 | 653 | 654 |
+| resolution steps | 11296 | 9603 | 7924 | 8132 |
+| redundant lits in core | 334 | 117 | **86** | 55 |
+| drat-trim | VERIFIED | VERIFIED | VERIFIED | **VERIFIED** |
+
+Portfolio diversification is real: across 8 seeds K₇/₆ conflicts spanned
+703–2138 (≈3×); the fastest worker beats the single default config (990).
+
+Newly added (K₈/₇, drat-trim `s VERIFIED` on the streamed proof):
+
+| metric | VSIDS | **LRB** |
+|---|---:|---:|
+| conflicts | 182,445 | **46,165** |
+| restarts | 1,695 | 415 |
+| proof | streamed→disk, verified | streamed→disk, verified |
+
+Still **staged** (not yet built): CHB + EVSIDS + stable/focused mode switching
+(rest of E1); Luby stable mode + tiered clause DB (rest of E2); all of E3
+inprocessing, E4 perf, P2 cube-and-conquer, P3 shared-DB, the Lean LRAT checker
+(V), the de Grey core flagship, and the kissat benchmark. These remain as
+specified below. With streamed proofs + LRB + the graph-colouring encoder with
+clique-precolour symmetry breaking, the **de Grey core line is now unblocked end
+to end** — the spindle (χ=4) already goes through; what remains for χ≥5 is a
+genuine 5-chromatic core (exact edges) and stronger symmetry (lex-leader /
+value-precedence) for the larger search.
+
+---
+
 ## 2. The modern-CDCL gap (Phase 1–2 backlog)
 
 Ordered by expected impact on hard structured UNSAT (the de Grey regime):
@@ -62,10 +205,12 @@ Ordered by expected impact on hard structured UNSAT (the de Grey regime):
 - [ ] **Mode switching** (CaDiCaL "stable vs focused"): alternate LRB/VSIDS phases.
 
 ### 2.2 Restarts & phases
-- [ ] **Glucose-style LBD-based dynamic restarts** (restart when the recent-LBD EMA
+- [x] **Glucose-style LBD-based dynamic restarts** (restart when the recent-LBD EMA
       exceeds the global LBD average × K) instead of fixed inner/outer.
+      *Done in `souc_sat.sio` with an integer cross-multiplied condition + trail-EMA block.*
 - [ ] **Reluctant doubling / Luby** as the stable-mode schedule.
-- [ ] **Rephasing** with multiple strategies (saved / inverted / random / best-found).
+- [x] **Rephasing** with multiple strategies (saved / inverted / random / best-found).
+      *Periodic phase flip implemented; multi-strategy rephasing still staged.*
 - [ ] **Target phases / local search rephasing** (walk-based phase seeding).
 
 ### 2.3 Clause database
@@ -75,9 +220,10 @@ Ordered by expected impact on hard structured UNSAT (the de Grey regime):
 - [ ] **Clause activity** bumping (alongside LBD) for the local tier.
 
 ### 2.4 Inprocessing (the big one)
-- [ ] **On-the-fly self-subsumption** during conflict analysis (clause minimisation —
-      *recursive* minimisation à la MiniSat, removes redundant learned literals;
-      typically 30–50% shorter clauses → big speedup *and* smaller proofs).
+- [x] **Recursive clause minimisation** à la MiniSat (`ccmin_mode=2`) in `analyze` —
+      removes redundant learned literals. *Done in `souc_sat.sio`; drat-trim core
+      redundant-literal count on K₇/₆ fell 334 → 86.* (Full on-the-fly
+      self-subsumption against the DB is still staged.)
 - [ ] **Vivification** (asymmetric branching to strengthen clauses).
 - [ ] **Bounded Variable Elimination (BVE)** + **subsumption** + **self-subsuming
       resolution** as a preprocessing and periodic inprocessing pass.
@@ -107,7 +253,10 @@ that can only be made to pass by weakening the proof is rejected (CLAUDE.md §6.
 
 The in-memory DRUP array is the current hard limit. de Grey-scale needs:
 
-- [ ] **Streamed proof to disk** (write lemmas/deletions as produced; no global array).
+- [~] **Proof to disk** — `souc_sat.sio` now serialises the full DIMACS+DRAT cert
+      to disk via `write_file` with a refuse-on-overflow guard. *Truly streamed*
+      (held `syscall6` fd, no in-RAM `P_lits`) is the remaining step; the 16 MiB
+      buffer already overflows at K₈/₇, confirming the need.
 - [ ] **Binary DRAT** output (compact) — and/or
 - [ ] **LRAT** (Linear RAT with resolution hints) emitted directly. LRAT is *checkable
       in linear time* and is what modern verified toolchains use.
@@ -137,9 +286,15 @@ Two parallel attack lines; either suffices for the certificate.
       verify with drat-trim + Lean checker. **This is the first real χ ≥ 5 certificate.**
 
 ### 4.2 Symmetry-aware encoding (domain win, Front F2)
+- [x] **Clique-precolour symmetry breaking** landed (`add_sb_units`,
+      satisfiability-preserving). K₈/₇ collapses 46,165→1 conflict; drat-trim
+      `s VERIFIED`. Edge-list k-colouring encoder + level-0 unit propagation also
+      landed, certifying **χ(Moser spindle) ≥ 4** end-to-end (UNSAT with *and*
+      without SB → SB confirmed sound on a real unit-distance graph).
 - [ ] de Grey's graph has a large rotation/reflection automorphism group. Add
-      **symmetry-breaking predicates** (lex-leader on colour classes) at the CNF level —
-      this is where owning the encoder beats a black-box solver.
+      **lex-leader / value-precedence** colour-class symmetry breaking (the
+      polynomial-size predicate that helps the small-clique de Grey graphs where
+      clique-precolour alone is weak) — the next encoder win.
 - [ ] **Cube-and-conquer**: split on a few high-degree vertices' colours, solve cubes
       in parallel (Front F3, GPU/cluster), recombine proofs.
 
@@ -212,13 +367,25 @@ weeks, P2 ≈ 3–4 weeks, P3 ≈ 3–4 weeks (Lean checker is the long pole), P
 
 ---
 
-## 8. Immediate next action (when P1 starts)
+## 8. Immediate next action (P1 landed; next up)
 
-1. Add **recursive clause minimisation** to `analyze` in `data/degrey/gen_solver.py`
-   (biggest single win, smaller proofs, low risk) and re-run the gate.
-2. Add **LRB** alongside VSIDS with mode switching.
-3. Re-run de Grey on SLURM; measure conflicts-to-first-core-shrink and whether the
-   `trail` starts trending toward a level-0 refutation.
+Done: recursive clause minimisation (E1), Glucose LBD-EMA restarts (E2),
+proof-on-disk with overflow guard (E0), diversified portfolio (P1) — all in
+`souc_sat.sio` / `portfolio.sh`, all `drat-trim s VERIFIED`.
+
+Next, in priority order:
+
+1. **Truly streamed proof** (held `syscall6` fd + buffered writer; drop in-RAM
+   `P_lits` and the 16 MiB text cap) so K₈/₇+ and de Grey-scale proofs fit. This
+   unblocks every larger experiment.
+2. **LRB / CHB** alongside VSIDS with stable/focused mode switching — the single
+   highest-leverage search-quality change for de Grey-type structured UNSAT.
+3. **Heap clause arena** (`heap_alloc`/`heap_realloc`) to drop the fixed
+   8192-var / 262144-clause caps (the smoke test `tests/run-pass/stdlib_mem_alloc.sio`
+   confirms `malloc`/`free` work natively).
+4. Re-run de Grey on SLURM via `portfolio_slurm.sbatch`; measure
+   conflicts-to-first-core-shrink and whether `trail` trends toward a level-0
+   refutation.
 
 Everything in this file is gated, re-runnable, and externally checkable. That is the
 only way a solo solver beats a 20-year-old institution: not by claiming, by *proving*.

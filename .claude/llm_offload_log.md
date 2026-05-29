@@ -1,5 +1,155 @@
 # LLM Offload Log
 
+## 2026-05-29: FLAGSHIP — χ(G₅₂₉) ≥ 5 via Sounio solver (`souc_sat.sio` graph-file mode)
+
+- **Claim**: the Heule 529-vertex de Grey core G₅₂₉ is **not 4-colourable** ⟹ χ(G₅₂₉) ≥ 5,
+  certified by the self-hosted Sounio solver + external `drat-trim`.
+- **Evidence (ground truth)**: `souc_sat` reads `data/degrey_529.edge` (529 vtx / 2670
+  edges, vendored from `marijnheule/CNP-SAT`), builds the one-hot 4-colouring CNF
+  (529 + 2670×4 = 11 209 clauses) + 3 triangle-precolour units (11 212 total — clause
+  count matches the structure exactly, confirming faithful parse), refutes in 327 208
+  conflicts / 33 s, streams a **72 MB DRAT**, and **`drat-trim` → `s VERIFIED`**
+  (9 776/11 212 core clauses, 5 010 369 resolution steps). Deterministic on re-run.
+- **Soundness of the symmetry break (math claim, self-derived)**: the 3 added units pin a
+  *real* triangle {0,1,5} (all three edges present, checked via the adjacency matrix) to
+  colours 0,1,2. A triangle needs 3 distinct colours in any proper colouring; by colour
+  permutation (S₄) WLOG they are 0,1,2 — so the predicate is **satisfiability-preserving**:
+  F∧precolour SAT ⟺ F SAT, hence F∧precolour UNSAT ⟹ F UNSAT. Therefore the verified
+  refutation of the augmented formula proves the *original* G₅₂₉ 4-colouring CNF is UNSAT.
+  (Cross-check available: the un-augmented `cnf/529-4.cnf` is Heule's published UNSAT
+  instance; our base CNF is that plus the 3 units.)
+- **Why this is honest about scope**: refuting a *given* core is the easy half — kissat/
+  CaDiCaL do it in seconds; our basic LRB-CDCL needs the triangle precolour (without it
+  it does not close in 300 s, lacking inprocessing). The Sounio *novelty* is the
+  exact + self-hosted + machine-checked chain; this is **Part A** (non-4-colourability).
+  **Part B** (exact `dist²=1` over ℚ(√3,√5,√11) from `degrey_529.vtx`) and the Lean
+  V-track are still TODO. No overclaim of χ(ℝ²)≥5 until Part B lands.
+- **Offload**: math claim is standard (graph k-colouring encoding + value/clique symmetry
+  is textbook; the chromatic fact is Heule 2019, arXiv:1907.00929). drat-trim is the
+  arbiter. No provider offload invoked for this published-result reproduction; logged here
+  for the audit trail.
+
+## 2026-05-29: souc-sat F2 value precedence + honest correction — review (`souc_sat.sio`)
+
+- **Target**: `add_value_precedence` (Law–Lee 2004 value precedence, `SB=2`/`SB=3`).
+- **Ground truth**: A/B/C/D matrix (none/clique/VP/both) on spindle (13/2/2/2 conflicts)
+  and K₈/₇ (46 165/1/1/1), **all `drat-trim s VERIFIED`**.
+- **deepseek review**: 8 findings (3 BLOCKER, 5 MAJOR) — **all recycled engine concerns
+  from prior rounds, none touching the new VP code, all previously adjudicated**:
+  #1 emit_delete format (both paths drat-trim VERIFIED); #2 `abstract_level & 31` collision
+  — REJECT, the abstraction is only a *pruning gate* before the full recursive reason-chain
+  check, so a collision merely declines to prune (sound), and `vlevel ≥ 0`; #3 lbd_ring
+  sizing — heuristic, index < LBD_WIN ≤ 63 < 64 so no OOB; #4 `&!` buffer pointer — REFUTED
+  by the 23 MB streamed proof verifying; #5 lrb_alpha negative — REJECT, `if <60 →60` clamps
+  it; #6 P_n in stream — cosmetic; #7 native `verify` deletion check — drat-trim is the
+  arbiter, not `verify`; #8 reduce_db reason update — REFUTED by K₈/₇ (91 k lemmas, many
+  reduce rounds) verifying. **No new valid defect.**
+- **Honest correction logged** (not a reviewer finding — author's own derivation): an earlier
+  `DEGREY_LITERATURE_REVIEW.md` draft claimed "value precedence is *required* for the de Grey
+  4-colouring." **Wrong.** Unit-distance plane graphs are K₄-free (ω=3); precolouring one
+  triangle leaves residual colour symmetry S_{k−ω}=S_{4−3}=S₁ (trivial), so clique-precolour
+  is **already complete** for k=4. The A/B/C/D matrix confirms VP ≡ clique here (identical
+  conflicts). VP is retained as the general tool for **k−ω≥2** only. Doc corrected.
+- **Build-env note**: `bin/souc` resolves the host binary to `bin/souc-linux-x86_64`, which
+  in this checkout is a *copy of the wrapper* ⇒ infinite self-`exec` recursion unless
+  `SOUNIO_SOUC_BIN` points at the real ELF `artifacts/self-hosted/souc-self-hosted-x86_64`.
+  Set `export SOUNIO_SOUC_BIN="$PWD/artifacts/self-hosted/souc-self-hosted-x86_64"` before
+  compiling. (Also had to rebuild `drat-trim` from the official source into `/tmp` after a
+  `/tmp` wipe; gcc verification-only, per authorisation.)
+
+## 2026-05-29: souc-sat F2 symmetry-breaking + graph-colouring encoder — soundness review (`souc_sat.sio`)
+
+- **Target**: `examples/erdos/souc_sat.sio` — added (a) initial unit-clause
+  propagation at level 0 in `solve()` (needed for symmetry-breaking units / any
+  unit in the input), (b) clique-precolour symmetry breaking `add_sb_units`
+  (precolour the first k-clique with distinct colours; satisfiability-preserving,
+  so F∧SB UNSAT ⟹ F UNSAT), and (c) an edge-list graph-colouring encoder
+  (`add_edge`, `add_atleast_one`, `build_spindle_3col`) certifying the Moser
+  spindle is not 3-colourable (χ ≥ 4).
+- **Orthogonal ground truth**: external `drat-trim` returns `s VERIFIED` on the
+  spindle 3-colouring refutation **both with and without SB** (13→2 conflicts),
+  and on K₈/₇ with SB (46 165→1 conflict). A 3-colourable graph or an unsound SB
+  predicate could not yield `s VERIFIED` on the un-SB'd CNF — the no-SB spindle
+  run is the decisive independent check that SB is satisfiability-preserving here.
+- **deepseek (devil's advocate) review**: 11 findings (3 BLOCKER, 5 MAJOR, 2 MINOR,
+  1 NIT). **No new valid soundness defect.**
+
+| # | sev | finding | verdict |
+|---|---|---|---|
+| 1 | BLOCKER | `abstract_level` shift on negative `vlevel[v]` is UB | **REJECT.** `vlevel` is a decision level, ≥ 0 by construction (set in `enqueue`, never negative). Pre-existing code; K₈/₇ heavy-minimisation path drat-trim `s VERIFIED`. |
+| 2 | BLOCKER | empty clause not terminal — `analyze` keeps emitting after `emit_empty` | **REJECT.** Every empty-clause path returns from `solve()` immediately (level-0 conflict in `analyze`, and the new unit-init `emit_empty()  return 0`). drat-trim requires a terminal empty clause and reports `s VERIFIED`. |
+| 3 | BLOCKER | `reduce_db` leaves stale `wnext` after compaction | **REJECT (re-adjudicated).** `whead` reset then every surviving clause re-watched via `watch_clause`, which rewrites that clause's `wnext`; deleted clauses are unreachable from any `whead` chain. K₈/₇ (91 k lemmas, many `reduce_db` rounds) drat-trim `s VERIFIED`. |
+| 4 | MAJOR | `lit_redundant` `mstack` overflow (check after push) | **REJECT (misread).** Guard `if sp >= 8192 { return 0 }` (line 405) is **before** the push `mstack[sp]` (line 412); max write index 8191, in-bounds for `[i64;8192]`. Already accepted/fixed last round. |
+| 5 | MAJOR | `lrb_alpha = 400 - n/1000` goes negative past 400 k conflicts | **REJECT (wrong).** Immediately clamped by `if lrb_alpha < 60 { lrb_alpha = 60 }` — a negative value is `< 60`, so it becomes 60. Never negative. |
+| 6 | MAJOR | `trail_ema=0` blocks all restarts until EMA warms | **ACK, won't-fix (heuristic-only).** Pure restart-scheduling nuance, not soundness; restarts still fire (K₈/₇ restarts=415). EMA warms within ~32 conflicts under the α=1/32 update. drat-trim unaffected. |
+| 7 | MAJOR | seed `phase[]` overwritten by `cancel_to` phase-saving | **REJECT.** Intended interaction; seed still diverts the initial descent + seeds `LBD_WIN`/`RESTART_FLOOR`. Measured 3× conflict spread across seeds confirms diversification works. |
+| 8 | MAJOR | `nvars` may undercount ⇒ DRAT header mismatch | **REJECT.** Every colour var appears in an at-least-one clause, so `db_add`'s running max equals `n*k`. drat-trim checks the header and reports `s VERIFIED`. |
+| 9 | MINOR | `print_digit` prints "9" for d≥9 | **REJECT (debug-only, callers pass 0–9).** |
+| 10 | MINOR | `str_to_int` swallows leading '-' | **REJECT (non-issue).** Seeds/n/flags are non-negative. |
+| 11 | NIT | `proof_over` mid-proof guarantee weaker than comment | **REJECT.** `verify()` is the native path; drat-trim is ground truth and overflow latches refusal. |
+
+Outcome: no code change required — the new SB/encoder/unit-init logic is sound and
+drat-trim is the arbiter. New verified milestone: **χ(Moser spindle) ≥ 4** certified
+end-to-end (edge encoder → triangle-precolour SB → LRB CDCL → streamed DRAT →
+`drat-trim s VERIFIED`), confirmed UNSAT both with and without SB.
+
+## 2026-05-29: souc-sat E0/E1/E2 + portfolio — soundness review (`souc_sat.sio`)
+
+- **Target**: `examples/erdos/souc_sat.sio` — hardened CDCL engine adding E0
+  proof-on-disk (`write_file` + overflow guard), E1 recursive clause minimisation
+  (MiniSat `ccmin_mode=2`), E2 Glucose LBD-EMA restarts, and a P1 portfolio worker
+  mode. Reviewed because minimisation and the proof-store paths are the parts most
+  able to corrupt a certificate.
+- **xai (Grok 4.1) math-review**: `NO MATHEMATICAL CONTENT TO REVIEW` (engine code,
+  not a formula) — re-routed to `review`.
+- **deepseek (devil's advocate) review**: 12 findings (2 BLOCKER, 6 MAJOR, 2 MINOR,
+  2 NIT). **Decisive orthogonal evidence: external `drat-trim` returns `s VERIFIED`
+  on the K₇/6 cert *and* `s NOT VERIFIED` on an unjustified empty clause** — a
+  satisfiable formula or unsound minimisation cannot yield `s VERIFIED`.
+
+| # | sev | finding | verdict |
+|---|---|---|---|
+| 1 | BLOCKER | `write_seed_cert` checks `PB_over` on "stale" data; partial file left on disk | **PARTIAL ACCEPT.** "Stale flag" is **wrong** — `build_drat_buf` resets `PB_over` then sets it during the build, so the check is fresh (empirically K₈/₇ → "cert refused"). The partial-file nit is real but harmless (workers use private mktemp dirs). **Fixed anyway**: build/check DRAT *before* writing CNF. |
+| 2 | BLOCKER | `lit_redundant` `mstack` has no `sp` bound (size 8192) | **ACCEPT.** `sp` ≤ distinct vars ≤ `nvars` (each var pushed once via `seen`), so ≤ 8192 only at the `nvars==MAXV` edge. **Fixed**: guard `sp>=8192` ⇒ return 0 (not-redundant = keep literal = sound). |
+| 3 | MAJOR | `reduce_db` corrupts original-clause `cstart` after compaction | **REJECT (misread).** Compaction loops `c=0..nclauses` (not `c=n_orig`); originals are all kept, stay first in order, so their `newidx==c` and `cstart` is recomputed correctly. K₇ fires `reduce_db` (reduces=3) and drat-trim still `s VERIFIED`. The `c=n_orig` loop is only delete-record emission. |
+| 4 | MAJOR | `verify` tautology overwrite corrupts persistent assignment | **REJECT.** `reset_assign_full()` runs at the start of *every* lemma iteration, so no cross-lemma persistence; and `taut⇒ok` skips propagation for that lemma. (1-UIP lemmas are never tautological anyway.) |
+| 5 | MAJOR | `trail_ema=0` blocks the first restart | **REJECT (non-issue).** The window gate (`lbd_rcnt≥LBD_WIN=50`) gives the α=1/32 EMA ~32 conflicts to converge before any restart is considered; restarts do fire (K₇ restarts=7). |
+| 6 | MAJOR | pigeonhole encoding missing at-most-one-colour ⇒ formula SAT | **REJECT (decisively).** K_n needs n pairwise-disjoint non-empty colour-sets; n−1 colours ⇒ UNSAT even allowing multi-colour vertices. **drat-trim verifies a refutation against this exact CNF**, impossible if SAT. |
+| 7 | MAJOR | `emit_*` silently drop on `P_lits`/`P_n` overflow ⇒ false VERIFIED | **ACCEPT.** **Fixed**: `proof_over` latch set on every overflow path; `verify()` returns −2 and all cert paths refuse when set. |
+| 8 | MAJOR | `analyze`/`minimize` `seen[]` corruption | **REJECT (author concurs it's safe).** `minimize_and_clear` clears `seen` for all touched vars (mtoclear); UIP `seen` already 0 ⇒ fully clean on exit. |
+| 9 | MINOR | `print_dec` `i64::MIN` not handled | **REJECT (unreachable).** Only counts/literals (bounded) are printed. |
+| 10 | MINOR | `pb_dec` `i64::MIN` infinite loop | **REJECT (unreachable).** Literals are bounded by `nvars`. |
+| 11 | NIT | redundant `reset_assign_full` before `verify` | **REJECT (harmless).** |
+| 12 | NIT | seed range note | no bug. |
+
+Outcome: two hardening fixes applied (#2 stack guard, #7 proof-overflow latch; plus
+#1 reorder); gate re-validated after the fixes (K₄–K₇ `RUP:VERIFIED`, drat-trim
+`s VERIFIED`, redundant-lits-in-core 334→86). All soundness BLOCKERs/MAJORs
+adjudicated against drat-trim ground truth.
+
+### Addendum — streamed proof (held `syscall6` fd) + LRB branching review
+
+Second `deepseek` review after adding (a) truly streamed DRAT to disk via a held
+`syscall6` fd (O(1) RAM) and (b) LRB integer-fixed-point branching. **12 findings;
+no valid new defect.** Decisive evidence: the **K₈/₇ streamed 23 MB proof drat-trim
+`s VERIFIED`** (both VSIDS 182k-conflict and LRB 46k-conflict variants).
+
+| # | sev | finding | verdict |
+|---|---|---|---|
+| 1 | BLOCKER | `db_add` `-1` ignored ⇒ `reason[-1]`/`lbd[-1]` corruption | **REJECT (misread).** `solve()` does `let lidx=db_add(...) if lidx<0 {return 3}` *before* any use. |
+| 2 | BLOCKER | `lit_redundant` abstract-level shortcut unsound | **REJECT.** Abstract level is the recursion *gate* (off-signature ⇒ return 0 = keep), not the decision; full reason-chain recursion still runs — exact MiniSat `ccmin_mode=2`. drat-trim verifies every minimised lemma. |
+| 3 | MAJOR | `lrb_alpha` goes negative after 400k conflicts | **REJECT.** Immediately clamped: `if lrb_alpha < 60 { lrb_alpha = 60 }`. |
+| 4 | MAJOR | `reduce_db` stale `n_orig` | **REJECT (repeat).** Originals kept + re-indexed identically every compaction; K₈/₇ runs `reduce_db` 100s of times, drat-trim `s VERIFIED`. |
+| 5 | MAJOR | streamed `emit_delete` deletes never-added/reused clause | **REJECT.** DRAT deletion is *content*-matched; clause was emitted on learn and is deleted by literals while live. 430k-record streamed proof verifies. |
+| 6 | MAJOR | `verify` accepts empty clause unchecked | **REJECT.** Empty lemma still runs `propagate_noenq`; `ok==0 ⇒ return −1` *before* the `pln==0 ⇒ return 1`. |
+| 7 | MAJOR | `arr[c as usize]` is invalid Sounio | **REJECT.** Compiles + runs (whole suite executes). |
+| 8 | MAJOR | `str_to_int` overflow on huge seed | **REJECT (non-issue).** Seeds are small harness ints. |
+| 9–11 | MINOR | `wb_dec(0)`, `lbd_ring` 64-vs-63, ring wrap on `LBD_WIN` | **REJECT.** Ring wrap MUST be `LBD_WIN` (window size); 64 is intentional headroom; no overflow (clamp ≤63). |
+| 12 | NIT | "drat-trim verifies every worker" comment | **ACCEPT (doc).** True at harness level; comment context kept (portfolio.sh runs drat-trim on the winner). |
+
+Net: no fix required; the streamed-proof + LRB additions are sound under the
+drat-trim arbiter, confirmed by the verified K₈/₇ certificates.
+
 ## 2026-05-29: Fast CDCL + LBD clause deletion — soundness review (`cdcl_fast.sio`)
 
 - **Target**: `examples/erdos/cdcl_fast.sio` — two-watched-literal CDCL with integer
