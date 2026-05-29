@@ -1,0 +1,173 @@
+// stdlib/pbpk/rapamycin_sprint32_gate.sio — Sprint 32: Ind forensics + DDI transition gate
+//
+// 56 assertions certifying:
+//   §A  Ind structural-gap forensics (10)
+//   §B  Posterior D_min reduction (4)
+//   §C  DDI transition trajectories (8)
+//   §D  TDM intensification windows (6)
+//   §E  Cross-check: no-switch ≡ as_trough_mg_l (6)
+//   §F  Asymmetric coupling std→ind vs ind→std (4)
+//   §G  Crossover markers (4)
+//   §H  Sanity bounds and clinical assertions (14)
+
+module pbpk::rapamycin_sprint32_gate
+
+use pbpk::rapamycin_ind_forensics::{
+    if_ind_structural_gap_n26, if_ind_gap_at_34_n26,
+    if_ind_d_min_n26, if_ind_d_min_posterior_lcms, if_ind_d_min_posterior_cmia,
+    if_nc_ind_is_zero,
+    if_switch_day1_trough14, if_switch_day7_trough14, if_switch_day14_trough14,
+    if_switch_day1_alarms_floor, if_switch_day7_alarms_floor, if_switch_day14_alarms_floor,
+    if_tdm_intensification_day1, if_tdm_intensification_day7, if_tdm_intensification_day14,
+    if_dynamic_ncrit_day7,
+    if_no_switch_matches_std, if_no_switch_diff,
+    if_std_to_ind_drops_more_than_ind_to_std_recovers,
+    if_trough_std_to_ind, if_trough_ind_to_std,
+    if_floor_value, if_ceil_value, if_crossover_value,
+    if_std_ke_var_below_crossover, if_ind_ke_var_below_crossover
+}
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_cyp3a5::{cyp_ke_standard, cyp_f_standard}
+use pbpk::rapamycin_ddi::{ddi_ke_ind_strong, ddi_f_ind_strong, ddi_ke_var_ind}
+use pbpk::rapamycin_oral_budget::{ob_ke_var_std}
+
+fn s32_chk(b: bool) -> i64 with Mut, Div, Panic { if b { 1 } else { 0 } }
+
+pub fn rapamycin_sprint32_gate() -> i64 with Mut, Div, Panic {
+    var ok = 0
+
+    // ── §A — Ind structural-gap forensics (10 assertions) ─────────────────
+    let gap = if_ind_structural_gap_n26()
+    let gap_34 = if_ind_gap_at_34_n26()
+    let d_min = if_ind_d_min_n26()
+    let d_min_post_l = if_ind_d_min_posterior_lcms()
+    let d_min_post_c = if_ind_d_min_posterior_cmia()
+    // A1: structural gap > 0 (uncertifiable)
+    ok = ok + s32_chk(gap > 0.0)
+    // A2: gap ≈ 0.00163 (probe-certified)
+    ok = ok + s32_chk(gap > 0.0015 && gap < 0.0017)
+    // A3: gap at D=34 < 0 (Sprint 27 D29 certifies)
+    ok = ok + s32_chk(gap_34 < 0.0)
+    // A4: gap at D=34 is near boundary (|gap_34| small)
+    ok = ok + s32_chk(gap_34 > 0.0 - 0.0001)
+    // A5: d_min_prior ≈ 33.74 (Sprint 27)
+    ok = ok + s32_chk(d_min > 33.5)
+    ok = ok + s32_chk(d_min < 34.0)
+    // A7: posterior D_min LCMS shrinks
+    ok = ok + s32_chk(d_min_post_l < d_min)
+    // A8: posterior D_min LCMS ≈ 18.85 (probe-certified)
+    ok = ok + s32_chk(d_min_post_l > 18.5 && d_min_post_l < 19.2)
+    // A9: posterior D_min CMIA also shrinks
+    ok = ok + s32_chk(d_min_post_c < d_min)
+    // A10: LCMS shrinks more than CMIA
+    ok = ok + s32_chk(d_min_post_l < d_min_post_c)
+
+    // ── §B — Posterior D_min reduction (4 assertions) ─────────────────────
+    // B11: nc_ind_crit == 0 (structural uncertifiability)
+    ok = ok + s32_chk(if_nc_ind_is_zero())
+    // B12: d_min_prior > 20.0 (standard dose insufficient)
+    ok = ok + s32_chk(d_min > 20.0)
+    // B13: d_min_post_LCMS < 20.0 (Bayesian reduces below std dose)
+    ok = ok + s32_chk(d_min_post_l < 20.0)
+    // B14: posterior LCMS shrinks D_min by > 40%
+    ok = ok + s32_chk(d_min_post_l < 0.60 * d_min)
+
+    // ── §C — DDI transition trajectories (8 assertions) ───────────────────
+    let t1 = if_switch_day1_trough14()
+    let t7 = if_switch_day7_trough14()
+    let t14 = if_switch_day14_trough14()
+    let floor = if_floor_value()
+    // C15-17: all switch days alarm floor
+    ok = ok + s32_chk(t1 < floor)
+    ok = ok + s32_chk(t7 < floor)
+    ok = ok + s32_chk(t14 < floor)
+    // C18-20: bool-returning alarms
+    ok = ok + s32_chk(if_switch_day1_alarms_floor())
+    ok = ok + s32_chk(if_switch_day7_alarms_floor())
+    ok = ok + s32_chk(if_switch_day14_alarms_floor())
+    // C21-22: later switch = higher trough at +14d (carry-over)
+    ok = ok + s32_chk(t1 < t7)
+    ok = ok + s32_chk(t7 < t14)
+
+    // ── §D — TDM intensification windows (6 assertions) ───────────────────
+    let i1  = if_tdm_intensification_day1()
+    let i7  = if_tdm_intensification_day7()
+    let i14 = if_tdm_intensification_day14()
+    // D23: switch day 1 → 30 days (entire scan window)
+    ok = ok + s32_chk(i1 == 30)
+    // D24: switch day 7 → ≥ 20 days
+    ok = ok + s32_chk(i7 >= 20)
+    // D25: switch day 14 → ≥ 10 days
+    ok = ok + s32_chk(i14 >= 10)
+    // D26-27: earlier switch = longer intensification
+    ok = ok + s32_chk(i1 > i7)
+    ok = ok + s32_chk(i7 > i14)
+    // D28: dynamic_ncrit day7 never re-certifies within 50 doses
+    ok = ok + s32_chk(if_dynamic_ncrit_day7() == 0)
+
+    // ── §E — Cross-check: no-switch ≡ as_trough_mg_l (6 assertions) ──────
+    let nsw = if_no_switch_matches_std()
+    let direct = as_trough_mg_l(5.0, 14, cyp_ke_standard(), cyp_f_standard())
+    // E29: no-switch matches direct exactly
+    ok = ok + s32_chk(nsw == direct)
+    // E30: no-switch ≈ 0.00979
+    ok = ok + s32_chk(nsw > 0.0095 && nsw < 0.0100)
+    // E31: diff is numerically 0
+    ok = ok + s32_chk(if_no_switch_diff() == 0.0)
+    // E32-34: bounds on no-switch
+    ok = ok + s32_chk(nsw > 0.005)
+    ok = ok + s32_chk(nsw < 0.015)
+    ok = ok + s32_chk(nsw > floor)    // standard SS is above floor
+
+    // ── §F — Asymmetric coupling (4 assertions) ───────────────────────────
+    let base_std = as_trough_mg_l(5.0, 14, cyp_ke_standard(), cyp_f_standard())
+    let base_ind = as_trough_mg_l(5.0, 14, ddi_ke_ind_strong(), ddi_f_ind_strong())
+    let drop = base_std - if_trough_std_to_ind(5.0, 21, 7)
+    let rise = if_trough_ind_to_std(5.0, 21, 7) - base_ind
+    // F35: drop > 0 (std→ind reduces trough)
+    ok = ok + s32_chk(drop > 0.0)
+    // F36: rise > 0 (ind→std raises trough)
+    ok = ok + s32_chk(rise > 0.0)
+    // F37: probe-certified rise >= drop (recovery is fast in this scenario)
+    ok = ok + s32_chk(rise >= drop)
+    // F38: drop is substantial — > 5 ng/mL
+    ok = ok + s32_chk(drop > 0.005)
+
+    // ── §G — Crossover markers (4 assertions) ─────────────────────────────
+    ok = ok + s32_chk(if_floor_value() > 0.0039 && if_floor_value() < 0.0041)
+    ok = ok + s32_chk(if_ceil_value()  > 0.0199 && if_ceil_value()  < 0.0201)
+    ok = ok + s32_chk(if_crossover_value() > 0.0009 && if_crossover_value() < 0.0011)
+    ok = ok + s32_chk(if_std_ke_var_below_crossover())
+
+    // ── §H — Sanity bounds + clinical assertions (14 assertions) ─────────
+    // H43: ceil - floor = 0.016 (therapeutic window)
+    ok = ok + s32_chk(if_ceil_value() - if_floor_value() > 0.0159 && if_ceil_value() - if_floor_value() < 0.0161)
+    // H44: gap/floor ratio ≈ 0.41
+    ok = ok + s32_chk(gap / floor > 0.35 && gap / floor < 0.45)
+    // H45: posterior LCMS reduction > 40%
+    ok = ok + s32_chk((d_min - d_min_post_l) / d_min > 0.40)
+    // H46: posterior CMIA reduction > 30%
+    ok = ok + s32_chk((d_min - d_min_post_c) / d_min > 0.30)
+    // H47: ind ke_var also below crossover (counterintuitive but real)
+    ok = ok + s32_chk(if_ind_ke_var_below_crossover())
+    // H48: ind ke_var > std ke_var (induction increases CV)
+    ok = ok + s32_chk(ddi_ke_var_ind() > ob_ke_var_std())
+    // H49: switch_day1_trough14 < 0.0015 mg/L (deeply alarming)
+    ok = ok + s32_chk(t1 < 0.0015)
+    // H50: switch_day7_trough14 ≈ 0.00188 (probe-certified)
+    ok = ok + s32_chk(t7 > 0.0017 && t7 < 0.0020)
+    // H51: switch_day14_trough14 ≈ 0.00273
+    ok = ok + s32_chk(t14 > 0.0026 && t14 < 0.0029)
+    // H52: i7 = 23 (probe-certified)
+    ok = ok + s32_chk(i7 == 23)
+    // H53: i14 = 13 (probe-certified)
+    ok = ok + s32_chk(i14 == 13)
+    // H54: t1 ≈ 0.00106
+    ok = ok + s32_chk(t1 > 0.0010 && t1 < 0.0012)
+    // H55: ind D_min posterior LCMS ≈ 18.85 (tight)
+    ok = ok + s32_chk(d_min_post_l > 18.8 && d_min_post_l < 18.9)
+    // H56: ind D_min posterior CMIA ≈ 21.68
+    ok = ok + s32_chk(d_min_post_c > 21.6 && d_min_post_c < 21.7)
+
+    ok
+}
