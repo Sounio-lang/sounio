@@ -1,0 +1,193 @@
+// stdlib/pbpk/rapamycin_steady_state.sio — Sprint 44
+//
+// GUM-certified steady-state profile and safe monitoring gap for all five
+// pharmacogenomic strata at their correct optimal doses.
+//
+// N_last_cert = last N in [1,60] where both Z_floor≥2.0 and Z_ceil≥2.0.
+// Monitoring gap = N_last_cert − N_crit (safe interval after certification).
+//
+// Finding A: std late-onset toxicity — N_last_cert=36 (gap=30); Z_ceil drops
+//            from 2.102 at N=36 to 1.826 at N=37; toxic (Z_ceil=-2.577) at N=60.
+//            Ceiling is the sole closing constraint; floor remains at Z=15.6.
+// Finding B: slow shortest window — N_last_cert=18 (gap=15); Z_ceil drops
+//            0.616σ per dose at boundary; severely toxic (Z_ceil=-10.0) at N=60.
+//            Slow has the shortest safe monitoring gap of all five strata.
+// Finding C: inh late toxicity despite 1.5mg — N_last_cert=37 (gap=30);
+//            Z_ceil=1.9997 at N=38 (misses certification by <0.001σ); the very
+//            slow elimination (ke=0.002236) accumulates drug past ceiling by N=45.
+// Finding D: fast and ind unbounded — N_last_cert=60 for both; fast is
+//            floor-limited (Z_ceil=10.4 at N=60); ind is floor-limited
+//            (Z_ceil=5.3 at N=60) with margin growing monotonically.
+
+module pbpk::rapamycin_steady_state
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn ss_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn ss_zf(d: f64, n: i64, ke: f64, f: f64,
+         ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d, n, ke, f)
+    let uc = eu_u_c(d, n, ke, f, ka_v, fv, ke_v, k12_v, k21_v)
+    (c - trough_floor_mg_l()) / uc
+}
+
+fn ss_zc(d: f64, n: i64, ke: f64, f: f64,
+         ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d, n, ke, f)
+    let uc = eu_u_c(d, n, ke, f, ka_v, fv, ke_v, k12_v, k21_v)
+    (trough_ceil_mg_l() - c) / uc
+}
+
+fn ss_margin(d: f64, n: i64, ke: f64, f: f64,
+             ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> f64
+    with Mut, Div, Panic {
+    ss_min(ss_zf(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v),
+           ss_zc(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v))
+}
+
+fn ss_nlast_cert(d: f64, ke: f64, f: f64,
+                 ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> i64
+    with Mut, Div, Panic {
+    var n = 1; var last = 0
+    while n <= 60 {
+        let zfv = ss_zf(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v)
+        let zcv = ss_zc(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v)
+        if zfv >= 2.0 && zcv >= 2.0 { last = n }
+        n = n + 1
+    }
+    last
+}
+
+// ── std D=5mg ke=0.01118 F=0.141 ────────────────────────────────────────────
+pub fn ss_std_nlast_cert() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_nlast_cert(5.0,0.01118,0.141, ka,fv,ke,k12,k21)
+}
+pub fn ss_std_zc_n36() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_zc(5.0,36,0.01118,0.141, ka,fv,ke,k12,k21)
+}
+pub fn ss_std_zc_n37() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_zc(5.0,37,0.01118,0.141, ka,fv,ke,k12,k21)
+}
+pub fn ss_std_margin_n60() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_margin(5.0,60,0.01118,0.141, ka,fv,ke,k12,k21)
+}
+pub fn ss_std_zf_n60() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_zf(5.0,60,0.01118,0.141, ka,fv,ke,k12,k21)
+}
+
+// ── slow D=5mg ke=0.00838 F=0.188 ───────────────────────────────────────────
+pub fn ss_slow_nlast_cert() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_nlast_cert(5.0,0.00838,0.188, ka,fv,ke,k12,k21)
+}
+pub fn ss_slow_zc_n18() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_zc(5.0,18,0.00838,0.188, ka,fv,ke,k12,k21)
+}
+pub fn ss_slow_zc_n19() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_zc(5.0,19,0.00838,0.188, ka,fv,ke,k12,k21)
+}
+pub fn ss_slow_margin_n60() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_margin(5.0,60,0.00838,0.188, ka,fv,ke,k12,k21)
+}
+pub fn ss_slow_zf_n60() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_zf(5.0,60,0.00838,0.188, ka,fv,ke,k12,k21)
+}
+
+// ── fast D=5mg ke=0.01677 F=0.094 ───────────────────────────────────────────
+pub fn ss_fast_nlast_cert() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_nlast_cert(5.0,0.01677,0.094, ka,fv,ke,k12,k21)
+}
+pub fn ss_fast_margin_n60() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_margin(5.0,60,0.01677,0.094, ka,fv,ke,k12,k21)
+}
+pub fn ss_fast_zf_n60() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_zf(5.0,60,0.01677,0.094, ka,fv,ke,k12,k21)
+}
+pub fn ss_fast_zc_n60() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_zc(5.0,60,0.01677,0.094, ka,fv,ke,k12,k21)
+}
+
+// ── inh D=1.5mg ke=0.002236 F=0.282 ────────────────────────────────────────
+pub fn ss_inh_nlast_cert() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_nlast_cert(1.5,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+pub fn ss_inh_zc_n37() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_zc(1.5,37,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+pub fn ss_inh_zc_n38() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_zc(1.5,38,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+pub fn ss_inh_margin_n60() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_margin(1.5,60,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+pub fn ss_inh_zf_n60() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_zf(1.5,60,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+
+// ── ind D=34mg ke=0.05590 F=0.047 ───────────────────────────────────────────
+pub fn ss_ind_nlast_cert() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_nlast_cert(34.0,0.05590,0.047, ka,fv,ob_ke_var_ind(),k12,k21)
+}
+pub fn ss_ind_margin_n60() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_margin(34.0,60,0.05590,0.047, ka,fv,ob_ke_var_ind(),k12,k21)
+}
+pub fn ss_ind_zf_n60() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_zf(34.0,60,0.05590,0.047, ka,fv,ob_ke_var_ind(),k12,k21)
+}
+pub fn ss_ind_zc_n60() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ss_zc(34.0,60,0.05590,0.047, ka,fv,ob_ke_var_ind(),k12,k21)
+}
