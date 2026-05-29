@@ -85,17 +85,21 @@ UNSAT). Current state of `stdlib/theorem/smt.sio`:
   `test_smt_solver_basic` regression (incl. LIA) stays green.
 - **clause budget: 4096 clauses / 16384 literals (unchanged).**
 
-> **BLOCKER (gates the de Grey-scale, χ ≥ 5 path).** de Grey's minimised graphs
+> **OPEN ISSUE (gates the de Grey-scale, χ ≥ 5 path).** de Grey's minimised graphs
 > (~510 vertices) are *dense*: a 4-colouring is ≈ 2040 vars **and ≈ 10 000 clauses**.
-> That needs both a bigger clause budget and more literals. Enlarging `clause_data`
-> to ≈ 65 536 (≈ 512 KB) makes `SmtContext` ≈ 800 KB, and its **by-value return
-> (SRET) became execution-order dependent**: a known-SAT even cycle (C₄₀₀, 800 vars)
-> returned spurious **UNSAT** only when a large prior solve (K₇₀ 4-col) had run in
-> the same process; in isolation it returned SAT. This is a large-struct return /
-> memory-safety issue at the compiler/runtime level, not a logic bug in the SAT
-> encoding. Until it is fixed (or `SmtContext` is heap/arena-allocated rather than
-> returned by value), the clause budget stays at the proven-stable size and only
-> *sparse* graphs reach >256 vars. **No χ ≥ 5 certificate is claimed here.**
+> That needs both a bigger clause budget and more literals. When `clause_data` was
+> temporarily enlarged to 65 536 (`SmtContext` ≈ 800 KB), a known-SAT even cycle
+> (C₄₀₀, 800 vars) returned spurious **UNSAT** in one specific build of
+> `native_sat_scale_demo.sio`. **This was NOT reliably reproducible**: minimal
+> struct-return probes (512 KB array, trailing scalars after the array, deep
+> recursion over a live large struct) all initialise correctly, and the exact demo
+> sequence at the 512 KB config later returned the correct SAT. The symptom — a
+> layout-sensitive wrong value from a by-value struct return, with no crash — is
+> consistent with the known compiler SRET struct-return corruption family
+> documented in `docs/audit/r2_3_compiler_tuple_return_bug/` and the large-struct
+> follow-up in `docs/audit/sret_large_struct_smtcontext/`. Pending a *reproducible*
+> diagnosis, the clause budget is kept at the proven-stable size (4096/16384) and
+> only *sparse* graphs reach >256 vars. **No χ ≥ 5 certificate is claimed here.**
 
 ### What is NOT done (honesty boundary)
 
