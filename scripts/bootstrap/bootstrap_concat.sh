@@ -293,6 +293,8 @@ FILES=(
 
   # ── 23. I/O helpers + module loader ─────────────────────────────
   self-hosted/interop/contract.sio
+  self-hosted/io/env.sio
+  self-hosted/io/trace.sio
   self-hosted/io/file_write.sio
   stdlib/compiler/ontology/model.sio
   stdlib/compiler/ontology/cache.sio
@@ -527,6 +529,8 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/vm/mod.sio
 
     # 9. I/O helpers + module loader
+    self-hosted/io/env.sio
+    self-hosted/io/trace.sio
     self-hosted/io/file_write.sio
     self-hosted/compiler/module_loader.sio
 
@@ -726,7 +730,7 @@ echo ""
 CHECKER_EXIT=0
 FULL_CHECK_LOG="$ARTIFACT_DIR/bootstrap_full_check.log"
 set +e
-CHECKER_STACK_KB="${CHECKER_STACK_KB:-65536}"
+CHECKER_STACK_KB="${CHECKER_STACK_KB:-unlimited}"
 if [ "$BOOTSTRAP_PROFILE" = "full" ]; then
   (
     ulimit -s "$CHECKER_STACK_KB" 2>/dev/null || true
