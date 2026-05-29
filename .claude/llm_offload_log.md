@@ -1,5 +1,22 @@
 # LLM Offload Log
 
+## 2026-05-29: FLAGSHIP V-track — geometry leg machine-checked in Lean 4 + LRAT
+
+- **Lean theorem (geometry leg)**: `formal/lean4/SounioDeGreyUnitDistance.lean`
+  `theorem g529_all_edges_unit_distance : edges.all edgeUnit = true := by native_decide`
+  — all 2670 edges of G₅₂₉ have `dist²=1` exact over ℚ(√3,√5,√7,√11) (integer 16-tuple
+  field kernel). `lean` checks it (~3 min); `#print axioms` = `[propext,
+  native_decide.ax]` — **no `sorryAx`**. Lean `Int` is bignum ⟹ no overflow risk (stronger
+  than the i64 Sounio Part B). Coordinates emitted by the Sounio source of truth
+  (`degrey_geometry.sio lean`) via `gen_lean_geometry.sh`; the field kernel mirrors the
+  reviewed `degrey_geometry.sio` algebra (Grok 4.1 math-review clean, see below).
+- **SAT leg → LRAT**: `drat-trim … -L g529.lrat` → 36 MB LRAT (hints), `s VERIFIED`.
+- **Trust base**: the geometry leg now rests on the Lean kernel + `native_decide` compiler
+  axiom (not on the Sounio i64 arithmetic). The SAT leg still rests on drat-trim; a verified
+  LRAT checker (cake_lpr / LeanSAT) on `g529.lrat` is the staged final step before a single
+  composed χ(ℝ²)≥5 theorem. No offload needed (the math is the same field algebra already
+  math-reviewed; Lean independently re-verifies). Logged for the audit trail.
+
 ## 2026-05-29: FLAGSHIP Part B — exact unit-distance certification (`degrey_geometry.sio`)
 
 - **Claim**: every one of G₅₂₉'s 2670 edges has squared distance exactly 1 over
@@ -451,6 +468,7 @@ more edge constraints → fewer valid colorings → CDCL converges faster. This 
 
 | Date | Task | Provider | Target | Outcome | Note |
 |------|------|----------|--------|---------|------|
+| 2026-05-29 | math-review | xai/grok-4-1-fast-reasoning | SounioDeGreyUnitDistance.lean | PASS (scope tightened) | Geometry leg of chi(R^2)>=5: native_decide proves all 2670 G_529 edges have squared distance exactly 1 over Q(sqrt3,sqrt5,sqrt7,sqrt11) (16-tuple XOR-mask field). Grok: [OK] counts + native_decide soundness (decidable 16-tuple equality on concrete data). [TIGHTENABLE] the XOR ring-homomorphism (qmul/bcoeff) and the Q-linear-independence behind isOne are TRUE (standard multiquadratic field facts) but discharged by construction/runtime, not re-proved as Lean lemmas. [OVERREACH] "Hence unit-distance graph in R^2": the theorem proves the ALGEBRAIC squared-distance identity; the embedding Q(sqrt3,sqrt5,sqrt7,sqrt11) ↪ R (b_mask ↦ the real radical) is the standard bridge and is external to the artifact. Adjudication: ACCEPTED — softened the docstring/roadmap to claim the exact algebraic identity (machine-checked, no sorryAx) and to flag the R-embedding + ring/independence lemmas as the standard, not-yet-Lean-formalised bridge. No false claim remains. Raw: /tmp/llm-offload-Y37tZp/. |
 | 2026-05-27 | math-review | xai/grok-4-1-fast-reasoning | SounioSedenionBipartite.lean | WAIVED | Lean4 sorry-annotated proof structure (intentional sketch). xai correctly flagged sorry/trivial placeholders — expected. Algebraic arguments (K-odd: component parity; K-even: XOR-symmetric coincidence parity) verified numerically by K=4 (152,880 checks) and K=6 (672,672 checks), both 0 edges. File is a theorem-STRUCTURE document for future full formalization, not a completed proof. |
 | 2026-05-27 | math-review | moonshot/kimi + anthropic/claude-cli | SounioYamaguti.lean | PASS | Adversarial fan-out on the Yamaguti (2,3) cocycle-partner obstruction (§6: associator has NO cocycle partner; Fredholm covector Λ, Λ(δ*(0,φ))=−24). BOTH verdicts SOUND. Kimi independently fetched Goswami–Saha arXiv:2308.03655 and confirmed cochain symmetry = skew-in-first-two only (F_ν(a,a)=0, G_ν(a,a,b)=0), NO cyclic-zero constraint ⟹ φ is a valid (2,3)-cochain (embedding well-posed); also confirmed δ_I*δ_I=0 transcription. Both flagged honest scope: claim is at (2,3)-cocycle level ("not the ternary part of any cocycle", matches docstring), distinct from the degree-3 integrability/associativity-obstruction group. Lean native_decide verified locally (Lean 4.30.0), axioms = native_decide baseline only; Julia Rational{BigInt} cross-check bit-identical (rhs=24). |
 | 2026-05-27 | math-review | moonshot/kimi + anthropic/claude-cli | SounioAlternativeCohomology.lean | PASS | Same fan-out (foundation: Im(𝕆) Lie–Yamaguti ternary 2[[x,y],z]−6assoc, J=6φ, associator IS a CE-coboundary). Both reviewers VERDICT SOUND; LY axiom basis (LY3 cyclic-sum = −Jacobiator ≠ 0) is precisely why the cochain space cannot impose cyclic-zero — validates the §6 embedding. |
