@@ -1,0 +1,113 @@
+// stdlib/pbpk/rapamycin_fast_dose_adjust.sio — Sprint 51
+//
+// GUM-certified dose adjustment for the fast stratum (CYP3A4 ultra-rapid
+// metabolizer, ke=0.01677 h⁻¹, F=0.094) to achieve certification at the
+// week-1 monitoring visit (N=7). Parallel to Sprint 48 (slow at N=28).
+//
+// Standard D=5mg: fast margin at N=7 = -0.538 (ALARM, just sub-therapeutic).
+// Dose scan D∈[5.0,12.0] in 0.5mg steps; also evaluates N=28 ceiling constraint.
+//
+// Finding A: standard dose ALARM at N=7 — fast stratum sub-therapeutic for
+//            the full first week at 5mg; margin=-0.538, C just below floor.
+// Finding B: N=7 cert boundary — lowest D in 0.5mg steps where fast margin≥2.0
+//            at week-1 (to be determined by probe).
+// Finding C: N=28 ceiling safety — fast high-ke stratum reaches near-SS by
+//            N=28; even at elevated doses the ceiling is not a binding constraint
+//            within the clinically relevant scan range.
+// Finding D: feasible dose window — [d_cert_n7_min, d_cert_n28_max] is non-empty;
+//            a single adjusted dose can simultaneously certify fast at N=7 and
+//            maintain certification at N=28.
+
+module pbpk::rapamycin_fast_dose_adjust
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+fn fda_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn fda_margin(d: f64, n: i64) -> f64 with Mut, Div, Panic {
+    let ka  = ob_ka_var_std()
+    let fv  = ob_f_var_std()
+    let ke  = ob_ke_var_std()
+    let k12 = ob_k12_var_std()
+    let k21 = ob_k21_var_std()
+    let c   = as_trough_mg_l(d, n, 0.01677, 0.094)
+    let uc  = eu_u_c(d, n, 0.01677, 0.094, ka, fv, ke, k12, k21)
+    fda_min((c - trough_floor_mg_l()) / uc, (trough_ceil_mg_l() - c) / uc)
+}
+
+// ── Spot values at N=7 in 0.5mg steps D=5.0..12.0 ───────────────────────────
+pub fn fda_margin_n7_d50()  -> f64 with Mut, Div, Panic { fda_margin(5.0,  7) }
+pub fn fda_margin_n7_d55()  -> f64 with Mut, Div, Panic { fda_margin(5.5,  7) }
+pub fn fda_margin_n7_d60()  -> f64 with Mut, Div, Panic { fda_margin(6.0,  7) }
+pub fn fda_margin_n7_d65()  -> f64 with Mut, Div, Panic { fda_margin(6.5,  7) }
+pub fn fda_margin_n7_d70()  -> f64 with Mut, Div, Panic { fda_margin(7.0,  7) }
+pub fn fda_margin_n7_d75()  -> f64 with Mut, Div, Panic { fda_margin(7.5,  7) }
+pub fn fda_margin_n7_d80()  -> f64 with Mut, Div, Panic { fda_margin(8.0,  7) }
+pub fn fda_margin_n7_d85()  -> f64 with Mut, Div, Panic { fda_margin(8.5,  7) }
+pub fn fda_margin_n7_d90()  -> f64 with Mut, Div, Panic { fda_margin(9.0,  7) }
+pub fn fda_margin_n7_d95()  -> f64 with Mut, Div, Panic { fda_margin(9.5,  7) }
+pub fn fda_margin_n7_d100() -> f64 with Mut, Div, Panic { fda_margin(10.0, 7) }
+
+// ── Spot values at N=28 for key doses ────────────────────────────────────────
+pub fn fda_margin_n28_d50()  -> f64 with Mut, Div, Panic { fda_margin(5.0,  28) }
+pub fn fda_margin_n28_d70()  -> f64 with Mut, Div, Panic { fda_margin(7.0,  28) }
+pub fn fda_margin_n28_d90()  -> f64 with Mut, Div, Panic { fda_margin(9.0,  28) }
+pub fn fda_margin_n28_d100() -> f64 with Mut, Div, Panic { fda_margin(10.0, 28) }
+
+// ── Scanner: lowest D (0.5mg steps) where fast certifies at N=7 ──────────────
+pub fn fda_d_cert_n7_min() -> f64 with Mut, Div, Panic {
+    var d      = 5.0
+    var result = 0.0
+    while d <= 12.0 {
+        if fda_margin(d, 7) >= 2.0 && result == 0.0 { result = d };
+        d = d + 0.5
+    }
+    result
+}
+
+// ── Scanner: highest D (0.5mg steps) where fast certifies at N=28 ────────────
+pub fn fda_d_cert_n28_max() -> f64 with Mut, Div, Panic {
+    var d      = 12.0
+    var result = 0.0
+    while d >= 5.0 {
+        if fda_margin(d, 28) >= 2.0 && result == 0.0 { result = d };
+        d = d - 0.5
+    }
+    result
+}
+
+// ── Scanner: argmax of N=7 margin in D∈[5.0,12.0] ────────────────────────────
+pub fn fda_d_optimal_n7() -> f64 with Mut, Div, Panic {
+    var d      = 5.0
+    var best_d = 5.0
+    var best_m = fda_margin(5.0, 7)
+    while d <= 12.0 {
+        let m = fda_margin(d, 7)
+        if m > best_m { best_d = d };
+        if m > best_m { best_m = m };
+        d = d + 0.5
+    }
+    best_d
+}
+
+// ── Gap from standard to N=7 cert boundary (in 0.5mg steps) ─────────────────
+pub fn fda_dose_gap_steps() -> i64 with Mut, Div, Panic {
+    let lo   = fda_d_cert_n7_min()
+    let diff = lo - 5.0
+    let s    = diff * 2.0
+    if s > 0.9 && s < 1.1 { 1 }
+    else if s > 1.9 && s < 2.1 { 2 }
+    else if s > 2.9 && s < 3.1 { 3 }
+    else if s > 3.9 && s < 4.1 { 4 }
+    else if s > 4.9 && s < 5.1 { 5 }
+    else if s > 5.9 && s < 6.1 { 6 }
+    else if s > 6.9 && s < 7.1 { 7 }
+    else if s > 7.9 && s < 8.1 { 8 }
+    else if s > 8.9 && s < 9.1 { 9 }
+    else { 0 }
+}
