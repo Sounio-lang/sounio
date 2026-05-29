@@ -1,0 +1,237 @@
+// stdlib/pbpk/rapamycin_loading_dose.sio — Sprint 66
+//
+// GUM-exact 3× loading dose analysis: n_crit advancement and cert-span impact
+// across all five CYP3A4/P-gp strata.
+//
+// Clinical protocol: D_load = 3 × D_maint on day 1, then D_maint daily.
+// FDA Rapamune label: 6mg load + 2mg/day for de novo transplant patients.
+// Here we apply 3× scaling to each stratum's individually calibrated dose.
+//
+// Implementation: loading dose modifies the ODE initial condition —
+//   Uniform:  a_gut(0) = D; on each subsequent dose, a_gut += D
+//   Loading:  a_gut(0) = D_load; on each subsequent dose, a_gut += D_maint
+//
+// GUM variance tracks the same modification:
+//   v_gut_f(0) = D_load² × Var(F); subsequent: v_gut_f += D_maint² × Var(F)
+// This correctly amplifies day-1 ka and F contributions to u_c.
+//
+// Strata and doses:
+//   std:  D_load=15mg,  D_maint=5mg,   ke=0.01118, F=0.141
+//   slow: D_load=7.5mg, D_maint=2.5mg, ke=0.00838, F=0.188
+//   fast: D_load=28.5mg, D_maint=9.5mg, ke=0.01677, F=0.094
+//   inh:  D_load=4.5mg, D_maint=1.5mg, ke=0.002236, F=0.282
+//   ind:  D_load=102mg, D_maint=34mg,  ke=0.05590, F=0.047
+//
+// Findings (probe-verified, combined 4–20 window):
+//   A: n_crit advances: std 6→4, slow 8→6, fast 7→5, inh 7→4, ind 26→24.
+//      All advance by 2 days except inh (3 days) — inh's slow ke sustains the
+//      loading bolus longer.
+//   B: cert_span is INVARIANT under 3× loading for std/slow/fast (spans 30/50/27
+//      preserved exactly). Loading shifts the window earlier but does NOT widen it.
+//      Loading dose "moves the clock forward" by 2 days with no net span benefit.
+//   C: inh gains +1 span day (30→31) and ind gains +2 apparent span days (74→76
+//      from the scan-limit artifact). The tiny asymmetry arises because inh's slow
+//      elimination sustains the loading effect at the n_last boundary.
+//   D: n_last contracts by 2 days for std/slow/fast (offsetting the n_crit gain).
+//      The ceiling constraint binds 2 days earlier because the higher early trough
+//      accumulates faster toward the therapeutic window ceiling.
+//   E: margin N=1 is WARN for all strata with loading (max 1.84 for inh) — no
+//      stratum certifies on day 1 even with 3× loading. Day-1 u_c is too large
+//      (single-dose variance with D_load²×Var(F) injection).
+//   F: Policy: loading dose provides guaranteed 2-day certification advance for
+//      all strata at no cert-span cost; clinically valuable for post-transplant
+//      urgent immunosuppression, but does not extend the monitoring window.
+
+module pbpk::rapamycin_loading_dose
+
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+fn ld_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+fn ld_min2(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+// ── Loading dose mean trough ODE ──────────────────────────────────────────────
+fn ld_trough(d_load: f64, d_maint: f64, n: i64, ke: f64, fv: f64) -> f64
+    with Mut, Div, Panic {
+    let k12_val = 0.05; let k21_val = 0.005
+    let ka_val  = 0.62; let vc      = 75.0
+    let j11 = 0.0 - (ke + k12_val); let j12 = k21_val
+    let j21 = k12_val;              let j22 = 0.0 - k21_val
+    var a_gut = d_load; var a1 = 0.0; var a2 = 0.0
+    var dose = 0
+    while dose < n {
+        if dose > 0 { a_gut = a_gut + d_maint }
+        var step = 0
+        while step < 48 {
+            let flux   = fv * ka_val * a_gut
+            let new_ag = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1 = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2 = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            a_gut = new_ag; a1 = new_a1; a2 = new_a2
+            step = step + 1
+        }
+        dose = dose + 1
+    }
+    a1 / vc
+}
+
+// ── Loading dose GUM variance propagation ────────────────────────────────────
+fn ld_v1_total(d_load: f64, d_maint: f64, n: i64, ke: f64, fv: f64,
+               ka_var: f64, f_var: f64, ke_var: f64,
+               k12_var: f64, k21_var: f64) -> f64
+    with Mut, Div, Panic {
+    let k12_val = 0.05; let k21_val = 0.005; let ka_val = 0.62
+    let j11 = 0.0 - (ke + k12_val); let j12 = k21_val
+    let j21 = k12_val;              let j22 = 0.0 - k21_val
+    let g11  = 1.0 + 0.5 * j11; let g12 = 0.5 * j12
+    let g21  = 0.5 * j21;       let g22 = 1.0 + 0.5 * j22
+    let ggut = 1.0 - 0.5 * ka_val
+    let g11s = g11 * g11; let g12s = g12 * g12
+    let g21s = g21 * g21; let g22s = g22 * g22; let ggs = ggut * ggut
+    let ka2  = 0.25 * ka_val * ka_val
+    var a_gut = d_load; var a1 = 0.0; var a2 = 0.0
+    var v_gut_f  = d_load * d_load * f_var; var v_gut_ka = 0.0
+    var v1_F = 0.0; var v2_F = 0.0
+    var v1_ka = 0.0; var v2_ka = 0.0
+    var v1_ke = 0.0; var v2_ke = 0.0
+    var v1_k12 = 0.0; var v2_k12 = 0.0
+    var v1_k21 = 0.0; var v2_k21 = 0.0
+    var dose = 0
+    while dose < n {
+        if dose > 0 {
+            a_gut   = a_gut + d_maint
+            v_gut_f = v_gut_f + d_maint * d_maint * f_var
+        }
+        var step = 0
+        while step < 48 {
+            let flux    = fv * ka_val * a_gut
+            let new_ag  = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1  = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2  = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            let ckg     = 0.25 * ka_var * a_gut * a_gut
+            let new_vgf = ggs * v_gut_f
+            let new_vgka = ggs * v_gut_ka + ckg
+            let iF   = ka2 * v_gut_f;  let ika  = ka2 * v_gut_ka
+            let ike  = 0.25 * ke_var  * a1 * a1
+            let ik12 = 0.25 * k12_var * a1 * a1
+            let ik21 = 0.25 * k21_var * a2 * a2
+            let nv1F  = g11s * v1_F  + g12s * v2_F  + iF
+            let nv2F  = g21s * v1_F  + g22s * v2_F
+            let nv1ka = g11s * v1_ka + g12s * v2_ka + ika
+            let nv2ka = g21s * v1_ka + g22s * v2_ka
+            let nv1ke = g11s * v1_ke + g12s * v2_ke + ike
+            let nv2ke = g21s * v1_ke + g22s * v2_ke
+            let nv1k12 = g11s * v1_k12 + g12s * v2_k12 + ik12
+            let nv2k12 = g21s * v1_k12 + g22s * v2_k12 + ik12
+            let nv1k21 = g11s * v1_k21 + g12s * v2_k21 + ik21
+            let nv2k21 = g21s * v1_k21 + g22s * v2_k21 + ik21
+            a_gut = new_ag; a1 = new_a1; a2 = new_a2
+            v_gut_f = new_vgf; v_gut_ka = new_vgka
+            v1_F = nv1F; v2_F = nv2F
+            v1_ka = nv1ka; v2_ka = nv2ka
+            v1_ke = nv1ke; v2_ke = nv2ke
+            v1_k12 = nv1k12; v2_k12 = nv2k12
+            v1_k21 = nv1k21; v2_k21 = nv2k21
+            step = step + 1
+        }
+        dose = dose + 1
+    }
+    let vc = 75.0
+    (v1_F + v1_ka + v1_ke + v1_k12 + v1_k21) / (vc * vc)
+}
+
+fn ld_u_c(d_load: f64, d_maint: f64, n: i64, ke: f64, fv: f64) -> f64 with Mut, Div, Panic {
+    ld_sqrt(ld_v1_total(d_load, d_maint, n, ke, fv,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std()))
+}
+
+fn ld_margin(d_load: f64, d_maint: f64, n: i64, ke: f64, fv: f64) -> f64 with Mut, Div, Panic {
+    let c  = ld_trough(d_load, d_maint, n, ke, fv)
+    let uc = ld_u_c(d_load, d_maint, n, ke, fv)
+    ld_min2((c - trough_floor_mg_l()) / uc, (trough_ceil_mg_l() - c) / uc)
+}
+
+fn ld_ncrit(d_load: f64, d_maint: f64, ke: f64, fv: f64) -> i64 with Mut, Div, Panic {
+    var n = 1; var result = 0
+    while n <= 100 {
+        if ld_margin(d_load, d_maint, n, ke, fv) >= 2.0 && result == 0 { result = n };
+        n = n + 1
+    }
+    result
+}
+
+fn ld_nlast(d_load: f64, d_maint: f64, ke: f64, fv: f64) -> i64 with Mut, Div, Panic {
+    var n = 1; var last = 0
+    while n <= 100 {
+        if ld_margin(d_load, d_maint, n, ke, fv) >= 2.0 { last = n };
+        n = n + 1
+    }
+    last
+}
+
+// ── std stratum (ke=0.01118, F=0.141, D_maint=5mg) ───────────────────────────
+pub fn ld_std_trough_load_n1() -> f64 with Mut, Div, Panic { ld_trough(15.0, 5.0, 1, 0.01118, 0.141) }
+pub fn ld_std_trough_load_n7() -> f64 with Mut, Div, Panic { ld_trough(15.0, 5.0, 7, 0.01118, 0.141) }
+pub fn ld_std_margin_load_n1() -> f64 with Mut, Div, Panic { ld_margin(15.0, 5.0, 1, 0.01118, 0.141) }
+pub fn ld_std_margin_load_n3() -> f64 with Mut, Div, Panic { ld_margin(15.0, 5.0, 3, 0.01118, 0.141) }
+pub fn ld_std_margin_load_n7() -> f64 with Mut, Div, Panic { ld_margin(15.0, 5.0, 7, 0.01118, 0.141) }
+pub fn ld_std_ncrit_load()     -> i64 with Mut, Div, Panic { ld_ncrit(15.0, 5.0, 0.01118, 0.141) }
+pub fn ld_std_nlast_load()     -> i64 with Mut, Div, Panic { ld_nlast(15.0, 5.0, 0.01118, 0.141) }
+pub fn ld_std_span_load()      -> i64 with Mut, Div, Panic { ld_std_nlast_load() - ld_std_ncrit_load() }
+pub fn ld_std_ncrit_uniform()  -> i64 { 6  }
+pub fn ld_std_nlast_uniform()  -> i64 { 36 }
+pub fn ld_std_span_uniform()   -> i64 { 30 }
+pub fn ld_std_advance()        -> i64 with Mut, Div, Panic { ld_std_ncrit_uniform() - ld_std_ncrit_load() }
+
+// ── slow stratum (ke=0.00838, F=0.188, D_maint=2.5mg) ────────────────────────
+pub fn ld_slow_margin_load_n1() -> f64 with Mut, Div, Panic { ld_margin(7.5, 2.5, 1, 0.00838, 0.188) }
+pub fn ld_slow_margin_load_n7() -> f64 with Mut, Div, Panic { ld_margin(7.5, 2.5, 7, 0.00838, 0.188) }
+pub fn ld_slow_ncrit_load()     -> i64 with Mut, Div, Panic { ld_ncrit(7.5, 2.5, 0.00838, 0.188) }
+pub fn ld_slow_nlast_load()     -> i64 with Mut, Div, Panic { ld_nlast(7.5, 2.5, 0.00838, 0.188) }
+pub fn ld_slow_span_load()      -> i64 with Mut, Div, Panic { ld_slow_nlast_load() - ld_slow_ncrit_load() }
+pub fn ld_slow_ncrit_uniform()  -> i64 { 8  }
+pub fn ld_slow_nlast_uniform()  -> i64 { 58 }
+pub fn ld_slow_span_uniform()   -> i64 { 50 }
+pub fn ld_slow_advance()        -> i64 with Mut, Div, Panic { ld_slow_ncrit_uniform() - ld_slow_ncrit_load() }
+
+// ── fast stratum (ke=0.01677, F=0.094, D_maint=9.5mg) ────────────────────────
+pub fn ld_fast_margin_load_n1() -> f64 with Mut, Div, Panic { ld_margin(28.5, 9.5, 1, 0.01677, 0.094) }
+pub fn ld_fast_margin_load_n7() -> f64 with Mut, Div, Panic { ld_margin(28.5, 9.5, 7, 0.01677, 0.094) }
+pub fn ld_fast_ncrit_load()     -> i64 with Mut, Div, Panic { ld_ncrit(28.5, 9.5, 0.01677, 0.094) }
+pub fn ld_fast_nlast_load()     -> i64 with Mut, Div, Panic { ld_nlast(28.5, 9.5, 0.01677, 0.094) }
+pub fn ld_fast_span_load()      -> i64 with Mut, Div, Panic { ld_fast_nlast_load() - ld_fast_ncrit_load() }
+pub fn ld_fast_ncrit_uniform()  -> i64 { 7  }
+pub fn ld_fast_nlast_uniform()  -> i64 { 34 }
+pub fn ld_fast_span_uniform()   -> i64 { 27 }
+pub fn ld_fast_advance()        -> i64 with Mut, Div, Panic { ld_fast_ncrit_uniform() - ld_fast_ncrit_load() }
+
+// ── inh stratum (ke=0.002236, F=0.282, D_maint=1.5mg) ────────────────────────
+pub fn ld_inh_margin_load_n1() -> f64 with Mut, Div, Panic { ld_margin(4.5, 1.5, 1, 0.002236, 0.282) }
+pub fn ld_inh_margin_load_n7() -> f64 with Mut, Div, Panic { ld_margin(4.5, 1.5, 7, 0.002236, 0.282) }
+pub fn ld_inh_ncrit_load()     -> i64 with Mut, Div, Panic { ld_ncrit(4.5, 1.5, 0.002236, 0.282) }
+pub fn ld_inh_nlast_load()     -> i64 with Mut, Div, Panic { ld_nlast(4.5, 1.5, 0.002236, 0.282) }
+pub fn ld_inh_span_load()      -> i64 with Mut, Div, Panic { ld_inh_nlast_load() - ld_inh_ncrit_load() }
+pub fn ld_inh_ncrit_uniform()  -> i64 { 7  }
+pub fn ld_inh_nlast_uniform()  -> i64 { 37 }
+pub fn ld_inh_span_uniform()   -> i64 { 30 }
+pub fn ld_inh_advance()        -> i64 with Mut, Div, Panic { ld_inh_ncrit_uniform() - ld_inh_ncrit_load() }
+
+// ── ind stratum (ke=0.05590, F=0.047, D_maint=34mg) ─────────────────────────
+pub fn ld_ind_margin_load_n1() -> f64 with Mut, Div, Panic { ld_margin(102.0, 34.0, 1, 0.05590, 0.047) }
+pub fn ld_ind_margin_load_n7() -> f64 with Mut, Div, Panic { ld_margin(102.0, 34.0, 7, 0.05590, 0.047) }
+pub fn ld_ind_ncrit_load()     -> i64 with Mut, Div, Panic { ld_ncrit(102.0, 34.0, 0.05590, 0.047) }
+pub fn ld_ind_nlast_load()     -> i64 with Mut, Div, Panic { ld_nlast(102.0, 34.0, 0.05590, 0.047) }
+pub fn ld_ind_span_load()      -> i64 with Mut, Div, Panic { ld_ind_nlast_load() - ld_ind_ncrit_load() }
+pub fn ld_ind_ncrit_uniform()  -> i64 { 26 }
+pub fn ld_ind_nlast_uniform()  -> i64 { 100 }
+pub fn ld_ind_span_uniform()   -> i64 { 74 }
+pub fn ld_ind_advance()        -> i64 with Mut, Div, Panic { ld_ind_ncrit_uniform() - ld_ind_ncrit_load() }
