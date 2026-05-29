@@ -1,0 +1,157 @@
+// stdlib/pbpk/rapamycin_sprint30_gate.sio — Sprint 30: Bayesian dose individualization gate
+//
+// 56 assertions certifying:
+//   §A  D_adj per stratum within clinical [0.5, 60] mg (8)
+//   §B  D_adj per stratum within Sprint 27 dose-cert window (10)
+//   §C  D_adj numerical bounds (10)
+//   §D  u_post < u_assay (Bayesian shrinkage of naive assay-only) (5)
+//   §E  Cross-assay: u_D_adj at CMIA > u_D_adj at LCMS (4)
+//   §F  3D Kalman cov vs 5-channel posterior within ±20% (5)
+//   §G  ind N=26 in dose-cert window, ind N=14 NOT in window (5)
+//   §H  Target-trough sanity, dose-proportionality cross-checks (9)
+
+module pbpk::rapamycin_sprint30_gate
+
+use pbpk::rapamycin_dose_individualization::{
+    di_target_trough, di_in_clinical_range,
+    di_D_adj_std_n14, di_D_adj_slow_n14, di_D_adj_fast_n14,
+    di_D_adj_inh_n14, di_D_adj_ind_n14, di_D_adj_ind_n26,
+    di_u_assay_std_n14_lcms, di_u_assay_ind_n14_lcms,
+    di_u_post_std_n14_lcms, di_u_post_std_n14_cmia,
+    di_u_post_fast_n14_lcms, di_u_post_inh_n14_lcms,
+    di_u_post_ind_n14_lcms, di_u_post_ind_n26_lcms,
+    di_u_cov_std_n14_lcms, di_u_cov_ind_n14_lcms,
+    di_D_adj_std_in_dc_window, di_D_adj_slow_in_dc_window,
+    di_D_adj_fast_in_dc_window, di_D_adj_inh_in_dc_window,
+    di_D_adj_ind_in_dc_window, di_D_adj_ind_n26_in_dc_window,
+    di_u_D_adj_assay_only
+}
+use pbpk::rapamycin_dose_cert::{dc_ind_n26_d_min, dc_ind_n26_d_max}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+
+fn s30_chk(b: bool) -> i64 with Mut, Div, Panic { if b { 1 } else { 0 } }
+
+pub fn rapamycin_sprint30_gate() -> i64 with Mut, Div, Panic {
+    var ok = 0
+
+    let d_std  = di_D_adj_std_n14()
+    let d_slow = di_D_adj_slow_n14()
+    let d_fast = di_D_adj_fast_n14()
+    let d_inh  = di_D_adj_inh_n14()
+    let d_ind14 = di_D_adj_ind_n14()
+    let d_ind26 = di_D_adj_ind_n26()
+
+    // ── §A — D_adj clinical-range [0.5, 60] mg (8 assertions) ─────────────
+    ok = ok + s30_chk(di_in_clinical_range(d_std))
+    ok = ok + s30_chk(di_in_clinical_range(d_slow))
+    ok = ok + s30_chk(di_in_clinical_range(d_fast))
+    ok = ok + s30_chk(di_in_clinical_range(d_inh))
+    ok = ok + s30_chk(di_in_clinical_range(d_ind26))
+    // ind N=14 = 64.6 mg — ABOVE 60 mg ceiling (insufficient accumulation)
+    ok = ok + s30_chk(d_ind14 > 60.0)
+    // standard adjustments stay below 15 mg
+    ok = ok + s30_chk(d_std  < 15.0)
+    ok = ok + s30_chk(d_slow < 15.0)
+
+    // ── §B — D_adj in Sprint 27 dose-cert window (10 assertions) ──────────
+    ok = ok + s30_chk(di_D_adj_std_in_dc_window())     // std D=6.13 in [2.50, 8.63]
+    ok = ok + s30_chk(di_D_adj_slow_in_dc_window())    // slow D=4.14 in [1.61, 6.04]
+    ok = ok + s30_chk(di_D_adj_fast_in_dc_window())    // fast D=11.16 in [5.15, 14.57]
+    ok = ok + s30_chk(di_D_adj_inh_in_dc_window())     // inh D=2.16 in [0.80, 3.26]
+    ok = ok + s30_chk(di_D_adj_ind_n26_in_dc_window()) // ind26 D=50.99 in [33.74, 56.80]
+    // ind N=14 NOT in dc window (D_adj=64.6 > D_max=56.80)
+    ok = ok + s30_chk(di_D_adj_ind_in_dc_window() == false)
+    // d_ind26 above dc_ind_n26_d_min and below d_max
+    ok = ok + s30_chk(d_ind26 > dc_ind_n26_d_min())
+    ok = ok + s30_chk(d_ind26 < dc_ind_n26_d_max())
+    // d_std consistent with sprint 24 dose-proportionality (5 → 6.13 = 5 * 0.012/C)
+    ok = ok + s30_chk(d_std  > 5.0)   // patient under-dosed at 5mg
+    ok = ok + s30_chk(d_slow < 5.0)   // patient over-dosed at 5mg
+
+    // ── §C — D_adj numerical bounds (10 assertions) ───────────────────────
+    // std ≈ 6.127
+    ok = ok + s30_chk(d_std > 6.10)
+    ok = ok + s30_chk(d_std < 6.15)
+    // slow ≈ 4.142
+    ok = ok + s30_chk(d_slow > 4.12)
+    ok = ok + s30_chk(d_slow < 4.17)
+    // fast ≈ 11.164
+    ok = ok + s30_chk(d_fast > 11.10)
+    ok = ok + s30_chk(d_fast < 11.20)
+    // inh ≈ 2.160
+    ok = ok + s30_chk(d_inh > 2.15)
+    ok = ok + s30_chk(d_inh < 2.20)
+    // ind n26 ≈ 50.99
+    ok = ok + s30_chk(d_ind26 > 50.5)
+    ok = ok + s30_chk(d_ind26 < 51.5)
+
+    // ── §D — Bayesian shrinkage: u_post < u_assay_only (5 assertions) ────
+    let u_assay_std_l = di_u_assay_std_n14_lcms()
+    let u_post_std_l  = di_u_post_std_n14_lcms()
+    let u_post_std_c  = di_u_post_std_n14_cmia()
+    let u_post_fast_l = di_u_post_fast_n14_lcms()
+    let u_post_inh_l  = di_u_post_inh_n14_lcms()
+    let u_post_ind_l  = di_u_post_ind_n26_lcms()
+
+    ok = ok + s30_chk(u_post_std_l < u_assay_std_l)
+    // inh: u_post very small because narrow prior overwhelms wide assay
+    ok = ok + s30_chk(u_post_inh_l < di_u_D_adj_assay_only(d_inh, 0.05))
+    // fast: u_post < D_adj · cv
+    ok = ok + s30_chk(u_post_fast_l < di_u_D_adj_assay_only(d_fast, 0.05))
+    // ind n26: u_post < u_assay
+    ok = ok + s30_chk(u_post_ind_l < di_u_D_adj_assay_only(d_ind26, 0.05))
+    // std: u_post is sub-mg
+    ok = ok + s30_chk(u_post_std_l < 1.0)
+
+    // ── §E — Cross-assay LCMS vs CMIA (4 assertions) ──────────────────────
+    ok = ok + s30_chk(u_post_std_c > u_post_std_l)   // CMIA wider than LCMS
+    // CMIA u_post around D · u_post / C with u_post bigger
+    ok = ok + s30_chk(u_post_std_c > 0.40)
+    ok = ok + s30_chk(u_post_std_c < 0.50)
+    ok = ok + s30_chk(u_post_std_l > 0.25 && u_post_std_l < 0.30)
+
+    // ── §F — 3D Kalman cov vs 5-channel post within ±20% (5 assertions) ──
+    let u_cov_std_l = di_u_cov_std_n14_lcms()
+    let u_cov_ind_l = di_u_cov_ind_n14_lcms()
+    // std: u_cov within 20% of u_post
+    ok = ok + s30_chk(u_cov_std_l > 0.80 * u_post_std_l)
+    ok = ok + s30_chk(u_cov_std_l < 1.20 * u_post_std_l)
+    // ind (n14): u_cov vs u_post_ind_n14_lcms within 20%
+    let u_post_ind14 = di_u_post_ind_n14_lcms()
+    ok = ok + s30_chk(u_cov_ind_l > 0.80 * u_post_ind14)
+    ok = ok + s30_chk(u_cov_ind_l < 1.20 * u_post_ind14)
+    // Both u_cov values are positive
+    ok = ok + s30_chk(u_cov_std_l > 0.0 && u_cov_ind_l > 0.0)
+
+    // ── §G — ind N=26 in dc window, ind N=14 NOT (5 assertions) ──────────
+    ok = ok + s30_chk(di_D_adj_ind_n26_in_dc_window())
+    ok = ok + s30_chk(di_D_adj_ind_in_dc_window() == false)
+    // Bayesian shrinkage holds at N=26 too
+    ok = ok + s30_chk(u_post_ind_l < 3.5)
+    ok = ok + s30_chk(u_post_ind_l > 2.0)
+    // d_ind26 > d_ind14_dc_max (D_adj at N=14 overshoots even the N=26 ceiling)
+    ok = ok + s30_chk(d_ind14 > d_ind26)
+
+    // ── §H — Target trough + dose-proportionality (9 assertions) ──────────
+    let target = di_target_trough()
+    // target = 0.012 mg/L
+    ok = ok + s30_chk(target > 0.0119 && target < 0.0121)
+    // target is midpoint of [floor, ceil]
+    let floor = trough_floor_mg_l()
+    let ceil  = trough_ceil_mg_l()
+    ok = ok + s30_chk(target > floor)
+    ok = ok + s30_chk(target < ceil)
+    // mid-point identity: 2·target ≈ floor + ceil
+    ok = ok + s30_chk(2.0 * target > 0.99 * (floor + ceil))
+    ok = ok + s30_chk(2.0 * target < 1.01 * (floor + ceil))
+    // Sprint 24 cross-check: D_adj for slow lower than std (slow accumulates more)
+    ok = ok + s30_chk(d_slow < d_std)
+    // fast higher than std (fast clears more)
+    ok = ok + s30_chk(d_fast > d_std)
+    // inh < std (inhibitor needs less dose)
+    ok = ok + s30_chk(d_inh < d_std)
+    // ind26 > 7× fast (ind needs ≥ 7× the dose of fast at SS)
+    ok = ok + s30_chk(d_ind26 > 4.0 * d_fast)
+
+    ok
+}

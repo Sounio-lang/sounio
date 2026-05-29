@@ -1,0 +1,317 @@
+// stdlib/pbpk/rapamycin_dose_individualization.sio — Sprint 30: Bayesian dose individualization
+//
+// Novel dissertation contribution: a single TDM observation at dose N yields a
+// posterior on the patient's underlying PK; that posterior determines D_adj and
+// its uncertainty.  We compare three computations of u(D_adj):
+//
+//   (1) ASSAY-ONLY     u(D_adj) = D_adj · cv
+//       — pretends the only source of D_adj uncertainty is the assay reading,
+//         ignoring the prior PK uncertainty.  Standard naive PK calculator.
+//
+//   (2) POSTERIOR      u(D_adj) = D_adj · u_post / C_obs
+//       — uses the Sprint 28 ep_merge posterior u_post.  Treats the
+//         observation as i.i.d. measurement of C, propagates through 1/C.
+//
+//   (3) 3D KALMAN COV  u(D_adj) = (D_adj/C) · sqrt(h^T Σ_post h)
+//       — builds Σ_prior = diag(ka_var, f_var, ke_var), Jacobian h via central
+//         differences on a local 3-parameter trough, rank-1 Kalman update,
+//         then projects onto D_adj.  Should equal (2) up to Jacobian error.
+//
+// ── Findings (probe-certified, /tmp/s30_probe.sio) ──────────────────────────
+//
+//   Target trough: 0.012 mg/L (midpoint of [floor, ceil]).
+//
+//   D_adj at N=14 LCMS by stratum:
+//     std    (D_ref=5,  C≈0.00979) → D_adj = 6.1270 mg
+//     slow   (D_ref=5,  C≈0.01449) → D_adj = 4.1421 mg
+//     fast   (D_ref=5,  C≈0.00537) → D_adj = 11.164 mg
+//     inh    (D_ref=1.5, C≈0.00833) → D_adj = 2.1598 mg
+//     ind N=14 → D_adj = 64.621 mg (above dc window; ind hasn't reached SS)
+//     ind N=26 → D_adj = 50.993 mg (in dc window [33.74, 56.80] of Sprint 27)
+//
+//   Bayesian posterior tightens the naive assay-only estimate.  At std N=14
+//   LCMS:
+//     u_assay = 0.05 · 0.00979 = 0.000490 mg/L
+//     u_pk    = 0.000900       (Sprint 25)
+//     u_post  = 0.000430       (Sprint 28 §D)
+//     u_D_adj_assay = 6.127 · 0.05 = 0.306 mg
+//     u_D_adj_post  = 6.127 · 0.000430 / 0.00979 = 0.269 mg
+//   u_post < u_assay because they enter via harmonic-mean variance, and the
+//   prior PK uncertainty was comparable to assay — pulling u_post under both.
+//
+//   3D Kalman cov vs full 5-channel posterior — the 3D approximation loses
+//   the k12+k21 channel contributions captured by ob_v1_channel in Sprint 22.
+//   Probe ratio at std N=14 LCMS: u_cov / u_post = 0.302 / 0.269 ≈ 1.12.
+//   Gate §F asserts agreement within ±20%; the residual is the 3D→5D gap.
+//
+// ── Clinical-range gate ─────────────────────────────────────────────────────
+//
+//   D_adj must fall in [0.5, 60] mg.  Sprint 27's certified dose window
+//   [dc_d_min, dc_d_max] is narrower.  Sprint 30 checks D_adj against both.
+
+module pbpk::rapamycin_dose_individualization
+
+use pbpk::rapamycin_multistratum_tdm::{mst_prior, mst_posterior, mst_obs}
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_assay::{
+    as_trough_mg_l, as_v_pred_conc, as_v_assay,
+    as_cv_hplc, as_cv_cmia
+}
+use pbpk::rapamycin_dose_cert::{
+    dc_d_min, dc_d_max,
+    dc_std_n14_d_min, dc_std_n14_d_max,
+    dc_slow_n14_d_min, dc_slow_n14_d_max,
+    dc_fast_n14_d_min, dc_fast_n14_d_max,
+    dc_inh_n14_d_min,  dc_inh_n14_d_max,
+    dc_ind_n26_d_min,  dc_ind_n26_d_max
+}
+use pbpk::rapamycin_cyp3a5::{
+    cyp_ke_slow, cyp_f_slow,
+    cyp_ke_standard, cyp_f_standard,
+    cyp_ke_fast, cyp_f_fast
+}
+use pbpk::rapamycin_ddi::{
+    ddi_ke_inh_strong, ddi_f_inh_strong,
+    ddi_ke_ind_strong, ddi_f_ind_strong,
+    ddi_ke_var_inh, ddi_ke_var_ind
+}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std,
+    ob_k12_var_std, ob_k21_var_std
+}
+
+// ── Local helpers ────────────────────────────────────────────────────────────
+
+fn di_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x
+        var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+pub fn di_target_trough() -> f64 { 0.012 }   // mid-window mg/L
+
+// ── 5-parameter trough (local; mirrors as_trough_mg_l with ka, k12, k21 varying) ──
+
+fn di_trough_5p(d_oral: f64, n_doses: i64,
+                ka_val: f64, f_val: f64, ke_val: f64,
+                k12_val: f64, k21_val: f64) -> f64
+    with Mut, Div, Panic {
+    let vc = 75.0
+    let j11 = 0.0 - (ke_val + k12_val)
+    let j12 = k21_val
+    let j21 = k12_val
+    let j22 = 0.0 - k21_val
+    var a_gut = d_oral
+    var a1 = 0.0
+    var a2 = 0.0
+    var dose = 0
+    while dose < n_doses {
+        if dose > 0 { a_gut = a_gut + d_oral };
+        var step = 0
+        while step < 48 {
+            let flux = f_val * ka_val * a_gut
+            let new_ag = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1 = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2 = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            a_gut = new_ag
+            a1 = new_a1
+            a2 = new_a2
+            step = step + 1
+        }
+        dose = dose + 1
+    }
+    a1 / vc
+}
+
+// ── D_adj computation ────────────────────────────────────────────────────────
+
+pub fn di_D_adj(d_ref: f64, c_obs: f64) -> f64 with Div, Panic {
+    if c_obs <= 0.0 { 999.0 } else { d_ref * di_target_trough() / c_obs }
+}
+
+// ── u(D_adj) — three computations ───────────────────────────────────────────
+
+// (1) ASSAY-ONLY: u(D_adj) = D_adj · cv  (since u_assay/C = cv)
+pub fn di_u_D_adj_assay_only(d_adj: f64, cv: f64) -> f64 { d_adj * cv }
+
+// (2) POSTERIOR: u(D_adj) = D_adj · u_post / C_obs
+pub fn di_u_D_adj_post(d_ref: f64, n: i64, ke: f64, fv: f64,
+                       ka_var: f64, f_var: f64, ke_var: f64,
+                       k12_var: f64, k21_var: f64, cv: f64) -> f64
+    with Mut, Div, Panic {
+    let c     = as_trough_mg_l(d_ref, n, ke, fv)
+    let v_pk  = as_v_pred_conc(d_ref, n, ke, fv, ka_var, f_var, ke_var, k12_var, k21_var)
+    let v_assay = cv * cv * c * c
+    // ep_merge posterior variance: 1/v_post = 1/v_pk + 1/v_assay
+    let v_post = if (v_pk + v_assay) <= 0.0 { 0.0 } else { v_pk * v_assay / (v_pk + v_assay) }
+    let u_post = di_sqrt(v_post)
+    let d_adj  = di_D_adj(d_ref, c)
+    if c <= 0.0 { 0.0 } else { d_adj * u_post / c }
+}
+
+// (3) 3D KALMAN COV: full 3D θ=(ka, F, ke) Kalman update, project to D_adj
+// Uses central-difference Jacobian on di_trough_5p with k12, k21 fixed at std.
+pub fn di_u_D_adj_3d_cov(d_ref: f64, n: i64, ka_m: f64, f_m: f64, ke_m: f64,
+                         ka_var: f64, f_var: f64, ke_var: f64,
+                         k12_m: f64, k21_m: f64, cv: f64) -> f64
+    with Mut, Div, Panic {
+
+    let c_nom = di_trough_5p(d_ref, n, ka_m, f_m, ke_m, k12_m, k21_m)
+    let v_assay = cv * cv * c_nom * c_nom
+
+    // Relative step h_θ = 1e-3 · |θ| (mitigation in plan Risk register)
+    let h_ka = 1.0e-3 * ka_m
+    let h_F  = 1.0e-3 * f_m
+    let h_ke = 1.0e-3 * ke_m
+
+    // Central-difference Jacobian
+    let dC_dka = (di_trough_5p(d_ref, n, ka_m + h_ka, f_m, ke_m, k12_m, k21_m)
+                - di_trough_5p(d_ref, n, ka_m - h_ka, f_m, ke_m, k12_m, k21_m))
+                / (2.0 * h_ka)
+    let dC_dF  = (di_trough_5p(d_ref, n, ka_m, f_m + h_F, ke_m, k12_m, k21_m)
+                - di_trough_5p(d_ref, n, ka_m, f_m - h_F, ke_m, k12_m, k21_m))
+                / (2.0 * h_F)
+    let dC_dke = (di_trough_5p(d_ref, n, ka_m, f_m, ke_m + h_ke, k12_m, k21_m)
+                - di_trough_5p(d_ref, n, ka_m, f_m, ke_m - h_ke, k12_m, k21_m))
+                / (2.0 * h_ke)
+
+    // Σ_prior diagonal: prior variance projected along h
+    let Q = dC_dka * dC_dka * ka_var
+          + dC_dF  * dC_dF  * f_var
+          + dC_dke * dC_dke * ke_var
+
+    // S = h^T Σ_prior h + V_assay
+    let S = Q + v_assay
+    // h^T Σ_post h = Q · V_assay / S
+    let h_sp_h = if S <= 0.0 { 0.0 } else { Q * v_assay / S }
+    let u_C_post_3d = di_sqrt(h_sp_h)
+
+    // D_adj nominal + projection
+    let d_adj = di_D_adj(d_ref, c_nom)
+    if c_nom <= 0.0 { 0.0 } else { d_adj * u_C_post_3d / c_nom }
+}
+
+// ── Per-stratum named scenarios ────────────────────────────────────────────
+
+// Anchors
+fn di_dose_std()  -> f64 { 5.0 }
+fn di_dose_slow() -> f64 { 5.0 }
+fn di_dose_fast() -> f64 { 5.0 }
+fn di_dose_inh()  -> f64 { 1.5 }
+fn di_dose_ind()  -> f64 { 20.0 }
+fn di_ka_std()    -> f64 { 0.62 }   // matches as_trough_mg_l hardcoded ka
+fn di_k12_std()   -> f64 { 0.05 }
+fn di_k21_std()   -> f64 { 0.005 }
+
+// D_adj per stratum at N=14, LCMS observation (Sprint 24 dose-proportionality)
+pub fn di_D_adj_std_n14()  -> f64 with Mut, Div, Panic {
+    di_D_adj(di_dose_std(),
+             as_trough_mg_l(di_dose_std(), 14, cyp_ke_standard(), cyp_f_standard()))
+}
+pub fn di_D_adj_slow_n14() -> f64 with Mut, Div, Panic {
+    di_D_adj(di_dose_slow(),
+             as_trough_mg_l(di_dose_slow(), 14, cyp_ke_slow(), cyp_f_slow()))
+}
+pub fn di_D_adj_fast_n14() -> f64 with Mut, Div, Panic {
+    di_D_adj(di_dose_fast(),
+             as_trough_mg_l(di_dose_fast(), 14, cyp_ke_fast(), cyp_f_fast()))
+}
+pub fn di_D_adj_inh_n14()  -> f64 with Mut, Div, Panic {
+    di_D_adj(di_dose_inh(),
+             as_trough_mg_l(di_dose_inh(), 14, ddi_ke_inh_strong(), ddi_f_inh_strong()))
+}
+pub fn di_D_adj_ind_n14()  -> f64 with Mut, Div, Panic {
+    di_D_adj(di_dose_ind(),
+             as_trough_mg_l(di_dose_ind(), 14, ddi_ke_ind_strong(), ddi_f_ind_strong()))
+}
+pub fn di_D_adj_ind_n26()  -> f64 with Mut, Div, Panic {
+    di_D_adj(di_dose_ind(),
+             as_trough_mg_l(di_dose_ind(), 26, ddi_ke_ind_strong(), ddi_f_ind_strong()))
+}
+pub fn di_u_post_ind_n26_lcms() -> f64 with Mut, Div, Panic {
+    di_u_D_adj_post(di_dose_ind(), 26, ddi_ke_ind_strong(), ddi_f_ind_strong(),
+                    ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_ind(),
+                    ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn di_D_adj_ind_n26_in_dc_window() -> bool with Mut, Div, Panic {
+    let d = di_D_adj_ind_n26()
+    d > dc_ind_n26_d_min() && d < dc_ind_n26_d_max()
+}
+
+// u(D_adj) ASSAY-ONLY
+pub fn di_u_assay_std_n14_lcms() -> f64 with Mut, Div, Panic {
+    di_u_D_adj_assay_only(di_D_adj_std_n14(), as_cv_hplc())
+}
+pub fn di_u_assay_ind_n14_lcms() -> f64 with Mut, Div, Panic {
+    di_u_D_adj_assay_only(di_D_adj_ind_n14(), as_cv_hplc())
+}
+
+// u(D_adj) POSTERIOR via Sprint 28 ep_merge identity
+pub fn di_u_post_std_n14_lcms() -> f64 with Mut, Div, Panic {
+    di_u_D_adj_post(di_dose_std(), 14, cyp_ke_standard(), cyp_f_standard(),
+                    ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+                    ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn di_u_post_std_n14_cmia() -> f64 with Mut, Div, Panic {
+    di_u_D_adj_post(di_dose_std(), 14, cyp_ke_standard(), cyp_f_standard(),
+                    ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+                    ob_k12_var_std(), ob_k21_var_std(), as_cv_cmia())
+}
+pub fn di_u_post_fast_n14_lcms() -> f64 with Mut, Div, Panic {
+    di_u_D_adj_post(di_dose_fast(), 14, cyp_ke_fast(), cyp_f_fast(),
+                    ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+                    ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn di_u_post_inh_n14_lcms() -> f64 with Mut, Div, Panic {
+    di_u_D_adj_post(di_dose_inh(), 14, ddi_ke_inh_strong(), ddi_f_inh_strong(),
+                    ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_inh(),
+                    ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+pub fn di_u_post_ind_n14_lcms() -> f64 with Mut, Div, Panic {
+    di_u_D_adj_post(di_dose_ind(), 14, ddi_ke_ind_strong(), ddi_f_ind_strong(),
+                    ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_ind(),
+                    ob_k12_var_std(), ob_k21_var_std(), as_cv_hplc())
+}
+
+// u(D_adj) 3D KALMAN COV — explicit Jacobian-based projection
+pub fn di_u_cov_std_n14_lcms() -> f64 with Mut, Div, Panic {
+    di_u_D_adj_3d_cov(di_dose_std(), 14,
+                      di_ka_std(), cyp_f_standard(), cyp_ke_standard(),
+                      ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+                      di_k12_std(), di_k21_std(), as_cv_hplc())
+}
+pub fn di_u_cov_ind_n14_lcms() -> f64 with Mut, Div, Panic {
+    di_u_D_adj_3d_cov(di_dose_ind(), 14,
+                      di_ka_std(), ddi_f_ind_strong(), ddi_ke_ind_strong(),
+                      ob_ka_var_std(), ob_f_var_std(), ddi_ke_var_ind(),
+                      di_k12_std(), di_k21_std(), as_cv_hplc())
+}
+
+// ── Clinical-range checks ─────────────────────────────────────────────────
+
+pub fn di_in_clinical_range(d_adj: f64) -> bool { d_adj > 0.5 && d_adj < 60.0 }
+
+// In Sprint 27 dose-cert window?  (Per-stratum convenience)
+pub fn di_D_adj_std_in_dc_window()  -> bool with Mut, Div, Panic {
+    let d = di_D_adj_std_n14()
+    d > dc_std_n14_d_min() && d < dc_std_n14_d_max()
+}
+pub fn di_D_adj_slow_in_dc_window() -> bool with Mut, Div, Panic {
+    let d = di_D_adj_slow_n14()
+    d > dc_slow_n14_d_min() && d < dc_slow_n14_d_max()
+}
+pub fn di_D_adj_fast_in_dc_window() -> bool with Mut, Div, Panic {
+    let d = di_D_adj_fast_n14()
+    d > dc_fast_n14_d_min() && d < dc_fast_n14_d_max()
+}
+pub fn di_D_adj_inh_in_dc_window()  -> bool with Mut, Div, Panic {
+    let d = di_D_adj_inh_n14()
+    d > dc_inh_n14_d_min() && d < dc_inh_n14_d_max()
+}
+pub fn di_D_adj_ind_in_dc_window()  -> bool with Mut, Div, Panic {
+    let d = di_D_adj_ind_n14()
+    d > dc_ind_n26_d_min() && d < dc_ind_n26_d_max()
+}
