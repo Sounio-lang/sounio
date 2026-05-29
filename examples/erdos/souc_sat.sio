@@ -6,6 +6,7 @@
 //       redundant literals from learned clauses; smaller clauses, smaller proofs.
 //   E0  streamed proof ON DISK via write_file() (drat-trim reads the file directly),
 //       not just stdout — the de Grey proof previously overflowed the in-RAM buffer.
+//   E4  blocking literals on watch lists (wblk[]): skip clits[] when blocker true.
 // Soundness arbiter unchanged: native RUP checker + external drat-trim. A wrong
 // minimisation makes a lemma non-RUP and drat-trim rejects it (CLAUDE.md 6.6).
 
@@ -28,8 +29,10 @@ var n_reduces: i64 = 0
 var n_deleted: i64 = 0
 
 // two-watched-literal scheme: clause c watches clits[cstart[c]+0] and +1.
+// E4 blocking literals: wblk[node] caches the other watched literal; if true, skip clits[].
 var whead: [i32; 16386] = [0 - 1; 16386]
 var wnext: [i32; 524288] = [0; 524288]
+var wblk: [i64; 524288] = [0; 524288]
 
 var assign: [i32; 8192] = [0; 8192]
 var vlevel: [i32; 8192] = [0; 8192]
@@ -170,13 +173,20 @@ fn litval(l: i64) -> i32 with Mut, Panic {
     return a
 }
 
+fn pick_blocker(c: i32, s: i32) -> i64 with Panic {
+    let st = cstart[c]
+    return clits[st + (1 - s)]
+}
+
 fn watch_clause(c: i32) with Mut, Panic {
     let st = cstart[c]
     let i0 = litidx(clits[st + 0])
     wnext[2 * c] = whead[i0]
+    wblk[2 * c] = pick_blocker(c, 0)
     whead[i0] = 2 * c
     let i1 = litidx(clits[st + 1])
     wnext[2 * c + 1] = whead[i1]
+    wblk[2 * c + 1] = pick_blocker(c, 1)
     whead[i1] = 2 * c + 1
 }
 
@@ -222,12 +232,18 @@ fn propagate() -> i32 with Mut, Panic {
         var node = whead[fi]
         while node != (0 - 1) {
             let nextnode = wnext[node]
+            let blk = wblk[node]
+            if litval(blk) == 1 {
+                prev = node
+                node = nextnode
+            } else {
             let c = node / 2
             let s = node - 2 * c
             let st = cstart[c]
             let other = clits[st + (1 - s)]
             var handled: i32 = 0
             if litval(other) == 1 {
+                wblk[node] = other
                 prev = node
                 handled = 1
             }
@@ -244,6 +260,8 @@ fn propagate() -> i32 with Mut, Panic {
                     clits[st + s] = clits[st + found]
                     clits[st + found] = tmp
                     let newlit = clits[st + s]
+                    wblk[node] = pick_blocker(c, s)
+                    wblk[2 * c + (1 - s)] = pick_blocker(c, 1 - s)
                     if prev == (0 - 1) { whead[fi] = nextnode } else { wnext[prev] = nextnode }
                     let ni = litidx(newlit)
                     wnext[node] = whead[ni]
@@ -257,6 +275,7 @@ fn propagate() -> i32 with Mut, Panic {
                 prev = node
             }
             node = nextnode
+            }
         }
     }
     return 0 - 1
