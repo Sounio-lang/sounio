@@ -52,6 +52,7 @@ So:
 | `sat_proof_kernel.sio` | from-scratch DPLL→**DRUP** emitter + independent **RUP checker**; demo K₄ not 3-colorable | — | VERIFIED UNSAT + 2 non-vacuity controls rejected; native **and** drat-trim `s VERIFIED` |
 | `spindle_proof_cert.sio` | exact ℚ(√3,√11) spindle geometry → 3-coloring CNF → DRUP proof → RUP + DIMACS/DRAT | ℚ(√3,√11) | χ(spindle) ≥ 4: native VERIFIED + external drat-trim `s VERIFIED` |
 | `dpll_scale_wall.sio` | scaling envelope of the DPLL→DRUP certifier on pigeonhole K_n/(n−1)-col | — | K₄–K₇ VERIFIED (17→6491 lemmas); K₈+ WALL; K₆ drat-trim `s VERIFIED` |
+| `cdcl_proof.sio` | **CDCL (1-UIP) clause-learning** solver emitting DRUP + same RUP checker | — | K₄–K₁₀ VERIFIED; breaks the DPLL wall (K₇: 485 vs 6491 lemmas); K₇ drat-trim `s VERIFIED` |
 | `erdos90_cubic_tower_base.sio` | explicit witness for the OpenAI-2026 #90 disproof's cubic tower base (Gauss periods) | cubic ⊂ ℚ(ζ_r) | 11/11 certified: field disc = r², r totally ramified |
 
 ### The degree-16 kernel (`degrey_fieldtower.sio`)
@@ -143,6 +144,38 @@ learning** in the emitter — chronological DPLL provably cannot produce a
 sub-exponential proof of a pigeonhole-hard instance. The native RUP checker and
 DIMACS/DRAT bridge already in place are reusable as-is; a CDCL upgrade changes only
 *how lemmas are produced*, not how they are checked.
+
+### Breaking the wall with clause learning — `cdcl_proof.sio`
+
+The CDCL upgrade is now built: a from-scratch **conflict-driven clause-learning**
+solver with a trail, decision levels, implication reasons, **1-UIP conflict
+analysis**, and **non-chronological backjumping**. Each learned clause is a
+resolution consequence of existing clauses (hence RUP), so the sequence of learned
+clauses ending in the empty clause is a valid **DRUP** proof — exactly how
+production solvers emit DRAT. The *identical* native RUP checker and `drat-trim`
+bridge verify it; a bug in the CDCL bookkeeping cannot yield a false "VERIFIED".
+
+Measured on the same pigeonhole family (PHP is exponential for *general*
+resolution, so CDCL cannot crack it either — but learning reaches much further
+before the wall, and is *the* mechanism that makes structured de-Grey-type
+4-colourings tractable):
+
+| instance | clauses | DPLL lemmas | **CDCL lemmas** | native RUP | drat-trim |
+|---|---:|---:|---:|---|---|
+| K₄ / 3-col | 22 | 17 | **9** | VERIFIED | — |
+| K₅ / 4-col | 45 | 103 | **40** | VERIFIED | — |
+| K₆ / 5-col | 81 | 749 | **149** | VERIFIED | — |
+| K₇ / 6-col | 133 | 6 491 | **485** | VERIFIED | `s VERIFIED` (3650 steps) |
+| K₈ / 7-col | 204 | **WALL** (> 3 M) | **1 517** | VERIFIED | — |
+| K₉ / 8-col | 297 | **WALL** | **4 343** | VERIFIED | — |
+| K₁₀ / 9-col | 415 | **WALL** | **11 832** | VERIFIED | — |
+
+Clause learning turns the DPLL wall at K₈ into routine instances and gives a 13×
+lemma reduction at K₇. The blow-up persists (≈ ×3 per step — pigeonhole stays
+exponential), but the regime that matters for χ ≥ 5 is *structured*, not
+pigeonhole; there CDCL's learning is the decisive lever. The certifier pipeline
+(emit → native RUP → drat-trim) is now production-shaped and waits only on the
+de Grey graph data.
 
 ### Solver scaling — status and BLOCKER
 
