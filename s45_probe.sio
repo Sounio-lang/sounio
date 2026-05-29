@@ -1,0 +1,190 @@
+// Sprint 45 probe: peak GUM margin analysis
+// Find N_peak (argmax of margin) and margin_peak for each stratum.
+// Also: crossing dose where Z_floor = Z_ceil (C centred in window).
+
+module main
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn zf(d: f64, n: i64, ke: f64, f: f64,
+      ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d, n, ke, f)
+    let uc = eu_u_c(d, n, ke, f, ka_v, fv, ke_v, k12_v, k21_v)
+    (c - trough_floor_mg_l()) / uc
+}
+fn zc(d: f64, n: i64, ke: f64, f: f64,
+      ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d, n, ke, f)
+    let uc = eu_u_c(d, n, ke, f, ka_v, fv, ke_v, k12_v, k21_v)
+    (trough_ceil_mg_l() - c) / uc
+}
+fn mg(d: f64, n: i64, ke: f64, f: f64,
+      ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> f64
+    with Mut, Div, Panic {
+    let zfv = zf(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v)
+    let zcv = zc(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v)
+    if zfv < zcv { zfv } else { zcv }
+}
+
+// Find N in [1,60] that maximises margin; returns argmax
+fn find_npeak(d: f64, ke: f64, f: f64,
+              ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> i64
+    with Mut, Div, Panic {
+    var n = 1; var best_n = 1
+    var best_m = mg(d,1,ke,f,ka_v,fv,ke_v,k12_v,k21_v)
+    n = 2
+    while n <= 60 {
+        let m = mg(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v)
+        if m > best_m { best_m = m; best_n = n }
+        n = n + 1
+    }
+    best_n
+}
+
+// Find first N where Z_ceil < Z_floor (ceiling becomes the binding constraint)
+fn find_ncross(d: f64, ke: f64, f: f64,
+               ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> i64
+    with Mut, Div, Panic {
+    var n = 1; var found = 0
+    while n <= 60 && found == 0 {
+        let zfv = zf(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v)
+        let zcv = zc(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v)
+        if zcv < zfv { found = n }
+        else { n = n + 1 }
+    }
+    found
+}
+
+fn pi(n: i64) with Mut, Div, Panic, IO {
+    if n == 0 { print("0") }
+    else {
+        var digits = [0, 0, 0, 0, 0, 0, 0, 0]
+        var num = n; var count = 0
+        while num > 0 { digits[count] = num - (num / 10) * 10; num = num / 10; count = count + 1 }
+        var idx = count - 1
+        while idx >= 0 {
+            if digits[idx] == 0 { print("0") } else if digits[idx] == 1 { print("1") }
+            else if digits[idx] == 2 { print("2") } else if digits[idx] == 3 { print("3") }
+            else if digits[idx] == 4 { print("4") } else if digits[idx] == 5 { print("5") }
+            else if digits[idx] == 6 { print("6") } else if digits[idx] == 7 { print("7") }
+            else if digits[idx] == 8 { print("8") } else { print("9") };
+            idx = idx - 1
+        }
+    }
+}
+
+fn main() with Mut, Div, Panic, IO {
+    let ka  = ob_ka_var_std()
+    let fv  = ob_f_var_std()
+    let ke  = ob_ke_var_std()
+    let k12 = ob_k12_var_std()
+    let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    let ke_ind = ob_ke_var_ind()
+
+    print("=== Peak margin summary ===\n")
+
+    print("std  D=5mg:  N_peak="); pi(find_npeak(5.0,0.01118,0.141,ka,fv,ke,k12,k21))
+    print(" N_cross="); pi(find_ncross(5.0,0.01118,0.141,ka,fv,ke,k12,k21)); print("\n")
+
+    print("slow D=5mg:  N_peak="); pi(find_npeak(5.0,0.00838,0.188,ka,fv,ke,k12,k21))
+    print(" N_cross="); pi(find_ncross(5.0,0.00838,0.188,ka,fv,ke,k12,k21)); print("\n")
+
+    print("fast D=5mg:  N_peak="); pi(find_npeak(5.0,0.01677,0.094,ka,fv,ke,k12,k21))
+    print(" N_cross="); pi(find_ncross(5.0,0.01677,0.094,ka,fv,ke,k12,k21)); print("\n")
+
+    print("inh  D=1.5mg:N_peak="); pi(find_npeak(1.5,0.002236,0.282,ka,fv,ke_inh,k12,k21))
+    print(" N_cross="); pi(find_ncross(1.5,0.002236,0.282,ka,fv,ke_inh,k12,k21)); print("\n")
+
+    print("ind  D=34mg: N_peak="); pi(find_npeak(34.0,0.05590,0.047,ka,fv,ke_ind,k12,k21))
+    print(" N_cross="); pi(find_ncross(34.0,0.05590,0.047,ka,fv,ke_ind,k12,k21)); print("\n")
+
+    print("\n=== Detailed margin traces (N_peak neighbourhood) ===\n")
+
+    print("std  N=10-20: ")
+    var ni = 10
+    while ni <= 20 {
+        print("N="); pi(ni); print(":mg="); print_f64(mg(5.0,ni,0.01118,0.141,ka,fv,ke,k12,k21)); print(" ")
+        ni = ni + 1
+    }
+    print("\n")
+
+    print("slow N=3-12:  ")
+    ni = 3
+    while ni <= 12 {
+        print("N="); pi(ni); print(":mg="); print_f64(mg(5.0,ni,0.00838,0.188,ka,fv,ke,k12,k21)); print(" ")
+        ni = ni + 1
+    }
+    print("\n")
+
+    print("inh  N=14-26: ")
+    ni = 14
+    while ni <= 26 {
+        print("N="); pi(ni); print(":mg="); print_f64(mg(1.5,ni,0.002236,0.282,ka,fv,ke_inh,k12,k21)); print(" ")
+        ni = ni + 1
+    }
+    print("\n")
+
+    print("\n=== Z_floor vs Z_ceil at peak N for unimodal strata ===\n")
+
+    // std peak
+    let np_std = find_npeak(5.0,0.01118,0.141,ka,fv,ke,k12,k21)
+    print("std  N_peak="); pi(np_std)
+    print(" zf="); print_f64(zf(5.0,np_std,0.01118,0.141,ka,fv,ke,k12,k21))
+    print(" zc="); print_f64(zc(5.0,np_std,0.01118,0.141,ka,fv,ke,k12,k21))
+    print(" mg="); print_f64(mg(5.0,np_std,0.01118,0.141,ka,fv,ke,k12,k21)); print("\n")
+
+    // slow peak
+    let np_slow = find_npeak(5.0,0.00838,0.188,ka,fv,ke,k12,k21)
+    print("slow N_peak="); pi(np_slow)
+    print(" zf="); print_f64(zf(5.0,np_slow,0.00838,0.188,ka,fv,ke,k12,k21))
+    print(" zc="); print_f64(zc(5.0,np_slow,0.00838,0.188,ka,fv,ke,k12,k21))
+    print(" mg="); print_f64(mg(5.0,np_slow,0.00838,0.188,ka,fv,ke,k12,k21)); print("\n")
+
+    // inh peak
+    let np_inh = find_npeak(1.5,0.002236,0.282,ka,fv,ke_inh,k12,k21)
+    print("inh  N_peak="); pi(np_inh)
+    print(" zf="); print_f64(zf(1.5,np_inh,0.002236,0.282,ka,fv,ke_inh,k12,k21))
+    print(" zc="); print_f64(zc(1.5,np_inh,0.002236,0.282,ka,fv,ke_inh,k12,k21))
+    print(" mg="); print_f64(mg(1.5,np_inh,0.002236,0.282,ka,fv,ke_inh,k12,k21)); print("\n")
+
+    print("\n=== fast and ind — confirm monotone (margin at N=15/20/30/60) ===\n")
+    print("fast: N=15:"); print_f64(mg(5.0,15,0.01677,0.094,ka,fv,ke,k12,k21))
+    print(" N=20:"); print_f64(mg(5.0,20,0.01677,0.094,ka,fv,ke,k12,k21))
+    print(" N=30:"); print_f64(mg(5.0,30,0.01677,0.094,ka,fv,ke,k12,k21))
+    print(" N=60:"); print_f64(mg(5.0,60,0.01677,0.094,ka,fv,ke,k12,k21)); print("\n")
+    print("ind:  N=26:"); print_f64(mg(34.0,26,0.05590,0.047,ka,fv,ke_ind,k12,k21))
+    print(" N=35:"); print_f64(mg(34.0,35,0.05590,0.047,ka,fv,ke_ind,k12,k21))
+    print(" N=45:"); print_f64(mg(34.0,45,0.05590,0.047,ka,fv,ke_ind,k12,k21))
+    print(" N=60:"); print_f64(mg(34.0,60,0.05590,0.047,ka,fv,ke_ind,k12,k21)); print("\n")
+
+    print("\n=== Peak margin at N_cross-1 and N_cross for unimodal strata ===\n")
+    let nc_std = find_ncross(5.0,0.01118,0.141,ka,fv,ke,k12,k21)
+    print("std  N_cross="); pi(nc_std)
+    print(" zf_before="); print_f64(zf(5.0,nc_std-1,0.01118,0.141,ka,fv,ke,k12,k21))
+    print(" zc_before="); print_f64(zc(5.0,nc_std-1,0.01118,0.141,ka,fv,ke,k12,k21))
+    print(" zf_at="); print_f64(zf(5.0,nc_std,0.01118,0.141,ka,fv,ke,k12,k21))
+    print(" zc_at="); print_f64(zc(5.0,nc_std,0.01118,0.141,ka,fv,ke,k12,k21)); print("\n")
+
+    let nc_slow = find_ncross(5.0,0.00838,0.188,ka,fv,ke,k12,k21)
+    print("slow N_cross="); pi(nc_slow)
+    print(" zf_before="); print_f64(zf(5.0,nc_slow-1,0.00838,0.188,ka,fv,ke,k12,k21))
+    print(" zc_before="); print_f64(zc(5.0,nc_slow-1,0.00838,0.188,ka,fv,ke,k12,k21))
+    print(" zf_at="); print_f64(zf(5.0,nc_slow,0.00838,0.188,ka,fv,ke,k12,k21))
+    print(" zc_at="); print_f64(zc(5.0,nc_slow,0.00838,0.188,ka,fv,ke,k12,k21)); print("\n")
+
+    let nc_inh = find_ncross(1.5,0.002236,0.282,ka,fv,ke_inh,k12,k21)
+    print("inh  N_cross="); pi(nc_inh)
+    print(" zf_before="); print_f64(zf(1.5,nc_inh-1,0.002236,0.282,ka,fv,ke_inh,k12,k21))
+    print(" zc_before="); print_f64(zc(1.5,nc_inh-1,0.002236,0.282,ka,fv,ke_inh,k12,k21))
+    print(" zf_at="); print_f64(zf(1.5,nc_inh,0.002236,0.282,ka,fv,ke_inh,k12,k21))
+    print(" zc_at="); print_f64(zc(1.5,nc_inh,0.002236,0.282,ka,fv,ke_inh,k12,k21)); print("\n")
+}

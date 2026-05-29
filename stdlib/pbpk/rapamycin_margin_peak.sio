@@ -1,0 +1,226 @@
+// stdlib/pbpk/rapamycin_margin_peak.sio — Sprint 45
+//
+// Peak GUM margin analysis: argmax of margin(N) over N∈[1,60] and the
+// first crossing dose N_cross where Z_ceil < Z_floor (ceiling becomes
+// the binding constraint). For unimodal strata, N_peak = N_cross − 1
+// exactly; for monotone strata, N_cross = 0 (ceiling never binds).
+//
+// Finding A: std unimodal — N_peak=19, margin_peak=8.442; peak is the
+//            last dose the floor constraint binds (Z_floor=8.442 < Z_ceil=8.597);
+//            from N=20 onward the ceiling tightens faster than the floor rises.
+// Finding B: slow earliest peak — N_peak=10, margin_peak=7.755; the highest
+//            bioavailability (F=0.188) drives the fastest accumulation, so
+//            the window centre is reached soonest; peak margin lower than std.
+// Finding C: inh highest peak margin — N_peak=22, margin_peak=14.302;
+//            the reduced dose (1.5mg) combined with very slow elimination
+//            (ke=0.002236) places the concentration precisely at the window
+//            centre with maximum uncertainty headroom on both sides.
+// Finding D: fast and ind monotone — N_peak=60, N_cross=0; both are
+//            floor-limited at all N (ceiling never becomes binding within
+//            60 doses); margin grows monotonically toward steady state.
+
+module pbpk::rapamycin_margin_peak
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn pm_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn pm_zf(d: f64, n: i64, ke: f64, f: f64,
+         ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d, n, ke, f)
+    let uc = eu_u_c(d, n, ke, f, ka_v, fv, ke_v, k12_v, k21_v)
+    (c - trough_floor_mg_l()) / uc
+}
+
+fn pm_zc(d: f64, n: i64, ke: f64, f: f64,
+         ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d, n, ke, f)
+    let uc = eu_u_c(d, n, ke, f, ka_v, fv, ke_v, k12_v, k21_v)
+    (trough_ceil_mg_l() - c) / uc
+}
+
+fn pm_margin(d: f64, n: i64, ke: f64, f: f64,
+             ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> f64
+    with Mut, Div, Panic {
+    pm_min(pm_zf(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v),
+           pm_zc(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v))
+}
+
+fn pm_find_npeak(d: f64, ke: f64, f: f64,
+                 ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> i64
+    with Mut, Div, Panic {
+    var best_n = 1
+    var best_m = pm_margin(d,1,ke,f,ka_v,fv,ke_v,k12_v,k21_v)
+    var n = 2
+    while n <= 60 {
+        let m = pm_margin(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v)
+        if m > best_m { best_m = m; best_n = n }
+        n = n + 1
+    }
+    best_n
+}
+
+fn pm_find_ncross(d: f64, ke: f64, f: f64,
+                  ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> i64
+    with Mut, Div, Panic {
+    var n = 1; var found = 0
+    while n <= 60 && found == 0 {
+        let zfv = pm_zf(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v)
+        let zcv = pm_zc(d,n,ke,f,ka_v,fv,ke_v,k12_v,k21_v)
+        if zcv < zfv { found = n }
+        else { n = n + 1 }
+    }
+    found
+}
+
+// ── std D=5mg ke=0.01118 F=0.141 ────────────────────────────────────────────
+pub fn pm_std_npeak() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_find_npeak(5.0,0.01118,0.141, ka,fv,ke,k12,k21)
+}
+pub fn pm_std_margin_peak() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    let np = pm_find_npeak(5.0,0.01118,0.141, ka,fv,ke,k12,k21)
+    pm_margin(5.0,np,0.01118,0.141, ka,fv,ke,k12,k21)
+}
+pub fn pm_std_zf_npeak() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    let np = pm_find_npeak(5.0,0.01118,0.141, ka,fv,ke,k12,k21)
+    pm_zf(5.0,np,0.01118,0.141, ka,fv,ke,k12,k21)
+}
+pub fn pm_std_zc_npeak() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    let np = pm_find_npeak(5.0,0.01118,0.141, ka,fv,ke,k12,k21)
+    pm_zc(5.0,np,0.01118,0.141, ka,fv,ke,k12,k21)
+}
+pub fn pm_std_ncross() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_find_ncross(5.0,0.01118,0.141, ka,fv,ke,k12,k21)
+}
+
+// ── slow D=5mg ke=0.00838 F=0.188 ───────────────────────────────────────────
+pub fn pm_slow_npeak() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_find_npeak(5.0,0.00838,0.188, ka,fv,ke,k12,k21)
+}
+pub fn pm_slow_margin_peak() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    let np = pm_find_npeak(5.0,0.00838,0.188, ka,fv,ke,k12,k21)
+    pm_margin(5.0,np,0.00838,0.188, ka,fv,ke,k12,k21)
+}
+pub fn pm_slow_zf_npeak() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    let np = pm_find_npeak(5.0,0.00838,0.188, ka,fv,ke,k12,k21)
+    pm_zf(5.0,np,0.00838,0.188, ka,fv,ke,k12,k21)
+}
+pub fn pm_slow_zc_npeak() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    let np = pm_find_npeak(5.0,0.00838,0.188, ka,fv,ke,k12,k21)
+    pm_zc(5.0,np,0.00838,0.188, ka,fv,ke,k12,k21)
+}
+pub fn pm_slow_ncross() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_find_ncross(5.0,0.00838,0.188, ka,fv,ke,k12,k21)
+}
+
+// ── fast D=5mg ke=0.01677 F=0.094 ───────────────────────────────────────────
+pub fn pm_fast_npeak() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_find_npeak(5.0,0.01677,0.094, ka,fv,ke,k12,k21)
+}
+pub fn pm_fast_margin_peak() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_margin(5.0,60,0.01677,0.094, ka,fv,ke,k12,k21)
+}
+pub fn pm_fast_margin_n15() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_margin(5.0,15,0.01677,0.094, ka,fv,ke,k12,k21)
+}
+pub fn pm_fast_margin_n30() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_margin(5.0,30,0.01677,0.094, ka,fv,ke,k12,k21)
+}
+pub fn pm_fast_ncross() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_find_ncross(5.0,0.01677,0.094, ka,fv,ke,k12,k21)
+}
+
+// ── inh D=1.5mg ke=0.002236 F=0.282 ────────────────────────────────────────
+pub fn pm_inh_npeak() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_find_npeak(1.5,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+pub fn pm_inh_margin_peak() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    let np = pm_find_npeak(1.5,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+    pm_margin(1.5,np,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+pub fn pm_inh_zf_npeak() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    let np = pm_find_npeak(1.5,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+    pm_zf(1.5,np,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+pub fn pm_inh_zc_npeak() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    let np = pm_find_npeak(1.5,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+    pm_zc(1.5,np,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+pub fn pm_inh_ncross() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_find_ncross(1.5,0.002236,0.282, ka,fv,ob_ke_var_inh(),k12,k21)
+}
+
+// ── ind D=34mg ke=0.05590 F=0.047 ───────────────────────────────────────────
+pub fn pm_ind_npeak() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_find_npeak(34.0,0.05590,0.047, ka,fv,ob_ke_var_ind(),k12,k21)
+}
+pub fn pm_ind_margin_peak() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_margin(34.0,60,0.05590,0.047, ka,fv,ob_ke_var_ind(),k12,k21)
+}
+pub fn pm_ind_margin_n26() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_margin(34.0,26,0.05590,0.047, ka,fv,ob_ke_var_ind(),k12,k21)
+}
+pub fn pm_ind_margin_n45() -> f64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_margin(34.0,45,0.05590,0.047, ka,fv,ob_ke_var_ind(),k12,k21)
+}
+pub fn pm_ind_ncross() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    pm_find_ncross(34.0,0.05590,0.047, ka,fv,ob_ke_var_ind(),k12,k21)
+}
