@@ -71,15 +71,15 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 
 ### Active Known Bugs / Architectural Gaps
 
-The previous claim *"No active known bugs"* was incorrect at the multi-module bundle level. The single-file emit path is clean; the bundle path is not. The following are tracked as active architectural gaps, not feature requests.
+**Multi-module bundle compile — RESOLVED 2026-05-29.** All three G1 architectural roots closed. Bundle: **0 errors** (arc 766 → 0, commits `fcce29dd3` through `8c4f619de`). The modular self-hosted tree (`self-hosted/compiler/main.sio`) now compiles clean. The gate to "modular source replaces `lean_single.sio`" is open.
 
-**Multi-module bundle compile (`[[project_task_c_blocker]]`)** — Bundle baseline as of 2026-05-24: **766 errors**. Three named architectural roots, all currently workaround-only:
+Previously tracked G1 roots, all closed:
 
-1. **i64 type-hash overflow on 3-level pointer nesting.** Sim-proven exact. Source workaround: `&Option<Box<T>>` → `&Option<&T>`. The real fix is composite-type interning (architectural, deferred).
-2. **SRET for ≥8-field struct returns — bundle path only.** No repro in the `lean_single.sio` single-file path (probed 2026-05-28, 14 scenarios up to 33-field i64/f64/mixed, all PASS including the `rep movsq` path). The bug is isolated to the multi-module bundle compile path where composite-type interning is absent. Regression test pinned: `tests/run-pass/sret_8_field_return.sio`. Source workaround for bundle path: flat arrays / split-by-field. Tracked in `[[feedback_native_compiler_limits]]`.
-3. **Nested `&!` struct-field mutation.** Mutation through `&!T` to a struct field doesn't propagate; bare-array index through `&![T;N]` was fixed in v2.0 but **struct** field stores were not. Source workaround: streaming / flat patterns.
+1. ~~**i64 type-hash overflow on 3-level pointer nesting.**~~ **FIXED** (`fcce29dd3`) — composite-type intern table; nested `&Option<Box<T>>` uses stable interned IDs. Regression: `tests/run-pass/type_hash_3level_nesting.sio` ✓.
+2. ~~**SRET for ≥8-field struct returns — bundle path.**~~ **FIXED** — closed by composite-type interning + TUP_CACHE fixes. Also fixed in x86/a64 codegen: global struct-array subscript (`esz>8`) now emits pointer arithmetic (`8a3bfe636`). Regression: `tests/run-pass/sret_8_field_return.sio` ✓.
+3. ~~**Nested `&!` struct-field mutation.**~~ **FIXED** (`a40989429`) — `ident.f1[i].f2[j] = v` pattern compiles correctly. Regression: `tests/run-pass/nested_ref_field_array_store.sio` ✓.
 
-These are the gate between "single-file demo language" and "modular self-hosted tree replaces `lean_single.sio` as binary source." See `docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md` §5 / G1.
+See `docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md` §5 / G1 and memory `[[project_closures_shipped_2026-05-27]]` for the full arc.
 
 ### Reconciliation notes (2026-05-27)
 
