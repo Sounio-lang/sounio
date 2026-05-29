@@ -1,0 +1,95 @@
+// stdlib/pbpk/rapamycin_constraint_crossover.sio — Sprint 60
+//
+// Binding constraint crossover analysis: the day N_x when trough first crosses
+// the therapeutic midpoint (0.012 mg/L) and the dominant risk switches from
+// floor-binding (under-dosing) to ceiling-binding (over-dosing).
+//
+// Midpoint = (floor + ceil) / 2 = (0.004 + 0.020) / 2 = 0.012 mg/L.
+// Floor-binding: c < 0.012 → margin = Z_floor = (c − floor)/u_c (increasing)
+// Ceil-binding:  c > 0.012 → margin = Z_ceil  = (ceil − c)/u_c  (decreasing)
+// Crossover at c = 0.012: Z_floor = Z_ceil = 0.008/u_c (symmetric).
+//
+// Five-stratum crossover atlas (scanned N=1..200):
+//   inh  (D=1.5mg,  ke=0.002236): N_x = probed
+//   slow (D=2.5mg,  ke=0.00838):  N_x = probed
+//   std  (D=5mg,    ke=0.01118):  N_x = probed  (near n_peak=19)
+//   fast (D=9.5mg,  ke=0.01677):  N_x = probed  (near n_peak=18)
+//   ind  (D=34mg,   ke=0.05590):  N_x = 0 — PERMANENT floor-binding
+//
+// Finding A: ind stratum is the only stratum with permanent floor-binding;
+//            its SS trough never reaches the midpoint (0.012 mg/L) at D=34mg;
+//            ceiling over-dosing risk is structurally absent for ind patients.
+// Finding B: crossover day for std is close to but distinct from n_peak=19;
+//            u_c contraction shifts the peak of min(Z_floor, Z_ceil) post-crossover.
+// Finding C: fast crossover < std crossover — faster ke → faster accumulation
+//            to midpoint; crossover ordering tracks ke ordering among finite strata.
+// Finding D: at the three standard monitoring visits, which constraint is
+//            binding for the std stratum:
+//            N=7  → floor-binding (trough still below 0.012)
+//            N=14 → floor-binding (trough still below 0.012)
+//            N=28 → ceil-binding  (trough above 0.012, descending toward ALARM)
+
+module pbpk::rapamycin_constraint_crossover
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+pub fn cc_midpoint() -> f64 with Mut, Div, Panic {
+    (trough_floor_mg_l() + trough_ceil_mg_l()) / 2.0
+}
+
+fn cc_crossover_scan(D: f64, ke: f64, fv: f64) -> i64 with Mut, Div, Panic {
+    var n = 1
+    var result = 0
+    while n <= 200 {
+        if as_trough_mg_l(D, n, ke, fv) >= cc_midpoint() && result == 0 { result = n };
+        n = n + 1
+    }
+    result
+}
+
+// ── Per-stratum crossover days ─────────────────────────────────────────────────
+pub fn cc_crossover_inh()  -> i64 with Mut, Div, Panic { cc_crossover_scan(1.5,  0.002236, 0.282) }
+pub fn cc_crossover_slow() -> i64 with Mut, Div, Panic { cc_crossover_scan(2.5,  0.00838,  0.188) }
+pub fn cc_crossover_std()  -> i64 with Mut, Div, Panic { cc_crossover_scan(5.0,  0.01118,  0.141) }
+pub fn cc_crossover_fast() -> i64 with Mut, Div, Panic { cc_crossover_scan(9.5,  0.01677,  0.094) }
+pub fn cc_crossover_ind()  -> i64 with Mut, Div, Panic { cc_crossover_scan(34.0, 0.05590,  0.047) }
+
+// ── Std stratum: separate floor / ceil margin at monitoring visits ─────────────
+fn cc_std_floor_at(n: i64) -> f64 with Mut, Div, Panic {
+    let ka  = ob_ka_var_std()
+    let fv  = ob_f_var_std()
+    let ke  = ob_ke_var_std()
+    let k12 = ob_k12_var_std()
+    let k21 = ob_k21_var_std()
+    let c   = as_trough_mg_l(5.0, n, 0.01118, 0.141)
+    let uc  = eu_u_c(5.0, n, 0.01118, 0.141, ka, fv, ke, k12, k21)
+    (c - trough_floor_mg_l()) / uc
+}
+
+fn cc_std_ceil_at(n: i64) -> f64 with Mut, Div, Panic {
+    let ka  = ob_ka_var_std()
+    let fv  = ob_f_var_std()
+    let ke  = ob_ke_var_std()
+    let k12 = ob_k12_var_std()
+    let k21 = ob_k21_var_std()
+    let c   = as_trough_mg_l(5.0, n, 0.01118, 0.141)
+    let uc  = eu_u_c(5.0, n, 0.01118, 0.141, ka, fv, ke, k12, k21)
+    (trough_ceil_mg_l() - c) / uc
+}
+
+pub fn cc_std_floor_n7()  -> f64 with Mut, Div, Panic { cc_std_floor_at(7)  }
+pub fn cc_std_ceil_n7()   -> f64 with Mut, Div, Panic { cc_std_ceil_at(7)   }
+pub fn cc_std_floor_n14() -> f64 with Mut, Div, Panic { cc_std_floor_at(14) }
+pub fn cc_std_ceil_n14()  -> f64 with Mut, Div, Panic { cc_std_ceil_at(14)  }
+pub fn cc_std_floor_n28() -> f64 with Mut, Div, Panic { cc_std_floor_at(28) }
+pub fn cc_std_ceil_n28()  -> f64 with Mut, Div, Panic { cc_std_ceil_at(28)  }
+
+// ── Lead of crossover relative to n_crit for std ──────────────────────────────
+pub fn cc_std_crossover_lead() -> i64 with Mut, Div, Panic {
+    cc_crossover_std() - 6
+}
