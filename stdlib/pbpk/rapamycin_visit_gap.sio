@@ -1,0 +1,109 @@
+// stdlib/pbpk/rapamycin_visit_gap.sio — Sprint 47
+//
+// Maximum alarm-free inter-visit gap: for the population-weighted five-stratum
+// model (Sprint 46 weights), find the last dose N where the alarm fraction
+// is zero and the first dose after week-2 (N=14) where alarm re-appears.
+//
+// Sprint 46 established: alarm non-monotone — 20% at N=7 (fast sub-therapeutic),
+// zero at N=14 (fast self-resolves), 15% at N=28 (slow stratum toxic).
+//
+// Finding A: alarm-free window closes at N=22 — slow stratum margin crosses zero
+//            at N=23; standard monitoring gap (N=14→N=28) is 14 doses but the
+//            alarm-free segment is only 8 doses (N=15 through N=22).
+// Finding B: gap excess = 6 — the standard 14-dose gap overshoots the alarm-free
+//            window by 6 doses; an intermediate visit at N≤22 eliminates the
+//            15% month-1 alarm entirely.
+// Finding C: safe fraction = 8/14 = 0.571 — only 57% of the standard
+//            week-2-to-month-1 interval is alarm-free; the excess 43% exposes
+//            the slow stratum to undetected toxicity.
+// Finding D: slow-stratum singularity — slow is the only post-N=14 alarm driver;
+//            fast is already certified by N=14, inh certified through N=37,
+//            std through N=36, ind monotone non-alarm throughout.
+
+module pbpk::rapamycin_visit_gap
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn vg_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn vg_margin(d: f64, n: i64, ke: f64, f: f64,
+             ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d, n, ke, f)
+    let uc = eu_u_c(d, n, ke, f, ka_v, fv, ke_v, k12_v, k21_v)
+    vg_min((c - trough_floor_mg_l()) / uc, (trough_ceil_mg_l() - c) / uc)
+}
+
+fn vg_alarm_w(d: f64, n: i64, ke: f64, f: f64,
+              ka_v: f64, fv: f64, ke_v: f64, k12_v: f64, k21_v: f64, w: f64) -> f64
+    with Mut, Div, Panic {
+    if vg_margin(d, n, ke, f, ka_v, fv, ke_v, k12_v, k21_v) < 0.0 { w } else { 0.0 }
+}
+
+fn vg_pop_alarm_at(n: i64) -> f64 with Mut, Div, Panic {
+    let ka     = ob_ka_var_std()
+    let fv     = ob_f_var_std()
+    let ke_s   = ob_ke_var_std()
+    let k12    = ob_k12_var_std()
+    let k21    = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    let ke_ind = ob_ke_var_ind()
+    let a_std  = vg_alarm_w(5.0,  n, 0.01118,  0.141, ka, fv, ke_s,    k12, k21, 0.50)
+    let a_slow = vg_alarm_w(5.0,  n, 0.00838,  0.188, ka, fv, ke_s,    k12, k21, 0.15)
+    let a_fast = vg_alarm_w(5.0,  n, 0.01677,  0.094, ka, fv, ke_s,    k12, k21, 0.20)
+    let a_inh  = vg_alarm_w(1.5,  n, 0.002236, 0.282, ka, fv, ke_inh,  k12, k21, 0.05)
+    let a_ind  = vg_alarm_w(34.0, n, 0.05590,  0.047, ka, fv, ke_ind,  k12, k21, 0.10)
+    a_std + a_slow + a_fast + a_inh + a_ind
+}
+
+// ── Named spot values ─────────────────────────────────────────────────────────
+pub fn vg_alarm_n7()  -> f64 with Mut, Div, Panic { vg_pop_alarm_at(7) }
+pub fn vg_alarm_n14() -> f64 with Mut, Div, Panic { vg_pop_alarm_at(14) }
+pub fn vg_alarm_n18() -> f64 with Mut, Div, Panic { vg_pop_alarm_at(18) }
+pub fn vg_alarm_n22() -> f64 with Mut, Div, Panic { vg_pop_alarm_at(22) }
+pub fn vg_alarm_n23() -> f64 with Mut, Div, Panic { vg_pop_alarm_at(23) }
+pub fn vg_alarm_n28() -> f64 with Mut, Div, Panic { vg_pop_alarm_at(28) }
+
+// ── Scanner: last N in [1,60] where population alarm = 0 ─────────────────────
+pub fn vg_n_alarm_free_max() -> i64 with Mut, Div, Panic {
+    var n    = 1
+    var last = 0
+    while n <= 60 {
+        if vg_pop_alarm_at(n) < 0.001 { last = n };
+        n = n + 1
+    }
+    last
+}
+
+// ── Scanner: first N > 14 where population alarm > 0 ─────────────────────────
+pub fn vg_n_alarm_onset_post14() -> i64 with Mut, Div, Panic {
+    var n     = 15
+    var found = 0
+    while n <= 60 {
+        if vg_pop_alarm_at(n) > 0.001 && found == 0 { found = n };
+        n = n + 1
+    }
+    found
+}
+
+// ── Gap metrics ───────────────────────────────────────────────────────────────
+pub fn vg_gap_standard() -> i64 { 14 }
+
+pub fn vg_gap_alarm_free() -> i64 with Mut, Div, Panic {
+    vg_n_alarm_free_max() - 14
+}
+
+pub fn vg_gap_excess() -> i64 with Mut, Div, Panic {
+    28 - vg_n_alarm_free_max()
+}
+
+// safe doses as percent × 10 of standard gap (e.g. 571 means 57.1%)
+pub fn vg_safe_pct10() -> i64 with Mut, Div, Panic {
+    vg_gap_alarm_free() * 1000 / vg_gap_standard()
+}
