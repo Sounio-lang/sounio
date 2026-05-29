@@ -3135,6 +3135,58 @@ fn box_alloc_bytes(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
 // Per-function error tracking for import-tolerant compilation.
 var TC_FN_ERR_COUNT: i64 = 0
 
+// Print "<source-file>:<local-line>" for a token's bundled byte position.
+// Scans backwards from TS[tok] to the nearest \x01<path>\x02 marker (start
+// of an imported file); newlines between the marker and the token give the
+// local line number. If no marker is found, the token is in main and we
+// print "main:<line>" using TL[tok] directly.
+fn print_src_loc_for_tok(tok: i64) with IO, Mut, Panic {
+    let pos = TS[tok as usize]
+    if pos < 0 || pos >= SRC_LEN {
+        print("<unknown>")
+        return
+    }
+    // Walk backwards: find most recent \x02 (end of marker); the bytes
+    // between the preceding \x01 and that \x02 are the source path.
+    var scan: i64 = pos
+    var marker_end: i64 = -1
+    while scan >= 0 {
+        if SRC[scan as usize] as i64 == 2 { marker_end = scan; break }
+        scan = scan - 1
+    }
+    if marker_end < 0 {
+        // No marker before this position — token is in the main file.
+        print("<main>:")
+        print_int(TL[tok as usize])
+        return
+    }
+    // Walk further back to find the matching \x01.
+    var marker_start: i64 = marker_end - 1
+    while marker_start >= 0 && SRC[marker_start as usize] as i64 != 1 {
+        marker_start = marker_start - 1
+    }
+    if marker_start < 0 {
+        print("<orphan-marker>:")
+        print_int(TL[tok as usize])
+        return
+    }
+    // Print the path (bytes between marker_start+1 and marker_end).
+    var pi: i64 = marker_start + 1
+    while pi < marker_end {
+        print_char(SRC[pi as usize] as i64)
+        pi = pi + 1
+    }
+    print(":")
+    // Count newlines from marker_end+1 to pos.
+    var local_line: i64 = 1
+    var nl_scan: i64 = marker_end + 1
+    while nl_scan < pos {
+        if SRC[nl_scan as usize] as i64 == 10 { local_line = local_line + 1 }
+        nl_scan = nl_scan + 1
+    }
+    print_int(local_line)
+}
+
 // Guard: errors in imported module functions should NOT block ELF emission.
 fn tc_mark_failed() with Mut {
     TC_FN_ERR_COUNT = TC_FN_ERR_COUNT + 1
@@ -3158,9 +3210,11 @@ fn tc_stack_frame_too_large(bytes: i64) with IO, Mut, Panic {
 fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     print("warning: ")
     print(msg)
-    print(" at line ")
+    print(" at ")
+    print_src_loc_for_tok(tok)
+    print(" (bundle line ")
     print_int(TL[tok as usize])
-    print("\n")
+    print(")\n")
     return 0
 }
 
@@ -3177,9 +3231,11 @@ fn tc_error_hard(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
         print("]")
         PENDING_PRIV_SI = 0 - 1
     }
-    print(" at line ")
+    print(" at ")
+    print_src_loc_for_tok(tok)
+    print(" (bundle line ")
     print_int(TL[tok as usize])
-    print("\n")
+    print(")\n")
     tc_mark_failed()
     return 0
 }
