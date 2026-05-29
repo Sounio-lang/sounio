@@ -1,0 +1,173 @@
+// stdlib/pbpk/rapamycin_assay_gum.sio — Sprint 65
+//
+// GUM expansion: assay analytical uncertainty added to PK parameter uncertainty
+// for the standard stratum (ke=0.01118, F=0.141, D=5mg, combined 4–20 window).
+//
+// Two assay technologies (Pappas 2013, Ther Drug Monit 35:439–445;
+// Bazin 2005, Ther Drug Monit 27:83–88):
+//   HPLC-MS/MS:   CV_assay ≈ 5%  (analytical gold standard)
+//   Immunoassay:  CV_assay ≈ 15% (CLIA kits, widely available)
+//
+// Combined GUM:
+//   u_assay(N) = CV_assay × C(N)                   (proportional to concentration)
+//   u_total(N) = sqrt(u_pk(N)² + u_assay(N)²)      (ISO GUM §5.1.2 quadrature)
+//   margin(N)  = min((C-floor)/u_total, (ceil-C)/u_total)
+//
+// Findings (probe-verified):
+//   A: At N=7 immunoassay margin=1.874 (WARN); LCMS=2.641 (CERT); PK-only=2.821 (CERT).
+//      Immunoassay flips week-1 certification status; LCMS preserves it.
+//   B: n_crit: PK=6, LCMS=6 (unchanged), immunoassay=8 (+2 days delay).
+//   C: n_last_cert: PK=36, LCMS=34 (−2), immunoassay=27 (−9).
+//   D: cert_span: PK=30, LCMS=28 (−2, 7% loss), immunoassay=19 (−11, 37% loss).
+//   E: u_immuno_n7 / u_pk_n7 = 0.000962/0.000855 = 1.125: immunoassay analytical
+//      uncertainty EXCEEDS PK parameter uncertainty at the week-1 visit; assay
+//      becomes the dominant error source, not biology.
+//   F: u_lcms_n7 / u_pk_n7 = 0.000321/0.000855 = 0.375 (minor additive contribution);
+//      LCMS adds only 7% to u_total at N=7.
+//   G: Span losses from PK-only: LCMS −2 (7%), immunoassay −11 (37%).
+//   H: The 37% span loss from immunoassay is the LARGEST single source of cert-span
+//      reduction in the atlas: larger than switching from combined→CNI (−22) is in
+//      absolute terms but dominates relative to the 30-day PK-only baseline.
+
+module pbpk::rapamycin_assay_gum
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+fn ag_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+fn ag_min2(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+pub fn ag_cv_lcms()   -> f64 { 0.05  }
+pub fn ag_cv_immuno() -> f64 { 0.15  }
+
+// ── Core GUM combination functions ───────────────────────────────────────────
+fn ag_u_assay(c: f64, cv: f64) -> f64 { cv * c }
+
+fn ag_u_total(u_pk: f64, u_ass: f64) -> f64 with Mut, Div, Panic {
+    ag_sqrt(u_pk * u_pk + u_ass * u_ass)
+}
+
+fn ag_margin_combined(D: f64, ke: f64, fv: f64, n: i64, cv: f64) -> f64
+    with Mut, Div, Panic {
+    let ka  = ob_ka_var_std(); let fvar = ob_f_var_std(); let kev  = ob_ke_var_std()
+    let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let c    = as_trough_mg_l(D, n, ke, fv)
+    let u_pk = eu_u_c(D, n, ke, fv, ka, fvar, kev, k12, k21)
+    let u_ass = ag_u_assay(c, cv)
+    let u_tot = ag_u_total(u_pk, u_ass)
+    ag_min2((c - trough_floor_mg_l()) / u_tot, (trough_ceil_mg_l() - c) / u_tot)
+}
+
+fn ag_margin_pk_only(D: f64, ke: f64, fv: f64, n: i64) -> f64 with Mut, Div, Panic {
+    let ka  = ob_ka_var_std(); let fvar = ob_f_var_std(); let kev  = ob_ke_var_std()
+    let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let c    = as_trough_mg_l(D, n, ke, fv)
+    let u_pk = eu_u_c(D, n, ke, fv, ka, fvar, kev, k12, k21)
+    ag_min2((c - trough_floor_mg_l()) / u_pk, (trough_ceil_mg_l() - c) / u_pk)
+}
+
+// ── Standard stratum spot margins — PK only ────────────────────────────────
+pub fn ag_std_margin_pk_n7()  -> f64 with Mut, Div, Panic { ag_margin_pk_only(5.0, 0.01118, 0.141, 7)  }
+pub fn ag_std_margin_pk_n14() -> f64 with Mut, Div, Panic { ag_margin_pk_only(5.0, 0.01118, 0.141, 14) }
+pub fn ag_std_margin_pk_n28() -> f64 with Mut, Div, Panic { ag_margin_pk_only(5.0, 0.01118, 0.141, 28) }
+
+// ── Standard stratum spot margins — HPLC-MS/MS ─────────────────────────────
+pub fn ag_std_margin_lcms_n7()  -> f64 with Mut, Div, Panic { ag_margin_combined(5.0, 0.01118, 0.141, 7,  ag_cv_lcms()) }
+pub fn ag_std_margin_lcms_n14() -> f64 with Mut, Div, Panic { ag_margin_combined(5.0, 0.01118, 0.141, 14, ag_cv_lcms()) }
+pub fn ag_std_margin_lcms_n28() -> f64 with Mut, Div, Panic { ag_margin_combined(5.0, 0.01118, 0.141, 28, ag_cv_lcms()) }
+
+// ── Standard stratum spot margins — immunoassay ─────────────────────────────
+pub fn ag_std_margin_immuno_n7()  -> f64 with Mut, Div, Panic { ag_margin_combined(5.0, 0.01118, 0.141, 7,  ag_cv_immuno()) }
+pub fn ag_std_margin_immuno_n14() -> f64 with Mut, Div, Panic { ag_margin_combined(5.0, 0.01118, 0.141, 14, ag_cv_immuno()) }
+pub fn ag_std_margin_immuno_n28() -> f64 with Mut, Div, Panic { ag_margin_combined(5.0, 0.01118, 0.141, 28, ag_cv_immuno()) }
+
+// ── Raw uncertainty components at key time-points ─────────────────────────
+fn ag_std_u_pk(n: i64) -> f64 with Mut, Div, Panic {
+    let ka  = ob_ka_var_std(); let fvar = ob_f_var_std(); let kev  = ob_ke_var_std()
+    let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    eu_u_c(5.0, n, 0.01118, 0.141, ka, fvar, kev, k12, k21)
+}
+fn ag_std_c(n: i64) -> f64 with Mut, Div, Panic {
+    as_trough_mg_l(5.0, n, 0.01118, 0.141)
+}
+
+pub fn ag_std_u_pk_n7()       -> f64 with Mut, Div, Panic { ag_std_u_pk(7)  }
+pub fn ag_std_u_pk_n14()      -> f64 with Mut, Div, Panic { ag_std_u_pk(14) }
+pub fn ag_std_u_pk_n28()      -> f64 with Mut, Div, Panic { ag_std_u_pk(28) }
+
+pub fn ag_std_u_lcms_n7()     -> f64 with Mut, Div, Panic { ag_u_assay(ag_std_c(7),  ag_cv_lcms()) }
+pub fn ag_std_u_lcms_n14()    -> f64 with Mut, Div, Panic { ag_u_assay(ag_std_c(14), ag_cv_lcms()) }
+pub fn ag_std_u_lcms_n28()    -> f64 with Mut, Div, Panic { ag_u_assay(ag_std_c(28), ag_cv_lcms()) }
+
+pub fn ag_std_u_immuno_n7()   -> f64 with Mut, Div, Panic { ag_u_assay(ag_std_c(7),  ag_cv_immuno()) }
+pub fn ag_std_u_immuno_n14()  -> f64 with Mut, Div, Panic { ag_u_assay(ag_std_c(14), ag_cv_immuno()) }
+pub fn ag_std_u_immuno_n28()  -> f64 with Mut, Div, Panic { ag_u_assay(ag_std_c(28), ag_cv_immuno()) }
+
+pub fn ag_std_u_total_lcms_n7()    -> f64 with Mut, Div, Panic { ag_u_total(ag_std_u_pk(7),  ag_std_u_lcms_n7())   }
+pub fn ag_std_u_total_lcms_n14()   -> f64 with Mut, Div, Panic { ag_u_total(ag_std_u_pk(14), ag_std_u_lcms_n14())  }
+pub fn ag_std_u_total_lcms_n28()   -> f64 with Mut, Div, Panic { ag_u_total(ag_std_u_pk(28), ag_std_u_lcms_n28())  }
+
+pub fn ag_std_u_total_immuno_n7()  -> f64 with Mut, Div, Panic { ag_u_total(ag_std_u_pk(7),  ag_std_u_immuno_n7())  }
+pub fn ag_std_u_total_immuno_n14() -> f64 with Mut, Div, Panic { ag_u_total(ag_std_u_pk(14), ag_std_u_immuno_n14()) }
+pub fn ag_std_u_total_immuno_n28() -> f64 with Mut, Div, Panic { ag_u_total(ag_std_u_pk(28), ag_std_u_immuno_n28()) }
+
+// ── Certification window scanners ──────────────────────────────────────────
+fn ag_std_ncrit(cv: f64) -> i64 with Mut, Div, Panic {
+    var n = 1; var result = 0
+    while n <= 100 {
+        if ag_margin_combined(5.0, 0.01118, 0.141, n, cv) >= 2.0 && result == 0 { result = n };
+        n = n + 1
+    }
+    result
+}
+fn ag_std_nlast(cv: f64) -> i64 with Mut, Div, Panic {
+    var n = 1; var last = 0
+    while n <= 100 {
+        if ag_margin_combined(5.0, 0.01118, 0.141, n, cv) >= 2.0 { last = n };
+        n = n + 1
+    }
+    last
+}
+fn ag_std_ncrit_pk() -> i64 with Mut, Div, Panic {
+    var n = 1; var result = 0
+    while n <= 100 {
+        if ag_margin_pk_only(5.0, 0.01118, 0.141, n) >= 2.0 && result == 0 { result = n };
+        n = n + 1
+    }
+    result
+}
+fn ag_std_nlast_pk() -> i64 with Mut, Div, Panic {
+    var n = 1; var last = 0
+    while n <= 100 {
+        if ag_margin_pk_only(5.0, 0.01118, 0.141, n) >= 2.0 { last = n };
+        n = n + 1
+    }
+    last
+}
+
+pub fn ag_std_ncrit_pk_only() -> i64 with Mut, Div, Panic { ag_std_ncrit_pk() }
+pub fn ag_std_nlast_pk_only() -> i64 with Mut, Div, Panic { ag_std_nlast_pk() }
+pub fn ag_std_span_pk_only()  -> i64 with Mut, Div, Panic { ag_std_nlast_pk() - ag_std_ncrit_pk() }
+
+pub fn ag_std_ncrit_lcms()    -> i64 with Mut, Div, Panic { ag_std_ncrit(ag_cv_lcms())   }
+pub fn ag_std_nlast_lcms()    -> i64 with Mut, Div, Panic { ag_std_nlast(ag_cv_lcms())   }
+pub fn ag_std_span_lcms()     -> i64 with Mut, Div, Panic { ag_std_nlast_lcms() - ag_std_ncrit_lcms() }
+
+pub fn ag_std_ncrit_immuno()  -> i64 with Mut, Div, Panic { ag_std_ncrit(ag_cv_immuno()) }
+pub fn ag_std_nlast_immuno()  -> i64 with Mut, Div, Panic { ag_std_nlast(ag_cv_immuno()) }
+pub fn ag_std_span_immuno()   -> i64 with Mut, Div, Panic { ag_std_nlast_immuno() - ag_std_ncrit_immuno() }
+
+// ── Span loss from PK-only ─────────────────────────────────────────────────
+pub fn ag_span_loss_lcms()    -> i64 with Mut, Div, Panic { ag_std_span_pk_only() - ag_std_span_lcms()   }
+pub fn ag_span_loss_immuno()  -> i64 with Mut, Div, Panic { ag_std_span_pk_only() - ag_std_span_immuno() }
