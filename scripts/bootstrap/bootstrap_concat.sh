@@ -726,15 +726,18 @@ echo ""
 CHECKER_EXIT=0
 FULL_CHECK_LOG="$ARTIFACT_DIR/bootstrap_full_check.log"
 set +e
+CHECKER_STACK_KB="${CHECKER_STACK_KB:-65536}"
 if [ "$BOOTSTRAP_PROFILE" = "full" ]; then
-  CHECKER_STACK_KB="${CHECKER_STACK_KB:-65536}"
   (
     ulimit -s "$CHECKER_STACK_KB" 2>/dev/null || true
     "$PINNED_BIN" "$OUTPUT_FILE" "$BUNDLE_ELF_OUT" 2>&1
   ) | tee "$FULL_CHECK_LOG"
   CHECKER_EXIT="${PIPESTATUS[0]}"
 else
-  "$PINNED_BIN" "$OUTPUT_FILE" "$BUNDLE_ELF_OUT" 2>&1
+  (
+    ulimit -s "$CHECKER_STACK_KB" 2>/dev/null || true
+    "$PINNED_BIN" "$OUTPUT_FILE" "$BUNDLE_ELF_OUT" 2>&1
+  )
   CHECKER_EXIT="$?"
 fi
 set -e
