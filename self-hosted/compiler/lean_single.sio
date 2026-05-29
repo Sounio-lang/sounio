@@ -4635,7 +4635,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         let total_nslots = first_nslots + last_nslots
         SCAN_TY = 6
         // Hash: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
-        SCAN_TY_HASH = tcount * 100000000 + first_f64 * 10000000 + last_f64 * 1000000 + first_nslots * 1000 + total_nslots
+        SCAN_TY_HASH = (first_hash % 1000) * 1000000000000000 + (last_hash % 1000000) * 1000000000 + tcount * 100000000 + first_f64 * 10000000 + last_f64 * 1000000 + first_nslots * 1000 + total_nslots
         tup_cache_register(SCAN_TY_HASH, first_ty, first_hash, last_ty, last_hash)
         SCAN_TY_NEXT = p
         return
@@ -9452,7 +9452,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if first_ty == 2 { first_f64_flag = 1 }
             var last_f64_flag: i64 = 0
             if last_ty == 2 { last_f64_flag = 1 }
-            EXPR_TY_HASH = tup_count * 100000000 + first_f64_flag * 10000000 + last_f64_flag * 1000000 + first_actual * 1000 + total_slots
+            EXPR_TY_HASH = (first_hash % 1000) * 1000000000000000 + (last_hash % 1000000) * 1000000000 + tup_count * 100000000 + first_f64_flag * 10000000 + last_f64_flag * 1000000 + first_actual * 1000 + total_slots
             tup_cache_register(EXPR_TY_HASH, first_ty, first_hash, last_ty, last_hash)
             return
         }
@@ -16878,11 +16878,30 @@ fn tuple_skip_value_a64() with IO, Mut, Panic, Div {
 //   where tcount_enc = tup_first_f64 * 10 + tup_last_f64
 // Currently handles flat 2-element tuples only.
 fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) with IO, Mut, Panic, Div {
-    let tup_first_slots = (tup_hash % 1000000) / 1000
-    let tup_total_slots = tup_hash % 1000
+    // Fall back to hash-derived values; override with TUP_CACHE if present (handles
+    // slot counts > 999 that overflow the 3-digit hash encoding, e.g. TileBuf/65537).
+    var tup_first_slots: i64 = (tup_hash % 1000000) / 1000
+    var tup_total_slots: i64 = tup_hash % 1000
+    var tup_first_f64: i64 = (tup_hash / 10000000) % 10
+    var tup_last_f64: i64 = (tup_hash / 1000000) % 10
+    var tup_first_ty: i64 = 1
+    var tup_first_ty_hash: i64 = 0
+    var tup_last_ty: i64 = 1
+    var tup_last_ty_hash: i64 = 0
+    let tup_ci = tup_cache_lookup(tup_hash)
+    if tup_ci >= 0 {
+        tup_first_ty = TUP_CACHE_FIRST_TY[tup_ci as usize]
+        tup_first_ty_hash = TUP_CACHE_FIRST_HASH[tup_ci as usize]
+        tup_last_ty = TUP_CACHE_LAST_TY[tup_ci as usize]
+        tup_last_ty_hash = TUP_CACHE_LAST_HASH[tup_ci as usize]
+        let fs = ty_slot_count(tup_first_ty, tup_first_ty_hash)
+        let ls = ty_slot_count(tup_last_ty, tup_last_ty_hash)
+        if fs > 0 { tup_first_slots = fs }
+        if tup_first_ty == 2 { tup_first_f64 = 1 } else { tup_first_f64 = 0 }
+        if tup_last_ty == 2 { tup_last_f64 = 1 } else { tup_last_f64 = 0 }
+        if fs > 0 && ls > 0 { tup_total_slots = fs + ls }
+    }
     let tup_last_slots = tup_total_slots - tup_first_slots
-    let tup_first_f64 = (tup_hash / 10000000) % 10
-    let tup_last_f64 = (tup_hash / 1000000) % 10
     var pp = pat_start + 1
     var elem_idx: i64 = 0
     while TK[pp as usize] != 7 && TK[pp as usize] != 0 {
@@ -16895,6 +16914,8 @@ fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
         let elem_is_f64 = if elem_idx == 0 { tup_first_f64 } else { tup_last_f64 }
         let elem_slots = if elem_idx == 0 { tup_first_slots } else { tup_last_slots }
         let byte_off = if elem_idx == 0 { 0 } else { tup_first_slots * 8 }
+        let elem_ty = if elem_idx == 0 { tup_first_ty } else { tup_last_ty }
+        let elem_ty_hash = if elem_idx == 0 { tup_first_ty_hash } else { tup_last_ty_hash }
         if is_wild == 0 {
             if elem_slots == 1 {
                 emit_load_var(ptr_slot)
@@ -16905,6 +16926,17 @@ fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
                 if elem_is_f64 == 1 { EXPR_IS_F64 = 1; EXPR_TY = 2 }
                 else { EXPR_IS_F64 = 0; EXPR_TY = 1 }
                 EXPR_TY_HASH = 0
+                tuple_bind_leaf_x86(pns, pne)
+            } else {
+                // Aggregate element: bind as pointer into the SRET buffer.
+                // rax = sret_ptr + byte_off points to the element's first slot.
+                emit_load_var(ptr_slot)
+                if byte_off > 0 {
+                    em(0x48); em(0x05); em32(byte_off)
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = elem_ty
+                EXPR_TY_HASH = elem_ty_hash
                 tuple_bind_leaf_x86(pns, pne)
             }
         }
