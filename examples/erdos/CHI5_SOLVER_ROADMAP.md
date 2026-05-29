@@ -72,12 +72,30 @@ cd /tmp && /tmp/souc_sat.elf 0 4 1 1 "$OLDPWD/examples/erdos/data/degrey_529.edg
 drat-trim souc_sat_worker.cnf souc_sat_worker.drat        # s VERIFIED
 ```
 
-This is **Part A** of the flagship (non-4-colourability of a real core, machine-checked
-by *our* solver + drat-trim). **Part B** (exact unit-distance realisation over
-ℚ(√3,√5,√11) from `degrey_529.vtx`, no floats ⟹ χ(ℝ²)≥5) and the **Lean V-track**
-(DRAT→LRAT→verified checker) remain. Honest framing: refuting a *given* core is the
-*easy* half (others did the hard finding/minimising); the Sounio novelty is the
-*exact + self-hosted + machine-checked* chain — Part A is the first leg.
+This was **Part A** of the flagship (non-4-colourability of a real core, machine-checked
+by *our* solver + drat-trim).
+
+**Part B — exact unit-distance realisation (DONE, 2026-05-29).**
+`examples/erdos/degrey_geometry.sio` reads the **exact algebraic coordinates** of all
+529 vertices from `data/degrey_529.vtx` (Mathematica syntax, e.g.
+`(-21+3·Sqrt[5]+7·Sqrt[33]+3·Sqrt[165])/48`) via a recursive-descent parser over a
+**denominator-extended degree-8 field kernel** ℚ(√3,√5,√11) (the `Q16` XOR-mask algebra
+from `degrey_fieldtower.sio` plus a common denominator; division only ever by a rational
+or by √3, so no general field inverse is needed), and certifies that **every one of the
+2670 edges has `dist² = 1` exactly** — **no floating point**. Result: `2670/2670`,
+self-test `dist²(v0,v1)=1`, no `SQRT_ERR`/`DIV_ERR`. Magnitudes stay ~10¹³ ≪ i64 max
+(no overflow). This is the Sounio analogue of upstream's Singular/Gröbner `check/*.singular`.
+
+```bash
+$SOUNIO_SOUC_BIN examples/erdos/degrey_geometry.sio /tmp/geo.elf && /tmp/geo.elf
+# => edges checked: 2670   dist^2 == 1: 2670   FAIL: 0
+```
+
+**Both legs now hold in self-hosted Sounio**: G₅₂₉ is a unit-distance graph (exact) **and**
+χ(G₅₂₉) ≥ 5 (drat-trim verified) ⟹ **χ(ℝ²) ≥ 5**. The remaining **Lean V-track**
+(DRAT→LRAT→verified checker + composed theorem) is staged. Honest framing: refuting and
+realising a *given* core is the *easy* half (others did the hard finding/minimising); the
+Sounio novelty is the *exact + self-hosted + machine-checked* chain — Parts A+B deliver it.
 
 ## 1b. Implemented & gated this iteration — `examples/erdos/souc_sat.sio`
 

@@ -218,7 +218,7 @@ verify each edge `dist² = 1` with **no floating point** — `degrey_q3q11_spind
 | G | Acquire a core's **edge list** (Heule **529** / Parts **510**) — vendored from `marijnheule/CNP-SAT`. | `examples/erdos/data/degrey_529.edge`, `parts_510.edge`, `degrey_529.vtx` | **DONE** |
 | E | Encode 4-colouring (DIMACS edge-file reader) + triangle precolour / value precedence. | `souc_sat.sio` graph-file mode | **DONE** |
 | S | Refute G₅₂₉ with `souc_sat` (streamed DRAT) → **`drat-trim s VERIFIED`** ⟹ **χ(G₅₂₉)≥5**. | `souc_sat.sio` | **DONE (Part A)** — 33 s, 327 k conflicts, 72 MB proof |
-| B | Reconstruct `degrey_529.vtx` exactly over ℚ(√3,√5,√11); certify every edge `dist²=1` (no floats). | `degrey_fieldtower.sio` kernel | **TODO (Part B)** — next |
+| B | Reconstruct `degrey_529.vtx` exactly over ℚ(√3,√5,√11); certify every edge `dist²=1` (no floats). | `degrey_geometry.sio` (denominator-extended `Q16` kernel + Mathematica parser) | **DONE (Part B)** — 2670/2670 edges `dist²=1` exact, no `SQRT_ERR`/`DIV_ERR` |
 | V | DRAT → LRAT (`drat-trim -L`) → **Lean verified checker** (`Std.Tactic.BVDecide`) + cake_lpr as 2nd checker. | `formal/lean4/` | **TODO** (V1–V2) |
 | T | Lean lemmas: exact embedding ⟹ unit-distance graph; CNF UNSAT ⟹ not 4-colourable ⟹ χ(ℝ²)≥5. Compose. | `formal/lean4/SounioErdosUnitDistance.lean` | **TODO** (V3–V4) |
 

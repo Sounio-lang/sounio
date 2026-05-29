@@ -1,5 +1,28 @@
 # LLM Offload Log
 
+## 2026-05-29: FLAGSHIP Part B — exact unit-distance certification (`degrey_geometry.sio`)
+
+- **Claim**: every one of G₅₂₉'s 2670 edges has squared distance exactly 1 over
+  ℚ(√3,√5,√11) (no floating point) ⟹ G₅₂₉ is a unit-distance graph; with Part A
+  (χ≥5, drat-trim) ⟹ **χ(ℝ²) ≥ 5**.
+- **Evidence**: `degrey_geometry.sio` parses the 529 exact Mathematica coordinates
+  into a denominator-extended degree-8 field kernel (the `Q16` XOR-mask algebra of
+  `degrey_fieldtower.sio` + a common denominator), computes (Δx)²+(Δy)² with exact
+  integer arithmetic, and reports **2670/2670 `dist²=1`, 0 FAIL**, self-test
+  `dist²(v0,v1)=1`, no `SQRT_ERR` (every radical stayed in the field) and no `DIV_ERR`
+  (every division was by a rational or √3). Magnitudes ≤ ~10¹³ ≪ i64 max ⟹ no overflow.
+- **Offload (policy-aligned, math claim)**: `bin/llm-offload -t math-review -p xai`
+  (Grok 4.1 fast reasoning, 9 s). Verdict: **NO MATHEMATICAL ERRORS OR OVERREACHES** —
+  confirmed (i) the field multiplication `b_i·b_j = bcoeff(i&j)·b_{i⊕j}` matches the
+  square-free-basis ring homomorphism, (ii) `qf_is_one` after `qf_reduce` exactly tests
+  equality with 1, (iii) the specialised `qf_div` (rational/√3 cases) is algebraically
+  equivalent to the general inverse on the data that occurs, (iv) the distance computation
+  is entirely exact, (v) the overall claim follows from exhaustive exact evaluation.
+- **Soundness chain (textbook)**: exact embedding ⟹ unit-distance graph; CNF UNSAT ⟹ not
+  4-colourable; a non-4-colourable unit-distance graph ⟹ χ(ℝ²) ≥ 5 (Hadwiger–Nelson).
+  No overclaim beyond what Parts A+B verify; full *formal* (Lean) machine-checking of the
+  DRAT→LRAT→theorem composition is still staged (V-track).
+
 ## 2026-05-29: FLAGSHIP — χ(G₅₂₉) ≥ 5 via Sounio solver (`souc_sat.sio` graph-file mode)
 
 - **Claim**: the Heule 529-vertex de Grey core G₅₂₉ is **not 4-colourable** ⟹ χ(G₅₂₉) ≥ 5,
