@@ -1,0 +1,117 @@
+// stdlib/pbpk/rapamycin_std_trajectory.sio — Sprint 57
+//
+// GUM-exact trough margin trajectory for the standard stratum (CYP3A4 normal
+// metabolizer, ke=0.01118 h⁻¹, F=0.141, D=5mg, w=0.50) — the majority
+// stratum carrying half the patient population weight.
+// Fifth and final trajectory analysis, completing the five-stratum atlas:
+//   S49: slow  (ke=0.00838, D=2.5mg)   S56: inh  (ke=0.002236, D=1.5mg)
+//   S52: fast  (ke=0.01677, D=9.5mg)   S55: ind  (ke=0.05590,  D=34mg)
+//   S57: std   (ke=0.01118, D=5mg)     ← this module
+//
+// Accumulation factor R = 1/(1−exp(−ke·τ)) ≈ 4.25 at ke=0.01118, τ=24h.
+// Near-SS requires ~15 doses (~95%). The trajectory is the central reference:
+// the standard stratum is CERT at all three monitoring visits under the
+// standard protocol; this module quantifies the certified window width and
+// peak margin.
+//
+// Finding A: n_crit — first day std certifies at D=5mg; from coverage analysis
+//            std is CERT at N=7, so n_crit ≤ 7.
+// Finding B: cert window — peak margin day and magnitude; ceiling eventually
+//            binds as trough approaches SS.
+// Finding C: comparison anchor — std sits between slow (ke=0.00838) and fast
+//            (ke=0.01677); its cert_span and peak characterise the median
+//            pharmacogenomic phenotype.
+// Finding D: N=7/14/28 profile — the three monitoring visits all certify for
+//            the standard stratum at standard dose; margins at each visit.
+
+module pbpk::rapamycin_std_trajectory
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+fn stt_min2(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn stt_margin_at(n: i64) -> f64 with Mut, Div, Panic {
+    let ka  = ob_ka_var_std()
+    let fv  = ob_f_var_std()
+    let ke  = ob_ke_var_std()
+    let k12 = ob_k12_var_std()
+    let k21 = ob_k21_var_std()
+    let c   = as_trough_mg_l(5.0, n, 0.01118, 0.141)
+    let uc  = eu_u_c(5.0, n, 0.01118, 0.141, ka, fv, ke, k12, k21)
+    stt_min2((c - trough_floor_mg_l()) / uc, (trough_ceil_mg_l() - c) / uc)
+}
+
+// ── Named spot values ─────────────────────────────────────────────────────────
+pub fn stt_margin_n1()  -> f64 with Mut, Div, Panic { stt_margin_at(1)  }
+pub fn stt_margin_n3()  -> f64 with Mut, Div, Panic { stt_margin_at(3)  }
+pub fn stt_margin_n5()  -> f64 with Mut, Div, Panic { stt_margin_at(5)  }
+pub fn stt_margin_n7()  -> f64 with Mut, Div, Panic { stt_margin_at(7)  }
+pub fn stt_margin_n14() -> f64 with Mut, Div, Panic { stt_margin_at(14) }
+pub fn stt_margin_n21() -> f64 with Mut, Div, Panic { stt_margin_at(21) }
+pub fn stt_margin_n28() -> f64 with Mut, Div, Panic { stt_margin_at(28) }
+pub fn stt_margin_n42() -> f64 with Mut, Div, Panic { stt_margin_at(42) }
+pub fn stt_margin_n56() -> f64 with Mut, Div, Panic { stt_margin_at(56) }
+pub fn stt_margin_n84() -> f64 with Mut, Div, Panic { stt_margin_at(84) }
+
+// ── Scanner: first N (1..100) where std certifies at D=5mg ───────────────────
+pub fn stt_n_crit() -> i64 with Mut, Div, Panic {
+    var n      = 1
+    var result = 0
+    while n <= 100 {
+        if stt_margin_at(n) >= 2.0 && result == 0 { result = n };
+        n = n + 1
+    }
+    result
+}
+
+// ── Scanner: last N (1..150) where std certifies at D=5mg ────────────────────
+pub fn stt_n_last_cert() -> i64 with Mut, Div, Panic {
+    var n    = 1
+    var last = 0
+    while n <= 150 {
+        if stt_margin_at(n) >= 2.0 { last = n };
+        n = n + 1
+    }
+    last
+}
+
+// ── Scanner: argmax N of margin in 1..150 ────────────────────────────────────
+pub fn stt_n_peak() -> i64 with Mut, Div, Panic {
+    var n      = 1
+    var best_n = 1
+    var best_m = stt_margin_at(1)
+    while n <= 150 {
+        let m = stt_margin_at(n)
+        if m > best_m { best_n = n };
+        if m > best_m { best_m = m };
+        n = n + 1
+    }
+    best_n
+}
+
+pub fn stt_margin_peak() -> f64 with Mut, Div, Panic {
+    stt_margin_at(stt_n_peak())
+}
+
+// ── Derived metrics ───────────────────────────────────────────────────────────
+pub fn stt_ncrit_lead() -> i64 with Mut, Div, Panic {
+    stt_n_crit() - 1
+}
+
+pub fn stt_cert_span() -> i64 with Mut, Div, Panic {
+    stt_n_last_cert() - stt_n_crit()
+}
+
+pub fn stt_peak_lag() -> i64 with Mut, Div, Panic {
+    stt_n_peak() - stt_n_crit()
+}
+
+// Margin at all three standard monitoring visits
+pub fn stt_margin_gain_n7_to_n28() -> f64 with Mut, Div, Panic {
+    stt_margin_at(28) - stt_margin_at(7)
+}
