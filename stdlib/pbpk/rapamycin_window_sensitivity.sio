@@ -1,0 +1,257 @@
+// stdlib/pbpk/rapamycin_window_sensitivity.sio — Sprint 39
+//
+// Therapeutic-window sensitivity analysis: N_crit and Z-margins under four
+// window specifications (mg/L):
+//   std  = [0.004, 0.020]   (standard clinical)
+//   sf   = [0.005, 0.020]   (strict floor)
+//   cc   = [0.004, 0.015]   (conservative ceiling)
+//   nw   = [0.005, 0.015]   (narrow / combined)
+//
+// Finding A: Floor dominance — conservative ceiling never tightens N_crit;
+//            strict floor does for all strata (cc≡std, nw≡sf everywhere).
+// Finding B: Ind floor penalty — ind N_crit jumps 26→43 (+17 doses) when
+//            floor rises 0.004→0.005 mg/L; largest absolute penalty.
+// Finding C: Slow ceiling collapse — at N=14 under cc, Z_ceil drops to 0.496
+//            (from 5.315 under std); slow stratum approaches toxicity quietly.
+// Finding D: Std certifies at N=6 under std floor (Z_floor=2.221); still
+//            fails Z_floor≥2 at N=7 under strict floor (Z_floor=1.651).
+
+module pbpk::rapamycin_window_sensitivity
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn tws_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+// Generic N_crit search with custom window. Returns 0 if not found within 60 doses.
+fn tws_find_ncrit(d: f64, ke: f64, f: f64,
+                  ka_v: f64, f_v: f64, ke_v: f64, k12_v: f64, k21_v: f64,
+                  floor_c: f64, ceil_c: f64) -> i64
+    with Mut, Div, Panic {
+    var n = 1; var found = 0
+    while n <= 60 && found == 0 {
+        let c  = as_trough_mg_l(d, n, ke, f)
+        let uc = eu_u_c(d, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v)
+        let zf = (c - floor_c) / uc
+        let zc = (ceil_c - c)  / uc
+        if zf >= 2.0 && zc >= 2.0 { found = n }
+        else { n = n + 1 }
+    }
+    found
+}
+
+// Generic Z_floor with custom floor.
+fn tws_z_floor(d: f64, n: i64, ke: f64, f: f64,
+               ka_v: f64, f_v: f64, ke_v: f64, k12_v: f64, k21_v: f64,
+               floor_c: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d, n, ke, f)
+    let uc = eu_u_c(d, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v)
+    (c - floor_c) / uc
+}
+
+// Generic Z_ceil with custom ceiling.
+fn tws_z_ceil(d: f64, n: i64, ke: f64, f: f64,
+              ka_v: f64, f_v: f64, ke_v: f64, k12_v: f64, k21_v: f64,
+              ceil_c: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d, n, ke, f)
+    let uc = eu_u_c(d, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v)
+    (ceil_c - c) / uc
+}
+
+// ── N_crit: std stratum ───────────────────────────────────────────────────────
+pub fn tws_std_ncrit_std() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(5.0, 0.01118, 0.141,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004, 0.020)
+}
+pub fn tws_std_ncrit_sf() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(5.0, 0.01118, 0.141,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005, 0.020)
+}
+pub fn tws_std_ncrit_cc() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(5.0, 0.01118, 0.141,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004, 0.015)
+}
+pub fn tws_std_ncrit_nw() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(5.0, 0.01118, 0.141,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005, 0.015)
+}
+
+// ── N_crit: slow stratum ─────────────────────────────────────────────────────
+pub fn tws_slow_ncrit_std() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(5.0, 0.00838, 0.188,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004, 0.020)
+}
+pub fn tws_slow_ncrit_sf() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(5.0, 0.00838, 0.188,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005, 0.020)
+}
+pub fn tws_slow_ncrit_cc() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(5.0, 0.00838, 0.188,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004, 0.015)
+}
+pub fn tws_slow_ncrit_nw() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(5.0, 0.00838, 0.188,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005, 0.015)
+}
+
+// ── N_crit: fast stratum ─────────────────────────────────────────────────────
+pub fn tws_fast_ncrit_std() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(5.0, 0.01677, 0.094,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004, 0.020)
+}
+pub fn tws_fast_ncrit_sf() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(5.0, 0.01677, 0.094,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005, 0.020)
+}
+pub fn tws_fast_ncrit_cc() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(5.0, 0.01677, 0.094,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004, 0.015)
+}
+pub fn tws_fast_ncrit_nw() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(5.0, 0.01677, 0.094,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005, 0.015)
+}
+
+// ── N_crit: inhibitor stratum ────────────────────────────────────────────────
+pub fn tws_inh_ncrit_std() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(1.5, 0.002236, 0.282,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_inh(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004, 0.020)
+}
+pub fn tws_inh_ncrit_sf() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(1.5, 0.002236, 0.282,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_inh(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005, 0.020)
+}
+pub fn tws_inh_ncrit_cc() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(1.5, 0.002236, 0.282,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_inh(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004, 0.015)
+}
+pub fn tws_inh_ncrit_nw() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(1.5, 0.002236, 0.282,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_inh(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005, 0.015)
+}
+
+// ── N_crit: inducer stratum ──────────────────────────────────────────────────
+pub fn tws_ind_ncrit_std() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(34.0, 0.05590, 0.047,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_ind(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004, 0.020)
+}
+pub fn tws_ind_ncrit_sf() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(34.0, 0.05590, 0.047,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_ind(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005, 0.020)
+}
+pub fn tws_ind_ncrit_cc() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(34.0, 0.05590, 0.047,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_ind(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004, 0.015)
+}
+pub fn tws_ind_ncrit_nw() -> i64 with Mut, Div, Panic {
+    tws_find_ncrit(34.0, 0.05590, 0.047,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_ind(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005, 0.015)
+}
+
+// ── Slow Z_ceil at N=7,14,26 — ceiling collapse analysis ────────────────────
+pub fn tws_slow_zceil_std_n7() -> f64 with Mut, Div, Panic {
+    tws_z_ceil(5.0, 7, 0.00838, 0.188,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.020)
+}
+pub fn tws_slow_zceil_cc_n7() -> f64 with Mut, Div, Panic {
+    tws_z_ceil(5.0, 7, 0.00838, 0.188,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.015)
+}
+pub fn tws_slow_zceil_std_n14() -> f64 with Mut, Div, Panic {
+    tws_z_ceil(5.0, 14, 0.00838, 0.188,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.020)
+}
+pub fn tws_slow_zceil_cc_n14() -> f64 with Mut, Div, Panic {
+    tws_z_ceil(5.0, 14, 0.00838, 0.188,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.015)
+}
+pub fn tws_slow_zceil_std_n26() -> f64 with Mut, Div, Panic {
+    tws_z_ceil(5.0, 26, 0.00838, 0.188,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.020)
+}
+pub fn tws_slow_zceil_cc_n26() -> f64 with Mut, Div, Panic {
+    tws_z_ceil(5.0, 26, 0.00838, 0.188,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.015)
+}
+
+// ── Std Z_floor at N=6,7 — floor sensitivity analysis ───────────────────────
+pub fn tws_std_zfloor_std_n6() -> f64 with Mut, Div, Panic {
+    tws_z_floor(5.0, 6, 0.01118, 0.141,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004)
+}
+pub fn tws_std_zfloor_sf_n6() -> f64 with Mut, Div, Panic {
+    tws_z_floor(5.0, 6, 0.01118, 0.141,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005)
+}
+pub fn tws_std_zfloor_std_n7() -> f64 with Mut, Div, Panic {
+    tws_z_floor(5.0, 7, 0.01118, 0.141,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004)
+}
+pub fn tws_std_zfloor_sf_n7() -> f64 with Mut, Div, Panic {
+    tws_z_floor(5.0, 7, 0.01118, 0.141,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005)
+}
+
+// ── Fast Z_floor at N=14,15 — floor sensitivity analysis ────────────────────
+pub fn tws_fast_zfloor_std_n14() -> f64 with Mut, Div, Panic {
+    tws_z_floor(5.0, 14, 0.01677, 0.094,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004)
+}
+pub fn tws_fast_zfloor_sf_n14() -> f64 with Mut, Div, Panic {
+    tws_z_floor(5.0, 14, 0.01677, 0.094,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005)
+}
+pub fn tws_fast_zfloor_std_n15() -> f64 with Mut, Div, Panic {
+    tws_z_floor(5.0, 15, 0.01677, 0.094,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.004)
+}
+pub fn tws_fast_zfloor_sf_n15() -> f64 with Mut, Div, Panic {
+    tws_z_floor(5.0, 15, 0.01677, 0.094,
+        ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std(),
+        0.005)
+}
