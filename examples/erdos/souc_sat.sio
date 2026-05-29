@@ -64,6 +64,17 @@ var P_pos: i64 = 0
 var n_conflicts: i64 = 0
 var n_decisions: i64 = 0
 var n_restarts: i64 = 0
+// E4c profile counters (search-only instrumentation)
+var prof_props: i64 = 0          // propagate() dequeue count
+var prof_watch_nodes: i64 = 0    // watch-list node visits
+var prof_block_skips: i64 = 0    // blocking literal short-circuits
+var prof_clause_refs: i64 = 0    // clits[] dereferences in propagate
+var prof_litval: i64 = 0         // litval() calls in propagate
+var prof_watch_moves: i64 = 0    // watch literal relocations
+var prof_chrono: i64 = 0         // chrono-BT fires (gap > CHRONO_LIMIT)
+var prof_pick_scans: i64 = 0     // pick() inner-loop iterations
+var pick_best: i32 = 0           // cached highest-priority unassigned var
+var pick_best_key: i64 = 0 - 1
 var CONFLICT_CAP: i64 = 200000000
 var var_inc: i64 = 1000000
 // Chronological backtracking (Nadel & Ryvchin 2018; kissat/CaDiCaL parity): when the
@@ -171,6 +182,7 @@ fn litidx(l: i64) -> i32 with Panic {
     return v * 2
 }
 fn litval(l: i64) -> i32 with Mut, Panic {
+    prof_litval = prof_litval + 1
     let v = lit_var(l)
     var a = assign[v]
     if l < 0 { a = 0 - a }
@@ -221,6 +233,7 @@ fn enqueue(lit: i64, rs: i32) with Mut, Panic {
     reason[v] = rs
     trail_lit[trail_len] = lit
     trail_len = trail_len + 1
+    if v == pick_best { pick_best = 0  pick_best_key = 0 - 1 }
     // LRB on-assign: stamp learnt counter, reset participation
     lrb_assigned[v] = n_conflicts
     lrb_part[v] = 0
@@ -230,20 +243,24 @@ fn propagate() -> i32 with Mut, Panic {
     while qhead < trail_len {
         let p = trail_lit[qhead]
         qhead = qhead + 1
+        prof_props = prof_props + 1
         let f = 0 - p
         let fi = litidx(f)
         var prev: i32 = 0 - 1
         var node = whead[fi]
         while node != (0 - 1) {
+            prof_watch_nodes = prof_watch_nodes + 1
             let nextnode = wnext[node]
             let blk = wblk[node]
             if litval(blk) == 1 {
+                prof_block_skips = prof_block_skips + 1
                 prev = node
                 node = nextnode
             } else {
             let c = node / 2
             let s = node - 2 * c
             let st = cstart[c]
+            prof_clause_refs = prof_clause_refs + 1
             let other = clits[st + (1 - s)]
             var handled: i32 = 0
             if litval(other) == 1 {
@@ -256,10 +273,12 @@ fn propagate() -> i32 with Mut, Panic {
                 var found: i32 = 0 - 1
                 var k: i32 = 2
                 while k < ln {
+                    prof_clause_refs = prof_clause_refs + 1
                     if litval(clits[st + k]) != (0 - 1) { found = k  k = ln }
                     else { k = k + 1 }
                 }
                 if found != (0 - 1) {
+                    prof_watch_moves = prof_watch_moves + 1
                     let tmp = clits[st + s]
                     clits[st + s] = clits[st + found]
                     clits[st + found] = tmp
@@ -290,10 +309,17 @@ fn rescale() with Mut, Panic {
     while i <= nvars { activity[i] = activity[i] / 1000000000  i = i + 1 }
     var_inc = var_inc / 1000000000
     if var_inc < 1 { var_inc = 1 }
+    pick_best = 0
+    pick_best_key = 0 - 1
 }
 fn bump(v: i32) with Mut, Panic {
     activity[v] = activity[v] + var_inc
     if activity[v] > 1000000000000000000 { rescale() }
+    if assign[v] == 0 {
+        var key = activity[v]
+        if USE_LRB == 1 { key = Q[v] }
+        if key > pick_best_key { pick_best_key = key  pick_best = v }
+    }
 }
 
 // ---- streamed writer over a held fd (syscall6) ----
@@ -570,6 +596,12 @@ fn cancel_to(level: i32) with Mut, Panic, Div {
         assign[v] = 0
         reason[v] = 0 - 1
         vlevel[v] = 0
+        if v == pick_best { pick_best = 0  pick_best_key = 0 - 1 }
+        else {
+            var uk = activity[v]
+            if USE_LRB == 1 { uk = Q[v] }
+            if uk > pick_best_key { pick_best_key = uk  pick_best = v }
+        }
         i = i - 1
     }
     trail_len = target
@@ -672,10 +704,18 @@ fn want_restart() -> i32 with Mut, Panic {
 }
 
 fn pick() -> i32 with Mut, Panic {
+    if pick_best != 0 {
+        if assign[pick_best] == 0 {
+            var ckey = activity[pick_best]
+            if USE_LRB == 1 { ckey = Q[pick_best] }
+            if ckey == pick_best_key { return pick_best }
+        }
+    }
     var best: i32 = 0
     var bestkey: i64 = 0 - 1
     var v: i32 = 1
     while v <= nvars {
+        prof_pick_scans = prof_pick_scans + 1
         if assign[v] == 0 {
             var key: i64 = activity[v]
             if USE_LRB == 1 { key = Q[v] }
@@ -683,6 +723,8 @@ fn pick() -> i32 with Mut, Panic {
         }
         v = v + 1
     }
+    pick_best = best
+    pick_best_key = bestkey
     return best
 }
 
@@ -735,7 +777,7 @@ fn solve() -> i32 with IO, Mut, Div, Panic {
             lbd[lidx] = last_lbd
             update_lbd_stats(last_lbd)
             var bt_target = bt
-            if cur_level - bt > CHRONO_LIMIT { bt_target = cur_level - 1 }
+            if cur_level - bt > CHRONO_LIMIT { prof_chrono = prof_chrono + 1  bt_target = cur_level - 1 }
             cancel_to(bt_target)
             enqueue(LEARNT[0], lidx)
             if (nclauses - n_orig) >= max_learnts {
@@ -1109,6 +1151,9 @@ fn reset_all() with Mut, Panic {
     while li < 16386 { whead[li] = 0 - 1  li = li + 1 }
     nvars=0 nclauses=0 trail_len=0 cur_level=0 qhead=0
     P_n=0 n_conflicts=0 n_decisions=0 n_restarts=0 var_inc=1000000
+    prof_props=0 prof_watch_nodes=0 prof_block_skips=0 prof_clause_refs=0
+    prof_litval=0 prof_watch_moves=0 prof_chrono=0 prof_pick_scans=0
+    pick_best=0 pick_best_key=0 - 1
     P_pos=0 n_reduces=0 n_deleted=0 n_orig=0 max_learnts=400
     proof_over=0 lrb_alpha=400
 }
@@ -1130,6 +1175,10 @@ fn run_case(n: i64) with IO, Mut, Div, Panic {
     print("  conflicts=")  print_dec(conf)  print(" decisions=")  print_dec(n_decisions)
     print(" restarts=")  print_dec(n_restarts)  print(" lemmas=")  print_dec(lemmas as i64)
     print(" lits_pre=")  print_dec(lits_before)  print(" lits_post=")  print_dec(lits_after)
+    print(" props=")  print_dec(prof_props)  print(" watch=")  print_dec(prof_watch_nodes)
+    print(" block=")  print_dec(prof_block_skips)  print(" clrefs=")  print_dec(prof_clause_refs)
+    print(" litval=")  print_dec(prof_litval)  print(" wmove=")  print_dec(prof_watch_moves)
+    print(" chrono=")  print_dec(prof_chrono)  print(" pickscan=")  print_dec(prof_pick_scans)
     if vr == 1 { print("  RUP:VERIFIED\n") } else { print("  RUP:FAIL(")  print_dec(vr as i64)  print(")\n") }
 }
 
@@ -1236,6 +1285,10 @@ fn worker_main() -> i32 with IO, Mut, Div, Panic {
         if cc == 0 {
             print("[worker seed=")  print_dec(SEED)  print(" UNSAT conflicts=")  print_dec(n_conflicts)
             print(" restarts=")  print_dec(n_restarts)  print(" lemmas=")  print_dec(P_n as i64)
+            print(" props=")  print_dec(prof_props)  print(" watch=")  print_dec(prof_watch_nodes)
+            print(" block=")  print_dec(prof_block_skips)  print(" clrefs=")  print_dec(prof_clause_refs)
+            print(" litval=")  print_dec(prof_litval)  print(" wmove=")  print_dec(prof_watch_moves)
+            print(" chrono=")  print_dec(prof_chrono)  print(" pickscan=")  print_dec(prof_pick_scans)
             print(" -> souc_sat_worker.cnf/.drat (streamed)]\n")
         }
         return 0
