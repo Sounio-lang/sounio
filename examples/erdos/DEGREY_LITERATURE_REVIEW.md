@@ -219,7 +219,7 @@ verify each edge `dist² = 1` with **no floating point** — `degrey_q3q11_spind
 | E | Encode 4-colouring (DIMACS edge-file reader) + triangle precolour / value precedence. | `souc_sat.sio` graph-file mode | **DONE** |
 | S | Refute G₅₂₉ with `souc_sat` (streamed DRAT) → **`drat-trim s VERIFIED`** ⟹ **χ(G₅₂₉)≥5**. | `souc_sat.sio` | **DONE (Part A)** — 33 s, 327 k conflicts, 72 MB proof |
 | B | Reconstruct `degrey_529.vtx` exactly over ℚ(√3,√5,√11); certify every edge `dist²=1` (no floats). | `degrey_geometry.sio` (denominator-extended `Q16` kernel + Mathematica parser) | **DONE (Part B)** — 2670/2670 edges `dist²=1` exact, no `SQRT_ERR`/`DIV_ERR` |
-| V | DRAT → **LRAT** (`drat-trim -L`, 36 MB, `s VERIFIED`) **DONE**; verified LRAT checker (`cake_lpr` / LeanSAT) on it — staged. | `formal/lean4/` | **PARTIAL** — LRAT produced + drat-trim-verified; verified-checker run staged |
+| V | DRAT → **LRAT** (`drat-trim -L`, 36 MB) → **`cake_lpr` (formally-verified CakeML checker) `s VERIFIED UNSAT`**. | `examples/erdos/verify_lrat_cake.sh`, `CAKE_LPR_RESULT.md` | **DONE** — SAT leg machine-checked by a verified checker |
 | T₁ | **Geometry leg in Lean 4**: `g529_all_edges_unit_distance` — all 2670 edges `dist²=1` exact over ℚ(√3,√5,√7,√11), `native_decide`, no `sorry`. | `formal/lean4/SounioDeGreyUnitDistance.lean` (gen by `gen_lean_geometry.sh`) | **DONE** |
 | T₂ | Compose: CNF UNSAT ⟹ not 4-colourable; ∧ unit-distance ⟹ χ(ℝ²)≥5. | `formal/lean4/` | **TODO** (depends on verified LRAT check) |
 

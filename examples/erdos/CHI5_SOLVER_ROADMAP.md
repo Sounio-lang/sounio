@@ -109,13 +109,15 @@ $SOUNIO_SOUC_BIN examples/erdos/degrey_geometry.sio /tmp/geo.elf && /tmp/geo.elf
   ℚ-linear-independence facts are standard true multiquadratic-field properties discharged by
   construction, **not yet re-proved as Lean lemmas** — formalising that bridge is part of the
   remaining V-track.
-- **SAT leg → LRAT (DONE).** `drat-trim souc_sat_worker.cnf souc_sat_worker.drat -L g529.lrat`
-  emits a **36 MB LRAT** (resolution proof *with hints*) and reports `s VERIFIED`. LRAT is the
-  format consumed by formally-verified checkers.
-- **Remaining (staged):** a *verified* LRAT checker run on `g529.lrat` (practical path:
-  `cake_lpr`, the CakeML/HOL-extracted checker; or LeanSAT's `lratChecker`), then the Lean
-  composition lemma `(CNF UNSAT) ∧ (unit-distance) ⟹ χ(ℝ²) ≥ 5`. This is the last leg to a
-  single end-to-end machine-checked theorem.
+- **SAT leg → LRAT → `cake_lpr` (DONE).** `drat-trim … -L g529.lrat` emits a **36 MB LRAT**
+  (resolution proof *with hints*); then **`cake_lpr` — the CakeML/HOL4 machine-code, formally
+  *verified* LRAT checker — returns `s VERIFIED UNSAT`** on `souc_sat_worker.cnf` + `g529.lrat`
+  (~2 s). This is strictly stronger than drat-trim (unverified C): the "G₅₂₉ is not 4-colourable"
+  claim now rests on a machine-checked checker. Reproducible: `examples/erdos/verify_lrat_cake.sh`
+  (see `examples/erdos/CAKE_LPR_RESULT.md`).
+- **Remaining (staged):** the Lean composition lemma `(CNF UNSAT) ∧ (unit-distance) ⟹ χ(ℝ²) ≥ 5`
+  tying the cake_lpr SAT leg to the Lean geometry leg into one end-to-end machine-checked theorem
+  (plus formalising the ℚ(…)↪ℝ embedding flagged by the §1c math-review).
 
 Honest framing (logged once, not repeated): finding/minimising the core was the hard work of
 de Grey/Heule/Parts. The Sounio contribution is the *exact + self-hosted + machine-checked*
