@@ -1,0 +1,186 @@
+// stdlib/pbpk/rapamycin_multistratum_cni.sio — Sprint 64
+//
+// Multi-stratum CNI protocol analysis: CNI co-medication (4–12 ng/mL) and
+// CNI-free (12–20 ng/mL) certification windows for all five CYP3A4/P-gp
+// pharmacogenomic strata.
+//
+// Strata and parameters (from Sprint 49/52/55/56 trajectory series):
+//   std:  ke=0.01118 h⁻¹, F=0.141, D=5mg,   w=0.50
+//   slow: ke=0.00838 h⁻¹, F=0.188, D=2.5mg, w=0.15
+//   fast: ke=0.01677 h⁻¹, F=0.094, D=9.5mg, w=0.20
+//   inh:  ke=0.002236 h⁻¹, F=0.282, D=1.5mg, w=0.05
+//   ind:  ke=0.05590 h⁻¹, F=0.047, D=34mg,  w=0.10
+//
+// Protocol boundaries (FDA NDA 21-083, midpoint 0.012 mg/L):
+//   CNI:      floor=0.004 mg/L, ceil=0.012 mg/L
+//   CNI-free: floor=0.012 mg/L, ceil=0.020 mg/L
+//
+// Scanner range: 1..200 (covers inh t½≈310h / near-SS at ~5 weeks)
+//
+// Findings (from probe):
+//   A: IND stratum (inducer) certifies under CNI for EXACTLY 1 day (ncrit=nlast=26,
+//      span=0) and NEVER certifies under CNI-free (ncrit=0, nlast=0). The inducer
+//      phenotype is pharmacogenomically incompatible with CNI-free dosing at D=34mg.
+//   B: SLOW stratum has the widest cert spans of any stratum: CNI span=17 (ncrit=8,
+//      nlast=25), CNI-free span=23 (ncrit=35, nlast=58). Low dose + slow elimination
+//      keeps the trough in range longest.
+//   C: FAST stratum has the narrowest CNI window: span=4 (ncrit=7, nlast=11). Fast
+//      clearance means the ceiling constraint binds rapidly; N=14 is already WARN.
+//      CNI-free span=6 is also the second-narrowest.
+//   D: Population CNI cert at N=7 = 0.75 (std+fast+inh CERT; slow+ind WARN);
+//      population CNI-free cert at N=28 = 0.75 (std+fast+inh CERT; slow+ind ALARM).
+//      Symmetric fractions but from mechanistically opposite failure modes.
+
+module pbpk::rapamycin_multistratum_cni
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+fn msc_min2(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+// Protocol boundaries
+pub fn msc_cni_floor()     -> f64 { 0.004 }
+pub fn msc_cni_ceil()      -> f64 { 0.012 }
+pub fn msc_cnifree_floor() -> f64 { 0.012 }
+pub fn msc_cnifree_ceil()  -> f64 { 0.020 }
+
+// ── Generic margin helpers ─────────────────────────────────────────────────────
+fn msc_cni_margin(D: f64, ke: f64, fv: f64, n: i64) -> f64 with Mut, Div, Panic {
+    let ka  = ob_ka_var_std(); let fvar = ob_f_var_std(); let kev = ob_ke_var_std()
+    let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let c  = as_trough_mg_l(D, n, ke, fv)
+    let uc = eu_u_c(D, n, ke, fv, ka, fvar, kev, k12, k21)
+    msc_min2((c - msc_cni_floor()) / uc, (msc_cni_ceil() - c) / uc)
+}
+
+fn msc_free_margin(D: f64, ke: f64, fv: f64, n: i64) -> f64 with Mut, Div, Panic {
+    let ka  = ob_ka_var_std(); let fvar = ob_f_var_std(); let kev = ob_ke_var_std()
+    let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let c  = as_trough_mg_l(D, n, ke, fv)
+    let uc = eu_u_c(D, n, ke, fv, ka, fvar, kev, k12, k21)
+    msc_min2((c - msc_cnifree_floor()) / uc, (msc_cnifree_ceil() - c) / uc)
+}
+
+fn msc_cni_ncrit(D: f64, ke: f64, fv: f64) -> i64 with Mut, Div, Panic {
+    var n = 1; var result = 0
+    while n <= 200 {
+        if msc_cni_margin(D, ke, fv, n) >= 2.0 && result == 0 { result = n };
+        n = n + 1
+    }
+    result
+}
+
+fn msc_cni_nlast(D: f64, ke: f64, fv: f64) -> i64 with Mut, Div, Panic {
+    var n = 1; var last = 0
+    while n <= 200 {
+        if msc_cni_margin(D, ke, fv, n) >= 2.0 { last = n };
+        n = n + 1
+    }
+    last
+}
+
+fn msc_free_ncrit(D: f64, ke: f64, fv: f64) -> i64 with Mut, Div, Panic {
+    var n = 1; var result = 0
+    while n <= 200 {
+        if msc_free_margin(D, ke, fv, n) >= 2.0 && result == 0 { result = n };
+        n = n + 1
+    }
+    result
+}
+
+fn msc_free_nlast(D: f64, ke: f64, fv: f64) -> i64 with Mut, Div, Panic {
+    var n = 1; var last = 0
+    while n <= 200 {
+        if msc_free_margin(D, ke, fv, n) >= 2.0 { last = n };
+        n = n + 1
+    }
+    last
+}
+
+// ── std stratum (ke=0.01118, F=0.141, D=5mg) ──────────────────────────────────
+pub fn msc_std_cni_margin_n7()  -> f64 with Mut, Div, Panic { msc_cni_margin(5.0, 0.01118, 0.141, 7)  }
+pub fn msc_std_cni_margin_n14() -> f64 with Mut, Div, Panic { msc_cni_margin(5.0, 0.01118, 0.141, 14) }
+pub fn msc_std_cni_margin_n21() -> f64 with Mut, Div, Panic { msc_cni_margin(5.0, 0.01118, 0.141, 21) }
+pub fn msc_std_cni_ncrit()  -> i64 with Mut, Div, Panic { msc_cni_ncrit(5.0, 0.01118, 0.141) }
+pub fn msc_std_cni_nlast()  -> i64 with Mut, Div, Panic { msc_cni_nlast(5.0, 0.01118, 0.141) }
+pub fn msc_std_cni_span()   -> i64 with Mut, Div, Panic { msc_std_cni_nlast() - msc_std_cni_ncrit() }
+pub fn msc_std_free_margin_n7()  -> f64 with Mut, Div, Panic { msc_free_margin(5.0, 0.01118, 0.141, 7)  }
+pub fn msc_std_free_margin_n28() -> f64 with Mut, Div, Panic { msc_free_margin(5.0, 0.01118, 0.141, 28) }
+pub fn msc_std_free_ncrit() -> i64 with Mut, Div, Panic { msc_free_ncrit(5.0, 0.01118, 0.141) }
+pub fn msc_std_free_nlast() -> i64 with Mut, Div, Panic { msc_free_nlast(5.0, 0.01118, 0.141) }
+pub fn msc_std_free_span()  -> i64 with Mut, Div, Panic { msc_std_free_nlast() - msc_std_free_ncrit() }
+
+// ── slow stratum (ke=0.00838, F=0.188, D=2.5mg) ───────────────────────────────
+pub fn msc_slow_cni_margin_n7()  -> f64 with Mut, Div, Panic { msc_cni_margin(2.5, 0.00838, 0.188, 7)  }
+pub fn msc_slow_cni_margin_n14() -> f64 with Mut, Div, Panic { msc_cni_margin(2.5, 0.00838, 0.188, 14) }
+pub fn msc_slow_cni_margin_n21() -> f64 with Mut, Div, Panic { msc_cni_margin(2.5, 0.00838, 0.188, 21) }
+pub fn msc_slow_cni_ncrit()  -> i64 with Mut, Div, Panic { msc_cni_ncrit(2.5, 0.00838, 0.188) }
+pub fn msc_slow_cni_nlast()  -> i64 with Mut, Div, Panic { msc_cni_nlast(2.5, 0.00838, 0.188) }
+pub fn msc_slow_cni_span()   -> i64 with Mut, Div, Panic { msc_slow_cni_nlast() - msc_slow_cni_ncrit() }
+pub fn msc_slow_free_margin_n14() -> f64 with Mut, Div, Panic { msc_free_margin(2.5, 0.00838, 0.188, 14) }
+pub fn msc_slow_free_margin_n28() -> f64 with Mut, Div, Panic { msc_free_margin(2.5, 0.00838, 0.188, 28) }
+pub fn msc_slow_free_ncrit() -> i64 with Mut, Div, Panic { msc_free_ncrit(2.5, 0.00838, 0.188) }
+pub fn msc_slow_free_nlast() -> i64 with Mut, Div, Panic { msc_free_nlast(2.5, 0.00838, 0.188) }
+pub fn msc_slow_free_span()  -> i64 with Mut, Div, Panic { msc_slow_free_nlast() - msc_slow_free_ncrit() }
+
+// ── fast stratum (ke=0.01677, F=0.094, D=9.5mg) ───────────────────────────────
+pub fn msc_fast_cni_margin_n7()  -> f64 with Mut, Div, Panic { msc_cni_margin(9.5, 0.01677, 0.094, 7)  }
+pub fn msc_fast_cni_margin_n14() -> f64 with Mut, Div, Panic { msc_cni_margin(9.5, 0.01677, 0.094, 14) }
+pub fn msc_fast_cni_margin_n21() -> f64 with Mut, Div, Panic { msc_cni_margin(9.5, 0.01677, 0.094, 21) }
+pub fn msc_fast_cni_ncrit()  -> i64 with Mut, Div, Panic { msc_cni_ncrit(9.5, 0.01677, 0.094) }
+pub fn msc_fast_cni_nlast()  -> i64 with Mut, Div, Panic { msc_cni_nlast(9.5, 0.01677, 0.094) }
+pub fn msc_fast_cni_span()   -> i64 with Mut, Div, Panic { msc_fast_cni_nlast() - msc_fast_cni_ncrit() }
+pub fn msc_fast_free_margin_n7()  -> f64 with Mut, Div, Panic { msc_free_margin(9.5, 0.01677, 0.094, 7)  }
+pub fn msc_fast_free_margin_n28() -> f64 with Mut, Div, Panic { msc_free_margin(9.5, 0.01677, 0.094, 28) }
+pub fn msc_fast_free_ncrit() -> i64 with Mut, Div, Panic { msc_free_ncrit(9.5, 0.01677, 0.094) }
+pub fn msc_fast_free_nlast() -> i64 with Mut, Div, Panic { msc_free_nlast(9.5, 0.01677, 0.094) }
+pub fn msc_fast_free_span()  -> i64 with Mut, Div, Panic { msc_fast_free_nlast() - msc_fast_free_ncrit() }
+
+// ── inh stratum (ke=0.002236, F=0.282, D=1.5mg) ───────────────────────────────
+pub fn msc_inh_cni_margin_n7()  -> f64 with Mut, Div, Panic { msc_cni_margin(1.5, 0.002236, 0.282, 7)  }
+pub fn msc_inh_cni_margin_n14() -> f64 with Mut, Div, Panic { msc_cni_margin(1.5, 0.002236, 0.282, 14) }
+pub fn msc_inh_cni_margin_n28() -> f64 with Mut, Div, Panic { msc_cni_margin(1.5, 0.002236, 0.282, 28) }
+pub fn msc_inh_cni_ncrit()  -> i64 with Mut, Div, Panic { msc_cni_ncrit(1.5, 0.002236, 0.282) }
+pub fn msc_inh_cni_nlast()  -> i64 with Mut, Div, Panic { msc_cni_nlast(1.5, 0.002236, 0.282) }
+pub fn msc_inh_cni_span()   -> i64 with Mut, Div, Panic { msc_inh_cni_nlast() - msc_inh_cni_ncrit() }
+pub fn msc_inh_free_margin_n7()  -> f64 with Mut, Div, Panic { msc_free_margin(1.5, 0.002236, 0.282, 7)  }
+pub fn msc_inh_free_margin_n28() -> f64 with Mut, Div, Panic { msc_free_margin(1.5, 0.002236, 0.282, 28) }
+pub fn msc_inh_free_ncrit() -> i64 with Mut, Div, Panic { msc_free_ncrit(1.5, 0.002236, 0.282) }
+pub fn msc_inh_free_nlast() -> i64 with Mut, Div, Panic { msc_free_nlast(1.5, 0.002236, 0.282) }
+pub fn msc_inh_free_span()  -> i64 with Mut, Div, Panic { msc_inh_free_nlast() - msc_inh_free_ncrit() }
+
+// ── ind stratum (ke=0.05590, F=0.047, D=34mg) ─────────────────────────────────
+pub fn msc_ind_cni_margin_n7()  -> f64 with Mut, Div, Panic { msc_cni_margin(34.0, 0.05590, 0.047, 7)  }
+pub fn msc_ind_cni_margin_n14() -> f64 with Mut, Div, Panic { msc_cni_margin(34.0, 0.05590, 0.047, 14) }
+pub fn msc_ind_cni_margin_n28() -> f64 with Mut, Div, Panic { msc_cni_margin(34.0, 0.05590, 0.047, 28) }
+pub fn msc_ind_cni_ncrit()  -> i64 with Mut, Div, Panic { msc_cni_ncrit(34.0, 0.05590, 0.047) }
+pub fn msc_ind_cni_nlast()  -> i64 with Mut, Div, Panic { msc_cni_nlast(34.0, 0.05590, 0.047) }
+pub fn msc_ind_cni_span()   -> i64 with Mut, Div, Panic { msc_ind_cni_nlast() - msc_ind_cni_ncrit() }
+pub fn msc_ind_free_margin_n7()  -> f64 with Mut, Div, Panic { msc_free_margin(34.0, 0.05590, 0.047, 7)  }
+pub fn msc_ind_free_margin_n28() -> f64 with Mut, Div, Panic { msc_free_margin(34.0, 0.05590, 0.047, 28) }
+pub fn msc_ind_free_ncrit() -> i64 with Mut, Div, Panic { msc_free_ncrit(34.0, 0.05590, 0.047) }
+pub fn msc_ind_free_nlast() -> i64 with Mut, Div, Panic { msc_free_nlast(34.0, 0.05590, 0.047) }
+pub fn msc_ind_free_span()  -> i64 with Mut, Div, Panic { msc_ind_free_nlast() - msc_ind_free_ncrit() }
+
+// ── Population-weighted cert fractions at N=7 under each protocol ─────────────
+// Weights: std=0.50, slow=0.15, fast=0.20, inh=0.05, ind=0.10
+fn msc_cert_flag(m: f64) -> f64 { if m >= 2.0 { 1.0 } else { 0.0 } }
+
+pub fn msc_pop_cni_cert_n7() -> f64 with Mut, Div, Panic {
+    msc_cert_flag(msc_std_cni_margin_n7())  * 0.50
+    + msc_cert_flag(msc_slow_cni_margin_n7())  * 0.15
+    + msc_cert_flag(msc_fast_cni_margin_n7())  * 0.20
+    + msc_cert_flag(msc_inh_cni_margin_n7())   * 0.05
+    + msc_cert_flag(msc_ind_cni_margin_n7())   * 0.10
+}
+
+pub fn msc_pop_free_cert_n28() -> f64 with Mut, Div, Panic {
+    msc_cert_flag(msc_std_free_margin_n28())  * 0.50
+    + msc_cert_flag(msc_slow_free_margin_n28()) * 0.15
+    + msc_cert_flag(msc_fast_free_margin_n28()) * 0.20
+    + msc_cert_flag(msc_inh_free_margin_n28())  * 0.05
+    + msc_cert_flag(msc_ind_free_margin_n28())  * 0.10
+}
