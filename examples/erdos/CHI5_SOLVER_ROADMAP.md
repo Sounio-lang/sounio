@@ -115,9 +115,23 @@ $SOUNIO_SOUC_BIN examples/erdos/degrey_geometry.sio /tmp/geo.elf && /tmp/geo.elf
   (~2 s). This is strictly stronger than drat-trim (unverified C): the "G₅₂₉ is not 4-colourable"
   claim now rests on a machine-checked checker. Reproducible: `examples/erdos/verify_lrat_cake.sh`
   (see `examples/erdos/CAKE_LPR_RESULT.md`).
-- **Remaining (staged):** the Lean composition lemma `(CNF UNSAT) ∧ (unit-distance) ⟹ χ(ℝ²) ≥ 5`
-  tying the cake_lpr SAT leg to the Lean geometry leg into one end-to-end machine-checked theorem
-  (plus formalising the ℚ(…)↪ℝ embedding flagged by the §1c math-review).
+- **Composition (reduction) lemma → Lean 4 (DONE, 2026-05-29).**
+  `formal/lean4/SounioDeGreyChi5.lean` proves the *logical reduction*
+  `(G unit-distance-embedded) ∧ (G not k-colourable) ⟹ no proper k-colouring of the
+  unit-relation plane` — i.e. χ of the plane `> k`. The reduction itself
+  (`reduction` = pullback `κ ∘ emb`; `not_colourable_implies_plane_chromatic_gt` =
+  contrapositive; `degrey_plane_needs_5_colours` = the k=4 instantiation) is **fully proved
+  in core Lean (no Mathlib, no `native_decide`)**; `lean` exits 0 and
+  **`#print axioms degrey_plane_needs_5_colours` reports it depends on *no axioms at all*** —
+  zero `sorryAx`. The two legs enter as *explicit, externally-discharged hypotheses*: the
+  geometry leg (`g529_all_edges_unit_distance`, Lean `native_decide`) and the SAT leg
+  (G₅₂₉ not 4-colourable, `cake_lpr`-verified). Grok 4.1 math-review: "NO ERRORS; reduction
+  leg is logically sound." This is the standard, honest SAT+ITP combination shape — the SAT
+  fact cannot be brute-forced inside Lean (4^529), so it is fed in as a verified hypothesis.
+- **Remaining (staged):** formalising the ℚ(√3,√5,√7,√11)↪ℝ embedding flagged by the §1c
+  math-review (so the geometry leg's algebraic `dist²=1` becomes a *real-plane* unit-distance
+  statement inside Lean), and optionally importing the geometry file + axiomatising the
+  cake_lpr verdict to collapse the two hypotheses into one zero-hypothesis end-to-end theorem.
 
 Honest framing (logged once, not repeated): finding/minimising the core was the hard work of
 de Grey/Heule/Parts. The Sounio contribution is the *exact + self-hosted + machine-checked*
@@ -165,6 +179,20 @@ makes the lemma non-RUP).
 global-average force condition and a **trail-EMA block** (postpone when the
 partial model is unusually large) to avoid the pigeonhole thrash naive restarts
 caused. Plus periodic rephasing.
+
+**E4/E4b — blocking literals + chronological backtracking (sound, currently
+neutral — HONEST NEGATIVE).** Two kissat-era propagation/backtrack refinements
+landed behind the gate but did **not** move search statistics on the current
+instance families: (i) *blocking literals* cache the other watched literal so
+`propagate()` can skip a satisfied clause without dereferencing it (sound, no
+speedup with the conservative blocker — commit `0436ba374`); (ii) *chronological
+backtracking* (Nadel & Ryvchin 2018, `CHRONO_LIMIT=100`) backtracks one level
+instead of to `btlevel` when the backjump gap exceeds the threshold (commit
+`cc97280b8`). Both keep drat-trim `s VERIFIED` on K₈/₇ and **G₅₂₉** (327,208
+conflicts unchanged, 32 s unchanged within noise). The gap exceeds 100 too rarely
+on these LRB+Glucose runs to register. The mechanisms are wired correctly for
+other instance families; the missing kissat-parity lever is a richer
+blocker/lazy-watch + arena cache layout, staged as E4c.
 
 **P1 — diversified portfolio.** `souc_sat.sio` doubles as a CLI worker
 (`souc_sat <seed> <clique_n> <lrb> <sb>`): the seed perturbs **only** search order

@@ -95,6 +95,14 @@ lean_lib «SounioErdosUnitDistance» where
 -- demand with `lake build SounioDeGreyUnitDistance` or `lean <file>`.
 lean_lib «SounioDeGreyUnitDistance» where
 
+-- chi(R^2) >= 5 REDUCTION LEG: combines the geometry leg (G_529 unit-distance) and the
+-- SAT leg (G_529 not 4-colourable, cake_lpr-verified) into the logical reduction
+-- "unit-distance graph + not k-colourable => plane chromatic number > k". Pure core Lean
+-- (no Mathlib, no native_decide): the two legs enter as explicit, externally-discharged
+-- hypotheses. Checks in <1s, so kept as a default_target (CI lean-proofs).
+@[default_target]
+lean_lib «SounioDeGreyChi5» where
+
 -- M1: Vancomycin-Knightian thrust — Approx × Causal × Knowledge composition
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where
