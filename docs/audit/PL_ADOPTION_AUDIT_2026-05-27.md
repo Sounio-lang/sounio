@@ -392,3 +392,51 @@ Three fixes were attempted in this session against `lean_single.sio`. All were r
 The fix must be in the hash function: widen it, reduce structural collision probability, or — as Slice A of the SOTA push plan proposes — switch tuple identity to interned structural IDs (analogous to CT_INNER_HASH for composite pointer types, committed `PR #197`). The interning approach guarantees identity equality and eliminates collision by construction.
 
 The 46 errors in the logical-not / if-condition / comparison categories (26+22+17+7+6 = 78 errors) are plausibly all rooted in TUP_CACHE collision or the bool-tuple-element path. The 137 assignment-type-mismatch and 14 unknown-field are separate architectural roots.
+
+## Bundle addendum — 2026-05-29 session (token-cap binary rebuild + check sub-module imports)
+
+### Context: why the 269-error baseline was an undercount
+
+The `a124c122e3e01f64ef56a71d23403e2b` binary used in the 2026-05-28 addendum had a **1M token cap** (arrays `TK`/`TS`/`TE`/`TV`/`TF`/`TD`/`TX`/`TL` sized 1048576). When the bundle compile processes the full 109-file modular tree, late-imported modules exceeded the cap — tokens were silently truncated, so those modules appeared error-free (their code was never fully parsed). The 269 count was a systematic undercount.
+
+Commit `b3e319cfb` doubled the token cap to 2M in `lean_single.sio` but **did not rebuild the binary**. The binary therefore still enforced the 1M cap.
+
+### This session
+
+- **`390860e9f`**: Added 4 missing check sub-module imports to `main.sio` — `check::refinement::*`, `check::units::*`, `check::env::*`, `check::traits::*`. Cleared "unknown identifier `refinement_table_new`" and siblings. Error count (with stale binary): 667 → 530.
+- **`712fdd3a1`**: Rebuilt `bin/souc` from current `lean_single.sio` (2M token cap, FN cap 65536). Error count: 530 → **384** (honest count — no silent truncation). Binary md5: `5f4334541b90f9430d9ba25f6c33cb04`.
+- **gen2==gen3 fixed point verified**: `5f4334541b90f9430d9ba25f6c33cb04` (all three match — source binary, gen2, gen3).
+
+### Current error breakdown (384 total, binary md5 `5f4334541b90f9430d9ba25f6c33cb04`)
+
+| Count | Error |
+|-------|-------|
+| 88 | comparison operands must have the same type |
+| 77 | value is not indexable |
+| 55 | unknown field access |
+| 47 | error[E001]: type mismatch in call argument |
+| 20 | logical and requires bool operands |
+| 17 | tuple index out of bounds |
+| 17 | arithmetic operands must have matching numeric types |
+| 13 | initializer type does not match declaration |
+| 8 | tail type mismatch |
+| 8 | if condition must be bool |
+| 7 | logical not requires bool operand |
+| 7 | field initializer type does not match struct field |
+| 3 | unknown identifier `(` |
+| 4 | genuine stub (module_frontend_summary_module ×2, ir_forbidden_law_mask ×2) |
+| 7 | other |
+
+### Named root causes
+
+1. **"comparison operands must have the same type" (88)** + **"value is not indexable" (77)**: Largely from `ir/opt_cleanup.sio::ocp_const_fold` (89 arrays of `[bool/i64; 256]`, 1117 locals). Arrays at lines 5068+ fail as "not indexable" despite identical arrays at lines 1183–1207 succeeding. Root cause unknown; suspect local-index table overflow after 1117th local (even with cap=2048, intermediate table entries may alias). Needs targeted debug print at lean_single.sio `is_arr_ty == 0` check (line ~12615) dumping `lvi`, `VAR_TY[lvi]`, `VAR_ESIZ[lvi]` for `bs_sub_valid`.
+
+2. **"comparison operands must have the same type" (88)**: Also from `ir/lower.sio` (47) and `check/check.sio` (15) — complex reference dereference patterns (`&T` vs `T` in enum variant comparisons).
+
+3. **"unknown field access" (55)**: Genuine Cat-D — struct fields used in modular files that are forward-declared or defined in a module whose import ordering doesn't propagate the struct layout. Architectural root (multiple files).
+
+4. **Genuine stubs (6)**: `module_frontend_summary_module` (defined nowhere), `ir_forbidden_law_mask` (defined nowhere), `ontology_*` (4 uses, undefined). Cannot fix without defining the missing functions.
+
+### Honest status
+
+The 269-error addendum represents an aspirational number achieved with a leaky binary. **384 is the correct current baseline** with full token processing. The comparison-operands and not-indexable clusters (165 errors combined) are likely architectural and not addressable without a lean_single.sio change to the local-variable tracking or the array-subscript path. The genuine-stub cluster (6 errors) requires implementing missing functions. The remaining 213 are type-mismatch patterns addressable by continued modular wiring.
