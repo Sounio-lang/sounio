@@ -1,0 +1,105 @@
+// stdlib/pbpk/rapamycin_slow_adjusted.sio — Sprint 49
+//
+// GUM trajectory for the slow stratum (CYP3A4 poor metabolizer) at the
+// GUM-optimal dose D=2.5mg (Sprint 48: d_cert_max=3.5mg, d_optimal=2.5mg).
+// Contrasted with standard D=5mg (Sprint 44: N_last_cert=18, Sprint 46:
+// month-1 alarm=15%).
+//
+// Finding A: dose trade-off — at D=2.5mg, N_crit is higher than at D=5mg
+//            (trough accumulates slower) but N_last_cert extends to 60
+//            (ceiling never reached within the 60-dose horizon).
+// Finding B: monitoring visits all safe — slow stratum at D=2.5mg is CERT
+//            at N=14 and N=28; the month-1 alarm is eliminated.
+// Finding C: N_peak at D=2.5mg exceeds N_peak at D=5mg (Sprint 45: 10);
+//            reduced dose pushes the margin peak later and higher (relative
+//            to ceiling constraint).
+// Finding D: population impact — swapping slow stratum to 2.5mg converts
+//            the month-1 alarm fraction from 0.15 to 0.00, and cert from
+//            0.85 to 1.00; the only residual trade-off is N=7 visit coverage.
+
+module pbpk::rapamycin_slow_adjusted
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+fn sa_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn sa_margin_at(n: i64) -> f64 with Mut, Div, Panic {
+    let ka  = ob_ka_var_std()
+    let fv  = ob_f_var_std()
+    let ke  = ob_ke_var_std()
+    let k12 = ob_k12_var_std()
+    let k21 = ob_k21_var_std()
+    let c   = as_trough_mg_l(2.5, n, 0.00838, 0.188)
+    let uc  = eu_u_c(2.5, n, 0.00838, 0.188, ka, fv, ke, k12, k21)
+    sa_min((c - trough_floor_mg_l()) / uc, (trough_ceil_mg_l() - c) / uc)
+}
+
+// ── Monitoring visit margins ──────────────────────────────────────────────────
+pub fn sa_margin_n7()  -> f64 with Mut, Div, Panic { sa_margin_at(7) }
+pub fn sa_margin_n14() -> f64 with Mut, Div, Panic { sa_margin_at(14) }
+pub fn sa_margin_n28() -> f64 with Mut, Div, Panic { sa_margin_at(28) }
+
+// ── N_crit: first N where margin ≥ 2.0 ───────────────────────────────────────
+pub fn sa_n_crit() -> i64 with Mut, Div, Panic {
+    var n    = 1
+    var ncrt = 0
+    while n <= 60 {
+        if sa_margin_at(n) >= 2.0 && ncrt == 0 { ncrt = n };
+        n = n + 1
+    }
+    ncrt
+}
+
+// ── N_last_cert: last N in [1,60] where margin ≥ 2.0 ─────────────────────────
+pub fn sa_n_last_cert() -> i64 with Mut, Div, Panic {
+    var n    = 1
+    var last = 0
+    while n <= 60 {
+        if sa_margin_at(n) >= 2.0 { last = n };
+        n = n + 1
+    }
+    last
+}
+
+// ── N_peak: argmax of margin in [1,60] ───────────────────────────────────────
+pub fn sa_n_peak() -> i64 with Mut, Div, Panic {
+    var n      = 1
+    var best_n = 1
+    var best_m = sa_margin_at(1)
+    while n <= 60 {
+        let m = sa_margin_at(n)
+        if m > best_m { best_n = n };
+        if m > best_m { best_m = m };
+        n = n + 1
+    }
+    best_n
+}
+
+// ── Peak margin value ─────────────────────────────────────────────────────────
+pub fn sa_margin_peak() -> f64 with Mut, Div, Panic {
+    var n      = 1
+    var best_m = sa_margin_at(1)
+    while n <= 60 {
+        let m = sa_margin_at(n)
+        if m > best_m { best_m = m };
+        n = n + 1
+    }
+    best_m
+}
+
+// ── Adjusted-minus-standard N_crit gap ───────────────────────────────────────
+// Positive means adjusted dose takes longer to certify than standard (D=5mg N_crit=3)
+pub fn sa_ncrit_gap() -> i64 with Mut, Div, Panic {
+    sa_n_crit() - 3
+}
+
+// ── Adjusted-minus-standard N_last_cert gap ───────────────────────────────────
+// Standard D=5mg N_last_cert=18 (Sprint 44); positive means adjusted certifies longer
+pub fn sa_nlast_cert_gain() -> i64 with Mut, Div, Panic {
+    sa_n_last_cert() - 18
+}
