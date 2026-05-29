@@ -1,0 +1,149 @@
+// stdlib/pbpk/rapamycin_cni_protocol.sio — Sprint 63
+//
+// Clinical protocol variant analysis for the standard stratum (ke=0.01118,
+// F=0.141, D=5mg). The 4–20 ng/mL window used throughout the atlas spans
+// two distinct published protocols (FDA Rapamune NDA 21-083):
+//
+//   CNI co-medication:  floor=4 ng/mL, ceil=12 ng/mL  (0.004–0.012 mg/L)
+//   CNI-free (mono):    floor=12 ng/mL, ceil=20 ng/mL  (0.012–0.020 mg/L)
+//   Combined (atlas):   floor=4 ng/mL, ceil=20 ng/mL  (0.004–0.020 mg/L)
+//
+// The combined 4–20 range is the union; certified under combined ⇒ in range
+// for one of the two protocols, not necessarily both.
+//
+// Pharmacogenomic context: Ferron 1997 (Clin Pharmacol Ther 61:416–428);
+// FDA Rapamune label: F=14%, t½=62h → ke=0.01118 h⁻¹ (exact match).
+// ka IIV 60–120% CV (Dansirikul 2006; Wu 2012 CPT:PSP 1:e2).
+//
+// Finding A: CNI protocol (4–12) — n_crit=6 (identical to combined; same floor),
+//            but n_last_cert collapses to 14 (trough crosses ceil=0.012 at N≈20);
+//            cert_span=8, span_loss=22 vs combined 30.
+// Finding B: CNI-free protocol (12–20) — n_crit=25 (trough must first reach
+//            0.012 floor); n_last_cert=36 (identical to combined; same ceiling);
+//            cert_span=11, span_loss=19.
+// Finding C: 8+11=19 < 30 (combined); sub-spans do NOT sum to combined because
+//            the two windows are adjacent (share midpoint 0.012) but the
+//            crossover N=20–24 gap belongs to neither sub-protocol.
+// Finding D: CNI patients MUST have monitoring visit by day 14 (window closes);
+//            CNI-free patients CANNOT certify until day 25 (window opens);
+//            days 15–24 are a certification dead-zone for all protocol strata.
+
+module pbpk::rapamycin_cni_protocol
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+fn cp_min2(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+pub fn cp_cni_ceil()      -> f64 { 0.012 }
+pub fn cp_cnifree_floor() -> f64 { 0.012 }
+pub fn cp_cnifree_ceil()  -> f64 { 0.020 }
+
+fn cp_uc(n: i64) -> f64 with Mut, Div, Panic {
+    eu_u_c(5.0, n, 0.01118, 0.141, ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(), ob_k12_var_std(), ob_k21_var_std())
+}
+
+fn cp_c(n: i64) -> f64 with Mut, Div, Panic {
+    as_trough_mg_l(5.0, n, 0.01118, 0.141)
+}
+
+// ── CNI protocol margins (floor=0.004, ceil=0.012) ────────────────────────────
+fn cp_cni_margin_at(n: i64) -> f64 with Mut, Div, Panic {
+    let c  = cp_c(n)
+    let uc = cp_uc(n)
+    cp_min2((c - trough_floor_mg_l()) / uc, (cp_cni_ceil() - c) / uc)
+}
+
+pub fn cp_cni_margin_n7()  -> f64 with Mut, Div, Panic { cp_cni_margin_at(7)  }
+pub fn cp_cni_margin_n14() -> f64 with Mut, Div, Panic { cp_cni_margin_at(14) }
+pub fn cp_cni_margin_n21() -> f64 with Mut, Div, Panic { cp_cni_margin_at(21) }
+pub fn cp_cni_margin_n28() -> f64 with Mut, Div, Panic { cp_cni_margin_at(28) }
+
+pub fn cp_cni_n_crit() -> i64 with Mut, Div, Panic {
+    var n = 1; var result = 0
+    while n <= 100 {
+        if cp_cni_margin_at(n) >= 2.0 && result == 0 { result = n };
+        n = n + 1
+    }
+    result
+}
+
+pub fn cp_cni_n_last_cert() -> i64 with Mut, Div, Panic {
+    var n = 1; var last = 0
+    while n <= 100 {
+        if cp_cni_margin_at(n) >= 2.0 { last = n };
+        n = n + 1
+    }
+    last
+}
+
+pub fn cp_cni_n_peak() -> i64 with Mut, Div, Panic {
+    var n = 1; var best_n = 1; var best_m = cp_cni_margin_at(1)
+    while n <= 100 {
+        let m = cp_cni_margin_at(n)
+        if m > best_m { best_n = n };
+        if m > best_m { best_m = m };
+        n = n + 1
+    }
+    best_n
+}
+
+pub fn cp_cni_margin_peak() -> f64 with Mut, Div, Panic { cp_cni_margin_at(cp_cni_n_peak()) }
+pub fn cp_cni_cert_span()   -> i64 with Mut, Div, Panic { cp_cni_n_last_cert() - cp_cni_n_crit() }
+
+// ── CNI-free protocol margins (floor=0.012, ceil=0.020) ───────────────────────
+fn cp_free_margin_at(n: i64) -> f64 with Mut, Div, Panic {
+    let c  = cp_c(n)
+    let uc = cp_uc(n)
+    cp_min2((c - cp_cnifree_floor()) / uc, (cp_cnifree_ceil() - c) / uc)
+}
+
+pub fn cp_free_margin_n7()  -> f64 with Mut, Div, Panic { cp_free_margin_at(7)  }
+pub fn cp_free_margin_n14() -> f64 with Mut, Div, Panic { cp_free_margin_at(14) }
+pub fn cp_free_margin_n28() -> f64 with Mut, Div, Panic { cp_free_margin_at(28) }
+
+pub fn cp_free_n_crit() -> i64 with Mut, Div, Panic {
+    var n = 1; var result = 0
+    while n <= 100 {
+        if cp_free_margin_at(n) >= 2.0 && result == 0 { result = n };
+        n = n + 1
+    }
+    result
+}
+
+pub fn cp_free_n_last_cert() -> i64 with Mut, Div, Panic {
+    var n = 1; var last = 0
+    while n <= 100 {
+        if cp_free_margin_at(n) >= 2.0 { last = n };
+        n = n + 1
+    }
+    last
+}
+
+pub fn cp_free_n_peak() -> i64 with Mut, Div, Panic {
+    var n = 1; var best_n = 1; var best_m = cp_free_margin_at(1)
+    while n <= 100 {
+        let m = cp_free_margin_at(n)
+        if m > best_m { best_n = n };
+        if m > best_m { best_m = m };
+        n = n + 1
+    }
+    best_n
+}
+
+pub fn cp_free_margin_peak() -> f64 with Mut, Div, Panic { cp_free_margin_at(cp_free_n_peak()) }
+pub fn cp_free_cert_span()   -> i64 with Mut, Div, Panic { cp_free_n_last_cert() - cp_free_n_crit() }
+
+// ── Combined 4–20 reference values (for comparison) ───────────────────────────
+// n_crit=6, n_last_cert=36, cert_span=30 from Sprint 57
+pub fn cp_combined_n_crit()      -> i64 { 6  }
+pub fn cp_combined_n_last_cert() -> i64 { 36 }
+pub fn cp_combined_cert_span()   -> i64 { 30 }
+
+// ── Span contraction metrics ───────────────────────────────────────────────────
+pub fn cp_cni_span_loss()  -> i64 with Mut, Div, Panic { cp_combined_cert_span() - cp_cni_cert_span()  }
+pub fn cp_free_span_loss() -> i64 with Mut, Div, Panic { cp_combined_cert_span() - cp_free_cert_span() }
