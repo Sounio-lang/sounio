@@ -440,3 +440,45 @@ Commit `b3e319cfb` doubled the token cap to 2M in `lean_single.sio` but **did no
 ### Honest status
 
 The 269-error addendum represents an aspirational number achieved with a leaky binary. **384 is the correct current baseline** with full token processing. The comparison-operands and not-indexable clusters (165 errors combined) are likely architectural and not addressable without a lean_single.sio change to the local-variable tracking or the array-subscript path. The genuine-stub cluster (6 errors) requires implementing missing functions. The remaining 213 are type-mismatch patterns addressable by continued modular wiring.
+
+---
+
+## Bundle addendum — 2026-05-29 session B (VAR_LIT_DATA overflow + intern-table fix)
+
+### Root causes fixed
+
+**Fix 1 — `VAR_LIT_DATA` buffer overflow** (`lean_single.sio` line 284, commit in this session):
+
+The PR-4 per-variable literal-tracking array `VAR_LIT_DATA: [i64; 2048]` is indexed with `vix*2+N` where `vix` ∈ 0..local_cap-1. With local_cap=2048, the maximum index is `2047*2+1 = 4095`, requiring size 4096. The array was declared with size 2048. When `VAR_COUNT` reached 1024+, writes to `VAR_LIT_DATA[2048+k]` landed in `VAR_TY[k]` (the next global array in BSS), corrupting the type CLASS for early-declared array locals from 8 (array) to 1 (has_lit flag) or to an arbitrary literal value. This turned correct `[bool; 256]` locals into "not indexable" — matching the `ocp_const_fold` failure pattern exactly.
+
+Fix: `[i64; 2048]` → `[i64; 4096]`.
+
+**Fix 2 — ref/Option/Box type-hash overflow** (commit `53efb3aa5`):
+
+`ref_hash_make` used arithmetic encoding `base + mut + ty*4 + hash*256`. Three nesting levels (e.g. `&Option<Box<Struct>>`) overflowed i64, producing negative hashes. `knowledge_hash_is` treated these as Knowledge<T> hashes, routing field access to the Knowledge dispatch branch and emitting "unknown field access". Fix: composite-type intern table (`ct_register`, `rh_intern_is`) with stable small IDs.
+
+### Combined impact
+
+384 → **218 bundle errors** (net −166). gen2==gen3==`8d2790157b8d1bcd9fc81f019bcb7f46`.
+
+### Current error breakdown (218 total, binary md5 `8d2790157b8d1bcd9fc81f019bcb7f46`)
+
+| Count | Error |
+|-------|-------|
+| 45 | error[E001]: Type mismatch in call argument |
+| 37 | comparison operands must have the same type |
+| 24 | value is not indexable |
+| 17 | tuple index out of bounds |
+| 17 | arithmetic operands must have matching numeric types |
+| 16 | unknown field access |
+| 12 | initializer type does not match declaration |
+| 8 | tail type mismatch |
+| 7 | unknown field access SITE_A |
+| 7 | field initializer type does not match struct field |
+| 4 | if condition must be bool |
+| 3 | unknown identifier `(` |
+| 4 | genuine stubs (module_frontend_summary_module ×2, ir_forbidden_law_mask ×2) |
+| 11 | unknown identifiers (ontology_* ×6, make_hyper_expr_info, cd_hyper_law_profile_fingerprint, others) |
+| 6 | other (match exhaustive, if-arm, array-index, etc.) |
+
+The 24 remaining "not indexable" and 37 comparison errors are from different sources (egraph.sio subscripts on expression-type bases; lower.sio/check.sio reference dereference patterns) — neither is the VAR_LIT_DATA overflow. Genuine stubs + ontology unimplementeds account for 15.
