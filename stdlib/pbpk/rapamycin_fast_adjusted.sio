@@ -1,0 +1,108 @@
+// stdlib/pbpk/rapamycin_fast_adjusted.sio — Sprint 52
+//
+// GUM-exact trough margin trajectory for the fast stratum (CYP3A4 ultra-rapid
+// metabolizer, ke=0.01677 h⁻¹, F=0.094) at the Sprint 51 adjusted dose D=9.5mg.
+// Parallel to Sprint 49 (slow stratum at D=2.5mg).
+//
+// At D=9.5mg the fast stratum just certifies at N=7 (margin=2.059, the minimum
+// certifying dose in 0.5mg steps). This module traces the full N trajectory:
+// first certification day, peak margin day, last certification day, and the
+// certified span.
+//
+// Finding A: early certification — fast reaches CERT on day N_crit (≤7), meaning
+//            the adjusted dose certifies at or before the week-1 visit.
+// Finding B: peak margin — fast margin peaks at N_peak (near SS) then the ceiling
+//            begins binding as accumulation plateaus; peak margin and day to peak.
+// Finding C: long certified span — fast remains certified over a wide N range;
+//            the ceiling constraint eventually becomes binding at large N.
+// Finding D: visit profile — certified at all three monitoring visits (N=7, 14, 28)
+//            under the adjusted protocol; compare margins across visits.
+
+module pbpk::rapamycin_fast_adjusted
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+fn fa_min2(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn fa_margin_at(n: i64) -> f64 with Mut, Div, Panic {
+    let ka  = ob_ka_var_std()
+    let fv  = ob_f_var_std()
+    let ke  = ob_ke_var_std()
+    let k12 = ob_k12_var_std()
+    let k21 = ob_k21_var_std()
+    let c   = as_trough_mg_l(9.5, n, 0.01677, 0.094)
+    let uc  = eu_u_c(9.5, n, 0.01677, 0.094, ka, fv, ke, k12, k21)
+    fa_min2((c - trough_floor_mg_l()) / uc, (trough_ceil_mg_l() - c) / uc)
+}
+
+// ── Named spot values at monitoring visits ────────────────────────────────────
+pub fn fa_margin_n1()  -> f64 with Mut, Div, Panic { fa_margin_at(1)  }
+pub fn fa_margin_n3()  -> f64 with Mut, Div, Panic { fa_margin_at(3)  }
+pub fn fa_margin_n7()  -> f64 with Mut, Div, Panic { fa_margin_at(7)  }
+pub fn fa_margin_n14() -> f64 with Mut, Div, Panic { fa_margin_at(14) }
+pub fn fa_margin_n21() -> f64 with Mut, Div, Panic { fa_margin_at(21) }
+pub fn fa_margin_n28() -> f64 with Mut, Div, Panic { fa_margin_at(28) }
+pub fn fa_margin_n42() -> f64 with Mut, Div, Panic { fa_margin_at(42) }
+pub fn fa_margin_n56() -> f64 with Mut, Div, Panic { fa_margin_at(56) }
+pub fn fa_margin_n84() -> f64 with Mut, Div, Panic { fa_margin_at(84) }
+
+// ── Scanner: first N (1..100) where fast certifies at D=9.5mg ─────────────
+pub fn fa_n_crit() -> i64 with Mut, Div, Panic {
+    var n      = 1
+    var result = 0
+    while n <= 100 {
+        if fa_margin_at(n) >= 2.0 && result == 0 { result = n };
+        n = n + 1
+    }
+    result
+}
+
+// ── Scanner: last N (1..120) where fast certifies at D=9.5mg ──────────────
+pub fn fa_n_last_cert() -> i64 with Mut, Div, Panic {
+    var n    = 1
+    var last = 0
+    while n <= 120 {
+        if fa_margin_at(n) >= 2.0 { last = n };
+        n = n + 1
+    }
+    last
+}
+
+// ── Scanner: argmax N of margin in 1..120 ─────────────────────────────────
+pub fn fa_n_peak() -> i64 with Mut, Div, Panic {
+    var n      = 1
+    var best_n = 1
+    var best_m = fa_margin_at(1)
+    while n <= 120 {
+        let m = fa_margin_at(n)
+        if m > best_m { best_n = n };
+        if m > best_m { best_m = m };
+        n = n + 1
+    }
+    best_n
+}
+
+pub fn fa_margin_peak() -> f64 with Mut, Div, Panic {
+    fa_margin_at(fa_n_peak())
+}
+
+// ── Derived metrics ────────────────────────────────────────────────────────
+// Gap from n_crit back to dose-1 (days before first cert)
+pub fn fa_ncrit_lead() -> i64 with Mut, Div, Panic {
+    fa_n_crit() - 1
+}
+
+// Total certified span in days
+pub fn fa_cert_span() -> i64 with Mut, Div, Panic {
+    fa_n_last_cert() - fa_n_crit()
+}
+
+// Days from n_crit to peak (how quickly margin climbs after first cert)
+pub fn fa_peak_lag() -> i64 with Mut, Div, Panic {
+    fa_n_peak() - fa_n_crit()
+}
