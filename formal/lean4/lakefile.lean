@@ -222,6 +222,11 @@ lean_lib «SounioNewtonSqrtImpl» where
 -- Phase 2d + 4: assemble RootedField ℝ from the above and fire the de Grey transfer → χ(ℝ²)≥5.
 lean_lib «SounioRootedFieldReal» where
 
+-- Multiquadratic linear-independence programme (faithfulness of QF↪ℝ): irrationality core.
+-- no_rat_sqrt (squarefree m has no rational √), not_sq_radicand, ofRat_inj, sqrt_radicand_irrational
+-- for the minimal support S={3,5,11} radicands {3,5,11,15,33,55,165}. `lake build SounioMultiquadIndep`.
+lean_lib «SounioMultiquadIndep» where
+
 -- χ≥5 UNCONDITIONAL over Mathlib-free ℝ: feeds the discharged SAT leg
 -- (DeGrey529.Closed.not_VColourable) into SounioRootedFieldReal.chi_R2_ge_5, closing the
 -- QF↪ℝ gap. chi_R2_ge_5_unconditional: the unit-distance graph on the Cauchy-quotient real
