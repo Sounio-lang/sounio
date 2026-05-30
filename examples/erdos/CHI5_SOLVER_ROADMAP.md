@@ -276,6 +276,26 @@ explicit and prove the χ≥5 bound *generically*, isolating ℝ to a single ins
   Then `qfSelf.unit = unitFP` *definitionally*, and `qfSelf.chi_ge_5` **is**
   `g529_field_plane_needs_5_colours` — the abstraction is faithful and non-vacuous.
 
+### 1c-B6/B7. QF quotient ring + abstract SqrtField — both pillars built (no Mathlib, 2026-05-30)
+
+Built in parallel via two `best-of-n-runner` subagents, then independently rebuilt + statement-audited
++ math-reviewed by the main agent (no `sorryAx`; axioms `[propext, Classical.choice, Quot.sound, native_decide.ax]`).
+
+- **`formal/lean4/SounioMultiquadQuotient.lean` — QF value-equivalence quotient ring.**
+  `QFeq x y := ∀ i<16, gi x.1 i * y.2 = gi y.1 i * x.2` (cross-multiplication value equality);
+  `Setoid QFp` on positive-denominator length-16 reps (transitivity via `Int.eq_of_mul_eq_mul_right`).
+  PROVED: qadd/qmul/qsub congruences, additive inverse `qadd_neg_QFeq` (closes `QaddNegObligation`),
+  left/right distributivity (closes the distrib obligations), and `qCommRing : QCommRingBundle`
+  (add comm/assoc/zero, neg, mul comm/one, distrib) on the quotient. **STAGED:** `qmul` associativity
+  (`QmulAssocObligation`) — the single remaining triple-sum XOR-reindex. So `QF/≈` is a certified
+  commutative ring *modulo multiplicative associativity*.
+- **`formal/lean4/SounioSqrtField.lean` — abstract ordered field with √ (the ℝ interface).**
+  `structure SqrtField` (comm-ring + ordered-field + sqrt axioms as hypotheses, satisfied by ℝ).
+  PROVED from the axioms: `nonneg_sqrt_unique` (nonneg roots of equal squares agree), `mul_sqrt`
+  (`√a·√b = √(ab)`), `ofNat_nonneg`, the four primes `s_sq` (`√pⱼ² = pⱼ`), radical map `r`, `r_zero`.
+  **STAGED:** `GeneratorLawObligation` (`r i · r j = ofNatProd(i∧j) · r(i⊕j)`) — the abstract image
+  of `basis_mul_law`, i.e. the multiplicative core of the eventual `QF↪ℝ` homomorphism.
+
 **Precise remaining step for Euclidean χ(ℝ²) ≥ 5 — now a single typeclass-free instance.**
 Provide one `QFTransfer` with `F = ℝ`: `φ(c,den) = (Σ cᵢ rᵢ)/den` where `rₘ = ∏_{bit j of m}√pⱼ`.
 Discharging `hadd/hmul/hsub` is exactly "`φ` is a ring hom" — its multiplicative core is the **real

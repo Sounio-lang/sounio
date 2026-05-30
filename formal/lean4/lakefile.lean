@@ -118,6 +118,18 @@ lean_lib «SounioDeGreyChi5Concrete» where
 @[default_target]
 lean_lib «SounioMultiquadRing» where
 
+-- Value-equivalence quotient of the QF multiquadratic kernel (imports SounioMultiquadRing).
+-- PROVED: QFeq Setoid, qadd/qmul/qsub congruence, neg, left/right distrib on quotient.
+-- OPEN: QmulAssocObligation (staged). Build: `lake build SounioMultiquadQuotient`.
+@[default_target]
+lean_lib «SounioMultiquadQuotient» where
+
+-- Abstract ordered field with square roots: target interface for ℚ(√3,√5,√7,√11) ↪ ℝ.
+-- PROVED: nonneg_sqrt_unique, mul_sqrt, ofNat_nonneg, s_sq, r_zero. STAGED:
+-- GeneratorLawObligation (multiquadratic generator law on radical map `r`).
+@[default_target]
+lean_lib «SounioSqrtField» where
+
 -- chi(R^2) >= 5 SAT-LEG INTERNALISATION (B1): soundness of the graph-colouring SAT
 -- encoding. Proves `(colourCNF n k edges).Unsat -> no proper k-colouring (Fin)` in pure
 -- core Lean (axioms: [propext, Quot.sound]; no Mathlib, no native_decide). This is the
