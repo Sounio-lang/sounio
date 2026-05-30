@@ -130,6 +130,13 @@ lean_lib «SounioMultiquadQuotient» where
 @[default_target]
 lean_lib «SounioSqrtField» where
 
+-- QF -> SqrtField numerator ring-homomorphism core (imports SounioSqrtField + SounioMultiquadRing).
+-- PROVED: Mathlib-free finite-sum library (fsum), evalNum numerator map, and the multiplicative
+-- core evalNum (qmul x y) = mul (evalNum x) (evalNum y) via generator_law + perm_range_xor reindex.
+-- Build: `lake build SounioMultiquadHom`.
+@[default_target]
+lean_lib «SounioMultiquadHom» where
+
 -- chi(R^2) >= 5 SAT-LEG INTERNALISATION (B1): soundness of the graph-colouring SAT
 -- encoding. Proves `(colourCNF n k edges).Unsat -> no proper k-colouring (Fin)` in pure
 -- core Lean (axioms: [propext, Quot.sound]; no Mathlib, no native_decide). This is the

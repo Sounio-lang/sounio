@@ -317,13 +317,18 @@ so denominators are invertible). **Done this iteration** in `SounioSqrtField.lea
 **Precise remaining steps for Euclidean χ(ℝ²) ≥ 5.**
 1. **(decision) guard `QFTransfer`** with `qfWf x := x.2 ≠ 0 ∧ x.1.length = 16` on `hadd/hmul/hsub`;
    reprove `qfSelf` and `geom_transfer` (the `emb` values are well-formed, so threading the guard is
-   mechanical). 2. **`ofInt_add`/`ofInt_mul`** (ℤ→F ring hom; remaining Int-sign case analysis).
+   mechanical). 2. **`ofInt_add`/`ofInt_mul`** (ℤ→F ring hom) — **DONE (2026-05-30)** in
+   `SounioSqrtField.lean` (`ofInt_neg`/`ofInt_add`/`ofInt_mul`, Int constructor case analysis,
+   `[propext, Quot.sound]`).
 3. **`evalNum`** numerator map + its multiplicative core `evalNum (qmul x y) = mul (evalNum x)(evalNum y)`
-   — the generator-law double-sum reindex (uses `perm_range_xor`); the den-free heart of `hmul`.
-4. **φ via fractions** + `hadd/hmul/hsub` using the char-0 inverse toolkit above. 5. instantiate
-   `SqrtField` for ℝ (`Real.sqrt`). Then `QFTransfer.chi_ge_5 (ℝ-instance) g529_not_colourable` is
-   **χ(ℝ²) ≥ 5** — the SAT leg, geometry certificate, generator law, and char-0 toolkit are already
-   closed in core Lean.
+   — **DONE (2026-05-30)** in new `SounioMultiquadHom.lean`: theorem `evalNum_qmul`, proved via a
+   from-scratch Mathlib-free finite-sum library (`fsum` + add/zero/congr/mul-distrib/`fsum_mul_fsum`/
+   map/`fsum_perm`/`fsum_comm`/`fsum_xor`), the `generator_law` per-pair rewrite, and the
+   `perm_range_xor` XOR reindex (j↦i⊕idx). Den-free heart of `hmul`; new code `[propext, Quot.sound]`.
+4. **φ via fractions** + `hadd/hmul/hsub` using the char-0 inverse toolkit + `evalNum_qmul`. 5. instantiate
+   `SqrtField` for ℝ (`Real.sqrt`, or the repo's Mathlib-free `SounioRealCauchy`/`SounioRealOrder`).
+   Then `QFTransfer.chi_ge_5 (ℝ-instance) g529_not_colourable` is **χ(ℝ²) ≥ 5** — the SAT leg, geometry
+   certificate, generator law, char-0 toolkit, and now the multiplicative hom core are closed in core Lean.
 
 ## 1b. Implemented & gated this iteration — `examples/erdos/souc_sat.sio`
 

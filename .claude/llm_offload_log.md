@@ -1,5 +1,28 @@
 # LLM Offload Log
 
+## 2026-05-30: evalNum multiplicative core — QF numerator convolution → SqrtField radical-sum product
+
+- **Claim**: new `formal/lean4/SounioMultiquadHom.lean` proves the deepest algebraic step of QF↪ℝ,
+  Mathlib-free: `evalNum_qmul : evalNum (qmul x y).1 = mul (evalNum x.1) (evalNum y.1)`, where
+  `evalNum l = Σ_{i<16} ofInt(lᵢ)·r i`. The 16-dim multiquadratic convolution `qmul` maps to the
+  product of radical-sums. Proof promotes the per-generator `generator_law`
+  (`rᵢ·rⱼ = ofNatProd(i∧j)·r_{i⊕j}`) to a full bilinear identity via a from-scratch finite-sum
+  library `fsum` (foldr-based `Finset.sum` substitute): `fsum_add`, `fsum_zero`, `fsum_congr`,
+  `mul_fsum_left/right`, `fsum_mul_fsum`, `fsum_map`, `fsum_perm` (List.Perm induction), `fsum_comm`
+  (Fubini), and `fsum_xor` (XOR reindex via `perm_range_xor`). Supporting bridges: `ofInt_fsum`
+  (ℤ-fold → F-sum), `foldl_add_int` (foldl=foldr for `qmulCoeff`), `ofNatProd_eq`/`bcoeff_int_eq`
+  (the two bcoeff defs agree, by `decide` over range 16 — kernel, no native axiom). 7-step `calc`:
+  fsum_mul_fsum → mul4comm+generator_law → XOR reindex (j↦i⊕idx) → fsum_comm → factor r idx →
+  W_eq (term=ofInt qmulTerm) → ofInt_qmulCoeff → gi/qmul_getElem. The convolution is **den-free**
+  (uses only numerators), so this is the standalone multiplicative heart of the eventual fraction
+  φ : QF → F. Axioms: `[propext, Quot.sound]` from new code; inherited `Classical.choice` +
+  `perm_range_xor` native_decide certificates come entirely from the already-committed reindex
+  permutation (authorised C-toolchain verification). `lake build SounioMultiquadHom` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "All listed fsum lemmas, W_eq, ofInt_qmulCoeff, generator_law and fsum_xor steps compose to a
+  valid equational proof of the ring-homomorphism identity; no leaps visible." [TIGHTENABLE] note:
+  proof complete modulo the imported (already-proved) `perm_range_xor`/`generator_law` statements.
+
 ## 2026-05-30: ℤ→F ring homomorphism (ofInt_add / ofInt_mul / ofInt_neg) for QF↪ℝ
 
 - **Claim**: `formal/lean4/SounioSqrtField.lean` proves `ofInt : ℤ → F` is a ring homomorphism:
@@ -174,6 +197,8 @@
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadRing.lean (ring laws) | PASS | qadd_assoc + qmul_one_left/right + qmulOne_solved (QmulOneObligation discharged). Grok: "No mathematical errors or leaps"; open obligations correctly flagged. Axioms [propext, Quot.sound]. |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadQuotient.lean | PASS | QFeq Setoid quotient + congruence + neg + distrib + qCommRing bundle (subagent-drafted, main-agent audited). Grok: "All checked claims are mathematically sound … no hidden axioms … ready for the next stage". qmul-assoc staged. |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSqrtField.lean | PASS | abstract ordered field + √ interface; nonneg_sqrt_unique, mul_sqrt, radical map (subagent-drafted, main-agent audited). Grok: "No mathematical errors found … no axiom leaks". GeneratorLawObligation staged. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSqrtField.lean (ℤ→F hom) | PASS | ofInt_neg/ofInt_add/ofInt_mul — ℤ→F is a ring homomorphism (Int constructor case analysis + directed helpers). Grok: "all proofs discharge from the axioms; no hidden axioms or sorry". Axioms [propext, Quot.sound]. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean | PASS | evalNum_qmul — QF numerator convolution → SqrtField radical-sum product, via from-scratch Mathlib-free fsum library + generator_law + perm_range_xor XOR reindex. Grok: "fsum lemmas, W_eq, ofInt_qmulCoeff, generator_law and fsum_xor steps compose to a valid equational proof of the ring-homomorphism identity; no leaps visible". New code axioms [propext, Quot.sound]. |
 
 ## 2026-05-29: FLAGSHIP V-track — geometry leg machine-checked in Lean 4 + LRAT
 
