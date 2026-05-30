@@ -21319,6 +21319,8 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                         // over-state evidence). ε parsed BY NAME, not position
                         // (value is positional-first). No literal ε → stays 1000.
                         var kconf: i64 = 1000
+                        var saw_eps_key: i64 = 0
+                        var eps_was_literal: i64 = 0
                         var kq: i64 = p + 2
                         var kdepth: i64 = 1
                         var kclose: i64 = 0 - 1
@@ -21334,15 +21336,34 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                                 if src_match(TS[kq as usize], TE[kq as usize] - TS[kq as usize], "epsilon") { is_eps_key = 1 }
                                 if src_match(TS[kq as usize], TE[kq as usize] - TS[kq as usize], "confidence") { is_eps_key = 1 }
                                 if is_eps_key == 1 && kq + 2 < TC && (TK[(kq + 1) as usize] == 16 || TK[(kq + 1) as usize] == 43) {
+                                    saw_eps_key = 1
                                     let eps_val_tok = kq + 2
-                                    if TK[eps_val_tok as usize] == 4 || TK[eps_val_tok as usize] == 53 {
+                                    let eps_after = kq + 3
+                                    // Bare compile-time literal: a numeric token immediately
+                                    // followed by a field terminator — ',' (28), ')' (7), or the
+                                    // next field-key identifier (3, Style-B `ε: v  prov: …`).
+                                    // NOT the head of an expression like `0.99 * runtime`, which
+                                    // would launder high confidence through `*` (19).
+                                    if (TK[eps_val_tok as usize] == 4 || TK[eps_val_tok as usize] == 53)
+                                       && eps_after < TC
+                                       && (TK[eps_after as usize] == 28 || TK[eps_after as usize] == 7 || TK[eps_after as usize] == 3) {
                                         let eps_scaled = tok_scaled_million(eps_val_tok)
-                                        if eps_scaled >= 0 && eps_scaled <= 1000000 { kconf = eps_scaled / 1000 }
+                                        if eps_scaled >= 0 && eps_scaled <= 1000000 {
+                                            kconf = eps_scaled / 1000
+                                            eps_was_literal = 1
+                                        }
                                     }
                                 }
                             }
                             kq = kq + 1
                         }
+                        // Soundness: ε declared but NOT a compile-time literal → its value is
+                        // unprovable at compile time. Use 1 (positive, below any real gate min)
+                        // so `with Epistemic(N)` REJECTS rather than laundering unknown/runtime
+                        // confidence as certain. (No ε at all keeps the language's "asserted
+                        // certain" 1000 default — matches the brace form.) A named-constant ε is
+                        // conservatively treated as non-literal; const-folding is future work.
+                        if saw_eps_key == 1 && eps_was_literal == 0 { kconf = 1 }
                         EXPR_ETY[p as usize] = ety_mk_knowledge(2, kconf, EXPR_UNIT_DIM)
                         EXPR_CONF[p as usize] = kconf
                         MEAS_CONF[p as usize] = kconf

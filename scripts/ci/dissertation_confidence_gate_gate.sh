@@ -104,6 +104,33 @@ else
   fi
 fi
 
+# ── 3. soundness: non-literal ε cannot satisfy the gate (no confidence laundering) ──
+echo ""
+NL_NAME="nonliteral_eps_reject"
+NL_SRC="tests/compile-fail/knowledge_nonliteral_eps_ungated.sio"
+NL_LOG="$STAGE_DIR/nonliteral_eps.log"
+echo "[$NL_NAME] $NL_SRC"
+NL_ELF="$STAGE_DIR/nonliteral_eps.elf"
+if [[ ! -f "$NL_SRC" ]]; then
+  echo "  FAIL: source missing"; fails=$((fails + 1))
+else
+  rm -f "$NL_ELF"
+  set +e
+  "$SOUC_BIN" "$NL_SRC" "$NL_ELF" >"$NL_LOG" 2>&1
+  n_rc=$?
+  set -e
+  if [[ $n_rc -eq 0 || -f "$NL_ELF" ]]; then
+    echo "  FAIL: non-literal ε compiled clean (confidence laundering hole open)"
+    fails=$((fails + 1))
+  elif ! grep -qE "EpistemicComplete violation" "$NL_LOG"; then
+    echo "  FAIL: rejected but not by the EpistemicComplete gate (rc=$n_rc)"
+    tail -5 "$NL_LOG" | sed 's/^/    /'
+    fails=$((fails + 1))
+  else
+    echo "  PASS (non-literal ε rejected, conf=1 < N, no laundering)"
+  fi
+fi
+
 echo ""
 if [[ $fails -ne 0 ]]; then
   echo "dissertation_confidence_gate_gate: FAIL ($fails check(s) failed)"
