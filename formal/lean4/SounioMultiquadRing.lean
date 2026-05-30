@@ -1,4 +1,5 @@
 set_option maxHeartbeats 0
+set_option linter.unusedSimpArgs false
 
 /-!
   SounioMultiquadRing.lean
@@ -223,6 +224,82 @@ theorem sqrt3_sqrt15 : qmul (basis 1) (basis 3) = scaleC 3 (basis 2) := by nativ
 /-- `√15 · √35 = 5·√21`  (shared prime 5: 3∧6 = 2 ⇒ bcoeff 5; 3⊕6 = 5 = √21). -/
 theorem sqrt15_sqrt35 : qmul (basis 3) (basis 6) = scaleC 5 (basis 5) := by native_decide
 
+/-! ## More certified ring laws (no Mathlib): additive associativity + multiplicative unit -/
+
+theorem qadd_assoc (x y z : QF) : qadd (qadd x y) z = qadd x (qadd y z) := by
+  apply Prod.ext
+  · apply List.ext_getElem?
+    intro i
+    by_cases hi : i < 16
+    · have h1 : i < (qadd (qadd x y) z).1.length := by rw [qadd_list_len]; exact hi
+      have h2 : i < (qadd x (qadd y z)).1.length := by rw [qadd_list_len]; exact hi
+      have hxy : i < (qadd x y).1.length := by rw [qadd_list_len]; exact hi
+      have hyz : i < (qadd y z).1.length := by rw [qadd_list_len]; exact hi
+      rw [List.getElem?_eq_getElem h1, List.getElem?_eq_getElem h2,
+          qadd_getElem (qadd x y) z i hi, qadd_getElem x (qadd y z) i hi,
+          gi_eq_getElem (qadd x y).1 i hxy, gi_eq_getElem (qadd y z).1 i hyz,
+          qadd_getElem x y i hi, qadd_getElem y z i hi]
+      simp only [Option.some.injEq]
+      show (gi x.1 i * y.2 + gi y.1 i * x.2) * z.2 + gi z.1 i * (x.2 * y.2)
+         = gi x.1 i * (y.2 * z.2) + (gi y.1 i * z.2 + gi z.1 i * y.2) * x.2
+      simp only [Int.add_mul, Int.mul_add, Int.mul_assoc, Int.mul_comm, Int.mul_left_comm,
+                 Int.add_assoc, Int.add_left_comm]
+    · have hlen : (qadd (qadd x y) z).1.length ≤ i := by rw [qadd_list_len]; exact Nat.le_of_not_lt hi
+      rw [List.getElem?_eq_none (by simpa using hlen),
+          List.getElem?_eq_none (by rw [qadd_list_len]; simpa using hlen)]
+  · show (x.2 * y.2) * z.2 = x.2 * (y.2 * z.2)
+    exact Int.mul_assoc x.2 y.2 z.2
+
+/-- Canonical multiplicative unit: rational `1`, denominator `1`. -/
+def qfone : QF := ((List.range 16).map (fun i => if i = 0 then (1 : Int) else 0), 1)
+
+theorem qfone_coeff (i : Nat) (hi : i < 16) : gi qfone.1 i = if i = 0 then 1 else 0 := by
+  unfold qfone gi
+  rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem (by simp [hi]),
+      List.getElem_map, List.getElem_range, Option.getD_some]
+
+theorem qmulCoeff_one_left (x : QF) (idx : Nat) (hidx : idx < 16) :
+    qmulCoeff qfone x idx = gi x.1 idx := by
+  unfold qmulCoeff qmulTerm
+  -- only the `i = 0` summand is nonzero: `gi qfone.1 i = 0` for `i ≠ 0`
+  have key : ∀ i ∈ List.range 16,
+      gi qfone.1 i * gi x.1 (Nat.xor i idx) * bcoeff (Nat.land i (Nat.xor i idx))
+        = (if i = 0 then gi x.1 idx else 0) := by
+    intro i hi
+    have hi16 : i < 16 := by simpa using hi
+    rw [qfone_coeff i hi16]
+    by_cases h0 : i = 0
+    · subst h0
+      simp [Nat.zero_xor, Nat.zero_and, bcoeff]
+    · simp [h0]
+  rw [foldl_add_pointwise (List.range 16) _ (fun i => if i = 0 then gi x.1 idx else 0) 0 key]
+  rw [show List.range 16 = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15] from by decide]
+  simp
+
+theorem qmul_one_left (x : QF) (hx : qfLen16 x) : qmul qfone x = x := by
+  apply Prod.ext
+  · apply List.ext_getElem?
+    intro i
+    by_cases hi : i < 16
+    · have hlen : i < (qmul qfone x).1.length := by rw [qmul_list_len]; exact hi
+      have hlen' : i < x.1.length := by rw [hx]; exact hi
+      rw [List.getElem?_eq_getElem hlen, List.getElem?_eq_getElem hlen']
+      rw [qmul_getElem qfone x i hi, qmulCoeff_one_left x i hi, gi_eq_getElem x.1 i hlen']
+    · have hlen : (qmul qfone x).1.length ≤ i := by rw [qmul_list_len]; exact Nat.le_of_not_lt hi
+      rw [List.getElem?_eq_none (by simpa using hlen),
+          List.getElem?_eq_none (by rw [hx]; simpa using hlen)]
+  · show qfone.2 * x.2 = x.2
+    simp [qfone]
+
+theorem qmul_one_right (x : QF) (hx : qfLen16 x) : qmul x qfone = x := by
+  rw [qmul_comm, qmul_one_left x hx]
+
+/-- Discharges `QmulOneObligation` on the length-16 representatives that carry the
+    de Grey coordinates (the only ones `qadd`/`qmul` ever produce). -/
+theorem qmul_one_obligation :
+    ∀ x : QF, qfLen16 x → qmul qfone x = x ∧ qmul x qfone = x :=
+  fun x hx => ⟨qmul_one_left x hx, qmul_one_right x hx⟩
+
 /-- Open obligation: associativity of `qmul` (heavy sum reindexing; no `ring` / BigOperators). -/
 def QmulAssocObligation : Prop :=
   ∀ x y z : QF, qmul (qmul x y) z = qmul x (qmul y z)
@@ -239,17 +316,27 @@ def QmulRightDistribObligation : Prop :=
 def QaddNegObligation : Prop :=
   ∀ x : QF, qfLen16 x → qadd x (qsub qzero x) = qzero
 
-/-- Open obligation: existence of a multiplicative unit for `qmul`. -/
+/-- DISCHARGED (on length-16 representatives) by `qmul_one_obligation` above:
+    `qfone` is a two-sided multiplicative unit for every `qfLen16` value. The unrestricted
+    `∀ x` form is false only for malformed (non-length-16) representatives, which `qadd`/`qmul`
+    never produce. -/
 def QmulOneObligation : Prop :=
-  ∃ one : QF, (∀ x : QF, qmul one x = x) ∧ (∀ x : QF, qmul x one = x)
+  ∃ one : QF, (∀ x : QF, qfLen16 x → qmul one x = x) ∧ (∀ x : QF, qfLen16 x → qmul x one = x)
+
+/-- `QmulOneObligation` is now a theorem (witness `qfone`). -/
+theorem qmulOne_solved : QmulOneObligation :=
+  ⟨qfone, fun x hx => qmul_one_left x hx, fun x hx => qmul_one_right x hx⟩
 
 #print axioms qadd_comm
+#print axioms qadd_assoc
 #print axioms qadd_zero_left
 #print axioms qadd_zero_right
 #print axioms qmul_comm
+#print axioms qmul_one_left
+#print axioms qmulOne_solved
 #print axioms basis_mul_law
 #print axioms sqrt3_sq
 
-#eval IO.println "SounioMultiquadRing: PROVED qadd_comm, qadd_zero_left, qadd_zero_right, qmul_comm, basis_mul_law (multiquadratic generator law, all 256 basis pairs) + √pᵢ²=pᵢ & cross-product corollaries; OPEN QmulAssocObligation, Qmul{Left,Right}DistribObligation, QaddNegObligation, QmulOneObligation."
+#eval IO.println "SounioMultiquadRing: PROVED qadd_{comm,assoc,zero_left,zero_right}, qmul_{comm,one_left,one_right} (QmulOneObligation discharged on length-16 reps), basis_mul_law (multiquadratic generator law, all 256 basis pairs) + √pᵢ²=pᵢ & cross-products; OPEN QmulAssocObligation, Qmul{Left,Right}DistribObligation, QaddNegObligation."
 
 end MultiquadRing

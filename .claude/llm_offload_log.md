@@ -1,5 +1,14 @@
 # LLM Offload Log
 
+## 2026-05-30: QF ring laws — additive assoc + multiplicative unit discharged (no Mathlib)
+
+- **Claim**: `formal/lean4/SounioMultiquadRing.lean` adds `qadd_assoc` (syntactic) and
+  `qmul_one_left/right` + `qmulOne_solved` (canonical `qfone` is a two-sided multiplicative
+  unit on length-16 reps), discharging the former `QmulOneObligation`. Axioms
+  `[propext, Quot.sound]`. Open: qmul assoc/distrib + additive inverse (need fraction-eq
+  quotient).
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai`.
+
 ## 2026-05-30: Abstract transfer leg — χ(F²)≥5 for any QF-receiving ring (no Mathlib)
 
 - **Claim**: `formal/lean4/SounioDeGreyChi5Transfer.lean` `QFTransfer.chi_ge_5` proves
@@ -95,6 +104,7 @@
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioDeGreyChi5Closed.lean | PASS | composition closing field-plane χ(QF²)≥5 (edges_eq + SAT-leg discharge → g529_field_plane_chi_ge_5). Grok: "NO MATHEMATICAL ERRORS OR GAPS… No overreach" (correctly isolates the sole remaining QF↪ℝ gap) |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadRing.lean | PASS (1 prose tighten applied) | multiquadratic generator law basis_mul_law (256 basis pairs) + √pᵢ²=pᵢ/cross-products. Grok: "NO MATHEMATICAL ERRORS FOUND"; flagged that "faithful model" overstated without assoc/distrib → softened the docstring/roadmap to "generator-level law, not full ring/field". |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioDeGreyChi5Transfer.lean | PASS | abstract transfer QFTransfer.chi_ge_5 (χ(F²)≥5 for any QF-receiving ring) + qfSelf instance. Grok: all theorems [OK], "No further mathematical claims present". Isolates χ(ℝ²)≥5 to one ℝ instance. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadRing.lean (ring laws) | PASS | qadd_assoc + qmul_one_left/right + qmulOne_solved (QmulOneObligation discharged). Grok: "No mathematical errors or leaps"; open obligations correctly flagged. Axioms [propext, Quot.sound]. |
 
 ## 2026-05-29: FLAGSHIP V-track — geometry leg machine-checked in Lean 4 + LRAT
 

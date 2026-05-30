@@ -251,9 +251,12 @@ multiplication law. We certify that law **exactly in core Lean**:
   must preserve. (Not yet a full ring/field certification: `qmul` assoc/distrib/inverses are still
   open, so this is the generator-level law, not "QF is the field ℚ(√3,√5,√7,√11)" in full.)
 - Together with the earlier `qadd_comm/qmul_comm/qadd_zero_*`, the commutative-ring backbone of QF is
-  now substantially certified (open: `qmul` assoc/distrib up to fraction-equivalence, and the
-  multiplicative unit — these need a value-equivalence quotient, since QF is a ring of *fraction
-  representatives*).
+  now substantially certified. **Newly discharged (no Mathlib):** `qadd_assoc` (additive
+  associativity, syntactic), `qmul_one_left/right` + `qmulOne_solved` (the canonical `qfone`
+  `([1,0,…],1)` is a two-sided multiplicative unit on every length-16 representative — closes the
+  former `QmulOneObligation`). Axioms `[propext, Quot.sound]`. **Still open:** `qmul`
+  assoc/distrib and the additive inverse — these need a value-equivalence quotient, since QF is a
+  ring of *fraction representatives* (denominators differ syntactically though values agree).
 
 ### 1c-B5. Abstract transfer leg — χ(F²)≥5 for ANY QF-receiving ring, no Mathlib (2026-05-30)
 
