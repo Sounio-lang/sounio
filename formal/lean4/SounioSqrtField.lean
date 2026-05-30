@@ -373,6 +373,89 @@ theorem generator_law (i j : Nat) :
 theorem generatorLaw_solved : (GeneratorLawObligation (R := R)) :=
   fun i j _ _ => generator_law i j
 
+/-! ## Characteristic zero: positive casts are invertible (denominator toolkit for QF↪ℝ)
+
+An ordered field has characteristic zero, so every nonzero integer denominator maps to a
+nonzero — hence invertible — element of `F`. These lemmas are the field-of-fractions toolkit
+that the eventual `φ : QF → F`, `φ(c,d) = (Σ cᵢ rᵢ) · inv (ofInt d)`, needs to invert
+denominators. (See the structural note in the roadmap: a total `QFTransfer` instance into a
+field is impossible — `hadd` forces denominators, `hmul` forbids `den = 0` — so the ℝ
+instance must be guarded by `den ≠ 0`, which is exactly what `ofInt_ne_zero` enables.) -/
+
+private theorem sf_neg_zero : R.neg R.zero = R.zero := by
+  have h := R.add_neg R.zero
+  rwa [sf_add_zero_left] at h
+
+/-- Characteristic zero: a successor natural cast never collapses to `0`. -/
+theorem ofNat_ne_zero (n : Nat) : ofNat (n + 1) ≠ R.zero := by
+  intro h
+  have hcancel : R.add (ofNat n) R.one = R.add (ofNat n) (R.neg (ofNat n)) :=
+    h.trans (R.add_neg (ofNat n)).symm
+  have hone : R.one = R.neg (ofNat n) :=
+    sf_add_left_cancel (ofNat n) R.one (R.neg (ofNat n)) hcancel
+  have hneg_le : R.le (R.neg (ofNat n)) R.zero := by
+    have hle :=
+      R.add_le_add_right (a := R.zero) (b := ofNat n) (c := R.neg (ofNat n)) (ofNat_nonneg n)
+    rwa [sf_add_zero_left, R.add_neg] at hle
+  rw [← hone] at hneg_le
+  exact R.zero_ne_one (R.le_antisymm sf_le_zero_one hneg_le)
+
+theorem sf_inv_ne_zero {a : R.F} (ha : a ≠ R.zero) : R.inv a ≠ R.zero := by
+  intro h
+  have hk : R.mul a (R.inv a) = R.one := R.mul_inv a ha
+  rw [h, sf_mul_zero_right] at hk
+  exact R.zero_ne_one hk
+
+theorem sf_inv_one : R.inv R.one = R.one := by
+  have h := R.mul_inv R.one (fun he => R.zero_ne_one he.symm)
+  rwa [sf_mul_one_left] at h
+
+/-- Inversion is multiplicative on nonzero elements (needed to split `inv (ofInt (d₁·d₂))`). -/
+theorem sf_inv_mul_inv {a b : R.F} (ha : a ≠ R.zero) (hb : b ≠ R.zero) :
+    R.inv (R.mul a b) = R.mul (R.inv a) (R.inv b) := by
+  have hab : R.mul a b ≠ R.zero := by
+    intro h
+    apply hb
+    calc
+      b = R.mul R.one b := (sf_mul_one_left b).symm
+      _ = R.mul (R.mul (R.inv a) a) b := by rw [sf_mul_inv_left a ha]
+      _ = R.mul (R.inv a) (R.mul a b) := R.mul_assoc _ _ _
+      _ = R.mul (R.inv a) R.zero := by rw [h]
+      _ = R.zero := sf_mul_zero_right _
+  have key : R.mul (R.mul (R.inv a) (R.inv b)) (R.mul a b) = R.one := by
+    rw [sf_mul_mul_mul_comm, sf_mul_inv_left a ha, sf_mul_inv_left b hb, R.mul_one]
+  calc
+    R.inv (R.mul a b)
+        = R.mul R.one (R.inv (R.mul a b)) := (sf_mul_one_left _).symm
+    _ = R.mul (R.mul (R.mul (R.inv a) (R.inv b)) (R.mul a b)) (R.inv (R.mul a b)) := by rw [key]
+    _ = R.mul (R.mul (R.inv a) (R.inv b)) (R.mul (R.mul a b) (R.inv (R.mul a b))) := by
+          rw [R.mul_assoc]
+    _ = R.mul (R.mul (R.inv a) (R.inv b)) R.one := by rw [R.mul_inv (R.mul a b) hab]
+    _ = R.mul (R.inv a) (R.inv b) := R.mul_one _
+
+/-! ## Integer cast `ℤ → F` (for the signed coefficients/denominators of QF) -/
+
+def ofInt : Int → R.F
+  | Int.ofNat n => ofNat n
+  | Int.negSucc n => R.neg (ofNat (n + 1))
+
+theorem ofInt_ofNat (n : Nat) : (ofInt (Int.ofNat n) : R.F) = ofNat n := rfl
+
+theorem ofInt_one : (ofInt 1 : R.F) = R.one := ofNat_one
+
+/-- Characteristic zero, integer form: a nonzero integer never casts to `0` —
+    the exact side-condition that makes a QF denominator invertible in `F`. -/
+theorem ofInt_ne_zero {d : Int} (hd : d ≠ 0) : ofInt d ≠ R.zero := by
+  match d with
+  | Int.ofNat 0 => exact absurd rfl hd
+  | Int.ofNat (n + 1) => exact ofNat_ne_zero n
+  | Int.negSucc n =>
+    intro h
+    apply ofNat_ne_zero n
+    have h' : R.neg (ofNat (n + 1)) = R.zero := h
+    have h2 := congrArg R.neg h'
+    rwa [sf_neg_neg, sf_neg_zero] at h2
+
 end SqrtField
 
 end SounioSqrt
@@ -386,5 +469,8 @@ end SounioSqrt
 #print axioms SounioSqrt.SqrtField.radicalBit_mul
 #print axioms SounioSqrt.SqrtField.generator_law
 #print axioms SounioSqrt.SqrtField.generatorLaw_solved
+#print axioms SounioSqrt.SqrtField.ofNat_ne_zero
+#print axioms SounioSqrt.SqrtField.sf_inv_mul_inv
+#print axioms SounioSqrt.SqrtField.ofInt_ne_zero
 
-#eval IO.println "SounioSqrtField: SqrtField structure; PROVED nonneg_sqrt_unique, mul_sqrt, ofNat_nonneg, s_sq, r_zero, ofNat_mul, radicalBit_mul, generator_law (GeneratorLawObligation discharged)."
+#eval IO.println "SounioSqrtField: SqrtField structure; PROVED nonneg_sqrt_unique, mul_sqrt, ofNat_nonneg, s_sq, r_zero, ofNat_mul, radicalBit_mul, generator_law; char-0 denominator toolkit ofNat_ne_zero/sf_inv_mul_inv/ofInt_ne_zero."

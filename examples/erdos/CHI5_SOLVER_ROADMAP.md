@@ -301,13 +301,29 @@ Built in parallel via two `best-of-n-runner` subagents, then independently rebui
   `s_sq`); the coefficient product collapses to `ofNatProd(i∧j)` via `ofNat_mul` + `Nat.testBit_and`.
   Axioms `[propext, Quot.sound]` — no Mathlib, no `Classical`, no new structure field (law DERIVED).
 
-**Precise remaining step for Euclidean χ(ℝ²) ≥ 5 — now a single typeclass-free instance.**
-Provide one `QFTransfer` with `F = ℝ`: `φ(c,den) = (Σ cᵢ rᵢ)/den` where `rₘ = ∏_{bit j of m}√pⱼ`.
-Discharging `hadd/hmul/hsub` is exactly "`φ` is a ring hom" — its multiplicative core is the **real
-image of `basis_mul_law`** (`√a·√b = √(ab)`); `hunit` is `φ 1 = 1`. The *only* Mathlib-requiring
-facts are `Real.sqrt` with `√a·√b=√(ab)` and `ring`. Then
-`QFTransfer.chi_ge_5 (ℝ-instance) g529_not_colourable` is **χ(ℝ²) ≥ 5** — everything else
-(the transfer, the SAT leg, the geometry certificate, the generator law) is already closed in core Lean.
+**STRUCTURAL FINDING (2026-05-30) — `QFTransfer` must be guarded by `den ≠ 0`.**
+A *total* `QFTransfer` instance into a field is **impossible**: `hadd`/`hmul`/`hsub` are `∀ a b`
+over *all* `QF` (any denominator, including `0`), and the two natural maps conflict:
+- φ that **drops** the denominator (`φ(c,d) = Σ cᵢ rᵢ`) makes `hmul` hold for free (generator
+  law), but `hadd` fails — `qadd` cross-multiplies the numerators by the denominators.
+- φ by **fractions** (`φ(c,d) = (Σ cᵢ rᵢ)·inv(ofInt d)`) makes `hadd` hold, but `hmul` fails at
+  `den = 0` (and even the if-`d=0`-then-`0` patch fixes `hmul` while re-breaking `hadd`).
+So the ℝ instance needs a well-formedness guard (`den ≠ 0`, length 16) on the homomorphism laws.
+That, in turn, needs an **ordered field to have characteristic zero** (`ofInt d ≠ 0` for `d ≠ 0`,
+so denominators are invertible). **Done this iteration** in `SounioSqrtField.lean`:
+`ofNat_ne_zero`, `ofInt`/`ofInt_ne_zero`, `sf_inv_one`, `sf_inv_ne_zero`, `sf_inv_mul_inv`
+(`inv(ab)=inv a·inv b`) — all `#print axioms`-empty (fully constructive, no Classical).
+
+**Precise remaining steps for Euclidean χ(ℝ²) ≥ 5.**
+1. **(decision) guard `QFTransfer`** with `qfWf x := x.2 ≠ 0 ∧ x.1.length = 16` on `hadd/hmul/hsub`;
+   reprove `qfSelf` and `geom_transfer` (the `emb` values are well-formed, so threading the guard is
+   mechanical). 2. **`ofInt_add`/`ofInt_mul`** (ℤ→F ring hom; remaining Int-sign case analysis).
+3. **`evalNum`** numerator map + its multiplicative core `evalNum (qmul x y) = mul (evalNum x)(evalNum y)`
+   — the generator-law double-sum reindex (uses `perm_range_xor`); the den-free heart of `hmul`.
+4. **φ via fractions** + `hadd/hmul/hsub` using the char-0 inverse toolkit above. 5. instantiate
+   `SqrtField` for ℝ (`Real.sqrt`). Then `QFTransfer.chi_ge_5 (ℝ-instance) g529_not_colourable` is
+   **χ(ℝ²) ≥ 5** — the SAT leg, geometry certificate, generator law, and char-0 toolkit are already
+   closed in core Lean.
 
 ## 1b. Implemented & gated this iteration — `examples/erdos/souc_sat.sio`
 

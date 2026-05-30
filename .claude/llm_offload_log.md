@@ -1,5 +1,24 @@
 # LLM Offload Log
 
+## 2026-05-30: Char-0 denominator toolkit for QF↪ℝ + QFTransfer den≠0 structural finding
+
+- **Structural finding**: a *total* `QFTransfer` instance into a field is impossible — `hadd`/`hmul`
+  are `∀ a b` over all QF (any denominator incl. 0); a denominator-dropping φ satisfies `hmul`
+  (generator law) but breaks `hadd` (qadd cross-multiplies by denominators), and a fraction φ
+  satisfies `hadd` but breaks `hmul` at `den=0`. ⇒ the ℝ instance must guard the hom laws with
+  `den ≠ 0`, which needs an ordered field to be characteristic zero (so denominators invert).
+- **Claim**: `formal/lean4/SounioSqrtField.lean` adds the char-0 / field-of-fractions toolkit:
+  `ofNat_ne_zero` (successor nat cast ≠ 0, via order: `0≤ofNat n` ⇒ `neg(ofNat n)≤0`, antisymm vs
+  `0≤1`), `ofInt`/`ofInt_ofNat`/`ofInt_one`/`ofInt_ne_zero` (nonzero ℤ casts ≠ 0), `sf_inv_one`,
+  `sf_inv_ne_zero`, `sf_inv_mul_inv` (`inv(ab)=inv a·inv b`, nonzero `mul a b` derived
+  constructively by multiplying through `inv a` — no `by_cases`, so no Classical). `structure
+  SqrtField` UNCHANGED. **All three exported lemmas `#print axioms`-EMPTY** (no propext, no
+  Classical, no Quot.sound — fully constructive). `lake build SounioSqrtField` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "All derivations are equational rewrites from the field/order/sqrt axioms … no gaps or external
+  axioms. All printed #print axioms blocks are empty as claimed." (one cosmetic [TIGHTENABLE]:
+  the 19-axiom structure could be Mathlib-style — intentionally kept explicit/Mathlib-free.)
+
 ## 2026-05-30: Generator law PROVED — QF→SqrtField multiplicative core (no Mathlib, no Classical)
 
 - **Claim**: `formal/lean4/SounioSqrtField.lean` discharges `GeneratorLawObligation` as the theorem
