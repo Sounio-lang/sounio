@@ -255,13 +255,31 @@ multiplication law. We certify that law **exactly in core Lean**:
   multiplicative unit — these need a value-equivalence quotient, since QF is a ring of *fraction
   representatives*).
 
-**Precise remaining step for Euclidean χ(ℝ²) ≥ 5.** Provide a real field `F` (= ℝ) with
-`r : Fin 16 → F`, `r m = ∏_{bit j of m} Real.sqrt pⱼ`, satisfying `r i * r j = bcoeff(i∧j) • r(i⊕j)`
-(the real image of `basis_mul_law`). Then `φ : QF → ℝ`, `φ(c,den) = (Σ cᵢ rᵢ)/den`, is a ring hom,
-and `φ(qf_dist²) = ℝ-dist²` makes every G₅₂₉ edge a genuine Euclidean unit pair. The
-field-plane theorem `g529_field_plane_chi_ge_5` then transfers verbatim to `¬ ∃ proper 4-colouring
-of (ℝ², unit)` = **χ(ℝ²) ≥ 5**. The *only* Mathlib-requiring fact is the existence of `Real.sqrt`
-with `√a·√b = √(ab)` — everything else (the relations, the transfer) is core-Lean-ready.
+### 1c-B5. Abstract transfer leg — χ(F²)≥5 for ANY QF-receiving ring, no Mathlib (2026-05-30)
+
+The reduction was already polymorphic in the plane `P`; we now make the **algebraic transfer**
+explicit and prove the χ≥5 bound *generically*, isolating ℝ to a single instance.
+
+- **`formal/lean4/SounioDeGreyChi5Transfer.lean` — `QFTransfer.chi_ge_5` (PROVED).**
+  A `QFTransfer` packages a target type `F` with `add/mul/sub`, a map `φ : QF → F`, a unit
+  predicate `isUnitVal`, the homomorphism equations `φ(qadd)=add`, `φ(qmul)=mul`, `φ(qsub)=sub`,
+  and `hunit : isOne d → isUnitVal (φ d)`. Theorem: *for every such `T`, if G₅₂₉ is not
+  4-colourable then `(F², T.unit)` has no proper 4-colouring* — **χ(F²) ≥ 5**.
+  Axioms `[propext, native_decide.ax]` (no `Classical`, no Mathlib).
+  The proof needs **no ring axioms of `F`**: the `F`-squared-distance of two embedded vertices
+  collapses through `hsub/hmul/hadd` onto the *exact QF squared-distance*, which the geometry
+  `native_decide` certificate already fixed at `1` for every edge; `hunit` finishes it.
+- **`qfSelf` instance (PROVED, core Lean).** `F = QF`, `φ = id`, `isUnitVal = (isOne · = true)`.
+  Then `qfSelf.unit = unitFP` *definitionally*, and `qfSelf.chi_ge_5` **is**
+  `g529_field_plane_needs_5_colours` — the abstraction is faithful and non-vacuous.
+
+**Precise remaining step for Euclidean χ(ℝ²) ≥ 5 — now a single typeclass-free instance.**
+Provide one `QFTransfer` with `F = ℝ`: `φ(c,den) = (Σ cᵢ rᵢ)/den` where `rₘ = ∏_{bit j of m}√pⱼ`.
+Discharging `hadd/hmul/hsub` is exactly "`φ` is a ring hom" — its multiplicative core is the **real
+image of `basis_mul_law`** (`√a·√b = √(ab)`); `hunit` is `φ 1 = 1`. The *only* Mathlib-requiring
+facts are `Real.sqrt` with `√a·√b=√(ab)` and `ring`. Then
+`QFTransfer.chi_ge_5 (ℝ-instance) g529_not_colourable` is **χ(ℝ²) ≥ 5** — everything else
+(the transfer, the SAT leg, the geometry certificate, the generator law) is already closed in core Lean.
 
 ## 1b. Implemented & gated this iteration — `examples/erdos/souc_sat.sio`
 

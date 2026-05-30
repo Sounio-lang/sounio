@@ -167,6 +167,14 @@ lean_lib «SounioSatG529» where
 -- NOT a default_target (imports the 30 MB G529 cert; `lake build SounioDeGreyChi5Closed`).
 lean_lib «SounioDeGreyChi5Closed» where
 
+-- ABSTRACT TRANSFER leg: χ(F²)≥5 for ANY commutative-ring-like F receiving QF via a
+-- homomorphism (QFTransfer). Proved with NO Mathlib — only the hom equations + unit
+-- detection; the F-squared-distance collapses through φ onto the QF certificate. The
+-- `qfSelf` (id) instance recovers the field-plane result, proving the abstraction faithful.
+-- The sole remaining χ(ℝ²)≥5 step is providing the single ℝ instance (Real.sqrt). Imports
+-- SounioDeGreyChi5Concrete (~3 min native_decide); `lake build SounioDeGreyChi5Transfer`.
+lean_lib «SounioDeGreyChi5Transfer» where
+
 -- M1: Vancomycin-Knightian thrust — Approx × Causal × Knowledge composition
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where
