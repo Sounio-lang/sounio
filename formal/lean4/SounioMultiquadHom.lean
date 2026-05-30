@@ -343,9 +343,54 @@ theorem phi_qsub (x y : QF) (hx : x.2 ≠ 0) (hy : y.2 ≠ 0) :
   exact frac_sub (evalNum x.1) (evalNum y.1) (ofInt x.2) (ofInt y.2)
     (ofInt_ne_zero hx) (ofInt_ne_zero hy)
 
+/-- A summand-isolation lemma: if `f` vanishes off a single index `a ∈ l` (and `l` has no
+    duplicates), the whole `fsum` collapses to `f a`. -/
+theorem fsum_single {ι} (a : ι) :
+    ∀ (l : List ι) (f : ι → R.F), a ∈ l → l.Nodup →
+      (∀ i ∈ l, i ≠ a → f i = R.zero) → fsum l f = f a := by
+  intro l
+  induction l with
+  | nil => intro f ha; exact absurd ha (by simp)
+  | cons b t ih =>
+    intro f ha hnd hz
+    rw [fsum_cons]
+    rcases List.nodup_cons.mp hnd with ⟨hbt, hndt⟩
+    by_cases hab : a = b
+    · subst hab
+      have htz : fsum t f = R.zero := by
+        have heq : fsum t f = fsum t (fun _ => R.zero) := by
+          apply fsum_congr; intro i hi
+          exact hz i (List.mem_cons_of_mem _ hi) (fun h => hbt (h ▸ hi))
+        rw [heq, fsum_zero]
+      rw [htz, R.add_zero]
+    · have hbz : f b = R.zero := hz b (by simp) (fun h => hab h.symm)
+      have hat : a ∈ t := (List.mem_cons.mp ha).resolve_left (fun h => hab h)
+      rw [hbz, add_zero_left]
+      exact ih f hat hndt (fun i hi hia => hz i (List.mem_cons_of_mem _ hi) hia)
+
+/-- **`φ` is unital.** Any QF value that *represents* the rational `1` — coefficient `0` equal
+    to the denominator, all other coefficients `0` — with nonzero denominator maps to `R.one`.
+    This is the den-aware mathematical content of the `hunit` law of a guarded `QFTransfer`:
+    `evalNum` collapses to `ofInt d.2` (only the `r 0 = 1` term survives), then `mul_inv` closes. -/
+theorem phi_unit (d : QF) (h0 : gi d.1 0 = d.2)
+    (hrest : ∀ i, i < 16 → i ≠ 0 → gi d.1 i = 0) (hd : d.2 ≠ 0) :
+    phi d = R.one := by
+  have hev : (evalNum d.1 : R.F) = ofInt d.2 := by
+    unfold evalNum
+    rw [fsum_single 0 (List.range 16) (fun i => R.mul (ofInt (gi d.1 i)) (r i))
+        (by simp) List.nodup_range
+        (fun i hi hi0 => by
+          show R.mul (ofInt (gi d.1 i)) (r i) = R.zero
+          rw [hrest i (List.mem_range.mp hi) hi0,
+            show (ofInt (0 : Int) : R.F) = R.zero from rfl, mul_zero_left]),
+      h0, r_zero, R.mul_one]
+  unfold phi
+  rw [hev, R.mul_inv _ (ofInt_ne_zero hd)]
+
 #print axioms SounioMultiquadHom.evalNum_qmul
+#print axioms SounioMultiquadHom.phi_unit
 #print axioms SounioMultiquadHom.phi_qmul
 #print axioms SounioMultiquadHom.phi_qadd
 #print axioms SounioMultiquadHom.phi_qsub
 
-#eval IO.println "SounioMultiquadHom: PROVED evalNum_qmul + fraction hom φ:QF→F with guarded ring-hom laws phi_qmul/phi_qadd/phi_qsub (Mathlib-free fsum library + generator_law + perm_range_xor reindex + char-0 inverse toolkit)."
+#eval IO.println "SounioMultiquadHom: PROVED evalNum_qmul + fraction hom φ:QF→F as a UNITAL ring homomorphism — guarded laws phi_qmul/phi_qadd/phi_qsub + phi_unit (φ sends any QF representing 1 with nonzero denominator to R.one). Mathlib-free fsum library + generator_law + perm_range_xor reindex + char-0 inverse toolkit."

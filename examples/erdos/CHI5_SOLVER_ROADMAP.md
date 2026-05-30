@@ -330,10 +330,17 @@ so denominators are invertible). **Done this iteration** in `SounioSqrtField.lea
    with `phi_qmul`/`phi_qadd`/`phi_qsub` proved under the `den ≠ 0` guard (numerator-linearity
    `evalNum_qadd`/`evalNum_qsub` + field fraction identities `frac_add`/`frac_sub`). `phi_qadd`/
    `phi_qsub` `[propext, Quot.sound]`; `phi_qmul` inherits the `perm_range_xor` certs.
+   **Unital law also DONE (2026-05-30)**: `phi_unit` — any QF representing the rational `1`
+   (coeff₀ = den, all other coeffs `0`, den ≠ 0) maps to `R.one`, via the summand-isolation lemma
+   `fsum_single` + `r_zero` + `mul_inv`. So **φ is a complete UNITAL ring homomorphism QF→F**:
+   `phi_qmul`/`phi_qadd`/`phi_qsub` supply `hmul`/`hadd`/`hsub`, and `phi_unit` supplies `hunit`.
 5. **Remaining gap (two pieces).** (a) **Guard `QFTransfer`**: its `hadd/hmul/hsub` quantify over *all*
-   QF (the den=0 impossibility); thread a `qfWf x := x.2 ≠ 0 ∧ x.1.length = 16` guard and reprove
-   `geom_transfer`/`chi_ge_5` (the De Grey `emb v` values are well-formed rationals, so the guard
-   discharges on the edge set). With the guard, `phi_*` plug straight into `hadd/hmul/hsub`.
+   QF (the den=0 impossibility); thread a `qfWf x := x.2 ≠ 0` guard and reprove `geom_transfer`/`chi_ge_5`
+   — the De Grey `emb v` denominators are all nonzero (`X`/`Y` tables use 1, 2, 3, 6, …; default `1`)
+   and `den` is multiplicative, so the guard discharges on the edge set; one namespace-bridge layer is
+   needed because the geometry's `qadd`/`qmul`/`gi`/`isOne` live in `DeGrey529` while φ is built over the
+   `MultiquadRing` copies (identical bodies ⇒ defeq). With the guard, `phi_*`/`phi_unit` plug straight
+   into `hadd`/`hmul`/`hsub`/`hunit`.
    (b) **`SqrtField ℝ` instance** — the sole *analytic* gap: ℝ as an ordered field with √. Mathlib
    gives it in one line; a Mathlib-free witness needs completing the in-tree Cauchy reals
    (`SounioRealCauchy` defers `mul_le_mul_of_nonneg_right` ≈500–1000 LOC + `OrderedCarrierObligation`)

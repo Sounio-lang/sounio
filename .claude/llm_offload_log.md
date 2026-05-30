@@ -1,5 +1,20 @@
 # LLM Offload Log
 
+## 2026-05-30: φ is unital — phi_unit (QF representing 1 ↦ R.one)
+
+- **Claim**: `formal/lean4/SounioMultiquadHom.lean` adds the unital law `phi_unit`: any QF value `d`
+  with `gi d.1 0 = d.2`, all other coefficients `0`, and `d.2 ≠ 0` satisfies `phi d = R.one`. Proof:
+  a summand-isolation lemma `fsum_single` (vanishing-off-one-index ⇒ `fsum` collapses to that term)
+  reduces `evalNum d.1` to the surviving `r 0 = R.one` term (`r_zero`), giving `evalNum d.1 = ofInt d.2`;
+  then `phi d = mul (ofInt d.2) (inv (ofInt d.2)) = R.one` by `mul_inv` (needs `d.2 ≠ 0`). This is the
+  den-aware mathematical content of the `hunit` law a guarded `QFTransfer` SqrtField instance requires;
+  with phi_qmul/phi_qadd/phi_qsub it makes φ a complete **unital ring homomorphism** QF→F. Axioms
+  `[propext, Classical.choice, Quot.sound]` (Classical.choice from `by_cases` in `fsum_single`; no
+  native_decide, no sorry). `lake build` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "phi_unit — fsum_single correctly isolates the r_0 term under the stated coefficient hypotheses;
+  mul_inv closes. NO MATHEMATICAL ERRORS OR OVERREACHES. All downstream claims hold."
+
 ## 2026-05-30: fraction homomorphism φ:QF→F — guarded ring-hom laws (phi_qmul/qadd/qsub)
 
 - **Claim**: `formal/lean4/SounioMultiquadHom.lean` adds the den-aware fraction map
@@ -222,6 +237,7 @@
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSqrtField.lean (ℤ→F hom) | PASS | ofInt_neg/ofInt_add/ofInt_mul — ℤ→F is a ring homomorphism (Int constructor case analysis + directed helpers). Grok: "all proofs discharge from the axioms; no hidden axioms or sorry". Axioms [propext, Quot.sound]. |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean | PASS | evalNum_qmul — QF numerator convolution → SqrtField radical-sum product, via from-scratch Mathlib-free fsum library + generator_law + perm_range_xor XOR reindex. Grok: "fsum lemmas, W_eq, ofInt_qmulCoeff, generator_law and fsum_xor steps compose to a valid equational proof of the ring-homomorphism identity; no leaps visible". New code axioms [propext, Quot.sound]. |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean (φ frac hom) | PASS | fraction map φ(c,d)=(Σcᵢrᵢ)·inv(ofInt d) + guarded ring-hom laws phi_qmul/phi_qadd/phi_qsub (den≠0), via evalNum_qadd/qsub + frac_add/frac_sub. Grok: "hypotheses (denominators ≠0) necessary and sufficient; frac_add/frac_sub supply the exact field identities. NO MATHEMATICAL ERRORS COMPOUNDING DOWNSTREAM". phi_qadd/qsub [propext, Quot.sound]; phi_qmul inherits perm_range_xor certs. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean (phi_unit) | PASS | unital law phi_unit: QF representing 1 (coeff₀=den, rest 0, den≠0) ↦ R.one, via fsum_single summand-isolation + r_zero + mul_inv. Grok: "fsum_single correctly isolates the r_0 term under the stated coefficient hypotheses; mul_inv closes. NO MATHEMATICAL ERRORS OR OVERREACHES". Axioms [propext, Classical.choice, Quot.sound]. |
 
 ## 2026-05-29: FLAGSHIP V-track — geometry leg machine-checked in Lean 4 + LRAT
 
