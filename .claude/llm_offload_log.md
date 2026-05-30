@@ -1,5 +1,26 @@
 # LLM Offload Log
 
+## 2026-05-30: guarded abstract transfer — χ(F²)≥5 for EVERY SqrtField F (Mathlib-free)
+
+- **Claim**: `formal/lean4/SounioDeGreyChi5TransferWf.lean` packages the QF→F transfer with the
+  well-formedness guard `qfWf x := x.2 ≠ 0` on the homomorphism laws (`QFTransferWf`), proves
+  `geom_transfer_wf` (every G₅₂₉ edge lands at `T.unit`, threading the guard through the squared
+  distance via `qfWf_qsub`/`qfWf_qmul`/`qfWf_qadd` since each op carries denominator `x.2*y.2`) and
+  `chi_ge_5_wf`. `emb_den_ne_zero` discharges the guard on the whole edge set (`native_decide` that
+  every entry of the De Grey coordinate arrays `X`/`Y` has nonzero `.2`, + default `1`). The
+  `SqrtField` instance `sqrtTransfer R` plugs the proved fraction homomorphism
+  (`phi_qadd`/`phi_qmul`/`phi_qsub`/`phi_unit`) straight into the four structure laws — the
+  geometry's `DeGrey529.qadd/qmul/gi/isOne` and φ's byte-identical `MultiquadRing` copies are
+  definitionally equal, so no bridge lemmas are needed. Result: `sqrtField_chi_ge_5` —
+  **χ(F²) ≥ 5 for every `SqrtField` F**, axioms `[propext, Classical.choice, Quot.sound]` + the
+  legitimate `native_decide` certificates (`perm_range_xor`, `geom_all_edges_unitFP`, `allX_ne`,
+  `allY_ne`); **no sorryAx**. The only remaining input to χ(ℝ²)≥5 is the analytic "ℝ is a `SqrtField`".
+  `lake build SounioDeGreyChi5TransferWf` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "geom_transfer_wf — guarded homs applied exactly once per subexpression; final hunit discharges
+  on the unitFP certificate. sqrtTransfer + sqrtField_chi_ge_5 — only external assumption is 'R is
+  SqrtField'. NO MATHEMATICAL LEAPS OR GAPS IN THE FORMAL CLAIMS."
+
 ## 2026-05-30: φ is unital — phi_unit (QF representing 1 ↦ R.one)
 
 - **Claim**: `formal/lean4/SounioMultiquadHom.lean` adds the unital law `phi_unit`: any QF value `d`
@@ -238,6 +259,7 @@
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean | PASS | evalNum_qmul — QF numerator convolution → SqrtField radical-sum product, via from-scratch Mathlib-free fsum library + generator_law + perm_range_xor XOR reindex. Grok: "fsum lemmas, W_eq, ofInt_qmulCoeff, generator_law and fsum_xor steps compose to a valid equational proof of the ring-homomorphism identity; no leaps visible". New code axioms [propext, Quot.sound]. |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean (φ frac hom) | PASS | fraction map φ(c,d)=(Σcᵢrᵢ)·inv(ofInt d) + guarded ring-hom laws phi_qmul/phi_qadd/phi_qsub (den≠0), via evalNum_qadd/qsub + frac_add/frac_sub. Grok: "hypotheses (denominators ≠0) necessary and sufficient; frac_add/frac_sub supply the exact field identities. NO MATHEMATICAL ERRORS COMPOUNDING DOWNSTREAM". phi_qadd/qsub [propext, Quot.sound]; phi_qmul inherits perm_range_xor certs. |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean (phi_unit) | PASS | unital law phi_unit: QF representing 1 (coeff₀=den, rest 0, den≠0) ↦ R.one, via fsum_single summand-isolation + r_zero + mul_inv. Grok: "fsum_single correctly isolates the r_0 term under the stated coefficient hypotheses; mul_inv closes. NO MATHEMATICAL ERRORS OR OVERREACHES". Axioms [propext, Classical.choice, Quot.sound]. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioDeGreyChi5TransferWf.lean | PASS | guarded abstract transfer: χ(F²)≥5 for EVERY SqrtField F (Mathlib-free). QFTransferWf (den≠0 guard) + geom_transfer_wf + chi_ge_5_wf + emb_den_ne_zero (native_decide X/Y dens nonzero) + sqrtTransfer instance from phi_*/phi_unit. Grok: "guarded homs applied exactly once per subexpression; final hunit discharges on unitFP certificate; sqrtField_chi_ge_5 only external assumption is 'R is SqrtField'. NO MATHEMATICAL LEAPS OR GAPS". Axioms [propext, Classical.choice, Quot.sound] + native certs; no sorryAx. |
 
 ## 2026-05-29: FLAGSHIP V-track — geometry leg machine-checked in Lean 4 + LRAT
 

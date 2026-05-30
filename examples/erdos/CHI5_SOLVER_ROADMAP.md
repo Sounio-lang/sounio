@@ -334,20 +334,24 @@ so denominators are invertible). **Done this iteration** in `SounioSqrtField.lea
    (coeff₀ = den, all other coeffs `0`, den ≠ 0) maps to `R.one`, via the summand-isolation lemma
    `fsum_single` + `r_zero` + `mul_inv`. So **φ is a complete UNITAL ring homomorphism QF→F**:
    `phi_qmul`/`phi_qadd`/`phi_qsub` supply `hmul`/`hadd`/`hsub`, and `phi_unit` supplies `hunit`.
-5. **Remaining gap (two pieces).** (a) **Guard `QFTransfer`**: its `hadd/hmul/hsub` quantify over *all*
-   QF (the den=0 impossibility); thread a `qfWf x := x.2 ≠ 0` guard and reprove `geom_transfer`/`chi_ge_5`
-   — the De Grey `emb v` denominators are all nonzero (`X`/`Y` tables use 1, 2, 3, 6, …; default `1`)
-   and `den` is multiplicative, so the guard discharges on the edge set; one namespace-bridge layer is
-   needed because the geometry's `qadd`/`qmul`/`gi`/`isOne` live in `DeGrey529` while φ is built over the
-   `MultiquadRing` copies (identical bodies ⇒ defeq). With the guard, `phi_*`/`phi_unit` plug straight
-   into `hadd`/`hmul`/`hsub`/`hunit`.
-   (b) **`SqrtField ℝ` instance** — the sole *analytic* gap: ℝ as an ordered field with √. Mathlib
-   gives it in one line; a Mathlib-free witness needs completing the in-tree Cauchy reals
+5. **Guarded transfer — DONE (2026-05-30)** in `SounioDeGreyChi5TransferWf.lean`. `QFTransferWf`
+   packages the transfer with the guard `qfWf x := x.2 ≠ 0` on `hadd/hmul/hsub/hunit`; `geom_transfer_wf`
+   threads the guard through the squared distance (each of `qadd`/`qmul`/`qsub` carries denominator
+   `x.2*y.2`, so `qfWf` is preserved); `emb_den_ne_zero` discharges it on the whole edge set
+   (`native_decide`: every `X`/`Y` coordinate has nonzero denominator; default `1`). The `SqrtField`
+   instance `sqrtTransfer R` plugs `phi_qadd`/`phi_qmul`/`phi_qsub`/`phi_unit` straight into the four
+   laws — the geometry's `DeGrey529.*` and φ's byte-identical `MultiquadRing.*` are **definitionally
+   equal**, so no bridge lemmas were needed. **`sqrtField_chi_ge_5` : χ(F²) ≥ 5 for EVERY `SqrtField` F**,
+   Mathlib-free, axioms `[propext, Classical.choice, Quot.sound]` + the legitimate `native_decide`
+   certs (`perm_range_xor`, `geom_all_edges_unitFP`, `allX_ne`, `allY_ne`); **no sorryAx**.
+6. **The sole remaining gap: the analytic `SqrtField ℝ` instance** — ℝ as an ordered field with √.
+   Mathlib gives it in one line; a Mathlib-free witness needs completing the in-tree Cauchy reals
    (`SounioRealCauchy` defers `mul_le_mul_of_nonneg_right` ≈500–1000 LOC + `OrderedCarrierObligation`)
    and a constructive √ (completeness/sup). This is multi-week and is the honest remaining frontier.
-   Then `QFTransfer.chi_ge_5 (ℝ-instance) g529_not_colourable` is **χ(ℝ²) ≥ 5** — SAT leg, geometry
-   certificate, generator law, char-0 toolkit, and the **full QF→F ring homomorphism** are closed
-   in core Lean; only the ℝ-model satisfiability of the `SqrtField` axioms remains.
+   Once `(R := ℝ)` is supplied, `sqrtField_chi_ge_5 ℝ g529_not_colourable` is **χ(ℝ²) ≥ 5** — SAT leg,
+   geometry certificate, generator law, char-0 toolkit, the **full QF→F unital ring homomorphism**, and
+   the **abstract χ(F²)≥5 transfer** are all closed in core Lean; only the ℝ-model satisfiability of the
+   `SqrtField` axioms remains.
 
 ## 1b. Implemented & gated this iteration — `examples/erdos/souc_sat.sio`
 

@@ -194,6 +194,13 @@ lean_lib «SounioDeGreyChi5Closed» where
 -- SounioDeGreyChi5Concrete (~3 min native_decide); `lake build SounioDeGreyChi5Transfer`.
 lean_lib «SounioDeGreyChi5Transfer» where
 
+-- Guarded abstract transfer: χ(F²)≥5 for EVERY SqrtField F (Mathlib-free). Packages the
+-- transfer with the den≠0 well-formedness guard the proved fraction homomorphism satisfies
+-- (SounioMultiquadHom.phi_qmul/qadd/qsub/phi_unit), discharges the guard on the de Grey
+-- edge set (all emb denominators nonzero), and exhibits the SqrtField instance. The sole
+-- remaining χ(ℝ²)≥5 input is the analytic 'ℝ is a SqrtField'. `lake build SounioDeGreyChi5TransferWf`.
+lean_lib «SounioDeGreyChi5TransferWf» where
+
 -- M1: Vancomycin-Knightian thrust — Approx × Causal × Knowledge composition
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where
