@@ -229,6 +229,10 @@ lean_lib «SounioRootedFieldReal» where
 -- homomorphism phi/evalNum (16 integer coeffs over r i). `lake build SounioMultiquadFaithful`.
 lean_lib «SounioMultiquadFaithful» where
 
+-- Single-entry showcase tying together the four pillars (any-RootedField χ≥5 sharp theorem +
+-- chi_R2_ge_5_unconditional + indep8 + evalNum_faithful_on_support). `lake build DeGreyChi5Vitrine`.
+lean_lib «DeGreyChi5Vitrine» where
+
 lean_lib «SounioMultiquadIndep» where
 
 -- χ≥5 UNCONDITIONAL over Mathlib-free ℝ: feeds the discharged SAT leg
