@@ -1,5 +1,6 @@
 import SounioSqrtFieldReal
 import SounioNewtonSqrtImpl
+import SounioRootedFieldReal
 
 set_option maxHeartbeats 400000
 
@@ -214,5 +215,173 @@ theorem sqrt_radicand_irrational (m : Nat)
 #print axioms no_rat_sqrt
 #print axioms ofRat_inj
 #print axioms sqrt_radicand_irrational
+
+/-! ## 5. Linear independence of `{1, √3}`: base case `√5 ∉ ℚ(√3)`.
+
+    We work in the Mathlib-free Cauchy-quotient reals `Real := Quotient realSetoid` assembled in
+    `SounioRootedFieldReal`, with the rational embedding `qR q := mkR (ofRat q)` and the first
+    Newton root `rootR 0 = √3` (since `primeNatLit 0 = 3`).
+
+    The deliverable is `sqrt5_not_in_Q_sqrt3`: no `a + b√3` (a,b ∈ ℚ) squares to `5`. Its heart is
+    `indep_1_R3`, the ℚ-linear independence of `{1, √3}`. -/
+
+/-- The rational embedding into the quotient reals: class of the constant Cauchy sequence. -/
+def qR (q : Rat) : Real := mkR (SounioRealCauchy.ofRat q)
+
+/-- `qR` is additive (constant sequences add pointwise). -/
+theorem qR_add (x y : Rat) : addR (qR x) (qR y) = qR (x + y) := by
+  show mkR (addC (SounioRealCauchy.ofRat x) (SounioRealCauchy.ofRat y))
+      = mkR (SounioRealCauchy.ofRat (x + y))
+  exact mk_eq_of_seq_eq (fun _ => rfl)
+
+/-- `qR` is multiplicative (constant sequences multiply pointwise). -/
+theorem qR_mul (x y : Rat) : mulR (qR x) (qR y) = qR (x * y) := by
+  show mkR (mulC (SounioRealCauchy.ofRat x) (SounioRealCauchy.ofRat y))
+      = mkR (SounioRealCauchy.ofRat (x * y))
+  exact mk_eq_of_seq_eq (fun _ => rfl)
+
+/-- `qR 0` is the additive identity (`zero` is literally `ofRat 0`). -/
+theorem qR_zero : qR 0 = zeroR' := rfl
+
+/-- `qR 1` is the multiplicative identity (`one` is literally `ofRat 1`). -/
+theorem qR_one : qR 1 = oneR := rfl
+
+/-- Negation commutes with the embedding (`negC` negates the constant sequence pointwise). -/
+theorem qR_neg (p : Rat) : negR (qR p) = qR (-p) := by
+  show mkR (negC (SounioRealCauchy.ofRat p)) = mkR (SounioRealCauchy.ofRat (-p))
+  exact mk_eq_of_seq_eq (fun _ => rfl)
+
+/-- The embedding is injective: from `qR x = qR y` recover `x = y` via `Quotient.exact` and
+    `ofRat_inj`. -/
+theorem qR_inj {x y : Rat} (h : qR x = qR y) : x = y := by
+  apply ofRat_inj
+  exact Quotient.exact h
+
+/-- Zero annihilates on the left in the quotient ring. -/
+theorem zeroR'_mul (x : Real) : mulR zeroR' x = zeroR' := by
+  refine Quotient.inductionOn x (fun a => ?_)
+  exact mk_eq_of_seq_eq (fun n => Rat.zero_mul (a.seq n))
+
+/-- Abelian regrouping `(w + x) + (x + z) = (w + z) + (x + x)`, from `addR_assoc`/`addR_comm`. -/
+theorem four_regroup (w x z : Real) :
+    addR (addR w x) (addR x z) = addR (addR w z) (addR x x) := by
+  rw [addR_assoc w x (addR x z), ← addR_assoc x x z, addR_comm (addR x x) z,
+      ← addR_assoc w z (addR x x)]
+
+/-- `Rat` cross-term identity: `a·b + a·b = 2·a·b`. -/
+theorem rat_cross (a b : Rat) : a * b + a * b = 2 * a * b := by
+  rw [show (2 : Rat) = 1 + 1 from by native_decide, Rat.add_mul, Rat.one_mul, Rat.add_mul]
+
+/-- `Rat` diagonal identity: `b·(b·3) = 3·(b·b)`. -/
+theorem rat_diag (b : Rat) : b * (b * 3) = 3 * (b * b) := by
+  rw [Rat.mul_comm b 3, ← Rat.mul_assoc b 3 b, Rat.mul_comm b 3, Rat.mul_assoc 3 b b]
+
+/-- `Rat` identity for the `a = 0` branch: `(3·b)·(3·b) = 3·(3·(b·b))`. -/
+theorem rat_three (b : Rat) : (3 * b) * (3 * b) = 3 * (3 * (b * b)) := by
+  rw [Rat.mul_assoc 3 b (3 * b), ← Rat.mul_assoc b 3 b, Rat.mul_comm b 3, Rat.mul_assoc 3 b b]
+
+/-- `Rat` has no zero divisors: multiply by the inverse of the nonzero factor. -/
+theorem rat_mul_eq_zero {a b : Rat} (h : a * b = 0) : a = 0 ∨ b = 0 := by
+  rcases Classical.em (a = 0) with ha | ha
+  · exact Or.inl ha
+  · refine Or.inr ?_
+    have h2 : a⁻¹ * (a * b) = a⁻¹ * 0 := by rw [h]
+    rw [← Rat.mul_assoc, Rat.mul_comm a⁻¹ a, Rat.mul_inv_cancel a ha, Rat.one_mul,
+        Rat.mul_zero] at h2
+    exact h2
+
+/-- `(√3)² = 3` in the quotient reals: `rootR_sq 0` collapsed through `rfOfNat_real` to `qR 3`. -/
+theorem R3_sq : mulR (rootR 0) (rootR 0) = qR 3 := by
+  rw [rootR_sq 0, rfOfNat_real (primeNatLit 0)]
+  have H : rfOfNat Rat.add 0 1 (primeNatLit 0) = (3 : Rat) := by native_decide
+  show mkR (SounioRealCauchy.ofRat (rfOfNat Rat.add 0 1 (primeNatLit 0)))
+      = mkR (SounioRealCauchy.ofRat (3 : Rat))
+  rw [H]
+
+/-- `√3` is irrational: it is not the embedding of any rational. (Squaring would give a rational
+    square root of `3`, impossible by `no_rat_sqrt 3`.) -/
+theorem R3_irrational : ¬ ∃ q : Rat, rootR 0 = qR q := by
+  intro hex
+  obtain ⟨q, hq⟩ := hex
+  have hsq : mulR (rootR 0) (rootR 0) = qR (q * q) := by rw [hq, qR_mul]
+  rw [R3_sq] at hsq
+  have h3 : (3 : Rat) = q * q := qR_inj hsq
+  apply no_rat_sqrt 3 (not_sq_radicand 3 (Or.inl rfl))
+  refine ⟨q, ?_⟩
+  rw [← h3]
+  native_decide
+
+/-- **The square expansion in `ℚ(√3)`.** `(a + b√3)² = (a² + 3b²) + (2ab)√3`. Proved by
+    `right`/`left` distributivity, collapsing the four cross terms with `mulR_assoc`/`mulR_comm`,
+    `R3_sq` (for `√3·√3 = 3`), and the embedding homomorphism lemmas `qR_mul`/`qR_add`, then a
+    single abelian regrouping (`four_regroup`) and the `Rat` coefficient identities. -/
+theorem E_sq (a b : Rat) :
+    mulR (addR (qR a) (mulR (qR b) (rootR 0))) (addR (qR a) (mulR (qR b) (rootR 0)))
+      = addR (qR (a * a + 3 * (b * b))) (mulR (qR (2 * a * b)) (rootR 0)) := by
+  have e1 : mulR (qR a) (qR a) = qR (a * a) := qR_mul a a
+  have e2 : mulR (qR a) (mulR (qR b) (rootR 0)) = mulR (qR (a * b)) (rootR 0) := by
+    rw [← mulR_assoc, qR_mul]
+  have e3 : mulR (mulR (qR b) (rootR 0)) (qR a) = mulR (qR (a * b)) (rootR 0) := by
+    rw [mulR_comm (mulR (qR b) (rootR 0)) (qR a), ← mulR_assoc, qR_mul]
+  have e4 : mulR (mulR (qR b) (rootR 0)) (mulR (qR b) (rootR 0)) = qR (3 * (b * b)) := by
+    rw [mulR_assoc, ← mulR_assoc (rootR 0) (qR b) (rootR 0), mulR_comm (rootR 0) (qR b),
+        mulR_assoc (qR b) (rootR 0) (rootR 0), R3_sq, qR_mul, qR_mul, rat_diag]
+  rw [rightDistribR, leftDistribR, leftDistribR, e1, e2, e3, e4, four_regroup, qR_add,
+      ← rightDistribR, qR_add, rat_cross]
+
+/-- **ℚ-linear independence of `{1, √3}`.** If `p + q√3 = r` with `p,q,r ∈ ℚ`, then `q = 0` and
+    `p = r`. The `q = 0` half is the crux: were `q ≠ 0`, isolating and dividing by `q` would
+    exhibit `√3` as a rational, contradicting `R3_irrational`. -/
+theorem indep_1_R3 (p q r : Rat)
+    (h : addR (qR p) (mulR (qR q) (rootR 0)) = qR r) : p = r ∧ q = 0 := by
+  have hq0 : q = 0 := by
+    refine Classical.byContradiction (fun hqne => ?_)
+    -- isolate the √3 term: q√3 = (-p + r)
+    have hM : mulR (qR q) (rootR 0) = qR (-p + r) := by
+      have hstep := congrArg (addR (negR (qR p))) h
+      rw [← addR_assoc, addR_comm (negR (qR p)) (qR p), addR_neg,
+          addR_comm zeroR' (mulR (qR q) (rootR 0)), addR_zero, qR_neg, qR_add] at hstep
+      exact hstep
+    -- divide by q on the left: √3 = q⁻¹·(-p + r), a rational — contradiction
+    have hqq : q⁻¹ * q = 1 := by rw [Rat.mul_comm]; exact Rat.mul_inv_cancel q hqne
+    have hmul := congrArg (mulR (qR q⁻¹)) hM
+    rw [← mulR_assoc, qR_mul, hqq, qR_one, mulR_comm oneR (rootR 0), mulR_one, qR_mul] at hmul
+    exact R3_irrational ⟨q⁻¹ * (-p + r), hmul⟩
+  have hpr : p = r := by
+    rw [hq0, qR_zero, zeroR'_mul, addR_zero] at h
+    exact qR_inj h
+  exact ⟨hpr, hq0⟩
+
+/-- **`√5 ∉ ℚ(√3)` — base case of the multiquadratic linear-independence tower.** No element
+    `a + b√3` of `ℚ(√3)` squares to `5`.
+
+    Expand the square with `E_sq` to `(a² + 3b²) + (2ab)√3 = 5`; linear independence
+    (`indep_1_R3`) forces `a² + 3b² = 5` and `2ab = 0`. As `ℚ` has no zero divisors and `2 ≠ 0`,
+    either `a = 0` (whence `(3b)² = 15`) or `b = 0` (whence `a² = 5`); both contradict the
+    irrationality core `no_rat_sqrt` on the non-squares `15` and `5`. -/
+theorem sqrt5_not_in_Q_sqrt3 :
+    ¬ ∃ a b : Rat,
+      mulR (addR (qR a) (mulR (qR b) (rootR 0)))
+           (addR (qR a) (mulR (qR b) (rootR 0))) = qR 5 := by
+  intro hex
+  obtain ⟨a, b, h⟩ := hex
+  rw [E_sq] at h
+  obtain ⟨hdiag, hcross⟩ := indep_1_R3 (a * a + 3 * (b * b)) (2 * a * b) 5 h
+  rcases rat_mul_eq_zero hcross with h2a | hb0
+  · -- 2·a = 0 ⇒ a = 0 (since 2 ≠ 0)
+    rcases rat_mul_eq_zero h2a with h2 | ha0
+    · exact absurd h2 (by native_decide : (2 : Rat) ≠ 0)
+    · -- a = 0 ⇒ 3·(b·b) = 5 ⇒ (3b)² = 15, contradicting no_rat_sqrt 15
+      rw [ha0, Rat.zero_mul, Rat.zero_add] at hdiag
+      have hb15 : (3 * b) * (3 * b) = (15 : Rat) := by
+        rw [rat_three b, hdiag]; native_decide
+      exact no_rat_sqrt 15 (not_sq_radicand 15 (Or.inr (Or.inr (Or.inr (Or.inl rfl)))))
+        ⟨3 * b, by rw [hb15]; native_decide⟩
+  · -- b = 0 ⇒ a·a = 5, contradicting no_rat_sqrt 5
+    rw [hb0, Rat.mul_zero, Rat.mul_zero, Rat.add_zero] at hdiag
+    exact no_rat_sqrt 5 (not_sq_radicand 5 (Or.inr (Or.inl rfl)))
+      ⟨a, by rw [hdiag]; native_decide⟩
+
+#print axioms sqrt5_not_in_Q_sqrt3
 
 end SounioSqrt.RealCauchyField
