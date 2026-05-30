@@ -64,16 +64,16 @@ theorem realEq_symm {a b : SounioRealCauchy} (h : RealEq a b) : RealEq b a := by
     exact h1
 
 /-- Difference splits across a midpoint: `x - z = (x - y) + (y - z)` over `Rat`. -/
-private theorem rat_sub_split (x y z : Rat) : x - z = (x - y) + (y - z) := by
+theorem rat_sub_split (x y z : Rat) : x - z = (x - y) + (y - z) := by
   rw [Rat.sub_eq_add_neg, Rat.sub_eq_add_neg, Rat.sub_eq_add_neg, Rat.add_assoc,
     ← Rat.add_assoc (-y) y (-z), Rat.add_comm (-y) y, Rat.add_neg_cancel, Rat.zero_add]
 
 /-- Half of a positive rational is positive. -/
-private theorem rat_half_pos {ε : Rat} (hε : 0 < ε) : 0 < ε * (1/2) :=
+theorem rat_half_pos {ε : Rat} (hε : 0 < ε) : 0 < ε * (1/2) :=
   Rat.mul_pos hε (by native_decide)
 
 /-- Two halves sum to the whole. -/
-private theorem rat_add_halves (ε : Rat) : ε * (1/2) + ε * (1/2) = ε := by
+theorem rat_add_halves (ε : Rat) : ε * (1/2) + ε * (1/2) = ε := by
   rw [← Rat.mul_add, show ((1:Rat)/2 + 1/2) = 1 from by native_decide, Rat.mul_one]
 
 /-- `RealEq` is **transitive**: the ε/2 triangle inequality over `Rat`. With `realEq_refl`/
@@ -106,7 +106,7 @@ theorem realEq_equivalence : Equivalence RealEq :=
 def realSetoid : Setoid SounioRealCauchy := ⟨RealEq, realEq_equivalence⟩
 
 /-- Sum-difference regroups: `(a+b) - (c+d) = (a-c) + (b-d)` over `Rat`. -/
-private theorem rat_add_sub_add (a b c d : Rat) : (a + b) - (c + d) = (a - c) + (b - d) := by
+theorem rat_add_sub_add (a b c d : Rat) : (a + b) - (c + d) = (a - c) + (b - d) := by
   rw [Rat.sub_eq_add_neg, Rat.sub_eq_add_neg, Rat.sub_eq_add_neg, Rat.neg_add,
     Rat.add_assoc a b (-c + -d), ← Rat.add_assoc b (-c) (-d), Rat.add_comm b (-c),
     Rat.add_assoc (-c) b (-d), ← Rat.add_assoc a (-c) (b + -d)]
@@ -140,16 +140,16 @@ theorem add_cauchy {f g : Nat → Rat} (hf : Sounio.RealCauchy.IsCauchy f)
     and product congruence. All Mathlib-free, built on the core `Rat` order API. -/
 
 /-- Add two `≤` inequalities. -/
-private theorem rat_add_le_add {a b c d : Rat} (h1 : a ≤ b) (h2 : c ≤ d) : a + c ≤ b + d :=
+theorem rat_add_le_add {a b c d : Rat} (h1 : a ≤ b) (h2 : c ≤ d) : a + c ≤ b + d :=
   Rat.le_trans (Rat.add_le_add_right.mpr h1) (Rat.add_le_add_left.mpr h2)
 
 /-- Sum of nonnegatives is nonnegative. -/
-private theorem rat_add_nonneg {a b : Rat} (ha : 0 ≤ a) (hb : 0 ≤ b) : 0 ≤ a + b := by
+theorem rat_add_nonneg {a b : Rat} (ha : 0 ≤ a) (hb : 0 ≤ b) : 0 ≤ a + b := by
   have h : (0 : Rat) + 0 ≤ a + b := rat_add_le_add ha hb
   rwa [Rat.add_zero] at h
 
 /-- Multiply two `≤` inequalities between nonnegatives. -/
-private theorem rat_mul_le_mul {a b c d : Rat}
+theorem rat_mul_le_mul {a b c d : Rat}
     (ha : 0 ≤ a) (hc : 0 ≤ c) (hab : a ≤ b) (hcd : c ≤ d) : a * c ≤ b * d :=
   Rat.le_trans (Rat.mul_le_mul_of_nonneg_right hab hc)
     (Rat.mul_le_mul_of_nonneg_left hcd (Rat.le_trans ha hab))
@@ -238,7 +238,7 @@ private theorem rat_mul_sub' (a b d : Rat) : a * b - a * d = a * (b - d) := by
 private theorem rat_sub_mul' (a c d : Rat) : a * d - c * d = (a - c) * d := by
   rw [Rat.sub_eq_add_neg a c, Rat.add_mul, Rat.neg_mul, ← Rat.sub_eq_add_neg]
 
-private theorem rat_mul_sub_mul (a b c d : Rat) : a * b - c * d = a * (b - d) + (a - c) * d := by
+theorem rat_mul_sub_mul (a b c d : Rat) : a * b - c * d = a * (b - d) + (a - c) * d := by
   rw [rat_sub_split (a * b) (a * d) (c * d), rat_mul_sub' a b d, rat_sub_mul' a c d]
 
 /-- `IsCauchy` in absolute-value form. -/
@@ -275,7 +275,7 @@ theorem cauchy_bounded {f : Nat → Rat} (hf : Sounio.RealCauchy.IsCauchy f) :
     exact Rat.add_le_add_right.mpr (neg_le_ratAbs (f N))
 
 /-- `(Bf+Bg+1) > 0` for nonnegative `Bf,Bg`. -/
-private theorem rat_K_pos {Bf Bg : Rat} (hBf : 0 ≤ Bf) (hBg : 0 ≤ Bg) : 0 < Bf + Bg + 1 := by
+theorem rat_K_pos {Bf Bg : Rat} (hBf : 0 ≤ Bf) (hBg : 0 ≤ Bg) : 0 < Bf + Bg + 1 := by
   have h01 : (0 : Rat) < 1 := by native_decide
   have hs : (0 : Rat) ≤ Bf + Bg := rat_add_nonneg hBf hBg
   have : (0 : Rat) + 1 ≤ (Bf + Bg) + 1 := Rat.add_le_add_right.mpr hs
@@ -283,7 +283,7 @@ private theorem rat_K_pos {Bf Bg : Rat} (hBf : 0 ≤ Bf) (hBg : 0 ≤ Bg) : 0 < 
   exact Std.lt_of_lt_of_le h01 this
 
 /-- The scaling identity `K · (ε · K⁻¹) = ε`. -/
-private theorem rat_K_delta {K ε : Rat} (hK : K ≠ 0) : K * (ε * K⁻¹) = ε := by
+theorem rat_K_delta {K ε : Rat} (hK : K ≠ 0) : K * (ε * K⁻¹) = ε := by
   rw [Rat.mul_comm ε K⁻¹, ← Rat.mul_assoc, Rat.mul_inv_cancel K hK, Rat.one_mul]
 
 /-- Core bound: with `|x|≤Bf`, `|u|≤δ`, `|v|≤δ`, `|y|≤Bg`, and `δ=ε·K⁻¹`, `K=Bf+Bg+1`, the sum

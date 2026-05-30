@@ -207,6 +207,21 @@ lean_lib «SounioDeGreyChi5TransferWf» where
 -- Discharging the ledger + sqrtField_chi_ge_5 yields χ(ℝ²)≥5. `lake build SounioSqrtFieldReal`.
 lean_lib «SounioSqrtFieldReal» where
 
+-- Phase 2b: multiplicative inverse on Cauchy-sequence reals (sequence level):
+-- invSeq + inv_cauchy + mul_inv_tendsto + inv_cong. `lake build SounioRealInverseImpl`.
+lean_lib «SounioRealInverseImpl» where
+
+-- Phase 2c: canonical ε-eventual order leR + order axioms (le_refl/trans/antisymm/total,
+-- add_le_add_right, mul_nonneg, zero_ne_one) at representative level. `lake build SounioRealOrderAxiomsImpl`.
+lean_lib «SounioRealOrderAxiomsImpl» where
+
+-- Phase 3: rational Newton √p sequences for p∈{3,5,7,11}: newton_ge_one + newton_sq_tendsto +
+-- newton_cauchy (CRUX 2, full convergence). `lake build SounioNewtonSqrtImpl`.
+lean_lib «SounioNewtonSqrtImpl» where
+
+-- Phase 2d + 4: assemble RootedField ℝ from the above and fire the de Grey transfer → χ(ℝ²)≥5.
+lean_lib «SounioRootedFieldReal» where
+
 -- M1: Vancomycin-Knightian thrust — Approx × Causal × Knowledge composition
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where
