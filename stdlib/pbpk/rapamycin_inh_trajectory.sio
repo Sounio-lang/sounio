@@ -1,0 +1,116 @@
+// stdlib/pbpk/rapamycin_inh_trajectory.sio — Sprint 56
+//
+// GUM-exact trough margin trajectory for the inhibitor stratum (strong CYP3A4
+// inhibitor, ke=0.002236 h⁻¹, F=0.282) at the standard dose D=1.5mg.
+// Fourth and final trajectory analysis: S49 (slow), S52 (fast), S55 (ind),
+// S56 (inh). Completes the five-stratum trajectory picture.
+//
+// The inhibitor stratum has ke=0.002236 h⁻¹ (half-life ≈ 310h ≈ 13 days),
+// so drug barely clears between 24h doses. Accumulation factor R≈19 means
+// near-SS requires ~56 doses to reach 95%. Unlike the inducer stratum (near-SS
+// by dose 6), the inhibitor trough builds slowly over weeks; both trough
+// accumulation AND GUM precision contraction drive margin growth.
+//
+// Finding A: n_crit — first day ind certifies; from coverage analysis, inh
+//            is CERT at standard N=7 so n_crit ≤ 7 (to be confirmed by probe).
+// Finding B: ceiling constraint — as trough climbs toward SS over weeks/months,
+//            the ceiling eventually binds; n_last_cert and cert_span quantify
+//            the safe window.
+// Finding C: trajectory contrast with inducer (S55) — opposite dynamics:
+//            ind reaches near-SS quickly (R≈1.35) and is GUM-precision limited;
+//            inh accumulates slowly (R≈19) and is trough-accumulation limited.
+// Finding D: peak margin day and magnitude — the peak occurs when the trough
+//            is optimally centered in the therapeutic window.
+
+module pbpk::rapamycin_inh_trajectory
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+fn iht_min2(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn iht_margin_at(n: i64) -> f64 with Mut, Div, Panic {
+    let ka  = ob_ka_var_std()
+    let fv  = ob_f_var_std()
+    let ke  = ob_ke_var_std()
+    let k12 = ob_k12_var_std()
+    let k21 = ob_k21_var_std()
+    let c   = as_trough_mg_l(1.5, n, 0.002236, 0.282)
+    let uc  = eu_u_c(1.5, n, 0.002236, 0.282, ka, fv, ke, k12, k21)
+    iht_min2((c - trough_floor_mg_l()) / uc, (trough_ceil_mg_l() - c) / uc)
+}
+
+// ── Named spot values ─────────────────────────────────────────────────────────
+pub fn iht_margin_n1()  -> f64 with Mut, Div, Panic { iht_margin_at(1)   }
+pub fn iht_margin_n3()  -> f64 with Mut, Div, Panic { iht_margin_at(3)   }
+pub fn iht_margin_n5()  -> f64 with Mut, Div, Panic { iht_margin_at(5)   }
+pub fn iht_margin_n7()  -> f64 with Mut, Div, Panic { iht_margin_at(7)   }
+pub fn iht_margin_n14() -> f64 with Mut, Div, Panic { iht_margin_at(14)  }
+pub fn iht_margin_n21() -> f64 with Mut, Div, Panic { iht_margin_at(21)  }
+pub fn iht_margin_n28() -> f64 with Mut, Div, Panic { iht_margin_at(28)  }
+pub fn iht_margin_n42() -> f64 with Mut, Div, Panic { iht_margin_at(42)  }
+pub fn iht_margin_n56() -> f64 with Mut, Div, Panic { iht_margin_at(56)  }
+pub fn iht_margin_n84() -> f64 with Mut, Div, Panic { iht_margin_at(84)  }
+pub fn iht_margin_n120() -> f64 with Mut, Div, Panic { iht_margin_at(120) }
+
+// ── Scanner: first N (1..200) where inh certifies at D=1.5mg ─────────────────
+pub fn iht_n_crit() -> i64 with Mut, Div, Panic {
+    var n      = 1
+    var result = 0
+    while n <= 200 {
+        if iht_margin_at(n) >= 2.0 && result == 0 { result = n };
+        n = n + 1
+    }
+    result
+}
+
+// ── Scanner: last N (1..200) where inh certifies at D=1.5mg ──────────────────
+pub fn iht_n_last_cert() -> i64 with Mut, Div, Panic {
+    var n    = 1
+    var last = 0
+    while n <= 200 {
+        if iht_margin_at(n) >= 2.0 { last = n };
+        n = n + 1
+    }
+    last
+}
+
+// ── Scanner: argmax N of margin in 1..200 ────────────────────────────────────
+pub fn iht_n_peak() -> i64 with Mut, Div, Panic {
+    var n      = 1
+    var best_n = 1
+    var best_m = iht_margin_at(1)
+    while n <= 200 {
+        let m = iht_margin_at(n)
+        if m > best_m { best_n = n };
+        if m > best_m { best_m = m };
+        n = n + 1
+    }
+    best_n
+}
+
+pub fn iht_margin_peak() -> f64 with Mut, Div, Panic {
+    iht_margin_at(iht_n_peak())
+}
+
+// ── Derived metrics ───────────────────────────────────────────────────────────
+pub fn iht_ncrit_lead() -> i64 with Mut, Div, Panic {
+    iht_n_crit() - 1
+}
+
+pub fn iht_cert_span() -> i64 with Mut, Div, Panic {
+    iht_n_last_cert() - iht_n_crit()
+}
+
+pub fn iht_peak_lag() -> i64 with Mut, Div, Panic {
+    iht_n_peak() - iht_n_crit()
+}
+
+// Margin gain from N=7 to N=56 (accumulation + GUM precision combined)
+pub fn iht_margin_gain_n7_to_n56() -> f64 with Mut, Div, Panic {
+    iht_margin_at(56) - iht_margin_at(7)
+}

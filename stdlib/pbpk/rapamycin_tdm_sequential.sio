@@ -1,0 +1,147 @@
+// stdlib/pbpk/rapamycin_tdm_sequential.sio — Sprint 70
+//
+// Sequential k-measurement TDM update for the std stratum (N=7 and N=14).
+// GUM k-measurement posterior: 1/u_post_k² = 1/u_pk² + k/u_assay²
+//   => u_post_k = 1 / sqrt(1/u_pk² + k/u_assay²)
+//   => gain_k   = sqrt(1 + k × (u_pk/u_assay)²)
+//
+// Measurement equivalence: how many immunoassay measurements equal one LCMS?
+//   k_eq = (u_immuno/u_lcms)² = (CV_immuno/CV_lcms)² = (0.15/0.05)² = 9
+//   This is exact and invariant with N (both u_assay ∝ CV × C, ratio cancels).
+//
+// Findings (probe-verified):
+//   A: LCMS gains at N=7: k=1→2.848, k=2→3.901, k=3→4.725 — √(1+k×7.1) law.
+//      Diminishing returns: 2nd LCMS adds +1.05× gain, 3rd adds +0.82×.
+//   B: Immuno gains at N=7: k=1→1.338, k=2→1.606, k=3→1.836, k=9→2.848.
+//      2nd immuno adds only +0.27× gain — very flat marginal return.
+//   C: EQUIVALENCE (machine-exact): immuno k=9 gain == LCMS k=1 gain at BOTH N=7 and N=14
+//      (diff = 0.000000). Proves k_eq = (CV_immuno/CV_lcms)² = 9 exactly, N-invariant.
+//   D: Posterior margins at N=7: LCMS k=1:8.03, k=2:11.00, k=3:13.33.
+//      Immuno k=9:8.03 (matches LCMS k=1 exactly).
+//   E: Immuno k=3 margin=5.18 — three immuno measurements still WELL below one LCMS (8.03).
+//   F: At N=14: LCMS k=1:2.09, immuno k=9:2.09 (equivalence confirmed).
+//      LCMS gains lower at N=14 because u_lcms/u_pk ratio grows as C rises toward ceiling.
+//   G: Diminishing returns are less severe for immuno (flat, 0.27/0.23) vs LCMS (1.05/0.82)
+//      because immuno has lower signal-to-model ratio (u_pk/u_immuno < 1).
+
+module pbpk::rapamycin_tdm_sequential
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+fn ts_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+fn ts_min2(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+// ── Std stratum parameters ────────────────────────────────────────────────────
+fn ts_d()  -> f64 { 5.0     }
+fn ts_ke() -> f64 { 0.01118 }
+fn ts_fv() -> f64 { 0.141   }
+
+// ── CV ratio squared: (CV_immuno / CV_lcms)² — theoretical equivalence count ─
+pub fn ts_cv_ratio_sq() -> f64 { 9.0 }  // (0.15/0.05)² = 9 exactly
+
+// ── Prior trough and u_pk ─────────────────────────────────────────────────────
+fn ts_c(n: i64) -> f64 with Mut, Div, Panic {
+    as_trough_mg_l(ts_d(), n, ts_ke(), ts_fv())
+}
+fn ts_u_pk(n: i64) -> f64 with Mut, Div, Panic {
+    eu_u_c(ts_d(), n, ts_ke(), ts_fv(),
+           ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+           ob_k12_var_std(), ob_k21_var_std())
+}
+fn ts_u_lcms(n: i64)   -> f64 with Mut, Div, Panic { 0.05 * ts_c(n) }
+fn ts_u_immuno(n: i64) -> f64 with Mut, Div, Panic { 0.15 * ts_c(n) }
+
+// ── k-measurement posterior: u_post_k = 1/sqrt(1/u_pk² + k/u_assay²) ─────────
+fn ts_u_post_k(u_pk: f64, u_assay: f64, k: f64) -> f64 with Mut, Div, Panic {
+    let sum = 1.0 / (u_pk * u_pk) + k / (u_assay * u_assay)
+    1.0 / ts_sqrt(sum)
+}
+
+fn ts_gain_k(u_pk: f64, u_post: f64) -> f64 with Mut, Div, Panic { u_pk / u_post }
+
+// ── LCMS k=1,2,3 at N=7 ──────────────────────────────────────────────────────
+pub fn ts_u_post_lcms_k1_n7() -> f64 with Mut, Div, Panic { ts_u_post_k(ts_u_pk(7), ts_u_lcms(7), 1.0) }
+pub fn ts_u_post_lcms_k2_n7() -> f64 with Mut, Div, Panic { ts_u_post_k(ts_u_pk(7), ts_u_lcms(7), 2.0) }
+pub fn ts_u_post_lcms_k3_n7() -> f64 with Mut, Div, Panic { ts_u_post_k(ts_u_pk(7), ts_u_lcms(7), 3.0) }
+
+pub fn ts_gain_lcms_k1_n7() -> f64 with Mut, Div, Panic { ts_gain_k(ts_u_pk(7), ts_u_post_lcms_k1_n7()) }
+pub fn ts_gain_lcms_k2_n7() -> f64 with Mut, Div, Panic { ts_gain_k(ts_u_pk(7), ts_u_post_lcms_k2_n7()) }
+pub fn ts_gain_lcms_k3_n7() -> f64 with Mut, Div, Panic { ts_gain_k(ts_u_pk(7), ts_u_post_lcms_k3_n7()) }
+
+// ── Immuno k=1,2,3,9 at N=7 ──────────────────────────────────────────────────
+pub fn ts_u_post_immuno_k1_n7() -> f64 with Mut, Div, Panic { ts_u_post_k(ts_u_pk(7), ts_u_immuno(7), 1.0) }
+pub fn ts_u_post_immuno_k2_n7() -> f64 with Mut, Div, Panic { ts_u_post_k(ts_u_pk(7), ts_u_immuno(7), 2.0) }
+pub fn ts_u_post_immuno_k3_n7() -> f64 with Mut, Div, Panic { ts_u_post_k(ts_u_pk(7), ts_u_immuno(7), 3.0) }
+pub fn ts_u_post_immuno_k9_n7() -> f64 with Mut, Div, Panic { ts_u_post_k(ts_u_pk(7), ts_u_immuno(7), 9.0) }
+
+pub fn ts_gain_immuno_k1_n7() -> f64 with Mut, Div, Panic { ts_gain_k(ts_u_pk(7), ts_u_post_immuno_k1_n7()) }
+pub fn ts_gain_immuno_k2_n7() -> f64 with Mut, Div, Panic { ts_gain_k(ts_u_pk(7), ts_u_post_immuno_k2_n7()) }
+pub fn ts_gain_immuno_k3_n7() -> f64 with Mut, Div, Panic { ts_gain_k(ts_u_pk(7), ts_u_post_immuno_k3_n7()) }
+pub fn ts_gain_immuno_k9_n7() -> f64 with Mut, Div, Panic { ts_gain_k(ts_u_pk(7), ts_u_post_immuno_k9_n7()) }
+
+// ── LCMS k=1,2,3 at N=14 ─────────────────────────────────────────────────────
+pub fn ts_u_post_lcms_k1_n14() -> f64 with Mut, Div, Panic { ts_u_post_k(ts_u_pk(14), ts_u_lcms(14), 1.0) }
+pub fn ts_u_post_lcms_k2_n14() -> f64 with Mut, Div, Panic { ts_u_post_k(ts_u_pk(14), ts_u_lcms(14), 2.0) }
+pub fn ts_u_post_lcms_k3_n14() -> f64 with Mut, Div, Panic { ts_u_post_k(ts_u_pk(14), ts_u_lcms(14), 3.0) }
+
+pub fn ts_gain_lcms_k1_n14() -> f64 with Mut, Div, Panic { ts_gain_k(ts_u_pk(14), ts_u_post_lcms_k1_n14()) }
+pub fn ts_gain_lcms_k2_n14() -> f64 with Mut, Div, Panic { ts_gain_k(ts_u_pk(14), ts_u_post_lcms_k2_n14()) }
+pub fn ts_gain_lcms_k3_n14() -> f64 with Mut, Div, Panic { ts_gain_k(ts_u_pk(14), ts_u_post_lcms_k3_n14()) }
+
+// ── Immuno k=1,2,3,9 at N=14 ─────────────────────────────────────────────────
+pub fn ts_u_post_immuno_k1_n14() -> f64 with Mut, Div, Panic { ts_u_post_k(ts_u_pk(14), ts_u_immuno(14), 1.0) }
+pub fn ts_u_post_immuno_k9_n14() -> f64 with Mut, Div, Panic { ts_u_post_k(ts_u_pk(14), ts_u_immuno(14), 9.0) }
+
+pub fn ts_gain_immuno_k1_n14() -> f64 with Mut, Div, Panic { ts_gain_k(ts_u_pk(14), ts_u_post_immuno_k1_n14()) }
+pub fn ts_gain_immuno_k9_n14() -> f64 with Mut, Div, Panic { ts_gain_k(ts_u_pk(14), ts_u_post_immuno_k9_n14()) }
+
+// ── Posterior margins at N=7 ──────────────────────────────────────────────────
+fn ts_margin_at(n: i64, u_post: f64) -> f64 with Mut, Div, Panic {
+    let c = ts_c(n)
+    ts_min2((c - trough_floor_mg_l()) / u_post, (trough_ceil_mg_l() - c) / u_post)
+}
+
+pub fn ts_margin_prior_n7()       -> f64 with Mut, Div, Panic { ts_margin_at(7, ts_u_pk(7)) }
+pub fn ts_margin_lcms_k1_n7()     -> f64 with Mut, Div, Panic { ts_margin_at(7, ts_u_post_lcms_k1_n7()) }
+pub fn ts_margin_lcms_k2_n7()     -> f64 with Mut, Div, Panic { ts_margin_at(7, ts_u_post_lcms_k2_n7()) }
+pub fn ts_margin_lcms_k3_n7()     -> f64 with Mut, Div, Panic { ts_margin_at(7, ts_u_post_lcms_k3_n7()) }
+pub fn ts_margin_immuno_k1_n7()   -> f64 with Mut, Div, Panic { ts_margin_at(7, ts_u_post_immuno_k1_n7()) }
+pub fn ts_margin_immuno_k3_n7()   -> f64 with Mut, Div, Panic { ts_margin_at(7, ts_u_post_immuno_k3_n7()) }
+pub fn ts_margin_immuno_k9_n7()   -> f64 with Mut, Div, Panic { ts_margin_at(7, ts_u_post_immuno_k9_n7()) }
+
+// ── Theoretical equivalence: immuno k_eq that matches LCMS k=1 ───────────────
+// k_eq = (u_immuno/u_lcms)² = (CV_immuno/CV_lcms)² = 9 (exact, N-invariant)
+// Verify: gain_immuno_k9 ≈ gain_lcms_k1 at both N=7 and N=14
+pub fn ts_equiv_gain_diff_n7()  -> f64 with Mut, Div, Panic {
+    ts_gain_immuno_k9_n7()  - ts_gain_lcms_k1_n7()
+}
+pub fn ts_equiv_gain_diff_n14() -> f64 with Mut, Div, Panic {
+    ts_gain_immuno_k9_n14() - ts_gain_lcms_k1_n14()
+}
+
+// ── Diminishing returns: marginal gain of k-th measurement ───────────────────
+// marginal_gain_k = gain_k - gain_{k-1}
+pub fn ts_marginal_lcms_k2_n7() -> f64 with Mut, Div, Panic {
+    ts_gain_lcms_k2_n7() - ts_gain_lcms_k1_n7()
+}
+pub fn ts_marginal_lcms_k3_n7() -> f64 with Mut, Div, Panic {
+    ts_gain_lcms_k3_n7() - ts_gain_lcms_k2_n7()
+}
+pub fn ts_marginal_immuno_k2_n7() -> f64 with Mut, Div, Panic {
+    ts_gain_immuno_k2_n7() - ts_gain_immuno_k1_n7()
+}
+pub fn ts_marginal_immuno_k3_n7() -> f64 with Mut, Div, Panic {
+    ts_gain_immuno_k3_n7() - ts_gain_immuno_k2_n7()
+}

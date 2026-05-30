@@ -1,0 +1,243 @@
+// stdlib/pbpk/rapamycin_rel_uncertainty.sio — Sprint 31: RSU Cascade Theorem
+//
+// Novel dissertation contribution: certifies the Relative Standard Uncertainty
+// (RSU = u_c/C) cascade — the N-evolution of measurement precision — across all
+// clinical strata, and establishes that N_crit (CI certification) and N_10%
+// (ISO 10% RSU target) are independent orderings with no universal precedence.
+//
+// ── RSU Dynamics ─────────────────────────────────────────────────────────────
+//
+//   RSU(N) = u_c(N) / C(N) where:
+//     u_c(N)  increases slowly with N (more accumulated drug → larger absolute
+//             uncertainty from each pharmacokinetic variance channel)
+//     C(N)    increases faster with N (approaching steady-state trough from
+//             below, convergence driven by 1 − e^{−ke·N·τ})
+//
+//   Net: RSU(N) is monotonically decreasing in N — verified numerically.
+//
+// ── Dose-Invariance Theorem (RSU) ────────────────────────────────────────────
+//
+//   N_thresh is independent of dose D for all certifiable strata.
+//   Proof: from Sprint 24 — u_c ∝ D and C ∝ D (linear ODE), so RSU = u_c/C
+//   is dose-cancelled. Verified: N_10%(std) = 12 at D=2, 5, and 10 mg.
+//
+// ── Certified RSU threshold values ───────────────────────────────────────────
+//
+//   Inhibitor (ke=0.002236, F=0.282, D=1.5mg, SS):
+//     N_20% = 1   N_10% = 4    N_5% = 17
+//     Fastest RSU convergence — high F drives large C
+//
+//   Slow (ke=0.00838, F=0.188, D=5mg, SS):
+//     N_20% = 2   N_10% = 8    N_5% = 38
+//
+//   Standard (ke=0.01118, F=0.141, D=5mg, SS):
+//     N_20% = 3   N_10% = 12   N_5% = 88
+//
+//   Fast (ke=0.01677, F=0.094, D=5mg, SS):
+//     N_20% = 8   N_10% = 27   N_5% = 0 (unreachable within N≤100)
+//     Low F → low C → RSU stays elevated
+//
+//   Inducer (ke=0.05590, F=0.047, D=20mg, SS):
+//     N_20% = 0   N_10% = 0    N_5% = 0 (all unreachable)
+//     Structural: very low F makes RSU permanently elevated regardless of N
+//
+// ── Independence Theorem: N_crit ⊥ N_10% (no universal ordering) ─────────────
+//
+//   Slow genotype: N_crit=3 < N_10%=8
+//     CI certifies at N=3 WHILE RSU is still 12.5% (above 10% target).
+//     C is large enough (14.5 ng/mL >> floor=4) that the CI clears the floor
+//     despite poor relative precision.
+//
+//   Inhibitor genotype: N_10%=4 < N_crit=7
+//     RSU reaches 10% at N=4 WHILE CI does not certify until N=7.
+//     C is moderate (8.3 ng/mL) but u_c is wide enough to straddle the floor.
+//
+//   Standard: N_crit=6 < N_10%=12 — CI certifies while RSU still ~16%
+//
+//   Conclusion: CI certification and RSU threshold are orthogonal quality
+//   dimensions. A TDM system needs BOTH: certified CI AND certified RSU.
+//
+// ── Effect annotations ────────────────────────────────────────────────────────
+//   ru_find_n_thresh, ru_*: with Mut, Div, Panic
+
+module pbpk::rapamycin_rel_uncertainty
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+// ── Core search ───────────────────────────────────────────────────────────────
+
+// First N where u_c(N)/C(N) ≤ thresh. Returns 0 if not found within max_n.
+pub fn ru_find_n_thresh(d_oral: f64, max_n: i64, ke_val: f64, f_val: f64,
+                         ka_var: f64, f_var: f64, ke_var: f64,
+                         k12_var: f64, k21_var: f64,
+                         thresh: f64) -> i64
+    with Mut, Div, Panic {
+    var n = 1
+    var found = 0
+    while n <= max_n {
+        if found == 0 {
+            let c  = as_trough_mg_l(d_oral, n, ke_val, f_val)
+            let uc = eu_u_c(d_oral, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+            if uc <= c * thresh { found = n }
+        };
+        n = n + 1
+    }
+    found
+}
+
+// RSU at a specific N (for curve-shape certification).
+pub fn ru_rsu_at_n(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64,
+                   ka_var: f64, f_var: f64, ke_var: f64,
+                   k12_var: f64, k21_var: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d_oral, n_doses, ke_val, f_val)
+    let uc = eu_u_c(d_oral, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    uc / c
+}
+
+// True iff RSU(N=n1) > RSU(N=n2) for n1 < n2 — local monotone decrease check.
+pub fn ru_rsu_decreasing(d_oral: f64, n1: i64, n2: i64, ke_val: f64, f_val: f64,
+                          ka_var: f64, f_var: f64, ke_var: f64,
+                          k12_var: f64, k21_var: f64) -> bool
+    with Mut, Div, Panic {
+    let r1 = ru_rsu_at_n(d_oral, n1, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    let r2 = ru_rsu_at_n(d_oral, n2, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    r1 > r2
+}
+
+// ── Standard genotype (D=5mg) ─────────────────────────────────────────────────
+
+pub fn ru_std_n20() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    ru_find_n_thresh(5.0, 100, 0.01118, 0.141, ka, fv, ke, k12, k21, 0.20)
+}
+
+pub fn ru_std_n10() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    ru_find_n_thresh(5.0, 100, 0.01118, 0.141, ka, fv, ke, k12, k21, 0.10)
+}
+
+pub fn ru_std_n5() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    ru_find_n_thresh(5.0, 100, 0.01118, 0.141, ka, fv, ke, k12, k21, 0.05)
+}
+
+// ── Slow genotype (D=5mg) ─────────────────────────────────────────────────────
+
+pub fn ru_slow_n20() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    ru_find_n_thresh(5.0, 100, 0.00838, 0.188, ka, fv, ke, k12, k21, 0.20)
+}
+
+pub fn ru_slow_n10() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    ru_find_n_thresh(5.0, 100, 0.00838, 0.188, ka, fv, ke, k12, k21, 0.10)
+}
+
+pub fn ru_slow_n5() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    ru_find_n_thresh(5.0, 100, 0.00838, 0.188, ka, fv, ke, k12, k21, 0.05)
+}
+
+// ── Fast genotype (D=5mg) ─────────────────────────────────────────────────────
+
+pub fn ru_fast_n20() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    ru_find_n_thresh(5.0, 100, 0.01677, 0.094, ka, fv, ke, k12, k21, 0.20)
+}
+
+pub fn ru_fast_n10() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    ru_find_n_thresh(5.0, 100, 0.01677, 0.094, ka, fv, ke, k12, k21, 0.10)
+}
+
+pub fn ru_fast_n5() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    ru_find_n_thresh(5.0, 100, 0.01677, 0.094, ka, fv, ke, k12, k21, 0.05)
+}
+
+// ── CYP3A4 inhibitor (D=1.5mg) ───────────────────────────────────────────────
+
+pub fn ru_inh_n20() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    ru_find_n_thresh(1.5, 100, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, 0.20)
+}
+
+pub fn ru_inh_n10() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    ru_find_n_thresh(1.5, 100, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, 0.10)
+}
+
+pub fn ru_inh_n5() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    ru_find_n_thresh(1.5, 100, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, 0.05)
+}
+
+// ── CYP3A4 inducer (D=20mg — structurally elevated RSU) ──────────────────────
+
+pub fn ru_ind_n20() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_ind = ob_ke_var_ind()
+    ru_find_n_thresh(20.0, 100, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, 0.20)
+}
+
+pub fn ru_ind_n10() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    let ke_ind = ob_ke_var_ind()
+    ru_find_n_thresh(20.0, 100, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, 0.10)
+}
+
+// ── Dose-invariance certification ─────────────────────────────────────────────
+
+// N_10% for std stratum at D=2mg — must equal 12 (dose-invariance of RSU)
+pub fn ru_std_n10_d2() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    ru_find_n_thresh(2.0, 100, 0.01118, 0.141, ka, fv, ke, k12, k21, 0.10)
+}
+
+// N_10% for std stratum at D=10mg — must equal 12 (dose-invariance of RSU)
+pub fn ru_std_n10_d10() -> i64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    ru_find_n_thresh(10.0, 100, 0.01118, 0.141, ka, fv, ke, k12, k21, 0.10)
+}
+
+// ── Independence theorem probes ───────────────────────────────────────────────
+
+// Slow: N_crit=3 < N_10%=8 — CI certifies while RSU > 10%
+pub fn ru_slow_ncrit_before_n10() -> bool with Mut, Div, Panic {
+    ru_slow_n10() > 3
+}
+
+// Inhibitor: N_10%=4 < N_crit=7 — RSU certified before CI
+pub fn ru_inh_n10_before_ncrit() -> bool with Mut, Div, Panic {
+    ru_inh_n10() < 7
+}
+
+// Standard: N_crit=6 < N_10%=12 — CI certifies while RSU > 10%
+pub fn ru_std_ncrit_before_n10() -> bool with Mut, Div, Panic {
+    ru_std_n10() > 6
+}

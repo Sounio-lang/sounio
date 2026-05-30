@@ -1,0 +1,104 @@
+// stdlib/pbpk/rapamycin_dose_adjust.sio — Sprint 48
+//
+// GUM-certified dose adjustment for the slow stratum (CYP3A4 poor metabolizer).
+// Standard 5mg dose produces margin=-2.536 at N=28 (toxic; Sprint 44/46/47).
+// This module scans D∈[0.5,5.0] in 0.5mg steps to find the certification
+// boundaries and optimal dose at the month-1 monitoring visit.
+//
+// Findings:
+// Finding A: standard dose ALARM — slow margin at D=5mg, N=28 = -2.536;
+//            the standard adult dose fails the slow stratum at month-1.
+// Finding B: upper cert boundary — highest D with margin≥2.0 at N=28 is 3.5mg;
+//            D=4.0mg gives WARN (margin≈1.69), D=4.5mg gives ALARM (C>ceil).
+// Finding C: lower cert boundary — lowest D with margin≥2.0 at N=28 is 1.0mg;
+//            D=0.5mg gives ALARM (C<floor, sub-therapeutic).
+// Finding D: GUM-optimal dose — margin is maximised near D=2.5mg (floor-limited
+//            at lower doses, ceiling-limited above D≈2.6mg); both boundaries
+//            are ≥12σ from the optimal, far exceeding the k=2.0 threshold.
+
+module pbpk::rapamycin_dose_adjust
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+fn da_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn da_slow_margin_n28(d: f64) -> f64 with Mut, Div, Panic {
+    let ka  = ob_ka_var_std()
+    let fv  = ob_f_var_std()
+    let ke  = ob_ke_var_std()
+    let k12 = ob_k12_var_std()
+    let k21 = ob_k21_var_std()
+    let c   = as_trough_mg_l(d, 28, 0.00838, 0.188)
+    let uc  = eu_u_c(d, 28, 0.00838, 0.188, ka, fv, ke, k12, k21)
+    da_min((c - trough_floor_mg_l()) / uc, (trough_ceil_mg_l() - c) / uc)
+}
+
+// ── Spot values at 0.5mg steps (D=0.5 to D=5.0) ──────────────────────────────
+pub fn da_slow_margin_n28_d05() -> f64 with Mut, Div, Panic { da_slow_margin_n28(0.5) }
+pub fn da_slow_margin_n28_d10() -> f64 with Mut, Div, Panic { da_slow_margin_n28(1.0) }
+pub fn da_slow_margin_n28_d15() -> f64 with Mut, Div, Panic { da_slow_margin_n28(1.5) }
+pub fn da_slow_margin_n28_d20() -> f64 with Mut, Div, Panic { da_slow_margin_n28(2.0) }
+pub fn da_slow_margin_n28_d25() -> f64 with Mut, Div, Panic { da_slow_margin_n28(2.5) }
+pub fn da_slow_margin_n28_d30() -> f64 with Mut, Div, Panic { da_slow_margin_n28(3.0) }
+pub fn da_slow_margin_n28_d35() -> f64 with Mut, Div, Panic { da_slow_margin_n28(3.5) }
+pub fn da_slow_margin_n28_d40() -> f64 with Mut, Div, Panic { da_slow_margin_n28(4.0) }
+pub fn da_slow_margin_n28_d45() -> f64 with Mut, Div, Panic { da_slow_margin_n28(4.5) }
+pub fn da_slow_margin_n28_d50() -> f64 with Mut, Div, Panic { da_slow_margin_n28(5.0) }
+
+// ── Scanners ─────────────────────────────────────────────────────────────────
+
+// Highest D (0.5mg steps) where slow margin_n28 ≥ 2.0 (upper cert boundary)
+pub fn da_slow_d_cert_max() -> f64 with Mut, Div, Panic {
+    var d      = 5.0
+    var result = 0.0
+    while d >= 0.5 {
+        if da_slow_margin_n28(d) >= 2.0 && result == 0.0 { result = d };
+        d = d - 0.5
+    }
+    result
+}
+
+// Lowest D (0.5mg steps) where slow margin_n28 ≥ 2.0 (lower cert boundary)
+pub fn da_slow_d_cert_min() -> f64 with Mut, Div, Panic {
+    var d      = 0.5
+    var result = 0.0
+    while d <= 5.0 {
+        if da_slow_margin_n28(d) >= 2.0 && result == 0.0 { result = d };
+        d = d + 0.5
+    }
+    result
+}
+
+// D (0.5mg steps) that maximises slow margin_n28 (GUM-optimal dose)
+pub fn da_slow_d_optimal() -> f64 with Mut, Div, Panic {
+    var d      = 0.5
+    var best_d = 0.5
+    var best_m = da_slow_margin_n28(0.5)
+    d = 1.0
+    while d <= 5.0 {
+        let m = da_slow_margin_n28(d)
+        if m > best_m { best_d = d };
+        if m > best_m { best_m = m };
+        d = d + 0.5
+    }
+    best_d
+}
+
+// Width of the certified dose range in 0.5mg steps (d_cert_max - d_cert_min) / 0.5
+// 3.5mg - 1.0mg = 2.5mg → 5 steps of 0.5mg
+pub fn da_slow_cert_range_steps() -> i64 with Mut, Div, Panic {
+    let hi = da_slow_d_cert_max()
+    let lo = da_slow_d_cert_min()
+    let steps_f = (hi - lo) * 2.0
+    if steps_f > 4.9 && steps_f < 5.1 { 5 }
+    else if steps_f > 3.9 && steps_f < 4.1 { 4 }
+    else if steps_f > 2.9 && steps_f < 3.1 { 3 }
+    else if steps_f > 1.9 && steps_f < 2.1 { 2 }
+    else if steps_f > 0.9 && steps_f < 1.1 { 1 }
+    else { 0 }
+}

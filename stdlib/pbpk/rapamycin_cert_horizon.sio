@@ -1,0 +1,222 @@
+// stdlib/pbpk/rapamycin_cert_horizon.sio — Sprint 37: Assay-Inclusive Certification Horizon
+//
+// Novel dissertation contribution: for each stratum × assay method, computes the
+// first dose N at which the assay-inclusive CI [C − 2·u_total, C + 2·u_total] is
+// fully certified, where u_total = sqrt(u_pred² + (cv·C)²). Compares to the
+// model-only N_crit (Sprint 26/29) to quantify the assay dose-penalty: the number
+// of extra doses required because the laboratory cannot achieve ideal u_pred-only
+// uncertainty. Returns 0 when certification is unreachable within 60 doses.
+//
+// ── Assay-Inclusive N_crit Table ─────────────────────────────────────────────
+//
+//   Stratum/D    | model | HPLC | CMIA | poor | poor penalty
+//   std   D=5mg  |   6   |   6  |   7  |  12  | +6
+//   slow  D=5mg  |   3   |   3  |   4  |   7  | +4
+//   fast  D=5mg  |  15   |  15  |  18  |  32  | +17  ← largest
+//   inh  D=1.5mg |   7   |   7  |   8  |  14  | +7
+//   ind  D=34mg  |  26   |  27  |  32  |   0  | ∞ (never)
+//
+// ── Four Novel Findings ───────────────────────────────────────────────────────
+//
+//   FINDING A — HPLC Preserves Model Horizon: HPLC adds 0 extra doses for
+//     std/slow/fast/inh. Only ind requires +1 dose (N=27 vs N=26 model).
+//     Gold-standard assay is model-equivalent for all routine strata.
+//
+//   FINDING B — Fast Genotype Assay Sensitivity: fast CMIA penalty = 3 doses
+//     (18 vs 15), poor penalty = 17 doses (32 vs 15). The fast metabolizer
+//     suffers the largest absolute dose delay under any non-HPLC assay. With
+//     CMIA, fast now requires 18 doses — past the N=14 protocol checkpoint,
+//     requiring extended monitoring beyond standard protocol.
+//
+//   FINDING C — Ind Poor Uncertifiable: ind D34 under poor assay never achieves
+//     certification within 60 doses (returns 0). The Gold-theorem dose, which
+//     the model certifies at N=26, cannot be certified in any realistic clinical
+//     timeframe with poor laboratory infrastructure.
+//
+//   FINDING D — Penalty Ordering: under poor assay, the dose-penalty ranks as
+//     fast(17) > inh(7) > std(6) > slow(4). Fast and inh, despite different
+//     pharmacokinetics, both suffer large penalties — fast from low SS
+//     concentration (close to floor), inh from slow accumulation kinetics.
+//
+// ── Effect annotations ────────────────────────────────────────────────────────
+//   All ach_* functions: with Mut, Div, Panic
+
+module pbpk::rapamycin_cert_horizon
+
+use pbpk::rapamycin_assay::{as_trough_mg_l, as_cv_hplc, as_cv_cmia, as_cv_poor}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn ach_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+// ── Core search primitive ─────────────────────────────────────────────────────
+
+// Returns first N in [1, 60] where both Z_floor_total ≥ 2.0 and Z_ceil_total ≥ 2.0.
+// Returns 0 if not found within 60 doses (clinically unreachable).
+pub fn ach_find_n_crit(d_oral: f64, ke_val: f64, f_val: f64,
+                        ka_var: f64, f_var: f64, ke_var: f64,
+                        k12_var: f64, k21_var: f64, cv: f64) -> i64
+    with Mut, Div, Panic {
+    let floor = trough_floor_mg_l(); let ceil = trough_ceil_mg_l()
+    var n = 1; var found = 0
+    while n <= 60 && found == 0 {
+        let c     = as_trough_mg_l(d_oral, n, ke_val, f_val)
+        let upred = eu_u_c(d_oral, n, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+        let ua    = cv * c
+        let ut    = ach_sqrt(upred * upred + ua * ua)
+        let zf    = (c - floor) / ut
+        let zc    = (ceil - c)  / ut
+        if zf >= 2.0 && zc >= 2.0 { found = n }
+        else { n = n + 1 }
+    }
+    found
+}
+
+// ── std D=5mg ────────────────────────────────────────────────────────────────
+
+pub fn ach_std_ncrit_model() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(5.0, 0.01118, 0.141, ka, fv, ke, k12, k21, 0.0)
+}
+pub fn ach_std_ncrit_hplc() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(5.0, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_hplc())
+}
+pub fn ach_std_ncrit_cmia() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(5.0, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_cmia())
+}
+pub fn ach_std_ncrit_poor() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(5.0, 0.01118, 0.141, ka, fv, ke, k12, k21, as_cv_poor())
+}
+pub fn ach_std_penalty_cmia() -> i64 with Mut, Div, Panic {
+    ach_std_ncrit_cmia() - ach_std_ncrit_model()
+}
+pub fn ach_std_penalty_poor() -> i64 with Mut, Div, Panic {
+    ach_std_ncrit_poor() - ach_std_ncrit_model()
+}
+
+// ── slow D=5mg ───────────────────────────────────────────────────────────────
+
+pub fn ach_slow_ncrit_model() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(5.0, 0.00838, 0.188, ka, fv, ke, k12, k21, 0.0)
+}
+pub fn ach_slow_ncrit_hplc() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(5.0, 0.00838, 0.188, ka, fv, ke, k12, k21, as_cv_hplc())
+}
+pub fn ach_slow_ncrit_cmia() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(5.0, 0.00838, 0.188, ka, fv, ke, k12, k21, as_cv_cmia())
+}
+pub fn ach_slow_ncrit_poor() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(5.0, 0.00838, 0.188, ka, fv, ke, k12, k21, as_cv_poor())
+}
+
+// ── fast D=5mg ───────────────────────────────────────────────────────────────
+
+pub fn ach_fast_ncrit_model() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(5.0, 0.01677, 0.094, ka, fv, ke, k12, k21, 0.0)
+}
+pub fn ach_fast_ncrit_hplc() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(5.0, 0.01677, 0.094, ka, fv, ke, k12, k21, as_cv_hplc())
+}
+pub fn ach_fast_ncrit_cmia() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(5.0, 0.01677, 0.094, ka, fv, ke, k12, k21, as_cv_cmia())
+}
+pub fn ach_fast_ncrit_poor() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke=ob_ke_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(5.0, 0.01677, 0.094, ka, fv, ke, k12, k21, as_cv_poor())
+}
+pub fn ach_fast_penalty_cmia() -> i64 with Mut, Div, Panic {
+    ach_fast_ncrit_cmia() - ach_fast_ncrit_model()
+}
+pub fn ach_fast_penalty_poor() -> i64 with Mut, Div, Panic {
+    ach_fast_ncrit_poor() - ach_fast_ncrit_model()
+}
+
+// ── inh D=1.5mg ──────────────────────────────────────────────────────────────
+
+pub fn ach_inh_ncrit_model() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std(); let ke_inh=ob_ke_var_inh()
+    ach_find_n_crit(1.5, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, 0.0)
+}
+pub fn ach_inh_ncrit_hplc() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std(); let ke_inh=ob_ke_var_inh()
+    ach_find_n_crit(1.5, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, as_cv_hplc())
+}
+pub fn ach_inh_ncrit_cmia() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std(); let ke_inh=ob_ke_var_inh()
+    ach_find_n_crit(1.5, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, as_cv_cmia())
+}
+pub fn ach_inh_ncrit_poor() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std(); let ke_inh=ob_ke_var_inh()
+    ach_find_n_crit(1.5, 0.002236, 0.282, ka, fv, ke_inh, k12, k21, as_cv_poor())
+}
+pub fn ach_inh_penalty_cmia() -> i64 with Mut, Div, Panic {
+    ach_inh_ncrit_cmia() - ach_inh_ncrit_model()
+}
+pub fn ach_inh_penalty_poor() -> i64 with Mut, Div, Panic {
+    ach_inh_ncrit_poor() - ach_inh_ncrit_model()
+}
+
+// ── ind D=34mg ───────────────────────────────────────────────────────────────
+
+pub fn ach_ind_ncrit_model() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke_ind=ob_ke_var_ind()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(34.0, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, 0.0)
+}
+pub fn ach_ind_ncrit_hplc() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke_ind=ob_ke_var_ind()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(34.0, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_hplc())
+}
+pub fn ach_ind_ncrit_cmia() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke_ind=ob_ke_var_ind()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(34.0, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_cmia())
+}
+pub fn ach_ind_ncrit_poor() -> i64 with Mut, Div, Panic {
+    let ka=ob_ka_var_std(); let fv=ob_f_var_std(); let ke_ind=ob_ke_var_ind()
+    let k12=ob_k12_var_std(); let k21=ob_k21_var_std()
+    ach_find_n_crit(34.0, 0.05590, 0.047, ka, fv, ke_ind, k12, k21, as_cv_poor())
+}
+pub fn ach_ind_penalty_hplc() -> i64 with Mut, Div, Panic {
+    ach_ind_ncrit_hplc() - ach_ind_ncrit_model()
+}
+pub fn ach_ind_penalty_cmia() -> i64 with Mut, Div, Panic {
+    ach_ind_ncrit_cmia() - ach_ind_ncrit_model()
+}

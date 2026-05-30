@@ -1,0 +1,148 @@
+// stdlib/pbpk/rapamycin_ka_sensitivity.sio — Sprint 68
+//
+// ka uncertainty reduction sensitivity study for the standard stratum.
+// Sprint 62 established ka as the dominant GUM source (81.6% at N=7, 58.3%
+// at N=28). This module asks: how does progressive ka_var reduction affect
+// n_crit, cert_span, and GUM margins?
+//
+// Four ka_var levels (combined 4–20 window, std stratum: ke=0.01118, F=0.141, D=5mg):
+//   Level 0 (baseline): ka_var = 0.0225  (SD=0.15 h⁻¹; CV≈24%; Dansirikul 2006)
+//   Level 1 (half):     ka_var = 0.01125 (SD≈0.106 h⁻¹, −50%)
+//   Level 2 (quarter):  ka_var = 0.005625 (SD≈0.075 h⁻¹, −75%)
+//   Level 3 (zero):     ka_var = 0.0    (ka perfectly known; theoretical bound)
+//
+// The remaining GUM sources (F, ke, k12, k21) are held at baseline.
+// At level 3, u_c is determined entirely by F+ke+k12+k21 (18.4% of baseline u_c²).
+//
+// Findings (probe-verified):
+//   A: n_crit: L0=6, L1=5, L2=5, L3=4 — only 2 days total advance over 4 orders
+//   B: cert_span: L0=30, L1=32, L2=32, L3=34 — total gain 4 days
+//   C: margin N=7: 2.82 → 3.67 → 4.53 → 6.58 (progressive, ~1.3× per halving)
+//   D: DEAD BAND: L1 = L2 in cert window (ncrit=5, span=32). Halving ka_var
+//      from L1 to L2 provides ZERO clinical benefit — the discrete n_crit does
+//      not advance. A precision study needs ≥75% reduction to see next step.
+//   E: Margin N=1 becomes MORE negative with ka reduction (L0=−1.75, L3=−4.92):
+//      reducing uncertainty sharpens both CERT and ALARM states. Day-1 ALARM
+//      is epistemically worse (more certain) with better ka knowledge.
+//   F: u_c ratio L1/L0 = 0.769 = sqrt(0.816×0.5+0.184) — GUM budget prediction
+//      exact; ratio L3/L0 = 0.428 = sqrt(0.184) — non-ka sources confirmed.
+//   G: ka elimination (L0→L3) advances n_crit by only 2 days — same as the
+//      3× loading dose from Sprint 66. Loading dose and full ka precision
+//      elimination are clinically equivalent in certification advancement.
+
+module pbpk::rapamycin_ka_sensitivity
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+fn ks_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+fn ks_min2(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+// ── ka_var levels ─────────────────────────────────────────────────────────────
+pub fn ks_ka_var_l0() -> f64 { ob_ka_var_std() }   // 0.0225
+pub fn ks_ka_var_l1() -> f64 { 0.01125  }           // half
+pub fn ks_ka_var_l2() -> f64 { 0.005625 }           // quarter
+pub fn ks_ka_var_l3() -> f64 { 0.0      }           // zero
+
+// ── Generic margin at a given ka_var level ────────────────────────────────────
+fn ks_margin(n: i64, ka_var: f64) -> f64 with Mut, Div, Panic {
+    let c  = as_trough_mg_l(5.0, n, 0.01118, 0.141)
+    let uc = eu_u_c(5.0, n, 0.01118, 0.141,
+                    ka_var, ob_f_var_std(), ob_ke_var_std(),
+                    ob_k12_var_std(), ob_k21_var_std())
+    ks_min2((c - trough_floor_mg_l()) / uc, (trough_ceil_mg_l() - c) / uc)
+}
+
+fn ks_u_c(n: i64, ka_var: f64) -> f64 with Mut, Div, Panic {
+    eu_u_c(5.0, n, 0.01118, 0.141,
+           ka_var, ob_f_var_std(), ob_ke_var_std(),
+           ob_k12_var_std(), ob_k21_var_std())
+}
+
+fn ks_ncrit(ka_var: f64) -> i64 with Mut, Div, Panic {
+    var n = 1; var result = 0
+    while n <= 100 {
+        if ks_margin(n, ka_var) >= 2.0 && result == 0 { result = n };
+        n = n + 1
+    }
+    result
+}
+
+fn ks_nlast(ka_var: f64) -> i64 with Mut, Div, Panic {
+    var n = 1; var last = 0
+    while n <= 100 {
+        if ks_margin(n, ka_var) >= 2.0 { last = n };
+        n = n + 1
+    }
+    last
+}
+
+// ── Spot margins at N=1/7/14/28 ──────────────────────────────────────────────
+pub fn ks_margin_l0_n1()  -> f64 with Mut, Div, Panic { ks_margin(1,  ks_ka_var_l0()) }
+pub fn ks_margin_l0_n7()  -> f64 with Mut, Div, Panic { ks_margin(7,  ks_ka_var_l0()) }
+pub fn ks_margin_l0_n14() -> f64 with Mut, Div, Panic { ks_margin(14, ks_ka_var_l0()) }
+pub fn ks_margin_l0_n28() -> f64 with Mut, Div, Panic { ks_margin(28, ks_ka_var_l0()) }
+
+pub fn ks_margin_l1_n1()  -> f64 with Mut, Div, Panic { ks_margin(1,  ks_ka_var_l1()) }
+pub fn ks_margin_l1_n7()  -> f64 with Mut, Div, Panic { ks_margin(7,  ks_ka_var_l1()) }
+pub fn ks_margin_l1_n14() -> f64 with Mut, Div, Panic { ks_margin(14, ks_ka_var_l1()) }
+pub fn ks_margin_l1_n28() -> f64 with Mut, Div, Panic { ks_margin(28, ks_ka_var_l1()) }
+
+pub fn ks_margin_l2_n1()  -> f64 with Mut, Div, Panic { ks_margin(1,  ks_ka_var_l2()) }
+pub fn ks_margin_l2_n7()  -> f64 with Mut, Div, Panic { ks_margin(7,  ks_ka_var_l2()) }
+pub fn ks_margin_l2_n28() -> f64 with Mut, Div, Panic { ks_margin(28, ks_ka_var_l2()) }
+
+pub fn ks_margin_l3_n1()  -> f64 with Mut, Div, Panic { ks_margin(1,  ks_ka_var_l3()) }
+pub fn ks_margin_l3_n7()  -> f64 with Mut, Div, Panic { ks_margin(7,  ks_ka_var_l3()) }
+pub fn ks_margin_l3_n14() -> f64 with Mut, Div, Panic { ks_margin(14, ks_ka_var_l3()) }
+pub fn ks_margin_l3_n28() -> f64 with Mut, Div, Panic { ks_margin(28, ks_ka_var_l3()) }
+
+// ── u_c at N=7 per level ──────────────────────────────────────────────────────
+pub fn ks_uc_l0_n7() -> f64 with Mut, Div, Panic { ks_u_c(7, ks_ka_var_l0()) }
+pub fn ks_uc_l1_n7() -> f64 with Mut, Div, Panic { ks_u_c(7, ks_ka_var_l1()) }
+pub fn ks_uc_l2_n7() -> f64 with Mut, Div, Panic { ks_u_c(7, ks_ka_var_l2()) }
+pub fn ks_uc_l3_n7() -> f64 with Mut, Div, Panic { ks_u_c(7, ks_ka_var_l3()) }
+
+// ── Certification windows ─────────────────────────────────────────────────────
+pub fn ks_ncrit_l0() -> i64 with Mut, Div, Panic { ks_ncrit(ks_ka_var_l0()) }
+pub fn ks_ncrit_l1() -> i64 with Mut, Div, Panic { ks_ncrit(ks_ka_var_l1()) }
+pub fn ks_ncrit_l2() -> i64 with Mut, Div, Panic { ks_ncrit(ks_ka_var_l2()) }
+pub fn ks_ncrit_l3() -> i64 with Mut, Div, Panic { ks_ncrit(ks_ka_var_l3()) }
+
+pub fn ks_nlast_l0() -> i64 with Mut, Div, Panic { ks_nlast(ks_ka_var_l0()) }
+pub fn ks_nlast_l1() -> i64 with Mut, Div, Panic { ks_nlast(ks_ka_var_l1()) }
+pub fn ks_nlast_l2() -> i64 with Mut, Div, Panic { ks_nlast(ks_ka_var_l2()) }
+pub fn ks_nlast_l3() -> i64 with Mut, Div, Panic { ks_nlast(ks_ka_var_l3()) }
+
+pub fn ks_span_l0() -> i64 with Mut, Div, Panic { ks_nlast_l0() - ks_ncrit_l0() }
+pub fn ks_span_l1() -> i64 with Mut, Div, Panic { ks_nlast_l1() - ks_ncrit_l1() }
+pub fn ks_span_l2() -> i64 with Mut, Div, Panic { ks_nlast_l2() - ks_ncrit_l2() }
+pub fn ks_span_l3() -> i64 with Mut, Div, Panic { ks_nlast_l3() - ks_ncrit_l3() }
+
+// ── Marginal gains: advance per ka halving ────────────────────────────────────
+pub fn ks_advance_l0_to_l1() -> i64 with Mut, Div, Panic { ks_ncrit_l0() - ks_ncrit_l1() }
+pub fn ks_advance_l1_to_l2() -> i64 with Mut, Div, Panic { ks_ncrit_l1() - ks_ncrit_l2() }
+pub fn ks_advance_l2_to_l3() -> i64 with Mut, Div, Panic { ks_ncrit_l2() - ks_ncrit_l3() }
+pub fn ks_total_advance()    -> i64 with Mut, Div, Panic { ks_ncrit_l0() - ks_ncrit_l3() }
+
+pub fn ks_span_gain_l0_to_l1() -> i64 with Mut, Div, Panic { ks_span_l1() - ks_span_l0() }
+pub fn ks_span_gain_l0_to_l3() -> i64 with Mut, Div, Panic { ks_span_l3() - ks_span_l0() }
+
+// ── u_c reduction ratio: l1/l0 and l3/l0 at N=7 ─────────────────────────────
+pub fn ks_uc_ratio_l1_l0() -> f64 with Mut, Div, Panic {
+    ks_uc_l1_n7() / ks_uc_l0_n7()
+}
+pub fn ks_uc_ratio_l3_l0() -> f64 with Mut, Div, Panic {
+    ks_uc_l3_n7() / ks_uc_l0_n7()
+}

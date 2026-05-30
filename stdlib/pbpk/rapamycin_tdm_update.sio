@@ -1,0 +1,130 @@
+// stdlib/pbpk/rapamycin_tdm_update.sio — Sprint 69
+//
+// Single-measurement TDM epistemic update for the std stratum.
+// GUM precision-weighted posterior: 1/u_post² = 1/u_pk² + 1/u_meas²
+//   => u_post = u_pk × u_meas / sqrt(u_pk² + u_meas²)
+//
+// At each observation day (N=7, 14, 28), one trough measurement via
+// LCMS (CV=5%) or immunoassay (CV=15%) updates the prior u_pk.
+//
+// Findings (probe-verified):
+//   A: CROSSOVER ASYMMETRY — LCMS is always more precise than the PK model
+//      (u_lcms < u_pk at all N); immunoassay is always less precise (u_immuno > u_pk).
+//      N=7: u_lcms=0.000321 < u_pk=0.000855 < u_immuno=0.000962
+//   B: Precision gains (u_pk/u_post): LCMS N=7→28: 2.85/2.09/1.66 (large, decreasing).
+//      Immuno N=7→28: 1.34/1.17/1.09 (modest, converging to 1 as C grows).
+//   C: LCMS single measurement at N=7: margin 2.82→8.03 (+5.21). Immunoassay: 2.82→3.77 (+0.95).
+//   D: LCMS N=7 posterior margin (8.03) EXCEEDS Sprint 68 full ka elimination (L3=6.58).
+//      One LCMS measurement is worth more than a perfect ka precision study.
+//   E: LCMS/immuno epistemic value ratio: 2.13× at N=7, 1.78× at N=14.
+//   F: Gains decrease with N as u_lcms=0.05×C grows with C approaching ceiling.
+//      At N=28, immuno gain is near-negligible (0.44 margin units).
+//   G: std stratum C trajectory: N=7=0.006411, N=14=0.009793, N=28=0.015258 mg/L.
+
+module pbpk::rapamycin_tdm_update
+
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std
+}
+
+fn tu_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+fn tu_min2(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+// ── Assay CVs ─────────────────────────────────────────────────────────────────
+pub fn tu_cv_lcms()   -> f64 { 0.05 }
+pub fn tu_cv_immuno() -> f64 { 0.15 }
+
+// ── Std stratum parameters (Dansirikul 2006 / Sprint 57) ──────────────────────
+fn tu_d()  -> f64 { 5.0     }
+fn tu_ke() -> f64 { 0.01118 }
+fn tu_fv() -> f64 { 0.141   }
+
+// ── Prior trough concentrations ───────────────────────────────────────────────
+pub fn tu_c_n7()  -> f64 with Mut, Div, Panic { as_trough_mg_l(tu_d(), 7,  tu_ke(), tu_fv()) }
+pub fn tu_c_n14() -> f64 with Mut, Div, Panic { as_trough_mg_l(tu_d(), 14, tu_ke(), tu_fv()) }
+pub fn tu_c_n28() -> f64 with Mut, Div, Panic { as_trough_mg_l(tu_d(), 28, tu_ke(), tu_fv()) }
+
+// ── Prior PK combined uncertainty at each observation day ─────────────────────
+fn tu_u_pk(n: i64) -> f64 with Mut, Div, Panic {
+    eu_u_c(tu_d(), n, tu_ke(), tu_fv(),
+           ob_ka_var_std(), ob_f_var_std(), ob_ke_var_std(),
+           ob_k12_var_std(), ob_k21_var_std())
+}
+
+pub fn tu_u_pk_n7()  -> f64 with Mut, Div, Panic { tu_u_pk(7) }
+pub fn tu_u_pk_n14() -> f64 with Mut, Div, Panic { tu_u_pk(14) }
+pub fn tu_u_pk_n28() -> f64 with Mut, Div, Panic { tu_u_pk(28) }
+
+// ── Assay uncertainties at each observation day ───────────────────────────────
+pub fn tu_u_lcms_n7()    -> f64 with Mut, Div, Panic { tu_cv_lcms()   * tu_c_n7() }
+pub fn tu_u_lcms_n14()   -> f64 with Mut, Div, Panic { tu_cv_lcms()   * tu_c_n14() }
+pub fn tu_u_lcms_n28()   -> f64 with Mut, Div, Panic { tu_cv_lcms()   * tu_c_n28() }
+pub fn tu_u_immuno_n7()  -> f64 with Mut, Div, Panic { tu_cv_immuno() * tu_c_n7() }
+pub fn tu_u_immuno_n14() -> f64 with Mut, Div, Panic { tu_cv_immuno() * tu_c_n14() }
+pub fn tu_u_immuno_n28() -> f64 with Mut, Div, Panic { tu_cv_immuno() * tu_c_n28() }
+
+// ── GUM precision-weighted posterior: u_post = u_pk*u_meas/sqrt(u_pk²+u_meas²)
+fn tu_u_post_inner(u_pk: f64, u_meas: f64) -> f64 with Mut, Div, Panic {
+    (u_pk * u_meas) / tu_sqrt(u_pk * u_pk + u_meas * u_meas)
+}
+
+pub fn tu_u_post_lcms_n7()    -> f64 with Mut, Div, Panic { tu_u_post_inner(tu_u_pk_n7(),  tu_u_lcms_n7()) }
+pub fn tu_u_post_lcms_n14()   -> f64 with Mut, Div, Panic { tu_u_post_inner(tu_u_pk_n14(), tu_u_lcms_n14()) }
+pub fn tu_u_post_lcms_n28()   -> f64 with Mut, Div, Panic { tu_u_post_inner(tu_u_pk_n28(), tu_u_lcms_n28()) }
+pub fn tu_u_post_immuno_n7()  -> f64 with Mut, Div, Panic { tu_u_post_inner(tu_u_pk_n7(),  tu_u_immuno_n7()) }
+pub fn tu_u_post_immuno_n14() -> f64 with Mut, Div, Panic { tu_u_post_inner(tu_u_pk_n14(), tu_u_immuno_n14()) }
+pub fn tu_u_post_immuno_n28() -> f64 with Mut, Div, Panic { tu_u_post_inner(tu_u_pk_n28(), tu_u_immuno_n28()) }
+
+// ── Precision gain factor = u_prior / u_post (always > 1) ────────────────────
+pub fn tu_gain_lcms_n7()    -> f64 with Mut, Div, Panic { tu_u_pk_n7()  / tu_u_post_lcms_n7() }
+pub fn tu_gain_lcms_n14()   -> f64 with Mut, Div, Panic { tu_u_pk_n14() / tu_u_post_lcms_n14() }
+pub fn tu_gain_lcms_n28()   -> f64 with Mut, Div, Panic { tu_u_pk_n28() / tu_u_post_lcms_n28() }
+pub fn tu_gain_immuno_n7()  -> f64 with Mut, Div, Panic { tu_u_pk_n7()  / tu_u_post_immuno_n7() }
+pub fn tu_gain_immuno_n14() -> f64 with Mut, Div, Panic { tu_u_pk_n14() / tu_u_post_immuno_n14() }
+pub fn tu_gain_immuno_n28() -> f64 with Mut, Div, Panic { tu_u_pk_n28() / tu_u_post_immuno_n28() }
+
+// ── Prior margins ─────────────────────────────────────────────────────────────
+fn tu_margin_prior_at(n: i64) -> f64 with Mut, Div, Panic {
+    let c    = as_trough_mg_l(tu_d(), n, tu_ke(), tu_fv())
+    let u_pk = tu_u_pk(n)
+    tu_min2((c - trough_floor_mg_l()) / u_pk, (trough_ceil_mg_l() - c) / u_pk)
+}
+
+pub fn tu_margin_prior_n7()  -> f64 with Mut, Div, Panic { tu_margin_prior_at(7) }
+pub fn tu_margin_prior_n14() -> f64 with Mut, Div, Panic { tu_margin_prior_at(14) }
+pub fn tu_margin_prior_n28() -> f64 with Mut, Div, Panic { tu_margin_prior_at(28) }
+
+// ── Posterior margins (margin scales as u_pk / u_post = gain factor) ──────────
+fn tu_margin_post_at(n: i64, u_post: f64) -> f64 with Mut, Div, Panic {
+    let c = as_trough_mg_l(tu_d(), n, tu_ke(), tu_fv())
+    tu_min2((c - trough_floor_mg_l()) / u_post, (trough_ceil_mg_l() - c) / u_post)
+}
+
+pub fn tu_margin_post_lcms_n7()    -> f64 with Mut, Div, Panic { tu_margin_post_at(7,  tu_u_post_lcms_n7()) }
+pub fn tu_margin_post_lcms_n14()   -> f64 with Mut, Div, Panic { tu_margin_post_at(14, tu_u_post_lcms_n14()) }
+pub fn tu_margin_post_lcms_n28()   -> f64 with Mut, Div, Panic { tu_margin_post_at(28, tu_u_post_lcms_n28()) }
+pub fn tu_margin_post_immuno_n7()  -> f64 with Mut, Div, Panic { tu_margin_post_at(7,  tu_u_post_immuno_n7()) }
+pub fn tu_margin_post_immuno_n14() -> f64 with Mut, Div, Panic { tu_margin_post_at(14, tu_u_post_immuno_n14()) }
+pub fn tu_margin_post_immuno_n28() -> f64 with Mut, Div, Panic { tu_margin_post_at(28, tu_u_post_immuno_n28()) }
+
+// ── Margin gains = posterior − prior ─────────────────────────────────────────
+pub fn tu_margin_gain_lcms_n7()    -> f64 with Mut, Div, Panic { tu_margin_post_lcms_n7()   - tu_margin_prior_n7() }
+pub fn tu_margin_gain_lcms_n14()   -> f64 with Mut, Div, Panic { tu_margin_post_lcms_n14()  - tu_margin_prior_n14() }
+pub fn tu_margin_gain_lcms_n28()   -> f64 with Mut, Div, Panic { tu_margin_post_lcms_n28()  - tu_margin_prior_n28() }
+pub fn tu_margin_gain_immuno_n7()  -> f64 with Mut, Div, Panic { tu_margin_post_immuno_n7() - tu_margin_prior_n7() }
+pub fn tu_margin_gain_immuno_n14() -> f64 with Mut, Div, Panic { tu_margin_post_immuno_n14()- tu_margin_prior_n14() }
+pub fn tu_margin_gain_immuno_n28() -> f64 with Mut, Div, Panic { tu_margin_post_immuno_n28()- tu_margin_prior_n28() }
+
+// ── LCMS / immuno gain ratio: how many times more informative is LCMS ─────────
+pub fn tu_lcms_immuno_gain_ratio_n7()  -> f64 with Mut, Div, Panic { tu_gain_lcms_n7()  / tu_gain_immuno_n7() }
+pub fn tu_lcms_immuno_gain_ratio_n14() -> f64 with Mut, Div, Panic { tu_gain_lcms_n14() / tu_gain_immuno_n14() }
