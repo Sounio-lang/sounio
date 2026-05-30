@@ -237,6 +237,32 @@ exact algebraic field-plane**. The single isolated gap to the *Euclidean* χ(ℝ
 is the isometry `QF×QF ↪ ℝ²` (the multiquadratic `√3·√5=√15` ring-hom into ℝ), which needs
 `Real.sqrt`/`ring` over Mathlib's ℝ — staged as `v6-mathlib-rembed`.
 
+### 1c-B4. QF↪ℝ groundwork — multiquadratic generator law certified, no Mathlib (2026-05-30)
+
+Attacking the last gap *without* Mathlib. The `QF↪ℝ` embedding sends each basis radical `basis m`
+to `∏√pⱼ ∈ ℝ`; for that map to be a well-defined ring hom it must respect the multiquadratic
+multiplication law. We certify that law **exactly in core Lean**:
+
+- **`formal/lean4/SounioMultiquadRing.lean` — `basis_mul_law` (PROVED).**
+  `∀ i,j < 16, qmul (basis i) (basis j) = bcoeff(i ∧ j) · basis (i ⊕ j)` — all 256 basis pairs, by
+  `native_decide`. Plus named corollaries `√pᵢ² = pᵢ` (i ∈ {3,5,7,11}) and cross-products
+  (`√3·√5=√15`, `√3·√15=3√5`, `√15·√35=5√21`). Axioms `[propext, native_decide.ax]`.
+  This fixes the multiplication table on the *generators* — exactly the relations a real embedding
+  must preserve. (Not yet a full ring/field certification: `qmul` assoc/distrib/inverses are still
+  open, so this is the generator-level law, not "QF is the field ℚ(√3,√5,√7,√11)" in full.)
+- Together with the earlier `qadd_comm/qmul_comm/qadd_zero_*`, the commutative-ring backbone of QF is
+  now substantially certified (open: `qmul` assoc/distrib up to fraction-equivalence, and the
+  multiplicative unit — these need a value-equivalence quotient, since QF is a ring of *fraction
+  representatives*).
+
+**Precise remaining step for Euclidean χ(ℝ²) ≥ 5.** Provide a real field `F` (= ℝ) with
+`r : Fin 16 → F`, `r m = ∏_{bit j of m} Real.sqrt pⱼ`, satisfying `r i * r j = bcoeff(i∧j) • r(i⊕j)`
+(the real image of `basis_mul_law`). Then `φ : QF → ℝ`, `φ(c,den) = (Σ cᵢ rᵢ)/den`, is a ring hom,
+and `φ(qf_dist²) = ℝ-dist²` makes every G₅₂₉ edge a genuine Euclidean unit pair. The
+field-plane theorem `g529_field_plane_chi_ge_5` then transfers verbatim to `¬ ∃ proper 4-colouring
+of (ℝ², unit)` = **χ(ℝ²) ≥ 5**. The *only* Mathlib-requiring fact is the existence of `Real.sqrt`
+with `√a·√b = √(ab)` — everything else (the relations, the transfer) is core-Lean-ready.
+
 ## 1b. Implemented & gated this iteration — `examples/erdos/souc_sat.sio`
 
 A hardened engine `souc_sat.sio` was forked from `cdcl_fast.sio` and three plan

@@ -179,6 +179,50 @@ theorem qmul_comm (x y : QF) : qmul x y = qmul y x := by
       rw [List.getElem?_eq_none (by simpa using hlen), List.getElem?_eq_none (by rw [qmul_list_len]; simpa using hlen)]
   · exact Int.mul_comm x.2 y.2
 
+/-! ## Multiquadratic generator law — QF *is* ℚ(√3,√5,√7,√11) at the basis level
+
+The 16 basis elements `basis m` are the squarefree radical monomials
+`√(∏ primes selected by m)` over {3,5,7,11}. The defining algebraic fact of the
+multiquadratic ring is that they multiply by *adding masks* (XOR) while the shared
+primes (AND) come out as the rational coefficient `bcoeff (i &&& j)`:
+
+    √a · √b  =  (∏ shared primes) · √(symmetric difference).
+
+We certify this **exactly** (no floats, no Mathlib) by exhaustion over all 16×16
+basis pairs. This is precisely the relation a real embedding `basis m ↦ ∏√pⱼ ∈ ℝ`
+must respect; it fixes the multiplication table on the *generators*. (This alone is
+NOT a full ring/field certification — `qmul` associativity, distributivity and
+inverses remain open obligations below — but it is the generator-level law the
+eventual `QF ↪ ℝ` map is built on.) -/
+
+/-- The `m`-th multiquadratic basis radical, denominator 1. -/
+def basis (m : Nat) : QF := ((List.range 16).map (fun i => if i = m then (1 : Int) else 0), 1)
+
+/-- Multiply all numerator coefficients of a QF value by an integer scalar. -/
+def scaleC (c : Int) (x : QF) : QF := (x.1.map (· * c), x.2)
+
+/-- **Multiquadratic generator law (exact).** For every pair of basis radicals,
+`√i · √j = bcoeff(i ∧ j) · √(i ⊕ j)`. Verified for all 256 basis pairs. -/
+theorem basis_mul_law :
+    ∀ i ∈ List.range 16, ∀ j ∈ List.range 16,
+      qmul (basis i) (basis j) = scaleC (bcoeff (Nat.land i j)) (basis (Nat.xor i j)) := by
+  native_decide
+
+/-- `√3 · √3 = 3`  (basis 1, shared prime 3, mask 1⊕1 = 0 ⇒ rational). -/
+theorem sqrt3_sq  : qmul (basis 1) (basis 1) = scaleC 3 (basis 0) := by native_decide
+/-- `√5 · √5 = 5`. -/
+theorem sqrt5_sq  : qmul (basis 2) (basis 2) = scaleC 5 (basis 0) := by native_decide
+/-- `√7 · √7 = 7`. -/
+theorem sqrt7_sq  : qmul (basis 4) (basis 4) = scaleC 7 (basis 0) := by native_decide
+/-- `√11 · √11 = 11`. -/
+theorem sqrt11_sq : qmul (basis 8) (basis 8) = scaleC 11 (basis 0) := by native_decide
+/-- `√3 · √5 = √15`  (no shared prime ⇒ mask 1⊕2 = 3, coefficient 1). -/
+theorem sqrt3_sqrt5  : qmul (basis 1) (basis 2) = basis 3 := by native_decide
+/-- `√3 · √15 = 3·√5`  (shared prime 3: mask 1∧3 = 1 ⇒ bcoeff 3; 1⊕3 = 2 = √5). -/
+theorem sqrt3_sqrt15 : qmul (basis 1) (basis 3) = scaleC 3 (basis 2) := by native_decide
+/-- `√15 · √35 = 5·√21`  (shared prime 5: 3∧6 = 2 ⇒ bcoeff 5; 3⊕6 = 5 = √21). -/
+theorem sqrt15_sqrt35 : qmul (basis 3) (basis 6) = scaleC 5 (basis 5) := by native_decide
+
 /-- Open obligation: associativity of `qmul` (heavy sum reindexing; no `ring` / BigOperators). -/
 def QmulAssocObligation : Prop :=
   ∀ x y z : QF, qmul (qmul x y) z = qmul x (qmul y z)
@@ -203,7 +247,9 @@ def QmulOneObligation : Prop :=
 #print axioms qadd_zero_left
 #print axioms qadd_zero_right
 #print axioms qmul_comm
+#print axioms basis_mul_law
+#print axioms sqrt3_sq
 
-#eval IO.println "SounioMultiquadRing: PROVED qadd_comm, qadd_zero_left, qadd_zero_right, qmul_comm; OPEN QmulAssocObligation, Qmul{Left,Right}DistribObligation, QaddNegObligation, QmulOneObligation."
+#eval IO.println "SounioMultiquadRing: PROVED qadd_comm, qadd_zero_left, qadd_zero_right, qmul_comm, basis_mul_law (multiquadratic generator law, all 256 basis pairs) + √pᵢ²=pᵢ & cross-product corollaries; OPEN QmulAssocObligation, Qmul{Left,Right}DistribObligation, QaddNegObligation, QmulOneObligation."
 
 end MultiquadRing
