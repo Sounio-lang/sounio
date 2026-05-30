@@ -56,7 +56,7 @@ private theorem mod_idx (v c : Nat) (hk : 0 < k) (hc : c < k) : (v * k + c) % k 
   rw [Nat.mul_comm v k, Nat.mul_add_mod, Nat.mod_eq_of_lt hc]
 
 /-- The induced assignment is true exactly on the chosen-colour variable. -/
-private theorem asg_iff (v c : Nat) (hk : 0 < k) (hc : c < k) :
+theorem asg_iff (v c : Nat) (hk : 0 < k) (hc : c < k) :
     asg k col (v * k + c) = true ↔ col v = c := by
   simp only [asg, decide_eq_true_eq, div_idx v c hk hc, mod_idx v c hk hc]
 
@@ -69,7 +69,7 @@ structure Proper (n k : Nat) (edges : List (Nat × Nat)) (col : Nat → Nat) : P
   endpts : ∀ e ∈ edges, e.1 < n ∧ e.2 < n
   proper : ∀ e ∈ edges, col e.1 ≠ col e.2
 
-private theorem sat_atLeastOne (hk : 0 < k) (hp : Proper n k edges col) :
+theorem sat_atLeastOne (hk : 0 < k) (hp : Proper n k edges col) :
     ∀ cl ∈ atLeastOne n k, CNF.Clause.eval (asg k col) cl = true := by
   intro cl hcl
   simp only [atLeastOne, List.mem_map, List.mem_range] at hcl
@@ -78,7 +78,7 @@ private theorem sat_atLeastOne (hk : 0 < k) (hp : Proper n k edges col) :
   simp only [CNF.Clause.eval, List.any_map, List.any_eq_true, List.mem_range, Function.comp]
   exact ⟨col v, hcolv, by simp [(asg_iff v (col v) hk hcolv).mpr rfl]⟩
 
-private theorem sat_edgeClauses (hk : 0 < k) (hp : Proper n k edges col) :
+theorem sat_edgeClauses (hk : 0 < k) (hp : Proper n k edges col) :
     ∀ cl ∈ edgeClauses k edges, CNF.Clause.eval (asg k col) cl = true := by
   intro cl hcl
   simp only [edgeClauses, List.mem_flatMap, List.mem_map, List.mem_range] at hcl

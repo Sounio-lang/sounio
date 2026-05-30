@@ -184,18 +184,39 @@ pure-logic bridge lifts `CNF.Unsat` to the chromatic statement. drat-trim is now
   (ii) Lean's `insert` *pushes*, so addition ids must be **contiguous** — `gen_lean_sat.sh`
   renumbers drat-trim's gappy ids (57 gaps on K₇/6) and remaps all hint/deletion refs. The
   un-renumbered version silently returned `check = false`.
-- **G₅₂₉ honest status (term-size wall).** souc_sat refutes G₅₂₉ in 300 218 conflicts → 66 MB
-  DRAT → **98 616-line / 31.5 MB LRAT** (drat-trim, 66 784 core lemmas, `s VERIFIED`). Embedding
-  a 98 k-action proof as a Lean *term* + `native_decide` is **not feasible in-workspace** (K₇/6 =
-  171 s for 1 464 actions ⟹ multi-hour compile + RAM blow-up). The fix is **file-loaded
-  reflection** (Lean's `bv_check`/`ofReduceBool` reads the LRAT at elaboration instead of
-  embedding it) — a `souc_check` meta-program is the recommended next sprint. Full writeup:
-  `examples/erdos/B1_SAT_LEG_IN_LEAN.md`.
+- **G₅₂₉ (term-size wall) — superseded; see 1c-B2.** souc_sat refutes G₅₂₉ in 300 218 conflicts →
+  626 MB DRAT → **98 616-line / 31.5 MB LRAT** (drat-trim, 66 784 core lemmas, `s VERIFIED`). The
+  embedded-*term* `native_decide` route does not scale here (K₇/6 = 171 s for 1 464 actions). Fixed
+  below by file-loaded reflection.
 
 This realises the §3 backlog item "Formally-verified LRAT checker in Lean" and most of the §4.3
-"end-to-end Lean theorem" prize: the χ≥5 SAT leg is now machine-checked in Lean for the
-mechanism + a real solver certificate; only the G₅₂₉-scale reflection and the `QF↪ℝ` embedding
-remain.
+"end-to-end Lean theorem" prize.
+
+### 1c-B2. χ(G₅₂₉) ≥ 5 CLOSED in Lean core via `souc_check` (file-loaded reflection) (2026-05-30)
+
+The B1 term-size wall is **broken**. Instead of embedding the certificate as an `Array IntAction`
+term, we embed the renumbered LRAT as a single **`String` literal** and parse it with
+`SounioSatReflect.parseLRAT` *inside* the `native_decide` computation — so parse + verified-check
+run as compiled native code (the string atom elaborates in ms). This is the `bv_check`/`ofReduceBool`
+idea with zero new trust: the parser is unverified but **soundness-irrelevant** (`check_sound` only
+trusts the verified checker's verdict on whatever actions it is fed; a parser bug can only make the
+proof *fail*).
+
+- **Scaling (DONE).** K₇/6: 171 s → **0.8 s**. G₅₂₉ (98 616 actions, 31.5 MB): **~11 s**,
+  `g529_unsat : g529_cnf.Unsat`. Negative control: corrupting one SB unit ⟹ `native_decide` = false
+  (`sorryAx`) — the result is genuine.
+- **WLOG leg (DONE).** `formal/lean4/SounioSatColouringSB.lean`: `not_colourable_of_unsat_tri` —
+  the souc_sat triangle-precolour (`0,1,5 → 0,1,2`) symmetry break is satisfiability-preserving for
+  k=4 (constructive colour-permutation `relabel4`, bijectivity by `decide` over `Fin 4`). Pure logic,
+  axioms `[propext, Quot.sound]`. Grok 4.1 math-review **[OK]** ("no gaps in the reduction").
+- **Flagship theorem (DONE).** `formal/lean4/SounioSatG529.lean` (autogen by
+  `gen_lean_sat_reflect.sh`): `g529_not_colourable : ¬ ∃ proper 4-colouring of G₅₂₉` =
+  **unconditional χ(G₅₂₉) ≥ 5**, axioms `[propext, Classical.choice, Quot.sound, native_decide.ax]`,
+  no `sorry`, **no Mathlib**, no external checker as a trust anchor.
+
+The χ≥5 SAT leg is now machine-checked in Lean **at full G₅₂₉ scale** from Sounio's own solver.
+Only the `QF↪ℝ` Euclidean-embedding leg (geometry × SAT composition over ℝ²) remains. Full writeup:
+`examples/erdos/B1_SAT_LEG_IN_LEAN.md`.
 
 ## 1b. Implemented & gated this iteration — `examples/erdos/souc_sat.sio`
 

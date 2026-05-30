@@ -1,8 +1,9 @@
 # B1 — Internalising the SAT leg in Lean core (no Mathlib)
 
-**Date:** 2026-05-29
-**Status:** mechanism + soundness bridge **proven**; full chain **closed on K₇/6**;
-G₅₂₉ blocked on `native_decide` term-size (path identified).
+**Date:** 2026-05-29 (updated 2026-05-30)
+**Status:** mechanism + soundness bridge **proven**; full chain **closed on K₇/6**
+*and on G₅₂₉* — **χ(G₅₂₉) ≥ 5 fully machine-checked in Lean core, no Mathlib** (the
+term-size wall was broken by file-loaded-style reflection, see §souc_check).
 
 ## What this is
 
@@ -62,35 +63,62 @@ clause-for-clause identical (same clause order; intra-clause literal order is
 irrelevant to the set-based checker) to souc_sat's DIMACS, verified by `diff`.
 This lets the **generic, scale-independent** bridge apply directly.
 
-## G₅₂₉ scaling — honest status
+## G₅₂₉ scaling — CLOSED via `souc_check` (file-loaded-style reflection)
 
-| instance | vars | clauses | LRAT lines | `native_decide` |
-|----------|-----:|--------:|-----------:|-----------------|
-| K₇/6     | 42   | 133     | 1 464      | 171 s ✅ |
-| G₅₂₉ 4-col | 2 116 | 11 212 | **98 616** (31.5 MB; 66 784 core lemmas) | ✗ (see below) |
+| instance | vars | clauses | LRAT actions | embedded-term route | **souc_check (string+parse)** |
+|----------|-----:|--------:|-------------:|---------------------|-------------------------------|
+| K₇/6     | 42   | 133     | 1 464        | 171 s ✅            | **0.8 s** ✅ |
+| G₅₂₉ 4-col | 2 116 | 11 212 | **98 616** (31.5 MB) | ✗ (term-size wall) | **~11 s** ✅ |
 
-souc_sat refutes G₅₂₉ in 300 218 conflicts (66 MB streamed DRAT); drat-trim
+souc_sat refutes G₅₂₉ in 300 218 conflicts (626 MB streamed DRAT); drat-trim
 trims to 66 784 core lemmas / 98 616 LRAT lines (`s VERIFIED`).
 
-Embedding a 98 616-action proof as a Lean **term** and discharging
-`check = true` by `native_decide` is **not feasible in the workspace**: the K₇/6
-datapoint (171 s for 1 464 actions) extrapolates to multiple hours of compilation
-and a ~31 MB array-of-arrays literal whose elaboration/native compilation exceeds
-available RAM. This is a *term-size* wall, not a soundness or logic gap — the
-bridge already proves the reduction for any `n, k, edges`.
+### Why the embedded-term route fails — and how `souc_check` fixes it
 
-### Path to closing G₅₂₉ in Lean (future sprint)
+Embedding a 98 616-action proof as a Lean **term** (one `Action.addRup id #[…] #[…]`
+per line) and discharging `check = true` by `native_decide` is infeasible: the K₇/6
+datapoint (171 s for 1 464 actions, almost all in *elaborating* the constructor
+applications) extrapolates to hours, and the array-of-arrays literal blows past RAM.
 
-1. **File-loaded reflection** (the real fix). Lean's `bv_decide`/`bv_check`
-   never embed the certificate as a term: they read the LRAT at elaboration and
-   reflect via `Lean.ofReduceBool` over file-loaded data. A `souc_check`-style
-   term/tactic that loads `g529.lrat` from disk and calls `check` the same way
-   would sidestep the term-size wall entirely. This is the recommended next step.
-2. **Cluster brute force.** Build `SounioSatG529` on the HPC node (≫ workspace
-   RAM, hours of compile budget) — closes it without new code, but is not
-   reproducible on a laptop.
-3. **Further proof minimisation** (`lrat-trim`) — helps constant-factor only
-   (~67× gap remains), insufficient alone.
+`bv_decide`/`bv_check` never do this — they reflect over file/array data rather than a
+term. We do the analogous thing with **zero new trust**:
+
+1. **Embed the renumbered LRAT as a single `String` literal.** A string is an *atom*:
+   the elaborator ingests 31 MB in milliseconds (vs minutes for 98 616 nested
+   constructors).
+2. **Parse it inside the reflective computation.** `SounioSatReflect.parseLRAT :
+   String → Array IntAction` runs *under* `native_decide`, i.e. as compiled native
+   code, alongside `check`. Parsing 31 MB + checking 98 616 actions: ~11 s total.
+3. **The parser is unverified but soundness-irrelevant.** `check_sound` guarantees
+   that *if the verified checker accepts the parsed actions* the CNF is UNSAT — no
+   matter how they were produced. A parser bug can only make the proof *fail*, never
+   make an unsound one succeed. (Confirmed: corrupting one SB unit flips
+   `native_decide` to `false`/`sorryAx`.)
+
+Result: `SounioSatG529.g529_unsat` (SB-augmented CNF UNSAT) and, via the WLOG leg,
+`g529_not_colourable` (**unconditional χ(G₅₂₉) ≥ 5**). Axioms `[propext,
+Classical.choice, Quot.sound, native_decide.ax]`, no `sorry`, no Mathlib, no external
+checker as a trust anchor (drat-trim/cake_lpr only *emit* the LRAT hints).
+
+### The WLOG leg (`SounioSatColouringSB.lean`)
+
+souc_sat refutes the 4-colouring CNF *augmented* with three units fixing a triangle
+`0,1,5` to colours `0,1,2` (a complete colour-symmetry break for k=4). To make the
+bound unconditional we prove `not_colourable_of_unsat_tri`: for a pairwise-adjacent
+triangle, that SB-augmented `Unsat` implies no proper 4-colouring exists — the standard
+colour-permutation WLOG, made constructive (`relabel4` bijection, bijectivity decided by
+exhaustion over `Fin 4`). Pure logic, axioms `[propext, Quot.sound]`, Grok math-review
+**[OK]**.
+
+### Reproduce (the `souc_check` codegen)
+
+```bash
+cd examples/erdos
+./gen_lean_sat_reflect.sh souc_sat_worker.cnf /tmp/g529.lrat \
+    ../../formal/lean4/SounioSatG529.lean g529 SounioSatG529 529 4 \
+    data/degrey_529.edge 0 1 5        # last three = the precolour triangle
+cd ../../formal/lean4 && lake env lean SounioSatG529.lean   # ~11 s, prints axioms
+```
 
 ## Reproduce
 

@@ -125,6 +125,20 @@ lean_lib «SounioMultiquadRing» where
 @[default_target]
 lean_lib «SounioSatColouringBridge» where
 
+-- χ≥5 SAT-LEG, reflection harness: unverified (soundness-irrelevant) LRAT-text
+-- parser used by the file-loaded "souc_check" route — embeds a souc_sat LRAT as a
+-- String literal parsed under native_decide, sidestepping the Array-IntAction
+-- term-size wall. See examples/erdos/gen_lean_sat_reflect.sh.
+@[default_target]
+lean_lib «SounioSatReflect» where
+
+-- χ≥5 SAT-LEG, WLOG leg: triangle-precolour symmetry break is satisfiability-
+-- preserving for k=4. Lifts souc_sat's SB-augmented Unsat to an UNCONDITIONAL
+-- "no proper 4-colouring" (χ≥5). relabel4 bijectivity decided over Fin 4; axioms
+-- [propext, Quot.sound] (no Mathlib, no native_decide).
+@[default_target]
+lean_lib «SounioSatColouringSB» where
+
 -- B1 mechanism spike: a tiny hand-written UNSAT certificate re-checked by Lean core's
 -- verified LRAT checker (check/check_sound + native_decide). Standalone; fast.
 @[default_target]
@@ -136,6 +150,15 @@ lean_lib «SounioSatCheckSpike» where
 -- NOT a default_target: native_decide over ~1100 LRAT actions takes a few minutes; build
 -- on demand with `lake build SounioSatK76`.
 lean_lib «SounioSatK76» where
+
+-- χ≥5 FLAGSHIP: G₅₂₉ (de Grey unit-distance fragment, 529 verts) is NOT
+-- 4-colourable — souc_sat's 98 616-line CDCL LRAT re-checked inside Lean core via
+-- *file-loaded-style reflection* (the LRAT is a String literal parsed at native-
+-- eval time, NOT an embedded Array IntAction term — sidesteps the term-size wall;
+-- ~11 s). g529_not_colourable lifts it to unconditional χ(G₅₂₉)≥5 via the WLOG
+-- triangle-precolour leg. NOT a default_target (30 MB source; build on demand:
+-- `lake build SounioSatG529`).
+lean_lib «SounioSatG529» where
 
 -- M1: Vancomycin-Knightian thrust — Approx × Causal × Knowledge composition
 @[default_target]
