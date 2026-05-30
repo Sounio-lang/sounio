@@ -4296,6 +4296,32 @@ fn stmt_is_deref_field_store(p0: i64) -> bool with Panic, Mut {
     return TK[(p0 + 6) as usize] == 16
 }
 
+// (*name).field[idx] = expr  — explicit-deref store into a struct's ARRAY field.
+// Tokens: ( * name ) . field [ ... ] =  →  6 19 3 7 50 3 41 ... 42 16
+// lean_single had detectors for (*p)[i]=, (*p)=, and (*p).f= but NOT this one, so
+// `(*p).field[idx] = struct/scalar` fell through to the generic assignment path and
+// silently wrote into a discarded value-copy of the field array (reads back as 0).
+// The auto-deref form `p.field[idx]=v` already works (resolve_field_struct_index
+// resolves through the pointer's inner struct), so this is the same codegen with the
+// name/field token positions shifted past the `( * … )`.
+fn stmt_is_deref_field_array_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }
+    if TK[(p0 + 1) as usize] != 19 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 7 { return false }
+    if TK[(p0 + 4) as usize] != 50 { return false }
+    if TK[(p0 + 5) as usize] != 3 { return false }
+    if TK[(p0 + 6) as usize] != 41 { return false }
+    var p = p0 + 7
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 41 { depth = depth + 1 }
+        if TK[p as usize] == 42 { depth = depth - 1 }
+        p = p + 1
+    }
+    return TK[p as usize] == 16
+}
+
 fn skip_type_meta_item(p0: i64, close_tk: i64) -> i64 with Panic, Mut {
     var p = p0
     var paren_depth: i64 = 0
@@ -17396,6 +17422,84 @@ fn compile_field_array_store_x86() with IO, Mut, Panic, Div {
     }
 }
 
+// (*name).field[idx] = expr — explicit-deref store into a struct array field.
+// Mirror of compile_field_array_store_x86 with the name/field tokens shifted past
+// `( * … )`: name at EP+2, field at EP+5, body starts at EP+7. resolve_field_struct_index
+// already resolves the struct through the pointer var's inner type, and emit_load_var
+// loads the pointer value as the base — so codegen is otherwise identical.
+fn compile_deref_field_array_store_x86() with IO, Mut, Panic, Div {
+    let name_tok = EP + 2
+    let ns = TS[(EP + 2) as usize]
+    let ne = TE[(EP + 2) as usize]
+    let field_tok = EP + 5
+    let fns = TS[(EP + 5) as usize]
+    let fne = TE[(EP + 5) as usize]
+    let fh = gl_name_hash(fns, fne)
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(field_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    EP = EP + 7  // skip ( * name ) . field [
+    compile_or()
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+    if TK[EP as usize] == 42 { EP = EP + 1 }
+    if TK[EP as usize] == 16 { EP = EP + 1 }
+    em(0x50)
+    compile_or()
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    ST_QUERY_NS = fns
+    ST_QUERY_NE = fne
+    let si = resolve_field_struct_index(ns, ne, fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if si < 0 {
+        tc_error(field_tok, "unknown field access")
+        em(0x59)
+        return
+    }
+    if st_private_access_denied(si, field_tok) {
+        tc_error_hard(field_tok, "private struct field access")
+        em(0x59)
+        return
+    }
+    ST_QUERY_NS = fns
+    ST_QUERY_NE = fne
+    let foff = st_field_offset(si, fh)
+    let fty = st_field_ty(si, fh)
+    let fhash = st_field_hash(si, fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if fty != 8 {
+        tc_error(field_tok, "indexed field store requires array field")
+        em(0x59)
+        return
+    }
+    if ty_eq(arr_hash_elem_ty(fhash), arr_hash_elem_hash(fhash), rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    materialize_aggregate_array_element_x86(fhash)
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
+    em(0x59)  // pop rcx (index)
+    let slot = var_find(ns, ne)
+    if slot >= 0 { emit_load_var(slot) }  // rax = pointer/base
+    else {
+        let gi = gl_find(ns, ne)
+        if gi >= 0 {
+            let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+            em(0x48); em(0xb8); em64(addr)
+        } else {
+            tc_undefined_var(name_tok)
+            em(0x31); em(0xc0)
+        }
+    }
+    if foff != 0 { em(0x48); em(0x8d); em(0x80); em32(foff) }
+    if arr_hash_esiz(fhash) == 8 {
+        em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+    } else {
+        em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
+    }
+}
+
 fn compile_field_array_array_store_x86() with IO, Mut, Panic, Div {
     // Handles: ident.field[outer_idx][inner_idx] = val
     let name_tok = EP
@@ -17553,6 +17657,69 @@ fn compile_field_array_store_a64() with IO, Mut, Panic, Div {
     let fhash = st_field_hash(si, fh)
                     ST_QUERY_NS = -1
                     ST_QUERY_NE = -1
+    if fty != 8 {
+        tc_error(field_tok, "indexed field store requires array field")
+        emit_pop_x1_a64()
+        return
+    }
+    if ty_eq(arr_hash_elem_ty(fhash), arr_hash_elem_hash(fhash), rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    materialize_aggregate_array_element_a64(fhash)
+    em32(0xAA0003EA)
+    emit_pop_x1_a64()
+    let slot = var_find(ns, ne)
+    if slot >= 0 { emit_load_var_a64(slot) }
+    else {
+        let gi = gl_find(ns, ne)
+        if gi >= 0 { emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+        else { tc_undefined_var(name_tok); em32(0xD2800000) }
+    }
+    if foff != 0 {
+        emit_imm64_reg_a64(11, foff)
+        em32(0x8B0B0000)
+    }
+    if arr_hash_esiz(fhash) == 8 { em32(0xF821780A) }
+    else { em32(0x3821680A) }
+}
+
+// (*name).field[idx] = expr — a64 mirror of compile_deref_field_array_store_x86.
+fn compile_deref_field_array_store_a64() with IO, Mut, Panic, Div {
+    let name_tok = EP + 2
+    let ns = TS[(EP + 2) as usize]; let ne = TE[(EP + 2) as usize]
+    let field_tok = EP + 5
+    let fns = TS[(EP + 5) as usize]; let fne = TE[(EP + 5) as usize]
+    let fh = gl_name_hash(fns, fne)
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(field_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    EP = EP + 7
+    compile_or_a64()
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+    if TK[EP as usize] == 42 { EP = EP + 1 }
+    if TK[EP as usize] == 16 { EP = EP + 1 }
+    emit_push_a64()
+    compile_or_a64()
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    let si = resolve_field_struct_index(ns, ne, fh)
+    if si < 0 {
+        tc_error(field_tok, "unknown field access")
+        emit_pop_x1_a64()
+        return
+    }
+    if st_private_access_denied(si, field_tok) {
+        tc_error_hard(field_tok, "private struct field access")
+        emit_pop_x1_a64()
+        return
+    }
+    ST_QUERY_NS = fns
+    ST_QUERY_NE = fne
+    let foff = st_field_offset(si, fh)
+    let fty = st_field_ty(si, fh)
+    let fhash = st_field_hash(si, fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
     if fty != 8 {
         tc_error(field_tok, "indexed field store requires array field")
         emit_pop_x1_a64()
@@ -18841,6 +19008,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         return
     }
 
+    // (*name).field[idx] = expr  (explicit-deref store into a struct array field)
+    if stmt_is_deref_field_array_store(EP) {
+        compile_deref_field_array_store_x86()
+        return
+    }
     // (*ARRAY_PTR)[idx] = expr
     if stmt_is_deref_array_store(EP) {
         let name_tok = EP + 2
@@ -29408,6 +29580,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 emit_pop_x1_a64()
             }
         }
+        return
+    }
+    // (*name).field[idx] = expr  (explicit-deref store into a struct array field)
+    if stmt_is_deref_field_array_store(EP) {
+        compile_deref_field_array_store_a64()
         return
     }
     // (*ARRAY_PTR)[idx] = expr
