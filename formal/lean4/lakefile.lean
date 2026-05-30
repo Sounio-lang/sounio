@@ -225,6 +225,10 @@ lean_lib «SounioRootedFieldReal» where
 -- Multiquadratic linear-independence programme (faithfulness of QF↪ℝ): irrationality core.
 -- no_rat_sqrt (squarefree m has no rational √), not_sq_radicand, ofRat_inj, sqrt_radicand_irrational
 -- for the minimal support S={3,5,11} radicands {3,5,11,15,33,55,165}. `lake build SounioMultiquadIndep`.
+-- Faithfulness bridge: connect indep8 (native rootR/alpha4 basis) to the abstract QF
+-- homomorphism phi/evalNum (16 integer coeffs over r i). `lake build SounioMultiquadFaithful`.
+lean_lib «SounioMultiquadFaithful» where
+
 lean_lib «SounioMultiquadIndep» where
 
 -- χ≥5 UNCONDITIONAL over Mathlib-free ℝ: feeds the discharged SAT leg
