@@ -201,6 +201,12 @@ lean_lib «SounioDeGreyChi5Transfer» where
 -- remaining χ(ℝ²)≥5 input is the analytic 'ℝ is a SqrtField'. `lake build SounioDeGreyChi5TransferWf`.
 lean_lib «SounioDeGreyChi5TransferWf» where
 
+-- Start of the analytic SqrtField ℝ construction (Mathlib-free): RealEq (Cauchy null-difference)
+-- proved reflexive + symmetric, plus the obligation ledger enumerating the deferred analytic core
+-- (ε-N transitivity, op-congruence, field/order axioms, completeness, constructive sqrt).
+-- Discharging the ledger + sqrtField_chi_ge_5 yields χ(ℝ²)≥5. `lake build SounioSqrtFieldReal`.
+lean_lib «SounioSqrtFieldReal» where
+
 -- M1: Vancomycin-Knightian thrust — Approx × Causal × Knowledge composition
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where

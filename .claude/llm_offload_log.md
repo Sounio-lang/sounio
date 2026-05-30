@@ -1,5 +1,23 @@
 # LLM Offload Log
 
+## 2026-05-30: started analytic SqrtField ℝ — RealEq (Cauchy null-difference) refl+symm + obligation ledger
+
+- **Claim**: `formal/lean4/SounioSqrtFieldReal.lean` begins the sole remaining input to χ(ℝ²)≥5
+  ("ℝ is a SqrtField"). ℝ = quotient of `SounioRealCauchy` (Cauchy `Rat` sequences) by the
+  null-difference relation `RealEq a b := TendsToZero (a.seq - b.seq)`. Proved: `realEq_refl`
+  (via `Rat.sub_self`) and `realEq_symm` (via `Rat.neg_sub`, swapping the band halves) — neither
+  needs the sparse Mathlib-free `Rat` order API. The rest is an explicit obligation ledger
+  (`RealEqTransObligation`, `RealOpsCongObligation`, field/order/completeness/sqrt) following the
+  repo's `OrderedCarrierObligation` pattern; `RealEqTrans`/`RealOpsCong` are stated concretely,
+  the field/order/completeness/sqrt ones are `True` documentation placeholders marked ⏳ deferred
+  (the genuine multi-week analytic core: ε/2 triangle over `Rat`, mul-monotonicity ≈500–1000 LOC,
+  order completeness/sup, constructive sqrt with `sqrt_sq`). No sorry; `lake build` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "realEq_refl/realEq_symm: no gaps. Obligation ledger exactly enumerates the missing analytic
+  steps needed for a SqrtField ℝ instance; no over-claim. No mathematical content requires
+  correction." [TIGHTENABLE] the `True` placeholders could be expanded to explicit Props
+  (harmless, no downstream effect).
+
 ## 2026-05-30: guarded abstract transfer — χ(F²)≥5 for EVERY SqrtField F (Mathlib-free)
 
 - **Claim**: `formal/lean4/SounioDeGreyChi5TransferWf.lean` packages the QF→F transfer with the
@@ -259,6 +277,7 @@
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean | PASS | evalNum_qmul — QF numerator convolution → SqrtField radical-sum product, via from-scratch Mathlib-free fsum library + generator_law + perm_range_xor XOR reindex. Grok: "fsum lemmas, W_eq, ofInt_qmulCoeff, generator_law and fsum_xor steps compose to a valid equational proof of the ring-homomorphism identity; no leaps visible". New code axioms [propext, Quot.sound]. |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean (φ frac hom) | PASS | fraction map φ(c,d)=(Σcᵢrᵢ)·inv(ofInt d) + guarded ring-hom laws phi_qmul/phi_qadd/phi_qsub (den≠0), via evalNum_qadd/qsub + frac_add/frac_sub. Grok: "hypotheses (denominators ≠0) necessary and sufficient; frac_add/frac_sub supply the exact field identities. NO MATHEMATICAL ERRORS COMPOUNDING DOWNSTREAM". phi_qadd/qsub [propext, Quot.sound]; phi_qmul inherits perm_range_xor certs. |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean (phi_unit) | PASS | unital law phi_unit: QF representing 1 (coeff₀=den, rest 0, den≠0) ↦ R.one, via fsum_single summand-isolation + r_zero + mul_inv. Grok: "fsum_single correctly isolates the r_0 term under the stated coefficient hypotheses; mul_inv closes. NO MATHEMATICAL ERRORS OR OVERREACHES". Axioms [propext, Classical.choice, Quot.sound]. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSqrtFieldReal.lean | PASS | started analytic SqrtField ℝ: ℝ as quotient of SounioRealCauchy by null-difference RealEq; realEq_refl (Rat.sub_self) + realEq_symm (Rat.neg_sub) proved, plus obligation ledger for the deferred analytic core (ε/2 transitivity, op-congruence, field/order/completeness/sqrt). Grok: "no gaps; obligation ledger exactly enumerates the missing analytic steps; no over-claim". No sorry; deferred = Prop defs. |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioDeGreyChi5TransferWf.lean | PASS | guarded abstract transfer: χ(F²)≥5 for EVERY SqrtField F (Mathlib-free). QFTransferWf (den≠0 guard) + geom_transfer_wf + chi_ge_5_wf + emb_den_ne_zero (native_decide X/Y dens nonzero) + sqrtTransfer instance from phi_*/phi_unit. Grok: "guarded homs applied exactly once per subexpression; final hunit discharges on unitFP certificate; sqrtField_chi_ge_5 only external assumption is 'R is SqrtField'. NO MATHEMATICAL LEAPS OR GAPS". Axioms [propext, Classical.choice, Quot.sound] + native certs; no sorryAx. |
 
 ## 2026-05-29: FLAGSHIP V-track — geometry leg machine-checked in Lean 4 + LRAT

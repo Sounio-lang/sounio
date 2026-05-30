@@ -345,9 +345,13 @@ so denominators are invertible). **Done this iteration** in `SounioSqrtField.lea
    Mathlib-free, axioms `[propext, Classical.choice, Quot.sound]` + the legitimate `native_decide`
    certs (`perm_range_xor`, `geom_all_edges_unitFP`, `allX_ne`, `allY_ne`); **no sorryAx**.
 6. **The sole remaining gap: the analytic `SqrtField ℝ` instance** — ℝ as an ordered field with √.
-   Mathlib gives it in one line; a Mathlib-free witness needs completing the in-tree Cauchy reals
-   (`SounioRealCauchy` defers `mul_le_mul_of_nonneg_right` ≈500–1000 LOC + `OrderedCarrierObligation`)
-   and a constructive √ (completeness/sup). This is multi-week and is the honest remaining frontier.
+   **STARTED (2026-05-30)** in `SounioSqrtFieldReal.lean`: ℝ = quotient of `SounioRealCauchy` by the
+   null-difference relation `RealEq`; `realEq_refl` + `realEq_symm` proved (no `Rat` order API needed),
+   with an explicit obligation ledger for the deferred analytic core. Mathlib gives the instance in
+   one line; a Mathlib-free witness needs the ε/2 transitivity/triangle lemmas over `Rat` (sparse
+   order API — even `Rat.add_le_add` absent), the mul-monotonicity law (`SounioRealCauchy` defers
+   `mul_le_mul_of_nonneg_right` ≈500–1000 LOC + `OrderedCarrierObligation`), order completeness (sup),
+   and a constructive √ with `sqrt_sq`. This is multi-week and is the honest remaining frontier.
    Once `(R := ℝ)` is supplied, `sqrtField_chi_ge_5 ℝ g529_not_colourable` is **χ(ℝ²) ≥ 5** — SAT leg,
    geometry certificate, generator law, char-0 toolkit, the **full QF→F unital ring homomorphism**, and
    the **abstract χ(F²)≥5 transfer** are all closed in core Lean; only the ℝ-model satisfiability of the
