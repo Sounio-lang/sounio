@@ -346,8 +346,10 @@ so denominators are invertible). **Done this iteration** in `SounioSqrtField.lea
    certs (`perm_range_xor`, `geom_all_edges_unitFP`, `allX_ne`, `allY_ne`); **no sorryAx**.
 6. **The sole remaining gap: the analytic `SqrtField ℝ` instance** — ℝ as an ordered field with √.
    **STARTED (2026-05-30)** in `SounioSqrtFieldReal.lean`: ℝ = quotient of `SounioRealCauchy` by the
-   null-difference relation `RealEq`; `realEq_refl` + `realEq_symm` proved (no `Rat` order API needed),
-   with an explicit obligation ledger for the deferred analytic core. Mathlib gives the instance in
+   null-difference relation `RealEq`, now proved a **full equivalence** (`realEq_refl` + `realEq_symm`
+   + `realEq_trans` via the ε/2 triangle on the core `Rat` order API) and packaged as `realSetoid`, so
+   **ℝ := `Quotient realSetoid`** is available. An explicit obligation ledger remains for the deferred
+   analytic core. Mathlib gives the instance in
    one line; a Mathlib-free witness needs the ε/2 transitivity/triangle lemmas over `Rat` (sparse
    order API — even `Rat.add_le_add` absent), the mul-monotonicity law (`SounioRealCauchy` defers
    `mul_le_mul_of_nonneg_right` ≈500–1000 LOC + `OrderedCarrierObligation`), order completeness (sup),

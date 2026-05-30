@@ -1,5 +1,29 @@
 # LLM Offload Log
 
+## 2026-05-30: RealEq is an equivalence — realEq_trans (ε/2 triangle) + realSetoid; ℝ := Quotient
+
+- **Claim**: `formal/lean4/SounioSqrtFieldReal.lean` discharges `RealEqTransObligation` with
+  `realEq_trans` (the ε/2 triangle inequality over `Rat`), built on `rat_sub_split`
+  (`x - z = (x-y)+(y-z)`), `rat_half_pos`, and `rat_add_halves` (`ε·½ + ε·½ = ε`) using the core
+  `Rat` order API (`Rat.add_le_add_left/right` iff-forms, `Rat.le_trans`, `Rat.mul_pos`,
+  `Rat.add_neg_cancel`, `Rat.neg_add`). `RealEq` is now a full `Equivalence` (`realEq_equivalence`)
+  and `Setoid` (`realSetoid`), so **ℝ := `Quotient realSetoid`** is available — the quotient is
+  unlocked. Two scalar facts (`0 < (1/2:Rat)`, `(1/2+1/2:Rat)=1`) use `native_decide` because
+  kernel `decide` stalls on `Rat` division normalisation; consistent with the χ5 chain's existing
+  native_decide use. `lake build` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1.
+  Findings: refl/symm/helpers/ledger/equivalence/setoid all **[OK]**.
+  **DISAGREEMENT (logged per policy)**: Grok flagged `[WRONG] realEq_trans`, claiming the chain
+  `Rat.le_trans (add_le_add_right.mpr h1a) (add_le_add_left.mpr h2a)` "does not establish the bound"
+  and suggested `Rat.add_le_add h1a h2a`. **Rejected with reasoning**: (1) the term is
+  machine-verified by the Lean kernel (`lake build` exit 0) — ground truth; (2) the two-step pattern
+  (add `(b-c)` on the right of `h1a`, then add `ε·½` on the left of `h2a`, chained by `le_trans`)
+  is a standard and valid way to add two inequalities, yielding exactly
+  `(a-b)+(b-c) ≤ ε·½ + ε·½`; (3) the suggested `Rat.add_le_add` **does not exist** Mathlib-free
+  (verified by `#check`: only the iff-forms `Rat.add_le_add_left/right` are available), so the
+  proposed fix would fail to compile. Grok's `[OVERREACH]` note ("Rat lemmas used as primitives")
+  is a misreading of "Mathlib-free" — these are Lean *core* `Rat` lemmas, no Mathlib import.
+
 ## 2026-05-30: started analytic SqrtField ℝ — RealEq (Cauchy null-difference) refl+symm + obligation ledger
 
 - **Claim**: `formal/lean4/SounioSqrtFieldReal.lean` begins the sole remaining input to χ(ℝ²)≥5
@@ -278,6 +302,7 @@
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean (φ frac hom) | PASS | fraction map φ(c,d)=(Σcᵢrᵢ)·inv(ofInt d) + guarded ring-hom laws phi_qmul/phi_qadd/phi_qsub (den≠0), via evalNum_qadd/qsub + frac_add/frac_sub. Grok: "hypotheses (denominators ≠0) necessary and sufficient; frac_add/frac_sub supply the exact field identities. NO MATHEMATICAL ERRORS COMPOUNDING DOWNSTREAM". phi_qadd/qsub [propext, Quot.sound]; phi_qmul inherits perm_range_xor certs. |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean (phi_unit) | PASS | unital law phi_unit: QF representing 1 (coeff₀=den, rest 0, den≠0) ↦ R.one, via fsum_single summand-isolation + r_zero + mul_inv. Grok: "fsum_single correctly isolates the r_0 term under the stated coefficient hypotheses; mul_inv closes. NO MATHEMATICAL ERRORS OR OVERREACHES". Axioms [propext, Classical.choice, Quot.sound]. |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSqrtFieldReal.lean | PASS | started analytic SqrtField ℝ: ℝ as quotient of SounioRealCauchy by null-difference RealEq; realEq_refl (Rat.sub_self) + realEq_symm (Rat.neg_sub) proved, plus obligation ledger for the deferred analytic core (ε/2 transitivity, op-congruence, field/order/completeness/sqrt). Grok: "no gaps; obligation ledger exactly enumerates the missing analytic steps; no over-claim". No sorry; deferred = Prop defs. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSqrtFieldReal.lean (realEq_trans) | DISAGREE-LOGGED | realEq_trans (ε/2 triangle) → RealEq is Equivalence + Setoid → ℝ := Quotient realSetoid. Grok [OK] on refl/symm/helpers/equivalence/setoid; flagged [WRONG] realEq_trans suggesting non-existent Rat.add_le_add. REJECTED: term machine-verified (lake build exit 0); add_le_add_right.mpr ∘ add_le_add_left.mpr ∘ le_trans is the valid two-step inequality sum; Rat.add_le_add absent Mathlib-free (only iff-forms exist) so the "fix" would not compile. |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioDeGreyChi5TransferWf.lean | PASS | guarded abstract transfer: χ(F²)≥5 for EVERY SqrtField F (Mathlib-free). QFTransferWf (den≠0 guard) + geom_transfer_wf + chi_ge_5_wf + emb_den_ne_zero (native_decide X/Y dens nonzero) + sqrtTransfer instance from phi_*/phi_unit. Grok: "guarded homs applied exactly once per subexpression; final hunit discharges on unitFP certificate; sqrtField_chi_ge_5 only external assumption is 'R is SqrtField'. NO MATHEMATICAL LEAPS OR GAPS". Axioms [propext, Classical.choice, Quot.sound] + native certs; no sorryAx. |
 
 ## 2026-05-29: FLAGSHIP V-track — geometry leg machine-checked in Lean 4 + LRAT

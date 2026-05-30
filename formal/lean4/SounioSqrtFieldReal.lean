@@ -63,6 +63,48 @@ theorem realEq_symm {a b : SounioRealCauchy} (h : RealEq a b) : RealEq b a := by
     rw [show -(b.seq n - a.seq n) = a.seq n - b.seq n from by rw [Rat.neg_sub]]
     exact h1
 
+/-- Difference splits across a midpoint: `x - z = (x - y) + (y - z)` over `Rat`. -/
+private theorem rat_sub_split (x y z : Rat) : x - z = (x - y) + (y - z) := by
+  rw [Rat.sub_eq_add_neg, Rat.sub_eq_add_neg, Rat.sub_eq_add_neg, Rat.add_assoc,
+    ← Rat.add_assoc (-y) y (-z), Rat.add_comm (-y) y, Rat.add_neg_cancel, Rat.zero_add]
+
+/-- Half of a positive rational is positive. -/
+private theorem rat_half_pos {ε : Rat} (hε : 0 < ε) : 0 < ε * (1/2) :=
+  Rat.mul_pos hε (by native_decide)
+
+/-- Two halves sum to the whole. -/
+private theorem rat_add_halves (ε : Rat) : ε * (1/2) + ε * (1/2) = ε := by
+  rw [← Rat.mul_add, show ((1:Rat)/2 + 1/2) = 1 from by native_decide, Rat.mul_one]
+
+/-- `RealEq` is **transitive**: the ε/2 triangle inequality over `Rat`. With `realEq_refl`/
+    `realEq_symm`, this discharges `RealEqTransObligation` and makes `RealEq` an equivalence. -/
+theorem realEq_trans {a b c : SounioRealCauchy} (hab : RealEq a b) (hbc : RealEq b c) :
+    RealEq a c := by
+  intro ε hε
+  obtain ⟨N1, hN1⟩ := hab (ε * (1/2)) (rat_half_pos hε)
+  obtain ⟨N2, hN2⟩ := hbc (ε * (1/2)) (rat_half_pos hε)
+  refine ⟨max N1 N2, fun n hn => ?_⟩
+  obtain ⟨h1a, h1b⟩ := hN1 n (Nat.le_trans (Nat.le_max_left N1 N2) hn)
+  obtain ⟨h2a, h2b⟩ := hN2 n (Nat.le_trans (Nat.le_max_right N1 N2) hn)
+  refine ⟨?_, ?_⟩
+  · show a.seq n - c.seq n ≤ ε
+    rw [rat_sub_split (a.seq n) (b.seq n) (c.seq n)]
+    have : (a.seq n - b.seq n) + (b.seq n - c.seq n) ≤ ε * (1/2) + ε * (1/2) :=
+      Rat.le_trans (Rat.add_le_add_right.mpr h1a) (Rat.add_le_add_left.mpr h2a)
+    rwa [rat_add_halves] at this
+  · show -(a.seq n - c.seq n) ≤ ε
+    rw [rat_sub_split (a.seq n) (b.seq n) (c.seq n), Rat.neg_add]
+    have : -(a.seq n - b.seq n) + -(b.seq n - c.seq n) ≤ ε * (1/2) + ε * (1/2) :=
+      Rat.le_trans (Rat.add_le_add_right.mpr h1b) (Rat.add_le_add_left.mpr h2b)
+    rwa [rat_add_halves] at this
+
+/-- `RealEq` is an **equivalence relation** — the foundation for ℝ as a quotient. -/
+theorem realEq_equivalence : Equivalence RealEq :=
+  { refl := realEq_refl, symm := realEq_symm, trans := realEq_trans }
+
+/-- The setoid on Cauchy representatives whose quotient is ℝ. -/
+def realSetoid : Setoid SounioRealCauchy := ⟨RealEq, realEq_equivalence⟩
+
 /-! ## Obligation ledger for `SqrtField ℝ`
 
 Each obligation below is a named `Prop`. Discharging *all* of them (Mathlib-free) and assembling
@@ -72,11 +114,13 @@ that, fed to `DeGrey529.TransferWf.sqrtField_chi_ge_5`, gives **χ(ℝ²) ≥ 5*
 Status legend: ✅ proved above · ⏳ deferred (analytic core).
 -/
 
-/-- ⏳ Transitivity of `RealEq` — the ε/2 triangle inequality over `Rat`. Needs a `Rat`
-    `add_le_add`-style lemma and `ε/2 + ε/2 = ε`, neither readily available Mathlib-free. Together
-    with `realEq_refl`/`realEq_symm` this upgrades `RealEq` to a `Setoid`, enabling the quotient. -/
+/-- ✅ **DISCHARGED** by `realEq_trans` / `realEq_equivalence` / `realSetoid` above (the ε/2 triangle,
+    built on `rat_sub_split` + `rat_add_halves` from the `Rat` order API). `RealEq` is now a full
+    equivalence, so ℝ := `Quotient realSetoid` is available. -/
 def RealEqTransObligation : Prop :=
   ∀ a b c : SounioRealCauchy, RealEq a b → RealEq b c → RealEq a c
+
+theorem realEqTransObligation_done : RealEqTransObligation := @realEq_trans
 
 /-- ⏳ `RealEq` respects pointwise sum/product (well-definedness of `add`/`mul`/`neg` on the
     quotient), stated at the sequence level to avoid threading sum/product Cauchy witnesses.
@@ -104,6 +148,6 @@ def RealCompletenessObligation : Prop := True  -- monotone-bounded ⇒ Cauchy �
     Newton/bisection iteration. This is the final `SqrtField` field. -/
 def RealSqrtObligation : Prop := True  -- sqrt + sqrt_nonneg + sqrt_sq
 
-#eval IO.println "SounioSqrtFieldReal: STARTED the analytic SqrtField ℝ construction (Mathlib-free) — RealEq (Cauchy null-difference) PROVED reflexive + symmetric; obligation ledger enumerates the deferred analytic core (ε-N transitivity, op-congruence, field/order axioms, completeness, constructive sqrt). Discharging the ledger + sqrtField_chi_ge_5 gives χ(ℝ²)≥5."
+#eval IO.println "SounioSqrtFieldReal: analytic SqrtField ℝ — RealEq (Cauchy null-difference) PROVED an EQUIVALENCE (refl + symm + trans via the ε/2 triangle); realSetoid gives ℝ := Quotient realSetoid. Remaining ledger: op-congruence, field/order axioms, completeness, constructive sqrt. Discharging it + sqrtField_chi_ge_5 gives χ(ℝ²)≥5."
 
 end SounioSqrt.RealCauchyField
