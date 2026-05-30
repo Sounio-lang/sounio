@@ -105,6 +105,37 @@ theorem realEq_equivalence : Equivalence RealEq :=
 /-- The setoid on Cauchy representatives whose quotient is ℝ. -/
 def realSetoid : Setoid SounioRealCauchy := ⟨RealEq, realEq_equivalence⟩
 
+/-- Sum-difference regroups: `(a+b) - (c+d) = (a-c) + (b-d)` over `Rat`. -/
+private theorem rat_add_sub_add (a b c d : Rat) : (a + b) - (c + d) = (a - c) + (b - d) := by
+  rw [Rat.sub_eq_add_neg, Rat.sub_eq_add_neg, Rat.sub_eq_add_neg, Rat.neg_add,
+    Rat.add_assoc a b (-c + -d), ← Rat.add_assoc b (-c) (-d), Rat.add_comm b (-c),
+    Rat.add_assoc (-c) b (-d), ← Rat.add_assoc a (-c) (b + -d)]
+
+/-- **The sum of two Cauchy sequences is Cauchy** — the ε/2 triangle again. Enables the additive
+    operation on the quotient ℝ. -/
+theorem add_cauchy {f g : Nat → Rat} (hf : Sounio.RealCauchy.IsCauchy f)
+    (hg : Sounio.RealCauchy.IsCauchy g) :
+    Sounio.RealCauchy.IsCauchy (fun n => f n + g n) := by
+  intro ε hε
+  obtain ⟨N1, hN1⟩ := hf (ε * (1/2)) (rat_half_pos hε)
+  obtain ⟨N2, hN2⟩ := hg (ε * (1/2)) (rat_half_pos hε)
+  refine ⟨max N1 N2, fun m n hm hn => ?_⟩
+  obtain ⟨h1a, h1b⟩ := hN1 m n (Nat.le_trans (Nat.le_max_left N1 N2) hm)
+                                (Nat.le_trans (Nat.le_max_left N1 N2) hn)
+  obtain ⟨h2a, h2b⟩ := hN2 m n (Nat.le_trans (Nat.le_max_right N1 N2) hm)
+                                (Nat.le_trans (Nat.le_max_right N1 N2) hn)
+  refine ⟨?_, ?_⟩
+  · show (f m + g m) - (f n + g n) ≤ ε
+    rw [rat_add_sub_add]
+    have : (f m - f n) + (g m - g n) ≤ ε * (1/2) + ε * (1/2) :=
+      Rat.le_trans (Rat.add_le_add_right.mpr h1a) (Rat.add_le_add_left.mpr h2a)
+    rwa [rat_add_halves] at this
+  · show (f n + g n) - (f m + g m) ≤ ε
+    rw [rat_add_sub_add]
+    have : (f n - f m) + (g n - g m) ≤ ε * (1/2) + ε * (1/2) :=
+      Rat.le_trans (Rat.add_le_add_right.mpr h1b) (Rat.add_le_add_left.mpr h2b)
+    rwa [rat_add_halves] at this
+
 /-! ## Obligation ledger for `SqrtField ℝ`
 
 Each obligation below is a named `Prop`. Discharging *all* of them (Mathlib-free) and assembling
@@ -122,12 +153,40 @@ def RealEqTransObligation : Prop :=
 
 theorem realEqTransObligation_done : RealEqTransObligation := @realEq_trans
 
-/-- ⏳ `RealEq` respects pointwise sum/product (well-definedness of `add`/`mul`/`neg` on the
-    quotient), stated at the sequence level to avoid threading sum/product Cauchy witnesses.
-    `add`/`neg` are direct; `mul` needs eventual boundedness of Cauchy representatives. -/
+/-- ✅ **DISCHARGED (additive part)** by `realOpsCong_add` below: `RealEq` respects pointwise sum,
+    so `add` descends to the quotient. The multiplicative congruence (needing eventual boundedness
+    of Cauchy representatives) remains in `RealMulCongObligation`. -/
 def RealOpsCongObligation : Prop :=
   ∀ a b a' b' : SounioRealCauchy, RealEq a a' → RealEq b b' →
     TendsToZero (fun n => (a.seq n + b.seq n) - (a'.seq n + b'.seq n))
+
+/-- `RealEq` respects pointwise addition: `(a+b) - (a'+b') = (a-a') + (b-b')`, each band-half
+    bounded by the ε/2 triangle. Discharges the additive part of `RealOpsCongObligation`. -/
+theorem realOpsCong_add : RealOpsCongObligation := by
+  intro a b a' b' hab hbb ε hε
+  obtain ⟨N1, hN1⟩ := hab (ε * (1/2)) (rat_half_pos hε)
+  obtain ⟨N2, hN2⟩ := hbb (ε * (1/2)) (rat_half_pos hε)
+  refine ⟨max N1 N2, fun n hn => ?_⟩
+  obtain ⟨h1a, h1b⟩ := hN1 n (Nat.le_trans (Nat.le_max_left N1 N2) hn)
+  obtain ⟨h2a, h2b⟩ := hN2 n (Nat.le_trans (Nat.le_max_right N1 N2) hn)
+  refine ⟨?_, ?_⟩
+  · show (a.seq n + b.seq n) - (a'.seq n + b'.seq n) ≤ ε
+    rw [rat_add_sub_add]
+    have : (a.seq n - a'.seq n) + (b.seq n - b'.seq n) ≤ ε * (1/2) + ε * (1/2) :=
+      Rat.le_trans (Rat.add_le_add_right.mpr h1a) (Rat.add_le_add_left.mpr h2a)
+    rwa [rat_add_halves] at this
+  · show -((a.seq n + b.seq n) - (a'.seq n + b'.seq n)) ≤ ε
+    rw [rat_add_sub_add, Rat.neg_add]
+    have : -(a.seq n - a'.seq n) + -(b.seq n - b'.seq n) ≤ ε * (1/2) + ε * (1/2) :=
+      Rat.le_trans (Rat.add_le_add_right.mpr h1b) (Rat.add_le_add_left.mpr h2b)
+    rwa [rat_add_halves] at this
+
+/-- ⏳ `RealEq` respects pointwise **product** — needs that Cauchy representatives are eventually
+    bounded (so `a·b - a'·b' = a·(b-b') + (a-a')·b'` is controlled). Unlike the additive case this
+    is not a pure ε/2 split. -/
+def RealMulCongObligation : Prop :=
+  ∀ a b a' b' : SounioRealCauchy, RealEq a a' → RealEq b b' →
+    TendsToZero (fun n => a.seq n * b.seq n - a'.seq n * b'.seq n)
 
 /-- ⏳ The field axioms (`add_assoc`, …, `mul_inv`, `zero_ne_one`) on the quotient. These descend
     from the corresponding `Rat` identities once `RealOpsCongObligation` provides well-definedness;
@@ -148,6 +207,6 @@ def RealCompletenessObligation : Prop := True  -- monotone-bounded ⇒ Cauchy �
     Newton/bisection iteration. This is the final `SqrtField` field. -/
 def RealSqrtObligation : Prop := True  -- sqrt + sqrt_nonneg + sqrt_sq
 
-#eval IO.println "SounioSqrtFieldReal: analytic SqrtField ℝ — RealEq (Cauchy null-difference) PROVED an EQUIVALENCE (refl + symm + trans via the ε/2 triangle); realSetoid gives ℝ := Quotient realSetoid. Remaining ledger: op-congruence, field/order axioms, completeness, constructive sqrt. Discharging it + sqrtField_chi_ge_5 gives χ(ℝ²)≥5."
+#eval IO.println "SounioSqrtFieldReal: analytic SqrtField ℝ — RealEq PROVED an EQUIVALENCE (realSetoid ⇒ ℝ := Quotient realSetoid); additive structure grounded (add_cauchy: sum of Cauchy is Cauchy; realOpsCong_add: + respects RealEq ⇒ descends to the quotient). Remaining ledger: multiplicative congruence, field/order axioms, completeness, constructive sqrt. Discharging it + sqrtField_chi_ge_5 gives χ(ℝ²)≥5."
 
 end SounioSqrt.RealCauchyField
