@@ -456,6 +456,101 @@ theorem ofInt_ne_zero {d : Int} (hd : d ≠ 0) : ofInt d ≠ R.zero := by
     have h2 := congrArg R.neg h'
     rwa [sf_neg_neg, sf_neg_zero] at h2
 
+/-! ## `ofInt` is a ring homomorphism `ℤ → F` -/
+
+private theorem sf_neg_add (a b : R.F) : R.neg (R.add a b) = R.add (R.neg a) (R.neg b) := by
+  rw [← sf_neg_one_mul (R.add a b), R.left_distrib, sf_neg_one_mul, sf_neg_one_mul]
+
+private theorem sf_mul_neg (a b : R.F) : R.mul a (R.neg b) = R.neg (R.mul a b) := by
+  rw [R.mul_comm a (R.neg b), sf_neg_mul, R.mul_comm b a]
+
+theorem ofInt_neg (a : Int) : ofInt (-a) = R.neg (ofInt a) := by
+  match a with
+  | Int.ofNat 0 => exact sf_neg_zero.symm
+  | Int.ofNat (n + 1) =>
+    rw [show (-(Int.ofNat (n + 1))) = Int.negSucc n from rfl]; rfl
+  | Int.negSucc n =>
+    rw [show (-(Int.negSucc n)) = Int.ofNat (n + 1) from rfl]
+    exact (sf_neg_neg (ofNat (n + 1))).symm
+
+private theorem ofInt_add_one (a : Int) : ofInt (a + 1) = R.add (ofInt a) R.one := by
+  match a with
+  | Int.ofNat n =>
+    rw [show (Int.ofNat n + 1) = Int.ofNat (n + 1) from rfl]; rfl
+  | Int.negSucc 0 =>
+    rw [show (Int.negSucc 0 + 1) = Int.ofNat 0 from by decide]
+    show R.zero = R.add (R.neg (ofNat 1)) R.one
+    rw [ofNat_one, R.add_comm, R.add_neg]
+  | Int.negSucc (n + 1) =>
+    rw [show (Int.negSucc (n + 1) + 1) = Int.negSucc n from by omega]
+    show R.neg (ofNat (n + 1)) = R.add (R.neg (ofNat (n + 2))) R.one
+    rw [show ofNat (n + 2) = R.add (ofNat (n + 1)) R.one from rfl, sf_neg_add, R.add_assoc,
+        R.add_comm (R.neg R.one) R.one, R.add_neg, R.add_zero]
+
+private theorem ofInt_sub_one (a : Int) : ofInt (a - 1) = R.add (ofInt a) (R.neg R.one) := by
+  match a with
+  | Int.ofNat 0 =>
+    rw [show (Int.ofNat 0 - 1) = Int.negSucc 0 from by decide]
+    show R.neg (ofNat 1) = R.add (ofInt (Int.ofNat 0)) (R.neg R.one)
+    rw [ofNat_one, show ofInt (Int.ofNat 0) = R.zero from rfl, sf_add_zero_left]
+  | Int.ofNat (n + 1) =>
+    rw [show (Int.ofNat (n + 1) - 1) = Int.ofNat n from by
+          rw [show Int.ofNat (n + 1) = Int.ofNat n + 1 from rfl]; omega]
+    show ofNat n = R.add (ofInt (Int.ofNat (n + 1))) (R.neg R.one)
+    rw [show ofInt (Int.ofNat (n + 1)) = R.add (ofNat n) R.one from rfl, R.add_assoc, R.add_neg,
+        R.add_zero]
+  | Int.negSucc n =>
+    rw [show (Int.negSucc n - 1) = Int.negSucc (n + 1) from by omega]
+    show R.neg (ofNat (n + 2)) = R.add (R.neg (ofNat (n + 1))) (R.neg R.one)
+    rw [show ofNat (n + 2) = R.add (ofNat (n + 1)) R.one from rfl, sf_neg_add]
+
+private theorem ofInt_add_ofNat (a : Int) (n : Nat) :
+    ofInt (a + Int.ofNat n) = R.add (ofInt a) (ofNat n) := by
+  induction n with
+  | zero =>
+    rw [show (a + Int.ofNat 0) = a from by rw [show Int.ofNat 0 = (0 : Int) from rfl]; omega]
+    exact (R.add_zero (ofInt a)).symm
+  | succ n ih =>
+    rw [show (a + Int.ofNat (n + 1)) = (a + Int.ofNat n) + 1 from by
+          rw [show Int.ofNat (n + 1) = Int.ofNat n + 1 from rfl]; omega,
+        ofInt_add_one, ih, R.add_assoc]; rfl
+
+private theorem ofInt_add_negSucc (a : Int) (n : Nat) :
+    ofInt (a + Int.negSucc n) = R.add (ofInt a) (R.neg (ofNat (n + 1))) := by
+  induction n with
+  | zero =>
+    rw [show (a + Int.negSucc 0) = (a - 1) from by omega, ofInt_sub_one, ofNat_one]
+  | succ n ih =>
+    rw [show (a + Int.negSucc (n + 1)) = (a + Int.negSucc n) - 1 from by omega, ofInt_sub_one, ih,
+        R.add_assoc, show ofNat (n + 2) = R.add (ofNat (n + 1)) R.one from rfl, sf_neg_add]
+
+theorem ofInt_add (a b : Int) : ofInt (a + b) = R.add (ofInt a) (ofInt b) := by
+  match b with
+  | Int.ofNat n => exact ofInt_add_ofNat a n
+  | Int.negSucc n => exact ofInt_add_negSucc a n
+
+private theorem ofInt_mul_ofNat (a : Int) (n : Nat) :
+    ofInt (a * Int.ofNat n) = R.mul (ofInt a) (ofNat n) := by
+  induction n with
+  | zero =>
+    rw [show (a * Int.ofNat 0) = 0 from by rw [show Int.ofNat 0 = (0 : Int) from rfl, Int.mul_zero]]
+    exact (sf_mul_zero_right (ofInt a)).symm
+  | succ n ih =>
+    rw [show (a * Int.ofNat (n + 1)) = a * Int.ofNat n + a from by
+          rw [show Int.ofNat (n + 1) = Int.ofNat n + 1 from rfl, Int.mul_add, Int.mul_one],
+        ofInt_add, ih, show ofNat (n + 1) = R.add (ofNat n) R.one from rfl, R.left_distrib,
+        R.mul_one]
+
+theorem ofInt_mul (a b : Int) : ofInt (a * b) = R.mul (ofInt a) (ofInt b) := by
+  match b with
+  | Int.ofNat n => exact ofInt_mul_ofNat a n
+  | Int.negSucc n =>
+    rw [show (a * Int.negSucc n) = -(a * Int.ofNat (n + 1)) from by
+          rw [show Int.negSucc n = -(Int.ofNat (n + 1)) from rfl, Int.mul_neg],
+        ofInt_neg, ofInt_mul_ofNat]
+    show R.neg (R.mul (ofInt a) (ofNat (n + 1))) = R.mul (ofInt a) (R.neg (ofNat (n + 1)))
+    rw [sf_mul_neg]
+
 end SqrtField
 
 end SounioSqrt
@@ -472,5 +567,7 @@ end SounioSqrt
 #print axioms SounioSqrt.SqrtField.ofNat_ne_zero
 #print axioms SounioSqrt.SqrtField.sf_inv_mul_inv
 #print axioms SounioSqrt.SqrtField.ofInt_ne_zero
+#print axioms SounioSqrt.SqrtField.ofInt_add
+#print axioms SounioSqrt.SqrtField.ofInt_mul
 
-#eval IO.println "SounioSqrtField: SqrtField structure; PROVED nonneg_sqrt_unique, mul_sqrt, ofNat_nonneg, s_sq, r_zero, ofNat_mul, radicalBit_mul, generator_law; char-0 denominator toolkit ofNat_ne_zero/sf_inv_mul_inv/ofInt_ne_zero."
+#eval IO.println "SounioSqrtField: SqrtField structure; PROVED nonneg_sqrt_unique, mul_sqrt, ofNat_nonneg, s_sq, r_zero, ofNat_mul, radicalBit_mul, generator_law; char-0 denominator toolkit ofNat_ne_zero/sf_inv_mul_inv/ofInt_ne_zero; ℤ→F ring hom ofInt_add/ofInt_mul/ofInt_neg."

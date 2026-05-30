@@ -1,5 +1,19 @@
 # LLM Offload Log
 
+## 2026-05-30: ℤ→F ring homomorphism (ofInt_add / ofInt_mul / ofInt_neg) for QF↪ℝ
+
+- **Claim**: `formal/lean4/SounioSqrtField.lean` proves `ofInt : ℤ → F` is a ring homomorphism:
+  `ofInt_neg` (`ofInt(-a)=neg(ofInt a)`), `ofInt_add` (`ofInt(a+b)=add(ofInt a)(ofInt b)`),
+  `ofInt_mul` (`ofInt(a·b)=mul(ofInt a)(ofInt b)`). Proof by Int constructor case analysis
+  (`ofNat`/`negSucc`) with directed helpers `ofInt_add_one`/`ofInt_sub_one`/`ofInt_add_ofNat`/
+  `ofInt_add_negSucc`/`ofInt_mul_ofNat`; Int-level identities discharged by `rfl`/`decide`/`omega`
+  (omega needs `Int.ofNat (n+1) = Int.ofNat n + 1` rewrite first, as it atomises the two), F-level by
+  `left_distrib`/`sf_neg_add`/`sf_mul_neg`. `structure SqrtField` UNCHANGED. Axioms
+  `[propext, Quot.sound]` — no Classical, no sorry. This is the signed-coefficient/denominator
+  cast the `evalNum` numerator map and the eventual fraction φ consume. `lake build` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "All proofs discharge from the stated field/order/sqrt axioms; no hidden axioms or sorry."
+
 ## 2026-05-30: Char-0 denominator toolkit for QF↪ℝ + QFTransfer den≠0 structural finding
 
 - **Structural finding**: a *total* `QFTransfer` instance into a field is impossible — `hadd`/`hmul`
