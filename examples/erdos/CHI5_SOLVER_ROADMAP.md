@@ -293,8 +293,13 @@ Built in parallel via two `best-of-n-runner` subagents, then independently rebui
   `structure SqrtField` (comm-ring + ordered-field + sqrt axioms as hypotheses, satisfied by ℝ).
   PROVED from the axioms: `nonneg_sqrt_unique` (nonneg roots of equal squares agree), `mul_sqrt`
   (`√a·√b = √(ab)`), `ofNat_nonneg`, the four primes `s_sq` (`√pⱼ² = pⱼ`), radical map `r`, `r_zero`.
-  **STAGED:** `GeneratorLawObligation` (`r i · r j = ofNatProd(i∧j) · r(i⊕j)`) — the abstract image
-  of `basis_mul_law`, i.e. the multiplicative core of the eventual `QF↪ℝ` homomorphism.
+  **PROVED (2026-05-30):** `GeneratorLawObligation` (`r i · r j = ofNatProd(i∧j) · r(i⊕j)`) — the abstract
+  image of `basis_mul_law`, i.e. the multiplicative core of the eventual `QF↪ℝ` homomorphism — is now
+  the theorem `generator_law` (+ `generatorLaw_solved`). Proof by finite four-bit radical factorisation:
+  reusable microlibrary `ofNat_one/ofNat_add/ofNat_mul` (ℕ→F cast hom), `mul8` (8-factor interleave via
+  3× `sf_mul_mul_mul_comm`), and the per-bit `radicalBit_mul` (four `Bool` cases, `(t,t)` is exactly
+  `s_sq`); the coefficient product collapses to `ofNatProd(i∧j)` via `ofNat_mul` + `Nat.testBit_and`.
+  Axioms `[propext, Quot.sound]` — no Mathlib, no `Classical`, no new structure field (law DERIVED).
 
 **Precise remaining step for Euclidean χ(ℝ²) ≥ 5 — now a single typeclass-free instance.**
 Provide one `QFTransfer` with `F = ℝ`: `φ(c,den) = (Σ cᵢ rᵢ)/den` where `rₘ = ∏_{bit j of m}√pⱼ`.

@@ -297,7 +297,53 @@ def bcoeff (m : Nat) : Nat :=
 
 def ofNatProd (m : Nat) : R.F := ofNat (bcoeff m)
 
-/-! ## Generator law (multiquadratic √a·√b = √(ab) image) — STAGED -/
+/-! ## Cast homomorphism ℕ → F (reusable: needed by the generator law and later the QF hom) -/
+
+theorem ofNat_one : (ofNat 1 : R.F) = R.one := sf_add_zero_left R.one
+
+theorem ofNat_add (m n : Nat) : (ofNat (m + n) : R.F) = R.add (ofNat m) (ofNat n) := by
+  induction n with
+  | zero => exact (R.add_zero (ofNat m)).symm
+  | succ n ih =>
+    show R.add (ofNat (m + n)) R.one = R.add (ofNat m) (ofNat (n + 1))
+    rw [ih]
+    exact R.add_assoc (ofNat m) (ofNat n) R.one
+
+theorem ofNat_mul (m n : Nat) : (ofNat (m * n) : R.F) = R.mul (ofNat m) (ofNat n) := by
+  induction n with
+  | zero =>
+    show (ofNat (m * 0) : R.F) = R.mul (ofNat m) (ofNat 0)
+    rw [Nat.mul_zero]
+    exact (sf_mul_zero_right (ofNat m)).symm
+  | succ n ih =>
+    show (ofNat (m * (n + 1)) : R.F) = R.mul (ofNat m) (ofNat (n + 1))
+    rw [Nat.mul_succ, ofNat_add, ih,
+        show (ofNat (n + 1) : R.F) = R.add (ofNat n) R.one from rfl,
+        R.left_distrib, R.mul_one]
+
+/-! ## Eight-factor regroup (3× the existing `sf_mul_mul_mul_comm`) -/
+
+/-- Interleave two nested 4-products: pairs up the matching factors. -/
+private theorem mul8 (a0 a1 a2 a3 b0 b1 b2 b3 : R.F) :
+    R.mul (R.mul a0 (R.mul a1 (R.mul a2 a3))) (R.mul b0 (R.mul b1 (R.mul b2 b3)))
+      = R.mul (R.mul a0 b0) (R.mul (R.mul a1 b1) (R.mul (R.mul a2 b2) (R.mul a3 b3))) := by
+  rw [sf_mul_mul_mul_comm a0 (R.mul a1 (R.mul a2 a3)) b0 (R.mul b1 (R.mul b2 b3)),
+      sf_mul_mul_mul_comm a1 (R.mul a2 a3) b1 (R.mul b2 b3),
+      sf_mul_mul_mul_comm a2 a3 b2 b3]
+
+/-! ## Per-bit radical multiplication -/
+
+/-- `√pₖ^[iₖ] · √pₖ^[jₖ] = (pₖ if both bits set else 1) · √pₖ^[(i⊕j)ₖ]` — the four-case core. -/
+theorem radicalBit_mul (i j : Nat) (k : Fin 4) :
+    R.mul (radicalBit i k) (radicalBit j k)
+      = R.mul (ofNat (if Nat.testBit i k.val && Nat.testBit j k.val then primeNat k else 1))
+              (radicalBit (Nat.xor i j) k) := by
+  unfold radicalBit
+  rw [show Nat.xor i j = i ^^^ j from rfl, Nat.testBit_xor]
+  cases Nat.testBit i k.val <;> cases Nat.testBit j k.val <;>
+    simp [ofNat_one, p, s_sq, R.mul_one, sf_mul_one_left]
+
+/-! ## Generator law (multiquadratic √a·√b = √(ab) image) — PROVED -/
 
 /-- The abstract image of `MultiquadRing.basis_mul_law` on radical generators.
     Discharging this for a concrete `ℝ` instance is exactly the multiplicative core of
@@ -305,6 +351,27 @@ def ofNatProd (m : Nat) : R.F := ofNat (bcoeff m)
 def GeneratorLawObligation : Prop :=
   ∀ i j : Nat, i < 16 → j < 16 →
     R.mul (r i) (r j) = R.mul (ofNatProd (Nat.land i j)) (r (Nat.xor i j))
+
+/-- **Generator law (PROVED).** `rᵢ · rⱼ = ofNatProd(i ∧ j) · r_{i⊕j}` for all `i,j < 16`,
+    by finite four-bit radical factorisation — no Mathlib, no `Classical`, no new axioms. -/
+theorem generator_law (i j : Nat) :
+    R.mul (r i) (r j) = R.mul (ofNatProd (Nat.land i j)) (r (Nat.xor i j)) := by
+  unfold r
+  rw [mul8]
+  simp only [radicalBit_mul]
+  rw [← mul8]
+  congr 1
+  -- coefficient product = ofNatProd (i ∧ j)
+  rw [← ofNat_mul, ← ofNat_mul, ← ofNat_mul]
+  show (ofNat _ : R.F) = ofNat (bcoeff (Nat.land i j))
+  congr 1
+  rw [show Nat.land i j = i &&& j from rfl]
+  simp [bcoeff, Nat.testBit_and, primeNat, Nat.mul_assoc]
+
+/-- `GeneratorLawObligation` is now a theorem (the `i,j < 16` hypotheses are unused: the law
+    holds for all naturals, but we keep the bounded statement for the obligation interface). -/
+theorem generatorLaw_solved : (GeneratorLawObligation (R := R)) :=
+  fun i j _ _ => generator_law i j
 
 end SqrtField
 
@@ -315,5 +382,9 @@ end SounioSqrt
 #print axioms SounioSqrt.SqrtField.ofNat_nonneg
 #print axioms SounioSqrt.SqrtField.s_sq
 #print axioms SounioSqrt.SqrtField.r_zero
+#print axioms SounioSqrt.SqrtField.ofNat_mul
+#print axioms SounioSqrt.SqrtField.radicalBit_mul
+#print axioms SounioSqrt.SqrtField.generator_law
+#print axioms SounioSqrt.SqrtField.generatorLaw_solved
 
-#eval IO.println "SounioSqrtField: SqrtField structure; PROVED nonneg_sqrt_unique, mul_sqrt, ofNat_nonneg, s_sq, r_zero; STAGED GeneratorLawObligation."
+#eval IO.println "SounioSqrtField: SqrtField structure; PROVED nonneg_sqrt_unique, mul_sqrt, ofNat_nonneg, s_sq, r_zero, ofNat_mul, radicalBit_mul, generator_law (GeneratorLawObligation discharged)."

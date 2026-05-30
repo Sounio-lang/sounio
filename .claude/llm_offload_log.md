@@ -1,5 +1,22 @@
 # LLM Offload Log
 
+## 2026-05-30: Generator law PROVED — QF→SqrtField multiplicative core (no Mathlib, no Classical)
+
+- **Claim**: `formal/lean4/SounioSqrtField.lean` discharges `GeneratorLawObligation` as the theorem
+  `generator_law` (+ `generatorLaw_solved`): `R.mul (r i) (r j) = R.mul (ofNatProd (i∧j)) (r (i⊕j))`
+  for all `i,j` (bounded `<16` hyps unused-but-harmless). Proof = finite four-bit radical factorisation:
+  reusable microlibrary `ofNat_one/ofNat_add/ofNat_mul` (ℕ→F cast hom, by induction + `left_distrib`),
+  `mul8` (8-factor interleave = 3× existing `sf_mul_mul_mul_comm`), per-bit `radicalBit_mul`
+  (four `Bool` cases; `(true,true)` is exactly `s_sq`), and coefficient collapse via `ofNat_mul`
+  + `Nat.testBit_and`/`Nat.testBit_xor`. `structure SqrtField` UNCHANGED — the law is DERIVED, not an
+  axiomatic field (no epistemic leak). Axioms `[propext, Quot.sound]`; **no `Classical.choice`**, no
+  `sorry`/`native_decide`. Method: compiler-in-loop (realises the plan's Runner-A bitwise lemma-factored
+  design directly; Runner-B Fin-16 fallback not needed as A did not stall; avoids worktree clobber on the
+  shared file). `lake build SounioSqrtField` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "All listed theorems … Finite case analysis + explicit equational rewriting; no gaps, no extra axioms,
+  bounds on i/j unused but harmless."
+
 ## 2026-05-30: QF value-equivalence quotient ring + abstract SqrtField (no Mathlib, fan-out subagents)
 
 - **Method**: two parallel `best-of-n-runner` subagents (composer-2.5-fast) drafted the
