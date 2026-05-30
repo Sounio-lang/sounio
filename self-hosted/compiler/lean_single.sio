@@ -8417,6 +8417,125 @@ fn compile_knowledge_literal_x86() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_AFFINE = 0
 }
 
+// Paren-form constructor: Knowledge(value, ε=eps, prov="...") or
+// Knowledge(value: v  ε: eps  prov: "...").  Mirrors the brace literal but
+// accepts a leading positional value, `=`/`:` separators, optional commas,
+// and the unicode ε key.  Stores the static ε literal into the type hash so
+// compile-time confidence gates see it (Contribution 2 substrate).
+fn compile_knowledge_paren_x86() with IO, Mut, Panic, Div {
+    EP = EP + 1  // skip '('
+    let base_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+    var value_ty: i64 = 0
+    var value_hash: i64 = 0
+    var saw_value: i64 = 0
+    var saw_var: i64 = 0
+    var saw_conf: i64 = 0
+    var lit_mode: i64 = 0
+    var lit_eps: i64 = -1
+    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        if TK[EP as usize] == 3 && (TK[(EP + 1) as usize] == 16 || TK[(EP + 1) as usize] == 43) {
+            let field_tok = EP
+            let fns = TS[EP as usize]
+            let fne = TE[EP as usize]
+            let is_eps_uni = tok_is_unicode_epsilon(field_tok)
+            EP = EP + 2  // skip name and `=`/`:`
+            let field_start = EP
+            compile_or()
+            let field_ty = EXPR_TY
+            let field_hash = EXPR_TY_HASH
+            let lit_tok = expr_simple_numeric_tok(field_start, EP)
+            if src_match(fns, fne - fns, "value") {
+                emit_store_var(base_slot + 2)
+                value_ty = field_ty
+                value_hash = field_hash
+                saw_value = 1
+            } else if src_match(fns, fne - fns, "variance") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        emit_i64_to_f64_in_rax_x86()
+                    } else {
+                        tc_error(field_tok, "Knowledge variance must be numeric")
+                        em(0x31); em(0xc0)
+                    }
+                }
+                emit_store_var(base_slot + 1)
+                saw_var = 1
+            } else if src_match(fns, fne - fns, "uncertainty") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        emit_i64_to_f64_in_rax_x86()
+                    } else {
+                        tc_error(field_tok, "Knowledge uncertainty must be numeric")
+                        em(0x31); em(0xc0)
+                    }
+                }
+                em(0x48); em(0x89); em(0xc1)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc9)
+                em(0xf2); em(0x0f); em(0x59); em(0xc1)
+                em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+                emit_store_var(base_slot + 1)
+                saw_var = 1
+            } else if is_eps_uni || src_match(fns, fne - fns, "confidence") || src_match(fns, fne - fns, "epsilon") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        emit_i64_to_f64_in_rax_x86()
+                    } else {
+                        tc_error(field_tok, "Knowledge epsilon must be numeric")
+                        em(0x31); em(0xc0)
+                    }
+                }
+                emit_store_var(base_slot)
+                saw_conf = 1
+                if lit_tok >= 0 {
+                    let scaled = tok_scaled_million(lit_tok)
+                    if scaled >= 0 && scaled <= 1000000 {
+                        lit_mode = 1
+                        lit_eps = scaled
+                    }
+                }
+            } else if src_match(fns, fne - fns, "validity") || src_match(fns, fne - fns, "provenance") || src_match(fns, fne - fns, "prov") {
+                // provenance string: compiled above, value discarded
+            } else {
+                tc_error(field_tok, "unknown field in Knowledge constructor")
+            }
+        } else {
+            // Positional argument: the first one is the value
+            compile_or()
+            if saw_value == 0 {
+                emit_store_var(base_slot + 2)
+                value_ty = EXPR_TY
+                value_hash = EXPR_TY_HASH
+                saw_value = 1
+            }
+        }
+        if TK[EP as usize] == 28 { EP = EP + 1 }  // optional comma
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }  // skip ')'
+    if saw_value == 0 {
+        em(0x31); em(0xc0)
+        emit_store_var(base_slot + 2)
+        value_ty = 0
+        value_hash = 0
+    }
+    if saw_var == 0 {
+        em(0x31); em(0xc0)
+        emit_store_var(base_slot + 1)
+    }
+    if saw_conf == 0 {
+        emit_imm64(4607182418800017408)
+        emit_store_var(base_slot)
+    }
+    em(0x48); em(0x8d); em(0x85)
+    em32(0 - (base_slot + 2) * 8)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = knowledge_hash_make_mode(value_ty, value_hash, lit_mode, lit_eps)
+    LAST_EXPR_IS_LINEAR = 0
+    LAST_EXPR_IS_AFFINE = 0
+}
+
 // Precedence (low→high): || < && < comparison < bitwise OR < bitwise AND < shift < additive < multiplicative < unary < postfix < primary
 
 fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
@@ -12089,6 +12208,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
             // f64 arithmetic builtins (SSE2) — hash-dispatched, no if-as-expression
             let bh = gl_name_hash(ns, ne)
             let bl = ne - ns
+            // Knowledge(value, ε=eps, prov="...") paren-form constructor
+            if bl == 9 && src_match(ns, ne - ns, "Knowledge") && st_find(bh) < 0 && ident_fi < 0 {
+                compile_knowledge_paren_x86()
+                return
+            }
             // f64_add/sub/mul/div: 7 chars each
             if bl == 7 && bh == 14456679815 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x58); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; EXPR_TY = 2; return }
             if bl == 7 && bh == 121920845326 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5c); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; EXPR_TY = 2; return }
@@ -26050,6 +26174,119 @@ fn compile_knowledge_literal_a64() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_LINEAR = 0
 }
 
+// Paren-form constructor (ARM64): see compile_knowledge_paren_x86.
+fn compile_knowledge_paren_a64() with IO, Mut, Panic, Div {
+    EP = EP + 1  // skip '('
+    let base_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+    var value_ty: i64 = 0
+    var value_hash: i64 = 0
+    var saw_value: i64 = 0
+    var saw_var: i64 = 0
+    var saw_conf: i64 = 0
+    var lit_mode: i64 = 0
+    var lit_eps: i64 = -1
+    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        if TK[EP as usize] == 3 && (TK[(EP + 1) as usize] == 16 || TK[(EP + 1) as usize] == 43) {
+            let field_tok = EP
+            let fns = TS[EP as usize]
+            let fne = TE[EP as usize]
+            let is_eps_uni = tok_is_unicode_epsilon(field_tok)
+            EP = EP + 2  // skip name and `=`/`:`
+            let field_start = EP
+            compile_or_a64()
+            let field_ty = EXPR_TY
+            let field_hash = EXPR_TY_HASH
+            let lit_tok = expr_simple_numeric_tok(field_start, EP)
+            if src_match(fns, fne - fns, "value") {
+                emit_store_var_a64(base_slot + 2)
+                value_ty = field_ty
+                value_hash = field_hash
+                saw_value = 1
+            } else if src_match(fns, fne - fns, "variance") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        em32(0x9E620000)
+                        em32(0x9E660000)
+                    } else {
+                        tc_error(field_tok, "Knowledge variance must be numeric")
+                        em32(0xD2800000)
+                    }
+                }
+                emit_store_var_a64(base_slot + 1)
+                saw_var = 1
+            } else if src_match(fns, fne - fns, "uncertainty") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        em32(0x9E620000)
+                        em32(0x9E660000)
+                    } else {
+                        tc_error(field_tok, "Knowledge uncertainty must be numeric")
+                        em32(0xD2800000)
+                    }
+                }
+                em32(0xAA0003E1)
+                emit_f64_binop_a64(0x1E610800)
+                emit_store_var_a64(base_slot + 1)
+                saw_var = 1
+            } else if is_eps_uni || src_match(fns, fne - fns, "confidence") || src_match(fns, fne - fns, "epsilon") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        em32(0x9E620000)
+                        em32(0x9E660000)
+                    } else {
+                        tc_error(field_tok, "Knowledge epsilon must be numeric")
+                        em32(0xD2800000)
+                    }
+                }
+                emit_store_var_a64(base_slot)
+                saw_conf = 1
+                if lit_tok >= 0 {
+                    let scaled = tok_scaled_million(lit_tok)
+                    if scaled >= 0 && scaled <= 1000000 {
+                        lit_mode = 1
+                        lit_eps = scaled
+                    }
+                }
+            } else if src_match(fns, fne - fns, "validity") || src_match(fns, fne - fns, "provenance") || src_match(fns, fne - fns, "prov") {
+                // provenance string: compiled above, value discarded
+            } else {
+                tc_error(field_tok, "unknown field in Knowledge constructor")
+            }
+        } else {
+            // Positional argument: the first one is the value
+            compile_or_a64()
+            if saw_value == 0 {
+                emit_store_var_a64(base_slot + 2)
+                value_ty = EXPR_TY
+                value_hash = EXPR_TY_HASH
+                saw_value = 1
+            }
+        }
+        if TK[EP as usize] == 28 { EP = EP + 1 }  // optional comma
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }  // skip ')'
+    if saw_value == 0 {
+        em32(0xD2800000)
+        emit_store_var_a64(base_slot + 2)
+        value_ty = 0
+        value_hash = 0
+    }
+    if saw_var == 0 {
+        em32(0xD2800000)
+        emit_store_var_a64(base_slot + 1)
+    }
+    if saw_conf == 0 {
+        emit_imm64_a64(4607182418800017408)
+        emit_store_var_a64(base_slot)
+    }
+    emit_lea_var_a64(base_slot + 2)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = knowledge_hash_make_mode(value_ty, value_hash, lit_mode, lit_eps)
+    LAST_EXPR_IS_LINEAR = 0
+}
+
 // ─── ARM64 expression compiler ───
 fn compile_primary_a64() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_CLOSURE = 0
@@ -27322,6 +27559,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             // f64 builtins
             let bh = gl_name_hash(ns, ne)
             let bl = ne - ns
+            // Knowledge(value, ε=eps, prov="...") paren-form constructor
+            if bl == 9 && src_match(ns, ne - ns, "Knowledge") && st_find(bh) < 0 && ident_fi < 0 {
+                compile_knowledge_paren_a64()
+                return
+            }
             if bl == 7 && bh == 14456679815 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
             if bl == 7 && bh == 121920845326 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
             if bl == 7 && bh == 47722337034 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
