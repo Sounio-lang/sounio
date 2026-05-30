@@ -325,10 +325,22 @@ so denominators are invertible). **Done this iteration** in `SounioSqrtField.lea
    from-scratch Mathlib-free finite-sum library (`fsum` + add/zero/congr/mul-distrib/`fsum_mul_fsum`/
    map/`fsum_perm`/`fsum_comm`/`fsum_xor`), the `generator_law` per-pair rewrite, and the
    `perm_range_xor` XOR reindex (j↦i⊕idx). Den-free heart of `hmul`; new code `[propext, Quot.sound]`.
-4. **φ via fractions** + `hadd/hmul/hsub` using the char-0 inverse toolkit + `evalNum_qmul`. 5. instantiate
-   `SqrtField` for ℝ (`Real.sqrt`, or the repo's Mathlib-free `SounioRealCauchy`/`SounioRealOrder`).
-   Then `QFTransfer.chi_ge_5 (ℝ-instance) g529_not_colourable` is **χ(ℝ²) ≥ 5** — the SAT leg, geometry
-   certificate, generator law, char-0 toolkit, and now the multiplicative hom core are closed in core Lean.
+4. **φ via fractions** + `hadd/hmul/hsub` using the char-0 inverse toolkit + `evalNum_qmul` —
+   **DONE (2026-05-30)** in `SounioMultiquadHom.lean`: `phi (c,d) = mul (evalNum c) (inv (ofInt d))`
+   with `phi_qmul`/`phi_qadd`/`phi_qsub` proved under the `den ≠ 0` guard (numerator-linearity
+   `evalNum_qadd`/`evalNum_qsub` + field fraction identities `frac_add`/`frac_sub`). `phi_qadd`/
+   `phi_qsub` `[propext, Quot.sound]`; `phi_qmul` inherits the `perm_range_xor` certs.
+5. **Remaining gap (two pieces).** (a) **Guard `QFTransfer`**: its `hadd/hmul/hsub` quantify over *all*
+   QF (the den=0 impossibility); thread a `qfWf x := x.2 ≠ 0 ∧ x.1.length = 16` guard and reprove
+   `geom_transfer`/`chi_ge_5` (the De Grey `emb v` values are well-formed rationals, so the guard
+   discharges on the edge set). With the guard, `phi_*` plug straight into `hadd/hmul/hsub`.
+   (b) **`SqrtField ℝ` instance** — the sole *analytic* gap: ℝ as an ordered field with √. Mathlib
+   gives it in one line; a Mathlib-free witness needs completing the in-tree Cauchy reals
+   (`SounioRealCauchy` defers `mul_le_mul_of_nonneg_right` ≈500–1000 LOC + `OrderedCarrierObligation`)
+   and a constructive √ (completeness/sup). This is multi-week and is the honest remaining frontier.
+   Then `QFTransfer.chi_ge_5 (ℝ-instance) g529_not_colourable` is **χ(ℝ²) ≥ 5** — SAT leg, geometry
+   certificate, generator law, char-0 toolkit, and the **full QF→F ring homomorphism** are closed
+   in core Lean; only the ℝ-model satisfiability of the `SqrtField` axioms remains.
 
 ## 1b. Implemented & gated this iteration — `examples/erdos/souc_sat.sio`
 

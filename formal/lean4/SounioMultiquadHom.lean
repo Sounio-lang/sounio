@@ -240,6 +240,112 @@ theorem evalNum_qmul (x y : QF) :
         rw [gi_eq_getElem (qmul x y).1 idx (by rw [qmul_list_len]; exact List.mem_range.mp hidx),
           qmul_getElem x y idx (List.mem_range.mp hidx)]
 
-#print axioms SounioMultiquadHom.evalNum_qmul
+/-! ## The fraction homomorphism `φ : QF → F` and its ring-hom laws (guarded by `den ≠ 0`)
 
-#eval IO.println "SounioMultiquadHom: PROVED evalNum_qmul — the QF numerator convolution maps to the SqrtField radical-sum product (Mathlib-free fsum library + generator_law + perm_range_xor reindex)."
+`φ(c, d) = (Σ cᵢ rᵢ) · inv(ofInt d)`. Under the well-formedness guard `den ≠ 0`, `φ` is a ring
+homomorphism: it carries `qmul`/`qadd`/`qsub` to `mul`/`add`/`sub` in `F`. The multiplicative law
+is exactly `evalNum_qmul` + the char-0 inverse toolkit (`sf_inv_mul_inv`); the additive laws are
+the field fraction-addition identity. This is the den-aware completion of `evalNum_qmul`. -/
+
+private theorem neg_zero_local : R.neg R.zero = (R.zero : R.F) := by
+  rw [← add_zero_left (R.neg R.zero), R.add_neg]
+
+private theorem neg_add_local (a b : R.F) : R.neg (R.add a b) = R.add (R.neg a) (R.neg b) := by
+  apply add_left_cancel_local (R.add a b)
+  rw [R.add_neg, add4comm, R.add_neg, R.add_neg, R.add_zero]
+
+private theorem neg_mul_local (a b : R.F) : R.mul (R.neg a) b = R.neg (R.mul a b) := by
+  apply add_left_cancel_local (R.mul a b)
+  rw [← R.right_distrib, R.add_neg, mul_zero_left, R.add_neg]
+
+private theorem ofInt_sub (a b : Int) :
+    (ofInt (a - b) : R.F) = R.add (ofInt a) (R.neg (ofInt b)) := by
+  rw [show a - b = a + (-b) from by omega, ofInt_add, ofInt_neg]
+
+theorem fsum_neg {ι} (l : List ι) (f : ι → R.F) :
+    fsum l (fun i => R.neg (f i)) = R.neg (fsum l f) := by
+  induction l with
+  | nil => exact neg_zero_local.symm
+  | cons a l ih => rw [fsum_cons, ih, fsum_cons, neg_add_local]
+
+theorem evalNum_mul_right (l : List Int) (c : R.F) :
+    R.mul (evalNum l) c = fsum (List.range 16) (fun i => R.mul (R.mul (ofInt (gi l i)) c) (r i)) := by
+  unfold evalNum
+  rw [mul_fsum_right]
+  apply fsum_congr; intro i _
+  rw [R.mul_assoc, R.mul_comm (r i) c, ← R.mul_assoc]
+
+private theorem qsub_list_len' (x y : QF) : (qsub x y).1.length = 16 := by
+  simp [qsub, List.length_map, List.length_range]
+
+private theorem qsub_getElem' (x y : QF) (i : Nat) (hi : i < 16) :
+    (qsub x y).1[i]'(by rw [qsub_list_len']; exact hi) = gi x.1 i * y.2 - gi y.1 i * x.2 := by
+  simp [qsub, gi, List.getElem_map, List.getElem_range (by simp; exact hi)]
+
+theorem evalNum_qadd (x y : QF) :
+    evalNum (qadd x y).1
+      = R.add (R.mul (evalNum x.1) (ofInt y.2)) (R.mul (evalNum y.1) (ofInt x.2)) := by
+  rw [evalNum_mul_right, evalNum_mul_right, ← fsum_add]
+  unfold evalNum
+  apply fsum_congr; intro i hi
+  rw [show gi (qadd x y).1 i = gi x.1 i * y.2 + gi y.1 i * x.2 from by
+        rw [gi_eq_getElem (qadd x y).1 i (by rw [qadd_list_len]; exact List.mem_range.mp hi),
+          qadd_getElem x y i (List.mem_range.mp hi)],
+      ofInt_add, ofInt_mul, ofInt_mul, R.right_distrib]
+
+theorem evalNum_qsub (x y : QF) :
+    evalNum (qsub x y).1
+      = R.add (R.mul (evalNum x.1) (ofInt y.2)) (R.neg (R.mul (evalNum y.1) (ofInt x.2))) := by
+  rw [evalNum_mul_right, evalNum_mul_right, ← fsum_neg, ← fsum_add]
+  unfold evalNum
+  apply fsum_congr; intro i hi
+  rw [show gi (qsub x y).1 i = gi x.1 i * y.2 - gi y.1 i * x.2 from by
+        rw [gi_eq_getElem (qsub x y).1 i (by rw [qsub_list_len']; exact List.mem_range.mp hi),
+          qsub_getElem' x y i (List.mem_range.mp hi)],
+      ofInt_sub, ofInt_mul, ofInt_mul, R.right_distrib, neg_mul_local]
+
+theorem frac_add (a1 a2 d1 d2 : R.F) (h1 : d1 ≠ R.zero) (h2 : d2 ≠ R.zero) :
+    R.mul (R.add (R.mul a1 d2) (R.mul a2 d1)) (R.inv (R.mul d1 d2))
+      = R.add (R.mul a1 (R.inv d1)) (R.mul a2 (R.inv d2)) := by
+  rw [sf_inv_mul_inv h1 h2, R.right_distrib]
+  congr 1
+  · rw [mul4comm, R.mul_inv d2 h2, R.mul_one]
+  · rw [R.mul_comm (R.inv d1) (R.inv d2), mul4comm, R.mul_inv d1 h1, R.mul_one]
+
+theorem frac_sub (a1 a2 d1 d2 : R.F) (h1 : d1 ≠ R.zero) (h2 : d2 ≠ R.zero) :
+    R.mul (R.add (R.mul a1 d2) (R.neg (R.mul a2 d1))) (R.inv (R.mul d1 d2))
+      = R.add (R.mul a1 (R.inv d1)) (R.neg (R.mul a2 (R.inv d2))) := by
+  rw [sf_inv_mul_inv h1 h2, R.right_distrib]
+  congr 1
+  · rw [mul4comm, R.mul_inv d2 h2, R.mul_one]
+  · rw [neg_mul_local, R.mul_comm (R.inv d1) (R.inv d2), mul4comm, R.mul_inv d1 h1, R.mul_one]
+
+/-- The fraction map `φ(c, d) = (Σ cᵢ rᵢ) · inv(ofInt d)`. -/
+def phi (x : QF) : R.F := R.mul (evalNum x.1) (R.inv (ofInt x.2))
+
+theorem phi_qmul (x y : QF) (hx : x.2 ≠ 0) (hy : y.2 ≠ 0) :
+    phi (qmul x y) = R.mul (phi x) (phi y) := by
+  unfold phi
+  rw [show (qmul x y).2 = x.2 * y.2 from rfl, ofInt_mul, evalNum_qmul,
+    sf_inv_mul_inv (ofInt_ne_zero hx) (ofInt_ne_zero hy), mul4comm]
+
+theorem phi_qadd (x y : QF) (hx : x.2 ≠ 0) (hy : y.2 ≠ 0) :
+    phi (qadd x y) = R.add (phi x) (phi y) := by
+  unfold phi
+  rw [show (qadd x y).2 = x.2 * y.2 from rfl, ofInt_mul, evalNum_qadd]
+  exact frac_add (evalNum x.1) (evalNum y.1) (ofInt x.2) (ofInt y.2)
+    (ofInt_ne_zero hx) (ofInt_ne_zero hy)
+
+theorem phi_qsub (x y : QF) (hx : x.2 ≠ 0) (hy : y.2 ≠ 0) :
+    phi (qsub x y) = R.add (phi x) (R.neg (phi y)) := by
+  unfold phi
+  rw [show (qsub x y).2 = x.2 * y.2 from rfl, ofInt_mul, evalNum_qsub]
+  exact frac_sub (evalNum x.1) (evalNum y.1) (ofInt x.2) (ofInt y.2)
+    (ofInt_ne_zero hx) (ofInt_ne_zero hy)
+
+#print axioms SounioMultiquadHom.evalNum_qmul
+#print axioms SounioMultiquadHom.phi_qmul
+#print axioms SounioMultiquadHom.phi_qadd
+#print axioms SounioMultiquadHom.phi_qsub
+
+#eval IO.println "SounioMultiquadHom: PROVED evalNum_qmul + fraction hom φ:QF→F with guarded ring-hom laws phi_qmul/phi_qadd/phi_qsub (Mathlib-free fsum library + generator_law + perm_range_xor reindex + char-0 inverse toolkit)."
