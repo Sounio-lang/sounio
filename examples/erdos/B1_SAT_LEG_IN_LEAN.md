@@ -3,7 +3,11 @@
 **Date:** 2026-05-29 (updated 2026-05-30)
 **Status:** mechanism + soundness bridge **proven**; full chain **closed on K₇/6**
 *and on G₅₂₉* — **χ(G₅₂₉) ≥ 5 fully machine-checked in Lean core, no Mathlib** (the
-term-size wall was broken by file-loaded-style reflection, see §souc_check).
+term-size wall was broken by file-loaded-style reflection, see §souc_check). The SAT
+leg is then composed with the (already-discharged) geometry leg in
+`formal/lean4/SounioDeGreyChi5Closed.lean`, closing **χ(QF²) ≥ 5** over the exact
+field-plane ℚ(√3,√5,√7,√11) with **zero remaining hypotheses** — only the `QF↪ℝ`
+isometry to Euclidean χ(ℝ²)≥5 is left (needs Mathlib's ℝ).
 
 ## What this is
 

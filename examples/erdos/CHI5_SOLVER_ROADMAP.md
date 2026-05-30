@@ -215,8 +215,27 @@ proof *fail*).
   no `sorry`, **no Mathlib**, no external checker as a trust anchor.
 
 The χ≥5 SAT leg is now machine-checked in Lean **at full G₅₂₉ scale** from Sounio's own solver.
-Only the `QF↪ℝ` Euclidean-embedding leg (geometry × SAT composition over ℝ²) remains. Full writeup:
-`examples/erdos/B1_SAT_LEG_IN_LEAN.md`.
+Full writeup: `examples/erdos/B1_SAT_LEG_IN_LEAN.md`.
+
+### 1c-B3. χ(QF²) ≥ 5 — field-plane CLOSED, both legs discharged, ZERO hypotheses (2026-05-30)
+
+`SounioDeGreyChi5Concrete.lean` had discharged the geometry leg but kept the SAT leg as a
+hypothesis (`h_sat : ¬ VColourable`). With 1c-B2 that hypothesis is now a **theorem**, so we wire
+the two together:
+
+- **`formal/lean4/SounioDeGreyChi5Closed.lean`** — `edges_eq` (the geometry edge list = souc_sat's,
+  `native_decide`, the 2670 lists are literally equal) → `not_VColourable` (SAT leg discharged from
+  `g529_not_colourable`) → **`g529_field_plane_chi_ge_5`**: the exact symbolic field-plane `QF×QF`
+  (QF = ℚ(√3,√5,√7,√11)) unit-distance graph has **no proper 4-colouring** — **χ(QF²) ≥ 5**.
+- **Zero remaining hypotheses, no `sorry`, no Mathlib, no external checker as a trust anchor.**
+  Axioms `[propext, Classical.choice, Quot.sound, native_decide.ax]` (the `native_decide`s are: the
+  verified LRAT checker, the exact unit-distance computation, the edge-list equality, the
+  triangle adjacency/bounds).
+
+Both legs of the de Grey χ≥5 lower bound are now machine-checked in Lean **at G₅₂₉ scale, over the
+exact algebraic field-plane**. The single isolated gap to the *Euclidean* χ(ℝ²) ≥ 5 (Hadwiger–Nelson)
+is the isometry `QF×QF ↪ ℝ²` (the multiquadratic `√3·√5=√15` ring-hom into ℝ), which needs
+`Real.sqrt`/`ring` over Mathlib's ℝ — staged as `v6-mathlib-rembed`.
 
 ## 1b. Implemented & gated this iteration — `examples/erdos/souc_sat.sio`
 

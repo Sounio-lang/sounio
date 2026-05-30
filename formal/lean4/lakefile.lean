@@ -160,6 +160,13 @@ lean_lib «SounioSatK76» where
 -- `lake build SounioSatG529`).
 lean_lib «SounioSatG529» where
 
+-- χ≥5 COMPOSITION: wires the now-proven SAT leg (SounioSatG529.g529_not_colourable)
+-- into the geometry reduction (SounioDeGreyChi5Concrete), discharging the last
+-- hypothesis. g529_field_plane_chi_ge_5: the exact field-plane QF×QF unit-distance
+-- graph has no proper 4-colouring — χ(QF²)≥5, ZERO hypotheses, no Mathlib, no sorry.
+-- NOT a default_target (imports the 30 MB G529 cert; `lake build SounioDeGreyChi5Closed`).
+lean_lib «SounioDeGreyChi5Closed» where
+
 -- M1: Vancomycin-Knightian thrust — Approx × Causal × Knowledge composition
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where
