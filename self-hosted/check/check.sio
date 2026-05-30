@@ -309,6 +309,24 @@ pub struct ExtractEffectsResult {
     count: i64,
 }
 
+// Checker-free effects result for the *mut collect spine. (A bare
+// ([i64;8], i64) TUPLE return mis-compiles in souc and smashes the
+// caller frame; a struct-with-array return is the proven-safe shape.)
+pub struct MutEffectsResult {
+    effects: [i64; 8],
+    count: i64,
+}
+
+pub struct MutParamsResult {
+    params: Option<Box<FnParamList>>,
+    count: i64,
+}
+
+pub struct MutParamListResult {
+    list: FnParamList,
+    count: i64,
+}
+
 pub struct CollectTransitionStepDefsResult {
     checker: Checker,
     steps: [i64; 16],
@@ -1113,8 +1131,11 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
 }
 
 fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
-    let next = (*c).collect_items(items)
-    checker_store_from_value(c, next)
+    // Route through the true *mut collect spine (ItemFn handled in place,
+    // other item kinds bridge by value). The crash lived here: the by-value
+    // (*c).collect_items(items) copied the 164KB Checker into `self` and
+    // tripped the layout-sensitive stale-stack codegen bug. (Was: that call.)
+    checker_collect_items_inplace(c, items)
 }
 
 fn checker_check_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
@@ -1942,6 +1963,520 @@ fn checker_prove_robust_names_mut(c: *mut Checker, contest_name: Name, policy_na
     ty_robust(contest_inner, add_result.1, policy_info.level_id, policy_info.scope_id)
 }
 
+// ============================================================
+// True *mut Checker hot-path spine.
+//
+// The by-value check_* method chain threads a 164KB Checker struct
+// through dozens of (Checker, X) returns and `c = c.method()` hops.
+// On the deep recursion that chain trips a layout-sensitive
+// stale-stack codegen bug (see docs/audit/...STACK_CLASH...), which
+// SIGSEGVs even on a trivial `fn main() { return 0 }`. These
+// functions operate directly on `*mut Checker` via `(*c).field`,
+// so no full-Checker copy ever lands on the hot path. Expression
+// kinds not yet ported fall back to the by-value bridge
+// `checker_check_expr_mut` (a single copy, off the hello.sio path).
+// ============================================================
+
+fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    print("error[E")
+    if code < 100 { print("0") }
+    if code < 10 { print("0") }
+    print_int(code)
+    print("]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": ")
+    print_error_message(code)
+    print("\n")
+    print_error_help(code)
+    print_error_note(code)
+}
+
+fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    print("error[E")
+    if code < 100 { print("0") }
+    if code < 10 { print("0") }
+    print_int(code)
+    print("]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": ")
+    if got.kind == TypeKind::TyContest && expected.kind != TypeKind::TyContest {
+        print("cannot implicitly coerce contested evidence into this type")
+    } else {
+        print_error_message(code)
+    }
+    print("\n   |\n   = expected ")
+    print_type_name(expected)
+    print("\n   = found ")
+    print_type_name(got)
+    print("\n")
+    print_error_help(code)
+    print_error_note(code)
+}
+
+fn checker_push_const_scope_inplace(c: *mut Checker) with Mut, Div, Panic {
+    if (*c).const_int_scope_depth < MAX_SCOPE_DEPTH {
+        (*c).const_int_scope_marks[(*c).const_int_scope_depth as usize] = (*c).const_int_count
+        (*c).const_int_scope_depth = (*c).const_int_scope_depth + 1
+    }
+}
+
+fn checker_pop_const_scope_inplace(c: *mut Checker) with Mut, Div, Panic {
+    if (*c).const_int_scope_depth > 0 {
+        (*c).const_int_scope_depth = (*c).const_int_scope_depth - 1
+        let mark = (*c).const_int_scope_marks[(*c).const_int_scope_depth as usize]
+        if mark >= 0 && mark <= (*c).const_int_count {
+            (*c).const_int_count = mark
+        }
+    }
+}
+
+fn checker_const_int_bind_raw_inplace(c: *mut Checker, name: Name, known: i64, value: i64) with Mut, Div, Panic {
+    var idx = (*c).const_int_count
+    if idx >= MAX_CONST_INT_BINDINGS {
+        idx = MAX_CONST_INT_BINDINGS - 1
+    } else {
+        (*c).const_int_count = (*c).const_int_count + 1
+    }
+    var bufs = (*c).const_int_name_bufs
+    var lens = (*c).const_int_name_lens
+    checker_const_name_write(&! bufs, &! lens, idx, name)
+    (*c).const_int_name_bufs = bufs
+    (*c).const_int_name_lens = lens
+    (*c).const_int_known[idx as usize] = known
+    (*c).const_int_values[idx as usize] = value
+}
+
+fn checker_const_int_bind_unknown_inplace(c: *mut Checker, name: Name) with Mut, Div, Panic {
+    checker_const_int_bind_raw_inplace(c, name, 0, 0)
+}
+
+fn checker_is_linear_type_inplace(c: *mut Checker, ty: TypeEntry) -> bool with Mut, Panic, Div {
+    if ty.kind == TypeKind::TyNamed {
+        let idx = (*c).structs.find(ty.name)
+        if idx >= 0 {
+            return (*c).structs.entries[idx].is_linear
+        }
+    }
+    false
+}
+
+// ---- collect phase, true *mut (the crash is HERE, in collect, not check) ----
+
+fn checker_lookup_user_effect_id_mut(c: *mut Checker, name_buf: [i8; 64], name_len: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*c).effects.count {
+        let entry = (*c).effects.entries[i as usize]
+        if entry.name.len == name_len {
+            var j: i64 = 0
+            var matched = true
+            while j < name_len && j < 64 {
+                if entry.name.buf[j as usize] != name_buf[j as usize] {
+                    matched = false
+                }
+                j = j + 1
+            }
+            if matched {
+                return 100 + i
+            }
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64; 8], count: i64) -> MutEffectsResult with Mut, Panic, Div {
+    var effs = effects
+    var n = count
+    var eff_id = effect_name_to_id(list.head.name_buf, list.head.name_len)
+    if eff_id < 0 {
+        eff_id = checker_lookup_user_effect_id_mut(c, list.head.name_buf, list.head.name_len)
+    }
+    if eff_id >= 0 && n < 8 {
+        var already_present = false
+        var i: i64 = 0
+        while i < n {
+            if effs[i as usize] == eff_id {
+                already_present = true
+            }
+            i = i + 1
+        }
+        if !already_present {
+            effs[n as usize] = eff_id
+            n = n + 1
+        }
+    }
+    match list.tail {
+        None => MutEffectsResult { effects: effs, count: n }
+        Some(next) => checker_collect_effects_mut(c, *next, effs, n)
+    }
+}
+
+fn checker_extract_effects_mut(c: *mut Checker, opt: Option<Box<EffectList> >) -> MutEffectsResult with Mut, Panic, Div {
+    match opt {
+        None => MutEffectsResult { effects: [0; 8], count: 0 }
+        Some(list) => checker_collect_effects_mut(c, *list, [0; 8], 0)
+    }
+}
+
+fn checker_collect_fn_param_list_mut(c: *mut Checker, pl: ParamList) -> MutParamListResult with Mut, Panic, Div, Alloc, IO {
+    let head_ty = checker_lower_type_expr_mut(c, pl.head.ty)
+    let head_param = FnParamInfo { name: pl.head.name, ty: head_ty }
+    match pl.tail {
+        None => MutParamListResult { list: FnParamList { head: head_param, tail: None }, count: 1 }
+        Some(rest) => {
+            let r = checker_collect_fn_param_list_mut(c, *rest)
+            MutParamListResult { list: FnParamList { head: head_param, tail: Some(Box::new(r.list)) }, count: 1 + r.count }
+        }
+    }
+}
+
+fn checker_collect_fn_params_mut(c: *mut Checker, opt: Option<Box<ParamList> >) -> MutParamsResult with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(pl) => {
+            let r = checker_collect_fn_param_list_mut(c, *pl)
+            MutParamsResult { params: Some(Box::new(r.list)), count: r.count }
+        }
+        None => MutParamsResult { params: None, count: 0 }
+    }
+}
+
+fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(fd) => {
+            let name = (*fd).name
+            let params_pair = checker_collect_fn_params_mut(c, (*fd).params)
+            let params = params_pair.params
+            let param_count = params_pair.count
+            let ret_ty = match (*fd).return_type {
+                Some(te) => checker_lower_type_expr_mut(c, *te)
+                None => ty_unknown()
+            }
+            let eff_pair = checker_extract_effects_mut(c, (*fd).effects)
+            let fn_effects = eff_pair.effects
+            let fn_effect_count = eff_pair.count
+
+            let is_kernel_fn = (*fd).is_kernel
+            var kernel_effects = fn_effects
+            var kernel_effect_count = fn_effect_count
+
+            if is_kernel_fn {
+                var has_gpu = false
+                var ei = 0
+                while ei < kernel_effect_count {
+                    if kernel_effects[ei as usize] == 5 { has_gpu = true }
+                    ei = ei + 1
+                }
+                if has_gpu == false {
+                    if kernel_effect_count < 8 {
+                        kernel_effects[kernel_effect_count as usize] = 5
+                        kernel_effect_count = kernel_effect_count + 1
+                    }
+                }
+                var ri = 0
+                while ri < kernel_effect_count {
+                    if kernel_effects[ri as usize] == 0 {
+                        checker_report_error_at_inplace(c, (*fd).span, 70, 0, 0, 0)
+                    }
+                    if kernel_effects[ri as usize] == 1 {
+                        checker_report_error_at_inplace(c, (*fd).span, 70, 0, 0, 0)
+                    }
+                    if kernel_effects[ri as usize] == 2 {
+                        checker_report_error_at_inplace(c, (*fd).span, 70, 0, 0, 0)
+                    }
+                    ri = ri + 1
+                }
+                if ret_ty.kind != TypeKind::TyUnit {
+                    checker_report_error_at_inplace(c, (*fd).span, 72, 0, 0, 0)
+                }
+            }
+
+            var has_epistemic_param = false
+            if is_kernel_fn {
+                var walk_params = params
+                var walk_i: i64 = 0
+                while walk_i < param_count {
+                    match walk_params {
+                        Some(plist) => {
+                            let pty = (*plist).head.ty
+                            if is_epistemic_type(pty) || pty.kind == TypeKind::TyEpistemic || pty.kind == TypeKind::TyAleatoric {
+                                has_epistemic_param = true
+                            }
+                            walk_params = (*plist).tail
+                        }
+                        None => { walk_i = param_count }
+                    }
+                    walk_i = walk_i + 1
+                }
+            }
+
+            let sig = FnSig {
+                name: name,
+                params: params,
+                param_count: param_count,
+                return_type: ret_ty,
+                is_method: false,
+                self_type_name: Name { buf: [0; 128], len: 0 },
+                self_type_entry: ty_unit(),
+                effects: kernel_effects,
+                effect_count: kernel_effect_count,
+                is_kernel: is_kernel_fn,
+                is_epistemic_kernel: has_epistemic_param,
+                is_linear_closure: false,
+                linear_capture_count: 0,
+                epistemic_epsilon: 0.0 - 1.0,
+            }
+            // In-place insert mirrors FnSigTable::add — avoids copying the 45KB
+            // FnSigTable by value (one of the large-aggregate copies the *mut
+            // conversion eliminates).
+            let sig_id = (*c).fn_sigs.count
+            if sig_id < 64 {
+                (*c).fn_sigs.entries[sig_id as usize] = sig
+                (*c).fn_sigs.count = sig_id + 1
+            }
+            // In-place env bind mirrors TypeEnv::bind (avoids copying the 32KB TypeEnv).
+            let benv_idx = (*c).env.count
+            if benv_idx < 128 {
+                (*c).env.bindings[benv_idx as usize] = TypeBinding {
+                    name: name,
+                    ty: ty_fn(sig_id),
+                    is_mutable: false,
+                    scope_depth: (*c).env.scope_depth,
+                }
+                (*c).env.count = benv_idx + 1
+            }
+            checker_const_int_bind_unknown_inplace(c, name)
+        }
+        None => {}
+    }
+}
+
+fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
+    match item.kind {
+        ItemFn => checker_collect_fn_def_inplace(c, item.fn_def)
+        ItemUse => {}
+        ItemSession => {}
+        _ => checker_store_from_value(c, (*c).collect_item(item))
+    }
+}
+
+fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    var cursor = items
+    while true {
+        match cursor {
+            Some(list) => {
+                checker_collect_item_inplace(c, (*list).head)
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_check_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    var cursor = items
+    while true {
+        match cursor {
+            Some(list) => {
+                checker_check_item_inplace(c, (*list).head)
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_check_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
+    match item.kind {
+        ItemFn => checker_check_fn_item_inplace(c, item.fn_def)
+        ItemImpl => checker_store_from_value(c, (*c).check_impl_item(item.impl_def))
+        _ => {}
+    }
+}
+
+fn checker_bind_fn_param_inplace(c: *mut Checker, p: Param) with Mut, Panic, Div, Alloc, IO {
+    if p.is_self {
+        (*c).env = (*c).env.bind(p.name, (*c).current_impl_type, p.is_self_mut)
+        checker_const_int_bind_unknown_inplace(c, p.name)
+        let self_linear = checker_is_linear_type_inplace(c, (*c).current_impl_type)
+        (*c).borrows = (*c).borrows.track(p.name, self_linear)
+    } else {
+        let param_ty = checker_lower_type_expr_mut(c, p.ty)
+        (*c).env = (*c).env.bind(p.name, param_ty, false)
+        checker_const_int_bind_unknown_inplace(c, p.name)
+        let lin = checker_is_linear_type_inplace(c, param_ty)
+        (*c).borrows = (*c).borrows.track(p.name, lin)
+    }
+}
+
+fn checker_bind_fn_params_inplace(c: *mut Checker, opt: Option<Box<ParamList> >) with Mut, Panic, Div, Alloc, IO {
+    var cursor = opt
+    while true {
+        match cursor {
+            Some(pl) => {
+                checker_bind_fn_param_inplace(c, (*pl).head)
+                cursor = (*pl).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(fd) => {
+            let saved_effects = (*c).current_effects
+            let saved_effect_count = (*c).current_effect_count
+            let saved_multitest_count = (*c).multitest_count
+            let saved_multitest_corrected = (*c).multitest_corrected
+            let sig_id = (*c).fn_sigs.find((*fd).name)
+            if sig_id >= 0 {
+                let sig = (*c).fn_sigs.get(sig_id)
+                (*c).current_return_type = sig.return_type
+                (*c).current_effects = sig.effects
+                (*c).current_effect_count = sig.effect_count
+            }
+            (*c).multitest_count = 0
+            (*c).multitest_corrected = false
+            (*c).env = (*c).env.push_scope()
+            (*c).borrows = (*c).borrows.push_scope()
+            checker_push_const_scope_inplace(c)
+            checker_bind_fn_params_inplace(c, (*fd).params)
+            let body_ty = checker_check_block_inplace(c, (*fd).body)
+            if sig_id >= 0 {
+                let sig2 = (*c).fn_sigs.get(sig_id)
+                if !types_compatible(body_ty, sig2.return_type) {
+                    checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
+                }
+            }
+            if (*c).multitest_count > 1 && !(*c).multitest_corrected {
+                checker_store_from_value(c, (*c).report_multitest_correction_required((*fd).span, (*c).multitest_count))
+            }
+            checker_pop_const_scope_inplace(c)
+            (*c).borrows = (*c).borrows.pop_scope()
+            (*c).env = (*c).env.pop_scope()
+            (*c).current_return_type = ty_unit()
+            (*c).current_effects = saved_effects
+            (*c).current_effect_count = saved_effect_count
+            (*c).multitest_count = saved_multitest_count
+            (*c).multitest_corrected = saved_multitest_corrected
+        }
+        None => {}
+    }
+}
+
+fn checker_check_block_inplace(c: *mut Checker, blk: Block) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    (*c).env = (*c).env.push_scope()
+    (*c).borrows = (*c).borrows.push_scope()
+    checker_push_const_scope_inplace(c)
+    let result_ty = checker_check_stmts_inplace(c, blk.stmts)
+    let linear_check = (*c).borrows.check_linear_consumed()
+    (*c).borrows = linear_check.0
+    if linear_check.1 > 0 {
+        (*c).had_error = true
+        (*c).error_count = (*c).error_count + 1
+        print("error[E040]: linear value not consumed (")
+        print_int(linear_check.1)
+        print(" unconsumed)\n")
+    }
+    checker_pop_const_scope_inplace(c)
+    (*c).borrows = (*c).borrows.pop_scope()
+    (*c).env = (*c).env.pop_scope()
+    result_ty
+}
+
+fn checker_check_stmts_inplace(c: *mut Checker, opt: Option<Box<StmtList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    var cursor = opt
+    var last_ty = ty_unit()
+    while true {
+        match cursor {
+            Some(list) => {
+                last_ty = checker_check_stmt_inplace(c, (*list).head)
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+    last_ty
+}
+
+fn checker_check_stmt_bridge(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let pair = (*c).check_stmt(s)
+    checker_store_from_value(c, pair.0)
+    pair.1
+}
+
+fn checker_check_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match s.kind {
+        StmtLet => checker_check_stmt_bridge(c, s)
+        StmtVar => checker_check_stmt_bridge(c, s)
+        StmtExpr => checker_check_expr_stmt_inplace(c, s)
+        StmtAssign => checker_check_stmt_bridge(c, s)
+    }
+}
+
+fn checker_check_expr_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    checker_check_opt_expr_inplace(c, s.expr)
+}
+
+fn checker_check_opt_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(e) => checker_check_expr_inplace(c, *e)
+        None => ty_unit()
+    }
+}
+
+fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let val_ty = checker_check_opt_expr_inplace(c, e.left)
+    if !types_compatible(val_ty, (*c).current_return_type) {
+        checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
+    }
+    ty_never()
+}
+
+fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if (*c).expr_depth >= MAX_EXPR_DEPTH {
+        checker_report_error_at_inplace(c, e.span, 61, (*c).expr_depth, MAX_EXPR_DEPTH, 0)
+        return ty_error()
+    }
+    (*c).expr_depth = (*c).expr_depth + 1
+    let result = match e.kind {
+        ExprIntLit => {
+            (*c).last_literal_int = e.int_val
+            (*c).last_literal_kind = 1
+            ty_i64()
+        }
+        ExprFloatLit => {
+            (*c).last_literal_float = e.float_val
+            (*c).last_literal_kind = 2
+            ty_f64()
+        }
+        ExprBoolTrue => ty_bool()
+        ExprBoolFalse => ty_bool()
+        ExprStringLit => ty_string()
+        ExprCharLit => ty_char()
+        ExprReturn => checker_check_return_expr_inplace(c, e)
+        _ => checker_check_expr_mut(c, e)
+    }
+    if (*c).expr_depth > 0 {
+        (*c).expr_depth = (*c).expr_depth - 1
+    }
+    result
+}
+
 fn checker_check_items_inner_return_error_count_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
     let next = (*c).check_items(items)
     print("stage=inner_after_check_items_value\n")
@@ -1965,8 +2500,10 @@ fn checker_check_items_inner_store_return_error_count_mut(c: *mut Checker, items
 }
 
 fn checker_check_items_inner_store_return_had_error_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
-    let next = (*c).check_items(items)
-    checker_store_from_value(c, next)
+    // Route through the true *mut spine: no 164KB by-value Checker copy
+    // ever lands on the hot path, so the layout-sensitive stale-stack
+    // codegen crash never fires. (Was: `(*c).check_items(items)` by value.)
+    checker_check_items_inplace(c, items)
     if (*c).had_error {
         1
     } else {
