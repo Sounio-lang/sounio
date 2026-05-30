@@ -124,10 +124,10 @@ theorem emb_den_ne_zero (v : Nat) : qfWf (emb v).1 ∧ qfWf (emb v).2 := by
 
 /-! ## The `SqrtField` instance: the proved fraction homomorphism *is* a guarded transfer. -/
 
-/-- For any `SqrtField R`, the fraction map `φ(c,d) = (Σ cᵢ rᵢ)·inv(ofInt d)` is a guarded
+/-- For any `RootedField R`, the fraction map `φ(c,d) = (Σ cᵢ rᵢ)·inv(ofInt d)` is a guarded
     QF-transfer onto `R.F`. The four laws are exactly the proved `phi_qadd`/`phi_qmul`/`phi_qsub`
     (ring-hom on `den ≠ 0`) and `phi_unit` (`φ` sends QF-representations of `1` to `R.one`). -/
-def sqrtTransfer (R : SqrtField) : QFTransferWf where
+def rootedTransfer (R : RootedField) : QFTransferWf where
   F := R.F
   add := R.add
   mul := R.mul
@@ -148,15 +148,24 @@ def sqrtTransfer (R : SqrtField) : QFTransferWf where
       rw [if_neg hi0] at ei
       exact eq_of_beq ei
 
-/-- **χ(F²) ≥ 5 for every `SqrtField F`** (Mathlib-free). The full QF→F unital ring homomorphism,
+/-- **χ(F²) ≥ 5 for every `RootedField F`** (Mathlib-free). The full QF→F unital ring homomorphism,
     the geometry certificate, the generator law, and the char-0 inverse toolkit are all closed in
-    core Lean. The *only* remaining input to χ(ℝ²) ≥ 5 is the analytic instance "ℝ is a `SqrtField`". -/
-theorem sqrtField_chi_ge_5 (R : SqrtField) (h_sat : ¬ VColourable) :
-    ¬ Nonempty (PlaneColouring ((sqrtTransfer R).F × (sqrtTransfer R).F) (sqrtTransfer R).unit 4) :=
-  (sqrtTransfer R).chi_ge_5_wf emb_den_ne_zero h_sat
+    core Lean. The *only* remaining input to χ(ℝ²) ≥ 5 is the analytic instance "ℝ is a
+    `RootedField`": an ordered field carrying √3,√5,√7,√11 — **no total `sqrt`, no completeness**. -/
+theorem rootedField_chi_ge_5 (R : RootedField) (h_sat : ¬ VColourable) :
+    ¬ Nonempty (PlaneColouring ((rootedTransfer R).F × (rootedTransfer R).F) (rootedTransfer R).unit 4) :=
+  (rootedTransfer R).chi_ge_5_wf emb_den_ne_zero h_sat
 
+/-- **Corollary: χ(F²) ≥ 5 for every `SqrtField F`** (ordered field with a *total* `sqrt`), via the
+    `toRootedField` adapter — the classic interface is subsumed. -/
+theorem sqrtField_chi_ge_5 (S : SqrtField) (h_sat : ¬ VColourable) :
+    ¬ Nonempty (PlaneColouring ((rootedTransfer S.toRootedField).F × (rootedTransfer S.toRootedField).F)
+      (rootedTransfer S.toRootedField).unit 4) :=
+  rootedField_chi_ge_5 S.toRootedField h_sat
+
+#print axioms rootedField_chi_ge_5
 #print axioms sqrtField_chi_ge_5
 
-#eval IO.println "SounioDeGreyChi5TransferWf: PROVED χ(F²)≥5 for EVERY SqrtField F (Mathlib-free) — the proved fraction homomorphism φ:QF→F (phi_qmul/qadd/qsub/phi_unit) instantiates a guarded QF-transfer; emb denominators are all nonzero; only the analytic 'ℝ is a SqrtField' instance remains."
+#eval IO.println "SounioDeGreyChi5TransferWf: PROVED χ(F²)≥5 for EVERY RootedField F (Mathlib-free) — ordered field + √3,√5,√7,√11, NO total sqrt/completeness; the proved fraction homomorphism φ:QF→F instantiates a guarded QF-transfer; emb denominators all nonzero. SqrtField (total sqrt) subsumed via toRootedField. Only the analytic 'ℝ is a RootedField' instance remains."
 
 end DeGrey529.TransferWf

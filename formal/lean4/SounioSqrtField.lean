@@ -11,8 +11,27 @@ algebraic interface a real field should satisfy.
 
 namespace SounioSqrt
 
-/-- An abstract ordered field equipped with a non-negative square root. -/
-structure SqrtField where
+/-- Standalone nat literal for the four primes (3,5,7,11), usable inside the structure axioms
+    before the `ofNat` cast is available. -/
+def primeNatLit : Fin 4 → Nat
+  | ⟨0, _⟩ => 3
+  | ⟨1, _⟩ => 5
+  | ⟨2, _⟩ => 7
+  | ⟨3, _⟩ => 11
+
+/-- Operation-parametric ℕ→F cast, used to state `root_sq` self-containedly inside the structure
+    (it is definitionally `RootedField.ofNat` once the field operations are fixed). -/
+def rfOfNat {F : Type} (add : F → F → F) (zero one : F) : Nat → F
+  | 0 => zero
+  | n + 1 => add (rfOfNat add zero one n) one
+
+/-- An abstract ordered field equipped with square roots of the four primes `3,5,7,11`.
+
+    This is exactly the interface the de Grey χ≥5 transfer needs: it never requires a *total*
+    square root, only the four generators `root j` with `root j ≥ 0` and `root j · root j = pⱼ`.
+    A classic ordered field with a *total* `sqrt` yields a `RootedField` via
+    `SqrtField.toRootedField`, so nothing is lost. -/
+structure RootedField where
   F : Type
   add : F → F → F
   mul : F → F → F
@@ -21,7 +40,6 @@ structure SqrtField where
   one : F
   inv : F → F
   le : F → F → Prop
-  sqrt : F → F
   add_assoc : ∀ a b c, add (add a b) c = add a (add b c)
   add_comm : ∀ a b, add a b = add b a
   mul_assoc : ∀ a b c, mul (mul a b) c = mul a (mul b c)
@@ -39,12 +57,13 @@ structure SqrtField where
   le_total : ∀ a b, le a b ∨ le b a
   add_le_add_right : ∀ {a b c}, le a b → le (add a c) (add b c)
   mul_nonneg : ∀ {a b}, le zero a → le zero b → le zero (mul a b)
-  sqrt_nonneg : ∀ a, le zero (sqrt a)
-  sqrt_sq : ∀ a, le zero a → mul (sqrt a) (sqrt a) = a
+  root : Fin 4 → F
+  root_nonneg : ∀ j, le zero (root j)
+  root_sq : ∀ j, mul (root j) (root j) = rfOfNat add zero one (primeNatLit j)
 
-namespace SqrtField
+namespace RootedField
 
-variable {R : SqrtField}
+variable {R : RootedField}
 
 def sub (a b : R.F) : R.F := R.add a (R.neg b)
 
@@ -226,24 +245,6 @@ theorem nonneg_sqrt_unique {x y : R.F}
   · rcases sf_nonneg_add_eq_zero hx hy hsum with ⟨hx0, hy0⟩
     rw [hx0, hy0]
 
-/-- `√a · √b = √(a·b)` for non-negative `a`, `b`. -/
-theorem mul_sqrt {a b : R.F} (ha : R.le R.zero a) (hb : R.le R.zero b) :
-    R.mul (R.sqrt a) (R.sqrt b) = R.sqrt (R.mul a b) := by
-  have hleft : R.le R.zero (R.mul (R.sqrt a) (R.sqrt b)) :=
-    R.mul_nonneg (R.sqrt_nonneg a) (R.sqrt_nonneg b)
-  have hright : R.le R.zero (R.sqrt (R.mul a b)) := R.sqrt_nonneg _
-  have hsq :
-      R.mul (R.mul (R.sqrt a) (R.sqrt b)) (R.mul (R.sqrt a) (R.sqrt b)) =
-        R.mul (R.sqrt (R.mul a b)) (R.sqrt (R.mul a b)) := by
-    calc
-      R.mul (R.mul (R.sqrt a) (R.sqrt b)) (R.mul (R.sqrt a) (R.sqrt b)) =
-          R.mul (R.mul (R.sqrt a) (R.sqrt a)) (R.mul (R.sqrt b) (R.sqrt b)) := by
-            rw [sf_mul_mul_mul_comm (R.sqrt a) (R.sqrt b) (R.sqrt a) (R.sqrt b)]
-      _ = R.mul a b := by rw [R.sqrt_sq a ha, R.sqrt_sq b hb]
-      _ = R.mul (R.sqrt (R.mul a b)) (R.sqrt (R.mul a b)) :=
-          (R.sqrt_sq (R.mul a b) (R.mul_nonneg ha hb)).symm
-  exact nonneg_sqrt_unique hleft hright hsq
-
 /-! ## Natural-number cast and nonnegativity -/
 
 def ofNat (n : Nat) : R.F :=
@@ -252,6 +253,13 @@ def ofNat (n : Nat) : R.F :=
   | n + 1 => R.add (ofNat n) R.one
 
 private theorem ofNat_succ (n : Nat) : ofNat (n + 1) = R.add (ofNat n) R.one := rfl
+
+/-- `ofNat` is the operation-parametric cast `rfOfNat` specialised to `R`'s operations. Bridges the
+    structure-level `root_sq` (stated via `rfOfNat`) to the `ofNat`-based prime values. -/
+theorem ofNat_eq_rfOfNat (n : Nat) : (ofNat n : R.F) = rfOfNat R.add R.zero R.one n := by
+  induction n with
+  | zero => rfl
+  | succ n ih => rw [ofNat_succ]; show R.add (ofNat n) R.one = R.add (rfOfNat R.add R.zero R.one n) R.one; rw [ih]
 
 theorem ofNat_nonneg (n : Nat) : R.le R.zero (ofNat n) := by
   induction n with
@@ -262,18 +270,17 @@ theorem ofNat_nonneg (n : Nat) : R.le R.zero (ofNat n) := by
 
 /-! ## The four primes and their square roots -/
 
-def primeNat : Fin 4 → Nat
-  | ⟨0, _⟩ => 3
-  | ⟨1, _⟩ => 5
-  | ⟨2, _⟩ => 7
-  | ⟨3, _⟩ => 11
+def primeNat : Fin 4 → Nat := primeNatLit
 
 def p (j : Fin 4) : R.F := ofNat (primeNat j)
 
-def s (j : Fin 4) : R.F := R.sqrt (p j)
+/-- The square-root generator of the `j`-th prime, supplied by the `RootedField` structure. -/
+def s (j : Fin 4) : R.F := R.root j
 
-theorem s_sq (j : Fin 4) : R.mul (s j) (s j) = p j :=
-  R.sqrt_sq _ (ofNat_nonneg (primeNat j))
+theorem s_sq (j : Fin 4) : R.mul (s j) (s j) = p j := by
+  show R.mul (R.root j) (R.root j) = ofNat (primeNat j)
+  rw [R.root_sq j, ofNat_eq_rfOfNat]
+  rfl
 
 /-! ## Radical monomial `r m` over the four low bits -/
 
@@ -366,7 +373,7 @@ theorem generator_law (i j : Nat) :
   show (ofNat _ : R.F) = ofNat (bcoeff (Nat.land i j))
   congr 1
   rw [show Nat.land i j = i &&& j from rfl]
-  simp [bcoeff, Nat.testBit_and, primeNat, Nat.mul_assoc]
+  simp [bcoeff, Nat.testBit_and, primeNat, primeNatLit, Nat.mul_assoc]
 
 /-- `GeneratorLawObligation` is now a theorem (the `i,j < 16` hypotheses are unused: the law
     holds for all naturals, but we keep the bounded statement for the obligation interface). -/
@@ -551,23 +558,34 @@ theorem ofInt_mul (a b : Int) : ofInt (a * b) = R.mul (ofInt a) (ofInt b) := by
     show R.neg (R.mul (ofInt a) (ofNat (n + 1))) = R.mul (ofInt a) (R.neg (ofNat (n + 1)))
     rw [sf_mul_neg]
 
-end SqrtField
+end RootedField
+
+/-! ## Classic interface: an ordered field with a *total* square root.
+
+A `SqrtField` bundles a `RootedField` with a total `sqrt` (and its nonnegativity / square law).
+Every `SqrtField` yields a `RootedField` by projection (`toRootedField`), so the χ(F²)≥5 result
+proved for `RootedField` specialises to any total-`sqrt` ordered field. -/
+structure SqrtField where
+  toRootedField : RootedField
+  sqrt : toRootedField.F → toRootedField.F
+  sqrt_nonneg : ∀ a, toRootedField.le toRootedField.zero (sqrt a)
+  sqrt_sq : ∀ a, toRootedField.le toRootedField.zero a →
+    toRootedField.mul (sqrt a) (sqrt a) = a
 
 end SounioSqrt
 
-#print axioms SounioSqrt.SqrtField.nonneg_sqrt_unique
-#print axioms SounioSqrt.SqrtField.mul_sqrt
-#print axioms SounioSqrt.SqrtField.ofNat_nonneg
-#print axioms SounioSqrt.SqrtField.s_sq
-#print axioms SounioSqrt.SqrtField.r_zero
-#print axioms SounioSqrt.SqrtField.ofNat_mul
-#print axioms SounioSqrt.SqrtField.radicalBit_mul
-#print axioms SounioSqrt.SqrtField.generator_law
-#print axioms SounioSqrt.SqrtField.generatorLaw_solved
-#print axioms SounioSqrt.SqrtField.ofNat_ne_zero
-#print axioms SounioSqrt.SqrtField.sf_inv_mul_inv
-#print axioms SounioSqrt.SqrtField.ofInt_ne_zero
-#print axioms SounioSqrt.SqrtField.ofInt_add
-#print axioms SounioSqrt.SqrtField.ofInt_mul
+#print axioms SounioSqrt.RootedField.nonneg_sqrt_unique
+#print axioms SounioSqrt.RootedField.ofNat_nonneg
+#print axioms SounioSqrt.RootedField.s_sq
+#print axioms SounioSqrt.RootedField.r_zero
+#print axioms SounioSqrt.RootedField.ofNat_mul
+#print axioms SounioSqrt.RootedField.radicalBit_mul
+#print axioms SounioSqrt.RootedField.generator_law
+#print axioms SounioSqrt.RootedField.generatorLaw_solved
+#print axioms SounioSqrt.RootedField.ofNat_ne_zero
+#print axioms SounioSqrt.RootedField.sf_inv_mul_inv
+#print axioms SounioSqrt.RootedField.ofInt_ne_zero
+#print axioms SounioSqrt.RootedField.ofInt_add
+#print axioms SounioSqrt.RootedField.ofInt_mul
 
-#eval IO.println "SounioSqrtField: SqrtField structure; PROVED nonneg_sqrt_unique, mul_sqrt, ofNat_nonneg, s_sq, r_zero, ofNat_mul, radicalBit_mul, generator_law; char-0 denominator toolkit ofNat_ne_zero/sf_inv_mul_inv/ofInt_ne_zero; ℤ→F ring hom ofInt_add/ofInt_mul/ofInt_neg."
+#eval IO.println "SounioSqrtField: RootedField structure (ordered field + four prime roots, NO total sqrt); PROVED nonneg_sqrt_unique, ofNat_nonneg, s_sq, r_zero, ofNat_mul, radicalBit_mul, generator_law; char-0 denominator toolkit ofNat_ne_zero/sf_inv_mul_inv/ofInt_ne_zero; ℤ→F ring hom ofInt_add/ofInt_mul/ofInt_neg. SqrtField (total sqrt) bundles a RootedField via toRootedField."

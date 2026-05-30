@@ -1,5 +1,28 @@
 # LLM Offload Log
 
+## 2026-05-30: RootedField refactor + multiplicative structure of ℝ (mul_cauchy, mul_cong) + inverse crux (bounded_away)
+
+- **Claim**: Two pieces. (1) **Phase-1 interface refactor** — `SounioSqrtField.lean` now exposes
+  `RootedField` (ordered field + four prime square-root generators `root : Fin 4 → F` with
+  `root_nonneg`, `root_sq`) **with no total `sqrt`**; the de Grey transfer
+  (`SounioDeGreyChi5TransferWf.lean`) is re-targeted at it as `rootedField_chi_ge_5`, and the classic
+  total-`sqrt` `SqrtField` is kept as a thin bundle with `sqrtField_chi_ge_5` recovered via
+  `toRootedField`. `SounioMultiquadHom` re-parameterised over `RootedField` (no `sqrt` was ever used
+  on the critical path — only `s`/`s_sq` at the four primes). (2) **Phase-2a/2b-crux analytics** in
+  `SounioSqrtFieldReal.lean`: a Mathlib-free `ratAbs` toolkit (`ratAbs_mul`, `ratAbs_add_le`,
+  two-sided lemmas), `cauchy_bounded` (Cauchy ⇒ eventually bounded), `mul_cauchy` (product of Cauchy
+  is Cauchy) and `mul_cong` (`·` respects `RealEq`) via the `K=Bf+Bg+1`, `δ=ε·K⁻¹` scaling
+  (`rat_prod_bound`), discharging `RealMulCongObligation` and `MulPreservesCauchy`; plus the inverse
+  CRUX `bounded_away` (`¬ RealEq x 0 ⇒ ∃ δ>0 N, ∀ n≥N, δ ≤ |xₙ|`) via reverse triangle + Cauchy
+  modulus. No `sorry`/`sorryAx`; `lake build SounioDeGreyChi5TransferWf SounioSqrtFieldReal` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 on the
+  analytic core. **All [OK]**: realEq_*, add_cauchy/mul_cauchy ("standard ε/2 + ratAbs toolkit;
+  cauchy_bounded supplies the K=Bf+Bg+1 guard"), realOpsCong_add/mul_cong ("bounded by the same
+  ε/2 + rat_prod_bound argument"), obligations directly discharged "no leap". `[TIGHTENABLE]` only on
+  the still-⏳ ledger entries (inverse completion, order axioms, completeness, sqrt) — acknowledged as
+  the remaining checklist, no error found. "All downstream claims rest only on the proved lemmas; no
+  compounding error."
+
 ## 2026-05-30: RealEq is an equivalence — realEq_trans (ε/2 triangle) + realSetoid; ℝ := Quotient
 
 - **Claim**: `formal/lean4/SounioSqrtFieldReal.lean` discharges `RealEqTransObligation` with
