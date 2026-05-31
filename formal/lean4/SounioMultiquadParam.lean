@@ -350,6 +350,98 @@ theorem indep_3_5_11 : IndepMultiquad [3, 5, 11] := by
   | 7, _ => exact h7
   | (n + 8), h => exact absurd h (by omega)
 
+/-! ## 10. Inductive engine — partial discharge toward `MultiquadIndepTheorem`.
+
+The unrestricted `∀S` proof factors through three named obligations per cons step
+(`EvalSConsSplitObligation`, `SqrtNewNotInTower`, `TowerHasInverses`) bundled in
+`IndepStepObligation`. This section proves the **base and |S|=1** layers, the ℚ-level
+`no_qR_eq_sqrtR` / `indep_1_sqrt` kernel, and packages list induction once the step
+hypothesis is supplied. The cons-step algebra (`indep_step`) and the general
+`evalS_cons_split` / recursive inverse / squarefree peel for arbitrary `S'` remain the
+open research work recorded in §8. -/
+
+/-- No rational embeds as the generic Newton root of a non-square radicand. -/
+theorem no_qR_eq_sqrtR (p : Nat) (hp : (1 : Rat) ≤ (p : Rat)) (hns : ∀ k : Nat, k * k ≠ p) :
+    ∀ q : Rat, qR q ≠ sqrtR p := by
+  intro q heq
+  apply sqrt_new_not_in_Q p hns
+  exact ⟨q, by rw [heq, sqrtR_sq p hp]⟩
+
+/-- **|S|=1 independence kernel.** If `a + b√p = r` with `p` non-square, then `b = 0` and
+    `a = r`. Generalises `indep_1_R3` to generic `sqrtR p`. -/
+theorem indep_1_sqrt (p : Nat) (hp : (1 : Rat) ≤ (p : Rat)) (hns : ∀ k : Nat, k * k ≠ p)
+    (a b r : Rat) (h : addR (qR a) (mulR (qR b) (sqrtR p)) = qR r) :
+    a = r ∧ b = 0 := by
+  have hb0 : b = 0 := by
+    refine Classical.byContradiction (fun hbne => ?_)
+    have hM : mulR (qR b) (sqrtR p) = qR (-a + r) := by
+      have hstep := congrArg (addR (negR (qR a))) h
+      rw [← addR_assoc, addR_comm (negR (qR a)) (qR a), addR_neg,
+          addR_comm zeroR' (mulR (qR b) (sqrtR p)), addR_zero, qR_neg, qR_add] at hstep
+      exact hstep
+    have hbinv : b⁻¹ * b = 1 := by rw [Rat.mul_comm]; exact Rat.mul_inv_cancel b hbne
+    have hmul := congrArg (mulR (qR b⁻¹)) hM
+    rw [← mulR_assoc, qR_mul, hbinv, qR_one, mulR_comm oneR (sqrtR p), mulR_one, qR_mul] at hmul
+    exact no_qR_eq_sqrtR p hp hns (b⁻¹ * (-a + r)) hmul.symm
+  have har : a = r := by
+    rw [hb0, qR_zero, zeroR'_mul, addR_zero] at h
+    exact qR_inj h
+  exact ⟨har, hb0⟩
+
+/-- **|S|=1 independence.** `{1, √p}` is ℚ-linearly independent for non-square `p`. -/
+theorem indep_singleton (p : Nat) (hp : (1 : Rat) ≤ (p : Rat)) (hns : ∀ k : Nat, k * k ≠ p) :
+    IndepMultiquad [p] := by
+  intro c hc m hm
+  have hc' : addR (qR (c 0)) (mulR (qR (c 1)) (sqrtR p)) = zeroR' := by
+    unfold evalS radS at hc
+    rw [show (2 ^ ([p] : List Nat).length) = 2 from by simp, show List.range 2 = [0, 1] from rfl] at hc
+    simp [List.foldr, radS, mulR_one, addR_zero] at hc
+    exact hc
+  rw [← qR_zero] at hc'
+  obtain ⟨h0, h1⟩ := indep_1_sqrt p hp hns (c 0) (c 1) 0 hc'
+  have hm2 : m < 2 := hm
+  match m, hm2 with
+  | 0, _ => exact h0
+  | 1, _ => exact h1
+  | (n + 2), h => exact absurd h (by omega)
+
+/-- Every nonzero rational coefficient vector over `S = []` has a tower inverse. -/
+theorem tower_has_inverses_nil : TowerHasInverses [] := by
+  intro c hc
+  obtain ⟨m, hm, hc0⟩ := hc
+  have hm0 : m = 0 := by
+    have : m < 1 := by simpa using hm
+    omega
+  subst hm0
+  refine ⟨fun n => if n = 0 then (c 0)⁻¹ else 0, ?_⟩
+  simp [evalS_nil, qR_mul, Rat.mul_comm, Rat.mul_inv_cancel (c 0) hc0, qR_one]
+
+/-- **Tower freshness at |S'|=0.** `√p ∉ ℚ` for non-square `p`. -/
+theorem sqrt_new_not_in_tower_nil (p : Nat) (hp : (1 : Rat) ≤ (p : Rat))
+    (hns : ∀ k : Nat, k * k ≠ p) : SqrtNewNotInTower p [] := by
+  intro ⟨c, hc⟩
+  rw [evalS_nil] at hc
+  exact no_qR_eq_sqrtR p hp hns (c 0) hc
+
+/-- **List induction wrapper (signature only).** Once `EvalSConsSplitObligation`,
+    `SqrtNewNotInTower`, and `TowerHasInverses` are discharged for every `S'`, and
+    `indep_step` is proved, the proof is `MultiquadIndepTheorem_of` below. -/
+theorem MultiquadIndepTheorem_of
+    (hstep : ∀ (p : Nat) (S' : List Nat), IndepStepObligation p S')
+    (hsplit : ∀ (p : Nat) (S' : List Nat), EvalSConsSplitObligation p S')
+    (hsqrt : ∀ (p : Nat) (S' : List Nat), HasRadicals (p :: S') → SqrtNewNotInTower p S')
+    (hinv : ∀ (S' : List Nat), HasRadicals S' → TowerHasInverses S') :
+    MultiquadIndepTheorem := by
+  intro S hS
+  induction S with
+  | nil => exact indep_base
+  | cons p S' ih =>
+    have hS' : HasRadicals S' := by
+      refine ⟨?_, ?_⟩
+      · exact (List.nodup_cons.mp hS.1).2
+      · intro q hq; exact hS.2 q (List.mem_cons_of_mem p hq)
+    exact (hstep p S') (hsplit p S') (hsqrt p S' hS) (hinv S' hS') (ih hS')
+
 #print axioms sqrtR_sq
 #print axioms evalS_nil
 #print axioms indep_base
@@ -357,6 +449,10 @@ theorem indep_3_5_11 : IndepMultiquad [3, 5, 11] := by
 #print axioms indep_3_5_11
 #print axioms sqrt_new_not_in_Q
 #print axioms Np_ne_zero
+#print axioms indep_singleton
+#print axioms tower_has_inverses_nil
+#print axioms sqrt_new_not_in_tower_nil
+#print axioms MultiquadIndepTheorem_of
 
 end Multiquad
 

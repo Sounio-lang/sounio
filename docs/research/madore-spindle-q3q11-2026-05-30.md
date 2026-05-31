@@ -54,11 +54,23 @@ Madore is the **minimal** multiquadratic base case; de Grey is the **sharpened**
 ## Open obligation (honest scope)
 
 `MultiquadIndepTheorem : ∀ S, HasRadicals S → IndepMultiquad S` is stated as an explicit
-obligation — *not* an axiom, *not* `sorry`. It is discharged for the **instantiated supports**
-(`[]`, `[3,11]`, `[3,5,11]`). The unrestricted `∀S` proof (degree `2^|S|`) needs, Mathlib-free:
-(i) a squarefree-by-prime-factorisation lemma feeding `no_rat_sqrt` for arbitrary radicands
-`p·∏T`, and (ii) the recursive norm/conjugate inverse tower lifting `Np_ne_zero`/`Q35_inv` to all
-levels.
+obligation — *not* an axiom, *not* `sorry`. Discharged instances:
+
+| Support | Theorem | Method |
+|---------|---------|--------|
+| `[]` | `indep_base` | `qR_inj` |
+| `[p]` (non-square) | `indep_singleton` | `indep_1_sqrt` / `no_qR_eq_sqrtR` |
+| `[3,11]` | `indep_3_11` | bridge to `indep8` |
+| `[3,5,11]` | `indep_3_5_11` | bridge to `indep8` |
+
+**§10 inductive packaging:** `MultiquadIndepTheorem_of` closes the general theorem once these
+three cons-step obligations are proved for all `S'`:
+
+1. `EvalSConsSplitObligation` — mask split `evalS (p::S') c = A + √p·B`
+2. `SqrtNewNotInTower` — `√p ∉ K_{S'}` (squarefree peel + `no_rat_sqrt`; base case `sqrt_new_not_in_tower_nil`)
+3. `TowerHasInverses` — recursive norm/conjugate inverse (base case `tower_has_inverses_nil`; lift of `Q35_inv`)
+
+The unrestricted `∀S` proof remains open at these three points; no `sorry` in the wrapper.
 
 ## Review
 
