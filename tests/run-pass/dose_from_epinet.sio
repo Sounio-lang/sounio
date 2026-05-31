@@ -1,0 +1,60 @@
+//@ run-pass
+//@ description: THE WIRING — the dragon drives the typed refusal. A width-N
+//@ epistemic dense layer (linalg::epistemic_tensor_dyn) propagates GUM
+//@ confidence through its forward pass; that PROPAGATED confidence
+//@ (etd_conf of the output) decides whether the prediction is eligible to be
+//@ certified for prescription. Confident inputs → propagated conf clears the
+//@ ASHP ε≥0.82 bar → certify+prescribe. Weak inputs → propagated conf falls
+//@ below the bar → ABSTAIN. The compile-time contract (`with Epistemic(820)`)
+//@ remains non-bypassable (see compile-fail/dose_contract_bypass.sio).
+//@ Method demo; NOT a clinical dosing engine.
+
+use linalg::epistemic_tensor_dyn::*
+use nn::epistemic_dense_n::*
+use nn::epi_certify::{ashp_vanco_threshold, epi_runtime_certified}
+
+// The prescription contract: only a literal-ε certification (auditable clinician
+// attestation that the net cleared the bar) can enter this gate.
+fn prescribe_vanco_dose() -> f64 with Epistemic(820), Mut, Div, Panic {
+    let dose: Knowledge[f64] = Knowledge(450.0, ε=0.90, prov="epinet_output_clinician_certified");
+    dose.value
+}
+
+// A tiny epistemic "net": 2→1 dense layer. Returns the PROPAGATED confidence of
+// its output element, given the evidence-confidence of the inputs.
+fn epinet_output_conf(input_conf: f64) -> f64 with Alloc, Mut, Div, Panic {
+    var layer = epi_dense_new(2, 1, epi_act_none())
+    epi_dense_set_weight(&!layer, 0, 0, 0.5, 0.0, 1.0)
+    epi_dense_set_weight(&!layer, 1, 0, 0.5, 0.0, 1.0)
+    var input = etd_alloc(1, 2)
+    etd_set(&!input, 0, 0, 1.0, 0.05, input_conf)
+    etd_set(&!input, 0, 1, 1.0, 0.05, input_conf)
+    var out = epi_dense_forward(&layer, &input)
+    let c = etd_conf(&out, 0, 0)
+    epi_dense_free(&!layer); etd_free(&!input); etd_free(&!out)
+    c
+}
+
+fn main() with IO, Alloc, Mut, Div, Panic, Epistemic {
+    let thr = ashp_vanco_threshold()
+
+    // Confident evidence (input conf 1.0) → propagated conf ≈ 0.96 ≥ 0.82.
+    let c_hi = epinet_output_conf(1.0)
+    if epi_runtime_certified(c_hi, thr) {
+        let d = prescribe_vanco_dose()
+        println(d)
+        println("NET_PRESCRIBE_CERTIFIED")
+    } else {
+        println("NET_ABSTAIN")
+    }
+
+    // Weak evidence (input conf 0.80) → propagated conf ≈ 0.77 < 0.82.
+    let c_lo = epinet_output_conf(0.80)
+    if epi_runtime_certified(c_lo, thr) {
+        println("NET_PRESCRIBE_CERTIFIED")
+    } else {
+        println("NET_ABSTAIN_LOW_CONFIDENCE")
+    }
+
+    println("DOSE_FROM_EPINET_PASS")
+}

@@ -47,8 +47,10 @@ run_pass tests/run-pass/epi_tensor_capacity_gt256.sio EPI_CAPACITY_512_PASS
 echo "── the typed refusal ──"
 run_pass     tests/run-pass/dose_certify_accept.sio     DOSE_CERTIFY_ACCEPT_PASS
 compile_fail tests/compile-fail/dose_contract_bypass.sio "EpistemicComplete violation"
+echo "── the wiring (dragon's propagated confidence drives the refusal) ──"
+run_pass     tests/run-pass/dose_from_epinet.sio        DOSE_FROM_EPINET_PASS
 
 rm -rf "$TMP"
 echo ""
 if [[ $fails -ne 0 ]]; then echo "epistemic_tensor_dyn_gate: FAIL ($fails)"; exit 1; fi
-echo "epistemic_tensor_dyn_gate: PASS (5/5)"
+echo "epistemic_tensor_dyn_gate: PASS (6/6)"
