@@ -2460,7 +2460,7 @@ fn checker_check_stmt_bridge(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Pa
 
 fn checker_check_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     match s.kind {
-        StmtLet => checker_check_stmt_bridge(c, s)
+        StmtLet => checker_check_let_stmt_inplace(c, s)
         StmtVar => checker_check_stmt_bridge(c, s)
         StmtExpr => checker_check_expr_stmt_inplace(c, s)
         StmtAssign => checker_check_stmt_bridge(c, s)
@@ -2514,6 +2514,180 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         (*c).expr_depth = (*c).expr_depth - 1
     }
     result
+}
+
+// ============================================================
+// G1: *mut StmtLet spine — converts the let-statement check path off the
+// by-value Checker copies (the 8MB SRET frames that crash `let x = 1` at 8MB).
+// bin/souc UNTOUCHED. Mirrors the by-value check_let_stmt (12208) faithfully.
+// ============================================================
+
+// *mut const-int bind helper (mirrors const_int_bind_value @6389 = raw with known=1).
+fn checker_const_int_bind_value_inplace(c: *mut Checker, name: Name, value: i64) with Mut, Div, Panic {
+    checker_const_int_bind_raw_inplace(c, name, 1, value)
+}
+
+// *mut transcription of eval_const_int_expr (8407) — avoids the by-value Checker
+// parameter (an 8MB frame hazard) by reading const-ints through *mut.
+fn checker_eval_const_int_expr_mut(c: *mut Checker, e: Expr) -> (i64, i64) with Mut, Panic, Div, Alloc {
+    match e.kind {
+        ExprIntLit => (1, e.int_val)
+        ExprIdent => {
+            let slot = checker_const_int_lookup_mut(c, e.name)
+            if slot.0 != 0 {
+                (slot.1, slot.2)
+            } else {
+                (0, 0)
+            }
+        }
+        ExprBinary => {
+            let l = checker_eval_const_int_expr_mut(c, *e.left)
+            let r = checker_eval_const_int_expr_mut(c, *e.right)
+            if l.0 != 0 && r.0 != 0 {
+                eval_const_int_binop(e.op, l.1, r.1)
+            } else {
+                (0, 0)
+            }
+        }
+        _ => (0, 0)
+    }
+}
+
+fn checker_eval_const_int_opt_expr_mut(c: *mut Checker, opt: Option<Box<Expr> >) -> (i64, i64) with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => checker_eval_const_int_expr_mut(c, *e)
+        None => (0, 0)
+    }
+}
+
+// *mut transcription of lower_opt_type (8925) — wraps the existing
+// checker_lower_type_expr_mut (1031).
+fn checker_lower_opt_type_inplace(c: *mut Checker, opt: Option<Box<TypeExpr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(te) => checker_lower_type_expr_mut(c, *te)
+        None => ty_unknown()
+    }
+}
+
+// *mut transcription of check_refinement_literal (12312). Reads refinements via
+// (*c); emits E042 through checker_report_error_at_inplace. Replicates the final
+// last_literal_kind = 0 reset (12338) so downstream stmts see clean state.
+fn checker_check_refinement_literal_inplace(c: *mut Checker, span: Span, ty: TypeEntry) with Mut, Panic, Div, IO {
+    if ty.refinement_id < 0 || ty.refinement_id >= 128 {
+        return
+    }
+    let rt = (*c).refinements.entries[ty.refinement_id as usize]
+    if (*c).last_literal_kind == 1 {
+        let result = refine_static_check_int_literal(rt.predicate, (*c).last_literal_int)
+        if result == refine_static_result_proved() {
+            (*c).refine_static_proved = (*c).refine_static_proved + 1
+        } else {
+            (*c).refine_violations = (*c).refine_violations + 1
+            checker_report_error_at_inplace(c, span, 42, 0, 0, 0)
+        }
+    } else if (*c).last_literal_kind == 2 {
+        let result = refine_static_check_float_literal(rt.predicate, (*c).last_literal_float)
+        if result == refine_static_result_proved() {
+            (*c).refine_static_proved = (*c).refine_static_proved + 1
+        } else {
+            (*c).refine_violations = (*c).refine_violations + 1
+            checker_report_error_at_inplace(c, span, 42, 0, 0, 0)
+        }
+    }
+    (*c).last_literal_kind = 0
+}
+
+// Predicate: does this binding-init expr need the epistemic special handling in
+// check_binding_init_expr (Contest / lift_knowledge / AuditAttach / Path-TyNamed)?
+fn checker_binding_init_is_special(e: Expr, ann_ty: TypeEntry) -> bool with Panic, Div {
+    if e.kind == ExprKind::ExprContest {
+        return true
+    }
+    if e.kind == ExprKind::ExprCall && call_expr_is_builtin_lift_knowledge(e.left) {
+        return true
+    }
+    if e.kind == ExprKind::ExprAuditAttach {
+        return true
+    }
+    if e.kind == ExprKind::ExprPath && ann_ty.kind == TypeKind::TyNamed {
+        return true
+    }
+    false
+}
+
+// Isolated by-value leaf for the epistemic special cases. ONE by-value call site
+// (the existing check_binding_init_expr method, which handles all four branches
+// internally) → exactly one 8MB SRET buffer, kept OUT of the hot frame. Never
+// reached by `let x = 1` (IntLit is not special), so it does not affect the gate.
+fn checker_check_binding_init_expr_bridge(c: *mut Checker, opt: Option<Box<Expr> >, ann_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let pair = (*c).check_binding_init_expr(opt, ann_ty)
+    checker_store_from_value(c, pair.0)
+    pair.1
+}
+
+// *mut binding-init dispatch: simple exprs run on the *mut expr spine (which
+// handles IntLit inline and sets last_literal_*); epistemic cases bridge.
+fn checker_check_binding_init_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >, ann_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(e) => {
+            if checker_binding_init_is_special(*e, ann_ty) {
+                checker_check_binding_init_expr_bridge(c, opt, ann_ty)
+            } else {
+                checker_check_expr_inplace(c, *e)
+            }
+        }
+        None => ty_unit()
+    }
+}
+
+// *mut transcription of check_let_stmt (12208). No inline by-value Checker call:
+// every helper is *mut or an isolated leaf, so the hot frame stays KB-scale.
+fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    (*c).last_literal_kind = 0  // reset before checking init expr
+    let ann_ty = checker_lower_opt_type_inplace(c, s.ty)
+    let init_ty = checker_check_binding_init_expr_inplace(c, s.expr, ann_ty)
+    // Determine binding type: annotation if present, else init type
+    var bind_ty = init_ty
+    if ann_ty.kind != TypeKind::TyUnknown {
+        // Integer literal narrowing: literal 5 (i64) is compatible with i32/i8 annotations
+        let int_lit_narrow = (*c).last_literal_kind == 1
+            && init_ty.kind == TypeKind::TyI64
+            && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
+        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
+            checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
+        }
+        if ann_ty.kind == init_ty.kind
+            && (((ann_ty.kind == TypeKind::TyContest) && ann_ty.epistemic_meta_id >= 0)
+                || ((ann_ty.kind == TypeKind::TyRobust) && ann_ty.robustness_level_id >= 0 && ann_ty.robustness_scope_id >= 0)
+                || ann_ty.kind == TypeKind::TyValidated
+                || ann_ty.kind == TypeKind::TyAdmissible
+                || ann_ty.kind == TypeKind::TyDeferred
+                || ann_ty.kind == TypeKind::TyAcquisitionPlan
+                || ann_ty.kind == TypeKind::TyRecoursePlan
+                || ann_ty.kind == TypeKind::TyTransitionPlan
+                || ann_ty.kind == TypeKind::TyObservedTransition
+                || ann_ty.kind == TypeKind::TyRollbackCertificate
+                || ann_ty.kind == TypeKind::TyAlternativeSet
+                || ann_ty.kind == TypeKind::TyAlternativeOption) {
+            bind_ty = init_ty
+        } else {
+            bind_ty = ann_ty
+        }
+    }
+    // Validate refinement predicate on literal initializers
+    checker_check_refinement_literal_inplace(c, s.span, bind_ty)
+    let const_pair = checker_eval_const_int_opt_expr_mut(c, s.expr)
+    let cur_env = (*c).env
+    (*c).env = cur_env.bind(s.name, bind_ty, false)
+    if const_pair.0 != 0 {
+        checker_const_int_bind_value_inplace(c, s.name, const_pair.1)
+    } else {
+        checker_const_int_bind_unknown_inplace(c, s.name)
+    }
+    // Track variable for borrow checking (linear if struct is declared linear)
+    let lin = checker_is_linear_type_inplace(c, bind_ty)
+    (*c).borrows = (*c).borrows.track(s.name, lin)
+    ty_unit()
 }
 
 fn checker_check_items_inner_return_error_count_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
