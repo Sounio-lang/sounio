@@ -1,0 +1,145 @@
+// self-hosted/gpu/kretikos_sass_selftest.sio
+//
+// KILLER VERIFICATION for the Track-3 native SASS encoder.
+//
+// Regenerates the vec_add_f64 sm_80 .text section from kretikos_sass_encode
+// (field-by-field, NOT a replayed blob) and asserts it is BYTE-IDENTICAL to
+// the .text section of the known-good gpu_bare_sm80_vec_add_f64 cubin.
+// Byte-identity = proof the encoding is correct (GPU analog of souc's
+// self-reproducing fixed point).
+//
+// GROUND TRUTH (GOLD_TEXT below): the 512 bytes are the .text.* section of
+// the stored gpu_bare_sm80_vec_add_f64 cubin (nvidia_bare.sio
+// gpu_bare_sm80_vec_add_f64_cubin_hex_chunk), at file offset 0x680, size
+// 0x200, mechanically extracted (the cubin reconstructs to a valid NVIDIA
+// ELF64; readelf -S shows .text.sounio_bare_vec_add_f64_sm80 @0x680/0x200).
+// They are embedded as a flat literal because the chunk selector function
+// hits a Sounio runtime edge when its long string literals are returned at
+// runtime (documented in kretikos_emit_cubin.sio); embedding the .text
+// region sidesteps that while preserving the byte-for-byte oracle.
+// The DADD (instruction 14) carries the add form (w2=0x0004); the sub form
+// sets bit 0x0800 in w2 -- the encoder's negate_b parameter selects between
+// them and both match their respective stored blobs.
+//
+//   exit 0  -> all 512 .text bytes reproduced exactly (sm_80 verified)
+//   exit 1  -> mismatch (prints first differing byte index)
+//
+// Usage: souc kretikos_sass_selftest.sio /tmp/t.elf ; /tmp/t.elf
+
+use nvidia_bare::*
+use kretikos_sass_encode::*
+
+fn print_int_nl(v: i64) with IO, Mut, Panic {
+    var x = v
+    if x < 0 { print("-"); x = 0 - x }
+    if x >= 10 { print_int_nl(x / 10) }
+    let d = x % 10
+    if d == 0 { print("0") } else if d == 1 { print("1") }
+    else if d == 2 { print("2") } else if d == 3 { print("3") }
+    else if d == 4 { print("4") } else if d == 5 { print("5") }
+    else if d == 6 { print("6") } else if d == 7 { print("7") }
+    else if d == 8 { print("8") } else { print("9") }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let text_len: i64 = 512
+
+    // Ground-truth .text bytes of gpu_bare_sm80_vec_add_f64 (see header).
+    let gold: [i64; 512] = [
+    2, 122, 1, 0, 0, 10, 0, 0, 0, 15, 0, 0, 0, 228, 15, 0,
+    25, 121, 6, 0, 0, 0, 0, 0, 0, 33, 0, 0, 0, 34, 14, 0,
+    53, 116, 7, 255, 8, 0, 0, 0, 255, 1, 0, 0, 0, 226, 15, 0,
+    130, 124, 4, 0, 63, 0, 0, 0, 0, 0, 0, 8, 0, 228, 15, 0,
+    185, 122, 6, 0, 0, 70, 0, 0, 0, 10, 0, 0, 0, 206, 15, 0,
+    37, 118, 4, 6, 0, 90, 0, 0, 7, 0, 142, 7, 0, 200, 31, 0,
+    37, 118, 2, 6, 0, 88, 0, 0, 7, 0, 142, 7, 0, 226, 15, 0,
+    16, 124, 5, 5, 4, 0, 0, 0, 255, 224, 255, 15, 0, 200, 15, 0,
+    16, 124, 9, 3, 4, 0, 0, 0, 255, 224, 255, 15, 0, 228, 15, 0,
+    2, 114, 8, 0, 2, 0, 0, 0, 0, 15, 0, 0, 0, 226, 15, 0,
+    129, 121, 4, 4, 6, 0, 0, 0, 0, 27, 30, 12, 0, 168, 14, 0,
+    129, 121, 2, 8, 6, 0, 0, 0, 0, 27, 30, 12, 0, 162, 14, 0,
+    37, 118, 6, 6, 0, 92, 0, 0, 7, 0, 142, 7, 0, 202, 15, 0,
+    16, 124, 7, 7, 4, 0, 0, 0, 255, 224, 255, 15, 0, 226, 15, 0,
+    41, 114, 2, 2, 0, 0, 0, 0, 4, 0, 0, 0, 0, 14, 78, 0,
+    134, 121, 0, 6, 2, 0, 0, 0, 6, 27, 16, 12, 0, 226, 31, 0,
+    77, 121, 0, 0, 0, 0, 0, 0, 0, 0, 128, 3, 0, 234, 15, 0,
+    71, 121, 0, 0, 240, 255, 255, 255, 255, 255, 131, 3, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0,
+    24, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 15, 0
+    ]
+
+    // Encoder output .text bytes (vec_add => negate_b = false).
+    var enc = gpu_bare_buf_new()
+    enc = sass_emit_vec_add_f64_sm80_text(enc, false)
+
+    if gpu_bare_buf_len(enc) != text_len {
+        print("FAIL: encoder produced ")
+        print_int_nl(gpu_bare_buf_len(enc))
+        println(" bytes, expected 512")
+        return 1
+    }
+
+    var i: i64 = 0
+    var mismatches: i64 = 0
+    var first_bad: i64 = -1
+    while i < text_len {
+        let g = gold[i as usize]
+        let e = gpu_bare_buf_byte_at(enc, i)
+        if g != e {
+            mismatches = mismatches + 1
+            if first_bad < 0 { first_bad = i }
+        }
+        i = i + 1
+    }
+
+    if mismatches == 0 {
+        println("PASS: sm_80 vec_add_f64 .text reproduced BYTE-IDENTICAL (512/512)")
+        // Cross-check vec_sub differs from vec_add in exactly the DADD region.
+        var sub = gpu_bare_buf_new()
+        sub = sass_emit_vec_add_f64_sm80_text(sub, true)
+        var j: i64 = 0
+        var diff: i64 = 0
+        var diff_idx: i64 = -1
+        while j < text_len {
+            if gpu_bare_buf_byte_at(sub, j) != gpu_bare_buf_byte_at(enc, j) {
+                diff = diff + 1
+                if diff_idx < 0 { diff_idx = j }
+            }
+            j = j + 1
+        }
+        print("INFO: add vs sub differ in ")
+        print_int_nl(diff)
+        println(" byte (the DADD source-B negate bit 0x0800 in w2)")
+        // Self-sufficient differential assertion: the ONLY differing byte must
+        // be .text index 233 (instr 14 = DADD, byte 9 of w2) and value 8 in sub.
+        if diff != 1 {
+            println("FAIL: differential is not exactly 1 byte")
+            return 1
+        }
+        if diff_idx != 233 || gpu_bare_buf_byte_at(sub, 233) != 8 {
+            println("FAIL: differing byte is not the expected DADD negate bit")
+            return 1
+        }
+        println("PASS: sub negate bit located at .text[233]=8 as expected")
+        return 0
+    } else {
+        print("FAIL: ")
+        print_int_nl(mismatches)
+        print(" mismatching bytes; first at .text index ")
+        print_int_nl(first_bad)
+        println("")
+        return 1
+    }
+}

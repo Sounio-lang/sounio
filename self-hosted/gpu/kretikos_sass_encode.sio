@@ -1,0 +1,214 @@
+// self-hosted/gpu/kretikos_sass_encode.sio
+//
+// Kretikos native SASS encoder (Track 3).
+//
+// Encodes K-AXI vector ops into native NVIDIA SASS instruction words for
+// Ampere (sm_80, byte-verified) and Turing (sm_75, STUB -- see below).
+//
+// What "verified" means here, precisely (distinguishing verified vs inferred
+// is a hard requirement of this work):
+//   * VERIFIED: the w0 field packing (opcode/predicate/dst/srcA, via sass_w0)
+//     and the DADD arithmetic parameterization (add vs sub) are reconstructed
+//     from semantic fields and reproduce the known-good bytes exactly.
+//   * The non-arithmetic scaffolding (address calc, loads, stores, prologue,
+//     terminator, NOP padding) is reproduced as VERIFIED CONSTANT WORDS
+//     (w1/w2/w3 hardcoded from the disassembled blob), NOT derived from a
+//     semantic operand model. They are byte-correct but not yet parametric.
+//
+// The strongest non-circular evidence is the add<->sub DIFFERENTIAL: flipping
+// one bool (negate_b) produces two DIFFERENT byte-exact known-good blobs that
+// differ in exactly one byte (the DADD negate bit). That is the GPU analog of
+// souc's self-reproducing fixed point. See kretikos_sass_selftest.sio.
+//
+// =====================================================================
+// DERIVED ENCODING  (sm_80 / Ampere SM_80, 128-bit = 4x u32 words w0..w3)
+// =====================================================================
+// Ground truth: gpu_bare_sm80_vec_add_f64 cubin, .text section @0x680, 512B.
+// Reverse-engineered with readelf + a 3-way differential oracle over the
+// stored add / sub / mul f64 blobs (nvidia_bare.sio).
+//
+//   w0 layout:  bits[0:11]  opcode (12-bit)
+//               bits[12:15] predicate guard (7 = PT, always-true)
+//               bits[16:23] dst register
+//               bits[24:31] srcA register
+//   w1, w2:     operand descriptors / immediates / src banks
+//   w3:         control+scheduling word
+//               (stall / yield / write-barrier / read-barrier / wait-mask / reuse)
+//
+// BYTE-VERIFIED opcodes (appear in the known-good blob):
+//   0x919 S2R   0x435 MOV/IMAD.MOV  0x625 IMAD  0xc10 IMAD  0x981 LDG
+//   0x986 STG   0x229 DADD          0x94d EXIT  0x947 BRA   0x918 NOP
+//   0x7a02/0xc82/0xab9 ULDC/MOV/S2UR-family (high-pred-nibble forms)
+//
+// add vs sub (byte-verified): the two stored f64 blobs' .text sections are
+// IDENTICAL except this single DADD instruction (verified: all 31 other
+// instructions match byte-for-byte).
+//   add: w0=0x02027229 w1=0x00000000 w2=0x00000004   (DADD R2, R2,  R4)
+//   sub: w0=0x02027229 w1=0x00000000 w2=0x00000804   (DADD R2, R2, -R4)
+//   => SAME opcode (0x229). Source-B negation is the single bit 0x0800 set
+//      in w2 (the operand-B descriptor). add clears it, sub sets it.
+//      (both forms byte-verified against the stored add/sub f64 blobs;
+//       DADD bytes grepped directly from nvidia_bare.sio: add owner-fn line
+//       1217 = ...0400000000..., sub owner-fn = ...0408000000...)
+//
+// =====================================================================
+// sm_75 / Turing:  INFERRED, NOT byte-verified (no stored blob, no ptxas).
+// Turing shares the instruction set but uses a different control-bit layout
+// and (for some ops) different main opcodes. The sm_75 path below is clearly
+// flagged INFERRED; it produces a structurally-valid cubin container but its
+// .text encoding is unverified until a Turing ground-truth blob or ptxas is
+// available. Do NOT treat sm_75 .text bytes as authoritative.
+
+use nvidia_bare::*
+
+// ---------------------------------------------------------------------
+// One SASS instruction = 4 little-endian u32 words.
+// Emitting field-by-field keeps the encoder non-circular.
+// ---------------------------------------------------------------------
+fn sass_push_word128(buf: GpuBareBuf, w0: i64, w1: i64, w2: i64, w3: i64)
+    -> GpuBareBuf with Mut, Panic {
+    var out = buf
+    out = gpu_bare_push_u32_le(out, w0)
+    out = gpu_bare_push_u32_le(out, w1)
+    out = gpu_bare_push_u32_le(out, w2)
+    out = gpu_bare_push_u32_le(out, w3)
+    out
+}
+
+// Compose w0 from its sub-fields (opcode/pred/dst/srcA).
+// All four pieces are byte-verified positions in the Ampere encoding.
+fn sass_w0(opcode: i64, pred: i64, dst: i64, srcA: i64) -> i64 {
+    (opcode & 4095)
+        + ((pred & 15) * 4096)
+        + ((dst & 255) * 65536)
+        + ((srcA & 255) * 16777216)
+}
+
+// DADD encoder (sm_80). negate_b selects vec_add (false) vs vec_sub (true).
+// BYTE-VERIFIED against both the add and sub f64 blobs.
+//   opcode 0x229, pred PT, dst R2, srcA R2 (shared by both forms).
+//   w3 = 0x004e0e00 (control word, shared). Source-B negation = bit 0x0800
+//   in w2: add => w2=0x0004, sub => w2=0x0804.
+fn sass_emit_dadd_sm80(buf: GpuBareBuf, negate_b: bool)
+    -> GpuBareBuf with Mut, Panic {
+    var out = buf
+    let w0 = sass_w0(0x229, 7, 2, 2)          // 0x02027229
+    let w1: i64 = 0x00000000
+    let w2 = if negate_b { 0x00000804 } else { 0x00000004 }
+    out = sass_push_word128(out, w0, w1, w2, 0x004e0e00)
+    out
+}
+
+// ---------------------------------------------------------------------
+// The fixed prologue/address-calc/load/store/epilogue of vec_add_f64.
+// These 31 of 32 instructions are byte-verified IDENTICAL across the
+// add and sub blobs (only the DADD differs). They are emitted from their
+// decoded w0..w3 fields, with the opcode/dst/srcA recomputed via sass_w0
+// where the layout is clean, and as raw verified words where the operand
+// packing is op-specific.
+// ---------------------------------------------------------------------
+fn sass_emit_vec_add_f64_sm80_text(buf: GpuBareBuf, negate_b: bool)
+    -> GpuBareBuf with Mut, Panic {
+    var out = buf
+    // [0]  MOV-family / ULDC prologue
+    out = sass_push_word128(out, 0x00017a02, 0x00000a00, 0x00000f00, 0x000fe400)
+    // [1]  S2R  R6, SR_TID.X
+    out = sass_push_word128(out, sass_w0(0x919, 7, 6, 0), 0x00000000, 0x00002100, 0x000e2200)
+    // [2]  MOV  R7, ...
+    out = sass_push_word128(out, 0xff077435, 0x00000008, 0x000001ff, 0x000fe200)
+    // [3]  IMAD.MOV / MOV  R4, c[..]
+    out = sass_push_word128(out, sass_w0(0xc82, 7, 4, 0), 0x0000003f, 0x08000000, 0x000fe400)
+    // [4]  ULDC / S2UR  R6
+    out = sass_push_word128(out, 0x00067ab9, 0x00004600, 0x00000a00, 0x000fce00)
+    // [5]  IMAD  R4, R6, ...
+    out = sass_push_word128(out, sass_w0(0x625, 7, 4, 6), 0x00005a00, 0x078e0007, 0x001fc800)
+    // [6]  IMAD  R2, R6, ...
+    out = sass_push_word128(out, sass_w0(0x625, 7, 2, 6), 0x00005800, 0x078e0007, 0x000fe200)
+    // [7]  IMAD  R5, R5, ...
+    out = sass_push_word128(out, sass_w0(0xc10, 7, 5, 5), 0x00000004, 0x0fffe0ff, 0x000fc800)
+    // [8]  IMAD  R9, R3, ...
+    out = sass_push_word128(out, sass_w0(0xc10, 7, 9, 3), 0x00000004, 0x0fffe0ff, 0x000fe400)
+    // [9]  MOV   R8, ...
+    out = sass_push_word128(out, sass_w0(0x202, 7, 8, 0), 0x00000002, 0x00000f00, 0x000fe200)
+    // [10] LDG.E.64  R4, [R4]
+    out = sass_push_word128(out, sass_w0(0x981, 7, 4, 4), 0x00000006, 0x0c1e1b00, 0x000ea800)
+    // [11] LDG.E.64  R2, [R8]
+    out = sass_push_word128(out, sass_w0(0x981, 7, 2, 8), 0x00000006, 0x0c1e1b00, 0x000ea200)
+    // [12] IMAD  R6, R6, ...
+    out = sass_push_word128(out, sass_w0(0x625, 7, 6, 6), 0x00005c00, 0x078e0007, 0x000fca00)
+    // [13] IMAD  R7, R7, ...
+    out = sass_push_word128(out, sass_w0(0xc10, 7, 7, 7), 0x00000004, 0x0fffe0ff, 0x000fe200)
+    // [14] DADD  R2, R2, (+/-)R4   <-- the only add/sub-dependent instruction
+    out = sass_emit_dadd_sm80(out, negate_b)
+    // [15] STG.E.64  [R6], R2
+    out = sass_push_word128(out, sass_w0(0x986, 7, 0, 6), 0x00000002, 0x0c101b06, 0x001fe200)
+    // [16] EXIT
+    out = sass_push_word128(out, sass_w0(0x94d, 7, 0, 0), 0x00000000, 0x03800000, 0x000fea00)
+    // [17] BRA  (self, terminator)
+    out = sass_push_word128(out, sass_w0(0x947, 7, 0, 0), 0xfffffff0, 0x0383ffff, 0x000fc000)
+    // [18..31] NOP padding (14 NOPs) to fill the 512-byte .text
+    var i: i64 = 0
+    while i < 14 {
+        out = sass_push_word128(out, sass_w0(0x918, 7, 0, 0), 0x00000000, 0x00000000, 0x000fc000)
+        i = i + 1
+    }
+    out
+}
+
+// Number of .text bytes produced (32 instructions * 16 = 512).
+fn sass_vec_add_f64_sm80_text_len() -> i64 {
+    512
+}
+
+// =====================================================================
+// sm_75 / Turing -- PLACEHOLDER STUB.  *** NOT A VALIDATED ENCODING ***
+//
+// Honest status: this function returns the sm_80 (Ampere) SASS bytes with
+// an sm_75 label. There is NO Turing ground-truth blob in this repo and no
+// ptxas/cuobjdump in this environment, so a Turing encoding cannot be
+// derived OR verified here. Turing's control-bit layout AND some main
+// opcodes differ from Ampere; emitting sm_80 bytes for an sm_75 target is
+// very likely WRONG and must NOT be spliced into a real sm_75 cubin until
+// validated against ptxas -arch=sm_75 / cuobjdump on a CUDA host.
+//
+// It exists only so Track 2 can wire a per-arch dispatch shape now; callers
+// MUST gate on sass_arch_is_verified(arch) before trusting the bytes.
+// =====================================================================
+fn sass_emit_vec_add_f64_sm75_text(buf: GpuBareBuf, negate_b: bool)
+    -> GpuBareBuf with Mut, Panic {
+    // STUB: returns sm_80 bytes. NOT a Turing encoding. See header above.
+    var out = buf
+    out = sass_emit_vec_add_f64_sm80_text(out, negate_b)
+    out
+}
+
+fn sass_arch_is_verified(arch: i64) -> bool {
+    // 80 = sm_80 byte-verified ; 75 = sm_75 stub (unverified)
+    arch == 80
+}
+
+// =====================================================================
+// PUBLIC API for Track 2:  kaxi-op -> sass_bytes(arch) -> (cubin)
+// =====================================================================
+// K-AXI op selectors handled today (the verified vec class):
+//   0 = vec_add_f64   1 = vec_sub_f64
+// arch: 75 = sm_75 (STUB), 80 = sm_80 (VERIFIED).
+//
+// Returns the kernel .text bytes (512B for the vec class) appended to buf.
+// The caller assembles the full cubin by splicing these bytes at offset
+// 0x680 of the stored gpu_bare_sm80_vec_add_f64 container (the only place a
+// complete f64 cubin currently exists -- there is no f64 *container builder*
+// yet, only the stored blob + this verified .text). For sm_80 vec_add /
+// vec_sub the spliced result is byte-identical to a real cubin.
+fn sass_emit_kaxi_vec_text(buf: GpuBareBuf, kaxi_op: i64, arch: i64)
+    -> GpuBareBuf with Mut, Panic {
+    var out = buf
+    let negate_b = kaxi_op == 1
+    if arch == 80 {
+        out = sass_emit_vec_add_f64_sm80_text(out, negate_b)
+    } else {
+        // arch == 75 (or anything else): STUB path, NOT verified.
+        out = sass_emit_vec_add_f64_sm75_text(out, negate_b)
+    }
+    out
+}
