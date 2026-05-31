@@ -19,6 +19,28 @@ as the routing completes."
 Branch `modular/move-codegen` (worktree `/workspace/sounio-move-codegen`, forked from
 `modular/mut-checker-refactor` @ `0e19f261a`). **Worktree is CLEAN — no edits made this session.**
 
+## ✅✅✅ G1 LANDED + COMMITTED (2026-05-31, next session) = `e1f99c7d` — `let x=1` --check rc=0
+
+The StmtLet path is now true `*mut`. **`fn main(){let x=1}` reaches `check: OK` rc=0 at 8MB (was
+rc=139).** One file (`self-hosted/check/check.sio`, +184), bin/souc UNTOUCHED, worktree clean.
+- New `*mut` fns (faithful transcriptions): `checker_check_let_stmt_inplace` (mirrors check_let_stmt
+  @12208; NO inline by-value Checker call — every helper is *mut or an isolated leaf);
+  `checker_check_binding_init_expr_inplace` + `_bridge` (simple inits → *mut expr spine which handles
+  IntLit inline & sets last_literal_*; the 4 epistemic special cases — Contest/lift_knowledge/
+  AuditAttach/Path-TyNamed — route through ONE isolated by-value leaf calling the EXISTING
+  check_binding_init_expr method = a single 8MB SRET site kept off the hot frame, never hit by `let x=1`);
+  `checker_lower_opt_type_inplace`; `checker_check_refinement_literal_inplace` (replicates the final
+  last_literal_kind=0 reset @12338); `checker_eval_const_int_{expr,opt_expr}_mut` (avoid eval_const_int_*'s
+  by-value Checker param via checker_const_int_lookup_mut); `checker_const_int_bind_value_inplace`.
+- `checker_check_stmt_inplace` StmtLet arm flipped `bridge` → `let_stmt_inplace`. StmtVar/StmtAssign
+  STAY on the bridge (out of G1 scope).
+- GATE (`ulimit -s 8192; mc.elf --check`): `fn main(){}` rc=0 ×5; `fn main(){let x=1}` **rc=139→rc=0
+  check: OK ×5**; NON-VACUITY PROVEN — `let x: bool = 1` → `error[E001] expected bool, got i64`
+  check:FAIL rc=1 (the spine genuinely type-checks); `let x: i64 = 1` → rc=0. bin/souc main.sio rc=0/0-err.
+- ⚠️ DRIVER IS `self-hosted/compiler/main.sio` (an Explore agent hallucinated `mc_main.sio`).
+- NEXT = G2 expr spine (Layer 2 of the recipe): ExprIdent/ExprBinary/ExprFieldAccess leaves, gating on
+  TAIL-position exprs (let-RHS + StmtVar/Assign stay vacuous behind the by-value bridge until converted).
+
 ## ✅✅ INCREMENT 1 LANDED + COMMITTED (2026-05-31, fresh session) — first `--check rc=0` BANKED
 
 The Gc+spine-entry frame-isolation increment is **done, gated, and committed** (no longer just a draft).
