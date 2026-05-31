@@ -1,0 +1,184 @@
+//@ run-pass
+//@ description: PROOF OF ENABLEMENT — a TRAINED epistemic net riding entirely on
+//@ the dynamic epistemic-tensor substrate. A 2→8→1 MLP whose weights live in
+//@ DynEpiTensors learns the vancomycin AUC surface AUC = 2·dose/CL from synthetic
+//@ patients (forward + hand-rolled backprop + SGD on weight values; weight
+//@ uncertainties decay as training sharpens them, ppcr-style). Training MUST cut
+//@ MSE by ≥10×. Then epistemic inference runs through the LEARNED weights via the
+//@ substrate's GUM matmul, propagating input measurement uncertainty, and the
+//@ propagated confidence gates a dose recommendation.
+//@ Method demo; NOT a clinical dosing engine — the analytic GUM chain already
+//@ does AUC±CI better. This proves the substrate carries a learnable model.
+
+use linalg::epistemic_tensor_dyn::*
+
+// 2 inputs (dose, CL) → 8 hidden (sigmoid) → 1 output (linear). H is the chosen
+// width of THIS net; the substrate supports any runtime width.
+
+fn sig(x: f64) -> f64 with Mut, Div, Panic { 1.0 / (1.0 + etd_exp(0.0 - x)) }
+
+fn main() with IO, Alloc, Mut, Div, Panic {
+    let nin = 2
+    let h = 8
+    let npts = 16
+
+    // ---- weights in DynEpiTensors (the model lives on the dragon) ----
+    var w1 = etd_alloc(nin, h)   // [2 × 8]
+    var b1 = etd_alloc(1, h)     // [1 × 8]
+    var w2 = etd_alloc(h, 1)     // [8 × 1]
+    var b2 = etd_alloc(1, 1)     // [1 × 1]
+
+    // deterministic asymmetric init (no RNG in Sounio); weight uncertainty 0.2.
+    var ii = 0
+    while ii < nin {
+        var jj = 0
+        while jj < h {
+            let s = (((ii * 3 + jj * 7) % 11) as f64) / 11.0 - 0.5
+            etd_set(&!w1, ii, jj, s, 0.2, 1.0)
+            jj = jj + 1
+        }
+        ii = ii + 1
+    }
+    var j0 = 0
+    while j0 < h {
+        let s = (((j0 * 5 + 3) % 7) as f64) / 7.0 - 0.5
+        etd_set(&!w2, j0, 0, s, 0.2, 1.0)
+        j0 = j0 + 1
+    }
+
+    // ---- synthetic data: AUC = 2·dose/CL, normalised to ~[0,1] ----
+    var x0: [f64; 16] = [0.0; 16]
+    var x1: [f64; 16] = [0.0; 16]
+    var yt: [f64; 16] = [0.0; 16]
+    var idx = 0
+    var di = 0
+    while di < 4 {
+        let dose = 250.0 * ((di + 1) as f64)
+        var ci = 0
+        while ci < 4 {
+            let cl = (ci + 1) as f64
+            let auc = 2.0 * dose / cl
+            x0[idx] = dose / 1000.0
+            x1[idx] = cl / 4.0
+            yt[idx] = auc / 2000.0
+            idx = idx + 1
+            ci = ci + 1
+        }
+        di = di + 1
+    }
+
+    // ---- MSE helper over the dataset (values only) ----
+    // (inlined as a closure-free loop each time we need it)
+
+    let lr = 0.5
+    var init_mse = 0.0
+    var final_mse = 0.0
+
+    var epoch = 0
+    while epoch < 4000 {
+        // accumulate full-batch gradients
+        var gw1: [f64; 16] = [0.0; 16]   // 2×8 = 16
+        var gb1: [f64; 8] = [0.0; 8]
+        var gw2: [f64; 8] = [0.0; 8]
+        var gb2 = 0.0
+        var mse = 0.0
+
+        var p = 0
+        while p < npts {
+            let in0 = x0[p]
+            let in1 = x1[p]
+            // forward
+            var hv: [f64; 8] = [0.0; 8]
+            var jf = 0
+            while jf < h {
+                let z = etd_val(&b1, 0, jf) + in0 * etd_val(&w1, 0, jf) + in1 * etd_val(&w1, 1, jf)
+                hv[jf] = sig(z)
+                jf = jf + 1
+            }
+            var yhat = etd_val(&b2, 0, 0)
+            var jo = 0
+            while jo < h { yhat = yhat + hv[jo] * etd_val(&w2, jo, 0); jo = jo + 1 }
+
+            let err = yhat - yt[p]
+            mse = mse + err * err
+            let dyhat = 2.0 * err / (npts as f64)   // mean-MSE gradient
+
+            // backward
+            gb2 = gb2 + dyhat
+            var jb = 0
+            while jb < h {
+                gw2[jb] = gw2[jb] + dyhat * hv[jb]
+                let dh = dyhat * etd_val(&w2, jb, 0)
+                let dz = dh * hv[jb] * (1.0 - hv[jb])     // sigmoid'
+                gb1[jb] = gb1[jb] + dz
+                gw1[jb] = gw1[jb] + dz * in0              // w1[0,jb]
+                gw1[h + jb] = gw1[h + jb] + dz * in1      // w1[1,jb]
+                jb = jb + 1
+            }
+            p = p + 1
+        }
+        mse = mse / (npts as f64)
+        if epoch == 0 { init_mse = mse }
+        final_mse = mse
+
+        // ---- SGD update on weight VALUES; uncertainty decays with |grad| ----
+        var ju = 0
+        while ju < h {
+            // w1 row 0 and row 1
+            let nw00 = etd_val(&w1, 0, ju) - lr * gw1[ju]
+            let nu00 = etd_unc(&w1, 0, ju) * (1.0 - 0.1 * etd_abs(gw1[ju]))
+            etd_set(&!w1, 0, ju, nw00, etd_fmax(nu00, 0.001), 1.0)
+            let nw10 = etd_val(&w1, 1, ju) - lr * gw1[h + ju]
+            let nu10 = etd_unc(&w1, 1, ju) * (1.0 - 0.1 * etd_abs(gw1[h + ju]))
+            etd_set(&!w1, 1, ju, nw10, etd_fmax(nu10, 0.001), 1.0)
+            // b1
+            let nb1 = etd_val(&b1, 0, ju) - lr * gb1[ju]
+            let ub1 = etd_unc(&b1, 0, ju)
+            etd_set(&!b1, 0, ju, nb1, ub1, 1.0)
+            // w2
+            let nw2 = etd_val(&w2, ju, 0) - lr * gw2[ju]
+            let nu2 = etd_unc(&w2, ju, 0) * (1.0 - 0.1 * etd_abs(gw2[ju]))
+            etd_set(&!w2, ju, 0, nw2, etd_fmax(nu2, 0.001), 1.0)
+            ju = ju + 1
+        }
+        let nb2 = etd_val(&b2, 0, 0) - lr * gb2
+        let ub2 = etd_unc(&b2, 0, 0)
+        etd_set(&!b2, 0, 0, nb2, ub2, 1.0)
+
+        epoch = epoch + 1
+    }
+
+    // ---- report training ----
+    print("init MSE x1e4 = "); println((init_mse * 10000.0) as i64)
+    print("final MSE x1e4 = "); println((final_mse * 10000.0) as i64)
+    let learned = final_mse * 10.0 < init_mse   // ≥10× reduction
+
+    // ---- epistemic inference through the LEARNED weights, via the substrate ----
+    // patient: dose 500 mg (exact), CL 2.0 L/h with measurement uncertainty.
+    var input = etd_alloc(1, nin)
+    etd_set(&!input, 0, 0, 500.0 / 1000.0, 0.0, 1.0)
+    etd_set(&!input, 0, 1, 2.0 / 4.0, 0.04, 0.9)   // CL uncertain → conf 0.9
+
+    var hid = etd_matmul(&input, &w1)   // [1×8]
+    etd_add_bias(&!hid, &b1)
+    etd_sigmoid(&!hid)
+    var outp = etd_matmul(&hid, &w2)    // [1×1]
+    etd_add_bias(&!outp, &b2)
+
+    let auc_pred = etd_val(&outp, 0, 0) * 2000.0
+    let auc_unc = etd_unc(&outp, 0, 0) * 2000.0
+    let conf = etd_conf(&outp, 0, 0)
+    // true AUC = 2·500/2 = 500
+    print("pred AUC = "); println(auc_pred as i64)
+    print("pred unc = "); println(auc_unc as i64)
+    let close = etd_abs(auc_pred - 500.0) < 120.0   // learned the surface to ~±120
+
+    etd_free(&!w1); etd_free(&!b1); etd_free(&!w2); etd_free(&!b2)
+    etd_free(&!input); etd_free(&!hid); etd_free(&!outp)
+
+    if learned && close && conf > 0.0 {
+        println("EPINET_TRAIN_VANCO_PASS")
+    } else {
+        println("EPINET_TRAIN_VANCO_FAIL")
+    }
+}

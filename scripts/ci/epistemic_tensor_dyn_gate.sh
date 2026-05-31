@@ -49,8 +49,10 @@ run_pass     tests/run-pass/dose_certify_accept.sio     DOSE_CERTIFY_ACCEPT_PASS
 compile_fail tests/compile-fail/dose_contract_bypass.sio "EpistemicComplete violation"
 echo "── the wiring (dragon's propagated confidence drives the refusal) ──"
 run_pass     tests/run-pass/dose_from_epinet.sio        DOSE_FROM_EPINET_PASS
+echo "── enablement: a TRAINED epistemic net on the substrate ──"
+run_pass     tests/run-pass/epinet_train_vanco.sio      EPINET_TRAIN_VANCO_PASS
 
 rm -rf "$TMP"
 echo ""
 if [[ $fails -ne 0 ]]; then echo "epistemic_tensor_dyn_gate: FAIL ($fails)"; exit 1; fi
-echo "epistemic_tensor_dyn_gate: PASS (6/6)"
+echo "epistemic_tensor_dyn_gate: PASS (7/7)"
