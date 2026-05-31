@@ -190,7 +190,8 @@ The exact field-plane bound `q311_plane_needs_4_colours` is the Madore base case
 `Qf × Qf`.  The ring homomorphism `phi311 : Qf → Real` (`E_mul311` in
 `SounioMoserSpindleQ311Real`) embeds the spindle into `Real × Real`; spindle edges have
 `dist² = 144` at the native `×12` integer scale (`MoserSpindleQ311.RealPlane.chi_R2_ge_4`).
-Rescaling the plane by `1/12` turns those into Euclidean unit edges, so χ(ℝ²) ≥ 4. -/
+Rescaling the plane by `1/12` turns those into Euclidean unit edges, so χ(ℝ²) ≥ 4.
+Showcase entry point: `MadoreSpindleVitrine`. -/
 
 #print axioms edges_unit
 #print axioms spindle_not_3_colourable

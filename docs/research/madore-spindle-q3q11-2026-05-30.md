@@ -1,8 +1,18 @@
-# Madore's Moser spindle over ℚ(√3,√11) — parametric multiquadratic framework (2026-05-30)
+# Madore's Moser spindle over ℚ(√3,√11) — parametric multiquadratic framework (2026-05-30/31)
 
-Mathlib-free Lean 4. Two new files, both `lake build`-green, no `sorry`/`sorryAx`.
+Mathlib-free Lean 4. Four files, all `lake build`-green, no `sorry`/`sorryAx`.
 
 ## What is proved
+
+### `formal/lean4/SounioMultiquadParam.lean` — parametric framework over `primes : List Nat`
+
+- `sqrtR : Nat → Real` (generic Newton root) + `sqrtR_sq` (`(√p)² = p`, `p ≥ 1`).
+- `radS`/`evalS` over `2^|S|` masks; `HasRadicals`/`IndepMultiquad`; base case `indep_base`.
+- `sqrt_new_not_in_Q` — generic ℚ-irrationality core (any non-square `m` ⇒ √m ∉ ℚ).
+- `Np_ne_zero` — generic degree-2 **domain core**: `a² − p·b² ≠ 0` for non-square `p`.
+- `indep_3_11` (degree 4, spindle basis `{1,√3,√11,√33}`) and `indep_3_5_11` (degree 8) —
+  proved by bridging to the existing `indep8`. The latter re-grounds the **χ ≥ 5 over ℚ(√3,√5,√11)**
+  line as the `S = [3,5,11]` instance (`SounioDeGreyChi5Param`).
 
 ### `formal/lean4/SounioMoserSpindleQ311.lean` — the headline (Madore's χ ≥ 4 line)
 
@@ -16,20 +26,30 @@ The Moser spindle is realised with **exact** coordinates in ℚ(√3,√11) (int
 - `q311_plane_needs_4_colours` — via the generic `UnitDistanceChromatic` reduction:
   **χ(ℚ(√3,√11)²) ≥ 4**, the base case of Madore (arXiv:1509.07023). Axioms `{propext, Quot.sound}`.
 
-χ(ℝ²) ≥ 4 is the intended corollary (each `Qf` point is a genuine real via the framework's
-`sqrtR`); the full `Real × Real` instance needs the ring homomorphism `φ : Qf → Real`
-(the `{3,11}` analogue of `E_sq4`) and is **not yet discharged** — noted explicitly, no overclaim.
+### `formal/lean4/SounioMoserSpindleQ311Real.lean` — **χ(ℝ²) ≥ 4 discharged**
 
-### `formal/lean4/SounioMultiquadParam.lean` — parametric framework over `primes : List Nat`
+- `phi311 : Qf → Real` via `alpha311 = alpha4(·,·,0,0) + alpha4(·,·,0,0)·√11`.
+- `E_mul311` / `phi311_mul` — ring homomorphism on the spindle field.
+- `dist2Real_emb` — squared distance commutes with embedding.
+- `chi_R2_ge_4` — `¬ Nonempty (PlaneColouring (Real × Real) unitReal144 3)` where
+  `unitReal144` means `dist² = 144` at the native ×12 integer scale.
+- **Reading:** rescaling the plane by `1/12` turns spindle edges into Euclidean unit edges
+  (`dist² = 1`); the chromatic lower bound is unchanged. A formal `dist² = 1` corollary is
+  optional follow-up (needs scalar-multiplication lemmas on the quotient reals).
 
-- `sqrtR : Nat → Real` (generic Newton root) + `sqrtR_sq` (`(√p)² = p`, `p ≥ 1`).
-- `radS`/`evalS` over `2^|S|` masks; `HasRadicals`/`IndepMultiquad`; base case `indep_base`.
-- `sqrt_new_not_in_Q` — generic ℚ-irrationality core (any non-square `m` ⇒ √m ∉ ℚ).
-- `Np_ne_zero` — generic degree-2 **domain core**: `a² − p·b² ≠ 0` for non-square `p`,
-  `(a,b) ≠ 0` (generalises `N5_ne_zero` to arbitrary `p`; kernel of the conjugate inverse).
-- `indep_3_11` (degree 4, the spindle basis `{1,√3,√11,√33}`) and `indep_3_5_11` (degree 8) —
-  proved by bridging to the existing `indep8`. The latter re-grounds the **χ ≥ 5 over ℚ(√3,√5,√11)**
-  line as the `S = [3,5,11]` instance of the framework.
+### `formal/lean4/MadoreSpindleVitrine.lean` — single-entry showcase
+
+Build-time manifest tying together `indep_3_11`, `spindle_not_3_colourable`,
+`q311_plane_needs_4_colours`, and `chi_R2_ge_4`. `lake build MadoreSpindleVitrine`.
+
+## Positioning vs de Grey (χ ≥ 5)
+
+| Line | Field | Degree | Vertices | Certificate |
+|------|-------|--------|----------|-------------|
+| **Madore** (this work) | ℚ(√3,√11) | 4 | 7 (Moser spindle) | `omega` + `decide` |
+| **de Grey** (prior) | ℚ(√3,√5,√11) | 8 | 529 (G₅₂₉) | souc_sat LRAT |
+
+Madore is the **minimal** multiquadratic base case; de Grey is the **sharpened** degree-8 line.
 
 ## Open obligation (honest scope)
 
@@ -38,11 +58,9 @@ obligation — *not* an axiom, *not* `sorry`. It is discharged for the **instant
 (`[]`, `[3,11]`, `[3,5,11]`). The unrestricted `∀S` proof (degree `2^|S|`) needs, Mathlib-free:
 (i) a squarefree-by-prime-factorisation lemma feeding `no_rat_sqrt` for arbitrary radicands
 `p·∏T`, and (ii) the recursive norm/conjugate inverse tower lifting `Np_ne_zero`/`Q35_inv` to all
-levels. These are recorded as the remaining research work; `Np_ne_zero` is the proven generic
-|S|=1 kernel.
+levels.
 
 ## Review
 
-`bin/llm-offload -t math-review -p xai` (Grok 4.1) on both files: **all proved statements [OK]**,
-the open obligation correctly identified, and "no overclaim" on the ℝ² reading. No bug caught.
-See `.claude/llm_offload_log.md` (2026-05-30 entry).
+`bin/llm-offload -t math-review -p xai` (Grok 4.1) on the Lean files: **proved statements [OK]**,
+open obligation correctly identified. See `.claude/llm_offload_log.md` (2026-05-30/31 entries).

@@ -251,6 +251,10 @@ lean_lib «SounioMoserSpindleQ311» where
 -- `lake build SounioMoserSpindleQ311Real`.
 lean_lib «SounioMoserSpindleQ311Real» where
 
+-- Single-entry showcase for Madore χ(ℝ²) ≥ 4 (indep_3_11 + spindle + field-plane + Real).
+-- Light import (no SAT certificate). `lake build MadoreSpindleVitrine`.
+lean_lib «MadoreSpindleVitrine» where
+
 -- G529 / de Grey χ≥5 on the parametric MultiquadField [3,5,11]: packages the degree-8 witness
 -- field, radS↔evalNum bridge, indep8 recovery, and q3511_plane_needs_5_colours (re-export of
 -- g529_field_plane_chi_ge_5). Heavy (pulls SounioDeGreyChi5Closed + G529 cert).
