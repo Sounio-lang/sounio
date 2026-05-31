@@ -2441,6 +2441,10 @@ fn arr_ty_hash_for_elem_type(alen: i64, esiz: i64, elem_ty: i64, elem_hash: i64)
     if elem_hash != 0 {
         if elem_ty == 6 || elem_ty == 7 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
         if elem_ty == 0 && st_find(elem_hash) >= 0 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
+        // Knowledge<T> element (kind=7, negative hash): preserve the element hash in
+        // the side table so `arr[i]` recovers its Knowledge type. The by-value
+        // struct-array machinery already sizes it via struct_like_nslots()==3.
+        if elem_ty == 0 && knowledge_hash_is(elem_hash) { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
     }
     return arr_ty_hash(alen, esiz, elem_ty)
 }
@@ -4807,6 +4811,24 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             if TK[p as usize] == 4 { SCAN_TY_ALEN = TV[p as usize]; p = p + 1 }
             if TK[p as usize] == 42 { p = p + 1 }
             SCAN_TY_HASH = arr_ty_hash_with_elem(SCAN_TY_ALEN, SCAN_TY_ESIZ, inner_ty, inner_hash)
+            SCAN_TY_NEXT = p
+            return
+        }
+        // Knowledge<T> element: `[Knowledge[f64]; N]` / `[Knowledge<f64>; N]`. Recurse
+        // scan_type so the kind=7 element hash is captured (the single-token path
+        // below only handles simple names + registered structs).
+        if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "Knowledge")
+           && (TK[(p + 1) as usize] == 41 || TK[(p + 1) as usize] == 23) {
+            scan_type(p)
+            let kelem_ty = SCAN_TY
+            let kelem_hash = SCAN_TY_HASH
+            p = SCAN_TY_NEXT
+            SCAN_TY = 8
+            SCAN_TY_ESIZ = 8
+            if TK[p as usize] == 27 { p = p + 1 }
+            if TK[p as usize] == 4 { SCAN_TY_ALEN = TV[p as usize]; p = p + 1 }
+            if TK[p as usize] == 42 { p = p + 1 }
+            SCAN_TY_HASH = arr_ty_hash_with_elem(SCAN_TY_ALEN, SCAN_TY_ESIZ, kelem_ty, kelem_hash)
             SCAN_TY_NEXT = p
             return
         }
@@ -18192,13 +18214,25 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 41 {
                 EP = EP + 1  // skip [
                 // Element type
-                let etns = TS[EP as usize]
-                let etne = TE[EP as usize]
-                let arr_elem_ty = type_name_kind(etns, etne)
+                var arr_elem_ty: i64 = 0
                 var arr_elem_hash: i64 = 0
-                if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
-                if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
-                EP = EP + 1  // skip element type
+                // Knowledge<T> element: scan the full type so the kind=7 element hash
+                // is captured (`[Knowledge[f64]; N]`); the single-token path below only
+                // handles simple names + registered structs.
+                if src_match(TS[EP as usize], TE[EP as usize] - TS[EP as usize], "Knowledge")
+                   && (TK[(EP + 1) as usize] == 41 || TK[(EP + 1) as usize] == 23) {
+                    scan_type(EP)
+                    arr_elem_ty = SCAN_TY
+                    arr_elem_hash = SCAN_TY_HASH
+                    EP = SCAN_TY_NEXT
+                } else {
+                    let etns = TS[EP as usize]
+                    let etne = TE[EP as usize]
+                    arr_elem_ty = type_name_kind(etns, etne)
+                    if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
+                    if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
+                    EP = EP + 1  // skip element type
+                }
                 if TK[EP as usize] == 27 { EP = EP + 1 }  // skip ;
                 arr_len = TV[EP as usize]
                 EP = EP + 1  // skip N
