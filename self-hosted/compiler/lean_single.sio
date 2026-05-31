@@ -4922,7 +4922,12 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                                                 ref_i = ref_i + 1
                                                             }
                                                             let ref_b = ref_idx * 10
-                                                            if ref_idx >= 0 && REF_TYPE_DATA[(ref_b + 0) as usize] != 0 {
+                                                            // Resolve the alias when it has a real target. A Knowledge<T>
+                                                            // alias (`type CrCl = Knowledge[f64]`) stores kind 0 with a
+                                                            // (negative) Knowledge hash, so the `kind != 0` guard alone
+                                                            // would drop it — leaving CrCl as the bare name hash and
+                                                            // triggering a spurious ty_eq mismatch (P0003) at every binding.
+                                                            if ref_idx >= 0 && (REF_TYPE_DATA[(ref_b + 0) as usize] != 0 || knowledge_hash_is(REF_TYPE_DATA[(ref_b + 1) as usize])) {
                                                                 SCAN_TY = REF_TYPE_DATA[(ref_b + 0) as usize]
                                                                 SCAN_TY_HASH = REF_TYPE_DATA[(ref_b + 1) as usize]
                                                                 if REF_TYPE_DATA[(ref_b + 2) as usize] == 1 {
@@ -24144,6 +24149,17 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         let rp_tok = FN_RET_TY_TOK[rp_i as usize]
         if rp_tok >= 0 {
             scan_type(rp_tok)
+            // Re-store the resolved return type ONLY for Knowledge<T>-alias returns
+            // (e.g. `-> DailyDose` where `type DailyDose = Knowledge[f64]`): these could
+            // not resolve at Pass-1 sig-scan time because the alias table was still
+            // empty, so FN_RET_HASH held the bare alias-name hash and every return/caller
+            // ty_eq mismatched (P0003). Narrowly guarded by knowledge_hash_is so non-alias
+            // returns keep their Pass-1 type verbatim (a broad re-store corrupted complex
+            // returns — e.g. Clifford multivectors — that Pass 1 had set correctly).
+            if knowledge_hash_is(SCAN_TY_HASH) {
+                FN_RET_TY[rp_i as usize] = SCAN_TY
+                FN_RET_HASH[rp_i as usize] = SCAN_TY_HASH
+            }
             // PR-10: store f64 metadata alongside integer predicates
             if SCAN_HAS_PRED == 1 {
                 FN_RET_HAS_PRED[rp_i as usize] = 1
