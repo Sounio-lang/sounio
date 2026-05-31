@@ -87,12 +87,24 @@ for src in $(ls "$ROOT_DIR"/tests/run-pass/*.sio 2>/dev/null | sort); do
   # Capture stdout; command substitution trims trailing newlines, matching how the
   # reference gate (ontology_typed_bridge_gate.sh) compares.
   if out="$(timeout "$TEST_TIMEOUT" "$elf" 2>"$TMP/$name.run.err")"; then
-    # Convention in this corpus: `expect-stdout` is the program's FINAL summary line
-    # (e.g. "ALL 12 TESTS PASSED"), printed after a multi-line report — OR, for
-    # single-line tests, the whole output. Match either. (out already has trailing
-    # newlines stripped by command substitution; last_line = text after final \n.)
-    last_line="${out##*$'\n'}"
-    if [ "$out" = "$expect" ] || [ "$last_line" = "$expect" ]; then
+    # Convention in this corpus: `expect-stdout` declares that the expected string
+    # appears as a complete output LINE — it may be the whole output, or one line
+    # among several (the contract line is not always last, e.g. closure_*_hof).
+    # souc's print() emits NO trailing newline, so some tests concatenate their
+    # whole report onto one line ending in the verdict (associator_field_pentagon,
+    # tac_compile_gate_pass) — for those (single-line only) accept a trailing
+    # suffix. Multi-line outputs must contain expect as an exact line, so a genuine
+    # FAIL (ptx_maxntid: "FAIL" vs want "PASS") is NOT masked. (out already has
+    # trailing newlines stripped by command substitution.)
+    matched=0
+    if [ "$out" = "$expect" ]; then
+      matched=1
+    elif printf '%s\n' "$out" | grep -Fxq -- "$expect"; then
+      matched=1                                   # expect is an exact \n-delimited line
+    elif [ "${out#*$'\n'}" = "$out" ]; then       # single-line output (no newline)
+      case "$out" in *"$expect") matched=1 ;; esac # ...ends with expect (no-newline quirk)
+    fi
+    if [ "$matched" -eq 1 ]; then
       printf '%s\t%s\n' "$name" "PASS" >> "$CUR"
       n_pass=$((n_pass + 1))
     else
