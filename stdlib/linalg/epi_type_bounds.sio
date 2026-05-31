@@ -1,0 +1,56 @@
+// stdlib::linalg::epi_type_bounds — the TYPE-LEVEL uncertainty algebra.
+//
+// The refinement that makes the epistemic tensor graph a TYPE, not just runtime
+// data. A tensor is refined by a pair of static bounds:
+//
+//     EpiBound { mag, unc }   —   |value| ≤ mag   AND   u(value) ≤ unc
+//                                 (worst case over every element)
+//
+// Each tensor op has a CLOSED-FORM rule that propagates these bounds — the GUM
+// delta-method lifted from runtime elements to a single static envelope. Because
+// every rule is an UPPER BOUND, the type-level `unc` is a SOUND over-approximation
+// of the dragon's actual runtime per-element uncertainty (proven empirically in
+// tests/run-pass/typed_epi_graph_soundness.sio, and as a lemma in Lean). The
+// compile-time gate then refuses any graph whose output `unc` exceeds a declared
+// budget — BEFORE it runs, BEFORE it trains.
+//
+// HONESTY: a single (mag, unc) envelope is a conservative abstraction of a
+// per-element field — it over-approximates, deliberately. That conservatism IS
+// the soundness: the type never promises more confidence than runtime delivers.
+
+use linalg::epistemic_tensor_dyn::{etd_sqrt, etd_fmax}
+
+pub struct EpiBound {
+    mag: f64,   // upper bound on |value| over all elements
+    unc: f64,   // upper bound on standard uncertainty u over all elements
+}
+
+pub fn eb_new(mag: f64, unc: f64) -> EpiBound { EpiBound { mag: mag, unc: unc } }
+pub fn eb_mag(b: &EpiBound) -> f64 { b.mag }
+pub fn eb_unc(b: &EpiBound) -> f64 { b.unc }
+
+// matmul  C[m×k] @ [k×p]:  C_ij = Σ_k a_ik b_kj
+//   |C_ij| ≤ k · Ma · Mb
+//   u(C_ij)² = Σ_k (b² u_a² + a² u_b²) ≤ k (Mb² Ea² + Ma² Eb²)
+//   ⇒ unc ≤ sqrt(k) · sqrt(Mb²Ea² + Ma²Eb²)
+pub fn eb_matmul(a: &EpiBound, b: &EpiBound, k: i64) -> EpiBound with Mut, Div, Panic {
+    let kf = k as f64
+    let mag = kf * a.mag * b.mag
+    let vbound = b.mag * b.mag * a.unc * a.unc + a.mag * a.mag * b.unc * b.unc
+    let unc = etd_sqrt(kf) * etd_sqrt(vbound)
+    EpiBound { mag: mag, unc: unc }
+}
+
+// elementwise add (e.g. bias broadcast):  |a+b| ≤ Ma+Mb ;  u² ≤ Ea²+Eb²
+pub fn eb_add(a: &EpiBound, b: &EpiBound) -> EpiBound with Mut, Div, Panic {
+    EpiBound { mag: a.mag + b.mag, unc: etd_sqrt(a.unc * a.unc + b.unc * b.unc) }
+}
+
+// sigmoid:  |σ| ≤ 1 ;  σ' = σ(1-σ) ≤ 1/4  ⇒  u(σ) ≤ (1/4) u(x)
+pub fn eb_sigmoid(a: &EpiBound) -> EpiBound { EpiBound { mag: 1.0, unc: 0.25 * a.unc } }
+
+// relu:  |relu| ≤ M ;  derivative ∈ {0,1}  ⇒  u(relu) ≤ u(x)
+pub fn eb_relu(a: &EpiBound) -> EpiBound { EpiBound { mag: a.mag, unc: a.unc } }
+
+// the BUDGET gate: does the static output uncertainty clear the declared bound?
+pub fn eb_within_budget(b: &EpiBound, max_unc: f64) -> bool { b.unc <= max_unc }

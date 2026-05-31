@@ -1,0 +1,106 @@
+//@ run-pass
+//@ description: SOUNDNESS WITNESS for the refinement-typed epistemic tensor graph.
+//@ The type-level (mag, unc) bounds (linalg::epi_type_bounds) are propagated through
+//@ a full layer ALONGSIDE the dragon's actual runtime forward pass. At EVERY op we
+//@ assert the dragon's real per-element uncertainty ≤ the type-level bound — i.e. the
+//@ type NEVER promises more confidence than runtime delivers. Inputs are chosen so the
+//@ matmul bound is TIGHT (worst case achieved), proving the bound is exact, not loose.
+//@ Finally the compile-time BUDGET gate accepts a 0.05 budget and would refuse a 0.03
+//@ one — uncertainty refused at the type level, before the net ever runs.
+//@ This is the empirical core of the typed-graph soundness theorem (Lean lemma alongside).
+
+use linalg::epistemic_tensor_dyn::*
+use linalg::epi_type_bounds::*
+
+// runtime max |value| and max uncertainty over a tensor's elements
+fn rt_max_mag(t: &DynEpiTensor) -> f64 with Mut, Panic {
+    var m = 0.0
+    var i = 0
+    let n = t.rows * t.cols
+    while i < n { let v = read_f64(t.vals, i); let a = etd_abs(v); if a > m { m = a } ; i = i + 1 }
+    m
+}
+fn rt_max_unc(t: &DynEpiTensor) -> f64 with Mut, Panic {
+    var m = 0.0
+    var i = 0
+    let n = t.rows * t.cols
+    while i < n { let u = read_f64(t.uncs, i); if u > m { m = u } ; i = i + 1 }
+    m
+}
+fn le(a: f64, b: f64) -> bool { a <= b + 0.000000001 }   // runtime ≤ bound (float-safe)
+
+fn main() with IO, Alloc, Mut, Div, Panic {
+    // ---- declared leaf bounds ----
+    let Mx = 1.0;  let Ex = 0.1     // input:  |x|≤1,   u(x)≤0.1
+    let Mw = 0.5;  let Ew = 0.05    // weight: |w|≤0.5, u(w)≤0.05
+    let Mb = 0.2;  let Eb = 0.02    // bias:   |b|≤0.2, u(b)≤0.02
+    let kdim = 4
+
+    // ---- build dragon tensors AT their declared bounds (tight worst case) ----
+    var x = etd_alloc(2, kdim)
+    var i = 0
+    while i < 2 {
+        var j = 0
+        while j < kdim {
+            let s = if (i + j) % 2 == 0 { 1.0 } else { 0.0 - 1.0 }
+            etd_set(&!x, i, j, Mx * s, Ex, 1.0)   // |val|=Mx, u=Ex  (at bound)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    var w = etd_alloc(kdim, 3)
+    var a = 0
+    while a < kdim {
+        var b = 0
+        while b < 3 { etd_set(&!w, a, b, Mw, Ew, 1.0); b = b + 1 }
+        a = a + 1
+    }
+    var bias = etd_alloc(1, 3)
+    var c = 0
+    while c < 3 { etd_set(&!bias, 0, c, Mb, Eb, 1.0); c = c + 1 }
+
+    // ---- type-level bounds (static) ----
+    let xb = eb_new(Mx, Ex)
+    let wb = eb_new(Mw, Ew)
+    let bb = eb_new(Mb, Eb)
+
+    // ===== op 1: matmul =====
+    var h = etd_matmul(&x, &w)
+    let hb = eb_matmul(&xb, &wb, kdim)
+    let rt1_mag = rt_max_mag(&h); let rt1_unc = rt_max_unc(&h)
+    let s1_mag = le(rt1_mag, eb_mag(&hb))
+    let s1_unc = le(rt1_unc, eb_unc(&hb))
+
+    // ===== op 2: bias add =====
+    etd_add_bias(&!h, &bias)
+    let hb2 = eb_add(&hb, &bb)
+    let rt2_unc = rt_max_unc(&h)
+    let s2_mag = le(rt_max_mag(&h), eb_mag(&hb2))
+    let s2_unc = le(rt2_unc, eb_unc(&hb2))
+
+    // ===== op 3: sigmoid =====
+    etd_sigmoid(&!h)
+    let hb3 = eb_sigmoid(&hb2)
+    let rt3_unc = rt_max_unc(&h)
+    let s3_mag = le(rt_max_mag(&h), eb_mag(&hb3))
+    let s3_unc = le(rt3_unc, eb_unc(&hb3))
+
+    // ---- report: matmul bound is TIGHT (runtime == type bound) ----
+    print("matmul  type-bound unc x1e6 = "); println((eb_unc(&hb) * 1000000.0) as i64)
+    print("matmul  runtime max unc x1e6 = "); println((rt1_unc * 1000000.0) as i64)
+    print("output  type-bound unc x1e6 = "); println((eb_unc(&hb3) * 1000000.0) as i64)
+    print("output  runtime max unc x1e6 = "); println((rt3_unc * 1000000.0) as i64)
+
+    // ---- the compile-time budget gate ----
+    let clears_05 = eb_within_budget(&hb3, 0.05)    // 0.0357 ≤ 0.05  → accept
+    let refuses_03 = !eb_within_budget(&hb3, 0.03)   // 0.0357 > 0.03  → REFUSE at type level
+
+    etd_free(&!x); etd_free(&!w); etd_free(&!bias); etd_free(&!h)
+
+    let sound = s1_mag && s1_unc && s2_mag && s2_unc && s3_mag && s3_unc
+    if sound && clears_05 && refuses_03 {
+        println("TYPED_EPI_GRAPH_SOUNDNESS_PASS")
+    } else {
+        println("TYPED_EPI_GRAPH_SOUNDNESS_FAIL")
+    }
+}

@@ -51,8 +51,10 @@ echo "── the wiring (dragon's propagated confidence drives the refusal) ─�
 run_pass     tests/run-pass/dose_from_epinet.sio        DOSE_FROM_EPINET_PASS
 echo "── enablement: a TRAINED epistemic net on the substrate ──"
 run_pass     tests/run-pass/epinet_train_vanco.sio      EPINET_TRAIN_VANCO_PASS
+echo "── SOTA: refinement-typed graph, type-bound ≥ runtime uncertainty (sound) ──"
+run_pass     tests/run-pass/typed_epi_graph_soundness.sio  TYPED_EPI_GRAPH_SOUNDNESS_PASS
 
 rm -rf "$TMP"
 echo ""
 if [[ $fails -ne 0 ]]; then echo "epistemic_tensor_dyn_gate: FAIL ($fails)"; exit 1; fi
-echo "epistemic_tensor_dyn_gate: PASS (7/7)"
+echo "epistemic_tensor_dyn_gate: PASS (8/8)"
