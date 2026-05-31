@@ -739,6 +739,43 @@ fn ty_slot_count(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     return 1
 }
 
+// Recover a tuple's true total slot count from the element-type cache. The
+// synthetic tuple hash packs first_nslots*1000 + total_nslots in 3-digit fields,
+// which OVERFLOWS for any element >= 1000 slots (e.g. (Checker, TypeEntry):
+// first=20991, total=21025 -> %1000 = 25, truncating a 167 KB by-value tuple
+// RETURN to 200 bytes and leaving env.count uninitialised -> SIGSEGV). The cache
+// (registered at every tuple encode site) stores the element types; ty_slot_count
+// gives the true size. Falls back to the packed decode for uncached/small tuples.
+// Mirrors the override already done in tuple_destructure_from_ptr_x86. Used for
+// the return-copy size (ret_agg_nslots) AND the tuple `.0` field-access copy size.
+// SIZE recovery is collision-SAFE: the first element is collision-invariant and
+// its slot count dwarfs the modulo. We deliberately do NOT recover element TYPES
+// from the cache in the .0/.1 path: the overflowed hash is not a unique key, so
+// two distinct >=1000-slot tuples (e.g. (Checker,i64) vs (Checker,bool)) can
+// collide and yield the wrong element type — which mis-types `.1` and breaks
+// type-checking. So `.1` routing/typing is left exactly on the legacy packed path.
+fn tup_total_slots_true(tup_hash: i64) -> i64 with Panic, Div, Mut {
+    let tci = tup_cache_lookup(tup_hash)
+    if tci >= 0 {
+        let fs = ty_slot_count(TUP_CACHE_FIRST_TY[tci as usize], TUP_CACHE_FIRST_HASH[tci as usize])
+        let ls = ty_slot_count(TUP_CACHE_LAST_TY[tci as usize], TUP_CACHE_LAST_HASH[tci as usize])
+        if fs > 0 && ls > 0 { return fs + ls }
+    }
+    return tup_hash % 1000
+}
+
+// True slot count of a tuple's FIRST element (collision-safe: first element is
+// invariant across hash collisions). Used to size the `.0` field-access copy,
+// which the packed 3-digit decode truncates for first elements >= 1000 slots.
+fn tup_first_slots_true(tup_hash: i64) -> i64 with Panic, Div, Mut {
+    let tci = tup_cache_lookup(tup_hash)
+    if tci >= 0 {
+        let fs = ty_slot_count(TUP_CACHE_FIRST_TY[tci as usize], TUP_CACHE_FIRST_HASH[tci as usize])
+        if fs > 0 { return fs }
+    }
+    return (tup_hash % 1000000) / 1000
+}
+
 fn st_field_slots_idx(si: i64, fi: i64) -> i64 with Panic, Div, Mut {
     return ty_slot_count(ST_FTY[(si * 128 + fi) as usize], ST_FHASH[(si * 128 + fi) as usize])
 }
@@ -1780,6 +1817,20 @@ fn record_frame_patch() with Mut {
     if FRAME_PATCH_COUNT < 4096 { FRAME_PATCH_OFF[FRAME_PATCH_COUNT as usize] = CL; FRAME_PATCH_COUNT = FRAME_PATCH_COUNT + 1 }
 }
 
+// Stack-clash guard. Emitted right after the prologue `sub rsp,<frame>`. Walks
+// rax from rbp down to rsp, touching one byte per 4 KB page, so a multi-MB frame
+// (the check phase threads a ~164 KB Checker by value, building 0.5–8 MB frames)
+// cannot jump the kernel's stack guard gap and SIGSEGV on the first deep push.
+// Position-independent (the two jump displacements are fixed within the sequence).
+fn emit_stack_probe_x86() with Mut {
+    em(0x48); em(0x89); em(0xe8)         // mov rax, rbp
+    em(0x48); em(0x2d); em32(0x1000)     // sub rax, 0x1000
+    em(0x48); em(0x39); em(0xe0)         // cmp rax, rsp
+    em(0x76); em(0x05)                   // jbe +5  (skip the touch+loop once rax<=rsp)
+    em(0x80); em(0x08); em(0x00)         // or byte ptr [rax], 0   (fault-in the page, value unchanged)
+    em(0xeb); em(0xf0)                   // jmp -16 (back to `sub rax,0x1000`)
+}
+
 fn record_frame_patch_a64(rd: i64) with Mut {
     if A64_FRAME_PATCH_COUNT < 32768 {
         A64_FRAME_PATCH_OFF[A64_FRAME_PATCH_COUNT as usize] = CL
@@ -2441,10 +2492,6 @@ fn arr_ty_hash_for_elem_type(alen: i64, esiz: i64, elem_ty: i64, elem_hash: i64)
     if elem_hash != 0 {
         if elem_ty == 6 || elem_ty == 7 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
         if elem_ty == 0 && st_find(elem_hash) >= 0 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
-        // Knowledge<T> element (kind=7, negative hash): preserve the element hash in
-        // the side table so `arr[i]` recovers its Knowledge type. The by-value
-        // struct-array machinery already sizes it via struct_like_nslots()==3.
-        if elem_ty == 0 && knowledge_hash_is(elem_hash) { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
     }
     return arr_ty_hash(alen, esiz, elem_ty)
 }
@@ -3167,11 +3214,11 @@ fn ret_agg_nslots(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     if ty == 6 {
         let si = st_find(ty_hash)
         if si >= 0 { return st_total_size(si) / 8 }
-        // Synthetic tuple: decode total slot count from hash.
-        // Hash format: tcount * 1000000 + first_nslots * 1000 + total_nslots
-        // Falls back to 128 for partially-encoded or unregistered structs.
+        // Synthetic tuple: recover total slot count from the element-type cache
+        // (the packed hash overflows for elements >= 1000 slots). Falls back to
+        // the 3-digit decode / 128 for partially-encoded or unregistered structs.
         if ty_hash != 0 {
-            let tup_total = ty_hash % 1000
+            let tup_total = tup_total_slots_true(ty_hash)
             if tup_total > 0 { return tup_total }
             return 128
         }
@@ -4249,6 +4296,32 @@ fn stmt_is_deref_field_store(p0: i64) -> bool with Panic, Mut {
     return TK[(p0 + 6) as usize] == 16
 }
 
+// (*name).field[idx] = expr  — explicit-deref store into a struct's ARRAY field.
+// Tokens: ( * name ) . field [ ... ] =  →  6 19 3 7 50 3 41 ... 42 16
+// lean_single had detectors for (*p)[i]=, (*p)=, and (*p).f= but NOT this one, so
+// `(*p).field[idx] = struct/scalar` fell through to the generic assignment path and
+// silently wrote into a discarded value-copy of the field array (reads back as 0).
+// The auto-deref form `p.field[idx]=v` already works (resolve_field_struct_index
+// resolves through the pointer's inner struct), so this is the same codegen with the
+// name/field token positions shifted past the `( * … )`.
+fn stmt_is_deref_field_array_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }
+    if TK[(p0 + 1) as usize] != 19 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 7 { return false }
+    if TK[(p0 + 4) as usize] != 50 { return false }
+    if TK[(p0 + 5) as usize] != 3 { return false }
+    if TK[(p0 + 6) as usize] != 41 { return false }
+    var p = p0 + 7
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 41 { depth = depth + 1 }
+        if TK[p as usize] == 42 { depth = depth - 1 }
+        p = p + 1
+    }
+    return TK[p as usize] == 16
+}
+
 fn skip_type_meta_item(p0: i64, close_tk: i64) -> i64 with Panic, Mut {
     var p = p0
     var paren_depth: i64 = 0
@@ -4610,8 +4683,12 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         scan_type(first_elem_start)
         let first_ty = SCAN_TY
         let first_hash = SCAN_TY_HASH
+        // Element-kind code packed into the (legacy "f64") hash digit: 1=f64, 2=bool,
+        // 0=other. Encoding bool as 2 makes (Big,bool) and (Big,i64) get DISTINCT
+        // tuple-hash keys (scalars both hash 0 otherwise → cache-key collision →
+        // mistyped `.1`). f64 decoders still test `== 1`, so they are unaffected.
         var first_f64: i64 = 0
-        if first_ty == 2 { first_f64 = 1 }
+        if first_ty == 2 { first_f64 = 1 } else if first_ty == 4 { first_f64 = 2 }
         var first_nslots: i64 = ty_slot_count(first_ty, first_hash)
         // Skip balanced parens, count elements, track last element start.
         var td: i64 = 1
@@ -4636,7 +4713,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             scan_type(last_elem_start)
             last_ty = SCAN_TY
             last_hash = SCAN_TY_HASH
-            if last_ty == 2 { last_f64 = 1 } else { last_f64 = 0 }
+            if last_ty == 2 { last_f64 = 1 } else if last_ty == 4 { last_f64 = 2 } else { last_f64 = 0 }
             last_nslots = ty_slot_count(last_ty, last_hash)
         }
         let total_nslots = first_nslots + last_nslots
@@ -4811,24 +4888,6 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             if TK[p as usize] == 4 { SCAN_TY_ALEN = TV[p as usize]; p = p + 1 }
             if TK[p as usize] == 42 { p = p + 1 }
             SCAN_TY_HASH = arr_ty_hash_with_elem(SCAN_TY_ALEN, SCAN_TY_ESIZ, inner_ty, inner_hash)
-            SCAN_TY_NEXT = p
-            return
-        }
-        // Knowledge<T> element: `[Knowledge[f64]; N]` / `[Knowledge<f64>; N]`. Recurse
-        // scan_type so the kind=7 element hash is captured (the single-token path
-        // below only handles simple names + registered structs).
-        if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "Knowledge")
-           && (TK[(p + 1) as usize] == 41 || TK[(p + 1) as usize] == 23) {
-            scan_type(p)
-            let kelem_ty = SCAN_TY
-            let kelem_hash = SCAN_TY_HASH
-            p = SCAN_TY_NEXT
-            SCAN_TY = 8
-            SCAN_TY_ESIZ = 8
-            if TK[p as usize] == 27 { p = p + 1 }
-            if TK[p as usize] == 4 { SCAN_TY_ALEN = TV[p as usize]; p = p + 1 }
-            if TK[p as usize] == 42 { p = p + 1 }
-            SCAN_TY_HASH = arr_ty_hash_with_elem(SCAN_TY_ALEN, SCAN_TY_ESIZ, kelem_ty, kelem_hash)
             SCAN_TY_NEXT = p
             return
         }
@@ -8439,125 +8498,6 @@ fn compile_knowledge_literal_x86() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_AFFINE = 0
 }
 
-// Paren-form constructor: Knowledge(value, ε=eps, prov="...") or
-// Knowledge(value: v  ε: eps  prov: "...").  Mirrors the brace literal but
-// accepts a leading positional value, `=`/`:` separators, optional commas,
-// and the unicode ε key.  Stores the static ε literal into the type hash so
-// compile-time confidence gates see it (Contribution 2 substrate).
-fn compile_knowledge_paren_x86() with IO, Mut, Panic, Div {
-    EP = EP + 1  // skip '('
-    let base_slot = NEXT_SLOT
-    NEXT_SLOT = NEXT_SLOT + 3
-    var value_ty: i64 = 0
-    var value_hash: i64 = 0
-    var saw_value: i64 = 0
-    var saw_var: i64 = 0
-    var saw_conf: i64 = 0
-    var lit_mode: i64 = 0
-    var lit_eps: i64 = -1
-    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
-        if TK[EP as usize] == 3 && (TK[(EP + 1) as usize] == 16 || TK[(EP + 1) as usize] == 43) {
-            let field_tok = EP
-            let fns = TS[EP as usize]
-            let fne = TE[EP as usize]
-            let is_eps_uni = tok_is_unicode_epsilon(field_tok)
-            EP = EP + 2  // skip name and `=`/`:`
-            let field_start = EP
-            compile_or()
-            let field_ty = EXPR_TY
-            let field_hash = EXPR_TY_HASH
-            let lit_tok = expr_simple_numeric_tok(field_start, EP)
-            if src_match(fns, fne - fns, "value") {
-                emit_store_var(base_slot + 2)
-                value_ty = field_ty
-                value_hash = field_hash
-                saw_value = 1
-            } else if src_match(fns, fne - fns, "variance") {
-                if field_ty != 2 {
-                    if ty_is_numeric(field_ty) {
-                        emit_i64_to_f64_in_rax_x86()
-                    } else {
-                        tc_error(field_tok, "Knowledge variance must be numeric")
-                        em(0x31); em(0xc0)
-                    }
-                }
-                emit_store_var(base_slot + 1)
-                saw_var = 1
-            } else if src_match(fns, fne - fns, "uncertainty") {
-                if field_ty != 2 {
-                    if ty_is_numeric(field_ty) {
-                        emit_i64_to_f64_in_rax_x86()
-                    } else {
-                        tc_error(field_tok, "Knowledge uncertainty must be numeric")
-                        em(0x31); em(0xc0)
-                    }
-                }
-                em(0x48); em(0x89); em(0xc1)
-                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)
-                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc9)
-                em(0xf2); em(0x0f); em(0x59); em(0xc1)
-                em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
-                emit_store_var(base_slot + 1)
-                saw_var = 1
-            } else if is_eps_uni || src_match(fns, fne - fns, "confidence") || src_match(fns, fne - fns, "epsilon") {
-                if field_ty != 2 {
-                    if ty_is_numeric(field_ty) {
-                        emit_i64_to_f64_in_rax_x86()
-                    } else {
-                        tc_error(field_tok, "Knowledge epsilon must be numeric")
-                        em(0x31); em(0xc0)
-                    }
-                }
-                emit_store_var(base_slot)
-                saw_conf = 1
-                if lit_tok >= 0 {
-                    let scaled = tok_scaled_million(lit_tok)
-                    if scaled >= 0 && scaled <= 1000000 {
-                        lit_mode = 1
-                        lit_eps = scaled
-                    }
-                }
-            } else if src_match(fns, fne - fns, "validity") || src_match(fns, fne - fns, "provenance") || src_match(fns, fne - fns, "prov") {
-                // provenance string: compiled above, value discarded
-            } else {
-                tc_error(field_tok, "unknown field in Knowledge constructor")
-            }
-        } else {
-            // Positional argument: the first one is the value
-            compile_or()
-            if saw_value == 0 {
-                emit_store_var(base_slot + 2)
-                value_ty = EXPR_TY
-                value_hash = EXPR_TY_HASH
-                saw_value = 1
-            }
-        }
-        if TK[EP as usize] == 28 { EP = EP + 1 }  // optional comma
-    }
-    if TK[EP as usize] == 7 { EP = EP + 1 }  // skip ')'
-    if saw_value == 0 {
-        em(0x31); em(0xc0)
-        emit_store_var(base_slot + 2)
-        value_ty = 0
-        value_hash = 0
-    }
-    if saw_var == 0 {
-        em(0x31); em(0xc0)
-        emit_store_var(base_slot + 1)
-    }
-    if saw_conf == 0 {
-        emit_imm64(4607182418800017408)
-        emit_store_var(base_slot)
-    }
-    em(0x48); em(0x8d); em(0x85)
-    em32(0 - (base_slot + 2) * 8)
-    EXPR_IS_F64 = 0
-    EXPR_TY = 0
-    EXPR_TY_HASH = knowledge_hash_make_mode(value_ty, value_hash, lit_mode, lit_eps)
-    LAST_EXPR_IS_LINEAR = 0
-    LAST_EXPR_IS_AFFINE = 0
-}
-
 // Precedence (low→high): || < && < comparison < bitwise OR < bitwise AND < shift < additive < multiplicative < unary < postfix < primary
 
 fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
@@ -9325,6 +9265,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         // Prologue: push rbp; mov rbp, rsp; sub rsp, <dynamic frame>
         em(0x55); em(0x48); em(0x89); em(0xe5)
         em(0x48); em(0x81); em(0xec); record_frame_patch(); em32(0)
+        emit_stack_probe_x86()  // guard-page touch for multi-MB by-value frames
         // Spill env_ptr (rdi) to slot 1: mov [rbp-8], rdi
         em(0x48); em(0x89); em(0x7d); em(0xf8 as i64 & 0xFF)
         // Spill user params from shifted registers (rsi=slot2, rdx=slot3, ...)
@@ -9592,10 +9533,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
             // Encode first_nslots, total_slots, and per-element f64-ness.
             // Format: tcount*100M + first_f64*10M + last_f64*1M + first_nslots*1000 + total_nslots
             let first_actual = if first_nslots > 1 { first_nslots } else { 1 }
+            // Element-kind code (1=f64, 2=bool, 0=other) — see scan_type: encoding
+            // bool as 2 keeps (Big,bool) and (Big,i64) hash-distinct so the element
+            // cache doesn't collide and mistype `.1`. f64 decoders still test `== 1`.
             var first_f64_flag: i64 = 0
-            if first_ty == 2 { first_f64_flag = 1 }
+            if first_ty == 2 { first_f64_flag = 1 } else if first_ty == 4 { first_f64_flag = 2 }
             var last_f64_flag: i64 = 0
-            if last_ty == 2 { last_f64_flag = 1 }
+            if last_ty == 2 { last_f64_flag = 1 } else if last_ty == 4 { last_f64_flag = 2 }
             EXPR_TY_HASH = (first_hash % 1000) * 1000000000000000 + (last_hash % 1000000) * 1000000000 + tup_count * 100000000 + first_f64_flag * 10000000 + last_f64_flag * 1000000 + first_actual * 1000 + total_slots
             tup_cache_register(EXPR_TY_HASH, first_ty, first_hash, last_ty, last_hash)
             return
@@ -12230,11 +12174,6 @@ fn compile_primary() with IO, Mut, Panic, Div {
             // f64 arithmetic builtins (SSE2) — hash-dispatched, no if-as-expression
             let bh = gl_name_hash(ns, ne)
             let bl = ne - ns
-            // Knowledge(value, ε=eps, prov="...") paren-form constructor
-            if bl == 9 && src_match(ns, ne - ns, "Knowledge") && st_find(bh) < 0 && ident_fi < 0 {
-                compile_knowledge_paren_x86()
-                return
-            }
             // f64_add/sub/mul/div: 7 chars each
             if bl == 7 && bh == 14456679815 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x58); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; EXPR_TY = 2; return }
             if bl == 7 && bh == 121920845326 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5c); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; EXPR_TY = 2; return }
@@ -13935,32 +13874,49 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if tup_idx > 1 {
                     tc_error_hard(method_tok, "tuple index out of bounds")
                 }
-                let tup_first_slots = (EXPR_TY_HASH % 1000000) / 1000
-                let tup_total_slots = EXPR_TY_HASH % 1000
+                // True slot counts from the element-type cache. Keys are now unique
+                // per element kind, so the cache is reliable. The packed 3-digit decode
+                // truncates for elements >= 1000 slots, which mis-routed `.1` of a
+                // large-first tuple to the aggregate path (returning a pointer instead
+                // of the scalar value) and truncated `.0` copies.
+                let tup_first_slots = tup_first_slots_true(EXPR_TY_HASH)
+                let tup_total_slots = tup_total_slots_true(EXPR_TY_HASH)
                 let tup_last_slots = tup_total_slots - tup_first_slots
                 let elem_slots = if tup_idx == 0 { tup_first_slots } else { tup_last_slots }
                 if tup_idx == 0 {
                     // rax already points to first element, keep as-is for now
                 } else {
-                    let byte_offset = tup_first_slots * 8
-                    if byte_offset > 0 && byte_offset < 8192 {
+                    let byte_offset = tup_first_slots * 8   // .1 offset (collision-safe)
+                    if byte_offset > 0 && byte_offset < 2000000000 {
                         em(0x48); em(0x05); em32(byte_offset)  // add rax, offset
                     }
                 }
                 if elem_slots == 1 {
-                    // Scalar element: dereference the pointer so rax holds the value.
-                    let tup_first_f64 = (EXPR_TY_HASH / 10000000) % 10
-                    let tup_last_f64 = (EXPR_TY_HASH / 1000000) % 10
-                    let elem_is_f64 = if tup_idx == 0 { tup_first_f64 } else { tup_last_f64 }
+                    // Scalar element: dereference so rax holds the value. Take the type
+                    // from the element cache (keys are now unique per element kind, so
+                    // the cache is reliable). NOT from the packed kind digit — for a
+                    // first element >= 1000 slots, first_nslots*1000 overflows into that
+                    // digit and corrupts it. Cache: 2=f64, 4=bool, else i64. Fall back to
+                    // the (unpolluted, small-tuple) digit only on a cache miss.
                     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
-                    if elem_is_f64 == 1 {
-                        EXPR_IS_F64 = 1
-                        EXPR_TY = 2
+                    let sc_ci = tup_cache_lookup(EXPR_TY_HASH)
+                    if sc_ci >= 0 {
+                        // Full element type from the (now collision-free) cache: covers
+                        // i64/f64/bool/enum/string/etc. The packed digit can't carry this
+                        // and is polluted by first_nslots*1000 overflow for large tuples.
+                        if tup_idx == 0 {
+                            EXPR_TY = TUP_CACHE_FIRST_TY[sc_ci as usize]
+                            EXPR_TY_HASH = TUP_CACHE_FIRST_HASH[sc_ci as usize]
+                        } else {
+                            EXPR_TY = TUP_CACHE_LAST_TY[sc_ci as usize]
+                            EXPR_TY_HASH = TUP_CACHE_LAST_HASH[sc_ci as usize]
+                        }
+                        if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     } else {
-                        EXPR_IS_F64 = 0
-                        EXPR_TY = 1
+                        let elem_kind = if tup_idx == 0 { (EXPR_TY_HASH / 10000000) % 10 } else { (EXPR_TY_HASH / 1000000) % 10 }
+                        if elem_kind == 1 { EXPR_IS_F64 = 1; EXPR_TY = 2 } else { EXPR_IS_F64 = 0; EXPR_TY = 1 }
+                        EXPR_TY_HASH = 0
                     }
-                    EXPR_TY_HASH = 0
                 } else {
                     // Aggregate element: materialize into fresh slots; rax is pointer.
                     EXPR_IS_F64 = 0
@@ -13983,6 +13939,15 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     }
                     var tup_mat_n: i64 = 128
                     if elem_slots > 0 { tup_mat_n = elem_slots }
+                    // Recover the TRUE element slot count for the copy size: the packed
+                    // elem_slots truncates when the first sibling is >= 1000 slots (e.g.
+                    // (Checker, TypeEntry).0 truncated to 12 -> env.count read as garbage).
+                    // Collision-safe: a wrong (collided) LAST element is still a 1-slot
+                    // scalar here, and the FIRST element type is collision-invariant.
+                    if tup_ci >= 0 {
+                        let true_mat_n = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+                        if true_mat_n > 0 { tup_mat_n = true_mat_n }
+                    }
                     let tup_mat_base = NEXT_SLOT
                     NEXT_SLOT = NEXT_SLOT + tup_mat_n
                     emit_bulk_copy_to_slots_x86(tup_mat_n, tup_mat_base)
@@ -17457,6 +17422,84 @@ fn compile_field_array_store_x86() with IO, Mut, Panic, Div {
     }
 }
 
+// (*name).field[idx] = expr — explicit-deref store into a struct array field.
+// Mirror of compile_field_array_store_x86 with the name/field tokens shifted past
+// `( * … )`: name at EP+2, field at EP+5, body starts at EP+7. resolve_field_struct_index
+// already resolves the struct through the pointer var's inner type, and emit_load_var
+// loads the pointer value as the base — so codegen is otherwise identical.
+fn compile_deref_field_array_store_x86() with IO, Mut, Panic, Div {
+    let name_tok = EP + 2
+    let ns = TS[(EP + 2) as usize]
+    let ne = TE[(EP + 2) as usize]
+    let field_tok = EP + 5
+    let fns = TS[(EP + 5) as usize]
+    let fne = TE[(EP + 5) as usize]
+    let fh = gl_name_hash(fns, fne)
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(field_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    EP = EP + 7  // skip ( * name ) . field [
+    compile_or()
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+    if TK[EP as usize] == 42 { EP = EP + 1 }
+    if TK[EP as usize] == 16 { EP = EP + 1 }
+    em(0x50)
+    compile_or()
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    ST_QUERY_NS = fns
+    ST_QUERY_NE = fne
+    let si = resolve_field_struct_index(ns, ne, fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if si < 0 {
+        tc_error(field_tok, "unknown field access")
+        em(0x59)
+        return
+    }
+    if st_private_access_denied(si, field_tok) {
+        tc_error_hard(field_tok, "private struct field access")
+        em(0x59)
+        return
+    }
+    ST_QUERY_NS = fns
+    ST_QUERY_NE = fne
+    let foff = st_field_offset(si, fh)
+    let fty = st_field_ty(si, fh)
+    let fhash = st_field_hash(si, fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if fty != 8 {
+        tc_error(field_tok, "indexed field store requires array field")
+        em(0x59)
+        return
+    }
+    if ty_eq(arr_hash_elem_ty(fhash), arr_hash_elem_hash(fhash), rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    materialize_aggregate_array_element_x86(fhash)
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
+    em(0x59)  // pop rcx (index)
+    let slot = var_find(ns, ne)
+    if slot >= 0 { emit_load_var(slot) }  // rax = pointer/base
+    else {
+        let gi = gl_find(ns, ne)
+        if gi >= 0 {
+            let addr = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+            em(0x48); em(0xb8); em64(addr)
+        } else {
+            tc_undefined_var(name_tok)
+            em(0x31); em(0xc0)
+        }
+    }
+    if foff != 0 { em(0x48); em(0x8d); em(0x80); em32(foff) }
+    if arr_hash_esiz(fhash) == 8 {
+        em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+    } else {
+        em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
+    }
+}
+
 fn compile_field_array_array_store_x86() with IO, Mut, Panic, Div {
     // Handles: ident.field[outer_idx][inner_idx] = val
     let name_tok = EP
@@ -17614,6 +17657,69 @@ fn compile_field_array_store_a64() with IO, Mut, Panic, Div {
     let fhash = st_field_hash(si, fh)
                     ST_QUERY_NS = -1
                     ST_QUERY_NE = -1
+    if fty != 8 {
+        tc_error(field_tok, "indexed field store requires array field")
+        emit_pop_x1_a64()
+        return
+    }
+    if ty_eq(arr_hash_elem_ty(fhash), arr_hash_elem_hash(fhash), rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    materialize_aggregate_array_element_a64(fhash)
+    em32(0xAA0003EA)
+    emit_pop_x1_a64()
+    let slot = var_find(ns, ne)
+    if slot >= 0 { emit_load_var_a64(slot) }
+    else {
+        let gi = gl_find(ns, ne)
+        if gi >= 0 { emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+        else { tc_undefined_var(name_tok); em32(0xD2800000) }
+    }
+    if foff != 0 {
+        emit_imm64_reg_a64(11, foff)
+        em32(0x8B0B0000)
+    }
+    if arr_hash_esiz(fhash) == 8 { em32(0xF821780A) }
+    else { em32(0x3821680A) }
+}
+
+// (*name).field[idx] = expr — a64 mirror of compile_deref_field_array_store_x86.
+fn compile_deref_field_array_store_a64() with IO, Mut, Panic, Div {
+    let name_tok = EP + 2
+    let ns = TS[(EP + 2) as usize]; let ne = TE[(EP + 2) as usize]
+    let field_tok = EP + 5
+    let fns = TS[(EP + 5) as usize]; let fne = TE[(EP + 5) as usize]
+    let fh = gl_name_hash(fns, fne)
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(field_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    EP = EP + 7
+    compile_or_a64()
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+    if TK[EP as usize] == 42 { EP = EP + 1 }
+    if TK[EP as usize] == 16 { EP = EP + 1 }
+    emit_push_a64()
+    compile_or_a64()
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    let si = resolve_field_struct_index(ns, ne, fh)
+    if si < 0 {
+        tc_error(field_tok, "unknown field access")
+        emit_pop_x1_a64()
+        return
+    }
+    if st_private_access_denied(si, field_tok) {
+        tc_error_hard(field_tok, "private struct field access")
+        emit_pop_x1_a64()
+        return
+    }
+    ST_QUERY_NS = fns
+    ST_QUERY_NE = fne
+    let foff = st_field_offset(si, fh)
+    let fty = st_field_ty(si, fh)
+    let fhash = st_field_hash(si, fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
     if fty != 8 {
         tc_error(field_tok, "indexed field store requires array field")
         emit_pop_x1_a64()
@@ -18214,25 +18320,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 41 {
                 EP = EP + 1  // skip [
                 // Element type
-                var arr_elem_ty: i64 = 0
+                let etns = TS[EP as usize]
+                let etne = TE[EP as usize]
+                let arr_elem_ty = type_name_kind(etns, etne)
                 var arr_elem_hash: i64 = 0
-                // Knowledge<T> element: scan the full type so the kind=7 element hash
-                // is captured (`[Knowledge[f64]; N]`); the single-token path below only
-                // handles simple names + registered structs.
-                if src_match(TS[EP as usize], TE[EP as usize] - TS[EP as usize], "Knowledge")
-                   && (TK[(EP + 1) as usize] == 41 || TK[(EP + 1) as usize] == 23) {
-                    scan_type(EP)
-                    arr_elem_ty = SCAN_TY
-                    arr_elem_hash = SCAN_TY_HASH
-                    EP = SCAN_TY_NEXT
-                } else {
-                    let etns = TS[EP as usize]
-                    let etne = TE[EP as usize]
-                    arr_elem_ty = type_name_kind(etns, etne)
-                    if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
-                    if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
-                    EP = EP + 1  // skip element type
-                }
+                if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
+                if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
+                EP = EP + 1  // skip element type
                 if TK[EP as usize] == 27 { EP = EP + 1 }  // skip ;
                 arr_len = TV[EP as usize]
                 EP = EP + 1  // skip N
@@ -18914,6 +19008,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         return
     }
 
+    // (*name).field[idx] = expr  (explicit-deref store into a struct array field)
+    if stmt_is_deref_field_array_store(EP) {
+        compile_deref_field_array_store_x86()
+        return
+    }
     // (*ARRAY_PTR)[idx] = expr
     if stmt_is_deref_array_store(EP) {
         let name_tok = EP + 2
@@ -19894,6 +19993,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         emit_store_var(match_slot)
         if TK[EP as usize] == 8 { EP = EP + 1 }  // skip {
         var arm_count: i64 = 0
+        // Per-match jump-to-merge patch sites. MUST be local (not the global
+        // MATCH_ENDS): a nested match inside an arm body re-enters this function and
+        // would otherwise overwrite the outer match's slots, leaving the outer arm's
+        // jmp as an unpatched e9 00000000 (falls through into the next arm's tag test
+        // → garbage/crash). lean_single uses if-chains so never hit this, but the
+        // modular check.sio has hundreds of nested matches.
+        var match_ends: [i64; 256] = [0; 256]
         var match_ty: i64 = 0
         var match_hash: i64 = 0
         var match_have_ty: i64 = 0
@@ -20112,7 +20218,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH }
                     else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error(EP - 1, "match arm type does not match other arms") }
                 } else { match_all_value = 0 }
-                em(0xe9); MATCH_ENDS[arm_count as usize] = CL; em32(0)
+                em(0xe9); match_ends[arm_count as usize] = CL; em32(0)
                 arm_count = arm_count + 1
                 if or_skip_patch >= 0 { patch32(or_skip_patch, CL) }
             }
@@ -20164,7 +20270,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error(EP - 1, "match arm type does not match other arms") }
                 } else { match_all_value = 0 }
                 if vb_has_guard == 1 {
-                    em(0xe9); MATCH_ENDS[arm_count as usize] = CL; em32(0)
+                    em(0xe9); match_ends[arm_count as usize] = CL; em32(0)
                     arm_count = arm_count + 1
                     patch32(vb_guard_skip, CL)
                 }
@@ -20223,7 +20329,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     } else {
                         match_all_value = 0
                     }
-                    em(0xe9); MATCH_ENDS[arm_count as usize] = CL; em32(0)
+                    em(0xe9); match_ends[arm_count as usize] = CL; em32(0)
                     arm_count = arm_count + 1
                     patch32(skip_patch, CL)
                 } else {
@@ -20258,7 +20364,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     } else {
                         match_all_value = 0
                     }
-                    em(0xe9); MATCH_ENDS[arm_count as usize] = CL; em32(0)
+                    em(0xe9); match_ends[arm_count as usize] = CL; em32(0)
                     arm_count = arm_count + 1
                     patch32(skip_patch, CL)
                 }
@@ -20294,7 +20400,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         }
         if TK[EP as usize] == 9 { EP = EP + 1 }
         var ai: i64 = 0
-        while ai < arm_count { patch32(MATCH_ENDS[ai as usize], CL); ai = ai + 1 }
+        while ai < arm_count { patch32(match_ends[ai as usize], CL); ai = ai + 1 }
         if MATCH_SCRUT_TY == 7 && match_arms < 1000000 && match_arms < en_variant_count(MATCH_SCRUT_HASH) {
             tc_error_hard(EP - 1, "match must be exhaustive")
             LAST_STMT_HAS_VALUE = 0
@@ -21346,64 +21452,6 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                         EXPR_BELIEF[p as usize] = m_conf
                         EXPR_PLAUS[p as usize] = m_conf
                         if q < TC && TK[q as usize] == 7 { EXPR_CONF[q as usize] = m_conf }
-                    } else if src_match(ins, ine - ins, "Knowledge") {
-                        // Knowledge(value, ε=eps, prov=..) — confidence is the
-                        // static ε literal (Contribution 2: a low-ε prior lowers
-                        // EXPR_CONF so `with Epistemic(N)` gates reject claims that
-                        // over-state evidence). ε parsed BY NAME, not position
-                        // (value is positional-first). No literal ε → stays 1000.
-                        var kconf: i64 = 1000
-                        var saw_eps_key: i64 = 0
-                        var eps_was_literal: i64 = 0
-                        var kq: i64 = p + 2
-                        var kdepth: i64 = 1
-                        var kclose: i64 = 0 - 1
-                        while kq < TC && kdepth > 0 {
-                            if TK[kq as usize] == 6 { kdepth = kdepth + 1 }
-                            if TK[kq as usize] == 7 {
-                                kdepth = kdepth - 1
-                                if kdepth == 0 { kclose = kq; break }
-                            }
-                            if kdepth > 0 && TK[kq as usize] == 3 {
-                                var is_eps_key: i64 = 0
-                                if tok_is_unicode_epsilon(kq) { is_eps_key = 1 }
-                                if src_match(TS[kq as usize], TE[kq as usize] - TS[kq as usize], "epsilon") { is_eps_key = 1 }
-                                if src_match(TS[kq as usize], TE[kq as usize] - TS[kq as usize], "confidence") { is_eps_key = 1 }
-                                if is_eps_key == 1 && kq + 2 < TC && (TK[(kq + 1) as usize] == 16 || TK[(kq + 1) as usize] == 43) {
-                                    saw_eps_key = 1
-                                    let eps_val_tok = kq + 2
-                                    let eps_after = kq + 3
-                                    // Bare compile-time literal: a numeric token immediately
-                                    // followed by a field terminator — ',' (28), ')' (7), or the
-                                    // next field-key identifier (3, Style-B `ε: v  prov: …`).
-                                    // NOT the head of an expression like `0.99 * runtime`, which
-                                    // would launder high confidence through `*` (19).
-                                    if (TK[eps_val_tok as usize] == 4 || TK[eps_val_tok as usize] == 53)
-                                       && eps_after < TC
-                                       && (TK[eps_after as usize] == 28 || TK[eps_after as usize] == 7 || TK[eps_after as usize] == 3) {
-                                        let eps_scaled = tok_scaled_million(eps_val_tok)
-                                        if eps_scaled >= 0 && eps_scaled <= 1000000 {
-                                            kconf = eps_scaled / 1000
-                                            eps_was_literal = 1
-                                        }
-                                    }
-                                }
-                            }
-                            kq = kq + 1
-                        }
-                        // Soundness: ε declared but NOT a compile-time literal → its value is
-                        // unprovable at compile time. Use 1 (positive, below any real gate min)
-                        // so `with Epistemic(N)` REJECTS rather than laundering unknown/runtime
-                        // confidence as certain. (No ε at all keeps the language's "asserted
-                        // certain" 1000 default — matches the brace form.) A named-constant ε is
-                        // conservatively treated as non-literal; const-folding is future work.
-                        if saw_eps_key == 1 && eps_was_literal == 0 { kconf = 1 }
-                        EXPR_ETY[p as usize] = ety_mk_knowledge(2, kconf, EXPR_UNIT_DIM)
-                        EXPR_CONF[p as usize] = kconf
-                        MEAS_CONF[p as usize] = kconf
-                        EXPR_BELIEF[p as usize] = kconf
-                        EXPR_PLAUS[p as usize] = kconf
-                        if kclose >= 0 { EXPR_CONF[kclose as usize] = kconf }
                     } else if src_match(ins, ine - ins, "asserted") {
                         EXPR_ETY[p as usize] = ety_mk_knowledge(2, 970, EXPR_UNIT_DIM)
                         EXPR_CONF[p as usize] = 970
@@ -24358,6 +24406,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             em(0x41); em(0x54)  // push r12
         }
         em(0x48); em(0x81); em(0xec); record_frame_patch(); em32(0)
+        emit_stack_probe_x86()  // guard-page touch for multi-MB by-value frames
 
         // Store parameters from registers/stack using low-level ABI slot order.
         var param_vi: i64 = 0
@@ -26266,119 +26315,6 @@ fn compile_knowledge_literal_a64() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_LINEAR = 0
 }
 
-// Paren-form constructor (ARM64): see compile_knowledge_paren_x86.
-fn compile_knowledge_paren_a64() with IO, Mut, Panic, Div {
-    EP = EP + 1  // skip '('
-    let base_slot = NEXT_SLOT
-    NEXT_SLOT = NEXT_SLOT + 3
-    var value_ty: i64 = 0
-    var value_hash: i64 = 0
-    var saw_value: i64 = 0
-    var saw_var: i64 = 0
-    var saw_conf: i64 = 0
-    var lit_mode: i64 = 0
-    var lit_eps: i64 = -1
-    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
-        if TK[EP as usize] == 3 && (TK[(EP + 1) as usize] == 16 || TK[(EP + 1) as usize] == 43) {
-            let field_tok = EP
-            let fns = TS[EP as usize]
-            let fne = TE[EP as usize]
-            let is_eps_uni = tok_is_unicode_epsilon(field_tok)
-            EP = EP + 2  // skip name and `=`/`:`
-            let field_start = EP
-            compile_or_a64()
-            let field_ty = EXPR_TY
-            let field_hash = EXPR_TY_HASH
-            let lit_tok = expr_simple_numeric_tok(field_start, EP)
-            if src_match(fns, fne - fns, "value") {
-                emit_store_var_a64(base_slot + 2)
-                value_ty = field_ty
-                value_hash = field_hash
-                saw_value = 1
-            } else if src_match(fns, fne - fns, "variance") {
-                if field_ty != 2 {
-                    if ty_is_numeric(field_ty) {
-                        em32(0x9E620000)
-                        em32(0x9E660000)
-                    } else {
-                        tc_error(field_tok, "Knowledge variance must be numeric")
-                        em32(0xD2800000)
-                    }
-                }
-                emit_store_var_a64(base_slot + 1)
-                saw_var = 1
-            } else if src_match(fns, fne - fns, "uncertainty") {
-                if field_ty != 2 {
-                    if ty_is_numeric(field_ty) {
-                        em32(0x9E620000)
-                        em32(0x9E660000)
-                    } else {
-                        tc_error(field_tok, "Knowledge uncertainty must be numeric")
-                        em32(0xD2800000)
-                    }
-                }
-                em32(0xAA0003E1)
-                emit_f64_binop_a64(0x1E610800)
-                emit_store_var_a64(base_slot + 1)
-                saw_var = 1
-            } else if is_eps_uni || src_match(fns, fne - fns, "confidence") || src_match(fns, fne - fns, "epsilon") {
-                if field_ty != 2 {
-                    if ty_is_numeric(field_ty) {
-                        em32(0x9E620000)
-                        em32(0x9E660000)
-                    } else {
-                        tc_error(field_tok, "Knowledge epsilon must be numeric")
-                        em32(0xD2800000)
-                    }
-                }
-                emit_store_var_a64(base_slot)
-                saw_conf = 1
-                if lit_tok >= 0 {
-                    let scaled = tok_scaled_million(lit_tok)
-                    if scaled >= 0 && scaled <= 1000000 {
-                        lit_mode = 1
-                        lit_eps = scaled
-                    }
-                }
-            } else if src_match(fns, fne - fns, "validity") || src_match(fns, fne - fns, "provenance") || src_match(fns, fne - fns, "prov") {
-                // provenance string: compiled above, value discarded
-            } else {
-                tc_error(field_tok, "unknown field in Knowledge constructor")
-            }
-        } else {
-            // Positional argument: the first one is the value
-            compile_or_a64()
-            if saw_value == 0 {
-                emit_store_var_a64(base_slot + 2)
-                value_ty = EXPR_TY
-                value_hash = EXPR_TY_HASH
-                saw_value = 1
-            }
-        }
-        if TK[EP as usize] == 28 { EP = EP + 1 }  // optional comma
-    }
-    if TK[EP as usize] == 7 { EP = EP + 1 }  // skip ')'
-    if saw_value == 0 {
-        em32(0xD2800000)
-        emit_store_var_a64(base_slot + 2)
-        value_ty = 0
-        value_hash = 0
-    }
-    if saw_var == 0 {
-        em32(0xD2800000)
-        emit_store_var_a64(base_slot + 1)
-    }
-    if saw_conf == 0 {
-        emit_imm64_a64(4607182418800017408)
-        emit_store_var_a64(base_slot)
-    }
-    emit_lea_var_a64(base_slot + 2)
-    EXPR_IS_F64 = 0
-    EXPR_TY = 0
-    EXPR_TY_HASH = knowledge_hash_make_mode(value_ty, value_hash, lit_mode, lit_eps)
-    LAST_EXPR_IS_LINEAR = 0
-}
-
 // ─── ARM64 expression compiler ───
 fn compile_primary_a64() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_CLOSURE = 0
@@ -27651,11 +27587,6 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             // f64 builtins
             let bh = gl_name_hash(ns, ne)
             let bl = ne - ns
-            // Knowledge(value, ε=eps, prov="...") paren-form constructor
-            if bl == 9 && src_match(ns, ne - ns, "Knowledge") && st_find(bh) < 0 && ident_fi < 0 {
-                compile_knowledge_paren_a64()
-                return
-            }
             if bl == 7 && bh == 14456679815 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
             if bl == 7 && bh == 121920845326 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
             if bl == 7 && bh == 47722337034 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
@@ -29651,6 +29582,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         return
     }
+    // (*name).field[idx] = expr  (explicit-deref store into a struct array field)
+    if stmt_is_deref_field_array_store(EP) {
+        compile_deref_field_array_store_a64()
+        return
+    }
     // (*ARRAY_PTR)[idx] = expr
     if stmt_is_deref_array_store(EP) {
         let name_tok = EP + 2
@@ -30263,6 +30199,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         emit_store_var_a64(match_slot)
         if TK[EP as usize] == 8 { EP = EP + 1 }
         var arm_count: i64 = 0
+        // Per-match patch sites (local, not global MATCH_ENDS) — see x86 path: a nested
+        // match in an arm body must not clobber the outer match's jump-to-merge slots.
+        var match_ends: [i64; 256] = [0; 256]
         var match_all_value: i64 = 1
         var match_arms: i64 = 0
         var match_have_ty: i64 = 0
@@ -30411,7 +30350,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH }
                     else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error(EP - 1, "match arm type does not match other arms") }
                 } else { match_all_value = 0 }
-                MATCH_ENDS[arm_count as usize] = CL; em32(0x14000000)
+                match_ends[arm_count as usize] = CL; em32(0x14000000)
                 arm_count = arm_count + 1
                 if or_skip_patch_a64 >= 0 { patch_branch_a64(or_skip_patch_a64, CL) }
             }
@@ -30453,7 +30392,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error(EP - 1, "match arm type does not match other arms") }
                 } else { match_all_value = 0 }
                 if vb_has_guard_a64 == 1 {
-                    MATCH_ENDS[arm_count as usize] = CL; em32(0x14000000)
+                    match_ends[arm_count as usize] = CL; em32(0x14000000)
                     arm_count = arm_count + 1
                     patch_branch_a64(vb_guard_skip_a64, CL)
                 }
@@ -30501,7 +30440,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     } else {
                         match_all_value = 0
                     }
-                    MATCH_ENDS[arm_count as usize] = CL; em32(0x14000000)
+                    match_ends[arm_count as usize] = CL; em32(0x14000000)
                     arm_count = arm_count + 1
                     patch_branch_a64(skip_off, CL)
                 } else {
@@ -30533,7 +30472,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     } else {
                         match_all_value = 0
                     }
-                    MATCH_ENDS[arm_count as usize] = CL; em32(0x14000000)
+                    match_ends[arm_count as usize] = CL; em32(0x14000000)
                     arm_count = arm_count + 1
                     patch_branch_a64(skip_off, CL)
                 }
@@ -30569,7 +30508,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         if TK[EP as usize] == 9 { EP = EP + 1 }
         var ai: i64 = 0
-        while ai < arm_count { patch_branch_a64(MATCH_ENDS[ai as usize], CL); ai = ai + 1 }
+        while ai < arm_count { patch_branch_a64(match_ends[ai as usize], CL); ai = ai + 1 }
         if MATCH_SCRUT_TY == 7 && match_arms < 1000000 && match_arms < en_variant_count(MATCH_SCRUT_HASH) {
             tc_error_hard(EP - 1, "match must be exhaustive")
             LAST_STMT_HAS_VALUE = 0
