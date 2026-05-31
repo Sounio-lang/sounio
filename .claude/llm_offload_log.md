@@ -1,5 +1,15 @@
 # LLM Offload Log
 
+## 2026-05-31: G529 migrated to parametric MultiquadField [3,5,11]
+
+- **Claim (math)**: `formal/lean4/SounioDeGreyChi5Param.lean` — re-frames de Grey G₅₂₉ on
+  `SounioMultiquadParam`: `multiquadField_3511 : MultiquadField [3,5,11]`, `radS3511_to_rR`
+  (eight `radS [3,5,11]` generators = √7-free `r i` at masks {0,1,2,3,8,9,10,11}),
+  `q3511_plane_needs_5_colours` re-exporting `g529_field_plane_chi_ge_5` (χ(ℚ(√3,√5,√11)²)≥5).
+  Geometry + SAT legs unchanged in `SounioDeGreyChi5Closed`. `lake build SounioDeGreyChi5Param` exit 0.
+- **Offload (policy)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1. **All [OK]**: bookkeeping
+  re-packaging only; radS3511_to_rR case analysis correct; no new algebraic leaps. No bug caught.
+
 ## 2026-05-30: Parametric multiquadratic framework + Moser spindle over ℚ(√3,√11) (Madore χ≥4 base)
 
 - **Claim (math)**: two new Mathlib-free files. (1) `formal/lean4/SounioMultiquadParam.lean` —
@@ -357,6 +367,7 @@
 
 | date | task | provider | Target | outcome | note |
 |---|---|---|---|---|---|
+| 2026-05-31 | math-review | xai (Grok 4.1 fast reasoning) | SounioDeGreyChi5Param.lean | PASS | G529 on MultiquadField [3,5,11]: multiquadField_3511, radS3511_to_rR (8 generators = √7-free r i), q3511_plane_needs_5_colours re-export of g529_field_plane_chi_ge_5. Grok: bookkeeping re-packaging only; no new algebraic leaps. lake build exit 0; no sorryAx |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | DeGreyChi5Vitrine.lean (single-entry showcase) | PASS | presentation file, no new math. deGrey_chi_ge_5_any_rootedField (χ(F²)≥5 for every RootedField F, one-liner = rootedField_chi_ge_5 + not_VColourable) + build-time manifest (#check) of the 4 pillars. Grok: "faithful one-line packaging, no errors or overreaches." axioms {propext,Classical.choice,Quot.sound}(+native_decide); no sorryAx |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadFaithful.lean (phi↔indep8 bridge) | PASS | faithfulness of the abstract QF→ℝ numerator map evalNum on the √7-free support. evalNum_faithful_on_support: evalNum l = 0 with √7-coeffs zero ⇒ all 8 used coeffs {0,1,2,3,8,9,10,11} zero. Bridge lemmas r0_R..r11_R (generator r i = rootR products in rootedFieldReal), ofIntR_qR (ofInt n = qR(n:ℚ)), fsum collapse + reassembly into indep8's A+B√11 form. Grok: "no leaps, all rewrites justified." axioms {propext,Classical.choice,Quot.sound}(+native_decide); no sorryAx |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadIndep.lean (capstone indep8) | PASS | full 8-radical ℚ-linear independence of {1,√3,√5,√15,√11,√33,√55,√165} = faithfulness of QF↪ℝ on used support ℚ(√3,√5,√11). indep8 via factoring α=A+B√11 (A,B∈ℚ(√3,√5)) + iterated subfield inverse Q35_inv (B⁻¹=(P−Q√3)·M⁻¹, M⁻¹ from Q5_inv) + not_R11_in_Q35. E_mul35 (4-dim product), M35_components_ne_zero. Grok reviewed WHOLE file: "all claims free of gaps, no compounding errors." axioms {propext,Classical.choice,Quot.sound}(+native_decide); no sorryAx |
@@ -900,3 +911,4 @@ more edge constraints → fewer valid colorings → CDCL converges faster. This 
 | 2026-05-31 | review | WAIVED | pbpk_claim_truth_table.md | WAIVED | Adds a repo-backed row: PBPK28 priors now DECLARED as Knowledge<T> (kn:[Knowledge[f64];8], value+variance+ε+provenance), migrated commit 7295004, enabled by arrays-of-Knowledge d6f2d4d. Flips the prior FORBIDDEN "stdlib carries per-parameter epistemic confidence" to allowed; keeps "ep28_run enforces/propagates ε" FORBIDDEN (kernel consumes f64 projection; gate is construction-site-local). External fan-out BLOCKED by harness trust-boundary classifier; honesty designed in-session with the advisor (byte-identical projection verification, kernel-untouched framing). Factual status sync. |
 | 2026-05-31 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioMultiquadParam.lean | PASS | Parametric multiquadratic framework checkpoint. Grok accepted sqrtR_sq, evalS_nil/indep_base, sqrtR_3/5/11 bridges to rootR, indep_3_11 and indep_3_5_11 embeddings through existing indep8, sqrt_new_not_in_Q, Np_ne_zero, and the named interface obligations. Open obligations (IndepStepObligation, MultiquadIndepTheorem) are properly flagged rather than assumed. Raw: /tmp/llm-offload-ykg48H/. |
 | 2026-05-31 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioMoserSpindleQ311.lean | PASS | Moser spindle Q( sqrt3, sqrt11 ) checkpoint. Grok accepted integer 4-tuple geometry, edges_unit, long_diagonals_not_unit, non-3-colourability, explicit 4-colouring, emb_unit, and q311_plane_needs_4_colours. Only note: basis_independent is a re-export of SounioMultiquadParam; Real embedding commentary correctly avoids overclaim. Raw: /tmp/llm-offload-FbtlFI/. |
+| 2026-05-31 | review | WAIVED | pbpk_claim_truth_table.md | WAIVED | One-cell update: ep28_run now CONSUMES the Knowledge priors directly (commit 2e67d5a) — marks the prior row's "next gate" DONE, adds allowed wording "the GUM kernel consumes the Knowledge<T> priors", keeps "ep28_run enforces/propagates ε" FORBIDDEN (gate still construction-site-local; reading kn[i] is not gate propagation). External fan-out BLOCKED by harness trust-boundary classifier; verified in-session (KN_EQUIV substitution-equivalence + 0 net errors vs f64 baseline). Factual status sync. |

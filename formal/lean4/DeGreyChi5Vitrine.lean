@@ -19,6 +19,8 @@ The full arc, end to end:
      independent in the from-scratch ℝ. Proved through the tower ℚ ⊂ ℚ(√3) ⊂ ℚ(√3,√5) ⊂
      ℚ(√3,√5,√11), with an iterated subfield inverse (no Galois theory, no flat degree-4 norm).
      ⇒ the witness field is genuinely degree 8; there is no hidden algebraic collapse.
+     **Parametric re-framing:** `SounioDeGreyChi5Param` packages the same support as
+     `MultiquadField [3,5,11]` (`indep_3_5_11`, `radS3511_to_rR`, `q3511_plane_needs_5_colours`).
 
   3. FAITHFULNESS  (`SounioSqrt.RealCauchyField.evalNum_faithful_on_support`): the abstract
      QF → ℝ numerator map `evalNum` (the numerator of the fraction homomorphism `φ` of

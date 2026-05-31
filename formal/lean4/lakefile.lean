@@ -247,6 +247,12 @@ lean_lib «SounioMultiquadParam» where
 -- `lake build SounioMoserSpindleQ311`.
 lean_lib «SounioMoserSpindleQ311» where
 
+-- G529 / de Grey χ≥5 on the parametric MultiquadField [3,5,11]: packages the degree-8 witness
+-- field, radS↔evalNum bridge, indep8 recovery, and q3511_plane_needs_5_colours (re-export of
+-- g529_field_plane_chi_ge_5). Heavy (pulls SounioDeGreyChi5Closed + G529 cert).
+-- `lake build SounioDeGreyChi5Param`.
+lean_lib «SounioDeGreyChi5Param» where
+
 -- χ≥5 UNCONDITIONAL over Mathlib-free ℝ: feeds the discharged SAT leg
 -- (DeGrey529.Closed.not_VColourable) into SounioRootedFieldReal.chi_R2_ge_5, closing the
 -- QF↪ℝ gap. chi_R2_ge_5_unconditional: the unit-distance graph on the Cauchy-quotient real
