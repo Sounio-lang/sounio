@@ -118,7 +118,7 @@ def unitDistanceCount (edge : Nat → Nat → Bool) : Nat :=
 
 /-- The classical probe has exactly 6 unit-distance pairs
     (matches the Sounio run `classical … edges=6`). -/
-theorem classical_unit_count : unitDistanceCount classEdge = 6 := by native_decide
+theorem classical_unit_count : unitDistanceCount classEdge = 6 := by decide
 
 /-- Unit-pair counts realized by the 84 linear right-multiplication twists. -/
 def linearCounts : List Nat := validPrims.map (fun v => unitDistanceCount (twEdge v))
@@ -155,7 +155,7 @@ def assocDiffNormSq (i j : Nat) (u v : PrimSed) : Int :=
 theorem diffVec_matches_classical :
     vpairs.all (fun p =>
       (combine (diffVec p.1 p.2)).foldl (fun acc q => acc + q.2 * q.2) 0
-        == classNormSq p.1 p.2) := by native_decide
+        == classNormSq p.1 p.2) := by decide
 
 /-- Associator-twisted unit edge. Two successive primitive right-multiplications each
     scale the squared norm of a unit difference by `‖e_lo ± e_hi‖² = 2`, so a *preserved*
@@ -360,7 +360,7 @@ def assocMaxS (m : Nat) : Nat :=
 
 /-- The `m`-leaf star has exactly `m` classical unit pairs (origin–leaf edges only). -/
 theorem star_classical_count : [6, 10, 14].all (fun m => classCountS m == m) = true := by
-  native_decide
+  decide
 
 /-- The linear route is **count-preserving** on the star: its maximum unit-pair count
     equals the classical count `m` — no linear surgery ever creates a new unit pair. -/

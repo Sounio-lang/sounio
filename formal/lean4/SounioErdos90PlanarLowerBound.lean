@@ -77,6 +77,6 @@ def harb (n : Nat) : Nat := 3*n - (let s := isqrt (12*n - 3); if s*s < 12*n - 3 
     explicit configurations. The rigorous baseline for the cluster search. -/
 theorem lattice_achieves_harborth :
     ((List.range 18).map (·+1)).all (fun n => countUnit (greedy 4 n) == harb n) = true := by
-  native_decide
+  decide
 
 end Sounio.Erdos90Planar

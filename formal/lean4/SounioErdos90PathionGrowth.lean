@@ -97,7 +97,7 @@ def pAssocMax (m : Nat) : Nat := (pathZD.map (fun pr => pUdc m (pAssocEdge m pr.
 -- §3. Theorems.
 /-- The `m`-leaf pathion star has exactly `m` classical unit pairs. -/
 theorem path_classical_count : [6, 14, 18].all (fun m => pClassCount m == m) = true := by
-  native_decide
+  decide
 
 theorem path_assoc_max_6  : pAssocMax 6  = 12 := by native_decide
 theorem path_assoc_max_14 : pAssocMax 14 = 44 := by native_decide

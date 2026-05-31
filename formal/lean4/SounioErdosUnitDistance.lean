@@ -137,7 +137,7 @@ def chromaticNumber (edge : Nat → Nat → Bool) : Nat :=
 /-- Classical unit-distance graph of the probe has chromatic number exactly 2
     (it has edges, and integer dist² = 1 forces bipartiteness). -/
 theorem classical_chromatic_eq_two :
-    chromaticNumber classEdge = 2 := by native_decide
+    chromaticNumber classEdge = 2 := by decide
 
 /-- ZD surgery is NOT trivial on this probe: at least one of the 84 primitives
     changes the edge set vs. the classical graph. (Without this, the negative
@@ -303,7 +303,7 @@ theorem left_surgery_total_parity_2colors :
 
 /-- Canonical first valid primitive (Sounio c=0): e₁ + e₁₀. -/
 def cWit : PrimSed := ⟨1, 10, false⟩
-theorem cWit_is_first : validPrims.head? = some cWit := by native_decide
+theorem cWit_is_first : validPrims.head? = some cWit := by decide
 
 /-- General sedenion product: (x·y)_k = Σ_{a⊕b=k} x_a y_b σ(a,b). -/
 def sprodV (x y : Nat → Int) : Nat → Int := fun k =>
