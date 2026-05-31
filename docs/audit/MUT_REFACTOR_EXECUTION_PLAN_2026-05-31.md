@@ -19,6 +19,46 @@ as the routing completes."
 Branch `modular/move-codegen` (worktree `/workspace/sounio-move-codegen`, forked from
 `modular/mut-checker-refactor` @ `0e19f261a`). **Worktree is CLEAN — no edits made this session.**
 
+## ✅✅ INCREMENT 1 LANDED + COMMITTED (2026-05-31, fresh session) — first `--check rc=0` BANKED
+
+The Gc+spine-entry frame-isolation increment is **done, gated, and committed** (no longer just a draft).
+Edits to `self-hosted/check/check.sio` (one file, bin/souc untouched):
+1. `checker_collect_item_inplace` `_` arm → `_ => {}` (was the 8MB by-value `(*c).collect_item`).
+   **Documented correctness gap:** user struct/enum/impl/policy decls no longer collected → programs
+   that USE them are not yet checked. Gc *mut collectors are the next correctness step.
+2. `checker_check_item_inplace` ItemImpl → new leaf `checker_check_impl_item_bridge` (isolates the
+   8MB check_impl_item SRET out of the hot frame; impl-free programs no longer carry it).
+3. multitest E042: `(*c).report_multitest_correction_required(...)` by-value Checker copy → new *mut
+   leaf `checker_report_multitest_correction_required_inplace` (mutates (*c) scalars + prints; no copy).
+4. The two `(*c).fn_sigs.get(sig_id)` reads in `checker_check_fn_item_inplace` are LEFT as proven
+   by-value `.find`/`.get` — they copy only the ~38KB FnSigTable, never the 8MB Checker, so they're
+   immaterial against the 8MB budget. (FnSig is ~600B, NOT the 1.7MB earlier notes assumed.) A direct
+   `(*c).fn_sigs.entries[idx].field` read variant (mc_v1) was built and is behaviorally IDENTICAL on
+   every runnable input, but could NOT be VALIDATED this session: the only error path that consumes
+   the read (a real return-type mismatch, `fn g()->bool{5}` or `return 5`) crashes rc=139 on the
+   unconverted expr/Return spine on BOTH variants. So the conservative proven path ships; revisit
+   direct-read WITH a real return-mismatch gate once the expr spine lands.
+
+**GATE RESULTS (mc.elf = bin/souc compiling main.sio, then `ulimit -s 8192; mc.elf --check`):**
+- `fn main(){}` → **`check: OK` rc=0 ×5** (was rc=139). **First --check success ever on this branch.**
+- `struct P{a}`+main → **`check: OK` rc=0 ×5** (vacuous: P unused; collection skipped per gap above).
+- `fn main(){let x=1}` → rc=139 (UNCHANGED — expr/let spine not yet converted; next increment).
+- `run_pass_output_gate.sh` → PASS, no regression (88 PASS; bin/souc unaffected).
+- bin/souc compiles main.sio rc=0, **0 errors**. Frame-warning count 86 (the empty-main *path*
+  frames dropped below 8MB; total count unchanged because off-path by-value fns still warn).
+
+**Read-style settled (the gates were insensitive to it):** the passing gates (`fn main(){}`,
+`struct_p`) yield `check: OK` under EVERY read-failure mode — empty/unit bodies never reach the one
+error path that consumes the return-type read, so they validate the frame fix but NOT the read value.
+A sensitive test (`return 5` / `fn g()->bool{5}`) crashes rc=139 on BOTH the direct-read (mc_v1) and
+`.get()` (mc_v2) builds (its body routes through the unconverted expr/Return spine) → the read is
+**untestable this session**. Conservative call for the canonical compiler: ship the proven `.get()`
+version. `fn f()->i64{}`→`check: OK` is identical on both builds — consistent with (but not proof of)
+pre-existing empty-body leniency. ⚠️ The real return-mismatch gate (`fn g()->bool{5}`) becomes
+available once the expr/Return spine lands; use it to validate direct-read before adopting it.
+
+**NEXT INCREMENT:** G1 + expr spine so `fn main(){let x=1}` reaches rc=0 (see "NEXT BLOCKER" below).
+
 ## ✅ SESSION FINDINGS — CURE EMPIRICALLY VALIDATED (2026-05-31, "beat the montanha")
 
 Live experiments on freshly-built mc.elf (bin/souc compiling main.sio, 2.5min each):
