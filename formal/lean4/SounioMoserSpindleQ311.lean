@@ -184,18 +184,13 @@ theorem basis_independent :
     SounioSqrt.RealCauchyField.Multiquad.IndepMultiquad [3, 11] :=
   SounioSqrt.RealCauchyField.Multiquad.indep_3_11
 
-/-! ## 7. Corollary for `ℝ²` (intended reading).
+/-! ## 7. Corollary for `ℝ²`.
 
-`q311_plane_needs_4_colours` is the χ ≥ 4 statement over the *exact* `ℚ(√3,√11)`-arithmetic
-plane `Qf × Qf`. Because `ℚ(√3,√11)` embeds into the from-scratch reals `Real`
-(`Multiquad.sqrtR 3 = rootR 0`, `sqrtR 11 = rootR 3`, with `sqrtR_sq` certifying `(√p)² = p`),
-each `Qf` point is a genuine real point and each unit pair (`dist² = 144`) is a real unit pair.
-Hence χ(ℝ²) ≥ 4 follows by restricting any real 3-colouring to the 7 embedded spindle points.
-
-The fully mechanised `Real × Real` instance requires the ring-homomorphism
-`φ : Qf → Real` (`φ(x·y) = φx · φy`, the `{3,11}` analogue of `E_sq4`); it is the natural next
-step and is *not* yet discharged here — `q311_plane_needs_4_colours` stands unconditionally over
-the exact field plane, which is the precise content of Madore's ℚ(√3,√11) bound. -/
+The exact field-plane bound `q311_plane_needs_4_colours` is the Madore base case over
+`Qf × Qf`.  The ring homomorphism `phi311 : Qf → Real` (`E_mul311` in
+`SounioMoserSpindleQ311Real`) embeds the spindle into `Real × Real`; spindle edges have
+`dist² = 144` at the native `×12` integer scale (`MoserSpindleQ311.RealPlane.chi_R2_ge_4`).
+Rescaling the plane by `1/12` turns those into Euclidean unit edges, so χ(ℝ²) ≥ 4. -/
 
 #print axioms edges_unit
 #print axioms spindle_not_3_colourable

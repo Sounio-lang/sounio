@@ -247,6 +247,10 @@ lean_lib «SounioMultiquadParam» where
 -- `lake build SounioMoserSpindleQ311`.
 lean_lib «SounioMoserSpindleQ311» where
 
+-- Madore spindle χ(ℝ²) ≥ 4: embeds the ℚ(√3,√11) spindle into Mathlib-free `Real`.
+-- `lake build SounioMoserSpindleQ311Real`.
+lean_lib «SounioMoserSpindleQ311Real» where
+
 -- G529 / de Grey χ≥5 on the parametric MultiquadField [3,5,11]: packages the degree-8 witness
 -- field, radS↔evalNum bridge, indep8 recovery, and q3511_plane_needs_5_colours (re-export of
 -- g529_field_plane_chi_ge_5). Heavy (pulls SounioDeGreyChi5Closed + G529 cert).

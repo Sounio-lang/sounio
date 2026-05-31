@@ -1,5 +1,15 @@
 # LLM Offload Log
 
+## 2026-05-31: χ(ℝ²) ≥ 4 — Moser spindle Real embedding (`SounioMoserSpindleQ311Real`)
+
+- **Claim (math)**: `formal/lean4/SounioMoserSpindleQ311Real.lean` — `phi311 : Qf → Real` via
+  `alpha311 = alpha4(·,·,0,0) + alpha4(·,·,0,0)·√11`; `E_mul311`/`phi311_mul` (ring homomorphism);
+  `dist2Real_emb`; `chi_R2_ge_4` over `Real × Real` with spindle-native unit predicate
+  `dist² = 144` (`unitReal144`). `lake build SounioMoserSpindleQ311Real` exit 0; no `sorry`.
+- **Offload (policy)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 flagged `alpha4_00`
+  (`rootR 0` vs √3). **Dismissed**: in `SounioMultiquadIndep`, `rootR 0 = √3` by construction
+  (`primeNatLit 0 = 3`); `alpha4 a b 0 0 = a + b·rootR 0` is correct. Remaining pipeline [OK].
+
 ## 2026-05-31: G529 migrated to parametric MultiquadField [3,5,11]
 
 - **Claim (math)**: `formal/lean4/SounioDeGreyChi5Param.lean` — re-frames de Grey G₅₂₉ on
