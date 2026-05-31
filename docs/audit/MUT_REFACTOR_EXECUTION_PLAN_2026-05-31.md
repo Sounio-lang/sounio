@@ -53,6 +53,20 @@ check_var_stmt, check_assign_stmt → *mut; (d) the expr subtree behind check_ex
 check_call_expr, check_field_access, check_method_call → *mut. Gate each with `--check` at 8MB on the
 input that exercises only the converted path (min_empty → min_let → two_fn → hello).
 
+## ⚠️ EMPIRICAL CORRECTION to the spec-workflow recipe (2026-05-31, tested)
+The recipe (MUT_EXPR_SPINE_RECIPE_2026-05-31.json) claims extracting collect_item_inplace's `_`
+arm into a leaf bridge is "necessary-and-sufficient for the collect-side frame." **FALSE, tested:**
+with the bridge extracted, `fn main(){}` STILL crashes rc=139 at 8MB — because the prelude carries
+non-fn items that hit the bridge, and the bridge's own `(*c).collect_item(item)` by-value call has
+the 8MB frame (just relocated, not removed). The ONLY validated collect states for `fn main(){}`:
+(1) `_ => {}` (skip) → PASSES (but skips real user struct/enum collection); (2) full *mut collectors
+for EVERY prelude kind → would pass + be correct. Bridge-extraction-alone is WORSE than skip (turns
+min_empty from pass→crash). OPEN QUESTION for next session: is the per-program prelude (one item of
+~13 non-fn kinds) REDUNDANT with checker_init_in_place's register_builtin_* (in which case `_ => {}`
+is correct), or real declarations needing collection? Resolve this BEFORE choosing skip vs full
+convert. (The "15 phantom items" earlier was layout-sensitive corruption from by-value bloat, not 15
+real items — a clean minimal collect path showed 1.)
+
 ## ⚠️ CRITICAL CONVERSION RULE (learned the hard way, 2026-05-31)
 
 **A by-value Checker-returning call allocates its 8MB SRET buffer in the ENCLOSING function's
