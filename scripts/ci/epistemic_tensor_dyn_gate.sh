@@ -58,3 +58,15 @@ rm -rf "$TMP"
 echo ""
 if [[ $fails -ne 0 ]]; then echo "epistemic_tensor_dyn_gate: FAIL ($fails)"; exit 1; fi
 echo "epistemic_tensor_dyn_gate: PASS (8/8)"
+
+# Lean soundness theorem (machine-checked, no sorry) — run if lean is available
+LEAN="$HOME/.elan/bin/lean"
+if [[ -x "$LEAN" ]]; then
+  echo "── theorem: type-bound soundness machine-checked in Lean ──"
+  if "$LEAN" "$ROOT/formal/lean4/SounioEpistemicTensorBound.lean" >/dev/null 2>&1 \
+     && ! grep -qE "sorry|admit" "$ROOT/formal/lean4/SounioEpistemicTensorBound.lean"; then
+    echo "  PASS SounioEpistemicTensorBound.lean (matmul_var_sound, no sorry)"
+  else
+    echo "  FAIL Lean soundness proof"; exit 1
+  fi
+fi
