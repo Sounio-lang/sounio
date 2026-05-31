@@ -40,6 +40,39 @@ Primary scripts:
 - `required` mode is fail-closed.
 - `auto` mode reports `not_run` for non-pass paths.
 
+## CUDA toolchain provenance (`toolchain` field)
+
+GPU artifacts pin `souc_version`, but ptxas codegen and cuBLAS baselines change
+across CUDA toolkit major versions — so a measured/attested result is only
+comparable when the **toolchain that produced it** is recorded alongside it. As of
+2026-05-30 **all GPU attestation artifacts carry it** — `gpu_codegen_parity.v1`,
+`gpu_binary_attestation.v1`, `gpu_runtime_attest_gate.v1`, `gpu_public_contract.v1`,
+`gpu_comprehensive_run.v1`, and the `l4-optimized-no-rust.v2` perf report — a
+`toolchain` object captured on the host that ran ptxas / the kernels:
+
+```json
+"toolchain": {
+  "captured_at_utc": "…Z", "captured_on": "user@host",
+  "capture_status": "ok|partial|unavailable|not_captured",
+  "cuda_release": "13.3", "nvcc_version": "…", "ptxas_version": "…",
+  "driver_version": "610.43.02", "gpu_name": "Quadro RTX 8000",
+  "gpu_compute_cap": "7.5", "cuda_version_json": "…", "probe_host": "…"
+}
+```
+
+- Single source of truth: `scripts/omega/omega_capture_toolchain.sh`
+  (`omega_capture_toolchain.sh user@host` over ssh; bare = local). Always emits a
+  well-formed object; absent tools → `""` and a downgraded `capture_status`.
+- `not_captured` means the host was unreachable / the gate short-circuited before
+  capture — it never blocks a gate.
+- Companion to the existing kretikos `toolchain_validation` block (which records
+  *whether* ptxas/nvdisasm validated; this records *which versions*).
+- Wiring: the producing gates (`codegen_parity`, `binary_attestation`,
+  `runtime_attest`, perf bench) capture directly (env `OMEGA_GPU_TOOLCHAIN_JSON`
+  overrides → local/remote capture → `not_captured`). The aggregators
+  (`public_contract`, `comprehensive_run`) surface it from whichever sub-artifact
+  captured a real value (runtime → parity → binary).
+
 ## `sounio.kretikos.bundle.v1`
 
 Purpose: show the local Kretikos CLI can emit both GPU artifact families from
