@@ -1,0 +1,59 @@
+//@ run-pass
+//! CAPACITY WITNESS — proves the dragon is dead.
+//!
+//! A width-512 epistemic dense layer: a 512-wide activation row and a 512×512
+//! weight tensor (262,144 epistemic weights). The legacy stdlib/linalg/
+//! epistemic_tensor.sio caps a tensor at [f64; 256] TOTAL elements; even a
+//! single 512-wide row is impossible there. This runs green on the dynamic
+//! heap tensor, with GUM uncertainty propagated through all 512 contractions.
+//!
+//! Hand-check (input all val=1, u=0.01; weights all val=1, u=0; bias 0; no act):
+//!   out[0,j] = Σ_{k=0..511} 1·1 = 512
+//!   var      = Σ_k (1²·0.01² + 1²·0²) = 512·0.0001 = 0.0512 ; u = √0.0512
+//!   conf     = (0.98 matmul) · (0.99 sum) · (0.99 bias) = 0.960498
+
+use linalg::epistemic_tensor_dyn::*
+use nn::epistemic_dense_n::*
+
+fn near(a: f64, b: f64, tol: f64) -> bool { etd_abs(a - b) <= tol }
+
+fn main() with IO, Alloc, Mut, Panic, Div {
+    let n = 512
+
+    // Layer: 512 → 512, no activation.
+    var layer = epi_dense_new(n, n, epi_act_none())
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            epi_dense_set_weight(&!layer, i, j, 1.0, 0.0, 1.0)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // bias all zero (already from alloc, conf 1.0)
+
+    // Input: 1 × 512, each value 1.0 with std-uncertainty 0.01.
+    var input = etd_alloc(1, n)
+    var k = 0
+    while k < n {
+        etd_set(&!input, 0, k, 1.0, 0.01, 1.0)
+        k = k + 1
+    }
+
+    var out = epi_dense_forward(&layer, &input)
+
+    let ok_v = near(etd_val(&out, 0, 0), 512.0, 0.000001)
+    let ok_u = near(etd_unc(&out, 0, 0), 0.2262741700, 0.000001)
+    let ok_c = near(etd_conf(&out, 0, 0), 0.960498, 0.00001)
+    // spot-check the far end of the 512-wide row too
+    let ok_far = near(etd_val(&out, 0, 511), 512.0, 0.000001)
+
+    epi_dense_free(&!layer); etd_free(&!input); etd_free(&!out)
+
+    if ok_v && ok_u && ok_c && ok_far {
+        println("EPI_CAPACITY_512_PASS")
+    } else {
+        println("EPI_CAPACITY_512_FAIL")
+    }
+}

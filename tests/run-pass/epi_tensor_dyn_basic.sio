@@ -1,0 +1,48 @@
+//@ run-pass
+//! Exercises the dynamic-width epistemic tensor module: matmul (value + GUM
+//! uncertainty + confidence decay), bias-add, and sigmoid activation, all
+//! checked against hand-computed expectations.
+
+use linalg::epistemic_tensor_dyn::*
+
+fn near(a: f64, b: f64, tol: f64) -> bool { etd_abs(a - b) <= tol }
+
+fn main() with IO, Alloc, Mut, Panic, Div {
+    // A = [[1,2],[3,4]], B = [[5,6],[7,8]], all std u = 0.1, conf = 1.0
+    var a = etd_alloc(2, 2)
+    var b = etd_alloc(2, 2)
+    etd_set(&!a, 0, 0, 1.0, 0.1, 1.0); etd_set(&!a, 0, 1, 2.0, 0.1, 1.0)
+    etd_set(&!a, 1, 0, 3.0, 0.1, 1.0); etd_set(&!a, 1, 1, 4.0, 0.1, 1.0)
+    etd_set(&!b, 0, 0, 5.0, 0.1, 1.0); etd_set(&!b, 0, 1, 6.0, 0.1, 1.0)
+    etd_set(&!b, 1, 0, 7.0, 0.1, 1.0); etd_set(&!b, 1, 1, 8.0, 0.1, 1.0)
+
+    var c = etd_matmul(&a, &b)
+    // C[0,0] = 1*5 + 2*7 = 19 ; var = 0.79 ; u = sqrt(0.79) ≈ 0.8888194
+    // conf  = (min(1,1)*0.98) * 0.99 = 0.9702
+    let ok_v = near(etd_val(&c, 0, 0), 19.0, 0.000000001)
+    let ok_u = near(etd_unc(&c, 0, 0), 0.8888194417, 0.000001)
+    let ok_c = near(etd_conf(&c, 0, 0), 0.9702, 0.00001)
+
+    // bias = [10, 20], exact (u=0, conf=1)
+    var bias = etd_alloc(1, 2)
+    etd_set(&!bias, 0, 0, 10.0, 0.0, 1.0); etd_set(&!bias, 0, 1, 20.0, 0.0, 1.0)
+    etd_add_bias(&!c, &bias)
+    // C[0,0] = 19 + 10 = 29 ; u unchanged (bias u=0) ; conf = min(0.9702,1)*0.99
+    let ok_bv = near(etd_val(&c, 0, 0), 29.0, 0.000000001)
+    let ok_bu = near(etd_unc(&c, 0, 0), 0.8888194417, 0.000001)
+
+    // sigmoid on a fresh 1x1: x=0, u=0.2 → σ=0.5, deriv=0.25, u=0.25*0.2=0.05
+    var s = etd_alloc(1, 1)
+    etd_set(&!s, 0, 0, 0.0, 0.2, 1.0)
+    etd_sigmoid(&!s)
+    let ok_sv = near(etd_val(&s, 0, 0), 0.5, 0.0001)
+    let ok_su = near(etd_unc(&s, 0, 0), 0.05, 0.0001)
+
+    etd_free(&!a); etd_free(&!b); etd_free(&!c); etd_free(&!bias); etd_free(&!s)
+
+    if ok_v && ok_u && ok_c && ok_bv && ok_bu && ok_sv && ok_su {
+        println("EPI_TENSOR_DYN_BASIC_PASS")
+    } else {
+        println("EPI_TENSOR_DYN_BASIC_FAIL")
+    }
+}

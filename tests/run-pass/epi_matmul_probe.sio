@@ -1,0 +1,108 @@
+//@ run-pass
+//! P1 de-risk probe for the dynamic-width epistemic tensor (the "dragon").
+//!
+//! Proves the heap `*mut f64` struct-of-arrays pattern + GUM variance
+//! propagation compiles and runs correctly on the canonical compiler, BEFORE
+//! building the full stdlib module. NOT the final API — a minimal 2x2 witness.
+//!
+//! Honesty: width here is a runtime value (rows/cols fields), not a const
+//! generic (Sounio has none). Storage is struct-of-arrays f64 on the heap,
+//! mirroring stdlib/tensor — the proven-safe pattern, never bare-array mutation.
+
+// Minimal dynamic epistemic tensor: 3 parallel heap arrays, runtime dims.
+struct EpiMat {
+    vals: *mut f64,   // point estimates
+    uncs: *mut f64,   // standard uncertainties (std u, NOT variance)
+    rows: i64,
+    cols: i64,
+}
+
+fn epi_alloc(rows: i64, cols: i64) -> EpiMat with Alloc {
+    let n = (rows * cols) as usize
+    let bytes = n * 8 as usize
+    let v = heap_alloc(bytes) as *mut f64
+    let u = heap_alloc(bytes) as *mut f64
+    EpiMat { vals: v, uncs: u, rows: rows, cols: cols }
+}
+
+fn epi_set(m: &!EpiMat, i: i64, j: i64, val: f64, unc: f64) with Mut, Panic {
+    let off = i * m.cols + j
+    write_f64(m.vals, off, val)
+    write_f64(m.uncs, off, unc)
+}
+
+fn epi_val(m: &EpiMat, i: i64, j: i64) -> f64 with Panic {
+    read_f64(m.vals, i * m.cols + j)
+}
+
+fn epi_unc(m: &EpiMat, i: i64, j: i64) -> f64 with Panic {
+    read_f64(m.uncs, i * m.cols + j)
+}
+
+// Local Newton sqrt (avoid import friction in the probe).
+fn p_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k = 0
+    while k < 40 {
+        g = 0.5 * (g + x / g)
+        k = k + 1
+    }
+    g
+}
+
+fn p_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// Epistemic matmul: C = A @ B. value = Σ a·b;
+// variance(C_ij) = Σ_k [ b_kj² · u(a_ik)² + a_ik² · u(b_kj)² ]  (GUM delta method,
+// independent terms). u(C_ij) = sqrt(variance).
+fn epi_matmul(a: &EpiMat, b: &EpiMat) -> EpiMat with Alloc, Mut, Panic, Div {
+    var c = epi_alloc(a.rows, b.cols)
+    var i = 0
+    while i < a.rows {
+        var j = 0
+        while j < b.cols {
+            var sum = 0.0
+            var varc = 0.0
+            var k = 0
+            while k < a.cols {
+                let av = epi_val(a, i, k)
+                let au = epi_unc(a, i, k)
+                let bv = epi_val(b, k, j)
+                let bu = epi_unc(b, k, j)
+                sum = sum + av * bv
+                varc = varc + bv * bv * au * au + av * av * bu * bu
+                k = k + 1
+            }
+            epi_set(&!c, i, j, sum, p_sqrt(varc))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    c
+}
+
+fn main() with IO, Alloc, Mut, Panic, Div {
+    var a = epi_alloc(2, 2)
+    var b = epi_alloc(2, 2)
+    // A = [[1,2],[3,4]], B = [[5,6],[7,8]], all std u = 0.1
+    epi_set(&!a, 0, 0, 1.0, 0.1); epi_set(&!a, 0, 1, 2.0, 0.1)
+    epi_set(&!a, 1, 0, 3.0, 0.1); epi_set(&!a, 1, 1, 4.0, 0.1)
+    epi_set(&!b, 0, 0, 5.0, 0.1); epi_set(&!b, 0, 1, 6.0, 0.1)
+    epi_set(&!b, 1, 0, 7.0, 0.1); epi_set(&!b, 1, 1, 8.0, 0.1)
+
+    let c = epi_matmul(&a, &b)
+
+    // Expected C[0,0] = 1*5 + 2*7 = 19
+    // var = 5²·0.01 + 1²·0.01 + 7²·0.01 + 2²·0.01 = 0.79 ; u = sqrt(0.79)
+    let v00 = epi_val(&c, 0, 0)
+    let u00 = epi_unc(&c, 0, 0)
+    let v_ok = p_abs(v00 - 19.0) < 0.000000001
+    let u_ok = p_abs(u00 - 0.8888194417) < 0.000001
+
+    if v_ok && u_ok {
+        println("EPI_MATMUL_PROBE_PASS")
+    } else {
+        println("EPI_MATMUL_PROBE_FAIL")
+    }
+}

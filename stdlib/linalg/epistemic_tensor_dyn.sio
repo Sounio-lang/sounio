@@ -1,0 +1,208 @@
+// stdlib::linalg::epistemic_tensor_dyn — dynamic-width epistemic tensor.
+//
+// THE DRAGON. The existing stdlib/linalg/epistemic_tensor.sio caps every tensor
+// at a fixed [f64; 256] inline array; stdlib/nn/epistemic_layer.sio hardcodes
+// width 4. This module lifts that cap: a 2-D epistemic matrix whose width is a
+// RUNTIME value, stored as three parallel heap arrays (struct-of-arrays), the
+// same proven-safe pattern as stdlib/tensor (`data: *mut f64` + read_f64/
+// write_f64 builtins) — never bare-array mutation (broken, Gotcha #12).
+//
+// HONESTY BOUNDARIES:
+//   * "dynamic width" = runtime rows/cols, NOT compile-time const generics
+//     (Sounio has none — stdlib/ml/pac.sio:112). No compile-time shape safety.
+//   * Storage is struct-of-arrays f64. Each element carries (value, std-
+//     uncertainty u, confidence∈[0,1]). The conceptual "Knowledge<f64> weight"
+//     reappears as a TYPE only at the boundary-lift (see stdlib/nn/epi_certify).
+//   * Uncertainty propagation is the GUM delta method assuming INDEPENDENT
+//     inputs (no covariance term). Confidence decays multiplicatively, matching
+//     the per-op decay in stdlib/epistemic/knowledge.sio (mul ×0.98, add ×0.99).
+
+pub struct DynEpiTensor {
+    vals: *mut f64,   // point estimates
+    uncs: *mut f64,   // standard uncertainties (std u, NOT variance)
+    confs: *mut f64,  // confidence in [0,1]
+    rows: i64,
+    cols: i64,
+}
+
+// ---- scalar helpers (self-contained; avoid import coupling) ----
+
+pub fn etd_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+pub fn etd_fmin(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+pub fn etd_fmax(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+// Newton sqrt. Local var mutation requires Mut; division requires Div.
+pub fn etd_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+// exp via scaled Taylor (sufficient for sigmoid over typical pre-activations).
+pub fn etd_exp(x: f64) -> f64 with Mut, Div, Panic {
+    // range-reduce: e^x = (e^(x/n))^n with n=64
+    var t = x / 64.0
+    var term = 1.0
+    var sum = 1.0
+    var i = 1
+    while i < 16 {
+        term = term * t / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    // raise to the 64th power by repeated squaring (2^6 = 64)
+    var r = sum
+    var p = 0
+    while p < 6 { r = r * r; p = p + 1 }
+    r
+}
+
+// ---- allocation / element access ----
+
+fn etd_idx(t: &DynEpiTensor, i: i64, j: i64) -> i64 { i * t.cols + j }
+
+// Allocate a rows×cols tensor, zero-initialised, conf = 1.0 (asserted certain).
+pub fn etd_alloc(rows: i64, cols: i64) -> DynEpiTensor with Alloc, Mut, Panic {
+    let n = (rows * cols) as usize
+    let bytes = n * 8 as usize
+    let v = heap_alloc(bytes) as *mut f64
+    let u = heap_alloc(bytes) as *mut f64
+    let c = heap_alloc(bytes) as *mut f64
+    var t = DynEpiTensor { vals: v, uncs: u, confs: c, rows: rows, cols: cols }
+    var off = 0
+    let total = rows * cols
+    while off < total {
+        write_f64(t.vals, off, 0.0)
+        write_f64(t.uncs, off, 0.0)
+        write_f64(t.confs, off, 1.0)
+        off = off + 1
+    }
+    t
+}
+
+pub fn etd_free(t: &!DynEpiTensor) with Alloc, Mut {
+    if t.vals != 0 as *mut f64 { heap_free(t.vals as *mut i8); t.vals = 0 as *mut f64 }
+    if t.uncs != 0 as *mut f64 { heap_free(t.uncs as *mut i8); t.uncs = 0 as *mut f64 }
+    if t.confs != 0 as *mut f64 { heap_free(t.confs as *mut i8); t.confs = 0 as *mut f64 }
+}
+
+pub fn etd_set(t: &!DynEpiTensor, i: i64, j: i64, val: f64, unc: f64, conf: f64) with Mut, Panic {
+    let o = i * t.cols + j
+    write_f64(t.vals, o, val)
+    write_f64(t.uncs, o, unc)
+    write_f64(t.confs, o, conf)
+}
+
+// Convenience: a measured element (conf 0.9, like Epistemic::measured).
+pub fn etd_set_measured(t: &!DynEpiTensor, i: i64, j: i64, val: f64, std: f64) with Mut, Panic {
+    etd_set(t, i, j, val, std, 0.9)
+}
+
+// Convenience: an exact/certain element (zero uncertainty, conf 1.0).
+pub fn etd_set_certain(t: &!DynEpiTensor, i: i64, j: i64, val: f64) with Mut, Panic {
+    etd_set(t, i, j, val, 0.0, 1.0)
+}
+
+pub fn etd_val(t: &DynEpiTensor, i: i64, j: i64) -> f64 with Panic { read_f64(t.vals, i * t.cols + j) }
+pub fn etd_unc(t: &DynEpiTensor, i: i64, j: i64) -> f64 with Panic { read_f64(t.uncs, i * t.cols + j) }
+pub fn etd_conf(t: &DynEpiTensor, i: i64, j: i64) -> f64 with Panic { read_f64(t.confs, i * t.cols + j) }
+pub fn etd_rows(t: &DynEpiTensor) -> i64 { t.rows }
+pub fn etd_cols(t: &DynEpiTensor) -> i64 { t.cols }
+
+// ---- the core op: batched epistemic matmul  C[m×p] = A[m×k] @ B[k×p] ----
+//
+// value:       C_ij = Σ_k A_ik · B_kj
+// variance:    var(C_ij) = Σ_k [ B_kj² · u(A_ik)² + A_ik² · u(B_kj)² ]   (GUM, independent)
+// uncertainty: u(C_ij) = sqrt(variance)
+// confidence:  min over the contributing elements, decayed per mul (×0.98)
+//              and once per the accumulating sum (×0.99).
+pub fn etd_matmul(a: &DynEpiTensor, b: &DynEpiTensor) -> DynEpiTensor with Alloc, Mut, Panic, Div {
+    if a.cols != b.rows { assert(false) }
+    var c = etd_alloc(a.rows, b.cols)
+    var i = 0
+    while i < a.rows {
+        var j = 0
+        while j < b.cols {
+            var sum = 0.0
+            var varc = 0.0
+            var cmin = 1.0
+            var k = 0
+            while k < a.cols {
+                let av = read_f64(a.vals, i * a.cols + k)
+                let au = read_f64(a.uncs, i * a.cols + k)
+                let ac = read_f64(a.confs, i * a.cols + k)
+                let bv = read_f64(b.vals, k * b.cols + j)
+                let bu = read_f64(b.uncs, k * b.cols + j)
+                let bc = read_f64(b.confs, k * b.cols + j)
+                sum = sum + av * bv
+                varc = varc + bv * bv * au * au + av * av * bu * bu
+                let tc = etd_fmin(ac, bc) * 0.98
+                cmin = etd_fmin(cmin, tc)
+                k = k + 1
+            }
+            etd_set(&!c, i, j, sum, etd_sqrt(varc), cmin * 0.99)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    c
+}
+
+// Add a row-vector bias [1×cols] to every row of C [m×cols], in place.
+// GUM add: var += bias_var; conf = min(conf, bias_conf) × 0.99.
+pub fn etd_add_bias(c: &!DynEpiTensor, bias: &DynEpiTensor) with Mut, Div, Panic {
+    if bias.cols != c.cols { assert(false) }
+    var i = 0
+    while i < c.rows {
+        var j = 0
+        while j < c.cols {
+            let o = i * c.cols + j
+            let cv = read_f64(c.vals, o)
+            let cu = read_f64(c.uncs, o)
+            let cc = read_f64(c.confs, o)
+            let bv = read_f64(bias.vals, j)
+            let bu = read_f64(bias.uncs, j)
+            let bc = read_f64(bias.confs, j)
+            write_f64(c.vals, o, cv + bv)
+            write_f64(c.uncs, o, etd_sqrt(cu * cu + bu * bu))
+            write_f64(c.confs, o, etd_fmin(cc, bc) * 0.99)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// ---- activations (in place) with delta-method uncertainty ----
+
+// ReLU: value max(0,x); derivative 1 (x>0) else 0 → u scales by the derivative.
+pub fn etd_relu(t: &!DynEpiTensor) with Mut, Panic {
+    var off = 0
+    let total = t.rows * t.cols
+    while off < total {
+        let v = read_f64(t.vals, off)
+        if v <= 0.0 {
+            write_f64(t.vals, off, 0.0)
+            write_f64(t.uncs, off, 0.0)
+        }
+        off = off + 1
+    }
+}
+
+// Sigmoid: a = σ(x); a' = a(1-a) → u(a) = |a(1-a)| · u(x). conf decays ×0.98.
+pub fn etd_sigmoid(t: &!DynEpiTensor) with Mut, Div, Panic {
+    var off = 0
+    let total = t.rows * t.cols
+    while off < total {
+        let v = read_f64(t.vals, off)
+        let u = read_f64(t.uncs, off)
+        let cc = read_f64(t.confs, off)
+        let a = 1.0 / (1.0 + etd_exp(0.0 - v))
+        let deriv = a * (1.0 - a)
+        write_f64(t.vals, off, a)
+        write_f64(t.uncs, off, etd_abs(deriv) * u)
+        write_f64(t.confs, off, cc * 0.98)
+        off = off + 1
+    }
+}

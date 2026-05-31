@@ -1,0 +1,64 @@
+// stdlib::nn::epistemic_dense_n — width-N epistemic dense layer.
+//
+// A fully-connected layer of ARBITRARY (runtime) width, built on the dynamic
+// epistemic tensor. Replaces the hardcoded width-4 EpistemicDenseLayer4 in
+// stdlib/nn/epistemic_layer.sio. Every weight and bias carries (value, std-
+// uncertainty, confidence); the forward pass propagates GUM uncertainty through
+// matmul + bias + activation.
+//
+// HONESTY: width is a runtime value (the weight tensor's shape), NOT a const
+// generic. No compile-time width checking — a shape mismatch asserts at runtime.
+
+use linalg::epistemic_tensor_dyn::*
+
+// activation codes
+pub fn epi_act_none() -> i64 { 0 }
+pub fn epi_act_relu() -> i64 { 1 }
+pub fn epi_act_sigmoid() -> i64 { 2 }
+
+pub struct EpiDenseN {
+    weights: DynEpiTensor,  // [in_features × out_features]
+    bias: DynEpiTensor,     // [1 × out_features]
+    activation: i64,
+    in_features: i64,
+    out_features: i64,
+}
+
+// Construct a layer with zeroed weights/bias (caller fills via the tensors).
+pub fn epi_dense_new(in_features: i64, out_features: i64, activation: i64) -> EpiDenseN with Alloc, Mut, Panic {
+    EpiDenseN {
+        weights: etd_alloc(in_features, out_features),
+        bias: etd_alloc(1, out_features),
+        activation: activation,
+        in_features: in_features,
+        out_features: out_features,
+    }
+}
+
+pub fn epi_dense_free(layer: &!EpiDenseN) with Alloc, Mut {
+    etd_free(&!layer.weights)
+    etd_free(&!layer.bias)
+}
+
+// Accessors so callers can set/read individual epistemic weights/biases.
+pub fn epi_dense_set_weight(layer: &!EpiDenseN, i: i64, j: i64, val: f64, unc: f64, conf: f64) with Mut, Panic {
+    etd_set(&!layer.weights, i, j, val, unc, conf)
+}
+pub fn epi_dense_set_bias(layer: &!EpiDenseN, j: i64, val: f64, unc: f64, conf: f64) with Mut, Panic {
+    etd_set(&!layer.bias, 0, j, val, unc, conf)
+}
+
+// Forward: output[batch × out] = activation( input[batch × in] @ W + b ).
+// Allocates and returns the output; caller frees it.
+pub fn epi_dense_forward(layer: &EpiDenseN, input: &DynEpiTensor) -> DynEpiTensor with Alloc, Mut, Panic, Div {
+    var out = etd_matmul(input, &layer.weights)
+    etd_add_bias(&!out, &layer.bias)
+    if layer.activation == 1 {
+        etd_relu(&!out)
+    } else {
+        if layer.activation == 2 {
+            etd_sigmoid(&!out)
+        }
+    }
+    out
+}
