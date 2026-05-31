@@ -235,6 +235,18 @@ lean_lib «DeGreyChi5Vitrine» where
 
 lean_lib «SounioMultiquadIndep» where
 
+-- Parametric multiquadratic framework over `primes : List Nat` (generalises the {3,5,11}
+-- ladder of SounioMultiquadIndep). Generic Newton sqrtR, radS/evalS over 2^|S| masks,
+-- HasRadicals/IndepMultiquad, base case + inductive engine (sqrt_new, generic inverse,
+-- indep_multiquad). Mathlib-free. `lake build SounioMultiquadParam`.
+lean_lib «SounioMultiquadParam» where
+
+-- Moser spindle over ℚ(√3,√11) (|S|=2, degree 4): instantiates the parametric framework,
+-- proves the 7-vertex / 11-edge unit-distance geometry (dist²=1 exact) by decide, ¬3-colourable
+-- ⇒ χ≥4, and transfers to χ(ℚ(√3,√11)²) ≥ 4 — the base of Madore's multiquadratic line.
+-- `lake build SounioMoserSpindleQ311`.
+lean_lib «SounioMoserSpindleQ311» where
+
 -- χ≥5 UNCONDITIONAL over Mathlib-free ℝ: feeds the discharged SAT leg
 -- (DeGrey529.Closed.not_VColourable) into SounioRootedFieldReal.chi_R2_ge_5, closing the
 -- QF↪ℝ gap. chi_R2_ge_5_unconditional: the unit-distance graph on the Cauchy-quotient real

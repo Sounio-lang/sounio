@@ -1,5 +1,34 @@
 # LLM Offload Log
 
+## 2026-05-30: Parametric multiquadratic framework + Moser spindle over ℚ(√3,√11) (Madore χ≥4 base)
+
+- **Claim (math)**: two new Mathlib-free files. (1) `formal/lean4/SounioMultiquadParam.lean` —
+  parametric framework over `primes : List Nat`: generic Newton `sqrtR : Nat → Real` with
+  `sqrtR_sq` (`(√p)²=p` for `p≥1`, via `newton_sq_tendsto`); `radS`/`evalS` over `2^|S|` masks;
+  `HasRadicals`/`IndepMultiquad`; base case `indep_base` (via `qR_inj`); generic ℚ-irrationality
+  core `sqrt_new_not_in_Q` (any non-square `m` ⇒ √m∉ℚ, via `no_rat_sqrt`); **generic degree-2
+  domain core `Np_ne_zero`** (`a²−p·b²≠0` for non-square `p`, `(a,b)≠0` — generalises `N5_ne_zero`
+  to arbitrary `p`, kernel of the conjugate inverse); concrete `indep_3_11` (degree 4) and
+  `indep_3_5_11` (degree 8) by bridging to the proven `indep8`; and the explicit open obligation
+  `MultiquadIndepTheorem` (∀S) — *not* an axiom, *not* `sorry`. (2)
+  `formal/lean4/SounioMoserSpindleQ311.lean` — Moser spindle in exact ℚ(√3,√11): 7 vertices ×12,
+  `dist2`, 11 unit edges with `dist²=⟨144,0,0,0⟩` by `decide`, `¬3-colourable` (11 disequalities
+  refuted by `omega`, NO native_decide), `col4` witness ⇒ χ=4, and the generic
+  `UnitDistanceChromatic` reduction ⇒ `q311_plane_needs_4_colours` (χ(ℚ(√3,√11)²)≥4). χ(ℝ²)≥4
+  documented as the intended corollary (needs the `φ:Qf→Real` ring hom; not yet discharged).
+  Axioms: param theorems {propext, Classical.choice, Quot.sound, newton native_decide}; spindle
+  `edges_unit`={propext}, `spindle_not_3_colourable`/`q311_plane_needs_4_colours`={propext,Quot.sound}.
+  `lake build SounioMultiquadParam SounioMoserSpindleQ311` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1, on both
+  files. **All proved statements [OK]**, no bug found. Param: evalS_nil, indep_base, sqrtR_sq,
+  sqrtR_3/5/11, indep_3_11, indep_3_5_11, sqrt_new_not_in_Q, Np_ne_zero all [OK]; `MultiquadIndepTheorem`
+  flagged [TIGHTENABLE] as "correctly left as an explicit obligation; two concrete instances + base
+  case are the only proved fragments" — matches the honest framing. Spindle: edges_unit,
+  long_diagonals_not_unit, spindle_not_3_colourable, spindle_4_colourable, emb_unit,
+  q311_plane_needs_4_colours all [OK]; "conclusion is precisely ¬3-colourable over the Qf plane, not
+  yet ℝ²"; "the sole intended downstream reading (χ(ℝ²)≥4) is explicitly noted as not yet formalised;
+  no overclaim occurs". No `LLM-offload-review:` commit trailer needed (no bug caught).
+
 ## 2026-05-30: Multiquadratic faithfulness — irrationality core (no_rat_sqrt) + edge-level radical support
 
 - **Empirical (no offload needed)**: `_radical_support_probe.lean` edge pass over G₅₂₉ (2670 edges):
@@ -866,3 +895,8 @@ more edge constraints → fewer valid colorings → CDCL converges faster. This 
 | 2026-05-30 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioRealOrderAxiomsImpl.lean | PASS | Canonical ε-eventual order leR + the 7 ordered-field order axioms at representative level. Grok all [OK] incl. the two flagged-fragile: leR_total (classical negation extraction + Cauchy moduli + rat_squeeze ⇒ eventual bₙ≤aₙ) and leR_mul_nonneg (cauchy_bounded + shrinking δ=ε/(Ba+Bb+1+ε) + (x+δ)(y+δ)≥0 expansion, error≤ε). "All listed theorems discharge the representative-level ordered-field axioms; no leaps or missing hypotheses." No sorryAx. Raw: /tmp/llm-offload-sdw5D2/. |
 | 2026-05-30 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioDeGreyChi5Real.lean | PASS | UNCONDITIONAL χ(ℝ²)≥5: fires the discharged SAT leg DeGrey529.Closed.not_VColourable into the conditional chi_R2_ge_5. Grok [OK]: "Direct modus-ponens of the already-proved conditional to the discharged not_VColourable; statement is exactly the conjunction of the two legs." #print axioms = [propext, Classical.choice, Quot.sound] + native_decide reduction axioms (SAT g529_*, geometry geom_all_edges_unitFP/allX_ne/allY_ne, multiquad perm_range_xor, analytic ℝ toolkit); zero sorryAx. Audit: docs/audit/CHI5_REAL_AXIOM_AUDIT_2026-05-30.md. Novelty (NOT first formalisation — vasnesterov/HadwigerNelson exists on Mathlib): docs/research/chi5-mathlib-free-novelty-2026-05-30.md. Raw: /tmp/llm-offload-KELTOz/. |
 | 2026-05-30 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioRootedFieldReal.lean | PASS | Phase 2d+4 assembly: ℝ := Quotient realSetoid into a Mathlib-free RootedField (ordered field + √3,√5,√7,√11, NO total sqrt, NO completeness), then DeGrey529.TransferWf.rootedField_chi_ge_5 fired ⇒ χ(ℝ²)≥5 (conditional on ¬VColourable). Grok all [OK]: every ring/order/inverse/root axiom descends correctly via the congruence lemmas, each reducing to a pointwise Rat identity or already-verified bounded_away/inv_cong/newton_* facts; rootedFieldReal satisfies the interface; "chi_R2_ge_5 statement is tight — the only external hypothesis is the imported SAT negation ¬VColourable; conclusion precisely the non-existence of a 4-colouring." One [TIGHTENABLE] cosmetic note (realEq_of_seq_eq, no downstream effect). "NO MATHEMATICAL ERRORS OR LEAPS THAT AFFECT THE FINAL CLAIM." #print axioms = [propext, Classical.choice, Quot.sound] + native_decide reduction axioms only; zero sorryAx. Raw: /tmp/llm-offload-iHc4Yu/. |
+| 2026-05-30 | review | WAIVED | pbpk_claim_truth_table.md | WAIVED | Truth-table re-audit rows for the Knowledge ε/prov constructor + Contribution 2 (compile-time confidence gates). External fan-out (xai/deepseek) BLOCKED by the Claude Code auto-mode trust-boundary classifier (cannot send a private dissertation doc to an external LLM = exfiltration). Review intent satisfied via the in-session advisor (stronger reviewer) which shaped the conservative wording: per-token (NOT combined) gate semantics, "PBPK28 stdlib still f64 / unchanged" forbidden-wording, and the non-literal-ε soundness limit are all called out. Edits are factual status syncs citing verified in-repo commits (18855a5/647c482/6c4a571/d71aaaf) + green dissertation_confidence_gate_gate.sh; no new external math claims. |
+| 2026-05-30 | review | WAIVED | pbpk_claim_truth_table.md | WAIVED | Single forbidden-wording update to the Contribution 2 row: the non-literal-ε soundness hole is now CLOSED (commit f5ef37b — runtime/const ε conservatively rejected, conf=1, regression-locked). External fan-out again BLOCKED by the harness trust-boundary classifier (private dissertation doc → external LLM = exfiltration). Honesty reviewed in-session by the advisor (which designed the {28,7,3} terminator + the conf=1-not-conf=0 gate semantics). Factual status sync, no new external math claims. |
+| 2026-05-31 | review | WAIVED | pbpk_claim_truth_table.md | WAIVED | Adds a repo-backed row: PBPK28 priors now DECLARED as Knowledge<T> (kn:[Knowledge[f64];8], value+variance+ε+provenance), migrated commit 7295004, enabled by arrays-of-Knowledge d6f2d4d. Flips the prior FORBIDDEN "stdlib carries per-parameter epistemic confidence" to allowed; keeps "ep28_run enforces/propagates ε" FORBIDDEN (kernel consumes f64 projection; gate is construction-site-local). External fan-out BLOCKED by harness trust-boundary classifier; honesty designed in-session with the advisor (byte-identical projection verification, kernel-untouched framing). Factual status sync. |
+| 2026-05-31 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioMultiquadParam.lean | PASS | Parametric multiquadratic framework checkpoint. Grok accepted sqrtR_sq, evalS_nil/indep_base, sqrtR_3/5/11 bridges to rootR, indep_3_11 and indep_3_5_11 embeddings through existing indep8, sqrt_new_not_in_Q, Np_ne_zero, and the named interface obligations. Open obligations (IndepStepObligation, MultiquadIndepTheorem) are properly flagged rather than assumed. Raw: /tmp/llm-offload-ykg48H/. |
+| 2026-05-31 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioMoserSpindleQ311.lean | PASS | Moser spindle Q( sqrt3, sqrt11 ) checkpoint. Grok accepted integer 4-tuple geometry, edges_unit, long_diagonals_not_unit, non-3-colourability, explicit 4-colouring, emb_unit, and q311_plane_needs_4_colours. Only note: basis_independent is a re-export of SounioMultiquadParam; Real embedding commentary correctly avoids overclaim. Raw: /tmp/llm-offload-FbtlFI/. |
