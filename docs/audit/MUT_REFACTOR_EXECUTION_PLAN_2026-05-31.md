@@ -53,6 +53,37 @@ check_var_stmt, check_assign_stmt → *mut; (d) the expr subtree behind check_ex
 check_call_expr, check_field_access, check_method_call → *mut. Gate each with `--check` at 8MB on the
 input that exercises only the converted path (min_empty → min_let → two_fn → hello).
 
+## ⚠️ CRITICAL CONVERSION RULE (learned the hard way, 2026-05-31)
+
+**A by-value Checker-returning call allocates its 8MB SRET buffer in the ENCLOSING function's
+frame at COMPILE time — regardless of whether its runtime branch executes.** So an `if rare { let p
+= (*c).by_value_method(...); ... }` bridge sitting INLINE in a hot *mut function gives that hot
+function an 8MB frame and it overflows when called, even though the rare branch never runs.
+**Therefore: every remaining by-value bridge MUST live in its OWN dedicated leaf function**, never
+inline in a converted hot-path function. (This is exactly why collect_item_inplace's `_` arm crashes:
+its `(*c).collect_item(item)` by-value call puts collect_item's 8MB frame into collect_item_inplace.)
+Verified: `fn main(){}` passes only when the `_` arm has NO inline by-value call (`_ => {}`).
+
+## NEXT BLOCKER (precise, gdb-confirmed): checker_check_expr_inplace is INCOMPLETE
+checker_check_expr_inplace (check.sio:2450) handles ONLY {IntLit, FloatLit, BoolTrue/False,
+StringLit, CharLit, Return} inline; EVERYTHING else (`_ => checker_check_expr_mut(c,e)` →
+by-value `(*c).check_expr` = the 12.29MB frame). So ANY real init/expr (ident, binary, call,
+struct-lit, …) still routes to the by-value 12.29MB check_expr. `min_let` (`let x=1`) traced:
+LET_INPLACE_ENTRY → BINDING_INPLACE → **EXPR_MUT_BYVAL** then the E048/E005 corruption cascade
+(the by-value check_expr runs on already-corrupted state). So the EXPR SPINE is the real mass:
+check_expr_inplace must dispatch ExprIdent/ExprBinary/ExprCall/ExprPath/ExprField/ExprMethodCall/
+ExprStructLit/… to NEW *mut handlers (checker_check_binary_expr_inplace, _call_expr_inplace,
+_field_access_inplace, _method_call_inplace, _path_expr_inplace, …), each obeying the
+isolated-bridge rule above. Until the expr spine is converted, only literal-only bodies pass.
+
+## MILESTONES ACHIEVED THIS SESSION (committed at ce30d1220 = findings; let-spine drafted)
+- `fn main(){}` and `struct P{a}`+main → **`check: OK` rc=0 at 8MB** (first --check successes ever).
+- check_let_stmt → *mut spine DRAFTED + compiles + self-reproduces (checker_check_let_stmt_inplace,
+  _binding_init_expr_inplace + isolated special bridge, eval_const_int_opt_expr_mut,
+  _const_int_lookup_mut, _const_int_bind_value_inplace, _check_refinement_literal_inplace). Correct
+  *mut code; blocked only by the check_expr_inplace incompleteness above (so not yet wired-in as a
+  pass). These functions are the template for the rest of the spine.
+
 ## The mechanical pattern (validated against existing code)
 
 **Bridge (the leak — to be REMOVED):** `check.sio:2416`
