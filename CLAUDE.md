@@ -320,7 +320,7 @@ Headline limitations (full list in [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/c
 - No unary minus — write `0 - x`
 - No REPL / `--show-ast` / `--show-types` in native mode
 - `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
-- GPU: PTX codegen exists but no end-to-end path from CLI
+- GPU: end-to-end `kernel fn` → PTX path **exists and is reproducible** via the GPU-profile binary (`souc-linux-x86_64-gpu build … --backend gpu -o out.ptx`); the general `bin/souc` does not emit PTX. Runtime execution is fixture-bounded (13 L4-validated profiles). See `docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md` for the measured/projected/source-only breakdown
 
 ---
 
