@@ -251,9 +251,9 @@ fn mc28_auc_fast(prm: PBPKParams28, dose_mg: f64) -> f64 with Mut, Div, Panic {
 // PARAMETER PERTURBATION (mirrors ep28_perturb)
 // ============================================================================
 
-fn mc28_params_from_sample(base: PBPKParams28, priors: EpPrior28, vals: [f64; 8]) -> PBPKParams28 with Mut, Div {
+fn mc28_params_from_sample(base: PBPKParams28, priors: EpPrior28, vals: [f64; 8]) -> PBPKParams28 with Mut, Div, Epistemic {
     var p  = base
-    let fu_ref = priors.mean[2]   // reference fu from prior mean
+    let fu_ref = priors.kn[2].value   // reference fu from prior mean
     let fu_sam = vals[2]
     let fu_scale = if fu_ref > 1.0e-12 { fu_sam / fu_ref } else { 1.0 }
     p.cl_central = (vals[0] + vals[1]) * fu_scale
@@ -281,7 +281,7 @@ fn mc28_run_lognormal(
     dose_mg:  f64,
     n:        i32,
     seed:     i64,
-) -> MC28Result with Mut, Div, Panic {
+) -> MC28Result with Mut, Div, Panic, Epistemic {
     var rng  = mc28_rng_new(seed)
     var ws   = mc28_welford_init()
     var iter: i32 = 0
@@ -291,10 +291,10 @@ fn mc28_run_lognormal(
         var vals: [f64; 8] = [0.0; 8]
         var ki: i32 = 0
         while ki < n_prms {
-            if priors.variance[ki] <= 0.0 || priors.mean[ki] <= 0.0 {
-                vals[ki] = priors.mean[ki]
+            if priors.kn[ki].variance <= 0.0 || priors.kn[ki].value <= 0.0 {
+                vals[ki] = priors.kn[ki].value
             } else {
-                let ps = mc28_sample_lognormal(rng, priors.mean[ki], priors.variance[ki])
+                let ps = mc28_sample_lognormal(rng, priors.kn[ki].value, priors.kn[ki].variance)
                 vals[ki] = ps.value
                 rng = ps.rng
             }
@@ -346,7 +346,7 @@ fn mc28_run_lognormal_copula(
     n:        i32,
     seed:     i64,
     spec:     MC28CopulaSpec,
-) -> MC28Result with Mut, Div, Panic {
+) -> MC28Result with Mut, Div, Panic, Epistemic {
     let chol = mc28_correlation_cholesky(spec)
     if !chol.ok {
         return MC28Result { mean_auc: 0.0, sd_auc: 0.0, n_valid: 0, success: false }
@@ -384,7 +384,7 @@ fn mc28_run_lognormal_copula(
 
         var ki: i32 = 0
         while ki < n_prms {
-            vals[ki] = mc28_lognormal_from_z(priors.mean[ki], priors.variance[ki], y[ki])
+            vals[ki] = mc28_lognormal_from_z(priors.kn[ki].value, priors.kn[ki].variance, y[ki])
             ki = ki + 1
         }
 
@@ -449,7 +449,7 @@ fn mc28_run_m1_copula_sweep(
     u_gum: f64,
     u_hess: f64,
     independent: MC28Result,
-) -> bool with IO, Mut, Div, Panic {
+) -> bool with IO, Mut, Div, Panic, Epistemic {
     println("")
     println("======================================================================")
     println("  M1 LogNormal Gaussian-Copula Sweep")
@@ -503,7 +503,7 @@ fn mc28_run_m1_copula_sweep(
 //   omega2 = 0.0566
 //   sigma2 = 0.0894
 
-fn mc28_prior_with_logvar(base: EpPrior28, logvar: f64) -> EpPrior28 with Mut, Div {
+fn mc28_prior_with_logvar(base: EpPrior28, logvar: f64) -> EpPrior28 with Mut, Div, Epistemic {
     var m: [f64; 8] = [0.0; 8]
     var v: [f64; 8] = [0.0; 8]
     var c: [f64; 8] = [0.0; 8]
@@ -511,16 +511,16 @@ fn mc28_prior_with_logvar(base: EpPrior28, logvar: f64) -> EpPrior28 with Mut, D
     var i: i32 = 0
     let mult = mc28_exp(logvar) - 1.0
     while i < base.n {
-        m[i] = base.mean[i]
-        v[i] = base.mean[i] * base.mean[i] * mult
-        c[i] = base.confidence[i]
+        m[i] = base.kn[i].value
+        v[i] = base.kn[i].value * base.kn[i].value * mult
+        c[i] = base.kn[i].confidence
         // Rebuild kn from the PERTURBED m/v/c so the kn≡f64 invariant holds — ep28_run
         // reads kn[i].variance, so carrying base.kn here would feed it the unperturbed
         // variance and silently ignore the logvar perturbation.
         kn[i] = Knowledge { value: m[i], variance: v[i], epsilon: c[i], provenance: "logvar_perturbed" }
         i = i + 1
     }
-    EpPrior28 { kn: kn, mean: m, variance: v, confidence: c, n: base.n }
+    EpPrior28 { kn: kn, n: base.n }
 }
 
 fn mc28_sample_hier_lognormal(
@@ -560,7 +560,7 @@ fn mc28_run_hierarchical(
     omega2:   f64,
     sigma2:   f64,
     mode:     i32,
-) -> MC28Result with Mut, Div, Panic {
+) -> MC28Result with Mut, Div, Panic, Epistemic {
     var rng  = mc28_rng_new(seed)
     var ws   = mc28_welford_init()
     var iter: i32 = 0
@@ -570,7 +570,7 @@ fn mc28_run_hierarchical(
         var vals: [f64; 8] = [0.0; 8]
         var ki: i32 = 0
         while ki < n_prms {
-            let ps = mc28_sample_hier_lognormal(rng, priors.mean[ki], omega2, sigma2, mode)
+            let ps = mc28_sample_hier_lognormal(rng, priors.kn[ki].value, omega2, sigma2, mode)
             vals[ki] = ps.value
             rng = ps.rng
             ki = ki + 1
