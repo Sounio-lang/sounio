@@ -53,6 +53,33 @@ check_var_stmt, check_assign_stmt → *mut; (d) the expr subtree behind check_ex
 check_call_expr, check_field_access, check_method_call → *mut. Gate each with `--check` at 8MB on the
 input that exercises only the converted path (min_empty → min_let → two_fn → hello).
 
+## ⚠️ CUMULATIVE-FRAME REALITY + more inline-bridge sites (2026-05-31, tested hands-on)
+Converting ExprIdent (clean *mut, committed pattern below) + collect `_ => {}` makes min_empty pass
+but a TYPED FUNCTION WITH A BODY (`fn idf(x:i64)->i64{x}`) STILL crashes rc=139 at 8MB. gdb: the
+faulting frame is **3,536,176 B (~3.5MB)** — BELOW the 4MB warn threshold, so it never appears in
+the frame-warning map; it overflows CUMULATIVELY once the body-check chain runs deep. Root: the
+hot-path *mut functions STILL contain inline by-value sites that each compile-allocate a Checker-sized
+buffer:
+  - check_fn_item_inplace (2358-2367): `(*c).report_multitest_correction_required(...)` inline
+    [FIXED this session — extracted to checker_report_multitest_correction_bridge leaf], AND two
+    `let sig = (*c).fn_sigs.get(sig_id)` / `let sig2 = (*c).fn_sigs.get(sig_id)` FnSig-BY-VALUE copies
+    (2347/2360) — FnSig is large (~1.7MB each → ~3.5MB), the dominant remaining frame. FIX: add a
+    *mut field accessor (read sig.return_type/effects/effect_count without copying the whole FnSig),
+    or a `checker_fn_sig_get_*` helper returning only the needed scalars.
+So the frame-isolation rule applies not just to Checker-returning calls but to ANY large-aggregate
+by-value materialization (FnSig, TypeEnv, StructInfo) inline in a hot *mut function. Sweep every
+hot-path *mut function for inline `let x = (*c).bigfield.get(...)` / `(*c).method() -> BigAggregate`
+and either isolate to a leaf or read fields directly. min_empty passes because empty-body main keeps
+the chain shallow; depth is what tips the cumulative sum over 8MB.
+
+VALIDATED PATTERN (paste-ready, correct *mut, re-derivable):
+  checker_check_ident_expr_inplace(c, e) -> TypeEntry: ident_ty=(*c).env.lookup(e.name); if
+  checker_is_linear_type_inplace(c,ident_ty) && (*c).suppress_linear_consume_depth==0 { if
+  (*c).borrows.is_borrowed(e.name){checker_report_error_at_inplace(c,e.span,38,0,0,0)} else { let
+  cr=(*c).borrows.consume_linear(e.name);(*c).borrows=cr.0; if cr.1!=0
+  {checker_report_error_at_inplace(c,e.span,cr.1,0,0,0)} } } ; ident_ty
+  + dispatch arm `ExprIdent => checker_check_ident_expr_inplace(c, e)` in check_expr_inplace (2471).
+
 ## ⚠️ EMPIRICAL CORRECTION to the spec-workflow recipe (2026-05-31, tested)
 The recipe (MUT_EXPR_SPINE_RECIPE_2026-05-31.json) claims extracting collect_item_inplace's `_`
 arm into a leaf bridge is "necessary-and-sufficient for the collect-side frame." **FALSE, tested:**
