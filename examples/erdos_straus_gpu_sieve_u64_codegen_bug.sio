@@ -1,22 +1,26 @@
-//@ run-pass
-//@ expect-stdout: PASS: souc erdos sieve
-
-// Erdős–Straus sieve em Sounio (souc -> PTX -> GPU), N=1_000_000 com guard de overflow i64.
-// 4/n = 1/x + 1/y + 1/z. Uma thread por n (chunked: buffers de 100k reaproveitados).
-// Guard: se q*y estoura i64 (9.2e18), pula esse y/x. Se TODO x do n estourou antes de achar,
-// marca x=-1 (fora-de-range i64) — reportado honestamente, sem comprometer a soundness.
+// ⚠️ REPRO DE BUG DE CODEGEN (souc 1.0.0-beta.5, backend GPU) — NÃO é um exemplo funcional.
+//
+// Versão u64 do sieve de Erdős–Straus (examples/erdos_straus_gpu_sieve.sio é a i64 que FUNCIONA,
+// resolve 520k-777k de 1M). Esta, idêntica em lógica mas com aritmética u64, retorna 0 solved na
+// RTX 4000 Ada (sm_8.9): o path de find (den%num==0 / den/num / incremento de var u64) dentro dos
+// while aninhados NÃO dispara nem para n=2 (solução trivial 1/1+1/2+1/2). bad=0 é VACUO (0 triplas).
+// Probe simples de u64 (%, /, * em constantes, store em &![u64]) compila E roda certo — então o bug
+// é específico de u64 dentro de loops aninhados no lowering u64->PTX. Use para isolar/corrigir.
+// O i64 idêntico acha 520k+. Sounio não tem i128/u128 (só u64), então furar o teto i64 de verdade
+// depende de consertar este bug. Saída observada: solved=0 / oor=900000 / unsolved=99998 / bad=0.
 kernel fn es_sieve(offset: i64, count: i64, cap: i64,
-                   ox: &![i64], oy: &![i64], oz: &![i64]) with GPU {
+                   ox: &![u64], oy: &![u64], oz: &![u64]) with GPU {
+    let umax: u64 = 18446744073709551615
     let tid = gpu_thread_id_x()
     if tid < count {
-        let n = offset + tid
-        var fx: i64 = 0
-        var fy: i64 = 0
-        var fz: i64 = 0
-        if n >= 2 && n < cap {
-            let imax: i64 = 9223372036854775807
+        let n = (offset + tid) as u64
+        let capn = cap as u64
+        var fx: u64 = 0
+        var fy: u64 = 0
+        var fz: u64 = 0
+        if n >= 2 && n < capn {
             var all_overflow: bool = true
-            var kx: i64 = 0
+            var kx: u64 = 0
             while kx < 1024 && fx == 0 {
                 let x = n / 4 + 1 + kx
                 let p = 4 * x - n
@@ -24,15 +28,16 @@ kernel fn es_sieve(offset: i64, count: i64, cap: i64,
                     let q = n * x
                     var y = q / p
                     if y < x { y = x }
-                    var ky: i64 = 0
+                    var ky: u64 = 0
                     var broke: bool = false
                     while ky < 16384 && fx == 0 && broke == false {
-                        if q > 0 && y > imax / q {
+                        if q > 0 && y > umax / q {
                             broke = true
                         } else {
                             all_overflow = false
-                            let num = p * y - q
-                            if num > 0 {
+                            let py = p * y
+                            if py > q {
+                                let num = py - q
                                 let den = q * y
                                 if den % num == 0 {
                                     let z = den / num
@@ -50,7 +55,7 @@ kernel fn es_sieve(offset: i64, count: i64, cap: i64,
                 }
                 kx = kx + 1
             }
-            if fx == 0 && all_overflow == true { fx = -1 }
+            if fx == 0 && all_overflow == true { fx = umax }
         }
         ox[tid as usize] = fx
         oy[tid as usize] = fy
@@ -59,10 +64,11 @@ kernel fn es_sieve(offset: i64, count: i64, cap: i64,
 }
 
 fn main() -> i32 with IO, Mut, Panic, GPU {
-    var ox: [i64; 100000] = [0; 100000]
-    var oy: [i64; 100000] = [0; 100000]
-    var oz: [i64; 100000] = [0; 100000]
+    var ox: [u64; 100000] = [0; 100000]
+    var oy: [u64; 100000] = [0; 100000]
+    var oz: [u64; 100000] = [0; 100000]
 
+    let umax: u64 = 18446744073709551615
     let cap: i64 = 1000000
     let chunk: i64 = 100000
     var solved: i64 = 0
@@ -78,21 +84,22 @@ fn main() -> i32 with IO, Mut, Panic, GPU {
             let n = off + t
             if n >= 2 && n < cap {
                 let x = ox[t as usize]
-                if x > 0 {
+                if x == umax {
+                    oor = oor + 1
+                } else if x > 0 {
                     solved = solved + 1
+                    let nn = n as u64
+                    let xx = x
                     let y = oy[t as usize]
                     let z = oz[t as usize]
-                    let p = 4 * x - n
-                    let q = n * x
-                    let num = p * y - q
-                    let den = q * y
-                    if num > 0 && den % num == 0 && den / num == z && z >= y {
+                    let p = 4 * xx - nn
+                    let q = nn * xx
+                    let py = p * y
+                    if py > q && (q * y) % (py - q) == 0 && (q * y) / (py - q) == z && z >= y {
                         bad = bad + 0
                     } else {
                         bad = bad + 1
                     }
-                } else if x < 0 {
-                    oor = oor + 1
                 } else {
                     unsolved = unsolved + 1
                 }
@@ -102,15 +109,15 @@ fn main() -> i32 with IO, Mut, Panic, GPU {
         off = off + chunk
     }
 
-    println("souc erdos sieve N=1000000 (solved / fora-de-range-i64 / unsolved-in-window / bad):")
+    println("souc erdos sieve u64 N=1000000 (solved / fora-de-range-u64 / unsolved-in-window / bad):")
     println(solved)
     println(oor)
     println(unsolved)
     println(bad)
     if bad == 0 {
-        println("PASS: souc erdos sieve")
+        println("PASS: souc erdos sieve u64")
     } else {
-        println("FAIL: souc erdos sieve")
+        println("FAIL: souc erdos sieve u64")
     }
     0
 }
