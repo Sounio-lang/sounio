@@ -122,3 +122,60 @@ type errors**, not corpus count. Scope FIX #2 success on correctness.
 The committed change keeps `ItemEnum` disabled, so the shipped binary is net-neutral
 vs baseline — re-verified by full sweep + `g1_expr_recursion_gate` on the marker-free
 build.
+
+## FIX #2 attempt (2026-06-01): in-place ExprPath handler — necessary but NOT sufficient
+
+Tried the advisor-recommended `*mut` migration of the enum-read: a `*mut` ExprPath leaf
+handler that returns only the `TypeEntry` (no 8MB `self` move), wired into the `*mut`
+expr dispatch, with `ItemEnum` re-enabled. Built + swept.
+
+**Result: top-level path-exprs fixed, nested ones still crash.**
+- `let x = E::A` (synthetic `probe_construct`) → **rc=0** (was crash). The `*mut` spine
+  dispatches this ExprPath directly to the in-place handler. Fixed.
+- `examples/native/enum_match.sio` (`if c == Color::Red`) → **still rc=139**. Its
+  `Color::Red` is nested inside a binary `==` inside an `if`. Both `ExprIf` and
+  `ExprBinary` are non-leaf → they bridge to by-value `check_expr`, which checks the
+  nested `Color::Red` via the **by-value** `check_path_expr` (the source-undodgeable one)
+  — NOT the `*mut` handler. So the in-place handler never sees nested path-exprs.
+- Full 847 sweep with the handler + `ItemEnum` on: still **exactly 1 regression**
+  (`enum_match` 0→139), **0 wins**.
+
+**Conclusion — FIX #2 is spine-completion, not a bounded fix.** Clearing the nested case
+requires `*mut` handlers for `ExprIf` AND `ExprBinary`; `ExprBinary` transitively pulls
+in op-typing / units / knowledge checking, each of which threads `self` by value and
+bridges again. The terminal state is "migrate the entire expression checker off by-value
+`self`-threading" — i.e. complete the half-converted `*mut` spine. With 0 structural
+corpus wins (the checker is lenient on enums), this is unbounded work for near-zero
+corpus payoff, and must be done as its own focused session (per the rule: do NOT chain a
+half-converted-spine migration on low context — it bricks mc.elf).
+
+The FIX #2 attempt was **discarded** (`git checkout` — it left `ItemEnum` enabled =
+net-negative). The clean collector-body fix (`ddc7a8b7e`) stands. The in-place handler is
+preserved here verbatim so the work isn't lost; re-add it as the FIRST step of the
+spine-completion session, then add `ExprIf`/`ExprBinary`/transitive `*mut` handlers:
+
+```sounio
+// wire into checker_check_expr_inplace's if-chain, before the `else` bridge:
+//   } else if e.kind == ExprKind::ExprPath {
+//       result = checker_check_path_expr_inplace(c, e)
+//   } else { result = checker_check_expr_mut(c, e) }
+
+// Faithful in-place transcription of by-value check_path_expr (a PURE READ: returns
+// `self` unchanged). Returns only the TypeEntry — no 8MB self SRET — so it dodges the
+// read-path return-address smash. Verified: fixes `let x = E::A` (rc=0).
+fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_name = checker_copy_string_list_to_name(e.path.segments)
+    let enum_idx = (*c).enums.find(first_name)
+    if enum_idx >= 0 {
+        ty_named(first_name)
+    } else {
+        let variant_enum_idx = (*c).enums.find_variant_enum(first_name)
+        if variant_enum_idx >= 0 {
+            let ei = (*c).enums.get(variant_enum_idx)
+            ty_named(ei.name)
+        } else {
+            (*c).env.lookup(first_name)
+        }
+    }
+}
+```
