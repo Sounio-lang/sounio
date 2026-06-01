@@ -1,0 +1,116 @@
+//@ run-pass
+//@ expect-stdout: PASS: souc erdos sieve
+
+// Erdős–Straus sieve em Sounio (souc -> PTX -> GPU), N=1_000_000 com guard de overflow i64.
+// 4/n = 1/x + 1/y + 1/z. Uma thread por n (chunked: buffers de 100k reaproveitados).
+// Guard: se q*y estoura i64 (9.2e18), pula esse y/x. Se TODO x do n estourou antes de achar,
+// marca x=-1 (fora-de-range i64) — reportado honestamente, sem comprometer a soundness.
+kernel fn es_sieve(offset: i64, count: i64, cap: i64,
+                   ox: &![i64], oy: &![i64], oz: &![i64]) with GPU {
+    let tid = gpu_thread_id_x()
+    if tid < count {
+        let n = offset + tid
+        var fx: i64 = 0
+        var fy: i64 = 0
+        var fz: i64 = 0
+        if n >= 2 && n < cap {
+            let imax: i64 = 9223372036854775807
+            var all_overflow: bool = true
+            var kx: i64 = 0
+            while kx < 256 && fx == 0 {
+                let x = n / 4 + 1 + kx
+                let p = 4 * x - n
+                if p > 0 {
+                    let q = n * x
+                    var y = q / p
+                    if y < x { y = x }
+                    var ky: i64 = 0
+                    var broke: bool = false
+                    while ky < 16384 && fx == 0 && broke == false {
+                        if q > 0 && y > imax / q {
+                            broke = true
+                        } else {
+                            all_overflow = false
+                            let num = p * y - q
+                            if num > 0 {
+                                let den = q * y
+                                if den % num == 0 {
+                                    let z = den / num
+                                    if z >= y {
+                                        fx = x
+                                        fy = y
+                                        fz = z
+                                    }
+                                }
+                            }
+                            y = y + 1
+                            ky = ky + 1
+                        }
+                    }
+                }
+                kx = kx + 1
+            }
+            if fx == 0 && all_overflow == true { fx = -1 }
+        }
+        ox[tid as usize] = fx
+        oy[tid as usize] = fy
+        oz[tid as usize] = fz
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic, GPU {
+    var ox: [i64; 100000] = [0; 100000]
+    var oy: [i64; 100000] = [0; 100000]
+    var oz: [i64; 100000] = [0; 100000]
+
+    let cap: i64 = 1000000
+    let chunk: i64 = 100000
+    var solved: i64 = 0
+    var oor: i64 = 0
+    var unsolved: i64 = 0
+    var bad: i64 = 0
+
+    var off: i64 = 0
+    while off < cap {
+        es_sieve(off, chunk, cap, &!ox, &!oy, &!oz)
+        var t: i64 = 0
+        while t < chunk {
+            let n = off + t
+            if n >= 2 && n < cap {
+                let x = ox[t as usize]
+                if x > 0 {
+                    solved = solved + 1
+                    let y = oy[t as usize]
+                    let z = oz[t as usize]
+                    let p = 4 * x - n
+                    let q = n * x
+                    let num = p * y - q
+                    let den = q * y
+                    if num > 0 && den % num == 0 && den / num == z && z >= y {
+                        bad = bad + 0
+                    } else {
+                        bad = bad + 1
+                    }
+                } else if x < 0 {
+                    oor = oor + 1
+                } else {
+                    unsolved = unsolved + 1
+                }
+            }
+            t = t + 1
+        }
+        off = off + chunk
+    }
+
+    println("souc erdos sieve N=1000000 (solved / fora-de-range-i64 / unsolved-in-window / bad):")
+    println(solved)
+    println(oor)
+    println(unsolved)
+    println(bad)
+    if bad == 0 {
+        println("PASS: souc erdos sieve")
+    } else {
+        println("FAIL: souc erdos sieve")
+    }
+    0
+}
