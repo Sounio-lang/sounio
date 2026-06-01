@@ -1,0 +1,183 @@
+//@ run-pass
+//@ expect-stdout: PASS: souc erdos sieve epistemic
+
+// Erdos-Straus GPU sieve com honestidade epistemica.
+// O kernel mantem a computacao pura (i64). O host envolve cada resultado
+// em Knowledge<f64>, propagando incerteza via GUM.
+// Categorias epistemicas:
+//   - Exact: solucao verificada, u = 0
+//   - Overflow-guard: estourou i64 antes de achar, u = 1 por item
+//   - Truncated-window: janela de busca esgotada, u = 1 por item
+//
+// Nenhuma outra linguagem combina kernel GPU self-hosted + GUM nativo.
+
+kernel fn es_sieve(offset: i64, count: i64, cap: i64,
+                   ox: &![i64], oy: &![i64], oz: &![i64]) with GPU {
+    let tid = gpu_thread_id_x()
+    if tid < count {
+        let n = offset + tid
+        var fx: i64 = 0
+        var fy: i64 = 0
+        var fz: i64 = 0
+        if n >= 2 && n < cap {
+            let imax: i64 = 9223372036854775807
+            var all_overflow: bool = true
+            var kx: i64 = 0
+            while kx < 256 && fx == 0 {
+                let x = n / 4 + 1 + kx
+                let p = 4 * x - n
+                if p > 0 {
+                    let q = n * x
+                    var y = q / p
+                    if y < x { y = x }
+                    var ky: i64 = 0
+                    var broke: bool = false
+                    while ky < 16384 && fx == 0 && broke == false {
+                        if q > 0 && y > imax / q {
+                            broke = true
+                        } else {
+                            all_overflow = false
+                            let num = p * y - q
+                            if num > 0 {
+                                let den = q * y
+                                if den % num == 0 {
+                                    let z = den / num
+                                    if z >= y {
+                                        fx = x
+                                        fy = y
+                                        fz = z
+                                    }
+                                }
+                            }
+                            y = y + 1
+                            ky = ky + 1
+                        }
+                    }
+                }
+                kx = kx + 1
+            }
+            if fx == 0 && all_overflow == true { fx = -1 }
+        }
+        ox[tid as usize] = fx
+        oy[tid as usize] = fy
+        oz[tid as usize] = fz
+    }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 15 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn main() -> i32 with IO, Mut, Panic, GPU, Alloc, Epistemic {
+    var ox: [i64; 100000] = [0; 100000]
+    var oy: [i64; 100000] = [0; 100000]
+    var oz: [i64; 100000] = [0; 100000]
+
+    let cap: i64 = 1000000
+    let chunk: i64 = 100000
+    var solved: i64 = 0
+    var oor: i64 = 0
+    var unsolved: i64 = 0
+    var bad: i64 = 0
+
+    var solved_f: f64 = 0.0
+    var oor_f: f64 = 0.0
+    var unsolved_f: f64 = 0.0
+
+    var off: i64 = 0
+    while off < cap {
+        es_sieve(off, chunk, cap, &!ox, &!oy, &!oz)
+        var t: i64 = 0
+        while t < chunk {
+            let n = off + t
+            if n >= 2 && n < cap {
+                let x = ox[t as usize]
+                if x > 0 {
+                    solved = solved + 1
+                    solved_f = solved_f + 1.0
+                    let y = oy[t as usize]
+                    let z = oz[t as usize]
+                    let p = 4 * x - n
+                    let q = n * x
+                    let num = p * y - q
+                    let den = q * y
+                    if num > 0 && den % num == 0 && den / num == z && z >= y {
+                        bad = bad + 0
+                    } else {
+                        bad = bad + 1
+                    }
+                } else if x < 0 {
+                    oor = oor + 1
+                    oor_f = oor_f + 1.0
+                } else {
+                    unsolved = unsolved + 1
+                    unsolved_f = unsolved_f + 1.0
+                }
+            }
+            t = t + 1
+        }
+        off = off + chunk
+    }
+
+    let oor_u = sqrt_f64(oor_f)
+    let unsolved_u = sqrt_f64(unsolved_f)
+    let solved_k = measure(solved_f, uncertainty: 0.0, confidence: 1.0)
+    let oor_k = measure(oor_f, uncertainty: oor_u, confidence: 0.0)
+    let unsolved_k = measure(unsolved_f, uncertainty: unsolved_u, confidence: 0.0)
+    let total_k = solved_k + oor_k + unsolved_k
+    let total_variance = total_k.variance
+    let u_combined = sqrt_f64(total_variance)
+    let coverage_k2 = 2.0 * u_combined
+
+    println("=== Erdos-Straus GPU Sieve + Epistemic Honesty ===")
+    println("N")
+    println(cap)
+    println("")
+    println("exact_solutions")
+    println(solved_k.value)
+    println("")
+    println("exact_u")
+    println(solved_k.variance)
+    println("")
+    println("overflow_unknown")
+    println(oor_k.value)
+    println("")
+    println("overflow_u")
+    println(oor_k.variance)
+    println("")
+    println("truncated_unknown")
+    println(unsolved_k.value)
+    println("")
+    println("truncated_u")
+    println(unsolved_k.variance)
+    println("")
+    println("total_classified")
+    println(total_k.value)
+    println("")
+    println("total_variance")
+    println(total_k.variance)
+    println("")
+    println("u_combined")
+    println(u_combined)
+    println("")
+    println("coverage_k2_95pct_approx")
+    println(coverage_k2)
+    println("")
+    println("bad_verifications")
+    println(bad)
+    println("")
+
+    if bad == 0 {
+        println("PASS: souc erdos sieve epistemic")
+    } else {
+        println("FAIL: souc erdos sieve epistemic")
+    }
+    0
+}
