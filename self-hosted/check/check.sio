@@ -2459,11 +2459,19 @@ fn checker_check_stmt_bridge(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Pa
 }
 
 fn checker_check_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    match s.kind {
-        StmtLet => checker_check_let_stmt_inplace(c, s)
-        StmtVar => checker_check_stmt_bridge(c, s)
-        StmtExpr => checker_check_expr_stmt_inplace(c, s)
-        StmtAssign => checker_check_stmt_bridge(c, s)
+    // NOTE: dispatch via explicit if-equality, NOT `match s.kind`. bin/souc
+    // miscompiles a `match <enum-field>` inside a *mut function — the first
+    // variant silently falls through to the wildcard/last arm (root-caused on
+    // ExprKind in checker_check_expr_inplace, where ExprIntLit fell to `_` →
+    // by-value check_expr → runaway recursion). StmtKind has the same exposure.
+    if s.kind == StmtKind::StmtLet {
+        checker_check_let_stmt_inplace(c, s)
+    } else if s.kind == StmtKind::StmtVar {
+        checker_check_stmt_bridge(c, s)
+    } else if s.kind == StmtKind::StmtExpr {
+        checker_check_expr_stmt_inplace(c, s)
+    } else {
+        checker_check_stmt_bridge(c, s)
     }
 }
 
@@ -2492,23 +2500,32 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         return ty_error()
     }
     (*c).expr_depth = (*c).expr_depth + 1
-    let result = match e.kind {
-        ExprIntLit => {
-            (*c).last_literal_int = e.int_val
-            (*c).last_literal_kind = 1
-            ty_i64()
-        }
-        ExprFloatLit => {
-            (*c).last_literal_float = e.float_val
-            (*c).last_literal_kind = 2
-            ty_f64()
-        }
-        ExprBoolTrue => ty_bool()
-        ExprBoolFalse => ty_bool()
-        ExprStringLit => ty_string()
-        ExprCharLit => ty_char()
-        ExprReturn => checker_check_return_expr_inplace(c, e)
-        _ => checker_check_expr_mut(c, e)
+    // Dispatch via explicit if-equality, NOT `match e.kind`. bin/souc miscompiles
+    // a `match <enum-field>` inside a *mut function: ExprIntLit (discriminant 0)
+    // silently fell through to the `_` wildcard → by-value check_expr → runaway
+    // recursion that SIGSEGVs/OOMs on any function body (`fn main(){1}`). The
+    // if-chain compiles correctly. Root-caused 2026-06-01 by 10-step bisection.
+    var result = ty_error()
+    if e.kind == ExprKind::ExprIntLit {
+        (*c).last_literal_int = e.int_val
+        (*c).last_literal_kind = 1
+        result = ty_i64()
+    } else if e.kind == ExprKind::ExprFloatLit {
+        (*c).last_literal_float = e.float_val
+        (*c).last_literal_kind = 2
+        result = ty_f64()
+    } else if e.kind == ExprKind::ExprBoolTrue {
+        result = ty_bool()
+    } else if e.kind == ExprKind::ExprBoolFalse {
+        result = ty_bool()
+    } else if e.kind == ExprKind::ExprStringLit {
+        result = ty_string()
+    } else if e.kind == ExprKind::ExprCharLit {
+        result = ty_char()
+    } else if e.kind == ExprKind::ExprReturn {
+        result = checker_check_return_expr_inplace(c, e)
+    } else {
+        result = checker_check_expr_mut(c, e)
     }
     if (*c).expr_depth > 0 {
         (*c).expr_depth = (*c).expr_depth - 1
