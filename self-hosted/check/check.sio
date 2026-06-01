@@ -2642,6 +2642,8 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_path_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprBinary {
         result = checker_check_binary_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprIf {
+        result = checker_check_if_expr_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
     }
@@ -2683,6 +2685,17 @@ fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     let left_ty = checker_check_opt_expr_inplace(c, e.left)
     let right_ty = checker_check_opt_expr_inplace(c, e.right)
     let pair = (*c).check_binary_with_operand_types(e, left_ty, right_ty)
+    checker_store_from_value(c, pair.0)
+    pair.1
+}
+
+// *mut ExprIf handler (split-and-bridge): check the CONDITION via the *mut spine — so a
+// nested enum path-expr in `if c == Color::Red` reaches checker_check_path_expr_inplace and
+// dodges the by-value check_path_expr SRET crash — then bridge to the by-value branch/
+// type-compat tail (check_if_with_cond_type) with the condition type already computed.
+fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let cond_ty = checker_check_opt_expr_inplace(c, e.left)
+    let pair = (*c).check_if_with_cond_type(e, cond_ty)
     checker_store_from_value(c, pair.0)
     pair.1
 }
@@ -16123,6 +16136,15 @@ impl Checker {
         let cond_pair = self.check_opt_expr(e.left)
         var c = cond_pair.0
         let cond_ty = cond_pair.1
+        c.check_if_with_cond_type(e, cond_ty)
+    }
+
+    // Tail of check_if_expr split out so the *mut spine (checker_check_if_expr_inplace)
+    // checks the CONDITION via the *mut spine — routing a nested enum path-expr (e.g.
+    // `if c == Color::Red`) to the in-place handler that dodges the by-value check_path_expr
+    // crash — then bridges here for the branch / type-compat work (faithful verbatim move).
+    fn check_if_with_cond_type(self, e: Expr, cond_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
         // Condition must be bool
         if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
             c = c.report_mismatch(e.span, 6, ty_bool(), cond_ty)
