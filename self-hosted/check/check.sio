@@ -342,11 +342,6 @@ pub struct MutVariantsResult {
     count: i64,
 }
 
-pub struct MutVariantListResult {
-    list: VariantInfoList,
-    count: i64,
-}
-
 pub struct CollectTransitionStepDefsResult {
     checker: Checker,
     steps: [i64; 16],
@@ -2331,24 +2326,31 @@ fn checker_collect_struct_def_inplace(c: *mut Checker, name: Name, opt: Option<B
     }
 }
 
-fn checker_collect_variant_list_mut(c: *mut Checker, vdl: VariantDefList) -> MutVariantListResult with Mut, Panic, Div, Alloc, IO {
+// Returns the boxed list HEAD (small MutVariantsResult = {Option<Box>, count}), NOT a
+// MutVariantListResult that carries a VariantInfoList by value. bin/souc miscompiles the
+// SRET return of that large aggregate out of a *mut fn (the value-move/SRET-return family
+// — same root as the largestruct miscompile), SIGSEGVing right after the deepest variant
+// builds its result. Boxing the node into a local then returning a pointer keeps every
+// return small (pointer + int) and mirrors the struct path's known-good `Box::new(local)`.
+fn checker_collect_variant_list_mut(c: *mut Checker, vdl: VariantDefList) -> MutVariantsResult with Mut, Panic, Div, Alloc, IO {
     let vf = checker_collect_field_defs_mut(c, vdl.head.fields)
     let head_info = VariantInfo { name: vdl.head.name, fields: vf.fields }
     match vdl.tail {
-        None => MutVariantListResult { list: VariantInfoList { head: head_info, tail: None }, count: 1 }
+        None => {
+            let node = VariantInfoList { head: head_info, tail: None }
+            MutVariantsResult { variants: Some(Box::new(node)), count: 1 }
+        }
         Some(rest) => {
             let r = checker_collect_variant_list_mut(c, *rest)
-            MutVariantListResult { list: VariantInfoList { head: head_info, tail: Some(Box::new(r.list)) }, count: 1 + r.count }
+            let node = VariantInfoList { head: head_info, tail: r.variants }
+            MutVariantsResult { variants: Some(Box::new(node)), count: 1 + r.count }
         }
     }
 }
 
 fn checker_collect_variants_mut(c: *mut Checker, opt: Option<Box<VariantDefList> >) -> MutVariantsResult with Mut, Panic, Div, Alloc, IO {
     match opt {
-        Some(vdl) => {
-            let r = checker_collect_variant_list_mut(c, *vdl)
-            MutVariantsResult { variants: Some(Box::new(r.list)), count: r.count }
-        }
+        Some(vdl) => checker_collect_variant_list_mut(c, *vdl)
         None => MutVariantsResult { variants: None, count: 0 }
     }
 }
@@ -2374,11 +2376,19 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         ItemKind::ItemStruct => checker_collect_struct_def_inplace(c, item.name, item.struct_def)
         ItemKind::ItemUse => {}
         ItemKind::ItemSession => {}
-        // ItemEnum collection is implemented (checker_collect_enum_def_inplace below)
-        // but DISABLED: enabling it crashes even enum-decl-only (rc=139) via a *mut
-        // codegen subtlety the struct collector doesn't hit (its variant-list layer /
-        // EnumInfo / EnumTable.add). Needs focused debugging before wiring. Remaining
-        // (enum/impl/policy/type-alias/…) still skipped — *mut collectors pending.
+        // ItemEnum collection is implemented (checker_collect_enum_def_inplace below) and
+        // its BODY now runs to completion without crashing (the variant collectors return
+        // a small boxed-head MutVariantsResult instead of moving a VariantInfoList by
+        // value — see checker_collect_variant_list_mut). It stays DISABLED here because
+        // wiring it exposes a SEPARATE, pre-existing bin/souc codegen bug: once (*c).enums
+        // is non-empty, the by-value enum-READ path (check_path_expr's `enum_idx >= 0`
+        // branch, which returns the 8MB `self` Checker by SRET) miscompiles and smashes a
+        // saved return address (gdb: rip jumps into the stack; stack-size- and
+        // return-value-independent — same large-struct-value-move family as the if/while
+        // miscompile). Net effect of enabling: 0 corpus wins (the checker is lenient on
+        // enums), 1 regression (examples/native/enum_match.sio 0→139). So enabling is
+        // gated on FIX #2 (migrate the enum-read off by-value `self`-threading onto the
+        // *mut spine). See docs/audit/g1_wip/ENUM_COLLECTOR_READPATH_BLOCKER_2026-06-01.md.
         _ => {}
     }
 }
