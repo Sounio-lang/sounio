@@ -327,6 +327,26 @@ pub struct MutParamListResult {
     count: i64,
 }
 
+pub struct MutFieldsResult {
+    fields: Option<Box<FieldInfoList>>,
+    count: i64,
+}
+
+pub struct MutFieldListResult {
+    list: FieldInfoList,
+    count: i64,
+}
+
+pub struct MutVariantsResult {
+    variants: Option<Box<VariantInfoList>>,
+    count: i64,
+}
+
+pub struct MutVariantListResult {
+    list: VariantInfoList,
+    count: i64,
+}
+
 pub struct CollectTransitionStepDefsResult {
     checker: Checker,
     steps: [i64; 16],
@@ -2264,17 +2284,101 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) wit
     }
 }
 
+// *mut declaration collectors — port of the by-value collect_struct_def /
+// collect_enum_def (check.sio ~11225) to mutate (*c) IN PLACE, avoiding the 8MB
+// Checker SRET copy that forced the `_ => {}` skip below. Fills (*c).structs /
+// (*c).enums so programs that USE structs/enums type-check. Modeled on the proven
+// checker_collect_fn_param_list_mut idiom (lowers types via checker_lower_type_expr_mut).
+fn checker_collect_field_def_list_mut(c: *mut Checker, fdl: FieldDefList) -> MutFieldListResult with Mut, Panic, Div, Alloc, IO {
+    let head_ty = checker_lower_type_expr_mut(c, fdl.head.ty)
+    let head_info = FieldInfo { name: fdl.head.name, ty: head_ty }
+    match fdl.tail {
+        None => MutFieldListResult { list: FieldInfoList { head: head_info, tail: None }, count: 1 }
+        Some(rest) => {
+            let r = checker_collect_field_def_list_mut(c, *rest)
+            MutFieldListResult { list: FieldInfoList { head: head_info, tail: Some(Box::new(r.list)) }, count: 1 + r.count }
+        }
+    }
+}
+
+fn checker_collect_field_defs_mut(c: *mut Checker, opt: Option<Box<FieldDefList> >) -> MutFieldsResult with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(fdl) => {
+            let r = checker_collect_field_def_list_mut(c, *fdl)
+            MutFieldsResult { fields: Some(Box::new(r.list)), count: r.count }
+        }
+        None => MutFieldsResult { fields: None, count: 0 }
+    }
+}
+
+fn checker_collect_struct_def_inplace(c: *mut Checker, name: Name, opt: Option<Box<StructDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(sd) => {
+            let tp_result = collect_type_params((*sd).type_params)
+            let fc = checker_collect_field_defs_mut(c, (*sd).fields)
+            let info = StructInfo {
+                name: name,
+                fields: fc.fields,
+                field_count: fc.count,
+                is_linear: (*sd).is_linear,
+                type_param_count: tp_result.count,
+                type_param_names: tp_result.names,
+                is_generic_template: tp_result.count > 0,
+            }
+            (*c).structs = (*c).structs.add(info)
+        }
+        None => {}
+    }
+}
+
+fn checker_collect_variant_list_mut(c: *mut Checker, vdl: VariantDefList) -> MutVariantListResult with Mut, Panic, Div, Alloc, IO {
+    let vf = checker_collect_field_defs_mut(c, vdl.head.fields)
+    let head_info = VariantInfo { name: vdl.head.name, fields: vf.fields }
+    match vdl.tail {
+        None => MutVariantListResult { list: VariantInfoList { head: head_info, tail: None }, count: 1 }
+        Some(rest) => {
+            let r = checker_collect_variant_list_mut(c, *rest)
+            MutVariantListResult { list: VariantInfoList { head: head_info, tail: Some(Box::new(r.list)) }, count: 1 + r.count }
+        }
+    }
+}
+
+fn checker_collect_variants_mut(c: *mut Checker, opt: Option<Box<VariantDefList> >) -> MutVariantsResult with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(vdl) => {
+            let r = checker_collect_variant_list_mut(c, *vdl)
+            MutVariantsResult { variants: Some(Box::new(r.list)), count: r.count }
+        }
+        None => MutVariantsResult { variants: None, count: 0 }
+    }
+}
+
+fn checker_collect_enum_def_inplace(c: *mut Checker, name: Name, opt: Option<Box<EnumDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(ed) => {
+            let vr = checker_collect_variants_mut(c, (*ed).variants)
+            let info = EnumInfo {
+                name: name,
+                variants: vr.variants,
+                variant_count: vr.count,
+            }
+            (*c).enums = (*c).enums.add(info)
+        }
+        None => {}
+    }
+}
+
 fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     match item.kind {
         ItemKind::ItemFn => checker_collect_fn_def_inplace(c, item.fn_def)
+        ItemKind::ItemStruct => checker_collect_struct_def_inplace(c, item.name, item.struct_def)
         ItemKind::ItemUse => {}
         ItemKind::ItemSession => {}
-        // FRAME-CRITICAL: the by-value (*c).collect_item(item) here carries an
-        // 8MB Checker SRET frame that overflows even an empty `fn main(){}`.
-        // Skipping is the only validated route to `check: OK` at 8MB. This is a
-        // CORRECTNESS GAP: user struct/enum/impl/policy/etc. declarations are no
-        // longer collected, so programs that USE them are not yet checked. The
-        // fix is the Gc *mut collectors (collect_struct_def_inplace, …) — pending.
+        // ItemEnum collection is implemented (checker_collect_enum_def_inplace below)
+        // but DISABLED: enabling it crashes even enum-decl-only (rc=139) via a *mut
+        // codegen subtlety the struct collector doesn't hit (its variant-list layer /
+        // EnumInfo / EnumTable.add). Needs focused debugging before wiring. Remaining
+        // (enum/impl/policy/type-alias/…) still skipped — *mut collectors pending.
         _ => {}
     }
 }
