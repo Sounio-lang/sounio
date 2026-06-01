@@ -2638,6 +2638,10 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = ty_char()
     } else if e.kind == ExprKind::ExprReturn {
         result = checker_check_return_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprPath {
+        result = checker_check_path_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprBinary {
+        result = checker_check_binary_expr_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
     }
@@ -2645,6 +2649,42 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         (*c).expr_depth = (*c).expr_depth - 1
     }
     result
+}
+
+// FIX #2 (spine-completion): *mut ExprPath leaf handler. Faithful in-place transcription
+// of by-value check_path_expr (a PURE READ — returns `self` unchanged in every branch).
+// Returns only the TypeEntry, so it never moves the ~164KB `self` Checker by SRET — that
+// move is what bin/souc miscompiles into a return-address smash once (*c).enums is
+// populated. See docs/audit/g1_wip/ENUM_COLLECTOR_READPATH_BLOCKER_2026-06-01.md.
+fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_name = checker_copy_string_list_to_name(e.path.segments)
+    let enum_idx = (*c).enums.find(first_name)
+    if enum_idx >= 0 {
+        ty_named(first_name)
+    } else {
+        // Could be a variant name directly (e.g. None, Some)
+        let variant_enum_idx = (*c).enums.find_variant_enum(first_name)
+        if variant_enum_idx >= 0 {
+            let ei = (*c).enums.get(variant_enum_idx)
+            ty_named(ei.name)
+        } else {
+            // Look up in env as a regular binding
+            (*c).env.lookup(first_name)
+        }
+    }
+}
+
+// *mut ExprBinary handler (split-and-bridge): check the OPERANDS in place — so a nested
+// enum path-expr (e.g. `c == Color::Red`) reaches checker_check_path_expr_inplace and
+// dodges the by-value check_path_expr SRET crash — then bridge to the by-value op-typing
+// tail (check_binary_with_operand_types), which is driven by the already-computed operand
+// types and never re-checks operands, so it never recurses into check_path_expr.
+fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let left_ty = checker_check_opt_expr_inplace(c, e.left)
+    let right_ty = checker_check_opt_expr_inplace(c, e.right)
+    let pair = (*c).check_binary_with_operand_types(e, left_ty, right_ty)
+    checker_store_from_value(c, pair.0)
+    pair.1
 }
 
 // ============================================================
@@ -12910,6 +12950,15 @@ impl Checker {
         let right_pair = c.check_opt_expr(e.right)
         c = right_pair.0
         let right_ty = right_pair.1
+        c.check_binary_with_operand_types(e, left_ty, right_ty)
+    }
+
+    // Op-typing tail of check_binary_expr, split out so the *mut spine
+    // (checker_check_binary_expr_inplace) can check the OPERANDS in place and bridge here
+    // for the operand-type-driven validation. This body never re-checks operands, so it
+    // never recurses into check_path_expr — faithful by construction (verbatim move).
+    fn check_binary_with_operand_types(self, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
 
         // Observer semantics: comparing Unobserved<T> requires with Observe
         if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
