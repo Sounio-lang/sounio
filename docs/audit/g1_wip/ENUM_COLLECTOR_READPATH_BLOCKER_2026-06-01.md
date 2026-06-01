@@ -149,10 +149,48 @@ corpus wins (the checker is lenient on enums), this is unbounded work for near-z
 corpus payoff, and must be done as its own focused session (per the rule: do NOT chain a
 half-converted-spine migration on low context — it bricks mc.elf).
 
-The FIX #2 attempt was **discarded** (`git checkout` — it left `ItemEnum` enabled =
-net-negative). The clean collector-body fix (`ddc7a8b7e`) stands. The in-place handler is
-preserved here verbatim so the work isn't lost; re-add it as the FIRST step of the
-spine-completion session, then add `ExprIf`/`ExprBinary`/transitive `*mut` handlers:
+## Spine-completion session (2026-06-01): Build A LANDED (80 crash rescues); ItemEnum now gated on a SEMANTIC blocker
+
+Did the spine-completion as its own session. Outcome split cleanly:
+
+**Build A — LANDED (`cb92d66a9`).** Added `*mut` leaf handlers for `ExprPath` and
+`ExprBinary` (split-and-bridge: check operands via the `*mut` spine, bridge the op-typing
+tail `check_binary_with_operand_types` — a verbatim extraction of `check_binary_expr`).
+With `ItemEnum` OFF, full 847 sweep vs baseline: **0 regressions** (every previously
+completing program byte-identical → operand-routing faithful) and **80 crashes RESCUED**
+(481→401 rc=139): 3 now type-check clean (incl. `struct_param.sio`, the FIX#1
+struct-as-param SIGSEGV limit), 77 now run to completion and report errors gracefully.
+So routing operand-checking off the by-value frame path heals frame-disease crashes
+corpus-wide — a real, large win independent of enums. g1 gate PASS.
+
+**ItemEnum enablement — DISCARDED; now gated on a SEMANTIC (not codegen) blocker.**
+Enabling `ItemEnum` on top of Build A changed **exactly one** corpus program: `enum_match`
+(the only one with a nested enum comparison). It still crashed (its `Color::Red` is nested
+in `if c == Color::Red` → bridges to by-value `check_if_expr` → by-value `check_path_expr`
+→ crash; ExprIf not migrated). The GO/NO-GO probe `enum E{A,B} fn f(c:i64){ let x = c==E::A }`
+(top-level binary, no `if`) → **rc=1, NO crash** — proving the `*mut` binary path itself
+works; the bridged tail ran and typed `i64 == E::A` as a mismatch (E004).
+
+But that rc=1 is a **divergence from canonical, not a correct rejection**: canonical
+`bin/souc` COMPILES both `enum_match.sio` and the probe successfully (`i64 == fieldless-enum`
+is valid in real Sounio — C-style int-like variants). The modular checker rejects it
+because `check_path_expr` types `Color::Red` as `ty_named("Color")` — it uses only the HEAD
+path segment (`checker_copy_string_list_to_name` copies `seg.head` only), so the whole path
+is typed as the enum, not an int. The lenient empty-table baseline masked this (uncollected
+enum → `Color::Red` typed as unknown → no mismatch).
+
+⇒ **Migrating ExprIf would only convert `enum_match` from crash (139) to a divergent type-
+error (1)** — trading a crash for a wrong answer, while opening the broad ExprIf regression
+surface. Reaching the canonical-correct rc=0 needs a SEMANTIC fix to enum-path typing
+(fieldless variants int-like, or relax enum/int compare), which is unscoped, unmeasured,
+and has its own corpus-wide blast radius. That is a TYPING project, not codegen — a fresh
+scoping problem (how should fieldless enums type? what does canonical do for enum/int
+compare across the corpus?). **ItemEnum stays disabled; full enable = ExprIf migration +
+enum-path/compare semantics matching canonical, as a separate session.**
+
+The in-place `check_path_expr` handler IS now landed (in Build A, `checker_check_path_expr_inplace`);
+the FIRST step below is therefore done. Remaining for full enable: the semantic typing fix
++ `ExprIf`/transitive `*mut` handlers. The in-place handler is preserved verbatim below:
 
 ```sounio
 // wire into checker_check_expr_inplace's if-chain, before the `else` bridge:
