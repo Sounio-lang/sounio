@@ -59,3 +59,15 @@ by-value path is the one with the large-struct/SRET frame disease. So:
 NOTE: this is SEPARATE from the bare-pattern qualification fix (committed on
 g1/qualify-bare-patterns) — that was a bin/souc codegen bug; these are modular-source
 completeness gaps. Both needed for the modular compiler to actually work.
+
+## CORRECTION (verified): the synthesis's "FIX #0 — just rebuild mc.elf" is FALSIFIED
+mc.elf `daaa5758` was freshly rebuilt 6× THIS session from current source (bin/souc
+`e35ef063` unchanged). On that fresh binary, `loop`+`break`, `impl`/`self`, and
+`type X = Y` STILL fail with parse errors (rc=1, "parse error: expected token"). So
+these are NOT mc.elf staleness. Most likely: **bin/souc miscompiles the modular parser
+source** for these constructs (another bin/souc codegen bug, same family spirit as the
+bare-pattern one), or a genuine modular-parser gap. "Rebuild" will not fix them — they
+need real investigation (diff what the modular parser SOURCE does vs what the built
+parser accepts; suspect a bin/souc miscompile of parse_param/self / parse_impl_item /
+loop / type-alias). This slots ABOVE FIX #1 only if methods/impl are a priority;
+otherwise FIX #1 (decl collection) remains the highest-leverage single fix.
