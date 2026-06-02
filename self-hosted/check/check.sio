@@ -2661,6 +2661,10 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_method_call_inplace(c, e)
     } else if e.kind == ExprKind::ExprCall {
         result = checker_check_call_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprIdent {
+        result = checker_check_ident_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprCast {
+        result = checker_check_cast_expr_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
     }
@@ -3601,6 +3605,57 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let rel = (*c).release_call_arg_borrows(e.args, None, call_start_borrows)
         checker_store_from_value(c, rel)
         ty_error()
+    }
+}
+
+
+// *mut ExprIdent leaf — transcription of the by-value ExprIdent arm (13856). env lookup +
+// linear-consume in place; returns only the TypeEntry (no 164KB self SRET — the by-value
+// arm's `(c2, ident_ty)` return was the last bridge before crash in 165 deeply-nested cases).
+fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let ident_ty = (*c).env.lookup(e.name)
+    if checker_is_linear_type_inplace(c, ident_ty) && (*c).suppress_linear_consume_depth == 0 {
+        if (*c).borrows.is_borrowed(e.name) {
+            checker_report_error_at_inplace(c, e.span, 38, 0, 0, 0)
+        } else {
+            let consume_result = (*c).borrows.consume_linear(e.name)
+            (*c).borrows = consume_result.0
+            if consume_result.1 != 0 {
+                checker_report_error_at_inplace(c, e.span, consume_result.1, 0, 0, 0)
+            }
+        }
+    }
+    ident_ty
+}
+
+// *mut ExprCast — transcription of check_cast_expr: operand via the spine, target type via
+// the *mut type-lowering, epistemic + unit-dimension checks in place.
+fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let src_ty = checker_check_opt_expr_inplace(c, e.left)
+    match e.cast_type {
+        Some(ty) => {
+            let target_ty = checker_lower_type_expr_mut(c, *ty)
+            let src_is_epistemic = src_ty.kind == TypeKind::TyKnowledge
+                || src_ty.kind == TypeKind::TyIntervention
+                || src_ty.kind == TypeKind::TyCounterfactual
+                || src_ty.kind == TypeKind::TyValidated
+            let tgt_is_epistemic = target_ty.kind == TypeKind::TyKnowledge
+                || target_ty.kind == TypeKind::TyIntervention
+                || target_ty.kind == TypeKind::TyCounterfactual
+                || target_ty.kind == TypeKind::TyValidated
+            if src_is_epistemic && !tgt_is_epistemic {
+                checker_report_error_at_inplace(c, e.span, 171, 0, 0, 0)
+            }
+            if src_ty.unit_id >= 0 && target_ty.unit_id >= 0 {
+                let src_dim = (*c).units.get_dim(src_ty.unit_id)
+                let tgt_dim = (*c).units.get_dim(target_ty.unit_id)
+                if !unit_dim_compatible(src_dim, tgt_dim) {
+                    checker_report_error_at_inplace(c, e.span, 43, 0, 0, 0)
+                }
+            }
+            target_ty
+        }
+        None => ty_error()
     }
 }
 
