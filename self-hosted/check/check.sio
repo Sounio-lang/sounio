@@ -1283,8 +1283,78 @@ fn checker_collect_item_mut(c: *mut Checker, item: Item) with Mut, Panic, Div, A
 }
 
 fn checker_collect_fn_item_mut(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
-    let next = (*c).collect_fn_def(item.name, item.fn_def)
-    checker_store_from_value(c, next)
+    match item.fn_def {
+        Some(fd) => {
+            var can_fast_collect = true
+            var params: Option<Box<FnParamList> > = None
+            var param_count: i64 = 0
+            match (*fd).params {
+                None => {}
+                Some(pl) => {
+                    match (*pl).tail {
+                        None => {
+                            let primitive_ty = primitive_type_from_type_expr((*pl).head.ty)
+                            if primitive_ty.kind != TypeKind::TyError {
+                                let head_param = FnParamInfo { name: (*pl).head.name, ty: primitive_ty }
+                                params = Some(Box::new(FnParamList { head: head_param, tail: None }))
+                                param_count = 1
+                            } else {
+                                can_fast_collect = false
+                            }
+                        }
+                        Some(_) => {
+                            can_fast_collect = false
+                        }
+                    }
+                }
+            }
+            match (*fd).effects {
+                None => {}
+                Some(_) => {
+                    can_fast_collect = false
+                }
+            }
+            var ret_ty = ty_unknown()
+            match (*fd).return_type {
+                None => {}
+                Some(ret_box) => {
+                    let ret_te = *ret_box
+                    let primitive_ret = primitive_type_from_type_expr(ret_te)
+                    if primitive_ret.kind != TypeKind::TyError {
+                        ret_ty = primitive_ret
+                    } else {
+                        can_fast_collect = false
+                    }
+                }
+            }
+            if can_fast_collect {
+                let sig = FnSig {
+                    name: item.name,
+                    params: params,
+                    param_count: param_count,
+                    return_type: ret_ty,
+                    is_method: false,
+                    self_type_name: Name { buf: [0; 128], len: 0 },
+                    self_type_entry: ty_unit(),
+                    effects: [0; 8],
+                    effect_count: 0,
+                    is_kernel: (*fd).is_kernel,
+                    is_epistemic_kernel: false,
+                    is_linear_closure: false,
+                    linear_capture_count: 0,
+                    epistemic_epsilon: 0.0 - 1.0,
+                }
+                let add_result = (*c).fn_sigs.add(sig)
+                (*c).fn_sigs = add_result.0
+                let sig_id = add_result.1
+                (*c).env = (*c).env.bind(item.name, ty_fn(sig_id), false)
+                return
+            }
+            let next = (*c).collect_fn_def(item.name, item.fn_def)
+            checker_store_from_value(c, next)
+        }
+        None => {}
+    }
 }
 
 fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
@@ -1306,8 +1376,234 @@ fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) wit
 }
 
 fn checker_check_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
-    let next = (*c).check_items(items)
-    checker_store_from_value(c, next)
+    var cursor = items
+    while true {
+        match cursor {
+            Some(list) => {
+                let item = (*list).head
+                if item.kind == ItemKind::ItemFn {
+                    checker_check_fn_item_mut(c, item.fn_def)
+                } else {
+                    let next = (*c).check_item(item)
+                    checker_store_from_value(c, next)
+                }
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_fn_body_return_int_literal(blk: Block) -> bool with Mut, Panic, Div, Alloc {
+    match blk.stmts {
+        Some(list) => {
+            match (*list).tail {
+                None => {
+                    let stmt = (*list).head
+                    if stmt.kind == StmtKind::StmtExpr {
+                        match stmt.expr {
+                            Some(expr_box) => {
+                                let expr = *expr_box
+                                if expr.kind == ExprKind::ExprReturn {
+                                    match expr.left {
+                                        Some(ret_box) => {
+                                            let ret_expr = *ret_box
+                                            return ret_expr.kind == ExprKind::ExprIntLit
+                                        }
+                                        None => {}
+                                    }
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        None => {}
+    }
+    false
+}
+
+fn checker_block_single_int_expr(blk: Block) -> bool with Mut, Panic, Div, Alloc {
+    match blk.stmts {
+        Some(list) => {
+            match (*list).tail {
+                None => {
+                    let stmt = (*list).head
+                    if stmt.kind == StmtKind::StmtExpr {
+                        match stmt.expr {
+                            Some(expr_box) => {
+                                let expr = *expr_box
+                                return expr.kind == ExprKind::ExprIntLit
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        None => {}
+    }
+    false
+}
+
+fn checker_if_true_else_int_expr(expr: Expr) -> bool with Mut, Panic, Div, Alloc {
+    if expr.kind != ExprKind::ExprIf {
+        return false
+    }
+    match expr.left {
+        Some(cond_box) => {
+            let cond = *cond_box
+            if cond.kind != ExprKind::ExprBoolTrue {
+                return false
+            }
+        }
+        None => {
+            return false
+        }
+    }
+    match expr.block {
+        Some(then_box) => {
+            if !checker_block_single_int_expr(*then_box) {
+                return false
+            }
+        }
+        None => {
+            return false
+        }
+    }
+    match expr.else_expr {
+        Some(else_box) => {
+            let else_expr = *else_box
+            if else_expr.kind == ExprKind::ExprBlock {
+                match else_expr.block {
+                    Some(else_block_box) => {
+                        return checker_block_single_int_expr(*else_block_box)
+                    }
+                    None => {}
+                }
+            }
+        }
+        None => {}
+    }
+    false
+}
+
+fn checker_fn_body_simple_i64(blk: Block) -> bool with Mut, Panic, Div, Alloc {
+    if checker_fn_body_return_int_literal(blk) {
+        return true
+    }
+    match blk.stmts {
+        Some(list) => {
+            match (*list).tail {
+                None => {
+                    let stmt = (*list).head
+                    if stmt.kind == StmtKind::StmtExpr {
+                        match stmt.expr {
+                            Some(expr_box) => {
+                                let expr = *expr_box
+                                if checker_if_true_else_int_expr(expr) {
+                                    return true
+                                }
+                                if expr.kind == ExprKind::ExprBlock {
+                                    match expr.block {
+                                        Some(block_box) => {
+                                            return checker_block_single_int_expr(*block_box)
+                                        }
+                                        None => {}
+                                    }
+                                }
+                                if expr.kind == ExprKind::ExprWhile {
+                                    match expr.left {
+                                        Some(cond_box) => {
+                                            let cond = *cond_box
+                                            if cond.kind == ExprKind::ExprBoolFalse {
+                                                return true
+                                            }
+                                        }
+                                        None => {}
+                                    }
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        None => {}
+    }
+    false
+}
+
+fn checker_check_fn_item_mut(c: *mut Checker, opt: Option<Box<FnDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(fd) => {
+            let saved_effects = (*c).current_effects
+            let saved_effect_count = (*c).current_effect_count
+            let saved_multitest_count = (*c).multitest_count
+            let saved_multitest_corrected = (*c).multitest_corrected
+            let sig_id = (*c).fn_sigs.find((*fd).name)
+            if sig_id >= 0 {
+                let sig = (*c).fn_sigs.get(sig_id)
+                (*c).current_return_type = sig.return_type
+                (*c).current_effects = sig.effects
+                (*c).current_effect_count = sig.effect_count
+            }
+            if sig_id >= 0 {
+                let sig_fast = (*c).fn_sigs.get(sig_id)
+                if sig_fast.param_count == 0
+                    && sig_fast.effect_count == 0
+                    && checker_fn_body_simple_i64((*fd).body) {
+                    if !types_compatible(ty_i64(), sig_fast.return_type) {
+                        let next_fast = (*c).report_mismatch((*fd).span, 8, sig_fast.return_type, ty_i64())
+                        checker_store_from_value(c, next_fast)
+                    }
+                    (*c).current_return_type = ty_unit()
+                    (*c).current_effects = saved_effects
+                    (*c).current_effect_count = saved_effect_count
+                    (*c).multitest_count = saved_multitest_count
+                    (*c).multitest_corrected = saved_multitest_corrected
+                    return
+                }
+            }
+            (*c).multitest_count = 0
+            (*c).multitest_corrected = false
+            (*c).env = (*c).env.push_scope()
+            (*c).borrows = (*c).borrows.push_scope()
+            let scoped = (*c).push_const_scope()
+            checker_store_from_value(c, scoped)
+            checker_bind_fn_params_mut(c, (*fd).params)
+            let pair = (*c).check_block((*fd).body)
+            checker_store_from_value(c, pair.0)
+            let body_ty = pair.1
+            if sig_id >= 0 {
+                let sig2 = (*c).fn_sigs.get(sig_id)
+                if !types_compatible(body_ty, sig2.return_type) {
+                    let next = (*c).report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
+                    checker_store_from_value(c, next)
+                }
+            }
+            if (*c).multitest_count > 1 && !(*c).multitest_corrected {
+                let next2 = (*c).report_multitest_correction_required((*fd).span, (*c).multitest_count)
+                checker_store_from_value(c, next2)
+            }
+            let popped = (*c).pop_const_scope()
+            checker_store_from_value(c, popped)
+            (*c).borrows = (*c).borrows.pop_scope()
+            (*c).env = (*c).env.pop_scope()
+            (*c).current_return_type = ty_unit()
+            (*c).current_effects = saved_effects
+            (*c).current_effect_count = saved_effect_count
+            (*c).multitest_count = saved_multitest_count
+            (*c).multitest_corrected = saved_multitest_corrected
+        }
+        None => {}
+    }
 }
 
 fn checker_check_expr_mut(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -1323,6 +1619,26 @@ fn checker_check_stmt_mut(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic
         return pair.1
     }
     if s.kind == StmtKind::StmtVar {
+        match s.ty {
+            None => {
+                match s.expr {
+                    Some(expr_box) => {
+                        let expr = *expr_box
+                        if expr.kind == ExprKind::ExprIntLit {
+                            (*c).last_literal_int = expr.int_val
+                            (*c).last_literal_kind = 1
+                            type_env_bind_mut(&! (*c).env, s.name, ty_i64(), true)
+                            let next_const = (*c).const_int_bind_value(s.name, expr.int_val)
+                            checker_store_from_value(c, next_const)
+                            (*c).borrows = (*c).borrows.track(s.name, false)
+                            return ty_unit()
+                        }
+                    }
+                    None => {}
+                }
+            }
+            Some(_) => {}
+        }
         let pair = (*c).check_var_stmt(s)
         checker_store_from_value(c, pair.0)
         return pair.1
@@ -1333,6 +1649,33 @@ fn checker_check_stmt_mut(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic
         return pair.1
     }
     if s.kind == StmtKind::StmtAssign {
+        match s.target {
+            Some(target_box) => {
+                let target = *target_box
+                if target.kind == ExprKind::ExprIdent {
+                    match s.expr {
+                        Some(expr_box) => {
+                            let expr = *expr_box
+                            if expr.kind == ExprKind::ExprIntLit {
+                                let target_ty = (*c).env.lookup(target.name)
+                                if target_ty.kind == TypeKind::TyI64
+                                    || target_ty.kind == TypeKind::TyI32
+                                    || target_ty.kind == TypeKind::TyI8
+                                    || target_ty.kind == TypeKind::TyU64
+                                    || target_ty.kind == TypeKind::TyU32
+                                    || target_ty.kind == TypeKind::TyU8 {
+                                    let next_const = (*c).const_int_bind_value(target.name, expr.int_val)
+                                    checker_store_from_value(c, next_const)
+                                    return ty_unit()
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            None => {}
+        }
         let pair = (*c).check_assign_stmt(s)
         checker_store_from_value(c, pair.0)
         return pair.1
@@ -1369,6 +1712,9 @@ fn checker_check_expr_stmt_mut(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, 
             if expr.kind == ExprKind::ExprCharLit {
                 return ty_char()
             }
+            if expr.kind == ExprKind::ExprIdent {
+                return (*c).env.lookup(expr.name)
+            }
             if expr.kind == ExprKind::ExprBinary {
                 match expr.left {
                     Some(left_box) => {
@@ -1376,12 +1722,24 @@ fn checker_check_expr_stmt_mut(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, 
                             Some(right_box) => {
                                 let left_expr = *left_box
                                 let right_expr = *right_box
-                                if left_expr.kind == ExprKind::ExprIntLit && right_expr.kind == ExprKind::ExprIntLit {
-                                    if expr.bin_op == BinaryOp::OpAdd
-                                        || expr.bin_op == BinaryOp::OpSub
-                                        || expr.bin_op == BinaryOp::OpMul
-                                        || expr.bin_op == BinaryOp::OpDiv
-                                        || expr.bin_op == BinaryOp::OpRem {
+                                if expr.bin_op == BinaryOp::OpAdd
+                                    || expr.bin_op == BinaryOp::OpSub
+                                    || expr.bin_op == BinaryOp::OpMul
+                                    || expr.bin_op == BinaryOp::OpDiv
+                                    || expr.bin_op == BinaryOp::OpRem {
+                                    var left_ty = ty_error()
+                                    var right_ty = ty_error()
+                                    if left_expr.kind == ExprKind::ExprIntLit {
+                                        left_ty = ty_i64()
+                                    } else if left_expr.kind == ExprKind::ExprIdent {
+                                        left_ty = (*c).env.lookup(left_expr.name)
+                                    }
+                                    if right_expr.kind == ExprKind::ExprIntLit {
+                                        right_ty = ty_i64()
+                                    } else if right_expr.kind == ExprKind::ExprIdent {
+                                        right_ty = (*c).env.lookup(right_expr.name)
+                                    }
+                                    if left_ty.kind == TypeKind::TyI64 && right_ty.kind == TypeKind::TyI64 {
                                         return ty_i64()
                                     }
                                 }
@@ -1394,6 +1752,21 @@ fn checker_check_expr_stmt_mut(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, 
                 let pair = (*c).check_binary_expr(expr)
                 checker_store_from_value(c, pair.0)
                 return pair.1
+            }
+            if expr.kind == ExprKind::ExprUnary {
+                if expr.un_op == UnaryOp::OpNeg {
+                    match expr.left {
+                        Some(inner_box) => {
+                            let inner = *inner_box
+                            if inner.kind == ExprKind::ExprIntLit {
+                                (*c).last_literal_int = 0 - inner.int_val
+                                (*c).last_literal_kind = 1
+                                return ty_i64()
+                            }
+                        }
+                        None => {}
+                    }
+                }
             }
             if expr.kind == ExprKind::ExprCall {
                 match expr.left {
@@ -1408,7 +1781,28 @@ fn checker_check_expr_stmt_mut(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, 
                                         return sig.return_type
                                     }
                                 }
-                                Some(_) => {}
+                                Some(arg_list) => {
+                                    match (*arg_list).tail {
+                                        None => {
+                                            let arg_expr = (*arg_list).head
+                                            if arg_expr.kind == ExprKind::ExprIntLit {
+                                                let callee_ty = (*c).env.lookup(callee.name)
+                                                if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
+                                                    let sig = (*c).fn_sigs.get(callee_ty.fn_sig_id)
+                                                    if sig.param_count == 1 && sig.effect_count == 0 {
+                                                        let param_info = fn_param_list_get(sig.params, 0)
+                                                        if param_info.ty.kind == TypeKind::TyI64 {
+                                                            (*c).last_literal_int = arg_expr.int_val
+                                                            (*c).last_literal_kind = 1
+                                                            return sig.return_type
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Some(_) => {}
+                                    }
+                                }
                             }
                         }
                     }
@@ -1441,13 +1835,191 @@ fn checker_check_let_stmt_mut(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, P
                         (*c).borrows = (*c).borrows.track(s.name, false)
                         return ty_unit()
                     }
+                    if expr.kind == ExprKind::ExprCall {
+                        match expr.left {
+                            Some(callee_box) => {
+                                let callee = *callee_box
+                                if callee.kind == ExprKind::ExprIdent {
+                                    let callee_ty = (*c).env.lookup(callee.name)
+                                    if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
+                                        let sig = (*c).fn_sigs.get(callee_ty.fn_sig_id)
+                                        if sig.effect_count == 0 {
+                                            match expr.args {
+                                                None => {
+                                                    if sig.param_count == 0 {
+                                                        type_env_bind_mut(&! (*c).env, s.name, sig.return_type, false)
+                                                        return ty_unit()
+                                                    }
+                                                }
+                                                Some(arg_list) => {
+                                                    match (*arg_list).tail {
+                                                        None => {
+                                                            let arg_expr = (*arg_list).head
+                                                            if arg_expr.kind == ExprKind::ExprIntLit && sig.param_count == 1 {
+                                                                let param_info = fn_param_list_get(sig.params, 0)
+                                                                if param_info.ty.kind == TypeKind::TyI64 {
+                                                                    type_env_bind_mut(&! (*c).env, s.name, sig.return_type, false)
+                                                                    return ty_unit()
+                                                                }
+                                                            }
+                                                        }
+                                                        Some(_) => {}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        Some(ty_box) => {
+            match s.expr {
+                Some(expr_box) => {
+                    let expr = *expr_box
+                    if expr.kind == ExprKind::ExprIntLit {
+                        let ann_ty = primitive_type_from_type_expr(*ty_box)
+                        if ann_ty.kind == TypeKind::TyI64
+                            || ann_ty.kind == TypeKind::TyI32
+                            || ann_ty.kind == TypeKind::TyI8
+                            || ann_ty.kind == TypeKind::TyU64
+                            || ann_ty.kind == TypeKind::TyU32
+                            || ann_ty.kind == TypeKind::TyU8 {
+                            (*c).last_literal_int = expr.int_val
+                            (*c).last_literal_kind = 1
+                            type_env_bind_mut(&! (*c).env, s.name, ann_ty, false)
+                            let next_const = (*c).const_int_bind_value(s.name, expr.int_val)
+                            checker_store_from_value(c, next_const)
+                            (*c).borrows = (*c).borrows.track(s.name, false)
+                            return ty_unit()
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+    let pair = (*c).check_let_stmt(s)
+    checker_store_from_value(c, pair.0)
+    pair.1
+}
+
+fn checker_bind_fn_param_mut(c: *mut Checker, p: Param) with Mut, Panic, Div, Alloc, IO {
+    if p.is_self {
+        let next_env = (*c).env.bind(p.name, (*c).current_impl_type, p.is_self_mut)
+        (*c).env = next_env
+        let next_const = (*c).const_int_bind_unknown(p.name)
+        checker_store_from_value(c, next_const)
+        let self_linear = (*c).is_linear_type((*c).current_impl_type)
+        (*c).borrows = (*c).borrows.track(p.name, self_linear)
+    } else {
+        var param_ty = primitive_type_from_type_expr(p.ty)
+        if param_ty.kind == TypeKind::TyError {
+            let pair = (*c).lower_type_expr(p.ty)
+            checker_store_from_value(c, pair.0)
+            param_ty = pair.1
+        }
+        let next_env = (*c).env.bind(p.name, param_ty, false)
+        (*c).env = next_env
+        if param_ty.kind != TypeKind::TyI64
+            && param_ty.kind != TypeKind::TyI32
+            && param_ty.kind != TypeKind::TyI8
+            && param_ty.kind != TypeKind::TyU64
+            && param_ty.kind != TypeKind::TyU32
+            && param_ty.kind != TypeKind::TyU8 {
+            let next_const = (*c).const_int_bind_unknown(p.name)
+            checker_store_from_value(c, next_const)
+        }
+        if param_ty.kind != TypeKind::TyI64
+            && param_ty.kind != TypeKind::TyI32
+            && param_ty.kind != TypeKind::TyI8
+            && param_ty.kind != TypeKind::TyU64
+            && param_ty.kind != TypeKind::TyU32
+            && param_ty.kind != TypeKind::TyU8
+            && param_ty.kind != TypeKind::TyF64
+            && param_ty.kind != TypeKind::TyF32
+            && param_ty.kind != TypeKind::TyBool
+            && param_ty.kind != TypeKind::TyString
+            && param_ty.kind != TypeKind::TyChar {
+            let lin = (*c).is_linear_type(param_ty)
+            (*c).borrows = (*c).borrows.track(p.name, lin)
+        }
+    }
+}
+
+fn checker_bind_fn_params_mut(c: *mut Checker, opt: Option<Box<ParamList> >) with Mut, Panic, Div, Alloc, IO {
+    var cursor = opt
+    while true {
+        match cursor {
+            Some(pl) => {
+                checker_bind_fn_param_mut(c, (*pl).head)
+                cursor = (*pl).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_check_var_stmt_small_mut(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match s.ty {
+        None => {
+            match s.expr {
+                Some(expr_box) => {
+                    let expr = *expr_box
+                    if expr.kind == ExprKind::ExprIntLit {
+                        (*c).last_literal_int = expr.int_val
+                        (*c).last_literal_kind = 1
+                        type_env_bind_mut(&! (*c).env, s.name, ty_i64(), true)
+                        let next_const = (*c).const_int_bind_value(s.name, expr.int_val)
+                        checker_store_from_value(c, next_const)
+                        (*c).borrows = (*c).borrows.track(s.name, false)
+                        return ty_unit()
+                    }
                 }
                 None => {}
             }
         }
         Some(_) => {}
     }
-    let pair = (*c).check_let_stmt(s)
+    let pair = (*c).check_var_stmt(s)
+    checker_store_from_value(c, pair.0)
+    pair.1
+}
+
+fn checker_check_assign_stmt_small_mut(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match s.target {
+        Some(target_box) => {
+            let target = *target_box
+            if target.kind == ExprKind::ExprIdent {
+                match s.expr {
+                    Some(expr_box) => {
+                        let expr = *expr_box
+                        if expr.kind == ExprKind::ExprIntLit {
+                            let target_ty = (*c).env.lookup(target.name)
+                            if target_ty.kind == TypeKind::TyI64
+                                || target_ty.kind == TypeKind::TyI32
+                                || target_ty.kind == TypeKind::TyI8
+                                || target_ty.kind == TypeKind::TyU64
+                                || target_ty.kind == TypeKind::TyU32
+                                || target_ty.kind == TypeKind::TyU8 {
+                                let next_const = (*c).const_int_bind_value(target.name, expr.int_val)
+                                checker_store_from_value(c, next_const)
+                                return ty_unit()
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+        None => {}
+    }
+    let pair = (*c).check_assign_stmt(s)
     checker_store_from_value(c, pair.0)
     pair.1
 }
@@ -1465,8 +2037,14 @@ fn checker_check_stmts_mut(c: *mut Checker, opt: Option<Box<StmtList> >) -> Type
                 if stmt.kind == StmtKind::StmtLet {
                     result_ty = checker_check_let_stmt_mut(c, stmt)
                 } else {
+                if stmt.kind == StmtKind::StmtVar {
+                    result_ty = checker_check_var_stmt_small_mut(c, stmt)
+                } else {
+                if stmt.kind == StmtKind::StmtAssign {
+                    result_ty = checker_check_assign_stmt_small_mut(c, stmt)
+                } else {
                     result_ty = checker_check_stmt_mut(c, stmt)
-                } }
+                } } } }
                 cursor = (*list).tail
             }
             None => break
@@ -2312,8 +2890,7 @@ fn checker_check_items_inner_store_return_error_count_mut(c: *mut Checker, items
 }
 
 fn checker_check_items_inner_store_return_had_error_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
-    let next = (*c).check_items(items)
-    checker_store_from_value(c, next)
+    checker_check_items_mut(c, items)
     if (*c).had_error {
         1
     } else {
@@ -10774,6 +11351,20 @@ impl Checker {
     fn collect_fn_params(self, opt: Option<Box<ParamList> >) -> CollectFnParamsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(pl) => {
+                match (*pl).tail {
+                    None => {
+                        let primitive_ty = primitive_type_from_type_expr((*pl).head.ty)
+                        if primitive_ty.kind != TypeKind::TyError {
+                            let head_param = FnParamInfo { name: (*pl).head.name, ty: primitive_ty }
+                            return CollectFnParamsResult {
+                                checker: self,
+                                params: Some(Box::new(FnParamList { head: head_param, tail: None })),
+                                count: 1,
+                            }
+                        }
+                    }
+                    Some(_) => {}
+                }
                 let __r = self.collect_fn_param_list(*pl)
                 CollectFnParamsResult { checker: __r.checker, params: Some(Box::new(__r.list)), count: __r.count }
             }
@@ -11838,7 +12429,7 @@ impl Checker {
                 c.env = c.env.push_scope()
                 c.borrows = c.borrows.push_scope()
                 c = c.push_const_scope()
-                c = c.bind_fn_params((*fd).params)
+                checker_bind_fn_params_mut(&! c, (*fd).params)
                 let pair = c.check_block((*fd).body)
                 c = pair.0
                 let body_ty = pair.1
@@ -11887,14 +12478,36 @@ impl Checker {
             c.borrows = c.borrows.track(p.name, self_linear)
             c
         } else {
-            let pair = c.lower_type_expr(p.ty)
-            c = pair.0
-            let param_ty = pair.1
-            c.env = c.env.bind(p.name, param_ty, false)
-            c = c.const_int_bind_unknown(p.name)
+            var param_ty = primitive_type_from_type_expr(p.ty)
+            if param_ty.kind == TypeKind::TyError {
+                let pair = c.lower_type_expr(p.ty)
+                c = pair.0
+                param_ty = pair.1
+            }
+            type_env_bind_mut(&! c.env, p.name, param_ty, false)
+            if param_ty.kind != TypeKind::TyI64
+                && param_ty.kind != TypeKind::TyI32
+                && param_ty.kind != TypeKind::TyI8
+                && param_ty.kind != TypeKind::TyU64
+                && param_ty.kind != TypeKind::TyU32
+                && param_ty.kind != TypeKind::TyU8 {
+                c = c.const_int_bind_unknown(p.name)
+            }
             // Track parameter for borrow checking (linear if struct is declared linear)
-            let lin = c.is_linear_type(param_ty)
-            c.borrows = c.borrows.track(p.name, lin)
+            if param_ty.kind != TypeKind::TyI64
+                && param_ty.kind != TypeKind::TyI32
+                && param_ty.kind != TypeKind::TyI8
+                && param_ty.kind != TypeKind::TyU64
+                && param_ty.kind != TypeKind::TyU32
+                && param_ty.kind != TypeKind::TyU8
+                && param_ty.kind != TypeKind::TyF64
+                && param_ty.kind != TypeKind::TyF32
+                && param_ty.kind != TypeKind::TyBool
+                && param_ty.kind != TypeKind::TyString
+                && param_ty.kind != TypeKind::TyChar {
+                let lin = c.is_linear_type(param_ty)
+                c.borrows = c.borrows.track(p.name, lin)
+            }
             c
         }
     }
