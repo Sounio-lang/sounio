@@ -2647,6 +2647,14 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_block_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprArrayLit {
         result = checker_check_array_lit_inplace(c, e)
+    } else if e.kind == ExprKind::ExprUnary {
+        result = checker_check_unary_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprFieldAccess {
+        result = checker_check_field_access_inplace(c, e)
+    } else if e.kind == ExprKind::ExprIndex {
+        result = checker_check_index_inplace(c, e)
+    } else if e.kind == ExprKind::ExprMatch {
+        result = checker_check_match_expr_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
     }
@@ -2844,6 +2852,383 @@ fn checker_check_array_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // Faithful to check_array_elems: empty literal yields ty_error element type, count 0.
     ty_array(first_ty, count)
 }
+
+
+// *mut ExprUnary handler — FULL transcription of check_unary_expr (13491). The operand
+// (and, for the slice-borrow form, the index base and the range start/end) are checked
+// via the *mut spine so a nested enum path-expr / call / if inside the operand reaches the
+// *mut handlers and dodges the by-value check_path_expr / check_call SRET crash (the ~164KB
+// Checker self-move bin/souc miscompiles). The non-recursive work — unary_result_type
+// op-typing (E005 on bad operand), and &x / &!x borrow tracking via the BorrowEnv methods —
+// is faithful to the by-value original: same error codes (5, and the 37/38 conflict codes
+// returned by try_shared_borrow/try_exclusive_borrow), same spans, same TypeEntry returns.
+// The half-open slice-borrow special case (&arr[a..b]) is delegated to a sibling *mut
+// transcription of check_slice_borrow_expr so its sub-expressions also route through the
+// spine. unary_result_type / slice_borrow_result_type / unary_operand_name are pure helpers
+// (TypeEntry/Name in, TypeEntry/Name out — no Checker copy), so they are called directly.
+fn checker_check_unary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // Half-open slice borrow: &arr[a..b] / &!arr[a..b]
+    if (e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut) && expr_is_half_open_range(e.left) {
+        return checker_check_slice_borrow_expr_inplace(c, e)
+    }
+    // Operand via the *mut spine (faithful to self.check_opt_expr(e.left)).
+    let operand_ty = checker_check_opt_expr_inplace(c, e.left)
+    // Op-typing (pure helper).
+    let result = unary_result_type(e.un_op, operand_ty)
+    if result.kind == TypeKind::TyError && !is_error_or_unknown(operand_ty) {
+        checker_report_error_at_inplace(c, e.span, 5, 0, 0, 0)
+    }
+    // Borrow checking for &x / &!x on a named variable.
+    if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
+        let borrow_name = unary_operand_name(e.left)
+        if borrow_name.len > 0 {
+            if e.un_op == UnaryOp::OpRef {
+                let borrow_result = (*c).borrows.try_shared_borrow(borrow_name)
+                (*c).borrows = borrow_result.0
+                if borrow_result.1 != 0 {
+                    checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
+                }
+            } else {
+                let borrow_result = (*c).borrows.try_exclusive_borrow(borrow_name)
+                (*c).borrows = borrow_result.0
+                if borrow_result.1 != 0 {
+                    checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
+                }
+            }
+        }
+    }
+    result
+}
+
+// *mut transcription of check_slice_borrow_expr (13419): the index base (idx_expr.left)
+// and the range start/end are all checked via the *mut spine. Faithful to the by-value
+// original: same E013 (malformed slice-borrow) / E055 (non-integer range bound) error
+// codes, same spans, same borrow tracking, same result TypeEntry. slice_borrow_result_type
+// is a pure helper (TypeEntry in/out). On the outer-None and non-ExprIndex paths the
+// original returns ty_error() after reporting E013.
+fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let want_mut = e.un_op == UnaryOp::OpRefMut
+    let borrow_name = unary_operand_name(e.left)
+    match e.left {
+        Some(index_expr) => {
+            let idx_expr = *index_expr
+            if idx_expr.kind != ExprKind::ExprIndex {
+                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
+                return ty_error()
+            }
+            // Index base via the *mut spine (faithful to self.check_opt_expr(idx_expr.left)).
+            let base_ty = checker_check_opt_expr_inplace(c, idx_expr.left)
+            let result_ty = slice_borrow_result_type(base_ty, want_mut)
+            if result_ty.kind == TypeKind::TyError && !is_error_or_unknown(base_ty) {
+                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
+            }
+            match idx_expr.right {
+                Some(range_expr) => {
+                    if (*range_expr).kind != ExprKind::ExprRange || (*range_expr).bin_op != BinaryOp::OpRange {
+                        checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
+                    } else {
+                        match (*range_expr).left {
+                            Some(start_expr) => {
+                                let start_ty = checker_check_expr_inplace(c, *start_expr)
+                                if !is_error_or_unknown(start_ty) && !is_integer_type(start_ty) {
+                                    checker_report_mismatch_inplace(c, e.span, 55, ty_i64(), start_ty)
+                                }
+                            }
+                            None => {
+                                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
+                            }
+                        }
+                        match (*range_expr).right {
+                            Some(end_expr) => {
+                                let end_ty = checker_check_expr_inplace(c, *end_expr)
+                                if !is_error_or_unknown(end_ty) && !is_integer_type(end_ty) {
+                                    checker_report_mismatch_inplace(c, e.span, 55, ty_i64(), end_ty)
+                                }
+                            }
+                            None => {
+                                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
+                            }
+                        }
+                    }
+                }
+                None => {
+                    checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
+                }
+            }
+            if borrow_name.len > 0 {
+                if want_mut {
+                    let borrow_result = (*c).borrows.try_exclusive_borrow(borrow_name)
+                    (*c).borrows = borrow_result.0
+                    if borrow_result.1 != 0 {
+                        checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
+                    }
+                } else {
+                    let borrow_result = (*c).borrows.try_shared_borrow(borrow_name)
+                    (*c).borrows = borrow_result.0
+                    if borrow_result.1 != 0 {
+                        checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
+                    }
+                }
+            }
+            result_ty
+        }
+        None => {
+            checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
+            ty_error()
+        }
+    }
+}
+
+// *mut ExprFieldAccess handler — FULL transcription of check_field_access (13528), not a
+// bridge. The ONLY sub-expression is the object (e.left); it is routed through the *mut
+// spine via checker_check_opt_expr_inplace so a nested enum path-expr / binary / etc. in
+// the object position reaches its in-place handler and dodges the by-value SRET crash.
+// Everything else is a PURE READ: struct field-type lookup against (*c).structs, the
+// Knowledge/Intervention/Counterfactual/Validated .value/.epsilon shapes (with the same
+// `with Epistemic` effect-id-8 enforcement), Hyper component access, Tuple-by-index, and
+// the error/unknown passthrough. Every `c = c.report_error_at(span, code, 0,0,0)` becomes a
+// side-effecting checker_report_error_at_inplace(c, ...) call; every `(c, X)` tuple return
+// becomes returning the TypeEntry X. Branch order, error codes, and per-case TypeEntry are
+// byte-for-byte faithful to the by-value original. No (*c).expr_depth management here (the
+// dispatch owns it).
+fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let base_ty = checker_check_opt_expr_inplace(c, e.left)
+    if base_ty.kind == TypeKind::TyNamed {
+        let struct_idx = (*c).structs.find(base_ty.name)
+        if struct_idx >= 0 {
+            let si = (*c).structs.get(struct_idx)
+            let field_ty = field_info_list_find(si.fields, e.name)
+            if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
+                checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+            }
+            field_ty
+        } else {
+            ty_error()
+        }
+    } else if base_ty.kind == TypeKind::TyKnowledge {
+        // Knowledge<T> field access: .value -> T, .epsilon -> f64
+        if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
+            // "value" = [118, 97, 108, 117, 101]
+            // Epistemic enforcement: .value requires `with Epistemic` effect
+            let epistemic_id: i64 = 8
+            if !has_effect_id((*c).current_effects, (*c).current_effect_count, epistemic_id) {
+                checker_report_error_at_inplace(c, e.span, 170, 0, 0, 0)
+            }
+            knowledge_inner(base_ty)
+        } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
+            // "epsilon" = [101, 112, 115, 105, 108, 111, 110]
+            ty_f64()
+        } else {
+            checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+            ty_error()
+        }
+    } else if base_ty.kind == TypeKind::TyIntervention {
+        if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
+            let epistemic_id: i64 = 8
+            if !has_effect_id((*c).current_effects, (*c).current_effect_count, epistemic_id) {
+                checker_report_error_at_inplace(c, e.span, 170, 0, 0, 0)
+            }
+            knowledge_inner(base_ty)
+        } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
+            ty_f64()
+        } else {
+            checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+            ty_error()
+        }
+    } else if base_ty.kind == TypeKind::TyCounterfactual {
+        if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
+            let epistemic_id: i64 = 8
+            if !has_effect_id((*c).current_effects, (*c).current_effect_count, epistemic_id) {
+                checker_report_error_at_inplace(c, e.span, 170, 0, 0, 0)
+            }
+            knowledge_inner(base_ty)
+        } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
+            ty_f64()
+        } else {
+            checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+            ty_error()
+        }
+    } else if base_ty.kind == TypeKind::TyValidated {
+        if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
+            let epistemic_id: i64 = 8
+            if !has_effect_id((*c).current_effects, (*c).current_effect_count, epistemic_id) {
+                checker_report_error_at_inplace(c, e.span, 170, 0, 0, 0)
+            }
+            knowledge_inner(base_ty)
+        } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
+            ty_f64()
+        } else {
+            checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+            ty_error()
+        }
+    } else if base_ty.kind == TypeKind::TyHyper {
+        // Hyper field access: delegates to hyper.sio predicates
+        // Complex: .real, .imag -> inner type
+        // Quaternion: .w, .x, .y, .z -> inner type
+        // Octonion: .e0.e7 -> inner type
+        let alg = base_ty.algebra_kind
+        let inner_ty = match base_ty.inner {
+            Some(inner) => *inner
+            None => ty_error()
+        }
+        // Complex fields
+        if alg == 1 {
+            // "real" = [114, 101, 97, 108], "imag" = [105, 109, 97, 103]
+            if name_matches_str4(e.name, 114, 101, 97, 108) { inner_ty }
+            else if name_matches_str4(e.name, 105, 109, 97, 103) { inner_ty }
+            else {
+                checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+                ty_error()
+            }
+        // Quaternion fields
+        } else if alg == 2 {
+            // .w .x .y .z (119, 120, 121, 122)
+            if name_matches_str1(e.name, 119) { inner_ty }
+            else if name_matches_str1(e.name, 120) { inner_ty }
+            else if name_matches_str1(e.name, 121) { inner_ty }
+            else if name_matches_str1(e.name, 122) { inner_ty }
+            else {
+                checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+                ty_error()
+            }
+        } else {
+            // Octonion/Sedenion/Clifford: field access by component index
+            // For now accept any short field name and return inner type
+            inner_ty
+        }
+    } else if base_ty.kind == TypeKind::TyTuple {
+        // Tuple field access by index (e.g. t.0, t.1)
+        // The field name contains the index as ascii digits
+        let idx = (e.name.buf[0] as i64) - 48
+        let tuple_count = type_entry_list_count(base_ty.tuple_elems)
+        if idx >= tuple_count {
+            checker_report_error_at_inplace(c, e.span, 47, 0, 0, 0)
+            ty_error()
+        } else {
+            let elem = type_entry_list_get(base_ty.tuple_elems, idx)
+            elem
+        }
+    } else if is_error_or_unknown(base_ty) {
+        base_ty
+    } else {
+        checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+        ty_error()
+    }
+}
+
+// *mut ExprIndex handler — FULL transcription of check_index_expr (13659), not a bridge:
+// the base (e.left) and index (e.right) sub-expressions are both checked via the *mut spine
+// so a nested enum path-expr / call / if anywhere in `base[idx]` reaches the *mut handlers
+// and dodges the by-value check_path_expr / check_call SRET crash (the ~164KB Checker
+// self-move that bin/souc miscompiles). The tail is non-recursive: it never re-checks a
+// sub-expression — it only inspects the already-computed base_ty / idx_ty via the free
+// functions is_error_or_unknown / indexable_elem_type (neither takes a Checker), then emits
+// E14 (non-i64 index) and E13 (not indexable) exactly as the by-value original, in the same
+// order, with the same spans and TypeEntry returns. No scope push/pop, no borrow tracking,
+// no loop_depth, no refine_cond_env — index has none. expr_depth is owned by the dispatch.
+fn checker_check_index_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // Base then index, in left->right order (faithful to the by-value c threading:
+    // base_pair = check_opt_expr(e.left); then idx_pair = c.check_opt_expr(e.right)).
+    let base_ty = checker_check_opt_expr_inplace(c, e.left)
+    let idx_ty = checker_check_opt_expr_inplace(c, e.right)
+    // Index must be i64 (E14). Non-returning: continues to the indexability check below.
+    if !is_error_or_unknown(idx_ty) && idx_ty.kind != TypeKind::TyI64 {
+        checker_report_error_at_inplace(c, e.span, 14, 0, 0, 0)
+    }
+    let elem_ty = indexable_elem_type(base_ty)
+    if !is_error_or_unknown(base_ty) && elem_ty.kind == TypeKind::TyError {
+        // base is a concrete-but-not-indexable type (E13).
+        checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
+        ty_error()
+    } else if is_error_or_unknown(base_ty) {
+        // Propagate the base's error/unknown type unchanged.
+        base_ty
+    } else {
+        // Indexable: yield the element type.
+        elem_ty
+    }
+}
+
+// *mut ExprMatch handler — FULL transcription of check_match_expr (16376) and its
+// recursive helpers check_match_arms (16383) / check_match_arm (16396) /
+// check_remaining_arms (16411). The scrutinee and every arm body are checked via the
+// *mut spine so a nested enum path-expr / call / if anywhere in the scrutinee or any
+// arm body reaches the *mut handlers (checker_check_path_expr_inplace et al.) and dodges
+// the by-value check_path_expr / check_call SRET crash (the ~164KB Checker self-move
+// that bin/souc miscompiles). The two recursive Checker-copying helpers
+// (check_match_arms / check_remaining_arms) are replaced by a single ITERATIVE
+// while-loop over the MatchArmList (mirroring checker_check_stmts_inplace's iterative
+// transcription) so no per-arm by-value Checker copy ever occurs. The pattern binding
+// (bind_pattern — a pure scope/env mutation that contains NO sub-expressions to re-check)
+// is bridged once per arm via checker_bind_pattern_inplace (store-back). The non-recursive
+// tail logic — first-arm type becomes the result, each remaining arm's body type compared
+// for compatibility (error code 18 on the remaining arm's span) — is faithful to the
+// by-value originals: same error code, same span, same TypeEntry returns. Empty arm list
+// returns ty_unit() exactly as check_match_arms' None branch.
+fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // Scrutinee via the *mut spine (faithful to check_match_expr's self.check_opt_expr(e.left)).
+    let scrut_ty = checker_check_opt_expr_inplace(c, e.left)
+    // Iterate the arm list. The FIRST arm's body type is the match result type
+    // (check_match_arms' first_ty); each REMAINING arm's body type is compared against it
+    // (check_remaining_arms). No arms => ty_unit() (check_match_arms' None branch).
+    var cursor = e.arms
+    var result_ty = ty_unit()
+    var seen_first = false
+    while true {
+        match cursor {
+            Some(list) => {
+                let arm = (*list).head
+                let arm_ty = checker_check_match_arm_inplace(c, arm, scrut_ty)
+                if !seen_first {
+                    // First arm: its body type becomes the expected/result type.
+                    result_ty = arm_ty
+                    seen_first = true
+                } else {
+                    // Remaining arm: compare against the first arm's type (check_remaining_arms,
+                    // code 18, span = this arm's span == (*list).head.span, expected = result_ty,
+                    // got = arm_ty).
+                    if !types_compatible(arm_ty, result_ty) {
+                        checker_report_mismatch_inplace(c, arm.span, 18, result_ty, arm_ty)
+                    }
+                }
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+    result_ty
+}
+
+// One match arm via the *mut spine — FULL transcription of check_match_arm (16396):
+// push env/borrows/const scopes, bind the pattern, check the arm body, pop the scopes in
+// reverse order. Faithful to the by-value original's scope discipline (env.push_scope /
+// borrows.push_scope / push_const_scope on entry; pop_const_scope / borrows.pop_scope /
+// env.pop_scope on exit, in that exact order). The body is checked via the *mut spine.
+fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    (*c).env = (*c).env.push_scope()
+    (*c).borrows = (*c).borrows.push_scope()
+    checker_push_const_scope_inplace(c)
+    checker_bind_pattern_inplace(c, arm.pattern, scrut_ty)
+    let body_ty = checker_check_expr_inplace(c, arm.body)
+    checker_pop_const_scope_inplace(c)
+    (*c).borrows = (*c).borrows.pop_scope()
+    (*c).env = (*c).env.pop_scope()
+    body_ty
+}
+
+// Bridge for bind_pattern (16426). Pattern binding mutates the Checker (env binds, const
+// binds, borrow tracking) but contains NO sub-EXPRESSIONS — it only walks sub-PATTERNS —
+// so there is nothing here that could recurse back into the by-value expr checker. Bridging
+// the by-value bind_pattern once and storing the result back via checker_store_from_value
+// is the standard split-and-bridge move (same shape as checker_check_binary_expr_inplace's
+// bridge to check_binary_with_operand_types). Faithful: identical env/const/borrow effects —
+// checker_store_from_value copies env, borrows, AND every const_int_* field (verified
+// check.sio:780,781,848-854), so the PatBinding env/const-int/borrow mutations round-trip.
+fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    let bound = (*c).bind_pattern(pat, scrut_ty)
+    checker_store_from_value(c, bound)
+}
+
 
 
 // ============================================================
