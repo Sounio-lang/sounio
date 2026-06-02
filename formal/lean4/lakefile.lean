@@ -518,3 +518,10 @@ lean_lib «EpistemicEffects» where
 -- form ∀n stays a conjecture (see project_cayley_dickson_erasure_ladder).
 @[default_target]
 lean_lib «SounioCayleyDicksonErasure» where
+
+-- G₂ / V₂(ℝ⁷) skeleton of Cayley–Dickson zero divisors: exact ℤ-rank companion
+-- to examples/g2_octonion_derivations.sio. Certifies dim Der(𝕆)=14=dim G₂,
+-- Der(𝕆)⊂so(7), the g₂↪Der(𝕊) lift (Aut(𝕆)=G₂ acts on ZD(𝕊)), 𝕆 no-ZD, and
+-- the sedenion S³-fiber ker=4. Manifold homeomorphism / V₂(ℝ⁷) cited only.
+@[default_target]
+lean_lib «SounioG2Derivations» where
