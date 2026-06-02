@@ -40,9 +40,23 @@ bodies are dominated by CALLS, so:
 **The big drop is gated on ExprCall + ExprMethodCall.** Until those are migrated, almost
 every crashing body still re-enters by-value `check_expr` through a call argument.
 
-## The Call/MethodCall keystone — NOT YET DONE (needs focused work)
+## UPDATE — StructLit + MethodCall LANDED (cdbbd9c8e); only ExprCall remains
 
-A fan-out workflow designed these but they are NOT integratable as-is:
+The batch-2 workflow's verify verdicts for Call/MethodCall/StructLit arrived late (after the
+prior commit). Re-checked: **MethodCall + StructLit were verified faithful + compile-ready,
+no invented helpers** — only ExprCall's design was broken. Integrated both:
+`checker_check_struct_lit_inplace` (full-transcribe) + `checker_check_method_call_inplace`
++ `check_method_call_with_base_ty` (receiver via spine, args still by-value). +10 rescues
+(330 → **320** rc=139), 0 regressions. So the migrated set is now 12 kinds; total arc
+**481 → 320 (161 rescued)**.
+
+MethodCall is PARTIAL by design (only the receiver is `*mut`-routed; the tail re-checks args
+by-value) — faithful, and it rescued the receiver-crash method-calls. ExprCall needs the
+args routed too (below).
+
+## The ExprCall keystone — the genuine remaining blocker
+
+A fan-out workflow designed these but only ExprCall remains NOT integratable:
 - **ExprCall** (split-and-bridge, ~246 lines): the design references **4 helpers that do
   not exist** — `call_expr_should_bridge_by_value`, `checker_check_call_args_inplace`,
   `checker_check_expr_list_no_type_inplace`,
