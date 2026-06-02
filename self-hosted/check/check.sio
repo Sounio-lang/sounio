@@ -3568,16 +3568,13 @@ fn checker_check_call_args_inner_inplace(c: *mut Checker, args: Option<Box<ExprL
                 if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
                     checker_report_mismatch_inplace(c, call_span, 9, param_info.ty, arg_ty)
                 }
-                let bb = (*c).check_call_arg_borrow_boundary(arg_expr, param_info.ty, call_span)
-                checker_store_from_value(c, bb)
-                let rb = (*c).check_call_arg_refinement_boundary(arg_expr, arg_ty, param_info.ty, call_span)
-                checker_store_from_value(c, rb)
-                let kb = (*c).check_call_arg_knowledge_boundary(arg_ty, param_info.ty, call_span)
-                checker_store_from_value(c, kb)
-                let ub = (*c).check_call_arg_unit_boundary(arg_ty, param_info.ty, call_span)
-                checker_store_from_value(c, ub)
-                let ob = (*c).ontology_boundary_check_call_arg_contract(arg_ty, param_info.ty, call_span)
-                checker_store_from_value(c, ob)
+                // Direct *mut void calls (no Checker locals — was bb/rb/kb/ub/ob, ~12MB+
+                // held across this fn's nested-call recursion → the stack overflow).
+                checker_check_call_arg_borrow_boundary_inplace(c, arg_expr, param_info.ty, call_span)
+                checker_check_call_arg_refinement_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
+                checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+                checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+                checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
             }
             if has_param_info &&
                arg_expr.kind == ExprKind::ExprIdent &&
@@ -3675,26 +3672,318 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let sig = (*c).fn_sigs.get(callee_ty.fn_sig_id)
         let call_start_borrows = (*c).borrows
         checker_check_call_args_inplace(c, e.args, sig.params, sig.param_count, e.span)
-        let eff = (*c).check_callee_effects(e.span, sig.effects, sig.effect_count)
-        checker_store_from_value(c, eff)
-        let rel = (*c).release_call_arg_borrows(e.args, sig.params, call_start_borrows)
-        checker_store_from_value(c, rel)
+        checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
+        checker_release_call_arg_borrows_inplace(c, e.args, sig.params, call_start_borrows)
         sig.return_type
     } else if is_error_or_unknown(callee_ty) {
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        let rel = (*c).release_call_arg_borrows(e.args, None, call_start_borrows)
-        checker_store_from_value(c, rel)
+        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         callee_ty
     } else {
         checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        let rel = (*c).release_call_arg_borrows(e.args, None, call_start_borrows)
-        checker_store_from_value(c, rel)
+        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         ty_error()
     }
 }
+
+
+fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) with Mut, IO, Panic, Div, Alloc {
+    if callee_effect_count == 0 {
+        return
+    }
+    if effects_subset(callee_effects, callee_effect_count, (*c).current_effects, (*c).current_effect_count) {
+        return
+    }
+    let missing_pair = find_missing_effects(callee_effects, callee_effect_count, (*c).current_effects, (*c).current_effect_count)
+    let t = (*c).report_effect_error(span, missing_pair.0, missing_pair.1)
+    checker_store_from_value(c, t)
+}
+
+    fn checker_release_call_arg_borrows_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) with Mut, Panic, Div, Alloc, IO {
+        match args {
+            None => {}
+            Some(arg_list) => {
+                let arg_expr = (*arg_list).head
+                var implicit_release_kind: i64 = 0  // 0=none, 1=shared, 2=exclusive
+                var next_params: Option<Box<FnParamList> > = None
+
+                match params {
+                    None => {}
+                    Some(param_list) => {
+                        let param = (*param_list).head
+                        if param.ty.kind == TypeKind::TyRef {
+                            implicit_release_kind = 1
+                        } else if param.ty.kind == TypeKind::TyRefMut {
+                            implicit_release_kind = 2
+                        }
+                        next_params = (*param_list).tail
+                    }
+                }
+
+                if arg_expr.kind == ExprKind::ExprIdent && implicit_release_kind != 0 {
+                    // Release borrows unconditionally after call returns.
+                    // Previous logic used state delta (before_pair vs current_pair)
+                    // which failed when consecutive calls borrow the same variable
+                    // (the second call saw before_pair.0 == 2 from the first call's
+                    // un-released borrow, and skipped the release).
+                    if implicit_release_kind == 1 || implicit_release_kind == 2 {
+                        (*c).borrows = (*c).borrows.release_borrow(arg_expr.name)
+                    }
+                }
+
+                if arg_expr.kind == ExprKind::ExprUnary &&
+                   (arg_expr.un_op == UnaryOp::OpRef || arg_expr.un_op == UnaryOp::OpRefMut) {
+                    let borrow_name = unary_operand_name(arg_expr.left)
+                    if !name_is_empty(borrow_name) {
+                        // Unconditionally release call-site borrows after call returns
+                        (*c).borrows = (*c).borrows.release_borrow(borrow_name)
+                    }
+                }
+
+                checker_release_call_arg_borrows_inplace(c, (*arg_list).tail, next_params, call_start_borrows)
+            }
+        }
+    }
+
+fn checker_check_call_arg_borrow_boundary_inplace(c: *mut Checker, arg_expr: Expr, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+    if arg_expr.kind != ExprKind::ExprIdent {
+        return
+    }
+    if param_ty.kind == TypeKind::TyRef {
+        let borrow_result = (*c).borrows.try_shared_borrow(arg_expr.name)
+        (*c).borrows = borrow_result.0
+        if borrow_result.1 != 0 {
+            checker_report_error_at_inplace(c, call_span, borrow_result.1, 0, 0, 0)
+        }
+    } else if param_ty.kind == TypeKind::TyRefMut {
+        let borrow_result = (*c).borrows.try_exclusive_borrow(arg_expr.name)
+        (*c).borrows = borrow_result.0
+        if borrow_result.1 != 0 {
+            checker_report_error_at_inplace(c, call_span, borrow_result.1, 0, 0, 0)
+        }
+    }
+}
+
+fn checker_check_call_arg_refinement_boundary_inplace(c: *mut Checker, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+    let expected_ty = call_ref_inner_or_self(param_ty)
+    if expected_ty.refinement_id < 0 || expected_ty.refinement_id >= 128 || is_error_or_unknown(expected_ty) {
+        return
+    }
+    let provided_ty = call_ref_inner_or_self(arg_ty)
+    if is_error_or_unknown(provided_ty) {
+        return
+    }
+
+    let expected_ref = (*c).refinements.entries[expected_ty.refinement_id as usize]
+
+    if arg_expr.kind == ExprKind::ExprIntLit {
+        // Constant folding: literal known at compile time.
+        let result = refine_static_check_int_literal(expected_ref.predicate, arg_expr.int_val)
+        if result == refine_static_result_proved() {
+            (*c).refine_static_proved = (*c).refine_static_proved + 1
+        } else {
+            (*c).refine_violations = (*c).refine_violations + 1
+            checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
+        }
+        return
+    }
+    if arg_expr.kind == ExprKind::ExprFloatLit {
+        let result = refine_static_check_float_literal(expected_ref.predicate, arg_expr.float_val)
+        if result == refine_static_result_proved() {
+            (*c).refine_static_proved = (*c).refine_static_proved + 1
+        } else {
+            (*c).refine_violations = (*c).refine_violations + 1
+            checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
+        }
+        return
+    }
+
+    if provided_ty.refinement_id >= 0 && provided_ty.refinement_id < 128 {
+        let provided_ref = (*c).refinements.entries[provided_ty.refinement_id as usize]
+        if pred_implies(provided_ref.predicate, expected_ref.predicate) {
+            (*c).refine_static_proved = (*c).refine_static_proved + 1
+        } else {
+            (*c).refine_violations = (*c).refine_violations + 1
+            checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
+        }
+        return
+    }
+
+    // Try known-constant lookup for identifiers
+    if arg_expr.kind == ExprKind::ExprIdent {
+        let const_result = checker_const_int_lookup_mut(c, arg_expr.name)
+        if const_result.0 != 0 {
+            let result = refine_static_check_int_literal(expected_ref.predicate, const_result.1)
+            if result == refine_static_result_proved() {
+                (*c).refine_static_proved = (*c).refine_static_proved + 1
+                return
+            } else {
+                (*c).refine_violations = (*c).refine_violations + 1
+                checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
+                return
+            }
+        }
+    }
+
+    // Try environment-based proof: look up arg type for refinement
+    if arg_expr.kind == ExprKind::ExprIdent {
+        let env_lookup = (*c).env.lookup(arg_expr.name)
+        if env_lookup.refinement_id >= 0 && env_lookup.refinement_id < 128 {
+            let env_ref = (*c).refinements.entries[env_lookup.refinement_id as usize]
+            if pred_implies(env_ref.predicate, expected_ref.predicate) {
+                (*c).refine_static_proved = (*c).refine_static_proved + 1
+                return
+            }
+        }
+
+        // Condition-narrowing proof: use guard predicates accumulated from
+        // enclosing `if` conditions.  E.g., inside `if x > 0 { f(x) }`,
+        // x > 0 is a guard — sufficient to prove `x` satisfies `{ x > 0 }`.
+        let cond_result = refine_static_check_var((*c).refine_cond_env, arg_expr.name, expected_ref.predicate)
+        if cond_result == refine_static_result_proved() {
+            (*c).refine_static_proved = (*c).refine_static_proved + 1
+            return
+        }
+
+        // Ontology-aware proof: collect ALL property predicates from
+        // class + ancestors into a single conjunction, then check once.
+        //
+        // This is the canonical form for compound property reasoning:
+        //   axioms = {potency >= 0.0, mw < 1000.0, ...}
+        //   conjoined = (potency >= 0.0) AND (mw < 1000.0) AND ...
+        //   pred_implies_structural(conjoined, expected) succeeds when the
+        //   collected conjunction is strong enough to discharge expected.
+        // Failure is still only an under-approximation of semantic proof.
+        //
+        // Uses pred_implies_structural (var_name independent) because
+        // properties are universally quantified — the bound variable name
+        // is a binder artifact, not a semantic identity.
+        if env_lookup.ontology_id >= 0 {
+            let arg_oid = env_lookup.ontology_id
+            var axiom_preds: [RefinementPred; 16] = [empty_refinement_pred(); 16]
+            var axiom_count: i64 = 0
+            var axiom_overflow = false
+
+            if arg_oid >= 0 && arg_oid < (*c).ontology_kernel.classes.count {
+                // Collect own class property axioms first.
+                var pi: i64 = 0
+                let own_axiom_count = (*c).ontology_kernel.materialized.class_property_counts[arg_oid as usize]
+                while pi < own_axiom_count {
+                    let axiom_idx = (*c).ontology_kernel.materialized.class_property_axioms[(arg_oid * 8 + pi) as usize]
+                    if axiom_idx >= 0 && axiom_idx < (*c).ontology_kernel.axioms.count {
+                        let ontology_axiom = (*c).ontology_kernel.axioms.axioms[axiom_idx as usize]
+                        let prop_ref_id = ontology_axiom.refinement_ref_id
+                        if prop_ref_id >= 0 && prop_ref_id < 128 {
+                            if axiom_count < 16 {
+                                axiom_preds[axiom_count as usize] = (*c).refinements.entries[prop_ref_id as usize].predicate
+                                axiom_count = axiom_count + 1
+                            } else {
+                                axiom_overflow = true
+                            }
+                        }
+                    }
+                    pi = pi + 1
+                }
+
+                // Collect superclass property axioms via the materialized subclass matrix.
+                var anc_idx: i64 = 0
+                while anc_idx < (*c).ontology_kernel.classes.count {
+                    if anc_idx != arg_oid && ontology_kernel_is_subclass((*c).ontology_kernel, arg_oid, anc_idx) {
+                        var pj: i64 = 0
+                        let anc_axiom_count = (*c).ontology_kernel.materialized.class_property_counts[anc_idx as usize]
+                        while pj < anc_axiom_count {
+                            let anc_axiom_idx = (*c).ontology_kernel.materialized.class_property_axioms[(anc_idx * 8 + pj) as usize]
+                            if anc_axiom_idx >= 0 && anc_axiom_idx < (*c).ontology_kernel.axioms.count {
+                                let anc_axiom = (*c).ontology_kernel.axioms.axioms[anc_axiom_idx as usize]
+                                let anc_prop_ref_id = anc_axiom.refinement_ref_id
+                                if anc_prop_ref_id >= 0 && anc_prop_ref_id < 128 {
+                                    if axiom_count < 16 {
+                                        axiom_preds[axiom_count as usize] = (*c).refinements.entries[anc_prop_ref_id as usize].predicate
+                                        axiom_count = axiom_count + 1
+                                    } else {
+                                        axiom_overflow = true
+                                    }
+                                }
+                            }
+                            pj = pj + 1
+                        }
+                    }
+                    anc_idx = anc_idx + 1
+                }
+            }
+
+            // Build conjunction and discharge with one call
+            if axiom_count > 0 {
+                if axiom_overflow {
+                    let t = (*c).report_warning_at(call_span, 42, 0, 0, 0)
+                    checker_store_from_value(c, t)
+                }
+                var conjoined = axiom_preds[0]
+                var ci: i64 = 1
+                while ci < axiom_count {
+                    conjoined = pred_and(conjoined, axiom_preds[ci as usize])
+                    ci = ci + 1
+                }
+                if pred_implies_structural(conjoined, expected_ref.predicate) {
+                    (*c).refine_static_proved = (*c).refine_static_proved + 1
+                    return
+                }
+            }
+        }
+    }
+
+    // Epistemic fallback: static analysis exhausted — defer to runtime assertion.
+    // W040 semantics: the call compiles. The predicate is NOT proven statically.
+    //   Emit refine_hint: static_unknown diagnostic (W045) alongside W040.
+    //   - Debug mode (future): codegen inserts runtime assertion at this call site.
+    //     If the predicate fails at runtime, panic with "refinement predicate violated".
+    //   - Release mode: trust the programmer. The warning was sufficient notice.
+    // To suppress: #[allow(W040)] on the call site (not yet implemented).
+    // To force proof: annotate the argument with an explicit refinement type.
+    (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
+    let t = (*c).report_warning_at(call_span, 40, 0, 0, 0)
+    checker_store_from_value(c, t)
+}
+
+fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+    let expected_ty = call_ref_inner_or_self(param_ty)
+    if !is_epistemic_type(expected_ty) {
+        return
+    }
+    let provided_ty = call_ref_inner_or_self(arg_ty)
+    if !is_epistemic_type(provided_ty) || is_error_or_unknown(provided_ty) {
+        return
+    }
+    if provided_ty.kind != expected_ty.kind {
+        checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0)
+        return
+    }
+    if !knowledge_call_boundary_compatible(provided_ty, expected_ty) {
+        checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0)
+    }
+}
+
+fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+    let expected_ty = call_ref_inner_or_self(param_ty)
+    let provided_ty = call_ref_inner_or_self(arg_ty)
+    if is_error_or_unknown(expected_ty) || is_error_or_unknown(provided_ty) {
+        return
+    }
+    if expected_ty.unit_id >= 0 && provided_ty.unit_id >= 0 && expected_ty.unit_id != provided_ty.unit_id {
+        let t = (*c).report_unit_call_mismatch(call_span, provided_ty.unit_id, expected_ty.unit_id)
+        checker_store_from_value(c, t)
+        return
+    }
+}
+
+fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+    let t = (*c).check_call_arg_ontology_boundary(arg_ty, param_ty, call_span)
+    checker_store_from_value(c, t)
+}
+
 
 
 // *mut ExprIdent leaf — transcription of the by-value ExprIdent arm (13856). env lookup +
