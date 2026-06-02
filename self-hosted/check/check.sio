@@ -904,6 +904,8 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         ty_u32()
     } else if name_is_u64(name) {
         ty_u64()
+    } else if name_is_usize(name) {
+        ty_i64()
     } else if name_is_f32(name) {
         ty_f32()
     } else if name_is_f64(name) {
@@ -4366,7 +4368,12 @@ fn checker_check_assign_mutability_inplace(c: *mut Checker, opt: Option<Box<Expr
     match opt {
         Some(e) => {
             if (*e).kind == ExprKind::ExprIdent {
-                if !(*c).env.lookup_is_mutable((*e).name) {
+                // E003 only for a name that IS bound (a local) and is immutable (a `let`).
+                // Module-level globals are not bound into env, so an unbound name is NOT a
+                // local `let` — it's a global (mutable, per the oracle) or genuinely
+                // undefined (a different error). Guarding on has_binding avoids a spurious
+                // E003 on `GLOBAL = …` while preserving the true positive on local `let`.
+                if (*c).env.has_binding((*e).name) && !(*c).env.lookup_is_mutable((*e).name) {
                     checker_report_error_at_inplace(c, span, 3, 0, 0, 0)
                 }
             }
@@ -10601,6 +10608,8 @@ impl Checker {
             (self, ty_u32())
         } else if name_is_u64(name) {
             (self, ty_u64())
+        } else if name_is_usize(name) {
+            (self, ty_i64())
         } else if name_is_f32(name) {
             (self, ty_f32())
         } else if name_is_f64(name) {
@@ -14290,7 +14299,10 @@ impl Checker {
         match opt {
             Some(e) => {
                 if (*e).kind == ExprKind::ExprIdent {
-                    if !self.env.lookup_is_mutable((*e).name) {
+                    // See checker_check_assign_mutability_inplace: E003 only for a bound
+                    // (local) immutable `let`; unbound names are globals (mutable) or
+                    // undefined, not local `let`s.
+                    if self.env.has_binding((*e).name) && !self.env.lookup_is_mutable((*e).name) {
                         self.report_error_at(span, 3, 0, 0, 0)
                     } else {
                         self
