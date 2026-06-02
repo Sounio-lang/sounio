@@ -509,3 +509,12 @@ lean_lib «SounioErdos90PathionGrowth» where
 -- Open obligation: effect_preservation/subst_preserves_typing (see SounioSubstitution.lean).
 @[default_target]
 lean_lib «EpistemicEffects» where
+
+-- Cayley–Dickson erasure ladder: the native-erasure law ker = 2^(n-1) − 4.
+-- Algebra-level exact ℤ-rank of the verified cdSigma product certifies the
+-- kernel dimensions L4–L8 (native_decide), matching the runtime float-Gauss
+-- measurements in examples/cd_l{8,9,10,11}_projective_measurement.sio; the
+-- recurrence / half-dimension law proved in core Lean (omega). The closed
+-- form ∀n stays a conjecture (see project_cayley_dickson_erasure_ladder).
+@[default_target]
+lean_lib «SounioCayleyDicksonErasure» where
