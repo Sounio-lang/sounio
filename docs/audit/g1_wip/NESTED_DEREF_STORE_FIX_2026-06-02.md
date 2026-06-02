@@ -70,11 +70,52 @@ generic path unchanged (no regression).
   gap on this base, tracked by the main checkout's `stmt_is_nested_field_store` WIP.
   Left to the generic path here (gate returns false).
 
-## Next step to realise the lever (NOT done here)
+## Lever payoff — MEASURED (A/B census, 2026-06-02)
 
-This is the **codegen fix only**. To convert the E008/E170 census numbers, rebuild
-the modular compiler (`self-hosted/compiler/main.sio` bundle) with a bin/souc built
-from this lean_single.sio, then re-run the corpus census. The prior naive source
-work-around was net-negative (PASS 125→112, CRASH 3→170); this codegen fix lets the
-in-place collectors use cheap nested writes instead — expected strictly better, but
-**unmeasured** until that rebuild + census runs.
+Built two modular compilers from the SAME `self-hosted/compiler/main.sio`, differing
+only in the bootstrap that compiled them (both ~85 MB, 5 pre-existing resolve.sio
+"match must be exhaustive" errors, build ~2:36 each under the lock):
+- **mc_baseline** = main.sio via the UNFIXED bootstrap (ds_clean).
+- **mc_fixed** = main.sio via the FIXED bootstrap (ds_fixed2).
+
+Ran `mc --check` over the 504-prog tests/run-pass corpus (artifacts:
+census_mc_baseline_2026-06-02.tsv / census_mc_fixed_2026-06-02.tsv):
+
+| metric | baseline | fixed | Δ |
+|--------|----------|-------|---|
+| PASS   | 117 | 93  | **−24** |
+| FAIL   | 309 | 202 | −107 |
+| CRASH (all SIGSEGV) | 78 | 209 | **+131** |
+| E008 progs | 137 | 51 | **−86** |
+| E170 progs | 2 | 0 | −2 |
+
+Transition matrix (baseline→fixed): 187 FAIL→FAIL, 110 **FAIL→CRASH**, 81 PASS→PASS,
+78 **CRASH→CRASH (0 baseline crashers fixed)**, 21 PASS→CRASH, 15 PASS→FAIL,
+12 **FAIL→PASS (genuine unblocks)**.
+
+### Verdict (honest)
+
+- ✅ **The lever's stated symptom is cleared.** The spurious E008 flood drops 137→51
+  progs and E170 2→0 — the bridge-state root cause (in-place collect dropping
+  fn_sigs) is genuinely fixed. 12 real FAIL→PASS unblocks, thematically coherent
+  (issue11_ptr_deref_write, heap_vec_*, ptr_index_write).
+- ❌ **But net corpus PASS goes DOWN (117→93) and CRASH explodes (78→209).** Same
+  census *shape* the rejected source work-around produced (PASS 125→112, CRASH
+  3→170) — because the broken collector was generating **false-passes/early-bails**;
+  a working collector lets the checker actually check bodies and reach a DEEPER layer
+  of latent *mut body-check SIGSEGVs. Sampled FAIL→CRASH (_diag_sobol.sio) emits 118
+  lines of real type diagnostics then segfaults — progress-exposed, not a codegen
+  break (the fix is proven correct + 0-regression on the bootstrap corpus).
+- ❌ **Hypothesis FALSIFIED:** "one codegen fix unblocks BOTH E008 AND the ~170
+  crashers." **0 of 78 baseline crashers fixed; +131 new crashers exposed.** The
+  crashers are a SEPARATE disease (a deeper *mut body-check codegen layer), now
+  revealed as the **dominant remaining front-half blocker** (209 SIGSEGV).
+
+### Consequence
+
+This codegen fix is correct and stands on its own (repros, fixed-point, 0
+regressions, G1b test win, E008 root-cause cleared). But **do NOT land mc_fixed on a
+green-gate basis** — net PASS is negative, same as the rejected workaround. The
+roadmap is refined: E008 was a real bug *masking* the true #1 net-blocker, which is
+the latent body-check SIGSEGV layer. Next lane = root-cause the 209 *mut
+body-check crashers (a fresh fan-out, same gdb/repro method as this fix).
