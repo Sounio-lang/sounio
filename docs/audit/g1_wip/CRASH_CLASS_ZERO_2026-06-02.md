@@ -48,6 +48,29 @@ spurious E-mismatch (2 pass→fail). Bridging the default to by-value `lower_typ
   modular checker now AGREES with the oracle (strict improvement, not a dropped error).
 - **0 non-crash → crash, 0 pass → fail.**
 
+## Oracle-vetting the 7 stragglers (139 → 1): crash-fixed, but rc=1 ≠ correct
+
+"139 → 1" proves they stopped crashing, NOT that the rc=1 verdict is right. Checked all 7
+against canonical `bin/souc`:
+
+- **4 agree with the oracle** (oracle also rc=1): `ekan_concrete_uci`, `ekan_energy_uci`,
+  `ekan_wine_uci`, `mlp_concrete_ablation` — all `error: effect not declared in function
+  signature`. Genuinely clean: modular checker now matches the oracle.
+- **3 surface a pre-existing modular/oracle divergence** (oracle rc=0, modular rc=1):
+  `epistemic_classifier` (E008), `lean_mini_compiler` (E014), `lean_utils_self_host`
+  (E014/E003). These programs **never produced a verdict before** (they crashed at HEAD), so
+  this is not a regression of working behaviour — it is the modular checker's own
+  pre-existing stricter checking (mutability E003, effects, E014) that the crash was masking.
+
+The E003 path was confirmed a **verbatim** transcription of by-value `check_assign_mutability`
+(14289: `Some(e)` → `ExprIdent` → `!env.lookup_is_mutable` → `report_error_at(.,3,..)`), so
+the divergence is modular-vs-`bin/souc`, independent of by-value-vs-`*mut`. The by-value
+modular path (had it not crashed) would emit the identical errors.
+
+**Follow-up (separate from the crash arc):** reconcile the modular checker's mutability /
+effect / E014 checking with the canonical `bin/souc` on these 3. No-crash is the milestone;
+verdict-parity on these 3 is a distinct correctness task.
+
 ## Arc total
 
 **481 → 0 crashes**: ~259 via the SRET-class `*mut` migration (enum + 13 expr kinds + Call
