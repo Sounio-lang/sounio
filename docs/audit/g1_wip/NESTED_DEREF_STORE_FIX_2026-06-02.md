@@ -148,3 +148,50 @@ crash delta is layout-confounded, the next lane should first **root-cause indivi
 crashers** (per-program, gdb/repro, same method as this fix) to confirm they are
 genuine body-check bugs rather than layout artifacts, before treating "209 crashers"
 as the headline blocker count.
+
+## Body-check crasher root-cause (2026-06-02, follow-up)
+
+Stack-overflow split (re-run all 209 default-stack crashers under `ulimit -s
+1048576`): **39 stop crashing = stack-overflow** (deep recursion / big frames, NOT
+memory bugs); **170 remain genuine SIGSEGV**. Under the FAIR big-stack A/B, baseline
+genuine crashers = **3** (matches the prior independent census's ~6 → layout-robust),
+fixed = **170**. A 3→170 directional jump is far too large/one-sided for layout
+noise.
+
+**gdb fault clustering (all 170, big stack) — the layout-confound killer:**
+- **131/170 (77%) fault at the SAME instruction `0x4c2805b`** — `mov 0x0(%rdx),%rax`
+  with **rdx = -1**, reading a 16-byte `TypeEntry {ty,hash}` from address −1. A
+  single shared code site rules out layout noise (which would scatter addresses).
+- 38/170 fault with RIP in the stack (0x7fff…) = corrupted return / residual deep
+  recursion. 1 misc (0xcd895b).
+
+**Minimal repro of the dominant bug (131/170), build-independent, 2 lines:**
+```
+fn f(x: i64) -> i64 { x }
+fn main() -> i64 { let y = f(5)  0 }
+```
+Crashes mc_fixed `--check` at 0x4c2805b. The trigger is **a call to a user function
+that HAS a parameter** — `f()` (no param) PASSES, `f(5)` (one param) crashes;
+`fn main()->i32{0}` alone only FAILs (E004), no crash.
+
+**Mechanism — it is the SEPARATE, documented SRET large-struct-return bug, not the
+nested-store bug:** call-argument checking (check.sio:3692 in-place path) does
+`let sig = (*c).fn_sigs.get(sig_id)` — `FnSigTable::get` returns a large `FnSig`
+**by value** (SRET) — then `checker_check_call_args_inner_inplace` (check.sio:3575)
+calls `fn_param_list_get(params, idx) -> FnParamInfo` **by value**, whose recursive
+arm `fn_param_list_get((*list).tail, idx-1)` is the exact "return another
+struct-returning call's result" forwarding shape of `project_sret_forwarding_bug`.
+One of these by-value struct returns corrupts `sig.params` (Box→−1) / the param info,
+so the param's `TypeEntry` read derefs −1 → SIGSEGV. This path is only REACHED now
+because the fn_sigs fix populates the table so call-checking proceeds past the
+previously-bailing point. **The nested-store fix (this branch) and the dominant
+body-check crasher are two DISTINCT codegen bugs**; fixing nested stores correctly
+unmasks the pre-existing struct-return bug.
+
+**Verified the confound is dead:** crash sets are per-binary deterministic AND the
+131 cluster at one instruction with a clear param'd-call trigger and a 2-line repro —
+this is a genuine bug, not layout. The "209 headline" was inflated (39 = stack); the
+real dominant body-check blocker is **one struct-return bug (~131 progs), = the
+already-tracked SRET forwarding family** ([[project_sret_forwarding_bug_2026-06-02]]).
+Next lane: fix the large/forwarded struct-return codegen (separate from this branch);
+38 stack crashers want a stack-size/frame-reduction pass.
