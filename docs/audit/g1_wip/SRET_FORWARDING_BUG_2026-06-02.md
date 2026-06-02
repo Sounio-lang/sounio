@@ -32,7 +32,44 @@ Verified on `bin/souc` md5 `9d4ef541` (the bootstrap compiler), `ulimit -s 10485
 - **Use-in-place is fine**: `let p = ctor(); p.f0` read in a non-returning caller gives 7.0.
   The bug only manifests when the caller's own return value IS the forwarded struct.
 
-## Mechanism (hypothesis, for the codegen fix)
+## gdb-PINNED root cause (2026-06-02, runtime addresses)
+Disassembly + gdb on the failing repro (`bin/souc 9d4ef541`) pin it precisely — and it is
+NOT a "make forgets to copy" bug (the copy instructions ARE emitted). The forwarded
+struct-return writes to the callee's OWN LOCAL TEMP instead of the caller-provided sret
+destination:
+
+```
+main:  lea -0x8(%rbp),%rdi      ; rdi = &s = 0x7fffffffe638  (correct sret dest)
+       call make                ; passes 0x...e638
+       reads s at 0x...e638      -> 0x0   (still zero)
+make:  (entry) rdi = 0x...e638  ; the real sret dest from main
+       lea -0x10(%rbp),%rdi     ; rdi = 0x...e600  = make's OWN local temp
+       call ctor                ; ctor writes 7.0 to *rdi = 0x...e600  (the temp) ✓
+       ; "copy temp->sret": stores 7.0 to r12, but r12 = 0x...e600 (the temp), NOT 0x...e638
+```
+gdb-confirmed: ctor writes 7.0 to `0x...e600`; make's "sret destination" register at the
+copy is `0x...e600` (its own temp), not the `0x...e638` main passed; main reads `s` at
+`0x...e638` = 0. **The caller-supplied sret pointer is dropped: make materializes the
+forwarded call's result into a local temp and "returns" that temp's address region instead
+of writing through main's sret pointer.** Because the doomed address is in make's frame, the
+outcome is layout-sensitive — silent zero here, but a different layout can make it an invalid
+deref (consistent with the G1 lane's "layout-sensitive sentinel-deref" crash).
+
+**Fix direction (for the codegen owner):** for a return-position struct-returning call,
+pass the ENCLOSING function's sret pointer directly as the inner call's destination (no local
+temp + copy). The temp+copy path drops/aliases the real sret pointer. This is the call-side
+return-forwarding lowering (around `emit_sret_destination_x86`:1765 + how `return <call>`
+threads the destination), NOT the verified-correct return-of-local path (7196-7225).
+
+## STOP point (honest, per time-box)
+Mechanism is gdb-PINNED above. The actual codegen edit + re-bootstrap (build a candidate
+bin/souc, clear repro + 5-working-variants + run-pass corpus + stage2==stage3 fixed point)
+is the brick-risky, unbounded step the G1 codegen owner already stopped at, and edits their
+live file. This handoff — deterministic repro + disassembly + gdb-pinned wrong-write — is
+the high-value deliverable that advances the lane past "reproducer NOT FOUND"; the fix itself
+is left to whoever owns the SRET lowering. Did NOT attempt the edit.
+
+## Mechanism (earlier hypothesis — superseded by the gdb finding above)
 SRET (struct-return via hidden pointer): the outer fn's hidden return-slot pointer is **not
 threaded into the inner struct-returning call**. The inner `ctor` writes into a discarded
 temporary (or a fresh stack slot), and the outer fn returns its own untouched (zeroed)
