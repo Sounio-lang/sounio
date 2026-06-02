@@ -5,6 +5,25 @@ config, mc_eff) are **3 distinct mechanisms**, pinned by a 4-strategy adversaria
 ALL 7 are TRIGGERED by the effect patch (the +7 baseline never reaches these paths), but NONE is
 invented by it — they are pre-existing latent defects the patch newly exercises.
 
+## RESOLUTION (final, 2026-06-02)
+Re-tested against the **shipped +7 baseline** (mc built from committed check.sio, NO effect patch):
+fibonacci / darwin_atlas-lib / ossm_multihead = `rc=1`, epistemic_bmi = `rc=0` — **zero crashes**
+(consistent with the census 481→0 and the 8000-slot tuple reproducer NOT firing). So the "7
+residual crashers" framing was premise-wrong: shipped bin/souc is already crash-clean; all 7
+manifest ONLY under the unshipped, NET-NEGATIVE (−95) effect patch.
+- **Cluster A — FIXED + LIVE** (`1ff453590` source, `b765525fb` swap). The ONLY genuinely
+  shipped bin/souc bug — reproduced standalone (no patch), fixed in lean_single, re-bootstrapped.
+- **Cluster B — FIXED + COMMITTED** (`d7d580797`). Bounds-checked `FnSigTable.get` (defs.sio);
+  verified a pure safe hardening — **0 verdict-flips across all 847 examples** (pre-fix vs post-fix
+  mc, same bin/souc). The check.sio registration guard was dropped (redundant with the get
+  bounds-check + conflicts with the effect patch).
+- **Cluster C — LEFT DOCUMENTED (not pursued).** It is the known large-by-value-Checker(8MB)-SRET
+  miscompile (see below). NOT pursued because: (1) the direct bin/souc large-SRET codegen fix is
+  intractable-without-gdb (B-repro verdict); (2) the only tractable fix — route the remaining
+  by-value Checker return via `*mut` — lives in the effect patch, which is net-negative and will
+  not ship; (3) fixing the crashes does not make that patch shippable anyway (its blocker is the
+  ~95 false-passes, not the 7 crashes). User decision: leave documented as the known miscompile.
+
 ## Cluster A — 4 progs — CODEGEN (a SECOND match-lowering bug, distinct from the fall-through)
 - Progs: epistemic_bmi, pbpk_simple, vancomycin_auc_epistemic, real_sounio_native_knowledge_demo
   (all Knowledge<T>-heavy). Identical fault: `mov (%rax),%rax`, rax=0, rip=0xcd8f93.
@@ -29,9 +48,15 @@ invented by it — they are pre-existing latent defects the patch newly exercise
 - ROOT: a function returning a ~168KB aggregate by value. Epilogue `rep movsq` of 0x51ff qwords
   (167928 B) into the caller-allocated SRET buffer (rdi=r12) OVERRUNS the callee's own saved
   rbp/return-addr slot → the trailing `ret` jumps to a heap field of the copied aggregate.
-- IMPACT: **shipped bin/souc bug** — large by-value aggregate (Checker-derived) return lowering
-  places the SRET buffer where the constant-length copy clobbers control data. This is the
-  large-by-value-Checker-return class the `*mut`/move-codegen arc was built to avoid.
+- IMPACT: **latent codegen weakness in shipped bin/souc, but NOT triggered by any shipped-corpus
+  program** (the +7 baseline is crash-clean — confirmed). Large by-value aggregate (Checker-derived)
+  return lowering places the SRET buffer where the constant-length copy clobbers control data; only
+  the effect patch introduces a by-value Checker return big enough to reach the cliff. This is the
+  large-by-value-Checker-return class the `*mut`/move-codegen arc was built to avoid. The patch's
+  OWN comment (`fn_sigs_e008_env_ontology_reports.patch` line 103) already names it — it routed 3
+  report helpers via `*mut` to dodge it; fibonacci/darwin hit a DIFFERENT remaining by-value return.
+  Direct fix is B-repro-verdict-intractable; the reliable fix is `*mut`-routing the remaining return
+  (lives in the non-shipping effect patch). LEFT DOCUMENTED — see RESOLUTION above.
 
 ## Cluster B — 1 prog — LOGIC (check.sio, latent baseline bug)
 - Prog: ossm_multihead. `rep movsq` with rsi=0x40 (NOT null) at rip=0x4dc3e7e = OOB array read.
@@ -44,18 +69,23 @@ invented by it — they are pre-existing latent defects the patch newly exercise
 - IMPACT: **latent committed-source bug** (>64-fn programs). Dormant in the baseline (it never
   reaches get with the dangling id); the patch triggers it. Capacity-raise only defers the cliff.
 
-## Fixes (all distinct from the just-landed fall-through fix)
-- **A (bin/souc codegen):** add a tuple-pattern arm handler in `lean_single.sio` match-lowering —
-  destructure the tuple, AND-combine a per-element discriminant test, place each arm body only
-  under its own combined guard. SOURCE-SIDE UNBLOCK (no re-bootstrap): rewrite the 2 tuple matches
-  (`epistemic.sio:657`, `check.sio:10208`) as nested single-scrutinee matches (the existing
-  Some/None dispatcher lowers those correctly).
-- **C (bin/souc codegen):** fix SRET placement so a large-aggregate return buffer can't overlap
-  the callee's saved rbp/ret slot, OR eliminate the 168KB by-value Checker return (the `*mut`
-  refactor).
-- **B (check.sio logic):** bounds-check `defs.sio:1242 get` + move the `ty_fn(sig_id)` env bind
-  INSIDE the `if sig_id < 64` guard (`check.sio:2279`); same at `:15438`.
+## Fixes — final status
+- **A (bin/souc codegen) — DONE + LIVE** (`1ff453590` source, `b765525fb` swap). Added a
+  tuple-pattern arm handler in `lean_single.sio` match-lowering (destructure the tuple, AND-combine
+  a per-element discriminant test, each arm body only under its own combined guard). Validated:
+  reproducer 139→111, 4-case correctness, gen2t==gen3t fixed point, 507/507 run-pass + 847/847
+  examples 0 divergences.
+- **B (check.sio logic) — DONE + COMMITTED** (`d7d580797`). Bounds-checked `defs.sio:1242 get`
+  (`idx<0 || idx>=64 || idx>=count → empty_fn_sig()`) — universal (covers the by-value twin at
+  `:15438`); verified 0 verdict-flips / 847 examples. (The registration-guard half — moving the
+  `ty_fn(sig_id)` env bind inside the `if sig_id<64` guard — was dropped: redundant with the get
+  bounds-check and conflicts with the effect patch.)
+- **C (bin/souc codegen) — LEFT DOCUMENTED, NOT FIXED.** Candidate fixes remain: fix SRET placement
+  so a large-aggregate return buffer can't overlap the callee's saved rbp/ret slot (intractable per
+  B-repro verdict), OR eliminate the 168KB by-value Checker return (the `*mut` refactor — lives in
+  the non-shipping effect patch). See RESOLUTION for why not pursued.
 
-Cross-cut: do NOT ship the effect-validation patch until A/C codegen + B logic are fixed
-(it's already marked NET-NEGATIVE / not shippable, `49f035fd9`). A & C are independent shipped
-bin/souc codegen bugs worth fixing regardless of the effect work.
+Cross-cut: A & B are landed. C is NOT a shipped-corpus crash (the +7 baseline is crash-clean); it
+is a latent large-SRET codegen weakness reachable only via the effect patch, which is independently
+NET-NEGATIVE / not shippable (`49f035fd9`). Do not ship the effect-validation patch (false-passes,
+not crashes, are its blocker).
