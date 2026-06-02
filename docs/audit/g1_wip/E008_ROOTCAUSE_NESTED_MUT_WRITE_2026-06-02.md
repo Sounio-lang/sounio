@@ -1,4 +1,4 @@
-# E008/E170 — PROVEN root cause: nested `*mut` field writes don't persist; the fix exposes a far less-functional checker (2026-06-02)
+# E008/E170 — PROVEN root cause: nested `*mut` field writes don't persist (2026-06-02)
 
 **Status: ROOT CAUSE PROVEN by instrumented rebuilds + census. Earlier theories in this file's
 history (by-value-spine drop / by-value-Checker truncation / lossy FnSigTable.find) were each
@@ -42,15 +42,36 @@ Source reverted clean — this is a diagnosis + an exact patch the `*mut`/codege
   `issue11_ptr_*`, `knowledge_kas1_policy`, `knowledge_struct_field_ok`.
 - Regressions: 16 PASS→FAIL + **23 PASS→CRASH**; total CRASH explodes 3→170.
 
-## Why the fix is net-negative — the real state of the checker
-The crashers have only **2–4 functions** and pass `COL_END`/`CHK_START` (collect is fine), then
-crash **inside the check pass**. So the 170 crashes are **NOT** copy-volume — they are **latent
-`*mut` bugs in the deeper body/expr/stmt checking that were never reached before**, because the
-broken `fn_sigs` made the checker bail to a shallow accept-everything path. **The baseline's 125
-"passes" were largely FALSE PASSES** — the modular checker was not actually type-checking
-function bodies. Making `fn_sigs` work turns shallow non-checking into real checking, which both
-clears spurious E008 *and* exposes that the in-place check spine crashes on genuine checking.
-The modular checker is substantially less functional than the corpus census implied.
+## Why the fix is net-negative — what is proven vs hypothesised
+**PROVEN:**
+- The crashers have only **2–4 functions** and pass `COL_END`/`CHK_START` (collect is fine), then
+  crash **inside the check pass** — so the 170 crashes are **NOT** collect copy-volume.
+- The body-type check was being **skipped** while `fn_sigs` was empty (sig_id<0); the fix
+  re-enables it. Demonstrated on `fn f()->i64{"hello"}` (one program) now correctly erroring —
+  a real frontend body-type hole.
+
+**HYPOTHESIS (NOT isolated — do not over-read the dramatic 170):** the crashes have ≥3 possible
+causes I did not separate: (a) latent deep *checker-logic* bugs newly reached; (b) the fix's own
+large-aggregate `*mut` copies / now-triggered recursion on newly-exercised paths; (c) **more
+instances of the same nested-write / large-`*mut`-copy codegen class just root-caused**.
+
+**Evidence points AWAY from (a), toward (c):** these are `tests/run-pass/*.sio` — the **canonical
+`bin/souc` (the fixed-point compiler bundling the SAME `check.sio` logic) checks them fine**. So
+the checker *logic* is sound; the 170 crashes are `mc.elf` **codegen** artifacts, not "the checker
+can't check." Do **not** read this as "the modular frontend is fundamentally broken" or "the 125
+baseline passes were mostly false" — that generalisation is unproven and would mis-route the war.
+
+**Useful reframe:** the crashes are very plausibly the same `*mut` codegen disease as the E008
+root cause, so **one codegen fix (nested-write persistence + large-aggregate `*mut` copy) likely
+unblocks BOTH the E008 lever and most of the 170 crashes** — a single actionable redirect, not two
+separate hopeless problems. (Discriminating test, not yet run: route the check-pass table reads
+`fn_sigs.find/.get`/`structs.find`/… through direct `*mut` scans and see if the crash count drops.)
+
+> NOTE (unresolved — flag for the next reader): preflight → `check_program_epistemic_into` →
+> `check_program_with_artifacts` reads as the **by-value** spine in source, yet the **in-place**
+> spine demonstrably executes (DBG). The patch targets the in-place collect, which runs, so it is
+> correct — but **source read ≠ execution path here**; do not trust the by-value `check_*` source
+> as "what runs" without instrumenting.
 
 ## §Patch (verified-correct persistence fix; do NOT land on the gate yet)
 In `checker_collect_fn_def_inplace` (check.sio ~2278), replace the manual nested writes:
@@ -68,12 +89,14 @@ table copy that `.find`/`.get`/`.add` incur — a free helper scanning `(*c).fn_
 
 ## Remaining work (the actual unblock, in priority order)
 1. **Codegen: make two-level nested `*mut` field writes persist** (`(*c).a.b = x`,
-   `(*c).a.entries[i] = x`). This is the single highest-leverage codegen fix — it lets EVERY
-   in-place collector use cheap manual writes and is almost certainly miscompiling other in-place
-   ports silently. (native/move-codegen lane.)
-2. **Fix the latent `*mut` body-check crashers** the persistence fix exposes (closures,
-   match-deref, large-aggregate copies in expr/stmt checking) — the same `*mut` codegen class.
-3. Only after 1+2 does the E008 lever convert to a real corpus gain without crashes.
+   `(*c).a.entries[i] = x`) and audit large-aggregate `*mut` copies. Single highest-leverage
+   codegen fix — lets EVERY in-place collector use cheap manual writes, is almost certainly
+   miscompiling other in-place ports silently, AND (leading hypothesis) likely accounts for most
+   of the 170 crashes too, so it plausibly unblocks the E008 lever and the crashes together.
+   (native/move-codegen lane.)
+2. Re-run the corpus after (1); only the residual crashes need separate triage. Run the
+   discriminating direct-`*mut`-scan test above first to confirm how much is codegen-class.
+3. Only after the crashes are gone does the E008 lever convert to a real corpus gain.
 
 Owner: Claude (worktree /workspace/sounio-e008). Census harnesses + logs under `.build/census*/`.
 Binaries: `/tmp/mc_e008_base.elf` (baseline), `/tmp/mc_e008_fix3.elf` (fix, net-negative).
