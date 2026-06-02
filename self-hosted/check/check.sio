@@ -2371,25 +2371,22 @@ fn checker_collect_enum_def_inplace(c: *mut Checker, name: Name, opt: Option<Box
 }
 
 fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
-    match item.kind {
-        ItemKind::ItemFn => checker_collect_fn_def_inplace(c, item.fn_def)
-        ItemKind::ItemStruct => checker_collect_struct_def_inplace(c, item.name, item.struct_def)
-        ItemKind::ItemUse => {}
-        ItemKind::ItemSession => {}
-        // ItemEnum collection is implemented (checker_collect_enum_def_inplace below) and
-        // its BODY now runs to completion without crashing (the variant collectors return
-        // a small boxed-head MutVariantsResult instead of moving a VariantInfoList by
-        // value — see checker_collect_variant_list_mut). It stays DISABLED here because
-        // wiring it exposes a SEPARATE, pre-existing bin/souc codegen bug: once (*c).enums
-        // is non-empty, the by-value enum-READ path (check_path_expr's `enum_idx >= 0`
-        // branch, which returns the 8MB `self` Checker by SRET) miscompiles and smashes a
-        // saved return address (gdb: rip jumps into the stack; stack-size- and
-        // return-value-independent — same large-struct-value-move family as the if/while
-        // miscompile). Net effect of enabling: 0 corpus wins (the checker is lenient on
-        // enums), 1 regression (examples/native/enum_match.sio 0→139). So enabling is
-        // gated on FIX #2 (migrate the enum-read off by-value `self`-threading onto the
-        // *mut spine). See docs/audit/g1_wip/ENUM_COLLECTOR_READPATH_BLOCKER_2026-06-01.md.
-        _ => {}
+    // Dispatch via explicit `if item.kind == ItemKind::X`, NOT `match item.kind`: bin/souc
+    // miscompiles a `match <enum-field>` inside a *mut fn (discriminant-0 → wildcard;
+    // root-caused 0afad182c). ItemEnum is WIRED: the collector body returns a small
+    // boxed-head MutVariantsResult (no large value-move), the enum-READ path is handled in
+    // place (checker_check_path_expr_inplace / checker_check_binary_expr_inplace /
+    // checker_check_if_expr_inplace — no 8MB self SRET), and i64==enum compares are accepted
+    // (C-style, matching canonical). See docs/audit/g1_wip/ENUM_PATH_TYPING_DESIGN_2026-06-01.md.
+    if item.kind == ItemKind::ItemFn {
+        checker_collect_fn_def_inplace(c, item.fn_def)
+    } else if item.kind == ItemKind::ItemStruct {
+        checker_collect_struct_def_inplace(c, item.name, item.struct_def)
+    } else if item.kind == ItemKind::ItemEnum {
+        checker_collect_enum_def_inplace(c, item.name, item.enum_def)
+    } else {
+        // ItemUse / ItemSession / impl / typealias / policy / … — not yet collected by the
+        // *mut spine (no-op, same as before). *mut collectors pending.
     }
 }
 
@@ -2689,15 +2686,46 @@ fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     pair.1
 }
 
-// *mut ExprIf handler (split-and-bridge): check the CONDITION via the *mut spine — so a
-// nested enum path-expr in `if c == Color::Red` reaches checker_check_path_expr_inplace and
-// dodges the by-value check_path_expr SRET crash — then bridge to the by-value branch/
-// type-compat tail (check_if_with_cond_type) with the condition type already computed.
+fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(blk) => checker_check_block_inplace(c, *blk)
+        None => ty_unit()
+    }
+}
+
+// *mut ExprIf handler — FULL transcription of check_if_expr (16122), not a bridge: the
+// condition, then-block, AND else are all checked via the *mut spine so a nested enum
+// path-expr anywhere in an `if … else if …` chain reaches checker_check_path_expr_inplace
+// and dodges the by-value check_path_expr SRET crash. The non-recursive work (bool check,
+// condition narrowing, branch-type compat) is faithful to the by-value original.
 fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let cond_ty = checker_check_opt_expr_inplace(c, e.left)
-    let pair = (*c).check_if_with_cond_type(e, cond_ty)
-    checker_store_from_value(c, pair.0)
-    pair.1
+    // Condition must be bool
+    if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
+        checker_report_mismatch_inplace(c, e.span, 6, ty_bool(), cond_ty)
+    }
+    // Condition narrowing (mirrors check_if_expr: push a refinement guard for the then-branch)
+    let saved_cond_env = (*c).refine_cond_env
+    let cond_guard = if_cond_extract_pred(e.left)
+    if cond_guard.0 != 0 {
+        (*c).refine_cond_env = refine_static_env_push((*c).refine_cond_env, cond_guard.1)
+    }
+    let then_ty = checker_check_opt_block_inplace(c, e.block)
+    (*c).refine_cond_env = saved_cond_env
+    match e.else_expr {
+        Some(else_e) => {
+            let else_ty = checker_check_expr_inplace(c, *else_e)
+            (*c).refine_cond_env = saved_cond_env
+            if !types_compatible(then_ty, else_ty) {
+                checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
+            }
+            then_ty
+        }
+        None => {
+            (*c).refine_cond_env = saved_cond_env
+            ty_unit()
+        }
+    }
 }
 
 // ============================================================
@@ -13033,7 +13061,19 @@ impl Checker {
             return (c, final_result)
         }
 
-        let result = binary_result_type(e.bin_op, left_ty, right_ty)
+        var result = binary_result_type(e.bin_op, left_ty, right_ty)
+        // C-style enum compare: a fieldless enum value is i64-compatible for ==/!=.
+        // Canonical bin/souc accepts `i64 == Color::Red`; the pure binary_result_type can't
+        // see the enum table, so override here (this Checker method has c.enums). Only ==/!=
+        // and only enum-vs-numeric (enum-vs-same-enum already passes via name_eq in
+        // binary_result_type; arithmetic stays rejected → matches canonical's `E::A + 1`).
+        if result.kind == TypeKind::TyError && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
+            let l_enum = left_ty.kind == TypeKind::TyNamed && c.enums.find(left_ty.name) >= 0
+            let r_enum = right_ty.kind == TypeKind::TyNamed && c.enums.find(right_ty.name) >= 0
+            if (l_enum && is_numeric_type(right_ty)) || (is_numeric_type(left_ty) && r_enum) {
+                result = ty_bool()
+            }
+        }
         if result.kind == TypeKind::TyError && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
             c = c.report_mismatch(e.span, 4, left_ty, right_ty)
         }
