@@ -132,3 +132,35 @@ non-recursive helpers called post-order. Then re-diagnose; method-call has the s
 
 Status at HEAD 0c2edf193: 481 -> 222 crashes (259 eliminated, ~54%). The remaining ~222 are
 this one stack-overflow class, gated on the call-path *mut-tail treatment above.
+
+## STRUCTURAL ROOT CAUSE of the residual ~222 crashes (2026-06-02, definitive)
+
+The residual crashes are STACK OVERFLOW, and the root is structural: the **Checker struct is
+multi-MB** (dozens of inline fixed-size Tables — structs/enums/fn_sigs/algebras/models/
+policies/contests/audits/...). So ANY Checker-derived local makes a recursive frame large,
+and deeply-nested programs overflow.
+
+Progress made (all faithful, 0 regressions):
+- `0c2edf193` *mut binary op-typing tail: binary handler no longer holds a 12MB (Checker,
+  TypeEntry) `pair` across its operand recursion. Fixes synthetic deep_binary.
+- `373e30dfb` *mut the 7 call-path methods (eff/rel + 5 boundary contracts): call frame
+  12.3MB -> 676KB (18x). algebra_demo threshold 256MB -> 128MB.
+
+But 0 corpus rescue at 64MB: the corpus crashers (algebra/hypercomplex) still overflow via
+(a) deep call/expr recursion x 676KB and (b) a SEPARATE 12.3MB frame in the HYPER path
+(check_hyper_binary / check_binary_units — still by-value, bridged from the *mut binary tail
+where `let hc = check_hyper_binary(*c, ...)` copies the whole Checker by value). Frame-
+shrinking is whack-a-mole across binary/hyper/call until every Checker-by-value local in a
+recursive path is gone.
+
+THE REAL FIX (structural, beyond per-handler migration):
+1. Heap-allocate the Checker's Tables (Box/heap_alloc, pointers in the struct) so sizeof(Checker)
+   drops from multi-MB to ~KB → every frame is small → deep recursion fits any stack. Large but
+   mechanical refactor; the single highest-leverage change for the whole stack-overflow class.
+2. OR run the checker on a dedicated thread with a large stack (e.g. 512MB) — legitimate for
+   genuine stack overflow; sidesteps the frame size entirely.
+Either makes the remaining ~222 disappear at once; per-handler *mut frame-shrinking cannot.
+
+Arc: 481 -> 222 crashes (259 eliminated, ~54%) via the SRET-class *mut migration (enum +
+13 expr kinds + Call arg-checker). The residual ~222 are the STACK-OVERFLOW class, gated on
+the structural Checker-size fix above.
