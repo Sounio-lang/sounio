@@ -142,4 +142,55 @@ theorem sedenion_zd_S3_fiber : 16 - intRank (leftMul 3 10 4 16) = 4 := by native
     divisors `ZD(𝕊)`.  (Combined nullity equals `dim Der(𝕆) = 14`.) -/
 theorem g2_embeds_in_der_sedenion : 64 - intRank (M_O ++ M_S') = 14 := by native_decide
 
+-- ================================================================
+-- §4. A concrete G₂ element — the group-level companion to the lift
+-- ================================================================
+
+-- A concrete nontrivial signed-basis automorphism of 𝕆 (found by exhaustive
+-- search over XOR-preserving index maps × signs): the swap e₂↔e₃, e₆↔e₇ with
+-- signs.  φ(e_k) = phiS[k] · e_{phiPi[k]}.
+def phiPi : List Nat := [0, 1, 3, 2, 4, 5, 7, 6]
+def phiS  : List Int := [1, -1, -1, -1, -1, 1, 1, 1]
+
+/-- A linear map given by index map `pi` and signs `s` is an automorphism of the
+    level-`bits` algebra: it preserves XOR support and the signed structure. -/
+def isAuto (pi : List Nat) (s : List Int) (bits : Nat) : Bool :=
+  let n := 2 ^ bits
+  (List.range n).all (fun i => (List.range n).all (fun j =>
+    (pi.getD (i ^^^ j) 0 == (pi.getD i 0) ^^^ (pi.getD j 0))
+    && (cdSigma i j bits * s.getD (i ^^^ j) 1
+        == (s.getD i 1) * (s.getD j 1) * cdSigma (pi.getD i 0) (pi.getD j 0) bits)))
+
+-- The diagonal lift φ⊕φ to 𝕊 = (𝕆,𝕆): lower block uses (phiPi,phiS),
+-- upper block (indices 8..15) uses the same with index offset 8.
+def liftPi : List Nat := phiPi ++ phiPi.map (· + 8)
+def liftS  : List Int := phiS ++ phiS
+
+-- signed left-multiplication kernel: A = s1·e_p + s2·e_q at level `bits`, dim n
+def lmSignedKer (p : Nat) (s1 : Int) (q : Nat) (s2 : Int) (bits n : Nat) : Nat :=
+  n - intRank ((List.range n).map (fun row => (List.range n).map (fun col =>
+    (if (p ^^^ col) == row then s1 * cdSigma p col bits else 0)
+    + (if (q ^^^ col) == row then s2 * cdSigma q col bits else 0))))
+
+/-- `φ` is a genuine (nontrivial) automorphism of the octonions, hence a concrete
+    element of `Aut(𝕆) = G₂`. -/
+theorem phi_is_octonion_automorphism : isAuto phiPi phiS 3 = true := by native_decide
+
+/-- The diagonal lift `φ⊕φ` is a genuine automorphism of the sedenions — the
+    group-level companion to `g2_embeds_in_der_sedenion`: the concrete `G₂`
+    element acts on 𝕊. -/
+theorem phi_lifts_to_sedenion_automorphism : isAuto liftPi liftS 4 = true := by native_decide
+
+/-- `φ⊕φ` sends the canonical zero divisor `e₃+e₁₀` to `−(e₂+e₁₁)` — a
+    **different-support** element (so the `G₂` action genuinely moves it on
+    `ZD(𝕊)`). -/
+theorem phi_moves_the_zero_divisor :
+    (liftPi.getD 3 0, liftPi.getD 10 0) = (2, 11) := by native_decide
+
+/-- …and the image is again a zero divisor with the **same** 4-dimensional
+    annihilator (the `S³` fiber is `G₂`-invariant). -/
+theorem phi_image_keeps_S3_fiber :
+    lmSignedKer (liftPi.getD 3 0) (liftS.getD 3 1) (liftPi.getD 10 0) (liftS.getD 10 1) 4 16 = 4 := by
+  native_decide
+
 end Sounio.G2Derivations
