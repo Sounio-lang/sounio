@@ -71,3 +71,33 @@ model of the hypothesised mechanism.
    modular rebuild + the 504-corpus census to confirm the 131 crashers clear.
 
 The nested-store codegen fix (this branch) is unaffected and remains correct.
+
+## Decision gate (run before opening a rebuild lane): NOT the bare-enum-pattern family
+
+Checked whether the *mut expr-kind dispatch uses bare `ExprCall`/`ExprIndex` match
+arms (the documented bin/souc bare-pattern miscompile family that could mis-route a
+call to a by-value/index handler):
+- **Zero bare `ExprCall`/`ExprIndex`/`ExprBinary`/`ExprUnary` match arms** in check.sio.
+- The dispatch (check.sio:2674/2682) already uses **explicit if-equality**
+  (`if e.kind == ExprKind::ExprIndex … else if e.kind == ExprKind::ExprCall`), with
+  NOTE comments (2591/2634) saying it deliberately avoids `match e.kind` "because
+  bin/souc miscompiles" it.
+
+So the dispatch is already hardened against that miscompile → the contradiction is
+NOT explained by the bare-pattern family. **The dispatch path that reaches a by-value
+function for a plain `f(5)` remains genuinely open.** Without a testable hypothesis,
+rebuild-iteration (2:36 each) would be exploratory guessing — so this is handed off
+as its own lane, not pursued here.
+
+## Hand-off summary
+
+- **It is NOT a struct-return bug.** Distinct, pre-existing crash: a by-value Checker
+  function (672KB frame) deref's a 16-byte struct argument from address −1
+  (find()-miss sentinel used as a by-value-arg source, unguarded). 131/170 genuine
+  crashers, one instruction (0x4c2805b), deterministic.
+- **Open questions for the fix lane:** (1) exact faulting function (arg fingerprint:
+  Checker + 2×TypeEntry + 1×16-byte, returns Checker); (2) which lookup yields the −1;
+  (3) why a plain `f(5)` reaches a by-value path at all (NOT the bare-pattern family —
+  already ruled out). Needs symbol-ful build or marker-instrumented rebuilds.
+- **Unrelated to and unblocking-independent of the nested-store fix on this branch**,
+  which stands correct + validated.
