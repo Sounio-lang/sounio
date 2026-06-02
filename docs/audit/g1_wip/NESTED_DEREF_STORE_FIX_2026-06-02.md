@@ -31,6 +31,16 @@ Four syntactic shapes, all two-hop `*.f1.f2`:
 
 Both write shapes the checker uses are now handled.
 
+**Type-structure precondition verified.** The fix bails (`tc_error "nested field
+store requires inline struct field"`) if the intermediate field is not an inline
+struct (`fty1 != 6`), which would *error-regress* the modular build if any collect-
+site intermediate were boxed/pointer. Confirmed safe: all six collect-site fields
+on `Checker` are value `pub struct` types (TypeEnv, FnSigTable, AlgebraTable,
+StudyTable, OntologyTable, OntologyKernel — check.sio:106-116, defs.sio/env.sio),
+i.e. ty 6 inline → the error branch never fires for them. A 512-element inline
+array-field repro confirms large inline struct fields resolve to correct offsets
+(no boxing), so the inline-offset arithmetic is valid at FnSigTable scale.
+
 ## Fix
 
 New token-shape detectors + x86 compilers mirroring the existing single-field
