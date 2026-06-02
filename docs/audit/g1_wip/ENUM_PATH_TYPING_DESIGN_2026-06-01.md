@@ -97,3 +97,39 @@ the checker is lenient on enums generally). Options:
 Recommendation: (b) unless enum support is a near-term requirement for the dissertation /
 conference pipeline. The verified canonical model above is the durable asset; re-enter via a
 single combined typing+ExprIf push if (a) is chosen.
+
+## OUTCOME (user chose (a)): ItemEnum ENABLED — landed `cef81349a`
+
+The full combined push was executed and landed. Sequence:
+- `102350faa` — ExprIf routed onto the *mut spine (split-and-bridge), +32 crash rescues, 0
+  regressions (checkpoint, ItemEnum off).
+- `cef81349a` — the combined unit: FULL *mut ExprIf handler (then-block via
+  checker_check_opt_block_inplace + else via checker_check_expr_inplace, so `else if` chains
+  route through *mut), binary `i64==enum` accept in check_binary_with_operand_types, and
+  ItemEnum WIRED.
+
+Result: `enum_match.sio` → **rc=0, canonical-faithful** (was a baseline lenient false-pass;
+crashed when ItemEnum was naively enabled). **0 corpus regressions, 0 pass→fail**, g1 gate
+PASS. 116 crashes→completions across the arc (Build A 80 + ExprIf 32 + this 4); spot-check vs
+canonical = most faithful, a minority reflect the modular checker's PRE-EXISTING
+incompleteness (now visible, not masked by the crash).
+
+Probe battery: **6/8 faithful** to canonical (p1–p5, p8). Two divergences REMAIN (synthetic,
+not in corpus — so 0 measured regressions — but real):
+
+### Follow-ups (do NOT chain on low context — the cascade restarts here)
+- **p7 `let x: E = E::A` — NEW latent crash introduced by enabling ItemEnum.** `let` with a
+  TyNamed annotation + path init routes through `check_binding_init_expr` (check.sio:~12782),
+  whose ExprPath special-case calls **by-value** `check_path_expr`; with the enum now
+  collected it takes the enum-found branch → the 8MB-self SRET smash. Fix: a *mut binding-init
+  path (route that init through checker_check_path_expr_inplace / the *mut spine). Absent from
+  the corpus, so the sweep is clean — but it is a real reachable crash shipped by flipping
+  ItemEnum on.
+- **p6 `let x: i64 = E::A` — divergent rejection.** enum→i64 ASSIGNMENT compat is unhandled
+  (only binary ==/!= was fixed). Fix: add the enum-int rule at the `types_compatible` call
+  sites already catalogued — return (check.sio:2605), let-binding (check.sio:2875), fn-args —
+  via a Checker-method helper (those sites have self.enums), OR the TypeEntry-marker route
+  (124 literals) for a uniform fix. Canonical accepts p2/p6 (enum coerces to i64).
+
+These are the next unbounded leg (p7 → *mut binding-init → its callees; p6 → every compat
+call site). The verified canonical model + probe battery (`.dbg/g1corpus/sem/`) is the spec.
