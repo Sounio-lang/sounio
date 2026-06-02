@@ -100,3 +100,21 @@ table copy that `.find`/`.get`/`.add` incur — a free helper scanning `(*c).fn_
 
 Owner: Claude (worktree /workspace/sounio-e008). Census harnesses + logs under `.build/census*/`.
 Binaries: `/tmp/mc_e008_base.elf` (baseline), `/tmp/mc_e008_fix3.elf` (fix, net-negative).
+
+## UPDATE 2026-06-02 (post fall-through codegen fix): nested-write bug CONFIRMED still open + minimal repro
+Another lane fixed a DIFFERENT codegen bug (fall-through epilogue, `CD[CL-1]==0xc3` gate) and
+swapped `bin/souc` (`5082bf67e`, `g1/qualify-bare-patterns`). That did NOT fix this one. Verified
+with a build-independent 15-line reproducer (`NESTED_MUT_WRITE_REPRO_2026-06-02.sio`), compiled by
+the NEW `bin/souc`:
+```
+(*o).top = 9            // one-level write through *mut       -> persists  (prints top=9)
+(*o).inner.n = 3        // TWO-level nested write through *mut -> LOST      (prints n=0)
+(*o).inner.vals[0] = 7  // TWO-level nested array write        -> LOST      (prints v0=0)
+```
+Result: `top=9 n=0 v0=0`. So **two-level nested `*mut` field writes `(*p).a.b = x` are dropped;
+one-level `(*p).a = x` persists** — a separate, still-open codegen bug, the direct cause of the
+in-place collect losing `fn_sigs`/`env` (E008). This is the clean unblock: a codegen fix here lets
+EVERY in-place collector use cheap manual writes (no large copies, no crashes) — strictly better
+than the source `.add`+write-back workaround (which reintroduces the per-function table copy).
+Hand to the codegen lane that just fixed the fall-through bug; same gdb/repro method applies.
+Source-of-truth binary for repro: `/workspace/sounio-move-codegen/bin/souc` (md5 ff68f758).
