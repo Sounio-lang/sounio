@@ -64,6 +64,14 @@ lean_lib «SounioProofObligation» where
 @[default_target]
 lean_lib «SounioZeroDivisorBridge» where
 
+-- Thin projective-measurement corollary file over SounioZeroDivisorBridge:
+-- re-states the canonical 4-annihilator structure of A = e3+e10 in
+-- measurement-channel language (forgettableBasis, erasure_*, channel count).
+-- No new sed_mul claims; pure re-export with `native_decide`. Aligned to the
+-- runtime after stdlib/algebra/sedenion.sio sign-fix in commit 16b6ad3ea.
+@[default_target]
+lean_lib «SounioSedenionMeasurement» where
+
 @[default_target]
 lean_lib «SounioImpossibilityChain» where
 
@@ -158,6 +166,12 @@ lean_lib «SounioSatReflect» where
 @[default_target]
 lean_lib «SounioSatColouringSB» where
 
+-- χ≥6 cube-and-conquer composition smoke: if all five one-literal split leaves
+-- for one vertex are UNSAT, the plain `colourCNF n 5 edges` is UNSAT. This is
+-- the Lean-side cover adapter for future generated per-cube LRAT certificates.
+@[default_target]
+lean_lib «SounioSatCubeCover» where
+
 -- B1 mechanism spike: a tiny hand-written UNSAT certificate re-checked by Lean core's
 -- verified LRAT checker (check/check_sound + native_decide). Standalone; fast.
 @[default_target]
@@ -178,6 +192,11 @@ lean_lib «SounioSatK76» where
 -- triangle-precolour leg. NOT a default_target (30 MB source; build on demand:
 -- `lake build SounioSatG529`).
 lean_lib «SounioSatG529» where
+
+-- χ≥6 SEARCH SMOKE: generated reflected LRAT certificate for finite K₆ not being
+-- 5-colourable. This exercises the exact no-5 SAT certificate plumbing for future
+-- witnesses, but is intentionally not a Euclidean/unit-distance χ≥6 theorem.
+lean_lib «SounioSatK65Reflect» where
 
 -- χ≥5 COMPOSITION: wires the now-proven SAT leg (SounioSatG529.g529_not_colourable)
 -- into the geometry reduction (SounioDeGreyChi5Concrete), discharging the last
@@ -200,6 +219,26 @@ lean_lib «SounioDeGreyChi5Transfer» where
 -- edge set (all emb denominators nonzero), and exhibits the SqrtField instance. The sole
 -- remaining χ(ℝ²)≥5 input is the analytic 'ℝ is a SqrtField'. `lake build SounioDeGreyChi5TransferWf`.
 lean_lib «SounioDeGreyChi5TransferWf» where
+
+-- Scoped current-fragment transfer: the reflected G529 LRAT obstruction transfers through any
+-- target receiving the checked QF operations used by the current {3,5,11} support. This is an
+-- honest boundary layer below the standalone RootedField3511 interface.
+-- `lake build SounioDeGreyChi5Transfer3511`.
+lean_lib «SounioDeGreyChi5Transfer3511» where
+
+-- Named three-root target interface for the current {3,5,11} G529 transfer. This removes the
+-- public transfer theorem's dependence on the older four-root RootedField interface, while keeping
+-- compatibility phi-law fields for the existing transfer theorem. The adjacent evaluator target
+-- below is the canonical derived phi3511/QF3511TransferWf path.
+-- `lake build SounioDeGreyChi5Rooted3511`.
+lean_lib «SounioDeGreyChi5Rooted3511» where
+
+-- Derived 8-mask evaluator for the named three-root target. Proves the compressed qmul core from
+-- RootedField3511 algebra, bridges de Grey's 16-mask qmul through {3,5,11} support, then proves
+-- phi3511 qmul/qadd/qsub/unit under explicit IntCastNonzero and packages that evaluator as a
+-- QF3511TransferWf target.
+-- `lake build SounioDeGreyChi5Eval3511`.
+lean_lib «SounioDeGreyChi5Eval3511» where
 
 -- Start of the analytic SqrtField ℝ construction (Mathlib-free): RealEq (Cauchy null-difference)
 -- proved reflexive + symmetric, plus the obligation ledger enumerating the deferred analytic core
@@ -233,7 +272,28 @@ lean_lib «SounioMultiquadFaithful» where
 -- chi_R2_ge_5_unconditional + indep8 + evalNum_faithful_on_support). `lake build DeGreyChi5Vitrine`.
 lean_lib «DeGreyChi5Vitrine» where
 
+-- Erdos-lane vitrine: packages the closed Madore/Q311 χ(ℝ²)≥4 base case, the scoped
+-- current {3,5,11} G529 transfer/minimal-support surface, and a separate chi>=6 smoke boundary.
+-- Packaging only; no new theorem beyond the imported vitrines. `lake build ErdosVitrine`.
+lean_lib «ErdosVitrine» where
+
+-- Reusable finite unit-distance obstruction interface: exact geometry + finite no-k-colouring
+-- certificate ⇒ no ambient k-colouring. The chi>=6 plug-in shape is the same with k=5.
+lean_lib «SounioFiniteUnitDistanceWitness» where
+
+-- Tiny finite K6/no-5-colouring smoke for the chi>=6 witness interface.
+-- This is intentionally not a Euclidean unit-distance theorem.
+lean_lib «SounioFiniteUnitDistanceWitnessSmoke» where
+
+-- Tiny exact Euclidean geometry smoke for the chi>=6 promotion contract.
+-- This inhabits EuclideanNatEdgeExactGeometry over Rat^2, but attaches no no-5 certificate.
+lean_lib «SounioFiniteUnitDistanceEuclideanSmoke» where
+
 lean_lib «SounioMultiquadIndep» where
+
+-- Canonical Mathlib-free `Real × Real` squared-distance formula used by generated
+-- public plane promotion gates. `lake build SounioRealPlaneGeometry`.
+lean_lib «SounioRealPlaneGeometry» where
 
 -- Parametric multiquadratic framework over `primes : List Nat` (generalises the {3,5,11}
 -- ladder of SounioMultiquadIndep). Generic Newton sqrtR, radS/evalS over 2^|S| masks,
@@ -242,8 +302,9 @@ lean_lib «SounioMultiquadIndep» where
 lean_lib «SounioMultiquadParam» where
 
 -- Moser spindle over ℚ(√3,√11) (|S|=2, degree 4): instantiates the parametric framework,
--- proves the 7-vertex / 11-edge unit-distance geometry (dist²=1 exact) by decide, ¬3-colourable
--- ⇒ χ≥4, and transfers to χ(ℚ(√3,√11)²) ≥ 4 — the base of Madore's multiquadratic line.
+-- proves the 7-vertex / 11-edge exact geometry (dist²=144 at ×12 scale) by decide,
+-- ¬3-colourable ⇒ χ≥4, and transfers to χ(ℚ(√3,√11)²) ≥ 4 — the base of Madore's
+-- multiquadratic line. The real-plane vitrine normalizes this to the standard dist²=1 unit.
 -- `lake build SounioMoserSpindleQ311`.
 lean_lib «SounioMoserSpindleQ311» where
 
@@ -251,12 +312,22 @@ lean_lib «SounioMoserSpindleQ311» where
 -- `lake build SounioMoserSpindleQ311Real`.
 lean_lib «SounioMoserSpindleQ311Real» where
 
+-- Geometry-only Nat-edge adapter for the normalized Moser/Q311 real-plane embedding.
+-- Also closes finite zero-distance separation and exposes the full Euclidean wrapper.
+lean_lib «SounioMoserSpindleQ311EuclideanGeometry» where
+
 -- Single-entry showcase for Madore χ(ℝ²) ≥ 4 (indep_3_11 + spindle + field-plane + Real).
 -- Light import (no SAT certificate). `lake build MadoreSpindleVitrine`.
 lean_lib «MadoreSpindleVitrine» where
 
--- G529 / de Grey χ≥5 on the parametric MultiquadField [3,5,11]: packages the degree-8 witness
--- field, radS↔evalNum bridge, indep8 recovery, and q3511_plane_needs_5_colours (re-export of
+-- G529 / de Grey radical-support audit: theoremizes the exact coordinate-table support
+-- ({3,5,11}, √7 unused). Heavy (imports SounioDeGreyUnitDistance); build on demand with
+-- `lake build SounioDeGreyRadicalSupport`.
+lean_lib «SounioDeGreyRadicalSupport» where
+
+-- G529 / de Grey χ≥5 on the fresh-order parametric MultiquadField [11,3,5]: packages the
+-- degree-8 witness field, canonical [3,5,11] permutation bridge, radS↔evalNum bridge, and
+-- q3511_plane_needs_5_colours (re-export of
 -- g529_field_plane_chi_ge_5). Heavy (pulls SounioDeGreyChi5Closed + G529 cert).
 -- `lake build SounioDeGreyChi5Param`.
 lean_lib «SounioDeGreyChi5Param» where
