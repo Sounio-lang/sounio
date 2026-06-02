@@ -1,9 +1,20 @@
 # E008/E170 root cause — by-value `Checker` copy TRUNCATION, not bridge-state logic (2026-06-02)
 
-**Status: PROVEN by rebuild. Redirects the #1 front-half lever away from the documented
-hypothesis.** Worktree `/workspace/sounio-e008`, branch `g1/e008-bridge-fix`, base
-`g1/qualify-bare-patterns @ ed581987e`. `ulimit -s 1048576`. Read-only conclusion (the one
-source edit attempted was reverted after it was empirically falsified).
+**Status: SOLID symptoms + a STRONG-BUT-UNCONFIRMED mechanism (downgraded 2026-06-02 after
+adversarial review).** Worktree `/workspace/sounio-e008`, branch `g1/e008-bridge-fix`, base
+`g1/qualify-bare-patterns @ ed581987e`. `ulimit -s 1048576`.
+
+> **CAVEAT (read first).** What is PROVEN: the baseline census (125/122/27), the
+> explicit-`return`-only symptom, and the silent body-type hole (`fn f()->i64{"hello"}` →
+> OK). What is NOT yet confirmed: the *mechanism*. The "by-value source fix is impossible /
+> *mut-only" conclusion rests on a single null rebuild (AST-set had no effect) whose cause was
+> not isolated — it has ≥4 explanations (edit site not live / a different code-8 emission site
+> / `lower_opt_return_type` returned unit / by-value field-drop) and only the last was
+> asserted. The mechanism story is also internally tense: `had_error`(55)/`error_count`(53)
+> survive by-value copies while `current_return_type`(56) supposedly does not. An instrumented
+> rebuild (DBG prints at `check_fn_item` / `check_return_expr` / the 18062 vs 2623 emit sites)
+> is in flight to settle it. **Do not action the *mut-only redirect until that lands — a
+> cheaper fix may exist.**
 
 ## TL;DR for whoever owns check.sio / the *mut migration
 The prior docs (FRONT_HALF_LEVERAGE_HANDOFF, MODULAR_CORPUS_FAILURE_BACKLOG) say E008 is a
