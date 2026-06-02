@@ -1,49 +1,73 @@
-# Struct-return crasher — fix ATTEMPT (does not reproduce in isolation) — 2026-06-02
+# Body-check dominant crasher — root-cause (machine-level solid, source-level partial) — 2026-06-02
 
-Goal: fix the dominant body-check crasher (131/170), which faults at 0x4c2805b
-reading a 16-byte TypeEntry from rdx=−1, on the modular repro
-`fn f(x:i64)->i64{x} fn main()->i64{let y=f(5) 0}` → mc_fixed --check SIGSEGV.
+The dominant body-check crasher (131/170 genuine SIGSEGVs) on the modular repro
+`fn f(x:i64)->i64{x} fn main()->i64{let y=f(5) 0}` → mc_fixed --check faults at
+0x4c2805b. Below is what is PROVEN vs INFERRED, after gdb probing the live mc_fixed
+binary (no rebuilds).
 
-## Method (same repro-driven approach that fixed the nested-store bug)
+## PROVEN (machine level, gdb on mc_fixed)
 
-Built progressively faithful BOOTSTRAP-level repros of the hypothesised mechanism
-(`(*c).fn_sigs.get(id)` returns FnSig by value → `fn_param_list_get(sig.params,idx)`
-reads a param TypeEntry), all compiled with ds_fixed2 (the SAME fixed bootstrap that
-produced the crashing mc_fixed). Sources in repro/sret_norepro_attempts/.
+Disassembling the faulting function's prologue + fault site (probe: `x/45i` back
+from 0x4c2805b):
+- Frame `sub $0xa4250,%rsp` = **672 KB** — a huge by-value frame.
+- It copies 4 incoming arguments (passed as pointers, ABI for large by-value
+  structs) into locals via `rep movsq`:
+  - arg0 (rdi): **0x51ff qwords ≈ 164 KB** → a struct the size of `Checker` passed
+    BY VALUE. (So this is NOT the `*mut Checker` in-place spine — it is a by-value
+    Checker function.)
+  - arg1 (rsi), arg2 (rdx): **34 qwords = 272 bytes** each (= the size of a
+    `TypeEntry`, 29 fields).
+  - arg3 (rcx): a **16-byte** struct, manual 2-qword copy → the faulting
+    `mov 0x0(%rdx),%rax` with **rdx (arg3 ptr) = −1**.
+- So: a **by-value Checker method crashes copying its 4th (16-byte) struct argument
+  from address −1.** −1 is the classic `find()`-miss sentinel — a lookup returned −1
+  and it is being used as the source ADDRESS of a by-value struct argument, unguarded.
 
-| repro | models | result on ds_fixed2 |
-|-------|--------|---------------------|
-| sret_repro | small struct w/ Box, plain fn return-by-value | r=77 OK |
-| A | large struct (Name-sized), plain fn, local self | r=77 OK |
-| B | large struct, method, local self | r=77 OK |
-| D | small struct, method, self via `(*c).tbl` | r=77 OK |
-| E | scalar return `self.entries[i].n` via deref-self | n=5 OK |
-| F | materialize `(*c).tbl` then method | r=77 OK |
-| chain | FULL chain: get()→struct by value, pass `.params` Box to a recursive
-          list-get returning a struct, read `.ty` | r=99 OK |
+Determinism + clustering (prior commit): 131/170 fault at this exact instruction;
+per-binary deterministic. A single shared site rules out layout noise. **This is a
+genuine, deterministic, single-site bug — the earlier "intractable/non-bisectable"
+framing (imported from project_modular_B_repro_verdict, which described a DIFFERENT
+non-deterministic crash) was wrong and is retracted.**
 
-**Every repro passes.** (An earlier apparent reproduction was a red herring: it used
-the UNFIXED bin/souc, where the *setup* `(*c).tbl.entries[i]=S{…}` is the nested-store
-bug this branch already fixes — not the return bug.)
+## NOT a struct-RETURN bug
 
-## Conclusion
+The "struct-return" label (from the census writeup) is corrected: the fault is a
+by-value struct **argument** passed from −1, not a return value. The earlier
+bootstrap repros (repro/sret_norepro_attempts/) modelled struct-RETURN and all
+compiled correctly under ds_fixed2 — they were testing the wrong mechanism.
 
-The crasher does NOT reproduce at bootstrap-repro scale. Minimal and faithful models
-of the hypothesised get()/fn_param_list_get struct-return mechanism all compile
-correctly under ds_fixed2 — the exact compiler that emits the crashing mc_fixed. So
-either the hypothesised mechanism is not the true cause, or (more likely) the crash
-is a SCALE/context-dependent codegen fault (register pressure, huge frames, the 17k-
-line check function, 64K-entry tables) that only manifests in the full check.sio —
-NOT a cleanly-isolable semantic codegen bug. This matches the repo's prior verdict
-(project_modular_B_repro_verdict: the modular-checker crash is "layout-sensitive,
-non-monotonic, non-bisectable, intractable without gdb").
+## INFERRED but NOT confirmed (source level)
 
-**Therefore the repro-driven fix method that worked for the nested-store bug does NOT
-apply here.** A real fix needs gdb-level debugging of the full mc_fixed binary
-(map 0x4c2805b to a check.sio function via instrumented build / careful disassembly),
-or surgical source-bisection with 2:36 modular rebuilds per step — a substantially
-larger undertaking than the nested-store fix. NOT attempted further here; flagged as
-its own lane.
+A plausible chain — by-value call-arg checking bridges via
+`call_expr_should_bridge_by_value` to a by-value boundary checker
+`(self: Checker, arg_ty: TypeEntry, param_ty: TypeEntry, span: Span) -> Checker`,
+crashing on the `span` (16-byte) argument — but this is **contradicted** by
+check.sio:15304's own comment ("ExprCall NEVER sets e.right; ExprIndex always
+does"), since for a genuine `ExprCall` the bridge should return false and route to
+the working *mut path. So the exact function and the precise reason arg3=−1 are
+**unconfirmed**. The arg shape (Checker by value + 2×TypeEntry + 1×16-byte) matches
+the by-value `report_*_mismatch` / call-arg-boundary family, but the dispatch path
+that reaches it for a plain `f(5)` is not established.
 
-The nested-store codegen fix (this branch) remains correct and complete on its own
-terms; this attempt does not change it.
+## Why isolated bootstrap repros don't reproduce it
+
+7 progressively-faithful repros (repro/sret_norepro_attempts/) all compile correctly
+under ds_fixed2 (the same bootstrap that emits the crashing mc_fixed). The bug only
+manifests in the full check.sio codegen context — consistent with a path/dispatch or
+arg-passing fault specific to the real by-value function, not reproducible by a small
+model of the hypothesised mechanism.
+
+## Concrete next steps (a real fix lane, needs 2:36 rebuilds)
+
+1. **Identify the function**: it is a by-value Checker method (returns Checker, ~672KB
+   frame, args = Checker + 2×TypeEntry + 1×16-byte). gdb-instrument or add a
+   distinctive marker; or rebuild mc with a symbol table if the toolchain supports it.
+2. **Find why arg3 = −1**: which lookup/find returns −1 and is passed as a by-value
+   struct-arg address. Likely a missing `if x < 0` guard before constructing/passing
+   the argument.
+3. **Two candidate fixes**: (a) guard the −1 at the call site; (b) if the dispatch to
+   the by-value path is itself wrong for plain calls (the e.right/ExprIndex kind
+   mismatch the comment warns about), route to the working *mut path. Either needs a
+   modular rebuild + the 504-corpus census to confirm the 131 crashers clear.
+
+The nested-store codegen fix (this branch) is unaffected and remains correct.
