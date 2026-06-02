@@ -37,17 +37,27 @@ The in-place collect's lost writes (`(*c).fn_sigs.entries[i]=sig`, `(*c).fn_sigs
 - The 45 remaining E008 are REAL (e.g. `main()->i32{0}` i64-literal-vs-i32 width — a separate
   frontend int-literal-narrowing gap, not this bug).
 
+Note: the E008 payoff exercises the fix's HARD path, not just the synthetic repro — the real
+collect site `(*c).fn_sigs.entries[sig_id] = sig` is a **variable-index, aggregate (FnSig)
+element** store on the live 8 MB Checker (the repro used a constant index + i64 element), and it
+worked (count 0→2, `find` resolves, matching-type programs `check: OK`).
+
 ## Honest limit — the corpus is still net-negative
-PASS 125→112, CRASH 3→170. **170 is the same crash count my earlier check.sio source-fix
-produced** — so the crashes are NOT the nested-write bug (fixed) and NOT my source approach.
-They are a SEPARATE latent crash class in the modular checker's deeper `*mut` check spine,
-newly REACHED because the checker now actually type-checks bodies. Crashers crash during
-"Type checking module 0" on VALID programs (canonical `souc_gen2` compiles them fine), 2–8
-functions, diverse constructs (`array_elem_field_store`, `array_mut_ref`, `approx_*`).
+PASS 125→112, CRASH 3→170. The crash SET is **identical** to my earlier `check.sio` source-fix:
+both produce exactly 170 crashers — **170 common, 0 unique to either** (`comm`-verified,
+`census_fix3` vs this census). Two different mechanisms (source `.add`+write-back vs codegen
+nested-write fix) reach the SAME programs ⇒ the crashes are a pre-existing latent class,
+**definitively not introduced by this fix**. They live in the modular checker's deeper `*mut`
+check spine, newly REACHED because the checker now actually type-checks bodies. Crashers crash
+during "Type checking module 0" on VALID programs (`souc_gen2` compiles them fine), 2–8
+functions, diverse (`array_elem_field_store`, `array_mut_ref`, `approx_*`).
 => "one codegen fix unblocks both E008 and crashes" is REFUTED: it unblocked E008, not the
 crashes. The next codegen hunt is this deeper-check crash class.
 
-## Status
-The lean_single.sio codegen fix is CORRECT, validated, 0 run-pass regressions, fixed-point
-stable — gate-ready for the canonical compiler (a real bug fix). The modular-compiler E008
-corpus win is gated behind the separate deeper-check crash class above. a64 dispatch: follow-up.
+## Status / merge-readiness
+The lean_single.sio codegen fix is CORRECT and validated: repro, fixed point (gen2==gen3),
+**run-pass 504: 501 identical / 3 non-deterministic / 0 regressions**, crash set proven
+pre-existing. Examples divergence sweep (847, the established canonical-compiler bar) is
+**IN PROGRESS** — merge-readiness is pending its result; do NOT call gate-ready until the 847
+examples confirm 0 real divergences. The modular-compiler E008 corpus win is gated behind the
+separate deeper-check crash class above. a64 dispatch: follow-up.
