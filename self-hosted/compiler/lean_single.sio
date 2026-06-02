@@ -4300,6 +4300,37 @@ fn stmt_is_deref_field_store(p0: i64) -> bool with Panic, Mut {
     return TK[(p0 + 6) as usize] == 16
 }
 
+// (*name).field.field = expr  — two-level nested field store through a *mut/ref.
+// Tokens: ( * name ) . field . field =  →  6 19 3 7 50 3 50 3 16
+// Without this, the two-field LHS fell to the generic assignment path, which
+// materialised the intermediate INLINE struct field as a value-copy, wrote into
+// the copy, and discarded it (reads back as 0) — the nested-*mut-write bug.
+fn stmt_is_deref_field_field_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }
+    if TK[(p0 + 1) as usize] != 19 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 7 { return false }
+    if TK[(p0 + 4) as usize] != 50 { return false }
+    if TK[(p0 + 5) as usize] != 3 { return false }
+    if TK[(p0 + 6) as usize] != 50 { return false }
+    if TK[(p0 + 7) as usize] != 3 { return false }
+    return TK[(p0 + 8) as usize] == 16
+}
+
+// (*name).field.field[idx] = expr  — two-level nested ARRAY-field store.
+// Tokens: ( * name ) . field . field [ … ] =  →  6 19 3 7 50 3 50 3 41 …
+fn stmt_is_deref_field_field_array_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }
+    if TK[(p0 + 1) as usize] != 19 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 7 { return false }
+    if TK[(p0 + 4) as usize] != 50 { return false }
+    if TK[(p0 + 5) as usize] != 3 { return false }
+    if TK[(p0 + 6) as usize] != 50 { return false }
+    if TK[(p0 + 7) as usize] != 3 { return false }
+    return TK[(p0 + 8) as usize] == 41
+}
+
 // (*name).field[idx] = expr  — explicit-deref store into a struct's ARRAY field.
 // Tokens: ( * name ) . field [ ... ] =  →  6 19 3 7 50 3 41 ... 42 16
 // lean_single had detectors for (*p)[i]=, (*p)=, and (*p).f= but NOT this one, so
@@ -18153,6 +18184,191 @@ fn compile_indexed_field_field_array_store_x86() with IO, Mut, Panic, Div {
 }
 
 // ─── Statement compiler ───
+// (*name).field1.field2 = expr  — two-level nested scalar/aggregate store through a *mut.
+// field1 is an INLINE struct field, so the target address is a FLAT offset from the
+// pointer base: [ptr + off(field1) + off(field2)]. Mirrors the working one-field
+// deref_field_store, resolving one level deeper and summing offsets.
+fn compile_deref_field_field_store_x86() with IO, Mut, Panic, Div {
+    let name_tok = EP + 2
+    let field1_tok = EP + 5
+    let field2_tok = EP + 7
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(field2_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    let ns = TS[name_tok as usize]
+    let ne = TE[name_tok as usize]
+    let fh1 = gl_name_hash(TS[field1_tok as usize], TE[field1_tok as usize])
+    let fh2 = gl_name_hash(TS[field2_tok as usize], TE[field2_tok as usize])
+    EP = EP + 9
+    compile_or()
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    let lslot = var_find(ns, ne)
+    if lslot < 0 {
+        tc_undefined_var(name_tok)
+        return
+    }
+    let lvi = var_find_idx(ns, ne)
+    if lvi < 0 || type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) == false {
+        tc_error(field1_tok, "field access through deref requires ref or pointer binding")
+        return
+    }
+    let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+    let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+    if inner_ty != 6 {
+        tc_error(field1_tok, "field access through pointer/ref requires struct pointee")
+        return
+    }
+    let si1 = st_find(inner_hash)
+    if si1 < 0 {
+        tc_error(field1_tok, "unknown field access")
+        return
+    }
+    if st_private_access_denied(si1, field1_tok) {
+        tc_error_hard(field1_tok, "private struct field access")
+        return
+    }
+    ST_QUERY_NS = TS[field1_tok as usize]
+    ST_QUERY_NE = TE[field1_tok as usize]
+    let foff1 = st_field_offset(si1, fh1)
+    let fty1 = st_field_ty(si1, fh1)
+    let fhash1 = st_field_hash(si1, fh1)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff1 < 0 {
+        tc_error(field1_tok, "unknown field access")
+        return
+    }
+    if fty1 != 6 {
+        tc_error(field2_tok, "field access through pointer/ref requires struct pointee")
+        return
+    }
+    let si2 = st_find(fhash1)
+    if si2 < 0 {
+        tc_error(field2_tok, "unknown field access")
+        return
+    }
+    if st_private_access_denied(si2, field2_tok) {
+        tc_error_hard(field2_tok, "private struct field access")
+        return
+    }
+    ST_QUERY_NS = TS[field2_tok as usize]
+    ST_QUERY_NE = TE[field2_tok as usize]
+    let foff2 = st_field_offset(si2, fh2)
+    let fty2 = st_field_ty(si2, fh2)
+    let fhash2 = st_field_hash(si2, fh2)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff2 < 0 {
+        tc_error(field2_tok, "unknown field access")
+        return
+    }
+    if ty_eq(fty2, fhash2, rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    } else {
+        emit_store_to_pointer_offset_x86(lslot, foff1 + foff2, fty2, fhash2)
+    }
+}
+
+// (*name).field1.field2[idx] = expr  — two-level nested ARRAY-field store through a *mut.
+// Base address = [ptr + off(field1) + off(field2)]; element selected by idx*esize.
+// Mirrors compile_deref_field_array_store_x86 with one extra field-resolution level.
+fn compile_deref_field_field_array_store_x86() with IO, Mut, Panic, Div {
+    let name_tok = EP + 2
+    let ns = TS[name_tok as usize]
+    let ne = TE[name_tok as usize]
+    let field1_tok = EP + 5
+    let field2_tok = EP + 7
+    let fh1 = gl_name_hash(TS[field1_tok as usize], TE[field1_tok as usize])
+    let fh2 = gl_name_hash(TS[field2_tok as usize], TE[field2_tok as usize])
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(field2_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    EP = EP + 9
+    compile_or()
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+    if TK[EP as usize] == 42 { EP = EP + 1 }
+    if TK[EP as usize] == 16 { EP = EP + 1 }
+    em(0x50)
+    compile_or()
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    let lslot = var_find(ns, ne)
+    let lvi = var_find_idx(ns, ne)
+    if lslot < 0 || lvi < 0 || type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) == false {
+        tc_error(field1_tok, "field access through deref requires ref or pointer binding")
+        em(0x59)
+        return
+    }
+    let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+    let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+    if inner_ty != 6 {
+        tc_error(field1_tok, "field access through pointer/ref requires struct pointee")
+        em(0x59)
+        return
+    }
+    let si1 = st_find(inner_hash)
+    if si1 < 0 {
+        tc_error(field1_tok, "unknown field access")
+        em(0x59)
+        return
+    }
+    if st_private_access_denied(si1, field1_tok) {
+        tc_error_hard(field1_tok, "private struct field access")
+        em(0x59)
+        return
+    }
+    ST_QUERY_NS = TS[field1_tok as usize]
+    ST_QUERY_NE = TE[field1_tok as usize]
+    let foff1 = st_field_offset(si1, fh1)
+    let fty1 = st_field_ty(si1, fh1)
+    let fhash1 = st_field_hash(si1, fh1)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff1 < 0 || fty1 != 6 {
+        tc_error(field2_tok, "field access through pointer/ref requires struct pointee")
+        em(0x59)
+        return
+    }
+    let si2 = st_find(fhash1)
+    if si2 < 0 {
+        tc_error(field2_tok, "unknown field access")
+        em(0x59)
+        return
+    }
+    if st_private_access_denied(si2, field2_tok) {
+        tc_error_hard(field2_tok, "private struct field access")
+        em(0x59)
+        return
+    }
+    ST_QUERY_NS = TS[field2_tok as usize]
+    ST_QUERY_NE = TE[field2_tok as usize]
+    let foff2 = st_field_offset(si2, fh2)
+    let fty2 = st_field_ty(si2, fh2)
+    let fhash2 = st_field_hash(si2, fh2)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if fty2 != 8 {
+        tc_error(field2_tok, "indexed field store requires array field")
+        em(0x59)
+        return
+    }
+    if ty_eq(arr_hash_elem_ty(fhash2), arr_hash_elem_hash(fhash2), rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    materialize_aggregate_array_element_x86(fhash2)
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
+    em(0x59)  // pop rcx (index)
+    emit_load_var(lslot)  // rax = base pointer
+    let total_off = foff1 + foff2
+    if total_off != 0 { em(0x48); em(0x8d); em(0x80); em32(total_off) }
+    if arr_hash_esiz(fhash2) == 8 {
+        em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+    } else {
+        em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
+    }
+}
+
 fn compile_stmt() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
     LAST_STMT_HAS_VALUE = 0
@@ -19132,6 +19348,19 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         } else {
             tc_undefined_var(name_tok)
         }
+        return
+    }
+
+    // (*name).field.field[idx] = expr  and  (*name).field.field = expr — two-level nested
+    // *mut writes. Without these, the two-field LHS fell to the generic assignment path,
+    // which materialised the inline intermediate struct field as a value-copy, wrote into
+    // the copy, and discarded it (read back as 0) — the nested-*mut-write codegen bug.
+    if stmt_is_deref_field_field_array_store(EP) {
+        compile_deref_field_field_array_store_x86()
+        return
+    }
+    if stmt_is_deref_field_field_store(EP) {
+        compile_deref_field_field_store_x86()
         return
     }
 
