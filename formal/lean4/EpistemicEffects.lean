@@ -383,21 +383,127 @@ where
 
 /-! ## §9.2 effect_progress
 
-A well-typed closed term is either a value or can step.
+A well-typed closed term is either a value or can step.  CLOSED (was an open
+obligation): proved by induction on the typing derivation with `Γ` generalized
+and pinned to `[]` by `rfl` (dodging Lean 4's fixed-index-induction restriction),
+using the generation/canonical-forms lemmas below. -/
 
-**Open obligation**: `induction ht with` fails when `Γ` is a concrete `[]`
-(Lean 4 rejects fixed-index induction — "Index in target's type is not a variable").
-Fix: generalize to `∀ {Γ}, HasTy Γ e T E → Γ = [] → …` and call with `rfl`.
-The proof structure by structural induction on `ht` is fully written out in
-`SounioProgress.lean` (for the linear-effect calculus); the same schema applies
-here. Estimated additional proof: ~150 lines. This is the second open
-obligation in this file (alongside `step_preserves_typing`). -/
+-- Generation lemmas: a value's type shape is fixed (peeling `t_sub` by induction).
+theorem genNat {Γ e T E} (h : HasTy Γ e T E) {n} (he : e = .lit_nat n) : T = .tnat := by
+  induction h with
+  | t_lit_nat => rfl
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+theorem genReal {Γ e T E} (h : HasTy Γ e T E) {z} (he : e = .lit_real z) : T = .treal := by
+  induction h with
+  | t_lit_real => rfl
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+theorem genKraw {Γ e T E} (h : HasTy Γ e T E) {k} (he : e = .kraw k) : T = .tknow .treal := by
+  induction h with
+  | t_kraw => rfl
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+theorem genLam {Γ e T E S F b} (h : HasTy Γ e T E) (he : e = .lam S F b) :
+    ∃ T₂, T = .tarrow S F T₂ := by
+  induction h with
+  | t_lam Γ T₁ T₂ E body _ => injection he with h1 h2 h3; subst h1; subst h2; exact ⟨T₂, rfl⟩
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+/-- Canonical forms: a closed value of arrow type is a `lam`. -/
+theorem canon_arrow {v S F T₂ E} (hv : IsValue v) (ht : HasTy [] v (.tarrow S F T₂) E) :
+    ∃ S' F' b, v = .lam S' F' b := by
+  cases hv with
+  | v_nat n  => exact Ty.noConfusion (genNat ht rfl)
+  | v_real z => exact Ty.noConfusion (genReal ht rfl)
+  | v_lam T E0 e0 => exact ⟨T, E0, e0, rfl⟩
+  | v_kraw k => exact Ty.noConfusion (genKraw ht rfl)
+
+/-- Canonical forms: a closed value of `Knowledge` type is a `kraw`. -/
+theorem canon_know {v T E} (hv : IsValue v) (ht : HasTy [] v (.tknow T) E) :
+    ∃ k, v = .kraw k := by
+  cases hv with
+  | v_kraw k => exact ⟨k, rfl⟩
+  | v_nat n  => exact Ty.noConfusion (genNat ht rfl)
+  | v_real z => exact Ty.noConfusion (genReal ht rfl)
+  | v_lam T E0 e0 => rcases genLam ht rfl with ⟨T₂, hT⟩; exact Ty.noConfusion hT
+
+/-- Progress (open-context form): every well-typed term in the empty context is a
+    value or steps.  Induct on the typing derivation; `Γ` is generalized and the
+    `Γ = []` hypothesis discharges the `t_var` case. -/
+theorem progress' {Γ e T E} (h : HasTy Γ e T E) (hΓ : Γ = []) :
+    IsValue e ∨ ∃ e', e ⇒ e' := by
+  induction h with
+  | t_lit_nat Γ n => exact Or.inl (.v_nat n)
+  | t_lit_real Γ z => exact Or.inl (.v_real z)
+  | t_var Γ n T hlk => subst hΓ; simp [lookupCtx] at hlk
+  | t_lam Γ T₁ T₂ E body _ => exact Or.inl (.v_lam _ _ _)
+  | t_app Γ T₁ T₂ Ef Ec Ecaller f a hf ha _ _ ihf iha =>
+      subst hΓ
+      rcases ihf rfl with hvf | ⟨f', hf'⟩
+      · rcases iha rfl with hva | ⟨a', ha'⟩
+        · rcases canon_arrow hvf hf with ⟨S, F, b, rfl⟩
+          exact Or.inr ⟨subst 0 a b, .beta hva⟩
+        · exact Or.inr ⟨.app f a', .app_r hvf ha'⟩
+      · exact Or.inr ⟨.app f' a, .app_l hf'⟩
+  | t_measure Γ T e k he _ ihe =>
+      subst hΓ
+      rcases ihe rfl with hv | ⟨e', he'⟩
+      · exact Or.inr ⟨.kraw k, .meas_red hv⟩
+      · exact Or.inr ⟨.measure e' k, .meas_arg he'⟩
+  | t_kvalue Γ T E e he ihe =>
+      subst hΓ
+      rcases ihe rfl with hv | ⟨e', he'⟩
+      · rcases canon_know hv he with ⟨k, rfl⟩
+        exact Or.inr ⟨.lit_real k.value, .kvalue_red⟩
+      · exact Or.inr ⟨.kvalue e', .kvalue_arg he'⟩
+  | t_kunc Γ T E e he ihe =>
+      subst hΓ
+      rcases ihe rfl with hv | ⟨e', he'⟩
+      · rcases canon_know hv he with ⟨k, rfl⟩
+        exact Or.inr ⟨.lit_real k.gumVar, .kunc_red⟩
+      · exact Or.inr ⟨.kunc e', .kunc_arg he'⟩
+  | t_kconf Γ T E e he ihe =>
+      subst hΓ
+      rcases ihe rfl with hv | ⟨e', he'⟩
+      · rcases canon_know hv he with ⟨k, rfl⟩
+        exact Or.inr ⟨.lit_real k.conf, .kconf_red⟩
+      · exact Or.inr ⟨.kconf e', .kconf_arg he'⟩
+  | t_kadd Γ T E₁ E₂ a b ha hb iha ihb =>
+      subst hΓ
+      rcases iha rfl with hva | ⟨a', ha'⟩
+      · rcases canon_know hva ha with ⟨ka, rfl⟩
+        rcases ihb rfl with hvb | ⟨b', hb'⟩
+        · rcases canon_know hvb hb with ⟨kb, rfl⟩
+          exact Or.inr ⟨.kraw (gumAdd ka kb), .kadd_red⟩
+        · exact Or.inr ⟨.kadd (.kraw ka) b', .kadd_r (.v_kraw ka) hb'⟩
+      · exact Or.inr ⟨.kadd a' b, .kadd_l ha'⟩
+  | t_kmul Γ T E₁ E₂ a b ha hb iha ihb =>
+      subst hΓ
+      rcases iha rfl with hva | ⟨a', ha'⟩
+      · rcases canon_know hva ha with ⟨ka, rfl⟩
+        rcases ihb rfl with hvb | ⟨b', hb'⟩
+        · rcases canon_know hvb hb with ⟨kb, rfl⟩
+          exact Or.inr ⟨.kraw (gumMul ka kb), .kmul_red⟩
+        · exact Or.inr ⟨.kmul (.kraw ka) b', .kmul_r (.v_kraw ka) hb'⟩
+      · exact Or.inr ⟨.kmul a' b, .kmul_l ha'⟩
+  | t_let Γ T₁ T₂ E₁ E₂ e body he hbody ihe _ =>
+      subst hΓ
+      rcases ihe rfl with hv | ⟨e', he'⟩
+      · exact Or.inr ⟨subst 0 e body, .let_red hv⟩
+      · exact Or.inr ⟨.letE e' body, .let_step he'⟩
+  | t_kraw Γ k _ => exact Or.inl (.v_kraw k)
+  | t_sub Γ e T E E' h0 hsub ih => exact ih hΓ
 
 theorem effect_progress
     {e : Expr} {T : Ty} {E : EffectSet}
     (ht : HasTy [] e T E) :
-    (IsValue e) ∨ ∃ e', e ⇒ e' := by
-  sorry  -- see open-obligation note in §9.2 docstring
+    (IsValue e) ∨ ∃ e', e ⇒ e' :=
+  progress' ht rfl
 
 -- ================================================================
 -- §10. GUM conservativity
