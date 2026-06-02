@@ -67,6 +67,36 @@ honestly so the G1 lane isn't misdirected:
 - A clean small repro for whoever works the SRET/struct-return lowering — possibly a
   sibling of the G1 codegen issues; useful regardless of the E008 mapping.
 
+## Bug family (16-variant fan-out + adversarial verify, 2026-06-02)
+A 19-agent workflow (haiku probes + opus synthesis/verify) mapped the family on
+`bin/souc` `9d4ef541`. **11 buggy / 5 working** variants:
+
+- **BUGGY** (zeroed return): `return ctor()`, `var p=ctor();return p`, tail `ctor()`,
+  two-level forward, reassign-then-return, **i64 field** (not just f64), read-2nd-field,
+  **nested struct** (`s.a.x`), **if-arm** `if b {return ctor()}`, 44-field, and
+  **`(ctor(), 1)` tuple-wrapped → SIGSEGV** (the zeroing ESCALATES to a crash when the
+  forwarded struct is tuple-wrapped).
+- **WORKING**: direct literal return, use-in-place (`let p=ctor(); read p`), return a
+  *derived scalar/field* (`let s=ctor(); return s.f0`), **arg-passthrough**
+  (`ident(ctor())`), **method self-passthrough** (`ctor().dup()`).
+
+Refinements from adversarial verify:
+- **`with Mut` is INCIDENTAL** — the bug fires without it (same miscompile).
+- **It needs the forwarding LAYER**: single-level `let s = ctor()` in a non-returning
+  caller works; the second function that returns ctor()'s result is what breaks.
+- **Dimensions that DON'T matter**: field type (i64 too), struct size (1↔44), nesting
+  depth, nested-struct fields, which field is read.
+- **The tuple→SIGSEGV case matters for the G1 crash hypothesis**: this family DOES have a
+  crashing variant, so "non-crashing ⇒ unrelated to their sentinel-deref crash" is weaker
+  than first stated — a tuple/aggregate-wrapped SRET-forward can crash. (Still: TyUnit
+  discriminant is 3≠0, so the E008 *value* mapping remains unsupported; the crash link is
+  now plausible-but-unproven.)
+- **Boundary is broader than the simplest rule**: one verifier found counterexamples where
+  the bug fires but "forwards a struct-returning call's result as the return value"
+  predicted it should work — so the family UNDER-predicts under that rule. The CORE trigger
+  is rock-solid; the exact full boundary is not yet pinned (a codegen-level question best
+  answered by whoever owns the SRET lowering).
+
 ## Handoff
 This is a doc + repro (no `check.sio` / codegen edit) — the SRET lowering lives in the
 codegen the G1 lane is actively working. Hand this minimal repro to whoever drives the
