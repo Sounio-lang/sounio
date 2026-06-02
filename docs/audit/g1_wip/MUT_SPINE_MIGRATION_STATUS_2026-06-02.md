@@ -107,3 +107,28 @@ After Call+MethodCall: re-run the bridge-histogram diagnosis to find the next lo
   helper exists before integrating; the build + sweep are the final gate.
 - Builds must stay serial (≤2 concurrent souc builds — concurrent builds saturate CPU and
   have crashed the pod). The workflow does DESIGN (no builds); integration is serial.
+
+## ROOT CAUSE of the residual ~222 crashes — recursive 12MB frame (2026-06-02, gdb)
+
+After Call landed (481->223), the next tier (Ident 165 / Cast 41 in the bridge-histogram)
+gave only +1 — the histogram MIS-attributes here. gdb on residual crashers (algebra_demo,
+autodiff_neural, ablation_suite, ...): ALL fault at the IDENTICAL stack-probe rip with a
+`rbp-rsp = 12.3MB` frame, and `ulimit -s 64MB->256MB` rescues every one (rc 139->1). So
+these are STACK OVERFLOW, not the SRET-smash class.
+
+Mechanism: the split-and-bridge handlers store the bridged tail's `(Checker, TypeEntry)`
+return in a ~12MB local; frames are reserved at entry, so that 12MB is held across the
+handler's RECURSIVE sub-expr checks. N-deep nesting => N x 12MB => overflow. Confirmed with a
+synthetic 400-deep `1+1+...` (139 at 64MB, 1 at 256MB; shallow passes).
+
+Fix pattern (proven for binary, 0c2edf193): transcribe the bridged tail to *mut (return only
+TypeEntry; its own by-value bridges are non-recursive => one frame at a time), so the
+RECURSIVE handler's frame is small. NEXT (the corpus crashers, all call-heavy): apply the
+same to the CALL path — eliminate the Checker locals held across nested-call recursion:
+- checker_check_call_expr_inplace: `eff` (check_callee_effects) + `rel` (release_call_arg_borrows).
+- checker_check_call_args_inner_inplace: bb/rb/kb/ub/ob (the 5 boundary-contract bridges).
+Make those 7 methods *mut (they self-mutate + report — mechanical) OR extract them into
+non-recursive helpers called post-order. Then re-diagnose; method-call has the same shape.
+
+Status at HEAD 0c2edf193: 481 -> 222 crashes (259 eliminated, ~54%). The remaining ~222 are
+this one stack-overflow class, gated on the call-path *mut-tail treatment above.
