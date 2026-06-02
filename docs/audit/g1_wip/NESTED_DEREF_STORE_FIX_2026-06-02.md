@@ -174,19 +174,26 @@ Crashes mc_fixed `--check` at 0x4c2805b. The trigger is **a call to a user funct
 that HAS a parameter** — `f()` (no param) PASSES, `f(5)` (one param) crashes;
 `fn main()->i32{0}` alone only FAILs (E004), no crash.
 
-**Mechanism — it is the SEPARATE, documented SRET large-struct-return bug, not the
-nested-store bug:** call-argument checking (check.sio:3692 in-place path) does
-`let sig = (*c).fn_sigs.get(sig_id)` — `FnSigTable::get` returns a large `FnSig`
-**by value** (SRET) — then `checker_check_call_args_inner_inplace` (check.sio:3575)
-calls `fn_param_list_get(params, idx) -> FnParamInfo` **by value**, whose recursive
-arm `fn_param_list_get((*list).tail, idx-1)` is the exact "return another
-struct-returning call's result" forwarding shape of `project_sret_forwarding_bug`.
-One of these by-value struct returns corrupts `sig.params` (Box→−1) / the param info,
-so the param's `TypeEntry` read derefs −1 → SIGSEGV. This path is only REACHED now
+**Mechanism — a SEPARATE large-struct-return-by-value miscompile, not the
+nested-store bug (exact SRET variant not isolated):** call-argument checking
+(check.sio:3692 in-place path) does `let sig = (*c).fn_sigs.get(sig_id)` —
+`FnSigTable::get` returns a large `FnSig` **by value**. Then
+`checker_check_call_args_inner_inplace` (check.sio:3575) calls `fn_param_list_get(
+sig.params, idx) -> FnParamInfo`; for the 1-param repro idx=0 hits the
+`Some(list) => (*list).head` arm (defs.sio:324), and the faulting 16-byte read is
+that `(*list).head` (a FnParamInfo whose first field is a `TypeEntry`) with the list
+pointer = −1. So `sig.params` (an `Option<Box<FnParamList>>`) comes back as a −1 Box
+from the by-value `FnSig` return — a **large-struct-return-by-value miscompile**, the
+same family as the documented `project_sret_forwarding_bug` (whose recursive
+`fn_param_list_get((*list).tail, idx-1)` arm is also a forwarding shape, reached at
+idx>0). I did NOT isolate whether the corruption is in `get`'s return path
+specifically vs the FnParamInfo return, nor confirm it is byte-identical to the
+documented "zeroed struct" variant (this crash shows −1, not 0) — so: **same
+struct-return-by-value family, exact variant pending.** This path is only REACHED now
 because the fn_sigs fix populates the table so call-checking proceeds past the
 previously-bailing point. **The nested-store fix (this branch) and the dominant
 body-check crasher are two DISTINCT codegen bugs**; fixing nested stores correctly
-unmasks the pre-existing struct-return bug.
+unmasks the pre-existing struct-return-by-value bug.
 
 **Verified the confound is dead:** crash sets are per-binary deterministic AND the
 131 cluster at one instruction with a clear param'd-call trigger and a 2-line repro —
