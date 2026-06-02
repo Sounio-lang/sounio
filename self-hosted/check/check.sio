@@ -1043,6 +1043,21 @@ fn checker_lower_contest_type_mut(c: *mut Checker, opt: Option<Box<TypeExprList>
     }
 }
 
+// *mut [T;N] lowering — transcription of lower_array_type (10651). The element type goes
+// through the *mut spine (was: the `_ =>` default silently noted a type-error → spurious
+// E-mismatch on `let/var x: [T;N] = …`). Returning only TypeEntry keeps the recursive frame
+// small (no held Checker-by-value), so it can never re-introduce the SRET-smash class.
+fn checker_lower_array_type_mut(c: *mut Checker, inner_opt: Option<Box<TypeExpr> >, size_opt: Option<Box<Expr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match inner_opt {
+        Some(inner_te) => {
+            let elem_ty = checker_lower_type_expr_mut(c, *inner_te)
+            let size = lower_array_size(size_opt)
+            ty_array(elem_ty, size)
+        }
+        None => ty_error()
+    }
+}
+
 fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !checker_enter_type_expr_mut(c) {
         return ty_error()
@@ -1135,6 +1150,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
             let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
             if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_validated(inner_ty, -1.0) }
         }
+        TypeExprKind::TypeArray => checker_lower_array_type_mut(c, te.inner, te.array_size)
         _ => {
             checker_note_type_error_mut(c)
             ty_error()
@@ -2578,9 +2594,11 @@ fn checker_check_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, P
     if s.kind == StmtKind::StmtLet {
         checker_check_let_stmt_inplace(c, s)
     } else if s.kind == StmtKind::StmtVar {
-        checker_check_stmt_bridge(c, s)
+        checker_check_var_stmt_inplace(c, s)
     } else if s.kind == StmtKind::StmtExpr {
         checker_check_expr_stmt_inplace(c, s)
+    } else if s.kind == StmtKind::StmtAssign {
+        checker_check_assign_stmt_inplace(c, s)
     } else {
         checker_check_stmt_bridge(c, s)
     }
@@ -4293,6 +4311,101 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     // Track variable for borrow checking (linear if struct is declared linear)
     let lin = checker_is_linear_type_inplace(c, bind_ty)
     (*c).borrows = (*c).borrows.track(s.name, lin)
+    ty_unit()
+}
+
+
+// *mut StmtVar handler — transcription of check_var_stmt (14041); mirrors the StmtLet
+// handler but binds mutable. The init expr goes through the *mut spine (was: bridged to
+// by-value check_stmt -> by-value check_expr -> the SRET-smash on assign/var RHS exprs).
+fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    (*c).last_literal_kind = 0
+    let ann_ty = checker_lower_opt_type_inplace(c, s.ty)
+    let init_ty = checker_check_binding_init_expr_inplace(c, s.expr, ann_ty)
+    var bind_ty = init_ty
+    if ann_ty.kind != TypeKind::TyUnknown {
+        let int_lit_narrow = (*c).last_literal_kind == 1
+            && init_ty.kind == TypeKind::TyI64
+            && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
+        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
+            checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
+        }
+        if ann_ty.kind == init_ty.kind
+            && (((ann_ty.kind == TypeKind::TyContest) && ann_ty.epistemic_meta_id >= 0)
+                || ((ann_ty.kind == TypeKind::TyRobust) && ann_ty.robustness_level_id >= 0 && ann_ty.robustness_scope_id >= 0)
+                || ann_ty.kind == TypeKind::TyValidated
+                || ann_ty.kind == TypeKind::TyAdmissible
+                || ann_ty.kind == TypeKind::TyDeferred
+                || ann_ty.kind == TypeKind::TyAcquisitionPlan
+                || ann_ty.kind == TypeKind::TyRecoursePlan
+                || ann_ty.kind == TypeKind::TyTransitionPlan
+                || ann_ty.kind == TypeKind::TyObservedTransition
+                || ann_ty.kind == TypeKind::TyRollbackCertificate
+                || ann_ty.kind == TypeKind::TyAlternativeSet
+                || ann_ty.kind == TypeKind::TyAlternativeOption) {
+            bind_ty = init_ty
+        } else {
+            bind_ty = ann_ty
+        }
+    }
+    checker_check_refinement_literal_inplace(c, s.span, bind_ty)
+    let const_pair = checker_eval_const_int_opt_expr_mut(c, s.expr)
+    (*c).env = (*c).env.bind(s.name, bind_ty, true)
+    if const_pair.0 != 0 {
+        checker_const_int_bind_value_inplace(c, s.name, const_pair.1)
+    } else {
+        checker_const_int_bind_unknown_inplace(c, s.name)
+    }
+    let lin = checker_is_linear_type_inplace(c, bind_ty)
+    (*c).borrows = (*c).borrows.track(s.name, lin)
+    ty_unit()
+}
+
+// *mut assign-mutability (E003) — transcription of check_assign_mutability (14176).
+fn checker_check_assign_mutability_inplace(c: *mut Checker, opt: Option<Box<Expr> >, span: Span) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(e) => {
+            if (*e).kind == ExprKind::ExprIdent {
+                if !(*c).env.lookup_is_mutable((*e).name) {
+                    checker_report_error_at_inplace(c, span, 3, 0, 0, 0)
+                }
+            }
+        }
+        None => {}
+    }
+}
+
+// *mut StmtAssign handler — transcription of check_assign_stmt (14136). The target and
+// value exprs go through the *mut spine (was: by-value check_opt_expr -> SRET-smash).
+fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let target_ty = checker_check_opt_expr_inplace(c, s.target)
+    let val_ty = checker_check_opt_expr_inplace(c, s.expr)
+    if s.assign_op != AssignOp::AssignEq {
+        if !is_error_or_unknown(target_ty) && !is_error_or_unknown(val_ty) {
+            let compound_result = binary_result_type(compound_assign_to_binop(s.assign_op), target_ty, val_ty)
+            if compound_result.kind == TypeKind::TyError {
+                checker_report_mismatch_inplace(c, s.span, 21, target_ty, val_ty)
+            }
+        }
+    } else {
+        if !types_compatible(target_ty, val_ty) {
+            checker_report_mismatch_inplace(c, s.span, 2, target_ty, val_ty)
+        }
+    }
+    checker_check_assign_mutability_inplace(c, s.target, s.span)
+    match s.target {
+        Some(target) => {
+            if (*target).kind == ExprKind::ExprIdent {
+                let rhs_pair = checker_eval_const_int_opt_expr_mut(c, s.expr)
+                if rhs_pair.0 != 0 {
+                    checker_const_int_bind_value_inplace(c, (*target).name, rhs_pair.1)
+                } else {
+                    checker_const_int_bind_unknown_inplace(c, (*target).name)
+                }
+            }
+        }
+        None => {}
+    }
     ty_unit()
 }
 
