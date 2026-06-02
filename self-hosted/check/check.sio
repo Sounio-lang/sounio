@@ -2705,9 +2705,97 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let left_ty = checker_check_opt_expr_inplace(c, e.left)
     let right_ty = checker_check_opt_expr_inplace(c, e.right)
-    let pair = (*c).check_binary_with_operand_types(e, left_ty, right_ty)
-    checker_store_from_value(c, pair.0)
-    pair.1
+    // Call the *mut tail (returns only TypeEntry) — NOT the by-value bridge, whose
+    // (Checker, TypeEntry) return became a 12MB local held across this fn's recursion
+    // → N-deep stack overflow on deeply-nested exprs. The tail is non-recursive.
+    checker_check_binary_with_operand_types_inplace(c, e, left_ty, right_ty)
+}
+
+
+// *mut transcription of check_binary_with_operand_types (13983). Returns ONLY the TypeEntry
+// so the RECURSIVE checker_check_binary_expr_inplace no longer holds a 12MB (Checker,
+// TypeEntry) `pair` local across its operand recursion (that N-deep 12MB frame was the
+// stack overflow on deeply-nested / algebra-heavy exprs). This tail is NOT recursive, so its
+// own internal by-value bridges (one Checker frame at a time) are fine. Faithful to the
+// by-value original: same order, same error codes, same result TypeEntry per branch.
+fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
+        let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
+            || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
+            || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
+        if is_cmp {
+            if !has_effect_id((*c).current_effects, (*c).current_effect_count, 13) {
+                checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
+            }
+        }
+    }
+    let bot = (*c).check_binary_op_types(e.span, e.bin_op, left_ty, right_ty)
+    checker_store_from_value(c, bot)
+    if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
+        let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
+        let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
+        if left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
+            let hc = check_hyper_binary(*c, e.span, e.bin_op, left_inner, right_inner)
+            checker_store_from_value(c, hc.0)
+        }
+        let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty)
+        if knowledge_result.kind == TypeKind::TyError {
+            checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
+        }
+        let ru = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, knowledge_result)
+        checker_store_from_value(c, ru.0)
+        let final_result = ru.1
+        if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
+            let final_inner = if final_result.kind == TypeKind::TyKnowledge {
+                knowledge_inner(final_result)
+            } else {
+                final_result
+            }
+            if final_inner.kind == TypeKind::TyHyper {
+                let rh = (*c).record_hyper_expr(e.span, final_inner.algebra_kind, 1, true)
+                checker_store_from_value(c, rh)
+            }
+        }
+        return final_result
+    }
+    if left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper {
+        let hr = check_hyper_binary(*c, e.span, e.bin_op, left_ty, right_ty)
+        checker_store_from_value(c, hr.0)
+        let typed_result = hr.1
+        let ru = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, typed_result)
+        checker_store_from_value(c, ru.0)
+        let final_result = ru.1
+        if e.bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
+            let rh = (*c).record_hyper_expr(e.span, final_result.algebra_kind, 1, false)
+            checker_store_from_value(c, rh)
+        }
+        return final_result
+    }
+    var result = binary_result_type(e.bin_op, left_ty, right_ty)
+    if result.kind == TypeKind::TyError && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
+        let l_enum = left_ty.kind == TypeKind::TyNamed && (*c).enums.find(left_ty.name) >= 0
+        let r_enum = right_ty.kind == TypeKind::TyNamed && (*c).enums.find(right_ty.name) >= 0
+        if (l_enum && is_numeric_type(right_ty)) || (is_numeric_type(left_ty) && r_enum) {
+            result = ty_bool()
+        }
+    }
+    if result.kind == TypeKind::TyError && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
+        checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
+    }
+    if e.bin_op == BinaryOp::OpDiv {
+        let denom_pair = checker_eval_const_int_opt_expr_mut(c, e.right)
+        if denom_pair.0 != 0 && denom_pair.1 == 0 {
+            checker_report_error_at_inplace(c, e.span, 56, 0, 0, 0)
+        }
+    } else if e.bin_op == BinaryOp::OpRem {
+        let denom_pair = checker_eval_const_int_opt_expr_mut(c, e.right)
+        if denom_pair.0 != 0 && denom_pair.1 == 0 {
+            checker_report_error_at_inplace(c, e.span, 57, 0, 0, 0)
+        }
+    }
+    let ru = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, result)
+    checker_store_from_value(c, ru.0)
+    ru.1
 }
 
 fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
