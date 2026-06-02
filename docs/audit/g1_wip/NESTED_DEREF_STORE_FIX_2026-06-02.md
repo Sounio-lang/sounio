@@ -190,10 +190,16 @@ idx>0). I did NOT isolate whether the corruption is in `get`'s return path
 specifically vs the FnParamInfo return, nor confirm it is byte-identical to the
 documented "zeroed struct" variant (this crash shows −1, not 0) — so: **same
 struct-return-by-value family, exact variant pending.** This path is only REACHED now
-because the fn_sigs fix populates the table so call-checking proceeds past the
-previously-bailing point. **The nested-store fix (this branch) and the dominant
-body-check crasher are two DISTINCT codegen bugs**; fixing nested stores correctly
-unmasks the pre-existing struct-return-by-value bug.
+because the fn_sigs fix populates the table so call-checking actually resolves the
+callee and enters param-checking. **Unmasking confirmed by keystone test:** on the
+minimal repro, mc_baseline returns rc=0 "check: OK" (a FALSE-PASS — with the empty
+fn_sigs the callee is unresolved and arg-checking is skipped entirely), while
+mc_fixed crashes (rc=139) at 0x4c2805b. So the baseline did NOT bail with an error
+here; it false-passed by skipping the path. (ir_disasm_basic shows the same:
+baseline PASS → fixed CRASH — a PASS→CRASH in the census matrix.) **The nested-store
+fix (this branch) and the dominant body-check crasher are two DISTINCT codegen
+bugs**; fixing nested stores correctly makes the checker do real call-arg checking,
+which reaches — and is crashed by — the pre-existing struct-return-by-value bug.
 
 **Verified the confound is dead:** crash sets are per-binary deterministic AND the
 131 cluster at one instruction with a clear param'd-call trigger and a 2-line repro —
