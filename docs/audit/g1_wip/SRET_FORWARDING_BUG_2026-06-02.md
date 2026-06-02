@@ -97,6 +97,29 @@ Refinements from adversarial verify:
   is rock-solid; the exact full boundary is not yet pinned (a codegen-level question best
   answered by whoever owns the SRET lowering).
 
+## Relation to the G1 lane's "SRET-smash" crash (the "reproducer NOT FOUND" one)
+The G1 docs (`CRASH_CLASS_ZERO`, `E008_ROOT_CAUSE`) **name this family**: "bin/souc
+large-struct return-value miscompile" / "SRET-smash". They:
+- verified **SRET-return-of-a-local is correct** (codegen lines 7196-7225), and
+- located their crash in the **arg-checker** (a call WITH ARGUMENTS, `g(5)`→139,
+  stack-independent; copies a 272-byte/34-qword TypeEntry field-by-field; **relocates per
+  source change**), and worked AROUND it by routing exprs off the by-value path — they
+  declared **"reproducer hunt NOT FOUND — emergent at full-compiler scale."**
+
+**This repro is a clean minimal member of that same named family, and supplies the missing
+distinction**: SRET-return-of-a-local is correct (they verified), but **SRET-FORWARDING
+(returning another struct-returning call's result) is broken** — silent zeroing, or SIGSEGV
+when the forward is aggregate-wrapped (`SRET_FORWARDING_CRASH_REPRO_2026-06-02.sio`, 4 lines,
+deterministic rc=139).
+
+**Honest non-identity** (don't overclaim — the discriminators say sibling, not same):
+- Mine is **deterministic**; theirs **relocates per source change** (layout-sensitive).
+- Mine is the **forwarding-return** instance; theirs is the **arg-checker-copy** instance.
+- So: same family root (large-struct value-move in the SRET path), distinct trigger. A fix
+  to the codegen's large-struct-move/SRET handling should address both; this minimal,
+  deterministic repro is a far easier test case for that fix than the emergent-at-scale
+  arg-checker crash. **Not proven byte-identical to their crash.**
+
 ## Handoff
 This is a doc + repro (no `check.sio` / codegen edit) — the SRET lowering lives in the
 codegen the G1 lane is actively working. Hand this minimal repro to whoever drives the
