@@ -106,16 +106,45 @@ Transition matrix (baseline→fixed): 187 FAIL→FAIL, 110 **FAIL→CRASH**, 81 
   of latent *mut body-check SIGSEGVs. Sampled FAIL→CRASH (_diag_sobol.sio) emits 118
   lines of real type diagnostics then segfaults — progress-exposed, not a codegen
   break (the fix is proven correct + 0-regression on the bootstrap corpus).
-- ❌ **Hypothesis FALSIFIED:** "one codegen fix unblocks BOTH E008 AND the ~170
-  crashers." **0 of 78 baseline crashers fixed; +131 new crashers exposed.** The
-  crashers are a SEPARATE disease (a deeper *mut body-check codegen layer), now
-  revealed as the **dominant remaining front-half blocker** (209 SIGSEGV).
+- ⚠️ **Hypothesis NOT SUPPORTED (with a layout caveat):** "one codegen fix unblocks
+  BOTH E008 AND the ~170 crashers." The crash count did not drop — 0 of 78 baseline
+  crashers moved, +131 new crashers appear (209 SIGSEGV total). The crashers behave
+  as a SEPARATE disease, not the nested-write bug.
+
+### Determinism + layout confound (added after advisor review)
+
+Crash/PASS sets are **per-binary deterministic** — re-running each census gives a
+byte-identical crash set (mc_fixed 209≡209, mc_baseline 78≡78, PASS set ≡; symdiff=0
+on all three). So the numbers are reproducible, NOT run-to-run noise.
+
+**HOWEVER** the cross-binary crash *delta* is confounded by layout. mc_baseline and
+mc_fixed differ by 386 bytes across an 85 MB binary, and this repo's modular-checker
+crash is documented as layout-sensitive / non-monotonic (`project_modular_span_sensitive_crash`,
+`project_modular_B_repro_verdict`: a 1-byte whitespace shift flips crash/pass on the
+SAME program). Corroborating: the prior G1 census counted **6** crashers where this
+build counts **78** — same checker logic, different binary, 13× crash count → crash
+counts are build/layout-bound. So **"+131 exposed / 0 fixed" is a reproducible
+observation but cannot be cleanly attributed to the semantic fix alone** — it is
+"semantic fix ⊕ a layout perturbation," inseparable with these two binaries. The
+*direction* (a nested-write fix is unlikely to repair unrelated SIGSEGVs, and a
+working collector does let the checker run deeper — the sampled _diag_sobol.sio
+emits 118 real diagnostic lines before crashing) is plausible, but the precise crash
+counts are NOT a pure semantic measurement.
+
+**The one robust, layout-independent signal is E008/E170** (a checker-logic
+diagnostic outcome, not a memory-layout outcome): 137→51 and 2→0 stand. The
+dominant-blocker reframing (front-half is now gated by a body-check SIGSEGV layer,
+not E008) is the *likely* read but rests on layout-confounded crash counts — treat
+as a strong lead to verify with per-program crash root-causing, not settled fact.
 
 ### Consequence
 
 This codegen fix is correct and stands on its own (repros, fixed-point, 0
 regressions, G1b test win, E008 root-cause cleared). But **do NOT land mc_fixed on a
-green-gate basis** — net PASS is negative, same as the rejected workaround. The
-roadmap is refined: E008 was a real bug *masking* the true #1 net-blocker, which is
-the latent body-check SIGSEGV layer. Next lane = root-cause the 209 *mut
-body-check crashers (a fresh fan-out, same gdb/repro method as this fix).
+green-gate basis** — net PASS is negative (and the crash count, the thing that would
+have to improve, is layout-confounded). The *likely* roadmap read: E008 was a real
+bug masking a body-check SIGSEGV layer that is now the net blocker — but because the
+crash delta is layout-confounded, the next lane should first **root-cause individual
+crashers** (per-program, gdb/repro, same method as this fix) to confirm they are
+genuine body-check bugs rather than layout artifacts, before treating "209 crashers"
+as the headline blocker count.
