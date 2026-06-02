@@ -31,6 +31,35 @@ The runtime (float Gaussian elimination) measured, for the native family
     10  1024   508     49.609375%     2^9  − 4
     11  2048   1020    49.804688%     2^10 − 4
 
+## Relation to the published literature (this is a re-derivation, not new math)
+
+The annihilator-dimension theory of zero divisors in Cayley–Dickson
+algebras is a developed published subject; this file *verifies* known
+structure, it does not discover it.  A Q1 literature check (2026-06-02)
+established:
+
+* `dim ker L_A = dim Ann(A)` is the standard annihilator dimension; Moreno
+  (1998) proved any zero divisor is imaginary with `dim Ann ≡ 0 (mod 4)`
+  and `dim Ann ≤ 2^n − 4` (Cor. 1.17).
+* The **sharp maximum** is `2^n − 4n + 4` (Biss–Dugger–Isaksen, *Large
+  annihilators in Cayley–Dickson algebras*, Thm 1.2), and every multiple
+  of 4 up to that bound is realised.  The native value `2^(n-1) − 4`
+  (4, 12, 28, 60, 124, …) equals this maximum **only at n = 4**; for n ≥ 5
+  it is strictly **sub-maximal** (the maxima are 4, 16, 44, 104, 228).
+* `2^(n-1) − 4` is itself a published structural quantity — the
+  top-dimensional eigentheory increment (Biss–Christensen–Dugger–Isaksen
+  2009, Cor. 6.5) and the `{a,0}` combination term
+  `dim Ann{a,0} = dim Ann a + 2^(n-1) − 4` (BCDI II, Prop. 5.11).
+* The `(a,0)` tower-lift exactly *doubles* the annihilator (BDI Thm 10.1,
+  `Ann(a,0) = Ann(a) × Ann(a)`).
+* The generator `e_3 + e_(2^(n-1)+2)` is **not** a distinguished family: a
+  direct ℤ-rank sweep finds 126 (n=5) / 342 (n=6) two-support generators
+  with the same kernel dimension.
+
+The contribution here is therefore the *formal, exact verification*
+(integer-rank certificate over the verified `cdSigma` table) of these
+known quantities at L4–L8 — not a new theorem.
+
 ## What this file PROVES
 
 **(1) Algebra-level exact kernels, L4–L8 (`native_decide`, exact ℤ-rank).**
@@ -54,13 +83,13 @@ kernel is *exactly* half the dimension minus 4, so the erasure fraction is
 
 ## What this file does **NOT** claim
 
-* **The closed form for all `n` is a conjecture, not a theorem.**
-  `kerNative n = 2^(n-1) − 4` is verified at eight runtime points and proved
-  exactly (algebra-level) at five of them (L4–L8); L9–L11 are runtime
-  measurements only.  We do **not** prove `dim ker L_A = 2^(n-1) − 4` for
-  *all* `n ≥ 4`; that would require a general kernel-dimension theorem over
-  a formalised Cayley–Dickson algebra (Mathlib `LinearMap.ker` /
-  `FiniteDimensional.finrank`), not loaded here.
+* **The `∀n` closed form is established theory, not ours to conjecture.**
+  `dim ker L_A = 2^(n-1) − 4` for the native generator follows from the
+  published annihilator/eigentheory results cited above; this file proves
+  it *exactly* only at L4–L8 (`native_decide`), with L9–L11 as runtime
+  measurements.  A general-`n` Lean proof would need a formalised
+  Cayley–Dickson algebra with `finrank` (Mathlib), not loaded here.  This
+  is a verification of known structure, **not** a novelty claim.
 
 * **The lifted-doubling is stated as arithmetic, not as an operator identity.**
   The structural reason a tower-lifted ZD doubles its kernel is
@@ -69,9 +98,16 @@ kernel is *exactly* half the dimension minus 4, so the erasure fraction is
   arithmetic shadow, and `lifted_family_kernels_L8` verifies the resulting
   numbers at L8 by direct computation.
 
-* **No Heisenberg claim.**  `σ_x σ_p ≥ ℏ/2` is a theorem about unitary
-  evolution on a complex Hilbert space; `L_A` is real-linear and
-  non-unitary by construction.
+* **No physics claim.**  `L_A` is real-linear and, for these zero-divisor
+  generators, singular — hence non-unitary and **not** a quantum channel.
+  A "projective measurement / erasure" reading is *not* supported by the
+  literature (the Q1 check found no such framing) and is deliberately
+  withheld.  Established physics in this tower is confined to the octonions
+  (n = 3, a division algebra); sedenions and above (n ≥ 4) have no
+  established physical role.  The genuine mathematical-physics depth is the
+  G₂ connection: the normalised sedenion zero divisors are homeomorphic to
+  `G₂ = Aut(𝕆)` (Moreno Cor. 2.14), with `ZD(S) ≅ V₂(ℝ⁷) = G₂/SU(2)`
+  (Reggiani 2024) — not exercised by this file.
 
 No `sorry`. No Mathlib. Algebra-level facts by `native_decide` (exact
 ℤ-rank of the verified `cdSigma` product); arithmetic facts by `omega`.
@@ -80,7 +116,15 @@ References:
   - `SounioCayleyDickson.lean` (the `cdSigma` sign table this builds on)
   - `stdlib/algebra/cayley_dickson.sio` (runtime `cd_sigma`, sign-aligned)
   - `examples/cd_l{8,9,10,11}_projective_measurement.sio` (runtime witnesses)
-  - Schafer (1954), Moreno (1998), Cawagas (2004)
+  - Moreno (1998), *The zero divisors of the Cayley–Dickson algebras over
+    the real numbers*, Bol. Soc. Mat. Mexicana 4 — arXiv:q-alg/9710013
+    (Cor. 1.17 bound `2^n−4`; Cor. 2.14 `ZD(S) ≅ G₂`)
+  - Biss, Dugger, Isaksen, *Large annihilators in Cayley–Dickson algebras*
+    — arXiv:math/0511691 (Thm 1.2 max `2^n−4n+4`; Thm 10.1 `(a,0)` doubling)
+  - Biss, Christensen, Dugger, Isaksen, eigentheory — `eigen.pdf`
+    (Cor. 6.5 increment `2^(n-1)−4`); BCDI II — arXiv:math/0702075 (Prop 5.11)
+  - Reggiani (2024) — arXiv:2411.18881 (`ZD(S) ≅ V₂(ℝ⁷) = G₂/SU(2)`)
+  - Schafer (1954), Cawagas (2004)
 -/
 
 namespace Sounio.CayleyDicksonErasure
