@@ -2641,6 +2641,12 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_binary_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprIf {
         result = checker_check_if_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprWhile {
+        result = checker_check_while_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprBlock {
+        result = checker_check_block_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprArrayLit {
+        result = checker_check_array_lit_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
     }
@@ -2727,6 +2733,118 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
         }
     }
 }
+
+
+// *mut ExprWhile handler — FULL transcription of check_while_expr (16436), not a bridge:
+// the condition and the loop body block are both checked via the *mut spine so a nested
+// enum path-expr anywhere in the condition or body reaches checker_check_path_expr_inplace
+// and dodges the by-value check_path_expr/check_while_expr SRET crash (the ~164KB Checker
+// self-move that bin/souc miscompiles). The non-recursive work — bool check on the
+// condition, the inlined check_loop_depth limit, loop_depth inc/dec, and the
+// release_exclusive_borrows before the body — is faithful to the by-value original.
+// While is SIMPLER than if: it has NO refine_cond_env narrowing, so none is added here.
+fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // Condition (via the *mut spine). Must be bool.
+    let cond_ty = checker_check_opt_expr_inplace(c, e.left)
+    if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
+        checker_report_mismatch_inplace(c, e.span, 6, ty_bool(), cond_ty)
+    }
+    // Inlined check_loop_depth (6763): read loop_depth BEFORE incrementing; on
+    // over-limit, emit E062 and bail with ty_error(), touching nothing else.
+    if (*c).loop_depth >= MAX_LOOP_DEPTH {
+        checker_report_error_at_inplace(c, e.span, 62, (*c).loop_depth, MAX_LOOP_DEPTH, 0)
+        return ty_error()
+    }
+    (*c).loop_depth = (*c).loop_depth + 1
+    // Release exclusive borrows before checking the loop body. In a while loop each
+    // iteration may re-borrow the same variables; without this the second iteration
+    // would fail because the first iteration's exclusive borrows are still active.
+    (*c).borrows = (*c).borrows.release_exclusive_borrows()
+    // Loop body block (via the *mut spine; its type is discarded, exactly as the
+    // by-value original discards body_pair.1).
+    let _body_ty = checker_check_opt_block_inplace(c, e.block)
+    (*c).loop_depth = (*c).loop_depth - 1
+    ty_unit()
+}
+
+fn checker_check_block_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    checker_check_opt_block_inplace(c, e.block)
+}
+
+// *mut ExprArrayLit handler — FULL transcription of check_array_lit (16637) and its
+// recursive helpers check_array_elems (16669) / check_array_rest (16690). All element
+// (and the repeat-form elem + count) sub-expressions are checked via the *mut spine so a
+// nested enum path-expr / call / if anywhere inside an array literal reaches the *mut
+// handlers and dodges the by-value check_path_expr / check_call SRET crash. The two
+// recursive Checker-copying helpers (check_array_elems/check_array_rest) are replaced by a
+// single ITERATIVE while-loop over the ExprList (mirroring check_tuple_elems @16719) so no
+// per-element by-value Checker copy ever occurs. The non-recursive tail logic
+// (count-type-compat check, IntLit-literal check, element-type unification) is faithful to
+// the by-value originals: same error codes (20), same spans, same TypeEntry returns.
+fn checker_check_array_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // ---- Repeat form: [elem; count] ----------------------------------------
+    // Original (check_array_lit 16638): triggers only when BOTH e.left (elem) and
+    // e.right (count) are present.
+    match e.left {
+        Some(elem_box) => match e.right {
+            Some(count_box) => {
+                // Route elem and count through the *mut spine (faithful to the two
+                // self.check_expr calls in the original, in the same left-then-right order).
+                let elem_ty = checker_check_expr_inplace(c, *elem_box)
+                let count_ty = checker_check_expr_inplace(c, *count_box)
+                let count_e = *count_box
+                // count must be i64
+                if !types_compatible(count_ty, ty_i64()) {
+                    checker_report_mismatch_inplace(c, count_e.span, 20, ty_i64(), count_ty)
+                    return ty_array(elem_ty, 0)
+                }
+                // count must be an integer literal
+                if count_e.kind != ExprKind::ExprIntLit {
+                    checker_report_error_at_inplace(c, count_e.span, 20, 0, 0, 0)
+                    return ty_array(elem_ty, 0)
+                }
+                return ty_array(elem_ty, count_e.int_val)
+            }
+            None => ()
+        }
+        None => ()
+    }
+
+    // ---- List form: [a, b, c, ...] -----------------------------------------
+    // Original: check_array_elems (16669) checks the FIRST element to fix the expected
+    // element type, then check_array_rest (16690) checks each remaining element and reports
+    // a mismatch (code 20, span = that element's head.span) against the first element's
+    // type. Empty list => (ty_error, count 0). Replicated here as one iterative loop
+    // (no recursive Checker copies).
+    var first_ty = ty_error()
+    var count: i64 = 0
+    var cur = e.args
+    var have_first = false
+    var done = false
+    while !done {
+        match cur {
+            Some(list) => {
+                let elem_ty = checker_check_expr_inplace(c, (*list).head)
+                if !have_first {
+                    first_ty = elem_ty
+                    have_first = true
+                } else {
+                    if !types_compatible(elem_ty, first_ty) {
+                        checker_report_mismatch_inplace(c, (*list).head.span, 20, first_ty, elem_ty)
+                    }
+                }
+                count = count + 1
+                cur = (*list).tail
+            }
+            None => {
+                done = true
+            }
+        }
+    }
+    // Faithful to check_array_elems: empty literal yields ty_error element type, count 0.
+    ty_array(first_ty, count)
+}
+
 
 // ============================================================
 // G1: *mut StmtLet spine — converts the let-statement check path off the
