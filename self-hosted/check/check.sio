@@ -2877,7 +2877,19 @@ fn checker_check_binding_init_expr_bridge(c: *mut Checker, opt: Option<Box<Expr>
 fn checker_check_binding_init_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >, ann_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(e) => {
-            if checker_binding_init_is_special(*e, ann_ty) {
+            if (*e).kind == ExprKind::ExprPath && ann_ty.kind == TypeKind::TyNamed {
+                // Bidirectional inference for enum/named variants (e.g. `Option::None` with
+                // annotation `Option<i32>` → keep the annotation type so generic params are
+                // preserved). Mirrors the by-value check_binding_init_expr ExprPath case, but
+                // via the *mut path handler — the by-value check_path_expr SRET-smashes once
+                // the enum is collected (the p7 latent crash on `let x: E = E::A`).
+                let path_ty = checker_check_path_expr_inplace(c, *e)
+                if path_ty.kind == TypeKind::TyNamed && name_eq(path_ty.name, ann_ty.name) {
+                    ann_ty
+                } else {
+                    path_ty
+                }
+            } else if checker_binding_init_is_special(*e, ann_ty) {
                 checker_check_binding_init_expr_bridge(c, opt, ann_ty)
             } else {
                 checker_check_expr_inplace(c, *e)
@@ -2900,7 +2912,13 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         let int_lit_narrow = (*c).last_literal_kind == 1
             && init_ty.kind == TypeKind::TyI64
             && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
+        // C-style enum↔int assignment: a fieldless enum value coerces to/from a numeric
+        // type (canonical bin/souc accepts `let x: i64 = E::A`). Matches the binary ==/!=
+        // rule; this *mut fn has (*c).enums to detect enum-named types.
+        let init_enum = init_ty.kind == TypeKind::TyNamed && (*c).enums.find(init_ty.name) >= 0
+        let ann_enum = ann_ty.kind == TypeKind::TyNamed && (*c).enums.find(ann_ty.name) >= 0
+        let enum_int_ok = (init_enum && is_numeric_type(ann_ty)) || (is_numeric_type(init_ty) && ann_enum)
+        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow && !enum_int_ok {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
