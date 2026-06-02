@@ -54,10 +54,17 @@ functions, diverse (`array_elem_field_store`, `array_mut_ref`, `approx_*`).
 => "one codegen fix unblocks both E008 and crashes" is REFUTED: it unblocked E008, not the
 crashes. The next codegen hunt is this deeper-check crash class.
 
-## Status / merge-readiness
-The lean_single.sio codegen fix is CORRECT and validated: repro, fixed point (gen2==gen3),
-**run-pass 504: 501 identical / 3 non-deterministic / 0 regressions**, crash set proven
-pre-existing. Examples divergence sweep (847, the established canonical-compiler bar) is
-**IN PROGRESS** — merge-readiness is pending its result; do NOT call gate-ready until the 847
-examples confirm 0 real divergences. The modular-compiler E008 corpus win is gated behind the
-separate deeper-check crash class above. a64 dispatch: follow-up.
+## Status / merge-readiness — MERGE-READY for the canonical compiler
+The lean_single.sio codegen fix is CORRECT and fully validated against the established bar:
+- repro `top=9 n=3 v0=7`; bootstrap fixed point gen2==gen3 (`ad9bf234`);
+- **run-pass 504: 501 identical / 3 non-deterministic / 0 real regressions**;
+- **examples 847: 847 identical / 0 divergences / 2 HANG_BOTH** (`TOTAL=847 SAME=847 DIVERGE=0
+  HANG_BOTH=2`). The 2 hangs (e.g. `alphageozero_final.sio`) are PRE-EXISTING — they time out
+  identically on BOTH the old and fixed compiler (rc=124 each side), so they are not a
+  divergence and not introduced by this fix;
+- crash set proven pre-existing (170 common / 0 unique vs the source-fix census).
+
+=> Zero behavioural change on 504 run-pass + 847 examples; the change can only affect
+previously-miscompiled two-level nested `*mut` writes. Ready for canonical-compiler review/merge.
+The modular-compiler E008 corpus win remains gated behind the separate deeper-check crash class
+above (next codegen hunt). a64 dispatch: follow-up.
