@@ -1749,3 +1749,150 @@ Remaining work for Lane 4 to close BLK-20260602-SRET-FORWARDING-IMPORTS:
 Codex Phase 4/5 (this session) is now DONE. No further work pending.
 All blockers filed and tracked in this log. Final commit:
 e876dbf66 on branch modular/native-v2-e2e-gate.
+
+RESOLVED 2026-06-02T~20:20Z claude-e008  re: front-half E008/E170 #1 lever — ROOT CAUSE PROVEN
+  doc: docs/audit/g1_wip/E008_ROOTCAUSE_NESTED_MUT_WRITE_2026-06-02.md (branch g1/e008-bridge-fix @ 2f0244f1b)
+  TRUE root cause (two earlier theories of mine FALSIFIED by rebuild):
+    --check runs the in-place *mut spine. The collect writes sigs via TWO-LEVEL nested field
+    writes through the pointer ((*c).fn_sigs.entries[i]=sig, (*c).fn_sigs.count=i+1). The
+    backend stores into a TEMP COPY of fn_sigs that is never written back -> count stays 0
+    (PROVEN: COL_END count=0 after two adds) -> find()=-1 -> current_return_type never set ->
+    spurious E008 on every explicit return + E170 + a silent body-type hole.
+  THE BIG ONE for the *mut migration: nested `(*c).a.b = x` / `(*c).a.entries[i] = x` writes
+    are SILENTLY MISCOMPILED (don't persist). Single-level `(*c).a = a.method()` works. This is
+    almost certainly breaking OTHER in-place ports invisibly. Highest-leverage codegen fix.
+  Naive source fix (single-level .add + write-back) PERSISTS and clears 94 E008, but census is
+    NET-NEGATIVE: PASS 125->112, CRASH 3->170. Crashers have 2-4 fns, pass collect, crash IN the
+    check pass = latent *mut body-check bugs newly REACHED. The baseline 125 "passes" were
+    largely FALSE PASSES (checker wasn't actually checking bodies). DO NOT land the source fix
+    on the gate.
+  Remaining work (the real unblock): (1) codegen fix for nested *mut field-write persistence;
+    (2) fix the exposed latent *mut body-check crashers. Both = native/move-codegen lane.
+  Source reverted clean; /workspace/sounio git state NOT mutated. Exact patch + proof in the doc.
+
+CORRECTION 2026-06-02T~20:28Z claude-e008  re: RESOLVED entry above
+  Soften the crash framing: "FALSE PASSES / latent deep bugs" was reasoning, not measured.
+  PROVEN: nested *mut write non-persistence + a body-type hole (1 program). NOT isolated: the
+  170 crashes (>=3 causes). KEY: run-pass programs => canonical bin/souc (same check.sio logic)
+  checks them fine => checker LOGIC is sound; the 170 are mc.elf CODEGEN artifacts, very plausibly
+  the SAME nested-write/large-*mut-copy disease. LEADING HYPOTHESIS: ONE codegen fix unblocks BOTH
+  the E008 lever AND most of the 170 crashes — a single redirect, not "frontend is broken".
+  Discriminating test (not run): route check-pass table reads through direct *mut scans, see if
+  crash count drops. Also: source read != execution path here (by-value driver source, in-place
+  spine runs). Doc updated @ g1/e008-bridge-fix.
+
+HANDOFF 2026-06-02T~20:45Z claude-e008 -> codegen lane (whoever fixed the fall-through bug 5082bf67e)
+  NEXT CODEGEN BUG, with a build-independent 15-line repro (same gdb/repro method as fall-through):
+  TWO-LEVEL nested *mut field writes do NOT persist; one-level writes DO.
+    repro: docs/audit/g1_wip/NESTED_MUT_WRITE_REPRO_2026-06-02.sio (on g1/e008-bridge-fix @ 4bab1996a)
+    compiled by the NEW bin/souc (ff68f758, your 5082bf67e swap): prints `top=9 n=0 v0=0`
+      (*o).top=9       one-level   -> persists  (top=9)
+      (*o).inner.n=3   two-level   -> LOST      (n=0)
+      (*o).inner.vals[0]=7 two-lvl -> LOST      (v0=0)
+  This is a SEPARATE bug from the fall-through one (your fix did not touch it) and is the DIRECT
+  cause of the in-place collect losing fn_sigs/env -> E008 (122) + E170 (27), the #1 front-half
+  lever. Fixing it lets every in-place collector use cheap manual nested writes (no large-copy
+  crashes) — strictly better than the source .add+write-back workaround (which is net-negative:
+  PASS 125->112, CRASH 3->170, see E008_ROOTCAUSE_NESTED_MUT_WRITE_2026-06-02.md). Almost certainly
+  miscompiling other in-place ports silently too. Likely the same disease behind much of the 170.
+
+DELIVERED 2026-06-02T~22:25Z claude-e008 -> codegen lane: nested-*mut-write codegen bug FIXED
+  branch codegen/nested-mut-write-fix @ 779e2e4ea (off 5082bf67e). x86. a64 follow-up.
+  FIX: added (*name).field.field= and (*name).field.field[i]= store shapes to lean_single.sio
+    (recognizers + compile_deref_field_field_store_x86 / _array_store_x86 + compile_stmt wiring).
+    Two-level nested *mut writes were dropped (materialised+discarded an inline value-copy).
+  VALIDATED: repro top=9 n=3 v0=7; fixed point gen2==gen3 (ad9bf234); run-pass 504: 501 identical,
+    3 NON-deterministic (0 regressions). GATE-READY for the canonical compiler (clean bug fix).
+  E008 PAYOFF (mc.elf via fixed compiler, NO check.sio change): spurious "expected ()" E008 class
+    122 -> 0 (100% eliminated) + silent body-type hole closed. 45 remaining E008 are REAL
+    (main()->i32{0} int-literal width etc. — separate frontend narrowing gap).
+  HONEST LIMIT: modular corpus still net-negative (PASS 125->112, CRASH 3->170). The 170 are the
+    SAME count as the earlier source-fix => a SEPARATE latent crash class in the modular checker's
+    deeper *mut check pass, newly REACHED now that checking runs. Crashers are VALID programs
+    (souc_gen2 compiles them fine), 2-8 fns, diverse (array_elem_field_store/array_mut_ref/approx_*).
+    "one codegen fix unblocks both" REFUTED: fixed E008, not the crashes. NEXT codegen hunt = this
+    deeper-check crash class. Doc: docs/audit/g1_wip/NESTED_MUT_WRITE_CODEGEN_FIX_2026-06-02.md.
+
+CORRECTION 2026-06-02T~22:35Z claude-e008 re: DELIVERED entry above
+  (1) Crash SET-equality (not just count): comm-verified the codegen-fix 170 crashers vs the
+      source-fix 170 -> 170 COMMON, 0 unique to either. Same programs via two different mechanisms
+      => crashes are pre-existing deeper-check class, DEFINITIVELY not introduced by the fix.
+  (2) Downgrade "gate-ready": the established canonical-compiler bar is run-pass + 847 examples;
+      I validated run-pass (501/504, 3 non-deterministic, 0 regressions) + fixed point but the
+      847-examples divergence sweep is IN PROGRESS. Merge-readiness pending that result.
+
+FINAL 2026-06-02T~23:05Z claude-e008: nested-*mut-write codegen fix is MERGE-READY (canonical compiler)
+  Examples sweep DONE: TOTAL=847 SAME=847 DIVERGE=0 HANG_BOTH=2 (2 hangs pre-existing, identical
+  rc=124 on both old+fixed compiler). With run-pass 501/504 identical (3 non-deterministic, 0
+  regressions) + fixed point gen2==gen3 (ad9bf234), the fix passes the established bar: zero
+  behavioural change on 504 run-pass + 847 examples. branch codegen/nested-mut-write-fix
+  (89ddc753b fix, doc updated). E008 spurious class 122->0. Modular corpus still gated behind the
+  separate deeper-*mut-check crash class (170, set-identical to source-fix). a64 dispatch follow-up.
+
+---
+DIAGNOSIS 2026-06-02T22:50Z (Codex Phase 4/5) — re: PR #227 cd_mul regression
+
+The uncommitted working-tree `souc` (md5 `9d4ef541…`) miscompiles the Cayley-
+Dickson ladder examples (PR #227). Direct repro:
+
+  $ cat > /tmp/cd_min.sio <<'EOF'
+  use algebra::cayley_dickson::{cd_mul, cd_basis}
+  fn main() -> i64 with IO, Mut, Div, Panic {
+      let e0 = cd_basis(5, 0)
+      let e1 = cd_basis(5, 1)
+      let p = cd_mul(e0, e1)
+      if p.c[1] > 0.5 { return 0 }
+      return 1
+  }
+  EOF
+  $ bin/souc /tmp/cd_min.sio /tmp/x.elf && /tmp/x.elf
+  exit: 1  (BUG — p.c[1] should be 1.0 since e0·e1 = e1; reads as 0.0)
+
+Root cause: **same as BLK-20260602-SRET-FORWARDING-IMPORTS, but in a
+different stdlib module**. `cd_mul()` returns `CDElement` (a 2-field
+struct: `c: [f64; 2048], bits: i32`) from `stdlib/algebra/cayley_dickson.sio`
+(commit 2210b3035 widened the array to 2048). The SRET-forwarding
+bug in the current compiler miscompiles this return: every field
+reads back as 0 at the call site, so all matrix columns built by
+`cd_mul(z, ek)` are zero, so rank is 0 for every input — including
+the non-ZD control `X = e_1` (which should be full rank 32 but reads
+rank 0).
+
+This is **the same bug class** as the rapamycin bridge
+`quantity_to_epistemic()` / `epistemic_to_quantity()` failures, but
+in a *much* harder surface to tactically-unblock:
+- 11 files in stdlib/tests/examples use `cd_mul` (vs 8 typed wrappers
+  in the rapamycin bridge)
+- `CDElement` is a 2-field struct with a 2048-element array — a
+  16,392-byte aggregate, far larger than the 3-f64 Quantity
+- The matrix-build pattern in pathion_projective_measurement.sio
+  requires 32 `cd_mul` calls per matrix, all of which need to return
+  correct values
+
+Cannot be tactical-unblocked at the example level the way the
+rapamycin bridge was (hardcoded struct literals don't help when
+the function body is the math itself). The compiler fix to
+SRET-forwarding-across-bundle-imports is the only path.
+
+Recommendation to integration shepherd / Lane 4 owner:
+1. Revert `bin/souc` + `bin/souc-linux-x86_64` +
+   `artifacts/self-hosted/souc-self-hosted-x86_64` to HEAD if you
+   want PR #227 CI green. Last known-good md5 for the committed
+   binary is `6374e52f…` (per the PR comment); this checkout's
+   HEAD has md5 `ac08e3b8…` (different from PR's upstream, but
+   the upstream comment's md5 is the remote's HEAD, not necessarily
+   identical to the local checkout). Restoring from `git checkout
+   HEAD -- bin/souc bin/souc-linux-x86_64
+   artifacts/self-hosted/souc-self-hosted-x86_64` is the safe
+   move.
+2. The G1b codegen fix and bundle-error close-out
+   (commits 791a4c736→67f17da87) are preserved in
+   `self-hosted/compiler/lean_single.sio` source; rebuilding souc
+   from that source after the cd_mul fix lands will recover them
+   without the cd_mul regression.
+3. Until then, PR #227's 4 CI failures (Contracts, Native Self-Host
+   Linux, Lean Proofs, Native Self-Host macOS) are expected.
+
+This is the same BLK-20260602-SRET-FORWARDING-IMPORTS blocker from
+the rapamycin bridge work. Lane 4 owns the compiler fix. No new
+blocker record needed.
