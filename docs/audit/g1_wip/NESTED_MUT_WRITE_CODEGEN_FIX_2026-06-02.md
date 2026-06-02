@@ -68,3 +68,36 @@ The lean_single.sio codegen fix is CORRECT and fully validated against the estab
 previously-miscompiled two-level nested `*mut` writes. Ready for canonical-compiler review/merge.
 The modular-compiler E008 corpus win remains gated behind the separate deeper-check crash class
 above (next codegen hunt). a64 dispatch: follow-up.
+
+## FOLLOW-UP 2026-06-02: deeper-*mut-check crash class — dominant bug fixed (170 -> 5)
+The "separate deeper-check crash class" above was hunted and largely fixed (commit 59895154d,
+check.sio source — modular-compiler checker, distinct from the lean_single.sio codegen fix).
+
+ROOT CAUSE (one bug, 165 of 170 crashers): `checker_ontology_boundary_check_call_arg_contract_inplace`
+(check.sio:4012) — despite its `_inplace` name — called the by-value method
+`(*c).check_call_arg_ontology_boundary(...)`, copying the 8MB Checker as `self` on EVERY
+user-function call argument. That copy was the stack smash (rip in stack, page-aligned frames).
+The other four arg-boundary checks (borrow/refine/knowledge/unit) were already true *mut; the
+ontology one was missed. It is exposed only because fn_sigs now persists (the arg-checker runs).
+
+HUNT METHOD (reusable): smallest crasher `ir_disasm_basic` -> minimal repro `fn id(x:i64)->i64{x}
+fn main()->i32{let y=id(5) 0}` -> trigger = user-fn call with >=1 arg (builtins don't crash) ->
+gdb (rip in stack, frames 0x1000 apart) -> entry markers (DBG_CCE/DBG_CCAI each fire ONCE => not
+recursion) -> per-boundary markers (DBG_M5_onto last, M6 never) -> the ontology boundary -> read
+the by-value method, saw its immediate early-out for non-ontology params.
+
+FIX: hoist that early-out into the *mut wrapper (no-op unless the PARAM carries an ontology
+contract) so the 8MB by-value copy only happens for real ontology args. Behaviour-identical.
+
+RESULT (modular census, 504 run-pass):
+| | PASS | FAIL | CRASH |
+|---|---:|---:|---:|
+| baseline (old compiler) | 125 | 376 | 3 |
+| nested-write codegen fix only | 112 | 222 | 170 |
+| + ontology guard | **151** | 348 | **5** |
+PASS now 151 > 125 baseline (NET POSITIVE); spurious E008 class still 0; CRASH 170 -> 5.
+
+REMAINING 5 (long tail, 3 distinct constructs, each a separate bug — same hunt method):
+- typed closure `|x: T|`: approx_propagation
+- Knowledge<T>: epsilon_comparison_valid, knowledge_octonion_inner
+- Seq<T>: seq_borrow, seq_struct_elems
