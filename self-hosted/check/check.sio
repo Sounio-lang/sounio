@@ -2659,6 +2659,8 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_struct_lit_inplace(c, e)
     } else if e.kind == ExprKind::ExprMethodCall {
         result = checker_check_method_call_inplace(c, e)
+    } else if e.kind == ExprKind::ExprCall {
+        result = checker_check_call_expr_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
     }
@@ -3387,6 +3389,219 @@ fn checker_check_method_call_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     let pair = (*c).check_method_call_with_base_ty(e, base_ty)
     checker_store_from_value(c, pair.0)
     pair.1
+}
+
+
+// ============================================================================
+// *mut ExprCall spine — the keystone (Call dominated the remaining crashes).
+// The by-value check_call_expr (14531) checks the callee + every arg via by-value
+// check_expr; in a call-heavy / nested body each sub-expr copies the ~164KB Checker
+// again, and a callee/arg that is an ExprPath hits the SRET miscompile → SIGSEGV.
+// This routes the callee AND every arg through the *mut spine; the per-arg boundary
+// contracts (which never re-check the arg — they inspect the already-computed arg_ty)
+// are bridged by value. The fan of non-crash early returns (ExprIndex redirect, 21
+// builtin predicates, contest-witness) is bridged WHOLE by value — faithful, since
+// call_expr_should_bridge_by_value is the exact disjunction of check_call_expr's guards.
+// ============================================================================
+
+fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    match e.right {
+        Some(_) => return true
+        None => {}
+    }
+    if call_expr_is_builtin_prove_robust(e.left) { return true }
+    if call_expr_is_builtin_validate_manifest(e.left) { return true }
+    if call_expr_is_builtin_admit_action(e.left) { return true }
+    if call_expr_is_builtin_defer_action(e.left) { return true }
+    if call_expr_is_builtin_deferral_reason(e.left) { return true }
+    if call_expr_is_builtin_plan_acquisition(e.left) { return true }
+    if call_expr_is_builtin_acquisition_reason(e.left) { return true }
+    if call_expr_is_builtin_plan_recourse(e.left) { return true }
+    if call_expr_is_builtin_recourse_reason(e.left) { return true }
+    if call_expr_is_builtin_propose_alternatives(e.left) { return true }
+    if call_expr_is_builtin_alternative_count(e.left) { return true }
+    if call_expr_is_builtin_alternative_option(e.left) { return true }
+    if call_expr_is_builtin_alternative_reason(e.left) { return true }
+    if call_expr_is_builtin_commit_alternative(e.left) { return true }
+    if call_expr_is_builtin_transition_reason(e.left) { return true }
+    if call_expr_is_builtin_transition_step_count(e.left) { return true }
+    if call_expr_is_builtin_observe_transition(e.left) { return true }
+    if call_expr_is_builtin_rollback_transition(e.left) { return true }
+    if call_expr_is_builtin_lift_knowledge(e.left) { return true }
+    if call_expr_is_builtin_measure(e.left) { return true }
+    if call_expr_is_builtin_slice_len(e.left) { return true }
+    if call_expr_contest_witness_kind(e.left) >= 0 { return true }
+    false
+}
+
+// *mut transcription of check_expr_list_no_type (16969): check each arg via the spine.
+fn checker_check_expr_list_no_type_inplace(c: *mut Checker, opt: Option<Box<ExprList> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(list) => {
+            let _aty = checker_check_expr_inplace(c, (*list).head)
+            checker_check_expr_list_no_type_inplace(c, (*list).tail)
+        }
+        None => {}
+    }
+}
+
+// *mut transcription of check_expr_list_no_type_no_linear_consume (16982).
+fn checker_check_expr_list_no_type_no_linear_consume_inplace(c: *mut Checker, opt: Option<Box<ExprList> >) with Mut, Panic, Div, Alloc, IO {
+    (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
+    checker_check_expr_list_no_type_inplace(c, opt)
+    if (*c).suppress_linear_consume_depth > 0 {
+        (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
+    }
+}
+
+// *mut transcription of check_call_args_inner (16907): the arg is checked via the spine;
+// the boundary contracts inspect the already-computed arg_ty (no re-check) and are bridged.
+fn checker_check_call_args_inner_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, idx: i64, expected_count: i64, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+    match args {
+        Some(arg_list) => {
+            let arg_expr = (*arg_list).head
+            let param_info = fn_param_list_get(params, idx)
+            let implicit_borrow =
+                arg_expr.kind == ExprKind::ExprIdent &&
+                (param_info.ty.kind == TypeKind::TyRef || param_info.ty.kind == TypeKind::TyRefMut)
+            if implicit_borrow {
+                (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
+            }
+            let arg_ty = checker_check_expr_inplace(c, arg_expr)
+            if implicit_borrow && (*c).suppress_linear_consume_depth > 0 {
+                (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
+            }
+            let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
+            if has_param_info {
+                if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
+                    checker_report_mismatch_inplace(c, call_span, 9, param_info.ty, arg_ty)
+                }
+                let bb = (*c).check_call_arg_borrow_boundary(arg_expr, param_info.ty, call_span)
+                checker_store_from_value(c, bb)
+                let rb = (*c).check_call_arg_refinement_boundary(arg_expr, arg_ty, param_info.ty, call_span)
+                checker_store_from_value(c, rb)
+                let kb = (*c).check_call_arg_knowledge_boundary(arg_ty, param_info.ty, call_span)
+                checker_store_from_value(c, kb)
+                let ub = (*c).check_call_arg_unit_boundary(arg_ty, param_info.ty, call_span)
+                checker_store_from_value(c, ub)
+                let ob = (*c).ontology_boundary_check_call_arg_contract(arg_ty, param_info.ty, call_span)
+                checker_store_from_value(c, ob)
+            }
+            if has_param_info &&
+               arg_expr.kind == ExprKind::ExprIdent &&
+               checker_is_linear_type_inplace(c, arg_ty) &&
+               !implicit_borrow &&
+               (*c).suppress_linear_consume_depth == 0 {
+                if (*c).borrows.is_borrowed(arg_expr.name) {
+                    checker_report_error_at_inplace(c, call_span, 38, 0, 0, 0)
+                } else {
+                    let consume_result = (*c).borrows.consume_linear(arg_expr.name)
+                    (*c).borrows = consume_result.0
+                    if consume_result.1 != 0 {
+                        checker_report_error_at_inplace(c, call_span, 39, 0, 0, 0)
+                    }
+                }
+            }
+            checker_check_call_args_inner_inplace(c, (*arg_list).tail, params, idx + 1, expected_count, call_span)
+        }
+        None => {
+            if idx != expected_count && expected_count >= 0 {
+                checker_report_error_at_inplace(c, call_span, 10, 0, 0, 0)
+            }
+        }
+    }
+}
+
+fn checker_check_call_args_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, expected_count: i64, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+    checker_check_call_args_inner_inplace(c, args, params, 0, expected_count, call_span)
+}
+
+// *mut ExprCall handler — transcription of check_call_expr's normal path (14605-14687).
+fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if call_expr_should_bridge_by_value(e) {
+        return checker_check_expr_mut(c, e)
+    }
+    // Preamble: multitest then hypothesis effects (shallow state, no sub-expr check).
+    if multitest_effect_enabled((*c).current_effects, (*c).current_effect_count) {
+        let callee_name = multitest_call_name(e.left)
+        if multitest_is_stat_test_name(callee_name) {
+            (*c).multitest_count = (*c).multitest_count + 1
+        } else if multitest_is_correction_name(callee_name) {
+            (*c).multitest_corrected = true
+        }
+    }
+    if hypothesis_effect_enabled((*c).current_effects, (*c).current_effect_count) {
+        let callee_name = multitest_call_name(e.left)
+        if (*c).studies.count > 0 && multitest_is_stat_test_name(callee_name) {
+            let outcome_name = hypothesis_outcome_name_from_args(e.args)
+            if !name_is_empty(outcome_name) && !active_study_has_hypothesis_outcome((*c).studies, outcome_name) {
+                let pen = (*c).report_hypothesis_penalty_warning(e.span, outcome_name)
+                checker_store_from_value(c, pen)
+            }
+        }
+    }
+    // Callee via the *mut spine (dodges the by-value check_path_expr SRET crash).
+    let callee_ty = checker_check_opt_expr_inplace(c, e.left)
+    let array_like_ty =
+        if callee_ty.kind == TypeKind::TyArray {
+            callee_ty
+        } else if callee_ty.kind == TypeKind::TyRef || callee_ty.kind == TypeKind::TyRefMut {
+            match callee_ty.inner {
+                Some(inner_ty) => *inner_ty
+                None => ty_error()
+            }
+        } else {
+            ty_error()
+        }
+    if array_like_ty.kind == TypeKind::TyArray {
+        let idx_arg = expr_list_head(e.args)
+        let extra_arg = expr_list_second(e.args)
+        match idx_arg {
+            Some(arg) => {
+                let idx_ty = checker_check_expr_inplace(c, *arg)
+                if !is_error_or_unknown(idx_ty) && idx_ty.kind != TypeKind::TyI64 {
+                    checker_report_error_at_inplace(c, e.span, 14, 0, 0, 0)
+                }
+                match extra_arg {
+                    Some(extra) => {
+                        let _ety = checker_check_expr_inplace(c, *extra)
+                        checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
+                        return ty_error()
+                    }
+                    None => {
+                        match array_like_ty.inner {
+                            Some(elem_ty) => return *elem_ty
+                            None => return ty_error()
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
+        let sig = (*c).fn_sigs.get(callee_ty.fn_sig_id)
+        let call_start_borrows = (*c).borrows
+        checker_check_call_args_inplace(c, e.args, sig.params, sig.param_count, e.span)
+        let eff = (*c).check_callee_effects(e.span, sig.effects, sig.effect_count)
+        checker_store_from_value(c, eff)
+        let rel = (*c).release_call_arg_borrows(e.args, sig.params, call_start_borrows)
+        checker_store_from_value(c, rel)
+        sig.return_type
+    } else if is_error_or_unknown(callee_ty) {
+        let call_start_borrows = (*c).borrows
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        let rel = (*c).release_call_arg_borrows(e.args, None, call_start_borrows)
+        checker_store_from_value(c, rel)
+        callee_ty
+    } else {
+        checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
+        let call_start_borrows = (*c).borrows
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        let rel = (*c).release_call_arg_borrows(e.args, None, call_start_borrows)
+        checker_store_from_value(c, rel)
+        ty_error()
+    }
 }
 
 
