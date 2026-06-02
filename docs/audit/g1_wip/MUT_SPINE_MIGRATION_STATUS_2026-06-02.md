@@ -54,7 +54,17 @@ MethodCall is PARTIAL by design (only the receiver is `*mut`-routed; the tail re
 by-value) — faithful, and it rescued the receiver-crash method-calls. ExprCall needs the
 args routed too (below).
 
-## The ExprCall keystone — the genuine remaining blocker
+## ExprCall — LANDED a1c3fcf03 (hand-written -97 crashes; arc 481->223)
+
+The arg-checker was hand-written as a faithful transcription of check_call_expr +
+check_call_args_inner (the fan-out couldn't synthesize it — it invented 4 helpers). Each
+ARG routes through checker_check_expr_inplace; the per-arg boundary contracts are bridged
+by value (they inspect the already-computed arg_ty, never re-check). 97 crashes rescued
+(320->223), 0 regressions, 0 pass->fail. 223 crashes remain — re-run the bridge-histogram
+diagnosis for the next tier (Loop/For/Cast/Closure/Tuple/Range/Contest/Handle/AuditAttach +
+whatever StructLit/MethodCall partials remain).
+
+## (historical) ExprCall keystone analysis — the genuine remaining blocker
 
 A fan-out workflow designed these but only ExprCall remains NOT integratable:
 - **ExprCall** (split-and-bridge, ~246 lines): the design references **4 helpers that do
