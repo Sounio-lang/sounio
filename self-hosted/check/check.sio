@@ -2655,6 +2655,10 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_index_inplace(c, e)
     } else if e.kind == ExprKind::ExprMatch {
         result = checker_check_match_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprStructLit {
+        result = checker_check_struct_lit_inplace(c, e)
+    } else if e.kind == ExprKind::ExprMethodCall {
+        result = checker_check_method_call_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
     }
@@ -3198,6 +3202,193 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     }
     result_ty
 }
+
+
+// *mut ExprStructLit handler — FULL transcription of check_struct_lit (16614) and its
+// recursive helpers: check_struct_field_inits / check_struct_field_inits_with_type (16723) /
+// check_struct_field_inits_no_type (16740), plus the generic path check_generic_struct_lit
+// (16633) / infer_type_params_from_fields (16642) / finalize_generic_struct_lit (16670).
+// Every field-initializer sub-expr is checked via the *mut spine (checker_check_expr_inplace)
+// so a nested enum path-expr / call / if inside any field init reaches the *mut leaf handlers
+// and dodges the by-value check_path_expr / check_call ~164KB-self SRET crash. The two
+// recursive Checker-copying field-init helpers are replaced by interleaved per-field
+// lookup-then-check loops over the StructFieldList (no fixed-size array → no field truncation).
+// The generic path is INLINED here (StructInfo obtained as a local via (*c).structs.get, NOT
+// passed as a by-value arg into a new helper — large-struct-by-value arg passing is the crash
+// model; the EnumInfo read in checker_check_path_expr_inplace proves the get-into-local form is
+// safe). mangle_generic_name / monomorphize_fields are reused verbatim (pure free fns).
+// NOTE (runtime-risk, see review issues): the generic leg's `(*c).structs = (*c).structs.add(...)`
+// is the ONE move with no proven *mut precedent — a ~160KB StructTable SRET-store-back into a
+// (*c) field; smoke-test a generic struct literal before trusting the generic path.
+// Fidelity: codes 15 (not-found) / 16 (field compat) / 46 (count mismatch); returns
+// ty_named(struct_name) | ty_named(mangled) | ty_error(); per-field order = lookup-then-check;
+// count mismatch returns ty_named(struct_name) (NOT ty_error — the outer by-value wraps it so);
+// generic-with-zero-type-params (args_list None edge, 16680) returns ty_error(); both generic
+// passes check each field expr (faithful to the by-value double-check); no expr_depth mgmt.
+fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let struct_name = checker_copy_string_list_to_name(e.path.segments)
+    let struct_idx = (*c).structs.find(struct_name)
+    if struct_idx >= 0 {
+        let si = (*c).structs.get(struct_idx)
+        if si.is_generic_template {
+            // ---- Generic struct literal (inlined check_generic_struct_lit 16633) ----
+            // Pass 1: infer type params from field initializers (infer_type_params_from_fields
+            // 16642). Walk the field list via the *mut spine, recording each inferred type into
+            // a per-template-param slot, exactly as the by-value original.
+            var inferred = InferBuf { args: [ty_error(); 8] }
+            var cur_inf = e.fields
+            var done_inf = false
+            while !done_inf {
+                match cur_inf {
+                    Some(fl) => {
+                        let field_name = (*fl).head.name
+                        let tmpl_field_ty = field_info_list_find(si.fields, field_name)
+                        let init_ty = checker_check_expr_inplace(c, (*fl).head.value)
+                        // If this template field type references a type parameter, record the
+                        // inferred type into that parameter's slot (faithful to 16652-16664).
+                        if tmpl_field_ty.kind == TypeKind::TyNamed {
+                            var pi: i64 = 0
+                            while pi < si.type_param_count {
+                                if name_eq(tmpl_field_ty.name, si.type_param_names[pi]) {
+                                    inferred.args[pi] = init_ty
+                                    pi = si.type_param_count  // break
+                                } else {
+                                    pi = pi + 1
+                                }
+                            }
+                        }
+                        cur_inf = (*fl).tail
+                    }
+                    None => {
+                        done_inf = true
+                    }
+                }
+            }
+
+            // Build the TypeEntryList from inferred args, in reverse (finalize 16671-16677).
+            var args_list_opt: Option<Box<TypeEntryList> > = None
+            var ai: i64 = si.type_param_count - 1
+            while ai >= 0 {
+                args_list_opt = Some(Box::new(TypeEntryList { head: inferred.args[ai], tail: args_list_opt }))
+                ai = ai - 1
+            }
+
+            match args_list_opt {
+                None => ty_error()
+                Some(args_box) => {
+                    let args = *args_box
+                    // Mangled name (finalize 16683-16684).
+                    let mangled = mangle_generic_name(si.name, args)
+                    // Monomorphize if not already present (finalize 16687-16702).
+                    let existing_idx = (*c).structs.find(mangled)
+                    if existing_idx < 0 {
+                        let mono_fields = monomorphize_fields(si.fields, si.type_param_count, si.type_param_names, args)
+                        let mono_info = StructInfo {
+                            name: mangled,
+                            fields: mono_fields.0,
+                            field_count: mono_fields.1,
+                            is_linear: si.is_linear,
+                            type_param_count: 0,
+                            type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
+                            is_generic_template: false,
+                        }
+                        // RUNTIME-RISK: ~160KB StructTable by-value SRET-store-back (see review).
+                        (*c).structs = (*c).structs.add(mono_info)
+                    }
+                    // Pass 2: validate fields against the monomorphized struct (finalize
+                    // 16705-16709 → check_struct_field_inits 16715). Count check first (E046),
+                    // then interleaved per-field lookup-then-check (E016), all via the *mut spine.
+                    let mono_idx = (*c).structs.find(mangled)
+                    if mono_idx >= 0 {
+                        let mono_si = (*c).structs.get(mono_idx)
+                        let init_count = struct_field_list_count(e.fields)
+                        if init_count != mono_si.field_count {
+                            checker_report_error_at_inplace(c, e.span, 46, 0, 0, 0)
+                        } else {
+                            var cur_v = e.fields
+                            var done_v = false
+                            while !done_v {
+                                match cur_v {
+                                    Some(list) => {
+                                        let field_ty = field_info_list_find(mono_si.fields, (*list).head.name)
+                                        let val_init_ty = checker_check_expr_inplace(c, (*list).head.value)
+                                        if !types_compatible(val_init_ty, field_ty) {
+                                            checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, val_init_ty)
+                                        }
+                                        cur_v = (*list).tail
+                                    }
+                                    None => {
+                                        done_v = true
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ty_named(mangled)
+                }
+            }
+        } else {
+            // ---- Non-generic struct literal (check_struct_lit else-branch 16622-16625 →
+            // check_struct_field_inits 16715). Count check first (E046, return ty_named NOT
+            // ty_error — the outer by-value wraps the result as ty_named(struct_name)
+            // regardless), then interleaved per-field lookup-then-check (E016). ----
+            let init_count = struct_field_list_count(e.fields)
+            if init_count != si.field_count {
+                checker_report_error_at_inplace(c, e.span, 46, 0, 0, 0)
+                return ty_named(struct_name)
+            }
+            var cur = e.fields
+            var done = false
+            while !done {
+                match cur {
+                    Some(list) => {
+                        let field_ty = field_info_list_find(si.fields, (*list).head.name)
+                        let init_ty = checker_check_expr_inplace(c, (*list).head.value)
+                        if !types_compatible(init_ty, field_ty) {
+                            checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
+                        }
+                        cur = (*list).tail
+                    }
+                    None => {
+                        done = true
+                    }
+                }
+            }
+            ty_named(struct_name)
+        }
+    } else {
+        // ---- Unknown struct (check_struct_lit else-branch 16626-16630 →
+        // check_struct_field_inits_no_type 16740). Report E015, then check every field-init
+        // expr via the *mut spine (for side effects / nested-expr diagnostics), no type compat. ----
+        checker_report_error_at_inplace(c, e.span, 15, 0, 0, 0)
+        var cur_nt = e.fields
+        var done_nt = false
+        while !done_nt {
+            match cur_nt {
+                Some(list) => {
+                    let _unused = checker_check_expr_inplace(c, (*list).head.value)
+                    cur_nt = (*list).tail
+                }
+                None => {
+                    done_nt = true
+                }
+            }
+        }
+        ty_error()
+    }
+}
+
+fn checker_check_method_call_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
+    let base_ty = checker_check_opt_expr_inplace(c, e.left)
+    if (*c).suppress_linear_consume_depth > 0 {
+        (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
+    }
+    let pair = (*c).check_method_call_with_base_ty(e, base_ty)
+    checker_store_from_value(c, pair.0)
+    pair.1
+}
+
 
 // One match arm via the *mut spine — FULL transcription of check_match_arm (16396):
 // push env/borrows/const scopes, bind the pattern, check the arm body, pop the scopes in
@@ -14197,6 +14388,115 @@ impl Checker {
             (c, ty_error())
         }
     }
+
+    fn check_method_call_with_base_ty(self, e: Expr, base_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
+            let call_start_borrows = c.borrows
+            c = c.check_expr_list_no_type_no_linear_consume(e.args)
+            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            return (c, ty_i64())
+        }
+        if base_ty.kind == TypeKind::TyKnowledge {
+            if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
+                let call_start_borrows = c.borrows
+                match e.args {
+                    None => {
+                        c = c.report_error_at(e.span, 172, 0, 0, 0)
+                        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                        (c, knowledge_inner(base_ty))
+                    }
+                    Some(arg_list) => {
+                        if (*arg_list).head.kind != ExprKind::ExprStringLit {
+                            c = c.report_error_at(e.span, 173, 0, 0, 0)
+                        }
+                        c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                        (c, knowledge_inner(base_ty))
+                    }
+                }
+            } else {
+                c = c.report_error_at(e.span, 11, 0, 0, 0)
+                let call_start_borrows = c.borrows
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                (c, ty_error())
+            }
+        } else if base_ty.kind == TypeKind::TyHyper {
+            let alg = base_ty.algebra_kind
+            let inner_ty = match base_ty.inner {
+                Some(inner) => *inner
+                None => ty_error()
+            }
+            if name_matches_str9(e.name, 99, 111, 110, 106, 117, 103, 97, 116, 101) {
+                let call_start_borrows = c.borrows
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                (c, base_ty)
+            } else if name_matches_str4(e.name, 110, 111, 114, 109) {
+                let call_start_borrows = c.borrows
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                (c, inner_ty)
+            } else if name_matches_str7(e.name, 105, 110, 118, 101, 114, 115, 101) {
+                let call_start_borrows = c.borrows
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                if alg > 3 {
+                    c = c.report_error_at(e.span, 32, 0, 0, 0)
+                    (c, ty_error())
+                } else {
+                    (c, base_ty)
+                }
+            } else {
+                c = c.report_error_at(e.span, 11, 0, 0, 0)
+                let call_start_borrows = c.borrows
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                (c, ty_error())
+            }
+        } else if base_ty.kind == TypeKind::TyNamed {
+            let sig_id = c.fn_sigs.find_method_semantic(base_ty, e.name)
+            if sig_id >= 0 {
+                let sig = c.fn_sigs.get(sig_id)
+                let call_start_borrows = c.borrows
+                c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
+                c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
+                c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
+                (c, sig.return_type)
+            } else {
+                c = c.report_error_at(e.span, 11, 0, 0, 0)
+                let call_start_borrows = c.borrows
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                (c, ty_error())
+            }
+        } else if base_ty.kind == TypeKind::TyString {
+            let call_start_borrows = c.borrows
+            c = c.check_expr_list_no_type_no_linear_consume(e.args)
+            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
+                (c, ty_ref(ty_i8()))
+            } else if name_matches_str3(e.name, 108, 101, 110) {
+                (c, ty_i64())
+            } else {
+                c = c.report_error_at(e.span, 11, 0, 0, 0)
+                (c, ty_error())
+            }
+        } else if is_error_or_unknown(base_ty) {
+            let call_start_borrows = c.borrows
+            c = c.check_expr_list_no_type_no_linear_consume(e.args)
+            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            (c, base_ty)
+        } else {
+            c = c.report_error_at(e.span, 19, 0, 0, 0)
+            let call_start_borrows = c.borrows
+            c = c.check_expr_list_no_type_no_linear_consume(e.args)
+            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            (c, ty_error())
+        }
+    }
+
 
     // --------------------------------------------------------
     // Function call
