@@ -9,6 +9,21 @@ use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
 
+// Set to 1 while parsing the body of an `extern "C" { ... }` block (between its
+// `{` and `}`). The opener consumes `extern "C" {` and sets this; each subsequent
+// `fn name(params) -> ret` is parsed as an extern fn decl, and `}` clears it.
+// Module-global (not a Parser field) to avoid touching the by-value Parser struct.
+var EXTERN_BLOCK_ACTIVE: i64 = 0
+
+pub fn reset_extern_block_state() with Mut {
+    EXTERN_BLOCK_ACTIVE = 0
+}
+
+// Build an ItemFn — used for extern fn decls and the block open/close placeholders.
+fn extern_item_fn(name: Name, fn_def_opt: Option<Box<FnDef> >, span: Span, is_pub: bool) -> Item {
+    Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: name, fn_def: fn_def_opt, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None }
+}
+
 impl Parser {
     // ============================================================
     // Parse a single item
@@ -16,6 +31,20 @@ impl Parser {
 
     fn parse_item(self) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let k = self.peek()
+
+        // Inside an `extern "C" { ... }` block: each `fn name(params) -> ret` is an
+        // extern fn decl, and `}` closes the block. Handled before the normal
+        // pub/modifier parsing (which does not apply in-block). Trailing `;` after
+        // each decl is skipped as trivia by the top-level item loop.
+        if EXTERN_BLOCK_ACTIVE == 1 {
+            if k == TokenKind::RBrace {
+                EXTERN_BLOCK_ACTIVE = 0
+                let csp = self.current_span()
+                let pc = self.advance()
+                return (pc, extern_item_fn(empty_name(), None, csp, false))
+            }
+            return self.parse_extern_block_fn()
+        }
 
         // Handle optional 'pub' visibility
         var is_pub = false
@@ -2815,6 +2844,15 @@ impl Parser {
         let start = self.current_span()
         var p = self.advance()  // skip 'extern'
         if parser_peek(p) == TokenKind::StringLit { p = p.advance() }
+        // Block form: `extern "C" { fn ...; fn ...; }`. Consume the `{`, mark the
+        // block active, and return a placeholder; the inner fn decls and the closing
+        // `}` are handled by parse_item's in-block branch.
+        if parser_peek(p) == TokenKind::LBrace {
+            EXTERN_BLOCK_ACTIVE = 1
+            let bsp = p.current_span()
+            let pc = p.advance()  // consume '{'
+            return (pc, extern_item_fn(empty_name(), None, bsp, false))
+        }
         if parser_peek(p) != TokenKind::Fn {
             let span = p.current_span()
             p.had_error = true
@@ -2836,6 +2874,38 @@ impl Parser {
         let span = p.span_from(start)
         let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: true }
         (p, Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+    }
+
+    // One fn declaration inside an `extern "C" { ... }` block: `fn name(params) -> ret`
+    // (no body; trailing `;` skipped by the item loop). Emitted as an ItemFn so the
+    // checker registers it as a callable, exactly like the single-form extern fn.
+    fn parse_extern_block_fn(self) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        if parser_peek(self) != TokenKind::Fn {
+            // Not a fn decl and not `}` (handled by caller) — error + advance to keep
+            // the top-level loop making progress; close the block to avoid a stuck state.
+            EXTERN_BLOCK_ACTIVE = 0
+            let span = self.current_span()
+            var pe = self
+            pe.had_error = true
+            pe.error_count = pe.error_count + 1
+            pe = pe.advance()
+            return (pe, extern_item_fn(empty_name(), None, span, false))
+        }
+        var p = self.advance()  // skip 'fn'
+        let name = p.current_name()
+        p = p.expect_ident()
+        p = p.expect(TokenKind::LParen)
+        let pair = p.parse_param_list()
+        p = pair.0
+        let params_opt = pair.1
+        p = p.expect(TokenKind::RParen)
+        let pair2 = p.parse_optional_return_type()
+        p = pair2.0
+        let ret_ty = pair2.1
+        let span = p.span_from(start)
+        let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: true }
+        (p, extern_item_fn(name, Some(Box::new(fn_def)), span, false))
     }
 
     // Sprint 109: export "C" fn
