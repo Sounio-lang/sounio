@@ -115,6 +115,28 @@ conditional, places the estimated-likely successor as fall-through. Layout-only
   choice) so a wrong guess never changes program meaning — only block order.
   Otherwise we'd trade an honesty problem for a correctness one.
 
+## ⚠️ Step 1 finding (2026-06-03): confidence ≠ variance — the estimator must be low-*confidence*
+
+Step 1 added `branch_likelihood(...) -> Knowledge<i64>` (via `measure(v, uncertainty: u)`)
+to `lean_single.sio` after `local_bss_spill_bytes` (≈ line 938) and ran
+`souc check` (committed binary `6374e52f`): it **type-checks cleanly** — 1396
+functions gate-passed, no errors — confirming the compiler can carry epistemic
+`Knowledge<i64>`/`measure` code in its own source. **But the census showed
+`min=1000 mean=1000` with the estimator present**: `measure(v, uncertainty: u)`
+sets the GUM **variance**, not the **confidence** that drives `EXPR_GATE`
+(`CONF < 950`). A high-variance measurement still has confidence 1000 → never
+gates (consistent with all 8 earlier programs showing `guarded=0`).
+
+**Design correction:** branch-likelihood is a *guess the compiler does not fully
+trust* — that is a **confidence** (~70%), not a variance. The estimator must
+inject **confidence < 950** via the compiler's confidence mechanism — the
+`with Epistemic(N)` floor (`FN_EPISTEMIC_MIN`, parsed at ~24507 with `N ≤ 1000`)
+or the `asserted`-named-function path (→ 970), serially composed below 950 —
+*not* via `measure`'s `uncertainty:`. Verify the exact low-confidence injector
+before re-applying (probe a `with Epistemic(700)` function's census for
+`guarded>0`). The WIP `measure`-based estimator was reverted (type-checks but
+ineffective and not self-compile-verified).
+
 ## Advisor caveats to honor during implementation
 
 - **Fixed-point hash will change, and that's fine.** Block reorder ⇒ different
