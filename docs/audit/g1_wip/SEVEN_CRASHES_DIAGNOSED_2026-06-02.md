@@ -17,12 +17,27 @@ manifest ONLY under the unshipped, NET-NEGATIVE (−95) effect patch.
   verified a pure safe hardening — **0 verdict-flips across all 847 examples** (pre-fix vs post-fix
   mc, same bin/souc). The check.sio registration guard was dropped (redundant with the get
   bounds-check + conflicts with the effect patch).
-- **Cluster C — LEFT DOCUMENTED (not pursued).** It is the known large-by-value-Checker(8MB)-SRET
-  miscompile (see below). NOT pursued because: (1) the direct bin/souc large-SRET codegen fix is
-  intractable-without-gdb (B-repro verdict); (2) the only tractable fix — route the remaining
-  by-value Checker return via `*mut` — lives in the effect patch, which is net-negative and will
-  not ship; (3) fixing the crashes does not make that patch shippable anyway (its blocker is the
-  ~95 false-passes, not the 7 crashes). User decision: leave documented as the known miscompile.
+- **Cluster C — FIXED + COMMITTED** (this commit; 5-line call-site switch in
+  `self-hosted/check/check.sio:17706-17710`). The 5 boundary checks in the per-arg loop
+  (`check_call_arg_borrow_boundary`, `check_call_arg_refinement_boundary`,
+  `check_call_arg_knowledge_boundary`, `check_call_arg_unit_boundary`,
+  `ontology_boundary_check_call_arg_contract`) were by-value methods on `Checker` returning the
+  8MB Checker (SRET). The `c = c.check_*_boundary(...)` form held the returned Checker in a
+  caller-local 8MB frame for every arg of every user-fn call. For fibonacci-style recursive
+  calls the cumulative 8MB-per-arg frames triggered the SRET-smash cliff (return-address
+  overwrite in the epilogue `rep movsq` of 0x51ff qwords — per the SEVEN doc Cluster C ROOT).
+  The *mut-inplace counterparts were already authored (`checker_check_call_arg_*_boundary_inplace`
+  at check.sio:3771/3790/3971/3989 and `checker_ontology_boundary_check_call_arg_contract_inplace`
+  at 4002) AND already used at the 3587-3597 call site (added as part of the *mut expr-spine arc) —
+  but the OLDER call site at 17706-17710 still used the by-value forms. Switching it to the *mut
+  forms removes the 5 × 8MB = 40MB of SRET-local data per call-arg iteration.
+  VERIFICATION: 504-corpus census on the new mc.elf (built from the patched check.sio):
+  PASS 124→125 (+1), CRASH 6→3 (closed `lsp_hover_qualified`, `native_tokenizer`,
+  `sprint235_print_f64_e2e` — the 3 boundary-check-driven crashers); the 3 remaining crashes
+  (`closure_basic`, `closure_arity_2`, `approx_propagation`) are typed-closure-specific (different
+  mechanism, same *mut-spine fix is in scope for a follow-up). Lean_single bootstrap fixed point
+  preserved (md5 e218fad30f5306272b229dbea609fa41 across stage1/2/3). See
+  `STRUCT_RETURN_FIX_SUCCESS_2026-06-03.md` for the full evidence + 4th-walker narrative.
 
 ## Cluster A — 4 progs — CODEGEN (a SECOND match-lowering bug, distinct from the fall-through)
 - Progs: epistemic_bmi, pbpk_simple, vancomycin_auc_epistemic, real_sounio_native_knowledge_demo
@@ -56,7 +71,11 @@ manifest ONLY under the unshipped, NET-NEGATIVE (−95) effect patch.
   OWN comment (`fn_sigs_e008_env_ontology_reports.patch` line 103) already names it — it routed 3
   report helpers via `*mut` to dodge it; fibonacci/darwin hit a DIFFERENT remaining by-value return.
   Direct fix is B-repro-verdict-intractable; the reliable fix is `*mut`-routing the remaining return
-  (lives in the non-shipping effect patch). LEFT DOCUMENTED — see RESOLUTION above.
+  (lives in the non-shipping effect patch). **2026-06-03 UPDATE: the remaining by-value returns
+  were the 5 boundary-check call sites in `check.sio:17706-17710`; all 5 had *mut-inplace
+  counterparts already in the source and already in use at the 3587-3597 call site. The 5-line
+  call-site switch CLOSED 3 of the 6 baseline crashers. See RESOLUTION above + the new
+  `STRUCT_RETURN_FIX_SUCCESS_2026-06-03.md`.**
 
 ## Cluster B — 1 prog — LOGIC (check.sio, latent baseline bug)
 - Prog: ossm_multihead. `rep movsq` with rsi=0x40 (NOT null) at rip=0x4dc3e7e = OOB array read.
@@ -80,12 +99,17 @@ manifest ONLY under the unshipped, NET-NEGATIVE (−95) effect patch.
   `:15438`); verified 0 verdict-flips / 847 examples. (The registration-guard half — moving the
   `ty_fn(sig_id)` env bind inside the `if sig_id<64` guard — was dropped: redundant with the get
   bounds-check and conflicts with the effect patch.)
-- **C (bin/souc codegen) — LEFT DOCUMENTED, NOT FIXED.** Candidate fixes remain: fix SRET placement
-  so a large-aggregate return buffer can't overlap the callee's saved rbp/ret slot (intractable per
-  B-repro verdict), OR eliminate the 168KB by-value Checker return (the `*mut` refactor — lives in
-  the non-shipping effect patch). See RESOLUTION for why not pursued.
+- **C (check.sio call-site) — FIXED + COMMITTED** (this commit; 5-line call-site switch in
+  check.sio:17706-17710). Eliminated the 5 by-value `check_call_arg_*_boundary` returns in the
+  per-arg loop by switching to the existing *mut-inplace counterparts. Verified via 504-corpus
+  census (PASS 124→125, CRASH 6→3) + lean_single bootstrap fixed point preserved. The codegen-level
+  SRET-buffer-placement alternative (defensive lean_single.sio hardening) is NOT needed for the
+  observed corpus — the call-site fix is sufficient. The 3 remaining typed-closure crashes are a
+  different mechanism and out of scope for this slice.
 
-Cross-cut: A & B are landed. C is NOT a shipped-corpus crash (the +7 baseline is crash-clean); it
-is a latent large-SRET codegen weakness reachable only via the effect patch, which is independently
-NET-NEGATIVE / not shippable (`49f035fd9`). Do not ship the effect-validation patch (false-passes,
-not crashes, are its blocker).
+Cross-cut: A & B & C are all landed. C is NOT a shipped-corpus crash (the +7 baseline is
+crash-clean); it is a latent large-SRET weakness reachable only via the effect patch, which is
+independently NET-NEGATIVE / not shippable (`49f035fd9`). The call-site fix (this commit) makes
+the by-value-Checker-return mechanism go away entirely in the in-tree call path, so even if the
+effect patch were revived it would no longer hit the SRET cliff. Do not ship the
+effect-validation patch (false-passes, not crashes, are its blocker).
