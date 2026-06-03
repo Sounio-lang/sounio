@@ -20,7 +20,8 @@ source → IR → native-v2 backend → ELF. **Not pushed.** 6 mc builds this se
      *reads* and copy-rebox (`var c=*box; ..; box=Box::new(c)`) are fine. Never auto-deref (`m.f`).
 2. **Pipeline reaches the backend, no crash**: with the fix, void `fn main(){}` lowers end-to-end
    ("Merged IR: 1 functions"; seam prints "emitted fns=1"). The feared body-stage tuple wall did not
-   bite for an empty body.
+   *crash* for an empty body — but the IR it produced was **not validated** (see caveat below);
+   "emitted fns=1" proves only `fn_count==1`, not that main's body/name are sound.
 3. **Back-half (IR→ELF) confirmed**: `--native-v2-emit13` on **ac08e3b8**-built mc writes an 8200-byte
    ELF that **exits 13**. Seam `--native-v2-compile <src> -o <out>` wired in `main.sio`.
 
@@ -35,6 +36,15 @@ source → IR → native-v2 backend → ELF. **Not pushed.** 6 mc builds this se
 So **full void→ELF is not achieved**. The writer works *standalone* with c634b38f — its mc failure is
 an at-scale/in-context miscompile. **Do not pin `c634b38f` to build mc** (it breaks the writer); use
 `bin/souc-linux-x86_64` (ac08e3b8). My branch reverts an incorrect c634b38f pin.
+
+> **CAVEAT (do not over-trust the "two independent bootstrap bugs" framing):** the ac08e3b8 void-main
+> corruption was **NOT root-caused**, and **no bootstrap has yet produced a validated module→ELF**
+> (under c634b38f the writer was broken so there was no artifact to inspect; under ac08e3b8 the
+> lowering corrupted). An equally-live hypothesis is that the **lowered void-main module is itself
+> malformed** — a corrupt `Name` buf/len (exactly what the wild-string env-dump implies) or a main
+> with no real `ret` — which the two bootstraps merely *surface* differently (c634b38f's writer
+> silently no-ops on it; ac08e3b8's path prints garbage). Before hunting bootstraps, **dump the
+> lowered module and validate main's name + that it ends in a `ret`.**
 
 ## Next steps (multi-session)
 
