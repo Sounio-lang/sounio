@@ -140,6 +140,84 @@ pub fn w1_int(ns: i64, nd: i64) -> i64 with Mut, Panic, Div {
     return mcmf_min_cost(src, snk, nnodes)
 }
 
+// ---------------------------------------------------------------------------
+// Exact LP dual (MODI / u-v potentials) for a Farkas certificate of W1.
+// After w1_int(ns,nd), recovers flow on each transport edge, builds the basis
+// (flow>0) potentials u_i, v_j with u_i + v_j = c_ij on basic cells, and exposes
+// them as rationals. Dual feasibility u_i+v_j <= c_ij for ALL i,j plus objective
+// sum(supply_i u_i)+sum(demand_j v_j) > d certifies W1 > d (UNSAT of "exists plan
+// with cost <= d"), i.e. kappa < 0, by LP weak duality.
+// ---------------------------------------------------------------------------
+pub var DU_N: [i64; 1024] = [0; 1024]      // u_i numerator (per supply)
+pub var DU_D: [i64; 1024] = [1; 1024]
+pub var DV_N: [i64; 1024] = [0; 1024]      // v_j numerator (per demand)
+pub var DV_D: [i64; 1024] = [1; 1024]
+var DU_SET: [i64; 1024] = [0; 1024]
+var DV_SET: [i64; 1024] = [0; 1024]
+var DMODI_Q: [i64; 4096] = [0; 4096]
+
+// transport edge (i,j) forward index in the residual arrays built by w1_int:
+//   first ns source edges (2 each) + nd sink edges (2 each), then i*nd+j (2 each)
+fn d_flow(ns: i64, nd: i64, i: i64, j: i64) -> i64 with Mut, Panic {
+    let fwd = (ns + nd) * 2 + (i * nd + j) * 2
+    return MF_CAP[(fwd + 1) as usize]   // reverse-edge cap == flow pushed
+}
+
+// Build MODI potentials after a solve. Returns 1 on success (all reachable).
+pub fn modi_duals(ns: i64, nd: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ns { DU_SET[i as usize] = 0; i = i + 1; }
+    var j: i64 = 0
+    while j < nd { DV_SET[j as usize] = 0; j = j + 1; }
+    // start: u_0 = 0. Nodes encoded as supply i -> i, demand j -> ns+j.
+    DU_N[0] = 0; DU_D[0] = 1; DU_SET[0] = 1
+    var qh: i64 = 0
+    var qt: i64 = 0
+    DMODI_Q[0] = 0; qt = 1
+    while qh < qt {
+        let node = DMODI_Q[qh as usize]
+        qh = qh + 1
+        if node < ns {
+            let si = node
+            var jj: i64 = 0
+            while jj < nd {
+                if d_flow(ns, nd, si, jj) > 0 {
+                    if DV_SET[jj as usize] == 0 {
+                        // v_j = c_ij - u_i
+                        let c = Rational { num: OT_COST[(si * nd + jj) as usize], den: 1 }
+                        let ui = Rational { num: DU_N[si as usize], den: DU_D[si as usize] }
+                        let v = rat_sub(c, ui)
+                        DV_N[jj as usize] = v.num; DV_D[jj as usize] = v.den; DV_SET[jj as usize] = 1
+                        DMODI_Q[qt as usize] = ns + jj; qt = qt + 1
+                    }
+                }
+                jj = jj + 1
+            }
+        } else {
+            let dj = node - ns
+            var ii: i64 = 0
+            while ii < ns {
+                if d_flow(ns, nd, ii, dj) > 0 {
+                    if DU_SET[ii as usize] == 0 {
+                        let c = Rational { num: OT_COST[(ii * nd + dj) as usize], den: 1 }
+                        let vj = Rational { num: DV_N[dj as usize], den: DV_D[dj as usize] }
+                        let u = rat_sub(c, vj)
+                        DU_N[ii as usize] = u.num; DU_D[ii as usize] = u.den; DU_SET[ii as usize] = 1
+                        DMODI_Q[qt as usize] = ii; qt = qt + 1
+                    }
+                }
+                ii = ii + 1
+            }
+        }
+    }
+    // any unset -> set 0 (degenerate basis); feasibility is checked separately.
+    i = 0
+    while i < ns { if DU_SET[i as usize] == 0 { DU_N[i as usize] = 0; DU_D[i as usize] = 1; } i = i + 1; }
+    j = 0
+    while j < nd { if DV_SET[j as usize] == 0 { DV_N[j as usize] = 0; DV_D[j as usize] = 1; } j = j + 1; }
+    return 1
+}
+
 fn ot_lcm(a: i64, b: i64) -> i64 with Mut, Div, Panic {
     var x = a; var y = b;
     while y > 0 { let t = y; y = x - (x / y) * y; x = t; }

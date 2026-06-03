@@ -40,6 +40,8 @@ pub var ORC_LCC_M: i64 = 0
 // ---- BFS -------------------------------------------------------------------
 var ORC_DIST: [i64; 131072] = [0 - 1; 131072]
 var ORC_Q:    [i64; 131072] = [0; 131072]
+var ORC_MARK: [i64; 131072] = [0; 131072]   // timestamp marker for common-neighbor test
+var ORC_MT:   i64 = 0
 
 // ============================================================================
 // Word interning
@@ -269,6 +271,23 @@ fn orc_bfs(src: i64) with Mut, Div, Panic {
     }
 }
 
+// Exact hop distance between supports a,b of an EDGE (u~v): guaranteed <= 3,
+// since d(a,b) <= d(a,u) + d(u,v) + d(v,b) <= 1 + 1 + 1. Computed in O(deg) via
+// adjacency + a common-neighbor test — no BFS (so dense hub graphs stay fast).
+fn orc_dist_le3(a: i64, b: i64) -> i64 with Mut, Panic {
+    if a == b { return 0; }
+    if orc_has_edge(a, b) { return 1; }
+    ORC_MT = ORC_MT + 1
+    var e = ORC_AH[a as usize]
+    while e >= 0 { ORC_MARK[ORC_ATO[e as usize] as usize] = ORC_MT; e = ORC_ANX[e as usize]; }
+    var f = ORC_AH[b as usize]
+    while f >= 0 {
+        if ORC_MARK[ORC_ATO[f as usize] as usize] == ORC_MT { return 2; }
+        f = ORC_ANX[f as usize]
+    }
+    return 3
+}
+
 // kth neighbor (full-id) of full-id u, k in [0, deg(u))
 fn orc_neighbor(u: i64, k: i64) -> i64 with Mut, Panic {
     var e = ORC_AH[u as usize]
@@ -289,6 +308,13 @@ fn orc_neighbor(u: i64, k: i64) -> i64 with Mut, Panic {
 pub var ORC_LAST_W1_NUM: i64 = 0
 pub var ORC_LAST_W1_DEN: i64 = 1
 
+// Per-edge exact kappa over the whole LCC (filled by orc_compute_all_kappa).
+pub var ORC_EK_N: [i64; 2097152] = [0; 2097152]   // kappa numerator per edge
+pub var ORC_EK_D: [i64; 2097152] = [1; 2097152]   // kappa denominator per edge
+pub var ORC_EU:   [i64; 2097152] = [0; 2097152]   // edge endpoint u (lcc id)
+pub var ORC_EV:   [i64; 2097152] = [0; 2097152]   // edge endpoint v (lcc id)
+pub var ORC_NEDGE: i64 = 0
+
 // Build support arrays into OT buffers and compute. Support = [self] ++ neighbors.
 pub fn orc_kappa_edge(u: i64, v: i64) -> Rational with Mut, Div, Panic {
     let du = ORC_DEG[u as usize]
@@ -303,18 +329,22 @@ pub fn orc_kappa_edge(u: i64, v: i64) -> Rational with Mut, Div, Panic {
     OT_DNUM[0] = 1; OT_DDEN[0] = 2
     var j: i64 = 1
     while j <= dv { OT_DNUM[j as usize] = 1; OT_DDEN[j as usize] = 2 * dv; j = j + 1; }
-    // cost = hop distance: BFS from each support point of u, read distance to each support of v.
-    // support u: index 0 -> u, index 1+k -> neighbor k.  support v similarly.
-    var a: i64 = 0
+    // Precompute support full-ids: index 0 -> self, index 1+k -> kth neighbor.
+    var SU: [i64; 1024] = [0; 1024]
+    var SV: [i64; 1024] = [0; 1024]
+    SU[0] = u; SV[0] = v
+    var a: i64 = 1
+    var eu = ORC_AH[u as usize]
+    while eu >= 0 { SU[a as usize] = ORC_ATO[eu as usize]; a = a + 1; eu = ORC_ANX[eu as usize]; }
+    var b: i64 = 1
+    var ev = ORC_AH[v as usize]
+    while ev >= 0 { SV[b as usize] = ORC_ATO[ev as usize]; b = b + 1; ev = ORC_ANX[ev as usize]; }
+    // cost matrix = exact hop distance (<=3) among supports, no BFS.
+    a = 0
     while a < ns {
-        var su: i64 = u
-        if a > 0 { su = orc_neighbor(u, a - 1); }
-        orc_bfs(su)
-        var b: i64 = 0
+        b = 0
         while b < nd {
-            var sv: i64 = v
-            if b > 0 { sv = orc_neighbor(v, b - 1); }
-            OT_COST[(a * nd + b) as usize] = ORC_DIST[sv as usize]
+            OT_COST[(a * nd + b) as usize] = orc_dist_le3(SU[a as usize], SV[b as usize])
             b = b + 1
         }
         a = a + 1
@@ -323,4 +353,30 @@ pub fn orc_kappa_edge(u: i64, v: i64) -> Rational with Mut, Div, Panic {
     ORC_LAST_W1_NUM = w1.num
     ORC_LAST_W1_DEN = w1.den
     return rat_sub(rat_one(), w1)
+}
+
+// Compute exact kappa for EVERY LCC edge; fill ORC_EK_N/ORC_EK_D/ORC_EU/ORC_EV.
+pub fn orc_compute_all_kappa() with Mut, Div, Panic {
+    ORC_NEDGE = 0
+    var i: i64 = 0
+    while i < ORC_NW {
+        if ORC_LID[i as usize] >= 0 {
+            var e = ORC_AH[i as usize]
+            while e >= 0 {
+                let j = ORC_ATO[e as usize]
+                if j > i {
+                    if ORC_LID[j as usize] >= 0 {
+                        let k = orc_kappa_edge(i, j)
+                        ORC_EK_N[ORC_NEDGE as usize] = k.num
+                        ORC_EK_D[ORC_NEDGE as usize] = k.den
+                        ORC_EU[ORC_NEDGE as usize] = ORC_LID[i as usize]
+                        ORC_EV[ORC_NEDGE as usize] = ORC_LID[j as usize]
+                        ORC_NEDGE = ORC_NEDGE + 1
+                    }
+                }
+                e = ORC_ANX[e as usize]
+            }
+        }
+        i = i + 1
+    }
 }
