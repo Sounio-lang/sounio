@@ -1,5 +1,12 @@
 # Claude Code Agent Handoff
 
+> **🔗 MODULAR-COMPILER AGENTS (2026-06-03): read
+> [`.claude/MODULAR_INTEGRATION_STATUS.md`](MODULAR_INTEGRATION_STATUS.md) FIRST.**
+> One integration lane (`codegen/nested-mut-write-fix`), `pull --ff-only` before
+> push, validate (canonical gate + 0-regression `--check` A/B) before pushing.
+> E008 / crashers / native-v2-back-half are DONE — the one open blocker is the
+> SRET large-struct-return chain; don't fork new lanes to re-solve solved work.
+
 > **⚠️ WORKSPACE STABILITY (2026-05-29).** The pod was recycled twice by the k8s
 > liveness probe under CPU saturation — four agents were running directly on the
 > shared `/workspace/sounio` checkout, each firing a full `souc main.sio` bundle
