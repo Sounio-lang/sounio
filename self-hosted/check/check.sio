@@ -1060,6 +1060,45 @@ fn checker_lower_array_type_mut(c: *mut Checker, inner_opt: Option<Box<TypeExpr>
     }
 }
 
+// *mut transcription of lower_ref_like_type (10649): &T / &!T parameter & field types.
+// The match in checker_lower_type_expr_mut had no TypeReference/TypeRefMut case, so every ref
+// type fell to `_ => checker_note_type_error_mut` — a SILENT rejection (had_error set, no
+// diagnostic) that failed EVERY no-import program with a ref param. &[T] (unsized) -> slice;
+// &[T;N] / &T / &Struct -> ty_ref / ty_ref_mut(inner). Mutually recursive with
+// checker_lower_type_expr_mut (same forward-call pattern as the array helper above).
+fn checker_lower_ref_like_type_mut(c: *mut Checker, inner_te: TypeExpr, is_mut_ref: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if inner_te.kind == TypeExprKind::TypeArray {
+        match inner_te.array_size {
+            None => {
+                match inner_te.inner {
+                    Some(elem_te) => {
+                        let elem_ty = checker_lower_type_expr_mut(c, *elem_te)
+                        if is_mut_ref {
+                            return ty_slice_mut(elem_ty)
+                        }
+                        return ty_slice(elem_ty)
+                    }
+                    None => return ty_error()
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    let inner_ty = checker_lower_type_expr_mut(c, inner_te)
+    if is_mut_ref {
+        ty_ref_mut(inner_ty)
+    } else {
+        ty_ref(inner_ty)
+    }
+}
+
+fn checker_lower_ref_type_dispatch_mut(c: *mut Checker, opt: Option<Box<TypeExpr> >, is_mut_ref: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(inner_te) => checker_lower_ref_like_type_mut(c, *inner_te, is_mut_ref)
+        None => ty_error()
+    }
+}
+
 fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !checker_enter_type_expr_mut(c) {
         return ty_error()
@@ -1153,6 +1192,8 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
             if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_validated(inner_ty, -1.0) }
         }
         TypeExprKind::TypeArray => checker_lower_array_type_mut(c, te.inner, te.array_size)
+        TypeExprKind::TypeReference => checker_lower_ref_type_dispatch_mut(c, te.inner, false)
+        TypeExprKind::TypeRefMut => checker_lower_ref_type_dispatch_mut(c, te.inner, true)
         _ => {
             checker_note_type_error_mut(c)
             ty_error()
