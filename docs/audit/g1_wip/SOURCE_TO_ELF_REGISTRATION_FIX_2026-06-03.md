@@ -51,6 +51,26 @@ an at-scale/in-context miscompile. **Do not pin `c634b38f` to build mc** (it bre
 > So NEXT = a backend-writer fix (or a bootstrap whose writer survives mc; the sound module is already
 > in hand) and/or the E008 checker miscompile under ac08e3b8 — **not** a lowering problem.
 
+## c634b38f writer miscompile — CHASED TO GROUND (2026-06-03)
+
+Instrumented `native_v2_write_min_elf64_to_file` with print markers + ran emit13 on c634b38f-built mc:
+- `WRITER ENTER` ✓, `POST-LOCAL` ✓, `W-A`(post file_len-check) ✓, `W-B`(post ELF-header puts) ✓,
+  `W-C`(post phdr emits) ✓, `W-C1`(post code fill-loop) ✓ — but `W-D`(post rodata fill-loop) ✗, and the
+  `write_file` call is never reached, yet the function returns rc=0 (caller prints "emitted") and writes
+  no file. So control **jumps to the function epilogue from the fill region** (~codegen_x86_linux.sio
+  7507-7518), skipping `write_file`.
+- **It is a c634b38f BRANCH-TARGET codegen miscompile, not a data bug:** the bound is sane
+  (`code_len=577`), no fault/crash; and for emit13 `rodata_len=0` so **loop 2's body never executes** —
+  yet the divergence is in the loop-2 *region*, i.e. the emitted labels/branches there, not any run
+  logic. Removing the compound `&&` from the loop conditions did NOT help; adding markers moves the
+  apparent point — **layout/span-sensitive**, the class memory already adjudicates intractable to fix by
+  source perturbation ([[project_modular_span_sensitive_crash]], [[project_modular_B_repro_verdict]]).
+- **The SOURCE IS PROVEN CORRECT:** ac08e3b8 compiles this exact writer correctly — emit13 writes 8200
+  bytes and **exits 13**. So the defect is purely in c634b38f's codegen, not in the writer source.
+- ⇒ NOT fixable by a writer source-workaround. Real fixes: (a) fix the branch-target codegen in
+  `lean_single.sio` and regenerate the bootstrap, or (b) use ac08e3b8 (writer works) + fix its checker
+  E008 miscompile (g1/e008-bridge-fix lane). Both multi-session.
+
 ## Next steps (multi-session)
 
 - Need a souc that compiles **both** the lowering and the 128KB-stack ELF writer
