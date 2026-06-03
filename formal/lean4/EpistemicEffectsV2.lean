@@ -156,4 +156,148 @@ inductive Step : Expr → Expr → Prop where
 
 infix:50 " ⇒ " => Step
 
+-- ================================================================
+-- §7. Generation, canonical forms, and Progress
+-- ================================================================
+
+theorem genNat {Γ e T E} (h : HasTy Γ e T E) {n} (he : e = .lit_nat n) : T = .tnat := by
+  induction h with
+  | t_lit_nat => rfl
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+theorem genReal {Γ e T E} (h : HasTy Γ e T E) {z} (he : e = .lit_real z) : T = .treal := by
+  induction h with
+  | t_lit_real => rfl
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+theorem genLam {Γ e T E S F b} (h : HasTy Γ e T E) (he : e = .lam S F b) :
+    ∃ T₂, T = .tarrow S F T₂ := by
+  induction h with
+  | t_lam Γ T₁ T₂ E body _ => injection he with h1 h2 h3; subst h1; subst h2; exact ⟨T₂, rfl⟩
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+theorem genKraw {Γ e T E} (h : HasTy Γ e T E) {v m} (he : e = .kraw v m) :
+    ∃ T', T = .tknow T' := by
+  induction h with
+  | t_kraw Γ T' v' m' _ _ _ => exact ⟨T', rfl⟩
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+/-- `kraw` inversion: recover the payload type, its typing, and its value-ness. -/
+theorem invKraw {Γ e T E} (h : HasTy Γ e T E) {v m} (he : e = .kraw v m) :
+    ∃ T', T = .tknow T' ∧ HasTy Γ v T' emptyE ∧ IsValue v := by
+  induction h with
+  | t_kraw Γ' T' v' m' hv' hval' hk' =>
+    injection he with h1 h2; subst h1; subst h2; exact ⟨T', rfl, hv', hval'⟩
+  | t_sub Γ' e' T0 E1 E2 h0 hsub ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+theorem canon_arrow {v S F T₂ E} (hv : IsValue v) (ht : HasTy [] v (.tarrow S F T₂) E) :
+    ∃ S' F' b, v = .lam S' F' b := by
+  cases hv with
+  | v_nat n  => exact Ty.noConfusion (genNat ht rfl)
+  | v_real z => exact Ty.noConfusion (genReal ht rfl)
+  | v_lam T E0 e0 => exact ⟨T, E0, e0, rfl⟩
+  | @v_kraw w m hp => rcases genKraw ht rfl with ⟨T', hT⟩; exact Ty.noConfusion hT
+
+theorem canon_know {v T E} (hv : IsValue v) (ht : HasTy [] v (.tknow T) E) :
+    ∃ w m, v = .kraw w m := by
+  cases hv with
+  | @v_kraw w m hp => exact ⟨w, m, rfl⟩
+  | v_nat n  => exact Ty.noConfusion (genNat ht rfl)
+  | v_real z => exact Ty.noConfusion (genReal ht rfl)
+  | v_lam T0 E0 e0 => rcases genLam ht rfl with ⟨T₂, hT⟩; exact Ty.noConfusion hT
+
+theorem canon_real {v E} (hv : IsValue v) (ht : HasTy [] v .treal E) :
+    ∃ z, v = .lit_real z := by
+  cases hv with
+  | v_real z => exact ⟨z, rfl⟩
+  | v_nat n  => exact Ty.noConfusion (genNat ht rfl)
+  | v_lam T0 E0 e0 => rcases genLam ht rfl with ⟨T₂, hT⟩; exact Ty.noConfusion hT
+  | @v_kraw w m hp => rcases genKraw ht rfl with ⟨T', hT⟩; exact Ty.noConfusion hT
+
+theorem progress' {Γ e T E} (h : HasTy Γ e T E) (hΓ : Γ = []) :
+    IsValue e ∨ ∃ e', e ⇒ e' := by
+  induction h with
+  | t_lit_nat Γ n => exact Or.inl (.v_nat n)
+  | t_lit_real Γ z => exact Or.inl (.v_real z)
+  | t_var Γ n T hlk => subst hΓ; simp [lookupCtx] at hlk
+  | t_lam Γ T₁ T₂ E body _ => exact Or.inl (.v_lam _ _ _)
+  | t_app Γ T₁ T₂ Ef Ec Ecaller f a hf ha _ _ ihf iha =>
+    subst hΓ
+    rcases ihf rfl with hvf | ⟨f', hf'⟩
+    · rcases iha rfl with hva | ⟨a', ha'⟩
+      · rcases canon_arrow hvf hf with ⟨S, F, b, rfl⟩
+        exact Or.inr ⟨subst 0 a b, .beta hva⟩
+      · exact Or.inr ⟨.app f a', .app_r hvf ha'⟩
+    · exact Or.inr ⟨.app f' a, .app_l hf'⟩
+  | t_measure Γ T e m he _ ihe =>
+    subst hΓ
+    rcases ihe rfl with hv | ⟨e', he'⟩
+    · exact Or.inr ⟨.kraw e m, .meas_red hv⟩
+    · exact Or.inr ⟨.measure e' m, .meas_arg he'⟩
+  | t_kvalue Γ T E e he ihe =>
+    subst hΓ
+    rcases ihe rfl with hv | ⟨e', he'⟩
+    · rcases canon_know hv he with ⟨w, m, rfl⟩
+      exact Or.inr ⟨w, .kvalue_red⟩
+    · exact Or.inr ⟨.kvalue e', .kvalue_arg he'⟩
+  | t_kunc Γ T E e he ihe =>
+    subst hΓ
+    rcases ihe rfl with hv | ⟨e', he'⟩
+    · rcases canon_know hv he with ⟨w, m, rfl⟩
+      exact Or.inr ⟨.lit_real m.gumVar, .kunc_red⟩
+    · exact Or.inr ⟨.kunc e', .kunc_arg he'⟩
+  | t_kconf Γ T E e he ihe =>
+    subst hΓ
+    rcases ihe rfl with hv | ⟨e', he'⟩
+    · rcases canon_know hv he with ⟨w, m, rfl⟩
+      exact Or.inr ⟨.lit_real m.conf, .kconf_red⟩
+    · exact Or.inr ⟨.kconf e', .kconf_arg he'⟩
+  | t_kadd Γ E₁ E₂ a b ha hb iha ihb =>
+    subst hΓ
+    rcases iha rfl with hva | ⟨a', ha'⟩
+    · rcases canon_know hva ha with ⟨wa, ma, rfl⟩
+      rcases invKraw ha rfl with ⟨Ta, hTa, hwaty, hwaval⟩
+      injection hTa with hTa'; subst hTa'
+      rcases canon_real hwaval hwaty with ⟨x, rfl⟩
+      rcases ihb rfl with hvb | ⟨b', hb'⟩
+      · rcases canon_know hvb hb with ⟨wb, mb, rfl⟩
+        rcases invKraw hb rfl with ⟨Tb, hTb, hwbty, hwbval⟩
+        injection hTb with hTb'; subst hTb'
+        rcases canon_real hwbval hwbty with ⟨y, rfl⟩
+        exact Or.inr ⟨_, .kadd_red⟩
+      · exact Or.inr ⟨_, .kadd_r (.v_kraw ma (.v_real x)) hb'⟩
+    · exact Or.inr ⟨_, .kadd_l ha'⟩
+  | t_kmul Γ E₁ E₂ a b ha hb iha ihb =>
+    subst hΓ
+    rcases iha rfl with hva | ⟨a', ha'⟩
+    · rcases canon_know hva ha with ⟨wa, ma, rfl⟩
+      rcases invKraw ha rfl with ⟨Ta, hTa, hwaty, hwaval⟩
+      injection hTa with hTa'; subst hTa'
+      rcases canon_real hwaval hwaty with ⟨x, rfl⟩
+      rcases ihb rfl with hvb | ⟨b', hb'⟩
+      · rcases canon_know hvb hb with ⟨wb, mb, rfl⟩
+        rcases invKraw hb rfl with ⟨Tb, hTb, hwbty, hwbval⟩
+        injection hTb with hTb'; subst hTb'
+        rcases canon_real hwbval hwbty with ⟨y, rfl⟩
+        exact Or.inr ⟨_, .kmul_red⟩
+      · exact Or.inr ⟨_, .kmul_r (.v_kraw ma (.v_real x)) hb'⟩
+    · exact Or.inr ⟨_, .kmul_l ha'⟩
+  | t_let Γ T₁ T₂ E₁ E₂ e body he hbody ihe _ =>
+    subst hΓ
+    rcases ihe rfl with hv | ⟨e', he'⟩
+    · exact Or.inr ⟨subst 0 e body, .let_red hv⟩
+    · exact Or.inr ⟨.letE e' body, .let_step he'⟩
+  | t_kraw Γ T v m hv hval hk _ => exact Or.inl (.v_kraw m hval)
+  | t_sub Γ e T E E' h0 hsub ih => exact ih hΓ
+
+/-- **Progress** for the value-carrying calculus: a well-typed closed term is a
+    value or steps. -/
+theorem effect_progress {e T E} (ht : HasTy [] e T E) : IsValue e ∨ ∃ e', e ⇒ e' :=
+  progress' ht rfl
+
 end Sounio.EpistemicEffectsV2
