@@ -204,6 +204,7 @@ let V2_BUILTIN_INDIRECT_CALL: i64 = 27
 // parse-time expands to load_imm 0 — the kernel body becomes dead-but-valid
 // code, and the runtime never runs it on CPU-only hosts.
 let V2_BUILTIN_GPU_INTRINSIC: i64 = 28
+let V2_BUILTIN_SAMPLE_UNIFORM: i64 = 29
 let V2_FIRST_USER_FN_ID: i64 = 32
 
 // V2_UFN_* — user fn instruction recording (scalar, bypasses broken IrInstr struct writes)
@@ -473,6 +474,7 @@ let V2_GLOBAL_LOCAL_ALEN: i64 = 102
 let V2_GLOBAL_USER_FN_RETURN_ARR_SIZE: i64 = 103
 let V2_GLOBAL_LOCAL_IS_BSS: i64 = 104
 let V2_GLOBAL_LOCAL_BSS_IDX: i64 = 105
+let V2_GLOBAL_SAMPLE_UNIFORM_STATE: i64 = 106
 
 struct ExprParse {
     ok: i64,
@@ -1146,6 +1148,7 @@ fn driver_global_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "V2_LOCAL_ALEN") { return V2_GLOBAL_LOCAL_ALEN }
     if token_text_eq(tok, "V2_LOCAL_IS_BSS") { return V2_GLOBAL_LOCAL_IS_BSS }
     if token_text_eq(tok, "V2_LOCAL_BSS_IDX") { return V2_GLOBAL_LOCAL_BSS_IDX }
+    if token_text_eq(tok, "V2_SAMPLE_UNIFORM_STATE") { return V2_GLOBAL_SAMPLE_UNIFORM_STATE }
     if token_text_eq(tok, "DRV_RELOC_OFFSETS") { return V2_GLOBAL_DRV_RELOC_OFFSETS }
     if token_text_eq(tok, "DRV_RELOC_KIND") { return V2_GLOBAL_DRV_RELOC_KIND }
     if token_text_eq(tok, "DRV_RELOC_TARGETS") { return V2_GLOBAL_DRV_RELOC_TARGETS }
@@ -1263,6 +1266,7 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "V2_BUILTIN_HEAP_REALLOC") { return 26 }
     if token_text_eq(tok, "V2_BUILTIN_INDIRECT_CALL") { return 27 }
     if token_text_eq(tok, "V2_BUILTIN_GPU_INTRINSIC") { return 28 }
+    if token_text_eq(tok, "V2_BUILTIN_SAMPLE_UNIFORM") { return 29 }
     if token_text_eq(tok, "V2_FIRST_USER_FN_ID") { return 32 }
 
     if token_text_eq(tok, "UFN_LOAD_IMM") { return 1 }
@@ -1354,6 +1358,7 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "V2_GLOBAL_USER_FN_RETURN_ARR_SIZE") { return 103 }
     if token_text_eq(tok, "V2_GLOBAL_LOCAL_IS_BSS") { return 104 }
     if token_text_eq(tok, "V2_GLOBAL_LOCAL_BSS_IDX") { return 105 }
+    if token_text_eq(tok, "V2_GLOBAL_SAMPLE_UNIFORM_STATE") { return 106 }
     -999999999
 }
 
@@ -2971,6 +2976,7 @@ fn builtin_fn_id(name: Name) -> i64 with Mut, Panic, Div {
     if name_eq_text(name, "read_i64") { return V2_BUILTIN_READ_I64 }
     if name_eq_text(name, "write_i64") { return V2_BUILTIN_WRITE_I64 }
     if name_eq_text(name, "heap_realloc") { return V2_BUILTIN_HEAP_REALLOC }
+    if name_eq_text(name, "sample_uniform") { return V2_BUILTIN_SAMPLE_UNIFORM }
     if name_eq_text(name, "gpu_thread_id_x") { return V2_BUILTIN_GPU_INTRINSIC }
     if name_eq_text(name, "gpu_thread_id_y") { return V2_BUILTIN_GPU_INTRINSIC }
     if name_eq_text(name, "gpu_thread_id_z") { return V2_BUILTIN_GPU_INTRINSIC }
@@ -3015,6 +3021,7 @@ fn builtin_fn_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "read_i64") { return V2_BUILTIN_READ_I64 }
     if token_text_eq(tok, "write_i64") { return V2_BUILTIN_WRITE_I64 }
     if token_text_eq(tok, "heap_realloc") { return V2_BUILTIN_HEAP_REALLOC }
+    if token_text_eq(tok, "sample_uniform") { return V2_BUILTIN_SAMPLE_UNIFORM }
     if token_text_eq(tok, "gpu_thread_id_x") { return V2_BUILTIN_GPU_INTRINSIC }
     if token_text_eq(tok, "gpu_thread_id_y") { return V2_BUILTIN_GPU_INTRINSIC }
     if token_text_eq(tok, "gpu_thread_id_z") { return V2_BUILTIN_GPU_INTRINSIC }
@@ -3662,6 +3669,32 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         let stub_reg = alloc_reg(ctx)
         ufn_record_load_imm(stub_reg, 0)
         return ExprParse { ok: 1, reg: stub_reg, next: pos + 3}
+    }
+    if is_indirect_call == 0 && fn_id == V2_BUILTIN_SAMPLE_UNIFORM && token_kind(pos + 2) == TK_RPAREN {
+        let zero = alloc_reg(ctx)
+        ufn_record_load_imm(zero, 0)
+        let state = alloc_reg(ctx)
+        ufn_record_global_load(state, V2_GLOBAL_SAMPLE_UNIFORM_STATE, zero)
+        let mult = alloc_reg(ctx)
+        ufn_record_load_imm(mult, 1103515245)
+        let prod = alloc_reg(ctx)
+        ufn_record_binop(prod, state, 3, mult)
+        let inc = alloc_reg(ctx)
+        ufn_record_load_imm(inc, 12345)
+        let sum = alloc_reg(ctx)
+        ufn_record_binop(sum, prod, 1, inc)
+        let modulus = alloc_reg(ctx)
+        ufn_record_load_imm(modulus, 2147483647)
+        let next_state = alloc_reg(ctx)
+        ufn_record_binop(next_state, sum, 16, modulus)
+        ufn_record_global_store(V2_GLOBAL_SAMPLE_UNIFORM_STATE, zero, next_state)
+        let as_f64 = alloc_reg(ctx)
+        ufn_record_cvt_i64_to_f64(as_f64, next_state)
+        let denom = alloc_reg(ctx)
+        ufn_record_load_f64_scaled(denom, 2147483647, 1)
+        let sample = alloc_reg(ctx)
+        ufn_record_f64_binop(sample, as_f64, 4, denom)
+        return ExprParse { ok: 1, reg: sample, next: pos + 3}
     }
     if is_indirect_call == 0 && fn_id == V2_BUILTIN_EMPTY_NAME && token_kind(pos + 2) == TK_RPAREN {
         let sidx = find_name_struct_idx()
@@ -5998,7 +6031,7 @@ fn drv_align_page(offset: i64) -> i64 with Div {
 }
 
 fn drv_global_stride() -> i64 { 1048576 }
-fn drv_driver_data_len() -> i64 { 111153152 }  // 4096 base + 106 global slots * 1MiB stride (0-105)
+fn drv_driver_data_len() -> i64 { 112201728 }  // 4096 base + 107 global slots * 1MiB stride (0-106)
 
 fn drv_emit_mov_reg_imm32(reg: i64, val: i64) with Mut, Div, Panic {
     drv_emit_byte(72)
