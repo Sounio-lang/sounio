@@ -12309,7 +12309,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 call_sig = var_find_ty_hash(ns, ne)
                 call_is_closure = var_find_is_closure(ns, ne)
             }
-            let call_tok = EP - 1
+            let call_tok = name_tok
             EP = EP + 1
             var argc: i64 = 0
             var abi_argc: i64 = 0
@@ -21749,7 +21749,10 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                         } else if qtk == 3 {
                             // Identifier arg — check if it's a nested call
                             if q + 1 < TC && TK[(q + 1) as usize] == 6 {
-                                // Nested function call: look up callee return type
+                                // Nested function call: look up callee return type.
+                                // Builtin measure()/measured() is not in FN_*; handle it here so
+                                // calls like f(measure(10.0, uncertainty: 5.0)) keep the source
+                                // confidence instead of falling back to 1000.
                                 let nns = TS[q as usize]
                                 let nne = TE[q as usize]
                                 var nfj: i64 = 0
@@ -21763,6 +21766,29 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                                         break
                                     }
                                     nfj = nfj + 1
+                                }
+                                if nested_conf == 0 && (src_match(nns, nne - nns, "measure") || src_match(nns, nne - nns, "measured")) {
+                                    nested_conf = 990
+                                    var nmq: i64 = q + 2
+                                    var nm_val_tok: i64 = -1
+                                    var nm_unc_tok: i64 = -1
+                                    var nm_depth: i64 = 1
+                                    while nmq < TC && nm_depth > 0 {
+                                        if TK[nmq as usize] == 6 { nm_depth = nm_depth + 1 }
+                                        if TK[nmq as usize] == 7 { nm_depth = nm_depth - 1 }
+                                        if nm_depth > 0 && (TK[nmq as usize] == 53 || TK[nmq as usize] == 4) {
+                                            if nm_val_tok < 0 { nm_val_tok = nmq }
+                                            else if nm_unc_tok < 0 { nm_unc_tok = nmq }
+                                        }
+                                        nmq = nmq + 1
+                                    }
+                                    if nm_val_tok >= 0 && nm_unc_tok >= 0 {
+                                        let nm_eps_scaled = infer_measure_eps_scaled(nm_val_tok, nm_unc_tok)
+                                        if nm_eps_scaled >= 0 {
+                                            nested_conf = 1000 - (nm_eps_scaled / 1000)
+                                            if nested_conf < 0 { nested_conf = 0 }
+                                        }
+                                    }
                                 }
                                 // Gen 11: nested call not in FN_NAME → built-in fallback
                                 if nested_conf == 0 { nested_conf = 1000 }
@@ -22111,15 +22137,17 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                             EXPR_CONF[p as usize] = 1000
                             refine_changed = refine_changed + 1
                         } else {
-                            var rfj: i64 = 0
-                            while rfj < FN_COUNT {
-                                if name_eq(FN_NS[rfj as usize], FN_NE[rfj as usize], rns, rne) {
-                                    EXPR_ETY[p as usize] = ety_from_tnk(FN_RET_TY[rfj as usize])
-                                    EXPR_CONF[p as usize] = FN_EFF_CONF[rfj as usize]  // Gen 16 Track A: propagate actual effect conf
-                                    refine_changed = refine_changed + 1
-                                    break
+                            if !(p + 1 < TC && TK[(p + 1) as usize] == 6) {
+                                var rfj: i64 = 0
+                                while rfj < FN_COUNT {
+                                    if name_eq(FN_NS[rfj as usize], FN_NE[rfj as usize], rns, rne) {
+                                        EXPR_ETY[p as usize] = ety_from_tnk(FN_RET_TY[rfj as usize])
+                                        EXPR_CONF[p as usize] = FN_EFF_CONF[rfj as usize]  // Gen 16 Track A: propagate actual effect conf
+                                        refine_changed = refine_changed + 1
+                                        break
+                                    }
+                                    rfj = rfj + 1
                                 }
-                                rfj = rfj + 1
                             }
                             // Try struct name table
                             if EXPR_CONF[p as usize] < GATE_THRESHOLD {
