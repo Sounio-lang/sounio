@@ -484,12 +484,16 @@ fn mangle_append_type_name(result: &! Name, ty: TypeEntry) with Mut, Panic, Div 
         mangle_append_literal(result, 105, 51, 50, 0, 3)  // "i32"
     } else if ty.kind == TypeKind::TyI64 {
         mangle_append_literal(result, 105, 54, 52, 0, 3)  // "i64"
+    } else if ty.kind == TypeKind::TyI128 {
+        mangle_append_literal(result, 105, 49, 50, 56, 4)  // "i128"
     } else if ty.kind == TypeKind::TyU8 {
         mangle_append_literal(result, 117, 56, 0, 0, 2)  // "u8"
     } else if ty.kind == TypeKind::TyU32 {
         mangle_append_literal(result, 117, 51, 50, 0, 3)  // "u32"
     } else if ty.kind == TypeKind::TyU64 {
         mangle_append_literal(result, 117, 54, 52, 0, 3)  // "u64"
+    } else if ty.kind == TypeKind::TyU128 {
+        mangle_append_literal(result, 117, 49, 50, 56, 4)  // "u128"
     } else if ty.kind == TypeKind::TyF32 {
         mangle_append_literal(result, 102, 51, 50, 0, 3)  // "f32"
     } else if ty.kind == TypeKind::TyF64 {
@@ -904,6 +908,10 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         ty_u32()
     } else if name_is_u64(name) {
         ty_u64()
+    } else if name_is_i128(name) {
+        ty_i128()
+    } else if name_is_u128(name) {
+        ty_u128()
     } else if name_is_usize(name) {
         ty_i64()
     } else if name_is_f32(name) {
@@ -4532,7 +4540,8 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         // Integer literal narrowing: literal 5 (i64) is compatible with i32/i8 annotations
         let int_lit_narrow = (*c).last_literal_kind == 1
             && init_ty.kind == TypeKind::TyI64
-            && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
+            && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8
+                || ann_ty.kind == TypeKind::TyI128 || ann_ty.kind == TypeKind::TyU128)
         // C-style enum↔int assignment: a fieldless enum value coerces to/from a numeric
         // type (canonical bin/souc accepts `let x: i64 = E::A`). Matches the binary ==/!=
         // rule; this *mut fn has (*c).enums to detect enum-named types.
@@ -4588,7 +4597,8 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     if ann_ty.kind != TypeKind::TyUnknown {
         let int_lit_narrow = (*c).last_literal_kind == 1
             && init_ty.kind == TypeKind::TyI64
-            && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
+            && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8
+                || ann_ty.kind == TypeKind::TyI128 || ann_ty.kind == TypeKind::TyU128)
         if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
@@ -5756,9 +5766,11 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
         TypeKind::TyI8 => print("i8")
         TypeKind::TyI32 => print("i32")
         TypeKind::TyI64 => print("i64")
+        TypeKind::TyI128 => print("i128")
         TypeKind::TyU8 => print("u8")
         TypeKind::TyU32 => print("u32")
         TypeKind::TyU64 => print("u64")
+        TypeKind::TyU128 => print("u128")
         TypeKind::TyF32 => print("f32")
         TypeKind::TyF64 => print("f64")
         TypeKind::TyBool => print("bool")
@@ -10610,6 +10622,12 @@ fn call_arg_types_compatible(arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEn
     if types_compatible(arg_ty, param_ty) {
         return true
     }
+    // Integer literals narrow into i128/u128 parameters (mirrors the let-binding
+    // narrowing: a bare `5` may flow into an i128/u128-typed parameter).
+    if arg_expr.kind == ExprKind::ExprIntLit && arg_ty.kind == TypeKind::TyI64
+        && (param_ty.kind == TypeKind::TyI128 || param_ty.kind == TypeKind::TyU128) {
+        return true
+    }
     // Directional borrow boundary: &!T can flow to &T.
     if param_ty.kind == TypeKind::TyRef && arg_ty.kind == TypeKind::TyRefMut {
         return types_compatible_inner(arg_ty.inner, param_ty.inner)
@@ -10868,6 +10886,10 @@ impl Checker {
             (self, ty_u32())
         } else if name_is_u64(name) {
             (self, ty_u64())
+        } else if name_is_i128(name) {
+            (self, ty_i128())
+        } else if name_is_u128(name) {
+            (self, ty_u128())
         } else if name_is_usize(name) {
             (self, ty_i64())
         } else if name_is_f32(name) {
@@ -14382,7 +14404,8 @@ impl Checker {
             // Integer literal narrowing: literal 5 (i64) is compatible with i32/i8 annotations
             let int_lit_narrow = c.last_literal_kind == 1
                 && init_ty.kind == TypeKind::TyI64
-                && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
+                && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8
+                || ann_ty.kind == TypeKind::TyI128 || ann_ty.kind == TypeKind::TyU128)
             if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
@@ -14434,7 +14457,8 @@ impl Checker {
             // Integer literal narrowing: literal 5 (i64) is compatible with i32/i8 annotations
             let int_lit_narrow = c.last_literal_kind == 1
                 && init_ty.kind == TypeKind::TyI64
-                && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
+                && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8
+                || ann_ty.kind == TypeKind::TyI128 || ann_ty.kind == TypeKind::TyU128)
             if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
