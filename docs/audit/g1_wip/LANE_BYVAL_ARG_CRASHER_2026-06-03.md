@@ -8,7 +8,7 @@ already fixed on the base branch. Opening it per `.claude/PARALLEL_BLOCKER_CONTR
 
 ```text
 Lane:          byval-arg-crasher (dominant body-check SIGSEGV)
-Owner:         <unclaimed — claim before writing lean_single.sio>
+Owner:         claude (native/codegen lane) — CLAIMED 2026-06-03
 Base:          codegen/deref-nested-store (has the nested-store fix #1, so the
                crasher is REACHABLE; branching off g1/e008-bridge-fix would NOT
                reach it because there fn_sigs stays empty and the checker bails)
@@ -27,10 +27,10 @@ Known-Blockers: BLK-20260603-byval-arg-crasher-deref (below)
 
 ```text
 Blocker-ID:    BLK-20260603-byval-arg-crasher-deref
-Status:        classified            (root-caused at machine level; fix unstarted)
+Status:        owned                 (claimed; instrumentation started 2026-06-03)
 Severity:      B1                    (dominant front-half crash; 131/170 genuine SIGSEGVs)
 Class:         compiler-semantics    (codegen: by-value struct-arg passing)
-Owner:         <unclaimed>
+Owner:         claude (native/codegen lane)
 Lane:          byval-arg-crasher
 Worktree:      /workspace/sounio-byval-crasher
 Branch:        codegen/byval-arg-crasher
@@ -106,3 +106,54 @@ sentinel −1 deref, sig.params is NOT the culprit. See ALIGNMENT_WITH_G1_LANE_2
 4. G1's not-yet-run discriminating test: route the check-pass table reads
    (`fn_sigs.find/.get`, `structs.find`, …) through direct `*mut` scans and see if the
    crash count drops — may localise the class cheaply.
+
+## Instrumentation result (2026-06-03) — PINNED to the residual by-value boundary methods
+
+Marker-instrumented mc (3 rebuilds via souc-build-lock) on the repro, gdb on the live
+binary. Findings:
+
+1. **Path = `*mut` in-place spine** (not the by-value bridge): only `@@DBG_INNER_INPLACE@@`
+   fired; the by-value `check_call_args_inner` markers never did. (`call_expr_should_bridge_by_value`
+   was a red herring; the in-place path runs, as G1's "source≠execution" NOTE warned.)
+2. **Crash is in the call-arg boundary checks**, specifically the residual boundary
+   `_inplace` wrappers that STILL pass `(*c)` by value:
+   - `checker_check_call_arg_unit_boundary_inplace` → `(*c).report_unit_call_mismatch(...)` (guarded)
+   - `checker_ontology_boundary_check_call_arg_contract_inplace` → `(*c).check_call_arg_ontology_boundary(arg_ty, param_ty, call_span)` (4016)
+   These `(*c).method(...)` calls **deref the *mut and pass the 164 KB `Checker` BY VALUE**.
+   `check_call_arg_{knowledge,unit,ontology}_boundary(self: Checker, arg_ty: TypeEntry,
+   param_ty: TypeEntry, call_span: Span)` matches the crash fingerprint EXACTLY
+   (164 KB + 272 B + 272 B + Span; the 4th struct arg `call_span` passed from −1).
+3. **Layout-sensitive (confirms prior verdict):** adding `print` markers MOVED the crash
+   (0x4c2805b → 0x4c28613; instr2 faulted at unit_boundary, instr3 at the ontology call).
+   The *pattern* is stable (`(*c).<by-value boundary method>(…, call_span)` with the 4th
+   struct arg from −1); the exact instance wobbles with instrumentation. So marker
+   bisection localizes the CLASS, not a single fixed line.
+4. **`call_ref_inner_or_self` is NOT the culprit** (its TypeEntry return is clean:
+   instrumented unit_id = −1 in and out; the unit-mismatch guard does NOT fire for `f(5)`).
+   The crash is the by-value *method-call arg passing itself, not a corrupted TypeEntry.
+
+### Root cause (refined)
+
+The dominant crasher is the **codegen for a by-value method call `(*c).m(self_by_value,
+struct, struct, struct)`** where `self` is the 164 KB `Checker` and there are ≥3
+additional struct args — the **4th struct argument's source address is miscompiled to
+−1**. The lane's *mut migration converted the borrow/refinement boundary checkers to
+direct `*mut` (no by-value self) but left **knowledge / unit / ontology** still calling
+`(*c).<by-value method>(...)` — those are the live crash sites.
+
+### Two fixes
+
+- **(A) Source, in check.sio (G1 domain), lane's PROVEN strategy:** finish the `*mut`
+  migration — give `check_call_arg_{knowledge,unit,ontology}_boundary` (and
+  `report_unit_call_mismatch`) `*mut Checker` transcriptions so the boundary `_inplace`
+  wrappers stop doing `(*c).method(...)` (no 164 KB by-value self, no 4-struct-arg call).
+  Removes the trigger exactly as it did for borrow/refinement. Verify via census
+  (the 131-cluster should clear). **Cross-lane: needs check.sio ownership / G1 coordination.**
+- **(B) Codegen, in lean_single.sio (this lane):** fix the 4th-struct-argument source
+  address in by-value method-call lowering. The REAL bug, but layout-sensitive
+  (Heisenbug) — not isolable by a small repro (faithful models compile correctly), so it
+  needs in-binary work, and instrumentation perturbs it. Higher-risk, higher-value.
+
+**Recommendation:** (A) is the tractable unblock and matches the lane's established
+pattern; (B) is the durable codegen fix but is the hard Heisenbug. Pursue (A) with G1;
+keep (B) as the codegen-hardening follow-up.
