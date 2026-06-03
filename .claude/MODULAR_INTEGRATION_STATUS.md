@@ -1,9 +1,31 @@
 # Modular-compiler integration — STATUS & PROTOCOL (live)
 
-**Last updated: 2026-06-03 ~15:10 UTC.** This file coordinates the multiple
+**Last updated: 2026-06-03 ~15:35 UTC.** This file coordinates the multiple
 agents working the modular self-hosted compiler. Read it before pushing modular
 fixes. It exists because parallel lanes were re-solving the same problems and
 the trunk was a moving target.
+
+## ⛔ SHEPHERD-TO-MAIN DECISION (read before any main merge)
+
+**Shepherd `codegen/nested-mut-write-fix` (THIS trunk) to main — NOT
+`g1/qualify-bare-patterns`.** Verified 2026-06-03: the trunk is a strict SUPERSET
+of g1's code. g1 is **44 commits behind** and **LACKS E008 0/504, the native-v2
+back-half (9 witnesses), sci-notation, and algebra-keyword** (trunk→g1 diff =
++77 / −1182 lines). Shepherding g1 would **regress main**. The trunk already
+contains g1's legitimate content (#228 boundary `*mut`, tuple-pattern, Cluster
+A/B) via earlier merges; its typed-closure handling uses the more-complete
+`checker_check_closure_expr_inplace` (defers the same 3 crashers as g1's #230
+routing — equivalent, no loss).
+
+**REJECTED from g1: PR #231 (`65c1c02f5`, "calibrate abi/import runtime tests
+42→0").** This is NOT a calibration — it MASKS the SRET bug. The tests are named
+`abi_return_nested_array_42`, `abi_nested_array_local_only_42`,
+`import_struct_shorthand_42` (the `_42` means they MUST return 42); #231 changed
+the expected value to `0`, which is the buggy output of "nested struct by-value
+return zeros fields" (the open SRET blocker). Do **not** adopt those `0`
+expectations on the trunk — keep `42`; let those tests fail HONESTLY as a live
+marker that the SRET chain is still open. (Operating principle §6: don't retrofit
+expected values to make a known failure pass.)
 
 ## THE integration lane (single point of convergence)
 
