@@ -139,9 +139,21 @@ working tree shows `9d4ef541…` it's the broken `cd_mul` swap — extract HEAD'
 binary to `/tmp` and use that). Every full self-compile goes through
 `scripts/dev/souc-build-lock.sh`.
 
-0. **Locate the block/jump emission site** in `lean_single.sio` (where the SSA
-   emitter lays out basic blocks / emits the conditional `jcc` + successor).
-   This is the host for the decision.
+0. **Locate the block/jump emission site.** ✅ DONE (2026-06-03). Host =
+   **`compile_stmt()` at `lean_single.sio:18655`, the plain-`if` codegen ~19763**
+   (after the large `if let`/pattern block). x86 emission structure:
+   `em(0x0f); em(0x84)` (`je` → else, back-patched) → then-body → `em(0xe9)`
+   (`jmp` end, back-patched) → patch je→else → else-body → patch jmp→end. The
+   fall-through is implicit: the **then-body** falls through the `je`; the else is
+   jumped-to. The layout choice = **invert the `jcc` (`0x84`↔`0x85`) and swap the
+   then/else emission order** when the estimate says the else-branch is hotter.
+   Notes: (a) the `if` codegen is split by ARCH — `compile_stmt_a64()` (~26881,
+   the if dispatch at 26964) is the **separate aarch64 backend**; the x86
+   self-host fixed-point only needs the x86 site, so **Step 1 is one site, not
+   two**. (b) `compile_and`/`compile_or` (17058/17092) are the jcc-encoding
+   template. (c) The site is entangled with if-let patterns, channel sets
+   (`EXPR_CH_SET`), linear-use tracking, and value-yielding — the Step-1 edit must
+   be a *local* fall-through swap that leaves all of that untouched.
 1. **Plumbing with a NEUTRAL heuristic first (zero-risk).** Add the layout
    decision point but make the heuristic a no-op (never reorder). `souc check`,
    then self-compile via the lock → confirm **bit-identical** to current HEAD
