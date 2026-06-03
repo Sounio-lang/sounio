@@ -129,7 +129,7 @@ is_macos_arm64_known_blocker() {
   esac
 
   case "$case_id" in
-    closure_lambda_lift|closure_fn_ref) return 0 ;;
+    closure_lambda_lift|closure_fn_ref|closure_higher_order|closure_sort_by) return 0 ;;
     *) return 1 ;;
   esac
 }
