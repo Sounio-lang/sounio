@@ -250,6 +250,30 @@ required_cmd_pattern \
   "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_basic.sio
 
 required_cmd_pattern \
+  "stage1_lean_seq_epistemic_check" \
+  "B4_stage1_lean_seq_epistemic_method_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_epistemic.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_knowledge_uncertain_check" \
+  "B4_stage1_lean_seq_knowledge_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_knowledge_uncertain.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_kaxi_fuse_check" \
+  "B4_stage1_lean_seq_kaxi_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_kaxi_fuse.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_nested_knowledge_check" \
+  "B4_stage1_lean_seq_nested_knowledge_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_knowledge_nested_generic.sio
+
+required_cmd_pattern \
   "stage1_lean_sample_uniform_check" \
   "B4_stage1_lean_sampling_semantic_surface_check" \
   "souc-lean check: ok" \
