@@ -316,6 +316,12 @@ required_rejects_with_pattern \
   "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/compile-fail/knowledge_unwrap_requires_reason.sio
 
 required_cmd_pattern \
+  "stage1_lean_knowledge_epsilon_literal_check" \
+  "B4_stage1_lean_knowledge_epsilon_literal_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/epsilon_comparison_valid.sio
+
+required_cmd_pattern \
   "stage1_lean_sample_uniform_check" \
   "B4_stage1_lean_sampling_semantic_surface_check" \
   "souc-lean check: ok" \
