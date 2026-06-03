@@ -2687,6 +2687,8 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_cast_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprClosure {
         result = checker_check_closure_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprForIn {
+        result = checker_check_for_in_expr_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
     }
@@ -2892,6 +2894,28 @@ fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     // by-value original discards body_pair.1).
     let _body_ty = checker_check_opt_block_inplace(c, e.block)
     (*c).loop_depth = (*c).loop_depth - 1
+    ty_unit()
+}
+
+// *mut transcription of check_for_in_expr (18227). It had NO in-place case (unlike ExprWhile),
+// so a `for` loop fell to the by-value bridge → 8MB Checker copy, then the loop BODY checked by
+// value → a body containing a CALL re-copied the Checker per sub-expr → stack smash (the
+// seq_borrow survivor: `for i in 0..n { eq(&bag.items[i], needle) }`). Here the body is checked
+// in place (checker_check_opt_block_inplace). Faithful to the by-value original (no loop-depth
+// limit on for-in; body type discarded).
+fn checker_check_for_in_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let _iter_ty = checker_check_opt_expr_inplace(c, e.left)
+    (*c).env = (*c).env.push_scope()
+    (*c).borrows = (*c).borrows.push_scope()
+    checker_push_const_scope_inplace(c)
+    (*c).env = (*c).env.bind(e.name, ty_i64(), false)
+    (*c).loop_depth = (*c).loop_depth + 1
+    (*c).borrows = (*c).borrows.release_exclusive_borrows()
+    let _body_ty = checker_check_opt_block_inplace(c, e.block)
+    (*c).loop_depth = (*c).loop_depth - 1
+    checker_pop_const_scope_inplace(c)
+    (*c).borrows = (*c).borrows.pop_scope()
+    (*c).env = (*c).env.pop_scope()
     ty_unit()
 }
 
