@@ -137,6 +137,39 @@ before re-applying (probe a `with Epistemic(700)` function's census for
 `guarded>0`). The WIP `measure`-based estimator was reverted (type-checks but
 ineffective and not self-compile-verified).
 
+## ⚠️⚠️ Step-1 probe finding (2026-06-03): the gate only fires on ERRORS, not genuine uncertainty — a wall
+
+The owner-requested probe (`with Epistemic(700)` census for `guarded>0`)
+returned **`guarded=0`**, as did `asserted`-named functions and serial
+composition. Reading the current confidence model (`lean_single.sio`) explains
+why, and it is structural, not incidental:
+
+- Legitimate confidence values are `measured → 990` and `asserted → 970`
+  (FN_EFF_CONF), and **both are ≥ `GATE_THRESHOLD = 950` by design** — the
+  compiler's own comment states it: `// call_conf = 990*1000/1000 = 990 ≥ 950. ✓`.
+- `with Epistemic(N)` is an **obligation** (the body must reach confidence `N`),
+  not a confidence *injector*; it does not lower a call's confidence to `N`.
+- The **only** way `EXPR_CONF` goes below 950 is the explicit `EXPR_CONF = 0`
+  sites — the **error / unresolved-identifier** cases (the "BRONZE" tier).
+
+**Therefore the `66 90` gate marker can fire only on errors, never on
+legitimately-uncertain code.** A guarded site means "unresolved/erroneous," not
+"genuinely uncertain heuristic." This corroborates the audit (8 + 3 programs,
+all `guarded=0`) and reveals the real obstacle: **"real self-reference with a
+genuine guarded>0" is not an annotation task — it requires redesigning the
+confidence calibration** so genuine uncertainty (a branch-likelihood *guess*)
+can land below 950, which the current model deliberately prevents (everything
+real is pinned ≥ 970). That is a substantial change to the epistemic pass
+itself, a third scope expansion on top of "add an optimization to host it."
+
+**Honest options now (owner's call):** (a) redesign the confidence calibration
+so genuine uncertainty gates (large, changes the pass semantics + invalidates
+the existing "0 guarded" framing); (b) accept that the gate is an *error/low-
+assurance* marker, not an *uncertainty* marker, and reframe §6 around that
+honestly; (c) the optimizer-module DEMO instead; (d) stop — the audit + this
+probe are the deliverable, and the self-reference headline may simply not be
+reachable without rebuilding the confidence model.
+
 ## Advisor caveats to honor during implementation
 
 - **Fixed-point hash will change, and that's fine.** Block reorder ⇒ different
