@@ -917,11 +917,20 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
     } else if name_is_char(name) {
         ty_char()
     } else {
-        let bound_ty = (*c).env.lookup(name)
-        if bound_ty.kind != TypeKind::TyError || bound_ty.ontology_id >= 0 {
-            bound_ty
+        // Registered unit names (eV, J, mg, …) resolve to f64 with a unit_id annotation,
+        // matching the by-value lower_named_type (check.sio:10937). The in-place path was
+        // missing this -> units lowered to ty_named, so numeric coercion / unit checks
+        // could not see them as f64.
+        let unit_idx = (*c).units.find(name)
+        if unit_idx >= 0 {
+            ty_with_unit(ty_f64(), unit_idx)
         } else {
-            ty_named(name)
+            let bound_ty = (*c).env.lookup(name)
+            if bound_ty.kind != TypeKind::TyError || bound_ty.ontology_id >= 0 {
+                bound_ty
+            } else {
+                ty_named(name)
+            }
         }
     }
 }
@@ -2547,7 +2556,8 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
                                           ((*c).last_literal_kind == 2 && is_float_type(sig2.return_type))
                 let body_observe_ok = has_effect_id((*c).current_effects, (*c).current_effect_count, 13) &&
                                       (body_ty.kind == TypeKind::TyUnobserved || sig2.return_type.kind == TypeKind::TyUnobserved)
-                if !types_compatible(body_ty, sig2.return_type) && !body_int_lit_narrow && !body_observe_ok {
+                let body_numeric_coerce = is_numeric_type(body_ty) && is_numeric_type(sig2.return_type)
+                if !types_compatible(body_ty, sig2.return_type) && !body_int_lit_narrow && !body_observe_ok && !body_numeric_coerce {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
             }
@@ -2654,7 +2664,10 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     // which would re-trigger the large-frame codegen crash).
     let observe_ok = has_effect_id((*c).current_effects, (*c).current_effect_count, 13) &&
                      (val_ty.kind == TypeKind::TyUnobserved || (*c).current_return_type.kind == TypeKind::TyUnobserved)
-    if !types_compatible(val_ty, (*c).current_return_type) && !lit_narrow && !observe_ok {
+    // Numeric coercion (matches canonical lean_single:19600 "i32→i64, unit→f64, etc."):
+    // any numeric value flows to any numeric return type (units are TyF64+unit_id).
+    let numeric_coerce = is_numeric_type(val_ty) && is_numeric_type((*c).current_return_type)
+    if !types_compatible(val_ty, (*c).current_return_type) && !lit_narrow && !observe_ok && !numeric_coerce {
         checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
     }
     ty_never()
@@ -4587,7 +4600,8 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         // Frame-light Observe boundary on a let binding (`let y: f64 = x`, x: Unobserved<f64>).
         let observe_bind_ok = has_effect_id((*c).current_effects, (*c).current_effect_count, 13) &&
                               (init_ty.kind == TypeKind::TyUnobserved || ann_ty.kind == TypeKind::TyUnobserved)
-        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow && !enum_int_ok && !observe_bind_ok {
+        let numeric_coerce = is_numeric_type(init_ty) && is_numeric_type(ann_ty)
+        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow && !enum_int_ok && !observe_bind_ok && !numeric_coerce {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
@@ -4639,7 +4653,8 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
         let observe_bind_ok = has_effect_id((*c).current_effects, (*c).current_effect_count, 13) &&
                               (init_ty.kind == TypeKind::TyUnobserved || ann_ty.kind == TypeKind::TyUnobserved)
-        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow && !observe_bind_ok {
+        let numeric_coerce = is_numeric_type(init_ty) && is_numeric_type(ann_ty)
+        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow && !observe_bind_ok && !numeric_coerce {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
