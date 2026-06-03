@@ -315,6 +315,18 @@ required_cmd_pattern \
   "souc-lean check: ok" \
   "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/observe_contraction.sio
 
+required_cmd_pattern \
+  "stage1_lean_observe_with_effect_check" \
+  "B4_stage1_lean_observe_boundary_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/observe_with_effect.sio
+
+required_cmd_pattern \
+  "stage1_lean_observe_pattern_check" \
+  "B4_stage1_lean_observe_binary_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/observe_pattern_ok.sio
+
 known_blocker_file_size_over \
   "main_sio_shim_size" \
   "self-hosted/compiler/main.sio" \

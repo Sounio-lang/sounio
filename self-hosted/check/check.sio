@@ -926,6 +926,27 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
     }
 }
 
+fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_args: Option<Box<TypeExprList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match type_args {
+        None => checker_lower_named_type_mut(c, path)
+        Some(args) => {
+            let name = checker_copy_string_list_to_name(path.segments)
+            if name_matches_str10(name, 85, 110, 111, 98, 115, 101, 114, 118, 101, 100) {
+                let inner_ty = checker_lower_single_wrapper_arg_mut(c, Some(args))
+                if inner_ty.kind == TypeKind::TyError {
+                    return ty_error()
+                }
+                var te = ty_error()
+                te.kind = TypeKind::TyUnobserved
+                te.name = name
+                te.inner = Some(Box::new(inner_ty))
+                return te
+            }
+            checker_lower_named_type_mut(c, path)
+        }
+    }
+}
+
 fn checker_lower_single_wrapper_arg_mut(c: *mut Checker, opt: Option<Box<TypeExprList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(args) => {
@@ -1097,7 +1118,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
     }
 
     let lowered = match te.kind {
-        TypeExprKind::TypeNamed => checker_lower_named_type_mut(c, te.path)
+        TypeExprKind::TypeNamed => checker_lower_named_type_with_args_mut(c, te.path, te.type_args)
         TypeExprKind::TypeUnit => ty_unit()
         TypeExprKind::TypeNever => ty_never()
         TypeExprKind::TypeInfer => ty_unknown()
@@ -2559,7 +2580,10 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             let body_ty = checker_check_block_inplace(c, (*fd).body)
             if sig_id >= 0 {
                 let sig2 = (*c).fn_sigs.get(sig_id)
-                if !types_compatible(body_ty, sig2.return_type) {
+                let int_lit_narrow = (*c).last_literal_kind == 1
+                    && body_ty.kind == TypeKind::TyI64
+                    && (sig2.return_type.kind == TypeKind::TyI32 || sig2.return_type.kind == TypeKind::TyI8)
+                if !types_compatible_observing(body_ty, sig2.return_type, (*c).current_effects, (*c).current_effect_count) && !int_lit_narrow {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
             }
@@ -2656,7 +2680,7 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     let int_lit_narrow = (*c).last_literal_kind == 1
         && val_ty.kind == TypeKind::TyI64
         && ((*c).current_return_type.kind == TypeKind::TyI32 || (*c).current_return_type.kind == TypeKind::TyI8)
-    if !types_compatible(val_ty, (*c).current_return_type) && !int_lit_narrow {
+    if !types_compatible_observing(val_ty, (*c).current_return_type, (*c).current_effects, (*c).current_effect_count) && !int_lit_narrow {
         checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
     }
     ty_never()
@@ -2792,19 +2816,21 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             }
         }
     }
-    checker_check_binary_op_types_inplace(c, e.span, e.bin_op, left_ty, right_ty)
-    if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
-        let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
-        let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
+    let effective_left_ty = observed_contract_type(left_ty, (*c).current_effects, (*c).current_effect_count)
+    let effective_right_ty = observed_contract_type(right_ty, (*c).current_effects, (*c).current_effect_count)
+    checker_check_binary_op_types_inplace(c, e.span, e.bin_op, effective_left_ty, effective_right_ty)
+    if is_knowledge_type(effective_left_ty) || is_knowledge_type(effective_right_ty) {
+        let left_inner = if is_knowledge_type(effective_left_ty) { knowledge_inner(effective_left_ty) } else { effective_left_ty }
+        let right_inner = if is_knowledge_type(effective_right_ty) { knowledge_inner(effective_right_ty) } else { effective_right_ty }
         if left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
             let hc = check_hyper_binary(*c, e.span, e.bin_op, left_inner, right_inner)
             checker_store_from_value(c, hc.0)
         }
-        let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty)
+        let knowledge_result = knowledge_binary_result(e.bin_op, effective_left_ty, effective_right_ty)
         if knowledge_result.kind == TypeKind::TyError {
             checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
         }
-        let final_result = checker_check_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_result)
+        let final_result = checker_check_binary_units_inplace(c, e.span, e.bin_op, effective_left_ty, effective_right_ty, knowledge_result)
         if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
             let final_inner = if final_result.kind == TypeKind::TyKnowledge {
                 knowledge_inner(final_result)
@@ -2818,27 +2844,27 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         }
         return final_result
     }
-    if left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper {
-        let hr = check_hyper_binary(*c, e.span, e.bin_op, left_ty, right_ty)
+    if effective_left_ty.kind == TypeKind::TyHyper && effective_right_ty.kind == TypeKind::TyHyper {
+        let hr = check_hyper_binary(*c, e.span, e.bin_op, effective_left_ty, effective_right_ty)
         checker_store_from_value(c, hr.0)
         let typed_result = hr.1
-        let final_result = checker_check_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, typed_result)
+        let final_result = checker_check_binary_units_inplace(c, e.span, e.bin_op, effective_left_ty, effective_right_ty, typed_result)
         if e.bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
             let rh = (*c).record_hyper_expr(e.span, final_result.algebra_kind, 1, false)
             checker_store_from_value(c, rh)
         }
         return final_result
     }
-    var result = binary_result_type(e.bin_op, left_ty, right_ty)
+    var result = binary_result_type(e.bin_op, effective_left_ty, effective_right_ty)
     if result.kind == TypeKind::TyError && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
-        let l_enum = left_ty.kind == TypeKind::TyNamed && (*c).enums.find(left_ty.name) >= 0
-        let r_enum = right_ty.kind == TypeKind::TyNamed && (*c).enums.find(right_ty.name) >= 0
-        if (l_enum && is_numeric_type(right_ty)) || (is_numeric_type(left_ty) && r_enum) {
+        let l_enum = effective_left_ty.kind == TypeKind::TyNamed && (*c).enums.find(effective_left_ty.name) >= 0
+        let r_enum = effective_right_ty.kind == TypeKind::TyNamed && (*c).enums.find(effective_right_ty.name) >= 0
+        if (l_enum && is_numeric_type(effective_right_ty)) || (is_numeric_type(effective_left_ty) && r_enum) {
             result = ty_bool()
         }
     }
-    if result.kind == TypeKind::TyError && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
-        checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
+    if result.kind == TypeKind::TyError && !is_error_or_unknown(effective_left_ty) && !is_error_or_unknown(effective_right_ty) {
+        checker_report_mismatch_inplace(c, e.span, 4, effective_left_ty, effective_right_ty)
     }
     if e.bin_op == BinaryOp::OpDiv {
         let denom_pair = checker_eval_const_int_opt_expr_mut(c, e.right)
@@ -2851,7 +2877,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             checker_report_error_at_inplace(c, e.span, 57, 0, 0, 0)
         }
     }
-    checker_check_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, result)
+    checker_check_binary_units_inplace(c, e.span, e.bin_op, effective_left_ty, effective_right_ty, result)
 }
 
 fn checker_check_binary_op_types_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -3674,7 +3700,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         ret_ty
     }
     if ret_ty.kind != TypeKind::TyUnknown {
-        if !types_compatible(body_ty, ret_ty) {
+        if !types_compatible_observing(body_ty, ret_ty, (*c).current_effects, (*c).current_effect_count) {
             checker_report_mismatch_inplace(c, e.span, 8, ret_ty, body_ty)
         }
     }
@@ -3959,7 +3985,7 @@ fn checker_check_call_args_inner_inplace(c: *mut Checker, args: Option<Box<ExprL
             }
             let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
             if has_param_info {
-                if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
+                if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty, (*c).current_effects, (*c).current_effect_count) {
                     checker_report_mismatch_inplace(c, call_span, 9, param_info.ty, arg_ty)
                 }
                 // Direct *mut void calls (no Checker locals — was bb/rb/kb/ub/ob, ~12MB+
@@ -4672,7 +4698,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         let init_enum = init_ty.kind == TypeKind::TyNamed && (*c).enums.find(init_ty.name) >= 0
         let ann_enum = ann_ty.kind == TypeKind::TyNamed && (*c).enums.find(ann_ty.name) >= 0
         let enum_int_ok = (init_enum && is_numeric_type(ann_ty)) || (is_numeric_type(init_ty) && ann_enum)
-        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow && !enum_int_ok {
+        if !types_compatible_observing(init_ty, ann_ty, (*c).current_effects, (*c).current_effect_count) && !int_lit_narrow && !enum_int_ok {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
@@ -4722,7 +4748,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         let int_lit_narrow = (*c).last_literal_kind == 1
             && init_ty.kind == TypeKind::TyI64
             && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
+        if !types_compatible_observing(init_ty, ann_ty, (*c).current_effects, (*c).current_effect_count) && !int_lit_narrow {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
@@ -5986,6 +6012,14 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
         }
         TypeKind::TyPolicy => {
             print("Policy<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TypeKind::TyUnobserved => {
+            print("Unobserved<")
             match ty.inner {
                 Some(inner) => print_type_name(*inner)
                 None => print("?")
@@ -10830,8 +10864,37 @@ fn eval_const_int_opt_expr(c: Checker, opt: Option<Box<Expr> >) -> (i64, i64) wi
     }
 }
 
-fn call_arg_types_compatible(arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+fn types_compatible_observing(provided_ty: TypeEntry, expected_ty: TypeEntry, effects: [i64; 8], effect_count: i64) -> bool with Mut, Panic, Div, Alloc {
+    if types_compatible(provided_ty, expected_ty) {
+        return true
+    }
+    if !has_effect_id(effects, effect_count, 13) {
+        return false
+    }
+    if provided_ty.kind == TypeKind::TyUnobserved {
+        match provided_ty.inner {
+            Some(inner_ty) => return types_compatible(*inner_ty, expected_ty)
+            None => return false
+        }
+    }
+    false
+}
+
+fn observed_contract_type(ty: TypeEntry, effects: [i64; 8], effect_count: i64) -> TypeEntry with Mut, Panic, Div {
+    if ty.kind == TypeKind::TyUnobserved && has_effect_id(effects, effect_count, 13) {
+        match ty.inner {
+            Some(inner_ty) => return *inner_ty
+            None => return ty
+        }
+    }
+    ty
+}
+
+fn call_arg_types_compatible(arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, effects: [i64; 8], effect_count: i64) -> bool with Mut, Panic, Div, Alloc {
     if types_compatible(arg_ty, param_ty) {
+        return true
+    }
+    if types_compatible_observing(arg_ty, param_ty, effects, effect_count) {
         return true
     }
     // Directional borrow boundary: &!T can flow to &T.
@@ -14405,7 +14468,10 @@ impl Checker {
                 // Check return type compatibility
                 if sig_id >= 0 {
                     let sig2 = c.fn_sigs.get(sig_id)
-                    if !types_compatible(body_ty, sig2.return_type) {
+                    let int_lit_narrow = c.last_literal_kind == 1
+                        && body_ty.kind == TypeKind::TyI64
+                        && (sig2.return_type.kind == TypeKind::TyI32 || sig2.return_type.kind == TypeKind::TyI8)
+                    if !types_compatible_observing(body_ty, sig2.return_type, c.current_effects, c.current_effect_count) && !int_lit_narrow {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
@@ -14515,7 +14581,10 @@ impl Checker {
                 let body_ty = pair.1
                 if sig_id >= 0 {
                     let sig2 = c.fn_sigs.get(sig_id)
-                    if !types_compatible(body_ty, sig2.return_type) {
+                    let int_lit_narrow = c.last_literal_kind == 1
+                        && body_ty.kind == TypeKind::TyI64
+                        && (sig2.return_type.kind == TypeKind::TyI32 || sig2.return_type.kind == TypeKind::TyI8)
+                    if !types_compatible_observing(body_ty, sig2.return_type, c.current_effects, c.current_effect_count) && !int_lit_narrow {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
@@ -14607,7 +14676,7 @@ impl Checker {
             let int_lit_narrow = c.last_literal_kind == 1
                 && init_ty.kind == TypeKind::TyI64
                 && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-            if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
+            if !types_compatible_observing(init_ty, ann_ty, c.current_effects, c.current_effect_count) && !int_lit_narrow {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             if ann_ty.kind == init_ty.kind
@@ -14659,7 +14728,7 @@ impl Checker {
             let int_lit_narrow = c.last_literal_kind == 1
                 && init_ty.kind == TypeKind::TyI64
                 && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-            if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
+            if !types_compatible_observing(init_ty, ann_ty, c.current_effects, c.current_effect_count) && !int_lit_narrow {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             if ann_ty.kind == init_ty.kind
@@ -14982,25 +15051,28 @@ impl Checker {
             }
         }
 
+        let effective_left_ty = observed_contract_type(left_ty, c.current_effects, c.current_effect_count)
+        let effective_right_ty = observed_contract_type(right_ty, c.current_effects, c.current_effect_count)
+
         // Validate binary operator type constraints
-        c = c.check_binary_op_types(e.span, e.bin_op, left_ty, right_ty)
+        c = c.check_binary_op_types(e.span, e.bin_op, effective_left_ty, effective_right_ty)
 
         // Epsilon propagation for Knowledge types
         // If either operand is Knowledge<T, epsilon>, propagate epsilon bounds
-        if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
-            let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
-            let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
+        if is_knowledge_type(effective_left_ty) || is_knowledge_type(effective_right_ty) {
+            let left_inner = if is_knowledge_type(effective_left_ty) { knowledge_inner(effective_left_ty) } else { effective_left_ty }
+            let right_inner = if is_knowledge_type(effective_right_ty) { knowledge_inner(effective_right_ty) } else { effective_right_ty }
             if left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
                 let hyper_checked = check_hyper_binary(c, e.span, e.bin_op, left_inner, right_inner)
                 c = hyper_checked.0
             }
-            let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty)
+            let knowledge_result = knowledge_binary_result(e.bin_op, effective_left_ty, effective_right_ty)
             if knowledge_result.kind == TypeKind::TyError {
                 c = c.report_error_at(e.span, 36, 0, 0, 0)
             }
             // Continue with normal checking for inner type compatibility
             // The knowledge_binary_result handles epsilon propagation
-            let result_with_units = c.check_binary_units(e.span, e.bin_op, left_ty, right_ty, knowledge_result)
+            let result_with_units = c.check_binary_units(e.span, e.bin_op, effective_left_ty, effective_right_ty, knowledge_result)
             c = result_with_units.0
             let final_result = result_with_units.1
             if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
@@ -15016,11 +15088,11 @@ impl Checker {
             return (c, final_result)
         }
 
-        if left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper {
-            let hyper_result = check_hyper_binary(c, e.span, e.bin_op, left_ty, right_ty)
+        if effective_left_ty.kind == TypeKind::TyHyper && effective_right_ty.kind == TypeKind::TyHyper {
+            let hyper_result = check_hyper_binary(c, e.span, e.bin_op, effective_left_ty, effective_right_ty)
             c = hyper_result.0
             let typed_result = hyper_result.1
-            let result_with_units = c.check_binary_units(e.span, e.bin_op, left_ty, right_ty, typed_result)
+            let result_with_units = c.check_binary_units(e.span, e.bin_op, effective_left_ty, effective_right_ty, typed_result)
             c = result_with_units.0
             let final_result = result_with_units.1
             if e.bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
@@ -15029,21 +15101,21 @@ impl Checker {
             return (c, final_result)
         }
 
-        var result = binary_result_type(e.bin_op, left_ty, right_ty)
+        var result = binary_result_type(e.bin_op, effective_left_ty, effective_right_ty)
         // C-style enum compare: a fieldless enum value is i64-compatible for ==/!=.
         // Canonical bin/souc accepts `i64 == Color::Red`; the pure binary_result_type can't
         // see the enum table, so override here (this Checker method has c.enums). Only ==/!=
         // and only enum-vs-numeric (enum-vs-same-enum already passes via name_eq in
         // binary_result_type; arithmetic stays rejected → matches canonical's `E::A + 1`).
         if result.kind == TypeKind::TyError && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
-            let l_enum = left_ty.kind == TypeKind::TyNamed && c.enums.find(left_ty.name) >= 0
-            let r_enum = right_ty.kind == TypeKind::TyNamed && c.enums.find(right_ty.name) >= 0
-            if (l_enum && is_numeric_type(right_ty)) || (is_numeric_type(left_ty) && r_enum) {
+            let l_enum = effective_left_ty.kind == TypeKind::TyNamed && c.enums.find(effective_left_ty.name) >= 0
+            let r_enum = effective_right_ty.kind == TypeKind::TyNamed && c.enums.find(effective_right_ty.name) >= 0
+            if (l_enum && is_numeric_type(effective_right_ty)) || (is_numeric_type(effective_left_ty) && r_enum) {
                 result = ty_bool()
             }
         }
-        if result.kind == TypeKind::TyError && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
-            c = c.report_mismatch(e.span, 4, left_ty, right_ty)
+        if result.kind == TypeKind::TyError && !is_error_or_unknown(effective_left_ty) && !is_error_or_unknown(effective_right_ty) {
+            c = c.report_mismatch(e.span, 4, effective_left_ty, effective_right_ty)
         }
         // Division/modulo by zero: detect denominators that fold to a constant integer zero.
         if e.bin_op == BinaryOp::OpDiv {
@@ -15058,7 +15130,7 @@ impl Checker {
             }
         }
         // Unit checking for arithmetic on unit-typed values
-        let result_with_units = c.check_binary_units(e.span, e.bin_op, left_ty, right_ty, result)
+        let result_with_units = c.check_binary_units(e.span, e.bin_op, effective_left_ty, effective_right_ty, result)
         c = result_with_units.0
         let final_result = result_with_units.1
         (c, final_result)
@@ -18204,7 +18276,7 @@ impl Checker {
                 // Check against parameter type and boundary contracts
                 let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
                 if has_param_info {
-                    if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
+                    if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty, c.current_effects, c.current_effect_count) {
                         c = c.report_mismatch(call_span, 9, param_info.ty, arg_ty)
                     }
                     c = c.check_call_arg_borrow_boundary(arg_expr, param_info.ty, call_span)
@@ -18567,7 +18639,7 @@ impl Checker {
         let int_lit_narrow = c.last_literal_kind == 1
             && val_ty.kind == TypeKind::TyI64
             && (c.current_return_type.kind == TypeKind::TyI32 || c.current_return_type.kind == TypeKind::TyI8)
-        if !types_compatible(val_ty, c.current_return_type) && !int_lit_narrow {
+        if !types_compatible_observing(val_ty, c.current_return_type, c.current_effects, c.current_effect_count) && !int_lit_narrow {
             c = c.report_mismatch(e.span, 8, c.current_return_type, val_ty)
         }
         (c, ty_never())
@@ -18987,7 +19059,7 @@ impl Checker {
 
         // Check body type against return type if annotated
         if ret_ty.kind != TypeKind::TyUnknown {
-            if !types_compatible(body_ty, ret_ty) {
+            if !types_compatible_observing(body_ty, ret_ty, c.current_effects, c.current_effect_count) {
                 c = c.report_mismatch(e.span, 8, ret_ty, body_ty)
             }
         }
