@@ -2439,6 +2439,40 @@ fn run_native_v2_emit13() with IO, Mut, Panic, Div, Alloc {
     run_native_v2_emit_exit_code(13, "artifacts/omega/emit13.elf")
 }
 
+// Bridge: real .sio SOURCE -> front-half (parse/check/lower) -> IrModule ->
+// native-v2 backend -> runnable x86-64 ELF. Composes compiler_preflight_ir_load
+// (the --ir-dump front-half, source -> IrModule) with
+// compile_native_v2_preview_to_file (the native-v2 IR -> ELF back-half). This is
+// the first real source -> native-v2 path; the --native-v2-emit* witnesses only
+// emit hardcoded IR.
+fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let source_path = compiler_mode_source_arg(args, flag_index, "--native-v2-compile")
+    let out_path = compiler_mode_output_path(args, "a.out")
+    if !compiler_preflight_source_input(source_path) {
+        panic("native-v2-compile failed: source not readable")
+    }
+    let ir_result = compiler_preflight_ir_load(source_path)
+    if !ir_result.ok {
+        compiler_print_errors(ir_result.errors)
+        panic("native-v2-compile failed: front-half errors")
+    }
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = ir_result.module
+    let fn_count = module.fn_count
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_compile: FAIL to_file rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_compile: emitted functions=")
+    print_int(fn_count)
+    print(" path=")
+    print(out_path)
+    print("\n")
+}
+
 // Parameterized scalar witness: --native-v2-emit-scalar <N> <out_path>.
 // Reuses the scalar IR builder; the gate runs the ELF and asserts exit == N (mod 256).
 // SCOPE: hardens the IR->ELF exit-code proof; source-level/front-half stays blocked on G1.
@@ -26227,6 +26261,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-emit13" {
             run_native_v2_emit13()
+            return
+        } else if mode == "--native-v2-compile" {
+            run_native_v2_compile_mode(args, arg_idx)
             return
         } else if mode == "--native-v2-emit-scalar" {
             run_native_v2_emit_scalar(args, arg_idx)
