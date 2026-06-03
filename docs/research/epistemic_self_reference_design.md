@@ -344,3 +344,88 @@ first-class `Knowledge<i64>` in the compiler's own source, certified and gated
 by the same epistemic pass it applies to user code. "The compiler applies its
 epistemic type system to its own source" becomes a mechanical fact with real
 content — and the fixed-point proves the self-confidence is stable.
+
+---
+
+## Forensic finding 7 (2026-06-03): the dual-channel fold fix is a NO-OP — REJECTED
+
+The proposed one-line fix — fold the measurement-quality channel into the gate
+channel at the binding `escope_add` site
+
+```sounio
+let gate_conf = if bind_meas_conf > 0 && bind_meas_conf < bind_conf { bind_meas_conf } else { bind_conf }
+escope_add(nh, bind_ty, gate_conf)
+```
+
+was implemented, self-compiled through the build lock (committed binary
+`6374e52f` as stage 0), and **empirically disproven**. It is now reverted.
+
+### What was measured
+
+Building the fixed compiler `B1 = B0(source+fold)` and compiling programs with
+it produced, at first sight, an exciting result:
+
+| program | `B0` (committed) | `B1` (fold) |
+|---|---|---|
+| `lean_single.sio` (the compiler itself) | `guarded=0` | `guarded=443` |
+| `consume_k(measure(10, unc:8))` (80% rel) | `guarded=0` | `guarded=1` |
+| `consume_k(measure(10, unc:0.05))` (0.5% rel) | `guarded=0` | `guarded=0` |
+
+and a "graded sweep" (`unc` 0.05→`guarded=0`, ≥1.0→`guarded=1`), plus a stable
+bootstrap fixed point `B2==B3` (md5 `33a8ddaf119c`). Read naively this says
+"the fold makes genuine uncertainty gate, selectively, and even makes the
+compiler gate 443 of its own sites." **All of that is an artifact.**
+
+### The decisive instrument
+
+A diagnostic counter `FOLD_FIRED`, incremented only inside the fold's true
+branch and printed beside `gates[...]`, settles it:
+
+```
+B1_instr compiling lean_single.sio:  direct=17161 guarded=443 fold_fired=0
+B1_instr compiling the high-unc probe: direct=23  guarded=1   fold_fired=0
+```
+
+**`fold_fired=0` in every case.** The fold's true branch never executed, so it
+provably never lowered a single confidence — yet `guarded` moved from 0 to 443
+(compiler) and 0 to 1 (probe). The guarded deltas are therefore **codegen
+artifacts**: inserting the `let gate_conf` local into `lean_single.sio`
+perturbed its known span/layout-sensitive codegen (see memory
+`project_modular_span_sensitive_crash`) and emitted spurious `66 90` NOP
+markers. The fixed point holding only proves the *artifact* is stable — a
+stable miscompile is still a miscompile.
+
+### Root cause of the no-op
+
+For a `measure()` binding the inference path assigns **the same value** to both
+channels: `rhs_conf = m_conf` and `bind_meas_conf = m_conf` (lean_single.sio
+~21606-21607). Hence `bind_meas_conf < bind_conf` is structurally **never
+true** for measured values, and `min(bind_conf, bind_meas_conf) ≡ bind_conf`.
+The two channels were never actually divergent at the binding site for the case
+the fix targeted; the fold had nothing to fold. The fix can only fire for a
+binding whose RHS is a call to a function named *exactly* `measured`/`asserted`/
+`constant` whose `FN_EFF_CONF` exceeds the tier constant — a case that occurs
+neither in the compiler source (zero such bindings, confirmed by grep) nor in
+any test probe.
+
+### Corrected understanding of the real gap
+
+The genuine bug is **upstream of the binding channel**, not at it. `B0` stores a
+low `bind_conf` (e.g. 200 for an 80%-relative measurement) into `ESCOPE_CONF`
+already, yet still reports `guarded=0` on the consuming call — i.e. the stored
+low confidence does **not** propagate to the call-token gate / marker-emission
+site. The §6 audit's "gate never observed firing" stands. Closing it requires
+work at the propagation / marker-emission boundary (which call token a
+low-confidence `ESCOPE_CONF` entry should mark), **not** a binding-site fold.
+
+### Status
+
+- Fix **reverted**; working tree clean; committed binary `6374e52f` untouched.
+- §6 self-application headline remains **overstated / not implemented** per the
+  2026-06-03 audit; this finding closes the "dual-channel fold" candidate fix as
+  a dead end.
+- Method note: the result was only caught because the `FOLD_FIRED` instrument
+  separated "the logic fired" from "the count changed." A guarded-count delta is
+  **not** evidence that an epistemic mechanism fired; on layout-sensitive codegen
+  it can be pure noise. Future epistemic-pass changes must instrument the
+  decision branch, not trust the aggregate count.
