@@ -37,14 +37,19 @@ So **full void→ELF is not achieved**. The writer works *standalone* with c634b
 an at-scale/in-context miscompile. **Do not pin `c634b38f` to build mc** (it breaks the writer); use
 `bin/souc-linux-x86_64` (ac08e3b8). My branch reverts an incorrect c634b38f pin.
 
-> **CAVEAT (do not over-trust the "two independent bootstrap bugs" framing):** the ac08e3b8 void-main
-> corruption was **NOT root-caused**, and **no bootstrap has yet produced a validated module→ELF**
-> (under c634b38f the writer was broken so there was no artifact to inspect; under ac08e3b8 the
-> lowering corrupted). An equally-live hypothesis is that the **lowered void-main module is itself
-> malformed** — a corrupt `Name` buf/len (exactly what the wild-string env-dump implies) or a main
-> with no real `ret` — which the two bootstraps merely *surface* differently (c634b38f's writer
-> silently no-ops on it; ac08e3b8's path prints garbage). Before hunting bootstraps, **dump the
-> lowered module and validate main's name + that it ends in a `ret`.**
+> **RESOLVED (dumped main's lowered IR via a temporary in-seam diagnostic):** under **c634b38f** the
+> void-main module is **SOUND** — `name=main` (len 4), `instr_count=2`, **ends in `ret`**
+> (last_op_is_ret=YES), backend reports `emitted fns=1`. The "malformed module / missing ret"
+> hypothesis is **REFUTED**: the lowering (incl. the registration fix) is correct. The wall is
+> **bootstrap-dependent codegen in DISTINCT subsystems**:
+> - `c634b38f`: sound module in, but the **backend ELF-writer** miscompiles in mc (`write_file`
+>   returns ok, no file) — even emit13 doesn't write. The writer works *standalone* with c634b38f.
+> - `ac08e3b8`: the **checker** miscompiles — void main raises a spurious
+>   `error[E008] expected i64, found i8`, then SIGSEGV + ~7MB garbage. (Its writer is fine: emit13
+>   exits 13.)
+>
+> So NEXT = a backend-writer fix (or a bootstrap whose writer survives mc; the sound module is already
+> in hand) and/or the E008 checker miscompile under ac08e3b8 — **not** a lowering problem.
 
 ## Next steps (multi-session)
 
