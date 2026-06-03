@@ -175,6 +175,14 @@ var OR_ALT_IS_WILD: [i64; 8] = [0; 8]   // 1 if wildcard _
 var OR_BODY_PATCHES:[i64; 8] = [0; 8]   // offset of je/jmp → body for each non-last alt
 var OR_BODY_PV:     [i64; 8] = [0; 8]   // 1 if OR_BODY_PATCHES[i] is a valid patch offset
 var OR_ALT_COUNT:   i64 = 0
+// Tuple-pattern arms: per-element sub-pattern data for `(p0, p1, ...) => body`.
+var TPAT_DISC:      [i64; 8] = [0; 8]   // element discriminant (-1 = none/wild/bind)
+var TPAT_TAGGED:    [i64; 8] = [0; 8]   // 1 if element is a tagged check (Some/None/Ok/Err/variant)
+var TPAT_HAS_BIND:  [i64; 8] = [0; 8]   // 1 if element binds its inner payload
+var TPAT_BIND_NS:   [i64; 8] = [0; 8]
+var TPAT_BIND_NE:   [i64; 8] = [0; 8]
+var TPAT_IS_WILD:   [i64; 8] = [0; 8]   // 1 if element is `_`
+var TPAT_SKIP:      [i64; 8] = [0; 8]   // collected jne-skip patch offsets
 
 // Generic function registry (for monomorphization)
 var GEN_FN_NS: [i64; 64] = [0; 32]
@@ -20450,6 +20458,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             var bind_ns: i64 = 0
             var bind_ne: i64 = 0
             var has_binding: i64 = 0
+            var is_tuple_pattern: i64 = 0
+            var tpat_count: i64 = 0
             let arm_tk = TK[EP as usize]
             // Some(v) pattern — tag=1, bind inner value
             if arm_tk == 57 {
@@ -20518,7 +20528,41 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             if arm_tk == 4 {
                 disc = TV[EP as usize]; EP = EP + 1
             }
-            if arm_tk != 57 && arm_tk != 58 && arm_tk != 59 && arm_tk != 60 && arm_tk != 3 && arm_tk != 4 { EP = EP + 1 }
+            // Tuple pattern: `( p0 , p1 , ... )` — parse each element sub-pattern into TPAT_*.
+            if arm_tk == 6 {
+                is_tuple_pattern = 1
+                EP = EP + 1  // consume (
+                while TK[EP as usize] != 7 && TK[EP as usize] != 0 && tpat_count < 8 {
+                    if TK[EP as usize] == 28 { EP = EP + 1; continue }  // skip comma
+                    var edisc: i64 = -1
+                    var etagged: i64 = 0
+                    var ehasbind: i64 = 0
+                    var ebns: i64 = 0
+                    var ebne: i64 = 0
+                    var ewild: i64 = 0
+                    let etk = TK[EP as usize]
+                    if etk == 57 { EP = EP + 1; edisc = 1; etagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; ebns = TS[EP as usize]; ebne = TE[EP as usize]; ehasbind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                    else if etk == 58 { EP = EP + 1; edisc = 0; etagged = 1 }
+                    else if etk == 59 { EP = EP + 1; edisc = 0; etagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; ebns = TS[EP as usize]; ebne = TE[EP as usize]; ehasbind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                    else if etk == 60 { EP = EP + 1; edisc = 1; etagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; ebns = TS[EP as usize]; ebne = TE[EP as usize]; ehasbind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                    else if etk == 3 {
+                        let ens = TS[EP as usize]; let ene = TE[EP as usize]
+                        if ene - ens == 1 && sb(ens) == 95 { ewild = 1; EP = EP + 1 }
+                        else if TK[(EP + 1) as usize] == 51 { let eeh = gl_name_hash(ens, ene); EP = EP + 2; let evh = gl_name_hash(TS[EP as usize], TE[EP as usize]); EP = EP + 1; edisc = en_variant_value(eeh, evh); etagged = 1 }
+                        else { ewild = 1; EP = EP + 1 }
+                    }
+                    else { EP = EP + 1 }
+                    TPAT_DISC[tpat_count as usize] = edisc
+                    TPAT_TAGGED[tpat_count as usize] = etagged
+                    TPAT_HAS_BIND[tpat_count as usize] = ehasbind
+                    TPAT_BIND_NS[tpat_count as usize] = ebns
+                    TPAT_BIND_NE[tpat_count as usize] = ebne
+                    TPAT_IS_WILD[tpat_count as usize] = ewild
+                    tpat_count = tpat_count + 1
+                }
+                if TK[EP as usize] == 7 { EP = EP + 1 }  // consume )
+            }
+            if arm_tk != 57 && arm_tk != 58 && arm_tk != 59 && arm_tk != 60 && arm_tk != 3 && arm_tk != 4 && arm_tk != 6 { EP = EP + 1 }
             // Phase 1.4: Or-pattern detection (A | B | C => body)
             var is_or_pattern: i64 = 0
             if is_var_bind == 0 && TK[EP as usize] == 45 {
@@ -20654,6 +20698,82 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 em(0xe9); match_ends[arm_count as usize] = CL; em32(0)
                 arm_count = arm_count + 1
                 if or_skip_patch >= 0 { patch32(or_skip_patch, CL) }
+            }
+            // Tuple pattern emission: `(p0, p1, ...) => body`. Scrutinee is a tuple pointer in
+            // match_slot; element i is at [tuple + off_i] and is itself a pointer to the
+            // element's {tag, payload} (Options/aggregates are pointer-represented, exactly as
+            // the single-pattern path at the tagged emission below loads [scrut]→tag). Emit a
+            // tag test per tagged element, ALL jumping to the shared skip; bind payloads; body.
+            if is_tuple_pattern == 1 {
+                var tup_first_slots: i64 = (MATCH_SCRUT_HASH % 1000000) / 1000
+                if tup_first_slots < 1 { tup_first_slots = 1 }
+                let elem1_off = tup_first_slots * 8
+                // Element Option types (for typing the payload bindings — without this the
+                // bound var is untyped and `*ia` in the arm body miscompiles).
+                var tup_e0_hash: i64 = 0
+                var tup_e1_hash: i64 = 0
+                let tmci = tup_cache_lookup(MATCH_SCRUT_HASH)
+                if tmci >= 0 {
+                    tup_e0_hash = TUP_CACHE_FIRST_HASH[tmci as usize]
+                    tup_e1_hash = TUP_CACHE_LAST_HASH[tmci as usize]
+                }
+                var nskip: i64 = 0
+                var tei: i64 = 0
+                while tei < tpat_count {
+                    if TPAT_IS_WILD[tei as usize] == 0 && TPAT_TAGGED[tei as usize] == 1 {
+                        let toff = if tei == 0 { 0 } else { elem1_off }
+                        emit_load_var(match_slot)
+                        if toff != 0 { em(0x48); em(0x8d); em(0x80); em32(toff) }
+                        em(0x48); em(0x8b); em(0x00)  // mov rax,[tuple+toff] = element tag (elements are INLINE)
+                        em(0x50)
+                        em(0x48); em(0xb8); em64(TPAT_DISC[tei as usize])
+                        em(0x59)
+                        em(0x48); em(0x39); em(0xc1)
+                        em(0x0f); em(0x85); TPAT_SKIP[nskip as usize] = CL; em32(0)
+                        nskip = nskip + 1
+                    }
+                    tei = tei + 1
+                }
+                tei = 0
+                while tei < tpat_count {
+                    if TPAT_HAS_BIND[tei as usize] == 1 {
+                        let toff = if tei == 0 { 0 } else { elem1_off }
+                        emit_load_var(match_slot)
+                        em(0x48); em(0x8d); em(0x80); em32(toff + 8)  // lea rax,[tuple+toff+8]
+                        em(0x48); em(0x8b); em(0x00)  // mov rax,[..] = element payload (inline, slot after tag)
+                        let tbslot = var_add(TPAT_BIND_NS[tei as usize], TPAT_BIND_NE[tei as usize])
+                        if tbslot >= 0 {
+                            emit_store_var(tbslot)
+                            if VAR_COUNT > 0 {
+                                let tbvi = VAR_COUNT - 1
+                                let eoh = if tei == 0 { tup_e0_hash } else { tup_e1_hash }
+                                if option_hash_is(eoh) {
+                                    VAR_TY[tbvi as usize] = option_hash_inner_ty(eoh)
+                                    VAR_TY_HASH[tbvi as usize] = option_hash_inner_hash(eoh)
+                                }
+                            }
+                        }
+                    }
+                    tei = tei + 1
+                }
+                if TK[EP as usize] == 52 { EP = EP + 1 }
+                var tup_arm_block: i64 = 0
+                if TK[EP as usize] == 8 { tup_arm_block = 1; EP = EP + 1 }
+                LAST_STMT_HAS_VALUE = 0
+                if tup_arm_block == 1 {
+                    while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                    if TK[EP as usize] == 9 { EP = EP + 1 }
+                } else { compile_stmt() }
+                match_arms_ch_union = match_arms_ch_union | EXPR_CH_SET
+                match_arms = match_arms + 1
+                if LAST_STMT_HAS_VALUE == 1 {
+                    if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH }
+                    else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error(EP - 1, "match arm type does not match other arms") }
+                } else { match_all_value = 0 }
+                em(0xe9); match_ends[arm_count as usize] = CL; em32(0)
+                arm_count = arm_count + 1
+                var tpj: i64 = 0
+                while tpj < nskip { patch32(TPAT_SKIP[tpj as usize], CL); tpj = tpj + 1 }
             }
             // Variable binding pattern (with optional guard)
             if is_or_pattern == 0 && is_var_bind == 1 {
