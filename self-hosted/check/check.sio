@@ -2757,8 +2757,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             }
         }
     }
-    let bot = (*c).check_binary_op_types(e.span, e.bin_op, left_ty, right_ty)
-    checker_store_from_value(c, bot)
+    checker_check_binary_op_types_inplace(c, e.span, e.bin_op, left_ty, right_ty)
     if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
         let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
         let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
@@ -2770,9 +2769,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         if knowledge_result.kind == TypeKind::TyError {
             checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
         }
-        let ru = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, knowledge_result)
-        checker_store_from_value(c, ru.0)
-        let final_result = ru.1
+        let final_result = checker_check_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_result)
         if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
             let final_inner = if final_result.kind == TypeKind::TyKnowledge {
                 knowledge_inner(final_result)
@@ -2790,9 +2787,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         let hr = check_hyper_binary(*c, e.span, e.bin_op, left_ty, right_ty)
         checker_store_from_value(c, hr.0)
         let typed_result = hr.1
-        let ru = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, typed_result)
-        checker_store_from_value(c, ru.0)
-        let final_result = ru.1
+        let final_result = checker_check_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, typed_result)
         if e.bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
             let rh = (*c).record_hyper_expr(e.span, final_result.algebra_kind, 1, false)
             checker_store_from_value(c, rh)
@@ -2821,9 +2816,74 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             checker_report_error_at_inplace(c, e.span, 57, 0, 0, 0)
         }
     }
-    let ru = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, result)
-    checker_store_from_value(c, ru.0)
-    ru.1
+    checker_check_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, result)
+}
+
+fn checker_check_binary_op_types_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    if is_error_or_unknown(left_ty) || is_error_or_unknown(right_ty) {
+        return
+    }
+    if op == BinaryOp::OpBitAnd || op == BinaryOp::OpBitOr || op == BinaryOp::OpBitXor {
+        if !is_integer_type(left_ty) || !is_integer_type(right_ty) {
+            checker_report_error_at_inplace(c, span, 48, 0, 0, 0)
+        }
+        return
+    }
+    if op == BinaryOp::OpShl || op == BinaryOp::OpShr {
+        if !is_integer_type(left_ty) || !is_integer_type(right_ty) {
+            checker_report_error_at_inplace(c, span, 49, 0, 0, 0)
+        }
+        return
+    }
+    if op == BinaryOp::OpRem {
+        if !is_integer_type(left_ty) || !is_integer_type(right_ty) {
+            checker_report_error_at_inplace(c, span, 50, 0, 0, 0)
+        }
+        return
+    }
+    if op == BinaryOp::OpAnd || op == BinaryOp::OpOr {
+        if !is_bool_type(left_ty) || !is_bool_type(right_ty) {
+            checker_report_error_at_inplace(c, span, 51, 0, 0, 0)
+        }
+    }
+}
+
+fn checker_check_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let lu = left.unit_id
+    let ru = right.unit_id
+    if lu < 0 && ru < 0 {
+        return result
+    }
+    if op == BinaryOp::OpAdd || op == BinaryOp::OpSub {
+        if lu != ru {
+            let updated = (*c).report_unit_mismatch(span, lu, ru)
+            checker_store_from_value(c, updated)
+            return result
+        }
+        return ty_with_unit(result, lu)
+    }
+    if op == BinaryOp::OpMul {
+        if lu >= 0 && ru >= 0 {
+            return result
+        }
+        let uid = if lu >= 0 { lu } else { ru }
+        return ty_with_unit(result, uid)
+    }
+    if op == BinaryOp::OpDiv {
+        if lu >= 0 && ru < 0 {
+            return ty_with_unit(result, lu)
+        }
+        return result
+    }
+    if op == BinaryOp::OpEq || op == BinaryOp::OpNe
+        || op == BinaryOp::OpLt || op == BinaryOp::OpLe
+        || op == BinaryOp::OpGt || op == BinaryOp::OpGe {
+        if lu != ru {
+            let updated = (*c).report_unit_mismatch(span, lu, ru)
+            checker_store_from_value(c, updated)
+        }
+    }
+    result
 }
 
 fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
