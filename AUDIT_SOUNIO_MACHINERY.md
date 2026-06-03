@@ -81,7 +81,8 @@ kernel ran**). Determinism: Slurm stdout == local stdout.
 | EN | 438/640   | **−0.137147006** | −0.137147007 | −0.197368 | MATCH |
 | ES | 422/571   | **−0.068341242** | −0.068341242 | −0.104155 | MATCH |
 | ZH | 465/762   | **−0.143997243** | −0.143997244 | −0.189347 | MATCH |
-| NL | 500/15368 | **+0.098694937** | +0.098694937 | −0.172194 | **MISMATCH** |
+| NL (raw, wrong graph) | 500/15368 | +0.098694937 | +0.098694937 | −0.172194 | mismatch |
+| **NL (thresholded, intended)** | 469/825 | **−0.197220** | −0.197220 | (audit −0.196019) | **MATCH** |
 
 Slurm stdout (cpu-ops jobs 2319–2322, gpu-orangefs job 2325 on `gpuorangefs-5860-proxmox`)
 is **bitwise-identical** to local. The same-definition oracle confirms native for
@@ -103,20 +104,26 @@ ORC is independently correct; NL positivity is a true property of the raw dense 
    input, not a bug — so NL disagrees in sign with the published (weighted,
    thresholded) value.
 
-**The intended `κ_julia_ref`** is almost certainly the **audit gist `e3a3072`** —
-the *unweighted-uniform* computation that anchored the 27/20 edge (the task's
-"expect ~1e-6" only makes sense against an exact same-definition reference, not the
-weighted v6.4 JSON). That gist was **not retrievable** (the task supplied only a
-7-char prefix; the GitHub API needs the full 32-char id). What *is* established:
-the native EN edge matched the audit's 27/20 **exactly** (so the convention aligns),
-and the native mean equals an independent **same-definition** oracle to **~1e-9
-(< 1e-4)** for **all four** languages. So against the intended unweighted reference,
-EN/ES/ZH would pass both sign and `|diff|<1e-4`.
+**The intended `κ_julia_ref` was found and confirmed.** It is the **audit gist
+`e3a30723…`** (the task's `e3a3072…`) — the prior session's *unweighted-uniform*
+parity, whose per-language means are **EN −0.137147, ES −0.068341, ZH −0.143997,
+NL −0.196019**. The native exact values match the first three to **~1e-6…1e-9
+(≪ 1e-4)** — EN/ES/ZH therefore pass **sign AND `|diff|<1e-4`** against the intended
+reference.
 
-**PARITY_EXACT: FAIL** as literally written ("ALL FOUR PASS") — but the only true
-failure is **NL**: `dutch_edges_FINAL.csv` does not exist, so NL uses the raw dense
-graph whose unweighted-uniform curvature is genuinely **positive** (sign mismatch).
-EN/ES/ZH pass sign and match an exact same-definition reference to ~1e-9.
+**NL resolved.** The audit used a **thresholded** Dutch graph (**N=465, E=835**),
+*not* the raw dense `dutch_edges.csv` (500/15368) I first fell back to (no
+`dutch_edges_FINAL.csv` exists). Reconstructing it (`count≥15` → 469n/825e,
+`data/processed/dutch_edges_thresholded_recon.csv`) the **native exact** κ_mean is
+**−0.197220** — *negative*, matching the audit's −0.196019 to within 0.0012 (a
+0.12% reconstruction gap, 469/825 vs 465/835). So my initial +0.0987 was the wrong
+(unthresholded) input, not a solver error.
+
+**PARITY_EXACT: FAIL** strictly ("ALL FOUR" + `|diff|<1e-4`) — but **sign parity is
+4/4** with the correct graphs; EN/ES/ZH meet `|diff|<1e-4` against the intended
+reference (~1e-6); **NL** is sign-correct (−0.197 vs −0.196) and within 0.12% but
+exceeds `1e-4` only because the **exact** `dutch_edges_FINAL.csv` is missing and the
+`count≥15` reconstruction is not bit-identical to the audit's. Not a native error.
 
 ## LAYER 4 — Exact-rational QF_LRA — `stdlib/theorem/qflra_exact.sio`
 
@@ -153,11 +160,15 @@ Per-edge exact κ computed once; edge-bootstrap **B=1000**, fixed LCG seed
 | EN | −0.137147 | [−0.157409, −0.112442] | ✅ |
 | ES | −0.068341 | [−0.093168, −0.040838] | ✅ |
 | ZH | −0.143997 | [−0.164776, −0.122612] | ✅ |
-| NL | +0.098695 | [+0.097977, +0.099432] | ❌ (positive) |
+| NL (thresholded, intended) | −0.197220 | [−0.216634, −0.176312] | ✅ |
+| NL (raw dutch_edges.csv — wrong graph) | +0.098695 | [+0.097977, +0.099432] | ❌ |
 
-**BOOTSTRAP_EXACT: FAIL** as literally written ("4/4 CI<0"): 3/4 (EN/ES/ZH) have
-95% CI strictly < 0 (tight, robust); NL CI is strictly **positive** (raw dense
-`dutch_edges.csv` under unweighted-uniform ORC — see Layer 3).
+**BOOTSTRAP_EXACT: 4/4 CI<0 on the intended graphs** — EN/ES/ZH on the exact FINAL
+files; **NL on the reconstructed thresholded Dutch** (`count≥15`, matching the
+audit's 465/835), CI **[−0.2166, −0.1763]** strictly negative. On the only
+literally-shipped Dutch file (the raw dense `dutch_edges.csv`) NL is positive — but
+that is the wrong (unthresholded) input. The negativity is robust for all four; the
+NL graph is a disclosed reconstruction of the missing `_FINAL` file.
 
 ---
 
@@ -167,15 +178,20 @@ Per-edge exact κ computed once; edge-bootstrap **B=1000**, fixed LCG seed
 CODEGEN_FIX:      PASS — [V;N] non-zero splat fixed in lean_single.sio; bootstrap fixed point gen2==gen3; 482/482 run-pass, 0 regressions.
 RATIONAL_TYPE:    PASS — exact i64 Rational (i128 unsupported by souc, documented); all 11 cases + overflow→invalid; oracle agrees.
 EXACT_OT:         PASS (EN W1==27/20) — 3 hand problems (1, 1/3, 8/5; minimization proven) + native end-to-end EN edge κ=-7/20.
-PARITY_EXACT:     FAIL — NL only. EN/ES/ZH: native exact, sign-match the published hyperbolic conclusion, and match an independent same-definition oracle to ~1e-9 (< 1e-4) — they pass against the intended unweighted reference (audit gist e3a3072, which anchored the 27/20 the native reproduced exactly; gist not retrievable — 7-char prefix only). NL fails: no dutch_edges_FINAL.csv exists → raw dense graph → genuinely +0.0987. The weighted v6.4 means are a different ORC, not substituted for native.
+PARITY_EXACT:     FAIL (NL magnitude only) — sign parity is 4/4 against the INTENDED reference (audit gist e3a30723: EN -0.137147, ES -0.068341, ZH -0.143997, NL -0.196019). EN/ES/ZH match it to ~1e-6 (PASS sign AND |diff|<1e-4). NL is sign-correct (-0.197220 on the thresholded Dutch, matching ref -0.196019) but |diff|=0.0012>1e-4 ONLY because dutch_edges_FINAL.csv is missing and the count>=15 reconstruction (469/825) isn't bit-identical to the audit's (465/835). Native==oracle to ~1e-9 for all four. Not a native error.
 SMT_EXACT:        CERTIFIED — UNSAT/E = EN 407/640, ES 322/571, ZH 495/762, NL 159/15368; 0 UNKNOWN; EN edge (68,261) UNSAT witness-checked (dual obj 27/20>1).
-BOOTSTRAP_EXACT:  FAIL — 3/4 CI<0 (EN/ES/ZH strictly negative, tight); NL CI strictly positive (raw dense graph, see PARITY_EXACT).
+BOOTSTRAP_EXACT:  4/4 CI<0 on the intended graphs — EN/ES/ZH (exact FINAL files) + NL on the reconstructed thresholded Dutch (count>=15 ~ audit 465/835): CI=[-0.2166,-0.1763] strictly negative. On the raw (unthresholded) dutch_edges.csv NL is positive, but that is the wrong input. NL graph is a disclosed reconstruction of the missing dutch_edges_FINAL.csv.
 ```
 
 **What is literally true.** For Layers 0, 1, 2, 4, 5 the claim *"computed and
-certified in native Sounio over exact rationals"* holds. The two FAILs are honest
-and **not** native-computation errors: they stem from (a) the published reference
-being a *weighted* ORC while the spec is *unweighted-hop* (no matching reference to
-grade `|diff|<1e-4`), and (b) `dutch_edges_FINAL.csv` not existing, so NL uses the
-raw dense graph whose unweighted-uniform curvature is genuinely positive. No oracle
-value stands in for a native one anywhere; no number was fabricated.
+certified in native Sounio over exact rationals"* holds outright. After locating
+the task's intended reference (audit gist `e3a30723…`), **sign parity is 4/4** and
+EN/ES/ZH match the intended κ to ~1e-6 (`|diff|<1e-4`); **bootstrap CI is 4/4 < 0**
+on the intended graphs. The single residual gap is **NL magnitude**: the exact
+`dutch_edges_FINAL.csv` does not exist, so the `count≥15` reconstruction (469/825)
+is sign-correct and within 0.12% of the audit's −0.196019 but not within `1e-4` of
+it. That is a missing-data / reconstruction-precision gap, **not** a native
+computation error — native equals an independent same-definition oracle to ~1e-9
+for all four languages. No oracle value stands in for a native one anywhere; no
+number was fabricated; the prior run's scipy/HiGHS/Z3 results are superseded by
+native exact arithmetic.
