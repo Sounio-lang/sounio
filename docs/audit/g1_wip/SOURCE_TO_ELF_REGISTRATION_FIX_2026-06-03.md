@@ -67,9 +67,25 @@ Instrumented `native_v2_write_min_elf64_to_file` with print markers + ran emit13
   source perturbation ([[project_modular_span_sensitive_crash]], [[project_modular_B_repro_verdict]]).
 - **The SOURCE IS PROVEN CORRECT:** ac08e3b8 compiles this exact writer correctly — emit13 writes 8200
   bytes and **exits 13**. So the defect is purely in c634b38f's codegen, not in the writer source.
-- ⇒ NOT fixable by a writer source-workaround. Real fixes: (a) fix the branch-target codegen in
-  `lean_single.sio` and regenerate the bootstrap, or (b) use ac08e3b8 (writer works) + fix its checker
-  E008 miscompile (g1/e008-bridge-fix lane). Both multi-session.
+- ⇒ NOT fixable by a writer source-workaround.
+
+## ac08e3b8 checker E008 route — ALSO intractable (proven, no build)
+
+Pursued route (b). `mc_ac` (ac08e3b8-built) `--check` spuriously raises **E008 on valid programs
+broadly** — `fn f()->i64{5}` and `fn g(){let x=1}` both fail, while c634b38f-mc says OK on both. The
+void-main E008 is the slow-path `report_mismatch((*fd).span, 8, sig2.return_type, body_ty)`
+(check.sio:1587) with **both** types corrupted; `sig2`/`body_ty` come from `(*c).fn_sigs.get(sig_id)`
+(FnSig by value) and `(*c).check_block(...)` — core by-value-struct returns. So ac08e3b8 (2026-05-29)
+**pervasively miscompiles the current `*mut`/SRET checker** (transcribed 2026-06-03, *after* ac08e3b8):
+it's too old. "Fixing" it would mean un-transcribing the `*mut` checker = reverting the 170-crasher fix.
+Not viable.
+
+**Conclusion — both source routes are dead, and no clean bootstrap exists** (only ac08e3b8 + c634b38f
+build mc post-cap-raise; all `.prev*` are pre-2026-05-28 → 1024-local-cap → can't build). The milestone
+needs a **codegen-level fix in `lean_single.sio` + bootstrap regeneration**. Cleanest target: the
+**writer branch-target regression in the c634b38f lineage** (recent, single; c634b38f already compiles
+the `*mut` checker correctly) — bisect lean_single codegen changes 05-29→06-03, fix, reach the bootstrap
+fixed point, rebuild mc. Multi-session, with bootstrap-brick risk.
 
 ## Next steps (multi-session)
 
