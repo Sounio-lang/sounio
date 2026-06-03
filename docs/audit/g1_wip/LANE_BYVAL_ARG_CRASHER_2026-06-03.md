@@ -167,3 +167,42 @@ direct `*mut` (no by-value self) but left **knowledge / unit / ontology** still 
 **Recommendation:** (A) is the tractable unblock and matches the lane's established
 pattern; (B) is the durable codegen fix but is the hard Heisenbug. Pursue (A) with G1;
 keep (B) as the codegen-hardening follow-up.
+
+## Fix (B) investigation — started 2026-06-03 (lean_single codegen)
+
+Per directive, started the lean_single codegen fix. Did NOT make blind edits (no fast
+verify loop; layout-sensitive). Findings from reading the arg-passing codegen + more
+in-binary gdb:
+
+### Arg-passing model (lean_single 1677–1796)
+- Args are evaluated and pushed to the stack, then loaded into arg registers by
+  `emit_setup_call_args_shift_x86(argc, shift)` → `emit_load_rsp_arg_x86`.
+- **Struct-by-value args are passed BY POINTER** (an 8-byte address per arg in a reg;
+  the callee `rep movsq`-copies the struct from it — matches the crash prologue).
+- A function returning a large struct uses **SRET with shift=1**: rdi = hidden return
+  buffer, real args shift to rsi/rdx/rcx/r8/r9 (`emit_direct_fn_call_x86`, ret_slots>0).
+
+### Hypothesis (concrete, testable — but verify is 2:36/rebuild + layout-sensitive)
+The crash callee prologue copies **rdi as the 164 KB self** (a shift=0 / self-in-rdi
+layout), yet `check_call_arg_{knowledge,unit,ontology}_boundary(self: Checker, …) ->
+Checker` RETURNS a large struct → it *should* be SRET (shift=1, rdi=buffer). A
+**caller/callee SRET-shift mismatch** (or a `ret_agg_nslots` miscount for the Checker
+return at this call site) would misplace the arguments by one slot, so the 4th struct
+arg (`call_span`) is loaded from the wrong stack slot → −1.
+
+### Counter-evidence / why it's still hard
+- The faulting frame has BOTH `rcx = −1` (bad 4th arg) AND `[rbp+8] = 0` (null return
+  address) → caller-side frame/convention corruption, not just one mis-loaded arg.
+- Layout-sensitive: instrumentation moves the crash, so a "fix" could pass by shifting
+  layout rather than correcting logic — verification needs the full census, not a unit
+  check, and a green census wouldn't prove the logic is right.
+- NOT repro-isolable: 6 faithful bootstrap models (incl. `(*ptr).method(re-passed
+  struct params)` with a 164 KB self) all compile correctly under ds_fixed2.
+
+### Status of fix (B)
+Concrete hypothesis in hand (SRET-shift / ret_slots-at-call-site for large-struct-
+returning by-value methods), but no fast verify loop and a layout-sensitive target.
+Proceeding means hypothesis-driven edits to `emit_direct_fn_call_x86` /
+`ret_agg_nslots` + full mc rebuild + 504-census per iteration. Higher-risk than fix
+(A). Recommended order remains: land fix (A) (G1, removes the trigger) first; pursue
+(B) as codegen hardening with the SRET-shift hypothesis as the entry point.
