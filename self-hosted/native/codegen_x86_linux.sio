@@ -7468,56 +7468,13 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     }
     if file_len <= 64 || file_len > 131072 { return 13 }
 
-    native_v2_file_put_u8(&! bytes, 0, 127)
-    native_v2_file_put_u8(&! bytes, 1, 69)
-    native_v2_file_put_u8(&! bytes, 2, 76)
-    native_v2_file_put_u8(&! bytes, 3, 70)
-    native_v2_file_put_u8(&! bytes, 4, 2)
-    native_v2_file_put_u8(&! bytes, 5, 1)
-    native_v2_file_put_u8(&! bytes, 6, 1)
-    native_v2_file_put_u16(&! bytes, 16, 2)
-    native_v2_file_put_u16(&! bytes, 18, 62)
-    native_v2_file_put_u32(&! bytes, 20, 1)
-    native_v2_file_put_u64(&! bytes, 24, base_addr + text_offset + entry_offset)
-    native_v2_file_put_u64(&! bytes, 32, 64)
-    native_v2_file_put_u64(&! bytes, 40, 0)
-    native_v2_file_put_u32(&! bytes, 48, 0)
-    native_v2_file_put_u16(&! bytes, 52, 64)
-    native_v2_file_put_u16(&! bytes, 54, 56)
-    native_v2_file_put_u16(&! bytes, 56, phnum)
-    native_v2_file_put_u16(&! bytes, 58, 64)
-    native_v2_file_put_u16(&! bytes, 60, 0)
-    native_v2_file_put_u16(&! bytes, 62, 0)
-
-    var phoff: i64 = 64
-    native_v2_file_emit_phdr(&! bytes, phoff, 1, 5, text_offset, text_vaddr, code_len, code_len, 4096)
-    phoff = phoff + 56
-    if rodata_len > 0 {
-        native_v2_file_emit_phdr(&! bytes, phoff, 1, 4, rodata_offset, rodata_vaddr, rodata_len, rodata_len, 4096)
-        phoff = phoff + 56
-    }
-    if data_len > 0 {
-        native_v2_file_emit_phdr(&! bytes, phoff, 1, 6, data_offset, data_vaddr, data_len, data_len, 4096)
-        phoff = phoff + 56
-    }
-    native_v2_file_emit_phdr(&! bytes, phoff, 0x6474e551, 6, 0, 0, 0, 0, 16)
-
-    var i: i64 = 0
-    while i < code_len && (text_offset + i) < 131072 {
-        bytes[(text_offset + i) as usize] = (*nc).code.bytes[i as usize]
-        i = i + 1
-    }
-
-    i = 0
-    while i < rodata_len && (rodata_offset + i) < 131072 {
-        let rb: i8 = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_bytes[i as usize] } else { (*nc).rodata.bytes[i as usize] }
-        bytes[(rodata_offset + i) as usize] = rb
-        i = i + 1
-    }
-
-    // The direct native-v2 witness only needs zero-initialized runtime-context
-    // storage. Avoid copying through the nested data byte array here; that path
-    // is still covered by the wider legacy ELF finalizer.
+    // Build the ELF header + program headers + segment payloads into `bytes`
+    // via a dedicated small helper. Splitting this out of the (large) caller
+    // keeps the conditional `if rodata_len>0`/`if data_len>0` forward jumps
+    // inside a short function so their branch offsets stay small — working
+    // around a c634b38f branch-target miscompile that otherwise skipped this
+    // whole block and fell through to `return 0` (file never written).
+    native_v2_build_elf_image_into(&! bytes, nc, base_addr, entry_offset, text_offset, code_len, rodata_offset, rodata_len, rodata_vaddr, text_vaddr, data_offset, data_len, data_vaddr, phnum)
 
     if bytes[0 as usize] != (0x7f as i8) { return 14 }
     if bytes[1 as usize] != (0x45 as i8) { return 15 }
@@ -7525,6 +7482,57 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     if bytes[3 as usize] != (0x46 as i8) { return 17 }
     if write_file(output_path, bytes, file_len) < 0 { return 18 }
     0
+}
+
+// Helper extracted from native_v2_write_min_elf64_to_file (c634b38f branch-offset
+// workaround — see caller). Writes the full ELF image into `bytes`.
+fn native_v2_build_elf_image_into(bytes: &! [i8; 131072], nc: &! NativeCompiler, base_addr: i64, entry_offset: i64, text_offset: i64, code_len: i64, rodata_offset: i64, rodata_len: i64, rodata_vaddr: i64, text_vaddr: i64, data_offset: i64, data_len: i64, data_vaddr: i64, phnum: i64) with Mut, Panic, Div {
+    native_v2_file_put_u8(bytes, 0, 127)
+    native_v2_file_put_u8(bytes, 1, 69)
+    native_v2_file_put_u8(bytes, 2, 76)
+    native_v2_file_put_u8(bytes, 3, 70)
+    native_v2_file_put_u8(bytes, 4, 2)
+    native_v2_file_put_u8(bytes, 5, 1)
+    native_v2_file_put_u8(bytes, 6, 1)
+    native_v2_file_put_u16(bytes, 16, 2)
+    native_v2_file_put_u16(bytes, 18, 62)
+    native_v2_file_put_u32(bytes, 20, 1)
+    native_v2_file_put_u64(bytes, 24, base_addr + text_offset + entry_offset)
+    native_v2_file_put_u64(bytes, 32, 64)
+    native_v2_file_put_u64(bytes, 40, 0)
+    native_v2_file_put_u32(bytes, 48, 0)
+    native_v2_file_put_u16(bytes, 52, 64)
+    native_v2_file_put_u16(bytes, 54, 56)
+    native_v2_file_put_u16(bytes, 56, phnum)
+    native_v2_file_put_u16(bytes, 58, 64)
+    native_v2_file_put_u16(bytes, 60, 0)
+    native_v2_file_put_u16(bytes, 62, 0)
+
+    var phoff: i64 = 64
+    native_v2_file_emit_phdr(bytes, phoff, 1, 5, text_offset, text_vaddr, code_len, code_len, 4096)
+    phoff = phoff + 56
+    if rodata_len > 0 {
+        native_v2_file_emit_phdr(bytes, phoff, 1, 4, rodata_offset, rodata_vaddr, rodata_len, rodata_len, 4096)
+        phoff = phoff + 56
+    }
+    if data_len > 0 {
+        native_v2_file_emit_phdr(bytes, phoff, 1, 6, data_offset, data_vaddr, data_len, data_len, 4096)
+        phoff = phoff + 56
+    }
+    native_v2_file_emit_phdr(bytes, phoff, 0x6474e551, 6, 0, 0, 0, 0, 16)
+
+    var i: i64 = 0
+    while i < code_len && (text_offset + i) < 131072 {
+        (*bytes)[(text_offset + i) as usize] = (*nc).code.bytes[i as usize]
+        i = i + 1
+    }
+
+    i = 0
+    while i < rodata_len && (rodata_offset + i) < 131072 {
+        let rb: i8 = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_bytes[i as usize] } else { (*nc).rodata.bytes[i as usize] }
+        (*bytes)[(rodata_offset + i) as usize] = rb
+        i = i + 1
+    }
 }
 
 pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeTargetSpec, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {

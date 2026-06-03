@@ -20482,6 +20482,97 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             var is_tuple_pattern: i64 = 0
             var tpat_count: i64 = 0
             let arm_tk = TK[EP as usize]
+            // TUPLE PATTERN: `(p0, p1) => body` — the arm dispatcher had NO handler for
+            // tuple patterns (LParen=6), so the catch-all merely skipped the `(` and
+            // mis-lowered the arm (tested only the 1st element, ran the wrong arm body on
+            // fall-through -> NULL/garbage deref). Handle the 2-element tuple case fully
+            // here, mirroring the single-tagged-arm emission, then `continue`. Each element
+            // is tested against the matching offset in the tuple scrutinee at match_slot;
+            // ALL elements must match (both `jne` target the same next-arm location).
+            if arm_tk == 6 {
+                EP = EP + 1   // skip '('
+                // --- parse sub-pattern 0 ---
+                var t0_disc: i64 = -1; var t0_tagged: i64 = 0; var t0_bns: i64 = 0; var t0_bne: i64 = 0; var t0_bind: i64 = 0; var t0_wild: i64 = 0
+                let p0tk = TK[EP as usize]
+                if p0tk == 57 { EP = EP + 1; t0_disc = 1; t0_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; t0_bns = TS[EP as usize]; t0_bne = TE[EP as usize]; t0_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                else if p0tk == 58 { EP = EP + 1; t0_disc = 0; t0_tagged = 1 }
+                else if p0tk == 59 { EP = EP + 1; t0_disc = 0; t0_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; t0_bns = TS[EP as usize]; t0_bne = TE[EP as usize]; t0_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                else if p0tk == 60 { EP = EP + 1; t0_disc = 1; t0_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; t0_bns = TS[EP as usize]; t0_bne = TE[EP as usize]; t0_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                else if p0tk == 3 { let ns0 = TS[EP as usize]; let ne0 = TE[EP as usize]; EP = EP + 1; if ne0 - ns0 == 1 && sb(ns0) == 95 { t0_wild = 1 } else { t0_bns = ns0; t0_bne = ne0; t0_bind = 1; t0_wild = 1 } }
+                else if p0tk == 4 { t0_disc = TV[EP as usize]; EP = EP + 1 }
+                else { EP = EP + 1 }
+                if TK[EP as usize] == 28 { EP = EP + 1 }   // skip ','
+                // --- parse sub-pattern 1 ---
+                var t1_disc: i64 = -1; var t1_tagged: i64 = 0; var t1_bns: i64 = 0; var t1_bne: i64 = 0; var t1_bind: i64 = 0; var t1_wild: i64 = 0
+                let p1tk = TK[EP as usize]
+                if p1tk == 57 { EP = EP + 1; t1_disc = 1; t1_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; t1_bns = TS[EP as usize]; t1_bne = TE[EP as usize]; t1_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                else if p1tk == 58 { EP = EP + 1; t1_disc = 0; t1_tagged = 1 }
+                else if p1tk == 59 { EP = EP + 1; t1_disc = 0; t1_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; t1_bns = TS[EP as usize]; t1_bne = TE[EP as usize]; t1_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                else if p1tk == 60 { EP = EP + 1; t1_disc = 1; t1_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; t1_bns = TS[EP as usize]; t1_bne = TE[EP as usize]; t1_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
+                else if p1tk == 3 { let ns1 = TS[EP as usize]; let ne1 = TE[EP as usize]; EP = EP + 1; if ne1 - ns1 == 1 && sb(ns1) == 95 { t1_wild = 1 } else { t1_bns = ns1; t1_bne = ne1; t1_bind = 1; t1_wild = 1 } }
+                else if p1tk == 4 { t1_disc = TV[EP as usize]; EP = EP + 1 }
+                else { EP = EP + 1 }
+                if TK[EP as usize] == 7 { EP = EP + 1 }    // skip ')'
+                // --- element offsets in the tuple scrutinee (first elem @0, second @ first's byte size) ---
+                let t_tci = tup_cache_lookup(MATCH_SCRUT_HASH)
+                var t_off1: i64 = 16
+                var t_first_ty: i64 = 0; var t_first_hash: i64 = 0; var t_last_ty: i64 = 0; var t_last_hash: i64 = 0
+                if t_tci >= 0 {
+                    t_first_ty = TUP_CACHE_FIRST_TY[t_tci as usize]; t_first_hash = TUP_CACHE_FIRST_HASH[t_tci as usize]
+                    t_last_ty = TUP_CACHE_LAST_TY[t_tci as usize]; t_last_hash = TUP_CACHE_LAST_HASH[t_tci as usize]
+                    t_off1 = ty_slot_count(t_first_ty, t_first_hash) * 8
+                }
+                // --- emit per-element tag tests; any mismatch -> next arm ---
+                var t_skip0: i64 = -1; var t_skip1: i64 = -1
+                if t0_tagged == 1 && t0_wild == 0 {
+                    emit_load_var(match_slot)
+                    em(0x48); em(0x8b); em(0x00)   // mov rax, [rax]  (elem0 tag @ +0)
+                    em(0x50); em(0x48); em(0xb8); em64(t0_disc); em(0x59)
+                    em(0x48); em(0x39); em(0xc1)
+                    em(0x0f); em(0x85); t_skip0 = CL; em32(0)
+                }
+                if t1_tagged == 1 && t1_wild == 0 {
+                    emit_load_var(match_slot)
+                    if t_off1 == 0 { em(0x48); em(0x8b); em(0x00) }
+                    else if t_off1 < 128 { em(0x48); em(0x8b); em(0x40); em(t_off1) }
+                    else { em(0x48); em(0x8b); em(0x80); em32(t_off1) }
+                    em(0x50); em(0x48); em(0xb8); em64(t1_disc); em(0x59)
+                    em(0x48); em(0x39); em(0xc1)
+                    em(0x0f); em(0x85); t_skip1 = CL; em32(0)
+                }
+                // --- bind payloads (after both tests pass) ---
+                if t0_bind == 1 {
+                    emit_load_var(match_slot)
+                    em(0x48); em(0x8b); em(0x40); em(0x08)   // mov rax, [rax+8] (elem0 payload)
+                    let bs0 = var_add(t0_bns, t0_bne)
+                    if bs0 >= 0 { emit_store_var(bs0); if VAR_COUNT > 0 && option_hash_is(t_first_hash) { let bvi0 = VAR_COUNT - 1; VAR_TY[bvi0 as usize] = option_hash_inner_ty(t_first_hash); VAR_TY_HASH[bvi0 as usize] = option_hash_inner_hash(t_first_hash) } }
+                }
+                if t1_bind == 1 {
+                    emit_load_var(match_slot)
+                    let t_poff1 = t_off1 + 8
+                    if t_poff1 < 128 { em(0x48); em(0x8b); em(0x40); em(t_poff1) }
+                    else { em(0x48); em(0x8b); em(0x80); em32(t_poff1) }
+                    let bs1 = var_add(t1_bns, t1_bne)
+                    if bs1 >= 0 { emit_store_var(bs1); if VAR_COUNT > 0 && option_hash_is(t_last_hash) { let bvi1 = VAR_COUNT - 1; VAR_TY[bvi1 as usize] = option_hash_inner_ty(t_last_hash); VAR_TY_HASH[bvi1 as usize] = option_hash_inner_hash(t_last_hash) } }
+                }
+                // --- arm body ---
+                if TK[EP as usize] == 52 { EP = EP + 1 }   // skip =>
+                var t_block: i64 = 0
+                if TK[EP as usize] == 8 { t_block = 1; EP = EP + 1 }
+                LAST_STMT_HAS_VALUE = 0
+                if t_block == 1 { while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }; if TK[EP as usize] == 9 { EP = EP + 1 } }
+                else { compile_stmt() }
+                match_arms = match_arms + 1
+                if LAST_STMT_HAS_VALUE == 1 {
+                    if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH }
+                    else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error(EP - 1, "match arm type does not match other arms") }
+                } else { match_all_value = 0 }
+                em(0xe9); match_ends[arm_count as usize] = CL; em32(0)   // jmp merge
+                arm_count = arm_count + 1
+                if t_skip0 >= 0 { patch32(t_skip0, CL) }
+                if t_skip1 >= 0 { patch32(t_skip1, CL) }
+                continue
+            }
             // Some(v) pattern — tag=1, bind inner value
             if arm_tk == 57 {
                 EP = EP + 1

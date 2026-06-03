@@ -302,6 +302,27 @@ run_phase_y() {
   append_gate_row "$gate" "$rc" "$gate_dir" "-" "$log_path"
 }
 
+# End-to-end codegen-correctness suite: builds the modular compiler from
+# self-hosted/compiler/main.sio, then emits + RUNS 9 witness executables
+# (scalar value fidelity, call/multicall, branch taken/not-taken, OpSub+OpDiv),
+# asserting each process exit code. Proves the IR -> machine code -> ELF -> exit
+# back-half is correct across distinct codegen shapes. Does NOT exercise the
+# parse->check->lower front-half (still G1-blocked). ~1-2min (one compiler build).
+run_e2e_codegen_suite() {
+  local gate="e2e_codegen_suite"
+  local gate_dir="$OUT_DIR/$gate"
+  local log_path="$LOG_DIR/$gate.log"
+
+  mkdir -p "$gate_dir"
+  echo "[native-v2-cpu-compiler] running $gate"
+  set +e
+  SOUNIO_BOOTSTRAP_SOUC="$SOUC_BIN" \
+    bash scripts/ci/native_v2_e2e_codegen_suite_gate.sh >"$log_path" 2>&1
+  local rc=$?
+  set -e
+  append_gate_row "$gate" "$rc" "$gate_dir" "-" "$log_path"
+}
+
 emit_summary_json() {
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -345,6 +366,7 @@ echo "[native-v2-cpu-compiler] souc=$SOUC_BIN"
 echo "[native-v2-cpu-compiler] out=$OUT_DIR"
 echo "[native-v2-cpu-compiler] summary=$SUMMARY_JSON"
 
+run_e2e_codegen_suite
 run_driver_self_compile
 run_science_spine
 run_f64_ladder
