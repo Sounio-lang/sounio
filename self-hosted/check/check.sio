@@ -2685,6 +2685,8 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_ident_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprCast {
         result = checker_check_cast_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprClosure {
+        result = checker_check_closure_expr_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
     }
@@ -3490,6 +3492,117 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         }
         ty_error()
     }
+}
+
+// *mut transcription of check_closure_expr (18449). The by-value version was reached via the
+// final bridge (checker_check_expr_mut → (*c).check_expr → check_closure_expr), copying the 8MB
+// Checker, and then checked the closure BODY by value — so a body containing a CALL recursively
+// re-copied the Checker per sub-expr → stack smash (the typed-closure crasher). Here the body is
+// checked IN PLACE (checker_check_opt_expr_inplace); the shallow setup (param collect / return
+// lower / param bind) stays bridged-by-value (single copies, survivable). Faithful to the
+// by-value logic incl. Sprint-231 capture analysis + Epistemic auto-inject.
+fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let params_result = (*c).collect_closure_params(e.closure_params)
+    checker_store_from_value(c, params_result.checker)
+    let params = params_result.params
+    let param_count = params_result.count
+
+    let ret_pair = (*c).lower_opt_closure_return(e.closure_return)
+    checker_store_from_value(c, ret_pair.0)
+    let ret_ty = ret_pair.1
+
+    let saved_effects = (*c).current_effects
+    let saved_effect_count = (*c).current_effect_count
+    (*c).current_effects = [0; 8]
+    (*c).current_effect_count = 0
+
+    (*c).env = (*c).env.push_scope()
+    (*c).borrows = (*c).borrows.push_scope()
+    checker_push_const_scope_inplace(c)
+
+    let bound = (*c).bind_closure_params(e.closure_params)
+    checker_store_from_value(c, bound)
+
+    // THE FIX: body checked in place (was the by-value c.check_opt_expr recursion).
+    let body_ty = checker_check_opt_expr_inplace(c, e.closure_body)
+
+    let inferred_ret_ty = if ret_ty.kind == TypeKind::TyUnknown {
+        body_ty
+    } else {
+        ret_ty
+    }
+    if ret_ty.kind != TypeKind::TyUnknown {
+        if !types_compatible(body_ty, ret_ty) {
+            checker_report_mismatch_inplace(c, e.span, 8, ret_ty, body_ty)
+        }
+    }
+
+    var inferred_effects = (*c).current_effects
+    var inferred_effect_count = (*c).current_effect_count
+
+    checker_pop_const_scope_inplace(c)
+    (*c).borrows = (*c).borrows.pop_scope()
+    (*c).env = (*c).env.pop_scope()
+    (*c).current_effects = saved_effects
+    (*c).current_effect_count = saved_effect_count
+
+    var capture_linear = false
+    var capture_linear_count: i64 = 0
+    var capture_epsilon: f64 = 0.0 - 1.0
+    var ci: i64 = 0
+    let env_count = (*c).env.count
+    while ci < env_count {
+        let binding = (*c).env.bindings[ci as usize]
+        let binding_ty = binding.ty
+        if checker_is_linear_type_inplace(c, binding_ty) {
+            capture_linear = true
+            capture_linear_count = capture_linear_count + 1
+        }
+        if binding_ty.kind == TypeKind::TyKnowledge {
+            let eps = binding_ty.knowledge_epsilon
+            if eps >= 0.0 {
+                if capture_epsilon < 0.0 {
+                    capture_epsilon = eps
+                } else {
+                    capture_epsilon = capture_epsilon + eps
+                }
+            }
+        }
+        ci = ci + 1
+    }
+    if capture_epsilon >= 0.0 {
+        var has_epistemic = false
+        var ei: i64 = 0
+        while ei < inferred_effect_count {
+            if inferred_effects[ei] == 8 { has_epistemic = true }
+            ei = ei + 1
+        }
+        if !has_epistemic && inferred_effect_count < 8 {
+            inferred_effects[inferred_effect_count] = 8
+            inferred_effect_count = inferred_effect_count + 1
+        }
+    }
+
+    let closure_sig = FnSig {
+        name: Name { buf: [0; 128], len: 0 },
+        params: params,
+        param_count: param_count,
+        return_type: inferred_ret_ty,
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: inferred_effects,
+        effect_count: inferred_effect_count,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_linear_closure: capture_linear,
+        linear_capture_count: capture_linear_count,
+        epistemic_epsilon: capture_epsilon,
+    }
+    let add_result = (*c).fn_sigs.add(closure_sig)
+    (*c).fn_sigs = add_result.0
+    let sig_id = add_result.1
+    ty_fn(sig_id)
 }
 
 fn checker_check_method_call_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
