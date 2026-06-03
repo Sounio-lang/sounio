@@ -262,6 +262,24 @@ required_cmd_pattern \
   "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_count.sio
 
 required_cmd_pattern \
+  "stage1_lean_seq_methods_check" \
+  "B4_stage1_lean_seq_get_set_method_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_methods.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_field_check" \
+  "B4_stage1_lean_seq_field_receiver_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_field.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_struct_elems_check" \
+  "B4_stage1_lean_seq_struct_element_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_struct_elems.sio
+
+required_cmd_pattern \
   "stage1_lean_seq_knowledge_uncertain_check" \
   "B4_stage1_lean_seq_knowledge_surface_check" \
   "souc-lean check: ok" \
