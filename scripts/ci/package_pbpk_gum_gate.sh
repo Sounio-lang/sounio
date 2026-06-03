@@ -14,6 +14,26 @@ WORKFLOW="tests/packages/package_pbpk_gum_workflow.sio"
 OUT_DIR="$(mktemp -d /tmp/sounio-package-pbpk-gum.XXXXXX)"
 trap 'rm -rf "$OUT_DIR"' EXIT
 
+compile_and_run() {
+  local src="$1"
+  local log="$2"
+  local elf="$OUT_DIR/$(basename "$src").elf"
+  local compile_log="$log.compile"
+  local run_log="$log.run"
+
+  if ! "$SOUC_BIN" "$src" "$elf" >"$compile_log" 2>&1; then
+    cat "$compile_log" >&2
+    return 1
+  fi
+  chmod +x "$elf"
+  if ! "$elf" >"$run_log" 2>&1; then
+    cat "$compile_log" >&2
+    cat "$run_log" >&2
+    return 1
+  fi
+  cat "$run_log" >"$log"
+}
+
 printf '[package-pbpk-gum] souc=%s\n' "$SOUC_BIN"
 printf '[package-pbpk-gum] stdlib=%s\n' "$SOUNIO_STDLIB_PATH"
 
@@ -22,7 +42,7 @@ bash "$ROOT_DIR/scripts/ci/package_import_science_gate.sh" >"$OUT_DIR/package_im
 cat "$OUT_DIR/package_import_science.log"
 
 printf '[package-pbpk-gum] run canonical observed PETAB baseline %s\n' "$BASELINE"
-if ! "$SOUC_BIN" run "$BASELINE" >"$OUT_DIR/observed_petab.log" 2>&1; then
+if ! compile_and_run "$BASELINE" "$OUT_DIR/observed_petab.log"; then
   cat "$OUT_DIR/observed_petab.log" >&2
   echo '[package-pbpk-gum] FAIL: canonical observed PETAB baseline failed' >&2
   exit 1
@@ -34,7 +54,7 @@ if ! grep -qF 'OBSERVED_PETAB_FIT_OK' "$OUT_DIR/observed_petab.log"; then
 fi
 
 printf '[package-pbpk-gum] run package-backed PBPK/GUM workflow %s\n' "$WORKFLOW"
-if ! "$SOUC_BIN" run "$WORKFLOW" >"$OUT_DIR/package_pbpk_gum.log" 2>&1; then
+if ! compile_and_run "$WORKFLOW" "$OUT_DIR/package_pbpk_gum.log"; then
   cat "$OUT_DIR/package_pbpk_gum.log" >&2
   echo '[package-pbpk-gum] FAIL: package-backed PBPK/GUM workflow failed' >&2
   exit 1
