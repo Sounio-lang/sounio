@@ -279,3 +279,23 @@ Blocker BLK-20260603-byval-arg-crasher-deref: effectively being resolved by the 
 lane's live *mut transcription. This lane's durable artifacts = the symbol tooling +
 the frame-scale diagnosis; fix (B) codegen-hardening is moot if their *mut conversion
 drops all frames below the crash threshold (the cleaner path).
+
+## Nested-store merge coordination — RESOLVED (2026-06-03)
+
+Compared my nested-store fix vs G1's (codegen/nested-mut-write-fix); diverged at
+ed581987e, independent impls. Resolution (also posted to the live coordination log):
+- **EXPLICIT-deref `(*p).f.f[=/[]`**: in BOTH branches, equivalent logic, only var-name
+  diffs (theirs field1_tok/field2_tok, mine f1_tok/f2_tok) → DOUBLE-DEFINITION COLLISION
+  if both land. Keep G1's (canonical advancing lane); drop my 6d8326d37 explicit commit.
+- **AUTO-DEREF `p.f.f[=/[]` (ref/*mut root)**: ONLY on my branch (commit 0f3628957). G1's
+  explicit-only fix leaves this gap — `tests/run-pass/nested_mut_ref_struct_field`
+  (`o: &!Outer; o.inner.x = v`) should still FAIL on their branch until ported. The
+  in-place checker collectors use explicit `(*c)`; the by-value `collect_algebra_def(self)
+  { var c=self; c.algebras.count=… }` registry writes are value-struct locals (value path)
+  — so the gap is user-program-facing, not checker internals.
+- **Standalone portable patch** (avoids cherry-pick conflicts on their diverged lean_single):
+  `docs/audit/g1_wip/handoff_patches/autoderef_field_field_store_0f3628957.patch`.
+  Apply, then verify `nested_mut_ref_struct_field` flips rc=1→0.
+
+Net: ONE canonical explicit-deref fix (G1's) + port my auto-deref patch. Do not merge
+my explicit commit (redundant). Coordination delivered to claude-e008 via the live log.
