@@ -11,12 +11,6 @@
 
 use lexer::mod::{lex_file_to_globals}
 use lexer::cursor::*
-use knowledge_runtime_guard_lowering_plan::{
-    knowledge_runtime_guard_lowering_plan_build,
-    knowledge_runtime_guard_lowering_plan_row_at,
-    knowledge_runtime_guard_native_emission_plan_at,
-    knowledge_runtime_guard_native_emission_step_from_plan,
-}
 use parser::ast::{Name, BinaryOp, make_name, empty_name, name_eq}
 use parser::parser::{pt_read_kind_code, pt_read_start, pt_read_end, pt_read_int_value}
 use ir::ir::*
@@ -371,9 +365,8 @@ var V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD_SCALE: [i64; 2048] = [0; 2048]
 var V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD_KIND: [i64; 2048] = [0; 2048]
 var V2_DIRECT_KNOWLEDGE_GUARD_EMITTED: i64 = 0
 
-// Row-stream step-walk backend: set by drv_precompute_knowledge_guard_step_walk before
-// driver_lex_file_to_globals. When true, all Knowledge<T> guard emissions use the
-// 7-step sequence driven by the lowering plan's native emission API.
+// Row-stream step-walk backend: hydrated from scanned Knowledge guard signatures.
+// When true, matching Knowledge<T> guard emissions use the precomputed step sequence.
 var V2_ROW_STREAM_READY: bool = false
 var V2_ROW_STREAM_BACKEND_COUNT: i64 = 0
 var V2_ROW_STREAM_PAYLOAD_READY: bool = false
@@ -2756,18 +2749,9 @@ fn ufn_emit_direct_knowledge_runtime_guard_values_step_walk(ctx: &! V2DriverCont
     V2_DIRECT_KNOWLEDGE_GUARD_EMITTED = V2_DIRECT_KNOWLEDGE_GUARD_EMITTED + 1
 }
 
-fn drv_precompute_knowledge_guard_step_walk(source_path: string) with IO, Mut, Panic, Div, Alloc {
-    let plan = knowledge_runtime_guard_lowering_plan_build(source_path)
-    if plan.native_lowering_ready {
-        V2_ROW_STREAM_READY = true
-        V2_ROW_STREAM_BACKEND_COUNT = plan.backend_guard_count
-        print("native_compile: row_stream_step_walk_ready=1 backend_guard_count=")
-        print_int(V2_ROW_STREAM_BACKEND_COUNT)
-        print("\n")
-    }
-}
-
-fn drv_hydrate_knowledge_guard_row_stream_payloads(source_path: string) with IO, Mut, Panic, Div, Alloc {
+fn drv_reset_knowledge_guard_row_stream_payloads() with Mut, Panic, Div {
+    V2_ROW_STREAM_READY = false
+    V2_ROW_STREAM_BACKEND_COUNT = 0
     V2_ROW_STREAM_PAYLOAD_READY = false
     V2_ROW_STREAM_PAYLOAD_COUNT = 0
     V2_ROW_STREAM_PAYLOAD_THRESHOLD_COUNT = 0
@@ -2785,51 +2769,83 @@ fn drv_hydrate_knowledge_guard_row_stream_payloads(source_path: string) with IO,
         V2_ROW_STREAM_ROW_STEP_COUNT[clear_i as usize] = 0
         clear_i = clear_i + 1
     }
-    if !V2_ROW_STREAM_READY {
+}
+
+fn drv_hydrate_knowledge_guard_row_stream_step_ops(row_idx: i64, threshold_kind: i64, threshold: i64) with Mut {
+    if row_idx < 0 || row_idx >= 256 {
         return
     }
-    var limit = V2_ROW_STREAM_BACKEND_COUNT
-    if limit > 256 { limit = 256 }
-    var i: i64 = 0
-    while i < limit {
-        let row = knowledge_runtime_guard_lowering_plan_row_at(source_path, i)
-        if row.row_ready {
-            let type_sidx = find_struct_idx_name(row.type_name)
-            let field_offset = struct_field_offset_name(type_sidx, row.field_name)
-            if type_sidx >= 0 && field_offset >= 0 {
-                V2_ROW_STREAM_ROW_READY[i as usize] = 1
-                V2_ROW_STREAM_ROW_SITE_KIND[i as usize] = row.site_kind
-                V2_ROW_STREAM_ROW_TYPE_STRUCT_IDX[i as usize] = type_sidx
-                V2_ROW_STREAM_ROW_FIELD_OFFSET[i as usize] = field_offset
-                V2_ROW_STREAM_ROW_CMP_CODE[i as usize] = row.native_cmp_code
-                V2_ROW_STREAM_ROW_THRESHOLD_SCALE[i as usize] = row.value_scale
-                V2_ROW_STREAM_ROW_THRESHOLD_KIND[i as usize] = row.threshold_kind
-                V2_ROW_STREAM_PAYLOAD_COUNT = V2_ROW_STREAM_PAYLOAD_COUNT + 1
-                if row.threshold_kind == 1 || row.threshold_kind == 2 || row.threshold_kind == 3 {
-                    V2_ROW_STREAM_ROW_THRESHOLD_READY[i as usize] = 1
-                    V2_ROW_STREAM_ROW_THRESHOLD[i as usize] = row.scaled_value
+    var sc: i64 = 7
+    V2_ROW_STREAM_STEP_OP[(row_idx * 10) as usize] = 1
+    if threshold_kind == 3 && threshold != 0 {
+        sc = 9
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 1) as usize] = 8
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 2) as usize] = 9
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 3) as usize] = 2
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 4) as usize] = 3
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 5) as usize] = 4
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 6) as usize] = 5
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 7) as usize] = 6
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 8) as usize] = 7
+    } else {
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 1) as usize] = 2
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 2) as usize] = 3
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 3) as usize] = 4
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 4) as usize] = 5
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 5) as usize] = 6
+        V2_ROW_STREAM_STEP_OP[(row_idx * 10 + 6) as usize] = 7
+    }
+    V2_ROW_STREAM_ROW_STEP_COUNT[row_idx as usize] = sc
+}
+
+fn drv_hydrate_knowledge_guard_row_stream_payloads_from_scanned_guards() with IO, Mut, Panic, Div {
+    drv_reset_knowledge_guard_row_stream_payloads()
+    var row_i: i64 = 0
+    var guard_idx: i64 = 0
+    while guard_idx < V2_USER_FN_COUNT && guard_idx < 512 && row_i < 256 {
+        if V2_USER_FN_KNOWLEDGE_GUARD_ENABLED[guard_idx as usize] != 0 {
+            var guard_count = V2_USER_FN_KNOWLEDGE_GUARD_COUNT[guard_idx as usize]
+            if guard_count <= 0 { guard_count = 1 }
+            if guard_count > 4 { guard_count = 4 }
+            let site_kind = row_stream_site_kind_for_user_guard_site(V2_USER_FN_KNOWLEDGE_GUARD_SITE[guard_idx as usize])
+            let type_sidx = V2_USER_FN_KNOWLEDGE_GUARD_TYPE_STRUCT_IDX[guard_idx as usize]
+            var slot: i64 = 0
+            while slot < guard_count && row_i < 256 {
+                let src_row = guard_idx * 4 + slot
+                let field_offset = V2_USER_FN_KNOWLEDGE_GUARD_ROW_FIELD_OFFSET[src_row as usize]
+                var threshold_kind = V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD_KIND[src_row as usize]
+                if threshold_kind == 0 { threshold_kind = 1 }
+                if site_kind > 0 && type_sidx >= 0 && field_offset >= 0 {
+                    V2_ROW_STREAM_ROW_READY[row_i as usize] = 1
+                    V2_ROW_STREAM_ROW_THRESHOLD_READY[row_i as usize] = 1
+                    V2_ROW_STREAM_ROW_SITE_KIND[row_i as usize] = site_kind
+                    V2_ROW_STREAM_ROW_TYPE_STRUCT_IDX[row_i as usize] = type_sidx
+                    V2_ROW_STREAM_ROW_FIELD_OFFSET[row_i as usize] = field_offset
+                    V2_ROW_STREAM_ROW_CMP_CODE[row_i as usize] = V2_USER_FN_KNOWLEDGE_GUARD_ROW_CMP_CODE[src_row as usize]
+                    V2_ROW_STREAM_ROW_THRESHOLD[row_i as usize] = V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD[src_row as usize]
+                    V2_ROW_STREAM_ROW_THRESHOLD_SCALE[row_i as usize] = V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD_SCALE[src_row as usize]
+                    V2_ROW_STREAM_ROW_THRESHOLD_KIND[row_i as usize] = threshold_kind
+                    drv_hydrate_knowledge_guard_row_stream_step_ops(
+                        row_i,
+                        threshold_kind,
+                        V2_USER_FN_KNOWLEDGE_GUARD_ROW_THRESHOLD[src_row as usize]
+                    )
+                    V2_ROW_STREAM_PAYLOAD_COUNT = V2_ROW_STREAM_PAYLOAD_COUNT + 1
                     V2_ROW_STREAM_PAYLOAD_THRESHOLD_COUNT = V2_ROW_STREAM_PAYLOAD_THRESHOLD_COUNT + 1
+                    row_i = row_i + 1
                 }
-                // Walk step_at(i, j) to pre-compute op sequence for step-driven emission.
-                let emplan = knowledge_runtime_guard_native_emission_plan_at(source_path, i)
-                if emplan.plan_ready {
-                    var sc = emplan.native_step_count
-                    if sc > 10 { sc = 10 }
-                    V2_ROW_STREAM_ROW_STEP_COUNT[i as usize] = sc
-                    var j: i64 = 0
-                    while j < sc {
-                        let step = knowledge_runtime_guard_native_emission_step_from_plan(emplan, j)
-                        let step_slot = i * 10 + j
-                        V2_ROW_STREAM_STEP_OP[step_slot as usize] = step.op_kind
-                        j = j + 1
-                    }
-                }
+                slot = slot + 1
             }
         }
-        i = i + 1
+        guard_idx = guard_idx + 1
     }
     if V2_ROW_STREAM_PAYLOAD_COUNT > 0 {
+        V2_ROW_STREAM_READY = true
+        V2_ROW_STREAM_BACKEND_COUNT = V2_ROW_STREAM_PAYLOAD_COUNT
         V2_ROW_STREAM_PAYLOAD_READY = true
+        print("native_compile: row_stream_step_walk_ready=1 backend_guard_count=")
+        print_int(V2_ROW_STREAM_BACKEND_COUNT)
+        print("\n")
         print("native_compile: row_stream_payload_ready=1 count=")
         print_int(V2_ROW_STREAM_PAYLOAD_COUNT)
         print(" threshold_payload_count=")
@@ -9164,16 +9180,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         }
     }
 
-    drv_precompute_knowledge_guard_step_walk(source_path)
     var token_count = driver_lex_file_to_globals(source_path)
-    if token_count <= 0 {
-        print("native_compile: lex_error\n")
-        return 1
-    }
-    V2_TOKEN_COUNT = token_count
-    scan_struct_decls(token_count)
-    drv_hydrate_knowledge_guard_row_stream_payloads(source_path)
-    token_count = driver_lex_file_to_globals(source_path)
     if token_count <= 0 {
         print("native_compile: lex_error\n")
         return 1
@@ -9184,6 +9191,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     scan_user_globals(token_count)
     reserve_sample_uniform_state_global(token_count)
     scan_user_fns(token_count, V2_FIRST_USER_FN_ID)
+    drv_hydrate_knowledge_guard_row_stream_payloads_from_scanned_guards()
     scan_closure_literals(token_count)
     return compile_ir_module_to_elf(output_path, token_count)
 }
