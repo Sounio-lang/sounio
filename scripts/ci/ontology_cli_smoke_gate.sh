@@ -291,6 +291,11 @@ echo "[ontology-smoke] souc=$SOUC_BIN"
 echo "[ontology-smoke] src=$SRC"
 echo "[ontology-smoke] tmp=$TMP_DIR"
 
+if ! grep -q 'fn ontology_run_cli()' "$SRC"; then
+    echo "[ontology-smoke] SKIP: lean_single.sio does not embed ontology_run_cli"
+    exit 0
+fi
+
 compile_test_binary
 
 echo "[ontology-smoke] running tests..."

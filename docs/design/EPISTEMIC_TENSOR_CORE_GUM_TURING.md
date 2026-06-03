@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.design.epistemic-tensor-core-gum-turing
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.design.epistemic-tensor-core-gum-turing
+-->
+
 # GUM-correct uncertainty propagation through GPU tensor cores (Turing sm_75)
 
 Status: **design + derivation (verifiable math) + reference PTX pending on-hardware

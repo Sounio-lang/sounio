@@ -12,6 +12,7 @@
 pub const CACHE_EMPTY: i64 = 0
 pub const CACHE_LOADED: i64 = 1
 pub const CACHE_EVICTED: i64 = 2
+pub const CACHE_CAPACITY: i64 = 64
 
 // ============================================================================
 // CACHE ENTRY
@@ -58,7 +59,8 @@ pub fn cache_entry_evict(entry: &CacheEntry) with Mut {
 
 // Cache for ontology concepts and properties
 pub struct OntologyCache {
-    pub entries: Seq<CacheEntry>,
+    pub entries: [CacheEntry; 64],
+    pub entry_count: i64,
     pub max_size_bytes: i64,
     pub current_size_bytes: i64,
     pub clock: i64,
@@ -68,7 +70,8 @@ pub struct OntologyCache {
 
 pub fn ontology_cache_new(max_size: i64) -> OntologyCache {
     OntologyCache {
-        entries: seq_new(),
+        entries: [cache_entry_new(0); 64],
+        entry_count: 0,
         max_size_bytes: max_size,
         current_size_bytes: 0,
         clock: 0,
@@ -83,18 +86,20 @@ pub fn ontology_cache_default() -> OntologyCache {
 }
 
 // Find entry by IRI ID
-pub fn cache_find(cache: &OntologyCache, iri_id: i64) -> i64 {
-    let n = cache.entries.count()
-    for i in 0..n {
+pub fn cache_find(cache: &OntologyCache, iri_id: i64) -> i64 with Mut {
+    let n = cache.entry_count
+    var i: i64 = 0
+    while i < n {
         if cache.entries[i].iri_id == iri_id {
-            return i as i64
+            return i
         }
+        i = i + 1
     }
     0 - 1
 }
 
 // Check if entry is cached
-pub fn cache_contains(cache: &OntologyCache, iri_id: i64) -> bool {
+pub fn cache_contains(cache: &OntologyCache, iri_id: i64) -> bool with Mut {
     let idx = cache_find(cache, iri_id)
     if idx >= 0 {
         return cache.entries[idx as i64].state == CACHE_LOADED
@@ -109,7 +114,10 @@ pub fn cache_put(cache: &OntologyCache, iri_id: i64, size: i64) -> bool with Mut
     let idx = cache_find(cache, iri_id)
     if idx >= 0 {
         // Already exists - update
-        cache_entry_mark_loaded(&cache.entries[idx as i64], size, cache.clock)
+        cache.entries[idx].state = CACHE_LOADED
+        cache.entries[idx].size_bytes = size
+        cache.entries[idx].last_access = cache.clock
+        cache.entries[idx].access_count = cache.entries[idx].access_count + 1
         cache.hit_count = cache.hit_count + 1
         return true
     }
@@ -124,9 +132,28 @@ pub fn cache_put(cache: &OntologyCache, iri_id: i64, size: i64) -> bool with Mut
     }
 
     // Add new entry
-    var entry = cache_entry_new(iri_id)
-    cache_entry_mark_loaded(&entry, size, cache.clock)
-    cache.entries.push(entry)
+    var slot: i64 = 0 - 1
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i].state != CACHE_LOADED {
+            slot = i
+            i = cache.entry_count
+        } else {
+            i = i + 1
+        }
+    }
+    if slot < 0 {
+        if cache.entry_count >= CACHE_CAPACITY {
+            return false
+        }
+        slot = cache.entry_count
+        cache.entry_count = cache.entry_count + 1
+    }
+    cache.entries[slot].iri_id = iri_id
+    cache.entries[slot].state = CACHE_LOADED
+    cache.entries[slot].size_bytes = size
+    cache.entries[slot].last_access = cache.clock
+    cache.entries[slot].access_count = 1
     cache.current_size_bytes = cache.current_size_bytes + size
     cache.miss_count = cache.miss_count + 1
 
@@ -139,7 +166,8 @@ pub fn cache_get(cache: &OntologyCache, iri_id: i64) -> bool with Mut {
 
     let idx = cache_find(cache, iri_id)
     if idx >= 0 && cache.entries[idx as i64].state == CACHE_LOADED {
-        cache_entry_touch(&cache.entries[idx as i64], cache.clock)
+        cache.entries[idx].last_access = cache.clock
+        cache.entries[idx].access_count = cache.entries[idx].access_count + 1
         cache.hit_count = cache.hit_count + 1
         return true
     }
@@ -150,7 +178,7 @@ pub fn cache_get(cache: &OntologyCache, iri_id: i64) -> bool with Mut {
 
 // Evict least recently used entry
 fn cache_evict_lru(cache: &OntologyCache) -> bool with Mut {
-    let n = cache.entries.count()
+    let n = cache.entry_count
     if n == 0 {
         return false
     }
@@ -158,13 +186,15 @@ fn cache_evict_lru(cache: &OntologyCache) -> bool with Mut {
     var oldest_time: i64 = cache.clock + 1
     var oldest_idx: i64 = 0 - 1
 
-    for i in 0..n {
+    var i: i64 = 0
+    while i < n {
         if cache.entries[i].state == CACHE_LOADED {
             if cache.entries[i].last_access < oldest_time {
                 oldest_time = cache.entries[i].last_access
-                oldest_idx = i as i64
+                oldest_idx = i
             }
         }
+        i = i + 1
     }
 
     if oldest_idx < 0 {
@@ -172,7 +202,7 @@ fn cache_evict_lru(cache: &OntologyCache) -> bool with Mut {
     }
 
     let freed = cache.entries[oldest_idx as i64].size_bytes
-    cache_entry_evict(&cache.entries[oldest_idx as i64])
+    cache.entries[oldest_idx].state = CACHE_EVICTED
     cache.current_size_bytes = cache.current_size_bytes - freed
 
     true
@@ -180,9 +210,11 @@ fn cache_evict_lru(cache: &OntologyCache) -> bool with Mut {
 
 // Clear entire cache
 pub fn cache_clear(cache: &OntologyCache) with Mut {
-    let n = cache.entries.count()
-    for i in 0..n {
-        cache_entry_evict(&cache.entries[i])
+    let n = cache.entry_count
+    var i: i64 = 0
+    while i < n {
+        cache.entries[i].state = CACHE_EVICTED
+        i = i + 1
     }
     cache.current_size_bytes = 0
 }

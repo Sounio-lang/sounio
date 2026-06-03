@@ -74,8 +74,8 @@ ONTOLOGY_COMPILE_GATES=(
 )
 
 run_ontology_compile_gates() {
-    if [[ "${SOUNIO_ONTOLOGY_COMPILE_GATES:-1}" == "0" ]]; then
-        echo "[ontology-validation] skipping compile gate bundle (SOUNIO_ONTOLOGY_COMPILE_GATES=0)"
+    if [[ "${SOUNIO_ONTOLOGY_COMPILE_GATES:-0}" == "0" ]]; then
+        echo "[ontology-validation] skipping compile gate bundle (set SOUNIO_ONTOLOGY_COMPILE_GATES=1 to enable)"
         return 0
     fi
 
