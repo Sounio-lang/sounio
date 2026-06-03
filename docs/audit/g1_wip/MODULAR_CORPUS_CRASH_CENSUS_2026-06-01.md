@@ -41,6 +41,8 @@ backlog.**
 | `native_tokenizer` | `match` + `if/else` (crashes after E008) | source-marker |
 | `sprint235_print_f64_e2e` | (no obvious marker; needs per-file gdb) | unpinned |
 
+**See also:** `SEVEN_CRASHES_DIAGNOSED_2026-06-02.md` (the 2026-06-02 follow-up diagnosis that evolved the count to 7 crashers and introduced the A/B/C clustering; C is the known large-SRET by-value-Checker miscompile — the root the *mut arc avoids — and was explicitly left documented / NOT pursued).
+
 **New finding (PROVEN): typed closures crash the checker (top crash cause, 3/6).**
 Controlled minimal repro on `fcaabdad`, `ulimit -s 1048576`:
 

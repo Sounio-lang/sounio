@@ -63,6 +63,8 @@ Four fixes clear **~230 of 352** failures:
 | 3 | parse_gap | parser | inherent `impl T { fn … }` blocks | — |
 | 2 | crash | front-half/G1 | SIGSEGV on `match *slot` deref + heterog. tuple | — |
 
+**See also:** `SEVEN_CRASHES_DIAGNOSED_2026-06-02.md` for the cluster breakdown of the (evolved) 7 crashers (Clusters A/B resolved via shippable *mut/codegen work; Cluster C = the known large-SRET by-value Checker miscompile, documented + NOT pursued per explicit decision — the bug the *mut arc exists to avoid).
+
 Totals: parse_gap ~163, spurious ~132, type_error ~80, crash 6.
 (Bucket counts sum to 382 vs 352 classified — a few programs double-tagged across
 related sub-keys during synthesis; treat counts as ±a handful, ranking is robust.)
