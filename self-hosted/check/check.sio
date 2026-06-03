@@ -1060,6 +1060,37 @@ fn checker_lower_array_type_mut(c: *mut Checker, inner_opt: Option<Box<TypeExpr>
     }
 }
 
+fn checker_lower_ref_like_type_mut(c: *mut Checker, inner_opt: Option<Box<TypeExpr> >, is_mut_ref: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match inner_opt {
+        Some(inner_box) => {
+            let inner_te = *inner_box
+            if inner_te.kind == TypeExprKind::TypeArray {
+                match inner_te.array_size {
+                    None => {
+                        match inner_te.inner {
+                            Some(elem_te) => {
+                                let elem_ty = checker_lower_type_expr_mut(c, *elem_te)
+                                if is_mut_ref {
+                                    return ty_slice_mut(elem_ty)
+                                }
+                                return ty_slice(elem_ty)
+                            }
+                            None => return ty_error()
+                        }
+                    }
+                    Some(_) => {}
+                }
+            }
+            let inner_ty = checker_lower_type_expr_mut(c, inner_te)
+            if is_mut_ref {
+                return ty_ref_mut(inner_ty)
+            }
+            ty_ref(inner_ty)
+        }
+        None => ty_error()
+    }
+}
+
 fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !checker_enter_type_expr_mut(c) {
         return ty_error()
@@ -1153,6 +1184,8 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
             if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_validated(inner_ty, -1.0) }
         }
         TypeExprKind::TypeArray => checker_lower_array_type_mut(c, te.inner, te.array_size)
+        TypeExprKind::TypeReference => checker_lower_ref_like_type_mut(c, te.inner, false)
+        TypeExprKind::TypeRefMut => checker_lower_ref_like_type_mut(c, te.inner, true)
         _ => {
             checker_note_type_error_mut(c)
             ty_error()
@@ -3214,7 +3247,8 @@ fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntr
 // byte-for-byte faithful to the by-value original. No (*c).expr_depth management here (the
 // dispatch owns it).
 fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    let base_ty = checker_check_opt_expr_inplace(c, e.left)
+    let raw_base_ty = checker_check_opt_expr_inplace(c, e.left)
+    let base_ty = field_access_base_type(raw_base_ty)
     if base_ty.kind == TypeKind::TyNamed {
         let struct_idx = (*c).structs.find(base_ty.name)
         if struct_idx >= 0 {
@@ -10498,6 +10532,16 @@ fn call_ref_inner_or_self(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Allo
     }
 }
 
+fn field_access_base_type(ty: TypeEntry) -> TypeEntry {
+    if ty.kind == TypeKind::TyRef || ty.kind == TypeKind::TyRefMut {
+        match ty.inner {
+            Some(inner) => return *inner
+            None => return ty_error()
+        }
+    }
+    ty
+}
+
 fn indexable_elem_type(base_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
     if is_error_or_unknown(base_ty) {
         return base_ty
@@ -15316,7 +15360,7 @@ impl Checker {
     fn check_field_access(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.check_opt_expr(e.left)
         var c = pair.0
-        let base_ty = pair.1
+        let base_ty = field_access_base_type(pair.1)
         if base_ty.kind == TypeKind::TyNamed {
             let struct_idx = c.structs.find(base_ty.name)
             if struct_idx >= 0 {

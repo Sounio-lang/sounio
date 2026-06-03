@@ -280,6 +280,12 @@ required_cmd_pattern \
   "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_struct_elems.sio
 
 required_cmd_pattern \
+  "stage1_lean_seq_borrow_check" \
+  "B4_stage1_lean_seq_borrow_ref_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_borrow.sio
+
+required_cmd_pattern \
   "stage1_lean_seq_knowledge_uncertain_check" \
   "B4_stage1_lean_seq_knowledge_surface_check" \
   "souc-lean check: ok" \
