@@ -304,6 +304,18 @@ required_cmd_pattern \
   "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_knowledge_nested_generic.sio
 
 required_cmd_pattern \
+  "stage1_lean_knowledge_unwrap_check" \
+  "B4_stage1_lean_knowledge_unwrap_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/knowledge_unwrap.sio
+
+required_rejects_with_pattern \
+  "stage1_lean_knowledge_unwrap_requires_reason_rejects" \
+  "B4_stage1_lean_knowledge_unwrap_reason_boundary_check" \
+  "Knowledge.unwrap requires exactly one argument" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/compile-fail/knowledge_unwrap_requires_reason.sio
+
+required_cmd_pattern \
   "stage1_lean_sample_uniform_check" \
   "B4_stage1_lean_sampling_semantic_surface_check" \
   "souc-lean check: ok" \
