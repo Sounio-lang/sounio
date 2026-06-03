@@ -1066,7 +1066,23 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
     }
 
     let lowered = match te.kind {
-        TypeExprKind::TypeNamed => checker_lower_named_type_mut(c, te.path)
+        TypeExprKind::TypeNamed => {
+            // Unify Unobserved<T> representation: the in-place named lowering otherwise
+            // drops te.type_args -> ty_named("Unobserved") (TyNamed); the by-value path
+            // (~10820) yields TyUnobserved. Match the name here so sig return/param/binding
+            // types lower to TyUnobserved consistently (needed by the Observe boundary).
+            let nm0 = checker_copy_string_list_to_name(te.path.segments)
+            if name_matches_str10(nm0, 85, 110, 111, 98, 115, 101, 114, 118, 101, 100) {
+                let inner_u = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+                var ut = ty_error()
+                ut.kind = TypeKind::TyUnobserved
+                ut.name = nm0
+                ut.inner = Some(Box::new(inner_u))
+                ut
+            } else {
+                checker_lower_named_type_mut(c, te.path)
+            }
+        }
         TypeExprKind::TypeUnit => ty_unit()
         TypeExprKind::TypeNever => ty_never()
         TypeExprKind::TypeInfer => ty_unknown()
@@ -2529,7 +2545,9 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
                 // Same int-literal narrowing for a tail-expression body (e.g. `{ … 0 }`).
                 let body_int_lit_narrow = ((*c).last_literal_kind == 1 && is_integer_type(sig2.return_type)) ||
                                           ((*c).last_literal_kind == 2 && is_float_type(sig2.return_type))
-                if !types_compatible(body_ty, sig2.return_type) && !body_int_lit_narrow {
+                let body_observe_ok = has_effect_id((*c).current_effects, (*c).current_effect_count, 13) &&
+                                      (body_ty.kind == TypeKind::TyUnobserved || sig2.return_type.kind == TypeKind::TyUnobserved)
+                if !types_compatible(body_ty, sig2.return_type) && !body_int_lit_narrow && !body_observe_ok {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
             }
@@ -2631,7 +2649,12 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     // float literal → any float return type (matches canonical bin/souc + the let path).
     let lit_narrow = ((*c).last_literal_kind == 1 && is_integer_type((*c).current_return_type)) ||
                      ((*c).last_literal_kind == 2 && is_float_type((*c).current_return_type))
-    if !types_compatible(val_ty, (*c).current_return_type) && !lit_narrow {
+    // Frame-light Observe boundary: Unobserved<T> <-> T crossing (return), gated on the
+    // Observe effect (13). Kind-only check (no Box deref / no 272B by-value materialization,
+    // which would re-trigger the large-frame codegen crash).
+    let observe_ok = has_effect_id((*c).current_effects, (*c).current_effect_count, 13) &&
+                     (val_ty.kind == TypeKind::TyUnobserved || (*c).current_return_type.kind == TypeKind::TyUnobserved)
+    if !types_compatible(val_ty, (*c).current_return_type) && !lit_narrow && !observe_ok {
         checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
     }
     ty_never()
@@ -2755,18 +2778,21 @@ fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
 // own internal by-value bridges (one Checker frame at a time) are fine. Faithful to the
 // by-value original: same order, same error codes, same result TypeEntry per branch.
 fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
-        let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
-            || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
-            || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
-        if is_cmp {
-            if !has_effect_id((*c).current_effects, (*c).current_effect_count, 13) {
-                checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
-            }
-        }
+    let unobs_operand = left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved
+    let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
+        || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
+        || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
+    let obs_present = has_effect_id((*c).current_effects, (*c).current_effect_count, 13)
+    if unobs_operand && is_cmp && !obs_present {
+        checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
     }
-    let bot = (*c).check_binary_op_types(e.span, e.bin_op, left_ty, right_ty)
-    checker_store_from_value(c, bot)
+    // Frame-light: an Observe-gated comparison of an Unobserved value observes it and yields
+    // bool. Skip check_binary_op_types (it returns the mutated Checker and reports E004 on
+    // Unobserved operands) for that sanctioned case; the result type is forced to bool below.
+    if !(unobs_operand && is_cmp && obs_present) {
+        let bot = (*c).check_binary_op_types(e.span, e.bin_op, left_ty, right_ty)
+        checker_store_from_value(c, bot)
+    }
     if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
         let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
         let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
@@ -2808,6 +2834,10 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         return final_result
     }
     var result = binary_result_type(e.bin_op, left_ty, right_ty)
+    // Observe-gated comparison of an Unobserved value yields bool (observation).
+    if unobs_operand && is_cmp && obs_present {
+        result = ty_bool()
+    }
     if result.kind == TypeKind::TyError && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
         let l_enum = left_ty.kind == TypeKind::TyNamed && (*c).enums.find(left_ty.name) >= 0
         let r_enum = right_ty.kind == TypeKind::TyNamed && (*c).enums.find(right_ty.name) >= 0
@@ -3847,7 +3877,10 @@ fn checker_check_call_args_inner_inplace(c: *mut Checker, args: Option<Box<ExprL
             }
             let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
             if has_param_info {
-                if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
+                // Frame-light Observe boundary at a call argument (Unobserved<T> -> T param).
+                let arg_observe_ok = has_effect_id((*c).current_effects, (*c).current_effect_count, 13) &&
+                                     (arg_ty.kind == TypeKind::TyUnobserved || param_info.ty.kind == TypeKind::TyUnobserved)
+                if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) && !arg_observe_ok {
                     checker_report_mismatch_inplace(c, call_span, 9, param_info.ty, arg_ty)
                 }
                 // Direct *mut void calls (no Checker locals — was bb/rb/kb/ub/ob, ~12MB+
@@ -4551,7 +4584,10 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         let init_enum = init_ty.kind == TypeKind::TyNamed && (*c).enums.find(init_ty.name) >= 0
         let ann_enum = ann_ty.kind == TypeKind::TyNamed && (*c).enums.find(ann_ty.name) >= 0
         let enum_int_ok = (init_enum && is_numeric_type(ann_ty)) || (is_numeric_type(init_ty) && ann_enum)
-        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow && !enum_int_ok {
+        // Frame-light Observe boundary on a let binding (`let y: f64 = x`, x: Unobserved<f64>).
+        let observe_bind_ok = has_effect_id((*c).current_effects, (*c).current_effect_count, 13) &&
+                              (init_ty.kind == TypeKind::TyUnobserved || ann_ty.kind == TypeKind::TyUnobserved)
+        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow && !enum_int_ok && !observe_bind_ok {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
@@ -4601,7 +4637,9 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         let int_lit_narrow = (*c).last_literal_kind == 1
             && init_ty.kind == TypeKind::TyI64
             && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
+        let observe_bind_ok = has_effect_id((*c).current_effects, (*c).current_effect_count, 13) &&
+                              (init_ty.kind == TypeKind::TyUnobserved || ann_ty.kind == TypeKind::TyUnobserved)
+        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow && !observe_bind_ok {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
