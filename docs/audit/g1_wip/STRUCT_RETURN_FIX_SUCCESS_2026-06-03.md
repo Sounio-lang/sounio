@@ -187,7 +187,74 @@ verification for the integration shepherd, not a precondition for either PR.
 | | `docs/audit/g1_wip/STRUCT_RETURN_FIX_SUCCESS_2026-06-03.md` (this doc, new) |
 | Blocker | none (proposed BLK-20260602-CLUSTER-C-FIX closed at E3) |
 | LLM-offload | not required (no math/clinical/external artifacts) |
-| Open follow-ups | typed-closure crashes (3 of 5 κ — separate lane) |
+| Open follow-ups | typed-closure crashes (3 of 5 κ — see "Typed-closure dispatch follow-up" section below) |
+
+## Typed-closure dispatch follow-up (2026-06-03, separate PR)
+
+After PR #228 landed, started the typed-closure follow-up (the 3 remaining
+crashers: `closure_basic`, `closure_arity_2`, `approx_propagation`). The
+mechanism is the same SRET-cliff family: the by-value `check_closure_expr`
+(impl Checker, line 18449) holds an 8MB Checker local (`var c = self`)
+across the function body, triggering the same epilogue `rep movsq` of
+0x51ff qwords return-address smash.
+
+The dispatch site (`checker_check_expr_inplace` at line 2628) has NO
+arm for `ExprClosure` — it falls through to `checker_check_expr_mut`
+(line 2689), which calls by-value `(*c).check_expr(e)` (line 1180). That
+12MB dispatch SRET is the proximate cliff source for typed-closure
+literals.
+
+### Minimal intervention (this commit, branch `work/typed-closure-dispatch-cleanup`)
+
+Added an `ExprClosure` arm to `checker_check_expr_inplace` that calls
+the by-value `(*c).check_closure_expr(e)` directly and absorbs the
+8MB return via `checker_store_from_value` immediately. The 8MB
+intermediate is one-statement-lived (vs the previous 12MB
+fall-through path), keeping the SRET cliff from triggering for
+non-typed-closure programs that contain closure literals.
+
+**Result on 504-corpus**: PASS 125 → **297** (+172), FAIL 376 → 204
+(−172), CRASH 6 → **3** (no new crashes introduced; the remaining
+3 are still the typed-closure `closure_basic` / `closure_arity_2` /
+`approx_propagation` themselves, deferred per the SEVEN doc "separate
+lane" framing).
+
+Lean_single bootstrap fixed point preserved (md5 e218fad3 across
+stage1/2/3).
+
+### What this minimal intervention does NOT do (deferred)
+
+The 3 typed-closure crashers themselves (`closure_basic`,
+`closure_arity_2`, `approx_propagation`) still CRASH rc=139. The
+minimal change routes the dispatch through the *mut tail but
+ultimately calls the by-value `check_closure_expr`, which still
+holds the 8MB Checker across the function body. A proper fix
+would require a full `_inplace` transcription of `check_closure_expr`
++ 4 closure helpers (`collect_closure_params`, `bind_closure_params`,
+`lower_opt_closure_return`, `push_const_scope` / `pop_const_scope`)
+— ~250 lines of new code.
+
+An attempt at the full transcription (a single ~250-line edit to
+check.sio) was made and tested: it REGRESSED the 504-corpus
+(PASS 296 → 296, FAIL 204 → 201, but CRASH 3 → **7** — 4 new
+crashes from the in-place transcription's own bugs in the effect
+inference / capture analysis path). The minimal intervention was
+reverted to and committed instead.
+
+A real typed-closure fix is a separate lane that requires:
+1. Source-level bisection of where the 8MB SRET cliff actually
+   triggers (the by-value `check_closure_expr` internal state is
+   complex — effect save/restore, capture analysis, FnSig creation)
+2. gdb-level debug of a typed-closure `mc.elf` run on
+   `closure_basic.sio` (no gdb in this env — would need setup)
+3. Either a full _inplace transcription OR a stack-frame-size
+   guard that aborts compilation when frames exceed a threshold
+
+This is the SEVEN doc's "separate lane" — not a quick fix.
+
+### Files in this follow-up commit
+- `self-hosted/check/check.sio` — 2-line ExprClosure arm + 7-line
+  comment in `checker_check_expr_inplace`
 
 ## Cross-refs
 
