@@ -27,32 +27,38 @@ Known-Blockers: BLK-20260603-byval-arg-crasher-deref (below)
 
 ```text
 Blocker-ID:    BLK-20260603-byval-arg-crasher-deref
-Status:        owned                 (claimed; instrumentation started 2026-06-03)
+Status:        review-ready          (diagnosis complete + pinned; fix HANDED to G1 frontend lane 2026-06-03)
 Severity:      B1                    (dominant front-half crash; 131/170 genuine SIGSEGVs)
-Class:         compiler-semantics    (codegen: by-value struct-arg passing)
-Owner:         claude (native/codegen lane)
+Class:         compiler-semantics    (codegen: by-value method-call struct-arg passing)
+Owner:         G1 frontend lane (g1/e008-bridge-fix) — fix (A) is in check.sio (their domain).
+               Diagnosed/pinned by the native/codegen lane (claude); handed off here.
 Lane:          byval-arg-crasher
 Worktree:      /workspace/sounio-byval-crasher
 Branch:        codegen/byval-arg-crasher
-Files-Owned:   self-hosted/compiler/lean_single.sio
+Files-Owned:   self-hosted/compiler/lean_single.sio  (this lane — fix (B) only, not pursued)
 Files-Read-Only: self-hosted/check/check.sio, self-hosted/check/defs.sio
 Do-Not-Touch:  bin/souc, bin/souc-linux-x86_64 (serialize re-bootstrap via souc-build-lock.sh)
 Repro:         (needs a compiler built WITH the #1 nested-store fix, e.g. /tmp/mc_fixed.elf)
                ulimit -s 1048576; <mc_with_fix> --check repro/bodycheck_crash_paramd_call_min.sio
-Observed:      SIGSEGV (rc=139) at code addr 0x4c2805b in mc_fixed
+Observed:      SIGSEGV (rc=139) in a by-value boundary method called as (*c).method(...)
+               from the knowledge/unit/ontology call-arg `_inplace` wrappers (layout-
+               sensitive exact site; see Instrumentation result)
 Expected:      check completes (rc 0 or a clean type error), no SIGSEGV
-Acceptance-Gate: rebuild modular mc with the patched bootstrap, re-run the 504
-               run-pass census (1 GB stack); the 131-at-0x4c2805b cluster must
-               drop to ~0 with no new crashers; native_v2_e2e gate stays green
-Evidence-Level: E3 (gdb on the live binary; deterministic single-instruction cluster)
-Evidence:      docs/audit/g1_wip/STRUCT_RETURN_FIX_ATTEMPT_2026-06-02.md ;
+Acceptance-Gate: rebuild modular mc with the patched check.sio, re-run the 504
+               run-pass census (1 GB stack); the ~131-crash cluster must drop to ~0
+               with no new crashers; native_v2_e2e gate stays green
+Evidence-Level: E3 (gdb + marker-instrumented rebuilds on the live binary)
+Evidence:      this doc (Instrumentation result) ; STRUCT_RETURN_FIX_ATTEMPT_2026-06-02.md ;
                census TSVs docs/audit/g1_wip/census_mc_{baseline,fixed}_2026-06-02.tsv
 Fallback-Path: none
 Legacy-Kept:   n/a
 LLM-Offload:   not-required
-Next-Action:   build mc with symbols OR add a distinctive marker to candidate
-               by-value call-arg fns, run the repro under gdb, confirm the exact
-               source function, then guard/repair the −1 source.
+Next-Action:   G1: *mut-convert check_call_arg_{knowledge,unit,ontology}_boundary
+               (+ report_unit_call_mismatch as a latent sibling) so the boundary
+               `_inplace` wrappers stop doing `(*c).<by-value method>(...)`; verify
+               via the Acceptance-Gate census. (Fix (B), the lean_single codegen of
+               4th-struct-arg by-value-method passing, stays with this lane as a
+               follow-up — layout-sensitive, not repro-isolable.)
 ```
 
 ## Root cause (machine-level, PROVEN; source-level OPEN)
@@ -116,10 +122,14 @@ binary. Findings:
    fired; the by-value `check_call_args_inner` markers never did. (`call_expr_should_bridge_by_value`
    was a red herring; the in-place path runs, as G1's "source≠execution" NOTE warned.)
 2. **Crash is in the call-arg boundary checks**, specifically the residual boundary
-   `_inplace` wrappers that STILL pass `(*c)` by value:
-   - `checker_check_call_arg_unit_boundary_inplace` → `(*c).report_unit_call_mismatch(...)` (guarded)
-   - `checker_ontology_boundary_check_call_arg_contract_inplace` → `(*c).check_call_arg_ontology_boundary(arg_ty, param_ty, call_span)` (4016)
-   These `(*c).method(...)` calls **deref the *mut and pass the 164 KB `Checker` BY VALUE**.
+   `_inplace` wrappers that STILL pass `(*c)` by value. The OBSERVED crash for `f(5)`
+   is the **knowledge/ontology** boundary call (the wobble below) —
+   `(*c).check_call_arg_{knowledge,ontology}_boundary(arg_ty, param_ty, call_span)`
+   (e.g. check.sio:4016 for ontology). **`report_unit_call_mismatch` is EXONERATED for
+   `f(5)`** — its guard is false (instrumented unit_id = −1 in/out), so it is NOT the
+   observed crash; it is only a **LATENT** same-pattern site (would crash if the
+   unit-mismatch guard ever fires). G1: do NOT chase the guarded unit-mismatch path first.
+   All these `(*c).method(...)` calls **deref the *mut and pass the 164 KB `Checker` BY VALUE**.
    `check_call_arg_{knowledge,unit,ontology}_boundary(self: Checker, arg_ty: TypeEntry,
    param_ty: TypeEntry, call_span: Span)` matches the crash fingerprint EXACTLY
    (164 KB + 272 B + 272 B + Span; the 4th struct arg `call_span` passed from −1).
