@@ -43,9 +43,8 @@ cd "$ROOT_DIR"
 #
 #   2. A raw self-hosted ELF binary, e.g. the CI `souc-stage2` artifact,
 #      which only accepts the raw `<src> <out>` interface and would treat
-#      `check` as a source path. For these, route through the repo wrapper
-#      at bin/souc, which translates the subcommands to the raw interface
-#      via SOUNIO_SOUC_BIN.
+#      `check` as a source path. For these, route through the native wrapper,
+#      which translates the harness subcommands to the raw interface.
 #
 # We discriminate by sniffing the first two bytes for a shebang.
 if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
@@ -55,7 +54,8 @@ if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
         SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
     else
         export SOUNIO_SOUC_BIN="$SOUNIO_TEST_SOUC_BIN"
-        unset SOUC_BIN
+        export SOUC_NATIVE_BIN="$SOUNIO_TEST_SOUC_BIN"
+        SOUC_BIN="$ROOT_DIR/scripts/ci/souc-native-wrapper.sh"
     fi
 fi
 if [[ -n "${SOUNIO_TEST_NATIVE_BIN:-}" ]]; then

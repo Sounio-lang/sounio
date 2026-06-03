@@ -1,9 +1,10 @@
 <!-- docs:meta
-topic_id: repo.docs.audit.pl_adoption_2026_05_27
-authority: probe_grounded
-audience: internal+llm-codegen
-last_validated: 2026-05-27
-validated_by: live-probe + repo cross-reference
+topic_id: repo.docs.audit.pl-adoption-audit-2026-05-27
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.pl-adoption-audit-2026-05-27
 -->
 
 # Sounio-as-a-PL Adoption Audit — 2026-05-27

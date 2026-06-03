@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.chi5-mathlib-free-novelty-2026-05-30
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.chi5-mathlib-free-novelty-2026-05-30
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Novelty assessment: a Mathlib-free, from-scratch-ℝ machine-checked proof of χ(ℝ²) ≥ 5
 
 *SOTA literature review — 2026-05-30. Search tools: WebSearch / WebFetch. EN-UK orthography.*

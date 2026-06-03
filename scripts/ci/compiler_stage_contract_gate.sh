@@ -11,6 +11,9 @@ cd "$ROOT_DIR"
 
 # shellcheck source=../lib/resolve_souc.sh
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+if [[ -n "${SOUC_NATIVE_BIN:-}" && -x "${SOUC_NATIVE_BIN:-}" ]]; then
+  SOUC_BIN="$ROOT_DIR/scripts/ci/souc-native-wrapper.sh"
+fi
 sounio_require_souc
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
@@ -233,6 +236,114 @@ required_cmd_pattern \
   "B3_stage1_frontend_examples_hello_check_drift" \
   "souc-lean-frontend check: ok" \
   "$SOUC_BIN" run self-hosted/compiler/lean_frontend.sio -- --check examples/hello.sio
+
+required_cmd_pattern \
+  "stage1_frontend_seq_basic_check" \
+  "B4_stage1_frontend_seq_semantic_surface_check" \
+  "souc-lean-frontend check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean_frontend.sio -- --check tests/run-pass/seq_basic.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_basic_check" \
+  "B4_stage1_lean_seq_semantic_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_basic.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_epistemic_check" \
+  "B4_stage1_lean_seq_epistemic_method_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_epistemic.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_count_check" \
+  "B4_stage1_lean_seq_count_range_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_count.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_methods_check" \
+  "B4_stage1_lean_seq_get_set_method_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_methods.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_field_check" \
+  "B4_stage1_lean_seq_field_receiver_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_field.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_struct_elems_check" \
+  "B4_stage1_lean_seq_struct_element_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_struct_elems.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_borrow_check" \
+  "B4_stage1_lean_seq_borrow_ref_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_borrow.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_knowledge_uncertain_check" \
+  "B4_stage1_lean_seq_knowledge_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_knowledge_uncertain.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_kaxi_fuse_check" \
+  "B4_stage1_lean_seq_kaxi_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_kaxi_fuse.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_nested_knowledge_check" \
+  "B4_stage1_lean_seq_nested_knowledge_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_knowledge_nested_generic.sio
+
+required_cmd_pattern \
+  "stage1_lean_knowledge_unwrap_check" \
+  "B4_stage1_lean_knowledge_unwrap_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/knowledge_unwrap.sio
+
+required_rejects_with_pattern \
+  "stage1_lean_knowledge_unwrap_requires_reason_rejects" \
+  "B4_stage1_lean_knowledge_unwrap_reason_boundary_check" \
+  "Knowledge.unwrap requires exactly one argument" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/compile-fail/knowledge_unwrap_requires_reason.sio
+
+required_cmd_pattern \
+  "stage1_lean_knowledge_epsilon_literal_check" \
+  "B4_stage1_lean_knowledge_epsilon_literal_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/epsilon_comparison_valid.sio
+
+required_cmd_pattern \
+  "stage1_lean_sample_uniform_check" \
+  "B4_stage1_lean_sampling_semantic_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/sample_uniform_native.sio
+
+required_cmd_pattern \
+  "stage1_lean_observe_contraction_check" \
+  "B4_stage1_lean_observe_semantic_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/observe_contraction.sio
+
+required_cmd_pattern \
+  "stage1_lean_observe_with_effect_check" \
+  "B4_stage1_lean_observe_boundary_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/observe_with_effect.sio
+
+required_cmd_pattern \
+  "stage1_lean_observe_pattern_check" \
+  "B4_stage1_lean_observe_binary_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/observe_pattern_ok.sio
 
 known_blocker_file_size_over \
   "main_sio_shim_size" \

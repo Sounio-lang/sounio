@@ -182,8 +182,11 @@ if ! bash "$ROOT_DIR/scripts/ci/build_native_souc.sh" "$GEN1_BIN" \
 else
     if [[ -x "$GEN1_BIN" ]]; then
         echo "==> compile current-source checker driver into $CHECK_BIN with $GEN1_BIN"
-        if build_driver "$GEN1_BIN" "$CHECK_SRC" "$CHECK_BIN" "$CHECK_LOG" &&
-           build_driver "$GEN1_BIN" "$DEBUG_CHECK_SRC" "$DEBUG_CHECK_BIN" "$DEBUG_CHECK_LOG"; then
+        if build_driver "$GEN1_BIN" "$CHECK_SRC" "$CHECK_BIN" "$CHECK_LOG"; then
+            if ! build_driver "$GEN1_BIN" "$DEBUG_CHECK_SRC" "$DEBUG_CHECK_BIN" "$DEBUG_CHECK_LOG"; then
+                echo "==> debug checker driver unavailable with $GEN1_BIN; continuing without diagnostics"
+                rm -f "$DEBUG_CHECK_BIN"
+            fi
             DRIVER_COMPILER="$GEN1_BIN"
         else
             echo "==> bootstrapped compiler could not build versioned checker driver; falling back to boot4"
@@ -205,8 +208,11 @@ if [[ -z "$DRIVER_COMPILER" ]]; then
         exit 1
     fi
     echo "==> compile current-source checker driver into $CHECK_BIN with $BOOT4_BIN"
-    if build_driver "$BOOT4_BIN" "$CHECK_SRC" "$CHECK_BIN" "$CHECK_LOG" &&
-       build_driver "$BOOT4_BIN" "$DEBUG_CHECK_SRC" "$DEBUG_CHECK_BIN" "$DEBUG_CHECK_LOG"; then
+    if build_driver "$BOOT4_BIN" "$CHECK_SRC" "$CHECK_BIN" "$CHECK_LOG"; then
+        if ! build_driver "$BOOT4_BIN" "$DEBUG_CHECK_SRC" "$DEBUG_CHECK_BIN" "$DEBUG_CHECK_LOG"; then
+            echo "==> debug checker driver unavailable with $BOOT4_BIN; continuing without diagnostics"
+            rm -f "$DEBUG_CHECK_BIN"
+        fi
         DRIVER_COMPILER="$BOOT4_BIN"
     else
         echo "failure_category=build/bootstrap-path"
@@ -226,8 +232,11 @@ else
 fi
 if [[ $RC -ne 0 && "$DRIVER_COMPILER" == "$GEN1_BIN" && -x "$BOOT4_BIN" ]]; then
     echo "==> current-source driver built by $GEN1_BIN failed smoke; retrying with $BOOT4_BIN"
-    if build_driver "$BOOT4_BIN" "$CHECK_SRC" "$CHECK_BIN" "$CHECK_LOG" &&
-       build_driver "$BOOT4_BIN" "$DEBUG_CHECK_SRC" "$DEBUG_CHECK_BIN" "$DEBUG_CHECK_LOG"; then
+    if build_driver "$BOOT4_BIN" "$CHECK_SRC" "$CHECK_BIN" "$CHECK_LOG"; then
+        if ! build_driver "$BOOT4_BIN" "$DEBUG_CHECK_SRC" "$DEBUG_CHECK_BIN" "$DEBUG_CHECK_LOG"; then
+            echo "==> debug checker driver unavailable with $BOOT4_BIN; continuing without diagnostics"
+            rm -f "$DEBUG_CHECK_BIN"
+        fi
         DRIVER_COMPILER="$BOOT4_BIN"
         if smoke_check_driver "$CHECK_BIN"; then
             RC=0
@@ -320,7 +329,7 @@ fallback_compile_oracle() {
   local out="\$2"
   local log_path="\$3"
   set +e
-  SOUNIO_SOUC_BIN= "\$FALLBACK_SOUC" compile "\$src" -o "\$out" >"\$log_path" 2>&1
+  SOUNIO_SOUC_BIN= "\$FALLBACK_SOUC" "\$src" "\$out" >"\$log_path" 2>&1
   local rc=\$?
   set -e
   if [[ \$rc -ne 0 ]]; then
@@ -514,7 +523,9 @@ case "\$cmd" in
       printf '%s\n' "\$DRIVER_CHECK_OUTPUT"
       exit \$DRIVER_CHECK_RC
     fi
-    exec env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" compile "\$src" -o "\$out"
+    env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" "\$src" "\$out"
+    chmod +x "\$out"
+    exit 0
     ;;
   run)
     src=""
@@ -544,7 +555,7 @@ case "\$cmd" in
     tmp_out="\$(mktemp /tmp/sounio-ontology-validation-run-XXXXXX.elf)"
     trap 'rm -f "\$tmp_out"' EXIT
     set +e
-    SOUNIO_SOUC_BIN= "\$FALLBACK_SOUC" compile "\$src" -o "\$tmp_out"
+    SOUNIO_SOUC_BIN= "\$FALLBACK_SOUC" "\$src" "\$tmp_out"
     fallback_run_rc=\$?
     set -e
     if [[ \$fallback_run_rc -ne 0 ]]; then
@@ -554,6 +565,7 @@ case "\$cmd" in
       fi
       exit \$fallback_run_rc
     fi
+    chmod +x "\$tmp_out"
     exec "\$tmp_out" "\${prog_args[@]}"
     ;;
   info)

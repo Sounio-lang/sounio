@@ -169,7 +169,6 @@ lean_lib «SounioSatColouringSB» where
 -- χ≥6 cube-and-conquer composition smoke: if all five one-literal split leaves
 -- for one vertex are UNSAT, the plain `colourCNF n 5 edges` is UNSAT. This is
 -- the Lean-side cover adapter for future generated per-cube LRAT certificates.
-@[default_target]
 lean_lib «SounioSatCubeCover» where
 
 -- B1 mechanism spike: a tiny hand-written UNSAT certificate re-checked by Lean core's
@@ -493,13 +492,11 @@ lean_lib «SounioErdos90PlanarLowerBound» where
 -- Erdős [90] unit-distance count spectrum on the 168/ZD structure (7-vertex probe):
 -- associator lever beats linear (max 12 vs 9, 6 vs 2 distinct counts) + interleaved-
 -- star count-growth (gap 6<20<26). See docs/research/erdos-90-168-spectrum-note.md
-@[default_target]
 lean_lib «SounioErdos90UnitSpectrum» where
 
 -- Erdős [90] refinement: the count-growth separation lifted to the pathion level
 -- (32-D, Cayley-Dickson 5). Pathion associator star breaks the sedenion ceiling of 40
 -- (reaches 44 at 15 verts, 168 at 31), 3696 verified pathion ZD pairs.
-@[default_target]
 lean_lib «SounioErdos90PathionGrowth» where
 
 -- Slice D of the SOTA push: Lean soundness sketch of the

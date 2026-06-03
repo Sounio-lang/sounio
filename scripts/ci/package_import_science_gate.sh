@@ -17,6 +17,26 @@ TEST_LIST="$OUT_DIR/epistemic_core_tests.tsv"
 
 trap 'rm -rf "$OUT_DIR"' EXIT
 
+compile_and_run() {
+  local src="$1"
+  local log="$2"
+  local elf="$OUT_DIR/$(basename "$src").elf"
+  local compile_log="$log.compile"
+  local run_log="$log.run"
+
+  if ! "$SOUC_BIN" "$src" "$elf" >"$compile_log" 2>&1; then
+    cat "$compile_log" >&2
+    return 1
+  fi
+  chmod +x "$elf"
+  if ! "$elf" >"$run_log" 2>&1; then
+    cat "$compile_log" >&2
+    cat "$run_log" >&2
+    return 1
+  fi
+  cat "$run_log" >"$log"
+}
+
 printf '[package-import-science] souc=%s\n' "$SOUC_BIN"
 printf '[package-import-science] stdlib=%s\n' "$SOUNIO_STDLIB_PATH"
 printf '[package-import-science] manifest=%s\n' "$MANIFEST"
@@ -82,7 +102,7 @@ while IFS=$'\t' read -r name path; do
   [[ -n "$name" ]] || continue
   log="$OUT_DIR/${name}.log"
   printf '[package-import-science] run manifest test %s (%s)\n' "$name" "$path"
-  if ! "$SOUC_BIN" run "$path" >"$log" 2>&1; then
+  if ! compile_and_run "$path" "$log"; then
     cat "$log" >&2
     printf '[package-import-science] FAIL: manifest test failed: %s\n' "$name" >&2
     exit 1
@@ -92,7 +112,7 @@ done <"$TEST_LIST"
 
 printf '[package-import-science] run downstream witness %s\n' "$WITNESS"
 WITNESS_LOG="$OUT_DIR/witness.log"
-if ! "$SOUC_BIN" run "$WITNESS" >"$WITNESS_LOG" 2>&1; then
+if ! compile_and_run "$WITNESS" "$WITNESS_LOG"; then
   cat "$WITNESS_LOG" >&2
   echo '[package-import-science] FAIL: downstream package witness failed' >&2
   exit 1
@@ -107,7 +127,7 @@ printf '[package-import-science] compile negative missing-package fixture %s\n' 
 NEGATIVE_LOG="$OUT_DIR/missing_package.log"
 NEGATIVE_ELF="$OUT_DIR/missing_package.elf"
 set +e
-SOUNIO_SOUC_VERBOSE=1 "$SOUC_BIN" compile "$NEGATIVE" -o "$NEGATIVE_ELF" >"$NEGATIVE_LOG" 2>&1
+SOUNIO_SOUC_VERBOSE=1 "$SOUC_BIN" "$NEGATIVE" "$NEGATIVE_ELF" >"$NEGATIVE_LOG" 2>&1
 negative_rc=$?
 set -e
 if [[ $negative_rc -eq 0 ]]; then

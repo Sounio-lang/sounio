@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.sigsegv-pbpk28-private-struct-2026-06-02
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.sigsegv-pbpk28-private-struct-2026-06-02
+-->
+
 # PBPK28 SIGSEGV — private struct field access across bundle imports
 
 **Date:** 2026-06-02  

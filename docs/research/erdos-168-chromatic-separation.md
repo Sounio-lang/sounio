@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.erdos-168-chromatic-separation
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.erdos-168-chromatic-separation
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # A machine-checked study of zero-divisor / associator chromatic obstructions for unit-distance graphs (Erdős #508/#704)
 
 **Status:** internal research note, 2026-05-25. Consolidates a six-step

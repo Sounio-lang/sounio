@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.pbpk-rapamycin-triage-2026-06-02
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.pbpk-rapamycin-triage-2026-06-02
+-->
+
 # dissertation_pbpk_rapamycin — 5-failure triage (2026-06-02)
 
 **Verdict: COMPILER bug (struct-return zeroing), NOT clinical-value drift.** All 5 failing
