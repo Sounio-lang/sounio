@@ -1388,6 +1388,58 @@ fn compiler_preflight_ir_load(path: string) -> CompilerIrLoadResult with IO, Mut
     return compiler_ir_load_result_ok(ir_result.module)
 }
 
+// SRET-safe variant of compiler_preflight_ir_load: writes the result through an
+// `&!out` pointer via in-place FIELD writes instead of returning the large
+// CompilerIrLoadResult (which contains a ~MB IrModule) BY VALUE. The by-value
+// return triggers the epilogue `rep movsq` overrun (SEVEN-doc Cluster-C ROOT;
+// gdb-pinned "caller sret pointer dropped") that SIGSEGVs the source→native-v2
+// bridge in its caller frame. In-place `(*out).field = …` writes are the
+// repaired nested-mut-write pattern and avoid the by-value return entirely.
+fn compiler_preflight_ir_load_into(out: &!CompilerIrLoadResult, path: string) with IO, Mut, Panic, Div, Alloc {
+    if file_size(path) <= 0 {
+        var file_errors = compile_errors_new()
+        file_errors = compile_errors_push(file_errors, compile_format_error_at(path, 0, 0, "could not read input file"))
+        (*out).ok = false
+        (*out).errors = file_errors
+        return
+    }
+    let incomplete_assign = compile_scan_incomplete_assignment(path)
+    if incomplete_assign.0 >= 0 {
+        var parse_like_errors = compile_errors_new()
+        parse_like_errors = compile_errors_push(
+            parse_like_errors,
+            compile_format_error_at(path, incomplete_assign.0, incomplete_assign.1, "syntax appears incomplete after assignment")
+        )
+        (*out).ok = false
+        (*out).errors = parse_like_errors
+        return
+    }
+    let ir_result = load_multimodule_ir(path)
+    let parse_errors = parser_last_error_count()
+    if !ir_result.ok || parse_errors > 0 {
+        var preflight_errors = compile_errors_new()
+        if !ir_result.ok {
+            preflight_errors = compile_push_ir_failure(preflight_errors, ir_result.error_msg)
+        }
+        if parse_errors > 0 {
+            preflight_errors = compile_errors_push(preflight_errors, "error: parser reported " + int_to_string(parse_errors) + " syntax errors")
+        }
+        if preflight_errors.len == 0 {
+            preflight_errors = compile_errors_push(preflight_errors, "error: IR preflight failed")
+        }
+        (*out).ok = false
+        (*out).errors = preflight_errors
+        return
+    }
+    (*out).ok = true
+    (*out).errors = compile_errors_new()
+    (*out).module = ir_result.module
+}
+
+// BSS-backed result storage for the source→native-v2 bridge (avoids a by-value
+// CompilerIrLoadResult local/return on the caller's stack — see _into above).
+var NV2_BRIDGE_IR_RESULT: CompilerIrLoadResult = compiler_ir_load_result_error(compile_errors_new())
+
 fn compiler_ir_buffers_equal(buf_a: [i8; 131072], len_a: i64, buf_b: [i8; 131072], len_b: i64) -> bool with Mut {
     if len_a != len_b {
         return false
@@ -2437,6 +2489,35 @@ fn run_native_v2_emit_exit_code(ret_value: i64, out_path: string) with IO, Mut, 
 
 fn run_native_v2_emit13() with IO, Mut, Panic, Div, Alloc {
     run_native_v2_emit_exit_code(13, "artifacts/omega/emit13.elf")
+}
+
+// Bridge: real .sio SOURCE -> front-half -> IrModule -> native-v2 -> ELF.
+// Uses the BSS-global NV2_BRIDGE_IR_RESULT + compiler_preflight_ir_load_into so
+// the large CompilerIrLoadResult is NEVER returned by value into this frame
+// (that path SIGSEGVs — SRET epilogue overrun). The native-v2 backend then
+// consumes &NV2_BRIDGE_IR_RESULT.module (a global field address, always valid).
+fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let source_path = compiler_mode_source_arg(args, flag_index, "--native-v2-compile")
+    let out_path = compiler_mode_output_path(args, "a.out")
+    if !compiler_preflight_source_input(source_path) {
+        panic("native-v2-compile failed: source not readable")
+    }
+    compiler_preflight_ir_load_into(&! NV2_BRIDGE_IR_RESULT, source_path)
+    if !NV2_BRIDGE_IR_RESULT.ok {
+        compiler_print_errors(NV2_BRIDGE_IR_RESULT.errors)
+        panic("native-v2-compile failed: front-half errors")
+    }
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let rc = compile_native_v2_preview_to_file(&NV2_BRIDGE_IR_RESULT.module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_compile: FAIL to_file rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_compile: emitted path=")
+    print(out_path)
+    print("\n")
 }
 
 // Parameterized scalar witness: --native-v2-emit-scalar <N> <out_path>.
@@ -26227,6 +26308,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-emit13" {
             run_native_v2_emit13()
+            return
+        } else if mode == "--native-v2-compile" {
+            run_native_v2_compile_mode(args, arg_idx)
             return
         } else if mode == "--native-v2-emit-scalar" {
             run_native_v2_emit_scalar(args, arg_idx)
