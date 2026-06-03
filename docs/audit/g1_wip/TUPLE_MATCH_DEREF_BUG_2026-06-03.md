@@ -64,3 +64,22 @@ not a tail-of-session partial (a buggy partial would break the bootstrap fixed p
   `match (a.inner, b.inner)`). Fixed by implementing tuple-pattern match arms.
 - closure (approx_propagation): UNDIAGNOSED — needs the Approx effect; likely separate.
 - Seq (seq_borrow, seq_struct_elems): UNDIAGNOSED — may or may not share the tuple-match root.
+
+## FULL SURVIVOR MAP (2026-06-03, after reducing all 5) — 3 distinct bugs, none a cheap guard
+1. Knowledge ×2 (epsilon_comparison_valid, knowledge_octonion_inner): CANONICAL codegen bug —
+   tuple patterns in match arms unimplemented (this doc). Repro: TUPLE_MATCH_DEREF_REPRO. Crashes
+   OLD bin/souc too. Fix = implement tuple-pattern match arms (feature).
+2. Seq ×2 (seq_borrow, seq_struct_elems): MODULAR-CHECKER bug — checker_check_method_call_inplace
+   (check.sio:3495) bridges to by-value `(*c).check_method_call_with_base_ty(...)` → copies the 8MB
+   Checker per method call; a struct-returning-CALL arg (v.push(mk(1))) adds nested copies → stack
+   smash. Minimal repro: SEQ_PUSH_SRET_CALL_REPRO_2026-06-03.sio (v.push(mk(1))). souc_gen2 RUNS the
+   program fine → checker-only. Fix = *mut transcription of check_method_call_with_base_ty (like the
+   arg-boundary checks), NOT a cheap guard (the method check is needed).
+3. Closure ×1 (approx_propagation): MODULAR-CHECKER bug — the in-place expr checker has NO
+   ExprClosure case, so a closure literal bridges to by-value check_closure_expr (check.sio:18449)
+   → 8MB copy + recursive body check (census's "runaway recursion"). Minimal repro:
+   CLOSURE_BODY_CALL_REPRO_2026-06-03.sio (typed closure whose body calls a fn; no Approx/no call
+   needed). Fix = add an in-place ExprClosure case (transcribe check_closure_expr to *mut).
+
+=> The ontology guard (165 crashers) was the cheap win. The remaining 5 are 3 separate substantial
+fixes (1 canonical feature + 2 *mut transcriptions), each covering only 1-2 programs.
