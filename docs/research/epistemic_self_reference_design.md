@@ -200,6 +200,49 @@ self-reference (and for the branch-likelihood estimator to gate). VERIFY the
 exact propagation site before editing; re-probe the corrected case for
 `guarded>0` after.
 
+## ✅ Propagation site LOCATED (2026-06-03): a deliberate dual-channel split
+
+The gap is a **two-channel design**, confirmed by the source comments
+("Gen 13: dual-channel measurement confidence (parallel to EXPR_CONF)";
+"ESCOPE measurement quality (parallel to ESCOPE_CONF)"):
+
+- `escope_add(name, ty, conf)` (`lean_single.sio:20948`) sets
+  `ESCOPE_CONF[slot] = conf` (20952) — the **GATE channel**.
+- The `let x = measure(...)` binding calls `escope_add(nh, bind_ty, bind_conf)`
+  (21680) with `bind_conf` ≈ 1000, and separately stores the measure's *low*
+  confidence `bind_meas_conf` (e.g. 200) into **`ESCOPE_MEAS[slot]`** (21683) —
+  a **parallel MEASUREMENT-QUALITY channel**.
+- Call-argument propagation (21785) and the gate read **`ESCOPE_CONF`**, never
+  `ESCOPE_MEAS`. So measurement uncertainty lowers only the parallel channel;
+  the gate channel stays 1000 → `guarded=0`.
+
+Empirical confirmation: `let lo = measure(10.0, uncertainty: 8.0)` then
+`consume_k(lo)` → `min=0` (measurement-quality channel) but `guarded=0` (gate
+channel ≥ 950). Disambiguated with the bare-Knowledge-arg probe (also 0), ruling
+out the `.value` walk and pinning it to the binding's channel split.
+
+### The fix (small, principled — connect the channels)
+
+At the binding (≈21680), fold the measurement confidence into the gate
+confidence: `escope_add(nh, bind_ty, min_nonzero(bind_conf, bind_meas_conf))`
+(use `bind_meas_conf` when it is > 0 and < `bind_conf`). Then `ESCOPE_CONF[lo]`
+carries the genuine low confidence, downstream uses propagate it (21785), and a
+call consuming a 20%-confident value **gates** (`guarded>0`). This is the honest
+redesign: the gate channel *should* reflect that a value you barely trust is not
+"confidently usable" — it does **not** lower the threshold or fabricate
+uncertainty. (Mirror the same fold anywhere `ESCOPE_MEAS`/`bind_meas_conf` is set
+but `ESCOPE_CONF` isn't, and re-pin the §6 "0 guarded" framing — clinical
+high-uncertainty measurements will now legitimately gate, which is correct.)
+
+### Then self-reference becomes reachable
+
+With the channels connected, the branch-likelihood estimator — expressed as a
+low-confidence `measure` (e.g. a ~70%-reliable guess) and consumed by the
+layout decision — produces a genuine `guarded>0` on the bootstrap self-compile.
+The remaining order: (i) make this channel-fold fix + verify `consume_k(lo)`
+gates on a probe; (ii) Step 0's layout host + estimator; (iii) self-compile via
+build lock + re-pin fixed-point.
+
 ## Advisor caveats to honor during implementation
 
 - **Fixed-point hash will change, and that's fine.** Block reorder ⇒ different
