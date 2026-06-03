@@ -3703,6 +3703,66 @@ fn knowledge_literal_epsilon_value(e: Expr) -> f64 {
     0.0 - 1.0
 }
 
+fn measure_literal_numeric_value(e: Expr) -> (bool, f64) {
+    if e.kind == ExprKind::ExprFloatLit {
+        return (true, e.float_val)
+    }
+    if e.kind == ExprKind::ExprIntLit {
+        return (true, e.int_val as f64)
+    }
+    (false, 0.0)
+}
+
+fn measure_relative_epsilon(value: f64, uncertainty: f64) -> f64 with Div {
+    var v = value
+    if v < 0.0 {
+        v = 0.0 - v
+    }
+    var u = uncertainty
+    if u < 0.0 {
+        u = 0.0 - u
+    }
+    if v == 0.0 {
+        if u == 0.0 {
+            return 0.0
+        }
+        return 1.0
+    }
+    var eps = u / v
+    if eps < 0.0 {
+        eps = 0.0
+    }
+    if eps > 1.0 {
+        eps = 1.0
+    }
+    eps
+}
+
+fn measure_literal_epsilon_from_args(args: Option<Box<ExprList> >) -> f64 with Div {
+    match args {
+        Some(first) => {
+            match (*first).tail {
+                Some(second) => {
+                    let label_ok =
+                        (*second).label.len == 0
+                        || name_matches_str11((*second).label, 117, 110, 99, 101, 114, 116, 97, 105, 110, 116, 121)
+                    if !label_ok {
+                        return 0.0 - 1.0
+                    }
+                    let value_pair = measure_literal_numeric_value((*first).head)
+                    let uncertainty_pair = measure_literal_numeric_value((*second).head)
+                    if value_pair.0 && uncertainty_pair.0 {
+                        return measure_relative_epsilon(value_pair.1, uncertainty_pair.1)
+                    }
+                    0.0 - 1.0
+                }
+                None => 0.0 - 1.0
+            }
+        }
+        None => 0.0 - 1.0
+    }
+}
+
 fn preserve_unspecified_knowledge_annotation(ann_ty: TypeEntry, init_ty: TypeEntry) -> bool {
     ann_ty.kind == TypeKind::TyKnowledge
         && init_ty.kind == TypeKind::TyKnowledge
@@ -4161,9 +4221,10 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 }
 
 fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let epsilon = measure_literal_epsilon_from_args(e.args)
     let first_arg = expr_list_head(e.args)
     let value_ty = checker_check_opt_expr_inplace(c, first_arg)
-    ty_knowledge(value_ty, 0.0 - 1.0)
+    ty_knowledge(value_ty, epsilon)
 }
 
 
@@ -17968,12 +18029,14 @@ impl Checker {
 
     fn check_measure_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         // measure(v: T, uncertainty: f64) -> Knowledge<T>
-        // Type-check first arg; T = type of value; result = Knowledge<T> with epsilon=-1 (unspecified)
+        // Literal uncertainty is lowered into a relative epsilon bound; dynamic
+        // inputs stay unspecified until the runtime evidence path can refine them.
+        let epsilon = measure_literal_epsilon_from_args(e.args)
         let first_arg = expr_list_head(e.args)
         let v_pair = self.check_opt_expr(first_arg)
         let c = v_pair.0
         let v_ty = v_pair.1
-        (c, ty_knowledge(v_ty, 0.0 - 1.0))
+        (c, ty_knowledge(v_ty, epsilon))
     }
 
     fn borrow_state_and_shared_count(self, name: Name) -> (i64, i64) with Mut, Panic, Div, Alloc, IO {
