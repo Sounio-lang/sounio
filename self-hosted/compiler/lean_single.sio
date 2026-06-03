@@ -19065,11 +19065,17 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         var has_eq: i64 = 0
         if TK[EP as usize] == 16 { EP = EP + 1; has_eq = 1 }
         if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
-            // Local array: allocate slots, skip initializer [0; N], store lea
-            // Skip [0; N] or [val; N] initializer
+            // Local array with repeat initializer [V; N]: splat V into every slot.
+            // (Previously V was SKIPPED and the slots were always zero-filled — the
+            //  [V;N] non-zero-splat miscompile. We now mirror the already-correct
+            //  global path (emit_global_inits_x86): compile V into rax, then rep-store.
+            //  Byte-element arrays keep the zero-fill — non-zero byte splat is a
+            //  documented remaining gap, so this is no regression for them.)
             EP = EP + 1  // skip [
+            let val_ep = EP                       // remember where the fill value V starts
             while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
             if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
+            let after_ep = EP
             var nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
             let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
@@ -19078,19 +19084,34 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             VAR_TY[arr_vi as usize] = 8
             VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
             VAR_MUT[arr_vi as usize] = decl_is_mut
-            // Zero-init the array slots using rep stosq (compact: 3 instrs vs N*2 instrs)
             // Array slots: base..base+nslots-1, lowest addr = rbp-(base+nslots-1)*8
             // rep stosq: store rax to [rdi], rdi += 8, rcx--; repeats rcx times (DF=0 → ascending)
             let base = ptr_slot - nslots
+            // Compute the fill value into rax. For 8-byte elements (i64/f64/ptr) splat
+            // the real V; var_add_arr emits no code and the rdi setup below does not
+            // clobber rax, so V survives into the rep-store.
+            var fill_zero: i64 = 1
+            if arr_esiz != 1 {
+                EP = val_ep
+                compile_or()
+                let v_is_f64 = EXPR_IS_F64
+                EP = after_ep
+                if v_is_f64 == 1 {
+                    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
+                }
+                fill_zero = 0
+            }
             if LAST_LOCAL_BSS_SPILL != 0 {
                 em(0x48); em(0xbf); em64(LAST_LOCAL_BSS_ADDR)
             } else {
                 em(0x48); em(0x8d); em(0xbd)  // lea rdi, [rbp + disp32]  (lowest array addr)
                 em32(0 - (base + nslots - 1) * 8)
             }
-            em(0x48); em(0x31); em(0xc0)  // xor rax, rax
+            if fill_zero == 1 {
+                em(0x48); em(0x31); em(0xc0)  // xor rax, rax (byte-array path: zero-fill)
+            }
             em(0xb9); em32(nslots)         // mov ecx, nslots (zero-extends to rcx)
-            em(0xf3); em(0x48); em(0xab)  // rep stosq
+            em(0xf3); em(0x48); em(0xab)  // rep stosq (splats rax across all slots)
             // Store lea (pointer to array start) in ptr_slot
             // Array slots are base..base+nslots-1, addresses [rbp-base*8]..[rbp-(base+nslots-1)*8]
             // Pointer must point to lowest address so arr[i] = [ptr + i*8] addresses upward
