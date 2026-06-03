@@ -1,0 +1,104 @@
+//! Native per-edge Farkas (transport-dual) certification of kappa sign over ALL LCC edges.
+//! For every edge: kappa<0 <=> W1>1 is UNSAT of "exists plan with cost<=1".
+//! For each UNSAT edge we materialize the MODI duals and verify natively:
+//!   (a) dual feasibility u_i+v_j<=c_ij for all cells,
+//!   (b) strong duality dual_obj == W1 (== 1-kappa),
+//!   (c) dual_obj > 1  => W1>1 => kappa<0 CERTIFIED.
+use ot::swow_orc::*
+use ot::transport_exact::*
+use math::rational::*
+
+fn pint(x: i64) with IO, Mut, Div, Panic {
+    if x == 0 { print_char(48 as u8); return; }
+    var n = x; if n < 0 { print_char(45 as u8); n = 0 - n; }
+    var buf: [i64; 24] = [0; 24]; var k: i64 = 0;
+    while n > 0 { buf[k as usize] = n % 10; n = n / 10; k = k + 1; }
+    while k > 0 { k = k - 1; print_char((48 + buf[k as usize]) as u8); }
+}
+
+fn cert_edge(uu: i64, vv: i64, k: Rational) -> i64 with Mut, Div, Panic {
+    // returns 1 if dual witness verifies kappa<0, else 0
+    let ns = ORC_DEG[uu as usize] + 1;
+    let nd = ORC_DEG[vv as usize] + 1;
+    let D = OT_LAST_D;
+    modi_duals_multiroot(ns, nd);
+    var i: i64 = 0;
+    while i < ns {
+        var j: i64 = 0;
+        while j < nd {
+            let ui = Rational { num: DU_N[i as usize], den: DU_D[i as usize] };
+            let vj = Rational { num: DV_N[j as usize], den: DV_D[j as usize] };
+            let c  = Rational { num: OT_COST[(i*nd+j) as usize], den: 1 };
+            if rat_cmp(rat_add(ui, vj), c) > 0 { return 2; }   // dual infeasible (degenerate basis)
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    var obj = rat_zero();
+    i = 0;
+    while i < ns {
+        let mu = rat_make(OT_SUPPLY[i as usize], D);
+        let ui = Rational { num: DU_N[i as usize], den: DU_D[i as usize] };
+        obj = rat_add(obj, rat_mul(mu, ui));
+        i = i + 1;
+    }
+    var j2: i64 = 0;
+    while j2 < nd {
+        let nu = rat_make(OT_DEMAND[j2 as usize], D);
+        let vj = Rational { num: DV_N[j2 as usize], den: DV_D[j2 as usize] };
+        obj = rat_add(obj, rat_mul(nu, vj));
+        j2 = j2 + 1;
+    }
+    // strong duality: dual obj == W1 == 1 - kappa
+    let w1 = rat_sub(rat_one(), k);
+    if rat_cmp(obj, w1) != 0 { return 3; }
+    // UNSAT: obj > 1
+    if rat_cmp(obj, rat_one()) <= 0 { return 4; }
+    return 1;
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    orc_load_csv("data/processed/chinese_edges_FINAL.csv");
+    orc_build_lcc();
+    var E: i64 = 0;
+    var unsat: i64 = 0;        // kappa < 0
+    var unsat_cert: i64 = 0;   // kappa<0 with verified dual witness
+    var sat: i64 = 0;          // kappa >= 0
+    var bad: i64 = 0;          // kappa<0 but witness failed (degenerate dual)
+    var infeas: i64 = 0;       // failed due to dual infeasibility (unset degenerate potentials)
+    var dmis: i64 = 0;         // failed due to strong-duality mismatch
+    var i: i64 = 0;
+    while i < ORC_NW {
+        if ORC_LID[i as usize] >= 0 {
+            var e = ORC_AH[i as usize];
+            while e >= 0 {
+                let j = ORC_ATO[e as usize];
+                if j > i {
+                    if ORC_LID[j as usize] >= 0 {
+                        let k = orc_kappa_edge(i, j);
+                        E = E + 1;
+                        if k.num < 0 {
+                            unsat = unsat + 1;
+                            let ok = cert_edge(i, j, k);
+                            if ok == 1 { unsat_cert = unsat_cert + 1; } else { bad = bad + 1; }
+                            if ok == 2 { infeas = infeas + 1; }
+                            if ok == 3 { dmis = dmis + 1; }
+                        } else {
+                            sat = sat + 1;
+                        }
+                    }
+                }
+                e = ORC_ANX[e as usize];
+            }
+        }
+        i = i + 1;
+    }
+    print("LANG=ZH E="); pint(E);
+    print(" UNSAT="); pint(unsat);
+    print(" UNSAT_CERT="); pint(unsat_cert);
+    print(" SAT="); pint(sat);
+    print(" WITNESS_FAIL="); pint(bad);
+    print(" (infeasible="); pint(infeas); print(" duality_mismatch="); pint(dmis); print(")");
+    print("\n");
+    return 0;
+}

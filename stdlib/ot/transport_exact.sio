@@ -218,6 +218,78 @@ pub fn modi_duals(ns: i64, nd: i64) -> i64 with Mut, Div, Panic {
     return 1
 }
 
+// Degeneracy-robust MODI potentials: seed u=0 at one root PER basis component so the
+// dual is tight on EVERY positive-flow cell (complementary slackness). By per-component
+// mass balance this gives dual objective == W1 for ANY such dual; cross-component
+// feasibility is then checked by the caller (a tight-but-infeasible dual is rejected).
+// Additive; does NOT modify modi_duals (the anchor cert depends on that one).
+pub fn modi_duals_multiroot(ns: i64, nd: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ns { DU_SET[i as usize] = 0; i = i + 1; }
+    var j: i64 = 0
+    while j < nd { DV_SET[j as usize] = 0; j = j + 1; }
+    var remaining: i64 = 1
+    while remaining == 1 {
+        // find an unset node to root (prefer a source)
+        var root: i64 = 0 - 1
+        var root_is_src: i64 = 1
+        var s: i64 = 0
+        while s < ns { if DU_SET[s as usize] == 0 { if root < 0 { root = s; } } s = s + 1; }
+        if root < 0 {
+            var d: i64 = 0
+            while d < nd { if DV_SET[d as usize] == 0 { if root < 0 { root = d; root_is_src = 0; } } d = d + 1; }
+        }
+        if root < 0 { remaining = 0; }
+        else {
+            var qh: i64 = 0
+            var qt: i64 = 0
+            if root_is_src == 1 {
+                DU_N[root as usize] = 0; DU_D[root as usize] = 1; DU_SET[root as usize] = 1
+                DMODI_Q[0] = root; qt = 1
+            } else {
+                DV_N[root as usize] = 0; DV_D[root as usize] = 1; DV_SET[root as usize] = 1
+                DMODI_Q[0] = ns + root; qt = 1
+            }
+            while qh < qt {
+                let node = DMODI_Q[qh as usize]
+                qh = qh + 1
+                if node < ns {
+                    let si = node
+                    var jj: i64 = 0
+                    while jj < nd {
+                        if d_flow(ns, nd, si, jj) > 0 {
+                            if DV_SET[jj as usize] == 0 {
+                                let c = Rational { num: OT_COST[(si * nd + jj) as usize], den: 1 }
+                                let ui = Rational { num: DU_N[si as usize], den: DU_D[si as usize] }
+                                let v = rat_sub(c, ui)
+                                DV_N[jj as usize] = v.num; DV_D[jj as usize] = v.den; DV_SET[jj as usize] = 1
+                                DMODI_Q[qt as usize] = ns + jj; qt = qt + 1
+                            }
+                        }
+                        jj = jj + 1
+                    }
+                } else {
+                    let dj = node - ns
+                    var ii: i64 = 0
+                    while ii < ns {
+                        if d_flow(ns, nd, ii, dj) > 0 {
+                            if DU_SET[ii as usize] == 0 {
+                                let c = Rational { num: OT_COST[(ii * nd + dj) as usize], den: 1 }
+                                let vj = Rational { num: DV_N[dj as usize], den: DV_D[dj as usize] }
+                                let u = rat_sub(c, vj)
+                                DU_N[ii as usize] = u.num; DU_D[ii as usize] = u.den; DU_SET[ii as usize] = 1
+                                DMODI_Q[qt as usize] = ii; qt = qt + 1
+                            }
+                        }
+                        ii = ii + 1
+                    }
+                }
+            }
+        }
+    }
+    return 1
+}
+
 fn ot_lcm(a: i64, b: i64) -> i64 with Mut, Div, Panic {
     var x = a; var y = b;
     while y > 0 { let t = y; y = x - (x / y) * y; x = t; }
