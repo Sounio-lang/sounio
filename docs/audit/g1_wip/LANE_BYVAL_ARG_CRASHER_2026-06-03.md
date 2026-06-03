@@ -206,3 +206,50 @@ Proceeding means hypothesis-driven edits to `emit_direct_fn_call_x86` /
 `ret_agg_nslots` + full mc rebuild + 504-census per iteration. Higher-risk than fix
 (A). Recommended order remains: land fix (A) (G1, removes the trigger) first; pursue
 (B) as codegen hardening with the SRET-shift hypothesis as the entry point.
+
+## Symbol tooling built + hypothesis GROUNDED (REFUTED) — 2026-06-03
+
+Built lightweight symbol tooling (no ELF .symtab needed): a `dump_fn_symbol_map()`
+in lean_single called at the top of `write_elf`, printing `@@SYM <name> <vaddr>` for
+every function (vaddr = text_base 0x400000 + text_off 4096 + `FN_OFF[fi]`). Recipe:
+```
+fn dump_fn_symbol_map() with IO, Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < FN_COUNT { print("@@SYM "); print_fn_name(fi); print(" ");
+        print_int(0x401000 + FN_OFF[fi as usize]); fi = fi + 1 }
+}
+// call dump_fn_symbol_map() as the first line of write_elf()
+```
+Build a bootstrap with it (ds_fixed2 → souc_dump, ~1.3s), compile main.sio with
+souc_dump (~2:36) → the map prints during the mc emit. The dump runs only in the
+emit phase, so **mc_dump is byte-identical to mc_fixed** (md5 7bdd1429 == 7bdd1429) —
+the map is valid for the observed 0x4c2805b crash. Reusable for any future RIP→fn.
+
+### Definitive results
+- **Faulting function = `checker_ontology_boundary_check_call_arg_contract_inplace`**
+  (@ 0x4c27fa8, crash at +179). Pinned by the symbol map; mc_dump≡mc_fixed.
+- **SRET-shift hypothesis REFUTED.** That function returns **unit** (no SRET) — there
+  is no return-buffer shift. The 164 KB `rep movsq` in its prologue is the `(*c)`
+  deref-copy to pass `Checker` by value into `(*c).check_call_arg_ontology_boundary(
+  arg_ty, param_ty, call_span)`; the fault is copying the **incoming `call_span`
+  (4th arg) from rcx = −1**.
+- **Caller-side corruption (deeper than one mis-loaded arg):** at the crash, the
+  callee's `[rbp+8]` (return address) is **0** as well as rcx=−1. So the caller
+  (`checker_check_call_args_inner_inplace`, a 672 KB-frame function) set up the call
+  with BOTH a −1 4th-arg pointer AND a 0 return address → **stack/frame-layout
+  corruption at the call site**, not a clean arg-passing logic bug.
+
+### Refined direction (supersedes the SRET-shift hypothesis)
+The bug is in the huge-frame in-place caller: calling the boundary `_inplace` checker
+corrupts the call frame (4th struct-arg source = −1, pushed return address = 0). The
+672 KB frame comes from the residual `(*c).<by-value method>(…)` calls each needing a
+164 KB by-value `Checker` copy local. This is consistent with a stack/frame-size or
+slot-offset codegen limit at frames this large — NOT an SRET shift, NOT a single
+arg-passing instruction. Fix (A) (remove the by-value `(*c).method` calls via *mut
+conversion) eliminates both the 164 KB copies AND the over-large frame, so it remains
+the correct unblock. Fix (B) would be hardening the codegen for very large
+(>0.5 MB) call frames / by-value-arg setup — but the trigger is frame scale, which is
+exactly why no small repro reproduces it.
+
+The `dump_fn_symbol_map` patch was reverted to keep the branch clean (recipe above
+re-applies it in seconds).
