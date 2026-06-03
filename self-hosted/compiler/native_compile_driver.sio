@@ -205,6 +205,8 @@ let V2_BUILTIN_INDIRECT_CALL: i64 = 27
 // code, and the runtime never runs it on CPU-only hosts.
 let V2_BUILTIN_GPU_INTRINSIC: i64 = 28
 let V2_BUILTIN_SAMPLE_UNIFORM: i64 = 29
+let V2_BUILTIN_OBSERVE: i64 = 30
+let V2_BUILTIN_ACKNOWLEDGE: i64 = 31
 let V2_FIRST_USER_FN_ID: i64 = 32
 
 // V2_UFN_* — user fn instruction recording (scalar, bypasses broken IrInstr struct writes)
@@ -1267,6 +1269,8 @@ fn driver_const_value_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "V2_BUILTIN_INDIRECT_CALL") { return 27 }
     if token_text_eq(tok, "V2_BUILTIN_GPU_INTRINSIC") { return 28 }
     if token_text_eq(tok, "V2_BUILTIN_SAMPLE_UNIFORM") { return 29 }
+    if token_text_eq(tok, "V2_BUILTIN_OBSERVE") { return 30 }
+    if token_text_eq(tok, "V2_BUILTIN_ACKNOWLEDGE") { return 31 }
     if token_text_eq(tok, "V2_FIRST_USER_FN_ID") { return 32 }
 
     if token_text_eq(tok, "UFN_LOAD_IMM") { return 1 }
@@ -2977,6 +2981,8 @@ fn builtin_fn_id(name: Name) -> i64 with Mut, Panic, Div {
     if name_eq_text(name, "write_i64") { return V2_BUILTIN_WRITE_I64 }
     if name_eq_text(name, "heap_realloc") { return V2_BUILTIN_HEAP_REALLOC }
     if name_eq_text(name, "sample_uniform") { return V2_BUILTIN_SAMPLE_UNIFORM }
+    if name_eq_text(name, "observe") { return V2_BUILTIN_OBSERVE }
+    if name_eq_text(name, "acknowledge") { return V2_BUILTIN_ACKNOWLEDGE }
     if name_eq_text(name, "gpu_thread_id_x") { return V2_BUILTIN_GPU_INTRINSIC }
     if name_eq_text(name, "gpu_thread_id_y") { return V2_BUILTIN_GPU_INTRINSIC }
     if name_eq_text(name, "gpu_thread_id_z") { return V2_BUILTIN_GPU_INTRINSIC }
@@ -3022,6 +3028,8 @@ fn builtin_fn_id_tok(tok: i64) -> i64 with Mut, Panic, Div {
     if token_text_eq(tok, "write_i64") { return V2_BUILTIN_WRITE_I64 }
     if token_text_eq(tok, "heap_realloc") { return V2_BUILTIN_HEAP_REALLOC }
     if token_text_eq(tok, "sample_uniform") { return V2_BUILTIN_SAMPLE_UNIFORM }
+    if token_text_eq(tok, "observe") { return V2_BUILTIN_OBSERVE }
+    if token_text_eq(tok, "acknowledge") { return V2_BUILTIN_ACKNOWLEDGE }
     if token_text_eq(tok, "gpu_thread_id_x") { return V2_BUILTIN_GPU_INTRINSIC }
     if token_text_eq(tok, "gpu_thread_id_y") { return V2_BUILTIN_GPU_INTRINSIC }
     if token_text_eq(tok, "gpu_thread_id_z") { return V2_BUILTIN_GPU_INTRINSIC }
@@ -3843,6 +3851,77 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         if token_kind(mc) == TK_RPAREN { mc = mc + 1 }
         if k_sidx >= 0 { V2_LAST_STRUCT_IDX = k_sidx }
         return ExprParse { ok: 1, reg: base_reg, next: mc}
+    }
+    if is_indirect_call == 0 && fn_id == V2_BUILTIN_ACKNOWLEDGE {
+        var ac = pos + 2
+        let k_arg = parse_expr_ir(func, ctx, ac)
+        if k_arg.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+        ac = k_arg.next
+        if token_kind(ac) == TK_COMMA {
+            let reason = parse_expr_ir(func, ctx, ac + 1)
+            if reason.ok != 0 { ac = reason.next }
+        }
+        if token_kind(ac) == TK_RPAREN { ac = ac + 1 }
+        mark_reg_f64(k_arg.reg)
+        return ExprParse { ok: 1, reg: k_arg.reg, next: ac}
+    }
+    if is_indirect_call == 0 && fn_id == V2_BUILTIN_OBSERVE {
+        let k_sidx2 = find_knowledge_struct_idx()
+        var oc = pos + 2
+        let prior = parse_expr_ir(func, ctx, oc)
+        if prior.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+        oc = prior.next
+        if token_kind(oc) == TK_COMMA { oc = oc + 1 }
+        let y = parse_expr_ir(func, ctx, oc)
+        if y.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+        oc = y.next
+        if token_kind(oc) == TK_COMMA { oc = oc + 1 }
+        var obs_sigma_reg: i64 = -1
+        if token_kind(oc) == TK_IDENT && token_text_eq(oc, "uncertainty") && token_kind(oc + 1) == TK_COLON {
+            let up = parse_expr_ir(func, ctx, oc + 2)
+            if up.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+            obs_sigma_reg = up.reg
+            oc = up.next
+        } else {
+            let up2 = parse_expr_ir(func, ctx, oc)
+            if up2.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
+            obs_sigma_reg = up2.reg
+            oc = up2.next
+        }
+        if token_kind(oc) == TK_RPAREN { oc = oc + 1 }
+
+        let prior_mean = prior.reg
+        let prior_sigma = prior.reg + 1
+        let prior_var = alloc_reg(ctx)
+        ufn_record_f64_binop(prior_var, prior_sigma, 3, prior_sigma)
+        let obs_var = alloc_reg(ctx)
+        ufn_record_f64_binop(obs_var, obs_sigma_reg, 3, obs_sigma_reg)
+        let denom = alloc_reg(ctx)
+        ufn_record_f64_binop(denom, prior_var, 1, obs_var)
+        let mean_left = alloc_reg(ctx)
+        ufn_record_f64_binop(mean_left, prior_mean, 3, obs_var)
+        let mean_right = alloc_reg(ctx)
+        ufn_record_f64_binop(mean_right, y.reg, 3, prior_var)
+        let mean_num = alloc_reg(ctx)
+        ufn_record_f64_binop(mean_num, mean_left, 1, mean_right)
+        let post_mean = alloc_reg(ctx)
+        ufn_record_f64_binop(post_mean, mean_num, 4, denom)
+        let var_num = alloc_reg(ctx)
+        ufn_record_f64_binop(var_num, prior_var, 3, obs_var)
+        let post_var = alloc_reg(ctx)
+        ufn_record_f64_binop(post_var, var_num, 4, denom)
+        let post_sigma = alloc_reg(ctx)
+        mark_reg_f64(post_sigma)
+        ufn_record_call(post_sigma, V2_BUILTIN_SQRT_F64, post_var, 1)
+
+        let base_reg2 = V2_NEXT_REG
+        V2_NEXT_REG = base_reg2 + 2
+        mark_reg_f64(base_reg2)
+        mark_reg_f64(base_reg2 + 1)
+        ufn_record_copy(base_reg2, post_mean)
+        ufn_record_copy(base_reg2 + 1, post_sigma)
+        if k_sidx2 >= 0 { V2_LAST_STRUCT_IDX = k_sidx2 }
+        return ExprParse { ok: 1, reg: base_reg2, next: oc}
     }
     if is_indirect_call == 0 && fn_id == V2_BUILTIN_ASSERT {
         if token_kind(pos + 2) == TK_RPAREN { return ExprParse { ok: 0, reg: -1, next: pos} }
