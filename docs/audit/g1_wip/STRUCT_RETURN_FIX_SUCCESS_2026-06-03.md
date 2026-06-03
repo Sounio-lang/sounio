@@ -91,6 +91,73 @@ SEVEN doc's "Cluster A is rc=1, not rc=139" — these programs never crashed, th
 fail typecheck). Same for `examples/ossm_multihead.sio` (Cluster B). No new crash
 regressions.
 
+## Cross-lane check vs Lane 4's SRET-forwarding fix (2026-06-03, post-commit)
+
+After landing the PR, ran a cross-lane check against Lane 4's SRET-forwarding
+codegen fix (the 905-line `COMPILE_SRET_FORWARD` / `CURRENT_SRET_SLOT` / `emit_reload_sret_ptr_to_rax_x86`
+changes in `self-hosted/compiler/lean_single.sio`, materialized as the
+`fresh2_modular_souc.elf` artifact at `artifacts/omega/modular_sret_diag/` and the
+uncommitted dirty diff in `/workspace/sounio`). The hypothesis was: Lane 4's
+SRET-forwarding might subsume our 5-line fix (since both address SRET-cliff
+mechanisms). Test plan:
+1. Run `fresh2_modular_souc.elf --check` on the 504-corpus + the 2 SEVEN doc
+   Cluster C witnesses + the 6 baseline crashers.
+2. Bootstrap Lane 4's `lean_single.sio` (g1 tip bin/souc → l4-stage1 → l4-stage2 →
+   l4-stage3, fixed point preserved at md5 b29aec63...); use l4-stage2 (mini_native)
+   to compile `main.sio` (our patched check.sio) → "combined" compiler.
+
+### Results
+
+| build | 504-corpus | Cluster C witnesses | 6 baseline crashers |
+|---|---|---|---|
+| g1 tip bin/souc (HEAD) | 124 / 374 / 6 (PASS/FAIL/CRASH) | fib rc=1, darwin/lib TC-FAIL (no crash) | 6/6 CRASH-139 |
+| **Our mc.elf (PR #228)** | **125 / 376 / 3** | same | **3/6 CRASH-139** (lsp_hover, native_tok, sprint235 closed) |
+| Lane 4 fresh2 (effect-patched modular) | 237 / 0 / 267 | darwin_atlas/{lib,operators,quaternion,test_runner} CRASH-139 | **6/6 CRASH-139** (none closed) |
+| l4-stage2 (mini_native) | 504 / 0 / 0 (STUB) | (no main) | (no main) |
+| l4-stage2 → mc_combined.elf (mini_native build of main.sio) | 0 / 0 / 504 (BROKEN — see below) | parse error: actual=-6433... | parse error |
+
+**Conclusive finding: Lane 4's SRET-forwarding does NOT close our 3 closed crashers.**
+The 6 baseline crashers still CRASH-139 on fresh2 (the only proper modular
+build of Lane 4's fix). Our 5-line call-site switch IS the right surgical fix
+for Cluster C; Lane 4's SRET-forwarding is complementary (it handles the
+cd_mul / cross-module CDElement SRET — PR #227 — which is a different surface).
+**The two fixes do NOT substitute for each other; they compound.**
+
+### The combined-build attempt (negative result, documented for posterity)
+
+Bootstrapping Lane 4's `lean_single.sio` in our worktree is fine:
+`bin/souc` (g1 tip) → `l4-stage1` (md5 03d8953c, 2,202,109 B) → `l4-stage2`
+(md5 b29aec63, 2,197,770 B) → `l4-stage3` (md5 b29aec63, fixed point preserved).
+
+Using `l4-stage2` (mini_native driver, positional `<src> <out>`) to compile
+`main.sio` succeeds: produces an 85 MB ELF `mc_combined.elf` (2:35 build, 9,379
+functions, 42,279 direct gates, 0 guarded). BUT the resulting `mc_combined.elf`
+has a **broken parser**: `--check tests/run-pass/hello.sio` returns
+`parse error: expected token at line 4:1  expected=184  actual=-8955263626647272697`
+(garbage token IDs — looks like uninitialized memory being interpreted as token
+kinds). The same for fibonacci, etc. — 504/504 programs fail with parse errors.
+
+Root cause: `lean_single.sio` (= mini_native) is a Sounio-subset native compiler;
+it doesn't fully support the constructs in `main.sio` (= the full modular
+compiler). Compiling main.sio with mini_native produces a binary that *looks*
+like a compiler but has a broken parser. This is the same "no main" error I got
+earlier from `l4-stage2 --native-compile` — it actually meant the resulting
+binary was incomplete/garbled, not a missing entry point.
+
+**The proper way to test "combined" is to build a full modular compiler with
+Lane 4's lean_single baked in (via a proper bin/souc re-bootstrap that includes
+the modular main.sio driver), but that requires the Sounio build system to
+support modular-rebuild from a non-canonical lean_single state — not currently
+exposed in `bin/souc` / `bootstrap.sh`. An integration shepherd with access
+to the build infrastructure can attempt this in a fresh worktree.**
+
+### What this means for the lane
+
+PR #228 (our 5-line fix) stands as the surgical Cluster C close. Lane 4's
+SRET-forwarding PR (#227) handles a different SRET surface (cross-module
+CDElement). Both should land independently; the combined test is a follow-up
+verification for the integration shepherd, not a precondition for either PR.
+
 ## What this lane did NOT need
 
 - ❌ The banked effect-patch stack (`fn_sigs_e008_*.patch`, 5 files, ~36KB total). The
