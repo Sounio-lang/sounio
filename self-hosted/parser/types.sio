@@ -732,7 +732,7 @@ impl Parser {
         p = pair.0
         let inner_ty = pair.1
 
-        // Parse optional comma-separated components (only in bracket form)
+        // Parse optional comma-separated epistemic metadata components.
         var epsilon_opt: Option<Box<EpsilonBound>> = None
         var validity_opt: Option<Box<ValidityCondition>> = None
         var provenance_opt: Option<Box<AstProvenanceKind>> = None
@@ -745,18 +745,39 @@ impl Parser {
             proof_constraints_opt = constraint_pair.1
         }
 
-        if use_bracket {
-            while parser_peek(p) == TokenKind::Comma {
-                p = p.advance()  // skip ,
+        while parser_peek(p) == TokenKind::Comma {
+            p = p.advance()  // skip ,
 
-                let ck = parser_peek(p)
+            let ck = parser_peek(p)
 
-                // Check for epsilon bound: identifier followed by comparison op
-                if ck == TokenKind::Ident {
-                    // Assume epsilon identifier: parse op + value
-                    p = p.advance()  // skip epsilon identifier
-                    var cmp_op = CompareOp::CmpLt
-                    if parser_peek(p) == TokenKind::Lt {
+            if ck == TokenKind::Ident || ck == TokenKind::Error || ck == TokenKind::Lt || ck == TokenKind::LtEq || ck == TokenKind::Gt || ck == TokenKind::GtEq || ck == TokenKind::Eq || ck == TokenKind::EqEq {
+                let meta_name = p.current_name()
+                var is_epsilon_meta = name_eq(meta_name, make_name("epsilon"))
+                if meta_name.len == 2 && meta_name.buf[0 as usize] == -50 as i8 && meta_name.buf[1 as usize] == -75 as i8 {
+                    is_epsilon_meta = true
+                }
+                if meta_name.len == 2 && meta_name.buf[0 as usize] == 206 as i8 && meta_name.buf[1 as usize] == 181 as i8 {
+                    is_epsilon_meta = true
+                }
+                if ck == TokenKind::Error && parser_peek_ahead(p, 1) == TokenKind::Error {
+                    is_epsilon_meta = true
+                }
+                if ck == TokenKind::Lt || ck == TokenKind::LtEq || ck == TokenKind::Gt || ck == TokenKind::GtEq || ck == TokenKind::Eq || ck == TokenKind::EqEq {
+                    is_epsilon_meta = true
+                }
+
+                if is_epsilon_meta {
+                    if ck == TokenKind::Error && parser_peek_ahead(p, 1) == TokenKind::Error {
+                        p = p.advance()
+                        p = p.advance()
+                    } else if ck == TokenKind::Ident || ck == TokenKind::Error {
+                        p = p.advance()  // skip epsilon identifier
+                    }
+                    var cmp_op = CompareOp::CmpLe
+                    var saw_bottom = false
+                    if parser_peek(p) == TokenKind::LParen {
+                        p = p.advance()
+                    } else if parser_peek(p) == TokenKind::Lt {
                         cmp_op = CompareOp::CmpLt
                         p = p.advance()
                     } else if parser_peek(p) == TokenKind::LtEq {
@@ -768,16 +789,49 @@ impl Parser {
                     } else if parser_peek(p) == TokenKind::GtEq {
                         cmp_op = CompareOp::CmpGe
                         p = p.advance()
-                    } else if parser_peek(p) == TokenKind::EqEq {
+                    } else if parser_peek(p) == TokenKind::EqEq || parser_peek(p) == TokenKind::Eq {
                         cmp_op = CompareOp::CmpEq
                         p = p.advance()
                     }
-                    // Parse float value
-                    let eps_tok = p.current()
-                    let eps_val = eps_tok.float_value
-                    p = p.advance()  // skip float literal
-                    epsilon_opt = Some(Box::new(EpsilonBound { op: cmp_op, value: eps_val }))
-                } else if ck == TokenKind::Valid {
+
+                    var eps_val: f64 = 0.0
+                    if parser_peek(p) == TokenKind::IntLit {
+                        eps_val = p.current().int_value as f64
+                        p = p.advance()
+                    } else if parser_peek(p) == TokenKind::FloatLit {
+                        eps_val = p.current().float_value
+                        p = p.advance()
+                    } else if parser_peek(p) == TokenKind::Error && parser_peek_ahead(p, 1) == TokenKind::Error && parser_peek_ahead(p, 2) == TokenKind::Error {
+                        saw_bottom = true
+                        p = p.advance()
+                        p = p.advance()
+                        p = p.advance()
+                    } else if parser_peek(p) == TokenKind::Ident || parser_peek(p) == TokenKind::Error {
+                        let value_name = p.current_name()
+                        if value_name.len == 3 && value_name.buf[0 as usize] == -30 as i8 && value_name.buf[1 as usize] == -118 as i8 && value_name.buf[2 as usize] == -91 as i8 {
+                            saw_bottom = true
+                            p = p.advance()
+                        }
+                        if value_name.len == 3 && value_name.buf[0 as usize] == 226 as i8 && value_name.buf[1 as usize] == 138 as i8 && value_name.buf[2 as usize] == 165 as i8 {
+                            saw_bottom = true
+                            p = p.advance()
+                        }
+                    }
+                    if parser_peek(p) == TokenKind::RParen {
+                        p = p.advance()
+                    }
+                    if !saw_bottom {
+                        if cmp_op == CompareOp::CmpGt || cmp_op == CompareOp::CmpGe {
+                            eps_val = 1.0 - eps_val
+                            cmp_op = CompareOp::CmpLe
+                        }
+                        epsilon_opt = Some(Box::new(EpsilonBound { op: cmp_op, value: eps_val }))
+                    }
+                } else {
+                    // Unknown identifier metadata is an ignorable provenance/evidence tag.
+                    p = p.advance()
+                }
+            } else if ck == TokenKind::Valid {
                     p = p.advance()  // skip 'Valid'
                     let vkind = AstValidityKind::ValidDuration
                     var vexpr: Option<Box<Expr>> = None
@@ -823,7 +877,6 @@ impl Parser {
                     // Unknown component — skip
                     p = p.advance()
                 }
-            }
         }
 
         // Expect closing delimiter
