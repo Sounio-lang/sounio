@@ -1555,10 +1555,13 @@ fn find_knowledge_struct_idx() -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < STRUCT_COUNT {
         if token_text_eq(STRUCT_NAME_TOKS[i as usize], "Knowledge") { return i }
-        // Synthetic registration: name tok is "value" when "Knowledge" not in source
+        // Synthetic registration: name tok is a builtin/field placeholder when
+        // "Knowledge" is not present in source.
         if STRUCT_FLAT_SIZE[i as usize] == 2 && STRUCT_FIELD_COUNT[i as usize] >= 1 {
             let fstart = STRUCT_FIELD_START[i as usize]
-            if token_text_eq(STRUCT_FIELDS[fstart as usize], "value") && token_text_eq(STRUCT_NAME_TOKS[i as usize], "value") { return i }
+            let name_tok = STRUCT_NAME_TOKS[i as usize]
+            if token_text_eq(STRUCT_FIELDS[fstart as usize], "value") && token_text_eq(name_tok, "value") { return i }
+            if token_text_eq(name_tok, "measure") || token_text_eq(name_tok, "observe") || token_text_eq(name_tok, "acknowledge") { return i }
         }
         i = i + 1
     }
@@ -1566,13 +1569,24 @@ fn find_knowledge_struct_idx() -> i64 with Mut, Panic, Div {
 }
 
 // Register Knowledge<T> as a synthetic 2-field struct {value: f64, uncertainty: f64}.
-// Registers if "value" token exists in the source. "Knowledge" and "uncertainty" are optional.
+// Registers for either explicit field access or epistemic builtins. Field-name
+// tokens are only needed when the source performs `.value`/`.uncertainty`
+// access; builtin-only sources still need the flat two-slot layout for lets.
 fn register_builtin_knowledge_struct(token_count: i64) with Mut, Panic, Div {
     if find_knowledge_struct_idx() >= 0 { return }
-    let v_tok = find_ident_token_text(token_count, "value")
-    if v_tok < 0 { return }
-    let u_tok = find_ident_token_text(token_count, "uncertainty")
+    var v_tok = find_ident_token_text(token_count, "value")
+    var u_tok = find_ident_token_text(token_count, "uncertainty")
     let k_tok = find_ident_token_text(token_count, "Knowledge")
+    let measure_tok = find_ident_token_text(token_count, "measure")
+    let observe_tok = find_ident_token_text(token_count, "observe")
+    let acknowledge_tok = find_ident_token_text(token_count, "acknowledge")
+    if v_tok < 0 && measure_tok < 0 && observe_tok < 0 && acknowledge_tok < 0 { return }
+    if v_tok < 0 {
+        if measure_tok >= 0 { v_tok = measure_tok }
+        else if observe_tok >= 0 { v_tok = observe_tok }
+        else { v_tok = acknowledge_tok }
+    }
+    if u_tok < 0 { u_tok = v_tok }
     if STRUCT_COUNT >= 16 || STRUCT_FIELD_TOTAL + 2 >= 128 { return }
     let sidx = STRUCT_COUNT
     let fstart = STRUCT_FIELD_TOTAL
@@ -1586,17 +1600,12 @@ fn register_builtin_knowledge_struct(token_count: i64) with Mut, Panic, Div {
     STRUCT_FIELD_STRUCT_IDX[fstart as usize] = -1
     STRUCT_FIELD_IS_F64[fstart as usize] = 1
     STRUCT_FIELD_FLAT_OFFSET[fstart as usize] = 0
-    if u_tok >= 0 {
-        STRUCT_FIELD_COUNT[sidx as usize] = 2
-        STRUCT_FIELDS[(fstart + 1) as usize] = u_tok
-        STRUCT_FIELD_STRUCT_IDX[(fstart + 1) as usize] = -1
-        STRUCT_FIELD_IS_F64[(fstart + 1) as usize] = 1
-        STRUCT_FIELD_FLAT_OFFSET[(fstart + 1) as usize] = 1
-        STRUCT_FIELD_TOTAL = fstart + 2
-    } else {
-        STRUCT_FIELD_COUNT[sidx as usize] = 1
-        STRUCT_FIELD_TOTAL = fstart + 1
-    }
+    STRUCT_FIELD_COUNT[sidx as usize] = 2
+    STRUCT_FIELDS[(fstart + 1) as usize] = u_tok
+    STRUCT_FIELD_STRUCT_IDX[(fstart + 1) as usize] = -1
+    STRUCT_FIELD_IS_F64[(fstart + 1) as usize] = 1
+    STRUCT_FIELD_FLAT_OFFSET[(fstart + 1) as usize] = 1
+    STRUCT_FIELD_TOTAL = fstart + 2
     STRUCT_COUNT = sidx + 1
 }
 
@@ -1872,7 +1881,7 @@ fn user_fn_knowledge_guard_site(guard_idx: i64) -> i64 {
     return V2_USER_FN_KNOWLEDGE_GUARD_SITE[guard_idx as usize]
 }
 
-fn native_v2_direct_knowledge_guard_count() -> i64 {
+fn native_v2_direct_knowledge_guard_count() -> i64 with Mut {
     var count: i64 = 0
     var i: i64 = 0
     while i < V2_USER_FN_COUNT {
@@ -3857,13 +3866,16 @@ fn parse_fn_call_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64) -> ExprPars
         let k_arg = parse_expr_ir(func, ctx, ac)
         if k_arg.ok == 0 { return ExprParse { ok: 0, reg: -1, next: pos} }
         ac = k_arg.next
+        let value_reg = alloc_reg(ctx)
+        ufn_record_copy(value_reg, k_arg.reg)
         if token_kind(ac) == TK_COMMA {
             let reason = parse_expr_ir(func, ctx, ac + 1)
             if reason.ok != 0 { ac = reason.next }
         }
         if token_kind(ac) == TK_RPAREN { ac = ac + 1 }
-        mark_reg_f64(k_arg.reg)
-        return ExprParse { ok: 1, reg: k_arg.reg, next: ac}
+        mark_reg_f64(value_reg)
+        V2_LAST_STRUCT_IDX = 0 - 1
+        return ExprParse { ok: 1, reg: value_reg, next: ac}
     }
     if is_indirect_call == 0 && fn_id == V2_BUILTIN_OBSERVE {
         let k_sidx2 = find_knowledge_struct_idx()
@@ -5024,7 +5036,11 @@ fn parse_stmt_ir(func: &! i64, ctx: &! V2DriverContext, pos: i64, close: i64, to
             let bind_base = alloc_reg(ctx)
             var bi: i64 = 1
             while bi < flat_size { let _ = alloc_reg(ctx); bi = bi + 1 }
-            ufn_record_bulk_copy(bind_base, let_reg, flat_size)
+            var ci: i64 = 0
+            while ci < flat_size {
+                ufn_record_copy(bind_base + ci, let_reg + ci)
+                ci = ci + 1
+            }
             remember_struct_local_tok(ctx, p + 1, bind_base, bind_sidx)
             let bind_guard_idx = V2_LOCAL_COUNT - 1
             scan_local_knowledge_guard_type(bind_guard_idx, p + 3, eq_pos)
