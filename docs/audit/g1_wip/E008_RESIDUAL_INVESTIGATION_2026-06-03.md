@@ -68,3 +68,33 @@ large-by-value-struct codegen bug is fixed — any code that unwraps Unobserved<
 hits it. So the dependency is concrete: **fix the by-value-struct codegen → then D lands as
 written.** Reverted all D edits to the safe state (PASS 209, CRASH 0, E008 5 — no regression
 shipped). The full D implementation is recorded here for re-application post-codegen-fix.
+
+## Attacking the struct-by-value codegen bug DIRECTLY: NOT repro-isolable (2026-06-03)
+
+Tried to reproduce the bug with the exact D-helper pattern in isolation: `fn deref_return(b:
+Box<Big272>) -> Big272 { *b }` and `take_by_val(*box)` (deref a Box<272-byte struct> used
+BY VALUE as arg AND return). On the current bin/souc: **compiles and runs CORRECTLY**
+(r1=12, g2.a=7, g2.cc=5). So `*box` large-struct-by-value is NOT a localized miscompile.
+
+Combined with the earlier evidence (the byval-arg-crasher lane: faulting fn had a 672KB
+frame, rcx=-1 AND return-addr=0 = frame corruption; raising stack 12MB→1GB cleared 39
+crashers; G1 got CRASH→0 by *mut-transcribing away the by-value Checker copies), the
+conclusion is firm: **this is NOT a fixable localized codegen instruction bug — it is a
+large-frame / stack-scale problem.** Functions that copy large structs (Checker 164KB,
+TypeEntry 272B) by value build 0.5MB+ frames; at that scale the frame setup / deep recursion
+corrupts (args read as −1, return address 0). It is layout-sensitive (any substantial
+check.sio change shifts the binary and amplifies it — that is why adding D's boundary code
+took CRASH 0→226 even with the keystone reverted).
+
+### Consequence for "fix the codegen bug"
+A direct codegen-instruction fix is intractable with available means: no isolable repro, and
+the faulting function VARIES with layout, so editing core arg-passing/frame codegen blind =
+2:36-rebuild guessing (and it already produced a 226-crash regression once). The PROVEN fix
+is FRAME REDUCTION — G1's *mut transcription (no by-value large-struct copies) drove CRASH→0.
+So the realistic path is NOT "fix the miscompile" but "don't build >0.5MB frames":
+- For D: rewrite the boundary helpers FRAME-LIGHT — compare via the Box-taking
+  `types_compatible_inner(a.inner, b.inner)` instead of `types_compatible(*box, …)`, and
+  avoid returning `*box` by value — so D lands without ever materializing a large by-value
+  struct. (Same avoidance strategy G1 used for the crashers.)
+- A true codegen fix would be the "heap-allocated large locals" refactor (frames stay small
+  regardless of by-value struct size) — a large architectural change, separate lane.
