@@ -42,3 +42,29 @@ clean. Implementing it properly is the next scoped task and should be done caref
 E008 133 → 5 (literal classes resolved, validated). The 5 residual = 1 deferred (B, needs
 array-literal structural detection) + 1 design-leave (C, dimensional safety) + 3 needing the
 D epistemic-boundary feature. None should be "fixed" by blanket coercion.
+
+## D feature — IMPLEMENTED & logically CORRECT, but BLOCKED on the by-value-struct codegen bug (2026-06-03)
+
+Implemented the full Observe-gated observation-boundary feature and it WORKS logically:
+- Keystone: unified Unobserved<T> lowering (checker_lower_type_expr_mut TypeNamed arm now
+  produces TyUnobserved with inner, matching the by-value path — the in-place path was
+  dropping te.type_args → ty_named("Unobserved"), retkind=6=TyNamed, the reason the boundary
+  helper (keyed on TyUnobserved) never matched).
+- Observe-gated (effect id 13) Unobserved<T> <-> T at: return-stmt, fn-body tail, let/var
+  binding, call argument, and comparison (unwrap operands to inner for op-typing).
+- RESULT: both D progs (unobserved_basic, observe_with_effect) check CLEAN; E008 5 → 1.
+
+**But the full census REGRESSED catastrophically: PASS 209 → 89, CRASH 0 → 226.** Bisected:
+NOT the keystone (reverting it left CRASH=226). The cause is the boundary HELPERS themselves:
+`unobserved_boundary_compatible` / `unobserved_inner_or_self` do `*inner` on a
+`Box<TypeEntry>` — i.e. a **272-byte TypeEntry passed/returned BY VALUE from a Box deref**.
+That is EXACTLY the by-value-large-struct codegen bug we root-caused as the dominant crasher
+(BLK-20260603-byval-arg-crasher-deref). These helpers run in hot checker paths
+(every return/let/call/binary), so bin/souc miscompiles those functions → 226 crashes.
+
+### Conclusion: D is BLOCKED on the by-value-struct-return/arg codegen fix
+D's logic is correct and complete (proven: the D progs pass). It cannot LAND until the
+large-by-value-struct codegen bug is fixed — any code that unwraps Unobserved<T> (`*box`)
+hits it. So the dependency is concrete: **fix the by-value-struct codegen → then D lands as
+written.** Reverted all D edits to the safe state (PASS 209, CRASH 0, E008 5 — no regression
+shipped). The full D implementation is recorded here for re-application post-codegen-fix.
