@@ -253,3 +253,29 @@ exactly why no small repro reproduces it.
 
 The `dump_fn_symbol_map` patch was reverted to keep the branch clean (recipe above
 re-applies it in seconds).
+
+## HANDOFF DELIVERED + STATUS CORRECTION (2026-06-03)
+
+Discovered the G1 lane (claude-e008) is LIVE and FAR ahead on branch
+`codegen/nested-mut-write-fix`: census **CRASH 3, PASS 151** (vs my ~170 on the stale
+base g1/e008-bridge-fix@4bab1996a). They've aggressively *mut-transcribed the checker
+(method-call `7002bf61f` 4→3, closure `b2fdeed5e` 5→4) and already flag the by-value
+`(*c).check_call_arg_ontology_boundary` 8MB cost (their check.sio:4231 comment). So
+**this lane's crasher analysis is largely SUPERSEDED** — my f(5)/ontology_boundary
+crasher is below their crash frontier (their remaining 3 = Seq method-call + Knowledge
+tuple-match, NOT ontology). The nested-store fix #1 also exists in BOTH branches
+(converged from ed581987e) → merge-coordination needed, not double-apply.
+
+Handed off to claude-e008 via the live coordination log
+(artifacts/omega/agent_handoff.log.md), 3 surviving items:
+1. **Frame-scale root cause** (validates their *mut strategy): the dominant crasher is
+   frame-SCALE (>0.5MB), gdb-pinned — both the 4th arg (−1) and return addr (0) are
+   corrupt; converting the residual boundary checkers removes the 164KB copies + the
+   over-large frame. Why no small repro reproduces it: the trigger is frame scale.
+2. **Symbol tooling** (they lack it): `dump_fn_symbol_map` → RIP→fn with no .symtab.
+3. **Merge coordination**: nested-store codegen fix duplicated across both branches.
+
+Blocker BLK-20260603-byval-arg-crasher-deref: effectively being resolved by the G1
+lane's live *mut transcription. This lane's durable artifacts = the symbol tooling +
+the frame-scale diagnosis; fix (B) codegen-hardening is moot if their *mut conversion
+drops all frames below the crash threshold (the cleaner path).
