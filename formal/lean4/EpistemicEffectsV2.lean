@@ -186,12 +186,13 @@ theorem genKraw {Γ e T E} (h : HasTy Γ e T E) {v m} (he : e = .kraw v m) :
   | t_sub _ _ _ _ _ _ _ ih => exact ih he
   | _ => exact Expr.noConfusion he
 
-/-- `kraw` inversion: recover the payload type, its typing, and its value-ness. -/
+/-- `kraw` inversion: recover the payload type, its typing, value-ness, and the
+    metadata validity. -/
 theorem invKraw {Γ e T E} (h : HasTy Γ e T E) {v m} (he : e = .kraw v m) :
-    ∃ T', T = .tknow T' ∧ HasTy Γ v T' emptyE ∧ IsValue v := by
+    ∃ T', T = .tknow T' ∧ HasTy Γ v T' emptyE ∧ IsValue v ∧ kvalid m := by
   induction h with
   | t_kraw Γ' T' v' m' hv' hval' hk' =>
-    injection he with h1 h2; subst h1; subst h2; exact ⟨T', rfl, hv', hval'⟩
+    injection he with h1 h2; subst h1; subst h2; exact ⟨T', rfl, hv', hval', hk'⟩
   | t_sub Γ' e' T0 E1 E2 h0 hsub ih => exact ih he
   | _ => exact Expr.noConfusion he
 
@@ -261,12 +262,12 @@ theorem progress' {Γ e T E} (h : HasTy Γ e T E) (hΓ : Γ = []) :
     subst hΓ
     rcases iha rfl with hva | ⟨a', ha'⟩
     · rcases canon_know hva ha with ⟨wa, ma, rfl⟩
-      rcases invKraw ha rfl with ⟨Ta, hTa, hwaty, hwaval⟩
+      rcases invKraw ha rfl with ⟨Ta, hTa, hwaty, hwaval, _⟩
       injection hTa with hTa'; subst hTa'
       rcases canon_real hwaval hwaty with ⟨x, rfl⟩
       rcases ihb rfl with hvb | ⟨b', hb'⟩
       · rcases canon_know hvb hb with ⟨wb, mb, rfl⟩
-        rcases invKraw hb rfl with ⟨Tb, hTb, hwbty, hwbval⟩
+        rcases invKraw hb rfl with ⟨Tb, hTb, hwbty, hwbval, _⟩
         injection hTb with hTb'; subst hTb'
         rcases canon_real hwbval hwbty with ⟨y, rfl⟩
         exact Or.inr ⟨_, .kadd_red⟩
@@ -276,12 +277,12 @@ theorem progress' {Γ e T E} (h : HasTy Γ e T E) (hΓ : Γ = []) :
     subst hΓ
     rcases iha rfl with hva | ⟨a', ha'⟩
     · rcases canon_know hva ha with ⟨wa, ma, rfl⟩
-      rcases invKraw ha rfl with ⟨Ta, hTa, hwaty, hwaval⟩
+      rcases invKraw ha rfl with ⟨Ta, hTa, hwaty, hwaval, _⟩
       injection hTa with hTa'; subst hTa'
       rcases canon_real hwaval hwaty with ⟨x, rfl⟩
       rcases ihb rfl with hvb | ⟨b', hb'⟩
       · rcases canon_know hvb hb with ⟨wb, mb, rfl⟩
-        rcases invKraw hb rfl with ⟨Tb, hTb, hwbty, hwbval⟩
+        rcases invKraw hb rfl with ⟨Tb, hTb, hwbty, hwbval, _⟩
         injection hTb with hTb'; subst hTb'
         rcases canon_real hwbval hwbty with ⟨y, rfl⟩
         exact Or.inr ⟨_, .kmul_red⟩
@@ -299,5 +300,330 @@ theorem progress' {Γ e T E} (h : HasTy Γ e T E) (hΓ : Γ = []) :
     value or steps. -/
 theorem effect_progress {e T E} (ht : HasTy [] e T E) : IsValue e ∨ ∃ e', e ⇒ e' :=
   progress' ht rfl
+
+-- ================================================================
+-- §8. Preservation (subject reduction)
+-- ================================================================
+
+-- shifting / substituting preserves value-ness (kraw payload recurses)
+theorem shift_value {v} (hv : IsValue v) : ∀ c d, IsValue (shift c d v) := by
+  induction hv with
+  | v_nat n => intro c d; exact .v_nat n
+  | v_real z => intro c d; exact .v_real z
+  | v_lam T E e => intro c d; exact .v_lam _ _ _
+  | v_kraw m hp ih => intro c d; exact .v_kraw m (ih c d)
+
+theorem subst_value {w} (hw : IsValue w) : ∀ n u, IsValue (subst n u w) := by
+  induction hw with
+  | v_nat n => intro n' u; exact .v_nat n
+  | v_real z => intro n' u; exact .v_real z
+  | v_lam T E e => intro n' u; exact .v_lam _ _ _
+  | v_kraw m hp ih => intro n' u; exact .v_kraw m (ih n' u)
+
+-- GUM metadata combinators preserve validity
+theorem gAddMeta_valid {ma mb} (ha : kvalid ma) (hb : kvalid mb) : kvalid (gAddMeta ma mb) := by
+  obtain ⟨ha1, ha2, ha3⟩ := ha
+  obtain ⟨hb1, hb2, hb3⟩ := hb
+  refine ⟨?_, ?_, ?_⟩
+  · show 0 ≤ ma.gumVar + mb.gumVar
+    omega
+  · show 0 ≤ (if ma.conf ≤ mb.conf then ma.conf else mb.conf)
+    split <;> omega
+  · show (if ma.conf ≤ mb.conf then ma.conf else mb.conf) ≤ 1000
+    split <;> omega
+
+theorem int_sq_nonneg (x : Int) : 0 ≤ x * x := by
+  rcases Int.le_total 0 x with h | h
+  · exact Int.mul_nonneg h h
+  · have h2 : 0 ≤ -x := by omega
+    have h3 := Int.mul_nonneg h2 h2
+    rwa [Int.neg_mul_neg] at h3
+
+theorem gMulMeta_valid {x y ma mb} (ha : kvalid ma) (hb : kvalid mb) :
+    kvalid (gMulMeta x ma y mb) := by
+  have hx : 0 ≤ x * x := int_sq_nonneg x
+  have hy : 0 ≤ y * y := int_sq_nonneg y
+  obtain ⟨ha1, ha2, ha3⟩ := ha
+  obtain ⟨hb1, hb2, hb3⟩ := hb
+  refine ⟨?_, ?_, ?_⟩
+  · show 0 ≤ y * y * ma.gumVar + x * x * mb.gumVar
+    have := Int.mul_nonneg hy ha1; have := Int.mul_nonneg hx hb1; omega
+  · show 0 ≤ (if ma.conf ≤ mb.conf then ma.conf else mb.conf)
+    split <;> omega
+  · show (if ma.conf ≤ mb.conf then ma.conf else mb.conf) ≤ 1000
+    split <;> omega
+
+theorem lookup_some_lt {Γ : TyCtx} {n : Nat} {T : Ty}
+    (h : lookupCtx Γ n = some T) : n < Γ.length := by
+  induction Γ generalizing n with
+  | nil => simp [lookupCtx] at h
+  | cons hd tl ih =>
+    cases n with
+    | zero => simp [List.length]
+    | succ n' => simp [lookupCtx] at h; have := ih h; simp [List.length]; omega
+
+theorem wellScoped {Γ e T E} (h : HasTy Γ e T E) :
+    ∀ c d, Γ.length ≤ c → shift c d e = e := by
+  induction h with
+  | t_lit_nat => intro c d _; rfl
+  | t_lit_real => intro c d _; rfl
+  | t_var Γ n T hlk =>
+    intro c d hc
+    have hn : n < Γ.length := lookup_some_lt hlk
+    have hnc : n < c := by omega
+    simp [shift, hnc]
+  | t_lam Γ T₁ T₂ E body _ ih =>
+    intro c d hc
+    have hb : (T₁ :: Γ).length ≤ c + 1 := by simp [List.length] at hc ⊢; omega
+    simp [shift, ih (c+1) d hb]
+  | t_app Γ T₁ T₂ Ef Ec Ecaller f a _ _ _ _ ihf iha =>
+    intro c d hc; simp [shift, ihf c d hc, iha c d hc]
+  | t_measure Γ T e m _ _ ih => intro c d hc; simp [shift, ih c d hc]
+  | t_kvalue Γ T E e _ ih => intro c d hc; simp [shift, ih c d hc]
+  | t_kunc Γ T E e _ ih => intro c d hc; simp [shift, ih c d hc]
+  | t_kconf Γ T E e _ ih => intro c d hc; simp [shift, ih c d hc]
+  | t_kadd Γ E₁ E₂ a b _ _ iha ihb => intro c d hc; simp [shift, iha c d hc, ihb c d hc]
+  | t_kmul Γ E₁ E₂ a b _ _ iha ihb => intro c d hc; simp [shift, iha c d hc, ihb c d hc]
+  | t_let Γ T₁ T₂ E₁ E₂ e body _ _ ihe ihb =>
+    intro c d hc
+    have hb : (T₁ :: Γ).length ≤ c + 1 := by simp [List.length] at hc ⊢; omega
+    simp [shift, ihe c d hc, ihb (c+1) d hb]
+  | t_kraw Γ T v m _ _ _ ih => intro c d hc; simp [shift, ih c d hc]
+  | t_sub Γ e T E E' _ _ ih => intro c d hc; exact ih c d hc
+
+theorem lookup_insert_lt {Γ : TyCtx} {k n : Nat} {τ T : Ty}
+    (hn : n < k) (h : lookupCtx Γ n = some T) :
+    lookupCtx (Γ.insertIdx k τ) n = some T := by
+  induction Γ generalizing k n with
+  | nil => cases n <;> simp [lookupCtx] at h
+  | cons hd tl ih =>
+    cases k with
+    | zero => omega
+    | succ k' =>
+      cases n with
+      | zero => simp [List.insertIdx, lookupCtx] at h ⊢; exact h
+      | succ n' => simp [List.insertIdx, lookupCtx] at h ⊢; exact ih (by omega) h
+
+theorem lookup_insert_ge {Γ : TyCtx} {k n : Nat} {τ T : Ty}
+    (hn : k ≤ n) (h : lookupCtx Γ n = some T) :
+    lookupCtx (Γ.insertIdx k τ) (n + 1) = some T := by
+  induction Γ generalizing k n with
+  | nil => cases n <;> simp [lookupCtx] at h
+  | cons hd tl ih =>
+    cases k with
+    | zero => simp [List.insertIdx, lookupCtx] at h ⊢; exact h
+    | succ k' =>
+      cases n with
+      | zero => omega
+      | succ n' => simp [List.insertIdx, lookupCtx] at h ⊢; exact ih (by omega) h
+
+theorem weakening {Γ e T E} (h : HasTy Γ e T E) :
+    ∀ k τ, HasTy (Γ.insertIdx k τ) (shift k 1 e) T E := by
+  induction h with
+  | t_lit_nat Γ n => intro k τ; exact .t_lit_nat _ _
+  | t_lit_real Γ z => intro k τ; exact .t_lit_real _ _
+  | t_var Γ n T hlk =>
+    intro k τ
+    by_cases hnk : n < k
+    · have : shift k 1 (.var n) = .var n := by simp [shift, hnk]
+      rw [this]; exact .t_var _ _ _ (lookup_insert_lt hnk hlk)
+    · have : shift k 1 (.var n) = .var (n+1) := by simp [shift, hnk]
+      rw [this]; exact .t_var _ _ _ (lookup_insert_ge (by omega) hlk)
+  | t_lam Γ T₁ T₂ E body _ ih =>
+    intro k τ
+    have : shift k 1 (.lam T₁ E body) = .lam T₁ E (shift (k+1) 1 body) := by simp [shift]
+    rw [this]
+    have hctx : (T₁ :: Γ).insertIdx (k+1) τ = T₁ :: Γ.insertIdx k τ := by simp [List.insertIdx]
+    have hb := ih (k+1) τ; rw [hctx] at hb
+    exact .t_lam _ _ _ _ _ hb
+  | t_app Γ T₁ T₂ Ef Ec Ecaller f a _ _ hEf hEc ihf iha =>
+    intro k τ; exact .t_app _ _ _ _ _ _ _ _ (ihf k τ) (iha k τ) hEf hEc
+  | t_measure Γ T e m _ hk ih =>
+    intro k τ; exact .t_measure _ _ _ _ (ih k τ) hk
+  | t_kvalue Γ T E e _ ih => intro k τ; exact .t_kvalue _ _ _ _ (ih k τ)
+  | t_kunc Γ T E e _ ih => intro k τ; exact .t_kunc _ _ _ _ (ih k τ)
+  | t_kconf Γ T E e _ ih => intro k τ; exact .t_kconf _ _ _ _ (ih k τ)
+  | t_kadd Γ E₁ E₂ a b _ _ iha ihb => intro k τ; exact .t_kadd _ _ _ _ _ (iha k τ) (ihb k τ)
+  | t_kmul Γ E₁ E₂ a b _ _ iha ihb => intro k τ; exact .t_kmul _ _ _ _ _ (iha k τ) (ihb k τ)
+  | t_let Γ T₁ T₂ E₁ E₂ e body _ _ ihe ihb =>
+    intro k τ
+    have : shift k 1 (.letE e body) = .letE (shift k 1 e) (shift (k+1) 1 body) := by simp [shift]
+    rw [this]
+    have hctx : (T₁ :: Γ).insertIdx (k+1) τ = T₁ :: Γ.insertIdx k τ := by simp [List.insertIdx]
+    have hb := ihb (k+1) τ; rw [hctx] at hb
+    exact .t_let _ _ _ _ _ _ _ (ihe k τ) hb
+  | t_kraw Γ T v m _ hval hk ih =>
+    intro k τ
+    have : shift k 1 (.kraw v m) = .kraw (shift k 1 v) m := by simp [shift]
+    rw [this]; exact .t_kraw _ _ _ _ (ih k τ) (shift_value hval k 1) hk
+  | t_sub Γ e T E E' _ hsub ih => intro k τ; exact .t_sub _ _ _ _ _ (ih k τ) hsub
+
+theorem closedWeaken {v σ E} (h : HasTy [] v σ E) : ∀ Δ, HasTy Δ v σ E := by
+  intro Δ
+  induction Δ with
+  | nil => exact h
+  | cons τ Δ' ih =>
+    have hw := weakening ih 0 τ
+    have hsh : shift 0 1 v = v := wellScoped h 0 1 (by simp [List.length])
+    rw [hsh] at hw
+    simpa [List.insertIdx] using hw
+
+theorem lookup_append_lt {Δ Γ' : TyCtx} {m : Nat} (hm : m < Δ.length) :
+    lookupCtx (Δ ++ Γ') m = lookupCtx Δ m := by
+  induction Δ generalizing m with
+  | nil => simp [List.length] at hm
+  | cons hd tl ih =>
+    cases m with
+    | zero => simp [lookupCtx]
+    | succ m' => simp [lookupCtx]; exact ih (by simp [List.length] at hm; omega)
+
+theorem lookup_append_eq {Δ Γ' : TyCtx} {σ : Ty} :
+    lookupCtx (Δ ++ σ :: Γ') Δ.length = some σ := by
+  induction Δ with
+  | nil => simp [lookupCtx]
+  | cons hd tl ih => simp [lookupCtx, List.length]; exact ih
+
+theorem invLam {Γ e T E} (h : HasTy Γ e T E) {S F b} (he : e = .lam S F b) :
+    ∃ T₂, T = .tarrow S F T₂ ∧ HasTy (S :: Γ) b T₂ F := by
+  induction h with
+  | t_lam Γ' T₁ T₂ E' body hb ihb =>
+    injection he with h1 h2 h3; subst h1; subst h2; subst h3; exact ⟨T₂, rfl, hb⟩
+  | t_sub Γ' e' T' E1 E2 h0 hsub ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+theorem value_emptyE {Γ v T E} (hv : IsValue v) (h : HasTy Γ v T E) :
+    HasTy Γ v T emptyE := by
+  cases hv with
+  | v_nat n => rw [genNat h rfl]; exact .t_lit_nat _ _
+  | v_real z => rw [genReal h rfl]; exact .t_lit_real _ _
+  | v_lam S F b => rcases invLam h rfl with ⟨T₂, hT, hb⟩; subst hT; exact .t_lam _ _ _ _ _ hb
+  | @v_kraw w m hp =>
+    rcases invKraw h rfl with ⟨T', hT, hwty, hwval, hk⟩; subst hT
+    exact .t_kraw _ _ _ _ hwty hwval hk
+
+theorem substClosed {v σ} (hv : HasTy [] v σ emptyE) {Γ0 e T E} (h : HasTy Γ0 e T E) :
+    ∀ Δ, Γ0 = Δ ++ σ :: [] → HasTy Δ (subst Δ.length v e) T E := by
+  induction h with
+  | t_lit_nat Γ' n => intro Δ hΓ; exact .t_lit_nat _ _
+  | t_lit_real Γ' z => intro Δ hΓ; exact .t_lit_real _ _
+  | t_var Γ' n T' hlk =>
+    intro Δ hΓ; subst hΓ
+    by_cases h1 : n = Δ.length
+    · subst h1
+      have hσ : T' = σ := by
+        have he := lookup_append_eq (Δ := Δ) (Γ' := ([] : TyCtx)) (σ := σ)
+        rw [he] at hlk; injection hlk with hh; exact hh.symm
+      subst hσ
+      have : subst Δ.length v (.var Δ.length) = v := by simp [subst]
+      rw [this]; exact closedWeaken hv Δ
+    · by_cases h2 : n > Δ.length
+      · exfalso
+        have hlen : (Δ ++ σ :: ([] : TyCtx)).length = Δ.length + 1 := by simp [List.length]
+        have := lookup_some_lt hlk; rw [hlen] at this; omega
+      · have hn : n < Δ.length := by omega
+        have hs : subst Δ.length v (.var n) = .var n := by simp [subst, h1, h2]
+        rw [hs]
+        exact .t_var _ _ _ (by rw [← lookup_append_lt hn]; exact hlk)
+  | t_lam Γ' T₁ T₂ E' body hb ihb =>
+    intro Δ hΓ; subst hΓ
+    have hsh : shift 0 1 v = v := wellScoped hv 0 1 (by simp [List.length])
+    have key : subst Δ.length v (.lam T₁ E' body) = .lam T₁ E' (subst (Δ.length + 1) v body) := by
+      simp [subst, hsh]
+    rw [key]; exact .t_lam _ _ _ _ _ (ihb (T₁ :: Δ) rfl)
+  | t_app Γ' T₁ T₂ Ef Ec Ecaller f a hf ha hEf hEc ihf iha =>
+    intro Δ hΓ; subst hΓ
+    exact .t_app _ _ _ _ _ _ _ _ (ihf Δ rfl) (iha Δ rfl) hEf hEc
+  | t_measure Γ' T e m he hk ih =>
+    intro Δ hΓ; subst hΓ; exact .t_measure _ _ _ _ (ih Δ rfl) hk
+  | t_kvalue Γ' T E e _ ih => intro Δ hΓ; subst hΓ; exact .t_kvalue _ _ _ _ (ih Δ rfl)
+  | t_kunc Γ' T E e _ ih => intro Δ hΓ; subst hΓ; exact .t_kunc _ _ _ _ (ih Δ rfl)
+  | t_kconf Γ' T E e _ ih => intro Δ hΓ; subst hΓ; exact .t_kconf _ _ _ _ (ih Δ rfl)
+  | t_kadd Γ' E₁ E₂ a b _ _ iha ihb =>
+    intro Δ hΓ; subst hΓ; exact .t_kadd _ _ _ _ _ (iha Δ rfl) (ihb Δ rfl)
+  | t_kmul Γ' E₁ E₂ a b _ _ iha ihb =>
+    intro Δ hΓ; subst hΓ; exact .t_kmul _ _ _ _ _ (iha Δ rfl) (ihb Δ rfl)
+  | t_let Γ' T₁ T₂ E₁ E₂ e body _ _ ihe ihb =>
+    intro Δ hΓ; subst hΓ
+    have hsh : shift 0 1 v = v := wellScoped hv 0 1 (by simp [List.length])
+    have key : subst Δ.length v (.letE e body) = .letE (subst Δ.length v e) (subst (Δ.length + 1) v body) := by
+      simp [subst, hsh]
+    rw [key]; exact .t_let _ _ _ _ _ _ _ (ihe Δ rfl) (ihb (T₁ :: Δ) rfl)
+  | t_kraw Γ' T w m hw hval hk ih =>
+    intro Δ hΓ; subst hΓ
+    have key : subst Δ.length v (.kraw w m) = .kraw (subst Δ.length v w) m := by simp [subst]
+    rw [key]; exact .t_kraw _ _ _ _ (ih Δ rfl) (subst_value hval Δ.length v) hk
+  | t_sub Γ' e T E E' h0 hsub ih => intro Δ hΓ; exact .t_sub _ _ _ _ _ (ih Δ hΓ) hsub
+
+/-- **Preservation (subject reduction)** for the value-carrying calculus:
+    a closed well-typed term keeps its type (and effect) under reduction. -/
+theorem preservation' {Γ e T E} (h : HasTy Γ e T E) :
+    ∀ {e'}, e ⇒ e' → Γ = [] → HasTy Γ e' T E := by
+  induction h with
+  | t_lit_nat Γ n => intro e' hs hΓ; cases hs
+  | t_lit_real Γ z => intro e' hs hΓ; cases hs
+  | t_var Γ n T hlk => intro e' hs hΓ; cases hs
+  | t_lam Γ T₁ T₂ E body _ => intro e' hs hΓ; cases hs
+  | t_app Γ T₁ T₂ Ef Ec Ecaller f a hf ha hEf hEc ihf iha =>
+    intro e' hs hΓ; subst hΓ
+    cases hs with
+    | beta hvarg =>
+      rcases invLam hf rfl with ⟨T2', hTeq, hbody⟩
+      injection hTeq with e1 e2 e3; subst e1; subst e2; subst e3
+      have hv0 := value_emptyE hvarg ha
+      exact .t_sub _ _ _ _ _ (substClosed hv0 hbody [] rfl) hEf
+    | app_l hf' => exact .t_app _ _ _ _ _ _ _ _ (ihf hf' rfl) ha hEf hEc
+    | app_r _ ha' => exact .t_app _ _ _ _ _ _ _ _ hf (iha ha' rfl) hEf hEc
+  | t_measure Γ T e m he hk ihe =>
+    intro e' hs hΓ; subst hΓ
+    cases hs with
+    | meas_red hv =>
+      exact .t_sub _ _ _ _ _ (.t_kraw _ _ _ _ he hv hk) (Sounio.EpistemicEffects.emptyE_sub _)
+    | meas_arg he' => exact .t_measure _ _ _ _ (ihe he' rfl) hk
+  | t_kvalue Γ T E e he ihe =>
+    intro e' hs hΓ; subst hΓ
+    cases hs with
+    | kvalue_red =>
+      rcases invKraw he rfl with ⟨T', hT, hwty, hwval, hk⟩
+      injection hT with hT'; subst hT'; exact .t_sub _ _ _ _ _ hwty (Sounio.EpistemicEffects.emptyE_sub _)
+    | kvalue_arg he' => exact .t_kvalue _ _ _ _ (ihe he' rfl)
+  | t_kunc Γ T E e he ihe =>
+    intro e' hs hΓ; subst hΓ
+    cases hs with
+    | kunc_red => exact .t_sub _ _ _ _ _ (.t_lit_real _ _) (Sounio.EpistemicEffects.emptyE_sub _)
+    | kunc_arg he' => exact .t_kunc _ _ _ _ (ihe he' rfl)
+  | t_kconf Γ T E e he ihe =>
+    intro e' hs hΓ; subst hΓ
+    cases hs with
+    | kconf_red => exact .t_sub _ _ _ _ _ (.t_lit_real _ _) (Sounio.EpistemicEffects.emptyE_sub _)
+    | kconf_arg he' => exact .t_kconf _ _ _ _ (ihe he' rfl)
+  | t_kadd Γ E₁ E₂ a b ha hb iha ihb =>
+    intro e' hs hΓ; subst hΓ
+    cases hs with
+    | kadd_red =>
+      rcases invKraw ha rfl with ⟨Ta, hTa, _, _, hka⟩
+      rcases invKraw hb rfl with ⟨Tb, hTb, _, _, hkb⟩
+      exact .t_sub _ _ _ _ _ (.t_kraw _ _ _ _ (.t_lit_real _ _) (.v_real _) (gAddMeta_valid hka hkb)) (Sounio.EpistemicEffects.emptyE_sub _)
+    | kadd_l ha' => exact .t_kadd _ _ _ _ _ (iha ha' rfl) hb
+    | kadd_r _ hb' => exact .t_kadd _ _ _ _ _ ha (ihb hb' rfl)
+  | t_kmul Γ E₁ E₂ a b ha hb iha ihb =>
+    intro e' hs hΓ; subst hΓ
+    cases hs with
+    | kmul_red =>
+      rcases invKraw ha rfl with ⟨Ta, hTa, _, _, hka⟩
+      rcases invKraw hb rfl with ⟨Tb, hTb, _, _, hkb⟩
+      exact .t_sub _ _ _ _ _ (.t_kraw _ _ _ _ (.t_lit_real _ _) (.v_real _) (gMulMeta_valid hka hkb)) (Sounio.EpistemicEffects.emptyE_sub _)
+    | kmul_l ha' => exact .t_kmul _ _ _ _ _ (iha ha' rfl) hb
+    | kmul_r _ hb' => exact .t_kmul _ _ _ _ _ ha (ihb hb' rfl)
+  | t_let Γ T₁ T₂ E₁ E₂ e body he hbody ihe ihb =>
+    intro e' hs hΓ; subst hΓ
+    cases hs with
+    | let_red hv => exact .t_sub _ _ _ _ _ (substClosed (value_emptyE hv he) hbody [] rfl) (Sounio.EpistemicEffects.sub_union_right E₁ E₂)
+    | let_step he' => exact .t_let _ _ _ _ _ _ _ (ihe he' rfl) hbody
+  | t_kraw Γ T v m hv hval hk ih => intro e' hs hΓ; cases hs
+  | t_sub Γ e T E E' h0 hsub ih => intro e' hs hΓ; exact .t_sub _ _ _ _ _ (ih hs hΓ) hsub
+
+/-- Closed-term subject reduction. -/
+theorem preservation {e T E} (h : HasTy [] e T E) {e'} (hs : e ⇒ e') : HasTy [] e' T E :=
+  preservation' h hs rfl
 
 end Sounio.EpistemicEffectsV2

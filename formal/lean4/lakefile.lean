@@ -510,6 +510,12 @@ lean_lib «SounioErdos90PathionGrowth» where
 @[default_target]
 lean_lib «EpistemicEffects» where
 
+-- Value-carrying Knowledge<T> calculus (V2): fixes the scalar-cell subject-
+-- reduction gap. Full mechanized type safety — Progress + Preservation — for the
+-- epistemic gradual compilation §5.4 metatheory. Mathlib-free, no sorry.
+@[default_target]
+lean_lib «EpistemicEffectsV2» where
+
 -- Cayley–Dickson erasure ladder: the native-erasure law ker = 2^(n-1) − 4.
 -- Algebra-level exact ℤ-rank of the verified cdSigma product certifies the
 -- kernel dimensions L4–L8 (native_decide), matching the runtime float-Gauss
