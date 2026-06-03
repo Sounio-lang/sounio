@@ -130,11 +130,15 @@ VALIDATION (tuple-match feature):
 - run-pass 504: 501 identical / 3 non-deterministic (covid_2020_kernel, epsilon_comparison_valid,
   knightian_syntax — all confirmed: old binary's own output varies per run) / **0 real regressions**;
 - modular census 504: **PASS 151 / CRASH 0** (was PASS 151 / CRASH 2).
-- examples sweep (souc_gen2 vs tm_genA, tuple-match delta): the only divergence is
-  `examples/erdos/cdcl_proof.sio` — a compute-heavy program (CDCL proofs for growing K_n)
-  that hits the 10 s RUN-timeout (rc=124) at a load-dependent cutoff (old reached mid-K_10
-  one run / mid-K_9 another; new mid-K_9). Output is byte-identical up to the timeout
-  boundary on both compilers ⇒ wall-clock artifact, **not a real regression**. 0 real divergences.
+- examples sweep (souc_gen2 vs tm_genA, tuple-match delta): **TOTAL=847 SAME=845 DIVERGE=2
+  HANG_BOTH=2**. Both divergences are 10 s RUN-timeout (rc=124) artifacts on compute-heavy
+  sweeps, classified non-real:
+  - `examples/erdos/cdcl_proof.sio` — CDCL proofs for growing K_n; old reached mid-K_10 one
+    run / mid-K_9 another, new mid-K_9; output byte-identical up to the cutoff.
+  - `examples/zd_ratio_sweep.sio` — zero-divisor ratio sweep; old's own cutoff line varies by
+    load (non-deterministic), and **new's output == old-run1 byte-for-byte**.
+  The 2 HANG_BOTH time out at COMPILE on both sides (pre-existing, identical). **0 real
+  divergences across all 847 examples.**
 
 ARC (modular crash count across the whole hunt): baseline 3 -> nested-write-fix 170 (reached the
 latent deeper-check class) -> ontology 5 -> closure 4 -> method 3 -> for-in 2 -> tuple-match **0**.
