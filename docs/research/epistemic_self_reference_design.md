@@ -131,6 +131,39 @@ conditional, places the estimated-likely successor as fall-through. Layout-only
   surface to manufacture a bigger count** — one honest guarded site beats fifty
   contrived ones.
 
+## First-session execution order (turnkey; staged to de-risk the bootstrap)
+
+Do these in order; each is a safe checkpoint. Use the **committed** binary
+(`md5 artifacts/self-hosted/souc-self-hosted-x86_64 == 6374e52f…`; if the
+working tree shows `9d4ef541…` it's the broken `cd_mul` swap — extract HEAD's
+binary to `/tmp` and use that). Every full self-compile goes through
+`scripts/dev/souc-build-lock.sh`.
+
+0. **Locate the block/jump emission site** in `lean_single.sio` (where the SSA
+   emitter lays out basic blocks / emits the conditional `jcc` + successor).
+   This is the host for the decision.
+1. **Plumbing with a NEUTRAL heuristic first (zero-risk).** Add the layout
+   decision point but make the heuristic a no-op (never reorder). `souc check`,
+   then self-compile via the lock → confirm **bit-identical** to current HEAD
+   binary. This proves the decision-site plumbing is safe before any behavior
+   change.
+2. **Make the heuristic real (still no annotation).** Static branch-likelihood
+   as a *pure function of the IR* (loop back-edge → likely; path to
+   `panic`/error → unlikely; else 50/50); reorder fall-through accordingly.
+   Self-compile; expect **different bytes**; re-pin `gen_k == gen_{k+1}` →
+   functional fixed-point with the optimization live. Full self-host gate green.
+3. **Annotate epistemically.** Lift the estimate to
+   `branch_likelihood(...) -> Knowledge<i64> with Epistemic`; consume via
+   `.value`. Self-compile; read `gates[direct=N guarded=M]` → **expect M > 0**
+   (first non-vacuous guarded count on the bootstrap).
+4. **Re-pin the epistemic fixed-point.** Re-bootstrap; `gen_k == gen_{k+1}` with
+   annotations live → *epistemic* stability with real content. Record the new
+   hash.
+5. **Rewrite §6 truthfully** (now backed): self-application is real; the census
+   is non-vacuous; re-pin the convergence/fixed-point numbers.
+
+Stop after step 1 if context tightens — it's a clean, reversible checkpoint.
+
 ## Why this is the honest headline, not theater
 
 The compiler genuinely cannot know which branch is hotter without a profile;
