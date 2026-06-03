@@ -44,3 +44,23 @@ codegen project (repro -> fix dispatch -> bootstrap fixed point -> run-pass + ex
 nested-write-scale, for the codegen lane. Closure (approx_propagation, needs Approx effect) and
 Seq (seq_borrow, seq_struct_elems) survivors are still undiagnosed (likely separate bugs; may or
 may not share this tuple-match root).
+
+## PRECISE LOCALIZATION (2026-06-03)
+The match-arm parser in lean_single.sio (the `while` loop at ~20253, "compile match arms")
+recognizes pattern starts: `Some(` (tk 57), `None` (58), `Ok(` (59), `Err(` (60), ident/wildcard
+(3), literal (4), and or-patterns (`A | B`). There is **NO case for `(` (tk 6) = a TUPLE
+pattern**. So an arm `(Some(ia), Some(ib))` is mis-parsed: the leading `(` is not consumed as a
+pattern, `disc` stays -1 / `arm_is_tagged` 0, EP advances into the sub-pattern tokens, and the
+emitted discriminant test + payload-deref are wrong → mis-route + garbage deref → SIGSEGV.
+
+=> The fix is a real CODEGEN FEATURE: implement tuple patterns in match arms — parse
+`( p1 , p2 , … )`, emit a discriminant test per element against the tuple's element offsets,
+bind each sub-pattern's payload, AND-combine the per-element tests for the arm. Then revalidate
+(bootstrap fixed point + run-pass + examples), nested-write-scale. Best done as a focused effort,
+not a tail-of-session partial (a buggy partial would break the bootstrap fixed point).
+
+## Survivor status
+- Knowledge (epsilon_comparison_valid, knowledge_octonion_inner): rooted here (types_equal uses
+  `match (a.inner, b.inner)`). Fixed by implementing tuple-pattern match arms.
+- closure (approx_propagation): UNDIAGNOSED — needs the Approx effect; likely separate.
+- Seq (seq_borrow, seq_struct_elems): UNDIAGNOSED — may or may not share the tuple-match root.
