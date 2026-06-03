@@ -231,6 +231,38 @@ binary to `/tmp` and use that). Every full self-compile goes through
 
 Stop after step 1 if context tightens — it's a clean, reversible checkpoint.
 
+## ⚠️ Step 1b finding (2026-06-03): low confidence is visible, but `guarded` is not a general low-confidence counter
+
+Follow-up probes on the current `modular/native-v2-e2e-gate` binary show the
+low-confidence injector story needs one more correction before editing
+`lean_single.sio`:
+
+- `with Epistemic(700)` on a callee does **not** make the callee's return/call
+  confidence 700. It is an `EpistemicComplete` body-confidence requirement
+  (`FN_EPISTEMIC_MIN`), while plain `with Epistemic` is just the effect tag.
+- `measure(10.0, uncertainty: 5.0)` does create real low-confidence expression
+  sites: the probe census reported `epistemic_main: 30 expr, 27 certain, 3
+  uncertain`, `tier_dist ... BRONZE=2`, `min=0`, and `mean=998`.
+- But `gates[guarded]` still stayed **0** even when the low-confidence
+  `k.value` fed a normal function call (`consume(k.value)`). The current x86
+  marker is emitted only when `EXPR_GATE[call_tok] == 1` at the call emission
+  site, and these probes do not make that call token guarded.
+
+**Design correction:** the self-reference success gate cannot be stated as
+"any low-confidence expression yields `guarded>0`." There are two honest paths:
+
+1. Treat `epistemic_main`/`tier_dist`/`econf min` as the first non-vacuous
+   self-uncertainty evidence, then separately decide whether a codegen marker
+   should be generalized beyond call tokens.
+2. If the headline specifically requires `gates[guarded]>0`, first add a real
+   consumer whose call token is low-confidence, or extend marker emission to the
+   actual branch-layout decision site instead of assuming `.value` propagation
+   reaches call-token gating.
+
+Do **not** implement the bootstrap annotation until this consumer/marker
+boundary is chosen explicitly. Low confidence is real; the old `guarded>0`
+acceptance condition is too narrow for the current implementation.
+
 ## Why this is the honest headline, not theater
 
 The compiler genuinely cannot know which branch is hotter without a profile;
