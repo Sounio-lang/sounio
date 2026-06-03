@@ -101,3 +101,42 @@ REMAINING 5 (long tail, 3 distinct constructs, each a separate bug — same hunt
 - typed closure `|x: T|`: approx_propagation
 - Knowledge<T>: epsilon_comparison_valid, knowledge_octonion_inner
 - Seq<T>: seq_borrow, seq_struct_elems
+
+## FOLLOW-UP 2026-06-03: long tail CLOSED — modular CRASH 5 -> 0; bin/souc swapped
+The 5 survivors were eliminated by four more `*mut` checker transcriptions plus one
+canonical codegen feature. Each `_inplace` transcription replaces a by-value `(*c).method()`
+bridge (8MB Checker copy) with a true *mut spine; the codegen feature implements a construct
+the canonical compiler never lowered.
+
+| commit | construct | site | modular CRASH |
+|---|---|---|---:|
+| 59895154d | (prior) ontology arg-boundary | check.sio:4012 | 170 -> 5 |
+| b2fdeed5e | closure expr | `checker_check_closure_expr_inplace` | 5 -> 4 |
+| 7002bf61f | method call w/ base ty | `checker_check_method_call_with_base_ty_inplace` | 4 -> 3 |
+| 9d5ffac8f | for-in expr | `checker_check_for_in_expr_inplace` | 3 -> 2 |
+| 5dce10672 | tuple patterns in match | lean_single.sio codegen | 2 -> **0** |
+
+The last 2 crashers (epsilon_comparison_valid, knowledge_octonion_inner) were NOT a checker
+*mut bug — they were `match (a,b){(Some(x),Some(y))=>...}` tuple patterns, which the canonical
+compiler's arm parser had no `(` case for, so it mis-parsed and emitted a garbage deref
+(SIGSEGV — crashed the OLD bin/souc too, pre-existing). Codegen now handles tuple patterns:
+elements are stored INLINE (tag at `[tuple+off]`, payload at `[tuple+off+8]`); per-element tag
+tests jump to a shared skip; payload binds are typed via the tuple cache's element Option
+inner-type so nested `*ia` derefs lower correctly. x86 only (a64 dispatch follow-up).
+
+VALIDATION (tuple-match feature):
+- repros teq/teq2/teq3 correct (equal trees true, diff-kind false, no crash);
+- bootstrap fixed point gen2==gen3 = **c634b38f** (compiler self-reproduces with the feature);
+- run-pass 504: 501 identical / 3 non-deterministic (covid_2020_kernel, epsilon_comparison_valid,
+  knightian_syntax — all confirmed: old binary's own output varies per run) / **0 real regressions**;
+- modular census 504: **PASS 151 / CRASH 0** (was PASS 151 / CRASH 2).
+
+ARC (modular crash count across the whole hunt): baseline 3 -> nested-write-fix 170 (reached the
+latent deeper-check class) -> ontology 5 -> closure 4 -> method 3 -> for-in 2 -> tuple-match **0**.
+PASS 125 (baseline) -> 151. Net: every modular crasher on the 504-program corpus eliminated, +26 PASS.
+
+CANONICAL bin/souc SWAP (commit 96528f1d7): bin/souc re-bootstrapped to the tuple-match fixed
+point. `canonical_compiler_gate.sh` PASS — bin/souc md5 == self-compile md5 == c634b38f. Prior
+bin/souc ff68f758 (fall-through-fixed, no tuple-match) backed up at
+/tmp/souc.backup-pre-tuplematch-bin. The 4.98MB artifacts/self-hosted binary is a separate
+legacy CLI (not the gate's canonical target) and was left untouched.
