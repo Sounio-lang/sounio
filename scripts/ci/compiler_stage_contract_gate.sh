@@ -11,6 +11,9 @@ cd "$ROOT_DIR"
 
 # shellcheck source=../lib/resolve_souc.sh
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+if [[ -n "${SOUC_NATIVE_BIN:-}" && -x "${SOUC_NATIVE_BIN:-}" ]]; then
+  SOUC_BIN="$ROOT_DIR/scripts/ci/souc-native-wrapper.sh"
+fi
 sounio_require_souc
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
@@ -233,6 +236,30 @@ required_cmd_pattern \
   "B3_stage1_frontend_examples_hello_check_drift" \
   "souc-lean-frontend check: ok" \
   "$SOUC_BIN" run self-hosted/compiler/lean_frontend.sio -- --check examples/hello.sio
+
+required_cmd_pattern \
+  "stage1_frontend_seq_basic_check" \
+  "B4_stage1_frontend_seq_semantic_surface_check" \
+  "souc-lean-frontend check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean_frontend.sio -- --check tests/run-pass/seq_basic.sio
+
+required_cmd_pattern \
+  "stage1_lean_seq_basic_check" \
+  "B4_stage1_lean_seq_semantic_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/seq_basic.sio
+
+required_cmd_pattern \
+  "stage1_lean_sample_uniform_check" \
+  "B4_stage1_lean_sampling_semantic_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/sample_uniform_native.sio
+
+required_cmd_pattern \
+  "stage1_lean_observe_contraction_check" \
+  "B4_stage1_lean_observe_semantic_surface_check" \
+  "souc-lean check: ok" \
+  "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --check tests/run-pass/observe_contraction.sio
 
 known_blocker_file_size_over \
   "main_sio_shim_size" \

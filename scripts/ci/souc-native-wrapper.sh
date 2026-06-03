@@ -25,6 +25,9 @@ if [[ -n "${SOUNIO_SOUC_BIN:-}" && -x "${SOUNIO_SOUC_BIN:-}" ]]; then
       fi
       src="$2"
       shift 2
+      if [[ "${1:-}" == "--" ]]; then
+        shift
+      fi
       tmp_out="$(mktemp /tmp/sounio-run-XXXXXX.elf)"
       trap 'rm -f "$tmp_out"' EXIT
       "$SOUNIO_SOUC_BIN" "$src" "$tmp_out"
