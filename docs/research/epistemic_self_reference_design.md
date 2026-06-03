@@ -170,6 +170,36 @@ honestly; (c) the optimizer-module DEMO instead; (d) stop — the audit + this
 probe are the deliverable, and the self-reference headline may simply not be
 reachable without rebuilding the confidence model.
 
+## ⚠️ CORRECTION (2026-06-03): the prior "gate fires only on errors" finding was WRONG
+
+Re-probing with the correct form (a `let x = measure(v, uncertainty: u)` *binding*
+with HIGH relative uncertainty) overturns the previous section. The confidence
+model **already derives gating confidence from uncertainty**:
+`m_conf = 1000 − eps_scaled/1000`, `eps_scaled = infer_measure_eps_scaled =
+(unc/value)·1e6` (relative uncertainty, ppm; `lean_single.sio:2947`,
+~21598). So `measure(10.0, uncertainty: 8.0)` (80% rel) → `eps_scaled=800000` →
+`m_conf = 200`, and the census confirms **`min=0`** (genuine sub-950 confidence
+from a real high-uncertainty measurement — *not* an error). My earlier probes
+missed this because (a) the bare-`measure()` *return* form doesn't hit this
+binding path, and (b) the 8 sampled programs had *low* relative uncertainty.
+
+**The real gap is narrower and more tractable:** despite `min=0`, the census
+still shows **`guarded=0`** — the `66 90` marker does not fire. The low
+confidence is computed but **does not propagate to the consuming call site's
+gate** (`consume(lo.value)` stays ≥950; `mean=998`). So the obstacle is **not**
+the calibration (sound) and **not** a "≥970 floor" (false) — it is the
+**confidence → call-site-gate propagation** (`EXPR_GATE[call_tok]` is not driven
+by a low-confidence argument). The §6.2 rule `CONF[call] = min(CONF[args])·
+CONF[body]` is the intended behavior; it is not reaching the gate.
+
+**Re-aimed "redesign":** the targeted fix is to complete the
+argument-confidence → call-confidence → `EXPR_GATE` propagation so a call
+consuming a genuinely-uncertain value gates (`guarded>0`). That is a localized
+pass fix, not a calibration rewrite — and it is the real prerequisite for
+self-reference (and for the branch-likelihood estimator to gate). VERIFY the
+exact propagation site before editing; re-probe the corrected case for
+`guarded>0` after.
+
 ## Advisor caveats to honor during implementation
 
 - **Fixed-point hash will change, and that's fine.** Block reorder ⇒ different
