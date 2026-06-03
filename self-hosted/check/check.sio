@@ -1099,6 +1099,72 @@ fn checker_lower_ref_type_dispatch_mut(c: *mut Checker, opt: Option<Box<TypeExpr
     }
 }
 
+// *mut transcription of lower_fn_type_params (11093): a TypeExprList of fn-type param types ->
+// FnParamList, synthesizing _p0/_p1/... names (faithful to the by-value original).
+fn checker_lower_fn_type_params_mut(c: *mut Checker, tel: TypeExprList, idx: i64) -> MutParamsResult with Mut, Panic, Div, Alloc, IO {
+    let param_ty = checker_lower_type_expr_mut(c, tel.head)
+    var pname = Name { buf: [0; 128], len: 0 }
+    pname.buf[0] = 95 as i8        // '_'
+    pname.buf[1] = 112 as i8       // 'p'
+    pname.buf[2] = (48 + idx) as i8  // '0'+idx
+    pname.len = 3
+    let param_info = FnParamInfo { name: pname, ty: param_ty }
+    match tel.tail {
+        None => MutParamsResult { params: Some(Box::new(FnParamList { head: param_info, tail: None })), count: idx + 1 }
+        Some(rest) => {
+            let r2 = checker_lower_fn_type_params_mut(c, *rest, idx + 1)
+            MutParamsResult { params: Some(Box::new(FnParamList { head: param_info, tail: r2.params })), count: r2.count }
+        }
+    }
+}
+
+// *mut transcription of lower_fn_type_expr (11034): a `fn(T,...) -> U with Effs` type. The match
+// in checker_lower_type_expr_mut had no TypeFn case, so closure / higher-order-fn param & field
+// types fell to `_ => checker_note_type_error_mut` — a SILENT rejection failing every no-import
+// closure/HOF program (closure_*, ode_generic_solver, quadrature, root_finding, ...). Lowers
+// params + return + effects, registers a FnSig, returns ty_fn(sig_id) (same shape as the by-value
+// path and the *mut closure_sig registration at 3685).
+fn checker_lower_fn_type_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    var params: Option<Box<FnParamList> > = None
+    var param_count: i64 = 0
+    match te.type_args {
+        Some(tel) => {
+            let r = checker_lower_fn_type_params_mut(c, *tel, 0)
+            params = r.params
+            param_count = r.count
+        }
+        _ => {}
+    }
+    var ret_ty = ty_unit()
+    match te.inner {
+        Some(inner_te) => {
+            ret_ty = checker_lower_type_expr_mut(c, *inner_te)
+        }
+        _ => {}
+    }
+    let eff = checker_extract_effects_mut(c, te.effects)
+    let sig = FnSig {
+        name: Name { buf: [0; 128], len: 0 },
+        params: params,
+        param_count: param_count,
+        return_type: ret_ty,
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: eff.effects,
+        effect_count: eff.count,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+    }
+    let add_result = (*c).fn_sigs.add(sig)
+    (*c).fn_sigs = add_result.0
+    let sig_id = add_result.1
+    ty_fn(sig_id)
+}
+
 fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !checker_enter_type_expr_mut(c) {
         return ty_error()
@@ -1194,6 +1260,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         TypeExprKind::TypeArray => checker_lower_array_type_mut(c, te.inner, te.array_size)
         TypeExprKind::TypeReference => checker_lower_ref_type_dispatch_mut(c, te.inner, false)
         TypeExprKind::TypeRefMut => checker_lower_ref_type_dispatch_mut(c, te.inner, true)
+        TypeExprKind::TypeFn => checker_lower_fn_type_mut(c, te)
         _ => {
             checker_note_type_error_mut(c)
             ty_error()
