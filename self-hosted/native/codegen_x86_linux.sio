@@ -1909,6 +1909,32 @@ fn nc_emit_add_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0xd8)
 }
 
+// adc rax, rbx  (rax += rbx + CF). 48 11 d8. MOV-class ops between limbs preserve CF.
+fn nc_emit_adc_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x11)
+    nc_emit_byte(nc, 0xd8)
+}
+
+// Unrolled N-limb carry-chain add: dst[k] = lhs[k] + rhs[k] (+carry) for k in 0..L-1.
+// Limb k of base vreg v lives in vreg slot v+k (consecutive vregs at decreasing rbp
+// addresses). Only flag-neutral mov loads/stores between add(limb0) and the adc steps,
+// so the carry propagates correctly.
+fn nc_wide_add_into(nc: &! NativeCompiler, lhs_vreg: i64, rhs_vreg: i64, dst_vreg: i64, limbs: i64) with Mut, Panic, Div {
+    var k: i64 = 0
+    while k < limbs {
+        nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(rhs_vreg + k))   // rbx = rhs limb k
+        nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(lhs_vreg + k))      // rax = lhs limb k
+        if k == 0 {
+            nc_emit_add_rax_rbx(nc)
+        } else {
+            nc_emit_adc_rax_rbx(nc)
+        }
+        nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(dst_vreg + k))     // dst limb k = rax
+        k = k + 1
+    }
+}
+
 fn nc_emit_sub_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x29)
@@ -5423,6 +5449,15 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_add_label_patch(nc, jnz_pos + 2, (*func).instrs[i as usize].label_id)
         } else if instr_op == IrOpcode::IrNop {
             // no-op
+        } else if instr_op == IrOpcode::IrWideAdd {
+            let dst_v = (*func).instrs[i as usize].dst
+            let lhs_v = (*func).instrs[i as usize].src1
+            let rhs_v = (*func).instrs[i as usize].src2
+            let limbs = (*func).instrs[i as usize].imm_i64
+            if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 {
+                return false
+            }
+            nc_wide_add_into(nc, lhs_v, rhs_v, dst_v, limbs)
         } else {
             return false
         }
