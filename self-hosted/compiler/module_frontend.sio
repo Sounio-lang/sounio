@@ -11,7 +11,7 @@ use io::env::{read_env}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_program_epistemic_into}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
-use module_parse::{extract_imports_from_ast, file_exists, load_module_file}
+use module_parse::{extract_imports_from_ast, file_exists, load_module_file, load_module_file_into}
 
 fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1")
@@ -23,6 +23,7 @@ var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES: [i64; 64] = [0; 64]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS: [i64; 64] = [0; 64]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES: [i64; 64] = [0; 64]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES: [i64; 64] = [0; 64]
+var MODULE_FRONTEND_SINGLE_PROGRAM_SCRATCH: Program = mf_empty_program()
 
 fn module_frontend_import_is_ident_ch(c: i8) -> bool {
     (c >= 65 as i8 && c <= 90 as i8) ||
@@ -2862,6 +2863,97 @@ fn load_multimodule_lower_program_traced(
     trace.last_stage = "lower_bodies_done"
     let lower_module = *body_result.module
     lower_module
+}
+
+fn load_multimodule_lower_program_into_traced(
+    out: &! IrModule,
+    program: &Program,
+    epistemic: IrEpistemicSection,
+    module_index: i64,
+    trace: &! LoadMultimoduleIrTrace
+) -> i64 with IO, Mut, Div, Panic, Alloc {
+    trace.last_stage = "lower_summary"
+    trace.last_module_index = module_index
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
+    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(program, epistemic)
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
+    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return 1
+    }
+
+    trace.summary_seeded_modules = trace.summary_seeded_modules + 1
+    trace.last_stage = "lower_bodies"
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    var summary_val = (*summary_result.summary)
+    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
+        program,
+        &summary_val,
+        epistemic
+    )
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
+    if body_result.had_error {
+        trace.last_stage = "lower_bodies_error"
+        return 2
+    }
+
+    trace.body_lowered_modules = trace.body_lowered_modules + 1
+    trace.lowered_modules = trace.lowered_modules + 1
+    trace.patched_functions = trace.patched_functions + body_result.patch_stats.patched_functions
+    trace.patched_calls = trace.patched_calls + body_result.patch_stats.patched_calls
+    trace.fallback_insertions = trace.fallback_insertions + body_result.patch_stats.fallback_insertions
+    trace.last_stage = "lower_bodies_done"
+    let lowered = *body_result.module
+    (*out).functions = lowered.functions
+    (*out).fn_count = lowered.fn_count
+    (*out).string_table = lowered.string_table
+    (*out).string_count = lowered.string_count
+    (*out).epistemic = lowered.epistemic
+    (*out).algebras = lowered.algebras
+    (*out).ontologies = lowered.ontologies
+    (*out).prof_counters = lowered.prof_counters
+    (*out).prof_counter_count = lowered.prof_counter_count
+    (*out).export_names = lowered.export_names
+    (*out).export_count = lowered.export_count
+    0
+}
+
+pub fn load_single_module_ir_into_traced(out: &! IrModule, main_path: string, trace: &! LoadMultimoduleIrTrace) -> i64 with IO, Mut, Div, Panic, Alloc {
+    load_module_file_into(&! MODULE_FRONTEND_SINGLE_PROGRAM_SCRATCH, main_path)
+    let main_parse_errors = parser_last_error_count()
+    if main_parse_errors > 0 {
+        return 1
+    }
+    trace.loaded_modules = 1
+    trace.last_stage = "load_main"
+    trace.last_module_index = 0
+
+    trace.resolved_modules = 1
+    var single_epistemic = ir_empty_epistemic_section()
+    trace.last_stage = "typecheck"
+    let single_verdict = 0
+    if single_verdict != 0 {
+        return 2
+    }
+    trace.typechecked_modules = 1
+    trace.last_stage = "lower_single"
+    MODULE_FRONTEND_SINGLE_PROGRAM_SCRATCH = mf_empty_program()
+    load_module_file_into(&! MODULE_FRONTEND_SINGLE_PROGRAM_SCRATCH, main_path)
+    let lower_err = load_multimodule_lower_program_into_traced(out, &MODULE_FRONTEND_SINGLE_PROGRAM_SCRATCH, single_epistemic, 0, trace)
+    if lower_err != 0 {
+        return 3
+    }
+    if (*out).fn_count <= 0 {
+        return 4
+    }
+    trace.merged_modules = 1
+    trace.last_stage = "done"
+    print("Merged IR: ")
+    print_int((*out).fn_count)
+    print(" functions\n")
+    ir_module_resolve_named_calls(out)
+    parser_reset_last_errors()
+    0
 }
 
 fn multimodule_frontend_ok() -> MultiModuleFrontendResult {

@@ -1755,8 +1755,16 @@ fn nc_emit_setae_al(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x93); nc_emit_byte(nc, 0xc0)
 }
 
+fn nc_emit_seta_al(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x97); nc_emit_byte(nc, 0xc0)
+}
+
 fn nc_emit_setb_al(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x92); nc_emit_byte(nc, 0xc0)
+}
+
+fn nc_emit_setbe_al(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x96); nc_emit_byte(nc, 0xc0)
 }
 
 // MOVZX RAX, AL
@@ -3973,6 +3981,13 @@ fn native_v2_reloc_is_call_patch(nc: &NativeCompiler, patch_offset: i64) -> bool
 
 fn native_v2_reloc_is_rip_disp_patch(nc: &NativeCompiler, patch_offset: i64) -> bool with Panic, Div {
     if !(patch_offset >= 3 && patch_offset + 4 <= (*nc).code.len) { return false }
+    if patch_offset >= 4
+        && (*nc).code.bytes[(patch_offset - 4) as usize] == (0xf2 as i8)
+        && (*nc).code.bytes[(patch_offset - 3) as usize] == (0x0f as i8)
+        && (*nc).code.bytes[(patch_offset - 2) as usize] == (0x10 as i8)
+        && (*nc).code.bytes[(patch_offset - 1) as usize] == (0x05 as i8) {
+        return true
+    }
     if (*nc).code.bytes[(patch_offset - 3) as usize] != (0x48 as i8) { return false }
     let op = (*nc).code.bytes[(patch_offset - 2) as usize]
     let modrm = (*nc).code.bytes[(patch_offset - 1) as usize]
@@ -4027,8 +4042,9 @@ pub fn compile_module_streaming_finish_main_into(nc: &! NativeCompiler, main_fn_
     let rodata_file_offset = align_page(text_file_offset + (*nc).code.len)
     let min_data_len = (*nc).prof_counter_data_base + ((*nc).prof_counter_count * 8)
     let effective_data_len = if (*nc).data.len < min_data_len { min_data_len } else { (*nc).data.len }
+    let effective_rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
     let data_file_offset = if effective_data_len > 0 {
-        align_page(rodata_file_offset + (*nc).rodata.len)
+        align_page(rodata_file_offset + effective_rodata_len)
     } else { 0 }
     apply_relocations_into(nc, rodata_file_offset, data_file_offset)
 }
@@ -5077,6 +5093,16 @@ fn nc_core_store_rax_to_temp(nc: &! NativeCompiler, temp: i64) with Mut, Panic, 
     }
 }
 
+fn nc_core_resolve_handle_to_object_base_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_rbx_rax(nc)
+    nc_emit_imul_rbx_rbx_imm8(nc, native_v2_handle_entry_size())
+    nc_emit_mov_reg_reg(nc, 7, 3)
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_table_base())
+    nc_emit_mov_reg_reg(nc, 3, 7)
+    nc_emit_add_rax_rbx(nc)
+    (*nc).code = emit_load_rax_mem_rax_disp32((*nc).code, native_v2_handle_entry_field_object_base())
+}
+
 fn nc_core_emit_empty_frame_gc_reset_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_base())
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
@@ -5299,6 +5325,56 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
     false
 }
 
+fn nc_emit_core_float_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64) -> bool with Mut, Panic, Div {
+    let lhs = (*func).instrs[instr_index as usize].src1
+    let rhs = (*func).instrs[instr_index as usize].src2
+    let dst = (*func).instrs[instr_index as usize].dst
+    let op = (*func).instrs[instr_index as usize].bin_op
+
+    nc_core_load_temp_to_rax(nc, lhs)
+    (*nc).code = emit_movq_xmm0_rax((*nc).code)
+    nc_core_load_temp_to_rax(nc, rhs)
+    (*nc).code = emit_movq_xmm1_rax((*nc).code)
+
+    if op == BinaryOp::OpAdd {
+        (*nc).code = emit_addsd_xmm0_xmm1((*nc).code)
+        (*nc).code = emit_movq_rax_xmm0((*nc).code)
+        nc_core_store_rax_to_temp(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpSub {
+        (*nc).code = emit_subsd_xmm0_xmm1((*nc).code)
+        (*nc).code = emit_movq_rax_xmm0((*nc).code)
+        nc_core_store_rax_to_temp(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpMul {
+        (*nc).code = emit_mulsd_xmm0_xmm1((*nc).code)
+        (*nc).code = emit_movq_rax_xmm0((*nc).code)
+        nc_core_store_rax_to_temp(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpDiv {
+        (*nc).code = emit_divsd_xmm0_xmm1((*nc).code)
+        (*nc).code = emit_movq_rax_xmm0((*nc).code)
+        nc_core_store_rax_to_temp(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpLt || op == BinaryOp::OpLe || op == BinaryOp::OpGt || op == BinaryOp::OpGe || op == BinaryOp::OpEq || op == BinaryOp::OpNe {
+        (*nc).code = emit_ucomisd_xmm0_xmm1((*nc).code)
+        if op == BinaryOp::OpLt { nc_emit_setb_al(nc) }
+        else if op == BinaryOp::OpLe { nc_emit_setbe_al(nc) }
+        else if op == BinaryOp::OpGt { nc_emit_seta_al(nc) }
+        else if op == BinaryOp::OpGe { nc_emit_setae_al(nc) }
+        else if op == BinaryOp::OpEq { nc_emit_sete_al(nc) }
+        else { nc_emit_setne_al(nc) }
+        nc_emit_movzx_rax_al(nc)
+        nc_core_store_rax_to_temp(nc, dst)
+        return true
+    }
+    false
+}
+
 fn nc_core_emit_println_i64_literal_sentinel_into(nc: &! NativeCompiler, value: i64) -> bool with Mut, Panic, Div {
     if value < 0 || value > 999 {
         return false
@@ -5326,6 +5402,42 @@ fn nc_core_emit_println_i64_literal_sentinel_into(nc: &! NativeCompiler, value: 
     true
 }
 
+fn nc_core_rodata_add_f64_bits_into(nc: &! NativeCompiler, bits: i64) -> i64 with Mut, Panic, Div {
+    while (native_v2_rodata_len_into(nc) % 8) != 0 {
+        native_v2_rodata_append_byte_into(nc, 0)
+    }
+    let data_offset = native_v2_rodata_len_into(nc)
+    var i: i64 = 0
+    while i < 8 {
+        native_v2_rodata_append_byte_into(nc, (bits >> (i * 8)) & 0xFF)
+        i = i + 1
+    }
+    data_offset
+}
+
+fn nc_core_emit_load_float_into(nc: &! NativeCompiler, dst: i64, value: f64) with Mut, Panic, Div {
+    let data_offset = nc_core_rodata_add_f64_bits_into(nc, f64_to_bits(value))
+    let movsd_pos = (*nc).code.len
+    (*nc).code = emit_movsd_xmm0_rip_disp32((*nc).code, 0)
+    nc_add_rodata_reloc(nc, movsd_pos + 4, data_offset)
+    (*nc).code = emit_movq_rax_xmm0((*nc).code)
+    nc_core_store_rax_to_temp(nc, dst)
+}
+
+fn nc_core_emit_int_to_float_into(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic, Div {
+    nc_core_load_temp_to_rax(nc, src)
+    (*nc).code = emit_cvtsi2sd_xmm0_rax((*nc).code)
+    (*nc).code = emit_movq_rax_xmm0((*nc).code)
+    nc_core_store_rax_to_temp(nc, dst)
+}
+
+fn nc_core_emit_float_to_int_into(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic, Div {
+    nc_core_load_temp_to_rax(nc, src)
+    (*nc).code = emit_movq_xmm0_rax((*nc).code)
+    (*nc).code = emit_cvttsd2si_rax_xmm0((*nc).code)
+    nc_core_store_rax_to_temp(nc, dst)
+}
+
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with Mut, Panic, Div, Alloc {
     nc_v2_reset_label_state()
     reset_function_state_mut(nc)
@@ -5338,6 +5450,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
     nc_emit_sub_rsp_imm32(nc, 512)
     spill_ir_params_ref_mut(nc, func)
 
+    var float_regs: [bool; 512] = [false; 512]
     var i = 0
     while i < (*func).instr_count {
         let instr_op = (*func).instrs[i as usize].op
@@ -5360,23 +5473,83 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 nc_emit_mov_rax_imm(nc, imm_value)
                 nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
             }
+            if (*func).instrs[i as usize].dst >= 0 && (*func).instrs[i as usize].dst < 512 {
+                float_regs[(*func).instrs[i as usize].dst as usize] = false
+            }
+        } else if instr_op == IrOpcode::IrLoadFloat {
+            nc_core_emit_load_float_into(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].imm_f64)
+            if (*func).instrs[i as usize].dst >= 0 && (*func).instrs[i as usize].dst < 512 {
+                float_regs[(*func).instrs[i as usize].dst as usize] = true
+            }
+        } else if instr_op == IrOpcode::IrIntToFloat {
+            nc_core_emit_int_to_float_into(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].src1)
+            if (*func).instrs[i as usize].dst >= 0 && (*func).instrs[i as usize].dst < 512 {
+                float_regs[(*func).instrs[i as usize].dst as usize] = true
+            }
+        } else if instr_op == IrOpcode::IrFloatToInt {
+            nc_core_emit_float_to_int_into(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].src1)
+            if (*func).instrs[i as usize].dst >= 0 && (*func).instrs[i as usize].dst < 512 {
+                float_regs[(*func).instrs[i as usize].dst as usize] = false
+            }
         } else if instr_op == IrOpcode::IrLoadString {
             let str_offset = nc_rodata_add_ir_instr_name(nc, func, i)
             let lea_pos = (*nc).code.len
             nc_emit_lea_rax_rip_disp32(nc, 0)
             nc_add_rodata_reloc(nc, lea_pos + 3, str_offset)
             nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            if (*func).instrs[i as usize].dst >= 0 && (*func).instrs[i as usize].dst < 512 {
+                float_regs[(*func).instrs[i as usize].dst as usize] = false
+            }
         } else if instr_op == IrOpcode::IrBinOp {
-            if !nc_emit_core_binop(nc, func, i) {
-                return false
+            let src1_is_float = (*func).instrs[i as usize].src1 >= 0 && (*func).instrs[i as usize].src1 < 512 && float_regs[(*func).instrs[i as usize].src1 as usize]
+            let src2_is_float = (*func).instrs[i as usize].src2 >= 0 && (*func).instrs[i as usize].src2 < 512 && float_regs[(*func).instrs[i as usize].src2 as usize]
+            if src1_is_float || src2_is_float {
+                if !nc_emit_core_float_binop(nc, func, i) {
+                    return false
+                }
+                if (*func).instrs[i as usize].dst >= 0 && (*func).instrs[i as usize].dst < 512 {
+                    let op = (*func).instrs[i as usize].bin_op
+                    if op == BinaryOp::OpAdd || op == BinaryOp::OpSub || op == BinaryOp::OpMul || op == BinaryOp::OpDiv {
+                        float_regs[(*func).instrs[i as usize].dst as usize] = true
+                    } else {
+                        float_regs[(*func).instrs[i as usize].dst as usize] = false
+                    }
+                }
+            } else {
+                if !nc_emit_core_binop(nc, func, i) {
+                    return false
+                }
+                if (*func).instrs[i as usize].dst >= 0 && (*func).instrs[i as usize].dst < 512 {
+                    float_regs[(*func).instrs[i as usize].dst as usize] = false
+                }
             }
         } else if instr_op == IrOpcode::IrCopy {
             nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
             nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            if (*func).instrs[i as usize].dst >= 0 && (*func).instrs[i as usize].dst < 512 {
+                if (*func).instrs[i as usize].src1 >= 0 && (*func).instrs[i as usize].src1 < 512 {
+                    float_regs[(*func).instrs[i as usize].dst as usize] = float_regs[(*func).instrs[i as usize].src1 as usize]
+                } else {
+                    float_regs[(*func).instrs[i as usize].dst as usize] = false
+                }
+            }
         } else if instr_op == IrOpcode::IrAlloc {
             if !nc_core_emit_alloc_into(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].imm_i64) {
                 return false
             }
+        } else if instr_op == IrOpcode::IrFieldGet {
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_core_resolve_handle_to_object_base_rax(nc)
+            nc_emit_mov_reg_imm(nc, 3, (*func).instrs[i as usize].field_idx + (native_v2_object_header_size() / 8))
+            nc_emit_mov_rax_mem_rax_rbx8(nc)
+            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+        } else if instr_op == IrOpcode::IrFieldSet {
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_core_resolve_handle_to_object_base_rax(nc)
+            nc_emit_mov_rdx_rax(nc)
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src2)
+            nc_emit_mov_reg_imm(nc, 3, (*func).instrs[i as usize].field_idx + (native_v2_object_header_size() / 8))
+            nc_emit_store_rax_mem_rdx_rbx8(nc)
         } else if instr_op == IrOpcode::IrCall {
             let argc = (*func).instrs[i as usize].arg_count
             if argc > 2 {
@@ -5842,8 +6015,9 @@ pub fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string
     let rodata_file_offset = align_page(text_file_offset + (*nc).code.len)
     let min_data_len = (*nc).prof_counter_data_base + ((*nc).prof_counter_count * 8)
     let effective_data_len = if (*nc).data.len < min_data_len { min_data_len } else { (*nc).data.len }
+    let effective_rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
     let data_file_offset = if effective_data_len > 0 {
-        align_page(rodata_file_offset + (*nc).rodata.len)
+        align_page(rodata_file_offset + effective_rodata_len)
     } else { 0 }
     (*nc).code = apply_relocations((*nc).relocs, (*nc).code, (*nc).fn_offsets, (*nc).fn_count, rodata_file_offset, data_file_offset)
 
@@ -7529,7 +7703,12 @@ fn native_v2_build_elf_image_into(bytes: &! [i8; 131072], nc: &! NativeCompiler,
 
     i = 0
     while i < rodata_len && (rodata_offset + i) < 131072 {
-        let rb: i8 = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_bytes[i as usize] } else { (*nc).rodata.bytes[i as usize] }
+        var rb: i8 = 0 as i8
+        if (*nc).flat_rodata_len > 0 {
+            rb = (*nc).flat_rodata_bytes[i as usize]
+        } else {
+            rb = (*nc).rodata.bytes[i as usize]
+        }
         (*bytes)[(rodata_offset + i) as usize] = rb
         i = i + 1
     }
@@ -7568,7 +7747,8 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         emit_entry_trampoline_split_into(&! nc, main_idx)
     }
     let patched_rodata_file_offset = align_page(text_file_offset + nc.code.len)
-    let patched_data_file_offset = align_page(patched_rodata_file_offset + nc.rodata.len)
+    let patched_rodata_len = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
+    let patched_data_file_offset = align_page(patched_rodata_file_offset + patched_rodata_len)
     apply_relocations_into(&! nc, patched_rodata_file_offset, patched_data_file_offset)
     let entry = trampoline_offset(nc)
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
@@ -7851,7 +8031,12 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
         NATIVE_ELF_OFF = rodata_offset
         var ri: i64 = 0
         while ri < rodata_len {
-            let rb: i8 = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_bytes[ri as usize] } else { (*nc).rodata.bytes[ri as usize] }
+            var rb: i8 = 0 as i8
+            if (*nc).flat_rodata_len > 0 {
+                rb = (*nc).flat_rodata_bytes[ri as usize]
+            } else {
+                rb = (*nc).rodata.bytes[ri as usize]
+            }
             NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = rb
             NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
             ri = ri + 1
@@ -7863,7 +8048,10 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
         NATIVE_ELF_OFF = data_offset
         var di: i64 = 0
         while di < actual_data_len {
-            let db: i8 = if di < raw_data_len { (*nc).data.bytes[di as usize] } else { 0 as i8 }
+            var db: i8 = 0 as i8
+            if di < raw_data_len {
+                db = (*nc).data.bytes[di as usize]
+            }
             NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = db
             NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
             di = di + 1

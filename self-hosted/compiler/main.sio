@@ -48,7 +48,7 @@ use resolve::scope::*
 
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
-use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace}
+use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, load_single_module_ir_into_traced, empty_load_multimodule_ir_trace}
 use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace}
 use module_parse::{ImportList, load_module_file, extract_imports_from_ast}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
@@ -1232,6 +1232,43 @@ fn compiler_is_render_fixture(path: string) -> bool with Mut, Panic, Div {
     starts_with(path, "examples/render/")
 }
 
+fn compiler_source_maybe_has_use_keyword(path: string) -> bool with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    if size <= 0 {
+        return false
+    }
+    let bytes = read_file(path)
+    var i: i64 = 0
+    var at_line_start = true
+    while i < size {
+        let ch = bytes[i as usize]
+        if ch == (10 as i8) || ch == (13 as i8) {
+            at_line_start = true
+            i = i + 1
+            continue
+        }
+        if at_line_start && compile_byte_is_whitespace(ch) {
+            i = i + 1
+            continue
+        }
+        if at_line_start {
+            if i + 3 <= size {
+                if bytes[i as usize] == (117 as i8) && bytes[(i + 1) as usize] == (115 as i8) && bytes[(i + 2) as usize] == (101 as i8) {
+                    return true
+                }
+            }
+            if i + 7 <= size {
+                if bytes[i as usize] == (112 as i8) && bytes[(i + 1) as usize] == (117 as i8) && bytes[(i + 2) as usize] == (98 as i8) && bytes[(i + 3) as usize] == (32 as i8) && bytes[(i + 4) as usize] == (117 as i8) && bytes[(i + 5) as usize] == (115 as i8) && bytes[(i + 6) as usize] == (101 as i8) {
+                    return true
+                }
+            }
+            at_line_start = false
+        }
+        i = i + 1
+    }
+    false
+}
+
 fn compiler_try_single_module_check(path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
     let program = load_module_file(path)
     let parse_errors = parser_last_error_count()
@@ -1439,6 +1476,7 @@ fn compiler_preflight_ir_load_into(out: &!CompilerIrLoadResult, path: string) wi
 // BSS-backed result storage for the source→native-v2 bridge (avoids a by-value
 // CompilerIrLoadResult local/return on the caller's stack — see _into above).
 var NV2_BRIDGE_IR_RESULT: CompilerIrLoadResult = compiler_ir_load_result_error(compile_errors_new())
+var NV2_BRIDGE_SINGLE_MODULE_SCRATCH: IrModule = ir_empty_module()
 
 fn compiler_ir_buffers_equal(buf_a: [i8; 131072], len_a: i64, buf_b: [i8; 131072], len_b: i64) -> bool with Mut {
     if len_a != len_b {
@@ -2491,6 +2529,29 @@ fn run_native_v2_emit13() with IO, Mut, Panic, Div, Alloc {
     run_native_v2_emit_exit_code(13, "artifacts/omega/emit13.elf")
 }
 
+fn compiler_try_native_v2_single_module(source_path: string, out_path: string, spec: NativeTargetSpec) -> bool with IO, Mut, Panic, Div, Alloc {
+    if compiler_source_maybe_has_use_keyword(source_path) {
+        return false
+    }
+    var single_trace = empty_load_multimodule_ir_trace()
+    NV2_BRIDGE_SINGLE_MODULE_SCRATCH = ir_empty_module()
+    let single_err = load_single_module_ir_into_traced(&! NV2_BRIDGE_SINGLE_MODULE_SCRATCH, source_path, &! single_trace)
+    if single_err != 0 {
+        return false
+    }
+    let rc = compile_native_v2_preview_to_file(&NV2_BRIDGE_SINGLE_MODULE_SCRATCH, spec, out_path)
+    if rc != 0 {
+        print("native_v2_compile: FAIL to_file rc=")
+        print_int(rc as i64)
+        print("\n")
+        return true
+    }
+    print("native_v2_compile: emitted path=")
+    print(out_path)
+    print("\n")
+    true
+}
+
 // Bridge: real .sio SOURCE -> front-half -> IrModule -> native-v2 -> ELF.
 // Uses the BSS-global NV2_BRIDGE_IR_RESULT + compiler_preflight_ir_load_into so
 // the large CompilerIrLoadResult is NEVER returned by value into this frame
@@ -2502,12 +2563,15 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     if !compiler_preflight_source_input(source_path) {
         panic("native-v2-compile failed: source not readable")
     }
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    if compiler_try_native_v2_single_module(source_path, out_path, spec) {
+        return
+    }
     compiler_preflight_ir_load_into(&! NV2_BRIDGE_IR_RESULT, source_path)
     if !NV2_BRIDGE_IR_RESULT.ok {
         compiler_print_errors(NV2_BRIDGE_IR_RESULT.errors)
         panic("native-v2-compile failed: front-half errors")
     }
-    let spec = native_resolve_target("x86_64-linux", "auto", true)
     let rc = compile_native_v2_preview_to_file(&NV2_BRIDGE_IR_RESULT.module, spec, out_path)
     if rc != 0 {
         print("native_v2_compile: FAIL to_file rc=")

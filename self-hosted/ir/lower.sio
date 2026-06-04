@@ -56,6 +56,12 @@ struct Lowerer {
     enum_variants: Box<EnumVariantTable>,
     // Phase 3.2: Struct field layouts
     struct_layouts: Box<StructLayoutTable>,
+    // Function return struct type names keyed by fn_id. Used to preserve the
+    // base type of locals initialized from calls, so call_result.field can use
+    // the same layout table path as struct literals and parameters.
+    fn_return_type_names: Box<[Name; 1024]>,
+    // Struct field result type names keyed by parent struct + field name.
+    field_type_table: Box<StructFieldTypeTable>,
     // Sprint 28: Debug-mode witness enforcement
     debug_mode: bool,
     // Sprint 44: probe-mode lowering skips heavyweight epistemic metadata lookup.
@@ -68,10 +74,38 @@ struct IrPreparedCallArgs {
     argc: i64,
 }
 
+struct StructFieldTypeEntry {
+    parent_type: Name,
+    field_name: Name,
+    field_type: Name,
+}
+
+struct StructFieldTypeTable {
+    entries: [StructFieldTypeEntry; 4096],
+    count: i64,
+}
+
+fn empty_struct_field_type_entry() -> StructFieldTypeEntry {
+    StructFieldTypeEntry {
+        parent_type: ir_empty_name(),
+        field_name: ir_empty_name(),
+        field_type: ir_empty_name(),
+    }
+}
+
+fn empty_struct_field_type_table() -> StructFieldTypeTable {
+    StructFieldTypeTable {
+        entries: [empty_struct_field_type_entry(); 4096],
+        count: 0,
+    }
+}
+
 pub struct IrProgramSummary {
     module: Box<IrModule>,
     enum_variants: Box<EnumVariantTable>,
     struct_layouts: Box<StructLayoutTable>,
+    fn_return_type_names: Box<[Name; 1024]>,
+    field_type_table: Box<StructFieldTypeTable>,
     probe_mode: bool,
 }
 
@@ -91,6 +125,8 @@ pub struct IrProgramSummaryFlat {
     module: IrModule,
     enum_variants: EnumVariantTable,
     struct_layouts: StructLayoutTable,
+    fn_return_type_names: [Name; 1024],
+    field_type_table: StructFieldTypeTable,
     probe_mode: bool,
 }
 
@@ -110,6 +146,8 @@ struct IrFastSummaryOwnedSeed {
     module: IrModule,
     enum_variants: EnumVariantTable,
     struct_layouts: StructLayoutTable,
+    fn_return_type_names: [Name; 1024],
+    field_type_table: StructFieldTypeTable,
 }
 
 pub struct IrFunctionBodyResult {
@@ -161,6 +199,8 @@ fn lowerer_new() -> Lowerer with Alloc {
         had_error: false,
         enum_variants: Box::new(empty_enum_variant_table()),
         struct_layouts: Box::new(empty_struct_layout_table()),
+        fn_return_type_names: Box::new([ir_empty_name(); 1024]),
+        field_type_table: Box::new(empty_struct_field_type_table()),
         debug_mode: false,
         probe_mode: false,
     }
@@ -221,6 +261,8 @@ pub fn ir_empty_program_summary() -> IrProgramSummary {
         module: Box::new(ir_empty_module()),
         enum_variants: Box::new(empty_enum_variant_table()),
         struct_layouts: Box::new(empty_struct_layout_table()),
+        fn_return_type_names: Box::new([ir_empty_name(); 1024]),
+        field_type_table: Box::new(empty_struct_field_type_table()),
         probe_mode: false,
     }
 }
@@ -230,6 +272,8 @@ fn ir_empty_program_summary_flat() -> IrProgramSummaryFlat {
         module: ir_empty_module(),
         enum_variants: empty_enum_variant_table(),
         struct_layouts: empty_struct_layout_table(),
+        fn_return_type_names: [ir_empty_name(); 1024],
+        field_type_table: empty_struct_field_type_table(),
         probe_mode: false,
     }
 }
@@ -239,6 +283,8 @@ fn ir_program_summary_from_lowerer(lo: Lowerer) -> IrProgramSummary {
         module: lo.module,
         enum_variants: lo.enum_variants,
         struct_layouts: lo.struct_layouts,
+        fn_return_type_names: lo.fn_return_type_names,
+        field_type_table: lo.field_type_table,
         probe_mode: lo.probe_mode,
     }
 }
@@ -312,6 +358,8 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: IrEpi
     lo.module = Box::new(module)
     lo = lowerer_seed_module_from_summary(lo, summary)
     lo = lowerer_seed_metadata_from_summary(lo, summary)
+    lo.fn_return_type_names = Box::new(*summary.fn_return_type_names)
+    lo.field_type_table = Box::new(*summary.field_type_table)
     lo.probe_mode = summary.probe_mode
     lo
 }
@@ -343,6 +391,8 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
     lo.module = Box::new(module)
     lo.enum_variants = Box::new(summary.enum_variants)
     lo.struct_layouts = Box::new(summary.struct_layouts)
+    lo.fn_return_type_names = Box::new(summary.fn_return_type_names)
+    lo.field_type_table = Box::new(summary.field_type_table)
     lo.probe_mode = summary.probe_mode
     lo
 }
@@ -429,6 +479,19 @@ fn lowerer_compute_strategy_from_ast_ref(
     }
 }
 
+fn ir_return_type_name_from_ast_ref(return_type: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
+    match *return_type {
+        Some(type_node) => {
+            if (*type_node).kind == TypeExprKind::TypeNamed {
+                ir_path_first_name((*type_node).path)
+            } else {
+                ir_empty_name()
+            }
+        }
+        None => ir_empty_name(),
+    }
+}
+
 fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Panic, Div {
     // bind-then-single-deref: a double-deref-through-Box store `(*(*lo).module).f = v`
     // is miscompiled (writes to a discarded copy; reads back stale) — it left fn_count
@@ -477,6 +540,9 @@ fn lowerer_preseed_fn_signature_mut(
     let strategy = lowerer_compute_strategy_from_ast_ref(return_type, effects)
     (*m).functions[fn_id as usize].compile_strategy = strategy
     (*m).functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
+    var fn_returns = *(*lo).fn_return_type_names
+    fn_returns[fn_id as usize] = ir_return_type_name_from_ast_ref(return_type)
+    (*lo).fn_return_type_names = Box::new(fn_returns)
     if strategy == IR_STRATEGY_INSTRUMENTED {
         (*m).functions[fn_id as usize].param_count = (*m).functions[fn_id as usize].param_count + 1
         if (*m).functions[fn_id as usize].prof_counter_id < 0 {
@@ -544,6 +610,7 @@ fn lowerer_register_struct_fields_mut(
     // and store through a single deref so the layout table persists (yielding compact declaration-
     // order field indices instead of the colliding hash).
     let sl = (*lo).struct_layouts
+    var field_types = *(*lo).field_type_table
     var current = fields
     var field_idx = idx
     while true {
@@ -591,12 +658,24 @@ fn lowerer_register_struct_fields_mut(
                     lo.error_count = lo.error_count + 1
                     lo.had_error = true
                 }
+                if (*list).head.ty.kind == TypeExprKind::TypeNamed {
+                    if field_types.count < 4096 {
+                        let type_idx = field_types.count
+                        field_types.entries[type_idx as usize] = StructFieldTypeEntry {
+                            parent_type: type_name,
+                            field_name: (*list).head.name,
+                            field_type: ir_path_first_name((*list).head.ty.path),
+                        }
+                        field_types.count = type_idx + 1
+                    }
+                }
                 current = &(*list).tail
                 field_idx = field_idx + 1
             }
             _ => break
         }
     }
+    (*lo).field_type_table = Box::new(field_types)
 }
 
 fn lowerer_preseed_impl_method_summaries_mut(
@@ -943,6 +1022,8 @@ fn ir_fast_summary_seed_empty(epistemic: IrEpistemicSection) -> IrFastSummaryOwn
         module: module,
         enum_variants: empty_enum_variant_table(),
         struct_layouts: empty_struct_layout_table(),
+        fn_return_type_names: [ir_empty_name(); 1024],
+        field_type_table: empty_struct_field_type_table(),
     }
 }
 
@@ -1014,6 +1095,29 @@ fn ir_fast_summary_register_struct_fields_owned(
     }
 }
 
+fn ir_fast_summary_register_field_types_owned(
+    table: StructFieldTypeTable,
+    parent_type: Name,
+    fields: Option<Box<FieldDefList>>
+) -> StructFieldTypeTable with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            var table_value = table
+            if (*list).head.ty.kind == TypeExprKind::TypeNamed && table_value.count < 4096 {
+                let idx = table_value.count
+                table_value.entries[idx as usize] = StructFieldTypeEntry {
+                    parent_type: parent_type,
+                    field_name: (*list).head.name,
+                    field_type: ir_path_first_name((*list).head.ty.path),
+                }
+                table_value.count = idx + 1
+            }
+            ir_fast_summary_register_field_types_owned(table_value, parent_type, (*list).tail)
+        }
+        None => table,
+    }
+}
+
 fn ir_fast_summary_preseed_impl_methods_seed_owned(
     seed: IrFastSummaryOwnedSeed,
     type_name: Name,
@@ -1067,6 +1171,7 @@ fn ir_fast_summary_preseed_items_seed_owned(
                 match item.struct_def {
                     Some(sd) => {
                         seed_value.struct_layouts = ir_fast_summary_register_struct_fields_owned(seed_value.struct_layouts, name, (*sd).fields, 0)
+                        seed_value.field_type_table = ir_fast_summary_register_field_types_owned(seed_value.field_type_table, name, (*sd).fields)
                     }
                     _ => {}
                 }
@@ -1099,6 +1204,8 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
     module.epistemic = epistemic
     var enum_variants = empty_enum_variant_table()
     var struct_layouts = empty_struct_layout_table()
+    var fn_return_type_names: [Name; 1024] = [ir_empty_name(); 1024]
+    var field_type_table = empty_struct_field_type_table()
     var current = (*prog).items
     while true {
         match current {
@@ -1130,6 +1237,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 let strategy = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
                                 module.functions[fn_id as usize].compile_strategy = strategy
                                 module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
+                                fn_return_type_names[fn_id as usize] = ir_return_type_name_from_ast_ref(&(*fd).return_type)
                                 if strategy == IR_STRATEGY_INSTRUMENTED {
                                     module.functions[fn_id as usize].param_count = module.functions[fn_id as usize].param_count + 1
                                     if module.functions[fn_id as usize].prof_counter_id < 0 && module.prof_counter_count < 64 {
@@ -1151,6 +1259,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                     match item.struct_def {
                         Some(sd) => {
                             struct_layouts = ir_fast_summary_register_struct_fields_owned(struct_layouts, name, (*sd).fields, 0)
+                            field_type_table = ir_fast_summary_register_field_types_owned(field_type_table, name, (*sd).fields)
                         }
                         _ => {}
                     }
@@ -1194,6 +1303,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         let strategy = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
                                                         module.functions[fn_id as usize].compile_strategy = strategy
                                                         module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
+                                                        fn_return_type_names[fn_id as usize] = ir_return_type_name_from_ast_ref(&(*fd).return_type)
                                                         if strategy == IR_STRATEGY_INSTRUMENTED {
                                                             module.functions[fn_id as usize].param_count = module.functions[fn_id as usize].param_count + 1
                                                             if module.functions[fn_id as usize].prof_counter_id < 0 && module.prof_counter_count < 64 {
@@ -1231,6 +1341,8 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
             module: module,
             enum_variants: enum_variants,
             struct_layouts: struct_layouts,
+            fn_return_type_names: fn_return_type_names,
+            field_type_table: field_type_table,
             probe_mode: false,
         },
         error_count: 0,
@@ -1593,6 +1705,13 @@ fn lower_opt_expr_has_float_source(opt: &Option<Box<Expr>>) -> bool with Mut, Pa
         }
         None => false,
     }
+}
+
+fn lower_type_name_is_f64(n: Name) -> bool {
+    n.len == 3
+        && n.buf[0] == (102 as i8)
+        && n.buf[1] == (54 as i8)
+        && n.buf[2] == (52 as i8)
 }
 
 impl Lowerer {
@@ -2519,6 +2638,118 @@ impl Lowerer {
         ir_empty_name()
     }
 
+    fn lookup_field_type_name(self, parent_type: Name, field_name: Name) -> Name with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < (*self.field_type_table).count {
+            let entry = (*self.field_type_table).entries[i as usize]
+            if ir_name_eq(entry.parent_type, parent_type) && ir_name_eq(entry.field_name, field_name) {
+                return entry.field_type
+            }
+            i = i + 1
+        }
+        ir_empty_name()
+    }
+
+    fn lookup_unique_field_type_name(self, field_name: Name) -> Name with Mut, Panic, Div {
+        var found = ir_empty_name()
+        var found_any = false
+        var ambiguous = false
+        var i: i64 = 0
+        while i < (*self.field_type_table).count {
+            let entry = (*self.field_type_table).entries[i as usize]
+            if ir_name_eq(entry.field_name, field_name) {
+                if !found_any {
+                    found = entry.field_type
+                    found_any = true
+                } else if !ir_name_eq(found, entry.field_type) {
+                    ambiguous = true
+                }
+            }
+            i = i + 1
+        }
+        if found_any && !ambiguous {
+            found
+        } else {
+            ir_empty_name()
+        }
+    }
+
+    fn field_idx_from_known_type_name(self, struct_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, struct_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
+                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+                    }
+                    fi = fi + 1
+                }
+                return -1
+            }
+            si = si + 1
+        }
+        -1
+    }
+
+    fn infer_call_return_type_name_ref(self, e: &Expr) -> Name with Mut, Panic, Div {
+        let callee_opt_ref: &Option<Box<Expr>> = &(*e).left
+        let callee_name = match *callee_opt_ref {
+            Some(c) => self.expr_to_callee_name_ref(&(*c)),
+            None => ir_empty_name(),
+        }
+        let fn_lookup = self.lookup_fn_by_name(callee_name)
+        let lo2 = fn_lookup.0
+        let fn_id = fn_lookup.1
+        if fn_id >= 0 && fn_id < 1024 {
+            let return_names = *lo2.fn_return_type_names
+            return_names[fn_id as usize]
+        } else {
+            ir_empty_name()
+        }
+    }
+
+    fn infer_expr_type_name_ref(self, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprStructLit {
+            ir_path_first_name((*e).path)
+        } else if (*e).kind == ExprKind::ExprIdent {
+            self.lookup_local_type((*e).name)
+        } else if (*e).kind == ExprKind::ExprFieldAccess {
+            let base_ref: &Option<Box<Expr>> = &(*e).left
+            match *base_ref {
+                Some(base_e) => {
+                    let parent_type = self.infer_expr_type_name_ref(&(*base_e))
+                    if parent_type.len > 0 {
+                        self.lookup_field_type_name(parent_type, (*e).name)
+                    } else {
+                        self.lookup_unique_field_type_name((*e).name)
+                    }
+                }
+                None => self.lookup_unique_field_type_name((*e).name),
+            }
+        } else if (*e).kind == ExprKind::ExprCall {
+            self.infer_call_return_type_name_ref(e)
+        } else {
+            ir_empty_name()
+        }
+    }
+
+    fn opt_expr_has_float_source(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        if lower_opt_expr_has_float_source(opt) { return true }
+        match *opt {
+            Some(e) => {
+                if (*e).kind == ExprKind::ExprIdent {
+                    return lower_type_name_is_f64(self.lookup_local_type((*e).name))
+                }
+                if (*e).kind == ExprKind::ExprFieldAccess {
+                    return lower_type_name_is_f64(self.infer_expr_type_name_ref(&(*e)))
+                }
+                false
+            }
+            None => false,
+        }
+    }
+
     fn lookup_local(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
         let stk = *self.locals
         var i = stk.count - 1
@@ -2759,6 +2990,38 @@ impl Lowerer {
         }
     }
 
+    // Resolve a named field without a known base type only when the field name
+    // is unambiguous across all registered struct layouts. This keeps the
+    // native-v2 field-index path fail-closed while still handling parameters
+    // and call-result locals whose struct type is not yet tracked.
+    fn field_idx_from_unique_field_name(self, field_name: Name) -> i64 with Mut, Panic, Div {
+        var found_idx: i64 = -1
+        var found_any = false
+        var ambiguous = false
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            var fi: i64 = 0
+            while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
+                    let idx = (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+                    if !found_any {
+                        found_idx = idx
+                        found_any = true
+                    } else if found_idx != idx {
+                        ambiguous = true
+                    }
+                }
+                fi = fi + 1
+            }
+            si = si + 1
+        }
+        if found_any && !ambiguous {
+            found_idx
+        } else {
+            -1
+        }
+    }
+
     // Phase 3.1: Register enum variant discriminants
     fn register_enum_variants_ref(self, enum_name: Name, variants: &Option<Box<VariantDefList>>, next_disc: i64) -> Lowerer with Mut, Panic, Div, Alloc {
         var lo = self
@@ -2833,6 +3096,7 @@ impl Lowerer {
                 return lo.report_error()
             }
         }
+        var field_types = *lo.field_type_table
         var current = fields
         var field_idx = idx
         while true {
@@ -2846,12 +3110,22 @@ impl Lowerer {
                         }
                         (*lo.struct_layouts).entries[layout_idx as usize].field_count = fc + 1
                     }
+                    if (*list).head.ty.kind == TypeExprKind::TypeNamed && field_types.count < 4096 {
+                        let type_idx = field_types.count
+                        field_types.entries[type_idx as usize] = StructFieldTypeEntry {
+                            parent_type: type_name,
+                            field_name: (*list).head.name,
+                            field_type: ir_path_first_name((*list).head.ty.path),
+                        }
+                        field_types.count = type_idx + 1
+                    }
                     current = &(*list).tail
                     field_idx = field_idx + 1
                 }
                 _ => break
             }
         }
+        lo.field_type_table = Box::new(field_types)
         if lower_ordered_diag_enabled() {
             print("lower_ordered: struct_fields_done type=")
             print(str_from_bytes(type_name.buf, type_name.len))
@@ -3144,6 +3418,9 @@ impl Lowerer {
         func.instr_count = 0
         func.reg_count = 0
         func.label_count = 0
+        var fn_returns = *lo.fn_return_type_names
+        fn_returns[fn_id as usize] = ir_return_type_name_from_ast_ref(return_type)
+        lo.fn_return_type_names = Box::new(fn_returns)
         if strategy == IR_STRATEGY_INSTRUMENTED {
             func.param_count = func.param_count + 1
             if func.prof_counter_id < 0 {
@@ -3530,6 +3807,11 @@ impl Lowerer {
                         locals.names[idx as usize] = (*list).head.name
                         locals.regs[idx as usize] = preg
                         locals.depths[idx as usize] = lo.scope_depth
+                        if (*list).head.ty.kind == TypeExprKind::TypeNamed {
+                            locals.type_names[idx as usize] = ir_path_first_name((*list).head.ty.path)
+                        } else {
+                            locals.type_names[idx as usize] = ir_empty_name()
+                        }
                         locals.count = idx + 1
                     } else {
                         lo = lo.report_error()
@@ -3863,9 +4145,8 @@ impl Lowerer {
     }
 
     fn lower_fn_item_ref(self, name: Name, fd: &FnDef) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        let pair = self.find_or_add_fn_id(name)
-        var lo = pair.0
-        let fn_id = pair.1
+        var lo = self
+        let fn_id = lowerer_find_or_add_fn_id_mut(&! lo, name)
         if fn_id < 0 {
             return lo.report_error()
         }
@@ -4163,6 +4444,20 @@ impl Lowerer {
             Some(init_e) => {
                 if (*init_e).kind == ExprKind::ExprStructLit {
                     type_name = ir_path_first_name((*init_e).path)
+                } else if (*init_e).kind == ExprKind::ExprFloatLit {
+                    type_name = make_name("f64")
+                } else if (*init_e).kind == ExprKind::ExprCast {
+                    if lower_cast_type_is_f64(&(*init_e).cast_type) {
+                        type_name = make_name("f64")
+                    }
+                } else if (*init_e).kind == ExprKind::ExprBinary {
+                    if lo.opt_expr_has_float_source(init_ref) {
+                        type_name = make_name("f64")
+                    }
+                } else if (*init_e).kind == ExprKind::ExprFieldAccess {
+                    type_name = lo.infer_expr_type_name_ref(&(*init_e))
+                } else if (*init_e).kind == ExprKind::ExprCall {
+                    type_name = lo.infer_expr_type_name_ref(&(*init_e))
                 }
             }
             None => {}
@@ -5573,9 +5868,8 @@ impl Lowerer {
                 let lo3_i = lo2_i.emit(ir_call_indirect(dst_i, callee_local_reg, args_i, argc_i))
                 return (lo3_i, dst_i)
             }
-            let pair_fn = self.find_or_add_fn_id(callee_name)
-            let lo1 = pair_fn.0
-            let fn_id = pair_fn.1
+            var lo1 = self
+            let fn_id = lowerer_find_or_add_fn_id_mut(&! lo1, callee_name)
             if lo1.ir_name_is_knowledge_kaxi_publish(callee_name) {
                 // Parser canonicalizes hardware_publish(value, KAXI::op) into this intrinsic with
                 // 2 arguments. Lowering expands only this canonical form to the runtime
@@ -5669,20 +5963,27 @@ impl Lowerer {
                 let base_ref: &Option<Box<Expr>> = &e.left
                 match *base_ref {
                     Some(be) => {
-                        if (*be).kind == ExprKind::ExprIdent {
-                            let tname = lo1.lookup_local_type((*be).name)
-                            if tname.len > 0 {
-                                fidx = lo1.field_idx_from_name(tname, fname)
+                        let tname = lo1.infer_expr_type_name_ref(&(*be))
+                        if tname.len > 0 {
+                            fidx = lo1.field_idx_from_known_type_name(tname, fname)
+                            if fidx >= 0 {
                                 resolved = true
                             }
                         }
-                    }
-                    None => {}
-                }
-                if !resolved {
-                    lo1 = lo1.report_error()
-                }
-            }
+	                    }
+	                    None => {}
+	                }
+	                if !resolved {
+	                    let unique_idx = lo1.field_idx_from_unique_field_name(fname)
+	                    if unique_idx >= 0 {
+	                        fidx = unique_idx
+	                        resolved = true
+	                    }
+	                }
+	                if !resolved {
+	                    lo1 = lo1.report_error()
+	                }
+	            }
             let pair_d = lo1.fresh_reg()
             let lo2 = pair_d.0
             let dst = pair_d.1
@@ -5980,7 +6281,7 @@ impl Lowerer {
                 let lo2 = p.0
                 let dst = p.1
                 (lo2.emit(ir_int_to_float(dst, src_reg)), dst)
-            } else if lower_opt_expr_has_float_source(&e.left) {
+            } else if lo1.opt_expr_has_float_source(&e.left) {
                 let p = lo1.fresh_reg()
                 let lo2 = p.0
                 let dst = p.1
@@ -6379,6 +6680,8 @@ fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic:
         module: lo.module,
         enum_variants: lo.enum_variants,
         struct_layouts: lo.struct_layouts,
+        fn_return_type_names: lo.fn_return_type_names,
+        field_type_table: lo.field_type_table,
         probe_mode: lo.probe_mode,
     }
     IrProgramSummaryBoxResult {
@@ -6423,6 +6726,8 @@ fn lower_program_to_ir_summary_box_into_ref(
     (*out_summary).module = summary.module
     (*out_summary).enum_variants = summary.enum_variants
     (*out_summary).struct_layouts = summary.struct_layouts
+    (*out_summary).fn_return_type_names = summary.fn_return_type_names
+    (*out_summary).field_type_table = summary.field_type_table
     (*out_summary).probe_mode = summary.probe_mode
 }
 
@@ -6456,6 +6761,8 @@ fn lower_program_to_ir_summary_flat_with_epistemic_ref(prog: &Program, epistemic
             module: *lo2.module,
             enum_variants: *lo2.enum_variants,
             struct_layouts: *lo2.struct_layouts,
+            fn_return_type_names: *lo2.fn_return_type_names,
+            field_type_table: *lo2.field_type_table,
             probe_mode: lo2.probe_mode,
         },
         error_count: lo2.error_count,
