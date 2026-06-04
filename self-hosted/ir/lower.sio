@@ -163,9 +163,13 @@ fn lowerer_new() -> Lowerer with Alloc {
 
 fn lowerer_new_with_epistemic(epistemic: IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lowerer_new()
-    var module = *lo.module
-    module.epistemic = epistemic
-    lo.module = Box::new(module)
+    // Set epistemic THROUGH the box pointer instead of `var module = *lo.module;
+    // module.epistemic = ...; lo.module = Box::new(module)`. That deref-copied the
+    // whole IrModule (inline [IrFunction;1400]) by value onto the stack — the
+    // boxed-array copy walks the 1400-table and faults one-past-end (idx=1400) on
+    // the c634b38f bootstrap. The store-through-pointer is the repaired
+    // nested-mut-write codegen and copies nothing large.
+    (*lo.module).epistemic = epistemic
     // Sprint 116: pre-register Knowledge<f64> layout
     lo.struct_layouts = Box::new(ir_register_knowledge_layout(*lo.struct_layouts))
     lo
@@ -2589,20 +2593,23 @@ impl Lowerer {
     }
 
     fn find_or_add_fn_id(self, name: Name) -> (Lowerer, i64) with Mut, Panic, Div {
+        // Explicit single-deref through the box (never auto-deref `self.module.functions`,
+        // which materializes the whole [IrFunction;1400] module and faults idx=1400).
         var i: i64 = 0
-        while i < self.module.fn_count {
-            if ir_name_eq(self.module.functions[i].name, name) {
+        while i < (*self.module).fn_count {
+            if ir_name_eq((*self.module).functions[i as usize].name, name) {
                 return (self, i)
             }
             i = i + 1
         }
 
         var lo = self
-        if lo.module.fn_count < IR_MAX_FUNCS {
+        if (*lo.module).fn_count < IR_MAX_FUNCS {
             let idx = (*lo.module).fn_count
-            var new_fn = ir_empty_function()
-            new_fn.name = name
-            (*lo.module).functions[idx as usize] = new_fn
+            // Slot is already ir_empty_function() (module init); set name in place
+            // instead of `var new_fn = ...; (*lo.module).functions[idx] = new_fn`,
+            // a whole-element store that materializes the [IrFunction;1400] module.
+            (*lo.module).functions[idx as usize].name = name
             (*lo.module).fn_count = idx + 1
             (lo, idx)
         } else {
@@ -3079,17 +3086,26 @@ impl Lowerer {
         }
 
         let strategy = lo.ir_compute_strategy_from_ast_ref(return_type, effects)
-        var func = (*lo.module).functions[fn_id as usize]
-        func.name = name
-        func.compile_strategy = strategy
-        func.param_count = ir_param_list_count_ref(params)
-        func.param_regs = [IR_INVALID_REG; 64]
-        func.instr_count = 0
-        func.reg_count = 0
-        func.label_count = 0
+        // In-place per-field writes through the module box. The old
+        // `var func = (*lo.module).functions[fn_id]; func.X = ...; (*lo.module).functions[fn_id] = func`
+        // copied a whole IrFunction element OUT, which on c634b38f materializes the
+        // entire IrModule (inline [IrFunction;1400]) and faults one-past-end
+        // (idx=1400). Per-field stores through the pointer copy nothing large.
+        let fi = fn_id as usize
+        (*lo.module).functions[fi].name = name
+        (*lo.module).functions[fi].compile_strategy = strategy
+        (*lo.module).functions[fi].param_count = ir_param_list_count_ref(params)
+        var pri: i64 = 0
+        while pri < 64 {
+            (*lo.module).functions[fi].param_regs[pri as usize] = IR_INVALID_REG
+            pri = pri + 1
+        }
+        (*lo.module).functions[fi].instr_count = 0
+        (*lo.module).functions[fi].reg_count = 0
+        (*lo.module).functions[fi].label_count = 0
         if strategy == IR_STRATEGY_INSTRUMENTED {
-            func.param_count = func.param_count + 1
-            if func.prof_counter_id < 0 {
+            (*lo.module).functions[fi].param_count = (*lo.module).functions[fi].param_count + 1
+            if (*lo.module).functions[fi].prof_counter_id < 0 {
                 let ctr_idx = (*lo.module).prof_counter_count
                 if ctr_idx < 64 {
                     (*lo.module).prof_counters[ctr_idx as usize] = IrProfCounterInfo {
@@ -3098,21 +3114,11 @@ impl Lowerer {
                         counter_id: ctr_idx,
                     }
                     (*lo.module).prof_counter_count = ctr_idx + 1
-                    func.prof_counter_id = ctr_idx
+                    (*lo.module).functions[fi].prof_counter_id = ctr_idx
                 } else {
                     return lo.report_error()
                 }
             }
-        }
-        (*lo.module).functions[fn_id as usize] = func
-        if lo.probe_mode && lower_summary_diag_enabled() {
-            print("lower_probe: preseed_fn done name=")
-            print(str_from_bytes(name.buf, name.len))
-            print(" param_count=")
-            print_int(func.param_count)
-            print(" strategy=")
-            print_int(func.compile_strategy)
-            print("\n")
         }
         lo
     }
