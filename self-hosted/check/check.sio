@@ -3716,15 +3716,61 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
 // checked IN PLACE (checker_check_opt_expr_inplace); the shallow setup (param collect / return
 // lower / param bind) stays bridged-by-value (single copies, survivable). Faithful to the
 // by-value logic incl. Sprint-231 capture analysis + Epistemic auto-inject.
-fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    let params_result = (*c).collect_closure_params(e.closure_params)
-    checker_store_from_value(c, params_result.checker)
-    let params = params_result.params
-    let param_count = params_result.count
+// *mut transcriptions of the closure-param/return helpers. The by-value versions
+// (collect_closure_params -> CollectClosureParamsResult{checker}, bind_closure_params
+// -> Checker, lower_opt_closure_return -> (Checker, TypeEntry)) each RETURN the ~164KB
+// Checker by value (tuple-wrapped, in the return case) — the SRET large-struct-return
+// miscompile — so ANY closure literal `|x| ...` SIGSEGV'd at check time. These mutate
+// the Checker in place through the existing inplace primitives and return only the
+// small payload, dodging the copy.
+fn checker_collect_closure_param_list_inplace(c: *mut Checker, pl: ClosureParamList) -> (FnParamList, i64) with Mut, Panic, Div, Alloc, IO {
+    let head_ty = checker_lower_type_expr_mut(c, pl.head.ty)
+    let head_param = FnParamInfo { name: pl.head.name, ty: head_ty }
+    match pl.tail {
+        None => (FnParamList { head: head_param, tail: None }, 1)
+        Some(rest) => {
+            let rest_result = checker_collect_closure_param_list_inplace(c, *rest)
+            (FnParamList { head: head_param, tail: Some(Box::new(rest_result.0)) }, 1 + rest_result.1)
+        }
+    }
+}
 
-    let ret_pair = (*c).lower_opt_closure_return(e.closure_return)
-    checker_store_from_value(c, ret_pair.0)
-    let ret_ty = ret_pair.1
+fn checker_collect_closure_params_inplace(c: *mut Checker, opt: Option<Box<ClosureParamList> >) -> (Option<Box<FnParamList> >, i64) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(pl) => {
+            let r = checker_collect_closure_param_list_inplace(c, *pl)
+            (Some(Box::new(r.0)), r.1)
+        }
+        None => (None, 0)
+    }
+}
+
+fn checker_bind_closure_params_inplace(c: *mut Checker, opt: Option<Box<ClosureParamList> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(pl) => {
+            let p = (*pl).head
+            let param_ty = checker_lower_type_expr_mut(c, p.ty)
+            (*c).env = (*c).env.bind(p.name, param_ty, false)
+            checker_const_int_bind_unknown_inplace(c, p.name)
+            checker_bind_closure_params_inplace(c, (*pl).tail)
+        }
+        None => {}
+    }
+}
+
+fn checker_lower_opt_closure_return_inplace(c: *mut Checker, opt: Option<Box<TypeExpr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(te) => checker_lower_type_expr_mut(c, *te)
+        None => ty_unknown()
+    }
+}
+
+fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let params_pair = checker_collect_closure_params_inplace(c, e.closure_params)
+    let params = params_pair.0
+    let param_count = params_pair.1
+
+    let ret_ty = checker_lower_opt_closure_return_inplace(c, e.closure_return)
 
     let saved_effects = (*c).current_effects
     let saved_effect_count = (*c).current_effect_count
@@ -3735,10 +3781,9 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
 
-    let bound = (*c).bind_closure_params(e.closure_params)
-    checker_store_from_value(c, bound)
+    checker_bind_closure_params_inplace(c, e.closure_params)
 
-    // THE FIX: body checked in place (was the by-value c.check_opt_expr recursion).
+    // Body checked in place (was the by-value c.check_opt_expr recursion).
     let body_ty = checker_check_opt_expr_inplace(c, e.closure_body)
 
     let inferred_ret_ty = if ret_ty.kind == TypeKind::TyUnknown {
