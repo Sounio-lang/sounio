@@ -1,5 +1,16 @@
 # Closure / HOF unlock — structural fn-type compatibility (modular *mut checker)
 
+> ⚠️ **SUPERSEDED (effect model only), 2026-06-04.** The "Effect subtyping" section below
+> describes effect-SUBSUMPTION (a value's effects must be ⊆ the param's) and presents the
+> `eff1`/GPU/Async *rejections* as verified-sound. That model was **wrong** — it only ever
+> "passed" because closure literals crashed before reaching the check. Branch
+> `parser/fn-type-effects-list-e008` replaced it with **effect-POLYMORPHISM**: bare `fn(T)->U`
+> params accept any-effect value by signature, and a fn/closure argument's effects propagate to
+> the HOF **call site** (the enclosing function must declare them). Under the correct model the
+> `eff1`/GPU/Async cases PASS (their caller declares the effect); rejection happens only when the
+> *caller* lacks it. The structural-compatibility mechanism (sig-id → structural) below remains
+> correct; only the effect-comparison part is superseded.
+
 **Date:** 2026-06-04
 **Branch:** `check/closure-hof-triple-e008` (off `check/field-deref-ref-e008` @ `7c18aae54`)
 **Commits (atomic, stacked):**
