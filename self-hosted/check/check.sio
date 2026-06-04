@@ -2139,22 +2139,47 @@ fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a
     print_error_note(code)
 }
 
-// Structural function-type compatibility: two ty_fn types match if they share
-// arity and have pairwise-compatible parameter and return types. Named functions
-// used as first-class values and `fn(T)->U` annotations register SEPARATE FnSig
-// entries (distinct sig_ids), so the sig_id-equality test in types_compatible()
-// spuriously rejects structurally-identical function types. This compares the
-// stored signatures directly.
-fn fn_sigs_structurally_compatible(sig_a: FnSig, sig_b: FnSig) -> bool with Mut, Panic, Div, Alloc {
-    if sig_a.param_count != sig_b.param_count { return false }
+// Effect subsumption: every effect performed by `got` must be permitted by
+// `allowed`. A function value may use FEWER effects than the required fn-type
+// allows (e.g. a pure `add_one` where `fn(i64)->i64 with Mut,Panic,Div` is
+// expected), but never MORE (an effectful `fn(i64)->i64 with IO` where a pure
+// `fn(i64)->i64` is expected must be rejected). This preserves the effect system.
+fn fn_sigs_effects_subset(got: FnSig, allowed: FnSig) -> bool with Mut, Panic, Div {
     var i: i64 = 0
-    while i < sig_a.param_count {
-        let pa = fn_param_list_get(sig_a.params, i)
-        let pb = fn_param_list_get(sig_b.params, i)
-        if !types_compatible(pa.ty, pb.ty) { return false }
+    while i < got.effect_count {
+        let e = got.effects[i as usize]
+        var found = false
+        var j: i64 = 0
+        while j < allowed.effect_count {
+            if allowed.effects[j as usize] == e { found = true }
+            j = j + 1
+        }
+        if !found { return false }
         i = i + 1
     }
-    types_compatible(sig_a.return_type, sig_b.return_type)
+    true
+}
+
+// Structural function-type compatibility: `got` is usable where `expected` is
+// required if they share arity, pairwise-compatible parameter and return types,
+// the same linearity, and `got`'s effects are a subset of `expected`'s. Named
+// functions used as first-class values and `fn(T)->U` annotations register
+// SEPARATE FnSig entries (distinct sig_ids), so the sig_id-equality test in
+// types_compatible() spuriously rejects structurally identical function types;
+// this compares the stored signatures directly. Effects and linearity ARE checked
+// (directionally for effects) so the guard never relaxes an effect/linearity rule.
+fn fn_sigs_structurally_compatible(expected: FnSig, got: FnSig) -> bool with Mut, Panic, Div, Alloc {
+    if expected.param_count != got.param_count { return false }
+    if expected.is_linear_closure != got.is_linear_closure { return false }
+    var i: i64 = 0
+    while i < expected.param_count {
+        let pe = fn_param_list_get(expected.params, i)
+        let pg = fn_param_list_get(got.params, i)
+        if !types_compatible(pe.ty, pg.ty) { return false }
+        i = i + 1
+    }
+    if !types_compatible(expected.return_type, got.return_type) { return false }
+    fn_sigs_effects_subset(got, expected)
 }
 
 fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
