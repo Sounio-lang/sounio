@@ -2072,7 +2072,37 @@ fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a
     print_error_note(code)
 }
 
+// Structural function-type compatibility: two ty_fn types match if they share
+// arity and have pairwise-compatible parameter and return types. Named functions
+// used as first-class values and `fn(T)->U` annotations register SEPARATE FnSig
+// entries (distinct sig_ids), so the sig_id-equality test in types_compatible()
+// spuriously rejects structurally-identical function types. This compares the
+// stored signatures directly.
+fn fn_sigs_structurally_compatible(sig_a: FnSig, sig_b: FnSig) -> bool with Mut, Panic, Div, Alloc {
+    if sig_a.param_count != sig_b.param_count { return false }
+    var i: i64 = 0
+    while i < sig_a.param_count {
+        let pa = fn_param_list_get(sig_a.params, i)
+        let pb = fn_param_list_get(sig_b.params, i)
+        if !types_compatible(pa.ty, pb.ty) { return false }
+        i = i + 1
+    }
+    types_compatible(sig_a.return_type, sig_b.return_type)
+}
+
 fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
+    // Rescue spurious function-type mismatches before reporting: types_compatible()
+    // compares ty_fn by sig_id, which differs for structurally-identical signatures
+    // (e.g. a named fn passed where `fn(T)->U` is expected). Here the FnSig table is
+    // in scope, so compare structurally and suppress the error if the signatures match.
+    if expected.kind == TypeKind::TyFn && got.kind == TypeKind::TyFn {
+        let nsigs = (*c).fn_sigs.count
+        if expected.fn_sig_id >= 0 && expected.fn_sig_id < nsigs && got.fn_sig_id >= 0 && got.fn_sig_id < nsigs {
+            let sig_e = (*c).fn_sigs.get(expected.fn_sig_id)
+            let sig_g = (*c).fn_sigs.get(got.fn_sig_id)
+            if fn_sigs_structurally_compatible(sig_e, sig_g) { return }
+        }
+    }
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
     print("error[E")
