@@ -1357,6 +1357,12 @@ var A64_FRAME_PATCH_COUNT: i64 = 0
 var A64_FRAME_PATCH_OFF: [i64; 65536] = [0; 65536]
 var A64_FRAME_PATCH_RD: [i64; 65536] = [0; 65536]
 var FN_FRAME_SIZE: [i64; 65536] = [0; 65536]
+// High-water mark of NEXT_SLOT within the current function/closure scope. The
+// per-statement temp reclaim (in compile_stmt) lowers NEXT_SLOT to reuse dead
+// aggregate/sret slots; the prologue frame must still be sized to the PEAK ever
+// used, not the final cursor — otherwise reclaimed-then-reused high slots fall
+// outside the under-sized frame and corrupt the stack. FRAME_HWM tracks that peak.
+var FRAME_HWM: i64 = 1
 var LAST_EXPR_IS_CLOSURE: i64 = 0
 // Scratch globals for float scientific exponent (avoids extra locals in compile_primary)
 var FL_SCI_SCRATCH: i64 = 0
@@ -9163,6 +9169,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         // Save outer function state
         let save_vc = VAR_COUNT
         let save_ns2 = NEXT_SLOT
+        let save_hwm2 = FRAME_HWM; FRAME_HWM = NEXT_SLOT
         let save_ld = LOOP_DEPTH
         let save_bc = BREAK_COUNT
         let save_ret_ty = CURRENT_RET_TY
@@ -9349,7 +9356,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         // Patch closure sub rsp / add rsp with actual frame size.
         // Closure's patches start at save_fpc (appended after outer patches).
-        let cl_frame_sz = (NEXT_SLOT * 8 + 15) & 0xFFFFFFF0
+        let cl_peak = if NEXT_SLOT > FRAME_HWM { NEXT_SLOT } else { FRAME_HWM }
+        let cl_frame_sz = (cl_peak * 8 + 15) & 0xFFFFFFF0
         if cl_frame_sz > max_frame_bytes() { tc_stack_frame_too_large(cl_frame_sz) }
         var cl_fpi: i64 = save_fpc
         while cl_fpi < FRAME_PATCH_COUNT { em32_at(FRAME_PATCH_OFF[cl_fpi as usize], cl_frame_sz); cl_fpi = cl_fpi + 1 }
@@ -9359,7 +9367,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let saved_cap_count = CL_CAP_COUNT
         // Restore outer function state
         VAR_COUNT = save_vc
-        NEXT_SLOT = save_ns2
+        NEXT_SLOT = save_ns2; FRAME_HWM = save_hwm2
         LOOP_DEPTH = save_ld
         BREAK_COUNT = save_bc
         CURRENT_RET_TY = save_ret_ty
@@ -18378,6 +18386,45 @@ fn compile_deref_field_field_array_store_x86() with IO, Mut, Panic, Div {
 }
 
 fn compile_stmt() with IO, Mut, Panic, Div {
+    // Per-statement temp-slot reclamation (frame-inflation fix). The NEXT_SLOT bump
+    // allocator never recycles aggregate/sret temporaries, so functions with many
+    // value-discarding statements accumulate multi-MB frames. A statement that binds
+    // no top-level name (not `let`/`let mut`, token 11/12) and is NOT the block tail
+    // (next token is not `}`=9, i.e. more statements follow so its value is discarded)
+    // leaves only dead temporaries above the entry watermark — reclaim them.
+    // Excluded by design (would corrupt live state — the kind of case that regressed
+    // the earlier watermark attempt): `let` bindings (named slot must persist) and the
+    // tail statement (its value is the block result and is read downstream).
+    let reclaim_base = NEXT_SLOT
+    let reclaim_ep0 = EP
+    let reclaim_k0 = TK[EP as usize]
+    compile_stmt_inner()
+    let reclaim_is_let = if reclaim_k0 == 11 { true } else { if reclaim_k0 == 12 { true } else { false } }
+    if reclaim_is_let == false {
+        if TK[EP as usize] != 9 {
+            if NEXT_SLOT > reclaim_base {
+                // Conservative liveness guard: do NOT reclaim if the statement contains an
+                // assignment `=` (token 13). An aggregate (re)assignment like `st = rk4(...)`
+                // lets the LHS var alias the call's SRET temp slot, so freeing temps would
+                // corrupt the still-live var (this regressed epistemic_pbpk_multidrug). Over-
+                // skipping is safe (just less reclaim); under-skipping corrupts. Pure value-
+                // discarding statements carry no `=` and are reclaimed — the inflation source.
+                var reclaim_has_assign = false
+                var reclaim_p = reclaim_ep0
+                while reclaim_p < EP {
+                    if TK[reclaim_p as usize] == 16 { reclaim_has_assign = true }
+                    reclaim_p = reclaim_p + 1
+                }
+                if reclaim_has_assign == false {
+                    if NEXT_SLOT > FRAME_HWM { FRAME_HWM = NEXT_SLOT }
+                    NEXT_SLOT = reclaim_base
+                }
+            }
+        }
+    }
+}
+
+fn compile_stmt_inner() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
     LAST_STMT_HAS_VALUE = 0
 
@@ -24640,7 +24687,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
         // Reset local vars
         VAR_COUNT = 0
-        NEXT_SLOT = 1
+        NEXT_SLOT = 1; FRAME_HWM = 1
         BREAK_COUNT = 0
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
@@ -24953,7 +25000,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             em(0x5d); em(0xc3)
         }
         // Patch sub rsp / add rsp with actual frame size
-        let frame_sz = (NEXT_SLOT * 8 + 15) & 0xFFFFFFF0
+        let frame_peak = if NEXT_SLOT > FRAME_HWM { NEXT_SLOT } else { FRAME_HWM }
+        let frame_sz = (frame_peak * 8 + 15) & 0xFFFFFFF0
         FN_FRAME_SIZE[fn_idx as usize] = frame_sz
         if frame_sz > max_frame_bytes() { tc_stack_frame_too_large(frame_sz) }
         var fpi: i64 = 0
@@ -30933,7 +30981,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         CURRENT_FN = fn_idx
         CURRENT_RET_TY = FN_RET_TY[fn_idx as usize]
         CURRENT_RET_HASH = FN_RET_HASH[fn_idx as usize]
-        VAR_COUNT = 0; NEXT_SLOT = 1; BREAK_COUNT = 0; LAST_STMT_HAS_VALUE = 0
+        VAR_COUNT = 0; NEXT_SLOT = 1; FRAME_HWM = 1; BREAK_COUNT = 0; LAST_STMT_HAS_VALUE = 0
         // β⁴/β⁶/β⁷: reset shadow state for new function scope (a64)
         EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; MEAS_CALL_IDX = 0; MEAS_KNOW_IDX = 0; KM_CACHE_COUNT = 0
         EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1; EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1; EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
@@ -31145,7 +31193,8 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
             em32(0xA8C17BFD)
             em32(0xD65F03C0)
         }
-        let frame_sz = (NEXT_SLOT * 8 + 15) & 0xFFFFFFF0
+        let frame_peak = if NEXT_SLOT > FRAME_HWM { NEXT_SLOT } else { FRAME_HWM }
+        let frame_sz = (frame_peak * 8 + 15) & 0xFFFFFFF0
         FN_FRAME_SIZE[fn_idx as usize] = frame_sz
         if frame_sz > max_frame_bytes() { tc_stack_frame_too_large(frame_sz) }
         var a64_fpi: i64 = a64_frame_patch_start
