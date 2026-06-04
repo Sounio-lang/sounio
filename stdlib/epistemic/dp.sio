@@ -32,11 +32,28 @@
 // (B) const-dimensioned struct FIELD types (e.g. `reward: [Epistemic; MAX_FLAT]`
 //     where MAX_FLAT is a const) are silently accepted by the type checker
 //     but produce a struct that segfaults on field read. Use literal `256`.
+//     Verified 2026-06-04: this is INDEPENDENT of the new N-limb
+//     wide-int backend (commit 41a7cab5f, feat/native-v2-source-bridge);
+//     the postfix-array-index codegen defect in
+//     self-hosted/compiler/lean_single.sio:13415-13437 trips on both
+//     `feat/exact-orc-machinery` and the wide-int build when the struct
+//     is a single-field `[Epistemic; N]` shape. The 5-field MDP shape
+//     (trans_p f64 + reward Epistemic + 3 scalars) dodges it on both.
+//     When that codegen defect is fixed upstream, this workaround can be
+//     retired: replace `trans_p: [f64; 256]` with `trans_p: [f64; MAX_FLAT]`
+//     and `reward: [Epistemic; 256]` with `reward: [Epistemic; MAX_FLAT]`.
 // (C) Reading an UNINITIALISED struct field of `[T; N]` where T is a
 //     non-primitive type segfaults (codegen defect in
 //     self-hosted/compiler/lean_single.sio:13415-13437). Workaround: in
 //     `mdp_new` we PRE-POPULATE every slot of `trans_p` and `reward` so
 //     the value-iteration read path never sees an uninitialised slot.
+//     Verified 2026-06-04: this segfault is also independent of the new
+//     N-limb wide-int backend; both the `feat/exact-orc-machinery` and
+//     `feat/native-v2-source-bridge` (post-41a7cab5f) compilers segfault
+//     on the minimal `struct M { reward: [Epistemic; 1] }` + uninit-read
+//     pattern. The pre-population in `mdp_new` is still the only safe
+//     fix. Retire this loop only when the postfix-index codegen defect
+//     is patched upstream.
 // (D) Struct-typed (PBox, Epistemic) arrays inside structs read through
 //     `&` / `&!` corrupt or crash. The robust MDP struct holds only
 //     scalar fields; the PBox tables are passed as separate array
@@ -578,3 +595,85 @@ pub fn main() -> i32 with IO, Mut, Div, Panic {
     println("LAYER2_OK")
     return 0
 }
+
+// ============================================================================
+// SUGGESTED EXTENSION (user "suggest" 2026-06): Epistemic MCTS / PUCT with DP backups
+// under Knightian (p-box / credal) model.
+// ============================================================================
+//
+// First principles (why this is the natural next after exact DP + MC sampling):
+//   - Pure DP is exact but explodes with |S| or horizon (your stiff ODEs are "continuous"
+//     infinite state; discretization + Knightian p-box on params gives a finite but
+//     ambiguous MDP).
+//   - Pure MCTS/PUCT (as in prior discussion) is asymmetric sampling + UCT/ PUCT selection
+//     + MC rollouts; it approximates the Bellman optimality but only explores a tiny
+//     fraction of the tree.
+//   - Hybrid: use the exact robust DP (this module) for "full backup" whenever a leaf
+//     or fringe node has a small local MDP (or when we have precomputed a p-box model
+//     for a sub-dynamics, e.g. discretized vdp from test_stiff_ode_knightian_mc).
+//     For unknown / large parts, fall back to MC rollout (using propagate::monte_carlo
+//     on the epistemic params) wrapped in p-box outer bounds (knightian) for the value
+//     estimate at the leaf.
+//   - Selection still PUCT, but the "value" of a node can be the robust lower from DP
+//     when available, or Klibanoff CE of the ambiguous leaf value (via the bridge) for
+//     ambiguity-averse search.
+//   - This gives "DP-style backups inside MCTS" exactly as noted in the DP definition query.
+//
+// High-level pseudocode (implement as a separate mcts_dp.sio or inside a planner example):
+//
+// struct EpistemicNode {
+//     s: State (or discretized ODE state),
+//     n: i64, w: f64,  // visit count, total return (Epistemic or p-box summary)
+//     children: map<Action, Node>,
+//     is_leaf: bool,
+// }
+//
+// fn select(node, C_puct) -> Action:
+//     for a in actions:
+//         if unvisited: return a
+//         uct = Q(a) + C_puct * p(a) * sqrt(N) / (1 + n(a))   // PUCT
+//     return argmax uct
+//
+// fn expand(node):
+//     if small_local_mdp(node.s):   // e.g. |reachable S'| < 16
+//         (V_l, V_u) = robust_value_iteration( build_local_knightian_mdp(node.s, pbox_model) )
+//         node.value = (V_l, V_u)   // exact robust backup
+//         return
+//     // else MC rollout under Knightian model
+//     samples = monte_carlo( epistemic_params_of(node.s), rollout_f, 1024 )
+//     leaf_box = pbox_from_samples_or_credal( samples )   // or klib CE
+//     node.value = leaf_box
+//
+// fn backup(path, leaf_value):
+//     for node in reversed(path):
+//         node.n += 1
+//         node.w = combine(node.w, leaf_value)   // Epistemic add or pbox join
+//         if node has exact DP value: use it preferentially for Q
+//
+// fn search(root, budget, model_pbox):
+//     for _ in budget:
+//         leaf = select + expand (using DP when possible)
+//         leaf_v = simulate or DP
+//         backup(path, leaf_v)
+//     return argmax Q(root)   // or Klib CE of the root action values for final choice
+//
+// Integration points (already exist):
+// - knightian::PBox / walley::CredalSet for the "model" (transition/reward ambiguity)
+// - propagate::monte_carlo for the rollout distribution
+// - klibanoff::klibanoff_compose_with_active + active::expected_free_energy for the
+//   leaf "value" when we want ambiguity aversion in the search (exactly as in the
+//   stiff_ode_knightian_mc test)
+// - dp::robust_* for the exact sub-MDP backups
+//
+// This would let a "planner" for the stiff ODE (discretized) use exact robust DP on
+// the reachable discrete states under the p-box on mu/CL/etc., while using MC + p-box
+// outer for the unknown parts — the best of both worlds the user described.
+//
+// Suggested first file: examples/planning/epistemic_mcts_dp.sio (small grid or discretized vdp)
+// or stdlib/epistemic/mcts.sio (library version using the same fixed-array style as dp.sio).
+//
+// When ready, the exact command could be:
+//   write examples/planning/epistemic_mcts_dp.sio with the hybrid skeleton + one test case
+//   that re-uses the vdp from test_stiff_ode_knightian_mc and asserts that the hybrid
+//   policy has lower robust regret than pure MC or pure one-step robust VI.
+
