@@ -257,13 +257,16 @@ avoid file + build-lock collisions.
 - **This lane (modular checker → parser):** closure/HOF unlock LANDED, **PR #235**
   (`check/closure-hof-triple-e008`, sound +7, modular checker only). **Next lever:
   async `spawn`/`await` parser cluster** (11 tests: async_basic/channels/join/sleep/
-  spawn/...) — INVESTIGATED, DEFERRED: async is a parser+checker FEATURE (needs
-  check.sio semantics for spawn/await builtins = i128 territory; parser-only = +0,
-  the const/kernel/extern double-block trap). **Pivoted to PARSE-TO-PASS items**:
-  parser productions that flip FAIL→PASS with parser-only changes (tuple-let
-  `let (a,b)=`, struct/while-for patterns, turbofish, match patterns) — checker
-  already handles the resulting AST. `self-hosted/parser/*` only, zero check.sio
-  overlap with i128.
+  spawn/...) — DEFERRED (parser+checker FEATURE, needs check.sio spawn/await
+  semantics = i128 territory). **LEVER 2 DONE + PUSHED** (`parser/fn-type-effects-list-e008`):
+  parser effect-list fix + closure-LITERAL SRET dodge + EFFECT-POLYMORPHIC HOF model →
+  SOUND +14 (269→283, 0 regr). ⚠️ **COORDINATION: this branch SUPERSEDES PR #235's
+  effect-SUBSUMPTION model** (fn_sigs_effects_subset) with effect-polymorphism
+  (closure-arg effects propagate to the call site). It edits check.sio (closure
+  checker, call-arg path, a new Checker field `closure_inference_depth` declared LAST).
+  If i128 is mid-edit on check.sio, expect a merge touch-point in the closure/call-arg
+  regions (different from i128's int-width sites). PR #235's subsumption helpers are now
+  dead — fold/revise when landing.
 - **i128 / arbitrary-width-int lane** (`feat/i128-modular`): owns `check/types.sio`,
   `check/compat.sio`, `check/check.sio` (int-width additions) + native codegen
   (`native/codegen_x86_linux.sio`, `native/encode.sio`, `ir/ir.sio`). I avoid these.
