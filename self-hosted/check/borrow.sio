@@ -167,6 +167,44 @@ impl BorrowEnv {
         (env, 0)
     }
 
+    // Branch-linear handling via the small (128-byte) consumed-flag vector — NOT a
+    // whole-BorrowEnv copy (the ~19KB struct is large enough to hit the bootstrap
+    // compiler's large-struct-by-value miscompile, which silently no-ops the save/restore).
+    // snapshot_consumed captures consumed flags; restore_consumed resets them (so the else
+    // arm starts from the pre-branch state); or_consumed merges (consumed in EITHER arm →
+    // consumed, conservative so no use-after-consume slips through).
+    fn snapshot_consumed(self) -> [bool; 128] with Mut, Panic, Div {
+        var flags: [bool; 128] = [false; 128]
+        var i: i64 = 0
+        while i < self.count {
+            flags[i as usize] = self.entries[i as usize].consumed
+            i = i + 1
+        }
+        flags
+    }
+
+    fn restore_consumed(self, flags: [bool; 128]) -> BorrowEnv with Mut, Panic, Div {
+        var env = self
+        var i: i64 = 0
+        while i < env.count {
+            env.entries[i as usize].consumed = flags[i as usize]
+            i = i + 1
+        }
+        env
+    }
+
+    fn or_consumed(self, flags: [bool; 128]) -> BorrowEnv with Mut, Panic, Div {
+        var env = self
+        var i: i64 = 0
+        while i < env.count {
+            if flags[i as usize] {
+                env.entries[i as usize].consumed = true
+            }
+            i = i + 1
+        }
+        env
+    }
+
     // Check that all linear variables in the current scope have been consumed
     // Returns (env, unconsumed_count)
     fn check_linear_consumed(self) -> (BorrowEnv, i64) with Mut, Panic, Div {

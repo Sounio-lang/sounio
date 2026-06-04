@@ -3012,11 +3012,19 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
     if cond_guard.0 != 0 {
         (*c).refine_cond_env = refine_static_env_push((*c).refine_cond_env, cond_guard.1)
     }
+    // Linear branch handling: the then and else arms are mutually exclusive, so each must
+    // be checked from the SAME pre-branch borrow state — otherwise a linear value consumed
+    // in the then arm is wrongly seen as consumed in the else arm (spurious E039). After
+    // both arms, merge: a value is consumed-after-the-if if consumed in EITHER arm.
+    let pre_consumed = (*c).borrows.snapshot_consumed()
     let then_ty = checker_check_opt_block_inplace(c, e.block)
     (*c).refine_cond_env = saved_cond_env
     match e.else_expr {
         Some(else_e) => {
+            let then_consumed = (*c).borrows.snapshot_consumed()
+            (*c).borrows = (*c).borrows.restore_consumed(pre_consumed)
             let else_ty = checker_check_expr_inplace(c, *else_e)
+            (*c).borrows = (*c).borrows.or_consumed(then_consumed)
             (*c).refine_cond_env = saved_cond_env
             if !types_compatible(then_ty, else_ty) {
                 checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
