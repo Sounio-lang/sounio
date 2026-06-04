@@ -5727,6 +5727,77 @@ impl Lowerer {
             lo = lo.emit(ir_jump(l_top))
             lo = lo.emit(ir_label(l_end))
             lo.emit_unit()
+        } else if e.kind == ExprKind::ExprForIn {
+            // for <name> in <start>..<end> { body }
+            // Desugared to a counter loop (the IR is a mutable-register machine, so
+            // ir_copy/ir_binop update the bound register in place):
+            //   i = start
+            // top: if !(i < end) goto end      (i <= end for ..= inclusive)
+            //   body                            (continue -> cont, break -> end)
+            // cont: i = i + 1; goto top
+            // end:
+            // Only integer ranges are lowered here; any other iterable reports an
+            // error rather than silently miscompiling (matches the by-value path's
+            // report_error convention; previously ExprForIn had no branch at all and
+            // fell through, producing "IR lowering failed for module 0").
+            let for_iter_opt: Option<Box<Expr>> = e.left
+            match for_iter_opt {
+                Some(iter_box) => {
+                    if (*iter_box).kind == ExprKind::ExprRange {
+                        var lo = self.enter_scope()
+                        let pair_i = lo.fresh_reg()
+                        lo = pair_i.0
+                        let i_reg = pair_i.1
+                        lo = lo.bind_local(e.name, i_reg, true)
+                        let pair_start = lo.lower_opt_expr_ref(&(*iter_box).left)
+                        lo = pair_start.0
+                        let start_reg = pair_start.1
+                        lo = lo.emit(ir_copy(i_reg, start_reg))
+                        let pair_end = lo.lower_opt_expr_ref(&(*iter_box).right)
+                        lo = pair_end.0
+                        let end_reg = pair_end.1
+                        let pair_top = lo.fresh_label()
+                        lo = pair_top.0
+                        let l_top = pair_top.1
+                        let pair_cont = lo.fresh_label()
+                        lo = pair_cont.0
+                        let l_cont = pair_cont.1
+                        let pair_end_lbl = lo.fresh_label()
+                        lo = pair_end_lbl.0
+                        let l_end = pair_end_lbl.1
+                        let cmp_op = if (*iter_box).bin_op == BinaryOp::OpRangeInclusive { BinaryOp::OpLe } else { BinaryOp::OpLt }
+                        lo = lo.emit(ir_label(l_top))
+                        let pair_cmp = lo.fresh_reg()
+                        lo = pair_cmp.0
+                        let cmp_reg = pair_cmp.1
+                        lo = lo.emit(ir_binop(cmp_reg, i_reg, cmp_op, end_reg))
+                        lo = lo.emit(ir_branch_false(cmp_reg, l_end))
+                        lo = lo.push_loop_labels(l_cont, l_end)
+                        let for_body_opt: Option<Box<Block>> = e.block
+                        match for_body_opt {
+                            Some(blk) => {
+                                let pair_body = lo.lower_block_ref(&(*blk))
+                                lo = pair_body.0
+                            }
+                            None => {}
+                        }
+                        lo = lo.pop_loop_labels()
+                        lo = lo.emit(ir_label(l_cont))
+                        let pair_one = lo.fresh_reg()
+                        lo = pair_one.0
+                        let one_reg = pair_one.1
+                        lo = lo.emit(ir_load_imm(one_reg, 1))
+                        lo = lo.emit(ir_binop(i_reg, i_reg, BinaryOp::OpAdd, one_reg))
+                        lo = lo.emit(ir_jump(l_top))
+                        lo = lo.emit(ir_label(l_end))
+                        lo = lo.exit_scope()
+                        lo.emit_unit()
+                    } else {
+                        self.report_error().emit_unit()
+                    }
+                }
+                None => self.report_error().emit_unit(),
+            }
         } else if e.kind == ExprKind::ExprBlock {
             let block_opt: Option<Box<Block>> = e.block
             match block_opt {
