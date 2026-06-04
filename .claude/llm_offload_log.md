@@ -1,5 +1,48 @@
 # LLM Offload Log
 
+## 2026-05-30: Multiquadratic faithfulness — irrationality core (no_rat_sqrt) + edge-level radical support
+
+- **Empirical (no offload needed)**: `_radical_support_probe.lean` edge pass over G₅₂₉ (2670 edges):
+  √3→2620, √11→2383, √5→590, √7→**0** edges; per prime 3→2634, 5→594, 11→2598, 7→0; only 2 of
+  2670 edges fully rational. Confirms minimal witness field at edge level too: **ℚ(√3,√5,√11)** (deg 8);
+  √7 absent in both vertices and edges. Sharpened theorem: χ(F²)≥5 for every ordered field F⊇{√3,√5,√11}.
+- **Claim (math)**: `formal/lean4/SounioMultiquadIndep.lean` — irrationality core of the ℚ-linear-
+  independence programme, Mathlib-free over `RealCauchyField`. `no_rat_sqrt m (∀k,k·k≠m) : ¬∃q:ℚ, q²=m`
+  via the pure-coprimality route (cross-multiply `divInt` → integer identity `a²=m·b²` → natAbs →
+  `Nat.Coprime.pow` + `dvd_gcd` ⇒ `b²∣1` ⇒ b=1 ⇒ a²=m, contra; NO p-adic valuation / unique factorisation).
+  `not_sq_radicand` (finite-bound `decide`/`omega`) for the 7 squarefree radicands {3,5,11,15,33,55,165};
+  `ofRat_inj` (nonzero constant ↛ 0); `sqrt_radicand_irrational` (√m ≠ any rational class, squaring the
+  RealEq via `mul_cong` + `newton_sq_tendsto`). No `sorry`/`sorryAx`; `no_rat_sqrt` axioms =
+  {propext, Classical.choice, Quot.sound}. `lake build SounioMultiquadIndep` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1. **All 7 [OK]**:
+  no_rat_sqrt "standard coprimality; each step (cross-multiply, natAbs, Nat.Coprime.pow, dvd_gcd)
+  justified"; not_sq_radicand "finite bound + decidable enumeration correct, omega closes tail";
+  ofRat_inj / eq_zero_of_tendsToZero_const "ε=c/2 contradiction"; sqrt_radicand_irrational "telescoping +
+  eq_zero_of_tendsToZero_const closes". "No leaps or missing side-conditions detected."
+
+## 2026-05-30: RootedField refactor + multiplicative structure of ℝ (mul_cauchy, mul_cong) + inverse crux (bounded_away)
+
+- **Claim**: Two pieces. (1) **Phase-1 interface refactor** — `SounioSqrtField.lean` now exposes
+  `RootedField` (ordered field + four prime square-root generators `root : Fin 4 → F` with
+  `root_nonneg`, `root_sq`) **with no total `sqrt`**; the de Grey transfer
+  (`SounioDeGreyChi5TransferWf.lean`) is re-targeted at it as `rootedField_chi_ge_5`, and the classic
+  total-`sqrt` `SqrtField` is kept as a thin bundle with `sqrtField_chi_ge_5` recovered via
+  `toRootedField`. `SounioMultiquadHom` re-parameterised over `RootedField` (no `sqrt` was ever used
+  on the critical path — only `s`/`s_sq` at the four primes). (2) **Phase-2a/2b-crux analytics** in
+  `SounioSqrtFieldReal.lean`: a Mathlib-free `ratAbs` toolkit (`ratAbs_mul`, `ratAbs_add_le`,
+  two-sided lemmas), `cauchy_bounded` (Cauchy ⇒ eventually bounded), `mul_cauchy` (product of Cauchy
+  is Cauchy) and `mul_cong` (`·` respects `RealEq`) via the `K=Bf+Bg+1`, `δ=ε·K⁻¹` scaling
+  (`rat_prod_bound`), discharging `RealMulCongObligation` and `MulPreservesCauchy`; plus the inverse
+  CRUX `bounded_away` (`¬ RealEq x 0 ⇒ ∃ δ>0 N, ∀ n≥N, δ ≤ |xₙ|`) via reverse triangle + Cauchy
+  modulus. No `sorry`/`sorryAx`; `lake build SounioDeGreyChi5TransferWf SounioSqrtFieldReal` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 on the
+  analytic core. **All [OK]**: realEq_*, add_cauchy/mul_cauchy ("standard ε/2 + ratAbs toolkit;
+  cauchy_bounded supplies the K=Bf+Bg+1 guard"), realOpsCong_add/mul_cong ("bounded by the same
+  ε/2 + rat_prod_bound argument"), obligations directly discharged "no leap". `[TIGHTENABLE]` only on
+  the still-⏳ ledger entries (inverse completion, order axioms, completeness, sqrt) — acknowledged as
+  the remaining checklist, no error found. "All downstream claims rest only on the proved lemmas; no
+  compounding error."
+
 ## 2026-05-30: RealEq is an equivalence — realEq_trans (ε/2 triangle) + realSetoid; ℝ := Quotient
 
 - **Claim**: `formal/lean4/SounioSqrtFieldReal.lean` discharges `RealEqTransObligation` with
@@ -285,6 +328,9 @@
 
 | date | task | provider | Target | outcome | note |
 |---|---|---|---|---|---|
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadIndep.lean (tower top √11∉ℚ(√3,√5)) | PASS | final non-containment step. indep4 ({1,√3,√5,√15} ℚ-lin-indep via factoring through ℚ(√5) + explicit Q5_inv subfield inverse + not_R3_in_Q5), E_mul5/E_sq4 (ℚ(√5) product + 16-term norm), Qsqrt5_no_zero_div, sqrt11_not_in_Q_sqrt3_sqrt5 (4 coeff eqs → no_rat_sqrt {11,55,33,165}). Grok: "math correct throughout, no leaps or gaps." axioms {propext,Classical.choice,Quot.sound}(+native_decide); no sorryAx |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadIndep.lean (base case √5∉ℚ(√3)) | PASS | tower base case. indep_1_R3 ({1,√3} ℚ-lin-indep via R3_irrational), E_sq (4-corner ring expansion in quotient), sqrt5_not_in_Q_sqrt3 (a=0→no_rat_sqrt 15, b=0→no_rat_sqrt 5). Grok: "statements tight, hypotheses exactly required, sorry/axiom count zero, every step justified — no correction." axioms {propext,Classical.choice,Quot.sound}(+native_decide); no sorryAx |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadIndep.lean | PASS | irrationality core of ℚ-linear-independence programme. All 7 lemmas [OK]: no_rat_sqrt (pure coprimality, no p-adic/UFD), not_sq_radicand, ofRat_inj, sqrt_radicand_irrational. "No leaps or missing side-conditions." no_rat_sqrt axioms = {propext, Classical.choice, Quot.sound}; no sorryAx |
 | 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSatColouringBridge.lean | PASS | "no gaps, no overclaims, no axioms beyond Lean core" — the substantive math (encoding soundness: colourCNF.Unsat → ¬ colourable) |
 | 2026-05-30 | math-review | xai (covered by bridge review) | SounioSatK76.lean | PASS (no new math claim) | autogenerated; k76_unsat is the verified LRAT checker (check_sound+native_decide) on souc_sat's cert, k76_not_colourable applies the reviewed bridge; clause-order identity to colourCNF verified by diff |
 | 2026-05-30 | math-review | xai (covered by bridge review) | SounioSatCheckSpike.lean | PASS (no new math claim) | trivial 1-variable (x)∧(¬x) mechanism demo; relies only on check_sound |
@@ -812,3 +858,9 @@ more edge constraints → fewer valid colorings → CDCL converges faster. This 
 | 2026-05-29 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioDeGreyChi5.lean | PASS | V-track composition (reduction) lemma for χ(ℝ²)≥5: `(G unit-distance-embedded) ∧ (G not k-colourable) ⟹ no proper k-colouring of the unit-relation plane` (χ_plane > k). `reduction` = pullback κ∘emb; `not_colourable_implies_plane_chromatic_gt` = contrapositive; `degrey_plane_needs_5_colours` = k=4 instantiation. Fully proved in core Lean (NO Mathlib, NO native_decide); `lean` exits 0; `#print axioms degrey_plane_needs_5_colours` = "does not depend on any axioms" (zero sorryAx). The two legs are explicit externally-discharged hypotheses (geometry = g529_all_edges_unit_distance Lean native_decide; SAT = G₅₂₉ not-4-colourable, cake_lpr-verified) — standard honest SAT+ITP shape since 4^529 cannot be brute-forced in Lean. Grok 6/6 checks OK: "NO ERRORS; reduction leg is logically sound." |
 | 2026-05-29 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioDeGreyChi5Concrete.lean | PASS-with-scope-flag | V-track: geometry leg DISCHARGED. Instantiates the SounioDeGreyChi5 reduction on concrete G₅₂₉ over the exact symbolic field-plane QF×QF (ℚ(√3,√5,√7,√11) 16-tuple model). Defines intrinsic unit relation `unitFP` (algebraic dist²=1); `unitFP_emb` matches `edgeUnit` definitionally; `geom_all_edges_unitFP` PROVES every edge is unitFP via the same native_decide cert; `g529_field_plane_needs_5_colours (h_sat : ¬VColourable) : ¬Nonempty (PlaneColouring (QF×QF) unitFP 4)`. `lake build` OK; `#print axioms` on both = [propext, native_decide.ax] — NO sorryAx. Grok 4/4 checks OK: "NO MATHEMATICAL ERRORS IN THE LEAN STATEMENTS." Grok [OVERREACH] flag (addressed, not dismissed): the machine-checked statement is the FIELD-PLANE one (QF×QF, unitFP), NOT Euclidean χ(ℝ²)≥5 — the isometric QF↪ℝ embedding (√3·√5=√15 etc., eval ring-hom) needs real analysis (Mathlib's ℝ/Real.sqrt/ring), absent from this core-Lean project (packages:[], no `ring`). The theorems do not overclaim; docs/README/roadmap framed as "field-plane χ≥5; QF↪ℝ staged". Raw: /tmp/llm-offload-9mtiHa/. |
 | 2026-05-29 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioMultiquadRing.lean | PASS | Mathlib-free ring-law groundwork for the QF multiquadratic kernel (no `ring` tactic, no BigOperators). PROVED (no sorryAx): qadd_comm, qadd_zero_left/right (propext+Quot.sound only), qmul_comm (adds Classical.choice + 16 finite native_decide XOR-permutation certs via perm_range_xor/qmulTerm_symm/foldl_add_pointwise). OPEN, stated as named Props NOT assumed/axiomatised: QmulAssocObligation, Qmul{Left,Right}DistribObligation, QaddNegObligation, QmulOneObligation. Grok: "NO MATHEMATICAL ERRORS OR OVERREACHES" — closed theorems tight, native_decide justified for the finite check, open obligations correctly identified as open. Honest wall (docs/research/multiquad-faithfulness-note.md): ℚ-linear independence + QF↪ℝ are not statable in core Lean without constructing ℝ (the standard textbook part Mathlib would mechanise); symbolic field-plane χ≥5 remains the self-hosted summit. Raw: /tmp/llm-offload-zOTxlX/. |
+| 2026-05-30 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioNewtonSqrtImpl.lean | PASS | Rational Newton √p sequences for p∈{3,5,7,11} (Mathlib-free). Grok 7/7 [OK]: err_step quadratic-contraction identity, mono_eq_gen, newton_inv invariant (1≤xₙ, p≤xₙ²), error_contract (factor-¼, no pre-contraction prefix needed via eₙ·xₙ⁻²≤1), decay/decay_modulus geometric majorant, per_step/telescope (2/3 coefficient), newton_sq_tendsto+newton_cauchy. "All supporting Rat lemmas elementary; no leaps or hidden ring tactics." No sorryAx. Raw: /tmp/llm-offload-eboieT/. |
+| 2026-05-30 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioRealInverseImpl.lean | PASS | Multiplicative inverse of Cauchy-rep reals (invSeq + inv_cauchy + mul_inv_tendsto + inv_cong). Grok all [OK]: inv_sub_inv standard identity, inv_antitone via non-negative factors, ratAbs_inv sign-split, neg_inv via uniqueness, the ε/δ² Cauchy estimate "tight; all bounds eventually active after max M Nba", mul_inv_tendsto (eventually exactly 1). "All four main theorems correctly stated and proved with the given hypotheses; no leaps, no missing side-conditions, no sorry." Raw: /tmp/llm-offload-zMG2Da/. |
+| 2026-05-30 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioRealOrderAxiomsImpl.lean | PASS | Canonical ε-eventual order leR + the 7 ordered-field order axioms at representative level. Grok all [OK] incl. the two flagged-fragile: leR_total (classical negation extraction + Cauchy moduli + rat_squeeze ⇒ eventual bₙ≤aₙ) and leR_mul_nonneg (cauchy_bounded + shrinking δ=ε/(Ba+Bb+1+ε) + (x+δ)(y+δ)≥0 expansion, error≤ε). "All listed theorems discharge the representative-level ordered-field axioms; no leaps or missing hypotheses." No sorryAx. Raw: /tmp/llm-offload-sdw5D2/. |
+| 2026-05-30 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioDeGreyChi5Real.lean | PASS | UNCONDITIONAL χ(ℝ²)≥5: fires the discharged SAT leg DeGrey529.Closed.not_VColourable into the conditional chi_R2_ge_5. Grok [OK]: "Direct modus-ponens of the already-proved conditional to the discharged not_VColourable; statement is exactly the conjunction of the two legs." #print axioms = [propext, Classical.choice, Quot.sound] + native_decide reduction axioms (SAT g529_*, geometry geom_all_edges_unitFP/allX_ne/allY_ne, multiquad perm_range_xor, analytic ℝ toolkit); zero sorryAx. Audit: docs/audit/CHI5_REAL_AXIOM_AUDIT_2026-05-30.md. Novelty (NOT first formalisation — vasnesterov/HadwigerNelson exists on Mathlib): docs/research/chi5-mathlib-free-novelty-2026-05-30.md. Raw: /tmp/llm-offload-KELTOz/. |
+| 2026-05-30 | math-review | xai/grok-4-1-fast-reasoning | formal/lean4/SounioRootedFieldReal.lean | PASS | Phase 2d+4 assembly: ℝ := Quotient realSetoid into a Mathlib-free RootedField (ordered field + √3,√5,√7,√11, NO total sqrt, NO completeness), then DeGrey529.TransferWf.rootedField_chi_ge_5 fired ⇒ χ(ℝ²)≥5 (conditional on ¬VColourable). Grok all [OK]: every ring/order/inverse/root axiom descends correctly via the congruence lemmas, each reducing to a pointwise Rat identity or already-verified bounded_away/inv_cong/newton_* facts; rootedFieldReal satisfies the interface; "chi_R2_ge_5 statement is tight — the only external hypothesis is the imported SAT negation ¬VColourable; conclusion precisely the non-existence of a 4-colouring." One [TIGHTENABLE] cosmetic note (realEq_of_seq_eq, no downstream effect). "NO MATHEMATICAL ERRORS OR LEAPS THAT AFFECT THE FINAL CLAIM." #print axioms = [propext, Classical.choice, Quot.sound] + native_decide reduction axioms only; zero sorryAx. Raw: /tmp/llm-offload-iHc4Yu/. |
+| 2026-06-04 | fan-out | n/a (merge inheritance) | pbpk_claim_truth_table.md | WAIVED | Flagged by pre-commit offload gate during the origin/main → feat/i128-modular merge (PR #236). The file is taken VERBATIM from origin/main (git diff origin/main -- docs/dissertation/pbpk_claim_truth_table.md is empty in the merge result); this branch authors NO new content in it. It was already reviewed/gated when committed on main (the Knowledge-ε / Contribution-2 lineage, commits 6aad43464/7d5ff6153/etc.). No new analysis to fan-out; waived as merge inheritance. |

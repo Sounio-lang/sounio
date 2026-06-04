@@ -21,11 +21,11 @@ eventual fraction homomorphism `φ : QF → F`.
 
 namespace SounioMultiquadHom
 
-open SounioSqrt SounioSqrt.SqrtField MultiquadRing
+open SounioSqrt SounioSqrt.RootedField MultiquadRing
 
-variable {R : SqrtField}
+variable {R : RootedField}
 
-/-! ## Local re-derivations of private `SqrtField` helpers -/
+/-! ## Local re-derivations of private `RootedField` helpers -/
 
 private theorem add_zero_left (a : R.F) : R.add R.zero a = a := by rw [R.add_comm, R.add_zero]
 
@@ -155,11 +155,11 @@ theorem foldl_add_int {ι} (l : List ι) (g : ι → Int) (a : Int) :
 /-! ## bcoeff bridge: the two `bcoeff` definitions agree -/
 
 private theorem bcoeff_int_eq : ∀ m ∈ List.range 16,
-    MultiquadRing.bcoeff m = Int.ofNat (SounioSqrt.SqrtField.bcoeff m) := by decide
+    MultiquadRing.bcoeff m = Int.ofNat (SounioSqrt.RootedField.bcoeff m) := by decide
 
 theorem ofNatProd_eq (m : Nat) (hm : m < 16) :
     (ofNatProd m : R.F) = ofInt (MultiquadRing.bcoeff m) := by
-  rw [show MultiquadRing.bcoeff m = Int.ofNat (SounioSqrt.SqrtField.bcoeff m)
+  rw [show MultiquadRing.bcoeff m = Int.ofNat (SounioSqrt.RootedField.bcoeff m)
         from bcoeff_int_eq m (List.mem_range.mpr hm)]
   rfl
 

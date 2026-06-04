@@ -82,6 +82,7 @@ use hlir::lower::*
 use gpu::hlir_to_gpu::*
 use gpu::epistemic_spirv::*
 use gpu::ptx::*
+use gpu::kaxi_to_ptx::*
 use gpu::metal::*
 use gpu::cuda_tile::*
 
@@ -2409,6 +2410,170 @@ fn run_native_v2_gc_retry_smoke() with IO, Mut, Panic, Div, Alloc {
         panic("native-v2 GC retry smoke failed")
     }
     println("native_v2_gc_retry_smoke: ok")
+}
+
+// E2E codegen-correctness gate: emit a full executable for `main() { return N }`
+// via the to-file path (which builds the entry trampoline). Running the emitted ELF
+// must exit with code N — proving end-to-end codegen correctness (semantics, not
+// just structural validity). The compiler only EMITS; the external gate script
+// (scripts/ci/native_v2_e2e_exit_code_gate.sh) runs the ELF and checks the exit code.
+// This fn writes the ELF and prints a machine-parseable status line for the gate.
+fn run_native_v2_emit_exit_code(ret_value: i64, out_path: string) with IO, Mut, Panic, Div, Alloc {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_scalar_module(ret_value)
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted ret_value=")
+    print_int(ret_value)
+    print(" path=")
+    print(out_path)
+    print("\n")
+}
+
+fn run_native_v2_emit13() with IO, Mut, Panic, Div, Alloc {
+    run_native_v2_emit_exit_code(13, "artifacts/omega/emit13.elf")
+}
+
+// Parameterized scalar witness: --native-v2-emit-scalar <N> <out_path>.
+// Reuses the scalar IR builder; the gate runs the ELF and asserts exit == N (mod 256).
+// SCOPE: hardens the IR->ELF exit-code proof; source-level/front-half stays blocked on G1.
+fn run_native_v2_emit_scalar(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 2 >= args.len {
+        panic("native-v2-emit-scalar: usage --native-v2-emit-scalar <N> <out_path>")
+    }
+    let parsed = parse_i64_decimal(arg_list_get(args, flag_index + 1))
+    let out_path = arg_list_get(args, flag_index + 2)
+    run_native_v2_emit_exit_code(parsed.1, out_path)
+}
+
+// Call witness: --native-v2-emit-call <out_path>. main() -> helper(3) = 3*2 = 6.
+// Proves params + a single call + arithmetic flow IR->ELF->exit.
+fn run_native_v2_emit_call(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("native-v2-emit-call: usage --native-v2-emit-call <out_path>")
+    }
+    let out_path = arg_list_get(args, flag_index + 1)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_call_module()
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=call rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=call path=")
+    print(out_path)
+    print("\n")
+}
+
+// Multi-call witness: --native-v2-emit-multicall <out_path>.
+// main() -> { x = add(10,32)=42; y = mul(x,2)=84; return y }. Chained calls + 2-param fns.
+fn run_native_v2_emit_multicall(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("native-v2-emit-multicall: usage --native-v2-emit-multicall <out_path>")
+    }
+    let out_path = arg_list_get(args, flag_index + 1)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_multi_call_module()
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=multicall rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=multicall path=")
+    print(out_path)
+    print("\n")
+}
+
+// Control witness: --native-v2-emit-control <out_path>. Conditional branch + label -> exit 1.
+// Branches/labels are where codegen bugs hide; highest-value shape to prove IR->ELF->exit.
+fn run_native_v2_emit_control(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("native-v2-emit-control: usage --native-v2-emit-control <out_path>")
+    }
+    let out_path = arg_list_get(args, flag_index + 1)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_control_module()
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=control rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=control path=")
+    print(out_path)
+    print("\n")
+}
+
+// Arithmetic witness: --native-v2-emit-arith <out_path>. (100-16)/2 = 42. OpSub + OpDiv.
+fn run_native_v2_emit_arith(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("native-v2-emit-arith: usage --native-v2-emit-arith <out_path>")
+    }
+    let out_path = arg_list_get(args, flag_index + 1)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_arith_module()
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=arith rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=arith path=")
+    print(out_path)
+    print("\n")
+}
+
+// Wide-add carry witness: --native-v2-emit-wide-add <out>. (2^64-1)+1 across 2 limbs
+// → high limb = 1 → exit 1 proves the adc carry-chain crossed the limb boundary.
+fn run_native_v2_emit_wide_add(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("native-v2-emit-wide-add: usage --native-v2-emit-wide-add <out_path>")
+    }
+    let out_path = arg_list_get(args, flag_index + 1)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_wide_add_module()
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=wide-add rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=wide-add path=")
+    print(out_path)
+    print("\n")
+}
+
+// Control fall-through witness: --native-v2-emit-control-ft <out_path>. cond=0 -> exit 7.
+// Proves branch_true does NOT jump when the condition is false (branch-not-taken path).
+fn run_native_v2_emit_control_ft(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("native-v2-emit-control-ft: usage --native-v2-emit-control-ft <out_path>")
+    }
+    let out_path = arg_list_get(args, flag_index + 1)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_control_fallthrough_module()
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=control-ft rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=control-ft path=")
+    print(out_path)
+    print("\n")
 }
 
 // ============================================================================
@@ -5676,6 +5841,67 @@ fn compiler_main_make_native_v2_control_module() -> IrModule with Mut, Panic, Di
     func.instrs[3] = ir_return(1)
     func.instrs[4] = ir_label(0)
     func.instrs[5] = ir_load_imm(2, 1)
+    func.instrs[6] = ir_return(2)
+    func.instr_count = 7
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
+// Arithmetic witness: main() -> { (100 - 16) / 2 } = 84 / 2 = 42. Exercises OpSub + OpDiv
+// in one module (OpAdd/OpMul are already covered by call/multicall).
+fn compiler_main_make_native_v2_arith_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.reg_count = 5
+    func.instrs[0] = ir_load_imm(0, 100)
+    func.instrs[1] = ir_load_imm(1, 16)
+    func.instrs[2] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    func.instrs[3] = ir_load_imm(3, 2)
+    func.instrs[4] = ir_binop(4, 2, BinaryOp::OpDiv, 3)
+    func.instrs[5] = ir_return(4)
+    func.instr_count = 6
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
+// Wide-add witness: proves N-limb carry. LHS=(2^64-1, 0) + RHS=(1, 0) = (0, 1).
+// vregs: 0=lhs_lo(-1) 1=lhs_hi(0) 2=rhs_lo(1) 3=rhs_hi(0) 4=dst_lo 5=dst_hi.
+// ir_wide_add(dst=4, lhs=0, rhs=2, limbs=2); return dst_hi (vreg 5) → exit 1 iff carry crossed.
+fn compiler_main_make_native_v2_wide_add_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.reg_count = 6
+    func.instrs[0] = ir_load_imm(0, -1)
+    func.instrs[1] = ir_load_imm(1, 0)
+    func.instrs[2] = ir_load_imm(2, 1)
+    func.instrs[3] = ir_load_imm(3, 0)
+    func.instrs[4] = ir_wide_add(4, 0, 2, 2)
+    func.instrs[5] = ir_return(5)
+    func.instr_count = 6
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
+// Control fall-through witness: cond = 0, so branch_true is NOT taken; execution falls
+// through to `return 7`. The symmetric companion to control_module (which proves the
+// branch-TAKEN path) — together they prove branch_true both jumps and does-not-jump.
+fn compiler_main_make_native_v2_control_fallthrough_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.reg_count = 3
+    func.label_count = 1
+    func.instrs[0] = ir_load_imm(0, 0)
+    func.instrs[1] = ir_branch_true(0, 0)
+    func.instrs[2] = ir_load_imm(1, 7)
+    func.instrs[3] = ir_return(1)
+    func.instrs[4] = ir_label(0)
+    func.instrs[5] = ir_load_imm(2, 99)
     func.instrs[6] = ir_return(2)
     func.instr_count = 7
     module.functions[0] = func
@@ -25855,6 +26081,39 @@ fn run_gpu_compile_pipeline(
         return 0
     }
 
+    // PTX via K-AXI (Kretikos native GPU spine) — source -> HLIR -> K-AXI -> PTX.
+    // Epistemic-mode aware: --gpu-binary-format epistemic|f32-gum|f32 selects the
+    // transpiler mode (the GUM 4-buffer C1/C2/V1/V2 layout flows through for mode 5).
+    if str_eq(gpu_target, "ptx-kaxi") {
+        let kaxi = hlir_kernels_to_kaxi(hlir_module)
+        let mode_id = if str_eq(gpu_binary_format, "epistemic") { 1 }
+                      else if str_eq(gpu_binary_format, "f32-gum") { 5 }
+                      else if str_eq(gpu_binary_format, "f32") { 2 }
+                      else { 0 }
+        let kaxi_ptx = kaxi_transpile_to_ptx_unified(kaxi, mode_id)
+        var kpb = ptx_buf_new()
+        kpb = ptx_push_str(kpb, kaxi_ptx)
+        if str_len(output_path) > 0 {
+            let kw_ok = io_write_bytes_to_file(output_path, kpb.data, kpb.len)
+            if !kw_ok {
+                print("GPU: failed to write K-AXI PTX to ")
+                print(output_path)
+                print("\n")
+                return 1
+            }
+            print("GPU: K-AXI PTX written to ")
+            print(output_path)
+            print(" (")
+            print_int(kpb.len)
+            print(" bytes, mode=")
+            print_int(mode_id)
+            print(")\n")
+        } else {
+            ptx_buf_print(kpb)
+        }
+        return 0
+    }
+
     // PTX (CUDA / ROCm) — default path
     // Select variant based on binary_format or epistemic annotation
     let use_epistemic = str_eq(gpu_binary_format, "epistemic")
@@ -26006,6 +26265,30 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-gc-retry-smoke" {
             run_native_v2_gc_retry_smoke()
+            return
+        } else if mode == "--native-v2-emit13" {
+            run_native_v2_emit13()
+            return
+        } else if mode == "--native-v2-emit-scalar" {
+            run_native_v2_emit_scalar(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-call" {
+            run_native_v2_emit_call(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-multicall" {
+            run_native_v2_emit_multicall(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-control" {
+            run_native_v2_emit_control(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-arith" {
+            run_native_v2_emit_arith(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-control-ft" {
+            run_native_v2_emit_control_ft(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-wide-add" {
+            run_native_v2_emit_wide_add(args, arg_idx)
             return
         } else if mode == "--bench-int-to-string" {
             run_int_to_string_bench_from_args(args, arg_idx)

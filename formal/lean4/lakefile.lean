@@ -207,6 +207,34 @@ lean_lib «SounioDeGreyChi5TransferWf» where
 -- Discharging the ledger + sqrtField_chi_ge_5 yields χ(ℝ²)≥5. `lake build SounioSqrtFieldReal`.
 lean_lib «SounioSqrtFieldReal» where
 
+-- Phase 2b: multiplicative inverse on Cauchy-sequence reals (sequence level):
+-- invSeq + inv_cauchy + mul_inv_tendsto + inv_cong. `lake build SounioRealInverseImpl`.
+lean_lib «SounioRealInverseImpl» where
+
+-- Phase 2c: canonical ε-eventual order leR + order axioms (le_refl/trans/antisymm/total,
+-- add_le_add_right, mul_nonneg, zero_ne_one) at representative level. `lake build SounioRealOrderAxiomsImpl`.
+lean_lib «SounioRealOrderAxiomsImpl» where
+
+-- Phase 3: rational Newton √p sequences for p∈{3,5,7,11}: newton_ge_one + newton_sq_tendsto +
+-- newton_cauchy (CRUX 2, full convergence). `lake build SounioNewtonSqrtImpl`.
+lean_lib «SounioNewtonSqrtImpl» where
+
+-- Phase 2d + 4: assemble RootedField ℝ from the above and fire the de Grey transfer → χ(ℝ²)≥5.
+lean_lib «SounioRootedFieldReal» where
+
+-- Multiquadratic linear-independence programme (faithfulness of QF↪ℝ): irrationality core.
+-- no_rat_sqrt (squarefree m has no rational √), not_sq_radicand, ofRat_inj, sqrt_radicand_irrational
+-- for the minimal support S={3,5,11} radicands {3,5,11,15,33,55,165}. `lake build SounioMultiquadIndep`.
+lean_lib «SounioMultiquadIndep» where
+
+-- χ≥5 UNCONDITIONAL over Mathlib-free ℝ: feeds the discharged SAT leg
+-- (DeGrey529.Closed.not_VColourable) into SounioRootedFieldReal.chi_R2_ge_5, closing the
+-- QF↪ℝ gap. chi_R2_ge_5_unconditional: the unit-distance graph on the Cauchy-quotient real
+-- plane ℝ×ℝ has no proper 4-colouring — χ(ℝ²)≥5, ZERO hypotheses, no Mathlib, no sorry.
+-- NOT a default_target (heavy import: pulls in the 30 MB G529 cert via SounioDeGreyChi5Closed,
+-- re-checked under native_decide; `lake build SounioDeGreyChi5Real`).
+lean_lib «SounioDeGreyChi5Real» where
+
 -- M1: Vancomycin-Knightian thrust — Approx × Causal × Knowledge composition
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where

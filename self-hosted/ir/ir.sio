@@ -621,6 +621,7 @@ pub enum IrOpcode {
     //   Formal guarantee: QDeformClassical.lean  `q_deform_recovers_classical`
     //   Lowering at q=1: 1 VMULPD.  At q≠1: VMULPD + VSUBPD + scale + VFMADD231PD; ~4 EVEX
     IrQDeform,          // Door Ξ: a·_q b, q in imm_flags, unifies all prior Doors
+    IrWideAdd,          // N-limb carry-chain add: dst[0..L-1]=src1[0..L-1]+src2[0..L-1]; imm_i64=L
 }
 
 pub struct IrRegList {
@@ -1894,6 +1895,16 @@ pub fn ir_empty_epistemic_section() -> IrEpistemicSection {
     }
 }
 
+// Build a heap IrEpistemicSection in THIS leaf's own short frame and return only
+// the Box pointer. Callers that would otherwise hold the MB-scale struct in a deep
+// stack frame (e.g. the native streaming driver) must use this to avoid lean_single's
+// layout-sensitive stale-stack crash. Inlining Box::new(ir_empty_epistemic_section())
+// at the caller does NOT help — the struct literal is still built on the caller frame.
+pub fn ir_empty_epistemic_section_boxed() -> Box<IrEpistemicSection> with Alloc, Mut, Panic, Div {
+    var ep = ir_empty_epistemic_section()
+    Box::new(ep)
+}
+
 pub struct IrModule {
     pub functions: [IrFunction; 1400],
     pub fn_count: i64,
@@ -3081,6 +3092,29 @@ pub fn ir_return(src: i64) -> IrInstr {
         src1: src,
         src2: base.src2,
         imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+// N-limb carry-chain add. dst/src1/src2 = base vregs of L consecutive limb slots;
+// imm_i64 = L. Lowered to add (limb0) + adc (limbs 1..L-1).
+pub fn ir_wide_add(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideAdd)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: src1,
+        src2: src2,
+        imm_i64: limb_count,
         imm_f64: base.imm_f64,
         label_id: base.label_id,
         fn_id: base.fn_id,
