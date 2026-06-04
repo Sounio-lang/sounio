@@ -192,6 +192,11 @@ pub struct Checker {
     refine_violations: i64,       // predicates definitely violated (compile error)
     // Condition-narrowing guard stack: up to 8 nested if-conditions.
     refine_cond_env: RefineStaticEnv,
+    // Closure-body effect inference depth: >0 while checking a closure body, so a
+    // callee's declared effects ACCUMULATE into current_effects (inference) rather
+    // than being enforced. Declared last to preserve existing field offsets
+    // (the modular checker's crash surface is layout-sensitive).
+    closure_inference_depth: i64,
 }
 
 // Wrapper for inferred type arguments (avoids &![T;N] JIT bug)
@@ -680,6 +685,7 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         refine_runtime_checked: 0,
         refine_violations: 0,
         refine_cond_env: refine_static_env_new(),
+        closure_inference_depth: 0,
     }
 }
 
@@ -742,6 +748,7 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).current_impl_type = ty_error()
     (*raw).current_effects = [0; 8]
     (*raw).current_effect_count = 0
+    (*raw).closure_inference_depth = 0
     (*raw).multitest_count = 0
     (*raw).multitest_corrected = false
     (*raw).last_literal_int = 0
@@ -2189,7 +2196,12 @@ fn fn_sigs_structurally_compatible(expected: FnSig, got: FnSig) -> bool with Mut
         i = i + 1
     }
     if !types_compatible(expected.return_type, got.return_type) { return false }
-    fn_sigs_effects_subset(got, expected)
+    // Effects are NOT a fn-type compatibility concern: bare fn-type params are
+    // effect-polymorphic. A function value's effects propagate to the HOF CALL SITE
+    // (see arg-effect propagation in checker_check_call_args_inner_inplace), where the
+    // enclosing function must declare them. So any closure/fn matching by signature
+    // (arity + param/return types + linearity) is compatible.
+    true
 }
 
 fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
@@ -3783,8 +3795,12 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
 
     checker_bind_closure_params_inplace(c, e.closure_params)
 
-    // Body checked in place (was the by-value c.check_opt_expr recursion).
+    // Body checked in place (was the by-value c.check_opt_expr recursion). Raise the
+    // inference depth so callee effects in the body accumulate into current_effects
+    // (closure effect inference) instead of being enforced against the closure.
+    (*c).closure_inference_depth = (*c).closure_inference_depth + 1
     let body_ty = checker_check_opt_expr_inplace(c, e.closure_body)
+    (*c).closure_inference_depth = (*c).closure_inference_depth - 1
 
     let inferred_ret_ty = if ret_ty.kind == TypeKind::TyUnknown {
         body_ty
@@ -4069,6 +4085,14 @@ fn checker_check_call_args_inner_inplace(c: *mut Checker, args: Option<Box<ExprL
             if implicit_borrow && (*c).suppress_linear_consume_depth > 0 {
                 (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
             }
+            // Effect-polymorphic HOF arguments: a function/closure value passed as an
+            // argument performs its effects at THIS call site, so propagate them to the
+            // enclosing context — enforced against the enclosing fn's declared effects at
+            // depth 0, or accumulated into an outer closure's inferred effects at depth>0.
+            if arg_ty.kind == TypeKind::TyFn && arg_ty.fn_sig_id >= 0 && arg_ty.fn_sig_id < (*c).fn_sigs.count {
+                let arg_sig = (*c).fn_sigs.get(arg_ty.fn_sig_id)
+                checker_check_callee_effects_inplace(c, call_span, arg_sig.effects, arg_sig.effect_count)
+            }
             let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
             if has_param_info {
                 if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
@@ -4109,6 +4133,23 @@ fn checker_check_call_args_inner_inplace(c: *mut Checker, args: Option<Box<ExprL
 
 fn checker_check_call_args_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, expected_count: i64, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     checker_check_call_args_inner_inplace(c, args, params, 0, expected_count, call_span)
+}
+
+// print / println / print_int / print_char are IO builtins that are NOT registered in
+// fn_sigs (they resolve to ty_error), so their IO effect is invisible to the effects
+// system. Recognize them by name so closure-body inference can capture their IO.
+fn call_callee_is_print_builtin(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent { return false }
+            if name_matches_str5((*expr).name, 112, 114, 105, 110, 116) { return true }            // print
+            if name_matches_str7((*expr).name, 112, 114, 105, 110, 116, 108, 110) { return true }  // println
+            if name_matches_str9((*expr).name, 112, 114, 105, 110, 116, 95, 105, 110, 116) { return true }  // print_int
+            if name_matches_str10((*expr).name, 112, 114, 105, 110, 116, 95, 99, 104, 97, 114) { return true } // print_char
+            false
+        }
+        None => false
+    }
 }
 
 // *mut ExprCall handler — transcription of check_call_expr's normal path (14605-14687).
@@ -4185,6 +4226,16 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        // During closure inference, treat a print-family builtin call as performing IO
+        // so the closure's inferred effect set includes it (these are not in fn_sigs).
+        if (*c).closure_inference_depth > 0 && call_callee_is_print_builtin(e.left) {
+            if (*c).current_effect_count < 8 {
+                if !has_effect_id((*c).current_effects, (*c).current_effect_count, 0) {
+                    (*c).current_effects[(*c).current_effect_count as usize] = 0
+                    (*c).current_effect_count = (*c).current_effect_count + 1
+                }
+            }
+        }
         callee_ty
     } else {
         checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
@@ -4198,6 +4249,24 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 
 fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) with Mut, IO, Panic, Div, Alloc {
     if callee_effect_count == 0 {
+        return
+    }
+    // Inference mode: while checking a closure body, ACCUMULATE the callee's effects
+    // into current_effects (deduped, capped at 8) so the closure's inferred effect set
+    // captures them. Enforcement (below) is skipped here — the closure is later checked
+    // for compatibility against the expected fn-type via fn_sigs_effects_subset.
+    if (*c).closure_inference_depth > 0 {
+        var i: i64 = 0
+        while i < callee_effect_count {
+            let eff_id = callee_effects[i as usize]
+            if (*c).current_effect_count < 8 {
+                if !has_effect_id((*c).current_effects, (*c).current_effect_count, eff_id) {
+                    (*c).current_effects[(*c).current_effect_count as usize] = eff_id
+                    (*c).current_effect_count = (*c).current_effect_count + 1
+                }
+            }
+            i = i + 1
+        }
         return
     }
     if effects_subset(callee_effects, callee_effect_count, (*c).current_effects, (*c).current_effect_count) {
