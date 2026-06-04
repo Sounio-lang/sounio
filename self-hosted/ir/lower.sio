@@ -531,36 +531,45 @@ fn lowerer_register_struct_fields_mut(
     while true {
         match *current {
             Some(list) => {
+                // Bind the Box once (the `(*(*lo).struct_layouts).entries[..]=..`
+                // double-deref-through-Box no-ops on c634b38f, so the layout table was
+                // never populated and field_idx_from_name fell back to a name-hash that
+                // mismatched storage → every field read 0). Ported from feat/mc-v2-opcodes a5706294d.
+                let sl = (*lo).struct_layouts
                 var layout_idx: i64 = -1
                 var si: i64 = 0
-                while si < (*(*lo).struct_layouts).count {
-                    if ir_name_eq((*(*lo).struct_layouts).entries[si as usize].type_name, type_name) {
+                while si < (*sl).count {
+                    if ir_name_eq((*sl).entries[si as usize].type_name, type_name) {
                         layout_idx = si
                     }
                     si = si + 1
                 }
                 if layout_idx < 0 {
-                    if (*(*lo).struct_layouts).count < 256 {
-                        layout_idx = (*(*lo).struct_layouts).count
-                        (*(*lo).struct_layouts).entries[layout_idx as usize] = StructLayoutEntry {
+                    if (*sl).count < 256 {
+                        layout_idx = (*sl).count
+                        (*sl).entries[layout_idx as usize] = StructLayoutEntry {
                             type_name: type_name,
                             fields: [empty_struct_field_entry(); 64],
                             field_count: 0,
                         }
-                        (*(*lo).struct_layouts).count = layout_idx + 1
+                        (*sl).count = layout_idx + 1
                     } else {
                         lo.error_count = lo.error_count + 1
                         lo.had_error = true
                         return
                     }
                 }
-                let fc = (*(*lo).struct_layouts).entries[layout_idx as usize].field_count
+                let fc = (*sl).entries[layout_idx as usize].field_count
                 if fc < 64 {
-                    (*(*lo).struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                    // The deeper nested store (*sl).entries[i].fields[j]=.. is still
+                    // miscompiled; copy the whole entry out, mutate the local, store it back.
+                    var entry = (*sl).entries[layout_idx as usize]
+                    entry.fields[fc as usize] = StructFieldEntry {
                         name: (*list).head.name,
                         index: field_idx,
                     }
-                    (*(*lo).struct_layouts).entries[layout_idx as usize].field_count = fc + 1
+                    entry.field_count = fc + 1
+                    (*sl).entries[layout_idx as usize] = entry
                 } else {
                     lo.error_count = lo.error_count + 1
                     lo.had_error = true
@@ -4400,10 +4409,21 @@ impl Lowerer {
                         print_int(field_idx)
                         print("\n")
                     }
+                    let fname = (*list).head.name
                     let pair = lo.lower_expr_ref(&(*list).head.value)
                     lo = pair.0
                     let vreg = pair.1
-                    lo = lo.emit(ir_field_set(base_reg, field_idx, vreg, (*list).head.name))
+                    // Store at the SAME slot field_idx_from_name_simple (the read side,
+                    // ExprFieldAccess) computes, so construction and access agree: numeric
+                    // .N -> N; named -> first-byte hash % 64. (Declaration-order indices
+                    // mismatched the hash-based read -> every field read 0.)
+                    var fslot = field_idx
+                    if fname.len == 1 && (fname.buf[0] as i64) >= 48 && (fname.buf[0] as i64) <= 57 {
+                        fslot = (fname.buf[0] as i64) - 48
+                    } else if fname.len > 0 {
+                        fslot = (fname.buf[0] as i64) % 64
+                    }
+                    lo = lo.emit(ir_field_set(base_reg, fslot, vreg, fname))
                     current = &(*list).tail
                     field_idx = field_idx + 1
                 }
@@ -5833,7 +5853,10 @@ impl Lowerer {
                 print_int(dst)
                 print("\n")
             }
-            lo = lo.emit(ir_alloc(dst, 0))
+            // 64 payload slots: field slots are first-byte-hash % 64 (see
+            // lower_struct_fields_ref / field_idx_from_name_simple), so reserve the
+            // full range instead of 0 (which gave the object no payload -> reads 0).
+            lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(64)))
             lo = lo.lower_struct_fields_ref(dst, &e.fields, 0)
             (lo, dst)
         } else if e.kind == ExprKind::ExprArrayLit {
