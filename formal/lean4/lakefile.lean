@@ -85,6 +85,12 @@ lean_lib «SounioLearningDynamics» where
 @[default_target]
 lean_lib «SounioPathionBridge» where
 
+-- Associator-shadow lever (non-associative sedenion product `Sounio.AssociatorShadow.smul`
+-- over 16 components). Algebraic substrate imported by the Erdős [90] count-growth files
+-- (SounioErdos90UnitSpectrum / SounioErdos90PathionGrowth). Mathlib-free, native_decide, no sorry.
+@[default_target]
+lean_lib «SounioAssociatorShadow» where
+
 -- Erdős resolution thrust (#508 + #704)
 @[default_target]
 lean_lib «SounioErdosUnitDistance» where
