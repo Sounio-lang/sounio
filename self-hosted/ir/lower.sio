@@ -2519,6 +2519,36 @@ impl Lowerer {
         ir_empty_name()
     }
 
+    // Does this expression evaluate to f64? Unlike lower_opt_expr_has_float_source
+    // (which only sees float *literals*), this consults the local type table so a
+    // typed variable (`let x: f64 = ...; (x + y) as i64`) is recognised as a float
+    // source and the cast lowers to IrFloatToInt instead of silently passing the
+    // raw IEEE-754 bits through. Only arithmetic propagates f64-ness; comparisons
+    // produce a bool, so they are not treated as float sources.
+    fn expr_is_f64_typed(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => {
+                if (*e).kind == ExprKind::ExprFloatLit { return true }
+                if (*e).kind == ExprKind::ExprCast {
+                    return lower_cast_type_is_f64(&(*e).cast_type)
+                }
+                if (*e).kind == ExprKind::ExprIdent {
+                    let tname = self.lookup_local_type((*e).name)
+                    return ir_name_eq(tname, make_name("f64"))
+                }
+                if (*e).kind == ExprKind::ExprBinary {
+                    let bop = (*e).bin_op
+                    if bop == BinaryOp::OpAdd || bop == BinaryOp::OpSub || bop == BinaryOp::OpMul || bop == BinaryOp::OpDiv {
+                        return self.expr_is_f64_typed(&(*e).left) || self.expr_is_f64_typed(&(*e).right)
+                    }
+                    return false
+                }
+                false
+            }
+            None => false,
+        }
+    }
+
     fn lookup_local(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
         let stk = *self.locals
         var i = stk.count - 1
@@ -4162,17 +4192,29 @@ impl Lowerer {
         let pair = self.lower_opt_expr_ref(&s.expr)
         var lo = pair.0
         let reg = pair.1
-        // Record the struct type of the binding when the initialiser is a struct literal, so
-        // later field access (binding.field) resolves the field index via the layout table.
+        // Record the binding's type so later passes can resolve it: prefer the explicit
+        // annotation (covers f64 — needed for float-cast lowering — and struct names), else
+        // fall back to a struct-literal initialiser's path (field-access layout resolution).
         var type_name = ir_empty_name()
-        let init_ref: &Option<Box<Expr>> = &s.expr
-        match *init_ref {
-            Some(init_e) => {
-                if (*init_e).kind == ExprKind::ExprStructLit {
-                    type_name = ir_path_first_name((*init_e).path)
+        let ann_ref: &Option<Box<TypeExpr>> = &s.ty
+        match *ann_ref {
+            Some(te) => {
+                if (*te).kind == TypeExprKind::TypeNamed {
+                    type_name = ir_path_first_name((*te).path)
                 }
             }
             None => {}
+        }
+        if type_name.len <= 0 {
+            let init_ref: &Option<Box<Expr>> = &s.expr
+            match *init_ref {
+                Some(init_e) => {
+                    if (*init_e).kind == ExprKind::ExprStructLit {
+                        type_name = ir_path_first_name((*init_e).path)
+                    }
+                }
+                None => {}
+            }
         }
         lo = lo.bind_local_typed(s.name, reg, is_mut, type_name)
         (lo, reg)
@@ -5987,7 +6029,7 @@ impl Lowerer {
                 let lo2 = p.0
                 let dst = p.1
                 (lo2.emit(ir_int_to_float(dst, src_reg)), dst)
-            } else if lower_opt_expr_has_float_source(&e.left) {
+            } else if lo1.expr_is_f64_typed(&e.left) {
                 let p = lo1.fresh_reg()
                 let lo2 = p.0
                 let dst = p.1
