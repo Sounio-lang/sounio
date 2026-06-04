@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.examples.erdos.data.readme
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.erdos.data.readme
+-->
+
 # de Grey / Parts unit-distance core data (provenance)
 
 Edge lists and exact-coordinate files for small 5-chromatic unit-distance graphs,

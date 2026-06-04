@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.modular-frontend-diagnosis-full-2026-06-01
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.modular-frontend-diagnosis-full-2026-06-01
+-->
+
 All four keystones confirmed:
 1. `check.sio:2278` — `_ => {}` skip with the documented CORRECTNESS GAP comment (2272-2277). Confirmed verbatim.
 2. `collect_struct_def_inplace` does NOT exist — the only grep hit is the comment at 2277 referencing it as "pending." Fix = write new fn, not wire existing.

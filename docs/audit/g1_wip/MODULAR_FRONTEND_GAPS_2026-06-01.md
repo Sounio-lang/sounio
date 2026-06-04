@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.modular-frontend-gaps-2026-06-01
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.modular-frontend-gaps-2026-06-01
+-->
+
 # Modular compiler (mc.elf --check) feature-gap diagnosis — 2026-06-01
 
 Source: 8-agent diagnosis workflow on the post-fix build (mc.elf `daaa5758`, after the

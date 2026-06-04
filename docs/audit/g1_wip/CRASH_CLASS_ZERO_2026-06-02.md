@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.crash-class-zero-2026-06-02
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.crash-class-zero-2026-06-02
+-->
+
 # Modular `--check` crash count → 0 (2026-06-02)
 
 The whole-arc goal — drive the modular `mc.elf` `--check` SIGSEGV count to zero across the
