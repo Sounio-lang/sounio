@@ -274,3 +274,307 @@ pub fn policy_iteration(m: &EpistemicMDP, max_outer: i64, eval_eps: f64, eval_it
     }
     (V, pi)
 }
+
+// ============================================================================
+// LAYER 2 — KNIGHTIAN-ROBUST DP
+// ============================================================================
+//
+// First principles (math this implements):
+//
+//   Robust Bellman under Knightian (p-box) uncertainty on the continuation
+//   value:
+//     V_lower(s) = max_a  lower-prevision  E[ r(s,a,s') + gamma * V_lower(s') ]
+//     V_upper(s) = max_a  upper-prevision  E[ r(s,a,s') + gamma * V_upper(s') ]
+//
+//   We compute the prevision envelope via the Frechet (point-mass) outer
+//   enclosure. For each (s, a, s') we build a p-box for the contribution
+//     X(s, a, s') = p(s, a, s') * ( r(s, a, s') + gamma * V(s') )
+//   with p(s, a, s') in [p_lo, p_hi] and V(s') in [V_lower, V_upper]. The
+//   enclosure is a 4-corner Frechet bound: for positive quantities, the
+//   min corner is (p_lo, r + gamma*V_lower) and the max corner is
+//   (p_hi, r + gamma*V_upper). This is monotone in both args, so we use
+//   `pb_apply2_monotone_inc_inc`. The enclosure is sound for the
+//   counter-monotonic (worst-case) copula and conservative under positive
+//   correlation.
+//
+// Two entry points:
+//   - robust_value_iteration       (one-step, caller pre-bakes the
+//                                   continuation p-box for each (s, a))
+//   - robust_value_iteration_full  (full Bellman backup; per-s' Knightian)
+//
+// Storage: 1D arrays with manual (s, a) -> s*A + a and
+// (s, a, sp) -> s*A*Sp + a*Sp + sp indexing.
+
+use epistemic::knightian::*
+
+// ============================================================================
+// KNIGHTIAN MDP — minimal scalar-only struct (PBox tables passed separately
+// to keep the struct readable through `&` without segfault).
+// ============================================================================
+
+pub struct KnightianMDP {
+    n_states: i64,
+    n_actions: i64,
+    gamma: f64,
+}
+
+pub fn kmdp_new(n_states: i64, n_actions: i64, gamma: f64) -> KnightianMDP with Mut, Div, Panic {
+    var m: KnightianMDP
+    m.n_states = n_states
+    m.n_actions = n_actions
+    m.gamma = gamma
+    m
+}
+
+// Multiplication closure for pb_apply2_monotone_inc_inc. Sounio requires
+// a free fn, not a closure.
+fn kmdp_mul(x: f64, y: f64) -> f64 { x * y }
+
+// ============================================================================
+// ENTRY POINT 1 — one-step, caller pre-bakes the continuation p-box.
+//
+// cont_pbox is 1D, indexed by s * A + a. Each element is a p-box whose
+// lo_mean is the lower-prevision Q(s, a) and whose hi_mean is the upper.
+// Solver returns V_lower[s] = max_a pb_lo_mean(cont_pbox[s*A+a]) and
+// V_upper[s] = max_a pb_hi_mean(cont_pbox[s*A+a]).
+// ============================================================================
+
+pub fn robust_value_iteration(
+    m: &KnightianMDP,
+    cont_pbox: &[PBox; 8],
+    eps: f64,
+    max_iter: i64
+) -> ([f64; 8], [f64; 8]) with Mut, Div, Panic {
+    var V_lower: [f64; 8] = [0.0; 8]
+    var V_upper: [f64; 8] = [0.0; 8]
+    var iter: i64 = 0
+    var converged: bool = false
+    while iter < max_iter && !converged {
+        var VL: [f64; 8] = [0.0; 8]
+        var VU: [f64; 8] = [0.0; 8]
+        var max_diff: f64 = 0.0
+        var s: i64 = 0
+        while s < m.n_states {
+            var best_lo: f64 = 0.0 - 1.0e18
+            var best_hi: f64 = 0.0 - 1.0e18
+            var a: i64 = 0
+            while a < m.n_actions {
+                let idx = s * m.n_actions + a
+                let pb = (*cont_pbox)[idx]
+                let lo = pb_lo_mean(&pb)
+                let hi = pb_hi_mean(&pb)
+                if lo > best_lo { best_lo = lo }
+                if hi > best_hi { best_hi = hi }
+                a = a + 1
+            }
+            VL[s] = best_lo
+            VU[s] = best_hi
+            let dl = dp_abs(VL[s] - V_lower[s])
+            let du = dp_abs(VU[s] - V_upper[s])
+            let dd = dp_max(dl, du)
+            if dd > max_diff { max_diff = dd }
+            s = s + 1
+        }
+        V_lower = VL
+        V_upper = VU
+        if max_diff < eps { converged = true }
+        iter = iter + 1
+    }
+    (V_lower, V_upper)
+}
+
+// ============================================================================
+// ENTRY POINT 2 — full Bellman backup, per-s' Knightian credal set.
+//
+// r_kn / p_kn_lo / p_kn_hi / r_kn_var are 1D arrays indexed by
+// s * A * Sp + a * Sp + sp. For each (s, a, sp) we build a p-box for
+// (r + gamma * V[sp]) and a p-box for the credal-set probability p(sp),
+// then combine via pb_apply2_monotone_inc_inc with kmdp_mul (4-corner
+// Frechet). The sum across sp gives the lower / upper prevision Q-values
+// for (s, a).
+// ============================================================================
+
+pub fn robust_value_iteration_full(
+    m: &KnightianMDP,
+    r_kn: &[f64; 32],
+    p_kn_lo: &[f64; 32],
+    p_kn_hi: &[f64; 32],
+    r_kn_var: &[f64; 32],
+    eps: f64,
+    max_iter: i64
+) -> ([f64; 8], [f64; 8]) with Mut, Div, Panic {
+    var V_lower: [f64; 8] = [0.0; 8]
+    var V_upper: [f64; 8] = [0.0; 8]
+    var iter: i64 = 0
+    var converged: bool = false
+    while iter < max_iter && !converged {
+        var VL: [f64; 8] = [0.0; 8]
+        var VU: [f64; 8] = [0.0; 8]
+        var max_diff: f64 = 0.0
+        var s: i64 = 0
+        while s < m.n_states {
+            var best_lo: f64 = 0.0 - 1.0e18
+            var best_hi: f64 = 0.0 - 1.0e18
+            var a: i64 = 0
+            while a < m.n_actions {
+                var q_lo: f64 = 0.0
+                var q_hi: f64 = 0.0
+                var sp: i64 = 0
+                while sp < m.n_states {
+                    let idx = s * m.n_actions * m.n_states + a * m.n_states + sp
+                    let r_mean = (*r_kn)[idx]
+                    let p_lo = (*p_kn_lo)[idx]
+                    let p_hi = (*p_kn_hi)[idx]
+                    let r_v = (*r_kn_var)[idx]
+                    let rv_lo = r_mean + m.gamma * V_lower[sp]
+                    let rv_hi = r_mean + m.gamma * V_upper[sp]
+                    let rv_box = PBox { lo_mean: rv_lo, hi_mean: rv_hi, variance: r_v, confidence: 1000 }
+                    let p_box = PBox { lo_mean: p_lo, hi_mean: p_hi, variance: 0.0, confidence: 1000 }
+                    let contrib = pb_apply2_monotone_inc_inc(kmdp_mul, &p_box, &rv_box)
+                    q_lo = q_lo + pb_lo_mean(&contrib)
+                    q_hi = q_hi + pb_hi_mean(&contrib)
+                    sp = sp + 1
+                }
+                if q_lo > best_lo { best_lo = q_lo }
+                if q_hi > best_hi { best_hi = q_hi }
+                a = a + 1
+            }
+            VL[s] = best_lo
+            VU[s] = best_hi
+            let dl = dp_abs(VL[s] - V_lower[s])
+            let du = dp_abs(VU[s] - V_upper[s])
+            let dd = dp_max(dl, du)
+            if dd > max_diff { max_diff = dd }
+            s = s + 1
+        }
+        V_lower = VL
+        V_upper = VU
+        if max_diff < eps { converged = true }
+        iter = iter + 1
+    }
+    (V_lower, V_upper)
+}
+
+// ============================================================================
+// ROBUST POLICY EXTRACTION (pessimistic / lower-prevision argmax).
+// ============================================================================
+
+pub fn robust_extract_policy(
+    m: &KnightianMDP,
+    V_lower: &[f64; 8],
+    cont_pbox: &[PBox; 8]
+) -> [i64; 8] with Mut, Div, Panic {
+    var pi: [i64; 8] = [0; 8]
+    var s: i64 = 0
+    while s < m.n_states {
+        var best_a: i64 = 0
+        var best_lo: f64 = 0.0 - 1.0e18
+        var a: i64 = 0
+        while a < m.n_actions {
+            let idx = s * m.n_actions + a
+            let pb = (*cont_pbox)[idx]
+            let lo = pb_lo_mean(&pb)
+            if lo > best_lo {
+                best_lo = lo
+                best_a = a
+            }
+            a = a + 1
+        }
+        pi[s] = best_a
+        s = s + 1
+    }
+    pi
+}
+
+// ============================================================================
+// LAYER 2 SELF-TEST (run as `pub fn main` so the library is exercisable
+// in isolation via `bin/souc check` and direct invocation).
+// ============================================================================
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    let m = kmdp_new(2, 2, 0.9)
+
+    // ---------- Tight (no Knightian gap) ----------
+    var cp_tight: [PBox; 8] = [pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000)]
+    let p_risky_tight = pb_new(0.909090909, 0.909090909, 0.0, 1000)
+    cp_tight[0] = p_risky_tight
+    let p_safe_tight = pb_new(1.0, 1.0, 0.0, 1000)
+    cp_tight[1] = p_safe_tight
+    let p_term = pb_new(0.0, 0.0, 0.0, 1000)
+    cp_tight[2] = p_term
+    cp_tight[3] = p_term
+
+    let (VL_tight, VU_tight) = robust_value_iteration(&m, &cp_tight, 1e-9, 100)
+    let pi_tight = robust_extract_policy(&m, &VL_tight, &cp_tight)
+
+    println("TIGHT_VL0")
+    println(VL_tight[0])
+    println("TIGHT_VU0")
+    println(VU_tight[0])
+    println("TIGHT_PI0")
+    println(pi_tight[0])
+
+    // ---------- Knightian gap on safe's transition ----------
+    var cp_gap: [PBox; 8] = [pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000)]
+    cp_gap[0] = p_risky_tight
+    let p_safe_gap = pb_new(0.4, 1.0, 0.0, 1000)
+    cp_gap[1] = p_safe_gap
+    cp_gap[2] = p_term
+    cp_gap[3] = p_term
+
+    let (VL_gap, VU_gap) = robust_value_iteration(&m, &cp_gap, 1e-9, 100)
+    let pi_gap = robust_extract_policy(&m, &VL_gap, &cp_gap)
+
+    println("GAP_VL0")
+    println(VL_gap[0])
+    println("GAP_VU0")
+    println(VU_gap[0])
+    println("GAP_PI0")
+    println(pi_gap[0])
+
+    // ---------- Full iterative solver with per-s' Knightian ----------
+    var r_arr: [f64; 32] = [0.0; 32]
+    var plo_arr: [f64; 32] = [0.0; 32]
+    var phi_arr: [f64; 32] = [0.0; 32]
+    var rvar_arr: [f64; 32] = [0.0; 32]
+
+    // s=0, a=0 (risky): p(0->0)=0.5, p(0->1)=0.5, r(0->0)=0, r(0->1)=1
+    plo_arr[0] = 0.5
+    phi_arr[0] = 0.5
+    r_arr[0] = 0.0
+    plo_arr[1] = 0.5
+    phi_arr[1] = 0.5
+    r_arr[1] = 1.0
+    // s=0, a=1 (safe, Knightian): p(0->0) in [0, 0.6], p(0->1) in [0.4, 1.0]
+    plo_arr[2] = 0.0
+    phi_arr[2] = 0.6
+    r_arr[2] = 1.0
+    plo_arr[3] = 0.4
+    phi_arr[3] = 1.0
+    r_arr[3] = 1.0
+    // s=1 (terminal): p(1->0)=0, p(1->1)=1, r=0
+    plo_arr[4] = 0.0
+    phi_arr[4] = 0.0
+    r_arr[4] = 0.0
+    plo_arr[5] = 1.0
+    phi_arr[5] = 1.0
+    r_arr[5] = 0.0
+    plo_arr[6] = 0.0
+    phi_arr[6] = 0.0
+    r_arr[6] = 0.0
+    plo_arr[7] = 1.0
+    phi_arr[7] = 1.0
+    r_arr[7] = 0.0
+
+    let (VL_full, VU_full) = robust_value_iteration_full(&m, &r_arr, &plo_arr, &phi_arr, &rvar_arr, 1e-9, 200)
+
+    println("FULL_VL0")
+    println(VL_full[0])
+    println("FULL_VU0")
+    println(VU_full[0])
+    println("FULL_VL1")
+    println(VL_full[1])
+
+    println("LAYER2_OK")
+    return 0
+}
