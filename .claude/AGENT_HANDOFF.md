@@ -246,3 +246,29 @@ RESOLUTION:
   (checked out by a live agent; git would refuse, and removal would disrupt
   that agent). It will retire naturally when that agent advances; until then it
   carries no unique commits.
+
+---
+
+## Active agent lanes (2026-06-04) — modular-checker / parser lane claim
+
+Three concurrent lanes; this entry claims the **modular-checker / parser** lane to
+avoid file + build-lock collisions.
+
+- **This lane (modular checker → parser):** closure/HOF unlock LANDED, **PR #235**
+  (`check/closure-hof-triple-e008`, sound +7, modular checker only). **Next lever:
+  async `spawn`/`await` parser cluster** (11 tests: async_basic/channels/join/sleep/
+  spawn/...) — INVESTIGATED, DEFERRED: async is a parser+checker FEATURE (needs
+  check.sio semantics for spawn/await builtins = i128 territory; parser-only = +0,
+  the const/kernel/extern double-block trap). **Pivoted to PARSE-TO-PASS items**:
+  parser productions that flip FAIL→PASS with parser-only changes (tuple-let
+  `let (a,b)=`, struct/while-for patterns, turbofish, match patterns) — checker
+  already handles the resulting AST. `self-hosted/parser/*` only, zero check.sio
+  overlap with i128.
+- **i128 / arbitrary-width-int lane** (`feat/i128-modular`): owns `check/types.sio`,
+  `check/compat.sio`, `check/check.sio` (int-width additions) + native codegen
+  (`native/codegen_x86_linux.sio`, `native/encode.sio`, `ir/ir.sio`). I avoid these.
+- **SRET / source→ELF lane** (`sret-fix-probe`): owns `self-hosted/ir/*` (lower.sio,
+  IR lowering, for-loops). I avoid these.
+
+Build discipline: all heavy `souc main.sio` builds via `scripts/dev/souc-build-lock.sh`
+(never two at once). Census gotcha: `chmod +x` the mc ELF before running.
