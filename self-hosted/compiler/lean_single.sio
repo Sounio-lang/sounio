@@ -2500,6 +2500,10 @@ fn arr_ty_hash_for_elem_type(alen: i64, esiz: i64, elem_ty: i64, elem_hash: i64)
     if elem_hash != 0 {
         if elem_ty == 6 || elem_ty == 7 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
         if elem_ty == 0 && st_find(elem_hash) >= 0 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
+        // Knowledge<T> element (kind=7, negative hash): preserve the element hash in
+        // the side table so `arr[i]` recovers its Knowledge type. The by-value
+        // struct-array machinery already sizes it via struct_like_nslots()==3.
+        if elem_ty == 0 && knowledge_hash_is(elem_hash) { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
     }
     return arr_ty_hash(alen, esiz, elem_ty)
 }
@@ -4934,6 +4938,24 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             SCAN_TY_NEXT = p
             return
         }
+        // Knowledge<T> element: `[Knowledge[f64]; N]` / `[Knowledge<f64>; N]`. Recurse
+        // scan_type so the kind=7 element hash is captured (the single-token path
+        // below only handles simple names + registered structs).
+        if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "Knowledge")
+           && (TK[(p + 1) as usize] == 41 || TK[(p + 1) as usize] == 23) {
+            scan_type(p)
+            let kelem_ty = SCAN_TY
+            let kelem_hash = SCAN_TY_HASH
+            p = SCAN_TY_NEXT
+            SCAN_TY = 8
+            SCAN_TY_ESIZ = 8
+            if TK[p as usize] == 27 { p = p + 1 }
+            if TK[p as usize] == 4 { SCAN_TY_ALEN = TV[p as usize]; p = p + 1 }
+            if TK[p as usize] == 42 { p = p + 1 }
+            SCAN_TY_HASH = arr_ty_hash_with_elem(SCAN_TY_ALEN, SCAN_TY_ESIZ, kelem_ty, kelem_hash)
+            SCAN_TY_NEXT = p
+            return
+        }
         let ens = TS[p as usize]
         let ene = TE[p as usize]
         let elem_ty = type_name_kind(ens, ene)
@@ -5024,7 +5046,12 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                                                 ref_i = ref_i + 1
                                                             }
                                                             let ref_b = ref_idx * 10
-                                                            if ref_idx >= 0 && REF_TYPE_DATA[(ref_b + 0) as usize] != 0 {
+                                                            // Resolve the alias when it has a real target. A Knowledge<T>
+                                                            // alias (`type CrCl = Knowledge[f64]`) stores kind 0 with a
+                                                            // (negative) Knowledge hash, so the `kind != 0` guard alone
+                                                            // would drop it — leaving CrCl as the bare name hash and
+                                                            // triggering a spurious ty_eq mismatch (P0003) at every binding.
+                                                            if ref_idx >= 0 && (REF_TYPE_DATA[(ref_b + 0) as usize] != 0 || knowledge_hash_is(REF_TYPE_DATA[(ref_b + 1) as usize])) {
                                                                 SCAN_TY = REF_TYPE_DATA[(ref_b + 0) as usize]
                                                                 SCAN_TY_HASH = REF_TYPE_DATA[(ref_b + 1) as usize]
                                                                 if REF_TYPE_DATA[(ref_b + 2) as usize] == 1 {
@@ -8518,6 +8545,125 @@ fn compile_knowledge_literal_x86() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 28 { EP = EP + 1 }
     }
     if TK[EP as usize] == 9 { EP = EP + 1 }
+    if saw_value == 0 {
+        em(0x31); em(0xc0)
+        emit_store_var(base_slot + 2)
+        value_ty = 0
+        value_hash = 0
+    }
+    if saw_var == 0 {
+        em(0x31); em(0xc0)
+        emit_store_var(base_slot + 1)
+    }
+    if saw_conf == 0 {
+        emit_imm64(4607182418800017408)
+        emit_store_var(base_slot)
+    }
+    em(0x48); em(0x8d); em(0x85)
+    em32(0 - (base_slot + 2) * 8)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = knowledge_hash_make_mode(value_ty, value_hash, lit_mode, lit_eps)
+    LAST_EXPR_IS_LINEAR = 0
+    LAST_EXPR_IS_AFFINE = 0
+}
+
+// Paren-form constructor: Knowledge(value, ε=eps, prov="...") or
+// Knowledge(value: v  ε: eps  prov: "...").  Mirrors the brace literal but
+// accepts a leading positional value, `=`/`:` separators, optional commas,
+// and the unicode ε key.  Stores the static ε literal into the type hash so
+// compile-time confidence gates see it (Contribution 2 substrate).
+fn compile_knowledge_paren_x86() with IO, Mut, Panic, Div {
+    EP = EP + 1  // skip '('
+    let base_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+    var value_ty: i64 = 0
+    var value_hash: i64 = 0
+    var saw_value: i64 = 0
+    var saw_var: i64 = 0
+    var saw_conf: i64 = 0
+    var lit_mode: i64 = 0
+    var lit_eps: i64 = -1
+    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        if TK[EP as usize] == 3 && (TK[(EP + 1) as usize] == 16 || TK[(EP + 1) as usize] == 43) {
+            let field_tok = EP
+            let fns = TS[EP as usize]
+            let fne = TE[EP as usize]
+            let is_eps_uni = tok_is_unicode_epsilon(field_tok)
+            EP = EP + 2  // skip name and `=`/`:`
+            let field_start = EP
+            compile_or()
+            let field_ty = EXPR_TY
+            let field_hash = EXPR_TY_HASH
+            let lit_tok = expr_simple_numeric_tok(field_start, EP)
+            if src_match(fns, fne - fns, "value") {
+                emit_store_var(base_slot + 2)
+                value_ty = field_ty
+                value_hash = field_hash
+                saw_value = 1
+            } else if src_match(fns, fne - fns, "variance") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        emit_i64_to_f64_in_rax_x86()
+                    } else {
+                        tc_error(field_tok, "Knowledge variance must be numeric")
+                        em(0x31); em(0xc0)
+                    }
+                }
+                emit_store_var(base_slot + 1)
+                saw_var = 1
+            } else if src_match(fns, fne - fns, "uncertainty") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        emit_i64_to_f64_in_rax_x86()
+                    } else {
+                        tc_error(field_tok, "Knowledge uncertainty must be numeric")
+                        em(0x31); em(0xc0)
+                    }
+                }
+                em(0x48); em(0x89); em(0xc1)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)
+                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc9)
+                em(0xf2); em(0x0f); em(0x59); em(0xc1)
+                em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+                emit_store_var(base_slot + 1)
+                saw_var = 1
+            } else if is_eps_uni || src_match(fns, fne - fns, "confidence") || src_match(fns, fne - fns, "epsilon") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        emit_i64_to_f64_in_rax_x86()
+                    } else {
+                        tc_error(field_tok, "Knowledge epsilon must be numeric")
+                        em(0x31); em(0xc0)
+                    }
+                }
+                emit_store_var(base_slot)
+                saw_conf = 1
+                if lit_tok >= 0 {
+                    let scaled = tok_scaled_million(lit_tok)
+                    if scaled >= 0 && scaled <= 1000000 {
+                        lit_mode = 1
+                        lit_eps = scaled
+                    }
+                }
+            } else if src_match(fns, fne - fns, "validity") || src_match(fns, fne - fns, "provenance") || src_match(fns, fne - fns, "prov") {
+                // provenance string: compiled above, value discarded
+            } else {
+                tc_error(field_tok, "unknown field in Knowledge constructor")
+            }
+        } else {
+            // Positional argument: the first one is the value
+            compile_or()
+            if saw_value == 0 {
+                emit_store_var(base_slot + 2)
+                value_ty = EXPR_TY
+                value_hash = EXPR_TY_HASH
+                saw_value = 1
+            }
+        }
+        if TK[EP as usize] == 28 { EP = EP + 1 }  // optional comma
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }  // skip ')'
     if saw_value == 0 {
         em(0x31); em(0xc0)
         emit_store_var(base_slot + 2)
@@ -12217,6 +12363,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
             // f64 arithmetic builtins (SSE2) — hash-dispatched, no if-as-expression
             let bh = gl_name_hash(ns, ne)
             let bl = ne - ns
+            // Knowledge(value, ε=eps, prov="...") paren-form constructor
+            if bl == 9 && src_match(ns, ne - ns, "Knowledge") && st_find(bh) < 0 && ident_fi < 0 {
+                compile_knowledge_paren_x86()
+                return
+            }
             // f64_add/sub/mul/div: 7 chars each
             if bl == 7 && bh == 14456679815 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x58); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; EXPR_TY = 2; return }
             if bl == 7 && bh == 121920845326 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5c); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; EXPR_TY = 2; return }
@@ -18548,13 +18699,25 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             if TK[EP as usize] == 41 {
                 EP = EP + 1  // skip [
                 // Element type
-                let etns = TS[EP as usize]
-                let etne = TE[EP as usize]
-                let arr_elem_ty = type_name_kind(etns, etne)
+                var arr_elem_ty: i64 = 0
                 var arr_elem_hash: i64 = 0
-                if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
-                if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
-                EP = EP + 1  // skip element type
+                // Knowledge<T> element: scan the full type so the kind=7 element hash
+                // is captured (`[Knowledge[f64]; N]`); the single-token path below only
+                // handles simple names + registered structs.
+                if src_match(TS[EP as usize], TE[EP as usize] - TS[EP as usize], "Knowledge")
+                   && (TK[(EP + 1) as usize] == 41 || TK[(EP + 1) as usize] == 23) {
+                    scan_type(EP)
+                    arr_elem_ty = SCAN_TY
+                    arr_elem_hash = SCAN_TY_HASH
+                    EP = SCAN_TY_NEXT
+                } else {
+                    let etns = TS[EP as usize]
+                    let etne = TE[EP as usize]
+                    arr_elem_ty = type_name_kind(etns, etne)
+                    if arr_elem_ty == 6 || arr_elem_ty == 7 { arr_elem_hash = gl_name_hash(etns, etne) }
+                    if src_match(etns, etne - etns, "i8") { arr_esiz = 1 }
+                    EP = EP + 1  // skip element type
+                }
                 if TK[EP as usize] == 27 { EP = EP + 1 }  // skip ;
                 arr_len = TV[EP as usize]
                 EP = EP + 1  // skip N
@@ -21820,6 +21983,64 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                         EXPR_BELIEF[p as usize] = m_conf
                         EXPR_PLAUS[p as usize] = m_conf
                         if q < TC && TK[q as usize] == 7 { EXPR_CONF[q as usize] = m_conf }
+                    } else if src_match(ins, ine - ins, "Knowledge") {
+                        // Knowledge(value, ε=eps, prov=..) — confidence is the
+                        // static ε literal (Contribution 2: a low-ε prior lowers
+                        // EXPR_CONF so `with Epistemic(N)` gates reject claims that
+                        // over-state evidence). ε parsed BY NAME, not position
+                        // (value is positional-first). No literal ε → stays 1000.
+                        var kconf: i64 = 1000
+                        var saw_eps_key: i64 = 0
+                        var eps_was_literal: i64 = 0
+                        var kq: i64 = p + 2
+                        var kdepth: i64 = 1
+                        var kclose: i64 = 0 - 1
+                        while kq < TC && kdepth > 0 {
+                            if TK[kq as usize] == 6 { kdepth = kdepth + 1 }
+                            if TK[kq as usize] == 7 {
+                                kdepth = kdepth - 1
+                                if kdepth == 0 { kclose = kq; break }
+                            }
+                            if kdepth > 0 && TK[kq as usize] == 3 {
+                                var is_eps_key: i64 = 0
+                                if tok_is_unicode_epsilon(kq) { is_eps_key = 1 }
+                                if src_match(TS[kq as usize], TE[kq as usize] - TS[kq as usize], "epsilon") { is_eps_key = 1 }
+                                if src_match(TS[kq as usize], TE[kq as usize] - TS[kq as usize], "confidence") { is_eps_key = 1 }
+                                if is_eps_key == 1 && kq + 2 < TC && (TK[(kq + 1) as usize] == 16 || TK[(kq + 1) as usize] == 43) {
+                                    saw_eps_key = 1
+                                    let eps_val_tok = kq + 2
+                                    let eps_after = kq + 3
+                                    // Bare compile-time literal: a numeric token immediately
+                                    // followed by a field terminator — ',' (28), ')' (7), or the
+                                    // next field-key identifier (3, Style-B `ε: v  prov: …`).
+                                    // NOT the head of an expression like `0.99 * runtime`, which
+                                    // would launder high confidence through `*` (19).
+                                    if (TK[eps_val_tok as usize] == 4 || TK[eps_val_tok as usize] == 53)
+                                       && eps_after < TC
+                                       && (TK[eps_after as usize] == 28 || TK[eps_after as usize] == 7 || TK[eps_after as usize] == 3) {
+                                        let eps_scaled = tok_scaled_million(eps_val_tok)
+                                        if eps_scaled >= 0 && eps_scaled <= 1000000 {
+                                            kconf = eps_scaled / 1000
+                                            eps_was_literal = 1
+                                        }
+                                    }
+                                }
+                            }
+                            kq = kq + 1
+                        }
+                        // Soundness: ε declared but NOT a compile-time literal → its value is
+                        // unprovable at compile time. Use 1 (positive, below any real gate min)
+                        // so `with Epistemic(N)` REJECTS rather than laundering unknown/runtime
+                        // confidence as certain. (No ε at all keeps the language's "asserted
+                        // certain" 1000 default — matches the brace form.) A named-constant ε is
+                        // conservatively treated as non-literal; const-folding is future work.
+                        if saw_eps_key == 1 && eps_was_literal == 0 { kconf = 1 }
+                        EXPR_ETY[p as usize] = ety_mk_knowledge(2, kconf, EXPR_UNIT_DIM)
+                        EXPR_CONF[p as usize] = kconf
+                        MEAS_CONF[p as usize] = kconf
+                        EXPR_BELIEF[p as usize] = kconf
+                        EXPR_PLAUS[p as usize] = kconf
+                        if kclose >= 0 { EXPR_CONF[kclose as usize] = kconf }
                     } else if src_match(ins, ine - ins, "asserted") {
                         EXPR_ETY[p as usize] = ety_mk_knowledge(2, 970, EXPR_UNIT_DIM)
                         EXPR_CONF[p as usize] = 970
@@ -24560,6 +24781,17 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         let rp_tok = FN_RET_TY_TOK[rp_i as usize]
         if rp_tok >= 0 {
             scan_type(rp_tok)
+            // Re-store the resolved return type ONLY for Knowledge<T>-alias returns
+            // (e.g. `-> DailyDose` where `type DailyDose = Knowledge[f64]`): these could
+            // not resolve at Pass-1 sig-scan time because the alias table was still
+            // empty, so FN_RET_HASH held the bare alias-name hash and every return/caller
+            // ty_eq mismatched (P0003). Narrowly guarded by knowledge_hash_is so non-alias
+            // returns keep their Pass-1 type verbatim (a broad re-store corrupted complex
+            // returns — e.g. Clifford multivectors — that Pass 1 had set correctly).
+            if knowledge_hash_is(SCAN_TY_HASH) {
+                FN_RET_TY[rp_i as usize] = SCAN_TY
+                FN_RET_HASH[rp_i as usize] = SCAN_TY_HASH
+            }
             // PR-10: store f64 metadata alongside integer predicates
             if SCAN_HAS_PRED == 1 {
                 FN_RET_HAS_PRED[rp_i as usize] = 1
@@ -26683,6 +26915,119 @@ fn compile_knowledge_literal_a64() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_LINEAR = 0
 }
 
+// Paren-form constructor (ARM64): see compile_knowledge_paren_x86.
+fn compile_knowledge_paren_a64() with IO, Mut, Panic, Div {
+    EP = EP + 1  // skip '('
+    let base_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+    var value_ty: i64 = 0
+    var value_hash: i64 = 0
+    var saw_value: i64 = 0
+    var saw_var: i64 = 0
+    var saw_conf: i64 = 0
+    var lit_mode: i64 = 0
+    var lit_eps: i64 = -1
+    while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
+        if TK[EP as usize] == 3 && (TK[(EP + 1) as usize] == 16 || TK[(EP + 1) as usize] == 43) {
+            let field_tok = EP
+            let fns = TS[EP as usize]
+            let fne = TE[EP as usize]
+            let is_eps_uni = tok_is_unicode_epsilon(field_tok)
+            EP = EP + 2  // skip name and `=`/`:`
+            let field_start = EP
+            compile_or_a64()
+            let field_ty = EXPR_TY
+            let field_hash = EXPR_TY_HASH
+            let lit_tok = expr_simple_numeric_tok(field_start, EP)
+            if src_match(fns, fne - fns, "value") {
+                emit_store_var_a64(base_slot + 2)
+                value_ty = field_ty
+                value_hash = field_hash
+                saw_value = 1
+            } else if src_match(fns, fne - fns, "variance") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        em32(0x9E620000)
+                        em32(0x9E660000)
+                    } else {
+                        tc_error(field_tok, "Knowledge variance must be numeric")
+                        em32(0xD2800000)
+                    }
+                }
+                emit_store_var_a64(base_slot + 1)
+                saw_var = 1
+            } else if src_match(fns, fne - fns, "uncertainty") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        em32(0x9E620000)
+                        em32(0x9E660000)
+                    } else {
+                        tc_error(field_tok, "Knowledge uncertainty must be numeric")
+                        em32(0xD2800000)
+                    }
+                }
+                em32(0xAA0003E1)
+                emit_f64_binop_a64(0x1E610800)
+                emit_store_var_a64(base_slot + 1)
+                saw_var = 1
+            } else if is_eps_uni || src_match(fns, fne - fns, "confidence") || src_match(fns, fne - fns, "epsilon") {
+                if field_ty != 2 {
+                    if ty_is_numeric(field_ty) {
+                        em32(0x9E620000)
+                        em32(0x9E660000)
+                    } else {
+                        tc_error(field_tok, "Knowledge epsilon must be numeric")
+                        em32(0xD2800000)
+                    }
+                }
+                emit_store_var_a64(base_slot)
+                saw_conf = 1
+                if lit_tok >= 0 {
+                    let scaled = tok_scaled_million(lit_tok)
+                    if scaled >= 0 && scaled <= 1000000 {
+                        lit_mode = 1
+                        lit_eps = scaled
+                    }
+                }
+            } else if src_match(fns, fne - fns, "validity") || src_match(fns, fne - fns, "provenance") || src_match(fns, fne - fns, "prov") {
+                // provenance string: compiled above, value discarded
+            } else {
+                tc_error(field_tok, "unknown field in Knowledge constructor")
+            }
+        } else {
+            // Positional argument: the first one is the value
+            compile_or_a64()
+            if saw_value == 0 {
+                emit_store_var_a64(base_slot + 2)
+                value_ty = EXPR_TY
+                value_hash = EXPR_TY_HASH
+                saw_value = 1
+            }
+        }
+        if TK[EP as usize] == 28 { EP = EP + 1 }  // optional comma
+    }
+    if TK[EP as usize] == 7 { EP = EP + 1 }  // skip ')'
+    if saw_value == 0 {
+        em32(0xD2800000)
+        emit_store_var_a64(base_slot + 2)
+        value_ty = 0
+        value_hash = 0
+    }
+    if saw_var == 0 {
+        em32(0xD2800000)
+        emit_store_var_a64(base_slot + 1)
+    }
+    if saw_conf == 0 {
+        emit_imm64_a64(4607182418800017408)
+        emit_store_var_a64(base_slot)
+    }
+    emit_lea_var_a64(base_slot + 2)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 0
+    EXPR_TY_HASH = knowledge_hash_make_mode(value_ty, value_hash, lit_mode, lit_eps)
+    LAST_EXPR_IS_LINEAR = 0
+}
+
 // ─── ARM64 expression compiler ───
 fn compile_primary_a64() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_CLOSURE = 0
@@ -27955,6 +28300,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             // f64 builtins
             let bh = gl_name_hash(ns, ne)
             let bl = ne - ns
+            // Knowledge(value, ε=eps, prov="...") paren-form constructor
+            if bl == 9 && src_match(ns, ne - ns, "Knowledge") && st_find(bh) < 0 && ident_fi < 0 {
+                compile_knowledge_paren_a64()
+                return
+            }
             if bl == 7 && bh == 14456679815 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
             if bl == 7 && bh == 121920845326 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
             if bl == 7 && bh == 47722337034 { EP = EP + 1; compile_or_a64(); emit_push_a64(); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800); if TK[EP as usize] == 7 { EP = EP + 1 }; EXPR_IS_F64 = 1; return }
