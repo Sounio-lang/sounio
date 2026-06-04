@@ -2633,8 +2633,17 @@ impl Lowerer {
     fn push_loop_labels(self, continue_label: i64, break_label: i64) -> Lowerer with Mut, Panic, Div {
         var lo = self
         if lo.loop_depth < 256 {
-            (*lo.loop_labels).continue_labels[lo.loop_depth as usize] = continue_label
-            (*lo.loop_labels).break_labels[lo.loop_depth as usize] = break_label
+            // Copy-out → mutate → rebox (the pattern emit/bind_local already use). The
+            // previous in-place `(*lo.loop_labels).continue_labels[i] = v` is a
+            // deref-through-Box array store, which is miscompiled to write into a
+            // discarded copy: loop_depth (a direct scalar) advanced but the label
+            // arrays never persisted, so current_break/continue_label read back the
+            // initial IR_INVALID_LABEL and every break/continue reported an error
+            // ("IR lowering failed"), in both for- and while-loops.
+            var labels = *lo.loop_labels
+            labels.continue_labels[lo.loop_depth as usize] = continue_label
+            labels.break_labels[lo.loop_depth as usize] = break_label
+            lo.loop_labels = Box::new(labels)
             lo.loop_depth = lo.loop_depth + 1
             lo
         } else {
