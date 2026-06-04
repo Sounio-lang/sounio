@@ -1172,6 +1172,40 @@ fn checker_lower_fn_type_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mu
     ty_fn(sig_id)
 }
 
+// *mut transcription of lower_refinement_type (by-value): the inplace type-lowering spine
+// lacked a TypeRefinement arm and fell to the silent _ => checker_note_type_error_mut, so an
+// inline refinement type `{ x: T | x op v }` (param/return/let) silently failed in the
+// no-import path. Lower the base type, build the predicate, register a synthetic refinement,
+// return ty_with_refinement.
+fn checker_lower_refinement_type_mut(c: *mut Checker, opt: Option<Box<RefinementInfo> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(info) => {
+            let ri = *info
+            match ri.base_type {
+                Some(bte) => {
+                    let base_ty = checker_lower_type_expr_mut(c, *bte)
+                    if ri.pred_op > 0 {
+                        let pred = if ri.pred_is_float {
+                            pred_make_float(ri.pred_op, ri.var_name, ri.pred_float_val)
+                        } else {
+                            pred_make_int(ri.pred_op, ri.var_name, ri.pred_int_val)
+                        }
+                        let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: pred }
+                        let synth_name = make_refinement_synth_name((*c).refinements.count)
+                        (*c).refinements = refinement_table_add((*c).refinements, synth_name, rt)
+                        let ref_idx = (*c).refinements.count - 1
+                        ty_with_refinement(base_ty, ref_idx)
+                    } else {
+                        base_ty
+                    }
+                }
+                None => ty_error()
+            }
+        }
+        None => ty_error()
+    }
+}
+
 fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !checker_enter_type_expr_mut(c) {
         return ty_error()
@@ -1268,6 +1302,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         TypeExprKind::TypeReference => checker_lower_ref_type_dispatch_mut(c, te.inner, false)
         TypeExprKind::TypeRefMut => checker_lower_ref_type_dispatch_mut(c, te.inner, true)
         TypeExprKind::TypeFn => checker_lower_fn_type_mut(c, te)
+        TypeExprKind::TypeRefinement => checker_lower_refinement_type_mut(c, te.refinement_info)
         _ => {
             checker_note_type_error_mut(c)
             ty_error()
@@ -2835,6 +2870,15 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_array_lit_inplace(c, e)
     } else if e.kind == ExprKind::ExprUnary {
         result = checker_check_unary_expr_inplace(c, e)
+        // Record a negated integer literal as the last literal so a refinement-literal check
+        // on `let x: { n | n > 0 } = -5` sees the folded value (-5) and flags the violation.
+        if e.un_op == UnaryOp::OpNeg {
+            let folded_neg = checker_eval_const_int_opt_expr_mut(c, Some(Box::new(e)))
+            if folded_neg.0 != 0 {
+                (*c).last_literal_int = folded_neg.1
+                (*c).last_literal_kind = 1
+            }
+        }
     } else if e.kind == ExprKind::ExprFieldAccess {
         result = checker_check_field_access_inplace(c, e)
     } else if e.kind == ExprKind::ExprIndex {
@@ -4334,6 +4378,20 @@ fn checker_check_call_arg_refinement_boundary_inplace(c: *mut Checker, arg_expr:
     }
     if arg_expr.kind == ExprKind::ExprFloatLit {
         let result = refine_static_check_float_literal(expected_ref.predicate, arg_expr.float_val)
+        if result == refine_static_result_proved() {
+            (*c).refine_static_proved = (*c).refine_static_proved + 1
+        } else {
+            (*c).refine_violations = (*c).refine_violations + 1
+            checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
+        }
+        return
+    }
+
+    // Constant-fold non-literal integer args (e.g. -5 = OpNeg, 0 - 5 = OpSub) and check the
+    // predicate, so a definite violation is a compile error rather than a deferred W040 warning.
+    let folded_arg = checker_eval_const_int_opt_expr_mut(c, Some(Box::new(arg_expr)))
+    if folded_arg.0 != 0 {
+        let result = refine_static_check_int_literal(expected_ref.predicate, folded_arg.1)
         if result == refine_static_result_proved() {
             (*c).refine_static_proved = (*c).refine_static_proved + 1
         } else {
