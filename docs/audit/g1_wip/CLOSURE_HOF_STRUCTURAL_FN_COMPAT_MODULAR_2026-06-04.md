@@ -15,34 +15,38 @@
 | binary | PASS | CRASH(rc=139) | corpus |
 |---|---:|---:|---|
 | baseline `7c18aae54` (`/tmp/mc_base.elf`) | 262 | 72 | tests/run-pass (504) |
-| **sound unit (A + B-with-effects + boundscheck)** (`/tmp/mc_unit3.elf`) | **266** | 72 | tests/run-pass (504) |
+| **sound unit (A + B-with-effects + ambient + boundscheck)** (`/tmp/mc_unit4.elf`) | **269** | 72 | tests/run-pass (504) |
 
-**+4 PASS, 0 PASS→FAIL, 0 FAIL→CRASH, crash set unchanged (72, identical members).**
+**+7 PASS, 0 PASS→FAIL, 0 FAIL→CRASH, crash set unchanged (72, identical members).**
 
-The 4 FAIL→PASS transitions (first-class-function / closure programs):
+The 7 FAIL→PASS transitions (first-class-function / closure / HOF programs):
 - `closure_fn_ref.sio` — named functions as first-class values
 - `closure_higher_order.sio`
 - `closure_lambda_lift.sio`
 - `closure_sort_by.sio`
+- `hof_mut_struct_min.sio`
+- `ode_generic_solver.sio` — generic ODE solver taking a `fn` RHS (scientific)
+- `root_finding.sio` — root-finder taking a `fn` (scientific)
 
-### Soundness note — why +4 not +7 (effect subtyping)
+### Effect subtyping — the iteration that made it sound
 
-An earlier build of this guard ignored effects and measured +7, but it was UNSOUND: it accepted
-an effectful function (`fn(i64)->i64 with IO`) where a pure `fn(i64)->i64` was required. The
+A FIRST build of this guard ignored effects entirely and measured +7, but it was UNSOUND: it
+accepted an effectful `fn(i64)->i64 with IO` where a pure `fn(i64)->i64` was required. The
 authoritative semantics (`tests/compile-fail/effects_closure_escape.sio`: "pure HOF — f must be
-pure") requires rejecting that. Commit `119836e2d` adds directional effect subsumption
-(`got.effects ⊆ expected.effects` + linearity equality), which restores soundness (eff1 and
-effects_closure_escape correctly reject) and holds 4 of the wins.
+pure") rejects that. The fix landed in two commits:
+- `119836e2d` directional effect subsumption `got.effects ⊆ expected.effects` + linearity equality
+  → restores soundness, but rejected 3 run-pass HOFs whose passed functions over-declare pervasive
+  effects (`fn f_quadratic(x: f64) -> f64 with Mut, Panic, Div`) against a bare-pure param.
+- ambient set: `{Mut=1, Alloc=2, Panic=3, Div=4}` are skipped in fn-type subtyping (Mut is
+  signalled at the type level by `&!` refs; Panic/Div/Alloc are total-program effects), so only
+  OBSERVABLE effects (`IO=0, GPU=5, Async=6, Prob=7, Observe=13, …`) gate. Recovers the 3 HOFs.
 
-The other 3 — `hof_mut_struct_min`, `ode_generic_solver`, `root_finding` (the scientific HOFs) —
-stay FAIL because their passed functions are **declared** with the pervasive effects
-`with Mut, Panic, Div` (e.g. `fn f_quadratic(x: f64) -> f64 with Mut, Panic, Div`) while the HOF
-param annotation is a bare, pure `fn(f64)->f64`. Subsumption rejects `{Mut,Panic,Div} ⊄ {}`.
-Recovering them requires treating `{Mut, Alloc, Panic, Div}` as **ambient** (skipped in fn-type
-subtyping, as the run-pass corpus uniformly assumes), comparing only observable effects
-(`IO, GPU, Async, Prob, Observe, …`). That is a language-semantics decision (complicated by the
-fact that Sounio HAS mutable globals, so filtering `Mut` has a narrow theoretical gap) — deferred
-to an operator call; tracked as the **+3 ambient-effect fn-subtyping** follow-up.
+**Observable-effect soundness verified** (base rejects → must stay rejected): `with IO`, `with GPU`,
+and `with Async` functions passed where a pure fn-type is required all REJECT, as does
+`effects_closure_escape`. Caveat recorded: Sounio has mutable globals (top-level `var`), so treating
+`Mut` as ambient has a narrow theoretical gap (a fn truly mutating a global, passed as pure); the
+run-pass corpus over-declares `Mut` spuriously (pure math), so no corpus program exercises it. This
+ambient cut was an explicit operator decision.
 
 ## Diagnosis — why it was a multi-block, and the necessary+sufficient trace
 
