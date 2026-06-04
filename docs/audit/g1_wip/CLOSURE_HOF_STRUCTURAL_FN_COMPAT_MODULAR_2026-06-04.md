@@ -15,18 +15,34 @@
 | binary | PASS | CRASH(rc=139) | corpus |
 |---|---:|---:|---|
 | baseline `7c18aae54` (`/tmp/mc_base.elf`) | 262 | 72 | tests/run-pass (504) |
-| **unit (A+B+boundscheck)** (`/tmp/mc_unit.elf`) | **269** | 72 | tests/run-pass (504) |
+| **sound unit (A + B-with-effects + boundscheck)** (`/tmp/mc_unit3.elf`) | **266** | 72 | tests/run-pass (504) |
 
-**+7 PASS, 0 PASS→FAIL, 0 FAIL→CRASH, crash set unchanged (72, identical members).**
+**+4 PASS, 0 PASS→FAIL, 0 FAIL→CRASH, crash set unchanged (72, identical members).**
 
-The 7 FAIL→PASS transitions (all higher-order / first-class-function programs):
+The 4 FAIL→PASS transitions (first-class-function / closure programs):
 - `closure_fn_ref.sio` — named functions as first-class values
 - `closure_higher_order.sio`
 - `closure_lambda_lift.sio`
 - `closure_sort_by.sio`
-- `hof_mut_struct_min.sio`
-- `ode_generic_solver.sio` — generic ODE solver taking a `fn` RHS (scientific)
-- `root_finding.sio` — root-finder taking a `fn` (scientific)
+
+### Soundness note — why +4 not +7 (effect subtyping)
+
+An earlier build of this guard ignored effects and measured +7, but it was UNSOUND: it accepted
+an effectful function (`fn(i64)->i64 with IO`) where a pure `fn(i64)->i64` was required. The
+authoritative semantics (`tests/compile-fail/effects_closure_escape.sio`: "pure HOF — f must be
+pure") requires rejecting that. Commit `119836e2d` adds directional effect subsumption
+(`got.effects ⊆ expected.effects` + linearity equality), which restores soundness (eff1 and
+effects_closure_escape correctly reject) and holds 4 of the wins.
+
+The other 3 — `hof_mut_struct_min`, `ode_generic_solver`, `root_finding` (the scientific HOFs) —
+stay FAIL because their passed functions are **declared** with the pervasive effects
+`with Mut, Panic, Div` (e.g. `fn f_quadratic(x: f64) -> f64 with Mut, Panic, Div`) while the HOF
+param annotation is a bare, pure `fn(f64)->f64`. Subsumption rejects `{Mut,Panic,Div} ⊄ {}`.
+Recovering them requires treating `{Mut, Alloc, Panic, Div}` as **ambient** (skipped in fn-type
+subtyping, as the run-pass corpus uniformly assumes), comparing only observable effects
+(`IO, GPU, Async, Prob, Observe, …`). That is a language-semantics decision (complicated by the
+fact that Sounio HAS mutable globals, so filtering `Mut` has a narrow theoretical gap) — deferred
+to an operator call; tracked as the **+3 ambient-effect fn-subtyping** follow-up.
 
 ## Diagnosis — why it was a multi-block, and the necessary+sufficient trace
 
