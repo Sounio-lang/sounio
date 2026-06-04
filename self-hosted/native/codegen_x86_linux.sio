@@ -7,7 +7,7 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, ir_name_eq}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS, IR_MAX_STRINGS, ir_name_eq}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
@@ -5552,18 +5552,17 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_emit_store_rax_mem_rdx_rbx8(nc)
         } else if instr_op == IrOpcode::IrCall {
             let argc = (*func).instrs[i as usize].arg_count
-            if argc > 2 {
+            if argc > 6 {
                 return false
             }
-            if argc > 0 {
-                let arg0 = (*func).instrs[i as usize].src1
-                if arg0 < 0 { return false }
-                nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(arg0))
-            }
-            if argc > 1 {
-                let arg1 = (*func).instrs[i as usize].src2
-                if arg1 < 0 { return false }
-                nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(arg1))
+            var ai: i64 = 0
+            while ai < argc {
+                let arg_reg = nc_ir_call_arg_at((*func).instrs[i as usize].call_args, ai)
+                if arg_reg < 0 { return false }
+                let preg = param_reg(ai)
+                if preg < 0 { return false }
+                nc_emit_load_rbp_disp32_reg(nc, preg, ir_slot_offset(arg_reg))
+                ai = ai + 1
             }
             let call_pos = (*nc).code.len
             nc_emit_call_rel32_placeholder(nc)
@@ -5723,6 +5722,18 @@ fn nc_emit_store_rbp_disp32_reg(nc: &! NativeCompiler, reg: i64, disp: i64) with
     nc_emit_byte(nc, 0x89)
     nc_emit_byte(nc, 0x80 | (reg * 8) | 5)
     nc_emit_u32_le(nc, disp)
+}
+
+fn nc_ir_call_arg_at(args: Option<Box<IrRegList>>, target_index: i64) -> i64 with Mut, Panic, Div {
+    match args {
+        Some(list) => {
+            if target_index == 0 {
+                return (*list).head
+            }
+            nc_ir_call_arg_at((*list).tail, target_index - 1)
+        }
+        _ => -1,
+    }
 }
 
 // Pass up to 4 args from consecutive vregs into SysV param regs (rdi/rsi/rdx/rcx)
