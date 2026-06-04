@@ -2497,6 +2497,28 @@ fn compiler_main_make_native_v2_wide_mul_module() -> IrModule with Mut, Panic, D
     module.fn_count = 1
     module
 }
+// Observation gate: ((2^32 * 2^32) >> 64) as i64 == 1. Proves a *source-shaped*
+// wide computation whose RESULT is observable in an i64 exit code (unlike add/sub/mul,
+// whose low limb is identical to i64 and so undetectable). a*a = 2^64 -> limbs lo=0,hi=1;
+// >>64 (1 limb) moves the hi limb into limb 0; returning limb 0 yields 1 (a broken/no-op
+// shift would return the un-shifted low limb = 0).
+fn compiler_main_make_native_v2_wide_shr_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.instrs[0] = ir_load_imm(0, 4294967296)   // a.lo = 2^32
+    func.instrs[1] = ir_load_imm(1, 0)            // a.hi = 0
+    func.instrs[2] = ir_load_imm(2, 4294967296)   // a.lo (2nd operand) = 2^32
+    func.instrs[3] = ir_load_imm(3, 0)            // a.hi = 0
+    func.instrs[4] = ir_wide_mul(4, 0, 2, 2)      // product -> limbs 4,5 ; scratch 6,7
+    func.instrs[5] = ir_wide_shr_limb(8, 4, 2, 1) // (product >> 64) -> limbs 8,9 ; limb0(8)=hi(5)=1
+    func.instrs[6] = ir_return(8)                 // return low limb of shifted (= 1)
+    func.instr_count = 7
+    func.reg_count = 10
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
 fn run_native_v2_emit_wide(args: ArgList, flag_index: i64, kind: i64) with IO, Mut, Panic, Div, Alloc {
     let out_path = compiler_mode_source_arg(args, flag_index, "--native-v2-emit-wide")
     let spec = native_resolve_target("x86_64-linux", "auto", true)
@@ -2508,6 +2530,10 @@ fn run_native_v2_emit_wide(args: ArgList, flag_index: i64, kind: i64) with IO, M
         let m = compiler_main_make_native_v2_wide_sub_module()
         let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
         print("wide-sub rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
+    } else if kind == 3 {
+        let m = compiler_main_make_native_v2_wide_shr_module()
+        let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
+        print("wide-shr rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
     } else {
         let m = compiler_main_make_native_v2_wide_mul_module()
         let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
@@ -26368,6 +26394,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-emit-wide-mul" {
             run_native_v2_emit_wide(args, arg_idx, 2)
+            return
+        } else if mode == "--native-v2-emit-wide-shr" {
+            run_native_v2_emit_wide(args, arg_idx, 3)
             return
         } else if mode == "--native-v2-compile" {
             run_native_v2_compile_mode(args, arg_idx)
