@@ -2605,12 +2605,22 @@ impl Lowerer {
 
         var lo = self
         if (*lo.module).fn_count < IR_MAX_FUNCS {
-            let idx = (*lo.module).fn_count
-            // Slot is already ir_empty_function() (module init); set name in place
-            // instead of `var new_fn = ...; (*lo.module).functions[idx] = new_fn`,
-            // a whole-element store that materializes the [IrFunction;1400] module.
-            (*lo.module).functions[idx as usize].name = name
-            (*lo.module).fn_count = idx + 1
+            // Bind the box to a LOCAL before deref-store. `(*lo.module).fn_count = v`
+            // (deref-store through a box FIELD of local `lo`) writes a discarded
+            // by-value copy and reads back 0 (documented c634b38f miscompile). The
+            // bound-local pattern `let m = lo.module; (*m).f = v` (as the working
+            // stub path module_frontend_lower_fn_item_into uses) stores correctly.
+            var m = lo.module
+            let idx = (*m).fn_count
+            // Whole-element store of a fresh IrFunction (the proven stub pattern at
+            // module_frontend_lower_fn_item_into:2749). A nested-array-element STRUCT
+            // field store `(*m).functions[idx].name = name` no-ops on c634b38f (Name
+            // is a [i8;128] struct); building the element and storing it whole works.
+            var new_fn = ir_empty_function()
+            new_fn.name = name
+            (*m).functions[idx as usize] = new_fn
+            (*m).fn_count = idx + 1
+            lo.module = m
             (lo, idx)
         } else {
             let loe = lo.report_error()
@@ -3086,40 +3096,42 @@ impl Lowerer {
         }
 
         let strategy = lo.ir_compute_strategy_from_ast_ref(return_type, effects)
-        // In-place per-field writes through the module box. The old
-        // `var func = (*lo.module).functions[fn_id]; func.X = ...; (*lo.module).functions[fn_id] = func`
-        // copied a whole IrFunction element OUT, which on c634b38f materializes the
-        // entire IrModule (inline [IrFunction;1400]) and faults one-past-end
-        // (idx=1400). Per-field stores through the pointer copy nothing large.
+        // Build a FRESH IrFunction local and whole-element store it (the proven
+        // stub pattern, module_frontend:2749). The old `var func =
+        // (*lo.module).functions[fn_id]` copy-OUT materializes the [IrFunction;1400]
+        // module and faults (idx=1400); and per-field nested-array-element STRUCT
+        // stores like `(*m).functions[fn_id].name = name` no-op on c634b38f.
+        // Building the element on the stack and storing it whole avoids both.
         let fi = fn_id as usize
-        (*lo.module).functions[fi].name = name
-        (*lo.module).functions[fi].compile_strategy = strategy
-        (*lo.module).functions[fi].param_count = ir_param_list_count_ref(params)
-        var pri: i64 = 0
-        while pri < 64 {
-            (*lo.module).functions[fi].param_regs[pri as usize] = IR_INVALID_REG
-            pri = pri + 1
-        }
-        (*lo.module).functions[fi].instr_count = 0
-        (*lo.module).functions[fi].reg_count = 0
-        (*lo.module).functions[fi].label_count = 0
+        var m = lo.module
+        var func = ir_empty_function()
+        func.name = name
+        func.compile_strategy = strategy
+        func.param_count = ir_param_list_count_ref(params)
+        func.param_regs = [IR_INVALID_REG; 64]
+        func.instr_count = 0
+        func.reg_count = 0
+        func.label_count = 0
         if strategy == IR_STRATEGY_INSTRUMENTED {
-            (*lo.module).functions[fi].param_count = (*lo.module).functions[fi].param_count + 1
-            if (*lo.module).functions[fi].prof_counter_id < 0 {
-                let ctr_idx = (*lo.module).prof_counter_count
+            func.param_count = func.param_count + 1
+            if func.prof_counter_id < 0 {
+                let ctr_idx = (*m).prof_counter_count
                 if ctr_idx < 64 {
-                    (*lo.module).prof_counters[ctr_idx as usize] = IrProfCounterInfo {
+                    (*m).prof_counters[ctr_idx as usize] = IrProfCounterInfo {
                         fn_id: fn_id,
                         fn_name: name,
                         counter_id: ctr_idx,
                     }
-                    (*lo.module).prof_counter_count = ctr_idx + 1
-                    (*lo.module).functions[fi].prof_counter_id = ctr_idx
+                    (*m).prof_counter_count = ctr_idx + 1
+                    func.prof_counter_id = ctr_idx
                 } else {
+                    lo.module = m
                     return lo.report_error()
                 }
             }
         }
+        (*m).functions[fi as usize] = func
+        lo.module = m
         lo
     }
 
