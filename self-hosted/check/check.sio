@@ -2146,45 +2146,14 @@ fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a
     print_error_note(code)
 }
 
-// Ambient (pervasive/total) effects do not gate fn-type subtyping: Mut, Alloc,
-// Panic and Div are either signalled at the type level (mutation via `&!` refs) or
-// are total-program effects, and the run-pass corpus uniformly passes functions
-// over-declaring them (e.g. `fn(f64)->f64 with Mut,Panic,Div`) to bare HOF params.
-// Observable effects (IO, GPU, Async, Prob, Observe, …) DO gate, so the "pure HOF"
-// rule (effects_closure_escape) still rejects an IO function where pure is required.
-fn is_ambient_effect(id: i64) -> bool {
-    id == 1 || id == 2 || id == 3 || id == 4   // Mut, Alloc, Panic, Div
-}
-
-// Effect subsumption: every OBSERVABLE effect performed by `got` must be permitted
-// by `allowed`. A function value may use fewer observable effects than the required
-// fn-type allows, but never more; ambient effects in `got` are ignored (see above).
-fn fn_sigs_effects_subset(got: FnSig, allowed: FnSig) -> bool with Mut, Panic, Div {
-    var i: i64 = 0
-    while i < got.effect_count {
-        let e = got.effects[i as usize]
-        if !is_ambient_effect(e) {
-            var found = false
-            var j: i64 = 0
-            while j < allowed.effect_count {
-                if allowed.effects[j as usize] == e { found = true }
-                j = j + 1
-            }
-            if !found { return false }
-        }
-        i = i + 1
-    }
-    true
-}
-
 // Structural function-type compatibility: `got` is usable where `expected` is
-// required if they share arity, pairwise-compatible parameter and return types,
-// the same linearity, and `got`'s effects are a subset of `expected`'s. Named
-// functions used as first-class values and `fn(T)->U` annotations register
-// SEPARATE FnSig entries (distinct sig_ids), so the sig_id-equality test in
-// types_compatible() spuriously rejects structurally identical function types;
-// this compares the stored signatures directly. Effects and linearity ARE checked
-// (directionally for effects) so the guard never relaxes an effect/linearity rule.
+// required if they share arity, pairwise-compatible parameter and return types, and
+// the same linearity. Named functions used as first-class values and `fn(T)->U`
+// annotations register SEPARATE FnSig entries (distinct sig_ids), so the
+// sig_id-equality test in types_compatible() spuriously rejects structurally
+// identical function types; this compares the stored signatures directly. Effects are
+// NOT compared here — bare fn-type params are effect-polymorphic; a value's effects
+// are propagated to the HOF call site instead (checker_check_call_args_inner_inplace).
 fn fn_sigs_structurally_compatible(expected: FnSig, got: FnSig) -> bool with Mut, Panic, Div, Alloc {
     if expected.param_count != got.param_count { return false }
     if expected.is_linear_closure != got.is_linear_closure { return false }
@@ -4253,8 +4222,8 @@ fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effe
     }
     // Inference mode: while checking a closure body, ACCUMULATE the callee's effects
     // into current_effects (deduped, capped at 8) so the closure's inferred effect set
-    // captures them. Enforcement (below) is skipped here — the closure is later checked
-    // for compatibility against the expected fn-type via fn_sigs_effects_subset.
+    // captures them. Enforcement (below) is skipped here — the closure's effects are
+    // later propagated to the HOF call site where its caller must declare them.
     if (*c).closure_inference_depth > 0 {
         var i: i64 = 0
         while i < callee_effect_count {
