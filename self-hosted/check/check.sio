@@ -476,6 +476,26 @@ fn mangle_append_args(result: &! Name, args: TypeEntryList) with Mut, Panic, Div
     }
 }
 
+// Append a wide-int mangling: sign byte ('i'/'u') + decimal digits of the bit width,
+// so i128/i256/i1024 mangle to distinct names (monomorphization correctness).
+fn mangle_append_wide(result: &! Name, sign: i8, bits: i64) with Mut, Panic, Div {
+    if (*result).len < 128 {
+        (*result).buf[(*result).len as usize] = sign
+        (*result).len = (*result).len + 1
+    }
+    var divisor: i64 = 1
+    var v = bits
+    while v >= 10 { divisor = divisor * 10; v = v / 10 }
+    while divisor >= 1 {
+        let d = (bits / divisor) % 10
+        if (*result).len < 128 {
+            (*result).buf[(*result).len as usize] = (48 + d) as i8
+            (*result).len = (*result).len + 1
+        }
+        divisor = divisor / 10
+    }
+}
+
 fn mangle_append_type_name(result: &! Name, ty: TypeEntry) with Mut, Panic, Div {
     // For named types, copy the name; for primitives, use canonical short names
     if ty.kind == TypeKind::TyI8 {
@@ -485,7 +505,7 @@ fn mangle_append_type_name(result: &! Name, ty: TypeEntry) with Mut, Panic, Div 
     } else if ty.kind == TypeKind::TyI64 {
         mangle_append_literal(result, 105, 54, 52, 0, 3)  // "i64"
     } else if ty.kind == TypeKind::TyI128 {
-        mangle_append_literal(result, 105, 49, 50, 56, 4)  // "i128"
+        mangle_append_wide(result, 105, ty.clifford_p)  // "i<bits>"
     } else if ty.kind == TypeKind::TyU8 {
         mangle_append_literal(result, 117, 56, 0, 0, 2)  // "u8"
     } else if ty.kind == TypeKind::TyU32 {
@@ -493,7 +513,7 @@ fn mangle_append_type_name(result: &! Name, ty: TypeEntry) with Mut, Panic, Div 
     } else if ty.kind == TypeKind::TyU64 {
         mangle_append_literal(result, 117, 54, 52, 0, 3)  // "u64"
     } else if ty.kind == TypeKind::TyU128 {
-        mangle_append_literal(result, 117, 49, 50, 56, 4)  // "u128"
+        mangle_append_wide(result, 117, ty.clifford_p)  // "u<bits>"
     } else if ty.kind == TypeKind::TyF32 {
         mangle_append_literal(result, 102, 51, 50, 0, 3)  // "f32"
     } else if ty.kind == TypeKind::TyF64 {
@@ -912,6 +932,8 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         ty_i128()
     } else if name_is_u128(name) {
         ty_u128()
+    } else if name_wide_int_bits(name) > 0 {
+        ty_wide_int(name_wide_int_bits(name), (name.buf[0] as i64) == 105)
     } else if name_is_usize(name) {
         ty_i64()
     } else if name_is_f32(name) {
@@ -5766,11 +5788,11 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
         TypeKind::TyI8 => print("i8")
         TypeKind::TyI32 => print("i32")
         TypeKind::TyI64 => print("i64")
-        TypeKind::TyI128 => print("i128")
+        TypeKind::TyI128 => { print("i"); print_int(ty.clifford_p) }
         TypeKind::TyU8 => print("u8")
         TypeKind::TyU32 => print("u32")
         TypeKind::TyU64 => print("u64")
-        TypeKind::TyU128 => print("u128")
+        TypeKind::TyU128 => { print("u"); print_int(ty.clifford_p) }
         TypeKind::TyF32 => print("f32")
         TypeKind::TyF64 => print("f64")
         TypeKind::TyBool => print("bool")
@@ -10890,6 +10912,8 @@ impl Checker {
             (self, ty_i128())
         } else if name_is_u128(name) {
             (self, ty_u128())
+        } else if name_wide_int_bits(name) > 0 {
+            (self, ty_wide_int(name_wide_int_bits(name), (name.buf[0] as i64) == 105))
         } else if name_is_usize(name) {
             (self, ty_i64())
         } else if name_is_f32(name) {
