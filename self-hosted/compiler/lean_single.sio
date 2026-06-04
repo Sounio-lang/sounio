@@ -19662,11 +19662,13 @@ fn compile_stmt_inner() with IO, Mut, Panic, Div {
             // Compile then-body
             LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
             if TK[EP as usize] == 8 { EP = EP + 1 }
+            let il_arm_wm = NEXT_SLOT
             while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
             let il_then_has_value = LAST_STMT_HAS_VALUE
             let il_then_ty = LAST_STMT_TY
             let il_then_hash = LAST_STMT_TY_HASH
             if TK[EP as usize] == 9 { EP = EP + 1 }
+            let il_then_end = NEXT_SLOT
             // Handle else
             LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
             if TK[EP as usize] == 14 {
@@ -19682,6 +19684,9 @@ fn compile_stmt_inner() with IO, Mut, Panic, Div {
                     CL_SAVE_USED[il_lthen as usize] = tused; CL_SAVE_MUT[il_lthen as usize] = tmov
                     il_lthen = il_lthen + 1
                 }
+                // arm-scoped reclaim (if-let): else arm reuses then arm slots
+                if il_then_end > FRAME_HWM { FRAME_HWM = il_then_end }
+                NEXT_SLOT = il_arm_wm
                 if TK[EP as usize] == 13 { compile_stmt() }
                 else {
                     LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
@@ -19692,6 +19697,9 @@ fn compile_stmt_inner() with IO, Mut, Panic, Div {
                 let il_else_has_value = LAST_STMT_HAS_VALUE
                 let il_else_ty = LAST_STMT_TY
                 let il_else_hash = LAST_STMT_TY_HASH
+                // arm-scoped reclaim (if-let): protect executed arm value temp
+                if NEXT_SLOT > FRAME_HWM { FRAME_HWM = NEXT_SLOT }
+                NEXT_SLOT = if il_then_end > NEXT_SLOT { il_then_end } else { NEXT_SLOT }
                 patch32(il_jmp_off, CL)
                 if il_then_has_value == 1 && il_else_has_value == 1 && il_then_ty != 5 && il_else_ty != 5 {
                     LAST_STMT_HAS_VALUE = 1; LAST_STMT_TY = il_then_ty; LAST_STMT_TY_HASH = il_then_hash
@@ -20313,7 +20321,12 @@ fn compile_stmt_inner() with IO, Mut, Panic, Div {
         // At the both-arms-have-value exit, EXPR_CH_SET = scrut | arms_union
         // to match `Typing.tMatch` conclusion `Sc.union (chsetUnionFin Ss)`.
         var match_arms_ch_union: i64 = 0
+        let match_arm_wm = NEXT_SLOT
+        var match_max_end = NEXT_SLOT
         while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 {
+            // arm-scoped reclaim (match): each arm reuses slots above match_arm_wm (arms mutually exclusive)
+            if NEXT_SLOT > match_max_end { match_max_end = NEXT_SLOT }
+            NEXT_SLOT = match_arm_wm
             var is_wildcard: i64 = 0
             var is_var_bind: i64 = 0
             var disc: i64 = -1
@@ -20814,6 +20827,10 @@ fn compile_stmt_inner() with IO, Mut, Panic, Div {
             }
             if TK[EP as usize] == 28 { EP = EP + 1 }
         }
+        // arm-scoped reclaim (match): protect the executed arm value temp (max arm end)
+        if NEXT_SLOT > match_max_end { match_max_end = NEXT_SLOT }
+        if match_max_end > FRAME_HWM { FRAME_HWM = match_max_end }
+        NEXT_SLOT = match_max_end
         if TK[EP as usize] == 9 { EP = EP + 1 }
         var ai: i64 = 0
         while ai < arm_count { patch32(match_ends[ai as usize], CL); ai = ai + 1 }
