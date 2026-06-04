@@ -306,9 +306,9 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
 
 fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lowerer_new()
-    var module = *lo.module
-    module.epistemic = epistemic
-    lo.module = Box::new(module)
+    // Store epistemic through the box (no `var module = *lo.module` deref-copy,
+    // which materializes [IrFunction;1400] and can corrupt epistemic on c634b38f).
+    (*lo.module).epistemic = epistemic
     lo = lowerer_seed_module_from_summary(lo, summary)
     lo = lowerer_seed_metadata_from_summary(lo, summary)
     lo.probe_mode = summary.probe_mode
@@ -1813,9 +1813,13 @@ impl Lowerer {
     }
 
     fn find_hyper_expr_id_for_span(self, span: Span) -> i64 with Mut, Panic, Div {
+        // Explicit single-deref (not auto-deref `self.module.epistemic.X`, which
+        // reads garbage on c634b38f — a nonzero hyper_expr_count here spuriously
+        // routes plain integer `*` into ir_hyper_mul_o, which the native-v2 backend
+        // rejects). With the correct 0 count this returns -1 → normal ir_binop.
         var i: i64 = 0
-        while i < self.module.epistemic.hyper_expr_count {
-            let info = self.module.epistemic.hyper_exprs[i]
+        while i < (*self.module).epistemic.hyper_expr_count {
+            let info = (*self.module).epistemic.hyper_exprs[i as usize]
             if self.metadata_span_matches(span, info.span_start, info.span_end) {
                 return i
             }
