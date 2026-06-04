@@ -11,6 +11,10 @@ struct LowerLocalStack {
     names: [Name; 4096],
     regs: [i64; 4096],
     depths: [i64; 4096],
+    // Struct type name of each local (empty Name if the local is not a struct value).
+    // Used to resolve named-field access (p.x) to the declaration-order field index via
+    // the struct_layouts table, instead of the old name-hash which mismatched storage.
+    type_names: [Name; 4096],
     count: i64,
 }
 
@@ -19,6 +23,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         names: [ir_empty_name(); 4096],
         regs: [IR_INVALID_REG; 4096],
         depths: [0; 4096],
+        type_names: [ir_empty_name(); 4096],
         count: 0,
     }
 }
@@ -498,19 +503,23 @@ fn lowerer_register_enum_variants_mut(
     variants: &Option<Box<VariantDefList>>,
     next_disc: i64
 ) with Mut, Panic, Div, Alloc {
+    // bind-then-single-deref: `(*(*lo).enum_variants).entries[..] = ..` is a double-deref-through-Box
+    // store, miscompiled to write into a discarded copy (count never advances → registrations lost).
+    // Bind the Box once and store through a single deref so the table actually persists.
+    let ev = (*lo).enum_variants
     var current = variants
     var disc = next_disc
     while true {
         match *current {
             Some(list) => {
-                if (*(*lo).enum_variants).count < 1024 {
-                    let idx = (*(*lo).enum_variants).count
-                    (*(*lo).enum_variants).entries[idx as usize] = EnumVariantEntry {
+                if (*ev).count < 1024 {
+                    let idx = (*ev).count
+                    (*ev).entries[idx as usize] = EnumVariantEntry {
                         enum_name: enum_name,
                         variant_name: (*list).head.name,
                         discriminant: disc,
                     }
-                    (*(*lo).enum_variants).count = idx + 1
+                    (*ev).count = idx + 1
                 } else {
                     lo.error_count = lo.error_count + 1
                     lo.had_error = true
@@ -529,6 +538,12 @@ fn lowerer_register_struct_fields_mut(
     fields: &Option<Box<FieldDefList>>,
     idx: i64
 ) with Mut, Panic, Div, Alloc {
+    // bind-then-single-deref: the `(*(*lo).struct_layouts).entries[..] = ..` double-deref-through-Box
+    // stores were miscompiled to write into a discarded copy, so count never advanced and NO struct
+    // was ever registered — field_idx_from_name then fell back to the name-hash. Bind the Box once
+    // and store through a single deref so the layout table persists (yielding compact declaration-
+    // order field indices instead of the colliding hash).
+    let sl = (*lo).struct_layouts
     var current = fields
     var field_idx = idx
     while true {
@@ -536,34 +551,42 @@ fn lowerer_register_struct_fields_mut(
             Some(list) => {
                 var layout_idx: i64 = -1
                 var si: i64 = 0
-                while si < (*(*lo).struct_layouts).count {
-                    if ir_name_eq((*(*lo).struct_layouts).entries[si as usize].type_name, type_name) {
+                while si < (*sl).count {
+                    if ir_name_eq((*sl).entries[si as usize].type_name, type_name) {
                         layout_idx = si
                     }
                     si = si + 1
                 }
                 if layout_idx < 0 {
-                    if (*(*lo).struct_layouts).count < 256 {
-                        layout_idx = (*(*lo).struct_layouts).count
-                        (*(*lo).struct_layouts).entries[layout_idx as usize] = StructLayoutEntry {
+                    if (*sl).count < 256 {
+                        layout_idx = (*sl).count
+                        (*sl).entries[layout_idx as usize] = StructLayoutEntry {
                             type_name: type_name,
                             fields: [empty_struct_field_entry(); 64],
                             field_count: 0,
                         }
-                        (*(*lo).struct_layouts).count = layout_idx + 1
+                        (*sl).count = layout_idx + 1
                     } else {
                         lo.error_count = lo.error_count + 1
                         lo.had_error = true
                         return
                     }
                 }
-                let fc = (*(*lo).struct_layouts).entries[layout_idx as usize].field_count
+                let fc = (*sl).entries[layout_idx as usize].field_count
                 if fc < 64 {
-                    (*(*lo).struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                    // Copy the whole entry out, mutate the local copy's fields/field_count, then
+                    // store the whole entry back. The deeper nested store
+                    // `(*sl).entries[i].fields[j] = ..` is still miscompiled (writes a discarded
+                    // copy → fields never persisted, so every field resolved to 0). A whole-element
+                    // store `(*sl).entries[i] = entry` through the bound Box DOES persist (same shape
+                    // find_or_add uses for functions).
+                    var entry = (*sl).entries[layout_idx as usize]
+                    entry.fields[fc as usize] = StructFieldEntry {
                         name: (*list).head.name,
                         index: field_idx,
                     }
-                    (*(*lo).struct_layouts).entries[layout_idx as usize].field_count = fc + 1
+                    entry.field_count = fc + 1
+                    (*sl).entries[layout_idx as usize] = entry
                 } else {
                     lo.error_count = lo.error_count + 1
                     lo.had_error = true
@@ -2462,6 +2485,10 @@ impl Lowerer {
     }
 
     fn bind_local(self, name: Name, reg: i64, is_mut: bool) -> Lowerer with Mut, Alloc, Panic {
+        self.bind_local_typed(name, reg, is_mut, ir_empty_name())
+    }
+
+    fn bind_local_typed(self, name: Name, reg: i64, is_mut: bool, type_name: Name) -> Lowerer with Mut, Alloc, Panic {
         var lo = self
         let _is_mut = is_mut
         var stk = *lo.locals
@@ -2470,12 +2497,26 @@ impl Lowerer {
             stk.names[idx as usize] = name
             stk.regs[idx as usize] = reg
             stk.depths[idx as usize] = lo.scope_depth
+            stk.type_names[idx as usize] = type_name
             stk.count = idx + 1
             lo.locals = Box::new(stk)
         } else {
             lo = lo.report_error()
         }
         lo
+    }
+
+    // Struct type name of the local `name` (empty Name if not found or not a struct value).
+    fn lookup_local_type(self, name: Name) -> Name with Mut, Panic, Div, Alloc {
+        let stk = *self.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= self.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                return stk.type_names[i as usize]
+            }
+            i = i - 1
+        }
+        ir_empty_name()
     }
 
     fn lookup_local(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
@@ -4114,7 +4155,19 @@ impl Lowerer {
         let pair = self.lower_opt_expr_ref(&s.expr)
         var lo = pair.0
         let reg = pair.1
-        lo = lo.bind_local(s.name, reg, is_mut)
+        // Record the struct type of the binding when the initialiser is a struct literal, so
+        // later field access (binding.field) resolves the field index via the layout table.
+        var type_name = ir_empty_name()
+        let init_ref: &Option<Box<Expr>> = &s.expr
+        match *init_ref {
+            Some(init_e) => {
+                if (*init_e).kind == ExprKind::ExprStructLit {
+                    type_name = ir_path_first_name((*init_e).path)
+                }
+            }
+            None => {}
+        }
+        lo = lo.bind_local_typed(s.name, reg, is_mut, type_name)
         (lo, reg)
     }
 
@@ -4380,24 +4433,31 @@ impl Lowerer {
         self.expr_to_callee_name_ref(&e)
     }
 
-    fn lower_struct_fields_ref(self, base_reg: i64, fields: &Option<Box<StructFieldList>>, idx: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn lower_struct_fields_ref(self, base_reg: i64, fields: &Option<Box<StructFieldList>>, idx: i64, struct_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var current = fields
         var field_idx = idx
         while true {
             match *current {
                 Some(list) => {
+                    // Resolve the slot from the struct's declaration-order layout (keyed by struct
+                    // name + field name) rather than the literal's textual order, so a reordered
+                    // literal (P{y:_, x:_}) writes to the same slots the layout/read side expects.
+                    var slot = field_idx
+                    if struct_name.len > 0 {
+                        slot = lo.field_idx_from_name(struct_name, (*list).head.name)
+                    }
                     if lo.probe_mode && lower_body_diag_enabled() {
                         print("lower_probe: struct_field name=")
                         print(str_from_bytes((*list).head.name.buf, (*list).head.name.len))
                         print(" idx=")
-                        print_int(field_idx)
+                        print_int(slot)
                         print("\n")
                     }
                     let pair = lo.lower_expr_ref(&(*list).head.value)
                     lo = pair.0
                     let vreg = pair.1
-                    lo = lo.emit(ir_field_set(base_reg, field_idx, vreg, (*list).head.name))
+                    lo = lo.emit(ir_field_set(base_reg, slot, vreg, (*list).head.name))
                     current = &(*list).tail
                     field_idx = field_idx + 1
                 }
@@ -4407,8 +4467,8 @@ impl Lowerer {
         lo
     }
 
-    fn lower_struct_fields(self, base_reg: i64, fields: Option<Box<StructFieldList>>, idx: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        self.lower_struct_fields_ref(base_reg, &fields, idx)
+    fn lower_struct_fields(self, base_reg: i64, fields: Option<Box<StructFieldList>>, idx: i64, struct_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        self.lower_struct_fields_ref(base_reg, &fields, idx, struct_name)
     }
 
     fn lower_array_elems_ref(self, base_reg: i64, elems: &Option<Box<ExprList>>, idx: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
@@ -5593,13 +5653,40 @@ impl Lowerer {
             (lo3, dst)
         } else if e.kind == ExprKind::ExprFieldAccess {
             let pair_b = self.lower_opt_expr_ref(&e.left)
-            let lo1 = pair_b.0
+            var lo1 = pair_b.0
             let base = pair_b.1
-            let fidx = lo1.field_idx_from_name_simple(e.name)
+            let fname = e.name
+            // Resolve the field slot. Numeric tuple fields (.0/.1) keep the simple path.
+            // Named fields resolve through the base local's struct type + the declaration-order
+            // layout (same as the write side), so reads and writes agree by construction. If the
+            // base's struct type is unknown (e.g. a non-local or untyped base), report an error
+            // rather than fall back to the name-hash, which would silently read a wrong slot.
+            var fidx: i64 = 0
+            if fname.len == 1 && (fname.buf[0] as i64) >= 48 && (fname.buf[0] as i64) <= 57 {
+                fidx = lo1.field_idx_from_name_simple(fname)
+            } else {
+                var resolved = false
+                let base_ref: &Option<Box<Expr>> = &e.left
+                match *base_ref {
+                    Some(be) => {
+                        if (*be).kind == ExprKind::ExprIdent {
+                            let tname = lo1.lookup_local_type((*be).name)
+                            if tname.len > 0 {
+                                fidx = lo1.field_idx_from_name(tname, fname)
+                                resolved = true
+                            }
+                        }
+                    }
+                    None => {}
+                }
+                if !resolved {
+                    lo1 = lo1.report_error()
+                }
+            }
             let pair_d = lo1.fresh_reg()
             let lo2 = pair_d.0
             let dst = pair_d.1
-            let lo3 = lo2.emit(ir_field_get(dst, base, fidx, e.name))
+            let lo3 = lo2.emit(ir_field_get(dst, base, fidx, fname))
             (lo3, dst)
         } else if e.kind == ExprKind::ExprIndex {
             let pair_b = self.lower_opt_expr_ref(&e.left)
@@ -5851,7 +5938,7 @@ impl Lowerer {
                 print("\n")
             }
             lo = lo.emit(ir_alloc(dst, 0))
-            lo = lo.lower_struct_fields_ref(dst, &e.fields, 0)
+            lo = lo.lower_struct_fields_ref(dst, &e.fields, 0, ir_path_first_name(e.path))
             (lo, dst)
         } else if e.kind == ExprKind::ExprArrayLit {
             match e.left {
