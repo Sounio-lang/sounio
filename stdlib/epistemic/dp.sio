@@ -1,0 +1,276 @@
+// stdlib/epistemic/dp.sio
+//
+// Dynamic Programming for finite MDPs — exact Bellman solvers.
+//
+// First principles:
+//   Bellman optimality, exact fixed-point:
+//     V*(s) = max_a  E_{s' ~ P(.|s,a)}[ r(s,a,s') + gamma * V*(s') ]
+//   Policy: pi*(s) = argmax_a Q*(s,a).
+//
+// We solve it exactly over a finite, dense, fixed-size MDP via:
+//   - value_iteration  (synchronous Bellman backup, ||V_new - V||_inf)
+//   - policy_iteration (Bellman eval under fixed pi, then improve)
+//
+// Layer 1 (this file, top half) — PRECISE Epistemic MDPs.
+//   GUM var/conf propagate through the reward term. Transitions are
+//   precise f64 (sum to 1).
+//
+// Layer 2 (this file, bottom half) — KNIGHTIAN-ROBUST MDPs.
+//   Two entry points:
+//     - robust_value_iteration       (one-step, caller pre-bakes p-box
+//                                     continuation per (s,a))
+//     - robust_value_iteration_full  (full Bellman backup, per-s'
+//                                     Knightian credal set)
+//
+// ---------------------------------------------------------------------------
+// SOUNIO QUIRKS in effect on this file
+// ---------------------------------------------------------------------------
+// (A) const-dimensioned array types in function PARAMETER / RETURN positions
+//     are rejected by the self-hosted type checker ("arity mismatch"). We use
+//     literal `8` and `4` in function signatures. The file-scope consts are
+//     used only in struct field types and local declarations.
+// (B) const-dimensioned struct FIELD types (e.g. `reward: [Epistemic; MAX_FLAT]`
+//     where MAX_FLAT is a const) are silently accepted by the type checker
+//     but produce a struct that segfaults on field read. Use literal `256`.
+// (C) Reading an UNINITIALISED struct field of `[T; N]` where T is a
+//     non-primitive type segfaults (codegen defect in
+//     self-hosted/compiler/lean_single.sio:13415-13437). Workaround: in
+//     `mdp_new` we PRE-POPULATE every slot of `trans_p` and `reward` so
+//     the value-iteration read path never sees an uninitialised slot.
+// (D) Struct-typed (PBox, Epistemic) arrays inside structs read through
+//     `&` / `&!` corrupt or crash. The robust MDP struct holds only
+//     scalar fields; the PBox tables are passed as separate array
+//     parameters.
+// (E) The 2D-nested-array-in-struct case crashes on `&!` (separate defect
+//     from C). We use FLAT 1D arrays with manual indexing.
+//     index(s, a, sp) = s * A * Sp + a * Sp + sp.
+//
+// Library file (Layer 1 has no `pub fn main`); the LAYER 2 chunk below
+// carries a self-test `pub fn main` that exercises both layers.
+
+use epistemic::knowledge::{Epistemic, epistemic_new}
+
+// ============================================================================
+// FILE-SCOPE SIZE PARAMETERS
+// ============================================================================
+//
+// Used as documentation for the matching struct field literal dims and
+// as a knob for the LAYER 1 `dp_index` helper. Do NOT use these in
+// function parameter or return types (quirk A) or in struct field array
+// dimensions (quirk B). Use literal `8` / `4` / `256` there.
+
+const MAX_STATES:  i64 = 8
+const MAX_ACTIONS: i64 = 4
+const MAX_SP:      i64 = 8
+
+// Compute the flat index from (s, a, sp). Helper used by all MDP code.
+fn dp_index(s: i64, a: i64, sp: i64) -> i64 {
+    s * MAX_ACTIONS * MAX_SP + a * MAX_SP + sp
+}
+
+// ============================================================================
+// NUMERIC HELPERS
+// ============================================================================
+
+fn dp_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn dp_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn dp_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn dp_min_i(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+
+// ============================================================================
+// LAYER 1 — PRECISE EPITEMIC MDP
+// ============================================================================
+
+pub struct EpistemicMDP {
+    n_states: i64,
+    n_actions: i64,
+    trans_p:  [f64;      256],   // literal dim (quirk B)
+    reward:   [Epistemic; 256],   // literal dim (quirk B)
+    gamma: f64,
+}
+
+pub fn mdp_new(n_states: i64, n_actions: i64, gamma: f64) -> EpistemicMDP with Mut, Div, Panic {
+    var m: EpistemicMDP
+    m.n_states = n_states
+    m.n_actions = n_actions
+    m.gamma = gamma
+    // PRE-POPULATE every slot of trans_p and reward (quirk C).
+    // The codegen for an uninitialised struct field of [T; N] with struct T
+    // emits a byte-load that segfaults on first read. Filling every slot
+    // here eliminates the read-of-uninitialised case in value_iteration.
+    let zero_e: Epistemic = epistemic_new(0.0, 0.0, 1000)
+    var i: i64 = 0
+    while i < 256 {
+        m.trans_p[i] = 0.0
+        m.reward[i]  = zero_e
+        i = i + 1
+    }
+    m
+}
+
+pub fn mdp_set_trans(m: &!EpistemicMDP, s: i64, a: i64, sp: i64, p: f64, r: Epistemic) with Mut, Div, Panic {
+    if s >= 0 && s < m.n_states && a >= 0 && a < m.n_actions && sp >= 0 && sp < m.n_states {
+        let idx = dp_index(s, a, sp)
+        m.trans_p[idx] = p
+        m.reward[idx] = r
+    }
+}
+
+// Standard synchronous value iteration. V[s] is Epistemic — carries
+// GUM var/conf through the backup. Stops when the sup-norm on .val
+// is below `epsilon`.
+pub fn value_iteration(m: &EpistemicMDP, epsilon: f64, max_iter: i64) -> [Epistemic; 8] with Mut, Div, Panic {
+    var V: [Epistemic; 8] = [epistemic_new(0.0, 0.0, 1000); 8]
+    var iter: i64 = 0
+    var converged: bool = false
+    while iter < max_iter && !converged {
+        var Vnew: [Epistemic; 8] = [epistemic_new(0.0, 0.0, 1000); 8]
+        var max_diff: f64 = 0.0
+        var s: i64 = 0
+        while s < m.n_states {
+            var best_val:  f64 = 0.0 - 1.0e18
+            var best_var:  f64 = 0.0
+            var best_conf: i64 = 1000
+            var a: i64 = 0
+            while a < m.n_actions {
+                var qv: f64 = 0.0
+                var qvar: f64 = 0.0
+                var qconf: i64 = 1000
+                var sp: i64 = 0
+                while sp < m.n_states {
+                    let idx = dp_index(s, a, sp)
+                    let p = m.trans_p[idx]
+                    if p > 0.0 {
+                        let r = m.reward[idx]
+                        let vsp = V[sp]
+                        let one_v   = r.val + m.gamma * vsp.val
+                        let one_var = r.variance + m.gamma * m.gamma * vsp.variance
+                        let one_cf  = dp_min_i(r.confidence, vsp.confidence)
+                        qv    = qv    + p * one_v
+                        // GUM: Var(p * X) = p^2 * Var(X).
+                        qvar  = qvar  + p * p * one_var
+                        qconf = dp_min_i(qconf, one_cf)
+                    }
+                    sp = sp + 1
+                }
+                if qv > best_val {
+                    best_val = qv
+                    best_var = qvar
+                    best_conf = qconf
+                }
+                a = a + 1
+            }
+            Vnew[s] = epistemic_new(best_val, best_var, best_conf)
+            let diff = dp_abs(Vnew[s].val - V[s].val)
+            if diff > max_diff { max_diff = diff }
+            s = s + 1
+        }
+        V = Vnew
+        if max_diff < epsilon { converged = true }
+        iter = iter + 1
+    }
+    V
+}
+
+pub fn extract_policy(m: &EpistemicMDP, V: &[Epistemic; 8]) -> [i64; 8] with Mut, Div, Panic {
+    var pi: [i64; 8] = [0; 8]
+    var s: i64 = 0
+    while s < m.n_states {
+        var best_a: i64 = 0
+        var best_q: f64 = 0.0 - 1.0e18
+        var a: i64 = 0
+        while a < m.n_actions {
+            var q: f64 = 0.0
+            var sp: i64 = 0
+            while sp < m.n_states {
+                let idx = dp_index(s, a, sp)
+                let p = m.trans_p[idx]
+                if p > 0.0 {
+                    let rmean = m.reward[idx].val
+                    let vsp   = V[sp].val
+                    q = q + p * (rmean + m.gamma * vsp)
+                }
+                sp = sp + 1
+            }
+            if q > best_q {
+                best_q = q
+                best_a = a
+            }
+            a = a + 1
+        }
+        pi[s] = best_a
+        s = s + 1
+    }
+    pi
+}
+
+// Policy evaluation: Bellman backup with a fixed policy pi until the
+// value function converges. We solve (I - gamma * P^pi) V = R^pi by
+// repeated sweeping (small |S|; cheaper than building the matrix).
+pub fn policy_evaluation(m: &EpistemicMDP, pi: &[i64; 8], epsilon: f64, max_iter: i64) -> [Epistemic; 8] with Mut, Div, Panic {
+    var V: [Epistemic; 8] = [epistemic_new(0.0, 0.0, 1000); 8]
+    var iter: i64 = 0
+    var converged: bool = false
+    while iter < max_iter && !converged {
+        var Vnew: [Epistemic; 8] = [epistemic_new(0.0, 0.0, 1000); 8]
+        var max_diff: f64 = 0.0
+        var s: i64 = 0
+        while s < m.n_states {
+            let a = pi[s]
+            var qv: f64 = 0.0
+            var qvar: f64 = 0.0
+            var qconf: i64 = 1000
+            var sp: i64 = 0
+            while sp < m.n_states {
+                let idx = dp_index(s, a, sp)
+                let p = m.trans_p[idx]
+                if p > 0.0 {
+                    let r = m.reward[idx]
+                    let vsp = V[sp]
+                    let one_v   = r.val + m.gamma * vsp.val
+                    let one_var = r.variance + m.gamma * m.gamma * vsp.variance
+                    let one_cf  = dp_min_i(r.confidence, vsp.confidence)
+                    qv    = qv    + p * one_v
+                    qvar  = qvar  + p * p * one_var
+                    qconf = dp_min_i(qconf, one_cf)
+                }
+                sp = sp + 1
+            }
+            Vnew[s] = epistemic_new(qv, qvar, qconf)
+            let diff = dp_abs(Vnew[s].val - V[s].val)
+            if diff > max_diff { max_diff = diff }
+            s = s + 1
+        }
+        V = Vnew
+        if max_diff < epsilon { converged = true }
+        iter = iter + 1
+    }
+    V
+}
+
+pub fn policy_improvement(m: &EpistemicMDP, V: &[Epistemic; 8]) -> [i64; 8] with Mut, Div, Panic {
+    extract_policy(m, V)
+}
+
+// Policy iteration: alternate evaluation and improvement until pi is stable.
+// (V*, pi*) returned.
+pub fn policy_iteration(m: &EpistemicMDP, max_outer: i64, eval_eps: f64, eval_iter: i64) -> ([Epistemic; 8], [i64; 8]) with Mut, Div, Panic {
+    var pi: [i64; 8] = [0; 8]
+    var V:  [Epistemic; 8] = [epistemic_new(0.0, 0.0, 1000); 8]
+    var k: i64 = 0
+    var stable: bool = false
+    while k < max_outer && !stable {
+        V = policy_evaluation(m, &pi, eval_eps, eval_iter)
+        let new_pi = policy_improvement(m, &V)
+        var sames: i64 = 0
+        var s: i64 = 0
+        while s < m.n_states {
+            if new_pi[s] == pi[s] { sames = sames + 1 }
+            s = s + 1
+        }
+        if sames == m.n_states { stable = true }
+        pi = new_pi
+        k = k + 1
+    }
+    (V, pi)
+}
