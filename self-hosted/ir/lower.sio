@@ -1546,6 +1546,56 @@ fn lower_cast_type_is_f64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, D
     }
 }
 
+// Bit width of a wide-int cast target (iN/uN), else 0. Reads the cast_type name bytes
+// directly from the AST — the native-v2 source path can't use the checker sidecar (the
+// by-value Checker SRET-crashes the bridge), so width is detected purely syntactically.
+fn lower_cast_type_wide_bits(ct: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *ct {
+        Some(te) => {
+            let seg = (*te).path.segments
+            if seg.head_len < 2 { return 0 }
+            let c0 = seg.head_buf[0] as i64
+            if c0 != 105 && c0 != 117 { return 0 }   // 'i' or 'u'
+            var bits: i64 = 0
+            var i: i64 = 1
+            while i < seg.head_len {
+                let d = seg.head_buf[i as usize] as i64
+                if d < 48 || d > 57 { return 0 }
+                bits = bits * 10 + (d - 48)
+                i = i + 1
+            }
+            bits
+        }
+        None => 0,
+    }
+}
+
+// Limb count if expr `e`'s RESULT is a wide int (>64 bits), else 0. Pure AST recursion,
+// no lowerer/checker state: a cast-to-iN (>64) is wide; a binary op is wide if either
+// operand is wide (shift inherits the left operand's width; rhs literal is narrow). This
+// is why the discriminating program uses inline casts rather than i128 vars — an ident
+// carries no type here, so wide vars would need separate tracking (a later step).
+fn expr_is_wide_limbs(e: &Expr) -> i64 with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprCast {
+        let bits = lower_cast_type_wide_bits(&(*e).cast_type)
+        if bits > 64 { return (bits + 63) / 64 }
+        return 0
+    }
+    if (*e).kind == ExprKind::ExprBinary {
+        let lw = opt_expr_is_wide_limbs(&(*e).left)
+        let rw = opt_expr_is_wide_limbs(&(*e).right)
+        if lw >= rw { return lw }
+        return rw
+    }
+    0
+}
+fn opt_expr_is_wide_limbs(opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(e) => expr_is_wide_limbs(&(*e)),
+        _ => 0,
+    }
+}
+
 fn lower_opt_expr_has_float_source(opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div {
     match *opt {
         Some(e) => {
@@ -1835,6 +1885,41 @@ impl Lowerer {
             i = i + 1
         }
         -1
+    }
+
+    // Wide-int sidecar query: if expr `span` was recorded as a wide value (op_kind==9),
+    // return its limb count (algebra_tag); else 0. The checker records every expr whose
+    // result type is TyI128/TyU128 via record_hyper_expr(span, limbs, 9, false), so the
+    // lowerer learns operand/result width without a per-Expr type field. Mirrors
+    // find_hyper_expr_id_for_span (explicit single-deref — auto-deref reads garbage on
+    // c634b38f).
+    fn wide_limbs_for_span(self, span: Span) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < (*self.module).epistemic.hyper_expr_count {
+            let info = (*self.module).epistemic.hyper_exprs[i as usize]
+            if info.op_kind == 9 {
+                if self.metadata_span_matches(span, info.span_start, info.span_end) {
+                    return info.algebra_tag
+                }
+            }
+            i = i + 1
+        }
+        0
+    }
+
+    // Reserve N CONSECUTIVE vregs (fresh_reg is sequential), returning the base. A wide
+    // value of L limbs occupies base..base+L-1; ir_wide_* read/write limb k at vreg base+k.
+    fn fresh_regs_n(self, n: i64) -> (Lowerer, i64) with Mut, Panic, Div, IO {
+        let p0 = self.fresh_reg()
+        var lo = p0.0
+        let base = p0.1
+        var k: i64 = 1
+        while k < n {
+            let pk = lo.fresh_reg()
+            lo = pk.0
+            k = k + 1
+        }
+        (lo, base)
     }
 
     fn emit_i64_const(self, value: i64) -> (Lowerer, i64) with Mut, Panic, Div {
@@ -5573,6 +5658,53 @@ impl Lowerer {
             let lo5 = lo4.emit(ir_call(dst, fn_id, callee_name, final_args, final_argc))
             (lo5, dst)
         } else if e.kind == ExprKind::ExprBinary {
+            // Wide-int (i128/u128/iN) arithmetic, detected syntactically from the AST. Each
+            // wide value occupies `wl` consecutive vregs (base..base+wl-1); operands lowered
+            // recursively already return such bases (cast-materialize / wide-binary below).
+            let wl = expr_is_wide_limbs(e)
+            if wl >= 1 {
+                if e.bin_op == BinaryOp::OpShr {
+                    // Limb-aligned >> by a compile-time multiple of 64 (the observation gate).
+                    let psl = self.lower_opt_expr_ref(&e.left)
+                    let los = psl.0
+                    let wsrc = psl.1
+                    var shift_bits: i64 = 0
+                    match e.right {
+                        Some(re) => { shift_bits = (*re).int_val }
+                        _ => {}
+                    }
+                    let pds = los.fresh_regs_n(wl)
+                    let lod = pds.0
+                    let dstw = pds.1
+                    let loe = lod.emit(ir_wide_shr_limb(dstw, wsrc, wl, shift_bits / 64))
+                    return (loe, dstw)
+                } else if e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub {
+                    let pwl = self.lower_opt_expr_ref(&e.left)
+                    let low1 = pwl.0
+                    let lbase = pwl.1
+                    let pwr = low1.lower_opt_expr_ref(&e.right)
+                    let low2 = pwr.0
+                    let rbase = pwr.1
+                    if e.bin_op == BinaryOp::OpMul {
+                        // result limbs + equal scratch, all contiguous (scratch at dst+wl).
+                        let pdm = low2.fresh_regs_n(wl + wl)
+                        let lod = pdm.0
+                        let dstw = pdm.1
+                        return (lod.emit(ir_wide_mul(dstw, lbase, rbase, wl)), dstw)
+                    } else if e.bin_op == BinaryOp::OpSub {
+                        let pds = low2.fresh_regs_n(wl)
+                        let lod = pds.0
+                        let dstw = pds.1
+                        return (lod.emit(ir_wide_sub(dstw, lbase, rbase, wl)), dstw)
+                    } else {
+                        let pda = low2.fresh_regs_n(wl)
+                        let lod = pda.0
+                        let dstw = pda.1
+                        return (lod.emit(ir_wide_add(dstw, lbase, rbase, wl)), dstw)
+                    }
+                }
+                // Other wide ops (div/mod/cmp) unimplemented: fall through -> backend rejects.
+            }
             let pair_l = self.lower_opt_expr_ref(&e.left)
             let lo1 = pair_l.0
             let lhs = pair_l.1
@@ -5891,10 +6023,30 @@ impl Lowerer {
             let lo4 = lo3.emit(ir_binop(dst, lhs, e.bin_op, rhs))
             (lo4, dst)
         } else if e.kind == ExprKind::ExprCast {
+            // Wide-int cast bridges. `cw` = limbs if THIS cast produces a wide value
+            // (X as i128); `operand_wl` = limbs if the OPERAND is wide (i128 as i64).
+            let cw = expr_is_wide_limbs(e)
+            let operand_wl = opt_expr_is_wide_limbs(&e.left)
             let sub = self.lower_opt_expr_ref(&e.left)
             let lo1 = sub.0
             let src_reg = sub.1
-            if lower_cast_type_is_f64(&e.cast_type) {
+            if cw >= 1 {
+                // Cast TO wide: materialize cw contiguous limbs; limb0 = source i64, rest 0.
+                // (Positive-source minimal slice: zero-extend. Sign-extension is a later step.)
+                let pb = lo1.fresh_regs_n(cw)
+                var lo2 = pb.0
+                let base = pb.1
+                lo2 = lo2.emit(ir_copy(base, src_reg))
+                var k: i64 = 1
+                while k < cw {
+                    lo2 = lo2.emit(ir_load_imm(base + k, 0))
+                    k = k + 1
+                }
+                (lo2, base)
+            } else if operand_wl >= 1 {
+                // Narrowing wide -> i64: the low limb IS the operand's base vreg. Pass through.
+                (lo1, src_reg)
+            } else if lower_cast_type_is_f64(&e.cast_type) {
                 let p = lo1.fresh_reg()
                 let lo2 = p.0
                 let dst = p.1
