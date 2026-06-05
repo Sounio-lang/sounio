@@ -1595,6 +1595,24 @@ fn opt_expr_is_wide_limbs(opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div {
         _ => 0,
     }
 }
+// A divisor is single-limb-safe iff it is a cast-TO-wide of a NARROW operand: `X as i128`
+// materializes limb0 = X, all high limbs 0, so the schoolbook (single-limb-divisor) div/mod
+// is exact. A wide-binary divisor (e.g. (A as i128)*(B as i128)) can have nonzero high limbs
+// and is NOT safe -> the caller emits a genuine reject. Conservative: a bare narrow divisor
+// (`/ 3`) is also rejected, never miscomputed.
+fn expr_is_single_limb_safe(opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(e) => {
+            if (*e).kind == ExprKind::ExprCast {
+                let cw = lower_cast_type_wide_bits(&(*e).cast_type)
+                let ow = opt_expr_is_wide_limbs(&(*e).left)
+                if cw > 64 && ow == 0 { return 1 }
+            }
+            0
+        }
+        _ => 0,
+    }
+}
 
 fn lower_opt_expr_has_float_source(opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div {
     match *opt {
@@ -5665,20 +5683,29 @@ impl Lowerer {
             if wl >= 1 {
                 if e.bin_op == BinaryOp::OpShr {
                     // Limb-aligned >> by a compile-time multiple of 64 (the observation gate).
+                    // The shift must be an int LITERAL that is a non-negative multiple of 64; a
+                    // non-literal or non-aligned amount cannot be done by this limb-copy, so we
+                    // reject it (no ELF) rather than silently shift by floor(bits/64). Funnel
+                    // shifts for arbitrary amounts are Increment B.
                     let psl = self.lower_opt_expr_ref(&e.left)
                     let los = psl.0
                     let wsrc = psl.1
-                    var shift_bits: i64 = 0
+                    var shift_bits: i64 = -1
                     match e.right {
-                        Some(re) => { shift_bits = (*re).int_val }
+                        Some(re) => {
+                            if (*re).kind == ExprKind::ExprIntLit { shift_bits = (*re).int_val }
+                        }
                         _ => {}
                     }
                     let pds = los.fresh_regs_n(wl)
                     let lod = pds.0
                     let dstw = pds.1
-                    let loe = lod.emit(ir_wide_shr_limb(dstw, wsrc, wl, shift_bits / 64))
-                    return (loe, dstw)
-                } else if e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpDiv {
+                    if shift_bits >= 0 && shift_bits % 64 == 0 {
+                        let loe = lod.emit(ir_wide_shr_limb(dstw, wsrc, wl, shift_bits / 64))
+                        return (loe, dstw)
+                    }
+                    return (lod.emit(ir_wide_reject(dstw)), dstw)
+                } else if e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem {
                     let pwl = self.lower_opt_expr_ref(&e.left)
                     let low1 = pwl.0
                     let lbase = pwl.1
@@ -5697,19 +5724,64 @@ impl Lowerer {
                         let dstw = pds.1
                         return (lod.emit(ir_wide_sub(dstw, lbase, rbase, wl)), dstw)
                     } else if e.bin_op == BinaryOp::OpDiv {
-                        // Single-limb-divisor division (divisor's high limbs must be 0).
+                        // Single-limb-divisor division ONLY: the divisor must be a cast-to-wide of a
+                        // narrow value (limb0=value, high limbs 0). A multi-limb divisor cannot be
+                        // soundly handled by the schoolbook loop -> emit a GENUINE reject (no ELF),
+                        // never a low-limb wrong answer. Full N/N (Knuth D) is Increment D.
                         let pdv = low2.fresh_regs_n(wl)
                         let lod = pdv.0
                         let dstw = pdv.1
-                        return (lod.emit(ir_wide_div(dstw, lbase, rbase, wl)), dstw)
+                        if expr_is_single_limb_safe(&e.right) == 1 {
+                            return (lod.emit(ir_wide_div(dstw, lbase, rbase, wl)), dstw)
+                        }
+                        return (lod.emit(ir_wide_reject(dstw)), dstw)
+                    } else if e.bin_op == BinaryOp::OpRem {
+                        // Single-limb-divisor remainder, same soundness contract as OpDiv.
+                        let pdr = low2.fresh_regs_n(wl)
+                        let lor = pdr.0
+                        let dstr = pdr.1
+                        if expr_is_single_limb_safe(&e.right) == 1 {
+                            return (lor.emit(ir_wide_mod(dstr, lbase, rbase, wl)), dstr)
+                        }
+                        return (lor.emit(ir_wide_reject(dstr)), dstr)
                     } else {
                         let pda = low2.fresh_regs_n(wl)
                         let lod = pda.0
                         let dstw = pda.1
                         return (lod.emit(ir_wide_add(dstw, lbase, rbase, wl)), dstw)
                     }
+                } else if e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe {
+                    // Wide unsigned compare -> a SINGLE i64 (0/1). Both operands must be EXACTLY
+                    // wl-wide; a mixed-width compare would read a garbage high limb from the narrow
+                    // side, so reject it (no ELF) rather than miscompute.
+                    let lwc = opt_expr_is_wide_limbs(&e.left)
+                    let rwc = opt_expr_is_wide_limbs(&e.right)
+                    let pcl = self.lower_opt_expr_ref(&e.left)
+                    let loc1 = pcl.0
+                    let lbase = pcl.1
+                    let pcr = loc1.lower_opt_expr_ref(&e.right)
+                    let loc2 = pcr.0
+                    let rbase = pcr.1
+                    let pd1 = loc2.fresh_regs_n(1)
+                    let lod = pd1.0
+                    let dst1 = pd1.1
+                    if lwc == wl && rwc == wl {
+                        var cc: i64 = 0
+                        if e.bin_op == BinaryOp::OpNe { cc = 1 }
+                        else if e.bin_op == BinaryOp::OpLt { cc = 2 }
+                        else if e.bin_op == BinaryOp::OpLe { cc = 3 }
+                        else if e.bin_op == BinaryOp::OpGt { cc = 4 }
+                        else if e.bin_op == BinaryOp::OpGe { cc = 5 }
+                        return (lod.emit(ir_wide_cmp(dst1, lbase, rbase, wl, cc)), dst1)
+                    }
+                    return (lod.emit(ir_wide_reject(dst1)), dst1)
                 }
-                // Other wide ops (mod/cmp) unimplemented: fall through -> backend rejects.
+                // Any remaining wide op (shl, bitwise, ...) is unimplemented: emit a genuine
+                // reject (no ELF) rather than falling through to a low-limb i64 miscompile.
+                let prj = self.fresh_regs_n(wl)
+                let lorj = prj.0
+                let dstrj = prj.1
+                return (lorj.emit(ir_wide_reject(dstrj)), dstrj)
             }
             let pair_l = self.lower_opt_expr_ref(&e.left)
             let lo1 = pair_l.0
