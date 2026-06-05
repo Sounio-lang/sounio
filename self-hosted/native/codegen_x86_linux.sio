@@ -1915,6 +1915,34 @@ fn nc_emit_sub_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0xd8)
 }
 
+// and rax, rbx  (0x48 0x21 0xd8) — bitwise AND for the v2 core binop emitter.
+fn nc_emit_and_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x21)
+    nc_emit_byte(nc, 0xd8)
+}
+
+// or rax, rbx  (0x48 0x09 0xd8) — bitwise OR for the v2 core binop emitter.
+fn nc_emit_or_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x09)
+    nc_emit_byte(nc, 0xd8)
+}
+
+// shl rax, cl  (0x48 0xd3 0xe0) — logical/arith left shift by the count in CL.
+fn nc_emit_shl_rax_cl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xd3)
+    nc_emit_byte(nc, 0xe0)
+}
+
+// sar rax, cl  (0x48 0xd3 0xf8) — arithmetic right shift by the count in CL (signed >>).
+fn nc_emit_sar_rax_cl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xd3)
+    nc_emit_byte(nc, 0xf8)
+}
+
 // --- Zig-style wide-int (N-limb of u64) emit primitives + ops ---
 // adc rax, rbx (rax += rbx + CF). 0x48 0x11 0xd8. MOV loads/stores between limbs preserve CF.
 fn nc_emit_adc_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -5674,6 +5702,50 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         else if op == BinaryOp::OpEq { nc_emit_sete_al(nc) }
         else { nc_emit_setne_al(nc) }
         nc_emit_movzx_rax_al(nc)
+        nc_core_store_rax_to_temp(nc, dst)
+        return true
+    }
+    // Bitwise AND/OR/XOR — commutative, same load shape as OpAdd (rax=rhs, rbx=lhs).
+    if op == BinaryOp::OpBitAnd {
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_and_rax_rbx(nc)
+        nc_core_store_rax_to_temp(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpBitOr {
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_or_rax_rbx(nc)
+        nc_core_store_rax_to_temp(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpBitXor {
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_xor_rax_rbx(nc)
+        nc_core_store_rax_to_temp(nc, dst)
+        return true
+    }
+    // Shifts — non-commutative: lhs in rax, count in CL. Load rhs first (the OpSub shape)
+    // so that after the pop rax=lhs, rbx=rhs(count); move the count into rcx then shift.
+    if op == BinaryOp::OpShl || op == BinaryOp::OpShr {
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_mov_reg_reg(nc, 1, 3)   // mov rcx, rbx  (count -> cl)
+        if op == BinaryOp::OpShl {
+            nc_emit_shl_rax_cl(nc)
+        } else {
+            nc_emit_sar_rax_cl(nc)
+        }
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
