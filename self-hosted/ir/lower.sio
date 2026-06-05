@@ -11,6 +11,10 @@ struct LowerLocalStack {
     names: [Name; 4096],
     regs: [i64; 4096],
     depths: [i64; 4096],
+    // Wide-int (i128/iN) width of the binding in u64 limbs: 0/1 = ordinary i64, >=2 = wide
+    // value occupying regs[idx]..regs[idx]+limbs-1. Lets `let x: i128 = ...` be used in later
+    // wide arithmetic (ident-type tracking; the checker is skipped on the native-v2 bridge).
+    limbs: [i64; 4096],
     count: i64,
 }
 
@@ -19,6 +23,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         names: [ir_empty_name(); 4096],
         regs: [IR_INVALID_REG; 4096],
         depths: [0; 4096],
+        limbs: [0; 4096],
         count: 0,
     }
 }
@@ -2575,6 +2580,11 @@ impl Lowerer {
     }
 
     fn bind_local(self, name: Name, reg: i64, is_mut: bool) -> Lowerer with Mut, Alloc, Panic {
+        self.bind_local_wide(name, reg, is_mut, 0)
+    }
+
+    // As bind_local, but records `limbs` (>=2 for a wide i128/iN value at reg..reg+limbs-1).
+    fn bind_local_wide(self, name: Name, reg: i64, is_mut: bool, limbs: i64) -> Lowerer with Mut, Alloc, Panic {
         var lo = self
         let _is_mut = is_mut
         var stk = *lo.locals
@@ -2583,6 +2593,7 @@ impl Lowerer {
             stk.names[idx as usize] = name
             stk.regs[idx as usize] = reg
             stk.depths[idx as usize] = lo.scope_depth
+            stk.limbs[idx as usize] = limbs
             stk.count = idx + 1
             lo.locals = Box::new(stk)
         } else {
@@ -2601,6 +2612,63 @@ impl Lowerer {
             i = i - 1
         }
         IR_INVALID_REG
+    }
+
+    // Wide-int width (limbs) of the binding named `name`, or 0 if narrow / not found.
+    // Mirrors lookup_local's depth+name scan so it sees the same binding.
+    fn lookup_local_limbs(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        let stk = *self.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= self.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                return stk.limbs[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // Context-sensitive version of expr_is_wide_limbs: same syntactic rule, but an ExprIdent
+    // resolves its width from the locals (so `let x: i128 = ...; x * x` detects x as wide).
+    // Returns 0 for everything that the free expr_is_wide_limbs returns 0 for, so replacing
+    // it only at the wide-dispatch / cast sites leaves all non-wide programs byte-identical.
+    fn expr_wide_limbs_m(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprCast {
+            let bits = lower_cast_type_wide_bits(&(*e).cast_type)
+            if bits > 64 { return (bits + 63) / 64 }
+            return 0
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_limbs((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            let lw = self.opt_expr_wide_limbs_m(&(*e).left)
+            let rw = self.opt_expr_wide_limbs_m(&(*e).right)
+            if lw >= rw { return lw }
+            return rw
+        }
+        0
+    }
+    fn opt_expr_wide_limbs_m(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => self.expr_wide_limbs_m(&(*e)),
+            _ => 0,
+        }
+    }
+    // Context-sensitive single-limb-safe divisor check (mirrors expr_is_single_limb_safe but
+    // resolves a wide ident operand): safe iff a cast-TO-wide of a NARROW operand.
+    fn expr_single_limb_safe_m(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => {
+                if (*e).kind == ExprKind::ExprCast {
+                    let cw = lower_cast_type_wide_bits(&(*e).cast_type)
+                    let ow = self.opt_expr_wide_limbs_m(&(*e).left)
+                    if cw > 64 && ow == 0 { return 1 }
+                }
+                0
+            }
+            _ => 0,
+        }
     }
 
     // Sprint 228: Look up a function by name in the module. Returns (Lowerer, fn_id) where
@@ -4229,10 +4297,14 @@ impl Lowerer {
     }
 
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Wide-int ident tracking: if the initializer is a wide (i128/iN) value, its lowered
+        // base reg holds limb0 with the rest contiguous above it, so binding that base with
+        // the limb count lets later expressions use the variable in wide arithmetic.
+        let init_limbs = self.opt_expr_wide_limbs_m(&s.expr)
         let pair = self.lower_opt_expr_ref(&s.expr)
         var lo = pair.0
         let reg = pair.1
-        lo = lo.bind_local(s.name, reg, is_mut)
+        lo = lo.bind_local_wide(s.name, reg, is_mut, init_limbs)
         (lo, reg)
     }
 
@@ -4262,8 +4334,28 @@ impl Lowerer {
                             lo = lo.report_error()
                             (lo, rhs)
                         } else {
-                            lo = lo.emit(ir_copy(dst, rhs))
-                            (lo, dst)
+                            // Wide-int var reassignment: a single ir_copy would clobber only
+                            // limb0 and leave the high limbs stale (a silent wrong answer). For a
+                            // wide target, do an in-place L-limb copy when the rhs is equally wide;
+                            // a width mismatch (e.g. a narrow rhs) is a genuine reject (no ELF).
+                            let tlimbs = lo.lookup_local_limbs((*target_expr).name)
+                            if tlimbs >= 1 {
+                                let rlimbs = lo.opt_expr_wide_limbs_m(&s.expr)
+                                if rlimbs == tlimbs {
+                                    var kk: i64 = 0
+                                    while kk < tlimbs {
+                                        lo = lo.emit(ir_copy(dst + kk, rhs + kk))
+                                        kk = kk + 1
+                                    }
+                                    (lo, dst)
+                                } else {
+                                    lo = lo.emit(ir_wide_reject(dst))
+                                    (lo, dst)
+                                }
+                            } else {
+                                lo = lo.emit(ir_copy(dst, rhs))
+                                (lo, dst)
+                            }
                         }
                 } else if (*target_expr).kind == ExprKind::ExprFieldAccess {
                         let base_opt: Option<Box<Expr>> = (*target_expr).left
@@ -5679,7 +5771,8 @@ impl Lowerer {
             // Wide-int (i128/u128/iN) arithmetic, detected syntactically from the AST. Each
             // wide value occupies `wl` consecutive vregs (base..base+wl-1); operands lowered
             // recursively already return such bases (cast-materialize / wide-binary below).
-            let wl = expr_is_wide_limbs(e)
+            let wl = self.expr_wide_limbs_m(e)
+            let rhs_single_limb_safe = self.expr_single_limb_safe_m(&e.right)
             if wl >= 1 {
                 if e.bin_op == BinaryOp::OpShr {
                     // Logical >> by a compile-time-literal, non-negative bit count. A limb-aligned
@@ -5733,7 +5826,7 @@ impl Lowerer {
                         let pdv = low2.fresh_regs_n(wl)
                         let lod = pdv.0
                         let dstw = pdv.1
-                        if expr_is_single_limb_safe(&e.right) == 1 {
+                        if rhs_single_limb_safe == 1 {
                             return (lod.emit(ir_wide_div(dstw, lbase, rbase, wl)), dstw)
                         }
                         return (lod.emit(ir_wide_reject(dstw)), dstw)
@@ -5742,7 +5835,7 @@ impl Lowerer {
                         let pdr = low2.fresh_regs_n(wl)
                         let lor = pdr.0
                         let dstr = pdr.1
-                        if expr_is_single_limb_safe(&e.right) == 1 {
+                        if rhs_single_limb_safe == 1 {
                             return (lor.emit(ir_wide_mod(dstr, lbase, rbase, wl)), dstr)
                         }
                         return (lor.emit(ir_wide_reject(dstr)), dstr)
@@ -5756,8 +5849,8 @@ impl Lowerer {
                     // Wide unsigned compare -> a SINGLE i64 (0/1). Both operands must be EXACTLY
                     // wl-wide; a mixed-width compare would read a garbage high limb from the narrow
                     // side, so reject it (no ELF) rather than miscompute.
-                    let lwc = opt_expr_is_wide_limbs(&e.left)
-                    let rwc = opt_expr_is_wide_limbs(&e.right)
+                    let lwc = self.opt_expr_wide_limbs_m(&e.left)
+                    let rwc = self.opt_expr_wide_limbs_m(&e.right)
                     let pcl = self.lower_opt_expr_ref(&e.left)
                     let loc1 = pcl.0
                     let lbase = pcl.1
@@ -6105,8 +6198,8 @@ impl Lowerer {
         } else if e.kind == ExprKind::ExprCast {
             // Wide-int cast bridges. `cw` = limbs if THIS cast produces a wide value
             // (X as i128); `operand_wl` = limbs if the OPERAND is wide (i128 as i64).
-            let cw = expr_is_wide_limbs(e)
-            let operand_wl = opt_expr_is_wide_limbs(&e.left)
+            let cw = self.expr_wide_limbs_m(e)
+            let operand_wl = self.opt_expr_wide_limbs_m(&e.left)
             let sub = self.lower_opt_expr_ref(&e.left)
             let lo1 = sub.0
             let src_reg = sub.1

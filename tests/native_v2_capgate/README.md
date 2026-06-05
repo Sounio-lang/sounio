@@ -4,6 +4,8 @@ Baseline 2026-06-04 (feat/native-v2-source-bridge): 17/17 (FULL).
 2026-06-05: 20/20 (+wide-int i128: mul, div).
 2026-06-05: 24/24 (+wide-int i128: mod, compare ==/!=/</<=/>/>=).
 2026-06-05: 26/26 (+wide-int i128: funnel >> via x86 shrd; 26 exercises the cross-limb merge).
+2026-06-05: 29/29 (+wide-int i128 VARIABLES: ident-type tracking; let/var of wide type usable
+            in later wide arithmetic; wide var reassignment = in-place L-limb copy).
 PASS: literals, arith +-*/% + precedence, comparisons, if/else, let, var+mutation,
 while, for-in ranges, 1-4 arg calls, recursion, structs, arrays, bool, inline floats.
 
@@ -25,7 +27,11 @@ Wide ints (i128, Zig-style N-limb of u64) — 18..24:
   divisor, a NON-LITERAL shift, a mixed-width compare, and any other wide op (shl, bitwise).
   These reach the lowerer's reject sentinel, which has no codegen arm, so the backend
   returns false and emits no binary.
-  NOT yet: i128 vars (need lowerer ident-type tracking) [Increment C]; full N/N division
-  (Knuth Algorithm D) + multi-limb mod [Increment D].
+  i128 VARIABLES (Increment C): a `let`/`var` whose initializer is a wide value is tracked
+  (LowerLocalStack.limbs); the name then carries its limb count, so `let x: i128 = a*b;
+  (x>>64) as i64` and `x*x` work (tests 27,28). Wide `var` reassignment does an in-place
+  L-limb copy (test 29); a width-mismatched reassignment (e.g. a narrow rhs) rejects.
+  NOT yet: full N/N division (Knuth Algorithm D) + multi-limb mod [Increment D]. A narrow
+  literal assigned into a wide var is NOT auto-widened (write `x = (v as i128)`) — it rejects.
   KNOWN BOUNDARY (pre-existing): mixed-width + - * (one operand narrow) reads a garbage
   high limb; keep both operands two-wide casts. Compare already rejects this case.
