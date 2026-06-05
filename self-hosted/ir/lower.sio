@@ -4437,7 +4437,19 @@ impl Lowerer {
                                     (lo, dst)
                                 }
                             } else {
-                                lo = lo.emit(ir_copy(dst, rhs))
+                                // Compound assignment (`a += b`, `a *= b`, …): the op was
+                                // being IGNORED — only the rhs was copied, so `a += 5`
+                                // silently became `a = 5`. Apply the op: `dst = dst OP rhs`.
+                                if s.assign_op == AssignOp::AssignEq {
+                                    lo = lo.emit(ir_copy(dst, rhs))
+                                } else {
+                                    var bop = BinaryOp::OpAdd
+                                    if s.assign_op == AssignOp::AssignSub { bop = BinaryOp::OpSub }
+                                    else if s.assign_op == AssignOp::AssignMul { bop = BinaryOp::OpMul }
+                                    else if s.assign_op == AssignOp::AssignDiv { bop = BinaryOp::OpDiv }
+                                    else if s.assign_op == AssignOp::AssignRem { bop = BinaryOp::OpRem }
+                                    lo = lo.emit(ir_binop(dst, dst, bop, rhs))
+                                }
                                 (lo, dst)
                             }
                         }
@@ -4449,8 +4461,28 @@ impl Lowerer {
                                 lo = pair_base.0
                                 let base_reg = pair_base.1
                                 let fidx = lo.field_idx_from_name_simple((*target_expr).name)
-                                lo = lo.emit(ir_field_set(base_reg, fidx, rhs, (*target_expr).name))
-                                (lo, rhs)
+                                if s.assign_op == AssignOp::AssignEq {
+                                    lo = lo.emit(ir_field_set(base_reg, fidx, rhs, (*target_expr).name))
+                                    (lo, rhs)
+                                } else {
+                                    // Compound `obj.f OP= rhs`: read the field, apply the op,
+                                    // write back (was ignoring the op = silently `obj.f = rhs`).
+                                    let pc = lo.fresh_reg()
+                                    lo = pc.0
+                                    let cur = pc.1
+                                    lo = lo.emit(ir_field_get(cur, base_reg, fidx, (*target_expr).name))
+                                    var bop = BinaryOp::OpAdd
+                                    if s.assign_op == AssignOp::AssignSub { bop = BinaryOp::OpSub }
+                                    else if s.assign_op == AssignOp::AssignMul { bop = BinaryOp::OpMul }
+                                    else if s.assign_op == AssignOp::AssignDiv { bop = BinaryOp::OpDiv }
+                                    else if s.assign_op == AssignOp::AssignRem { bop = BinaryOp::OpRem }
+                                    let pr = lo.fresh_reg()
+                                    lo = pr.0
+                                    let res = pr.1
+                                    lo = lo.emit(ir_binop(res, cur, bop, rhs))
+                                    lo = lo.emit(ir_field_set(base_reg, fidx, res, (*target_expr).name))
+                                    (lo, res)
+                                }
                             }
                             _ => (lo.report_error(), rhs),
                         }
@@ -4461,8 +4493,28 @@ impl Lowerer {
                         let pair_idx = lo.lower_opt_expr_ref(&(*target_expr).right)
                         lo = pair_idx.0
                         let idx_reg = pair_idx.1
-                        lo = lo.emit(ir_index_set(base_reg, idx_reg, rhs))
-                        (lo, rhs)
+                        if s.assign_op == AssignOp::AssignEq {
+                            lo = lo.emit(ir_index_set(base_reg, idx_reg, rhs))
+                            (lo, rhs)
+                        } else {
+                            // Compound `arr[i] OP= rhs`: read the element, apply the op,
+                            // write it back (was ignoring the op = silently `arr[i] = rhs`).
+                            let pc = lo.fresh_reg()
+                            lo = pc.0
+                            let cur = pc.1
+                            lo = lo.emit(ir_index_get(cur, base_reg, idx_reg))
+                            var bop = BinaryOp::OpAdd
+                            if s.assign_op == AssignOp::AssignSub { bop = BinaryOp::OpSub }
+                            else if s.assign_op == AssignOp::AssignMul { bop = BinaryOp::OpMul }
+                            else if s.assign_op == AssignOp::AssignDiv { bop = BinaryOp::OpDiv }
+                            else if s.assign_op == AssignOp::AssignRem { bop = BinaryOp::OpRem }
+                            let pr = lo.fresh_reg()
+                            lo = pr.0
+                            let res = pr.1
+                            lo = lo.emit(ir_binop(res, cur, bop, rhs))
+                            lo = lo.emit(ir_index_set(base_reg, idx_reg, res))
+                            (lo, res)
+                        }
                 } else {
                     lo = lo.report_error()
                     (lo, rhs)
