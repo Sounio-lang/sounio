@@ -5771,6 +5771,49 @@ impl Lowerer {
             let lo5 = lo4.emit(ir_call(dst, fn_id, callee_name, final_args, final_argc))
             (lo5, dst)
         } else if e.kind == ExprKind::ExprBinary {
+            // Short-circuit logical && / || lowered to branches. The backend has no bare
+            // OpAnd/OpOr machine emitter, so the generic ir_binop(OpAnd) below failed the
+            // function (rc=12) — every compound condition `a && b` / `a || b` blocked.
+            // && => dst = left ? right : 0 ;  || => dst = left ? 1 : right. Mirrors the
+            // if/while branch+label pattern (ir_branch_false/true, ir_label, ir_copy).
+            if e.bin_op == BinaryOp::OpAnd {
+                let pd = self.fresh_reg()
+                var lo = pd.0
+                let dst = pd.1
+                lo = lo.emit(ir_load_imm(dst, 0))
+                let pl = lo.lower_opt_expr_ref(&e.left)
+                lo = pl.0
+                let l_reg = pl.1
+                let pe = lo.fresh_label()
+                lo = pe.0
+                let end_label = pe.1
+                lo = lo.emit(ir_branch_false(l_reg, end_label))
+                let pr = lo.lower_opt_expr_ref(&e.right)
+                lo = pr.0
+                let r_reg = pr.1
+                lo = lo.emit(ir_copy(dst, r_reg))
+                lo = lo.emit(ir_label(end_label))
+                return (lo, dst)
+            }
+            if e.bin_op == BinaryOp::OpOr {
+                let pd = self.fresh_reg()
+                var lo = pd.0
+                let dst = pd.1
+                lo = lo.emit(ir_load_imm(dst, 1))
+                let pl = lo.lower_opt_expr_ref(&e.left)
+                lo = pl.0
+                let l_reg = pl.1
+                let pe = lo.fresh_label()
+                lo = pe.0
+                let end_label = pe.1
+                lo = lo.emit(ir_branch_true(l_reg, end_label))
+                let pr = lo.lower_opt_expr_ref(&e.right)
+                lo = pr.0
+                let r_reg = pr.1
+                lo = lo.emit(ir_copy(dst, r_reg))
+                lo = lo.emit(ir_label(end_label))
+                return (lo, dst)
+            }
             // Wide-int (i128/u128/iN) arithmetic, detected syntactically from the AST. Each
             // wide value occupies `wl` consecutive vregs (base..base+wl-1); operands lowered
             // recursively already return such bases (cast-materialize / wide-binary below).
