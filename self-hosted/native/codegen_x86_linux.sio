@@ -3241,6 +3241,29 @@ fn emit_builtin_str_len(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, D
     c
 }
 
+// _into variants for the pure-.code string builtins str_len / str_slice. The by-value
+// dispatch `(*nc) = emit_builtin_X((*nc))` round-tripped the whole ~70KB NativeCompiler by
+// value → SRET-smash → SIGSEGV on any call. These mutate (*nc).code through the pointer
+// (the proven 48x pattern); bodies mirror the by-value versions byte-for-byte. (str_eq /
+// starts_with are NOT converted yet — their _into form crashes the compiler under the
+// string-literal quote fix; left on the by-value path until root-caused.)
+fn emit_builtin_str_len_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    (*nc).code = emit_xor_rcx_rcx((*nc).code)
+    (*nc).code = emit_cmp_byte_rdi_zero((*nc).code)
+    (*nc).code = emit_jz_rel8((*nc).code, 8)
+    (*nc).code = emit_inc_rdi((*nc).code)
+    (*nc).code = emit_inc_rcx((*nc).code)
+    (*nc).code = emit_jmp_rel8((*nc).code, -13)
+    (*nc).code = emit_mov_reg_reg((*nc).code, 0, 1)
+    (*nc).code = emit_ret((*nc).code)
+}
+
+fn emit_builtin_str_slice_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    (*nc).code = emit_add_reg_reg((*nc).code, 7, 6)  // add rdi, rsi
+    (*nc).code = emit_mov_reg_reg((*nc).code, 0, 7)  // mov rax, rdi
+    (*nc).code = emit_ret((*nc).code)
+}
+
 // str_eq(a: *u8, b: *u8) -> i64 (1 if equal, 0 if not)
 // Byte-by-byte comparison until mismatch or both reach null
 fn emit_builtin_str_eq(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
@@ -5268,9 +5291,13 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     }
     if builtin_id == 4 { emit_builtin_get_arg_count_into(nc); return }
     if builtin_id == 5 { emit_builtin_get_arg_into(nc); return }
-    if builtin_id == 6 { (*nc) = emit_builtin_str_len((*nc)); return }
+    if builtin_id == 6 { emit_builtin_str_len_into(nc); return }
+    // NOTE: str_eq (7) / starts_with (9) kept on the by-value path. Their _into variants
+    // SIGSEGV the compiler specifically when the string-literal quote fix is in effect
+    // (2-string-arg interaction, not yet root-caused). Pre-existing by-value SRET crash
+    // stands until that is understood — do not ship a *new* crash.
     if builtin_id == 7 { (*nc) = emit_builtin_str_eq((*nc)); return }
-    if builtin_id == 8 { (*nc) = emit_builtin_str_slice((*nc)); return }
+    if builtin_id == 8 { emit_builtin_str_slice_into(nc); return }
     if builtin_id == 9 { (*nc) = emit_builtin_starts_with((*nc)); return }
     if builtin_id == 10 { (*nc) = emit_builtin_str_concat((*nc)); return }
     if builtin_id == 11 { (*nc) = emit_builtin_read_file((*nc)); return }
@@ -5991,7 +6018,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             }
         } else if instr_op == IrOpcode::IrCall {
             let argc = (*func).instrs[i as usize].arg_count
-            if argc > 4 {
+            if argc > 6 {
                 return false
             }
             if argc > 0 {
@@ -6014,6 +6041,21 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 let arg3 = (*func).instrs[i as usize].label_id
                 if arg3 < 0 { return false }
                 nc_emit_load_rbp_disp32_reg(nc, 1, ir_slot_offset(arg3))
+            }
+            // args 4 and 5 live in the call_args linked list (NOT cached in IrInstr).
+            // The existing emitter pattern loads them inline via a tiny walker that
+            // returns IR_INVALID_REG when the list is too short; if either is invalid
+            // we fail-closed (return false) rather than emit a wrong call. Args 6+ still
+            // fail-closed — the SysV ABI requires stack placement we don't implement here.
+            if argc > 4 {
+                let arg4 = nc_call_arg_n_from_list(&(*func).instrs[i as usize].call_args, 4)
+                if arg4 < 0 { return false }
+                nc_emit_load_rbp_disp32_reg(nc, 8, ir_slot_offset(arg4))
+            }
+            if argc > 5 {
+                let arg5 = nc_call_arg_n_from_list(&(*func).instrs[i as usize].call_args, 5)
+                if arg5 < 0 { return false }
+                nc_emit_load_rbp_disp32_reg(nc, 9, ir_slot_offset(arg5))
             }
             let call_pos = (*nc).code.len
             nc_emit_call_rel32_placeholder(nc)
