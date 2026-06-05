@@ -2845,6 +2845,31 @@ impl Lowerer {
         }
     }
 
+    // Resolve a method call to an already-registered (mangled) method body WITHOUT minting
+    // a stub. Methods are preseeded under `Type_method` names, but native-v2 has no receiver
+    // type to mangle with, so match by name: exact, or a fn whose name ends in `_<method>`.
+    // Return the index ONLY if EXACTLY ONE candidate matches (otherwise the dispatch would be
+    // ambiguous and silently wrong — `len`/`push`/`get` collide across types); return -1 to
+    // let the caller fail closed. Never returns a fresh stub (calling an empty body SIGSEGVs).
+    fn resolve_method_fn_id(self, method_name: Name) -> i64 with Mut, Panic, Div {
+        var found: i64 = -1
+        var count: i64 = 0
+        var i: i64 = 0
+        while i < (*self.module).fn_count {
+            let fname = (*self.module).functions[i as usize].name
+            if ir_name_eq(fname, method_name) || ir_name_ends_with_method(fname, method_name) {
+                found = i
+                count = count + 1
+            }
+            i = i + 1
+        }
+        if count == 1 {
+            found
+        } else {
+            -1
+        }
+    }
+
     fn fn_ends_with_return(self) -> bool with Mut, Panic, Div {
         if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
             return false
@@ -6068,9 +6093,14 @@ impl Lowerer {
             let arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
             let arg_count = pair_args.count
             let args2 = lo2.prepend_arg(base_reg, arg_list)
-            let pair_fn = lo2.find_or_add_fn_id(e.name)
-            let lo3 = pair_fn.0
-            let fn_id = pair_fn.1
+            // Resolve to an already-registered (mangled) method body; do NOT mint a stub.
+            // An unresolved or ambiguous method fails CLOSED (report_error -> ir_bodies_failed,
+            // no ELF) instead of emitting a call into an empty body that SIGSEGVs at runtime.
+            let fn_id = lo2.resolve_method_fn_id(e.name)
+            if fn_id < 0 {
+                return lo2.report_error().emit_unit()
+            }
+            let lo3 = lo2
             let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args2, arg_count + 1)
             let lo4 = pair_call.lo
             let final_args = pair_call.args
