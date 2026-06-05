@@ -1053,20 +1053,34 @@ impl Parser {
     fn current_string_name(self: Parser) -> Name with Mut, Panic, Div {
         if self.pos < self.token_count {
             // The token span [s,e) covers the full literal INCLUDING both `"` quotes.
-            // Strip them: start at s+1 (skip the opening quote) and take (e-s)-2 bytes
-            // (drop opening + closing quote). Derived from the span directly — PT_TEXT_LEN
-            // is not populated for string tokens by this boot4 parallel-array parser, so it
-            // cannot be used here. (Escape sequences keep their raw source bytes for now.)
+            // The content is [s+1, e-1). Copy it, PROCESSING backslash escapes
+            // (\n \t \r \0 \\ \" \') — the source bytes are raw, so without this a
+            // string `"a\tb"` would emit a literal backslash-t instead of a tab.
             let s = PT_START[self.pos as usize]
             let e = PT_END[self.pos as usize]
-            var nlen = (e - s) - 2
-            if nlen > 128 { nlen = 128 }
-            if nlen < 0 { nlen = 0 }
-            var name = Name { buf: [0; 128], len: nlen }
-            var i: i64 = 0
-            while i < nlen {
-                name.buf[i as usize] = CURSOR_SOURCE[(s + 1 + i) as usize]
-                i = i + 1
+            var name = Name { buf: [0; 128], len: 0 }
+            var src = s + 1
+            let src_end = e - 1
+            while src < src_end && name.len < 128 {
+                let c0 = CURSOR_SOURCE[src as usize]
+                if c0 == (92 as i8) && src + 1 < src_end {  // backslash
+                    let nx = CURSOR_SOURCE[(src + 1) as usize]
+                    var eb = nx                              // unknown escape -> literal char
+                    if nx == (110 as i8) { eb = 10 as i8 }       // \n
+                    else if nx == (116 as i8) { eb = 9 as i8 }   // \t
+                    else if nx == (114 as i8) { eb = 13 as i8 }  // \r
+                    else if nx == (48 as i8) { eb = 0 as i8 }    // \0
+                    else if nx == (92 as i8) { eb = 92 as i8 }   // \\
+                    else if nx == (34 as i8) { eb = 34 as i8 }   // \"
+                    else if nx == (39 as i8) { eb = 39 as i8 }   // \'
+                    name.buf[name.len as usize] = eb
+                    name.len = name.len + 1
+                    src = src + 2
+                } else {
+                    name.buf[name.len as usize] = c0
+                    name.len = name.len + 1
+                    src = src + 1
+                }
             }
             name
         } else {
