@@ -1915,6 +1915,374 @@ fn nc_emit_sub_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0xd8)
 }
 
+// --- Zig-style wide-int (N-limb of u64) emit primitives + ops ---
+// adc rax, rbx (rax += rbx + CF). 0x48 0x11 0xd8. MOV loads/stores between limbs preserve CF.
+fn nc_emit_adc_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x11)
+    nc_emit_byte(nc, 0xd8)
+}
+// sbb rax, rbx (rax -= rbx + borrow). 0x48 0x19 0xd8.
+fn nc_emit_sbb_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x19)
+    nc_emit_byte(nc, 0xd8)
+}
+// mul rbx (rdx:rax = rax * rbx, unsigned). 0x48 0xf7 0xe3. Overwrites all of rdx:rax.
+fn nc_emit_mul_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xf7)
+    nc_emit_byte(nc, 0xe3)
+}
+// mov rcx, rax  (0x48 0x89 0xc1) — stash low product before reusing rax.
+fn nc_emit_mov_rcx_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xc1)
+}
+// mov rax, rdx  (0x48 0x89 0xd0) — move high half of product.
+fn nc_emit_mov_rax_rdx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xd0)
+}
+// xor rax, rbx  (0x48 0x31 0xd8) — per-limb difference for wide equality.
+fn nc_emit_xor_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x31)
+    nc_emit_byte(nc, 0xd8)
+}
+// or rcx, rax  (0x48 0x09 0xc1) — OR-accumulate limb diffs into the equality accumulator.
+fn nc_emit_or_rcx_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x09)
+    nc_emit_byte(nc, 0xc1)
+}
+// mov rax, rcx  (0x48 0x89 0xc8) — pull the accumulator into rax to TEST it.
+fn nc_emit_mov_rax_rcx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xc8)
+}
+// xor rbx, rbx  (0x48 0x31 0xdb) — zero the funnel-shift high source past the top limb.
+fn nc_emit_xor_rbx_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x31)
+    nc_emit_byte(nc, 0xdb)
+}
+// shrd rax, rbx, imm8  (0x48 0x0F 0xAC 0xD8 ib): rax = (rax >> imm) | (rbx << (64-imm)).
+fn nc_emit_shrd_rax_rbx_imm8(nc: &! NativeCompiler, imm: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0xac)
+    nc_emit_byte(nc, 0xd8)
+    nc_emit_byte(nc, low8(imm))
+}
+
+// Unrolled N-limb carry-chain add: dst[k] = lhs[k] + rhs[k] (+carry). Limb k of base
+// vreg v lives at vreg v+k. CF-safe: only flag-neutral MOVs between add/adc steps.
+fn nc_wide_add_into(nc: &! NativeCompiler, lhs_vreg: i64, rhs_vreg: i64, dst_vreg: i64, limbs: i64) with Mut, Panic, Div {
+    var k: i64 = 0
+    while k < limbs {
+        nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(rhs_vreg + k))   // rbx = rhs limb k
+        nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(lhs_vreg + k))      // rax = lhs limb k
+        if k == 0 { nc_emit_add_rax_rbx(nc) } else { nc_emit_adc_rax_rbx(nc) }
+        nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(dst_vreg + k))     // dst limb k = rax
+        k = k + 1
+    }
+}
+// N-limb borrow-chain sub: dst[k] = lhs[k] - rhs[k] - borrow.
+fn nc_wide_sub_into(nc: &! NativeCompiler, lhs_vreg: i64, rhs_vreg: i64, dst_vreg: i64, limbs: i64) with Mut, Panic, Div {
+    var k: i64 = 0
+    while k < limbs {
+        nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(rhs_vreg + k))
+        nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(lhs_vreg + k))
+        if k == 0 { nc_emit_sub_rax_rbx(nc) } else { nc_emit_sbb_rax_rbx(nc) }
+        nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(dst_vreg + k))
+        k = k + 1
+    }
+}
+// 2-limb schoolbook mul (truncated to 2 limbs; i128). Caller reserves scratch at dst+limbs..
+//   dst_lo = lhs_lo*rhs_lo (low 64);  carry = high 64 of that product
+//   dst_hi = carry + (lhs_lo*rhs_hi low) + (lhs_hi*rhs_lo low)
+fn nc_wide_mul_into(nc: &! NativeCompiler, lhs_vreg: i64, rhs_vreg: i64, dst_vreg: i64, limbs: i64) with Mut, Panic, Div {
+    let scratch = dst_vreg + limbs        // scratch base (caller reserved `limbs` slots)
+    // lhs_lo * rhs_lo -> dst_lo = rax ; carry = rdx (stash via rcx then store)
+    nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(rhs_vreg + 0))   // rbx = rhs_lo
+    nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(lhs_vreg + 0))      // rax = lhs_lo
+    nc_emit_mul_rbx(nc)                                                // rdx:rax = lhs_lo*rhs_lo
+    nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(dst_vreg + 0))     // dst_lo = rax
+    nc_emit_mov_rax_rdx(nc)                                            // rax = high(lhs_lo*rhs_lo)
+    nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(scratch + 0))      // scratch0 = carry
+    // lhs_lo * rhs_hi  (take low 64)
+    nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(rhs_vreg + 1))   // rbx = rhs_hi
+    nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(lhs_vreg + 0))      // rax = lhs_lo
+    nc_emit_mul_rbx(nc)
+    nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(scratch + 1))      // scratch1 = lo(lhs_lo*rhs_hi)
+    // lhs_hi * rhs_lo  (take low 64)
+    nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(rhs_vreg + 0))   // rbx = rhs_lo
+    nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(lhs_vreg + 1))      // rax = lhs_hi
+    nc_emit_mul_rbx(nc)                                                // rax = lo(lhs_hi*rhs_lo)
+    // dst_hi = rax + scratch0 + scratch1
+    nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(scratch + 0))    // rbx = carry
+    nc_emit_add_rax_rbx(nc)
+    nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(scratch + 1))    // rbx = lhs_lo*rhs_hi lo
+    nc_emit_add_rax_rbx(nc)
+    nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(dst_vreg + 1))     // dst_hi
+}
+
+// Limb-aligned logical right shift: dst[k] = src[k+shift_limbs], zero-filled above.
+// The observation gate — ((a*a) >> 64) shifts the high limb of a 2-limb product into
+// limb 0, where `as i64` (low-limb truncation) can return it as an ordinary i64.
+fn nc_wide_shr_limb_into(nc: &! NativeCompiler, src_vreg: i64, dst_vreg: i64, limbs: i64, shift_limbs: i64) with Mut, Panic, Div {
+    var k: i64 = 0
+    while k < limbs {
+        let src_limb = k + shift_limbs
+        if src_limb < limbs {
+            nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(src_vreg + src_limb))   // rax = src[k+shift]
+        } else {
+            nc_emit_xor_rax_rax(nc)                                                // rax = 0 (shifted-in)
+        }
+        nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(dst_vreg + k))             // dst[k] = rax
+        k = k + 1
+    }
+}
+
+// xor rdx, rdx (clear the high dividend / remainder). 0x48 0x31 0xd2.
+fn nc_emit_xor_rdx_rdx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x31)
+    nc_emit_byte(nc, 0xd2)
+}
+// div rcx (unsigned: rax = rdx:rax / rcx, rdx = rdx:rax % rcx). 0x48 0xf7 0xf1.
+fn nc_emit_div_rcx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xf7)
+    nc_emit_byte(nc, 0xf1)
+}
+
+// --- Increment D (full N/N divmod) byte primitives ---------------------------------
+// rcl rax, 1 — rotate-left-through-carry: rax = (rax << 1) | CF_in; CF_out = old bit63.
+// REX.W + D1 /2, ModRM 11 010 000 = 0xD0. The carry chains a multi-limb left shift.
+fn nc_emit_rcl_rax_1(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xd1)
+    nc_emit_byte(nc, 0xd0)
+}
+// bt reg, imm8 — set CF = bit `imm` of `reg` (reg code rax=0,rcx=1,rdx=2,rbx=3).
+// REX.W + 0F BA /4 ib, ModRM 11 100 rrr = 0xE0 + reg.
+fn nc_emit_bt_reg_imm8(nc: &! NativeCompiler, reg: i64, imm: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0xba)
+    nc_emit_byte(nc, 0xe0 + reg)
+    nc_emit_byte(nc, low8(imm))
+}
+// sbb rdx, rdx — rdx = 0 - 0 - CF = -CF (0 if CF=0, -1 if CF=1). REX.W + 19 /r, ModRM 0xD2.
+fn nc_emit_sbb_rdx_rdx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x19)
+    nc_emit_byte(nc, 0xd2)
+}
+// not rdx — rdx = ~rdx (flag-neutral). REX.W + F7 /2, ModRM 0xD2.
+fn nc_emit_not_rdx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xf7)
+    nc_emit_byte(nc, 0xd2)
+}
+// and rax, rdx — rax &= rdx. REX.W + 21 /r (and r/m64,r64; r/m=rax,reg=rdx), ModRM 0xD0.
+fn nc_emit_and_rax_rdx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x21)
+    nc_emit_byte(nc, 0xd0)
+}
+
+// N-limb division by a SINGLE-limb divisor (divisor's limb0; high limbs must be 0).
+// Schoolbook long division high-limb -> low-limb: x86 `div` does rdx:rax / rcx with the
+// remainder kept in rdx, which feeds the next (lower) limb. Correct for any dividend width
+// when the divisor fits in 64 bits (the common case; full N/N is Knuth Algorithm D, TODO).
+fn nc_wide_div_into(nc: &! NativeCompiler, lhs_vreg: i64, rhs_vreg: i64, dst_vreg: i64, limbs: i64) with Mut, Panic, Div {
+    nc_emit_load_rbp_disp32_reg(nc, 1, ir_slot_offset(rhs_vreg + 0))   // rcx = divisor (limb0)
+    nc_emit_xor_rdx_rdx(nc)                                            // remainder = 0
+    var k: i64 = limbs - 1
+    while k >= 0 {
+        nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(lhs_vreg + k))  // rax = dividend limb k
+        nc_emit_div_rcx(nc)                                            // rax=quot, rdx=rem (carries down)
+        nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(dst_vreg + k)) // quotient limb k
+        k = k - 1
+    }
+}
+
+// N-limb % single-limb divisor. Same schoolbook loop as div, but we keep the running
+// remainder (rdx) instead of the quotient: after the last `div rcx`, rdx holds the full
+// remainder (< divisor, so it fits one limb). dst limb0 = remainder, high limbs 0.
+fn nc_wide_mod_into(nc: &! NativeCompiler, lhs_vreg: i64, rhs_vreg: i64, dst_vreg: i64, limbs: i64) with Mut, Panic, Div {
+    nc_emit_load_rbp_disp32_reg(nc, 1, ir_slot_offset(rhs_vreg + 0))   // rcx = divisor (limb0)
+    nc_emit_xor_rdx_rdx(nc)                                            // remainder = 0
+    var k: i64 = limbs - 1
+    while k >= 0 {
+        nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(lhs_vreg + k))  // rax = dividend limb k
+        nc_emit_div_rcx(nc)                                            // rdx = running remainder
+        k = k - 1
+    }
+    nc_emit_mov_rax_rdx(nc)                                            // rax = final remainder
+    nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(dst_vreg + 0))     // dst limb0 = remainder
+    nc_emit_xor_rax_rax(nc)                                            // rax = 0 for the high limbs
+    var j: i64 = 1
+    while j < limbs {
+        nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(dst_vreg + j)) // dst high limb = 0
+        j = j + 1
+    }
+}
+
+// N-limb unsigned compare -> dst limb0 = 0/1. cmp_op: 0 Eq,1 Ne,2 Lt,3 Le,4 Gt,5 Ge.
+// Ordering (Lt/Le/Gt/Ge): a sub/sbb borrow chain across the limbs — only `mov` loads sit
+// between the sbb steps, and MOV leaves the flags untouched, so CF chains correctly. The
+// final CF is the unsigned borrow (first < second). Le/Gt swap the operands; Lt/Gt read
+// CF via `setb`, Le/Ge via `setae` (no-borrow = >=). Equality: XOR each limb pair and
+// OR-accumulate; a zero accumulator means all limbs equal.
+fn nc_wide_cmp_into(nc: &! NativeCompiler, lhs_vreg: i64, rhs_vreg: i64, dst_vreg: i64, limbs: i64, cmp_op: i64) with Mut, Panic, Div {
+    if cmp_op == 0 || cmp_op == 1 {
+        nc_emit_xor_rax_rax(nc)                                         // rax = 0
+        nc_emit_mov_rcx_rax(nc)                                         // rcx = 0 (accumulator)
+        var k: i64 = 0
+        while k < limbs {
+            nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(rhs_vreg + k))  // rbx = rhs[k]
+            nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(lhs_vreg + k))     // rax = lhs[k]
+            nc_emit_xor_rax_rbx(nc)                                           // rax = lhs[k] ^ rhs[k]
+            nc_emit_or_rcx_rax(nc)                                            // rcx |= rax
+            k = k + 1
+        }
+        nc_emit_mov_rax_rcx(nc)                                         // rax = accumulator
+        nc_emit_test_rax_rax(nc)                                        // ZF = (acc == 0)
+        if cmp_op == 0 { nc_emit_sete_al(nc) } else { nc_emit_setne_al(nc) }
+    } else {
+        var swap: i64 = 0
+        if cmp_op == 3 || cmp_op == 4 { swap = 1 }                      // Le/Gt compute (rhs - lhs)
+        var k: i64 = 0
+        while k < limbs {
+            if swap == 0 {
+                nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(rhs_vreg + k))  // rbx = rhs[k]
+                nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(lhs_vreg + k))     // rax = lhs[k]
+            } else {
+                nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(lhs_vreg + k))  // rbx = lhs[k]
+                nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(rhs_vreg + k))     // rax = rhs[k]
+            }
+            if k == 0 { nc_emit_sub_rax_rbx(nc) } else { nc_emit_sbb_rax_rbx(nc) }
+            k = k + 1
+        }
+        if cmp_op == 2 || cmp_op == 4 { nc_emit_setb_al(nc) } else { nc_emit_setae_al(nc) }
+    }
+    nc_emit_movzx_rax_al(nc)                                            // zero-extend the 0/1 byte
+    nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(dst_vreg + 0))      // dst limb0 = result
+}
+
+// General logical right shift by `shift_bits` (q = shift/64 limbs, r = shift%64 bits).
+// dst[k] = (src[k+q] >> r) | (src[k+q+1] << (64-r)), zero past the top. x86 `shrd rax, rbx, r`
+// computes exactly that funnel: rax = low limb (src[k+q]), rbx = the next higher limb. r=0
+// degenerates to a no-op shrd (rax unchanged = src[k+q]), so this also covers limb-aligned.
+fn nc_wide_shr_into(nc: &! NativeCompiler, src_vreg: i64, dst_vreg: i64, limbs: i64, shift_bits: i64) with Mut, Panic, Div {
+    let q = shift_bits / 64
+    let r = shift_bits % 64
+    var k: i64 = 0
+    while k < limbs {
+        let lo_idx = k + q
+        let hi_idx = k + q + 1
+        if lo_idx < limbs {
+            nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(src_vreg + lo_idx))   // rax = src[k+q]
+        } else {
+            nc_emit_xor_rax_rax(nc)                                              // 0 (shifted past top)
+        }
+        if hi_idx < limbs {
+            nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(src_vreg + hi_idx))   // rbx = src[k+q+1]
+        } else {
+            nc_emit_xor_rbx_rbx(nc)                                              // 0
+        }
+        nc_emit_shrd_rax_rbx_imm8(nc, r)                                         // funnel by r bits
+        nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(dst_vreg + k))           // dst[k]
+        k = k + 1
+    }
+}
+
+// FULL N/N unsigned divmod (Increment D). Branchless restoring shift-subtract over the
+// dividend's L*64 bits, producing BOTH quotient (q_base) and remainder (r_base) in one pass;
+// diff_base is L-limb scratch. Sound for ANY divisor width (the single-limb fast path in
+// nc_wide_div_into/nc_wide_mod_into is kept separate and untouched).
+// VERIFIED at L=2 (i128 — the only width the frontend can express): capgate 31/31 (this
+// path adds tests 30 divfull + 31 modfull) + an exact-bigint oracle sweep (766 source
+// cases, div+mod). CODE-SIZE BOUNDARY: this is
+// FULLY UNROLLED at ~400 bytes/iteration * L*64 iterations, so L=2 emits ~27KB (fits) and
+// L=3 ~59KB (fits), but L>=4 (i256+) exceeds the 64KB CodeBuffer cap in nc_emit_byte and is
+// silently truncated -> SIGSEGV. L>=4 is not source-reachable today; lifting it needs a
+// runtime-loop emission (O(1) code) rather than a wider buffer.
+//   Q=0; R=0
+//   for i = L*64-1 downto 0:
+//     R = (R<<1) | bit_i(N)                 ; bt N[i/64],i%64 -> CF; rcl chain across R
+//     diff = R - D                          ; sub/sbb chain, final CF = (R<D) borrow
+//     mask = (R>=D) ? -1 : 0                ; sbb rdx,rdx (=-CF) then not rdx
+//     R = R ^ ((R ^ diff) & mask)           ; branchless select: take diff iff R>=D
+//     Q = (Q<<1) | (mask & 1)               ; bt rdx,0 -> CF=qbit; rcl chain across Q
+// Only flag-neutral MOV loads sit between the carry-bearing ops, so CF chains correctly.
+fn nc_wide_divmod_into(nc: &! NativeCompiler, lhs_vreg: i64, rhs_vreg: i64, q_base: i64, r_base: i64, diff_base: i64, limbs: i64) with Mut, Panic, Div {
+    // Q = 0, R = 0
+    nc_emit_xor_rax_rax(nc)
+    var z: i64 = 0
+    while z < limbs {
+        nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(q_base + z))
+        nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(r_base + z))
+        z = z + 1
+    }
+    var i: i64 = limbs * 64 - 1
+    while i >= 0 {
+        let nlimb = i / 64
+        let nbit = i % 64
+        // R = (R << 1) | bit_i(N)
+        nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(lhs_vreg + nlimb))   // rbx = N[i/64]
+        nc_emit_bt_reg_imm8(nc, 3, nbit)                                       // CF = bit i of N
+        var k: i64 = 0
+        while k < limbs {
+            nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(r_base + k))        // mov: preserves CF
+            nc_emit_rcl_rax_1(nc)                                              // R[k]<<1 | CF
+            nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(r_base + k))
+            k = k + 1
+        }
+        // diff = R - D  (final CF = borrow = R < D)
+        k = 0
+        while k < limbs {
+            nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(rhs_vreg + k))   // rbx = D[k]
+            nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(r_base + k))        // rax = R[k]
+            if k == 0 { nc_emit_sub_rax_rbx(nc) } else { nc_emit_sbb_rax_rbx(nc) }
+            nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(diff_base + k))    // mov: preserves CF
+            k = k + 1
+        }
+        // mask (rdx) = (R >= D) ? -1 : 0
+        nc_emit_sbb_rdx_rdx(nc)                                               // rdx = -CF (=-borrow)
+        nc_emit_not_rdx(nc)                                                   // rdx = ~(-borrow)
+        // R = R ^ ((R ^ diff) & mask) : take diff iff R>=D, else restore R
+        k = 0
+        while k < limbs {
+            nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(r_base + k))        // rax = R[k]
+            nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(diff_base + k))  // rbx = diff[k]
+            nc_emit_xor_rax_rbx(nc)                                           // rax = R ^ diff
+            nc_emit_and_rax_rdx(nc)                                           // rax &= mask
+            nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(r_base + k))     // rbx = R[k]
+            nc_emit_xor_rax_rbx(nc)                                           // rax ^= R[k]
+            nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(r_base + k))       // R[k] = select
+            k = k + 1
+        }
+        // Q = (Q << 1) | (mask & 1) ; mask bit0 = (R>=D) = quotient bit
+        nc_emit_bt_reg_imm8(nc, 2, 0)                                         // CF = bit0 of rdx
+        k = 0
+        while k < limbs {
+            nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(q_base + k))        // mov: preserves CF
+            nc_emit_rcl_rax_1(nc)                                             // Q[k]<<1 | CF
+            nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(q_base + k))
+            k = k + 1
+        }
+        i = i - 1
+    }
+}
+
 fn nc_emit_imul_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x0f)
@@ -5276,6 +5644,19 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
+    if op == BinaryOp::OpRem {
+        // Same as OpDiv (idiv rcx) but the remainder is in rdx; move it to rax
+        // before storing. Without this, OpRem fell through to `false` and modulo
+        // compile-failed.
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_mov_reg_reg(nc, 1, 0)
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_cqo(nc)
+        nc_emit_idiv_rcx(nc)
+        nc_emit_mov_reg_reg(nc, 0, 2)
+        nc_core_store_rax_to_temp(nc, dst)
+        return true
+    }
     // Comparison ops: push lhs, load rhs into rax, pop lhs into rbx
     // CMP RAX, RBX = rhs - lhs; setXX conditions are flipped vs intuition
     if op == BinaryOp::OpLt || op == BinaryOp::OpLe || op == BinaryOp::OpGt || op == BinaryOp::OpGe || op == BinaryOp::OpEq || op == BinaryOp::OpNe {
@@ -5326,6 +5707,90 @@ fn nc_core_emit_println_i64_literal_sentinel_into(nc: &! NativeCompiler, value: 
     true
 }
 
+// mov rax, [rax]  (load qword at the address in rax). Ported from feat/mc-v2-opcodes.
+fn nc_emit_load_rax_mem_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x00)
+}
+
+// Resolve a managed-heap handle (in rax) to the object base address (in rax).
+// _into port of native_v2_resolve_handle_to_object_base_rax; used by the v2 core
+// emitter's IrFieldGet/Set and IrIndexGet/Set. Ported from feat/mc-v2-opcodes d0f5380b0.
+fn nc_resolve_handle_to_object_base_rax_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_rdx_rax(nc)                                                                 // rdx = handle (survives ctx load)
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_table_base()) // rax = table base (clobbers rbx)
+    nc_emit_mov_reg_reg(nc, 3, 2)                                                           // rbx = rdx (handle)
+    nc_emit_imul_rbx_rbx_imm8(nc, native_v2_handle_entry_size())                            // rbx = handle * entry_size
+    nc_emit_add_rax_rbx(nc)                                                                 // rax = table + handle*entry
+    nc_emit_load_rax_mem_rax(nc)                                                            // rax = [entry + object_base(0)]
+}
+
+// f64 scalar SSE support for the v2 core emitter. Ported from feat/mc-v2-opcodes 8752b5562.
+// f64 values live in GP temps as raw bits; ops move them to xmm0/xmm1, operate, move back.
+fn nc_emit_movq_xmm0_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x66); nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x6E); nc_emit_byte(nc, 0xC0)
+}
+fn nc_emit_movq_xmm1_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x66); nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x6E); nc_emit_byte(nc, 0xC8)
+}
+fn nc_emit_movq_rax_xmm0(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x66); nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x7E); nc_emit_byte(nc, 0xC0)
+}
+fn nc_emit_addsd_xmm0_xmm1(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2); nc_emit_byte(nc, 0x0F); nc_emit_byte(nc, 0x58); nc_emit_byte(nc, 0xC1)
+}
+fn nc_emit_subsd_xmm0_xmm1(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2); nc_emit_byte(nc, 0x0F); nc_emit_byte(nc, 0x5C); nc_emit_byte(nc, 0xC1)
+}
+fn nc_emit_mulsd_xmm0_xmm1(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2); nc_emit_byte(nc, 0x0F); nc_emit_byte(nc, 0x59); nc_emit_byte(nc, 0xC1)
+}
+fn nc_emit_divsd_xmm0_xmm1(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2); nc_emit_byte(nc, 0x0F); nc_emit_byte(nc, 0x5E); nc_emit_byte(nc, 0xC1)
+}
+fn nc_emit_cvtsi2sd_xmm0_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2); nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x2A); nc_emit_byte(nc, 0xC0)
+}
+fn nc_emit_cvttsd2si_rax_xmm0(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2); nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x2C); nc_emit_byte(nc, 0xC0)
+}
+fn nc_float_flag(nc: &! NativeCompiler, tmp: i64) -> i64 with Mut, Panic, Div {
+    if tmp >= 0 && tmp < 512 {
+        return (*nc).is_float_reg[tmp as usize]
+    }
+    0
+}
+fn nc_set_float_flag(nc: &! NativeCompiler, tmp: i64, val: i64) with Mut, Panic, Div {
+    if tmp >= 0 && tmp < 512 {
+        (*nc).is_float_reg[tmp as usize] = val
+    }
+}
+fn nc_emit_core_binop_f64(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64) -> bool with Mut, Panic, Div {
+    let lhs = (*func).instrs[instr_index as usize].src1
+    let rhs = (*func).instrs[instr_index as usize].src2
+    let dst = (*func).instrs[instr_index as usize].dst
+    let op = (*func).instrs[instr_index as usize].bin_op
+    nc_core_load_temp_to_rax(nc, lhs)
+    nc_emit_movq_xmm0_rax(nc)
+    nc_core_load_temp_to_rax(nc, rhs)
+    nc_emit_movq_xmm1_rax(nc)
+    if op == BinaryOp::OpAdd { nc_emit_addsd_xmm0_xmm1(nc) }
+    else if op == BinaryOp::OpSub { nc_emit_subsd_xmm0_xmm1(nc) }
+    else if op == BinaryOp::OpMul { nc_emit_mulsd_xmm0_xmm1(nc) }
+    else if op == BinaryOp::OpDiv { nc_emit_divsd_xmm0_xmm1(nc) }
+    else { return false }
+    nc_emit_movq_rax_xmm0(nc)
+    nc_core_store_rax_to_temp(nc, dst)
+    nc_set_float_flag(nc, dst, 1)
+    true
+}
+
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with Mut, Panic, Div, Alloc {
     nc_v2_reset_label_state()
     reset_function_state_mut(nc)
@@ -5366,20 +5831,95 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_emit_lea_rax_rip_disp32(nc, 0)
             nc_add_rodata_reloc(nc, lea_pos + 3, str_offset)
             nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+        } else if instr_op == IrOpcode::IrLoadBool {
+            nc_emit_mov_rax_imm(nc, (*func).instrs[i as usize].imm_i64)
+            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+        } else if instr_op == IrOpcode::IrFieldGet {
+            // dst = obj.field[field_idx]. base handle in src1; field at payload slot
+            // (field_idx + header/8). Ported from feat/mc-v2-opcodes d0f5380b0.
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_resolve_handle_to_object_base_rax_into(nc)
+            nc_emit_mov_reg_imm(nc, 3, (*func).instrs[i as usize].field_idx + native_v2_object_header_size() / 8)
+            nc_emit_mov_rax_mem_rax_rbx8(nc)
+            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+        } else if instr_op == IrOpcode::IrFieldSet {
+            // obj.field[field_idx] = src2. base handle in src1, value in src2.
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_resolve_handle_to_object_base_rax_into(nc)
+            nc_emit_mov_rdx_rax(nc)
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src2)
+            nc_emit_mov_reg_imm(nc, 3, (*func).instrs[i as usize].field_idx + native_v2_object_header_size() / 8)
+            nc_emit_store_rax_mem_rdx_rbx8(nc)
+        } else if instr_op == IrOpcode::IrIndexGet {
+            // dst = base[idx]. base handle in src1, idx in src2; element at payload slot
+            // (idx + header/8). Ported from feat/mc-v2-opcodes 5952da3e3.
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_resolve_handle_to_object_base_rax_into(nc)
+            nc_emit_mov_rdx_rax(nc)
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src2)
+            nc_emit_mov_rbx_rax(nc)
+            nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
+            nc_emit_add_reg_reg(nc, 3, 1)
+            nc_emit_load_rax_mem_rdx_rbx8(nc)
+            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+        } else if instr_op == IrOpcode::IrIndexSet {
+            // base[idx] = value. base handle in src1, idx in src2, value slot in imm_i64.
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_resolve_handle_to_object_base_rax_into(nc)
+            nc_emit_mov_rdx_rax(nc)
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src2)
+            nc_emit_mov_rbx_rax(nc)
+            nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
+            nc_emit_add_reg_reg(nc, 3, 1)
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].imm_i64)
+            nc_emit_store_rax_mem_rdx_rbx8(nc)
         } else if instr_op == IrOpcode::IrBinOp {
-            if !nc_emit_core_binop(nc, func, i) {
-                return false
+            let bo_lhs = (*func).instrs[i as usize].src1
+            let bo_rhs = (*func).instrs[i as usize].src2
+            if nc_float_flag(nc, bo_lhs) == 1 || nc_float_flag(nc, bo_rhs) == 1 {
+                if !nc_emit_core_binop_f64(nc, func, i) {
+                    return false
+                }
+            } else {
+                if !nc_emit_core_binop(nc, func, i) {
+                    return false
+                }
             }
+        } else if instr_op == IrOpcode::IrLoadFloat {
+            let lf_dst = (*func).instrs[i as usize].dst
+            let lf_bits = f64_to_bits((*func).instrs[i as usize].imm_f64)
+            nc_emit_mov_reg_imm64(nc, 0, lf_bits)
+            nc_core_store_rax_to_temp(nc, lf_dst)
+            nc_set_float_flag(nc, lf_dst, 1)
+        } else if instr_op == IrOpcode::IrIntToFloat {
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_emit_cvtsi2sd_xmm0_rax(nc)
+            nc_emit_movq_rax_xmm0(nc)
+            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            nc_set_float_flag(nc, (*func).instrs[i as usize].dst, 1)
+        } else if instr_op == IrOpcode::IrFloatToInt {
+            // Convert only if the source is runtime-float; otherwise this is a plain
+            // int->int cast (the lowering now emits IrFloatToInt for ALL int casts).
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            if nc_float_flag(nc, (*func).instrs[i as usize].src1) == 1 {
+                nc_emit_movq_xmm0_rax(nc)
+                nc_emit_cvttsd2si_rax_xmm0(nc)
+            }
+            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            nc_set_float_flag(nc, (*func).instrs[i as usize].dst, 0)
         } else if instr_op == IrOpcode::IrCopy {
             nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
             nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            // Propagate float-ness so `let a = <f64>` keeps the f64 flag (else the
+            // later binop sees an int operand and uses integer mul -> wrong value).
+            nc_set_float_flag(nc, (*func).instrs[i as usize].dst, nc_float_flag(nc, (*func).instrs[i as usize].src1))
         } else if instr_op == IrOpcode::IrAlloc {
             if !nc_core_emit_alloc_into(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].imm_i64) {
                 return false
             }
         } else if instr_op == IrOpcode::IrCall {
             let argc = (*func).instrs[i as usize].arg_count
-            if argc > 2 {
+            if argc > 4 {
                 return false
             }
             if argc > 0 {
@@ -5391,6 +5931,17 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 let arg1 = (*func).instrs[i as usize].src2
                 if arg1 < 0 { return false }
                 nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(arg1))
+            }
+            // args 2 and 3 are cached by ir_call in field_idx / label_id (see ir.sio)
+            if argc > 2 {
+                let arg2 = (*func).instrs[i as usize].field_idx
+                if arg2 < 0 { return false }
+                nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(arg2))
+            }
+            if argc > 3 {
+                let arg3 = (*func).instrs[i as usize].label_id
+                if arg3 < 0 { return false }
+                nc_emit_load_rbp_disp32_reg(nc, 1, ir_slot_offset(arg3))
             }
             let call_pos = (*nc).code.len
             nc_emit_call_rel32_placeholder(nc)
@@ -5423,6 +5974,79 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_add_label_patch(nc, jnz_pos + 2, (*func).instrs[i as usize].label_id)
         } else if instr_op == IrOpcode::IrNop {
             // no-op
+        } else if instr_op == IrOpcode::IrWideAdd {
+            let dst_v = (*func).instrs[i as usize].dst
+            let lhs_v = (*func).instrs[i as usize].src1
+            let rhs_v = (*func).instrs[i as usize].src2
+            let limbs = (*func).instrs[i as usize].imm_i64
+            if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 { return false }
+            nc_wide_add_into(nc, lhs_v, rhs_v, dst_v, limbs)
+        } else if instr_op == IrOpcode::IrWideSub {
+            let dst_v = (*func).instrs[i as usize].dst
+            let lhs_v = (*func).instrs[i as usize].src1
+            let rhs_v = (*func).instrs[i as usize].src2
+            let limbs = (*func).instrs[i as usize].imm_i64
+            if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 { return false }
+            nc_wide_sub_into(nc, lhs_v, rhs_v, dst_v, limbs)
+        } else if instr_op == IrOpcode::IrWideMul {
+            let dst_v = (*func).instrs[i as usize].dst
+            let lhs_v = (*func).instrs[i as usize].src1
+            let rhs_v = (*func).instrs[i as usize].src2
+            let limbs = (*func).instrs[i as usize].imm_i64
+            if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 { return false }
+            nc_wide_mul_into(nc, lhs_v, rhs_v, dst_v, limbs)
+        } else if instr_op == IrOpcode::IrWideShrLimb {
+            let dst_v = (*func).instrs[i as usize].dst
+            let src_v = (*func).instrs[i as usize].src1
+            let shift_l = (*func).instrs[i as usize].src2
+            let limbs = (*func).instrs[i as usize].imm_i64
+            if dst_v < 0 || src_v < 0 || shift_l < 0 || limbs < 1 { return false }
+            nc_wide_shr_limb_into(nc, src_v, dst_v, limbs, shift_l)
+        } else if instr_op == IrOpcode::IrWideDiv {
+            let dst_v = (*func).instrs[i as usize].dst
+            let lhs_v = (*func).instrs[i as usize].src1
+            let rhs_v = (*func).instrs[i as usize].src2
+            let limbs = (*func).instrs[i as usize].imm_i64
+            if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 { return false }
+            nc_wide_div_into(nc, lhs_v, rhs_v, dst_v, limbs)
+        } else if instr_op == IrOpcode::IrWideMod {
+            let dst_v = (*func).instrs[i as usize].dst
+            let lhs_v = (*func).instrs[i as usize].src1
+            let rhs_v = (*func).instrs[i as usize].src2
+            let limbs = (*func).instrs[i as usize].imm_i64
+            if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 { return false }
+            nc_wide_mod_into(nc, lhs_v, rhs_v, dst_v, limbs)
+        } else if instr_op == IrOpcode::IrWideCmp {
+            let dst_v = (*func).instrs[i as usize].dst
+            let lhs_v = (*func).instrs[i as usize].src1
+            let rhs_v = (*func).instrs[i as usize].src2
+            let limbs = (*func).instrs[i as usize].imm_i64
+            let cmp_op = (*func).instrs[i as usize].field_idx
+            if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 { return false }
+            nc_wide_cmp_into(nc, lhs_v, rhs_v, dst_v, limbs, cmp_op)
+        } else if instr_op == IrOpcode::IrWideShr {
+            let dst_v = (*func).instrs[i as usize].dst
+            let src_v = (*func).instrs[i as usize].src1
+            let shift_b = (*func).instrs[i as usize].src2
+            let limbs = (*func).instrs[i as usize].imm_i64
+            if dst_v < 0 || src_v < 0 || shift_b < 0 || limbs < 1 { return false }
+            nc_wide_shr_into(nc, src_v, dst_v, limbs, shift_b)
+        } else if instr_op == IrOpcode::IrWideDivFull {
+            // FULL N/N division: quotient at dst, remainder scratch at dst+L, diff at dst+2L.
+            let dst_v = (*func).instrs[i as usize].dst
+            let lhs_v = (*func).instrs[i as usize].src1
+            let rhs_v = (*func).instrs[i as usize].src2
+            let limbs = (*func).instrs[i as usize].imm_i64
+            if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 { return false }
+            nc_wide_divmod_into(nc, lhs_v, rhs_v, dst_v, dst_v + limbs, dst_v + limbs + limbs, limbs)
+        } else if instr_op == IrOpcode::IrWideModFull {
+            // FULL N/N remainder: remainder at dst, quotient scratch at dst+L, diff at dst+2L.
+            let dst_v = (*func).instrs[i as usize].dst
+            let lhs_v = (*func).instrs[i as usize].src1
+            let rhs_v = (*func).instrs[i as usize].src2
+            let limbs = (*func).instrs[i as usize].imm_i64
+            if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 { return false }
+            nc_wide_divmod_into(nc, lhs_v, rhs_v, dst_v + limbs, dst_v, dst_v + limbs + limbs, limbs)
         } else {
             return false
         }
@@ -7468,56 +8092,13 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     }
     if file_len <= 64 || file_len > 131072 { return 13 }
 
-    native_v2_file_put_u8(&! bytes, 0, 127)
-    native_v2_file_put_u8(&! bytes, 1, 69)
-    native_v2_file_put_u8(&! bytes, 2, 76)
-    native_v2_file_put_u8(&! bytes, 3, 70)
-    native_v2_file_put_u8(&! bytes, 4, 2)
-    native_v2_file_put_u8(&! bytes, 5, 1)
-    native_v2_file_put_u8(&! bytes, 6, 1)
-    native_v2_file_put_u16(&! bytes, 16, 2)
-    native_v2_file_put_u16(&! bytes, 18, 62)
-    native_v2_file_put_u32(&! bytes, 20, 1)
-    native_v2_file_put_u64(&! bytes, 24, base_addr + text_offset + entry_offset)
-    native_v2_file_put_u64(&! bytes, 32, 64)
-    native_v2_file_put_u64(&! bytes, 40, 0)
-    native_v2_file_put_u32(&! bytes, 48, 0)
-    native_v2_file_put_u16(&! bytes, 52, 64)
-    native_v2_file_put_u16(&! bytes, 54, 56)
-    native_v2_file_put_u16(&! bytes, 56, phnum)
-    native_v2_file_put_u16(&! bytes, 58, 64)
-    native_v2_file_put_u16(&! bytes, 60, 0)
-    native_v2_file_put_u16(&! bytes, 62, 0)
-
-    var phoff: i64 = 64
-    native_v2_file_emit_phdr(&! bytes, phoff, 1, 5, text_offset, text_vaddr, code_len, code_len, 4096)
-    phoff = phoff + 56
-    if rodata_len > 0 {
-        native_v2_file_emit_phdr(&! bytes, phoff, 1, 4, rodata_offset, rodata_vaddr, rodata_len, rodata_len, 4096)
-        phoff = phoff + 56
-    }
-    if data_len > 0 {
-        native_v2_file_emit_phdr(&! bytes, phoff, 1, 6, data_offset, data_vaddr, data_len, data_len, 4096)
-        phoff = phoff + 56
-    }
-    native_v2_file_emit_phdr(&! bytes, phoff, 0x6474e551, 6, 0, 0, 0, 0, 16)
-
-    var i: i64 = 0
-    while i < code_len && (text_offset + i) < 131072 {
-        bytes[(text_offset + i) as usize] = (*nc).code.bytes[i as usize]
-        i = i + 1
-    }
-
-    i = 0
-    while i < rodata_len && (rodata_offset + i) < 131072 {
-        let rb: i8 = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_bytes[i as usize] } else { (*nc).rodata.bytes[i as usize] }
-        bytes[(rodata_offset + i) as usize] = rb
-        i = i + 1
-    }
-
-    // The direct native-v2 witness only needs zero-initialized runtime-context
-    // storage. Avoid copying through the nested data byte array here; that path
-    // is still covered by the wider legacy ELF finalizer.
+    // Build the ELF header + program headers + segment payloads into `bytes`
+    // via a dedicated small helper. Splitting this out of the (large) caller
+    // keeps the conditional `if rodata_len>0`/`if data_len>0` forward jumps
+    // inside a short function so their branch offsets stay small — working
+    // around a c634b38f branch-target miscompile that otherwise skipped this
+    // whole block and fell through to `return 0` (file never written).
+    native_v2_build_elf_image_into(&! bytes, nc, base_addr, entry_offset, text_offset, code_len, rodata_offset, rodata_len, rodata_vaddr, text_vaddr, data_offset, data_len, data_vaddr, phnum)
 
     if bytes[0 as usize] != (0x7f as i8) { return 14 }
     if bytes[1 as usize] != (0x45 as i8) { return 15 }
@@ -7525,6 +8106,68 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     if bytes[3 as usize] != (0x46 as i8) { return 17 }
     if write_file(output_path, bytes, file_len) < 0 { return 18 }
     0
+}
+
+// Helper extracted from native_v2_write_min_elf64_to_file (c634b38f branch-offset
+// workaround — see caller). Writes the full ELF image into `bytes`.
+fn native_v2_build_elf_image_into(bytes: &! [i8; 131072], nc: &! NativeCompiler, base_addr: i64, entry_offset: i64, text_offset: i64, code_len: i64, rodata_offset: i64, rodata_len: i64, rodata_vaddr: i64, text_vaddr: i64, data_offset: i64, data_len: i64, data_vaddr: i64, phnum: i64) with Mut, Panic, Div {
+    native_v2_file_put_u8(bytes, 0, 127)
+    native_v2_file_put_u8(bytes, 1, 69)
+    native_v2_file_put_u8(bytes, 2, 76)
+    native_v2_file_put_u8(bytes, 3, 70)
+    native_v2_file_put_u8(bytes, 4, 2)
+    native_v2_file_put_u8(bytes, 5, 1)
+    native_v2_file_put_u8(bytes, 6, 1)
+    native_v2_file_put_u16(bytes, 16, 2)
+    native_v2_file_put_u16(bytes, 18, 62)
+    native_v2_file_put_u32(bytes, 20, 1)
+    native_v2_file_put_u64(bytes, 24, base_addr + text_offset + entry_offset)
+    native_v2_file_put_u64(bytes, 32, 64)
+    native_v2_file_put_u64(bytes, 40, 0)
+    native_v2_file_put_u32(bytes, 48, 0)
+    native_v2_file_put_u16(bytes, 52, 64)
+    native_v2_file_put_u16(bytes, 54, 56)
+    native_v2_file_put_u16(bytes, 56, phnum)
+    native_v2_file_put_u16(bytes, 58, 64)
+    native_v2_file_put_u16(bytes, 60, 0)
+    native_v2_file_put_u16(bytes, 62, 0)
+
+    var phoff: i64 = 64
+    native_v2_file_emit_phdr(bytes, phoff, 1, 5, text_offset, text_vaddr, code_len, code_len, 4096)
+    phoff = phoff + 56
+    if rodata_len > 0 {
+        native_v2_file_emit_phdr(bytes, phoff, 1, 4, rodata_offset, rodata_vaddr, rodata_len, rodata_len, 4096)
+        phoff = phoff + 56
+    }
+    if data_len > 0 {
+        native_v2_file_emit_phdr(bytes, phoff, 1, 6, data_offset, data_vaddr, data_len, data_len, 4096)
+        phoff = phoff + 56
+    }
+    native_v2_file_emit_phdr(bytes, phoff, 0x6474e551, 6, 0, 0, 0, 0, 16)
+
+    var i: i64 = 0
+    while i < code_len && (text_offset + i) < 131072 {
+        (*bytes)[(text_offset + i) as usize] = (*nc).code.bytes[i as usize]
+        i = i + 1
+    }
+
+    // Split the rodata write into two single-source loops instead of a per-iteration
+    // `if flat_rodata_len>0 {..} else {..}`. The mixed-source if-expression inside the
+    // loop miscompiled to a hang for the flat_rodata (string) branch; floats (rodata
+    // branch) were unaffected. Two straight-line loops dodge it.
+    if (*nc).flat_rodata_len > 0 {
+        i = 0
+        while i < rodata_len && (rodata_offset + i) < 131072 {
+            (*bytes)[(rodata_offset + i) as usize] = (*nc).flat_rodata_bytes[i as usize]
+            i = i + 1
+        }
+    } else {
+        i = 0
+        while i < rodata_len && (rodata_offset + i) < 131072 {
+            (*bytes)[(rodata_offset + i) as usize] = (*nc).rodata.bytes[i as usize]
+            i = i + 1
+        }
+    }
 }
 
 pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeTargetSpec, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
@@ -7560,7 +8203,11 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         emit_entry_trampoline_split_into(&! nc, main_idx)
     }
     let patched_rodata_file_offset = align_page(text_file_offset + nc.code.len)
-    let patched_data_file_offset = align_page(patched_rodata_file_offset + nc.rodata.len)
+    // Match native_v2_write_min_elf64_to_file: string consts live in flat_rodata,
+    // f64 consts in nc.rodata. Use the same effective length so the data section
+    // (and its relocs) land at the SAME offset the ELF writer uses.
+    let patched_eff_rodata_len = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
+    let patched_data_file_offset = align_page(patched_rodata_file_offset + patched_eff_rodata_len)
     apply_relocations_into(&! nc, patched_rodata_file_offset, patched_data_file_offset)
     let entry = trampoline_offset(nc)
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)

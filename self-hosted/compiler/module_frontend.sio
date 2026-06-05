@@ -2666,6 +2666,13 @@ fn multimodule_ir_error(msg: string) -> MultiModuleIrResult {
     MultiModuleIrResult { ok: false, module: ir_empty_module(), error_msg: msg }
 }
 
+// Pub constructor for a BSS-global MultiModuleIrResult backing store (used by the
+// source→native-v2 bridge to receive load_multimodule_ir_into's in-place result
+// without a by-value return — see load_multimodule_ir_traced_into).
+pub fn empty_multimodule_ir_result() -> MultiModuleIrResult {
+    multimodule_ir_error("")
+}
+
 fn multimodule_ir_counts_ok(fn_count: i64, string_count: i64, contest_count: i64) -> MultiModuleIrCountsResult {
     MultiModuleIrCountsResult {
         ok: true,
@@ -2686,11 +2693,11 @@ fn multimodule_ir_counts_error(msg: string) -> MultiModuleIrCountsResult {
     }
 }
 
-struct ModuleFrontendLowerBoxResult {
-    ok: bool,
-    module: Option<Box<IrModule>>,
-    error_msg: string,
-    patch_stats: IrValidatedPatchStats,
+pub struct ModuleFrontendLowerBoxResult {
+    pub ok: bool,
+    pub module: Option<Box<IrModule>>,
+    pub error_msg: string,
+    pub patch_stats: IrValidatedPatchStats,
 }
 
 fn module_frontend_lower_box_error(msg: string) -> ModuleFrontendLowerBoxResult {
@@ -2821,6 +2828,46 @@ fn module_frontend_lower_program_box_traced(
     trace.lowered_modules = trace.lowered_modules + 1
     trace.last_stage = "lower_bodies_done"
     module_frontend_lower_box_ok(module, ir_empty_validated_patch_stats())
+}
+
+// Bridge-only single-module front-half: parse + typecheck + lower to a HEAP-BOXED
+// IrModule, returning a ModuleFrontendLowerBoxResult whose `.module` is an
+// Option<Box<IrModule>> (a POINTER). The result is small, so returning it by
+// value does NOT trigger the frame-sensitive SRET large-struct-return crash that
+// kills the by-value IrModule/MultiModuleIrResult chain. The caller borrows/derefs
+// the box to hand the backend a stable &IrModule with no full-module copy on the
+// caller stack. Scope: single module, no-import (the source→native-v2 wall's case).
+pub fn bridge_lower_single_module_box(main_path: string, trace: &! LoadMultimoduleIrTrace) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
+    // Mirror load_multimodule_lower_program_traced EXACTLY (single load_module_file,
+    // no extra large Program locals, no separate typecheck) so this fn's frame
+    // matches the proven-good one — extra locals shift the stack and re-trigger the
+    // frame-sensitive c634b38f large-struct miscompile. REAL body lowering (summary
+    // box + body box), returning the body Box<IrModule> directly instead of
+    // `*body_result.module` (the by-value materialization = SRET crash).
+    let prog_lower = load_module_file(main_path)
+    let main_parse_errors = parser_last_error_count()
+    if main_parse_errors > 0 {
+        print("Parse failed during IR lowering for module 0: ")
+        print_int(main_parse_errors)
+        print(" errors\n")
+        return module_frontend_lower_box_error("parse_failed")
+    }
+    let epistemic = ir_empty_epistemic_section()
+    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&prog_lower, epistemic)
+    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+        return module_frontend_lower_box_error("ir_summary_failed")
+    }
+    var summary_val = (*summary_result.summary)
+    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
+        &prog_lower,
+        &summary_val,
+        epistemic
+    )
+    if body_result.had_error {
+        return module_frontend_lower_box_error("ir_bodies_failed")
+    }
+    parser_reset_last_errors()
+    module_frontend_lower_box_ok(body_result.module, body_result.patch_stats)
 }
 
 fn load_multimodule_lower_program_traced(
@@ -3522,6 +3569,276 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
 pub fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
     var trace = empty_load_multimodule_ir_trace()
     load_multimodule_ir_traced(main_path, &! trace)
+}
+
+// SRET-safe variant of load_multimodule_ir_traced: writes the MultiModuleIrResult
+// through an `&!out` pointer via in-place FIELD writes instead of RETURNING the
+// ~MB struct (which embeds a large IrModule) BY VALUE. The by-value return
+// triggers the frame-sensitive SRET epilogue `rep movsq` / dropped-sret-pointer
+// crash (c634b38f) when the caller frame is the source→native-v2 bridge's. Only
+// the OUTER returns are converted; the inner large-by-value calls
+// (load_multimodule_lower_program_traced / *_box_traced / ir_merge_modules) are
+// left exactly as in the proven-good `_traced` body (--check traverses them in
+// this same frame shape and succeeds). On error paths `.module` is left unset —
+// the consumer only reads `.module` when `.ok` is true. See
+// compiler_preflight_ir_load_into for the matching top-level routing.
+pub fn load_multimodule_ir_traced_into(out: &! MultiModuleIrResult, main_path: string, trace: &! LoadMultimoduleIrTrace) with IO, Mut, Div, Panic, Alloc {
+    if module_frontend_file_maybe_has_use(main_path) {
+        trace.loaded_modules = 1
+        trace.last_stage = "load_main"
+        trace.last_module_index = 0
+        var merged_imported = module_frontend_lower_imported_source_recursive(main_path, 0, trace)
+        if merged_imported.fn_count <= 0 {
+            print("IR lowering failed for module 0\n")
+            (*out).ok = false
+            (*out).error_msg = "ir_lowering_failed"
+            return
+        }
+
+        trace.last_stage = "done"
+        trace.last_module_index = trace.loaded_modules - 1
+        print("Merged IR: ")
+        print_int(merged_imported.fn_count)
+        print(" functions\n")
+        ir_module_resolve_named_calls(&! merged_imported)
+        parser_reset_last_errors()
+        (*out).ok = true
+        (*out).error_msg = ""
+        (*out).module = merged_imported
+        return
+    }
+
+    let main_prog = load_module_file(main_path)
+    let main_parse_errors = parser_last_error_count()
+    if main_parse_errors > 0 {
+        print("Parse failed during IR lowering for module 0: ")
+        print_int(main_parse_errors)
+        print(" errors\n")
+        (*out).ok = false
+        (*out).error_msg = "parse_failed"
+        return
+    }
+    if module_frontend_lower_trace_enabled() { print("module_frontend_full: main_loaded\n") }
+    trace.loaded_modules = 1
+    trace.last_stage = "load_main"
+    trace.last_module_index = 0
+
+    if !module_frontend_file_maybe_has_use(main_path) {
+        trace.resolved_modules = 1
+        var single_epistemic_no_use = ir_empty_epistemic_section()
+        trace.last_stage = "typecheck"
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_begin\n") }
+        let single_verdict_no_use = module_frontend_check_items_with_source_context(main_prog.items, main_path)
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
+        if single_verdict_no_use != 0 {
+            print("Type check failed during IR lowering for module 0\n")
+            (*out).ok = false
+            (*out).error_msg = "type_check_failed"
+            return
+        }
+        trace.typechecked_modules = 1
+        trace.last_stage = "lower_single"
+        let single_prog_lower_no_use = load_module_file(main_path)
+        var single_lower_result_no_use = load_multimodule_lower_program_traced(single_prog_lower_no_use, single_epistemic_no_use, 0, trace)
+        if single_lower_result_no_use.fn_count <= 0 {
+            print("IR lowering failed for module 0\n")
+            (*out).ok = false
+            (*out).error_msg = "ir_lowering_failed"
+            return
+        }
+        trace.merged_modules = 1
+        trace.last_stage = "done"
+        print("Merged IR: ")
+        print_int(single_lower_result_no_use.fn_count)
+        print(" functions\n")
+        if single_lower_result_no_use.fn_count <= 0 {
+            print("IR lowering produced empty module\n")
+            (*out).ok = false
+            (*out).error_msg = "ir_lowering_empty_module"
+            return
+        }
+        parser_reset_last_errors()
+        (*out).ok = true
+        (*out).error_msg = ""
+        (*out).module = single_lower_result_no_use
+        return
+    }
+
+    let main_imports_fast = module_frontend_import_files_from_source(main_path)
+    if main_imports_fast.count <= 0 {
+        trace.resolved_modules = 1
+        var single_epistemic = ir_empty_epistemic_section()
+        trace.last_stage = "typecheck"
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_begin\n") }
+        let single_verdict = module_frontend_check_items_with_source_context(main_prog.items, main_path)
+        if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
+        if single_verdict != 0 {
+            print("Type check failed during IR lowering for module 0\n")
+            (*out).ok = false
+            (*out).error_msg = "type_check_failed"
+            return
+        }
+        trace.typechecked_modules = 1
+        trace.last_stage = "lower_single"
+        let single_prog_lower = load_module_file(main_path)
+        var single_lower_result = load_multimodule_lower_program_traced(single_prog_lower, single_epistemic, 0, trace)
+        if single_lower_result.fn_count <= 0 {
+            print("IR lowering failed for module 0\n")
+            (*out).ok = false
+            (*out).error_msg = "ir_lowering_failed"
+            return
+        }
+        trace.merged_modules = 1
+        trace.last_stage = "done"
+        print("Merged IR: ")
+        print_int(single_lower_result.fn_count)
+        print(" functions\n")
+        if single_lower_result.fn_count <= 0 {
+            print("IR lowering produced empty module\n")
+            (*out).ok = false
+            (*out).error_msg = "ir_lowering_empty_module"
+            return
+        }
+        parser_reset_last_errors()
+        (*out).ok = true
+        (*out).error_msg = ""
+        (*out).module = single_lower_result
+        return
+    }
+
+    var programs: [Program; 256] = [mf_empty_program(); 256]
+    var file_paths: [string; 256] = [""; 256]
+    programs[0] = main_prog
+    file_paths[0] = main_path
+    var loaded: i64 = 1
+    var visited_paths: [string; 256] = [""; 256]
+    var visited_count: i64 = 0
+    visited_paths[0] = main_path
+    visited_count = 1
+    var work_front: i64 = 0
+    var i: i64 = 0
+
+    while work_front < loaded && loaded < 256 {
+        let work_imports = module_frontend_import_files_from_source(file_paths[work_front])
+        work_front = work_front + 1
+        i = 0
+        while i < work_imports.count && loaded < 256 {
+            let file_path = work_imports.paths[i]
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    if module_frontend_lower_trace_enabled() { print("module_frontend_full: load_dep_begin\n") }
+                    programs[loaded] = load_module_file(file_path)
+                    if module_frontend_lower_trace_enabled() { print("module_frontend_full: load_dep_done\n") }
+                    file_paths[loaded] = file_path
+                    loaded = loaded + 1
+                    trace.loaded_modules = loaded
+                    trace.last_stage = "load_deps"
+                    trace.last_module_index = loaded - 1
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    let main_imports = module_frontend_import_files_from_source(file_paths[0])
+    let needs_resolution = loaded > 1 || main_imports.count > 0
+    if needs_resolution {
+        trace.last_stage = "resolve"
+        trace.last_module_index = loaded - 1
+        trace.resolved_modules = loaded
+    } else {
+        trace.resolved_modules = loaded
+    }
+
+    if loaded <= 0 {
+        trace.last_stage = "empty"
+        (*out).ok = false
+        (*out).error_msg = "no_modules_loaded"
+        return
+    }
+
+    trace.last_stage = "typecheck_imported_summary"
+    trace.last_module_index = 0
+    trace.typechecked_modules = 1
+    let seed_prog_lower = load_module_file(file_paths[0])
+    let seed_lower_result = module_frontend_lower_program_box_traced(seed_prog_lower, 0, trace)
+    if !seed_lower_result.ok {
+        print("IR lowering failed for module 0\n")
+        (*out).ok = false
+        (*out).error_msg = "ir_lowering_failed"
+        return
+    }
+    var merged_module = ir_empty_module()
+    match seed_lower_result.module {
+        Some(module_box) => { merged_module = *module_box }
+        None => {
+            print("IR lowering failed for module 0\n")
+            (*out).ok = false
+            (*out).error_msg = "ir_lowering_failed"
+            return
+        }
+    }
+    trace.merged_modules = 1
+
+    i = 1
+    while i < loaded {
+        trace.last_stage = "typecheck_imported_summary"
+        trace.last_module_index = i
+        trace.typechecked_modules = trace.typechecked_modules + 1
+        let prog_lower = load_module_file(file_paths[i])
+        let lower_result = module_frontend_lower_program_box_traced(prog_lower, i, trace)
+        if !lower_result.ok {
+            print("IR lowering failed for module ")
+            print_int(i)
+            print("\n")
+            (*out).ok = false
+            (*out).error_msg = "ir_lowering_failed"
+            return
+        }
+        var lowered_module = ir_empty_module()
+        match lower_result.module {
+            Some(module_box) => { lowered_module = *module_box }
+            None => {
+                print("IR lowering failed for module ")
+                print_int(i)
+                print("\n")
+                (*out).ok = false
+                (*out).error_msg = "ir_lowering_failed"
+                return
+            }
+        }
+        trace.last_stage = "merge"
+        merged_module = ir_merge_modules(merged_module, lowered_module)
+        trace.merged_modules = trace.merged_modules + 1
+        i = i + 1
+    }
+
+    trace.last_stage = "done"
+    trace.last_module_index = loaded - 1
+    print("Merged IR: ")
+    print_int(merged_module.fn_count)
+    print(" functions\n")
+
+    if merged_module.fn_count <= 0 {
+        print("IR lowering produced empty module\n")
+        (*out).ok = false
+        (*out).error_msg = "ir_lowering_empty_module"
+        return
+    }
+
+    ir_module_resolve_named_calls(&! merged_module)
+    parser_reset_last_errors()
+    (*out).ok = true
+    (*out).error_msg = ""
+    (*out).module = merged_module
+}
+
+// SRET-safe wrapper mirroring load_multimodule_ir (writes via &!out).
+pub fn load_multimodule_ir_into(out: &! MultiModuleIrResult, main_path: string) with IO, Mut, Div, Panic, Alloc {
+    var trace = empty_load_multimodule_ir_trace()
+    load_multimodule_ir_traced_into(out, main_path, &! trace)
 }
 
 pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrCountsResult with IO, Mut, Div, Panic, Alloc {

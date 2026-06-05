@@ -621,6 +621,17 @@ pub enum IrOpcode {
     //   Formal guarantee: QDeformClassical.lean  `q_deform_recovers_classical`
     //   Lowering at q=1: 1 VMULPD.  At q≠1: VMULPD + VSUBPD + scale + VFMADD231PD; ~4 EVEX
     IrQDeform,          // Door Ξ: a·_q b, q in imm_flags, unifies all prior Doors
+    IrWideAdd,          // Zig-style N-limb carry-chain add: dst[0..L-1]=src1+src2; imm_i64=L (limbs of u64)
+    IrWideSub,          // N-limb borrow-chain sub (sbb); imm_i64=L
+    IrWideMul,          // N-limb schoolbook mul (truncated to N limbs); imm_i64=L; caller reserves L scratch slots at dst+L..
+    IrWideShrLimb,      // Limb-aligned logical shr: dst[k]=src1[k+src2] (zero-fill); imm_i64=L limbs, src2=shift in limbs. The observation gate: ((a*a)>>64) extracts the high limb into an i64.
+    IrWideDiv,          // N-limb / single-limb-divisor unsigned division (x86 div, remainder carries high->low); imm_i64=L. Fast path for a cast divisor; multi-limb divisors use IrWideDivFull.
+    IrWideMod,          // N-limb % single-limb-divisor: remainder of the wide div (rdx after the final div), stored in dst limb0, high limbs 0; imm_i64=L. Multi-limb divisors use IrWideModFull.
+    IrWideCmp,          // N-limb unsigned compare; dst is a SINGLE i64 = 0/1. field_idx = cmp code (0 Eq,1 Ne,2 Lt,3 Le,4 Gt,5 Ge). imm_i64=L. Both operands must be L-wide.
+    IrWideReject,       // Sentinel for a wide form the backend cannot soundly compile (e.g. multi-limb divisor, mixed-width compare). Has NO codegen arm -> nc lowering returns false -> no ELF. A GENUINE reject (never a wrong answer), not a fall-through.
+    IrWideShr,          // General logical >> by an arbitrary bit count: dst[k]=(src[k+q]>>r)|(src[k+q+1]<<(64-r)), q=shift/64, r=shift%64, zero-filled. src2=shift in BITS, imm_i64=L. Funnel via x86 shrd; subsumes IrWideShrLimb (r=0).
+    IrWideDivFull,      // FULL N/N (multi-limb divisor) unsigned division (Increment D): branchless restoring shift-subtract divmod. dst=quotient (L limbs); scratch remainder at dst+L, diff at dst+2L (caller reserves 3L). src1=dividend, src2=divisor, imm_i64=L. Sound for ANY divisor (incl. high limbs nonzero).
+    IrWideModFull,      // FULL N/N (multi-limb divisor) unsigned remainder: same divmod, dst=remainder (L limbs); scratch quotient at dst+L, diff at dst+2L (caller reserves 3L). src1=dividend, src2=divisor, imm_i64=L.
 }
 
 pub struct IrRegList {
@@ -2972,6 +2983,132 @@ pub fn ir_binop(dst: i64, lhs: i64, op: BinaryOp, rhs: i64) -> IrInstr {
     }
 }
 
+// Zig-style fixed-width wide-int ops. dst/src1/src2 = BASE vreg of each operand;
+// limb k lives at vreg base+k (consecutive slots, limb 0 = least significant).
+// limb_count = ceil(N/64) for an iN/uN value.
+pub fn ir_wide_add(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideAdd)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_sub(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideSub)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_mul(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideMul)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+// N-limb unsigned division by a single-limb divisor: dst = src1 / src2 (src2's limb0).
+pub fn ir_wide_div(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideDiv)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+// Limb-aligned logical right shift: dst[k] = src[k+shift_limbs] (zero where out of range).
+// src2 carries the shift amount in limbs; imm_i64 = source limb count.
+pub fn ir_wide_shr_limb(dst: i64, src: i64, limb_count: i64, shift_limbs: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideShrLimb)
+    IrInstr {
+        op: base.op, dst: dst, src1: src, src2: shift_limbs,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+// N-limb unsigned remainder by a single-limb divisor: dst limb0 = src1 % src2 (src2's limb0),
+// high dst limbs 0. Reuses the schoolbook div loop, keeping the final running remainder.
+pub fn ir_wide_mod(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideMod)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+// N-limb unsigned compare -> dst (single i64) = 0/1. cmp_op in field_idx (0 Eq,1 Ne,2 Lt,3 Le,4 Gt,5 Ge).
+pub fn ir_wide_cmp(dst: i64, src1: i64, src2: i64, limb_count: i64, cmp_op: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideCmp)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: cmp_op, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+// General logical right shift by an arbitrary bit count (src2 = shift in bits, imm_i64 = L limbs).
+pub fn ir_wide_shr(dst: i64, src: i64, limb_count: i64, shift_bits: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideShr)
+    IrInstr {
+        op: base.op, dst: dst, src1: src, src2: shift_bits,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+// FULL N/N division (multi-limb divisor): dst = src1 / src2. dst is the quotient (L limbs);
+// caller reserves 2 more L-limb scratch blocks at dst+L (remainder) and dst+2L (diff).
+pub fn ir_wide_div_full(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideDivFull)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+// FULL N/N remainder (multi-limb divisor): dst = src1 % src2. dst is the remainder (L limbs);
+// caller reserves 2 more L-limb scratch blocks at dst+L (quotient) and dst+2L (diff).
+pub fn ir_wide_mod_full(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideModFull)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+// Sentinel: an unsupported wide form. No codegen arm -> backend lowering returns false -> no ELF.
+pub fn ir_wide_reject(dst: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideReject)
+    IrInstr {
+        op: base.op, dst: dst, src1: base.src1, src2: base.src2,
+        imm_i64: base.imm_i64, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+
 fn ir_hyper_mul_o(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrHyperMulO)
     IrInstr {
@@ -3039,6 +3176,12 @@ pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>
     let pair_regs = ir_reg_list_first_two(args)
     let arg0 = pair_regs.0
     let arg1 = pair_regs.1
+    // Cache args 2 and 3 in field_idx / label_id (both unused for IrCall) so the
+    // native-v2 emitter reads them without walking the Option<Box<IrRegList>> chain
+    // (which miscompiles inside the emitter loop). Caps the fast path at 4 SysV regs.
+    let pair_more = ir_reg_list_third_fourth(args)
+    let arg2 = pair_more.0
+    let arg3 = pair_more.1
     let base = ir_instr_new(IrOpcode::IrCall)
     IrInstr {
         op: base.op,
@@ -3047,9 +3190,9 @@ pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>
         src2: arg1,
         imm_i64: base.imm_i64,
         imm_f64: base.imm_f64,
-        label_id: base.label_id,
+        label_id: arg3,
         fn_id: fn_id,
-        field_idx: base.field_idx,
+        field_idx: arg2,
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
@@ -3067,6 +3210,32 @@ pub fn ir_reg_list_first_two(args: Option<Box<IrRegList>>) -> (i64, i64) {
             match (*list).tail {
                 Some(rest) => (a0, (*rest).head),
                 _ => (a0, IR_INVALID_REG),
+            }
+        }
+        _ => (IR_INVALID_REG, IR_INVALID_REG),
+    }
+}
+
+// Extract the 3rd and 4th argument regs (args index 2 and 3), IR_INVALID_REG when
+// absent. Walked here in the helper layer (NOT the v2 emitter loop, where the
+// nested Option<Box> match miscompiles). Ported from feat/mc-v2-opcodes 7c7f5514c.
+pub fn ir_reg_list_third_fourth(args: Option<Box<IrRegList>>) -> (i64, i64) {
+    match args {
+        Some(list) => {
+            match (*list).tail {
+                Some(rest) => {
+                    match (*rest).tail {
+                        Some(third) => {
+                            let a2 = (*third).head
+                            match (*third).tail {
+                                Some(fourth) => (a2, (*fourth).head),
+                                _ => (a2, IR_INVALID_REG),
+                            }
+                        }
+                        _ => (IR_INVALID_REG, IR_INVALID_REG),
+                    }
+                }
+                _ => (IR_INVALID_REG, IR_INVALID_REG),
             }
         }
         _ => (IR_INVALID_REG, IR_INVALID_REG),
