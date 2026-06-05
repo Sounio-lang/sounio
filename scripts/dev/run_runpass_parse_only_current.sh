@@ -71,6 +71,12 @@ SIO
 
 "$SOUC_BIN" "$BUNDLE" "$ELF"
 /bin/chmod +x "$ELF"
-"$ELF" > "$OUT" || true
+runner_status=0
+"$ELF" > "$OUT" || runner_status=$?
 /bin/grep -E "RUN_PASS_PARSE_(FAIL|SUMMARY)|passed=|failed=" "$OUT"
+/bin/grep -q "RUN_PASS_PARSE_SUMMARY" "$OUT"
+/bin/grep -q "^failed=0$" "$OUT"
+if [[ "$runner_status" -ne 0 ]]; then
+  exit "$runner_status"
+fi
 ! /bin/grep -q "RUN_PASS_PARSE_FAIL" "$OUT"
