@@ -685,10 +685,21 @@ for f in "${FILES[@]}"; do
     echo "// SOURCE: $f  ($LINES lines)"
     echo "// ════════════════════════════════════════════════════════════════"
     echo ""
-    sed \
-      -e '/^[[:space:]]*module[[:space:]]\+[A-Za-z0-9_:]\+[[:space:]]*;*[[:space:]]*$/d' \
-      -e '/^[[:space:]]*use[[:space:]].*$/d' \
-      "$f"
+    awk '
+      /^[[:space:]]*module[[:space:]]+[A-Za-z0-9_:]+[[:space:]]*;?[[:space:]]*$/ { next }
+      in_use {
+        if ($0 ~ /^[[:space:]]*}[[:space:]]*$/) {
+          in_use = 0
+        }
+        next
+      }
+      /^[[:space:]]*use[[:space:]].*\{[[:space:]]*$/ {
+        in_use = 1
+        next
+      }
+      /^[[:space:]]*use[[:space:]].*$/ { next }
+      { print }
+    ' "$f"
   } >> "$OUTPUT_FILE"
 
   if [ "$DECL_LINES" -gt 0 ]; then
@@ -724,7 +735,12 @@ echo "  Stripped module/use declarations: $STRIPPED_DECL_LINES"
 # SIGSEGV (exit 139), is a real bundle-compile failure.
 echo ""
 BUNDLE_ELF_OUT="$ARTIFACT_DIR/bootstrap_stage1.elf"
-echo "=== Running pinned compile: $PINNED_BIN $OUTPUT_FILE $BUNDLE_ELF_OUT ==="
+if "$PINNED_BIN" --help 2>&1 | grep -q "Commands:"; then
+  PINNED_CMD=( "$PINNED_BIN" build "$OUTPUT_FILE" -o "$BUNDLE_ELF_OUT" )
+else
+  PINNED_CMD=( "$PINNED_BIN" "$OUTPUT_FILE" "$BUNDLE_ELF_OUT" )
+fi
+echo "=== Running pinned compile: ${PINNED_CMD[*]} ==="
 echo ""
 
 CHECKER_EXIT=0
@@ -734,13 +750,13 @@ CHECKER_STACK_KB="${CHECKER_STACK_KB:-unlimited}"
 if [ "$BOOTSTRAP_PROFILE" = "full" ]; then
   (
     ulimit -s "$CHECKER_STACK_KB" 2>/dev/null || true
-    "$PINNED_BIN" "$OUTPUT_FILE" "$BUNDLE_ELF_OUT" 2>&1
+    "${PINNED_CMD[@]}" 2>&1
   ) | tee "$FULL_CHECK_LOG"
   CHECKER_EXIT="${PIPESTATUS[0]}"
 else
   (
     ulimit -s "$CHECKER_STACK_KB" 2>/dev/null || true
-    "$PINNED_BIN" "$OUTPUT_FILE" "$BUNDLE_ELF_OUT" 2>&1
+    "${PINNED_CMD[@]}" 2>&1
   )
   CHECKER_EXIT="$?"
 fi
