@@ -957,6 +957,18 @@ fn name_is_print(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+fn name_is_println(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 7 { return false }
+    if n.buf[0] != 112 as i8 { return false }     // 'p'
+    if n.buf[1] != 114 as i8 { return false }     // 'r'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 110 as i8 { return false }     // 'n'
+    if n.buf[4] != 116 as i8 { return false }     // 't'
+    if n.buf[5] != 108 as i8 { return false }     // 'l'
+    if n.buf[6] != 110 as i8 { return false }     // 'n'
+    true
+}
+
 fn name_ref_is_print_int(n: &Name) -> bool with Mut, Panic, Div {
     if (*n).len != 9 { return false }
     if (*n).buf[0] != 112 as i8 { return false }
@@ -1046,6 +1058,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if native_v2_func_name_is_print_int(func) { return 1 }
     if native_v2_func_name_is_print_char(func) { return 2 }
     if native_v2_func_name_is_print(func) { return 3 }
+    if name_is_println((*func).name) { return 20 }
     if name_is_get_arg_count((*func).name) { return 4 }
     if name_is_get_arg((*func).name) { return 5 }
     if name_is_str_len((*func).name) { return 6 }
@@ -3046,6 +3059,32 @@ fn emit_builtin_print_str_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_jmp_rel8(nc, -16)
     nc_emit_mov_reg_reg(nc, 2, 1)
     emit_stdout_write_syscall_linux_into(nc)
+    nc_emit_pop_rbp(nc)
+    nc_emit_ret(nc)
+}
+
+// println(s) — print the null-terminated string in rdi, then a '\n'. Same scan+write as
+// print_str, followed by a second 1-byte write of the newline from the stack.
+fn emit_builtin_println_str_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_push_rbp(nc)
+    nc_emit_mov_rbp_rsp(nc)
+    nc_emit_mov_reg_reg(nc, 6, 7)        // rsi = rdi (string start)
+    nc_emit_xor_rcx_rcx(nc)              // len = 0
+    nc_emit_movzx_rax_byte_rdi(nc)
+    nc_emit_test_al_al(nc)
+    nc_emit_jz_rel8(nc, 8)
+    nc_emit_inc_rdi(nc)
+    nc_emit_inc_rcx(nc)
+    nc_emit_jmp_rel8(nc, -16)
+    nc_emit_mov_reg_reg(nc, 2, 1)        // rdx = rcx (length)
+    emit_stdout_write_syscall_linux_into(nc)
+    // newline: write(stdout, "\n", 1) — push '\n', point rsi at it, len 1.
+    nc_emit_mov_rdi_imm(nc, 10)          // rdi = '\n'
+    nc_emit_push_rdi(nc)                  // [rsp] low byte = 10
+    nc_emit_mov_rsi_rsp(nc)              // rsi = &newline
+    nc_emit_mov_reg_imm(nc, 2, 1)        // rdx = 1
+    emit_stdout_write_syscall_linux_into(nc)
+    nc_emit_add_rsp_8(nc)
     nc_emit_pop_rbp(nc)
     nc_emit_ret(nc)
 }
@@ -5291,6 +5330,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     }
     if builtin_id == 4 { emit_builtin_get_arg_count_into(nc); return }
     if builtin_id == 5 { emit_builtin_get_arg_into(nc); return }
+    if builtin_id == 20 { emit_builtin_println_str_into(nc); return }
     if builtin_id == 6 { emit_builtin_str_len_into(nc); return }
     // NOTE: str_eq (7) / starts_with (9) kept on the by-value path. Their _into variants
     // SIGSEGV the compiler specifically when the string-literal quote fix is in effect
@@ -5890,6 +5930,48 @@ fn nc_emit_core_binop_f64(nc: &! NativeCompiler, func: &IrFunction, instr_index:
     true
 }
 
+// Walk the call_args linked list (Option<Box<IrRegList>>) to extract the
+// n-th argument register id. Returns IR_INVALID_REG (-1) if the list is
+// empty or shorter than n+1 elements. The IrCall emitter caches args 0..3
+// in IrInstr.src1/src2/field_idx/label_id; args 4+ need this walker because
+// the v2 emitter loop cannot safely pattern-match on Option<Box<...>>.
+// The walker is intentionally non-recursive to keep stack usage flat and
+// to avoid the miscompiles the inline match hit.
+fn nc_call_arg_n_from_list(args: &Option<Box<IrRegList>>, n: i64) -> i64 {
+    var i: i64 = 0
+    var cur = args
+    while i <= n {
+        match cur {
+            Some(list_box) => {
+                let list = *list_box
+                if i == n {
+                    return (*list).head
+                }
+                cur = &(*list).tail
+            }
+            _ => { return 0 - 1 }
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Compute the stack frame size for a function given its vreg count.
+// The fixed 512-byte frame was the v1 budget; functions with many vregs
+// (above ~44) wrote past it and SIGSEGV'd the compiler. We size the
+// frame from reg_count with a 32-slot safety margin for the prologue
+// (16 bytes), the return address (8), and any unmodeled locals. Cap at
+// 16 KB so a misbehaving reg_count fails-closed (return false) rather
+// than emitting a giant frame.
+fn nc_frame_size_for_reg_count(reg_count: i64) -> i64 with Mut, Div {
+    let needed = (reg_count + 32) * 8
+    if needed > 16384 {
+        0
+    } else {
+        needed
+    }
+}
+
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with Mut, Panic, Div, Alloc {
     nc_v2_reset_label_state()
     reset_function_state_mut(nc)
@@ -5899,7 +5981,11 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
 
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
-    nc_emit_sub_rsp_imm32(nc, 512)
+    let frame_size = nc_frame_size_for_reg_count((*func).reg_count)
+    if frame_size <= 0 {
+        return false
+    }
+    nc_emit_sub_rsp_imm32(nc, frame_size)
     spill_ir_params_ref_mut(nc, func)
 
     var i = 0
@@ -6178,7 +6264,11 @@ pub fn native_v2_core_begin_function_from_ir_into(nc: &! NativeCompiler, func: &
     native_compiler_add_symbol_func_ref(nc, fn_index, func)
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
-    nc_emit_sub_rsp_imm32(nc, 512)
+    let frame_size = nc_frame_size_for_reg_count((*func).reg_count)
+    if frame_size <= 0 {
+        return
+    }
+    nc_emit_sub_rsp_imm32(nc, frame_size)
 }
 
 pub fn native_v2_core_emit_load_imm_into(nc: &! NativeCompiler, dst: i64, value: i64) with Mut, Panic, Div {
@@ -6633,7 +6723,11 @@ pub fn native_v2_core_begin_fn_spill_into(nc: &! NativeCompiler, func: &IrFuncti
     native_compiler_add_symbol_func_ref(nc, fn_index, func)
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
-    nc_emit_sub_rsp_imm32(nc, 512)
+    let frame_size = nc_frame_size_for_reg_count((*func).reg_count)
+    if frame_size <= 0 {
+        return
+    }
+    nc_emit_sub_rsp_imm32(nc, frame_size)
     spill_ir_params_ref_mut(nc, func)
 }
 
