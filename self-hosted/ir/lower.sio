@@ -421,6 +421,20 @@ fn lowerer_mark_error(lo: &! Lowerer) with Mut {
     lo.had_error = true
 }
 
+fn lowerer_intern_string_mut(lo: &! Lowerer, n: Name) -> i64 with Mut, Panic, Div, Alloc {
+    if (*(*lo).module).string_count < IR_MAX_STRINGS {
+        var module = *(*lo).module
+        let idx = module.string_count
+        module.string_table[idx as usize] = n
+        module.string_count = idx + (1 as i64)
+        (*lo).module = Box::new(module)
+        idx
+    } else {
+        lowerer_mark_error(lo)
+        -1
+    }
+}
+
 fn lowerer_effect_list_has_name_ref(effects: &Option<Box<EffectList>>, target: string) -> bool with Mut, Panic, Div {
     var current = effects
     while true {
@@ -2731,6 +2745,9 @@ impl Lowerer {
         if lower_name_is_sqrt_builtin(callee_name) {
             return lower_type_name_f64()
         }
+        if ir_name_is_some(callee_name) || ir_name_is_box(callee_name) {
+            return ir_empty_name()
+        }
         let fn_lookup = self.lookup_fn_by_name(callee_name)
         let lo2 = fn_lookup.0
         let fn_id = fn_lookup.1
@@ -2888,18 +2905,13 @@ impl Lowerer {
     }
 
     fn intern_string(self, n: Name) -> (Lowerer, i64) with Mut, Panic, Div {
-        var i: i64 = 0
-        while i < self.module.string_count {
-            if ir_name_eq(self.module.string_table[i], n) {
-                return (self, i)
-            }
-            i = i + 1
-        }
         var lo = self
         if lo.module.string_count < IR_MAX_STRINGS {
-            let idx = (*lo.module).string_count
-            (*lo.module).string_table[idx as usize] = n
-            (*lo.module).string_count = idx + 1
+            var module = *lo.module
+            let idx = module.string_count
+            module.string_table[idx as usize] = n
+            module.string_count = idx + (1 as i64)
+            lo.module = Box::new(module)
             (lo, idx)
         } else {
             let loe = lo.report_error()
@@ -3591,18 +3603,20 @@ impl Lowerer {
 
     fn lower_program_bodies_filtered_ref(self, items: &Option<Box<ItemList>>, target_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
-        var current: Option<Box<ItemList> > = *items
+        var current = items
         while true {
-            match current {
+            match *current {
                 Some(list) => {
-                    let kind = (*list).head.kind
-                    let name = (*list).head.name
+                    let head = &(*list).head
+                    let kind = head.kind
+                    let name = head.name
                     if kind == ItemKind::ItemFn {
                         if ir_name_eq(name, target_name) {
                             if lower_body_diag_enabled() {
                                 lower_body_trace_append("body_filtered_fn name=" + str_from_bytes(name.buf, name.len))
                             }
-                            match (*list).head.fn_def {
+                            let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
+                            match *fn_def_opt_ref {
                                 Some(fd) => {
                                     lo = lo.lower_fn_item_ref(name, &(*fd))
                                 }
@@ -3610,13 +3624,13 @@ impl Lowerer {
                             }
                         }
                     } else if kind == ItemKind::ItemImpl {
-                        let impl_def_opt: Option<Box<ImplDef>> = (*list).head.impl_def
-                        match impl_def_opt {
+                        let impl_def_opt_ref: &Option<Box<ImplDef>> = &head.impl_def
+                        match *impl_def_opt_ref {
                             Some(id) => { lo = lo.lower_impl_methods_filtered_ref(name, &(*id).methods, target_name) }
                             _ => {}
                         }
                     }
-                    current = (*list).tail
+                    current = &(*list).tail
                 }
                 _ => break
             }
@@ -4340,7 +4354,7 @@ impl Lowerer {
         var lo = self
         if lower_live_diag_enabled() { print("lower_live: block_begin\n") }
         lo.scope_depth = lo.scope_depth + 1
-        let pair = lo.lower_stmt_list(blk.stmts)
+        let pair = lo.lower_stmt_list_ref(&blk.stmts)
         lo = pair.0
         let reg = pair.1
         if lo.scope_depth > 0 {
@@ -4526,9 +4540,9 @@ impl Lowerer {
         let pair_rhs = self.lower_opt_expr_ref(&s.expr)
         var lo = pair_rhs.0
         let rhs = pair_rhs.1
-        let target_opt: Option<Box<Expr>> = s.target
+        let target_ref: &Option<Box<Expr>> = &s.target
 
-        match target_opt {
+        match *target_ref {
             Some(target_expr) => {
                 if (*target_expr).kind == ExprKind::ExprIdent {
                         let dst = lo.lookup_local((*target_expr).name)
@@ -4540,8 +4554,8 @@ impl Lowerer {
                             (lo, dst)
                         }
                 } else if (*target_expr).kind == ExprKind::ExprFieldAccess {
-                        let base_opt: Option<Box<Expr>> = (*target_expr).left
-                        match base_opt {
+                        let base_ref: &Option<Box<Expr>> = &(*target_expr).left
+                        match *base_ref {
                             Some(base_expr) => {
                                 let pair_base = lo.lower_expr_ref(&(*base_expr))
                                 lo = pair_base.0
@@ -5017,7 +5031,7 @@ impl Lowerer {
                 // Branch if scrutinee == 0 (skip this arm)
                 lo = lo.emit(ir_branch_false(scrut, l_skip))
                 // Bind the inner pattern (first sub_pattern) to scrutinee value
-                lo = lo.bind_match_sub_pattern(scrut, pat.sub_patterns)
+                lo = lo.bind_match_sub_pattern_ref(scrut, &pat.sub_patterns)
                 let pair_b = lo.lower_expr_ref(&arm.body)
                 lo = pair_b.0
                 let body_reg = pair_b.1
@@ -5759,14 +5773,16 @@ impl Lowerer {
         self.emit_i64_const(self.module.epistemic.transition_plans[plan_id as usize].step_count)
     }
 
-    // Bind the first sub-pattern of a Some(x) match to the scrutinee value
-    fn bind_match_sub_pattern(self, scrut: i64, pats: Option<Box<PatternList>>) -> Lowerer with Mut, Panic, Div, Alloc {
-        match pats {
+    // Bind the first sub-pattern of a Some(x) match to the scrutinee value.
+    // Keep this by-reference: PatternList/Pattern are large AST aggregates, and
+    // copying them by value can trip the seed compiler's SRET/null-copy bug.
+    fn bind_match_sub_pattern_ref(self, scrut: i64, pats: &Option<Box<PatternList>>) -> Lowerer with Mut, Panic, Div, Alloc {
+        match *pats {
             Some(list) => {
-                let inner = (*list).head
-                if inner.kind == PatternKind::PatBinding {
-                    self.bind_local(inner.name, scrut, inner.is_mut)
-                } else if inner.kind == PatternKind::PatWildcard {
+                let inner_ref: &Pattern = &(*list).head
+                if (*inner_ref).kind == PatternKind::PatBinding {
+                    self.bind_local((*inner_ref).name, scrut, (*inner_ref).is_mut)
+                } else if (*inner_ref).kind == PatternKind::PatWildcard {
                     // _ inside Some(_) — no binding needed
                     self
                 } else {
@@ -5831,9 +5847,8 @@ impl Lowerer {
             let lo2 = lo.emit(ir_load_bool(reg, false))
             (lo2, reg)
         } else if e.kind == ExprKind::ExprStringLit {
-            let pair_idx = self.intern_string(e.name)
-            let lo1 = pair_idx.0
-            let idx = pair_idx.1
+            var lo1 = self
+            let idx = lowerer_intern_string_mut(&! lo1, e.name)
             let pair_reg = lo1.fresh_reg()
             let lo2 = pair_reg.0
             let reg = pair_reg.1
@@ -5936,8 +5951,8 @@ impl Lowerer {
                 }
             }
         } else if e.kind == ExprKind::ExprCall {
-            let callee_opt: Option<Box<Expr>> = e.left
-            let callee_name = match callee_opt {
+            let callee_ref: &Option<Box<Expr>> = &e.left
+            let callee_name = match *callee_ref {
                 Some(c) => self.expr_to_callee_name_ref(&(*c)),
                 None => ir_empty_name(),
             }
