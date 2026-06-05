@@ -8151,11 +8151,22 @@ fn native_v2_build_elf_image_into(bytes: &! [i8; 131072], nc: &! NativeCompiler,
         i = i + 1
     }
 
-    i = 0
-    while i < rodata_len && (rodata_offset + i) < 131072 {
-        let rb: i8 = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_bytes[i as usize] } else { (*nc).rodata.bytes[i as usize] }
-        (*bytes)[(rodata_offset + i) as usize] = rb
-        i = i + 1
+    // Split the rodata write into two single-source loops instead of a per-iteration
+    // `if flat_rodata_len>0 {..} else {..}`. The mixed-source if-expression inside the
+    // loop miscompiled to a hang for the flat_rodata (string) branch; floats (rodata
+    // branch) were unaffected. Two straight-line loops dodge it.
+    if (*nc).flat_rodata_len > 0 {
+        i = 0
+        while i < rodata_len && (rodata_offset + i) < 131072 {
+            (*bytes)[(rodata_offset + i) as usize] = (*nc).flat_rodata_bytes[i as usize]
+            i = i + 1
+        }
+    } else {
+        i = 0
+        while i < rodata_len && (rodata_offset + i) < 131072 {
+            (*bytes)[(rodata_offset + i) as usize] = (*nc).rodata.bytes[i as usize]
+            i = i + 1
+        }
     }
 }
 
@@ -8192,7 +8203,11 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         emit_entry_trampoline_split_into(&! nc, main_idx)
     }
     let patched_rodata_file_offset = align_page(text_file_offset + nc.code.len)
-    let patched_data_file_offset = align_page(patched_rodata_file_offset + nc.rodata.len)
+    // Match native_v2_write_min_elf64_to_file: string consts live in flat_rodata,
+    // f64 consts in nc.rodata. Use the same effective length so the data section
+    // (and its relocs) land at the SAME offset the ELF writer uses.
+    let patched_eff_rodata_len = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
+    let patched_data_file_offset = align_page(patched_rodata_file_offset + patched_eff_rodata_len)
     apply_relocations_into(&! nc, patched_rodata_file_offset, patched_data_file_offset)
     let entry = trampoline_offset(nc)
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
