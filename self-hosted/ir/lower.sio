@@ -15,6 +15,9 @@ struct LowerLocalStack {
     // value occupying regs[idx]..regs[idx]+limbs-1. Lets `let x: i128 = ...` be used in later
     // wide arithmetic (ident-type tracking; the checker is skipped on the native-v2 bridge).
     limbs: [i64; 4096],
+    // Array element count of the binding (for `let a: [T; N]`): N, used to desugar
+    // `for x in a`. 0 = not a known-size array. Mirrors `limbs` tracking.
+    elem_counts: [i64; 4096],
     count: i64,
 }
 
@@ -24,6 +27,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         regs: [IR_INVALID_REG; 4096],
         depths: [0; 4096],
         limbs: [0; 4096],
+        elem_counts: [0; 4096],
         count: 0,
     }
 }
@@ -2594,12 +2598,38 @@ impl Lowerer {
             stk.regs[idx as usize] = reg
             stk.depths[idx as usize] = lo.scope_depth
             stk.limbs[idx as usize] = limbs
+            stk.elem_counts[idx as usize] = 0
             stk.count = idx + 1
             lo.locals = Box::new(stk)
         } else {
             lo = lo.report_error()
         }
         lo
+    }
+
+    // Record the array element count N for the most-recently-bound local (`let a: [T; N]`),
+    // so `for x in a` can desugar to an N-bounded index loop. No-op if no binding exists.
+    fn set_top_elem_count(self, elem_count: i64) -> Lowerer with Mut, Alloc, Panic {
+        var lo = self
+        var stk = *lo.locals
+        if stk.count > 0 {
+            stk.elem_counts[(stk.count - 1) as usize] = elem_count
+            lo.locals = Box::new(stk)
+        }
+        lo
+    }
+
+    // Array element count of the binding named `name`, or 0 if not a known-size array.
+    fn lookup_local_elem_count(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        let stk = *self.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= self.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                return stk.elem_counts[i as usize]
+            }
+            i = i - 1
+        }
+        0
     }
 
     fn lookup_local(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
@@ -4308,6 +4338,25 @@ impl Lowerer {
         var lo = pair.0
         let reg = pair.1
         lo = lo.bind_local_wide(s.name, reg, is_mut, init_limbs)
+        // Track the array element count for `let a: [T; N]` (N a literal), so `for x in a`
+        // can desugar to an N-bounded index loop (see ExprForIn lowering).
+        let ty_opt: Option<Box<TypeExpr> > = s.ty
+        match ty_opt {
+            Some(tybox) => {
+                if (*tybox).kind == TypeExprKind::TypeArray {
+                    let sz_opt: Option<Box<Expr> > = (*tybox).array_size
+                    match sz_opt {
+                        Some(szbox) => {
+                            if (*szbox).kind == ExprKind::ExprIntLit {
+                                lo = lo.set_top_elem_count((*szbox).int_val)
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            None => {}
+        }
         (lo, reg)
     }
 
@@ -6114,6 +6163,74 @@ impl Lowerer {
                         lo = lo.emit(ir_label(l_end))
                         lo = lo.exit_scope()
                         lo.emit_unit()
+                    } else if (*iter_box).kind == ExprKind::ExprArrayLit || (*iter_box).kind == ExprKind::ExprIdent {
+                        // Desugar `for x in arr { body }` over a known-size array to an index
+                        // loop: i=0; while i < LEN { x = arr[i]; body; i+=1 }. LEN comes from
+                        // the array-literal element count, or the local's tracked elem_count
+                        // (`let a: [T; N]`). No static size (e.g. slice param) → report_error.
+                        var lo = self.enter_scope()
+                        var len_val: i64 = 0
+                        if (*iter_box).kind == ExprKind::ExprArrayLit {
+                            len_val = count_expr_list_ref(&(*iter_box).args)
+                        } else {
+                            len_val = lo.lookup_local_elem_count((*iter_box).name)
+                        }
+                        if len_val <= 0 {
+                            lo = lo.exit_scope()
+                            lo.report_error().emit_unit()
+                        } else {
+                            let pair_base = lo.lower_opt_expr_ref(&e.left)
+                            lo = pair_base.0
+                            let base_reg = pair_base.1
+                            let pair_i = lo.fresh_reg()
+                            lo = pair_i.0
+                            let i_reg = pair_i.1
+                            lo = lo.emit(ir_load_imm(i_reg, 0))
+                            let pair_len = lo.fresh_reg()
+                            lo = pair_len.0
+                            let len_reg = pair_len.1
+                            lo = lo.emit(ir_load_imm(len_reg, len_val))
+                            let pair_x = lo.fresh_reg()
+                            lo = pair_x.0
+                            let x_reg = pair_x.1
+                            lo = lo.bind_local(e.name, x_reg, true)
+                            let pair_top2 = lo.fresh_label()
+                            lo = pair_top2.0
+                            let l_top2 = pair_top2.1
+                            let pair_cont2 = lo.fresh_label()
+                            lo = pair_cont2.0
+                            let l_cont2 = pair_cont2.1
+                            let pair_end2 = lo.fresh_label()
+                            lo = pair_end2.0
+                            let l_end2 = pair_end2.1
+                            lo = lo.emit(ir_label(l_top2))
+                            let pair_cmp2 = lo.fresh_reg()
+                            lo = pair_cmp2.0
+                            let cmp_reg2 = pair_cmp2.1
+                            lo = lo.emit(ir_binop(cmp_reg2, i_reg, BinaryOp::OpLt, len_reg))
+                            lo = lo.emit(ir_branch_false(cmp_reg2, l_end2))
+                            lo = lo.emit(ir_index_get(x_reg, base_reg, i_reg))
+                            lo = lo.push_loop_labels(l_cont2, l_end2)
+                            let body2_opt: Option<Box<Block>> = e.block
+                            match body2_opt {
+                                Some(blk) => {
+                                    let pair_body2 = lo.lower_block_ref(&(*blk))
+                                    lo = pair_body2.0
+                                }
+                                None => {}
+                            }
+                            lo = lo.pop_loop_labels()
+                            lo = lo.emit(ir_label(l_cont2))
+                            let pair_one2 = lo.fresh_reg()
+                            lo = pair_one2.0
+                            let one_reg2 = pair_one2.1
+                            lo = lo.emit(ir_load_imm(one_reg2, 1))
+                            lo = lo.emit(ir_binop(i_reg, i_reg, BinaryOp::OpAdd, one_reg2))
+                            lo = lo.emit(ir_jump(l_top2))
+                            lo = lo.emit(ir_label(l_end2))
+                            lo = lo.exit_scope()
+                            lo.emit_unit()
+                        }
                     } else {
                         self.report_error().emit_unit()
                     }
