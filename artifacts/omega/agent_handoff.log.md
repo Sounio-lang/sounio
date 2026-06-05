@@ -2583,3 +2583,22 @@ error: no main
 
 **Status.** The test implements the requested stiff case with MC, knightian (with apply2 on monotone readout segment + grid for non-mono), bridge usage for assert3, and the three asserts + prints. Offload notes addressed by safe mul + grid. Ready for review before high-dim or hyper. Only the specified files touched in this step.
 
+
+---
+
+agent: codex
+time_utc: 2026-06-05T14:10:00Z
+files:
+  - self-hosted/native/codegen_x86_linux.sio
+  - tests/card_b_repros/  (new dir, will be created)
+intent: Card B — backend layer. Drive backend_fail 180→↓ and CRASH 269→↓. File-partitioned
+  (only codegen_x86_linux.sio + new tests/card_b_repros/ fixtures). No edits to lower.sio,
+  parser/*.sio, lean_single.sio, main.sio, bin/souc, or high-risk shared control files.
+  Will file Blocker-IDs per .claude/PARALLEL_BLOCKER_CONTRACT.md for anything that needs
+  lower.sio changes (AoS element-stride field is the prime candidate).
+checks:
+  - pending: Phase 0 baseline census + capgate
+  - bash scripts/dev/souc-build-lock.sh ./bin/souc self-hosted/compiler/main.sio bin/souc.elf (when Phase 1/2 land)
+commit: pending
+status: lock-open
+
