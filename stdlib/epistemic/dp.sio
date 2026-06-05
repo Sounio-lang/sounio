@@ -32,28 +32,37 @@
 // (B) const-dimensioned struct FIELD types (e.g. `reward: [Epistemic; MAX_FLAT]`
 //     where MAX_FLAT is a const) are silently accepted by the type checker
 //     but produce a struct that segfaults on field read. Use literal `256`.
-//     Verified 2026-06-04: this is INDEPENDENT of the new N-limb
-//     wide-int backend (commit 41a7cab5f, feat/native-v2-source-bridge);
-//     the postfix-array-index codegen defect in
-//     self-hosted/compiler/lean_single.sio:13415-13437 trips on both
-//     `feat/exact-orc-machinery` and the wide-int build when the struct
-//     is a single-field `[Epistemic; N]` shape. The 5-field MDP shape
-//     (trans_p f64 + reward Epistemic + 3 scalars) dodges it on both.
-//     When that codegen defect is fixed upstream, this workaround can be
-//     retired: replace `trans_p: [f64; 256]` with `trans_p: [f64; MAX_FLAT]`
-//     and `reward: [Epistemic; 256]` with `reward: [Epistemic; MAX_FLAT]`.
+//     Verified 2026-06-04 (re-verified 2026-06-05 against the new
+//     canonical compiler): this defect is in the postfix-array-index
+//     codegen for the `ExprIndex` AST node. The defect lives in the
+//     canonical self-hosted compiler — currently
+//     self-hosted/bootstrap/bootstrap_v0.sio:12529-12534 (the old
+//     self-hosted/compiler/lean_single.sio:13415-13437 location, which
+//     earlier investigations pointed to, is now stale — lean_single
+//     is no longer the canonical compiler; the bootstrap_v0 single-file
+//     compiler is what the JIT binary is built from). For local arrays
+//     of struct-typed elements, the bootstrap_v0 codegen falls into the
+//     else branch (`mov rax, [rcx + rax*8]`, an i64-sized load) which
+//     reads only 8 bytes of a 24-byte Epistemic struct. The 5-field MDP
+//     shape (trans_p f64 + reward Epistemic + 3 scalars) happens to
+//     dodge the bad path on the current build; the minimal single-
+//     field [Epistemic; N] struct trips it. When the codegen defect is
+//     fixed upstream, this workaround can be retired: replace
+//     `trans_p: [f64; 256]` with `trans_p: [f64; MAX_FLAT]` and
+//     `reward: [Epistemic; 256]` with `reward: [Epistemic; MAX_FLAT]`.
 // (C) Reading an UNINITIALISED struct field of `[T; N]` where T is a
-//     non-primitive type segfaults (codegen defect in
-//     self-hosted/compiler/lean_single.sio:13415-13437). Workaround: in
-//     `mdp_new` we PRE-POPULATE every slot of `trans_p` and `reward` so
-//     the value-iteration read path never sees an uninitialised slot.
-//     Verified 2026-06-04: this segfault is also independent of the new
-//     N-limb wide-int backend; both the `feat/exact-orc-machinery` and
-//     `feat/native-v2-source-bridge` (post-41a7cab5f) compilers segfault
-//     on the minimal `struct M { reward: [Epistemic; 1] }` + uninit-read
-//     pattern. The pre-population in `mdp_new` is still the only safe
-//     fix. Retire this loop only when the postfix-index codegen defect
-//     is patched upstream.
+//     non-primitive type segfaults (same defect as quirk (B), in the
+//     canonical compiler at self-hosted/bootstrap/bootstrap_v0.sio:12529-
+//     12534; the older reference self-hosted/compiler/lean_single.sio
+//     is now stale). Workaround: in `mdp_new` we PRE-POPULATE every
+//     slot of `trans_p` and `reward` so the value-iteration read path
+//     never sees an uninitialised slot. Empirically re-verified
+//     2026-06-05 against the current bin/souc (built from
+//     bootstrap_v0.sio, the canonical compiler on feat/exact-orc-
+//     machinery): the minimal `struct M { reward: [Epistemic; 1] }`
+//     uninit-read pattern segfaults; pre-population makes it pass.
+//     Retire this loop only when the postfix-index codegen defect is
+//     patched upstream.
 // (D) Struct-typed (PBox, Epistemic) arrays inside structs read through
 //     `&` / `&!` corrupt or crash. The robust MDP struct holds only
 //     scalar fields; the PBox tables are passed as separate array
