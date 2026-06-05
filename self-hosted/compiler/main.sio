@@ -48,8 +48,8 @@ use resolve::scope::*
 
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
-use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace}
-use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace}
+use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace}
+use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult}
 use module_parse::{ImportList, load_module_file, extract_imports_from_ast}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
@@ -82,6 +82,7 @@ use hlir::lower::*
 use gpu::hlir_to_gpu::*
 use gpu::epistemic_spirv::*
 use gpu::ptx::*
+use gpu::kaxi_to_ptx::*
 use gpu::metal::*
 use gpu::cuda_tile::*
 
@@ -2436,6 +2437,296 @@ fn run_native_v2_emit_exit_code(ret_value: i64, out_path: string) with IO, Mut, 
 
 fn run_native_v2_emit13() with IO, Mut, Panic, Div, Alloc {
     run_native_v2_emit_exit_code(13, "artifacts/omega/emit13.elf")
+}
+
+// --- Zig-style wide-int witnesses (hand-built IR -> ELF, exercise nc_wide_*_into).
+// Each returns the HIGH limb so the exit code DISTINGUISHES real N-limb from fake-i64.
+fn compiler_main_make_native_v2_wide_add4_module() -> IrModule with Mut, Panic, Div {
+    // i256 (4 limbs): (-1,-1,-1,0) + (1,0,0,0) -> carry cascades 0->1->2->3; hi limb = 1.
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.instrs[0] = ir_load_imm(0, 0 - 1)
+    func.instrs[1] = ir_load_imm(1, 0 - 1)
+    func.instrs[2] = ir_load_imm(2, 0 - 1)
+    func.instrs[3] = ir_load_imm(3, 0)
+    func.instrs[4] = ir_load_imm(4, 1)
+    func.instrs[5] = ir_load_imm(5, 0)
+    func.instrs[6] = ir_load_imm(6, 0)
+    func.instrs[7] = ir_load_imm(7, 0)
+    func.instrs[8] = ir_wide_add(8, 0, 4, 4)
+    func.instrs[9] = ir_return(11)
+    func.instr_count = 10
+    func.reg_count = 12
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+fn compiler_main_make_native_v2_wide_sub_module() -> IrModule with Mut, Panic, Div {
+    // i128: (hi=2,lo=0) - (hi=0,lo=1) -> borrow: hi = 2-0-1 = 1. Fake-i64 would give 2.
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.instrs[0] = ir_load_imm(0, 0)
+    func.instrs[1] = ir_load_imm(1, 2)
+    func.instrs[2] = ir_load_imm(2, 1)
+    func.instrs[3] = ir_load_imm(3, 0)
+    func.instrs[4] = ir_wide_sub(4, 0, 2, 2)
+    func.instrs[5] = ir_return(5)
+    func.instr_count = 6
+    func.reg_count = 6
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+fn compiler_main_make_native_v2_wide_mul_module() -> IrModule with Mut, Panic, Div {
+    // i128: 2^32 * 2^32 = 2^64 -> lo=0, hi=1. Fake-i64 (single mul) would give 0.
+    // dst base=4 (limbs 4,5); scratch at 6,7 -> reg_count must be 8.
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.instrs[0] = ir_load_imm(0, 4294967296)
+    func.instrs[1] = ir_load_imm(1, 0)
+    func.instrs[2] = ir_load_imm(2, 4294967296)
+    func.instrs[3] = ir_load_imm(3, 0)
+    func.instrs[4] = ir_wide_mul(4, 0, 2, 2)
+    func.instrs[5] = ir_return(5)
+    func.instr_count = 6
+    func.reg_count = 8
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+// Observation gate: ((2^32 * 2^32) >> 64) as i64 == 1. Proves a *source-shaped*
+// wide computation whose RESULT is observable in an i64 exit code (unlike add/sub/mul,
+// whose low limb is identical to i64 and so undetectable). a*a = 2^64 -> limbs lo=0,hi=1;
+// >>64 (1 limb) moves the hi limb into limb 0; returning limb 0 yields 1 (a broken/no-op
+// shift would return the un-shifted low limb = 0).
+fn compiler_main_make_native_v2_wide_shr_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.instrs[0] = ir_load_imm(0, 4294967296)   // a.lo = 2^32
+    func.instrs[1] = ir_load_imm(1, 0)            // a.hi = 0
+    func.instrs[2] = ir_load_imm(2, 4294967296)   // a.lo (2nd operand) = 2^32
+    func.instrs[3] = ir_load_imm(3, 0)            // a.hi = 0
+    func.instrs[4] = ir_wide_mul(4, 0, 2, 2)      // product -> limbs 4,5 ; scratch 6,7
+    func.instrs[5] = ir_wide_shr_limb(8, 4, 2, 1) // (product >> 64) -> limbs 8,9 ; limb0(8)=hi(5)=1
+    func.instrs[6] = ir_return(8)                 // return low limb of shifted (= 1)
+    func.instr_count = 7
+    func.reg_count = 10
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+// (15 * 2^64) / 3 = 5 * 2^64 -> hi limb 5. Single-limb divisor (3). Proves N-limb
+// division source-independently; return the high limb so the exit code observes it.
+fn compiler_main_make_native_v2_wide_div_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.instrs[0] = ir_load_imm(0, 0)            // dividend lo = 0
+    func.instrs[1] = ir_load_imm(1, 15)           // dividend hi = 15  (=> 15*2^64)
+    func.instrs[2] = ir_load_imm(2, 3)            // divisor lo = 3
+    func.instrs[3] = ir_load_imm(3, 0)            // divisor hi = 0 (single-limb)
+    func.instrs[4] = ir_wide_div(4, 0, 2, 2)      // quotient -> limbs 4,5 = [0,5]
+    func.instrs[5] = ir_return(5)                 // return hi limb = 5
+    func.instr_count = 6
+    func.reg_count = 6
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+// (2^64 + 1) % 7 = 3. Single-limb divisor 7. A low-limb-only impl would give 1 % 7 = 1.
+fn compiler_main_make_native_v2_wide_mod_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.instrs[0] = ir_load_imm(0, 1)            // dividend lo = 1
+    func.instrs[1] = ir_load_imm(1, 1)            // dividend hi = 1  (=> 2^64 + 1)
+    func.instrs[2] = ir_load_imm(2, 7)            // divisor lo = 7
+    func.instrs[3] = ir_load_imm(3, 0)            // divisor hi = 0 (single-limb)
+    func.instrs[4] = ir_wide_mod(4, 0, 2, 2)      // remainder -> limbs 4,5 = [3,0]
+    func.instrs[5] = ir_return(4)                 // return low limb = 3
+    func.instr_count = 6
+    func.reg_count = 6
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+// FULL N/N division by a MULTI-LIMB divisor (Increment D). N = 5*2^64+105, D = 2^64+1.
+// 5*D = 5*2^64+5, so N = 5*D + 100 -> quotient 5, remainder 100. Returns the quotient low
+// limb = 5. The divisor's HIGH limb (1) is nonzero, so the single-limb schoolbook can't be
+// used; a low-limb-only impl dividing by D's limb0 (=1) would return lo(N)=105 (≠5).
+fn compiler_main_make_native_v2_wide_divfull_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.instrs[0] = ir_load_imm(0, 105)          // N lo = 105
+    func.instrs[1] = ir_load_imm(1, 5)            // N hi = 5     (=> 5*2^64 + 105)
+    func.instrs[2] = ir_load_imm(2, 1)            // D lo = 1
+    func.instrs[3] = ir_load_imm(3, 1)            // D hi = 1     (=> 2^64 + 1, multi-limb)
+    func.instrs[4] = ir_wide_div_full(4, 0, 2, 2) // Q -> 4,5 ; R scratch 6,7 ; diff 8,9
+    func.instrs[5] = ir_return(4)                 // quotient low limb = 5
+    func.instr_count = 6
+    func.reg_count = 10
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+// FULL N/N remainder by a MULTI-LIMB divisor. N = 7*2^64+200, D = 2^64+1. 7*D = 7*2^64+7,
+// N = 7*D + 193 -> remainder 193. Returns the remainder low limb = 193. A low-limb-only impl
+// (% D's limb0 = 1) would return 0.
+fn compiler_main_make_native_v2_wide_modfull_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.instrs[0] = ir_load_imm(0, 200)          // N lo = 200
+    func.instrs[1] = ir_load_imm(1, 7)            // N hi = 7     (=> 7*2^64 + 200)
+    func.instrs[2] = ir_load_imm(2, 1)            // D lo = 1
+    func.instrs[3] = ir_load_imm(3, 1)            // D hi = 1     (=> 2^64 + 1, multi-limb)
+    func.instrs[4] = ir_wide_mod_full(4, 0, 2, 2) // R -> 4,5 ; Q scratch 6,7 ; diff 8,9
+    func.instrs[5] = ir_return(4)                 // remainder low limb = 193
+    func.instr_count = 6
+    func.reg_count = 10
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+// 2^64 < 2^65 -> 1. a=[0,1] (2^64), b=[0,2] (2^65); the HIGH limb (1<2) decides. A
+// low-limb-only impl (0<0) would give 0. cmp_op=2 (Lt).
+fn compiler_main_make_native_v2_wide_cmp_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.instrs[0] = ir_load_imm(0, 0)            // a lo = 0
+    func.instrs[1] = ir_load_imm(1, 1)            // a hi = 1  (=> 2^64)
+    func.instrs[2] = ir_load_imm(2, 0)            // b lo = 0
+    func.instrs[3] = ir_load_imm(3, 2)            // b hi = 2  (=> 2^65)
+    func.instrs[4] = ir_wide_cmp(4, 0, 2, 2, 2)   // a < b -> reg4 = 1
+    func.instrs[5] = ir_return(4)
+    func.instr_count = 6
+    func.reg_count = 6
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+// Non-limb-aligned funnel shift: 2^100 >> 96 = 2^4 = 16. src limbs lo=0, hi=2^36; shift
+// 96 = 64+32 (q=1, r=32). A limb-aligned-only impl (>>64) would give 2^36; low-limb -> 0.
+fn compiler_main_make_native_v2_wide_shr_unaligned_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.instrs[0] = ir_load_imm(0, 0)               // src lo = 0
+    func.instrs[1] = ir_load_imm(1, 68719476736)     // src hi = 2^36  (value = 2^100)
+    func.instrs[2] = ir_wide_shr(2, 0, 2, 96)        // (>>96) -> limbs 2,3 ; limb0 = 16
+    func.instrs[3] = ir_return(2)                     // return low limb = 16
+    func.instr_count = 4
+    func.reg_count = 4
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+fn run_native_v2_emit_wide(args: ArgList, flag_index: i64, kind: i64) with IO, Mut, Panic, Div, Alloc {
+    let out_path = compiler_mode_source_arg(args, flag_index, "--native-v2-emit-wide")
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    if kind == 0 {
+        let m = compiler_main_make_native_v2_wide_add4_module()
+        let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
+        print("wide-add4 rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
+    } else if kind == 1 {
+        let m = compiler_main_make_native_v2_wide_sub_module()
+        let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
+        print("wide-sub rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
+    } else if kind == 3 {
+        let m = compiler_main_make_native_v2_wide_shr_module()
+        let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
+        print("wide-shr rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
+    } else if kind == 4 {
+        let m = compiler_main_make_native_v2_wide_div_module()
+        let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
+        print("wide-div rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
+    } else if kind == 5 {
+        let m = compiler_main_make_native_v2_wide_mod_module()
+        let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
+        print("wide-mod rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
+    } else if kind == 6 {
+        let m = compiler_main_make_native_v2_wide_cmp_module()
+        let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
+        print("wide-cmp rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
+    } else if kind == 7 {
+        let m = compiler_main_make_native_v2_wide_shr_unaligned_module()
+        let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
+        print("wide-shr-unaligned rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
+    } else if kind == 8 {
+        let m = compiler_main_make_native_v2_wide_divfull_module()
+        let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
+        print("wide-divfull rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
+    } else if kind == 9 {
+        let m = compiler_main_make_native_v2_wide_modfull_module()
+        let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
+        print("wide-modfull rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
+    } else {
+        let m = compiler_main_make_native_v2_wide_mul_module()
+        let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
+        print("wide-mul rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
+    }
+}
+
+// Bridge: real .sio SOURCE -> front-half (parse/check/lower) -> IrModule ->
+// native-v2 backend -> runnable x86-64 ELF. Composes compiler_preflight_ir_load
+// (the --ir-dump front-half, source -> IrModule) with
+// compile_native_v2_preview_to_file (the native-v2 IR -> ELF back-half). This is
+// the first real source -> native-v2 path; the --native-v2-emit* witnesses only
+// emit hardcoded IR.
+// Crash-surviving marker buffer (write_file is a syscall; print is buffered and
+// lost on SIGSEGV). Content is irrelevant — file existence is the signal. Uses a
+// zero-fill init ([0;N] is the codegen-safe array-fill form).
+var NV2_MARKER_BUF: [i8; 4] = [0; 4]
+
+// Bridge: real .sio SOURCE → front-half → HEAP-BOXED IrModule → native-v2 → ELF.
+// Routes through bridge_lower_single_module_box, whose result embeds the module as
+// an Option<Box<IrModule>> (a POINTER), so the front-half result is NEVER returned
+// by value with a large embedded IrModule — dodging the frame-sensitive SRET
+// large-struct-return crash chain (c634b38f). The boxed module is derefed into a
+// local and passed to the backend as a stable &IrModule. Marker files pin which
+// step (if any) still faults. Scope: single module / no imports (the wall's case).
+fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let source_path = compiler_mode_source_arg(args, flag_index, "--native-v2-compile")
+    let out_path = compiler_mode_output_path(args, "a.out")
+    if !compiler_preflight_source_input(source_path) {
+        panic("native-v2-compile failed: source not readable")
+    }
+    var trace = empty_load_multimodule_ir_trace()
+    let box_result = bridge_lower_single_module_box(source_path, &! trace)
+    write_file("/tmp/nv2_m1_after_lower", &! NV2_MARKER_BUF, 1)
+    if !box_result.ok {
+        print("native_v2_compile: front-half failed: ")
+        print(box_result.error_msg)
+        print("\n")
+        panic("native-v2-compile failed: front-half errors")
+    }
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    match box_result.module {
+        Some(module_box) => {
+            let lowered = *module_box
+            write_file("/tmp/nv2_m2_after_copy", &! NV2_MARKER_BUF, 1)
+            write_file("/tmp/nv2_m3_before_backend", &! NV2_MARKER_BUF, 1)
+            let rc = compile_native_v2_preview_to_file(&lowered, spec, out_path)
+            if rc != 0 {
+                print("native_v2_compile: FAIL to_file rc=")
+                print_int(rc as i64)
+                print("\n")
+                return
+            }
+            print("native_v2_compile: emitted path=")
+            print(out_path)
+            print("\n")
+        }
+        None => {
+            panic("native-v2-compile failed: no module produced")
+        }
+    }
 }
 
 // Parameterized scalar witness: --native-v2-emit-scalar <N> <out_path>.
@@ -26054,6 +26345,39 @@ fn run_gpu_compile_pipeline(
         return 0
     }
 
+    // PTX via K-AXI (Kretikos native GPU spine) — source -> HLIR -> K-AXI -> PTX.
+    // Epistemic-mode aware: --gpu-binary-format epistemic|f32-gum|f32 selects the
+    // transpiler mode (the GUM 4-buffer C1/C2/V1/V2 layout flows through for mode 5).
+    if str_eq(gpu_target, "ptx-kaxi") {
+        let kaxi = hlir_kernels_to_kaxi(hlir_module)
+        let mode_id = if str_eq(gpu_binary_format, "epistemic") { 1 }
+                      else if str_eq(gpu_binary_format, "f32-gum") { 5 }
+                      else if str_eq(gpu_binary_format, "f32") { 2 }
+                      else { 0 }
+        let kaxi_ptx = kaxi_transpile_to_ptx_unified(kaxi, mode_id)
+        var kpb = ptx_buf_new()
+        kpb = ptx_push_str(kpb, kaxi_ptx)
+        if str_len(output_path) > 0 {
+            let kw_ok = io_write_bytes_to_file(output_path, kpb.data, kpb.len)
+            if !kw_ok {
+                print("GPU: failed to write K-AXI PTX to ")
+                print(output_path)
+                print("\n")
+                return 1
+            }
+            print("GPU: K-AXI PTX written to ")
+            print(output_path)
+            print(" (")
+            print_int(kpb.len)
+            print(" bytes, mode=")
+            print_int(mode_id)
+            print(")\n")
+        } else {
+            ptx_buf_print(kpb)
+        }
+        return 0
+    }
+
     // PTX (CUDA / ROCm) — default path
     // Select variant based on binary_format or epistemic annotation
     let use_epistemic = str_eq(gpu_binary_format, "epistemic")
@@ -26208,6 +26532,34 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-emit13" {
             run_native_v2_emit13()
+            return
+        } else if mode == "--native-v2-emit-wide-add4" {
+            run_native_v2_emit_wide(args, arg_idx, 0)
+            return
+        } else if mode == "--native-v2-emit-wide-sub" {
+            run_native_v2_emit_wide(args, arg_idx, 1)
+            return
+        } else if mode == "--native-v2-emit-wide-mul" {
+            run_native_v2_emit_wide(args, arg_idx, 2)
+            return
+        } else if mode == "--native-v2-emit-wide-shr" {
+            run_native_v2_emit_wide(args, arg_idx, 3)
+            return
+        } else if mode == "--native-v2-emit-wide-div" {
+            run_native_v2_emit_wide(args, arg_idx, 4)
+        } else if mode == "--native-v2-emit-wide-mod" {
+            run_native_v2_emit_wide(args, arg_idx, 5)
+        } else if mode == "--native-v2-emit-wide-cmp" {
+            run_native_v2_emit_wide(args, arg_idx, 6)
+        } else if mode == "--native-v2-emit-wide-shr-unaligned" {
+            run_native_v2_emit_wide(args, arg_idx, 7)
+        } else if mode == "--native-v2-emit-wide-divfull" {
+            run_native_v2_emit_wide(args, arg_idx, 8)
+        } else if mode == "--native-v2-emit-wide-modfull" {
+            run_native_v2_emit_wide(args, arg_idx, 9)
+            return
+        } else if mode == "--native-v2-compile" {
+            run_native_v2_compile_mode(args, arg_idx)
             return
         } else if mode == "--native-v2-emit-scalar" {
             run_native_v2_emit_scalar(args, arg_idx)

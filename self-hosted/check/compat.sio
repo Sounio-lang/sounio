@@ -29,6 +29,14 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
     if a.kind == TypeKind::TyI64 && b.kind == TypeKind::TyI64 {
         return true
     }
+    // Wide ints: same signedness AND same width (clifford_p carries bit-width).
+    // Closes the i128 != i256 soundness hole.
+    if a.kind == TypeKind::TyI128 && b.kind == TypeKind::TyI128 {
+        return a.clifford_p == b.clifford_p
+    }
+    if a.kind == TypeKind::TyU128 && b.kind == TypeKind::TyU128 {
+        return a.clifford_p == b.clifford_p
+    }
     if a.kind == TypeKind::TyU8 && b.kind == TypeKind::TyU8 {
         return true
     }
@@ -707,13 +715,36 @@ pub fn tuple_types_compatible(a: Option<Box<TypeEntryList>>, b: Option<Box<TypeE
 
 pub fn is_numeric_type(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyI8 || ty.kind == TypeKind::TyI32 || ty.kind == TypeKind::TyI64 ||
+    ty.kind == TypeKind::TyI128 ||
     ty.kind == TypeKind::TyU8 || ty.kind == TypeKind::TyU32 || ty.kind == TypeKind::TyU64 ||
+    ty.kind == TypeKind::TyU128 ||
     ty.kind == TypeKind::TyF32 || ty.kind == TypeKind::TyF64
 }
 
 pub fn is_integer_type(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyI8 || ty.kind == TypeKind::TyI32 || ty.kind == TypeKind::TyI64 ||
-    ty.kind == TypeKind::TyU8 || ty.kind == TypeKind::TyU32 || ty.kind == TypeKind::TyU64
+    ty.kind == TypeKind::TyI128 ||
+    ty.kind == TypeKind::TyU8 || ty.kind == TypeKind::TyU32 || ty.kind == TypeKind::TyU64 ||
+    ty.kind == TypeKind::TyU128
+}
+
+// Parse a wide-int type name iN/uN -> N (bit width), else 0. Sign in buf[0]
+// ('i'=105 / 'u'=117); all remaining chars must be digits. i64/u64/etc are caught
+// by the dedicated name_is_* checks before this is consulted.
+pub fn name_wide_int_bits(n: Name) -> i64 with Panic, Div {
+    if n.len < 2 { return 0 }
+    let c0 = n.buf[0] as i64
+    if c0 != 105 && c0 != 117 { return 0 }
+    var bits: i64 = 0
+    var i: i64 = 1
+    while i < n.len {
+        let d = n.buf[i as usize] as i64
+        if d < 48 || d > 57 { return 0 }
+        bits = bits * 10 + (d - 48)
+        i = i + 1
+    }
+    if bits <= 0 { return 0 }
+    bits
 }
 
 pub fn is_float_type(ty: TypeEntry) -> bool {
@@ -747,7 +778,7 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
 
     match op {
         // Arithmetic: both numeric, result = left type
-        OpAdd => {
+        BinaryOp::OpAdd => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 left
             } else if left.kind == TypeKind::TyString && right.kind == TypeKind::TyString {
@@ -758,7 +789,7 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
                 ty_error()
             }
         }
-        OpSub => {
+        BinaryOp::OpSub => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 left
             } else if compat_is_hyper_type(left) && compat_is_hyper_type(right) {
@@ -767,7 +798,7 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
                 ty_error()
             }
         }
-        OpMul => {
+        BinaryOp::OpMul => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 left
             } else if compat_is_hyper_type(left) && compat_is_hyper_type(right) {
@@ -776,7 +807,7 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
                 ty_error()
             }
         }
-        OpDiv => {
+        BinaryOp::OpDiv => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 left
             } else if compat_is_hyper_type(left) && compat_is_hyper_type(right) {
@@ -785,7 +816,7 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
                 ty_error()
             }
         }
-        OpRem => {
+        BinaryOp::OpRem => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 left
             } else {
@@ -794,42 +825,42 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
         }
 
         // Comparison: both same type, result = bool
-        OpEq => {
+        BinaryOp::OpEq => {
             if types_compatible(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpNe => {
+        BinaryOp::OpNe => {
             if types_compatible(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpLt => {
+        BinaryOp::OpLt => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpLe => {
+        BinaryOp::OpLe => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpGt => {
+        BinaryOp::OpGt => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpGe => {
+        BinaryOp::OpGe => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 ty_bool()
             } else {
@@ -838,14 +869,14 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
         }
 
         // Logical: both bool, result = bool
-        OpAnd => {
+        BinaryOp::OpAnd => {
             if is_bool_type(left) && is_bool_type(right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpOr => {
+        BinaryOp::OpOr => {
             if is_bool_type(left) && is_bool_type(right) {
                 ty_bool()
             } else {
@@ -854,35 +885,35 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
         }
 
         // Bitwise: both i64, result = i64
-        OpBitAnd => {
+        BinaryOp::OpBitAnd => {
             if is_integer_type(left) && is_integer_type(right) {
                 ty_i64()
             } else {
                 ty_error()
             }
         }
-        OpBitOr => {
+        BinaryOp::OpBitOr => {
             if is_integer_type(left) && is_integer_type(right) {
                 ty_i64()
             } else {
                 ty_error()
             }
         }
-        OpBitXor => {
+        BinaryOp::OpBitXor => {
             if is_integer_type(left) && is_integer_type(right) {
                 ty_i64()
             } else {
                 ty_error()
             }
         }
-        OpShl => {
+        BinaryOp::OpShl => {
             if is_integer_type(left) && is_integer_type(right) {
                 ty_i64()
             } else {
                 ty_error()
             }
         }
-        OpShr => {
+        BinaryOp::OpShr => {
             if is_integer_type(left) && is_integer_type(right) {
                 ty_i64()
             } else {
@@ -891,7 +922,7 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
         }
 
         // Concat: arrays or strings
-        OpConcat => {
+        BinaryOp::OpConcat => {
             if left.kind == TypeKind::TyString && right.kind == TypeKind::TyString {
                 ty_string()
             } else if left.kind == TypeKind::TyArray && right.kind == TypeKind::TyArray {
@@ -902,8 +933,8 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
         }
 
         // Range
-        OpRange => ty_unit()
-        OpRangeInclusive => ty_unit()
+        BinaryOp::OpRange => ty_unit()
+        BinaryOp::OpRangeInclusive => ty_unit()
     }
 }
 
@@ -917,23 +948,23 @@ pub fn unary_result_type(op: UnaryOp, operand: TypeEntry) -> TypeEntry with Allo
     }
 
     match op {
-        OpNeg => {
+        UnaryOp::OpNeg => {
             if is_numeric_type(operand) {
                 operand
             } else {
                 ty_error()
             }
         }
-        OpNot => {
+        UnaryOp::OpNot => {
             if is_bool_type(operand) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpRef => ty_ref(operand)
-        OpRefMut => ty_ref_mut(operand)
-        OpDeref => {
+        UnaryOp::OpRef => ty_ref(operand)
+        UnaryOp::OpRefMut => ty_ref_mut(operand)
+        UnaryOp::OpDeref => {
             match operand.inner {
                 Some(inner_ty) => *inner_ty
                 None => ty_error()
@@ -992,12 +1023,12 @@ pub fn hyper_division_result_type(left: TypeEntry, right: TypeEntry) -> TypeEntr
 
 pub fn compound_assign_to_binop(op: AssignOp) -> BinaryOp {
     match op {
-        AssignAdd => BinaryOp::OpAdd
-        AssignSub => BinaryOp::OpSub
-        AssignMul => BinaryOp::OpMul
-        AssignDiv => BinaryOp::OpDiv
-        AssignRem => BinaryOp::OpRem
-        AssignEq => BinaryOp::OpAdd  // should not happen, fallback
+        AssignOp::AssignAdd => BinaryOp::OpAdd
+        AssignOp::AssignSub => BinaryOp::OpSub
+        AssignOp::AssignMul => BinaryOp::OpMul
+        AssignOp::AssignDiv => BinaryOp::OpDiv
+        AssignOp::AssignRem => BinaryOp::OpRem
+        AssignOp::AssignEq => BinaryOp::OpAdd  // should not happen, fallback
     }
 }
 
@@ -1185,6 +1216,14 @@ pub fn name_is_u32(n: Name) -> bool with Panic, Div {
 // "u64" = [117, 54, 52]
 pub fn name_is_u64(n: Name) -> bool with Panic, Div {
     name_matches_str3(n, 117, 54, 52)
+}
+
+// "usize" = [117, 115, 105, 122, 101]. lean_single (the oracle) collapses every
+// integer width — i32/u32/i64/u64/usize — to a single integer type code, so the
+// faithful mapping is to the canonical integer (i64). Without this, `x as usize`
+// lowered to ty_named("usize") (a TyNamed) and array-index checks rejected it (E014).
+pub fn name_is_usize(n: Name) -> bool with Panic, Div {
+    name_matches_str5(n, 117, 115, 105, 122, 101)
 }
 
 // "f32" = [102, 51, 50]

@@ -11,6 +11,10 @@ struct LowerLocalStack {
     names: [Name; 4096],
     regs: [i64; 4096],
     depths: [i64; 4096],
+    // Wide-int (i128/iN) width of the binding in u64 limbs: 0/1 = ordinary i64, >=2 = wide
+    // value occupying regs[idx]..regs[idx]+limbs-1. Lets `let x: i128 = ...` be used in later
+    // wide arithmetic (ident-type tracking; the checker is skipped on the native-v2 bridge).
+    limbs: [i64; 4096],
     count: i64,
 }
 
@@ -19,6 +23,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         names: [ir_empty_name(); 4096],
         regs: [IR_INVALID_REG; 4096],
         depths: [0; 4096],
+        limbs: [0; 4096],
         count: 0,
     }
 }
@@ -163,9 +168,13 @@ fn lowerer_new() -> Lowerer with Alloc {
 
 fn lowerer_new_with_epistemic(epistemic: IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lowerer_new()
-    var module = *lo.module
-    module.epistemic = epistemic
-    lo.module = Box::new(module)
+    // Set epistemic THROUGH the box pointer instead of `var module = *lo.module;
+    // module.epistemic = ...; lo.module = Box::new(module)`. That deref-copied the
+    // whole IrModule (inline [IrFunction;1400]) by value onto the stack — the
+    // boxed-array copy walks the 1400-table and faults one-past-end (idx=1400) on
+    // the c634b38f bootstrap. The store-through-pointer is the repaired
+    // nested-mut-write codegen and copies nothing large.
+    (*lo.module).epistemic = epistemic
     // Sprint 116: pre-register Knowledge<f64> layout
     lo.struct_layouts = Box::new(ir_register_knowledge_layout(*lo.struct_layouts))
     lo
@@ -302,9 +311,9 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
 
 fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lowerer_new()
-    var module = *lo.module
-    module.epistemic = epistemic
-    lo.module = Box::new(module)
+    // Store epistemic through the box (no `var module = *lo.module` deref-copy,
+    // which materializes [IrFunction;1400] and can corrupt epistemic on c634b38f).
+    (*lo.module).epistemic = epistemic
     lo = lowerer_seed_module_from_summary(lo, summary)
     lo = lowerer_seed_metadata_from_summary(lo, summary)
     lo.probe_mode = summary.probe_mode
@@ -527,36 +536,45 @@ fn lowerer_register_struct_fields_mut(
     while true {
         match *current {
             Some(list) => {
+                // Bind the Box once (the `(*(*lo).struct_layouts).entries[..]=..`
+                // double-deref-through-Box no-ops on c634b38f, so the layout table was
+                // never populated and field_idx_from_name fell back to a name-hash that
+                // mismatched storage → every field read 0). Ported from feat/mc-v2-opcodes a5706294d.
+                let sl = (*lo).struct_layouts
                 var layout_idx: i64 = -1
                 var si: i64 = 0
-                while si < (*(*lo).struct_layouts).count {
-                    if ir_name_eq((*(*lo).struct_layouts).entries[si as usize].type_name, type_name) {
+                while si < (*sl).count {
+                    if ir_name_eq((*sl).entries[si as usize].type_name, type_name) {
                         layout_idx = si
                     }
                     si = si + 1
                 }
                 if layout_idx < 0 {
-                    if (*(*lo).struct_layouts).count < 256 {
-                        layout_idx = (*(*lo).struct_layouts).count
-                        (*(*lo).struct_layouts).entries[layout_idx as usize] = StructLayoutEntry {
+                    if (*sl).count < 256 {
+                        layout_idx = (*sl).count
+                        (*sl).entries[layout_idx as usize] = StructLayoutEntry {
                             type_name: type_name,
                             fields: [empty_struct_field_entry(); 64],
                             field_count: 0,
                         }
-                        (*(*lo).struct_layouts).count = layout_idx + 1
+                        (*sl).count = layout_idx + 1
                     } else {
                         lo.error_count = lo.error_count + 1
                         lo.had_error = true
                         return
                     }
                 }
-                let fc = (*(*lo).struct_layouts).entries[layout_idx as usize].field_count
+                let fc = (*sl).entries[layout_idx as usize].field_count
                 if fc < 64 {
-                    (*(*lo).struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                    // The deeper nested store (*sl).entries[i].fields[j]=.. is still
+                    // miscompiled; copy the whole entry out, mutate the local, store it back.
+                    var entry = (*sl).entries[layout_idx as usize]
+                    entry.fields[fc as usize] = StructFieldEntry {
                         name: (*list).head.name,
                         index: field_idx,
                     }
-                    (*(*lo).struct_layouts).entries[layout_idx as usize].field_count = fc + 1
+                    entry.field_count = fc + 1
+                    (*sl).entries[layout_idx as usize] = entry
                 } else {
                     lo.error_count = lo.error_count + 1
                     lo.had_error = true
@@ -1533,6 +1551,74 @@ fn lower_cast_type_is_f64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, D
     }
 }
 
+// Bit width of a wide-int cast target (iN/uN), else 0. Reads the cast_type name bytes
+// directly from the AST — the native-v2 source path can't use the checker sidecar (the
+// by-value Checker SRET-crashes the bridge), so width is detected purely syntactically.
+fn lower_cast_type_wide_bits(ct: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *ct {
+        Some(te) => {
+            let seg = (*te).path.segments
+            if seg.head_len < 2 { return 0 }
+            let c0 = seg.head_buf[0] as i64
+            if c0 != 105 && c0 != 117 { return 0 }   // 'i' or 'u'
+            var bits: i64 = 0
+            var i: i64 = 1
+            while i < seg.head_len {
+                let d = seg.head_buf[i as usize] as i64
+                if d < 48 || d > 57 { return 0 }
+                bits = bits * 10 + (d - 48)
+                i = i + 1
+            }
+            bits
+        }
+        None => 0,
+    }
+}
+
+// Limb count if expr `e`'s RESULT is a wide int (>64 bits), else 0. Pure AST recursion,
+// no lowerer/checker state: a cast-to-iN (>64) is wide; a binary op is wide if either
+// operand is wide (shift inherits the left operand's width; rhs literal is narrow). This
+// is why the discriminating program uses inline casts rather than i128 vars — an ident
+// carries no type here, so wide vars would need separate tracking (a later step).
+fn expr_is_wide_limbs(e: &Expr) -> i64 with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprCast {
+        let bits = lower_cast_type_wide_bits(&(*e).cast_type)
+        if bits > 64 { return (bits + 63) / 64 }
+        return 0
+    }
+    if (*e).kind == ExprKind::ExprBinary {
+        let lw = opt_expr_is_wide_limbs(&(*e).left)
+        let rw = opt_expr_is_wide_limbs(&(*e).right)
+        if lw >= rw { return lw }
+        return rw
+    }
+    0
+}
+fn opt_expr_is_wide_limbs(opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(e) => expr_is_wide_limbs(&(*e)),
+        _ => 0,
+    }
+}
+// A divisor is single-limb-safe iff it is a cast-TO-wide of a NARROW operand: `X as i128`
+// materializes limb0 = X, all high limbs 0, so the schoolbook (single-limb-divisor) div/mod
+// is exact. A wide-binary divisor (e.g. (A as i128)*(B as i128)) can have nonzero high limbs
+// and is NOT safe -> the caller emits a genuine reject. Conservative: a bare narrow divisor
+// (`/ 3`) is also rejected, never miscomputed.
+fn expr_is_single_limb_safe(opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(e) => {
+            if (*e).kind == ExprKind::ExprCast {
+                let cw = lower_cast_type_wide_bits(&(*e).cast_type)
+                let ow = opt_expr_is_wide_limbs(&(*e).left)
+                if cw > 64 && ow == 0 { return 1 }
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
 fn lower_opt_expr_has_float_source(opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div {
     match *opt {
         Some(e) => {
@@ -1809,15 +1895,54 @@ impl Lowerer {
     }
 
     fn find_hyper_expr_id_for_span(self, span: Span) -> i64 with Mut, Panic, Div {
+        // Explicit single-deref (not auto-deref `self.module.epistemic.X`, which
+        // reads garbage on c634b38f — a nonzero hyper_expr_count here spuriously
+        // routes plain integer `*` into ir_hyper_mul_o, which the native-v2 backend
+        // rejects). With the correct 0 count this returns -1 → normal ir_binop.
         var i: i64 = 0
-        while i < self.module.epistemic.hyper_expr_count {
-            let info = self.module.epistemic.hyper_exprs[i]
+        while i < (*self.module).epistemic.hyper_expr_count {
+            let info = (*self.module).epistemic.hyper_exprs[i as usize]
             if self.metadata_span_matches(span, info.span_start, info.span_end) {
                 return i
             }
             i = i + 1
         }
         -1
+    }
+
+    // Wide-int sidecar query: if expr `span` was recorded as a wide value (op_kind==9),
+    // return its limb count (algebra_tag); else 0. The checker records every expr whose
+    // result type is TyI128/TyU128 via record_hyper_expr(span, limbs, 9, false), so the
+    // lowerer learns operand/result width without a per-Expr type field. Mirrors
+    // find_hyper_expr_id_for_span (explicit single-deref — auto-deref reads garbage on
+    // c634b38f).
+    fn wide_limbs_for_span(self, span: Span) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < (*self.module).epistemic.hyper_expr_count {
+            let info = (*self.module).epistemic.hyper_exprs[i as usize]
+            if info.op_kind == 9 {
+                if self.metadata_span_matches(span, info.span_start, info.span_end) {
+                    return info.algebra_tag
+                }
+            }
+            i = i + 1
+        }
+        0
+    }
+
+    // Reserve N CONSECUTIVE vregs (fresh_reg is sequential), returning the base. A wide
+    // value of L limbs occupies base..base+L-1; ir_wide_* read/write limb k at vreg base+k.
+    fn fresh_regs_n(self, n: i64) -> (Lowerer, i64) with Mut, Panic, Div, IO {
+        let p0 = self.fresh_reg()
+        var lo = p0.0
+        let base = p0.1
+        var k: i64 = 1
+        while k < n {
+            let pk = lo.fresh_reg()
+            lo = pk.0
+            k = k + 1
+        }
+        (lo, base)
     }
 
     fn emit_i64_const(self, value: i64) -> (Lowerer, i64) with Mut, Panic, Div {
@@ -2455,6 +2580,11 @@ impl Lowerer {
     }
 
     fn bind_local(self, name: Name, reg: i64, is_mut: bool) -> Lowerer with Mut, Alloc, Panic {
+        self.bind_local_wide(name, reg, is_mut, 0)
+    }
+
+    // As bind_local, but records `limbs` (>=2 for a wide i128/iN value at reg..reg+limbs-1).
+    fn bind_local_wide(self, name: Name, reg: i64, is_mut: bool, limbs: i64) -> Lowerer with Mut, Alloc, Panic {
         var lo = self
         let _is_mut = is_mut
         var stk = *lo.locals
@@ -2463,6 +2593,7 @@ impl Lowerer {
             stk.names[idx as usize] = name
             stk.regs[idx as usize] = reg
             stk.depths[idx as usize] = lo.scope_depth
+            stk.limbs[idx as usize] = limbs
             stk.count = idx + 1
             lo.locals = Box::new(stk)
         } else {
@@ -2481,6 +2612,63 @@ impl Lowerer {
             i = i - 1
         }
         IR_INVALID_REG
+    }
+
+    // Wide-int width (limbs) of the binding named `name`, or 0 if narrow / not found.
+    // Mirrors lookup_local's depth+name scan so it sees the same binding.
+    fn lookup_local_limbs(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        let stk = *self.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= self.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                return stk.limbs[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // Context-sensitive version of expr_is_wide_limbs: same syntactic rule, but an ExprIdent
+    // resolves its width from the locals (so `let x: i128 = ...; x * x` detects x as wide).
+    // Returns 0 for everything that the free expr_is_wide_limbs returns 0 for, so replacing
+    // it only at the wide-dispatch / cast sites leaves all non-wide programs byte-identical.
+    fn expr_wide_limbs_m(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprCast {
+            let bits = lower_cast_type_wide_bits(&(*e).cast_type)
+            if bits > 64 { return (bits + 63) / 64 }
+            return 0
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_limbs((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            let lw = self.opt_expr_wide_limbs_m(&(*e).left)
+            let rw = self.opt_expr_wide_limbs_m(&(*e).right)
+            if lw >= rw { return lw }
+            return rw
+        }
+        0
+    }
+    fn opt_expr_wide_limbs_m(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => self.expr_wide_limbs_m(&(*e)),
+            _ => 0,
+        }
+    }
+    // Context-sensitive single-limb-safe divisor check (mirrors expr_is_single_limb_safe but
+    // resolves a wide ident operand): safe iff a cast-TO-wide of a NARROW operand.
+    fn expr_single_limb_safe_m(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => {
+                if (*e).kind == ExprKind::ExprCast {
+                    let cw = lower_cast_type_wide_bits(&(*e).cast_type)
+                    let ow = self.opt_expr_wide_limbs_m(&(*e).left)
+                    if cw > 64 && ow == 0 { return 1 }
+                }
+                0
+            }
+            _ => 0,
+        }
     }
 
     // Sprint 228: Look up a function by name in the module. Returns (Lowerer, fn_id) where
@@ -2589,21 +2777,34 @@ impl Lowerer {
     }
 
     fn find_or_add_fn_id(self, name: Name) -> (Lowerer, i64) with Mut, Panic, Div {
+        // Explicit single-deref through the box (never auto-deref `self.module.functions`,
+        // which materializes the whole [IrFunction;1400] module and faults idx=1400).
         var i: i64 = 0
-        while i < self.module.fn_count {
-            if ir_name_eq(self.module.functions[i].name, name) {
+        while i < (*self.module).fn_count {
+            if ir_name_eq((*self.module).functions[i as usize].name, name) {
                 return (self, i)
             }
             i = i + 1
         }
 
         var lo = self
-        if lo.module.fn_count < IR_MAX_FUNCS {
-            let idx = (*lo.module).fn_count
+        if (*lo.module).fn_count < IR_MAX_FUNCS {
+            // Bind the box to a LOCAL before deref-store. `(*lo.module).fn_count = v`
+            // (deref-store through a box FIELD of local `lo`) writes a discarded
+            // by-value copy and reads back 0 (documented c634b38f miscompile). The
+            // bound-local pattern `let m = lo.module; (*m).f = v` (as the working
+            // stub path module_frontend_lower_fn_item_into uses) stores correctly.
+            var m = lo.module
+            let idx = (*m).fn_count
+            // Whole-element store of a fresh IrFunction (the proven stub pattern at
+            // module_frontend_lower_fn_item_into:2749). A nested-array-element STRUCT
+            // field store `(*m).functions[idx].name = name` no-ops on c634b38f (Name
+            // is a [i8;128] struct); building the element and storing it whole works.
             var new_fn = ir_empty_function()
             new_fn.name = name
-            (*lo.module).functions[idx as usize] = new_fn
-            (*lo.module).fn_count = idx + 1
+            (*m).functions[idx as usize] = new_fn
+            (*m).fn_count = idx + 1
+            lo.module = m
             (lo, idx)
         } else {
             let loe = lo.report_error()
@@ -3079,7 +3280,15 @@ impl Lowerer {
         }
 
         let strategy = lo.ir_compute_strategy_from_ast_ref(return_type, effects)
-        var func = (*lo.module).functions[fn_id as usize]
+        // Build a FRESH IrFunction local and whole-element store it (the proven
+        // stub pattern, module_frontend:2749). The old `var func =
+        // (*lo.module).functions[fn_id]` copy-OUT materializes the [IrFunction;1400]
+        // module and faults (idx=1400); and per-field nested-array-element STRUCT
+        // stores like `(*m).functions[fn_id].name = name` no-op on c634b38f.
+        // Building the element on the stack and storing it whole avoids both.
+        let fi = fn_id as usize
+        var m = lo.module
+        var func = ir_empty_function()
         func.name = name
         func.compile_strategy = strategy
         func.param_count = ir_param_list_count_ref(params)
@@ -3090,30 +3299,23 @@ impl Lowerer {
         if strategy == IR_STRATEGY_INSTRUMENTED {
             func.param_count = func.param_count + 1
             if func.prof_counter_id < 0 {
-                let ctr_idx = (*lo.module).prof_counter_count
+                let ctr_idx = (*m).prof_counter_count
                 if ctr_idx < 64 {
-                    (*lo.module).prof_counters[ctr_idx as usize] = IrProfCounterInfo {
+                    (*m).prof_counters[ctr_idx as usize] = IrProfCounterInfo {
                         fn_id: fn_id,
                         fn_name: name,
                         counter_id: ctr_idx,
                     }
-                    (*lo.module).prof_counter_count = ctr_idx + 1
+                    (*m).prof_counter_count = ctr_idx + 1
                     func.prof_counter_id = ctr_idx
                 } else {
+                    lo.module = m
                     return lo.report_error()
                 }
             }
         }
-        (*lo.module).functions[fn_id as usize] = func
-        if lo.probe_mode && lower_summary_diag_enabled() {
-            print("lower_probe: preseed_fn done name=")
-            print(str_from_bytes(name.buf, name.len))
-            print(" param_count=")
-            print_int(func.param_count)
-            print(" strategy=")
-            print_int(func.compile_strategy)
-            print("\n")
-        }
+        (*m).functions[fi as usize] = func
+        lo.module = m
         lo
     }
 
@@ -4095,10 +4297,14 @@ impl Lowerer {
     }
 
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Wide-int ident tracking: if the initializer is a wide (i128/iN) value, its lowered
+        // base reg holds limb0 with the rest contiguous above it, so binding that base with
+        // the limb count lets later expressions use the variable in wide arithmetic.
+        let init_limbs = self.opt_expr_wide_limbs_m(&s.expr)
         let pair = self.lower_opt_expr_ref(&s.expr)
         var lo = pair.0
         let reg = pair.1
-        lo = lo.bind_local(s.name, reg, is_mut)
+        lo = lo.bind_local_wide(s.name, reg, is_mut, init_limbs)
         (lo, reg)
     }
 
@@ -4128,8 +4334,28 @@ impl Lowerer {
                             lo = lo.report_error()
                             (lo, rhs)
                         } else {
-                            lo = lo.emit(ir_copy(dst, rhs))
-                            (lo, dst)
+                            // Wide-int var reassignment: a single ir_copy would clobber only
+                            // limb0 and leave the high limbs stale (a silent wrong answer). For a
+                            // wide target, do an in-place L-limb copy when the rhs is equally wide;
+                            // a width mismatch (e.g. a narrow rhs) is a genuine reject (no ELF).
+                            let tlimbs = lo.lookup_local_limbs((*target_expr).name)
+                            if tlimbs >= 1 {
+                                let rlimbs = lo.opt_expr_wide_limbs_m(&s.expr)
+                                if rlimbs == tlimbs {
+                                    var kk: i64 = 0
+                                    while kk < tlimbs {
+                                        lo = lo.emit(ir_copy(dst + kk, rhs + kk))
+                                        kk = kk + 1
+                                    }
+                                    (lo, dst)
+                                } else {
+                                    lo = lo.emit(ir_wide_reject(dst))
+                                    (lo, dst)
+                                }
+                            } else {
+                                lo = lo.emit(ir_copy(dst, rhs))
+                                (lo, dst)
+                            }
                         }
                 } else if (*target_expr).kind == ExprKind::ExprFieldAccess {
                         let base_opt: Option<Box<Expr>> = (*target_expr).left
@@ -4378,10 +4604,21 @@ impl Lowerer {
                         print_int(field_idx)
                         print("\n")
                     }
+                    let fname = (*list).head.name
                     let pair = lo.lower_expr_ref(&(*list).head.value)
                     lo = pair.0
                     let vreg = pair.1
-                    lo = lo.emit(ir_field_set(base_reg, field_idx, vreg, (*list).head.name))
+                    // Store at the SAME slot field_idx_from_name_simple (the read side,
+                    // ExprFieldAccess) computes, so construction and access agree: numeric
+                    // .N -> N; named -> first-byte hash % 64. (Declaration-order indices
+                    // mismatched the hash-based read -> every field read 0.)
+                    var fslot = field_idx
+                    if fname.len == 1 && (fname.buf[0] as i64) >= 48 && (fname.buf[0] as i64) <= 57 {
+                        fslot = (fname.buf[0] as i64) - 48
+                    } else if fname.len > 0 {
+                        fslot = (fname.buf[0] as i64) % 64
+                    }
+                    lo = lo.emit(ir_field_set(base_reg, fslot, vreg, fname))
                     current = &(*list).tail
                     field_idx = field_idx + 1
                 }
@@ -5531,6 +5768,123 @@ impl Lowerer {
             let lo5 = lo4.emit(ir_call(dst, fn_id, callee_name, final_args, final_argc))
             (lo5, dst)
         } else if e.kind == ExprKind::ExprBinary {
+            // Wide-int (i128/u128/iN) arithmetic, detected syntactically from the AST. Each
+            // wide value occupies `wl` consecutive vregs (base..base+wl-1); operands lowered
+            // recursively already return such bases (cast-materialize / wide-binary below).
+            let wl = self.expr_wide_limbs_m(e)
+            let rhs_single_limb_safe = self.expr_single_limb_safe_m(&e.right)
+            if wl >= 1 {
+                if e.bin_op == BinaryOp::OpShr {
+                    // Logical >> by a compile-time-literal, non-negative bit count. A limb-aligned
+                    // amount (multiple of 64) uses the cheap limb-copy (the observation gate); any
+                    // other amount uses the general funnel shift (x86 shrd). A NON-literal shift is
+                    // rejected (no ELF) rather than silently treated as 0.
+                    let psl = self.lower_opt_expr_ref(&e.left)
+                    let los = psl.0
+                    let wsrc = psl.1
+                    var shift_bits: i64 = -1
+                    match e.right {
+                        Some(re) => {
+                            if (*re).kind == ExprKind::ExprIntLit { shift_bits = (*re).int_val }
+                        }
+                        _ => {}
+                    }
+                    let pds = los.fresh_regs_n(wl)
+                    let lod = pds.0
+                    let dstw = pds.1
+                    if shift_bits >= 0 {
+                        if shift_bits % 64 == 0 {
+                            let loe = lod.emit(ir_wide_shr_limb(dstw, wsrc, wl, shift_bits / 64))
+                            return (loe, dstw)
+                        }
+                        return (lod.emit(ir_wide_shr(dstw, wsrc, wl, shift_bits)), dstw)
+                    }
+                    return (lod.emit(ir_wide_reject(dstw)), dstw)
+                } else if e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem {
+                    let pwl = self.lower_opt_expr_ref(&e.left)
+                    let low1 = pwl.0
+                    let lbase = pwl.1
+                    let pwr = low1.lower_opt_expr_ref(&e.right)
+                    let low2 = pwr.0
+                    let rbase = pwr.1
+                    if e.bin_op == BinaryOp::OpMul {
+                        // result limbs + equal scratch, all contiguous (scratch at dst+wl).
+                        let pdm = low2.fresh_regs_n(wl + wl)
+                        let lod = pdm.0
+                        let dstw = pdm.1
+                        return (lod.emit(ir_wide_mul(dstw, lbase, rbase, wl)), dstw)
+                    } else if e.bin_op == BinaryOp::OpSub {
+                        let pds = low2.fresh_regs_n(wl)
+                        let lod = pds.0
+                        let dstw = pds.1
+                        return (lod.emit(ir_wide_sub(dstw, lbase, rbase, wl)), dstw)
+                    } else if e.bin_op == BinaryOp::OpDiv {
+                        // Single-limb divisor (a cast-to-wide of a narrow value) keeps the proven
+                        // schoolbook fast path. A MULTI-limb divisor now uses the full N/N divmod
+                        // (Increment D): quotient at dst, with remainder + diff scratch reserved
+                        // contiguously above (3*wl total). Sound for any divisor; no more reject.
+                        if rhs_single_limb_safe == 1 {
+                            let pdv = low2.fresh_regs_n(wl)
+                            let lod = pdv.0
+                            let dstw = pdv.1
+                            return (lod.emit(ir_wide_div(dstw, lbase, rbase, wl)), dstw)
+                        }
+                        let pdf = low2.fresh_regs_n(wl * 3)
+                        let lof = pdf.0
+                        let dstf = pdf.1
+                        return (lof.emit(ir_wide_div_full(dstf, lbase, rbase, wl)), dstf)
+                    } else if e.bin_op == BinaryOp::OpRem {
+                        // Single-limb divisor keeps the schoolbook fast path; a multi-limb divisor
+                        // uses the full divmod (remainder at dst, quotient + diff scratch above).
+                        if rhs_single_limb_safe == 1 {
+                            let pdr = low2.fresh_regs_n(wl)
+                            let lor = pdr.0
+                            let dstr = pdr.1
+                            return (lor.emit(ir_wide_mod(dstr, lbase, rbase, wl)), dstr)
+                        }
+                        let prf = low2.fresh_regs_n(wl * 3)
+                        let lof = prf.0
+                        let dstf = prf.1
+                        return (lof.emit(ir_wide_mod_full(dstf, lbase, rbase, wl)), dstf)
+                    } else {
+                        let pda = low2.fresh_regs_n(wl)
+                        let lod = pda.0
+                        let dstw = pda.1
+                        return (lod.emit(ir_wide_add(dstw, lbase, rbase, wl)), dstw)
+                    }
+                } else if e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe {
+                    // Wide unsigned compare -> a SINGLE i64 (0/1). Both operands must be EXACTLY
+                    // wl-wide; a mixed-width compare would read a garbage high limb from the narrow
+                    // side, so reject it (no ELF) rather than miscompute.
+                    let lwc = self.opt_expr_wide_limbs_m(&e.left)
+                    let rwc = self.opt_expr_wide_limbs_m(&e.right)
+                    let pcl = self.lower_opt_expr_ref(&e.left)
+                    let loc1 = pcl.0
+                    let lbase = pcl.1
+                    let pcr = loc1.lower_opt_expr_ref(&e.right)
+                    let loc2 = pcr.0
+                    let rbase = pcr.1
+                    let pd1 = loc2.fresh_regs_n(1)
+                    let lod = pd1.0
+                    let dst1 = pd1.1
+                    if lwc == wl && rwc == wl {
+                        var cc: i64 = 0
+                        if e.bin_op == BinaryOp::OpNe { cc = 1 }
+                        else if e.bin_op == BinaryOp::OpLt { cc = 2 }
+                        else if e.bin_op == BinaryOp::OpLe { cc = 3 }
+                        else if e.bin_op == BinaryOp::OpGt { cc = 4 }
+                        else if e.bin_op == BinaryOp::OpGe { cc = 5 }
+                        return (lod.emit(ir_wide_cmp(dst1, lbase, rbase, wl, cc)), dst1)
+                    }
+                    return (lod.emit(ir_wide_reject(dst1)), dst1)
+                }
+                // Any remaining wide op (shl, bitwise, ...) is unimplemented: emit a genuine
+                // reject (no ELF) rather than falling through to a low-limb i64 miscompile.
+                let prj = self.fresh_regs_n(wl)
+                let lorj = prj.0
+                let dstrj = prj.1
+                return (lorj.emit(ir_wide_reject(dstrj)), dstrj)
+            }
             let pair_l = self.lower_opt_expr_ref(&e.left)
             let lo1 = pair_l.0
             let lhs = pair_l.1
@@ -5658,6 +6012,68 @@ impl Lowerer {
             lo = lo.emit(ir_load_imm(res, 0))
             lo = lo.emit(ir_label(l_end))
             (lo, res)
+        } else if e.kind == ExprKind::ExprForIn {
+            // Ported from feat/mc-v2-opcodes (750c8f092): desugar `for i in a..b {body}`
+            // to a counter loop. Integer ranges only; other iterables report an error
+            // rather than silently miscompiling.
+            let for_iter_opt: Option<Box<Expr>> = e.left
+            match for_iter_opt {
+                Some(iter_box) => {
+                    if (*iter_box).kind == ExprKind::ExprRange {
+                        var lo = self.enter_scope()
+                        let pair_i = lo.fresh_reg()
+                        lo = pair_i.0
+                        let i_reg = pair_i.1
+                        lo = lo.bind_local(e.name, i_reg, true)
+                        let pair_start = lo.lower_opt_expr_ref(&(*iter_box).left)
+                        lo = pair_start.0
+                        let start_reg = pair_start.1
+                        lo = lo.emit(ir_copy(i_reg, start_reg))
+                        let pair_end = lo.lower_opt_expr_ref(&(*iter_box).right)
+                        lo = pair_end.0
+                        let end_reg = pair_end.1
+                        let pair_top = lo.fresh_label()
+                        lo = pair_top.0
+                        let l_top = pair_top.1
+                        let pair_cont = lo.fresh_label()
+                        lo = pair_cont.0
+                        let l_cont = pair_cont.1
+                        let pair_end_lbl = lo.fresh_label()
+                        lo = pair_end_lbl.0
+                        let l_end = pair_end_lbl.1
+                        let cmp_op = if (*iter_box).bin_op == BinaryOp::OpRangeInclusive { BinaryOp::OpLe } else { BinaryOp::OpLt }
+                        lo = lo.emit(ir_label(l_top))
+                        let pair_cmp = lo.fresh_reg()
+                        lo = pair_cmp.0
+                        let cmp_reg = pair_cmp.1
+                        lo = lo.emit(ir_binop(cmp_reg, i_reg, cmp_op, end_reg))
+                        lo = lo.emit(ir_branch_false(cmp_reg, l_end))
+                        lo = lo.push_loop_labels(l_cont, l_end)
+                        let for_body_opt: Option<Box<Block>> = e.block
+                        match for_body_opt {
+                            Some(blk) => {
+                                let pair_body = lo.lower_block_ref(&(*blk))
+                                lo = pair_body.0
+                            }
+                            None => {}
+                        }
+                        lo = lo.pop_loop_labels()
+                        lo = lo.emit(ir_label(l_cont))
+                        let pair_one = lo.fresh_reg()
+                        lo = pair_one.0
+                        let one_reg = pair_one.1
+                        lo = lo.emit(ir_load_imm(one_reg, 1))
+                        lo = lo.emit(ir_binop(i_reg, i_reg, BinaryOp::OpAdd, one_reg))
+                        lo = lo.emit(ir_jump(l_top))
+                        lo = lo.emit(ir_label(l_end))
+                        lo = lo.exit_scope()
+                        lo.emit_unit()
+                    } else {
+                        self.report_error().emit_unit()
+                    }
+                }
+                None => self.report_error().emit_unit(),
+            }
         } else if e.kind == ExprKind::ExprWhile {
             let pair_l_top = self.fresh_label()
             let lo1 = pair_l_top.0
@@ -5749,7 +6165,10 @@ impl Lowerer {
                 print_int(dst)
                 print("\n")
             }
-            lo = lo.emit(ir_alloc(dst, 0))
+            // 64 payload slots: field slots are first-byte-hash % 64 (see
+            // lower_struct_fields_ref / field_idx_from_name_simple), so reserve the
+            // full range instead of 0 (which gave the object no payload -> reads 0).
+            lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(64)))
             lo = lo.lower_struct_fields_ref(dst, &e.fields, 0)
             (lo, dst)
         } else if e.kind == ExprKind::ExprArrayLit {
@@ -5784,21 +6203,45 @@ impl Lowerer {
             let lo4 = lo3.emit(ir_binop(dst, lhs, e.bin_op, rhs))
             (lo4, dst)
         } else if e.kind == ExprKind::ExprCast {
+            // Wide-int cast bridges. `cw` = limbs if THIS cast produces a wide value
+            // (X as i128); `operand_wl` = limbs if the OPERAND is wide (i128 as i64).
+            let cw = self.expr_wide_limbs_m(e)
+            let operand_wl = self.opt_expr_wide_limbs_m(&e.left)
             let sub = self.lower_opt_expr_ref(&e.left)
             let lo1 = sub.0
             let src_reg = sub.1
-            if lower_cast_type_is_f64(&e.cast_type) {
+            if cw >= 1 {
+                // Cast TO wide: materialize cw contiguous limbs; limb0 = source i64, rest 0.
+                // (Positive-source minimal slice: zero-extend. Sign-extension is a later step.)
+                let pb = lo1.fresh_regs_n(cw)
+                var lo2 = pb.0
+                let base = pb.1
+                lo2 = lo2.emit(ir_copy(base, src_reg))
+                var k: i64 = 1
+                while k < cw {
+                    lo2 = lo2.emit(ir_load_imm(base + k, 0))
+                    k = k + 1
+                }
+                (lo2, base)
+            } else if operand_wl >= 1 {
+                // Narrowing wide -> i64: the low limb IS the operand's base vreg. Pass through.
+                (lo1, src_reg)
+            } else if lower_cast_type_is_f64(&e.cast_type) {
                 let p = lo1.fresh_reg()
                 let lo2 = p.0
                 let dst = p.1
                 (lo2.emit(ir_int_to_float(dst, src_reg)), dst)
-            } else if lower_opt_expr_has_float_source(&e.left) {
+            } else {
+                // Cast to int: emit IrFloatToInt unconditionally. The codegen converts
+                // (cvttsd2si) iff the source reg is RUNTIME-float (is_float_reg, set by
+                // IrLoadFloat/binop_f64 and reg-reuse-preserved), else passes through.
+                // This catches f64-VAR sources (e.g. (a*b) as i64) that the static
+                // lower_opt_expr_has_float_source (float literals only) misses — without
+                // needing compile-time variable-type tracking.
                 let p = lo1.fresh_reg()
                 let lo2 = p.0
                 let dst = p.1
                 (lo2.emit(ir_float_to_int(dst, src_reg)), dst)
-            } else {
-                (lo1, src_reg)
             }
         } else if e.kind == ExprKind::ExprContest {
             // Contest<T> introduction: `contest [M1, M2, ...] on subject`
