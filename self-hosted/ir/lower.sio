@@ -5682,11 +5682,10 @@ impl Lowerer {
             let wl = expr_is_wide_limbs(e)
             if wl >= 1 {
                 if e.bin_op == BinaryOp::OpShr {
-                    // Limb-aligned >> by a compile-time multiple of 64 (the observation gate).
-                    // The shift must be an int LITERAL that is a non-negative multiple of 64; a
-                    // non-literal or non-aligned amount cannot be done by this limb-copy, so we
-                    // reject it (no ELF) rather than silently shift by floor(bits/64). Funnel
-                    // shifts for arbitrary amounts are Increment B.
+                    // Logical >> by a compile-time-literal, non-negative bit count. A limb-aligned
+                    // amount (multiple of 64) uses the cheap limb-copy (the observation gate); any
+                    // other amount uses the general funnel shift (x86 shrd). A NON-literal shift is
+                    // rejected (no ELF) rather than silently treated as 0.
                     let psl = self.lower_opt_expr_ref(&e.left)
                     let los = psl.0
                     let wsrc = psl.1
@@ -5700,9 +5699,12 @@ impl Lowerer {
                     let pds = los.fresh_regs_n(wl)
                     let lod = pds.0
                     let dstw = pds.1
-                    if shift_bits >= 0 && shift_bits % 64 == 0 {
-                        let loe = lod.emit(ir_wide_shr_limb(dstw, wsrc, wl, shift_bits / 64))
-                        return (loe, dstw)
+                    if shift_bits >= 0 {
+                        if shift_bits % 64 == 0 {
+                            let loe = lod.emit(ir_wide_shr_limb(dstw, wsrc, wl, shift_bits / 64))
+                            return (loe, dstw)
+                        }
+                        return (lod.emit(ir_wide_shr(dstw, wsrc, wl, shift_bits)), dstw)
                     }
                     return (lod.emit(ir_wide_reject(dstw)), dstw)
                 } else if e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem {
