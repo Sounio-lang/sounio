@@ -2693,6 +2693,8 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_for_in_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprRange {
         result = checker_check_range_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprTupleLit {
+        result = checker_check_tuple_lit_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
     }
@@ -2718,6 +2720,52 @@ fn checker_check_range_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         checker_report_mismatch_inplace(c, e.span, 55, ty_i64(), right_ty)
     }
     ty_unit()
+}
+
+// *mut ExprTupleLit handler. Was missing from the inplace dispatch → fell to by-value
+// checker_check_expr_mut → 164KB Checker SRET-smash. ANY tuple literal as a value
+// expression (`let t = (1,2)`) crashed --check (destructuring `let (a,b)=..` survived via
+// a different path). Checks each element in place (no per-element Checker copy) and builds
+// the tuple type. Faithful to by-value check_tuple_lit + check_tuple_elems.
+fn checker_check_tuple_elems_inplace(c: *mut Checker, opt: Option<Box<ExprList> >) -> Option<Box<TypeEntryList> > with Mut, Panic, Div, Alloc, IO {
+    var types: [TypeEntry; 16] = [empty_type_entry(); 16]
+    var count: i64 = 0
+    var cur = opt
+    var done = false
+    while !done {
+        match cur {
+            Some(list) => {
+                if count < 16 {
+                    types[count] = checker_check_expr_inplace(c, (*list).head)
+                    count = count + 1
+                    cur = (*list).tail
+                } else {
+                    done = true
+                }
+            }
+            None => {
+                done = true
+            }
+        }
+    }
+    if count == 0 {
+        return None
+    }
+    var result: Option<Box<TypeEntryList> > = None
+    var j = count - 1
+    while j >= 0 {
+        result = Some(Box::new(TypeEntryList { head: types[j as usize], tail: result }))
+        j = j - 1
+    }
+    result
+}
+
+fn checker_check_tuple_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let elems = checker_check_tuple_elems_inplace(c, e.args)
+    match elems {
+        Some(elem_list) => ty_tuple(*elem_list)
+        None => ty_unit()
+    }
 }
 
 // FIX #2 (spine-completion): *mut ExprPath leaf handler. Faithful in-place transcription
@@ -3547,15 +3595,64 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
 // checked IN PLACE (checker_check_opt_expr_inplace); the shallow setup (param collect / return
 // lower / param bind) stays bridged-by-value (single copies, survivable). Faithful to the
 // by-value logic incl. Sprint-231 capture analysis + Epistemic auto-inject.
-fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    let params_result = (*c).collect_closure_params(e.closure_params)
-    checker_store_from_value(c, params_result.checker)
-    let params = params_result.params
-    let param_count = params_result.count
+// --- *mut closure setup helpers (replace the by-value collect/lower/bind bridges whose
+// 164KB Checker returns SRET-smashed once (*c).enums was populated → every closure crashed
+// --check). Each mutates (*c) directly and returns only small data; lower_type_expr is the
+// one remaining bridge (it survives in isolation, e.g. `let x: i64`). ---
+fn checker_collect_closure_param_list_inplace(c: *mut Checker, pl: ClosureParamList) -> (FnParamList, i64) with Mut, Panic, Div, Alloc, IO {
+    let head_ty = checker_lower_type_expr_mut(c, pl.head.ty)
+    let head_param = FnParamInfo { name: pl.head.name, ty: head_ty }
+    match pl.tail {
+        None => (FnParamList { head: head_param, tail: None }, 1)
+        Some(rest) => {
+            let rest_pair = checker_collect_closure_param_list_inplace(c, *rest)
+            (FnParamList { head: head_param, tail: Some(Box::new(rest_pair.0)) }, 1 + rest_pair.1)
+        }
+    }
+}
 
-    let ret_pair = (*c).lower_opt_closure_return(e.closure_return)
-    checker_store_from_value(c, ret_pair.0)
-    let ret_ty = ret_pair.1
+fn checker_collect_closure_params_inplace(c: *mut Checker, opt: Option<Box<ClosureParamList> >) -> (Option<Box<FnParamList> >, i64) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(pl) => {
+            let r = checker_collect_closure_param_list_inplace(c, *pl)
+            (Some(Box::new(r.0)), r.1)
+        }
+        None => (None, 0)
+    }
+}
+
+fn checker_lower_opt_closure_return_inplace(c: *mut Checker, opt: Option<Box<TypeExpr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    checker_lower_opt_type_inplace(c, opt)
+}
+
+fn checker_bind_closure_param_inplace(c: *mut Checker, p: ClosureParam) with Mut, Panic, Div, Alloc, IO {
+    let param_ty = checker_lower_type_expr_mut(c, p.ty)
+    (*c).env = (*c).env.bind(p.name, param_ty, false)
+    checker_const_int_bind_unknown_inplace(c, p.name)
+}
+
+fn checker_bind_closure_params_inplace(c: *mut Checker, opt: Option<Box<ClosureParamList> >) with Mut, Panic, Div, Alloc, IO {
+    var cur = opt
+    while true {
+        match cur {
+            Some(pl) => {
+                checker_bind_closure_param_inplace(c, (*pl).head)
+                cur = (*pl).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // *mut closure helpers (no 164KB Checker SRET-move; only lower_type_expr is bridged,
+    // which works in isolation — the crash was the ACCUMULATED by-value Checker returns of
+    // collect_closure_params / lower_opt_closure_return / bind_closure_params).
+    let params_pair = checker_collect_closure_params_inplace(c, e.closure_params)
+    let params = params_pair.0
+    let param_count = params_pair.1
+
+    let ret_ty = checker_lower_opt_closure_return_inplace(c, e.closure_return)
 
     let saved_effects = (*c).current_effects
     let saved_effect_count = (*c).current_effect_count
@@ -3566,8 +3663,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
 
-    let bound = (*c).bind_closure_params(e.closure_params)
-    checker_store_from_value(c, bound)
+    checker_bind_closure_params_inplace(c, e.closure_params)
 
     // THE FIX: body checked in place (was the by-value c.check_opt_expr recursion).
     let body_ty = checker_check_opt_expr_inplace(c, e.closure_body)
@@ -4364,9 +4460,88 @@ fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: Typ
 // bridge to check_binary_with_operand_types). Faithful: identical env/const/borrow effects —
 // checker_store_from_value copies env, borrows, AND every const_int_* field (verified
 // check.sio:780,781,848-854), so the PatBinding env/const-int/borrow mutations round-trip.
+// Full *mut recursive transcription of bind_pattern + its list helpers. The old version
+// bridged the by-value (*c).bind_pattern, whose tuple/struct/enum-payload recursion returns
+// a ~164KB Checker per level — once (*c).enums is populated that SRET-move smashes the
+// return address (match-with-tuple `match t {(a,b)=>}` crashed --check, while the
+// non-recursive `let (a,b)=..` survived). This version mutates (*c) directly and returns
+// nothing, so no Checker is ever moved. if/else-if (not match on pat.kind) dodges the
+// discriminant-0 *mut match miscompile.
 fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
-    let bound = (*c).bind_pattern(pat, scrut_ty)
-    checker_store_from_value(c, bound)
+    if pat.kind == PatternKind::PatBinding {
+        (*c).env = (*c).env.bind(pat.name, scrut_ty, pat.is_mut)
+        checker_const_int_bind_unknown_inplace(c, pat.name)
+        let lin = checker_is_linear_type_inplace(c, scrut_ty)
+        (*c).borrows = (*c).borrows.track(pat.name, lin)
+    } else if pat.kind == PatternKind::PatEnum {
+        checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
+    } else if pat.kind == PatternKind::PatStruct {
+        checker_bind_struct_pat_fields_inplace(c, pat.pat_fields, scrut_ty)
+    } else if pat.kind == PatternKind::PatTuple {
+        checker_bind_tuple_pattern_list_idx_inplace(c, pat.sub_patterns, scrut_ty, 0)
+    } else if pat.kind == PatternKind::PatOr {
+        checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
+    }
+    // PatWildcard / PatIntLit / PatBoolTrue / PatBoolFalse / PatStringLit bind nothing.
+}
+
+fn checker_bind_pattern_list_inplace(c: *mut Checker, opt: Option<Box<PatternList> >, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    var cur = opt
+    while true {
+        match cur {
+            Some(list) => {
+                checker_bind_pattern_inplace(c, (*list).head, scrut_ty)
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_bind_tuple_pattern_list_idx_inplace(c: *mut Checker, opt: Option<Box<PatternList> >, scrut_ty: TypeEntry, start_idx: i64) with Mut, Panic, Div, Alloc, IO {
+    var cur = opt
+    var idx = start_idx
+    while true {
+        match cur {
+            Some(list) => {
+                var elem_ty = ty_unknown()
+                if scrut_ty.kind == TypeKind::TyTuple {
+                    elem_ty = type_entry_list_get(scrut_ty.tuple_elems, idx)
+                }
+                checker_bind_pattern_inplace(c, (*list).head, elem_ty)
+                cur = (*list).tail
+                idx = idx + 1
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_bind_struct_pat_fields_inplace(c: *mut Checker, opt: Option<Box<PatFieldList> >, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    var cur = opt
+    while true {
+        match cur {
+            Some(list) => {
+                var field_ty = ty_unknown()
+                if scrut_ty.kind == TypeKind::TyNamed {
+                    let struct_idx = (*c).structs.find(scrut_ty.name)
+                    if struct_idx >= 0 {
+                        let si = (*c).structs.get(struct_idx)
+                        field_ty = field_info_list_find(si.fields, (*list).head.name)
+                    } else {
+                        let enum_idx = (*c).enums.find(scrut_ty.name)
+                        if enum_idx >= 0 {
+                            let ei = (*c).enums.get(enum_idx)
+                            field_ty = variant_fields_find_field(ei.variants, (*list).head.name)
+                        }
+                    }
+                }
+                checker_bind_pattern_inplace(c, (*list).head.pattern, field_ty)
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
 }
 
 
