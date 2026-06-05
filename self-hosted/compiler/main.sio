@@ -2762,6 +2762,26 @@ fn run_native_v2_emit_call(args: ArgList, flag_index: i64) with IO, Mut, Panic, 
     print("\n")
 }
 
+// Fn-pointer witness: --native-v2-emit-fnptr <out_path>. main() -> (&helper)(55) = 110.
+fn run_native_v2_emit_fnptr(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("native-v2-emit-fnptr: usage --native-v2-emit-fnptr <out_path>")
+    }
+    let out_path = arg_list_get(args, flag_index + 1)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_fnptr_module()
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=fnptr rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=fnptr path=")
+    print(out_path)
+    print("\n")
+}
+
 // Multi-call witness: --native-v2-emit-multicall <out_path>.
 // main() -> { x = add(10,32)=42; y = mul(x,2)=84; return y }. Chained calls + 2-param fns.
 fn run_native_v2_emit_multicall(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
@@ -6040,6 +6060,39 @@ fn compiler_main_make_native_v2_call_module() -> IrModule with Mut, Panic, Div, 
     main_fn.instrs[1] = ir_call(1, 0, helper.name, Some(Box::new(ir_reg_list_single(0))), 1)
     main_fn.instrs[2] = ir_return(1)
     main_fn.instr_count = 3
+    module.functions[1] = main_fn
+
+    module.fn_count = 2
+    module
+}
+
+// Fn-pointer witness: main() takes the ADDRESS of helper, then calls THROUGH it.
+//   fn helper(x) -> x * 2          (functions[0])
+//   fn main() -> { p = &helper; return p(55) }  = 55 * 2 = 110   (functions[1])
+// Proves IrLoadFnRef (lea rax,[rip+disp32] + reloc kind 4) + IrCallIndirect (call rax)
+// IR->ELF->exit. The distinct 110 cannot be produced by the direct-call path.
+fn compiler_main_make_native_v2_fnptr_module() -> IrModule with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+
+    var helper = ir_empty_function()
+    helper.name = ir_name_from_bytes(104, 101, 108, 112, 4)
+    helper.param_count = 1
+    helper.param_regs[0] = 0
+    helper.reg_count = 3
+    helper.instrs[0] = ir_load_imm(1, 2)
+    helper.instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    helper.instrs[2] = ir_return(2)
+    helper.instr_count = 3
+    module.functions[0] = helper
+
+    var main_fn = ir_empty_function()
+    main_fn.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    main_fn.reg_count = 3
+    main_fn.instrs[0] = ir_load_fn_ref(0, 0)
+    main_fn.instrs[1] = ir_load_imm(1, 55)
+    main_fn.instrs[2] = ir_call_indirect(2, 0, Some(Box::new(ir_reg_list_single(1))), 1)
+    main_fn.instrs[3] = ir_return(2)
+    main_fn.instr_count = 4
     module.functions[1] = main_fn
 
     module.fn_count = 2
@@ -26552,6 +26605,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-emit-call" {
             run_native_v2_emit_call(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-fnptr" {
+            run_native_v2_emit_fnptr(args, arg_idx)
             return
         } else if mode == "--native-v2-emit-multicall" {
             run_native_v2_emit_multicall(args, arg_idx)
