@@ -62,7 +62,33 @@ impl Parser {
         while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             let pair = p.parse_stmt()
             p = pair.0
-            let stmt = pair.1
+            var stmt = pair.1
+
+            var late_assign_code = parser_assign_op_code(p)
+            if late_assign_code < 0 {
+                let late_k = parser_peek(p)
+                if late_k == TokenKind::Eq { late_assign_code = 0 }
+                else if late_k == TokenKind::PlusEq { late_assign_code = 1 }
+                else if late_k == TokenKind::MinusEq { late_assign_code = 2 }
+                else if late_k == TokenKind::StarEq { late_assign_code = 3 }
+                else if late_k == TokenKind::SlashEq { late_assign_code = 4 }
+                else if late_k == TokenKind::PercentEq { late_assign_code = 5 }
+            }
+            if late_assign_code >= 0 {
+                let target_opt = stmt.expr
+                p = parser_advance(p)
+                p = parse_expr_entry(p)
+                let rhs_box = parser_take_expr_box()
+                stmt = Stmt {
+                    kind: StmtKind::StmtAssign,
+                    span: p.span_from(start),
+                    name: empty_name(),
+                    ty: None,
+                    expr: Some(rhs_box),
+                    target: target_opt,
+                    assign_op: assign_op_from_code(late_assign_code),
+                }
+            }
 
             rev_stmts_opt = Some(Box::new(StmtList { head: stmt, tail: rev_stmts_opt }))
 
@@ -95,15 +121,20 @@ impl Parser {
     }
 
     // ============================================================
-    // Let binding: let name [: Type] = expr
+    // Let binding: let pattern [: Type] = expr
     // ============================================================
 
     fn parse_let_stmt(self) -> (Parser, Stmt) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
-        var p = self.advance()  // skip 'let'
+        var p = parser_advance(self)  // skip 'let'
 
-        let name = p.current_name()
-        p = p.expect_ident()
+        let pat_pair = p.parse_pattern()
+        p = pat_pair.0
+        let pat = pat_pair.1
+        var name = empty_name()
+        if pat.kind == PatternKind::PatBinding {
+            name = pat.name
+        }
 
         // Optional type annotation
         let pair = p.parse_optional_type()
@@ -111,7 +142,11 @@ impl Parser {
         let ty_opt = pair.1
 
         // = expr
-        p = p.expect(TokenKind::Eq)
+        if parser_assign_op_code(p) == 0 || parser_peek(p) == TokenKind::Eq {
+            p = parser_advance(p)
+        } else {
+            p = p.expect(TokenKind::Eq)
+        }
         p = p.parse_expr()
         let init_box = parser_take_expr_box()
 
@@ -128,12 +163,12 @@ impl Parser {
     }
 
     // ============================================================
-    // Var declaration: var name [: Type] = expr
+    // Var declaration: var name [: Type] [= expr]
     // ============================================================
 
     fn parse_var_stmt(self) -> (Parser, Stmt) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
-        var p = self.advance()  // skip 'var'
+        var p = parser_advance(self)  // skip 'var'
 
         let name = p.current_name()
         p = p.expect_ident()
@@ -143,10 +178,12 @@ impl Parser {
         p = pair.0
         let ty_opt = pair.1
 
-        // = expr
-        p = p.expect(TokenKind::Eq)
-        p = p.parse_expr()
-        let init_box = parser_take_expr_box()
+        var init_opt: Option<Box<Expr>> = None
+        if parser_assign_op_code(p) == 0 || parser_peek(p) == TokenKind::Eq {
+            p = parser_advance(p)
+            p = p.parse_expr()
+            init_opt = Some(parser_take_expr_box())
+        }
 
         let span = p.span_from(start)
         (p, Stmt {
@@ -154,7 +191,7 @@ impl Parser {
             span: span,
             name: name,
             ty: ty_opt,
-            expr: Some(init_box),
+            expr: init_opt,
             target: None,
             assign_op: AssignOp::AssignEq,
         })
@@ -168,11 +205,28 @@ impl Parser {
         let start = self.current_span()
         var p1 = self.parse_expr()
 
-        let assign_code = parser_assign_op_code(p1)
+        var assign_code = parser_assign_op_code(p1)
+        var assign_p = p1
+        if assign_code < 0 {
+            let ak = parser_peek(p1)
+            if ak == TokenKind::Eq { assign_code = 0 }
+            else if ak == TokenKind::PlusEq { assign_code = 1 }
+            else if ak == TokenKind::MinusEq { assign_code = 2 }
+            else if ak == TokenKind::StarEq { assign_code = 3 }
+            else if ak == TokenKind::SlashEq { assign_code = 4 }
+            else if ak == TokenKind::PercentEq { assign_code = 5 }
+        }
+        if assign_code < 0 && p1.pos >= 0 && p1.pos + 1 < p1.token_count {
+            let next_code = PT_KIND_CODE[(p1.pos + 1) as usize]
+            if next_code == 137 || next_code == 154 || next_code == 155 || next_code == 156 || next_code == 157 || next_code == 168 {
+                assign_p = parser_advance(p1)
+                assign_code = parser_assign_op_code(assign_p)
+            }
+        }
         if assign_code >= 0 {
             // Assignment
             stmt_store_assign_target(parser_take_expr_box())
-            var p = parser_advance(p1)  // skip operator
+            var p = parser_advance(assign_p)  // skip operator
             p = parse_expr_entry(p)
             let rhs_box = parser_take_expr_box()
             let lhs_box = stmt_take_assign_target()
