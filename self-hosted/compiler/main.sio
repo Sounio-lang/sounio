@@ -6212,6 +6212,88 @@ fn compiler_main_make_native_v2_control_module() -> IrModule with Mut, Panic, Di
     module
 }
 
+// f64-comparison witness builder. Returns the RAW i64 0/1 result of `lhs OP rhs`
+// so the process exit code IS the boolean: exit 1 = true, exit 0 = false. This
+// makes a NaN case verifiable by exit code (e.g. NaN < x must exit 0, NaN != x
+// must exit 1). When lhs_is_nan != 0 the lhs operand is produced at RUNTIME via
+// 0.0/0.0 (a genuine f64 NaN with the float flag set), so the comparison path
+// sees a real NaN, not a folded literal.
+//   reg layout: r0=lhs, r1=rhs, r2=cmp result (i64 0/1)
+//   NaN form:   r0=0.0, r1=0.0, r2=0.0/0.0(NaN), r3=rhs, r4=NaN OP rhs
+fn compiler_main_make_native_v2_f64cmp_module(op: BinaryOp, lhs_is_nan: i64, lhs: f64, rhs: f64) -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    if lhs_is_nan != 0 {
+        func.reg_count = 6
+        func.instrs[0] = ir_load_float(0, 0.0)
+        func.instrs[1] = ir_load_float(1, 0.0)
+        func.instrs[2] = ir_binop(2, 0, BinaryOp::OpDiv, 1)   // r2 = 0.0/0.0 = NaN
+        func.instrs[3] = ir_load_float(3, rhs)
+        func.instrs[4] = ir_binop(4, 2, op, 3)                // r4 = NaN OP rhs (i64 0/1)
+        func.instrs[5] = ir_return(4)
+        func.instr_count = 6
+    } else {
+        func.reg_count = 3
+        func.instrs[0] = ir_load_float(0, lhs)
+        func.instrs[1] = ir_load_float(1, rhs)
+        func.instrs[2] = ir_binop(2, 0, op, 1)                // r2 = lhs OP rhs (i64 0/1)
+        func.instrs[3] = ir_return(2)
+        func.instr_count = 4
+    }
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
+// f64-comparison witness driver: --native-v2-emit-f64cmp <case> <out_path>.
+// <case> selects op + operands; the emitted ELF's exit code is the raw 0/1 result.
+// Cases pair an ordered-true (exit 1), ordered-false (exit 0), and a NaN case
+// whose IEEE-correct result the gate asserts (unordered: <,<=,>,>=,== -> 0; != -> 1).
+fn run_native_v2_emit_f64cmp(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 2 >= args.len {
+        panic("native-v2-emit-f64cmp: usage --native-v2-emit-f64cmp <case> <out_path>")
+    }
+    let case = arg_list_get(args, flag_index + 1)
+    let out_path = arg_list_get(args, flag_index + 2)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+
+    var module = ir_empty_module()
+    // Ordered cases use 2.0 and 1.0 so both directions are exercised per op.
+    if case == "lt-true"       { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpLt, 0, 1.0, 2.0) }
+    else if case == "lt-false" { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpLt, 0, 2.0, 1.0) }
+    else if case == "lt-nan"   { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpLt, 1, 0.0, 1.0) }
+    else if case == "le-true"  { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpLe, 0, 2.0, 2.0) }
+    else if case == "le-false" { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpLe, 0, 2.0, 1.0) }
+    else if case == "le-nan"   { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpLe, 1, 0.0, 1.0) }
+    else if case == "gt-true"  { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpGt, 0, 2.0, 1.0) }
+    else if case == "gt-false" { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpGt, 0, 1.0, 2.0) }
+    else if case == "gt-nan"   { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpGt, 1, 0.0, 1.0) }
+    else if case == "ge-true"  { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpGe, 0, 2.0, 2.0) }
+    else if case == "ge-false" { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpGe, 0, 1.0, 2.0) }
+    else if case == "ge-nan"   { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpGe, 1, 0.0, 1.0) }
+    else if case == "eq-true"  { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpEq, 0, 2.0, 2.0) }
+    else if case == "eq-false" { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpEq, 0, 2.0, 1.0) }
+    else if case == "eq-nan"   { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpEq, 1, 0.0, 1.0) }
+    else if case == "ne-true"  { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpNe, 0, 2.0, 1.0) }
+    else if case == "ne-false" { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpNe, 0, 2.0, 2.0) }
+    else if case == "ne-nan"   { module = compiler_main_make_native_v2_f64cmp_module(BinaryOp::OpNe, 1, 0.0, 1.0) }
+    else { panic("native-v2-emit-f64cmp: unknown case") }
+
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=f64cmp rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=f64cmp case=")
+    print(case)
+    print(" path=")
+    print(out_path)
+    print("\n")
+}
+
 // Arithmetic witness: main() -> { (100 - 16) / 2 } = 84 / 2 = 42. Exercises OpSub + OpDiv
 // in one module (OpAdd/OpMul are already covered by call/multicall).
 fn compiler_main_make_native_v2_arith_module() -> IrModule with Mut, Panic, Div {
@@ -26754,6 +26836,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-emit-arith" {
             run_native_v2_emit_arith(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-f64cmp" {
+            run_native_v2_emit_f64cmp(args, arg_idx)
             return
         } else if mode == "--native-v2-emit-control-ft" {
             run_native_v2_emit_control_ft(args, arg_idx)

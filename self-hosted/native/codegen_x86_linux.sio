@@ -1778,6 +1778,44 @@ fn nc_emit_setb_al(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x92); nc_emit_byte(nc, 0xc0)
 }
 
+// SETA AL: AL = (CF=0 && ZF=0). Used for f64 ordered ">" (ucomisd is unsigned;
+// NaN sets CF=1 so seta yields 0 — the required IEEE unordered=false result).
+fn nc_emit_seta_al(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x97); nc_emit_byte(nc, 0xc0)
+}
+
+// SETP BL: BL = parity flag (PF). ucomisd sets PF=1 on unordered (NaN) operands.
+fn nc_emit_setp_bl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x9a); nc_emit_byte(nc, 0xc3)
+}
+
+// SETNP BL: BL = !PF (ordered). For "==" we AND sete with setnp so NaN==NaN -> 0.
+fn nc_emit_setnp_bl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x9b); nc_emit_byte(nc, 0xc3)
+}
+
+// AND AL, BL
+fn nc_emit_and_al_bl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x20); nc_emit_byte(nc, 0xd8)
+}
+
+// OR AL, BL
+fn nc_emit_or_al_bl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x08); nc_emit_byte(nc, 0xd8)
+}
+
+// UCOMISD xmm0, xmm1 (66 0F 2E C1): compares scalar f64 like an unsigned cmp,
+// sets CF/ZF/PF (PF=1 on unordered/NaN). Does not raise on QNaN.
+fn nc_emit_ucomisd_xmm0_xmm1(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x66); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x2e); nc_emit_byte(nc, 0xc1)
+}
+
+// UCOMISD xmm1, xmm0 (66 0F 2E C8): swapped-operand form for "<"/"<=" so the
+// unordered case still yields false (we compute rhs>lhs / rhs>=lhs).
+fn nc_emit_ucomisd_xmm1_xmm0(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x66); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x2e); nc_emit_byte(nc, 0xc8)
+}
+
 // MOVZX RAX, AL
 fn nc_emit_movzx_rax_al(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
@@ -5934,6 +5972,45 @@ fn nc_emit_core_binop_f64(nc: &! NativeCompiler, func: &IrFunction, instr_index:
     nc_emit_movq_xmm0_rax(nc)
     nc_core_load_temp_to_rax(nc, rhs)
     nc_emit_movq_xmm1_rax(nc)
+    // f64 comparisons: produce an i64 0/1 with correct IEEE unordered (NaN)
+    // semantics. ucomisd sets flags like an unsigned compare and sets PF=1 on
+    // unordered (NaN) operands. dst is an INTEGER 0/1 -> clear its float flag.
+    if op == BinaryOp::OpLt || op == BinaryOp::OpLe || op == BinaryOp::OpGt
+       || op == BinaryOp::OpGe || op == BinaryOp::OpEq || op == BinaryOp::OpNe {
+        if op == BinaryOp::OpGt {
+            // lhs > rhs: ucomisd xmm0,xmm1; seta (CF=0&&ZF=0). NaN->CF=1->0.
+            nc_emit_ucomisd_xmm0_xmm1(nc)
+            nc_emit_seta_al(nc)
+        } else if op == BinaryOp::OpGe {
+            // lhs >= rhs: ucomisd xmm0,xmm1; setae (CF=0). NaN->CF=1->0.
+            nc_emit_ucomisd_xmm0_xmm1(nc)
+            nc_emit_setae_al(nc)
+        } else if op == BinaryOp::OpLt {
+            // lhs < rhs == rhs > lhs: swap operands so unordered still yields 0.
+            nc_emit_ucomisd_xmm1_xmm0(nc)
+            nc_emit_seta_al(nc)
+        } else if op == BinaryOp::OpLe {
+            // lhs <= rhs == rhs >= lhs: swap operands; NaN->CF=1->0.
+            nc_emit_ucomisd_xmm1_xmm0(nc)
+            nc_emit_setae_al(nc)
+        } else if op == BinaryOp::OpEq {
+            // ZF=1 means equal OR unordered; AND with setnp (ordered) so NaN==x -> 0.
+            nc_emit_ucomisd_xmm0_xmm1(nc)
+            nc_emit_sete_al(nc)
+            nc_emit_setnp_bl(nc)
+            nc_emit_and_al_bl(nc)
+        } else {
+            // OpNe: ZF=0 (incl. unordered's ZF=1->setne=0); OR with setp so NaN!=x -> 1.
+            nc_emit_ucomisd_xmm0_xmm1(nc)
+            nc_emit_setne_al(nc)
+            nc_emit_setp_bl(nc)
+            nc_emit_or_al_bl(nc)
+        }
+        nc_emit_movzx_rax_al(nc)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_set_float_flag(nc, dst, 0)
+        return true
+    }
     if op == BinaryOp::OpAdd { nc_emit_addsd_xmm0_xmm1(nc) }
     else if op == BinaryOp::OpSub { nc_emit_subsd_xmm0_xmm1(nc) }
     else if op == BinaryOp::OpMul { nc_emit_mulsd_xmm0_xmm1(nc) }
