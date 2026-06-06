@@ -3589,6 +3589,48 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             ty_named(struct_name)
         }
     } else {
+        // ---- Enum struct-variant constructor (`Enum::Variant { field: val }`). The head
+        // segment ("Event") is the enum name; the last segment ("C") names a struct variant.
+        // checker_copy_string_list_to_name returns the HEAD; _tail_to_name returns the LAST
+        // segment. If head is an enum AND last is a struct-variant of it, validate the field
+        // inits against the variant's declared fields and yield ty_named(enum_name) — matching
+        // how checker_check_path_expr_inplace types a variant path, so a later
+        // `match c { Event::C { x: cx } => .. }` resolves via (*c).enums.find(scrut_ty.name). ----
+        let enum_idx = (*c).enums.find(struct_name)
+        if enum_idx >= 0 {
+            let variant_name = checker_copy_string_list_tail_to_name(e.path.segments)
+            let ei = (*c).enums.get(enum_idx)
+            if variant_info_list_has(ei.variants, variant_name) {
+                let vfields = variant_info_list_find_fields(ei.variants, variant_name)
+                // Count check first (E046), mirroring the non-generic struct branch:
+                // report and still yield ty_named so the variant type is known downstream.
+                let ev_init_count = struct_field_list_count(e.fields)
+                if ev_init_count != field_info_list_count(vfields) {
+                    checker_report_error_at_inplace(c, e.span, 46, 0, 0, 0)
+                    return ty_named(struct_name)
+                }
+                var cur_ev = e.fields
+                var done_ev = false
+                while !done_ev {
+                    match cur_ev {
+                        Some(list) => {
+                            let field_ty = field_info_list_find(vfields, (*list).head.name)
+                            let init_ty = checker_check_expr_inplace(c, (*list).head.value)
+                            if field_info_list_has(vfields, (*list).head.name) {
+                                if !types_compatible(init_ty, field_ty) {
+                                    checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
+                                }
+                            }
+                            cur_ev = (*list).tail
+                        }
+                        None => {
+                            done_ev = true
+                        }
+                    }
+                }
+                return ty_named(struct_name)
+            }
+        }
         // ---- Unknown struct (check_struct_lit else-branch 16626-16630 →
         // check_struct_field_inits_no_type 16740). Report E015, then check every field-init
         // expr via the *mut spine (for side effects / nested-expr diagnostics), no type compat. ----
@@ -4026,6 +4068,35 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     ty_knowledge(v_ty, 0.0 - 1.0)
 }
 
+// Enum tuple-variant constructor detection (`Enum::Variant(args)`). Given the callee
+// opt-expr, returns the enum table index if the callee is a 2+-segment path whose HEAD
+// names an enum and whose LAST segment names a variant of it (e.g. `Event::B`); else -1.
+// Mirrors checker_check_path_expr_inplace's head/last split. A tuple-variant call types
+// as ty_named(enum_name) (like the path-expr handler), so it isn't a plain callable and
+// would otherwise fall to E017. Single-segment paths have head==last; a bare enum name
+// alone won't match a variant, so this stays scoped to true `Enum::Variant` callees.
+fn call_expr_enum_variant_ctor_enum_idx(c: *mut Checker, opt: Option<Box<Expr> >) -> i64 with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprPath {
+                return -1
+            }
+            let head_name = checker_copy_string_list_to_name((*expr).path.segments)
+            let enum_idx = (*c).enums.find(head_name)
+            if enum_idx < 0 {
+                return -1
+            }
+            let variant_name = checker_copy_string_list_tail_to_name((*expr).path.segments)
+            let ei = (*c).enums.get(enum_idx)
+            if variant_info_list_has(ei.variants, variant_name) {
+                return enum_idx
+            }
+            -1
+        }
+        None => -1
+    }
+}
+
 fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // Intercept the common epistemic builtin measure() with an inplace handler before the
     // by-value bridge below (which SRET-smashes on the 164KB Checker return).
@@ -4106,6 +4177,18 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         callee_ty
     } else {
+        // Enum tuple-variant constructor (`Event::B(42)`): the callee path typed as
+        // ty_named(enum_name) (not TyFn), so it would otherwise hit E017. Check the args for
+        // side effects / nested diagnostics and yield ty_named(enum_name) so a later
+        // `match b { Event::B(n) => .. }` resolves via (*c).enums.find(scrut_ty.name).
+        let variant_enum_idx = call_expr_enum_variant_ctor_enum_idx(c, e.left)
+        if variant_enum_idx >= 0 {
+            let ei = (*c).enums.get(variant_enum_idx)
+            let call_start_borrows = (*c).borrows
+            checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            return ty_named(ei.name)
+        }
         checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
