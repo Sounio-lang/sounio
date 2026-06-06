@@ -1053,6 +1053,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_str_slice((*func).name) { return 8 }
     if name_is_starts_with((*func).name) { return 9 }
     if name_is_str_concat((*func).name) { return 10 }
+    if name_is_str_char_at((*func).name) { return 20 }
     if name_is_read_file((*func).name) { return 11 }
     if name_is_write_file((*func).name) { return 12 }
     if name_is_file_size((*func).name) { return 13 }
@@ -1152,6 +1153,23 @@ fn name_is_starts_with(n: Name) -> bool with Mut, Panic, Div {
     if n.buf[8] != 105 as i8 { return false }     // 'i'
     if n.buf[9] != 116 as i8 { return false }     // 't'
     if n.buf[10] != 104 as i8 { return false }    // 'h'
+    true
+}
+
+fn name_is_str_char_at(n: Name) -> bool with Mut, Panic, Div {
+    // "str_char_at" = 11 chars
+    if n.len != 11 { return false }
+    if n.buf[0] != 115 as i8 { return false }     // 's'
+    if n.buf[1] != 116 as i8 { return false }     // 't'
+    if n.buf[2] != 114 as i8 { return false }     // 'r'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 99 as i8 { return false }      // 'c'
+    if n.buf[5] != 104 as i8 { return false }     // 'h'
+    if n.buf[6] != 97 as i8 { return false }      // 'a'
+    if n.buf[7] != 114 as i8 { return false }     // 'r'
+    if n.buf[8] != 95 as i8 { return false }      // '_'
+    if n.buf[9] != 97 as i8 { return false }      // 'a'
+    if n.buf[10] != 116 as i8 { return false }    // 't'
     true
 }
 
@@ -1901,6 +1919,25 @@ fn nc_emit_load_rbp_disp32_rax(nc: &! NativeCompiler, disp: i64) with Mut, Panic
     nc_emit_byte(nc, 0x8b)
     nc_emit_byte(nc, 0x85)
     nc_emit_u32_le(nc, disp)
+}
+
+fn nc_emit_load_rbp_disp32_rbx(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x9d)
+    nc_emit_u32_le(nc, disp)
+}
+
+fn nc_emit_cmp_byte_rdi_zero(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x80)
+    nc_emit_byte(nc, 0x3f)
+    nc_emit_byte(nc, 0x00)
+}
+
+fn nc_emit_mov_rcx_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xc1)
 }
 
 fn nc_emit_add_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -2760,6 +2797,78 @@ pub fn native_v2_core_emit_str_char_at_into(nc: &! NativeCompiler, dst: i64, arg
     nc_core_store_rax_to_temp(nc, dst)
 }
 
+pub fn native_v2_core_emit_str_concat_into(nc: &! NativeCompiler, dst: i64, arg0_reg: i64) with Mut, Panic, Div {
+    let slot_len_a = arg0_reg + 64
+    let slot_len_b = arg0_reg + 65
+    let slot_res = arg0_reg + 66
+
+    nc_core_load_temp_to_rax(nc, arg0_reg)
+    nc_emit_mov_rdi_rax(nc)
+    nc_emit_xor_rcx_rcx(nc)
+    nc_emit_movzx_rax_byte_rdi(nc)
+    nc_emit_test_al_al(nc)
+    nc_emit_jz_rel8(nc, 8)
+    nc_emit_inc_rdi(nc)
+    nc_emit_inc_rcx(nc)
+    nc_emit_jmp_rel8(nc, -16)
+    nc_emit_mov_reg_reg(nc, 0, 1)
+    nc_core_store_rax_to_temp(nc, slot_len_a)
+
+    nc_core_load_temp_to_rax(nc, arg0_reg + 1)
+    nc_emit_mov_rdi_rax(nc)
+    nc_emit_xor_rcx_rcx(nc)
+    nc_emit_movzx_rax_byte_rdi(nc)
+    nc_emit_test_al_al(nc)
+    nc_emit_jz_rel8(nc, 8)
+    nc_emit_inc_rdi(nc)
+    nc_emit_inc_rcx(nc)
+    nc_emit_jmp_rel8(nc, -16)
+    nc_emit_mov_reg_reg(nc, 0, 1)
+    nc_core_store_rax_to_temp(nc, slot_len_b)
+
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
+    nc_core_store_rax_to_temp(nc, slot_res)
+
+    nc_core_load_temp_to_rax(nc, slot_len_a)
+    nc_emit_push_rax(nc)
+    nc_core_load_temp_to_rax(nc, slot_len_b)
+    nc_emit_pop_rbx(nc)
+    nc_emit_add_rax_rbx(nc)
+    nc_emit_mov_reg_imm(nc, 1, 1)
+    nc_emit_add_reg_reg(nc, 0, 1)
+    nc_emit_mov_reg_reg(nc, 1, 0)
+
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_push_rax(nc)
+    nc_emit_mov_reg_reg(nc, 0, 1)
+    nc_emit_add_reg_reg(nc, 0, 1)
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_pop_rax(nc)
+
+    nc_emit_byte(nc, 0xfc)
+    nc_core_load_temp_to_rax(nc, slot_len_a)
+    nc_emit_mov_reg_reg(nc, 1, 0)
+    nc_core_load_temp_to_rax(nc, arg0_reg)
+    nc_emit_mov_reg_reg(nc, 6, 0)
+    nc_core_load_temp_to_rax(nc, slot_res)
+    nc_emit_mov_rdi_rax(nc)
+    nc_emit_byte(nc, 0xf3)
+    nc_emit_byte(nc, 0xa4)
+
+    nc_core_load_temp_to_rax(nc, slot_len_b)
+    nc_emit_mov_reg_reg(nc, 1, 0)
+    nc_core_load_temp_to_rax(nc, arg0_reg + 1)
+    nc_emit_mov_reg_reg(nc, 6, 0)
+    nc_emit_byte(nc, 0xf3)
+    nc_emit_byte(nc, 0xa4)
+
+    nc_emit_byte(nc, 0xc6)
+    nc_emit_byte(nc, 0x07)
+    nc_emit_byte(nc, 0x00)
+    nc_core_load_temp_to_rax(nc, slot_res)
+    nc_core_store_rax_to_temp(nc, dst)
+}
+
 pub fn native_v2_core_emit_str_eq_into(nc: &! NativeCompiler, dst: i64, arg0_reg: i64) with Mut, Panic, Div {
     nc_core_load_temp_to_rax(nc, arg0_reg)
     nc_emit_mov_rdi_rax(nc)
@@ -2952,100 +3061,195 @@ fn emit_builtin_starts_with(nc: NativeCompiler) -> NativeCompiler with Mut, Pani
     c
 }
 
+// str_char_at(s: *u8, i: i64) -> i64
+// Returns zero-extended byte at s[i].
+fn emit_builtin_str_char_at(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // rdi = s, rsi = i
+    c.code = emit_add_reg_reg(c.code, 7, 6)
+    c.code = emit_movzx_rax_byte_rdi(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
 // str_concat(a: *u8, b: *u8) -> *u8
 // Allocates len_a + len_b + 1 bytes from RuntimeContext.heap_cursor,
-// copies a then b, null-terminates, returns pointer to new string.
+// copies a then b with rep movsb, null-terminates, returns pointer to new string.
 fn emit_builtin_str_concat(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     // rdi = a, rsi = b
 
-    // Phase 0: Prologue + save inputs
-    c.code = emit_push_rbp(c.code)                     // 1
-    c.code = emit_mov_rbp_rsp(c.code)                  // 3
-    c.code = emit_sub_rsp_imm32(c.code, 48)            // 7
-    c.code = emit_mov_reg_reg(c.code, 0, 7)            // 3: mov rax, rdi
-    c.code = emit_store_rax_rbp_disp32(c.code, -8)     // 7: save a at [rbp-8]
-    c.code = emit_mov_reg_reg(c.code, 0, 6)            // 3: mov rax, rsi
-    c.code = emit_store_rax_rbp_disp32(c.code, -16)    // 7: save b at [rbp-16]
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 48)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)
+    c.code = emit_store_rax_rbp_disp32(c.code, -8)
+    c.code = emit_mov_reg_reg(c.code, 0, 6)
+    c.code = emit_store_rax_rbp_disp32(c.code, -16)
 
-    // Phase 1: Compute len_a (rdi still = a)
-    c.code = emit_xor_rcx_rcx(c.code)                  // 3: rcx = 0
-    // loop_a:
-    c.code = emit_cmp_byte_rdi_zero(c.code)             // 3: cmp byte [rdi], 0
-    c.code = emit_jz_rel8(c.code, 8)                    // 2: jz done_a (skip 3+3+2)
-    c.code = emit_inc_rdi(c.code)                       // 3
-    c.code = emit_inc_rcx(c.code)                       // 3
-    c.code = emit_jmp_rel8(c.code, -13)                 // 2: jmp loop_a
-    // done_a: rcx = len_a
-    c.code = emit_mov_reg_reg(c.code, 0, 1)             // 3: mov rax, rcx
-    c.code = emit_store_rax_rbp_disp32(c.code, -24)     // 7: save len_a at [rbp-24]
+    c.code = emit_xor_rcx_rcx(c.code)
+    c.code = emit_cmp_byte_rdi_zero(c.code)
+    c.code = emit_jz_rel8(c.code, 8)
+    c.code = emit_inc_rdi(c.code)
+    c.code = emit_inc_rcx(c.code)
+    c.code = emit_jmp_rel8(c.code, -13)
+    c.code = emit_mov_reg_reg(c.code, 0, 1)
+    c.code = emit_store_rax_rbp_disp32(c.code, -24)
 
-    // Phase 2: Compute len_b
-    c.code = emit_load_rbp_disp32_rax(c.code, -16)      // 7: rax = b
-    c.code = emit_mov_rdi_rax(c.code)                    // 3: rdi = b
-    c.code = emit_xor_rcx_rcx(c.code)                   // 3: rcx = 0
-    // loop_b:
-    c.code = emit_cmp_byte_rdi_zero(c.code)              // 3: cmp byte [rdi], 0
-    c.code = emit_jz_rel8(c.code, 8)                     // 2: jz done_b
-    c.code = emit_inc_rdi(c.code)                        // 3
-    c.code = emit_inc_rcx(c.code)                        // 3
-    c.code = emit_jmp_rel8(c.code, -13)                  // 2: jmp loop_b
-    // done_b: rcx = len_b
+    c.code = emit_load_rbp_disp32_rax(c.code, -16)
+    c.code = emit_mov_rdi_rax(c.code)
+    c.code = emit_xor_rcx_rcx(c.code)
+    c.code = emit_cmp_byte_rdi_zero(c.code)
+    c.code = emit_jz_rel8(c.code, 8)
+    c.code = emit_inc_rdi(c.code)
+    c.code = emit_inc_rcx(c.code)
+    c.code = emit_jmp_rel8(c.code, -13)
+    c.code = emit_mov_reg_reg(c.code, 0, 1)
+    c.code = emit_store_rax_rbp_disp32(c.code, -32)
 
-    // Phase 3: Allocate from RuntimeContext.heap_cursor
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
-    c.code = emit_store_rax_rbp_disp32(c.code, -40)      // 7: save result at [rbp-40]
-    c.code = emit_load_rbp_disp32_rax(c.code, -24)       // 7: rax = len_a
-    c.code = emit_add_reg_reg(c.code, 0, 1)              // 3: rax += rcx (len_b)
-    // add rax, 1 — raw: 48 83 c0 01
+    c.code = emit_store_rax_rbp_disp32(c.code, -40)
+    c.code = emit_load_rbp_disp32_rax(c.code, -24)
+    c.code = emit_load_rbp_disp32_rbx(c.code, -32)
+    c.code = emit_add_reg_reg(c.code, 0, 3)
     var ab = c.code
     ab = emit_byte(ab, 0x48)
     ab = emit_byte(ab, 0x83)
     ab = emit_byte(ab, 0xc0)
     ab = emit_byte(ab, 0x01)
-    c.code = ab                                           // 4: rax = total
-    c.code = emit_mov_rcx_rax(c.code)                    // 3: rcx = total
+    c.code = ab
+    c.code = emit_mov_rcx_rax(c.code)
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
-    c.code = emit_add_reg_reg(c.code, 0, 1)              // 3: rax = new r13
+    c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
 
-    // Phase 4: Copy a → result
-    c.code = emit_load_rbp_disp32_rax(c.code, -8)        // 7: rax = a
-    c.code = emit_mov_rdi_rax(c.code)                     // 3: rdi = a (source)
-    c.code = emit_load_rbp_disp32_rax(c.code, -40)       // 7: rax = result
-    c.code = emit_mov_rsi_rax(c.code)                     // 3: rsi = result (dest)
-    // copy_loop_a:
-    c.code = emit_movzx_rax_byte_rdi(c.code)             // 4: movzx rax, byte [rdi]
-    c.code = emit_test_al_al(c.code)                      // 2: test al, al
-    c.code = emit_jz_rel8(c.code, 13)                     // 2: jz done_copy_a (skip 3+2+3+3+2)
-    c.code = emit_mov_reg_reg(c.code, 2, 0)              // 3: mov rdx, rax (dl = byte)
-    c.code = emit_mov_byte_mem_rsi_dl(c.code)             // 2: mov [rsi], dl
-    c.code = emit_inc_rdi(c.code)                         // 3
-    c.code = emit_inc_rsi(c.code)                         // 3
-    c.code = emit_jmp_rel8(c.code, -21)                   // 2: jmp copy_loop_a
-    // done_copy_a: rsi points past last copied byte
+    c.code = emit_byte(c.code, 0xfc)
+    c.code = emit_load_rbp_disp32_rax(c.code, -24)
+    c.code = emit_mov_reg_reg(c.code, 1, 0)
+    c.code = emit_load_rbp_disp32_rax(c.code, -8)
+    c.code = emit_mov_reg_reg(c.code, 6, 0)
+    c.code = emit_load_rbp_disp32_rax(c.code, -40)
+    c.code = emit_mov_rdi_rax(c.code)
+    c.code = emit_byte(c.code, 0xf3)
+    c.code = emit_byte(c.code, 0xa4)
 
-    // Phase 5: Copy b → result (rsi continues from end of a)
-    c.code = emit_load_rbp_disp32_rax(c.code, -16)       // 7: rax = b
-    c.code = emit_mov_rdi_rax(c.code)                     // 3: rdi = b (source)
-    // copy_loop_b:
-    c.code = emit_movzx_rax_byte_rdi(c.code)             // 4: movzx rax, byte [rdi]
-    c.code = emit_test_al_al(c.code)                      // 2: test al, al
-    c.code = emit_jz_rel8(c.code, 13)                     // 2: jz done_copy_b
-    c.code = emit_mov_reg_reg(c.code, 2, 0)              // 3: mov rdx, rax
-    c.code = emit_mov_byte_mem_rsi_dl(c.code)             // 2: mov [rsi], dl
-    c.code = emit_inc_rdi(c.code)                         // 3
-    c.code = emit_inc_rsi(c.code)                         // 3
-    c.code = emit_jmp_rel8(c.code, -21)                   // 2: jmp copy_loop_b
-    // done_copy_b:
+    c.code = emit_load_rbp_disp32_rax(c.code, -32)
+    c.code = emit_mov_reg_reg(c.code, 1, 0)
+    c.code = emit_load_rbp_disp32_rax(c.code, -16)
+    c.code = emit_mov_reg_reg(c.code, 6, 0)
+    c.code = emit_byte(c.code, 0xf3)
+    c.code = emit_byte(c.code, 0xa4)
 
-    // Phase 6: Null terminate + return
-    c.code = emit_mov_byte_mem_rsi_imm8(c.code, 0)       // 3: mov byte [rsi], 0
-    c.code = emit_load_rbp_disp32_rax(c.code, -40)       // 7: rax = result ptr
-    c.code = emit_mov_rsp_rbp(c.code)                     // 3: epilogue
-    c.code = emit_pop_rbp(c.code)                         // 1
-    c.code = emit_ret(c.code)                              // 1
+    c.code = emit_byte(c.code, 0xc6)
+    c.code = emit_byte(c.code, 0x07)
+    c.code = emit_byte(c.code, 0x00)
+    c.code = emit_load_rbp_disp32_rax(c.code, -40)
+    c.code = emit_mov_rsp_rbp(c.code)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
     c
+}
+
+fn native_v2_persist_builtin_emit_into(nc: &! NativeCompiler, updated: NativeCompiler) with Mut, Panic, Div {
+    let new_len = updated.code.len
+    (*nc).code = updated.code
+    var code = (*nc).code
+    code.len = new_len
+    (*nc).code = code
+    var ri = 0
+    while ri < updated.relocs.count && ri < 4096 {
+        let entry = updated.relocs.entries[ri as usize]
+        if entry.kind.kind_code == 3 {
+            nc_add_data_section_reloc(nc, entry.offset, entry.target.target_index)
+        }
+        ri = ri + 1
+    }
+}
+
+fn emit_builtin_str_len_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_xor_rcx_rcx(nc)
+    nc_emit_cmp_byte_rdi_zero(nc)
+    nc_emit_jz_rel8(nc, 8)
+    nc_emit_inc_rdi(nc)
+    nc_emit_inc_rcx(nc)
+    nc_emit_jmp_rel8(nc, -13)
+    nc_emit_mov_reg_reg(nc, 0, 1)
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_str_char_at_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_add_reg_reg(nc, 7, 6)
+    nc_emit_movzx_rax_byte_rdi(nc)
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_str_concat_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_push_rbp(nc)
+    nc_emit_mov_rbp_rsp(nc)
+    nc_emit_sub_rsp_imm32(nc, 48)
+    nc_emit_mov_reg_reg(nc, 0, 7)
+    nc_emit_store_rax_rbp_disp32(nc, -8)
+    nc_emit_mov_reg_reg(nc, 0, 6)
+    nc_emit_store_rax_rbp_disp32(nc, -16)
+
+    nc_emit_xor_rcx_rcx(nc)
+    nc_emit_cmp_byte_rdi_zero(nc)
+    nc_emit_jz_rel8(nc, 8)
+    nc_emit_inc_rdi(nc)
+    nc_emit_inc_rcx(nc)
+    nc_emit_jmp_rel8(nc, -13)
+    nc_emit_mov_reg_reg(nc, 0, 1)
+    nc_emit_store_rax_rbp_disp32(nc, -24)
+
+    nc_emit_load_rbp_disp32_rax(nc, -16)
+    nc_emit_mov_rdi_rax(nc)
+    nc_emit_xor_rcx_rcx(nc)
+    nc_emit_cmp_byte_rdi_zero(nc)
+    nc_emit_jz_rel8(nc, 8)
+    nc_emit_inc_rdi(nc)
+    nc_emit_inc_rcx(nc)
+    nc_emit_jmp_rel8(nc, -13)
+    nc_emit_mov_reg_reg(nc, 0, 1)
+    nc_emit_store_rax_rbp_disp32(nc, -32)
+
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_store_rax_rbp_disp32(nc, -40)
+    nc_emit_load_rbp_disp32_rax(nc, -24)
+    nc_emit_load_rbp_disp32_rbx(nc, -32)
+    nc_emit_add_rax_rbx(nc)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xc0)
+    nc_emit_byte(nc, 0x01)
+    nc_emit_mov_rcx_rax(nc)
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_add_reg_reg(nc, 0, 1)
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
+
+    nc_emit_byte(nc, 0xfc)
+    nc_emit_load_rbp_disp32_rax(nc, -24)
+    nc_emit_mov_reg_reg(nc, 1, 0)
+    nc_emit_load_rbp_disp32_rax(nc, -8)
+    nc_emit_mov_reg_reg(nc, 6, 0)
+    nc_emit_load_rbp_disp32_rax(nc, -40)
+    nc_emit_mov_rdi_rax(nc)
+    nc_emit_byte(nc, 0xf3)
+    nc_emit_byte(nc, 0xa4)
+
+    nc_emit_load_rbp_disp32_rax(nc, -32)
+    nc_emit_mov_reg_reg(nc, 1, 0)
+    nc_emit_load_rbp_disp32_rax(nc, -16)
+    nc_emit_mov_reg_reg(nc, 6, 0)
+    nc_emit_byte(nc, 0xf3)
+    nc_emit_byte(nc, 0xa4)
+
+    nc_emit_byte(nc, 0xc6)
+    nc_emit_byte(nc, 0x07)
+    nc_emit_byte(nc, 0x00)
+    nc_emit_load_rbp_disp32_rax(nc, -40)
+    nc_emit_mov_rsp_rbp(nc)
+    nc_emit_pop_rbp(nc)
+    nc_emit_ret(nc)
 }
 
 // ============================================================================
@@ -3981,6 +4185,10 @@ fn native_v2_reloc_is_rip_disp_patch(nc: &NativeCompiler, patch_offset: i64) -> 
         || (op == (0x89 as i8) && modrm == (0x05 as i8))
 }
 
+fn native_v2_effective_rodata_len_ref(nc: &NativeCompiler) -> i64 {
+    if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
+}
+
 fn apply_relocations_into(nc: &! NativeCompiler, rodata_file_offset: i64, data_file_offset: i64) with Mut, Panic, Div {
     var i = 0
     while i < (*nc).flat_reloc_count && i < 4096 {
@@ -4028,7 +4236,7 @@ pub fn compile_module_streaming_finish_main_into(nc: &! NativeCompiler, main_fn_
     let min_data_len = (*nc).prof_counter_data_base + ((*nc).prof_counter_count * 8)
     let effective_data_len = if (*nc).data.len < min_data_len { min_data_len } else { (*nc).data.len }
     let data_file_offset = if effective_data_len > 0 {
-        align_page(rodata_file_offset + (*nc).rodata.len)
+        align_page(rodata_file_offset + native_v2_effective_rodata_len_ref(nc))
     } else { 0 }
     apply_relocations_into(nc, rodata_file_offset, data_file_offset)
 }
@@ -4116,6 +4324,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
     if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
     if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
+    if name_is_str_char_at(func.name) { return emit_builtin_str_char_at(c) }
     // M5: file I/O builtins
     if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
     if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
@@ -4851,6 +5060,7 @@ fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_str_slice(name) { return 8 }
     if name_is_starts_with(name) { return 9 }
     if name_is_str_concat(name) { return 10 }
+    if name_is_str_char_at(name) { return 20 }
     if name_is_read_file(name) { return 11 }
     if name_is_write_file(name) { return 12 }
     if name_is_file_size(name) { return 13 }
@@ -4872,11 +5082,12 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     }
     if builtin_id == 4 { emit_builtin_get_arg_count_into(nc); return }
     if builtin_id == 5 { emit_builtin_get_arg_into(nc); return }
-    if builtin_id == 6 { (*nc) = emit_builtin_str_len((*nc)); return }
-    if builtin_id == 7 { (*nc) = emit_builtin_str_eq((*nc)); return }
-    if builtin_id == 8 { (*nc) = emit_builtin_str_slice((*nc)); return }
-    if builtin_id == 9 { (*nc) = emit_builtin_starts_with((*nc)); return }
-    if builtin_id == 10 { (*nc) = emit_builtin_str_concat((*nc)); return }
+    if builtin_id == 6 { emit_builtin_str_len_into(nc); return }
+    if builtin_id == 7 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_eq((*nc))); return }
+    if builtin_id == 8 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_slice((*nc))); return }
+    if builtin_id == 9 { native_v2_persist_builtin_emit_into(nc, emit_builtin_starts_with((*nc))); return }
+    if builtin_id == 10 { emit_builtin_str_concat_into(nc); return }
+    if builtin_id == 20 { emit_builtin_str_char_at_into(nc); return }
     if builtin_id == 11 { (*nc) = emit_builtin_read_file((*nc)); return }
     if builtin_id == 12 { (*nc) = emit_builtin_write_file((*nc)); return }
     if builtin_id == 13 { (*nc) = emit_builtin_file_size((*nc)); return }
@@ -4928,6 +5139,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
     if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
     if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
+    if name_is_str_char_at(func.name) { return emit_builtin_str_char_at(c) }
     if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
     if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
     if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
@@ -5687,6 +5899,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     if name_is_str_slice(func.name) { (*nc) = emit_builtin_str_slice((*nc)); return }
     if name_is_starts_with(func.name) { (*nc) = emit_builtin_starts_with((*nc)); return }
     if name_is_str_concat(func.name) { (*nc) = emit_builtin_str_concat((*nc)); return }
+    if name_is_str_char_at(func.name) { (*nc) = emit_builtin_str_char_at((*nc)); return }
     if name_is_read_file(func.name) { (*nc) = emit_builtin_read_file((*nc)); return }
     if name_is_write_file(func.name) { (*nc) = emit_builtin_write_file((*nc)); return }
     if name_is_file_size(func.name) { (*nc) = emit_builtin_file_size((*nc)); return }
@@ -5843,7 +6056,7 @@ pub fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string
     let min_data_len = (*nc).prof_counter_data_base + ((*nc).prof_counter_count * 8)
     let effective_data_len = if (*nc).data.len < min_data_len { min_data_len } else { (*nc).data.len }
     let data_file_offset = if effective_data_len > 0 {
-        align_page(rodata_file_offset + (*nc).rodata.len)
+        align_page(rodata_file_offset + native_v2_effective_rodata_len_ref(nc))
     } else { 0 }
     (*nc).code = apply_relocations((*nc).relocs, (*nc).code, (*nc).fn_offsets, (*nc).fn_count, rodata_file_offset, data_file_offset)
 
@@ -7560,7 +7773,7 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         emit_entry_trampoline_split_into(&! nc, main_idx)
     }
     let patched_rodata_file_offset = align_page(text_file_offset + nc.code.len)
-    let patched_data_file_offset = align_page(patched_rodata_file_offset + nc.rodata.len)
+    let patched_data_file_offset = align_page(patched_rodata_file_offset + native_v2_effective_rodata_len_ref(&nc))
     apply_relocations_into(&! nc, patched_rodata_file_offset, patched_data_file_offset)
     let entry = trampoline_offset(nc)
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)

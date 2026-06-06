@@ -1,0 +1,377 @@
+// self-hosted::compiler::native_v2_codegen_suite_emit
+//
+// Slim native-v2 codegen suite emitter for CI gates. Avoids the bloated
+// compiler/main.sio surface while providing --native-v2-emit-* CLI modes.
+
+use parser::ast::*
+use ir::ir::*
+use native::codegen_x86_linux::*
+
+fn suite_name_str_concat() -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 10 }
+    n.buf[0] = 115 as i8
+    n.buf[1] = 116 as i8
+    n.buf[2] = 114 as i8
+    n.buf[3] = 95 as i8
+    n.buf[4] = 99 as i8
+    n.buf[5] = 111 as i8
+    n.buf[6] = 110 as i8
+    n.buf[7] = 99 as i8
+    n.buf[8] = 97 as i8
+    n.buf[9] = 116 as i8
+    n
+}
+
+fn suite_name_str_len() -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 7 }
+    n.buf[0] = 115 as i8
+    n.buf[1] = 116 as i8
+    n.buf[2] = 114 as i8
+    n.buf[3] = 95 as i8
+    n.buf[4] = 108 as i8
+    n.buf[5] = 101 as i8
+    n.buf[6] = 110 as i8
+    n
+}
+
+fn suite_name_str_char_at() -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 11 }
+    n.buf[0] = 115 as i8
+    n.buf[1] = 116 as i8
+    n.buf[2] = 114 as i8
+    n.buf[3] = 95 as i8
+    n.buf[4] = 99 as i8
+    n.buf[5] = 104 as i8
+    n.buf[6] = 97 as i8
+    n.buf[7] = 114 as i8
+    n.buf[8] = 95 as i8
+    n.buf[9] = 97 as i8
+    n.buf[10] = 116 as i8
+    n
+}
+
+fn suite_make_scalar_module(ret_value: i64) -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109 as i8, 97 as i8, 105 as i8, 110 as i8, 4)
+    func.instrs[0] = ir_load_imm(0, ret_value)
+    func.instrs[1] = ir_return(0)
+    func.instr_count = 2
+    func.reg_count = 1
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
+fn suite_make_call_module() -> IrModule with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+
+    var helper = ir_empty_function()
+    helper.name = ir_name_from_bytes(104 as i8, 101 as i8, 108 as i8, 112 as i8, 4)
+    helper.param_count = 1
+    helper.param_regs[0] = 0
+    helper.reg_count = 3
+    helper.instrs[0] = ir_load_imm(1, 2)
+    helper.instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    helper.instrs[2] = ir_return(2)
+    helper.instr_count = 3
+    module.functions[0] = helper
+
+    var main_fn = ir_empty_function()
+    main_fn.name = ir_name_from_bytes(109 as i8, 97 as i8, 105 as i8, 110 as i8, 4)
+    main_fn.reg_count = 2
+    main_fn.instrs[0] = ir_load_imm(0, 3)
+    main_fn.instrs[1] = ir_call(1, 0, helper.name, Some(Box::new(ir_reg_list_single(0))), 1)
+    main_fn.instrs[2] = ir_return(1)
+    main_fn.instr_count = 3
+    module.functions[1] = main_fn
+
+    module.fn_count = 2
+    module
+}
+
+fn suite_make_multi_call_module() -> IrModule with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+
+    let add_name = ir_name_from_bytes(97 as i8, 100 as i8, 100 as i8, 0 as i8, 3)
+    var add_fn = ir_empty_function()
+    add_fn.name = add_name
+    add_fn.param_count = 2
+    add_fn.param_regs[0] = 0
+    add_fn.param_regs[1] = 1
+    add_fn.reg_count = 3
+    add_fn.instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    add_fn.instrs[1] = ir_return(2)
+    add_fn.instr_count = 2
+    module.functions[0] = add_fn
+
+    let mul_name = ir_name_from_bytes(109 as i8, 117 as i8, 108 as i8, 0 as i8, 3)
+    var mul_fn = ir_empty_function()
+    mul_fn.name = mul_name
+    mul_fn.param_count = 2
+    mul_fn.param_regs[0] = 0
+    mul_fn.param_regs[1] = 1
+    mul_fn.reg_count = 3
+    mul_fn.instrs[0] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    mul_fn.instrs[1] = ir_return(2)
+    mul_fn.instr_count = 2
+    module.functions[1] = mul_fn
+
+    var main_fn = ir_empty_function()
+    main_fn.name = ir_name_from_bytes(109 as i8, 97 as i8, 105 as i8, 110 as i8, 4)
+    main_fn.reg_count = 5
+    main_fn.instrs[0] = ir_load_imm(0, 10)
+    main_fn.instrs[1] = ir_load_imm(1, 32)
+    main_fn.instrs[2] = ir_call(2, 0, add_name, Some(Box::new(ir_reg_list_append(ir_reg_list_single(0), 1))), 2)
+    main_fn.instrs[3] = ir_load_imm(3, 2)
+    main_fn.instrs[4] = ir_call(4, 1, mul_name, Some(Box::new(ir_reg_list_append(ir_reg_list_single(2), 3))), 2)
+    main_fn.instrs[5] = ir_return(4)
+    main_fn.instr_count = 6
+    module.functions[2] = main_fn
+
+    module.fn_count = 3
+    module
+}
+
+fn suite_make_control_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109 as i8, 97 as i8, 105 as i8, 110 as i8, 4)
+    func.reg_count = 3
+    func.label_count = 1
+    func.instrs[0] = ir_load_imm(0, 1)
+    func.instrs[1] = ir_branch_true(0, 0)
+    func.instrs[2] = ir_load_imm(1, 0)
+    func.instrs[3] = ir_return(1)
+    func.instrs[4] = ir_label(0)
+    func.instrs[5] = ir_load_imm(2, 1)
+    func.instrs[6] = ir_return(2)
+    func.instr_count = 7
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
+fn suite_make_arith_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109 as i8, 97 as i8, 105 as i8, 110 as i8, 4)
+    func.reg_count = 5
+    func.instrs[0] = ir_load_imm(0, 100)
+    func.instrs[1] = ir_load_imm(1, 16)
+    func.instrs[2] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    func.instrs[3] = ir_load_imm(3, 2)
+    func.instrs[4] = ir_binop(4, 2, BinaryOp::OpDiv, 3)
+    func.instrs[5] = ir_return(4)
+    func.instr_count = 6
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
+fn suite_make_control_fallthrough_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109 as i8, 97 as i8, 105 as i8, 110 as i8, 4)
+    func.reg_count = 3
+    func.label_count = 1
+    func.instrs[0] = ir_load_imm(0, 0)
+    func.instrs[1] = ir_branch_true(0, 0)
+    func.instrs[2] = ir_load_imm(1, 7)
+    func.instrs[3] = ir_return(1)
+    func.instrs[4] = ir_label(0)
+    func.instrs[5] = ir_load_imm(2, 99)
+    func.instrs[6] = ir_return(2)
+    func.instr_count = 7
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
+fn suite_add_builtin_stub(module: &! IrModule, fn_index: i64, name: Name, param_count: i64) with Mut, Panic, Div {
+    var stub = ir_empty_function()
+    stub.name = name
+    stub.param_count = param_count
+    var pi: i64 = 0
+    while pi < param_count {
+        stub.param_regs[pi as usize] = pi
+        pi = pi + 1
+    }
+    stub.reg_count = param_count
+    stub.instr_count = 0
+    (*module).functions[fn_index as usize] = stub
+}
+
+// main() -> 0 after loading a string literal (rodata smoke)
+fn suite_make_string_load_only_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var main_fn = ir_empty_function()
+    main_fn.name = ir_name_from_bytes(109 as i8, 97 as i8, 105 as i8, 110 as i8, 4)
+    main_fn.reg_count = 2
+    main_fn.instrs[0] = ir_load_string(0, 0, ir_name_from_bytes(104 as i8, 105 as i8, 0 as i8, 0 as i8, 2))
+    main_fn.instrs[1] = ir_load_imm(1, 0)
+    main_fn.instrs[2] = ir_return(1)
+    main_fn.instr_count = 3
+    module.functions[0] = main_fn
+    module.fn_count = 1
+    module
+}
+
+// main() -> str_len("hi") == 2
+fn suite_make_string_len_only_module() -> IrModule with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    let len_name = suite_name_str_len()
+    suite_add_builtin_stub(&! module, 0, len_name, 1)
+
+    var main_fn = ir_empty_function()
+    main_fn.name = ir_name_from_bytes(109 as i8, 97 as i8, 105 as i8, 110 as i8, 4)
+    main_fn.reg_count = 2
+    main_fn.instrs[0] = ir_load_string(0, 0, ir_name_from_bytes(104 as i8, 105 as i8, 0 as i8, 0 as i8, 2))
+    main_fn.instrs[1] = ir_call(1, 0, len_name, Some(Box::new(ir_reg_list_single(0))), 1)
+    main_fn.instrs[2] = ir_return(1)
+    main_fn.instr_count = 3
+    module.functions[1] = main_fn
+    module.fn_count = 2
+    module
+}
+
+// main() -> str_len(str_concat("ab", "cde")) == 5
+fn suite_make_string_concat_len_module() -> IrModule with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    let concat_name = suite_name_str_concat()
+    let len_name = suite_name_str_len()
+    suite_add_builtin_stub(&! module, 0, concat_name, 2)
+    suite_add_builtin_stub(&! module, 1, len_name, 1)
+
+    var main_fn = ir_empty_function()
+    main_fn.name = ir_name_from_bytes(109 as i8, 97 as i8, 105 as i8, 110 as i8, 4)
+    main_fn.reg_count = 4
+    main_fn.instrs[0] = ir_load_string(0, 0, ir_name_from_bytes(97 as i8, 98 as i8, 0 as i8, 0 as i8, 2))
+    main_fn.instrs[1] = ir_load_string(1, 1, ir_name_from_bytes(99 as i8, 100 as i8, 101 as i8, 0 as i8, 3))
+    main_fn.instrs[2] = ir_call(2, 0, concat_name, Some(Box::new(ir_reg_list_append(ir_reg_list_single(0), 1))), 2)
+    main_fn.instrs[3] = ir_call(3, 1, len_name, Some(Box::new(ir_reg_list_single(2))), 1)
+    main_fn.instrs[4] = ir_return(3)
+    main_fn.instr_count = 5
+    module.functions[2] = main_fn
+    module.fn_count = 3
+    module
+}
+
+// main() -> str_char_at(str_concat("ab", "cde"), 3) == 100 ('d')
+fn suite_make_string_concat_char_module() -> IrModule with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    let concat_name = suite_name_str_concat()
+    let char_name = suite_name_str_char_at()
+    suite_add_builtin_stub(&! module, 0, concat_name, 2)
+    suite_add_builtin_stub(&! module, 1, char_name, 2)
+
+    var main_fn = ir_empty_function()
+    main_fn.name = ir_name_from_bytes(109 as i8, 97 as i8, 105 as i8, 110 as i8, 4)
+    main_fn.reg_count = 5
+    main_fn.instrs[0] = ir_load_string(0, 0, ir_name_from_bytes(97 as i8, 98 as i8, 0 as i8, 0 as i8, 2))
+    main_fn.instrs[1] = ir_load_string(1, 1, ir_name_from_bytes(99 as i8, 100 as i8, 101 as i8, 0 as i8, 3))
+    main_fn.instrs[2] = ir_call(2, 0, concat_name, Some(Box::new(ir_reg_list_append(ir_reg_list_single(0), 1))), 2)
+    main_fn.instrs[3] = ir_load_imm(3, 3)
+    main_fn.instrs[4] = ir_call(4, 1, char_name, Some(Box::new(ir_reg_list_append(ir_reg_list_single(2), 3))), 2)
+    main_fn.instrs[5] = ir_return(4)
+    main_fn.instr_count = 6
+    module.functions[2] = main_fn
+    module.fn_count = 3
+    module
+}
+
+fn suite_emit_module_to_file(module: &IrModule, out_path: string, label: string) -> bool with IO, Mut, Panic, Div, Alloc {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let rc = compile_native_v2_preview_to_file(module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=")
+        print(label)
+        print(" rc=")
+        print_int(rc as i64)
+        print("\n")
+        return false
+    }
+    print("native_v2_emit_exit_code: emitted label=")
+    print(label)
+    print(" path=")
+    print(out_path)
+    print("\n")
+    true
+}
+
+fn suite_arg_eq(a: string, b: string) -> bool with Mut, Panic, Div {
+    if str_len(a) != str_len(b) { return false }
+    var i: i64 = 0
+    while i < str_len(a) {
+        if str_char_at(a, i) != str_char_at(b, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn suite_parse_i64(s: string) -> i64 with Mut, Panic, Div {
+    var value: i64 = 0
+    var i: i64 = 0
+    let n = str_len(s)
+    while i < n {
+        let c = str_char_at(s, i)
+        if c < 48 || c > 57 { return 0 - 1 }
+        value = value * 10 + (c - 48)
+        i = i + 1
+    }
+    value
+}
+
+fn suite_dispatch_emit() -> i64 with IO, Mut, Panic, Div, Alloc {
+    if arg_count() < 2 { return 90 }
+    let mode = get_arg(0)
+    let out_path = get_arg(arg_count() - 1)
+
+    if suite_arg_eq(mode, "--native-v2-emit-scalar") {
+        if arg_count() < 3 { return 91 }
+        let ret_value = suite_parse_i64(get_arg(1))
+        let module = suite_make_scalar_module(ret_value)
+        return if suite_emit_module_to_file(&module, out_path, "scalar") { 0 } else { 92 }
+    }
+    if suite_arg_eq(mode, "--native-v2-emit-call") {
+        let module = suite_make_call_module()
+        return if suite_emit_module_to_file(&module, out_path, "call") { 0 } else { 93 }
+    }
+    if suite_arg_eq(mode, "--native-v2-emit-multicall") {
+        let module = suite_make_multi_call_module()
+        return if suite_emit_module_to_file(&module, out_path, "multicall") { 0 } else { 94 }
+    }
+    if suite_arg_eq(mode, "--native-v2-emit-control") {
+        let module = suite_make_control_module()
+        return if suite_emit_module_to_file(&module, out_path, "control") { 0 } else { 95 }
+    }
+    if suite_arg_eq(mode, "--native-v2-emit-arith") {
+        let module = suite_make_arith_module()
+        return if suite_emit_module_to_file(&module, out_path, "arith") { 0 } else { 96 }
+    }
+    if suite_arg_eq(mode, "--native-v2-emit-control-ft") {
+        let module = suite_make_control_fallthrough_module()
+        return if suite_emit_module_to_file(&module, out_path, "control-ft") { 0 } else { 97 }
+    }
+    if suite_arg_eq(mode, "--native-v2-emit-string-load-only") {
+        let module = suite_make_string_load_only_module()
+        return if suite_emit_module_to_file(&module, out_path, "str-load-only") { 0 } else { 96 }
+    }
+    if suite_arg_eq(mode, "--native-v2-emit-string-len-only") {
+        let module = suite_make_string_len_only_module()
+        return if suite_emit_module_to_file(&module, out_path, "str-len-only") { 0 } else { 97 }
+    }
+    if suite_arg_eq(mode, "--native-v2-emit-string-concat-len") {
+        let module = suite_make_string_concat_len_module()
+        return if suite_emit_module_to_file(&module, out_path, "str-concat-len") { 0 } else { 98 }
+    }
+    if suite_arg_eq(mode, "--native-v2-emit-string-concat-char") {
+        let module = suite_make_string_concat_char_module()
+        return if suite_emit_module_to_file(&module, out_path, "str-concat-char") { 0 } else { 99 }
+    }
+    89
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    suite_dispatch_emit()
+}

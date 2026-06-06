@@ -38,14 +38,21 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 BOOTSTRAP_SOUC="${SOUNIO_BOOTSTRAP_SOUC:-./bin/souc}"
+EMIT_SRC="${SOUNIO_NATIVE_V2_SUITE_EMIT_SRC:-self-hosted/compiler/native_v2_codegen_suite_emit.sio}"
 MODULAR_SOUC="${SOUNIO_MODULAR_SOUC:-}"
 
 if [[ -z "$MODULAR_SOUC" ]]; then
-    echo "[gate] building modular compiler from self-hosted/compiler/main.sio (bootstrap=$BOOTSTRAP_SOUC)"
-    MODULAR_SOUC="$WORK/mc.elf"
-    if ! "$BOOTSTRAP_SOUC" self-hosted/compiler/main.sio "$MODULAR_SOUC" > "$WORK/build.log" 2>&1; then
-        echo "[gate] FAIL: could not build modular compiler"
-        tail -5 "$WORK/build.log"
+    echo "[gate] building suite emitter from $EMIT_SRC via lean_single (bootstrap=$BOOTSTRAP_SOUC)"
+    MODULAR_SOUC="$WORK/suite_emit.elf"
+    if ! "$BOOTSTRAP_SOUC" self-hosted/compiler/lean_single.sio "$WORK/lean_single.elf" > "$WORK/lean_build.log" 2>&1; then
+        echo "[gate] FAIL: could not build lean_single bootstrap"
+        tail -5 "$WORK/lean_build.log"
+        exit 2
+    fi
+    chmod +x "$WORK/lean_single.elf"
+    if ! "$WORK/lean_single.elf" "$EMIT_SRC" "$MODULAR_SOUC" > "$WORK/build.log" 2>&1; then
+        echo "[gate] FAIL: could not build suite emitter"
+        tail -10 "$WORK/build.log"
         exit 2
     fi
     chmod +x "$MODULAR_SOUC"
@@ -110,10 +117,14 @@ emit_and_check 1   "control"    --native-v2-emit-control
 emit_and_check 7   "control-ft" --native-v2-emit-control-ft
 emit_and_check 42  "arith"      --native-v2-emit-arith
 
+# String concat witnesses (len + byte index).
+emit_and_check 5   "str_concat_len"  --native-v2-emit-string-concat-len
+emit_and_check 100 "str_concat_char" --native-v2-emit-string-concat-char
+
 if [[ "$FAILED" -ne 0 ]]; then
     echo "[gate] FAIL: one or more native-v2 codegen witnesses regressed"
     exit 5
 fi
 
-echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/multicall/control/control-ft/arith (IR->ELF->exit)"
+echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/multicall/control/control-ft/arith/str-concat (IR->ELF->exit)"
 exit 0
