@@ -1066,6 +1066,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_str_slice((*func).name) { return 8 }
     if name_is_starts_with((*func).name) { return 9 }
     if name_is_str_concat((*func).name) { return 10 }
+    if name_is_str_char_at((*func).name) { return 21 }
     if name_is_read_file((*func).name) { return 11 }
     if name_is_write_file((*func).name) { return 12 }
     if name_is_file_size((*func).name) { return 13 }
@@ -1148,6 +1149,23 @@ fn name_is_str_slice(n: Name) -> bool with Mut, Panic, Div {
     if n.buf[6] != 105 as i8 { return false }     // 'i'
     if n.buf[7] != 99 as i8 { return false }      // 'c'
     if n.buf[8] != 101 as i8 { return false }     // 'e'
+    true
+}
+
+fn name_is_str_char_at(n: Name) -> bool with Mut, Panic, Div {
+    // "str_char_at" = 11 chars
+    if n.len != 11 { return false }
+    if n.buf[0] != 115 as i8 { return false }     // 's'
+    if n.buf[1] != 116 as i8 { return false }     // 't'
+    if n.buf[2] != 114 as i8 { return false }     // 'r'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 99 as i8 { return false }      // 'c'
+    if n.buf[5] != 104 as i8 { return false }     // 'h'
+    if n.buf[6] != 97 as i8 { return false }      // 'a'
+    if n.buf[7] != 114 as i8 { return false }     // 'r'
+    if n.buf[8] != 95 as i8 { return false }      // '_'
+    if n.buf[9] != 97 as i8 { return false }      // 'a'
+    if n.buf[10] != 116 as i8 { return false }    // 't'
     true
 }
 
@@ -3309,6 +3327,16 @@ fn emit_builtin_str_slice_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     (*nc).code = emit_ret((*nc).code)
 }
 
+// str_char_at(s: *u8, i: i64) -> i64
+// Args: rdi = s, rsi = i. Returns the zero-extended byte at s[i].
+// Pure-.code builtin (no rodata, no heap); mutates through (*nc).code like the
+// other _into string builtins to avoid the by-value NativeCompiler SRET-smash.
+fn emit_builtin_str_char_at_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    (*nc).code = emit_add_reg_reg((*nc).code, 7, 6)   // add rdi, rsi
+    (*nc).code = emit_movzx_rax_byte_rdi((*nc).code)  // movzx rax, byte [rdi]
+    (*nc).code = emit_ret((*nc).code)
+}
+
 // str_eq(a: *u8, b: *u8) -> i64 (1 if equal, 0 if not)
 // Byte-by-byte comparison until mismatch or both reach null
 fn emit_builtin_str_eq(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
@@ -3365,6 +3393,41 @@ fn emit_builtin_str_eq(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Di
     c.code = emit_mov_rax_imm(c.code, 1)          // 7
     c.code = emit_ret(c.code)                      // 1
     c
+}
+
+// _into form of str_eq. Emits the same bytes as emit_builtin_str_eq but via the
+// nc_emit_* pointer helpers (no 64KB CodeBuffer by-value round-trips). See the
+// body for the root-cause note on the historical emit SIGSEGV.
+fn emit_builtin_str_eq_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // rdi = a, rsi = b. Byte layout identical to emit_builtin_str_eq, but emitted
+    // entirely via the nc_emit_* POINTER helpers (mutate (*nc).code in place).
+    //
+    // ROOT CAUSE of the historical str_eq emit SIGSEGV (localized by differential
+    // elimination, not the by-value-SRET hypothesis the prior note guessed):
+    // when a str_eq builtin BODY is emitted through the from-IR / by-id path
+    // (native_v2_emit_builtin_by_id_into), the crash reproduces even with a minimal
+    // `mov rax,1; ret` body AND even when str_eq is present-but-uncalled. Bisecting
+    // that minimal body against the two working by-value builtins (str_len_into,
+    // str_char_at_into) leaves exactly one distinguishing helper: emit_mov_rax_imm
+    // -> emit_mov_reg_imm (encode.sio:152). That wrapper is a mixed-source `if/else`
+    // that RETURNS a 64KB CodeBuffer struct-local from each branch (r32 vs r64) —
+    // the "mixed-source-if returns large struct" miscompile class. (Plain by-value
+    // emit_* helpers like emit_mov_reg_reg, used by str_len_into, are single-source
+    // and DO NOT crash — so it is the if/else struct-return, not by-value per se.)
+    // Emitting str_eq via nc_emit_* (in-place, no struct return) sidesteps it.
+    // Witnessed clean by --native-v2-emit-streq / -streq1 / -streqnocall.
+    nc_emit_movzx_rax_byte_rdi(nc)   // 4: movzx rax, byte [rdi]
+    nc_emit_cmp_al_mem_rsi(nc)       // 2: cmp al, [rsi]  (3a 06)
+    nc_emit_jnz_rel8(nc, 12)         // 2: jne not_equal  (target +12 -> 20)
+    nc_emit_test_al_al(nc)           // 2: test al, al
+    nc_emit_jz_rel8(nc, 12)          // 2: jz equal       (target +12 -> 24)
+    nc_emit_inc_rdi(nc)              // 3: inc rdi
+    nc_emit_inc_rsi(nc)              // 3: inc rsi
+    nc_emit_jmp_rel8(nc, -20)        // 2: jmp loop        (target -20 -> 0)
+    nc_emit_xor_rax_rax(nc)          // 3: not_equal: xor rax, rax
+    nc_emit_ret(nc)                  // 1: ret
+    nc_emit_mov_rax_imm(nc, 1)       // 7: equal: mov rax, 1
+    nc_emit_ret(nc)                  // 1: ret
 }
 
 // str_slice(s: *u8, start: i64) -> *u8
@@ -5324,6 +5387,7 @@ fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_str_slice(name) { return 8 }
     if name_is_starts_with(name) { return 9 }
     if name_is_str_concat(name) { return 10 }
+    if name_is_str_char_at(name) { return 21 }
     if name_is_read_file(name) { return 11 }
     if name_is_write_file(name) { return 12 }
     if name_is_file_size(name) { return 13 }
@@ -5347,11 +5411,12 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 5 { emit_builtin_get_arg_into(nc); return }
     if builtin_id == 20 { emit_builtin_println_str_into(nc); return }
     if builtin_id == 6 { emit_builtin_str_len_into(nc); return }
-    // NOTE: str_eq (7) / starts_with (9) kept on the by-value path. Their _into variants
-    // SIGSEGV the compiler specifically when the string-literal quote fix is in effect
-    // (2-string-arg interaction, not yet root-caused). Pre-existing by-value SRET crash
-    // stands until that is understood — do not ship a *new* crash.
-    if builtin_id == 7 { (*nc) = emit_builtin_str_eq((*nc)); return }
+    if builtin_id == 21 { emit_builtin_str_char_at_into(nc); return }
+    // str_eq (7) routes to the nc_emit_* _into form. The historical emit SIGSEGV
+    // was emit_mov_reg_imm's if/else 64KB-CodeBuffer struct-return (see
+    // emit_builtin_str_eq_into for the full root-cause note); the in-place form
+    // avoids it. starts_with (9) stays by-value; convert it the same way if needed.
+    if builtin_id == 7 { emit_builtin_str_eq_into(nc); return }
     if builtin_id == 8 { emit_builtin_str_slice_into(nc); return }
     if builtin_id == 9 { (*nc) = emit_builtin_starts_with((*nc)); return }
     if builtin_id == 10 { (*nc) = emit_builtin_str_concat((*nc)); return }

@@ -116,10 +116,24 @@ emit_and_check 42  "arith"      --native-v2-emit-arith
 emit_and_check 31  "call5"      --native-v2-emit-call5
 emit_and_check 63  "call6"      --native-v2-emit-call6
 
+# String builtins: IrLoadString (rodata) + a string-builtin call.
+#   strlen    -> exit 5    str_len("hello")           (1-string-arg builtin + 1 rodata)
+#   strcharat -> exit 101  str_char_at("hello",1)='e' (newly wired builtin id 21)
+#   streq     -> exit 1    str_eq("ab","ab")=1        (2-string-arg + 2 rodata)
+#
+# The `streq` shape used to SIGSEGV the EMITTER (souc exit 139, no ELF). Root cause:
+# emitting the str_eq builtin body via the from-IR/by-id path went through
+# emit_mov_reg_imm (encode.sio:152), whose if/else returns a 64KB CodeBuffer
+# struct-local per branch (mixed-source-if large-struct-return miscompile). Fixed by
+# emitting str_eq via the nc_emit_* in-place helpers (emit_builtin_str_eq_into).
+emit_and_check 5   "strlen"     --native-v2-emit-strlen
+emit_and_check 101 "strcharat"  --native-v2-emit-strcharat
+emit_and_check 1   "streq"      --native-v2-emit-streq
+
 if [[ "$FAILED" -ne 0 ]]; then
     echo "[gate] FAIL: one or more native-v2 codegen witnesses regressed"
     exit 5
 fi
 
-echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/fnptr/multicall/control/control-ft/arith/call5/call6 (IR->ELF->exit)"
+echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/fnptr/multicall/control/control-ft/arith/call5/call6/strlen/strcharat/streq (IR->ELF->exit)"
 exit 0
