@@ -2412,7 +2412,7 @@ impl Lowerer {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst = pair_dst.1
-        lo = lo.emit(ir_alloc(dst, 0))
+        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(256)))
 
         let contest_pair = lo.emit_i64_const(contest_id)
         lo = contest_pair.0
@@ -2489,7 +2489,7 @@ impl Lowerer {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst = pair_dst.1
-        lo = lo.emit(ir_alloc(dst, 0))
+        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(256)))
 
         let model_pair = lo.emit_name_string(info.model_name)
         lo = model_pair.0
@@ -2522,7 +2522,7 @@ impl Lowerer {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst = pair_dst.1
-        lo = lo.emit(ir_alloc(dst, 0))
+        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(256)))
 
         let count_pair = lo.emit_i64_const(info.count)
         lo = count_pair.0
@@ -2585,7 +2585,7 @@ impl Lowerer {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst = pair_dst.1
-        lo = lo.emit(ir_alloc(dst, 0))
+        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(256)))
 
         let policy_name_pair = lo.emit_name_string(lo.epistemic_deferral_policy_name(info.deferral_policy_id))
         lo = policy_name_pair.0
@@ -3028,12 +3028,29 @@ impl Lowerer {
         if n.len == 1 && first_byte >= 48 && first_byte <= 57 {
             return first_byte - 48
         }
-        // Fallback: hash-based (will be replaced when we track types)
+        // Type-FREE bucketed full-name hash (no struct type needed at the read site;
+        // the receiver type is NOT recoverable in the lowerer — Expr carries no
+        // resolved ty, the Lowerer tracks no var types). Computed IDENTICALLY here at
+        // BOTH construction (lower_struct_fields_ref) and every read (ExprFieldAccess,
+        // assign-target, enum payload bind), so construction and read ALWAYS agree —
+        // no real-index/hash mixing hazard, no false-reject, never report_error.
+        // Slot = (byte[0] % 64) + 64 * (fullNameHash % 4) -> range 0..255. Two fields
+        // sharing byte[0] now separate via distinct full-name hashes (fixes {ax,ay}).
+        // Residual collision (same byte[0] AND same fullHash%4) is rarer than the old
+        // byte[0]-only scheme and recorded as documented known-bad; never WORSE than base.
         if n.len <= 0 {
-            0
-        } else {
-            (n.buf[0] as i64) % 64
+            return 0
         }
+        let bucket = (n.buf[0] as i64) % 64
+        var h: i64 = 0
+        var bi: i64 = 0
+        while bi < n.len {
+            h = (h * 31 + (n.buf[bi as usize] as i64)) % 256
+            bi = bi + 1
+        }
+        if h < 0 { h = h + 256 }
+        let sub = h % 4
+        bucket + 64 * sub
     }
 
     // Phase 3.1: Register enum variant discriminants
@@ -3083,9 +3100,9 @@ impl Lowerer {
     }
 
     // Reserved aggregate slot holding a tagged enum's discriminant. Field hashes
-    // occupy 0..63 (field_idx_from_name_simple % 64), so slot 64 is collision-free.
+    // occupy 0..255 (field_idx_from_name_simple bucketed), so slot 256 is collision-free.
     fn enum_tag_slot(self) -> i64 with Mut, Panic, Div {
-        64
+        256
     }
 
     // Lookup an enum variant entry by FULL path (enum_name + variant_name). Keying on
@@ -4931,15 +4948,10 @@ impl Lowerer {
                     lo = pair.0
                     let vreg = pair.1
                     // Store at the SAME slot field_idx_from_name_simple (the read side,
-                    // ExprFieldAccess) computes, so construction and access agree: numeric
-                    // .N -> N; named -> first-byte hash % 64. (Declaration-order indices
-                    // mismatched the hash-based read -> every field read 0.)
-                    var fslot = field_idx
-                    if fname.len == 1 && (fname.buf[0] as i64) >= 48 && (fname.buf[0] as i64) <= 57 {
-                        fslot = (fname.buf[0] as i64) - 48
-                    } else if fname.len > 0 {
-                        fslot = (fname.buf[0] as i64) % 64
-                    }
+                    // ExprFieldAccess) computes, so construction and access agree. Single
+                    // shared slot function (no inline copy to drift): numeric .N -> N;
+                    // named -> bucketed full-name hash 0..255.
+                    let fslot = lo.field_idx_from_name_simple(fname)
                     lo = lo.emit(ir_field_set(base_reg, fslot, vreg, fname))
                     current = &(*list).tail
                     field_idx = field_idx + 1
@@ -5506,7 +5518,7 @@ impl Lowerer {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst = pair_dst.1
-        lo = lo.emit(ir_alloc(dst, 0))
+        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(256)))
 
         let policy_name_pair = lo.emit_name_string(lo.epistemic_acquisition_policy_name(info.acquisition_policy_id))
         lo = policy_name_pair.0
@@ -5587,7 +5599,7 @@ impl Lowerer {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst = pair_dst.1
-        lo = lo.emit(ir_alloc(dst, 0))
+        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(256)))
 
         let policy_name_pair = lo.emit_name_string(lo.epistemic_recourse_policy_name(info.recourse_policy_id))
         lo = policy_name_pair.0
@@ -5789,7 +5801,7 @@ impl Lowerer {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst = pair_dst.1
-        lo = lo.emit(ir_alloc(dst, 0))
+        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(256)))
 
         let candidate_name_pair = lo.emit_name_string(cand.name)
         lo = candidate_name_pair.0
@@ -5900,7 +5912,7 @@ impl Lowerer {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst = pair_dst.1
-        lo = lo.emit(ir_alloc(dst, 0))
+        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(256)))
 
         let policy_name_pair = lo.emit_name_string(lo.epistemic_transition_policy_name(info.transition_policy_id))
         lo = policy_name_pair.0
@@ -6102,15 +6114,15 @@ impl Lowerer {
                 let disc = self.lookup_variant_discriminant_path(e.path)
                 if disc >= 0 {
                     // Tagged enum unit variant (e.g. Event::A where Event also has a
-                    // payload variant): box uniformly into a 65-slot aggregate with the
-                    // discriminant at slot 64, so unit and payload variants of the same
+                    // payload variant): box uniformly into a 257-slot aggregate with the
+                    // discriminant at slot 256, so unit and payload variants of the same
                     // enum share ONE representation (a pointer). The match dispatch always
-                    // loads the tag from slot 64. All-unit enums keep the bare-int path.
+                    // loads the tag from slot 256. All-unit enums keep the bare-int path.
                     if self.path_is_tagged_variant(e.path) {
                         let pair_d = self.fresh_reg()
                         var lo = pair_d.0
                         let dst = pair_d.1
-                        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(65)))
+                        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(257)))
                         let pair_t = lo.fresh_reg()
                         lo = pair_t.0
                         let tag_reg = pair_t.1
@@ -6850,12 +6862,12 @@ impl Lowerer {
                 print("\n")
             }
             // Tagged enum STRUCT-variant construction (e.g. Event::C{x,y}): box into a
-            // 65-slot aggregate (0..63 payload field slots + slot 64 = discriminant tag).
-            // The match dispatch loads the tag from slot 64 to identify the variant.
-            // Plain structs and single-segment paths keep the untouched 64-slot layout.
+            // 257-slot aggregate (0..255 payload field slots + slot 256 = discriminant
+            // tag). The match dispatch loads the tag from slot 256 to identify the variant.
+            // Plain structs and single-segment paths keep the 256-slot payload layout.
             if lo.path_is_tagged_variant(e.path) {
                 let disc = lo.lookup_variant_discriminant_path(e.path)
-                lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(65)))
+                lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(257)))
                 lo = lo.lower_struct_fields_ref(dst, &e.fields, 0)
                 let pair_tag = lo.fresh_reg()
                 lo = pair_tag.0
@@ -6864,10 +6876,10 @@ impl Lowerer {
                 lo = lo.emit(ir_field_set(dst, lo.enum_tag_slot(), tag_reg, ir_empty_name()))
                 return (lo, dst)
             }
-            // 64 payload slots: field slots are first-byte-hash % 64 (see
+            // 256 payload slots: field slots are the bucketed full-name hash 0..255 (see
             // lower_struct_fields_ref / field_idx_from_name_simple), so reserve the
             // full range instead of 0 (which gave the object no payload -> reads 0).
-            lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(64)))
+            lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(256)))
             lo = lo.lower_struct_fields_ref(dst, &e.fields, 0)
             (lo, dst)
         } else if e.kind == ExprKind::ExprArrayLit {

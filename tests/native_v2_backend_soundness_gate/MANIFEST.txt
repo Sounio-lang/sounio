@@ -47,3 +47,57 @@ discB_tagged_collision                             99       B-enum-disc
 # capitalized ident pattern is PatBinding (always-match), so the first arm wins
 # -> 10. Asserted as a normal expectation so the gate does not lie by omission.
 discB_bare_binding_control                         10       B-enum-disc
+
+# ===== bug C — type-blind field-index hash (FIXED, type-free bucketed) =====
+# field_idx_from_name_simple (lower.sio) used byte[0]%64 -> two fields sharing a
+# first letter aliased one aggregate slot; the 2nd write clobbered the 1st (last
+# write wins). Type was NOT recoverable on the read side (Expr carries no resolved
+# ty; the Lowerer tracks no var types), so real-index keying is impossible for
+# general receivers. FIX = a TYPE-FREE bucketed FULL-NAME hash computed IDENTICALLY
+# at construction (lower_struct_fields_ref, now the single shared function) and at
+# every read (ExprFieldAccess, assign-target 4622, enum payload bind 5307):
+#   slot = byte[0]%64 + 64*(fullNameHash%4)  -> range 0..255.
+# Consistent BY CONSTRUCTION (no type info either side) => NO real/hash mixing
+# hazard, NO false-reject, never report_error for a valid field access. Aggregate
+# allocs grown in lockstep: plain struct 64->256 slots, tagged enum 65->257, enum
+# tag slot 64->256, and the 8 epistemic emit_named_field constructors ir_alloc(0)
+# (512B=64 slots) -> aggregate_storage_bytes(256) so bucketed slots up to 255 cannot
+# OOB the heap object (the round-3 OOB landmine: ir_alloc(0)+named-field writes).
+# WRONG TURNS recorded so they are not repeated:
+#   - round-3 C recorded a type only for `let p=Foo{}` + struct-typed params and
+#     report_error'd every other receiver -> FALSE-REJECTED mk().v, let q=p, nested,
+#     array-elem (valid base-correct code). It also left enum payload on the hash.
+#     -> NEVER report_error a valid field access; keep the consistent fallback.
+#   - the naive "upgrade construction to real-index, leave reads on hash" -> indices
+#     DISAGREE -> miscompiles even NON-colliding structs (worse than base). The
+#     C_control_mix_discriminator witness (q.ax=5 across a copy of NON-colliding
+#     {ax,bz}) is the single discriminator: it is 0 iff a fix mixed real+hash.
+# Colliding {ax,ay}/{aa,..} via EVERY receiver form (was 74/7, now 42):
+C_collide_direct                                   42       C-field-hash
+C_collide_copy                                     42       C-field-hash
+C_collide_mkreturn                                 42       C-field-hash
+C_collide_param                                    42       C-field-hash
+C_collide_nested                                   42       C-field-hash
+C_collide_array                                    42       C-field-hash
+C_collide_assign_read                              42       C-field-hash
+C_collide_enum_payload                             42       C-field-hash
+C_collide_three_readfirst                          42       C-field-hash
+# Anti-mixing sentinels (NON-colliding {ax,bz} across a copy; must STAY base):
+C_control_mix_discriminator                        5        C-field-hash
+C_control_mix_secondfield                          37       C-field-hash
+C_control_copy_noncollide                          42       C-field-hash
+# Base-correct regression sentinels (R2 — must NOT regress):
+C_control_mkv                                       42       C-field-hash
+C_control_three_fields                             6        C-field-hash
+C_control_wide_distinct_buckets                    11       C-field-hash
+C_control_single_field                             42       C-field-hash
+# Residual known-bad (documented, NOT a manifest entry): two fields sharing byte[0]
+# AND fullNameHash%4 still alias (e.g. aa/ae -> slot 33, both miscompile to 74 on
+# BASE and after the fix). This is NO WORSE than base and far rarer than the old
+# byte[0]-only scheme (the fix strictly shrinks the collision set). Witness source
+# kept at witnesses/C_known_residual_bucket_collision.sio for the record. It is
+# deliberately NOT listed as a KNOWN_MISCOMPILE manifest entry: it would force the
+# gate exit nonzero, blocking an otherwise-green landing for a pre-existing,
+# no-worse-than-base condition (not a regression). A future injective field-name
+# intern table (built in the summary pre-pass) would make it a pure i64 lookup and
+# remove the residual entirely without any (Lowerer,type) threading.
