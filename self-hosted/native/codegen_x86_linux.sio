@@ -1898,6 +1898,18 @@ fn nc_emit_cmp_al_mem_rsi(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x06)
 }
 
+fn nc_emit_cmp_byte_rdi_zero(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // 80 3f 00 — cmp byte [rdi], 0
+    nc_emit_byte(nc, 0x80)
+    nc_emit_byte(nc, 0x3f)
+    nc_emit_byte(nc, 0x00)
+}
+
+fn nc_emit_mov_rsi_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // mov rsi, rax  (48 89 c6)
+    nc_emit_mov_reg_reg(nc, 6, 0)
+}
+
 fn nc_emit_test_al_al(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x84)
     nc_emit_byte(nc, 0xc0)
@@ -3573,6 +3585,93 @@ fn emit_builtin_str_concat(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     c.code = emit_pop_rbp(c.code)                         // 1
     c.code = emit_ret(c.code)                              // 1
     c
+}
+
+// _into form of str_concat (id 10). Same machine code as emit_builtin_str_concat
+// but emitted via the nc_emit_* in-place helpers, so it does NOT hit the
+// emit_mov_reg_imm if/else 64KB-CodeBuffer struct-return emit crash (see
+// emit_builtin_str_eq_into). Allocates len_a+len_b+1 bytes from
+// RuntimeContext.heap_cursor (initialized by the entry trampoline), copies a then
+// b, null-terminates, returns the new string pointer in rax.
+fn emit_builtin_str_concat_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // rdi = a, rsi = b
+
+    // Phase 0: prologue + save inputs
+    nc_emit_push_rbp(nc)
+    nc_emit_mov_rbp_rsp(nc)
+    nc_emit_sub_rsp_imm32(nc, 48)
+    nc_emit_mov_reg_reg(nc, 0, 7)            // mov rax, rdi
+    nc_emit_store_rax_rbp_disp32(nc, -8)     // save a at [rbp-8]
+    nc_emit_mov_reg_reg(nc, 0, 6)            // mov rax, rsi
+    nc_emit_store_rax_rbp_disp32(nc, -16)    // save b at [rbp-16]
+
+    // Phase 1: len_a (rdi = a)
+    nc_emit_xor_rcx_rcx(nc)
+    nc_emit_cmp_byte_rdi_zero(nc)            // loop_a: cmp byte [rdi], 0
+    nc_emit_jz_rel8(nc, 8)                   // jz done_a (skip inc rdi+inc rcx+jmp = 3+3+2)
+    nc_emit_inc_rdi(nc)
+    nc_emit_inc_rcx(nc)
+    nc_emit_jmp_rel8(nc, -13)                // jmp loop_a
+    nc_emit_mov_reg_reg(nc, 0, 1)            // done_a: mov rax, rcx
+    nc_emit_store_rax_rbp_disp32(nc, -24)    // save len_a at [rbp-24]
+
+    // Phase 2: len_b
+    nc_emit_load_rbp_disp32_rax(nc, -16)     // rax = b
+    nc_emit_mov_rdi_rax(nc)                   // rdi = b
+    nc_emit_xor_rcx_rcx(nc)
+    nc_emit_cmp_byte_rdi_zero(nc)            // loop_b
+    nc_emit_jz_rel8(nc, 8)
+    nc_emit_inc_rdi(nc)
+    nc_emit_inc_rcx(nc)
+    nc_emit_jmp_rel8(nc, -13)
+    // done_b: rcx = len_b
+
+    // Phase 3: allocate total = len_a + len_b + 1 from heap_cursor
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_store_rax_rbp_disp32(nc, -40)    // save result ptr at [rbp-40]
+    nc_emit_load_rbp_disp32_rax(nc, -24)     // rax = len_a
+    nc_emit_add_reg_reg(nc, 0, 1)            // rax += rcx (len_b)
+    nc_emit_byte(nc, 0x48)                   // add rax, 1
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xc0)
+    nc_emit_byte(nc, 0x01)
+    nc_emit_mov_rcx_rax(nc)                   // rcx = total
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_add_reg_reg(nc, 0, 1)            // rax = heap_cursor + total
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
+
+    // Phase 4: copy a -> result
+    nc_emit_load_rbp_disp32_rax(nc, -8)      // rax = a
+    nc_emit_mov_rdi_rax(nc)                   // rdi = a (src)
+    nc_emit_load_rbp_disp32_rax(nc, -40)     // rax = result
+    nc_emit_mov_rsi_rax(nc)                   // rsi = result (dst)
+    nc_emit_movzx_rax_byte_rdi(nc)           // copy_loop_a: movzx rax, byte [rdi]
+    nc_emit_test_al_al(nc)
+    nc_emit_jz_rel8(nc, 13)                   // jz done_copy_a (skip 3+2+3+3+2)
+    nc_emit_mov_reg_reg(nc, 2, 0)            // mov rdx, rax
+    nc_emit_mov_byte_mem_rsi_dl(nc)          // mov [rsi], dl
+    nc_emit_inc_rdi(nc)
+    nc_emit_inc_rsi(nc)
+    nc_emit_jmp_rel8(nc, -21)                // jmp copy_loop_a
+
+    // Phase 5: copy b -> result (rsi continues)
+    nc_emit_load_rbp_disp32_rax(nc, -16)     // rax = b
+    nc_emit_mov_rdi_rax(nc)                   // rdi = b (src)
+    nc_emit_movzx_rax_byte_rdi(nc)           // copy_loop_b
+    nc_emit_test_al_al(nc)
+    nc_emit_jz_rel8(nc, 13)
+    nc_emit_mov_reg_reg(nc, 2, 0)
+    nc_emit_mov_byte_mem_rsi_dl(nc)
+    nc_emit_inc_rdi(nc)
+    nc_emit_inc_rsi(nc)
+    nc_emit_jmp_rel8(nc, -21)
+
+    // Phase 6: null-terminate + return result ptr
+    nc_emit_mov_byte_mem_rsi_imm8(nc, 0)     // mov byte [rsi], 0
+    nc_emit_load_rbp_disp32_rax(nc, -40)     // rax = result ptr
+    nc_emit_mov_rsp_rbp(nc)
+    nc_emit_pop_rbp(nc)
+    nc_emit_ret(nc)
 }
 
 // ============================================================================
@@ -5419,7 +5518,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 7 { emit_builtin_str_eq_into(nc); return }
     if builtin_id == 8 { emit_builtin_str_slice_into(nc); return }
     if builtin_id == 9 { (*nc) = emit_builtin_starts_with((*nc)); return }
-    if builtin_id == 10 { (*nc) = emit_builtin_str_concat((*nc)); return }
+    if builtin_id == 10 { emit_builtin_str_concat_into(nc); return }
     if builtin_id == 11 { (*nc) = emit_builtin_read_file((*nc)); return }
     if builtin_id == 12 { (*nc) = emit_builtin_write_file((*nc)); return }
     if builtin_id == 13 { (*nc) = emit_builtin_file_size((*nc)); return }
