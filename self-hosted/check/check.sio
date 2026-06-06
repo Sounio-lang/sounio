@@ -3589,6 +3589,38 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             ty_named(struct_name)
         }
     } else {
+        // ---- Enum struct-variant constructor: Enum::Variant { field: val, ... } ----
+        // If the path has two segments (seg_count > 1), the head segment is the enum name
+        // and the tail segment is the variant name. Look up the enum, then look up the
+        // variant's fields and type-check each field initializer.
+        if e.path.seg_count > 1 {
+            let enum_name = checker_copy_string_list_to_name(e.path.segments)
+            let enum_idx = (*c).enums.find(enum_name)
+            if enum_idx >= 0 {
+                let ei = (*c).enums.get(enum_idx)
+                let variant_name = checker_copy_string_list_tail_to_name(e.path.segments)
+                let variant_fields_opt = variant_info_list_find_fields(ei.variants, variant_name)
+                // Type-check each field initializer against the variant's declared field type.
+                var cur_ef = e.fields
+                var done_ef = false
+                while !done_ef {
+                    match cur_ef {
+                        Some(list) => {
+                            let fty = field_info_list_find(variant_fields_opt, (*list).head.name)
+                            let init_ty = checker_check_expr_inplace(c, (*list).head.value)
+                            if !types_compatible(init_ty, fty) {
+                                checker_report_mismatch_inplace(c, (*list).head.value.span, 16, fty, init_ty)
+                            }
+                            cur_ef = (*list).tail
+                        }
+                        None => {
+                            done_ef = true
+                        }
+                    }
+                }
+                return ty_named(enum_name)
+            }
+        }
         // ---- Unknown struct (check_struct_lit else-branch 16626-16630 →
         // check_struct_field_inits_no_type 16740). Report E015, then check every field-init
         // expr via the *mut spine (for side effects / nested-expr diagnostics), no type compat. ----
@@ -18579,6 +18611,34 @@ impl Checker {
                 (c, ty_named(struct_name))
             }
         } else {
+            // Enum struct-variant constructor: Enum::Variant { field: val, ... }
+            if e.path.seg_count > 1 {
+                let enum_name = checker_copy_string_list_to_name(e.path.segments)
+                let enum_idx = self.enums.find(enum_name)
+                if enum_idx >= 0 {
+                    let ei = self.enums.get(enum_idx)
+                    let variant_name = checker_copy_string_list_tail_to_name(e.path.segments)
+                    let variant_fields_opt = variant_info_list_find_fields(ei.variants, variant_name)
+                    var c = self
+                    var cur_bv = e.fields
+                    while true {
+                        match cur_bv {
+                            Some(list) => {
+                                let fty = field_info_list_find(variant_fields_opt, (*list).head.name)
+                                let pair = c.check_expr((*list).head.value)
+                                c = pair.0
+                                let init_ty = pair.1
+                                if !types_compatible(init_ty, fty) {
+                                    c = c.report_mismatch((*list).head.value.span, 16, fty, init_ty)
+                                }
+                                cur_bv = (*list).tail
+                            }
+                            None => break
+                        }
+                    }
+                    return (c, ty_named(enum_name))
+                }
+            }
             var c = self.report_error_at(e.span, 15, 0, 0, 0)
             c = c.check_struct_field_inits_no_type(e.fields)
             (c, ty_error())
