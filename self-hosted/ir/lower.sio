@@ -4964,9 +4964,59 @@ impl Lowerer {
         self.lower_array_elems_ref(base_reg, &elems, idx)
     }
 
+    // True if the arm list contains at least one arm with a guard clause.
+    fn match_arms_have_guard(self, arms: &Option<Box<MatchArmList>>) -> bool with Mut, Panic, Div, Alloc, IO {
+        var current = arms
+        while true {
+            match *current {
+                Some(list) => {
+                    if self.arm_has_guard(&(*list).head) { return true }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        false
+    }
+
+    // True if the arm list contains an UNGUARDED catch-all (wildcard or plain
+    // binding) — an arm that is guaranteed to fire. Such an arm makes the match
+    // total regardless of any guards on earlier arms.
+    fn match_arms_have_uncond_catchall(self, arms: &Option<Box<MatchArmList>>) -> bool with Mut, Panic, Div, Alloc, IO {
+        var current = arms
+        while true {
+            match *current {
+                Some(list) => {
+                    let arm = &(*list).head
+                    if !self.arm_has_guard(arm) {
+                        let pk = arm.pattern.kind
+                        if pk == PatternKind::PatWildcard { return true }
+                        if pk == PatternKind::PatBinding { return true }
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        false
+    }
+
     // Lower match arms as a linear if/else chain
     fn lower_match_arms_ref(self, scrut: i64, res: i64, l_end: i64, arms: &Option<Box<MatchArmList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        // SOUNDNESS (guards): when any arm carries a guard, the arm can fail its test
+        // at runtime and fall through. The frontend checker treats a guarded
+        // binding/wildcard arm as irrefutable for exhaustiveness, so a match like
+        // `match x { n if n>10 => .. }` type-checks but has NO arm guaranteed to fire.
+        // Lowering that as a linear chain would leave `res` uninitialized on the
+        // all-guards-false path -> silent wrong value. We can only PROVE totality here
+        // when there is an UNGUARDED catch-all arm. If guards are present without one,
+        // REJECT (report_error blocks ELF emission) rather than miscompile.
+        if lo.match_arms_have_guard(arms) {
+            if !lo.match_arms_have_uncond_catchall(arms) {
+                lo = lo.report_error()
+            }
+        }
         var current = arms
         while true {
             match *current {
@@ -4984,26 +5034,82 @@ impl Lowerer {
         self.lower_match_arms_ref(scrut, res, l_end, &arms)
     }
 
+    // Emit a guard test for an arm that already matched its pattern. The pattern's
+    // bindings must already be bound (so the guard can read them). If the arm has a
+    // guard, evaluate it and branch to l_skip when it is false (0), so control falls
+    // through to the next arm. No guard => no-op.
+    fn emit_guard_test(self, l_skip: i64, arm: &MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match arm.guard {
+            Some(g) => {
+                var lo = self
+                let pair_g = lo.lower_expr_ref(&(*g))
+                lo = pair_g.0
+                let g_reg = pair_g.1
+                lo = lo.emit(ir_branch_false(g_reg, l_skip))
+                lo
+            }
+            _ => self
+        }
+    }
+
+    fn arm_has_guard(self, arm: &MatchArm) -> bool {
+        match arm.guard {
+            Some(_g) => true,
+            _ => false
+        }
+    }
+
     // Lower a single match arm: test pattern, conditionally execute body
     fn lower_match_arm_ref(self, scrut: i64, res: i64, l_end: i64, arm: &MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         let pat = &arm.pattern
         if pat.kind == PatternKind::PatWildcard {
-            // Wildcard always matches — evaluate body unconditionally
-            let pair = self.lower_expr_ref(&arm.body)
-            var lo = pair.0
-            let body_reg = pair.1
-            lo = lo.emit(ir_copy(res, body_reg))
-            lo = lo.emit(ir_jump(l_end))
-            lo
+            if self.arm_has_guard(arm) {
+                // Wildcard with guard: pattern always matches, but the guard may fail.
+                let pair_l = self.fresh_label()
+                var lo = pair_l.0
+                let l_skip = pair_l.1
+                lo = lo.emit_guard_test(l_skip, arm)
+                let pair = lo.lower_expr_ref(&arm.body)
+                lo = pair.0
+                let body_reg = pair.1
+                lo = lo.emit(ir_copy(res, body_reg))
+                lo = lo.emit(ir_jump(l_end))
+                lo = lo.emit(ir_label(l_skip))
+                lo
+            } else {
+                // Wildcard always matches — evaluate body unconditionally
+                let pair = self.lower_expr_ref(&arm.body)
+                var lo = pair.0
+                let body_reg = pair.1
+                lo = lo.emit(ir_copy(res, body_reg))
+                lo = lo.emit(ir_jump(l_end))
+                lo
+            }
         } else if pat.kind == PatternKind::PatBinding {
-            // Binding always matches — bind scrutinee to name, evaluate body
-            var lo = self.bind_local(pat.name, scrut, pat.is_mut)
-            let pair = lo.lower_expr_ref(&arm.body)
-            lo = pair.0
-            let body_reg = pair.1
-            lo = lo.emit(ir_copy(res, body_reg))
-            lo = lo.emit(ir_jump(l_end))
-            lo
+            if self.arm_has_guard(arm) {
+                // Binding with guard: bind scrutinee, then test the guard.
+                let pair_l = self.fresh_label()
+                var lo = pair_l.0
+                let l_skip = pair_l.1
+                lo = lo.bind_local(pat.name, scrut, pat.is_mut)
+                lo = lo.emit_guard_test(l_skip, arm)
+                let pair = lo.lower_expr_ref(&arm.body)
+                lo = pair.0
+                let body_reg = pair.1
+                lo = lo.emit(ir_copy(res, body_reg))
+                lo = lo.emit(ir_jump(l_end))
+                lo = lo.emit(ir_label(l_skip))
+                lo
+            } else {
+                // Binding always matches — bind scrutinee to name, evaluate body
+                var lo = self.bind_local(pat.name, scrut, pat.is_mut)
+                let pair = lo.lower_expr_ref(&arm.body)
+                lo = pair.0
+                let body_reg = pair.1
+                lo = lo.emit(ir_copy(res, body_reg))
+                lo = lo.emit(ir_jump(l_end))
+                lo
+            }
         } else if pat.kind == PatternKind::PatEnum {
             let variant_name = ir_path_last_name(pat.path)
             // Check for Some/None (Option<Box<T>> as nullable pointer)
@@ -5018,6 +5124,7 @@ impl Lowerer {
                 lo = lo.emit(ir_branch_false(scrut, l_skip))
                 // Bind the inner pattern (first sub_pattern) to scrutinee value
                 lo = lo.bind_match_sub_pattern(scrut, pat.sub_patterns)
+                lo = lo.emit_guard_test(l_skip, arm)
                 let pair_b = lo.lower_expr_ref(&arm.body)
                 lo = pair_b.0
                 let body_reg = pair_b.1
@@ -5032,6 +5139,7 @@ impl Lowerer {
                 let l_skip = pair_l.1
                 // Branch if scrutinee != 0 (skip this arm)
                 lo = lo.emit(ir_branch_true(scrut, l_skip))
+                lo = lo.emit_guard_test(l_skip, arm)
                 let pair_b = lo.lower_expr_ref(&arm.body)
                 lo = pair_b.0
                 let body_reg = pair_b.1
@@ -5065,6 +5173,7 @@ impl Lowerer {
                     let cmp_reg = pair_cmp.1
                     lo = lo.emit(ir_binop(cmp_reg, tag_val, BinaryOp::OpEq, disc_reg))
                     lo = lo.emit(ir_branch_false(cmp_reg, l_skip))
+                    lo = lo.emit_guard_test(l_skip, arm)
                     let pair_b = lo.lower_expr_ref(&arm.body)
                     lo = pair_b.0
                     let body_reg = pair_b.1
@@ -5091,6 +5200,7 @@ impl Lowerer {
             let cmp_reg = pair_cmp.1
             lo = lo.emit(ir_binop(cmp_reg, scrut, BinaryOp::OpEq, lit_reg))
             lo = lo.emit(ir_branch_false(cmp_reg, l_skip))
+            lo = lo.emit_guard_test(l_skip, arm)
             let pair_b = lo.lower_expr_ref(&arm.body)
             lo = pair_b.0
             let body_reg = pair_b.1
@@ -5103,6 +5213,7 @@ impl Lowerer {
             var lo = pair_l.0
             let l_skip = pair_l.1
             lo = lo.emit(ir_branch_false(scrut, l_skip))
+            lo = lo.emit_guard_test(l_skip, arm)
             let pair_b = lo.lower_expr_ref(&arm.body)
             lo = pair_b.0
             let body_reg = pair_b.1
@@ -5115,6 +5226,7 @@ impl Lowerer {
             var lo = pair_l.0
             let l_skip = pair_l.1
             lo = lo.emit(ir_branch_true(scrut, l_skip))
+            lo = lo.emit_guard_test(l_skip, arm)
             let pair_b = lo.lower_expr_ref(&arm.body)
             lo = pair_b.0
             let body_reg = pair_b.1
@@ -5144,6 +5256,7 @@ impl Lowerer {
             lo = lo.emit(ir_binop(cmp_reg, tg, BinaryOp::OpEq, disc_reg))
             lo = lo.emit(ir_branch_false(cmp_reg, l_skip))
             lo = lo.bind_struct_variant_fields(scrut, pat.pat_fields)
+            lo = lo.emit_guard_test(l_skip, arm)
             let pair_b = lo.lower_expr_ref(&arm.body)
             lo = pair_b.0
             let body_reg = pair_b.1
