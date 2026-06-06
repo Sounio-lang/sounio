@@ -6459,6 +6459,52 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             if (*func).instrs[i as usize].dst >= 0 {
                 nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
             }
+        } else if instr_op == IrOpcode::IrCallSret {
+            // Real SysV >16B by-value struct return, caller side.
+            //   rdi <- sret destination handle (src1)   [HIDDEN, ABI-injected]
+            //   rsi <- explicit arg 0 (field_idx)       [shifted down by the hidden dest]
+            //   rdx <- explicit arg 1 (field_idx+1) ...
+            // The callee writes its result through the rdi destination and returns the
+            // destination handle in rax. argc here counts EXPLICIT args only.
+            let argc = (*func).instrs[i as usize].arg_count
+            if argc > 5 {
+                return false
+            }
+            let dest_reg = (*func).instrs[i as usize].src1
+            if dest_reg < 0 { return false }
+            let first_arg = (*func).instrs[i as usize].field_idx
+            // Hidden sret destination -> rdi (SysV reg 7).
+            nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(dest_reg))
+            // Explicit args shifted one slot: arg k -> SysV reg index k+1.
+            if argc > 0 {
+                if first_arg < 0 { return false }
+                nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(first_arg))
+            }
+            if argc > 1 {
+                nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(first_arg + 1))
+            }
+            if argc > 2 {
+                nc_emit_load_rbp_disp32_reg(nc, 1, ir_slot_offset(first_arg + 2))
+            }
+            if argc > 3 {
+                nc_emit_load_rbp_disp32_reg(nc, 8, ir_slot_offset(first_arg + 3))
+            }
+            if argc > 4 {
+                nc_emit_load_rbp_disp32_reg(nc, 9, ir_slot_offset(first_arg + 4))
+            }
+            let call_pos = (*nc).code.len
+            nc_emit_call_rel32_placeholder(nc)
+            nc_add_call_reloc(nc, call_pos + 1, (*func).instrs[i as usize].fn_id)
+            if (*func).instrs[i as usize].dst >= 0 {
+                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            }
+        } else if instr_op == IrOpcode::IrReturnSret {
+            // Callee side: the hidden destination handle (already written through by the
+            // body's IrFieldSets) is returned in rax, then the standard epilogue.
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_emit_mov_rsp_rbp(nc)
+            nc_emit_pop_rbp(nc)
+            nc_emit_ret(nc)
         } else if instr_op == IrOpcode::IrNop {
             // no-op
         } else if instr_op == IrOpcode::IrWideAdd {
@@ -6996,11 +7042,23 @@ fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction) with Mut, Panic,
 }
 
 fn spill_ir_params_ref_mut(nc: &! NativeCompiler, func: &IrFunction) with Mut, Panic, Div {
+    // SysV sret callee: rdi holds the HIDDEN destination pointer, so it is spilled to
+    // the dedicated sret_dest_reg vreg and the explicit params shift one SysV slot down
+    // (explicit param i arrives in param_reg(i+1): rsi/rdx/...). A plain (non-sret) call
+    // to this same callee would instead deliver explicit param 0 in rdi -> WRONG, which
+    // is exactly the discriminator that makes this a real sret rather than a renamed call.
+    let sret_shift = if (*func).is_sret == 1 { 1 } else { 0 }
+    if sret_shift == 1 {
+        let dest_reg = (*func).sret_dest_reg
+        if dest_reg >= 0 {
+            (*nc).code = emit_store_reg_rbp_disp32((*nc).code, ir_slot_offset(dest_reg), param_reg(0))
+        }
+    }
     var i = 0
-    while i < (*func).param_count && i < 6 {
+    while i < (*func).param_count && (i + sret_shift) < 6 {
         let vreg = (*func).param_regs[i as usize]
         if vreg >= 0 {
-            let preg = param_reg(i)
+            let preg = param_reg(i + sret_shift)
             let offset = ir_slot_offset(vreg)
             (*nc).code = emit_store_reg_rbp_disp32((*nc).code, offset, preg)
         }

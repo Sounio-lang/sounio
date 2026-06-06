@@ -2866,6 +2866,28 @@ fn run_native_v2_emit_strlen(args: ArgList, flag_index: i64) with IO, Mut, Panic
     print("\n")
 }
 
+// Sret witness: --native-v2-emit-sret <out_path>. make(7) writes a >16B Big through the
+// ABI-injected rdi destination; main reads b.f1 = 7*2 = 14 -> exit 14. Proves the real
+// SysV sret path (hidden dest in rdi + explicit param shifted to rsi) in the CORE emitter.
+fn run_native_v2_emit_sret(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("native-v2-emit-sret: usage --native-v2-emit-sret <out_path>")
+    }
+    let out_path = arg_list_get(args, flag_index + 1)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_sret_module()
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=sret rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=sret path=")
+    print(out_path)
+    print("\n")
+}
+
 // str_char_at witness: --native-v2-emit-strcharat <out_path>. str_char_at("hello",1)='e'=101.
 fn run_native_v2_emit_strcharat(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     if flag_index + 1 >= args.len {
@@ -2882,6 +2904,28 @@ fn run_native_v2_emit_strcharat(args: ArgList, flag_index: i64) with IO, Mut, Pa
         return
     }
     print("native_v2_emit_exit_code: emitted label=strcharat path=")
+    print(out_path)
+    print("\n")
+}
+
+// Negative sret discriminator: --native-v2-emit-sret-plaincall <out_path>. The sret
+// callee invoked via a plain IrCall reads v from the wrong register -> f1 != 14, proving
+// the sret param-shift is real and not a renamed IrCall.
+fn run_native_v2_emit_sret_plaincall(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("native-v2-emit-sret-plaincall: usage --native-v2-emit-sret-plaincall <out_path>")
+    }
+    let out_path = arg_list_get(args, flag_index + 1)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_sret_plaincall_module()
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=sret-plaincall rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=sret-plaincall path=")
     print(out_path)
     print("\n")
 }
@@ -6921,6 +6965,111 @@ fn compiler_main_make_native_v2_alloc_field_module() -> IrModule with Mut, Panic
     func.instr_count = 5
     module.functions[0] = func
     module.fn_count = 1
+    module
+}
+
+// Real SysV >16-byte by-value struct return (sret) witness.
+//   struct Big { f0: i64, f1: i64, f2: i64 }   (3 fields = 24B > 16B)
+//   fn make(v) -> Big { Big { f0: v, f1: v*2, f2: v+1 } }   (sret callee)
+//   fn main() -> { let b = make(7); return b.f1 }            = 7*2 = 14
+//
+// The discriminator vs a plain handle-passthrough call: the destination handle is
+// HIDDEN and ABI-injected in rdi, so the one explicit param `v` shifts to rsi. If the
+// callee wrongly read `v` from rdi it would get the dest handle id, not 7, and f1 would
+// not be 14. Reading f1 (= v*2 = 14, distinct/non-coincidental) therefore proves BOTH
+// write-through-the-rdi-destination AND the SysV param shift. The struct is genuinely
+// >16B (3 i64 fields), matching the by-value >16B sret framing.
+fn compiler_main_make_native_v2_sret_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+
+    // fn make(v) -> Big  (is_sret: HIDDEN dest in rdi -> vreg0; explicit v shifts to rsi -> vreg1)
+    // make has ONE explicit param. The destination is NOT a declared param: it is the
+    // ABI-injected rdi sret pointer, spilled to sret_dest_reg by the is_sret prologue.
+    // Called via a plain IrCall this very fn would read v from rdi (the dest handle) and
+    // mis-fill the struct; only the sret convention puts v in rsi -> f1 = 14. That gap is
+    // the discriminator (see compiler_main_make_native_v2_sret_plaincall_module below).
+    var make_fn = ir_empty_function()
+    make_fn.name = ir_name_from_bytes(109, 97, 107, 101, 4)  // "make"
+    make_fn.is_sret = 1
+    make_fn.sret_dest_reg = 0    // hidden destination handle (from rdi)
+    make_fn.param_count = 1
+    make_fn.param_regs[0] = 1    // v (explicit) shifts to rsi
+    make_fn.reg_count = 6
+    // f0 = v
+    make_fn.instrs[0] = ir_field_set(0, 0, 1, ir_name_from_bytes(102, 48, 0, 0, 2))
+    // f1 = v * 2
+    make_fn.instrs[1] = ir_load_imm(2, 2)
+    make_fn.instrs[2] = ir_binop(3, 1, BinaryOp::OpMul, 2)
+    make_fn.instrs[3] = ir_field_set(0, 1, 3, ir_name_from_bytes(102, 49, 0, 0, 2))
+    // f2 = v + 1
+    make_fn.instrs[4] = ir_load_imm(4, 1)
+    make_fn.instrs[5] = ir_binop(5, 1, BinaryOp::OpAdd, 4)
+    make_fn.instrs[6] = ir_field_set(0, 2, 5, ir_name_from_bytes(102, 50, 0, 0, 2))
+    // return the destination handle in rax (callee-side sret epilogue)
+    make_fn.instrs[7] = ir_return_sret(0)
+    make_fn.instr_count = 8
+    module.functions[0] = make_fn
+
+    // fn main() -> { dest = alloc Big; b = make_sret(dest, 7); return b.f1 }
+    var main_fn = ir_empty_function()
+    main_fn.name = ir_name_from_bytes(109, 97, 105, 110, 4)  // "main"
+    main_fn.reg_count = 4
+    main_fn.instrs[0] = ir_alloc(0, 64)        // dest: 64B payload (8 i64 slots) >16B
+    main_fn.instrs[1] = ir_load_imm(1, 7)      // v = 7
+    // sret call: dest (vreg0) -> rdi, v (vreg1) -> rsi; result handle -> vreg2
+    main_fn.instrs[2] = ir_call_sret(2, 0, make_fn.name, 0, 1, 1)
+    main_fn.instrs[3] = ir_field_get(3, 2, 1, ir_name_from_bytes(102, 49, 0, 0, 2))  // b.f1
+    main_fn.instrs[4] = ir_return(3)
+    main_fn.instr_count = 5
+    module.functions[1] = main_fn
+
+    module.fn_count = 2
+    module
+}
+
+// NEGATIVE discriminator for the sret path. Identical sret-callee `make` (is_sret=1,
+// reads its explicit param v from rsi because rdi is the hidden dest), but main invokes
+// it with a PLAIN IrCall passing a single arg v -> rdi. Under the sret prologue the
+// callee reads v from rsi (NOT rdi), so it sees a garbage/zero v and f1 != 14. This
+// proves the param shift is genuinely consumed: if IrCallSret were a renamed IrCall the
+// two modules would agree, but they DON'T. The gate asserts this exit is NOT 14.
+fn compiler_main_make_native_v2_sret_plaincall_module() -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+
+    // Same sret-callee as compiler_main_make_native_v2_sret_module's make.
+    var make_fn = ir_empty_function()
+    make_fn.name = ir_name_from_bytes(109, 97, 107, 101, 4)  // "make"
+    make_fn.is_sret = 1
+    make_fn.sret_dest_reg = 0
+    make_fn.param_count = 1
+    make_fn.param_regs[0] = 1    // v expected in rsi (sret shift)
+    make_fn.reg_count = 6
+    make_fn.instrs[0] = ir_field_set(0, 0, 1, ir_name_from_bytes(102, 48, 0, 0, 2))
+    make_fn.instrs[1] = ir_load_imm(2, 2)
+    make_fn.instrs[2] = ir_binop(3, 1, BinaryOp::OpMul, 2)
+    make_fn.instrs[3] = ir_field_set(0, 1, 3, ir_name_from_bytes(102, 49, 0, 0, 2))
+    make_fn.instrs[4] = ir_load_imm(4, 1)
+    make_fn.instrs[5] = ir_binop(5, 1, BinaryOp::OpAdd, 4)
+    make_fn.instrs[6] = ir_field_set(0, 2, 5, ir_name_from_bytes(102, 50, 0, 0, 2))
+    make_fn.instrs[7] = ir_return_sret(0)
+    make_fn.instr_count = 8
+    module.functions[0] = make_fn
+
+    // main: PLAIN call passing the dest handle as the ONLY arg (-> rdi). The callee,
+    // expecting v in rsi, reads a different register -> f1 != 14.
+    var main_fn = ir_empty_function()
+    main_fn.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    main_fn.reg_count = 4
+    main_fn.instrs[0] = ir_alloc(0, 64)
+    main_fn.instrs[1] = ir_load_imm(1, 7)
+    // Plain IrCall, dest as single arg (rdi); v NOT placed in rsi.
+    main_fn.instrs[2] = ir_call(2, 0, make_fn.name, Some(Box::new(ir_reg_list_single(0))), 1)
+    main_fn.instrs[3] = ir_field_get(3, 0, 1, ir_name_from_bytes(102, 49, 0, 0, 2))  // dest.f1
+    main_fn.instrs[4] = ir_return(3)
+    main_fn.instr_count = 5
+    module.functions[1] = main_fn
+
+    module.fn_count = 2
     module
 }
 
@@ -27287,6 +27436,12 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-emit-control-ft" {
             run_native_v2_emit_control_ft(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-sret" {
+            run_native_v2_emit_sret(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-sret-plaincall" {
+            run_native_v2_emit_sret_plaincall(args, arg_idx)
             return
         } else if mode == "--native-v2-emit-call5" {
             run_native_v2_emit_call5(args, arg_idx)
