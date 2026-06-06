@@ -416,18 +416,23 @@ impl Parser {
             p = pair3.0
             effects_opt = Some(Box::new(pair3.1))
         }
-        // Body
-        let pair4 = p.parse_block()
-        p = pair4.0
-        let body = pair4.1
-        if parser_peek(p) == TokenKind::With {
-            let pair5 = p.parse_effect_list()
-            p = pair5.0
-            match effects_opt {
-                None => {
-                    effects_opt = Some(Box::new(pair5.1))
-                },
-                Some(_) => {},
+        // Body. Trait declarations use signature-only methods: `fn sig();`.
+        var body = Block { stmts: None, span: p.current_span() }
+        if parser_peek(p) == TokenKind::Semi {
+            p = p.advance()
+        } else {
+            let pair4 = p.parse_block()
+            p = pair4.0
+            body = pair4.1
+            if parser_peek(p) == TokenKind::With {
+                let pair5 = p.parse_effect_list()
+                p = pair5.0
+                match effects_opt {
+                    None => {
+                        effects_opt = Some(Box::new(pair5.1))
+                    },
+                    Some(_) => {},
+                }
             }
         }
 
@@ -691,9 +696,27 @@ impl Parser {
             let v_name = p.current_name()
             p = p.expect_ident()
 
-            // Parse optional variant fields: Variant { field1: Type1, field2: Type2 }
+            // Parse optional variant fields:
+            //   Variant(T1, T2)
+            //   Variant { field1: Type1, field2: Type2 }
             var v_fields: Option<Box<FieldDefList>> = None
-            if parser_peek(p) == TokenKind::LBrace {
+            if parser_peek(p) == TokenKind::LParen {
+                p = p.advance()  // skip (
+                var rev_fields: Option<Box<FieldDefList>> = None
+                while parser_peek(p) != TokenKind::RParen && parser_peek(p) != TokenKind::Eof {
+                    let ty_pair = p.parse_type()
+                    p = ty_pair.0
+                    let f_ty = ty_pair.1
+                    let f_span = p.span_from(v_start)
+                    let fdef = FieldDef { name: empty_name(), ty: f_ty, span: f_span }
+                    rev_fields = Some(Box::new(FieldDefList { head: fdef, tail: rev_fields }))
+                    if parser_peek(p) == TokenKind::Comma {
+                        p = p.advance()
+                    }
+                }
+                p = p.expect(TokenKind::RParen)
+                v_fields = reverse_field_def_list_opt(rev_fields)
+            } else if parser_peek(p) == TokenKind::LBrace {
                 p = p.advance()  // skip {
                 var rev_fields: Option<Box<FieldDefList>> = None
                 while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
@@ -777,7 +800,17 @@ impl Parser {
 
         let pair = p.parse_type()
         p = pair.0
-        let target_ty = pair.1
+        var target_ty = pair.1
+        var trait_name = empty_name()
+
+        if parser_peek(p) == TokenKind::For {
+            trait_name = extract_impl_name(target_ty)
+            p = p.advance()
+            let target_pair = p.parse_type()
+            p = target_pair.0
+            target_ty = target_pair.1
+        }
+
         p = p.expect(TokenKind::LBrace)
 
         // Build methods in reverse for O(1) cons, reverse once at the end.
@@ -811,7 +844,7 @@ impl Parser {
         // Extract name from target type path
         let impl_name = extract_impl_name(target_ty)
 
-        let idef = ImplDef { target_type: target_ty, methods: methods_opt, span: span, trait_name: empty_name() }
+        let idef = ImplDef { target_type: target_ty, methods: methods_opt, span: span, trait_name: trait_name }
 
         (p, Item {
             kind: ItemKind::ItemImpl,
