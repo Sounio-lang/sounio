@@ -95,6 +95,38 @@ emit_and_check() {
     echo "[gate] PASS[$label]: exit $got (expected $expected)"
 }
 
+# emit_and_check_not <forbidden_exit> <label> <emit-args...>
+# Negative discriminator: emits an ELF, runs it, and asserts the exit is NOT the
+# forbidden value (used to prove sret is not a renamed plain call).
+emit_and_check_not() {
+    local forbidden="$1"; shift
+    local label="$1"; shift
+    local elf="$WORK/witness_${label}_$$.elf"
+    rm -f "$elf"
+    "$MODULAR_SOUC" "$@" "$elf" > "$WORK/emit_${label}.log" 2>&1 || true
+    if [[ ! -f "$elf" ]]; then
+        echo "[gate] FAIL[$label]: compiler did not emit $elf"
+        FAILED=1
+        return
+    fi
+    local magic
+    magic="$(head -c4 "$elf" | od -An -tx1 | tr -d ' ')"
+    if [[ "$magic" != "7f454c46" ]]; then
+        echo "[gate] FAIL[$label]: emitted file is not ELF (magic=$magic)"
+        FAILED=1
+        return
+    fi
+    chmod +x "$elf"
+    "$elf"
+    local got=$?
+    if [[ "$got" -eq "$forbidden" ]]; then
+        echo "[gate] FAIL[$label]: exit code=$got equals forbidden $forbidden (sret param-shift NOT exercised)"
+        FAILED=1
+        return
+    fi
+    echo "[gate] PASS[$label]: exit $got (not $forbidden, as required)"
+}
+
 echo "[gate] native-v2 codegen suite (IR -> ELF -> exit); front-half/G1 out of scope"
 
 # Scalar value fidelity across the byte range.
@@ -111,6 +143,15 @@ emit_and_check 1   "control"    --native-v2-emit-control
 emit_and_check 7   "control-ft" --native-v2-emit-control-ft
 emit_and_check 42  "arith"      --native-v2-emit-arith
 
+# Real SysV >16B by-value struct return (sret): the destination is HIDDEN (ABI-injected
+# in rdi); the one explicit param v is therefore shifted to rsi. Callee writes f1=v*2
+# through the rdi destination and returns it; main reads b.f1 = 7*2 = 14.
+emit_and_check 14  "sret"       --native-v2-emit-sret
+# NEGATIVE discriminator: the SAME sret-callee invoked via a PLAIN IrCall reads v from
+# the wrong register (rsi is not loaded) -> f1 != 14. Proves the sret param-shift is
+# genuinely consumed and IrCallSret/is_sret are NOT a renamed plain call.
+emit_and_check_not 14 "sret-plaincall" --native-v2-emit-sret-plaincall
+
 # 5- and 6-argument calls: exercises r8/r9 (SysV arg regs 4 and 5).
 # Exit codes are power-of-two sums so any dropped/misencoded arg yields a distinct wrong value.
 emit_and_check 31  "call5"      --native-v2-emit-call5
@@ -121,5 +162,5 @@ if [[ "$FAILED" -ne 0 ]]; then
     exit 5
 fi
 
-echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/fnptr/multicall/control/control-ft/arith/call5/call6 (IR->ELF->exit)"
+echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/fnptr/multicall/control/control-ft/arith/sret/call5/call6 (IR->ELF->exit)"
 exit 0
