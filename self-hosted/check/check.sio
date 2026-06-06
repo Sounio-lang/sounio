@@ -2887,6 +2887,20 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         }
         return final_result
     }
+    // Soundness gate for the tagged-enum representation: a payload-carrying enum's values
+    // are boxed aggregate pointers in the native-v2 backend, so == / != would compare
+    // pointer identity rather than discriminants (silent miscompile). REJECT == / != when
+    // either operand is a payload-carrying enum. All-unit enums keep the bare-int model
+    // (enum_has_payload == false) and their == / != still type-check — the self-hosted
+    // compiler relies on all-unit IrOpcode/ExprKind comparisons.
+    if e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe {
+        let l_payload_enum = left_ty.kind == TypeKind::TyNamed && (*c).enums.enum_has_payload(left_ty.name)
+        let r_payload_enum = right_ty.kind == TypeKind::TyNamed && (*c).enums.enum_has_payload(right_ty.name)
+        if l_payload_enum || r_payload_enum {
+            checker_report_error_at_inplace(c, e.span, 4, 0, 0, 0)
+            return ty_bool()
+        }
+    }
     var result = binary_result_type(e.bin_op, left_ty, right_ty)
     if result.kind == TypeKind::TyError && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
         let l_enum = left_ty.kind == TypeKind::TyNamed && (*c).enums.find(left_ty.name) >= 0
@@ -4541,6 +4555,14 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             if src_is_epistemic && !tgt_is_epistemic {
                 checker_report_error_at_inplace(c, e.span, 171, 0, 0, 0)
             }
+            // Soundness gate for the tagged-enum representation: a payload-carrying enum's
+            // value is a boxed aggregate pointer, so `e as i64` would yield the pointer, not
+            // the discriminant (silent miscompile). REJECT the cast. All-unit enums keep the
+            // bare-int model and `E::A as i64` still yields the discriminant.
+            let src_is_payload_enum = src_ty.kind == TypeKind::TyNamed && (*c).enums.enum_has_payload(src_ty.name)
+            if src_is_payload_enum && is_numeric_type(target_ty) {
+                checker_report_error_at_inplace(c, e.span, 4, 0, 0, 0)
+            }
             if src_ty.unit_id >= 0 && target_ty.unit_id >= 0 {
                 let src_dim = (*c).units.get_dim(src_ty.unit_id)
                 let tgt_dim = (*c).units.get_dim(target_ty.unit_id)
@@ -4596,7 +4618,7 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
     } else if pat.kind == PatternKind::PatEnum {
         checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
     } else if pat.kind == PatternKind::PatStruct {
-        checker_bind_struct_pat_fields_inplace(c, pat.pat_fields, scrut_ty)
+        checker_bind_struct_pat_fields_inplace(c, pat, scrut_ty)
     } else if pat.kind == PatternKind::PatTuple {
         checker_bind_tuple_pattern_list_idx_inplace(c, pat.sub_patterns, scrut_ty, 0)
     } else if pat.kind == PatternKind::PatOr {
@@ -4637,8 +4659,26 @@ fn checker_bind_tuple_pattern_list_idx_inplace(c: *mut Checker, opt: Option<Box<
     }
 }
 
-fn checker_bind_struct_pat_fields_inplace(c: *mut Checker, opt: Option<Box<PatFieldList> >, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
-    var cur = opt
+fn checker_bind_struct_pat_fields_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    // For an enum struct-variant pattern (E::C{...}, path seg_count >= 2) resolve the
+    // SPECIFIC variant's declared fields so a pattern field name can be validated against
+    // it. This is the soundness check for the native-v2 binding code: bind_struct_variant_fields
+    // reads each payload field by the pattern field NAME's hashed slot, so a name that the
+    // variant does not declare would read an unwritten slot (silent miscompile, exit 0).
+    // REJECT such patterns here. (variant_fields_find_field, used below for plain field-type
+    // resolution, searches ALL variants and would mask a wrong name shared with a sibling.)
+    var variant_fields: Option<Box<FieldInfoList>> = None
+    var have_variant_fields = false
+    if scrut_ty.kind == TypeKind::TyNamed && pat.path.seg_count >= 2 {
+        let enum_idx0 = (*c).enums.find(scrut_ty.name)
+        if enum_idx0 >= 0 {
+            let ei0 = (*c).enums.get(enum_idx0)
+            let variant_name = checker_copy_string_list_tail_to_name(pat.path.segments)
+            variant_fields = variant_info_list_find_fields(ei0.variants, variant_name)
+            have_variant_fields = true
+        }
+    }
+    var cur = pat.pat_fields
     while true {
         match cur {
             Some(list) => {
@@ -4651,8 +4691,16 @@ fn checker_bind_struct_pat_fields_inplace(c: *mut Checker, opt: Option<Box<PatFi
                     } else {
                         let enum_idx = (*c).enums.find(scrut_ty.name)
                         if enum_idx >= 0 {
-                            let ei = (*c).enums.get(enum_idx)
-                            field_ty = variant_fields_find_field(ei.variants, (*list).head.name)
+                            if have_variant_fields {
+                                // Validate the field name against THIS variant's declared fields.
+                                if !field_info_list_has(variant_fields, (*list).head.name) {
+                                    checker_report_error_at_inplace(c, pat.span, 4, 0, 0, 0)
+                                }
+                                field_ty = field_info_list_find(variant_fields, (*list).head.name)
+                            } else {
+                                let ei = (*c).enums.get(enum_idx)
+                                field_ty = variant_fields_find_field(ei.variants, (*list).head.name)
+                            }
                         }
                     }
                 }

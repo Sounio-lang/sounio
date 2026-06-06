@@ -498,12 +498,45 @@ fn lowerer_preseed_fn_signature_mut(
     (*(*lo).module).functions[fn_id as usize].label_count = 0
 }
 
+// Classify a variant's payload from its FieldDefList:
+//   None                       -> 0 (unit variant)
+//   Some, first field named    -> 1 (struct variant)
+//   Some, first field empty    -> 2 (tuple variant; parser stores empty names, items.sio:711)
+fn variant_payload_kind(fields: &Option<Box<FieldDefList>>) -> i64 with Mut, Panic, Div {
+    match *fields {
+        None => 0,
+        Some(list) => {
+            if (*list).head.name.len > 0 { 1 } else { 2 }
+        }
+    }
+}
+
+// Pre-pass: does ANY variant of this enum carry a payload (struct or tuple)?
+// Used to stamp enum_tagged uniformly across every variant so that unit and
+// payload variants of the SAME enum share one representation.
+fn variant_list_any_payload(variants: &Option<Box<VariantDefList>>) -> i64 with Mut, Panic, Div {
+    var current = variants
+    while true {
+        match *current {
+            Some(list) => {
+                if variant_payload_kind(&(*list).head.fields) > 0 {
+                    return 1
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+    0
+}
+
 fn lowerer_register_enum_variants_mut(
     lo: &! Lowerer,
     enum_name: Name,
     variants: &Option<Box<VariantDefList>>,
     next_disc: i64
 ) with Mut, Panic, Div, Alloc {
+    let tagged = variant_list_any_payload(variants)
     var current = variants
     var disc = next_disc
     while true {
@@ -515,6 +548,8 @@ fn lowerer_register_enum_variants_mut(
                         enum_name: enum_name,
                         variant_name: (*list).head.name,
                         discriminant: disc,
+                        payload_kind: variant_payload_kind(&(*list).head.fields),
+                        enum_tagged: tagged,
                     }
                     (*(*lo).enum_variants).count = idx + 1
                 } else {
@@ -938,11 +973,12 @@ fn ir_fast_summary_seed_empty(epistemic: IrEpistemicSection) -> IrFastSummaryOwn
     }
 }
 
-fn ir_fast_summary_register_enum_variants_owned(
+fn ir_fast_summary_register_enum_variants_owned_tagged(
     table: EnumVariantTable,
     enum_name: Name,
     variants: Option<Box<VariantDefList>>,
-    next_disc: i64
+    next_disc: i64,
+    tagged: i64
 ) -> EnumVariantTable with Mut, Panic, Div, Alloc {
     match variants {
         Some(list) => {
@@ -953,13 +989,25 @@ fn ir_fast_summary_register_enum_variants_owned(
                     enum_name: enum_name,
                     variant_name: (*list).head.name,
                     discriminant: next_disc,
+                    payload_kind: variant_payload_kind(&(*list).head.fields),
+                    enum_tagged: tagged,
                 }
                 table_value.count = idx + 1
             }
-            ir_fast_summary_register_enum_variants_owned(table_value, enum_name, (*list).tail, next_disc + 1)
+            ir_fast_summary_register_enum_variants_owned_tagged(table_value, enum_name, (*list).tail, next_disc + 1, tagged)
         }
         None => table,
     }
+}
+
+fn ir_fast_summary_register_enum_variants_owned(
+    table: EnumVariantTable,
+    enum_name: Name,
+    variants: Option<Box<VariantDefList>>,
+    next_disc: i64
+) -> EnumVariantTable with Mut, Panic, Div, Alloc {
+    let tagged = variant_list_any_payload(&variants)
+    ir_fast_summary_register_enum_variants_owned_tagged(table, enum_name, variants, next_disc, tagged)
 }
 
 fn ir_fast_summary_register_struct_fields_owned(
@@ -2991,6 +3039,7 @@ impl Lowerer {
     // Phase 3.1: Register enum variant discriminants
     fn register_enum_variants_ref(self, enum_name: Name, variants: &Option<Box<VariantDefList>>, next_disc: i64) -> Lowerer with Mut, Panic, Div, Alloc {
         var lo = self
+        let tagged = variant_list_any_payload(variants)
         var current = variants
         var disc = next_disc
         var table = *lo.enum_variants
@@ -3002,6 +3051,8 @@ impl Lowerer {
                             enum_name: enum_name,
                             variant_name: (*list).head.name,
                             discriminant: disc,
+                            payload_kind: variant_payload_kind(&(*list).head.fields),
+                            enum_tagged: tagged,
                         }
                         table.count = table.count + 1
                     }
@@ -3029,6 +3080,56 @@ impl Lowerer {
             i = i + 1
         }
         -1
+    }
+
+    // Reserved aggregate slot holding a tagged enum's discriminant. Field hashes
+    // occupy 0..63 (field_idx_from_name_simple % 64), so slot 64 is collision-free.
+    fn enum_tag_slot(self) -> i64 with Mut, Panic, Div {
+        64
+    }
+
+    // Lookup an enum variant entry by FULL path (enum_name + variant_name). Keying on
+    // both names avoids a plain-struct named like a variant being misread as tagged.
+    // Returns the entry index, or -1 if not found.
+    fn lookup_variant_entry_by_path(self, enum_name: Name, variant_name: Name) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < (*self.enum_variants).count {
+            if ir_name_eq((*self.enum_variants).entries[i as usize].enum_name, enum_name)
+                && ir_name_eq((*self.enum_variants).entries[i as usize].variant_name, variant_name) {
+                return i
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    // Is this enum-variant path part of a TAGGED enum (any variant has a payload)?
+    // path must have >= 2 segments (EnumName::Variant). Returns false otherwise.
+    fn path_is_tagged_variant(self, path: AstPath) -> bool with Mut, Panic, Div, Alloc {
+        if path.seg_count < 2 {
+            return false
+        }
+        let idx = self.lookup_variant_entry_by_path(ir_path_first_name(path), ir_path_last_name(path))
+        if idx < 0 {
+            return false
+        }
+        (*self.enum_variants).entries[idx as usize].enum_tagged == 1
+    }
+
+    // Is expr `e` a path naming a tagged-enum variant (e.g. a bare unit-variant ref)?
+    fn expr_is_tagged_variant_path(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if e.kind == ExprKind::ExprPath {
+            self.path_is_tagged_variant(e.path)
+        } else {
+            false
+        }
+    }
+
+    fn lower_opt_expr_is_tagged_variant_path(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(b) => self.expr_is_tagged_variant_path(&(*b)),
+            _ => false
+        }
     }
 
     // Phase 3.2: Register struct field layout
@@ -4758,6 +4859,23 @@ impl Lowerer {
         (lo, dst)
     }
 
+    // Is this call's callee an enum-variant PATH (EnumName::Variant)? Such a call is a
+    // tuple-variant constructor, which has no IR lowering and must be rejected (see the
+    // ExprCall site). Keyed on the full path so an ordinary function is never matched.
+    fn callee_opt_is_variant_path(self, callee_opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *callee_opt {
+            Some(c) => {
+                if (*c).kind == ExprKind::ExprPath && (*c).path.seg_count >= 2 {
+                    let idx = self.lookup_variant_entry_by_path(ir_path_first_name((*c).path), ir_path_last_name((*c).path))
+                    idx >= 0
+                } else {
+                    false
+                }
+            }
+            _ => false
+        }
+    }
+
     fn expr_to_callee_name_ref(self, e: &Expr) -> Name with Mut, Panic, Div {
         if e.kind == ExprKind::ExprIdent {
             e.name
@@ -4928,6 +5046,16 @@ impl Lowerer {
                     let pair_l = self.fresh_label()
                     var lo = pair_l.0
                     let l_skip = pair_l.1
+                    // Tagged enum: scrutinee is a pointer; load the discriminant tag from
+                    // slot 64 before comparing. All-unit enums keep scrut as a bare int.
+                    var tag_val = scrut
+                    if lo.path_is_tagged_variant(pat.path) {
+                        let pair_tg = lo.fresh_reg()
+                        lo = pair_tg.0
+                        let tg = pair_tg.1
+                        lo = lo.emit(ir_field_get(tg, scrut, lo.enum_tag_slot(), ir_empty_name()))
+                        tag_val = tg
+                    }
                     let pair_d = lo.fresh_reg()
                     lo = pair_d.0
                     let disc_reg = pair_d.1
@@ -4935,7 +5063,7 @@ impl Lowerer {
                     let pair_cmp = lo.fresh_reg()
                     lo = pair_cmp.0
                     let cmp_reg = pair_cmp.1
-                    lo = lo.emit(ir_binop(cmp_reg, scrut, BinaryOp::OpEq, disc_reg))
+                    lo = lo.emit(ir_binop(cmp_reg, tag_val, BinaryOp::OpEq, disc_reg))
                     lo = lo.emit(ir_branch_false(cmp_reg, l_skip))
                     let pair_b = lo.lower_expr_ref(&arm.body)
                     lo = pair_b.0
@@ -4994,10 +5122,74 @@ impl Lowerer {
             lo = lo.emit(ir_jump(l_end))
             lo = lo.emit(ir_label(l_skip))
             lo
+        } else if pat.kind == PatternKind::PatStruct && self.path_is_tagged_variant(pat.path) {
+            // Tagged enum STRUCT-variant arm (e.g. Event::C{x,y}): load the discriminant
+            // tag from slot 64 of the pointer scrutinee, compare to this variant's disc,
+            // and on match bind each payload field (by hashed slot) before the body.
+            let disc = self.lookup_variant_discriminant(ir_path_last_name(pat.path))
+            let pair_l = self.fresh_label()
+            var lo = pair_l.0
+            let l_skip = pair_l.1
+            let pair_tg = lo.fresh_reg()
+            lo = pair_tg.0
+            let tg = pair_tg.1
+            lo = lo.emit(ir_field_get(tg, scrut, lo.enum_tag_slot(), ir_empty_name()))
+            let pair_d = lo.fresh_reg()
+            lo = pair_d.0
+            let disc_reg = pair_d.1
+            lo = lo.emit(ir_load_imm(disc_reg, disc))
+            let pair_cmp = lo.fresh_reg()
+            lo = pair_cmp.0
+            let cmp_reg = pair_cmp.1
+            lo = lo.emit(ir_binop(cmp_reg, tg, BinaryOp::OpEq, disc_reg))
+            lo = lo.emit(ir_branch_false(cmp_reg, l_skip))
+            lo = lo.bind_struct_variant_fields(scrut, pat.pat_fields)
+            let pair_b = lo.lower_expr_ref(&arm.body)
+            lo = pair_b.0
+            let body_reg = pair_b.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
+            lo
         } else {
             // Unsupported pattern — skip
             self
         }
+    }
+
+    // Bind tagged struct-variant payload fields: for each PatField, load the field value
+    // from its hashed aggregate slot (same hashing as construction) and bind the field
+    // pattern's binding name to it. Field hashes live in 0..63; slot 64 is the tag.
+    fn bind_struct_variant_fields(self, scrut: i64, pat_fields: &Option<Box<PatFieldList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var current = pat_fields
+        while true {
+            match *current {
+                Some(node) => {
+                    let pf = (*node).head
+                    // The arm fires on tag-match alone, so a field sub-pattern that
+                    // imposes a CONDITION (literal/bool/string) or further DESTRUCTURES
+                    // (nested struct/enum/tuple) cannot be honored here -> would silently
+                    // miscompile. Only a plain binding (E::C{x}) or wildcard (E::C{x:_})
+                    // is sound. REJECT anything else (report_error blocks ELF emission).
+                    if pf.pattern.kind == PatternKind::PatBinding {
+                        let slot = lo.field_idx_from_name_simple(pf.name)
+                        let pair_v = lo.fresh_reg()
+                        lo = pair_v.0
+                        let val_reg = pair_v.1
+                        lo = lo.emit(ir_field_get(val_reg, scrut, slot, ir_empty_name()))
+                        lo = lo.bind_local(pf.pattern.name, val_reg, false)
+                    } else if pf.pattern.kind == PatternKind::PatWildcard {
+                        // Match-anything: nothing to bind, nothing to test. Sound.
+                    } else {
+                        lo = lo.report_error()
+                    }
+                    current = &(*node).tail
+                }
+                _ => break
+            }
+        }
+        lo
     }
 
     fn lower_match_arm(self, scrut: i64, res: i64, l_end: i64, arm: MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
@@ -5778,6 +5970,23 @@ impl Lowerer {
                 }
                 let disc = self.lookup_variant_discriminant(variant_name)
                 if disc >= 0 {
+                    // Tagged enum unit variant (e.g. Event::A where Event also has a
+                    // payload variant): box uniformly into a 65-slot aggregate with the
+                    // discriminant at slot 64, so unit and payload variants of the same
+                    // enum share ONE representation (a pointer). The match dispatch always
+                    // loads the tag from slot 64. All-unit enums keep the bare-int path.
+                    if self.path_is_tagged_variant(e.path) {
+                        let pair_d = self.fresh_reg()
+                        var lo = pair_d.0
+                        let dst = pair_d.1
+                        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(65)))
+                        let pair_t = lo.fresh_reg()
+                        lo = pair_t.0
+                        let tag_reg = pair_t.1
+                        lo = lo.emit(ir_load_imm(tag_reg, disc))
+                        lo = lo.emit(ir_field_set(dst, lo.enum_tag_slot(), tag_reg, ir_empty_name()))
+                        return (lo, dst)
+                    }
                     let pair = self.fresh_reg()
                     let lo = pair.0
                     let reg = pair.1
@@ -5819,6 +6028,18 @@ impl Lowerer {
             }
         } else if e.kind == ExprKind::ExprCall {
             let callee_opt: Option<Box<Expr>> = e.left
+            // Tuple-variant construction (e.g. Event::B(9)) has no IR lowering: the callee
+            // is an enum-variant path, not a function. At base it fell through to
+            // find_or_add_fn_id("Event") + ir_call to a nonexistent fn -> SIGSEGV. REJECT
+            // it here (report_error blocks ELF emission; the checker does not cover tuple
+            // CONSTRUCTION). Payload binding / `==` on payload enums are rejected by the
+            // checker; this closes the construction hole. Plain function calls are paths of
+            // a non-variant name and are unaffected.
+            let callee_is_variant_ctor = self.callee_opt_is_variant_path(&callee_opt)
+            if callee_is_variant_ctor {
+                let lo_e = self.report_error()
+                return lo_e.emit_unit()
+            }
             let callee_name = match callee_opt {
                 Some(c) => self.expr_to_callee_name_ref(&(*c)),
                 None => ir_empty_name(),
@@ -5954,6 +6175,16 @@ impl Lowerer {
             let lo5 = lo4.emit(ir_call(dst, fn_id, callee_name, final_args, final_argc))
             (lo5, dst)
         } else if e.kind == ExprKind::ExprBinary {
+            // Defense-in-depth: == / != with a tagged-enum-variant-PATH operand would
+            // compare pointer identity, not discriminants. The checker now rejects ALL
+            // payload-enum == / != (operand-type based, var-var included); this catches the
+            // syntactic path case too should a value reach lowering unchecked. REJECT.
+            if (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe)
+                && (self.lower_opt_expr_is_tagged_variant_path(&e.left)
+                    || self.lower_opt_expr_is_tagged_variant_path(&e.right)) {
+                let lo_e = self.report_error()
+                return lo_e.emit_unit()
+            }
             // Short-circuit logical && / || lowered to branches. The backend has no bare
             // OpAnd/OpOr machine emitter, so the generic ir_binop(OpAnd) below failed the
             // function (rc=12) — every compound condition `a && b` / `a || b` blocked.
@@ -6486,6 +6717,21 @@ impl Lowerer {
                 print("lower_probe: struct_lit_alloc dst=")
                 print_int(dst)
                 print("\n")
+            }
+            // Tagged enum STRUCT-variant construction (e.g. Event::C{x,y}): box into a
+            // 65-slot aggregate (0..63 payload field slots + slot 64 = discriminant tag).
+            // The match dispatch loads the tag from slot 64 to identify the variant.
+            // Plain structs and single-segment paths keep the untouched 64-slot layout.
+            if lo.path_is_tagged_variant(e.path) {
+                let disc = lo.lookup_variant_discriminant(ir_path_last_name(e.path))
+                lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(65)))
+                lo = lo.lower_struct_fields_ref(dst, &e.fields, 0)
+                let pair_tag = lo.fresh_reg()
+                lo = pair_tag.0
+                let tag_reg = pair_tag.1
+                lo = lo.emit(ir_load_imm(tag_reg, disc))
+                lo = lo.emit(ir_field_set(dst, lo.enum_tag_slot(), tag_reg, ir_empty_name()))
+                return (lo, dst)
             }
             // 64 payload slots: field slots are first-byte-hash % 64 (see
             // lower_struct_fields_ref / field_idx_from_name_simple), so reserve the
