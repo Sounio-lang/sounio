@@ -5031,6 +5031,119 @@ impl Lowerer {
         false
     }
 
+    // True if every field sub-pattern in a struct/enum-struct pattern is
+    // UNCONDITIONAL (a plain binding or wildcard). A nested literal/enum
+    // sub-pattern can fail to match, so such an arm is NOT a guaranteed cover.
+    fn pat_fields_all_unconditional(self, pat_fields: &Option<Box<PatFieldList>>) -> bool with Mut, Panic, Div, Alloc, IO {
+        var current = pat_fields
+        while true {
+            match *current {
+                Some(list) => {
+                    let pk = (*list).head.pattern.kind
+                    if pk != PatternKind::PatWildcard && pk != PatternKind::PatBinding {
+                        return false
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        true
+    }
+
+    // True if every positional sub-pattern (enum tuple-variant payload) is
+    // UNCONDITIONAL (binding/wildcard).
+    fn sub_patterns_all_unconditional(self, sub_patterns: &Option<Box<PatternList>>) -> bool with Mut, Panic, Div, Alloc, IO {
+        var current = sub_patterns
+        while true {
+            match *current {
+                Some(list) => {
+                    let pk = (*list).head.kind
+                    if pk != PatternKind::PatWildcard && pk != PatternKind::PatBinding {
+                        return false
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        true
+    }
+
+    // If an arm UNCONDITIONALLY covers a single enum variant, return that
+    // variant's entry index; otherwise -1. Unconditional means: NO guard, the
+    // pattern is an enum/struct path with seg_count>=2 resolvable to a variant
+    // entry, and every sub-pattern/field pattern is a binding/wildcard (so the
+    // arm cannot fail to match once the discriminant matches). Single-segment
+    // paths (Option Some/None, tuple ctor sugar) are intentionally excluded:
+    // they are not keyed by (enum,variant), so we stay conservative there.
+    fn arm_unconditional_variant_idx(self, arm: &MatchArm) -> i64 with Mut, Panic, Div, Alloc, IO {
+        if self.arm_has_guard(arm) { return -1 }
+        let pat = &arm.pattern
+        if pat.kind == PatternKind::PatEnum {
+            if pat.path.seg_count < 2 { return -1 }
+            if !self.sub_patterns_all_unconditional(&pat.sub_patterns) { return -1 }
+            return self.lookup_variant_entry_by_path(ir_path_first_name(pat.path), ir_path_last_name(pat.path))
+        }
+        if pat.kind == PatternKind::PatStruct {
+            if pat.path.seg_count < 2 { return -1 }
+            if !self.pat_fields_all_unconditional(&pat.pat_fields) { return -1 }
+            return self.lookup_variant_entry_by_path(ir_path_first_name(pat.path), ir_path_last_name(pat.path))
+        }
+        -1
+    }
+
+    // True when the arms EXHAUSTIVELY cover all variants of the scrutinee enum
+    // with at least one UNGUARDED arm per variant. The scrutinee enum is taken
+    // from the first arm that unconditionally covers some variant; if none, the
+    // match is not enum-exhaustive in the sense we can prove here -> false.
+    // Proving this lets a guarded enum match be treated as total (no
+    // all-guards-false fall-through can leave `res` uninitialized).
+    fn match_arms_enum_exhaustive_unguarded(self, arms: &Option<Box<MatchArmList>>) -> bool with Mut, Panic, Div, Alloc, IO {
+        // 1. Find the scrutinee enum from the first unconditional variant arm.
+        var ename = ir_empty_name()
+        var found = false
+        var current = arms
+        while true {
+            match *current {
+                Some(list) => {
+                    let idx = self.arm_unconditional_variant_idx(&(*list).head)
+                    if idx >= 0 {
+                        ename = (*self.enum_variants).entries[idx as usize].enum_name
+                        found = true
+                        break
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        if !found { return false }
+        // 2. Every variant entry of that enum must be covered by >=1 unconditional arm.
+        var vi: i64 = 0
+        while vi < (*self.enum_variants).count {
+            if ir_name_eq((*self.enum_variants).entries[vi as usize].enum_name, ename) {
+                var covered = false
+                var cur2 = arms
+                while true {
+                    match *cur2 {
+                        Some(list2) => {
+                            if self.arm_unconditional_variant_idx(&(*list2).head) == vi {
+                                covered = true
+                                break
+                            }
+                            cur2 = &(*list2).tail
+                        }
+                        _ => break
+                    }
+                }
+                if !covered { return false }
+            }
+            vi = vi + 1
+        }
+        true
+    }
+
     // Lower match arms as a linear if/else chain
     fn lower_match_arms_ref(self, scrut: i64, res: i64, l_end: i64, arms: &Option<Box<MatchArmList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
@@ -5042,9 +5155,17 @@ impl Lowerer {
         // all-guards-false path -> silent wrong value. We can only PROVE totality here
         // when there is an UNGUARDED catch-all arm. If guards are present without one,
         // REJECT (report_error blocks ELF emission) rather than miscompile.
+        //
+        // REFINEMENT (A-refine): an enum match can also be PROVABLY total without a
+        // catch-all when its arms exhaustively cover every variant of the scrutinee
+        // enum with at least one UNGUARDED arm per variant — then no all-guards-false
+        // path can leave `res` uninitialized. Accept those; keep rejecting genuinely
+        // non-exhaustive guarded matches.
         if lo.match_arms_have_guard(arms) {
             if !lo.match_arms_have_uncond_catchall(arms) {
-                lo = lo.report_error()
+                if !lo.match_arms_enum_exhaustive_unguarded(arms) {
+                    lo = lo.report_error()
+                }
             }
         }
         var current = arms
