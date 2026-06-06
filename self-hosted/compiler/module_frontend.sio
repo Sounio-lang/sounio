@@ -18,6 +18,19 @@ fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
 }
 
 var MODULE_FRONTEND_IMPORT_FILE_DATA: [i8; 1048576] = [0; 1048576]
+// #3 IMPORTED-FN LINK: combined-source buffer for multi-module native compile.
+// Imported module texts (use-lines stripped) are concatenated here ahead of the
+// entry module, then written to a temp file and fed to the proven single-module
+// real-AST lowerer (bridge_lower_single_module_box) so find_or_add_fn_id links
+// cross-module calls in one pass. Dup top-level fn names across the merge are
+// detected and REJECTED (R1: never silently miscompile a name collision).
+var MODULE_FRONTEND_COMBINE_BUF: [i8; 1048576] = [0; 1048576]
+var MODULE_FRONTEND_COMBINE_LEN: i64 = 0
+var MODULE_FRONTEND_COMBINE_VISITED: [string; 256] = [""; 256]
+var MODULE_FRONTEND_COMBINE_VISITED_COUNT: i64 = 0
+var MODULE_FRONTEND_COMBINE_FNNAMES: [i64; 1024] = [0; 1024]
+var MODULE_FRONTEND_COMBINE_FNNAME_COUNT: i64 = 0
+var MODULE_FRONTEND_COMBINE_OVERFLOW: bool = false
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT: i64 = 0
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES: [i64; 64] = [0; 64]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS: [i64; 64] = [0; 64]
@@ -2837,6 +2850,180 @@ fn module_frontend_lower_program_box_traced(
 // kills the by-value IrModule/MultiModuleIrResult chain. The caller borrows/derefs
 // the box to hand the backend a stable &IrModule with no full-module copy on the
 // caller stack. Scope: single module, no-import (the source→native-v2 wall's case).
+// #3 IMPORTED-FN LINK GAP helpers ------------------------------------------------
+// True if line [ls,le) (in COMBINE source-byte space) starts with "use ".
+fn module_frontend_line_is_use(data: string, ls: i64, le: i64) -> bool {
+    if le - ls < 4 { return false }
+    data[ls as usize] == (117 as i8) &&
+    data[(ls + 1) as usize] == (115 as i8) &&
+    data[(ls + 2) as usize] == (101 as i8) &&
+    data[(ls + 3) as usize] == (32 as i8)
+}
+
+// Append one file's text to MODULE_FRONTEND_COMBINE_BUF, dropping any `use ...` line
+// (the imported bodies are concatenated in, so the path-based imports are redundant;
+// keeping them is harmless but stripping keeps the combined module self-contained).
+fn module_frontend_combine_append_file(path: string) with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    if size <= 0 { return }
+    let data = read_file(path)
+    var i: i64 = 0
+    while i < size {
+        // find end of this line
+        var le = i
+        while le < size && data[le as usize] != (10 as i8) { le = le + 1 }
+        if !module_frontend_line_is_use(data, i, le) {
+            var j = i
+            while j < le {
+                if MODULE_FRONTEND_COMBINE_LEN < 1048576 {
+                    MODULE_FRONTEND_COMBINE_BUF[MODULE_FRONTEND_COMBINE_LEN as usize] = data[j as usize]
+                    MODULE_FRONTEND_COMBINE_LEN = MODULE_FRONTEND_COMBINE_LEN + 1
+                } else {
+                    // R1: never silently truncate a well-typed program -> reject honestly.
+                    MODULE_FRONTEND_COMBINE_OVERFLOW = true
+                }
+                j = j + 1
+            }
+        }
+        // always emit the newline separator (keeps fn-at-line-start invariant)
+        if MODULE_FRONTEND_COMBINE_LEN < 1048576 {
+            MODULE_FRONTEND_COMBINE_BUF[MODULE_FRONTEND_COMBINE_LEN as usize] = (10 as i8)
+            MODULE_FRONTEND_COMBINE_LEN = MODULE_FRONTEND_COMBINE_LEN + 1
+        } else {
+            MODULE_FRONTEND_COMBINE_OVERFLOW = true
+        }
+        i = le + 1
+    }
+}
+
+fn module_frontend_combine_visited(path: string) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < MODULE_FRONTEND_COMBINE_VISITED_COUNT {
+        if str_eq(MODULE_FRONTEND_COMBINE_VISITED[i as usize], path) { return true }
+        i = i + 1
+    }
+    false
+}
+
+// Recursively append imported module texts (depth-first, deepest first) then leave
+// the entry module to be appended last by the caller. Dedups by path.
+fn module_frontend_combine_imports_recursive(path: string, depth: i64) with IO, Mut, Panic, Div {
+    if depth > 16 { return }
+    let imports = module_frontend_import_files_from_source(path)
+    var i: i64 = 0
+    while i < imports.count {
+        let dep = imports.paths[i]
+        if file_exists(dep) && !module_frontend_combine_visited(dep) {
+            if MODULE_FRONTEND_COMBINE_VISITED_COUNT < 256 {
+                MODULE_FRONTEND_COMBINE_VISITED[MODULE_FRONTEND_COMBINE_VISITED_COUNT as usize] = dep
+                MODULE_FRONTEND_COMBINE_VISITED_COUNT = MODULE_FRONTEND_COMBINE_VISITED_COUNT + 1
+            }
+            module_frontend_combine_imports_recursive(dep, depth + 1)
+            module_frontend_combine_append_file(dep)
+        }
+        i = i + 1
+    }
+}
+
+// Scan the combined buffer for top-level fn definitions (both `fn ` and `pub fn `)
+// at line start and record a name-hash for each. Returns true if a DUPLICATE
+// top-level fn name is found (= cross-module collision -> caller must REJECT, R1).
+fn module_frontend_combine_has_dup_fn() -> bool with Mut, Panic, Div {
+    MODULE_FRONTEND_COMBINE_FNNAME_COUNT = 0
+    let size = MODULE_FRONTEND_COMBINE_LEN
+    var i: i64 = 0
+    while i < size {
+        let at_line_start = (i == 0) || (MODULE_FRONTEND_COMBINE_BUF[(i - 1) as usize] == (10 as i8))
+        if at_line_start {
+            var name_start: i64 = 0 - 1
+            // "fn "
+            if i + 2 < size &&
+               MODULE_FRONTEND_COMBINE_BUF[i as usize] == (102 as i8) &&
+               MODULE_FRONTEND_COMBINE_BUF[(i + 1) as usize] == (110 as i8) &&
+               MODULE_FRONTEND_COMBINE_BUF[(i + 2) as usize] == (32 as i8) {
+                name_start = i + 3
+            }
+            // "pub fn "
+            if name_start < 0 && i + 6 < size &&
+               MODULE_FRONTEND_COMBINE_BUF[i as usize] == (112 as i8) &&
+               MODULE_FRONTEND_COMBINE_BUF[(i + 1) as usize] == (117 as i8) &&
+               MODULE_FRONTEND_COMBINE_BUF[(i + 2) as usize] == (98 as i8) &&
+               MODULE_FRONTEND_COMBINE_BUF[(i + 3) as usize] == (32 as i8) &&
+               MODULE_FRONTEND_COMBINE_BUF[(i + 4) as usize] == (102 as i8) &&
+               MODULE_FRONTEND_COMBINE_BUF[(i + 5) as usize] == (110 as i8) &&
+               MODULE_FRONTEND_COMBINE_BUF[(i + 6) as usize] == (32 as i8) {
+                name_start = i + 7
+            }
+            if name_start >= 0 {
+                let h = module_frontend_combine_name_hash(name_start, size)
+                if h != 5381 {
+                    var k: i64 = 0
+                    while k < MODULE_FRONTEND_COMBINE_FNNAME_COUNT {
+                        if MODULE_FRONTEND_COMBINE_FNNAMES[k as usize] == h {
+                            return true
+                        }
+                        k = k + 1
+                    }
+                    if MODULE_FRONTEND_COMBINE_FNNAME_COUNT < 1024 {
+                        MODULE_FRONTEND_COMBINE_FNNAMES[MODULE_FRONTEND_COMBINE_FNNAME_COUNT as usize] = h
+                        MODULE_FRONTEND_COMBINE_FNNAME_COUNT = MODULE_FRONTEND_COMBINE_FNNAME_COUNT + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// djb2 hash of the fn identifier in COMBINE_BUF starting at `start` (terminated by
+// '(' / whitespace / '<'). 64-bit djb2: cross-name collision prob ~1e-9 at the few-
+// hundred-fn scale here -> R2 false-reject risk negligible (advisor-confirmed).
+fn module_frontend_combine_name_hash(start: i64, size: i64) -> i64 with Panic, Div {
+    var hash: i64 = 5381
+    var i = start
+    while i < size && MODULE_FRONTEND_COMBINE_BUF[i as usize] == (32 as i8) {
+        i = i + 1
+    }
+    while i < size {
+        let ch = MODULE_FRONTEND_COMBINE_BUF[i as usize]
+        if ch == (40 as i8) || ch == (32 as i8) || ch == (9 as i8) ||
+           ch == (10 as i8) || ch == (13 as i8) || ch == (60 as i8) {
+            return hash
+        }
+        hash = (hash * 33) + (ch as i64)
+        i = i + 1
+    }
+    hash
+}
+
+// Build the combined multi-module source into `temp_out`. Returns:
+//   0 = ok (wrote combined file)
+//   1 = duplicate top-level fn name across modules (REJECT, R1 collision)
+//   2 = io/empty failure
+//   3 = combined source exceeds the 1MB buffer (REJECT, R1: never truncate)
+// On ok, temp_out is a single self-contained .sio with all module bodies, ready
+// for the proven single-module real-AST lowerer.
+pub fn bridge_combine_multimodule_source(main_path: string, temp_out: string) -> i64 with IO, Mut, Panic, Div {
+    MODULE_FRONTEND_COMBINE_LEN = 0
+    MODULE_FRONTEND_COMBINE_VISITED_COUNT = 0
+    MODULE_FRONTEND_COMBINE_FNNAME_COUNT = 0
+    MODULE_FRONTEND_COMBINE_OVERFLOW = false
+    if MODULE_FRONTEND_COMBINE_VISITED_COUNT < 256 {
+        MODULE_FRONTEND_COMBINE_VISITED[0] = main_path
+        MODULE_FRONTEND_COMBINE_VISITED_COUNT = 1
+    }
+    module_frontend_combine_imports_recursive(main_path, 0)
+    module_frontend_combine_append_file(main_path)
+    if MODULE_FRONTEND_COMBINE_OVERFLOW { return 3 }
+    if MODULE_FRONTEND_COMBINE_LEN <= 0 { return 2 }
+    if module_frontend_combine_has_dup_fn() { return 1 }
+    // write_file returns bytes-written (not 0-on-success); success = full length.
+    let rc = write_file(temp_out, &! MODULE_FRONTEND_COMBINE_BUF, MODULE_FRONTEND_COMBINE_LEN)
+    if rc != MODULE_FRONTEND_COMBINE_LEN { return 2 }
+    0
+}
+
 pub fn bridge_lower_single_module_box(main_path: string, trace: &! LoadMultimoduleIrTrace) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
     // Mirror load_multimodule_lower_program_traced EXACTLY (single load_module_file,
     // no extra large Program locals, no separate typecheck) so this fn's frame
