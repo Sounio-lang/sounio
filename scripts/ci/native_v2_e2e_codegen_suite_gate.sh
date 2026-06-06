@@ -110,10 +110,14 @@ emit_and_check 1   "control"    --native-v2-emit-control
 emit_and_check 7   "control-ft" --native-v2-emit-control-ft
 emit_and_check 42  "arith"      --native-v2-emit-arith
 
+# String concat witnesses: len(("ab"+"cde"))=5 and byte[3] of "abcde" = 'd' = 100.
+emit_and_check 5   "strconcat-len"  --native-v2-emit-strconcat-len
+emit_and_check 100 "strconcat-char" --native-v2-emit-strconcat-char
+
 if [[ "$FAILED" -ne 0 ]]; then
     echo "[gate] FAIL: one or more native-v2 codegen witnesses regressed"
     exit 5
 fi
 
-echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/multicall/control/control-ft/arith (IR->ELF->exit)"
+echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/multicall/control/control-ft/arith/strconcat (IR->ELF->exit)"
 exit 0

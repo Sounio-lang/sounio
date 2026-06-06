@@ -2845,6 +2845,50 @@ fn run_native_v2_emit_control_ft(args: ArgList, flag_index: i64) with IO, Mut, P
     print("\n")
 }
 
+// String-concat length witness: --native-v2-emit-strconcat-len <out_path>.
+// str_len(str_concat("ab", "cde")) = 5. Proves two rodata string literals +
+// str_concat heap copy + str_len over the result, IR->ELF->exit.
+fn run_native_v2_emit_strconcat_len(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("native-v2-emit-strconcat-len: usage --native-v2-emit-strconcat-len <out_path>")
+    }
+    let out_path = arg_list_get(args, flag_index + 1)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_string_concat_len_module()
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=strconcat-len rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=strconcat-len path=")
+    print(out_path)
+    print("\n")
+}
+
+// String-concat byte-index witness: --native-v2-emit-strconcat-char <out_path>.
+// str_char_at(str_concat("ab","cde"), 3) = 'd' = 100. Proves str_char_at addressing
+// over a concatenated string, IR->ELF->exit.
+fn run_native_v2_emit_strconcat_char(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("native-v2-emit-strconcat-char: usage --native-v2-emit-strconcat-char <out_path>")
+    }
+    let out_path = arg_list_get(args, flag_index + 1)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_string_concat_char_module()
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=strconcat-char rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=strconcat-char path=")
+    print(out_path)
+    print("\n")
+}
+
 // ============================================================================
 // COMMAND LINE PARSING
 // ============================================================================
@@ -6155,6 +6199,117 @@ fn compiler_main_make_native_v2_control_fallthrough_module() -> IrModule with Mu
     func.instr_count = 7
     module.functions[0] = func
     module.fn_count = 1
+    module
+}
+
+// Full IR names for the string builtins. ir_name_from_bytes only carries 4 visible
+// bytes, but these intrinsic names are longer, so build the Name buffers explicitly.
+// The native-v2 backend matches these byte-for-byte (name_is_str_concat / _len / _char_at).
+fn native_v2_name_str_concat() -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 10 }  // "str_concat"
+    n.buf[0] = 115 as i8
+    n.buf[1] = 116 as i8
+    n.buf[2] = 114 as i8
+    n.buf[3] = 95 as i8
+    n.buf[4] = 99 as i8
+    n.buf[5] = 111 as i8
+    n.buf[6] = 110 as i8
+    n.buf[7] = 99 as i8
+    n.buf[8] = 97 as i8
+    n.buf[9] = 116 as i8
+    n
+}
+
+fn native_v2_name_str_len() -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 7 }  // "str_len"
+    n.buf[0] = 115 as i8
+    n.buf[1] = 116 as i8
+    n.buf[2] = 114 as i8
+    n.buf[3] = 95 as i8
+    n.buf[4] = 108 as i8
+    n.buf[5] = 101 as i8
+    n.buf[6] = 110 as i8
+    n
+}
+
+fn native_v2_name_str_char_at() -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 11 }  // "str_char_at"
+    n.buf[0] = 115 as i8
+    n.buf[1] = 116 as i8
+    n.buf[2] = 114 as i8
+    n.buf[3] = 95 as i8
+    n.buf[4] = 99 as i8
+    n.buf[5] = 104 as i8
+    n.buf[6] = 97 as i8
+    n.buf[7] = 114 as i8
+    n.buf[8] = 95 as i8
+    n.buf[9] = 97 as i8
+    n.buf[10] = 116 as i8
+    n
+}
+
+// Builtin stub: an IR function with the builtin's name and param count but no body.
+// The native-v2 backend recognizes the name and emits the intrinsic; the empty body
+// is never used. Models how a real source program declares str_concat/str_char_at.
+fn compiler_main_native_v2_add_builtin_stub(module: &! IrModule, fn_index: i64, name: Name, param_count: i64) with Mut, Panic, Div {
+    var stub = ir_empty_function()
+    stub.name = name
+    stub.param_count = param_count
+    var pi: i64 = 0
+    while pi < param_count {
+        stub.param_regs[pi as usize] = pi
+        pi = pi + 1
+    }
+    stub.reg_count = param_count
+    stub.instr_count = 0
+    (*module).functions[fn_index as usize] = stub
+}
+
+// String-concat length witness: main() -> str_len(str_concat("ab", "cde")) == 5.
+// Exercises two rodata string literals, str_concat heap allocation + byte copy, and
+// str_len over the result. Proves IR->ELF->exit for the string-concat backend path.
+fn compiler_main_make_native_v2_string_concat_len_module() -> IrModule with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    let concat_full = native_v2_name_str_concat()
+    let len_full = native_v2_name_str_len()
+    compiler_main_native_v2_add_builtin_stub(&! module, 0, concat_full, 2)
+    compiler_main_native_v2_add_builtin_stub(&! module, 1, len_full, 1)
+
+    var main_fn = ir_empty_function()
+    main_fn.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    main_fn.reg_count = 4
+    main_fn.instrs[0] = ir_load_string(0, 0, ir_name_from_bytes(97, 98, 0, 0, 2))    // "ab"
+    main_fn.instrs[1] = ir_load_string(1, 1, ir_name_from_bytes(99, 100, 101, 0, 3)) // "cde"
+    main_fn.instrs[2] = ir_call(2, 0, concat_full, Some(Box::new(ir_reg_list_append(ir_reg_list_single(0), 1))), 2)
+    main_fn.instrs[3] = ir_call(3, 1, len_full, Some(Box::new(ir_reg_list_single(2))), 1)
+    main_fn.instrs[4] = ir_return(3)
+    main_fn.instr_count = 5
+    module.functions[2] = main_fn
+    module.fn_count = 3
+    module
+}
+
+// String-concat byte-index witness: main() -> str_char_at(str_concat("ab","cde"), 3) == 100 ('d').
+// Proves str_char_at addressing over a concatenated string ("abcde"[3] = 'd' = 100).
+fn compiler_main_make_native_v2_string_concat_char_module() -> IrModule with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    let concat_full = native_v2_name_str_concat()
+    let char_full = native_v2_name_str_char_at()
+    compiler_main_native_v2_add_builtin_stub(&! module, 0, concat_full, 2)
+    compiler_main_native_v2_add_builtin_stub(&! module, 1, char_full, 2)
+
+    var main_fn = ir_empty_function()
+    main_fn.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    main_fn.reg_count = 5
+    main_fn.instrs[0] = ir_load_string(0, 0, ir_name_from_bytes(97, 98, 0, 0, 2))    // "ab"
+    main_fn.instrs[1] = ir_load_string(1, 1, ir_name_from_bytes(99, 100, 101, 0, 3)) // "cde"
+    main_fn.instrs[2] = ir_call(2, 0, concat_full, Some(Box::new(ir_reg_list_append(ir_reg_list_single(0), 1))), 2)
+    main_fn.instrs[3] = ir_load_imm(3, 3)
+    main_fn.instrs[4] = ir_call(4, 1, char_full, Some(Box::new(ir_reg_list_append(ir_reg_list_single(2), 3))), 2)
+    main_fn.instrs[5] = ir_return(4)
+    main_fn.instr_count = 6
+    module.functions[2] = main_fn
+    module.fn_count = 3
     module
 }
 
@@ -26564,6 +26719,12 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-emit-control-ft" {
             run_native_v2_emit_control_ft(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-strconcat-len" {
+            run_native_v2_emit_strconcat_len(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-strconcat-char" {
+            run_native_v2_emit_strconcat_char(args, arg_idx)
             return
         } else if mode == "--bench-int-to-string" {
             run_int_to_string_bench_from_args(args, arg_idx)
