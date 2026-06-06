@@ -4137,12 +4137,42 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         callee_ty
+    } else if callee_ty.kind == TypeKind::TyNamed && checker_call_is_enum_tuple_variant(c, e.left, callee_ty.name) {
+        // ---- Enum tuple-variant constructor: Enum::Variant(args...) ----
+        let call_start_borrows = (*c).borrows
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        callee_ty
     } else {
         checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         ty_error()
+    }
+}
+
+// Returns true iff the call callee is an ExprPath with seg_count > 1 that resolves to an
+// enum tuple-variant constructor (e.g. Event::B in `Event::B(42)`).
+fn checker_call_is_enum_tuple_variant(c: *mut Checker, callee_opt: Option<Box<Expr>>, enum_name: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    let enum_idx = (*c).enums.find(enum_name)
+    if enum_idx < 0 {
+        return false
+    }
+    match callee_opt {
+        Some(callee) => {
+            if (*callee).kind != ExprKind::ExprPath {
+                return false
+            }
+            if (*callee).path.seg_count < 2 {
+                return false
+            }
+            // Verify the variant actually exists in this enum
+            let variant_name = checker_copy_string_list_tail_to_name((*callee).path.segments)
+            let ei = (*c).enums.get(enum_idx)
+            variant_info_list_has(ei.variants, variant_name)
+        }
+        None => false
     }
 }
 
@@ -15980,12 +16010,41 @@ impl Checker {
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             (c, callee_ty)
+        } else if callee_ty.kind == TypeKind::TyNamed && c.call_is_enum_tuple_variant(e.left, callee_ty.name) {
+            // ---- Enum tuple-variant constructor: Enum::Variant(args...) ----
+            let call_start_borrows = c.borrows
+            c = c.check_expr_list_no_type_no_linear_consume(e.args)
+            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            (c, callee_ty)
         } else {
             c = c.report_error_at(e.span, 17, 0, 0, 0)
             let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             (c, ty_error())
+        }
+    }
+
+    // Returns true iff the call callee is an ExprPath with seg_count > 1 that resolves to an
+    // enum tuple-variant constructor (e.g. Event::B in `Event::B(42)`).
+    fn call_is_enum_tuple_variant(self, callee_opt: Option<Box<Expr>>, enum_name: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+        let enum_idx = self.enums.find(enum_name)
+        if enum_idx < 0 {
+            return false
+        }
+        match callee_opt {
+            Some(callee) => {
+                if (*callee).kind != ExprKind::ExprPath {
+                    return false
+                }
+                if (*callee).path.seg_count < 2 {
+                    return false
+                }
+                let variant_name = checker_copy_string_list_tail_to_name((*callee).path.segments)
+                let ei = self.enums.get(enum_idx)
+                variant_info_list_has(ei.variants, variant_name)
+            }
+            None => false
         }
     }
 
