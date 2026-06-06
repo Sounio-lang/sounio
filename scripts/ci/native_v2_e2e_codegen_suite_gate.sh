@@ -130,10 +130,19 @@ emit_and_check 5   "strlen"     --native-v2-emit-strlen
 emit_and_check 101 "strcharat"  --native-v2-emit-strcharat
 emit_and_check 1   "streq"      --native-v2-emit-streq
 
+# str_concat (id 10): allocates from RuntimeContext.heap_cursor, copies a then b,
+# null-terminates. Consumed end-to-end by str_len / str_char_at (the task's spec
+# inputs). Exit values are discriminating: a broken concat returning just "ab" or
+# "cde" would yield 2/3 (len) or the wrong char, not 5 / 'd'=100.
+#   strconcatlen     -> exit 5    str_len("ab"+"cde")        = 5
+#   strconcatcharat  -> exit 100  str_char_at("ab"+"cde", 3) = 'd' = 100
+emit_and_check 5   "strconcatlen"    --native-v2-emit-strconcatlen
+emit_and_check 100 "strconcatcharat" --native-v2-emit-strconcatcharat
+
 if [[ "$FAILED" -ne 0 ]]; then
     echo "[gate] FAIL: one or more native-v2 codegen witnesses regressed"
     exit 5
 fi
 
-echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/fnptr/multicall/control/control-ft/arith/call5/call6/strlen/strcharat/streq (IR->ELF->exit)"
+echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/fnptr/multicall/control/control-ft/arith/call5/call6/strlen/strcharat/streq/strconcat (IR->ELF->exit)"
 exit 0
