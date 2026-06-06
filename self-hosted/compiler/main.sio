@@ -2726,6 +2726,18 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     if !compiler_preflight_source_input(source_path) {
         panic("native-v2-compile failed: source not readable")
     }
+    // Soundness gate: typecheck the source before emitting any ELF, mirroring
+    // run_check_mode exactly so --native-v2-compile rejects ill-typed source
+    // instead of silently miscompiling it. preflight_multimodule_frontend returns
+    // MultiModuleFrontendResult {bool, string} = 16 bytes (RAX:RDX, no hidden SRET
+    // pointer), so returning it by value here is crash-free — the c634b38f SRET
+    // crash class belongs to load_multimodule_ir / MultiModuleIrResult, not this fn.
+    let frontend_result = preflight_multimodule_frontend(source_path)
+    let parse_errors = parser_last_error_count()
+    if !frontend_result.ok || parse_errors != 0 {
+        compiler_print_ir_preflight_failure(frontend_result.error_msg)
+        panic("native-v2-compile failed: type check errors")
+    }
     var trace = empty_load_multimodule_ir_trace()
     let box_result = bridge_lower_single_module_box(source_path, &! trace)
     write_file("/tmp/nv2_m1_after_lower", &! NV2_MARKER_BUF, 1)
