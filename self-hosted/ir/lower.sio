@@ -3103,6 +3103,24 @@ impl Lowerer {
         -1
     }
 
+    // Resolve a variant's discriminant by FULL path (enum_name, variant_name).
+    // Discriminants restart at 0 per enum, so a name-only lookup returns the FIRST
+    // enum that happens to declare a variant with that name -> wrong tag when two
+    // enums share a variant name. When the path carries the enum (seg_count >= 2),
+    // key on both names; only fall back to name-only for single-segment paths
+    // (the tuple-variant Name(x) form, whose construction is already rejected, so
+    // construction and match cannot disagree).
+    fn lookup_variant_discriminant_path(self, path: AstPath) -> i64 with Mut, Panic, Div, Alloc {
+        if path.seg_count >= 2 {
+            let idx = self.lookup_variant_entry_by_path(ir_path_first_name(path), ir_path_last_name(path))
+            if idx >= 0 {
+                return (*self.enum_variants).entries[idx as usize].discriminant
+            }
+            return self.lookup_variant_discriminant(ir_path_last_name(path))
+        }
+        self.lookup_variant_discriminant(ir_path_last_name(path))
+    }
+
     // Is this enum-variant path part of a TAGGED enum (any variant has a payload)?
     // path must have >= 2 segments (EnumName::Variant). Returns false otherwise.
     fn path_is_tagged_variant(self, path: AstPath) -> bool with Mut, Panic, Div, Alloc {
@@ -5149,7 +5167,7 @@ impl Lowerer {
                 lo
             } else {
                 // Enum variant: compare scrutinee to discriminant
-                let disc = self.lookup_variant_discriminant(variant_name)
+                let disc = self.lookup_variant_discriminant_path(pat.path)
                 if disc >= 0 {
                     let pair_l = self.fresh_label()
                     var lo = pair_l.0
@@ -5238,7 +5256,7 @@ impl Lowerer {
             // Tagged enum STRUCT-variant arm (e.g. Event::C{x,y}): load the discriminant
             // tag from slot 64 of the pointer scrutinee, compare to this variant's disc,
             // and on match bind each payload field (by hashed slot) before the body.
-            let disc = self.lookup_variant_discriminant(ir_path_last_name(pat.path))
+            let disc = self.lookup_variant_discriminant_path(pat.path)
             let pair_l = self.fresh_label()
             var lo = pair_l.0
             let l_skip = pair_l.1
@@ -6081,7 +6099,7 @@ impl Lowerer {
                     let lo2 = lo.emit(ir_load_imm(reg, 0))
                     return (lo2, reg)
                 }
-                let disc = self.lookup_variant_discriminant(variant_name)
+                let disc = self.lookup_variant_discriminant_path(e.path)
                 if disc >= 0 {
                     // Tagged enum unit variant (e.g. Event::A where Event also has a
                     // payload variant): box uniformly into a 65-slot aggregate with the
@@ -6836,7 +6854,7 @@ impl Lowerer {
             // The match dispatch loads the tag from slot 64 to identify the variant.
             // Plain structs and single-segment paths keep the untouched 64-slot layout.
             if lo.path_is_tagged_variant(e.path) {
-                let disc = lo.lookup_variant_discriminant(ir_path_last_name(e.path))
+                let disc = lo.lookup_variant_discriminant_path(e.path)
                 lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(65)))
                 lo = lo.lower_struct_fields_ref(dst, &e.fields, 0)
                 let pair_tag = lo.fresh_reg()
