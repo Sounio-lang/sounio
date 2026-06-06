@@ -111,6 +111,29 @@ emit_and_check 1   "control"    --native-v2-emit-control
 emit_and_check 7   "control-ft" --native-v2-emit-control-ft
 emit_and_check 42  "arith"      --native-v2-emit-arith
 
+# f64 comparisons (ucomisd + setcc). Exit code IS the raw 0/1 result.
+# Each op: ordered-true (exit 1), ordered-false (exit 0), and a NaN case proving
+# IEEE unordered semantics (NaN <,<=,>,>=,== -> 0; NaN != -> 1). The true/false
+# pair proves the setcc discriminates; the NaN case proves correct unordered handling.
+emit_and_check 1 "f64lt-true"  --native-v2-emit-f64cmp lt-true
+emit_and_check 0 "f64lt-false" --native-v2-emit-f64cmp lt-false
+emit_and_check 0 "f64lt-nan"   --native-v2-emit-f64cmp lt-nan
+emit_and_check 1 "f64le-true"  --native-v2-emit-f64cmp le-true
+emit_and_check 0 "f64le-false" --native-v2-emit-f64cmp le-false
+emit_and_check 0 "f64le-nan"   --native-v2-emit-f64cmp le-nan
+emit_and_check 1 "f64gt-true"  --native-v2-emit-f64cmp gt-true
+emit_and_check 0 "f64gt-false" --native-v2-emit-f64cmp gt-false
+emit_and_check 0 "f64gt-nan"   --native-v2-emit-f64cmp gt-nan
+emit_and_check 1 "f64ge-true"  --native-v2-emit-f64cmp ge-true
+emit_and_check 0 "f64ge-false" --native-v2-emit-f64cmp ge-false
+emit_and_check 0 "f64ge-nan"   --native-v2-emit-f64cmp ge-nan
+emit_and_check 1 "f64eq-true"  --native-v2-emit-f64cmp eq-true
+emit_and_check 0 "f64eq-false" --native-v2-emit-f64cmp eq-false
+emit_and_check 0 "f64eq-nan"   --native-v2-emit-f64cmp eq-nan
+emit_and_check 1 "f64ne-true"  --native-v2-emit-f64cmp ne-true
+emit_and_check 0 "f64ne-false" --native-v2-emit-f64cmp ne-false
+emit_and_check 1 "f64ne-nan"   --native-v2-emit-f64cmp ne-nan
+
 # 5- and 6-argument calls: exercises r8/r9 (SysV arg regs 4 and 5).
 # Exit codes are power-of-two sums so any dropped/misencoded arg yields a distinct wrong value.
 emit_and_check 31  "call5"      --native-v2-emit-call5
