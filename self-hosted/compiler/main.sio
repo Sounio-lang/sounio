@@ -1124,6 +1124,30 @@ fn compiler_mode_source_arg(args: ArgList, flag_index: i64, mode_name: string) -
     return ""
 }
 
+// Returns the Nth (0-based) positional (non-flag, non -o-value) argument after
+// flag_index, or fallback if there are fewer than N+1 positionals. Lets the
+// source-compile modes accept `<src.sio> <out.elf>` (out as 2nd positional)
+// in addition to `-o <out>`, matching the documented `mc src.sio out.elf` form.
+fn compiler_mode_positional_arg(args: ArgList, flag_index: i64, which: i64, fallback: string) -> string with Mut, Panic, Div {
+    var i: i64 = flag_index + 1
+    var seen: i64 = 0
+    while i < args.len {
+        let arg = arg_list_get(args, i)
+        if arg == "-o" || arg == "--output" {
+            i = i + 2
+        } else if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
+            if seen == which {
+                return arg
+            }
+            seen = seen + 1
+            i = i + 1
+        } else {
+            i = i + 1
+        }
+    }
+    return fallback
+}
+
 fn compiler_mode_has_flag(args: ArgList, needle: string) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < args.len {
@@ -2693,7 +2717,12 @@ var NV2_MARKER_BUF: [i8; 4] = [0; 4]
 // step (if any) still faults. Scope: single module / no imports (the wall's case).
 fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     let source_path = compiler_mode_source_arg(args, flag_index, "--native-v2-compile")
-    let out_path = compiler_mode_output_path(args, "a.out")
+    // Output path resolution: `-o <out>` wins; otherwise honor a second
+    // positional argument (`mc --native-v2-compile src.sio out.elf`); else a.out.
+    // Previously the second positional was silently ignored and every compile
+    // wrote a.out — the root of the "writes no file at the requested path" report.
+    let out_positional = compiler_mode_positional_arg(args, flag_index, 1, "a.out")
+    let out_path = compiler_mode_output_path(args, out_positional)
     if !compiler_preflight_source_input(source_path) {
         panic("native-v2-compile failed: source not readable")
     }
