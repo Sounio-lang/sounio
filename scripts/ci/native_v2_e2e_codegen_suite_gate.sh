@@ -111,10 +111,15 @@ emit_and_check 1   "control"    --native-v2-emit-control
 emit_and_check 7   "control-ft" --native-v2-emit-control-ft
 emit_and_check 42  "arith"      --native-v2-emit-arith
 
+# 5- and 6-argument calls: exercises r8/r9 (SysV arg regs 4 and 5).
+# Exit codes are power-of-two sums so any dropped/misencoded arg yields a distinct wrong value.
+emit_and_check 31  "call5"      --native-v2-emit-call5
+emit_and_check 63  "call6"      --native-v2-emit-call6
+
 if [[ "$FAILED" -ne 0 ]]; then
     echo "[gate] FAIL: one or more native-v2 codegen witnesses regressed"
     exit 5
 fi
 
-echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/fnptr/multicall/control/control-ft/arith (IR->ELF->exit)"
+echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/fnptr/multicall/control/control-ft/arith/call5/call6 (IR->ELF->exit)"
 exit 0
