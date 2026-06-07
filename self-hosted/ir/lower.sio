@@ -1603,6 +1603,29 @@ fn lower_cast_type_is_f64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, D
     }
 }
 
+// True if the cast target is a floating type (f32 OR f64). The native-v2 backend
+// stores BOTH as 64-bit doubles (no single-precision storage exists), so `as f32`
+// must lower to a FLOAT cast (int->float / float passthrough), exactly like `as f64`.
+// The prior code only matched f64, so `x as f32` fell into the int branch and emitted
+// IrFloatToInt (cvttsd2si) -> the float value was truncated to an integer and the
+// downstream compare ran as an INTEGER compare (the M1 silent miscompile).
+fn lower_cast_type_is_float(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *ct {
+        Some(te) => {
+            let seg = (*te).path.segments
+            if seg.head_len != 3 { return false }
+            if seg.head_buf[0] as i64 != 102 { return false }   // 'f'
+            // 'f32' or 'f64': second byte '3'(51) or '6'(54), third byte '2'(50) or '4'(52)
+            let b1 = seg.head_buf[1] as i64
+            let b2 = seg.head_buf[2] as i64
+            if b1 == 54 && b2 == 52 { return true }   // f64
+            if b1 == 51 && b2 == 50 { return true }   // f32
+            false
+        }
+        None => false,
+    }
+}
+
 // Bit width of a wide-int cast target (iN/uN), else 0. Reads the cast_type name bytes
 // directly from the AST — the native-v2 source path can't use the checker sidecar (the
 // by-value Checker SRET-crashes the bridge), so width is detected purely syntactically.
@@ -7058,7 +7081,12 @@ impl Lowerer {
             } else if operand_wl >= 1 {
                 // Narrowing wide -> i64: the low limb IS the operand's base vreg. Pass through.
                 (lo1, src_reg)
-            } else if lower_cast_type_is_f64(&e.cast_type) {
+            } else if lower_cast_type_is_float(&e.cast_type) {
+                // `as f32` / `as f64`: float cast. If the source is an integer the
+                // codegen converts via cvtsi2sd; if it is ALREADY a float (e.g. a
+                // float literal `1.5 as f32`) the codegen passes the bits through
+                // unchanged (it checks is_float_reg), preserving the value and the
+                // float flag so a downstream compare uses ucomisd, not an int cmp.
                 let p = lo1.fresh_reg()
                 let lo2 = p.0
                 let dst = p.1
