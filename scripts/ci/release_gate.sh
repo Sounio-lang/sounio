@@ -244,6 +244,7 @@ gate_parser_sweep() {
 gate_rc "native_v2_calls_arity"       arity    bash scripts/ci/native_v2_calls_arity_gate.sh
 gate_rc "native_v2_e2e_codegen_suite" codegen  bash scripts/ci/native_v2_e2e_codegen_suite_gate.sh
 gate_rc "native_v2_e2e_exit_code"     exitcode bash scripts/ci/native_v2_e2e_exit_code_gate.sh
+gate_rc "native_v2_recovered_source"  recovered bash scripts/ci/native_v2_recovered_source_core_gate.sh
 
 gate_capgate
 
