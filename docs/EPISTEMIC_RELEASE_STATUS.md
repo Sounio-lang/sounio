@@ -14,11 +14,11 @@
 > enforce** them (see Unverified, below). So this release earns its honesty by
 > *practice* — adversarial verification — not by a feature it does not yet have.
 
-Reference tip: `integration/native-v2-honest` @ `a53511813`.
+Reference tip: `integration/native-v2-honest` @ `a417d2e0e`.
 Method of provenance: every "verified" claim was checked by building the modular
 compiler `mc` from `self-hosted/compiler/main.sio` via the bootstrap `./bin/souc`,
 then running the program and observing the exit code / output — never trusted from
-a report. The aggregate honest gate is `scripts/ci/release_gate.sh` (11 gates).
+a report. The aggregate honest gate is `scripts/ci/release_gate.sh` (15 gates).
 
 ---
 
@@ -78,10 +78,13 @@ an imported function) is **rejected** with the right type error.
 
 ## PARTIAL — medium confidence (works in the verified shape; edges unproven)
 
-- **Multi-module native compilation is structure-dependent.** The canonical
-  `use helper::util::*` layout links and runs (verified, exit-checked). Some other
-  module layouts fail in the native back half (`ir_summary_failed`). Treat
-  multi-module native output as working for simple shapes, not yet hardened.
+- **Multi-module native compilation** — hardened: 26 layouts (flat, transitive,
+  diamond, sub-directories, imported struct/enum types, brace/`pub use`/`import`
+  forms, indented `use`, cross-module argument passing) now link and run to the
+  correct value (verified, exit-checked). A silent crash on **indented `use`**
+  (leading whitespace → `--check` OK but ELF exited 139) was found and fixed. The
+  `ir_summary_failed` failure mode was not reproduced in the characterized layouts;
+  if a deeper layout still hits it, that is the residual to chase.
 - **Cross-module type checking** rejects wrong-typed arguments to imported
   functions; a let-binding from an imported call result (`let x:bool = i64_fn()`)
   may not yet be caught in every shape — under verification.
