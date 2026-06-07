@@ -1062,6 +1062,107 @@ fn checker_lower_array_type_mut(c: *mut Checker, inner_opt: Option<Box<TypeExpr>
     }
 }
 
+// Standalone (no-Checker-frame) effect extraction, mirroring Checker::extract_effect_ids
+// (check.sio ~11519). Used by the *mut fn-type lowering so the 164KB Checker is never copied.
+fn extract_effect_ids_standalone(eff_list: EffectList) -> ([i64; 8], i64) with Mut, Panic, Div {
+    var effects: [i64; 8] = [0; 8]
+    var count: i64 = 0
+    let eid = effect_name_to_id(eff_list.head.name_buf, eff_list.head.name_len)
+    if eid >= 0 && count < 8 {
+        effects[count] = eid
+        count = count + 1
+    }
+    var current = eff_list.tail
+    while true {
+        match current {
+            Some(rest) => {
+                let rid = effect_name_to_id((*rest).head.name_buf, (*rest).head.name_len)
+                if rid >= 0 && count < 8 {
+                    effects[count] = rid
+                    count = count + 1
+                }
+                current = (*rest).tail
+            }
+            _ => break
+        }
+    }
+    (effects, count)
+}
+
+// *mut fn-type param lowering, mirroring Checker::lower_fn_type_params (check.sio ~11491).
+fn checker_lower_fn_type_params_mut(c: *mut Checker, tel: TypeExprList, idx: i64) -> (Option<Box<FnParamList> >, i64) with Mut, Panic, Div, Alloc, IO {
+    let param_ty = checker_lower_type_expr_mut(c, tel.head)
+    var pname = Name { buf: [0; 128], len: 0 }
+    pname.buf[0] = 95   // '_'
+    pname.buf[1] = 112  // 'p'
+    pname.buf[2] = (48 + idx) as i8  // '0'+idx
+    pname.len = 3
+    let param_info = FnParamInfo { name: pname, ty: param_ty }
+    match tel.tail {
+        None => {
+            let pl = FnParamList { head: param_info, tail: None }
+            (Some(Box::new(pl)), idx + 1)
+        }
+        Some(rest) => {
+            let r2 = checker_lower_fn_type_params_mut(c, *rest, idx + 1)
+            let pl = FnParamList { head: param_info, tail: r2.0 }
+            (Some(Box::new(pl)), r2.1)
+        }
+    }
+}
+
+// *mut fn-type lowering, mirroring Checker::lower_fn_type_expr (check.sio ~11432). The by-value
+// path copied the 164KB Checker into `self`; the *mut variant routes through the hot dispatch
+// without the SRET-smash frame class. This is what was missing — the *mut type-lowering had no
+// TypeFn arm, so a valid `fn(i64) -> i64` parameter type fell to the `_` error arm and the
+// checker false-rejected every higher-order-function program.
+fn checker_lower_fn_type_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    var params: Option<Box<FnParamList> > = None
+    var param_count: i64 = 0
+    match te.type_args {
+        Some(tel) => {
+            let r = checker_lower_fn_type_params_mut(c, *tel, 0)
+            params = r.0
+            param_count = r.1
+        }
+        _ => {}
+    }
+    var ret_ty = ty_unit()
+    match te.inner {
+        Some(inner_te) => { ret_ty = checker_lower_type_expr_mut(c, *inner_te) }
+        _ => {}
+    }
+    var effects: [i64; 8] = [0; 8]
+    var effect_count: i64 = 0
+    match te.effects {
+        Some(eff_list) => {
+            let ep = extract_effect_ids_standalone(*eff_list)
+            effects = ep.0
+            effect_count = ep.1
+        }
+        _ => {}
+    }
+    let sig = FnSig {
+        name: Name { buf: [0; 128], len: 0 },
+        params: params,
+        param_count: param_count,
+        return_type: ret_ty,
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: effects,
+        effect_count: effect_count,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+    }
+    let add_result = (*c).fn_sigs.add(sig)
+    (*c).fn_sigs = add_result.0
+    ty_fn(add_result.1)
+}
+
 fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !checker_enter_type_expr_mut(c) {
         return ty_error()
@@ -1155,6 +1256,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
             if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_validated(inner_ty, -1.0) }
         }
         TypeExprKind::TypeArray => checker_lower_array_type_mut(c, te.inner, te.array_size)
+        TypeExprKind::TypeFn => checker_lower_fn_type_mut(c, te)
         _ => {
             checker_note_type_error_mut(c)
             ty_error()
@@ -4102,6 +4204,54 @@ fn checker_check_expr_list_no_type_no_linear_consume_inplace(c: *mut Checker, op
 
 // *mut transcription of check_call_args_inner (16907): the arg is checked via the spine;
 // the boundary contracts inspect the already-computed arg_ty (no re-check) and are bridged.
+// Structural fn-type arg compatibility for higher-order calls. types_compatible() requires
+// fn_sig_id EQUALITY for two TyFn, which never holds between a fn-type PARAMETER (freshly
+// lowered sig) and a named-function ARGUMENT (its own declared sig) — that mismatch was the
+// false-reject of every valid HOF call. Here we compare STRUCTURALLY (param_count + compatible
+// return + pairwise-compatible params), which is STRICTER than accept-all: a wrong-arity /
+// wrong-param-type / wrong-return / non-fn argument still fails (C0 preserved).
+//
+// R1 GUARD: only a TOP-LEVEL FUNCTION reference is accepted structurally. The native-v2
+// backend can lower a named function passed as a fn-type argument (via the IrLoadFnRef /
+// fnptr path), but it CANNOT yet lower a CLOSURE value passed as a fn-type argument to a
+// correct exit (it silently miscompiles to 0). The discriminator is the resolved FnSig's
+// name: a top-level fn/method sig carries its declared name (non-empty), while a closure
+// sig is anonymous (empty name) — see check_closure_expr (anonymous) vs the ItemFn sig.
+// This rejects BOTH a closure-literal argument (`apply(|x| x*2, n)`) and a closure bound to
+// a local and passed by ident (`let g = |x| x*2; apply(g, n)`) — both stay honest
+// false-rejects rather than silent miscompiles. C0: still STRICTER than accept-all
+// (param_count + return + params + effects must all match), so wrong-arity / wrong-param /
+// wrong-return / wrong-effect / non-fn arguments are still rejected with E009.
+fn checker_fn_arg_compatible_inplace(c: *mut Checker, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    if param_ty.kind == TypeKind::TyFn && arg_ty.kind == TypeKind::TyFn {
+        let n = (*c).fn_sigs.count
+        if param_ty.fn_sig_id < 0 || param_ty.fn_sig_id >= n { return false }
+        if arg_ty.fn_sig_id < 0 || arg_ty.fn_sig_id >= n { return false }
+        let psig = (*c).fn_sigs.entries[param_ty.fn_sig_id as usize]
+        let asig = (*c).fn_sigs.entries[arg_ty.fn_sig_id as usize]
+        // R1: only a named top-level function (lowerable via the fnptr path) is accepted;
+        // an anonymous closure sig (empty name) is not backend-lowerable here.
+        if name_is_empty(asig.name) { return false }
+        if psig.param_count != asig.param_count { return false }
+        if !types_compatible(asig.return_type, psig.return_type) { return false }
+        if psig.effect_count != asig.effect_count { return false }
+        var ei: i64 = 0
+        while ei < psig.effect_count {
+            if psig.effects[ei as usize] != asig.effects[ei as usize] { return false }
+            ei = ei + 1
+        }
+        var i: i64 = 0
+        while i < psig.param_count {
+            let pp = fn_param_list_get(psig.params, i)
+            let ap = fn_param_list_get(asig.params, i)
+            if !types_compatible(ap.ty, pp.ty) { return false }
+            i = i + 1
+        }
+        return true
+    }
+    call_arg_types_compatible(arg_expr, arg_ty, param_ty)
+}
+
 fn checker_check_call_args_inner_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, idx: i64, expected_count: i64, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     match args {
         Some(arg_list) => {
@@ -4119,7 +4269,7 @@ fn checker_check_call_args_inner_inplace(c: *mut Checker, args: Option<Box<ExprL
             }
             let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
             if has_param_info {
-                if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
+                if !checker_fn_arg_compatible_inplace(c, arg_expr, arg_ty, param_info.ty) {
                     checker_report_mismatch_inplace(c, call_span, 9, param_info.ty, arg_ty)
                 }
                 // Direct *mut void calls (no Checker locals — was bb/rb/kb/ub/ob, ~12MB+
