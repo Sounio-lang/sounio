@@ -1,5 +1,16 @@
 #!/bin/bash
-# Release quality checklist for Demetrios v0.50.0
+# ============================================================================
+# RETIRED — DO NOT USE. This is the DEMETRIOS v0.50.0 cargo-era release
+# checklist. It does NOT reflect the current self-hosted Sounio compiler
+# (the modular compiler mc = self-hosted/compiler/main.sio, built by the
+# bootstrap ./bin/souc). It references a Rust/cargo toolchain that is gone.
+#
+# The HONEST release gate is:   scripts/ci/release_gate.sh
+# Run that instead. It builds mc from main.sio and asserts real behavior.
+# Kept (not deleted) only to preserve git history.
+# ============================================================================
+echo "RETIRED: scripts/ci/release_check.sh (DEMETRIOS/cargo era) — use scripts/ci/release_gate.sh" >&2
+exit 2
 
 set -e
 
