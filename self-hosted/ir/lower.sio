@@ -29,6 +29,13 @@ struct LowerLocalStack {
     // struct type and look up the field's float-ness (StructFieldEntry.is_float), so float
     // struct-field arithmetic routes to the SSE path. -1 = not a tracked struct local.
     struct_layout_idx: [i64; 4096],
+    // String-typedness of the binding (1 = the value is a `string`, i.e. a *u8 to NUL-
+    // terminated rodata/heap bytes). Seeded from a `: string` annotation, a string-literal
+    // initializer, or a string-returning builtin call. Lets `s.len()` lower to the proven
+    // `str_len` builtin and `a + b` (both strings) lower to `str_concat` instead of the
+    // integer add path (which would add two pointers -> garbage / SIGSEGV). Mirrors
+    // `is_float`/`struct_layout_idx`. 0 = not a tracked string local.
+    is_string: [i64; 4096],
     count: i64,
 }
 
@@ -41,6 +48,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         elem_counts: [0; 4096],
         is_float: [0; 4096],
         struct_layout_idx: [-1; 4096],
+        is_string: [0; 4096],
         count: 0,
     }
 }
@@ -1316,6 +1324,7 @@ fn lowerer_bind_local_mut(
         (*(*lo).locals).depths[idx as usize] = (*lo).scope_depth
         (*(*lo).locals).is_float[idx as usize] = 0
         (*(*lo).locals).struct_layout_idx[idx as usize] = -1
+        (*(*lo).locals).is_string[idx as usize] = 0
         (*(*lo).locals).count = idx + 1
     } else {
         lowerer_mark_error(lo)
@@ -1328,6 +1337,15 @@ fn lowerer_set_top_is_float_mut(lo: &! Lowerer, flag: i64) with Mut, Panic, Div 
     if (*(*lo).locals).count > 0 {
         let idx = (*(*lo).locals).count - 1
         (*(*lo).locals).is_float[idx as usize] = flag
+    }
+}
+
+// Mark the most-recently-bound local (via lowerer_bind_local_mut) as string-typed. Used by
+// the param loop to record `string` params so `s.len()`/`a + b` lower to the str builtins.
+fn lowerer_set_top_is_string_mut(lo: &! Lowerer, flag: i64) with Mut, Panic, Div {
+    if (*(*lo).locals).count > 0 {
+        let idx = (*(*lo).locals).count - 1
+        (*(*lo).locals).is_string[idx as usize] = flag
     }
 }
 
@@ -1425,6 +1443,11 @@ fn lowerer_lower_fn_params_mut(
                 let p_li = lowerer_struct_layout_idx_of_type_mut(lo, &(*list).head.ty)
                 if p_li >= 0 {
                     lowerer_set_top_struct_layout_idx_mut(lo, p_li)
+                }
+                // Record a `string` param so `s.len()` / `a + b` route to the str builtins
+                // (lowerer_bind_local_mut already reset is_string to 0 for this slot).
+                if type_expr_is_string(&(*list).head.ty) {
+                    lowerer_set_top_is_string_mut(lo, 1)
                 }
                 current = &(*list).tail
             }
@@ -1722,7 +1745,37 @@ fn type_expr_is_float(te: &TypeExpr) -> bool with Mut, Panic, Div {
     false
 }
 
-// True if `te` is `[E; N]` with a floating element type E. Used so `let a:[f64;N]`
+// True if `te` is the named type `string`. Detected purely syntactically from the path
+// segment bytes (the native-v2 bridge can't consult the checker sidecar). Used to seed the
+// is_string local tracking so `s.len()` / `a + b` route to the str builtins.
+fn type_expr_is_string(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    let seg = (*te).path.segments
+    if seg.head_len != 6 { return false }
+    if seg.head_buf[0] as i64 != 115 { return false }  // 's'
+    if seg.head_buf[1] as i64 != 116 { return false }  // 't'
+    if seg.head_buf[2] as i64 != 114 { return false }  // 'r'
+    if seg.head_buf[3] as i64 != 105 { return false }  // 'i'
+    if seg.head_buf[4] as i64 != 110 { return false }  // 'n'
+    if seg.head_buf[5] as i64 != 103 { return false }  // 'g'
+    true
+}
+
+// Build a Name from an ASCII string literal (e.g. "str_len"). The bootstrap host supports
+// str_len/str_char_at, so this is safe in the lowerer. Used to synthesize calls to the
+// proven native-v2 string builtins from method / operator syntax.
+fn ir_name_of_ascii(s: string) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 0 }
+    let total = str_len(s)
+    var i = 0
+    while i < total && i < 128 {
+        n.buf[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    n.len = total
+    n
+}
+
+// True if `[E; N]` with a floating element type E. Used so `let a:[f64;N]`
 // records float-ness of the elements, making `a[i]` a recognised float operand.
 fn type_expr_array_elem_is_float(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeArray { return false }
@@ -2798,6 +2851,7 @@ impl Lowerer {
             stk.elem_counts[idx as usize] = 0
             stk.is_float[idx as usize] = 0
             stk.struct_layout_idx[idx as usize] = -1
+            stk.is_string[idx as usize] = 0
             stk.count = idx + 1
             lo.locals = Box::new(stk)
         } else {
@@ -2825,6 +2879,31 @@ impl Lowerer {
         while i >= 0 {
             if stk.depths[i as usize] <= self.scope_depth && ir_name_eq(stk.names[i as usize], name) {
                 return stk.elem_counts[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // Mark the most-recently-bound local as string-typed (`let s: string` / string param /
+    // string-literal or string-returning-builtin initializer). Mirrors set_top_is_float.
+    fn set_top_is_string(self, flag: i64) -> Lowerer with Mut, Alloc, Panic {
+        var lo = self
+        var stk = *lo.locals
+        if stk.count > 0 {
+            stk.is_string[(stk.count - 1) as usize] = flag
+            lo.locals = Box::new(stk)
+        }
+        lo
+    }
+
+    // 1 if the binding named `name` is string-typed, else 0. Mirrors lookup_local_is_float.
+    fn lookup_local_is_string(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        let stk = *self.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= self.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                return stk.is_string[i as usize]
             }
             i = i - 1
         }
@@ -3050,6 +3129,42 @@ impl Lowerer {
     fn opt_expr_is_float_m(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
         match *opt {
             Some(e) => self.expr_is_float_m(&(*e)),
+            _ => 0,
+        }
+    }
+
+    // 1 if `e` is statically known to be a `string` value. Recognizes string literals,
+    // string-tracked idents, the string-returning builtins (str_concat / str_slice), and
+    // `a + b` where either operand is a string (the checker guarantees both are then). Used
+    // to route `s.len()` -> str_len and string `a + b` -> str_concat. Conservative: an
+    // unrecognized form returns 0 and stays on its existing (non-string) lowering path.
+    fn expr_is_string_m(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprStringLit { return 1 }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_is_string((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            let cn = match (*e).left {
+                Some(c) => self.expr_to_callee_name_ref(&(*c)),
+                None => ir_empty_name(),
+            }
+            if ir_name_eq(cn, ir_name_of_ascii("str_concat")) { return 1 }
+            if ir_name_eq(cn, ir_name_of_ascii("str_slice")) { return 1 }
+            return 0
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            if (*e).bin_op == BinaryOp::OpAdd {
+                if self.opt_expr_is_string_m(&(*e).left) == 1 { return 1 }
+                if self.opt_expr_is_string_m(&(*e).right) == 1 { return 1 }
+            }
+            return 0
+        }
+        0
+    }
+
+    fn opt_expr_is_string_m(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => self.expr_is_string_m(&(*e)),
             _ => 0,
         }
     }
@@ -4173,6 +4288,11 @@ impl Lowerer {
                         // Struct-typed param (`p: P`): record its layout index so `p.x`
                         // field reads can look up the field's float-ness (-1 if not a struct).
                         locals.struct_layout_idx[idx as usize] = lo.struct_layout_idx_of_type(&(*list).head.ty)
+                        // String-typed param (`s: string`) so `s.len()` / `a + b` route to
+                        // the str builtins. Reset the (possibly reused) slot either way.
+                        var ps = 0
+                        if type_expr_is_string(&(*list).head.ty) { ps = 1 }
+                        locals.is_string[idx as usize] = ps
                         locals.count = idx + 1
                     } else {
                         lo = lo.report_error()
@@ -4869,6 +4989,18 @@ impl Lowerer {
                 if li_init >= 0 { lo = lo.set_top_struct_layout_idx(li_init) }
             }
         }
+        // String-type tracking: an explicit `: string` annotation wins; otherwise infer from
+        // a string-valued initializer (`let s = "x"` / `let c = a + b` / `let c = str_concat(..)`).
+        // Lets `s.len()` lower to str_len and string `a + b` lower to str_concat.
+        let ty_opt4: Option<Box<TypeExpr> > = s.ty
+        match ty_opt4 {
+            Some(tybox4) => {
+                if type_expr_is_string(&(*tybox4)) { lo = lo.set_top_is_string(1) }
+            }
+            None => {
+                if lo.opt_expr_is_string_m(&s.expr) == 1 { lo = lo.set_top_is_string(1) }
+            }
+        }
         (lo, reg)
     }
 
@@ -5236,6 +5368,50 @@ impl Lowerer {
 
     fn expr_to_callee_name(self, e: Expr) -> Name with Mut, Panic, Div {
         self.expr_to_callee_name_ref(&e)
+    }
+
+    // Synthesize a call to a 1-arg native-v2 string builtin (e.g. str_len) with the value
+    // already in `arg0`. Mirrors the ExprCall emission ABI (find_or_add_fn_id +
+    // ir_lower_prepend_validated_arg + ir_call) so the backend's name-keyed builtin emitter
+    // sees an ordinary call. Used to lower `s.len()` -> str_len(s).
+    fn emit_str_builtin_call_1(self, builtin: string, arg0: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let name = ir_name_of_ascii(builtin)
+        let args = lo.prepend_arg(arg0, None)
+        let pair_fn = lo.find_or_add_fn_id(name)
+        lo = pair_fn.0
+        let fn_id = pair_fn.1
+        let pair_call = lo.ir_lower_prepend_validated_arg(fn_id, args, 1)
+        lo = pair_call.lo
+        let final_args = pair_call.args
+        let final_argc = pair_call.argc
+        let pair_d = lo.fresh_reg()
+        lo = pair_d.0
+        let dst = pair_d.1
+        lo = lo.emit(ir_call(dst, fn_id, name, final_args, final_argc))
+        (lo, dst)
+    }
+
+    // Synthesize a call to a 2-arg native-v2 string builtin (e.g. str_concat) with the
+    // operands already in `arg0`, `arg1`. Arg order is [arg0, arg1] (rdi, rsi). Used to
+    // lower string `a + b` -> str_concat(a, b).
+    fn emit_str_builtin_call_2(self, builtin: string, arg0: i64, arg1: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let name = ir_name_of_ascii(builtin)
+        var args = lo.prepend_arg(arg1, None)
+        args = lo.prepend_arg(arg0, args)
+        let pair_fn = lo.find_or_add_fn_id(name)
+        lo = pair_fn.0
+        let fn_id = pair_fn.1
+        let pair_call = lo.ir_lower_prepend_validated_arg(fn_id, args, 2)
+        lo = pair_call.lo
+        let final_args = pair_call.args
+        let final_argc = pair_call.argc
+        let pair_d = lo.fresh_reg()
+        lo = pair_d.0
+        let dst = pair_d.1
+        lo = lo.emit(ir_call(dst, fn_id, name, final_args, final_argc))
+        (lo, dst)
     }
 
     fn lower_struct_fields_ref(self, base_reg: i64, fields: &Option<Box<StructFieldList>>, idx: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
@@ -6918,6 +7094,21 @@ impl Lowerer {
                 let dstrj = prj.1
                 return (lorj.emit(ir_wide_reject(dstrj)), dstrj)
             }
+            // String `a + b` -> str_concat(a, b). The checker only types `+` as string when
+            // BOTH operands are string, so detecting EITHER as string is sufficient (and
+            // closes the prior silent miscompile where two rodata pointers were integer-
+            // added into a garbage pointer). Operands lowered in source order (a -> rdi,
+            // b -> rsi) to match the str_concat builtin's ABI.
+            if e.bin_op == BinaryOp::OpAdd
+                && (self.opt_expr_is_string_m(&e.left) == 1 || self.opt_expr_is_string_m(&e.right) == 1) {
+                let pair_sl = self.lower_opt_expr_ref(&e.left)
+                let los1 = pair_sl.0
+                let s_lhs = pair_sl.1
+                let pair_sr = los1.lower_opt_expr_ref(&e.right)
+                let los2 = pair_sr.0
+                let s_rhs = pair_sr.1
+                return los2.emit_str_builtin_call_2("str_concat", s_lhs, s_rhs)
+            }
             // Float-operand detection BEFORE the operands are consumed: an f64/f32 param
             // or array element carries no IrLoadFloat flag, so the backend can't tell the
             // binop is float and would add the raw bits as integers (-> 0). Resolve the
@@ -7002,6 +7193,13 @@ impl Lowerer {
             let pair_b = self.lower_opt_expr_ref(&e.left)
             let lo1 = pair_b.0
             let base_reg = pair_b.1
+            // String `.len()` -> str_len(receiver). The receiver is in base_reg; the proven
+            // str_len builtin reads it from rdi and returns the byte length. Gated on the
+            // receiver being statically string-typed so array/slice `.len()` (a different
+            // semantics) is untouched and still fails closed below.
+            if ir_name_eq(e.name, ir_name_of_ascii("len")) && lo1.opt_expr_is_string_m(&e.left) == 1 {
+                return lo1.emit_str_builtin_call_1("str_len", base_reg)
+            }
             let pair_args: LowerExprArgsResult = lo1.lower_expr_args_ref(&e.args)
             let lo2 = pair_args.lowerer
             let arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
