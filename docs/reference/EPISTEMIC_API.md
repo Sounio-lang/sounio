@@ -2,24 +2,38 @@
 topic_id: repo.docs.reference.epistemic-api
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A3
+last_validated: 2026-06-07
+validated_by: Codex
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.reference.epistemic-api
 -->
 
-# Sounio Epistemic Gaps — API Documentation
+# Sounio Epistemic Gaps — Design Sketch
+
+> **Status: DESIGN SKETCH (aspirational, not current API).**
+>
+> This page preserves an earlier proposal for epistemic promotion, KEC
+> selection, SMC, and adaptive SMC APIs. The files named here
+> (`promotion.rs`, `kec.rs`, `smc.sio`, and `adaptive_smc.sio`) are not present
+> as current repository APIs in this checkout. Treat the Rust and Sounio
+> snippets below as proposed interfaces, not as documented working code.
 
 ## Module Overview
 
-This documentation covers the four main components added to close gaps in Sounio's epistemic computing system.
+This document sketches four proposed components intended to close gaps in
+Sounio's epistemic computing system. It does not describe the current
+implemented API surface. Current validated epistemic claims must be routed
+through `docs/serious-language/public-claim-registry.v1.tsv` and checked
+fixtures or named gates.
 
 ---
 
-## 1. Promotion Lattice (`promotion.rs`)
+## 1. Proposed Promotion Lattice (`promotion.rs`)
 
 ### Purpose
 
-Provides a formal mathematical lattice structure for uncertainty representations, enabling principled promotion (widening) between different uncertainty models.
+Proposed: provide a formal mathematical lattice structure for uncertainty
+representations, enabling principled promotion (widening) between different
+uncertainty models.
 
 ### Core Types
 
@@ -152,11 +166,12 @@ if let PromotedValue::Distribution { samples, mean, variance } = result {
 
 ---
 
-## 2. KEC Auto-Selection (`kec.rs`)
+## 2. Proposed KEC Auto-Selection (`kec.rs`)
 
 ### Purpose
 
-Automatically selects the optimal uncertainty propagation backend based on Knowledge, Entropy, and Complexity analysis.
+Proposed: automatically select the optimal uncertainty propagation backend
+based on Knowledge, Entropy, and Complexity analysis.
 
 ### Core Types
 
@@ -310,7 +325,7 @@ for reason in &result.reasoning {
 
 ---
 
-## 3. Sequential Monte Carlo (`smc.sio`)
+## 3. Proposed Sequential Monte Carlo (`smc.sio`)
 
 ### Purpose
 
@@ -433,7 +448,7 @@ let (lower, upper) = filter.cloud().credible_interval(|x| x, 0.05)
 
 ---
 
-## 4. Adaptive SMC (`adaptive_smc.sio`)
+## 4. Proposed Adaptive SMC (`adaptive_smc.sio`)
 
 ### Purpose
 

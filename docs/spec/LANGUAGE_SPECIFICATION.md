@@ -2,8 +2,8 @@
 topic_id: repo.docs.spec.language-specification
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: 2026-06-07
+validated_by: Codex
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.spec.language-specification
 -->
 
@@ -12,16 +12,29 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.spec.language-
 ## Language Specification v1.0.0-beta.6
 
 **Author**: Demetrios Chiuratto Agourakis
-**Status**: Release Candidate
-**Last Updated**: 2026-03-21
+**Status**: Prototype / validated-research specification, not Release Candidate
+**Last Updated**: 2026-06-07
 
-> **Note (2026-05-27, updated):** Lambda/closure literals (Section 4.7.2) are **normative and implemented** — 16/17 `tests/run-pass/closure_*.sio` pass (the exception is `closure_linear.sio` which tests linear-resource closures, marked `//@ ignore`). The authoritative tiering for every feature in this spec is `docs/serious-language/public-claim-registry.v1.tsv` (see `closures.lambdas = validated_research`); for compiler limits and active gaps see `docs/compiler/KNOWN_LIMITATIONS.md`.
+> **Maturity note (2026-06-07):** This document is a language specification
+> draft for a serious research compiler. It is not a blanket claim that every
+> section is production-ready or uniformly implemented across compiler paths.
+> The authoritative public tiering is
+> `docs/serious-language/public-claim-registry.v1.tsv`. In this checkout,
+> notable prototype surfaces include `stdlib.surface`, `generics.*`,
+> `units.measure`, `refinement.types`, `tooling.package`, `tooling.editor`, and
+> `closures.lambdas` (path-dependent: common cases compile on the host
+> `bin/souc`, while native-v2 parity is not claimed).
 
 ---
 
 ## Abstract
 
-Sounio is a novel systems programming language designed for scientific computing, medical modeling, and high-performance applications. The language combines strong static typing with algebraic effects, linear types, units of measure, and first-class GPU support. This specification defines the syntax, semantics, and type system of the Sounio language.
+Sounio is a research systems programming language designed for scientific
+computing, medical modeling, and high-performance applications. The language
+explores strong static typing with algebraic effects, linear types, units of
+measure, and GPU support. This specification records the intended syntax,
+semantics, and type system, with per-feature maturity governed by the claim
+registry and evidence matrix.
 
 ---
 
@@ -392,11 +405,15 @@ let z = [1, 2, 3]       // Inferred as [int; 3]
 
 ### 3.9 Epistemic Types
 
-Epistemic types enable rigorous uncertainty quantification in scientific computing, following the Guide to the Expression of Uncertainty in Measurement (GUM, JCGM 100:2008).
+Epistemic types are a validated-research surface for checked fixtures and named
+gates. Broad ergonomic APIs remain prototype unless a fixture or gate is cited.
+The design follows the Guide to the Expression of Uncertainty in Measurement
+(GUM, JCGM 100:2008).
 
 #### 3.9.1 The Knowledge\<T\> Type
 
-The `Knowledge<T>` type represents a value with associated uncertainty:
+The `Knowledge<T>` type represents a value with associated uncertainty. The
+conceptual model is:
 
 ```sio
 struct Knowledge<T> {
@@ -410,21 +427,25 @@ struct Knowledge<T> {
 **Construction:**
 
 ```sio
-// From direct measurement
-let temp = Knowledge::new(
-    value: 98.6,
-    variance: 0.04,  // ±0.2°F standard uncertainty
-    confidence: BetaConfidence::new(alpha: 100.0, beta: 5.0),
-    provenance: Provenance::measurement("thermometer_A")
-)
-
-// Exact (zero uncertainty)
-let g = Knowledge::exact(9.81)  // Gravitational constant
+// Checked builtin shape: see tests/run-pass/gum_variance_shadow.sio
+fn main() with IO, Mut, Epistemic {
+    let temp: Knowledge<f64> = measure(98.6, uncertainty: 0.2)
+    let value = temp.value
+    let variance = variance_of(value)
+    println(value)
+    println(variance)
+}
 ```
+
+Older constructor sketches such as `Knowledge::new(...)`,
+`Knowledge::exact(...)`, and named provenance builders are design material, not
+current standalone API examples.
 
 #### 3.9.2 Uncertainty Propagation
 
-Arithmetic operations on `Knowledge<T>` values automatically propagate uncertainty according to GUM first-order Taylor series approximation:
+Checked fixtures demonstrate GUM-style propagation through compiler-supported
+metadata after `measure(...)` and `.value` extraction under `with Epistemic`.
+The intended first-order formulas are:
 
 **Addition/Subtraction:**
 
@@ -584,7 +605,7 @@ fn cockcroft_gault(
 }
 ```
 
-**Climate ensemble analysis:**
+**Climate ensemble analysis (design sketch):**
 
 ```sio
 fn sea_level_rise_projection(
@@ -616,10 +637,12 @@ fn sea_level_rise_projection(
 
 #### 3.9.9 Implementation Notes
 
-- **v1.0 Status**: Full native code generation with GUM-compliant propagation
-- **SIR Pass**: `epistemic_insertion.rs` transforms `BinOp` on `Knowledge<T>`
-- **Runtime**: 593 lines in `backend/native/epistemic_runtime.rs`
-- **Memory layout**: 40 bytes stack-allocated (value: 8B, variance: 8B, confidence: 16B, provenance: 8B pointer)
+- **Status**: validated research for checked Knowledge/GUM fixtures and named
+  gates; not a v1.0 production API claim.
+- **Compiler surface**: current evidence lives in Sounio compiler sources and
+  run-pass fixtures, not in the older Rust file names previously listed here.
+- **Runtime/layout claims**: cite exact gates or source probes before making
+  byte-size or full-codegen claims.
 - **SIMD**: AVX2 (x86-64), NEON (ARM) for parallel value/variance computation
 - **Optimizations**: Exact elision, variance fusion, provenance elision
 
@@ -695,11 +718,11 @@ let result = add(1, 2)
 let chained = obj.method().another()
 ```
 
-### 4.7 Function References and Lambda Literals (both normative)
+### 4.7 Function References and Lambda Literals (prototype / path-dependent)
 
-Sounio has first-class **function references** and **lambda literals** (`|x| x + 1`). Both are normative, implemented, and gate-tested. The public-claim registry reflects this at `closures.lambdas = validated_research` (`docs/serious-language/public-claim-registry.v1.tsv`).
+Sounio has first-class **function references** and **lambda literals** (`|x| x + 1`) in checked host fixtures. This surface is currently classified as `prototype`: common closure cases compile with the host `bin/souc`, linear-resource closure enforcement reports an error as expected, and native-v2 parity is not claimed.
 
-#### 4.7.1 Named Function References (normative — implemented)
+#### 4.7.1 Named Function References (checked host fixtures)
 
 ```sio
 fn square(x: i64) -> i64 { x * x }
@@ -716,7 +739,7 @@ fn main() -> i64 {
 
 Function references support higher-order programming: functions can be stored in variables, passed as arguments, and called indirectly.
 
-#### 4.7.2 Lambda Literals (normative — implemented)
+#### 4.7.2 Lambda Literals (checked host fixtures; prototype overall)
 
 Lambda literals (`|params| body`) create anonymous functions. They may capture variables from the enclosing scope (closures), be passed to higher-order functions, and escape their definition scope.
 
@@ -745,7 +768,11 @@ fn main() -> i64 with IO, Mut, Panic, Div {
 }
 ```
 
-**One open feature:** *linear closures* (capturing linear/affine resources) are not yet implemented. `closure_linear.sio` is `//@ ignore`. All other closure forms are gate-tested in `tests/run-pass/closure_*.sio`.
+**Known boundary:** common closure forms are covered by host run-pass fixtures,
+but this is not a cross-backend production claim. Linear closures are not a
+supported runtime feature; `tests/run-pass/closure_linear.sio` is retained as
+an ignored/enforcement fixture and reports a linear-consumption error when
+compiled directly.
 
 ### 4.8 Effect Expressions
 
@@ -1520,4 +1547,4 @@ block           = "{" { stmt } [ expr ] "}" ;
 
 ---
 
-*End of Sounio Language Specification v0.1.0*
+*End of Sounio Language Specification draft v1.0.0-beta.6 (prototype status)*
