@@ -38,10 +38,22 @@ Current status after the binary-tail and impl-item fixes:
 - `09_if_let_nested.sio`: false E006; `if let` condition is checked as an
   `Option` expression rather than pattern control flow.
 - `10_while_let_option.sio`: still SIGSEGVs in the single-module check path.
-- `13_method_value_receiver.sio`, `14_method_ref_receiver.sio`: no longer
-  SIGSEGV after the impl-item in-place fix, but method lookup still reports
-  false E011.
+- `13_method_value_receiver.sio`, `14_method_ref_receiver.sio`: FIXED — moved
+  to `valid/`. The live `*mut` collect spine had a no-op `ItemImpl` branch in
+  `checker_collect_item_inplace` (check.sio), so no method signatures were
+  registered and `find_method_semantic` returned nothing -> false E011. Wired a
+  `*mut` impl collector (`checker_collect_impl_def_inplace` ported from the dead
+  by-value `collect_impl_def`/`collect_impl_method`). Both `--check` OK and
+  `--native-v2-compile` ELF runs to exit 42. Ill-typed twins (nonexistent
+  method, wrong arg type, wrong receiver type) stay rejected — see
+  `invalid/13_method_*.sio`, `invalid/14_method_ref_nonexistent.sio`.
 - `15_generic_fn_id.sio`, `16_generic_multi_param.sio`,
-  `17_generic_struct_pair.sio`: generic function/struct instantiation still
-  produces false E008/E009/E004.
+  `17_generic_struct_pair.sio`: DEFERRED — generic function/struct
+  instantiation still produces false E008/E009/E004. Needs FnSig type-param
+  storage + per-call turbofish binding + substitution into params/return
+  (15/16: check.sio:~4195 `checker_check_call_args_inner_inplace` compares
+  arg `i64` vs unresolved `TyNamed` `T`) and monomorphized-struct field
+  registration at lowering (17: `checker_lower_named_type_mut` ignores
+  `te.type_args`). A wildcard shortcut would over-accept `id::<i64>(true)` =
+  C0 soundness hole, so these stay deferred until done properly.
 - `18_option_box_match.sio`: false E005 for Box dereference in the checker.

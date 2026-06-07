@@ -2492,6 +2492,91 @@ fn checker_collect_enum_def_inplace(c: *mut Checker, name: Name, opt: Option<Box
     }
 }
 
+// *mut impl-method collector — port of the by-value collect_impl_def (14626) /
+// collect_impl_method (14650) to mutate (*c).fn_sigs IN PLACE. The ItemImpl branch
+// of checker_collect_item_inplace was a no-op, so on the live *mut collect path NO
+// method signatures were registered -> find_method/find_method_semantic found nothing
+// -> false E011. The CHECK path (checker_check_impl_item_inplace, 2616) already works;
+// only the COLLECT path was missing.
+fn checker_collect_method_params_mut(c: *mut Checker, opt: Option<Box<ParamList> >) -> MutParamsResult with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(pl) => {
+            if (*pl).head.is_self {
+                checker_collect_fn_params_mut(c, (*pl).tail)
+            } else {
+                let r = checker_collect_fn_param_list_mut(c, *pl)
+                MutParamsResult { params: Some(Box::new(r.list)), count: r.count }
+            }
+        }
+        None => MutParamsResult { params: None, count: 0 }
+    }
+}
+
+fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: Name) with Mut, Panic, Div, Alloc, IO {
+    match item.fn_def {
+        Some(fd) => {
+            let params_pair = checker_collect_method_params_mut(c, (*fd).params)
+            let params = params_pair.params
+            let param_count = params_pair.count
+            let ret_ty = match (*fd).return_type {
+                Some(te) => checker_lower_type_expr_mut(c, *te)
+                None => ty_unit()
+            }
+            let eff_pair = checker_extract_effects_mut(c, (*fd).effects)
+            let fn_effects = eff_pair.effects
+            let fn_effect_count = eff_pair.count
+            let sig = FnSig {
+                name: item.name,
+                params: params,
+                param_count: param_count,
+                return_type: ret_ty,
+                is_method: true,
+                self_type_name: type_name,
+                self_type_entry: (*c).current_impl_type,
+                effects: fn_effects,
+                effect_count: fn_effect_count,
+                is_kernel: false,
+                is_epistemic_kernel: false,
+                is_linear_closure: false,
+                linear_capture_count: 0,
+                epistemic_epsilon: 0.0 - 1.0,
+            }
+            // Mirror FnSigTable::add in place (same < 64 cap as checker_collect_fn_def_inplace).
+            let sig_id = (*c).fn_sigs.count
+            if sig_id < 64 {
+                (*c).fn_sigs.entries[sig_id as usize] = sig
+                (*c).fn_sigs.count = sig_id + 1
+            }
+        }
+        None => {}
+    }
+}
+
+fn checker_collect_impl_methods_collect_inplace(c: *mut Checker, opt: Option<Box<ItemList> >, type_name: Name) with Mut, Panic, Div, Alloc, IO {
+    var cursor = opt
+    while true {
+        match cursor {
+            Some(list) => {
+                checker_collect_impl_method_inplace(c, (*list).head, type_name)
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_collect_impl_def_inplace(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(id) => {
+            let impl_ty = checker_lower_type_expr_mut(c, (*id).target_type)
+            (*c).current_impl_type = impl_ty
+            checker_collect_impl_methods_collect_inplace(c, (*id).methods, impl_ty.name)
+            (*c).current_impl_type = ty_error()
+        }
+        None => {}
+    }
+}
+
 fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     // Dispatch via explicit `if item.kind == ItemKind::X`, NOT `match item.kind`: bin/souc
     // miscompiles a `match <enum-field>` inside a *mut fn (discriminant-0 → wildcard;
@@ -2506,8 +2591,10 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         checker_collect_struct_def_inplace(c, item.name, item.struct_def)
     } else if item.kind == ItemKind::ItemEnum {
         checker_collect_enum_def_inplace(c, item.name, item.enum_def)
+    } else if item.kind == ItemKind::ItemImpl {
+        checker_collect_impl_def_inplace(c, item.impl_def)
     } else {
-        // ItemUse / ItemSession / impl / typealias / policy / … — not yet collected by the
+        // ItemUse / ItemSession / typealias / policy / … — not yet collected by the
         // *mut spine (no-op, same as before). *mut collectors pending.
     }
 }
