@@ -34,7 +34,20 @@ Current status after the binary-tail and impl-item fixes:
   whether it arrives as a literal or via a local. Both forms stay honest
   false-rejects (R1 witnesses in `invalid/04_hof_closure_value_arg.sio`).
   Re-enable once the backend lowers closure args.
-- `06_tuple_return.sio`: tuple return type lowering/compat remains rejected.
+- `06_tuple_return.sio`: **FIXED** — moved to `valid/`. The `*mut` type-lowerer
+  (`checker_lower_type_expr_mut`, check.sio) had no `TypeTuple` arm, so a
+  `(i64, i64)` return/param type fell to the `_` error arm and the checker
+  false-rejected every tuple-typed program. Added `checker_lower_tuple_type_mut`
+  + `checker_lower_type_expr_list_mut` (mirroring the dead by-value
+  `lower_tuple_type`/`lower_type_expr_list`) and a `TypeTuple` arm. Both
+  `--check` OK and `--native-v2-compile` ELF runs to the correct exit (42 =
+  10+32 for the return form; 42 = 40+2 for a tuple-param form). Ill-typed twins
+  stay rejected for the right reason — `tuple_types_compatible` (compat.sio) is
+  arity- and element-wise structural: wrong return arity / wrong return element
+  type reject with E008, wrong-arity tuple argument rejects with E009. See
+  `invalid/06_tuple_return_wrong_arity.sio`,
+  `invalid/06_tuple_return_wrong_elemtype.sio`,
+  `invalid/06_tuple_param_wrong_arity.sio`.
 - `09_if_let_nested.sio`: false E006; `if let` condition is checked as an
   `Option` expression rather than pattern control flow.
 - `10_while_let_option.sio`: still SIGSEGVs in the single-module check path.

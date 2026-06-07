@@ -1051,6 +1051,32 @@ fn checker_lower_contest_type_mut(c: *mut Checker, opt: Option<Box<TypeExprList>
 // through the *mut spine (was: the `_ =>` default silently noted a type-error → spurious
 // E-mismatch on `let/var x: [T;N] = …`). Returning only TypeEntry keeps the recursive frame
 // small (no held Checker-by-value), so it can never re-introduce the SRET-smash class.
+// *mut tuple-element-list lowering, mirroring Checker::lower_type_expr_list (check.sio ~11652).
+// Recurses head-first so each element type is lowered through the hot *mut dispatch without the
+// 164KB by-value Checker copy. Required for the TypeTuple arm below.
+fn checker_lower_type_expr_list_mut(c: *mut Checker, tel: TypeExprList) -> TypeEntryList with Mut, Panic, Div, Alloc, IO {
+    let head_ty = checker_lower_type_expr_mut(c, tel.head)
+    match tel.tail {
+        None => TypeEntryList { head: head_ty, tail: None }
+        Some(rest) => {
+            let rest_list = checker_lower_type_expr_list_mut(c, *rest)
+            TypeEntryList { head: head_ty, tail: Some(Box::new(rest_list)) }
+        }
+    }
+}
+
+// *mut tuple-type lowering, mirroring Checker::lower_tuple_type (check.sio ~11642). The by-value
+// path copied the 164KB Checker into `self`; the *mut variant routes through the hot dispatch
+// without the SRET-smash frame class. This is what was missing — the *mut type-lowering had no
+// TypeTuple arm, so a valid `(i64, i64)` return/param type fell to the `_` error arm and the
+// checker false-rejected every tuple-typed program.
+fn checker_lower_tuple_type_mut(c: *mut Checker, opt: Option<Box<TypeExprList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(tel) => ty_tuple(checker_lower_type_expr_list_mut(c, *tel))
+        None => ty_unit()
+    }
+}
+
 fn checker_lower_array_type_mut(c: *mut Checker, inner_opt: Option<Box<TypeExpr> >, size_opt: Option<Box<Expr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     match inner_opt {
         Some(inner_te) => {
@@ -1257,6 +1283,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         }
         TypeExprKind::TypeArray => checker_lower_array_type_mut(c, te.inner, te.array_size)
         TypeExprKind::TypeFn => checker_lower_fn_type_mut(c, te)
+        TypeExprKind::TypeTuple => checker_lower_tuple_type_mut(c, te.type_args)
         _ => {
             checker_note_type_error_mut(c)
             ty_error()
