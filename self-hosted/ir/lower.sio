@@ -24,6 +24,11 @@ struct LowerLocalStack {
     // (which only sees LoadFloat-flagged regs in the backend) recognise float operands
     // that originate from params / array elements. Mirrors `limbs`/`elem_counts`.
     is_float: [i64; 4096],
+    // Index into the Lowerer's struct_layouts table for a struct-typed binding (param /
+    // let of a known struct type), else -1. Lets a field read `p.x` resolve the base's
+    // struct type and look up the field's float-ness (StructFieldEntry.is_float), so float
+    // struct-field arithmetic routes to the SSE path. -1 = not a tracked struct local.
+    struct_layout_idx: [i64; 4096],
     count: i64,
 }
 
@@ -35,6 +40,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         limbs: [0; 4096],
         elem_counts: [0; 4096],
         is_float: [0; 4096],
+        struct_layout_idx: [-1; 4096],
         count: 0,
     }
 }
@@ -145,9 +151,9 @@ fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLayoutTable w
     }
     let idx = t.count
     var fields: [StructFieldEntry; 64] = [empty_struct_field_entry(); 64]
-    fields[0] = StructFieldEntry { name: make_name("value"), index: 0 }
-    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1 }
-    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2 }
+    fields[0] = StructFieldEntry { name: make_name("value"), index: 0, is_float: 1 }
+    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1, is_float: 1 }
+    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2, is_float: 1 }
     t.entries[idx as usize] = StructLayoutEntry {
         type_name: make_name("Knowledge"),
         fields: fields,
@@ -615,9 +621,12 @@ fn lowerer_register_struct_fields_mut(
                     // The deeper nested store (*sl).entries[i].fields[j]=.. is still
                     // miscompiled; copy the whole entry out, mutate the local, store it back.
                     var entry = (*sl).entries[layout_idx as usize]
+                    var fld_is_float = 0
+                    if type_expr_is_float(&(*list).head.ty) { fld_is_float = 1 }
                     entry.fields[fc as usize] = StructFieldEntry {
                         name: (*list).head.name,
                         index: field_idx,
+                        is_float: fld_is_float,
                     }
                     entry.field_count = fc + 1
                     (*sl).entries[layout_idx as usize] = entry
@@ -1049,9 +1058,12 @@ fn ir_fast_summary_register_struct_fields_owned(
             }
             let fc = table_value.entries[layout_idx as usize].field_count
             if fc < 64 {
+                var sfld_is_float = 0
+                if type_expr_is_float(&(*list).head.ty) { sfld_is_float = 1 }
                 table_value.entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
                     name: (*list).head.name,
                     index: idx,
+                    is_float: sfld_is_float,
                 }
                 table_value.entries[layout_idx as usize].field_count = fc + 1
             }
@@ -1298,6 +1310,7 @@ fn lowerer_bind_local_mut(
         (*(*lo).locals).regs[idx as usize] = reg
         (*(*lo).locals).depths[idx as usize] = (*lo).scope_depth
         (*(*lo).locals).is_float[idx as usize] = 0
+        (*(*lo).locals).struct_layout_idx[idx as usize] = -1
         (*(*lo).locals).count = idx + 1
     } else {
         lowerer_mark_error(lo)
@@ -1311,6 +1324,41 @@ fn lowerer_set_top_is_float_mut(lo: &! Lowerer, flag: i64) with Mut, Panic, Div 
         let idx = (*(*lo).locals).count - 1
         (*(*lo).locals).is_float[idx as usize] = flag
     }
+}
+
+// Record the struct-layout index of the most-recently-bound local (used by the param loop
+// to record a struct-typed param so its field reads can look up field float-ness).
+fn lowerer_set_top_struct_layout_idx_mut(lo: &! Lowerer, li: i64) with Mut, Panic, Div {
+    if (*(*lo).locals).count > 0 {
+        let idx = (*(*lo).locals).count - 1
+        (*(*lo).locals).struct_layout_idx[idx as usize] = li
+    }
+}
+
+// First path segment as a Name, read by REFERENCE straight from segments.head (the same
+// access pattern type_expr_is_float uses). Avoids ir_path_last_name, which (a) takes the
+// large AstPath BY VALUE — a by-value pass the mc backend miscompiles — and (b) returns
+// empty when seg_count<=0 even though the name is present in segments.head. For a plain
+// named type / struct-literal head (`P`) this is exactly the type name.
+fn ast_path_head_name_ref(p: &AstPath) -> Name with Mut, Panic, Div {
+    Name { buf: (*p).segments.head_buf, len: (*p).segments.head_len }
+}
+
+// Struct-layout index for a PLAIN named struct type (`P`), else -1. Restricted to
+// TypeNamed so `&P`, `[P;N]`, `Box<P>` etc. resolve to -1 (conservative: those field
+// reads stay on the integer path, never mis-tagged to SSE). Free-fn flavour for the
+// mut param loop; mirrors the method `struct_layout_idx_of_type`.
+fn lowerer_struct_layout_idx_of_type_mut(lo: &! Lowerer, te: &TypeExpr) -> i64 with Mut, Panic, Div, Alloc {
+    if (*te).kind != TypeExprKind::TypeNamed { return -1 }
+    let nm = ast_path_head_name_ref(&(*te).path)
+    var si: i64 = 0
+    while si < (*(*lo).struct_layouts).count {
+        if ir_name_eq((*(*lo).struct_layouts).entries[si as usize].type_name, nm) {
+            return si
+        }
+        si = si + 1
+    }
+    -1
 }
 
 fn lowerer_fresh_reg_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
@@ -1366,6 +1414,12 @@ fn lowerer_lower_fn_params_mut(
                 // are added as integers (the both-memory-operand miscompile -> 0).
                 if type_expr_is_float(&(*list).head.ty) {
                     lowerer_set_top_is_float_mut(lo, 1)
+                }
+                // Record a struct-typed param (`p: P`) so `p.x` field reads can look up
+                // the field's float-ness and route float field arithmetic to SSE.
+                let p_li = lowerer_struct_layout_idx_of_type_mut(lo, &(*list).head.ty)
+                if p_li >= 0 {
+                    lowerer_set_top_struct_layout_idx_mut(lo, p_li)
                 }
                 current = &(*list).tail
             }
@@ -2738,6 +2792,7 @@ impl Lowerer {
             stk.limbs[idx as usize] = limbs
             stk.elem_counts[idx as usize] = 0
             stk.is_float[idx as usize] = 0
+            stk.struct_layout_idx[idx as usize] = -1
             stk.count = idx + 1
             lo.locals = Box::new(stk)
         } else {
@@ -2783,6 +2838,18 @@ impl Lowerer {
         lo
     }
 
+    // Record the struct-layout index of the most-recently-bound local. Mirrors
+    // set_top_is_float. No-op if no binding exists.
+    fn set_top_struct_layout_idx(self, li: i64) -> Lowerer with Mut, Alloc, Panic {
+        var lo = self
+        var stk = *lo.locals
+        if stk.count > 0 {
+            stk.struct_layout_idx[(stk.count - 1) as usize] = li
+            lo.locals = Box::new(stk)
+        }
+        lo
+    }
+
     // 1 if the binding named `name` is float-typed (scalar float value, or float array
     // element), else 0. Mirrors lookup_local's depth+name scan.
     fn lookup_local_is_float(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
@@ -2795,6 +2862,70 @@ impl Lowerer {
             i = i - 1
         }
         0
+    }
+
+    // Struct-layout index recorded for the binding named `name`, or -1 if it is not a
+    // tracked struct local. Mirrors lookup_local_is_float's depth+name scan.
+    fn lookup_local_struct_layout(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        let stk = *self.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= self.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                return stk.struct_layout_idx[i as usize]
+            }
+            i = i - 1
+        }
+        -1
+    }
+
+    // Index of the struct layout named `nm`, or -1 if not registered.
+    fn find_struct_layout_idx(self, nm: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, nm) {
+                return si
+            }
+            si = si + 1
+        }
+        -1
+    }
+
+    // Struct-layout index for a PLAIN named struct type (`P`), else -1 (see the mut-flavour
+    // note: `&P`/`[P;N]`/`Box<P>` deliberately resolve to -1).
+    fn struct_layout_idx_of_type(self, te: &TypeExpr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*te).kind != TypeExprKind::TypeNamed { return -1 }
+        self.find_struct_layout_idx(ast_path_head_name_ref(&(*te).path))
+    }
+
+    // Float-ness of field `fname` within the struct layout at `li` (1 = f32/f64 field),
+    // or 0 if the field is not found / not float. STRICT: returns 1 only for a layout
+    // field explicitly recorded float, so an integer field never routes arithmetic to SSE.
+    fn field_is_float_in_layout(self, li: i64, fname: Name) -> i64 with Mut, Panic, Div, Alloc {
+        if li < 0 || li >= (*self.struct_layouts).count { return 0 }
+        let fc = (*self.struct_layouts).entries[li as usize].field_count
+        var fi: i64 = 0
+        while fi < fc {
+            if ir_name_eq((*self.struct_layouts).entries[li as usize].fields[fi as usize].name, fname) {
+                return (*self.struct_layouts).entries[li as usize].fields[fi as usize].is_float
+            }
+            fi = fi + 1
+        }
+        0
+    }
+
+    // Struct-layout index inferred from a let initializer expression: a struct literal
+    // `let p = P { ... }` yields P's layout index; anything else -1. Lets an UNANNOTATED
+    // struct let still track its type for field-float recognition. Mirrors opt_expr_is_float_m.
+    fn opt_struct_layout_idx_from_init(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => {
+                if (*e).kind == ExprKind::ExprStructLit {
+                    return self.find_struct_layout_idx(ast_path_head_name_ref(&(*e).path))
+                }
+                -1
+            }
+            _ => -1,
+        }
     }
 
     fn lookup_local(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
@@ -2869,6 +3000,24 @@ impl Lowerer {
             // value, so exclude it: float-ness applies only at the index site below.
             if self.lookup_local_elem_count((*e).name) > 0 { return 0 }
             return self.lookup_local_is_float((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            // `p.x` is float iff base `p` is an IDENT bound to a known struct layout AND
+            // field `x` in that layout is float-typed. Ident base only (matches ExprIndex);
+            // non-ident bases (f().x, a[i].x, nested o.inner.x) and untracked structs -> 0:
+            // those stay on the integer path (unfixed, never mis-tagged onto the SSE path).
+            match (*e).left {
+                Some(base) => {
+                    if (*base).kind == ExprKind::ExprIdent {
+                        let li = self.lookup_local_struct_layout((*base).name)
+                        if li >= 0 {
+                            return self.field_is_float_in_layout(li, (*e).name)
+                        }
+                    }
+                    return 0
+                }
+                None => { return 0 }
+            }
         }
         if (*e).kind == ExprKind::ExprIndex {
             // a[i] is float iff `a`'s local records a float element type.
@@ -3323,51 +3472,16 @@ impl Lowerer {
             print_int(idx)
             print("\n")
         }
-        var layout_idx: i64 = -1
-        var si: i64 = 0
-        while si < (*lo.struct_layouts).count {
-            if ir_name_eq((*lo.struct_layouts).entries[si as usize].type_name, type_name) {
-                layout_idx = si
-            }
-            si = si + 1
-        }
-        if layout_idx < 0 {
-            if (*lo.struct_layouts).count < 256 {
-                layout_idx = (*lo.struct_layouts).count
-                (*lo.struct_layouts).entries[layout_idx as usize] = StructLayoutEntry {
-                    type_name: type_name,
-                    fields: [empty_struct_field_entry(); 64],
-                    field_count: 0,
-                }
-                (*lo.struct_layouts).count = (*lo.struct_layouts).count + 1
-            } else {
-                return lo.report_error()
-            }
-        }
-        var current = fields
-        var field_idx = idx
-        while true {
-            match *current {
-                Some(list) => {
-                    let fc = (*lo.struct_layouts).entries[layout_idx as usize].field_count
-                    if fc < 64 {
-                        (*lo.struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
-                            name: (*list).head.name,
-                            index: field_idx,
-                        }
-                        (*lo.struct_layouts).entries[layout_idx as usize].field_count = fc + 1
-                    }
-                    current = &(*list).tail
-                    field_idx = field_idx + 1
-                }
-                _ => break
-            }
-        }
+        // Delegate to the PROVEN mut registration. The previous inline body wrote through
+        // (*lo.struct_layouts).entries[..] — the double-deref-through-Box store c634b38f
+        // no-ops — so neither the entry (type_name) nor the fields ever landed: the layout
+        // table stayed at just the Knowledge builtin and every struct-type lookup missed.
+        // The mut fn binds `let sl = (*lo).struct_layouts` first and uses the copy-out
+        // workaround, so it actually populates type_name + fields (incl. is_float).
+        lowerer_register_struct_fields_mut(&! lo, type_name, fields, idx)
         if lower_ordered_diag_enabled() {
             print("lower_ordered: struct_fields_done type=")
             print(str_from_bytes(type_name.buf, type_name.len))
-            print(" field_count=")
-            print_int((*lo.struct_layouts).entries[layout_idx as usize].field_count)
             print("\n")
         }
         lo
@@ -4051,6 +4165,9 @@ impl Lowerer {
                         if type_expr_is_float(&(*list).head.ty) { pf = 1 }
                         else if type_expr_array_elem_is_float(&(*list).head.ty) { pf = 1 }
                         locals.is_float[idx as usize] = pf
+                        // Struct-typed param (`p: P`): record its layout index so `p.x`
+                        // field reads can look up the field's float-ness (-1 if not a struct).
+                        locals.struct_layout_idx[idx as usize] = lo.struct_layout_idx_of_type(&(*list).head.ty)
                         locals.count = idx + 1
                     } else {
                         lo = lo.report_error()
@@ -4731,6 +4848,20 @@ impl Lowerer {
                 if lo.opt_expr_is_float_m(&s.expr) == 1 {
                     lo = lo.set_top_is_float(1)
                 }
+            }
+        }
+        // Struct-type tracking for the binding so `p.x` field reads recover float-ness.
+        // Annotated `let p: P` resolves from the annotation; an unannotated `let p = P{..}`
+        // infers P from the struct-literal initializer. -1 (non-struct) leaves it untracked.
+        let ty_opt3: Option<Box<TypeExpr> > = s.ty
+        match ty_opt3 {
+            Some(tybox3) => {
+                let li_ann = lo.struct_layout_idx_of_type(&(*tybox3))
+                if li_ann >= 0 { lo = lo.set_top_struct_layout_idx(li_ann) }
+            }
+            None => {
+                let li_init = lo.opt_struct_layout_idx_from_init(&s.expr)
+                if li_init >= 0 { lo = lo.set_top_struct_layout_idx(li_init) }
             }
         }
         (lo, reg)
