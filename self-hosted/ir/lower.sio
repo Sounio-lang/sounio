@@ -18,6 +18,12 @@ struct LowerLocalStack {
     // Array element count of the binding (for `let a: [T; N]`): N, used to desugar
     // `for x in a`. 0 = not a known-size array. Mirrors `limbs` tracking.
     elem_counts: [i64; 4096],
+    // Float-typedness of the binding (1 = the value is f32/f64). For a scalar `let s:
+    // f64` / f64 param this is the value's float-ness; for an array `let a:[f64;N]` it
+    // is the ELEMENT float-ness (so `a[i]` is float). Lets the binop float-detection
+    // (which only sees LoadFloat-flagged regs in the backend) recognise float operands
+    // that originate from params / array elements. Mirrors `limbs`/`elem_counts`.
+    is_float: [i64; 4096],
     count: i64,
 }
 
@@ -28,6 +34,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         depths: [0; 4096],
         limbs: [0; 4096],
         elem_counts: [0; 4096],
+        is_float: [0; 4096],
         count: 0,
     }
 }
@@ -1290,9 +1297,19 @@ fn lowerer_bind_local_mut(
         (*(*lo).locals).names[idx as usize] = name
         (*(*lo).locals).regs[idx as usize] = reg
         (*(*lo).locals).depths[idx as usize] = (*lo).scope_depth
+        (*(*lo).locals).is_float[idx as usize] = 0
         (*(*lo).locals).count = idx + 1
     } else {
         lowerer_mark_error(lo)
+    }
+}
+
+// Mark the most-recently-bound local (via lowerer_bind_local_mut) as float-typed. Used by
+// the param loop to record f64/f32 params so their later use in arithmetic is recognised.
+fn lowerer_set_top_is_float_mut(lo: &! Lowerer, flag: i64) with Mut, Panic, Div {
+    if (*(*lo).locals).count > 0 {
+        let idx = (*(*lo).locals).count - 1
+        (*(*lo).locals).is_float[idx as usize] = flag
     }
 }
 
@@ -1344,6 +1361,12 @@ fn lowerer_lower_fn_params_mut(
                 }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, preg, (*list).head.is_self_mut)
+                // Record float-typed params so their use in arithmetic routes to the SSE
+                // path. The backend has no param types; without this an f64 param's bits
+                // are added as integers (the both-memory-operand miscompile -> 0).
+                if type_expr_is_float(&(*list).head.ty) {
+                    lowerer_set_top_is_float_mut(lo, 1)
+                }
                 current = &(*list).tail
             }
             _ => break
@@ -1622,6 +1645,30 @@ fn lower_cast_type_is_float(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic,
             if b1 == 51 && b2 == 50 { return true }   // f32
             false
         }
+        None => false,
+    }
+}
+
+// True if a bare TypeExpr names a floating type (f32 OR f64). Mirrors the byte test in
+// lower_cast_type_is_float but takes the TypeExpr directly (params/let carry a TypeExpr,
+// not a cast Option). Both f32 and f64 are stored as 64-bit doubles in the backend.
+fn type_expr_is_float(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    let seg = (*te).path.segments
+    if seg.head_len != 3 { return false }
+    if seg.head_buf[0] as i64 != 102 { return false }   // 'f'
+    let b1 = seg.head_buf[1] as i64
+    let b2 = seg.head_buf[2] as i64
+    if b1 == 54 && b2 == 52 { return true }   // f64
+    if b1 == 51 && b2 == 50 { return true }   // f32
+    false
+}
+
+// True if `te` is `[E; N]` with a floating element type E. Used so `let a:[f64;N]`
+// records float-ness of the elements, making `a[i]` a recognised float operand.
+fn type_expr_array_elem_is_float(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeArray { return false }
+    match (*te).inner {
+        Some(inner) => type_expr_is_float(&(*inner)),
         None => false,
     }
 }
@@ -2690,6 +2737,7 @@ impl Lowerer {
             stk.depths[idx as usize] = lo.scope_depth
             stk.limbs[idx as usize] = limbs
             stk.elem_counts[idx as usize] = 0
+            stk.is_float[idx as usize] = 0
             stk.count = idx + 1
             lo.locals = Box::new(stk)
         } else {
@@ -2717,6 +2765,32 @@ impl Lowerer {
         while i >= 0 {
             if stk.depths[i as usize] <= self.scope_depth && ir_name_eq(stk.names[i as usize], name) {
                 return stk.elem_counts[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // Mark the most-recently-bound local as float-typed (`let s: f64` / f64 param /
+    // `let a: [f64; N]` element). Mirrors set_top_elem_count. No-op if no binding.
+    fn set_top_is_float(self, flag: i64) -> Lowerer with Mut, Alloc, Panic {
+        var lo = self
+        var stk = *lo.locals
+        if stk.count > 0 {
+            stk.is_float[(stk.count - 1) as usize] = flag
+            lo.locals = Box::new(stk)
+        }
+        lo
+    }
+
+    // 1 if the binding named `name` is float-typed (scalar float value, or float array
+    // element), else 0. Mirrors lookup_local's depth+name scan.
+    fn lookup_local_is_float(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        let stk = *self.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= self.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                return stk.is_float[i as usize]
             }
             i = i - 1
         }
@@ -2773,6 +2847,55 @@ impl Lowerer {
     fn opt_expr_wide_limbs_m(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
         match *opt {
             Some(e) => self.expr_wide_limbs_m(&(*e)),
+            _ => 0,
+        }
+    }
+
+    // 1 if `e` evaluates to a float (f32/f64) value, resolving idents against the locals'
+    // float tracking so a param / float-local / float-array element is recognised. The
+    // backend's binop float-detection only sees regs flagged by IrLoadFloat; this lets the
+    // lowerer mark a binop whose float operand came from a param or array element instead.
+    // STRICT: returns 1 ONLY for genuinely-float sources so an integer binop is never
+    // mis-routed to the SSE path (which would silently miscompile integer arithmetic).
+    fn expr_is_float_m(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprFloatLit { return 1 }
+        if (*e).kind == ExprKind::ExprCast {
+            if lower_cast_type_is_float(&(*e).cast_type) { return 1 }
+            return 0
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            // A SCALAR float local (`let s: f64` / f64 param). An array local also stores
+            // is_float (the ELEMENT type), but a bare array ident is a handle, not a float
+            // value, so exclude it: float-ness applies only at the index site below.
+            if self.lookup_local_elem_count((*e).name) > 0 { return 0 }
+            return self.lookup_local_is_float((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprIndex {
+            // a[i] is float iff `a`'s local records a float element type.
+            match (*e).left {
+                Some(base) => {
+                    if (*base).kind == ExprKind::ExprIdent {
+                        return self.lookup_local_is_float((*base).name)
+                    }
+                    0
+                }
+                None => 0,
+            }
+        } else if (*e).kind == ExprKind::ExprBinary {
+            // Arithmetic on float operands is float; a comparison yields an i64 (not float).
+            if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub
+               || (*e).bin_op == BinaryOp::OpMul || (*e).bin_op == BinaryOp::OpDiv {
+                if self.opt_expr_is_float_m(&(*e).left) == 1 { return 1 }
+                if self.opt_expr_is_float_m(&(*e).right) == 1 { return 1 }
+            }
+            0
+        } else {
+            0
+        }
+    }
+    fn opt_expr_is_float_m(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => self.expr_is_float_m(&(*e)),
             _ => 0,
         }
     }
@@ -3921,6 +4044,13 @@ impl Lowerer {
                         locals.depths[idx as usize] = lo.scope_depth
                         locals.limbs[idx as usize] = 0
                         locals.elem_counts[idx as usize] = lo.type_array_literal_elem_count(&(*list).head.ty)
+                        // Float-typed params (f32/f64 scalar, or float array element) so their
+                        // use in arithmetic routes to the SSE path. The backend has no param
+                        // types; without this an f64 param's bits add as integers (-> 0).
+                        var pf = 0
+                        if type_expr_is_float(&(*list).head.ty) { pf = 1 }
+                        else if type_expr_array_elem_is_float(&(*list).head.ty) { pf = 1 }
+                        locals.is_float[idx as usize] = pf
                         locals.count = idx + 1
                     } else {
                         lo = lo.report_error()
@@ -4580,6 +4710,26 @@ impl Lowerer {
                         }
                     }
                     None => {}
+                }
+            }
+        }
+        // Float-typedness tracking (mirrors the elem_count block). An explicit annotation
+        // wins: `let s: f64` is a float scalar; `let a: [f64; N]` records float ELEMENTS
+        // (so a[i] is float). With no annotation, infer from the initializer so a value
+        // derived from float params/elements (`let s = a + b`) stays float for downstream
+        // arithmetic and the `as i64` cast. STRICT: only genuine float sources set the flag.
+        let ty_opt2: Option<Box<TypeExpr> > = s.ty
+        match ty_opt2 {
+            Some(tybox) => {
+                if type_expr_is_float(&(*tybox)) {
+                    lo = lo.set_top_is_float(1)
+                } else if type_expr_array_elem_is_float(&(*tybox)) {
+                    lo = lo.set_top_is_float(1)
+                }
+            }
+            None => {
+                if lo.opt_expr_is_float_m(&s.expr) == 1 {
+                    lo = lo.set_top_is_float(1)
                 }
             }
         }
@@ -6632,6 +6782,14 @@ impl Lowerer {
                 let dstrj = prj.1
                 return (lorj.emit(ir_wide_reject(dstrj)), dstrj)
             }
+            // Float-operand detection BEFORE the operands are consumed: an f64/f32 param
+            // or array element carries no IrLoadFloat flag, so the backend can't tell the
+            // binop is float and would add the raw bits as integers (-> 0). Resolve the
+            // operand exprs against the locals' float tracking and tag the IrBinOp.
+            var binop_is_float = 0
+            if self.opt_expr_is_float_m(&e.left) == 1 || self.opt_expr_is_float_m(&e.right) == 1 {
+                binop_is_float = 1
+            }
             let pair_l = self.lower_opt_expr_ref(&e.left)
             let lo1 = pair_l.0
             let lhs = pair_l.1
@@ -6651,7 +6809,7 @@ impl Lowerer {
                     }
                 }
             }
-            let lo4 = lo3.emit(ir_binop(dst, lhs, e.bin_op, rhs))
+            let lo4 = lo3.emit(ir_binop_float(dst, lhs, e.bin_op, rhs, binop_is_float))
             (lo4, dst)
         } else if e.kind == ExprKind::ExprUnary {
             let pair_s = self.lower_opt_expr_ref(&e.left)

@@ -22,6 +22,7 @@
 #   tests/native_v2_checker_crash_gate/run.sh         (rc==0 + "26/26")
 #   tests/native_v2_literal_coercion_gate/run.sh      (rc==0 + "19/19")
 #   tests/native_v2_float_compare_gate/run.sh         (rc==0 + "9/9"; M1 f32-cmp)
+#   tests/native_v2_float_arith_gate/run.sh           (rc==0 + "11/11"; both-mem-operand)
 #   tests/native_v2_multimodule_gate/run.sh           (tracked residual; see below)
 #   tests/native_v2_backend_soundness_gate/run.sh     (tracked residual; see below)
 #   scripts/dev/run_runpass_parse_only_current.sh     (rc==0 + "passed=525")
@@ -256,6 +257,7 @@ gate_tests_rc_count "native_v2_closure"        tests/native_v2_closure_gate/run.
 gate_tests_rc_count "native_v2_checker_crash"  tests/native_v2_checker_crash_gate/run.sh  "26/26"
 gate_tests_rc_count "native_v2_literal_coercion" tests/native_v2_literal_coercion_gate/run.sh "19/19"
 gate_tests_rc_count "native_v2_float_compare"  tests/native_v2_float_compare_gate/run.sh  "9/9"
+gate_tests_rc_count "native_v2_float_arith"    tests/native_v2_float_arith_gate/run.sh    "11/11"
 
 gate_tracked_residual "native_v2_backend_soundness" \
   tests/native_v2_backend_soundness_gate/run.sh \
