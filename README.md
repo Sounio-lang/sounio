@@ -2,8 +2,8 @@
 topic_id: repo.frontdoor.readme
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: 2026-06-07
+validated_by: claude-release-apparatus (mc = Madares v0.80.0, tip claude/release-apparatus)
 source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 -->
 
@@ -17,7 +17,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 <p align="center">
   <a href="https://www.souniolang.org"><img src="https://img.shields.io/badge/website-souniolang.org-blue.svg" alt="Sounio Website"/></a>
   <a href="https://www.souniolang.org/playground"><img src="https://img.shields.io/badge/playground-wasm-purple.svg" alt="Playground"/></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.0.0--beta.6-orange.svg" alt="Version 1.0.0-beta.6"/></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/compiler-Madares%20v0.80.0-orange.svg" alt="Self-hosted compiler: Madares v0.80.0"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-gold.svg" alt="Apache-2.0 License"/></a>
   <a href="#honest-status"><img src="https://img.shields.io/badge/scale-4.2k%20.sio%20files-informational.svg" alt="~4.2k tracked .sio files; see SCALE.md"/></a>
 </p>
@@ -49,7 +49,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 | **Mathematical Rigor** | Non-associative octonion basis associators, formalized Lean 4 proofs of invariants. | `non-associative-algebra`, `octonions`, `lean4-proofs` |
 | **Dimensional Analysis** | Compile-time unit checking (`VAR_UNIT_DIM`) to prevent physical dimension errors. | `dimensional-analysis`, `unit-types`, `compile-time-units` |
 
-The compiler is **self-hosted**: Sounio compiles itself, bootstrapped from a [2000-line C compiler](bootstrap/stage0.c) through a multi-stage chain to a true fixed-point where stage N and stage N+1 produce bit-identical binaries. It was used to computationally verify a new result in algebra — that the count of nonzero octonion basis associators equals |PSL(2,7)| = 168 — now [submitted for publication](#the-168-theorem).
+The compiler is **self-hosted in Sounio**, bootstrapped from a [2000-line C compiler](bootstrap/stage0.c) through a multi-stage chain. The shipped bootstrap binary (`bin/souc`, a static `mini_native` ELF) builds the modular self-hosted compiler `self-hosted/compiler/main.sio` (which self-identifies as **Madares v0.80.0**). The legacy `lean_single.sio` lane reaches a bit-identical bootstrap fixed point; the modular `main.sio` compiler does **not** yet self-compile to a native ELF (see [Current limitations](#current-limitations)). Sounio was used to computationally verify a new result in algebra — that the count of nonzero octonion basis associators equals |PSL(2,7)| = 168 — now [submitted for publication](#the-168-theorem).
 
 This is an active **research project**, not a production release. Read the [honest status](#honest-status) before using it for anything serious.
 
@@ -106,9 +106,9 @@ The current published dataset lives in the maintainer namespace as a public mirr
 
 ## What makes Sounio different
 
-**Epistemic types as first-class citizens.** Every scientific measurement has uncertainty. Most languages ignore this. Sounio's type system includes `Knowledge[T]` with built-in confidence, provenance tracking, and automatic GUM-compliant uncertainty propagation. The compiler can enforce confidence thresholds at compile time — a function requiring `ε >= 0.82` rejects under-confident data before any code runs. No equivalent system exists in any production language.
+**Epistemic types as a design goal.** Every scientific measurement has uncertainty. Most languages ignore this. Sounio's type system is being built around `Knowledge[T]` with confidence, provenance tracking, and GUM-compliant uncertainty propagation. The epistemic surface is **prototype-grade** on the current self-hosted compiler: the `Knowledge(...)` constructor and `ε >= 0.82` confidence-gate syntax do not yet typecheck/enforce on the modular compiler (single-module `--check` performs resolve-skip, so these forms parse but are not actually validated). See [Current limitations](#current-limitations) before relying on them.
 
-**Self-hosted compiler.** The compiler bootstrapped from C through a multi-stage chain (`stage0.c` → `boot2g.sio` → self-hosted) to a true fixed-point. The default workflow is now native-only: `bin/souc` compiles `.sio` sources to temporary or named ELFs via the self-hosted compiler and executes those binaries directly.
+**Self-hosted compiler.** The compiler bootstrapped from C through a multi-stage chain (`stage0.c` → `boot2g.sio` → self-hosted). The shipped `bin/souc` is the bootstrap binary (a static `mini_native` ELF) and uses the raw interface `souc <source.sio> <output> [flags]` — it is **not** a launcher with `check`/`compile`/`build`/`run` subcommands. The modular compiler it builds (`Madares v0.80.0`) compiles single-file `.sio` programs to a native x86-64 ELF via `--native-v2-compile`, with `main()`'s return value as the process exit code.
 
 **Not a Rust/Julia dialect.** Own syntax (`&!` not `&mut`, `var` not `let mut`), own semantics (algebraic effects, linear types, dimensional analysis), own philosophy (epistemic computing for science).
 
@@ -116,7 +116,13 @@ The current published dataset lives in the maintainer namespace as a public mirr
 
 ## Quick taste
 
-### Uncertainty propagation with provenance
+> The epistemic examples below show the **language design** (spec-level syntax). The
+> `Knowledge(...)` constructor and `ε >= 0.82` confidence gates are **prototype** and do
+> not yet typecheck or enforce on the current self-hosted compiler — see
+> [Current limitations](#current-limitations). The effects/linear-types example further
+> down is verified-working.
+
+### Uncertainty propagation with provenance (design preview)
 
 ```
 fn main() with IO {
@@ -138,7 +144,7 @@ fn main() with IO {
 
 > Full pipeline: [tests/run-pass/vancomycin_propagation.sio](tests/run-pass/vancomycin_propagation.sio) — real ASHP 2020 vancomycin dosing with 5-step GUM propagation.
 
-### Compile-time confidence gate
+### Compile-time confidence gate (design preview — not yet enforced)
 
 ```
 // ASHP 2020 §8.3: AUC-guided dosing requires ε >= 0.82
@@ -153,9 +159,9 @@ fn main() with IO {
 }
 ```
 
-> The compiler rejects this *before any code runs* — a hard patient-safety guarantee. See: [tests/compile-fail/vancomycin_low_conf.sio](tests/compile-fail/vancomycin_low_conf.sio)
+> This is the intended semantics — confidence-gated rejection *before any code runs*. It is a **design goal, not yet enforced** by the current self-hosted compiler. See: [tests/compile-fail/vancomycin_low_conf.sio](tests/compile-fail/vancomycin_low_conf.sio)
 
-### Effects and linear types
+### Effects and linear types (verified-working)
 
 ```
 fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
@@ -187,16 +193,23 @@ This is an active research repository. Public claims are registry-backed; see [`
 
 **Scale (measured, 2026-05):** **4,233** tracked `.sio` files, **~1.84M** lines (`bash scripts/dev/measure_repo_scale.sh`). The self-hosted compiler alone is **~542k** lines — not a small experiment. Full audit: [docs/audit/README.md](docs/audit/README.md) · [SCALE.md](SCALE.md).
 
-### What WORKS (evidence-backed lanes)
+### What WORKS (evidence-backed, re-verified 2026-06-07 against `Madares v0.80.0`)
 
 | Component | Status | Evidence |
 |---|---|---|
-| **Epistemic core** | `Knowledge[T]` + GUM + provenance | Named package / conformance gates |
-| **Self-hosted compiler** | Lexer → codegen; fixed-point bootstrap | `lean_single` fixed-point + native-v2 spine gates |
+| **Single-file source → native ELF** | mc `--native-v2-compile`; `main()` → exit code | `tests/native_v2_capgate/run.sh` = **32/32** |
+| **Linear types (use-once)** | double-consume is a compile error | `--check` rejects second use of a `linear struct` |
+| **Multi-module link + run** | imports resolve, link, execute | `tests/native_v2_multimodule_gate/run.sh` = 9/9 (one tracked import-typecheck-bypass class, documented) |
+| **Cross-compile** | macOS `arm64` Mach-O + host `x86_64` ELF | `bin/souc src.sio out --target aarch64-macos`; verified Mach-O/ELF output |
+| **Backend soundness** | field-store/load behavior gated | `tests/native_v2_backend_soundness_gate/run.sh` = 40/40, **1 tracked field-hash residual** (disclosed below) |
+| **Effects** | `IO`/`Mut`/`Div`/`Panic`/`Alloc` declarations checked | `--check` + native-v2 gates |
 | **Ontology** | Generated bundles + validation harness | `run_ontology_validation.sh` + compile gates |
-| **Native codegen** | Linux ELF; Mach-O artifact lane | Self-host + native-v2 gates |
-| **Core stdlib slices** | Stats, linalg, ODE, etc. | `stdlib_science_pipeline_gate`, reliability inventory |
 | **Language server** | LSP 3.17 subset | Release binary + protocol tests (prototype per registry) |
+
+> The legacy `lean_single.sio` lane reaches a **bit-identical bootstrap fixed point**; the
+> modular `main.sio` compiler does not yet self-compile to ELF. The epistemic core
+> (`Knowledge[T]` + GUM gates) is **prototype**, not in this table — see
+> [Current limitations](#current-limitations).
 
 ### What's SCAFFOLDING or PARTIAL
 
@@ -236,7 +249,10 @@ The result was verified computationally in Sounio and independently reproduced i
 
 ## Get started
 
-This checkout ships checked self-hosted compiler artifacts for Linux `x86_64`, macOS `arm64`, and macOS `x86_64` behind the host-aware `bin/souc` launcher. No Rust build step is required for the default workflow.
+This checkout ships the checked-in bootstrap compiler `bin/souc` (a static `mini_native`
+ELF). No Rust build step is required for the default workflow. `bin/souc` uses the **raw
+compiler interface** — `souc <source.sio> <output> [flags]` — it is not a launcher with
+`check`/`compile`/`build`/`run` subcommands.
 
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
@@ -245,12 +261,17 @@ cd sounio
 export SOUC="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
-$SOUC --version                              # souc 1.0.0-beta.6
-$SOUC info                                   # selected host artifact + wrapper contract
-$SOUC check examples/hello.sio               # type-check via checked self-hosted lane
-$SOUC compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
-$SOUC run self-hosted/compiler/native_print_f64_smoke.sio
-$SOUC compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
+# bin/souc identifies as mini_native; usage is: souc <source.sio> <output> [flags]
+$SOUC examples/hello.sio /tmp/hello.elf       # bootstrap: compile a host x86_64 ELF
+chmod +x /tmp/hello.elf && /tmp/hello.elf     # main()'s return value is the exit code
+$SOUC examples/hello.sio /tmp/hello-macos --target aarch64-macos   # cross to macOS arm64 Mach-O
+
+# Build the modular self-hosted compiler (Madares v0.80.0), then drive it directly:
+ulimit -s 1048576
+$SOUC self-hosted/compiler/main.sio /tmp/mc.elf && chmod +x /tmp/mc.elf
+/tmp/mc.elf --version                                          # Madares v0.80.0
+/tmp/mc.elf --check examples/hello.sio                         # type-check
+/tmp/mc.elf --native-v2-compile examples/hello.sio /tmp/h.elf  # single-file source → native ELF
 ```
 
 For detailed setup: [INSTALL.md](INSTALL.md) · [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md)
@@ -293,19 +314,29 @@ See [docs/MANIFESTO.md](docs/MANIFESTO.md) for the full philosophy.
 
 ---
 
-## Known Limitations
+## Current limitations
 
-**Platform.** This checkout ships checked self-hosted compiler artifacts for Linux `x86_64`, macOS `arm64`, and macOS `x86_64` behind the `bin/souc` launcher. Linux `x86_64` and macOS `arm64` are the active first-class host lanes. The newer native-v2 `aarch64` backend is still preview-grade, so Apple Silicon support in this checkout is via the self-hosted Mach-O artifact lane rather than the new preview emitter.
+Re-verified 2026-06-07 against the modular compiler (`Madares v0.80.0`). These are honest, probe-backed gaps — please do not read past them.
 
-**Native startup cost.** Native execution still requires producing a host binary before launch, so there is a small startup cost compared with an in-process executor.
+**Int literals need an explicit cast.** Integer literals do not yet coerce to `i32`: `fn main() -> i32 { 0 }` is **rejected** (`found i64`); write `{ 0 as i32 }`. Implicit literal coercion is in progress.
 
-**Launcher contract.** `bin/souc` now provides compatibility commands for `check`, `run`, `compile`, and `build`, but broader omega workflows and JIT-oriented tooling still live outside the checked self-hosted launcher lane.
+**Epistemic core is prototype.** The `Knowledge(15.0, ε=0.92, prov=...)` constructor and the `ε >= 0.82` confidence-gate syntax do **not** typecheck/enforce on the modular compiler. Single-module `--check` does resolve-skip, so these forms parse but are not validated (an undefined call passes `--check` identically). Confidence-gated rejection is a design goal, not a working guarantee.
 
-**Windows cross-compile.** The PE/COFF backend (3,508 lines) is production-grade. Use `--target x86_64-windows` to emit Windows binaries. No pre-built .exe is shipped in this checkout.
+**Closures / generics / nested control checks.** Closures and lambdas are **not** supported end-to-end: a lambda passed as a `fn` argument fails typecheck, and the backend does not reliably compile lambdas. Generics, nested `if let`, and `while let` currently produce false rejections. None of these should be treated as working.
 
-**No REPL yet.** The checked self-hosted launcher does not support `repl`.
+**Self-compilation.** The modular `main.sio` compiler does **not** yet compile itself to a native ELF; only the legacy `lean_single.sio` lane reaches a bit-identical bootstrap fixed point. Multi-module also has a tracked import-typecheck-bypass class (ill-typed cross-module programs can slip through; see the multimodule gate).
 
-**Debug flags.** `--show-ast` and `--show-types` are supported as pass-through flags on the checked self-hosted launcher for `check`, `run`, `compile`, and `build`.
+**Field-hash residual (disclosed).** Struct field slots use a first-byte hash that can collide for fields sharing an initial byte; one such collision is a tracked residual in `tests/native_v2_backend_soundness_gate` (40/40 with exactly 1 known residual). Proper fix = declaration-order layout via struct-type tracking.
+
+**Example coverage.** Roughly **252 of ~860** example programs are currently green; the rest hit unimplemented features or the checker (five example files currently SIGSEGV the checker).
+
+**Platform.** Linux `x86_64` is the first-class host lane; macOS `arm64`/`x86_64` are supported via cross-compiled Mach-O output. The native-v2 `aarch64` backend is still preview-grade.
+
+**Native startup cost.** Native execution requires producing a host binary before launch, so there is a small startup cost compared with an in-process executor.
+
+**No subcommands / no REPL.** `bin/souc` is the raw `mini_native` compiler interface (`souc <source.sio> <output> [flags]`), not a `check`/`run`/`compile`/`build` launcher, and there is no `repl`. `--show-ast` and `--show-types` are pass-through debug flags.
+
+**Windows cross-compile.** A PE/COFF backend exists and `--target x86_64-windows` emits Windows binaries, but the platform is **prototype** per the public-claim registry — not production-grade. No pre-built `.exe` is shipped.
 
 **FFI.** `extern "C"` remains limited in scope, but the old JIT-only integer FFI failure mode is gone on the native path.
 
@@ -324,7 +355,7 @@ If you use Sounio in academic work:
   title     = {Sounio: A Systems Programming Language for Epistemic Computing},
   author    = {Agourakis, Demetrios Chiuratto and Gerenutti, Marli},
   year      = {2026},
-  version   = {1.0.0-beta.6},
+  version   = {Madares v0.80.0 (self-hosted compiler)},
   doi       = {10.5281/zenodo.18726647},
   url       = {https://github.com/sounio-lang/sounio},
   note      = {Self-hosted compiler with epistemic types and Lean 4 verification}

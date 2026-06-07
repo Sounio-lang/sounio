@@ -1,10 +1,10 @@
 # Sounio Installation Guide
 
-This guide describes the installation path that matches the current repository state as of April 22, 2026.
+This guide describes the installation path that matches the current repository state, re-verified 2026-06-07.
 
 ## Recommended Path For This Checkout
 
-This repository already contains checked-in self-hosted compiler artifacts for Linux `x86_64`, macOS `arm64`, and macOS `x86_64` under `artifacts/self-hosted/`. If you are working directly from this checkout, use the launcher at `bin/souc`; it selects the matching host artifact automatically.
+This repository ships the bootstrap compiler at `bin/souc` — a static `mini_native` ELF. No Rust build step is required for the default workflow. `bin/souc` uses the **raw compiler interface** `souc <source.sio> <output> [flags]`; it is **not** a launcher with `check`/`compile`/`build`/`run` subcommands.
 
 ```bash
 cd /path/to/sounio
@@ -12,40 +12,55 @@ cd /path/to/sounio
 export SOUC_BIN="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
-"$SOUC_BIN" --version
-"$SOUC_BIN" info
-"$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" compile examples/hello.sio -o /tmp/hello.out
-"$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
+"$SOUC_BIN" --version                                   # usage banner (mini_native)
+"$SOUC_BIN" examples/hello.sio /tmp/hello.elf           # compile a host x86_64 ELF
+chmod +x /tmp/hello.elf && /tmp/hello.elf               # main()'s return value is the exit code
+"$SOUC_BIN" examples/hello.sio /tmp/hello-macos --target aarch64-macos   # cross to macOS arm64 Mach-O
 ```
 
-On this repo snapshot, `bin/souc` is a host-aware launcher around the checked self-hosted artifacts:
+Notes on `bin/souc` (the bootstrap binary):
 
-- It provides compatibility commands: `check`, `compile`, `build`, `run`, `info`, and `--version`
-- It also supports the raw self-hosted compiler interface: `<source.sio> <output> [flags]`
-- `--target aarch64-macos` and `--target x86_64-macos` emit Mach-O binaries
-- `--target aarch64-linux` emits Linux ARM64 ELF binaries
-- It still does not provide the broader omega-only workflows such as `repl`, `gpu-emit`, or the full pinned-release tool surface
+- Invocation is positional: `<source.sio> <output> [flags]`. There are no `check`/`compile`/`build`/`run`/`info` subcommands and no `repl`.
+- `--target aarch64-macos` and `--target x86_64-macos` emit Mach-O binaries; `--target x86_64-windows` emits a (prototype) PE/COFF binary.
+- `--show-ast` and `--show-types` are pass-through debug flags.
 
-On macOS, the emitted binaries are Mach-O instead of ELF.
+On macOS, the emitted binaries are Mach-O instead of ELF; run them on the matching target OS/arch.
+
+## Build And Drive The Modular Compiler (Madares v0.80.0)
+
+The modular self-hosted compiler is `self-hosted/compiler/main.sio`. Build it with the bootstrap, then invoke it with its **flag-based** interface (this is the lane with `--check` and `--native-v2-compile`):
+
+```bash
+ulimit -s 1048576
+"$SOUC_BIN" self-hosted/compiler/main.sio /tmp/mc.elf && chmod +x /tmp/mc.elf   # ~2.5 min
+
+/tmp/mc.elf --version                                          # Madares v0.80.0
+/tmp/mc.elf --check examples/hello.sio                         # type-check
+/tmp/mc.elf --native-v2-compile examples/hello.sio /tmp/h.elf  # single-file source -> native ELF
+chmod +x /tmp/h.elf && /tmp/h.elf; echo $?
+```
 
 ## Validate The Checkout
 
-Run the conservative smoke tests:
+Run the honest gates that build the modular compiler from `main.sio` via `bin/souc` and assert real behavior:
 
 ```bash
-"$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
-"$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
-"$SOUC_BIN" run self-hosted/compiler/native_print_f64_smoke.sio
+# Build mc first (see above), then point the gates at it:
+bash tests/native_v2_capgate/run.sh /tmp/mc.elf                      # 32/32 single-file source -> ELF
+bash tests/native_v2_multimodule_gate/run.sh /tmp/mc.elf            # 9/9 (1 documented import-typecheck-bypass class)
+bash tests/native_v2_backend_soundness_gate/run.sh /tmp/mc.elf      # 40/40, exits nonzero with 1 tracked field-hash residual (by design)
+
+# Cross-compile smoke via the bootstrap:
+"$SOUC_BIN" examples/hello.sio /tmp/hello-macos --target aarch64-macos
+file /tmp/hello-macos                                                # Mach-O 64-bit arm64 executable
 ```
 
 Expected behavior:
 
-- the checked launcher resolves a host-native compiler artifact
-- the compiler rebuild smoke produces a host-native binary
+- `bin/souc` compiles `main.sio` to a host-native ELF (`Madares v0.80.0`)
+- the capgate compiles its single-file programs to native ELFs whose exit codes match
 - the macOS-target compile produces a Mach-O ARM64 binary
-- the runtime smoke prints the expected floating-point lines on the host OS
+- `native_v2_backend_soundness_gate` reports 40/40 with exactly ONE tracked residual (`C_known_residual_bucket_collision`) — that is expected, not a failure; it should fail only if the residual grows
 - emitted binaries must be executed on the matching target OS/architecture
 
 If you need GPU-profile validation:
@@ -72,8 +87,8 @@ This resolves a pinned release binary and falls back to a local executable only 
 
 - Do not assume `cargo build` at the repo root is the default setup path.
 - Always set `SOUNIO_STDLIB_PATH` when you want deterministic stdlib resolution.
-- Prefer `souc check` when validating examples and docs claims.
-- The checked self-hosted launcher provides `check/run/compile/build`, but broader omega workflows still require the pinned Linux release lane.
+- To type-check, build mc and use `/tmp/mc.elf --check <file>` (the `--check` lane lives in the modular compiler, not in `bin/souc`).
+- `bin/souc` has no subcommands and no `repl`; broader omega/GPU workflows live outside this bootstrap lane.
 
 ## What Is Verified Today
 
