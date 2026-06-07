@@ -395,8 +395,11 @@ impl Parser {
         var p = self.advance()  // skip 'fn'
         let name = p.current_name()
         p = p.expect_ident()
+        var fn_type_params_opt: Option<Box<TypeParamDefList>> = None
         if parser_peek(p) == TokenKind::Lt {
-            p = p.parse_type_param_header()
+            let tph = p.parse_type_param_header()
+            p = tph.0
+            fn_type_params_opt = tph.1
         }
         // Parameters
         p = p.expect(TokenKind::LParen)
@@ -445,6 +448,7 @@ impl Parser {
             body: body,
             span: span,
             is_kernel: is_kernel,
+            type_params: fn_type_params_opt,
         }
 
         (p, Item {
@@ -656,17 +660,30 @@ impl Parser {
         })
     }
 
-    fn parse_type_param_header(self) -> Parser with Mut, IO, Panic, Div, Alloc {
+    // Parse a `<T, U, ...>` generic-parameter header and RETURN the collected type-param
+    // list (previously this discarded the names). `const N` params and `: bound` annotations
+    // are still consumed; only plain type-param names are collected (the checker treats them
+    // as opaque). Mirrors the struct header collection.
+    fn parse_type_param_header(self) -> (Parser, Option<Box<TypeParamDefList>>) with Mut, IO, Panic, Div, Alloc {
         var p = self.expect(TokenKind::Lt)
+        var rev_tparams: Option<Box<TypeParamDefList>> = None
         while parser_peek(p) != TokenKind::Gt && parser_peek(p) != TokenKind::Eof {
+            let tp_span = p.current_span()
+            var is_const = false
             if parser_peek(p) == TokenKind::Const {
+                is_const = true
                 p = p.advance()
             }
+            let tp_name = p.current_name()
             p = p.expect_ident()
             if parser_peek(p) == TokenKind::Colon {
                 p = p.advance()
                 let ann_pair = p.parse_type()
                 p = ann_pair.0
+            }
+            if !is_const {
+                let tpd = TypeParamDef { name: tp_name, span: p.span_from(tp_span) }
+                rev_tparams = Some(Box::new(TypeParamDefList { head: tpd, tail: rev_tparams }))
             }
             if parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
@@ -674,7 +691,8 @@ impl Parser {
                 p = p.advance()
             }
         }
-        p.expect(TokenKind::Gt)
+        p = p.expect(TokenKind::Gt)
+        (p, reverse_type_param_def_list_opt(rev_tparams))
     }
 
     // ============================================================
@@ -3043,7 +3061,7 @@ impl Parser {
             p = p.expect(TokenKind::RBrace)
             let span = p.span_from(start)
             if have_first {
-                let fn_def = FnDef { name: first_name, params: first_params_opt, return_type: first_ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: true }
+                let fn_def = FnDef { name: first_name, params: first_params_opt, return_type: first_ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: true, type_params: None }
                 return (p, Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: first_name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
             }
             return (p, Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
@@ -3070,7 +3088,7 @@ impl Parser {
             p = p.advance()
         }
         let span = p.span_from(start)
-        let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: true }
+        let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: true, type_params: None }
         (p, Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
     }
 
