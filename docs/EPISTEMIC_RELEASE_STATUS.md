@@ -24,8 +24,10 @@ a report. The aggregate honest gate is `scripts/ci/release_gate.sh` (11 gates).
 
 ## What the compiler builds, certified
 
-`scripts/ci/release_gate.sh` — **11/11 honest gates green** at this tip. These are
-the only gates that build `mc` from `main.sio` and assert *observed* behavior:
+`scripts/ci/release_gate.sh` — **14/14 honest gates green** at this tip (the 11
+below plus `native_v2_closure` 5/5, `native_v2_float_compare` 9/9, and
+`native_v2_recovered_source`). These are the only gates that build `mc` from
+`main.sio` and assert *observed* behavior:
 
 | gate | result | what it proves |
 |---|---|---|
@@ -92,9 +94,18 @@ These are stated loudest because, for an epistemic language, a *silent* wrong
 answer is the worst possible failure. None of these should be relied on.
 
 **Silent miscompiles (well-typed source → wrong runtime value):**
-- `f32` comparison: `let x:f32=1.5 as f32; if x > 1.0 as f32 {12} else {0}` → exits
-  **0**, should be 12. (`f64` comparison is correct; `f32` is not.)
-- Closures without capture: `let f = |x:i64| x+1; f(41)` → exits **1**, should be 42.
+- **Float arithmetic between two values both freshly loaded from memory** runs to a
+  wrong value (0): two `f64`/`f32` function parameters `a + b`, two struct-field
+  reads `p.x + p.y`, two array-element reads `a[0] + a[1]`. A memory operand + a
+  literal works (`p.x + 1.0` → correct). Pre-existing (present before and after the
+  fixes below); verified by running the ELF at both tips. This is the next item on
+  the ledger.
+
+  *(Fixed since the prior status, verified by running the ELF — moved to Verified:
+  `f32` comparison [`as f32` no longer truncates to int → 12] and no-capture
+  closures [`f(41)` → 42]. Caveat: `f32` is represented as `f64` in the backend —
+  values exactly representable compare/round-trip correctly, but true
+  single-precision rounding is not modeled. Capturing closures still crash, below.)*
 
 **Crashes during `--native-v2-compile` (after a clean type-check):**
 closures with capture · generic functions (`id<i64>(42)`) · string `len`/`eq`/
@@ -146,9 +157,14 @@ unworthy of a language whose entire premise is honest uncertainty.
 
 ## The release ledger (what closes next, in order)
 
-1. the two silent miscompiles — `f32` comparison, no-capture closures
+1. ~~the two silent miscompiles — `f32` comparison, no-capture closures~~ **DONE**
+   (verified, in Verified above). Remaining silent miscompile: **float arithmetic
+   between two memory-loaded operands** (the pre-existing one surfaced above).
 2. the `--native-v2-compile` crashes — strings, IO, capturing closures, generics
-3. packaged-import resolution (`SOUNIO_STDLIB_PATH`) + multi-module hardening
+3. ~~packaged-import resolution (`SOUNIO_STDLIB_PATH`)~~ **DONE** (the resolver now
+   honors `SOUNIO_STDLIB_PATH`; root cause was a broken `read_env`). Remaining:
+   multi-module hardening (`ir_summary_failed` on some layouts) + the real-`mc`
+   packaging (the distributable still ships the bootstrap, not the 86 MB modular `mc`).
 4. effect enforcement — enforce, or document as unenforced in the type system
 5. package the real `mc`, not the bootstrap, in the distributable
 
