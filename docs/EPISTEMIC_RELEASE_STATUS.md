@@ -24,7 +24,7 @@ a report. The aggregate honest gate is `scripts/ci/release_gate.sh` (11 gates).
 
 ## What the compiler builds, certified
 
-`scripts/ci/release_gate.sh` — **14/14 honest gates green** at this tip (the 11
+`scripts/ci/release_gate.sh` — **15/15 honest gates green** at this tip (the 11
 below plus `native_v2_closure` 5/5, `native_v2_float_compare` 9/9, and
 `native_v2_recovered_source`). These are the only gates that build `mc` from
 `main.sio` and assert *observed* behavior:
@@ -94,12 +94,13 @@ These are stated loudest because, for an epistemic language, a *silent* wrong
 answer is the worst possible failure. None of these should be relied on.
 
 **Silent miscompiles (well-typed source → wrong runtime value):**
-- **Float arithmetic between two values both freshly loaded from memory** runs to a
-  wrong value (0): two `f64`/`f32` function parameters `a + b`, two struct-field
-  reads `p.x + p.y`, two array-element reads `a[0] + a[1]`. A memory operand + a
-  literal works (`p.x + 1.0` → correct). Pre-existing (present before and after the
-  fixes below); verified by running the ELF at both tips. This is the next item on
-  the ledger.
+- **Float arithmetic between two struct-FIELD reads** runs to a wrong value (0):
+  `p.x + p.y` → 0. (Two `f64`/`f32` **parameters** `a+b` and two **array elements**
+  `a[0]+a[1]` are now FIXED — verified by running the ELF; the float-binop
+  float-detection now seeds from f32/f64 param/array types. Struct *fields* remain
+  because the lowerer tracks no local struct types — the same type-blindness root as
+  the field-hash residual.) A memory operand + a literal works (`p.x + 1.0` →
+  correct). This is the next item on the ledger.
 
   *(Fixed since the prior status, verified by running the ELF — moved to Verified:
   `f32` comparison [`as f32` no longer truncates to int → 12] and no-capture
