@@ -255,10 +255,12 @@ gate_tracked_residual "native_v2_backend_soundness" \
   "40/40" "UNRESOLVED SILENT MISCOMPILES" \
   C_known_residual_bucket_collision
 
-gate_tracked_residual "native_v2_multimodule" \
+# native_v2_multimodule: the #2 import-typecheck fix (+caps) PROMOTED the former
+# k1/k2 KNOWN_MISCOMPILE slips to genuine REJECTs, so this gate is now a clean
+# rc==0 27/27 (no tracked residual). Treat it as a normal count gate.
+gate_tests_rc_count "native_v2_multimodule" \
   tests/native_v2_multimodule_gate/run.sh \
-  "9/9" "UNRESOLVED MULTI-MODULE SLIPS" \
-  k1_illtyped_arity k2_illtyped_typedup
+  "27/27"
 
 gate_parser_sweep
 
