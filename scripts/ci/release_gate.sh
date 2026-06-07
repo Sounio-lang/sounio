@@ -18,6 +18,7 @@
 #   tests/native_v2_capgate/run.sh                    (parse "32/32"; no rc)
 #   tests/native_v2_soundness_gate/run.sh             (rc==0 + "7/7")
 #   tests/native_v2_enum_gate/run.sh                  (rc==0 + "15/15")
+#   tests/native_v2_closure_gate/run.sh               (rc==0 + "5/5"; M2 no-capture)
 #   tests/native_v2_checker_crash_gate/run.sh         (rc==0 + "26/26")
 #   tests/native_v2_literal_coercion_gate/run.sh      (rc==0 + "19/19")
 #   tests/native_v2_float_compare_gate/run.sh         (rc==0 + "9/9"; M1 f32-cmp)
@@ -251,6 +252,7 @@ gate_capgate
 
 gate_tests_rc_count "native_v2_soundness"      tests/native_v2_soundness_gate/run.sh      "7/7"
 gate_tests_rc_count "native_v2_enum"           tests/native_v2_enum_gate/run.sh           "15/15"
+gate_tests_rc_count "native_v2_closure"        tests/native_v2_closure_gate/run.sh        "5/5"
 gate_tests_rc_count "native_v2_checker_crash"  tests/native_v2_checker_crash_gate/run.sh  "26/26"
 gate_tests_rc_count "native_v2_literal_coercion" tests/native_v2_literal_coercion_gate/run.sh "19/19"
 gate_tests_rc_count "native_v2_float_compare"  tests/native_v2_float_compare_gate/run.sh  "9/9"
