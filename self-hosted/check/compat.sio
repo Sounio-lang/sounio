@@ -764,6 +764,126 @@ pub fn compat_is_hyper_type(ty: TypeEntry) -> bool {
 }
 
 // ============================================================
+// Numeric-literal expected-type coercion (release lever)
+//
+// SOUNDNESS (C0): ONLY untyped numeric LITERAL syntax adopts an expected
+// numeric type. The decision is gated on the AST NODE shape — never on a
+// stateful "last literal" flag, never on "expected type is numeric". A
+// non-literal expression of the wrong width always flows through the normal
+// types_compatible mismatch unchanged. Unary negation of a literal (`-5`,
+// `-1.0`) is still syntactically a literal, so it qualifies; anything else
+// (idents, calls, arithmetic, field reads) does not.
+// ============================================================
+
+// Returns 1 if `e` is syntactically an integer literal (possibly negated),
+// 2 if a float literal (possibly negated), else 0. Mirrors the neg-of-literal
+// recursion already used by checker_eval_const_int_opt_expr_mut.
+pub fn expr_is_num_literal(e: Expr) -> i64 {
+    if e.kind == ExprKind::ExprIntLit {
+        return 1
+    }
+    if e.kind == ExprKind::ExprFloatLit {
+        return 2
+    }
+    if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
+        match e.left {
+            Some(inner) => return expr_is_num_literal(*inner)
+            None => return 0
+        }
+    }
+    0
+}
+
+// Same predicate over an Option<Box<Expr>> (return / binding-init positions).
+pub fn opt_expr_is_num_literal(opt: Option<Box<Expr> >) -> i64 {
+    match opt {
+        Some(inner) => expr_is_num_literal(*inner)
+        None => 0
+    }
+}
+
+// Constant value of an integer-literal-syntax expr (ExprIntLit, possibly
+// negated). Mirrors checker_eval_const_int_opt_expr_mut's literal/neg cases.
+// Only meaningful when expr_is_num_literal(e) == 1.
+pub fn int_literal_value(e: Expr) -> i64 with Panic, Div {
+    if e.kind == ExprKind::ExprIntLit {
+        return e.int_val
+    }
+    if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
+        match e.left {
+            Some(inner) => return 0 - int_literal_value(*inner)
+            None => return 0
+        }
+    }
+    0
+}
+
+pub fn opt_int_literal_value(opt: Option<Box<Expr> >) -> i64 with Panic, Div {
+    match opt {
+        Some(inner) => int_literal_value(*inner)
+        None => 0
+    }
+}
+
+// R1 SOUNDNESS: does integer VALUE `v` fit the NARROW target type without a
+// silent value-changing truncation at the coerced width? Narrow types
+// (i8/u8/i32/u32) are range-checked; i64/u64/i128/u128 already hold any i64
+// literal so they always fit. An out-of-range narrow literal is REJECTED (a
+// `u8 = 300` would otherwise miscompile to 44 — verified by ELF). Unsigned
+// targets additionally reject negatives.
+pub fn int_value_fits(v: i64, expected: TypeEntry) -> bool {
+    if expected.kind == TypeKind::TyI8 {
+        return v >= -128 && v <= 127
+    }
+    if expected.kind == TypeKind::TyU8 {
+        return v >= 0 && v <= 255
+    }
+    if expected.kind == TypeKind::TyI32 {
+        return v >= -2147483648 && v <= 2147483647
+    }
+    if expected.kind == TypeKind::TyU32 {
+        return v >= 0 && v <= 4294967295
+    }
+    if expected.kind == TypeKind::TyU64 {
+        // u64 stores any nonnegative i64 literal exactly; negatives are rejected.
+        return v >= 0
+    }
+    // i64 / i128 / u128: any i64 literal value fits the coerced width.
+    true
+}
+
+// Given a literal-kind (1=int, 2=float from expr_is_num_literal), the literal's
+// integer VALUE (for lit_kind==1; ignored otherwise), and an EXPECTED type,
+// decide if the literal may adopt it. Integer literals coerce to any integer
+// type IF the value fits that width (int_value_fits — R1 guard against silent
+// truncation); float literals coerce to any float type. Int-literal -> float is
+// intentionally EXCLUDED (would require IEEE-constant lowering to stay sound).
+// Bool/string/named/etc. expected types never qualify.
+pub fn literal_coerces_to_val(lit_kind: i64, int_val: i64, expected: TypeEntry) -> bool {
+    if lit_kind == 1 {
+        return is_integer_type(expected) && int_value_fits(int_val, expected)
+    }
+    if lit_kind == 2 {
+        return is_float_type(expected)
+    }
+    false
+}
+
+// Node-based convenience: does literal-syntax expr `e` coerce to `expected`,
+// value-range included? This is the canonical entry point for the node-reachable
+// coercion sites (let/var/field/arg/closure/return-expr).
+pub fn expr_literal_coerces_to(e: Expr, expected: TypeEntry) -> bool with Panic, Div {
+    literal_coerces_to_val(expr_is_num_literal(e), int_literal_value(e), expected)
+}
+
+pub fn opt_expr_literal_coerces_to(opt: Option<Box<Expr> >, expected: TypeEntry) -> bool with Panic, Div {
+    match opt {
+        Some(inner) => expr_literal_coerces_to(*inner, expected)
+        None => false
+    }
+}
+
+// ============================================================
 // Binary operator result types
 // ============================================================
 

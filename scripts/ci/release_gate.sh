@@ -19,6 +19,7 @@
 #   tests/native_v2_soundness_gate/run.sh             (rc==0 + "7/7")
 #   tests/native_v2_enum_gate/run.sh                  (rc==0 + "15/15")
 #   tests/native_v2_checker_crash_gate/run.sh         (rc==0 + "26/26")
+#   tests/native_v2_literal_coercion_gate/run.sh      (rc==0 + "15/15")
 #   tests/native_v2_multimodule_gate/run.sh           (tracked residual; see below)
 #   tests/native_v2_backend_soundness_gate/run.sh     (tracked residual; see below)
 #   scripts/dev/run_runpass_parse_only_current.sh     (rc==0 + "passed=525")
@@ -249,6 +250,7 @@ gate_capgate
 gate_tests_rc_count "native_v2_soundness"      tests/native_v2_soundness_gate/run.sh      "7/7"
 gate_tests_rc_count "native_v2_enum"           tests/native_v2_enum_gate/run.sh           "15/15"
 gate_tests_rc_count "native_v2_checker_crash"  tests/native_v2_checker_crash_gate/run.sh  "26/26"
+gate_tests_rc_count "native_v2_literal_coercion" tests/native_v2_literal_coercion_gate/run.sh "15/15"
 
 gate_tracked_residual "native_v2_backend_soundness" \
   tests/native_v2_backend_soundness_gate/run.sh \

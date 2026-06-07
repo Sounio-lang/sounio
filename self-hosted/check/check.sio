@@ -166,6 +166,17 @@ pub struct Checker {
     last_literal_int: i64,
     last_literal_float: f64,
     last_literal_kind: i64,   // 0=none, 1=int, 2=float
+    // Literal-coercion (release lever): kind of the OUTERMOST expr node most
+    // recently checked by checker_check_expr_inplace, computed via
+    // expr_is_num_literal — 1=int-literal-syntax, 2=float-literal-syntax, 0=not
+    // a literal. UNLIKE last_literal_kind (set only on literals, never cleared),
+    // this is set/cleared on EVERY expr check, so it reliably reflects the
+    // immediately-preceding expression (e.g. a block tail). Gates return-position
+    // coercion soundly: a non-literal tail clears it -> 0 -> no coercion.
+    last_outer_lit_kind: i64,
+    // Integer VALUE of the outermost expr when last_outer_lit_kind==1 (for the
+    // R1 range guard at the return-via-flag site, which has no node in scope).
+    last_outer_lit_int: i64,
     loop_depth: i64,
     suppress_linear_consume_depth: i64,
     type_depth: i64,
@@ -657,6 +668,8 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         last_literal_int: 0,
         last_literal_float: 0.0,
         last_literal_kind: 0,
+        last_outer_lit_kind: 0,
+        last_outer_lit_int: 0,
         loop_depth: 0,
         suppress_linear_consume_depth: 0,
         type_depth: 0,
@@ -747,6 +760,8 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).last_literal_int = 0
     (*raw).last_literal_float = 0.0
     (*raw).last_literal_kind = 0
+    (*raw).last_outer_lit_kind = 0
+    (*raw).last_outer_lit_int = 0
     (*raw).loop_depth = 0
     (*raw).suppress_linear_consume_depth = 0
     (*raw).type_depth = 0
@@ -840,6 +855,8 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).last_literal_int = src.last_literal_int
     (*dst).last_literal_float = src.last_literal_float
     (*dst).last_literal_kind = src.last_literal_kind
+    (*dst).last_outer_lit_kind = src.last_outer_lit_kind
+    (*dst).last_outer_lit_int = src.last_outer_lit_int
     (*dst).loop_depth = src.loop_depth
     (*dst).suppress_linear_consume_depth = src.suppress_linear_consume_depth
     (*dst).type_depth = src.type_depth
@@ -2732,7 +2749,13 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             let body_ty = checker_check_block_inplace(c, (*fd).body)
             if sig_id >= 0 {
                 let sig2 = (*c).fn_sigs.get(sig_id)
-                if !types_compatible(body_ty, sig2.return_type) {
+                // Literal-coercion (release lever): a numeric-literal block tail
+                // adopts the declared return type (fn ->i32 {0}). Gated on the
+                // per-expr last_outer_lit_kind flag, which reflects ONLY the
+                // immediately-checked block tail — a non-literal tail (ident,
+                // call, arithmetic) leaves it 0, so this never over-accepts.
+                let ret_lit_ok = literal_coerces_to_val((*c).last_outer_lit_kind, (*c).last_outer_lit_int, sig2.return_type)
+                if !types_compatible(body_ty, sig2.return_type) && !ret_lit_ok {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
             }
@@ -2843,7 +2866,13 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             let body_ty = checker_check_block_inplace(c, (*fd).body)
             if sig_id >= 0 {
                 let sig2 = (*c).fn_sigs.get(sig_id)
-                if !types_compatible(body_ty, sig2.return_type) {
+                // Literal-coercion (release lever): a numeric-literal block tail
+                // adopts the declared return type (fn ->i32 {0}). Gated on the
+                // per-expr last_outer_lit_kind flag, which reflects ONLY the
+                // immediately-checked block tail — a non-literal tail (ident,
+                // call, arithmetic) leaves it 0, so this never over-accepts.
+                let ret_lit_ok = literal_coerces_to_val((*c).last_outer_lit_kind, (*c).last_outer_lit_int, sig2.return_type)
+                if !types_compatible(body_ty, sig2.return_type) && !ret_lit_ok {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
             }
@@ -2936,7 +2965,10 @@ fn checker_check_opt_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >) -> T
 
 fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let val_ty = checker_check_opt_expr_inplace(c, e.left)
-    if !types_compatible(val_ty, (*c).current_return_type) {
+    // Literal-coercion (release lever): `return <numeric-literal>` adopts the
+    // current return type. Gated on the returned-expr NODE being literal syntax.
+    let ret_lit_ok = opt_expr_literal_coerces_to(e.left, (*c).current_return_type)
+    if !types_compatible(val_ty, (*c).current_return_type) && !ret_lit_ok {
         checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
     }
     ty_never()
@@ -3020,6 +3052,13 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
     if (*c).expr_depth > 0 {
         (*c).expr_depth = (*c).expr_depth - 1
     }
+    // Record whether the OUTERMOST node just checked is numeric-literal syntax.
+    // Set unconditionally (incl. to 0) so it always reflects THIS expr, not a
+    // stale earlier one — this is what makes return-position coercion sound
+    // (a non-literal block tail clears it). Computed from the node `e`, never
+    // from sub-expression state.
+    (*c).last_outer_lit_kind = expr_is_num_literal(e)
+    (*c).last_outer_lit_int = int_literal_value(e)
     result
 }
 
@@ -3904,7 +3943,8 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                                     Some(list) => {
                                         let field_ty = field_info_list_find(mono_si.fields, (*list).head.name)
                                         let val_init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                                        if !types_compatible(val_init_ty, field_ty) {
+                                        let fld_lit_ok = expr_literal_coerces_to((*list).head.value, field_ty)
+                                        if !types_compatible(val_init_ty, field_ty) && !fld_lit_ok {
                                             checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, val_init_ty)
                                         }
                                         cur_v = (*list).tail
@@ -3936,7 +3976,8 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     Some(list) => {
                         let field_ty = field_info_list_find(si.fields, (*list).head.name)
                         let init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                        if !types_compatible(init_ty, field_ty) {
+                        let fld_lit_ok = expr_literal_coerces_to((*list).head.value, field_ty)
+                        if !types_compatible(init_ty, field_ty) && !fld_lit_ok {
                             checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
                         }
                         cur = (*list).tail
@@ -3976,8 +4017,9 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                         Some(list) => {
                             let field_ty = field_info_list_find(vfields, (*list).head.name)
                             let init_ty = checker_check_expr_inplace(c, (*list).head.value)
+                            let fld_lit_ok = expr_literal_coerces_to((*list).head.value, field_ty)
                             if field_info_list_has(vfields, (*list).head.name) {
-                                if !types_compatible(init_ty, field_ty) {
+                                if !types_compatible(init_ty, field_ty) && !fld_lit_ok {
                                     checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
                                 }
                             }
@@ -4098,7 +4140,10 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         ret_ty
     }
     if ret_ty.kind != TypeKind::TyUnknown {
-        if !types_compatible(body_ty, ret_ty) {
+        // Literal-coercion (release lever): a numeric-literal closure body adopts
+        // the declared closure return type. Gated on the body NODE being literal.
+        let clo_lit_ok = opt_expr_literal_coerces_to(e.closure_body, ret_ty)
+        if !types_compatible(body_ty, ret_ty) && !clo_lit_ok {
             checker_report_mismatch_inplace(c, e.span, 8, ret_ty, body_ty)
         }
     }
@@ -5288,17 +5333,30 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     // Determine binding type: annotation if present, else init type
     var bind_ty = init_ty
     if ann_ty.kind != TypeKind::TyUnknown {
-        // Integer literal narrowing: literal 5 (i64) is compatible with i32/i8 annotations
+        // Pre-existing i32/i8 narrowing carve-out, RETAINED for R2 but gated to
+        // ONLY non-pure-literal inits (a const-foldable `1 + 2` / `if {0} else {1}`
+        // i64 expression into an i32/i8 slot — programs that were green at base).
+        // PURE numeric literals are excluded here and instead flow through the
+        // range-checked node path (lit_ann_ok) so `let x: i8 = 128` is REJECTED.
+        // (An out-of-range NON-literal expression e.g. `let x: i8 = 100 + 50` still
+        // truncates — pre-existing base behavior, the deferred operator-operand
+        // increment, out of scope.)
         let int_lit_narrow = (*c).last_literal_kind == 1
             && init_ty.kind == TypeKind::TyI64
             && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
+            && opt_expr_is_num_literal(s.expr) == 0
+        // Literal-coercion (release lever): a numeric-LITERAL init (gated on the
+        // init-expr NODE, incl. -lit) adopts any compatible-width numeric
+        // annotation (i32/u8/u32/u64/f32/...) IF the value fits (R1 range guard).
+        // Int literals -> integer types, float literals -> float types only.
+        let lit_ann_ok = opt_expr_literal_coerces_to(s.expr, ann_ty)
         // C-style enum↔int assignment: a fieldless enum value coerces to/from a numeric
         // type (canonical bin/souc accepts `let x: i64 = E::A`). Matches the binary ==/!=
         // rule; this *mut fn has (*c).enums to detect enum-named types.
         let init_enum = init_ty.kind == TypeKind::TyNamed && (*c).enums.find(init_ty.name) >= 0
         let ann_enum = ann_ty.kind == TypeKind::TyNamed && (*c).enums.find(ann_ty.name) >= 0
         let enum_int_ok = (init_enum && is_numeric_type(ann_ty)) || (is_numeric_type(init_ty) && ann_enum)
-        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow && !enum_int_ok {
+        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow && !lit_ann_ok && !enum_int_ok {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
@@ -5345,10 +5403,17 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     let init_ty = checker_check_binding_init_expr_inplace(c, s.expr, ann_ty)
     var bind_ty = init_ty
     if ann_ty.kind != TypeKind::TyUnknown {
+        // i32/i8 narrowing carve-out, RETAINED for R2 but gated to non-pure-literal
+        // inits (const-foldable i64 expr into i32/i8). Pure literals go through the
+        // range-checked node path below.
         let int_lit_narrow = (*c).last_literal_kind == 1
             && init_ty.kind == TypeKind::TyI64
             && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
+            && opt_expr_is_num_literal(s.expr) == 0
+        // Literal-coercion (release lever): numeric-literal init adopts a
+        // compatible-width numeric annotation, value-range checked. Gated on NODE.
+        let lit_ann_ok = opt_expr_literal_coerces_to(s.expr, ann_ty)
+        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow && !lit_ann_ok {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
@@ -11369,6 +11434,13 @@ fn eval_const_int_opt_expr(c: Checker, opt: Option<Box<Expr> >) -> (i64, i64) wi
 
 fn call_arg_types_compatible(arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     if types_compatible(arg_ty, param_ty) {
+        return true
+    }
+    // Literal-coercion (release lever): a numeric-LITERAL argument adopts the
+    // parameter's numeric type (f(0) where param: i32). Gated on the arg-expr
+    // NODE being literal syntax — a non-literal arg of the wrong width still
+    // fails below.
+    if expr_literal_coerces_to(arg_expr, param_ty) {
         return true
     }
     // Directional borrow boundary: &!T can flow to &T.
