@@ -2749,12 +2749,13 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             let body_ty = checker_check_block_inplace(c, (*fd).body)
             if sig_id >= 0 {
                 let sig2 = (*c).fn_sigs.get(sig_id)
-                // Literal-coercion (release lever): a numeric-literal block tail
-                // adopts the declared return type (fn ->i32 {0}). Gated on the
-                // per-expr last_outer_lit_kind flag, which reflects ONLY the
-                // immediately-checked block tail — a non-literal tail (ident,
-                // call, arithmetic) leaves it 0, so this never over-accepts.
-                let ret_lit_ok = literal_coerces_to_val((*c).last_outer_lit_kind, (*c).last_outer_lit_int, sig2.return_type)
+                // H1: a numeric-literal block tail adopts the declared return
+                // type (fn ->i32 {0}). Gated on the block ACTUALLY having a
+                // numeric-literal TAIL EXPRESSION NODE — NOT the stateful
+                // last_outer_lit_kind flag (which a let-init literal leaks into
+                // a unit body). A unit-yielding body (last stmt is let/var/assign,
+                // or no fitting literal tail) is NOT coerced → E008.
+                let ret_lit_ok = checker_tail_block_lit_coerces((*fd).body, sig2.return_type)
                 if !types_compatible(body_ty, sig2.return_type) && !ret_lit_ok {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
@@ -2836,6 +2837,89 @@ fn checker_bind_fn_params_inplace(c: *mut Checker, opt: Option<Box<ParamList> >)
     }
 }
 
+// ============================================================
+// H1 SOUNDNESS — node-gated return-position literal coercion.
+//
+// The return sites below used to read the stateful (*c).last_outer_lit_kind
+// flag, which is set on EVERY checked expr (check.sio ~L3060). A unit-yielding
+// body like `fn f()->i32 { let z:i64=5; }` left the flag at 1 (the let-init
+// literal `5`) so the unit body was wrongly coerced to i32 → over-accept. The
+// fix gates coercion on the block ACTUALLY having a numeric-literal TAIL
+// EXPRESSION NODE: a body whose last statement is a let/var/assign (or whose
+// only tail is not a fitting literal) yields unit and is NOT coerced → E008.
+//
+// Carve-out preserved: a const-fold `if true {0} else {1}` tail still coerces
+// because BOTH its branch tails are fitting numeric literals (recursion below).
+// ============================================================
+
+// Does expr `e`, used as a block tail, coerce to `ret_ty` purely by being
+// numeric-literal syntax (incl. a fully-literal if/else whose branch tails all
+// fit)? No Checker mutation; pure AST inspection.
+fn checker_tail_expr_lit_coerces(e: Expr, ret_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    if expr_is_num_literal(e) != 0 {
+        return expr_literal_coerces_to(e, ret_ty)
+    }
+    if e.kind == ExprKind::ExprBlock {
+        // A nested block (e.g. an `else { 1 }` branch is parsed as an ExprBlock):
+        // recurse into its tail.
+        return checker_tail_opt_block_lit_coerces(e.block, ret_ty)
+    }
+    if e.kind == ExprKind::ExprIf {
+        // Carve-out: an if/else whose then-tail AND else-tail are both fitting
+        // numeric literals (the const-fold-if positive). A then-only `if`
+        // (no else) yields unit, so it must NOT coerce.
+        match e.else_expr {
+            Some(else_e) => {
+                let then_ok = checker_tail_opt_block_lit_coerces(e.block, ret_ty)
+                let else_ok = checker_tail_expr_lit_coerces(*else_e, ret_ty)
+                return then_ok && else_ok
+            }
+            None => return false
+        }
+    }
+    false
+}
+
+// Does the block's TAIL (its last statement, if that statement is an expression
+// statement) coerce to `ret_ty` as a numeric literal? A block whose last stmt
+// is a let/var/assign — or which is empty — yields unit and returns false.
+fn checker_tail_block_lit_coerces(blk: Block, ret_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    var cursor = blk.stmts
+    var last_kind = StmtKind::StmtLet
+    var last_expr: Option<Box<Expr> > = None
+    var found = false
+    while true {
+        match cursor {
+            Some(list) => {
+                last_kind = (*list).head.kind
+                last_expr = (*list).head.expr
+                found = true
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+    if !found {
+        return false
+    }
+    // Only an expression statement can be the block's value tail. Let/Var/Assign
+    // yield unit. Use if-equality (NOT match) per the L2937 miscompile note.
+    if last_kind == StmtKind::StmtExpr {
+        match last_expr {
+            Some(te) => return checker_tail_expr_lit_coerces(*te, ret_ty)
+            None => return false
+        }
+    }
+    false
+}
+
+fn checker_tail_opt_block_lit_coerces(opt: Option<Box<Block> >, ret_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(blk) => checker_tail_block_lit_coerces(*blk, ret_ty)
+        None => false
+    }
+}
+
 fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(fd) => {
@@ -2866,12 +2950,13 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             let body_ty = checker_check_block_inplace(c, (*fd).body)
             if sig_id >= 0 {
                 let sig2 = (*c).fn_sigs.get(sig_id)
-                // Literal-coercion (release lever): a numeric-literal block tail
-                // adopts the declared return type (fn ->i32 {0}). Gated on the
-                // per-expr last_outer_lit_kind flag, which reflects ONLY the
-                // immediately-checked block tail — a non-literal tail (ident,
-                // call, arithmetic) leaves it 0, so this never over-accepts.
-                let ret_lit_ok = literal_coerces_to_val((*c).last_outer_lit_kind, (*c).last_outer_lit_int, sig2.return_type)
+                // H1: a numeric-literal block tail adopts the declared return
+                // type (fn ->i32 {0}). Gated on the block ACTUALLY having a
+                // numeric-literal TAIL EXPRESSION NODE — NOT the stateful
+                // last_outer_lit_kind flag (which a let-init literal leaks into
+                // a unit body). A unit-yielding body (last stmt is let/var/assign,
+                // or no fitting literal tail) is NOT coerced → E008.
+                let ret_lit_ok = checker_tail_block_lit_coerces((*fd).body, sig2.return_type)
                 if !types_compatible(body_ty, sig2.return_type) && !ret_lit_ok {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }

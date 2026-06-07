@@ -825,6 +825,45 @@ pub fn opt_int_literal_value(opt: Option<Box<Expr> >) -> i64 with Panic, Div {
     }
 }
 
+// Float value of a float-literal-syntax expr (ExprFloatLit, possibly negated).
+// Only meaningful when expr_is_num_literal(e) == 2.
+pub fn float_literal_value(e: Expr) -> f64 with Panic, Div {
+    if e.kind == ExprKind::ExprFloatLit {
+        return e.float_val
+    }
+    if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
+        match e.left {
+            Some(inner) => return 0.0 - float_literal_value(*inner)
+            None => return 0.0
+        }
+    }
+    0.0
+}
+
+// H3 R1 SOUNDNESS: does float VALUE `v` fit the target float type without a
+// silent value change? f64 holds any f64 literal. f32 has a finite range of
+// roughly +/-3.4028235e38; a literal whose finite magnitude exceeds that
+// (`let x:f32 = 1e300`) would round to +/-inf — a silent value change — so it
+// is REJECTED. Non-finite literals are not produced by the lexer here, and
+// f32-representable in-range / underflow values are accepted unchanged.
+pub fn float_value_fits(v: f64, expected: TypeEntry) -> bool {
+    if expected.kind == TypeKind::TyF32 {
+        // f32 max finite magnitude (~3.4028235e38); a larger literal would round
+        // to +/-inf — a silent value change — so it is rejected. Compared via
+        // explicit branches (no if-expression-as-value / no abs temp) to stay on
+        // the simplest codegen path.
+        if v > 3.4028235e38 {
+            return false
+        }
+        if v < -3.4028235e38 {
+            return false
+        }
+        return true
+    }
+    // f64 (and any other float target) holds any f64 literal value.
+    true
+}
+
 // R1 SOUNDNESS: does integer VALUE `v` fit the NARROW target type without a
 // silent value-changing truncation at the coerced width? Narrow types
 // (i8/u8/i32/u32) are range-checked; i64/u64/i128/u128 already hold any i64
@@ -848,7 +887,17 @@ pub fn int_value_fits(v: i64, expected: TypeEntry) -> bool {
         // u64 stores any nonnegative i64 literal exactly; negatives are rejected.
         return v >= 0
     }
-    // i64 / i128 / u128: any i64 literal value fits the coerced width.
+    if expected.kind == TypeKind::TyU128 {
+        // H2: u128 is unsigned — a NEGATIVE literal (`let x:u128 = -1`) must be
+        // REJECTED (it would otherwise wrap to a huge value, a silent value
+        // change). Any nonnegative i64 literal fits the wide width.
+        return v >= 0
+    }
+    if expected.kind == TypeKind::TyI128 {
+        // i128 holds any i64-representable literal, including negatives.
+        return true
+    }
+    // i64: any i64 literal value fits the coerced width.
     true
 }
 
@@ -873,7 +922,15 @@ pub fn literal_coerces_to_val(lit_kind: i64, int_val: i64, expected: TypeEntry) 
 // value-range included? This is the canonical entry point for the node-reachable
 // coercion sites (let/var/field/arg/closure/return-expr).
 pub fn expr_literal_coerces_to(e: Expr, expected: TypeEntry) -> bool with Panic, Div {
-    literal_coerces_to_val(expr_is_num_literal(e), int_literal_value(e), expected)
+    let lk = expr_is_num_literal(e)
+    // H3: a float-literal node additionally must FIT the float target's
+    // magnitude (f32 narrowing rejects out-of-range; f64 accepts any). The
+    // value-only literal_coerces_to_val cannot see the float magnitude, so the
+    // guard lives here at the node level.
+    if lk == 2 {
+        return is_float_type(expected) && float_value_fits(float_literal_value(e), expected)
+    }
+    literal_coerces_to_val(lk, int_literal_value(e), expected)
 }
 
 pub fn opt_expr_literal_coerces_to(opt: Option<Box<Expr> >, expected: TypeEntry) -> bool with Panic, Div {

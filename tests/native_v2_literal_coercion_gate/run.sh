@@ -30,6 +30,14 @@
 #         (the call node must clear the per-expr literal flag -> still rejects)
 #     r08 non-literal arg of wrong width to a typed param (arg coercion must not
 #         leak to vars: take(y) where y:i64, param i32)
+#     r09 UNIT-BODY return hole: fn ->i32 { let z:i64=5; } — body yields unit
+#         (last stmt is a let), so the stale last-literal flag must NOT coerce it
+#         (return coercion is node-gated on the literal TAIL) -> E008
+#     r10 u128 NEGATIVE-literal hole: let x:u128 = -1 (unsigned rejects negatives)
+#     r11 f32 MAGNITUDE hole: let x:f32 = 1e300 (out of f32 finite range ->
+#         would silently become +/-inf; rejected)
+#     r12 f32 NEGATIVE-magnitude twin: let x:f32 = -1e300 (the negative side of
+#         the f32 range guard; rejected by symmetry)
 #
 # Anti-overclaim: positives assert FILE-PRESENT + exact exit code; rejects assert
 # --check FAILS (rc!=0). Prints N/N; nonzero exit on any miss.
