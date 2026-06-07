@@ -2,30 +2,36 @@
 topic_id: repo.docs.reference.stdlib-reference
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A3
+last_validated: 2026-06-07
+validated_by: Codex
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.reference.stdlib-reference
 -->
 
 # Standard Library Reference Entry Point
 
-This page is the stable reference entrypoint linked from the repository README.
+This page is the reference entrypoint for stdlib documentation. It is not a
+claim that every `stdlib/**/*.sio` file is currently callable; broad stdlib
+surface claims are governed by `docs/serious-language/public-claim-registry.v1.tsv`
+(`stdlib.surface = prototype` in this checkout).
 
 ## Core References
 
-- Executable STDLIB snapshot (inventory + reliability gate): `../STDLIB_REFERENCE.md`
+- Executable STDLIB status is produced by the reliability and evolution gates
+  below; there is no `docs/STDLIB_REFERENCE.md` snapshot file in this checkout.
 - `Knowledge<T>` and uncertainty usage: `KNOWLEDGE_REFERENCE.md`
 - Language specification: `../../spec/LANGUAGE_SPECIFICATION.md`
 
 ## API Doc Generation (`souniodoc`)
 
-Generate docs from the repository root:
+Generate docs from the repository root with the repository-local wrapper:
 
 ```bash
-cargo run -p souc --bin souniodoc -- generate stdlib --output target/doc
+mkdir -p target/doc
+bash tools/souniodoc.sh stdlib > target/doc/stdlib.md
 ```
 
-This generates browsable API docs for stdlib modules.
+There is no Cargo workspace root package named `souc` in this checkout, so
+`cargo run -p souc --bin souniodoc ...` is not the current invocation.
 
 ## Reliability Gate
 
