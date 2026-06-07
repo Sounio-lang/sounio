@@ -85,6 +85,12 @@ struct Lowerer {
     debug_mode: bool,
     // Sprint 44: probe-mode lowering skips heavyweight epistemic metadata lookup.
     probe_mode: bool,
+    // While lowering a lambda-lifted closure BODY, holds the ENCLOSING function's locals so
+    // a reference to a captured free var can be detected and REJECTED (capture-with-env is
+    // unsupported; see lower_closure_expr_ref). count==0 outside a closure body. Critical
+    // for soundness: without it a captured var whose name collides with a top-level fn would
+    // misresolve to that fn's address (the checker permits such shadowing).
+    closure_enclosing: Box<LowerLocalStack>,
 }
 
 struct IrPreparedCallArgs {
@@ -188,6 +194,7 @@ fn lowerer_new() -> Lowerer with Alloc {
         struct_layouts: Box::new(empty_struct_layout_table()),
         debug_mode: false,
         probe_mode: false,
+        closure_enclosing: Box::new(empty_lower_local_stack()),
     }
 }
 
@@ -3187,14 +3194,35 @@ impl Lowerer {
     // Sprint 228: Look up a function by name in the module. Returns (Lowerer, fn_id) where
     // fn_id >= 0 if found, -1 if not a known function.
     fn lookup_fn_by_name(self, name: Name) -> (Lowerer, i64) with Mut, Panic, Div {
+        // Explicit single-deref through the box (never auto-deref `self.module.functions`,
+        // which materializes the whole [IrFunction;1400] module by value onto the stack and
+        // faults). Mirrors find_or_add_fn_id. The old auto-deref form SIGSEGV'd the compiler
+        // whenever this miss/scan path was hit (e.g. a free var in a lifted closure body).
         var i: i64 = 0
-        while i < self.module.fn_count {
-            if ir_name_eq(self.module.functions[i].name, name) {
+        while i < (*self.module).fn_count {
+            if ir_name_eq((*self.module).functions[i as usize].name, name) {
                 return (self, i)
             }
             i = i + 1
         }
         (self, -1)
+    }
+
+    // True if `name` is bound in the ENCLOSING function's locals captured during closure-body
+    // lowering (closure_enclosing). Used to REJECT a captured free var (capture-with-env is
+    // unsupported) BEFORE it can misresolve to a top-level fn of the same name. count==0
+    // (outside a closure body) => always false, so normal lowering is unaffected. Copies the
+    // stack by value exactly as lookup_local does (a LowerLocalStack copy is tolerated).
+    fn name_in_closure_enclosing(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        let stk = *self.closure_enclosing
+        var i = stk.count - 1
+        while i >= 0 {
+            if ir_name_eq(stk.names[i as usize], name) {
+                return true
+            }
+            i = i - 1
+        }
+        false
     }
 
     fn fresh_reg(self) -> (Lowerer, i64) with Mut, Panic, Div, IO {
@@ -6680,6 +6708,15 @@ impl Lowerer {
             let src = self.lookup_local(e.name)
             if src >= 0 {
                 (self, src)
+            } else if self.name_in_closure_enclosing(e.name) {
+                // Captured free var in a lifted closure body. Capture-with-environment is
+                // unsupported, so REJECT (report_error -> ir_bodies_failed -> no ELF) rather
+                // than fall through to the fn-name lookup below, which for a captured var
+                // whose name collides with a top-level fn would emit that fn's ADDRESS (a
+                // silent miscompile). No-capture closures never reach here (their bodies use
+                // only params/literals); a genuine top-level-fn reference is NOT an enclosing
+                // local, so it still resolves below.
+                self.report_error().emit_unit()
             } else {
                 // Sprint 228: Check if this is a function name used as a first-class value
                 let fn_lookup = self.lookup_fn_by_name(e.name)
@@ -7676,11 +7713,17 @@ impl Lowerer {
         let saved_locals = lo.locals
         let saved_scope = lo.scope_depth
         let saved_loop = lo.loop_depth
+        let saved_closure_enclosing = lo.closure_enclosing
 
-        // 3. Switch to the closure function context
+        // 3. Switch to the closure function context. Expose the ENCLOSING locals via
+        // closure_enclosing so a captured free var in the body is detected and rejected
+        // (capture-with-env unsupported) instead of crashing or misresolving. saved_locals
+        // is the enclosing scope; share it for read-only capture checks (it is not mutated
+        // while the fresh closure stack is active). Restored in step 8.
         lo.current_fn = closure_fn_id
         lo.current_func = Box::new(ir_empty_function())
         (*lo.current_func).name = closure_name
+        lo.closure_enclosing = saved_locals
         lo.locals = Box::new(empty_lower_local_stack())
         lo.scope_depth = 0
         lo.loop_depth = 0
@@ -7730,6 +7773,7 @@ impl Lowerer {
         lo.locals = saved_locals
         lo.scope_depth = saved_scope
         lo.loop_depth = saved_loop
+        lo.closure_enclosing = saved_closure_enclosing
 
         // 9. In the original function, emit IrLoadFnRef to return the fn_id
         let ref_pair = lo.fresh_reg()

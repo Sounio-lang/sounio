@@ -34,11 +34,17 @@ for src in "$DIR"/[pr][0-9]*.sio; do
   rm -f "$out"
   exp="${EXP[$n]:-}"
   "$BIN" --native-v2-compile "$src" -o "$out" >/dev/null 2>&1
+  crc=$?
   if [ "$exp" = "REJECT" ]; then
     if [ -f "$out" ]; then
       echo "WRONG $n (REJECT expected but ELF emitted)"
+    elif [ "$crc" -ge 128 ]; then
+      # A compiler crash (e.g. SIGSEGV rc=139) also produces no ELF -- but it is NOT a
+      # clean reject. Fail loudly so the lookup_fn_by_name materialization crash can't
+      # masquerade as a pass.
+      echo "WRONG $n (compiler crashed rc=$crc, expected clean reject)"
     else
-      echo "PASS  $n (rejected, no ELF)"; pass=$((pass+1))
+      echo "PASS  $n (rejected cleanly, rc=$crc, no ELF)"; pass=$((pass+1))
     fi
   else
     if [ -f "$out" ]; then
