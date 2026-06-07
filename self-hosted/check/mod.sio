@@ -500,6 +500,46 @@ pub fn check_items_verdict_boot4(items: Option<Box<ItemList>>) -> i64 with Mut, 
     0
 }
 
+// ============================================================
+// #2 IMPORT-TYPECHECK seeded-checker primitives.
+//
+// The multimodule import path (module_frontend preflight import branch) seeds
+// the Checker with the REAL pub fn/struct/enum signatures of every transitively
+// imported module BEFORE checking the main module's bodies. This catches
+// ill-typed cross-module use of imported symbols (wrong arg type, wrong arity,
+// wrong imported-struct field) while NEVER checking imported bodies (which would
+// false-reject a valid main whose imported module uses an unsupported feature).
+//
+// C0: collect seeds the REAL types (struct/enum/fn signatures), never TyUnknown.
+// Cap: FnSigTable grown 64 -> 256 (defs.sio) so seeding many pub fns ahead of
+// main's own does not silently truncate (which would re-open the slip).
+// Order: main is collected FIRST so main's own fns can never be the dropped ones.
+// ============================================================
+
+// Allocate + init a Checker, then collect MAIN's items first (so main's own
+// fns/types occupy the lowest table indices and are never the truncated ones).
+pub fn checker_boot4_alloc_seed_main(main_items: Option<Box<ItemList>>) -> *mut Checker with Mut, Panic, Div, Alloc, IO {
+    let checker_ptr = heap_alloc(8388608) as *mut Checker
+    checker_init_in_place(checker_ptr)
+    checker_collect_items_mut(checker_ptr, main_items)
+    checker_ptr
+}
+
+// Seed one imported module's items (signatures/structs/enums only — collect, not
+// check) into an already-initialized checker.
+pub fn checker_boot4_seed_imported(checker_ptr: *mut Checker, imported_items: Option<Box<ItemList>>) with Mut, Panic, Div, Alloc, IO {
+    checker_collect_items_mut(checker_ptr, imported_items)
+}
+
+// Check ONLY the main module's bodies against the seeded tables. Returns 0 = ok,
+// 1 = type error. The knowledge-context value validation is run by the caller
+// (module_frontend_check_items_with_source_context), mirroring boot4.
+pub fn checker_boot4_finish_check_main(checker_ptr: *mut Checker, main_items: Option<Box<ItemList>>) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, main_items)
+    if had_error == 1 { return 1 }
+    0
+}
+
 pub fn check_ontology_side_table_cache_subclass_verdict_probe(source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div {
     ontology_side_table_cache_subclass_verdict(source_path, child_id, parent_id)
 }
