@@ -2162,6 +2162,27 @@ fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a
     print_error_note(code)
 }
 
+// CAP-HOLES round: LOUD overflow guard. When a checker table (fn/struct/enum/
+// env) fills even after the 4x grow to 512, the checker MUST reject loudly
+// rather than silently drop the symbol (which would re-open a C0 over-accept or
+// a false-reject). Emits a clear "compiler limit exceeded" diagnostic, sets
+// had_error so the verdict is REJECT (no ELF), and increments error_count.
+// `kind` is a human label: "functions", "structs", "enums", "bindings".
+fn checker_report_cap_overflow_inplace(c: *mut Checker, kind: i64, limit: i64) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    print("error[E300]: too many ")
+    if kind == 0 { print("functions") }
+    else if kind == 1 { print("structs") }
+    else if kind == 2 { print("enums") }
+    else { print("type bindings") }
+    print(" in module set; compiler limit ")
+    print_int(limit)
+    print(" exceeded\n")
+    print("   = help: split the module set or raise the checker table cap\n")
+    print("   = note: the type checker uses fixed-size tables; exceeding the cap is rejected rather than silently dropped\n")
+}
+
 fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
@@ -2405,15 +2426,20 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) wit
             }
             // In-place insert mirrors FnSigTable::add — avoids copying the 45KB
             // FnSigTable by value (one of the large-aggregate copies the *mut
-            // conversion eliminates). Cap grown 64 -> 256 for #2 import seeding.
+            // conversion eliminates). Cap grown 64 -> 256 -> 512 (cap-holes).
             let sig_id = (*c).fn_sigs.count
-            if sig_id < 256 {
+            if sig_id < 512 {
                 (*c).fn_sigs.entries[sig_id as usize] = sig
                 (*c).fn_sigs.count = sig_id + 1
+            } else {
+                checker_report_cap_overflow_inplace(c, 0, 512)
             }
-            // In-place env bind mirrors TypeEnv::bind (avoids copying the 32KB TypeEnv).
+            // In-place env bind mirrors TypeEnv::bind. Cap grown 128 -> 512
+            // (cap-holes): env was the real fn-LOOKUP gate — a >128-fn module
+            // stopped binding fn names, so high-index fn calls resolved to
+            // nothing and went arg-unchecked (silent C0 over-accept).
             let benv_idx = (*c).env.count
-            if benv_idx < 128 {
+            if benv_idx < 512 {
                 (*c).env.bindings[benv_idx as usize] = TypeBinding {
                     name: name,
                     ty: ty_fn(sig_id),
@@ -2421,6 +2447,8 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) wit
                     scope_depth: (*c).env.scope_depth,
                 }
                 (*c).env.count = benv_idx + 1
+            } else {
+                checker_report_cap_overflow_inplace(c, 3, 512)
             }
             checker_const_int_bind_unknown_inplace(c, name)
         }
@@ -2469,7 +2497,11 @@ fn checker_collect_struct_def_inplace(c: *mut Checker, name: Name, opt: Option<B
                 type_param_names: tp_result.names,
                 is_generic_template: tp_result.count > 0,
             }
-            (*c).structs = (*c).structs.add(info)
+            if (*c).structs.count < 512 {
+                (*c).structs = (*c).structs.add(info)
+            } else {
+                checker_report_cap_overflow_inplace(c, 1, 512)
+            }
         }
         None => {}
     }
@@ -2513,7 +2545,11 @@ fn checker_collect_enum_def_inplace(c: *mut Checker, name: Name, opt: Option<Box
                 variants: vr.variants,
                 variant_count: vr.count,
             }
-            (*c).enums = (*c).enums.add(info)
+            if (*c).enums.count < 512 {
+                (*c).enums = (*c).enums.add(info)
+            } else {
+                checker_report_cap_overflow_inplace(c, 2, 512)
+            }
         }
         None => {}
     }
@@ -2568,11 +2604,13 @@ fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: N
                 linear_capture_count: 0,
                 epistemic_epsilon: 0.0 - 1.0,
             }
-            // Mirror FnSigTable::add in place (same < 256 cap as checker_collect_fn_def_inplace).
+            // Mirror FnSigTable::add in place (same < 512 cap as checker_collect_fn_def_inplace).
             let sig_id = (*c).fn_sigs.count
-            if sig_id < 256 {
+            if sig_id < 512 {
                 (*c).fn_sigs.entries[sig_id as usize] = sig
                 (*c).fn_sigs.count = sig_id + 1
+            } else {
+                checker_report_cap_overflow_inplace(c, 0, 512)
             }
         }
         None => {}
@@ -3843,7 +3881,11 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             is_generic_template: false,
                         }
                         // RUNTIME-RISK: ~160KB StructTable by-value SRET-store-back (see review).
-                        (*c).structs = (*c).structs.add(mono_info)
+                        if (*c).structs.count < 512 {
+                            (*c).structs = (*c).structs.add(mono_info)
+                        } else {
+                            checker_report_cap_overflow_inplace(c, 1, 512)
+                        }
                     }
                     // Pass 2: validate fields against the monomorphized struct (finalize
                     // 16705-16709 → check_struct_field_inits 16715). Count check first (E046),
