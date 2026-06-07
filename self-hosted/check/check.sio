@@ -2455,17 +2455,78 @@ fn checker_report_multitest_correction_required_inplace(c: *mut Checker, span: S
     print("   = note: functions with `with MultiTest` must record an explicit multiple-testing correction once they perform more than one statistical test\n")
 }
 
-// Dedicated leaf for the by-value check_impl_item bridge. Isolating it here
-// keeps its 8MB SRET frame OUT of checker_check_item_inplace (which else would
-// carry the frame at compile time even for impl-free programs like `fn main(){}`).
-fn checker_check_impl_item_bridge(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
-    checker_store_from_value(c, (*c).check_impl_item(opt))
+fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
+    match item.fn_def {
+        Some(fd) => {
+            let saved_effects = (*c).current_effects
+            let saved_effect_count = (*c).current_effect_count
+            let saved_multitest_count = (*c).multitest_count
+            let saved_multitest_corrected = (*c).multitest_corrected
+            let sig_id = (*c).fn_sigs.find_method((*c).current_impl_type.name, (*fd).name)
+            if sig_id >= 0 {
+                let sig = (*c).fn_sigs.get(sig_id)
+                (*c).current_return_type = sig.return_type
+                (*c).current_effects = sig.effects
+                (*c).current_effect_count = sig.effect_count
+            }
+            (*c).multitest_count = 0
+            (*c).multitest_corrected = false
+            (*c).env = (*c).env.push_scope()
+            (*c).borrows = (*c).borrows.push_scope()
+            checker_push_const_scope_inplace(c)
+            checker_bind_fn_params_inplace(c, (*fd).params)
+            let body_ty = checker_check_block_inplace(c, (*fd).body)
+            if sig_id >= 0 {
+                let sig2 = (*c).fn_sigs.get(sig_id)
+                if !types_compatible(body_ty, sig2.return_type) {
+                    checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
+                }
+            }
+            if (*c).multitest_count > 1 && !(*c).multitest_corrected {
+                checker_report_multitest_correction_required_inplace(c, (*fd).span, (*c).multitest_count)
+            }
+            checker_pop_const_scope_inplace(c)
+            (*c).borrows = (*c).borrows.pop_scope()
+            (*c).env = (*c).env.pop_scope()
+            (*c).current_return_type = ty_unit()
+            (*c).current_effects = saved_effects
+            (*c).current_effect_count = saved_effect_count
+            (*c).multitest_count = saved_multitest_count
+            (*c).multitest_corrected = saved_multitest_corrected
+        }
+        None => {}
+    }
+}
+
+fn checker_check_impl_methods_inplace(c: *mut Checker, opt: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    var cursor = opt
+    while true {
+        match cursor {
+            Some(list) => {
+                checker_check_impl_method_inplace(c, (*list).head)
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_check_impl_item_inplace(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(id) => {
+            let impl_ty = checker_lower_type_expr_mut(c, (*id).target_type)
+            (*c).current_impl_type = impl_ty
+            checker_check_impl_methods_inplace(c, (*id).methods)
+            (*c).current_impl_type = ty_error()
+        }
+        None => {}
+    }
 }
 
 fn checker_check_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     match item.kind {
         ItemKind::ItemFn => checker_check_fn_item_inplace(c, item.fn_def)
-        ItemKind::ItemImpl => checker_check_impl_item_bridge(c, item.impl_def)
+        ItemKind::ItemImpl => checker_check_impl_item_inplace(c, item.impl_def)
         _ => {}
     }
 }
@@ -2828,6 +2889,40 @@ fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
 }
 
 
+fn checker_check_binary_op_types_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    if is_error_or_unknown(left_ty) || is_error_or_unknown(right_ty) {
+        return
+    }
+    if op == BinaryOp::OpBitAnd || op == BinaryOp::OpBitOr || op == BinaryOp::OpBitXor {
+        if !is_integer_type(left_ty) || !is_integer_type(right_ty) {
+            checker_report_error_at_inplace(c, span, 48, 0, 0, 0)
+        }
+    } else if op == BinaryOp::OpShl || op == BinaryOp::OpShr {
+        if !is_integer_type(left_ty) || !is_integer_type(right_ty) {
+            checker_report_error_at_inplace(c, span, 49, 0, 0, 0)
+        }
+    } else if op == BinaryOp::OpRem {
+        if !is_integer_type(left_ty) || !is_integer_type(right_ty) {
+            checker_report_error_at_inplace(c, span, 50, 0, 0, 0)
+        }
+    } else if op == BinaryOp::OpAnd || op == BinaryOp::OpOr {
+        if !is_bool_type(left_ty) || !is_bool_type(right_ty) {
+            checker_report_error_at_inplace(c, span, 51, 0, 0, 0)
+        }
+    }
+}
+
+fn checker_check_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let lu = left.unit_id
+    let ru = right.unit_id
+    if lu < 0 && ru < 0 {
+        return result
+    }
+    let pair = (*c).check_binary_units(span, op, left, right, result)
+    checker_store_from_value(c, pair.0)
+    pair.1
+}
+
 // *mut transcription of check_binary_with_operand_types (13983). Returns ONLY the TypeEntry
 // so the RECURSIVE checker_check_binary_expr_inplace no longer holds a 12MB (Checker,
 // TypeEntry) `pair` local across its operand recursion (that N-deep 12MB frame was the
@@ -2845,8 +2940,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             }
         }
     }
-    let bot = (*c).check_binary_op_types(e.span, e.bin_op, left_ty, right_ty)
-    checker_store_from_value(c, bot)
+    checker_check_binary_op_types_inplace(c, e.span, e.bin_op, left_ty, right_ty)
     if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
         let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
         let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
@@ -2858,9 +2952,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         if knowledge_result.kind == TypeKind::TyError {
             checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
         }
-        let ru = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, knowledge_result)
-        checker_store_from_value(c, ru.0)
-        let final_result = ru.1
+        let final_result = checker_check_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_result)
         if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
             let final_inner = if final_result.kind == TypeKind::TyKnowledge {
                 knowledge_inner(final_result)
@@ -2878,9 +2970,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         let hr = check_hyper_binary(*c, e.span, e.bin_op, left_ty, right_ty)
         checker_store_from_value(c, hr.0)
         let typed_result = hr.1
-        let ru = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, typed_result)
-        checker_store_from_value(c, ru.0)
-        let final_result = ru.1
+        let final_result = checker_check_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, typed_result)
         if e.bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
             let rh = (*c).record_hyper_expr(e.span, final_result.algebra_kind, 1, false)
             checker_store_from_value(c, rh)
@@ -2923,9 +3013,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             checker_report_error_at_inplace(c, e.span, 57, 0, 0, 0)
         }
     }
-    let ru = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, result)
-    checker_store_from_value(c, ru.0)
-    ru.1
+    checker_check_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, result)
 }
 
 fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
