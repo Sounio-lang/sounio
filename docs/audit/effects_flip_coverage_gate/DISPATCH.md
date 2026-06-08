@@ -28,6 +28,16 @@ A(full)/C/D BLOCKED — see banner.
 > larger, separately-authorised changes. Phases C (annotate) and D (flip+gate) are gated on (1)+(2)
 > and were **not** executed. Details: `PHASE_B_RESULTS.md`.
 
+> **⚠️ UPDATE 2026-06-08 (post EFF.2 Phase-1 — the per-module gate Fb is RETIRED).** The Phase-B
+> "imported types aren't seeded" diagnosis above was **wrong** (structs/enums *do* seed; only aliases
+> fail). EFF.2 Phase-1 attribution (`EFF2_PHASE1_ATTRIBUTION.md`) found the per-module gate is the
+> **wrong unit**: 9 of the genuine TYPEFAILs are SELF_NOT_CONTAINED (zero imports; types flow inward
+> from the bundle root — nothing to seed), 27 are unrelated pre-existing checker type-gaps, 0 are the
+> alias gap. ⟹ **Coverage must be the whole-program (bundle) check, not per-module.** The whole effort
+> reduces to: **fix the 271-wall, then run the existing whole-program check under `toggle = 2`.**
+> §2 (Fb) and §3/§5/§6 (per-module gate plumbing) are superseded; this dispatch's residual value is
+> §1 (evidence) and §4 (the 271-wall dependency, now the sole gate). See `EFF2_PHASE1_ATTRIBUTION.md`.
+
 ---
 
 ## §0 — Constraint / framing

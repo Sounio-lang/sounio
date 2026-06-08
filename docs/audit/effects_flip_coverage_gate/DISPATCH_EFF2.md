@@ -12,7 +12,19 @@
 **Priority.** P3 — prerequisite for the EFF.1 coverage gate; itself partly downstream of the
 271-wall (see §4). Not on any current critical path.
 **Branch.** `claude/effects-enforcement`.
-**Status.** OPEN — spec only (diagnosis-first).
+**Status.** Phase 1 EXECUTED 2026-06-08 (`EFF2_PHASE1_ATTRIBUTION.md`, raw `eff2_phase1_raw.json`).
+**Outcome: PREMISE FALSIFIED — do NOT implement EFF.2 seeding.** See banner.
+
+> **⚠️ RESOLUTION 2026-06-08 (Phase 1).** Attribution of the 66 TYPEFAIL: **23 271-poisoned, 9
+> SELF_NOT_CONTAINED, 27 REAL_TYPE_ERROR (pre-existing checker gaps, verified by minimal repro), 7
+> OTHER (incl. 2 false-TYPEFAILs), and 0 ALIAS_E008.** EFF.2's stated motivation (imported type-alias
+> seeding) occurs **zero** times in the real surface → **do not implement the seeding fix.** The 9
+> SELF_NOT_CONTAINED modules show the **per-module gate is the wrong unit** (their types flow inward
+> from the bundle root; nothing to seed). ⟹ The effects-flip coverage reduces to: **fix the 271-wall,
+> then run the existing whole-program check under `toggle = 2`** (covers every module body in one
+> pass; no per-module gate, no seeding). Orthogonal cleanup: two systematic checker type-gaps
+> (array-literal element coercion; uninit-struct inference). EFF.2 and EFF.1's per-module gate (Fb)
+> are RETIRED.
 
 ---
 
