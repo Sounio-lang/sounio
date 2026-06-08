@@ -15,7 +15,18 @@
 can be trusted for the compiler's own source; **not** on any current critical path (see §4).
 **Branch.** `claude/effects-enforcement` (M2 toggle lives here; parser prerequisite already landed
 as `526b0091f`).
-**Status.** OPEN — spec only.
+**Status.** Phase B EXECUTED 2026-06-08 (`PHASE_B_RESULTS.md`, raw `phase_b_raw.json`); Phases
+A(full)/C/D BLOCKED — see banner.
+
+> **⚠️ UPDATE 2026-06-08 (post Phase-B — supersedes the "thin wrapper" assumption in §2/§3).**
+> Phase B (per-module coverage sweep of all 107 modules via `--check`) found **16 OK / 66 TYPEFAIL /
+> 25 PARSEFAIL**, only **20 W035** of clean signal (all in `native/regalloc.sio`). The 66 TYPEFAILs
+> are dominated by `E015 unknown struct type` / `E016` / `E001` → `checker_boot4_seed_imported`
+> seeds imported **function** signatures but **not imported type definitions**. So the recommended
+> Fb generalisation is **NOT a thin wrapper**: a sound coverage gate needs (1) imported-**type**
+> seeding extended in the checker, **and** (2) the 271-wall fixed (the 25 PARSEFAILs). Both are
+> larger, separately-authorised changes. Phases C (annotate) and D (flip+gate) are gated on (1)+(2)
+> and were **not** executed. Details: `PHASE_B_RESULTS.md`.
 
 ---
 
