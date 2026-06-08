@@ -266,6 +266,7 @@ gate_tests_rc_count "native_v2_struct_field_float" tests/native_v2_struct_field_
 gate_tests_rc_count "native_v2_string"         tests/native_v2_string_gate/run.sh         "10/10"
 gate_tests_rc_count "native_v2_generic"        tests/native_v2_generic_gate/run.sh        "10/10"
 gate_tests_rc_count "native_v2_showcase"       tests/native_v2_showcase_gate/run.sh       "2/2"
+gate_tests_rc_count "native_v2_effects"        tests/native_v2_effects_gate/run.sh        "8/8"
 
 gate_tracked_residual "native_v2_backend_soundness" \
   tests/native_v2_backend_soundness_gate/run.sh \
