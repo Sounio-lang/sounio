@@ -24,9 +24,18 @@
   **`native/regalloc` (20 W035)**, `native/runtime_context`, `native/stack_maps`, `resolve/scope`,
   `wasm/buf`, `wasm/core`, `wasm/opcodes`, `wasm/types`.
 
-## Dominant failure modes (the two blockers)
+> **⚠️ CORRECTION (2026-06-08, see `DISPATCH_EFF2.md` §1).** The "(1) incomplete imported-TYPE
+> seeding" diagnosis below is **wrong**. Follow-up probes show imported **structs and enums DO
+> seed** (`check: OK` for a target using an imported struct/enum); only **type aliases** fail
+> (E008). The 66 TYPEFAILs actually decompose into: **(a)** transitive **271-wall poisoning**
+> (confirmed — an importer TYPEFAILs if any transitively-imported module fails to parse; likely the
+> majority), **(b)** imported type **aliases** not seeded (E008; the `else`-branch no-op at
+> `check.sio:2726`), and **(c)** a residual, *unpinned* E015/E016 class (NOT "structs not seeded").
+> EFF.2 is diagnosis-first to attribute and fix (b)+(c); (a) belongs to the 271-wall. The raw
+> code-distribution below is still accurate as data.
 
-**(1) 66 TYPEFAIL — incomplete imported-TYPE seeding.** First-error code distribution:
+**(1) 66 TYPEFAIL — first-error code distribution (data; see correction above for the real causes).**
+First-error code distribution:
 `E015 unknown struct type` ×16, `E001 binding type mismatch` ×13, `E016 field-initialiser wrong
 type` ×8, `E011` ×6, `E004` ×6, `E005` ×5, `E035` ×3, `E007`/`E013` ×1, none ×7. The `E015`/`E016`/
 many-`E001` cluster is the signature of a module referencing an imported **struct/enum** that the
@@ -47,10 +56,10 @@ EFF.1 §2 (Fb) assumed generalising `import_typecheck_main` → `_target` was a 
 **refutes** that: a sound per-module coverage gate is blocked behind **two** upstream changes, both
 larger than the dispatch's contained scope:
 
-1. **Extend `checker_boot4_seed_imported` to seed imported TYPE definitions** (structs/enums), so a
-   module checked as target resolves its imported types and TYPEFAILs only on genuine errors. This
-   is a soundness-sensitive checker change in its own right (clears the 66 TYPEFAILs) — it needs its
-   own evidence/verification, not a rushed edit.
+1. **EFF.2 (`DISPATCH_EFF2.md`)** — make per-module target-check clean. NB: structs/enums already
+   seed (correction above); the genuine EFF.2 surface is type-**alias** seeding (E008) + a residual
+   unpinned E015/E016 class, and is **diagnosis-first** (attribute the 66 by cause before editing).
+   Soundness-sensitive; its own evidence/verification, not a rushed edit.
 2. **The 271-wall fix** (keyword demotion, concurrent session) — clears the 25 PARSEFAILs and is the
    prerequisite for `main.sio`'s own coverage + `gen2 == gen3` flip verification.
 
