@@ -1,0 +1,143 @@
+// stdlib/viz/mol3d.sio — Screen-space molecular 3D renderer
+//
+// Renders MoleculeViz atoms as depth-sorted filled circles and bonds as
+// antialiased lines directly into a display::Canvas.
+// Coordinates are in Ångströms. Camera uses Camera3D from renderer3d.sio.
+//
+// Usage:
+//   let mol = molecule_h2o()
+//   let cam = Camera3D { pos_x: 0.0, pos_y: 0.0, pos_z: -15.0, focal: 400.0 }
+//   mol3d_render(&mol, &cam, angle_y, angle_x, &!canvas)
+
+use display::canvas::{Canvas, canvas_fill_circle}
+use display::canvas_ext::{canvas_draw_line_aa}
+use render::renderer3d::{Camera3D, Vec3f}
+use viz::physchem::{MoleculeViz}
+
+// ============================================================
+// Internal math
+// ============================================================
+
+fn m3_sin(t: f64) -> f64 with Div {
+    let t2 = t * t
+    t * (1.0 - t2 * (1.0 / 6.0 - t2 * (1.0 / 120.0 - t2 / 5040.0)))
+}
+
+fn m3_cos(t: f64) -> f64 with Div {
+    let t2 = t * t
+    1.0 - t2 * (0.5 - t2 * (1.0 / 24.0 - t2 / 720.0))
+}
+
+// Project world point → screen. z component of returned Vec3f = depth (> 0 if visible).
+fn m3_project(x: f64, y: f64, z: f64, cam: &Camera3D, w: i64, h: i64) -> Vec3f with Div {
+    let rz = z - cam.pos_z
+    if rz >= 0.0 {
+        return Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    }
+    let depth = 0.0 - rz
+    let scale = cam.focal / depth
+    let sx = (x - cam.pos_x) * scale + (w as f64) * 0.5
+    let sy = (0.0 - (y - cam.pos_y)) * scale + (h as f64) * 0.5
+    Vec3f { x: sx, y: sy, z: depth }
+}
+
+// Insertion sort: order[0..n] = indices into depth[], descending (furthest first).
+fn m3_sort_desc(depth: &[f64; 64], n: i64, order: &![i64; 64]) with Mut {
+    var i: i64 = 0
+    while i < n {
+        (*order)[i as usize] = i
+        i = i + 1
+    }
+    var j: i64 = 1
+    while j < n {
+        let ki = (*order)[j as usize]
+        let kd = depth[ki as usize]
+        var k = j - 1
+        while k >= 0 && depth[(*order)[k as usize] as usize] < kd {
+            (*order)[(k + 1) as usize] = (*order)[k as usize]
+            k = k - 1
+        }
+        (*order)[(k + 1) as usize] = ki
+        j = j + 1
+    }
+}
+
+// ============================================================
+// Public API
+// ============================================================
+
+// Render a MoleculeViz into a Canvas with perspective projection.
+//   angle_y — rotation around vertical (Y) axis in radians
+//   angle_x — rotation around horizontal (X) axis in radians
+//   cam     — Camera3D; set pos_z negative (e.g. -15.0) and focal ~400 for typical molecules
+pub fn mol3d_render(
+    mol: &MoleculeViz,
+    cam: &Camera3D,
+    angle_y: f64,
+    angle_x: f64,
+    c: &!Canvas,
+) with Mut, Div {
+    let cy = m3_cos(angle_y)
+    let sy = m3_sin(angle_y)
+    let cx = m3_cos(angle_x)
+    let sx = m3_sin(angle_x)
+
+    // Per-atom projected data
+    var px:  [i64; 64] = [0; 64]      // screen x
+    var py:  [i64; 64] = [0; 64]      // screen y
+    var pd:  [f64; 64] = [0.0; 64]    // depth (0 = behind camera)
+    var prad:[i64; 64] = [0; 64]      // screen radius
+    var pvis:[i64; 64] = [0; 64]      // 1 = visible
+
+    var i: i64 = 0
+    while i < mol.atom_count {
+        let a = mol.atoms[i as usize]
+
+        // Rotate Y then X
+        let x1 = a.x * cy + a.z * sy
+        let y1 = a.y
+        let z1 = 0.0 - a.x * sy + a.z * cy
+        let y2 = y1 * cx - z1 * sx
+        let z2 = y1 * sx + z1 * cx
+
+        let p = m3_project(x1, y2, z2, cam, c.width, c.height)
+        if p.z > 0.0 {
+            px[i as usize]   = p.x as i64
+            py[i as usize]   = p.y as i64
+            pd[i as usize]   = p.z
+            let rs = (a.radius * cam.focal / p.z) as i64
+            prad[i as usize] = if rs < 3 { 3 } else if rs > 100 { 100 } else { rs }
+            pvis[i as usize] = 1
+        }
+        i = i + 1
+    }
+
+    // Draw bonds (behind atoms — paint first)
+    var bi: i64 = 0
+    while bi < mol.bond_count {
+        let bond = mol.bonds[bi as usize]
+        let ia = bond.atom_a
+        let ib = bond.atom_b
+        if pvis[ia as usize] == 1 && pvis[ib as usize] == 1 {
+            canvas_draw_line_aa(c,
+                px[ia as usize], py[ia as usize],
+                px[ib as usize], py[ib as usize],
+                200, 200, 200)
+        }
+        bi = bi + 1
+    }
+
+    // Depth-sort back-to-front and draw atoms as filled circles
+    var order: [i64; 64] = [0; 64]
+    m3_sort_desc(&pd, mol.atom_count, &!order)
+
+    var oi: i64 = 0
+    while oi < mol.atom_count {
+        let idx = order[oi as usize]
+        if pvis[idx as usize] == 1 {
+            let a = mol.atoms[idx as usize]
+            canvas_fill_circle(c, px[idx as usize], py[idx as usize], prad[idx as usize], a.r, a.g, a.b)
+        }
+        oi = oi + 1
+    }
+}
