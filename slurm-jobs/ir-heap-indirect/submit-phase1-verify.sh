@@ -61,6 +61,8 @@ wait \${GPID}; NCRC=\$?
   echo "NATIVE_COMPILE_RC=\${NCRC}  (137=OOM, 139=SIGSEGV, 0=completed)"
   echo "PEAK_HWM_MB=\$((PEAK/1024))   (Phase-0 baseline job 2382 = 16194 MB / OOM)"
   echo "MERGED_IR=\$(grep -E '^Merged IR:' "\${RES}/nc.log" | head -1) \$(grep -A1 -E '^Merged IR:' "\${RES}/nc.log" | tail -1)"
+  echo "--- DBG_A1 localization (scratch=global direct read; dst=pointer read) ---"
+  grep -E '^DBG_A1 ' "\${RES}/nc.log" | head -12
   echo "gen.elf size: \$(stat -c%s "\${ROOT}/gen.elf" 2>/dev/null || echo 0)"
   if [ -s "\${ROOT}/gen.elf" ]; then chmod +x "\${ROOT}/gen.elf"; echo "gen.elf --help: \$(/usr/bin/timeout 20 "\${ROOT}/gen.elf" --help 2>&1 | head -1)"; fi
   echo "--- last 12 nc.log lines ---"; tail -12 "\${RES}/nc.log"
