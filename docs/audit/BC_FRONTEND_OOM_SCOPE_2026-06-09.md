@@ -126,6 +126,33 @@ which can be addressed later. **Refined Phase-1 target = `module_frontend_lower_
 `IrModule` per import), then the two merge loops (`:3962`, `:4229`) → in-place. Harness +
 SUMMARY: `slurm-jobs/ir-heap-indirect/` (job 2382).
 
+## Phase 1 — ATTEMPT 1 RESULT (job 2383): builds + gate-clean + peak down, but NOT correct yet
+
+The A1 single-accumulator refactor (commit on `claude/ir-heap-indirect`) is implemented:
+`ir_merge_modules_into` / `ir_module_logical_reset` / `_summary_into` / `_recursive_into`,
+wired into the `--native-compile` full-IR path via `&!(*out).module`.
+
+Job 2383: **`MC_BUILD_RC=0`** (compiles), **`native_v2_multimodule 27/27`** (no regression),
+peak **16194 → 12979 MB** (down, but far from the ~1–1.5 GB target). BUT
+**`NATIVE_COMPILE_RC=139` (SIGSEGV)** with **`Merged IR: 6878231886984147744`** — a garbage
+`fn_count` (the value decodes as ASCII bytes = it's reading `Name`/string-table data). So the
+merge reads/writes `fn_count` at the **wrong offset** through the pointer threading; the corrupt
+count drives `functions[garbage] = …` wild writes (the residual 13 GB) → SIGSEGV.
+
+**Pinned next bug:** `IrModule.fn_count` sits ~526 MB into the struct (right after
+`functions[8192]`). Accessing it (and `string_count`) through the freshly-threaded `&!`/`&`
+pointers at that scale mis-resolves. Local-struct access to the same fields works (the original
+by-value code did), and the 800 KB-scale pointer test passes — but a 520 MB **local** struct is
+outright rejected ("consider *mut/heap or global arrays"), so large IrModules must be
+global/BSS, and the `var scratch = ir_empty_module()` **local** (BSS-spilled) + `&! scratch` +
+`&!(*out).module` interaction at 526 MB is the suspect. Candidate fixes for attempt 2:
+(a) make the scratch a **global** `IrModule` (matches the proven `NATIVE_DRIVER_IR_RESULT`
+pattern; large IrModules should never be locals); (b) add per-merge `fn_count` instrumentation to
+localize whether the bad offset is on the read (`(*mod_ptr).fn_count`), the write
+(`logical_reset`/append), or the scratch SRET init; (c) if `&!(*out).module` is implicated,
+reference the global field directly (the driver already uses `&NATIVE_DRIVER_IR_RESULT.module`).
+Harness: `slurm-jobs/ir-heap-indirect/submit-phase1-verify.sh`. **Phase 1 is NOT done.**
+
 ## Recommended phased plan
 
 - **Phase 0 — instrumented baseline (measures the GATING question, not just copy-count).** SLURM
