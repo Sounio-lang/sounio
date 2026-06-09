@@ -2622,28 +2622,68 @@ fn module_frontend_count_imported_source_recursive(path: string, depth: i64, tra
     total
 }
 
+// Lower `path` plus all transitively-imported modules into one merged IrModule.
+//
+// This is an ITERATIVE BFS with a visited-set (dedup), mirroring the proven
+// traversal in module_frontend_import_typecheck_main. It replaces a former
+// recursive implementation that had two diagnosed faults (SLURM jobs 2363/2364):
+//   1. STACK OVERFLOW at recursion depth ~10 — each frame carried large
+//      IrModule-handling locals, so a deep import chain exhausted the 8 MB stack.
+//   2. No dedup — shared/cyclic imports were re-lowered along every path, so once
+//      the stack wall was lifted (ulimit -s unlimited) the traversal OOMed at 15 GB.
+// A flat loop has no call-stack depth and never aliases bss-spilled IrModule slots
+// across live frames; the visited-set lowers each distinct module exactly once.
+// Merge order is irrelevant to correctness: intra-module call fn_ids shift by the
+// merge offset in ir_merge_modules, and cross-module calls are resolved by NAME in
+// ir_module_resolve_named_calls (called by the caller post-merge), not by position.
+// `depth` is retained only for signature/call-site compatibility (callers pass 0).
 fn module_frontend_lower_imported_source_recursive(path: string, depth: i64, trace: &! LoadMultimoduleIrTrace) -> IrModule with IO, Mut, Panic, Div, Alloc {
-    if depth > 16 {
-        return ir_empty_module()
-    }
-    if depth > 0 {
-        trace.loaded_modules = trace.loaded_modules + 1
-    }
-    trace.resolved_modules = trace.loaded_modules
-    trace.typechecked_modules = trace.loaded_modules
-    var merged = module_frontend_lower_source_file_summary(path, depth, trace)
-    if merged.fn_count <= 0 {
-        return merged
-    }
-    trace.merged_modules = trace.merged_modules + 1
-    let imports = module_frontend_import_files_from_source(path)
-    var i: i64 = 0
-    while i < imports.count {
-        let dep = module_frontend_lower_imported_source_recursive(imports.paths[i], depth + 1, trace)
-        if dep.fn_count > 0 {
-            merged = ir_merge_modules(merged, dep)
+    // Phase 1: BFS collect the distinct set of transitively-imported module paths.
+    var file_paths: [string; 256] = [""; 256]
+    file_paths[0] = path
+    var loaded: i64 = 1
+    var visited_paths: [string; 256] = [""; 256]
+    visited_paths[0] = path
+    var visited_count: i64 = 1
+    var work_front: i64 = 0
+    while work_front < loaded && loaded < 256 {
+        let work_imports = module_frontend_import_files_from_source(file_paths[work_front as usize])
+        work_front = work_front + 1
+        var i: i64 = 0
+        while i < work_imports.count && loaded < 256 {
+            let file_path = work_imports.paths[i as usize]
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count as usize] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    file_paths[loaded as usize] = file_path
+                    loaded = loaded + 1
+                }
+            }
+            i = i + 1
         }
-        i = i + 1
+    }
+
+    trace.loaded_modules = loaded
+    trace.resolved_modules = loaded
+    trace.typechecked_modules = loaded
+
+    // Phase 2: lower each distinct module once and merge sequentially.
+    var merged = ir_empty_module()
+    var has_any: bool = false
+    var mi: i64 = 0
+    while mi < loaded {
+        let part = module_frontend_lower_source_file_summary(file_paths[mi as usize], mi, trace)
+        if part.fn_count > 0 {
+            if has_any {
+                merged = ir_merge_modules(merged, part)
+            } else {
+                merged = part
+                has_any = true
+            }
+            trace.merged_modules = trace.merged_modules + 1
+        }
+        mi = mi + 1
     }
     merged
 }
