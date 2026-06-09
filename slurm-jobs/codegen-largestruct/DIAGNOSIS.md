@@ -120,3 +120,39 @@ This is advisor option (b): generalize the base-pointer acquisition (compile_or)
 - **The SIGBUS/reloc wall** — keep investigating in parallel; it is plausibly a *different*
   class member (see caveat 1). Bundle any further lean_single codegen fixes into the one
   rebootstrap.
+
+## Phase 2b — FIX CONFIRMED ON THE WALL PATH (not merely latent)
+
+`grep` found **23 live complex-base deref-store sites in `self-hosted/ir/lower.sio`** with NO
+bind-to-local workaround — the exact pattern my fix newly handles. Critically these include the
+hottest IR-building paths:
+- `intern_string` (3311-3315): `var lo = self; (*lo.module).string_table[idx]=n; (*lo.module).string_count=idx+1`
+- `find_or_add_fn_id` neighbours, `export_names`/`export_count` (3765-66), `param_regs`/`param_count`
+  (4259-63), `compile_strategy`/`prof_counter_id` (4534/4551/4705/4721), closure `name` (7725),
+  `epistemic` (209/348).
+
+These compile INTO `souc.elf` via `bin/souc`. Confirmed miscompiled by the current `bin/souc`:
+- `/tmp/disc.sio` — small (16B, register-passed) AND large (hidden-pointer-passed, Lowerer-like)
+  holders BOTH return 0 ⇒ size is NOT the discriminator.
+- `/tmp/method.sio` — the EXACT `intern_string` shape (`fn bump(self)->(Holder,i64)`,
+  `var lo=self; (*lo.inner).counter=42`, tuple return) returns 0/0 ⇒ `souc.elf`'s `intern_string`
+  is genuinely broken.
+
+⇒ `souc.elf` builds CORRUPT IR (lost string/export/param counts) — consistent with its observed
+brokenness (`--native-compile` writes no file, `--native-v2-compile` parse-fails). **My fix to
+`bin/souc` makes these stores work**, fixing a real on-path contributor to the self-host wall.
+
+### Honest scope (the c634b38f class has ≥4 distinct members)
+- (A) explicit-deref STORE through a complex base `(*lo.module).X=v` → discarded copy — **MY FIX**.
+- (B) AUTO-deref READ `self.module.X` (no explicit `(*)`) → materializes the 96MB IrModule → the
+  documented front-half SIGSEGV (memory `project_lowercodegen_oom_2026-06-08`). lower.sio dodges
+  this with explicit `(*self.module)` reads; residual auto-derefs remain. NOT my fix.
+- (C) by-value IrModule (~96MB) copies → fault/OOM. NOT my fix.
+- (D) branch-target / `e8 00000000` reloc (the 0deb43bcb writer bug). NOT my fix.
+
+My fix is necessary-but-not-sufficient for the wall: it removes a real STORE-corruption
+contributor, but (B)/(C)/(D) remain and must be addressed (and bundled) before gen2==gen3.
+
+### Token-safety of the new detector (verified vs tokenizer 5567-5584)
+`==`→21, `!=`→22, `<=`→25, `>=`→26, `=>`→52, `=`→16. Detector fires only on `after==16` (`=`) or
+`41` (`[`) ⇒ cannot false-match comparisons, fat-arrows, or method calls `(*a.b).c(...)`.
