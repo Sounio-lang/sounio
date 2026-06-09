@@ -156,3 +156,32 @@ contributor, but (B)/(C)/(D) remain and must be addressed (and bundled) before g
 ### Token-safety of the new detector (verified vs tokenizer 5567-5584)
 `==`→21, `!=`→22, `<=`→25, `>=`→26, `=>`→52, `=`→16. Detector fires only on `after==16` (`=`) or
 `41` (`[`) ⇒ cannot false-match comparisons, fat-arrows, or method calls `(*a.b).c(...)`.
+
+## Phase 3 (D) — call-relocation table overflow FIXED (lean_single, bundled)
+
+`PATCH_OFF/FN/KIND[65536]` is the WHOLE-PROGRAM direct-call relocation table (reset once per
+backend in `compile_all` 23450 x86 / 31044 a64), and the 12 write sites
+(`emit_direct_fn_call_x86` etc.) wrote **UNCHECKED**: `PATCH_OFF[PATCH_COUNT]=CL; PATCH_COUNT++`
+with no bound guard. Each direct call also emits `e8` + `em32(0)` (rel32=0 placeholder) and relies
+on the patch entry to fill the displacement later.
+
+If `PATCH_COUNT` exceeds 65536, the writes go **out of bounds** into adjacent globals (corruption)
+and those calls' relocations are lost ⇒ the `e8 00000000` stays unpatched — **exactly the recent
+session's symptom** + SIGBUS in the full-IR `--native-compile` build.
+
+Scale: the self-hosted source bundle has **~127k call-like tokens** (>> 65536), so main.sio
+plausibly overflows the table. (Exact emitted-patch count needs the build to measure — UNCONFIRMED
+— but the unchecked write is a genuine latent buffer overflow regardless.)
+
+**Fix (commit pending):** grew `PATCH_*` 65536 → **524288**, added `patch_cap()` +
+`record_call_patch(fn_idx, kind)` (bounded, `note_limit_error(3)` on overflow = loud, not silent),
+replaced all 12 write sites. For `PATCH_COUNT < cap` behavior is byte-identical to the old inline
+code ⇒ no regression; only overflow changes from silent OOB corruption to a hard error. BSS-resident
+arrays ⇒ frame-safe (no by-value materialization). Bundled into the same rebootstrap as the (A) fix.
+
+### Remaining wall members still open
+- (B) auto-deref READ of the 96MB IrModule, (C) by-value IrModule copies — the documented
+  architectural front-half SIGSEGV (heap-indirect IR storage), NOT surgical, NOT in this branch yet.
+- The original 0deb43bcb branch-target writer miscompile — may be (partly) explained by the PATCH
+  overflow corrupting code/branch bytes; re-test after the (A)+(D) rebootstrap before treating it
+  as a separate unsolved bug.

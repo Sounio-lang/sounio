@@ -99,11 +99,17 @@ var FN_RECV_HASH: [i64; 65536] = [0; 65536]
 var PTX_BUF: [i8; 262144] = [0; 262144]
 var PTX_LEN: i64 = 0
 
-// Call patch table: code offset where rel32 needs patching, target fn index
-var PATCH_OFF: [i64; 65536] = [0; 65536]
-var PATCH_FN: [i64; 65536] = [0; 65536]
-var PATCH_KIND: [i64; 65536] = [0; 65536]
+// Call patch table: code offset where rel32 needs patching, target fn index.
+// WHOLE-PROGRAM (reset once in compile_all), so the cap must cover every direct call
+// site across the entire bundle. The self-hosted compiler has >127k call tokens; at
+// 65536 the unchecked writes overflowed into adjacent globals → corrupt/unpatched
+// `e8 00000000` relocations + SIGBUS in the full-IR build. Grown + loud-guarded
+// (record_call_patch / note_limit_error kind 3). BSS-resident, so frame-safe.
+var PATCH_OFF: [i64; 524288] = [0; 524288]
+var PATCH_FN: [i64; 524288] = [0; 524288]
+var PATCH_KIND: [i64; 524288] = [0; 524288]
 var PATCH_COUNT: i64 = 0
+fn patch_cap() -> i64 { return 524288 }
 
 // Canonical function-signature registry for fn-typed values and indirect calls.
 // Signatures are stored as arity + param types/hashes + return type/hash.
@@ -951,6 +957,24 @@ fn print_limit_error() with IO, Mut, Panic {
         print("error: too many globals (max ")
         print_int(global_cap())
         print(")\n")
+    } else if LIMIT_ERROR_KIND == 3 {
+        print("error: too many call relocations in program (max ")
+        print_int(patch_cap())
+        print(")\n")
+    }
+}
+
+// Record a direct-call relocation (rel32 at CL → target fn_idx). Whole-program table;
+// bounded + loud-guarded so an overflow is a hard error instead of a silent OOB write
+// that corrupts adjacent globals (the c634b38f-era `e8 00000000` reloc corruption).
+fn record_call_patch(fn_idx: i64, kind: i64) with Mut, Panic {
+    if PATCH_COUNT >= 0 && PATCH_COUNT < patch_cap() {
+        PATCH_OFF[PATCH_COUNT as usize] = CL
+        PATCH_FN[PATCH_COUNT as usize] = fn_idx
+        PATCH_KIND[PATCH_COUNT as usize] = kind
+        PATCH_COUNT = PATCH_COUNT + 1
+    } else {
+        note_limit_error(3)
     }
 }
 
@@ -1755,10 +1779,7 @@ fn emit_direct_fn_call_x86(fi: i64, argc: i64) with Mut, Panic, Div {
         emit_sret_destination_x86(ret_slots)
         em(0x48); em(0x89); em(0xc7)
         em(0xe8)
-        PATCH_OFF[PATCH_COUNT as usize] = CL
-        PATCH_FN[PATCH_COUNT as usize] = fi
-        PATCH_KIND[PATCH_COUNT as usize] = 0
-        PATCH_COUNT = PATCH_COUNT + 1
+        record_call_patch(fi, 0)
         em32(0)
         emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 5))
         return
@@ -1766,10 +1787,7 @@ fn emit_direct_fn_call_x86(fi: i64, argc: i64) with Mut, Panic, Div {
     emit_setup_direct_call_args_x86(argc)
     emit_prepare_stack_call_args_x86(argc, 6)
     em(0xe8)
-    PATCH_OFF[PATCH_COUNT as usize] = CL
-    PATCH_FN[PATCH_COUNT as usize] = fi
-    PATCH_KIND[PATCH_COUNT as usize] = 0
-    PATCH_COUNT = PATCH_COUNT + 1
+    record_call_patch(fi, 0)
     em32(0)
     emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 6))
 }
@@ -1949,10 +1967,7 @@ fn emit_direct_fn_call_a64(fi: i64, argc: i64) with Mut {
     if argc >= 3 { emit_pop_x2_a64() }
     if argc >= 2 { emit_pop_x1_a64() }
     if argc >= 1 { emit_pop_x0_a64() }
-    PATCH_OFF[PATCH_COUNT as usize] = CL
-    PATCH_FN[PATCH_COUNT as usize] = fi
-    PATCH_KIND[PATCH_COUNT as usize] = 0
-    PATCH_COUNT = PATCH_COUNT + 1
+    record_call_patch(fi, 0)
     em32(0x94000000)
 }
 
@@ -10074,20 +10089,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         emit_sret_destination_x86(static_ret_slots)
                         em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (SRET ptr)
                         em(0xe8)
-                        PATCH_OFF[PATCH_COUNT as usize] = CL
-                        PATCH_FN[PATCH_COUNT as usize] = static_mfi
-                        PATCH_KIND[PATCH_COUNT as usize] = 0
-                        PATCH_COUNT = PATCH_COUNT + 1
+                        record_call_patch(static_mfi, 0)
                         em32(0)
                         emit_drop_call_args_x86(static_argc + call_extra_stack_args_x86(static_argc, 5))
                     } else {
                         emit_setup_direct_call_args_x86(static_argc)
                         emit_prepare_stack_call_args_x86(static_argc, 6)
                         em(0xe8)
-                        PATCH_OFF[PATCH_COUNT as usize] = CL
-                        PATCH_FN[PATCH_COUNT as usize] = static_mfi
-                        PATCH_KIND[PATCH_COUNT as usize] = 0
-                        PATCH_COUNT = PATCH_COUNT + 1
+                        record_call_patch(static_mfi, 0)
                         em32(0)
                         emit_drop_call_args_x86(static_argc + call_extra_stack_args_x86(static_argc, 6))
                     }
@@ -13073,10 +13082,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if FN_OFF[fri as usize] != -1 {
                         em32(FN_OFF[fri as usize] - (CL + 4))
                     } else {
-                        PATCH_OFF[PATCH_COUNT as usize] = CL
-                        PATCH_FN[PATCH_COUNT as usize] = fri
-                        PATCH_KIND[PATCH_COUNT as usize] = 0
-                        PATCH_COUNT = PATCH_COUNT + 1
+                        record_call_patch(fri, 0)
                         em32(0)
                     }
                     em(0xc3)  // ret
@@ -13908,10 +13914,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         emit_sret_destination_x86(method_ret_slots)
                         em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (SRET ptr)
                         em(0xe8)
-                        PATCH_OFF[PATCH_COUNT as usize] = CL
-                        PATCH_FN[PATCH_COUNT as usize] = mfi
-                        PATCH_KIND[PATCH_COUNT as usize] = 0
-                        PATCH_COUNT = PATCH_COUNT + 1
+                        record_call_patch(mfi, 0)
                         em32(0)
                         emit_drop_call_args_x86(margc + call_extra_stack_args_x86(margc, 5))
                     } else {
@@ -13919,10 +13922,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         emit_setup_direct_call_args_x86(margc)
                         emit_prepare_stack_call_args_x86(margc, 6)
                         em(0xe8)
-                        PATCH_OFF[PATCH_COUNT as usize] = CL
-                        PATCH_FN[PATCH_COUNT as usize] = mfi
-                        PATCH_KIND[PATCH_COUNT as usize] = 0
-                        PATCH_COUNT = PATCH_COUNT + 1
+                        record_call_patch(mfi, 0)
                         em32(0)
                         emit_drop_call_args_x86(margc + call_extra_stack_args_x86(margc, 6))
                     }
@@ -16453,10 +16453,7 @@ fn emit_kernel_cpu_direct_call_x86(fi: i64, abi_argc: i64) with Mut {
     emit_setup_direct_call_args_x86(abi_argc)
     emit_prepare_stack_call_args_x86(abi_argc, 6)
     em(0xe8)
-    PATCH_OFF[PATCH_COUNT as usize] = CL
-    PATCH_FN[PATCH_COUNT as usize] = fi
-    PATCH_KIND[PATCH_COUNT as usize] = 0
-    PATCH_COUNT = PATCH_COUNT + 1
+    record_call_patch(fi, 0)
     em32(0)
     emit_drop_call_args_x86(abi_argc + call_extra_stack_args_x86(abi_argc, 6))
 }
@@ -28195,10 +28192,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if abi_argc >= 3 { em32(0xF84107E2) }
                 if abi_argc >= 2 { emit_pop_x1_a64() }
                 if abi_argc >= 1 { em32(0xF84107E0) }
-                PATCH_OFF[PATCH_COUNT as usize] = CL
-                PATCH_FN[PATCH_COUNT as usize] = fi
-                PATCH_KIND[PATCH_COUNT as usize] = 0
-                PATCH_COUNT = PATCH_COUNT + 1
+                record_call_patch(fi, 0)
                 em32(0x94000000)
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
@@ -28692,10 +28686,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         let rel = (FN_OFF[fri as usize] - CL) / 4
                         em32(0x14000000 | (rel & 0x3FFFFFF))
                     } else {
-                        PATCH_OFF[PATCH_COUNT as usize] = CL
-                        PATCH_FN[PATCH_COUNT as usize] = fri
-                        PATCH_KIND[PATCH_COUNT as usize] = 2
-                        PATCH_COUNT = PATCH_COUNT + 1
+                        record_call_patch(fri, 2)
                         em32(0x14000000)
                     }
                     patch_branch_a64(skip_thunk, CL)
@@ -28979,10 +28970,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     if margc >= 3 { em32(0xF84107E2) }
                     if margc >= 2 { emit_pop_x1_a64() }
                     if margc >= 1 { em32(0xF84107E0) }
-                    PATCH_OFF[PATCH_COUNT as usize] = CL
-                    PATCH_FN[PATCH_COUNT as usize] = mfi
-                    PATCH_KIND[PATCH_COUNT as usize] = 0
-                    PATCH_COUNT = PATCH_COUNT + 1
+                    record_call_patch(mfi, 0)
                     em32(0x94000000)
                     EXPR_TY = FN_RET_TY[mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
