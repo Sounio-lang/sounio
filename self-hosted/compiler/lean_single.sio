@@ -4365,6 +4365,35 @@ fn stmt_is_deref_field_array_store(p0: i64) -> bool with Panic, Mut {
     return TK[p as usize] == 16
 }
 
+// (*EXPR).field = expr   and   (*EXPR).field[idx] = expr  where EXPR is any
+// pointer-valued expression that is NOT a bare identifier (e.g. a field access
+// `lo.inner`, an index `arr[i]`, a call `f()`). The bare-identifier forms are
+// claimed by the stmt_is_deref_field_store / _array_store fast paths above; this
+// detector fires only for the general base. Root fix for the c634b38f
+// discarded-copy store: `(*lo.box_field).f = v` matched no bare-ident detector and
+// fell through to the generic expr path, which wrote into a discarded value copy.
+fn stmt_is_deref_complex_field_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }        // (
+    if TK[(p0 + 1) as usize] != 19 { return false } // *
+    // Find the ) that matches the ( at p0 (track paren depth only; brackets are balanced
+    // inside, and a ) can only close a ( in well-formed code).
+    var p = p0 + 1
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        p = p + 1
+        if TK[p as usize] == 6 { depth = depth + 1 }
+        if TK[p as usize] == 7 { depth = depth - 1 }
+    }
+    if p >= TC { return false }
+    if TK[p as usize] != 7 { return false }
+    // Bare-ident base `( * ID )` closes at p0+3 and is handled by the fast paths; require complex.
+    if p <= p0 + 3 { return false }
+    if TK[(p + 1) as usize] != 50 { return false }  // .
+    if TK[(p + 2) as usize] != 3 { return false }   // field identifier
+    let after = TK[(p + 3) as usize]
+    return after == 16 || after == 41               // `=` (field store) or `[` (array-field store)
+}
+
 fn skip_type_meta_item(p0: i64, close_tk: i64) -> i64 with Panic, Mut {
     var p = p0
     var paren_depth: i64 = 0
@@ -17470,6 +17499,102 @@ fn compile_field_array_store_x86() with IO, Mut, Panic, Div {
 // `( * … )`: name at EP+2, field at EP+5, body starts at EP+7. resolve_field_struct_index
 // already resolves the struct through the pointer var's inner type, and emit_load_var
 // loads the pointer value as the base — so codegen is otherwise identical.
+// General deref-field store through an arbitrary pointer expression.
+// Handles `(*EXPR).field = rhs` and `(*EXPR).field[idx] = rhs` where EXPR is any
+// pointer-valued expression (field access, index, call, ...). The base pointer is
+// computed by the general expression compiler (compile_or) — exactly as the rvalue
+// READ path does — instead of var_find, which only resolves a bare local. This is
+// the root fix for the c634b38f discarded-copy store: `(*lo.box_field).f = v`.
+fn compile_deref_complex_field_store_x86() with IO, Mut, Panic, Div {
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(EP, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    EP = EP + 2                 // skip `( *`
+    compile_or()                // rax = base pointer; EXPR_TY = pointer type
+    let base_ty = EXPR_TY
+    let base_hash = EXPR_TY_HASH
+    let psl = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(psl)         // spill the base pointer across the rhs/index compiles
+    if TK[EP as usize] == 7 { EP = EP + 1 }   // skip `)`
+    if type_is_pointer_like(base_ty, base_hash) == false {
+        tc_error(EP, "field store through deref requires ref or pointer base")
+        return
+    }
+    let inner_ty = ptr_hash_inner_ty(base_hash)
+    let inner_hash = ptr_hash_inner_hash(base_hash)
+    if inner_ty != 6 {
+        tc_error(EP, "field access through pointer requires struct pointee")
+        return
+    }
+    if TK[EP as usize] == 50 { EP = EP + 1 }   // skip `.`
+    let field_tok = EP
+    let fns = TS[EP as usize]
+    let fne = TE[EP as usize]
+    let fh = gl_name_hash(fns, fne)
+    EP = EP + 1                 // past field identifier
+    let si = st_find(inner_hash)
+    if si < 0 { tc_error(field_tok, "unknown field access"); return }
+    if st_private_access_denied(si, field_tok) {
+        tc_error_hard(field_tok, "private struct field access"); return
+    }
+    ST_QUERY_NS = fns
+    ST_QUERY_NE = fne
+    let foff = st_field_offset(si, fh)
+    let fty = st_field_ty(si, fh)
+    let fhash = st_field_hash(si, fh)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff < 0 { tc_error(field_tok, "unknown field access"); return }
+
+    if TK[EP as usize] == 16 {
+        // (*EXPR).field = rhs
+        EP = EP + 1
+        compile_or()            // rax = rhs value
+        let rhs_ty = EXPR_TY
+        let rhs_ty_hash = EXPR_TY_HASH
+        if ty_eq(fty, fhash, rhs_ty, rhs_ty_hash) == false {
+            tc_error(EP - 1, "assignment type mismatch")
+        }
+        // emit_store_to_pointer_offset_x86 does: mov rdx,rax (rhs) ; load psl (ptr) ;
+        // lea +foff ; store (scalar or aggregate copy). psl holds the base pointer.
+        emit_store_to_pointer_offset_x86(psl, foff, fty, fhash)
+        return
+    }
+    if TK[EP as usize] == 41 {
+        // (*EXPR).field[idx] = rhs  (mirror of compile_deref_field_array_store_x86)
+        EP = EP + 1             // skip `[`
+        compile_or()            // index in rax
+        if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // `as usize`
+        if TK[EP as usize] == 42 { EP = EP + 1 }               // `]`
+        if TK[EP as usize] == 16 { EP = EP + 1 }               // `=`
+        em(0x50)                // push index
+        compile_or()            // value in rax
+        let rhs_ty = EXPR_TY
+        let rhs_ty_hash = EXPR_TY_HASH
+        if fty != 8 {
+            tc_error(field_tok, "indexed field store requires array field")
+            em(0x59)
+            return
+        }
+        if ty_eq(arr_hash_elem_ty(fhash), arr_hash_elem_hash(fhash), rhs_ty, rhs_ty_hash) == false {
+            tc_error(EP - 1, "assignment type mismatch")
+        }
+        materialize_aggregate_array_element_x86(fhash)
+        em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
+        em(0x59)                      // pop rcx (index)
+        emit_load_var(psl)            // rax = base pointer
+        if foff != 0 { em(0x48); em(0x8d); em(0x80); em32(foff) }
+        if arr_hash_esiz(fhash) == 8 {
+            em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+        } else {
+            em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
+        }
+        return
+    }
+    tc_error(EP, "unsupported deref field store form")
+}
+
 fn compile_deref_field_array_store_x86() with IO, Mut, Panic, Div {
     let name_tok = EP + 2
     let ns = TS[(EP + 2) as usize]
@@ -19369,6 +19494,12 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     }
     if stmt_is_deref_field_field_store(EP) {
         compile_deref_field_field_store_x86()
+        return
+    }
+    // (*EXPR).field = expr / (*EXPR).field[idx] = expr — general (non-bare-ident) base.
+    // Must come AFTER the bare-ident deref fast paths above so they claim their forms.
+    if stmt_is_deref_complex_field_store(EP) {
+        compile_deref_complex_field_store_x86()
         return
     }
 

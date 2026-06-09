@@ -1,0 +1,41 @@
+//@ run-pass
+// Minimal reproducer for the c634b38f large-struct codegen miscompile class.
+//
+// BigStruct is >2KB (tag + [i64;256] + tail). The fields `tag` and `tail`
+// straddle the large inline array, so a truncated/mis-offset by-value copy or
+// SRET corrupts them. Three probes, all using the UNSAFE by-value spine on
+// purpose (the safe &/&! spine is what the production path uses).
+
+struct BigStruct {
+    tag: i64,
+    data: [i64; 256],
+    tail: i64,
+}
+
+// SRET probe: return a >2KB struct by value.
+fn make_big(t: i64, tl: i64) -> BigStruct with Mut, Panic {
+    var b = BigStruct { tag: t, data: [0; 256], tail: tl }
+    b.data[0] = 100
+    b.data[255] = 200
+    return b
+}
+
+// By-value PARAM probe: read fields of a large struct passed by value.
+fn read_tag(b: BigStruct) -> i64 { b.tag }
+fn read_tail(b: BigStruct) -> i64 { b.tail }
+fn read_first(b: BigStruct) -> i64 with Panic { b.data[0] }
+fn read_last(b: BigStruct) -> i64 with Panic { b.data[255] }
+
+fn main() with Mut, Panic {
+    let b = make_big(11, 99)            // SRET return
+    let t  = read_tag(b)               // by-value copy in
+    let tl = read_tail(b)              // by-value copy in
+    let f  = read_first(b)
+    let l  = read_last(b)
+    // Expected: tag=11, tail=99, data[0]=100, data[255]=200
+    // Print each on its own line; a wrong value pins which probe miscompiles.
+    print_int(t)                       // expect 11
+    print_int(tl)                      // expect 99
+    print_int(f)                       // expect 100
+    print_int(l)                       // expect 200
+}

@@ -1,0 +1,52 @@
+//@ run-pass
+// c634b38f repro v3 — the THREE documented box-store miscompiles (lower.sio:3324-3350).
+
+struct Elem { name: i64, v: i64 }
+struct Inner { tag: i64, big: [i64; 256], items: [Elem; 8], counter: i64 }
+struct Holder { inner: Box<Inner>, label: i64 }
+
+fn make_holder() -> Holder with Mut, Panic, Alloc {
+    Holder { inner: Box::new(Inner { tag: 1, big: [0; 256], items: [Elem{name:0,v:0}; 8], counter: 0 }), label: 7 }
+}
+
+// Probe 1: inline deref-store through box field of a LOCAL (documented: discarded copy -> 0)
+fn probe1_inline(h: Holder) -> i64 with Mut, Panic {
+    var lo = h
+    (*lo.inner).counter = 42
+    (*lo.inner).counter            // expect 42; miscompile -> 0
+}
+
+// Probe 1-fixed: bound-local pattern
+fn probe1_fixed(h: Holder) -> i64 with Mut, Panic {
+    var lo = h
+    var m = lo.inner
+    (*m).counter = 42
+    lo.inner = m
+    (*lo.inner).counter            // expect 42
+}
+
+// Probe 2: nested array-element struct-field store (documented: no-op)
+fn probe2_inline(h: Holder) -> i64 with Mut, Panic {
+    var lo = h
+    var m = lo.inner
+    (*m).items[3].v = 55           // nested array-elem struct-field store
+    lo.inner = m
+    (*lo.inner).items[3].v         // expect 55; miscompile -> 0
+}
+
+// Probe 2-fixed: build element whole, store whole
+fn probe2_fixed(h: Holder) -> i64 with Mut, Panic {
+    var lo = h
+    var m = lo.inner
+    var e = Elem { name: 0, v: 55 }
+    (*m).items[3] = e
+    lo.inner = m
+    (*lo.inner).items[3].v         // expect 55
+}
+
+fn main() with Mut, Panic, Alloc {
+    print_int(probe1_inline(make_holder()))   // 42 ?
+    print_int(probe1_fixed(make_holder()))    // 42
+    print_int(probe2_inline(make_holder()))   // 55 ?
+    print_int(probe2_fixed(make_holder()))    // 55
+}
