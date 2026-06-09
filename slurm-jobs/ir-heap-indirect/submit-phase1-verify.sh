@@ -14,7 +14,9 @@ PARTITION="${PARTITION:-cpu-ops}"; ACCOUNT="${ACCOUNT:-omics}"; QOS="${QOS:-cpuo
 JOB_MEM="${JOB_MEM:-16G}"; JOB_CPUS="${JOB_CPUS:-2}"; JOB_TIME="${JOB_TIME:-00:50:00}"
 RUN_ID="${RUN_ID:-phase1-$(date -u +%Y%m%dT%H%M%S)}"
 test -x "${WORKTREE}/bin/souc" || { echo "no bin/souc" >&2; exit 1; }
-LOGIN_POD="$(${KUBECTL} -n "${NS}" get pods -l app.kubernetes.io/name=login --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')"
+LOGIN_POD="${LOGIN_POD:-$(${KUBECTL} -n "${NS}" get pods -l app.kubernetes.io/name=login --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')}"
+LOGIN_CTR="${LOGIN_CTR:-}"
+LCFLAG=""; [ -n "${LOGIN_CTR}" ] && LCFLAG="-c ${LOGIN_CTR}"
 test -n "${LOGIN_POD}" || { echo "no login pod" >&2; exit 1; }
 WORKER_POD="$(${KUBECTL} -n "${NS}" get pods -o name | sed 's#pod/##' | grep -i worker-cpuops | head -1)"
 WORKER_CTR="${WORKER_CTR:-slurmd}"
@@ -77,7 +79,7 @@ grep -iE "[0-9]+/[0-9]+|UNRESOLVED|PASS|FAIL" "\${RES}/mm.log" | tail -8 | tee -
 scontrol update JobId=\${SLURM_JOB_ID} Comment="phase1 ncrc=\${NCRC} peakMB=\$((PEAK/1024)) mm=\${MMRC}" 2>/dev/null || true
 echo "RESULT_DIR=\${RES}" | tee -a "\${RES}/SUMMARY.txt"
 EOF
-${KUBECTL} -n "${NS}" cp "${SBATCH}" "${LOGIN_POD}:/tmp/${RUN_ID}.sbatch"
-${KUBECTL} -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "sbatch '/tmp/${RUN_ID}.sbatch'"
+${KUBECTL} -n "${NS}" cp ${LCFLAG} "${SBATCH}" "${LOGIN_POD}:/tmp/${RUN_ID}.sbatch"
+${KUBECTL} -n "${NS}" exec "${LOGIN_POD}" ${LCFLAG} -- bash -lc "sbatch '/tmp/${RUN_ID}.sbatch'"
 echo "RUN_ID=${RUN_ID}"; echo "${RUN_ID}" > /tmp/phase1.last_run_id
 rm -f "${TARBALL}" "${SBATCH}"
