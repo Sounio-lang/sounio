@@ -181,7 +181,31 @@ arrays ⇒ frame-safe (no by-value materialization). Bundled into the same reboo
 
 ### Remaining wall members still open
 - (B) auto-deref READ of the 96MB IrModule, (C) by-value IrModule copies — the documented
-  architectural front-half SIGSEGV (heap-indirect IR storage), NOT surgical, NOT in this branch yet.
+  architectural front-half SIGSEGV (heap-indirect IR storage; job 2356 /
+  [[project_lowercodegen_oom_2026-06-08]]). NOT surgical, NOT bundleable as a lean_single codegen
+  fix — a separate workstream. (Empirical note: an 8MB auto-deref read does NOT fault under
+  bin/souc — `/tmp/bread.sio` returns correct values — so the fault is specific to the 96MB
+  scale / repeated copies, consistent with the by-value-elimination diagnosis, not a generic
+  read-materialization codegen bug.)
 - The original 0deb43bcb branch-target writer miscompile — may be (partly) explained by the PATCH
-  overflow corrupting code/branch bytes; re-test after the (A)+(D) rebootstrap before treating it
-  as a separate unsolved bug.
+  overflow (D) corrupting code/branch bytes; re-test after the (A)+(D) rebootstrap before treating
+  it as a separate unsolved bug.
+
+### Cap-sweep result (other whole-program fixed arrays in lean_single)
+- `FN_*[65536]` — safe (main.sio ~6642 fns ≪ 65536).
+- `FNSIG_*[256]` (codegen signature table, deduped by shape, indexed `sig*16` into
+  `FNSIG_PARAM_TY[4096]`) — already **guarded** (`if sig >= 256 { return 0 }`, 4580): a bounded
+  soft fallback (wrong-sig at scale), NOT OOB corruption. Whether main.sio has >256 distinct
+  signatures is UNKNOWN; growing it is an index-web (must grow `FNSIG_PARAM_TY` too). NOT grown
+  blind. **Rebootstrap-time candidate:** if the rebuilt compiler shows signature/type-resolution
+  errors, grow the whole FNSIG family together (256→e.g. 8192, PARAM→×16) + loud guard.
+
+## Bundle status for the single rebootstrap
+- (A) deref-field store through complex base — committed `22dece7b9`, confirmed on wall path.
+- (D) call-relocation table guard+grow — committed `7b3017474`, plausibly the unpatched-`e8` cause.
+- Both are x86; a64 mirrors deferred (not needed for x86_64 self-host).
+- B/C and the FNSIG family are NOT in this bundle (architectural / unverified-index-web).
+- NEXT: 3-stage SLURM rebootstrap (confirm submission path w/ operator) → re-run repros
+  (expect `repro_boxstore`/`min` = 42/42/55/55) + `--native-compile main.sio` should get further
+  (watch for `error: too many call relocations` = D guard firing = need bigger cap) +
+  `canonical_compiler_gate` + `release_gate` + run-pass 525/0.
