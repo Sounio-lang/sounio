@@ -153,6 +153,22 @@ localize whether the bad offset is on the read (`(*mod_ptr).fn_count`), the writ
 reference the global field directly (the driver already uses `&NATIVE_DRIVER_IR_RESULT.module`).
 Harness: `slurm-jobs/ir-heap-indirect/submit-phase1-verify.sh`. **Phase 1 is NOT done.**
 
+### Phase 1 — ROOT-CAUSED + FIXED (attempts 2-4 / pinpoint jobs 2385-2386); confirm BLOCKED by infra
+Instrumented localization: `DBG_A1` (job 2385) → reset/scratch reads OK, garbage only `after_merge`;
+`DBG_M` (job 2386) → garbage `after_fns` = the **functions-loop store**. **Root cause:**
+`(*dst).functions[(*dst).fn_count] = func` uses an **inline deref-read in the array-index position**,
+so the 64 KB struct-element store overshoots onto `fn_count` (the ASCII garbage = a stored `Name`).
+**Fix (the proven `find_or_add_fn_id` idiom): bind the index to a local first** —
+`let idx = (*dst).fn_count; (*dst).functions[idx as usize] = func; (*dst).fn_count = idx + 1` — applied
+to both array stores in `ir_merge_modules_into` and the `summary_into` store. **Committed.**
+
+**⛔ Confirm run BLOCKED by a SLURM infra outage** (node `r770-proxmox` disk-pressure cascade:
+controller repeatedly evicted → killed job 2387 mid-build; login pods all Error/Evicted; cpu-ops
+worker stuck `Init` 35 min+). Workaround committed (submit via controller pod:
+`LOGIN_POD=slurm-pilot-controller-0 LOGIN_CTR=slurmctld`), pending a healthy worker. **Resume:**
+rerun the harness, confirm `DBG_M after_fns` is small + `Merged IR ~6642` + peak ↓ ~1.5 GB + 27/27,
+then drop the `DBG_*` instrumentation before merge.
+
 ## Recommended phased plan
 
 - **Phase 0 — instrumented baseline (measures the GATING question, not just copy-count).** SLURM
