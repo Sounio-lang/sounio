@@ -956,21 +956,80 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
 
 // Resolve fn_id=-1 named calls (cross-module calls emitted by module_frontend_ir_named_call)
 // to their position in the merged module. Operates through &! to avoid large-local JIT writes.
+// Polynomial name hash, mirroring the module loader's thin_hash_mix so every
+// intermediate stays < 2^31 (the `* 131 ... % 2147483647` keeps the multiply
+// well inside i64 — no overflow trap) and the result is always non-negative.
+fn ir_resolve_hash_name(n: Name) -> i64 with Mut, Panic, Div {
+    var h: i64 = 1000003
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        h = ((h * 131) + (n.buf[i as usize] as i64) + 97) % 2147483647
+        i = i + 1
+    }
+    h
+}
+
+// Resolve cross-module IrCall fn_ids by NAME (merge-order-independent).
+//
+// Was an O(n^2 * m) linear name-scan of the whole fn table for every unresolved
+// call — fine at a few hundred fns, a multi-minute sink on the ~6642-fn merged
+// self-host module. Now builds a single open-addressing name->fn_id index up
+// front (size 16384 = 2 * IR_MAX_FUNCS, load factor <= 0.5, linear probing),
+// turning each lookup into O(1) amortised → O(n + m) overall.
+//
+// Equivalence to the old scan is exact, including LOWEST-INDEX FIRST-MATCH-WINS:
+// the build inserts functions in increasing index order and, on a duplicate
+// name, keeps the function already stored (the lower index). With the merge
+// fix's dedup names are unique, but this does not rely on that.
 fn ir_module_resolve_named_calls(module: &! IrModule) with Mut, Div, Panic {
+    // slot_fn[h] = function index occupying that slot, or -1 if empty.
+    // 16384 i64 = 128 KB; this function is non-recursive (called once per merged
+    // module post-merge), so the fixed frame is safe.
+    var slot_fn: [i64; 16384] = [-1; 16384]
+
+    // Build phase: insert each function, keeping the first for any duplicate name.
+    var bi: i64 = 0
+    while bi < (*module).fn_count {
+        let bname = (*module).functions[bi as usize].name
+        var probe = ir_resolve_hash_name(bname) % 16384
+        var placed: bool = false
+        var bguard: i64 = 0
+        while !placed && bguard < 16384 {
+            let cur = slot_fn[probe as usize]
+            if cur < 0 {
+                slot_fn[probe as usize] = bi
+                placed = true
+            } else if ir_name_eq((*module).functions[cur as usize].name, bname) {
+                // duplicate name — keep the lower index already stored
+                placed = true
+            } else {
+                probe = (probe + 1) % 16384
+                bguard = bguard + 1
+            }
+        }
+        bi = bi + 1
+    }
+
+    // Resolve phase: index-driven lookup per unresolved call.
     var fi: i64 = 0
     while fi < (*module).fn_count {
         var ii: i64 = 0
         while ii < (*module).functions[fi as usize].instr_count {
             if (*module).functions[fi as usize].instrs[ii as usize].op == IrOpcode::IrCall && (*module).functions[fi as usize].instrs[ii as usize].fn_id < 0 {
                 let call_name = (*module).functions[fi as usize].instrs[ii as usize].name
-                var ji: i64 = 0
+                var probe = ir_resolve_hash_name(call_name) % 16384
                 var found_ji: i64 = 0 - 1
-                while ji < (*module).fn_count {
-                    if ir_name_eq((*module).functions[ji as usize].name, call_name) {
-                        found_ji = ji
-                        ji = (*module).fn_count
+                var lguard: i64 = 0
+                while found_ji < 0 && lguard < 16384 {
+                    let cur = slot_fn[probe as usize]
+                    if cur < 0 {
+                        lguard = 16384
+                    } else if ir_name_eq((*module).functions[cur as usize].name, call_name) {
+                        found_ji = cur
+                    } else {
+                        probe = (probe + 1) % 16384
+                        lguard = lguard + 1
                     }
-                    ji = ji + 1
                 }
                 if found_ji >= 0 {
                     (*module).functions[fi as usize].instrs[ii as usize].fn_id = found_ji
