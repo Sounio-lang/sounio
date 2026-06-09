@@ -15,8 +15,18 @@ use native::contract::{
 use native::codegen_x86_linux::{
     compile_native_x86_linux_to_file,
 }
-use module_frontend::{imported_simple_ir_global_fn_count, imported_simple_ir_global_fn_kind, imported_simple_ir_global_fn_name_hash, imported_simple_ir_global_fn_target_hash, imported_simple_ir_global_fn_value, load_multimodule_ir, load_multimodule_imported_simple_ir_global, module_frontend_eval_imported_main_i64, module_frontend_file_maybe_has_use}
+use module_frontend::{imported_simple_ir_global_fn_count, imported_simple_ir_global_fn_kind, imported_simple_ir_global_fn_name_hash, imported_simple_ir_global_fn_target_hash, imported_simple_ir_global_fn_value, load_multimodule_ir, load_multimodule_ir_into, MultiModuleIrResult, empty_multimodule_ir_result, load_multimodule_imported_simple_ir_global, module_frontend_eval_imported_main_i64, module_frontend_file_maybe_has_use}
 use module_native_streaming::{compile_multimodule_native_maybe_streaming}
+
+// BSS-global backing store for the full-IR --native-compile path. load_multimodule_ir
+// returns MultiModuleIrResult BY VALUE, and that struct embeds an IrModule by value
+// (~280 MB at IR_MAX_FUNCS=8192). The by-value return hits the documented c634b38f SRET
+// epilogue / dropped-sret-pointer miscompile (module_frontend.sio:3988) — gen.elf then
+// silently skips the writer and emits NO ELF for every multi-module --native-compile.
+// Fill this global IN PLACE via load_multimodule_ir_into (&!out, no by-value return) and
+// pass the module to the writer by reference. Global init runs the by-value constructor
+// once at startup (a non-bridge frame — safe; mirrors CGPLAN_GLOBAL_BLOCK in codegen_plan).
+var NATIVE_DRIVER_IR_RESULT: MultiModuleIrResult = empty_multimodule_ir_result()
 
 fn native_driver_print_dispatch(
     target_spec: NativeTargetSpec,
@@ -1159,14 +1169,16 @@ pub fn compile_multimodule_native_advanced(
         }
     }
 
-    let ir_result = load_multimodule_ir(main_path)
-    if !ir_result.ok {
+    // SRET-safe: fill the bss-global IN PLACE (no by-value MultiModuleIrResult return,
+    // which would miscompile per c634b38f and skip the writer). See the global's decl.
+    load_multimodule_ir_into(&! NATIVE_DRIVER_IR_RESULT, main_path)
+    if !NATIVE_DRIVER_IR_RESULT.ok {
         print("Multi-module IR failed: ")
-        print(ir_result.error_msg)
+        print(NATIVE_DRIVER_IR_RESULT.error_msg)
         print("\n")
         return 1
     }
-    compile_native_x86_linux_to_file(&ir_result.module, output_path)
+    compile_native_x86_linux_to_file(&NATIVE_DRIVER_IR_RESULT.module, output_path)
 }
 
 pub fn compile_multimodule_native_maybe_streaming_for_target(
