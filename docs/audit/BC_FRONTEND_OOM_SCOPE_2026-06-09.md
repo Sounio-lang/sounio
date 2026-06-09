@@ -98,6 +98,34 @@ land on (it is already ~19 %). Building B needs an owned `[T]` value type + ptr/
 
 ### Option C — Fix the compact-IR path — REJECTED (see "What does NOT work").
 
+## Phase 0 — RESULTS (run 2026-06-09, SLURM job 2382)
+
+Static + empirical, both decisive. The gating question is **answered: the allocator does NOT
+free**, and the leak is **upstream of the documented merge loop**.
+
+- **Allocator (static):** runtime is mmap-per-allocation (`lean_single.sio:emit_heap_alloc_x86`);
+  `emit_heap_free` is emitted ONLY for the explicit `free()` builtin (2 sites) — **no drop / RAII /
+  scope-free**. So every `Box::new(IrModule)` mmaps ~526 MB and **leaks until exit**.
+- **Empirical (job 2382, instrumented `mc --native-compile main.sio`, 16 GB worker):**
+  - `NATIVE_COMPILE_RC=137` (OOM); **PEAK 16194 MB**; first RSS sample already **15381 MB**.
+  - **`MERGE_STEPS_REACHED=0`** — the instrumented merge loop (`module_frontend.sio:3938` /
+    `:4187`) **never ran**. The OOM is **upstream**, in
+    **`module_frontend_lower_imported_source_recursive` (`:2699`)** — the recursive lowerer that
+    returns `IrModule` BY VALUE and recurses over all imports (invoked at `:4004` before the merge
+    loop).
+  - `15381 MB / 526 MB ≈ 29` live `IrModule`s at OOM (of 72–81 imports ⇒ dies ~40 % through);
+    RSS climbs **monotonically** (no free) — confirms per-import 526 MB leak quantitatively.
+  - Compact path runs first (`Merged IR: 64 → missing_main`) then falls back to the full-IR path
+    which OOMs — compact is a cheap dead-end, as scoped.
+
+**Conclusion:** A1-**strong** (single accumulator, zero per-import full-`IrModule` allocation) is
+**required** (no-free allocator) and **sufficient** (collapses ~29+ allocations to one ≪ 16 GB).
+**Option B is NOT forced** by memory (one 526 MB fits easily) — only by the ~19 % cap headroom,
+which can be addressed later. **Refined Phase-1 target = `module_frontend_lower_imported_source_recursive:2699`**
+(thread a shared `&! IrModule` accumulator through the recursion; never return/allocate a fresh
+`IrModule` per import), then the two merge loops (`:3962`, `:4229`) → in-place. Harness +
+SUMMARY: `slurm-jobs/ir-heap-indirect/` (job 2382).
+
 ## Recommended phased plan
 
 - **Phase 0 — instrumented baseline (measures the GATING question, not just copy-count).** SLURM
