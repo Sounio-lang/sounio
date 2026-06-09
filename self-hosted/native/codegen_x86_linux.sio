@@ -7732,6 +7732,44 @@ fn nc_elf_put_u64(val: i64) with Mut, Panic {
 // ELF finalization using the module-level NATIVE_ELF_BUF/NATIVE_ELF_OFF (BSS).
 // Avoids (*struct_ref).array_field[idx]=val (drops writes) and stack-allocated
 // large arrays (overflows 8MB thread stack).
+// Copy the code/rodata/data sections from nc into NATIVE_ELF_BUF at their page
+// offsets. EXTRACTED from compile_native_finalize_and_write_ref: inlined here, the
+// section-copy loops sat after ~75 header-emission calls in one large function and
+// bin/souc (gen N-1) MISCOMPILED that region — the copy loops + the entire tail
+// (write_file + size prints) silently did not execute, so --native-compile emitted
+// no ELF while returning 0 (job 2372: DBG-M-HDRDONE fired, DBG-M-COPYDONE did not).
+// The construct is fine in isolation; isolating it into its own small function
+// relieves whatever frame/register-pressure limit bin/souc hit. See DIAGNOSIS UPDATE 9/10.
+fn nc_finalize_copy_sections(nc: &! NativeCompiler, text_offset: i64, code_len: i64, rodata_offset: i64, rodata_len: i64, data_offset: i64, actual_data_len: i64, raw_data_len: i64) with Mut, Panic, Div {
+    NATIVE_ELF_OFF = text_offset
+    var ci: i64 = 0
+    while ci < code_len {
+        NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = (*nc).code.bytes[ci as usize]
+        NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
+        ci = ci + 1
+    }
+    if rodata_len > 0 {
+        NATIVE_ELF_OFF = rodata_offset
+        var ri: i64 = 0
+        while ri < rodata_len {
+            let rb: i8 = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_bytes[ri as usize] } else { (*nc).rodata.bytes[ri as usize] }
+            NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = rb
+            NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
+            ri = ri + 1
+        }
+    }
+    if actual_data_len > 0 {
+        NATIVE_ELF_OFF = data_offset
+        var di: i64 = 0
+        while di < actual_data_len {
+            let db: i8 = if di < raw_data_len { (*nc).data.bytes[di as usize] } else { 0 as i8 }
+            NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = db
+            NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
+            di = di + 1
+        }
+    }
+}
+
 fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
     NATIVE_ELF_OFF = 0
 
@@ -7827,40 +7865,9 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
     nc_elf_put_u64(0)
     nc_elf_put_u64(16)
 
-    // Advance to text section (BSS already zeroed, no explicit padding needed)
-    NATIVE_ELF_OFF = text_offset
-
-    // Copy code bytes — direct BSS write + struct-ref read (both work)
-    var ci: i64 = 0
-    while ci < code_len {
-        NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = (*nc).code.bytes[ci as usize]
-        NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
-        ci = ci + 1
-    }
-
-    // Copy rodata bytes
-    if rodata_len > 0 {
-        NATIVE_ELF_OFF = rodata_offset
-        var ri: i64 = 0
-        while ri < rodata_len {
-            let rb: i8 = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_bytes[ri as usize] } else { (*nc).rodata.bytes[ri as usize] }
-            NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = rb
-            NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
-            ri = ri + 1
-        }
-    }
-
-    // Copy data bytes
-    if actual_data_len > 0 {
-        NATIVE_ELF_OFF = data_offset
-        var di: i64 = 0
-        while di < actual_data_len {
-            let db: i8 = if di < raw_data_len { (*nc).data.bytes[di as usize] } else { 0 as i8 }
-            NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = db
-            NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
-            di = di + 1
-        }
-    }
+    // Advance to text section + copy code/rodata/data — extracted to a small helper
+    // because bin/souc miscompiled these loops when inlined in this large function.
+    nc_finalize_copy_sections(nc, text_offset, code_len, rodata_offset, rodata_len, data_offset, actual_data_len, raw_data_len)
 
     let elf_size = NATIVE_ELF_OFF
     if elf_size <= 0 {
