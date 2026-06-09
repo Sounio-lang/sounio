@@ -1,0 +1,182 @@
+// stdlib/viz/chart.sio — Basic chart types rendered into a Canvas
+//
+// All chart functions take a CoordSystem (data→screen mapping) and
+// a Canvas, and draw into the canvas in-place.
+
+use display::canvas::{Canvas, canvas_fill_rect, canvas_set_pixel}
+use display::canvas_ext::{canvas_draw_line_aa}
+use viz::coord::{CoordSystem, coord_map_x, coord_map_y}
+
+// ============================================================
+// Internal helpers
+// ============================================================
+
+fn chart_clamp(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo { lo } else if v > hi { hi } else { v }
+}
+
+// Colormap: map t in [0,255] → R,G,B using a blue→cyan→green→yellow→red ramp.
+fn chart_colormap_r(t: i64) -> i64 {
+    if t < 64 { 0 }
+    else if t < 128 { (t - 64) * 4 }
+    else if t < 192 { 255 }
+    else { 255 }
+}
+
+fn chart_colormap_g(t: i64) -> i64 {
+    if t < 64 { t * 4 }
+    else if t < 128 { 255 }
+    else if t < 192 { 255 }
+    else { 255 - (t - 192) * 4 }
+}
+
+fn chart_colormap_b(t: i64) -> i64 {
+    if t < 64 { 255 }
+    else if t < 128 { 255 - (t - 64) * 4 }
+    else { 0 }
+}
+
+// Categorical palette (8 distinct hues).
+fn chart_cat_r(idx: i64) -> i64 {
+    let colors: [i64; 8] = [64, 255, 80, 255, 200, 100, 255, 160]
+    colors[(idx % 8) as usize]
+}
+
+fn chart_cat_g(idx: i64) -> i64 {
+    let colors: [i64; 8] = [160, 80, 200, 200, 60, 180, 140, 100]
+    colors[(idx % 8) as usize]
+}
+
+fn chart_cat_b(idx: i64) -> i64 {
+    let colors: [i64; 8] = [255, 60, 100, 60, 200, 255, 40, 200]
+    colors[(idx % 8) as usize]
+}
+
+pub fn chart_series_r(series_idx: i64) -> i64 { chart_cat_r(series_idx) }
+pub fn chart_series_g(series_idx: i64) -> i64 { chart_cat_g(series_idx) }
+pub fn chart_series_b(series_idx: i64) -> i64 { chart_cat_b(series_idx) }
+
+// ============================================================
+// Line chart — antialiased polyline through (xs[i], ys[i])
+// ============================================================
+
+pub fn chart_line(
+    cs: &CoordSystem,
+    xs: &[f64; 1024], ys: &[f64; 1024],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n < 2 { return }
+    var i: i64 = 0
+    while i < n - 1 {
+        let x0 = coord_map_x(cs, xs[i as usize])
+        let y0 = coord_map_y(cs, ys[i as usize])
+        let x1 = coord_map_x(cs, xs[(i + 1) as usize])
+        let y1 = coord_map_y(cs, ys[(i + 1) as usize])
+        canvas_draw_line_aa(c, x0, y0, x1, y1, r, g, b)
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Scatter plot — small cross marker per point
+// ============================================================
+
+fn chart_draw_marker(c: &!Canvas, sx: i64, sy: i64, radius: i64, r: i64, g: i64, b: i64) with Mut {
+    canvas_fill_rect(c, sx - radius, sy, radius * 2 + 1, 1, r, g, b)
+    canvas_fill_rect(c, sx, sy - radius, 1, radius * 2 + 1, r, g, b)
+}
+
+pub fn chart_scatter(
+    cs: &CoordSystem,
+    xs: &[f64; 1024], ys: &[f64; 1024],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    var i: i64 = 0
+    while i < n {
+        let sx = coord_map_x(cs, xs[i as usize])
+        let sy = coord_map_y(cs, ys[i as usize])
+        chart_draw_marker(c, sx, sy, 3, r, g, b)
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Bar chart — vertical bars from y=0 to ys[i]
+// ============================================================
+
+pub fn chart_bar(
+    cs: &CoordSystem,
+    xs: &[f64; 1024], ys: &[f64; 1024],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n == 0 { return }
+    // Bar width: ~80% of spacing between ticks
+    let bar_w = if n > 1 {
+        let sx0 = coord_map_x(cs, xs[0])
+        let sx1 = coord_map_x(cs, xs[1])
+        let gap = if sx1 > sx0 { sx1 - sx0 } else { sx0 - sx1 }
+        chart_clamp(gap * 8 / 10, 2, 40)
+    } else {
+        8
+    }
+    let y_zero = coord_map_y(cs, 0.0)
+    var i: i64 = 0
+    while i < n {
+        let sx = coord_map_x(cs, xs[i as usize])
+        let sy = coord_map_y(cs, ys[i as usize])
+        let top    = if sy < y_zero { sy } else { y_zero }
+        let bottom = if sy < y_zero { y_zero } else { sy }
+        let bar_h = bottom - top
+        if bar_h > 0 {
+            canvas_fill_rect(c, sx - bar_w / 2, top, bar_w, bar_h, r, g, b)
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Heatmap — rows×cols data array, colormapped blue→red
+// ============================================================
+
+// data: flat row-major array [row*cols + col], values in [data_min, data_max]
+pub fn chart_heatmap(
+    cs: &CoordSystem,
+    data: &[f64; 4096],
+    rows: i64, cols: i64,
+    data_min: f64, data_max: f64,
+    c: &!Canvas,
+) with Mut, Div {
+    if rows == 0 || cols == 0 { return }
+    let cell_w = cs.screen_w / cols
+    let cell_h = cs.screen_h / rows
+    let cw = if cell_w < 1 { 1 } else { cell_w }
+    let ch = if cell_h < 1 { 1 } else { cell_h }
+    let range = data_max - data_min
+    var row: i64 = 0
+    while row < rows {
+        var col: i64 = 0
+        while col < cols {
+            let v = data[(row * cols + col) as usize]
+            let t = if range == 0.0 {
+                128
+            } else {
+                (((v - data_min) / range) * 255.0) as i64
+            }
+            let t_clamped = chart_clamp(t, 0, 255)
+            let cr = chart_colormap_r(t_clamped)
+            let cg = chart_colormap_g(t_clamped)
+            let cb = chart_colormap_b(t_clamped)
+            let px = cs.screen_x + col * cw
+            let py = cs.screen_y + (rows - 1 - row) * ch  // Y-up
+            canvas_fill_rect(c, px, py, cw, ch, cr, cg, cb)
+            col = col + 1
+        }
+        row = row + 1
+    }
+}

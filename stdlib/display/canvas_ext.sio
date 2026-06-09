@@ -1,0 +1,223 @@
+// stdlib/display/canvas_ext.sio — Extended canvas drawing primitives
+//
+// Adds antialiased lines, filled triangle, and Surface→Canvas blit
+// on top of the base canvas.sio API.
+//
+// Pixel format (same as canvas.sio): lower 32 bits = 0x00RRGGBB
+//   B in byte 0, G in byte 1, R in byte 2.
+
+use display::canvas::{Canvas, canvas_fill_rect}
+use graphics::surface::{Surface}
+
+// ============================================================
+// Internal helpers
+// ============================================================
+
+fn cext_clamp(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo { lo } else if v > hi { hi } else { v }
+}
+
+// Alpha-blend one color channel: (src*cov + dst*(255-cov)) / 255
+fn cext_blend_ch(dst: i64, src: i64, cov: i64) -> i64 with Div {
+    (src * cov + dst * (255 - cov)) / 255
+}
+
+// Read-modify-write a pixel at (x,y) with given RGB and coverage 0..255.
+fn canvas_blend_pixel(c: &!Canvas, x: i64, y: i64, r: i64, g: i64, b: i64, cov: i64) with Mut, Div {
+    if x < 0 || x >= c.width || y < 0 || y >= c.height { return }
+    let cv = cext_clamp(cov, 0, 255)
+    if cv == 0 { return }
+    let idx = y * c.width + x
+    let px = read_i64(c.pixels, idx)
+    let er = (px >> 16) & 0xFF
+    let eg = (px >> 8) & 0xFF
+    let eb = px & 0xFF
+    let nr = cext_blend_ch(er, r, cv)
+    let ng = cext_blend_ch(eg, g, cv)
+    let nb = cext_blend_ch(eb, b, cv)
+    write_i64(c.pixels, idx, nb | (ng << 8) | (nr << 16))
+}
+
+// ============================================================
+// Antialiased line — fixed-point coverage, x-major / y-major
+// ============================================================
+
+fn cext_line_aa_x(c: &!Canvas, ax: i64, ay: i64, bx: i64, by: i64, r: i64, g: i64, b: i64) with Mut, Div {
+    var x0 = ax
+    var y0 = ay
+    var x1 = bx
+    var y1 = by
+    if x0 > x1 {
+        let tx = x0
+        let ty = y0
+        x0 = x1
+        y0 = y1
+        x1 = tx
+        y1 = ty
+    }
+    let span = x1 - x0
+    if span == 0 { return }
+    let y_step = ((y1 - y0) * 256) / span
+    var y_fixed = y0 * 256
+    var x = x0
+    while x <= x1 {
+        let y_base = if y_fixed >= 0 { y_fixed / 256 } else { (y_fixed - 255) / 256 }
+        let frac   = y_fixed - y_base * 256
+        canvas_blend_pixel(c, x, y_base, r, g, b, 255 - frac)
+        if frac > 0 {
+            let y_next = if y_step >= 0 { y_base + 1 } else { y_base - 1 }
+            canvas_blend_pixel(c, x, y_next, r, g, b, frac)
+        }
+        y_fixed = y_fixed + y_step
+        x = x + 1
+    }
+}
+
+fn cext_line_aa_y(c: &!Canvas, ax: i64, ay: i64, bx: i64, by: i64, r: i64, g: i64, b: i64) with Mut, Div {
+    var x0 = ax
+    var y0 = ay
+    var x1 = bx
+    var y1 = by
+    if y0 > y1 {
+        let tx = x0
+        let ty = y0
+        x0 = x1
+        y0 = y1
+        x1 = tx
+        y1 = ty
+    }
+    let span = y1 - y0
+    if span == 0 { return }
+    let x_step = ((x1 - x0) * 256) / span
+    var x_fixed = x0 * 256
+    var y = y0
+    while y <= y1 {
+        let x_base = if x_fixed >= 0 { x_fixed / 256 } else { (x_fixed - 255) / 256 }
+        let frac   = x_fixed - x_base * 256
+        canvas_blend_pixel(c, x_base, y, r, g, b, 255 - frac)
+        if frac > 0 {
+            let x_next = if x_step >= 0 { x_base + 1 } else { x_base - 1 }
+            canvas_blend_pixel(c, x_next, y, r, g, b, frac)
+        }
+        x_fixed = x_fixed + x_step
+        y = y + 1
+    }
+}
+
+// Draw an antialiased line using fixed-point coverage blending.
+pub fn canvas_draw_line_aa(
+    c: &!Canvas,
+    x0: i64, y0: i64,
+    x1: i64, y1: i64,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    let dx = if x1 > x0 { x1 - x0 } else { x0 - x1 }
+    let dy = if y1 > y0 { y1 - y0 } else { y0 - y1 }
+    if dx == 0 {
+        let y_min = if y0 < y1 { y0 } else { y1 }
+        let y_max = if y0 > y1 { y0 } else { y1 }
+        canvas_fill_rect(c, x0, y_min, 1, y_max - y_min + 1, r, g, b)
+    } else if dy == 0 {
+        let x_min = if x0 < x1 { x0 } else { x1 }
+        let x_max = if x0 > x1 { x0 } else { x1 }
+        canvas_fill_rect(c, x_min, y0, x_max - x_min + 1, 1, r, g, b)
+    } else if dx >= dy {
+        cext_line_aa_x(c, x0, y0, x1, y1, r, g, b)
+    } else {
+        cext_line_aa_y(c, x0, y0, x1, y1, r, g, b)
+    }
+}
+
+// ============================================================
+// Filled triangle — barycentric scanline, no z-buffer
+// ============================================================
+
+fn cext_edge(ax: i64, ay: i64, bx: i64, by: i64, cx: i64, cy: i64) -> i64 {
+    (cx - ax) * (by - ay) - (cy - ay) * (bx - ax)
+}
+
+fn cext_min3(a: i64, b: i64, cc: i64) -> i64 {
+    let m = if a < b { a } else { b }
+    if m < cc { m } else { cc }
+}
+
+fn cext_max3(a: i64, b: i64, cc: i64) -> i64 {
+    let m = if a > b { a } else { b }
+    if m > cc { m } else { cc }
+}
+
+// Fill a solid-color triangle defined by three integer vertices.
+pub fn canvas_fill_triangle(
+    c: &!Canvas,
+    ax: i64, ay: i64,
+    bx: i64, by: i64,
+    ccx: i64, ccy: i64,
+    r: i64, g: i64, b: i64,
+) with Mut {
+    let area = cext_edge(ax, ay, bx, by, ccx, ccy)
+    if area == 0 { return }
+    let color = b | (g << 8) | (r << 16)
+
+    let min_x = cext_clamp(cext_min3(ax, bx, ccx), 0, c.width - 1)
+    let max_x = cext_clamp(cext_max3(ax, bx, ccx), 0, c.width - 1)
+    let min_y = cext_clamp(cext_min3(ay, by, ccy), 0, c.height - 1)
+    let max_y = cext_clamp(cext_max3(ay, by, ccy), 0, c.height - 1)
+
+    var py = min_y
+    while py <= max_y {
+        var px = min_x
+        while px <= max_x {
+            let w0 = cext_edge(bx, by, ccx, ccy, px, py)
+            let w1 = cext_edge(ccx, ccy, ax, ay, px, py)
+            let w2 = cext_edge(ax, ay, bx, by, px, py)
+            let inside = if area > 0 {
+                w0 >= 0 && w1 >= 0 && w2 >= 0
+            } else {
+                w0 <= 0 && w1 <= 0 && w2 <= 0
+            }
+            if inside {
+                write_i64(c.pixels, py * c.width + px, color)
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// ============================================================
+// Surface → Canvas blit
+// ============================================================
+//
+// Copies up to Surface.width × Surface.height pixels from a real
+// stdlib/graphics::surface::Surface (separate R,G,B,A i64 arrays, 0-255)
+// into the Canvas at offset (dst_x, dst_y), alpha blending each source pixel.
+// Pixels outside the canvas bounds are silently clipped.
+//
+// Note: takes surf by value because Surface is a large by-value struct
+// (compiler limitation with &Surface and large arrays).
+
+pub fn canvas_blit_surface(
+    c: &!Canvas,
+    sv: Surface,
+    dst_x: i64,
+    dst_y: i64,
+) with Mut, Div {
+    var sy: i64 = 0
+    while sy < sv.height {
+        var sx: i64 = 0
+        while sx < sv.width {
+            let cx = dst_x + sx
+            let cy = dst_y + sy
+            if cx >= 0 && cx < c.width && cy >= 0 && cy < c.height {
+                let idx = sy * sv.width + sx
+                let ri = sv.r[idx as usize]
+                let gi = sv.g[idx as usize]
+                let bi = sv.b[idx as usize]
+                let ai = sv.a[idx as usize]
+                canvas_blend_pixel(c, cx, cy, ri, gi, bi, ai)
+            }
+            sx = sx + 1
+        }
+        sy = sy + 1
+    }
+}

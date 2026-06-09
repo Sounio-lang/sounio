@@ -1,0 +1,99 @@
+// stdlib/viz/viz_canvas.sio — Visual IR renderer to display::Canvas
+
+use display::canvas::{Canvas, canvas_fill_rect, canvas_draw_rect, canvas_draw_text}
+use display::canvas_ext::{canvas_draw_line_aa}
+use viz::coord::{coord_new, coord_draw_axes}
+use viz::chart::{chart_line, chart_scatter, chart_bar, chart_heatmap}
+use viz::epiviz::{epiviz_band}
+use viz::ir::{
+    VizScene, VizNode,
+    VIZ_NODE_PANEL, VIZ_NODE_CHART_LINE, VIZ_NODE_CHART_SCATTER, VIZ_NODE_CHART_BAR,
+    VIZ_NODE_HEATMAP, VIZ_NODE_UNCERTAINTY_BAND, VIZ_NODE_LABEL, VIZ_NODE_CONTROL,
+    VIZ_NODE_MOLECULE, VIZ_NODE_FIELD,
+    VIZ_CONTROL_SLIDER, VIZ_CONTROL_TOGGLE, VIZ_CONTROL_TABS, VIZ_CONTROL_LEGEND,
+    VIZ_CONTROL_BUTTON, VIZ_CONTROL_TOOLTIP, VIZ_CONTROL_VIEWPORT
+}
+
+fn vc_pad_range_min(v: f64) -> f64 { v - 0.001 }
+fn vc_pad_range_max(v: f64) -> f64 { v + 0.001 }
+
+fn vc_draw_panel(c: &!Canvas, node: &VizNode) with Mut {
+    canvas_fill_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 18, 22, 28)
+    canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 80, 95, 110)
+}
+
+fn vc_draw_control(c: &!Canvas, node: &VizNode) with Mut, Div {
+    let x = node.layout.x
+    let y = node.layout.y
+    let w = node.layout.w
+    let h = node.layout.h
+    if node.data_slot == VIZ_CONTROL_SLIDER {
+        canvas_fill_rect(c, x, y + h / 2 - 2, w, 4, 55, 60, 70)
+        let span = node.max_value - node.min_value
+        let frac = if span == 0.0 { 0.0 } else { (node.value - node.min_value) / span }
+        let knob_x = x + (frac * (w as f64)) as i64
+        canvas_fill_rect(c, knob_x - 3, y, 7, h, node.style.r, node.style.g, node.style.b)
+    } else if node.data_slot == VIZ_CONTROL_TOGGLE {
+        canvas_draw_rect(c, x, y, w, h, 130, 150, 160)
+        if node.selected {
+            canvas_fill_rect(c, x + 3, y + 3, w - 6, h - 6, node.style.r, node.style.g, node.style.b)
+        }
+    } else if node.data_slot == VIZ_CONTROL_TABS {
+        canvas_fill_rect(c, x, y, w, h, 40, 48, 58)
+        canvas_fill_rect(c, x, y, w / 3, h, node.style.r, node.style.g, node.style.b)
+    } else if node.data_slot == VIZ_CONTROL_LEGEND || node.data_slot == VIZ_CONTROL_TOOLTIP || node.data_slot == VIZ_CONTROL_VIEWPORT || node.data_slot == VIZ_CONTROL_BUTTON {
+        canvas_draw_rect(c, x, y, w, h, 120, 135, 150)
+    }
+}
+
+fn vc_draw_label(c: &!Canvas, node: &VizNode) with Mut {
+    var buf: [i8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < node.label_len && i < 64 {
+        buf[i as usize] = node.label[i as usize]
+        i = i + 1
+    }
+    canvas_draw_text(c, &buf, node.label_len, node.layout.x, node.layout.y, node.style.r, node.style.g, node.style.b)
+}
+
+pub fn viz_canvas_render_scene(scene: &VizScene, c: &!Canvas) with Mut, Div {
+    var i: i64 = 0
+    while i < scene.node_count {
+        let node = scene.nodes[i as usize]
+        if node.kind == VIZ_NODE_PANEL {
+            vc_draw_panel(c, &node)
+        } else if node.kind == VIZ_NODE_LABEL {
+            vc_draw_label(c, &node)
+        } else if node.kind == VIZ_NODE_CONTROL {
+            vc_draw_control(c, &node)
+        } else if node.kind == VIZ_NODE_CHART_LINE || node.kind == VIZ_NODE_CHART_SCATTER || node.kind == VIZ_NODE_CHART_BAR || node.kind == VIZ_NODE_UNCERTAINTY_BAND {
+            let d = scene.series[node.data_slot as usize]
+            let x0 = if d.x_min == d.x_max { vc_pad_range_min(d.x_min) } else { d.x_min }
+            let x1 = if d.x_min == d.x_max { vc_pad_range_max(d.x_max) } else { d.x_max }
+            let y0 = if d.y_min == d.y_max { vc_pad_range_min(d.y_min) } else { d.y_min }
+            let y1 = if d.y_min == d.y_max { vc_pad_range_max(d.y_max) } else { d.y_max }
+            let cs = coord_new(x0, x1, y0, y1, node.layout.x, node.layout.y, node.layout.w, node.layout.h)
+            coord_draw_axes(&cs, c)
+            if node.kind == VIZ_NODE_CHART_LINE {
+                chart_line(&cs, &d.xs, &d.ys, d.n, c, node.style.r, node.style.g, node.style.b)
+            } else if node.kind == VIZ_NODE_CHART_SCATTER {
+                chart_scatter(&cs, &d.xs, &d.ys, d.n, c, node.style.r, node.style.g, node.style.b)
+            } else if node.kind == VIZ_NODE_CHART_BAR {
+                chart_bar(&cs, &d.xs, &d.ys, d.n, c, node.style.r, node.style.g, node.style.b)
+            } else {
+                epiviz_band(&cs, &d.xs, &d.ys, &d.vars, d.n, c, node.style.r, node.style.g, node.style.b)
+            }
+        } else if node.kind == VIZ_NODE_HEATMAP {
+            let h = scene.heatmaps[node.data_slot as usize]
+            let cs = coord_new(0.0, h.cols as f64, 0.0, h.rows as f64, node.layout.x, node.layout.y, node.layout.w, node.layout.h)
+            chart_heatmap(&cs, &h.values, h.rows, h.cols, h.min_value, h.max_value, c)
+            coord_draw_axes(&cs, c)
+        } else if node.kind == VIZ_NODE_MOLECULE {
+            canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 120, 130, 150)
+            canvas_draw_line_aa(c, node.layout.x + 20, node.layout.y + node.layout.h / 2, node.layout.x + node.layout.w - 20, node.layout.y + node.layout.h / 2, node.style.r, node.style.g, node.style.b)
+        } else if node.kind == VIZ_NODE_FIELD {
+            canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 90, 120, 130)
+        }
+        i = i + 1
+    }
+}

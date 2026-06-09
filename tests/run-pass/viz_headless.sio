@@ -1,0 +1,152 @@
+// tests/run-pass/viz_headless.sio — Headless smoke test for stdlib/viz/
+//
+// Exercises coord, chart, epiviz, and sci without opening a window.
+// All rendering goes into a heap-allocated pixel buffer.
+//
+// Expected output:
+//   VIZ_HEADLESS_PASS
+//   exit 0
+
+use display::canvas::{Canvas, canvas_clear}
+use display::canvas_ext::{canvas_draw_line_aa, canvas_fill_triangle}
+use viz::coord::{CoordSystem, coord_new, coord_map_x, coord_map_y, coord_draw_axes, coord_draw_grid}
+use viz::chart::{chart_line, chart_scatter, chart_bar, chart_heatmap}
+use viz::epiviz::{epiviz_band, epiviz_knowledge_series, epiviz_waterfall, epiviz_forest}
+use viz::sci::{sci_lattice_heatmap, sci_lattice_variance, sci_pbpk_series}
+use viz::ir::{viz_scene_new, viz_layout_rect, viz_style_rgb, viz_add_line_chart, viz_add_uncertainty_band, viz_add_heatmap, viz_add_control, viz_scene_set_time, VIZ_CONTROL_SLIDER}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::physchem::{molecule_h2o, scalar_field_radial}
+use epistemic::knowledge::{Epistemic}
+use physics::phonon_quantity::{Lattice64, lattice64_zero}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn read_px(c: &Canvas, x: i64, y: i64) -> i64 {
+    read_i64(c.pixels, y * c.width + x)
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    let W: i64 = 256
+    let H: i64 = 256
+    var c = make_canvas(W, H)
+
+    // ---- 1. canvas_draw_line_aa draws at least one pixel ----
+    canvas_clear(&!c, 0, 0, 0)
+    canvas_draw_line_aa(&!c, 0, 128, 255, 128, 255, 200, 0)
+    let aa_px = read_px(&c, 128, 128)
+    assert(aa_px != 0)
+
+    // ---- 2. canvas_fill_triangle fills centre pixel ----
+    canvas_clear(&!c, 0, 0, 0)
+    canvas_fill_triangle(&!c, 100, 50, 200, 200, 20, 200, 0, 180, 255)
+    // Centroid ≈ (107, 150) should be inside the triangle
+    let tri_px = read_px(&c, 107, 150)
+    assert(tri_px != 0)
+
+    // ---- 3. CoordSystem mapping is monotone ----
+    let cs = coord_new(0.0, 10.0, 0.0, 10.0, 20, 20, 200, 150)
+    let sx0 = coord_map_x(&cs, 0.0)
+    let sx1 = coord_map_x(&cs, 10.0)
+    assert(sx1 > sx0)
+    let sy0 = coord_map_y(&cs, 0.0)
+    let sy1 = coord_map_y(&cs, 10.0)
+    assert(sy1 < sy0)   // Y-up convention: larger data → smaller screen Y
+
+    // ---- 4. coord_draw_axes writes at least one pixel ----
+    canvas_clear(&!c, 0, 0, 0)
+    coord_draw_axes(&cs, &!c)
+    // The Y-axis line starts at x_zero = screen_x = 20 (since 0 is in range)
+    let axis_px = read_px(&c, 20, 100)
+    assert(axis_px != 0)
+
+    // ---- 5. chart_line draws pixels along a diagonal ----
+    canvas_clear(&!c, 0, 0, 0)
+    var xs: [f64; 1024] = [0.0; 1024]
+    var ys: [f64; 1024] = [0.0; 1024]
+    var li: i64 = 0
+    while li < 10 {
+        xs[li as usize] = li as f64
+        ys[li as usize] = li as f64
+        li = li + 1
+    }
+    chart_line(&cs, &xs, &ys, 10, &!c, 255, 100, 80)
+    // Mid-point of the diagonal line should be painted
+    let mid_x = coord_map_x(&cs, 5.0)
+    let mid_y = coord_map_y(&cs, 5.0)
+    let line_px = read_px(&c, mid_x, mid_y)
+    assert(line_px != 0)
+
+    // ---- 6. chart_heatmap covers the plot region ----
+    canvas_clear(&!c, 0, 0, 0)
+    var hm: [f64; 4096] = [0.0; 4096]
+    var hi: i64 = 0
+    while hi < 16 {
+        hm[hi as usize] = hi as f64
+        hi = hi + 1
+    }
+    chart_heatmap(&cs, &hm, 4, 4, 0.0, 15.0, &!c)
+    // Top-left cell of the heatmap region (cs.screen_x, cs.screen_y) should be painted
+    let hm_px = read_px(&c, 21, 21)
+    assert(hm_px != 0)
+
+    // ---- 7. epiviz_band draws at least one pixel ----
+    canvas_clear(&!c, 0, 0, 0)
+    var bvals: [f64; 1024] = [0.0; 1024]
+    var bvars: [f64; 1024] = [0.0; 1024]
+    var bi: i64 = 0
+    while bi < 5 {
+        bvals[bi as usize] = 5.0
+        bvars[bi as usize] = 1.0
+        xs[bi as usize] = bi as f64
+        bi = bi + 1
+    }
+    epiviz_band(&cs, &xs, &bvals, &bvars, 5, &!c, 100, 200, 255)
+    // Centre of the band (y=5, middle of x range) should have a pixel
+    let band_sx = coord_map_x(&cs, 2.0)
+    let band_sy = coord_map_y(&cs, 5.0)
+    let band_px = read_px(&c, band_sx, band_sy)
+    assert(band_px != 0)
+
+    // ---- 8. sci_lattice_heatmap covers heatmap columns ----
+    canvas_clear(&!c, 0, 0, 0)
+    var lat = lattice64_zero()
+    var si: i64 = 0
+    while si < 64 {
+        lat.values[si as usize] = si as f64
+        si = si + 1
+    }
+    let cs2 = coord_new(0.0, 1.0, 0.0, 1.0, 10, 10, 200, 100)
+    sci_lattice_heatmap(&cs2, &lat, &!c)
+    // Some pixel in the heatmap region must be colored
+    let lat_px = read_px(&c, 50, 50)
+    assert(lat_px != 0)
+
+    // ---- 9. Visual IR renders line, band, heatmap, and a native control ----
+    canvas_clear(&!c, 0, 0, 0)
+    var scene = viz_scene_new()
+    viz_scene_set_time(&!scene, 3.0)
+    viz_add_line_chart(&!scene, &xs, &ys, 10, viz_layout_rect(10, 10, 90, 70), viz_style_rgb(255, 140, 90))
+    viz_add_uncertainty_band(&!scene, &xs, &bvals, &bvars, 5, viz_layout_rect(110, 10, 90, 70), viz_style_rgb(100, 200, 255))
+    viz_add_heatmap(&!scene, &hm, 4, 4, 0.0, 15.0, viz_layout_rect(10, 100, 80, 60))
+    viz_add_control(&!scene, VIZ_CONTROL_SLIDER, viz_layout_rect(120, 120, 80, 16), scene.time, 0.0, 10.0)
+    viz_canvas_render_scene(&scene, &!c)
+    let ir_px = read_px(&c, 10, 10)
+    assert(ir_px != 0)
+    let slider_px = read_px(&c, 120, 126)
+    assert(slider_px != 0)
+
+    // ---- 10. Physico-chemistry data stays in Sounio structs ----
+    let mol = molecule_h2o()
+    assert(mol.atom_count == 3)
+    assert(mol.bond_count == 2)
+    let field = scalar_field_radial(8, 8)
+    assert(field.rows == 8)
+    assert(field.cols == 8)
+    assert(field.max_value > field.min_value)
+
+    heap_free(c.pixels as *mut i8)
+    println("VIZ_HEADLESS_PASS")
+}

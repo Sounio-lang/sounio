@@ -1,0 +1,227 @@
+// stdlib/viz/epiviz.sio — Epistemic uncertainty visualization
+//
+// Renders Epistemic data (val ± σ, confidence) directly from
+// stdlib/epistemic/knowledge.sio types into a Canvas.
+
+use display::canvas::{Canvas, canvas_fill_rect}
+use display::canvas_ext::{canvas_draw_line_aa}
+use display::font::{font_draw_string}
+use viz::coord::{CoordSystem, coord_map_x, coord_map_y}
+use epistemic::knowledge::{Epistemic}
+
+// ============================================================
+// Internal
+// ============================================================
+
+fn epiviz_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn epiviz_clamp(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo { lo } else if v > hi { hi } else { v }
+}
+
+// Draw a semi-transparent filled band between two y-screen coordinates.
+// Simulated via a 50%-dimmed fill using alternating rows.
+fn epiviz_draw_band_row(c: &!Canvas, x: i64, y: i64, w: i64, r: i64, g: i64, b: i64) with Mut {
+    // Checkerboard at 50% density — every other pixel
+    var px = x
+    while px < x + w {
+        if (px + y) % 2 == 0 {
+            canvas_fill_rect(c, px, y, 1, 1, r, g, b)
+        }
+        px = px + 1
+    }
+}
+
+// ============================================================
+// Uncertainty band — center line + ±1σ shaded region
+// ============================================================
+//
+// xs[i], vals[i], vars[i]: data-space X, mean, and variance (σ²).
+// Band is rendered as a translucent region between val-σ and val+σ.
+
+pub fn epiviz_band(
+    cs: &CoordSystem,
+    xs: &[f64; 1024],
+    vals: &[f64; 1024],
+    vars: &[f64; 1024],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n == 0 { return }
+    // First pass: draw the ±1σ band
+    var i: i64 = 0
+    while i < n {
+        let sx   = coord_map_x(cs, xs[i as usize])
+        let sigma = epiviz_sqrt(vars[i as usize])
+        let y_lo = coord_map_y(cs, vals[i as usize] - sigma)
+        let y_hi = coord_map_y(cs, vals[i as usize] + sigma)
+        let band_top    = if y_hi < y_lo { y_hi } else { y_lo }
+        let band_bottom = if y_hi > y_lo { y_hi } else { y_lo }
+        var py = band_top
+        while py <= band_bottom {
+            epiviz_draw_band_row(c, sx - 1, py, 3, r / 2, g / 2, b)
+            py = py + 1
+        }
+        i = i + 1
+    }
+    // Second pass: center line (solid, antialiased)
+    var j: i64 = 0
+    while j < n - 1 {
+        let sx0 = coord_map_x(cs, xs[j as usize])
+        let sy0 = coord_map_y(cs, vals[j as usize])
+        let sx1 = coord_map_x(cs, xs[(j + 1) as usize])
+        let sy1 = coord_map_y(cs, vals[(j + 1) as usize])
+        canvas_draw_line_aa(c, sx0, sy0, sx1, sy1, r, g, b)
+        j = j + 1
+    }
+}
+
+// ============================================================
+// Epistemic series — convenience wrapper for Epistemic arrays
+// ============================================================
+
+pub fn epiviz_knowledge_series(
+    cs: &CoordSystem,
+    xs: &[f64; 1024],
+    ks: &[Epistemic; 1024],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    // Unpack vals + vars into local arrays
+    var vals: [f64; 1024] = [0.0; 1024]
+    var vars: [f64; 1024] = [0.0; 1024]
+    var i: i64 = 0
+    while i < n {
+        vals[i as usize] = ks[i as usize].val
+        vars[i as usize] = ks[i as usize].variance
+        i = i + 1
+    }
+    epiviz_band(cs, xs, &vals, &vars, n, c, r, g, b)
+}
+
+// ============================================================
+// Confidence waterfall — bar per operation showing decay
+// ============================================================
+//
+// confidences[i] in [0, 1000]; labels[i][0..8] is an 8-char tag.
+// Draws horizontal bars ranked by index, colored by confidence:
+//   high (≥900) → green, mid (≥600) → yellow, low → red.
+
+fn epiviz_conf_color_r(conf: i64) -> i64 {
+    if conf >= 900 { 80 }
+    else if conf >= 600 { 255 }
+    else { 220 }
+}
+
+fn epiviz_conf_color_g(conf: i64) -> i64 {
+    if conf >= 900 { 220 }
+    else if conf >= 600 { 200 }
+    else { 60 }
+}
+
+fn epiviz_conf_color_b(conf: i64) -> i64 {
+    if conf >= 900 { 80 } else { 40 }
+}
+
+pub fn epiviz_waterfall(
+    cs: &CoordSystem,
+    confidences: &[i64; 64],
+    n: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n == 0 { return }
+    let bar_h = epiviz_clamp(cs.screen_h / n - 2, 4, 30)
+    var i: i64 = 0
+    while i < n {
+        let conf = confidences[i as usize]
+        let bar_w = epiviz_clamp((conf * cs.screen_w) / 1000, 2, cs.screen_w)
+        let py = cs.screen_y + i * (bar_h + 2)
+        let cr = epiviz_conf_color_r(conf)
+        let cg = epiviz_conf_color_g(conf)
+        let cb = epiviz_conf_color_b(conf)
+        canvas_fill_rect(c, cs.screen_x, py, bar_w, bar_h, cr, cg, cb)
+        // dim border
+        canvas_fill_rect(c, cs.screen_x + bar_w, py, cs.screen_w - bar_w, bar_h, 40, 40, 50)
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Forest plot — per-study estimates + pooled result
+// ============================================================
+//
+// studies: array of Epistemic (val ± σ per study)
+// pooled:  the meta-analysis pooled Epistemic
+// Draws horizontal error bars and a diamond for the pooled result.
+
+pub fn epiviz_forest(
+    cs: &CoordSystem,
+    studies: &[Epistemic; 64],
+    n: i64,
+    pooled: Epistemic,
+    c: &!Canvas,
+) with Mut, Div {
+    if n == 0 { return }
+    let row_h = epiviz_clamp(cs.screen_h / (n + 2), 6, 20)
+
+    // Center of X axis = pooled.val, so scale by max sigma across studies
+    var max_sigma: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let s = epiviz_sqrt(studies[i as usize].variance)
+        if s > max_sigma { max_sigma = s }
+        i = i + 1
+    }
+    let x_span = if max_sigma > 0.0 { max_sigma * 4.0 } else { 1.0 }
+    let x_lo = pooled.val - x_span * 0.5
+    let x_hi = pooled.val + x_span * 0.5
+
+    // Per-study rows
+    var j: i64 = 0
+    while j < n {
+        let est = studies[j as usize].val
+        let sigma = epiviz_sqrt(studies[j as usize].variance)
+        let conf  = studies[j as usize].confidence
+
+        let row_y = cs.screen_y + j * (row_h + 2) + row_h / 2
+        let sx_est = cs.screen_x + (((est - x_lo) / (x_hi - x_lo)) * (cs.screen_w as f64)) as i64
+        let sx_lo  = cs.screen_x + ((((est - sigma) - x_lo) / (x_hi - x_lo)) * (cs.screen_w as f64)) as i64
+        let sx_hi  = cs.screen_x + ((((est + sigma) - x_lo) / (x_hi - x_lo)) * (cs.screen_w as f64)) as i64
+
+        // Error bar line
+        canvas_fill_rect(c, sx_lo, row_y, sx_hi - sx_lo + 1, 1, 180, 180, 220)
+        // Cap lines
+        canvas_fill_rect(c, sx_lo, row_y - 2, 1, 5, 180, 180, 220)
+        canvas_fill_rect(c, sx_hi, row_y - 2, 1, 5, 180, 180, 220)
+        // Center marker (confidence-colored)
+        let mr = if conf >= 900 { 80 } else if conf >= 600 { 200 } else { 220 }
+        let mg = if conf >= 900 { 200 } else if conf >= 600 { 180 } else { 80 }
+        let mb = if conf >= 900 { 80 } else { 40 }
+        canvas_fill_rect(c, sx_est - 3, row_y - 3, 7, 7, mr, mg, mb)
+
+        j = j + 1
+    }
+
+    // Pooled diamond
+    let pooled_y  = cs.screen_y + n * (row_h + 2) + row_h + row_h / 2
+    let pooled_sigma = epiviz_sqrt(pooled.variance)
+    let sx_p  = cs.screen_x + (((pooled.val - x_lo) / (x_hi - x_lo)) * (cs.screen_w as f64)) as i64
+    let sx_pl = cs.screen_x + ((((pooled.val - pooled_sigma) - x_lo) / (x_hi - x_lo)) * (cs.screen_w as f64)) as i64
+    let sx_pr = cs.screen_x + ((((pooled.val + pooled_sigma) - x_lo) / (x_hi - x_lo)) * (cs.screen_w as f64)) as i64
+    // Draw diamond as 4 lines
+    canvas_draw_line_aa(c, sx_pl, pooled_y, sx_p, pooled_y - 6, 255, 220, 80)
+    canvas_draw_line_aa(c, sx_p, pooled_y - 6, sx_pr, pooled_y, 255, 220, 80)
+    canvas_draw_line_aa(c, sx_pr, pooled_y, sx_p, pooled_y + 6, 255, 220, 80)
+    canvas_draw_line_aa(c, sx_p, pooled_y + 6, sx_pl, pooled_y, 255, 220, 80)
+}
