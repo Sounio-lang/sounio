@@ -1,7 +1,7 @@
 // stdlib/display/canvas_ext.sio — Extended canvas drawing primitives
 //
-// Adds antialiased lines, filled triangle, and Surface→Canvas blit
-// on top of the base canvas.sio API.
+// Adds antialiased lines, filled triangle, Surface→Canvas blit,
+// and Phong-shaded sphere primitive.
 //
 // Pixel format (same as canvas.sio): lower 32 bits = 0x00RRGGBB
 //   B in byte 0, G in byte 1, R in byte 2.
@@ -219,5 +219,98 @@ pub fn canvas_blit_surface(
             sx = sx + 1
         }
         sy = sy + 1
+    }
+}
+
+// ============================================================
+// Phong-shaded sphere — for molecular / 3D atom rendering
+// ============================================================
+//
+// Light L = (0.447, -0.632, 0.632): upper-left-front, normalized.
+// Blinn-Phong half-vector H = normalize(L + V) ≈ (0.247, -0.350, 0.903).
+// Shading: ambient=0.32 + Lambertian diffuse + Blinn-Phong specular^32.
+// Soft rim darkening: (nz*0.35 + 0.65) keeps dark atoms visible.
+
+fn sph_sqrt(x: f64) -> f64 with Div {
+    if x <= 0.0 { return 0.0 }
+    var g: f64 = 0.6
+    g = (g + x / g) * 0.5
+    g = (g + x / g) * 0.5
+    g = (g + x / g) * 0.5
+    g = (g + x / g) * 0.5
+    g = (g + x / g) * 0.5
+    g
+}
+
+// Renders a Blinn-Phong-shaded sphere at (cx,cy) with radius r.
+pub fn canvas_sphere_shaded(
+    c: &!Canvas,
+    cx: i64, cy: i64, r: i64,
+    base_r: i64, base_g: i64, base_b: i64,
+) with Mut, Div {
+    if r <= 0 { return }
+    let r_f: f64 = r as f64
+    let r2   = r * r
+
+    // Light direction — upper-left-front, normalised (0.447, -0.632, 0.632)
+    let lx: f64 =         0.447
+    let ly: f64 = 0.0 - 0.632
+    // Blinn-Phong half-vector H = normalize(L + V), V = (0,0,1)
+    // H ≈ (0.247, -0.350, 0.903) — precomputed constant
+    let hx: f64 =         0.247
+    let hy: f64 = 0.0 - 0.350
+    let hz: f64 =         0.903
+
+    let ambient:  f64 = 0.32
+    let spec_str: f64 = 0.90
+
+    let x_min = cext_clamp(cx - r, 0, c.width  - 1)
+    let x_max = cext_clamp(cx + r, 0, c.width  - 1)
+    let y_min = cext_clamp(cy - r, 0, c.height - 1)
+    let y_max = cext_clamp(cy + r, 0, c.height - 1)
+
+    var py = y_min
+    while py <= y_max {
+        var px = x_min
+        while px <= x_max {
+            let dx = px - cx
+            let dy = py - cy
+            if dx * dx + dy * dy <= r2 {
+                let nx_f = (dx as f64) / r_f
+                let ny_f = (dy as f64) / r_f
+                let nz2  = 1.0 - nx_f * nx_f - ny_f * ny_f
+                let nz_f = sph_sqrt(nz2)
+
+                // Lambertian diffuse: N · L (lz=0.632)
+                let ndotl   = nx_f * lx + ny_f * ly + nz_f * 0.632
+                let diffuse = if ndotl > 0.0 { ndotl } else { 0.0 }
+
+                // Blinn-Phong specular: (N · H)^32
+                let ndoth = nx_f * hx + ny_f * hy + nz_f * hz
+                let s1 = if ndoth > 0.0 { ndoth } else { 0.0 }
+                let s2 = s1 * s1
+                let s4 = s2 * s2
+                let s8 = s4 * s4
+                let s16 = s8 * s8
+                let s32 = s16 * s16
+
+                // Soft rim: keeps silhouette visible (nz*0.35+0.65 maps [0,1]→[0.65,1])
+                let rim = nz_f * 0.35 + 0.65
+
+                let intensity = (ambient + (1.0 - ambient) * diffuse) * rim
+
+                let fr = (base_r as f64) * intensity + 255.0 * spec_str * s32
+                let fg = (base_g as f64) * intensity + 255.0 * spec_str * s32
+                let fb = (base_b as f64) * intensity + 255.0 * spec_str * s32
+
+                let ir = if fr > 255.0 { 255 } else { fr as i64 }
+                let ig = if fg > 255.0 { 255 } else { fg as i64 }
+                let ib = if fb > 255.0 { 255 } else { fb as i64 }
+
+                write_i64(c.pixels, py * c.width + px, ib | (ig << 8) | (ir << 16))
+            }
+            px = px + 1
+        }
+        py = py + 1
     }
 }
