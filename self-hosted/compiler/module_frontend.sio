@@ -2878,6 +2878,13 @@ fn module_frontend_lower_source_file_summary_into(out: &! IrModule, path: string
 // by summary_into before each use.
 var MODULE_FRONTEND_LOWER_SCRATCH: IrModule = ir_empty_module()
 
+// Global IR accumulator (Option 2). `&!(*out).module` (address-of-a-field-through-a-pointer)
+// miscompiled the merge stores at the 526 MB offset (jobs 2383-2388), while `&! GLOBAL`
+// (address-of-global, as MODULE_FRONTEND_LOWER_SCRATCH uses) writes correctly. So merge
+// the whole program into THIS global via `&! MODULE_FRONTEND_IR_ACCUM`, and have the driver
+// read it for codegen.
+pub var MODULE_FRONTEND_IR_ACCUM: IrModule = ir_empty_module()
+
 // A1 single-accumulator variant of module_frontend_lower_imported_source_recursive:
 // lowers `path` + all transitively-imported modules into the caller's `dst` accumulator
 // using exactly ONE scratch IrModule (allocated once, before the loop). The per-module
@@ -4200,11 +4207,10 @@ pub fn load_multimodule_ir_traced_into(out: &! MultiModuleIrResult, main_path: s
         trace.loaded_modules = 1
         trace.last_stage = "load_main"
         trace.last_module_index = 0
-        // A1 single-accumulator: lower main + all imports DIRECTLY into the out-result's
-        // module field (the BSS-global backing store), with no per-import full-IrModule
-        // allocation and no 526 MB `(*out).module = merged_imported` copy. mod_ptr reads
-        // go through the pointer (read-through, no 526 MB materialization).
-        let mod_ptr = &! (*out).module
+        // A1 single-accumulator (Option 2): lower main + all imports into the GLOBAL
+        // accumulator via `&! GLOBAL` (NOT `&!(*out).module`, which miscompiled the merge
+        // stores at 526 MB). The driver reads it via module_frontend_ir_accum_ptr().
+        let mod_ptr = &! MODULE_FRONTEND_IR_ACCUM
         module_frontend_lower_imported_source_recursive_into(mod_ptr, main_path, 0, trace)
         if (*mod_ptr).fn_count <= 0 {
             print("IR lowering failed for module 0\n")
