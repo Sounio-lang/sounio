@@ -119,6 +119,9 @@ done
 echo "(expect repro_boxstore=42/42/55/55/ ; repro_huge=11/99/100/200/)" | tee -a "\${RES}/SUMMARY.txt"
 
 # ---------- PHASE 3: D-fix / wall observation ----------
+if [ "${SKIP_PHASE3:-0}" = "1" ]; then
+  echo "=== PHASE 3: SKIPPED (SKIP_PHASE3=1) ===" | tee -a "\${RES}/SUMMARY.txt"
+else
 echo "=== PHASE 3: build souc_new.elf = gen1 main.sio, then --native-compile (observational) ===" | tee -a "\${RES}/SUMMARY.txt"
 echo "[build mc] gen1 self-hosted/compiler/main.sio -> souc_new.elf ..." | tee "\${RES}/mc_build.log"
 /usr/bin/timeout 1200 "\${ROOT}/gen1" self-hosted/compiler/main.sio "\${ROOT}/souc_new.elf" >> "\${RES}/mc_build.log" 2>&1
@@ -150,8 +153,9 @@ else
   echo "souc_new.elf not built (mc_build rc=\${MCRC}); skipping native-compile probe" | tee -a "\${RES}/SUMMARY.txt"
   tail -30 "\${RES}/mc_build.log" | tee -a "\${RES}/SUMMARY.txt"
 fi
+fi  # end SKIP_PHASE3 guard
 
-scontrol update JobId=\${SLURM_JOB_ID} Comment="cgreboot fp=\${FIXEDPOINT} s1=\${S1} mc=\${MCRC}" 2>/dev/null || true
+scontrol update JobId=\${SLURM_JOB_ID} Comment="cgreboot fp=\${FIXEDPOINT} s1=\${S1}" 2>/dev/null || true
 echo "RESULT_DIR=\${RES}" | tee -a "\${RES}/SUMMARY.txt"
 EOF
 
