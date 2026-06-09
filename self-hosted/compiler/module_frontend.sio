@@ -954,6 +954,86 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
     merged
 }
 
+// Logical reset of an IrModule accumulator/scratch WITHOUT a ~526 MB whole-struct
+// re-zero: clear only the count fields (the array payloads are never read past their
+// count, so stale tails are harmless). Mirrors every count ir_empty_module sets to 0:
+// the 4 top-level counts + the 3 nested sub-tables (assigned fresh, which resets all of
+// THEIR counts comprehensively — no per-field enumeration to drift out of sync). Used by
+// the single-accumulator front-half (A1) so the per-module loop does ZERO full-IrModule
+// materializations.
+fn ir_module_logical_reset(dst: &! IrModule) with Mut, Panic, Div {
+    (*dst).fn_count = 0
+    (*dst).string_count = 0
+    (*dst).prof_counter_count = 0
+    (*dst).export_count = 0
+    (*dst).epistemic = ir_empty_epistemic_section()
+    (*dst).algebras = ir_empty_algebra_table()
+    (*dst).ontologies = ir_empty_ontology_table()
+}
+
+// In-place merge: append `src`'s functions/strings/epistemic/algebras into `dst` with the
+// SAME fn_id offset shift + 11 epistemic offset adjustments as ir_merge_modules — but
+// without the two 526 MB by-value param copies and the 526 MB by-value return. Byte-for-
+// byte the same merge semantics; just `merged`->`(*dst)`, `src.`->`(*src).`. This is the
+// core of A1 (single accumulator, no per-import full-IrModule allocation).
+fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div {
+    let fn_offset = (*dst).fn_count
+    let contest_offset = (*dst).epistemic.contest_count
+    let robust_offset = (*dst).epistemic.robust_proof_count
+    let decision_offset = (*dst).epistemic.decision_certificate_count
+    let deferred_offset = (*dst).epistemic.deferred_certificate_count
+    let validated_offset = (*dst).epistemic.validated_manifest_count
+    let acquisition_plan_offset = (*dst).epistemic.acquisition_plan_count
+    let recourse_plan_offset = (*dst).epistemic.recourse_plan_count
+    let alternative_set_offset = (*dst).epistemic.alternative_set_count
+    let transition_plan_offset = (*dst).epistemic.transition_plan_count
+    let observed_transition_offset = (*dst).epistemic.observed_transition_count
+    let rollback_certificate_offset = (*dst).epistemic.rollback_certificate_count
+
+    var fi: i64 = 0
+    while fi < (*src).fn_count && (*dst).fn_count < IR_MAX_FUNCS {
+        var func = (*src).functions[fi]
+        func.compile_strategy = (*src).functions[fi].compile_strategy
+        var ii: i64 = 0
+        while ii < func.instr_count {
+            if func.instrs[ii].op == IrOpcode::IrCall {
+                if func.instrs[ii].fn_id >= 0 {
+                    func.instrs[ii].fn_id = func.instrs[ii].fn_id + fn_offset
+                }
+            }
+            func.instrs[ii] = ir_merge_adjust_epistemic_instr(
+                func.instrs[ii],
+                contest_offset,
+                robust_offset,
+                decision_offset,
+                deferred_offset,
+                validated_offset,
+                acquisition_plan_offset,
+                recourse_plan_offset,
+                alternative_set_offset,
+                transition_plan_offset,
+                observed_transition_offset,
+                rollback_certificate_offset
+            )
+            ii = ii + 1
+        }
+        func.compile_strategy = (*src).functions[fi].compile_strategy
+        (*dst).functions[(*dst).fn_count] = func
+        (*dst).fn_count = (*dst).fn_count + 1
+        fi = fi + 1
+    }
+
+    var si: i64 = 0
+    while si < (*src).string_count && (*dst).string_count < IR_MAX_STRINGS {
+        (*dst).string_table[(*dst).string_count] = (*src).string_table[si]
+        (*dst).string_count = (*dst).string_count + 1
+        si = si + 1
+    }
+
+    (*dst).epistemic = ir_merge_epistemic_sections((*dst).epistemic, (*src).epistemic)
+    (*dst).algebras = ir_merge_algebra_tables((*dst).algebras, (*src).algebras)
+}
+
 // Resolve fn_id=-1 named calls (cross-module calls emitted by module_frontend_ir_named_call)
 // to their position in the merged module. Operates through &! to avoid large-local JIT writes.
 // Polynomial name hash, mirroring the module loader's thin_hash_mix so every
@@ -2747,6 +2827,88 @@ fn module_frontend_lower_imported_source_recursive(path: string, depth: i64, tra
     merged
 }
 
+// A1 single-accumulator variant of module_frontend_lower_source_file_summary: lowers
+// `path`'s functions DIRECTLY into the caller's `out` accumulator (in-place), with no
+// per-call `var module = ir_empty_module()` 526 MB materialization. `out` is logical-reset
+// up front, then filled; the caller merges it into the real accumulator via
+// ir_merge_modules_into (which applies the fn_id/epistemic offset shift).
+fn module_frontend_lower_source_file_summary_into(out: &! IrModule, path: string, module_index: i64, trace: &! LoadMultimoduleIrTrace) with IO, Mut, Panic, Div, Alloc {
+    trace.last_stage = "lower_source_summary"
+    trace.last_module_index = module_index
+    ir_module_logical_reset(out)
+    let size = file_size(path)
+    if size <= 2 {
+        return
+    }
+    let data = read_file(path)
+    var i: i64 = 0
+    while i + 2 < size && (*out).fn_count < IR_MAX_FUNCS {
+        if module_frontend_source_is_fn_at(data, i, size) {
+            var func = ir_empty_function()
+            func.name = module_frontend_source_fn_name(data, i + 3, size)
+            func = module_frontend_lower_source_fn_body(path, data, i, size, func)
+            (*out).functions[(*out).fn_count as usize] = func
+            (*out).fn_count = (*out).fn_count + 1
+        }
+        i = i + 1
+    }
+    if (*out).fn_count > 0 {
+        trace.summary_seeded_modules = trace.summary_seeded_modules + 1
+        trace.body_lowered_modules = trace.body_lowered_modules + 1
+        trace.lowered_modules = trace.lowered_modules + 1
+    }
+}
+
+// A1 single-accumulator variant of module_frontend_lower_imported_source_recursive:
+// lowers `path` + all transitively-imported modules into the caller's `dst` accumulator
+// using exactly ONE scratch IrModule (allocated once, before the loop). The per-module
+// loop body does ZERO full-IrModule materializations — the property that bounds peak RSS
+// to ~2 full modules instead of N. Merge semantics are identical to the by-value version
+// (ir_merge_modules_into preserves the fn_id offset shift; cross-module calls resolve by
+// name in ir_module_resolve_named_calls post-merge).
+fn module_frontend_lower_imported_source_recursive_into(dst: &! IrModule, path: string, depth: i64, trace: &! LoadMultimoduleIrTrace) with IO, Mut, Panic, Div, Alloc {
+    var file_paths: [string; 256] = [""; 256]
+    file_paths[0] = path
+    var loaded: i64 = 1
+    var visited_paths: [string; 256] = [""; 256]
+    visited_paths[0] = path
+    var visited_count: i64 = 1
+    var work_front: i64 = 0
+    while work_front < loaded && loaded < 256 {
+        let work_imports = module_frontend_import_files_from_source(file_paths[work_front as usize])
+        work_front = work_front + 1
+        var i: i64 = 0
+        while i < work_imports.count && loaded < 256 {
+            let file_path = work_imports.paths[i as usize]
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count as usize] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    file_paths[loaded as usize] = file_path
+                    loaded = loaded + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    trace.loaded_modules = loaded
+    trace.resolved_modules = loaded
+    trace.typechecked_modules = loaded
+
+    ir_module_logical_reset(dst)
+    var scratch = ir_empty_module()   // the ONLY per-loop full IrModule, allocated ONCE
+    var mi: i64 = 0
+    while mi < loaded {
+        module_frontend_lower_source_file_summary_into(&! scratch, file_paths[mi as usize], mi, trace)
+        if scratch.fn_count > 0 {
+            ir_merge_modules_into(dst, &scratch)
+            trace.merged_modules = trace.merged_modules + 1
+        }
+        mi = mi + 1
+    }
+}
+
 // ============================================================
 // Multi-module IR loading (shared by bytecode + native paths)
 // ============================================================
@@ -4001,8 +4163,13 @@ pub fn load_multimodule_ir_traced_into(out: &! MultiModuleIrResult, main_path: s
         trace.loaded_modules = 1
         trace.last_stage = "load_main"
         trace.last_module_index = 0
-        var merged_imported = module_frontend_lower_imported_source_recursive(main_path, 0, trace)
-        if merged_imported.fn_count <= 0 {
+        // A1 single-accumulator: lower main + all imports DIRECTLY into the out-result's
+        // module field (the BSS-global backing store), with no per-import full-IrModule
+        // allocation and no 526 MB `(*out).module = merged_imported` copy. mod_ptr reads
+        // go through the pointer (read-through, no 526 MB materialization).
+        let mod_ptr = &! (*out).module
+        module_frontend_lower_imported_source_recursive_into(mod_ptr, main_path, 0, trace)
+        if (*mod_ptr).fn_count <= 0 {
             print("IR lowering failed for module 0\n")
             (*out).ok = false
             (*out).error_msg = "ir_lowering_failed"
@@ -4012,13 +4179,12 @@ pub fn load_multimodule_ir_traced_into(out: &! MultiModuleIrResult, main_path: s
         trace.last_stage = "done"
         trace.last_module_index = trace.loaded_modules - 1
         print("Merged IR: ")
-        print_int(merged_imported.fn_count)
+        print_int((*mod_ptr).fn_count)
         print(" functions\n")
-        ir_module_resolve_named_calls(&! merged_imported)
+        ir_module_resolve_named_calls(mod_ptr)
         parser_reset_last_errors()
         (*out).ok = true
         (*out).error_msg = ""
-        (*out).module = merged_imported
         return
     }
 
