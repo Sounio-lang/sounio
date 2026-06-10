@@ -259,6 +259,38 @@ VIZ_INSPECTOR_PANEL_PASS
 
 The test draws the native Canvas inspector panel over a focused Visual IR scene and verifies panel/text pixels without requiring a display server.
 
+## Replay Trace Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_replay_trace.sio
+```
+
+Expected output:
+
+```text
+VIZ_REPLAY_TRACE_PASS
+```
+
+The test records a timeline of event kind/key/position, changed flag, Canvas hash, audit hash, selected/hovered/focused state, active tab, and scene time for every replayed frame.
+
+## Inspector Interactive Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_inspector_interactive.sio
+```
+
+Expected output:
+
+```text
+VIZ_INSPECTOR_INTERACTIVE_PASS
+```
+
+The test clicks an inspector row, selects/focuses/hovers the corresponding Visual IR node, verifies shared audit hashes, and checks the native Canvas highlight/text pixels.
+
 ## Renderer3D Edge Proof
 
 Run:

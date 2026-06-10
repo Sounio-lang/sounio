@@ -34,6 +34,15 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `tests/run-pass/viz_inspector_panel.sio` gives the inspector a headless pixel proof.
 - `viz_html_emit_scene` now emits a passive `viz-audit` comment with node count, selected/hovered/focused nodes, active tab, and integer scene time so HTML/SVG exports carry the same audit trail without JavaScript semantics.
 
+## V1.4: Interactive Inspector And Replay Timeline
+
+- `stdlib/viz/audit.sio` defines shared Visual IR audit hashes for replay traces, inspector checks, and export/runtime parity tests.
+- `viz_replay_trace_events` records a bounded timeline of replay frames: event kind/key/position, changed flag, Canvas hash, audit hash, selected/hovered/focused, active tab, and scene time.
+- `tests/run-pass/viz_replay_trace.sio` proves timeline recording over a slider/toggle interaction tape.
+- `viz_inspector_hit_node` and `viz_inspector_select` let native Canvas inspector rows select/focus/hover the corresponding Visual IR node.
+- `viz_inspector_draw_node_highlights` overlays selected/hovered/focused node highlights on the rendered scene.
+- `tests/run-pass/viz_inspector_interactive.sio` proves inspector row selection, shared audit hashes, and highlight pixels without a display server.
+
 ## V1.5: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.
