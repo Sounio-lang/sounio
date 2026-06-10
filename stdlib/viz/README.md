@@ -7,7 +7,9 @@ The v1 architecture is:
 - `viz::ir`: fixed-capacity Visual IR owned by Sounio.
 - `viz::viz_canvas`: immediate native renderer to `display::Canvas`.
 - `viz::viz_html`: static HTML/SVG export renderer over the same IR.
-- `viz::physchem`: Sounio data structures for molecules, bonds, scalar/vector fields, trajectories, and uncertainty overlays.
+- `viz::viz_app`: headless-testable app runner for Event -> Visual IR -> Canvas frames.
+- `viz::viz_window`: optional native `display::Window` bridge for manual event-loop demos.
+- `viz::physchem`: Sounio data structures for molecules, bonds, scalar/vector fields, trajectories, spectra, lattice/phonon fields, particle event views, and uncertainty overlays.
 - `viz::{coord,chart,epiviz,sci}`: direct drawing helpers that the IR renderer can lower into.
 
 Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattices, fields, simulation clocks, scene nodes, and interaction state are represented as Sounio data. Browser or terminal export surfaces display pixels or markup; they do not own the scientific model.
@@ -15,7 +17,17 @@ Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattic
 ## V1 Constraints
 
 - Fixed node/data arrays; no heap-heavy scene graph.
-- Fixed rectangles and simple row/column layout metadata; no flexbox.
+- Fixed rectangles plus a simple row/column layout pass over contiguous node ranges; no flexbox.
 - CPU Canvas is the primary renderer.
-- HTML/SVG is static export only.
+- HTML/SVG is static export only. It serializes Visual IR geometry and simple glyphs; no JavaScript owns model state.
+- Scalar fields keep their Sounio `ScalarField2D` payload and mirror values into heatmap storage for renderer-friendly export.
+- Vector fields keep their Sounio `VectorField2D` payload and mirror components into renderer-friendly vector slots with explicit row/column metadata.
+- Trajectories keep their Sounio `Trajectory3D` payload and mirror path coordinates into renderer-friendly trajectory slots.
+- Spectra keep their Sounio `SpectrumViz` payload and mirror wavelength/intensity/variance into renderer-friendly spectrum slots.
+- Chart builders cover line, scatter, bar, heatmap, uncertainty band, forest plot, and waterfall nodes over the shared Visual IR.
+- Scene time, selected node, hovered node, active tabs, and toggle values are Sounio state that renderers display.
+- Labels and text controls use fixed `[i8; 64]` buffers in the Visual IR. Canvas renders them with `display::font`; HTML/SVG escapes XML-sensitive ASCII before export.
+- Native frontend builders cover button, slider, toggle, tabs, legend, tooltip, text viewport, and plot viewport nodes over the same control reducer machinery.
+- `display::event::Event` can be reduced directly into `VizScene` for headless tests and future native window loops.
+- Native windows are an optional layer over the same app runner; CI proofs stay headless.
 - GPU rendering is deferred until general compiler GPU backend wiring is ready.

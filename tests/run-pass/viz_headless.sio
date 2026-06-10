@@ -13,9 +13,10 @@ use viz::coord::{CoordSystem, coord_new, coord_map_x, coord_map_y, coord_draw_ax
 use viz::chart::{chart_line, chart_scatter, chart_bar, chart_heatmap}
 use viz::epiviz::{epiviz_band, epiviz_knowledge_series, epiviz_waterfall, epiviz_forest}
 use viz::sci::{sci_lattice_heatmap, sci_lattice_variance, sci_pbpk_series}
-use viz::ir::{viz_scene_new, viz_layout_rect, viz_style_rgb, viz_add_line_chart, viz_add_uncertainty_band, viz_add_heatmap, viz_add_control, viz_scene_set_time, VIZ_CONTROL_SLIDER}
+use viz::ir::{viz_scene_new, viz_layout_rect, viz_style_rgb, viz_add_line_chart, viz_add_uncertainty_band, viz_add_heatmap, viz_add_control, viz_add_molecule, viz_add_scalar_field, viz_add_mesh, viz_scene_set_time, viz_scene_pointer_down, viz_scene_pointer_update, VIZ_CONTROL_SLIDER}
 use viz::viz_canvas::{viz_canvas_render_scene}
 use viz::physchem::{molecule_h2o, scalar_field_radial}
+use render::renderer3d::{Tri3D}
 use epistemic::knowledge::{Epistemic}
 use physics::phonon_quantity::{Lattice64, lattice64_zero}
 
@@ -26,6 +27,22 @@ fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
 
 fn read_px(c: &Canvas, x: i64, y: i64) -> i64 {
     read_i64(c.pixels, y * c.width + x)
+}
+
+fn count_nonzero_rect(c: &Canvas, x: i64, y: i64, w: i64, h: i64) -> i64 with Mut {
+    var count: i64 = 0
+    var yy: i64 = y
+    while yy < y + h {
+        var xx: i64 = x
+        while xx < x + w {
+            if read_px(c, xx, yy) != 0 {
+                count = count + 1
+            }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+    count
 }
 
 fn main() with IO, Alloc, Mut, Div {
@@ -131,21 +148,102 @@ fn main() with IO, Alloc, Mut, Div {
     viz_add_line_chart(&!scene, &xs, &ys, 10, viz_layout_rect(10, 10, 90, 70), viz_style_rgb(255, 140, 90))
     viz_add_uncertainty_band(&!scene, &xs, &bvals, &bvars, 5, viz_layout_rect(110, 10, 90, 70), viz_style_rgb(100, 200, 255))
     viz_add_heatmap(&!scene, &hm, 4, 4, 0.0, 15.0, viz_layout_rect(10, 100, 80, 60))
-    viz_add_control(&!scene, VIZ_CONTROL_SLIDER, viz_layout_rect(120, 120, 80, 16), scene.time, 0.0, 10.0)
-    viz_canvas_render_scene(&scene, &!c)
-    let ir_px = read_px(&c, 10, 10)
-    assert(ir_px != 0)
-    let slider_px = read_px(&c, 120, 126)
-    assert(slider_px != 0)
-
-    // ---- 10. Physico-chemistry data stays in Sounio structs ----
+    let slider_id = viz_add_control(&!scene, VIZ_CONTROL_SLIDER, viz_layout_rect(120, 120, 80, 16), scene.time, 0.0, 10.0)
     let mol = molecule_h2o()
     assert(mol.atom_count == 3)
     assert(mol.bond_count == 2)
+    viz_add_molecule(&!scene, mol, viz_layout_rect(96, 160, 70, 60), viz_style_rgb(210, 220, 240))
     let field = scalar_field_radial(8, 8)
     assert(field.rows == 8)
     assert(field.cols == 8)
     assert(field.max_value > field.min_value)
+    viz_add_scalar_field(&!scene, field, viz_layout_rect(176, 160, 64, 60))
+    var tris: [Tri3D; 128] = [Tri3D {
+        v0x: -0.45, v0y: -0.35, v0z: -2.0,
+        v1x: 0.45, v1y: -0.35, v1z: -2.0,
+        v2x: 0.0, v2y: 0.45, v2z: -2.0,
+        nx: 0.0, ny: 0.0, nz: 1.0,
+        base_r: 180, base_g: 220, base_b: 120,
+    }; 128]
+    viz_add_mesh(&!scene, &tris, 1, viz_layout_rect(88, 88, 80, 60), viz_style_rgb(180, 220, 120))
+    let hit_id = viz_scene_pointer_down(&!scene, 190, 124)
+    assert(hit_id == slider_id)
+    assert(scene.selected_node == slider_id)
+    let updated_id = viz_scene_pointer_update(&!scene, 200, 124)
+    assert(updated_id == slider_id)
+    assert(scene.nodes[slider_id as usize].value == 10.0)
+    assert(scene.time == 10.0)
+    viz_canvas_render_scene(&scene, &!c)
+
+    // ---- 10. Physico-chemistry data stays in Sounio structs ----
+    assert(scene.molecule_count == 1)
+    assert(scene.field_count == 1)
+    assert(scene.mesh_count == 1)
+    if scene.field_heatmap_slots[0] < 0 {
+        println("FAIL field mirror slot")
+        assert(false)
+    }
+    if scene.heatmaps[scene.field_heatmap_slots[0] as usize].rows != 8 {
+        println("FAIL field mirror rows")
+        assert(false)
+    }
+
+    // ---- 11. Visual IR molecule renderer paints atom pixels in its own rect ----
+    canvas_clear(&!c, 0, 0, 0)
+    var mol_scene = viz_scene_new()
+    let mol2 = molecule_h2o()
+    viz_add_molecule(&!mol_scene, mol2, viz_layout_rect(90, 70, 80, 60), viz_style_rgb(210, 220, 240))
+    assert(mol_scene.node_count == 1)
+    assert(mol_scene.molecule_count == 1)
+    assert(mol_scene.molecules[0].atom_count == 3)
+    viz_canvas_render_scene(&mol_scene, &!c)
+    let mol_border_px = read_px(&c, 90, 70)
+    if mol_border_px == 0 {
+        println("FAIL viz molecule dispatch")
+        assert(false)
+    }
+    let mol_inner_px = count_nonzero_rect(&c, 122, 92, 16, 16)
+    if mol_inner_px == 0 {
+        println("FAIL viz molecule pixel")
+        assert(false)
+    }
+
+    // ---- 12. Visual IR field renderer paints heatmap and overlay pixels ----
+    canvas_clear(&!c, 0, 0, 0)
+    var field_scene = viz_scene_new()
+    let field2 = scalar_field_radial(8, 8)
+    viz_add_scalar_field(&!field_scene, field2, viz_layout_rect(32, 32, 64, 64))
+    assert(field_scene.field_count == 1)
+    if field_scene.field_heatmap_slots[0] < 0 {
+        println("FAIL isolated field mirror slot")
+        assert(false)
+    }
+    if field_scene.heatmaps[field_scene.field_heatmap_slots[0] as usize].cols != 8 {
+        println("FAIL isolated field mirror cols")
+        assert(false)
+    }
+    viz_canvas_render_scene(&field_scene, &!c)
+    let field_px = read_px(&c, 64, 64)
+    if field_px == 0 {
+        println("FAIL viz field pixel")
+        assert(false)
+    }
+
+    // ---- 13. Visual IR mesh renderer respects the node viewport ----
+    canvas_clear(&!c, 0, 0, 0)
+    var mesh_scene = viz_scene_new()
+    viz_add_mesh(&!mesh_scene, &tris, 1, viz_layout_rect(80, 80, 80, 60), viz_style_rgb(180, 220, 120))
+    viz_canvas_render_scene(&mesh_scene, &!c)
+    let mesh_px = read_px(&c, 120, 110)
+    let mesh_outside_px = read_px(&c, 40, 40)
+    if mesh_px == 0 {
+        println("FAIL viz mesh pixel")
+        assert(false)
+    }
+    if mesh_outside_px != 0 {
+        println("FAIL viz mesh viewport")
+        assert(false)
+    }
 
     heap_free(c.pixels as *mut i8)
     println("VIZ_HEADLESS_PASS")
