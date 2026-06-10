@@ -4,7 +4,7 @@
 // stdlib/epistemic/knowledge.sio types into a Canvas.
 
 use display::canvas::{Canvas, canvas_fill_rect}
-use display::canvas_ext::{canvas_draw_line_aa}
+use display::canvas_ext::{canvas_draw_line_aa, canvas_blend_pixel}
 use display::font::{font_draw_string}
 use viz::coord::{CoordSystem, coord_map_x, coord_map_y}
 use epistemic::knowledge::{Epistemic}
@@ -224,4 +224,146 @@ pub fn epiviz_forest(
     canvas_draw_line_aa(c, sx_p, pooled_y - 6, sx_pr, pooled_y, 255, 220, 80)
     canvas_draw_line_aa(c, sx_pr, pooled_y, sx_p, pooled_y + 6, 255, 220, 80)
     canvas_draw_line_aa(c, sx_p, pooled_y + 6, sx_pl, pooled_y, 255, 220, 80)
+}
+
+// ============================================================
+// Violin / KDE plot — posterior distribution as half-violin
+// ============================================================
+//
+// Renders a half-violin (right-side only) at a given data-space Y centre.
+// Uses Gaussian KDE with Silverman bandwidth: h = 0.9 * σ * n^(-1/5).
+// 64 evaluation points; max half-width = 35 px.
+// n ≤ 256 data points.
+
+fn epiviz_exp_neg(x: f64) -> f64 with Mut, Div {
+    // exp(-x) for x >= 0 via Taylor series on fractional part × e^(-1)^ipart
+    if x <= 0.0 { return 1.0 }
+    if x > 10.0 { return 0.0 }
+    let e1: f64 = 0.36787944117
+    let ipart = x as i64
+    let frac = x - (ipart as f64)
+    var r: f64 = 1.0
+    var term: f64 = 1.0
+    var k: i64 = 1
+    while k <= 12 {
+        term = 0.0 - term * frac / (k as f64)
+        r = r + term
+        k = k + 1
+    }
+    if r < 0.0 { r = 0.0 }
+    var em: i64 = 0
+    while em < ipart {
+        r = r * e1
+        em = em + 1
+    }
+    r
+}
+
+fn epiviz_fifth_root(n: i64) -> f64 with Mut, Div {
+    // Compute n^(1/5) via Newton: y ← (4y + n/y^4) / 5
+    if n <= 1 { return 1.0 }
+    var y: f64 = 2.0
+    var i: i64 = 0
+    while i < 20 {
+        let y4 = y * y * y * y
+        y = (4.0 * y + (n as f64) / y4) / 5.0
+        i = i + 1
+    }
+    y
+}
+
+pub fn epiviz_violin(
+    cs: &CoordSystem,
+    data: &[f64; 256],
+    n: i64,
+    label_y: f64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n < 3 { return }
+
+    // Mean and σ for Silverman bandwidth
+    var dsum: f64 = 0.0
+    var vi: i64 = 0
+    while vi < n {
+        dsum = dsum + data[vi as usize]
+        vi = vi + 1
+    }
+    let dmean = dsum / (n as f64)
+    var var_acc: f64 = 0.0
+    var vj: i64 = 0
+    while vj < n {
+        let d = data[vj as usize] - dmean
+        var_acc = var_acc + d * d
+        vj = vj + 1
+    }
+    let sigma = epiviz_sqrt(var_acc / (n as f64))
+    if sigma <= 0.0 { return }
+
+    // Silverman h = 0.9 * σ * n^(-1/5)
+    let h = 0.9 * sigma / epiviz_fifth_root(n)
+    if h <= 0.0 { return }
+
+    // Display range: mean ± 3.5σ
+    let x_lo = dmean - 3.5 * sigma
+    let x_hi = dmean + 3.5 * sigma
+    if x_hi <= x_lo { return }
+
+    // Evaluate KDE at 64 points; Gaussian kernel K(u) = exp(-u²/2)
+    let n_eval: i64 = 64
+    var densities: [f64; 64] = [0.0; 64]
+    var max_dens: f64 = 0.001
+    var ei: i64 = 0
+    while ei < n_eval {
+        let x = x_lo + (x_hi - x_lo) * (ei as f64) / ((n_eval - 1) as f64)
+        var kde_sum: f64 = 0.0
+        var ki: i64 = 0
+        while ki < n {
+            let u = (x - data[ki as usize]) / h
+            let u2 = u * u
+            if u2 < 9.0 {
+                kde_sum = kde_sum + epiviz_exp_neg(u2 * 0.5)
+            }
+            ki = ki + 1
+        }
+        densities[ei as usize] = kde_sum
+        if kde_sum > max_dens { max_dens = kde_sum }
+        ei = ei + 1
+    }
+
+    let center_sy = coord_map_y(cs, label_y)
+    let max_hw: i64 = 35
+
+    // Fill half-violin (spans from center_sy outward in screen-Y)
+    var pi: i64 = 0
+    while pi < n_eval - 1 {
+        let t0 = (pi as f64) / ((n_eval - 1) as f64)
+        let t1 = ((pi + 1) as f64) / ((n_eval - 1) as f64)
+        let sx0 = coord_map_x(cs, x_lo + (x_hi - x_lo) * t0)
+        let sx1 = coord_map_x(cs, x_lo + (x_hi - x_lo) * t1)
+        if sx1 <= sx0 {
+            pi = pi + 1
+            continue
+        }
+        let hw0 = (densities[pi as usize] / max_dens * (max_hw as f64)) as i64
+        let hw1 = (densities[(pi + 1) as usize] / max_dens * (max_hw as f64)) as i64
+        let span = sx1 - sx0
+        var px = sx0
+        while px <= sx1 {
+            let t = if span > 0 { ((px - sx0) as f64) / (span as f64) } else { 0.0 }
+            let hw = (hw0 as f64 * (1.0 - t) + hw1 as f64 * t) as i64
+            var dy: i64 = 0
+            while dy <= hw {
+                canvas_blend_pixel(c, px, center_sy - dy, r, g, b, 120)
+                canvas_blend_pixel(c, px, center_sy + dy, r, g, b, 120)
+                dy = dy + 1
+            }
+            px = px + 1
+        }
+        pi = pi + 1
+    }
+    // Baseline at label_y
+    let sx_lo = coord_map_x(cs, x_lo)
+    let sx_hi = coord_map_x(cs, x_hi)
+    canvas_draw_line_aa(c, sx_lo, center_sy, sx_hi, center_sy, r, g, b)
 }

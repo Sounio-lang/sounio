@@ -10,7 +10,8 @@
 //   mol3d_render(&mol, &cam, angle_y, angle_x, &!canvas)
 
 use display::canvas::{Canvas}
-use display::canvas_ext::{canvas_draw_line_aa, canvas_sphere_shaded, canvas_sphere_shaded_fog}
+use display::canvas_ext::{canvas_draw_line_aa, canvas_sphere_shaded, canvas_sphere_shaded_fog,
+                           canvas_bond_cylinder}
 use render::renderer3d::{Camera3D, Vec3f}
 use viz::physchem::{MoleculeViz}
 
@@ -124,6 +125,10 @@ pub fn mol3d_render(
     var pd:  [f64; 64] = [0.0; 64]    // depth (0 = behind camera)
     var prad:[i64; 64] = [0; 64]      // screen radius
     var pvis:[i64; 64] = [0; 64]      // 1 = visible
+    // World-space rotated positions (needed for cylinder bonds)
+    var wx: [f64; 64] = [0.0; 64]
+    var wy: [f64; 64] = [0.0; 64]
+    var wz: [f64; 64] = [0.0; 64]
 
     var i: i64 = 0
     while i < mol.atom_count {
@@ -135,6 +140,10 @@ pub fn mol3d_render(
         let z1 = 0.0 - a.x * sy + a.z * cy
         let y2 = y1 * cx - z1 * sx
         let z2 = y1 * sx + z1 * cx
+
+        wx[i as usize] = x1
+        wy[i as usize] = y2
+        wz[i as usize] = z2
 
         let p = m3_project(x1, y2, z2, cam, c.width, c.height)
         if p.z > 0.0 {
@@ -174,21 +183,34 @@ pub fn mol3d_render(
         ai = ai + 1
     }
 
-    // Draw bonds (behind atoms — paint first)
+    // Draw bonds (behind atoms — paint first).
+    // Use cylinder impostor when the average projected radius ≥ 4px; AA lines otherwise.
+    let bond_r_w: f64 = 0.20   // cylinder radius in Ångströms (typical covalent bond)
     var bi: i64 = 0
     while bi < mol.bond_count {
         let bond = mol.bonds[bi as usize]
         let ia = bond.atom_a
         let ib = bond.atom_b
         if pvis[ia as usize] == 1 && pvis[ib as usize] == 1 {
-            canvas_draw_line_aa(c,
-                px[ia as usize], py[ia as usize],
-                px[ib as usize], py[ib as usize],
-                140, 155, 175)
-            canvas_draw_line_aa(c,
-                px[ia as usize] + 1, py[ia as usize],
-                px[ib as usize] + 1, py[ib as usize],
-                120, 135, 155)
+            let avg_rad = (prad[ia as usize] + prad[ib as usize]) / 2
+            if avg_rad >= 3 {
+                // Full cylinder impostor
+                canvas_bond_cylinder(c,
+                    wx[ia as usize], wy[ia as usize], wz[ia as usize],
+                    wx[ib as usize], wy[ib as usize], wz[ib as usize],
+                    cam.pos_x, cam.pos_y, cam.pos_z, cam.focal,
+                    130, 150, 175, bond_r_w)
+            } else {
+                // Fast AA line for small/distant bonds
+                canvas_draw_line_aa(c,
+                    px[ia as usize], py[ia as usize],
+                    px[ib as usize], py[ib as usize],
+                    140, 155, 175)
+                canvas_draw_line_aa(c,
+                    px[ia as usize] + 1, py[ia as usize],
+                    px[ib as usize] + 1, py[ib as usize],
+                    120, 135, 155)
+            }
         }
         bi = bi + 1
     }

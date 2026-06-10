@@ -360,3 +360,166 @@ pub fn canvas_sphere_shaded(
 ) with Mut, Div {
     canvas_sphere_shaded_inner(c, cx, cy, r, base_r, base_g, base_b, 1.0, 0.0, 0.0, 0.0, 0.0)
 }
+
+// ============================================================
+// Cylinder impostor bond — ray-cylinder intersection per pixel
+// ============================================================
+//
+// Renders a Blinn-Phong-shaded cylinder between two 3D endpoints using
+// per-pixel ray-cylinder intersection.
+//
+// Camera model matches renderer3d.sio:
+//   ray origin  = (cam_px, cam_py, cam_pz)
+//   ray direction for pixel (px, py):
+//     Dx = (px - cw/2) / focal
+//     Dy = -(py - ch/2) / focal
+//     Dz = -1.0  (camera looks toward -Z)
+//
+// Cobb (2024) / Cambridge SMAG quadratic coefficients:
+//   A_unit = normalize(B - A)
+//   Δ = ray_origin - A
+//   a = 1 - (D·A_unit)²
+//   b = 2·[(D·Δ) - (D·A_unit)(A_unit·Δ)]
+//   c = |Δ|² - (A_unit·Δ)² - r_w²
+//
+// r_w = world-space cylinder radius.
+
+fn cyl_dot(ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64) -> f64 {
+    ax * bx + ay * by + az * bz
+}
+
+fn cyl_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g: f64 = 0.6
+    var i: i64 = 0
+    while i < 8 {
+        g = (g + x / g) * 0.5
+        i = i + 1
+    }
+    g
+}
+
+// Shade one cylinder pixel with Blinn-Phong (same constants as sphere).
+fn cyl_shade(base_r: i64, base_g: i64, base_b: i64, nx: f64, ny: f64, nz: f64) -> i64 with Div {
+    let lx: f64 = 0.447; let ly: f64 = 0.0 - 0.632; let lz: f64 = 0.632
+    let hx: f64 = 0.247; let hy: f64 = 0.0 - 0.350; let hz: f64 = 0.903
+    let diffuse = cyl_dot(nx, ny, nz, lx, ly, lz)
+    let d = if diffuse < 0.0 { 0.0 } else { diffuse }
+    let ndoth = cyl_dot(nx, ny, nz, hx, hy, hz)
+    let s = if ndoth < 0.0 { 0.0 } else { ndoth }
+    let s2 = s * s; let s4 = s2 * s2; let s8 = s4 * s4; let s32 = s8 * s8 * s8 * s8
+    let intensity = 0.32 + 0.68 * d
+    let spec = 0.90 * s32
+    let fr = if (base_r as f64 * intensity + 255.0 * spec) > 255.0 { 255 }
+             else { (base_r as f64 * intensity + 255.0 * spec) as i64 }
+    let fg = if (base_g as f64 * intensity + 255.0 * spec) > 255.0 { 255 }
+             else { (base_g as f64 * intensity + 255.0 * spec) as i64 }
+    let fb = if (base_b as f64 * intensity + 255.0 * spec) > 255.0 { 255 }
+             else { (base_b as f64 * intensity + 255.0 * spec) as i64 }
+    fb | (fg << 8) | (fr << 16)
+}
+
+// Render a 3D cylinder bond between world-space points (ax,ay,az) and (bx,by,bz).
+// cam_px/y/z: camera world position.  focal: focal length in pixels.
+// r_w: cylinder radius in world units.
+pub fn canvas_bond_cylinder(
+    c: &!Canvas,
+    ax: f64, ay: f64, az: f64,
+    bx: f64, by: f64, bz: f64,
+    cam_px: f64, cam_py: f64, cam_pz: f64,
+    focal: f64,
+    base_r: i64, base_g: i64, base_b: i64,
+    r_w: f64,
+) with Mut, Div {
+    // Compute axis unit vector A_unit = normalize(B - A)
+    let abx = bx - ax; let aby = by - ay; let abz = bz - az
+    let ab_len = cyl_sqrt(abx * abx + aby * aby + abz * abz)
+    if ab_len < 0.0001 { return }
+    let au_x = abx / ab_len; let au_y = aby / ab_len; let au_z = abz / ab_len
+
+    // Project both endpoints to screen to get bounding rectangle
+    let half_cw: f64 = (c.width as f64) * 0.5
+    let half_ch: f64 = (c.height as f64) * 0.5
+    let rza = az - cam_pz; let rzb = bz - cam_pz
+    if rza >= 0.0 && rzb >= 0.0 { return }
+    let da = if rza < 0.0 { 0.0 - rza } else { 0.001 }
+    let db = if rzb < 0.0 { 0.0 - rzb } else { 0.001 }
+    let sax = ((ax - cam_px) * focal / da + half_cw) as i64
+    let say = ((0.0 - (ay - cam_py)) * focal / da + half_ch) as i64
+    let sbx = ((bx - cam_px) * focal / db + half_cw) as i64
+    let sby = ((0.0 - (by - cam_py)) * focal / db + half_ch) as i64
+
+    // Screen-space radius padding from projected radius (use closer endpoint)
+    let min_depth = if da < db { da } else { db }
+    let scr_pad = (r_w * focal / min_depth) as i64 + 2
+
+    let x_lo = cext_clamp((if sax < sbx { sax } else { sbx }) - scr_pad, 0, c.width - 1)
+    let x_hi = cext_clamp((if sax > sbx { sax } else { sbx }) + scr_pad, 0, c.width - 1)
+    let y_lo = cext_clamp((if say < sby { say } else { sby }) - scr_pad, 0, c.height - 1)
+    let y_hi = cext_clamp((if say > sby { say } else { sby }) + scr_pad, 0, c.height - 1)
+
+    var py = y_lo
+    while py <= y_hi {
+        var px = x_lo
+        while px <= x_hi {
+            // Ray direction (unnormalized): camera → pixel
+            let dx_u = ((px as f64) - half_cw) / focal
+            let dy_u = 0.0 - ((py as f64) - half_ch) / focal
+            let dz_u: f64 = 0.0 - 1.0
+            let d_len = cyl_sqrt(dx_u * dx_u + dy_u * dy_u + dz_u * dz_u)
+            let dx = dx_u / d_len; let dy = dy_u / d_len; let dz = dz_u / d_len
+
+            // Δ = ray_origin - A
+            let del_x = cam_px - ax; let del_y = cam_py - ay; let del_z = cam_pz - az
+
+            let d_dot_au  = cyl_dot(dx, dy, dz, au_x, au_y, au_z)
+            let del_dot_au = cyl_dot(del_x, del_y, del_z, au_x, au_y, au_z)
+
+            let ca = 1.0 - d_dot_au * d_dot_au
+            if ca < 0.0001 {
+                px = px + 1
+                continue   // ray parallel to cylinder axis
+            }
+            let cb = 2.0 * (cyl_dot(dx, dy, dz, del_x, del_y, del_z) - d_dot_au * del_dot_au)
+            let cc = cyl_dot(del_x, del_y, del_z, del_x, del_y, del_z) - del_dot_au * del_dot_au - r_w * r_w
+
+            let disc = cb * cb - 4.0 * ca * cc
+            if disc < 0.0 {
+                px = px + 1
+                continue
+            }
+
+            let t = (0.0 - cb - cyl_sqrt(disc)) / (2.0 * ca)
+            if t <= 0.0 {
+                px = px + 1
+                continue
+            }
+
+            // Hit point
+            let hx_p = cam_px + t * dx
+            let hy_p = cam_py + t * dy
+            let hz_p = cam_pz + t * dz
+
+            // Clamp to finite segment: 0 ≤ (hit−A)·A_unit ≤ L
+            let ha_x = hx_p - ax; let ha_y = hy_p - ay; let ha_z = hz_p - az
+            let proj = cyl_dot(ha_x, ha_y, ha_z, au_x, au_y, au_z)
+            if proj < 0.0 || proj > ab_len {
+                px = px + 1
+                continue
+            }
+
+            // Normal = (hit − closest_point_on_axis) / r_w
+            let cp_x = ax + proj * au_x; let cp_y = ay + proj * au_y; let cp_z = az + proj * au_z
+            let nx = (hx_p - cp_x) / r_w
+            let ny = (hy_p - cp_y) / r_w
+            let nz = (hz_p - cp_z) / r_w
+
+            let color = cyl_shade(base_r, base_g, base_b, nx, ny, nz)
+            let idx = py * c.width + px
+            write_i64(c.pixels, idx, color)
+
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
