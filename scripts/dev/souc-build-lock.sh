@@ -32,13 +32,26 @@ if [ "$#" -eq 0 ]; then
   exit 64
 fi
 
-# OOM guard: when not inside a SLURM job, cap virtual memory at 40 GB so a
-# runaway build dies with ENOMEM instead of OOMKilling the workspace container.
-# Heavy self-host builds (main.sio full-IR, --native-compile) must go via SLURM
-# (sbatch on cpu-ops partition) where memory is provisioned correctly.
+# OOM guard — two layers when not inside a SLURM job:
+#
+# 1. HARD BLOCK: main.sio full-self-host builds and --native-*-compile modes peak
+#    at 26+ GB RSS and will OOM-kill or evict the workspace container. These must
+#    run under SLURM (cpu-ops partition, --mem bound). Block them here so they
+#    fail immediately with a clear message rather than silently growing to 26+ GB.
+#
+# 2. SOFT CAP: all other local builds are capped at 12 GiB virtual memory so any
+#    unexpectedly large build dies with ENOMEM instead of OOMKilling the container.
 if [ -z "${SLURM_JOB_ID:-}" ]; then
-  ulimit -v 41943040  # 40 GiB in KiB
-  echo "[souc-build-lock] NOT in SLURM — virtual-memory cap 40 GiB applied. For builds that need >40 GiB, use the SLURM submit script." >&2
+  for _arg in "$@"; do
+    case "${_arg}" in
+      *main.sio|--native-compile|--native-v2-compile)
+        echo "[souc-build-lock] BLOCKED: '${_arg}' peaks at 26+ GB RSS — must run via SLURM." >&2
+        echo "[souc-build-lock] Use: WORKTREE=/workspace/sounio-ir bash slurm-jobs/ir-heap-indirect/submit-v2test.sh" >&2
+        exit 1
+        ;;
+    esac
+  done
+  ulimit -v 12582912  # 12 GiB in KiB — safe cap for non-SLURM local builds
 fi
 
 LOCK="${SOUNIO_BUILD_LOCK:-/tmp/sounio-souc-build.lock}"
