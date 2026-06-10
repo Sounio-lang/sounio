@@ -7,11 +7,15 @@ module parser::mod
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_new, parser_reset_last_errors, parser_set_last_errors}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_new, parser_reset_last_errors, parser_set_last_errors, pt_read_line, pt_read_kind_code}
 use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
 use parser::items::*
+
+// NV2 bridge crash-localization: 1-byte sentinel buffer for write_file stage markers
+// (print is block-buffered and lost on SIGSEGV; write_file flushes immediately).
+var NV2DBG_PARSE_BUF: [i8; 1] = [0; 1]
 
 fn parse_program_loop(mut_p: Parser) -> Program with Mut, IO, Panic, Div, Alloc {
     var p = mut_p
@@ -69,14 +73,30 @@ fn parse_items_loop(mut_p: Parser) -> Option<Box<ItemList>> with Mut, IO, Panic,
         while tk_is_doc_comment(parser_peek(p)) { p = p.advance() }
         if parser_at_eof(p) { break }
         let before_pos = p.pos
+        let before_err = p.error_count
         let result = p.parse_item()
         let p2 = result.0
         let item = result.1
+        if p2.error_count > before_err {
+            // NV2 bridge diagnostic: a top-level item produced parse error(s). Log the
+            // combined-file source line + leading token-kind code so the offending
+            // construct can be mapped back. Clean RC=1 flushes these prints.
+            print("ITEMERR cline=")
+            print_int(pt_read_line(before_pos))
+            print(" tok=")
+            print_int(pt_read_kind_code(before_pos))
+            print(" derr=")
+            print_int(p2.error_count - before_err)
+            print("\n")
+        }
         if p2.pos <= before_pos { p = p2.advance() } else { p = p2 }
         rev_items_opt = Some(Box::new(ItemList { head: item, tail: rev_items_opt }))
     }
     parser_set_last_errors(p.had_error, p.error_count)
-    reverse_item_list_opt(rev_items_opt)
+    write_file("/tmp/nv2dbg_beforereverse", &! NV2DBG_PARSE_BUF, 1)
+    let reversed = reverse_item_list_opt(rev_items_opt)
+    write_file("/tmp/nv2dbg_afterreverse", &! NV2DBG_PARSE_BUF, 1)
+    reversed
 }
 
 pub fn parse_items_preloaded(token_count: i64) -> Option<Box<ItemList>> with Mut, IO, Panic, Div, Alloc {
@@ -108,20 +128,25 @@ fn count_item_list(list: ItemList) -> i64 {
 // Internal list helpers
 // ============================================================
 
+// ITERATIVE reverse (was recursive `reverse_item_list_loop`): at flat-combine scale
+// the item list is ~6000+ nodes, and the recursive form is NOT tail-call-optimized by
+// this compiler, so it built one stack frame per item (each materializing `head: Item`
+// by value) -> stack overflow / SIGSEGV. The while-loop form allocates a fresh reversed
+// node per item exactly like before (same heap cost) but uses O(1) stack. NB: stays
+// ALLOCATE-NEW (Box::new per node), NOT in-place `(*node).tail = acc` deref-store —
+// that would reintroduce the c634b38f deref-store-through-Box miscompile class.
 fn reverse_item_list_opt(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
-    reverse_item_list_loop(items, None)
-}
-
-fn reverse_item_list_loop(
-    current: Option<Box<ItemList>>,
-    acc: Option<Box<ItemList>>,
-) -> Option<Box<ItemList>> with Mut, Alloc {
-    match current {
-        None => acc,
-        Some(node) => {
-            let next = (*node).tail
-            let rev_node = ItemList { head: (*node).head, tail: acc }
-            reverse_item_list_loop(next, Some(Box::new(rev_node)))
-        },
+    var current = items
+    var acc: Option<Box<ItemList>> = None
+    while true {
+        match current {
+            None => break,
+            Some(node) => {
+                let next = (*node).tail
+                acc = Some(Box::new(ItemList { head: (*node).head, tail: acc }))
+                current = next
+            },
+        }
     }
+    acc
 }

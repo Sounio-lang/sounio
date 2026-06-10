@@ -3228,6 +3228,55 @@ fn module_frontend_line_is_use(data: string, ls: i64, le: i64) -> bool {
     data[(p + 6) as usize] == (32 as i8)
 }
 
+// Detect a path-style module/submodule declaration line: `module ir::lower` or
+// `mod cli;`. In the combined flat file these headers are meaningless (everything is
+// one self-contained module), and — because the lexer emits no Newline tokens — a
+// surviving `module NAME` header makes parse_module_item swallow the ENTIRE rest of
+// the file into one discarded ItemUnit (0 items -> fn_count=0). So they MUST be
+// stripped exactly like `use` lines.
+//
+// CRITICAL: `module` is a DEMOTED soft keyword on this branch, so `module = expr` is a
+// valid assignment (real lines exist, e.g. `module = module_frontend_lower_items_into(...)`).
+// To strip ONLY declarations, require an identifier-start char (letter or `_`) after the
+// `module `/`mod ` keyword — that is present in `module ir::lower` but NOT in `module = x`.
+// This also rejects `module_state` / `mode` / `modular` (no space after the keyword).
+fn module_frontend_line_is_module_decl(data: string, ls: i64, le: i64) -> bool {
+    var p = ls
+    while p < le && (data[p as usize] == (32 as i8) || data[p as usize] == (9 as i8)) {
+        p = p + 1
+    }
+    var q: i64 = 0 - 1
+    // "module " (m o d u l e <space>)
+    if le - p >= 7 &&
+       data[p as usize] == (109 as i8) &&
+       data[(p + 1) as usize] == (111 as i8) &&
+       data[(p + 2) as usize] == (100 as i8) &&
+       data[(p + 3) as usize] == (117 as i8) &&
+       data[(p + 4) as usize] == (108 as i8) &&
+       data[(p + 5) as usize] == (101 as i8) &&
+       data[(p + 6) as usize] == (32 as i8) {
+        q = p + 7
+    }
+    // "mod " (m o d <space>)
+    if q < 0 && le - p >= 4 &&
+       data[p as usize] == (109 as i8) &&
+       data[(p + 1) as usize] == (111 as i8) &&
+       data[(p + 2) as usize] == (100 as i8) &&
+       data[(p + 3) as usize] == (32 as i8) {
+        q = p + 4
+    }
+    if q < 0 { return false }
+    // skip any further whitespace, then require an identifier-start char (A-Za-z_)
+    while q < le && (data[q as usize] == (32 as i8) || data[q as usize] == (9 as i8)) {
+        q = q + 1
+    }
+    if q >= le { return false }
+    let c = data[q as usize]
+    (c >= (65 as i8) && c <= (90 as i8)) ||
+    (c >= (97 as i8) && c <= (122 as i8)) ||
+    (c == (95 as i8))
+}
+
 // Append one file's text to MODULE_FRONTEND_COMBINE_BUF, dropping any `use ...` line
 // (the imported bodies are concatenated in, so the path-based imports are redundant;
 // keeping them is harmless but stripping keeps the combined module self-contained).
@@ -3236,11 +3285,38 @@ fn module_frontend_combine_append_file(path: string) with IO, Mut, Panic, Div {
     if size <= 0 { return }
     let data = module_frontend_cached_read_file(path)
     var i: i64 = 0
+    // skip_use_depth > 0 while inside a MULTI-LINE `use ...::{ \n name, \n ... \n }` block.
+    // The `use`-strip is line-based, so without this the opening `use ...::{` is dropped but
+    // the member lines + closing `}` survive as orphaned garbage -> parse errors. Track brace
+    // depth across use lines and skip the whole block.
+    var skip_use_depth: i64 = 0
     while i < size {
         // find end of this line
         var le = i
         while le < size && data[le as usize] != (10 as i8) { le = le + 1 }
-        if !module_frontend_line_is_use(data, i, le) {
+        let is_use_line = module_frontend_line_is_use(data, i, le)
+        var skip_line = false
+        if skip_use_depth > 0 {
+            skip_line = true
+        } else if is_use_line {
+            skip_line = true
+        } else if module_frontend_line_is_module_decl(data, i, le) {
+            skip_line = true
+        }
+        // Update use-block brace depth from this line's net { vs } — but only when this line is
+        // itself a use line or a continuation of an open use block (never for ordinary code, so
+        // `impl X {` etc. can't trigger skipping).
+        if skip_use_depth > 0 || is_use_line {
+            var bp = i
+            while bp < le {
+                let bc = data[bp as usize]
+                if bc == (123 as i8) { skip_use_depth = skip_use_depth + 1 }
+                if bc == (125 as i8) { skip_use_depth = skip_use_depth - 1 }
+                bp = bp + 1
+            }
+            if skip_use_depth < 0 { skip_use_depth = 0 }
+        }
+        if !skip_line {
             var j = i
             while j < le {
                 if MODULE_FRONTEND_COMBINE_LEN < 33554432 {
@@ -3411,6 +3487,13 @@ pub fn bridge_lower_single_module_box(main_path: string, trace: &! LoadMultimodu
     let epistemic = ir_empty_epistemic_section()
     let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&prog_lower, epistemic)
     write_file("/tmp/nv2dbg_summary", &! NV2DBG_BUF, 1)
+    print("NV2DBG_SUMMARY had_err=")
+    print(summary_result.had_error)
+    print(" err_cnt=")
+    print_int(summary_result.error_count)
+    print(" fn=")
+    print_int((*(*summary_result.summary).module).fn_count)
+    print("\n")
     if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
         return module_frontend_lower_box_error("ir_summary_failed")
     }
