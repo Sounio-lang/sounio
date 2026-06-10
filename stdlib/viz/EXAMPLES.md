@@ -176,6 +176,38 @@ VIZ_EVENT_REDUCER_PASS
 
 The test feeds `display::event::Event` values into `viz_scene_handle_event`, proving that mouse press/motion/release and keyboard arrows/space update the Sounio Visual IR state directly.
 
+## Identity, Focus, And Dump Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_identity_focus_dump.sio
+```
+
+Expected output includes:
+
+```text
+VIZ_IDENTITY_FOCUS_DUMP_PASS
+```
+
+The test proves scene-local node IDs, `parent_id`, app-owned tags, focus next/previous traversal, focused activation, keyboard fallback to the focused control, and deterministic `viz_scene_dump` output.
+
+## Renderer3D Edge Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_renderer3d_edges.sio
+```
+
+Expected output:
+
+```text
+VIZ_RENDERER3D_EDGES_PASS
+```
+
+The test renders one software 3D triangle into a headless Canvas and checks both filled face pixels and antialiased edge-line pixels.
+
 ## App Frame Proof
 
 Run:

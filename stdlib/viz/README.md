@@ -17,6 +17,7 @@ Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattic
 ## V1 Constraints
 
 - Fixed node/data arrays; no heap-heavy scene graph.
+- Nodes receive stable scene-local `id` values, optional `parent_id`, and an integer `tag` for application-owned identity.
 - Fixed rectangles plus a simple row/column layout pass over contiguous node ranges; no flexbox.
 - CPU Canvas is the primary renderer.
 - HTML/SVG is static export only. It serializes Visual IR geometry and simple glyphs; no JavaScript owns model state.
@@ -26,8 +27,11 @@ Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattic
 - Spectra keep their Sounio `SpectrumViz` payload and mirror wavelength/intensity/variance into renderer-friendly spectrum slots.
 - Chart builders cover line, scatter, bar, heatmap, uncertainty band, forest plot, and waterfall nodes over the shared Visual IR.
 - Scene time, selected node, hovered node, active tabs, and toggle values are Sounio state that renderers display.
+- Focused node state is Sounio data. `viz_scene_focus_next`, `viz_scene_focus_prev`, and `viz_scene_activate_focused` provide deterministic keyboard-style navigation for controls.
+- `viz_scene_dump` emits deterministic node/data counts plus per-node identity, parent, tag, kind, data slot, and rectangle fields for debugging and CI proof logs.
 - Labels and text controls use fixed `[i8; 64]` buffers in the Visual IR. Canvas renders them with `display::font`; HTML/SVG escapes XML-sensitive ASCII before export.
 - Native frontend builders cover button, slider, toggle, tabs, legend, tooltip, text viewport, and plot viewport nodes over the same control reducer machinery.
 - `display::event::Event` can be reduced directly into `VizScene` for headless tests and future native window loops.
 - Native windows are an optional layer over the same app runner; CI proofs stay headless.
+- `render::renderer3d` remains a CPU Canvas renderer. Its v1.1 path adds Blinn-Phong specular shading and antialiased triangle edge lines while keeping 3D scene meaning in Sounio data.
 - GPU rendering is deferred until general compiler GPU backend wiring is ready.

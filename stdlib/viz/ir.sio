@@ -62,6 +62,9 @@ pub struct VizLayout {
 }
 
 pub struct VizNode {
+    pub id: i64,
+    pub parent_id: i64,
+    pub tag: i64,
     pub kind: i64,
     pub parent: i64,
     pub first_child: i64,
@@ -157,6 +160,8 @@ pub struct VizScene {
     pub mesh_count: i64,
     pub selected_node: i64,
     pub hovered_node: i64,
+    pub focused_node: i64,
+    pub next_node_id: i64,
     pub active_tab: i64,
     pub time: f64,
 }
@@ -183,6 +188,7 @@ fn viz_layout_nonneg(v: i64) -> i64 {
 
 pub fn viz_node_empty() -> VizNode {
     VizNode {
+        id: 0, parent_id: 0 - 1, tag: 0,
         kind: VIZ_NODE_EMPTY, parent: 0, first_child: 0, next_sibling: 0,
         style: viz_style_rgb(220, 220, 220),
         layout: viz_layout_rect(0, 0, 0, 0),
@@ -268,6 +274,8 @@ pub fn viz_scene_new() -> VizScene {
         mesh_count: 0,
         selected_node: 0 - 1,
         hovered_node: 0 - 1,
+        focused_node: 0 - 1,
+        next_node_id: 1,
         active_tab: 0,
         time: 0.0,
     }
@@ -278,11 +286,43 @@ pub fn viz_scene_add_node(scene: &!VizScene, kind: i64, layout: VizLayout, style
     let idx = scene.node_count
     scene.nodes[idx as usize] = viz_node_empty()
     scene.nodes[idx as usize].kind = kind
+    scene.nodes[idx as usize].id = scene.next_node_id
+    scene.next_node_id = scene.next_node_id + 1
     scene.nodes[idx as usize].layout = layout
     scene.nodes[idx as usize].style = style
     scene.nodes[idx as usize].data_slot = data_slot
     scene.node_count = scene.node_count + 1
     idx
+}
+
+pub fn viz_node_id(scene: &VizScene, node_idx: i64) -> i64 {
+    if node_idx < 0 || node_idx >= scene.node_count { return 0 - 1 }
+    scene.nodes[node_idx as usize].id
+}
+
+pub fn viz_scene_find_node(scene: &VizScene, id: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while i < scene.node_count {
+        if scene.nodes[i as usize].id == id { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+pub fn viz_scene_set_tag(scene: &!VizScene, node_idx: i64, tag: i64) with Mut {
+    if node_idx < 0 || node_idx >= scene.node_count { return }
+    scene.nodes[node_idx as usize].tag = tag
+}
+
+pub fn viz_scene_set_parent(scene: &!VizScene, node_idx: i64, parent_idx: i64) with Mut {
+    if node_idx < 0 || node_idx >= scene.node_count { return }
+    if parent_idx < 0 || parent_idx >= scene.node_count {
+        scene.nodes[node_idx as usize].parent = 0 - 1
+        scene.nodes[node_idx as usize].parent_id = 0 - 1
+        return
+    }
+    scene.nodes[node_idx as usize].parent = parent_idx
+    scene.nodes[node_idx as usize].parent_id = scene.nodes[parent_idx as usize].id
 }
 
 pub fn viz_scene_add_series(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], vars: &[f64; 1024], n: i64) -> i64 with Mut {
@@ -621,6 +661,151 @@ pub fn viz_scene_set_time(scene: &!VizScene, t: f64) with Mut {
     scene.time = t
 }
 
+fn viz_node_is_focusable_kind(node: VizNode) -> bool {
+    if node.kind != VIZ_NODE_CONTROL { return false }
+    if node.data_slot == VIZ_CONTROL_BUTTON { return true }
+    if node.data_slot == VIZ_CONTROL_SLIDER { return true }
+    if node.data_slot == VIZ_CONTROL_TOGGLE { return true }
+    if node.data_slot == VIZ_CONTROL_TABS { return true }
+    if node.data_slot == VIZ_CONTROL_VIEWPORT { return true }
+    return false
+}
+
+fn viz_scene_is_focusable_node(scene: &VizScene, node_idx: i64) -> bool {
+    if node_idx < 0 || node_idx >= scene.node_count { return false }
+    return viz_node_is_focusable_kind(scene.nodes[node_idx as usize])
+}
+
+fn viz_scene_focus_set(scene: &!VizScene, node_idx: i64) with Mut {
+    if node_idx < 0 || node_idx >= scene.node_count {
+        scene.focused_node = 0 - 1
+        return
+    }
+    scene.focused_node = node_idx
+}
+
+pub fn viz_scene_focus_next(scene: &!VizScene) -> i64 with Mut {
+    if scene.node_count <= 0 {
+        scene.focused_node = 0 - 1
+        return 0 - 1
+    }
+    var start = scene.focused_node + 1
+    if start < 0 || start >= scene.node_count { start = 0 }
+    var step: i64 = 0
+    while step < scene.node_count {
+        let idx = (start + step) % scene.node_count
+        if viz_scene_is_focusable_node(scene, idx) {
+            viz_scene_focus_set(scene, idx)
+            return idx
+        }
+        step = step + 1
+    }
+    scene.focused_node = 0 - 1
+    return 0 - 1
+}
+
+pub fn viz_scene_focus_prev(scene: &!VizScene) -> i64 with Mut {
+    if scene.node_count <= 0 {
+        scene.focused_node = 0 - 1
+        return 0 - 1
+    }
+    var start = scene.focused_node - 1
+    if start < 0 || start >= scene.node_count { start = scene.node_count - 1 }
+    var step: i64 = 0
+    while step < scene.node_count {
+        var idx = start - step
+        while idx < 0 { idx = idx + scene.node_count }
+        if viz_scene_is_focusable_node(scene, idx) {
+            viz_scene_focus_set(scene, idx)
+            return idx
+        }
+        step = step + 1
+    }
+    scene.focused_node = 0 - 1
+    return 0 - 1
+}
+
+pub fn viz_scene_activate_focused(scene: &!VizScene) -> bool with Mut, Div {
+    let idx = scene.focused_node
+    if idx < 0 || idx >= scene.node_count { return false }
+    let node = scene.nodes[idx as usize]
+    if !viz_node_is_focusable_kind(node) { return false }
+    scene.selected_node = idx
+    var i: i64 = 0
+    while i < scene.node_count {
+        scene.nodes[i as usize].selected = i == idx
+        i = i + 1
+    }
+    if node.data_slot == VIZ_CONTROL_TOGGLE {
+        viz_scene_toggle(scene, idx)
+    } else if node.data_slot == VIZ_CONTROL_TABS {
+        viz_scene_step_tab_key(scene, idx, 1)
+    }
+    return true
+}
+
+fn viz_print_i64(n: i64) with IO, Mut, Div {
+    if n == 0 { print("0"); return }
+    var v = n
+    if v < 0 { print("-"); v = 0 - v }
+    var digits: [i64; 20] = [0; 20]
+    var len: i64 = 0
+    while v > 0 {
+        digits[len as usize] = v - (v / 10) * 10
+        v = v / 10
+        len = len + 1
+    }
+    var i = len - 1
+    while i >= 0 {
+        let d = digits[i as usize]
+        if d == 0 { print("0") }
+        if d == 1 { print("1") }
+        if d == 2 { print("2") }
+        if d == 3 { print("3") }
+        if d == 4 { print("4") }
+        if d == 5 { print("5") }
+        if d == 6 { print("6") }
+        if d == 7 { print("7") }
+        if d == 8 { print("8") }
+        if d == 9 { print("9") }
+        i = i - 1
+    }
+}
+
+fn viz_dump_node(scene: &VizScene, idx: i64) with IO, Mut, Div {
+    let n = scene.nodes[idx as usize]
+    print("node idx="); viz_print_i64(idx)
+    print(" id="); viz_print_i64(n.id)
+    print(" parent_id="); viz_print_i64(n.parent_id)
+    print(" tag="); viz_print_i64(n.tag)
+    print(" kind="); viz_print_i64(n.kind)
+    print(" slot="); viz_print_i64(n.data_slot)
+    print(" rect="); viz_print_i64(n.layout.x); print(","); viz_print_i64(n.layout.y)
+    print(","); viz_print_i64(n.layout.w); print(","); viz_print_i64(n.layout.h)
+    println("")
+}
+
+pub fn viz_scene_dump(scene: &VizScene) with IO, Mut, Div {
+    print("VizScene nodes="); viz_print_i64(scene.node_count)
+    print(" selected="); viz_print_i64(scene.selected_node)
+    print(" hovered="); viz_print_i64(scene.hovered_node)
+    print(" focused="); viz_print_i64(scene.focused_node)
+    print(" series="); viz_print_i64(scene.series_count)
+    print(" heatmaps="); viz_print_i64(scene.heatmap_count)
+    print(" molecules="); viz_print_i64(scene.molecule_count)
+    print(" fields="); viz_print_i64(scene.field_count)
+    print(" vectors="); viz_print_i64(scene.vector_field_count)
+    print(" trajectories="); viz_print_i64(scene.trajectory_count)
+    print(" spectra="); viz_print_i64(scene.spectrum_count)
+    print(" meshes="); viz_print_i64(scene.mesh_count)
+    println("")
+    var i: i64 = 0
+    while i < scene.node_count {
+        viz_dump_node(scene, i)
+        i = i + 1
+    }
+}
+
 pub fn viz_scene_apply_layout_range(scene: &!VizScene, first_idx: i64, count: i64, layout: VizLayout) with Mut {
     if count <= 0 { return }
     if first_idx < 0 || first_idx >= scene.node_count { return }
@@ -750,6 +935,9 @@ pub fn viz_scene_hit_test(scene: &VizScene, px: i64, py: i64) -> i64 with Mut {
 pub fn viz_scene_pointer_down(scene: &!VizScene, px: i64, py: i64) -> i64 with Mut, Div {
     let idx = viz_scene_hit_test(scene, px, py)
     scene.selected_node = idx
+    if idx >= 0 && idx < scene.node_count && viz_scene_is_focusable_node(scene, idx) {
+        scene.focused_node = idx
+    }
     var i: i64 = 0
     while i < scene.node_count {
         scene.nodes[i as usize].selected = i == idx
@@ -821,6 +1009,9 @@ pub fn viz_scene_key_press(scene: &!VizScene, key: i64) -> bool with Mut {
     var idx = scene.selected_node
     if idx < 0 || idx >= scene.node_count {
         idx = scene.hovered_node
+    }
+    if idx < 0 || idx >= scene.node_count {
+        idx = scene.focused_node
     }
     if idx < 0 || idx >= scene.node_count {
         return false
