@@ -31,6 +31,12 @@ pub struct Light3D {
     pub ambient: f64,                        // ambient coefficient [0,1]
 }
 
+// Linear depth fog: blends shaded colour toward a background colour over [near, far] depth range.
+pub struct FogParams {
+    pub near: f64, pub far: f64,
+    pub r: i64, pub g: i64, pub b: i64,
+}
+
 // A triangle in world/view space.
 // v0/v1/v2 are (x,y,z) positions; nx/ny/nz is the face normal (unit length).
 // base_r/g/b is the material diffuse colour.
@@ -226,6 +232,12 @@ fn r3d_rasterize_tri(
     }
 }
 
+fn r3d_fog_factor(depth: f64, fog: &FogParams) -> f64 with Div {
+    if fog.far == fog.near { return 0.0 }
+    let f = (depth - fog.near) / (fog.far - fog.near)
+    if f < 0.0 { 0.0 } else if f > 1.0 { 1.0 } else { f }
+}
+
 // Gouraud rasterize — per-vertex colours c0/c1/c2, each Vec3f{x=R,y=G,z=B} in [0,255].
 // Barycentric interpolation gives smooth shading gradients within the face.
 pub fn r3d_rasterize_tri_gouraud(
@@ -272,6 +284,72 @@ pub fn r3d_rasterize_tri_gouraud(
                     let pr = r3d_clamp_i(fr as i64, 0, 255)
                     let pg = r3d_clamp_i(fg as i64, 0, 255)
                     let pb = r3d_clamp_i(fb as i64, 0, 255)
+                    write_i64(cv.pixels, idx, pb | (pg << 8) | (pr << 16))
+                }
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// Phong rasterize — interpolates vertex normals per-pixel, shades with Blinn-Phong, applies
+// linear depth fog. Produces sharper highlights than Gouraud at the cost of ~10 extra ops/px.
+pub fn r3d_rasterize_tri_phong(
+    sx0: i64, sy0: i64,
+    sx1: i64, sy1: i64,
+    sx2: i64, sy2: i64,
+    d0: f64, d1: f64, d2: f64,
+    n0: Vec3f, n1: Vec3f, n2: Vec3f,
+    base_r: i64, base_g: i64, base_b: i64,
+    fog: &FogParams,
+    light: &Light3D,
+    depth_buf: *mut i64,
+    cv: &!Canvas,
+) with Mut, Div {
+    let area = r3d_edge(sx0, sy0, sx1, sy1, sx2, sy2)
+    if area == 0 { return }
+    let min_x = r3d_clamp_i(r3d_min_i(r3d_min_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let max_x = r3d_clamp_i(r3d_max_i(r3d_max_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let min_y = r3d_clamp_i(r3d_min_i(r3d_min_i(sy0, sy1), sy2), 0, cv.height - 1)
+    let max_y = r3d_clamp_i(r3d_max_i(r3d_max_i(sy0, sy1), sy2), 0, cv.height - 1)
+    var py = min_y
+    while py <= max_y {
+        var px = min_x
+        while px <= max_x {
+            let w0 = r3d_edge(sx1, sy1, sx2, sy2, px, py)
+            let w1 = r3d_edge(sx2, sy2, sx0, sy0, px, py)
+            let w2 = r3d_edge(sx0, sy0, sx1, sy1, px, py)
+            let inside = if area > 0 {
+                w0 >= 0 && w1 >= 0 && w2 >= 0
+            } else {
+                w0 <= 0 && w1 <= 0 && w2 <= 0
+            }
+            if inside {
+                let idx = py * cv.width + px
+                let area_f = area as f64
+                let bw0 = (w0 as f64) / area_f
+                let bw1 = (w1 as f64) / area_f
+                let bw2 = (w2 as f64) / area_f
+                let depth = bw0 * d0 + bw1 * d1 + bw2 * d2
+                let stored = read_i64(depth_buf, idx)
+                let dbits = depth as i64
+                if dbits < stored {
+                    write_i64(depth_buf, idx, dbits)
+                    // Per-pixel normal interpolation + Blinn-Phong
+                    let ni_x = bw0 * n0.x + bw1 * n1.x + bw2 * n2.x
+                    let ni_y = bw0 * n0.y + bw1 * n1.y + bw2 * n2.y
+                    let ni_z = bw0 * n0.z + bw1 * n1.z + bw2 * n2.z
+                    let col = r3d_shade(base_r, base_g, base_b, ni_x, ni_y, ni_z, light)
+                    // Linear depth fog
+                    let ff = r3d_fog_factor(depth, fog)
+                    let one_ff = 1.0 - ff
+                    let out_r = col.x * one_ff + (fog.r as f64) * ff
+                    let out_g = col.y * one_ff + (fog.g as f64) * ff
+                    let out_b = col.z * one_ff + (fog.b as f64) * ff
+                    let pr = r3d_clamp_i(out_r as i64, 0, 255)
+                    let pg = r3d_clamp_i(out_g as i64, 0, 255)
+                    let pb = r3d_clamp_i(out_b as i64, 0, 255)
                     write_i64(cv.pixels, idx, pb | (pg << 8) | (pr << 16))
                 }
             }
