@@ -1,0 +1,48 @@
+// stdlib/epistemic/propagate_nonassoc.sio — non-associative structural variance
+//
+// Lives in its own module (rather than epistemic::propagate) so it parses and
+// builds independently of propagate.sio, whose generic higher-order functions
+// (`fn f<F>(...) where F: fn(...)`) the toolchain is migrating to fn-pointer
+// params.
+//
+// When a scalar observable is computed through a product of non-associative
+// quantities (octonions, sedenions), the *order* of multiplication is not free:
+// (a·b)·c ≠ a·(b·c). That order-indeterminacy is a genuine, structural
+// uncertainty on the result — distinct from measurement variance — and the
+// associator [a,b,c] = (a·b)·c − a·(b·c) measures it exactly.
+//
+// This is the join of the two theses the language is built on: non-associativity
+// is not merely *blocked* at the optimizer (the Fano reassociation gate in
+// ir/egraph.sio) — it *feeds* the uncertainty budget here. Certainty about
+// evaluation order is something you must earn (an associative / Fano triple,
+// where ‖α‖² = 0), not something assumed for convenience:
+//
+//   Var_total = Var_GUM + κ·‖[a,b,c]‖²
+//
+// The associator coupling itself is the verified primitive in
+// algebra::associator_field (window 7); this makes it a first-class propagation
+// rule rather than a manual, opt-in call.
+
+use algebra::associator_field::{assoc_field_octonion, af_augmented_variance}
+use epistemic::knowledge::Epistemic
+
+// Augment a scalar observable's variance with the order-indeterminacy of the
+// non-associative octonion triple (a,b,c) it was computed through. `base.val` is
+// unchanged (the structural term is uncertainty, not a bias); confidence passes
+// through, since the order-ambiguity is expressed in the variance channel per the
+// GUM-augmentation model — not double-counted as a confidence penalty. Variance
+// is clamped ≥ 0 (guards κ<0 / FP drift), consistent with sum_correlated /
+// product_correlated in epistemic::propagate.
+pub fn product_nonassoc(
+    base: Epistemic,
+    a: &[f64; 8], b: &[f64; 8], c: &[f64; 8],
+    kappa: f64,
+) -> Epistemic with Mut, Div, Panic, NonAssoc {
+    let field = assoc_field_octonion(a, b, c, kappa)
+    let total = af_augmented_variance(base.variance, &field)
+    Epistemic {
+        val: base.val,
+        variance: if total < 0.0 { 0.0 } else { total },
+        confidence: base.confidence,
+    }
+}
