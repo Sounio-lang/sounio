@@ -41,7 +41,7 @@ wait \${GPID}; V2RC=\$?
   echo "V2_COMPILE_RC=\${V2RC}  (0=ok, 137=OOM, 139=SIGSEGV)"
   echo "PEAK_HWM_MB=\$((PEAK/1024))"
   echo "v2.elf size: \$(stat -c%s "\${ROOT}/v2.elf" 2>/dev/null || echo 0)"
-  echo "--- front-half: Merged IR / errors ---"; grep -iE "Merged IR:|error|fail|summary|successful|parse" "\${RES}/v2.log" | head -12
+  echo "--- front-half: Merged IR / errors ---"; grep -iE "NV2DBG|Merged IR:|error|fail|successful|REJECT" "\${RES}/v2.log" | head -12
   if [ -s "\${ROOT}/v2.elf" ]; then
     chmod +x "\${ROOT}/v2.elf"
     echo "--- DOES v2.elf RUN? (the residual-2 disambiguator) ---"
