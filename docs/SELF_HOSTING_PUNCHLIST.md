@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.self-hosting-punchlist
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.self-hosting-punchlist
+-->
+
 # Madáres self-hosting punch-list (2026-06-05)
 
 Goal: make `--native-v2-compile` handle the **whole language**, so Madáres can compile

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.seven-crashes-diagnosed-2026-06-02
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.seven-crashes-diagnosed-2026-06-02
+-->
+
 # Seven Crashes Diagnosed — modular corpus under g1 / *mut / move-codegen (2026-06-02)
 
 **Scope.** Census + adversarial classification of SIGSEGV (rc=139) failures when running the modular/move-codegen compiler (`mc.elf` built from the g1/move-codegen tree) over the `tests/run-pass` corpus (and related). Work reduced an initial large crash frontier (tens of rc=139 under the checker) via collectors and *mut-spine migrations. After shippable changes, **7 crashers remained**; they were clustered for routing.

@@ -2,8 +2,8 @@
 topic_id: website.docs.epistemic
 authority: dual
 audience: users
-last_validated: 2026-06-07
-validated_by: Codex
+last_validated: 2026-03-07
+validated_by: A3
 source_of_truth: docs/governance/topic-registry.v1.json#website.docs.epistemic
 -->
 

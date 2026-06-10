@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.release-packaging-e2e-2026-06-07
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.release-packaging-e2e-2026-06-07
+-->
+
 # `scripts/release.sh` — end-to-end packaging test (2026-06-07)
 
 Scope: build the distributable tarball, install it into a clean temp dir, and

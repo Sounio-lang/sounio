@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.modular-corpus-crash-census-2026-06-01
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.modular-corpus-crash-census-2026-06-01
+-->
+
 # Modular `--check` corpus census — g1 tip `ddc7a8b7e` (2026-06-01)
 
 **Read-only diagnostic. No source edited.** Empirical per-program inventory of the

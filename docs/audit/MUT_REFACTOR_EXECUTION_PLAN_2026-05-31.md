@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.mut-refactor-execution-plan-2026-05-31
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.mut-refactor-execution-plan-2026-05-31
+-->
+
 # *mut Checker refactor — execution plan (the montanha)
 
 **Decision (2026-05-31):** after the move-codegen wedge plan was overturned (Wedge A a verified

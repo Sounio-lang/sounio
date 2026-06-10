@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.epistemic-release-status
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.epistemic-release-status
+-->
+
 # Sounio / Madáres v0.80.0 — Epistemic Release Status
 
 > An epistemic programming language must know what it knows.

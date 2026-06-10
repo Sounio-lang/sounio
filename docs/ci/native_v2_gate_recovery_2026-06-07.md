@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.ci.native-v2-gate-recovery-2026-06-07
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ci.native-v2-gate-recovery-2026-06-07
+-->
+
 # Native-v2 Gate Recovery Audit (2026-06-07)
 
 Branch: `claude/gate-recovery`

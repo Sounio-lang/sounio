@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.card-c1-for-in-array
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.card-c1-for-in-array
+-->
+
 # Card C1 — for-in over arrays (lowering)  [native-v2 self-hosting punch-list]
 
 **Owner file:** `self-hosted/ir/lower.sio` ONLY. (Coordinate with the lowerer owner — this is

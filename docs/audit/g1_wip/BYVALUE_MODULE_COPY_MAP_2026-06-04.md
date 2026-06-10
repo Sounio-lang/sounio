@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.byvalue-module-copy-map-2026-06-04
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.byvalue-module-copy-map-2026-06-04
+-->
+
 # By-value IrModule / *box deref-copy sites — c634b38f [IrFunction;1400] crash class
 
 Map of every large-struct by-value copy / `*box` deref-copy in the modular lowering→native-v2 backend path.

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.examples.native-v2-source.readme
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.native-v2-source.readme
+-->
+
 # Source → native ELF via the elected modular compiler
 
 First working programs compiled from `.sio` SOURCE to a runnable native x86-64 ELF

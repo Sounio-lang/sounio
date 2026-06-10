@@ -50,7 +50,7 @@ CHECKER_WARNING_MUT_PROBE_BIN="$WORK_DIR/checker_warning_mut_probe.elf"
 CHECKER_WARNING_MUT_PROBE_LOG="$WORK_DIR/checker_warning_mut_probe.log"
 CHECKER_WARNING_MUT_PROBE_RUN_LOG="$WORK_DIR/checker_warning_mut_probe.run.log"
 BOOTSTRAP_LOG="$WORK_DIR/bootstrap.log"
-FALLBACK_SOUC="${SOUNIO_VALIDATION_FALLBACK_SOUC:-$ROOT_DIR/bin/souc}"
+FALLBACK_SOUC="${SOUNIO_VALIDATION_FALLBACK_SOUC:-$ROOT_DIR/scripts/ci/souc-native-wrapper.sh}"
 BOOT4_BIN="${SOUNIO_VALIDATION_BOOT4_BIN:-$ROOT_DIR/artifacts/bootstrap/boot4.elf}"
 
 mkdir -p "$WORK_DIR"
@@ -554,6 +554,7 @@ case "\$cmd" in
       fi
       exit \$fallback_run_rc
     fi
+    chmod +x "\$tmp_out"
     exec "\$tmp_out" "\${prog_args[@]}"
     ;;
   info)

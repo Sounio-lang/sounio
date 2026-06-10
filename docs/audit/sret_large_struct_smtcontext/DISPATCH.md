@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.sret-large-struct-smtcontext.dispatch
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.sret-large-struct-smtcontext.dispatch
+-->
+
 # DISPATCH — struct/array initialisation codegen: a reproducible local-array bug + a non-reproducible large-struct return observation
 
 **Opened:** 2026-05-28

@@ -2,8 +2,8 @@
 topic_id: repo.frontdoor.readme
 authority: repo_only
 audience: users
-last_validated: 2026-06-07
-validated_by: claude-release-apparatus (mc = Madares v0.80.0, tip claude/release-apparatus)
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 -->
 
