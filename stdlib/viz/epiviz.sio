@@ -4,9 +4,11 @@
 // stdlib/epistemic/knowledge.sio types into a Canvas.
 
 use display::canvas::{Canvas, canvas_fill_rect}
-use display::canvas_ext::{canvas_draw_line_aa, canvas_blend_pixel}
+use display::canvas_ext::{canvas_draw_line_aa, canvas_blend_pixel, canvas_fill_triangle,
+                           canvas_blend_pixel_bayer}
 use display::font::{font_draw_string}
 use viz::coord::{CoordSystem, coord_map_x, coord_map_y}
+use viz::colormap::{viridis_r, viridis_g, viridis_b}
 use epistemic::knowledge::{Epistemic}
 
 // ============================================================
@@ -1309,5 +1311,416 @@ pub fn epiviz_corrmap(
             col = col + 1
         }
         row = row + 1
+    }
+}
+
+// ============================================================
+// Volcano plot (pharmacogenomics / differential expression)
+// ============================================================
+//
+// X axis: log₂(fold-change) = ln(fc)/ln(2) = ln(fc)/0.693147.
+// Y axis: -log₁₀(p) = -ln(p)/ln(10) = -ln(p)/2.302585.
+//
+// Colour: |log2fc|>fc_thresh AND -log10p>sig_thresh → up(red)/down(blue),
+// otherwise grey (non-significant).
+// Reference lines dashed at ±fc_thresh and sig_thresh.
+
+pub fn epiviz_volcano(
+    cs: &CoordSystem,
+    fc: &[f64; 256],
+    pval: &[f64; 256],
+    n: i64,
+    fc_thresh: f64,
+    sig_thresh: f64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n < 1 { return }
+
+    let ln2  = 0.693147180559945
+    let ln10 = 2.302585092994046
+
+    // Reference lines (dashed)
+    let x0 = coord_map_x(cs, cs.data_x_min)
+    let x1 = coord_map_x(cs, cs.data_x_max)
+    let sig_sy = coord_map_y(cs, sig_thresh)
+    var px = x0
+    while px <= x1 {
+        if (px - x0) % 8 < 4 { canvas_fill_rect(c, px, sig_sy, 1, 1, 140, 140, 140) }
+        px = px + 1
+    }
+    let fc_sx_pos = coord_map_x(cs, fc_thresh)
+    let fc_sx_neg = coord_map_x(cs, 0.0 - fc_thresh)
+    let y0 = coord_map_y(cs, cs.data_y_min)
+    let y1 = coord_map_y(cs, cs.data_y_max)
+    var py = y1
+    while py <= y0 {
+        if (py - y1) % 8 < 4 {
+            canvas_fill_rect(c, fc_sx_pos, py, 1, 1, 140, 140, 140)
+            canvas_fill_rect(c, fc_sx_neg, py, 1, 1, 140, 140, 140)
+        }
+        py = py + 1
+    }
+
+    // Points
+    var i: i64 = 0
+    while i < n {
+        let fci = fc[i as usize]
+        let pi  = pval[i as usize]
+        if pi <= 0.0 { i = i + 1; continue }
+        let log2fc  = epiviz_ln(fci) / ln2
+        let neglog10p = 0.0 - epiviz_ln(pi) / ln10
+        let sx = coord_map_x(cs, log2fc)
+        let sy = coord_map_y(cs, neglog10p)
+
+        let sig = neglog10p > sig_thresh
+        let up  = log2fc > fc_thresh
+        let dn  = log2fc < 0.0 - fc_thresh
+
+        let pr = if sig && up { 220 } else if sig && dn { 80 } else { 130 }
+        let pg = if sig && (up || dn) { 60 } else { 130 }
+        let pb = if sig && dn { 220 } else if sig && up { 60 } else { 130 }
+        let cov = if sig && (up || dn) { 220 } else { 120 }
+
+        canvas_blend_pixel(c, sx, sy, pr, pg, pb, cov)
+        canvas_blend_pixel(c, sx - 1, sy, pr, pg, pb, cov / 2)
+        canvas_blend_pixel(c, sx + 1, sy, pr, pg, pb, cov / 2)
+        canvas_blend_pixel(c, sx, sy - 1, pr, pg, pb, cov / 2)
+        canvas_blend_pixel(c, sx, sy + 1, pr, pg, pb, cov / 2)
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Q-Q plot (normal quantile-quantile)
+// ============================================================
+//
+// Beasley-Springer-Moro inverse normal Φ⁻¹ (Moro 1995, Int. J. Theor.
+// Applied Finance 8:177); quartile-fit reference line; ±1.96·SE envelope.
+// Blom plotting position: p_i = i/(n+1).
+
+fn bsm_inv_normal(p: f64) -> f64 with Div {
+    if p <= 0.0 { return 0.0 - 7.0 }
+    if p >= 1.0 { return 7.0 }
+    let y = p - 0.5
+    let ya = if y < 0.0 { 0.0 - y } else { y }
+    if ya < 0.42 {
+        let r = y * y
+        let a = ((0.0 - 25.44106049637 * r + 41.39119773534) * r - 18.61500062529) * r + 2.50662823884
+        let b = (((3.13082909833 * r - 21.06224101826) * r + 23.08336743743) * r - 8.47351093090)
+        if b == 0.0 { return 0.0 }
+        y * a / b
+    } else {
+        let rr = if p < 0.5 { p } else { 1.0 - p }
+        let s = epiviz_sqrt(0.0 - epiviz_ln(rr))
+        let cs2 = 0.3374754822726147 + s * (0.9761690190917186 + s * (0.1607979714918209
+                  + s * (0.0276438810333863 + s * (0.0038405729373609 + s * (0.0003951896511919
+                  + s * (0.0000321767881768 + s * (0.0000002888167364 + s * 0.0000003960315187)))))))
+        if p < 0.5 { 0.0 - cs2 } else { cs2 }
+    }
+}
+
+pub fn epiviz_qqplot(
+    cs: &CoordSystem,
+    data: &[f64; 256],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n < 4 { return }
+
+    var ord: [i64; 256] = [0; 256]
+    epiviz_isort(data, n, &!ord)
+
+    // Mean and sigma for envelope
+    var dsum: f64 = 0.0
+    var di: i64 = 0
+    while di < n { dsum = dsum + data[ord[di as usize] as usize]; di = di + 1 }
+    let dmean = dsum / (n as f64)
+    var dss: f64 = 0.0
+    var di2: i64 = 0
+    while di2 < n {
+        let d = data[ord[di2 as usize] as usize] - dmean
+        dss = dss + d * d
+        di2 = di2 + 1
+    }
+    let dsig = epiviz_sqrt(dss / ((n - 1) as f64))
+
+    // Quartile-fit reference line
+    let q1_idx = (n as f64 * 0.25) as i64
+    let q3_idx = (n as f64 * 0.75) as i64
+    let q1_d = data[ord[q1_idx as usize] as usize]
+    let q3_d = data[ord[q3_idx as usize] as usize]
+    let q1_z: f64 = 0.0 - 0.6745
+    let q3_z: f64 = 0.6745
+    let slope = if q3_d != q1_d { (q3_d - q1_d) / (q3_z - q1_z) } else { 1.0 }
+    let intercept = q1_d - slope * q1_z
+
+    // Draw reference line
+    let z_lo = cs.data_x_min
+    let z_hi = cs.data_x_max
+    let ref_y0 = coord_map_y(cs, slope * z_lo + intercept)
+    let ref_y1 = coord_map_y(cs, slope * z_hi + intercept)
+    canvas_draw_line_aa(c, coord_map_x(cs, z_lo), ref_y0,
+                           coord_map_x(cs, z_hi), ref_y1, 100, 100, 100)
+
+    // Draw confidence envelope and data points
+    var ki: i64 = 0
+    while ki < n {
+        let p_i = ((ki + 1) as f64) / ((n + 1) as f64)
+        let z_i = bsm_inv_normal(p_i)
+        let x_i = data[ord[ki as usize] as usize]
+        let sx = coord_map_x(cs, z_i)
+        let sy = coord_map_y(cs, x_i)
+
+        // ±1.96 SE envelope
+        let phi_z = 0.39894 * epiviz_exp(0.0 - 0.5 * z_i * z_i)
+        let se = if phi_z > 0.001 {
+            dsig / phi_z * epiviz_sqrt(p_i * (1.0 - p_i) / (n as f64))
+        } else { 0.0 }
+        let env_lo = coord_map_y(cs, slope * z_i + intercept + 1.96 * se)
+        let env_hi = coord_map_y(cs, slope * z_i + intercept - 1.96 * se)
+        canvas_blend_pixel(c, sx, env_lo, r, g, b, 60)
+        canvas_blend_pixel(c, sx, env_hi, r, g, b, 60)
+
+        // Data point
+        canvas_blend_pixel(c, sx, sy, r, g, b, 210)
+        canvas_blend_pixel(c, sx - 1, sy, r, g, b, 120)
+        canvas_blend_pixel(c, sx + 1, sy, r, g, b, 120)
+        canvas_blend_pixel(c, sx, sy - 1, r, g, b, 120)
+        canvas_blend_pixel(c, sx, sy + 1, r, g, b, 120)
+        ki = ki + 1
+    }
+}
+
+// ============================================================
+// Parallel coordinates plot
+// ============================================================
+//
+// N_axes vertical axes evenly spaced; each independently normalised.
+// Overplot alpha: cov = max(1, 200 / n_obs).
+// Color: viridis on first axis value.
+//
+// data_flat: row-major [n_obs * n_axes]; data_flat[i*n_axes + k].
+
+pub fn epiviz_parallel_coords(
+    data_flat: &[f64; 2048],
+    n_obs: i64,
+    n_axes: i64,
+    screen_x: i64,
+    screen_y: i64,
+    screen_w: i64,
+    screen_h: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n_obs < 1 { return }
+    if n_axes < 2 { return }
+
+    // Per-axis min/max
+    var ax_lo: [f64; 16] = [0.0; 16]
+    var ax_hi: [f64; 16] = [0.0; 16]
+    var ki: i64 = 0
+    while ki < n_axes {
+        var lo = data_flat[ki as usize]
+        var hi = lo
+        var ii: i64 = 0
+        while ii < n_obs {
+            let v = data_flat[(ii * n_axes + ki) as usize]
+            if v < lo { lo = v }
+            if v > hi { hi = v }
+            ii = ii + 1
+        }
+        if hi == lo { hi = lo + 1.0 }
+        ax_lo[ki as usize] = lo
+        ax_hi[ki as usize] = hi
+        ki = ki + 1
+    }
+
+    let step = screen_w / (n_axes - 1)
+    let cov  = if 200 / n_obs > 1 { 200 / n_obs } else { 1 }
+
+    // Draw axes
+    var ai: i64 = 0
+    while ai < n_axes {
+        let ax = screen_x + ai * step
+        canvas_draw_line_aa(c, ax, screen_y, ax, screen_y + screen_h, 140, 140, 155)
+        ai = ai + 1
+    }
+
+    // Draw observation polylines
+    var oi: i64 = 0
+    while oi < n_obs {
+        let v0 = data_flat[(oi * n_axes) as usize]
+        let t0 = (v0 - ax_lo[0]) / (ax_hi[0] - ax_lo[0])
+        let lr = viridis_r(t0)
+        let lg = viridis_g(t0)
+        let lb = viridis_b(t0)
+
+        var ki2: i64 = 0
+        while ki2 < n_axes - 1 {
+            let vA = data_flat[(oi * n_axes + ki2) as usize]
+            let vB = data_flat[(oi * n_axes + ki2 + 1) as usize]
+            let tA = (vA - ax_lo[ki2 as usize]) / (ax_hi[ki2 as usize] - ax_lo[ki2 as usize])
+            let tB = (vB - ax_lo[(ki2 + 1) as usize]) / (ax_hi[(ki2 + 1) as usize] - ax_lo[(ki2 + 1) as usize])
+            let x0a = screen_x + ki2 * step
+            let y0a = screen_y + screen_h - (tA * (screen_h as f64)) as i64
+            let x1a = screen_x + (ki2 + 1) * step
+            let y1a = screen_y + screen_h - (tB * (screen_h as f64)) as i64
+
+            // Bresenham-trace the segment and blend at cov
+            let ddx = x1a - x0a; let ddy = y1a - y0a
+            let adx = if ddx < 0 { 0 - ddx } else { ddx }
+            let ady = if ddy < 0 { 0 - ddy } else { ddy }
+            let nst = if adx > ady { adx } else { ady }
+            if nst > 0 {
+                var si: i64 = 0
+                while si <= nst {
+                    let t = (si as f64) / (nst as f64)
+                    let bx = x0a + (ddx as f64 * t) as i64
+                    let by = y0a + (ddy as f64 * t) as i64
+                    canvas_blend_pixel_bayer(c, bx, by, lr, lg, lb, cov)
+                    si = si + 1
+                }
+            }
+            ki2 = ki2 + 1
+        }
+        oi = oi + 1
+    }
+}
+
+// ============================================================
+// Radar / spider chart
+// ============================================================
+//
+// K spokes at angles -π/2 + k·2π/K (first spoke up).
+// Quarter-wave sin table (9 entries): error < 0.6%.
+// Multiple datasets overlaid with different colors + Bayer alpha fill.
+// Concentric rings at 0.25, 0.5, 0.75, 1.0.
+
+fn radar_sin_q(a: f64) -> f64 with Div {
+    // Quarter-wave table: SIN_Q[i] for i=0..8 covering [0, π/2]
+    var sq: [f64; 9] = [0.0, 0.19509, 0.38268, 0.55557,
+                        0.70711, 0.83147, 0.92388, 0.98079, 1.0]
+    let pi2: f64 = 1.5707963268
+    let two_pi: f64 = 6.2831853072
+    // Reduce to [0, 2π)
+    var aa = a
+    var rr: i64 = 0
+    while aa < 0.0 { aa = aa + two_pi }
+    while aa >= two_pi { aa = aa - two_pi }
+    // Quadrant reflections
+    if aa > 3.14159265 { return 0.0 - radar_sin_q(aa - 3.14159265) }
+    if aa > pi2 { return radar_sin_q(3.14159265 - aa) }
+    // Table interp in [0, π/2]
+    let t = aa / pi2 * 8.0
+    let ii = t as i64
+    let ff = t - (ii as f64)
+    let i2 = if ii >= 8 { 8 } else { ii }
+    let i3 = if ii + 1 >= 9 { 8 } else { ii + 1 }
+    sq[i2 as usize] * (1.0 - ff) + sq[i3 as usize] * ff
+}
+
+fn radar_cos_q(a: f64) -> f64 with Div {
+    radar_sin_q(1.5707963268 - a)
+}
+
+fn radar_spoke_x(k: i64, K: i64, v: f64, cx: i64, rr: i64) -> i64 with Div {
+    let angle = 0.0 - 1.5707963268 + (k as f64) * 6.2831853072 / (K as f64)
+    cx + (v * (rr as f64) * radar_cos_q(angle)) as i64
+}
+
+fn radar_spoke_y(k: i64, K: i64, v: f64, cy: i64, rr: i64) -> i64 with Div {
+    let angle = 0.0 - 1.5707963268 + (k as f64) * 6.2831853072 / (K as f64)
+    cy + (v * (rr as f64) * radar_sin_q(angle)) as i64
+}
+
+pub fn epiviz_radar(
+    data_flat: &[f64; 64],
+    n_datasets: i64,
+    K: i64,
+    cx: i64, cy: i64, rr: i64,
+    colors_r: &[i64; 8], colors_g: &[i64; 8], colors_b: &[i64; 8],
+    alpha: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if K < 3 { return }
+
+    // Concentric reference rings
+    var ri: i64 = 1
+    while ri <= 4 {
+        let rv = (ri as f64) * 0.25
+        var ki: i64 = 0
+        while ki < K {
+            let kn = (ki + 1) % K
+            let x0 = radar_spoke_x(ki, K, rv, cx, rr)
+            let y0 = radar_spoke_y(ki, K, rv, cy, rr)
+            let x1 = radar_spoke_x(kn, K, rv, cx, rr)
+            let y1 = radar_spoke_y(kn, K, rv, cy, rr)
+            canvas_blend_pixel(c, x0, y0, 70, 70, 80, 160)
+            canvas_draw_line_aa(c, x0, y0, x1, y1, 70, 70, 80)
+            ki = ki + 1
+        }
+        ri = ri + 1
+    }
+
+    // Spoke lines
+    var si: i64 = 0
+    while si < K {
+        let sx = radar_spoke_x(si, K, 1.0, cx, rr)
+        let sy = radar_spoke_y(si, K, 1.0, cy, rr)
+        canvas_draw_line_aa(c, cx, cy, sx, sy, 70, 70, 80)
+        si = si + 1
+    }
+
+    // Fill polygons per dataset (fan triangulation from center)
+    var di: i64 = 0
+    while di < n_datasets {
+        let dr = colors_r[di as usize]
+        let dg = colors_g[di as usize]
+        let db = colors_b[di as usize]
+        var ki2: i64 = 0
+        while ki2 < K {
+            let vA = data_flat[(di * K + ki2) as usize]
+            let vB = data_flat[(di * K + (ki2 + 1) % K) as usize]
+            let ax = radar_spoke_x(ki2, K, vA, cx, rr)
+            let ay = radar_spoke_y(ki2, K, vA, cy, rr)
+            let bx = radar_spoke_x((ki2 + 1) % K, K, vB, cx, rr)
+            let by = radar_spoke_y((ki2 + 1) % K, K, vB, cy, rr)
+            // Fill triangle with Bayer-dithered alpha
+            // Compute bounding box and test each pixel
+            let min_x = if cx < ax { if cx < bx { cx } else { bx } } else { if ax < bx { ax } else { bx } }
+            let max_x = if cx > ax { if cx > bx { cx } else { bx } } else { if ax > bx { ax } else { bx } }
+            let min_y = if cy < ay { if cy < by { cy } else { by } } else { if ay < by { ay } else { by } }
+            let max_y = if cy > ay { if cy > by { cy } else { by } } else { if ay > by { ay } else { by } }
+            var ty = min_y
+            while ty <= max_y {
+                var tx = min_x
+                while tx <= max_x {
+                    // Barycentric test
+                    let e0 = (ax - cx) * (ty - cy) - (ay - cy) * (tx - cx)
+                    let e1 = (bx - ax) * (ty - ay) - (by - ay) * (tx - ax)
+                    let e2 = (cx - bx) * (ty - by) - (cy - by) * (tx - bx)
+                    if (e0 >= 0 && e1 >= 0 && e2 >= 0) || (e0 <= 0 && e1 <= 0 && e2 <= 0) {
+                        canvas_blend_pixel_bayer(c, tx, ty, dr, dg, db, alpha)
+                    }
+                    tx = tx + 1
+                }
+                ty = ty + 1
+            }
+            ki2 = ki2 + 1
+        }
+        // Outline
+        var ki3: i64 = 0
+        while ki3 < K {
+            let vA2 = data_flat[(di * K + ki3) as usize]
+            let vB2 = data_flat[(di * K + (ki3 + 1) % K) as usize]
+            canvas_draw_line_aa(c,
+                radar_spoke_x(ki3, K, vA2, cx, rr),
+                radar_spoke_y(ki3, K, vA2, cy, rr),
+                radar_spoke_x((ki3 + 1) % K, K, vB2, cx, rr),
+                radar_spoke_y((ki3 + 1) % K, K, vB2, cy, rr),
+                dr, dg, db)
+            ki3 = ki3 + 1
+        }
+        di = di + 1
     }
 }

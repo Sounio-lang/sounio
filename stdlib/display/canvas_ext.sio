@@ -682,6 +682,117 @@ pub fn canvas_bond_cylinder(
 // scratch: heap-allocated i64 array of size c.width*c.height (caller owns).
 // threshold: luma cutoff 0–255 (typical: 200). cov: bloom intensity 0–255.
 
+// ============================================================
+// FXAA — Fast Approximate Anti-Aliasing (Lottes 2009, simplified console variant)
+// ============================================================
+//
+// scratch: caller-allocated W×H×8 bytes.  Reads original from scratch,
+// writes anti-aliased result into c.pixels.
+//
+// Constants: REDUCE_MIN=1/128→2, REDUCE_MUL=1/8→lumaSum/32, SPAN_MAX=8.
+// Luma: 77R+150G+29B >> 8 (integer ≈ 0.299/0.587/0.114).
+
+fn fxaa_luma(pix: i64) -> i64 {
+    (77 * ((pix >> 16) & 255) + 150 * ((pix >> 8) & 255) + 29 * (pix & 255)) >> 8
+}
+
+fn fxaa_avg2(p1: i64, p2: i64) -> i64 {
+    let r = (((p1 >> 16) & 255) + ((p2 >> 16) & 255)) / 2
+    let g = (((p1 >>  8) & 255) + ((p2 >>  8) & 255)) / 2
+    let b = ((p1 & 255) + (p2 & 255)) / 2
+    b | (g << 8) | (r << 16)
+}
+
+pub fn canvas_fxaa(c: &!Canvas, scratch: *mut i64) with Mut, Div {
+    let W = c.width
+    let H = c.height
+
+    // Copy original to scratch
+    var cy: i64 = 0
+    while cy < H {
+        var cx: i64 = 0
+        while cx < W {
+            write_i64(scratch, cy * W + cx, read_i64(c.pixels, cy * W + cx))
+            cx = cx + 1
+        }
+        cy = cy + 1
+    }
+
+    var y: i64 = 1
+    while y < H - 1 {
+        var x: i64 = 1
+        while x < W - 1 {
+            let pM  = read_i64(scratch,  y      * W +  x     )
+            let pNW = read_i64(scratch, (y - 1) * W + (x - 1))
+            let pNE = read_i64(scratch, (y - 1) * W + (x + 1))
+            let pSW = read_i64(scratch, (y + 1) * W + (x - 1))
+            let pSE = read_i64(scratch, (y + 1) * W + (x + 1))
+
+            let lM  = fxaa_luma(pM)
+            let lNW = fxaa_luma(pNW)
+            let lNE = fxaa_luma(pNE)
+            let lSW = fxaa_luma(pSW)
+            let lSE = fxaa_luma(pSE)
+
+            let mn_ab = if lNW < lNE { lNW } else { lNE }
+            let mn_cd = if lSW < lSE { lSW } else { lSE }
+            let mn_e  = if mn_ab < mn_cd { mn_ab } else { mn_cd }
+            let lmin  = if lM < mn_e { lM } else { mn_e }
+            let mx_ab = if lNW > lNE { lNW } else { lNE }
+            let mx_cd = if lSW > lSE { lSW } else { lSE }
+            let mx_e  = if mx_ab > mx_cd { mx_ab } else { mx_cd }
+            let lmax  = if lM > mx_e { lM } else { mx_e }
+
+            let contrast = lmax - lmin
+            let gate = if lmax >> 3 > 8 { lmax >> 3 } else { 8 }
+            if contrast < gate {
+                x = x + 1
+                continue
+            }
+
+            let dir_x = (0 - lNW - lNE) + (lSW + lSE)
+            let dir_y = (lNW + lSW) - (lNE + lSE)
+            let lsum  = lNW + lNE + lSW + lSE
+            let dr = if lsum >> 5 > 2 { lsum >> 5 } else { 2 }
+
+            let adx = if dir_x < 0 { 0 - dir_x } else { dir_x }
+            let ady = if dir_y < 0 { 0 - dir_y } else { dir_y }
+            let md  = if adx < ady { adx } else { ady }
+            let rcp = md + dr
+
+            let raw_sx = if rcp > 0 { dir_x * 8 / rcp } else { 0 }
+            let raw_sy = if rcp > 0 { dir_y * 8 / rcp } else { 0 }
+            let sx = if raw_sx > 8 { 8 } else if raw_sx < 0 - 8 { 0 - 8 } else { raw_sx }
+            let sy = if raw_sy > 8 { 8 } else if raw_sy < 0 - 8 { 0 - 8 } else { raw_sy }
+
+            // blurA at ±span/6
+            let ax6 = sx / 6; let ay6 = sy / 6
+            let x1a = cext_clamp(x + ax6, 0, W - 1); let y1a = cext_clamp(y + ay6, 0, H - 1)
+            let x2a = cext_clamp(x - ax6, 0, W - 1); let y2a = cext_clamp(y - ay6, 0, H - 1)
+            let blurA = fxaa_avg2(read_i64(scratch, y1a * W + x1a),
+                                  read_i64(scratch, y2a * W + x2a))
+
+            // blurB at ±span/2
+            let ax2 = sx / 2; let ay2 = sy / 2
+            let x1b = cext_clamp(x + ax2, 0, W - 1); let y1b = cext_clamp(y + ay2, 0, H - 1)
+            let x2b = cext_clamp(x - ax2, 0, W - 1); let y2b = cext_clamp(y - ay2, 0, H - 1)
+            let pB1 = read_i64(scratch, y1b * W + x1b)
+            let pB2 = read_i64(scratch, y2b * W + x2b)
+            let aR = (blurA >> 16) & 255; let aG = (blurA >> 8) & 255; let aB = blurA & 255
+            let bR = (aR * 2 + ((pB1>>16)&255) + ((pB2>>16)&255)) / 4
+            let bG = (aG * 2 + ((pB1>> 8)&255) + ((pB2>> 8)&255)) / 4
+            let bB = (aB * 2 + (pB1 & 255) + (pB2 & 255)) / 4
+            let blurB = bB | (bG << 8) | (bR << 16)
+            let lB = fxaa_luma(blurB)
+
+            let result = if lB < lmin || lB > lmax { blurA } else { blurB }
+            write_i64(c.pixels, y * W + x, result)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
 pub fn canvas_bloom(c: &!Canvas, scratch: *mut i64, threshold: i64, cov: i64) with Mut, Div {
     let w = c.width
     let h = c.height
