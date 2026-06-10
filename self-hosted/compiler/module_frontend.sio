@@ -71,13 +71,42 @@ fn module_frontend_import_byte_to_str(c: i8) -> string {
     ""
 }
 
+// Content cache for read_file (Residual 1). The full-IR front-half re-reads each source
+// file many times — once per function via the eval heuristics — and the no-free bump
+// allocator never reclaims those buffers (~1.6 MB/fn × 6681 fns ≈ 10.6 GB peak). This caches
+// by path so a file is read from disk at most once; repeat reads return the already-allocated
+// content (the buffer persists under no-free anyway). ~81 distinct files; cap 512.
+struct ReadFileCacheEntry { path: string, content: string, used: bool }
+var READ_FILE_CACHE: [ReadFileCacheEntry; 512] = [ReadFileCacheEntry { path: "", content: "", used: false }; 512]
+var READ_FILE_CACHE_COUNT: i64 = 0
+
+fn module_frontend_cached_read_file(path: string) -> string with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < READ_FILE_CACHE_COUNT {
+        if str_eq(READ_FILE_CACHE[i as usize].path, path) {
+            return READ_FILE_CACHE[i as usize].content
+        }
+        i = i + 1
+    }
+    let content = read_file(path)
+    if READ_FILE_CACHE_COUNT < 512 {
+        let idx = READ_FILE_CACHE_COUNT
+        // whole-element store (the proven find_or_add_fn_id idiom; never a nested
+        // array-element field store, which miscompiles for struct fields).
+        var entry = ReadFileCacheEntry { path: path, content: content, used: true }
+        READ_FILE_CACHE[idx as usize] = entry
+        READ_FILE_CACHE_COUNT = idx + 1
+    }
+    content
+}
+
 fn module_frontend_load_import_file(path: string) -> i64 with IO, Mut, Panic, Div {
     let size = file_size(path)
     if size <= 0 {
         return 0
     }
     let n = if size > 1048576 { 1048576 } else { size }
-    let raw = read_file(path)
+    let raw = module_frontend_cached_read_file(path)
     var i: i64 = 0
     while i < n {
         MODULE_FRONTEND_IMPORT_FILE_DATA[i as usize] = raw[i as usize]
@@ -2468,7 +2497,7 @@ fn module_frontend_try_eval_imported_function_i64(path: string, fn_name: Name, d
     if size <= 2 {
         return (false, 0)
     }
-    let data = read_file(path)
+    let data = module_frontend_cached_read_file(path)
     let fn_pos = module_frontend_source_find_fn(data, size, fn_name)
     if fn_pos >= 0 {
         let body = module_frontend_source_body_start(data, fn_pos, size)
@@ -2707,7 +2736,7 @@ fn module_frontend_lower_source_file_summary(path: string, module_index: i64, tr
     if size <= 2 {
         return module
     }
-    let data = read_file(path)
+    let data = module_frontend_cached_read_file(path)
     var i: i64 = 0
     while i + 2 < size && module.fn_count < IR_MAX_FUNCS {
         if module_frontend_source_is_fn_at(data, i, size) {
@@ -2732,7 +2761,7 @@ fn module_frontend_count_source_file_fns(path: string) -> i64 with IO, Mut, Pani
     if size <= 2 {
         return 0
     }
-    let data = read_file(path)
+    let data = module_frontend_cached_read_file(path)
     var count: i64 = 0
     var i: i64 = 0
     while i + 2 < size {
@@ -2846,7 +2875,7 @@ fn module_frontend_lower_source_file_summary_into(out: &! IrModule, path: string
     if size <= 2 {
         return
     }
-    let data = read_file(path)
+    let data = module_frontend_cached_read_file(path)
     var i: i64 = 0
     while i + 2 < size && (*out).fn_count < IR_MAX_FUNCS {
         if module_frontend_source_is_fn_at(data, i, size) {
@@ -3203,7 +3232,7 @@ fn module_frontend_line_is_use(data: string, ls: i64, le: i64) -> bool {
 fn module_frontend_combine_append_file(path: string) with IO, Mut, Panic, Div {
     let size = file_size(path)
     if size <= 0 { return }
-    let data = read_file(path)
+    let data = module_frontend_cached_read_file(path)
     var i: i64 = 0
     while i < size {
         // find end of this line
@@ -3667,7 +3696,7 @@ fn module_frontend_lower_source_file_simple_global(
     if size <= 2 {
         return true
     }
-    let data = read_file(path)
+    let data = module_frontend_cached_read_file(path)
     var i: i64 = 0
     while i + 2 < size && MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT < 64 {
         if module_frontend_source_is_fn_at(data, i, size) {
@@ -3775,7 +3804,7 @@ pub fn module_frontend_file_maybe_has_use(path: string) -> bool with IO, Mut, Pa
     if size <= 3 {
         return false
     }
-    let data = read_file(path)
+    let data = module_frontend_cached_read_file(path)
     var line_start: i64 = 0
     var i: i64 = 0
     while i <= size {
