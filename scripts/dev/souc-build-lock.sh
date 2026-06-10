@@ -32,6 +32,15 @@ if [ "$#" -eq 0 ]; then
   exit 64
 fi
 
+# OOM guard: when not inside a SLURM job, cap virtual memory at 40 GB so a
+# runaway build dies with ENOMEM instead of OOMKilling the workspace container.
+# Heavy self-host builds (main.sio full-IR, --native-compile) must go via SLURM
+# (sbatch on cpu-ops partition) where memory is provisioned correctly.
+if [ -z "${SLURM_JOB_ID:-}" ]; then
+  ulimit -v 41943040  # 40 GiB in KiB
+  echo "[souc-build-lock] NOT in SLURM — virtual-memory cap 40 GiB applied. For builds that need >40 GiB, use the SLURM submit script." >&2
+fi
+
 LOCK="${SOUNIO_BUILD_LOCK:-/tmp/sounio-souc-build.lock}"
 exec 9>"$LOCK"
 
