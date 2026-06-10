@@ -16,7 +16,7 @@ FAIL_SRC="$ROOT_DIR/tests/compile-fail/ontology_typed_bridge_go_reject.sio"
 EXPECT="ontology typed bridge go OK"
 
 # 1. run-pass: must compile, run, and print EXPECT.
-if ! "$SOUC_BIN" compile "$PASS_SRC" -o "$TMP/bridge" >"$TMP/build.log" 2>&1; then
+if ! "$SOUC_BIN" "$PASS_SRC" "$TMP/bridge" >"$TMP/build.log" 2>&1; then
   echo "[ontology-typed-bridge] FAIL: run-pass test did not compile"; tail -20 "$TMP/build.log"; exit 1
 fi
 chmod +x "$TMP/bridge"
@@ -26,7 +26,7 @@ if [ "$OUT" != "$EXPECT" ]; then
 fi
 
 # 2. compile-fail: must be rejected (E152 subsumption).
-if "$SOUC_BIN" compile "$FAIL_SRC" -o "$TMP/rej" >"$TMP/rej.log" 2>&1; then
+if "$SOUC_BIN" "$FAIL_SRC" "$TMP/rej" >"$TMP/rej.log" 2>&1; then
   echo "[ontology-typed-bridge] FAIL: bad-subsumption test compiled clean (should reject)"; exit 1
 fi
 if ! grep -q "E152" "$TMP/rej.log"; then

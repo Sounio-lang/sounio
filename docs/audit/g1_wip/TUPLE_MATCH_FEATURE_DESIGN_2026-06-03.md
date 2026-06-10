@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.tuple-match-feature-design-2026-06-03
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.tuple-match-feature-design-2026-06-03
+-->
+
 # Tuple-patterns-in-match-arms — implementation design (canonical compiler) 2026-06-03
 
 Implements the last 2 modular survivors' root cause (Knowledge: types_equal uses

@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.erdos-90-planar-search-plan
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.erdos-90-planar-search-plan
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Erdős [90] — planar `u(n)` cluster search plan + pilot results
 
 *Companion to `formal/lean4/SounioErdos90PlanarLowerBound.lean` and the CPU search kernel

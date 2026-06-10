@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.front-half-leverage-handoff-2026-06-02
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.front-half-leverage-handoff-2026-06-02
+-->
+
 # Front-half leverage handoff — the #1 unaddressed lever + 4 ready parser prereqs (2026-06-02)
 
 For whoever drives the G1 front-half next. Crashes are essentially closed (live lane:

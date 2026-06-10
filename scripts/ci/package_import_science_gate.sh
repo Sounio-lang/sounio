@@ -9,6 +9,13 @@ sounio_require_souc
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
+SUBCOMMAND_SOUC_BIN="$SOUC_BIN"
+if [[ "$(head -c 2 "$SOUC_BIN" 2>/dev/null)" != "#!" ]]; then
+  export SOUC_NATIVE_BIN="$SOUC_BIN"
+  SUBCOMMAND_SOUC_BIN="$ROOT_DIR/scripts/ci/souc-native-wrapper.sh"
+  chmod +x "$SUBCOMMAND_SOUC_BIN"
+fi
+
 MANIFEST="packages/epistemic-core/sounio.toml"
 WITNESS="tests/packages/package_import_science_witness.sio"
 NEGATIVE="tests/packages/package_import_missing_package.sio"
@@ -17,7 +24,7 @@ TEST_LIST="$OUT_DIR/epistemic_core_tests.tsv"
 
 trap 'rm -rf "$OUT_DIR"' EXIT
 
-printf '[package-import-science] souc=%s\n' "$SOUC_BIN"
+printf '[package-import-science] souc=%s\n' "$SUBCOMMAND_SOUC_BIN"
 printf '[package-import-science] stdlib=%s\n' "$SOUNIO_STDLIB_PATH"
 printf '[package-import-science] manifest=%s\n' "$MANIFEST"
 
@@ -82,7 +89,7 @@ while IFS=$'\t' read -r name path; do
   [[ -n "$name" ]] || continue
   log="$OUT_DIR/${name}.log"
   printf '[package-import-science] run manifest test %s (%s)\n' "$name" "$path"
-  if ! "$SOUC_BIN" run "$path" >"$log" 2>&1; then
+  if ! "$SUBCOMMAND_SOUC_BIN" run "$path" >"$log" 2>&1; then
     cat "$log" >&2
     printf '[package-import-science] FAIL: manifest test failed: %s\n' "$name" >&2
     exit 1
@@ -92,7 +99,7 @@ done <"$TEST_LIST"
 
 printf '[package-import-science] run downstream witness %s\n' "$WITNESS"
 WITNESS_LOG="$OUT_DIR/witness.log"
-if ! "$SOUC_BIN" run "$WITNESS" >"$WITNESS_LOG" 2>&1; then
+if ! "$SUBCOMMAND_SOUC_BIN" run "$WITNESS" >"$WITNESS_LOG" 2>&1; then
   cat "$WITNESS_LOG" >&2
   echo '[package-import-science] FAIL: downstream package witness failed' >&2
   exit 1
@@ -107,7 +114,7 @@ printf '[package-import-science] compile negative missing-package fixture %s\n' 
 NEGATIVE_LOG="$OUT_DIR/missing_package.log"
 NEGATIVE_ELF="$OUT_DIR/missing_package.elf"
 set +e
-SOUNIO_SOUC_VERBOSE=1 "$SOUC_BIN" compile "$NEGATIVE" -o "$NEGATIVE_ELF" >"$NEGATIVE_LOG" 2>&1
+SOUNIO_SOUC_VERBOSE=1 "$SUBCOMMAND_SOUC_BIN" compile "$NEGATIVE" -o "$NEGATIVE_ELF" >"$NEGATIVE_LOG" 2>&1
 negative_rc=$?
 set -e
 if [[ $negative_rc -eq 0 ]]; then
