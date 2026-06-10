@@ -101,12 +101,16 @@ RUN_ID="${RUN_ID:-kretikos-source-$(date -u +%Y%m%dT%H%M%S)-${BASHPID}}"
 LOCAL_TARBALL="${LOCAL_TARBALL:-/tmp/${RUN_ID}.tgz}"
 LOCAL_SBATCH="${LOCAL_SBATCH:-/tmp/${RUN_ID}.sbatch}"
 REMOTE_SBATCH="${REMOTE_SBATCH:-/tmp/${RUN_ID}.sbatch}"
+REMOTE_PAYLOAD_TGZ="${REMOTE_PAYLOAD_TGZ:-${KRETIKOS_HPC_WORKER_TMP}/${RUN_ID}.payload.tgz}"
 LOCAL_LOADER="${LOCAL_LOADER:-/tmp/${RUN_ID}.kretikos_nvidia_bare_loader}"
 SOURCE_PAYLOAD_NAME="${RUN_ID}.source.sio"
 LOADER_PAYLOAD_NAME="$(basename "${LOCAL_LOADER}")"
 SOURCE_PAYLOAD="/tmp/${SOURCE_PAYLOAD_NAME}"
 
 cleanup() {
+  if [[ "${KRETIKOS_HPC_KEEP_LOCAL:-0}" == "1" ]]; then
+    return
+  fi
   rm -f "${SOURCE_PAYLOAD}" "${LOCAL_TARBALL}" "${LOCAL_SBATCH}" "${LOCAL_LOADER}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -120,20 +124,18 @@ tar -C "${ROOT_DIR}" -czf "${LOCAL_TARBALL}" \
   bin/kretikos \
   bin/souc \
   bin/souc-linux-x86_64 \
-  self-hosted/gpu/kretikos_emit_ptx.sio \
-  self-hosted/gpu/kretikos_emit_cubin.sio \
-  self-hosted/gpu/kretikos_emit_kaxi.sio \
-  self-hosted/gpu/kretikos_kaxi_validate_evidence.sio \
-  self-hosted/gpu/kretikos_json_emit.sio \
-  self-hosted/gpu/kaxi_backend.sio \
-  self-hosted/gpu/ptx.sio \
-  self-hosted/gpu/nvidia_bare.sio \
+  self-hosted/gpu/*.sio \
   scripts/gpu/nvidia_bare_driver_loader.c \
   stdlib \
   -C /tmp "${LOADER_PAYLOAD_NAME}" "${SOURCE_PAYLOAD_NAME}"
 tar -tzf "${LOCAL_TARBALL}" >/dev/null
 
-PAYLOAD_B64="$(base64 -w 0 "${LOCAL_TARBALL}" 2>/dev/null || base64 "${LOCAL_TARBALL}" | tr -d '\n')"
+WORKER_POD_FOR_PAYLOAD="$("${KUBECTL_BIN}" -n "${NS}" get pods -l "${KRETIKOS_HPC_WORKER_POD_LABEL}" -o wide \
+  | awk -v node="${KRETIKOS_HPC_WORKER_NODE}" '$7 == node { print $1; exit }')"
+if [[ -z "${WORKER_POD_FOR_PAYLOAD}" ]]; then
+  echo "could not resolve worker pod for node ${KRETIKOS_HPC_WORKER_NODE}" >&2
+  exit 1
+fi
 
 cat > "${LOCAL_SBATCH}" <<EOF
 #!/usr/bin/env bash
@@ -163,6 +165,7 @@ CERTIFY_KAXI="${KRETIKOS_HPC_CERTIFY_KAXI}"
 SOURCE_PAYLOAD_NAME="${SOURCE_PAYLOAD_NAME}"
 LOADER_PAYLOAD_NAME="${LOADER_PAYLOAD_NAME}"
 KRETIKOS_VEC_N="${KRETIKOS_VEC_N}"
+REMOTE_PAYLOAD_TGZ="${REMOTE_PAYLOAD_TGZ}"
 
 mark() {
   local msg="\$1"
@@ -186,10 +189,8 @@ trap 'fail "\$?" "\$LINENO"' ERR
 rm -rf "\${LOCAL_ROOT}"
 mkdir -p "\${SOUNIO_DIR}" "\${BUNDLE_DIR}" "\${CERT_DIR}"
 mark "kretikos_source=running phase=decode_payload"
-cat > "\${LOCAL_ROOT}/payload.tgz.b64" <<'PAYLOAD_EOF'
-${PAYLOAD_B64}
-PAYLOAD_EOF
-base64 -d "\${LOCAL_ROOT}/payload.tgz.b64" > "\${LOCAL_ROOT}/payload.tgz"
+cp "\${REMOTE_PAYLOAD_TGZ}" "\${LOCAL_ROOT}/payload.tgz"
+rm -f "\${REMOTE_PAYLOAD_TGZ}"
 tar -xzf "\${LOCAL_ROOT}/payload.tgz" -C "\${SOUNIO_DIR}"
 mv "\${SOUNIO_DIR}/\${LOADER_PAYLOAD_NAME}" "\${SOUNIO_DIR}/kretikos_nvidia_bare_loader"
 chmod +x "\${SOUNIO_DIR}/bin/kretikos" "\${SOUNIO_DIR}/bin/souc" "\${SOUNIO_DIR}/bin/souc-linux-x86_64" "\${SOUNIO_DIR}/kretikos_nvidia_bare_loader"
@@ -366,7 +367,8 @@ if [[ "\${PUBLISH_RESULTS}" == "1" ]]; then
 fi
 EOF
 
-echo "[3/5] uploading sbatch to login pod"
+echo "[3/5] staging payload and uploading sbatch"
+"${KUBECTL_BIN}" -n "${NS}" cp "${LOCAL_TARBALL}" "${WORKER_POD_FOR_PAYLOAD}:${REMOTE_PAYLOAD_TGZ}" >/dev/null
 "${KUBECTL_BIN}" -n "${NS}" cp "${LOCAL_SBATCH}" "${LOGIN_POD}:${REMOTE_SBATCH}" >/dev/null
 
 echo "[4/5] submitting to Slurm"
