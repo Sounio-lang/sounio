@@ -76,26 +76,26 @@ fn module_frontend_import_byte_to_str(c: i8) -> string {
 // allocator never reclaims those buffers (~1.6 MB/fn × 6681 fns ≈ 10.6 GB peak). This caches
 // by path so a file is read from disk at most once; repeat reads return the already-allocated
 // content (the buffer persists under no-free anyway). ~81 distinct files; cap 512.
-struct ReadFileCacheEntry { path: string, content: string, used: bool }
-fn empty_read_file_cache_entry() -> ReadFileCacheEntry { ReadFileCacheEntry { path: "", content: "", used: false } }
-var READ_FILE_CACHE: [ReadFileCacheEntry; 512] = [empty_read_file_cache_entry(); 512]
+// Parallel string arrays (NOT a struct-of-strings array — storing a string FIELD of a
+// struct array element corrupts the fat-pointer, the c634b38f string/struct-field class).
+// String arrays + direct element stores are the proven pattern (cf. visited_paths).
+var READ_FILE_CACHE_PATH: [string; 512] = [""; 512]
+var READ_FILE_CACHE_CONTENT: [string; 512] = [""; 512]
 var READ_FILE_CACHE_COUNT: i64 = 0
 
 fn module_frontend_cached_read_file(path: string) -> string with IO, Mut, Panic, Div {
     var i: i64 = 0
     while i < READ_FILE_CACHE_COUNT {
-        if str_eq(READ_FILE_CACHE[i as usize].path, path) {
-            return READ_FILE_CACHE[i as usize].content
+        if str_eq(READ_FILE_CACHE_PATH[i as usize], path) {
+            return READ_FILE_CACHE_CONTENT[i as usize]
         }
         i = i + 1
     }
     let content = read_file(path)
     if READ_FILE_CACHE_COUNT < 512 {
         let idx = READ_FILE_CACHE_COUNT
-        // whole-element store (the proven find_or_add_fn_id idiom; never a nested
-        // array-element field store, which miscompiles for struct fields).
-        var entry = ReadFileCacheEntry { path: path, content: content, used: true }
-        READ_FILE_CACHE[idx as usize] = entry
+        READ_FILE_CACHE_PATH[idx as usize] = path
+        READ_FILE_CACHE_CONTENT[idx as usize] = content
         READ_FILE_CACHE_COUNT = idx + 1
     }
     content
