@@ -362,6 +362,130 @@ pub fn canvas_sphere_shaded(
 }
 
 // ============================================================
+// SSS (subsurface-scattering) sphere — wrap lighting + back-scatter
+// ============================================================
+//
+// Green 2004 "wrap lighting" + back-scatter term for organic/biological
+// atom glow. Produces soft translucent halo when lit from behind.
+//
+//   base_r/g/b  — surface CPK colour
+//   trans_r/g/b — transmitted/scatter tint (glow from inside)
+//                 e.g., O atom: base=(220,50,50) trans=(255,160,120)
+//
+// Wrap diffuse: diff = clamp((N·L + 0.5) / 1.5, 0, 1)²
+// Back-scatter: back = max(0, -N·L + 0.2)³ × 0.35  (rear translucency)
+
+pub fn canvas_sphere_sss(
+    c: &!Canvas,
+    cx: i64, cy: i64, r: i64,
+    base_r: i64, base_g: i64, base_b: i64,
+    trans_r: i64, trans_g: i64, trans_b: i64,
+) with Mut, Div {
+    if r <= 0 { return }
+    let r_f = r as f64
+    let r2  = r * r
+
+    let lx: f64 =         0.447
+    let ly: f64 = 0.0 - 0.632
+    // lz = 0.632 (used inline below)
+    let hx: f64 =         0.247
+    let hy: f64 = 0.0 - 0.350
+    let hz: f64 =         0.903
+
+    let ambient:  f64 = 0.28
+    let spec_str: f64 = 0.80
+
+    let x_min = cext_clamp(cx - r, 0, c.width  - 1)
+    let x_max = cext_clamp(cx + r, 0, c.width  - 1)
+    let y_min = cext_clamp(cy - r, 0, c.height - 1)
+    let y_max = cext_clamp(cy + r, 0, c.height - 1)
+
+    var py = y_min
+    while py <= y_max {
+        var px = x_min
+        while px <= x_max {
+            let dx = px - cx
+            let dy = py - cy
+            if dx * dx + dy * dy <= r2 {
+                let nx_f = (dx as f64) / r_f
+                let ny_f = (dy as f64) / r_f
+                let nz2  = 1.0 - nx_f * nx_f - ny_f * ny_f
+                let nz_f = sph_sqrt(nz2)
+
+                let ndotl_raw = nx_f * lx + ny_f * ly + nz_f * 0.632
+
+                // Wrap lighting: (N·L + wrap) / (1 + wrap), clamped, squared
+                let wrap_num = ndotl_raw + 0.5
+                let wrap_raw = wrap_num / 1.5
+                let wrap_cl  = if wrap_raw < 0.0 { 0.0 } else if wrap_raw > 1.0 { 1.0 } else { wrap_raw }
+                let diff = wrap_cl * wrap_cl
+
+                // Back-scatter: strongest when N·L ≈ -1 (back-lit)
+                let back_raw = 0.0 - ndotl_raw + 0.2
+                let back_cl  = if back_raw < 0.0 { 0.0 } else { back_raw }
+                let back2 = back_cl * back_cl
+                let back  = back2 * back_cl * 0.35
+
+                // Specular (N·H)^32
+                let ndoth = nx_f * hx + ny_f * hy + nz_f * hz
+                let s1 = if ndoth > 0.0 { ndoth } else { 0.0 }
+                let s2 = s1 * s1; let s4 = s2 * s2
+                let s8 = s4 * s4; let s16 = s8 * s8; let s32 = s16 * s16
+
+                let intensity = ambient + (1.0 - ambient) * diff
+
+                let fr = (base_r  as f64) * intensity + (trans_r as f64) * back + 255.0 * spec_str * s32
+                let fg = (base_g  as f64) * intensity + (trans_g as f64) * back + 255.0 * spec_str * s32
+                let fb = (base_b  as f64) * intensity + (trans_b as f64) * back + 255.0 * spec_str * s32
+
+                let ir = if fr > 255.0 { 255 } else { fr as i64 }
+                let ig = if fg > 255.0 { 255 } else { fg as i64 }
+                let ib = if fb > 255.0 { 255 } else { fb as i64 }
+                write_i64(c.pixels, py * c.width + px, ib | (ig << 8) | (ir << 16))
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// ============================================================
+// Depth-buffer silhouette outline
+// ============================================================
+//
+// Post-process pass: for each foreground pixel whose 4-neighbors
+// include a background pixel, overwrite with the outline colour.
+// depth_buf must be the same buffer used for rasterization
+// (cleared with r3d_depth_buf_clear which writes +Inf = 0x7FF0000000000000).
+// Call AFTER all rasterization, BEFORE window_present.
+
+pub fn canvas_depth_outline(
+    c: &!Canvas,
+    depth_buf: *mut i64,
+    r: i64, g: i64, b: i64,
+) with Mut {
+    let bg: i64 = 0x7FF0000000000000
+    var py: i64 = 1
+    while py < c.height - 1 {
+        var px: i64 = 1
+        while px < c.width - 1 {
+            let d = read_i64(depth_buf, py * c.width + px)
+            if d != bg {
+                let dn = read_i64(depth_buf, (py - 1) * c.width + px)
+                let ds = read_i64(depth_buf, (py + 1) * c.width + px)
+                let dw = read_i64(depth_buf, py * c.width + (px - 1))
+                let de = read_i64(depth_buf, py * c.width + (px + 1))
+                if dn == bg || ds == bg || dw == bg || de == bg {
+                    write_i64(c.pixels, py * c.width + px, b | (g << 8) | (r << 16))
+                }
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// ============================================================
 // Cylinder impostor bond — ray-cylinder intersection per pixel
 // ============================================================
 //

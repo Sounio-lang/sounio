@@ -662,3 +662,176 @@ pub fn epiviz_raincloud(
         di = di + 1
     }
 }
+
+// ============================================================
+// ECDF with DKW 95% confidence band (F2)
+// ============================================================
+//
+// Empirical CDF rendered as a step function.
+// DKW inequality (Massart 1990): band half-width ε = sqrt(ln(40)/(2n)).
+// For n=50: ε ≈ 0.192; for n=20: ε ≈ 0.303.
+//
+// cs: x-axis = data domain, y-axis = [0,1] (probability).
+// data[0..n]: observations.
+// r/g/b: step-function colour; band shown at 40% opacity.
+
+pub fn epiviz_ecdf(
+    cs: &CoordSystem,
+    data: &[f64; 256],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n < 2 { return }
+
+    var ord: [i64; 256] = [0; 256]
+    epiviz_isort(data, n, &!ord)
+
+    // DKW epsilon: sqrt(ln(40) / (2n)) = sqrt(1.844439 / n)
+    let eps = epiviz_sqrt(1.844439 / (n as f64))
+
+    // Draw DKW confidence band (fill between lower and upper bound) in blended colour
+    var bi: i64 = 0
+    while bi < n {
+        let xv = data[ord[bi as usize] as usize]
+        let yv = ((bi + 1) as f64) / (n as f64)
+        let y_lo = if yv - eps < 0.0 { 0.0 } else { yv - eps }
+        let y_hi = if yv + eps > 1.0 { 1.0 } else { yv + eps }
+        let sx = coord_map_x(cs, xv)
+        let sy_lo = coord_map_y(cs, y_lo)
+        let sy_hi = coord_map_y(cs, y_hi)
+        let top = if sy_lo < sy_hi { sy_lo } else { sy_hi }
+        let bot = if sy_lo > sy_hi { sy_lo } else { sy_hi }
+        var sy = top
+        while sy <= bot {
+            canvas_blend_pixel(c, sx - 1, sy, r, g, b, 35)
+            canvas_blend_pixel(c, sx,     sy, r, g, b, 35)
+            canvas_blend_pixel(c, sx + 1, sy, r, g, b, 35)
+            sy = sy + 1
+        }
+        bi = bi + 1
+    }
+
+    // Draw ECDF step function
+    var si: i64 = 0
+    while si < n {
+        let xv0 = data[ord[si as usize] as usize]
+        let yv0 = ((si + 1) as f64) / (n as f64)
+        let xv1 = if si < n - 1 { data[ord[(si + 1) as usize] as usize] } else { xv0 }
+        let sx0 = coord_map_x(cs, xv0)
+        let sx1 = if si < n - 1 { coord_map_x(cs, xv1) } else { sx0 }
+        let sy  = coord_map_y(cs, yv0)
+        // Horizontal step segment
+        canvas_draw_line_aa(c, sx0, sy, sx1, sy, r, g, b)
+        // Vertical riser (from previous height to current)
+        if si > 0 {
+            let sy_prev = coord_map_y(cs, (si as f64) / (n as f64))
+            canvas_draw_line_aa(c, sx0, sy_prev, sx0, sy, r, g, b)
+        }
+        si = si + 1
+    }
+    // First riser from 0 to 1/n
+    let sx_first = coord_map_x(cs, data[ord[0] as usize])
+    let sy_zero  = coord_map_y(cs, 0.0)
+    let sy_first = coord_map_y(cs, 1.0 / (n as f64))
+    canvas_draw_line_aa(c, sx_first, sy_zero, sx_first, sy_first, r, g, b)
+}
+
+// ============================================================
+// Correlation heatmap — RdBu diverging colormap (F3)
+// ============================================================
+//
+// Renders an n×n symmetric correlation matrix as a colour grid.
+// RdBu anchors (ColorBrewer): red=(215,48,39) white=(247,247,247) blue=(33,102,172).
+// Negative r → blue tones; positive r → red tones; r≈0 → near-white.
+//
+// corr: flat row-major n×n array (n ≤ 8, so 64 entries max).
+// panel_x/y/w/h: pixel bounding rect for the heatmap.
+
+fn rdbu_r(rv: f64) -> i64 with Div {
+    let s = if rv < 0.0 { 0.0 - rv } else { rv }
+    let sc = if s > 1.0 { 1.0 } else { s }
+    if rv >= 0.0 {
+        let v = (247.0 - 32.0 * sc) as i64
+        if v < 0 { 0 } else { v }
+    } else {
+        let v = (247.0 - 214.0 * sc) as i64
+        if v < 0 { 0 } else { v }
+    }
+}
+
+fn rdbu_g(rv: f64) -> i64 with Div {
+    let s = if rv < 0.0 { 0.0 - rv } else { rv }
+    let sc = if s > 1.0 { 1.0 } else { s }
+    let v = (247.0 - 199.0 * sc) as i64
+    if v < 0 { 0 } else if v > 247 { 247 } else { v }
+}
+
+fn rdbu_b(rv: f64) -> i64 with Div {
+    let s = if rv < 0.0 { 0.0 - rv } else { rv }
+    let sc = if s > 1.0 { 1.0 } else { s }
+    if rv <= 0.0 {
+        let v = (247.0 - 75.0 * sc) as i64
+        if v < 0 { 0 } else if v > 247 { 247 } else { v }
+    } else {
+        let v = (247.0 - 208.0 * sc) as i64
+        if v < 0 { 0 } else { v }
+    }
+}
+
+pub fn epiviz_corrmap(
+    panel_x: i64, panel_y: i64, panel_w: i64, panel_h: i64,
+    corr: &[f64; 64],
+    n: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n <= 0 { return }
+    let cell_w = panel_w / n
+    let cell_h = panel_h / n
+    let cell_w_s = if cell_w < 1 { 1 } else { cell_w }
+    let cell_h_s = if cell_h < 1 { 1 } else { cell_h }
+
+    var row: i64 = 0
+    while row < n {
+        var col: i64 = 0
+        while col < n {
+            let rv = corr[(row * n + col) as usize]
+            let cr = rdbu_r(rv)
+            let cg = rdbu_g(rv)
+            let cb = rdbu_b(rv)
+            let x0 = panel_x + col * cell_w_s
+            let y0 = panel_y + row * cell_h_s
+
+            // Fill cell
+            var cy = y0
+            while cy < y0 + cell_h_s {
+                var cx = x0
+                while cx < x0 + cell_w_s {
+                    if cx >= 0 && cx < c.width && cy >= 0 && cy < c.height {
+                        write_i64(c.pixels, cy * c.width + cx,
+                                  cb | (cg << 8) | (cr << 16))
+                    }
+                    cx = cx + 1
+                }
+                cy = cy + 1
+            }
+            // Thin grid line on right and bottom edges (dark)
+            var gl: i64 = y0
+            while gl < y0 + cell_h_s {
+                if x0 + cell_w_s < c.width {
+                    canvas_blend_pixel(c, x0 + cell_w_s - 1, gl, 50, 50, 60, 120)
+                }
+                gl = gl + 1
+            }
+            var gl2: i64 = x0
+            while gl2 < x0 + cell_w_s {
+                if y0 + cell_h_s < c.height {
+                    canvas_blend_pixel(c, gl2, y0 + cell_h_s - 1, 50, 50, 60, 120)
+                }
+                gl2 = gl2 + 1
+            }
+            col = col + 1
+        }
+        row = row + 1
+    }
+}
