@@ -18,6 +18,14 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `render::renderer3d` keeps CPU Canvas as the target while adding Blinn-Phong specular highlights and antialiased edge outlines.
 - Proofs: `tests/run-pass/viz_identity_focus_dump.sio` and `tests/run-pass/viz_renderer3d_edges.sio`.
 
+## V1.2: Live Lab Interaction And Export Identity
+
+- `examples/viz_lab/main.sio` exercises pointer and keyboard interaction over a richer Visual IR scene: chart, uncertainty band, heatmap, molecule, scalar field, mesh, slider, tabs, and toggle.
+- `tests/run-pass/viz_lab_interaction.sio` provides a headless lab proof with mouse events, keyboard focus traversal, focused activation, Canvas pixel checks, `viz_scene_dump`, and `viz_app_frame_hash`.
+- `viz_html_emit_scene` exports every node inside a passive SVG group carrying `data-viz-id`, `data-viz-parent-id`, `data-viz-tag`, `data-viz-kind`, and `data-viz-slot`.
+- `tests/run-pass/viz_html_identity.sio` proves those identity attributes in static HTML/SVG export.
+- `viz_app_render` remains covered for small scenes by `tests/run-pass/viz_app_frame.sio`; richer lab scenes currently use explicit `viz_app_handle_event` plus `viz_canvas_render_scene` to match the demo path.
+
 ## V1.5: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.

@@ -192,6 +192,41 @@ VIZ_IDENTITY_FOCUS_DUMP_PASS
 
 The test proves scene-local node IDs, `parent_id`, app-owned tags, focus next/previous traversal, focused activation, keyboard fallback to the focused control, and deterministic `viz_scene_dump` output.
 
+## Lab Interaction Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_lab_interaction.sio
+```
+
+Expected output:
+
+```text
+VIZ_LAB_INTERACTION_PASS
+```
+
+The test drives the native lab scene as Sounio data: pointer events move the time slider and switch tabs, keyboard Tab moves focus, Space activates a focused toggle, Canvas pixels are checked, and `viz_app_frame_hash` proves the frame snapshot changed after interaction.
+
+## HTML Identity Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_html_identity.sio
+```
+
+Expected output includes:
+
+```text
+data-viz-id="1"
+data-viz-parent-id="1"
+data-viz-tag="77"
+VIZ_HTML_IDENTITY_PASS
+```
+
+The test proves static HTML/SVG export preserves Visual IR identity, parent identity, tag, kind, and data-slot metadata as passive attributes. JavaScript still owns no scientific semantics.
+
 ## Renderer3D Edge Proof
 
 Run:
