@@ -26,6 +26,14 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `tests/run-pass/viz_html_identity.sio` proves those identity attributes in static HTML/SVG export.
 - `viz_app_render` remains covered for small scenes by `tests/run-pass/viz_app_frame.sio`; richer lab scenes currently use explicit `viz_app_handle_event` plus `viz_canvas_render_scene` to match the demo path.
 
+## V1.3: Replay, Inspector, And Cross-Renderer Audit
+
+- `stdlib/viz/viz_replay.sio` replays fixed `display::event::Event` arrays into `VizApp`/`VizScene`, renders every Canvas frame, and returns the final `viz_app_frame_hash`.
+- `tests/run-pass/viz_replay_deterministic.sio` proves two independent scenes and canvases converge to the same frame hash and interaction state from the same event tape.
+- `stdlib/viz/inspector.sio` draws a native Canvas inspector panel for node count, selected/hovered/focused state, IDs, tags, kinds, and data slots.
+- `tests/run-pass/viz_inspector_panel.sio` gives the inspector a headless pixel proof.
+- `viz_html_emit_scene` now emits a passive `viz-audit` comment with node count, selected/hovered/focused nodes, active tab, and integer scene time so HTML/SVG exports carry the same audit trail without JavaScript semantics.
+
 ## V1.5: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.

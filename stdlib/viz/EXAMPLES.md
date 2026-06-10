@@ -227,6 +227,38 @@ VIZ_HTML_IDENTITY_PASS
 
 The test proves static HTML/SVG export preserves Visual IR identity, parent identity, tag, kind, and data-slot metadata as passive attributes. JavaScript still owns no scientific semantics.
 
+## Replay Determinism Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_replay_deterministic.sio
+```
+
+Expected output includes:
+
+```text
+VIZ_REPLAY_DETERMINISTIC_PASS
+```
+
+The test replays the same fixed event tape twice through `VizApp`, `VizScene`, Canvas rendering, and `viz_app_frame_hash`. It proves the final frame hash and interaction state match, while the dump shows node identity/tags and final hover/focus state.
+
+## Inspector Panel Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_inspector_panel.sio
+```
+
+Expected output:
+
+```text
+VIZ_INSPECTOR_PANEL_PASS
+```
+
+The test draws the native Canvas inspector panel over a focused Visual IR scene and verifies panel/text pixels without requiring a display server.
+
 ## Renderer3D Edge Proof
 
 Run:

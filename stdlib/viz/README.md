@@ -8,6 +8,8 @@ The v1 architecture is:
 - `viz::viz_canvas`: immediate native renderer to `display::Canvas`.
 - `viz::viz_html`: static HTML/SVG export renderer over the same IR.
 - `viz::viz_app`: headless-testable app runner for Event -> Visual IR -> Canvas frames.
+- `viz::viz_replay`: deterministic event replay over `VizApp`, `VizScene`, Canvas rendering, and frame hashes.
+- `viz::inspector`: native Canvas inspector panel for Visual IR identity and interaction state.
 - `viz::viz_window`: optional native `display::Window` bridge for manual event-loop demos.
 - `viz::physchem`: Sounio data structures for molecules, bonds, scalar/vector fields, trajectories, spectra, lattice/phonon fields, particle event views, and uncertainty overlays.
 - `viz::{coord,chart,epiviz,sci}`: direct drawing helpers that the IR renderer can lower into.
@@ -30,7 +32,10 @@ Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattic
 - Focused node state is Sounio data. `viz_scene_focus_next`, `viz_scene_focus_prev`, and `viz_scene_activate_focused` provide deterministic keyboard-style navigation for controls.
 - `viz_scene_dump` emits deterministic node/data counts plus per-node identity, parent, tag, kind, data slot, and rectangle fields for debugging and CI proof logs.
 - `viz_html_emit_scene` wraps each Visual IR node in a static SVG group with `data-viz-id`, `data-viz-parent-id`, `data-viz-tag`, `data-viz-kind`, and `data-viz-slot` attributes so exports remain auditable without JavaScript semantics.
+- `viz_html_emit_scene` also emits a passive `viz-audit` comment with node count, selected/hovered/focused nodes, active tab, and integer scene time.
 - `viz_app_frame_hash` gives headless tests a compact deterministic probe over app frame state, Visual IR interaction state, and a few Canvas pixels.
+- `viz_replay_events` replays a fixed event array into the Sounio reducer, renders every frame, and returns the final deterministic frame hash.
+- `viz_inspector_draw` renders node IDs, tags, kinds, selected/hovered/focused state, and node counts into a native Canvas panel.
 - Labels and text controls use fixed `[i8; 64]` buffers in the Visual IR. Canvas renders them with `display::font`; HTML/SVG escapes XML-sensitive ASCII before export.
 - Native frontend builders cover button, slider, toggle, tabs, legend, tooltip, text viewport, and plot viewport nodes over the same control reducer machinery.
 - `display::event::Event` can be reduced directly into `VizScene` for headless tests and future native window loops.
