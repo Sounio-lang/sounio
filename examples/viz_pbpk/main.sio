@@ -1,0 +1,188 @@
+// examples/viz_pbpk/main.sio — PK uncertainty visualization demo
+//
+// Two-panel display:
+//   Top (y 20-210): plasma concentration C(t) with 3 nested HDI ribbons (50/80/95%)
+//   Bottom (y 240-430): epistemic waterfall for key PK parameters
+//
+// Model: 1-compartment IV bolus  C(t) = (D/Vd)*exp(-(CL/Vd)*t)
+//   D=5mg, Vd=50L, CL=10L/h → ke=0.2h^-1, C0=0.1mg/L
+//   GUM uncertainty: σD=15%·D, σVd=30%·Vd, σCL=25%·CL
+//   σ²(C) = (1/Vd·e^{-ke·t})²σ²D + (-D/Vd²·e^{-ke·t}·(1+ke·t))²σ²Vd + (D·t/Vd²)²·e^{-2ke·t}·σ²CL
+//   (GUM first-order approximation)
+// HDI bounds: median ± z·σ where z=0.674(50%), 1.282(80%), 1.960(95%)
+//
+// Press ESC or close to exit.
+
+use display::window::{Window, window_open, window_set_title, window_present, window_pending,
+                       window_next_event, window_close}
+use display::canvas::{Canvas, canvas_from_window, canvas_clear}
+use display::event::{EV_CLOSE, EV_KEY_PRESS}
+use viz::coord::{CoordSystem, coord_new, coord_draw_axes, coord_draw_grid, coord_draw_frame}
+use viz::chart::{chart_uncertainty_band}
+use viz::epiviz::{epiviz_waterfall}
+
+// ============================================================
+// Math helpers
+// ============================================================
+
+fn vpk_exp_neg(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 1.0 }
+    let e1: f64 = 0.36787944117
+    let ipart = x as i64
+    let frac = x - (ipart as f64)
+    var r = 1.0
+    var term = 1.0
+    var k: i64 = 1
+    while k <= 12 {
+        term = 0.0 - term * frac / (k as f64)
+        r = r + term
+        k = k + 1
+    }
+    if r < 0.0 { r = 0.0 }
+    var em: i64 = 0
+    while em < ipart {
+        r = r * e1
+        em = em + 1
+    }
+    r
+}
+
+fn vpk_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// ============================================================
+// PK curve + GUM uncertainty arrays
+// ============================================================
+
+fn pk_fill_arrays(
+    xs: &![f64; 1024],
+    med: &![f64; 1024],
+    lo95: &![f64; 1024], hi95: &![f64; 1024],
+    lo80: &![f64; 1024], hi80: &![f64; 1024],
+    lo50: &![f64; 1024], hi50: &![f64; 1024],
+    n: i64,
+) with Mut, Div {
+    let dose: f64 = 5.0
+    let vd: f64 = 50.0
+    let cl: f64 = 10.0
+    let ke = cl / vd
+    let c0 = dose / vd
+    // GUM coefficient standard deviations
+    let s_d  = 0.15 * dose
+    let s_vd = 0.30 * vd
+    let s_cl = 0.25 * cl
+    let t_max: f64 = 24.0
+    var i: i64 = 0
+    while i < n {
+        let t = t_max * (i as f64) / ((n - 1) as f64)
+        let ekt = vpk_exp_neg(ke * t)
+        let ct = c0 * ekt
+        // GUM sensitivities
+        let dc_dd  = ekt / vd
+        let dc_dvd = 0.0 - ct / vd * (1.0 + ke * t)
+        let dc_dcl = 0.0 - ct * t / vd
+        let var_c = dc_dd*dc_dd*s_d*s_d + dc_dvd*dc_dvd*s_vd*s_vd + dc_dcl*dc_dcl*s_cl*s_cl
+        let sigma = vpk_sqrt(var_c)
+        xs[i as usize]   = t
+        med[i as usize]  = ct
+        lo95[i as usize] = ct - 1.960 * sigma
+        hi95[i as usize] = ct + 1.960 * sigma
+        lo80[i as usize] = ct - 1.282 * sigma
+        hi80[i as usize] = ct + 1.282 * sigma
+        lo50[i as usize] = ct - 0.674 * sigma
+        hi50[i as usize] = ct + 0.674 * sigma
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Main
+// ============================================================
+
+fn main() with IO, Alloc, Mut, Div {
+    let W: i64 = 640
+    let H: i64 = 480
+
+    var title: [i8; 128] = [0; 128]
+    title[0]  = 80   // P
+    title[1]  = 75   // K
+    title[2]  = 32   //
+    title[3]  = 85   // U
+    title[4]  = 110  // n
+    title[5]  = 99   // c
+    title[6]  = 101  // e
+    title[7]  = 114  // r
+    title[8]  = 116  // t
+    title[9]  = 97   // a
+    title[10] = 105  // i
+    title[11] = 110  // n
+    title[12] = 116  // t
+    title[13] = 121  // y
+    let title_len: i64 = 14
+
+    var win = window_open(W, H)
+    window_set_title(&!win, &title, title_len)
+
+    // Precompute PK arrays (constant — no sliders in this demo)
+    let n_pts: i64 = 60
+    var xs:   [f64; 1024] = [0.0; 1024]
+    var med:  [f64; 1024] = [0.0; 1024]
+    var lo95: [f64; 1024] = [0.0; 1024]
+    var hi95: [f64; 1024] = [0.0; 1024]
+    var lo80: [f64; 1024] = [0.0; 1024]
+    var hi80: [f64; 1024] = [0.0; 1024]
+    var lo50: [f64; 1024] = [0.0; 1024]
+    var hi50: [f64; 1024] = [0.0; 1024]
+    pk_fill_arrays(&!xs, &!med, &!lo95, &!hi95, &!lo80, &!hi80, &!lo50, &!hi50, n_pts)
+
+    // CoordSystem for top panel: time [0,24h], conc [0, 0.14 mg/L]
+    let cs_top = coord_new(0.0, 24.0, 0.0, 0.14, 60, 20, 560, 180)
+
+    // Bottom panel: confidence waterfall for 4 PK parameters
+    let cs_bot = coord_new(0.0, 1.0, 0.0, 4.0, 60, 250, 560, 180)
+    var confs: [i64; 64] = [0; 64]
+    confs[0] = 950   // D  — well controlled (analytical balance)
+    confs[1] = 720   // Vd — moderate uncertainty (population estimate)
+    confs[2] = 780   // CL — moderate uncertainty (creatinine-based)
+    confs[3] = 860   // ke — derived from CL/Vd, moderate
+
+    var running = true
+    while running {
+        while window_pending(&!win) > 0 {
+            let ev = window_next_event(&!win)
+            if ev.kind == EV_CLOSE { running = false }
+            if ev.kind == EV_KEY_PRESS && ev.key == 27 { running = false }
+        }
+
+        var c = canvas_from_window(&!win)
+        canvas_clear(&!c, 18, 20, 30)
+
+        // Top panel: uncertainty band + median line
+        coord_draw_grid(&cs_top, &!c, 5)
+        coord_draw_axes(&cs_top, &!c)
+        chart_uncertainty_band(&cs_top,
+            &xs,
+            &lo95, &hi95,
+            &lo80, &hi80,
+            &lo50, &hi50,
+            &med,
+            n_pts, &!c,
+            80, 160, 255)
+
+        // Bottom panel: parameter confidence waterfall
+        coord_draw_frame(&cs_bot, &!c)
+        epiviz_waterfall(&cs_bot, &confs, 4, &!c)
+
+        window_present(&!win)
+    }
+
+    window_close(&!win)
+}
