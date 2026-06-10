@@ -226,6 +226,64 @@ __kretikos_normalize_profile() {
     tr '[:upper:]' '[:lower:]' <<<"$1" | tr '-' '_'
 }
 
+__kretikos_source_profile_record_from_kaxi_recognition() {
+    local src="$1"
+    local recog_driver_src="$ROOT_DIR/self-hosted/gpu/kretikos_kaxi_source_recognizer.sio"
+    if [[ ! -f "$recog_driver_src" ]]; then
+        return 1
+    fi
+
+    local old_umask recog_dir recog_elf recognition_out recog_utc
+    old_umask="$(umask)"
+    umask 077
+    recog_dir="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-source-profile-recog.XXXXXX")" || {
+        umask "$old_umask"
+        return 1
+    }
+    umask "$old_umask"
+    recog_elf="$recog_dir/source-recog.elf"
+    recognition_out="$recog_dir/recognition.json"
+
+    if ! __kretikos_compile_source "$recog_driver_src" "$recog_elf" >/dev/null 2>&1; then
+        rm -rf "$recog_dir"
+        return 1
+    fi
+    chmod +x "$recog_elf"
+    recog_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if ! "$recog_elf" "$src" "$src" "$recog_utc" >"$recognition_out" 2>/dev/null; then
+        rm -rf "$recog_dir"
+        return 1
+    fi
+
+    local parts status kaxi_pattern runtime_rung profile_hint fallback_path
+    mapfile -t parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$recognition_out" \
+        --print-or-empty status \
+        --print-or-empty kaxi_pattern \
+        --print-or-empty runtime_rung \
+        --print-or-empty profile_hint \
+        --print-or-empty fallback_path 2>/dev/null || true)
+    rm -rf "$recog_dir"
+
+    status="${parts[0]:-}"
+    kaxi_pattern="${parts[1]:-}"
+    runtime_rung="${parts[2]:-}"
+    profile_hint="${parts[3]:-}"
+    fallback_path="${parts[4]:-}"
+
+    if [[ "$status" != "pass" || "$profile_hint" != "none" || "$fallback_path" != "none" ]]; then
+        return 1
+    fi
+
+    case "$kaxi_pattern:$runtime_rung" in
+        source_vec_add_f32:vec_add_f32)
+            echo "vec_add_f32|vec_add_f32|vec_add_f32|sounio_bare_vec_add_f32_sm80|semantic_source_profile|vec_add|1"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 __kretikos_source_profile_record() {
     local src="$1"
     if [[ ! -f "$src" ]]; then
@@ -244,6 +302,13 @@ __kretikos_source_profile_record() {
     profile="$(__kretikos_normalize_profile "$directive")"
 
     if [[ -z "$profile" ]]; then
+        local semantic_record
+        semantic_record="$(__kretikos_source_profile_record_from_kaxi_recognition "$src" 2>/dev/null || true)"
+        if [[ -n "$semantic_record" ]]; then
+            echo "$semantic_record"
+            return 0
+        fi
+
         if grep -Eq 'kernel[[:space:]]+fn[[:space:]]+.*(epistemic_dual|knowledge_dual)' "$src"; then
             profile="epistemic_dual_output_f32"
         elif grep -Eq 'kernel[[:space:]]+fn[[:space:]]+.*epistemic.*vec.*add' "$src"; then
