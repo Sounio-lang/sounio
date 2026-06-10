@@ -28,6 +28,7 @@ echo "[build mc]" | tee "\${RES}/SUMMARY.txt"
 /usr/bin/timeout 1200 ./bin/souc self-hosted/compiler/main.sio "\${ROOT}/mc.elf" > "\${RES}/build.log" 2>&1
 [ -s "\${ROOT}/mc.elf" ] || { echo "BUILD_FAIL" | tee -a "\${RES}/SUMMARY.txt"; tail -15 "\${RES}/build.log" | tee -a "\${RES}/SUMMARY.txt"; exit 0; }
 chmod +x "\${ROOT}/mc.elf"
+rm -f /tmp/nv2dbg_parse /tmp/nv2dbg_summary /tmp/nv2dbg_bodies /tmp/nv2_combined_multimodule.sio
 echo "[v2] mc --native-v2-compile main.sio under RSS poller ..." | tee -a "\${RES}/SUMMARY.txt"
 "\${ROOT}/mc.elf" --native-v2-compile self-hosted/compiler/main.sio -o "\${ROOT}/v2.elf" > "\${RES}/v2.log" 2>&1 &
 GPID=\$!; PEAK=0
@@ -39,6 +40,7 @@ done
 wait \${GPID}; V2RC=\$?
 {
   echo "V2_COMPILE_RC=\${V2RC}  (0=ok, 137=OOM, 139=SIGSEGV)"
+  echo "STAGE_REACHED: combined=\$([ -f /tmp/nv2_combined_multimodule.sio ] && wc -c </tmp/nv2_combined_multimodule.sio || echo MISSING) parse=\$([ -f /tmp/nv2dbg_parse ] && echo Y || echo N) summary=\$([ -f /tmp/nv2dbg_summary ] && echo Y || echo N) bodies=\$([ -f /tmp/nv2dbg_bodies ] && echo Y || echo N)"
   echo "PEAK_HWM_MB=\$((PEAK/1024))"
   echo "v2.elf size: \$(stat -c%s "\${ROOT}/v2.elf" 2>/dev/null || echo 0)"
   echo "--- front-half: Merged IR / errors ---"; grep -iE "NV2DBG|Merged IR:|error|fail|successful|REJECT" "\${RES}/v2.log" | head -12
