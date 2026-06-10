@@ -1,5 +1,23 @@
 # bin/souc SRET-forwarding codegen bug — minimal repro (2026-06-02)
 
+> **✅ MOSTLY FIXED as of 2026-06-10** — re-measured in
+> [`../MODULAR_COMPILER_AUDIT_2026-06-10.md`](../MODULAR_COMPILER_AUDIT_2026-06-10.md)
+> on the current `bin/souc`:
+> - Plain return-forwarding (`return ctor()`, `var p = ctor(); return p`,
+>   tail): **FIXED** — prints 7.000000. Pinned green in
+>   `tests/run-pass/sret_forwarding_minimal.sio`.
+> - Cross-module large-struct forward (cd_mul / CDElement): **FIXED** —
+>   pinned green in `tests/run-pass/sret_forwarding_cross_module_cd_mul.sio`.
+> - **Forward-in-aggregate (`return (ctor(), 1)`): STILL BROKEN** — the
+>   SIGSEGV is gone but the tuple now carries uninitialised memory
+>   (t.0.f0 = 6.95e-310, t.1 = garbage). Pinned as
+>   `//@ known-failure` in `tests/run-pass/sret_forwarding_tuple_aggregate.sio`.
+>
+> Likely fixed by the SRET/store codegen commits on `feat/assoc-variance-wiring`
+> (`994525a69` / `4aab38cd8` / `63d4cad09` — plausible, not proven). The
+> gdb-pinned mechanism below remains the reference for the residual aggregate
+> case.
+
 **A function that returns the struct result of another struct-returning function returns a
 ZEROED struct.** Verified, minimal (6 lines, 1-field struct), size-independent. It provably
 explains the olanzapine bug (commit `a3ea42082`). Whether it relates to the G1 lane's E008

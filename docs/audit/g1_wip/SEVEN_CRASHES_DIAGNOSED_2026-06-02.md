@@ -1,5 +1,14 @@
 # Seven Crashes Diagnosed — modular corpus under g1 / *mut / move-codegen (2026-06-02)
 
+> **STATUS UPDATE 2026-06-10** — Cluster C ("known large-SRET miscompile,
+> NOT pursued") is now largely stale: the SRET-forwarding repros pass on the
+> current `bin/souc` (see the banner in `SRET_FORWARDING_BUG_2026-06-02.md`;
+> regression pins in `tests/run-pass/sret_forwarding_*.sio`). Residual open
+> member of the family: forward-in-aggregate returns uninitialised memory
+> (known-failure pin). The modular `--check` crash frontier re-measured at
+> **1 crasher** in a 109-file corpus sample (`slice_fat_pointers.sio`) — see
+> [`../MODULAR_COMPILER_AUDIT_2026-06-10.md`](../MODULAR_COMPILER_AUDIT_2026-06-10.md).
+
 **Scope.** Census + adversarial classification of SIGSEGV (rc=139) failures when running the modular/move-codegen compiler (`mc.elf` built from the g1/move-codegen tree) over the `tests/run-pass` corpus (and related). Work reduced an initial large crash frontier (tens of rc=139 under the checker) via collectors and *mut-spine migrations. After shippable changes, **7 crashers remained**; they were clustered for routing.
 
 **Decision (user explicit, this session).** "leave C documented as the known large-SRET miscompile." 5 of the 7 resolved through shippable changes (4 via cluster-A live, 1 via cluster-B committed). The remaining 2 are cluster C.

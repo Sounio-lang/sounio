@@ -1,5 +1,15 @@
 # Modular `--check` corpus failure backlog — ranked, verified (2026-06-02)
 
+> **⚠️ PARTIALLY STALE 2026-06-10** — re-measured in
+> [`../MODULAR_COMPILER_AUDIT_2026-06-10.md`](../MODULAR_COMPILER_AUDIT_2026-06-10.md)
+> on the 2026-06-07 binary: roadmap items **#1 (E008/E170 bridge state-loss),
+> #2 (scientific-notation lexer) and #4 (E014 usize index) are FIXED**
+> (verified by direct repro). **#3 (E004 literal width) remains OPEN** and is
+> now the largest coded failure bucket. Pass rate moved 25% → ~37% (1-in-5
+> sample); 23/68 sampled failures now reject with NO error code (new
+> diagnostics-gap finding). Long-tail bucket counts below are dated; re-run
+> the backlog workflow on the current binary before using them for routing.
+
 Turns the census's black-box "~231 generic failures" into a **complete, leverage-ranked,
 adversarially-verified root-cause backlog** of all modular-compiler `--check` corpus
 failures. Built by a 22-agent workflow (classify → synthesize → verify).
