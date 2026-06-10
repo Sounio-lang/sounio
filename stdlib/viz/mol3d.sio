@@ -10,13 +10,47 @@
 //   mol3d_render(&mol, &cam, angle_y, angle_x, &!canvas)
 
 use display::canvas::{Canvas}
-use display::canvas_ext::{canvas_draw_line_aa, canvas_sphere_shaded_fog}
+use display::canvas_ext::{canvas_draw_line_aa, canvas_sphere_shaded, canvas_sphere_shaded_fog}
 use render::renderer3d::{Camera3D, Vec3f}
 use viz::physchem::{MoleculeViz}
 
 // ============================================================
 // Internal math
 // ============================================================
+
+// HSV to RGB — H ∈ [0, 360], S=1, V=1. Returns r/g/b each in [0, 255].
+// Used for chromatic depth cueing (near=red, far=blue).
+fn m3_hsv_r(h: f64) -> i64 with Div {
+    let sector = (h / 60.0) as i64
+    let frac = h / 60.0 - (sector as f64)
+    if sector == 0 { 255 }
+    else if sector == 1 { (255.0 * (1.0 - frac)) as i64 }
+    else if sector == 2 { 0 }
+    else if sector == 3 { 0 }
+    else if sector == 4 { (255.0 * frac) as i64 }
+    else { 255 }
+}
+
+fn m3_hsv_g(h: f64) -> i64 with Div {
+    let sector = (h / 60.0) as i64
+    let frac = h / 60.0 - (sector as f64)
+    if sector == 0 { (255.0 * frac) as i64 }
+    else if sector == 1 { 255 }
+    else if sector == 2 { 255 }
+    else if sector == 3 { (255.0 * (1.0 - frac)) as i64 }
+    else { 0 }
+}
+
+fn m3_hsv_b(h: f64) -> i64 with Div {
+    let sector = (h / 60.0) as i64
+    let frac = h / 60.0 - (sector as f64)
+    if sector == 0 { 0 }
+    else if sector == 1 { 0 }
+    else if sector == 2 { (255.0 * frac) as i64 }
+    else if sector == 3 { 255 }
+    else if sector == 4 { 255 }
+    else { (255.0 * (1.0 - frac)) as i64 }
+}
 
 fn m3_sin(t: f64) -> f64 with Div {
     let t2 = t * t
@@ -67,9 +101,11 @@ fn m3_sort_desc(depth: &[f64; 64], n: i64, order: &![i64; 64]) with Mut {
 // ============================================================
 
 // Render a MoleculeViz into a Canvas with perspective projection.
-//   angle_y — rotation around vertical (Y) axis in radians
-//   angle_x — rotation around horizontal (X) axis in radians
-//   cam     — Camera3D; set pos_z negative (e.g. -15.0) and focal ~400 for typical molecules
+//   angle_y   — rotation around vertical (Y) axis in radians
+//   angle_x   — rotation around horizontal (X) axis in radians
+//   cam       — Camera3D; set pos_z negative (e.g. -15.0) and focal ~400 for typical molecules
+//   outline   — silhouette outline radius in extra screen pixels (0=off, 1-3 recommended)
+//   chromatic — chromatic depth cueing strength [0=off .. 255=full]
 pub fn mol3d_render(
     mol: &MoleculeViz,
     cam: &Camera3D,
@@ -161,24 +197,52 @@ pub fn mol3d_render(
     var order: [i64; 64] = [0; 64]
     m3_sort_desc(&pd, mol.atom_count, &!order)
 
-    // Fog: gradual fade toward dark background as depth increases.
+    // Fog / depth parameters.
     // mol_viewer camera at pos_z=-15 → depth = -(z - pos_z) ≈ 10..20 for typical molecules.
     let fog_near: f64 = 12.0
     let fog_far:  f64 = 30.0
 
+    // Pass 1: silhouette outlines — render each atom at radius+2 in dark colour first.
     var oi: i64 = 0
     while oi < mol.atom_count {
         let idx = order[oi as usize]
         if pvis[idx as usize] == 1 {
+            let outline_r = prad[idx as usize] + 2
+            canvas_sphere_shaded(c, px[idx as usize], py[idx as usize], outline_r, 30, 30, 42)
+        }
+        oi = oi + 1
+    }
+
+    // Pass 2: lit + AO + chromatic-depth atoms (back-to-front).
+    var oi2: i64 = 0
+    while oi2 < mol.atom_count {
+        let idx = order[oi2 as usize]
+        if pvis[idx as usize] == 1 {
             let a = mol.atoms[idx as usize]
             let depth = pd[idx as usize]
+
+            // Chromatic depth cueing: blend CPK colour toward hue(depth) at weight 0.40.
+            // dn ∈ [0,1]: near=0(red/H=0°), far=1(blue/H=240°)
+            let dn = if fog_far > fog_near {
+                let raw = (depth - fog_near) / (fog_far - fog_near)
+                if raw < 0.0 { 0.0 } else if raw > 1.0 { 1.0 } else { raw }
+            } else { 0.0 }
+            let chroma_h = dn * 240.0
+            let ch_r = m3_hsv_r(chroma_h)
+            let ch_g = m3_hsv_g(chroma_h)
+            let ch_b = m3_hsv_b(chroma_h)
+            // Blend: 60% CPK + 40% chromatic
+            let final_r = (a.r as f64 * 0.60 + ch_r as f64 * 0.40) as i64
+            let final_g = (a.g as f64 * 0.60 + ch_g as f64 * 0.40) as i64
+            let final_b = (a.b as f64 * 0.60 + ch_b as f64 * 0.40) as i64
+
             canvas_sphere_shaded_fog(c,
                 px[idx as usize], py[idx as usize], prad[idx as usize],
-                a.r, a.g, a.b,
+                final_r, final_g, final_b,
                 depth, fog_near, fog_far,
                 18.0, 20.0, 30.0,
                 ao[idx as usize])
         }
-        oi = oi + 1
+        oi2 = oi2 + 1
     }
 }

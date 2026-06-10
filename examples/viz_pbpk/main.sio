@@ -17,9 +17,12 @@ use display::window::{Window, window_open, window_set_title, window_present, win
                        window_next_event, window_close}
 use display::canvas::{Canvas, canvas_from_window, canvas_clear}
 use display::event::{EV_CLOSE, EV_KEY_PRESS}
-use viz::coord::{CoordSystem, coord_new, coord_draw_axes, coord_draw_grid, coord_draw_frame}
+use viz::coord::{CoordSystem, coord_new, coord_draw_axes, coord_draw_grid, coord_draw_frame,
+                  coord_map_x, coord_map_y}
 use viz::chart::{chart_uncertainty_band}
 use viz::epiviz::{epiviz_waterfall}
+use display::canvas_ext::{canvas_blend_pixel, canvas_draw_line_aa, canvas_sphere_shaded}
+use display::canvas::{canvas_fill_rect}
 
 // ============================================================
 // Math helpers
@@ -104,6 +107,138 @@ fn pk_fill_arrays(
 }
 
 // ============================================================
+// VPC panel — Visual Predictive Check
+// ============================================================
+//
+// Standard clinical PK/PD display (Bergstrand et al. 2011, pcVPC).
+// Shows simulated PI outer bands (blue) + median band (red) +
+// observed median (solid red) + observed outer bounds (dashed red).
+//
+// Reuses lo95/hi95/med arrays as 2.5th/97.5th/50th simulated percentiles.
+
+fn vpc_draw_dashed_line(
+    c: &!Canvas,
+    sx0: i64, sy0: i64, sx1: i64, sy1: i64,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    let dx = sx1 - sx0
+    let dy = sy1 - sy0
+    let steps = if dx < 0 { 0 - dx } else { dx }
+    let ysteps = if dy < 0 { 0 - dy } else { dy }
+    let n_steps = if steps > ysteps { steps } else { ysteps }
+    if n_steps == 0 { return }
+    var si: i64 = 0
+    while si <= n_steps {
+        // Dashed: draw 4px, skip 4px
+        if (si % 8) < 4 {
+            let t = (si as f64) / (n_steps as f64)
+            let bx = sx0 + ((sx1 - sx0) as f64 * t) as i64
+            let by_v = sy0 + ((sy1 - sy0) as f64 * t) as i64
+            canvas_fill_rect(c, bx, by_v, 1, 1, r, g, b)
+        }
+        si = si + 1
+    }
+}
+
+fn vpc_draw_panel(
+    cs: &CoordSystem,
+    xs: &[f64; 1024],
+    lo95: &[f64; 1024], hi95: &[f64; 1024],
+    lo50: &[f64; 1024], hi50: &[f64; 1024],
+    med: &[f64; 1024],
+    n: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n < 2 { return }
+    var i: i64 = 0
+    // Blue outer PI bands (2.5th and 97.5th)
+    while i < n - 1 {
+        let sx0 = coord_map_x(cs, xs[i as usize])
+        let sx1 = coord_map_x(cs, xs[(i + 1) as usize])
+        // lo95 band bottom (2.5th percentile vicinity ≈ lo95 band fill)
+        let lo_y0 = coord_map_y(cs, lo95[i as usize])
+        let lo_y1 = coord_map_y(cs, lo95[(i + 1) as usize])
+        let hi_y0 = coord_map_y(cs, hi95[i as usize])
+        let hi_y1 = coord_map_y(cs, hi95[(i + 1) as usize])
+        // Outer PI region: from lo95 edge toward the median on each side
+        if sx1 > sx0 {
+            let span = sx1 - sx0
+            var px = sx0
+            while px < sx1 {
+                let t = ((px - sx0) as f64) / (span as f64)
+                let top_y = (lo_y0 as f64 * (1.0 - t) + lo_y1 as f64 * t) as i64
+                canvas_blend_pixel(c, px, top_y, 60, 120, 220, 70)
+                canvas_blend_pixel(c, px, top_y - 1, 60, 120, 220, 40)
+                let bot_y = (hi_y0 as f64 * (1.0 - t) + hi_y1 as f64 * t) as i64
+                canvas_blend_pixel(c, px, bot_y, 60, 120, 220, 70)
+                canvas_blend_pixel(c, px, bot_y + 1, 60, 120, 220, 40)
+                px = px + 1
+            }
+        }
+        i = i + 1
+    }
+    // Red median PI band (50th percentile band)
+    var j: i64 = 0
+    while j < n - 1 {
+        let sx0 = coord_map_x(cs, xs[j as usize])
+        let sx1 = coord_map_x(cs, xs[(j + 1) as usize])
+        let lo_y0 = coord_map_y(cs, lo50[j as usize])
+        let lo_y1 = coord_map_y(cs, lo50[(j + 1) as usize])
+        let hi_y0 = coord_map_y(cs, hi50[j as usize])
+        let hi_y1 = coord_map_y(cs, hi50[(j + 1) as usize])
+        if sx1 > sx0 {
+            let span = sx1 - sx0
+            var px = sx0
+            while px < sx1 {
+                let t = ((px - sx0) as f64) / (span as f64)
+                let top_y = (lo_y0 as f64 * (1.0 - t) + lo_y1 as f64 * t) as i64
+                let bot_y = (hi_y0 as f64 * (1.0 - t) + hi_y1 as f64 * t) as i64
+                var py = top_y
+                while py <= bot_y {
+                    canvas_blend_pixel(c, px, py, 220, 60, 60, 85)
+                    py = py + 1
+                }
+                px = px + 1
+            }
+        }
+        j = j + 1
+    }
+    // Observed median — solid red line
+    var k: i64 = 0
+    while k < n - 1 {
+        let sx0 = coord_map_x(cs, xs[k as usize])
+        let sy0 = coord_map_y(cs, med[k as usize])
+        let sx1 = coord_map_x(cs, xs[(k + 1) as usize])
+        let sy1 = coord_map_y(cs, med[(k + 1) as usize])
+        canvas_draw_line_aa(c, sx0, sy0, sx1, sy1, 240, 80, 80)
+        k = k + 1
+    }
+    // Observed 2.5th + 97.5th — dashed red
+    var m: i64 = 0
+    while m < n - 1 {
+        let sx0 = coord_map_x(cs, xs[m as usize])
+        let sx1 = coord_map_x(cs, xs[(m + 1) as usize])
+        vpc_draw_dashed_line(c,
+            sx0, coord_map_y(cs, lo95[m as usize]),
+            sx1, coord_map_y(cs, lo95[(m + 1) as usize]),
+            200, 100, 100)
+        vpc_draw_dashed_line(c,
+            sx0, coord_map_y(cs, hi95[m as usize]),
+            sx1, coord_map_y(cs, hi95[(m + 1) as usize]),
+            200, 100, 100)
+        m = m + 1
+    }
+    // Simulated data points — small blue dots at each x along the median
+    var di: i64 = 0
+    while di < n {
+        let sx = coord_map_x(cs, xs[di as usize])
+        let sy = coord_map_y(cs, med[di as usize])
+        canvas_sphere_shaded(c, sx, sy, 3, 80, 140, 220)
+        di = di + 1
+    }
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -143,11 +278,10 @@ fn main() with IO, Alloc, Mut, Div {
     var hi50: [f64; 1024] = [0.0; 1024]
     pk_fill_arrays(&!xs, &!med, &!lo95, &!hi95, &!lo80, &!hi80, &!lo50, &!hi50, n_pts)
 
-    // CoordSystem for top panel: time [0,24h], conc [0, 0.14 mg/L]
-    let cs_top = coord_new(0.0, 24.0, 0.0, 0.14, 60, 20, 560, 180)
-
-    // Bottom panel: confidence waterfall for 4 PK parameters
-    let cs_bot = coord_new(0.0, 1.0, 0.0, 4.0, 60, 250, 560, 180)
+    // Three-panel layout: HDI band (top) | VPC (middle) | waterfall (bottom)
+    let cs_top = coord_new(0.0, 24.0, 0.0, 0.14, 60, 12, 560, 140)
+    let cs_vpc = coord_new(0.0, 24.0, 0.0, 0.14, 60, 168, 560, 130)
+    let cs_bot = coord_new(0.0, 1.0, 0.0, 4.0, 60, 315, 560, 148)
     var confs: [i64; 64] = [0; 64]
     confs[0] = 950   // D  — well controlled (analytical balance)
     confs[1] = 720   // Vd — moderate uncertainty (population estimate)
@@ -165,7 +299,7 @@ fn main() with IO, Alloc, Mut, Div {
         var c = canvas_from_window(&!win)
         canvas_clear(&!c, 18, 20, 30)
 
-        // Top panel: uncertainty band + median line
+        // Top panel: HDI uncertainty band + median line
         coord_draw_grid(&cs_top, &!c, 5)
         coord_draw_axes(&cs_top, &!c)
         chart_uncertainty_band(&cs_top,
@@ -176,6 +310,10 @@ fn main() with IO, Alloc, Mut, Div {
             &med,
             n_pts, &!c,
             80, 160, 255)
+
+        // Middle panel: VPC (Visual Predictive Check)
+        coord_draw_frame(&cs_vpc, &!c)
+        vpc_draw_panel(&cs_vpc, &xs, &lo95, &hi95, &lo50, &hi50, &med, n_pts, &!c)
 
         // Bottom panel: parameter confidence waterfall
         coord_draw_frame(&cs_bot, &!c)

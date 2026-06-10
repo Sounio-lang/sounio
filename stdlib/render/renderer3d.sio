@@ -360,6 +360,93 @@ pub fn r3d_rasterize_tri_phong(
 }
 
 // ============================================================
+// Cel / toon shading
+// ============================================================
+
+// r3d_shade_cel — quantizes diffuse into 4 bands + silhouette ring.
+// Silhouette: pixels whose interpolated normal faces away from the camera
+// (ni_z < edge_thresh, camera along +Z) are rendered dark.
+// band thresholds: 0.95 / 0.50 / 0.25 → 1.0 / 0.70 / 0.40 / ambient
+pub fn r3d_shade_cel(
+    base_r: i64, base_g: i64, base_b: i64,
+    nx: f64, ny: f64, nz: f64,
+    light: &Light3D,
+) -> Vec3f with Mut, Div {
+    let nl = r3d_normalise(nx, ny, nz)
+    let raw = r3d_dot(nl.x, nl.y, nl.z, light.dx, light.dy, light.dz)
+    let diffuse = if raw < 0.0 { 0.0 } else { raw }
+    let band = if diffuse > 0.95 { 1.0 }
+               else if diffuse > 0.50 { 0.70 }
+               else if diffuse > 0.25 { 0.40 }
+               else { light.ambient }
+    // Silhouette ring: normal nearly perpendicular to eye (camera along +Z)
+    let eye_dot = nl.z
+    let final_band = if eye_dot < 0.28 { 0.0 } else { band }
+    let fr = r3d_clamp_i((base_r as f64 * final_band) as i64, 0, 255)
+    let fg = r3d_clamp_i((base_g as f64 * final_band) as i64, 0, 255)
+    let fb = r3d_clamp_i((base_b as f64 * final_band) as i64, 0, 255)
+    Vec3f { x: fr as f64, y: fg as f64, z: fb as f64 }
+}
+
+// r3d_rasterize_tri_cel — same rasterizer as Phong but calls r3d_shade_cel.
+// No fog (cel shading looks best without depth fade).
+pub fn r3d_rasterize_tri_cel(
+    sx0: i64, sy0: i64,
+    sx1: i64, sy1: i64,
+    sx2: i64, sy2: i64,
+    d0: f64, d1: f64, d2: f64,
+    n0: Vec3f, n1: Vec3f, n2: Vec3f,
+    base_r: i64, base_g: i64, base_b: i64,
+    light: &Light3D,
+    depth_buf: *mut i64,
+    cv: &!Canvas,
+) with Mut, Div {
+    let area = r3d_edge(sx0, sy0, sx1, sy1, sx2, sy2)
+    if area == 0 { return }
+    let min_x = r3d_clamp_i(r3d_min_i(r3d_min_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let max_x = r3d_clamp_i(r3d_max_i(r3d_max_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let min_y = r3d_clamp_i(r3d_min_i(r3d_min_i(sy0, sy1), sy2), 0, cv.height - 1)
+    let max_y = r3d_clamp_i(r3d_max_i(r3d_max_i(sy0, sy1), sy2), 0, cv.height - 1)
+    var py = min_y
+    while py <= max_y {
+        var px = min_x
+        while px <= max_x {
+            let w0 = r3d_edge(sx1, sy1, sx2, sy2, px, py)
+            let w1 = r3d_edge(sx2, sy2, sx0, sy0, px, py)
+            let w2 = r3d_edge(sx0, sy0, sx1, sy1, px, py)
+            let inside = if area > 0 {
+                w0 >= 0 && w1 >= 0 && w2 >= 0
+            } else {
+                w0 <= 0 && w1 <= 0 && w2 <= 0
+            }
+            if inside {
+                let idx = py * cv.width + px
+                let area_f = area as f64
+                let bw0 = (w0 as f64) / area_f
+                let bw1 = (w1 as f64) / area_f
+                let bw2 = (w2 as f64) / area_f
+                let depth = bw0 * d0 + bw1 * d1 + bw2 * d2
+                let stored = read_i64(depth_buf, idx)
+                let dbits = depth as i64
+                if dbits < stored {
+                    write_i64(depth_buf, idx, dbits)
+                    let ni_x = bw0 * n0.x + bw1 * n1.x + bw2 * n2.x
+                    let ni_y = bw0 * n0.y + bw1 * n1.y + bw2 * n2.y
+                    let ni_z = bw0 * n0.z + bw1 * n1.z + bw2 * n2.z
+                    let col = r3d_shade_cel(base_r, base_g, base_b, ni_x, ni_y, ni_z, light)
+                    let pr = col.x as i64
+                    let pg = col.y as i64
+                    let pb = col.z as i64
+                    write_i64(cv.pixels, idx, pb | (pg << 8) | (pr << 16))
+                }
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// ============================================================
 // Public API: render a list of triangles
 // ============================================================
 
