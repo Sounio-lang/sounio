@@ -523,3 +523,105 @@ pub fn canvas_bond_cylinder(
         py = py + 1
     }
 }
+
+// ============================================================
+// Bloom post-processing — additive glow on bright pixels
+// ============================================================
+//
+// Two-pass separable 5-tap Gaussian (σ≈1 px): horizontal then vertical.
+// Bright pixels (perceptual luma > threshold) are extracted, blurred,
+// and added back additively. Result: specular highlights and saturated
+// colours gain a soft halo without changing mid-tones.
+//
+// scratch: heap-allocated i64 array of size c.width*c.height (caller owns).
+// threshold: luma cutoff 0–255 (typical: 200). cov: bloom intensity 0–255.
+
+pub fn canvas_bloom(c: &!Canvas, scratch: *mut i64, threshold: i64, cov: i64) with Mut, Div {
+    let w = c.width
+    let h = c.height
+    // Gaussian weights for 5-tap (symmetric): w0=center, w1=±1, w2=±2
+    // Derived from σ=1 binomial kernel, normalised over 5 taps.
+    // w = [0.2270, 0.1946, 0.1216] → scale to 256: [58, 50, 31]
+    let gw0: i64 = 58
+    let gw1: i64 = 50
+    let gw2: i64 = 31
+    let gsum: i64 = gw0 + gw1 + gw1 + gw2 + gw2  // 220
+
+    // Pass 1: horizontal blur of bright pixels → scratch
+    var hy: i64 = 0
+    while hy < h {
+        var hx: i64 = 0
+        while hx < w {
+            var acc_r: i64 = 0
+            var acc_g: i64 = 0
+            var acc_b: i64 = 0
+            var tap: i64 = 0 - 2
+            while tap <= 2 {
+                let sx = hx + tap
+                let sx_c = if sx < 0 { 0 } else if sx >= w { w - 1 } else { sx }
+                let pix = read_i64(c.pixels, hy * w + sx_c)
+                let pr = (pix >> 16) & 255
+                let pg = (pix >> 8) & 255
+                let pb = pix & 255
+                // Perceptual luma (scaled ×256): 54R + 183G + 19B
+                let luma = (54 * pr + 183 * pg + 19 * pb) >> 8
+                let bright = if luma > threshold { 1 } else { 0 }
+                let wt = if tap == 0 { gw0 }
+                         else if tap == 1 || tap == 0 - 1 { gw1 }
+                         else { gw2 }
+                acc_r = acc_r + bright * pr * wt
+                acc_g = acc_g + bright * pg * wt
+                acc_b = acc_b + bright * pb * wt
+                tap = tap + 1
+            }
+            let br = acc_r / gsum
+            let bg = acc_g / gsum
+            let bb = acc_b / gsum
+            write_i64(scratch, hy * w + hx, bb | (bg << 8) | (br << 16))
+            hx = hx + 1
+        }
+        hy = hy + 1
+    }
+
+    // Pass 2: vertical blur of scratch, additive composite into canvas
+    var vy: i64 = 0
+    while vy < h {
+        var vx: i64 = 0
+        while vx < w {
+            var acc_r: i64 = 0
+            var acc_g: i64 = 0
+            var acc_b: i64 = 0
+            var tap: i64 = 0 - 2
+            while tap <= 2 {
+                let sy = vy + tap
+                let sy_c = if sy < 0 { 0 } else if sy >= h { h - 1 } else { sy }
+                let pix = read_i64(scratch, sy_c * w + vx)
+                let pr = (pix >> 16) & 255
+                let pg = (pix >> 8) & 255
+                let pb = pix & 255
+                let wt = if tap == 0 { gw0 }
+                         else if tap == 1 || tap == 0 - 1 { gw1 }
+                         else { gw2 }
+                acc_r = acc_r + pr * wt
+                acc_g = acc_g + pg * wt
+                acc_b = acc_b + pb * wt
+                tap = tap + 1
+            }
+            let bloom_r = (acc_r / gsum) * cov / 255
+            let bloom_g = (acc_g / gsum) * cov / 255
+            let bloom_b = (acc_b / gsum) * cov / 255
+            // Additive composite: read original, add bloom, clamp
+            let idx = vy * w + vx
+            let orig = read_i64(c.pixels, idx)
+            let or_  = (orig >> 16) & 255
+            let og   = (orig >> 8) & 255
+            let ob   = orig & 255
+            let fr = cext_clamp(or_ + bloom_r, 0, 255)
+            let fg = cext_clamp(og  + bloom_g, 0, 255)
+            let fb = cext_clamp(ob  + bloom_b, 0, 255)
+            write_i64(c.pixels, idx, fb | (fg << 8) | (fr << 16))
+            vx = vx + 1
+        }
+        vy = vy + 1
+    }
+}

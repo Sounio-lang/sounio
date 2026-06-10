@@ -367,3 +367,298 @@ pub fn epiviz_violin(
     let sx_hi = coord_map_x(cs, x_hi)
     canvas_draw_line_aa(c, sx_lo, center_sy, sx_hi, center_sy, r, g, b)
 }
+
+// ============================================================
+// Sensitivity tornado chart (E3)
+// ============================================================
+//
+// Horizontal bar chart of sensitivity indices (Sobol/Morris or any
+// ∈ [0,1]) ranked largest-at-top. Bars are centred at the panel
+// midpoint and coloured green (low) → yellow → red (high).
+//
+// panel_x/y: top-left pixel of the bounding rect.
+// panel_w/h: pixel dimensions.
+// sensitivities[i] ∈ [0,1]: total-order sensitivity of parameter i.
+// n ≤ 32.
+
+pub fn epiviz_tornado(
+    panel_x: i64, panel_y: i64, panel_w: i64, panel_h: i64,
+    sensitivities: &[f64; 32],
+    n: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n <= 0 { return }
+    // Insertion sort: order[0..n] = indices into sensitivities[], descending.
+    var order: [i64; 32] = [0; 32]
+    var si: i64 = 0
+    while si < n {
+        order[si as usize] = si
+        si = si + 1
+    }
+    var sj: i64 = 1
+    while sj < n {
+        let ki = order[sj as usize]
+        let kv = sensitivities[ki as usize]
+        var sk = sj - 1
+        while sk >= 0 && sensitivities[order[sk as usize] as usize] < kv {
+            order[(sk + 1) as usize] = order[sk as usize]
+            sk = sk - 1
+        }
+        order[(sk + 1) as usize] = ki
+        sj = sj + 1
+    }
+
+    let bar_h = if n > 0 { (panel_h - 4) / n } else { 16 }
+    let bar_h_safe = if bar_h < 4 { 4 } else { bar_h }
+    let cx = panel_x + panel_w / 2   // centre x (Si=0 line)
+    let max_half = panel_w / 2 - 4   // max bar half-width in px
+
+    // Vertical reference line at centre
+    var rl: i64 = 0
+    while rl < panel_h {
+        canvas_blend_pixel(c, cx, panel_y + rl, 120, 120, 120, 80)
+        rl = rl + 1
+    }
+
+    var ri: i64 = 0
+    while ri < n {
+        let idx = order[ri as usize]
+        let sv = sensitivities[idx as usize]
+        let half_w = (sv * (max_half as f64)) as i64
+        let by = panel_y + ri * bar_h_safe + 1
+
+        // Color ramp: green (0) → yellow (0.5) → red (1.0)
+        let tr = if sv >= 0.5 {
+            let t = (sv - 0.5) * 2.0
+            200 + (55.0 * t) as i64
+        } else { 200 }
+        let tg = if sv <= 0.5 {
+            180 + (75.0 * sv * 2.0) as i64
+        } else {
+            let t = (sv - 0.5) * 2.0
+            (255.0 * (1.0 - t)) as i64
+        }
+        let tb: i64 = 30
+
+        // Bar fill: cx-half_w..cx+half_w
+        var bx = cx - half_w
+        while bx <= cx + half_w {
+            var bdy: i64 = 0
+            while bdy < bar_h_safe - 1 {
+                canvas_blend_pixel(c, bx, by + bdy, tr, tg, tb, 180)
+                bdy = bdy + 1
+            }
+            bx = bx + 1
+        }
+        // Outline top/bottom
+        canvas_draw_line_aa(c, cx - half_w, by, cx + half_w, by, tr, tg, tb)
+        canvas_draw_line_aa(c, cx - half_w, by + bar_h_safe - 2,
+                               cx + half_w, by + bar_h_safe - 2, tr, tg, tb)
+        ri = ri + 1
+    }
+}
+
+// ============================================================
+// Raincloud plot (E4) — half-violin + box + jittered dots
+// ============================================================
+//
+// Three-component display (Allen 2019 / van Langen 2020) for showing
+// both the full distribution and individual data points:
+//   Left of centre:  box-and-whisker (IQR + median + ±1.5×IQR whiskers)
+//   Right of centre: KDE half-violin (reuses Silverman bandwidth)
+//   Dots: jittered horizontally, stacked using deterministic LCG jitter
+//
+// cs: coord system — y-axis is the data axis, x=label_y is the row centre.
+// data[0..n]: raw observations ≤ 256 values.
+// label_y: data-space y position of this row's centre.
+// height: data-space height of the rain cloud strip.
+
+fn epiviz_median(data: &[f64; 256], order: &[i64; 256], n: i64) -> f64 with Div {
+    if n == 0 { return 0.0 }
+    let mid = n / 2
+    if (n & 1) == 1 {
+        data[order[mid as usize] as usize]
+    } else {
+        (data[order[mid as usize] as usize] +
+         data[order[(mid - 1) as usize] as usize]) * 0.5
+    }
+}
+
+fn epiviz_isort(data: &[f64; 256], n: i64, order: &![i64; 256]) with Mut {
+    var ii: i64 = 0
+    while ii < n {
+        (*order)[ii as usize] = ii
+        ii = ii + 1
+    }
+    var jj: i64 = 1
+    while jj < n {
+        let ki = (*order)[jj as usize]
+        let kv = data[ki as usize]
+        var kk = jj - 1
+        while kk >= 0 && data[(*order)[kk as usize] as usize] > kv {
+            (*order)[(kk + 1) as usize] = (*order)[kk as usize]
+            kk = kk - 1
+        }
+        (*order)[(kk + 1) as usize] = ki
+        jj = jj + 1
+    }
+}
+
+pub fn epiviz_raincloud(
+    cs: &CoordSystem,
+    data: &[f64; 256],
+    n: i64,
+    label_y: f64,
+    half_height: f64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n < 2 { return }
+
+    var order: [i64; 256] = [0; 256]
+    epiviz_isort(data, n, &!order)
+
+    // ── Compute summary stats ──────────────────────────────────
+    let q1_idx = n / 4
+    let q3_idx = 3 * n / 4
+    let q1 = data[order[q1_idx as usize] as usize]
+    let q3 = data[order[q3_idx as usize] as usize]
+    let med = epiviz_median(data, &order, n)
+    let iqr = q3 - q1
+    // Whiskers: Tukey 1.5×IQR
+    let w_lo = q1 - 1.5 * iqr
+    let w_hi = q3 + 1.5 * iqr
+
+    // ── Screen coordinates ─────────────────────────────────────
+    let centre_x = coord_map_x(cs, 0.5)   // centre of coord range
+    let strip_px = (half_height * (cs.screen_w as f64) /
+                    (cs.data_x_max - cs.data_x_min)) as i64
+    let strip_px_safe = if strip_px < 6 { 6 } else if strip_px > 60 { 60 } else { strip_px }
+    let box_w = strip_px_safe / 3
+
+    // ── Box-and-whisker (left of centre) ──────────────────────
+    let sy_q1  = coord_map_y(cs, q1)
+    let sy_q3  = coord_map_y(cs, q3)
+    let sy_med = coord_map_y(cs, med)
+    let sy_wlo = coord_map_y(cs, w_lo)
+    let sy_whi = coord_map_y(cs, w_hi)
+    let box_x0 = centre_x - box_w - 2
+    let box_x1 = centre_x - 2
+    // IQR rectangle
+    let ry_top = if sy_q1 < sy_q3 { sy_q1 } else { sy_q3 }
+    let ry_bot = if sy_q1 > sy_q3 { sy_q1 } else { sy_q3 }
+    var bry = ry_top
+    while bry <= ry_bot {
+        canvas_blend_pixel(c, box_x0, bry, r, g, b, 80)
+        canvas_blend_pixel(c, box_x1, bry, r, g, b, 80)
+        var brx = box_x0 + 1
+        while brx < box_x1 {
+            canvas_blend_pixel(c, brx, bry, r, g, b, 40)
+            brx = brx + 1
+        }
+        bry = bry + 1
+    }
+    // Median line
+    canvas_draw_line_aa(c, box_x0, sy_med, box_x1, sy_med, 255, 255, 255)
+    // Whisker stems
+    let wx_mid = (box_x0 + box_x1) / 2
+    canvas_draw_line_aa(c, wx_mid, ry_top, wx_mid, sy_whi, r, g, b)
+    canvas_draw_line_aa(c, wx_mid, ry_bot, wx_mid, sy_wlo, r, g, b)
+    // Whisker caps
+    canvas_draw_line_aa(c, box_x0, sy_whi, box_x1, sy_whi, r, g, b)
+    canvas_draw_line_aa(c, box_x0, sy_wlo, box_x1, sy_wlo, r, g, b)
+
+    // ── KDE half-violin (right of centre) ──────────────────────
+    // Silverman bandwidth
+    var mean_v: f64 = 0.0
+    var vi: i64 = 0
+    while vi < n {
+        mean_v = mean_v + data[vi as usize]
+        vi = vi + 1
+    }
+    mean_v = mean_v / (n as f64)
+    var var_v: f64 = 0.0
+    var vi2: i64 = 0
+    while vi2 < n {
+        let dv = data[vi2 as usize] - mean_v
+        var_v = var_v + dv * dv
+        vi2 = vi2 + 1
+    }
+    let sigma_v = epiviz_sqrt(var_v / (n as f64))
+    let bw = if sigma_v > 0.0 {
+        0.9 * sigma_v * epiviz_fifth_root(n)
+    } else { 0.01 }
+
+    // Evaluate KDE on 48 points spanning data range
+    let dlo = data[order[0] as usize]
+    let dhi = data[order[(n - 1) as usize] as usize]
+    let drange = dhi - dlo
+    let drange_s = if drange < 0.0001 { 0.0001 } else { drange }
+    let n_eval: i64 = 48
+    var max_kde: f64 = 0.0
+    var kvals: [f64; 64] = [0.0; 64]
+    var ei: i64 = 0
+    while ei < n_eval {
+        let xv = dlo + drange_s * (ei as f64) / ((n_eval - 1) as f64)
+        var kde: f64 = 0.0
+        var ki: i64 = 0
+        while ki < n {
+            let u = (xv - data[ki as usize]) / bw
+            if u > 0.0 - 3.0 && u < 3.0 {
+                kde = kde + epiviz_exp_neg(u * u * 0.5)
+            }
+            ki = ki + 1
+        }
+        kvals[ei as usize] = kde
+        if kde > max_kde { max_kde = kde }
+        ei = ei + 1
+    }
+    let max_kde_s = if max_kde < 0.0001 { 0.0001 } else { max_kde }
+    let violin_w = strip_px_safe - 2
+
+    var ei2: i64 = 0
+    while ei2 < n_eval - 1 {
+        let xv0 = dlo + drange_s * (ei2 as f64) / ((n_eval - 1) as f64)
+        let xv1 = dlo + drange_s * ((ei2 + 1) as f64) / ((n_eval - 1) as f64)
+        let sy0 = coord_map_y(cs, xv0)
+        let sy1 = coord_map_y(cs, xv1)
+        let hw0 = (kvals[ei2 as usize] / max_kde_s * (violin_w as f64)) as i64
+        let hw1 = (kvals[(ei2 + 1) as usize] / max_kde_s * (violin_w as f64)) as i64
+        // Fill between centre+2 and centre+hw at each scanline
+        let sy_min = if sy0 < sy1 { sy0 } else { sy1 }
+        let sy_max = if sy0 > sy1 { sy0 } else { sy1 }
+        var sy = sy_min
+        while sy <= sy_max {
+            let t = if sy_max > sy_min {
+                ((sy - sy_min) as f64) / ((sy_max - sy_min) as f64)
+            } else { 0.0 }
+            let hw = ((1.0 - t) * (hw0 as f64) + t * (hw1 as f64)) as i64
+            var dx: i64 = 2
+            while dx <= hw {
+                canvas_blend_pixel(c, centre_x + dx, sy, r, g, b, 120)
+                dx = dx + 1
+            }
+            canvas_blend_pixel(c, centre_x + hw + 1, sy, r, g, b, 60)
+            sy = sy + 1
+        }
+        ei2 = ei2 + 1
+    }
+
+    // ── Jittered dots (centred on centre line) ─────────────────
+    // Deterministic LCG jitter: seed from index, jitter in ±dot_spread px.
+    let dot_spread: i64 = strip_px_safe / 4
+    var di: i64 = 0
+    while di < n {
+        let sy = coord_map_y(cs, data[di as usize])
+        // LCG: next = (1664525 * seed + 1013904223) & 0x7FFFFFFF
+        let seed = (1664525 * di + 1013904223) & 2147483647
+        let jitter = (seed & 255) * dot_spread / 128 - dot_spread / 2
+        let dx = centre_x + jitter
+        canvas_blend_pixel(c, dx, sy, r, g, b, 200)
+        canvas_blend_pixel(c, dx - 1, sy, r, g, b, 100)
+        canvas_blend_pixel(c, dx + 1, sy, r, g, b, 100)
+        canvas_blend_pixel(c, dx, sy - 1, r, g, b, 100)
+        canvas_blend_pixel(c, dx, sy + 1, r, g, b, 100)
+        di = di + 1
+    }
+}
