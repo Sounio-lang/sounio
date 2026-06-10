@@ -242,11 +242,15 @@ fn sph_sqrt(x: f64) -> f64 with Mut, Div {
     g
 }
 
-// Renders a Blinn-Phong-shaded sphere at (cx,cy) with radius r.
-pub fn canvas_sphere_shaded(
+// Core sphere rasterizer — accepts pre-blended fog params for inline application.
+// one_ff / ff = (1 - fog_factor) / fog_factor computed by the caller.
+// fog_r/g/b = background colour to blend toward when ff > 0.
+fn canvas_sphere_shaded_inner(
     c: &!Canvas,
     cx: i64, cy: i64, r: i64,
     base_r: i64, base_g: i64, base_b: i64,
+    one_ff: f64, ff: f64,
+    fog_r: f64, fog_g: f64, fog_b: f64,
 ) with Mut, Div {
     if r <= 0 { return }
     let r_f: f64 = r as f64
@@ -299,13 +303,18 @@ pub fn canvas_sphere_shaded(
 
                 let intensity = (ambient + (1.0 - ambient) * diffuse) * rim
 
-                let fr = (base_r as f64) * intensity + 255.0 * spec_str * s32
-                let fg = (base_g as f64) * intensity + 255.0 * spec_str * s32
-                let fb = (base_b as f64) * intensity + 255.0 * spec_str * s32
+                let fr_s = (base_r as f64) * intensity + 255.0 * spec_str * s32
+                let fg_s = (base_g as f64) * intensity + 255.0 * spec_str * s32
+                let fb_s = (base_b as f64) * intensity + 255.0 * spec_str * s32
 
-                let ir = if fr > 255.0 { 255 } else { fr as i64 }
-                let ig = if fg > 255.0 { 255 } else { fg as i64 }
-                let ib = if fb > 255.0 { 255 } else { fb as i64 }
+                // Apply fog blend toward background colour
+                let out_r = fr_s * one_ff + fog_r * ff
+                let out_g = fg_s * one_ff + fog_g * ff
+                let out_b = fb_s * one_ff + fog_b * ff
+
+                let ir = if out_r > 255.0 { 255 } else { out_r as i64 }
+                let ig = if out_g > 255.0 { 255 } else { out_g as i64 }
+                let ib = if out_b > 255.0 { 255 } else { out_b as i64 }
 
                 write_i64(c.pixels, py * c.width + px, ib | (ig << 8) | (ir << 16))
             }
@@ -313,4 +322,41 @@ pub fn canvas_sphere_shaded(
         }
         py = py + 1
     }
+}
+
+// Sphere shaded with Blinn-Phong + linear depth fog + precomputed ambient occlusion.
+//   depth      — world-space depth (positive = in front of camera)
+//   fog_near   — depth at which fog starts (fog disabled when fog_far <= fog_near)
+//   fog_far    — depth at which object is fully fogged
+//   fog_r/g/b  — background/fog colour (0-255, as f64)
+//   ao_factor  — precomputed AO in [0,1]; 0 = fully lit, 1 = fully occluded
+pub fn canvas_sphere_shaded_fog(
+    c: &!Canvas,
+    cx: i64, cy: i64, r: i64,
+    base_r: i64, base_g: i64, base_b: i64,
+    depth: f64,
+    fog_near: f64, fog_far: f64,
+    fog_r: f64, fog_g: f64, fog_b: f64,
+    ao_factor: f64,
+) with Mut, Div {
+    let ff: f64 = if fog_far > fog_near {
+        let f = (depth - fog_near) / (fog_far - fog_near)
+        if f < 0.0 { 0.0 } else if f > 1.0 { 1.0 } else { f }
+    } else { 0.0 }
+    let one_ff = 1.0 - ff
+    // AO darkening applied to base colour before Phong shading
+    let ao_scale = 1.0 - 0.40 * ao_factor
+    let adj_r: i64 = if (base_r as f64) * ao_scale > 255.0 { 255 } else { ((base_r as f64) * ao_scale) as i64 }
+    let adj_g: i64 = if (base_g as f64) * ao_scale > 255.0 { 255 } else { ((base_g as f64) * ao_scale) as i64 }
+    let adj_b: i64 = if (base_b as f64) * ao_scale > 255.0 { 255 } else { ((base_b as f64) * ao_scale) as i64 }
+    canvas_sphere_shaded_inner(c, cx, cy, r, adj_r, adj_g, adj_b, one_ff, ff, fog_r, fog_g, fog_b)
+}
+
+// Renders a Blinn-Phong-shaded sphere at (cx,cy) with radius r (no fog, no AO).
+pub fn canvas_sphere_shaded(
+    c: &!Canvas,
+    cx: i64, cy: i64, r: i64,
+    base_r: i64, base_g: i64, base_b: i64,
+) with Mut, Div {
+    canvas_sphere_shaded_inner(c, cx, cy, r, base_r, base_g, base_b, 1.0, 0.0, 0.0, 0.0, 0.0)
 }

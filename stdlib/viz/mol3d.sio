@@ -10,7 +10,7 @@
 //   mol3d_render(&mol, &cam, angle_y, angle_x, &!canvas)
 
 use display::canvas::{Canvas}
-use display::canvas_ext::{canvas_draw_line_aa, canvas_sphere_shaded}
+use display::canvas_ext::{canvas_draw_line_aa, canvas_sphere_shaded_fog}
 use render::renderer3d::{Camera3D, Vec3f}
 use viz::physchem::{MoleculeViz}
 
@@ -112,6 +112,32 @@ pub fn mol3d_render(
         i = i + 1
     }
 
+    // Precompute per-atom ambient occlusion (model-space, view-independent).
+    // Approximation: sum of solid angle contributions from all neighbouring atoms.
+    var ao: [f64; 64] = [0.0; 64]
+    var ai: i64 = 0
+    while ai < mol.atom_count {
+        let aa = mol.atoms[ai as usize]
+        var acc: f64 = 0.0
+        var bj: i64 = 0
+        while bj < mol.atom_count {
+            if bj != ai {
+                let ab = mol.atoms[bj as usize]
+                let ddx = ab.x - aa.x
+                let ddy = ab.y - aa.y
+                let ddz = ab.z - aa.z
+                let dist2 = ddx*ddx + ddy*ddy + ddz*ddz
+                if dist2 > 0.0 {
+                    acc = acc + (ab.radius * ab.radius) / dist2
+                }
+            }
+            bj = bj + 1
+        }
+        let raw = acc * 0.30
+        ao[ai as usize] = if raw > 1.0 { 1.0 } else { raw }
+        ai = ai + 1
+    }
+
     // Draw bonds (behind atoms — paint first)
     var bi: i64 = 0
     while bi < mol.bond_count {
@@ -135,12 +161,23 @@ pub fn mol3d_render(
     var order: [i64; 64] = [0; 64]
     m3_sort_desc(&pd, mol.atom_count, &!order)
 
+    // Fog: gradual fade toward dark background as depth increases.
+    // mol_viewer camera at pos_z=-15 → depth = -(z - pos_z) ≈ 10..20 for typical molecules.
+    let fog_near: f64 = 12.0
+    let fog_far:  f64 = 30.0
+
     var oi: i64 = 0
     while oi < mol.atom_count {
         let idx = order[oi as usize]
         if pvis[idx as usize] == 1 {
             let a = mol.atoms[idx as usize]
-            canvas_sphere_shaded(c, px[idx as usize], py[idx as usize], prad[idx as usize], a.r, a.g, a.b)
+            let depth = pd[idx as usize]
+            canvas_sphere_shaded_fog(c,
+                px[idx as usize], py[idx as usize], prad[idx as usize],
+                a.r, a.g, a.b,
+                depth, fog_near, fog_far,
+                18.0, 20.0, 30.0,
+                ao[idx as usize])
         }
         oi = oi + 1
     }
