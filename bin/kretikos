@@ -112,16 +112,60 @@ __kretikos_token_value() {
     tr ' ' '\n' <<<"$text" | awk -F= -v k="$key" '$1 == k { print $2; exit }'
 }
 
+__kretikos_compiler_help() {
+    "$SOUC_BIN" --help 2>&1 || true
+}
+
+__kretikos_compiler_mode() {
+    local help
+    help="$(__kretikos_compiler_help)"
+    if grep -q "Commands:" <<<"$help" || grep -q "<COMMAND>" <<<"$help"; then
+        echo "subcommand"
+    else
+        echo "positional"
+    fi
+}
+
+KRETIKOS_COMPILER_MODE="$(__kretikos_compiler_mode)"
+
+__kretikos_compile_source() {
+    local src="$1"
+    local out="$2"
+    case "$KRETIKOS_COMPILER_MODE" in
+        subcommand)
+            "$SOUC_BIN" compile "$src" -o "$out"
+            ;;
+        positional)
+            "$SOUC_BIN" "$src" "$out"
+            ;;
+        *)
+            echo "error: unknown Kretikos compiler mode: $KRETIKOS_COMPILER_MODE" >&2
+            return 1
+            ;;
+    esac
+}
+
 __kretikos_check_source() {
     local src="$1"
-    if [[ -x "$SCRIPT_DIR/souc" ]]; then
-        "$SCRIPT_DIR/souc" check "$src"
-    else
-        local out="${TMPDIR:-/tmp}/kretikos-check.elf"
-        rm -f "$out"
-        "$SOUC_BIN" "$src" "$out" >/dev/null
-        rm -f "$out"
-    fi
+    local out
+    out="$(mktemp "${TMPDIR:-/tmp}/kretikos-check.XXXXXX.elf")" || return 1
+    rm -f "$out"
+    case "$KRETIKOS_COMPILER_MODE" in
+        subcommand)
+            "$SOUC_BIN" check "$src"
+            ;;
+        positional)
+            __kretikos_compile_source "$src" "$out" >/dev/null
+            ;;
+        *)
+            echo "error: unknown Kretikos compiler mode: $KRETIKOS_COMPILER_MODE" >&2
+            rm -f "$out"
+            return 1
+            ;;
+    esac
+    local rc=$?
+    rm -f "$out"
+    return "$rc"
 }
 
 __kretikos_hpc_require_script() {
@@ -292,9 +336,13 @@ case "$CMD" in
         fi
         OUT="/tmp/kretikos-run.elf"
         rm -f "$OUT"
-        "$SOUC_BIN" "$1" "$OUT"
+        __kretikos_compile_source "$1" "$OUT"
         chmod +x "$OUT"
         "$OUT"
+        ;;
+    compiler-info)
+        COMPILER_PATH="$(__kretikos_repo_path "$SOUC_BIN")"
+        echo "kretikos: compiler - path=$COMPILER_PATH mode=$KRETIKOS_COMPILER_MODE"
         ;;
     profile-source)
         if [[ $# -lt 1 ]]; then
@@ -914,7 +962,7 @@ case "$CMD" in
             exit 1
         fi
 
-        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile PTX emitter driver" >&2
             exit 1
         }
@@ -997,7 +1045,7 @@ case "$CMD" in
             exit 1
         fi
 
-        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile Metal emitter driver" >&2
             exit 1
         }
@@ -1089,7 +1137,7 @@ case "$CMD" in
             exit 1
         fi
 
-        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile SPIR-V emitter driver" >&2
             exit 1
         }
@@ -1190,7 +1238,7 @@ case "$CMD" in
                 ;;
         esac
 
-        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile K-AXI emitter driver" >&2
             exit 1
         }
@@ -1313,7 +1361,7 @@ case "$CMD" in
                 ;;
         esac
 
-        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile K-AXI→PTX driver" >&2
             exit 1
         }
@@ -1438,7 +1486,7 @@ USAGE
             exit 2
         fi
 
-        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile json-emit driver" >&2
             exit 1
         }
@@ -1476,7 +1524,7 @@ USAGE
             exit 2
         fi
 
-        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile validate-evidence driver" >&2
             exit 1
         }
@@ -1505,7 +1553,7 @@ USAGE
             exit 2
         fi
 
-        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile cubin-validate driver" >&2
             exit 1
         }
@@ -1557,7 +1605,7 @@ USAGE
             *) echo "error: unsupported mode '$MODE'" >&2; exit 1 ;;
         esac
 
-        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile K-AXI compile driver" >&2
             exit 1
         }
@@ -1664,7 +1712,7 @@ USAGE
         SUMMARY_DRIVER_ELF="$SUMMARY_DRIVER_DIR/asm-summary.elf"
         SUMMARY_JSON="$SUMMARY_DRIVER_DIR/summary.json"
         trap 'rm -rf "$SUMMARY_DRIVER_DIR"' EXIT INT TERM
-        "$SOUC_BIN" "$SUMMARY_DRIVER_SRC" "$SUMMARY_DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$SUMMARY_DRIVER_SRC" "$SUMMARY_DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile kaxi-asm-summary driver" >&2
             exit 1
         }
@@ -2240,7 +2288,7 @@ USAGE
         umask "$OLD_UMASK"
         RECOG_DRIVER_ELF="$RECOG_DRIVER_DIR/source-recog.elf"
         trap 'rm -rf "$RECOG_DRIVER_DIR"' EXIT INT TERM
-        "$SOUC_BIN" "$RECOG_DRIVER_SRC" "$RECOG_DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$RECOG_DRIVER_SRC" "$RECOG_DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile kaxi-source-recognizer driver" >&2
             exit 1
         }
@@ -2394,7 +2442,7 @@ USAGE
 
     kaxi-lowering-certificate)
         if [[ $# -lt 1 ]]; then
-            echo "usage: kretikos kaxi-lowering-certificate <source.sio> -o <file.json> [--work-dir <dir>] [--force] [--require-runtime]" >&2
+            echo "usage: kretikos kaxi-lowering-certificate <source.sio> -o <file.json> [--work-dir <dir>] [--force] [--allow-runtime-blocked] [--require-runtime]" >&2
             exit 1
         fi
         SRC="$1"
@@ -2404,6 +2452,8 @@ USAGE
         FORCE=0
         RUNTIME_ARG=(--validate-runtime)
         RUNTIME_MODE="auto"
+        ALLOW_RUNTIME_BLOCKED=0
+        RUNTIME_BLOCKED=0
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 -o|--output)
@@ -2423,6 +2473,10 @@ USAGE
                     RUNTIME_MODE="auto"
                     shift
                     ;;
+                --allow-runtime-blocked)
+                    ALLOW_RUNTIME_BLOCKED=1
+                    shift
+                    ;;
                 --require-runtime)
                     RUNTIME_ARG=(--require-runtime)
                     RUNTIME_MODE="required"
@@ -2440,7 +2494,7 @@ USAGE
         done
 
         if [[ -z "$OUT" ]]; then
-            echo "usage: kretikos kaxi-lowering-certificate <source.sio> -o <file.json> [--work-dir <dir>] [--force] [--require-runtime]" >&2
+            echo "usage: kretikos kaxi-lowering-certificate <source.sio> -o <file.json> [--work-dir <dir>] [--force] [--allow-runtime-blocked] [--require-runtime]" >&2
             exit 1
         fi
         if [[ ! -f "$SRC" ]]; then
@@ -2480,11 +2534,14 @@ USAGE
             --kaxi-witness-output "$KAXI_WITNESS" >/dev/null
 
         mkdir -p "$RUNTIME_DIR"
-        "$KRETIKOS_SELF" run-source "$SRC" -o "$RUNTIME_DIR" --force "${RUNTIME_ARG[@]}" >"$RUN_SOURCE_LOG" 2>&1 || {
-            cat "$RUN_SOURCE_LOG" >&2
-            echo "error: K-AXI lowering certificate runtime/profile bundle step failed" >&2
-            exit 1
-        }
+        if ! "$KRETIKOS_SELF" run-source "$SRC" -o "$RUNTIME_DIR" --force "${RUNTIME_ARG[@]}" >"$RUN_SOURCE_LOG" 2>&1; then
+            if [[ "$RUNTIME_MODE" == "required" || "$ALLOW_RUNTIME_BLOCKED" -ne 1 ]]; then
+                cat "$RUN_SOURCE_LOG" >&2
+                echo "error: K-AXI lowering certificate runtime/profile bundle step failed" >&2
+                exit 1
+            fi
+            RUNTIME_BLOCKED=1
+        fi
 
         # Compose kaxi-lowering-certificate JSON. Reads up to 4 JSON files
         # (source_lowering, kaxi_witness, runtime_profile, bundle), runs
@@ -2624,10 +2681,10 @@ USAGE
         elif [[ "$KW_STATUS" != "pass" ]]; then
             __FAIL_ELEMS+=("$(printf '{"kind": "kaxi_witness_not_pass", "status": "%s"}' "$(__json_str_escape "$KW_STATUS")")")
         fi
-        if [[ ! -f "$RUNTIME_PROFILE_PATH" ]]; then
+        if [[ "$RUNTIME_BLOCKED" -ne 1 && ! -f "$RUNTIME_PROFILE_PATH" ]]; then
             __FAIL_ELEMS+=("$(printf '{"kind": "missing_runtime_source_profile", "path": "%s"}' "$(__json_str_escape "$RUNTIME_PROFILE_PATH")")")
         fi
-        if [[ ! -f "$BUNDLE_PATH" ]]; then
+        if [[ "$RUNTIME_BLOCKED" -ne 1 && ! -f "$BUNDLE_PATH" ]]; then
             __FAIL_ELEMS+=("$(printf '{"kind": "missing_runtime_bundle", "path": "%s"}' "$(__json_str_escape "$BUNDLE_PATH")")")
         fi
         if [[ -f "$SOURCE_LOWERING" ]]; then
@@ -2683,7 +2740,11 @@ USAGE
         fi
         if [[ ${#__FAIL_ELEMS[@]} -eq 0 ]]; then
             FAILURES_ARRAY="[]"
-            STATUS_VAL="pass"
+            if [[ "$RUNTIME_BLOCKED" -eq 1 ]]; then
+                STATUS_VAL="partial_runtime_blocked"
+            else
+                STATUS_VAL="pass"
+            fi
         else
             FAILURES_ARRAY="[$(IFS=,; echo "${__FAIL_ELEMS[*]}")]"
             STATUS_VAL="fail"
@@ -2698,8 +2759,17 @@ USAGE
             "$(__scalar_or_null "$RP_RUNTIME_RUNG")" \
             "$(__scalar_or_null "$RP_KERNEL")")"
         BUNDLE_STATUS_LIT="$(__scalar_or_null "$BD_STATUS")"
-        RUNTIME_OBJ="$(printf '{"mode": "%s", "source_profile": %s, "bundle_status": %s, "structural_checks": %s, "artifacts": %s, "runtime_validation": %s, "toolchain_validation": %s}' \
+        if [[ "$RUNTIME_BLOCKED" -eq 1 ]]; then
+            RUNTIME_BLOCKED_LIT="true"
+            RUNTIME_BLOCKED_REASON_LIT="$(__scalar_or_null "cubin_or_runtime_bundle_unavailable")"
+        else
+            RUNTIME_BLOCKED_LIT="false"
+            RUNTIME_BLOCKED_REASON_LIT="null"
+        fi
+        RUNTIME_OBJ="$(printf '{"mode": "%s", "blocked": %s, "blocked_reason": %s, "source_profile": %s, "bundle_status": %s, "structural_checks": %s, "artifacts": %s, "runtime_validation": %s, "toolchain_validation": %s}' \
             "$(__json_str_escape "$RUNTIME_MODE")" \
+            "$RUNTIME_BLOCKED_LIT" \
+            "$RUNTIME_BLOCKED_REASON_LIT" \
             "$RP_FULL_JSON" \
             "$BUNDLE_STATUS_LIT" \
             "$BD_SC_JSON" \
@@ -3007,7 +3077,7 @@ USAGE
         DRIVER_ELF="$DRIVER_DIR/driver.elf"
         trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
 
-        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile CPU emulation driver" >&2
             exit 1
         }
@@ -3182,7 +3252,7 @@ USAGE
             fi
             ;;
             *)
-        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile CUBIN emitter driver" >&2
             exit 1
         }
@@ -3858,7 +3928,7 @@ NF {
             exit 2
         fi
 
-        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile siep-probe driver" >&2
             exit 1
         }
@@ -3884,7 +3954,7 @@ NF {
             exit 2
         fi
 
-        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+        __kretikos_compile_source "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
             echo "error: failed to compile umbrella-aggregate driver" >&2
             exit 1
         }
