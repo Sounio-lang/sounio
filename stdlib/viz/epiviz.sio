@@ -667,6 +667,482 @@ pub fn epiviz_raincloud(
 // ECDF with DKW 95% confidence band (F2)
 // ============================================================
 //
+// Natural log via (x-1)/(x+1) Padé series — private.
+fn epiviz_ln(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 - 999.0 }
+    if x == 1.0 { return 0.0 }
+    let y = (x - 1.0) / (x + 1.0)
+    var res: f64 = 0.0
+    var term = y
+    var i: i64 = 1
+    while i < 30 {
+        res = res + term / (i as f64)
+        term = term * y * y
+        i = i + 2
+    }
+    2.0 * res
+}
+
+// exp(x) via Taylor series — private; clamp |x| <= 20.
+fn epiviz_exp(x: f64) -> f64 with Mut, Div {
+    if x < 0.0 - 20.0 { return 0.0 }
+    if x > 20.0 { return 485165195.0 }
+    var r: f64 = 1.0
+    var term: f64 = 1.0
+    var k: i64 = 1
+    while k <= 20 {
+        term = term * x / (k as f64)
+        r = r + term
+        k = k + 1
+    }
+    r
+}
+
+// C^n for integer n via binary exponentiation — private.
+fn epiviz_powi(c: f64, n: i64) -> f64 with Div {
+    if n == 0 { return 1.0 }
+    var acc: f64 = 1.0
+    var base = c
+    var k = n
+    while k > 0 {
+        if k % 2 == 1 { acc = acc * base }
+        base = base * base
+        k = k / 2
+    }
+    acc
+}
+
+// ============================================================
+// Kaplan-Meier survival curve
+// ============================================================
+//
+// times[0..n]: event times (any order); events[0..n]: 1=event, 0=censored.
+// Plots S(t) step function with log-log 95% CI band.
+// Censored observations shown as vertical tick marks.
+//
+// Algorithm: Kaplan & Meier 1958; CI: Kalbfleisch & Prentice 1980 log-log.
+// Greenwood Var[S] = S² × Σ dⱼ/(nⱼ(nⱼ-dⱼ)).
+
+pub fn epiviz_kaplan_meier(
+    cs: &CoordSystem,
+    times: &[f64; 256],
+    events: &[i64; 256],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n < 2 { return }
+
+    // Sort indices by time ascending
+    var ord: [i64; 256] = [0; 256]
+    var oi: i64 = 0
+    while oi < n { ord[oi as usize] = oi; oi = oi + 1 }
+    // Insertion sort by times
+    var si: i64 = 1
+    while si < n {
+        let key = ord[si as usize]
+        let kt = times[key as usize]
+        var sj = si - 1
+        while sj >= 0 && times[ord[sj as usize] as usize] > kt {
+            ord[(sj + 1) as usize] = ord[sj as usize]
+            sj = sj - 1
+        }
+        ord[(sj + 1) as usize] = key
+        si = si + 1
+    }
+
+    var surv: f64 = 1.0
+    var greenwood: f64 = 0.0
+    var prev_sx: i64 = coord_map_x(cs, times[ord[0] as usize])
+    var prev_sy: i64 = coord_map_y(cs, 1.0)
+    var ni: i64 = n   // at-risk
+
+    var ki: i64 = 0
+    while ki < n {
+        let idx = ord[ki as usize] as usize
+        let t = times[idx]
+
+        if events[idx] == 0 {
+            // Censored: draw tick mark at current S(t)
+            let sx = coord_map_x(cs, t)
+            let sy = coord_map_y(cs, surv)
+            canvas_fill_rect(c, sx, sy - 4, 1, 8, r, g, b)
+            ni = ni - 1
+            ki = ki + 1
+            continue
+        }
+
+        // Count ties at this time
+        var di: i64 = 0
+        var di2 = ki
+        while di2 < n && times[ord[di2 as usize] as usize] == t {
+            if events[ord[di2 as usize] as usize] == 1 { di = di + 1 }
+            di2 = di2 + 1
+        }
+
+        // Horizontal segment at current S to this event time
+        let sx = coord_map_x(cs, t)
+        canvas_draw_line_aa(c, prev_sx, prev_sy, sx, prev_sy, r, g, b)
+
+        // Update S and Greenwood
+        surv = surv * (1.0 - (di as f64) / (ni as f64))
+        let denom = (ni as f64) * ((ni - di) as f64)
+        if denom > 0.0 { greenwood = greenwood + (di as f64) / denom }
+
+        let sy = coord_map_y(cs, surv)
+
+        // Vertical drop
+        canvas_draw_line_aa(c, sx, prev_sy, sx, sy, r, g, b)
+
+        // CI via log-log transform
+        if surv > 0.0001 && surv < 0.9999 {
+            let log_s = epiviz_ln(surv)
+            if log_s < 0.0 - 0.0001 {
+                let se_theta = epiviz_sqrt(greenwood) / (0.0 - log_s)
+                let lo_s = epiviz_exp(log_s * epiviz_exp(1.96 * se_theta))
+                let hi_s = epiviz_exp(log_s * epiviz_exp(0.0 - 1.96 * se_theta))
+                let ci_lo_y = coord_map_y(cs, lo_s)
+                let ci_hi_y = coord_map_y(cs, hi_s)
+                var px = prev_sx
+                while px <= sx {
+                    canvas_blend_pixel(c, px, ci_lo_y, r, g, b, 55)
+                    canvas_blend_pixel(c, px, ci_hi_y, r, g, b, 55)
+                    // Fill band sparsely
+                    if ci_hi_y < ci_lo_y {
+                        var py = ci_hi_y
+                        while py <= ci_lo_y {
+                            if (px + py) % 3 == 0 {
+                                canvas_blend_pixel(c, px, py, r, g, b, 35)
+                            }
+                            py = py + 1
+                        }
+                    }
+                    px = px + 1
+                }
+            }
+        }
+
+        prev_sx = sx
+        prev_sy = sy
+        ni = ni - di
+        ki = ki + di
+    }
+    // Final horizontal segment to right edge
+    let x_end = coord_map_x(cs, cs.data_x_max)
+    canvas_draw_line_aa(c, prev_sx, prev_sy, x_end, prev_sy, r, g, b)
+}
+
+// ============================================================
+// Bland-Altman method-agreement plot
+// ============================================================
+//
+// Altman & Bland 1983 (Lancet 1:307-310).
+// X = (a+b)/2 (mean), Y = a-b (difference).
+// Bias line (solid), LoA = mean_diff ± 1.96·SD (dashed).
+
+pub fn epiviz_bland_altman(
+    cs: &CoordSystem,
+    a: &[f64; 256],
+    b: &[f64; 256],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b_col: i64,
+) with Mut, Div {
+    if n < 3 { return }
+
+    // Compute mean_diff and SD_diff
+    var sum_d: f64 = 0.0
+    var bi: i64 = 0
+    while bi < n {
+        sum_d = sum_d + a[bi as usize] - b[bi as usize]
+        bi = bi + 1
+    }
+    let mean_d = sum_d / (n as f64)
+
+    var sum_sq: f64 = 0.0
+    var ci: i64 = 0
+    while ci < n {
+        let d = a[ci as usize] - b[ci as usize] - mean_d
+        sum_sq = sum_sq + d * d
+        ci = ci + 1
+    }
+    let sd_d = epiviz_sqrt(sum_sq / ((n - 1) as f64))
+    let loa_hi = mean_d + 1.96 * sd_d
+    let loa_lo = mean_d - 1.96 * sd_d
+
+    // Scatter dots
+    var di: i64 = 0
+    while di < n {
+        let xv = (a[di as usize] + b[di as usize]) * 0.5
+        let yv = a[di as usize] - b[di as usize]
+        let sx = coord_map_x(cs, xv)
+        let sy = coord_map_y(cs, yv)
+        canvas_blend_pixel(c, sx, sy, r, g, b_col, 200)
+        canvas_blend_pixel(c, sx - 1, sy, r, g, b_col, 120)
+        canvas_blend_pixel(c, sx + 1, sy, r, g, b_col, 120)
+        canvas_blend_pixel(c, sx, sy - 1, r, g, b_col, 120)
+        canvas_blend_pixel(c, sx, sy + 1, r, g, b_col, 120)
+        di = di + 1
+    }
+
+    // Bias line (solid green)
+    let x0 = coord_map_x(cs, cs.data_x_min)
+    let x1 = coord_map_x(cs, cs.data_x_max)
+    canvas_draw_line_aa(c, x0, coord_map_y(cs, mean_d), x1, coord_map_y(cs, mean_d), 60, 200, 80)
+
+    // LoA dashed lines
+    let lh = coord_map_y(cs, loa_hi)
+    let ll = coord_map_y(cs, loa_lo)
+    var px: i64 = x0
+    while px <= x1 {
+        if (px - x0) % 8 < 4 {
+            canvas_fill_rect(c, px, lh, 1, 1, 220, 140, 40)
+            canvas_fill_rect(c, px, ll, 1, 1, 220, 140, 40)
+        }
+        px = px + 1
+    }
+
+    // Shaded LoA band
+    var bpy: i64 = lh
+    while bpy <= ll {
+        var bpx: i64 = x0
+        while bpx <= x1 {
+            if (bpx + bpy) % 4 == 0 {
+                canvas_blend_pixel(c, bpx, bpy, 220, 140, 40, 30)
+            }
+            bpx = bpx + 1
+        }
+        bpy = bpy + 1
+    }
+}
+
+// ============================================================
+// Beeswarm dot plot
+// ============================================================
+//
+// Deterministic x-offset placement: for each dot sorted by value,
+// candidate offsets are computed from all already-placed dots at
+// x ± sqrt(4r²-(yi-yj)²) when |yi-yj|<2r (Wilkinson 1999).
+// Picks minimum |x| candidate with no collision.
+//
+// data[0..n]: values mapped to Y axis; all dots at same x=center_data_x.
+
+pub fn epiviz_beeswarm(
+    cs: &CoordSystem,
+    data: &[f64; 256],
+    n: i64,
+    center_x: f64,
+    dot_r: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n < 1 { return }
+
+    // Sort by value
+    var ord: [i64; 256] = [0; 256]
+    var oi: i64 = 0
+    while oi < n { ord[oi as usize] = oi; oi = oi + 1 }
+    var si: i64 = 1
+    while si < n {
+        let key = ord[si as usize]
+        let kv = data[key as usize]
+        var sj = si - 1
+        while sj >= 0 && data[ord[sj as usize] as usize] > kv {
+            ord[(sj + 1) as usize] = ord[sj as usize]
+            sj = sj - 1
+        }
+        ord[(sj + 1) as usize] = key
+        si = si + 1
+    }
+
+    // Placed dot screen positions
+    var placed_sx: [i64; 256] = [0; 256]
+    var placed_sy: [i64; 256] = [0; 256]
+    var placed_n: i64 = 0
+
+    let dr2 = (2 * dot_r) * (2 * dot_r)
+    let cx_screen = coord_map_x(cs, center_x)
+
+    var pi: i64 = 0
+    while pi < n {
+        let idx = ord[pi as usize]
+        let sy = coord_map_y(cs, data[idx as usize])
+
+        // Build candidate x-offsets
+        var cands: [i64; 256] = [0; 256]
+        var nc: i64 = 1   // cands[0] = 0 (center)
+        var qi: i64 = 0
+        while qi < placed_n {
+            let dy = sy - placed_sy[qi as usize]
+            let dy2 = dy * dy
+            if dy2 < dr2 {
+                let dx_sq = dr2 - dy2
+                // Integer sqrt of dx_sq
+                var dxi: i64 = 0
+                var tmp = dxi
+                while (dxi + 1) * (dxi + 1) <= dx_sq { dxi = dxi + 1 }
+                let off_hi = placed_sx[qi as usize] - cx_screen + dxi + 1
+                let off_lo = placed_sx[qi as usize] - cx_screen - dxi - 1
+                if nc < 250 { cands[nc as usize] = off_hi; nc = nc + 1 }
+                if nc < 250 { cands[nc as usize] = off_lo; nc = nc + 1 }
+            }
+            qi = qi + 1
+        }
+
+        // Pick candidate with smallest |x| that doesn't collide
+        var best_off: i64 = 0
+        var best_abs: i64 = 999999
+        var ci2: i64 = 0
+        while ci2 < nc {
+            let off = cands[ci2 as usize]
+            let abs_off = if off < 0 { 0 - off } else { off }
+            if abs_off < best_abs {
+                // Check no collision
+                let px_try = cx_screen + off
+                var ok = true
+                var qi2: i64 = 0
+                while qi2 < placed_n {
+                    let ddx = px_try - placed_sx[qi2 as usize]
+                    let ddy = sy - placed_sy[qi2 as usize]
+                    if ddx * ddx + ddy * ddy < dr2 { ok = false }
+                    qi2 = qi2 + 1
+                }
+                if ok {
+                    best_off = off
+                    best_abs = abs_off
+                }
+            }
+            ci2 = ci2 + 1
+        }
+
+        let final_sx = cx_screen + best_off
+        placed_sx[placed_n as usize] = final_sx
+        placed_sy[placed_n as usize] = sy
+        placed_n = placed_n + 1
+
+        // Draw dot
+        canvas_blend_pixel(c, final_sx, sy, r, g, b, 220)
+        canvas_blend_pixel(c, final_sx - 1, sy, r, g, b, 140)
+        canvas_blend_pixel(c, final_sx + 1, sy, r, g, b, 140)
+        canvas_blend_pixel(c, final_sx, sy - 1, r, g, b, 140)
+        canvas_blend_pixel(c, final_sx, sy + 1, r, g, b, 140)
+        if dot_r >= 2 {
+            canvas_blend_pixel(c, final_sx - 1, sy - 1, r, g, b, 80)
+            canvas_blend_pixel(c, final_sx + 1, sy - 1, r, g, b, 80)
+            canvas_blend_pixel(c, final_sx - 1, sy + 1, r, g, b, 80)
+            canvas_blend_pixel(c, final_sx + 1, sy + 1, r, g, b, 80)
+        }
+
+        pi = pi + 1
+    }
+}
+
+// ============================================================
+// Hill sigmoid dose-response
+// ============================================================
+//
+// Hill 1910 / Goutelle 2008: E(C) = Emax × Cⁿ / (EC50ⁿ + Cⁿ)
+// X axis: log-scale (c_min → c_max, 3 decades typical).
+// Integer n: binary exponentiation.  n=1.5: C × sqrt(C).
+//
+// ec50_marker: draw vertical dashed line at EC50 + horizontal at Emax/2.
+
+pub fn epiviz_dose_response(
+    cs: &CoordSystem,
+    emax: f64,
+    ec50: f64,
+    hill_n: f64,
+    c_min: f64,
+    c_max: f64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if c_min <= 0.0 { return }
+    if ec50 <= 0.0 { return }
+
+    let steps: i64 = 200
+    let log_min = epiviz_ln(c_min)
+    let log_max = epiviz_ln(c_max)
+    let log_ec50 = epiviz_ln(ec50)
+    let n_int = hill_n as i64
+    let n_frac = hill_n - (n_int as f64)
+    let half_n = if n_frac > 0.49 && n_frac < 0.51 { true } else { false }
+
+    var prev_sx: i64 = 0
+    var prev_sy: i64 = 0
+    var first = true
+
+    var ki: i64 = 0
+    while ki <= steps {
+        let log_c = log_min + (log_max - log_min) * (ki as f64) / (steps as f64)
+        let cc = epiviz_exp(log_c)
+
+        // Cⁿ
+        let c_int = epiviz_powi(cc, n_int)
+        let cn = if half_n {
+            c_int * epiviz_sqrt(cc)
+        } else {
+            c_int
+        }
+
+        // EC50ⁿ
+        let ec50_int = epiviz_powi(ec50, n_int)
+        let ec50n = if half_n {
+            ec50_int * epiviz_sqrt(ec50)
+        } else {
+            ec50_int
+        }
+
+        let denom = ec50n + cn
+        let effect = if denom > 0.0 { emax * cn / denom } else { 0.0 }
+
+        // Map to screen: X = linear in log(C)
+        let t = (log_c - log_min) / (log_max - log_min)
+        let sx = cs.screen_x + (t * (cs.screen_w as f64)) as i64
+        let sy = coord_map_y(cs, effect)
+
+        if first {
+            prev_sx = sx; prev_sy = sy; first = false
+        } else {
+            canvas_draw_line_aa(c, prev_sx, prev_sy, sx, sy, r, g, b)
+            prev_sx = sx; prev_sy = sy
+        }
+        ki = ki + 1
+    }
+
+    // EC50 marker: vertical dashed at EC50, horizontal at Emax/2
+    let ec50_t = (log_ec50 - log_min) / (log_max - log_min)
+    let ec50_sx = cs.screen_x + (ec50_t * (cs.screen_w as f64)) as i64
+    let half_sy = coord_map_y(cs, emax * 0.5)
+    let y_bot = coord_map_y(cs, cs.data_y_min)
+    var mk: i64 = half_sy
+    while mk <= y_bot {
+        if (mk - half_sy) % 8 < 4 {
+            canvas_fill_rect(c, ec50_sx, mk, 1, 1, 160, 160, 180)
+        }
+        mk = mk + 1
+    }
+    let x0 = coord_map_x(cs, c_min)
+    var mh: i64 = x0
+    while mh <= ec50_sx {
+        if (mh - x0) % 8 < 4 {
+            canvas_fill_rect(c, mh, half_sy, 1, 1, 160, 160, 180)
+        }
+        mh = mh + 1
+    }
+
+    // Emax asymptote
+    let emax_sy = coord_map_y(cs, emax)
+    let x1 = coord_map_x(cs, c_max)
+    var ah: i64 = x0
+    while ah <= x1 {
+        if (ah - x0) % 6 < 3 {
+            canvas_blend_pixel(c, ah, emax_sy, r, g, b, 80)
+        }
+        ah = ah + 1
+    }
+}
+
 // Empirical CDF rendered as a step function.
 // DKW inequality (Massart 1990): band half-width ε = sqrt(ln(40)/(2n)).
 // For n=50: ε ≈ 0.192; for n=20: ε ≈ 0.303.

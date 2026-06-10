@@ -16,6 +16,49 @@ use render::renderer3d::{Camera3D, Vec3f}
 use viz::physchem::{MoleculeViz}
 
 // ============================================================
+// Precomputed ambient occlusion
+// ============================================================
+//
+// Tarini et al. 2006 (VMV): AO per-atom = solid-angle sum of overlapping
+// neighbours.  Call once per molecule; pass ao[] to mol3d_render_ao.
+// ao[i] ∈ [0.0, 1.0]; 0 = fully lit, 1 = fully occluded.
+
+pub fn mol3d_precompute_ao(mol: &MoleculeViz, ao: &![f64; 64]) with Mut, Div {
+    var i: i64 = 0
+    while i < mol.atom_count {
+        ao[i as usize] = 0.0
+        i = i + 1
+    }
+    var ai: i64 = 0
+    while ai < mol.atom_count {
+        let ax = mol.atoms[ai as usize].x
+        let ay = mol.atoms[ai as usize].y
+        let az = mol.atoms[ai as usize].z
+        var sum: f64 = 0.0
+        var bi: i64 = 0
+        while bi < mol.atom_count {
+            if bi == ai { bi = bi + 1; continue }
+            let bx = mol.atoms[bi as usize].x
+            let by = mol.atoms[bi as usize].y
+            let bz = mol.atoms[bi as usize].z
+            let br = mol.atoms[bi as usize].radius
+            let dx = bx - ax
+            let dy = by - ay
+            let dz = bz - az
+            let dist2 = dx*dx + dy*dy + dz*dz
+            if dist2 < 0.0001 { bi = bi + 1; continue }
+            // Solid angle occlusion: r²/dist²
+            let sa = (br * br) / dist2
+            sum = sum + sa
+            bi = bi + 1
+        }
+        let clamped = if sum > 1.0 { 1.0 } else { sum }
+        ao[ai as usize] = clamped
+        ai = ai + 1
+    }
+}
+
+// ============================================================
 // Internal math
 // ============================================================
 
@@ -453,6 +496,82 @@ pub fn mol3d_render_sss(
             canvas_sphere_sss(c,
                 px3[idx as usize], py3[idx as usize], pr3[idx as usize],
                 a.r, a.g, a.b, tr, tg, tb)
+        }
+        oi2 = oi2 + 1
+    }
+}
+
+// mol3d_render_ao: SSS shading + precomputed AO darkening.
+// ao[i] from mol3d_precompute_ao. AO contribution: darken by ao[i]*0.40.
+pub fn mol3d_render_ao(
+    mol: &MoleculeViz,
+    cam: &Camera3D,
+    angle_y: f64,
+    angle_x: f64,
+    ao: &[f64; 64],
+    c: &!Canvas,
+) with Mut, Div {
+    let cy3 = m3_cos(angle_y)
+    let sy3 = m3_sin(angle_y)
+    let cx3 = m3_cos(angle_x)
+    let sx3 = m3_sin(angle_x)
+
+    var px3: [i64; 64] = [0; 64]
+    var py3: [i64; 64] = [0; 64]
+    var pd3: [f64; 64] = [0.0; 64]
+    var pr3: [i64; 64] = [0; 64]
+    var pv3: [i64; 64] = [0; 64]
+
+    var i: i64 = 0
+    while i < mol.atom_count {
+        let a = mol.atoms[i as usize]
+        let x1 = a.x * cy3 + a.z * sy3
+        let y1 = a.y
+        let z1 = 0.0 - a.x * sy3 + a.z * cy3
+        let y23 = y1 * cx3 - z1 * sx3
+        let z23 = y1 * sx3 + z1 * cx3
+        let p = m3_project(x1, y23, z23, cam, c.width, c.height)
+        if p.z > 0.0 {
+            px3[i as usize] = p.x as i64
+            py3[i as usize] = p.y as i64
+            pd3[i as usize] = p.z
+            let rs = (a.radius * cam.focal / p.z) as i64
+            pr3[i as usize] = if rs < 3 { 3 } else if rs > 100 { 100 } else { rs }
+            pv3[i as usize] = 1
+        }
+        i = i + 1
+    }
+
+    var order3: [i64; 64] = [0; 64]
+    m3_sort_desc(&pd3, mol.atom_count, &!order3)
+
+    var oi: i64 = 0
+    while oi < mol.atom_count {
+        let idx = order3[oi as usize]
+        if pv3[idx as usize] == 1 {
+            canvas_sphere_shaded(c, px3[idx as usize], py3[idx as usize],
+                                  pr3[idx as usize] + 2, 20, 20, 35)
+        }
+        oi = oi + 1
+    }
+
+    var oi2: i64 = 0
+    while oi2 < mol.atom_count {
+        let idx = order3[oi2 as usize]
+        if pv3[idx as usize] == 1 {
+            let a = mol.atoms[idx as usize]
+            let ao_v = ao[idx as usize]
+            let scale = 255 - (ao_v * 100.0) as i64
+            let scale_cl = if scale < 60 { 60 } else if scale > 255 { 255 } else { scale }
+            let ar = a.r * scale_cl / 255
+            let ag = a.g * scale_cl / 255
+            let ab = a.b * scale_cl / 255
+            let tr = m3_trans_r(ar, ag, ab)
+            let tg = m3_trans_g(ar, ag, ab)
+            let tb = m3_trans_b(ar, ag, ab)
+            canvas_sphere_sss(c,
+                px3[idx as usize], py3[idx as usize], pr3[idx as usize],
+                ar, ag, ab, tr, tg, tb)
         }
         oi2 = oi2 + 1
     }
