@@ -8,11 +8,11 @@
 //   1. Model→View: rotate/translate vertices (caller supplies pre-transformed verts)
 //   2. Perspective projection via project_vertex
 //   3. Barycentric rasterization with depth test into a per-call depth buffer
-//   4. Phong shading: ambient + diffuse (no specular)
-//   5. Output via canvas_fill_triangle (solid per-triangle colour)
+//   4. Blinn-Phong shading: ambient + diffuse + specular^32
+//   5. Output via canvas_fill_triangle (solid per-triangle colour) + edge lines
 
 use display::canvas::{Canvas}
-use display::canvas_ext::{canvas_fill_triangle}
+use display::canvas_ext::{canvas_fill_triangle, canvas_draw_line_aa}
 
 // ============================================================
 // Types
@@ -83,7 +83,7 @@ pub fn r3d_normalise(x: f64, y: f64, z: f64) -> Vec3f with Mut, Div {
 
 // Projects a 3D point onto the canvas using a simple perspective model.
 // Returns (screen_x, screen_y, depth). depth <= 0 means behind camera.
-fn r3d_project(wx: f64, wy: f64, wz: f64, cam: &Camera3D, cw: i64, ch: i64) -> Vec3f with Div {
+pub fn r3d_project(wx: f64, wy: f64, wz: f64, cam: &Camera3D, cw: i64, ch: i64) -> Vec3f with Div {
     let rz = wz - cam.pos_z
     if rz >= 0.0 {
         // Behind or at camera plane — signal with depth = 0
@@ -112,7 +112,7 @@ fn r3d_project_viewport(wx: f64, wy: f64, wz: f64, cam: &Camera3D, vx: i64, vy: 
 // Shading
 // ============================================================
 
-fn r3d_shade(
+pub fn r3d_shade(
     base_r: i64, base_g: i64, base_b: i64,
     nx: f64, ny: f64, nz: f64,
     light: &Light3D,
@@ -120,9 +120,27 @@ fn r3d_shade(
     let nl = r3d_normalise(nx, ny, nz)
     let diffuse = r3d_max_f(r3d_dot(nl.x, nl.y, nl.z, light.dx, light.dy, light.dz), 0.0)
     let intensity = light.ambient + (1.0 - light.ambient) * diffuse
-    let sr = r3d_clamp_i((base_r as f64 * intensity) as i64, 0, 255)
-    let sg = r3d_clamp_i((base_g as f64 * intensity) as i64, 0, 255)
-    let sb = r3d_clamp_i((base_b as f64 * intensity) as i64, 0, 255)
+
+    // Blinn-Phong specular: H = normalize(L + V), V = (0,0,1) toward camera.
+    let hx_u = light.dx
+    let hy_u = light.dy
+    let hz_u = light.dz + 1.0
+    let h_len = r3d_sqrt(hx_u * hx_u + hy_u * hy_u + hz_u * hz_u)
+    let ndoth = if h_len > 0.0 {
+        r3d_max_f(nl.x * (hx_u / h_len) + nl.y * (hy_u / h_len) + nl.z * (hz_u / h_len), 0.0)
+    } else { 0.0 }
+    let s2 = ndoth * ndoth
+    let s4 = s2 * s2
+    let s8 = s4 * s4
+    let s32 = s8 * s8 * s8 * s8   // ^32
+    let spec = 0.85 * s32
+
+    let fr = base_r as f64 * intensity + 255.0 * spec
+    let fg = base_g as f64 * intensity + 255.0 * spec
+    let fb = base_b as f64 * intensity + 255.0 * spec
+    let sr = r3d_clamp_i(fr as i64, 0, 255)
+    let sg = r3d_clamp_i(fg as i64, 0, 255)
+    let sb = r3d_clamp_i(fb as i64, 0, 255)
     // Pack into Vec3f channels re-used as i64 via cast (R=x, G=y, B=z)
     Vec3f { x: sr as f64, y: sg as f64, z: sb as f64 }
 }
@@ -208,6 +226,61 @@ fn r3d_rasterize_tri(
     }
 }
 
+// Gouraud rasterize — per-vertex colours c0/c1/c2, each Vec3f{x=R,y=G,z=B} in [0,255].
+// Barycentric interpolation gives smooth shading gradients within the face.
+pub fn r3d_rasterize_tri_gouraud(
+    sx0: i64, sy0: i64,
+    sx1: i64, sy1: i64,
+    sx2: i64, sy2: i64,
+    d0: f64, d1: f64, d2: f64,
+    c0: Vec3f, c1: Vec3f, c2: Vec3f,
+    depth_buf: *mut i64,
+    cv: &!Canvas,
+) with Mut, Div {
+    let area = r3d_edge(sx0, sy0, sx1, sy1, sx2, sy2)
+    if area == 0 { return }
+    let min_x = r3d_clamp_i(r3d_min_i(r3d_min_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let max_x = r3d_clamp_i(r3d_max_i(r3d_max_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let min_y = r3d_clamp_i(r3d_min_i(r3d_min_i(sy0, sy1), sy2), 0, cv.height - 1)
+    let max_y = r3d_clamp_i(r3d_max_i(r3d_max_i(sy0, sy1), sy2), 0, cv.height - 1)
+    var py = min_y
+    while py <= max_y {
+        var px = min_x
+        while px <= max_x {
+            let w0 = r3d_edge(sx1, sy1, sx2, sy2, px, py)
+            let w1 = r3d_edge(sx2, sy2, sx0, sy0, px, py)
+            let w2 = r3d_edge(sx0, sy0, sx1, sy1, px, py)
+            let inside = if area > 0 {
+                w0 >= 0 && w1 >= 0 && w2 >= 0
+            } else {
+                w0 <= 0 && w1 <= 0 && w2 <= 0
+            }
+            if inside {
+                let idx = py * cv.width + px
+                let area_f = area as f64
+                let bw0 = (w0 as f64) / area_f
+                let bw1 = (w1 as f64) / area_f
+                let bw2 = (w2 as f64) / area_f
+                let depth = bw0 * d0 + bw1 * d1 + bw2 * d2
+                let stored = read_i64(depth_buf, idx)
+                let dbits = depth as i64
+                if dbits < stored {
+                    write_i64(depth_buf, idx, dbits)
+                    let fr = bw0 * c0.x + bw1 * c1.x + bw2 * c2.x
+                    let fg = bw0 * c0.y + bw1 * c1.y + bw2 * c2.y
+                    let fb = bw0 * c0.z + bw1 * c1.z + bw2 * c2.z
+                    let pr = r3d_clamp_i(fr as i64, 0, 255)
+                    let pg = r3d_clamp_i(fg as i64, 0, 255)
+                    let pb = r3d_clamp_i(fb as i64, 0, 255)
+                    write_i64(cv.pixels, idx, pb | (pg << 8) | (pr << 16))
+                }
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
 // ============================================================
 // Public API: render a list of triangles
 // ============================================================
@@ -241,7 +314,7 @@ pub fn r3d_render(
         // Shade
         let col = r3d_shade(tri.base_r, tri.base_g, tri.base_b, tri.nx, tri.ny, tri.nz, light)
 
-        // Rasterize
+        // Rasterize face
         r3d_rasterize_tri(
             p0.x as i64, p0.y as i64,
             p1.x as i64, p1.y as i64,
@@ -250,6 +323,15 @@ pub fn r3d_render(
             col.x as i64, col.y as i64, col.z as i64,
             depth_buf, c,
         )
+
+        // Draw edges — dark silhouette lines for depth separation
+        let er = r3d_clamp_i((col.x as i64 * 3) / 10, 0, 255)
+        let eg = r3d_clamp_i((col.y as i64 * 3) / 10, 0, 255)
+        let eb = r3d_clamp_i((col.z as i64 * 3) / 10, 0, 255)
+        canvas_draw_line_aa(c, p0.x as i64, p0.y as i64, p1.x as i64, p1.y as i64, er, eg, eb)
+        canvas_draw_line_aa(c, p1.x as i64, p1.y as i64, p2.x as i64, p2.y as i64, er, eg, eb)
+        canvas_draw_line_aa(c, p2.x as i64, p2.y as i64, p0.x as i64, p0.y as i64, er, eg, eb)
+
         i = i + 1
     }
 }

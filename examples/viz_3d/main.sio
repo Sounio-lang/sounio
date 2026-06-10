@@ -7,24 +7,61 @@
 use display::window::{Window, window_open, window_set_title, window_present, window_pending,
                        window_next_event, window_close}
 use display::canvas::{Canvas, canvas_from_window, canvas_clear}
+use display::canvas_ext::{canvas_draw_line_aa}
 use display::event::{EV_CLOSE, EV_KEY_PRESS}
-use render::renderer3d::{Camera3D, Light3D, Tri3D, Vec3f,
-                          r3d_depth_buf_alloc, r3d_depth_buf_clear, r3d_render,
-                          r3d_sqrt, r3d_normalise}
+use render::renderer3d::{Camera3D, Light3D, Vec3f,
+                          r3d_depth_buf_alloc, r3d_depth_buf_clear,
+                          r3d_project, r3d_shade, r3d_rasterize_tri_gouraud,
+                          r3d_normalise}
 
 // ============================================================
 // Rotation helpers (Y and X axis)
 // ============================================================
 
-fn rot_cos(t: f64) -> f64 with Div {
-    // cos via Taylor: 1 - t²/2 + t⁴/24 - t⁶/720
+// Taylor series accurate on [0, π/2]; combined with quadrant reduction below.
+fn trig_core_cos(t: f64) -> f64 with Div {
     let t2 = t * t
-    1.0 - t2 * (0.5 - t2 * (1.0 / 24.0 - t2 / 720.0))
+    1.0 - t2 * (0.5 - t2 * (1.0 / 24.0 - t2 * (1.0 / 720.0 - t2 / 40320.0)))
+}
+fn trig_core_sin(t: f64) -> f64 with Div {
+    let t2 = t * t
+    t * (1.0 - t2 * (1.0 / 6.0 - t2 * (1.0 / 120.0 - t2 * (1.0 / 5040.0 - t2 / 362880.0))))
 }
 
-fn rot_sin(t: f64) -> f64 with Div {
-    let t2 = t * t
-    t * (1.0 - t2 * (1.0 / 6.0 - t2 * (1.0 / 120.0 - t2 / 5040.0)))
+fn rot_cos(t: f64) -> f64 with Mut, Div {
+    let half_pi: f64 = 1.57079632679490
+    let pi: f64 = 3.14159265358979
+    let two_pi: f64 = 6.28318530717958
+    var a: f64 = t
+    if a > two_pi { a = a - two_pi }
+    if a < 0.0 { a = a + two_pi }
+    if a <= half_pi {
+        trig_core_cos(a)
+    } else if a <= pi {
+        0.0 - trig_core_cos(pi - a)
+    } else if a <= pi + half_pi {
+        0.0 - trig_core_cos(a - pi)
+    } else {
+        trig_core_cos(two_pi - a)
+    }
+}
+
+fn rot_sin(t: f64) -> f64 with Mut, Div {
+    let half_pi: f64 = 1.57079632679490
+    let pi: f64 = 3.14159265358979
+    let two_pi: f64 = 6.28318530717958
+    var a: f64 = t
+    if a > two_pi { a = a - two_pi }
+    if a < 0.0 { a = a + two_pi }
+    if a <= half_pi {
+        trig_core_sin(a)
+    } else if a <= pi {
+        trig_core_sin(pi - a)
+    } else if a <= pi + half_pi {
+        0.0 - trig_core_sin(a - pi)
+    } else {
+        0.0 - trig_core_sin(two_pi - a)
+    }
 }
 
 fn rotate_y(x: f64, y: f64, z: f64, angle: f64, out: &!Vec3f) with Mut, Div {
@@ -64,84 +101,109 @@ fn cross_norm(
 //   B = ( √(8/9),  -1/3,  0)
 //   C = (-√(2/9), -1/3,  √(2/3))
 //   D = (-√(2/9), -1/3, -√(2/3))
+//
+// Vertex normals = normalised average of 3 adjacent face normals.
+// Combined with per-face base colours and r3d_shade, this gives Gouraud
+// shading: smooth gradients + Blinn-Phong specular that travels around.
 
-fn tet_build(tris: &![Tri3D; 4096], ry: f64, rx: f64) -> i64 with Mut, Div {
-    // Vertex model positions
-    let ax: f64 = 0.0;       let ay: f64 = 1.0;        let az: f64 = 0.0
+fn tet_draw_gouraud(
+    angle_y: f64, angle_x: f64,
+    cam: &Camera3D, light: &Light3D,
+    depth_buf: *mut i64, c: &!Canvas,
+) with Mut, Div {
+    let ax: f64 = 0.0;       let ay: f64 = 1.0;             let az: f64 = 0.0
     let bx: f64 = 0.942809;  let by: f64 = 0.0 - 0.333333;  let bz: f64 = 0.0
     let cx: f64 = 0.0 - 0.471405; let cy: f64 = 0.0 - 0.333333; let cz: f64 = 0.816497
     let dx: f64 = 0.0 - 0.471405; let dy: f64 = 0.0 - 0.333333; let dz: f64 = 0.0 - 0.816497
 
-    // Apply rotation (Y then X)
     var ra = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
     var rb = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
     var rc = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
     var rd = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
-
     var tmp = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
 
-    rotate_y(ax, ay, az, ry, &!tmp)
-    rotate_x(tmp.x, tmp.y, tmp.z, rx, &!ra)
+    rotate_y(ax, ay, az, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!ra)
+    rotate_y(bx, by, bz, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!rb)
+    rotate_y(cx, cy, cz, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!rc)
+    rotate_y(dx, dy, dz, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!rd)
 
-    rotate_y(bx, by, bz, ry, &!tmp)
-    rotate_x(tmp.x, tmp.y, tmp.z, rx, &!rb)
-
-    rotate_y(cx, cy, cz, ry, &!tmp)
-    rotate_x(tmp.x, tmp.y, tmp.z, rx, &!rc)
-
-    rotate_y(dx, dy, dz, ry, &!tmp)
-    rotate_x(tmp.x, tmp.y, tmp.z, rx, &!rd)
-
-    // Scale and translate; camera at pos_z=20, tz=5 → depth≈15, scale≈27 px/unit
-    let scale: f64 = 2.5
+    let scale: f64 = 2.0
     let tz: f64 = 5.0
-
     let va_x = ra.x * scale; let va_y = ra.y * scale; let va_z = ra.z * scale + tz
     let vb_x = rb.x * scale; let vb_y = rb.y * scale; let vb_z = rb.z * scale + tz
     let vc_x = rc.x * scale; let vc_y = rc.y * scale; let vc_z = rc.z * scale + tz
     let vd_x = rd.x * scale; let vd_y = rd.y * scale; let vd_z = rd.z * scale + tz
 
-    // Face 0: A-B-C (red) — outward normal points away from D: use (C-A)×(B-A)
+    // Face normals (outward)
+    // Face 0: A-B-C  Face 1: A-B-D  Face 2: A-C-D  Face 3: B-C-D
     let n0 = cross_norm(vc_x - va_x, vc_y - va_y, vc_z - va_z,
                         vb_x - va_x, vb_y - va_y, vb_z - va_z)
-    (*tris)[0] = Tri3D {
-        v0x: va_x, v0y: va_y, v0z: va_z,
-        v1x: vb_x, v1y: vb_y, v1z: vb_z,
-        v2x: vc_x, v2y: vc_y, v2z: vc_z,
-        nx: n0.x, ny: n0.y, nz: n0.z,
-        base_r: 220, base_g: 80, base_b: 60,
-    }
-    // Face 1: A-B-D (green)
     let n1 = cross_norm(vb_x - va_x, vb_y - va_y, vb_z - va_z,
                         vd_x - va_x, vd_y - va_y, vd_z - va_z)
-    (*tris)[1] = Tri3D {
-        v0x: va_x, v0y: va_y, v0z: va_z,
-        v1x: vb_x, v1y: vb_y, v1z: vb_z,
-        v2x: vd_x, v2y: vd_y, v2z: vd_z,
-        nx: n1.x, ny: n1.y, nz: n1.z,
-        base_r: 80, base_g: 200, base_b: 120,
-    }
-    // Face 2: A-C-D (blue) — outward normal points away from B: use (D-A)×(C-A)
     let n2 = cross_norm(vd_x - va_x, vd_y - va_y, vd_z - va_z,
                         vc_x - va_x, vc_y - va_y, vc_z - va_z)
-    (*tris)[2] = Tri3D {
-        v0x: va_x, v0y: va_y, v0z: va_z,
-        v1x: vc_x, v1y: vc_y, v1z: vc_z,
-        v2x: vd_x, v2y: vd_y, v2z: vd_z,
-        nx: n2.x, ny: n2.y, nz: n2.z,
-        base_r: 80, base_g: 140, base_b: 255,
-    }
-    // Face 3: B-C-D (yellow)
     let n3 = cross_norm(vc_x - vb_x, vc_y - vb_y, vc_z - vb_z,
                         vd_x - vb_x, vd_y - vb_y, vd_z - vb_z)
-    (*tris)[3] = Tri3D {
-        v0x: vb_x, v0y: vb_y, v0z: vb_z,
-        v1x: vc_x, v1y: vc_y, v1z: vc_z,
-        v2x: vd_x, v2y: vd_y, v2z: vd_z,
-        nx: n3.x, ny: n3.y, nz: n3.z,
-        base_r: 255, base_g: 220, base_b: 60,
-    }
-    4
+
+    // Vertex normals: A∈{0,1,2}  B∈{0,1,3}  C∈{0,2,3}  D∈{1,2,3}
+    let vna = r3d_normalise(n0.x+n1.x+n2.x, n0.y+n1.y+n2.y, n0.z+n1.z+n2.z)
+    let vnb = r3d_normalise(n0.x+n1.x+n3.x, n0.y+n1.y+n3.y, n0.z+n1.z+n3.z)
+    let vnc = r3d_normalise(n0.x+n2.x+n3.x, n0.y+n2.y+n3.y, n0.z+n2.z+n3.z)
+    let vnd = r3d_normalise(n1.x+n2.x+n3.x, n1.y+n2.y+n3.y, n1.z+n2.z+n3.z)
+
+    // Project all 4 vertices to screen
+    let pa = r3d_project(va_x, va_y, va_z, cam, c.width, c.height)
+    let pb = r3d_project(vb_x, vb_y, vb_z, cam, c.width, c.height)
+    let pc = r3d_project(vc_x, vc_y, vc_z, cam, c.width, c.height)
+    let pd = r3d_project(vd_x, vd_y, vd_z, cam, c.width, c.height)
+
+    // Face 0: A-B-C (red 220,80,60)
+    let f0a = r3d_shade(220, 80, 60, vna.x, vna.y, vna.z, light)
+    let f0b = r3d_shade(220, 80, 60, vnb.x, vnb.y, vnb.z, light)
+    let f0c = r3d_shade(220, 80, 60, vnc.x, vnc.y, vnc.z, light)
+    r3d_rasterize_tri_gouraud(
+        pa.x as i64, pa.y as i64, pb.x as i64, pb.y as i64, pc.x as i64, pc.y as i64,
+        pa.z, pb.z, pc.z, f0a, f0b, f0c, depth_buf, c)
+    canvas_draw_line_aa(c, pa.x as i64, pa.y as i64, pb.x as i64, pb.y as i64, 66, 24, 18)
+    canvas_draw_line_aa(c, pb.x as i64, pb.y as i64, pc.x as i64, pc.y as i64, 66, 24, 18)
+    canvas_draw_line_aa(c, pc.x as i64, pc.y as i64, pa.x as i64, pa.y as i64, 66, 24, 18)
+
+    // Face 1: A-B-D (green 80,200,120)
+    let f1a = r3d_shade(80, 200, 120, vna.x, vna.y, vna.z, light)
+    let f1b = r3d_shade(80, 200, 120, vnb.x, vnb.y, vnb.z, light)
+    let f1d = r3d_shade(80, 200, 120, vnd.x, vnd.y, vnd.z, light)
+    r3d_rasterize_tri_gouraud(
+        pa.x as i64, pa.y as i64, pb.x as i64, pb.y as i64, pd.x as i64, pd.y as i64,
+        pa.z, pb.z, pd.z, f1a, f1b, f1d, depth_buf, c)
+    canvas_draw_line_aa(c, pa.x as i64, pa.y as i64, pb.x as i64, pb.y as i64, 24, 60, 36)
+    canvas_draw_line_aa(c, pb.x as i64, pb.y as i64, pd.x as i64, pd.y as i64, 24, 60, 36)
+    canvas_draw_line_aa(c, pd.x as i64, pd.y as i64, pa.x as i64, pa.y as i64, 24, 60, 36)
+
+    // Face 2: A-C-D (blue 80,140,255)
+    let f2a = r3d_shade(80, 140, 255, vna.x, vna.y, vna.z, light)
+    let f2c = r3d_shade(80, 140, 255, vnc.x, vnc.y, vnc.z, light)
+    let f2d = r3d_shade(80, 140, 255, vnd.x, vnd.y, vnd.z, light)
+    r3d_rasterize_tri_gouraud(
+        pa.x as i64, pa.y as i64, pc.x as i64, pc.y as i64, pd.x as i64, pd.y as i64,
+        pa.z, pc.z, pd.z, f2a, f2c, f2d, depth_buf, c)
+    canvas_draw_line_aa(c, pa.x as i64, pa.y as i64, pc.x as i64, pc.y as i64, 24, 42, 76)
+    canvas_draw_line_aa(c, pc.x as i64, pc.y as i64, pd.x as i64, pd.y as i64, 24, 42, 76)
+    canvas_draw_line_aa(c, pd.x as i64, pd.y as i64, pa.x as i64, pa.y as i64, 24, 42, 76)
+
+    // Face 3: B-C-D (yellow 255,220,60)
+    let f3b = r3d_shade(255, 220, 60, vnb.x, vnb.y, vnb.z, light)
+    let f3c = r3d_shade(255, 220, 60, vnc.x, vnc.y, vnc.z, light)
+    let f3d = r3d_shade(255, 220, 60, vnd.x, vnd.y, vnd.z, light)
+    r3d_rasterize_tri_gouraud(
+        pb.x as i64, pb.y as i64, pc.x as i64, pc.y as i64, pd.x as i64, pd.y as i64,
+        pb.z, pc.z, pd.z, f3b, f3c, f3d, depth_buf, c)
+    canvas_draw_line_aa(c, pb.x as i64, pb.y as i64, pc.x as i64, pc.y as i64, 76, 66, 18)
+    canvas_draw_line_aa(c, pc.x as i64, pc.y as i64, pd.x as i64, pd.y as i64, 76, 66, 18)
+    canvas_draw_line_aa(c, pd.x as i64, pd.y as i64, pb.x as i64, pb.y as i64, 76, 66, 18)
 }
 
 // ============================================================
@@ -175,20 +237,11 @@ fn main() with IO, Alloc, Mut, Div {
         dy: 0.577350,
         dz: 0.577350,
         r: 255, g: 255, b: 255,
-        ambient: 0.45,
+        ambient: 0.22,
     }
 
-    var tris: [Tri3D; 4096] = [Tri3D {
-        v0x: 0.0, v0y: 0.0, v0z: 0.0,
-        v1x: 0.0, v1y: 0.0, v1z: 0.0,
-        v2x: 0.0, v2y: 0.0, v2z: 0.0,
-        nx: 0.0, ny: 0.0, nz: 1.0,
-        base_r: 0, base_g: 0, base_b: 0,
-    }; 4096]
-
-    var n_tris: i64 = 0
     var angle_y: f64 = 0.6
-    var angle_x: f64 = 0.4
+    var angle_x: f64 = 0.3
 
     var running = true
     while running {
@@ -202,14 +255,15 @@ fn main() with IO, Alloc, Mut, Div {
         canvas_clear(&!c, 18, 20, 30)
         r3d_depth_buf_clear(depth_buf, W, H)
 
-        n_tris = tet_build(&!tris, angle_y, angle_x)
-        r3d_render(&tris, n_tris, &cam, &light, depth_buf, &!c)
+        tet_draw_gouraud(angle_y, angle_x, &cam, &light, depth_buf, &!c)
 
         window_present(&!win)
 
-        // Advance rotation (approx 1°/frame)
+        // Tumble: Y ~1°/frame, X ~0.4°/frame — shows all faces and specular highlights
         angle_y = angle_y + 0.017453
         if angle_y > 6.28318 { angle_y = angle_y - 6.28318 }
+        angle_x = angle_x + 0.004
+        if angle_x > 6.28318 { angle_x = angle_x - 6.28318 }
     }
 
     heap_free(depth_buf as *mut i8)
