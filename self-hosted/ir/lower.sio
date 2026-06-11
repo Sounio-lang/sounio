@@ -7260,41 +7260,64 @@ impl Lowerer {
             let lo6 = lo5.emit(ir_call(dst, fn_id, e.name, final_args, final_argc))
             (lo6, dst)
         } else if e.kind == ExprKind::ExprIf {
-            let pair_cond = self.lower_opt_expr_ref(&e.left)
-            let lo1 = pair_cond.0
-            let cond = pair_cond.1
-
-            let pair_l_else = lo1.fresh_label()
-            let lo2 = pair_l_else.0
-            let l_else = pair_l_else.1
-            let pair_l_end = lo2.fresh_label()
-            let lo3 = pair_l_end.0
-            let l_end = pair_l_end.1
-            let pair_res = lo3.fresh_reg()
-            let lo4 = pair_res.0
+            // ITERATIVE else-if-chain lowering (was recursive on e.else_expr). A long
+            // `if/else if/.../else` chain is a RIGHT-NESTED ExprIf in the AST; recursing
+            // lower_expr_ref once per link overflowed the fixed compiled stack at ~40+ deep
+            // (CONFIRMED: 45-deep else-if SIGSEGVs in lowering, 300 straight-line stmts do not,
+            // and ulimit -s unlimited does not help -> fixed mmap'd stack). Walk the chain in a
+            // loop with ONE shared result reg + end label; per-link l_next. Semantically
+            // identical (each cond-false falls to the next link; each taken branch copies res +
+            // jumps to the shared end; the final non-ExprIf else lowers as the fallthrough).
+            let pair_res = self.fresh_reg()
+            var lo = pair_res.0
             let res = pair_res.1
+            let pair_l_end = lo.fresh_label()
+            lo = pair_l_end.0
+            let l_end = pair_l_end.1
 
-            var lo = lo4.emit(ir_branch_false(cond, l_else))
-
-            let then_block_opt: Option<Box<Block>> = e.block
-            let pair_then = match then_block_opt {
-                Some(blk) => lo.lower_block_ref(&(*blk)),
-                None => lo.emit_unit(),
+            var cur_cond: &Option<Box<Expr>> = &e.left
+            var cur_block: &Option<Box<Block>> = &e.block
+            var cur_else: &Option<Box<Expr>> = &e.else_expr
+            var chain_done = false
+            while !chain_done {
+                let pair_cond = lo.lower_opt_expr_ref(cur_cond)
+                lo = pair_cond.0
+                let cond = pair_cond.1
+                let pair_next = lo.fresh_label()
+                lo = pair_next.0
+                let l_next = pair_next.1
+                lo = lo.emit(ir_branch_false(cond, l_next))
+                let pair_then = match *cur_block {
+                    Some(blk) => lo.lower_block_ref(&(*blk)),
+                    None => lo.emit_unit(),
+                }
+                lo = pair_then.0
+                lo = lo.emit(ir_copy(res, pair_then.1))
+                lo = lo.emit(ir_jump(l_end))
+                lo = lo.emit(ir_label(l_next))
+                // Advance: if the else is another ExprIf, continue the loop on it (no recursion);
+                // otherwise lower it (or unit) as the final else and stop.
+                match *cur_else {
+                    Some(ee) => {
+                        if (*ee).kind == ExprKind::ExprIf {
+                            cur_cond = &(*ee).left
+                            cur_block = &(*ee).block
+                            cur_else = &(*ee).else_expr
+                        } else {
+                            let pair_else = lo.lower_expr_ref(&(*ee))
+                            lo = pair_else.0
+                            lo = lo.emit(ir_copy(res, pair_else.1))
+                            chain_done = true
+                        }
+                    }
+                    None => {
+                        let pair_unit = lo.emit_unit()
+                        lo = pair_unit.0
+                        lo = lo.emit(ir_copy(res, pair_unit.1))
+                        chain_done = true
+                    }
+                }
             }
-            lo = pair_then.0
-            let then_reg = pair_then.1
-            lo = lo.emit(ir_copy(res, then_reg))
-            lo = lo.emit(ir_jump(l_end))
-            lo = lo.emit(ir_label(l_else))
-
-            let else_expr_opt: Option<Box<Expr>> = e.else_expr
-            let pair_else = match else_expr_opt {
-                Some(ee) => lo.lower_expr_ref(&(*ee)),
-                None => lo.emit_unit(),
-            }
-            lo = pair_else.0
-            let else_reg = pair_else.1
-            lo = lo.emit(ir_copy(res, else_reg))
             lo = lo.emit(ir_label(l_end))
             (lo, res)
         } else if e.kind == ExprKind::ExprMatch {
