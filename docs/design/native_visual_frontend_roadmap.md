@@ -49,7 +49,13 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - The v1.5 editor supports fixed-rectangle nudging, fixed-rectangle resizing, app tag edits, clamped control value edits, and deterministic edit traces from keyboard events.
 - `tests/run-pass/viz_editor_scene.sio` proves inspector selection -> editor mutation -> edit trace -> Canvas highlight -> static HTML/SVG export over the same edited Visual IR.
 
-## V1.6: Static HTML/SVG
+## V1.6: Native Visual Workbench
+
+- `stdlib/viz/workbench.sio` composes chart, epistemic band, heatmap, molecule data, scalar/vector field, trajectory, spectrum, 3D mesh, controls, labels, legend, tooltip, viewport, replay, inspector, editor, Canvas, and HTML/SVG into one reusable scene blueprint.
+- `examples/viz_workbench/main.sio` is the first native Workbench demo surface.
+- `tests/run-pass/viz_workbench_roundtrip.sio` proves Workbench render -> replay -> inspector selection -> editor mutation -> Canvas highlight -> static HTML/SVG identity export without delegating scientific semantics to JavaScript.
+
+## V1.7: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.
 - JavaScript is not used for scientific semantics.

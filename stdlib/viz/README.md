@@ -41,6 +41,7 @@ Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattic
 - `viz_inspector_hit_node` and `viz_inspector_select` make inspector rows interactive Sounio state: selecting a row updates selected/hovered/focused node fields without delegating state to UI runtime code.
 - `viz_inspector_draw_node_highlights` overlays native Canvas highlights on selected/hovered/focused Visual IR nodes.
 - `viz::editor` edits the selected/focused/hovered node: nudge/resize fixed rectangles, set app tags, set clamped control values, and record edit traces from keyboard events.
+- `viz::workbench` composes charts, molecule data, scalar/vector fields, trajectory, spectrum, mesh, controls, inspector/edit/replay/export hooks into a reusable native visual workbench scene blueprint.
 - Labels and text controls use fixed `[i8; 64]` buffers in the Visual IR. Canvas renders them with `display::font`; HTML/SVG escapes XML-sensitive ASCII before export.
 - Native frontend builders cover button, slider, toggle, tabs, legend, tooltip, text viewport, and plot viewport nodes over the same control reducer machinery.
 - `display::event::Event` can be reduced directly into `VizScene` for headless tests and future native window loops.

@@ -308,6 +308,23 @@ VIZ_EDITOR_SCENE_PASS
 
 The test selects a Visual IR node through the inspector, edits its tag/value/rectangle, replays keyboard edit events into a deterministic edit trace, checks Canvas highlight pixels, and emits HTML/SVG with the edited identity and geometry.
 
+## Visual Workbench Roundtrip
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_roundtrip.sio
+```
+
+Expected output includes:
+
+```text
+data-viz-tag="9101"
+VIZ_WORKBENCH_ROUNDTRIP_PASS
+```
+
+The test builds the reusable Workbench scene, renders Canvas, replays a deterministic interaction script, selects a node through the inspector, edits the selected Visual IR node, redraws highlights, and exports HTML/SVG from the same edited scene.
+
 ## Renderer3D Edge Proof
 
 Run:
