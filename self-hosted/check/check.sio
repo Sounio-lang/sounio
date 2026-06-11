@@ -157,6 +157,7 @@ pub struct Checker {
     error_count: i64,
     warning_count: i64,
     had_error: bool,
+    diag_emitted: bool,
     current_return_type: TypeEntry,
     current_impl_type: TypeEntry,
     current_effects: [i64; 8],
@@ -648,6 +649,7 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         error_count: 0,
         warning_count: 0,
         had_error: false,
+        diag_emitted: false,
         current_return_type: ty_unit(),
         current_impl_type: ty_error(),
         current_effects: [0; 8],
@@ -738,6 +740,7 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).error_count = 0
     (*raw).warning_count = 0
     (*raw).had_error = false
+    (*raw).diag_emitted = false
     (*raw).current_return_type = ty_unit()
     (*raw).current_impl_type = ty_error()
     (*raw).current_effects = [0; 8]
@@ -777,6 +780,7 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
 }
 
 fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Div, Alloc {
+    let prev_error_count = (*dst).error_count
     (*dst).env = src.env
     (*dst).borrows = src.borrows
     (*dst).units = src.units
@@ -831,6 +835,11 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).error_count = src.error_count
     (*dst).warning_count = src.warning_count
     (*dst).had_error = src.had_error
+    if src.error_count > prev_error_count {
+        (*dst).diag_emitted = true
+    } else {
+        (*dst).diag_emitted = (*dst).diag_emitted || src.diag_emitted
+    }
     (*dst).current_return_type = src.current_return_type
     (*dst).current_impl_type = src.current_impl_type
     (*dst).current_effects = src.current_effects
@@ -868,6 +877,16 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
 fn checker_note_type_error_mut(c: *mut Checker) with Mut {
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
+}
+
+// Emit a fallback diagnostic when had_error was recorded without printing.
+// Boot4/modular path uses checker_check_items_inplace which notes errors via
+// checker_note_type_error_mut without emitting; this closes the silent gap.
+fn checker_flush_unemitted_type_errors_mut(c: *mut Checker) with IO {
+    if (*c).had_error && !(*c).diag_emitted {
+        print("error[E000]: type checking failed\n")
+        (*c).diag_emitted = true
+    }
 }
 
 fn checker_enter_type_expr_mut(c: *mut Checker) -> bool with Mut, Panic, Div {
@@ -2015,6 +2034,7 @@ fn checker_prove_robust_names_mut(c: *mut Checker, contest_name: Name, policy_na
 fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
+    (*c).diag_emitted = true
     print("error[E")
     if code < 100 { print("0") }
     if code < 10 { print("0") }
@@ -2036,6 +2056,7 @@ fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a
 fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
+    (*c).diag_emitted = true
     print("error[E")
     if code < 100 { print("0") }
     if code < 10 { print("0") }
@@ -2441,6 +2462,7 @@ fn checker_check_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) w
 fn checker_report_multitest_correction_required_inplace(c: *mut Checker, span: Span, test_count: i64) with Mut, IO, Panic, Div {
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
+    (*c).diag_emitted = true
     print("error[E042]")
     if span.start > 0 || span.end > 0 {
         print(" at ")
@@ -2558,6 +2580,7 @@ fn checker_check_block_inplace(c: *mut Checker, blk: Block) -> TypeEntry with Mu
     if linear_check.1 > 0 {
         (*c).had_error = true
         (*c).error_count = (*c).error_count + 1
+        (*c).diag_emitted = true
         print("error[E040]: linear value not consumed (")
         print_int(linear_check.1)
         print(" unconsumed)\n")
@@ -2813,6 +2836,20 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
 }
 
+// Narrow a default i64 int-literal operand to a narrower integer peer (e.g. `a: i32 + 10`).
+fn checker_narrow_literal_operand_ty(operand_ty: TypeEntry, operand_was_int_lit: bool, peer_ty: TypeEntry) -> TypeEntry {
+    if !operand_was_int_lit {
+        return operand_ty
+    }
+    if operand_ty.kind != TypeKind::TyI64 {
+        return operand_ty
+    }
+    if is_integer_type(peer_ty) && peer_ty.kind != TypeKind::TyI64 {
+        return peer_ty
+    }
+    operand_ty
+}
+
 // *mut ExprBinary handler (split-and-bridge): check the OPERANDS in place — so a nested
 // enum path-expr (e.g. `c == Color::Red`) reaches checker_check_path_expr_inplace and
 // dodges the by-value check_path_expr SRET crash — then bridge to the by-value op-typing
@@ -2820,11 +2857,17 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 // types and never re-checks operands, so it never recurses into check_path_expr.
 fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let left_ty = checker_check_opt_expr_inplace(c, e.left)
+    let left_was_int_lit = (*c).last_literal_kind == 1
+    (*c).last_literal_kind = 0
     let right_ty = checker_check_opt_expr_inplace(c, e.right)
+    let right_was_int_lit = (*c).last_literal_kind == 1
+    (*c).last_literal_kind = 0
+    let narrowed_left = checker_narrow_literal_operand_ty(left_ty, left_was_int_lit, right_ty)
+    let narrowed_right = checker_narrow_literal_operand_ty(right_ty, right_was_int_lit, left_ty)
     // Call the *mut tail (returns only TypeEntry) — NOT the by-value bridge, whose
     // (Checker, TypeEntry) return became a 12MB local held across this fn's recursion
     // → N-deep stack overflow on deeply-nested exprs. The tail is non-recursive.
-    checker_check_binary_with_operand_types_inplace(c, e, left_ty, right_ty)
+    checker_check_binary_with_operand_types_inplace(c, e, narrowed_left, narrowed_right)
 }
 
 
@@ -3973,7 +4016,6 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_rollback_transition(e.left) { return true }
     if call_expr_is_builtin_lift_knowledge(e.left) { return true }
     if call_expr_is_builtin_measure(e.left) { return true }
-    if call_expr_is_builtin_slice_len(e.left) { return true }
     if call_expr_contest_witness_kind(e.left) >= 0 { return true }
     false
 }
@@ -4068,6 +4110,32 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     ty_knowledge(v_ty, 0.0 - 1.0)
 }
 
+// slice_len(s: &[T]) -> i64. Inplace transcription of check_slice_len_call_expr —
+// the by-value bridge SRET-smashed on populated enum tables (slice_fat_pointers crash).
+fn checker_check_slice_len_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let call_start_borrows = (*c).borrows
+    let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        None => {}
+    }
+    let is_ok =
+        arg_ty.kind == TypeKind::TySlice
+        || arg_ty.kind == TypeKind::TySliceMut
+        || slice_param_accepts_array_ref(arg_ty, ty_slice(ty_unknown()))
+    if !is_ok && !is_error_or_unknown(arg_ty) {
+        checker_report_error_at_inplace(c, e.span, 9, 0, 0, 0)
+    }
+    checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+    ty_i64()
+}
+
 // Enum tuple-variant constructor detection (`Enum::Variant(args)`). Given the callee
 // opt-expr, returns the enum table index if the callee is a 2+-segment path whose HEAD
 // names an enum and whose LAST segment names a variant of it (e.g. `Event::B`); else -1.
@@ -4102,6 +4170,9 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // by-value bridge below (which SRET-smashes on the 164KB Checker return).
     if call_expr_is_builtin_measure(e.left) {
         return checker_check_measure_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_slice_len(e.left) {
+        return checker_check_slice_len_expr_inplace(c, e)
     }
     if call_expr_should_bridge_by_value(e) {
         return checker_check_expr_mut(c, e)
@@ -5020,6 +5091,7 @@ fn checker_check_items_inner_store_return_had_error_mut(c: *mut Checker, items: 
     // ever lands on the hot path, so the layout-sensitive stale-stack
     // codegen crash never fires. (Was: `(*c).check_items(items)` by value.)
     checker_check_items_inplace(c, items)
+    checker_flush_unemitted_type_errors_mut(c)
     if (*c).had_error {
         1
     } else {
