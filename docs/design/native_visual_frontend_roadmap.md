@@ -43,7 +43,13 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_inspector_draw_node_highlights` overlays selected/hovered/focused node highlights on the rendered scene.
 - `tests/run-pass/viz_inspector_interactive.sio` proves inspector row selection, shared audit hashes, and highlight pixels without a display server.
 
-## V1.5: Static HTML/SVG
+## V1.5: Minimal Scene Editor
+
+- `stdlib/viz/editor.sio` edits the selected/focused/hovered Visual IR node without moving state into UI runtime code.
+- The v1.5 editor supports fixed-rectangle nudging, fixed-rectangle resizing, app tag edits, clamped control value edits, and deterministic edit traces from keyboard events.
+- `tests/run-pass/viz_editor_scene.sio` proves inspector selection -> editor mutation -> edit trace -> Canvas highlight -> static HTML/SVG export over the same edited Visual IR.
+
+## V1.6: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.
 - JavaScript is not used for scientific semantics.

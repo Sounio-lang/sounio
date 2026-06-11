@@ -291,6 +291,23 @@ VIZ_INSPECTOR_INTERACTIVE_PASS
 
 The test clicks an inspector row, selects/focuses/hovers the corresponding Visual IR node, verifies shared audit hashes, and checks the native Canvas highlight/text pixels.
 
+## Scene Editor Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_editor_scene.sio
+```
+
+Expected output includes:
+
+```text
+data-viz-tag="7202"
+VIZ_EDITOR_SCENE_PASS
+```
+
+The test selects a Visual IR node through the inspector, edits its tag/value/rectangle, replays keyboard edit events into a deterministic edit trace, checks Canvas highlight pixels, and emits HTML/SVG with the edited identity and geometry.
+
 ## Renderer3D Edge Proof
 
 Run:
