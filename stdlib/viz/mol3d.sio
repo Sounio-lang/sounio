@@ -10,8 +10,8 @@
 //   mol3d_render(&mol, &cam, angle_y, angle_x, &!canvas)
 
 use display::canvas::{Canvas}
-use display::canvas_ext::{canvas_draw_line_aa, canvas_sphere_shaded, canvas_sphere_shaded_fog,
-                           canvas_sphere_sss, canvas_bond_cylinder}
+use display::canvas_ext::{canvas_draw_line_aa, canvas_blend_pixel, canvas_sphere_shaded,
+                           canvas_sphere_shaded_fog, canvas_sphere_sss, canvas_bond_cylinder}
 use render::renderer3d::{Camera3D, Vec3f}
 use viz::physchem::{MoleculeViz}
 
@@ -22,6 +22,62 @@ use viz::physchem::{MoleculeViz}
 // Tarini et al. 2006 (VMV): AO per-atom = solid-angle sum of overlapping
 // neighbours.  Call once per molecule; pass ao[] to mol3d_render_ao.
 // ao[i] ∈ [0.0, 1.0]; 0 = fully lit, 1 = fully occluded.
+
+// ============================================================
+// Per-atom analytic soft shadows (Quilez 2010)
+// ============================================================
+//
+// Trace a ray toward the directional light from each atom center.
+// For each other atom along the ray, measure how much it occludes the light
+// via its angular radius (Quilez 2010 soft penumbra formula).
+// shadow[i] ∈ [0,1]: 0=full shadow, 1=fully lit.
+// Light direction matches canvas_sphere_shaded: (0.447, -0.632, 0.632).
+
+fn m3_sqrt_f(x: f64) -> f64 with Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x * 0.5 + 0.5
+    g = 0.5 * (g + x / g)
+    g = 0.5 * (g + x / g)
+    g = 0.5 * (g + x / g)
+    g = 0.5 * (g + x / g)
+    g
+}
+
+pub fn mol3d_precompute_shadow(mol: &MoleculeViz, shadow: &![f64; 64]) with Mut, Div {
+    let lx: f64 = 0.447
+    let ly: f64 = 0.0 - 0.632
+    let lz: f64 = 0.632
+    var i: i64 = 0
+    while i < mol.atom_count {
+        var sf: f64 = 1.0
+        let ax = mol.atoms[i as usize].x
+        let ay = mol.atoms[i as usize].y
+        let az = mol.atoms[i as usize].z
+        var j: i64 = 0
+        while j < mol.atom_count {
+            if j != i {
+                let dx = mol.atoms[j as usize].x - ax
+                let dy = mol.atoms[j as usize].y - ay
+                let dz = mol.atoms[j as usize].z - az
+                let br = mol.atoms[j as usize].radius
+                // Project onto light ray direction
+                let t = dx * lx + dy * ly + dz * lz
+                if t > 0.0 {
+                    let qx = dx - t * lx
+                    let qy = dy - t * ly
+                    let qz = dz - t * lz
+                    let perp = m3_sqrt_f(qx*qx + qy*qy + qz*qz)
+                    let pen = if br > 0.0001 { perp / br } else { 1.0 }
+                    let pcl = if pen < 0.0 { 0.0 } else if pen > 1.0 { 1.0 } else { pen }
+                    if pcl < sf { sf = pcl }
+                }
+            }
+            j = j + 1
+        }
+        shadow[i as usize] = sf
+        i = i + 1
+    }
+}
 
 pub fn mol3d_precompute_ao(mol: &MoleculeViz, ao: &![f64; 64]) with Mut, Div {
     var i: i64 = 0
@@ -574,5 +630,230 @@ pub fn mol3d_render_ao(
                 ar, ag, ab, tr, tg, tb)
         }
         oi2 = oi2 + 1
+    }
+}
+
+// ============================================================
+// Shadow + AO render — mol3d_render with precomputed shadow
+// ============================================================
+//
+// Combines analytic soft shadows (from mol3d_precompute_shadow) with
+// inline AO, chromatic depth cueing, and fog. The shadow pre-scales
+// the diffuse component (ambient preserved at 0.30 even at shadow=0).
+
+pub fn mol3d_render_shadow(
+    mol: &MoleculeViz,
+    cam: &Camera3D,
+    angle_y: f64,
+    angle_x: f64,
+    shadow: &[f64; 64],
+    c: &!Canvas,
+) with Mut, Div {
+    let cy5 = m3_cos(angle_y)
+    let sy5 = m3_sin(angle_y)
+    let cx5 = m3_cos(angle_x)
+    let sx5 = m3_sin(angle_x)
+
+    var px5:  [i64; 64] = [0; 64]
+    var py5:  [i64; 64] = [0; 64]
+    var pd5:  [f64; 64] = [0.0; 64]
+    var pr5:  [i64; 64] = [0; 64]
+    var pv5:  [i64; 64] = [0; 64]
+
+    var i: i64 = 0
+    while i < mol.atom_count {
+        let a = mol.atoms[i as usize]
+        let x1 = a.x * cy5 + a.z * sy5
+        let y1 = a.y
+        let z1 = 0.0 - a.x * sy5 + a.z * cy5
+        let y2 = y1 * cx5 - z1 * sx5
+        let z2 = y1 * sx5 + z1 * cx5
+        let p = m3_project(x1, y2, z2, cam, c.width, c.height)
+        if p.z > 0.0 {
+            px5[i as usize] = p.x as i64
+            py5[i as usize] = p.y as i64
+            pd5[i as usize] = p.z
+            let rs = (a.radius * cam.focal / p.z) as i64
+            pr5[i as usize] = if rs < 3 { 3 } else if rs > 100 { 100 } else { rs }
+            pv5[i as usize] = 1
+        }
+        i = i + 1
+    }
+
+    // Inline AO
+    var ao5: [f64; 64] = [0.0; 64]
+    var ai: i64 = 0
+    while ai < mol.atom_count {
+        let aa5 = mol.atoms[ai as usize]
+        var acc: f64 = 0.0
+        var bj: i64 = 0
+        while bj < mol.atom_count {
+            if bj != ai {
+                let ab5 = mol.atoms[bj as usize]
+                let ddx = ab5.x - aa5.x
+                let ddy = ab5.y - aa5.y
+                let ddz = ab5.z - aa5.z
+                let dist2 = ddx*ddx + ddy*ddy + ddz*ddz
+                if dist2 > 0.0 {
+                    acc = acc + (ab5.radius * ab5.radius) / dist2
+                }
+            }
+            bj = bj + 1
+        }
+        let raw = acc * 0.30
+        ao5[ai as usize] = if raw > 1.0 { 1.0 } else { raw }
+        ai = ai + 1
+    }
+
+    var order5: [i64; 64] = [0; 64]
+    m3_sort_desc(&pd5, mol.atom_count, &!order5)
+
+    let fog_near5: f64 = 12.0
+    let fog_far5:  f64 = 30.0
+
+    // Silhouette pass
+    var oi: i64 = 0
+    while oi < mol.atom_count {
+        let idx = order5[oi as usize]
+        if pv5[idx as usize] == 1 {
+            canvas_sphere_shaded(c, px5[idx as usize], py5[idx as usize],
+                                  pr5[idx as usize] + 2, 30, 30, 42)
+        }
+        oi = oi + 1
+    }
+
+    // Lit pass: shadow × AO pre-scale + chromatic depth + fog
+    var oi2: i64 = 0
+    while oi2 < mol.atom_count {
+        let idx = order5[oi2 as usize]
+        if pv5[idx as usize] == 1 {
+            let a = mol.atoms[idx as usize]
+            let depth = pd5[idx as usize]
+            let ao_v = ao5[idx as usize]
+            let sh_v = shadow[idx as usize]
+            // Shadow preserves 0.30 ambient (matches sphere shader ambient=0.32 approx)
+            let sh_sc = 0.30 + 0.70 * sh_v
+            let ao_sc = 1.0 - 0.40 * ao_v
+            let sc_f = sh_sc * ao_sc
+            let sc_i = (sc_f * 255.0) as i64
+            let sc = if sc_i < 45 { 45 } else if sc_i > 255 { 255 } else { sc_i }
+            let ar = a.r * sc / 255
+            let ag = a.g * sc / 255
+            let ab = a.b * sc / 255
+            // Chromatic depth cueing
+            let dn = if fog_far5 > fog_near5 {
+                let raw = (depth - fog_near5) / (fog_far5 - fog_near5)
+                if raw < 0.0 { 0.0 } else if raw > 1.0 { 1.0 } else { raw }
+            } else { 0.0 }
+            let ch = dn * 240.0
+            let final_r = (ar as f64 * 0.60 + m3_hsv_r(ch) as f64 * 0.40) as i64
+            let final_g = (ag as f64 * 0.60 + m3_hsv_g(ch) as f64 * 0.40) as i64
+            let final_b = (ab as f64 * 0.60 + m3_hsv_b(ch) as f64 * 0.40) as i64
+            canvas_sphere_shaded_fog(c,
+                px5[idx as usize], py5[idx as usize], pr5[idx as usize],
+                final_r, final_g, final_b,
+                depth, fog_near5, fog_far5, 18.0, 20.0, 30.0, 0.0)
+        }
+        oi2 = oi2 + 1
+    }
+}
+
+// ============================================================
+// Hydrogen bond visualization
+// ============================================================
+//
+// Detects N/O···N/O heavy-atom pairs within H-bond range (2.5–3.5 Å)
+// that are not covalently bonded, then renders dashed yellow lines.
+// Uses atomic_number: N=7, O=8.
+
+pub fn mol3d_render_hbonds(
+    mol: &MoleculeViz,
+    cam: &Camera3D,
+    angle_y: f64,
+    angle_x: f64,
+    c: &!Canvas,
+) with Mut, Div {
+    let cy6 = m3_cos(angle_y)
+    let sy6 = m3_sin(angle_y)
+    let cx6 = m3_cos(angle_x)
+    let sx6 = m3_sin(angle_x)
+
+    var hsx: [i64; 64] = [0; 64]
+    var hsy: [i64; 64] = [0; 64]
+    var hvis: [i64; 64] = [0; 64]
+
+    var i: i64 = 0
+    while i < mol.atom_count {
+        let a = mol.atoms[i as usize]
+        let x1 = a.x * cy6 + a.z * sy6
+        let y1 = a.y
+        let z1 = 0.0 - a.x * sy6 + a.z * cy6
+        let y2 = y1 * cx6 - z1 * sx6
+        let z2 = y1 * sx6 + z1 * cx6
+        let p = m3_project(x1, y2, z2, cam, c.width, c.height)
+        if p.z > 0.0 {
+            hsx[i as usize] = p.x as i64
+            hsy[i as usize] = p.y as i64
+            hvis[i as usize] = 1
+        }
+        i = i + 1
+    }
+
+    // Detect and render H-bond pairs
+    var di: i64 = 0
+    while di < mol.atom_count {
+        let da = mol.atoms[di as usize]
+        if da.atomic_number != 7 && da.atomic_number != 8 {
+            di = di + 1
+            continue
+        }
+        var ai: i64 = di + 1
+        while ai < mol.atom_count {
+            let aa = mol.atoms[ai as usize]
+            if aa.atomic_number != 7 && aa.atomic_number != 8 {
+                ai = ai + 1
+                continue
+            }
+            let ddx = aa.x - da.x
+            let ddy = aa.y - da.y
+            let ddz = aa.z - da.z
+            let dist2 = ddx*ddx + ddy*ddy + ddz*ddz
+            // H-bond range: 2.5–3.5 Å → dist² ∈ [6.25, 12.25]; skip if < 1 Å (covalent overlap)
+            if dist2 >= 6.25 && dist2 <= 12.25 {
+                var is_bond: i64 = 0
+                var bi: i64 = 0
+                while bi < mol.bond_count {
+                    let bnd = mol.bonds[bi as usize]
+                    if (bnd.atom_a == di && bnd.atom_b == ai) || (bnd.atom_a == ai && bnd.atom_b == di) {
+                        is_bond = 1
+                    }
+                    bi = bi + 1
+                }
+                if is_bond == 0 && hvis[di as usize] == 1 && hvis[ai as usize] == 1 {
+                    let x0s = hsx[di as usize]
+                    let y0s = hsy[di as usize]
+                    let x1s = hsx[ai as usize]
+                    let y1s = hsy[ai as usize]
+                    let dx_s = x1s - x0s
+                    let dy_s = y1s - y0s
+                    let adx = if dx_s < 0 { 0 - dx_s } else { dx_s }
+                    let ady = if dy_s < 0 { 0 - dy_s } else { dy_s }
+                    let steps = if adx > ady { adx } else { ady }
+                    if steps > 0 {
+                        var si: i64 = 0
+                        while si <= steps {
+                            if si % 8 < 4 {
+                                let px6 = x0s + dx_s * si / steps
+                                let py6 = y0s + dy_s * si / steps
+                                canvas_blend_pixel(c, px6, py6, 255, 220, 50, 220)
+                            }
+                            si = si + 1
+                        }
+                    }
+                }
+            }
+            ai = ai + 1
+        }
+        di = di + 1
     }
 }

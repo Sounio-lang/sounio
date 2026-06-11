@@ -1724,3 +1724,325 @@ pub fn epiviz_radar(
         di = di + 1
     }
 }
+
+// ============================================================
+// Hex-bin density plot — true scatter-to-grid binning
+// ============================================================
+//
+// Maps n scatter points (xs[i], ys[i]) in data space [x_min,x_max]×[y_min,y_max]
+// to pointy-top hexagonal cells of circumradius hex_r pixels.
+// Cells colored by count density using viridis (viridis_r/g/b from colormap.sio).
+// Screen area: x0,y0 top-left corner, w×h pixels.
+
+pub fn epiviz_hexbin(
+    xs: &[f64; 1024],
+    ys: &[f64; 1024],
+    n: i64,
+    x_min: f64, x_max: f64,
+    y_min: f64, y_max: f64,
+    hex_r: i64,
+    c: &!Canvas,
+    x0: i64, y0: i64, w: i64, h: i64,
+) with Mut, Div {
+    if n == 0 || hex_r <= 0 { return }
+    let x_range = x_max - x_min
+    let y_range = y_max - y_min
+    if x_range <= 0.0 || y_range <= 0.0 { return }
+
+    let r_f = hex_r as f64
+    // Bin accumulator: 32×32 axial grid, offset by (16,16)
+    var bins: [i64; 1024] = [0; 1024]
+    let BCOLS: i64 = 32
+    let BOFF: i64 = 16
+    var max_count: i64 = 0
+
+    // Accumulate scatter points
+    var ii: i64 = 0
+    while ii < n {
+        // Data → screen (y flipped: data y-up, screen y-down)
+        let spx = (xs[ii as usize] - x_min) / x_range * (w as f64)
+        let spy = (1.0 - (ys[ii as usize] - y_min) / y_range) * (h as f64)
+
+        // Screen → pointy-top axial (q,r): 2/3=0.66667, sqrt(3)/3=0.57735
+        let q_f = spx * 0.66667 / r_f
+        let r_f2 = spx * (0.0 - 0.33333) / r_f + spy * 0.57735 / r_f
+
+        // Cube round: round q, r, s = -q-r; fix largest delta
+        let qr_i = if q_f >= 0.0 { (q_f + 0.5) as i64 } else { (q_f - 0.5) as i64 }
+        let rr_i = if r_f2 >= 0.0 { (r_f2 + 0.5) as i64 } else { (r_f2 - 0.5) as i64 }
+        let sr_i = 0 - qr_i - rr_i
+        let dq = if q_f > qr_i as f64 { q_f - qr_i as f64 } else { qr_i as f64 - q_f }
+        let dr2 = if r_f2 > rr_i as f64 { r_f2 - rr_i as f64 } else { rr_i as f64 - r_f2 }
+        let ds2 = if (0.0 - q_f - r_f2) > sr_i as f64 { (0.0 - q_f - r_f2) - sr_i as f64 } else { sr_i as f64 - (0.0 - q_f - r_f2) }
+        let qf = if dq > dr2 && dq > ds2 { 0 - rr_i - sr_i } else { qr_i }
+        let rf = if dr2 > ds2 { 0 - qf - sr_i } else { rr_i }
+
+        let qi = qf + BOFF
+        let ri = rf + BOFF
+        if qi >= 0 && qi < BCOLS && ri >= 0 && ri < BCOLS {
+            let bidx = (qi * BCOLS + ri) as usize
+            bins[bidx] = bins[bidx] + 1
+            if bins[bidx] > max_count { max_count = bins[bidx] }
+        }
+        ii = ii + 1
+    }
+
+    if max_count == 0 { return }
+
+    // Render hex cells
+    var qi: i64 = 0
+    while qi < BCOLS {
+        var ri: i64 = 0
+        while ri < BCOLS {
+            let cnt = bins[(qi * BCOLS + ri) as usize]
+            if cnt > 0 {
+                let q = qi - BOFF
+                let r = ri - BOFF
+                // Axial → screen (pointy-top center)
+                let cx_f = (r_f * 1.73205 * (q as f64 + (r as f64) * 0.5)) as i64 + x0
+                let cy_f = (r_f * 1.5 * (r as f64)) as i64 + y0
+                // Viridis color by density
+                let t_i = cnt * 1000 / max_count
+                let t_f = (t_i as f64) * 0.001
+                let vr = viridis_r(t_f)
+                let vg = viridis_g(t_f)
+                let vb = viridis_b(t_f)
+                // Pointy-top hex: 6 vertices at angles 30°,90°,150°,210°,270°,330°
+                // cos/sin table (multiples of 60°, offset 30°):
+                // 0.866, 0.5 / 0, 1 / -0.866, 0.5 / -0.866, -0.5 / 0, -1 / 0.866, -0.5
+                let hx0 = cx_f + (r_f * 0.866) as i64
+                let hy0 = cy_f + (r_f * 0.5)   as i64
+                let hx1 = cx_f
+                let hy1 = cy_f + hex_r
+                let hx2 = cx_f - (r_f * 0.866) as i64
+                let hy2 = cy_f + (r_f * 0.5)   as i64
+                let hx3 = cx_f - (r_f * 0.866) as i64
+                let hy3 = cy_f - (r_f * 0.5)   as i64
+                let hx4 = cx_f
+                let hy4 = cy_f - hex_r
+                let hx5 = cx_f + (r_f * 0.866) as i64
+                let hy5 = cy_f - (r_f * 0.5)   as i64
+                canvas_fill_triangle(c, cx_f, cy_f, hx0, hy0, hx1, hy1, vr, vg, vb)
+                canvas_fill_triangle(c, cx_f, cy_f, hx1, hy1, hx2, hy2, vr, vg, vb)
+                canvas_fill_triangle(c, cx_f, cy_f, hx2, hy2, hx3, hy3, vr, vg, vb)
+                canvas_fill_triangle(c, cx_f, cy_f, hx3, hy3, hx4, hy4, vr, vg, vb)
+                canvas_fill_triangle(c, cx_f, cy_f, hx4, hy4, hx5, hy5, vr, vg, vb)
+                canvas_fill_triangle(c, cx_f, cy_f, hx5, hy5, hx0, hy0, vr, vg, vb)
+            }
+            ri = ri + 1
+        }
+        qi = qi + 1
+    }
+}
+
+// ============================================================
+// Ridgeline (joy) plot — stacked KDE distribution panels
+// ============================================================
+//
+// Renders n_groups KDE panels stacked vertically, each showing the
+// distribution of n_per_group data points. Panels overlap for the
+// Joy Division aesthetic.
+//
+// data_flat: row-major [n_groups × n_per_group], n_per_group ≤ 128.
+// bw: KDE bandwidth in data units (Epanechnikov kernel, no exp needed).
+// x_min/x_max: data-space range for the shared x-axis.
+// r/g/b arrays: per-group colors (length ≥ n_groups).
+// x0,y0,w,h: bounding box of the whole ridgeline plot area.
+
+pub fn epiviz_ridgeline(
+    data_flat: &[f64; 2048],
+    n_groups: i64,
+    n_per_group: i64,
+    x_min: f64, x_max: f64,
+    bw: f64,
+    c: &!Canvas,
+    x0: i64, y0: i64, w: i64, h: i64,
+    r_arr: &[i64; 16], g_arr: &[i64; 16], b_arr: &[i64; 16],
+) with Mut, Div {
+    if n_groups <= 0 || n_per_group <= 0 || w <= 0 || h <= 0 { return }
+    let x_range = x_max - x_min
+    if x_range <= 0.0 { return }
+    let step = h / n_groups
+    let band_h = step + step / 2   // 1.5× step for 50% overlap
+    if step <= 0 { return }
+
+    // Render groups back-to-front so foreground panels paint over background
+    var k: i64 = n_groups - 1
+    while k >= 0 {
+        let base_y = y0 + h - k * step
+        let gr = r_arr[k as usize]
+        let gg = g_arr[k as usize]
+        let gb = b_arr[k as usize]
+        let koff = k * n_per_group
+
+        // First pass: find max density for scaling
+        var max_dens: f64 = 0.0
+        var col: i64 = 0
+        while col < w {
+            let x_eval = x_min + x_range * (col as f64) / ((w - 1) as f64)
+            var dens: f64 = 0.0
+            var si: i64 = 0
+            while si < n_per_group {
+                let xi = data_flat[(koff + si) as usize]
+                let u = (x_eval - xi) / bw
+                let u2 = u * u
+                if u2 < 1.0 { dens = dens + 0.75 * (1.0 - u2) }
+                si = si + 1
+            }
+            let dn = dens / (n_per_group as f64 * bw)
+            if dn > max_dens { max_dens = dn }
+            col = col + 1
+        }
+        if max_dens <= 0.0 { k = k - 1; continue }
+
+        // Second pass: render fill + outline
+        var prev_sy: i64 = base_y
+        var col2: i64 = 0
+        while col2 < w {
+            let x_eval = x_min + x_range * (col2 as f64) / ((w - 1) as f64)
+            var dens: f64 = 0.0
+            var si2: i64 = 0
+            while si2 < n_per_group {
+                let xi = data_flat[(koff + si2) as usize]
+                let u = (x_eval - xi) / bw
+                let u2 = u * u
+                if u2 < 1.0 { dens = dens + 0.75 * (1.0 - u2) }
+                si2 = si2 + 1
+            }
+            let dn = dens / (n_per_group as f64 * bw)
+            let density_h = (dn / max_dens * (band_h as f64) * 0.82) as i64
+            let sy = base_y - density_h
+
+            // Fill: gradient alpha bottom→top
+            var fy = sy
+            while fy < base_y {
+                let fa_raw = 55 + (base_y - fy) * 130 / (band_h + 1)
+                let fa = if fa_raw > 200 { 200 } else { fa_raw }
+                canvas_blend_pixel(c, x0 + col2, fy, gr, gg, gb, fa)
+                fy = fy + 1
+            }
+            // Density outline
+            if col2 > 0 {
+                canvas_draw_line_aa(c, x0 + col2 - 1, prev_sy, x0 + col2, sy, gr / 3, gg / 3, gb / 3)
+            }
+            prev_sy = sy
+            col2 = col2 + 1
+        }
+        // Baseline
+        canvas_draw_line_aa(c, x0, base_y, x0 + w - 1, base_y, 45, 50, 65)
+        k = k - 1
+    }
+}
+
+// ============================================================
+// Streamlines — Euler integration of a 2D vector field
+// ============================================================
+//
+// vx_flat/vy_flat: row-major [rows × cols] velocity field (any units —
+//   normalized to unit length internally, then scaled by step_px).
+// n_seeds_x × n_seeds_y: uniform seed grid.
+// max_steps: maximum integration steps per streamline.
+// step_px: arc-length step in screen pixels.
+// Color: viridis by speed magnitude (relative to field max).
+// Screen area: x0,y0 top-left, w×h pixels.
+
+fn sl_bilinear(field: &[f64; 4096], rows: i64, cols: i64, gx: f64, gy: f64) -> f64 with Div {
+    let gx_cl = if gx < 0.0 { 0.0 } else if gx >= cols as f64 - 1.001 { cols as f64 - 1.001 } else { gx }
+    let gy_cl = if gy < 0.0 { 0.0 } else if gy >= rows as f64 - 1.001 { rows as f64 - 1.001 } else { gy }
+    let gi = gx_cl as i64
+    let gj = gy_cl as i64
+    let tx = gx_cl - gi as f64
+    let ty = gy_cl - gj as f64
+    let v00 = field[(gj * cols + gi)       as usize]
+    let v10 = field[(gj * cols + gi + 1)   as usize]
+    let v01 = field[((gj + 1) * cols + gi) as usize]
+    let v11 = field[((gj + 1) * cols + gi + 1) as usize]
+    (1.0 - tx) * (1.0 - ty) * v00 + tx * (1.0 - ty) * v10
+    + (1.0 - tx) * ty * v01 + tx * ty * v11
+}
+
+fn sl_sqrt(x: f64) -> f64 with Div {
+    if x <= 0.00001 { return 0.001 }
+    var g = x * 0.5 + 0.5
+    g = 0.5 * (g + x / g)
+    g = 0.5 * (g + x / g)
+    g = 0.5 * (g + x / g)
+    g = 0.5 * (g + x / g)
+    g
+}
+
+pub fn epiviz_streamlines(
+    vx_flat: &[f64; 4096],
+    vy_flat: &[f64; 4096],
+    rows: i64, cols: i64,
+    n_seeds_x: i64, n_seeds_y: i64,
+    max_steps: i64,
+    step_px: f64,
+    c: &!Canvas,
+    x0: i64, y0: i64, w: i64, h: i64,
+) with Mut, Div {
+    if rows <= 1 || cols <= 1 || n_seeds_x <= 0 || n_seeds_y <= 0 { return }
+    let w_f = w as f64
+    let h_f = h as f64
+    let x0_f = x0 as f64
+    let y0_f = y0 as f64
+    let cols_f = cols as f64
+    let rows_f = rows as f64
+
+    var sj: i64 = 0
+    while sj < n_seeds_y {
+        var si2: i64 = 0
+        while si2 < n_seeds_x {
+            // Seed in pixel space (interior of plot)
+            var px6 = x0_f + w_f * (si2 as f64 + 0.5) / (n_seeds_x as f64)
+            var py6 = y0_f + h_f * (sj as f64 + 0.5) / (n_seeds_y as f64)
+
+            // Color by average speed at seed
+            let gx0 = (px6 - x0_f) * (cols_f - 1.0) / w_f
+            let gy0 = (py6 - y0_f) * (rows_f - 1.0) / h_f
+            let vx0 = sl_bilinear(vx_flat, rows, cols, gx0, gy0)
+            let vy0 = sl_bilinear(vy_flat, rows, cols, gx0, gy0)
+            let mag0 = sl_sqrt(vx0*vx0 + vy0*vy0)
+            // Normalize mag to [0,1] using field maximum estimate (use 2.0 as approx)
+            let t_color = if mag0 / 2.0 > 1.0 { 1.0 } else { mag0 / 2.0 }
+            let sr = viridis_r(t_color)
+            let sg = viridis_g(t_color)
+            let sb = viridis_b(t_color)
+
+            var step: i64 = 0
+            while step < max_steps {
+                if px6 < x0_f || px6 >= x0_f + w_f - 1.0 || py6 < y0_f || py6 >= y0_f + h_f - 1.0 {
+                    step = max_steps
+                    step = step + 1
+                    continue
+                }
+                // Map pixel → field grid
+                let gx = (px6 - x0_f) * (cols_f - 1.0) / w_f
+                let gy = (py6 - y0_f) * (rows_f - 1.0) / h_f
+
+                // Bilinear velocity
+                let vx = sl_bilinear(vx_flat, rows, cols, gx, gy)
+                let vy = sl_bilinear(vy_flat, rows, cols, gx, gy)
+                let mag = sl_sqrt(vx*vx + vy*vy)
+                if mag < 0.0001 {
+                    step = max_steps
+                    step = step + 1
+                    continue
+                }
+                // Normalized step
+                let scale = step_px / mag
+                let dpx = vx * scale
+                let dpy = vy * scale
+                let nx = px6 + dpx
+                let ny = py6 + dpy
+                // Draw segment
+                canvas_draw_line_aa(c, px6 as i64, py6 as i64, nx as i64, ny as i64, sr, sg, sb)
+                px6 = nx
+                py6 = ny
+                step = step + 1
+            }
+            si2 = si2 + 1
+        }
+        sj = sj + 1
+    }
+}
