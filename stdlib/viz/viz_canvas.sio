@@ -11,7 +11,8 @@ use viz::ir::{
     VIZ_NODE_PANEL, VIZ_NODE_CHART_LINE, VIZ_NODE_CHART_SCATTER, VIZ_NODE_CHART_BAR,
     VIZ_NODE_HEATMAP, VIZ_NODE_UNCERTAINTY_BAND, VIZ_NODE_LABEL, VIZ_NODE_CONTROL,
     VIZ_NODE_FOREST, VIZ_NODE_WATERFALL,
-    VIZ_NODE_MOLECULE, VIZ_NODE_FIELD, VIZ_NODE_VECTOR_FIELD, VIZ_NODE_TRAJECTORY, VIZ_NODE_SPECTRUM, VIZ_NODE_MESH,
+    VIZ_NODE_MOLECULE, VIZ_NODE_FIELD, VIZ_NODE_VECTOR_FIELD, VIZ_NODE_TRAJECTORY, VIZ_NODE_SPECTRUM,
+    VIZ_NODE_LATTICE_FIELD, VIZ_NODE_PARTICLE_EVENT, VIZ_NODE_MESH,
     VIZ_CONTROL_SLIDER, VIZ_CONTROL_TOGGLE, VIZ_CONTROL_TABS, VIZ_CONTROL_LEGEND,
     VIZ_CONTROL_BUTTON, VIZ_CONTROL_TOOLTIP, VIZ_CONTROL_VIEWPORT
 }
@@ -313,6 +314,68 @@ fn vc_draw_spectrum(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div
     }
 }
 
+fn vc_draw_lattice_field(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div {
+    canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 80, 130, 130)
+    if node.data_slot < 0 || node.data_slot >= scene.lattice_count { return }
+    let lat = scene.lattice_data[node.data_slot as usize]
+    let rows = if lat.rows <= 0 { 1 } else { lat.rows }
+    let cols = if lat.cols <= 0 { 1 } else { lat.cols }
+    let cell_w = if cols <= 1 { node.layout.w } else { node.layout.w / cols }
+    let cell_h = if rows <= 1 { node.layout.h } else { node.layout.h / rows }
+    var rr: i64 = 0
+    while rr < rows && rr < 64 {
+        var cc: i64 = 0
+        while cc < cols && cc < 64 {
+            let idx = rr * cols + cc
+            let base_x = node.layout.x + cc * cell_w + cell_w / 2
+            let base_y = node.layout.y + rr * cell_h + cell_h / 2
+            let dx = vc_clamp((lat.displacement_x[idx as usize] * (cell_w as f64) * 4.0) as i64, 0 - cell_w / 2, cell_w / 2)
+            let dy = vc_clamp((lat.displacement_y[idx as usize] * (cell_h as f64) * 4.0) as i64, 0 - cell_h / 2, cell_h / 2)
+            let phase_i = vc_clamp((lat.phase[idx as usize] * 42.0) as i64, 0, 180)
+            let var_i = vc_clamp((lat.variance[idx as usize] * 5000.0) as i64, 0, 70)
+            let px = base_x + dx
+            let py = base_y + dy
+            canvas_draw_line_aa(c, base_x, base_y, px, py, 70, 95 + phase_i / 3, 120 + phase_i / 3)
+            canvas_fill_rect(c, px - 2, py - 2, 5, 5, node.style.r, vc_clamp(node.style.g - var_i, 60, 255), node.style.b)
+            cc = cc + 1
+        }
+        rr = rr + 1
+    }
+}
+
+fn vc_event_x(node: &VizNode, x: f64, z: f64) -> i64 {
+    node.layout.x + 8 + (x * (node.layout.w as f64) * 0.16) as i64 + (z * 3.0) as i64
+}
+
+fn vc_event_y(node: &VizNode, y: f64, z: f64) -> i64 {
+    node.layout.y + node.layout.h - 8 - (y * (node.layout.h as f64) * 0.12) as i64 - (z * 2.0) as i64
+}
+
+fn vc_draw_particle_event(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div {
+    canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 135, 105, 80)
+    if node.data_slot < 0 || node.data_slot >= scene.particle_event_count { return }
+    let events = scene.particle_event_data[node.data_slot as usize]
+    var i: i64 = 0
+    while i < events.n && i < 1024 {
+        let px = vc_event_x(node, events.px[i as usize], events.pz[i as usize])
+        let py = vc_event_y(node, events.py[i as usize], events.pz[i as usize])
+        let e = vc_clamp((events.energy[i as usize] * 24.0) as i64, 20, 210)
+        let sigma = vc_clamp((events.variance[i as usize] * 200.0) as i64 + 2, 2, 8)
+        let kind = events.kind[i as usize]
+        let rr = if kind == 0 { 90 + e } else if kind == 1 { 80 } else { 210 }
+        let gg = if kind == 0 { 150 } else if kind == 1 { 100 + e / 2 } else { 110 }
+        let bb = if kind == 0 { 130 } else if kind == 1 { 255 } else { 90 + e / 3 }
+        if i > 0 {
+            let x0 = vc_event_x(node, events.px[(i - 1) as usize], events.pz[(i - 1) as usize])
+            let y0 = vc_event_y(node, events.py[(i - 1) as usize], events.pz[(i - 1) as usize])
+            canvas_draw_line_aa(c, x0, y0, px, py, 90, 105, 125)
+        }
+        canvas_fill_circle(c, px, py, sigma, vc_clamp(rr, 0, 255), vc_clamp(gg, 0, 255), vc_clamp(bb, 0, 255))
+        canvas_fill_rect(c, px - 1, py - 1, 3, 3, 255, 245, 190)
+        i = i + 1
+    }
+}
+
 fn vc_draw_mesh(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div, Alloc {
     let m = scene.meshes[node.data_slot as usize]
     var tris: [Tri3D; 4096] = [m.tris[0]; 4096]
@@ -376,6 +439,10 @@ pub fn viz_canvas_render_scene(scene: &VizScene, c: &!Canvas) with Mut, Div, All
             vc_draw_trajectory(scene, c, &node)
         } else if node.kind == VIZ_NODE_SPECTRUM {
             vc_draw_spectrum(scene, c, &node)
+        } else if node.kind == VIZ_NODE_LATTICE_FIELD {
+            vc_draw_lattice_field(scene, c, &node)
+        } else if node.kind == VIZ_NODE_PARTICLE_EVENT {
+            vc_draw_particle_event(scene, c, &node)
         } else if node.kind == VIZ_NODE_MESH {
             vc_draw_mesh(scene, c, &node)
         }

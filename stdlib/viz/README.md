@@ -31,6 +31,8 @@ Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattic
 - Vector fields keep their Sounio `VectorField2D` payload and mirror components into renderer-friendly vector slots with explicit row/column metadata.
 - Trajectories keep their Sounio `Trajectory3D` payload and mirror path coordinates into renderer-friendly trajectory slots.
 - Spectra keep their Sounio `SpectrumViz` payload and mirror wavelength/intensity/variance into renderer-friendly spectrum slots.
+- Lattice/phonon fields keep their Sounio `LatticeField2D` payload and render as displaced lattice nodes with phase and variance visible in Canvas and static SVG.
+- Particle event views keep their Sounio `ParticleEventView` payload and render as bounded event traces with energy, event kind, and variance visible in Canvas and static SVG.
 - Chart builders cover line, scatter, bar, heatmap, uncertainty band, forest plot, and waterfall nodes over the shared Visual IR.
 - Scene time, selected node, hovered node, active tabs, and toggle values are Sounio state that renderers display.
 - Focused node state is Sounio data. `viz_scene_focus_next`, `viz_scene_focus_prev`, and `viz_scene_activate_focused` provide deterministic keyboard-style navigation for controls.

@@ -4,7 +4,7 @@
 // lives in Sounio data: units, uncertainty, fields, molecules, and simulation
 // state are lowered to renderers, not delegated to JS or Python.
 
-use viz::physchem::{MoleculeViz, ScalarField2D, VectorField2D, Trajectory3D, SpectrumViz, molecule_empty, scalar_field_empty, vector_field_empty, trajectory_empty, spectrum_empty}
+use viz::physchem::{MoleculeViz, ScalarField2D, VectorField2D, Trajectory3D, SpectrumViz, LatticeField2D, ParticleEventView, molecule_empty, scalar_field_empty, vector_field_empty, trajectory_empty, spectrum_empty, lattice_field_empty, particle_event_view_empty}
 use render::renderer3d::{Tri3D}
 use display::event::{Event, EV_KEY_PRESS, EV_MOUSE_PRESS, EV_MOUSE_RELEASE, EV_MOTION, KEY_LEFT, KEY_RIGHT, KEY_SPACE, KEY_RETURN, KEY_TAB, MOUSE_LEFT}
 
@@ -28,6 +28,8 @@ pub const VIZ_NODE_WATERFALL: i64 = 16
 pub const VIZ_NODE_VECTOR_FIELD: i64 = 17
 pub const VIZ_NODE_TRAJECTORY: i64 = 18
 pub const VIZ_NODE_SPECTRUM: i64 = 19
+pub const VIZ_NODE_LATTICE_FIELD: i64 = 20
+pub const VIZ_NODE_PARTICLE_EVENT: i64 = 21
 
 pub const VIZ_CONTROL_BUTTON: i64 = 1
 pub const VIZ_CONTROL_SLIDER: i64 = 2
@@ -128,6 +130,25 @@ pub struct VizSpectrumData {
     pub y_max: f64,
 }
 
+pub struct VizLatticeFieldData {
+    pub rows: i64,
+    pub cols: i64,
+    pub displacement_x: [f64; 4096],
+    pub displacement_y: [f64; 4096],
+    pub phase: [f64; 4096],
+    pub variance: [f64; 4096],
+}
+
+pub struct VizParticleEventData {
+    pub px: [f64; 1024],
+    pub py: [f64; 1024],
+    pub pz: [f64; 1024],
+    pub energy: [f64; 1024],
+    pub variance: [f64; 1024],
+    pub kind: [i64; 1024],
+    pub n: i64,
+}
+
 pub struct VizMeshData {
     pub tris: [Tri3D; 128],
     pub n: i64,
@@ -156,6 +177,12 @@ pub struct VizScene {
     pub spectra: [SpectrumViz; 4],
     pub spectrum_data: [VizSpectrumData; 4],
     pub spectrum_count: i64,
+    pub lattices: [LatticeField2D; 4],
+    pub lattice_data: [VizLatticeFieldData; 4],
+    pub lattice_count: i64,
+    pub particle_events: [ParticleEventView; 4],
+    pub particle_event_data: [VizParticleEventData; 4],
+    pub particle_event_count: i64,
     pub meshes: [VizMeshData; 4],
     pub mesh_count: i64,
     pub selected_node: i64,
@@ -243,6 +270,22 @@ pub fn viz_spectrum_empty() -> VizSpectrumData {
     }
 }
 
+pub fn viz_lattice_field_empty() -> VizLatticeFieldData {
+    VizLatticeFieldData {
+        rows: 0, cols: 0,
+        displacement_x: [0.0; 4096], displacement_y: [0.0; 4096],
+        phase: [0.0; 4096], variance: [0.0; 4096],
+    }
+}
+
+pub fn viz_particle_event_empty() -> VizParticleEventData {
+    VizParticleEventData {
+        px: [0.0; 1024], py: [0.0; 1024], pz: [0.0; 1024],
+        energy: [0.0; 1024], variance: [0.0; 1024],
+        kind: [0; 1024], n: 0,
+    }
+}
+
 pub fn viz_tri_empty() -> Tri3D {
     Tri3D {
         v0x: 0.0, v0y: 0.0, v0z: -2.0,
@@ -281,6 +324,12 @@ pub fn viz_scene_new() -> VizScene {
         spectra: [spectrum_empty(); 4],
         spectrum_data: [viz_spectrum_empty(); 4],
         spectrum_count: 0,
+        lattices: [lattice_field_empty(0, 0); 4],
+        lattice_data: [viz_lattice_field_empty(); 4],
+        lattice_count: 0,
+        particle_events: [particle_event_view_empty(); 4],
+        particle_event_data: [viz_particle_event_empty(); 4],
+        particle_event_count: 0,
         meshes: [viz_mesh_empty(); 4],
         mesh_count: 0,
         selected_node: 0 - 1,
@@ -475,6 +524,50 @@ pub fn viz_scene_add_spectrum_data(scene: &!VizScene, spec: SpectrumViz) -> i64 
     slot
 }
 
+pub fn viz_scene_add_lattice_data(scene: &!VizScene, lattice: LatticeField2D) -> i64 with Mut {
+    if scene.lattice_count >= 4 { return 0 - 1 }
+    let slot = scene.lattice_count
+    let rows = lattice.rows
+    let cols = lattice.cols
+    scene.lattices[slot as usize] = lattice
+    var d = viz_lattice_field_empty()
+    d.rows = rows
+    d.cols = cols
+    var i: i64 = 0
+    while i < rows * cols && i < 4096 {
+        d.displacement_x[i as usize] = lattice.displacement_x[i as usize]
+        d.displacement_y[i as usize] = lattice.displacement_y[i as usize]
+        d.phase[i as usize] = lattice.phase[i as usize]
+        d.variance[i as usize] = lattice.variance[i as usize]
+        i = i + 1
+    }
+    scene.lattice_data[slot as usize] = d
+    scene.lattice_count = scene.lattice_count + 1
+    slot
+}
+
+pub fn viz_scene_add_particle_event_data(scene: &!VizScene, events: ParticleEventView) -> i64 with Mut {
+    if scene.particle_event_count >= 4 { return 0 - 1 }
+    let slot = scene.particle_event_count
+    let n = events.n
+    scene.particle_events[slot as usize] = events
+    var d = viz_particle_event_empty()
+    d.n = n
+    var i: i64 = 0
+    while i < n && i < 1024 {
+        d.px[i as usize] = events.x[i as usize]
+        d.py[i as usize] = events.y[i as usize]
+        d.pz[i as usize] = events.z[i as usize]
+        d.energy[i as usize] = events.energy[i as usize]
+        d.variance[i as usize] = events.variance[i as usize]
+        d.kind[i as usize] = events.kind[i as usize]
+        i = i + 1
+    }
+    scene.particle_event_data[slot as usize] = d
+    scene.particle_event_count = scene.particle_event_count + 1
+    slot
+}
+
 pub fn viz_scene_add_mesh_data(scene: &!VizScene, tris: &[Tri3D; 128], n: i64) -> i64 with Mut {
     if scene.mesh_count >= 4 { return 0 - 1 }
     let slot = scene.mesh_count
@@ -583,6 +676,16 @@ pub fn viz_add_trajectory(scene: &!VizScene, tr: Trajectory3D, layout: VizLayout
 pub fn viz_add_spectrum(scene: &!VizScene, spec: SpectrumViz, layout: VizLayout) -> i64 with Mut {
     let slot = viz_scene_add_spectrum_data(scene, spec)
     viz_scene_add_node(scene, VIZ_NODE_SPECTRUM, layout, viz_style_rgb(255, 210, 120), slot)
+}
+
+pub fn viz_add_lattice_field(scene: &!VizScene, lattice: LatticeField2D, layout: VizLayout) -> i64 with Mut {
+    let slot = viz_scene_add_lattice_data(scene, lattice)
+    viz_scene_add_node(scene, VIZ_NODE_LATTICE_FIELD, layout, viz_style_rgb(120, 220, 210), slot)
+}
+
+pub fn viz_add_particle_event(scene: &!VizScene, events: ParticleEventView, layout: VizLayout) -> i64 with Mut {
+    let slot = viz_scene_add_particle_event_data(scene, events)
+    viz_scene_add_node(scene, VIZ_NODE_PARTICLE_EVENT, layout, viz_style_rgb(255, 180, 105), slot)
 }
 
 pub fn viz_add_mesh(scene: &!VizScene, tris: &[Tri3D; 128], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
@@ -824,6 +927,8 @@ pub fn viz_scene_dump(scene: &VizScene) with IO, Mut, Div {
     print(" vectors="); viz_print_i64(scene.vector_field_count)
     print(" trajectories="); viz_print_i64(scene.trajectory_count)
     print(" spectra="); viz_print_i64(scene.spectrum_count)
+    print(" lattices="); viz_print_i64(scene.lattice_count)
+    print(" particle-events="); viz_print_i64(scene.particle_event_count)
     print(" meshes="); viz_print_i64(scene.mesh_count)
     println("")
     var i: i64 = 0

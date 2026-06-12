@@ -3,7 +3,7 @@
 // V1 emits static SVG/HTML markup to stdout. No JavaScript owns scientific
 // semantics; this renderer only serializes Sounio Visual IR geometry.
 
-use viz::ir::{VizScene, VIZ_NODE_PANEL, VIZ_NODE_CHART_LINE, VIZ_NODE_CHART_SCATTER, VIZ_NODE_CHART_BAR, VIZ_NODE_HEATMAP, VIZ_NODE_UNCERTAINTY_BAND, VIZ_NODE_LABEL, VIZ_NODE_CONTROL, VIZ_NODE_FOREST, VIZ_NODE_WATERFALL, VIZ_NODE_MOLECULE, VIZ_NODE_FIELD, VIZ_NODE_VECTOR_FIELD, VIZ_NODE_TRAJECTORY, VIZ_NODE_SPECTRUM, VIZ_NODE_MESH, VIZ_CONTROL_BUTTON, VIZ_CONTROL_SLIDER, VIZ_CONTROL_TOGGLE, VIZ_CONTROL_TABS, VIZ_CONTROL_LEGEND, VIZ_CONTROL_TOOLTIP, VIZ_CONTROL_VIEWPORT}
+use viz::ir::{VizScene, VIZ_NODE_PANEL, VIZ_NODE_CHART_LINE, VIZ_NODE_CHART_SCATTER, VIZ_NODE_CHART_BAR, VIZ_NODE_HEATMAP, VIZ_NODE_UNCERTAINTY_BAND, VIZ_NODE_LABEL, VIZ_NODE_CONTROL, VIZ_NODE_FOREST, VIZ_NODE_WATERFALL, VIZ_NODE_MOLECULE, VIZ_NODE_FIELD, VIZ_NODE_VECTOR_FIELD, VIZ_NODE_TRAJECTORY, VIZ_NODE_SPECTRUM, VIZ_NODE_LATTICE_FIELD, VIZ_NODE_PARTICLE_EVENT, VIZ_NODE_MESH, VIZ_CONTROL_BUTTON, VIZ_CONTROL_SLIDER, VIZ_CONTROL_TOGGLE, VIZ_CONTROL_TABS, VIZ_CONTROL_LEGEND, VIZ_CONTROL_TOOLTIP, VIZ_CONTROL_VIEWPORT}
 
 fn vh_print_i64(n: i64) with IO, Mut, Div {
     if n == 0 { print("0"); return }
@@ -399,6 +399,79 @@ fn vh_emit_spectrum(scene: &VizScene, slot: i64, x: i64, y: i64, w: i64, h: i64,
     print("<!-- spectrum slot="); vh_print_i64(slot); println(" fallback -->")
 }
 
+fn vh_emit_lattice_field(scene: &VizScene, slot: i64, x: i64, y: i64, w: i64, h: i64, r: i64, g: i64, b: i64) with IO, Mut, Div {
+    vh_emit_rect_stroke(x, y, w, h, 80, 130, 130)
+    if slot >= 0 && slot < scene.lattice_count {
+        let lat = scene.lattice_data[slot as usize]
+        let rows = if lat.rows <= 0 { 1 } else { lat.rows }
+        let cols = if lat.cols <= 0 { 1 } else { lat.cols }
+        let cell_w = if cols <= 1 { w } else { w / cols }
+        let cell_h = if rows <= 1 { h } else { h / rows }
+        var rr: i64 = 0
+        while rr < rows && rr < 64 {
+            var cc: i64 = 0
+            while cc < cols && cc < 64 {
+                let idx = rr * cols + cc
+                let bx = x + cc * cell_w + cell_w / 2
+                let by = y + rr * cell_h + cell_h / 2
+                let dx = vh_clamp_i((lat.displacement_x[idx as usize] * (cell_w as f64) * 4.0) as i64, 0 - cell_w / 2, cell_w / 2)
+                let dy = vh_clamp_i((lat.displacement_y[idx as usize] * (cell_h as f64) * 4.0) as i64, 0 - cell_h / 2, cell_h / 2)
+                let phase_i = vh_clamp_i((lat.phase[idx as usize] * 42.0) as i64, 0, 180)
+                let px = bx + dx
+                let py = by + dy
+                vh_emit_line(bx, by, px, py, 70, 95 + phase_i / 3, 120 + phase_i / 3)
+                vh_emit_rect(px - 2, py - 2, 5, 5, r, g, b)
+                cc = cc + 1
+            }
+            rr = rr + 1
+        }
+        print("<!-- lattice-field slot="); vh_print_i64(slot)
+        print(" rows="); vh_print_i64(rows)
+        print(" cols="); vh_print_i64(cols)
+        println(" -->")
+        return
+    }
+    print("<!-- lattice-field slot="); vh_print_i64(slot); println(" fallback -->")
+}
+
+fn vh_event_x(x0: i64, w: i64, x: f64, z: f64) -> i64 {
+    x0 + 8 + (x * (w as f64) * 0.16) as i64 + (z * 3.0) as i64
+}
+
+fn vh_event_y(y0: i64, h: i64, y: f64, z: f64) -> i64 {
+    y0 + h - 8 - (y * (h as f64) * 0.12) as i64 - (z * 2.0) as i64
+}
+
+fn vh_emit_particle_event(scene: &VizScene, slot: i64, x: i64, y: i64, w: i64, h: i64) with IO, Mut, Div {
+    vh_emit_rect_stroke(x, y, w, h, 135, 105, 80)
+    if slot >= 0 && slot < scene.particle_event_count {
+        let events = scene.particle_event_data[slot as usize]
+        var i: i64 = 0
+        while i < events.n && i < 1024 {
+            let px = vh_event_x(x, w, events.px[i as usize], events.pz[i as usize])
+            let py = vh_event_y(y, h, events.py[i as usize], events.pz[i as usize])
+            let e = vh_clamp_i((events.energy[i as usize] * 24.0) as i64, 20, 210)
+            let sigma = vh_clamp_i((events.variance[i as usize] * 200.0) as i64 + 2, 2, 8)
+            let kind = events.kind[i as usize]
+            let rr = if kind == 0 { 90 + e } else if kind == 1 { 80 } else { 210 }
+            let gg = if kind == 0 { 150 } else if kind == 1 { 100 + e / 2 } else { 110 }
+            let bb = if kind == 0 { 130 } else if kind == 1 { 255 } else { 90 + e / 3 }
+            if i > 0 {
+                let xprev = vh_event_x(x, w, events.px[(i - 1) as usize], events.pz[(i - 1) as usize])
+                let yprev = vh_event_y(y, h, events.py[(i - 1) as usize], events.pz[(i - 1) as usize])
+                vh_emit_line(xprev, yprev, px, py, 90, 105, 125)
+            }
+            vh_emit_circle(px, py, sigma, vh_clamp_i(rr, 0, 255), vh_clamp_i(gg, 0, 255), vh_clamp_i(bb, 0, 255))
+            i = i + 1
+        }
+        print("<!-- particle-event slot="); vh_print_i64(slot)
+        print(" n="); vh_print_i64(events.n)
+        println(" -->")
+        return
+    }
+    print("<!-- particle-event slot="); vh_print_i64(slot); println(" fallback -->")
+}
+
 fn vh_emit_control(scene: &VizScene, node_idx: i64) with IO, Mut, Div {
     let n = scene.nodes[node_idx as usize]
     if n.data_slot == VIZ_CONTROL_SLIDER {
@@ -540,6 +613,10 @@ pub fn viz_html_emit_scene(scene: &VizScene, width: i64, height: i64) with IO, M
             vh_emit_trajectory(scene, n.data_slot, n.layout.x, n.layout.y, n.layout.w, n.layout.h, n.style.r, n.style.g, n.style.b)
         } else if n.kind == VIZ_NODE_SPECTRUM {
             vh_emit_spectrum(scene, n.data_slot, n.layout.x, n.layout.y, n.layout.w, n.layout.h, n.style.r, n.style.g, n.style.b)
+        } else if n.kind == VIZ_NODE_LATTICE_FIELD {
+            vh_emit_lattice_field(scene, n.data_slot, n.layout.x, n.layout.y, n.layout.w, n.layout.h, n.style.r, n.style.g, n.style.b)
+        } else if n.kind == VIZ_NODE_PARTICLE_EVENT {
+            vh_emit_particle_event(scene, n.data_slot, n.layout.x, n.layout.y, n.layout.w, n.layout.h)
         } else if n.kind == VIZ_NODE_MESH {
             vh_emit_rect_stroke(n.layout.x, n.layout.y, n.layout.w, n.layout.h, 120, 130, 150)
             print("<polygon points=\"")

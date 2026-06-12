@@ -81,6 +81,14 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - The proof uses `viz_replay_present` plus the public `viz_replay_record` hook after each Workbench-specific reducer step, so composed frontends can share replay timelines without adding a separate replay module.
 - The trace records Canvas hash, audit hash, scene time, event identity, and final Workbench molecule state while the tape crosses generic controls and Molecule Studio authoring constraints.
 
+## V1.8c: Physchem Dynamics Nodes
+
+- `VizScene` now stores `LatticeField2D` and `ParticleEventView` payloads in fixed-capacity Sounio-owned slots.
+- `viz_add_lattice_field` and `viz_add_particle_event` create first-class Visual IR nodes for lattice/phonon motion and particle-event traces instead of leaving those physchem structs as standalone data.
+- `viz_canvas_render_scene` renders displaced lattice nodes with phase/variance cues and particle-event traces with energy, kind, and variance cues.
+- `viz_html_emit_scene` serializes both node types as passive static SVG groups plus audit comments; JavaScript still owns no scientific semantics.
+- `tests/run-pass/viz_physchem_dynamics.sio` proves the new node kinds, slots, and Canvas pixels without requiring `DISPLAY`.
+
 ## V1.9: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.

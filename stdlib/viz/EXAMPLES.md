@@ -94,7 +94,21 @@ Expected output:
 VIZ_PHYSCHEM_PASS
 ```
 
-The test validates H2O, a coarse rapamycin molecule, scalar-field variance/data, vector-field variance/data, trajectory variance/path data, spectrum intensity/variance data, Visual IR molecule and field slots, scene time, and headless Canvas pixels for the rendered physchem nodes.
+The test validates H2O, a coarse rapamycin molecule, scalar-field variance/data, vector-field variance/data, trajectory variance/path data, spectrum intensity/variance data, lattice/phonon displacement data, particle event energy/kind/variance data, Visual IR physchem slots, scene time, and headless Canvas pixels for the rendered physchem nodes.
+
+Run the focused dynamics proof:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_physchem_dynamics.sio
+```
+
+Expected output:
+
+```text
+VIZ_PHYSCHEM_DYNAMICS_PASS
+```
+
+This proof builds a Visual IR scene with native lattice/phonon and particle-event nodes, renders both through `viz_canvas`, and checks deterministic Canvas pixels.
 
 ## Interaction Time Proof
 
@@ -438,7 +452,7 @@ Compile or run:
 SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run examples/viz_physchem_demo/main.sio
 ```
 
-The demo builds one Visual IR scene with H2O, coarse rapamycin, a scalar field, a vector field, a trajectory, an absorption spectrum, a 3D mesh, and a time-evolution chart with an uncertainty band. It renders the same scene to native Canvas pixels and static HTML/SVG, then prints `VIZ_PHYSCHEM_DEMO_READY`.
+The demo builds one Visual IR scene with H2O, coarse rapamycin, a scalar field, a vector field, a trajectory, an absorption spectrum, a lattice/phonon field, a particle-event view, a 3D mesh, and a time-evolution chart with an uncertainty band. It renders the same scene to native Canvas pixels and static HTML/SVG, then prints `VIZ_PHYSCHEM_DEMO_READY`.
 
 ## Hello
 
