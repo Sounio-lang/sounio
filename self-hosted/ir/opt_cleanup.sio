@@ -471,29 +471,43 @@ fn ocp_binop_to_ra_key(op: BinaryOp) -> i64 {
 // enabling in-place patching of the constant when strength reduction rewrites it.
 fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     // Split below the gen N-1 bootstrap compiler's hard cap of 1024 local
-    // variables per function. The original single interleaved loop declared
-    // 1117 locals; it is partitioned into two sequential passes by tracking-array
-    // dependency (connected components over non-universal trackers), so no two
-    // blocks that share a tracking array are separated.
+    // variables per function. NOTE on the cap: the bootstrap counts EVERY let/var
+    // DECLARATION, including mid-line ones after a semicolon (`let a = x; let b = y`
+    // is two locals) — not just line-starting lets. Counted that way the original
+    // single interleaved loop declared ~1170 locals, and even the round-1 partition
+    // left pass_a at 1170 (still over cap). Round 2 therefore splits pass_a itself
+    // into pass_a1 + pass_a2, so every function in this file has a TRUE let/var
+    // token count well under the cap (verify with an awk per-fn gsub over the
+    // pattern `(^|[^A-Za-z_])(let|var)[[:space:]]`).
     //
-    // pass_b runs after pass_a and therefore sees pass_a's rewrites. Each pass
-    // independently re-derives its tracking state (is_const/const_val/def_at and
-    // its own trackers) from the current instruction stream via its replicated
-    // IrLoadImm / IrLoadBool maintenance blocks. The ONLY semantic delta versus
-    // the single interleaved loop is that some cross-group fold opportunities may
-    // land on a later optimizer fixpoint iteration instead of the same one:
-    // folding is conservative (every fold is guarded by a *_valid / is_* flag that
-    // defaults false), so a pattern whose tracking state is not re-derived in the
-    // current pass simply does not fire — it never fires wrongly. Correctness is
-    // unaffected; only fold-strength-per-iteration can differ, and the outer
-    // fixpoint recovers it.
+    // The passes run in order a1 -> a2 -> b; each later pass sees the earlier
+    // passes' rewrites. Each pass independently re-derives its tracking state
+    // (is_const/const_val/def_at and its own trackers) from the current
+    // instruction stream via its replicated IrLoadImm / IrLoadBool maintenance
+    // blocks. It is SAFE to separate blocks that share a tracking array ACROSS
+    // passes: each pass re-derives its own state, so a separated pattern simply
+    // fires on a later optimizer-fixpoint iteration instead of the same one. The
+    // ONLY semantic delta versus the single interleaved loop is fold-strength per
+    // iteration; folding is conservative (every fold is guarded by a *_valid /
+    // is_* flag that defaults false), so a pattern whose tracking state is not
+    // re-derived in the current pass simply does not fire — it never fires
+    // wrongly. Correctness is unaffected and the outer fixpoint recovers it.
+    //
+    // a1 and a2 each carry the full tracking-array preamble verbatim (a superset
+    // of what their blocks need, never a missing decl) plus the IrLoadImm /
+    // IrLoadBool maintenance. The known co-located scalar dependency
+    // (preserve_mul_chain written by the associative-chain block and read by the
+    // Sprint 68 strength-reduction block) lives entirely in pass_b and is NOT
+    // touched here. Local verification of the cap: strip the `use` lines and feed
+    // the file to the bootstrap; it must report zero "too many local" errors.
     var result = func
-    result = ocp_const_fold_pass_a(result)
+    result = ocp_const_fold_pass_a1(result)
+    result = ocp_const_fold_pass_a2(result)
     result = ocp_const_fold_pass_b(result)
     return result
 }
 
-fn ocp_const_fold_pass_a(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     var is_const: [bool; 256] = [false; 256]
     var const_val: [i64; 256] = [0; 256]
@@ -3467,6 +3481,122 @@ fn ocp_const_fold_pass_a(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         }
                     }
                 }
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+    var result = func
+    var is_const: [bool; 256] = [false; 256]
+    var const_val: [i64; 256] = [0; 256]
+    var def_at: [i64; 256] = [-1; 256]
+    // Sprint 112 Block AI: Bitwise NOT via XOR(-1) tracking.
+    var is_bnot:  [bool; 256] = [false; 256]
+    var bnot_src: [i64;  256] = [-1;    256]
+    // Sprint 88 Block O: Mul-div cancellation — track r = x * C (partial-const mul).
+    // (x * C) / C → x.  SOTA: LLVM InstCombineMulDivRem.cpp; Cooper & Torczon §9.
+    var mul_valid:   [bool; 256] = [false; 256]
+    var mul_var_src: [i64;  256] = [-1;    256]
+    var mul_const_v: [i64;  256] = [0;     256]
+    // Sprint 89 Block P: Add-sub/sub-add cancellation — track r = x +/- C.
+    // (x + C) - C → x  ;  (x - C) + C → x.
+    // SOTA: LLVM InstCombineAddSub.cpp; Muchnick §12.2.
+    var as_valid:   [bool; 256] = [false; 256]
+    var as_var_src: [i64;  256] = [-1;    256]
+    var as_const_v: [i64;  256] = [0;     256]
+    var as_is_add:  [bool; 256] = [false; 256]
+    // Sprint 96 Block T: Shift-chain combining — track r = x << C or r = x >> C.
+    // (x << C1) << C2 → x << (C1+C2)  ;  (x >> C1) >> C2 → x >> (C1+C2).
+    // SOTA: Bernstein SODA 1986; LLVM InstCombineShifts.cpp.
+    var sh_valid:   [bool; 256] = [false; 256]
+    var sh_var_src: [i64;  256] = [-1;    256]
+    var sh_amount:  [i64;  256] = [0;     256]
+    var sh_is_left: [bool; 256] = [false; 256]
+    // Sprint 108 Block AE: And-mask fold — track r = x & C.
+    // (x & C1) & C2 → x & (C1 & C2).  SOTA: LLVM InstCombineAndOrXor.cpp.
+    var and_valid:     [bool; 256] = [false; 256]
+    var and_var_src:   [i64;  256] = [-1;    256]
+    var and_const_val: [i64;  256] = [0;     256]
+    // Sprint 115 Block AL: Sub-tracking for neg reversal.
+    // al_is_sub[r]=true means r = al_sub_lhs[r] - al_sub_rhs[r].
+    // neg(a - b) -> b - a  ;  0 - (a - b) -> b - a.
+    // SOTA: LLVM InstCombineAddSub.cpp; Cooper & Torczon §8.4.
+    var al_is_sub:  [bool; 256] = [false; 256]
+    var al_sub_lhs: [i64;  256] = [-1;    256]
+    var al_sub_rhs: [i64;  256] = [-1;    256]
+    // Sprint 116 Block AM: OR-mask tracking for superset elimination.
+    // (x | C1) | C2 where (C1 | C2) == C1 → IrCopy(src1).
+    // SOTA: LLVM InstCombineAndOrXor.cpp.
+    var am_or_valid:     [bool; 256] = [false; 256]
+    var am_or_var_src:   [i64;  256] = [-1;    256]
+    var am_or_const_val: [i64;  256] = [0;     256]
+    // Sprint 127 Block AO: Register-register AND/OR tracking for absorption.
+    // Huntington 1904 absorption axiom: a | (a & b) = a, a & (a | b) = a.
+    // SOTA: LLVM InstCombineAndOrXor.cpp; Hacker's Delight §2-1.
+    var ao_and_rr_valid: [bool; 256] = [false; 256]
+    var ao_and_rr_lhs:   [i64;  256] = [-1;    256]
+    var ao_and_rr_rhs:   [i64;  256] = [-1;    256]
+    var ao_or_rr_valid:  [bool; 256] = [false; 256]
+    var ao_or_rr_lhs:    [i64;  256] = [-1;    256]
+    var ao_or_rr_rhs:    [i64;  256] = [-1;    256]
+    // Sprint 129 Block AQ: Register-register add/mul tracking for inverse cancellation.
+    // (a + b) - b → a, (a * b) / b → a.
+    // SOTA: LLVM InstCombine algebraic identity; group-theoretic inverse.
+    var aq_add_rr_valid: [bool; 256] = [false; 256]
+    var aq_add_rr_lhs:   [i64;  256] = [-1;    256]
+    var aq_add_rr_rhs:   [i64;  256] = [-1;    256]
+    var aq_mul_rr_valid: [bool; 256] = [false; 256]
+    var aq_mul_rr_lhs:   [i64;  256] = [-1;    256]
+    var aq_mul_rr_rhs:   [i64;  256] = [-1;    256]
+    // Sprint 131 Block AS: Register-register XOR tracking for self-inverse cancellation.
+    // (a ^ b) ^ b → a, (a ^ b) ^ a → b.
+    // SOTA: LLVM InstCombineAndOrXor; GF(2) field: XOR is its own inverse.
+    var as_xor_rr_valid: [bool; 256] = [false; 256]
+    var as_xor_rr_lhs:   [i64;  256] = [-1;    256]
+    var as_xor_rr_rhs:   [i64;  256] = [-1;    256]
+    // Sprint 149 Block BK: Consecutive same-direction shift folding.
+    // (x << A) << B → x << (A+B), (x >> A) >> B → x >> (A+B).
+    // Track when a register is the result of a shift by a known constant.
+    // SOTA: LLVM InstCombineShifts.cpp FoldShiftByConstant; Cooper & Torczon §8.1.
+    var bk_shl_valid: [bool; 256] = [false; 256]
+    var bk_shl_src:   [i64;  256] = [-1;    256]
+    var bk_shl_amt:   [i64;  256] = [0;     256]
+    var bk_shr_valid: [bool; 256] = [false; 256]
+    var bk_shr_src:   [i64;  256] = [-1;    256]
+    var bk_shr_amt:   [i64;  256] = [0;     256]
+    // Sprint 151 Block BM: XOR constant-chain fold — (x ^ C1) ^ C2 → x ^ (C1^C2).
+    // Mirrors Block BG (OR) and Block AE (AND) for the XOR operator.
+    // SOTA: LLVM InstCombineAndOrXor; GF(2) field associativity; Hacker's Delight §2-3.
+    var bm_xor_valid: [bool; 256] = [false; 256]
+    var bm_xor_src:   [i64;  256] = [-1;    256]
+    var bm_xor_cval:  [i64;  256] = [0;     256]
+
+    var i: i64 = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+        var preserve_mul_chain = false
+        // Track IrLoadImm: register dst becomes a known constant
+        if ocp_is_load_imm(instr.op) {
+            if instr.dst >= 0 && instr.dst < 256 {
+                is_const[instr.dst as usize] = true
+                const_val[instr.dst as usize] = instr.imm_i64
+                def_at[instr.dst as usize] = i
+            }
+        }
+        // Sprint 83 Block K: IrLoadBool constant tracking.
+        // IrLoadBool stores true→1, false→0 in imm_i64. Tracking booleans in the
+        // constant lattice enables downstream Block F branch folding, Block E
+        // comparison folding, and SCCP on boolean-valued registers.
+        // SOTA: Click "Value Numbering" PLDI 1995 §2 — all value-producing
+        // instructions participate in the constant lattice.
+        if instr.op == IrOpcode::IrLoadBool {
+            if instr.dst >= 0 && instr.dst < 256 {
+                is_const[instr.dst as usize] = true
+                const_val[instr.dst as usize] = instr.imm_i64
+                def_at[instr.dst as usize] = i
             }
         }
         // Sprint 208 Block DR: De Morgan NOT-AND — ~(~x & ~y) → x | y.
