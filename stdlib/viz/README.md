@@ -14,6 +14,7 @@ The v1 architecture is:
 - `viz::audit`: shared state hashes used by replay, inspector, HTML/export audits, and headless tests.
 - `viz::molecule_editor`: atom-level molecule hit-testing, selection, and mutation helpers over `VizScene`.
 - `viz::authoring`: typed molecule authoring transactions, checked constraints, replay traces, and proof-hash certificates over `VizScene`.
+- `viz::molecule_studio`: native molecule-authoring tool state over the Workbench, backed by checked `viz::authoring` transactions and Visual IR controls.
 - `viz::physchem`: Sounio data structures for molecules, bonds, scalar/vector fields, trajectories, spectra, lattice/phonon fields, particle event views, and uncertainty overlays.
 - `viz::{coord,chart,epiviz,sci}`: direct drawing helpers that the IR renderer can lower into.
 
@@ -48,6 +49,9 @@ Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattic
 - `viz::authoring` lifts molecule edits into typed transactions: select atom, select by hit-test, nudge with angstrom/nanometer units, set radius/color, add/delete atoms, add bonds, set bond order, and replay bounded action tapes.
 - Checked molecule authoring returns explicit reason codes for unsupported actions, invalid atoms, unknown units, bond geometry, locked atoms, radius bounds, and capacity. Rejected checked actions leave audit and atom hashes unchanged.
 - Authoring certificates are Sounio data derived from before/after audit and atom hashes. `viz_authoring_verify_checked_trace` verifies every frame without delegating scientific meaning to JavaScript or Python.
+- `viz::molecule_studio` adds Workbench-facing native tools for select, move, add atom, add bond, delete, and lock. Pointer gestures and nudge commands reduce into checked authoring actions, then update Sounio-owned last-action, last-reason, accepted/rejected, pending-bond, unit, and timeline state.
+- The Workbench molecule toolbar is Visual IR too: tool buttons, status tooltip, and timeline viewport are nodes with stable tags and parent identity. Canvas and static HTML/SVG render the same controls without JavaScript semantics.
+- `viz_html_emit_scene`, `viz_audit_hash`, and `viz_app_frame_hash` include molecule studio state so exported scenes, replay traces, and headless frame hashes observe the active tool, unit, reason, action, timeline, and checked action counts.
 - `viz::workbench` composes charts, rendered molecule nodes, scalar/vector fields, trajectory, spectrum, mesh, controls, inspector/edit/replay/export hooks into a reusable native visual workbench scene blueprint.
 - Labels and text controls use fixed `[i8; 64]` buffers in the Visual IR. Canvas renders them with `display::font`; HTML/SVG escapes XML-sensitive ASCII before export.
 - Native frontend builders cover button, slider, toggle, tabs, legend, tooltip, text viewport, and plot viewport nodes over the same control reducer machinery.

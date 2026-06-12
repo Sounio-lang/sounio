@@ -1,0 +1,246 @@
+// stdlib/viz/molecule_studio.sio - native molecule authoring UI state
+
+use viz::authoring::{
+    VizAuthoringResult, VizMoleculeConstraint,
+    VIZ_AUTHOR_REASON_OK, VIZ_AUTHOR_REASON_INVALID_ATOM,
+    VIZ_AUTHOR_SELECT_ATOM_AT, VIZ_AUTHOR_ADD_ATOM, VIZ_AUTHOR_ADD_BOND, VIZ_AUTHOR_DELETE_ATOM,
+    VIZ_AUTHOR_NUDGE_SELECTED_ATOM_UNITED,
+    viz_author_select_atom_at, viz_author_nudge_selected_atom_unit,
+    viz_author_add_atom, viz_author_add_bond, viz_author_delete_atom,
+    viz_authoring_apply_checked, viz_molecule_constraint_lock_atom,
+}
+use viz::ir::{VizScene}
+use viz::molecule_editor::{viz_molecule_hit_atom}
+
+pub const VIZ_MOLECULE_TOOL_SELECT: i64 = 1
+pub const VIZ_MOLECULE_TOOL_MOVE: i64 = 2
+pub const VIZ_MOLECULE_TOOL_ADD_ATOM: i64 = 3
+pub const VIZ_MOLECULE_TOOL_ADD_BOND: i64 = 4
+pub const VIZ_MOLECULE_TOOL_DELETE: i64 = 5
+pub const VIZ_MOLECULE_TOOL_LOCK: i64 = 6
+
+fn ms_clear_label(scene: &!VizScene, node_idx: i64) with Mut {
+    if node_idx < 0 || node_idx >= scene.node_count { return }
+    var n = scene.nodes[node_idx as usize]
+    n.label_len = 0
+    var i: i64 = 0
+    while i < 64 {
+        n.label[i as usize] = 0
+        i = i + 1
+    }
+    scene.nodes[node_idx as usize] = n
+}
+
+fn ms_label2(scene: &!VizScene, node_idx: i64, a: i64, b: i64) with Mut {
+    if node_idx < 0 || node_idx >= scene.node_count { return }
+    ms_clear_label(scene, node_idx)
+    var n = scene.nodes[node_idx as usize]
+    n.label[0] = a as i8
+    n.label[1] = b as i8
+    n.label_len = 2
+    scene.nodes[node_idx as usize] = n
+}
+
+fn ms_label4(scene: &!VizScene, node_idx: i64, a: i64, b: i64, c: i64, d: i64) with Mut {
+    if node_idx < 0 || node_idx >= scene.node_count { return }
+    ms_clear_label(scene, node_idx)
+    var n = scene.nodes[node_idx as usize]
+    n.label[0] = a as i8
+    n.label[1] = b as i8
+    n.label[2] = c as i8
+    n.label[3] = d as i8
+    n.label_len = 4
+    scene.nodes[node_idx as usize] = n
+}
+
+fn ms_label8(scene: &!VizScene, node_idx: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) with Mut {
+    if node_idx < 0 || node_idx >= scene.node_count { return }
+    ms_clear_label(scene, node_idx)
+    var n = scene.nodes[node_idx as usize]
+    n.label[0] = a as i8
+    n.label[1] = b as i8
+    n.label[2] = c as i8
+    n.label[3] = d as i8
+    n.label[4] = e as i8
+    n.label[5] = f as i8
+    n.label[6] = g as i8
+    n.label[7] = h as i8
+    n.label_len = 8
+    scene.nodes[node_idx as usize] = n
+}
+
+pub fn viz_molecule_studio_bind(scene: &!VizScene, molecule_node: i64) -> bool with Mut {
+    if molecule_node < 0 || molecule_node >= scene.node_count { return false }
+    scene.molecule_studio_node = molecule_node
+    scene.molecule_tool = VIZ_MOLECULE_TOOL_SELECT
+    scene.molecule_unit = 1
+    scene.molecule_pending_atom = 0 - 1
+    scene.molecule_last_reason = VIZ_AUTHOR_REASON_OK
+    scene.molecule_last_action = 0
+    scene.molecule_accept_count = 0
+    scene.molecule_reject_count = 0
+    scene.molecule_timeline_count = 0
+    true
+}
+
+pub fn viz_molecule_studio_set_tool(scene: &!VizScene, tool: i64) -> bool with Mut {
+    if tool < VIZ_MOLECULE_TOOL_SELECT || tool > VIZ_MOLECULE_TOOL_LOCK { return false }
+    scene.molecule_tool = tool
+    if tool != VIZ_MOLECULE_TOOL_ADD_BOND {
+        scene.molecule_pending_atom = 0 - 1
+    }
+    true
+}
+
+pub fn viz_molecule_studio_set_unit(scene: &!VizScene, unit_code: i64) -> bool with Mut {
+    if unit_code != 1 && unit_code != 2 { return false }
+    scene.molecule_unit = unit_code
+    true
+}
+
+fn ms_record_result(scene: &!VizScene, result: VizAuthoringResult) with Mut {
+    scene.molecule_last_reason = result.reason
+    scene.molecule_last_action = result.action_kind
+    scene.molecule_timeline_count = scene.molecule_timeline_count + 1
+    if result.accepted {
+        scene.molecule_accept_count = scene.molecule_accept_count + 1
+    } else {
+        scene.molecule_reject_count = scene.molecule_reject_count + 1
+    }
+}
+
+fn ms_record_manual(scene: &!VizScene, action_kind: i64, reason: i64, accepted: bool) with Mut {
+    scene.molecule_last_reason = reason
+    scene.molecule_last_action = action_kind
+    scene.molecule_timeline_count = scene.molecule_timeline_count + 1
+    if accepted {
+        scene.molecule_accept_count = scene.molecule_accept_count + 1
+    } else {
+        scene.molecule_reject_count = scene.molecule_reject_count + 1
+    }
+}
+
+pub fn viz_molecule_studio_update_nodes(scene: &!VizScene, status_node: i64, timeline_node: i64) with Mut {
+    if scene.molecule_last_reason == VIZ_AUTHOR_REASON_OK {
+        ms_label2(scene, status_node, 79, 75)
+    } else if scene.molecule_last_reason == 3 {
+        ms_label8(scene, status_node, 85, 78, 73, 84, 32, 69, 82, 82)
+    } else if scene.molecule_last_reason == 4 {
+        ms_label8(scene, status_node, 71, 69, 79, 77, 69, 84, 82, 89)
+    } else if scene.molecule_last_reason == 5 {
+        ms_label6_locked(scene, status_node)
+    } else if scene.molecule_last_reason == 6 {
+        ms_label8(scene, status_node, 82, 65, 68, 73, 85, 83, 32, 33)
+    } else if scene.molecule_last_reason == 7 {
+        ms_label8(scene, status_node, 67, 65, 80, 65, 67, 73, 84, 89)
+    } else {
+        ms_label8(scene, status_node, 82, 69, 74, 69, 67, 84, 69, 68)
+    }
+    ms_label8(scene, timeline_node, 84, 73, 77, 69, 76, 73, 78, 69)
+    if timeline_node >= 0 && timeline_node < scene.node_count {
+        scene.nodes[timeline_node as usize].value = scene.molecule_timeline_count as f64
+        scene.nodes[timeline_node as usize].min_value = 0.0
+        scene.nodes[timeline_node as usize].max_value = 32.0
+    }
+}
+
+fn ms_label6_locked(scene: &!VizScene, node_idx: i64) with Mut {
+    if node_idx < 0 || node_idx >= scene.node_count { return }
+    ms_clear_label(scene, node_idx)
+    var n = scene.nodes[node_idx as usize]
+    n.label[0] = 76 as i8
+    n.label[1] = 79 as i8
+    n.label[2] = 67 as i8
+    n.label[3] = 75 as i8
+    n.label[4] = 69 as i8
+    n.label[5] = 68 as i8
+    n.label_len = 6
+    scene.nodes[node_idx as usize] = n
+}
+
+fn ms_mol_x(scene: &VizScene, px: i64) -> f64 {
+    let node = scene.nodes[scene.molecule_studio_node as usize]
+    ((px - node.layout.x - node.layout.w / 2) as f64) / ((node.layout.w as f64) * 0.30)
+}
+
+fn ms_mol_y(scene: &VizScene, py: i64) -> f64 {
+    let node = scene.nodes[scene.molecule_studio_node as usize]
+    ((node.layout.y + node.layout.h / 2 - py) as f64) / ((node.layout.h as f64) * 0.30)
+}
+
+pub fn viz_molecule_studio_apply_checked(scene: &!VizScene, constraint: &VizMoleculeConstraint, action_kind: i64, px: i64, py: i64) -> bool with Mut, Div {
+    if scene.molecule_studio_node < 0 || scene.molecule_studio_node >= scene.node_count {
+        ms_record_manual(scene, action_kind, VIZ_AUTHOR_REASON_INVALID_ATOM, false)
+        return false
+    }
+    var accepted = false
+    if action_kind == VIZ_AUTHOR_SELECT_ATOM_AT {
+        let r = viz_authoring_apply_checked(scene, constraint, viz_author_select_atom_at(scene.molecule_studio_node, px, py))
+        accepted = r.accepted
+        ms_record_result(scene, r)
+    } else if action_kind == VIZ_AUTHOR_ADD_ATOM {
+        let x = ms_mol_x(scene, px)
+        let y = ms_mol_y(scene, py)
+        let r = viz_authoring_apply_checked(scene, constraint, viz_author_add_atom(scene.molecule_studio_node, 1, x, y, 0.0, 0.7, 230, 230, 240))
+        accepted = r.accepted
+        ms_record_result(scene, r)
+    } else if action_kind == VIZ_AUTHOR_DELETE_ATOM {
+        let atom = viz_molecule_hit_atom(scene, scene.molecule_studio_node, px, py)
+        let r = viz_authoring_apply_checked(scene, constraint, viz_author_delete_atom(scene.molecule_studio_node, atom))
+        accepted = r.accepted
+        ms_record_result(scene, r)
+    } else {
+        ms_record_manual(scene, action_kind, VIZ_AUTHOR_REASON_INVALID_ATOM, false)
+    }
+    accepted
+}
+
+pub fn viz_molecule_studio_nudge_selected(scene: &!VizScene, constraint: &VizMoleculeConstraint, dx: f64, dy: f64, dz: f64) -> bool with Mut, Div {
+    let r = viz_authoring_apply_checked(scene, constraint, viz_author_nudge_selected_atom_unit(dx, dy, dz, scene.molecule_unit))
+    let accepted = r.accepted
+    ms_record_result(scene, r)
+    accepted
+}
+
+pub fn viz_molecule_studio_pointer(scene: &!VizScene, constraint: &!VizMoleculeConstraint, px: i64, py: i64) -> bool with Mut, Div {
+    if scene.molecule_tool == VIZ_MOLECULE_TOOL_SELECT || scene.molecule_tool == VIZ_MOLECULE_TOOL_MOVE {
+        return viz_molecule_studio_apply_checked(scene, constraint, VIZ_AUTHOR_SELECT_ATOM_AT, px, py)
+    }
+    if scene.molecule_tool == VIZ_MOLECULE_TOOL_ADD_ATOM {
+        return viz_molecule_studio_apply_checked(scene, constraint, VIZ_AUTHOR_ADD_ATOM, px, py)
+    }
+    if scene.molecule_tool == VIZ_MOLECULE_TOOL_DELETE {
+        return viz_molecule_studio_apply_checked(scene, constraint, VIZ_AUTHOR_DELETE_ATOM, px, py)
+    }
+    if scene.molecule_tool == VIZ_MOLECULE_TOOL_LOCK {
+        let atom = viz_molecule_hit_atom(scene, scene.molecule_studio_node, px, py)
+        if atom < 0 {
+            ms_record_manual(scene, VIZ_AUTHOR_SELECT_ATOM_AT, VIZ_AUTHOR_REASON_INVALID_ATOM, false)
+            return false
+        }
+        let selected = viz_molecule_studio_apply_checked(scene, constraint, VIZ_AUTHOR_SELECT_ATOM_AT, px, py)
+        if selected && viz_molecule_constraint_lock_atom(constraint, atom) {
+            ms_record_manual(scene, 9001, VIZ_AUTHOR_REASON_OK, true)
+            return true
+        }
+        return false
+    }
+    if scene.molecule_tool == VIZ_MOLECULE_TOOL_ADD_BOND {
+        let atom = viz_molecule_hit_atom(scene, scene.molecule_studio_node, px, py)
+        if atom < 0 {
+            ms_record_manual(scene, VIZ_AUTHOR_ADD_BOND, VIZ_AUTHOR_REASON_INVALID_ATOM, false)
+            return false
+        }
+        if scene.molecule_pending_atom < 0 {
+            scene.molecule_pending_atom = atom
+            return viz_molecule_studio_apply_checked(scene, constraint, VIZ_AUTHOR_SELECT_ATOM_AT, px, py)
+        }
+        let r = viz_authoring_apply_checked(scene, constraint, viz_author_add_bond(scene.molecule_studio_node, scene.molecule_pending_atom, atom, 1))
+        scene.molecule_pending_atom = 0 - 1
+        let accepted = r.accepted
+        ms_record_result(scene, r)
+        return accepted
+    }
+    ms_record_manual(scene, 0, VIZ_AUTHOR_REASON_INVALID_ATOM, false)
+    false
+}

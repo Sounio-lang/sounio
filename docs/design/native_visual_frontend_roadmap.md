@@ -65,7 +65,15 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_audit_hash` includes molecule atom and bond payloads, so atom moves, radius/color edits, bond changes, and capacity mutations are visible to replay/export audit surfaces.
 - `tests/run-pass/viz_workbench_roundtrip.sio` proves typed action replay, checked constraints, certificate verification, Canvas pixels, and static HTML/SVG export from the same Workbench scene.
 
-## V1.8: Static HTML/SVG
+## V1.8: Native Molecule Studio
+
+- `stdlib/viz/molecule_studio.sio` turns checked molecule authoring into a native Workbench tool layer. Tool state, unit scale, pending bond endpoint, last action, last reason, accept/reject counts, and timeline count are fields on `VizScene`.
+- `stdlib/viz/workbench.sio` now binds a molecule node to Studio V0 and adds Visual IR toolbar controls for select, move, add atom, add bond, delete, lock, status, and timeline.
+- Studio pointer and nudge commands reduce into `viz::authoring` checked actions, so constraints for locked atoms, geometry, units, radius, and capacity remain Sounio data.
+- `viz_audit_hash`, `viz_app_frame_hash`, and `viz_html_emit_scene` expose Studio state for replay/export parity without moving semantics into JavaScript.
+- `tests/run-pass/viz_workbench_roundtrip.sio` proves the Studio path end to end: select, move/nudge, add atom, add bond, lock, rejected locked selection, delete, status/timeline update, and Canvas toolbar pixels.
+
+## V1.9: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.
 - JavaScript is not used for scientific semantics.

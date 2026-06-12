@@ -328,6 +328,8 @@ The test builds the reusable Workbench scene, renders Canvas, replays a determin
 
 The molecule section uses `viz::authoring` transactions rather than raw payload edits. It proves atom hit-test selection, angstrom-unit nudging, radius/color changes, add atom, add bond, set bond order, delete atom, deterministic replay across two scenes, checked rejection for bond geometry, unknown unit, locked atom, radius range, unsupported action, and molecule capacity. It also verifies per-frame authoring certificates.
 
+The Workbench also includes Molecule Studio V0. Its Visual IR toolbar exposes select, move, add atom, add bond, delete, and lock tools, plus status and timeline controls. The roundtrip proof drives Studio pointer/nudge commands through checked authoring, verifies accepted/rejected counters and timeline state, updates status/timeline nodes, and renders the toolbar to Canvas.
+
 ## Renderer3D Edge Proof
 
 Run:
