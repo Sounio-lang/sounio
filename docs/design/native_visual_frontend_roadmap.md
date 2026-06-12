@@ -116,6 +116,14 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_audit_hash` includes control node values and selection state, so playback state is visible to replay/certificate/export proofs.
 - `tests/run-pass/viz_workbench_timeline_playback.sio` proves native control clicks plus deterministic ticks drive the full composed Workbench scene and static HTML/SVG export without moving simulation semantics into JavaScript.
 
+## V1.8h: Workbench Replay Sessions
+
+- `VizWorkbenchReplaySession` records bounded Workbench tapes containing native event steps and deterministic tick steps.
+- `viz_workbench_replay_record_session` stores per-frame Canvas hashes, audit hashes, and quantized scene time after rendering through the native Canvas path.
+- `viz_workbench_replay_verify_session` applies the recorded tape to a freshly rebuilt Workbench scene and verifies every frame against the recorded hashes and time samples.
+- `viz_workbench_replay_dump_session` emits a compact text export of the session timeline for CI logs and external audit, while state and verification remain Sounio-owned data.
+- `tests/run-pass/viz_workbench_replay_session.sio` proves record -> dump -> rebuild -> verify across playback controls, molecule authoring, frame hashes, audit hashes, readout state, and 3D mesh state.
+
 ## V1.9: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.

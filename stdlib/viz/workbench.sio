@@ -1,7 +1,9 @@
 // stdlib/viz/workbench.sio - native visual workbench scene blueprint
 
+use display::canvas::{Canvas}
 use display::event::{Event, EV_MOUSE_PRESS, EV_MOTION, EV_KEY_PRESS, EV_CLOSE, EV_EXPOSE, MOUSE_LEFT, KEY_RIGHT}
 use render::renderer3d::{Tri3D}
+use viz::audit::{viz_audit_hash}
 use viz::authoring::{VizMoleculeConstraint, viz_molecule_constraint_default}
 use viz::ir::{
     VizScene, viz_layout_rect, viz_style_rgb,
@@ -19,6 +21,7 @@ use viz::physchem::{
     lattice_field_phonon_frame, particle_event_view_frame,
 }
 use viz::viz_app::{VizApp, viz_app_handle_event}
+use viz::viz_replay::{viz_replay_present}
 
 pub struct VizWorkbenchIds {
     pub title: i64,
@@ -57,6 +60,59 @@ pub const VIZ_WORKBENCH_TAG_TIME_BACK: i64 = 8801
 pub const VIZ_WORKBENCH_TAG_TIME_PLAY: i64 = 8802
 pub const VIZ_WORKBENCH_TAG_TIME_FORWARD: i64 = 8803
 pub const VIZ_WORKBENCH_TAG_TIME_READOUT: i64 = 8804
+
+pub const VIZ_WORKBENCH_REPLAY_EVENT: i64 = 1
+pub const VIZ_WORKBENCH_REPLAY_TICK: i64 = 2
+
+pub struct VizWorkbenchReplayStep {
+    pub kind: i64,
+    pub event: Event,
+    pub dt_ms: i64,
+}
+
+pub struct VizWorkbenchReplaySession {
+    pub steps: [VizWorkbenchReplayStep; 32],
+    pub step_count: i64,
+    pub frame_hashes: [i64; 33],
+    pub audit_hashes: [i64; 33],
+    pub times_ms: [i64; 33],
+    pub frame_count: i64,
+    pub final_frame_hash: i64,
+    pub final_audit_hash: i64,
+}
+
+pub fn viz_workbench_replay_step_empty() -> VizWorkbenchReplayStep {
+    VizWorkbenchReplayStep {
+        kind: 0,
+        event: Event { kind: 0, key: 0, x: 0, y: 0, mods: 0 },
+        dt_ms: 0,
+    }
+}
+
+pub fn viz_workbench_replay_event(ev: Event) -> VizWorkbenchReplayStep {
+    VizWorkbenchReplayStep { kind: VIZ_WORKBENCH_REPLAY_EVENT, event: ev, dt_ms: 0 }
+}
+
+pub fn viz_workbench_replay_tick(dt_ms: i64) -> VizWorkbenchReplayStep {
+    VizWorkbenchReplayStep {
+        kind: VIZ_WORKBENCH_REPLAY_TICK,
+        event: Event { kind: 0, key: 0, x: 0, y: 0, mods: 0 },
+        dt_ms: dt_ms,
+    }
+}
+
+pub fn viz_workbench_replay_session_new() -> VizWorkbenchReplaySession {
+    VizWorkbenchReplaySession {
+        steps: [viz_workbench_replay_step_empty(); 32],
+        step_count: 0,
+        frame_hashes: [0; 33],
+        audit_hashes: [0; 33],
+        times_ms: [0; 33],
+        frame_count: 0,
+        final_frame_hash: 0,
+        final_audit_hash: 0,
+    }
+}
 
 pub fn viz_workbench_build_scene(scene: &!VizScene) -> VizWorkbenchIds with Mut, Div {
     var xs: [f64; 1024] = [0.0; 1024]
@@ -549,6 +605,101 @@ pub fn viz_workbench_tick(app: &!VizApp, scene: &!VizScene, dt: f64) -> bool wit
     viz_workbench_set_time(scene, scene.time + dt)
     app.dirty = true
     true
+}
+
+fn viz_workbench_replay_store_frame(session: &!VizWorkbenchReplaySession, frame_idx: i64, frame_hash: i64, scene: &VizScene) with Mut {
+    if frame_idx < 0 || frame_idx >= 33 { return }
+    session.frame_hashes[frame_idx as usize] = frame_hash
+    session.audit_hashes[frame_idx as usize] = viz_audit_hash(scene)
+    session.times_ms[frame_idx as usize] = (scene.time * 1000.0) as i64
+    session.frame_count = frame_idx + 1
+    session.final_frame_hash = frame_hash
+    session.final_audit_hash = session.audit_hashes[frame_idx as usize]
+}
+
+pub fn viz_workbench_replay_record_session(app: &!VizApp, scene: &!VizScene, ids: &VizWorkbenchIds, c: &!Canvas, steps: &[VizWorkbenchReplayStep; 32], step_count: i64) -> VizWorkbenchReplaySession with Mut, Div, Alloc {
+    var session = viz_workbench_replay_session_new()
+    var constraint = viz_workbench_constraint(ids)
+    var count = step_count
+    if count < 0 { count = 0 }
+    if count > 32 { count = 32 }
+    session.step_count = count
+
+    var i: i64 = 0
+    while i < count {
+        session.steps[i as usize] = steps[i as usize]
+        i = i + 1
+    }
+
+    var hash = viz_replay_present(app, scene, c)
+    viz_workbench_replay_store_frame(&!session, 0, hash, scene)
+
+    i = 0
+    while i < count {
+        let step = steps[i as usize]
+        if step.kind == VIZ_WORKBENCH_REPLAY_EVENT {
+            viz_workbench_app_handle_event(app, scene, &!constraint, step.event)
+        }
+        if step.kind == VIZ_WORKBENCH_REPLAY_TICK {
+            viz_workbench_tick(app, scene, (step.dt_ms as f64) / 1000.0)
+        }
+        hash = viz_replay_present(app, scene, c)
+        viz_workbench_replay_store_frame(&!session, i + 1, hash, scene)
+        i = i + 1
+    }
+    session
+}
+
+pub fn viz_workbench_replay_verify_session(app: &!VizApp, scene: &!VizScene, ids: &VizWorkbenchIds, c: &!Canvas, session: &VizWorkbenchReplaySession) -> bool with Mut, Div, Alloc {
+    var constraint = viz_workbench_constraint(ids)
+    var count = session.step_count
+    if count < 0 { return false }
+    if count > 32 { return false }
+    if session.frame_count != count + 1 { return false }
+
+    var hash = viz_replay_present(app, scene, c)
+    if hash != session.frame_hashes[0] { return false }
+    if viz_audit_hash(scene) != session.audit_hashes[0] { return false }
+    if ((scene.time * 1000.0) as i64) != session.times_ms[0] { return false }
+
+    var i: i64 = 0
+    while i < count {
+        let step = session.steps[i as usize]
+        if step.kind == VIZ_WORKBENCH_REPLAY_EVENT {
+            viz_workbench_app_handle_event(app, scene, &!constraint, step.event)
+        }
+        if step.kind == VIZ_WORKBENCH_REPLAY_TICK {
+            viz_workbench_tick(app, scene, (step.dt_ms as f64) / 1000.0)
+        }
+        hash = viz_replay_present(app, scene, c)
+        let frame_idx = i + 1
+        if hash != session.frame_hashes[frame_idx as usize] { return false }
+        if viz_audit_hash(scene) != session.audit_hashes[frame_idx as usize] { return false }
+        if ((scene.time * 1000.0) as i64) != session.times_ms[frame_idx as usize] { return false }
+        i = i + 1
+    }
+    hash == session.final_frame_hash && viz_audit_hash(scene) == session.final_audit_hash
+}
+
+pub fn viz_workbench_replay_dump_session(session: &VizWorkbenchReplaySession) with IO, Mut {
+    print("VIZ_WORKBENCH_REPLAY_SESSION count=")
+    print_int(session.step_count)
+    print(" frames=")
+    print_int(session.frame_count)
+    print("\n")
+    var i: i64 = 0
+    while i < session.frame_count && i < 33 {
+        print("frame ")
+        print_int(i)
+        print(" time-ms=")
+        print_int(session.times_ms[i as usize])
+        print(" frame-hash=")
+        print_int(session.frame_hashes[i as usize])
+        print(" audit-hash=")
+        print_int(session.audit_hashes[i as usize])
+        print("\n")
+        i = i + 1
+    }
 }
 
 pub fn viz_workbench_default_events(events: &![Event; 32]) -> i64 with Mut {

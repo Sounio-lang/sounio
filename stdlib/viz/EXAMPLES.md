@@ -174,6 +174,22 @@ VIZ_WORKBENCH_TIMELINE_PLAYBACK_PASS
 
 The test clicks the native play control, advances deterministic ticks through the Workbench app bridge, pauses playback, steps backward and forward, then proves lattice/phonon, particle-event, mesh, slider, frame readout, audit hash, Canvas frame hash, and static HTML/SVG export all agree on the same `scene.time`.
 
+## Workbench Replay Session Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_replay_session.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_REPLAY_SESSION_PASS
+```
+
+The test records a Workbench session tape containing native event steps and deterministic tick steps, exports the per-frame session dump, reconstructs a fresh Workbench scene, and verifies every frame's Canvas hash, audit hash, scene time, molecule atom count, play state, readout, and mesh state against the recorded session.
+
 ## Interaction Time Proof
 
 Run:
