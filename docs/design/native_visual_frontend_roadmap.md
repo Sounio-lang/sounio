@@ -75,6 +75,12 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_audit_hash`, `viz_app_frame_hash`, and `viz_html_emit_scene` expose Studio state for replay/export parity without moving semantics into JavaScript.
 - `tests/run-pass/viz_workbench_roundtrip.sio` proves the direct Studio path end to end, `tests/run-pass/viz_molecule_studio_events.sio` proves the native event path, and `tests/run-pass/viz_workbench_app_events.sio` proves the composed app bridge from event -> dirty app -> render/hash.
 
+## V1.8b: Workbench Replay Proof With Studio Constraints
+
+- `tests/run-pass/viz_workbench_replay_studio.sio` replays a fixed `display::event::Event` tape through the composed Workbench app bridge instead of the generic Visual IR reducer alone.
+- The test-local replay frames record Canvas hash, audit hash, scene time, molecule tool, timeline count, accepted/rejected checked-action counters, and molecule atom count.
+- The proof covers a tape that crosses generic controls and Molecule Studio authoring constraints without adding a separate replay module that perturbs current import ordering.
+
 ## V1.9: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.

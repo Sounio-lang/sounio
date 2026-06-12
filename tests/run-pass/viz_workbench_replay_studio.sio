@@ -1,0 +1,176 @@
+// tests/run-pass/viz_workbench_replay_studio.sio - Workbench replay with Molecule Studio
+//
+// Expected output:
+//   VIZ_WORKBENCH_REPLAY_STUDIO_PASS
+
+use display::canvas::{Canvas}
+use display::event::{Event, EV_KEY_PRESS, EV_MOUSE_PRESS, EV_MOTION, KEY_RIGHT, MOUSE_LEFT}
+use viz::authoring::{VizMoleculeConstraint}
+use viz::ir::{VizScene, viz_scene_new}
+use viz::workbench::{
+    VizWorkbenchIds, viz_workbench_app_handle_event, viz_workbench_build_scene,
+    viz_workbench_constraint,
+}
+use viz::viz_app::{VizApp, viz_app_frame_hash, viz_app_new, viz_app_render}
+
+pub struct WorkbenchReplayFrame {
+    pub frame: i64,
+    pub changed: bool,
+    pub canvas_hash: i64,
+    pub audit_hash: i64,
+    pub time_i: i64,
+    pub molecule_tool: i64,
+    pub molecule_timeline: i64,
+    pub molecule_accepted: i64,
+    pub molecule_rejected: i64,
+    pub replay_atoms: i64,
+}
+
+pub struct WorkbenchReplayTrace {
+    pub frames: [WorkbenchReplayFrame; 33],
+    pub count: i64,
+}
+
+fn empty_frame() -> WorkbenchReplayFrame {
+    WorkbenchReplayFrame {
+        frame: 0,
+        changed: false,
+        canvas_hash: 0,
+        audit_hash: 0,
+        time_i: 0,
+        molecule_tool: 0,
+        molecule_timeline: 0,
+        molecule_accepted: 0,
+        molecule_rejected: 0,
+        replay_atoms: 0,
+    }
+}
+
+fn ev(kind: i64, key: i64, x: i64, y: i64) -> Event {
+    Event { kind: kind, key: key, x: x, y: y, mods: 0 }
+}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn center_x(x: i64, w: i64) -> i64 {
+    x + w / 2
+}
+
+fn center_y(y: i64, h: i64) -> i64 {
+    y + h / 2
+}
+
+fn atom_count(scene: &VizScene, ids: &VizWorkbenchIds) -> i64 with Mut {
+    let slot = scene.nodes[ids.molecule as usize].data_slot
+    scene.molecules[slot as usize].atom_count
+}
+
+fn audit_hash(scene: &VizScene, ids: &VizWorkbenchIds) -> i64 with Mut {
+    var h: i64 = 47
+    h = h * 131 + scene.selected_node
+    h = h * 131 + scene.selected_atom_index
+    h = h * 131 + scene.molecule_tool
+    h = h * 131 + scene.molecule_accept_count
+    h = h * 131 + scene.molecule_reject_count
+    h = h * 131 + scene.molecule_timeline_count
+    h = h * 131 + scene.time as i64
+    let slot = scene.nodes[ids.molecule as usize].data_slot
+    var count = scene.molecules[slot as usize].atom_count
+    if count < 0 { count = 0 }
+    if count > 64 { count = 64 }
+    h = h * 131 + count
+    var i: i64 = 0
+    while i < count {
+        let atom = scene.molecules[slot as usize].atoms[i as usize]
+        h = h * 131 + atom.atomic_number
+        h = h * 131 + (atom.x * 1000.0) as i64
+        h = h * 131 + (atom.y * 1000.0) as i64
+        h = h * 131 + (atom.radius * 1000.0) as i64
+        i = i + 1
+    }
+    h
+}
+
+fn record(trace: &!WorkbenchReplayTrace, app: &VizApp, scene: &VizScene, ids: &VizWorkbenchIds, changed: bool, hash: i64) with Mut {
+    let idx = trace.count
+    trace.frames[idx as usize] = WorkbenchReplayFrame {
+        frame: app.frame,
+        changed: changed,
+        canvas_hash: hash,
+        audit_hash: audit_hash(scene, ids),
+        time_i: scene.time as i64,
+        molecule_tool: scene.molecule_tool,
+        molecule_timeline: scene.molecule_timeline_count,
+        molecule_accepted: scene.molecule_accept_count,
+        molecule_rejected: scene.molecule_reject_count,
+        replay_atoms: atom_count(scene, ids),
+    }
+    trace.count = trace.count + 1
+}
+
+fn replay(app: &!VizApp, scene: &!VizScene, ids: &VizWorkbenchIds, constraint: &!VizMoleculeConstraint, canvas: &!Canvas, events: &[Event; 32], count: i64) -> WorkbenchReplayTrace with Mut, Div, Alloc {
+    var trace = WorkbenchReplayTrace { frames: [empty_frame(); 33], count: 0 }
+    app.dirty = true
+    viz_app_render(app, scene, canvas)
+    record(&!trace, app, scene, ids, true, viz_app_frame_hash(app, scene, canvas))
+    var i: i64 = 0
+    while i < count {
+        let changed = viz_workbench_app_handle_event(app, scene, constraint, events[i as usize])
+        app.dirty = true
+        viz_app_render(app, scene, canvas)
+        record(&!trace, app, scene, ids, changed, viz_app_frame_hash(app, scene, canvas))
+        i = i + 1
+    }
+    trace
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene_a = viz_scene_new()
+    let ids_a = viz_workbench_build_scene(&!scene_a)
+    var constraint_a = viz_workbench_constraint(&ids_a)
+    var app_a = viz_app_new(10, 13, 18)
+    var canvas_a = make_canvas(480, 320)
+    var events: [Event; 32] = [ev(0, 0, 0, 0); 32]
+
+    let atom1_x = 443
+    let atom1_y = 72
+    let add_x = scene_a.nodes[ids_a.molecule as usize].layout.x + scene_a.nodes[ids_a.molecule as usize].layout.w / 2
+    let add_y = scene_a.nodes[ids_a.molecule as usize].layout.y + scene_a.nodes[ids_a.molecule as usize].layout.h / 2 + 21
+
+    events[0] = ev(EV_MOUSE_PRESS, MOUSE_LEFT, 46, 238)
+    events[1] = ev(EV_MOTION, 0, 101, 238)
+    events[2] = ev(
+        EV_MOUSE_PRESS, MOUSE_LEFT,
+        center_x(98, 44),
+        center_y(292, 18),
+    )
+    events[3] = ev(EV_MOUSE_PRESS, MOUSE_LEFT, add_x, add_y)
+    events[4] = ev(
+        EV_MOUSE_PRESS, MOUSE_LEFT,
+        center_x(54, 38),
+        center_y(292, 18),
+    )
+    events[5] = ev(EV_MOUSE_PRESS, MOUSE_LEFT, atom1_x, atom1_y)
+    events[6] = ev(EV_KEY_PRESS, KEY_RIGHT, 0, 0)
+
+    let trace_a = replay(&!app_a, &!scene_a, &ids_a, &!constraint_a, &!canvas_a, &events, 7)
+    let last = trace_a.count - 1
+
+    assert(trace_a.count == 8)
+    assert(trace_a.frames[last as usize].canvas_hash != trace_a.frames[0].canvas_hash)
+    assert(trace_a.frames[last as usize].replay_atoms == 4)
+    assert(trace_a.frames[last as usize].time_i == 5)
+    assert(trace_a.frames[last as usize].molecule_tool == 2)
+    assert(trace_a.frames[last as usize].molecule_timeline >= 3)
+    assert(trace_a.frames[last as usize].molecule_accepted >= 3)
+    assert(trace_a.frames[last as usize].molecule_rejected == 0)
+    assert(trace_a.frames[4].replay_atoms == 4)
+    assert(app_a.frame == 8)
+    assert(!app_a.dirty)
+
+    heap_free(canvas_a.pixels as *mut i8)
+    println("VIZ_WORKBENCH_REPLAY_STUDIO_PASS")
+}

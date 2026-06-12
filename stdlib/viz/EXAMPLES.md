@@ -362,6 +362,22 @@ VIZ_WORKBENCH_APP_EVENTS_PASS
 
 The test drives the composed Workbench app bridge. Generic slider events and Molecule Studio toolbar/molecule events enter through `viz_workbench_app_handle_event`, mark the app dirty, render through `viz_app_render`, and produce changed deterministic frame hashes.
 
+## Workbench Studio Replay Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_replay_studio.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_REPLAY_STUDIO_PASS
+```
+
+The test replays one Workbench event tape through the composed app bridge. The tape drives a generic time slider, switches Molecule Studio tools, adds an atom, selects an atom, and nudges it. The recorded timeline proves Canvas hash changes, final atom count, dirty/render cleanup, and molecule Studio counters through the same bridge used by the native Workbench demo.
+
 ## Renderer3D Edge Proof
 
 Run:
