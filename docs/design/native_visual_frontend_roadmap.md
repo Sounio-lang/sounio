@@ -124,6 +124,12 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_workbench_replay_dump_session` emits a compact text export of the session timeline for CI logs and external audit, while state and verification remain Sounio-owned data.
 - `tests/run-pass/viz_workbench_replay_session.sio` proves record -> dump -> rebuild -> verify across playback controls, molecule authoring, frame hashes, audit hashes, readout state, and 3D mesh state.
 
+## V1.8i: Replay Session HTML Archive
+
+- `viz_workbench_replay_session_hash` derives a deterministic signature from the full Workbench replay tape, frame hashes, audit hashes, and time samples.
+- `viz_workbench_replay_emit_html_archive` emits a passive `workbench-replay-session` comment for static HTML/SVG exports, including step count, frame count, session signature, final frame hash, final audit hash, and final time.
+- `tests/run-pass/viz_workbench_replay_html_archive.sio` proves record -> verify -> archive comment -> static scene export parity: the archive final time, `viz-audit` scene time, timeline readout, and 3D mesh audit comments all agree on the same Sounio-owned replay state.
+
 ## V1.9: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.

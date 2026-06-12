@@ -190,6 +190,22 @@ VIZ_WORKBENCH_REPLAY_SESSION_PASS
 
 The test records a Workbench session tape containing native event steps and deterministic tick steps, exports the per-frame session dump, reconstructs a fresh Workbench scene, and verifies every frame's Canvas hash, audit hash, scene time, molecule atom count, play state, readout, and mesh state against the recorded session.
 
+## Workbench Replay HTML Archive Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_replay_html_archive.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_REPLAY_HTML_ARCHIVE_PASS
+```
+
+The test records a Workbench playback session, verifies it against a rebuilt scene, emits a passive `workbench-replay-session` HTML/SVG archive comment with the deterministic session signature and final hashes, then emits the static scene export whose `viz-audit`, readout, and mesh comments agree on the final replay time.
+
 ## Interaction Time Proof
 
 Run:
