@@ -147,13 +147,17 @@ var RB: [i8; 1048576] = [0; 1048576]
 var RBlen: i64 = 0
 var RBpos: i64 = 0
 var EDGE_PATH: string = ""
+var CUBE_PATH: string = ""
 var USE_FILE: i32 = 0
+var USE_CUBE: i32 = 0
+var WORKER_K: i64 = 0
 // edge store + adjacency for triangle-finding (cores up to 1000 vertices)
 var EU: [i64; 8192] = [0; 8192]
 var EV: [i64; 8192] = [0; 8192]
 var NEDGES: i64 = 0
 var GN: i64 = 0
 var ADJ: [i8; 1000000] = [0; 1000000]
+var CUBE_MARK: [i8; 8192] = [0; 8192]
 
 fn print_digit(d: i64) with IO {
     if d == 0 { print("0") } else if d == 1 { print("1") } else if d == 2 { print("2") }
@@ -999,6 +1003,75 @@ fn read_edge_file(path: string) -> i64 with IO, Mut, Panic {
     RBpos = 0
     return n
 }
+
+// Cube-file integers for the search lane. The accepted format is the same as the
+// Python manifest producer: zero-based `<vertex> <colour>` rows, optionally using
+// labels like `vertex=12 colour=3`; `#` starts a comment to end-of-line.
+fn next_cube_int() -> i64 with Mut, Panic, Div {
+    while RBpos < RBlen {
+        let c = RB[RBpos as usize] as i64
+        if c == 35 {
+            while RBpos < RBlen {
+                let d = RB[RBpos as usize] as i64
+                RBpos = RBpos + 1
+                if d == 10 { break }
+            }
+        } else if c == 45 {
+            RBpos = RBpos + 1
+            if RBpos < RBlen {
+                let d = RB[RBpos as usize] as i64
+                if d >= 48 { if d <= 57 { return 0 - 2 } }
+            }
+        } else {
+            if c >= 48 { if c <= 57 { break } }
+            RBpos = RBpos + 1
+        }
+    }
+    if RBpos >= RBlen { return 0 - 1 }
+    var v: i64 = 0
+    while RBpos < RBlen {
+        let c = RB[RBpos as usize] as i64
+        if c < 48 { break }
+        if c > 57 { break }
+        v = v * 10 + (c - 48)
+        RBpos = RBpos + 1
+    }
+    return v
+}
+
+// Read a cube file and append each assignment as an original UNIT clause. Because
+// this runs before `onc = nclauses`, the streamed CNF is exactly CNF(edge,k) plus
+// these cube units, and the streamed DRAT refutes that exact formula.
+fn read_cube_file(path: string, nverts: i64, k: i64) -> i64 with IO, Mut, Div, Panic {
+    let fd = syscall6(2, path, 0, 0, 0, 0, 0)
+    if fd < 0 { return 0 - 1 }
+    let n = syscall6(0, fd, &! RB, 1048576, 0, 0, 0)
+    let _ = syscall6(3, fd, 0, 0, 0, 0, 0)
+    if n < 0 { return 0 - 1 }
+    RBlen = n
+    RBpos = 0
+    var i: i32 = 0
+    while i < 8192 { CUBE_MARK[i] = 0  i = i + 1 }
+    var arr: [i64; 8192] = [0; 8192]
+    var count: i64 = 0
+    while 1 == 1 {
+        let v = next_cube_int()
+        if v == (0 - 1) { break }
+        if v < 0 { return v }
+        let c = next_cube_int()
+        if c < 0 { return 0 - 2 }
+        if v >= nverts { return 0 - 3 }
+        if c >= k { return 0 - 4 }
+        if v >= 8192 { return 0 - 5 }
+        if CUBE_MARK[v as usize] == 1 { return 0 - 6 }
+        CUBE_MARK[v as usize] = 1
+        arr[0] = v * k + c + 1
+        let _ = db_add(&arr, 1)
+        count = count + 1
+    }
+    if count == 0 { return 0 - 7 }
+    return count
+}
 // Scan the next non-negative integer in RB from RBpos; skips letters/space/newline
 // (header tokens 'p','edge','e'). Returns -1 at EOF.
 fn next_int() -> i64 with Mut, Panic, Div {
@@ -1019,10 +1092,18 @@ fn next_int() -> i64 with Mut, Panic, Div {
     return v
 }
 // Build the k-colouring CNF from the loaded edge list: header `N M`, then M
-// `u v` edges (1-based ⟹ 0-based). UNSAT ⟹ χ(G) ≥ k+1.
-fn build_graph_from_edges(k: i64) with IO, Mut, Div, Panic {
+// `u v` edges (1-based -> 0-based). UNSAT => chi(G) >= k+1.
+fn build_graph_from_edges(k: i64) -> i64 with IO, Mut, Div, Panic {
     let nN = next_int()
     let mM = next_int()
+    if nN <= 0 { return 0 - 1 }
+    if mM < 0 { return 0 - 2 }
+    if k <= 0 { return 0 - 3 }
+    if nN * k >= 8192 { return 0 - 4 }
+    if SB == 1 {
+        if nN > 1000 { return 0 - 5 }
+        if mM > 8192 { return 0 - 6 }
+    }
     GN = nN
     NEDGES = 0
     add_atleast_one(nN, k)
@@ -1030,14 +1111,26 @@ fn build_graph_from_edges(k: i64) with IO, Mut, Div, Panic {
     while e < mM {
         let u = next_int()
         let w = next_int()
-        if u < 1 { break }
+        if u < 1 { return 0 - 7 }
+        if w < 1 { return 0 - 8 }
+        if u > nN { return 0 - 9 }
+        if w > nN { return 0 - 10 }
+        if u == w { return 0 - 11 }
         let a = u - 1
         let b = w - 1
         add_edge(a, b, k)
         if NEDGES < 8192 { EU[NEDGES as usize] = a  EV[NEDGES as usize] = b  NEDGES = NEDGES + 1 }
-        if a < 1000 { if b < 1000 { ADJ[(a * GN + b) as usize] = 1  ADJ[(b * GN + a) as usize] = 1 } }
+        if a < 1000 { if b < 1000 {
+            let ab = a * GN + b
+            let ba = b * GN + a
+            if ab < 1000000 { if ba < 1000000 {
+                ADJ[ab as usize] = 1  ADJ[ba as usize] = 1
+            } else if SB == 1 { return 0 - 12 } }
+            else if SB == 1 { return 0 - 12 }
+        } }
         e = e + 1
     }
+    return e
 }
 // Find the first triangle (a,b,c) and precolour it 0,1,2. For a K₄-free
 // unit-distance graph this is a COMPLETE colour-symmetry break for k=4
@@ -1231,6 +1324,28 @@ fn stream_cnf(path: string, orig_nc: i32) -> i64 with IO, Mut, Div, Panic {
     return 0
 }
 
+fn sat_colour_for_vertex(v: i64, k: i64) -> i64 with Mut, Div, Panic {
+    var c: i64 = 0
+    while c < k {
+        let lit = (v * k + c + 1) as i32
+        if assign[lit] == 1 { return c }
+        c = c + 1
+    }
+    return 0 - 1
+}
+
+fn print_sat_colouring(k: i64) with IO, Mut, Div, Panic {
+    print("[worker seed=")  print_dec(SEED)
+    print(" SAT colouring=")
+    var v: i64 = 0
+    while v < GN {
+        if v > 0 { print(",") }
+        print_dec(v)  print(":")  print_dec(sat_colour_for_vertex(v, k))
+        v = v + 1
+    }
+    print("]\n")
+}
+
 // Streaming worker: the DRAT proof is written to disk *as it is produced* during
 // solve() (held fd, 64 KiB buffer), so RAM is O(1) in proof size — K8+ and de
 // Grey-scale proofs no longer hit any in-RAM cap. The native RUP checker is
@@ -1241,18 +1356,32 @@ fn worker_main() -> i32 with IO, Mut, Div, Panic {
     if arg_count() > 2 { USE_LRB = str_to_int(get_arg(2)) as i32 }
     if arg_count() > 3 { SB = str_to_int(get_arg(3)) as i32 }
     if arg_count() > 4 { EDGE_PATH = get_arg(4)  USE_FILE = 1 }
+    if arg_count() > 5 { CUBE_PATH = get_arg(5)  USE_CUBE = 1 }
     reset_all()
     lits_before = 0  lits_after = 0
     if USE_FILE == 1 {
         // graph-from-file: `n` is the number of colours k (default 8 → use 4)
         var k: i64 = n
         if k == 8 { k = 4 }
+        WORKER_K = k
         if read_edge_file(EDGE_PATH) < 0 {
             print("[worker cannot read edge file]\n")  return 1
         }
-        build_graph_from_edges(k)
+        let gr = build_graph_from_edges(k)
+        if gr < 0 {
+            print("[worker invalid edge file code=")  print_dec(gr)  print("]\n")
+            return 1
+        }
         if SB == 1 { let _ = precolour_triangle(k) }
         if SB == 2 { add_value_precedence(nvars as i64 / k, k) }
+        if USE_CUBE == 1 {
+            let cr = read_cube_file(CUBE_PATH, nvars as i64 / k, k)
+            if cr < 0 {
+                print("[worker invalid cube file code=")  print_dec(cr)  print("]\n")
+                return 1
+            }
+            print("[cube units=")  print_dec(cr)  print("]\n")
+        }
     } else if n == 0 {
         build_spindle_3col()
     } else {
@@ -1264,7 +1393,10 @@ fn worker_main() -> i32 with IO, Mut, Div, Panic {
     let onc = nclauses
     n_orig = onc
     apply_seed()
-    if USE_FILE == 1 { print("[worker seed=")  print_dec(SEED)  print(" graph-file k-col") }
+    if USE_FILE == 1 {
+        print("[worker seed=")  print_dec(SEED)  print(" graph-file k-col")
+        if USE_CUBE == 1 { print(" cube-file") }
+    }
     else if n == 0 { print("[worker seed=")  print_dec(SEED)  print(" Moser-spindle 3-col") }
     else { print("[worker seed=")  print_dec(SEED)  print(" K_")  print_dec(n)  print("/")  print_dec(n - 1) }
     print(" vars=")  print_dec(nvars as i64)  print(" clauses=")  print_dec(onc as i64)
@@ -1292,6 +1424,14 @@ fn worker_main() -> i32 with IO, Mut, Div, Panic {
             print(" -> souc_sat_worker.cnf/.drat (streamed)]\n")
         }
         return 0
+    }
+    if s == 1 {
+        if USE_FILE == 1 { print_sat_colouring(WORKER_K) }
+        else {
+            print("[worker seed=")  print_dec(SEED)
+            print(" SAT]\n")
+        }
+        return 1
     }
     print("[worker seed=")  print_dec(SEED)  print(" NORESULT code=")  print_dec(s as i64)  print(" (partial proof discarded)]\n")
     return 1

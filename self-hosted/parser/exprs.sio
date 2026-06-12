@@ -10,7 +10,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_peek_ahead, parser_assign_op_code, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_assign_op_code, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box}
 use parser::types::*
 use parser::stmts::*
 use parser::patterns::*
@@ -37,27 +37,27 @@ impl Parser {
         while !parser_at_eof(p) {
             if parser_assign_op_code(p) >= 0 { break }
             let op_kind = parser_peek(p)
-            let prec = tk_precedence(op_kind)
-
-            // Stop if current operator has lower or equal precedence
-            if prec <= min_bp { break }
+            let op_code = pt_read_kind_code(p.pos)
+            if op_code == 175 || op_code == 177 || op_code == 179 || op_code == 180 || op_code == 182 {
+                break
+            }
 
             // Postfix: function call, method call, field access, index
             // A `(` after a newline is NOT a call — it starts a new expression.
-            if op_kind == TokenKind::LParen {
+            if op_kind == TokenKind::LParen || op_code == 174 {
                 if p.had_newline_before() { break }
                 p = p.parse_call_expr_box(lhs)
                 lhs = parser_take_expr_box()
                 continue
             }
 
-            if op_kind == TokenKind::LBracket {
+            if op_kind == TokenKind::LBracket || op_code == 178 {
                 p = p.parse_index_expr_box(lhs)
                 lhs = parser_take_expr_box()
                 continue
             }
 
-            if op_kind == TokenKind::Dot {
+            if op_kind == TokenKind::Dot || op_code == 183 {
                 p = p.parse_dot_expr_box(lhs)
                 lhs = parser_take_expr_box()
                 continue
@@ -75,6 +75,11 @@ impl Parser {
                 lhs = Box::new(audit_e)
                 continue
             }
+
+            let prec = tk_precedence(op_kind)
+
+            // Stop if current operator has lower or equal precedence
+            if prec <= min_bp { break }
 
             // Range operators (non-associative)
             if op_kind == TokenKind::DotDot || op_kind == TokenKind::DotDotEq {
@@ -153,6 +158,8 @@ impl Parser {
             self.parse_unary(UnaryOp::OpNeg)
         } else if k == TokenKind::Bang {
             self.parse_unary(UnaryOp::OpNot)
+        } else if k == TokenKind::Tilde {
+            self.parse_unary(UnaryOp::OpNot)
         } else if k == TokenKind::Amp {
             self.parse_unary(UnaryOp::OpRef)
         } else if k == TokenKind::AmpBang {
@@ -225,7 +232,22 @@ impl Parser {
         }
         // Effect handler: handle<Effect> { body } with { handlers }
         else if k == TokenKind::Handle {
-            self.parse_handle_expr()
+            if parser_peek_ahead(self, 1) == TokenKind::Lt {
+                self.parse_handle_expr()
+            } else {
+                self.parse_ident_expr()
+            }
+        }
+        // Effect operation: perform E.op(args)
+        else if k == TokenKind::Perform {
+            self.parse_perform_expr()
+        }
+        // Async/spawn blocks are parsed conservatively as block-shaped
+        // expressions; async runtime lowering is handled outside this layer.
+        else if k == TokenKind::Async {
+            self.parse_async_like_block_expr()
+        } else if k == TokenKind::Spawn {
+            self.parse_async_like_block_expr()
         }
         // Closure: |params| body  or  || body
         else if k == TokenKind::Pipe {
@@ -236,7 +258,7 @@ impl Parser {
             self.parse_contest_expr()
         }
         // Identifier (variable, function name, enum path, struct literal)
-        else if k == TokenKind::Ident || k == TokenKind::Knowledge {
+        else if k == TokenKind::Ident || k == TokenKind::Knowledge || k == TokenKind::Close || k == TokenKind::Unit || k == TokenKind::Kernel {
             self.parse_ident_expr()
         }
         // Error recovery: advance past unrecognized token to avoid infinite loops
@@ -252,7 +274,7 @@ impl Parser {
     }
 
     // ============================================================
-    // Unary expression: -x, !x, &x, &!x, *x
+    // Unary expression: -x, !x, ~x, &x, &!x, *x
     // ============================================================
 
     fn parse_unary(self, op: UnaryOp) -> Parser with Mut, IO, Panic, Div, Alloc {
@@ -518,6 +540,39 @@ impl Parser {
         p
     }
 
+    fn parse_perform_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
+        var p = self.advance()  // skip 'perform'
+        p = p.parse_expr()
+        // The performed operation expression remains in LAST_EXPR.
+        p
+    }
+
+    fn parse_async_like_block_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        let marker_name = self.current_name()
+        var p = self.advance()  // skip 'async' or 'spawn'
+
+        if parser_peek(p) == TokenKind::LBrace {
+            let pair = p.parse_block()
+            p = pair.0
+            let blk = pair.1
+            let span = p.span_from(start)
+            var e = mk_expr(ExprKind::ExprBlock, span)
+            e.name = marker_name
+            e.block = Some(Box::new(blk))
+            parser_store_expr_box(Box::new(e))
+            p
+        } else {
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            let span = p.span_from(start)
+            var e = error_expr(span)
+            e.name = marker_name
+            parser_store_expr_box(Box::new(e))
+            p
+        }
+    }
+
     // ============================================================
     // Closure expression: |x: T, y: U| body  or  |x: T| -> R with E { body }
     // ============================================================
@@ -651,10 +706,13 @@ impl Parser {
         let span = self.current_span()
         let name = self.current_name()
         var p = self.advance()  // skip param name
-        p = p.expect(TokenKind::Colon)
-        let ty_pair = p.parse_type()
-        p = ty_pair.0
-        let ty = ty_pair.1
+        var ty = dummy_type_expr()
+        if parser_peek(p) == TokenKind::Colon {
+            p = p.advance()
+            let ty_pair = p.parse_type()
+            p = ty_pair.0
+            ty = ty_pair.1
+        }
         (p, ClosureParam { name: name, ty: ty, span: span })
     }
 
@@ -665,11 +723,23 @@ impl Parser {
     fn parse_if_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'if'
-        // Restrict struct literals in condition to avoid { ambiguity
-        p.no_struct_lit = true
-        p = p.parse_expr()
-        let cond_box = parser_take_expr_box()
-        p.no_struct_lit = false
+        var cond_box: Box<Expr> = Box::new(error_expr(start))
+        if parser_peek(p) == TokenKind::Let {
+            p = p.advance()
+            let pat_pair = p.parse_pattern()
+            p = pat_pair.0
+            p = p.expect(TokenKind::Eq)
+            p.no_struct_lit = true
+            p = p.parse_expr()
+            cond_box = parser_take_expr_box()
+            p.no_struct_lit = false
+        } else {
+            // Restrict struct literals in condition to avoid { ambiguity
+            p.no_struct_lit = true
+            p = p.parse_expr()
+            cond_box = parser_take_expr_box()
+            p.no_struct_lit = false
+        }
         let pair2 = p.parse_block()
         p = pair2.0
         let then_block = pair2.1
@@ -725,6 +795,13 @@ impl Parser {
             let pair2 = p.parse_pattern()
             p = pair2.0
             let pattern = pair2.1
+            if parser_peek(p) == TokenKind::If {
+                p = p.advance()
+                p.no_struct_lit = true
+                p = p.parse_expr()
+                let _guard_box = parser_take_expr_box()
+                p.no_struct_lit = false
+            }
             p = p.expect(TokenKind::FatArrow)
 
             if parser_peek(p) == TokenKind::LBrace {
@@ -767,6 +844,9 @@ impl Parser {
     fn parse_while_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'while'
+        if parser_peek(p) == TokenKind::Let {
+            return p.parse_while_let_expr(start)
+        }
         // Restrict struct literals in condition to avoid { ambiguity
         p.no_struct_lit = true
         p = p.parse_expr()
@@ -780,6 +860,75 @@ impl Parser {
         e.left = Some(cond_box)
         e.block = Some(Box::new(body))
         parser_store_expr_box(Box::new(e))
+        p
+    }
+
+    fn parse_while_let_expr(self, start: Span) -> Parser with Mut, IO, Panic, Div, Alloc {
+        var p = self.advance()  // skip 'let'
+        let pat_pair = p.parse_pattern()
+        p = pat_pair.0
+        let success_pattern = pat_pair.1
+        p = p.expect(TokenKind::Eq)
+
+        p.no_struct_lit = true
+        p = p.parse_expr()
+        let scrutinee_box = parser_take_expr_box()
+        p.no_struct_lit = false
+
+        let body_pair = p.parse_block()
+        p = body_pair.0
+        let success_block = body_pair.1
+
+        let span = p.span_from(start)
+        var success_expr = mk_expr(ExprKind::ExprBlock, success_block.span)
+        success_expr.block = Some(Box::new(success_block))
+        let success_arm = MatchArm {
+            pattern: success_pattern,
+            body: success_expr,
+            span: success_block.span,
+        }
+
+        var wildcard_pattern = Pattern {
+            kind: PatternKind::PatWildcard,
+            span: span,
+            name: empty_name(),
+            int_val: 0,
+            path: empty_path(),
+            sub_patterns: None,
+            pat_fields: None,
+            is_mut: false,
+        }
+        var break_expr = mk_expr(ExprKind::ExprBreak, span)
+        let break_arm = MatchArm {
+            pattern: wildcard_pattern,
+            body: break_expr,
+            span: span,
+        }
+
+        let arms = MatchArmList {
+            head: success_arm,
+            tail: Some(Box::new(MatchArmList { head: break_arm, tail: None })),
+        }
+        var match_expr = mk_expr(ExprKind::ExprMatch, span)
+        match_expr.left = Some(scrutinee_box)
+        match_expr.arms = Some(Box::new(arms))
+
+        let match_stmt = Stmt {
+            kind: StmtKind::StmtExpr,
+            span: span,
+            name: empty_name(),
+            ty: None,
+            expr: Some(Box::new(match_expr)),
+            target: None,
+            assign_op: AssignOp::AssignEq,
+        }
+        let loop_block = Block {
+            stmts: Some(Box::new(StmtList { head: match_stmt, tail: None })),
+            span: span,
+        }
+        var loop_expr = mk_expr(ExprKind::ExprLoop, span)
+        loop_expr.block = Some(Box::new(loop_block))
+        parser_store_expr_box(Box::new(loop_expr))
         p
     }
 
@@ -917,16 +1066,33 @@ impl Parser {
         } else {
             // Simple identifier — may still carry turbofish: vec_new::<f64>()
             let span = self.current_span()
-            var p = self.advance()
+            var p = parser_advance(self)
             var e = mk_expr(ExprKind::ExprIdent, span)
             e.name = name
             if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::Lt {
-                p = p.advance()  // skip ::
+                p = parser_advance(p)  // skip ::
                 let ta_pair = p.parse_type_args()
                 p = ta_pair.0
                 e.type_args = Some(Box::new(ta_pair.1))
             }
-            parser_store_expr_box(Box::new(e))
+            var lhs = Box::new(e)
+            while !parser_at_eof(p) {
+                let post_code = pt_read_kind_code(p.pos)
+                if parser_peek(p) == TokenKind::LParen || post_code == 174 {
+                    if p.had_newline_before() { break }
+                    p = p.parse_call_expr_box(lhs)
+                    lhs = parser_take_expr_box()
+                } else if parser_peek(p) == TokenKind::LBracket || post_code == 178 {
+                    p = p.parse_index_expr_box(lhs)
+                    lhs = parser_take_expr_box()
+                } else if parser_peek(p) == TokenKind::Dot || post_code == 183 {
+                    p = p.parse_dot_expr_box(lhs)
+                    lhs = parser_take_expr_box()
+                } else {
+                    break
+                }
+            }
+            parser_store_expr_box(lhs)
             p
         }
     }
@@ -941,13 +1107,20 @@ impl Parser {
         var rev_fields_opt: Option<Box<StructFieldList>> = None
 
         while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            let field_span = p.current_span()
             let field_name = p.current_name()
             p = p.expect_ident()
-            p = p.expect(TokenKind::Colon)
-            p = p.parse_expr()
-            let field_val_box = parser_take_expr_box()
+            var field_value = mk_expr(ExprKind::ExprIdent, field_span)
+            if parser_peek(p) == TokenKind::Colon {
+                p = p.advance()
+                p = p.parse_expr()
+                let field_val_box = parser_take_expr_box()
+                field_value = *field_val_box
+            } else {
+                field_value.name = field_name
+            }
 
-            let field = StructFieldInit { name: field_name, value: *field_val_box }
+            let field = StructFieldInit { name: field_name, value: field_value }
             rev_fields_opt = Some(Box::new(StructFieldList { head: field, tail: rev_fields_opt }))
 
             if parser_peek(p) == TokenKind::Comma {
@@ -974,8 +1147,21 @@ impl Parser {
 
         if parser_peek(p) == TokenKind::Ident && parser_peek_ahead(p, 1) == TokenKind::Colon {
             label = p.current_name()
-            p = p.advance()
+            p = parser_advance(p)
             p = p.expect(TokenKind::Colon)
+        } else if parser_peek(p) == TokenKind::Ident && parser_peek_ahead(p, 1) == TokenKind::Eq {
+            label = p.current_name()
+            p = parser_advance(p)
+            p = p.expect(TokenKind::Eq)
+        } else if parser_peek(p) == TokenKind::Error {
+            label = p.current_name()
+            p = parser_advance(p)
+            while parser_peek(p) == TokenKind::Error {
+                p = parser_advance(p)
+            }
+            if parser_peek(p) == TokenKind::Eq || parser_assign_op_code(p) == 0 {
+                p = parser_advance(p)
+            }
         }
         p = p.parse_expr()
         let expr_box = parser_take_expr_box()
@@ -985,7 +1171,7 @@ impl Parser {
 
     fn parse_call_expr_box(self, callee: Box<Expr>) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = callee.span
-        var p = self.advance()  // skip (
+        var p = parser_advance(self)  // skip (
 
         var args_opt: Option<Box<ExprList>> = None
 
@@ -1008,7 +1194,11 @@ impl Parser {
             args_opt = reverse_expr_list_opt(rev_list_opt)
         }
 
-        p = p.expect(TokenKind::RParen)
+        if parser_peek(p) == TokenKind::RParen || pt_read_kind_code(p.pos) == 175 {
+            p = parser_advance(p)
+        } else {
+            p = p.expect(TokenKind::RParen)
+        }
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprCall, span)
         e.type_args = callee.type_args
@@ -1053,14 +1243,14 @@ impl Parser {
 
     fn parse_dot_expr_box(self, base: Box<Expr>) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = base.span
-        var p = self.advance()  // skip .
+        var p = parser_advance(self)  // skip .
         let name = p.current_name()
-        p = p.advance()  // skip field/method name
+        p = parser_advance(p)  // skip field/method name
 
         // Turbofish on method: base.method::<T>(args)
         var method_type_args: Option<Box<TypeExprList>> = None
         if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::Lt {
-            p = p.advance()  // skip ::
+            p = parser_advance(p)  // skip ::
             let ta_pair = p.parse_type_args()
             p = ta_pair.0
             method_type_args = Some(Box::new(ta_pair.1))
@@ -1068,7 +1258,7 @@ impl Parser {
 
         if parser_peek(p) == TokenKind::LParen {
             // Method call: base.method(args) or base.method::<T>(args)
-            p = p.advance()  // skip (
+            p = parser_advance(p)  // skip (
             var args_opt: Option<Box<ExprList>> = None
 
             if parser_peek(p) != TokenKind::RParen {
@@ -1078,7 +1268,7 @@ impl Parser {
                 var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(*first))
 
                 while parser_peek(p) == TokenKind::Comma {
-                    p = p.advance()
+                    p = parser_advance(p)
                     if parser_peek(p) == TokenKind::RParen { break }
                     let pair2 = p.parse_call_arg_expr()
                     p = pair2.0

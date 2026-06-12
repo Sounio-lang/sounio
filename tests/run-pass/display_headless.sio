@@ -1,0 +1,108 @@
+// tests/run-pass/display_headless.sio — Headless canvas smoke test
+//
+// Exercises stdlib/display/canvas + stdlib/display/font without opening
+// a window, writing pixels to a heap buffer and verifying values.
+//
+// Expected output:
+//   DISPLAY_HEADLESS_PASS
+//   exit 0
+
+use display::canvas::{Canvas, canvas_clear, canvas_set_pixel, canvas_fill_rect,
+                       canvas_draw_line, canvas_draw_circle, canvas_fill_circle,
+                       canvas_draw_char, canvas_draw_text}
+use display::font::{font_glyph, font_draw_char}
+
+fn make_headless_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn read_pixel(c: &Canvas, x: i64, y: i64) -> i64 {
+    read_i64(c.pixels, y * c.width + x)
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    let w: i64 = 128
+    let h: i64 = 128
+    var c = make_headless_canvas(w, h)
+
+    // 1. canvas_clear
+    canvas_clear(&!c, 10, 20, 30)
+    let p0 = read_pixel(&c, 0, 0)
+    let expected_clear = 30 | (20 << 8) | (10 << 16)
+    assert(p0 == expected_clear)
+
+    // 2. canvas_set_pixel
+    canvas_set_pixel(&!c, 64, 64, 255, 0, 0)
+    let p1 = read_pixel(&c, 64, 64)
+    let expected_red = 0 | (0 << 8) | (255 << 16)
+    assert(p1 == expected_red)
+
+    // 3. canvas_fill_rect — paint a 10×10 blue square at (5,5)
+    canvas_fill_rect(&!c, 5, 5, 10, 10, 0, 0, 255)
+    let corner = read_pixel(&c, 5, 5)
+    let expected_blue = 255 | (0 << 8) | (0 << 16)
+    assert(corner == expected_blue)
+    // Pixel just outside rect should still be clear background
+    let outside = read_pixel(&c, 15, 15)
+    assert(outside == expected_clear)
+
+    // 4. canvas_draw_line — draws at least one pixel along y=0 row
+    canvas_clear(&!c, 0, 0, 0)
+    canvas_draw_line(&!c, 0, 50, 127, 50, 200, 150, 100)
+    let line_px = read_pixel(&c, 64, 50)
+    let expected_line = 100 | (150 << 8) | (200 << 16)
+    assert(line_px == expected_line)
+
+    // 5. canvas_draw_circle — centre pixel won't be filled; check a nearby spoke
+    canvas_clear(&!c, 0, 0, 0)
+    canvas_draw_circle(&!c, 64, 64, 20, 0, 255, 0)
+    // The top-most point of the circle should be colored
+    let top = read_pixel(&c, 64, 44)
+    let expected_green = 0 | (255 << 8) | (0 << 16)
+    assert(top == expected_green)
+
+    // 6. canvas_fill_circle — centre pixel and nearby are filled
+    canvas_clear(&!c, 0, 0, 0)
+    canvas_fill_circle(&!c, 64, 64, 10, 255, 128, 0)
+    // Centre pixel must be filled
+    let circ_center = read_pixel(&c, 64, 64)
+    let expected_orange = 0 | (128 << 8) | (255 << 16)
+    assert(circ_center == expected_orange)
+    // Pixel well outside the radius must be unfilled
+    let circ_outside = read_pixel(&c, 0, 0)
+    assert(circ_outside == 0)
+
+    // 7. font_glyph non-zero for printable char
+    let g_a = font_glyph(65)  // 'A'
+    assert(g_a != 0)
+    let g_space = font_glyph(32)  // ' '
+    assert(g_space == 0)
+
+    // 8. font_draw_char writes some pixels
+    canvas_clear(&!c, 0, 0, 0)
+    font_draw_char(c.pixels, w, h, 65, 0, 0, 255, 255, 255)  // 'A'
+    // At least the top row of 'A' glyph (bits 7-0 = row 0) should have pixels
+    // Row 0 of 'A' glyph = 0x1C (from packed i64); check pixel at (2,0) which is bit 5
+    let glyph_a = font_glyph(65)
+    let row0 = glyph_a & 0xFF
+    // Rather than hard-code bit positions, just check that at least one pixel in
+    // the 8×8 box is white:
+    var found_white = false
+    var gy: i64 = 0
+    while gy < 8 {
+        var gx: i64 = 0
+        while gx < 8 {
+            let px = read_pixel(&c, gx, gy)
+            if px != 0 {
+                found_white = true
+            }
+            gx = gx + 1
+        }
+        gy = gy + 1
+    }
+    assert(found_white)
+
+    heap_free(c.pixels as *mut i8)
+    println("DISPLAY_HEADLESS_PASS")
+}

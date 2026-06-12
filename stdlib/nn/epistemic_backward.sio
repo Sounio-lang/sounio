@@ -65,12 +65,10 @@ pub struct EpistemicLayerGrad {
     input_delta: EpistemicVec4,
 }
 
-fn elgrad_zero() -> EpistemicLayerGrad {
-    EpistemicLayerGrad {
-        weight_grad: emat4_zeros(),
-        bias_grad: evec4_zeros(),
-        input_delta: evec4_zeros(),
-    }
+pub fn epistemic_layer_grad_zero(out: &!EpistemicLayerGrad) with Mut, Panic {
+    out.weight_grad = emat4_zeros()
+    out.bias_grad = evec4_zeros()
+    out.input_delta = evec4_zeros()
 }
 
 // =============================================================================
@@ -83,12 +81,12 @@ fn elgrad_zero() -> EpistemicLayerGrad {
 // =============================================================================
 
 fn epistemic_act_backward(
+    out: &!EpistemicVec4,
     act: i32,
     pre_act: &EpistemicVec4,
     forward_out: &EpistemicVec4,
     upstream: &EpistemicVec4,
-) -> EpistemicVec4 with Mut, Div, Panic {
-    var delta = evec4_zeros()
+) with Mut, Div, Panic {
     var k = 0
     while k < 4 {
         let z = pre_act.values[k]
@@ -97,29 +95,23 @@ fn epistemic_act_backward(
         let c_up = upstream.confidences[k]
         let up_val = upstream.values[k]
 
-        // Compute activation gate (derivative)
         var gate: f64 = 1.0
         if act == ACT_RELU() {
             if z > 0.0 { gate = 1.0 } else { gate = 0.0 }
         } else if act == ACT_SIGMOID() {
-            // σ'(z) = σ(z)(1 - σ(z))
             gate = a * (1.0 - a)
         } else if act == ACT_TANH() {
-            // tanh'(z) = 1 - tanh²(z)
             gate = 1.0 - a * a
         } else {
-            // identity: gate = 1
             gate = 1.0
         }
 
-        delta.values[k] = gate * up_val
-        // GUM: u²(δz) = gate² * u²(upstream)
-        delta.uncertainties[k] = bk_abs(gate) * u_up
-        delta.confidences[k] = c_up
+        out.values[k] = gate * up_val
+        out.uncertainties[k] = bk_abs(gate) * u_up
+        out.confidences[k] = c_up
 
         k = k + 1
     }
-    delta
 }
 
 // =============================================================================
@@ -139,20 +131,20 @@ fn epistemic_act_backward(
 // =============================================================================
 
 pub fn epistemic_dense_backward(
+    out: &!EpistemicLayerGrad,
     layer: &EpistemicDenseLayer4,
     input: &EpistemicVec4,
     pre_activation: &EpistemicVec4,
     forward_out: &EpistemicVec4,
     upstream: &EpistemicVec4,
-) -> EpistemicLayerGrad with Mut, Div, Panic {
-    var grad = elgrad_zero()
+) with Mut, Div, Panic {
+    epistemic_layer_grad_zero(out)
 
-    // Step 1: gate upstream through activation derivative
-    let delta_z = epistemic_act_backward(
-        layer.activation, pre_activation, forward_out, upstream
+    var delta_z = evec4_zeros()
+    epistemic_act_backward(
+        &!delta_z, layer.activation, pre_activation, forward_out, upstream
     )
 
-    // Step 2: weight gradients  ∂L/∂W[k,j] = δ_z[k] * x[j]
     var k = 0
     while k < 4 {
         let dz_val = delta_z.values[k]
@@ -160,9 +152,9 @@ pub fn epistemic_dense_backward(
         let dz_conf = delta_z.confidences[k]
 
         // bias gradient
-        grad.bias_grad.values[k] = dz_val
-        grad.bias_grad.uncertainties[k] = dz_unc
-        grad.bias_grad.confidences[k] = dz_conf
+        out.bias_grad.values[k] = dz_val
+        out.bias_grad.uncertainties[k] = dz_unc
+        out.bias_grad.confidences[k] = dz_conf
 
         var jj = 0
         while jj < 4 {
@@ -176,7 +168,7 @@ pub fn epistemic_dense_backward(
             let wg_unc = bk_sqrt(u2)
             let wg_conf = bk_min(dz_conf, x_conf)
 
-            emat4_set(&grad.weight_grad, k, jj, wg_val, wg_unc, wg_conf)
+            emat4_set(&!out.weight_grad, k, jj, wg_val, wg_unc, wg_conf)
             jj = jj + 1
         }
         k = k + 1
@@ -206,14 +198,12 @@ pub fn epistemic_dense_backward(
             k2 = k2 + 1
         }
 
-        grad.input_delta.values[jj2] = sum_val
-        grad.input_delta.uncertainties[jj2] = bk_sqrt(sum_unc2)
-        grad.input_delta.confidences[jj2] = min_conf
+        out.input_delta.values[jj2] = sum_val
+        out.input_delta.uncertainties[jj2] = bk_sqrt(sum_unc2)
+        out.input_delta.confidences[jj2] = min_conf
 
         jj2 = jj2 + 1
     }
-
-    grad
 }
 
 // =============================================================================
@@ -258,7 +248,7 @@ pub fn epistemic_dense_update(
             let new_unc = bk_sqrt(new_unc2)
             let new_conf = bk_min(old_w_conf, gw_conf)
 
-            emat4_set(&layer.weights, k, j, new_w, new_unc, new_conf)
+            emat4_set(&!layer.weights, k, j, new_w, new_unc, new_conf)
             j = j + 1
         }
         k = k + 1
@@ -280,16 +270,14 @@ pub fn mse_loss(output: &EpistemicVec4, target: &EpistemicVec4) -> f64 {
     s / 4.0
 }
 
-pub fn mse_gradient(output: &EpistemicVec4, target: &EpistemicVec4) -> EpistemicVec4 {
-    var g = evec4_zeros()
+pub fn mse_gradient(out: &!EpistemicVec4, output: &EpistemicVec4, target: &EpistemicVec4) with Mut {
     var i = 0
     while i < 4 {
-        g.values[i] = (output.values[i] - target.values[i]) * 2.0 / 4.0
-        g.uncertainties[i] = output.uncertainties[i]
-        g.confidences[i] = output.confidences[i]
+        out.values[i] = (output.values[i] - target.values[i]) * 2.0 / 4.0
+        out.uncertainties[i] = output.uncertainties[i]
+        out.confidences[i] = output.confidences[i]
         i = i + 1
     }
-    g
 }
 
 // =============================================================================
@@ -315,9 +303,9 @@ fn test_act_backward_relu() with Mut, Div, Panic {
         0.5, 0.02, 0.98,
         0.5, 0.02, 0.98,
     )
-    let delta = epistemic_act_backward(ACT_RELU(), &pre, &fwd, &upstream)
+    var delta = evec4_zeros()
+    epistemic_act_backward(&!delta, ACT_RELU(), &pre, &fwd, &upstream)
 
-    // Positive pre-activation: passes through
     assert(delta.values[0] > 0.49 && delta.values[0] < 0.51)
     // Negative pre-activation: gated to zero
     assert(delta.values[1] == 0.0)
@@ -326,7 +314,8 @@ fn test_act_backward_relu() with Mut, Div, Panic {
 
 fn test_backward_identity_layer() with Mut, Div, Panic {
 
-    var layer = epistemic_dense_identity()
+    var layer: EpistemicDenseLayer4
+    epistemic_dense_identity(&!layer)
     let input = evec4_from_epistemic(
         1.0, 0.05, 0.95,
         0.5, 0.025, 0.97,
@@ -336,22 +325,28 @@ fn test_backward_identity_layer() with Mut, Div, Panic {
     let target = evec4_from_values(0.6, 0.4, 0.0, 0.0)
 
     // Forward pass (identity activation)
-    let output = epistemic_dense_forward(&layer, &input)
+    var output = evec4_zeros()
+    epistemic_dense_forward(&!output, &layer, &input)
     let loss_before = mse_loss(&output, &target)
 
     // Compute upstream gradient
-    let upstream = mse_gradient(&output, &target)
+    var upstream = evec4_zeros()
+    mse_gradient(&!upstream, &output, &target)
 
     // Backward: pre_activation = output (identity)
-    let grad = epistemic_dense_backward(
-        &layer, &input, &output, &output, &upstream
+    var grad: EpistemicLayerGrad
+    grad.weight_grad = emat4_zeros()
+    grad.bias_grad = evec4_zeros()
+    grad.input_delta = evec4_zeros()
+    epistemic_dense_backward(
+        &!grad, &layer, &input, &output, &output, &upstream
     )
 
-    // Update weights
-    epistemic_dense_update(&layer, &grad, 0.1)
+    epistemic_dense_update(&!layer, &grad, 0.1)
 
     // Forward pass again
-    let output2 = epistemic_dense_forward(&layer, &input)
+    var output2 = evec4_zeros()
+    epistemic_dense_forward(&!output2, &layer, &input)
     let loss_after = mse_loss(&output2, &target)
 
     // Loss should decrease
@@ -362,7 +357,7 @@ fn test_backward_identity_layer() with Mut, Div, Panic {
     assert(w00_unc_new >= 0.0)
 }
 
-pub fn main() with IO, Mut, Div, Panic {
+pub fn epistemic_backward_unit_tests_main() with IO, Mut, Div, Panic {
     test_act_backward_relu()
     test_backward_identity_layer()
     println("PASS: epistemic backward pass")

@@ -1,0 +1,334 @@
+// examples/viz_pbpk/main.sio — PK uncertainty visualization demo
+//
+// Two-panel display:
+//   Top (y 20-210): plasma concentration C(t) with 3 nested HDI ribbons (50/80/95%)
+//   Bottom (y 240-430): epistemic waterfall for key PK parameters
+//
+// Model: 1-compartment IV bolus  C(t) = (D/Vd)*exp(-(CL/Vd)*t)
+//   D=5mg, Vd=50L, CL=10L/h → ke=0.2h^-1, C0=0.1mg/L
+//   GUM uncertainty: σD=15%·D, σVd=30%·Vd, σCL=25%·CL
+//   σ²(C) = (1/Vd·e^{-ke·t})²σ²D + (-D/Vd²·e^{-ke·t}·(1+ke·t))²σ²Vd + (D·t/Vd²)²·e^{-2ke·t}·σ²CL
+//   (GUM first-order approximation)
+// HDI bounds: median ± z·σ where z=0.674(50%), 1.282(80%), 1.960(95%)
+//
+// Press ESC or close to exit.
+
+use display::window::{Window, window_open, window_set_title, window_present, window_pending,
+                       window_next_event, window_close}
+use display::canvas::{Canvas, canvas_from_window, canvas_clear}
+use display::event::{EV_CLOSE, EV_KEY_PRESS}
+use viz::coord::{CoordSystem, coord_new, coord_draw_axes, coord_draw_grid, coord_draw_frame,
+                  coord_map_x, coord_map_y}
+use viz::chart::{chart_uncertainty_band}
+use viz::epiviz::{epiviz_waterfall}
+use display::canvas_ext::{canvas_blend_pixel, canvas_draw_line_aa, canvas_sphere_shaded,
+                           canvas_bloom, canvas_fxaa}
+use display::canvas::{canvas_fill_rect}
+
+// ============================================================
+// Math helpers
+// ============================================================
+
+fn vpk_exp_neg(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 1.0 }
+    let e1: f64 = 0.36787944117
+    let ipart = x as i64
+    let frac = x - (ipart as f64)
+    var r = 1.0
+    var term = 1.0
+    var k: i64 = 1
+    while k <= 12 {
+        term = 0.0 - term * frac / (k as f64)
+        r = r + term
+        k = k + 1
+    }
+    if r < 0.0 { r = 0.0 }
+    var em: i64 = 0
+    while em < ipart {
+        r = r * e1
+        em = em + 1
+    }
+    r
+}
+
+fn vpk_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// ============================================================
+// PK curve + GUM uncertainty arrays
+// ============================================================
+
+fn pk_fill_arrays(
+    xs: &![f64; 1024],
+    med: &![f64; 1024],
+    lo95: &![f64; 1024], hi95: &![f64; 1024],
+    lo80: &![f64; 1024], hi80: &![f64; 1024],
+    lo50: &![f64; 1024], hi50: &![f64; 1024],
+    n: i64,
+) with Mut, Div {
+    let dose: f64 = 5.0
+    let vd: f64 = 50.0
+    let cl: f64 = 10.0
+    let ke = cl / vd
+    let c0 = dose / vd
+    // GUM coefficient standard deviations
+    let s_d  = 0.15 * dose
+    let s_vd = 0.30 * vd
+    let s_cl = 0.25 * cl
+    let t_max: f64 = 24.0
+    var i: i64 = 0
+    while i < n {
+        let t = t_max * (i as f64) / ((n - 1) as f64)
+        let ekt = vpk_exp_neg(ke * t)
+        let ct = c0 * ekt
+        // GUM sensitivities
+        let dc_dd  = ekt / vd
+        let dc_dvd = 0.0 - ct / vd * (1.0 + ke * t)
+        let dc_dcl = 0.0 - ct * t / vd
+        let var_c = dc_dd*dc_dd*s_d*s_d + dc_dvd*dc_dvd*s_vd*s_vd + dc_dcl*dc_dcl*s_cl*s_cl
+        let sigma = vpk_sqrt(var_c)
+        xs[i as usize]   = t
+        med[i as usize]  = ct
+        lo95[i as usize] = ct - 1.960 * sigma
+        hi95[i as usize] = ct + 1.960 * sigma
+        lo80[i as usize] = ct - 1.282 * sigma
+        hi80[i as usize] = ct + 1.282 * sigma
+        lo50[i as usize] = ct - 0.674 * sigma
+        hi50[i as usize] = ct + 0.674 * sigma
+        i = i + 1
+    }
+}
+
+// ============================================================
+// VPC panel — Visual Predictive Check
+// ============================================================
+//
+// Standard clinical PK/PD display (Bergstrand et al. 2011, pcVPC).
+// Shows simulated PI outer bands (blue) + median band (red) +
+// observed median (solid red) + observed outer bounds (dashed red).
+//
+// Reuses lo95/hi95/med arrays as 2.5th/97.5th/50th simulated percentiles.
+
+fn vpc_draw_dashed_line(
+    c: &!Canvas,
+    sx0: i64, sy0: i64, sx1: i64, sy1: i64,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    let dx = sx1 - sx0
+    let dy = sy1 - sy0
+    let steps = if dx < 0 { 0 - dx } else { dx }
+    let ysteps = if dy < 0 { 0 - dy } else { dy }
+    let n_steps = if steps > ysteps { steps } else { ysteps }
+    if n_steps == 0 { return }
+    var si: i64 = 0
+    while si <= n_steps {
+        // Dashed: draw 4px, skip 4px
+        if (si % 8) < 4 {
+            let t = (si as f64) / (n_steps as f64)
+            let bx = sx0 + ((sx1 - sx0) as f64 * t) as i64
+            let by_v = sy0 + ((sy1 - sy0) as f64 * t) as i64
+            canvas_fill_rect(c, bx, by_v, 1, 1, r, g, b)
+        }
+        si = si + 1
+    }
+}
+
+fn vpc_draw_panel(
+    cs: &CoordSystem,
+    xs: &[f64; 1024],
+    lo95: &[f64; 1024], hi95: &[f64; 1024],
+    lo50: &[f64; 1024], hi50: &[f64; 1024],
+    med: &[f64; 1024],
+    n: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n < 2 { return }
+    var i: i64 = 0
+    // Blue outer PI bands (2.5th and 97.5th)
+    while i < n - 1 {
+        let sx0 = coord_map_x(cs, xs[i as usize])
+        let sx1 = coord_map_x(cs, xs[(i + 1) as usize])
+        // lo95 band bottom (2.5th percentile vicinity ≈ lo95 band fill)
+        let lo_y0 = coord_map_y(cs, lo95[i as usize])
+        let lo_y1 = coord_map_y(cs, lo95[(i + 1) as usize])
+        let hi_y0 = coord_map_y(cs, hi95[i as usize])
+        let hi_y1 = coord_map_y(cs, hi95[(i + 1) as usize])
+        // Outer PI region: from lo95 edge toward the median on each side
+        if sx1 > sx0 {
+            let span = sx1 - sx0
+            var px = sx0
+            while px < sx1 {
+                let t = ((px - sx0) as f64) / (span as f64)
+                let top_y = (lo_y0 as f64 * (1.0 - t) + lo_y1 as f64 * t) as i64
+                canvas_blend_pixel(c, px, top_y, 60, 120, 220, 70)
+                canvas_blend_pixel(c, px, top_y - 1, 60, 120, 220, 40)
+                let bot_y = (hi_y0 as f64 * (1.0 - t) + hi_y1 as f64 * t) as i64
+                canvas_blend_pixel(c, px, bot_y, 60, 120, 220, 70)
+                canvas_blend_pixel(c, px, bot_y + 1, 60, 120, 220, 40)
+                px = px + 1
+            }
+        }
+        i = i + 1
+    }
+    // Red median PI band (50th percentile band)
+    var j: i64 = 0
+    while j < n - 1 {
+        let sx0 = coord_map_x(cs, xs[j as usize])
+        let sx1 = coord_map_x(cs, xs[(j + 1) as usize])
+        let lo_y0 = coord_map_y(cs, lo50[j as usize])
+        let lo_y1 = coord_map_y(cs, lo50[(j + 1) as usize])
+        let hi_y0 = coord_map_y(cs, hi50[j as usize])
+        let hi_y1 = coord_map_y(cs, hi50[(j + 1) as usize])
+        if sx1 > sx0 {
+            let span = sx1 - sx0
+            var px = sx0
+            while px < sx1 {
+                let t = ((px - sx0) as f64) / (span as f64)
+                let top_y = (lo_y0 as f64 * (1.0 - t) + lo_y1 as f64 * t) as i64
+                let bot_y = (hi_y0 as f64 * (1.0 - t) + hi_y1 as f64 * t) as i64
+                var py = top_y
+                while py <= bot_y {
+                    canvas_blend_pixel(c, px, py, 220, 60, 60, 85)
+                    py = py + 1
+                }
+                px = px + 1
+            }
+        }
+        j = j + 1
+    }
+    // Observed median — solid red line
+    var k: i64 = 0
+    while k < n - 1 {
+        let sx0 = coord_map_x(cs, xs[k as usize])
+        let sy0 = coord_map_y(cs, med[k as usize])
+        let sx1 = coord_map_x(cs, xs[(k + 1) as usize])
+        let sy1 = coord_map_y(cs, med[(k + 1) as usize])
+        canvas_draw_line_aa(c, sx0, sy0, sx1, sy1, 240, 80, 80)
+        k = k + 1
+    }
+    // Observed 2.5th + 97.5th — dashed red
+    var m: i64 = 0
+    while m < n - 1 {
+        let sx0 = coord_map_x(cs, xs[m as usize])
+        let sx1 = coord_map_x(cs, xs[(m + 1) as usize])
+        vpc_draw_dashed_line(c,
+            sx0, coord_map_y(cs, lo95[m as usize]),
+            sx1, coord_map_y(cs, lo95[(m + 1) as usize]),
+            200, 100, 100)
+        vpc_draw_dashed_line(c,
+            sx0, coord_map_y(cs, hi95[m as usize]),
+            sx1, coord_map_y(cs, hi95[(m + 1) as usize]),
+            200, 100, 100)
+        m = m + 1
+    }
+    // Simulated data points — small blue dots at each x along the median
+    var di: i64 = 0
+    while di < n {
+        let sx = coord_map_x(cs, xs[di as usize])
+        let sy = coord_map_y(cs, med[di as usize])
+        canvas_sphere_shaded(c, sx, sy, 3, 80, 140, 220)
+        di = di + 1
+    }
+}
+
+// ============================================================
+// Main
+// ============================================================
+
+fn main() with IO, Alloc, Mut, Div {
+    let W: i64 = 640
+    let H: i64 = 480
+    let bloom_scratch = heap_alloc(W * H * 8) as *mut i64
+
+    var title: [i8; 128] = [0; 128]
+    title[0]  = 80   // P
+    title[1]  = 75   // K
+    title[2]  = 32   //
+    title[3]  = 85   // U
+    title[4]  = 110  // n
+    title[5]  = 99   // c
+    title[6]  = 101  // e
+    title[7]  = 114  // r
+    title[8]  = 116  // t
+    title[9]  = 97   // a
+    title[10] = 105  // i
+    title[11] = 110  // n
+    title[12] = 116  // t
+    title[13] = 121  // y
+    let title_len: i64 = 14
+
+    var win = window_open(W, H)
+    window_set_title(&!win, &title, title_len)
+
+    // Precompute PK arrays (constant — no sliders in this demo)
+    let n_pts: i64 = 60
+    var xs:   [f64; 1024] = [0.0; 1024]
+    var med:  [f64; 1024] = [0.0; 1024]
+    var lo95: [f64; 1024] = [0.0; 1024]
+    var hi95: [f64; 1024] = [0.0; 1024]
+    var lo80: [f64; 1024] = [0.0; 1024]
+    var hi80: [f64; 1024] = [0.0; 1024]
+    var lo50: [f64; 1024] = [0.0; 1024]
+    var hi50: [f64; 1024] = [0.0; 1024]
+    pk_fill_arrays(&!xs, &!med, &!lo95, &!hi95, &!lo80, &!hi80, &!lo50, &!hi50, n_pts)
+
+    // Three-panel layout: HDI band (top) | VPC (middle) | waterfall (bottom)
+    let cs_top = coord_new(0.0, 24.0, 0.0, 0.14, 60, 12, 560, 140)
+    let cs_vpc = coord_new(0.0, 24.0, 0.0, 0.14, 60, 168, 560, 130)
+    let cs_bot = coord_new(0.0, 1.0, 0.0, 4.0, 60, 315, 560, 148)
+    var confs: [i64; 64] = [0; 64]
+    confs[0] = 950   // D  — well controlled (analytical balance)
+    confs[1] = 720   // Vd — moderate uncertainty (population estimate)
+    confs[2] = 780   // CL — moderate uncertainty (creatinine-based)
+    confs[3] = 860   // ke — derived from CL/Vd, moderate
+
+    var running = true
+    while running {
+        while window_pending(&!win) > 0 {
+            let ev = window_next_event(&!win)
+            if ev.kind == EV_CLOSE { running = false }
+            if ev.kind == EV_KEY_PRESS && ev.key == 27 { running = false }
+        }
+
+        var c = canvas_from_window(&!win)
+        canvas_clear(&!c, 18, 20, 30)
+
+        // Top panel: HDI uncertainty band + median line
+        coord_draw_grid(&cs_top, &!c, 5)
+        coord_draw_axes(&cs_top, &!c)
+        chart_uncertainty_band(&cs_top,
+            &xs,
+            &lo95, &hi95,
+            &lo80, &hi80,
+            &lo50, &hi50,
+            &med,
+            n_pts, &!c,
+            80, 160, 255)
+
+        // Middle panel: VPC (Visual Predictive Check)
+        coord_draw_frame(&cs_vpc, &!c)
+        vpc_draw_panel(&cs_vpc, &xs, &lo95, &hi95, &lo50, &hi50, &med, n_pts, &!c)
+
+        // Bottom panel: parameter confidence waterfall
+        coord_draw_frame(&cs_bot, &!c)
+        epiviz_waterfall(&cs_bot, &confs, 4, &!c)
+
+        // Bloom: threshold=195 highlights the bright sphere dots + median line
+        canvas_bloom(&!c, bloom_scratch, 195, 160)
+        // FXAA: smooth jagged edges on chart lines
+        canvas_fxaa(&!c, bloom_scratch)
+
+        window_present(&!win)
+    }
+
+    heap_free(bloom_scratch as *mut i8)
+    window_close(&!win)
+}

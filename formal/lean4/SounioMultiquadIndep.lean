@@ -978,4 +978,430 @@ theorem sqrt11_not_in_Q_sqrt3_sqrt5 :
 
 #print axioms sqrt11_not_in_Q_sqrt3_sqrt5
 
+/-! ## 8. LEVA A — the `ℚ(√3,√5)` multiplication and the iterated subfield inverse.
+
+    This section adds the fifth generator `√11` (`rootR 3`, `primeNatLit 3 = 11`), the **general**
+    bilinear product `E_mul35` over the basis `{1,√3,√5,√15}` (the non-diagonal analogue of the
+    squared-norm `E_sq4`), the nonzero-norm helper `M35_components_ne_zero`, and the **iterated**
+    `ℚ(√3,√5)` inverse `Q35_inv`, built by reducing to the quadratic subfield `ℚ(√5)` via the
+    conjugate `B·B̄ = M ∈ ℚ(√5)` and the in-file `Q5_inv`. LEVA B consumes these by name. -/
+
+-- Verify every external/earlier name reused below.
+#check @rootR
+#check @rootR_sq
+#check @primeNatLit
+#check @rfOfNat_real
+#check @qR
+#check @qR_add
+#check @qR_mul
+#check @qR_zero
+#check @qR_one
+#check @qR_neg
+#check @qR_inj
+#check @zeroR'_mul
+#check @addR_zero
+#check @addR_assoc
+#check @addR_comm
+#check @addR_swap4
+#check @addR_regroup_ad
+#check @mulR_assoc
+#check @mulR_comm
+#check @mulR_one
+#check @leftDistribR
+#check @rightDistribR
+#check @R3_sq
+#check @R5_sq
+#check @R15
+#check @R15_def
+#check @alpha4
+#check @E_mul
+#check @E_mul5
+#check @E5_sq
+#check @E_sq4
+#check @Q5_inv
+#check @N5_ne_zero
+#check @Qsqrt5_no_zero_div
+#check @not_R3_in_Q5
+#check @sqrt3_not_in_Q_sqrt5
+#check @sqrt11_not_in_Q_sqrt3_sqrt5
+#check @rat_of_two_mul_zero
+#check @eq_add_of_sub_eq
+#check @add_swap4
+
+/-! ### 8.1. `√11` and `√11 ∉ ℚ(√3,√5)`. -/
+
+/-- `(√11)² = 11` in the quotient reals: `rootR_sq 3` collapsed through `rfOfNat_real`
+    (`primeNatLit 3 = 11`). Copy of `R5_sq` at index `3`. -/
+theorem R11_sq : mulR (rootR 3) (rootR 3) = qR 11 := by
+  rw [rootR_sq 3, rfOfNat_real (primeNatLit 3)]
+  have H : rfOfNat Rat.add 0 1 (primeNatLit 3) = (11 : Rat) := by native_decide
+  show mkR (SounioRealCauchy.ofRat (rfOfNat Rat.add 0 1 (primeNatLit 3)))
+      = mkR (SounioRealCauchy.ofRat (11 : Rat))
+  rw [H]
+
+/-- **`√11 ∉ ℚ(√3,√5)` (membership form).** No `alpha4 a b c d` equals `√11`; squaring such an
+    equality and applying `R11_sq` would land an `alpha4`-square equal to `11`, contradicting
+    `sqrt11_not_in_Q_sqrt3_sqrt5`. -/
+theorem not_R11_in_Q35 : ¬ ∃ a b c d : Rat, rootR 3 = alpha4 a b c d := by
+  intro hex
+  obtain ⟨a, b, c, d, h⟩ := hex
+  have hsq : mulR (alpha4 a b c d) (alpha4 a b c d) = qR 11 := by
+    rw [← h, R11_sq]
+  exact sqrt11_not_in_Q_sqrt3_sqrt5 ⟨a, b, c, d, hsq⟩
+
+#print axioms R11_sq
+#print axioms not_R11_in_Q35
+
+/-! ### 8.2. The general bilinear product `E_mul35` over `{1,√3,√5,√15}`. -/
+
+/-- **General `(u + v√5)(u' + v'√5)` formula** with `u, v, u', v'` arbitrary reals:
+    `(u + v√5)(u' + v'√5) = (uu' + 5vv') + (uv' + u'v)√5`. The bilinear analogue of `gen_sq5`. -/
+theorem gen_mul5 (u v u' v' : Real) :
+    mulR (addR u (mulR v (rootR 1))) (addR u' (mulR v' (rootR 1)))
+      = addR (addR (mulR u u') (mulR (qR 5) (mulR v v')))
+             (mulR (addR (mulR u v') (mulR u' v)) (rootR 1)) := by
+  have e2 : mulR u (mulR v' (rootR 1)) = mulR (mulR u v') (rootR 1) := by rw [← mulR_assoc]
+  have e3 : mulR (mulR v (rootR 1)) u' = mulR (mulR u' v) (rootR 1) := by
+    rw [mulR_comm (mulR v (rootR 1)) u', ← mulR_assoc]
+  have e4 : mulR (mulR v (rootR 1)) (mulR v' (rootR 1)) = mulR (qR 5) (mulR v v') := by
+    rw [mulR_assoc v (rootR 1) (mulR v' (rootR 1)), ← mulR_assoc (rootR 1) v' (rootR 1),
+        mulR_comm (rootR 1) v', mulR_assoc v' (rootR 1) (rootR 1), R5_sq,
+        mulR_comm v' (qR 5), ← mulR_assoc v (qR 5) v', mulR_comm v (qR 5),
+        mulR_assoc (qR 5) v v']
+  rw [rightDistribR, leftDistribR, leftDistribR, e2, e3, e4, addR_regroup_ad,
+      ← rightDistribR (mulR u v') (mulR u' v) (rootR 1)]
+
+/-- **The general product in `ℚ(√3,√5)` over the basis `{1, √3, √5, √15}`.**
+
+    `(a + b√3 + c√5 + d√15)(e + f√3 + g√5 + h√15)` expands, using `√3²=3`, `√5²=5`, `√15²=15`,
+    `√3√5=√15`, `√3√15=3√5`, `√5√15=5√3`, to
+    `(ae+3bf+5cg+15dh) + (af+be+5ch+5dg)√3 + (ag+ce+3bh+3df)√5 + (ah+bg+cf+de)√15`.
+
+    Proof route (no `ring`): write each factor as `U + V√5` (`U=a+b√3`, `V=c+d√3`; `U'=e+f√3`,
+    `V'=g+h√3`) like `E_sq4`; multiply via the bilinear `gen_mul5`; expand the four `ℚ(√3)`
+    products `UU'`, `VV'`, `UV'`, `U'V` with `E_mul`; collect basis buckets with `addR_swap4`,
+    `rightDistribR`, `qR_add`, closing the rational coefficient arithmetic with explicit `Rat`
+    lemma chains (`hC1`/`hC3`/`hC5`/`hC15`). Specialising `e=a,f=b,g=c,h=d` recovers `E_sq4`. -/
+theorem E_mul35 (a b c d e f g h : Rat) :
+    mulR (alpha4 a b c d) (alpha4 e f g h)
+      = alpha4 (a*e + 3*(b*f) + 5*(c*g) + 15*(d*h))
+               (a*f + b*e + 5*(c*h) + 5*(d*g))
+               (a*g + c*e + 3*(b*h) + 3*(d*f))
+               (a*h + b*g + c*f + d*e) := by
+  show mulR (alpha4 a b c d) (alpha4 e f g h)
+      = addR (addR (addR (qR (a*e + 3*(b*f) + 5*(c*g) + 15*(d*h)))
+                         (mulR (qR (a*f + b*e + 5*(c*h) + 5*(d*g))) (rootR 0)))
+                   (mulR (qR (a*g + c*e + 3*(b*h) + 3*(d*f))) (rootR 1)))
+             (mulR (qR (a*h + b*g + c*f + d*e)) R15)
+  have huL : alpha4 a b c d
+      = addR (addR (qR a) (mulR (qR b) (rootR 0)))
+             (mulR (addR (qR c) (mulR (qR d) (rootR 0))) (rootR 1)) := by
+    show addR (addR (addR (qR a) (mulR (qR b) (rootR 0))) (mulR (qR c) (rootR 1)))
+              (mulR (qR d) R15)
+        = addR (addR (qR a) (mulR (qR b) (rootR 0)))
+               (mulR (addR (qR c) (mulR (qR d) (rootR 0))) (rootR 1))
+    rw [R15_def, rightDistribR (qR c) (mulR (qR d) (rootR 0)) (rootR 1),
+        mulR_assoc (qR d) (rootR 0) (rootR 1), ← addR_assoc]
+  have huR : alpha4 e f g h
+      = addR (addR (qR e) (mulR (qR f) (rootR 0)))
+             (mulR (addR (qR g) (mulR (qR h) (rootR 0))) (rootR 1)) := by
+    show addR (addR (addR (qR e) (mulR (qR f) (rootR 0))) (mulR (qR g) (rootR 1)))
+              (mulR (qR h) R15)
+        = addR (addR (qR e) (mulR (qR f) (rootR 0)))
+               (mulR (addR (qR g) (mulR (qR h) (rootR 0))) (rootR 1))
+    rw [R15_def, rightDistribR (qR g) (mulR (qR h) (rootR 0)) (rootR 1),
+        mulR_assoc (qR h) (rootR 0) (rootR 1), ← addR_assoc]
+  have hA : mulR (qR 5) (addR (qR (c*g + 3*(d*h))) (mulR (qR (c*h + d*g)) (rootR 0)))
+      = addR (qR (5*(c*g + 3*(d*h)))) (mulR (qR (5*(c*h + d*g))) (rootR 0)) := by
+    rw [leftDistribR, qR_mul, ← mulR_assoc, qR_mul]
+  have hC1 : (a*e + 3*(b*f)) + 5*(c*g + 3*(d*h)) = a*e + 3*(b*f) + 5*(c*g) + 15*(d*h) := by
+    rw [Rat.mul_add, ← Rat.mul_assoc 5 3 (d*h),
+        show (5:Rat)*3 = 15 from by native_decide, ← Rat.add_assoc]
+  have hC3 : (a*f + b*e) + 5*(c*h + d*g) = a*f + b*e + 5*(c*h) + 5*(d*g) := by
+    rw [Rat.mul_add, ← Rat.add_assoc]
+  have hC5 : (a*g + 3*(b*h)) + (e*c + 3*(f*d)) = a*g + c*e + 3*(b*h) + 3*(d*f) := by
+    rw [Rat.mul_comm e c, Rat.mul_comm f d, add_swap4 (a*g) (3*(b*h)) (c*e) (3*(d*f)),
+        ← Rat.add_assoc (a*g + c*e) (3*(b*h)) (3*(d*f))]
+  have hC15 : (a*h + b*g) + (e*d + f*c) = a*h + b*g + c*f + d*e := by
+    rw [Rat.mul_comm e d, Rat.mul_comm f c, Rat.add_comm (d*e) (c*f),
+        ← Rat.add_assoc (a*h + b*g) (c*f) (d*e)]
+  have hPartA :
+      addR (addR (qR (a*e+3*(b*f))) (mulR (qR (a*f+b*e)) (rootR 0)))
+           (mulR (qR 5) (addR (qR (c*g+3*(d*h))) (mulR (qR (c*h+d*g)) (rootR 0))))
+        = addR (qR (a*e + 3*(b*f) + 5*(c*g) + 15*(d*h)))
+               (mulR (qR (a*f + b*e + 5*(c*h) + 5*(d*g))) (rootR 0)) := by
+    rw [hA, addR_swap4, qR_add, ← rightDistribR (qR (a*f+b*e)) (qR (5*(c*h+d*g))) (rootR 0),
+        qR_add, hC1, hC3]
+  have hPartB :
+      mulR (addR (addR (qR (a*g+3*(b*h))) (mulR (qR (a*h+b*g)) (rootR 0)))
+                 (addR (qR (e*c+3*(f*d))) (mulR (qR (e*d+f*c)) (rootR 0)))) (rootR 1)
+        = addR (mulR (qR (a*g + c*e + 3*(b*h) + 3*(d*f))) (rootR 1))
+               (mulR (qR (a*h + b*g + c*f + d*e)) (mulR (rootR 0) (rootR 1))) := by
+    rw [addR_swap4, qR_add, ← rightDistribR (qR (a*h+b*g)) (qR (e*d+f*c)) (rootR 0), qR_add,
+        hC5, hC15, rightDistribR, mulR_assoc (qR (a*h+b*g+c*f+d*e)) (rootR 0) (rootR 1)]
+  rw [huL, huR, gen_mul5, E_mul a b e f, E_mul c d g h, E_mul a b g h, E_mul e f c d,
+      hPartA, hPartB, ← R15_def, ← addR_assoc]
+
+#print axioms gen_mul5
+#print axioms E_mul35
+
+/-! ### 8.3. The zero element and the nonzero-`ℚ(√5)`-norm helper. -/
+
+/-- The all-zero `alpha4` is the additive zero. -/
+theorem alpha4_zero : alpha4 0 0 0 0 = zeroR' := by
+  show addR (addR (addR (qR 0) (mulR (qR 0) (rootR 0))) (mulR (qR 0) (rootR 1)))
+            (mulR (qR 0) R15)
+      = zeroR'
+  rw [qR_zero, zeroR'_mul (rootR 0), zeroR'_mul (rootR 1), zeroR'_mul R15,
+      addR_zero, addR_zero, addR_zero]
+
+/-- Squaring respects the interchange `(xy)(xy) = (xx)(yy)` (commutativity + associativity). -/
+theorem mulR_sq_interchange (x y : Real) :
+    mulR (mulR x y) (mulR x y) = mulR (mulR x x) (mulR y y) := by
+  rw [mulR_assoc x y (mulR x y), ← mulR_assoc y x y, mulR_comm y x, mulR_assoc x y y,
+      ← mulR_assoc x x (mulR y y)]
+
+/-- **The `ℚ(√5)`-norm `M = P² − 3Q²` of `alpha4 a b c d` is a nonzero `ℚ(√5)` element**, where
+    `P = a + c√5`, `Q = b + d√5`. Concretely the two `ℚ(√5)`-coordinates
+    `M0 = a² + 5c² − 3b² − 15d²` and `M1 = 2ac − 6bd` cannot both vanish unless
+    `a = b = c = d = 0`.
+
+    Proof: if both vanish then `P² = 3Q²` in `ℚ(√5)`. Split on `(b,d) = (0,0)`. If so, `P² = 0`,
+    and the `ℚ(√5)` domain lemma `Qsqrt5_no_zero_div` (applied to `P·P`) forces `a = c = 0`, hence
+    all zero. Otherwise `Q` is invertible (`Q5_inv`); `W := P·Q⁻¹` satisfies
+    `W² = P²·Q⁻² = 3Q²·Q⁻² = 3·(Q·Q⁻¹)² = 3` (via `mulR_sq_interchange`), so the `ℚ(√5)` element
+    `W` squares to `3`, contradicting `sqrt3_not_in_Q_sqrt5`. -/
+theorem M35_components_ne_zero (a b c d : Rat)
+    (hne : ¬ (a = 0 ∧ b = 0 ∧ c = 0 ∧ d = 0)) :
+    ¬ ( (a*a + 5*(c*c) - 3*(b*b) - 15*(d*d) = 0) ∧ (2*(a*c) - 6*(b*d) = 0) ) := by
+  intro hM
+  obtain ⟨hM0, hM1⟩ := hM
+  have hM1' : 2*(a*c) = 6*(b*d) := by
+    have h := eq_add_of_sub_eq hM1
+    rwa [Rat.add_zero] at h
+  have hStep1 : (a*a+5*(c*c)) - 3*(b*b) = 15*(d*d) := by
+    have h := eq_add_of_sub_eq hM0
+    rwa [Rat.add_zero] at h
+  have hStep2 : a*a+5*(c*c) = 3*(b*b) + 15*(d*d) := eq_add_of_sub_eq hStep1
+  have hcoord0 : a*a+5*(c*c) = 3*(b*b+5*(d*d)) := by
+    rw [hStep2, Rat.mul_add 3 (b*b) (5*(d*d)), ← Rat.mul_assoc 3 5 (d*d),
+        show (3:Rat)*5 = 15 from by native_decide]
+  rcases Classical.em (b = 0 ∧ d = 0) with hbd0 | hbd
+  · obtain ⟨hb0, hd0⟩ := hbd0
+    have h1 : a*a + 5*(c*c) = 0 := by
+      rw [hcoord0, hb0, hd0]; native_decide
+    have hac : a*c = 0 := by
+      have hM1'' : 2*(a*c) = 6*(b*d) := hM1'
+      rw [hb0, hd0, Rat.mul_zero, Rat.mul_zero] at hM1''
+      exact rat_of_two_mul_zero hM1''
+    have h2 : a*c + c*a = 0 := by
+      rw [hac, Rat.mul_comm c a, hac, Rat.add_zero]
+    rcases Qsqrt5_no_zero_div a a c c h1 h2 with ⟨ha0, hc0⟩ | ⟨ha0, hc0⟩ <;>
+      exact hne ⟨ha0, hb0, hc0, hd0⟩
+  · have hQinv : mulR (addR (qR b) (mulR (qR d) (rootR 1)))
+        (addR (qR (b/(b*b-5*(d*d)))) (mulR (qR (0 - d/(b*b-5*(d*d)))) (rootR 1))) = qR 1
+      := Q5_inv b d hbd
+    have hcoord1 : 2*a*c = 3*(2*b*d) := by
+      rw [Rat.mul_assoc 2 a c, hM1', Rat.mul_assoc 2 b d, ← Rat.mul_assoc 3 2 (b*d),
+          show (3:Rat)*2 = 6 from by native_decide]
+    have h3Q2 :
+        mulR (qR 3) (mulR (addR (qR b) (mulR (qR d) (rootR 1)))
+                          (addR (qR b) (mulR (qR d) (rootR 1))))
+          = addR (qR (3*(b*b+5*(d*d)))) (mulR (qR (3*(2*b*d))) (rootR 1)) := by
+      rw [E5_sq b d, leftDistribR, qR_mul, ← mulR_assoc, qR_mul]
+    have hP2_3Q2 :
+        mulR (addR (qR a) (mulR (qR c) (rootR 1))) (addR (qR a) (mulR (qR c) (rootR 1)))
+          = mulR (qR 3) (mulR (addR (qR b) (mulR (qR d) (rootR 1)))
+                              (addR (qR b) (mulR (qR d) (rootR 1)))) := by
+      rw [E5_sq a c, hcoord0, hcoord1, ← h3Q2]
+    have hWW :
+        mulR (mulR (addR (qR a) (mulR (qR c) (rootR 1)))
+                   (addR (qR (b/(b*b-5*(d*d)))) (mulR (qR (0 - d/(b*b-5*(d*d)))) (rootR 1))))
+             (mulR (addR (qR a) (mulR (qR c) (rootR 1)))
+                   (addR (qR (b/(b*b-5*(d*d)))) (mulR (qR (0 - d/(b*b-5*(d*d)))) (rootR 1))))
+          = qR 3 := by
+      rw [mulR_sq_interchange (addR (qR a) (mulR (qR c) (rootR 1)))
+            (addR (qR (b/(b*b-5*(d*d)))) (mulR (qR (0 - d/(b*b-5*(d*d)))) (rootR 1))),
+          hP2_3Q2,
+          mulR_assoc (qR 3)
+            (mulR (addR (qR b) (mulR (qR d) (rootR 1))) (addR (qR b) (mulR (qR d) (rootR 1))))
+            (mulR (addR (qR (b/(b*b-5*(d*d)))) (mulR (qR (0 - d/(b*b-5*(d*d)))) (rootR 1)))
+                  (addR (qR (b/(b*b-5*(d*d)))) (mulR (qR (0 - d/(b*b-5*(d*d)))) (rootR 1)))),
+          ← mulR_sq_interchange (addR (qR b) (mulR (qR d) (rootR 1)))
+            (addR (qR (b/(b*b-5*(d*d)))) (mulR (qR (0 - d/(b*b-5*(d*d)))) (rootR 1))),
+          hQinv, qR_mul, qR_mul, show (3:Rat) * (1 * 1) = 3 from by native_decide]
+    exact sqrt3_not_in_Q_sqrt5
+      ⟨a*(b/(b*b-5*(d*d))) + 5*(c*(0 - d/(b*b-5*(d*d)))),
+       a*(0 - d/(b*b-5*(d*d))) + c*(b/(b*b-5*(d*d))),
+       by rw [← E_mul5 a c (b/(b*b-5*(d*d))) (0 - d/(b*b-5*(d*d)))]; exact hWW⟩
+
+#print axioms alpha4_zero
+#print axioms mulR_sq_interchange
+#print axioms M35_components_ne_zero
+
+/-! ### 8.4. The iterated `ℚ(√3,√5)` inverse `Q35_inv`. -/
+
+/-- **Inverse via a `ℚ(√5)` conjugate.** If `B·Bc = m0 + m1√5` (a `ℚ(√5)` element) with
+    `(m0,m1) ≠ (0,0)` and `Bc` is an `alpha4`-element, then `B` is invertible with an explicit
+    `alpha4`-form inverse `Bc·M⁻¹` (where `M⁻¹` is the in-file `Q5_inv` inverse). The product
+    `B·(Bc·M⁻¹) = (B·Bc)·M⁻¹ = M·M⁻¹ = 1`, and `Bc·M⁻¹` is an `alpha4`-element by `E_mul35`
+    (`M⁻¹ = alpha4 (m0/N) 0 (0−m1/N) 0`). -/
+theorem inv_via_conj (B Bc : Real) (m0 m1 : Rat)
+    (hBBc : mulR B Bc = addR (qR m0) (mulR (qR m1) (rootR 1)))
+    (hm : ¬ (m0 = 0 ∧ m1 = 0))
+    (hBc : ∃ w x y z : Rat, Bc = alpha4 w x y z) :
+    ∃ Binv : Real, mulR B Binv = qR 1 ∧ (∃ w x y z : Rat, Binv = alpha4 w x y z) := by
+  have hMinv := Q5_inv m0 m1 hm
+  have hMinvAlpha :
+      alpha4 (m0/(m0*m0-5*(m1*m1))) 0 (0 - m1/(m0*m0-5*(m1*m1))) 0
+        = addR (qR (m0/(m0*m0-5*(m1*m1))))
+               (mulR (qR (0 - m1/(m0*m0-5*(m1*m1)))) (rootR 1)) := by
+    show addR (addR (addR (qR (m0/(m0*m0-5*(m1*m1)))) (mulR (qR 0) (rootR 0)))
+                    (mulR (qR (0 - m1/(m0*m0-5*(m1*m1)))) (rootR 1)))
+              (mulR (qR 0) R15)
+        = addR (qR (m0/(m0*m0-5*(m1*m1))))
+               (mulR (qR (0 - m1/(m0*m0-5*(m1*m1)))) (rootR 1))
+    rw [qR_zero, zeroR'_mul (rootR 0), zeroR'_mul R15, addR_zero, addR_zero]
+  refine ⟨mulR Bc (addR (qR (m0/(m0*m0-5*(m1*m1))))
+            (mulR (qR (0 - m1/(m0*m0-5*(m1*m1)))) (rootR 1))), ?_, ?_⟩
+  · rw [← mulR_assoc B Bc
+          (addR (qR (m0/(m0*m0-5*(m1*m1)))) (mulR (qR (0 - m1/(m0*m0-5*(m1*m1)))) (rootR 1))),
+        hBBc, hMinv]
+  · obtain ⟨w, x, y, z, hBcEq⟩ := hBc
+    exact ⟨_, _, _, _, by
+      rw [hBcEq, ← hMinvAlpha]
+      exact E_mul35 w x y z (m0/(m0*m0-5*(m1*m1))) 0 (0 - m1/(m0*m0-5*(m1*m1))) 0⟩
+
+/-- **The iterated `ℚ(√3,√5)` inverse.** Every nonzero `B = alpha4 a b c d` has an explicit
+    `alpha4`-form inverse. Construction: conjugate `Bc = alpha4 a (0−b) c (0−d)` (`= a − b√3 +
+    c√5 − d√15`); then `B·Bc` collapses (`E_mul35` + coordinate simplification, the `√3`/`√15`
+    coordinates vanishing) to the `ℚ(√5)` element `M = M0 + M1√5` with
+    `M0 = a²+5c²−3b²−15d²`, `M1 = 2ac−6bd`; `M` is nonzero (`M35_components_ne_zero`), so it has a
+    `Q5_inv` inverse `M⁻¹`; finally `B⁻¹ = Bc·M⁻¹` (`inv_via_conj`). -/
+theorem Q35_inv (a b c d : Rat) (hne : ¬ (a = 0 ∧ b = 0 ∧ c = 0 ∧ d = 0)) :
+    ∃ Binv : Real, mulR (alpha4 a b c d) Binv = qR 1 ∧
+      (∃ w x y z : Rat, Binv = alpha4 w x y z) := by
+  have hBBc : mulR (alpha4 a b c d) (alpha4 a (0-b) c (0-d))
+      = addR (qR (a*a+5*(c*c)-3*(b*b)-15*(d*d)))
+             (mulR (qR (2*(a*c)-6*(b*d))) (rootR 1)) := by
+    have htwo : a*c + a*c = 2*(a*c) := by
+      rw [show (2:Rat) = 1+1 from by native_decide, Rat.add_mul, Rat.one_mul]
+    have hsix : 3*(b*d) + 3*(b*d) = 6*(b*d) := by
+      rw [← Rat.add_mul 3 3 (b*d), show (3:Rat)+3 = 6 from by native_decide]
+    have hC1eq : a*a + 3*(b*(0-b)) + 5*(c*c) + 15*(d*(0-d))
+        = a*a+5*(c*c)-3*(b*b)-15*(d*d) := by
+      rw [rat_zero_sub b, Rat.mul_neg b b, Rat.mul_neg 3 (b*b),
+          rat_zero_sub d, Rat.mul_neg d d, Rat.mul_neg 15 (d*d),
+          Rat.sub_eq_add_neg, Rat.sub_eq_add_neg,
+          Rat.add_assoc (a*a) (-(3*(b*b))) (5*(c*c)),
+          Rat.add_comm (-(3*(b*b))) (5*(c*c)),
+          ← Rat.add_assoc (a*a) (5*(c*c)) (-(3*(b*b)))]
+    have hC3eq0 : a*(0-b) + b*a + 5*(c*(0-d)) + 5*(d*c) = 0 := by
+      rw [rat_zero_sub b, Rat.mul_neg a b, Rat.mul_comm b a, rat_zero_sub d,
+          Rat.mul_neg c d, Rat.mul_neg 5 (c*d), Rat.mul_comm d c,
+          Rat.neg_add_cancel (a*b), Rat.zero_add, Rat.neg_add_cancel (5*(c*d))]
+    have hC5eq : a*c + c*a + 3*(b*(0-d)) + 3*(d*(0-b)) = 2*(a*c)-6*(b*d) := by
+      rw [Rat.mul_comm c a, rat_zero_sub d, Rat.mul_neg b d, Rat.mul_neg 3 (b*d),
+          rat_zero_sub b, Rat.mul_neg d b, Rat.mul_comm d b, Rat.mul_neg 3 (b*d),
+          Rat.sub_eq_add_neg (2*(a*c)) (6*(b*d)),
+          Rat.add_assoc (a*c+a*c) (-(3*(b*d))) (-(3*(b*d))),
+          htwo, ← @Rat.neg_add (3*(b*d)) (3*(b*d)), hsix]
+    have hC15eq0 : a*(0-d) + b*c + c*(0-b) + d*a = 0 := by
+      rw [rat_zero_sub d, Rat.mul_neg a d, rat_zero_sub b, Rat.mul_neg c b,
+          Rat.mul_comm c b, Rat.mul_comm d a,
+          Rat.add_assoc (-(a*d)) (b*c) (-(b*c)),
+          Rat.add_neg_cancel (b*c), Rat.add_zero, Rat.neg_add_cancel (a*d)]
+    rw [E_mul35 a b c d a (0-b) c (0-d), hC3eq0, hC15eq0, hC1eq, hC5eq]
+    show addR (addR (addR (qR (a*a+5*(c*c)-3*(b*b)-15*(d*d))) (mulR (qR 0) (rootR 0)))
+                    (mulR (qR (2*(a*c)-6*(b*d))) (rootR 1)))
+              (mulR (qR 0) R15)
+        = addR (qR (a*a+5*(c*c)-3*(b*b)-15*(d*d))) (mulR (qR (2*(a*c)-6*(b*d))) (rootR 1))
+    rw [qR_zero, zeroR'_mul (rootR 0), zeroR'_mul R15, addR_zero, addR_zero]
+  exact inv_via_conj (alpha4 a b c d) (alpha4 a (0-b) c (0-d))
+    (a*a+5*(c*c)-3*(b*b)-15*(d*d)) (2*(a*c)-6*(b*d))
+    hBBc
+    (M35_components_ne_zero a b c d hne)
+    ⟨a, 0-b, c, 0-d, rfl⟩
+
+#print axioms inv_via_conj
+#print axioms Q35_inv
+
+/-! ## 9. LEVA B — the 8-radical ℚ-linear independence `indep8`.
+
+    Capstone: the eight radicals `{1, √3, √5, √15, √11, √33, √55, √165}` — a ℚ-basis of
+    `ℚ(√3, √5, √11)` — are ℚ-linearly independent. Encoded with the first four packed into
+    `A = alpha4 a b c d` and the second four into `mulR (alpha4 e f g h) (rootR 3)`
+    (`= e√11 + f√33 + g√55 + h√165`, since `√11·√3 = √33` etc.), the statement is: if
+    `A + B·√11 = r` (rational) then all eight coordinates collapse to `a = r`, the rest `0`.
+
+    Proof: if `B = alpha4 e f g h ≠ 0`, invert it (`Q35_inv`); isolating `B·√11 = r − A` and
+    left-multiplying by `B⁻¹` lands a `ℚ(√3,√5)`-representation `alpha4 …` of `√11`
+    (`E_mul35`), contradicting `not_R11_in_Q35`. Hence `e=f=g=h=0`, so `B·√11 = 0` and
+    `A = r` reduces to the 4-radical case `indep4`. -/
+
+/-- Negation of an `alpha4` element stays an `alpha4` element:
+    `−(a + b√3 + c√5 + d√15) = (0−a) + (0−b)√3 + (0−c)√5 + (0−d)√15`. The 4-generator analogue of
+    `negR_Q5`. -/
+theorem negR_alpha4 (a b c d : Rat) :
+    negR (alpha4 a b c d) = alpha4 (0 - a) (0 - b) (0 - c) (0 - d) := by
+  show negR (addR (addR (addR (qR a) (mulR (qR b) (rootR 0))) (mulR (qR c) (rootR 1)))
+                  (mulR (qR d) R15))
+      = addR (addR (addR (qR (0 - a)) (mulR (qR (0 - b)) (rootR 0))) (mulR (qR (0 - c)) (rootR 1)))
+             (mulR (qR (0 - d)) R15)
+  rw [negR_addR, negR_addR, negR_addR,
+      qR_neg a, negR_mulR_left (qR b) (rootR 0), qR_neg b,
+      negR_mulR_left (qR c) (rootR 1), qR_neg c,
+      negR_mulR_left (qR d) R15, qR_neg d,
+      rat_zero_sub a, rat_zero_sub b, rat_zero_sub c, rat_zero_sub d]
+
+/-- Merging a rational constant into the constant coordinate of an `alpha4`:
+    `r + (a + b√3 + c√5 + d√15) = (r+a) + b√3 + c√5 + d√15`. The `√3,√5,√15` coordinates are
+    unchanged. -/
+theorem qR_add_alpha4 (r a b c d : Rat) :
+    addR (qR r) (alpha4 a b c d) = alpha4 (r + a) b c d := by
+  show addR (qR r) (addR (addR (addR (qR a) (mulR (qR b) (rootR 0))) (mulR (qR c) (rootR 1)))
+                         (mulR (qR d) R15))
+      = addR (addR (addR (qR (r + a)) (mulR (qR b) (rootR 0))) (mulR (qR c) (rootR 1)))
+             (mulR (qR d) R15)
+  rw [← addR_assoc (qR r)
+        (addR (addR (qR a) (mulR (qR b) (rootR 0))) (mulR (qR c) (rootR 1))) (mulR (qR d) R15),
+      ← addR_assoc (qR r) (addR (qR a) (mulR (qR b) (rootR 0))) (mulR (qR c) (rootR 1)),
+      ← addR_assoc (qR r) (qR a) (mulR (qR b) (rootR 0)),
+      qR_add r a]
+
+/-- **LEVA B — ℚ-linear independence of the 8 radicals `{1,√3,√5,√15, √11,√33,√55,√165}`.**
+    The basis of `ℚ(√3,√5,√11)`. If `(a+b√3+c√5+d√15) + (e+f√3+g√5+h√15)·√11 = r` with all
+    coordinates rational, then `a = r` and `b = c = d = e = f = g = h = 0`. -/
+theorem indep8 (a b c d e f g h r : Rat)
+    (H : addR (alpha4 a b c d) (mulR (alpha4 e f g h) (rootR 3)) = qR r) :
+    a = r ∧ b = 0 ∧ c = 0 ∧ d = 0 ∧ e = 0 ∧ f = 0 ∧ g = 0 ∧ h = 0 := by
+  have hefgh : e = 0 ∧ f = 0 ∧ g = 0 ∧ h = 0 := by
+    refine Classical.byContradiction (fun hne => ?_)
+    obtain ⟨Binv, hBinv, w, x, y, z, hForm⟩ := Q35_inv e f g h hne
+    have hiso : mulR (alpha4 e f g h) (rootR 3)
+        = addR (qR r) (negR (alpha4 a b c d)) := by
+      have hstep := congrArg (addR (negR (alpha4 a b c d))) H
+      rw [← addR_assoc, addR_comm (negR (alpha4 a b c d)) (alpha4 a b c d), addR_neg,
+          addR_comm zeroR' (mulR (alpha4 e f g h) (rootR 3)), addR_zero,
+          addR_comm (negR (alpha4 a b c d)) (qR r)] at hstep
+      exact hstep
+    have hmul := congrArg (mulR Binv) hiso
+    rw [← mulR_assoc Binv (alpha4 e f g h) (rootR 3),
+        mulR_comm Binv (alpha4 e f g h), hBinv,
+        mulR_comm (qR 1) (rootR 3), qR_one, mulR_one,
+        negR_alpha4 a b c d,
+        qR_add_alpha4 r (0 - a) (0 - b) (0 - c) (0 - d),
+        hForm,
+        E_mul35 w x y z (r + (0 - a)) (0 - b) (0 - c) (0 - d)] at hmul
+    exact not_R11_in_Q35 ⟨_, _, _, _, hmul⟩
+  obtain ⟨he, hf, hg, hh⟩ := hefgh
+  subst he hf hg hh
+  rw [alpha4_zero, zeroR'_mul (rootR 3), addR_zero] at H
+  obtain ⟨hpr, hb0, hc0, hd0⟩ := indep4 a b c d r H
+  exact ⟨hpr, hb0, hc0, hd0, rfl, rfl, rfl, rfl⟩
+
+#print axioms negR_alpha4
+#print axioms qR_add_alpha4
+#print axioms indep8
+
 end SounioSqrt.RealCauchyField

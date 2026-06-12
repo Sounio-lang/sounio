@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-SOUC_NATIVE="${SOUC_NATIVE:-$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64}"
+SOUC_NATIVE="${SOUC_NATIVE:-$ROOT_DIR/artifacts/self-hosted/souc-lean-frontend.elf}"
 MANIFEST_PATH="${MANIFEST_PATH:-tests/selfhost/native_typecheck/manifest.tsv}"
 WORK_DIR="${WORK_DIR:-/tmp/sounio-selfhost-native-typecheck-proof}"
 ARTIFACT_DIR="$WORK_DIR/artifacts"
@@ -112,13 +112,8 @@ run_case() {
   rm -f "$elf_path" "$compile_stdout" "$compile_stderr" "$combined_log"
 
   set +e
-  if [ -n "$SOUNIO_NATIVE_TARGET" ]; then
-    run_with_timeout "$TIMEOUT_SECS" "$SOUC_NATIVE" "$program_path" "$elf_path" --target "$SOUNIO_NATIVE_TARGET" \
-      >"$compile_stdout" 2>"$compile_stderr"
-  else
-    run_with_timeout "$TIMEOUT_SECS" "$SOUC_NATIVE" "$program_path" "$elf_path" \
-      >"$compile_stdout" 2>"$compile_stderr"
-  fi
+  run_with_timeout "$TIMEOUT_SECS" "$SOUC_NATIVE" --check "$program_path" \
+    >"$compile_stdout" 2>"$compile_stderr"
   compile_exit=$?
   set -e
 

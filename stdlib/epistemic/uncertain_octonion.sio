@@ -1,0 +1,119 @@
+// stdlib/epistemic/uncertain_octonion.sio — uncertainty-carrying octonion
+//
+// UncertainOct is the octonion analogue of Epistemic (epistemic::knowledge):
+// an octonion value [f64; 8] bundled with a scalar variance budget. Its whole
+// reason to exist is that the multiplication operations fold non-associativity
+// into the variance *by construction* — you cannot form a triple product
+// without the order-ambiguity κ·‖[a,b,c]‖² being added to the result's
+// uncertainty. The synthesis ("associativity failure is a source of variance")
+// is not an opt-in helper here; it is what `mul3` IS.
+//
+// Variance model (first-order delta method on norms). Octonions form a
+// COMPOSITION algebra: ‖a·b‖ = ‖a‖·‖b‖. For c = a·b with independent
+// perturbations δa, δb, first order gives δc ≈ δa·b + a·δb, so
+//   Var(a·b) ≈ ‖b‖²·Var(a) + ‖a‖²·Var(b).
+// A triple product ((a·b)·c) applies this twice and then adds the structural
+// term — the part no binary rule can see, because non-associativity only
+// exists for three operands.
+//
+// No new algebra: reuses the verified primitives in algebra::octonion.
+
+use algebra::octonion::{oct_mul, oct_associator, oct_norm_sq}
+
+// Newton sqrt — matches the ep_sqrt / af_sqrt idiom elsewhere in the tree.
+fn uoct_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+pub struct UncertainOct {
+    val: [f64; 8],   // the octonion value
+    variance: f64,   // scalar variance budget (σ²) on the octonion
+}
+
+impl UncertainOct {
+    // An exactly-known octonion (zero variance).
+    pub fn certain(v: [f64; 8]) -> UncertainOct {
+        UncertainOct { val: v, variance: 0.0 }
+    }
+
+    // A measured octonion with standard deviation std_dev on its magnitude.
+    pub fn measured(v: [f64; 8], std_dev: f64) -> UncertainOct {
+        UncertainOct { val: v, variance: std_dev * std_dev }
+    }
+
+    pub fn variance(self: &UncertainOct) -> f64 { self.variance }
+
+    pub fn component(self: &UncertainOct, i: i64) -> f64 { self.val[i] }
+
+    pub fn std(self: &UncertainOct) -> f64 with Mut, Div, Panic {
+        uoct_sqrt(self.variance)
+    }
+
+    pub fn norm(self: &UncertainOct) -> f64 with Mut, Div, Panic {
+        let v = self.val
+        uoct_sqrt(oct_norm_sq(&v))
+    }
+
+    // Binary product. Order-free (two operands have no associator), so it
+    // propagates only measurement variance:  Var(a·b) ≈ ‖b‖²Var(a)+‖a‖²Var(b).
+    // NOTE: chaining binaries — a.mul(b).mul(c) — is order-NAIVE: it cannot add
+    // the structural term, because at each step it sees only a product and one
+    // factor, never the triple. For a three-factor product use `mul3`, which is
+    // the order-aware primitive. (Removing this caveat needs a perturbation DAG.)
+    pub fn mul(self: &UncertainOct, other: &UncertainOct) -> UncertainOct
+        with Mut, Div, NonAssoc {
+        let av = self.val
+        let bv = other.val
+        var ab: [f64; 8] = [0.0; 8]
+        oct_mul(&av, &bv, &!ab)
+        let na = oct_norm_sq(&av)
+        let nb = oct_norm_sq(&bv)
+        UncertainOct {
+            val: ab,
+            variance: nb * self.variance + na * other.variance,
+        }
+    }
+
+    // Triple product ((a·b)·c) — THE automatic synthesis. Returns the value AND
+    // a variance that ALWAYS includes the order-indeterminacy of the triple:
+    //   Var_total = Var_measurement + κ·‖[a,b,c]‖²
+    // The structural term is computed and added unconditionally — there is no
+    // path through this method that yields the product without it. Associative
+    // (Fano) triples carry ‖α‖²=0 and pay nothing; non-associative triples carry
+    // exactly the variance their order-ambiguity implies.
+    pub fn mul3(
+        self: &UncertainOct, b: &UncertainOct, c: &UncertainOct, kappa: f64,
+    ) -> UncertainOct with Mut, Div, NonAssoc {
+        let av = self.val
+        let bv = b.val
+        let cv = c.val
+
+        // value: ((a·b)·c)
+        var ab: [f64; 8] = [0.0; 8]
+        oct_mul(&av, &bv, &!ab)
+        var abc: [f64; 8] = [0.0; 8]
+        oct_mul(&ab, &cv, &!abc)
+
+        // measurement variance, propagated twice through the norm rule
+        let na = oct_norm_sq(&av)
+        let nb = oct_norm_sq(&bv)
+        let nc = oct_norm_sq(&cv)
+        let nab = oct_norm_sq(&ab)
+        let var_ab = nb * self.variance + na * b.variance
+        let var_meas = nc * var_ab + nab * c.variance
+
+        // structural variance — automatic, unconditional: κ·‖[a,b,c]‖²
+        var assoc: [f64; 8] = [0.0; 8]
+        oct_associator(&av, &bv, &cv, &!assoc)
+        let structural = kappa * oct_norm_sq(&assoc)
+
+        UncertainOct {
+            val: abc,
+            variance: var_meas + structural,
+        }
+    }
+}

@@ -1,0 +1,111 @@
+// stdlib/viz/viz_replay.sio - deterministic event replay over VizApp + Visual IR
+
+use display::canvas::{Canvas, canvas_clear}
+use display::event::{Event}
+use viz::ir::{VizScene, viz_scene_dump}
+use viz::audit::{viz_audit_hash}
+use viz::viz_app::{VizApp, viz_app_handle_event, viz_app_frame_hash}
+use viz::viz_canvas::{viz_canvas_render_scene}
+
+pub struct VizReplayFrame {
+    pub frame: i64,
+    pub event_kind: i64,
+    pub event_key: i64,
+    pub event_x: i64,
+    pub event_y: i64,
+    pub changed: bool,
+    pub canvas_hash: i64,
+    pub audit_hash: i64,
+    pub selected_node: i64,
+    pub hovered_node: i64,
+    pub focused_node: i64,
+    pub active_tab: i64,
+    pub time_i: i64,
+}
+
+pub struct VizReplayTrace {
+    pub frames: [VizReplayFrame; 33],
+    pub count: i64,
+}
+
+pub fn viz_replay_frame_empty() -> VizReplayFrame {
+    VizReplayFrame {
+        frame: 0,
+        event_kind: 0,
+        event_key: 0,
+        event_x: 0,
+        event_y: 0,
+        changed: false,
+        canvas_hash: 0,
+        audit_hash: 0,
+        selected_node: 0 - 1,
+        hovered_node: 0 - 1,
+        focused_node: 0 - 1,
+        active_tab: 0,
+        time_i: 0,
+    }
+}
+
+pub fn viz_replay_trace_new() -> VizReplayTrace {
+    VizReplayTrace { frames: [viz_replay_frame_empty(); 33], count: 0 }
+}
+
+pub fn viz_replay_present(app: &!VizApp, scene: &!VizScene, c: &!Canvas) -> i64 with Mut, Div, Alloc {
+    canvas_clear(c, app.bg_r, app.bg_g, app.bg_b)
+    viz_canvas_render_scene(scene, c)
+    app.frame = app.frame + 1
+    app.dirty = false
+    viz_app_frame_hash(app, scene, c)
+}
+
+fn viz_replay_record(trace: &!VizReplayTrace, app: &VizApp, scene: &VizScene, ev: Event, changed: bool, hash: i64) with Mut {
+    if trace.count < 0 || trace.count >= 33 { return }
+    let idx = trace.count
+    trace.frames[idx as usize] = VizReplayFrame {
+        frame: app.frame,
+        event_kind: ev.kind,
+        event_key: ev.key,
+        event_x: ev.x,
+        event_y: ev.y,
+        changed: changed,
+        canvas_hash: hash,
+        audit_hash: viz_audit_hash(scene),
+        selected_node: scene.selected_node,
+        hovered_node: scene.hovered_node,
+        focused_node: scene.focused_node,
+        active_tab: scene.active_tab,
+        time_i: scene.time as i64,
+    }
+    trace.count = trace.count + 1
+}
+
+pub fn viz_replay_events(app: &!VizApp, scene: &!VizScene, c: &!Canvas, events: &[Event; 32], count: i64) -> i64 with Mut, Div, Alloc {
+    var i: i64 = 0
+    var last_hash: i64 = viz_replay_present(app, scene, c)
+    while i < count && i < 32 {
+        viz_app_handle_event(app, scene, events[i as usize])
+        last_hash = viz_replay_present(app, scene, c)
+        i = i + 1
+    }
+    last_hash
+}
+
+pub fn viz_replay_trace_events(app: &!VizApp, scene: &!VizScene, c: &!Canvas, events: &[Event; 32], count: i64) -> VizReplayTrace with Mut, Div, Alloc {
+    var trace = viz_replay_trace_new()
+    let none = Event { kind: 0, key: 0, x: 0, y: 0, mods: 0 }
+    var last_hash: i64 = viz_replay_present(app, scene, c)
+    viz_replay_record(&!trace, app, scene, none, true, last_hash)
+    var i: i64 = 0
+    while i < count && i < 32 {
+        let ev = events[i as usize]
+        let changed = viz_app_handle_event(app, scene, ev)
+        last_hash = viz_replay_present(app, scene, c)
+        viz_replay_record(&!trace, app, scene, ev, changed, last_hash)
+        i = i + 1
+    }
+    trace
+}
+
+pub fn viz_replay_dump(scene: &VizScene) with IO, Mut, Div {
+    viz_scene_dump(scene)
+}

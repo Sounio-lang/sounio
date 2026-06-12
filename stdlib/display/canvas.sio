@@ -1,0 +1,244 @@
+// stdlib/display/canvas.sio — Software canvas drawing API
+//
+// A Canvas is a thin view over a Window's pixel buffer.
+// All drawing operates directly on the i64 pixel array.
+// Pixel format: lower 32 bits = 0x00RRGGBB (B in byte 0, G in byte 1, R in byte 2).
+
+use display::window::{Window}
+use display::font::{font_draw_char, font_draw_string}
+
+// ============================================================
+// Canvas struct
+// ============================================================
+
+pub struct Canvas {
+    pub pixels: *mut i64, // same pointer as window.pixels (zero-copy view)
+    pub width: i64,
+    pub height: i64,
+}
+
+// Create a canvas that shares the window's pixel buffer (no allocation).
+pub fn canvas_from_window(win: &!Window) -> Canvas with Mut {
+    Canvas { pixels: win.pixels, width: win.width, height: win.height }
+}
+
+// ============================================================
+// Pixel primitives
+// ============================================================
+
+fn canvas_in_bounds(c: &Canvas, x: i64, y: i64) -> bool {
+    x >= 0 && y >= 0 && x < c.width && y < c.height
+}
+
+fn pack_color(r: i64, g: i64, b: i64) -> i64 {
+    b | (g << 8) | (r << 16)
+}
+
+pub fn canvas_set_pixel(c: &!Canvas, x: i64, y: i64, r: i64, g: i64, b: i64) with Mut {
+    if canvas_in_bounds(c, x, y) {
+        let idx = y * c.width + x
+        write_i64(c.pixels, idx, pack_color(r, g, b))
+    }
+}
+
+// ============================================================
+// Fill operations
+// ============================================================
+
+pub fn canvas_clear(c: &!Canvas, r: i64, g: i64, b: i64) with Mut {
+    let color = pack_color(r, g, b)
+    let total = c.width * c.height
+    var idx: i64 = 0
+    while idx < total {
+        write_i64(c.pixels, idx, color)
+        idx = idx + 1
+    }
+}
+
+pub fn canvas_fill_rect(
+    c: &!Canvas,
+    x: i64, y: i64,
+    w: i64, h: i64,
+    r: i64, g: i64, b: i64,
+) with Mut {
+    let color = pack_color(r, g, b)
+    // Clip to canvas bounds
+    let x0 = if x < 0 { 0 } else { x }
+    let y0 = if y < 0 { 0 } else { y }
+    let x1 = if x + w > c.width  { c.width  } else { x + w }
+    let y1 = if y + h > c.height { c.height } else { y + h }
+    var cy = y0
+    while cy < y1 {
+        var cx = x0
+        while cx < x1 {
+            write_i64(c.pixels, cy * c.width + cx, color)
+            cx = cx + 1
+        }
+        cy = cy + 1
+    }
+}
+
+// Draw a 1-pixel border rect (no fill)
+pub fn canvas_draw_rect(
+    c: &!Canvas,
+    x: i64, y: i64,
+    w: i64, h: i64,
+    r: i64, g: i64, b: i64,
+) with Mut {
+    canvas_fill_rect(c, x,     y,     w, 1, r, g, b)    // top
+    canvas_fill_rect(c, x,     y+h-1, w, 1, r, g, b)    // bottom
+    canvas_fill_rect(c, x,     y,     1, h, r, g, b)    // left
+    canvas_fill_rect(c, x+w-1, y,     1, h, r, g, b)    // right
+}
+
+// ============================================================
+// Line drawing — Bresenham
+// ============================================================
+
+pub fn canvas_draw_line(
+    c: &!Canvas,
+    x0: i64, y0: i64,
+    x1: i64, y1: i64,
+    r: i64, g: i64, b: i64,
+) with Mut {
+    var cx = x0
+    var cy = y0
+
+    let dx = if x1 > x0 { x1 - x0 } else { x0 - x1 }
+    let dy = if y1 > y0 { y1 - y0 } else { y0 - y1 }
+    let sx = if x0 < x1 { 1 } else { 0 - 1 }
+    let sy = if y0 < y1 { 1 } else { 0 - 1 }
+    var err = dx - dy
+    let color = pack_color(r, g, b)
+    var running = true
+    while running {
+        if canvas_in_bounds(c, cx, cy) {
+            write_i64(c.pixels, cy * c.width + cx, color)
+        }
+        if cx == x1 && cy == y1 {
+            running = false
+        } else {
+            let e2 = err * 2
+            if e2 > 0 - dy {
+                err = err - dy
+                cx = cx + sx
+            }
+            if e2 < dx {
+                err = err + dx
+                cy = cy + sy
+            }
+        }
+    }
+}
+
+// ============================================================
+// Circle drawing — Bresenham midpoint algorithm
+// ============================================================
+
+fn canvas_circle_points(c: &!Canvas, cx: i64, cy: i64, x: i64, y: i64, color: i64) with Mut {
+    let pts_x = [cx+x, cx-x, cx+x, cx-x, cx+y, cx-y, cx+y, cx-y]
+    let pts_y = [cy+y, cy+y, cy-y, cy-y, cy+x, cy+x, cy-x, cy-x]
+    var i: i64 = 0
+    while i < 8 {
+        let px = pts_x[i as usize]
+        let py = pts_y[i as usize]
+        if canvas_in_bounds(c, px, py) {
+            write_i64(c.pixels, py * c.width + px, color)
+        }
+        i = i + 1
+    }
+}
+
+pub fn canvas_draw_circle(
+    c: &!Canvas,
+    cx: i64, cy: i64,
+    radius: i64,
+    r: i64, g: i64, b: i64,
+) with Mut {
+    let color = pack_color(r, g, b)
+    var x: i64 = 0
+    var y = radius
+    var d = 3 - radius * 2
+    while x <= y {
+        canvas_circle_points(c, cx, cy, x, y, color)
+        if d < 0 {
+            d = d + 4 * x + 6
+        } else {
+            d = d + 4 * (x - y) + 10
+            y = y - 1
+        }
+        x = x + 1
+    }
+}
+
+// Filled circle — scanline fill using the midpoint algorithm.
+pub fn canvas_fill_circle(
+    c: &!Canvas,
+    cx: i64, cy: i64,
+    radius: i64,
+    r: i64, g: i64, b: i64,
+) with Mut {
+    var x: i64 = 0
+    var y = radius
+    var d = 3 - radius * 2
+    while x <= y {
+        // Horizontal spans for each octant pair
+        canvas_fill_rect(c, cx - y, cy - x, y * 2 + 1, 1, r, g, b)
+        canvas_fill_rect(c, cx - x, cy - y, x * 2 + 1, 1, r, g, b)
+        canvas_fill_rect(c, cx - y, cy + x, y * 2 + 1, 1, r, g, b)
+        canvas_fill_rect(c, cx - x, cy + y, x * 2 + 1, 1, r, g, b)
+        if d < 0 {
+            d = d + 4 * x + 6
+        } else {
+            d = d + 4 * (x - y) + 10
+            y = y - 1
+        }
+        x = x + 1
+    }
+}
+
+// ============================================================
+// Text drawing (delegates to font.sio)
+// ============================================================
+
+pub fn canvas_draw_char(
+    c: &!Canvas,
+    ch: i64,
+    x: i64, y: i64,
+    r: i64, g: i64, b: i64,
+) with Mut {
+    font_draw_char(c.pixels, c.width, c.height, ch, x, y, r, g, b)
+}
+
+pub fn canvas_draw_text(
+    c: &!Canvas,
+    s: &[i8; 256],
+    len: i64,
+    x: i64, y: i64,
+    r: i64, g: i64, b: i64,
+) with Mut {
+    font_draw_string(c.pixels, c.width, c.height, s, len, x, y, r, g, b)
+}
+
+// ============================================================
+// Gradient fill (vertical, for backgrounds)
+// ============================================================
+
+pub fn canvas_fill_gradient_v(
+    c: &!Canvas,
+    x: i64, y: i64,
+    w: i64, h: i64,
+    r0: i64, g0: i64, b0: i64,
+    r1: i64, g1: i64, b1: i64,
+) with Mut, Div {
+    var row: i64 = 0
+    while row < h {
+        let t_num = row * 255
+        let t = t_num / h
+        let ri = r0 + (r1 - r0) * t / 255
+        let gi = g0 + (g1 - g0) * t / 255
+        let bi = b0 + (b1 - b0) * t / 255
+        canvas_fill_rect(c, x, y + row, w, 1, ri, gi, bi)
+        row = row + 1
+    }
+}

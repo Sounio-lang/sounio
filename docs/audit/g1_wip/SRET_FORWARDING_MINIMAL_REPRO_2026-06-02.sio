@@ -1,0 +1,41 @@
+// MINIMAL REPRO — bin/souc SRET-forwarding codegen bug (2026-06-02)
+//
+// A function that RETURNS the struct result of another struct-returning function
+// returns a ZEROED struct. Size-independent (triggers at a 1-field, 8-byte struct).
+// Verified codegen bug; explains the olanzapine smoker bug. NOTE: the E008 connection
+// is an open hypothesis with evidence against it (TyUnit discriminant is 3 not 0, and this
+// is non-crashing/size-independent vs the G1 lane's layout-sensitive crash) — see
+// SRET_FORWARDING_BUG_2026-06-02.md. Treat as a real, independently-worth-fixing bug.
+//
+// Expected output: 7.000000
+// Actual output  : 0.000000   <-- BUG
+//
+// Compile+run:  ./bin/souc this.sio /tmp/r.elf && chmod +x /tmp/r.elf && /tmp/r.elf
+//
+// Isolation (all four forwarding forms are BROKEN; only in-place use works):
+//   fn make()->S { return ctor() }            -> 0.0  BUG
+//   fn make()->S { var p=ctor(); return p }   -> 0.0  BUG   (olanzapine_pbpk_params_smoker shape)
+//   fn make()->S { let p=ctor(); return p }   -> 0.0  BUG
+//   fn make()->S { ctor() }      (tail)       -> 0.0  BUG
+//   CONTROL: fn main(){ let p=ctor(); use p } -> 7.0  OK   (use-in-place, no outer return)
+//
+// I.e. the bug is RETURN-FORWARDING of a struct-returning call: the outer fn's SRET
+// hidden-return pointer is not threaded into the inner call, so the inner ctor writes
+// to a discarded temporary and the outer fn returns zeros.
+
+struct S { f0: f64 }
+
+fn ctor() -> S with Mut {
+    var p: S = S { f0: 7.0 }
+    return p
+}
+
+fn make() -> S with Mut {
+    return ctor()          // forwarding a struct-returning call -> returns zeros
+}
+
+fn main() with IO, Mut {
+    let s = make()
+    print_f64(s.f0)        // prints 0.000000; should be 7.000000
+    print("\n")
+}

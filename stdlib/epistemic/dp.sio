@@ -1,0 +1,688 @@
+// stdlib/epistemic/dp.sio
+//
+// Dynamic Programming for finite MDPs — exact Bellman solvers.
+//
+// First principles:
+//   Bellman optimality, exact fixed-point:
+//     V*(s) = max_a  E_{s' ~ P(.|s,a)}[ r(s,a,s') + gamma * V*(s') ]
+//   Policy: pi*(s) = argmax_a Q*(s,a).
+//
+// We solve it exactly over a finite, dense, fixed-size MDP via:
+//   - value_iteration  (synchronous Bellman backup, ||V_new - V||_inf)
+//   - policy_iteration (Bellman eval under fixed pi, then improve)
+//
+// Layer 1 (this file, top half) — PRECISE Epistemic MDPs.
+//   GUM var/conf propagate through the reward term. Transitions are
+//   precise f64 (sum to 1).
+//
+// Layer 2 (this file, bottom half) — KNIGHTIAN-ROBUST MDPs.
+//   Two entry points:
+//     - robust_value_iteration       (one-step, caller pre-bakes p-box
+//                                     continuation per (s,a))
+//     - robust_value_iteration_full  (full Bellman backup, per-s'
+//                                     Knightian credal set)
+//
+// ---------------------------------------------------------------------------
+// SOUNIO QUIRKS in effect on this file
+// ---------------------------------------------------------------------------
+// (A) const-dimensioned array types in function PARAMETER / RETURN positions
+//     are rejected by the self-hosted type checker ("arity mismatch"). We use
+//     literal `8` and `4` in function signatures. The file-scope consts are
+//     used only in struct field types and local declarations.
+// (B) const-dimensioned struct FIELD types (e.g. `reward: [Epistemic; MAX_FLAT]`
+//     where MAX_FLAT is a const) are silently accepted by the type checker
+//     but produce a struct that segfaults on field read. Use literal `256`.
+//     Verified 2026-06-04 (re-verified 2026-06-05 against the new
+//     canonical compiler): this defect is in the postfix-array-index
+//     codegen for the `ExprIndex` AST node. The defect lives in the
+//     canonical self-hosted compiler — currently
+//     self-hosted/bootstrap/bootstrap_v0.sio:12529-12534 (the old
+//     self-hosted/compiler/lean_single.sio:13415-13437 location, which
+//     earlier investigations pointed to, is now stale — lean_single
+//     is no longer the canonical compiler; the bootstrap_v0 single-file
+//     compiler is what the JIT binary is built from). For local arrays
+//     of struct-typed elements, the bootstrap_v0 codegen falls into the
+//     else branch (`mov rax, [rcx + rax*8]`, an i64-sized load) which
+//     reads only 8 bytes of a 24-byte Epistemic struct. The 5-field MDP
+//     shape (trans_p f64 + reward Epistemic + 3 scalars) happens to
+//     dodge the bad path on the current build; the minimal single-
+//     field [Epistemic; N] struct trips it. When the codegen defect is
+//     fixed upstream, this workaround can be retired: replace
+//     `trans_p: [f64; 256]` with `trans_p: [f64; MAX_FLAT]` and
+//     `reward: [Epistemic; 256]` with `reward: [Epistemic; MAX_FLAT]`.
+// (C) Reading an UNINITIALISED struct field of `[T; N]` where T is a
+//     non-primitive type segfaults (same defect as quirk (B), in the
+//     canonical compiler at self-hosted/bootstrap/bootstrap_v0.sio:12529-
+//     12534; the older reference self-hosted/compiler/lean_single.sio
+//     is now stale). Workaround: in `mdp_new` we PRE-POPULATE every
+//     slot of `trans_p` and `reward` so the value-iteration read path
+//     never sees an uninitialised slot. Empirically re-verified
+//     2026-06-05 against the current bin/souc (built from
+//     bootstrap_v0.sio, the canonical compiler on feat/exact-orc-
+//     machinery): the minimal `struct M { reward: [Epistemic; 1] }`
+//     uninit-read pattern segfaults; pre-population makes it pass.
+//     Retire this loop only when the postfix-index codegen defect is
+//     patched upstream.
+// (D) Struct-typed (PBox, Epistemic) arrays inside structs read through
+//     `&` / `&!` corrupt or crash. The robust MDP struct holds only
+//     scalar fields; the PBox tables are passed as separate array
+//     parameters.
+// (E) The 2D-nested-array-in-struct case crashes on `&!` (separate defect
+//     from C). We use FLAT 1D arrays with manual indexing.
+//     index(s, a, sp) = s * A * Sp + a * Sp + sp.
+//
+// Library file (Layer 1 has no `pub fn main`); the LAYER 2 chunk below
+// carries a self-test `pub fn main` that exercises both layers.
+
+use epistemic::knowledge::{Epistemic}
+
+// ============================================================================
+// FILE-SCOPE SIZE PARAMETERS
+// ============================================================================
+//
+// Used as documentation for the matching struct field literal dims and
+// as a knob for the LAYER 1 `dp_index` helper. Do NOT use these in
+// function parameter or return types (quirk A) or in struct field array
+// dimensions (quirk B). Use literal `8` / `4` / `256` there.
+
+const MAX_STATES:  i64 = 8
+const MAX_ACTIONS: i64 = 4
+const MAX_SP:      i64 = 8
+
+// Compute the flat index from (s, a, sp). Helper used by all MDP code.
+fn dp_index(s: i64, a: i64, sp: i64) -> i64 {
+    s * MAX_ACTIONS * MAX_SP + a * MAX_SP + sp
+}
+
+// ============================================================================
+// NUMERIC HELPERS
+// ============================================================================
+
+fn dp_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn dp_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn dp_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn dp_min_i(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+
+// ============================================================================
+// LAYER 1 — PRECISE EPITEMIC MDP
+// ============================================================================
+
+pub struct EpistemicMDP {
+    n_states: i64,
+    n_actions: i64,
+    trans_p:  [f64;      256],   // literal dim (quirk B)
+    reward:   [Epistemic; 256],   // literal dim (quirk B)
+    gamma: f64,
+}
+
+pub fn mdp_new(n_states: i64, n_actions: i64, gamma: f64) -> EpistemicMDP with Mut, Div, Panic {
+    var m: EpistemicMDP
+    m.n_states = n_states
+    m.n_actions = n_actions
+    m.gamma = gamma
+    // PRE-POPULATE every slot of trans_p and reward (quirk C).
+    // The codegen for an uninitialised struct field of [T; N] with struct T
+    // emits a byte-load that segfaults on first read. Filling every slot
+    // here eliminates the read-of-uninitialised case in value_iteration.
+    let zero_e: Epistemic = Epistemic { val: 0.0, variance: 0.0, confidence: 1000 }
+    var i: i64 = 0
+    while i < 256 {
+        m.trans_p[i] = 0.0
+        m.reward[i]  = zero_e
+        i = i + 1
+    }
+    m
+}
+
+pub fn mdp_set_trans(m: &!EpistemicMDP, s: i64, a: i64, sp: i64, p: f64, r: Epistemic) with Mut, Div, Panic {
+    if s >= 0 && s < m.n_states && a >= 0 && a < m.n_actions && sp >= 0 && sp < m.n_states {
+        let idx = dp_index(s, a, sp)
+        m.trans_p[idx] = p
+        m.reward[idx] = r
+    }
+}
+
+// Standard synchronous value iteration. V[s] is Epistemic — carries
+// GUM var/conf through the backup. Stops when the sup-norm on .val
+// is below `epsilon`.
+pub fn value_iteration(m: &EpistemicMDP, epsilon: f64, max_iter: i64) -> [Epistemic; 8] with Mut, Div, Panic {
+    var V: [Epistemic; 8] = [Epistemic { val: 0.0, variance: 0.0, confidence: 1000 }; 8]
+    var iter: i64 = 0
+    var converged: bool = false
+    while iter < max_iter && !converged {
+        var Vnew: [Epistemic; 8] = [Epistemic { val: 0.0, variance: 0.0, confidence: 1000 }; 8]
+        var max_diff: f64 = 0.0
+        var s: i64 = 0
+        while s < m.n_states {
+            var best_val:  f64 = 0.0 - 1.0e18
+            var best_var:  f64 = 0.0
+            var best_conf: i64 = 1000
+            var a: i64 = 0
+            while a < m.n_actions {
+                var qv: f64 = 0.0
+                var qvar: f64 = 0.0
+                var qconf: i64 = 1000
+                var sp: i64 = 0
+                while sp < m.n_states {
+                    let idx = dp_index(s, a, sp)
+                    let p = m.trans_p[idx]
+                    if p > 0.0 {
+                        let r = m.reward[idx]
+                        let vsp = V[sp]
+                        let one_v   = r.val + m.gamma * vsp.val
+                        let one_var = r.variance + m.gamma * m.gamma * vsp.variance
+                        let one_cf  = dp_min_i(r.confidence, vsp.confidence)
+                        qv    = qv    + p * one_v
+                        // GUM: Var(p * X) = p^2 * Var(X).
+                        qvar  = qvar  + p * p * one_var
+                        qconf = dp_min_i(qconf, one_cf)
+                    }
+                    sp = sp + 1
+                }
+                if qv > best_val {
+                    best_val = qv
+                    best_var = qvar
+                    best_conf = qconf
+                }
+                a = a + 1
+            }
+            Vnew[s] = Epistemic { val: best_val, variance: best_var, confidence: best_conf }
+            let diff = dp_abs(Vnew[s].val - V[s].val)
+            if diff > max_diff { max_diff = diff }
+            s = s + 1
+        }
+        V = Vnew
+        if max_diff < epsilon { converged = true }
+        iter = iter + 1
+    }
+    V
+}
+
+pub fn extract_policy(m: &EpistemicMDP, V: &[Epistemic; 8]) -> [i64; 8] with Mut, Div, Panic {
+    var pi: [i64; 8] = [0; 8]
+    var s: i64 = 0
+    while s < m.n_states {
+        var best_a: i64 = 0
+        var best_q: f64 = 0.0 - 1.0e18
+        var a: i64 = 0
+        while a < m.n_actions {
+            var q: f64 = 0.0
+            var sp: i64 = 0
+            while sp < m.n_states {
+                let idx = dp_index(s, a, sp)
+                let p = m.trans_p[idx]
+                if p > 0.0 {
+                    let rmean = m.reward[idx].val
+                    let vsp   = V[sp].val
+                    q = q + p * (rmean + m.gamma * vsp)
+                }
+                sp = sp + 1
+            }
+            if q > best_q {
+                best_q = q
+                best_a = a
+            }
+            a = a + 1
+        }
+        pi[s] = best_a
+        s = s + 1
+    }
+    pi
+}
+
+// Policy evaluation: Bellman backup with a fixed policy pi until the
+// value function converges. We solve (I - gamma * P^pi) V = R^pi by
+// repeated sweeping (small |S|; cheaper than building the matrix).
+pub fn policy_evaluation(m: &EpistemicMDP, pi: &[i64; 8], epsilon: f64, max_iter: i64) -> [Epistemic; 8] with Mut, Div, Panic {
+    var V: [Epistemic; 8] = [Epistemic { val: 0.0, variance: 0.0, confidence: 1000 }; 8]
+    var iter: i64 = 0
+    var converged: bool = false
+    while iter < max_iter && !converged {
+        var Vnew: [Epistemic; 8] = [Epistemic { val: 0.0, variance: 0.0, confidence: 1000 }; 8]
+        var max_diff: f64 = 0.0
+        var s: i64 = 0
+        while s < m.n_states {
+            let a = pi[s]
+            var qv: f64 = 0.0
+            var qvar: f64 = 0.0
+            var qconf: i64 = 1000
+            var sp: i64 = 0
+            while sp < m.n_states {
+                let idx = dp_index(s, a, sp)
+                let p = m.trans_p[idx]
+                if p > 0.0 {
+                    let r = m.reward[idx]
+                    let vsp = V[sp]
+                    let one_v   = r.val + m.gamma * vsp.val
+                    let one_var = r.variance + m.gamma * m.gamma * vsp.variance
+                    let one_cf  = dp_min_i(r.confidence, vsp.confidence)
+                    qv    = qv    + p * one_v
+                    qvar  = qvar  + p * p * one_var
+                    qconf = dp_min_i(qconf, one_cf)
+                }
+                sp = sp + 1
+            }
+            Vnew[s] = Epistemic { val: qv, variance: qvar, confidence: qconf }
+            let diff = dp_abs(Vnew[s].val - V[s].val)
+            if diff > max_diff { max_diff = diff }
+            s = s + 1
+        }
+        V = Vnew
+        if max_diff < epsilon { converged = true }
+        iter = iter + 1
+    }
+    V
+}
+
+pub fn policy_improvement(m: &EpistemicMDP, V: &[Epistemic; 8]) -> [i64; 8] with Mut, Div, Panic {
+    extract_policy(m, V)
+}
+
+// Policy iteration: alternate evaluation and improvement until pi is stable.
+// (V*, pi*) returned.
+pub fn policy_iteration(m: &EpistemicMDP, max_outer: i64, eval_eps: f64, eval_iter: i64) -> ([Epistemic; 8], [i64; 8]) with Mut, Div, Panic {
+    var pi: [i64; 8] = [0; 8]
+    var V:  [Epistemic; 8] = [Epistemic { val: 0.0, variance: 0.0, confidence: 1000 }; 8]
+    var k: i64 = 0
+    var stable: bool = false
+    while k < max_outer && !stable {
+        V = policy_evaluation(m, &pi, eval_eps, eval_iter)
+        let new_pi = policy_improvement(m, &V)
+        var sames: i64 = 0
+        var s: i64 = 0
+        while s < m.n_states {
+            if new_pi[s] == pi[s] { sames = sames + 1 }
+            s = s + 1
+        }
+        if sames == m.n_states { stable = true }
+        pi = new_pi
+        k = k + 1
+    }
+    (V, pi)
+}
+
+// ============================================================================
+// LAYER 2 — KNIGHTIAN-ROBUST DP
+// ============================================================================
+//
+// First principles (math this implements):
+//
+//   Robust Bellman under Knightian (p-box) uncertainty on the continuation
+//   value:
+//     V_lower(s) = max_a  lower-prevision  E[ r(s,a,s') + gamma * V_lower(s') ]
+//     V_upper(s) = max_a  upper-prevision  E[ r(s,a,s') + gamma * V_upper(s') ]
+//
+//   We compute the prevision envelope via the Frechet (point-mass) outer
+//   enclosure. For each (s, a, s') we build a p-box for the contribution
+//     X(s, a, s') = p(s, a, s') * ( r(s, a, s') + gamma * V(s') )
+//   with p(s, a, s') in [p_lo, p_hi] and V(s') in [V_lower, V_upper]. The
+//   enclosure is a 4-corner Frechet bound: for positive quantities, the
+//   min corner is (p_lo, r + gamma*V_lower) and the max corner is
+//   (p_hi, r + gamma*V_upper). This is monotone in both args, so we use
+//   `pb_apply2_monotone_inc_inc`. The enclosure is sound for the
+//   counter-monotonic (worst-case) copula and conservative under positive
+//   correlation.
+//
+// Two entry points:
+//   - robust_value_iteration       (one-step, caller pre-bakes the
+//                                   continuation p-box for each (s, a))
+//   - robust_value_iteration_full  (full Bellman backup; per-s' Knightian)
+//
+// Storage: 1D arrays with manual (s, a) -> s*A + a and
+// (s, a, sp) -> s*A*Sp + a*Sp + sp indexing.
+
+use epistemic::knightian::*
+
+// ============================================================================
+// KNIGHTIAN MDP — minimal scalar-only struct (PBox tables passed separately
+// to keep the struct readable through `&` without segfault).
+// ============================================================================
+
+pub struct KnightianMDP {
+    n_states: i64,
+    n_actions: i64,
+    gamma: f64,
+}
+
+pub fn kmdp_new(n_states: i64, n_actions: i64, gamma: f64) -> KnightianMDP with Mut, Div, Panic {
+    var m: KnightianMDP
+    m.n_states = n_states
+    m.n_actions = n_actions
+    m.gamma = gamma
+    m
+}
+
+// Multiplication closure for pb_apply2_monotone_inc_inc. Sounio requires
+// a free fn, not a closure.
+fn kmdp_mul(x: f64, y: f64) -> f64 { x * y }
+
+// ============================================================================
+// ENTRY POINT 1 — one-step, caller pre-bakes the continuation p-box.
+//
+// cont_pbox is 1D, indexed by s * A + a. Each element is a p-box whose
+// lo_mean is the lower-prevision Q(s, a) and whose hi_mean is the upper.
+// Solver returns V_lower[s] = max_a pb_lo_mean(cont_pbox[s*A+a]) and
+// V_upper[s] = max_a pb_hi_mean(cont_pbox[s*A+a]).
+// ============================================================================
+
+pub fn robust_value_iteration(
+    m: &KnightianMDP,
+    cont_pbox: &[PBox; 8],
+    eps: f64,
+    max_iter: i64
+) -> ([f64; 8], [f64; 8]) with Mut, Div, Panic {
+    var V_lower: [f64; 8] = [0.0; 8]
+    var V_upper: [f64; 8] = [0.0; 8]
+    var iter: i64 = 0
+    var converged: bool = false
+    while iter < max_iter && !converged {
+        var VL: [f64; 8] = [0.0; 8]
+        var VU: [f64; 8] = [0.0; 8]
+        var max_diff: f64 = 0.0
+        var s: i64 = 0
+        while s < m.n_states {
+            var best_lo: f64 = 0.0 - 1.0e18
+            var best_hi: f64 = 0.0 - 1.0e18
+            var a: i64 = 0
+            while a < m.n_actions {
+                let idx = s * m.n_actions + a
+                let pb = (*cont_pbox)[idx]
+                let lo = pb_lo_mean(&pb)
+                let hi = pb_hi_mean(&pb)
+                if lo > best_lo { best_lo = lo }
+                if hi > best_hi { best_hi = hi }
+                a = a + 1
+            }
+            VL[s] = best_lo
+            VU[s] = best_hi
+            let dl = dp_abs(VL[s] - V_lower[s])
+            let du = dp_abs(VU[s] - V_upper[s])
+            let dd = dp_max(dl, du)
+            if dd > max_diff { max_diff = dd }
+            s = s + 1
+        }
+        V_lower = VL
+        V_upper = VU
+        if max_diff < eps { converged = true }
+        iter = iter + 1
+    }
+    (V_lower, V_upper)
+}
+
+// ============================================================================
+// ENTRY POINT 2 — full Bellman backup, per-s' Knightian credal set.
+//
+// r_kn / p_kn_lo / p_kn_hi / r_kn_var are 1D arrays indexed by
+// s * A * Sp + a * Sp + sp. For each (s, a, sp) we build a p-box for
+// (r + gamma * V[sp]) and a p-box for the credal-set probability p(sp),
+// then combine via pb_apply2_monotone_inc_inc with kmdp_mul (4-corner
+// Frechet). The sum across sp gives the lower / upper prevision Q-values
+// for (s, a).
+// ============================================================================
+
+pub fn robust_value_iteration_full(
+    m: &KnightianMDP,
+    r_kn: &[f64; 32],
+    p_kn_lo: &[f64; 32],
+    p_kn_hi: &[f64; 32],
+    r_kn_var: &[f64; 32],
+    eps: f64,
+    max_iter: i64
+) -> ([f64; 8], [f64; 8]) with Mut, Div, Panic {
+    var V_lower: [f64; 8] = [0.0; 8]
+    var V_upper: [f64; 8] = [0.0; 8]
+    var iter: i64 = 0
+    var converged: bool = false
+    while iter < max_iter && !converged {
+        var VL: [f64; 8] = [0.0; 8]
+        var VU: [f64; 8] = [0.0; 8]
+        var max_diff: f64 = 0.0
+        var s: i64 = 0
+        while s < m.n_states {
+            var best_lo: f64 = 0.0 - 1.0e18
+            var best_hi: f64 = 0.0 - 1.0e18
+            var a: i64 = 0
+            while a < m.n_actions {
+                var q_lo: f64 = 0.0
+                var q_hi: f64 = 0.0
+                var sp: i64 = 0
+                while sp < m.n_states {
+                    let idx = s * m.n_actions * m.n_states + a * m.n_states + sp
+                    let r_mean = (*r_kn)[idx]
+                    let p_lo = (*p_kn_lo)[idx]
+                    let p_hi = (*p_kn_hi)[idx]
+                    let r_v = (*r_kn_var)[idx]
+                    let rv_lo = r_mean + m.gamma * V_lower[sp]
+                    let rv_hi = r_mean + m.gamma * V_upper[sp]
+                    let rv_box = PBox { lo_mean: rv_lo, hi_mean: rv_hi, variance: r_v, confidence: 1000 }
+                    let p_box = PBox { lo_mean: p_lo, hi_mean: p_hi, variance: 0.0, confidence: 1000 }
+                    let contrib = pb_apply2_monotone_inc_inc(kmdp_mul, &p_box, &rv_box)
+                    q_lo = q_lo + pb_lo_mean(&contrib)
+                    q_hi = q_hi + pb_hi_mean(&contrib)
+                    sp = sp + 1
+                }
+                if q_lo > best_lo { best_lo = q_lo }
+                if q_hi > best_hi { best_hi = q_hi }
+                a = a + 1
+            }
+            VL[s] = best_lo
+            VU[s] = best_hi
+            let dl = dp_abs(VL[s] - V_lower[s])
+            let du = dp_abs(VU[s] - V_upper[s])
+            let dd = dp_max(dl, du)
+            if dd > max_diff { max_diff = dd }
+            s = s + 1
+        }
+        V_lower = VL
+        V_upper = VU
+        if max_diff < eps { converged = true }
+        iter = iter + 1
+    }
+    (V_lower, V_upper)
+}
+
+// ============================================================================
+// ROBUST POLICY EXTRACTION (pessimistic / lower-prevision argmax).
+// ============================================================================
+
+pub fn robust_extract_policy(
+    m: &KnightianMDP,
+    V_lower: &[f64; 8],
+    cont_pbox: &[PBox; 8]
+) -> [i64; 8] with Mut, Div, Panic {
+    var pi: [i64; 8] = [0; 8]
+    var s: i64 = 0
+    while s < m.n_states {
+        var best_a: i64 = 0
+        var best_lo: f64 = 0.0 - 1.0e18
+        var a: i64 = 0
+        while a < m.n_actions {
+            let idx = s * m.n_actions + a
+            let pb = (*cont_pbox)[idx]
+            let lo = pb_lo_mean(&pb)
+            if lo > best_lo {
+                best_lo = lo
+                best_a = a
+            }
+            a = a + 1
+        }
+        pi[s] = best_a
+        s = s + 1
+    }
+    pi
+}
+
+// ============================================================================
+// LAYER 2 SELF-TEST (run as `pub fn main` so the library is exercisable
+// in isolation via `bin/souc check` and direct invocation).
+// ============================================================================
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    let m = kmdp_new(2, 2, 0.9)
+
+    // ---------- Tight (no Knightian gap) ----------
+    var cp_tight: [PBox; 8] = [pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000)]
+    let p_risky_tight = pb_new(0.909090909, 0.909090909, 0.0, 1000)
+    cp_tight[0] = p_risky_tight
+    let p_safe_tight = pb_new(1.0, 1.0, 0.0, 1000)
+    cp_tight[1] = p_safe_tight
+    let p_term = pb_new(0.0, 0.0, 0.0, 1000)
+    cp_tight[2] = p_term
+    cp_tight[3] = p_term
+
+    let (VL_tight, VU_tight) = robust_value_iteration(&m, &cp_tight, 1e-9, 100)
+    let pi_tight = robust_extract_policy(&m, &VL_tight, &cp_tight)
+
+    println("TIGHT_VL0")
+    println(VL_tight[0])
+    println("TIGHT_VU0")
+    println(VU_tight[0])
+    println("TIGHT_PI0")
+    println(pi_tight[0])
+
+    // ---------- Knightian gap on safe's transition ----------
+    var cp_gap: [PBox; 8] = [pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000)]
+    cp_gap[0] = p_risky_tight
+    let p_safe_gap = pb_new(0.4, 1.0, 0.0, 1000)
+    cp_gap[1] = p_safe_gap
+    cp_gap[2] = p_term
+    cp_gap[3] = p_term
+
+    let (VL_gap, VU_gap) = robust_value_iteration(&m, &cp_gap, 1e-9, 100)
+    let pi_gap = robust_extract_policy(&m, &VL_gap, &cp_gap)
+
+    println("GAP_VL0")
+    println(VL_gap[0])
+    println("GAP_VU0")
+    println(VU_gap[0])
+    println("GAP_PI0")
+    println(pi_gap[0])
+
+    // ---------- Full iterative solver with per-s' Knightian ----------
+    var r_arr: [f64; 32] = [0.0; 32]
+    var plo_arr: [f64; 32] = [0.0; 32]
+    var phi_arr: [f64; 32] = [0.0; 32]
+    var rvar_arr: [f64; 32] = [0.0; 32]
+
+    // s=0, a=0 (risky): p(0->0)=0.5, p(0->1)=0.5, r(0->0)=0, r(0->1)=1
+    plo_arr[0] = 0.5
+    phi_arr[0] = 0.5
+    r_arr[0] = 0.0
+    plo_arr[1] = 0.5
+    phi_arr[1] = 0.5
+    r_arr[1] = 1.0
+    // s=0, a=1 (safe, Knightian): p(0->0) in [0, 0.6], p(0->1) in [0.4, 1.0]
+    plo_arr[2] = 0.0
+    phi_arr[2] = 0.6
+    r_arr[2] = 1.0
+    plo_arr[3] = 0.4
+    phi_arr[3] = 1.0
+    r_arr[3] = 1.0
+    // s=1 (terminal): p(1->0)=0, p(1->1)=1, r=0
+    plo_arr[4] = 0.0
+    phi_arr[4] = 0.0
+    r_arr[4] = 0.0
+    plo_arr[5] = 1.0
+    phi_arr[5] = 1.0
+    r_arr[5] = 0.0
+    plo_arr[6] = 0.0
+    phi_arr[6] = 0.0
+    r_arr[6] = 0.0
+    plo_arr[7] = 1.0
+    phi_arr[7] = 1.0
+    r_arr[7] = 0.0
+
+    let (VL_full, VU_full) = robust_value_iteration_full(&m, &r_arr, &plo_arr, &phi_arr, &rvar_arr, 1e-9, 200)
+
+    println("FULL_VL0")
+    println(VL_full[0])
+    println("FULL_VU0")
+    println(VU_full[0])
+    println("FULL_VL1")
+    println(VL_full[1])
+
+    println("LAYER2_OK")
+    return 0
+}
+
+// ============================================================================
+// SUGGESTED EXTENSION (user "suggest" 2026-06): Epistemic MCTS / PUCT with DP backups
+// under Knightian (p-box / credal) model.
+// ============================================================================
+//
+// First principles (why this is the natural next after exact DP + MC sampling):
+//   - Pure DP is exact but explodes with |S| or horizon (your stiff ODEs are "continuous"
+//     infinite state; discretization + Knightian p-box on params gives a finite but
+//     ambiguous MDP).
+//   - Pure MCTS/PUCT (as in prior discussion) is asymmetric sampling + UCT/ PUCT selection
+//     + MC rollouts; it approximates the Bellman optimality but only explores a tiny
+//     fraction of the tree.
+//   - Hybrid: use the exact robust DP (this module) for "full backup" whenever a leaf
+//     or fringe node has a small local MDP (or when we have precomputed a p-box model
+//     for a sub-dynamics, e.g. discretized vdp from test_stiff_ode_knightian_mc).
+//     For unknown / large parts, fall back to MC rollout (using propagate::monte_carlo
+//     on the epistemic params) wrapped in p-box outer bounds (knightian) for the value
+//     estimate at the leaf.
+//   - Selection still PUCT, but the "value" of a node can be the robust lower from DP
+//     when available, or Klibanoff CE of the ambiguous leaf value (via the bridge) for
+//     ambiguity-averse search.
+//   - This gives "DP-style backups inside MCTS" exactly as noted in the DP definition query.
+//
+// High-level pseudocode (implement as a separate mcts_dp.sio or inside a planner example):
+//
+// struct EpistemicNode {
+//     s: State (or discretized ODE state),
+//     n: i64, w: f64,  // visit count, total return (Epistemic or p-box summary)
+//     children: map<Action, Node>,
+//     is_leaf: bool,
+// }
+//
+// fn select(node, C_puct) -> Action:
+//     for a in actions:
+//         if unvisited: return a
+//         uct = Q(a) + C_puct * p(a) * sqrt(N) / (1 + n(a))   // PUCT
+//     return argmax uct
+//
+// fn expand(node):
+//     if small_local_mdp(node.s):   // e.g. |reachable S'| < 16
+//         (V_l, V_u) = robust_value_iteration( build_local_knightian_mdp(node.s, pbox_model) )
+//         node.value = (V_l, V_u)   // exact robust backup
+//         return
+//     // else MC rollout under Knightian model
+//     samples = monte_carlo( epistemic_params_of(node.s), rollout_f, 1024 )
+//     leaf_box = pbox_from_samples_or_credal( samples )   // or klib CE
+//     node.value = leaf_box
+//
+// fn backup(path, leaf_value):
+//     for node in reversed(path):
+//         node.n += 1
+//         node.w = combine(node.w, leaf_value)   // Epistemic add or pbox join
+//         if node has exact DP value: use it preferentially for Q
+//
+// fn search(root, budget, model_pbox):
+//     for _ in budget:
+//         leaf = select + expand (using DP when possible)
+//         leaf_v = simulate or DP
+//         backup(path, leaf_v)
+//     return argmax Q(root)   // or Klib CE of the root action values for final choice
+//
+// Integration points (already exist):
+// - knightian::PBox / walley::CredalSet for the "model" (transition/reward ambiguity)
+// - propagate::monte_carlo for the rollout distribution
+// - klibanoff::klibanoff_compose_with_active + active::expected_free_energy for the
+//   leaf "value" when we want ambiguity aversion in the search (exactly as in the
+//   stiff_ode_knightian_mc test)
+// - dp::robust_* for the exact sub-MDP backups
+//
+// This would let a "planner" for the stiff ODE (discretized) use exact robust DP on
+// the reachable discrete states under the p-box on mu/CL/etc., while using MC + p-box
+// outer for the unknown parts — the best of both worlds the user described.
+//
+// Suggested first file: examples/planning/epistemic_mcts_dp.sio (small grid or discretized vdp)
+// or stdlib/epistemic/mcts.sio (library version using the same fixed-array style as dp.sio).
+//
+// When ready, the exact command could be:
+//   write examples/planning/epistemic_mcts_dp.sio with the hybrid skeleton + one test case
+//   that re-uses the vdp from test_stiff_ode_knightian_mc and asserts that the hybrid
+//   policy has lower robust regret than pure MC or pure one-step robust VI.
+

@@ -1,0 +1,196 @@
+//@ run-pass
+//! examples/cd_l10_projective_measurement.sio
+//!
+//! Cayley-Dickson level 10 projective measurement (dim 1024).
+//!
+//!  d 1   2   4   8   16   32   64  128  256  512  1024
+//!  L 0   1   2   3   4    5    6    7    8    9    10
+//!
+//! Seventh rung of the projective-measurement ladder (siblings:
+//! 16b6ad3ea L4, 729bce515 L5, e072bc74e L6, c680f083b L7, f686a4a4c L8,
+//! 048e6100c L9). Requires the k≤10 CDElement from 102b1ede0 (c → 1024).
+//!
+//! Two separate claims, kept methodologically distinct:
+//!   (A) Tower-lifted zero-divisors double their kernel each rung —
+//!       PREDICTIONS, asserted.  A miss is a 1024-D Gauss/codegen bug
+//!       (or a broken doubling assumption), not new algebra.
+//!   (B) The conjectured native-erasure curve at a 7th point — the L10
+//!       native family e_3 + e_(half+2) = e_3 + e_514 is MEASURED, never
+//!       asserted, no index hunting.  Conjecture (c680f083b):
+//!         ker_native(L_n) = 2^(n-1) - 4,
+//!       so ker_native(L10) = 2^9 - 4 = 508, rank = 516.  A miss is a
+//!       refutation/refinement, reported AS the result.
+//!
+//! Lifted predictions (Schafer L_{(a,0)} doubling of the parent kernel):
+//!   (1) A1 = e_3 + e_10   sedenion ×6 lifts  ker→256  rank 768
+//!   (2) A2 = e_3 + e_18   pathion  ×5 lifts  ker→384  rank 640
+//!   (3) A3 = e_3 + e_34   chingon  ×4 lifts  ker→448  rank 576
+//!   (4) A4 = e_3 + e_66   routon   ×3 lifts  ker→480  rank 544
+//!   (5) A5 = e_3 + e_130  L8-native ×2 lifts ker→496  rank 528
+//!   (6) A6 = e_3 + e_258  L9-native ×1 lift  ker→504  rank 520
+//!   (7) A7 = e_3 + e_514  L10-native             measured     ?
+//!   (X) X  = e_1          control                 rank 1024
+//!
+//! No Heisenberg claim: for these zero-divisor generators L_A is real-linear
+//! and non-unitary (singular); σ_x σ_p ≥ ℏ/2 is a theorem about unitary
+//! evolution.  (The unit control e_1 gives an orthogonal L_{e_1}.)
+
+use algebra::cayley_dickson::{cd_mul, cd_basis, cd_zero, CDElement}
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// Build the 1024x1024 matrix where column k = L_z(e_k). Row-major M[1024*i+k].
+fn build_left_mult_matrix_1024(z: CDElement, out: &![f64; 1048576]) with Mut, Div, Panic {
+    var k: i64 = 0
+    while k < 1024 {
+        let ek = cd_basis(10, k as i32)
+        let prod = cd_mul(z, ek)
+        var i: i64 = 0
+        while i < 1024 {
+            (*out)[(1024 * i + k) as usize] = prod.c[i as usize]
+            i = i + 1
+        }
+        k = k + 1
+    }
+}
+
+// Gauss elimination with partial pivoting on a 1024x1024 in-place matrix.
+fn rank_1024x1024(m: &![f64; 1048576], tol: f64) -> i64 with Mut, Div, Panic {
+    var rank: i64 = 0
+    var row: i64 = 0
+    var col: i64 = 0
+    while col < 1024 && row < 1024 {
+        var pivot_row: i64 = 0 - 1
+        var best: f64 = tol
+        var r: i64 = row
+        while r < 1024 {
+            let av = abs_f64((*m)[(1024 * r + col) as usize])
+            if av > best { best = av; pivot_row = r }
+            r = r + 1
+        }
+        if pivot_row < 0 {
+            col = col + 1
+        } else {
+            if pivot_row != row {
+                var j: i64 = 0
+                while j < 1024 {
+                    let a = (*m)[(1024 * row + j) as usize]
+                    let b = (*m)[(1024 * pivot_row + j) as usize]
+                    (*m)[(1024 * row + j) as usize] = b
+                    (*m)[(1024 * pivot_row + j) as usize] = a
+                    j = j + 1
+                }
+            }
+            let piv = (*m)[(1024 * row + col) as usize]
+            var rr: i64 = row + 1
+            while rr < 1024 {
+                let factor = (*m)[(1024 * rr + col) as usize] / piv
+                var j: i64 = col
+                while j < 1024 {
+                    let nv = (*m)[(1024 * rr + j) as usize]
+                              - factor * (*m)[(1024 * row + j) as usize]
+                    (*m)[(1024 * rr + j) as usize] = nv
+                    j = j + 1
+                }
+                rr = rr + 1
+            }
+            rank = rank + 1
+            row = row + 1
+            col = col + 1
+        }
+    }
+    rank
+}
+
+// Compute rank(L_A) for A = e_lo + e_hi at level 10.
+fn measure(label: i64, idx_lo: i64, idx_hi: i64) -> i64 with IO, Mut, Div, Panic {
+    var A: CDElement = cd_zero(10)
+    A.c[idx_lo as usize] = 1.0
+    A.c[idx_hi as usize] = 1.0
+    var M: [f64; 1048576] = [0.0; 1048576]
+    build_left_mult_matrix_1024(A, &!M)
+    let r = rank_1024x1024(&!M, 1.0e-10)
+    let k = 1024 - r
+    print("  case "); print(label); print(": A = e_")
+    print(idx_lo); print(" + e_"); print(idx_hi); print("  rank=")
+    print(r); print("  dim ker="); print(k)
+    println("")
+    r
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println("  Cayley-Dickson L10 Projective Measurement on R^1024")
+    println("================================================================")
+    println("  L_A(h) := cd_mul(A, h)   on   R^1024")
+    println("")
+
+    // (1) sedenion ZD lifted six rungs: assert.
+    let r1 = measure(1, 3, 10)
+    if r1 != 768 { println("  FAIL: sedenion-6x-lifted expected rank 768"); return 1 }
+
+    // (2) pathion-native ZD lifted five rungs: assert.
+    let r2 = measure(2, 3, 18)
+    if r2 != 640 { println("  FAIL: pathion-5x-lifted expected rank 640"); return 1 }
+
+    // (3) chingon-native ZD lifted four rungs: assert.
+    let r3 = measure(3, 3, 34)
+    if r3 != 576 { println("  FAIL: chingon-4x-lifted expected rank 576"); return 1 }
+
+    // (4) routon-native ZD lifted three rungs: assert.
+    let r4 = measure(4, 3, 66)
+    if r4 != 544 { println("  FAIL: routon-3x-lifted expected rank 544"); return 1 }
+
+    // (5) L8-native ZD lifted two rungs: assert.
+    let r5 = measure(5, 3, 130)
+    if r5 != 528 { println("  FAIL: L8-native-2x-lifted expected rank 528"); return 1 }
+
+    // (6) L9-native ZD lifted one rung: assert.
+    let r6 = measure(6, 3, 258)
+    if r6 != 520 { println("  FAIL: L9-native-1x-lifted expected rank 520"); return 1 }
+
+    // (7) L10-native ZD e_3 + e_514 — MEASURE ONLY, do not assert.
+    let r7 = measure(7, 3, 514)
+    if r7 == 1024 { println("  FAIL: e_3 + e_514 should be a zero-divisor at L10"); return 1 }
+
+    // (X) control: invertible imaginary unit e_1 — assert full rank.
+    let X = cd_basis(10, 1)
+    var Mc: [f64; 1048576] = [0.0; 1048576]
+    build_left_mult_matrix_1024(X, &!Mc)
+    let rx = rank_1024x1024(&!Mc, 1.0e-10)
+    print("  case X: A = e_1  rank="); print(rx); println("  (expected 1024)")
+    if rx != 1024 { println("  FAIL: e_1 should be invertible at L10"); return 1 }
+    println("")
+
+    println("================================================================")
+    println("  Summary (erasure = dim ker / 1024):")
+    let k7 = 1024 - r7
+    print("    sedenion-6x-lifted (e_3+e_10):  ker=256/1024 = 25.00000%   [asserted]"); println("")
+    print("    pathion-5x-lifted  (e_3+e_18):  ker=384/1024 = 37.50000%   [asserted]"); println("")
+    print("    chingon-4x-lifted  (e_3+e_34):  ker=448/1024 = 43.75000%   [asserted]"); println("")
+    print("    routon-3x-lifted   (e_3+e_66):  ker=480/1024 = 46.87500%   [asserted]"); println("")
+    print("    L8-native-2x-lift  (e_3+e_130): ker=496/1024 = 48.43750%   [asserted]"); println("")
+    print("    L9-native-1x-lift  (e_3+e_258): ker=504/1024 = 49.21875%   [asserted]"); println("")
+    print("    L10-native         (e_3+e_514): ker="); print(k7); print("/1024  [measured]"); println("")
+    println("================================================================")
+    println("  Native-erasure ladder (one representative family per rung):")
+    println("    L4   ker 4   / 16   = 25.000000%   (= 2^3 - 4)")
+    println("    L5   ker 12  / 32   = 37.500000%   (= 2^4 - 4)")
+    println("    L6   ker 28  / 64   = 43.750000%   (= 2^5 - 4)")
+    println("    L7   ker 60  / 128  = 46.875000%   (= 2^6 - 4)")
+    println("    L8   ker 124 / 256  = 48.437500%   (= 2^7 - 4)")
+    println("    L9   ker 252 / 512  = 49.218750%   (= 2^8 - 4)")
+    print("    L10  ker "); print(k7); print(" / 1024 = ")
+    if k7 == 508 {
+        println("49.609375%  (= 2^9 - 4)  [conjecture HOLDS]")
+    } else {
+        println("?          [conjecture REFUTED/REFINED — see ker above]")
+    }
+    println("================================================================")
+    println("  Conjecture (observational; not a theorem; 7 points if HOLDS):")
+    println("    ker_native(L_n) = 2^(n-1) - 4   for the e_3 + e_(2^(n-1)+2)")
+    println("    family, n >= 4.  Erasure -> 1/2 from below as n grows.")
+    println("  No Heisenberg claim: L_A real-linear, non-unitary (ZD generators).")
+    println("================================================================")
+    0
+}

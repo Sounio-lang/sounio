@@ -1,0 +1,109 @@
+//@ run-pass
+//@ expect-stdout: EPISTEMIC_MCTS_PASS
+
+// examples/epistemic_mcts.sio
+//
+// Minimal epistemic PUCT demo: Beta posterior updates + ignorance bonus via stdlib policy.
+//
+// Run: artifacts/self-hosted/souc-self-hosted-x86_64 examples/epistemic_mcts.sio /tmp/out.elf && /tmp/out.elf
+//
+// Policy twin: stdlib/search/mcts/policy.sio::puct_epistemic (gated by tests/stdlib/search/test_mcts_policy.sio).
+
+struct BetaResult {
+    mean: f64,
+    variance: f64
+}
+
+struct MCTSNode {
+    prior_mean: f64,
+    value_mean: f64,
+    value_variance: f64,
+    visits: f64,
+    parent_visits: f64
+}
+
+fn max_f(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn beta_update(old_mean: f64, old_variance: f64, outcome: f64, weight: f64) -> BetaResult with Div {
+    let safe_var = max_f(old_variance, 0.0001)
+    let n_eff = old_mean * (1.0 - old_mean) / safe_var - 1.0
+    let n_eff_safe = max_f(n_eff, 1.0)
+    let new_mean = (old_mean * n_eff_safe + outcome * weight) / (n_eff_safe + weight)
+    let new_n = n_eff_safe + weight
+    let new_variance = new_mean * (1.0 - new_mean) / (new_n + 1.0)
+    BetaResult { mean: new_mean, variance: new_variance }
+}
+
+fn sqrt_local(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    guess = (guess + x / guess) / 2.0
+    guess = (guess + x / guess) / 2.0
+    guess = (guess + x / guess) / 2.0
+    guess = (guess + x / guess) / 2.0
+    guess = (guess + x / guess) / 2.0
+    guess
+}
+
+fn node_puct_score(node: MCTSNode, c_exploration: f64, c_ignorance: f64) -> f64 with Mut, Div {
+    let parent_sqrt = sqrt_local(node.parent_visits)
+    let u = node.prior_mean * parent_sqrt / (1.0 + node.visits)
+    let safe_variance = max_f(node.value_variance, 0.0001)
+    node.value_mean + c_exploration * u + c_ignorance * sqrt_local(safe_variance)
+}
+
+fn backprop_node(node: MCTSNode, outcome: f64) -> MCTSNode with Div {
+    let result = beta_update(node.value_mean, node.value_variance, outcome, 1.0)
+    MCTSNode {
+        prior_mean: node.prior_mean,
+        value_mean: result.mean,
+        value_variance: result.variance,
+        visits: node.visits + 1.0,
+        parent_visits: node.parent_visits
+    }
+}
+
+fn test_puct_scores() -> f64 with Mut, Div {
+    let confident = MCTSNode {
+        prior_mean: 0.3,
+        value_mean: 0.7,
+        value_variance: 0.01,
+        visits: 10.0,
+        parent_visits: 100.0
+    }
+    let uncertain = MCTSNode {
+        prior_mean: 0.3,
+        value_mean: 0.5,
+        value_variance: 0.25,
+        visits: 10.0,
+        parent_visits: 100.0
+    }
+    node_puct_score(uncertain, 1.4, 0.8) - node_puct_score(confident, 1.4, 0.8)
+}
+
+fn test_beta_update() -> f64 with Div {
+    let initial_mean = 0.5
+    let initial_variance = 0.25
+    let r1 = beta_update(initial_mean, initial_variance, 1.0, 1.0)
+    let r2 = beta_update(r1.mean, r1.variance, 1.0, 1.0)
+    let r3 = beta_update(r2.mean, r2.variance, 1.0, 1.0)
+    (r3.mean - initial_mean) + (initial_variance - r3.variance)
+}
+
+fn main() with IO, Mut, Div {
+    println("=== Epistemic MCTS (minimal) ===")
+    let puct_test = test_puct_scores()
+    println("PUCT epistemic advantage: ")
+    println(puct_test)
+    let beta_test = test_beta_update()
+    println("Beta update metric: ")
+    println(beta_test)
+    let ok = puct_test > 0.01 && beta_test > 0.0
+    if ok {
+        println("EPISTEMIC_MCTS_PASS")
+    } else {
+        println("EPISTEMIC_MCTS_FAIL")
+    }
+}

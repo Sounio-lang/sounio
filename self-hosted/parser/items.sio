@@ -4,7 +4,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_peek_ahead, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
 use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
@@ -35,11 +35,33 @@ impl Parser {
             is_affine = true
             p = p.advance()
         }
+        if parser_peek(p) == TokenKind::Ident {
+            let mod_name = p.current_name()
+            if mod_name.len == 8
+                && mod_name.buf[0] == (114 as i8)
+                && mod_name.buf[1] == (101 as i8)
+                && mod_name.buf[2] == (108 as i8)
+                && mod_name.buf[3] == (101 as i8)
+                && mod_name.buf[4] == (118 as i8)
+                && mod_name.buf[5] == (97 as i8)
+                && mod_name.buf[6] == (110 as i8)
+                && mod_name.buf[7] == (116 as i8)
+                && parser_peek_ahead(p, 1) == TokenKind::Struct {
+                p = p.advance()
+            }
+        }
 
         // Handle optional 'kernel' modifier for GPU kernel functions
         var is_kernel = false
         if parser_peek(p) == TokenKind::Kernel {
             is_kernel = true
+            p = p.advance()
+        }
+
+        if parser_peek(p) == TokenKind::Const && parser_peek_ahead(p, 1) == TokenKind::Fn {
+            p = p.advance()
+        }
+        if parser_peek(p) == TokenKind::Async && parser_peek_ahead(p, 1) == TokenKind::Fn {
             p = p.advance()
         }
 
@@ -55,6 +77,8 @@ impl Parser {
             p.parse_impl_item(is_pub)
         } else if item_kind == TokenKind::Type {
             p.parse_type_alias_item(is_pub)
+        } else if item_kind == TokenKind::Const {
+            p.parse_global_let_item(is_pub)
         } else if item_kind == TokenKind::ModelsLower {
             p.parse_models_item(is_pub)
         } else if item_kind == TokenKind::PolicyLower {
@@ -85,6 +109,8 @@ impl Parser {
             p.parse_use_item(is_pub)
         } else if item_kind == TokenKind::Import {
             p.parse_use_item(is_pub)
+        } else if item_kind == TokenKind::Module {
+            p.parse_module_item(is_pub)
         } else if item_kind == TokenKind::Let {
             p.parse_global_let_item(is_pub)
         } else if item_kind == TokenKind::Var {
@@ -153,7 +179,58 @@ impl Parser {
     }
 
     // ============================================================
-    // Global bindings (top-level): let/var NAME [: Type] = expr
+    // Module declaration: module foo::bar
+    // ============================================================
+
+    fn parse_module_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'module'
+
+        while parser_peek(p) != TokenKind::Newline && parser_peek(p) != TokenKind::Eof {
+            p = p.advance_raw()
+        }
+        if parser_peek(p) == TokenKind::Newline {
+            p = p.advance_raw()
+        }
+
+        let span = p.span_from(start)
+        (p, Item {
+            kind: ItemKind::ItemUnit,
+            span: span,
+            is_pub: is_pub,
+            name: empty_name(),
+            fn_def: None,
+            struct_def: None,
+            enum_def: None,
+            impl_def: None,
+            type_alias_ty: None,
+            policy_def: None,
+            acquisition_policy_def: None,
+            recourse_policy_def: None,
+            decision_policy_def: None,
+            deferral_policy_def: None,
+            transition_policy_def: None,
+            transition_protocol_def: None,
+            monitoring_policy_def: None,
+            alternative_policy_def: None,
+            alternative_frontier_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
+            use_path: empty_path(),
+            use_glob: false,
+            use_items: None,
+            effect_def: None,
+            session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
+        })
+    }
+
+    // ============================================================
+    // Global bindings (top-level): let/const NAME [: Type] = expr; var NAME [: Type] [= expr]
     // ============================================================
 
     fn parse_global_let_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
@@ -167,10 +244,12 @@ impl Parser {
         let ty_pair = p.parse_optional_type()
         p = ty_pair.0
 
-        // = expr
         p = p.expect(TokenKind::Eq)
         p = p.parse_expr()
         // expr value not used in Item (global let initialiser stored separately)
+        if parser_peek(p) == TokenKind::Semi {
+            p = p.advance()
+        }
 
         let span = p.span_from(start)
         (p, Item {
@@ -219,10 +298,14 @@ impl Parser {
         let ty_pair = p.parse_optional_type()
         p = ty_pair.0
 
-        // = expr
-        p = p.expect(TokenKind::Eq)
-        p = p.parse_expr()
-        // expr value not used in Item (global var initialiser stored separately)
+        if parser_peek(p) == TokenKind::Eq {
+            p = p.advance()
+            p = p.parse_expr()
+            // expr value not used in Item (global var initialiser stored separately)
+        }
+        if parser_peek(p) == TokenKind::Semi {
+            p = p.advance()
+        }
 
         let span = p.span_from(start)
         (p, Item {
@@ -312,6 +395,9 @@ impl Parser {
         var p = self.advance()  // skip 'fn'
         let name = p.current_name()
         p = p.expect_ident()
+        if parser_peek(p) == TokenKind::Lt {
+            p = p.parse_type_param_header()
+        }
         // Parameters
         p = p.expect(TokenKind::LParen)
         let pair = p.parse_param_list()
@@ -334,6 +420,16 @@ impl Parser {
         let pair4 = p.parse_block()
         p = pair4.0
         let body = pair4.1
+        if parser_peek(p) == TokenKind::With {
+            let pair5 = p.parse_effect_list()
+            p = pair5.0
+            match effects_opt {
+                None => {
+                    effects_opt = Some(Box::new(pair5.1))
+                },
+                Some(_) => {},
+            }
+        }
 
         let span = p.span_from(start)
         let fn_def = FnDef {
@@ -417,11 +513,18 @@ impl Parser {
         if self.peek() == TokenKind::SelfLower {
             // self parameter
             let name = self.current_name()
-            let p = self.advance()
+            var p = self.advance()
+            var ty = dummy_type_expr()
+            if parser_peek(p) == TokenKind::Colon {
+                p = p.advance()
+                let pair = p.parse_type()
+                p = pair.0
+                ty = pair.1
+            }
             let span = p.span_from(start)
             (p, Param {
                 name: name,
-                ty: dummy_type_expr(),
+                ty: ty,
                 is_self: true,
                 is_self_mut: false,
                 span: span,
@@ -462,8 +565,16 @@ impl Parser {
             var rev_tparams: Option<Box<TypeParamDefList>> = None
             while parser_peek(p) != TokenKind::Gt && parser_peek(p) != TokenKind::Eof {
                 let tp_span = p.current_span()
+                if parser_peek(p) == TokenKind::Const {
+                    p = p.advance()
+                }
                 let tp_name = p.current_name()
                 p = p.expect_ident()
+                if parser_peek(p) == TokenKind::Colon {
+                    p = p.advance()
+                    let ann_pair = p.parse_type()
+                    p = ann_pair.0
+                }
                 let tpd = TypeParamDef { name: tp_name, span: p.span_from(tp_span) }
                 rev_tparams = Some(Box::new(TypeParamDefList { head: tpd, tail: rev_tparams }))
                 if parser_peek(p) == TokenKind::Comma {
@@ -481,6 +592,9 @@ impl Parser {
 
         while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             let field_start = p.current_span()
+            if parser_peek(p) == TokenKind::Pub {
+                p = p.advance()
+            }
             let field_name = p.current_name()
             p = p.expect_ident()
             p = p.expect(TokenKind::Colon)
@@ -537,6 +651,27 @@ impl Parser {
         })
     }
 
+    fn parse_type_param_header(self) -> Parser with Mut, IO, Panic, Div, Alloc {
+        var p = self.expect(TokenKind::Lt)
+        while parser_peek(p) != TokenKind::Gt && parser_peek(p) != TokenKind::Eof {
+            if parser_peek(p) == TokenKind::Const {
+                p = p.advance()
+            }
+            p = p.expect_ident()
+            if parser_peek(p) == TokenKind::Colon {
+                p = p.advance()
+                let ann_pair = p.parse_type()
+                p = ann_pair.0
+            }
+            if parser_peek(p) == TokenKind::Comma {
+                p = p.advance()
+            } else if parser_peek(p) != TokenKind::Gt {
+                p = p.advance()
+            }
+        }
+        p.expect(TokenKind::Gt)
+    }
+
     // ============================================================
     // Enum: enum Name { Variant1, Variant2, ... }
     // ============================================================
@@ -562,6 +697,9 @@ impl Parser {
                 p = p.advance()  // skip {
                 var rev_fields: Option<Box<FieldDefList>> = None
                 while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+                    if parser_peek(p) == TokenKind::Pub {
+                        p = p.advance()
+                    }
                     let f_name = p.current_name()
                     p = p.expect_ident()
                     p = p.expect(TokenKind::Colon)
@@ -787,6 +925,9 @@ impl Parser {
             let ref_pair = p.parse_refinement_type()
             p = ref_pair.0
             let ref_ty = ref_pair.1
+            if parser_peek(p) == TokenKind::Semi {
+                p = p.advance()
+            }
             let span = p.span_from(start)
             return (p, Item {
                 kind: ItemKind::ItemTypeAlias,
@@ -826,6 +967,9 @@ impl Parser {
         let pair = p.parse_type()
         p = pair.0
         let ty = pair.1
+        if parser_peek(p) == TokenKind::Semi {
+            p = p.advance()
+        }
 
         let span = p.span_from(start)
         (p, Item {
@@ -2396,7 +2540,7 @@ impl Parser {
 
     fn parse_use_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
-        var p = self.advance()  // skip 'use'
+        var p = parser_advance(self)  // skip 'use'
 
         let pair = p.parse_type_path()
         p = pair.0
@@ -2405,28 +2549,28 @@ impl Parser {
         var is_glob = false
         var use_items_opt: Option<Box<ImportItemList>> = None
 
-        if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::Star {
+        if (parser_peek(p) == TokenKind::ColonColon || pt_read_kind_code(p.pos) == 162) && (parser_peek_ahead(p, 1) == TokenKind::Star || pt_read_kind_code(p.pos + 1) == 134) {
             // Glob import: use path::*
-            p = p.advance()  // skip ::
-            p = p.advance()  // skip *
+            p = parser_advance(p)  // skip ::
+            p = parser_advance(p)  // skip *
             is_glob = true
-        } else if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::LBrace {
+        } else if (parser_peek(p) == TokenKind::ColonColon || pt_read_kind_code(p.pos) == 162) && (parser_peek_ahead(p, 1) == TokenKind::LBrace || pt_read_kind_code(p.pos + 1) == 176) {
             // Selective import: use path::{A, B, C}
-            p = p.advance()  // skip ::
-            p = p.advance()  // skip {
+            p = parser_advance(p)  // skip ::
+            p = parser_advance(p)  // skip {
 
             // Parse comma-separated identifiers
             var rev_items: Option<Box<ImportItemList>> = None
             if parser_peek(p) != TokenKind::RBrace {
                 let first_name = p.current_name()
-                p = p.advance()  // skip ident
+                p = parser_advance(p)  // skip ident
                 rev_items = Some(Box::new(ImportItemList { head: first_name, tail: None }))
 
                 while parser_peek(p) == TokenKind::Comma {
-                    p = p.advance()  // skip ,
+                    p = parser_advance(p)  // skip ,
                     if parser_peek(p) == TokenKind::RBrace { break }
                     let next_name = p.current_name()
-                    p = p.advance()  // skip ident
+                    p = parser_advance(p)  // skip ident
                     rev_items = Some(Box::new(ImportItemList { head: next_name, tail: rev_items }))
                 }
             }
@@ -2435,6 +2579,10 @@ impl Parser {
             use_items_opt = reverse_import_item_list_opt(rev_items)
         }
         // Else: whole-module import (use path) — no glob, no items
+
+        if parser_peek(p) == TokenKind::Semi {
+            p = parser_advance(p)
+        }
 
         let span = p.span_from(start)
         (p, Item {
@@ -2811,10 +2959,62 @@ impl Parser {
     }
 
     // Sprint 108: extern "C" fn name(params) -> RetType (no body)
+    // Also accept brace-form extern blocks and conservatively retain only the
+    // first parsed declaration in the returned Item.
     fn parse_extern_fn_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'extern'
         if parser_peek(p) == TokenKind::StringLit { p = p.advance() }
+        if parser_peek(p) == TokenKind::LBrace {
+            p = p.advance()
+            var first_name = empty_name()
+            var first_params_opt: Option<Box<ParamList>> = None
+            var first_ret_ty: Option<Box<TypeExpr>> = None
+            var have_first = false
+
+            while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+                while parser_peek(p) == TokenKind::Semi || tk_is_doc_comment(parser_peek(p)) {
+                    p = p.advance()
+                }
+                if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
+                    break
+                }
+                if parser_peek(p) != TokenKind::Fn {
+                    p.had_error = true
+                    p.error_count = p.error_count + 1
+                    p = p.advance()
+                } else {
+                    p = p.advance()  // skip 'fn'
+                    let name = p.current_name()
+                    p = p.expect_ident()
+                    p = p.expect(TokenKind::LParen)
+                    let pair = p.parse_param_list()
+                    p = pair.0
+                    let params_opt = pair.1
+                    p = p.expect(TokenKind::RParen)
+                    let pair2 = p.parse_optional_return_type()
+                    p = pair2.0
+                    let ret_ty = pair2.1
+                    if !have_first {
+                        first_name = name
+                        first_params_opt = params_opt
+                        first_ret_ty = ret_ty
+                        have_first = true
+                    }
+                    while parser_peek(p) == TokenKind::Semi {
+                        p = p.advance()
+                    }
+                }
+            }
+
+            p = p.expect(TokenKind::RBrace)
+            let span = p.span_from(start)
+            if have_first {
+                let fn_def = FnDef { name: first_name, params: first_params_opt, return_type: first_ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: true }
+                return (p, Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: first_name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+            }
+            return (p, Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+        }
         if parser_peek(p) != TokenKind::Fn {
             let span = p.current_span()
             p.had_error = true
@@ -2833,6 +3033,9 @@ impl Parser {
         let pair2 = p.parse_optional_return_type()
         p = pair2.0
         let ret_ty = pair2.1
+        while parser_peek(p) == TokenKind::Semi {
+            p = p.advance()
+        }
         let span = p.span_from(start)
         let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: true }
         (p, Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
@@ -2841,7 +3044,15 @@ impl Parser {
     // Sprint 109: export "C" fn
     fn parse_export_fn_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         var p = self.advance()  // skip 'export'
-        if parser_peek(p) == TokenKind::StringLit { p = p.advance() }
+        if parser_peek(p) == TokenKind::Extern {
+            return p.parse_extern_fn_item(true)
+        }
+        if parser_peek(p) == TokenKind::StringLit {
+            p = p.advance()
+            if parser_peek(p) == TokenKind::Extern {
+                return p.parse_extern_fn_item(true)
+            }
+        }
         p.parse_fn_item(true, false)
     }
 
@@ -3210,7 +3421,7 @@ pub fn copy_string_list_tail_to_name(seg: StringList) -> Name with Mut, Panic, D
 // ============================================================
 // Parses: algebra Name over Type { op: prop, prop; ... reassociate: strategy }
 
-fn name_eq_str(n: Name, s: [i8; 64], slen: i64) -> bool with Mut {
+fn name_eq_str(n: Name, s: [i8; 64], slen: i64) -> bool with Mut, Panic, Div {
     if n.len != slen { return false }
     var i: i64 = 0
     while i < slen {
@@ -3220,7 +3431,7 @@ fn name_eq_str(n: Name, s: [i8; 64], slen: i64) -> bool with Mut {
     true
 }
 
-fn make_short_name(s: [i8; 64], slen: i64) -> Name with Mut {
+fn make_short_name(s: [i8; 64], slen: i64) -> Name with Mut, Panic, Div {
     var out = Name { buf: [0; 128], len: 0 }
     var i: i64 = 0
     while i < slen && i < 64 && i < 128 {
@@ -3463,8 +3674,11 @@ fn study_correction_from_name(name: Name) -> i32 with Panic, Div {
 
 fn parse_study_hypothesis(p: Parser) -> (Parser, StudyHypothesis) with Mut, IO, Panic, Div, Alloc {
     var pa = p.advance()  // skip "hypothesis"
-    let name = pa.current_name()
-    pa = pa.expect_ident()
+    var name = empty_name()
+    if parser_peek(pa) != TokenKind::LBrace {
+        name = pa.current_name()
+        pa = pa.expect_ident()
+    }
     pa = pa.expect(TokenKind::LBrace)
 
     var outcome = empty_name()
@@ -3480,16 +3694,24 @@ fn parse_study_hypothesis(p: Parser) -> (Parser, StudyHypothesis) with Mut, IO, 
         }
 
         let field_name = pa.current_name()
-        if field_name.len == 7 && field_name.buf[0] == 111 as i8 && field_name.buf[1] == 117 as i8 {
+        if field_name.len == 4 && field_name.buf[0] == 110 as i8 && field_name.buf[3] == 101 as i8 {
             pa = pa.advance()
             pa = pa.expect(TokenKind::Colon)
-            outcome = pa.current_name()
-            pa = pa.expect_ident()
+            let name_pair = pa.parse_audit_name_value()
+            pa = name_pair.0
+            name = name_pair.1
+        } else if field_name.len == 7 && field_name.buf[0] == 111 as i8 && field_name.buf[1] == 117 as i8 {
+            pa = pa.advance()
+            pa = pa.expect(TokenKind::Colon)
+            let outcome_pair = pa.parse_audit_name_value()
+            pa = outcome_pair.0
+            outcome = outcome_pair.1
         } else if field_name.len == 9 && field_name.buf[0] == 100 as i8 && field_name.buf[1] == 105 as i8 {
             pa = pa.advance()
             pa = pa.expect(TokenKind::Colon)
-            let dir_name = pa.current_name()
-            pa = pa.expect_ident()
+            let dir_pair = pa.parse_audit_name_value()
+            pa = dir_pair.0
+            let dir_name = dir_pair.1
             direction = study_direction_from_name(dir_name)
         } else if field_name.len == 11 && field_name.buf[0] == 101 as i8 && field_name.buf[6] == 95 as i8 {
             pa = pa.advance()
@@ -3672,8 +3894,11 @@ fn parse_study_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Pan
     let start = p.current_span()
     var pa = p.advance()  // skip 'study'
 
-    let name = pa.current_name()
-    pa = pa.expect_ident()
+    var name = empty_name()
+    if parser_peek(pa) != TokenKind::LBrace {
+        name = pa.current_name()
+        pa = pa.expect_ident()
+    }
     pa = pa.expect(TokenKind::LBrace)
 
     var title = empty_name()
@@ -3698,7 +3923,17 @@ fn parse_study_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Pan
 
         let entry_name = pa.current_name()
 
-        if entry_name.len == 5 && entry_name.buf[0] == 116 as i8 && entry_name.buf[1] == 105 as i8 {
+        if parser_peek(pa) == TokenKind::Fn {
+            let fn_pair = pa.parse_fn_item(false, false)
+            pa = fn_pair.0
+        } else if entry_name.len == 10 && entry_name.buf[0] == 104 as i8 && entry_name.buf[9] == 115 as i8 {
+            let hyp_pair = parse_study_hypothesis(pa)
+            pa = hyp_pair.0
+            if n_hypotheses < 8 {
+                hypotheses[n_hypotheses as usize] = hyp_pair.1
+                n_hypotheses = n_hypotheses + 1
+            }
+        } else if entry_name.len == 5 && entry_name.buf[0] == 116 as i8 && entry_name.buf[1] == 105 as i8 {
             pa = pa.advance()
             pa = pa.expect(TokenKind::Colon)
             let title_pair = pa.parse_audit_name_value()

@@ -23,6 +23,7 @@ var BASE_DIR: [i8; 512] = [0; 512]
 var BASE_DIR_LEN: i64 = 0
 var CLI_SHOW_AST: i64 = 0
 var CLI_SHOW_TYPES: i64 = 0
+var CLI_DEBUG_FN_MAP: i64 = 0
 var CLI_R15_MONITOR: i64 = 0     // --r15-monitor: emit R15 confidence checks at all call sites
 var R15_GATE_COUNT: i64 = 0      // number of call sites instrumented
 var R15_SIDE_TABLE_BSS_OFF: i64 = 0  // BSS offset of the R15 side table
@@ -319,6 +320,8 @@ var SCAN_TY_HASH: i64 = 0
 var SCAN_TY_ESIZ: i64 = 8
 var SCAN_TY_ALEN: i64 = 0
 var SCAN_TY_NEXT: i64 = 0
+var SCAN_UNIT_EXPR_DIM: i64 = 0
+var SCAN_UNIT_EXPR_NEXT: i64 = 0
 var RESOLVE_TY: i64 = 0
 var RESOLVE_TY_HASH: i64 = 0
 var LEX_ERROR_LINE: i64 = 0
@@ -1196,6 +1199,59 @@ fn unit_lookup_dim(h: i64) -> i64 with Panic, Mut, Div {
         iters = iters + 1
     }
     return 0
+}
+
+fn unit_is_registered_h(h: i64) -> bool with Panic, Mut, Div {
+    if h == 0 { return false }
+    var idx: i64 = h % 2048
+    if idx < 0 { idx = idx + 2048 }
+    var probe: i64 = idx
+    var iters: i64 = 0
+    while iters < 2048 {
+        if UNIT_HASH_TABLE[probe as usize] == 0 { return false }
+        if UNIT_HASH_TABLE[probe as usize] == h { return true }
+        probe = probe + 1
+        if probe >= 2048 { probe = 0 }
+        iters = iters + 1
+    }
+    return false
+}
+
+fn unit_type_hash_base() -> i64 { return 900000000000 }
+
+fn unit_type_hash_make(dim: i64) -> i64 {
+    return unit_type_hash_base() + dim
+}
+
+fn unit_type_hash_is(h: i64) -> bool {
+    return h >= unit_type_hash_base() && h < 901000000000
+}
+
+fn unit_type_hash_dim(h: i64) -> i64 {
+    if unit_type_hash_is(h) == false { return 0 }
+    return h - unit_type_hash_base()
+}
+
+fn type_hash_unit_dim(h: i64) -> i64 with Panic, Mut, Div {
+    if unit_type_hash_is(h) { return unit_type_hash_dim(h) }
+    return unit_lookup_dim(h)
+}
+
+fn unit_call_arg_mismatch(param_hash: i64, expr_unit: i64, expr_dim: i64) -> bool with Panic, Mut, Div {
+    let param_dim = type_hash_unit_dim(param_hash)
+    if param_dim == 0 { return false }
+    if expr_unit == param_hash { return false }
+    if expr_dim != 0 && expr_dim == param_dim { return false }
+    return true
+}
+
+fn expr_set_unit_from_type(ty: i64, ty_hash: i64) with Panic, Mut, Div {
+    EXPR_UNIT = 0
+    EXPR_UNIT_DIM = 0
+    if ty == 2 && ty_hash != 0 {
+        EXPR_UNIT = ty_hash
+        EXPR_UNIT_DIM = type_hash_unit_dim(ty_hash)
+    }
 }
 
 // Compute gl_name_hash from raw byte values (for init_unit_table without src buffer)
@@ -3175,9 +3231,6 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
     // integer-typed parameters in older tests.
     if k1 == 1 && k2 == 7 { return true }
     if k1 == 1 && k2 == 9 { return true }
-    // Allow integer scalar (from tuple .0/.1 type-erasure) to fill enum/bool struct fields.
-    if k1 == 7 && k2 == 1 { return true }
-    if k1 == 4 && k2 == 1 { return true }
     // Knowledge<T> must not silently coerce to non-Knowledge types (or vice versa)
     if k1 != 0 && k2 == 0 && knowledge_hash_is(h2) { return false }
     if k1 == 0 && k2 != 0 && knowledge_hash_is(h1) { return false }
@@ -3186,7 +3239,14 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
     }
     if k1 != k2 { return false }
     if k1 == 2 {
-        if h1 != 0 && h2 != 0 { return h1 == h2 }
+        if h1 != 0 && h2 != 0 {
+            if unit_type_hash_is(h1) || unit_type_hash_is(h2) {
+                let d1 = type_hash_unit_dim(h1)
+                let d2 = type_hash_unit_dim(h2)
+                return d1 != 0 && d1 == d2
+            }
+            return h1 == h2
+        }
         return true
     }
     if k1 == 6 || k1 == 7 {
@@ -3354,6 +3414,20 @@ fn tc_error_hard(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
         print("]")
         PENDING_PRIV_SI = 0 - 1
     }
+    print(" at ")
+    print_src_loc_for_tok(tok)
+    print(" (bundle line ")
+    print_int(TL[tok as usize])
+    print(")\n")
+    tc_mark_failed()
+    return 0
+}
+
+fn tc_decl_init_mismatch(tok: i64, decl_ty: i64, decl_hash: i64, expr_ty: i64, expr_hash: i64) -> i64 with IO, Mut, Panic, Div {
+    print("error: Type mismatch — expected ")
+    print_type_label(decl_ty, decl_hash)
+    print(", got ")
+    print_type_label(expr_ty, expr_hash)
     print(" at ")
     print_src_loc_for_tok(tok)
     print(" (bundle line ")
@@ -4369,6 +4443,166 @@ fn stmt_is_deref_field_array_store(p0: i64) -> bool with Panic, Mut {
     return TK[p as usize] == 16
 }
 
+// (*name).f1.f2 = expr  — TWO-level nested store through an explicit deref.
+// Tokens: ( * name ) . f1 . f2 =  →  6 19 3 7 50 3 50 3 16
+// lean_single had detectors for (*p).f= and (*p).f[i]= but NOT the two-hop forms,
+// so `(*p).inner.x = v` fell through to the generic assignment path and silently
+// wrote into a discarded value-copy of the inner struct (reads back as 0). This is
+// the exact shape the in-place checker uses ((*c).fn_sigs.count = …), the #1
+// front-half codegen lever (E008/E170). Nested structs are stored INLINE, so the
+// store address is base_ptr + foff(f1) + foff(f2).
+fn stmt_is_deref_field_field_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }
+    if TK[(p0 + 1) as usize] != 19 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 7 { return false }
+    if TK[(p0 + 4) as usize] != 50 { return false }
+    if TK[(p0 + 5) as usize] != 3 { return false }
+    if TK[(p0 + 6) as usize] != 50 { return false }
+    if TK[(p0 + 7) as usize] != 3 { return false }
+    return TK[(p0 + 8) as usize] == 16
+}
+
+// (*name).f1.f2[idx] = expr  — two-level nested store into a struct's ARRAY field.
+// Tokens: ( * name ) . f1 . f2 [ ... ] =  →  6 19 3 7 50 3 50 3 41 ... 42 16
+fn stmt_is_deref_field_field_array_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }
+    if TK[(p0 + 1) as usize] != 19 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 7 { return false }
+    if TK[(p0 + 4) as usize] != 50 { return false }
+    if TK[(p0 + 5) as usize] != 3 { return false }
+    if TK[(p0 + 6) as usize] != 50 { return false }
+    if TK[(p0 + 7) as usize] != 3 { return false }
+    if TK[(p0 + 8) as usize] != 41 { return false }
+    var p = p0 + 9
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 41 { depth = depth + 1 }
+        if TK[p as usize] == 42 { depth = depth - 1 }
+        p = p + 1
+    }
+    return TK[p as usize] == 16
+}
+
+// name.f1.f2 = expr  — AUTO-DEREF two-level store (ident root, no explicit `(* )`).
+// Shape only: (3|79) 50 3 50 3 16. For a VALUE struct root the generic assignment
+// path already handles this correctly, so the dispatch gates this on the root var
+// being pointer-like (token_chain_root_is_pointer); value structs fall through
+// unchanged. Pointer roots previously wrote into a discarded value-copy (read 0) —
+// the same disease as the explicit-deref form, and the shape used by the in-place
+// checker's c.algebras.count / c.studies.count / c.ontologies.count collectors.
+fn stmt_is_field_field_store_shape(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 3 && TK[p0 as usize] != 79 { return false }
+    if TK[(p0 + 1) as usize] != 50 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 50 { return false }
+    if TK[(p0 + 4) as usize] != 3 { return false }
+    return TK[(p0 + 5) as usize] == 16
+}
+
+// name.f1.f2[idx] = expr  →  (3|79) 50 3 50 3 41 ... 42 16
+fn stmt_is_field_field_array_store_shape(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 3 && TK[p0 as usize] != 79 { return false }
+    if TK[(p0 + 1) as usize] != 50 { return false }
+    if TK[(p0 + 2) as usize] != 3 { return false }
+    if TK[(p0 + 3) as usize] != 50 { return false }
+    if TK[(p0 + 4) as usize] != 3 { return false }
+    if TK[(p0 + 5) as usize] != 41 { return false }
+    var p = p0 + 6
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 41 { depth = depth + 1 }
+        if TK[p as usize] == 42 { depth = depth - 1 }
+        p = p + 1
+    }
+    return TK[p as usize] == 16
+}
+
+// True when the var named by the token at p0 is a pointer/ref binding (so a
+// `name.f1.f2 = …` write must deref rather than write into a local struct slot).
+fn token_chain_root_is_pointer(p0: i64) -> bool with Panic, Mut, Div {
+    let lvi = var_find_idx(TS[p0 as usize], TE[p0 as usize])
+    if lvi < 0 { return false }
+    return type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize])
+}
+
+// True when the statement is `name[idx].field(.field)* = expr` — store into a
+// field of a struct element inside an array-of-structs root. The root is itself
+// an array-of-structs variable (local, global, or &![T;N] param); after the
+// bracket-balanced index there must be a '.' field chain and a terminal '='.
+fn stmt_is_array_elem_field_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 3 { return false }
+    if TK[(p0 + 1) as usize] != 41 { return false }
+    var p = p0 + 2
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 41 { depth = depth + 1 }
+        if TK[p as usize] == 42 { depth = depth - 1 }
+        p = p + 1
+    }
+    if TK[p as usize] != 50 { return false }
+    if TK[(p + 1) as usize] != 3 { return false }
+    p = p + 2
+    while TK[p as usize] == 50 && TK[(p + 1) as usize] == 3 {
+        p = p + 2
+    }
+    return TK[p as usize] == 16
+}
+
+fn scan_unit_type_expr(p0: i64, close_tk: i64) with IO, Panic, Mut, Div {
+    var p = p0
+    var dim: i64 = 0
+    var saw_unit: i64 = 0
+    var expect_unit: i64 = 1
+    var op: i64 = 19
+    while p < TC && TK[p as usize] != close_tk && TK[p as usize] != 39 && TK[p as usize] != 0 {
+        if expect_unit != 0 {
+            if TK[p as usize] != 3 {
+                tc_error_hard(p, "malformed f64<UnitExpr> annotation")
+                SCAN_UNIT_EXPR_DIM = 0
+                SCAN_UNIT_EXPR_NEXT = 0 - 1
+                return
+            }
+            let uh = gl_name_hash(TS[p as usize], TE[p as usize])
+            if !unit_is_registered_h(uh) {
+                tc_error_hard(p, "unknown unit in f64<UnitExpr> annotation")
+                SCAN_UNIT_EXPR_DIM = 0
+                SCAN_UNIT_EXPR_NEXT = 0 - 1
+                return
+            }
+            let ud = unit_lookup_dim(uh)
+            if saw_unit == 0 {
+                dim = ud
+            } else {
+                if op == 19 { dim = dim_add(dim, ud) }
+                else { dim = dim_sub(dim, ud) }
+            }
+            saw_unit = 1
+            expect_unit = 0
+            p = p + 1
+        } else {
+            if TK[p as usize] != 19 && TK[p as usize] != 20 {
+                tc_error_hard(p, "malformed f64<UnitExpr> annotation")
+                SCAN_UNIT_EXPR_DIM = 0
+                SCAN_UNIT_EXPR_NEXT = 0 - 1
+                return
+            }
+            op = TK[p as usize]
+            expect_unit = 1
+            p = p + 1
+        }
+    }
+    if saw_unit == 0 || expect_unit != 0 {
+        tc_error_hard(p, "malformed f64<UnitExpr> annotation")
+        SCAN_UNIT_EXPR_DIM = 0
+        SCAN_UNIT_EXPR_NEXT = 0 - 1
+        return
+    }
+    SCAN_UNIT_EXPR_DIM = dim
+    SCAN_UNIT_EXPR_NEXT = p
+}
+
 fn skip_type_meta_item(p0: i64, close_tk: i64) -> i64 with Panic, Mut {
     var p = p0
     var paren_depth: i64 = 0
@@ -5087,6 +5321,27 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                 }
             }
             }
+        }
+        if src_match(ns, ne - ns, "f64") && TK[(p + 1) as usize] == 23 {
+            p = p + 2
+            scan_unit_type_expr(p, 24)
+            if SCAN_UNIT_EXPR_NEXT < 0 {
+                SCAN_TY = 2
+                SCAN_TY_HASH = 0
+                SCAN_TY_NEXT = p
+                return
+            }
+            p = SCAN_UNIT_EXPR_NEXT
+            if TK[p as usize] == 24 { p = p + 1 }
+            else if TK[p as usize] == 39 {
+                TK[p as usize] = 24
+                TS[p as usize] = TS[p as usize] + 1
+                p = p + 1
+            }
+            SCAN_TY = 2
+            SCAN_TY_HASH = unit_type_hash_make(SCAN_UNIT_EXPR_DIM)
+            SCAN_TY_NEXT = p
+            return
         }
         // Option<T> → pointer-sized (tag + value); in struct fields, 2 qwords
         if src_match(ns, ne - ns, "Option") && TK[(p + 1) as usize] == 23 {
@@ -12418,7 +12673,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 call_sig = var_find_ty_hash(ns, ne)
                 call_is_closure = var_find_is_closure(ns, ne)
             }
-            let call_tok = EP - 1
+            let call_tok = name_tok
             EP = EP + 1
             var argc: i64 = 0
             var abi_argc: i64 = 0
@@ -12450,7 +12705,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     SCAN_TY = 0
                     SCAN_TY_HASH = 0
                 }
-                if (SCAN_TY == 0 || SCAN_TY == 2) && unit_lookup_dim(SCAN_TY_HASH) != 0 && EXPR_UNIT != SCAN_TY_HASH {
+                if (SCAN_TY == 0 || SCAN_TY == 2) && unit_call_arg_mismatch(SCAN_TY_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
                     tc_linear_violation(call_tok, "unit mismatch in call argument")
                 }
                 if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
@@ -16057,6 +16312,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
         compile_multiplicative()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
+        let right_unit = EXPR_UNIT
         let right_unit_dim = EXPR_UNIT_DIM
         // β⁹ GTT: capture RHS channel topology before the merge resets EXPR_CH_SET.
         let right_ch_set_a = EXPR_CH_SET
@@ -16090,6 +16346,10 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let right_ha_57 = EXPR_HSHADOW_57
         let right_ha_66 = EXPR_HSHADOW_66; let right_ha_67 = EXPR_HSHADOW_67
         let right_ha_77 = EXPR_HSHADOW_77
+        // Gen 19: named units must match exactly for additive arithmetic.
+        if left_unit != 0 && right_unit != 0 && left_unit != right_unit {
+            tc_linear_violation(op_tok, "unit mismatch")
+        }
         // Gen 19: unit dimension mismatch — compare packed dim vectors, not name hashes
         // This allows g + kg (both mass^1) while catching m + kg (length vs mass)
         if left_unit_dim != 0 && right_unit_dim != 0 && left_unit_dim != right_unit_dim {
@@ -16801,7 +17061,7 @@ fn compile_gpu_launch_stmt_x86() with IO, Mut, Panic, Div {
         while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
             compile_or()
             scan_fn_param_type(fi, argc)
-            if (SCAN_TY == 0 || SCAN_TY == 2) && unit_lookup_dim(SCAN_TY_HASH) != 0 && EXPR_UNIT != SCAN_TY_HASH {
+            if (SCAN_TY == 0 || SCAN_TY == 2) && unit_call_arg_mismatch(SCAN_TY_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
                 tc_linear_violation(call_tok, "unit mismatch in call argument")
             }
             if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
@@ -17694,6 +17954,324 @@ fn compile_deref_field_array_store_x86() with IO, Mut, Panic, Div {
     }
 }
 
+// (*name).f1.f2 = expr — two-level nested scalar/aggregate store through a deref.
+// Mirrors the single-field stmt_is_deref_field_store path, but resolves a second
+// inline struct hop and sums both field offsets. f1 must be an inline struct field.
+fn compile_deref_field_field_store_x86() with IO, Mut, Panic, Div {
+    let name_tok = EP + 2
+    let f1_tok = EP + 5
+    let f2_tok = EP + 7
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(f2_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    let ns = TS[name_tok as usize]
+    let ne = TE[name_tok as usize]
+    let fh1 = gl_name_hash(TS[f1_tok as usize], TE[f1_tok as usize])
+    let fh2 = gl_name_hash(TS[f2_tok as usize], TE[f2_tok as usize])
+    EP = EP + 9  // skip ( * name ) . f1 . f2 =
+    compile_or()  // rhs in rax
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    let lslot = var_find(ns, ne)
+    if lslot < 0 {
+        tc_undefined_var(name_tok)
+        return
+    }
+    let lvi = var_find_idx(ns, ne)
+    if lvi < 0 || type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) == false {
+        tc_error(f1_tok, "field access through deref requires ref or pointer binding")
+        return
+    }
+    let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+    let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+    if inner_ty != 6 {
+        tc_error(f1_tok, "field access through pointer/ref requires struct pointee")
+        return
+    }
+    let si1 = st_find(inner_hash)
+    if si1 < 0 {
+        tc_error(f1_tok, "unknown field access")
+        return
+    }
+    ST_QUERY_NS = TS[f1_tok as usize]
+    ST_QUERY_NE = TE[f1_tok as usize]
+    let foff1 = st_field_offset(si1, fh1)
+    let fty1 = st_field_ty(si1, fh1)
+    let fhash1 = st_field_hash(si1, fh1)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff1 < 0 || fty1 != 6 {
+        tc_error(f1_tok, "nested field store requires inline struct field")
+        return
+    }
+    let si2 = st_find(fhash1)
+    if si2 < 0 {
+        tc_error(f2_tok, "unknown field access")
+        return
+    }
+    ST_QUERY_NS = TS[f2_tok as usize]
+    ST_QUERY_NE = TE[f2_tok as usize]
+    let foff2 = st_field_offset(si2, fh2)
+    let fty2 = st_field_ty(si2, fh2)
+    let fhash2 = st_field_hash(si2, fh2)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff2 < 0 {
+        tc_error(f2_tok, "unknown field access")
+        return
+    }
+    if ty_eq(fty2, fhash2, rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    emit_store_to_pointer_offset_x86(lslot, foff1 + foff2, fty2, fhash2)
+}
+
+// (*name).f1.f2[idx] = expr — two-level nested store into a struct ARRAY field.
+fn compile_deref_field_field_array_store_x86() with IO, Mut, Panic, Div {
+    let name_tok = EP + 2
+    let ns = TS[name_tok as usize]
+    let ne = TE[name_tok as usize]
+    let f1_tok = EP + 5
+    let f2_tok = EP + 7
+    let fh1 = gl_name_hash(TS[f1_tok as usize], TE[f1_tok as usize])
+    let fh2 = gl_name_hash(TS[f2_tok as usize], TE[f2_tok as usize])
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(f2_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    EP = EP + 9  // skip ( * name ) . f1 . f2 [
+    compile_or()  // index in rax
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // 'as usize'
+    if TK[EP as usize] == 42 { EP = EP + 1 }  // ]
+    if TK[EP as usize] == 16 { EP = EP + 1 }  // =
+    em(0x50)  // push index
+    compile_or()  // value in rax
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    let lslot = var_find(ns, ne)
+    let lvi = var_find_idx(ns, ne)
+    if lslot < 0 || lvi < 0 || type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) == false {
+        tc_error(f1_tok, "field access through deref requires ref or pointer binding")
+        em(0x59)
+        return
+    }
+    let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+    let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+    if inner_ty != 6 {
+        tc_error(f1_tok, "field access through pointer/ref requires struct pointee")
+        em(0x59)
+        return
+    }
+    let si1 = st_find(inner_hash)
+    if si1 < 0 {
+        tc_error(f1_tok, "unknown field access")
+        em(0x59)
+        return
+    }
+    ST_QUERY_NS = TS[f1_tok as usize]
+    ST_QUERY_NE = TE[f1_tok as usize]
+    let foff1 = st_field_offset(si1, fh1)
+    let fty1 = st_field_ty(si1, fh1)
+    let fhash1 = st_field_hash(si1, fh1)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff1 < 0 || fty1 != 6 {
+        tc_error(f1_tok, "nested field store requires inline struct field")
+        em(0x59)
+        return
+    }
+    let si2 = st_find(fhash1)
+    if si2 < 0 {
+        tc_error(f2_tok, "unknown field access")
+        em(0x59)
+        return
+    }
+    ST_QUERY_NS = TS[f2_tok as usize]
+    ST_QUERY_NE = TE[f2_tok as usize]
+    let foff2 = st_field_offset(si2, fh2)
+    let fty2 = st_field_ty(si2, fh2)
+    let fhash2 = st_field_hash(si2, fh2)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff2 < 0 || fty2 != 8 {
+        tc_error(f2_tok, "indexed field store requires array field")
+        em(0x59)
+        return
+    }
+    if ty_eq(arr_hash_elem_ty(fhash2), arr_hash_elem_hash(fhash2), rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    materialize_aggregate_array_element_x86(fhash2)
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
+    em(0x59)  // pop rcx (index)
+    emit_load_var(lslot)  // rax = base pointer
+    let total_off = foff1 + foff2
+    if total_off != 0 { em(0x48); em(0x8d); em(0x80); em32(total_off) }  // lea rax,[rax+total_off]
+    if arr_hash_esiz(fhash2) == 8 {
+        em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+    } else {
+        em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
+    }
+}
+
+// name.f1.f2 = expr — AUTO-DEREF two-level scalar/aggregate store (pointer root).
+// Identical to compile_deref_field_field_store_x86 but with the token offsets for an
+// ident root (no `( * … )` wrapper): name@EP, f1@EP+2, f2@EP+4, rhs after EP+6.
+fn compile_autoderef_field_field_store_x86() with IO, Mut, Panic, Div {
+    let name_tok = EP + 0
+    let f1_tok = EP + 2
+    let f2_tok = EP + 4
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(f2_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    let ns = TS[name_tok as usize]
+    let ne = TE[name_tok as usize]
+    let fh1 = gl_name_hash(TS[f1_tok as usize], TE[f1_tok as usize])
+    let fh2 = gl_name_hash(TS[f2_tok as usize], TE[f2_tok as usize])
+    EP = EP + 6  // skip name . f1 . f2 =
+    compile_or()  // rhs in rax
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    let lslot = var_find(ns, ne)
+    if lslot < 0 {
+        tc_undefined_var(name_tok)
+        return
+    }
+    let lvi = var_find_idx(ns, ne)
+    if lvi < 0 || type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) == false {
+        tc_error(f1_tok, "field access through deref requires ref or pointer binding")
+        return
+    }
+    let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+    let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+    if inner_ty != 6 {
+        tc_error(f1_tok, "field access through pointer/ref requires struct pointee")
+        return
+    }
+    let si1 = st_find(inner_hash)
+    if si1 < 0 {
+        tc_error(f1_tok, "unknown field access")
+        return
+    }
+    ST_QUERY_NS = TS[f1_tok as usize]
+    ST_QUERY_NE = TE[f1_tok as usize]
+    let foff1 = st_field_offset(si1, fh1)
+    let fty1 = st_field_ty(si1, fh1)
+    let fhash1 = st_field_hash(si1, fh1)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff1 < 0 || fty1 != 6 {
+        tc_error(f1_tok, "nested field store requires inline struct field")
+        return
+    }
+    let si2 = st_find(fhash1)
+    if si2 < 0 {
+        tc_error(f2_tok, "unknown field access")
+        return
+    }
+    ST_QUERY_NS = TS[f2_tok as usize]
+    ST_QUERY_NE = TE[f2_tok as usize]
+    let foff2 = st_field_offset(si2, fh2)
+    let fty2 = st_field_ty(si2, fh2)
+    let fhash2 = st_field_hash(si2, fh2)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff2 < 0 {
+        tc_error(f2_tok, "unknown field access")
+        return
+    }
+    if ty_eq(fty2, fhash2, rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    emit_store_to_pointer_offset_x86(lslot, foff1 + foff2, fty2, fhash2)
+}
+
+// name.f1.f2[idx] = expr — AUTO-DEREF two-level array store (pointer root).
+fn compile_autoderef_field_field_array_store_x86() with IO, Mut, Panic, Div {
+    let name_tok = EP + 0
+    let ns = TS[name_tok as usize]
+    let ne = TE[name_tok as usize]
+    let f1_tok = EP + 2
+    let f2_tok = EP + 4
+    let fh1 = gl_name_hash(TS[f1_tok as usize], TE[f1_tok as usize])
+    let fh2 = gl_name_hash(TS[f2_tok as usize], TE[f2_tok as usize])
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(f2_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    EP = EP + 6  // skip name . f1 . f2 [
+    compile_or()  // index in rax
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // 'as usize'
+    if TK[EP as usize] == 42 { EP = EP + 1 }  // ]
+    if TK[EP as usize] == 16 { EP = EP + 1 }  // =
+    em(0x50)  // push index
+    compile_or()  // value in rax
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    let lslot = var_find(ns, ne)
+    let lvi = var_find_idx(ns, ne)
+    if lslot < 0 || lvi < 0 || type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) == false {
+        tc_error(f1_tok, "field access through deref requires ref or pointer binding")
+        em(0x59)
+        return
+    }
+    let inner_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+    let inner_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+    if inner_ty != 6 {
+        tc_error(f1_tok, "field access through pointer/ref requires struct pointee")
+        em(0x59)
+        return
+    }
+    let si1 = st_find(inner_hash)
+    if si1 < 0 {
+        tc_error(f1_tok, "unknown field access")
+        em(0x59)
+        return
+    }
+    ST_QUERY_NS = TS[f1_tok as usize]
+    ST_QUERY_NE = TE[f1_tok as usize]
+    let foff1 = st_field_offset(si1, fh1)
+    let fty1 = st_field_ty(si1, fh1)
+    let fhash1 = st_field_hash(si1, fh1)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff1 < 0 || fty1 != 6 {
+        tc_error(f1_tok, "nested field store requires inline struct field")
+        em(0x59)
+        return
+    }
+    let si2 = st_find(fhash1)
+    if si2 < 0 {
+        tc_error(f2_tok, "unknown field access")
+        em(0x59)
+        return
+    }
+    ST_QUERY_NS = TS[f2_tok as usize]
+    ST_QUERY_NE = TE[f2_tok as usize]
+    let foff2 = st_field_offset(si2, fh2)
+    let fty2 = st_field_ty(si2, fh2)
+    let fhash2 = st_field_hash(si2, fh2)
+    ST_QUERY_NS = -1
+    ST_QUERY_NE = -1
+    if foff2 < 0 || fty2 != 8 {
+        tc_error(f2_tok, "indexed field store requires array field")
+        em(0x59)
+        return
+    }
+    if ty_eq(arr_hash_elem_ty(fhash2), arr_hash_elem_hash(fhash2), rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    materialize_aggregate_array_element_x86(fhash2)
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
+    em(0x59)  // pop rcx (index)
+    emit_load_var(lslot)  // rax = base pointer
+    let total_off = foff1 + foff2
+    if total_off != 0 { em(0x48); em(0x8d); em(0x80); em32(total_off) }  // lea rax,[rax+total_off]
+    if arr_hash_esiz(fhash2) == 8 {
+        em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+    } else {
+        em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
+    }
+}
+
 fn compile_field_array_array_store_x86() with IO, Mut, Panic, Div {
     // Handles: ident.field[outer_idx][inner_idx] = val
     let name_tok = EP
@@ -18105,6 +18683,133 @@ fn materialize_aggregate_array_element_a64(array_hash: i64) with Mut, Panic, Div
     em32(0xAA0003EA)
     emit_load_var_a64(dst_slot)
     emit_copy_agg_to_ptr_a64(6, elem_hash)
+}
+
+// ARRAY[idx].field(.field)* = expr — store into a struct element of an array.
+// Array-of-struct slots hold 8-byte pointers to heap-materialized struct copies
+// (see materialize_aggregate_array_element_x86), so the element pointer is
+// [base + idx*8]; we then add the inline field-chain offset and store at the
+// leaf. Distinct from compile_indexed_field_field_store_x86 (root struct's array
+// field) and compile_nested_field_store_x86 (root struct base, no index).
+fn compile_array_elem_field_store_x86() with IO, Mut, Panic, Div {
+    let name_tok = EP
+    let ns = TS[EP as usize]
+    let ne = TE[EP as usize]
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    var array_hash: i64 = 0
+    var is_global: i64 = 0
+    let gi = gl_find(ns, ne)
+    var lslot: i64 = 0 - 1
+    if gi >= 0 {
+        is_global = 1
+        array_hash = GL_TY_HASH[gi as usize]
+    } else {
+        lslot = var_find(ns, ne)
+        let lvi = var_find_idx(ns, ne)
+        if lslot < 0 || lvi < 0 {
+            tc_undefined_var(name_tok)
+            return
+        }
+        if VAR_TY[lvi as usize] == 8 {
+            array_hash = VAR_TY_HASH[lvi as usize]
+        } else if VAR_TY[lvi as usize] == 10 && ref_hash_inner_ty(VAR_TY_HASH[lvi as usize]) == 8 {
+            array_hash = ref_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+        } else {
+            tc_error(name_tok, "array-element field store requires an array of structs")
+            return
+        }
+    }
+    if arr_hash_elem_ty(array_hash) != 6 {
+        tc_error(name_tok, "array-element field store requires struct array element")
+        return
+    }
+    let elem_hash = arr_hash_elem_hash(array_hash)
+    var elem_si: i64 = 0 - 1
+    if elem_hash != 0 { elem_si = st_find(elem_hash) }
+    if elem_si < 0 {
+        tc_error(name_tok, "array-element field store requires a known struct element")
+        return
+    }
+
+    EP = EP + 1
+    EP = EP + 1
+    compile_or()
+    if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }
+    if TK[EP as usize] == 42 { EP = EP + 1 }
+    em(0x50)
+
+    var cur_si = elem_si
+    var total_off: i64 = 0
+    var leaf_ty: i64 = 0
+    var leaf_hash: i64 = 0
+    var leaf_tok: i64 = 0 - 1
+    var bad: bool = false
+    var done: bool = false
+    while done == false && TK[EP as usize] == 50 {
+        EP = EP + 1
+        leaf_tok = EP
+        let fns = TS[EP as usize]
+        let fne = TE[EP as usize]
+        let fh = gl_name_hash(fns, fne)
+        EP = EP + 1
+        ST_QUERY_NS = fns
+        ST_QUERY_NE = fne
+        let off = st_field_offset(cur_si, fh)
+        let fty = st_field_ty(cur_si, fh)
+        let fhash = st_field_hash(cur_si, fh)
+        ST_QUERY_NS = 0 - 1
+        ST_QUERY_NE = 0 - 1
+        if off < 0 {
+            tc_error(leaf_tok, "unknown field access")
+            bad = true
+            done = true
+        } else {
+            total_off = total_off + off
+            if TK[EP as usize] == 16 {
+                leaf_ty = fty
+                leaf_hash = fhash
+                done = true
+            } else {
+                let nsi = st_find(fhash)
+                if nsi < 0 {
+                    tc_error(leaf_tok, "array-element field store requires inline struct field")
+                    bad = true
+                    done = true
+                } else {
+                    cur_si = nsi
+                }
+            }
+        }
+    }
+    if bad {
+        em(0x58)
+        return
+    }
+    if TK[EP as usize] == 16 { EP = EP + 1 }
+
+    compile_or()
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    if leaf_ty != 0 && ty_eq(leaf_ty, leaf_hash, rhs_ty, rhs_ty_hash) == false {
+        tc_error_hard(EP - 1, "assignment type mismatch")
+    }
+    em(0x48); em(0x89); em(0xc2)
+    em(0x59)
+    if is_global == 1 {
+        let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
+        em(0x48); em(0xb8); em64(base)
+    } else {
+        emit_load_var(lslot)
+    }
+    em(0x48); em(0x8b); em(0x04); em(0xc8)
+    if total_off != 0 { em(0x48); em(0x8d); em(0x80); em32(total_off) }
+    if leaf_ty == 8 || type_is_option_inline(leaf_ty, leaf_hash) || leaf_ty == 6 || knowledge_hash_is(leaf_hash) {
+        emit_copy_agg_to_ptr_x86(leaf_ty, leaf_hash)
+    } else {
+        em(0x48); em(0x89); em(0x10)
+    }
 }
 
 fn compile_indexed_field_field_store_x86() with IO, Mut, Panic, Div {
@@ -18739,6 +19444,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     decl_ty = 2
                     decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
                 }
+                if decl_ty == 0 && decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
+                    decl_ty = 2
+                }
                 if decl_ty == 2 { decl_is_f64 = 1 }
                 else { decl_is_f64 = 0 }
                 EP = SCAN_TY_NEXT
@@ -18748,11 +19456,17 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         var has_eq: i64 = 0
         if TK[EP as usize] == 16 { EP = EP + 1; has_eq = 1 }
         if is_arr == 1 && arr_len > 0 && TK[EP as usize] == 41 && array_init_is_repeat(EP) {
-            // Local array: allocate slots, skip initializer [0; N], store lea
-            // Skip [0; N] or [val; N] initializer
+            // Local array with repeat initializer [V; N]: splat V into every slot.
+            // (Previously V was SKIPPED and the slots were always zero-filled — the
+            //  [V;N] non-zero-splat miscompile. We now mirror the already-correct
+            //  global path (emit_global_inits_x86): compile V into rax, then rep-store.
+            //  Byte-element arrays keep the zero-fill — non-zero byte splat is a
+            //  documented remaining gap, so this is no regression for them.)
             EP = EP + 1  // skip [
+            let val_ep = EP                       // remember where the fill value V starts
             while ep_before_body_close() && TK[EP as usize] != 42 && TK[EP as usize] != 0 { EP = EP + 1 }
             if TK[EP as usize] == 42 { EP = EP + 1 }  // skip ]
+            let after_ep = EP
             var nslots = arr_len
             if arr_esiz == 1 { nslots = (arr_len + 7) / 8 }
             let ptr_slot = var_add_arr(ns, ne, nslots, arr_esiz, arr_hash_elem_ty(decl_ty_hash))
@@ -18761,19 +19475,34 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             VAR_TY[arr_vi as usize] = 8
             VAR_TY_HASH[arr_vi as usize] = decl_ty_hash
             VAR_MUT[arr_vi as usize] = decl_is_mut
-            // Zero-init the array slots using rep stosq (compact: 3 instrs vs N*2 instrs)
             // Array slots: base..base+nslots-1, lowest addr = rbp-(base+nslots-1)*8
             // rep stosq: store rax to [rdi], rdi += 8, rcx--; repeats rcx times (DF=0 → ascending)
             let base = ptr_slot - nslots
+            // Compute the fill value into rax. For 8-byte elements (i64/f64/ptr) splat
+            // the real V; var_add_arr emits no code and the rdi setup below does not
+            // clobber rax, so V survives into the rep-store.
+            var fill_zero: i64 = 1
+            if arr_esiz != 1 {
+                EP = val_ep
+                compile_or()
+                let v_is_f64 = EXPR_IS_F64
+                EP = after_ep
+                if v_is_f64 == 1 {
+                    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
+                }
+                fill_zero = 0
+            }
             if LAST_LOCAL_BSS_SPILL != 0 {
                 em(0x48); em(0xbf); em64(LAST_LOCAL_BSS_ADDR)
             } else {
                 em(0x48); em(0x8d); em(0xbd)  // lea rdi, [rbp + disp32]  (lowest array addr)
                 em32(0 - (base + nslots - 1) * 8)
             }
-            em(0x48); em(0x31); em(0xc0)  // xor rax, rax
+            if fill_zero == 1 {
+                em(0x48); em(0x31); em(0xc0)  // xor rax, rax (byte-array path: zero-fill)
+            }
             em(0xb9); em32(nslots)         // mov ecx, nslots (zero-extends to rcx)
-            em(0xf3); em(0x48); em(0xab)  // rep stosq
+            em(0xf3); em(0x48); em(0xab)  // rep stosq (splats rax across all slots)
             // Store lea (pointer to array start) in ptr_slot
             // Array slots are base..base+nslots-1, addresses [rbp-base*8]..[rbp-(base+nslots-1)*8]
             // Pointer must point to lowest address so arr[i] = [ptr + i*8] addresses upward
@@ -18802,7 +19531,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 if type_has_knowledge(decl_ty, decl_ty_hash) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                     tc_epistemic_boundary(EP)
                 } else {
-                    tc_error_hard(EP - 1, "initializer type does not match declaration")
+                    tc_decl_init_mismatch(EP - 1, decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH)
                 }
             }
             // Observation boundary: Unobserved<T> assigned to non-Unobserved binding
@@ -19030,12 +19759,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 // Set linear/affine flag if RHS was a linear/affine struct literal
                 VAR_LINEAR[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_LINEAR
                 VAR_AFFINE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_AFFINE
-                // Set unit hash for unit-typed variables (e.g. let mass: mg = 5.0)
-                // decl_ty == 2 and decl_ty_hash == hash("mg") for unit annotations
-                if decl_ty == 2 && decl_ty_hash != 0 {
+                // Set unit hash for unit-typed variables (e.g. let mass: mg = 5.0, let e: J = 1.0)
+                if decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = decl_ty_hash
-                    // Gen 19: also propagate RHS expression unit dim if annotation is a known unit
-                    // (unit_lookup_dim returns 0 for unknown names — no-op in that case)
+                } else if decl_ty == 0 && decl_ty_hash == 0 && EXPR_UNIT != 0 {
+                    VAR_UNIT[(VAR_COUNT - 1) as usize] = EXPR_UNIT
                 }
                 // β⁴/β⁵: capture variance and sensitivity shadow slots into the new variable
                 // Mutable f64 vars get a fixed runtime slot so variance_of() works across loop iterations
@@ -19127,6 +19855,18 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         return
     }
 
+    // name.f1.f2[idx] = expr through a pointer var (auto-deref). Value-struct roots
+    // fall through to the generic path, which already handles them correctly.
+    if stmt_is_field_field_array_store_shape(EP) && token_chain_root_is_pointer(EP) {
+        compile_autoderef_field_field_array_store_x86()
+        return
+    }
+    // name.f1.f2 = expr through a pointer var (auto-deref). Value-struct roots fall
+    // through to the generic path unchanged.
+    if stmt_is_field_field_store_shape(EP) && token_chain_root_is_pointer(EP) {
+        compile_autoderef_field_field_store_x86()
+        return
+    }
     // x.field[idx] = expr
     if stmt_is_field_array_store(EP) {
         if current_fn_allows_mutation() == false {
@@ -19325,6 +20065,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         }
         return
     }
+    // ARRAY[idx].field(.field)* = expr (store into struct element of an array)
+    if stmt_is_array_elem_field_store(EP) {
+        compile_array_elem_field_store_x86()
+        return
+    }
     // ARRAY[idx] = expr (global array write)
     if stmt_is_array_store(EP) {
         let name_tok = EP
@@ -19465,6 +20210,16 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         } else {
             tc_undefined_var(name_tok)
         }
+        return
+    }
+    // (*name).f1.f2[idx] = expr  (two-level nested deref store into an array field)
+    if stmt_is_deref_field_field_array_store(EP) {
+        compile_deref_field_field_array_store_x86()
+        return
+    }
+    // (*name).f1.f2 = expr  (two-level nested deref store)
+    if stmt_is_deref_field_field_store(EP) {
+        compile_deref_field_field_store_x86()
         return
     }
     // (*PTR).field = expr
@@ -21855,7 +22610,10 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                         } else if qtk == 3 {
                             // Identifier arg — check if it's a nested call
                             if q + 1 < TC && TK[(q + 1) as usize] == 6 {
-                                // Nested function call: look up callee return type
+                                // Nested function call: look up callee return type.
+                                // Builtin measure()/measured() is not in FN_*; handle it here so
+                                // calls like f(measure(10.0, uncertainty: 5.0)) keep the source
+                                // confidence instead of falling back to 1000.
                                 let nns = TS[q as usize]
                                 let nne = TE[q as usize]
                                 var nfj: i64 = 0
@@ -21869,6 +22627,29 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                                         break
                                     }
                                     nfj = nfj + 1
+                                }
+                                if nested_conf == 0 && (src_match(nns, nne - nns, "measure") || src_match(nns, nne - nns, "measured")) {
+                                    nested_conf = 990
+                                    var nmq: i64 = q + 2
+                                    var nm_val_tok: i64 = -1
+                                    var nm_unc_tok: i64 = -1
+                                    var nm_depth: i64 = 1
+                                    while nmq < TC && nm_depth > 0 {
+                                        if TK[nmq as usize] == 6 { nm_depth = nm_depth + 1 }
+                                        if TK[nmq as usize] == 7 { nm_depth = nm_depth - 1 }
+                                        if nm_depth > 0 && (TK[nmq as usize] == 53 || TK[nmq as usize] == 4) {
+                                            if nm_val_tok < 0 { nm_val_tok = nmq }
+                                            else if nm_unc_tok < 0 { nm_unc_tok = nmq }
+                                        }
+                                        nmq = nmq + 1
+                                    }
+                                    if nm_val_tok >= 0 && nm_unc_tok >= 0 {
+                                        let nm_eps_scaled = infer_measure_eps_scaled(nm_val_tok, nm_unc_tok)
+                                        if nm_eps_scaled >= 0 {
+                                            nested_conf = 1000 - (nm_eps_scaled / 1000)
+                                            if nested_conf < 0 { nested_conf = 0 }
+                                        }
+                                    }
                                 }
                                 // Gen 11: nested call not in FN_NAME → built-in fallback
                                 if nested_conf == 0 { nested_conf = 1000 }
@@ -22275,15 +23056,17 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                             EXPR_CONF[p as usize] = 1000
                             refine_changed = refine_changed + 1
                         } else {
-                            var rfj: i64 = 0
-                            while rfj < FN_COUNT {
-                                if name_eq(FN_NS[rfj as usize], FN_NE[rfj as usize], rns, rne) {
-                                    EXPR_ETY[p as usize] = ety_from_tnk(FN_RET_TY[rfj as usize])
-                                    EXPR_CONF[p as usize] = FN_EFF_CONF[rfj as usize]  // Gen 16 Track A: propagate actual effect conf
-                                    refine_changed = refine_changed + 1
-                                    break
+                            if !(p + 1 < TC && TK[(p + 1) as usize] == 6) {
+                                var rfj: i64 = 0
+                                while rfj < FN_COUNT {
+                                    if name_eq(FN_NS[rfj as usize], FN_NE[rfj as usize], rns, rne) {
+                                        EXPR_ETY[p as usize] = ety_from_tnk(FN_RET_TY[rfj as usize])
+                                        EXPR_CONF[p as usize] = FN_EFF_CONF[rfj as usize]  // Gen 16 Track A: propagate actual effect conf
+                                        refine_changed = refine_changed + 1
+                                        break
+                                    }
+                                    rfj = rfj + 1
                                 }
-                                rfj = rfj + 1
                             }
                             // Try struct name table
                             if EXPR_CONF[p as usize] < GATE_THRESHOLD {
@@ -23586,23 +24369,31 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 let une = TE[p as usize]
                 let uhash = gl_name_hash(uns, une)
                 p = p + 1  // skip NAME
-                // Check for '= SCALE * BASE;' form
+                // Check for '= unit_expr;' form. Supports SCALE * BASE and m / s derived units.
                 if p < TC && TK[p as usize] == 16 {
-                    // = expr * base_unit ; — inherit base unit dimension
                     p = p + 1  // skip '='
-                    // Skip scale factor (numeric literal(s))
                     while p < TC && (TK[p as usize] == 4 || TK[p as usize] == 53 || TK[p as usize] == 50 || TK[p as usize] == 19) { p = p + 1 }
-                    // Expect ident (base unit name)
+                    var derived_dim: i64 = 0
                     if p < TC && TK[p as usize] == 3 {
                         let buns = TS[p as usize]
                         let bune = TE[p as usize]
                         let base_hash = gl_name_hash(buns, bune)
-                        let base_dim = unit_lookup_dim(base_hash)
-                        unit_register_h(uhash, base_dim)
+                        derived_dim = unit_lookup_dim(base_hash)
                         p = p + 1
-                    } else {
-                        unit_register_h(uhash, 0)  // unknown dim, register as dimensionless
+                        while p < TC && (TK[p as usize] == 19 || TK[p as usize] == 20) {
+                            let unit_op = TK[p as usize]
+                            p = p + 1
+                            while p < TC && (TK[p as usize] == 4 || TK[p as usize] == 53 || TK[p as usize] == 50) { p = p + 1 }
+                            if p < TC && TK[p as usize] == 3 {
+                                let rhs_hash = gl_name_hash(TS[p as usize], TE[p as usize])
+                                let rhs_dim = unit_lookup_dim(rhs_hash)
+                                if unit_op == 19 { derived_dim = dim_add(derived_dim, rhs_dim) }
+                                else { derived_dim = dim_sub(derived_dim, rhs_dim) }
+                                p = p + 1
+                            }
+                        }
                     }
+                    unit_register_h(uhash, derived_dim)
                 } else {
                     // Plain 'unit NAME;' — look up dim from preloaded table (may be 0 if new)
                     let existing_dim = unit_lookup_dim(uhash)
@@ -25375,6 +26166,16 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     print(" main=fn"); print_int(main_fn); print(" patches="); print_int(PATCH_COUNT)
     print(" gates[direct="); print_int(EPIST_GATES_DIRECT)
     print(" guarded="); print_int(EPIST_GATES_GUARDED); print("]\n")
+    if CLI_DEBUG_FN_MAP != 0 {
+        var map_i: i64 = 0
+        while map_i < FN_COUNT {
+            print("fnmap fn="); print_int(map_i)
+            print(" off="); print_int(FN_OFF[map_i as usize])
+            print(" name="); print_fn_name(map_i)
+            print("\n")
+            map_i = map_i + 1
+        }
+    }
     if CLI_R15_MONITOR != 0 {
         print("r15_monitor: "); print_int(R15_GATE_COUNT); print(" sites instrumented")
         print(", side_table_size="); print_int(R15_GATE_COUNT * 8); print(" bytes")
@@ -28354,7 +29155,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     SCAN_TY = 0
                     SCAN_TY_HASH = 0
                 }
-                if (SCAN_TY == 0 || SCAN_TY == 2) && unit_lookup_dim(SCAN_TY_HASH) != 0 && EXPR_UNIT != SCAN_TY_HASH {
+                if (SCAN_TY == 0 || SCAN_TY == 2) && unit_call_arg_mismatch(SCAN_TY_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
                     tc_linear_violation(call_tok, "unit mismatch in call argument")
                 }
                 if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
@@ -29885,6 +30686,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     decl_ty = 2
                     decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
                 }
+                if decl_ty == 0 && decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
+                    decl_ty = 2
+                }
                 if decl_ty == 2 { decl_is_f64 = 1 }
                 else { decl_is_f64 = 0 }
                 EP = SCAN_TY_NEXT
@@ -29930,7 +30734,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 if type_has_knowledge(decl_ty, decl_ty_hash) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                     tc_epistemic_boundary(EP)
                 } else {
-                    tc_error(EP - 1, "initializer type does not match declaration")
+                    tc_decl_init_mismatch(EP - 1, decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH)
                 }
             }
             if type_is_slice_ref(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_slice_ref(EXPR_TY, EXPR_TY_HASH)) {
@@ -33181,6 +33985,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
 
     CLI_SHOW_AST = 0
     CLI_SHOW_TYPES = 0
+    CLI_DEBUG_FN_MAP = 0
     CLI_R15_MONITOR = 0
     CLI_DUMP_CONF_JSON = 0
     CLI_EMIT_ECONF = 0
@@ -33194,6 +33999,9 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         let flag = get_arg(arg_i)
         if cli_arg_eq(flag, "--show-ast") {
             CLI_SHOW_AST = 1
+        } else {
+        if cli_arg_eq(flag, "--debug-fn-map") {
+            CLI_DEBUG_FN_MAP = 1
         } else {
         if cli_arg_eq(flag, "--r15-monitor") {
             CLI_R15_MONITOR = 1
@@ -33248,7 +34056,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
                     arg_i = arg_i + 1
                 }
             }
-        } } } } } }
+        } } } } } } }
         arg_i = arg_i + 1
     }
 

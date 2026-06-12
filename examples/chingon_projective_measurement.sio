@@ -1,0 +1,168 @@
+//@ run-pass
+//! examples/chingon_projective_measurement.sio
+//!
+//! Chingon Projective Measurement (Cayley-Dickson level 6, dim 64).
+//!
+//!   ℝ → ℂ → ℍ → 𝕆 → 𝕊 → 𝕋 → 𝕀
+//!   L0  L1  L2  L3  L4   L5   L6
+//!  d 1   2   4   8   16   32   64
+//!
+//! Third rung up the projective-measurement ladder.  We replay the
+//! sedenion / pathion experiments to probe whether the Cayley-Dickson
+//! tower has any "ceiling" effect on either:
+//!   (a) erasure-fraction preservation under tower-lifting, or
+//!   (b) appearance of strictly larger native ZDs at each level.
+//!
+//! Four cases:
+//!   (1) A1 = e_3 + e_10  — sedenion ZD lifted through 𝕋 into 𝕀.
+//!       Schafer doubling predicts kernel = 4*4 = 16 (the L4 → L5 → L6
+//!       doubling of the 4-D sedenion right-annihilator), rank = 48.
+//!   (2) A2 = e_3 + e_18  — pathion-native ZD lifted into 𝕀.
+//!       Doubling of pathion 12-D kernel predicts 24, rank = 40.
+//!   (3) A3 = e_3 + e_34  — a candidate native chingon ZD: lo = 3 in
+//!       lower 𝕋, hi = 34 = 32 + 2 in upper 𝕋.  XOR-label = 33 ≠ 32.
+//!       Kernel dimension measured directly — not derivable from lower
+//!       levels and not predicted in advance.
+//!   (4) X = e_1  — invertible imaginary unit, rank = 64.
+//!
+//! Reading: the experiment tests whether erasure fractions stratify
+//! cleanly across the tower (25% — 25% — 37.5% — ?) or whether L6
+//! introduces a new structural regime.  No Heisenberg claim: for these
+//! zero-divisor generators L_A is real-linear and non-unitary (singular);
+//! the unit control e_1 gives an orthogonal L_{e_1}.
+
+use algebra::cayley_dickson::{cd_mul, cd_basis, cd_zero, CDElement}
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// Build the 64x64 matrix where column k = L_z(e_k).  Row-major M[64*i+k].
+fn build_left_mult_matrix_64(z: CDElement, out: &![f64; 4096]) with Mut, Div, Panic {
+    var k: i64 = 0
+    while k < 64 {
+        let ek = cd_basis(6, k as i32)
+        let prod = cd_mul(z, ek)
+        var i: i64 = 0
+        while i < 64 {
+            (*out)[(64 * i + k) as usize] = prod.c[i as usize]
+            i = i + 1
+        }
+        k = k + 1
+    }
+}
+
+// Gauss elimination with partial pivoting on a 64x64 in-place matrix.
+fn rank_64x64(m: &![f64; 4096], tol: f64) -> i64 with Mut, Div, Panic {
+    var rank: i64 = 0
+    var row: i64 = 0
+    var col: i64 = 0
+    while col < 64 && row < 64 {
+        var pivot_row: i64 = 0 - 1
+        var best: f64 = tol
+        var r: i64 = row
+        while r < 64 {
+            let av = abs_f64((*m)[(64 * r + col) as usize])
+            if av > best { best = av; pivot_row = r }
+            r = r + 1
+        }
+        if pivot_row < 0 {
+            col = col + 1
+        } else {
+            if pivot_row != row {
+                var j: i64 = 0
+                while j < 64 {
+                    let a = (*m)[(64 * row + j) as usize]
+                    let b = (*m)[(64 * pivot_row + j) as usize]
+                    (*m)[(64 * row + j) as usize] = b
+                    (*m)[(64 * pivot_row + j) as usize] = a
+                    j = j + 1
+                }
+            }
+            let piv = (*m)[(64 * row + col) as usize]
+            var rr: i64 = row + 1
+            while rr < 64 {
+                let factor = (*m)[(64 * rr + col) as usize] / piv
+                var j: i64 = col
+                while j < 64 {
+                    let nv = (*m)[(64 * rr + j) as usize]
+                              - factor * (*m)[(64 * row + j) as usize]
+                    (*m)[(64 * rr + j) as usize] = nv
+                    j = j + 1
+                }
+                rr = rr + 1
+            }
+            rank = rank + 1
+            row = row + 1
+            col = col + 1
+        }
+    }
+    rank
+}
+
+fn measure(label: i64, idx_lo: i64, idx_hi: i64, expected_rank: i64) -> i64 with IO, Mut, Div, Panic {
+    var A: CDElement = cd_zero(6)
+    A.c[idx_lo as usize] = 1.0
+    A.c[idx_hi as usize] = 1.0
+    var M: [f64; 4096] = [0.0; 4096]
+    build_left_mult_matrix_64(A, &!M)
+    let r = rank_64x64(&!M, 1.0e-10)
+    let k = 64 - r
+    print("  case "); print(label); print(": A = e_")
+    print(idx_lo); print(" + e_"); print(idx_hi); print("  rank=")
+    print(r); print("  dim ker="); print(k)
+    if expected_rank >= 0 {
+        print("  (expected rank "); print(expected_rank); print(")")
+    }
+    println("")
+    r
+}
+
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println("  Chingon Projective Measurement on R^64  (Cayley-Dickson L6)")
+    println("================================================================")
+    println("  L_A(h) := cd_mul(A, h)   on   R^64 ~ 𝕀")
+    println("")
+
+    // (1) sedenion ZD twice-lifted (L4 -> L5 -> L6)
+    let r1 = measure(1, 3, 10, 48)
+    if r1 == 64 { println("  FAIL: sedenion-twice-lifted should be ZD"); return 1 }
+
+    // (2) pathion-native ZD lifted into chingon (L5 -> L6)
+    let r2 = measure(2, 3, 18, 40)
+    if r2 == 64 { println("  FAIL: pathion-lifted should be ZD"); return 1 }
+
+    // (3) candidate native chingon ZD — measurement only
+    let r3 = measure(3, 3, 34, 0 - 1)
+
+    // (4) control: invertible imaginary unit e_1
+    let X = cd_basis(6, 1)
+    var Mc: [f64; 4096] = [0.0; 4096]
+    build_left_mult_matrix_64(X, &!Mc)
+    let r4 = rank_64x64(&!Mc, 1.0e-10)
+    print("  case 4: A = e_1  rank="); print(r4)
+    println("  (expected 64)")
+    if r4 != 64 { println("  FAIL: e_1 should be invertible at L6"); return 1 }
+    println("")
+
+    println("================================================================")
+    println("  Summary (erasure = dim ker / 64):")
+    let k1 = 64 - r1
+    let k2 = 64 - r2
+    let k3 = 64 - r3
+    print("    sedenion-twice-lifted (e_3+e_10):  ker="); print(k1); println("/64")
+    print("    pathion-lifted        (e_3+e_18):  ker="); print(k2); println("/64")
+    print("    chingon-native        (e_3+e_34):  ker="); print(k3); println("/64")
+    println("================================================================")
+    println("  L4 sedenion canonical : 4/16  = 25.0%")
+    println("  L5 sedenion lifted    : 8/32  = 25.0%")
+    println("  L5 pathion native     : 12/32 = 37.5%")
+    println("  L6 sedenion 2x lifted : 16/64 = 25.0% (predicted)")
+    println("  L6 pathion lifted     : 24/64 = 37.5% (predicted)")
+    println("  L6 chingon native     : measured above")
+    println("================================================================")
+    println("  No Heisenberg claim: these ZD operators are non-unitary; the")
+    println("  uncertainty principle is a theorem about unitary evolution.")
+    println("================================================================")
+    0
+}

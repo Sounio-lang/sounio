@@ -19,10 +19,10 @@
 #
 # Two modes:
 #   plain  : <cnf> <lrat> <out> <name> <Module> <n> <k> <edgefile>
-#   SB-tri : <cnf> <lrat> <out> <name> <Module> <n> 4  <edgefile> <a> <b> <c>
+#   SB-tri : <cnf> <lrat> <out> <name> <Module> <n> <4|5> <edgefile> <a> <b> <c>
 #            (souc_sat triangle-precolour: vertices a,b,c fixed to colours 0,1,2;
-#             requires a,b,c pairwise adjacent; yields UNCONDITIONAL χ≥5 via the
-#             WLOG leg SounioSatColouringSB.not_colourable_of_unsat_tri).
+#             requires a,b,c pairwise adjacent; yields an unconditional no-k-colouring
+#             theorem via the matching WLOG leg in SounioSatColouringSB).
 set -euo pipefail
 
 CNF="$1"; LRAT="$2"; OUT="$3"; NAME="$4"; MODULE="$5"; N="$6"; K="$7"; EDGEFILE="$8"
@@ -34,8 +34,23 @@ TA="${9:-}"; TB="${10:-}"; TC="${11:-}"
 
 NCLS=$(awk '/^p cnf/ {print $4; exit}' "$CNF")
 SBMODE=0
+SB_CNF_FUNC=""
+SB_NOT_THEOREM=""
 if [[ -n "$TA" ]]; then
-  [[ "$K" == "4" ]] || { echo "error: SB-triangle mode requires k=4" >&2; exit 1; }
+  case "$K" in
+    4)
+      SB_CNF_FUNC="colourCNFsb"
+      SB_NOT_THEOREM="not_colourable_of_unsat_tri"
+      ;;
+    5)
+      SB_CNF_FUNC="colourCNFsb5"
+      SB_NOT_THEOREM="not_colourable5_of_unsat_tri"
+      ;;
+    *)
+      echo "error: SB-triangle mode requires k=4 or k=5" >&2
+      exit 1
+      ;;
+  esac
   SBMODE=1
 fi
 
@@ -100,7 +115,7 @@ cat <<EOF
 ]
 
 /-- Colouring CNF + souc_sat triangle-precolour SB units ($TA,$TB,$TC → 0,1,2). -/
-def ${NAME}_cnf : CNF Nat := colourCNFsb $TA $TB $TC $N ${NAME}_edges
+def ${NAME}_cnf : CNF Nat := $SB_CNF_FUNC $TA $TB $TC $N ${NAME}_edges
 
 def ${NAME}_lrat : String := "
 EOF
@@ -130,13 +145,13 @@ EOF
 if [[ $SBMODE == 1 ]]; then
 cat <<EOF
 
-/-- **χ ≥ $((K+1)) (unconditional).** Triangle $TA,$TB,$TC is pairwise adjacent, so its
+/-- **Finite graph lower bound.** Triangle $TA,$TB,$TC is pairwise adjacent, so its
 precolour is WLOG; hence no proper $K-colouring \`Fin $N → Fin $K\` exists. -/
 theorem ${NAME}_not_colourable :
     ¬ ∃ f : Fin $N → Fin $K,
         ∀ e ∈ ${NAME}_edges, ∀ (h1 : e.1 < $N) (h2 : e.2 < $N),
           f ⟨e.1, h1⟩ ≠ f ⟨e.2, h2⟩ :=
-  not_colourable_of_unsat_tri
+  $SB_NOT_THEOREM
     (by decide) (by decide) (by decide)
     (by native_decide) (by native_decide) (by native_decide)
     (by native_decide) ${NAME}_unsat
@@ -144,7 +159,7 @@ EOF
 else
 cat <<EOF
 
-/-- **χ ≥ $((K+1)).** No proper $K-colouring \`Fin $N → Fin $K\` exists. -/
+/-- **Finite graph lower bound.** No proper $K-colouring \`Fin $N → Fin $K\` exists. -/
 theorem ${NAME}_not_colourable :
     ¬ ∃ c : Fin $N → Fin $K,
         ∀ e ∈ ${NAME}_edges, ∀ (h1 : e.1 < $N) (h2 : e.2 < $N), c ⟨e.1, h1⟩ ≠ c ⟨e.2, h2⟩ :=

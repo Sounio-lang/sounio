@@ -1,0 +1,884 @@
+// stdlib/display/canvas_ext.sio — Extended canvas drawing primitives
+//
+// Adds antialiased lines, filled triangle, Surface→Canvas blit,
+// and Phong-shaded sphere primitive.
+//
+// Pixel format (same as canvas.sio): lower 32 bits = 0x00RRGGBB
+//   B in byte 0, G in byte 1, R in byte 2.
+
+use display::canvas::{Canvas, canvas_fill_rect}
+use graphics::surface::{Surface}
+
+// ============================================================
+// Internal helpers
+// ============================================================
+
+fn cext_clamp(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo { lo } else if v > hi { hi } else { v }
+}
+
+// Alpha-blend one color channel: (src*cov + dst*(255-cov)) / 255
+fn cext_blend_ch(dst: i64, src: i64, cov: i64) -> i64 with Div {
+    (src * cov + dst * (255 - cov)) / 255
+}
+
+// Read-modify-write a pixel at (x,y) with given RGB and coverage 0..255.
+fn canvas_blend_pixel(c: &!Canvas, x: i64, y: i64, r: i64, g: i64, b: i64, cov: i64) with Mut, Div {
+    if x < 0 || x >= c.width || y < 0 || y >= c.height { return }
+    let cv = cext_clamp(cov, 0, 255)
+    if cv == 0 { return }
+    let idx = y * c.width + x
+    let px = read_i64(c.pixels, idx)
+    let er = (px >> 16) & 0xFF
+    let eg = (px >> 8) & 0xFF
+    let eb = px & 0xFF
+    let nr = cext_blend_ch(er, r, cv)
+    let ng = cext_blend_ch(eg, g, cv)
+    let nb = cext_blend_ch(eb, b, cv)
+    write_i64(c.pixels, idx, nb | (ng << 8) | (nr << 16))
+}
+
+// ============================================================
+// Bayer ordered dithering — fakes alpha without per-pixel blend.
+// ============================================================
+//
+// Bayer 1973 4×4 matrix. Threshold (M4[x&3][y&3]+0.5)/16 ∈ (0,1).
+// If cov/255 < threshold the pixel is silently skipped; otherwise
+// drawn opaque. Gives ~16-level perceptually smooth transparency.
+//
+// Use instead of canvas_blend_pixel when many overlapping passes
+// over the same region make blending accumulate incorrectly.
+
+pub fn canvas_blend_pixel_bayer(c: &!Canvas, x: i64, y: i64, r: i64, g: i64, b: i64, cov: i64) with Mut {
+    if x < 0 || x >= c.width || y < 0 || y >= c.height { return }
+    // cov ∈ [0,255]; threshold is (M4+0.5)/16 * 255 → (M4*255 + 128) / 16
+    var m: [i64; 16] = [0, 8, 2, 10,  12, 4, 14, 6,  3, 11, 1, 9,  15, 7, 13, 5]
+    let cell = m[((y & 3) * 4 + (x & 3)) as usize]
+    let thresh = (cell * 255 + 128) / 16
+    if cov < thresh { return }
+    let idx = y * c.width + x
+    write_i64(c.pixels, idx, b | (g << 8) | (r << 16))
+}
+
+// ============================================================
+// Antialiased line — fixed-point coverage, x-major / y-major
+// ============================================================
+
+fn cext_line_aa_x(c: &!Canvas, ax: i64, ay: i64, bx: i64, by: i64, r: i64, g: i64, b: i64) with Mut, Div {
+    var x0 = ax
+    var y0 = ay
+    var x1 = bx
+    var y1 = by
+    if x0 > x1 {
+        let tx = x0
+        let ty = y0
+        x0 = x1
+        y0 = y1
+        x1 = tx
+        y1 = ty
+    }
+    let span = x1 - x0
+    if span == 0 { return }
+    let y_step = ((y1 - y0) * 256) / span
+    var y_fixed = y0 * 256
+    var x = x0
+    while x <= x1 {
+        let y_base = if y_fixed >= 0 { y_fixed / 256 } else { (y_fixed - 255) / 256 }
+        let frac   = y_fixed - y_base * 256
+        canvas_blend_pixel(c, x, y_base, r, g, b, 255 - frac)
+        if frac > 0 {
+            let y_next = if y_step >= 0 { y_base + 1 } else { y_base - 1 }
+            canvas_blend_pixel(c, x, y_next, r, g, b, frac)
+        }
+        y_fixed = y_fixed + y_step
+        x = x + 1
+    }
+}
+
+fn cext_line_aa_y(c: &!Canvas, ax: i64, ay: i64, bx: i64, by: i64, r: i64, g: i64, b: i64) with Mut, Div {
+    var x0 = ax
+    var y0 = ay
+    var x1 = bx
+    var y1 = by
+    if y0 > y1 {
+        let tx = x0
+        let ty = y0
+        x0 = x1
+        y0 = y1
+        x1 = tx
+        y1 = ty
+    }
+    let span = y1 - y0
+    if span == 0 { return }
+    let x_step = ((x1 - x0) * 256) / span
+    var x_fixed = x0 * 256
+    var y = y0
+    while y <= y1 {
+        let x_base = if x_fixed >= 0 { x_fixed / 256 } else { (x_fixed - 255) / 256 }
+        let frac   = x_fixed - x_base * 256
+        canvas_blend_pixel(c, x_base, y, r, g, b, 255 - frac)
+        if frac > 0 {
+            let x_next = if x_step >= 0 { x_base + 1 } else { x_base - 1 }
+            canvas_blend_pixel(c, x_next, y, r, g, b, frac)
+        }
+        x_fixed = x_fixed + x_step
+        y = y + 1
+    }
+}
+
+// Draw an antialiased line using fixed-point coverage blending.
+pub fn canvas_draw_line_aa(
+    c: &!Canvas,
+    x0: i64, y0: i64,
+    x1: i64, y1: i64,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    let dx = if x1 > x0 { x1 - x0 } else { x0 - x1 }
+    let dy = if y1 > y0 { y1 - y0 } else { y0 - y1 }
+    if dx == 0 {
+        let y_min = if y0 < y1 { y0 } else { y1 }
+        let y_max = if y0 > y1 { y0 } else { y1 }
+        canvas_fill_rect(c, x0, y_min, 1, y_max - y_min + 1, r, g, b)
+    } else if dy == 0 {
+        let x_min = if x0 < x1 { x0 } else { x1 }
+        let x_max = if x0 > x1 { x0 } else { x1 }
+        canvas_fill_rect(c, x_min, y0, x_max - x_min + 1, 1, r, g, b)
+    } else if dx >= dy {
+        cext_line_aa_x(c, x0, y0, x1, y1, r, g, b)
+    } else {
+        cext_line_aa_y(c, x0, y0, x1, y1, r, g, b)
+    }
+}
+
+// ============================================================
+// Filled triangle — barycentric scanline, no z-buffer
+// ============================================================
+
+fn cext_edge(ax: i64, ay: i64, bx: i64, by: i64, cx: i64, cy: i64) -> i64 {
+    (cx - ax) * (by - ay) - (cy - ay) * (bx - ax)
+}
+
+fn cext_min3(a: i64, b: i64, cc: i64) -> i64 {
+    let m = if a < b { a } else { b }
+    if m < cc { m } else { cc }
+}
+
+fn cext_max3(a: i64, b: i64, cc: i64) -> i64 {
+    let m = if a > b { a } else { b }
+    if m > cc { m } else { cc }
+}
+
+// Fill a solid-color triangle defined by three integer vertices.
+pub fn canvas_fill_triangle(
+    c: &!Canvas,
+    ax: i64, ay: i64,
+    bx: i64, by: i64,
+    ccx: i64, ccy: i64,
+    r: i64, g: i64, b: i64,
+) with Mut {
+    let area = cext_edge(ax, ay, bx, by, ccx, ccy)
+    if area == 0 { return }
+    let color = b | (g << 8) | (r << 16)
+
+    let min_x = cext_clamp(cext_min3(ax, bx, ccx), 0, c.width - 1)
+    let max_x = cext_clamp(cext_max3(ax, bx, ccx), 0, c.width - 1)
+    let min_y = cext_clamp(cext_min3(ay, by, ccy), 0, c.height - 1)
+    let max_y = cext_clamp(cext_max3(ay, by, ccy), 0, c.height - 1)
+
+    var py = min_y
+    while py <= max_y {
+        var px = min_x
+        while px <= max_x {
+            let w0 = cext_edge(bx, by, ccx, ccy, px, py)
+            let w1 = cext_edge(ccx, ccy, ax, ay, px, py)
+            let w2 = cext_edge(ax, ay, bx, by, px, py)
+            let inside = if area > 0 {
+                w0 >= 0 && w1 >= 0 && w2 >= 0
+            } else {
+                w0 <= 0 && w1 <= 0 && w2 <= 0
+            }
+            if inside {
+                write_i64(c.pixels, py * c.width + px, color)
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// ============================================================
+// Surface → Canvas blit
+// ============================================================
+//
+// Copies up to Surface.width × Surface.height pixels from a real
+// stdlib/graphics::surface::Surface (separate R,G,B,A i64 arrays, 0-255)
+// into the Canvas at offset (dst_x, dst_y), alpha blending each source pixel.
+// Pixels outside the canvas bounds are silently clipped.
+//
+// Note: takes surf by value because Surface is a large by-value struct
+// (compiler limitation with &Surface and large arrays).
+
+pub fn canvas_blit_surface(
+    c: &!Canvas,
+    sv: Surface,
+    dst_x: i64,
+    dst_y: i64,
+) with Mut, Div {
+    var sy: i64 = 0
+    while sy < sv.height {
+        var sx: i64 = 0
+        while sx < sv.width {
+            let cx = dst_x + sx
+            let cy = dst_y + sy
+            if cx >= 0 && cx < c.width && cy >= 0 && cy < c.height {
+                let idx = sy * sv.width + sx
+                let ri = sv.r[idx as usize]
+                let gi = sv.g[idx as usize]
+                let bi = sv.b[idx as usize]
+                let ai = sv.a[idx as usize]
+                canvas_blend_pixel(c, cx, cy, ri, gi, bi, ai)
+            }
+            sx = sx + 1
+        }
+        sy = sy + 1
+    }
+}
+
+// ============================================================
+// Phong-shaded sphere — for molecular / 3D atom rendering
+// ============================================================
+//
+// Light L = (0.447, -0.632, 0.632): upper-left-front, normalized.
+// Blinn-Phong half-vector H = normalize(L + V) ≈ (0.247, -0.350, 0.903).
+// Shading: ambient=0.32 + Lambertian diffuse + Blinn-Phong specular^32.
+// Soft rim darkening: (nz*0.35 + 0.65) keeps dark atoms visible.
+
+fn sph_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g: f64 = 0.6
+    g = (g + x / g) * 0.5
+    g = (g + x / g) * 0.5
+    g = (g + x / g) * 0.5
+    g = (g + x / g) * 0.5
+    g = (g + x / g) * 0.5
+    g
+}
+
+// Core sphere rasterizer — accepts pre-blended fog params for inline application.
+// one_ff / ff = (1 - fog_factor) / fog_factor computed by the caller.
+// fog_r/g/b = background colour to blend toward when ff > 0.
+fn canvas_sphere_shaded_inner(
+    c: &!Canvas,
+    cx: i64, cy: i64, r: i64,
+    base_r: i64, base_g: i64, base_b: i64,
+    one_ff: f64, ff: f64,
+    fog_r: f64, fog_g: f64, fog_b: f64,
+) with Mut, Div {
+    if r <= 0 { return }
+    let r_f: f64 = r as f64
+    let r2   = r * r
+
+    // Light direction — upper-left-front, normalised (0.447, -0.632, 0.632)
+    let lx: f64 =         0.447
+    let ly: f64 = 0.0 - 0.632
+    // Blinn-Phong half-vector H = normalize(L + V), V = (0,0,1)
+    // H ≈ (0.247, -0.350, 0.903) — precomputed constant
+    let hx: f64 =         0.247
+    let hy: f64 = 0.0 - 0.350
+    let hz: f64 =         0.903
+
+    let ambient:  f64 = 0.32
+    let spec_str: f64 = 0.90
+
+    let x_min = cext_clamp(cx - r, 0, c.width  - 1)
+    let x_max = cext_clamp(cx + r, 0, c.width  - 1)
+    let y_min = cext_clamp(cy - r, 0, c.height - 1)
+    let y_max = cext_clamp(cy + r, 0, c.height - 1)
+
+    var py = y_min
+    while py <= y_max {
+        var px = x_min
+        while px <= x_max {
+            let dx = px - cx
+            let dy = py - cy
+            if dx * dx + dy * dy <= r2 {
+                let nx_f = (dx as f64) / r_f
+                let ny_f = (dy as f64) / r_f
+                let nz2  = 1.0 - nx_f * nx_f - ny_f * ny_f
+                let nz_f = sph_sqrt(nz2)
+
+                // Lambertian diffuse: N · L (lz=0.632)
+                let ndotl   = nx_f * lx + ny_f * ly + nz_f * 0.632
+                let diffuse = if ndotl > 0.0 { ndotl } else { 0.0 }
+
+                // Blinn-Phong specular: (N · H)^32
+                let ndoth = nx_f * hx + ny_f * hy + nz_f * hz
+                let s1 = if ndoth > 0.0 { ndoth } else { 0.0 }
+                let s2 = s1 * s1
+                let s4 = s2 * s2
+                let s8 = s4 * s4
+                let s16 = s8 * s8
+                let s32 = s16 * s16
+
+                // Soft rim: keeps silhouette visible (nz*0.35+0.65 maps [0,1]→[0.65,1])
+                let rim = nz_f * 0.35 + 0.65
+
+                let intensity = (ambient + (1.0 - ambient) * diffuse) * rim
+
+                let fr_s = (base_r as f64) * intensity + 255.0 * spec_str * s32
+                let fg_s = (base_g as f64) * intensity + 255.0 * spec_str * s32
+                let fb_s = (base_b as f64) * intensity + 255.0 * spec_str * s32
+
+                // Apply fog blend toward background colour
+                let out_r = fr_s * one_ff + fog_r * ff
+                let out_g = fg_s * one_ff + fog_g * ff
+                let out_b = fb_s * one_ff + fog_b * ff
+
+                let ir = if out_r > 255.0 { 255 } else { out_r as i64 }
+                let ig = if out_g > 255.0 { 255 } else { out_g as i64 }
+                let ib = if out_b > 255.0 { 255 } else { out_b as i64 }
+
+                write_i64(c.pixels, py * c.width + px, ib | (ig << 8) | (ir << 16))
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// Sphere shaded with Blinn-Phong + linear depth fog + precomputed ambient occlusion.
+//   depth      — world-space depth (positive = in front of camera)
+//   fog_near   — depth at which fog starts (fog disabled when fog_far <= fog_near)
+//   fog_far    — depth at which object is fully fogged
+//   fog_r/g/b  — background/fog colour (0-255, as f64)
+//   ao_factor  — precomputed AO in [0,1]; 0 = fully lit, 1 = fully occluded
+pub fn canvas_sphere_shaded_fog(
+    c: &!Canvas,
+    cx: i64, cy: i64, r: i64,
+    base_r: i64, base_g: i64, base_b: i64,
+    depth: f64,
+    fog_near: f64, fog_far: f64,
+    fog_r: f64, fog_g: f64, fog_b: f64,
+    ao_factor: f64,
+) with Mut, Div {
+    let ff: f64 = if fog_far > fog_near {
+        let f = (depth - fog_near) / (fog_far - fog_near)
+        if f < 0.0 { 0.0 } else if f > 1.0 { 1.0 } else { f }
+    } else { 0.0 }
+    let one_ff = 1.0 - ff
+    // AO darkening applied to base colour before Phong shading
+    let ao_scale = 1.0 - 0.40 * ao_factor
+    let adj_r: i64 = if (base_r as f64) * ao_scale > 255.0 { 255 } else { ((base_r as f64) * ao_scale) as i64 }
+    let adj_g: i64 = if (base_g as f64) * ao_scale > 255.0 { 255 } else { ((base_g as f64) * ao_scale) as i64 }
+    let adj_b: i64 = if (base_b as f64) * ao_scale > 255.0 { 255 } else { ((base_b as f64) * ao_scale) as i64 }
+    canvas_sphere_shaded_inner(c, cx, cy, r, adj_r, adj_g, adj_b, one_ff, ff, fog_r, fog_g, fog_b)
+}
+
+// Renders a Blinn-Phong-shaded sphere at (cx,cy) with radius r (no fog, no AO).
+pub fn canvas_sphere_shaded(
+    c: &!Canvas,
+    cx: i64, cy: i64, r: i64,
+    base_r: i64, base_g: i64, base_b: i64,
+) with Mut, Div {
+    canvas_sphere_shaded_inner(c, cx, cy, r, base_r, base_g, base_b, 1.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+// ============================================================
+// SSS (subsurface-scattering) sphere — wrap lighting + back-scatter
+// ============================================================
+//
+// Green 2004 "wrap lighting" + back-scatter term for organic/biological
+// atom glow. Produces soft translucent halo when lit from behind.
+//
+//   base_r/g/b  — surface CPK colour
+//   trans_r/g/b — transmitted/scatter tint (glow from inside)
+//                 e.g., O atom: base=(220,50,50) trans=(255,160,120)
+//
+// Wrap diffuse: diff = clamp((N·L + 0.5) / 1.5, 0, 1)²
+// Back-scatter: back = max(0, -N·L + 0.2)³ × 0.35  (rear translucency)
+
+pub fn canvas_sphere_sss(
+    c: &!Canvas,
+    cx: i64, cy: i64, r: i64,
+    base_r: i64, base_g: i64, base_b: i64,
+    trans_r: i64, trans_g: i64, trans_b: i64,
+) with Mut, Div {
+    if r <= 0 { return }
+    let r_f = r as f64
+    let r2  = r * r
+
+    let lx: f64 =         0.447
+    let ly: f64 = 0.0 - 0.632
+    // lz = 0.632 (used inline below)
+    let hx: f64 =         0.247
+    let hy: f64 = 0.0 - 0.350
+    let hz: f64 =         0.903
+
+    let ambient:  f64 = 0.28
+    let spec_str: f64 = 0.80
+
+    let x_min = cext_clamp(cx - r, 0, c.width  - 1)
+    let x_max = cext_clamp(cx + r, 0, c.width  - 1)
+    let y_min = cext_clamp(cy - r, 0, c.height - 1)
+    let y_max = cext_clamp(cy + r, 0, c.height - 1)
+
+    var py = y_min
+    while py <= y_max {
+        var px = x_min
+        while px <= x_max {
+            let dx = px - cx
+            let dy = py - cy
+            if dx * dx + dy * dy <= r2 {
+                let nx_f = (dx as f64) / r_f
+                let ny_f = (dy as f64) / r_f
+                let nz2  = 1.0 - nx_f * nx_f - ny_f * ny_f
+                let nz_f = sph_sqrt(nz2)
+
+                let ndotl_raw = nx_f * lx + ny_f * ly + nz_f * 0.632
+
+                // Wrap lighting: (N·L + wrap) / (1 + wrap), clamped, squared
+                let wrap_num = ndotl_raw + 0.5
+                let wrap_raw = wrap_num / 1.5
+                let wrap_cl  = if wrap_raw < 0.0 { 0.0 } else if wrap_raw > 1.0 { 1.0 } else { wrap_raw }
+                let diff = wrap_cl * wrap_cl
+
+                // Back-scatter: strongest when N·L ≈ -1 (back-lit)
+                let back_raw = 0.0 - ndotl_raw + 0.2
+                let back_cl  = if back_raw < 0.0 { 0.0 } else { back_raw }
+                let back2 = back_cl * back_cl
+                let back  = back2 * back_cl * 0.35
+
+                // Specular (N·H)^32
+                let ndoth = nx_f * hx + ny_f * hy + nz_f * hz
+                let s1 = if ndoth > 0.0 { ndoth } else { 0.0 }
+                let s2 = s1 * s1; let s4 = s2 * s2
+                let s8 = s4 * s4; let s16 = s8 * s8; let s32 = s16 * s16
+
+                let intensity = ambient + (1.0 - ambient) * diff
+
+                let fr = (base_r  as f64) * intensity + (trans_r as f64) * back + 255.0 * spec_str * s32
+                let fg = (base_g  as f64) * intensity + (trans_g as f64) * back + 255.0 * spec_str * s32
+                let fb = (base_b  as f64) * intensity + (trans_b as f64) * back + 255.0 * spec_str * s32
+
+                let ir = if fr > 255.0 { 255 } else { fr as i64 }
+                let ig = if fg > 255.0 { 255 } else { fg as i64 }
+                let ib = if fb > 255.0 { 255 } else { fb as i64 }
+                write_i64(c.pixels, py * c.width + px, ib | (ig << 8) | (ir << 16))
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// ============================================================
+// Depth-buffer silhouette outline
+// ============================================================
+//
+// Post-process pass: for each foreground pixel whose 4-neighbors
+// include a background pixel, overwrite with the outline colour.
+// depth_buf must be the same buffer used for rasterization
+// (cleared with r3d_depth_buf_clear which writes +Inf = 0x7FF0000000000000).
+// Call AFTER all rasterization, BEFORE window_present.
+
+pub fn canvas_depth_outline(
+    c: &!Canvas,
+    depth_buf: *mut i64,
+    r: i64, g: i64, b: i64,
+) with Mut {
+    let bg: i64 = 0x7FF0000000000000
+    var py: i64 = 1
+    while py < c.height - 1 {
+        var px: i64 = 1
+        while px < c.width - 1 {
+            let d = read_i64(depth_buf, py * c.width + px)
+            if d != bg {
+                let dn = read_i64(depth_buf, (py - 1) * c.width + px)
+                let ds = read_i64(depth_buf, (py + 1) * c.width + px)
+                let dw = read_i64(depth_buf, py * c.width + (px - 1))
+                let de = read_i64(depth_buf, py * c.width + (px + 1))
+                if dn == bg || ds == bg || dw == bg || de == bg {
+                    write_i64(c.pixels, py * c.width + px, b | (g << 8) | (r << 16))
+                }
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// ============================================================
+// Cylinder impostor bond — ray-cylinder intersection per pixel
+// ============================================================
+//
+// Renders a Blinn-Phong-shaded cylinder between two 3D endpoints using
+// per-pixel ray-cylinder intersection.
+//
+// Camera model matches renderer3d.sio:
+//   ray origin  = (cam_px, cam_py, cam_pz)
+//   ray direction for pixel (px, py):
+//     Dx = (px - cw/2) / focal
+//     Dy = -(py - ch/2) / focal
+//     Dz = -1.0  (camera looks toward -Z)
+//
+// Cobb (2024) / Cambridge SMAG quadratic coefficients:
+//   A_unit = normalize(B - A)
+//   Δ = ray_origin - A
+//   a = 1 - (D·A_unit)²
+//   b = 2·[(D·Δ) - (D·A_unit)(A_unit·Δ)]
+//   c = |Δ|² - (A_unit·Δ)² - r_w²
+//
+// r_w = world-space cylinder radius.
+
+fn cyl_dot(ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64) -> f64 {
+    ax * bx + ay * by + az * bz
+}
+
+fn cyl_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g: f64 = 0.6
+    var i: i64 = 0
+    while i < 8 {
+        g = (g + x / g) * 0.5
+        i = i + 1
+    }
+    g
+}
+
+// Shade one cylinder pixel with Blinn-Phong (same constants as sphere).
+fn cyl_shade(base_r: i64, base_g: i64, base_b: i64, nx: f64, ny: f64, nz: f64) -> i64 with Div {
+    let lx: f64 = 0.447; let ly: f64 = 0.0 - 0.632; let lz: f64 = 0.632
+    let hx: f64 = 0.247; let hy: f64 = 0.0 - 0.350; let hz: f64 = 0.903
+    let diffuse = cyl_dot(nx, ny, nz, lx, ly, lz)
+    let d = if diffuse < 0.0 { 0.0 } else { diffuse }
+    let ndoth = cyl_dot(nx, ny, nz, hx, hy, hz)
+    let s = if ndoth < 0.0 { 0.0 } else { ndoth }
+    let s2 = s * s; let s4 = s2 * s2; let s8 = s4 * s4; let s32 = s8 * s8 * s8 * s8
+    let intensity = 0.32 + 0.68 * d
+    let spec = 0.90 * s32
+    let fr = if (base_r as f64 * intensity + 255.0 * spec) > 255.0 { 255 }
+             else { (base_r as f64 * intensity + 255.0 * spec) as i64 }
+    let fg = if (base_g as f64 * intensity + 255.0 * spec) > 255.0 { 255 }
+             else { (base_g as f64 * intensity + 255.0 * spec) as i64 }
+    let fb = if (base_b as f64 * intensity + 255.0 * spec) > 255.0 { 255 }
+             else { (base_b as f64 * intensity + 255.0 * spec) as i64 }
+    fb | (fg << 8) | (fr << 16)
+}
+
+// Render a 3D cylinder bond between world-space points (ax,ay,az) and (bx,by,bz).
+// cam_px/y/z: camera world position.  focal: focal length in pixels.
+// r_w: cylinder radius in world units.
+pub fn canvas_bond_cylinder(
+    c: &!Canvas,
+    ax: f64, ay: f64, az: f64,
+    bx: f64, by: f64, bz: f64,
+    cam_px: f64, cam_py: f64, cam_pz: f64,
+    focal: f64,
+    base_r: i64, base_g: i64, base_b: i64,
+    r_w: f64,
+) with Mut, Div {
+    // Compute axis unit vector A_unit = normalize(B - A)
+    let abx = bx - ax; let aby = by - ay; let abz = bz - az
+    let ab_len = cyl_sqrt(abx * abx + aby * aby + abz * abz)
+    if ab_len < 0.0001 { return }
+    let au_x = abx / ab_len; let au_y = aby / ab_len; let au_z = abz / ab_len
+
+    // Project both endpoints to screen to get bounding rectangle
+    let half_cw: f64 = (c.width as f64) * 0.5
+    let half_ch: f64 = (c.height as f64) * 0.5
+    let rza = az - cam_pz; let rzb = bz - cam_pz
+    if rza >= 0.0 && rzb >= 0.0 { return }
+    let da = if rza < 0.0 { 0.0 - rza } else { 0.001 }
+    let db = if rzb < 0.0 { 0.0 - rzb } else { 0.001 }
+    let sax = ((ax - cam_px) * focal / da + half_cw) as i64
+    let say = ((0.0 - (ay - cam_py)) * focal / da + half_ch) as i64
+    let sbx = ((bx - cam_px) * focal / db + half_cw) as i64
+    let sby = ((0.0 - (by - cam_py)) * focal / db + half_ch) as i64
+
+    // Screen-space radius padding from projected radius (use closer endpoint)
+    let min_depth = if da < db { da } else { db }
+    let scr_pad = (r_w * focal / min_depth) as i64 + 2
+
+    let x_lo = cext_clamp((if sax < sbx { sax } else { sbx }) - scr_pad, 0, c.width - 1)
+    let x_hi = cext_clamp((if sax > sbx { sax } else { sbx }) + scr_pad, 0, c.width - 1)
+    let y_lo = cext_clamp((if say < sby { say } else { sby }) - scr_pad, 0, c.height - 1)
+    let y_hi = cext_clamp((if say > sby { say } else { sby }) + scr_pad, 0, c.height - 1)
+
+    var py = y_lo
+    while py <= y_hi {
+        var px = x_lo
+        while px <= x_hi {
+            // Ray direction (unnormalized): camera → pixel
+            let dx_u = ((px as f64) - half_cw) / focal
+            let dy_u = 0.0 - ((py as f64) - half_ch) / focal
+            let dz_u: f64 = 0.0 - 1.0
+            let d_len = cyl_sqrt(dx_u * dx_u + dy_u * dy_u + dz_u * dz_u)
+            let dx = dx_u / d_len; let dy = dy_u / d_len; let dz = dz_u / d_len
+
+            // Δ = ray_origin - A
+            let del_x = cam_px - ax; let del_y = cam_py - ay; let del_z = cam_pz - az
+
+            let d_dot_au  = cyl_dot(dx, dy, dz, au_x, au_y, au_z)
+            let del_dot_au = cyl_dot(del_x, del_y, del_z, au_x, au_y, au_z)
+
+            let ca = 1.0 - d_dot_au * d_dot_au
+            if ca < 0.0001 {
+                px = px + 1
+                continue   // ray parallel to cylinder axis
+            }
+            let cb = 2.0 * (cyl_dot(dx, dy, dz, del_x, del_y, del_z) - d_dot_au * del_dot_au)
+            let cc = cyl_dot(del_x, del_y, del_z, del_x, del_y, del_z) - del_dot_au * del_dot_au - r_w * r_w
+
+            let disc = cb * cb - 4.0 * ca * cc
+            if disc < 0.0 {
+                px = px + 1
+                continue
+            }
+
+            let t = (0.0 - cb - cyl_sqrt(disc)) / (2.0 * ca)
+            if t <= 0.0 {
+                px = px + 1
+                continue
+            }
+
+            // Hit point
+            let hx_p = cam_px + t * dx
+            let hy_p = cam_py + t * dy
+            let hz_p = cam_pz + t * dz
+
+            // Clamp to finite segment: 0 ≤ (hit−A)·A_unit ≤ L
+            let ha_x = hx_p - ax; let ha_y = hy_p - ay; let ha_z = hz_p - az
+            let proj = cyl_dot(ha_x, ha_y, ha_z, au_x, au_y, au_z)
+            if proj < 0.0 || proj > ab_len {
+                px = px + 1
+                continue
+            }
+
+            // Normal = (hit − closest_point_on_axis) / r_w
+            let cp_x = ax + proj * au_x; let cp_y = ay + proj * au_y; let cp_z = az + proj * au_z
+            let nx = (hx_p - cp_x) / r_w
+            let ny = (hy_p - cp_y) / r_w
+            let nz = (hz_p - cp_z) / r_w
+
+            let color = cyl_shade(base_r, base_g, base_b, nx, ny, nz)
+            let idx = py * c.width + px
+            write_i64(c.pixels, idx, color)
+
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// ============================================================
+// Bloom post-processing — additive glow on bright pixels
+// ============================================================
+//
+// Two-pass separable 5-tap Gaussian (σ≈1 px): horizontal then vertical.
+// Bright pixels (perceptual luma > threshold) are extracted, blurred,
+// and added back additively. Result: specular highlights and saturated
+// colours gain a soft halo without changing mid-tones.
+//
+// scratch: heap-allocated i64 array of size c.width*c.height (caller owns).
+// threshold: luma cutoff 0–255 (typical: 200). cov: bloom intensity 0–255.
+
+// ============================================================
+// FXAA — Fast Approximate Anti-Aliasing (Lottes 2009, simplified console variant)
+// ============================================================
+//
+// scratch: caller-allocated W×H×8 bytes.  Reads original from scratch,
+// writes anti-aliased result into c.pixels.
+//
+// Constants: REDUCE_MIN=1/128→2, REDUCE_MUL=1/8→lumaSum/32, SPAN_MAX=8.
+// Luma: 77R+150G+29B >> 8 (integer ≈ 0.299/0.587/0.114).
+
+fn fxaa_luma(pix: i64) -> i64 {
+    (77 * ((pix >> 16) & 255) + 150 * ((pix >> 8) & 255) + 29 * (pix & 255)) >> 8
+}
+
+fn fxaa_avg2(p1: i64, p2: i64) -> i64 {
+    let r = (((p1 >> 16) & 255) + ((p2 >> 16) & 255)) / 2
+    let g = (((p1 >>  8) & 255) + ((p2 >>  8) & 255)) / 2
+    let b = ((p1 & 255) + (p2 & 255)) / 2
+    b | (g << 8) | (r << 16)
+}
+
+pub fn canvas_fxaa(c: &!Canvas, scratch: *mut i64) with Mut, Div {
+    let W = c.width
+    let H = c.height
+
+    // Copy original to scratch
+    var cy: i64 = 0
+    while cy < H {
+        var cx: i64 = 0
+        while cx < W {
+            write_i64(scratch, cy * W + cx, read_i64(c.pixels, cy * W + cx))
+            cx = cx + 1
+        }
+        cy = cy + 1
+    }
+
+    var y: i64 = 1
+    while y < H - 1 {
+        var x: i64 = 1
+        while x < W - 1 {
+            let pM  = read_i64(scratch,  y      * W +  x     )
+            let pNW = read_i64(scratch, (y - 1) * W + (x - 1))
+            let pNE = read_i64(scratch, (y - 1) * W + (x + 1))
+            let pSW = read_i64(scratch, (y + 1) * W + (x - 1))
+            let pSE = read_i64(scratch, (y + 1) * W + (x + 1))
+
+            let lM  = fxaa_luma(pM)
+            let lNW = fxaa_luma(pNW)
+            let lNE = fxaa_luma(pNE)
+            let lSW = fxaa_luma(pSW)
+            let lSE = fxaa_luma(pSE)
+
+            let mn_ab = if lNW < lNE { lNW } else { lNE }
+            let mn_cd = if lSW < lSE { lSW } else { lSE }
+            let mn_e  = if mn_ab < mn_cd { mn_ab } else { mn_cd }
+            let lmin  = if lM < mn_e { lM } else { mn_e }
+            let mx_ab = if lNW > lNE { lNW } else { lNE }
+            let mx_cd = if lSW > lSE { lSW } else { lSE }
+            let mx_e  = if mx_ab > mx_cd { mx_ab } else { mx_cd }
+            let lmax  = if lM > mx_e { lM } else { mx_e }
+
+            let contrast = lmax - lmin
+            let gate = if lmax >> 3 > 8 { lmax >> 3 } else { 8 }
+            if contrast < gate {
+                x = x + 1
+                continue
+            }
+
+            let dir_x = (0 - lNW - lNE) + (lSW + lSE)
+            let dir_y = (lNW + lSW) - (lNE + lSE)
+            let lsum  = lNW + lNE + lSW + lSE
+            let dr = if lsum >> 5 > 2 { lsum >> 5 } else { 2 }
+
+            let adx = if dir_x < 0 { 0 - dir_x } else { dir_x }
+            let ady = if dir_y < 0 { 0 - dir_y } else { dir_y }
+            let md  = if adx < ady { adx } else { ady }
+            let rcp = md + dr
+
+            let raw_sx = if rcp > 0 { dir_x * 8 / rcp } else { 0 }
+            let raw_sy = if rcp > 0 { dir_y * 8 / rcp } else { 0 }
+            let sx = if raw_sx > 8 { 8 } else if raw_sx < 0 - 8 { 0 - 8 } else { raw_sx }
+            let sy = if raw_sy > 8 { 8 } else if raw_sy < 0 - 8 { 0 - 8 } else { raw_sy }
+
+            // blurA at ±span/6
+            let ax6 = sx / 6; let ay6 = sy / 6
+            let x1a = cext_clamp(x + ax6, 0, W - 1); let y1a = cext_clamp(y + ay6, 0, H - 1)
+            let x2a = cext_clamp(x - ax6, 0, W - 1); let y2a = cext_clamp(y - ay6, 0, H - 1)
+            let blurA = fxaa_avg2(read_i64(scratch, y1a * W + x1a),
+                                  read_i64(scratch, y2a * W + x2a))
+
+            // blurB at ±span/2
+            let ax2 = sx / 2; let ay2 = sy / 2
+            let x1b = cext_clamp(x + ax2, 0, W - 1); let y1b = cext_clamp(y + ay2, 0, H - 1)
+            let x2b = cext_clamp(x - ax2, 0, W - 1); let y2b = cext_clamp(y - ay2, 0, H - 1)
+            let pB1 = read_i64(scratch, y1b * W + x1b)
+            let pB2 = read_i64(scratch, y2b * W + x2b)
+            let aR = (blurA >> 16) & 255; let aG = (blurA >> 8) & 255; let aB = blurA & 255
+            let bR = (aR * 2 + ((pB1>>16)&255) + ((pB2>>16)&255)) / 4
+            let bG = (aG * 2 + ((pB1>> 8)&255) + ((pB2>> 8)&255)) / 4
+            let bB = (aB * 2 + (pB1 & 255) + (pB2 & 255)) / 4
+            let blurB = bB | (bG << 8) | (bR << 16)
+            let lB = fxaa_luma(blurB)
+
+            let result = if lB < lmin || lB > lmax { blurA } else { blurB }
+            write_i64(c.pixels, y * W + x, result)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+pub fn canvas_bloom(c: &!Canvas, scratch: *mut i64, threshold: i64, cov: i64) with Mut, Div {
+    let w = c.width
+    let h = c.height
+    // Gaussian weights for 5-tap (symmetric): w0=center, w1=±1, w2=±2
+    // Derived from σ=1 binomial kernel, normalised over 5 taps.
+    // w = [0.2270, 0.1946, 0.1216] → scale to 256: [58, 50, 31]
+    let gw0: i64 = 58
+    let gw1: i64 = 50
+    let gw2: i64 = 31
+    let gsum: i64 = gw0 + gw1 + gw1 + gw2 + gw2  // 220
+
+    // Pass 1: horizontal blur of bright pixels → scratch
+    var hy: i64 = 0
+    while hy < h {
+        var hx: i64 = 0
+        while hx < w {
+            var acc_r: i64 = 0
+            var acc_g: i64 = 0
+            var acc_b: i64 = 0
+            var tap: i64 = 0 - 2
+            while tap <= 2 {
+                let sx = hx + tap
+                let sx_c = if sx < 0 { 0 } else if sx >= w { w - 1 } else { sx }
+                let pix = read_i64(c.pixels, hy * w + sx_c)
+                let pr = (pix >> 16) & 255
+                let pg = (pix >> 8) & 255
+                let pb = pix & 255
+                // Perceptual luma (scaled ×256): 54R + 183G + 19B
+                let luma = (54 * pr + 183 * pg + 19 * pb) >> 8
+                let bright = if luma > threshold { 1 } else { 0 }
+                let wt = if tap == 0 { gw0 }
+                         else if tap == 1 || tap == 0 - 1 { gw1 }
+                         else { gw2 }
+                acc_r = acc_r + bright * pr * wt
+                acc_g = acc_g + bright * pg * wt
+                acc_b = acc_b + bright * pb * wt
+                tap = tap + 1
+            }
+            let br = acc_r / gsum
+            let bg = acc_g / gsum
+            let bb = acc_b / gsum
+            write_i64(scratch, hy * w + hx, bb | (bg << 8) | (br << 16))
+            hx = hx + 1
+        }
+        hy = hy + 1
+    }
+
+    // Pass 2: vertical blur of scratch, additive composite into canvas
+    var vy: i64 = 0
+    while vy < h {
+        var vx: i64 = 0
+        while vx < w {
+            var acc_r: i64 = 0
+            var acc_g: i64 = 0
+            var acc_b: i64 = 0
+            var tap: i64 = 0 - 2
+            while tap <= 2 {
+                let sy = vy + tap
+                let sy_c = if sy < 0 { 0 } else if sy >= h { h - 1 } else { sy }
+                let pix = read_i64(scratch, sy_c * w + vx)
+                let pr = (pix >> 16) & 255
+                let pg = (pix >> 8) & 255
+                let pb = pix & 255
+                let wt = if tap == 0 { gw0 }
+                         else if tap == 1 || tap == 0 - 1 { gw1 }
+                         else { gw2 }
+                acc_r = acc_r + pr * wt
+                acc_g = acc_g + pg * wt
+                acc_b = acc_b + pb * wt
+                tap = tap + 1
+            }
+            let bloom_r = (acc_r / gsum) * cov / 255
+            let bloom_g = (acc_g / gsum) * cov / 255
+            let bloom_b = (acc_b / gsum) * cov / 255
+            // Additive composite: read original, add bloom, clamp
+            let idx = vy * w + vx
+            let orig = read_i64(c.pixels, idx)
+            let or_  = (orig >> 16) & 255
+            let og   = (orig >> 8) & 255
+            let ob   = orig & 255
+            let fr = cext_clamp(or_ + bloom_r, 0, 255)
+            let fg = cext_clamp(og  + bloom_g, 0, 255)
+            let fb = cext_clamp(ob  + bloom_b, 0, 255)
+            write_i64(c.pixels, idx, fb | (fg << 8) | (fr << 16))
+            vx = vx + 1
+        }
+        vy = vy + 1
+    }
+}

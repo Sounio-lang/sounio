@@ -1,0 +1,365 @@
+// examples/pbpk_dashboard/main.sio — Interactive one-compartment PK dashboard
+//
+// Displays a real-time plasma concentration curve C(t) = (D/Vd)*exp(-CL/Vd * t)
+// with a GUM uncertainty band.  Three sliders control:
+//   Dose (D)         1 – 20 mg     default 5 mg
+//   Volume (Vd)     20 – 300 L     default 100 L
+//   Clearance (CL)   5 – 100 L/h   default 25 L/h
+//
+// GUM uncertainty propagation:
+//   σ(D)=0.15·D, σ(Vd)=0.30·Vd, σ(CL)=0.25·CL
+//   σ²(C) = (∂C/∂D)²σ²D + (∂C/∂Vd)²σ²Vd + (∂C/∂CL)²σ²CL
+//
+// Press ESC or close to exit.
+
+use display::window::{Window, window_open_titled, window_present, window_pending,
+                       window_next_event, window_close}
+use display::canvas::{Canvas, canvas_from_window, canvas_clear, canvas_fill_rect,
+                       canvas_draw_rect, canvas_draw_line}
+use display::event::{EV_CLOSE, EV_KEY_PRESS, EV_MOTION, EV_MOUSE_PRESS, EV_MOUSE_RELEASE,
+                     KEY_ESCAPE, MOUSE_LEFT}
+use display::font::{font_draw_string}
+use viz::coord::{CoordSystem, coord_new, coord_map_x, coord_map_y, coord_draw_axes, coord_draw_grid}
+use viz::epiviz::{epiviz_band}
+
+// ============================================================
+// Math helpers
+// ============================================================
+
+// exp(-x) for x >= 0 via Taylor of frac part + repeated multiplication.
+fn pk_exp_neg(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 1.0 }
+    let e_neg1: f64 = 0.36787944117
+    let ipart = x as i64
+    let frac = x - (ipart as f64)
+    // Taylor exp(-frac) for frac in [0,1): good to 1e-15 with 12 terms
+    var r = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n <= 12 {
+        term = 0.0 - term * frac / (n as f64)
+        r = r + term
+        n = n + 1
+    }
+    if r < 0.0 { r = 0.0 }
+    // Multiply by exp(-1)^ipart
+    var k: i64 = 0
+    while k < ipart {
+        r = r * e_neg1
+        k = k + 1
+    }
+    r
+}
+
+fn pk_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn pk_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// ============================================================
+// Slider
+// ============================================================
+
+struct Slider {
+    x: i64, y: i64, w: i64, h: i64,
+    min_val: f64, max_val: f64, val: f64,
+}
+
+fn sl_knob_x(sl: &Slider) -> i64 with Div {
+    let range = sl.max_val - sl.min_val
+    if range == 0.0 { return sl.x }
+    let frac = (sl.val - sl.min_val) / range
+    let kx = sl.x + (frac * (sl.w as f64)) as i64
+    if kx < sl.x { sl.x } else if kx > sl.x + sl.w { sl.x + sl.w } else { kx }
+}
+
+fn sl_render(sl: &Slider, c: &!Canvas, r: i64, g: i64, b: i64) with Mut, Div {
+    // Track
+    canvas_fill_rect(c, sl.x, sl.y + sl.h / 2 - 2, sl.w, 4, 50, 55, 70)
+    // Filled portion
+    let kx = sl_knob_x(sl)
+    canvas_fill_rect(c, sl.x, sl.y + sl.h / 2 - 2, kx - sl.x, 4, r / 2, g / 2, b / 2)
+    // Knob
+    canvas_fill_rect(c, kx - 5, sl.y, 10, sl.h, r, g, b)
+    canvas_draw_rect(c, kx - 5, sl.y, 10, sl.h, 200, 210, 230)
+}
+
+fn sl_update(sl: &!Slider, mouse_x: i64) with Mut, Div {
+    let range = sl.max_val - sl.min_val
+    let t = (mouse_x - sl.x) as f64 / (sl.w as f64)
+    let t2 = if t < 0.0 { 0.0 } else if t > 1.0 { 1.0 } else { t }
+    sl.val = sl.min_val + t2 * range
+}
+
+fn sl_hit(sl: &Slider, mx: i64, my: i64) -> bool {
+    mx >= sl.x && mx <= sl.x + sl.w && my >= sl.y && my <= sl.y + sl.h
+}
+
+// ============================================================
+// PK curve computation
+// ============================================================
+
+// Fill xs[0..N] with time and ys[0..N] with C(t) using current PK params.
+// Also fills var_arr[0..N] with GUM standard uncertainty σ(C(t)).
+fn pk_compute(
+    dose: f64, vd: f64, cl: f64, n: i64,
+    xs: &![f64; 1024], ys: &![f64; 1024], var_arr: &![f64; 1024],
+) with Mut, Div {
+    let ke = cl / vd           // h⁻¹
+    let c0 = dose / vd         // mg/L = μg/mL
+
+    // GUM coefficient variances
+    let sd_d  = 0.15 * dose
+    let sd_v  = 0.30 * vd
+    let sd_cl = 0.25 * cl
+
+    // σ²(D), σ²(Vd), σ²(CL)
+    let var_d  = sd_d  * sd_d
+    let var_v  = sd_v  * sd_v
+    let var_cl = sd_cl * sd_cl
+
+    var i: i64 = 0
+    while i < n {
+        let t = (i as f64) / ((n - 1) as f64) * 24.0   // 0 to 24h
+        let e = pk_exp_neg(ke * t)
+        let ct = c0 * e
+
+        // GUM partial derivatives
+        let dc_dd  = e / vd
+        let dc_dv  = ct * (ke * t / vd - 1.0 / vd)
+        let dc_dcl = 0.0 - ct * t / vd
+
+        let sig2 = dc_dd * dc_dd * var_d + dc_dv * dc_dv * var_v + dc_dcl * dc_dcl * var_cl
+        let sig  = pk_sqrt(sig2)
+
+        (*xs)[i as usize]      = t
+        (*ys)[i as usize]      = ct
+        (*var_arr)[i as usize] = sig * sig    // variance for epiviz_band
+
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Text rendering helpers
+// ============================================================
+
+fn draw_val_int(c: &!Canvas, x: i64, y: i64, v: i64, r: i64, g: i64, b: i64) with Mut, Div {
+    var buf: [i8; 256] = [0; 256]
+    var n = v
+    var len: i64 = 0
+    var digits: [i8; 12] = [0; 12]
+    if n == 0 {
+        buf[0] = 48
+        len = 1
+    } else {
+        while n > 0 {
+            digits[len as usize] = (48 + n % 10) as i8
+            n = n / 10
+            len = len + 1
+        }
+        var j: i64 = 0
+        while j < len {
+            buf[j as usize] = digits[(len - 1 - j) as usize]
+            j = j + 1
+        }
+    }
+    font_draw_string(c.pixels, c.width, c.height, &buf, len, x, y, r, g, b)
+}
+
+// ============================================================
+// Main
+// ============================================================
+
+fn main() with IO, Alloc, Mut, Div {
+    let W: i64 = 900
+    let H: i64 = 600
+
+    var title: [i8; 128] = [0; 128]
+    title[0] = 83    // S
+    title[1] = 111   // o
+    title[2] = 117   // u
+    title[3] = 110   // n
+    title[4] = 105   // i
+    title[5] = 111   // o
+    title[6] = 32    //
+    title[7] = 80    // P
+    title[8] = 75    // K
+    let title_len: i64 = 9
+
+    var win = window_open_titled(&title, title_len, W, H)
+
+    // Layout: plot on left (580 px), sliders on right (320 px)
+    let PLOT_W: i64 = 560
+    let PLOT_H: i64 = 480
+    let PLOT_X: i64 = 20
+    let PLOT_Y: i64 = 80
+
+    let cs = coord_new(0.0, 24.0, 0.0, 0.2, PLOT_X + 40, PLOT_Y + 10, PLOT_W - 60, PLOT_H - 40)
+
+    // Sliders (right panel)
+    let SL_X: i64 = 600
+    var sl_dose = Slider { x: SL_X, y: 120, w: 260, h: 20, min_val: 1.0, max_val: 20.0, val: 5.0 }
+    var sl_vd   = Slider { x: SL_X, y: 200, w: 260, h: 20, min_val: 20.0, max_val: 300.0, val: 100.0 }
+    var sl_cl   = Slider { x: SL_X, y: 280, w: 260, h: 20, min_val: 5.0, max_val: 100.0, val: 25.0 }
+
+    var drag_sl: i64 = 0   // 0=none, 1=dose, 2=vd, 3=cl
+    var mouse_down = false
+
+    var xs:      [f64; 1024] = [0.0; 1024]
+    var ys:      [f64; 1024] = [0.0; 1024]
+    var var_arr: [f64; 1024] = [0.0; 1024]
+    let N: i64 = 120
+
+    var running = true
+    while running {
+        while window_pending(&!win) > 0 {
+            let ev = window_next_event(&!win)
+            if ev.kind == EV_CLOSE { running = false }
+            if ev.kind == EV_KEY_PRESS && ev.key == KEY_ESCAPE { running = false }
+            if ev.kind == EV_MOUSE_PRESS && ev.key == MOUSE_LEFT {
+                mouse_down = true
+                drag_sl = 0
+                if sl_hit(&sl_dose, ev.x, ev.y) { drag_sl = 1 }
+                if sl_hit(&sl_vd,   ev.x, ev.y) { drag_sl = 2 }
+                if sl_hit(&sl_cl,   ev.x, ev.y) { drag_sl = 3 }
+            }
+            if ev.kind == EV_MOUSE_RELEASE {
+                mouse_down = false
+                drag_sl = 0
+            }
+            if ev.kind == EV_MOTION && mouse_down {
+                if drag_sl == 1 { sl_update(&!sl_dose, ev.x) }
+                if drag_sl == 2 { sl_update(&!sl_vd,   ev.x) }
+                if drag_sl == 3 { sl_update(&!sl_cl,   ev.x) }
+            }
+        }
+
+        // Recompute curve
+        pk_compute(sl_dose.val, sl_vd.val, sl_cl.val, N, &!xs, &!ys, &!var_arr)
+
+        var c = canvas_from_window(&!win)
+        canvas_clear(&!c, 14, 16, 26)
+
+        // Title
+        var title_lbl: [i8; 256] = [0; 256]
+        title_lbl[0] = 80    // P
+        title_lbl[1] = 75    // K
+        title_lbl[2] = 32    //
+        title_lbl[3] = 68    // D
+        title_lbl[4] = 97    // a
+        title_lbl[5] = 115   // s
+        title_lbl[6] = 104   // h
+        title_lbl[7] = 98    // b
+        title_lbl[8] = 111   // o
+        title_lbl[9] = 97    // a
+        title_lbl[10] = 114  // r
+        title_lbl[11] = 100  // d
+        font_draw_string(c.pixels, c.width, c.height, &title_lbl, 12, 20, 20, 100, 200, 255)
+
+        // Plot panel
+        canvas_fill_rect(&!c, PLOT_X, PLOT_Y, PLOT_W, PLOT_H, 20, 22, 35)
+        canvas_draw_rect(&!c, PLOT_X, PLOT_Y, PLOT_W, PLOT_H, 50, 55, 80)
+
+        coord_draw_grid(&cs, &!c, 5)
+        coord_draw_axes(&cs, &!c)
+
+        // Uncertainty band (σ shading)
+        epiviz_band(&cs, &xs, &ys, &var_arr, N, &!c, 80, 160, 255)
+
+        // Axis labels
+        var ax_t: [i8; 256] = [0; 256]
+        ax_t[0]=84
+        ax_t[1]=105
+        ax_t[2]=109
+        ax_t[3]=101
+        ax_t[4]=32
+        ax_t[5]=40
+        ax_t[6]=104
+        ax_t[7]=41
+        font_draw_string(c.pixels, c.width, c.height, &ax_t, 8, PLOT_X + PLOT_W / 2 - 32, PLOT_Y + PLOT_H - 18, 160, 175, 220)
+        var ax_c: [i8; 256] = [0; 256]
+        ax_c[0]=67
+        ax_c[1]=40
+        ax_c[2]=116
+        ax_c[3]=41
+        ax_c[4]=32
+        ax_c[5]=117
+        ax_c[6]=103
+        ax_c[7]=47
+        font_draw_string(c.pixels, c.width, c.height, &ax_c, 8, PLOT_X + 4, PLOT_Y + PLOT_H / 2, 160, 175, 220)
+
+        // Slider panel divider
+        canvas_fill_rect(&!c, SL_X - 10, 0, 2, H, 40, 45, 65)
+
+        // Slider labels and values
+        var sl_hdr: [i8; 256] = [0; 256]
+        sl_hdr[0] = 80    // P
+        sl_hdr[1] = 97    // a
+        sl_hdr[2] = 114   // r
+        sl_hdr[3] = 97    // a
+        sl_hdr[4] = 109   // m
+        sl_hdr[5] = 115   // s
+        font_draw_string(c.pixels, c.width, c.height, &sl_hdr, 6, SL_X, 80, 150, 200, 255)
+
+        var lbl_d: [i8; 256] = [0; 256]
+        lbl_d[0]=68
+        lbl_d[1]=111
+        lbl_d[2]=115
+        lbl_d[3]=101
+        lbl_d[4]=32
+        lbl_d[5]=40
+        lbl_d[6]=109
+        lbl_d[7]=103
+        font_draw_string(c.pixels, c.width, c.height, &lbl_d, 8, SL_X, 100, 140, 220, 140)
+        sl_render(&sl_dose, &!c, 100, 200, 100)
+        draw_val_int(&!c, SL_X + 270, 108, sl_dose.val as i64, 100, 240, 100)
+
+        var lbl_v: [i8; 256] = [0; 256]
+        lbl_v[0]=86
+        lbl_v[1]=100
+        lbl_v[2]=32
+        lbl_v[3]=40
+        lbl_v[4]=76
+        lbl_v[5]=41
+        lbl_v[6]=58
+        lbl_v[7]=32
+        font_draw_string(c.pixels, c.width, c.height, &lbl_v, 8, SL_X, 180, 255, 195, 120)
+        sl_render(&sl_vd, &!c, 255, 160, 80)
+        draw_val_int(&!c, SL_X + 270, 188, sl_vd.val as i64, 255, 200, 80)
+
+        var lbl_cl2: [i8; 256] = [0; 256]
+        lbl_cl2[0]=67
+        lbl_cl2[1]=76
+        lbl_cl2[2]=32
+        lbl_cl2[3]=40
+        lbl_cl2[4]=76
+        lbl_cl2[5]=47
+        lbl_cl2[6]=104
+        lbl_cl2[7]=41
+        font_draw_string(c.pixels, c.width, c.height, &lbl_cl2, 8, SL_X, 260, 200, 140, 255)
+        sl_render(&sl_cl, &!c, 200, 100, 255)
+        draw_val_int(&!c, SL_X + 270, 268, sl_cl.val as i64, 200, 130, 255)
+
+        // Show ke = CL/Vd
+        var ke_lbl: [i8; 256] = [0; 256]
+        ke_lbl[0] = 107   // k
+        ke_lbl[1] = 101   // e
+        ke_lbl[2] = 61    // =
+        let ke_int = (sl_cl.val / sl_vd.val * 1000.0) as i64
+        font_draw_string(c.pixels, c.width, c.height, &ke_lbl, 3, SL_X, 360, 140, 160, 200)
+        draw_val_int(&!c, SL_X + 28, 360, ke_int, 140, 180, 220)
+
+        window_present(&!win)
+    }
+
+    window_close(&!win)
+}

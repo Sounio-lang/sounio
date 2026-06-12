@@ -1,0 +1,185 @@
+// stdlib/display/window.sio — Window lifecycle and event loop
+//
+// Creates an X11 window backed by a heap-allocated BGRX pixel buffer.
+// Use window_open() to create, window_present() to blit, window_close() to destroy.
+
+use display::event::{Event, EV_NONE, EV_KEY_PRESS, EV_KEY_RELEASE,
+                     EV_MOUSE_PRESS, EV_MOUSE_RELEASE, EV_CLOSE, EV_EXPOSE, EV_MOTION,
+                     event_none}
+use display::x11_proto::{X11Setup, x11_connect, x11_setup, x11_create_window, x11_map_window,
+                          x11_create_gc, x11_set_title, x11_put_scanline,
+                          x11_pending, x11_next_event_packed,
+                          x11_unpack_type, x11_unpack_detail, x11_unpack_x, x11_unpack_y,
+                          x11_keycode_to_key,
+                          X11_EV_DEFAULT_MASK, X11_EVT_KEY_PRESS, X11_EVT_KEY_RELEASE,
+                          X11_EVT_BUTTON_PRESS, X11_EVT_BUTTON_RELEASE,
+                          X11_EVT_MOTION, X11_EVT_EXPOSE, X11_EVT_DESTROY,
+                          X11_EVT_MAP_NOTIFY}
+
+// ============================================================
+// Window struct
+// ============================================================
+
+pub struct Window {
+    pub fd: i64,         // X11 socket file descriptor
+    pub xid: i64,        // Window XID
+    pub gc: i64,         // GC XID
+    pub pixels: *mut i64, // Pixel buffer: one i64 per pixel, BGRX in lower 32 bits
+    pub width: i64,
+    pub height: i64,
+    pub xid_counter: i64, // Next available XID counter (offset from base)
+    pub res_base: i64,
+    pub res_mask: i64,
+}
+
+// Allocate next XID
+fn win_alloc_xid(win: &!Window) -> i64 with Mut {
+    let xid = win.res_base | (win.xid_counter & win.res_mask)
+    win.xid_counter = win.xid_counter + 1
+    xid
+}
+
+// ============================================================
+// window_open — create X11 window and pixel buffer
+// ============================================================
+
+pub fn window_open(w: i64, h: i64) -> Window with IO, Alloc, Mut {
+    let fd = x11_connect(0)
+    let setup = x11_setup(fd)
+    let res_base = setup.res_base
+    let res_mask = setup.res_mask
+    let root_win = setup.root_win
+    let root_vis = setup.root_vis
+
+    var win = Window {
+        fd: fd,
+        xid: 0,
+        gc: 0,
+        pixels: 0 as *mut i64,
+        width: w,
+        height: h,
+        xid_counter: 1,
+        res_base: res_base,
+        res_mask: res_mask,
+    }
+
+    let win_xid = win_alloc_xid(&!win)
+    let gc_xid = win_alloc_xid(&!win)
+
+    x11_create_window(fd, win_xid, root_win, 0, 0, w, h, root_vis, X11_EV_DEFAULT_MASK)
+    x11_map_window(fd, win_xid)
+    x11_create_gc(fd, gc_xid, win_xid)
+
+    // Allocate pixel buffer: one i64 per pixel (8 bytes per pixel)
+    let buf_bytes = w * h * 8
+    let pix = heap_alloc(buf_bytes) as *mut i64
+
+    // Clear to black
+    var idx: i64 = 0
+    let total_pix = w * h
+    while idx < total_pix {
+        write_i64(pix, idx, 0)
+        idx = idx + 1
+    }
+
+    win.xid = win_xid
+    win.gc = gc_xid
+    win.pixels = pix
+    win
+}
+
+// ============================================================
+// window_set_title — set the window title (call after window_open)
+//
+// Separated from window_open to avoid a nested-SRET codegen issue
+// where the compiler mis-copies the returned Window when a SRET
+// function calls another SRET function internally.
+// ============================================================
+
+pub fn window_set_title(win: &!Window, title: &[i8; 128], title_len: i64) with IO, Mut {
+    x11_set_title(win.fd, win.xid, title, title_len)
+}
+
+// window_open_titled — deprecated shim kept for reference only.
+// Use window_open() + window_set_title() instead.
+pub fn window_open_titled(title: &[i8; 128], title_len: i64, w: i64, h: i64) -> Window
+        with IO, Alloc, Mut {
+    var win = window_open(w, h)
+    x11_set_title(win.fd, win.xid, title, title_len)
+    win
+}
+
+// ============================================================
+// window_present — blit pixel buffer to window via PutImage
+// Sends one PutImage request per scanline (no BigRequests needed).
+// scan_buf must be at least (win.width * 4) bytes; max width = 1024.
+// ============================================================
+
+pub fn window_present(win: &!Window) with IO, Mut {
+    var scan: [i8; 4096] = [0; 4096]
+    var y: i64 = 0
+    while y < win.height {
+        // Pack BGRX scanline from i64 pixel buffer
+        var x: i64 = 0
+        while x < win.width {
+            let pixel = read_i64(win.pixels, y * win.width + x)
+            let bi = x * 4
+            scan[bi as usize]       = (pixel & 0xFF) as i8         // B
+            scan[(bi + 1) as usize] = ((pixel >> 8) & 0xFF) as i8  // G
+            scan[(bi + 2) as usize] = ((pixel >> 16) & 0xFF) as i8 // R
+            scan[(bi + 3) as usize] = 0 as i8                       // X (pad)
+            x = x + 1
+        }
+        x11_put_scanline(win.fd, win.xid, win.gc, win.width, y, &!scan)
+        y = y + 1
+    }
+}
+
+// ============================================================
+// window_pending — check for pending events (non-blocking)
+// Returns 1 if event available, 0 if none.
+// ============================================================
+
+pub fn window_pending(win: &!Window) -> i64 with IO, Mut {
+    x11_pending(win.fd)
+}
+
+// ============================================================
+// window_next_event — read one event from window
+// ============================================================
+
+pub fn window_next_event(win: &!Window) -> Event with IO, Mut {
+    let packed = x11_next_event_packed(win.fd)
+    let typ    = x11_unpack_type(packed)
+    let detail = x11_unpack_detail(packed)
+    let mx     = x11_unpack_x(packed)
+    let my     = x11_unpack_y(packed)
+
+    if typ == X11_EVT_KEY_PRESS {
+        let k = x11_keycode_to_key(detail)
+        Event { kind: EV_KEY_PRESS, key: k, x: mx, y: my, mods: 0 }
+    } else if typ == X11_EVT_KEY_RELEASE {
+        let k = x11_keycode_to_key(detail)
+        Event { kind: EV_KEY_RELEASE, key: k, x: mx, y: my, mods: 0 }
+    } else if typ == X11_EVT_BUTTON_PRESS {
+        Event { kind: EV_MOUSE_PRESS, key: detail, x: mx, y: my, mods: 0 }
+    } else if typ == X11_EVT_BUTTON_RELEASE {
+        Event { kind: EV_MOUSE_RELEASE, key: detail, x: mx, y: my, mods: 0 }
+    } else if typ == X11_EVT_MOTION {
+        Event { kind: EV_MOTION, key: 0, x: mx, y: my, mods: 0 }
+    } else if typ == X11_EVT_DESTROY {
+        Event { kind: EV_CLOSE, key: 0, x: 0, y: 0, mods: 0 }
+    } else {
+        event_none()
+    }
+}
+
+// ============================================================
+// window_close — release resources
+// ============================================================
+
+pub fn window_close(win: &!Window) with IO, Alloc, Mut {
+    heap_free(win.pixels as *mut i8)
+    syscall6(3, win.fd, 0, 0, 0, 0, 0)  // SYS_close
+    win.fd = 0 - 1
+}

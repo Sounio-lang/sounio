@@ -11,6 +11,7 @@
 //! - Monte Carlo propagation for complex cases
 
 use epistemic::knowledge::{Epistemic, ep_clamp_conf, ep_min_conf, ep_decay, ep_combine};
+use algebra::associator_field::{assoc_field_octonion, af_augmented_variance};
 
 // ============================================================================
 // UNIVARIATE PROPAGATION
@@ -228,6 +229,50 @@ pub fn product_correlated(
         val: x.val * y.val,
         variance: max_f64(variance, 0.0),
         confidence: ep_combine(x.confidence, y.confidence),
+    }
+}
+
+// ============================================================================
+// NON-ASSOCIATIVE STRUCTURAL PROPAGATION
+// ============================================================================
+//
+// When a scalar observable is computed through a product of non-associative
+// quantities (octonions, sedenions), the *order* of multiplication is not
+// free: (a·b)·c ≠ a·(b·c). That order-indeterminacy is a genuine, structural
+// uncertainty on the result — distinct from measurement variance — and the
+// associator [a,b,c] = (a·b)·c − a·(b·c) measures it exactly.
+//
+// This is the join of the two theses the language is built on: non-associativity
+// is not merely *blocked* at the optimizer (the Fano reassociation gate in
+// ir/egraph.sio) — it *feeds* the uncertainty budget here. Certainty about
+// evaluation order is something you must earn (an associative / Fano triple,
+// where ‖α‖² = 0), not something assumed for convenience:
+//
+//   Var_total = Var_GUM + κ·‖[a,b,c]‖²
+//
+// Associative triple   ⇒ ‖α‖² = 0 ⇒ no augmentation (order was safe).
+// Non-associative triple ⇒ variance grows by exactly the order-ambiguity carried.
+//
+// The associator coupling itself is the verified primitive in
+// algebra::associator_field (window 7); this makes it a first-class propagation
+// rule alongside sum/product/quotient rather than a manual, opt-in call.
+
+// Augment a scalar observable's variance with the order-indeterminacy of the
+// non-associative octonion triple (a,b,c) it was computed through.
+// `base.val` is unchanged (the structural term is uncertainty, not a bias);
+// confidence passes through, since the order-ambiguity is expressed in the
+// variance channel per the GUM-augmentation model — not double-counted as a
+// separate confidence penalty.
+pub fn product_nonassoc(
+    base: Epistemic,
+    a: &[f64; 8], b: &[f64; 8], c: &[f64; 8],
+    kappa: f64,
+) -> Epistemic with Mut, Div, Panic, NonAssoc {
+    let field = assoc_field_octonion(a, b, c, kappa)
+    Epistemic {
+        val: base.val,
+        variance: af_augmented_variance(base.variance, &field),
+        confidence: base.confidence,
     }
 }
 

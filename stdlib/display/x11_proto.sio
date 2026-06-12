@@ -1,0 +1,499 @@
+// stdlib/display/x11_proto.sio — X11 protocol layer (pure syscall6, no libX11)
+//
+// Implements the minimum X11 subset needed for a windowed pixel renderer:
+//   - Unix socket connection to display server
+//   - Connection setup handshake
+//   - CreateWindow / MapWindow / CreateGC
+//   - PutImage (ZPixmap, scanline-by-scanline)
+//   - SelectInput / event receive
+//
+// Protocol reference: https://x.org/releases/X11R7.7/doc/xproto/x11protocol.html
+// All messages are little-endian.
+
+// ============================================================
+// Syscall numbers (x86-64 Linux)
+// ============================================================
+
+let X11_SYS_READ:    i64 = 0
+let X11_SYS_WRITE:   i64 = 1
+let X11_SYS_CLOSE:   i64 = 3
+let X11_SYS_POLL:    i64 = 7
+let X11_SYS_SOCKET:  i64 = 41
+let X11_SYS_CONNECT: i64 = 42
+
+// ============================================================
+// X11 protocol constants
+// ============================================================
+
+let X11_AF_UNIX:       i64 = 1
+let X11_SOCK_STREAM:   i64 = 1
+
+// Event mask bits
+let X11_EV_KEY_PRESS:       i64 = 1
+let X11_EV_KEY_RELEASE:     i64 = 2
+let X11_EV_BUTTON_PRESS:    i64 = 4
+let X11_EV_BUTTON_RELEASE:  i64 = 8
+let X11_EV_POINTER_MOTION:  i64 = 64
+let X11_EV_EXPOSURE:        i64 = 32768
+let X11_EV_STRUCT_NOTIFY:   i64 = 131072
+let X11_EV_DEFAULT_MASK:    i64 = 163847   // KEY|BUTTON|MOTION|EXPOSE|STRUCT
+
+// X11 event type bytes (raw values in 32-byte event packets)
+let X11_EVT_KEY_PRESS:      i64 = 2
+let X11_EVT_KEY_RELEASE:    i64 = 3
+let X11_EVT_BUTTON_PRESS:   i64 = 4
+let X11_EVT_BUTTON_RELEASE: i64 = 5
+let X11_EVT_MOTION:         i64 = 6
+let X11_EVT_EXPOSE:         i64 = 12
+let X11_EVT_DESTROY:        i64 = 17
+let X11_EVT_CLIENT_MSG:     i64 = 33
+let X11_EVT_MAP_NOTIFY:     i64 = 19
+
+// ============================================================
+// X11 session setup result struct
+// ============================================================
+
+pub struct X11Setup {
+    pub ok: i64,       // 1 = success, 0 = failure
+    pub res_base: i64,
+    pub res_mask: i64,
+    pub root_win: i64,
+    pub root_vis: i64,
+}
+
+// ============================================================
+// LE integer packing into [i8; N] buffers
+// ============================================================
+
+fn le16(buf: &![i8; 64], off: i64, v: i64) with Mut {
+    buf[off as usize]       = (v & 0xFF) as i8
+    buf[(off + 1) as usize] = ((v >> 8) & 0xFF) as i8
+}
+
+fn le32(buf: &![i8; 64], off: i64, v: i64) with Mut {
+    buf[off as usize]       = (v & 0xFF) as i8
+    buf[(off + 1) as usize] = ((v >> 8) & 0xFF) as i8
+    buf[(off + 2) as usize] = ((v >> 16) & 0xFF) as i8
+    buf[(off + 3) as usize] = ((v >> 24) & 0xFF) as i8
+}
+
+fn le16_big(buf: &![i8; 256], off: i64, v: i64) with Mut {
+    buf[off as usize]       = (v & 0xFF) as i8
+    buf[(off + 1) as usize] = ((v >> 8) & 0xFF) as i8
+}
+
+fn le32_big(buf: &![i8; 256], off: i64, v: i64) with Mut {
+    buf[off as usize]       = (v & 0xFF) as i8
+    buf[(off + 1) as usize] = ((v >> 8) & 0xFF) as i8
+    buf[(off + 2) as usize] = ((v >> 16) & 0xFF) as i8
+    buf[(off + 3) as usize] = ((v >> 24) & 0xFF) as i8
+}
+
+
+// ============================================================
+// Write helpers for X11 socket
+// ============================================================
+
+fn x11_write_small(fd: i64, buf: &![i8; 64], n: i64) with IO, Mut {
+    syscall6(X11_SYS_WRITE, fd, buf, n, 0, 0, 0)
+}
+
+fn x11_write_big(fd: i64, buf: &![i8; 256], n: i64) with IO, Mut {
+    syscall6(X11_SYS_WRITE, fd, buf, n, 0, 0, 0)
+}
+
+fn x11_write_scan(fd: i64, buf: &![i8; 4096], n: i64) with IO, Mut {
+    syscall6(X11_SYS_WRITE, fd, buf, n, 0, 0, 0)
+}
+
+fn x11_read_big(fd: i64, buf: &![i8; 4096], n: i64) -> i64 with IO, Mut {
+    syscall6(X11_SYS_READ, fd, buf, n, 0, 0, 0)
+}
+
+fn x11_read_event(fd: i64, buf: &![i8; 32]) -> i64 with IO, Mut {
+    syscall6(X11_SYS_READ, fd, buf, 32, 0, 0, 0)
+}
+
+// ============================================================
+// Connect to X11 display via Unix domain socket
+// Returns socket fd, or negative on error
+// ============================================================
+
+pub fn x11_connect(display_num: i64) -> i64 with IO, Mut {
+    let fd = syscall6(X11_SYS_SOCKET, X11_AF_UNIX, X11_SOCK_STREAM, 0, 0, 0, 0)
+    if fd < 0 { return fd }
+
+    // Build sockaddr_un: 2 bytes family + 108 bytes path = 110 bytes
+    // Path = "/tmp/.X11-unix/X" + display_digit
+    var sa: [i8; 110] = [0; 110]
+    sa[0] = 1 as i8   // AF_UNIX low byte
+    sa[1] = 0 as i8   // AF_UNIX high byte
+    // Write path "/tmp/.X11-unix/X0" manually
+    sa[2]  = 47 as i8  // /
+    sa[3]  = 116 as i8 // t
+    sa[4]  = 109 as i8 // m
+    sa[5]  = 112 as i8 // p
+    sa[6]  = 47 as i8  // /
+    sa[7]  = 46 as i8  // .
+    sa[8]  = 88 as i8  // X
+    sa[9]  = 49 as i8  // 1
+    sa[10] = 49 as i8  // 1
+    sa[11] = 45 as i8  // -
+    sa[12] = 117 as i8 // u
+    sa[13] = 110 as i8 // n
+    sa[14] = 105 as i8 // i
+    sa[15] = 120 as i8 // x
+    sa[16] = 47 as i8  // /
+    sa[17] = 88 as i8  // X
+    // display number digit (0-9)
+    sa[18] = (48 + display_num) as i8  // '0' + N
+    sa[19] = 0 as i8   // NUL terminator
+
+    let ret = syscall6(X11_SYS_CONNECT, fd, &!sa, 110, 0, 0, 0)
+    if ret < 0 {
+        syscall6(X11_SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+        return 0 - 1
+    }
+    fd
+}
+
+// ============================================================
+// Send X11 connection setup request, read reply.
+// Returns X11Setup with ok=1 on success, ok=0 on failure.
+// ============================================================
+
+pub fn x11_setup(fd: i64) -> X11Setup with IO, Mut {
+    // Connection request: 12 bytes
+    // byte-order=0x6c (LE), pad, major=11, minor=0, auth_proto_len=0, auth_data_len=0, pad
+    var req: [i8; 12] = [0; 12]
+    req[0] = 108 as i8  // 0x6c = little-endian
+    req[1] = 0 as i8    // pad
+    req[2] = 11 as i8   // major version
+    req[3] = 0 as i8    // major high
+    req[4] = 0 as i8    // minor version low
+    req[5] = 0 as i8    // minor version high
+    req[6] = 0 as i8    // auth_proto_name_len low
+    req[7] = 0 as i8    // auth_proto_name_len high
+    req[8] = 0 as i8    // auth_proto_data_len low
+    req[9] = 0 as i8    // auth_proto_data_len high
+    req[10] = 0 as i8   // pad
+    req[11] = 0 as i8   // pad
+
+    // Write 12 bytes to server
+    var req_small: [i8; 64] = [0; 64]
+    var i: i64 = 0
+    while i < 12 {
+        req_small[i as usize] = req[i as usize]
+        i = i + 1
+    }
+    syscall6(X11_SYS_WRITE, fd, &!req_small, 12, 0, 0, 0)
+
+    // Read reply — parse with direct indexing (avoids &hdr borrow after &!hdr)
+    var hdr: [i8; 4096] = [0; 4096]
+    let r = syscall6(X11_SYS_READ, fd, &!hdr, 4096, 0, 0, 0)
+    let fail = X11Setup { ok: 0, res_base: 0, res_mask: 0, root_win: 0, root_vis: 0 }
+    if r < 8 { return fail }
+    let h0 = hdr[0] as i64
+    if h0 != 1 { return fail }
+
+    // vendor_len at bytes 16-17 (LE u16)
+    let vl0 = hdr[16] as i64
+    let vl1 = hdr[17] as i64
+    let vl0u = if vl0 < 0 { vl0 + 256 } else { vl0 }
+    let vl1u = if vl1 < 0 { vl1 + 256 } else { vl1 }
+    let vendor_len = vl0u | (vl1u << 8)
+    let nf = hdr[21] as i64
+    let num_formats = if nf < 0 { nf + 256 } else { nf }
+    let vendor_pad = if (vendor_len & 3) == 0 { 0 } else { 4 - (vendor_len & 3) }
+    let screen_off = 40 + vendor_len + vendor_pad + num_formats * 8
+
+    // Unpack resource_id_base (bytes 32-35, LE)
+    let rb0 = hdr[32] as i64
+    let rb0u = if rb0 < 0 { rb0 + 256 } else { rb0 }
+    let rb1 = hdr[33] as i64
+    let rb1u = if rb1 < 0 { rb1 + 256 } else { rb1 }
+    let rb2 = hdr[34] as i64
+    let rb2u = if rb2 < 0 { rb2 + 256 } else { rb2 }
+    let rb3 = hdr[35] as i64
+    let rb3u = if rb3 < 0 { rb3 + 256 } else { rb3 }
+    let base = rb0u | (rb1u << 8) | (rb2u << 16) | (rb3u << 24)
+
+    // Unpack resource_id_mask (bytes 36-39, LE)
+    let rm0 = hdr[36] as i64
+    let rm0u = if rm0 < 0 { rm0 + 256 } else { rm0 }
+    let rm1 = hdr[37] as i64
+    let rm1u = if rm1 < 0 { rm1 + 256 } else { rm1 }
+    let rm2 = hdr[38] as i64
+    let rm2u = if rm2 < 0 { rm2 + 256 } else { rm2 }
+    let rm3 = hdr[39] as i64
+    let rm3u = if rm3 < 0 { rm3 + 256 } else { rm3 }
+    let mask = rm0u | (rm1u << 8) | (rm2u << 16) | (rm3u << 24)
+
+    // Unpack root_window (at screen_off, LE)
+    let so = screen_off
+    let rw0 = hdr[so as usize] as i64
+    let rw0u = if rw0 < 0 { rw0 + 256 } else { rw0 }
+    let rw1 = hdr[(so + 1) as usize] as i64
+    let rw1u = if rw1 < 0 { rw1 + 256 } else { rw1 }
+    let rw2 = hdr[(so + 2) as usize] as i64
+    let rw2u = if rw2 < 0 { rw2 + 256 } else { rw2 }
+    let rw3 = hdr[(so + 3) as usize] as i64
+    let rw3u = if rw3 < 0 { rw3 + 256 } else { rw3 }
+    let root_w = rw0u | (rw1u << 8) | (rw2u << 16) | (rw3u << 24)
+
+    // Unpack root_visual (at screen_off+32, LE)
+    let sv0 = hdr[(so + 32) as usize] as i64
+    let sv0u = if sv0 < 0 { sv0 + 256 } else { sv0 }
+    let sv1 = hdr[(so + 33) as usize] as i64
+    let sv1u = if sv1 < 0 { sv1 + 256 } else { sv1 }
+    let sv2 = hdr[(so + 34) as usize] as i64
+    let sv2u = if sv2 < 0 { sv2 + 256 } else { sv2 }
+    let sv3 = hdr[(so + 35) as usize] as i64
+    let sv3u = if sv3 < 0 { sv3 + 256 } else { sv3 }
+    let root_v = sv0u | (sv1u << 8) | (sv2u << 16) | (sv3u << 24)
+
+    X11Setup { ok: 1, res_base: base, res_mask: mask, root_win: root_w, root_vis: root_v }
+}
+
+// ============================================================
+// CreateWindow (opcode 1)
+// Creates an InputOutput window with event selection.
+// ============================================================
+
+pub fn x11_create_window(fd: i64, xid: i64, parent: i64,
+                     x: i64, y: i64, w: i64, h: i64,
+                     visual: i64, event_mask: i64) with IO, Mut {
+    // Request: 36 bytes (9 x u32)
+    // opcode(1) depth(0) length(9) [4 bytes]
+    // wid [4] parent [4] x,y [2+2] w,h [2+2] border_w(0) class(1) [2+2]
+    // visual [4] value_mask(0x800=CW_EventMask) [4] event_mask [4]
+    var buf: [i8; 64] = [0; 64]
+    buf[0] = 1 as i8   // opcode CreateWindow
+    buf[1] = 0 as i8   // depth (copy from parent)
+    le16(&!buf, 2, 9)  // request length in 4-byte units
+
+    le32(&!buf, 4, xid)
+    le32(&!buf, 8, parent)
+    le16(&!buf, 12, x)
+    le16(&!buf, 14, y)
+    le16(&!buf, 16, w)
+    le16(&!buf, 18, h)
+    le16(&!buf, 20, 0)  // border_width = 0
+    le16(&!buf, 22, 1)  // class = InputOutput
+
+    le32(&!buf, 24, visual)
+    le32(&!buf, 28, 2048)      // value_mask = 0x800 = CW_EventMask
+    le32(&!buf, 32, event_mask)
+
+    syscall6(X11_SYS_WRITE, fd, &!buf, 36, 0, 0, 0)
+}
+
+// ============================================================
+// MapWindow (opcode 8) — make window visible
+// ============================================================
+
+pub fn x11_map_window(fd: i64, xid: i64) with IO, Mut {
+    var buf: [i8; 64] = [0; 64]
+    buf[0] = 8 as i8   // opcode MapWindow
+    buf[1] = 0 as i8
+    le16(&!buf, 2, 2)  // length = 2 (8 bytes total)
+    le32(&!buf, 4, xid)
+    syscall6(X11_SYS_WRITE, fd, &!buf, 8, 0, 0, 0)
+}
+
+// ============================================================
+// CreateGC (opcode 55) — create graphics context for drawing
+// ============================================================
+
+pub fn x11_create_gc(fd: i64, gc_id: i64, drawable: i64) with IO, Mut {
+    // Minimal GC: no extra values (value_mask = 0)
+    var buf: [i8; 64] = [0; 64]
+    buf[0] = 55 as i8  // opcode CreateGC
+    buf[1] = 0 as i8
+    le16(&!buf, 2, 4)  // length = 4 (16 bytes)
+    le32(&!buf, 4, gc_id)
+    le32(&!buf, 8, drawable)
+    le32(&!buf, 12, 0)   // value_mask = 0 (no GC attributes)
+    syscall6(X11_SYS_WRITE, fd, &!buf, 16, 0, 0, 0)
+}
+
+// ============================================================
+
+// ============================================================
+// ChangeProperty (opcode 18) — set window property (for WM hints)
+// Used to set WM_NAME (window title)
+// ============================================================
+
+pub fn x11_set_title(fd: i64, xid: i64, title: &[i8; 128], title_len: i64) with IO, Mut {
+    // WM_NAME = atom 39 (predefined), STRING = atom 31
+    let pad = if (title_len & 3) == 0 { 0 } else { 4 - (title_len & 3) }
+    let total = 24 + title_len + pad
+    let length = (total + 3) / 4
+    var buf: [i8; 256] = [0; 256]
+    buf[0] = 18 as i8  // ChangeProperty
+    buf[1] = 0 as i8   // mode = Replace
+    le16_big(&!buf, 2, length)
+    le32_big(&!buf, 4, xid)
+    le32_big(&!buf, 8, 39)   // WM_NAME atom (predefined)
+    le32_big(&!buf, 12, 31)  // STRING type atom (predefined)
+    buf[16] = 8 as i8  // format = 8 bits
+    le32_big(&!buf, 20, title_len)
+    var i: i64 = 0
+    while i < title_len {
+        buf[(24 + i) as usize] = title[i as usize]
+        i = i + 1
+    }
+    syscall6(X11_SYS_WRITE, fd, &!buf, total, 0, 0, 0)
+}
+
+// ============================================================
+// PutImage (opcode 72) — blit BGRX pixels to window, one scanline
+//
+// Sends the PutImage request header + one scanline of pixel data.
+// Caller must pack 4 bytes per pixel (BGRX) into scan_buf.
+//
+// scan_buf must hold at least (width * 4) bytes.
+// ============================================================
+
+pub fn x11_put_scanline(fd: i64, drawable: i64, gc: i64,
+                    width: i64, dst_y: i64,
+                    scan_buf: &![i8; 4096]) with IO, Mut {
+    let data_bytes = width * 4
+    let pad = if (data_bytes & 3) == 0 { 0 } else { 4 - (data_bytes & 3) }
+    let total = 24 + data_bytes + pad
+    let length = total / 4
+
+    var hdr: [i8; 64] = [0; 64]
+    hdr[0] = 72 as i8  // PutImage
+    hdr[1] = 2 as i8   // format = ZPixmap
+    le16(&!hdr, 2, length)
+    le32(&!hdr, 4, drawable)
+    le32(&!hdr, 8, gc)
+    le16(&!hdr, 12, width)
+    le16(&!hdr, 14, 1)       // height = 1 scanline
+    le16(&!hdr, 16, 0)       // dst_x = 0
+    le16(&!hdr, 18, dst_y)   // dst_y
+    hdr[20] = 0 as i8        // left_pad
+    hdr[21] = 24 as i8       // depth = 24
+
+    syscall6(X11_SYS_WRITE, fd, &!hdr, 24, 0, 0, 0)
+    syscall6(X11_SYS_WRITE, fd, scan_buf, data_bytes, 0, 0, 0)
+    // Write padding if needed
+    if pad > 0 {
+        var pad_buf: [i8; 4] = [0; 4]
+        syscall6(X11_SYS_WRITE, fd, &!pad_buf, pad, 0, 0, 0)
+    }
+}
+
+// ============================================================
+// Check if data is available on the X11 socket (non-blocking poll)
+// Returns: 1 if event pending, 0 if none
+// ============================================================
+
+pub fn x11_pending(fd: i64) -> i64 with IO, Mut {
+    // pollfd struct: fd(i32=4), events(i16=2), revents(i16=2) = 8 bytes
+    var pfd: [i8; 8] = [0; 8]
+    pfd[0] = (fd & 0xFF) as i8
+    pfd[1] = ((fd >> 8) & 0xFF) as i8
+    pfd[2] = 0 as i8
+    pfd[3] = 0 as i8
+    pfd[4] = 1 as i8  // POLLIN
+    pfd[5] = 0 as i8
+    pfd[6] = 0 as i8
+    pfd[7] = 0 as i8
+    let ret = syscall6(X11_SYS_POLL, &!pfd, 1, 0, 0, 0, 0)
+    if ret > 0 { 1 } else { 0 }
+}
+
+// ============================================================
+// Full event read: returns (type, key/button, x, y)
+// packed as: type | (key << 8) | (x << 24) | (y << 40)
+// ============================================================
+
+// Returns packed event: type (bits 0-7) | detail (bits 8-15) | x (bits 16-31) | y (bits 32-47)
+// Caller decodes with x11_unpack_* helpers.
+pub fn x11_next_event_packed(fd: i64) -> i64 with IO, Mut {
+    var pkt: [i8; 32] = [0; 32]
+    let r = syscall6(X11_SYS_READ, fd, &!pkt, 32, 0, 0, 0)
+    if r < 32 { return 0 }
+
+    // Direct index access avoids borrow-checker &pkt conflicts after &!pkt
+    let raw_typ = pkt[0] as i64
+    let raw_det = pkt[1] as i64
+    let raw_x0  = pkt[24] as i64
+    let raw_x1  = pkt[25] as i64
+    let raw_y0  = pkt[26] as i64
+    let raw_y1  = pkt[27] as i64
+
+    let typ  = (if raw_typ < 0 { raw_typ + 256 } else { raw_typ }) & 127
+    let det  = if raw_det < 0 { raw_det + 256 } else { raw_det }
+    let xv0  = if raw_x0 < 0 { raw_x0 + 256 } else { raw_x0 }
+    let xv1  = if raw_x1 < 0 { raw_x1 + 256 } else { raw_x1 }
+    let yv0  = if raw_y0 < 0 { raw_y0 + 256 } else { raw_y0 }
+    let yv1  = if raw_y1 < 0 { raw_y1 + 256 } else { raw_y1 }
+    let ev_x = xv0 | (xv1 << 8)
+    let ev_y = yv0 | (yv1 << 8)
+
+    typ | (det << 8) | (ev_x << 16) | (ev_y << 32)
+}
+
+pub fn x11_unpack_type(packed: i64) -> i64 { packed & 127 }
+pub fn x11_unpack_detail(packed: i64) -> i64 { (packed >> 8) & 255 }
+pub fn x11_unpack_x(packed: i64) -> i64 { (packed >> 16) & 65535 }
+pub fn x11_unpack_y(packed: i64) -> i64 { (packed >> 32) & 65535 }
+
+// Translate X11 keycode to ASCII / key constant
+// This is a minimal mapping for common keys only.
+pub fn x11_keycode_to_key(keycode: i64) -> i64 {
+    // X11 keycodes on typical Linux keyboard (scan → keysym mapping)
+    // These are hardware keycodes, not keysyms. The mapping depends on keyboard layout.
+    // For a basic US QWERTY:
+    if keycode == 9  { return 27 }   // Escape
+    if keycode == 10 { return 49 }   // 1
+    if keycode == 11 { return 50 }   // 2
+    if keycode == 12 { return 51 }   // 3
+    if keycode == 13 { return 52 }   // 4
+    if keycode == 14 { return 53 }   // 5
+    if keycode == 15 { return 54 }   // 6
+    if keycode == 16 { return 55 }   // 7
+    if keycode == 17 { return 56 }   // 8
+    if keycode == 18 { return 57 }   // 9
+    if keycode == 19 { return 48 }   // 0
+    if keycode == 36 { return 13 }   // Return
+    if keycode == 65 { return 32 }   // Space
+    if keycode == 22 { return 8 }    // BackSpace
+    if keycode == 119 { return 127 } // Delete
+    if keycode == 23 { return 9 }    // Tab
+    if keycode == 111 { return 3 }   // Up
+    if keycode == 116 { return 4 }   // Down
+    if keycode == 113 { return 1 }   // Left
+    if keycode == 114 { return 2 }   // Right
+    // Letter keys (lowercase)
+    if keycode == 38 { return 97 }   // a
+    if keycode == 56 { return 98 }   // b
+    if keycode == 54 { return 99 }   // c
+    if keycode == 40 { return 100 }  // d
+    if keycode == 26 { return 101 }  // e
+    if keycode == 41 { return 102 }  // f
+    if keycode == 42 { return 103 }  // g
+    if keycode == 43 { return 104 }  // h
+    if keycode == 31 { return 105 }  // i
+    if keycode == 44 { return 106 }  // j
+    if keycode == 45 { return 107 }  // k
+    if keycode == 46 { return 108 }  // l
+    if keycode == 58 { return 109 }  // m
+    if keycode == 57 { return 110 }  // n
+    if keycode == 32 { return 111 }  // o
+    if keycode == 33 { return 112 }  // p
+    if keycode == 24 { return 113 }  // q
+    if keycode == 27 { return 114 }  // r
+    if keycode == 39 { return 115 }  // s
+    if keycode == 28 { return 116 }  // t
+    if keycode == 30 { return 117 }  // u
+    if keycode == 55 { return 118 }  // v
+    if keycode == 25 { return 119 }  // w
+    if keycode == 53 { return 120 }  // x
+    if keycode == 29 { return 121 }  // y
+    if keycode == 52 { return 122 }  // z
+    0  // unknown
+}

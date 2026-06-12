@@ -1,0 +1,247 @@
+//! stdlib/ot/transport_exact.sio — Exact discrete optimal transport / W1 over Q.
+//!
+//! The discrete OT LP (transportation problem) has a totally-unimodular constraint
+//! matrix, so with INTEGER supplies/demands the LP optimum is integral. We solve it
+//! EXACTLY as an integer min-cost max-flow (successive shortest paths / SPFA), with
+//! NO floating point and NO Sinkhorn anywhere. Rational masses are scaled to a common
+//! integer denominator D = lcm(denominators); the exact Wasserstein-1 distance is
+//! W1 = (optimal integer cost) / D  ∈  Q.
+//!
+//! Inputs are passed via module-global buffers (filled by the caller) to avoid
+//! large array-by-value copies and stack spills:
+//!   OT_COST[i*nd + j]                 integer cost matrix (hop distances)
+//!   OT_SUPPLY[i], OT_DEMAND[j]        integer masses  (for w1_int)
+//!   OT_SNUM/OT_SDEN, OT_DNUM/OT_DDEN  rational masses (for w1_rational)
+
+use math::rational::*
+
+// ---- caller-filled input buffers -------------------------------------------
+pub var OT_SUPPLY: [i64; 1024]    = [0; 1024]
+pub var OT_DEMAND: [i64; 1024]    = [0; 1024]
+pub var OT_COST:   [i64; 1048576] = [0; 1048576]
+pub var OT_SNUM:   [i64; 1024]    = [0; 1024]
+pub var OT_SDEN:   [i64; 1024]    = [1; 1024]
+pub var OT_DNUM:   [i64; 1024]    = [0; 1024]
+pub var OT_DDEN:   [i64; 1024]    = [1; 1024]
+pub var OT_LAST_D: i64 = 1     // common denominator used by the last w1_rational call
+
+// ---- residual-graph storage (module globals) -------------------------------
+var MF_HEAD: [i64; 2050]    = [0 - 1; 2050]
+var MF_TO:   [i64; 2097152] = [0; 2097152]
+var MF_NXT:  [i64; 2097152] = [0 - 1; 2097152]
+var MF_CAP:  [i64; 2097152] = [0; 2097152]
+var MF_COST: [i64; 2097152] = [0; 2097152]
+var MF_EC:   i64 = 0
+var MF_DIST: [i64; 2050]    = [0; 2050]
+var MF_INQ:  [i64; 2050]    = [0; 2050]
+var MF_PREV: [i64; 2050]    = [0 - 1; 2050]
+var MF_QUE:  [i64; 1048576] = [0; 1048576]
+
+let MF_INF: i64 = 1000000000000000000   // 1e18
+
+fn mcmf_reset(nnodes: i64) with Mut, Panic {
+    MF_EC = 0
+    var i: i64 = 0
+    while i < nnodes { MF_HEAD[i as usize] = 0 - 1; i = i + 1; }
+}
+
+fn mcmf_add_edge(u: i64, v: i64, cap: i64, cost: i64) with Mut, Panic {
+    MF_TO[MF_EC as usize] = v
+    MF_CAP[MF_EC as usize] = cap
+    MF_COST[MF_EC as usize] = cost
+    MF_NXT[MF_EC as usize] = MF_HEAD[u as usize]
+    MF_HEAD[u as usize] = MF_EC
+    MF_EC = MF_EC + 1
+    MF_TO[MF_EC as usize] = u
+    MF_CAP[MF_EC as usize] = 0
+    MF_COST[MF_EC as usize] = 0 - cost
+    MF_NXT[MF_EC as usize] = MF_HEAD[v as usize]
+    MF_HEAD[v as usize] = MF_EC
+    MF_EC = MF_EC + 1
+}
+
+fn mcmf_spfa(s: i64, t: i64, nnodes: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < nnodes { MF_DIST[i as usize] = MF_INF; MF_INQ[i as usize] = 0; MF_PREV[i as usize] = 0 - 1; i = i + 1; }
+    MF_DIST[s as usize] = 0
+    var qh: i64 = 0
+    var qt: i64 = 0
+    MF_QUE[0] = s; qt = 1
+    MF_INQ[s as usize] = 1
+    while qh < qt {
+        let u = MF_QUE[(qh % 1048576) as usize]
+        qh = qh + 1
+        MF_INQ[u as usize] = 0
+        var e = MF_HEAD[u as usize]
+        while e >= 0 {
+            if MF_CAP[e as usize] > 0 {
+                let v = MF_TO[e as usize]
+                let nd = MF_DIST[u as usize] + MF_COST[e as usize]
+                if nd < MF_DIST[v as usize] {
+                    MF_DIST[v as usize] = nd
+                    MF_PREV[v as usize] = e
+                    if MF_INQ[v as usize] == 0 {
+                        MF_QUE[(qt % 1048576) as usize] = v; qt = qt + 1
+                        MF_INQ[v as usize] = 1
+                    }
+                }
+            }
+            e = MF_NXT[e as usize]
+        }
+    }
+    if MF_DIST[t as usize] < MF_INF { return 1; }
+    return 0
+}
+
+// Min-cost MAX-flow from s to t; returns total integer cost.
+fn mcmf_min_cost(s: i64, t: i64, nnodes: i64) -> i64 with Mut, Panic, Div {
+    var total: i64 = 0
+    while mcmf_spfa(s, t, nnodes) == 1 {
+        var f = MF_INF
+        var v = t
+        while v != s {
+            let e = MF_PREV[v as usize]
+            if MF_CAP[e as usize] < f { f = MF_CAP[e as usize] }
+            v = MF_TO[(e ^ 1) as usize]
+        }
+        v = t
+        while v != s {
+            let e = MF_PREV[v as usize]
+            MF_CAP[e as usize] = MF_CAP[e as usize] - f
+            MF_CAP[(e ^ 1) as usize] = MF_CAP[(e ^ 1) as usize] + f
+            v = MF_TO[(e ^ 1) as usize]
+        }
+        total = total + f * MF_DIST[t as usize]
+    }
+    return total
+}
+
+// Transportation problem on integer masses in OT_SUPPLY/OT_DEMAND/OT_COST.
+// Node layout: 0=source, 1..ns=supply, 1+ns..ns+nd=demand, ns+nd+1=sink.
+// Requires sum(OT_SUPPLY)==sum(OT_DEMAND). Returns optimal integer cost.
+pub fn w1_int(ns: i64, nd: i64) -> i64 with Mut, Panic, Div {
+    let src: i64 = 0
+    let snk = ns + nd + 1
+    let nnodes = ns + nd + 2
+    mcmf_reset(nnodes)
+    var i: i64 = 0
+    while i < ns { mcmf_add_edge(src, 1 + i, OT_SUPPLY[i as usize], 0); i = i + 1; }
+    var j: i64 = 0
+    while j < nd { mcmf_add_edge(1 + ns + j, snk, OT_DEMAND[j as usize], 0); j = j + 1; }
+    i = 0
+    while i < ns {
+        j = 0
+        while j < nd {
+            mcmf_add_edge(1 + i, 1 + ns + j, MF_INF, OT_COST[(i * nd + j) as usize])
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return mcmf_min_cost(src, snk, nnodes)
+}
+
+// ---------------------------------------------------------------------------
+// Exact LP dual (MODI / u-v potentials) for a Farkas certificate of W1.
+// After w1_int(ns,nd), recovers flow on each transport edge, builds the basis
+// (flow>0) potentials u_i, v_j with u_i + v_j = c_ij on basic cells, and exposes
+// them as rationals. Dual feasibility u_i+v_j <= c_ij for ALL i,j plus objective
+// sum(supply_i u_i)+sum(demand_j v_j) > d certifies W1 > d (UNSAT of "exists plan
+// with cost <= d"), i.e. kappa < 0, by LP weak duality.
+// ---------------------------------------------------------------------------
+pub var DU_N: [i64; 1024] = [0; 1024]      // u_i numerator (per supply)
+pub var DU_D: [i64; 1024] = [1; 1024]
+pub var DV_N: [i64; 1024] = [0; 1024]      // v_j numerator (per demand)
+pub var DV_D: [i64; 1024] = [1; 1024]
+var DU_SET: [i64; 1024] = [0; 1024]
+var DV_SET: [i64; 1024] = [0; 1024]
+var DMODI_Q: [i64; 4096] = [0; 4096]
+
+// transport edge (i,j) forward index in the residual arrays built by w1_int:
+//   first ns source edges (2 each) + nd sink edges (2 each), then i*nd+j (2 each)
+fn d_flow(ns: i64, nd: i64, i: i64, j: i64) -> i64 with Mut, Panic {
+    let fwd = (ns + nd) * 2 + (i * nd + j) * 2
+    return MF_CAP[(fwd + 1) as usize]   // reverse-edge cap == flow pushed
+}
+
+// Build MODI potentials after a solve. Returns 1 on success (all reachable).
+pub fn modi_duals(ns: i64, nd: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ns { DU_SET[i as usize] = 0; i = i + 1; }
+    var j: i64 = 0
+    while j < nd { DV_SET[j as usize] = 0; j = j + 1; }
+    // start: u_0 = 0. Nodes encoded as supply i -> i, demand j -> ns+j.
+    DU_N[0] = 0; DU_D[0] = 1; DU_SET[0] = 1
+    var qh: i64 = 0
+    var qt: i64 = 0
+    DMODI_Q[0] = 0; qt = 1
+    while qh < qt {
+        let node = DMODI_Q[qh as usize]
+        qh = qh + 1
+        if node < ns {
+            let si = node
+            var jj: i64 = 0
+            while jj < nd {
+                if d_flow(ns, nd, si, jj) > 0 {
+                    if DV_SET[jj as usize] == 0 {
+                        // v_j = c_ij - u_i
+                        let c = Rational { num: OT_COST[(si * nd + jj) as usize], den: 1 }
+                        let ui = Rational { num: DU_N[si as usize], den: DU_D[si as usize] }
+                        let v = rat_sub(c, ui)
+                        DV_N[jj as usize] = v.num; DV_D[jj as usize] = v.den; DV_SET[jj as usize] = 1
+                        DMODI_Q[qt as usize] = ns + jj; qt = qt + 1
+                    }
+                }
+                jj = jj + 1
+            }
+        } else {
+            let dj = node - ns
+            var ii: i64 = 0
+            while ii < ns {
+                if d_flow(ns, nd, ii, dj) > 0 {
+                    if DU_SET[ii as usize] == 0 {
+                        let c = Rational { num: OT_COST[(ii * nd + dj) as usize], den: 1 }
+                        let vj = Rational { num: DV_N[dj as usize], den: DV_D[dj as usize] }
+                        let u = rat_sub(c, vj)
+                        DU_N[ii as usize] = u.num; DU_D[ii as usize] = u.den; DU_SET[ii as usize] = 1
+                        DMODI_Q[qt as usize] = ii; qt = qt + 1
+                    }
+                }
+                ii = ii + 1
+            }
+        }
+    }
+    // any unset -> set 0 (degenerate basis); feasibility is checked separately.
+    i = 0
+    while i < ns { if DU_SET[i as usize] == 0 { DU_N[i as usize] = 0; DU_D[i as usize] = 1; } i = i + 1; }
+    j = 0
+    while j < nd { if DV_SET[j as usize] == 0 { DV_N[j as usize] = 0; DV_D[j as usize] = 1; } j = j + 1; }
+    return 1
+}
+
+fn ot_lcm(a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    var x = a; var y = b;
+    while y > 0 { let t = y; y = x - (x / y) * y; x = t; }
+    if x == 0 { return 0; }
+    return a / x * b
+}
+
+// Exact rational W1 from rational masses in OT_SNUM/OT_SDEN, OT_DNUM/OT_DDEN and
+// integer OT_COST. Scales to common denominator D, solves integer transport,
+// returns rat_make(cost, D). Imbalanced masses -> rat_invalid().
+pub fn w1_rational(ns: i64, nd: i64) -> Rational with Mut, Panic, Div {
+    var D: i64 = 1
+    var i: i64 = 0
+    while i < ns { D = ot_lcm(D, OT_SDEN[i as usize]); i = i + 1; }
+    i = 0
+    while i < nd { D = ot_lcm(D, OT_DDEN[i as usize]); i = i + 1; }
+    OT_LAST_D = D
+    var ssum: i64 = 0
+    var dsum: i64 = 0
+    i = 0
+    while i < ns { OT_SUPPLY[i as usize] = OT_SNUM[i as usize] * (D / OT_SDEN[i as usize]); ssum = ssum + OT_SUPPLY[i as usize]; i = i + 1; }
+    i = 0
+    while i < nd { OT_DEMAND[i as usize] = OT_DNUM[i as usize] * (D / OT_DDEN[i as usize]); dsum = dsum + OT_DEMAND[i as usize]; i = i + 1; }
+    if ssum != dsum { return rat_invalid(); }
+    let c = w1_int(ns, nd)
+    return rat_make(c, D)
+}
