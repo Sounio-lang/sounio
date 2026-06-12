@@ -152,6 +152,17 @@ REQUIRED: tuple[Evidence, ...] = (
         "Workbench project workspace keeps A/B visual project slots, comparison state, and restore metadata as Sounio data.",
     ),
     Evidence(
+        "workbench-project-workspace-controls",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "VIZ_WORKBENCH_TAG_WORKSPACE_SAVE_A",
+            "VIZ_WORKBENCH_TAG_WORKSPACE_COMPARE",
+            "viz_workbench_workspace_app_handle_event",
+        ),
+        "Workbench A/B project workspace controls are native Visual IR nodes handled by the Sounio reducer.",
+    ),
+    Evidence(
         "physchem-core-structs",
         "contains",
         "stdlib/viz/physchem.sio",
@@ -329,6 +340,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_project_workspace",
         detail="Workbench A/B visual project workspace proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-workbench-project-workspace-controls-run",
+        "label",
+        "viz_workbench_project_workspace_controls",
+        detail="Workbench native A/B project workspace controls proof is in the canonical gate.",
     ),
     Evidence(
         "gate-html-run",
