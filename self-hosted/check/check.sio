@@ -2922,6 +2922,72 @@ fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
 // stack overflow on deeply-nested / algebra-heavy exprs). This tail is NOT recursive, so its
 // own internal by-value bridges (one Checker frame at a time) are fine. Faithful to the
 // by-value original: same order, same error codes, same result TypeEntry per branch.
+fn checker_check_binary_op_types_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    if is_error_or_unknown(left_ty) || is_error_or_unknown(right_ty) {
+        return
+    }
+    match op {
+        BinaryOp::OpBitAnd => {
+            if !is_integer_type(left_ty) || !is_integer_type(right_ty) {
+                checker_report_error_at_inplace(c, span, 48, 0, 0, 0)
+            }
+        }
+        BinaryOp::OpBitOr => {
+            if !is_integer_type(left_ty) || !is_integer_type(right_ty) {
+                checker_report_error_at_inplace(c, span, 48, 0, 0, 0)
+            }
+        }
+        BinaryOp::OpBitXor => {
+            if !is_integer_type(left_ty) || !is_integer_type(right_ty) {
+                checker_report_error_at_inplace(c, span, 48, 0, 0, 0)
+            }
+        }
+        BinaryOp::OpShl => {
+            if !is_integer_type(left_ty) {
+                checker_report_error_at_inplace(c, span, 49, 0, 0, 0)
+            }
+            if !is_integer_type(right_ty) {
+                checker_report_error_at_inplace(c, span, 49, 0, 0, 0)
+            }
+        }
+        BinaryOp::OpShr => {
+            if !is_integer_type(left_ty) {
+                checker_report_error_at_inplace(c, span, 49, 0, 0, 0)
+            }
+            if !is_integer_type(right_ty) {
+                checker_report_error_at_inplace(c, span, 49, 0, 0, 0)
+            }
+        }
+        BinaryOp::OpRem => {
+            if !is_integer_type(left_ty) || !is_integer_type(right_ty) {
+                checker_report_error_at_inplace(c, span, 50, 0, 0, 0)
+            }
+        }
+        BinaryOp::OpAnd => {
+            if !is_bool_type(left_ty) || !is_bool_type(right_ty) {
+                checker_report_error_at_inplace(c, span, 51, 0, 0, 0)
+            }
+        }
+        BinaryOp::OpOr => {
+            if !is_bool_type(left_ty) || !is_bool_type(right_ty) {
+                checker_report_error_at_inplace(c, span, 51, 0, 0, 0)
+            }
+        }
+        _ => { }
+    }
+}
+
+fn checker_finish_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let lu = left.unit_id
+    let ru = right.unit_id
+    if lu < 0 && ru < 0 {
+        return result
+    }
+    let pair = (*c).check_binary_units(span, op, left, right, result)
+    checker_store_from_value(c, pair.0)
+    pair.1
+}
+
 fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
@@ -2933,8 +2999,17 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             }
         }
     }
-    let bot = (*c).check_binary_op_types(e.span, e.bin_op, left_ty, right_ty)
-    checker_store_from_value(c, bot)
+    checker_check_binary_op_types_inplace(c, e.span, e.bin_op, left_ty, right_ty)
+    if !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !types_compatible(left_ty, right_ty) {
+        let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
+        let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
+            || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
+            || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
+        if is_arith || is_cmp {
+            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
+        }
+    }
     if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
         let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
         let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
@@ -2946,9 +3021,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         if knowledge_result.kind == TypeKind::TyError {
             checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
         }
-        let ru = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, knowledge_result)
-        checker_store_from_value(c, ru.0)
-        let final_result = ru.1
+        let final_result = checker_finish_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_result)
         if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
             let final_inner = if final_result.kind == TypeKind::TyKnowledge {
                 knowledge_inner(final_result)
@@ -2966,9 +3039,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         let hr = check_hyper_binary(*c, e.span, e.bin_op, left_ty, right_ty)
         checker_store_from_value(c, hr.0)
         let typed_result = hr.1
-        let ru = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, typed_result)
-        checker_store_from_value(c, ru.0)
-        let final_result = ru.1
+        let final_result = checker_finish_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, typed_result)
         if e.bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
             let rh = (*c).record_hyper_expr(e.span, final_result.algebra_kind, 1, false)
             checker_store_from_value(c, rh)
@@ -2997,9 +3068,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             checker_report_error_at_inplace(c, e.span, 57, 0, 0, 0)
         }
     }
-    let ru = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, result)
-    checker_store_from_value(c, ru.0)
-    ru.1
+    checker_finish_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, result)
 }
 
 fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -3016,9 +3085,20 @@ fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) ->
 // condition narrowing, branch-type compat) is faithful to the by-value original.
 fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let cond_ty = checker_check_opt_expr_inplace(c, e.left)
-    // Condition must be bool
+    // Condition must be bool (skip E006 when the condition already failed typechecking).
     if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
-        checker_report_mismatch_inplace(c, e.span, 6, ty_bool(), cond_ty)
+        let cond_is_cmp = match e.left {
+            Some(cond_box) => {
+                let cond_expr = *cond_box
+                cond_expr.bin_op == BinaryOp::OpEq || cond_expr.bin_op == BinaryOp::OpNe
+                    || cond_expr.bin_op == BinaryOp::OpLt || cond_expr.bin_op == BinaryOp::OpLe
+                    || cond_expr.bin_op == BinaryOp::OpGt || cond_expr.bin_op == BinaryOp::OpGe
+            }
+            None => false
+        }
+        if !cond_is_cmp {
+            checker_report_mismatch_inplace(c, e.span, 6, ty_bool(), cond_ty)
+        }
     }
     // Condition narrowing (mirrors check_if_expr: push a refinement guard for the then-branch)
     let saved_cond_env = (*c).refine_cond_env
@@ -3630,10 +3710,14 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             while !done_v {
                                 match cur_v {
                                     Some(list) => {
-                                        let field_ty = field_info_list_find(mono_si.fields, (*list).head.name)
-                                        let val_init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                                        if !types_compatible(val_init_ty, field_ty) {
-                                            checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, val_init_ty)
+                                        if !field_info_list_has(mono_si.fields, (*list).head.name) {
+                                            checker_report_error_at_inplace(c, (*list).head.value.span, 12, 0, 0, 0)
+                                        } else {
+                                            let field_ty = field_info_list_find(mono_si.fields, (*list).head.name)
+                                            let val_init_ty = checker_check_expr_inplace(c, (*list).head.value)
+                                            if !types_compatible(val_init_ty, field_ty) {
+                                                checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, val_init_ty)
+                                            }
                                         }
                                         cur_v = (*list).tail
                                     }
@@ -3662,10 +3746,14 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             while !done {
                 match cur {
                     Some(list) => {
-                        let field_ty = field_info_list_find(si.fields, (*list).head.name)
-                        let init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                        if !types_compatible(init_ty, field_ty) {
-                            checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
+                        if !field_info_list_has(si.fields, (*list).head.name) {
+                            checker_report_error_at_inplace(c, (*list).head.value.span, 12, 0, 0, 0)
+                        } else {
+                            let field_ty = field_info_list_find(si.fields, (*list).head.name)
+                            let init_ty = checker_check_expr_inplace(c, (*list).head.value)
+                            if !types_compatible(init_ty, field_ty) {
+                                checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
+                            }
                         }
                         cur = (*list).tail
                     }
@@ -3702,9 +3790,11 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                 while !done_ev {
                     match cur_ev {
                         Some(list) => {
-                            let field_ty = field_info_list_find(vfields, (*list).head.name)
-                            let init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                            if field_info_list_has(vfields, (*list).head.name) {
+                            if !field_info_list_has(vfields, (*list).head.name) {
+                                checker_report_error_at_inplace(c, (*list).head.value.span, 12, 0, 0, 0)
+                            } else {
+                                let field_ty = field_info_list_find(vfields, (*list).head.name)
+                                let init_ty = checker_check_expr_inplace(c, (*list).head.value)
                                 if !types_compatible(init_ty, field_ty) {
                                     checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
                                 }
@@ -4140,7 +4230,20 @@ fn checker_check_call_args_inner_inplace(c: *mut Checker, args: Option<Box<ExprL
     }
 }
 
+fn checker_count_expr_list(opt: Option<Box<ExprList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        None => 0
+        Some(list) => 1 + checker_count_expr_list((*list).tail)
+    }
+}
+
 fn checker_check_call_args_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, expected_count: i64, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+    if expected_count >= 0 {
+        let actual_count = checker_count_expr_list(args)
+        if actual_count != expected_count {
+            checker_report_error_at_inplace(c, call_span, 10, 0, 0, 0)
+        }
+    }
     checker_check_call_args_inner_inplace(c, args, params, 0, expected_count, call_span)
 }
 
@@ -4157,6 +4260,24 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
 
 // slice_len(s: &[T]) -> i64. Inplace transcription of check_slice_len_call_expr —
 // the by-value bridge SRET-smashed on populated enum tables (slice_fat_pointers crash).
+fn checker_check_assert_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        None => {}
+    }
+    let cond_ty = checker_check_opt_expr_inplace(c, first_arg)
+    if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
+        checker_report_mismatch_inplace(c, e.span, 174, ty_bool(), cond_ty)
+    }
+    ty_unit()
+}
+
 fn checker_check_slice_len_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_arg = expr_list_head(e.args)
     let second_arg = expr_list_second(e.args)
@@ -4218,6 +4339,9 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     if call_expr_is_builtin_slice_len(e.left) {
         return checker_check_slice_len_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_assert(e.left) {
+        return checker_check_assert_expr_inplace(c, e)
     }
     if call_expr_should_bridge_by_value(e) {
         return checker_check_expr_mut(c, e)
@@ -4624,6 +4748,10 @@ fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, ar
 // linear-consume in place; returns only the TypeEntry (no 164KB self SRET — the by-value
 // arm's `(c2, ident_ty)` return was the last bridge before crash in 165 deeply-nested cases).
 fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if !(*c).env.has_binding(e.name) {
+        checker_report_error_at_inplace(c, e.span, 137, 0, 0, 0)
+        return ty_error()
+    }
     let ident_ty = (*c).env.lookup(e.name)
     if checker_is_linear_type_inplace(c, ident_ty) && (*c).suppress_linear_consume_depth == 0 {
         if (*c).borrows.is_borrowed(e.name) {
@@ -9124,6 +9252,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 134 { print("rollback_transition(...) requires a violated or unavailable monitoring guard") }
     else if code == 135 { print("monitoring policy requires unavailable transition evidence") }
     else if code == 136 { print("monitoring policy obligation failed") }
+    else if code == 137 { print("use of undeclared variable") }
     // Sprint 29: Do-calculus type checking errors (138-141)
     else if code == 138 { print("front-door criterion failed: no mediator set intercepts all directed paths from cause to effect") }
     else if code == 139 { print("do-calculus Rule 1 violated: observation is not d-separated from outcome given intervention") }
@@ -9150,6 +9279,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 171 { print("cannot cast epistemic type to its inner type; epistemic wrapping cannot be silently stripped") }
     else if code == 172 { print("Knowledge.unwrap requires exactly one argument") }
     else if code == 173 { print("reason must be a `string` literal") }
+    else if code == 174 { print("assert condition must be of type `bool`") }
     else if code == 200 { print("Forgettable type requires ZD effect: exact annihilation is only possible via zero-divisor algebra (sedenions). Division algebras cannot satisfy this guarantee. Add `with ZD` to your function signature.") }
     else if code == 201 { print("ExactlyPrivate<T> requires ZD effect: exact data-contribution removal is only possible via sedenion annihilation. Differential privacy (epsilon-bounded) does not suffice. Add `with ZD` to your function signature.") }
     else if code == 202 { print("Editable<T> requires ZD effect: locality-bounded edits (G5) require ZD-based kernel annihilation. Ripple-free editing is not achievable via rank-1 or mask-based updates. Add `with ZD` to your function signature.") }
@@ -9403,6 +9533,12 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 72 {
         print("   |\n   = help: kernel functions execute on GPU and cannot return values; use &![T] output parameters instead\n")
+    }
+    else if code == 137 {
+        print("   |\n   = help: declare the variable before use, or import it from another module\n")
+    }
+    else if code == 174 {
+        print("   |\n   = help: use a comparison or boolean expression in assert(...)\n")
     }
     // Sprint 29: Do-calculus type checking (138-141)
     else if code == 138 {
@@ -9994,6 +10130,18 @@ fn call_expr_is_builtin_measure(opt: Option<Box<Expr> >) -> bool with Mut, Panic
                 return false
             }
             name_matches_str7((*expr).name, 109, 101, 97, 115, 117, 114, 101)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_assert(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str6((*expr).name, 97, 115, 115, 101, 114, 116)
         }
         None => false
     }
@@ -15086,6 +15234,10 @@ impl Checker {
             ExprKind::ExprStringLit => (c, ty_string())
             ExprKind::ExprCharLit => (c, ty_char())
             ExprKind::ExprIdent => {
+                if !c.env.has_binding(e.name) {
+                    let c_err = c.report_error_at(e.span, 137, 0, 0, 0)
+                    return (c_err, ty_error())
+                }
                 let ident_ty = c.env.lookup(e.name)
                 // If this is a linear type variable, mark it as consumed
                 var c2 = c
