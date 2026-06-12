@@ -120,6 +120,13 @@ REQUIRED: tuple[Evidence, ...] = (
         "Editable Visual IR state can be packaged, emitted, and restored as Sounio data.",
     ),
     Evidence(
+        "workbench-native-package-controls",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        ("viz_workbench_handle_package_command", "VIZ_WORKBENCH_TAG_PACKAGE_SAVE", "VizScenePackage"),
+        "Workbench package save, restore, undo, and redo commands are native Visual IR control state.",
+    ),
+    Evidence(
         "physchem-core-structs",
         "contains",
         "stdlib/viz/physchem.sio",
@@ -273,6 +280,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_scene_package",
         detail="Scene package export/import proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-workbench-package-controls-run",
+        "label",
+        "viz_workbench_package_controls",
+        detail="Workbench-native package controls proof is in the canonical gate.",
     ),
     Evidence(
         "gate-html-run",

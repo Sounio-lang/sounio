@@ -1,0 +1,114 @@
+// tests/run-pass/viz_workbench_package_controls.sio - Workbench-native package controls proof
+//
+// Expected output includes:
+//   viz-scene-package
+//   VIZ_WORKBENCH_PACKAGE_CONTROLS_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use display::event::{MOUSE_LEFT, EV_MOUSE_PRESS}
+use viz::authoring::{VizMoleculeConstraint}
+use viz::audit::{viz_audit_hash, viz_audit_node_hash}
+use viz::editor::{viz_editor_resize_selected, viz_editor_set_selected_value}
+use viz::ir::{VizScene, viz_scene_new}
+use viz::snapshot::{
+    VizSceneHistory, VizScenePackage,
+    viz_scene_history_new,
+    viz_scene_package_new, viz_scene_package_verify, viz_scene_package_emit,
+}
+use viz::viz_app::{VizApp, viz_app_new}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+use viz::workbench::{
+    VIZ_WORKBENCH_TAG_PACKAGE_UNDO, VIZ_WORKBENCH_TAG_PACKAGE_REDO,
+    VIZ_WORKBENCH_TAG_PACKAGE_SAVE, VIZ_WORKBENCH_TAG_PACKAGE_RESTORE,
+    VIZ_WORKBENCH_TAG_PACKAGE_AUDIT,
+    VizWorkbenchIds,
+    viz_workbench_build_scene, viz_workbench_constraint, viz_workbench_event,
+    viz_workbench_package_app_handle_event,
+}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn read_px(c: &Canvas, x: i64, y: i64) -> i64 {
+    read_i64(c.pixels, y * c.width + x)
+}
+
+fn click(app: &!VizApp, scene: &!VizScene, ids: &VizWorkbenchIds, constraint: &!VizMoleculeConstraint, history: &!VizSceneHistory, pkg: &!VizScenePackage, x: i64, y: i64) -> bool with Mut, Div {
+    let ev = viz_workbench_event(EV_MOUSE_PRESS, MOUSE_LEFT, x, y, 0)
+    viz_workbench_package_app_handle_event(app, scene, ids, constraint, history, pkg, ev)
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene = viz_scene_new()
+    let ids = viz_workbench_build_scene(&!scene)
+    var app = viz_app_new(10, 13, 18)
+    var constraint = viz_workbench_constraint(&ids)
+    var history = viz_scene_history_new()
+    var pkg = viz_scene_package_new()
+
+    assert(scene.node_count == 36)
+    assert(scene.nodes[ids.package_undo as usize].tag == VIZ_WORKBENCH_TAG_PACKAGE_UNDO)
+    assert(scene.nodes[ids.package_redo as usize].tag == VIZ_WORKBENCH_TAG_PACKAGE_REDO)
+    assert(scene.nodes[ids.package_save as usize].tag == VIZ_WORKBENCH_TAG_PACKAGE_SAVE)
+    assert(scene.nodes[ids.package_restore as usize].tag == VIZ_WORKBENCH_TAG_PACKAGE_RESTORE)
+    assert(scene.nodes[ids.package_audit as usize].tag == VIZ_WORKBENCH_TAG_PACKAGE_AUDIT)
+
+    scene.selected_node = ids.slider
+    scene.focused_node = ids.slider
+    scene.hovered_node = ids.slider
+    scene.nodes[ids.slider as usize].selected = true
+
+    assert(click(&!app, &!scene, &ids, &!constraint, &!history, &!pkg, 125, 253))
+    assert(viz_scene_package_verify(&pkg))
+    assert(history.count == 1)
+    assert(history.cursor == 0)
+    let base_audit = viz_audit_hash(&scene)
+    let base_slider_hash = viz_audit_node_hash(&scene, ids.slider)
+
+    assert(viz_editor_set_selected_value(&!scene, 7.0))
+    assert(viz_editor_resize_selected(&!scene, 14, 2, 10, 6))
+    assert(click(&!app, &!scene, &ids, &!constraint, &!history, &!pkg, 125, 253))
+    assert(viz_scene_package_verify(&pkg))
+    assert(history.count == 2)
+    assert(history.cursor == 1)
+    assert(pkg.history_count == 2)
+    assert(pkg.history_cursor == 1)
+    let edit_audit = viz_audit_hash(&scene)
+    let edit_slider_hash = viz_audit_node_hash(&scene, ids.slider)
+    assert(edit_audit != base_audit)
+    assert(edit_slider_hash != base_slider_hash)
+    assert(scene.nodes[ids.slider as usize].value == 7.0)
+    assert(scene.nodes[ids.package_audit as usize].value >= 0.0)
+
+    assert(click(&!app, &!scene, &ids, &!constraint, &!history, &!pkg, 35, 253))
+    assert(history.cursor == 0)
+    assert(scene.nodes[ids.slider as usize].value == 2.0)
+    assert(viz_audit_node_hash(&scene, ids.slider) == base_slider_hash)
+
+    assert(click(&!app, &!scene, &ids, &!constraint, &!history, &!pkg, 80, 253))
+    assert(history.cursor == 1)
+    assert(scene.nodes[ids.slider as usize].value == 7.0)
+    assert(viz_audit_node_hash(&scene, ids.slider) == edit_slider_hash)
+    assert(viz_scene_package_verify(&pkg))
+
+    assert(viz_editor_set_selected_value(&!scene, 9.0))
+    assert(scene.nodes[ids.slider as usize].value == 9.0)
+    assert(click(&!app, &!scene, &ids, &!constraint, &!history, &!pkg, 174, 253))
+    assert(scene.nodes[ids.slider as usize].value == 7.0)
+    assert(viz_audit_node_hash(&scene, ids.slider) == edit_slider_hash)
+    assert(viz_scene_package_verify(&pkg))
+    viz_scene_package_emit(&pkg)
+
+    var c = make_canvas(470, 320)
+    canvas_clear(&!c, app.bg_r, app.bg_g, app.bg_b)
+    viz_canvas_render_scene(&scene, &!c)
+    assert(read_px(&c, 18, 246) != 0)
+    assert(read_px(&c, 202, 246) != 0)
+    viz_html_emit_scene(&scene, 470, 320)
+
+    heap_free(c.pixels as *mut i8)
+    println("VIZ_WORKBENCH_PACKAGE_CONTROLS_PASS")
+}

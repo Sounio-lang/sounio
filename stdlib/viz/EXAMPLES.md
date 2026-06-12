@@ -190,6 +190,22 @@ VIZ_SCENE_PACKAGE_PASS
 
 The test captures an authored Workbench scene plus edit-history signature into `VizScenePackage`, emits a passive `viz-scene-package` audit comment, restores the package into a freshly rebuilt scene, then proves scene audit, node hash, Canvas pixels, and static HTML/SVG export all agree with the packaged Sounio-owned state.
 
+## Workbench Package Controls Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_package_controls.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_PACKAGE_CONTROLS_PASS
+```
+
+The test drives Workbench package buttons through native mouse events: save captures a package, undo and redo restore bounded history frames, restore reloads the latest package after a destructive local edit, and Canvas plus static HTML/SVG render the same Visual IR controls with a passive `viz-scene-package` audit comment.
+
 ## Workbench Physchem HTML Export Proof
 
 Run:
