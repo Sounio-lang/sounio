@@ -1,0 +1,140 @@
+// stdlib/viz/molecule_editor.sio - deterministic molecule authoring helpers
+
+use viz::ir::{VizScene, VIZ_NODE_MOLECULE}
+
+fn vme_molecule_slot(scene: &VizScene, molecule_node: i64) -> i64 {
+    if molecule_node < 0 || molecule_node >= scene.node_count { return 0 - 1 }
+    let n = scene.nodes[molecule_node as usize]
+    if n.kind != VIZ_NODE_MOLECULE { return 0 - 1 }
+    if n.data_slot < 0 || n.data_slot >= scene.molecule_count { return 0 - 1 }
+    n.data_slot
+}
+
+fn vme_atom_count(scene: &VizScene, slot: i64) -> i64 with Mut {
+    if slot < 0 || slot >= scene.molecule_count { return 0 }
+    var count = scene.molecules[slot as usize].atom_count
+    if count < 0 { count = 0 }
+    if count > 64 { count = 64 }
+    count
+}
+
+pub fn viz_molecule_atom_count(scene: &VizScene, molecule_node: i64) -> i64 with Mut {
+    let slot = vme_molecule_slot(scene, molecule_node)
+    vme_atom_count(scene, slot)
+}
+
+pub fn viz_molecule_atom_screen_x(scene: &VizScene, molecule_node: i64, atom_idx: i64) -> i64 with Mut {
+    let slot = vme_molecule_slot(scene, molecule_node)
+    let count = vme_atom_count(scene, slot)
+    if atom_idx < 0 || atom_idx >= count { return 0 }
+    let n = scene.nodes[molecule_node as usize]
+    let a = scene.molecules[slot as usize].atoms[atom_idx as usize]
+    n.layout.x + n.layout.w / 2 + (a.x * (n.layout.w as f64) * 0.30) as i64
+}
+
+pub fn viz_molecule_atom_screen_y(scene: &VizScene, molecule_node: i64, atom_idx: i64) -> i64 with Mut {
+    let slot = vme_molecule_slot(scene, molecule_node)
+    let count = vme_atom_count(scene, slot)
+    if atom_idx < 0 || atom_idx >= count { return 0 }
+    let n = scene.nodes[molecule_node as usize]
+    let a = scene.molecules[slot as usize].atoms[atom_idx as usize]
+    n.layout.y + n.layout.h / 2 - (a.y * (n.layout.h as f64) * 0.30) as i64
+}
+
+pub fn viz_molecule_atom_hash(scene: &VizScene, molecule_node: i64, atom_idx: i64) -> i64 with Mut {
+    let slot = vme_molecule_slot(scene, molecule_node)
+    let count = vme_atom_count(scene, slot)
+    if atom_idx < 0 || atom_idx >= count { return 0 }
+    let a = scene.molecules[slot as usize].atoms[atom_idx as usize]
+    var h: i64 = 41
+    h = h * 131 + a.atomic_number
+    h = h * 131 + (a.x * 1000.0) as i64
+    h = h * 131 + (a.y * 1000.0) as i64
+    h = h * 131 + (a.z * 1000.0) as i64
+    h = h * 131 + (a.radius * 1000.0) as i64
+    h = h * 131 + a.r
+    h = h * 131 + a.g
+    h = h * 131 + a.b
+    h
+}
+
+pub fn viz_molecule_hit_atom(scene: &VizScene, molecule_node: i64, px: i64, py: i64) -> i64 with Mut {
+    let slot = vme_molecule_slot(scene, molecule_node)
+    let count = vme_atom_count(scene, slot)
+    if count <= 0 { return 0 - 1 }
+    var best: i64 = 0 - 1
+    var best_dist: i64 = 9223372036854775807
+    var i: i64 = 0
+    while i < count {
+        let sx = viz_molecule_atom_screen_x(scene, molecule_node, i)
+        let sy = viz_molecule_atom_screen_y(scene, molecule_node, i)
+        let dx = sx - px
+        let dy = sy - py
+        let d2 = dx * dx + dy * dy
+        let radius = (scene.molecules[slot as usize].atoms[i as usize].radius * 8.0) as i64 + 4
+        if d2 <= radius * radius && d2 < best_dist {
+            best = i
+            best_dist = d2
+        }
+        i = i + 1
+    }
+    best
+}
+
+pub fn viz_molecule_select_atom(scene: &!VizScene, molecule_node: i64, atom_idx: i64) -> bool with Mut {
+    let slot = vme_molecule_slot(scene, molecule_node)
+    let count = vme_atom_count(scene, slot)
+    if atom_idx < 0 || atom_idx >= count { return false }
+    scene.selected_node = molecule_node
+    scene.focused_node = molecule_node
+    scene.hovered_node = molecule_node
+    var i: i64 = 0
+    while i < scene.node_count {
+        scene.nodes[i as usize].selected = i == molecule_node
+        i = i + 1
+    }
+    true
+}
+
+pub fn viz_molecule_nudge_atom(scene: &!VizScene, molecule_node: i64, atom_idx: i64, dx: f64, dy: f64, dz: f64) -> bool with Mut {
+    let slot = vme_molecule_slot(scene, molecule_node)
+    let count = vme_atom_count(scene, slot)
+    if atom_idx < 0 || atom_idx >= count { return false }
+    var mol = scene.molecules[slot as usize]
+    var atom = mol.atoms[atom_idx as usize]
+    atom.x = atom.x + dx
+    atom.y = atom.y + dy
+    atom.z = atom.z + dz
+    mol.atoms[atom_idx as usize] = atom
+    scene.molecules[slot as usize] = mol
+    true
+}
+
+pub fn viz_molecule_set_atom_radius(scene: &!VizScene, molecule_node: i64, atom_idx: i64, radius: f64) -> bool with Mut {
+    let slot = vme_molecule_slot(scene, molecule_node)
+    let count = vme_atom_count(scene, slot)
+    if atom_idx < 0 || atom_idx >= count { return false }
+    var r = radius
+    if r < 0.2 { r = 0.2 }
+    if r > 2.0 { r = 2.0 }
+    var mol = scene.molecules[slot as usize]
+    var atom = mol.atoms[atom_idx as usize]
+    atom.radius = r
+    mol.atoms[atom_idx as usize] = atom
+    scene.molecules[slot as usize] = mol
+    true
+}
+
+pub fn viz_molecule_set_atom_color(scene: &!VizScene, molecule_node: i64, atom_idx: i64, r: i64, g: i64, b: i64) -> bool with Mut {
+    let slot = vme_molecule_slot(scene, molecule_node)
+    let count = vme_atom_count(scene, slot)
+    if atom_idx < 0 || atom_idx >= count { return false }
+    var mol = scene.molecules[slot as usize]
+    var atom = mol.atoms[atom_idx as usize]
+    atom.r = r
+    atom.g = g
+    atom.b = b
+    mol.atoms[atom_idx as usize] = atom
+    scene.molecules[slot as usize] = mol
+    true
+}

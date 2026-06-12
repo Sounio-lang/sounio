@@ -51,9 +51,10 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 
 ## V1.6: Native Visual Workbench
 
-- `stdlib/viz/workbench.sio` composes chart, epistemic band, heatmap, molecule data, scalar/vector field, trajectory, spectrum, 3D mesh, controls, labels, legend, tooltip, viewport, replay, inspector, editor, Canvas, and HTML/SVG into one reusable scene blueprint.
+- `stdlib/viz/workbench.sio` composes chart, epistemic band, heatmap, rendered molecule nodes, scalar/vector field, trajectory, spectrum, 3D mesh, controls, labels, legend, tooltip, viewport, replay, inspector, editor, Canvas, and HTML/SVG into one reusable scene blueprint.
 - `examples/viz_workbench/main.sio` is the first native Workbench demo surface.
-- `tests/run-pass/viz_workbench_roundtrip.sio` proves Workbench render -> replay -> inspector selection -> editor mutation -> Canvas highlight -> static HTML/SVG identity export without delegating scientific semantics to JavaScript.
+- `stdlib/viz/molecule_editor.sio` adds atom-level hit-testing, selection, position/radius/color mutation, and deterministic atom hashes over Sounio molecule payloads.
+- `tests/run-pass/viz_workbench_roundtrip.sio` proves Workbench render -> replay -> inspector selection -> editor mutation -> Canvas highlight -> molecule atom authoring -> static HTML/SVG identity export without delegating scientific semantics to JavaScript.
 
 ## V1.7: Static HTML/SVG
 

@@ -320,10 +320,11 @@ Expected output includes:
 
 ```text
 data-viz-tag="9101"
+data-viz-tag="8301"
 VIZ_WORKBENCH_ROUNDTRIP_PASS
 ```
 
-The test builds the reusable Workbench scene, renders Canvas, replays a deterministic interaction script, selects a node through the inspector, edits the selected Visual IR node, redraws highlights, and exports HTML/SVG from the same edited scene.
+The test builds the reusable Workbench scene, renders Canvas, replays a deterministic interaction script, selects a node through the inspector, edits the selected Visual IR node, redraws highlights, hit-tests and edits a molecule atom, verifies the edited molecule pixels, and exports HTML/SVG from the same edited scene.
 
 ## Renderer3D Edge Proof
 

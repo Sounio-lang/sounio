@@ -12,6 +12,7 @@ The v1 architecture is:
 - `viz::inspector`: native Canvas inspector panel for Visual IR identity and interaction state.
 - `viz::viz_window`: optional native `display::Window` bridge for manual event-loop demos.
 - `viz::audit`: shared state hashes used by replay, inspector, HTML/export audits, and headless tests.
+- `viz::molecule_editor`: atom-level molecule hit-testing, selection, and mutation helpers over `VizScene`.
 - `viz::physchem`: Sounio data structures for molecules, bonds, scalar/vector fields, trajectories, spectra, lattice/phonon fields, particle event views, and uncertainty overlays.
 - `viz::{coord,chart,epiviz,sci}`: direct drawing helpers that the IR renderer can lower into.
 
@@ -41,7 +42,8 @@ Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattic
 - `viz_inspector_hit_node` and `viz_inspector_select` make inspector rows interactive Sounio state: selecting a row updates selected/hovered/focused node fields without delegating state to UI runtime code.
 - `viz_inspector_draw_node_highlights` overlays native Canvas highlights on selected/hovered/focused Visual IR nodes.
 - `viz::editor` edits the selected/focused/hovered node: nudge/resize fixed rectangles, set app tags, set clamped control values, and record edit traces from keyboard events.
-- `viz::workbench` composes charts, molecule data, scalar/vector fields, trajectory, spectrum, mesh, controls, inspector/edit/replay/export hooks into a reusable native visual workbench scene blueprint.
+- `viz::molecule_editor` edits molecule payloads through the Visual IR: count atoms, project atom positions to Canvas coordinates, hit-test atoms, select molecule nodes, nudge atoms, set atom radius, and recolor atoms.
+- `viz::workbench` composes charts, rendered molecule nodes, scalar/vector fields, trajectory, spectrum, mesh, controls, inspector/edit/replay/export hooks into a reusable native visual workbench scene blueprint.
 - Labels and text controls use fixed `[i8; 64]` buffers in the Visual IR. Canvas renders them with `display::font`; HTML/SVG escapes XML-sensitive ASCII before export.
 - Native frontend builders cover button, slider, toggle, tabs, legend, tooltip, text viewport, and plot viewport nodes over the same control reducer machinery.
 - `display::event::Event` can be reduced directly into `VizScene` for headless tests and future native window loops.
