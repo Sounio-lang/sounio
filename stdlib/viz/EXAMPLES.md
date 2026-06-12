@@ -346,6 +346,22 @@ VIZ_MOLECULE_STUDIO_EVENTS_PASS
 
 The test drives Molecule Studio from native `display::event::Event` values: toolbar clicks select tools, molecule clicks add atoms and bonds, keyboard arrows nudge the selected atom, lock constraints reject later selection, delete returns the molecule to three atoms, and Canvas renders the toolbar/status pixels.
 
+## Workbench App Event Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_app_events.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_APP_EVENTS_PASS
+```
+
+The test drives the composed Workbench app bridge. Generic slider events and Molecule Studio toolbar/molecule events enter through `viz_workbench_app_handle_event`, mark the app dirty, render through `viz_app_render`, and produce changed deterministic frame hashes.
+
 ## Renderer3D Edge Proof
 
 Run:

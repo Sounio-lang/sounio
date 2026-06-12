@@ -1,0 +1,91 @@
+// tests/run-pass/viz_workbench_app_events.sio - Workbench app event bridge proof
+//
+// Expected output:
+//   VIZ_WORKBENCH_APP_EVENTS_PASS
+
+use display::canvas::{Canvas}
+use display::event::{Event, EV_KEY_PRESS, EV_MOUSE_PRESS, EV_MOTION, KEY_RIGHT, MOUSE_LEFT}
+use viz::molecule_editor::{
+    viz_molecule_atom_count, viz_molecule_atom_hash,
+    viz_molecule_atom_screen_x, viz_molecule_atom_screen_y,
+    viz_molecule_selected_atom_index,
+}
+use viz::molecule_studio::{
+    VIZ_MOLECULE_TOOL_ADD_ATOM, VIZ_MOLECULE_TOOL_MOVE,
+}
+use viz::viz_app::{viz_app_new, viz_app_render, viz_app_frame_hash}
+use viz::workbench::{
+    viz_workbench_build_scene, viz_workbench_constraint,
+    viz_workbench_app_handle_event,
+}
+use viz::ir::{viz_scene_new}
+
+fn ev(kind: i64, key: i64, x: i64, y: i64) -> Event {
+    Event { kind: kind, key: key, x: x, y: y, mods: 0 }
+}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn center_x(x: i64, w: i64) -> i64 {
+    x + w / 2
+}
+
+fn center_y(y: i64, h: i64) -> i64 {
+    y + h / 2
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene = viz_scene_new()
+    let ids = viz_workbench_build_scene(&!scene)
+    var constraint = viz_workbench_constraint(&ids)
+    var app = viz_app_new(10, 13, 18)
+    var c = make_canvas(480, 320)
+
+    viz_app_render(&!app, &!scene, &!c)
+    let initial_hash = viz_app_frame_hash(&app, &scene, &c)
+    assert(!app.dirty)
+    assert(initial_hash != 0)
+
+    assert(viz_workbench_app_handle_event(&!app, &!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, 46, 238)))
+    assert(scene.selected_node == ids.slider)
+    assert(app.dirty)
+    assert(viz_workbench_app_handle_event(&!app, &!scene, &!constraint, ev(EV_MOTION, 0, 101, 238)))
+    assert(scene.time == 5.0)
+    viz_app_render(&!app, &!scene, &!c)
+    assert(!app.dirty)
+    let after_slider_hash = viz_app_frame_hash(&app, &scene, &c)
+    assert(after_slider_hash != initial_hash)
+
+    let add_x = scene.nodes[ids.molecule as usize].layout.x + scene.nodes[ids.molecule as usize].layout.w / 2
+    let add_y = scene.nodes[ids.molecule as usize].layout.y + scene.nodes[ids.molecule as usize].layout.h / 2 + 21
+    let atom1_x = viz_molecule_atom_screen_x(&scene, ids.molecule, 1)
+    let atom1_y = viz_molecule_atom_screen_y(&scene, ids.molecule, 1)
+    assert(viz_molecule_atom_count(&scene, ids.molecule) == 3)
+
+    assert(viz_workbench_app_handle_event(&!app, &!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, center_x(scene.nodes[ids.studio_atom as usize].layout.x, scene.nodes[ids.studio_atom as usize].layout.w), center_y(scene.nodes[ids.studio_atom as usize].layout.y, scene.nodes[ids.studio_atom as usize].layout.h))))
+    assert(scene.molecule_tool == VIZ_MOLECULE_TOOL_ADD_ATOM)
+    assert(app.dirty)
+    assert(viz_workbench_app_handle_event(&!app, &!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, add_x, add_y)))
+    assert(viz_molecule_atom_count(&scene, ids.molecule) == 4)
+    assert(scene.nodes[ids.studio_timeline as usize].value == scene.molecule_timeline_count as f64)
+    viz_app_render(&!app, &!scene, &!c)
+    assert(!app.dirty)
+
+    assert(viz_workbench_app_handle_event(&!app, &!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, center_x(scene.nodes[ids.studio_move as usize].layout.x, scene.nodes[ids.studio_move as usize].layout.w), center_y(scene.nodes[ids.studio_move as usize].layout.y, scene.nodes[ids.studio_move as usize].layout.h))))
+    assert(scene.molecule_tool == VIZ_MOLECULE_TOOL_MOVE)
+    assert(viz_workbench_app_handle_event(&!app, &!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, atom1_x, atom1_y)))
+    assert(viz_molecule_selected_atom_index(&scene) == 1)
+    let before_move_hash = viz_molecule_atom_hash(&scene, ids.molecule, 1)
+    assert(viz_workbench_app_handle_event(&!app, &!scene, &!constraint, ev(EV_KEY_PRESS, KEY_RIGHT, 0, 0)))
+    assert(viz_molecule_atom_hash(&scene, ids.molecule, 1) != before_move_hash)
+    assert(app.dirty)
+    viz_app_render(&!app, &!scene, &!c)
+    assert(!app.dirty)
+    assert(viz_app_frame_hash(&app, &scene, &c) != after_slider_hash)
+
+    heap_free(c.pixels as *mut i8)
+    println("VIZ_WORKBENCH_APP_EVENTS_PASS")
+}
