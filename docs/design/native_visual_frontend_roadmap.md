@@ -70,8 +70,9 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `stdlib/viz/molecule_studio.sio` turns checked molecule authoring into a native Workbench tool layer. Tool state, unit scale, pending bond endpoint, last action, last reason, accept/reject counts, and timeline count are fields on `VizScene`.
 - `stdlib/viz/workbench.sio` now binds a molecule node to Studio V0 and adds Visual IR toolbar controls for select, move, add atom, add bond, delete, lock, status, and timeline.
 - Studio pointer and nudge commands reduce into `viz::authoring` checked actions, so constraints for locked atoms, geometry, units, radius, and capacity remain Sounio data.
+- `viz_molecule_studio_handle_event` connects native `display::event::Event` input to the Studio toolbar and molecule canvas. Button clicks choose tools, molecule clicks author atoms/bonds/deletes/locks, and arrow keys nudge selected atoms through checked unit-aware authoring.
 - `viz_audit_hash`, `viz_app_frame_hash`, and `viz_html_emit_scene` expose Studio state for replay/export parity without moving semantics into JavaScript.
-- `tests/run-pass/viz_workbench_roundtrip.sio` proves the Studio path end to end: select, move/nudge, add atom, add bond, lock, rejected locked selection, delete, status/timeline update, and Canvas toolbar pixels.
+- `tests/run-pass/viz_workbench_roundtrip.sio` proves the direct Studio path end to end, while `tests/run-pass/viz_molecule_studio_events.sio` proves the native event path: toolbar click -> checked molecule mutation -> status/timeline update -> Canvas pixels.
 
 ## V1.9: Static HTML/SVG
 

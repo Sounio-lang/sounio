@@ -330,6 +330,22 @@ The molecule section uses `viz::authoring` transactions rather than raw payload 
 
 The Workbench also includes Molecule Studio V0. Its Visual IR toolbar exposes select, move, add atom, add bond, delete, and lock tools, plus status and timeline controls. The roundtrip proof drives Studio pointer/nudge commands through checked authoring, verifies accepted/rejected counters and timeline state, updates status/timeline nodes, and renders the toolbar to Canvas.
 
+## Molecule Studio Event Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_molecule_studio_events.sio
+```
+
+Expected output:
+
+```text
+VIZ_MOLECULE_STUDIO_EVENTS_PASS
+```
+
+The test drives Molecule Studio from native `display::event::Event` values: toolbar clicks select tools, molecule clicks add atoms and bonds, keyboard arrows nudge the selected atom, lock constraints reject later selection, delete returns the molecule to three atoms, and Canvas renders the toolbar/status pixels.
+
 ## Renderer3D Edge Proof
 
 Run:

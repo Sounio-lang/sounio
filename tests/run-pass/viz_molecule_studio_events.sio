@@ -1,0 +1,114 @@
+// tests/run-pass/viz_molecule_studio_events.sio - Molecule Studio native event proof
+//
+// Expected output:
+//   VIZ_MOLECULE_STUDIO_EVENTS_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use display::event::{Event, EV_KEY_PRESS, EV_MOUSE_PRESS, KEY_RIGHT, MOUSE_LEFT}
+use viz::authoring::{
+    VIZ_AUTHOR_REASON_LOCKED_ATOM, VIZ_AUTHOR_REASON_OK,
+    viz_molecule_constraint_default,
+}
+use viz::molecule_editor::{
+    viz_molecule_atom_count, viz_molecule_atom_hash,
+    viz_molecule_atom_screen_x, viz_molecule_atom_screen_y,
+    viz_molecule_selected_atom_node, viz_molecule_selected_atom_index,
+}
+use viz::molecule_studio::{
+    VIZ_MOLECULE_TOOL_SELECT, VIZ_MOLECULE_TOOL_MOVE, VIZ_MOLECULE_TOOL_ADD_ATOM,
+    VIZ_MOLECULE_TOOL_ADD_BOND, VIZ_MOLECULE_TOOL_DELETE, VIZ_MOLECULE_TOOL_LOCK,
+    VIZ_MOLECULE_STUDIO_TAG_STATUS, VIZ_MOLECULE_STUDIO_TAG_TIMELINE,
+    viz_molecule_studio_find_tag, viz_molecule_studio_handle_event,
+}
+use viz::ir::{viz_scene_new}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::workbench::{viz_workbench_build_scene}
+
+fn ev(kind: i64, key: i64, x: i64, y: i64) -> Event {
+    Event { kind: kind, key: key, x: x, y: y, mods: 0 }
+}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn read_px(c: &Canvas, x: i64, y: i64) -> i64 {
+    read_i64(c.pixels, y * c.width + x)
+}
+
+fn cx(scene_node_x: i64, scene_node_w: i64) -> i64 {
+    scene_node_x + scene_node_w / 2
+}
+
+fn cy(scene_node_y: i64, scene_node_h: i64) -> i64 {
+    scene_node_y + scene_node_h / 2
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene = viz_scene_new()
+    let ids = viz_workbench_build_scene(&!scene)
+    var constraint = viz_molecule_constraint_default(ids.molecule)
+
+    assert(scene.molecule_tool == VIZ_MOLECULE_TOOL_SELECT)
+    assert(viz_molecule_studio_find_tag(&scene, VIZ_MOLECULE_STUDIO_TAG_STATUS) == ids.studio_status)
+    assert(viz_molecule_studio_find_tag(&scene, VIZ_MOLECULE_STUDIO_TAG_TIMELINE) == ids.studio_timeline)
+    assert(viz_molecule_atom_count(&scene, ids.molecule) == 3)
+
+    let atom0_x = viz_molecule_atom_screen_x(&scene, ids.molecule, 0)
+    let atom0_y = viz_molecule_atom_screen_y(&scene, ids.molecule, 0)
+    let atom1_x = viz_molecule_atom_screen_x(&scene, ids.molecule, 1)
+    let atom1_y = viz_molecule_atom_screen_y(&scene, ids.molecule, 1)
+    let atom2_x = viz_molecule_atom_screen_x(&scene, ids.molecule, 2)
+    let atom2_y = viz_molecule_atom_screen_y(&scene, ids.molecule, 2)
+    let add_x = scene.nodes[ids.molecule as usize].layout.x + scene.nodes[ids.molecule as usize].layout.w / 2
+    let add_y = scene.nodes[ids.molecule as usize].layout.y + scene.nodes[ids.molecule as usize].layout.h / 2 + 21
+
+    assert(viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, cx(scene.nodes[ids.studio_atom as usize].layout.x, scene.nodes[ids.studio_atom as usize].layout.w), cy(scene.nodes[ids.studio_atom as usize].layout.y, scene.nodes[ids.studio_atom as usize].layout.h))))
+    assert(scene.molecule_tool == VIZ_MOLECULE_TOOL_ADD_ATOM)
+    assert(scene.selected_node == ids.studio_atom)
+    assert(viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, add_x, add_y)))
+    assert(viz_molecule_atom_count(&scene, ids.molecule) == 4)
+    assert(scene.molecule_last_reason == VIZ_AUTHOR_REASON_OK)
+    assert(scene.nodes[ids.studio_timeline as usize].value == scene.molecule_timeline_count as f64)
+
+    assert(viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, cx(scene.nodes[ids.studio_bond as usize].layout.x, scene.nodes[ids.studio_bond as usize].layout.w), cy(scene.nodes[ids.studio_bond as usize].layout.y, scene.nodes[ids.studio_bond as usize].layout.h))))
+    assert(scene.molecule_tool == VIZ_MOLECULE_TOOL_ADD_BOND)
+    assert(viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, atom0_x, atom0_y)))
+    assert(scene.molecule_pending_atom == 0)
+    assert(viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, add_x, add_y)))
+    assert(scene.molecule_pending_atom == 0 - 1)
+    assert(scene.molecule_last_reason == VIZ_AUTHOR_REASON_OK)
+
+    assert(viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, cx(scene.nodes[ids.studio_move as usize].layout.x, scene.nodes[ids.studio_move as usize].layout.w), cy(scene.nodes[ids.studio_move as usize].layout.y, scene.nodes[ids.studio_move as usize].layout.h))))
+    assert(scene.molecule_tool == VIZ_MOLECULE_TOOL_MOVE)
+    assert(viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, atom1_x, atom1_y)))
+    assert(viz_molecule_selected_atom_node(&scene) == ids.molecule)
+    assert(viz_molecule_selected_atom_index(&scene) == 1)
+    let before_move = viz_molecule_atom_hash(&scene, ids.molecule, 1)
+    assert(viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_KEY_PRESS, KEY_RIGHT, 0, 0)))
+    assert(viz_molecule_atom_hash(&scene, ids.molecule, 1) != before_move)
+
+    assert(viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, cx(scene.nodes[ids.studio_lock as usize].layout.x, scene.nodes[ids.studio_lock as usize].layout.w), cy(scene.nodes[ids.studio_lock as usize].layout.y, scene.nodes[ids.studio_lock as usize].layout.h))))
+    assert(scene.molecule_tool == VIZ_MOLECULE_TOOL_LOCK)
+    assert(viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, atom2_x, atom2_y)))
+    assert(viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, cx(scene.nodes[ids.studio_select as usize].layout.x, scene.nodes[ids.studio_select as usize].layout.w), cy(scene.nodes[ids.studio_select as usize].layout.y, scene.nodes[ids.studio_select as usize].layout.h))))
+    assert(scene.molecule_tool == VIZ_MOLECULE_TOOL_SELECT)
+    assert(!viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, atom2_x, atom2_y)))
+    assert(scene.molecule_last_reason == VIZ_AUTHOR_REASON_LOCKED_ATOM)
+    assert(scene.molecule_reject_count > 0)
+
+    assert(viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, cx(scene.nodes[ids.studio_delete as usize].layout.x, scene.nodes[ids.studio_delete as usize].layout.w), cy(scene.nodes[ids.studio_delete as usize].layout.y, scene.nodes[ids.studio_delete as usize].layout.h))))
+    assert(scene.molecule_tool == VIZ_MOLECULE_TOOL_DELETE)
+    assert(viz_molecule_studio_handle_event(&!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, add_x, add_y)))
+    assert(viz_molecule_atom_count(&scene, ids.molecule) == 3)
+    assert(scene.molecule_accept_count > scene.molecule_reject_count)
+
+    var c = make_canvas(480, 320)
+    canvas_clear(&!c, 12, 16, 22)
+    viz_canvas_render_scene(&scene, &!c)
+    assert(read_px(&c, 20, 296) != 0)
+    assert(read_px(&c, 296, 296) != 0)
+
+    println("VIZ_MOLECULE_STUDIO_EVENTS_PASS")
+}

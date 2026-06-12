@@ -9,7 +9,10 @@ use viz::authoring::{
     viz_author_add_atom, viz_author_add_bond, viz_author_delete_atom,
     viz_authoring_apply_checked, viz_molecule_constraint_lock_atom,
 }
-use viz::ir::{VizScene}
+use display::event::{
+    Event, EV_KEY_PRESS, EV_MOUSE_PRESS, KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN, MOUSE_LEFT,
+}
+use viz::ir::{VizScene, viz_scene_hit_test}
 use viz::molecule_editor::{viz_molecule_hit_atom}
 
 pub const VIZ_MOLECULE_TOOL_SELECT: i64 = 1
@@ -18,6 +21,15 @@ pub const VIZ_MOLECULE_TOOL_ADD_ATOM: i64 = 3
 pub const VIZ_MOLECULE_TOOL_ADD_BOND: i64 = 4
 pub const VIZ_MOLECULE_TOOL_DELETE: i64 = 5
 pub const VIZ_MOLECULE_TOOL_LOCK: i64 = 6
+
+pub const VIZ_MOLECULE_STUDIO_TAG_SELECT: i64 = 8701
+pub const VIZ_MOLECULE_STUDIO_TAG_MOVE: i64 = 8702
+pub const VIZ_MOLECULE_STUDIO_TAG_ADD_ATOM: i64 = 8703
+pub const VIZ_MOLECULE_STUDIO_TAG_ADD_BOND: i64 = 8704
+pub const VIZ_MOLECULE_STUDIO_TAG_DELETE: i64 = 8705
+pub const VIZ_MOLECULE_STUDIO_TAG_LOCK: i64 = 8706
+pub const VIZ_MOLECULE_STUDIO_TAG_STATUS: i64 = 8710
+pub const VIZ_MOLECULE_STUDIO_TAG_TIMELINE: i64 = 8711
 
 fn ms_clear_label(scene: &!VizScene, node_idx: i64) with Mut {
     if node_idx < 0 || node_idx >= scene.node_count { return }
@@ -92,6 +104,25 @@ pub fn viz_molecule_studio_set_tool(scene: &!VizScene, tool: i64) -> bool with M
     true
 }
 
+pub fn viz_molecule_studio_tool_for_tag(tag: i64) -> i64 {
+    if tag == VIZ_MOLECULE_STUDIO_TAG_SELECT { return VIZ_MOLECULE_TOOL_SELECT }
+    if tag == VIZ_MOLECULE_STUDIO_TAG_MOVE { return VIZ_MOLECULE_TOOL_MOVE }
+    if tag == VIZ_MOLECULE_STUDIO_TAG_ADD_ATOM { return VIZ_MOLECULE_TOOL_ADD_ATOM }
+    if tag == VIZ_MOLECULE_STUDIO_TAG_ADD_BOND { return VIZ_MOLECULE_TOOL_ADD_BOND }
+    if tag == VIZ_MOLECULE_STUDIO_TAG_DELETE { return VIZ_MOLECULE_TOOL_DELETE }
+    if tag == VIZ_MOLECULE_STUDIO_TAG_LOCK { return VIZ_MOLECULE_TOOL_LOCK }
+    0
+}
+
+pub fn viz_molecule_studio_find_tag(scene: &VizScene, tag: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while i < scene.node_count {
+        if scene.nodes[i as usize].tag == tag { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
 pub fn viz_molecule_studio_set_unit(scene: &!VizScene, unit_code: i64) -> bool with Mut {
     if unit_code != 1 && unit_code != 2 { return false }
     scene.molecule_unit = unit_code
@@ -141,6 +172,25 @@ pub fn viz_molecule_studio_update_nodes(scene: &!VizScene, status_node: i64, tim
         scene.nodes[timeline_node as usize].value = scene.molecule_timeline_count as f64
         scene.nodes[timeline_node as usize].min_value = 0.0
         scene.nodes[timeline_node as usize].max_value = 32.0
+    }
+}
+
+fn ms_update_default_nodes(scene: &!VizScene) with Mut {
+    let status_node = viz_molecule_studio_find_tag(scene, VIZ_MOLECULE_STUDIO_TAG_STATUS)
+    let timeline_node = viz_molecule_studio_find_tag(scene, VIZ_MOLECULE_STUDIO_TAG_TIMELINE)
+    viz_molecule_studio_update_nodes(scene, status_node, timeline_node)
+}
+
+fn ms_mark_node_selected(scene: &!VizScene, idx: i64) with Mut {
+    scene.selected_node = idx
+    scene.hovered_node = idx
+    if idx >= 0 && idx < scene.node_count {
+        scene.focused_node = idx
+    }
+    var i: i64 = 0
+    while i < scene.node_count {
+        scene.nodes[i as usize].selected = i == idx
+        i = i + 1
     }
 }
 
@@ -242,5 +292,52 @@ pub fn viz_molecule_studio_pointer(scene: &!VizScene, constraint: &!VizMoleculeC
         return accepted
     }
     ms_record_manual(scene, 0, VIZ_AUTHOR_REASON_INVALID_ATOM, false)
+    false
+}
+
+pub fn viz_molecule_studio_handle_event(scene: &!VizScene, constraint: &!VizMoleculeConstraint, ev: Event) -> bool with Mut, Div {
+    if ev.kind == EV_MOUSE_PRESS && ev.key == MOUSE_LEFT {
+        let idx = viz_scene_hit_test(scene, ev.x, ev.y)
+        if idx < 0 || idx >= scene.node_count { return false }
+        let node = scene.nodes[idx as usize]
+        let tool = viz_molecule_studio_tool_for_tag(node.tag)
+        if tool > 0 {
+            let changed = viz_molecule_studio_set_tool(scene, tool)
+            ms_mark_node_selected(scene, idx)
+            ms_update_default_nodes(scene)
+            return changed
+        }
+        if idx == scene.molecule_studio_node {
+            ms_mark_node_selected(scene, idx)
+            let changed = viz_molecule_studio_pointer(scene, constraint, ev.x, ev.y)
+            ms_update_default_nodes(scene)
+            return changed
+        }
+        return false
+    }
+    if ev.kind == EV_KEY_PRESS {
+        if scene.molecule_tool == VIZ_MOLECULE_TOOL_MOVE {
+            if ev.key == KEY_LEFT {
+                let changed = viz_molecule_studio_nudge_selected(scene, constraint, -0.10, 0.0, 0.0)
+                ms_update_default_nodes(scene)
+                return changed
+            }
+            if ev.key == KEY_RIGHT {
+                let changed = viz_molecule_studio_nudge_selected(scene, constraint, 0.10, 0.0, 0.0)
+                ms_update_default_nodes(scene)
+                return changed
+            }
+            if ev.key == KEY_UP {
+                let changed = viz_molecule_studio_nudge_selected(scene, constraint, 0.0, 0.10, 0.0)
+                ms_update_default_nodes(scene)
+                return changed
+            }
+            if ev.key == KEY_DOWN {
+                let changed = viz_molecule_studio_nudge_selected(scene, constraint, 0.0, -0.10, 0.0)
+                ms_update_default_nodes(scene)
+                return changed
+            }
+        }
+    }
     false
 }
