@@ -1,5 +1,9 @@
 # LLM Offload Log
 
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-06-12 | deepseek+xai | fan-out raw external diff review | ABSTRACT_V2.md, CONFIDENCE_SEMANTICS.md, SOUNDNESS_DENOTATION.md, 168-dual-pathway-correction.md | OK | Generated docs governance metadata sync only; both reviewers found no substantive paper/research claim changes. Raw output: /tmp/llm-offload-KFmJXR |
+
 ## 2026-05-30: Multiquadratic faithfulness — irrationality core (no_rat_sqrt) + edge-level radical support
 
 - **Empirical (no offload needed)**: `_radical_support_probe.lean` edge pass over G₅₂₉ (2670 edges):

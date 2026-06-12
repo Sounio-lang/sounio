@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.mut-spine-migration-status-2026-06-02
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.mut-spine-migration-status-2026-06-02
+-->
+
 # *mut spine migration — status + the Call/MethodCall keystone (2026-06-02)
 
 Toward "the working compiler": eliminating the frame-disease SIGSEGVs in the modular
