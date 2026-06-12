@@ -1,0 +1,101 @@
+// tests/run-pass/viz_scene_history.sio - Visual IR snapshot history proof
+//
+// Expected output includes:
+//   VIZ_SCENE_HISTORY_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use viz::audit::{viz_audit_hash, viz_audit_node_hash}
+use viz::editor::{viz_editor_resize_selected, viz_editor_set_selected_tag, viz_editor_set_selected_value}
+use viz::snapshot::{
+    viz_scene_history_new, viz_scene_history_record, viz_scene_history_hash,
+    viz_scene_history_can_undo, viz_scene_history_can_redo,
+    viz_scene_history_undo, viz_scene_history_redo,
+}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+use viz::workbench::{viz_workbench_build_scene}
+use viz::ir::{viz_scene_new}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn read_px(c: &Canvas, x: i64, y: i64) -> i64 {
+    read_i64(c.pixels, y * c.width + x)
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene = viz_scene_new()
+    let ids = viz_workbench_build_scene(&!scene)
+    scene.selected_node = ids.slider
+    scene.focused_node = ids.slider
+    scene.hovered_node = ids.slider
+    scene.nodes[ids.slider as usize].selected = true
+
+    var history = viz_scene_history_new()
+    let base_audit = viz_audit_hash(&scene)
+    let base_slider_hash = viz_audit_node_hash(&scene, ids.slider)
+    assert(viz_scene_history_record(&!history, &scene, 100))
+    assert(history.count == 1)
+    assert(history.cursor == 0)
+    assert(!viz_scene_history_can_undo(&history))
+    assert(!viz_scene_history_can_redo(&history))
+
+    assert(viz_editor_set_selected_value(&!scene, 5.0))
+    assert(viz_editor_resize_selected(&!scene, 10, 0, 8, 8))
+    let edit1_audit = viz_audit_hash(&scene)
+    let edit1_slider_hash = viz_audit_node_hash(&scene, ids.slider)
+    assert(edit1_audit != base_audit)
+    assert(viz_scene_history_record(&!history, &scene, 101))
+
+    assert(viz_editor_set_selected_tag(&!scene, 9902))
+    assert(viz_editor_resize_selected(&!scene, 0, 6, 8, 8))
+    let edit2_audit = viz_audit_hash(&scene)
+    assert(edit2_audit != edit1_audit)
+    assert(viz_scene_history_record(&!history, &scene, 102))
+    let h_after_two = viz_scene_history_hash(&history)
+    assert(history.count == 3)
+    assert(history.cursor == 2)
+    assert(history.last_hash == h_after_two)
+    assert(viz_scene_history_can_undo(&history))
+    assert(!viz_scene_history_can_redo(&history))
+
+    assert(viz_scene_history_undo(&!history, &!scene))
+    assert(history.cursor == 1)
+    assert(viz_audit_hash(&scene) == edit1_audit)
+    assert(viz_audit_node_hash(&scene, ids.slider) == edit1_slider_hash)
+    assert(viz_scene_history_can_undo(&history))
+    assert(viz_scene_history_can_redo(&history))
+
+    assert(viz_scene_history_undo(&!history, &!scene))
+    assert(history.cursor == 0)
+    assert(viz_audit_hash(&scene) == base_audit)
+    assert(viz_audit_node_hash(&scene, ids.slider) == base_slider_hash)
+    assert(!viz_scene_history_can_undo(&history))
+    assert(viz_scene_history_can_redo(&history))
+
+    assert(viz_scene_history_redo(&!history, &!scene))
+    assert(history.cursor == 1)
+    assert(viz_audit_hash(&scene) == edit1_audit)
+    assert(viz_scene_history_can_redo(&history))
+
+    assert(viz_editor_set_selected_tag(&!scene, 9910))
+    assert(viz_scene_history_record(&!history, &scene, 201))
+    assert(history.count == 3)
+    assert(history.cursor == 2)
+    assert(history.labels[2] == 201)
+    assert(!viz_scene_history_can_redo(&history))
+    assert(viz_audit_hash(&scene) != edit2_audit)
+    assert(history.last_hash == viz_scene_history_hash(&history))
+
+    var c = make_canvas(470, 320)
+    canvas_clear(&!c, 5, 8, 12)
+    viz_canvas_render_scene(&scene, &!c)
+    assert(read_px(&c, 20, 230) != 0)
+    assert(read_px(&c, 390, 74) != 0)
+    viz_html_emit_scene(&scene, 470, 320)
+
+    heap_free(c.pixels as *mut i8)
+    println("VIZ_SCENE_HISTORY_PASS")
+}

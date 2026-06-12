@@ -144,6 +144,12 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_scene_restore_snapshot` restores the captured native frontend state onto an existing scene while scientific payload slots remain Sounio-owned `VizScene` data.
 - `tests/run-pass/viz_scene_snapshot.sio` proves Workbench snapshot -> editor mutation -> audit change -> restore -> matching audit/node hashes -> Canvas and static HTML/SVG render from the restored state.
 
+## V1.8l: Undo/Redo Scene History
+
+- `VizSceneHistory` stores a compact bounded timeline for the current editor target node: label, rectangle, tag, value, selection/focus state, audit hash, node hash, cursor, and deterministic history hash.
+- `viz_scene_history_undo` and `viz_scene_history_redo` restore authored Visual IR node state from Sounio history data. Recording a new edit after undo truncates the redo branch.
+- `tests/run-pass/viz_scene_history.sio` proves Workbench snapshot history -> two editor mutations -> undo -> undo -> redo -> branch replacement -> Canvas and static HTML/SVG render from the authored state.
+
 ## V1.9: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.

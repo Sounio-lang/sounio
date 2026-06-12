@@ -158,6 +158,22 @@ VIZ_SCENE_SNAPSHOT_PASS
 
 The test captures a Workbench Visual IR snapshot, mutates an editable control node through `viz::editor`, proves the audit hash changes, restores from the snapshot, then proves node hash, scene audit, selection/focus state, Canvas pixels, and static HTML/SVG export all return to the captured Sounio-owned state.
 
+## Scene History Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_scene_history.sio
+```
+
+Expected output:
+
+```text
+VIZ_SCENE_HISTORY_PASS
+```
+
+The test records a bounded Workbench edit history for the selected Visual IR node, applies two editor mutations, proves undo and redo restore the exact Sounio-owned audit/node hashes, then proves a new edit after undo truncates the redo branch before rendering Canvas and static HTML/SVG from the current authored state.
+
 ## Workbench Physchem HTML Export Proof
 
 Run:

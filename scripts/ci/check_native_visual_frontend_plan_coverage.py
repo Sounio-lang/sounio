@@ -106,6 +106,13 @@ REQUIRED: tuple[Evidence, ...] = (
         "Editable Visual IR state can be captured and restored as Sounio data.",
     ),
     Evidence(
+        "scene-authoring-history",
+        "contains",
+        "stdlib/viz/snapshot.sio",
+        ("struct VizSceneHistory", "viz_scene_history_record", "viz_scene_history_undo", "viz_scene_history_redo"),
+        "Editable Visual IR node state can be kept in a bounded undo/redo history.",
+    ),
+    Evidence(
         "physchem-core-structs",
         "contains",
         "stdlib/viz/physchem.sio",
@@ -247,6 +254,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_scene_snapshot",
         detail="Scene snapshot/restore proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-scene-history-run",
+        "label",
+        "viz_scene_history",
+        detail="Scene undo/redo history proof is in the canonical gate.",
     ),
     Evidence(
         "gate-html-run",

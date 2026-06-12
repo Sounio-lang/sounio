@@ -15,7 +15,7 @@ The v1 architecture is:
 - `viz::molecule_editor`: atom-level molecule hit-testing, selection, and mutation helpers over `VizScene`.
 - `viz::authoring`: typed molecule authoring transactions, checked constraints, replay traces, and proof-hash certificates over `VizScene`.
 - `viz::molecule_studio`: native molecule-authoring tool state over the Workbench, backed by checked `viz::authoring` transactions and Visual IR controls.
-- `viz::snapshot`: bounded Visual IR scene snapshots for native authoring, restore, and future persistence surfaces.
+- `viz::snapshot`: bounded Visual IR scene snapshots plus undo/redo history for native authoring, restore, and future persistence surfaces.
 - `viz::physchem`: Sounio data structures for molecules, bonds, scalar/vector fields, trajectories, spectra, lattice/phonon fields, particle event views, and uncertainty overlays.
 - `viz::{coord,chart,epiviz,sci}`: direct drawing helpers that the IR renderer can lower into.
 
@@ -60,6 +60,7 @@ The gate reads `scripts/ci/native_visual_frontend_gate.manifest.tsv`, validates 
 - `viz_inspector_draw_node_highlights` overlays native Canvas highlights on selected/hovered/focused Visual IR nodes.
 - `viz::editor` edits the selected/focused/hovered node: nudge/resize fixed rectangles, set app tags, set clamped control values, and record edit traces from keyboard events.
 - `viz::snapshot` captures edit-facing Visual IR state as Sounio data: node identity/hierarchy/layout/style/labels/control values, selection/focus, molecule-studio state, counts, and expected audit hashes. `viz_scene_restore_snapshot` restores that state without giving renderer or browser code ownership of the scene model.
+- `VizSceneHistory` keeps a compact bounded history of the current editor target node with deterministic hash, undo, redo, and redo truncation after a new edit, so Workbench authoring can grow toward persistent scene packages without moving state into browser runtime code.
 - `viz::molecule_editor` edits molecule payloads through the Visual IR: count atoms, project atom positions to Canvas coordinates, hit-test atoms, select molecule nodes, nudge atoms, set atom radius, and recolor atoms.
 - `viz::authoring` lifts molecule edits into typed transactions: select atom, select by hit-test, nudge with angstrom/nanometer units, set radius/color, add/delete atoms, add bonds, set bond order, and replay bounded action tapes.
 - Checked molecule authoring returns explicit reason codes for unsupported actions, invalid atoms, unknown units, bond geometry, locked atoms, radius bounds, and capacity. Rejected checked actions leave audit and atom hashes unchanged.
