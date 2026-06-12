@@ -13,6 +13,7 @@ The v1 architecture is:
 - `viz::viz_window`: optional native `display::Window` bridge for manual event-loop demos.
 - `viz::audit`: shared state hashes used by replay, inspector, HTML/export audits, and headless tests.
 - `viz::molecule_editor`: atom-level molecule hit-testing, selection, and mutation helpers over `VizScene`.
+- `viz::authoring`: typed molecule authoring transactions, checked constraints, replay traces, and proof-hash certificates over `VizScene`.
 - `viz::physchem`: Sounio data structures for molecules, bonds, scalar/vector fields, trajectories, spectra, lattice/phonon fields, particle event views, and uncertainty overlays.
 - `viz::{coord,chart,epiviz,sci}`: direct drawing helpers that the IR renderer can lower into.
 
@@ -34,7 +35,8 @@ Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattic
 - Focused node state is Sounio data. `viz_scene_focus_next`, `viz_scene_focus_prev`, and `viz_scene_activate_focused` provide deterministic keyboard-style navigation for controls.
 - `viz_scene_dump` emits deterministic node/data counts plus per-node identity, parent, tag, kind, data slot, and rectangle fields for debugging and CI proof logs.
 - `viz_html_emit_scene` wraps each Visual IR node in a static SVG group with `data-viz-id`, `data-viz-parent-id`, `data-viz-tag`, `data-viz-kind`, and `data-viz-slot` attributes so exports remain auditable without JavaScript semantics.
-- `viz_html_emit_scene` also emits a passive `viz-audit` comment with node count, selected/hovered/focused nodes, active tab, and integer scene time.
+- `viz_html_emit_scene` also emits a passive `viz-audit` comment with node count, selected/hovered/focused nodes, selected molecule atom state, active tab, and integer scene time.
+- `viz_audit_hash` includes molecule atom/bond payloads, so molecule position/radius/color/bond edits are visible to replay, certificate, and export audit surfaces.
 - `viz_app_frame_hash` gives headless tests a compact deterministic probe over app frame state, Visual IR interaction state, and a few Canvas pixels.
 - `viz_replay_events` replays a fixed event array into the Sounio reducer, renders every frame, and returns the final deterministic frame hash.
 - `viz_replay_trace_events` records one frame summary per event: input event, changed flag, Canvas hash, audit hash, selected/hovered/focused, active tab, and integer scene time.
@@ -43,6 +45,9 @@ Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattic
 - `viz_inspector_draw_node_highlights` overlays native Canvas highlights on selected/hovered/focused Visual IR nodes.
 - `viz::editor` edits the selected/focused/hovered node: nudge/resize fixed rectangles, set app tags, set clamped control values, and record edit traces from keyboard events.
 - `viz::molecule_editor` edits molecule payloads through the Visual IR: count atoms, project atom positions to Canvas coordinates, hit-test atoms, select molecule nodes, nudge atoms, set atom radius, and recolor atoms.
+- `viz::authoring` lifts molecule edits into typed transactions: select atom, select by hit-test, nudge with angstrom/nanometer units, set radius/color, add/delete atoms, add bonds, set bond order, and replay bounded action tapes.
+- Checked molecule authoring returns explicit reason codes for unsupported actions, invalid atoms, unknown units, bond geometry, locked atoms, radius bounds, and capacity. Rejected checked actions leave audit and atom hashes unchanged.
+- Authoring certificates are Sounio data derived from before/after audit and atom hashes. `viz_authoring_verify_checked_trace` verifies every frame without delegating scientific meaning to JavaScript or Python.
 - `viz::workbench` composes charts, rendered molecule nodes, scalar/vector fields, trajectory, spectrum, mesh, controls, inspector/edit/replay/export hooks into a reusable native visual workbench scene blueprint.
 - Labels and text controls use fixed `[i8; 64]` buffers in the Visual IR. Canvas renders them with `display::font`; HTML/SVG escapes XML-sensitive ASCII before export.
 - Native frontend builders cover button, slider, toggle, tabs, legend, tooltip, text viewport, and plot viewport nodes over the same control reducer machinery.

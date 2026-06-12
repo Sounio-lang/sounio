@@ -326,6 +326,8 @@ VIZ_WORKBENCH_ROUNDTRIP_PASS
 
 The test builds the reusable Workbench scene, renders Canvas, replays a deterministic interaction script, selects a node through the inspector, edits the selected Visual IR node, redraws highlights, hit-tests and edits a molecule atom, verifies the edited molecule pixels, and exports HTML/SVG from the same edited scene.
 
+The molecule section uses `viz::authoring` transactions rather than raw payload edits. It proves atom hit-test selection, angstrom-unit nudging, radius/color changes, add atom, add bond, set bond order, delete atom, deterministic replay across two scenes, checked rejection for bond geometry, unknown unit, locked atom, radius range, unsupported action, and molecule capacity. It also verifies per-frame authoring certificates.
+
 ## Renderer3D Edge Proof
 
 Run:

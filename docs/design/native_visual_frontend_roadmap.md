@@ -56,7 +56,16 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `stdlib/viz/molecule_editor.sio` adds atom-level hit-testing, selection, position/radius/color mutation, and deterministic atom hashes over Sounio molecule payloads.
 - `tests/run-pass/viz_workbench_roundtrip.sio` proves Workbench render -> replay -> inspector selection -> editor mutation -> Canvas highlight -> molecule atom authoring -> static HTML/SVG identity export without delegating scientific semantics to JavaScript.
 
-## V1.7: Static HTML/SVG
+## V1.7: Checked Molecule Authoring
+
+- `stdlib/viz/authoring.sio` lifts molecule edits into typed transactions over Visual IR: select atom, select atom at Canvas position, nudge selected atom, nudge with angstrom/nanometer units, set radius/color, add atom, add bond, set bond order, and delete atom.
+- `VizMoleculeConstraint` keeps authoring constraints in Sounio data: locked atoms, bond-length bounds, radius bounds, and fixed molecule capacity.
+- Checked authoring returns explicit reason codes for unsupported actions, invalid atoms, unknown unit, bond geometry, locked atom, radius range, and capacity. Rejected actions preserve before/after audit and atom hashes.
+- Authoring traces and certificates record before/after scene audit plus atom hashes for each frame. Verification is a Sounio function over the certificate data; no browser runtime owns molecule semantics.
+- `viz_audit_hash` includes molecule atom and bond payloads, so atom moves, radius/color edits, bond changes, and capacity mutations are visible to replay/export audit surfaces.
+- `tests/run-pass/viz_workbench_roundtrip.sio` proves typed action replay, checked constraints, certificate verification, Canvas pixels, and static HTML/SVG export from the same Workbench scene.
+
+## V1.8: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.
 - JavaScript is not used for scientific semantics.
