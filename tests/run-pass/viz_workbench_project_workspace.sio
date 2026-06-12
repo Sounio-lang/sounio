@@ -1,0 +1,114 @@
+// tests/run-pass/viz_workbench_project_workspace.sio - Multi-slot Workbench project workspace
+//
+// Expected output includes:
+//   viz-scene-project
+//   VIZ_WORKBENCH_PROJECT_WORKSPACE_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use display::event::{MOUSE_LEFT, EV_MOUSE_PRESS}
+use viz::authoring::{VizMoleculeConstraint}
+use viz::ir::{VizScene, viz_scene_new}
+use viz::snapshot::{viz_scene_project_emit}
+use viz::viz_app::{VizApp, viz_app_new}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+use viz::workbench::{
+    VizWorkbenchIds, VizWorkbenchProjectStore, VizWorkbenchProjectWorkspace,
+    viz_workbench_build_scene, viz_workbench_constraint, viz_workbench_event,
+    viz_workbench_project_app_handle_event, viz_workbench_project_store_new,
+    viz_workbench_project_workspace_active_hash,
+    viz_workbench_project_workspace_compare,
+    viz_workbench_project_workspace_load,
+    viz_workbench_project_workspace_new,
+    viz_workbench_project_workspace_save,
+    viz_workbench_project_workspace_slot_valid,
+}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn read_px(c: &Canvas, x: i64, y: i64) -> i64 {
+    read_i64(c.pixels, y * c.width + x)
+}
+
+fn click(app: &!VizApp, scene: &!VizScene, ids: &VizWorkbenchIds, constraint: &!VizMoleculeConstraint, store: &!VizWorkbenchProjectStore, c: &!Canvas, x: i64, y: i64) -> bool with Mut, Div, Alloc {
+    let ev = viz_workbench_event(EV_MOUSE_PRESS, MOUSE_LEFT, x, y, 0)
+    viz_workbench_project_app_handle_event(app, scene, ids, constraint, store, c, ev)
+}
+
+fn render(app: &VizApp, scene: &VizScene, c: &!Canvas) with Mut, Div, Alloc {
+    canvas_clear(c, app.bg_r, app.bg_g, app.bg_b)
+    viz_canvas_render_scene(scene, c)
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene = viz_scene_new()
+    let ids = viz_workbench_build_scene(&!scene)
+    var app = viz_app_new(10, 13, 18)
+    var constraint = viz_workbench_constraint(&ids)
+    var store = viz_workbench_project_store_new()
+    var workspace = viz_workbench_project_workspace_new()
+    var c = make_canvas(480, 320)
+
+    scene.selected_node = ids.time_readout
+    scene.focused_node = ids.time_readout
+    scene.hovered_node = ids.time_readout
+    render(&app, &scene, &!c)
+
+    assert(viz_workbench_project_workspace_save(&!app, &!scene, &ids, &!workspace, &!c, 0))
+    assert(viz_workbench_project_workspace_slot_valid(&workspace, 0))
+    assert(workspace.slot_count == 1)
+    assert(workspace.save_count == 1)
+    assert(workspace.active_slot == 0)
+    assert(scene.time == 2.0)
+    let slot0_hash = workspace.project_hashes[0]
+    let slot0_audit = workspace.audit_hashes[0]
+    assert(slot0_hash != 0)
+    assert(viz_workbench_project_workspace_active_hash(&workspace) == slot0_hash)
+
+    assert(click(&!app, &!scene, &ids, &!constraint, &!store, &!c, 113, 212))
+    assert(click(&!app, &!scene, &ids, &!constraint, &!store, &!c, 113, 212))
+    assert(scene.time == 4.0)
+    render(&app, &scene, &!c)
+    assert(viz_workbench_project_workspace_save(&!app, &!scene, &ids, &!workspace, &!c, 1))
+    assert(viz_workbench_project_workspace_slot_valid(&workspace, 1))
+    assert(workspace.slot_count == 2)
+    assert(workspace.save_count == 2)
+    assert(workspace.active_slot == 1)
+    assert(workspace.project_hashes[1] != slot0_hash)
+    assert(workspace.audit_hashes[1] != slot0_audit)
+    let slot1_hash = workspace.project_hashes[1]
+
+    let diff = viz_workbench_project_workspace_compare(&!workspace, 0, 1)
+    assert(diff != 0)
+    assert(workspace.last_diff_hash == diff)
+    assert(workspace.compare_count == 1)
+    assert(workspace.active_slot == 0)
+    assert(workspace.compare_slot == 1)
+
+    assert(viz_workbench_project_workspace_load(&!scene, &ids, &!workspace, 0))
+    assert(workspace.load_count == 1)
+    assert(scene.time == 2.0)
+    assert(scene.nodes[ids.time_readout as usize].value == 2.0)
+    assert(scene.meshes[0].base_r[0] == 162)
+    assert(viz_workbench_project_workspace_active_hash(&workspace) == slot0_hash)
+
+    assert(viz_workbench_project_workspace_load(&!scene, &ids, &!workspace, 1))
+    assert(workspace.load_count == 2)
+    assert(workspace.switch_count == 1)
+    assert(scene.time == 4.0)
+    assert(scene.nodes[ids.time_readout as usize].value == 4.0)
+    assert(scene.meshes[0].base_r[0] == 174)
+    assert(viz_workbench_project_workspace_active_hash(&workspace) == slot1_hash)
+
+    render(&app, &scene, &!c)
+    assert(read_px(&c, 314, 170) != 0)
+    viz_scene_project_emit(&workspace.project_a)
+    viz_scene_project_emit(&workspace.project_b)
+    viz_html_emit_scene(&scene, 480, 320)
+
+    heap_free(c.pixels as *mut i8)
+    println("VIZ_WORKBENCH_PROJECT_WORKSPACE_PASS")
+}

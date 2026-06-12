@@ -118,6 +118,23 @@ pub struct VizWorkbenchProjectStore {
     pub export_count: i64,
 }
 
+pub struct VizWorkbenchProjectWorkspace {
+    pub project_a: VizSceneProject,
+    pub project_b: VizSceneProject,
+    pub valid: [bool; 2],
+    pub project_hashes: [i64; 2],
+    pub audit_hashes: [i64; 2],
+    pub time_ms: [i64; 2],
+    pub active_slot: i64,
+    pub compare_slot: i64,
+    pub slot_count: i64,
+    pub switch_count: i64,
+    pub save_count: i64,
+    pub load_count: i64,
+    pub compare_count: i64,
+    pub last_diff_hash: i64,
+}
+
 pub fn viz_workbench_replay_step_empty() -> VizWorkbenchReplayStep {
     VizWorkbenchReplayStep {
         kind: 0,
@@ -163,6 +180,25 @@ pub fn viz_workbench_project_store_new() -> VizWorkbenchProjectStore {
         save_count: 0,
         load_count: 0,
         export_count: 0,
+    }
+}
+
+pub fn viz_workbench_project_workspace_new() -> VizWorkbenchProjectWorkspace {
+    VizWorkbenchProjectWorkspace {
+        project_a: viz_scene_project_new(),
+        project_b: viz_scene_project_new(),
+        valid: [false; 2],
+        project_hashes: [0; 2],
+        audit_hashes: [0; 2],
+        time_ms: [0; 2],
+        active_slot: 0,
+        compare_slot: 0,
+        slot_count: 0,
+        switch_count: 0,
+        save_count: 0,
+        load_count: 0,
+        compare_count: 0,
+        last_diff_hash: 0,
     }
 }
 
@@ -993,6 +1029,121 @@ fn viz_workbench_project_current_session(app: &!VizApp, scene: &!VizScene, c: &!
 
 fn viz_workbench_project_store_mark(scene: &!VizScene, ids: &VizWorkbenchIds, store: &VizWorkbenchProjectStore) with Mut, Div {
     viz_workbench_set_package_marker(scene, ids, store.last_project_hash)
+}
+
+fn viz_workbench_project_workspace_clamp_slot(slot: i64) -> i64 {
+    if slot < 0 { return 0 }
+    if slot > 1 { return 1 }
+    slot
+}
+
+fn viz_workbench_project_workspace_slot_hash(workspace: &VizWorkbenchProjectWorkspace, slot: i64) -> i64 with Mut, Div {
+    let idx = viz_workbench_project_workspace_clamp_slot(slot)
+    var h: i64 = 41
+    h = h * 131 + idx
+    h = h * 131 + workspace.project_hashes[idx as usize]
+    h = h * 131 + workspace.audit_hashes[idx as usize]
+    h = h * 131 + workspace.time_ms[idx as usize]
+    h
+}
+
+fn viz_workbench_project_workspace_project_hash(workspace: &VizWorkbenchProjectWorkspace, slot: i64) -> i64 {
+    if slot == 0 { return workspace.project_a.project_hash }
+    workspace.project_b.project_hash
+}
+
+fn viz_workbench_project_workspace_time_ms(workspace: &VizWorkbenchProjectWorkspace, slot: i64) -> i64 {
+    if slot == 0 { return workspace.project_a.final_time_ms }
+    workspace.project_b.final_time_ms
+}
+
+pub fn viz_workbench_project_workspace_slot_valid(workspace: &VizWorkbenchProjectWorkspace, slot: i64) -> bool {
+    let idx = viz_workbench_project_workspace_clamp_slot(slot)
+    workspace.valid[idx as usize]
+}
+
+pub fn viz_workbench_project_workspace_active_hash(workspace: &VizWorkbenchProjectWorkspace) -> i64 {
+    let idx = viz_workbench_project_workspace_clamp_slot(workspace.active_slot)
+    workspace.project_hashes[idx as usize]
+}
+
+pub fn viz_workbench_project_workspace_save(
+    app: &!VizApp,
+    scene: &!VizScene,
+    ids: &VizWorkbenchIds,
+    workspace: &!VizWorkbenchProjectWorkspace,
+    c: &!Canvas,
+    slot: i64,
+) -> bool with Mut, Div, Alloc {
+    let idx = viz_workbench_project_workspace_clamp_slot(slot)
+    viz_workbench_package_select_target(scene, ids)
+    var history = viz_scene_history_new()
+    var pkg = viz_scene_package_new()
+    viz_scene_history_record(&!history, scene, VIZ_WORKBENCH_TAG_PACKAGE_SAVE + idx)
+    let session = viz_workbench_project_current_session(app, scene, c)
+    let export_hash = viz_workbench_canvas_hash(c)
+    if idx == 0 { viz_workbench_project_capture(&!workspace.project_a, scene, &history, &!pkg, &session, export_hash) }
+    if idx == 1 { viz_workbench_project_capture(&!workspace.project_b, scene, &history, &!pkg, &session, export_hash) }
+    if idx == 0 {
+        if !viz_scene_project_verify(&workspace.project_a) { return false }
+    }
+    if idx == 1 {
+        if !viz_scene_project_verify(&workspace.project_b) { return false }
+    }
+    if !workspace.valid[idx as usize] {
+        workspace.slot_count = workspace.slot_count + 1
+    }
+    workspace.valid[idx as usize] = true
+    workspace.project_hashes[idx as usize] = viz_workbench_project_workspace_project_hash(workspace, idx)
+    workspace.time_ms[idx as usize] = viz_workbench_project_workspace_time_ms(workspace, idx)
+    workspace.active_slot = idx
+    workspace.save_count = workspace.save_count + 1
+    viz_workbench_set_package_marker(scene, ids, workspace.project_hashes[idx as usize])
+    workspace.audit_hashes[idx as usize] = viz_audit_hash(scene)
+    true
+}
+
+pub fn viz_workbench_project_workspace_load(
+    scene: &!VizScene,
+    ids: &VizWorkbenchIds,
+    workspace: &!VizWorkbenchProjectWorkspace,
+    slot: i64,
+) -> bool with Mut, Div {
+    let idx = viz_workbench_project_workspace_clamp_slot(slot)
+    if !workspace.valid[idx as usize] { return false }
+    if idx == 0 {
+        if !viz_workbench_project_restore(scene, &workspace.project_a) { return false }
+    }
+    if idx == 1 {
+        if !viz_workbench_project_restore(scene, &workspace.project_b) { return false }
+    }
+    if workspace.active_slot != idx {
+        workspace.switch_count = workspace.switch_count + 1
+    }
+    workspace.active_slot = idx
+    workspace.load_count = workspace.load_count + 1
+    viz_workbench_set_package_marker(scene, ids, workspace.project_hashes[idx as usize])
+    true
+}
+
+pub fn viz_workbench_project_workspace_compare(
+    workspace: &!VizWorkbenchProjectWorkspace,
+    left_slot: i64,
+    right_slot: i64,
+) -> i64 with Mut, Div {
+    let left = viz_workbench_project_workspace_clamp_slot(left_slot)
+    let right = viz_workbench_project_workspace_clamp_slot(right_slot)
+    if !workspace.valid[left as usize] { return 0 }
+    if !workspace.valid[right as usize] { return 0 }
+    var h: i64 = 97
+    h = h * 131 + viz_workbench_project_workspace_slot_hash(workspace, left)
+    h = h * 131 + viz_workbench_project_workspace_slot_hash(workspace, right)
+    h = h * 131 + workspace.slot_count
+    workspace.active_slot = left
+    workspace.compare_slot = right
+    workspace.compare_count = workspace.compare_count + 1
+    workspace.last_diff_hash = h
+    h
 }
 
 pub fn viz_workbench_project_store_save(

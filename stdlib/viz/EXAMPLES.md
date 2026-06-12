@@ -238,6 +238,22 @@ VIZ_WORKBENCH_PROJECT_CONTROLS_PASS
 
 The test drives the real Workbench save, load, and export buttons through native mouse events. `VizWorkbenchProjectStore` captures a project, marks dirty state after a time-control edit, exports a new `VizSceneProject`, restores it through the load button after another edit, and proves the final scene audit, frame time, Canvas pixels, project hash, and static HTML/SVG export agree.
 
+## Workbench Project Workspace Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_project_workspace.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_PROJECT_WORKSPACE_PASS
+```
+
+The test builds a native A/B visual project workspace. Slot A captures the Workbench scene at time 2, native time-control events advance the simulation, slot B captures time 4, and `viz_workbench_project_workspace_compare` records a deterministic diff hash. Loading each slot restores the Sounio-owned scene time, readout control, derived 3D material colour, active project hash, Canvas pixels, and passive `viz-scene-project` plus static HTML/SVG export surfaces.
+
 ## Workbench Physchem HTML Export Proof
 
 Run:

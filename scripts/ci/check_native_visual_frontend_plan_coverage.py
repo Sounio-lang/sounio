@@ -141,6 +141,17 @@ REQUIRED: tuple[Evidence, ...] = (
         "Workbench save, load, and export controls operate on a Sounio-owned visual project store.",
     ),
     Evidence(
+        "workbench-project-workspace",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchProjectWorkspace",
+            "viz_workbench_project_workspace_save",
+            "viz_workbench_project_workspace_compare",
+        ),
+        "Workbench project workspace keeps A/B visual project slots, comparison state, and restore metadata as Sounio data.",
+    ),
+    Evidence(
         "physchem-core-structs",
         "contains",
         "stdlib/viz/physchem.sio",
@@ -312,6 +323,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_project_controls",
         detail="Workbench project save/load/export controls proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-workbench-project-workspace-run",
+        "label",
+        "viz_workbench_project_workspace",
+        detail="Workbench A/B visual project workspace proof is in the canonical gate.",
     ),
     Evidence(
         "gate-html-run",
