@@ -226,17 +226,21 @@ fn ep28_perturb(prm: PBPKParams28, idx: i32, delta: f64) -> PBPKParams28 with Mu
 // ============================================================================
 
 pub struct EpPrior28 {
-    mean:       [f64; 8],
-    variance:   [f64; 8],
-    confidence: [f64; 8],
-    n:          i32,
+    // SINGLE SOURCE OF TRUTH: each parameter is a Knowledge<f64> carrying its value
+    // (mean), variance, evidence-quality ε (confidence) and literature provenance.
+    // The parallel f64 arrays were deleted — every consumer (ep28_run, the Hessian,
+    // cumulants, the MC validators) now reads kn[i].value/.variance/.confidence, so
+    // there is no second representation to hand-sync (that dual-source sync was the
+    // class of bug that the logvar-perturbation regression came from). NOTE: the
+    // confidence gate is construction-site-local, so this does NOT make the kernel
+    // enforce ε — it makes the data model single-source and honest.
+    kn: [Knowledge[f64]; 8],
+    n:  i32,
 }
 
-fn ep28_prior_empty() -> EpPrior28 {
-    var m: [f64; 8] = [0.0; 8]
-    var v: [f64; 8] = [0.0; 8]
-    var c: [f64; 8] = [0.0; 8]
-    EpPrior28 { mean: m, variance: v, confidence: c, n: 0 }
+fn ep28_prior_empty() -> EpPrior28 with Mut {
+    var kn: [Knowledge[f64]; 8] = [Knowledge(0.0, ε=1.0, prov="empty"); 8]
+    EpPrior28 { kn: kn, n: 0 }
 }
 
 pub fn ep28_rapamycin_priors() -> EpPrior28 with Mut {
@@ -275,7 +279,20 @@ pub fn ep28_rapamycin_priors() -> EpPrior28 with Mut {
     // 6: kp_adipose (capped model, CV=40%)
     m[6] = 0.30;   v[6] = 0.0144;   c[6] = 0.40
 
-    EpPrior28 { mean: m, variance: v, confidence: c, n: 7 }
+    // Knowledge<f64> declarations — the per-parameter epistemic source of truth
+    // (value+variance+ε+provenance). The f64 arrays above are their numeric
+    // projection for the GUM kernel; built here from the same numbers so they
+    // cannot silently drift.
+    var kn: [Knowledge[f64]; 8] = [Knowledge(0.0, ε=1.0, prov="unused"); 8]
+    kn[0] = Knowledge { value: m[0], variance: v[0], epsilon: c[0], provenance: "Jiao2009_popPK_CV38" }
+    kn[1] = Knowledge { value: m[1], variance: v[1], epsilon: c[1], provenance: "cl_renal_estimate_CV40" }
+    kn[2] = Knowledge { value: m[2], variance: v[2], epsilon: c[2], provenance: "Schreiber1991_CV25" }
+    kn[3] = Knowledge { value: m[3], variance: v[3], epsilon: c[3], provenance: "Lampen1998_Pgp_CV25" }
+    kn[4] = Knowledge { value: m[4], variance: v[4], epsilon: c[4], provenance: "Valoteau1996_CV25" }
+    kn[5] = Knowledge { value: m[5], variance: v[5], epsilon: c[5], provenance: "Valoteau1996_CV25" }
+    kn[6] = Knowledge { value: m[6], variance: v[6], epsilon: c[6], provenance: "capped_model_CV40" }
+
+    EpPrior28 { kn: kn, n: 7 }
 }
 
 // ============================================================================
@@ -319,7 +336,7 @@ pub fn ep28_run(
     priors:   EpPrior28,
     dose_mg:  f64,
     t_end:    f64
-) -> EpResult28 with Mut, Div, Panic {
+) -> EpResult28 with Mut, Div, Panic, Epistemic {
     let n = priors.n
 
     let ref_m = ep28_simulate(base_prm, dose_mg, t_end)
@@ -340,7 +357,8 @@ pub fn ep28_run(
 
     var i = 0
     while i < n {
-        let h = ep28_fdiff_h(priors.mean[i], priors.variance[i])
+        let pk_i = priors.kn[i]
+        let h = ep28_fdiff_h(pk_i.value, pk_i.variance)
         if h > 0.0 {
             let prm_p = ep28_perturb(base_prm, i, h)
             let prm_n = ep28_perturb(base_prm, i, 0.0 - h)
@@ -366,7 +384,8 @@ pub fn ep28_run(
 
     var j = 0
     while j < n {
-        let vi = priors.variance[j]
+        let pk_j = priors.kn[j]
+        let vi = pk_j.variance
         let contrib = d_auc_b[j] * d_auc_b[j] * vi
         var_auc_b = var_auc_b + contrib
         var_cb24  = var_cb24  + d_cb24[j]  * d_cb24[j]  * vi
@@ -389,7 +408,8 @@ pub fn ep28_run(
     var conf_auc = 0.0
     var c = 0
     while c < n {
-        conf_auc = conf_auc + priors.confidence[c] * sensitivity[c]
+        let pk_c = priors.kn[c]
+        conf_auc = conf_auc + pk_c.confidence * sensitivity[c]
         c = c + 1
     }
 
@@ -463,14 +483,24 @@ pub fn ep28_semaglutide_priors() -> EpPrior28 with Mut {
     // 6: kp_adipose (CV=40%)
     m[6] = 0.10;    v[6] = 0.001600;  c[6] = 0.40
 
-    EpPrior28 { mean: m, variance: v, confidence: c, n: 7 }
+    // Knowledge<f64> declarations (value+variance+ε+provenance) — see ep28_rapamycin_priors.
+    var kn: [Knowledge[f64]; 8] = [Knowledge(0.0, ε=1.0, prov="unused"); 8]
+    kn[0] = Knowledge { value: m[0], variance: v[0], epsilon: c[0], provenance: "Overgaard2019_n12_CV30" }
+    kn[1] = Knowledge { value: m[1], variance: v[1], epsilon: c[1], provenance: "cl_renal_negligible_peptide" }
+    kn[2] = Knowledge { value: m[2], variance: v[2], epsilon: c[2], provenance: "Tougaard2022_albumin_CV30" }
+    kn[3] = Knowledge { value: m[3], variance: v[3], epsilon: c[3], provenance: "BBB_impermeable_CV40" }
+    kn[4] = Knowledge { value: m[4], variance: v[4], epsilon: c[4], provenance: "Kapitza2015_CV25" }
+    kn[5] = Knowledge { value: m[5], variance: v[5], epsilon: c[5], provenance: "kp_kidney_CV25" }
+    kn[6] = Knowledge { value: m[6], variance: v[6], epsilon: c[6], provenance: "kp_adipose_CV40" }
+
+    EpPrior28 { kn: kn, n: 7 }
 }
 
 // ============================================================================
 // MAIN — TEST SUITE (8 tests)
 // ============================================================================
 
-fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic {
+fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     println("======================================================================")
     println("  Epistemic PBPK28 — GUM Uncertainty Propagation (first-order)")
     println("  Drug: Rapamycin (Sirolimus)")
@@ -659,6 +689,6 @@ fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic {
     return failed
 }
 
-fn main() -> i32 with IO, Mut, Div, Panic {
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     ep28_selftest_main()
 }
