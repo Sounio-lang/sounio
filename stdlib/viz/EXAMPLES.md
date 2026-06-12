@@ -110,6 +110,22 @@ VIZ_PHYSCHEM_DYNAMICS_PASS
 
 This proof builds a Visual IR scene with native lattice/phonon and particle-event nodes, renders both through `viz_canvas`, and checks deterministic Canvas pixels.
 
+## Workbench Physchem Dynamics Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_physchem_dynamics.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_PHYSCHEM_DYNAMICS_PASS
+```
+
+The test drives the Workbench time slider and proves lattice/phonon phase, displacement, particle-event energy/position, audit hash, frame hash, and Canvas pixels all change through the composed Workbench event bridge.
+
 ## Interaction Time Proof
 
 Run:

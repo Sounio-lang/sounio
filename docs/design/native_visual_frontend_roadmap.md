@@ -89,6 +89,13 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_html_emit_scene` serializes both node types as passive static SVG groups plus audit comments; JavaScript still owns no scientific semantics.
 - `tests/run-pass/viz_physchem_dynamics.sio` proves the new node kinds, slots, and Canvas pixels without requiring `DISPLAY`.
 
+## V1.8d: Workbench Physchem Dynamics
+
+- `viz::workbench` now includes lattice/phonon and particle-event nodes in the composed native scene.
+- Workbench slider events synchronize existing physchem slots with `scene.time`, so dynamic state changes in-place under stable Visual IR node identities.
+- `viz_audit_hash` includes lattice/phonon and particle-event renderer data, making physchem dynamics visible to replay traces and export/audit parity.
+- `tests/run-pass/viz_workbench_physchem_dynamics.sio` proves the composed app bridge updates lattice phase/displacement, particle energy/position, audit hash, frame hash, and Canvas pixels.
+
 ## V1.9: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.
