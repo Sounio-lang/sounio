@@ -206,6 +206,22 @@ VIZ_WORKBENCH_PACKAGE_CONTROLS_PASS
 
 The test drives Workbench package buttons through native mouse events: save captures a package, undo and redo restore bounded history frames, restore reloads the latest package after a destructive local edit, and Canvas plus static HTML/SVG render the same Visual IR controls with a passive `viz-scene-package` audit comment.
 
+## Workbench Project Bundle Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_project_bundle.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_PROJECT_BUNDLE_PASS
+```
+
+The test captures a Workbench Visual Project Format v0 bundle: `VizSceneProject` contains the scene package, replay-session signature, final frame/audit/time hashes, and Canvas export hash. A rebuilt scene restores from the project, another rebuilt scene verifies the replay session against the project envelope, and the run emits passive `viz-scene-project`, `viz-scene-package`, replay-session, and static HTML/SVG audit surfaces.
+
 ## Workbench Physchem HTML Export Proof
 
 Run:
