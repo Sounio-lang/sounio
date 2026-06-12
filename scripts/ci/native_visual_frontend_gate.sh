@@ -63,6 +63,10 @@ python3 "${ROOT_DIR}/scripts/ci/check_native_visual_frontend_gate_manifest.py" \
   --root "$ROOT_DIR" \
   --manifest "$MANIFEST"
 
+python3 "${ROOT_DIR}/scripts/ci/check_native_visual_frontend_plan_coverage.py" \
+  --root "$ROOT_DIR" \
+  --manifest "$MANIFEST"
+
 while IFS=$'\t' read -r mode label path marker; do
   [[ -z "${mode}" || "${mode}" == \#* ]] && continue
   case "$mode" in

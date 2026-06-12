@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+"""Check that the native visual frontend gate covers the original lane plan.
+
+This is intentionally a lightweight evidence checker, not a semantic verifier.
+The semantic proof still comes from the Sounio programs in the gate manifest.
+This script keeps the plan-to-proof contract explicit so future edits cannot
+quietly drop a promised Visual IR, renderer, control, physchem, demo, or CI
+surface.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+import sys
+
+
+@dataclass(frozen=True)
+class Evidence:
+    requirement: str
+    kind: str
+    target: str
+    needles: tuple[str, ...] = ()
+    detail: str = ""
+
+
+REQUIRED: tuple[Evidence, ...] = (
+    Evidence(
+        "visual-ir-node-kinds",
+        "contains",
+        "stdlib/viz/ir.sio",
+        (
+            "VIZ_NODE_SCENE",
+            "VIZ_NODE_GROUP",
+            "VIZ_NODE_PANEL",
+            "VIZ_NODE_CANVAS_LAYER",
+            "VIZ_NODE_CHART_LINE",
+            "VIZ_NODE_CHART_SCATTER",
+            "VIZ_NODE_CHART_BAR",
+            "VIZ_NODE_HEATMAP",
+            "VIZ_NODE_MESH",
+            "VIZ_NODE_MOLECULE",
+            "VIZ_NODE_FIELD",
+            "VIZ_NODE_LABEL",
+            "VIZ_NODE_CONTROL",
+        ),
+        "Visual IR owns the v1 scene graph vocabulary.",
+    ),
+    Evidence(
+        "visual-ir-style-layout-scene",
+        "contains",
+        "stdlib/viz/ir.sio",
+        ("struct VizStyle", "struct VizLayout", "struct VizScene", "viz_layout_row", "viz_layout_column"),
+        "Style, fixed rectangles, and simple row/column layout are Sounio data.",
+    ),
+    Evidence(
+        "visual-ir-fixed-capacity",
+        "contains",
+        "stdlib/viz/ir.sio",
+        ("nodes: [VizNode; 64]", "series: [VizSeriesData; 8]", "molecules: [MoleculeViz; 4]"),
+        "Scene storage remains bounded and fixed capacity.",
+    ),
+    Evidence(
+        "canvas-renderer",
+        "contains",
+        "stdlib/viz/viz_canvas.sio",
+        ("viz_canvas_render_scene", "VIZ_NODE_MOLECULE", "VIZ_NODE_MESH", "VIZ_NODE_LATTICE_FIELD"),
+        "Native CPU Canvas is the primary renderer.",
+    ),
+    Evidence(
+        "html-svg-renderer",
+        "contains",
+        "stdlib/viz/viz_html.sio",
+        ("viz_html_emit_scene", "<svg", "data-viz-id", "viz-audit"),
+        "Static HTML/SVG export is a second renderer over the same IR.",
+    ),
+    Evidence(
+        "native-controls",
+        "contains",
+        "stdlib/viz/ir.sio",
+        (
+            "VIZ_CONTROL_BUTTON",
+            "VIZ_CONTROL_SLIDER",
+            "VIZ_CONTROL_TOGGLE",
+            "VIZ_CONTROL_TABS",
+            "VIZ_CONTROL_LEGEND",
+            "VIZ_CONTROL_TOOLTIP",
+            "VIZ_CONTROL_VIEWPORT",
+            "viz_add_plot_viewport",
+        ),
+        "Buttons, sliders, toggles, tabs, legend, tooltip, and viewports are Visual IR.",
+    ),
+    Evidence(
+        "interaction-state-in-sounio",
+        "contains",
+        "stdlib/viz/ir.sio",
+        ("viz_scene_handle_event", "EV_MOUSE_PRESS", "EV_MOTION", "EV_KEY_PRESS"),
+        "Native events reduce into Sounio-owned scene state.",
+    ),
+    Evidence(
+        "physchem-core-structs",
+        "contains",
+        "stdlib/viz/physchem.sio",
+        (
+            "struct AtomViz",
+            "struct BondViz",
+            "struct MoleculeViz",
+            "struct ScalarField2D",
+            "struct VectorField2D",
+            "struct Trajectory3D",
+        ),
+        "Physico-chemistry payloads are native Sounio structs.",
+    ),
+    Evidence(
+        "physchem-extended-surfaces",
+        "contains",
+        "stdlib/viz/physchem.sio",
+        ("struct SpectrumViz", "struct LatticeField2D", "struct ParticleEventView", "variance"),
+        "Spectra, lattice/phonon, particle events, and uncertainty arrays are first-class.",
+    ),
+    Evidence(
+        "physchem-units",
+        "contains",
+        "stdlib/viz/physchem.sio",
+        ("use units::lib::{Quantity, UnitDim", "pub length: Quantity", "pub unit: UnitDim"),
+        "Physchem unit metadata uses the Sounio units layer.",
+    ),
+    Evidence(
+        "seed-canvas-extension",
+        "contains",
+        "stdlib/display/canvas_ext.sio",
+        ("canvas_blit_surface", "graphics::surface::Surface", "alpha"),
+        "Canvas extension bridges real graphics surfaces with alpha.",
+    ),
+    Evidence(
+        "seed-sci-effects",
+        "contains",
+        "stdlib/viz/sci.sio",
+        ("sci_sqrt", "with Mut, Div"),
+        "Scientific drawing helper effects are explicit.",
+    ),
+    Evidence(
+        "module-readme-examples",
+        "exists",
+        "stdlib/viz/mod.sio",
+        detail="Viz module surface exists.",
+    ),
+    Evidence("module-readme", "exists", "stdlib/viz/README.md", detail="Viz README exists."),
+    Evidence("module-examples", "exists", "stdlib/viz/EXAMPLES.md", detail="Viz examples doc exists."),
+    Evidence(
+        "chart-builders",
+        "contains",
+        "stdlib/viz/ir.sio",
+        (
+            "viz_add_line_chart",
+            "viz_add_scatter_chart",
+            "viz_add_bar_chart",
+            "viz_add_heatmap",
+            "viz_add_uncertainty_band",
+            "viz_add_forest_plot",
+            "viz_add_waterfall",
+        ),
+        "Line, scatter, bar, heatmap, band, forest, and waterfall builders exist.",
+    ),
+    Evidence(
+        "lab-demo-rich-scene",
+        "contains",
+        "examples/viz_lab/main.sio",
+        (
+            "viz_add_line_chart",
+            "viz_add_uncertainty_band",
+            "viz_add_heatmap",
+            "viz_add_molecule",
+            "viz_add_scalar_field",
+            "viz_add_mesh",
+            "VIZ_CONTROL_SLIDER",
+            "VIZ_CONTROL_TABS",
+            "VIZ_CONTROL_TOGGLE",
+            "viz_app_handle_event",
+        ),
+        "Headless lab demo composes plot, molecule, field, 3D, and controls.",
+    ),
+    Evidence(
+        "optional-window-demo",
+        "contains",
+        "examples/viz_lab_window/main.sio",
+        ("window_open", "viz_window_step", "VIZ_CONTROL_TABS"),
+        "Optional native window demo uses the same Visual IR app path.",
+    ),
+    Evidence(
+        "physchem-demo",
+        "contains",
+        "examples/viz_physchem_demo/main.sio",
+        (
+            "molecule_h2o",
+            "molecule_rapamycin_coarse",
+            "viz_add_vector_field",
+            "viz_add_trajectory",
+            "viz_add_spectrum",
+            "viz_add_lattice_field",
+            "viz_add_particle_event",
+            "viz_add_mesh",
+        ),
+        "Physchem demo covers molecule, field, dynamics, spectra, events, and 3D.",
+    ),
+    Evidence(
+        "gpu-deferred-roadmap",
+        "contains",
+        "docs/design/native_visual_frontend_roadmap.md",
+        ("V2: GPU Renderer", "Deferred until general `bin/souc --backend gpu` wiring exists"),
+        "GPU renderer stays deferred and documented.",
+    ),
+    Evidence(
+        "gate-headless-run",
+        "label",
+        "viz_headless",
+        detail="Headless proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-canvas-ext-run",
+        "label",
+        "viz_canvas_ext_surface",
+        detail="Canvas extension pixel/surface proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-chart-builders-run",
+        "label",
+        "viz_chart_builders",
+        detail="Chart builder proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-interaction-run",
+        "label",
+        "viz_event_reducer",
+        detail="Interaction reducer proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-html-run",
+        "label",
+        "viz_html_static",
+        detail="Static HTML/SVG proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-physchem-run",
+        "label",
+        "viz_physchem",
+        detail="Physchem proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-physchem-dynamics-run",
+        "label",
+        "viz_physchem_dynamics",
+        detail="Physchem dynamics proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-workbench-run",
+        "label",
+        "viz_workbench_roundtrip",
+        detail="Composed Workbench proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-workbench-timeline-run",
+        "label",
+        "viz_workbench_timeline_playback",
+        detail="Workbench timeline playback proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-replay-session-run",
+        "label",
+        "viz_workbench_replay_session",
+        detail="Workbench replay session proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-replay-html-archive-run",
+        "label",
+        "viz_workbench_replay_html_archive",
+        detail="Replay HTML archive proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-demo-compiles",
+        "labels",
+        "",
+        ("viz_hello_demo", "viz_lab_demo", "viz_physchem_demo", "viz_workbench_demo"),
+        "Demo compile gates are present.",
+    ),
+    Evidence(
+        "gate-demo-runs",
+        "labels",
+        "",
+        ("viz_lab_run", "viz_physchem_demo_run", "viz_workbench_demo_run"),
+        "Headless demo run markers are present.",
+    ),
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", default=".", help="Repository root.")
+    parser.add_argument(
+        "--manifest",
+        default="scripts/ci/native_visual_frontend_gate.manifest.tsv",
+        help="Native visual frontend gate manifest.",
+    )
+    return parser.parse_args()
+
+
+def read_labels(root: Path, manifest_rel: str) -> tuple[set[str], list[str]]:
+    manifest = Path(manifest_rel)
+    if not manifest.is_absolute():
+        manifest = root / manifest
+    labels: set[str] = set()
+    errors: list[str] = []
+    if not manifest.exists():
+        return labels, [f"manifest missing: {manifest}"]
+    for lineno, raw in enumerate(manifest.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) != 4:
+            errors.append(f"{manifest}:{lineno}: expected 4 TSV columns")
+            continue
+        labels.add(parts[1])
+    return labels, errors
+
+
+def check_evidence(root: Path, labels: set[str], ev: Evidence) -> list[str]:
+    if ev.kind == "label":
+        return [] if ev.target in labels else [f"{ev.requirement}: missing gate label {ev.target!r}"]
+    if ev.kind == "labels":
+        missing = [label for label in ev.needles if label not in labels]
+        if missing:
+            return [f"{ev.requirement}: missing gate labels: {', '.join(missing)}"]
+        return []
+
+    path = root / ev.target
+    if ev.kind == "exists":
+        return [] if path.exists() else [f"{ev.requirement}: missing file {ev.target}"]
+    if ev.kind == "contains":
+        if not path.exists():
+            return [f"{ev.requirement}: missing file {ev.target}"]
+        text = path.read_text(encoding="utf-8")
+        missing = [needle for needle in ev.needles if needle not in text]
+        if missing:
+            return [f"{ev.requirement}: {ev.target} missing: {', '.join(missing)}"]
+        return []
+    return [f"{ev.requirement}: unknown evidence kind {ev.kind!r}"]
+
+
+def main() -> int:
+    args = parse_args()
+    root = Path(args.root).resolve()
+    labels, errors = read_labels(root, args.manifest)
+
+    for ev in REQUIRED:
+        errors.extend(check_evidence(root, labels, ev))
+
+    if errors:
+        for err in errors:
+            print(f"error: native visual frontend plan coverage: {err}", file=sys.stderr)
+        return 1
+
+    print(f"native_visual_frontend_plan_coverage: PASS requirements={len(REQUIRED)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
