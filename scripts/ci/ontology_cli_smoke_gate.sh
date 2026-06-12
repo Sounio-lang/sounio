@@ -82,7 +82,12 @@ compile_test_binary() {
         exit 1
     fi
     patch_source
-    if ! "$SOUC_BIN" "$PATCHED_SRC" "$TEST_BIN" >/dev/null 2>&1; then
+    if "$SOUC_BIN" --help 2>/dev/null | grep -q "compile <file.sio>"; then
+        compile_cmd=( "$SOUC_BIN" compile "$PATCHED_SRC" -o "$TEST_BIN" )
+    else
+        compile_cmd=( "$SOUC_BIN" "$PATCHED_SRC" "$TEST_BIN" )
+    fi
+    if ! "${compile_cmd[@]}" >/dev/null 2>&1; then
         echo "[ontology-smoke] ERROR: failed to compile patched ontology source" >&2
         exit 1
     fi

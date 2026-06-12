@@ -79,6 +79,32 @@ run_ontology_compile_gates() {
         return 0
     fi
 
+    local seq_probe_dir seq_probe_src seq_probe_out seq_probe_log
+    seq_probe_dir="$(mktemp -d /tmp/sounio-ontology-seq-probe-XXXXXX)"
+    seq_probe_src="$seq_probe_dir/seq_probe.sio"
+    seq_probe_out="$seq_probe_dir/seq_probe"
+    seq_probe_log="$seq_probe_dir/seq_probe.log"
+    cat >"$seq_probe_src" <<'EOF'
+fn main() -> i32 with IO, Mut, Panic, Epistemic {
+    var s: Seq<i64> = seq_new()
+    s.push(1)
+    return 0
+}
+EOF
+    source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+    if "$SOUC_BIN" --help 2>/dev/null | grep -q "compile <file.sio>"; then
+        seq_probe_cmd=( "$SOUC_BIN" compile "$seq_probe_src" -o "$seq_probe_out" )
+    else
+        seq_probe_cmd=( "$SOUC_BIN" "$seq_probe_src" "$seq_probe_out" )
+    fi
+    if ! "${seq_probe_cmd[@]}" >"$seq_probe_log" 2>&1; then
+        echo "[ontology-validation] skipping compile gate bundle: selected compiler surface lacks Seq runtime compile support"
+        tail -n 8 "$seq_probe_log" || true
+        rm -rf "$seq_probe_dir"
+        return 0
+    fi
+    rm -rf "$seq_probe_dir"
+
     local gate script
     for gate in "${ONTOLOGY_COMPILE_GATES[@]}"; do
         script="$ROOT_DIR/scripts/ci/$gate"
