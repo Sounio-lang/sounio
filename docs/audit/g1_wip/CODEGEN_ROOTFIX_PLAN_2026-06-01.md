@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.codegen-rootfix-plan-2026-06-01
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.codegen-rootfix-plan-2026-06-01
+-->
+
 # Root-fix plan: bin/souc codegen bugs #2/#3 (by-value 164KB Checker copy)
 
 **Decision (2026-06-01):** fix the bin/souc CODEGEN root of bugs #2+#3 at once,

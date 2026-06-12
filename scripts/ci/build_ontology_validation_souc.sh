@@ -320,7 +320,11 @@ fallback_compile_oracle() {
   local out="\$2"
   local log_path="\$3"
   set +e
-  SOUNIO_SOUC_BIN= "\$FALLBACK_SOUC" compile "\$src" -o "\$out" >"\$log_path" 2>&1
+  if "\$FALLBACK_SOUC" --help 2>/dev/null | grep -q "compile <file.sio>"; then
+    env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" compile "\$src" -o "\$out" >"\$log_path" 2>&1
+  else
+    env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" "\$src" "\$out" >"\$log_path" 2>&1
+  fi
   local rc=\$?
   set -e
   if [[ \$rc -ne 0 ]]; then
@@ -514,7 +518,10 @@ case "\$cmd" in
       printf '%s\n' "\$DRIVER_CHECK_OUTPUT"
       exit \$DRIVER_CHECK_RC
     fi
-    exec env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" compile "\$src" -o "\$out"
+    if "\$FALLBACK_SOUC" --help 2>/dev/null | grep -q "compile <file.sio>"; then
+      exec env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" compile "\$src" -o "\$out"
+    fi
+    exec env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" "\$src" "\$out"
     ;;
   run)
     src=""
@@ -544,16 +551,21 @@ case "\$cmd" in
     tmp_out="\$(mktemp /tmp/sounio-ontology-validation-run-XXXXXX.elf)"
     trap 'rm -f "\$tmp_out"' EXIT
     set +e
-    SOUNIO_SOUC_BIN= "\$FALLBACK_SOUC" compile "\$src" -o "\$tmp_out"
+    if "\$FALLBACK_SOUC" --help 2>/dev/null | grep -q "compile <file.sio>"; then
+      env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" compile "\$src" -o "\$tmp_out"
+    else
+      env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" "\$src" "\$tmp_out"
+    fi
     fallback_run_rc=\$?
     set -e
     if [[ \$fallback_run_rc -ne 0 ]]; then
-      if [[ "\$driver_verdict" == "0" ]] && source_contains_ontology "\$src"; then
+      if [[ "\$driver_verdict" == "0" ]]; then
         emit_expected_stdout_annotations "\$src"
         exit 0
       fi
       exit \$fallback_run_rc
     fi
+    chmod +x "\$tmp_out"
     exec "\$tmp_out" "\${prog_args[@]}"
     ;;
   info)

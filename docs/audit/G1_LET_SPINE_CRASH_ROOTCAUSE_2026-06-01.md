@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-let-spine-crash-rootcause-2026-06-01
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-let-spine-crash-rootcause-2026-06-01
+-->
+
 # G1 `let x = 1` --check SIGSEGV — root cause: runaway recursion, not frame size
 
 > **⚠️ SUPERSEDED 2026-06-10** — no longer reproduces. Re-measured in

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.chi5-real-axiom-audit-2026-05-30
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.chi5-real-axiom-audit-2026-05-30
+-->
+
 # χ(ℝ²) ≥ 5 over a Mathlib-free ℝ — axiom audit
 
 **Date:** 2026-05-30

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.gpu-pipeline-sota-assessment-2026-05-30
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.gpu-pipeline-sota-assessment-2026-05-30
+-->
+
 # GPU pipeline — ground-truth SOTA assessment (2026-05-30)
 
 Goal of this pass: *investigate the entire GPU pipeline in search of surpassing the SOTA.*

@@ -2880,7 +2880,11 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             ty_named(ei.name)
         } else {
             // Look up in env as a regular binding
-            (*c).env.lookup(first_name)
+            let bound_ty = (*c).env.lookup(first_name)
+            if bound_ty.kind == TypeKind::TyError && !(*c).env.has_binding(first_name) {
+                checker_report_error_at_inplace(c, e.span, 137, 0, 0, 0)
+            }
+            bound_ty
         }
     }
 }
@@ -2993,6 +2997,35 @@ fn checker_finish_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp
 }
 
 fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
+        let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
+            || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
+            || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
+        let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv
+            || e.bin_op == BinaryOp::OpRem
+        if is_cmp && left_ty.kind != right_ty.kind {
+            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
+            return ty_error()
+        }
+        if is_arith && left_ty.kind != right_ty.kind {
+            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
+            return ty_error()
+        }
+        if is_arith && left_ty.kind == TypeKind::TyString && right_ty.kind != TypeKind::TyString {
+            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
+            return ty_error()
+        }
+        if is_arith && left_ty.kind == right_ty.kind && is_numeric_type(left_ty) {
+            return left_ty
+        }
+        if is_arith && e.bin_op == BinaryOp::OpAdd && left_ty.kind == TypeKind::TyString && right_ty.kind == TypeKind::TyString {
+            return ty_string()
+        }
+        if is_cmp && left_ty.kind == right_ty.kind {
+            return ty_bool()
+        }
+    }
     if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
             || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
@@ -3802,6 +3835,8 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                                 if !types_compatible(init_ty, field_ty) {
                                     checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
                                 }
+                            } else {
+                                checker_report_error_at_inplace(c, (*list).head.value.span, 12, 0, 0, 0)
                             }
                             cur_ev = (*list).tail
                         }
@@ -4179,6 +4214,13 @@ fn checker_check_expr_list_no_type_no_linear_consume_inplace(c: *mut Checker, op
     }
 }
 
+fn expr_list_count_inplace(opt: Option<Box<ExprList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => 1 + expr_list_count_inplace((*list).tail)
+        None => 0
+    }
+}
+
 // *mut transcription of check_call_args_inner (16907): the arg is checked via the spine;
 // the boundary contracts inspect the already-computed arg_ty (no re-check) and are bridged.
 fn checker_check_call_args_inner_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, idx: i64, expected_count: i64, call_span: Span) with Mut, Panic, Div, Alloc, IO {
@@ -4306,6 +4348,24 @@ fn checker_check_slice_len_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry w
     ty_i64()
 }
 
+fn checker_check_assert_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        None => {}
+    }
+    if !is_error_or_unknown(arg_ty) && arg_ty.kind != TypeKind::TyBool {
+        checker_report_error_at_inplace(c, e.span, 174, 0, 0, 0)
+    }
+    ty_unit()
+}
+
 // Enum tuple-variant constructor detection (`Enum::Variant(args)`). Given the callee
 // opt-expr, returns the enum table index if the callee is a 2+-segment path whose HEAD
 // names an enum and whose LAST segment names a variant of it (e.g. `Event::B`); else -1.
@@ -4336,6 +4396,9 @@ fn call_expr_enum_variant_ctor_enum_idx(c: *mut Checker, opt: Option<Box<Expr> >
 }
 
 fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if call_expr_is_builtin_assert(e.left) {
+        return checker_check_assert_expr_inplace(c, e)
+    }
     // Intercept the common epistemic builtin measure() with an inplace handler before the
     // by-value bridge below (which SRET-smashes on the 164KB Checker return).
     if call_expr_is_builtin_measure(e.left) {
@@ -4409,6 +4472,15 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
     }
     if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
+        let sig_id = callee_ty.fn_sig_id
+        if sig_id >= 0 && sig_id < (*c).fn_sigs.count {
+            let expected_count = (*c).fn_sigs.entries[sig_id as usize].param_count
+            let actual_count = expr_list_count_inplace(e.args)
+            if actual_count != expected_count {
+                checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+                return (*c).fn_sigs.entries[sig_id as usize].return_type
+            }
+        }
         let sig = (*c).fn_sigs.get(callee_ty.fn_sig_id)
         let call_start_borrows = (*c).borrows
         checker_check_call_args_inplace(c, e.args, sig.params, sig.param_count, e.span)
@@ -4757,6 +4829,10 @@ fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         return ty_error()
     }
     let ident_ty = (*c).env.lookup(e.name)
+    if ident_ty.kind == TypeKind::TyError && !(*c).env.has_binding(e.name) {
+        checker_report_error_at_inplace(c, e.span, 137, 0, 0, 0)
+        return ident_ty
+    }
     if checker_is_linear_type_inplace(c, ident_ty) && (*c).suppress_linear_consume_depth == 0 {
         if (*c).borrows.is_borrowed(e.name) {
             checker_report_error_at_inplace(c, e.span, 38, 0, 0, 0)
@@ -9198,6 +9274,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 58 { print("prove_robust(...) requires Contest<T> and Policy<T> with the same inner type") }
     else if code == 59 { print("contest expressions require an explicit Contest<T> annotation") }
     else if code == 63 { print("epistemic wrapper metadata is malformed or unsupported in this compiler slice") }
+    else if code == 137 { print("name is not defined in this scope") }
+    else if code == 174 { print("assert condition must be of type `bool`") }
     else if code == 79 { print("contest witness builtin requires Contest<T, Family, Policy>") }
     else if code == 80 { print("contest metadata is incomplete for witness projection") }
     else if code == 81 { print("requested contest metric is unavailable") }

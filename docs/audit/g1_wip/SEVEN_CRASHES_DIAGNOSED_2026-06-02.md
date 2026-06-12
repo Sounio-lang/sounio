@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.seven-crashes-diagnosed-2026-06-02
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.seven-crashes-diagnosed-2026-06-02
+-->
+
 # Seven Crashes Diagnosed — modular corpus under g1 / *mut / move-codegen (2026-06-02)
 
 > **STATUS UPDATE 2026-06-10** — Cluster C ("known large-SRET miscompile,

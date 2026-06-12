@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.tuple-match-deref-bug-2026-06-03
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.tuple-match-deref-bug-2026-06-03
+-->
+
 # Pre-existing canonical-compiler tuple-match codegen bug — root of the Knowledge survivors (2026-06-03)
 
 The Knowledge deeper-crash survivors (epsilon_comparison_valid, knowledge_octonion_inner) reduce

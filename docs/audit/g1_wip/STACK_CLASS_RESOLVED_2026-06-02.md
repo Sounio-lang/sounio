@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.g1-wip.stack-class-resolved-2026-06-02
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.g1-wip.stack-class-resolved-2026-06-02
+-->
+
 # Stack-overflow class RESOLVED by the standard large stack — heap-tables refactor UNNECESSARY (2026-06-02)
 
 ## The finding (advisor-directed empirical test, definitive)

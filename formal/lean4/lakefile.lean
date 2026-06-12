@@ -172,12 +172,6 @@ lean_lib «SounioSatReflect» where
 @[default_target]
 lean_lib «SounioSatColouringSB» where
 
--- χ≥6 cube-and-conquer composition smoke: if all five one-literal split leaves
--- for one vertex are UNSAT, the plain `colourCNF n 5 edges` is UNSAT. This is
--- the Lean-side cover adapter for future generated per-cube LRAT certificates.
-@[default_target]
-lean_lib «SounioSatCubeCover» where
-
 -- B1 mechanism spike: a tiny hand-written UNSAT certificate re-checked by Lean core's
 -- verified LRAT checker (check/check_sound + native_decide). Standalone; fast.
 @[default_target]

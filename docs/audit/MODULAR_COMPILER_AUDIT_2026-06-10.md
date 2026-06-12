@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.modular-compiler-audit-2026-06-10
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.modular-compiler-audit-2026-06-10
+-->
+
 # Modular Compiler Audit — state re-measured (2026-06-10)
 
 **Scope.** Re-audit of the modular/multi-module compiler path
