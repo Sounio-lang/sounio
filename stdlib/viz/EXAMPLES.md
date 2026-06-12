@@ -222,6 +222,22 @@ VIZ_WORKBENCH_PROJECT_BUNDLE_PASS
 
 The test captures a Workbench Visual Project Format v0 bundle: `VizSceneProject` contains the scene package, replay-session signature, final frame/audit/time hashes, and Canvas export hash. A rebuilt scene restores from the project, another rebuilt scene verifies the replay session against the project envelope, and the run emits passive `viz-scene-project`, `viz-scene-package`, replay-session, and static HTML/SVG audit surfaces.
 
+## Workbench Project Controls Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_project_controls.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_PROJECT_CONTROLS_PASS
+```
+
+The test drives the real Workbench save, load, and export buttons through native mouse events. `VizWorkbenchProjectStore` captures a project, marks dirty state after a time-control edit, exports a new `VizSceneProject`, restores it through the load button after another edit, and proves the final scene audit, frame time, Canvas pixels, project hash, and static HTML/SVG export agree.
+
 ## Workbench Physchem HTML Export Proof
 
 Run:

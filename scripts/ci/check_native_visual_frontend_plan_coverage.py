@@ -134,6 +134,13 @@ REQUIRED: tuple[Evidence, ...] = (
         "Workbench package save, restore, undo, and redo commands are native Visual IR control state.",
     ),
     Evidence(
+        "workbench-native-project-controls",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        ("struct VizWorkbenchProjectStore", "viz_workbench_project_app_handle_event", "VIZ_WORKBENCH_TAG_EXPORT"),
+        "Workbench save, load, and export controls operate on a Sounio-owned visual project store.",
+    ),
+    Evidence(
         "physchem-core-structs",
         "contains",
         "stdlib/viz/physchem.sio",
@@ -299,6 +306,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_project_bundle",
         detail="Workbench Visual Project Format v0 proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-workbench-project-controls-run",
+        "label",
+        "viz_workbench_project_controls",
+        detail="Workbench project save/load/export controls proof is in the canonical gate.",
     ),
     Evidence(
         "gate-html-run",

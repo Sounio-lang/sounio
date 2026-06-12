@@ -22,6 +22,7 @@ use viz::physchem::{
 }
 use viz::snapshot::{
     VizSceneHistory, VizScenePackage, VizSceneProject,
+    viz_scene_history_new, viz_scene_package_new, viz_scene_project_new,
     viz_scene_history_record, viz_scene_history_undo, viz_scene_history_redo,
     viz_scene_history_hash,
     viz_scene_package_capture, viz_scene_package_restore, viz_scene_package_verify,
@@ -77,6 +78,7 @@ pub const VIZ_WORKBENCH_TAG_PACKAGE_REDO: i64 = 8902
 pub const VIZ_WORKBENCH_TAG_PACKAGE_SAVE: i64 = 8903
 pub const VIZ_WORKBENCH_TAG_PACKAGE_RESTORE: i64 = 8904
 pub const VIZ_WORKBENCH_TAG_PACKAGE_AUDIT: i64 = 8905
+pub const VIZ_WORKBENCH_TAG_EXPORT: i64 = 8604
 
 pub const VIZ_WORKBENCH_PACKAGE_UNDO: i64 = 1
 pub const VIZ_WORKBENCH_PACKAGE_REDO: i64 = 2
@@ -101,6 +103,19 @@ pub struct VizWorkbenchReplaySession {
     pub frame_count: i64,
     pub final_frame_hash: i64,
     pub final_audit_hash: i64,
+}
+
+pub struct VizWorkbenchProjectStore {
+    pub project: VizSceneProject,
+    pub history: VizSceneHistory,
+    pub package: VizScenePackage,
+    pub last_project_hash: i64,
+    pub last_replay_signature: i64,
+    pub last_export_hash: i64,
+    pub dirty: bool,
+    pub save_count: i64,
+    pub load_count: i64,
+    pub export_count: i64,
 }
 
 pub fn viz_workbench_replay_step_empty() -> VizWorkbenchReplayStep {
@@ -133,6 +148,21 @@ pub fn viz_workbench_replay_session_new() -> VizWorkbenchReplaySession {
         frame_count: 0,
         final_frame_hash: 0,
         final_audit_hash: 0,
+    }
+}
+
+pub fn viz_workbench_project_store_new() -> VizWorkbenchProjectStore {
+    VizWorkbenchProjectStore {
+        project: viz_scene_project_new(),
+        history: viz_scene_history_new(),
+        package: viz_scene_package_new(),
+        last_project_hash: 0,
+        last_replay_signature: 0,
+        last_export_hash: 0,
+        dirty: false,
+        save_count: 0,
+        load_count: 0,
+        export_count: 0,
     }
 }
 
@@ -413,7 +443,7 @@ pub fn viz_workbench_build_scene(scene: &!VizScene) -> VizWorkbenchIds with Mut,
     viz_scene_set_tag(scene, legend, 8601)
     viz_scene_set_tag(scene, tooltip, 8602)
     viz_scene_set_tag(scene, viewport, 8603)
-    viz_scene_set_tag(scene, button, 8604)
+    viz_scene_set_tag(scene, button, VIZ_WORKBENCH_TAG_EXPORT)
     viz_scene_set_tag(scene, studio_select, 8701)
     viz_scene_set_tag(scene, studio_move, 8702)
     viz_scene_set_tag(scene, studio_atom, 8703)
@@ -940,6 +970,128 @@ pub fn viz_workbench_project_verify_session(
     if session.frame_count <= 0 || session.frame_count > 33 { return false }
     if project.final_time_ms != session.times_ms[(session.frame_count - 1) as usize] { return false }
     viz_workbench_replay_verify_session(app, scene, ids, c, session)
+}
+
+fn viz_workbench_canvas_hash(c: &Canvas) -> i64 with Mut {
+    var h: i64 = 23
+    var i: i64 = 0
+    let n = c.width * c.height
+    while i < n {
+        h = h * 131 + read_i64(c.pixels, i)
+        i = i + 1
+    }
+    h
+}
+
+fn viz_workbench_project_current_session(app: &!VizApp, scene: &!VizScene, c: &!Canvas) -> VizWorkbenchReplaySession with Mut, Div, Alloc {
+    var session = viz_workbench_replay_session_new()
+    session.step_count = 0
+    let frame_hash = viz_replay_present(app, scene, c)
+    viz_workbench_replay_store_frame(&!session, 0, frame_hash, scene)
+    session
+}
+
+fn viz_workbench_project_store_mark(scene: &!VizScene, ids: &VizWorkbenchIds, store: &VizWorkbenchProjectStore) with Mut, Div {
+    viz_workbench_set_package_marker(scene, ids, store.last_project_hash)
+}
+
+pub fn viz_workbench_project_store_save(
+    app: &!VizApp,
+    scene: &!VizScene,
+    ids: &VizWorkbenchIds,
+    store: &!VizWorkbenchProjectStore,
+    c: &!Canvas,
+) -> bool with Mut, Div, Alloc {
+    viz_workbench_package_select_target(scene, ids)
+    viz_scene_history_record(&!store.history, scene, VIZ_WORKBENCH_TAG_PACKAGE_SAVE)
+    let session = viz_workbench_project_current_session(app, scene, c)
+    let export_hash = viz_workbench_canvas_hash(c)
+    viz_workbench_project_capture(&!store.project, scene, &store.history, &!store.package, &session, export_hash)
+    if !viz_scene_project_verify(&store.project) { return false }
+    store.last_project_hash = store.project.project_hash
+    store.last_replay_signature = store.project.replay_signature
+    store.last_export_hash = store.project.export_hash
+    store.dirty = false
+    store.save_count = store.save_count + 1
+    viz_workbench_project_store_mark(scene, ids, store)
+    true
+}
+
+pub fn viz_workbench_project_store_load(
+    scene: &!VizScene,
+    ids: &VizWorkbenchIds,
+    store: &!VizWorkbenchProjectStore,
+) -> bool with Mut, Div {
+    if !viz_workbench_project_restore(scene, &store.project) { return false }
+    store.last_project_hash = store.project.project_hash
+    store.last_replay_signature = store.project.replay_signature
+    store.last_export_hash = store.project.export_hash
+    store.dirty = false
+    store.load_count = store.load_count + 1
+    viz_workbench_project_store_mark(scene, ids, store)
+    true
+}
+
+pub fn viz_workbench_project_store_export(
+    app: &!VizApp,
+    scene: &!VizScene,
+    ids: &VizWorkbenchIds,
+    store: &!VizWorkbenchProjectStore,
+    c: &!Canvas,
+) -> bool with Mut, Div, Alloc {
+    if !viz_workbench_project_store_save(app, scene, ids, store, c) { return false }
+    store.export_count = store.export_count + 1
+    true
+}
+
+pub fn viz_workbench_handle_project_event(
+    app: &!VizApp,
+    scene: &!VizScene,
+    ids: &VizWorkbenchIds,
+    store: &!VizWorkbenchProjectStore,
+    c: &!Canvas,
+    ev: Event,
+) -> bool with Mut, Div, Alloc {
+    if ev.kind != EV_MOUSE_PRESS || ev.key != MOUSE_LEFT { return false }
+    let idx = viz_scene_hit_test(scene, ev.x, ev.y)
+    if idx < 0 || idx >= scene.node_count { return false }
+    let tag = scene.nodes[idx as usize].tag
+    if tag == VIZ_WORKBENCH_TAG_PACKAGE_SAVE {
+        return viz_workbench_project_store_save(app, scene, ids, store, c)
+    }
+    if tag == VIZ_WORKBENCH_TAG_PACKAGE_RESTORE {
+        return viz_workbench_project_store_load(scene, ids, store)
+    }
+    if tag == VIZ_WORKBENCH_TAG_EXPORT {
+        return viz_workbench_project_store_export(app, scene, ids, store, c)
+    }
+    false
+}
+
+pub fn viz_workbench_project_app_handle_event(
+    app: &!VizApp,
+    scene: &!VizScene,
+    ids: &VizWorkbenchIds,
+    constraint: &!VizMoleculeConstraint,
+    store: &!VizWorkbenchProjectStore,
+    c: &!Canvas,
+    ev: Event,
+) -> bool with Mut, Div, Alloc {
+    if ev.kind == EV_CLOSE || ev.kind == EV_EXPOSE {
+        return viz_app_handle_event(app, scene, ev)
+    }
+    var changed = viz_workbench_handle_project_event(app, scene, ids, store, c, ev)
+    if !changed {
+        changed = viz_workbench_handle_event(scene, constraint, ev)
+        if changed {
+            store.dirty = true
+        }
+    }
+    if changed {
+        viz_workbench_sync_dynamics(scene)
+        app.dirty = true
+    }
+    changed
 }
 
 fn viz_workbench_print_i64(n: i64) with IO, Mut, Div {

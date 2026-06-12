@@ -1,0 +1,110 @@
+// tests/run-pass/viz_workbench_project_controls.sio - Workbench project save/load/export controls
+//
+// Expected output includes:
+//   viz-scene-project
+//   VIZ_WORKBENCH_PROJECT_CONTROLS_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use display::event::{MOUSE_LEFT, EV_MOUSE_PRESS}
+use viz::audit::{viz_audit_hash}
+use viz::authoring::{VizMoleculeConstraint}
+use viz::ir::{VizScene, viz_scene_new}
+use viz::snapshot::{viz_scene_project_verify, viz_scene_project_emit}
+use viz::viz_app::{VizApp, viz_app_new}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+use viz::workbench::{
+    VIZ_WORKBENCH_TAG_EXPORT,
+    VIZ_WORKBENCH_TAG_PACKAGE_SAVE, VIZ_WORKBENCH_TAG_PACKAGE_RESTORE,
+    VizWorkbenchIds, VizWorkbenchProjectStore,
+    viz_workbench_build_scene, viz_workbench_constraint, viz_workbench_event,
+    viz_workbench_project_app_handle_event, viz_workbench_project_store_new,
+}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn read_px(c: &Canvas, x: i64, y: i64) -> i64 {
+    read_i64(c.pixels, y * c.width + x)
+}
+
+fn click(app: &!VizApp, scene: &!VizScene, ids: &VizWorkbenchIds, constraint: &!VizMoleculeConstraint, store: &!VizWorkbenchProjectStore, c: &!Canvas, x: i64, y: i64) -> bool with Mut, Div, Alloc {
+    let ev = viz_workbench_event(EV_MOUSE_PRESS, MOUSE_LEFT, x, y, 0)
+    viz_workbench_project_app_handle_event(app, scene, ids, constraint, store, c, ev)
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene = viz_scene_new()
+    let ids = viz_workbench_build_scene(&!scene)
+    var app = viz_app_new(10, 13, 18)
+    var constraint = viz_workbench_constraint(&ids)
+    var store = viz_workbench_project_store_new()
+    var c = make_canvas(480, 320)
+
+    assert(scene.nodes[ids.package_save as usize].tag == VIZ_WORKBENCH_TAG_PACKAGE_SAVE)
+    assert(scene.nodes[ids.package_restore as usize].tag == VIZ_WORKBENCH_TAG_PACKAGE_RESTORE)
+    assert(scene.nodes[ids.button as usize].tag == VIZ_WORKBENCH_TAG_EXPORT)
+
+    scene.selected_node = ids.time_readout
+    scene.focused_node = ids.time_readout
+    scene.hovered_node = ids.time_readout
+    canvas_clear(&!c, app.bg_r, app.bg_g, app.bg_b)
+    viz_canvas_render_scene(&scene, &!c)
+
+    assert(click(&!app, &!scene, &ids, &!constraint, &!store, &!c, 125, 253))
+    assert(viz_scene_project_verify(&store.project))
+    assert(store.save_count == 1)
+    assert(store.load_count == 0)
+    assert(store.export_count == 0)
+    assert(!store.dirty)
+    assert(store.last_project_hash == store.project.project_hash)
+    assert(store.last_replay_signature == store.project.replay_signature)
+    assert(store.last_export_hash == store.project.export_hash)
+    let saved_hash = store.last_project_hash
+    let saved_audit = viz_audit_hash(&scene)
+    assert(scene.time == 2.0)
+
+    assert(click(&!app, &!scene, &ids, &!constraint, &!store, &!c, 113, 212))
+    assert(scene.time == 3.0)
+    assert(store.dirty)
+    assert(viz_audit_hash(&scene) != saved_audit)
+
+    canvas_clear(&!c, app.bg_r, app.bg_g, app.bg_b)
+    viz_canvas_render_scene(&scene, &!c)
+    assert(click(&!app, &!scene, &ids, &!constraint, &!store, &!c, 427, 273))
+    assert(viz_scene_project_verify(&store.project))
+    assert(store.save_count == 2)
+    assert(store.export_count == 1)
+    assert(!store.dirty)
+    assert(store.last_project_hash == store.project.project_hash)
+    assert(store.last_project_hash != saved_hash)
+    assert(store.project.final_time_ms == 3000)
+    let exported_hash = store.last_project_hash
+    let exported_audit = viz_audit_hash(&scene)
+    assert(scene.time == 3.0)
+
+    assert(click(&!app, &!scene, &ids, &!constraint, &!store, &!c, 113, 212))
+    assert(scene.time == 4.0)
+    assert(store.dirty)
+    assert(viz_audit_hash(&scene) != exported_audit)
+
+    assert(click(&!app, &!scene, &ids, &!constraint, &!store, &!c, 174, 253))
+    assert(store.load_count == 1)
+    assert(!store.dirty)
+    assert(store.last_project_hash == exported_hash)
+    assert(scene.time == 3.0)
+    assert(scene.nodes[ids.time_readout as usize].value == 3.0)
+    assert(viz_audit_hash(&scene) == exported_audit)
+
+    canvas_clear(&!c, app.bg_r, app.bg_g, app.bg_b)
+    viz_canvas_render_scene(&scene, &!c)
+    assert(read_px(&c, 202, 246) != 0)
+    assert(read_px(&c, 427, 273) != 0)
+    viz_scene_project_emit(&store.project)
+    viz_html_emit_scene(&scene, 480, 320)
+
+    heap_free(c.pixels as *mut i8)
+    println("VIZ_WORKBENCH_PROJECT_CONTROLS_PASS")
+}
