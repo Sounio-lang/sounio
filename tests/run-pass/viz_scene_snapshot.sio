@@ -1,0 +1,72 @@
+// tests/run-pass/viz_scene_snapshot.sio - Visual IR snapshot/restore proof
+//
+// Expected output includes:
+//   VIZ_SCENE_SNAPSHOT_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use viz::audit::{viz_audit_hash, viz_audit_node_hash}
+use viz::editor::{viz_editor_resize_selected, viz_editor_set_selected_tag, viz_editor_set_selected_value}
+use viz::snapshot::{viz_scene_snapshot, viz_scene_snapshot_hash, viz_scene_restore_snapshot, viz_scene_snapshot_matches}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+use viz::workbench::{viz_workbench_build_scene}
+use viz::ir::{viz_scene_new}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn read_px(c: &Canvas, x: i64, y: i64) -> i64 {
+    read_i64(c.pixels, y * c.width + x)
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene = viz_scene_new()
+    let ids = viz_workbench_build_scene(&!scene)
+    scene.selected_node = ids.slider
+    scene.focused_node = ids.slider
+    scene.hovered_node = ids.slider
+    scene.nodes[ids.slider as usize].selected = true
+
+    let before_audit = viz_audit_hash(&scene)
+    let before_slider_hash = viz_audit_node_hash(&scene, ids.slider)
+    let snap = viz_scene_snapshot(&scene)
+    let snap_hash = viz_scene_snapshot_hash(&snap)
+    assert(snap.node_count == scene.node_count)
+    assert(snap.audit_hash == before_audit)
+    assert(snap.node_tag[ids.slider as usize] == 8101)
+    assert(snap.node_layout_x[ids.slider as usize] == 16)
+    assert(snap_hash != 0)
+    assert(viz_scene_snapshot_matches(&scene, &snap))
+
+    assert(viz_editor_set_selected_tag(&!scene, 9901))
+    assert(viz_editor_set_selected_value(&!scene, 7.0))
+    assert(viz_editor_resize_selected(&!scene, 14, 4, 8, 8))
+    assert(viz_audit_node_hash(&scene, ids.slider) != before_slider_hash)
+    assert(viz_audit_hash(&scene) != before_audit)
+    assert(snap.node_tag[ids.slider as usize] == 8101)
+    assert(snap.node_layout_w[ids.slider as usize] == 170)
+    assert(!viz_scene_snapshot_matches(&scene, &snap))
+
+    assert(viz_scene_restore_snapshot(&!scene, &snap))
+    assert(viz_scene_snapshot_matches(&scene, &snap))
+    assert(viz_audit_hash(&scene) == before_audit)
+    assert(viz_audit_node_hash(&scene, ids.slider) == before_slider_hash)
+    assert(scene.nodes[ids.slider as usize].tag == 8101)
+    assert(scene.nodes[ids.slider as usize].value == 2.0)
+    assert(scene.selected_node == ids.slider)
+    assert(scene.focused_node == ids.slider)
+    assert(scene.hovered_node == ids.slider)
+    assert(scene.molecule_studio_node == ids.molecule)
+
+    var c = make_canvas(470, 320)
+    canvas_clear(&!c, 5, 8, 12)
+    viz_canvas_render_scene(&scene, &!c)
+    assert(read_px(&c, 20, 230) != 0)
+    assert(read_px(&c, 390, 74) != 0)
+    viz_html_emit_scene(&scene, 470, 320)
+
+    heap_free(c.pixels as *mut i8)
+    println("VIZ_SCENE_SNAPSHOT_PASS")
+}

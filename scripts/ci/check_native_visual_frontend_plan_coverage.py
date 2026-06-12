@@ -99,6 +99,13 @@ REQUIRED: tuple[Evidence, ...] = (
         "Native events reduce into Sounio-owned scene state.",
     ),
     Evidence(
+        "scene-authoring-snapshots",
+        "contains",
+        "stdlib/viz/snapshot.sio",
+        ("struct VizSceneSnapshot", "viz_scene_snapshot", "viz_scene_restore_snapshot", "viz_scene_snapshot_matches"),
+        "Editable Visual IR state can be captured and restored as Sounio data.",
+    ),
+    Evidence(
         "physchem-core-structs",
         "contains",
         "stdlib/viz/physchem.sio",
@@ -234,6 +241,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_event_reducer",
         detail="Interaction reducer proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-scene-snapshot-run",
+        "label",
+        "viz_scene_snapshot",
+        detail="Scene snapshot/restore proof is in the canonical gate.",
     ),
     Evidence(
         "gate-html-run",

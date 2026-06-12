@@ -138,6 +138,12 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - The gate checks `viz::sci` and Workbench modules, runs Canvas, HTML/SVG, physchem, interaction, replay, Workbench, timeline, mesh, replay-session, and replay-archive proofs, then compile-gates and headless-runs the visual demos that do not require `DISPLAY`.
 - `tests/run-pass/viz_module_surface_gate.sio` is a module import smoke used by the gate so the public `stdlib/viz` surface is checked through a real executable entrypoint rather than relying on module files that intentionally have no `main`.
 
+## V1.8k: Scene Snapshot Authoring State
+
+- `stdlib/viz/snapshot.sio` captures the edit-facing Visual IR state into a bounded Sounio struct: nodes, layout/style/labels/control values, identity, selection/focus, molecule-studio state, counts, and audit hashes.
+- `viz_scene_restore_snapshot` restores the captured native frontend state onto an existing scene while scientific payload slots remain Sounio-owned `VizScene` data.
+- `tests/run-pass/viz_scene_snapshot.sio` proves Workbench snapshot -> editor mutation -> audit change -> restore -> matching audit/node hashes -> Canvas and static HTML/SVG render from the restored state.
+
 ## V1.9: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.

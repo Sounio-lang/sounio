@@ -142,6 +142,22 @@ VIZ_WORKBENCH_PHYSCHEM_DYNAMICS_PASS
 
 The test drives the Workbench time slider and proves lattice/phonon phase, displacement, particle-event energy/position, audit hash, frame hash, and Canvas pixels all change through the composed Workbench event bridge.
 
+## Scene Snapshot Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_scene_snapshot.sio
+```
+
+Expected output:
+
+```text
+VIZ_SCENE_SNAPSHOT_PASS
+```
+
+The test captures a Workbench Visual IR snapshot, mutates an editable control node through `viz::editor`, proves the audit hash changes, restores from the snapshot, then proves node hash, scene audit, selection/focus state, Canvas pixels, and static HTML/SVG export all return to the captured Sounio-owned state.
+
 ## Workbench Physchem HTML Export Proof
 
 Run:
