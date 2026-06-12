@@ -41,6 +41,7 @@ Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattic
 - `viz_app_frame_hash` gives headless tests a compact deterministic probe over app frame state, Visual IR interaction state, and a few Canvas pixels.
 - `viz_replay_events` replays a fixed event array into the Sounio reducer, renders every frame, and returns the final deterministic frame hash.
 - `viz_replay_trace_events` records one frame summary per event: input event, changed flag, Canvas hash, audit hash, selected/hovered/focused, active tab, and integer scene time.
+- `viz_replay_record` is public so composed reducers can reuse the same replay timeline after applying domain-specific events, such as Workbench Molecule Studio constraints.
 - `viz_inspector_draw` renders node IDs, tags, kinds, selected/hovered/focused state, and node counts into a native Canvas panel.
 - `viz_inspector_hit_node` and `viz_inspector_select` make inspector rows interactive Sounio state: selecting a row updates selected/hovered/focused node fields without delegating state to UI runtime code.
 - `viz_inspector_draw_node_highlights` overlays native Canvas highlights on selected/hovered/focused Visual IR nodes.

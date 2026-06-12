@@ -376,7 +376,7 @@ Expected output:
 VIZ_WORKBENCH_REPLAY_STUDIO_PASS
 ```
 
-The test replays one Workbench event tape through the composed app bridge. The tape drives a generic time slider, switches Molecule Studio tools, adds an atom, selects an atom, and nudges it. The recorded timeline proves Canvas hash changes, final atom count, dirty/render cleanup, and molecule Studio counters through the same bridge used by the native Workbench demo.
+The test replays one Workbench event tape through the composed app bridge. It uses the shared `viz_replay_present` and public `viz_replay_record` timeline hook after each Workbench-specific reducer step. The tape drives a generic time slider, switches Molecule Studio tools, adds an atom, selects an atom, and nudges it. The recorded timeline proves Canvas hash changes, final atom count, dirty/render cleanup, and molecule Studio counters through the same bridge used by the native Workbench demo.
 
 ## Renderer3D Edge Proof
 

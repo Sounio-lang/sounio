@@ -78,8 +78,8 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 ## V1.8b: Workbench Replay Proof With Studio Constraints
 
 - `tests/run-pass/viz_workbench_replay_studio.sio` replays a fixed `display::event::Event` tape through the composed Workbench app bridge instead of the generic Visual IR reducer alone.
-- The test-local replay frames record Canvas hash, audit hash, scene time, molecule tool, timeline count, accepted/rejected checked-action counters, and molecule atom count.
-- The proof covers a tape that crosses generic controls and Molecule Studio authoring constraints without adding a separate replay module that perturbs current import ordering.
+- The proof uses `viz_replay_present` plus the public `viz_replay_record` hook after each Workbench-specific reducer step, so composed frontends can share replay timelines without adding a separate replay module.
+- The trace records Canvas hash, audit hash, scene time, event identity, and final Workbench molecule state while the tape crosses generic controls and Molecule Studio authoring constraints.
 
 ## V1.9: Static HTML/SVG
 
