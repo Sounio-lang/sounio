@@ -1,0 +1,83 @@
+// tests/run-pass/viz_scene_package.sio - Visual IR scene package roundtrip proof
+//
+// Expected output includes:
+//   viz-scene-package
+//   VIZ_SCENE_PACKAGE_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use viz::audit::{viz_audit_hash, viz_audit_node_hash}
+use viz::editor::{viz_editor_resize_selected, viz_editor_set_selected_tag, viz_editor_set_selected_value}
+use viz::snapshot::{
+    viz_scene_history_new, viz_scene_history_record, viz_scene_history_hash,
+    viz_scene_package_new, viz_scene_package_capture, viz_scene_package_verify,
+    viz_scene_package_restore, viz_scene_package_matches, viz_scene_package_emit,
+}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+use viz::workbench::{viz_workbench_build_scene}
+use viz::ir::{viz_scene_new}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn read_px(c: &Canvas, x: i64, y: i64) -> i64 {
+    read_i64(c.pixels, y * c.width + x)
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene = viz_scene_new()
+    let ids = viz_workbench_build_scene(&!scene)
+    scene.selected_node = ids.slider
+    scene.focused_node = ids.slider
+    scene.hovered_node = ids.slider
+    scene.nodes[ids.slider as usize].selected = true
+
+    var history = viz_scene_history_new()
+    assert(viz_scene_history_record(&!history, &scene, 100))
+    assert(viz_editor_set_selected_value(&!scene, 6.0))
+    assert(viz_editor_resize_selected(&!scene, 12, 2, 8, 8))
+    assert(viz_scene_history_record(&!history, &scene, 101))
+    assert(viz_editor_set_selected_tag(&!scene, 9920))
+    assert(viz_scene_history_record(&!history, &scene, 102))
+
+    let authored_audit = viz_audit_hash(&scene)
+    let authored_node_hash = viz_audit_node_hash(&scene, ids.slider)
+    let history_hash = viz_scene_history_hash(&history)
+
+    var pkg = viz_scene_package_new()
+    viz_scene_package_capture(&!pkg, &scene, &history)
+    assert(viz_scene_package_verify(&pkg))
+    assert(pkg.history_hash == history_hash)
+    assert(pkg.history_count == history.count)
+    assert(pkg.history_cursor == history.cursor)
+    assert(pkg.history_last_label == 102)
+    assert(pkg.snapshot.audit_hash == authored_audit)
+    assert(pkg.package_hash != 0)
+    viz_scene_package_emit(&pkg)
+
+    var restored = viz_scene_new()
+    let restored_ids = viz_workbench_build_scene(&!restored)
+    assert(restored_ids.slider == ids.slider)
+    assert(viz_scene_package_restore(&!restored, &pkg))
+    assert(viz_scene_package_matches(&restored, &pkg))
+    assert(viz_audit_hash(&restored) == authored_audit)
+    assert(viz_audit_node_hash(&restored, restored_ids.slider) == authored_node_hash)
+    assert(restored.nodes[restored_ids.slider as usize].tag == 9920)
+    assert(restored.nodes[restored_ids.slider as usize].value == 6.0)
+    assert(restored.nodes[restored_ids.slider as usize].layout.w == 182)
+    assert(restored.nodes[restored_ids.slider as usize].layout.h == 24)
+    assert(restored.selected_node == restored_ids.slider)
+    assert(restored.focused_node == restored_ids.slider)
+
+    var c = make_canvas(470, 320)
+    canvas_clear(&!c, 5, 8, 12)
+    viz_canvas_render_scene(&restored, &!c)
+    assert(read_px(&c, 20, 230) != 0)
+    assert(read_px(&c, 390, 74) != 0)
+    viz_html_emit_scene(&restored, 470, 320)
+
+    heap_free(c.pixels as *mut i8)
+    println("VIZ_SCENE_PACKAGE_PASS")
+}
