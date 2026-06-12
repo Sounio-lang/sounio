@@ -102,6 +102,13 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_html_emit_scene` includes quantized physchem samples in passive comments for lattice/phonon and particle-event nodes: scene time, first phase/displacement/variance sample, and first event position/energy/variance sample.
 - `tests/run-pass/viz_workbench_html_physchem.sio` drives the Workbench scrubber, verifies the updated payload values before export, and emits static HTML/SVG whose grepable audit comments prove the same dynamic scene reached the HTML renderer.
 
+## V1.8f: Time-Driven 3D Mesh
+
+- `VizMeshData` keeps the existing `Tri3D` array plus primitive vertex/normal/color mirrors, so Canvas, audit, and HTML/SVG renderers can read mesh geometry across module boundaries without relying on fragile large array-of-struct copies.
+- `viz_workbench_sync_dynamics` updates the Workbench mesh from `scene.time`, giving the native scrubber a CPU Canvas 3D target whose vertices, normal, depth, and color are Sounio-owned data.
+- `viz_canvas_render_scene` rebuilds `Tri3D` draw calls from the primitive mirror, and `viz_html_emit_scene` emits SVG polygons plus passive mesh audit comments with quantized vertex/normal/color samples.
+- `tests/run-pass/viz_workbench_mesh_dynamics.sio` proves slider -> mesh payload -> audit hash -> Canvas frame hash -> static HTML/SVG export for the Workbench 3D scene.
+
 ## V1.9: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.

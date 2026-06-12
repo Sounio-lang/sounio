@@ -142,6 +142,22 @@ VIZ_WORKBENCH_HTML_PHYSCHEM_PASS
 
 The test drives the same Workbench time slider to `time=5`, verifies lattice/phonon and particle-event payload samples in Sounio data, then exports static HTML/SVG from that scene. The HTML renderer emits passive node identity attributes plus quantized physchem comments such as `time-ms`, `phase0-milli`, and `energy0-milli`, so export parity is grepable without giving JavaScript scientific semantics.
 
+## Workbench Mesh Dynamics Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_mesh_dynamics.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_MESH_DYNAMICS_PASS
+```
+
+The test drives the Workbench time slider, updates the 3D mesh payload in-place, verifies quantized vertex/normal/color samples, checks Canvas frame change, and exports static HTML/SVG with a passive `mesh` comment such as `time-ms`, `v0x-milli`, `nx-milli`, and `base-r`.
+
 ## Interaction Time Proof
 
 Run:
