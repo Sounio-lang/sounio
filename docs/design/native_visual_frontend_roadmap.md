@@ -109,6 +109,13 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_canvas_render_scene` rebuilds `Tri3D` draw calls from the primitive mirror, and `viz_html_emit_scene` emits SVG polygons plus passive mesh audit comments with quantized vertex/normal/color samples.
 - `tests/run-pass/viz_workbench_mesh_dynamics.sio` proves slider -> mesh payload -> audit hash -> Canvas frame hash -> static HTML/SVG export for the Workbench 3D scene.
 
+## V1.8g: Native Timeline Playback
+
+- `viz::workbench` adds play/pause, step-back, step-forward, and frame-readout controls as Visual IR nodes with stable tags.
+- `viz_workbench_tick` advances `scene.time` only while the play control is active, then synchronizes lattice/phonon, particle-event, trajectory cursor, and 3D mesh state through the same Workbench dynamics path.
+- `viz_audit_hash` includes control node values and selection state, so playback state is visible to replay/certificate/export proofs.
+- `tests/run-pass/viz_workbench_timeline_playback.sio` proves native control clicks plus deterministic ticks drive the full composed Workbench scene and static HTML/SVG export without moving simulation semantics into JavaScript.
+
 ## V1.9: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.

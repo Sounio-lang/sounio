@@ -1,0 +1,100 @@
+// tests/run-pass/viz_workbench_timeline_playback.sio - Workbench timeline playback proof
+//
+// Expected output includes:
+//   <!-- mesh slot=0 n=2 time-ms=5000 ... -->
+//   <!-- control viewport value-ms=5000 -->
+//   VIZ_WORKBENCH_TIMELINE_PLAYBACK_PASS
+
+use display::canvas::{Canvas}
+use display::event::{Event, EV_MOUSE_PRESS, MOUSE_LEFT}
+use viz::audit::{viz_audit_hash}
+use viz::ir::{VizScene, viz_scene_new}
+use viz::viz_app::{viz_app_new, viz_app_render, viz_app_frame_hash}
+use viz::viz_html::{viz_html_emit_scene}
+use viz::workbench::{
+    viz_workbench_build_scene, viz_workbench_constraint,
+    viz_workbench_app_handle_event, viz_workbench_tick, viz_workbench_playing,
+}
+
+fn ev(kind: i64, key: i64, x: i64, y: i64) -> Event {
+    Event { kind: kind, key: key, x: x, y: y, mods: 0 }
+}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn center_x(scene: &VizScene, idx: i64) -> i64 {
+    scene.nodes[idx as usize].layout.x + scene.nodes[idx as usize].layout.w / 2
+}
+
+fn center_y(scene: &VizScene, idx: i64) -> i64 {
+    scene.nodes[idx as usize].layout.y + scene.nodes[idx as usize].layout.h / 2
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene = viz_scene_new()
+    let ids = viz_workbench_build_scene(&!scene)
+    var constraint = viz_workbench_constraint(&ids)
+    var app = viz_app_new(10, 13, 18)
+    var c = make_canvas(480, 320)
+
+    assert(scene.time == 2.0)
+    assert(!viz_workbench_playing(&scene))
+    assert(scene.nodes[ids.time_readout as usize].value == 2.0)
+    let initial_audit = viz_audit_hash(&scene)
+
+    viz_app_render(&!app, &!scene, &!c)
+    let initial_frame = viz_app_frame_hash(&app, &scene, &c)
+
+    let play_x = center_x(&scene, ids.time_play)
+    let play_y = center_y(&scene, ids.time_play)
+    let back_x = center_x(&scene, ids.time_back)
+    let back_y = center_y(&scene, ids.time_back)
+    let forward_x = center_x(&scene, ids.time_forward)
+    let forward_y = center_y(&scene, ids.time_forward)
+
+    assert(viz_workbench_app_handle_event(&!app, &!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, play_x, play_y)))
+    assert(viz_workbench_playing(&scene))
+    assert(scene.nodes[ids.time_play as usize].value == 1.0)
+    assert(viz_audit_hash(&scene) != initial_audit)
+
+    assert(viz_workbench_tick(&!app, &!scene, 1.0))
+    assert((scene.time * 1000.0) as i64 == 3000)
+    assert((scene.nodes[ids.slider as usize].value * 1000.0) as i64 == 3000)
+    assert((scene.nodes[ids.time_readout as usize].value * 1000.0) as i64 == 3000)
+    let after_tick_audit = viz_audit_hash(&scene)
+    assert(scene.meshes[0].base_r[0] == 168)
+    let phase3 = (scene.lattice_data[0].phase[0] * 1000.0) as i64
+    assert(phase3 >= 1049 && phase3 <= 1050)
+
+    assert(viz_workbench_tick(&!app, &!scene, 1.0))
+    assert(viz_workbench_tick(&!app, &!scene, 1.0))
+    assert((scene.time * 1000.0) as i64 == 5000)
+    assert((scene.nodes[ids.slider as usize].value * 1000.0) as i64 == 5000)
+    assert((scene.nodes[ids.time_readout as usize].value * 1000.0) as i64 == 5000)
+    assert(viz_audit_hash(&scene) != after_tick_audit)
+    assert(scene.meshes[0].base_r[0] == 180)
+    assert((scene.meshes[0].v0x[0] * 1000.0) as i64 == 0 - 370)
+
+    viz_app_render(&!app, &!scene, &!c)
+    assert(viz_app_frame_hash(&app, &scene, &c) != initial_frame)
+
+    assert(viz_workbench_app_handle_event(&!app, &!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, play_x, play_y)))
+    assert(!viz_workbench_playing(&scene))
+    assert(scene.nodes[ids.time_play as usize].value == 0.0)
+    assert(!viz_workbench_tick(&!app, &!scene, 1.0))
+    assert((scene.time * 1000.0) as i64 == 5000)
+
+    assert(viz_workbench_app_handle_event(&!app, &!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, back_x, back_y)))
+    assert((scene.time * 1000.0) as i64 == 4000)
+    assert((scene.nodes[ids.time_readout as usize].value * 1000.0) as i64 == 4000)
+    assert(viz_workbench_app_handle_event(&!app, &!scene, &!constraint, ev(EV_MOUSE_PRESS, MOUSE_LEFT, forward_x, forward_y)))
+    assert((scene.time * 1000.0) as i64 == 5000)
+    assert((scene.nodes[ids.time_readout as usize].value * 1000.0) as i64 == 5000)
+
+    viz_html_emit_scene(&scene, 480, 320)
+    heap_free(c.pixels as *mut i8)
+    println("VIZ_WORKBENCH_TIMELINE_PLAYBACK_PASS")
+}

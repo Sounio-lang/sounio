@@ -158,6 +158,22 @@ VIZ_WORKBENCH_MESH_DYNAMICS_PASS
 
 The test drives the Workbench time slider, updates the 3D mesh payload in-place, verifies quantized vertex/normal/color samples, checks Canvas frame change, and exports static HTML/SVG with a passive `mesh` comment such as `time-ms`, `v0x-milli`, `nx-milli`, and `base-r`.
 
+## Workbench Timeline Playback Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_timeline_playback.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_TIMELINE_PLAYBACK_PASS
+```
+
+The test clicks the native play control, advances deterministic ticks through the Workbench app bridge, pauses playback, steps backward and forward, then proves lattice/phonon, particle-event, mesh, slider, frame readout, audit hash, Canvas frame hash, and static HTML/SVG export all agree on the same `scene.time`.
+
 ## Interaction Time Proof
 
 Run:
