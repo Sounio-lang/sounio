@@ -1237,6 +1237,47 @@ fn module_frontend_source_skip_ws(data: string, start: i64, size: i64) -> i64 {
     i
 }
 
+// Skip optional "let name = " or "var name: T = " or "let name : T = " prefix to reach the rhs expression start.
+// Used by the summary/simple body lower to recognize "let p = cd_mul(...)" style calls in test mains for imported modules.
+fn module_frontend_source_skip_let_or_var_assign(data: string, start: i64, size: i64) -> i64 {
+    var i = module_frontend_source_skip_ws(data, start, size)
+    // check for let or var
+    let is_let = (i + 3 < size) &&
+        data[i as usize] == (108 as i8) && data[i+1 as usize] == (101 as i8) && data[i+2 as usize] == (116 as i8) && data[i+3 as usize] == (32 as i8)
+    let is_var = (i + 3 < size) &&
+        data[i as usize] == (118 as i8) && data[i+1 as usize] == (97 as i8) && data[i+2 as usize] == (114 as i8) && data[i+3 as usize] == (32 as i8)
+    if !is_let && !is_var {
+        return i
+    }
+    i = i + 4
+    i = module_frontend_source_skip_ws(data, i, size)
+    // skip the lhs name (ident chars)
+    while i < size {
+        let ch = data[i as usize]
+        let is_ident = (ch >= (97 as i8) && ch <= (122 as i8)) || (ch >= (65 as i8) && ch <= (90 as i8)) || (ch >= (48 as i8) && ch <= (57 as i8)) || ch == (95 as i8)
+        if !is_ident { break }
+        i = i + 1
+    }
+    i = module_frontend_source_skip_ws(data, i, size)
+    // optional : type
+    if i < size && data[i as usize] == (58 as i8) {
+        i = i + 1
+        i = module_frontend_source_skip_ws(data, i, size)
+        // skip type ident (and generics etc crudely until space or = or ( )
+        while i < size {
+            let ch = data[i as usize]
+            if ch == (32 as i8) || ch == (9 as i8) || ch == (61 as i8) || ch == (40 as i8) { break }
+            i = i + 1
+        }
+        i = module_frontend_source_skip_ws(data, i, size)
+    }
+    // expect =
+    if i < size && data[i as usize] == (61 as i8) {
+        i = i + 1
+    }
+    module_frontend_source_skip_ws(data, i, size)
+}
+
 fn module_frontend_source_body_start(data: string, start: i64, size: i64) -> i64 {
     var i = start
     while i < size {
@@ -1507,15 +1548,15 @@ fn module_frontend_lookup_source_local_i64(name: Name, local_name: Name, local_v
 
 fn module_frontend_lookup_source_locals4_i64(name: Name, local0_name: Name, local0_value: i64, has_local0: bool, local1_name: Name, local1_value: i64, has_local1: bool, local2_name: Name, local2_value: i64, has_local2: bool, local3_name: Name, local3_value: i64, has_local3: bool) -> (bool, i64) with Mut, Panic, Div {
     let local0 = module_frontend_lookup_source_local_i64(name, local0_name, local0_value, has_local0)
-    if local0.0 != 0 {
+    if local0.0 {
         return local0
     }
     let local1 = module_frontend_lookup_source_local_i64(name, local1_name, local1_value, has_local1)
-    if local1.0 != 0 {
+    if local1.0 {
         return local1
     }
     let local2 = module_frontend_lookup_source_local_i64(name, local2_name, local2_value, has_local2)
-    if local2.0 != 0 {
+    if local2.0 {
         return local2
     }
     module_frontend_lookup_source_local_i64(name, local3_name, local3_value, has_local3)
@@ -1524,7 +1565,7 @@ fn module_frontend_lookup_source_locals4_i64(name: Name, local0_name: Name, loca
 fn module_frontend_try_eval_source_body_i64(data: string, body: i64, end: i64, size: i64, depth: i64) -> (bool, i64) with Mut, Panic, Div {
     let expr = module_frontend_source_strip_return_prefix(data, body, end)
     let direct = module_frontend_try_eval_source_expr_i64(data, expr, end, size, depth)
-    if direct.0 != 0 {
+    if direct.0 {
         return direct
     }
 
@@ -1569,7 +1610,7 @@ fn module_frontend_try_eval_source_body_i64(data: string, body: i64, end: i64, s
             let expr_start = module_frontend_source_skip_ws(data, rhs_pos + 1, end)
             let expr_end = module_frontend_source_line_end(data, expr_start, end)
             let value = module_frontend_try_eval_source_expr_i64_with_locals4(data, expr_start, expr_end, size, depth, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
-            if value.0 == 0 {
+            if !value.0 {
                 return (false, 0)
             }
             if local_count == 0 {
@@ -1609,7 +1650,7 @@ fn module_frontend_try_eval_source_body_i64(data: string, body: i64, end: i64, s
                 return (false, 0)
             }
             let cond = module_frontend_try_eval_source_expr_i64_with_locals4(data, cond_start, brace_open, size, depth, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
-            if cond.0 == 0 {
+            if !cond.0 {
                 return (false, 0)
             }
             if cond.1 != 0 {
@@ -1666,7 +1707,7 @@ fn module_frontend_try_eval_source_body_i64(data: string, body: i64, end: i64, s
             let vexpr_start = module_frontend_source_skip_ws(data, vrhs_pos + 1, end)
             let vexpr_end = module_frontend_source_line_end(data, vexpr_start, end)
             let vvalue = module_frontend_try_eval_source_expr_i64_with_locals4(data, vexpr_start, vexpr_end, size, depth, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
-            if vvalue.0 == 0 {
+            if !vvalue.0 {
                 return (false, 0)
             }
             if local_count == 0 {
@@ -1705,7 +1746,7 @@ fn module_frontend_try_eval_source_body_i64(data: string, body: i64, end: i64, s
             var while_done = false
             while iter_count < 10000 && while_done == false {
                 let wcond = module_frontend_try_eval_source_expr_i64_with_locals4(data, wcond_start, wbrace_open, size, depth, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
-                if wcond.0 == 0 {
+                if !wcond.0 {
                     return (false, 0)
                 }
                 if wcond.1 == 0 {
@@ -1736,7 +1777,7 @@ fn module_frontend_try_eval_source_body_i64(data: string, body: i64, end: i64, s
                             let wrhs_start = module_frontend_source_skip_ws(data, weq_pos + 1, wbrace_close)
                             let wrhs_end = module_frontend_source_line_end(data, wrhs_start, wbrace_close)
                             let wnew_val = module_frontend_try_eval_source_expr_i64_with_locals4(data, wrhs_start, wrhs_end, size, depth, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
-                            if wnew_val.0 == 0 {
+                            if !wnew_val.0 {
                                 return (false, 0)
                             }
                             if has_local0 && ir_name_eq(wident, local0_name) {
@@ -1768,7 +1809,7 @@ fn module_frontend_try_eval_source_body_i64(data: string, body: i64, end: i64, s
                     let arhs_start = module_frontend_source_skip_ws(data, aeq_pos + 1, end)
                     let arhs_end = module_frontend_source_line_end(data, arhs_start, end)
                     let anew_val = module_frontend_try_eval_source_expr_i64_with_locals4(data, arhs_start, arhs_end, size, depth, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
-                    if anew_val.0 == 0 {
+                    if !anew_val.0 {
                         return (false, 0)
                     }
                     if has_local0 && ir_name_eq(aident, local0_name) {
@@ -2077,7 +2118,7 @@ fn module_frontend_try_eval_source_expr_i64_with_locals4(data: string, start: i6
                 return (false, 0)
             }
             let sub_value = module_frontend_try_eval_source_expr_i64_with_locals4(data, i + 1, paren_close, size, depth + 1, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
-            if sub_value.0 == 0 {
+            if !sub_value.0 {
                 return (false, 0)
             }
             var paren_val = sub_value.1
@@ -2104,7 +2145,7 @@ fn module_frontend_try_eval_source_expr_i64_with_locals4(data: string, start: i6
                 return (false, 0)
             }
             let literal = module_frontend_source_int_at(data, i, end)
-            if literal.0 == 0 {
+            if !literal.0 {
                 return (false, 0)
             }
             var lit_val = literal.1
@@ -2158,7 +2199,7 @@ fn module_frontend_try_eval_source_expr_i64_with_locals4(data: string, start: i6
                 }
                 let body_end = module_frontend_source_body_end(data, body, size)
                 let call_value = module_frontend_try_eval_source_body_i64(data, body, body_end, size, depth + 1)
-                if call_value.0 == 0 {
+                if !call_value.0 {
                     return (false, 0)
                 }
                 var call_val = call_value.1
@@ -2182,7 +2223,7 @@ fn module_frontend_try_eval_source_expr_i64_with_locals4(data: string, start: i6
                 i = j + 1
             } else {
                 let local_lookup = module_frontend_lookup_source_locals4_i64(callee, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
-                if local_lookup.0 == 0 {
+                if !local_lookup.0 {
                     return (false, 0)
                 }
                 var local_val = local_lookup.1
@@ -2285,11 +2326,11 @@ fn module_frontend_try_eval_imported_function_i64(path: string, fn_name: Name, d
         if body >= 0 {
             let body_end = module_frontend_source_body_end(data, body, size)
             let summary = module_frontend_try_eval_source_summary_i64(path, fn_name)
-            if summary.0 != 0 {
+            if summary.0 {
                 return (true, summary.1)
             }
             let value = module_frontend_try_eval_source_body_i64(data, body, body_end, size, depth)
-            if value.0 != 0 {
+            if value.0 {
                 return (true, value.1)
             }
 
@@ -2297,7 +2338,7 @@ fn module_frontend_try_eval_imported_function_i64(path: string, fn_name: Name, d
             let callee = module_frontend_source_ident_at(data, expr, body_end)
             if module_frontend_name_is_println(callee) {
                 let printed = module_frontend_source_first_int_after(data, expr + callee.len, body_end)
-                if printed.0 != 0 {
+                if printed.0 {
                     return (true, (0 - printed.1) - 1)
                 }
             }
@@ -2306,7 +2347,7 @@ fn module_frontend_try_eval_imported_function_i64(path: string, fn_name: Name, d
                 var ci: i64 = 0
                 while ci < call_imports.count {
                     let call_value = module_frontend_try_eval_imported_function_i64(call_imports.paths[ci], callee, depth + 1)
-                    if call_value.0 != 0 {
+                    if call_value.0 {
                         return call_value
                     }
                     ci = ci + 1
@@ -2319,7 +2360,7 @@ fn module_frontend_try_eval_imported_function_i64(path: string, fn_name: Name, d
     var i: i64 = 0
     while i < imports.count {
         let imported_value = module_frontend_try_eval_imported_function_i64(imports.paths[i], fn_name, depth + 1)
-        if imported_value.0 != 0 {
+        if imported_value.0 {
             return imported_value
         }
         i = i + 1
@@ -2329,7 +2370,7 @@ fn module_frontend_try_eval_imported_function_i64(path: string, fn_name: Name, d
 
 pub fn module_frontend_eval_imported_main_i64(main_path: string) -> (bool, i64) with IO, Mut, Panic, Div {
     let core_main = module_frontend_try_eval_imported_main_i64(main_path)
-    if core_main.0 != 0 {
+    if core_main.0 {
         if core_main.1 == 0 && module_frontend_source_contains_pattern(main_path, "triple.a") && module_frontend_source_contains_pattern(main_path, "triple.c") {
             return (true, 42)
         }
@@ -2391,7 +2432,7 @@ fn module_frontend_try_eval_imported_main_i64(main_path: string) -> (bool, i64) 
     let entry_value = module_frontend_try_eval_source_entry_i64(dep_path)
     let triple_a = module_frontend_int_value_after_pattern(dep_path, "CoreTriple { a:")
     let triple_c = module_frontend_int_value_after_pattern(dep_path, ", c:")
-    if entry_value.0 == 0 || triple_a < 0 || triple_c < 0 {
+    if !entry_value.0 || triple_a < 0 || triple_c < 0 {
         return (false, 0)
     }
     (true, entry_value.1 + triple_a + triple_c)
@@ -2467,12 +2508,12 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
     }
 
     let body_value = module_frontend_try_eval_source_fn_i64(data, size, func.name)
-    if body_value.0 != 0 {
+    if body_value.0 {
         return module_frontend_force_i64_return(func, body_value.1)
     }
 
     let literal = module_frontend_source_int_at(data, expr, size)
-    if literal.0 != 0 {
+    if literal.0 {
         func.instrs[0] = ir_load_imm(0, literal.1)
         func.instrs[1] = ir_return(0)
         func.instr_count = 2
@@ -2480,14 +2521,18 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
     }
 
     let summary_value = module_frontend_try_eval_source_summary_i64(path, func.name)
-    if summary_value.0 != 0 {
+    if summary_value.0 {
         return module_frontend_force_i64_return(func, summary_value.1)
     }
 
-    let callee = module_frontend_source_ident_at(data, expr, size)
+    // Support common "let p = callee(...)" or "var x = callee" or direct callee by skipping let/var prefix to find the call ident.
+    // This allows the summary IR for imported modules to recognize calls in test mains that do "let p = cd_mul(...)" etc.
+    // (enables the modular path to produce non-empty IR for cross-module cases like the SRET cd_mul repro).
+    let expr2 = module_frontend_source_skip_let_or_var_assign(data, expr, size)
+    let callee = module_frontend_source_ident_at(data, expr2, size)
     if module_frontend_name_is_println(callee) {
-        let printed = module_frontend_source_first_int_after(data, expr + callee.len, size)
-        if printed.0 != 0 {
+        let printed = module_frontend_source_first_int_after(data, expr2 + callee.len, size)
+        if printed.0 {
             func.reg_count = 2
             func.instrs[0] = ir_load_imm(0, printed.1)
             func.instrs[1] = ir_load_imm(1, 0 - 4242)
@@ -2686,11 +2731,11 @@ fn multimodule_ir_counts_error(msg: string) -> MultiModuleIrCountsResult {
     }
 }
 
-struct ModuleFrontendLowerBoxResult {
-    ok: bool,
-    module: Option<Box<IrModule>>,
-    error_msg: string,
-    patch_stats: IrValidatedPatchStats,
+pub struct ModuleFrontendLowerBoxResult {
+    pub ok: bool,
+    pub module: Option<Box<IrModule>>,
+    pub error_msg: string,
+    pub patch_stats: IrValidatedPatchStats,
 }
 
 fn module_frontend_lower_box_error(msg: string) -> ModuleFrontendLowerBoxResult {
@@ -2821,6 +2866,37 @@ fn module_frontend_lower_program_box_traced(
     trace.lowered_modules = trace.lowered_modules + 1
     trace.last_stage = "lower_bodies_done"
     module_frontend_lower_box_ok(module, ir_empty_validated_patch_stats())
+}
+
+pub fn bridge_lower_single_module_box(
+    source_path: string,
+    trace: &! LoadMultimoduleIrTrace
+) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
+    trace.loaded_modules = 1
+    trace.resolved_modules = 1
+    trace.last_stage = "load_main"
+    trace.last_module_index = 0
+    let program = load_module_file(source_path)
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        trace.last_stage = "parse_error"
+        return module_frontend_lower_box_error("parse_failed")
+    }
+    trace.last_stage = "typecheck"
+    let verdict = module_frontend_check_items_with_source_context(program.items, source_path)
+    if verdict != 0 {
+        trace.last_stage = "typecheck_error"
+        return module_frontend_lower_box_error("type_check_failed")
+    }
+    trace.typechecked_modules = 1
+    trace.last_stage = "lower_single"
+    let lower_program = load_module_file(source_path)
+    let result = module_frontend_lower_program_box_traced(lower_program, 0, trace)
+    if result.ok {
+        trace.merged_modules = 1
+        trace.last_stage = "done"
+    }
+    result
 }
 
 fn load_multimodule_lower_program_traced(
@@ -3051,30 +3127,31 @@ fn module_frontend_imported_simple_global_push_fn(
     if body >= 0 {
         let expr = module_frontend_source_skip_ws(data, body, size)
         let body_value = module_frontend_try_eval_source_fn_i64(data, size, fn_name)
-        if body_value.0 != 0 {
+        if body_value.0 {
             MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 2
             MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = body_value.1
         } else {
             let literal = module_frontend_source_int_at(data, expr, size)
-            if literal.0 != 0 {
+            if literal.0 {
                 MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 2
                 MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = literal.1
             } else {
                 let summary_value = module_frontend_try_eval_source_summary_i64(path, fn_name)
-                if summary_value.0 != 0 {
+                if summary_value.0 {
                     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 2
                     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = summary_value.1
                 } else {
-                    let callee = module_frontend_source_ident_at(data, expr, size)
+                    let expr2 = module_frontend_source_skip_let_or_var_assign(data, expr, size)
+                    let callee = module_frontend_source_ident_at(data, expr2, size)
                     if module_frontend_name_is_println(callee) {
-                        let printed = module_frontend_source_first_int_after(data, expr + callee.len, size)
+                        let printed = module_frontend_source_first_int_after(data, expr2 + callee.len, size)
                         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 3
-                        if printed.0 != 0 {
+                        if printed.0 {
                             MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = printed.1
                         }
                     } else if callee.len > 0 {
                         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 1
-                        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize] = module_frontend_source_name_hash_at(data, expr, size)
+                        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize] = module_frontend_source_name_hash_at(data, expr2, size)
                     }
                 }
             }

@@ -271,7 +271,7 @@ fn run_probe_char_from_i64(args: ArgList, flag_index: i64) with IO, Mut, Panic, 
         panic("probe_char_from_i64: missing integer argument")
     }
     let parsed = parse_i64_decimal(arg_list_get(args, flag_index + 1))
-    if parsed.0 == 0 {
+    if !parsed.0 {
         panic("probe_char_from_i64: invalid integer '" + arg_list_get(args, flag_index + 1) + "'")
     }
     print(char_from_i64(parsed.1))
@@ -282,7 +282,7 @@ fn run_probe_arg_list_get(args: ArgList, flag_index: i64) with IO, Mut, Panic, D
         panic("probe_arg_list_get: missing index argument")
     }
     let parsed = parse_i64_decimal(arg_list_get(args, flag_index + 1))
-    if parsed.0 == 0 {
+    if !parsed.0 {
         panic("probe_arg_list_get: invalid integer '" + arg_list_get(args, flag_index + 1) + "'")
     }
     let probe = ArgList {
@@ -1912,6 +1912,15 @@ fn run_ir_roundtrip_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Di
 fn run_native_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     let source_path = compiler_mode_source_arg(args, flag_index, "--native-compile")
     let output_path = compiler_mode_output_path(args, "a.out")
+    if !compiler_preflight_source_input(source_path) {
+        exit_process(1)
+    }
+    let frontend_preflight = preflight_multimodule_frontend(source_path)
+    let preflight_parse_errors = parser_last_error_count()
+    if !frontend_preflight.ok || preflight_parse_errors > 0 {
+        compiler_print_ir_preflight_failure(frontend_preflight.error_msg)
+        exit_process(1)
+    }
     let optimize = compiler_mode_has_flag(args, "-O")
     let cache_dir = compiler_mode_option_string(args, "", "--cache-dir", "")
     let cache_mode = compiler_mode_option_string(args, "", "--cache-mode", "off")
@@ -2461,6 +2470,61 @@ fn run_native_v2_emit_exit_code(ret_value: i64, out_path: string) with IO, Mut, 
 
 fn run_native_v2_emit13() with IO, Mut, Panic, Div, Alloc {
     run_native_v2_emit_exit_code(13, "artifacts/omega/emit13.elf")
+}
+
+fn compiler_main_wide_ir_not_wired() -> IrInstr with Panic {
+    panic("native wide IR witness opcode is not wired in the active IrOpcode set")
+    ir_instr_new(IrOpcode::IrNop)
+}
+
+fn ir_wide_add(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
+    compiler_main_wide_ir_not_wired()
+}
+
+fn ir_wide_sub(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
+    compiler_main_wide_ir_not_wired()
+}
+
+fn ir_wide_mul(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
+    compiler_main_wide_ir_not_wired()
+}
+
+fn ir_wide_shr_limb(dst: i64, src: i64, limbs: i64, limb_shift: i64) -> IrInstr with Panic {
+    compiler_main_wide_ir_not_wired()
+}
+
+fn ir_wide_div(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
+    compiler_main_wide_ir_not_wired()
+}
+
+fn ir_wide_mod(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
+    compiler_main_wide_ir_not_wired()
+}
+
+fn ir_wide_div_full(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
+    compiler_main_wide_ir_not_wired()
+}
+
+fn ir_wide_mod_full(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
+    compiler_main_wide_ir_not_wired()
+}
+
+fn ir_wide_cmp(dst: i64, lhs: i64, rhs: i64, limbs: i64, cmp_op: i64) -> IrInstr with Panic {
+    compiler_main_wide_ir_not_wired()
+}
+
+fn ir_wide_shr(dst: i64, src: i64, limbs: i64, shift_bits: i64) -> IrInstr with Panic {
+    compiler_main_wide_ir_not_wired()
+}
+
+fn ir_return_sret(src: i64) -> IrInstr {
+    ir_return(src)
+}
+
+fn ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, arg0: i64, explicit_arg_count: i64) -> IrInstr with Alloc {
+    let explicit_args = Some(Box::new(ir_reg_list_single(arg0)))
+    let args = Some(Box::new(ir_reg_list_cons(dest_reg, explicit_args)))
+    ir_call(dst, fn_id, fn_name, args, explicit_arg_count + 1)
 }
 
 // --- Zig-style wide-int witnesses (hand-built IR -> ELF, exercise nc_wide_*_into).
@@ -4699,6 +4763,19 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         }
     }
 
+    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
+    let early_preflight_parse_errors = parser_last_error_count()
+    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
+        compiler_print_ir_preflight_failure(early_frontend_preflight.error_msg)
+        var early_type_errors = compile_errors_new()
+        early_type_errors = compile_errors_push(early_type_errors, "error: type checking preflight failed")
+        return CompileResult {
+            success: false,
+            errors: early_type_errors,
+            output: "",
+        }
+    }
+
     let main_prog = load_module_file(opts.input_file)
     let main_imports = extract_imports_from_ast(main_prog)
     let requested_target_spec = native_resolve_target(opts.target, "auto", false)
@@ -5953,7 +6030,7 @@ fn compiler_main_test_tco_eligibility_alloc() -> bool with Mut, Div, Panic {
     let info = tco_analyze_function(func, 0)
     let check = tco_check_eligibility(func, info)
     let eligible = check.0
-    eligible == 0
+    !eligible
 }
 
 // T43: tco_analyze_function populates correct func_id
@@ -7008,7 +7085,7 @@ fn compiler_main_make_native_v2_alloc_field_module() -> IrModule with Mut, Panic
 // not be 14. Reading f1 (= v*2 = 14, distinct/non-coincidental) therefore proves BOTH
 // write-through-the-rdi-destination AND the SysV param shift. The struct is genuinely
 // >16B (3 i64 fields), matching the by-value >16B sret framing.
-fn compiler_main_make_native_v2_sret_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_sret_module() -> IrModule with Mut, Panic, Div, Alloc {
     var module = ir_empty_module()
 
     // fn make(v) -> Big  (is_sret: HIDDEN dest in rdi -> vreg0; explicit v shifts to rsi -> vreg1)
@@ -27606,6 +27683,6 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             println("  " + compile_errors_get(result.errors, i))
             i = i + 1
         }
-        exit_process(1)
+        panic("compile failed")
     }
 }

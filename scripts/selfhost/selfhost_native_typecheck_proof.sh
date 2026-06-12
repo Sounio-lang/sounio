@@ -112,13 +112,8 @@ run_case() {
   rm -f "$elf_path" "$compile_stdout" "$compile_stderr" "$combined_log"
 
   set +e
-  if [ -n "$SOUNIO_NATIVE_TARGET" ]; then
-    run_with_timeout "$TIMEOUT_SECS" "$SOUC_NATIVE" "$program_path" "$elf_path" --target "$SOUNIO_NATIVE_TARGET" \
-      >"$compile_stdout" 2>"$compile_stderr"
-  else
-    run_with_timeout "$TIMEOUT_SECS" "$SOUC_NATIVE" "$program_path" "$elf_path" \
-      >"$compile_stdout" 2>"$compile_stderr"
-  fi
+  run_with_timeout "$TIMEOUT_SECS" "$SOUC_NATIVE" --check "$program_path" \
+    >"$compile_stdout" 2>"$compile_stderr"
   compile_exit=$?
   set -e
 
