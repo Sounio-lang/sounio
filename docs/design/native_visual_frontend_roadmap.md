@@ -130,6 +130,12 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_workbench_replay_emit_html_archive` emits a passive `workbench-replay-session` comment for static HTML/SVG exports, including step count, frame count, session signature, final frame hash, final audit hash, and final time.
 - `tests/run-pass/viz_workbench_replay_html_archive.sio` proves record -> verify -> archive comment -> static scene export parity: the archive final time, `viz-audit` scene time, timeline readout, and 3D mesh audit comments all agree on the same Sounio-owned replay state.
 
+## V1.8j: Canonical Headless Visual Gate
+
+- `scripts/ci/native_visual_frontend_gate.sh` is the one-command proof surface for the native visual frontend lane.
+- The gate checks `viz::sci` and Workbench modules, runs Canvas, HTML/SVG, physchem, interaction, replay, Workbench, timeline, mesh, replay-session, and replay-archive proofs, then compile-gates and headless-runs the visual demos that do not require `DISPLAY`.
+- `tests/run-pass/viz_module_surface_gate.sio` is a module import smoke used by the gate so the public `stdlib/viz` surface is checked through a real executable entrypoint rather than relying on module files that intentionally have no `main`.
+
 ## V1.9: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.

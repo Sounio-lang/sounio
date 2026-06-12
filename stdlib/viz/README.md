@@ -20,6 +20,14 @@ The v1 architecture is:
 
 Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattices, fields, simulation clocks, scene nodes, and interaction state are represented as Sounio data. Browser or terminal export surfaces display pixels or markup; they do not own the scientific model.
 
+The canonical headless acceptance gate for this lane is:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/native_visual_frontend_gate.sh
+```
+
+It checks the module surface, Canvas renderer, static HTML/SVG export, physico-chemistry nodes, Workbench interaction, replay sessions, timeline playback, and demo compile/run surfaces without requiring `DISPLAY`.
+
 ## V1 Constraints
 
 - Fixed node/data arrays; no heap-heavy scene graph.
