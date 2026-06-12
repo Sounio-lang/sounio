@@ -6,6 +6,10 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 sounio_require_souc
+if ! "$SOUC_BIN" --help 2>/dev/null | grep -q "run <file.sio>"; then
+  export SOUNIO_SOUC_BIN="$SOUC_BIN"
+  SOUC_BIN="$ROOT_DIR/scripts/ci/souc-native-wrapper.sh"
+fi
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
