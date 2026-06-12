@@ -28,6 +28,8 @@ SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/native_visual_frontend_gate.sh
 
 It checks the module surface, Canvas renderer, static HTML/SVG export, physico-chemistry nodes, Workbench interaction, replay sessions, timeline playback, and demo compile/run surfaces without requiring `DISPLAY`.
 
+The gate reads `scripts/ci/native_visual_frontend_gate.manifest.tsv` and validates it with `scripts/ci/check_native_visual_frontend_gate_manifest.py`, so the accepted proof surface is explicit and reviewable.
+
 ## V1 Constraints
 
 - Fixed node/data arrays; no heap-heavy scene graph.

@@ -14,7 +14,7 @@ Expected output:
 === Native Visual Frontend Gate: PASS ===
 ```
 
-This gate is the one-command proof surface for the native Visual IR lane. It checks the core `viz::sci` and Workbench modules, runs headless Canvas/HTML/physchem/interaction/replay proofs, compile-gates the visual demos, and runs the headless demos that do not require `DISPLAY`.
+This gate is the one-command proof surface for the native Visual IR lane. It validates `scripts/ci/native_visual_frontend_gate.manifest.tsv`, checks the core `viz::sci` and Workbench modules, runs headless Canvas/HTML/physchem/interaction/replay proofs, compile-gates the visual demos, and runs the headless demos that do not require `DISPLAY`.
 
 ## Headless Proof
 
