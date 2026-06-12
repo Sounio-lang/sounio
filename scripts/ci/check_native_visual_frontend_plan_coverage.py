@@ -163,6 +163,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Workbench A/B project workspace controls are native Visual IR nodes handled by the Sounio reducer.",
     ),
     Evidence(
+        "workbench-project-diff-panel",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchProjectDiff",
+            "viz_workbench_project_workspace_compare_detail",
+            "VIZ_WORKBENCH_TAG_WORKSPACE_DT",
+            "VIZ_WORKBENCH_TAG_WORKSPACE_DPROJECT",
+        ),
+        "Workbench A/B compare produces Sounio-owned semantic diff state and native viewport nodes for key deltas.",
+    ),
+    Evidence(
         "physchem-core-structs",
         "contains",
         "stdlib/viz/physchem.sio",

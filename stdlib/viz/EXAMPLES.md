@@ -268,7 +268,7 @@ Expected output:
 VIZ_WORKBENCH_PROJECT_WORKSPACE_CONTROLS_PASS
 ```
 
-The test drives the native Workbench A/B project controls through mouse events. The `saveA`, `saveB`, `diff`, `loadA`, and `loadB` Visual IR buttons route through `viz_workbench_workspace_app_handle_event`, populate both project slots, update the `ab` diff viewport, restore both scientific states, and emit passive `viz-scene-project` plus static HTML/SVG surfaces.
+The test drives the native Workbench A/B project controls through mouse events. The `saveA`, `saveB`, `diff`, `loadA`, and `loadB` Visual IR buttons route through `viz_workbench_workspace_app_handle_event`, populate both project slots, update the `ab` diff viewport plus semantic `dt`, `dh`, `df`, `dp`, and `dn` delta viewports, restore both scientific states, and emit passive `viz-scene-project` plus static HTML/SVG surfaces.
 
 ## Workbench Physchem HTML Export Proof
 
