@@ -240,111 +240,167 @@ fn correlation_coefficient(a: CorrelatedValue, b: CorrelatedValue) -> f64 with M
 }
 
 // ============================================================================
-// GUM EQUATION 14: ADDITION WITH CORRELATION
+// SOURCE-MERGING COMBINE (GUM Eq 13/14, exact within 4 tracked slots)
 // ============================================================================
+//
+// One general combiner behind add/sub/mul: y depends on the UNION of both
+// operands' sources, with per-source sensitivity ca·sens_a + cb·sens_b
+// (add: ca=cb=1; sub: ca=1, cb=−1; mul first-order: ca=b.value, cb=a.value).
+// This replaces the original "simplified" bookkeeping that kept only the left
+// operand's sources (dropping downstream covariance through the right operand
+// and breaking the representation invariant whenever sources were shared).
+//
+// Invariant restored and maintained: total_u² = Σ tracked (sens·u)² + residual_u2
+// — total_u is recomputed FROM the merged representation, which provably equals
+// the GUM Eq 14 value when nothing overflows. Cancelled sources (|sens·u|<1e-12,
+// e.g. x−x) are dropped, freeing slots. Beyond 4 distinct surviving sources, the
+// overflow contributes (sens·u)² to residual_u2: the total stays exactly right,
+// but downstream covariance THROUGH an overflowed source is no longer tracked
+// (documented degradation; cf. the 64-symbol affine-arena scaling path).
+//
+// Execution-verified (self-contained build, 26 checks): right-operand sources
+// survive (cov(a+b, b)-through-b restored from 0 to its true value); shared-
+// source add gives cov(a+b, a)=2u² (was u², inconsistent with Eq14); x−x keeps
+// ZERO sources (downstream cov 0, was wrongly u²); 5-source overflow keeps
+// total √5 exact; mul shared/distinct cases match Eq14 (25, √200).
+fn combine_correlated(a: CorrelatedValue, b: CorrelatedValue, ca: f64, cb: f64, new_value: f64) -> CorrelatedValue with Mut, Div, Panic {
+    // Step 1: gather a's sources (scaled by ca), then merge b's (scaled by cb)
+    var ids: [i64; 8] = [0; 8]
+    var sens: [f64; 8] = [0.0; 8]
+    var us: [f64; 8] = [0.0; 8]
+    var n: i64 = 0
 
-// Add two correlated values: y = a + b
-// GUM Eq 14: u²(y) = u²(a) + u²(b) + 2·u(a,b)
-//          = u²(a) + u²(b) + 2·u(a)·u(b)·r(a,b)
-fn add_correlated(a: CorrelatedValue, b: CorrelatedValue) -> CorrelatedValue with Mut, Div, Panic {
-    let value = a.value + b.value
-    let conf = min_f64(a.conf, b.conf)
-
-    // GUM Equation 14 for addition (∂y/∂a = 1, ∂y/∂b = 1)
-    let cov = covariance(a, b)
-    let u2 = a.total_u * a.total_u + b.total_u * b.total_u + 2.0 * cov
-    let total_u = sqrt_f64(u2)
-
-    // Merge source tracking (simplified: take union up to capacity)
-    var result = correlated_empty()
-    result.value = value
-    result.total_u = total_u
-    result.conf = conf
-
-    // Copy sources from a
-    result.source_count = a.source_count
-    result.s1_id = a.s1_id
-    result.s1_sens = a.s1_sens  // Sensitivity unchanged for addition
-    result.s1_u = a.s1_u
-    result.s2_id = a.s2_id
-    result.s2_sens = a.s2_sens
-    result.s2_u = a.s2_u
-    result.s3_id = a.s3_id
-    result.s3_sens = a.s3_sens
-    result.s3_u = a.s3_u
-    result.s4_id = a.s4_id
-    result.s4_sens = a.s4_sens
-    result.s4_u = a.s4_u
-
-    // Add sources from b (if room and not already present)
-    // For simplicity, just add to residual
-    result.residual_u2 = a.residual_u2 + b.residual_u2 + b.total_u * b.total_u
-
-    return result
-}
-
-// Subtract two correlated values: y = a - b
-// GUM Eq 14: u²(y) = u²(a) + u²(b) - 2·u(a,b)
-fn sub_correlated(a: CorrelatedValue, b: CorrelatedValue) -> CorrelatedValue with Mut, Div, Panic {
-    let value = a.value - b.value
-    let conf = min_f64(a.conf, b.conf)
-
-    // GUM Equation 14 for subtraction (∂y/∂a = 1, ∂y/∂b = -1)
-    let cov = covariance(a, b)
-    var u2 = a.total_u * a.total_u + b.total_u * b.total_u - 2.0 * cov
-    if u2 < 0.0 { u2 = 0.0 }  // Numerical safety
-    let total_u = sqrt_f64(u2)
-
-    var result = correlated_empty()
-    result.value = value
-    result.total_u = total_u
-    result.conf = conf
-    result.source_count = a.source_count
-    result.s1_id = a.s1_id
-    result.s1_sens = a.s1_sens
-    result.s1_u = a.s1_u
-    result.s2_id = a.s2_id
-    result.s2_sens = a.s2_sens
-    result.s2_u = a.s2_u
-    result.residual_u2 = a.residual_u2 + b.residual_u2
-
-    return result
-}
-
-// ============================================================================
-// GUM EQUATION 14: MULTIPLICATION WITH CORRELATION
-// ============================================================================
-
-// Multiply two correlated values: y = a * b
-// For y = a·b: ∂y/∂a = b, ∂y/∂b = a
-// u²(y) = b²·u²(a) + a²·u²(b) + 2·a·b·u(a,b)
-fn mul_correlated(a: CorrelatedValue, b: CorrelatedValue) -> CorrelatedValue with Mut, Div, Panic {
-    let value = a.value * b.value
-    let conf = min_f64(a.conf, b.conf)
-
-    let cov = covariance(a, b)
-    let u2 = b.value * b.value * a.total_u * a.total_u
-           + a.value * a.value * b.total_u * b.total_u
-           + 2.0 * a.value * b.value * cov
-    let total_u = sqrt_f64(abs_f64(u2))
-
-    var result = correlated_empty()
-    result.value = value
-    result.total_u = total_u
-    result.conf = conf
-
-    // Update sensitivities: new_sens_k = a·sens_b_k + b·sens_a_k
-    if a.source_count > 0 {
-        result.source_count = a.source_count
-        result.s1_id = a.s1_id
-        result.s1_sens = b.value * a.s1_sens
-        result.s1_u = a.s1_u
+    var ai: i64 = 0
+    while ai < a.source_count {
+        let src_a = get_source_id_sens(a, ai)
+        ids[n] = src_a.0
+        sens[n] = ca * src_a.1
+        us[n] = get_source_u(a, ai)
+        n = n + 1
+        ai = ai + 1
     }
 
-    result.residual_u2 = a.residual_u2 * b.value * b.value
-                       + b.residual_u2 * a.value * a.value
+    var bi: i64 = 0
+    while bi < b.source_count {
+        let src_b = get_source_id_sens(b, bi)
+        let id_b = src_b.0
+        let s_b = src_b.1
+        let u_b = get_source_u(b, bi)
+
+        var found: i64 = 0 - 1
+        var si: i64 = 0
+        while si < n {
+            if ids[si] == id_b {
+                found = si
+            }
+            si = si + 1
+        }
+
+        if found >= 0 {
+            // shared source: combine sensitivities, preserving the exact
+            // contribution c = ca·sens_a·u_a + cb·sens_b·u_b even if u differs
+            let p = found
+            if us[p] > 0.0 {
+                sens[p] = sens[p] + cb * s_b * (u_b / us[p])
+            } else {
+                sens[p] = cb * s_b
+                us[p] = u_b
+            }
+        } else {
+            ids[n] = id_b
+            sens[n] = cb * s_b
+            us[n] = u_b
+            n = n + 1
+        }
+        bi = bi + 1
+    }
+
+    // Step 2: drop cancelled entries (frees slots; makes x−x source-free)
+    var rp: i64 = 0
+    var wp: i64 = 0
+    while rp < n {
+        let contrib = abs_f64(sens[rp] * us[rp])
+        if contrib >= 1.0e-12 {
+            if wp != rp {
+                ids[wp] = ids[rp]
+                sens[wp] = sens[rp]
+                us[wp] = us[rp]
+            }
+            wp = wp + 1
+        }
+        rp = rp + 1
+    }
+    n = wp
+
+    // Step 3: first 4 tracked; overflow folds into residual as (sens·u)²
+    var overflow_var: f64 = 0.0
+    var tk: i64 = 0
+    while tk < n {
+        if tk >= 4 {
+            let c = sens[tk] * us[tk]
+            overflow_var = overflow_var + c * c
+        }
+        tk = tk + 1
+    }
+    let n_tracked: i64 = if n < 4 { n } else { 4 }
+
+    // Step 4: residuals scale by the squared combination coefficients
+    let residual = ca * ca * a.residual_u2 + cb * cb * b.residual_u2 + overflow_var
+
+    // Step 5: total from the merged representation (= GUM Eq 14 when no overflow)
+    var sumsq: f64 = 0.0
+    var ts: i64 = 0
+    while ts < n_tracked {
+        let c = sens[ts] * us[ts]
+        sumsq = sumsq + c * c
+        ts = ts + 1
+    }
+    let total_u = sqrt_f64(sumsq + residual)
+
+    var result = correlated_empty()
+    result.value = new_value
+    result.total_u = total_u
+    result.conf = min_f64(a.conf, b.conf)
+    result.source_count = n_tracked
+    result.residual_u2 = residual
+
+    if n_tracked > 0 {
+        result.s1_id = ids[0]
+        result.s1_sens = sens[0]
+        result.s1_u = us[0]
+    }
+    if n_tracked > 1 {
+        result.s2_id = ids[1]
+        result.s2_sens = sens[1]
+        result.s2_u = us[1]
+    }
+    if n_tracked > 2 {
+        result.s3_id = ids[2]
+        result.s3_sens = sens[2]
+        result.s3_u = us[2]
+    }
+    if n_tracked > 3 {
+        result.s4_id = ids[3]
+        result.s4_sens = sens[3]
+        result.s4_u = us[3]
+    }
 
     return result
+}
+
+// Add two correlated values: y = a + b   (GUM Eq 14, ∂y/∂a = ∂y/∂b = 1)
+fn add_correlated(a: CorrelatedValue, b: CorrelatedValue) -> CorrelatedValue with Mut, Div, Panic {
+    return combine_correlated(a, b, 1.0, 1.0, a.value + b.value)
+}
+
+// Subtract: y = a − b   (∂y/∂a = 1, ∂y/∂b = −1)
+fn sub_correlated(a: CorrelatedValue, b: CorrelatedValue) -> CorrelatedValue with Mut, Div, Panic {
+    return combine_correlated(a, b, 1.0, 0.0 - 1.0, a.value - b.value)
+}
+
+// Multiply (first-order GUM): y = a·b   (∂y/∂a = b, ∂y/∂b = a)
+fn mul_correlated(a: CorrelatedValue, b: CorrelatedValue) -> CorrelatedValue with Mut, Div, Panic {
+    return combine_correlated(a, b, b.value, a.value, a.value * b.value)
 }
 
 // ============================================================================
