@@ -96,6 +96,12 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_audit_hash` includes lattice/phonon and particle-event renderer data, making physchem dynamics visible to replay traces and export/audit parity.
 - `tests/run-pass/viz_workbench_physchem_dynamics.sio` proves the composed app bridge updates lattice phase/displacement, particle energy/position, audit hash, frame hash, and Canvas pixels.
 
+## V1.8e: Workbench Physchem Export Parity
+
+- `viz_workbench_sync_dynamics` keeps Workbench lattice/phonon and particle-event payloads synchronized with the native time slider as Sounio data.
+- `viz_html_emit_scene` includes quantized physchem samples in passive comments for lattice/phonon and particle-event nodes: scene time, first phase/displacement/variance sample, and first event position/energy/variance sample.
+- `tests/run-pass/viz_workbench_html_physchem.sio` drives the Workbench scrubber, verifies the updated payload values before export, and emits static HTML/SVG whose grepable audit comments prove the same dynamic scene reached the HTML renderer.
+
 ## V1.9: Static HTML/SVG
 
 - `stdlib/viz/viz_html.sio` serializes the same Visual IR as static markup.

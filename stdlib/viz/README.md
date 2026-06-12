@@ -38,7 +38,7 @@ Scientific meaning stays in Sounio. Units, epistemic variance, molecules, lattic
 - Focused node state is Sounio data. `viz_scene_focus_next`, `viz_scene_focus_prev`, and `viz_scene_activate_focused` provide deterministic keyboard-style navigation for controls.
 - `viz_scene_dump` emits deterministic node/data counts plus per-node identity, parent, tag, kind, data slot, and rectangle fields for debugging and CI proof logs.
 - `viz_html_emit_scene` wraps each Visual IR node in a static SVG group with `data-viz-id`, `data-viz-parent-id`, `data-viz-tag`, `data-viz-kind`, and `data-viz-slot` attributes so exports remain auditable without JavaScript semantics.
-- `viz_html_emit_scene` also emits a passive `viz-audit` comment with node count, selected/hovered/focused nodes, selected molecule atom state, active tab, and integer scene time.
+- `viz_html_emit_scene` also emits a passive `viz-audit` comment with node count, selected/hovered/focused nodes, selected molecule atom state, active tab, and integer scene time. Lattice/phonon and particle-event comments include quantized time and payload samples so static exports can be checked against the same Sounio-owned dynamic state without JavaScript semantics.
 - `viz_audit_hash` includes molecule atom/bond payloads plus lattice/phonon and particle-event renderer data, so molecule edits and physchem dynamics are visible to replay, certificate, and export audit surfaces.
 - `viz_app_frame_hash` gives headless tests a compact deterministic probe over app frame state, Visual IR interaction state, and a few Canvas pixels.
 - `viz_replay_events` replays a fixed event array into the Sounio reducer, renders every frame, and returns the final deterministic frame hash.

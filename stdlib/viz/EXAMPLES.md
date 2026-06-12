@@ -126,6 +126,22 @@ VIZ_WORKBENCH_PHYSCHEM_DYNAMICS_PASS
 
 The test drives the Workbench time slider and proves lattice/phonon phase, displacement, particle-event energy/position, audit hash, frame hash, and Canvas pixels all change through the composed Workbench event bridge.
 
+## Workbench Physchem HTML Export Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_html_physchem.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_HTML_PHYSCHEM_PASS
+```
+
+The test drives the same Workbench time slider to `time=5`, verifies lattice/phonon and particle-event payload samples in Sounio data, then exports static HTML/SVG from that scene. The HTML renderer emits passive node identity attributes plus quantized physchem comments such as `time-ms`, `phase0-milli`, and `energy0-milli`, so export parity is grepable without giving JavaScript scientific semantics.
+
 ## Interaction Time Proof
 
 Run:
