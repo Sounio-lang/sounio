@@ -270,6 +270,22 @@ VIZ_WORKBENCH_NOTEBOOK_PASS
 
 The test records two different Workbench experiment runs, captures each as a Visual Project plus selected session archive, indexes both archives in `VizWorkbenchNotebook`, selects a baseline and comparison run, verifies notebook hashes and run-to-run deltas, emits a passive `workbench-notebook` HTML/SVG archive comment, and renders the compared scene without JavaScript or Python owning the scientific state.
 
+## Workbench Notebook Browser Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_notebook_browser.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_NOTEBOOK_BROWSER_PASS
+```
+
+The test records two notebook runs, selects the second archive, replays that archive's selected frame into a fresh Workbench scene, verifies browser hashes against the notebook/session/archive indexes, proves the reconstructed molecule count and timeline control state, and emits passive `workbench-notebook-browser` metadata before static HTML/SVG export.
+
 ## Workbench Project Controls Proof
 
 Run:
