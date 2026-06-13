@@ -460,6 +460,21 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment packet-ledger browser selection is navigable through native key and mouse events, updating Sounio-owned browser state and marking the app dirty for redraw.",
     ),
     Evidence(
+        "workbench-experiment-flight-recorder",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "VizWorkbenchExperimentFlightRecorder",
+            "viz_workbench_experiment_flight_recorder_begin",
+            "viz_workbench_experiment_flight_recorder_append",
+            "viz_workbench_experiment_flight_recorder_verify",
+            "event_kinds",
+            "frame_hashes",
+            "final_audit_delta",
+        ),
+        "Experiment packet-ledger navigation is captured as a fixed-capacity native flight recorder with event kinds, selected packet indices, browser hashes, frame hashes, and final scene-audit binding.",
+    ),
+    Evidence(
         "workbench-experiment-import-replay-zero-drift",
         "contains",
         "tests/run-pass/viz_workbench_experiment_diff_player.sio",
