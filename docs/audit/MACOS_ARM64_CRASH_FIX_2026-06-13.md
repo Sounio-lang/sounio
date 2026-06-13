@@ -33,14 +33,32 @@ x9 = frame_size identical across different inputs.** (`blr` cannot produce LR=PC
 identical `x9=0x20` across two unrelated programs.)
 
 The working baseline `a5ab12395` anchored sp on the frame pointer (`mov sp, x29`,
-`0x910003BF`) and carried a comment documenting exactly this hazard. The
-`9b53bb8d4` merge replaced it with `add sp, sp, x9` (the same merge that dropped
-the fn-ref dispatch later restored by `65dc60cd8`). The crash was masked by Bug 1
-until `c95690b2f` let execution reach Pass 2.
+`0x910003BF`) and carried a comment documenting exactly this hazard — the original
+fix was commit `6d6231c02` ("compiler: restore arm64 epilogues from frame pointer").
+
+Provenance (verified by opcode count + binary-blob OID across commits):
+- The **source** lost `mov sp, x29` at `1b719e5f8` ("Merge origin/main into
+  feat/i128-modular") — a merge-conflict resolution silently swapped both epilogues
+  to `add sp, sp, x9`. (3×`mov sp,x29` → 0; 1×`add sp,sp,x9` → 3.)
+- The committed **arm64 binary** stayed byte-identical (blob `dd655ca0`) from
+  `a5ab12395` through `9b53bb8d4`, so the stale-but-correct binary kept working —
+  the merge did NOT ship a crashing binary.
+- The crash first surfaced when `65dc60cd8` **rebuilt** the binary from the
+  regressed source (blob `988b8473`). Bug 1 then masked Bug 2 until `c95690b2f`
+  let execution reach Pass 2.
 
 Fix: restore `mov sp, x29` in both epilogues. Verified: new arm64 binary has 1698
 epilogues using `mov sp, x29`, **zero** `add sp, sp, x9` (the only remaining
 `add sp,sp,x9` is `emit_drop_call_args_a64`, a post-call arg pop, not an epilogue).
+
+## Latent gap (not this crash, not fixed here)
+
+The x86 backend emits a merge-point `nop` (`em(0x90)`) after an if-without-else
+(`8f0443a13`) and after match arms (`998112bb8`) so the implicit-return guard
+(`last word == ret → skip epilogue`) cannot misfire. The a64 backend has **no**
+`0xD503201F` counterpart at either merge — and never did, including in the working
+baseline. With the frame-pointer restore now in place the guard is no longer the
+fault path, but porting the a64 merge nops remains a latent-correctness follow-up.
 
 ## Rebuild chain (deterministic)
 
