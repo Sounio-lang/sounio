@@ -127,6 +127,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Visual Project Format v0 bundles package state, replay/export hashes, restore, verify, and emit surfaces.",
     ),
     Evidence(
+        "workbench-session-timeline",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchSessionTimeline",
+            "viz_workbench_session_timeline_from_session",
+            "viz_workbench_replay_to_frame",
+            "viz_workbench_session_timeline_mark",
+        ),
+        "Workbench replay sessions can be inspected as Sounio-owned frame timelines and replayed to selected frames.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -400,6 +412,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_replay_html_archive",
         detail="Replay HTML archive proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-session-timeline-run",
+        "label",
+        "viz_workbench_session_timeline",
+        detail="Workbench replay session timeline navigation proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",

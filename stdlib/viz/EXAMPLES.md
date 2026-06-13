@@ -222,6 +222,22 @@ VIZ_WORKBENCH_PROJECT_BUNDLE_PASS
 
 The test captures a Workbench Visual Project Format v0 bundle: `VizSceneProject` contains the scene package, replay-session signature, final frame/audit/time hashes, and Canvas export hash. A rebuilt scene restores from the project, another rebuilt scene verifies the replay session against the project envelope, and the run emits passive `viz-scene-project`, `viz-scene-package`, replay-session, and static HTML/SVG audit surfaces.
 
+## Workbench Session Timeline Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_session_timeline.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_SESSION_TIMELINE_PASS
+```
+
+The test records a Workbench replay session, derives a Sounio-owned `VizWorkbenchSessionTimeline`, reconstructs both an intermediate frame and the clamped final frame in fresh scenes, and proves selected frame/time/hash/delta state through native Visual IR timeline controls.
+
 ## Workbench Project Controls Proof
 
 Run:

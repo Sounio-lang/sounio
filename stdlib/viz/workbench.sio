@@ -127,6 +127,21 @@ pub struct VizWorkbenchReplaySession {
     pub final_audit_hash: i64,
 }
 
+pub struct VizWorkbenchSessionTimeline {
+    pub valid: bool,
+    pub selected_frame: i64,
+    pub frame_count: i64,
+    pub selected_time_ms: i64,
+    pub selected_frame_hash: i64,
+    pub selected_audit_hash: i64,
+    pub previous_frame_hash: i64,
+    pub next_frame_hash: i64,
+    pub selected_delta_ms: i64,
+    pub selected_frame_delta: i64,
+    pub selected_audit_delta: i64,
+    pub timeline_hash: i64,
+}
+
 pub struct VizWorkbenchProjectStore {
     pub project: VizSceneProject,
     pub history: VizSceneHistory,
@@ -204,6 +219,23 @@ pub fn viz_workbench_replay_session_new() -> VizWorkbenchReplaySession {
         frame_count: 0,
         final_frame_hash: 0,
         final_audit_hash: 0,
+    }
+}
+
+pub fn viz_workbench_session_timeline_empty() -> VizWorkbenchSessionTimeline {
+    VizWorkbenchSessionTimeline {
+        valid: false,
+        selected_frame: 0,
+        frame_count: 0,
+        selected_time_ms: 0,
+        selected_frame_hash: 0,
+        selected_audit_hash: 0,
+        previous_frame_hash: 0,
+        next_frame_hash: 0,
+        selected_delta_ms: 0,
+        selected_frame_delta: 0,
+        selected_audit_delta: 0,
+        timeline_hash: 0,
     }
 }
 
@@ -1118,6 +1150,100 @@ pub fn viz_workbench_replay_session_hash(session: &VizWorkbenchReplaySession) ->
         i = i + 1
     }
     h
+}
+
+fn viz_workbench_session_timeline_clamp_frame(session: &VizWorkbenchReplaySession, frame_idx: i64) -> i64 {
+    if session.frame_count <= 0 { return 0 }
+    if frame_idx < 0 { return 0 }
+    if frame_idx >= session.frame_count { return session.frame_count - 1 }
+    frame_idx
+}
+
+pub fn viz_workbench_session_timeline_from_session(session: &VizWorkbenchReplaySession, frame_idx: i64) -> VizWorkbenchSessionTimeline with Mut {
+    if session.frame_count <= 0 || session.frame_count > 33 { return viz_workbench_session_timeline_empty() }
+    let idx = viz_workbench_session_timeline_clamp_frame(session, frame_idx)
+    var prev = idx - 1
+    if prev < 0 { prev = idx }
+    var next = idx + 1
+    if next >= session.frame_count { next = idx }
+    let dt = viz_workbench_abs_delta(session.times_ms[idx as usize], session.times_ms[prev as usize])
+    let df = viz_workbench_abs_delta(session.frame_hashes[idx as usize], session.frame_hashes[prev as usize])
+    let da = viz_workbench_abs_delta(session.audit_hashes[idx as usize], session.audit_hashes[prev as usize])
+    var h: i64 = 211
+    h = h * 131 + viz_workbench_replay_session_hash(session)
+    h = h * 131 + idx
+    h = h * 131 + session.frame_hashes[idx as usize]
+    h = h * 131 + session.audit_hashes[idx as usize]
+    h = h * 131 + session.times_ms[idx as usize]
+    VizWorkbenchSessionTimeline {
+        valid: true,
+        selected_frame: idx,
+        frame_count: session.frame_count,
+        selected_time_ms: session.times_ms[idx as usize],
+        selected_frame_hash: session.frame_hashes[idx as usize],
+        selected_audit_hash: session.audit_hashes[idx as usize],
+        previous_frame_hash: session.frame_hashes[prev as usize],
+        next_frame_hash: session.frame_hashes[next as usize],
+        selected_delta_ms: dt,
+        selected_frame_delta: df,
+        selected_audit_delta: da,
+        timeline_hash: h,
+    }
+}
+
+pub fn viz_workbench_session_timeline_mark(scene: &!VizScene, ids: &VizWorkbenchIds, timeline: &VizWorkbenchSessionTimeline) with Mut, Div {
+    if !timeline.valid { return }
+    viz_workbench_set_time(scene, (timeline.selected_time_ms as f64) / 1000.0)
+    if ids.studio_timeline >= 0 && ids.studio_timeline < scene.node_count {
+        scene.nodes[ids.studio_timeline as usize].value = timeline.selected_frame as f64
+        scene.nodes[ids.studio_timeline as usize].min_value = 0.0
+        var max_frame = timeline.frame_count - 1
+        if max_frame < 0 { max_frame = 0 }
+        scene.nodes[ids.studio_timeline as usize].max_value = max_frame as f64
+    }
+}
+
+pub fn viz_workbench_replay_to_frame(
+    app: &!VizApp,
+    scene: &!VizScene,
+    ids: &VizWorkbenchIds,
+    c: &!Canvas,
+    session: &VizWorkbenchReplaySession,
+    frame_idx: i64,
+) -> VizWorkbenchSessionTimeline with Mut, Div, Alloc {
+    if session.frame_count <= 0 || session.frame_count > 33 { return viz_workbench_session_timeline_empty() }
+    if session.step_count < 0 || session.step_count > 32 { return viz_workbench_session_timeline_empty() }
+    if session.frame_count != session.step_count + 1 { return viz_workbench_session_timeline_empty() }
+    let target = viz_workbench_session_timeline_clamp_frame(session, frame_idx)
+    var constraint = viz_workbench_constraint(ids)
+    var hash = viz_replay_present(app, scene, c)
+    if hash != session.frame_hashes[0] { return viz_workbench_session_timeline_empty() }
+    if viz_audit_hash(scene) != session.audit_hashes[0] { return viz_workbench_session_timeline_empty() }
+    if ((scene.time * 1000.0) as i64) != session.times_ms[0] { return viz_workbench_session_timeline_empty() }
+    if target == 0 {
+        let timeline = viz_workbench_session_timeline_from_session(session, 0)
+        viz_workbench_session_timeline_mark(scene, ids, &timeline)
+        return timeline
+    }
+    var i: i64 = 0
+    while i < target {
+        let step = session.steps[i as usize]
+        if step.kind == VIZ_WORKBENCH_REPLAY_EVENT {
+            viz_workbench_app_handle_event(app, scene, &!constraint, step.event)
+        }
+        if step.kind == VIZ_WORKBENCH_REPLAY_TICK {
+            viz_workbench_tick(app, scene, (step.dt_ms as f64) / 1000.0)
+        }
+        hash = viz_replay_present(app, scene, c)
+        let current_frame = i + 1
+        if hash != session.frame_hashes[current_frame as usize] { return viz_workbench_session_timeline_empty() }
+        if viz_audit_hash(scene) != session.audit_hashes[current_frame as usize] { return viz_workbench_session_timeline_empty() }
+        if ((scene.time * 1000.0) as i64) != session.times_ms[current_frame as usize] { return viz_workbench_session_timeline_empty() }
+        i = i + 1
+    }
+    let timeline = viz_workbench_session_timeline_from_session(session, target)
+    viz_workbench_session_timeline_mark(scene, ids, &timeline)
+    timeline
 }
 
 pub fn viz_workbench_project_capture(

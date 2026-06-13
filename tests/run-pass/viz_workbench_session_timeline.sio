@@ -1,0 +1,128 @@
+// tests/run-pass/viz_workbench_session_timeline.sio - Workbench replay session timeline navigation proof
+//
+// Expected output:
+//   VIZ_WORKBENCH_SESSION_TIMELINE frame=3 frames=6
+//   VIZ_WORKBENCH_SESSION_TIMELINE_PASS
+
+use display::canvas::{Canvas}
+use display::event::{Event, EV_MOUSE_PRESS, MOUSE_LEFT}
+use viz::audit::{viz_audit_hash}
+use viz::ir::{viz_scene_new}
+use viz::molecule_editor::{viz_molecule_atom_count}
+use viz::viz_app::{viz_app_frame_hash, viz_app_new}
+use viz::viz_html::{viz_html_emit_scene}
+use viz::workbench::{
+    VizWorkbenchReplayStep,
+    viz_workbench_build_scene,
+    viz_workbench_replay_emit_html_archive,
+    viz_workbench_replay_event,
+    viz_workbench_replay_record_session,
+    viz_workbench_replay_tick,
+    viz_workbench_replay_to_frame,
+    viz_workbench_session_timeline_from_session,
+}
+
+fn ev(kind: i64, key: i64, x: i64, y: i64) -> Event {
+    Event { kind: kind, key: key, x: x, y: y, mods: 0 }
+}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn center_x(x: i64, w: i64) -> i64 {
+    x + w / 2
+}
+
+fn center_y(y: i64, h: i64) -> i64 {
+    y + h / 2
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene_a = viz_scene_new()
+    let ids_a = viz_workbench_build_scene(&!scene_a)
+    var app_a = viz_app_new(10, 13, 18)
+    var canvas_a = make_canvas(480, 320)
+
+    var steps: [VizWorkbenchReplayStep; 32] = [viz_workbench_replay_tick(0); 32]
+    let play_x = center_x(scene_a.nodes[ids_a.time_play as usize].layout.x, scene_a.nodes[ids_a.time_play as usize].layout.w)
+    let play_y = center_y(scene_a.nodes[ids_a.time_play as usize].layout.y, scene_a.nodes[ids_a.time_play as usize].layout.h)
+    let atom_tool_x = center_x(scene_a.nodes[ids_a.studio_atom as usize].layout.x, scene_a.nodes[ids_a.studio_atom as usize].layout.w)
+    let atom_tool_y = center_y(scene_a.nodes[ids_a.studio_atom as usize].layout.y, scene_a.nodes[ids_a.studio_atom as usize].layout.h)
+    let add_x = center_x(scene_a.nodes[ids_a.molecule as usize].layout.x, scene_a.nodes[ids_a.molecule as usize].layout.w)
+    let add_y = center_y(scene_a.nodes[ids_a.molecule as usize].layout.y, scene_a.nodes[ids_a.molecule as usize].layout.h) + 21
+
+    steps[0] = viz_workbench_replay_event(ev(EV_MOUSE_PRESS, MOUSE_LEFT, play_x, play_y))
+    steps[1] = viz_workbench_replay_tick(1000)
+    steps[2] = viz_workbench_replay_tick(1000)
+    steps[3] = viz_workbench_replay_event(ev(EV_MOUSE_PRESS, MOUSE_LEFT, atom_tool_x, atom_tool_y))
+    steps[4] = viz_workbench_replay_event(ev(EV_MOUSE_PRESS, MOUSE_LEFT, add_x, add_y))
+
+    let session = viz_workbench_replay_record_session(&!app_a, &!scene_a, &ids_a, &!canvas_a, &steps, 5)
+    assert(session.frame_count == 6)
+    assert(session.times_ms[3] == 4000)
+    assert(session.times_ms[5] == 4000)
+    assert(viz_molecule_atom_count(&scene_a, ids_a.molecule) == 4)
+
+    let metadata = viz_workbench_session_timeline_from_session(&session, 3)
+    assert(metadata.valid)
+    assert(metadata.selected_frame == 3)
+    assert(metadata.frame_count == 6)
+    assert(metadata.selected_time_ms == 4000)
+    assert(metadata.selected_frame_hash == session.frame_hashes[3])
+    assert(metadata.selected_audit_hash == session.audit_hashes[3])
+    assert(metadata.previous_frame_hash == session.frame_hashes[2])
+    assert(metadata.next_frame_hash == session.frame_hashes[4])
+    assert(metadata.selected_delta_ms == 1000)
+    assert(metadata.selected_frame_delta != 0)
+    assert(metadata.selected_audit_delta != 0)
+    assert(metadata.timeline_hash != 0)
+
+    var scene_mid = viz_scene_new()
+    let ids_mid = viz_workbench_build_scene(&!scene_mid)
+    var app_mid = viz_app_new(10, 13, 18)
+    var canvas_mid = make_canvas(480, 320)
+    let mid = viz_workbench_replay_to_frame(&!app_mid, &!scene_mid, &ids_mid, &!canvas_mid, &session, 3)
+    assert(mid.valid)
+    assert(mid.timeline_hash == metadata.timeline_hash)
+    assert(mid.selected_frame_hash == session.frame_hashes[3])
+    assert(mid.selected_audit_hash == session.audit_hashes[3])
+    assert(scene_mid.time == 4.0)
+    assert(scene_mid.nodes[ids_mid.time_readout as usize].value == 4.0)
+    assert(scene_mid.nodes[ids_mid.slider as usize].value == 4.0)
+    assert(scene_mid.nodes[ids_mid.studio_timeline as usize].value == 3.0)
+    assert(scene_mid.nodes[ids_mid.studio_timeline as usize].max_value == 5.0)
+    assert(viz_audit_hash(&scene_mid) != session.audit_hashes[3])
+    assert(viz_app_frame_hash(&app_mid, &scene_mid, &canvas_mid) != 0)
+    assert(viz_molecule_atom_count(&scene_mid, ids_mid.molecule) == 3)
+
+    var scene_final = viz_scene_new()
+    let ids_final = viz_workbench_build_scene(&!scene_final)
+    var app_final = viz_app_new(10, 13, 18)
+    var canvas_final = make_canvas(480, 320)
+    let final_timeline = viz_workbench_replay_to_frame(&!app_final, &!scene_final, &ids_final, &!canvas_final, &session, 99)
+    assert(final_timeline.valid)
+    assert(final_timeline.selected_frame == 5)
+    assert(final_timeline.frame_count == 6)
+    assert(final_timeline.selected_frame_hash == session.final_frame_hash)
+    assert(final_timeline.selected_audit_hash == session.final_audit_hash)
+    assert(scene_final.time == 4.0)
+    assert(scene_final.nodes[ids_final.studio_timeline as usize].value == 5.0)
+    assert(viz_molecule_atom_count(&scene_final, ids_final.molecule) == 4)
+    assert(viz_audit_hash(&scene_final) != 0)
+    assert(viz_app_frame_hash(&app_final, &scene_final, &canvas_final) != 0)
+
+    viz_workbench_replay_emit_html_archive(&session)
+    viz_html_emit_scene(&scene_mid, 480, 320)
+
+    print("VIZ_WORKBENCH_SESSION_TIMELINE frame=")
+    print_int(mid.selected_frame)
+    print(" frames=")
+    print_int(mid.frame_count)
+    print("\n")
+    heap_free(canvas_a.pixels as *mut i8)
+    heap_free(canvas_mid.pixels as *mut i8)
+    heap_free(canvas_final.pixels as *mut i8)
+    println("VIZ_WORKBENCH_SESSION_TIMELINE_PASS")
+}
