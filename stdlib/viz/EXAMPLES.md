@@ -286,6 +286,22 @@ VIZ_WORKBENCH_NOTEBOOK_BROWSER_PASS
 
 The test records two notebook runs, selects the second archive, replays that archive's selected frame into a fresh Workbench scene, verifies browser hashes against the notebook/session/archive indexes, proves the reconstructed molecule count and timeline control state, and emits passive `workbench-notebook-browser` metadata before static HTML/SVG export.
 
+## Workbench Notebook Compare Browser Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_notebook_compare_browser.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_NOTEBOOK_COMPARE_BROWSER_PASS
+```
+
+The test records baseline and comparison Workbench runs, builds a notebook, replays both selected archives into fresh scenes, verifies the individual browser hashes, verifies the side-by-side `VizWorkbenchNotebookCompareBrowser`, and emits passive metadata with baseline/comparison browser hashes plus frame and audit deltas.
+
 ## Workbench Project Controls Proof
 
 Run:

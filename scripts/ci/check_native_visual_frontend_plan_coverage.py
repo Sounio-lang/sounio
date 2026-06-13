@@ -177,6 +177,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Notebook archives can be selected and replayed into fresh Workbench scenes with browser hashes and passive export metadata.",
     ),
     Evidence(
+        "workbench-notebook-compare-browser",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchNotebookCompareBrowser",
+            "viz_workbench_notebook_compare_browser_select",
+            "viz_workbench_notebook_compare_browser_verify",
+            "viz_workbench_notebook_compare_browser_emit",
+        ),
+        "Notebook baseline and comparison archives can be replayed side by side with browser hashes and run-to-run frame/audit deltas.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -474,6 +486,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_notebook_browser",
         detail="Workbench visual lab notebook browser proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-notebook-compare-browser-run",
+        "label",
+        "viz_workbench_notebook_compare_browser",
+        detail="Workbench visual lab notebook compare browser proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",
