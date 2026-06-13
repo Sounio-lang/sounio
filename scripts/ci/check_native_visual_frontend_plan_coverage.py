@@ -552,6 +552,23 @@ REQUIRED: tuple[Evidence, ...] = (
         "The sealed evidence observatory is projected into native Visual IR controls with selected/baseline/compare navigation, passive cockpit metadata, and zero aggregate drift checks.",
     ),
     Evidence(
+        "workbench-experiment-evidence-certificate",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "VizWorkbenchExperimentEvidenceCertificate",
+            "viz_workbench_experiment_evidence_certificate_build",
+            "viz_workbench_experiment_evidence_certificate_verify",
+            "viz_workbench_experiment_evidence_certificate_import_verify",
+            "viz_workbench_experiment_evidence_certificate_emit",
+            "certificate_version",
+            "rendered_frame_hash",
+            "scene_audit_hash",
+            "total_browser_drift",
+        ),
+        "Passive certificate binds observatory/cockpit/package selection, rendered frame, scene audit, counters, and zero drift for import-style verification.",
+    ),
+    Evidence(
         "workbench-experiment-import-replay-zero-drift",
         "contains",
         "tests/run-pass/viz_workbench_experiment_diff_player.sio",
