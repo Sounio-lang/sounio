@@ -355,7 +355,19 @@ REQUIRED: tuple[Evidence, ...] = (
             "viz_workbench_experiment_import_replay_report_verify",
             "viz_workbench_experiment_import_replay_report_emit",
         ),
-        "Shareable experiment packets can be imported into a fresh Workbench scene, replayed as Sounio data, and compared against exported frame/audit hashes with explicit drift deltas.",
+        "Shareable experiment packets can be imported into a fresh Workbench scene, replayed as Sounio data, and compared against exported frame/audit hashes.",
+    ),
+    Evidence(
+        "workbench-experiment-import-replay-zero-drift",
+        "contains",
+        "tests/run-pass/viz_workbench_experiment_diff_player.sio",
+        (
+            "assert(import_report.replay_frame_hash == export_packet.export_frame_hash)",
+            "assert(import_report.replay_scene_audit_hash == export_packet.export_scene_audit_hash)",
+            "assert(import_report.frame_hash_delta == 0)",
+            "assert(import_report.scene_audit_hash_delta == 0)",
+        ),
+        "The canonical Workbench experiment import replay proof requires zero Canvas frame drift and zero scene-audit drift.",
     ),
     Evidence(
         "workbench-native-package-controls",
