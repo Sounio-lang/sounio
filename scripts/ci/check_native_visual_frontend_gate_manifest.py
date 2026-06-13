@@ -68,8 +68,14 @@ def main() -> int:
         labels.add(label)
         if rel_path.startswith("/") or ".." in Path(rel_path).parts:
             errors.append(f"{lineno}: path must be repo-relative and not escape root: {rel_path!r}")
-        elif not (root / rel_path).exists():
-            errors.append(f"{lineno}: missing path {rel_path!r}")
+        else:
+            path = root / rel_path
+            if not path.exists():
+                errors.append(f"{lineno}: missing path {rel_path!r}")
+            elif mode == "script" and not path.is_file():
+                errors.append(f"{lineno}: script entry must point to a file: {rel_path!r}")
+            elif mode == "script" and not path.stat().st_mode & 0o111:
+                errors.append(f"{lineno}: script entry must be executable: {rel_path!r}")
         if mode == "run":
             if marker == "-" or not marker:
                 errors.append(f"{lineno}: run entries require an output marker")

@@ -133,9 +133,9 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 ## V1.8j: Canonical Headless Visual Gate
 
 - `scripts/ci/native_visual_frontend_gate.sh` is the one-command proof surface for the native visual frontend lane.
-- `scripts/ci/native_visual_frontend_gate.manifest.tsv` lists the check/run/compile entries and required run markers, while `scripts/ci/check_native_visual_frontend_gate_manifest.py` validates the manifest before execution.
+- `scripts/ci/native_visual_frontend_gate.manifest.tsv` lists the check/run/compile/script entries and required run markers, while `scripts/ci/check_native_visual_frontend_gate_manifest.py` validates the manifest and executable script entries before execution.
 - `scripts/ci/check_native_visual_frontend_plan_coverage.py` binds the original native visual frontend plan to executable evidence: Visual IR node kinds, fixed layouts, renderers, controls, physchem payloads, demos, gate labels, and GPU deferral docs.
-- The gate checks `viz::sci` and Workbench modules, runs Canvas, HTML/SVG, physchem, interaction, replay, Workbench, timeline, mesh, replay-session, and replay-archive proofs, then compile-gates and headless-runs the visual demos that do not require `DISPLAY`.
+- The gate checks `viz::sci` and Workbench modules, runs Canvas, HTML/SVG, passive no-JavaScript export, physchem, interaction, replay, Workbench, timeline, mesh, replay-session, and replay-archive proofs, then compile-gates the native window lab plus other visual demos and headless-runs the demos that do not require `DISPLAY`.
 - `tests/run-pass/viz_module_surface_gate.sio` is a module import smoke used by the gate so the public `stdlib/viz` surface is checked through a real executable entrypoint rather than relying on module files that intentionally have no `main`.
 
 ## V1.8k: Scene Snapshot Authoring State

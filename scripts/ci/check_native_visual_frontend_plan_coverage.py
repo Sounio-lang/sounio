@@ -88,6 +88,13 @@ REQUIRED: tuple[Evidence, ...] = (
         "Static HTML/SVG export is checked as passive markup with no active browser semantics.",
     ),
     Evidence(
+        "gate-manifest-script-mode",
+        "contains",
+        "scripts/ci/check_native_visual_frontend_gate_manifest.py",
+        ("\"script\"", "script entry must be executable", "script={counts['script']}"),
+        "Gate manifest validation includes executable script proofs.",
+    ),
+    Evidence(
         "native-controls",
         "contains",
         "stdlib/viz/ir.sio",
