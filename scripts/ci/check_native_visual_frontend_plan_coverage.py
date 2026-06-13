@@ -759,6 +759,20 @@ REQUIRED: tuple[Evidence, ...] = (
         "GPU renderer stays deferred and documented.",
     ),
     Evidence(
+        "completion-audit-contract",
+        "contains",
+        "scripts/ci/native_visual_frontend_completion_audit.py",
+        (
+            "NATIVE_VISUAL_FRONTEND_COMPLETION_AUDIT_PASS",
+            "visual_ir",
+            "renderers",
+            "physchem",
+            "workbench_replay_export",
+            "evidence_chain",
+        ),
+        "A machine-checkable completion audit binds original plan categories to coverage requirements and gate labels.",
+    ),
+    Evidence(
         "gate-headless-run",
         "label",
         "viz_headless",
