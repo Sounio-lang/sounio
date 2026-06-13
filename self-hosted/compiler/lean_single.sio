@@ -2047,6 +2047,41 @@ fn emit_setup_call_args_a64(n: i64) -> i64 with Mut {
     return stk16 + n * 16
 }
 
+// Closure / fn-ref variant: x0 is reserved for the env/closure value (loaded by
+// the caller after this), so user args go in x1..x7 (7 registers) and args 8..n
+// become 8-byte ABI stack slots — the closure body reads the same shifted ABI
+// (arg_idx 0 = env, arg_idx i = param i). For n<=7 the args are popped into
+// x1..x(n) exactly as before. Returns the post-call drop (0 for n<=7).
+fn emit_setup_closure_call_args_a64(n: i64) -> i64 with Mut {
+    if n <= 7 {
+        if n >= 7 { em32(0xF84107E7) }
+        if n >= 6 { em32(0xF84107E6) }
+        if n >= 5 { em32(0xF84107E5) }
+        if n >= 4 { em32(0xF84107E4) }
+        if n >= 3 { em32(0xF84107E3) }
+        if n >= 2 { em32(0xF84107E2) }
+        if n >= 1 { em32(0xF84107E1) }
+        return 0
+    }
+    let stk = (n - 7) * 8
+    let stk16 = (stk + 15) & (0 - 16)
+    em32(0xD10003FF | ((stk16 & 0xFFF) << 10))               // sub sp, sp, #stk16
+    var r: i64 = 1
+    while r <= 7 {
+        let off = stk16 + (n - r) * 16                       // arg r, from bottom of pushed block
+        em32(0xF9400000 | (((off / 8) & 0xFFF) << 10) | (31 << 5) | r)   // ldr x_r, [sp, #off]
+        r = r + 1
+    }
+    var j: i64 = 0
+    while j < n - 7 {
+        let src = stk16 + (n - 8 - j) * 16                   // arg(8+j), source-order
+        em32(0xF940000A | (((src / 8) & 0xFFF) << 10) | (31 << 5))       // ldr x10, [sp, #src]
+        em32(0xF900000A | ((j & 0xFFF) << 10) | (31 << 5))              // str x10, [sp, #(j*8)]
+        j = j + 1
+    }
+    return stk16 + n * 16
+}
+
 fn emit_direct_fn_call_a64(fi: i64, argc: i64) with Mut {
     if argc >= 8 { em32(0xF84107E7) }
     if argc >= 7 { em32(0xF84107E6) }
@@ -29599,13 +29634,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     }
                     if call_sig > 0 && FNSIG_ARITY[call_sig as usize] != argc { tc_wrong_arity(call_tok, FNSIG_ARITY[call_sig as usize], argc) }
                     if call_is_closure == 1 {
-                        if argc >= 7 { em32(0xF84107E7) }
-                        if argc >= 6 { em32(0xF84107E6) }
-                        if argc >= 5 { em32(0xF84107E5) }
-                        if argc >= 4 { em32(0xF84107E4) }
-                        if argc >= 3 { em32(0xF84107E3) }
-                        if argc >= 2 { em32(0xF84107E2) }
-                        if argc >= 1 { em32(0xF84107E1) }
+                        let a64_cargs_drop = emit_setup_closure_call_args_a64(argc)
                         emit_load_var_a64(call_vslot)
                         em32(0x37000080)  // tbnz w0, #0, tagged fn-ref
                         em32(0xF9400009)  // ldr x9, [x0]
@@ -29613,6 +29642,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         em32(0x14000003)  // b done
                         em32(0xD1000409)  // tagged: sub x9, x0, #1
                         em32(0xD63F0120)  // blr x9
+                        emit_add_sp_bytes_a64(a64_cargs_drop)
                     } else {
                         emit_load_var_a64(call_vslot)
                         em32(0xAA0003E9)
@@ -29974,6 +30004,19 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     if fn_arity >= 5 { em32(0xAA0503E4) }  // mov x4, x5
                     if fn_arity >= 6 { em32(0xAA0603E5) }  // mov x5, x6
                     if fn_arity >= 7 { em32(0xAA0703E6) }  // mov x6, x7
+                    // >7 args: the closure-call ABI put args 1..7 in x1..x7 and
+                    // args 8..n at [sp] (8-byte). After the env-drop shift x7 holds
+                    // arg7; load arg8 into x7 and slide args 9..n down one slot so
+                    // the tail-called real fn sees args 1..8 in x0..x7 and 9.. at [sp].
+                    if fn_arity >= 8 {
+                        em32(0xF94003E7)  // ldr x7, [sp]   (arg8)
+                        var thsh: i64 = 0
+                        while thsh < fn_arity - 8 {
+                            em32(0xF94003E9 | (((thsh + 1) & 0xFFF) << 10))  // ldr x9, [sp, #((thsh+1)*8)]
+                            em32(0xF90003E9 | ((thsh & 0xFFF) << 10))        // str x9, [sp, #(thsh*8)]
+                            thsh = thsh + 1
+                        }
+                    }
                     if FN_OFF[fri as usize] != -1 {
                         let rel = (FN_OFF[fri as usize] - CL) / 4
                         em32(0x14000000 | (rel & 0x3FFFFFF))
