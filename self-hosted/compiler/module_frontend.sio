@@ -31,6 +31,11 @@ struct ModuleFrontendImportedArgExpr {
     value: i64,
 }
 
+struct ModuleFrontendImportedLiteralArgPack {
+    count: i64,
+    pack: i64,
+}
+
 fn module_frontend_imported_arg_expr_invalid() -> ModuleFrontendImportedArgExpr {
     ModuleFrontendImportedArgExpr { kind: 0, value: 0 }
 }
@@ -59,6 +64,34 @@ fn module_frontend_imported_arg_expr_store(fn_idx: i64, count: i64, expr: Module
         return false
     }
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_ARG_VALUES[(fn_idx * 8 + count) as usize] = compact.1
+    true
+}
+
+fn module_frontend_imported_literal_arg_pack_empty() -> ModuleFrontendImportedLiteralArgPack {
+    ModuleFrontendImportedLiteralArgPack { count: 0, pack: 0 }
+}
+
+fn module_frontend_imported_literal_arg_pack_append(pack: ModuleFrontendImportedLiteralArgPack, value: i64) -> (bool, ModuleFrontendImportedLiteralArgPack) {
+    if value < 0 || value > 255 || pack.count >= 8 {
+        return (false, pack)
+    }
+    (true, ModuleFrontendImportedLiteralArgPack { count: pack.count + 1, pack: (pack.pack * 256) + value })
+}
+
+fn module_frontend_imported_literal_arg_pack_store(fn_idx: i64, idx: i64, value: i64) -> bool with Mut, Panic {
+    if value < 0 || value > 255 || idx < 0 || idx >= 8 {
+        return false
+    }
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_ARG_VALUES[(fn_idx * 8 + idx) as usize] = value
+    true
+}
+
+fn module_frontend_imported_literal_arg_pack_commit(fn_idx: i64, pack: ModuleFrontendImportedLiteralArgPack) -> bool with Mut, Panic {
+    if pack.count <= 0 {
+        return false
+    }
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[fn_idx as usize] = pack.pack
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_ARITIES[fn_idx as usize] = pack.count
     true
 }
 
@@ -3314,17 +3347,21 @@ fn module_frontend_source_call_i64_literals_into(data: string, start: i64, end: 
         return false
     }
     i = module_frontend_source_skip_ws(data, i + 1, end)
-    var count: i64 = 0
-    var pack: i64 = 0
+    var literal_pack = module_frontend_imported_literal_arg_pack_empty()
     var done = false
-    while i < end && !done && count < max_count {
+    while i < end && !done && literal_pack.count < max_count {
         let arg = module_frontend_source_int_at(data, i, end)
         if !arg.0 || arg.1 < 0 || arg.1 > 255 {
             return false
         }
-        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_ARG_VALUES[(fn_idx * 8 + count) as usize] = arg.1
-        pack = (pack * 256) + arg.1
-        count = count + 1
+        let next_pack = module_frontend_imported_literal_arg_pack_append(literal_pack, arg.1)
+        if !next_pack.0 {
+            return false
+        }
+        if !module_frontend_imported_literal_arg_pack_store(fn_idx, literal_pack.count, arg.1) {
+            return false
+        }
+        literal_pack = next_pack.1
         i = module_frontend_source_skip_digits(data, i, end)
         i = module_frontend_source_skip_ws(data, i, end)
         if i < end && data[i as usize] == (44 as i8) {
@@ -3335,10 +3372,8 @@ fn module_frontend_source_call_i64_literals_into(data: string, start: i64, end: 
             return false
         }
     }
-    if done && count > 0 {
-        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[fn_idx as usize] = pack
-        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_ARITIES[fn_idx as usize] = count
-        return true
+    if done {
+        return module_frontend_imported_literal_arg_pack_commit(fn_idx, literal_pack)
     }
     false
 }
