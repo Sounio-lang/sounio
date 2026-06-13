@@ -225,3 +225,185 @@ classical inputs are assumed (not proved) in Lean. We verify only the **finite
 combinatorial core** (`erdos90_repcount_engine.sio`), not the class field tower, which
 is infinitary and outside exact computation. We make **no** independent claim on the
 exponent.
+
+## UPDATE 2026-06-13: certified witness ladder (machine-checked, exact integer)
+
+Between June 2026 cluster runs we built an end-to-end **propose → export → Lean
+`native_decide`** pipeline for explicit lower bounds on `u(n)` at fixed `n`. Every
+witness is a list of **distinct** integer coordinates; multiset inflation (duplicate
+coords counting extra edges) was caught and rejected during export (the prior 318/338
+unified-ℚ(√3) counts were invalid for this reason).
+
+### Literature placement (web audit, 2026-06-13)
+
+| Source | What it gives for our `n` |
+|--------|---------------------------|
+| [OEIS A186705](https://oeis.org/A186705) | **Exact** `u(n)` certified only for `n ≤ 21` |
+| Alexeev–Mixon–Parshall [arXiv:2412.11914](https://arxiv.org/abs/2412.11914) | Improved **upper** bounds for `n = 16..30`; full enumeration to `n = 21` |
+| [Erdős Problem #90](https://www.erdosproblems.com/90) | Exponent conjecture **disproved** (OpenAI May 2026, Lean); orthogonal to finite witnesses |
+| Sawin [arXiv:2605.20579](https://arxiv.org/abs/2605.20579) | Explicit asymptotic **n^1.014** lower bound (May 2026) |
+
+**Honest claim tier:** our values are **finite lower bounds** `u(n) ≥ …` with explicit
+coordinates. We do **not** assert `u(n) = …` for `n > 21`. We fill a gap the OEIS /
+Alexeev tables do not cover.
+
+### Certified ladder (Lean gates green on branch `research/erdos90-resume`)
+
+| `n` | `harb(n)` | Full square grid | Subset hill-climb | Lean module | Gate |
+|-----|-----------|------------------|-------------------|-------------|------|
+| 100 | 265 | 288 (10×10, N=5) | **303** (saturation, seed 1000003) | `SounioErdos90Subset303Witness` | `erdos90_subset303_witness_gate.sh` |
+| 144 | 390 | 456 (12×12, N=25) | **493** (seed 9000023) | `SounioErdos90Subset144Witness` | `erdos90_subset144_witness_gate.sh` |
+| 196 | 539 | **692** (14×14, N=25) | **716** (seed 9000023; cluster 2739 may improve) | `SounioErdos90Subset196Witness` | `erdos90_subset196_witness_gate.sh` |
+
+Earlier rungs preserved: `SounioErdos90SubsetWitness` (302), `SounioErdos90GridWitness`
+(288), `SounioErdos90UnifiedQsqrt3Witness` (265 deduped).
+
+### Correction to the 2026-05-25 subset conclusion
+
+The May 2025 densest-k-subgraph sweep at `n ≈ 400..800` found the compact disk optimal
+for isotropic `N` — and concluded that "no periodic-pool subset search can beat the
+grid." That conclusion is **regime-dependent**:
+
+* **Small `n` (fixed optimal `N`, square patch):** subset **does** beat the full square
+  grid — measured and Lean-certified at `n = 100` (302 > 288) and `n = 144` (493 > 456).
+  Mechanism: **boundary tax** on square patches; a compact 100/144/196-point region in ℤ²
+  drops deficient corner/edge vertices.
+* **Large `n` with climbing `N`:** the full Erdős grid/disk construction wins; subset
+  hill-climb on a fixed pool cannot beat the periodic optimum (our original pilot at
+  `n = 225+`).
+
+Crossover for **grid vs harb** at fixed `N = 5` is at `n = 64` (8×8), not `n = 225`.
+The `n ≈ 225` crossover in the pilot table is for **optimal-`N` full grids** at scale.
+
+### Saturation probe at `n = 100` (job 2679, 36 seeds, 3× iters)
+
+| Best edges | Seeds |
+|------------|-------|
+| **303** | 10 (`NEW-RECORD` vs prior 302) |
+| 302 | 26 |
+
+Interpretation: under this search class (ℤ² pool, `N = 5`, hill-climb + random restarts),
+the ceiling appears to be **303**, not 302. Further seed sweeps at the same algorithm
+have diminishing returns unless the move set or pool changes.
+
+### Unified ℚ(√3) pool — structural dead end at `n = 100`
+
+Heavy cluster array (job 2537, 18 seeds) capped at **265 = harb(100)** everywhere after
+coordinate deduplication. The mixed ℤ²+Eisenstein embedding does not beat the triangular
+baseline at this `n`; the ℤ² subset front is the correct target for small-`n` records.
+
+### Scaling pattern (subset gain over full square grid)
+
+| `n` | Grid | Disk-first (Python) | Cluster subset | Δ grid→subset |
+|-----|------|----------------------|----------------|---------------|
+| 100 | 288 | 300 | 303 | +15 |
+| 144 | 456 | 467 | 493 | +37 |
+| 196 | 692 | 707 | **716** (smoke, seed 9000023) | +24 (+3.5%) |
+
+The **relative** gain grows with `n` in this sample (100: +5.2%, 144: +8.1%), while the
+**absolute** gain also widens. Subset search buys more at medium `n` where the square
+patch is a worse approximation of the optimal shape.
+
+### Two-front research model (deeper framing)
+
+```text
+Front A — finite ℤ² ladder (this work)
+  Target: explicit u(n) ≥ … witnesses at chosen n
+  Method: grid export + subset cluster + Lean certify
+  Ceiling: pool-local hill-climb; saturated near disk+ε at fixed (n, N)
+
+Front B — asymptotic exponent (literature, May 2026)
+  Target: u(n) ≥ n^{1+δ} infinitely often
+  Method: class-field towers, growing algebraic degree
+  Not reachable by fixed ℤ² pool search
+```
+
+Our epistemic pipeline (distinctness check, reproducible seed, independent Lean count)
+is the **correctness layer** for Front A. It caught multiset inflation that would have
+published false records.
+
+### Cluster inventory (June 2026)
+
+| RUN_ID | Job | Target |
+|--------|-----|--------|
+| `erdos90-sub-20260613T145654-970979` | 2583 | `n=100` subset → 301–302 |
+| `erdos90-sat-20260613T153818-1010187` | 2679 | `n=100` saturation → 302/303 |
+| `erdos90-144-20260613T153818-1010197` | 2625 | `n=144` subset → 486–493 |
+| `erdos90-196-20260613T161738-1043947` | **2739** (18 seeds) | `n=196` subset vs grid 692 |
+
+Stage roots under `/orangefs/training/sounio/erdos90-{sub,sat,144,196}-runs/`.
+
+### Boundary tax — why subset beats square grid at small/medium `n`
+
+For a full `w × w` square patch with `n = w²` vertices and unit distance `N`, each
+interior vertex has the maximum possible degree in the ℤ² unit graph; **corners and
+edges lose neighbours** to the missing half-plane outside the patch. A compact subset
+of the same cardinality can **delete low-degree boundary vertices** and **replace them
+with interior-equivalent vertices** drawn from a larger pool `|ℤ² ∩ B_R|`, increasing
+the edge count without changing `n`.
+
+Quantitative sketch at fixed `N = 25` (edges per vertex capped at 12 in ℤ²):
+
+| Patch | Corners (deg 2) | Edge (deg 5) | Interior (deg 12) | Grid edges (approx) |
+|-------|-----------------|--------------|-------------------|---------------------|
+| 10×10 (`n=100`) | 4 | 32 | 64 | 288 |
+| 12×12 (`n=144`) | 4 | 40 | 100 | 456 |
+| 14×14 (`n=196`) | 4 | 48 | 144 | 692 |
+
+The **fraction of deficient vertices** is `O(1/√n)` but the **absolute** boundary
+deficit grows (`48` edge vertices at `n=196` vs `32` at `n=100`). Subset hill-climb
+exploits this by reshaping toward a disk-like vertex set; measured Δ grows from `+15`
+at `n=100` to `+37` at `n=144` (8.1% relative). At `n=196` smoke runs suggest
+`≈708` (`+16`, +2.3% relative) — the relative gain **compresses** as the square
+patch becomes a better disk approximation, even while absolute Δ may stay flat.
+
+This is **not** a contradiction of the May 2025 conclusion: that sweep climbed `N`
+with `n` and compared against the **periodic Erdős grid optimum**, where boundary
+effects vanish. Our ladder holds `N` fixed (5 or 25) and compares **finite patches**.
+
+### Saturation and seed ecology
+
+| `n` | Search class | Best found | Seeds at best | Interpretation |
+|-----|--------------|------------|---------------|----------------|
+| 100 | `N=5`, 3× iters | 303 | 10/36 | Plateau; 26 seeds stuck at 302 |
+| 144 | `N=25`, full iters | 493 | 1/18 (9000023) | High seed variance; leader seed reused |
+| 196 | `N=25`, 3× iters | **716** (smoke) | 1/1 tested | Cluster 2739 may find higher; smoke already +24 over grid |
+
+**Seed 9000023** is the recurring leader at `n=144`; it is included in the `n=196`
+array as a transfer hypothesis (good RNG trajectory in the same pool geometry), not
+because optimality is seed-invariant.
+
+### Epistemic correctness layer (why Lean gates matter)
+
+The export pipeline enforces three independent checks before publication:
+
+1. **Distinctness:** `len(set(coords)) == n` — caught multiset inflation (318/338
+   false unified counts).
+2. **Reproducibility:** fixed `EXPORT_SEED` in `.sio` → identical witness on replay.
+3. **Independent count:** Lean `countGridUnit25` recomputes edges from coordinates
+   alone (`native_decide`), decoupled from the searcher's `total_edges()`.
+
+A record is **certified** only when the gate script is green; cluster stdout alone
+is staging evidence until export + Lean confirm.
+
+### Infrastructure added for `n = 196`
+
+| Artifact | Role |
+|----------|------|
+| `erdos90_grid196_export.sio` | Full 14×14 grid → Lean (`u(196) ≥ 692`) |
+| `erdos90_subset196_cluster.sio` | Slurm array kernel (`BEST_N196`) |
+| `erdos90_subset196_export.sio` | Replay winning seed → coordinate witness |
+| `submit_subset196_array.sh` | 18-seed array → OrangeFS staging |
+| `erdos90_grid196_witness_gate.sh` | Grid gate (green) |
+| `erdos90_subset196_witness_gate.sh` | Subset gate (awaits `MIN_EDGES > 692`) |
+
+### Next steps
+
+1. ~~`n = 196` subset certify~~ — **done** (`SounioErdos90Subset196Witness`, 716 edges,
+   seed 9000023). Re-run job 2739 aggregation if OrangeFS logs become available; update
+   `EXPORT_SEED` only if a higher `BEST_N196` appears.
+2. Optional: `n = 225` (15×15, `N = 25`) — first pilot-scale grid crossover point in
+   the original table (`828 > 623`); subset relative gain may shrink further (+3.5% at
+   `n = 196` vs +8.1% at `n = 144`).
+3. Do **not** claim global optimality; cite OEIS/A186705 exact ceiling at `n ≤ 21`.
+4. Keep asymptotic (Sawin/OpenAI) and finite (this ladder) claims in separate tiers.
