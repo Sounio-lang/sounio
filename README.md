@@ -248,8 +248,9 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 $SOUC --version                              # souc 1.0.0-beta.6
 $SOUC info                                   # selected host artifact + wrapper contract
 $SOUC check examples/hello.sio               # type-check via checked self-hosted lane
+$SOUC run examples/native/hello.sio          # compile to a temp ELF and execute it
 $SOUC compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
-$SOUC run self-hosted/compiler/native_print_f64_smoke.sio
+$SOUC repl                                   # interactive compile-and-run REPL
 $SOUC compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
 ```
 
@@ -299,11 +300,13 @@ See [docs/MANIFESTO.md](docs/MANIFESTO.md) for the full philosophy.
 
 **Native startup cost.** Native execution still requires producing a host binary before launch, so there is a small startup cost compared with an in-process executor.
 
-**Launcher contract.** `bin/souc` now provides compatibility commands for `check`, `run`, `compile`, and `build`, but broader omega workflows and JIT-oriented tooling still live outside the checked self-hosted launcher lane.
+**Launcher contract.** `bin/souc` now provides compatibility commands for `check`, `run`, `compile`, `build`, and `repl`. `run` compiles to a temporary host ELF and executes it; `compile`/`build` write an executable ELF at `-o <path>`. Broader omega workflows and JIT-oriented tooling still live outside the checked self-hosted launcher lane.
+
+**Madaros modular compiler.** `bin/madaros` is the Stage1 modular compiler launcher for the compiler built from `self-hosted/compiler/main.sio`. Build the raw modular ELF with `make build-madaros`; the launcher resolves `artifacts/self-hosted/madaros`, `bin/madaros-linux-x86_64`, or `MADAROS_RAW_BIN`.
 
 **Windows cross-compile.** The PE/COFF backend (3,508 lines) is production-grade. Use `--target x86_64-windows` to emit Windows binaries. No pre-built .exe is shipped in this checkout.
 
-**No REPL yet.** The checked self-hosted launcher does not support `repl`.
+**REPL.** `bin/souc repl` launches the real Sounio REPL. It accumulates declarations, wraps expressions in a temporary `main`, compiles with the raw Stage0 compiler, executes the ELF, and prints the result.
 
 **Debug flags.** `--show-ast` and `--show-types` are supported as pass-through flags on the checked self-hosted launcher for `check`, `run`, `compile`, and `build`.
 

@@ -163,7 +163,7 @@ fn filter_compiler_output(output: &str) -> String {
 }
 
 impl Repl {
-    fn new(compiler_path: PathBuf) -> Self {
+    fn new(compiler_path: PathBuf, restore_session: bool) -> Self {
         let data_dir = std::env::var("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/tmp"))
@@ -181,7 +181,7 @@ impl Repl {
             session_file,
         };
 
-        if repl.session_file.exists() {
+        if restore_session && repl.session_file.exists() {
             if let Err(e) = repl.session.load(&repl.session_file) {
                 eprintln!("warn: failed to restore session: {}", e);
             }
@@ -527,11 +527,86 @@ Expressions are automatically wrapped in main() and evaluated.
     }
 }
 
-fn find_compiler() -> PathBuf {
+struct Cli {
+    compiler_path: Option<PathBuf>,
+    restore_session: bool,
+}
+
+fn print_usage() {
+    println!(
+        "Sounio REPL v{}\n\nUsage: sounio-repl [--compiler <path>] [--no-restore]\n\nOptions:\n  --compiler <path>  Use a specific raw Sounio compiler binary\n  --no-restore       Start with an empty session instead of restoring saved declarations\n  -h, --help         Show this help\n  -V, --version      Show version\n\nEnvironment:\n  SOUC_BIN           Preferred compiler override\n  SOUNIO_COMPILER    Fallback compiler override",
+        VERSION
+    );
+}
+
+fn parse_cli() -> Cli {
+    let mut args = std::env::args().skip(1);
+    let mut cli = Cli {
+        compiler_path: None,
+        restore_session: true,
+    };
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--compiler" => {
+                let Some(path) = args.next() else {
+                    eprintln!("error: --compiler requires a path");
+                    std::process::exit(2);
+                };
+                cli.compiler_path = Some(PathBuf::from(path));
+            }
+            "--no-restore" => {
+                cli.restore_session = false;
+            }
+            "-h" | "--help" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("Sounio REPL v{}", VERSION);
+                std::process::exit(0);
+            }
+            other => {
+                eprintln!("error: unknown option: {}", other);
+                print_usage();
+                std::process::exit(2);
+            }
+        }
+    }
+
+    cli
+}
+
+fn raw_compiler_for_candidate(path: PathBuf) -> PathBuf {
+    if let Ok(content) = std::fs::read(&path) {
+        if content.starts_with(b"#!") {
+            if let Some(dir) = path.parent() {
+                let sibling = dir.join("souc-linux-x86_64");
+                if sibling.exists() {
+                    return sibling;
+                }
+            }
+        }
+    }
+    path
+}
+
+fn find_compiler(cli_path: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = cli_path {
+        return raw_compiler_for_candidate(path);
+    }
+
+    if let Ok(path) = std::env::var("SOUC_BIN") {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return raw_compiler_for_candidate(p);
+        }
+    }
+
     if let Ok(path) = std::env::var("SOUNIO_COMPILER") {
         let p = PathBuf::from(path);
         if p.exists() {
-            return p;
+            return raw_compiler_for_candidate(p);
         }
     }
 
@@ -555,7 +630,7 @@ fn find_compiler() -> PathBuf {
                         return native;
                     }
                 }
-                return wrapper;
+                return raw_compiler_for_candidate(wrapper);
             }
         }
     }
@@ -574,14 +649,15 @@ fn find_compiler() -> PathBuf {
 }
 
 fn main() {
-    let compiler_path = find_compiler();
+    let cli = parse_cli();
+    let compiler_path = find_compiler(cli.compiler_path);
     if !compiler_path.exists() {
         eprintln!("Error: Cannot find souc compiler binary.");
         eprintln!("Set SOUNIO_COMPILER or ensure souc is in PATH.");
         std::process::exit(1);
     }
 
-    let mut repl = Repl::new(compiler_path);
+    let mut repl = Repl::new(compiler_path, cli.restore_session);
     if let Err(e) = repl.run_repl() {
         eprintln!("REPL error: {}", e);
         std::process::exit(1);

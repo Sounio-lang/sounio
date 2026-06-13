@@ -57,7 +57,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 #      us, it sets SOUNIO_SOUC_BIN to this wrapper's own path, which we
 #      must skip to avoid infinite recursion.
 #   2. SOUC_NATIVE_BIN — older alias, same shebang-skip rule.
-#   3. ROOT_DIR/bin/souc — the checked-in raw ELF (default).
+#   3. ROOT_DIR/bin/souc-linux-x86_64 — the checked-in raw ELF (default).
+#   4. ROOT_DIR/bin/souc — legacy raw-ELF location, skipped if it is now the
+#      public launcher wrapper.
 #
 # The shebang-skip rule is what makes the wrapper composable: callers
 # can pass us through `SOUNIO_SOUC_BIN` and we'll still find the raw
@@ -71,7 +73,12 @@ _resolve_raw_elf() {
       return 0
     fi
   done
-  if [[ -x "$ROOT_DIR/bin/souc" ]]; then
+  if [[ -x "$ROOT_DIR/bin/souc-linux-x86_64" ]]; then
+    echo "$ROOT_DIR/bin/souc-linux-x86_64"
+    return 0
+  fi
+  if [[ -x "$ROOT_DIR/bin/souc" ]] \
+     && [[ "$(head -c 2 "$ROOT_DIR/bin/souc" 2>/dev/null)" != "#!" ]]; then
     echo "$ROOT_DIR/bin/souc"
     return 0
   fi
@@ -80,7 +87,7 @@ _resolve_raw_elf() {
 
 if ! RAW_SOUC="$(_resolve_raw_elf)"; then
   echo "error: souc-native-wrapper: no raw ELF found" >&2
-  echo "  tried: SOUNIO_SOUC_BIN (skipped if wrapper), SOUC_NATIVE_BIN (skipped if wrapper), $ROOT_DIR/bin/souc" >&2
+  echo "  tried: SOUNIO_SOUC_BIN (skipped if wrapper), SOUC_NATIVE_BIN (skipped if wrapper), $ROOT_DIR/bin/souc-linux-x86_64, $ROOT_DIR/bin/souc (skipped if wrapper)" >&2
   exit 127
 fi
 

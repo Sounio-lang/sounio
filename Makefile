@@ -13,6 +13,7 @@
          test-knowledge-runtime-guard-native-lowering \
          test-knowledge-context-static \
          test-semantic-knowledge-spine \
+         build-madaros test-madaros-identity test-real-language-runner \
          ops-guardrail-local ops-infra-up ops-strict-up ops-status \
          website-verified-snapshot
 
@@ -65,6 +66,16 @@ test-stdlib:         ## Run stdlib integration tests (subset)
 	@echo "→ Running stdlib tests"
 	$(SOUC) run tests/stdlib/bayes/test_prior_e2e.sio
 	$(SOUC) run tests/stdlib/complex/test_complex.sio
+
+build-madaros:       ## Build the Stage1 modular compiler (Madaros)
+	@echo "→ Building Madaros (Stage1 modular compiler)"
+	@bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+
+test-madaros-identity: ## Verify Madaros identifies as the Stage1 modular Sounio compiler
+	@bash scripts/gates/g6_madaros_identity.sh
+
+test-real-language-runner: ## Verify public souc CLI + REPL + optional Madaros path
+	@bash scripts/ci/real_language_runner_gate.sh
 
 clean:               ## Remove generated ELF artifacts (gen1, gen2, gen3)
 	rm -f gen1.elf gen2.elf gen3.elf gen4.elf

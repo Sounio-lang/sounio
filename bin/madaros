@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# bin/madaros - public launcher for the Stage1 modular Sounio compiler.
+#
+# Madaros is built from self-hosted/compiler/main.sio.  It is not the Stage0
+# bootstrap compiler behind bin/souc-linux-x86_64.
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+_is_wrapper() {
+  local path="$1"
+  [[ -f "$path" ]] && [[ "$(head -c 2 "$path" 2>/dev/null || true)" == "#!" ]]
+}
+
+resolve_madaros_raw() {
+  local cand
+  for cand in \
+    "${MADAROS_RAW_BIN:-}" \
+    "${SOUNIO_MADAROS_BIN:-}" \
+    "$ROOT_DIR/artifacts/self-hosted/madaros" \
+    "$ROOT_DIR/bin/madaros-linux-x86_64" \
+    "$ROOT_DIR/bin/souc-modular"; do
+    if [[ -n "$cand" && -x "$cand" ]] && ! _is_wrapper "$cand"; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+
+  echo "error: madaros: no modular compiler raw ELF found" >&2
+  echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, artifacts/self-hosted/madaros, bin/madaros-linux-x86_64, bin/souc-modular" >&2
+  echo "  run: make build-madaros" >&2
+  return 127
+}
+
+RAW_MADAROS="$(resolve_madaros_raw)"
+
+usage() {
+  cat <<USAGE
+madaros - Stage1 modular Sounio compiler launcher
+
+Usage:
+  madaros --version
+  madaros info
+  madaros check <file.sio>
+  madaros run <file.sio> [-- program args...]
+  madaros compile <file.sio> -o <out>
+  madaros build <file.sio> -o <out>
+  madaros <raw compiler args...>
+
+Environment:
+  MADAROS_RAW_BIN=<path>       override raw Madaros ELF
+  SOUNIO_MADAROS_BIN=<path>    override raw Madaros ELF
+USAGE
+}
+
+info() {
+  echo "launcher: $0"
+  echo "madaros:  $RAW_MADAROS"
+  echo "stdlib:   ${SOUNIO_STDLIB_PATH:-<unset>}"
+}
+
+version() {
+  "$RAW_MADAROS" --version 2>&1 | sed -n '1p'
+}
+
+madaros_compile_native_v2() {
+  local src="$1"
+  local out="$2"
+  shift 2
+  rm -f "$out"
+  "$RAW_MADAROS" --native-v2-compile "$src" -o "$out" "$@"
+  [[ -s "$out" ]] || {
+    echo "typecheck: failed" >&2
+    return 1
+  }
+  chmod +x "$out"
+}
+
+madaros_compile_positional() {
+  local src="$1"
+  local out="$2"
+  shift 2
+  rm -f "$out"
+  local log rc
+  set +e
+  log="$("$RAW_MADAROS" "$src" "$out" "$@" 2>&1)"
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 ]] || [[ ! -s "$out" ]] || ! grep -qF "compile: fns=" <<<"$log"; then
+    printf '%s\n' "$log"
+    if ! grep -qF "typecheck: failed" <<<"$log"; then
+      printf 'typecheck: failed\n'
+    fi
+    rm -f "$out"
+    return 1
+  fi
+  chmod +x "$out"
+  if [[ "${SOUNIO_MADAROS_VERBOSE:-0}" == "1" && -n "$log" ]]; then
+    printf '%s\n' "$log" >&2
+  fi
+}
+
+madaros_compile() {
+  local src="$1"
+  local out="$2"
+  shift 2
+  local ident
+  ident="$("$RAW_MADAROS" --version 2>&1 || true)"
+  if [[ "$ident" == *"Madaros"* || "$ident" == *"Madares"* ]]; then
+    madaros_compile_native_v2 "$src" "$out" "$@"
+  else
+    madaros_compile_positional "$src" "$out" "$@"
+  fi
+}
+
+parse_compile_args() {
+  MADAROS_SOURCE=""
+  MADAROS_OUTPUT=""
+  MADAROS_ARGS=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output)
+        shift
+        [[ $# -gt 0 ]] || { echo "error: -o requires an output path" >&2; exit 2; }
+        MADAROS_OUTPUT="$1"
+        shift
+        ;;
+      *)
+        if [[ -z "$MADAROS_SOURCE" && "$1" != -* ]]; then
+          MADAROS_SOURCE="$1"
+        else
+          MADAROS_ARGS+=("$1")
+        fi
+        shift
+        ;;
+    esac
+  done
+  [[ -n "$MADAROS_SOURCE" && -n "$MADAROS_OUTPUT" ]] || {
+    echo "error: compile requires <file.sio> -o <out>" >&2
+    exit 2
+  }
+}
+
+cmd_check() {
+  [[ $# -ge 1 ]] || { echo "error: check requires <file.sio>" >&2; exit 2; }
+  local src="$1"
+  shift
+  local tmp
+  tmp="$(mktemp /tmp/madaros-check-XXXXXX.elf)"
+  local rc
+  set +e
+  madaros_compile "$src" "$tmp" "$@"
+  rc=$?
+  set -e
+  rm -f "$tmp"
+  exit "$rc"
+}
+
+cmd_run() {
+  [[ $# -ge 1 ]] || { echo "error: run requires <file.sio>" >&2; exit 2; }
+  local src="$1"
+  shift
+  local compiler_args=()
+  local program_args=()
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--" ]]; then
+      shift
+      program_args=("$@")
+      break
+    fi
+    compiler_args+=("$1")
+    shift
+  done
+  local tmp rc
+  tmp="$(mktemp /tmp/madaros-run-XXXXXX.elf)"
+  MADAROS_TMP_RUN="$tmp"
+  trap 'rm -f "${MADAROS_TMP_RUN:-}"' EXIT
+  madaros_compile "$src" "$tmp" "${compiler_args[@]}"
+  set +e
+  "$tmp" "${program_args[@]}"
+  rc=$?
+  set -e
+  rm -f "$tmp"
+  trap - EXIT
+  exit "$rc"
+}
+
+case "${1:-}" in
+  --version|-V)
+    version
+    ;;
+  info)
+    info
+    ;;
+  check)
+    shift
+    cmd_check "$@"
+    ;;
+  run)
+    shift
+    cmd_run "$@"
+    ;;
+  compile|build)
+    shift
+    parse_compile_args "$@"
+    madaros_compile "$MADAROS_SOURCE" "$MADAROS_OUTPUT" "${MADAROS_ARGS[@]}"
+    ;;
+  -h|--help|help|"")
+    usage
+    ;;
+  *)
+    exec "$RAW_MADAROS" "$@"
+    ;;
+esac
