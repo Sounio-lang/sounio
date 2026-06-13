@@ -27,6 +27,7 @@ GC_RETRY_SMOKE_BIN="$OUT_DIR/native_backend_v2_gc_retry_smoke.selftest.bin"
 
 "$SOUC_BIN" run "$SHADOW_GATE_SRC" -- "$OUT_DIR" >"$SELFTEST_LOG" 2>&1
 
+grep -q 'native_v2_machine_ir_stack_args: ok' "$SELFTEST_LOG"
 grep -q 'native_v2_shadow_gate_self_test: ok' "$SELFTEST_LOG"
 
 if [[ "${SOUNIO_RUN_NATIVE_V2_PREVIEW_SMOKE:-0}" == "1" ]]; then
