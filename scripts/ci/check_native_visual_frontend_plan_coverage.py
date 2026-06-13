@@ -432,6 +432,20 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment packet ledgers can be bound to first/last packets and the final import replay report, proving the sequence closes with zero frame and audit drift.",
     ),
     Evidence(
+        "workbench-experiment-packet-ledger-browser",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentPacketLedgerBrowser",
+            "viz_workbench_experiment_packet_ledger_browser_apply",
+            "viz_workbench_experiment_packet_ledger_browser_verify",
+            "viz_workbench_experiment_packet_ledger_browser_emit",
+            "selected_packet_hash",
+            "packet_delta_node",
+        ),
+        "Experiment packet ledgers can be projected back into native Visual IR controls, making selected packet hashes and packet/payload/frame/audit deltas visible in Canvas and passive HTML/SVG exports.",
+    ),
+    Evidence(
         "workbench-experiment-import-replay-zero-drift",
         "contains",
         "tests/run-pass/viz_workbench_experiment_diff_player.sio",
