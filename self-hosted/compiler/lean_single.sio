@@ -1996,6 +1996,57 @@ fn emit_drop_call_args_a64(argc: i64) with Mut {
     em32(0x8B2963FF)  // add sp, sp, x9
 }
 
+// add sp, sp, #bytes  (arbitrary positive multiple of 8)
+fn emit_add_sp_bytes_a64(bytes: i64) with Mut {
+    if bytes <= 0 { return }
+    if bytes <= 4095 {
+        em32(0x91000000 | ((bytes & 0xFFF) << 10) | (31 << 5) | 31)
+        return
+    }
+    emit_imm64_reg_a64(9, bytes)
+    em32(0x8B2963FF)  // add sp, sp, x9
+}
+
+// Set up the AArch64 calling convention for a call whose `n` ABI args were each
+// pushed as a 16-byte stack slot in source order (arg1 deepest, argN at [sp]).
+// For n<=8 the args are popped into x0..x(n-1) exactly as before. For n>8 the
+// first 8 args are loaded into x0..x7 (from the bottom of the pushed block) and
+// args 9..n are repacked into 8-byte ABI stack slots at [sp] in order — without
+// this, the old code popped the TOP 8 (args n-7..n) into the registers and left
+// the rest mis-positioned, corrupting every >8-arg call (e.g. local_meta_add).
+// Uses x10 as the repack scratch so an indirect target in x9 survives.
+// Returns the byte count to drop AFTER the bl/blr (0 for n<=8; the pops drop it).
+fn emit_setup_call_args_a64(n: i64) -> i64 with Mut {
+    if n <= 8 {
+        if n >= 8 { em32(0xF84107E7) }
+        if n >= 7 { em32(0xF84107E6) }
+        if n >= 6 { em32(0xF84107E5) }
+        if n >= 5 { em32(0xF84107E4) }
+        if n >= 4 { em32(0xF84107E3) }
+        if n >= 3 { em32(0xF84107E2) }
+        if n >= 2 { em32(0xF84107E1) }
+        if n >= 1 { em32(0xF84107E0) }
+        return 0
+    }
+    let stk = (n - 8) * 8
+    let stk16 = (stk + 15) & (0 - 16)        // round up to 16 (keep sp aligned)
+    em32(0xD10003FF | ((stk16 & 0xFFF) << 10))               // sub sp, sp, #stk16
+    var r: i64 = 0
+    while r < 8 {
+        let off = stk16 + (n - 1 - r) * 16                   // arg(r+1), from bottom of pushed block
+        em32(0xF9400000 | (((off / 8) & 0xFFF) << 10) | (31 << 5) | r)   // ldr x_r, [sp, #off]
+        r = r + 1
+    }
+    var j: i64 = 0
+    while j < n - 8 {
+        let src = stk16 + (n - 9 - j) * 16                   // arg(9+j), source-order
+        em32(0xF940000A | (((src / 8) & 0xFFF) << 10) | (31 << 5))       // ldr x10, [sp, #src]
+        em32(0xF900000A | ((j & 0xFFF) << 10) | (31 << 5))              // str x10, [sp, #(j*8)]
+        j = j + 1
+    }
+    return stk16 + n * 16
+}
+
 fn emit_direct_fn_call_a64(fi: i64, argc: i64) with Mut {
     if argc >= 8 { em32(0xF84107E7) }
     if argc >= 7 { em32(0xF84107E6) }
@@ -29426,19 +29477,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     em32(0xF900016A)  // str x10, [x11]
                     b5a_pvi = b5a_pvi + 1
                 }
-                if abi_argc >= 8 { em32(0xF84107E7) }
-                if abi_argc >= 7 { em32(0xF84107E6) }
-                if abi_argc >= 6 { em32(0xF84107E5) }
-                if abi_argc >= 5 { em32(0xF84107E4) }
-                if abi_argc >= 4 { em32(0xF84107E3) }
-                if abi_argc >= 3 { em32(0xF84107E2) }
-                if abi_argc >= 2 { emit_pop_x1_a64() }
-                if abi_argc >= 1 { em32(0xF84107E0) }
+                let a64_dargs_drop = emit_setup_call_args_a64(abi_argc)
                 PATCH_OFF[PATCH_COUNT as usize] = CL
                 PATCH_FN[PATCH_COUNT as usize] = fi
                 PATCH_KIND[PATCH_COUNT as usize] = 0
                 PATCH_COUNT = PATCH_COUNT + 1
                 em32(0x94000000)
+                emit_add_sp_bytes_a64(a64_dargs_drop)
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -29571,15 +29616,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     } else {
                         emit_load_var_a64(call_vslot)
                         em32(0xAA0003E9)
-                        if abi_argc >= 8 { em32(0xF84107E7) }
-                        if abi_argc >= 7 { em32(0xF84107E6) }
-                        if abi_argc >= 6 { em32(0xF84107E5) }
-                        if abi_argc >= 5 { em32(0xF84107E4) }
-                        if abi_argc >= 4 { em32(0xF84107E3) }
-                        if abi_argc >= 3 { em32(0xF84107E2) }
-                        if abi_argc >= 2 { emit_pop_x1_a64() }
-                        if abi_argc >= 1 { em32(0xF84107E0) }
+                        let a64_iargs_drop = emit_setup_call_args_a64(abi_argc)
                         em32(0xD63F0120)
+                        emit_add_sp_bytes_a64(a64_iargs_drop)
                     }
                     if call_sig > 0 {
                         EXPR_TY = FNSIG_RET_TY[call_sig as usize]
@@ -30218,19 +30257,13 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     }
                     if TK[EP as usize] == 7 { EP = EP + 1 }
                     if FN_ARITY[mfi as usize] != margc { tc_wrong_arity(method_tok, FN_ARITY[mfi as usize], margc) }
-                    if margc >= 8 { em32(0xF84107E7) }
-                    if margc >= 7 { em32(0xF84107E6) }
-                    if margc >= 6 { em32(0xF84107E5) }
-                    if margc >= 5 { em32(0xF84107E4) }
-                    if margc >= 4 { em32(0xF84107E3) }
-                    if margc >= 3 { em32(0xF84107E2) }
-                    if margc >= 2 { emit_pop_x1_a64() }
-                    if margc >= 1 { em32(0xF84107E0) }
+                    let a64_margs_drop = emit_setup_call_args_a64(margc)
                     PATCH_OFF[PATCH_COUNT as usize] = CL
                     PATCH_FN[PATCH_COUNT as usize] = mfi
                     PATCH_KIND[PATCH_COUNT as usize] = 0
                     PATCH_COUNT = PATCH_COUNT + 1
                     em32(0x94000000)
+                    emit_add_sp_bytes_a64(a64_margs_drop)
                     EXPR_TY = FN_RET_TY[mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
