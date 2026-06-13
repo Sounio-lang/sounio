@@ -35,6 +35,22 @@ resolve_madaros_raw() {
 
 RAW_MADAROS="$(resolve_madaros_raw)"
 
+resolve_madaros_imports_raw() {
+  local cand
+  for cand in \
+    "${MADAROS_IMPORTS_RAW_BIN:-}" \
+    "$ROOT_DIR/bin/madaros-imports-linux-x86_64" \
+    "$RAW_MADAROS"; do
+    if [[ -n "$cand" && -x "$cand" ]] && ! _is_wrapper "$cand"; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+RAW_MADAROS_IMPORTS="$(resolve_madaros_imports_raw)"
+
 usage() {
   cat <<USAGE
 madaros - Stage1 modular Sounio compiler launcher
@@ -42,14 +58,15 @@ madaros - Stage1 modular Sounio compiler launcher
 Usage:
   madaros --version
   madaros info
-  madaros check <file.sio>
-  madaros run <file.sio> [-- program args...]
-  madaros compile <file.sio> -o <out>
-  madaros build <file.sio> -o <out>
+  madaros check <file.sio|project-dir>
+  madaros run <file.sio|project-dir> [-- program args...]
+  madaros compile <file.sio|project-dir> -o <out>
+  madaros build <file.sio|project-dir> [-o <out>]
   madaros <raw compiler args...>
 
 Environment:
   MADAROS_RAW_BIN=<path>       override raw Madaros ELF
+  MADAROS_IMPORTS_RAW_BIN=<path> override imported-module native driver ELF
   SOUNIO_MADAROS_BIN=<path>    override raw Madaros ELF
 USAGE
 }
@@ -57,6 +74,7 @@ USAGE
 info() {
   echo "launcher: $0"
   echo "madaros:  $RAW_MADAROS"
+  echo "imports:  $RAW_MADAROS_IMPORTS"
   echo "stdlib:   ${SOUNIO_STDLIB_PATH:-<unset>}"
 }
 
@@ -82,7 +100,7 @@ madaros_compile_native_imported() {
   local out="$2"
   shift 2
   rm -f "$out"
-  "$RAW_MADAROS" --native-compile "$src" -o "$out" "$@"
+  "$RAW_MADAROS_IMPORTS" --native-compile "$src" -o "$out" "$@"
   [[ -s "$out" ]] || {
     echo "typecheck: failed" >&2
     return 1
@@ -136,6 +154,96 @@ madaros_compile() {
   fi
 }
 
+find_project_root() {
+  local start="${1:-$PWD}"
+  if [[ -f "$start" ]]; then
+    start="$(dirname "$start")"
+  fi
+  if [[ -d "$start" ]]; then
+    start="$(cd "$start" && pwd)"
+  else
+    return 1
+  fi
+  while [[ "$start" != "/" ]]; do
+    if [[ -f "$start/sounio.toml" ]]; then
+      printf '%s\n' "$start"
+      return 0
+    fi
+    start="$(dirname "$start")"
+  done
+  return 1
+}
+
+project_manifest_value() {
+  local root="$1"
+  local key="$2"
+  python3 - "$root/sounio.toml" "$key" <<'PY'
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    raise SystemExit(3)
+path, key = sys.argv[1], sys.argv[2]
+text = open(path, "rb").read().decode("utf-8")
+data = tomllib.loads(text)
+if key == "package.name":
+    print(data.get("package", {}).get("name", "sounio-project"))
+elif key == "entry":
+    bins = data.get("bin", [])
+    if isinstance(bins, list) and bins:
+        value = bins[0].get("path", "")
+        if value:
+            print(value)
+            raise SystemExit(0)
+    value = data.get("project", {}).get("entry", "")
+    if value:
+        print(value)
+        raise SystemExit(0)
+    value = data.get("lib", {}).get("path", "")
+    if value and "[[bin]]" not in text:
+        print(value)
+        raise SystemExit(0)
+    print("src/main.sio")
+else:
+    raise SystemExit(2)
+PY
+}
+
+resolve_source_or_project() {
+  local candidate="${1:-}"
+  if [[ -n "$candidate" && -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  local root=""
+  if [[ -n "$candidate" && -d "$candidate" ]]; then
+    root="$(find_project_root "$candidate" || true)"
+  else
+    root="$(find_project_root "$PWD" || true)"
+  fi
+
+  if [[ -z "$root" ]]; then
+    return 1
+  fi
+
+  local entry
+  entry="$(project_manifest_value "$root" entry)"
+  if [[ ! -f "$root/$entry" ]]; then
+    echo "error: project entry not found: $root/$entry" >&2
+    return 1
+  fi
+  printf '%s\n' "$root/$entry"
+}
+
+project_default_output() {
+  local root="$1"
+  local name
+  name="$(project_manifest_value "$root" package.name)"
+  mkdir -p "$root/target"
+  printf '%s\n' "$root/target/$name"
+}
+
 parse_compile_args() {
   MADAROS_SOURCE=""
   MADAROS_OUTPUT=""
@@ -158,16 +266,26 @@ parse_compile_args() {
         ;;
     esac
   done
-  [[ -n "$MADAROS_SOURCE" && -n "$MADAROS_OUTPUT" ]] || {
-    echo "error: compile requires <file.sio> -o <out>" >&2
-    exit 2
-  }
+  if [[ -z "$MADAROS_SOURCE" ]]; then
+    MADAROS_SOURCE=""
+  fi
 }
 
 cmd_check() {
-  [[ $# -ge 1 ]] || { echo "error: check requires <file.sio>" >&2; exit 2; }
-  local src="$1"
-  shift
+  [[ $# -ge 1 ]] || set -- ""
+  local candidate="$1"
+  local src
+  if ! src="$(resolve_source_or_project "$candidate")"; then
+    echo "error: check requires <file.sio> or a project with sounio.toml" >&2
+    exit 2
+  fi
+  if [[ -n "$candidate" ]]; then
+    shift
+  fi
+  if source_uses_imports "$src"; then
+    "$RAW_MADAROS_IMPORTS" --check "$src" "$@"
+    exit "$?"
+  fi
   local tmp
   tmp="$(mktemp /tmp/madaros-check-XXXXXX.elf)"
   local rc
@@ -180,9 +298,16 @@ cmd_check() {
 }
 
 cmd_run() {
-  [[ $# -ge 1 ]] || { echo "error: run requires <file.sio>" >&2; exit 2; }
-  local src="$1"
-  shift
+  [[ $# -ge 1 ]] || set -- ""
+  local candidate="$1"
+  local src
+  if ! src="$(resolve_source_or_project "$candidate")"; then
+    echo "error: run requires <file.sio> or a project with sounio.toml" >&2
+    exit 2
+  fi
+  if [[ -n "$candidate" ]]; then
+    shift
+  fi
   local compiler_args=()
   local program_args=()
   while [[ $# -gt 0 ]]; do
@@ -226,6 +351,23 @@ case "${1:-}" in
   compile|build)
     shift
     parse_compile_args "$@"
+    if [[ -d "$MADAROS_SOURCE" || -z "$MADAROS_SOURCE" ]]; then
+      project_root="$(find_project_root "$MADAROS_SOURCE")"
+      MADAROS_SOURCE="$(resolve_source_or_project "$project_root")"
+      if [[ -z "$MADAROS_OUTPUT" ]]; then
+        MADAROS_OUTPUT="$(project_default_output "$project_root")"
+      fi
+    fi
+    if [[ -z "$MADAROS_OUTPUT" ]]; then
+      project_root="$(find_project_root "$MADAROS_SOURCE" || true)"
+      if [[ -n "$project_root" ]]; then
+        MADAROS_OUTPUT="$(project_default_output "$project_root")"
+      fi
+    fi
+    [[ -n "$MADAROS_OUTPUT" ]] || {
+      echo "error: compile requires -o <out> when no project default is available" >&2
+      exit 2
+    }
     madaros_compile "$MADAROS_SOURCE" "$MADAROS_OUTPUT" "${MADAROS_ARGS[@]}"
     ;;
   -h|--help|help|"")

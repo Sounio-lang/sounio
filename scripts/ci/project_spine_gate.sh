@@ -24,10 +24,10 @@ assert_contains() {
   fi
 }
 
-echo "[project-spine] 1/8 public runner baseline"
+echo "[project-spine] 1/9 public runner baseline"
 bash scripts/ci/real_language_runner_gate.sh
 
-echo "[project-spine] 2/8 checked example project"
+echo "[project-spine] 2/9 checked example project"
 ./bin/souc check examples/projects/hello_pkg
 HELLO_OUT="$(./bin/souc run examples/projects/hello_pkg 2>&1)"
 assert_contains "$HELLO_OUT" "42" "souc run examples/projects/hello_pkg"
@@ -38,7 +38,7 @@ BUILT_OUT="$(examples/projects/hello_pkg/target/hello_pkg 2>&1)"
 assert_contains "$BUILT_OUT" "42" "built hello_pkg ELF"
 rm -f examples/projects/hello_pkg/target/hello_pkg
 
-echo "[project-spine] 3/8 souc init project loop"
+echo "[project-spine] 3/9 souc init project loop"
 TMP_DIR="$(mktemp -d /tmp/sounio-project-spine.XXXXXX)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 (
@@ -54,7 +54,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
   assert_contains "$GEN_ELF_OUT" "42" "generated project built ELF"
 )
 
-echo "[project-spine] 4/8 missing import negative"
+echo "[project-spine] 4/9 missing import negative"
 NEG_LOG="$TMP_DIR/missing_import.log"
 set +e
 ./bin/souc check examples/projects/bad_missing_import >"$NEG_LOG" 2>&1
@@ -69,10 +69,10 @@ if ! grep -qE 'unreadable import|typecheck: failed|unknown identifier' "$NEG_LOG
   fail "missing import project did not emit an import/typecheck diagnostic"
 fi
 
-echo "[project-spine] 5/8 package import manifest gate"
+echo "[project-spine] 5/9 package import manifest gate"
 bash scripts/ci/package_import_science_gate.sh
 
-echo "[project-spine] 6/8 thin multimodule runtime"
+echo "[project-spine] 6/9 thin multimodule runtime"
 THIN_ELF="$TMP_DIR/thin_single.elf"
 ./bin/souc compile tests/multimodule/thin_single_main.sio -o "$THIN_ELF"
 set +e
@@ -81,7 +81,7 @@ THIN_RC=$?
 set -e
 [[ "$THIN_RC" -eq 7 ]] || fail "thin multimodule ELF expected exit 7, got $THIN_RC"
 
-echo "[project-spine] 7/8 Madaros identity and single-file native-v2"
+echo "[project-spine] 7/9 Madaros identity and single-file native-v2"
 bash scripts/gates/g6_madaros_identity.sh
 MADAROS_SRC="$TMP_DIR/madaros_single.sio"
 MADAROS_ELF="$TMP_DIR/madaros_single.elf"
@@ -93,7 +93,17 @@ MADAROS_RC=$?
 set -e
 [[ "$MADAROS_RC" -eq 42 ]] || fail "Madaros single-file ELF expected exit 42, got $MADAROS_RC"
 
-echo "[project-spine] 8/8 imported modular IR lowering gate"
+echo "[project-spine] 8/9 Madaros project import runtime"
+MADAROS_PROJECT_OUT="$(./bin/madaros run examples/projects/hello_pkg 2>&1)"
+assert_contains "$MADAROS_PROJECT_OUT" "42" "madaros run examples/projects/hello_pkg"
+rm -f examples/projects/hello_pkg/target/hello_pkg
+./bin/madaros build examples/projects/hello_pkg
+[[ -x examples/projects/hello_pkg/target/hello_pkg ]] || fail "Madaros project build did not create executable target"
+MADAROS_PROJECT_BUILT_OUT="$(examples/projects/hello_pkg/target/hello_pkg 2>&1)"
+assert_contains "$MADAROS_PROJECT_BUILT_OUT" "42" "Madaros built hello_pkg ELF"
+rm -f examples/projects/hello_pkg/target/hello_pkg
+
+echo "[project-spine] 9/9 imported modular IR lowering gate"
 bash scripts/ci/native_v2_imported_body_lowering_gate.sh
 
 echo "PROJECT_SPINE_PASS"
