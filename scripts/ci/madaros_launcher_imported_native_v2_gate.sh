@@ -154,6 +154,15 @@ run_exit_case thin_parenthesized_local_args tests/multimodule/thin_parenthesized
 run_exit_case thin_typed_var_args tests/multimodule/thin_typed_var_args_main.sio 7 6
 run_exit_case thin_return_call tests/multimodule/thin_return_call_main.sio 7 6
 run_exit_case thin_four_locals tests/multimodule/thin_four_locals_main.sio 7 6
+run_exit_case thin_runtime_param tests/multimodule/thin_runtime_param_main.sio 7 11
+run_exit_case thin_runtime_param_offsets tests/multimodule/thin_runtime_param_offsets_main.sio 7 11
+run_exit_case thin_runtime_param_subtarget tests/multimodule/thin_runtime_param_subtarget_main.sio 7 11
+run_exit_case thin_runtime_param_local tests/multimodule/thin_runtime_param_local_main.sio 7 11
+run_exit_case thin_runtime_param_chain tests/multimodule/thin_runtime_param_chain_main.sio 7 11
+run_exit_case thin_runtime_sum7 tests/multimodule/thin_runtime_param_seven_main.sio 28 7
+run_exit_case thin_runtime_mixed_sum7 tests/multimodule/thin_runtime_mixed_seven_main.sio 31 7
+run_exit_case thin_runtime_local_mixed_sum7 tests/multimodule/thin_runtime_local_mixed_seven_main.sio 50 7
+run_exit_case thin_runtime_two_local_sum7 tests/multimodule/thin_runtime_two_local_seven_main.sio 69 7
 run_exit_case thin_sum5 tests/multimodule/thin_five_literal_args_main.sio 31 6
 run_exit_case thin_sum6 tests/multimodule/thin_six_literal_args_main.sio 63 6
 run_exit_case thin_sum7 tests/multimodule/thin_seven_literal_args_main.sio 127 6
