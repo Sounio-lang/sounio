@@ -35,6 +35,73 @@ use parser::ast::*
 use ir::ir::*
 
 // ============================================================
+// Visibility / module-path helpers
+// ============================================================
+
+fn string_list_eq_sl(a: StringList, b: StringList) -> bool with Mut, Panic, Div {
+    if a.head_len != b.head_len { return false }
+    var i: i64 = 0
+    while i < a.head_len {
+        if a.head_buf[i as usize] != b.head_buf[i as usize] { return false }
+        i = i + 1
+    }
+    // Avoid any Option<Box<T>> matching inside *mut callers: bin/souc miscompiles it.
+    if a.tail == None && b.tail == None { return true }
+    if a.tail == None || b.tail == None { return false }
+    string_list_eq_sl(*a.tail, *b.tail)
+}
+
+fn ast_path_eq(a: AstPath, b: AstPath) -> bool with Mut, Panic, Div {
+    if a.seg_count != b.seg_count { return false }
+    if a.seg_count == 0 { return true }
+    string_list_eq_sl(a.segments, b.segments)
+}
+
+fn ast_path_is_prefix(ancestor: AstPath, descendant: AstPath) -> bool with Mut, Panic, Div {
+    if ancestor.seg_count == 0 { return true }
+    if descendant.seg_count < ancestor.seg_count { return false }
+    var a_segs = ancestor.segments
+    var d_segs = descendant.segments
+    var i: i64 = 0
+    while i < ancestor.seg_count {
+        if a_segs.head_len != d_segs.head_len { return false }
+        var j: i64 = 0
+        while j < a_segs.head_len {
+            if a_segs.head_buf[j as usize] != d_segs.head_buf[j as usize] { return false }
+            j = j + 1
+        }
+        i = i + 1
+        if i < ancestor.seg_count {
+            if a_segs.tail == None || d_segs.tail == None { return false }
+            a_segs = *a_segs.tail
+            d_segs = *d_segs.tail
+        }
+    }
+    true
+}
+
+fn visibility_allows_access(vis: Visibility, defining_module: AstPath, current_module: AstPath, crate_root: AstPath) -> bool with Mut, Panic, Div {
+    if vis.kind == VISIBILITY_PUB {
+        return true
+    }
+    if vis.kind == VISIBILITY_PRIVATE {
+        return ast_path_eq(defining_module, current_module)
+    }
+    if vis.kind == VISIBILITY_PUB_CRATE {
+        // All loaded modules are considered part of the current crate for now.
+        return true
+    }
+    if vis.kind == VISIBILITY_PUB_SUPER {
+        // Without a true parent module hierarchy, treat pub(super) as pub(crate).
+        return true
+    }
+    if vis.kind == VISIBILITY_PUB_IN {
+        return ast_path_is_prefix(vis.path, current_module)
+    }
+    true
+}
+
+// ============================================================
 // Security limits
 // ============================================================
 
@@ -158,6 +225,11 @@ pub struct Checker {
     warning_count: i64,
     had_error: bool,
     diag_emitted: bool,
+    // Module/crate context for visibility checking.
+    current_module: AstPath,
+    current_module_id: i64,
+    crate_root: AstPath,
+    enforce_visibility: bool,
     current_return_type: TypeEntry,
     current_impl_type: TypeEntry,
     current_effects: [i64; 8],
@@ -650,6 +722,10 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         warning_count: 0,
         had_error: false,
         diag_emitted: false,
+        current_module: empty_path(),
+        current_module_id: 0,
+        crate_root: empty_path(),
+        enforce_visibility: true,
         current_return_type: ty_unit(),
         current_impl_type: ty_error(),
         current_effects: [0; 8],
@@ -741,6 +817,10 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).warning_count = 0
     (*raw).had_error = false
     (*raw).diag_emitted = false
+    (*raw).current_module = empty_path()
+    (*raw).current_module_id = 0
+    (*raw).crate_root = empty_path()
+    (*raw).enforce_visibility = true
     (*raw).current_return_type = ty_unit()
     (*raw).current_impl_type = ty_error()
     (*raw).current_effects = [0; 8]
@@ -1242,8 +1322,7 @@ fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) wit
 }
 
 fn checker_check_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
-    let next = (*c).check_items(items)
-    checker_store_from_value(c, next)
+    checker_check_items_inplace(c, items)
 }
 
 fn checker_check_expr_mut(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -2259,7 +2338,7 @@ fn checker_collect_fn_params_mut(c: *mut Checker, opt: Option<Box<ParamList> >) 
     }
 }
 
-fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with Mut, Panic, Div, Alloc, IO {
+fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, visibility: Visibility, defining_module: AstPath) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(fd) => {
             let name = (*fd).name
@@ -2343,6 +2422,11 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) wit
                 is_linear_closure: false,
                 linear_capture_count: 0,
                 epistemic_epsilon: 0.0 - 1.0,
+                visibility_kind: visibility.kind,
+                defining_module_seg_count: defining_module.seg_count,
+                defining_module_id: (*c).current_module_id,
+                visibility: visibility,
+                defining_module: defining_module,
             }
             // In-place insert mirrors FnSigTable::add — avoids copying the 45KB
             // FnSigTable by value (one of the large-aggregate copies the *mut
@@ -2396,7 +2480,7 @@ fn checker_collect_field_defs_mut(c: *mut Checker, opt: Option<Box<FieldDefList>
     }
 }
 
-fn checker_collect_struct_def_inplace(c: *mut Checker, name: Name, opt: Option<Box<StructDef> >) with Mut, Panic, Div, Alloc, IO {
+fn checker_collect_struct_def_inplace(c: *mut Checker, name: Name, opt: Option<Box<StructDef> >, visibility: Visibility, defining_module: AstPath) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(sd) => {
             let tp_result = collect_type_params((*sd).type_params)
@@ -2409,6 +2493,10 @@ fn checker_collect_struct_def_inplace(c: *mut Checker, name: Name, opt: Option<B
                 type_param_count: tp_result.count,
                 type_param_names: tp_result.names,
                 is_generic_template: tp_result.count > 0,
+                visibility_kind: visibility.kind,
+                defining_module_id: (*c).current_module_id,
+                visibility: visibility,
+                defining_module: defining_module,
             }
             (*c).structs = (*c).structs.add(info)
         }
@@ -2445,7 +2533,7 @@ fn checker_collect_variants_mut(c: *mut Checker, opt: Option<Box<VariantDefList>
     }
 }
 
-fn checker_collect_enum_def_inplace(c: *mut Checker, name: Name, opt: Option<Box<EnumDef> >) with Mut, Panic, Div, Alloc, IO {
+fn checker_collect_enum_def_inplace(c: *mut Checker, name: Name, opt: Option<Box<EnumDef> >, visibility: Visibility, defining_module: AstPath) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(ed) => {
             let vr = checker_collect_variants_mut(c, (*ed).variants)
@@ -2453,6 +2541,10 @@ fn checker_collect_enum_def_inplace(c: *mut Checker, name: Name, opt: Option<Box
                 name: name,
                 variants: vr.variants,
                 variant_count: vr.count,
+                visibility_kind: visibility.kind,
+                defining_module_id: (*c).current_module_id,
+                visibility: visibility,
+                defining_module: defining_module,
             }
             (*c).enums = (*c).enums.add(info)
         }
@@ -2469,11 +2561,11 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
     // checker_check_if_expr_inplace — no 8MB self SRET), and i64==enum compares are accepted
     // (C-style, matching canonical). See docs/audit/g1_wip/ENUM_PATH_TYPING_DESIGN_2026-06-01.md.
     if item.kind == ItemKind::ItemFn {
-        checker_collect_fn_def_inplace(c, item.fn_def)
+        checker_collect_fn_def_inplace(c, item.fn_def, item.visibility, (*c).current_module)
     } else if item.kind == ItemKind::ItemStruct {
-        checker_collect_struct_def_inplace(c, item.name, item.struct_def)
+        checker_collect_struct_def_inplace(c, item.name, item.struct_def, item.visibility, (*c).current_module)
     } else if item.kind == ItemKind::ItemEnum {
-        checker_collect_enum_def_inplace(c, item.name, item.enum_def)
+        checker_collect_enum_def_inplace(c, item.name, item.enum_def, item.visibility, (*c).current_module)
     } else {
         // ItemUse / ItemSession / impl / typealias / policy / … — not yet collected by the
         // *mut spine (no-op, same as before). *mut collectors pending.
@@ -2534,10 +2626,10 @@ fn checker_check_impl_item_bridge(c: *mut Checker, opt: Option<Box<ImplDef> >) w
 }
 
 fn checker_check_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
-    match item.kind {
-        ItemKind::ItemFn => checker_check_fn_item_inplace(c, item.fn_def)
-        ItemKind::ItemImpl => checker_check_impl_item_bridge(c, item.impl_def)
-        _ => {}
+    if item.kind == ItemKind::ItemFn {
+        checker_check_fn_item_inplace(c, item.fn_def)
+    } else if item.kind == ItemKind::ItemImpl {
+        checker_check_impl_item_bridge(c, item.impl_def)
     }
 }
 
@@ -2684,11 +2776,17 @@ fn checker_check_expr_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with M
     checker_check_opt_expr_inplace(c, s.expr)
 }
 
-fn checker_check_opt_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn expr_opt_get(opt: Option<Box<Expr> >) -> *mut Expr with Mut, Panic, Div, Alloc {
     match opt {
-        Some(e) => checker_check_expr_inplace(c, *e)
-        None => ty_unit()
+        Some(e) => e as *mut Expr
+        None => 0 as *mut Expr
     }
+}
+
+fn checker_check_opt_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let ptr = expr_opt_get(opt)
+    if ptr == 0 as *mut Expr { return ty_unit() }
+    checker_check_expr_inplace(c, *ptr)
 }
 
 fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -2871,20 +2969,23 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     let first_name = checker_copy_string_list_to_name(e.path.segments)
     let enum_idx = (*c).enums.find(first_name)
     if enum_idx >= 0 {
+        let ei = (*c).enums.get(enum_idx)
+        if (*c).enforce_visibility && !checker_enum_visible_inplace(c, enum_idx) {
+            checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
+        }
         ty_named(first_name)
     } else {
         // Could be a variant name directly (e.g. None, Some)
         let variant_enum_idx = (*c).enums.find_variant_enum(first_name)
         if variant_enum_idx >= 0 {
             let ei = (*c).enums.get(variant_enum_idx)
+            if (*c).enforce_visibility && !checker_enum_visible_inplace(c, variant_enum_idx) {
+                checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
+            }
             ty_named(ei.name)
         } else {
             // Look up in env as a regular binding
-            let bound_ty = (*c).env.lookup(first_name)
-            if bound_ty.kind == TypeKind::TyError && !(*c).env.has_binding(first_name) {
-                checker_report_error_at_inplace(c, e.span, 137, 0, 0, 0)
-            }
-            bound_ty
+            (*c).env.lookup(first_name)
         }
     }
 }
@@ -2997,35 +3098,6 @@ fn checker_finish_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp
 }
 
 fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    if !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
-        let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
-            || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
-            || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
-        let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
-            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv
-            || e.bin_op == BinaryOp::OpRem
-        if is_cmp && left_ty.kind != right_ty.kind {
-            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
-            return ty_error()
-        }
-        if is_arith && left_ty.kind != right_ty.kind {
-            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
-            return ty_error()
-        }
-        if is_arith && left_ty.kind == TypeKind::TyString && right_ty.kind != TypeKind::TyString {
-            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
-            return ty_error()
-        }
-        if is_arith && left_ty.kind == right_ty.kind && is_numeric_type(left_ty) {
-            return left_ty
-        }
-        if is_arith && e.bin_op == BinaryOp::OpAdd && left_ty.kind == TypeKind::TyString && right_ty.kind == TypeKind::TyString {
-            return ty_string()
-        }
-        if is_cmp && left_ty.kind == right_ty.kind {
-            return ty_bool()
-        }
-    }
     if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
             || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
@@ -3667,6 +3739,9 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     let struct_idx = (*c).structs.find(struct_name)
     if struct_idx >= 0 {
         let si = (*c).structs.get(struct_idx)
+        if (*c).enforce_visibility && !checker_struct_visible_inplace(c, struct_idx) {
+            checker_report_error_at_inplace(c, e.span, 176, 0, 0, 0)
+        }
         if si.is_generic_template {
             // ---- Generic struct literal (inlined check_generic_struct_lit 16633) ----
             // Pass 1: infer type params from field initializers (infer_type_params_from_fields
@@ -3728,6 +3803,10 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             type_param_count: 0,
                             type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
                             is_generic_template: false,
+                            visibility_kind: si.visibility_kind,
+                            defining_module_id: si.defining_module_id,
+                            visibility: si.visibility,
+                            defining_module: si.defining_module,
                         }
                         // RUNTIME-RISK: ~160KB StructTable by-value SRET-store-back (see review).
                         (*c).structs = (*c).structs.add(mono_info)
@@ -3835,8 +3914,6 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                                 if !types_compatible(init_ty, field_ty) {
                                     checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
                                 }
-                            } else {
-                                checker_report_error_at_inplace(c, (*list).head.value.span, 12, 0, 0, 0)
                             }
                             cur_ev = (*list).tail
                         }
@@ -4021,6 +4098,11 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         is_linear_closure: capture_linear,
         linear_capture_count: capture_linear_count,
         epistemic_epsilon: capture_epsilon,
+        visibility_kind: VISIBILITY_PRIVATE,
+        defining_module_seg_count: (*c).current_module.seg_count,
+        defining_module_id: (*c).current_module_id,
+        visibility: visibility_private(),
+        defining_module: (*c).current_module,
     }
     let add_result = (*c).fn_sigs.add(closure_sig)
     (*c).fn_sigs = add_result.0
@@ -4106,7 +4188,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         if sig_id >= 0 {
             let sig = (*c).fn_sigs.get(sig_id)
             let call_start_borrows = (*c).borrows
-            checker_check_call_args_inplace(c, e.args, sig.params, sig.param_count, e.span)
+            checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(sig.params), sig.param_count, e.span)
             checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
             checker_release_call_arg_borrows_inplace(c, e.args, sig.params, call_start_borrows)
             sig.return_type
@@ -4214,83 +4296,118 @@ fn checker_check_expr_list_no_type_no_linear_consume_inplace(c: *mut Checker, op
     }
 }
 
-fn expr_list_count_inplace(opt: Option<Box<ExprList> >) -> i64 with Mut, Panic, Div, Alloc {
-    match opt {
-        Some(list) => 1 + expr_list_count_inplace((*list).tail)
-        None => 0
+fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_info: FnParamInfo, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+    let implicit_borrow =
+        arg_expr.kind == ExprKind::ExprIdent &&
+        (param_info.ty.kind == TypeKind::TyRef || param_info.ty.kind == TypeKind::TyRefMut)
+    if implicit_borrow {
+        (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
+    }
+    let arg_ty = checker_check_expr_inplace(c, arg_expr)
+    if implicit_borrow && (*c).suppress_linear_consume_depth > 0 {
+        (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
+    }
+    if arg_ty.kind == param_info.ty.kind {
+        if arg_ty.kind == TypeKind::TyI64
+        || arg_ty.kind == TypeKind::TyF64
+        || arg_ty.kind == TypeKind::TyBool
+        || arg_ty.kind == TypeKind::TyUnit
+        || arg_ty.kind == TypeKind::TyString
+        || arg_ty.kind == TypeKind::TyChar {
+            return
+        }
+    }
+    let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
+    if has_param_info {
+        if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
+            checker_report_mismatch_inplace(c, call_span, 9, param_info.ty, arg_ty)
+        }
+        // Direct *mut void calls (no Checker locals — was bb/rb/kb/ub/ob, ~12MB+
+        // held across this fn's nested-call recursion → the stack overflow).
+        checker_check_call_arg_borrow_boundary_inplace(c, arg_expr, param_info.ty, call_span)
+        checker_check_call_arg_refinement_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
+        checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+        checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+        checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
+    }
+    if has_param_info &&
+       arg_expr.kind == ExprKind::ExprIdent &&
+       checker_is_linear_type_inplace(c, arg_ty) &&
+       !implicit_borrow &&
+       (*c).suppress_linear_consume_depth == 0 {
+        if (*c).borrows.is_borrowed(arg_expr.name) {
+            checker_report_error_at_inplace(c, call_span, 38, 0, 0, 0)
+        } else {
+            let consume_result = (*c).borrows.consume_linear(arg_expr.name)
+            (*c).borrows = consume_result.0
+            if consume_result.1 != 0 {
+                checker_report_error_at_inplace(c, call_span, 39, 0, 0, 0)
+            }
+        }
     }
 }
 
 // *mut transcription of check_call_args_inner (16907): the arg is checked via the spine;
 // the boundary contracts inspect the already-computed arg_ty (no re-check) and are bridged.
-fn checker_check_call_args_inner_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, idx: i64, expected_count: i64, call_span: Span) with Mut, Panic, Div, Alloc, IO {
-    match args {
-        Some(arg_list) => {
-            let arg_expr = (*arg_list).head
-            let param_info = fn_param_list_get(params, idx)
-            let implicit_borrow =
-                arg_expr.kind == ExprKind::ExprIdent &&
-                (param_info.ty.kind == TypeKind::TyRef || param_info.ty.kind == TypeKind::TyRefMut)
-            if implicit_borrow {
-                (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
+fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params: FnParamListHandle, expected_count: i64, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+    var current = args
+    var idx: i64 = 0
+    while current.ptr != 0 as *mut ExprList {
+        let param_info = fn_param_list_handle_get(params, idx)
+        let arg_expr = (*current.ptr).head
+        let implicit_borrow =
+            arg_expr.kind == ExprKind::ExprIdent &&
+            (param_info.ty.kind == TypeKind::TyRef || param_info.ty.kind == TypeKind::TyRefMut)
+        if implicit_borrow {
+            (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
+        }
+        let arg_ty = checker_check_expr_inplace(c, arg_expr)
+        if implicit_borrow && (*c).suppress_linear_consume_depth > 0 {
+            (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
+        }
+        var primitive_exact = false
+        if arg_ty.kind == param_info.ty.kind {
+            if arg_ty.kind == TypeKind::TyI64
+            || arg_ty.kind == TypeKind::TyF64
+            || arg_ty.kind == TypeKind::TyBool
+            || arg_ty.kind == TypeKind::TyUnit
+            || arg_ty.kind == TypeKind::TyString
+            || arg_ty.kind == TypeKind::TyChar {
+                primitive_exact = true
             }
-            let arg_ty = checker_check_expr_inplace(c, arg_expr)
-            if implicit_borrow && (*c).suppress_linear_consume_depth > 0 {
-                (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
+        }
+        let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
+        if has_param_info && !primitive_exact {
+            if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
+                checker_report_mismatch_inplace(c, call_span, 9, param_info.ty, arg_ty)
             }
-            let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
-            if has_param_info {
-                if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
-                    checker_report_mismatch_inplace(c, call_span, 9, param_info.ty, arg_ty)
+            checker_check_call_arg_borrow_boundary_inplace(c, arg_expr, param_info.ty, call_span)
+            checker_check_call_arg_refinement_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
+            checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+            checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+            checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
+        }
+        if has_param_info &&
+           arg_expr.kind == ExprKind::ExprIdent &&
+           checker_is_linear_type_inplace(c, arg_ty) &&
+           !implicit_borrow &&
+           (*c).suppress_linear_consume_depth == 0 {
+            if (*c).borrows.is_borrowed(arg_expr.name) {
+                checker_report_error_at_inplace(c, call_span, 38, 0, 0, 0)
+            } else {
+                let consume_result = (*c).borrows.consume_linear(arg_expr.name)
+                (*c).borrows = consume_result.0
+                if consume_result.1 != 0 {
+                    checker_report_error_at_inplace(c, call_span, 39, 0, 0, 0)
                 }
-                // Direct *mut void calls (no Checker locals — was bb/rb/kb/ub/ob, ~12MB+
-                // held across this fn's nested-call recursion → the stack overflow).
-                checker_check_call_arg_borrow_boundary_inplace(c, arg_expr, param_info.ty, call_span)
-                checker_check_call_arg_refinement_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
-                checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_info.ty, call_span)
-                checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
-                checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
-            }
-            if has_param_info &&
-               arg_expr.kind == ExprKind::ExprIdent &&
-               checker_is_linear_type_inplace(c, arg_ty) &&
-               !implicit_borrow &&
-               (*c).suppress_linear_consume_depth == 0 {
-                if (*c).borrows.is_borrowed(arg_expr.name) {
-                    checker_report_error_at_inplace(c, call_span, 38, 0, 0, 0)
-                } else {
-                    let consume_result = (*c).borrows.consume_linear(arg_expr.name)
-                    (*c).borrows = consume_result.0
-                    if consume_result.1 != 0 {
-                        checker_report_error_at_inplace(c, call_span, 39, 0, 0, 0)
-                    }
-                }
-            }
-            checker_check_call_args_inner_inplace(c, (*arg_list).tail, params, idx + 1, expected_count, call_span)
-        }
-        None => {
-            if idx != expected_count && expected_count >= 0 {
-                checker_report_error_at_inplace(c, call_span, 10, 0, 0, 0)
             }
         }
+        current = expr_list_handle_next(current)
+        idx = idx + 1
     }
-}
-
-fn checker_count_expr_list(opt: Option<Box<ExprList> >) -> i64 with Mut, Panic, Div, Alloc {
-    match opt {
-        None => 0
-        Some(list) => 1 + checker_count_expr_list((*list).tail)
+    if expected_count >= 0 && idx != expected_count {
+        checker_report_error_at_inplace(c, call_span, 10, 0, 0, 0)
     }
-}
-
-fn checker_check_call_args_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, expected_count: i64, call_span: Span) with Mut, Panic, Div, Alloc, IO {
-    if expected_count >= 0 {
-        let actual_count = checker_count_expr_list(args)
-        if actual_count != expected_count {
-            checker_report_error_at_inplace(c, call_span, 10, 0, 0, 0)
-        }
-    }
-    checker_check_call_args_inner_inplace(c, args, params, 0, expected_count, call_span)
 }
 
 // *mut ExprCall handler — transcription of check_call_expr's normal path (14605-14687).
@@ -4348,24 +4465,6 @@ fn checker_check_slice_len_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry w
     ty_i64()
 }
 
-fn checker_check_assert_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    let first_arg = expr_list_head(e.args)
-    let second_arg = expr_list_second(e.args)
-    let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
-    match first_arg {
-        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
-        Some(_) => {}
-    }
-    match second_arg {
-        Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
-        None => {}
-    }
-    if !is_error_or_unknown(arg_ty) && arg_ty.kind != TypeKind::TyBool {
-        checker_report_error_at_inplace(c, e.span, 174, 0, 0, 0)
-    }
-    ty_unit()
-}
-
 // Enum tuple-variant constructor detection (`Enum::Variant(args)`). Given the callee
 // opt-expr, returns the enum table index if the callee is a 2+-segment path whose HEAD
 // names an enum and whose LAST segment names a variant of it (e.g. `Event::B`); else -1.
@@ -4395,10 +4494,90 @@ fn call_expr_enum_variant_ctor_enum_idx(c: *mut Checker, opt: Option<Box<Expr> >
     }
 }
 
-fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    if call_expr_is_builtin_assert(e.left) {
-        return checker_check_assert_expr_inplace(c, e)
+fn checker_fn_sigs_find_inplace(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
+    var i: i64 = 0
+    while i < (*c).fn_sigs.count {
+        let sig_name = (*c).fn_sigs.entries[i].name
+        let sig_is_method = (*c).fn_sigs.entries[i].is_method
+        if name_eq(sig_name, name) && !sig_is_method {
+            return i
+        }
+        i = i + 1
     }
+    -1
+}
+
+fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    let sig = (*c).fn_sigs.get(sig_id)
+    let vis_kind = sig.visibility_kind
+    if vis_kind == VISIBILITY_PUB {
+        return true
+    }
+    if vis_kind == VISIBILITY_PUB_CRATE {
+        return true
+    }
+    if vis_kind == VISIBILITY_PUB_SUPER {
+        return true
+    }
+    if vis_kind == VISIBILITY_PRIVATE {
+        if sig.defining_module_id == (*c).current_module_id {
+            return true
+        }
+        return false
+    }
+    visibility_allows_access(
+        sig.visibility,
+        sig.defining_module,
+        (*c).current_module,
+        (*c).crate_root,
+    )
+}
+
+fn checker_struct_visible_inplace(c: *mut Checker, struct_idx: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    let vis_kind = (*c).structs.entries[struct_idx as usize].visibility_kind
+    if vis_kind == VISIBILITY_PUB {
+        return true
+    }
+    if vis_kind == VISIBILITY_PUB_CRATE {
+        return true
+    }
+    if vis_kind == VISIBILITY_PUB_SUPER {
+        return true
+    }
+    if vis_kind == VISIBILITY_PRIVATE {
+        return (*c).structs.entries[struct_idx as usize].defining_module_id == (*c).current_module_id
+    }
+    visibility_allows_access(
+        (*c).structs.entries[struct_idx as usize].visibility,
+        (*c).structs.entries[struct_idx as usize].defining_module,
+        (*c).current_module,
+        (*c).crate_root,
+    )
+}
+
+fn checker_enum_visible_inplace(c: *mut Checker, enum_idx: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    let vis_kind = (*c).enums.entries[enum_idx as usize].visibility_kind
+    if vis_kind == VISIBILITY_PUB {
+        return true
+    }
+    if vis_kind == VISIBILITY_PUB_CRATE {
+        return true
+    }
+    if vis_kind == VISIBILITY_PUB_SUPER {
+        return true
+    }
+    if vis_kind == VISIBILITY_PRIVATE {
+        return (*c).enums.entries[enum_idx as usize].defining_module_id == (*c).current_module_id
+    }
+    visibility_allows_access(
+        (*c).enums.entries[enum_idx as usize].visibility,
+        (*c).enums.entries[enum_idx as usize].defining_module,
+        (*c).current_module,
+        (*c).crate_root,
+    )
+}
+
+fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // Intercept the common epistemic builtin measure() with an inplace handler before the
     // by-value bridge below (which SRET-smashes on the 164KB Checker return).
     if call_expr_is_builtin_measure(e.left) {
@@ -4432,8 +4611,38 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             }
         }
     }
-    // Callee via the *mut spine (dodges the by-value check_path_expr SRET crash).
-    let callee_ty = checker_check_opt_expr_inplace(c, e.left)
+    var direct_sig_id: i64 = -1
+    match e.left {
+        Some(callee_expr) => {
+            if (*callee_expr).kind == ExprKind::ExprIdent {
+                direct_sig_id = checker_fn_sigs_find_inplace(c, (*callee_expr).name)
+            }
+        }
+        None => {}
+    }
+    if direct_sig_id >= 0 {
+        if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
+            checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
+        }
+        let call_start_borrows = (*c).borrows
+        checker_check_call_args_inplace(
+            c,
+            expr_list_handle(e.args),
+            fn_param_list_handle((*c).fn_sigs.entries[direct_sig_id].params),
+            (*c).fn_sigs.entries[direct_sig_id].param_count,
+            e.span,
+        )
+        checker_check_callee_effects_inplace(c, e.span, (*c).fn_sigs.entries[direct_sig_id].effects, (*c).fn_sigs.entries[direct_sig_id].effect_count)
+        checker_release_call_arg_borrows_inplace(c, e.args, (*c).fn_sigs.entries[direct_sig_id].params, call_start_borrows)
+        return (*c).fn_sigs.entries[direct_sig_id].return_type
+    }
+    // Callee via the *mut spine, matched locally so the call path does not pass
+    // Option<Box<Expr>> through another *mut helper boundary.
+    let callee_ty =
+        match e.left {
+            Some(callee_expr) => checker_check_expr_inplace(c, *callee_expr)
+            None => ty_error()
+        }
     let array_like_ty =
         if callee_ty.kind == TypeKind::TyArray {
             callee_ty
@@ -4472,18 +4681,12 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
     }
     if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
-        let sig_id = callee_ty.fn_sig_id
-        if sig_id >= 0 && sig_id < (*c).fn_sigs.count {
-            let expected_count = (*c).fn_sigs.entries[sig_id as usize].param_count
-            let actual_count = expr_list_count_inplace(e.args)
-            if actual_count != expected_count {
-                checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
-                return (*c).fn_sigs.entries[sig_id as usize].return_type
-            }
-        }
         let sig = (*c).fn_sigs.get(callee_ty.fn_sig_id)
+        if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
+            checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
+        }
         let call_start_borrows = (*c).borrows
-        checker_check_call_args_inplace(c, e.args, sig.params, sig.param_count, e.span)
+        checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(sig.params), sig.param_count, e.span)
         checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
         checker_release_call_arg_borrows_inplace(c, e.args, sig.params, call_start_borrows)
         sig.return_type
@@ -4829,10 +5032,6 @@ fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         return ty_error()
     }
     let ident_ty = (*c).env.lookup(e.name)
-    if ident_ty.kind == TypeKind::TyError && !(*c).env.has_binding(e.name) {
-        checker_report_error_at_inplace(c, e.span, 137, 0, 0, 0)
-        return ident_ty
-    }
     if checker_is_linear_type_inplace(c, ident_ty) && (*c).suppress_linear_consume_depth == 0 {
         if (*c).borrows.is_borrowed(e.name) {
             checker_report_error_at_inplace(c, e.span, 38, 0, 0, 0)
@@ -9274,8 +9473,6 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 58 { print("prove_robust(...) requires Contest<T> and Policy<T> with the same inner type") }
     else if code == 59 { print("contest expressions require an explicit Contest<T> annotation") }
     else if code == 63 { print("epistemic wrapper metadata is malformed or unsupported in this compiler slice") }
-    else if code == 137 { print("name is not defined in this scope") }
-    else if code == 174 { print("assert condition must be of type `bool`") }
     else if code == 79 { print("contest witness builtin requires Contest<T, Family, Policy>") }
     else if code == 80 { print("contest metadata is incomplete for witness projection") }
     else if code == 81 { print("requested contest metric is unavailable") }
@@ -9362,6 +9559,10 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 172 { print("Knowledge.unwrap requires exactly one argument") }
     else if code == 173 { print("reason must be a `string` literal") }
     else if code == 174 { print("assert condition must be of type `bool`") }
+    // Visibility enforcement (175-177)
+    else if code == 175 { print("function is private in its defining module") }
+    else if code == 176 { print("struct constructor is private in its defining module") }
+    else if code == 177 { print("enum constructor is private in its defining module") }
     else if code == 200 { print("Forgettable type requires ZD effect: exact annihilation is only possible via zero-divisor algebra (sedenions). Division algebras cannot satisfy this guarantee. Add `with ZD` to your function signature.") }
     else if code == 201 { print("ExactlyPrivate<T> requires ZD effect: exact data-contribution removal is only possible via sedenion annihilation. Differential privacy (epsilon-bounded) does not suffice. Add `with ZD` to your function signature.") }
     else if code == 202 { print("Editable<T> requires ZD effect: locality-bounded edits (G5) require ZD-based kernel annihilation. Ripple-free editing is not achievable via rank-1 or mask-based updates. Add `with ZD` to your function signature.") }
@@ -10482,6 +10683,75 @@ fn expr_list_head(opt: Option<Box<ExprList> >) -> Option<Box<Expr> > with Alloc 
     }
 }
 
+fn expr_list_tail(opt: Option<Box<ExprList> >) -> Option<Box<ExprList> > with Alloc {
+    match opt {
+        Some(list) => (*list).tail
+        None => None
+    }
+}
+
+// Stage0 miscompiles passing Option<Box<T>> by value into *mut functions.
+// Use an explicit raw-pointer handle built in a non-*mut helper instead.
+struct ExprListHandle {
+    ptr: *mut ExprList,
+}
+
+fn expr_list_handle(opt: Option<Box<ExprList> >) -> ExprListHandle with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            let result = list as *mut ExprList
+            ExprListHandle { ptr: result }
+        }
+        None => ExprListHandle { ptr: 0 as *mut ExprList }
+    }
+}
+
+fn expr_list_handle_next(h: ExprListHandle) -> ExprListHandle with Mut, Panic, Div {
+    if h.ptr == 0 as *mut ExprList { return ExprListHandle { ptr: 0 as *mut ExprList } }
+    match (*h.ptr).tail {
+        Some(next) => ExprListHandle { ptr: next as *mut ExprList }
+        None => ExprListHandle { ptr: 0 as *mut ExprList }
+    }
+}
+
+fn expr_list_handle_count(h: ExprListHandle) -> i64 with Mut, Panic, Div {
+    if h.ptr == 0 as *mut ExprList { return 0 }
+    1 + expr_list_handle_count(expr_list_handle_next(h))
+}
+
+struct FnParamListHandle {
+    ptr: *mut FnParamList,
+}
+
+fn fn_param_list_handle(opt: Option<Box<FnParamList> >) -> FnParamListHandle with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            let result = FnParamListHandle { ptr: list as *mut FnParamList }
+            result
+        }
+        None => FnParamListHandle { ptr: 0 as *mut FnParamList }
+    }
+}
+
+fn fn_param_list_handle_get(h: FnParamListHandle, idx: i64) -> FnParamInfo with Mut, Panic, Div {
+    var current = h
+    var i: i64 = idx
+    while current.ptr != 0 as *mut FnParamList {
+        if i == 0 {
+            let result = (*current.ptr).head
+            return result
+        }
+        match (*current.ptr).tail {
+            Some(next) => {
+                current = FnParamListHandle { ptr: next as *mut FnParamList }
+                i = i - 1
+            }
+            None => { break }
+        }
+    }
+    empty_fn_param_info()
+}
+
 fn expr_list_second(opt: Option<Box<ExprList> >) -> Option<Box<Expr> > with Alloc {
     match opt {
         Some(list) => {
@@ -11479,9 +11749,13 @@ impl Checker {
                                 fields: mono_fields.0,
                                 field_count: mono_fields.1,
                                 is_linear: tmpl.is_linear,
-                                type_param_count: 0,
-                                type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
-                                is_generic_template: false,
+                            type_param_count: 0,
+                            type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
+                            is_generic_template: false,
+                            visibility_kind: tmpl.visibility_kind,
+                            defining_module_id: tmpl.defining_module_id,
+                            visibility: tmpl.visibility,
+                            defining_module: tmpl.defining_module,
                             }
                             c.structs = c.structs.add(mono_info)
                             (c, ty_named(mangled))
@@ -11690,6 +11964,11 @@ impl Checker {
             is_linear_closure: false,
             linear_capture_count: 0,
             epistemic_epsilon: 0.0 - 1.0,
+            visibility_kind: VISIBILITY_PUB,
+            defining_module_seg_count: 0,
+            defining_module_id: 0,
+            visibility: visibility_pub(),
+            defining_module: empty_path(),
         }
         let add_result = c.fn_sigs.add(sig)
         c.fn_sigs = add_result.0
@@ -12386,9 +12665,9 @@ impl Checker {
 
     fn collect_item(self, item: Item) -> Checker with Mut, Panic, Div, Alloc, IO {
         match item.kind {
-            ItemKind::ItemFn => self.collect_fn_def(item.name, item.fn_def)
-            ItemKind::ItemStruct => self.collect_struct_def(item.name, item.struct_def)
-            ItemKind::ItemEnum => self.collect_enum_def(item.name, item.enum_def)
+            ItemKind::ItemFn => self.collect_fn_def(item.name, item.fn_def, item.visibility, self.current_module)
+            ItemKind::ItemStruct => self.collect_struct_def(item.name, item.struct_def, item.visibility, self.current_module)
+            ItemKind::ItemEnum => self.collect_enum_def(item.name, item.enum_def, item.visibility, self.current_module)
             ItemKind::ItemImpl => self.collect_impl_def(item.impl_def)
             ItemKind::ItemTypeAlias => self.collect_type_alias(item.name, item.type_alias_ty)
             ItemKind::ItemModels => self.collect_models_def(item.name, item.models_def)
@@ -13617,7 +13896,7 @@ impl Checker {
     // Collect function signature
     // --------------------------------------------------------
 
-    fn collect_fn_def(self, name: Name, opt: Option<Box<FnDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_fn_def(self, name: Name, opt: Option<Box<FnDef> >, visibility: Visibility, defining_module: AstPath) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(fd) => {
                 let __r = self.collect_fn_params((*fd).params)
@@ -13774,6 +14053,11 @@ impl Checker {
                     is_linear_closure: false,
                     linear_capture_count: 0,
                     epistemic_epsilon: 0.0 - 1.0,
+                    visibility_kind: visibility.kind,
+                    defining_module_seg_count: defining_module.seg_count,
+                    defining_module_id: c.current_module_id,
+                    visibility: visibility,
+                    defining_module: defining_module,
                 }
                 let add_result = c.fn_sigs.add(sig)
                 c.fn_sigs = add_result.0
@@ -13825,7 +14109,7 @@ impl Checker {
     // Collect struct definition
     // --------------------------------------------------------
 
-    fn collect_struct_def(self, name: Name, opt: Option<Box<StructDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_struct_def(self, name: Name, opt: Option<Box<StructDef> >, visibility: Visibility, defining_module: AstPath) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(sd) => {
                 // Extract type parameters if present
@@ -13846,6 +14130,10 @@ impl Checker {
                     type_param_count: tp_count,
                     type_param_names: tp_names,
                     is_generic_template: is_generic,
+                    visibility_kind: visibility.kind,
+                    defining_module_id: c.current_module_id,
+                    visibility: visibility,
+                    defining_module: defining_module,
                 }
                 c.structs = c.structs.add(info)
                 c
@@ -13886,7 +14174,7 @@ impl Checker {
     // Collect enum definition
     // --------------------------------------------------------
 
-    fn collect_enum_def(self, name: Name, opt: Option<Box<EnumDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_enum_def(self, name: Name, opt: Option<Box<EnumDef> >, visibility: Visibility, defining_module: AstPath) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(ed) => {
                 let pair = self.collect_variants((*ed).variants)
@@ -13897,6 +14185,10 @@ impl Checker {
                     name: name,
                     variants: variants,
                     variant_count: variant_count,
+                    visibility_kind: visibility.kind,
+                    defining_module_id: c.current_module_id,
+                    visibility: visibility,
+                    defining_module: defining_module,
                 }
                 c.enums = c.enums.add(info)
                 c
@@ -14739,6 +15031,11 @@ impl Checker {
                     is_linear_closure: false,
                     linear_capture_count: 0,
                     epistemic_epsilon: 0.0 - 1.0,
+                    visibility_kind: item.visibility.kind,
+                    defining_module_seg_count: c.current_module.seg_count,
+                    defining_module_id: c.current_module_id,
+                    visibility: item.visibility,
+                    defining_module: c.current_module,
                 }
                 let add_result = c.fn_sigs.add(sig)
                 c.fn_sigs = add_result.0
@@ -15381,12 +15678,21 @@ impl Checker {
         let first_name = checker_copy_string_list_to_name(e.path.segments)
         let enum_idx = self.enums.find(first_name)
         if enum_idx >= 0 {
+            let ei = self.enums.get(enum_idx)
+            if self.enforce_visibility && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
+                let c = self.report_error_at(e.span, 177, 0, 0, 0)
+                return (c, ty_named(first_name))
+            }
             (self, ty_named(first_name))
         } else {
             // Could be a variant name directly (e.g. None, Some)
             let variant_enum_idx = self.enums.find_variant_enum(first_name)
             if variant_enum_idx >= 0 {
                 let ei = self.enums.get(variant_enum_idx)
+                if self.enforce_visibility && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
+                    let c = self.report_error_at(e.span, 177, 0, 0, 0)
+                    return (c, ty_named(ei.name))
+                }
                 (self, ty_named(ei.name))
             } else {
                 // Look up in env as a regular binding
@@ -16368,6 +16674,9 @@ impl Checker {
         }
         if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
             let sig = c.fn_sigs.get(callee_ty.fn_sig_id)
+            if c.enforce_visibility && !visibility_allows_access(sig.visibility, sig.defining_module, c.current_module, c.crate_root) {
+                c = c.report_error_at(e.span, 175, 0, 0, 0)
+            }
             let call_start_borrows = c.borrows
             c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
             // Verify callee's effects are subset of caller's effects
@@ -19004,6 +19313,10 @@ impl Checker {
         let struct_idx = self.structs.find(struct_name)
         if struct_idx >= 0 {
             let si = self.structs.get(struct_idx)
+            if self.enforce_visibility && !visibility_allows_access(si.visibility, si.defining_module, self.current_module, self.crate_root) {
+                let c = self.report_error_at(e.span, 176, 0, 0, 0)
+                return (c, ty_named(struct_name))
+            }
             if si.is_generic_template {
                 // Generic struct: infer type params from field initializers
                 self.check_generic_struct_lit(e, si)
@@ -19082,9 +19395,13 @@ impl Checker {
                         fields: mono_fields.0,
                         field_count: mono_fields.1,
                         is_linear: tmpl.is_linear,
-                        type_param_count: 0,
-                        type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
-                        is_generic_template: false,
+                    type_param_count: 0,
+                    type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
+                    is_generic_template: false,
+                    visibility_kind: tmpl.visibility_kind,
+                    defining_module_id: tmpl.defining_module_id,
+                    visibility: tmpl.visibility,
+                    defining_module: tmpl.defining_module,
                     }
                     c.structs = c.structs.add(mono_info)
                 }
@@ -19484,6 +19801,11 @@ impl Checker {
             is_linear_closure: capture_linear,
             linear_capture_count: capture_linear_count,
             epistemic_epsilon: capture_epsilon,
+            visibility_kind: VISIBILITY_PRIVATE,
+            defining_module_seg_count: c.current_module.seg_count,
+            defining_module_id: c.current_module_id,
+            visibility: visibility_private(),
+            defining_module: c.current_module,
         }
 
         // Add to fn_sigs table

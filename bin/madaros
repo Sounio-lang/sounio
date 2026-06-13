@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# bin/madaros — launcher for the Madaros modular compiler raw ELF.
+#
+# Madaros is the Stage1 self-hosted compiler built from
+# self-hosted/compiler/main.sio. It is distinct from the Stage0 bootstrap
+# compiler (lean_single.sio) which is exposed as bin/souc.
+#
+# The modular compiler currently exposes backend-specific emit modes and
+# package-manager commands rather than the generic check/run/compile surface
+# of the Stage0 wrapper. This launcher therefore resolves the raw ELF and
+# passes arguments through unchanged, except for --version and info.
+#
+# Usage:
+#   madaros --version
+#   madaros info
+#   madaros --native-v2-emit13
+#   madaros --native-v2-emit-scalar 42
+#   madaros pkg ...
+#
+# Environment:
+#   SOUNIO_STDLIB_PATH     — forwarded to the raw ELF unchanged
+#   MADAROS_RAW_BIN        — override the underlying modular raw ELF
+#   SOUNIO_MADAROS_BIN     — alias for MADAROS_RAW_BIN
+#
+# To obtain the raw ELF, run:
+#   make build-madaros
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Resolve the underlying modular raw ELF.
+# Resolution order:
+#   1. MADAROS_RAW_BIN / SOUNIO_MADAROS_BIN env var
+#   2. artifacts/self-hosted/madaros (built by make build-madaros)
+#   3. bin/madaros-linux-x86_64 (checked-in prebuilt)
+_resolve_modular_elf() {
+  local cand
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+    if [[ -n "$cand" && -x "$cand" && "$(head -c 2 "$cand" 2>/dev/null)" != "#!" ]]; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  echo "error: madaros: no modular compiler raw ELF found" >&2
+  echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, $ROOT_DIR/artifacts/self-hosted/madaros, $ROOT_DIR/bin/madaros-linux-x86_64" >&2
+  echo "  run: make build-madaros" >&2
+  return 1
+}
+
+if ! RAW_MADAROS="$(_resolve_modular_elf)"; then
+  exit 127
+fi
+
+usage() {
+  cat <<USAGE
+madaros — launcher for the Madaros modular compiler ($RAW_MADAROS)
+
+Usage:
+  madaros --version                     print compiler identity
+  madaros info                          print resolution path
+  madaros <modular-compiler-args>...    pass through to the raw ELF
+
+Common modular-compiler modes:
+  madaros --native-v2-emit13            emit artifacts/omega/emit13.elf
+  madaros --native-v2-emit-scalar N     emit a scalar witness
+  madaros --version-json                emit version metadata
+  madaros pkg ...                       package manager commands
+
+Environment:
+  SOUNIO_STDLIB_PATH=<dir>     forwarded to raw ELF
+  MADAROS_RAW_BIN=<path>       override raw ELF
+  SOUNIO_MADAROS_BIN=<path>    override raw ELF (alias)
+USAGE
+}
+
+info() {
+  echo "wrapper:      $0"
+  echo "raw_elf:      $RAW_MADAROS"
+  echo "stdlib:       ${SOUNIO_STDLIB_PATH:-<unset>}"
+  local identity
+  identity="$("$RAW_MADAROS" /dev/null /dev/null 2>/dev/null)" || true
+  echo "identity:     $(echo "$identity" | head -n 1)"
+}
+
+version() {
+  local out
+  out="$("$RAW_MADAROS" /dev/null /dev/null 2>/dev/null)" || true
+  echo "$out" | head -n 1
+}
+
+# Parse subcommands.
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 0
+fi
+
+case "$1" in
+  --version|-V)
+    version
+    ;;
+  info)
+    info
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    if [[ "$1" == "--check" && $# -ge 2 && ! -e "$2" ]]; then
+      echo "error: at $2:0:0 - could not read input file"
+      exit 1
+    fi
+    # Pass everything through to the raw ELF unchanged.
+    "$RAW_MADAROS" "$@"
+    ;;
+esac
