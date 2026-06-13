@@ -1583,6 +1583,10 @@ fn nc_add_data_section_reloc(nc: &! NativeCompiler, patch_offset: i64, data_offs
     nc_add_flat_reloc(nc, patch_offset, 3, 0, data_offset)
 }
 
+fn nc_add_global_bss_reloc(nc: &! NativeCompiler, patch_offset: i64, global_id: i64) with Mut, Panic, Div {
+    nc_add_flat_reloc(nc, patch_offset, 5, 0, global_id)
+}
+
 fn nc_emit_mov_rax_r15(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x4c)
     nc_emit_byte(nc, 0x89)
@@ -3913,11 +3917,32 @@ fn emit_builtin_file_size(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 // Module compilation
 // ============================================================================
 
+fn native_v2_module_global_data_bytes(module: &IrModule) -> i64 {
+    if (*module).global_bss_total > 0 {
+        return (*module).global_bss_total
+    }
+    (*module).global_count * 8
+}
+
+fn native_v2_global_data_offset(nc: &NativeCompiler, global_id: i64) -> i64 {
+    if (*nc).global_bss_total > 0 && global_id >= 0 && global_id < 256 {
+        return runtime_context_global_slot_size() + (*nc).global_bss_offsets[global_id as usize]
+    }
+    runtime_context_global_slot_size() + (global_id * 8)
+}
+
 pub fn compile_module_streaming_begin_into(nc: &! NativeCompiler, module: &IrModule) with Mut, Panic, Div, Alloc {
     (*nc).fn_count = module.fn_count
     (*nc).runtime_context_slot_offset = 0
     let runtime_slot_size = runtime_context_global_slot_size()
-    (*nc).prof_counter_data_base = runtime_slot_size + (module.global_count * 8)
+    let global_data_bytes = native_v2_module_global_data_bytes(module)
+    (*nc).prof_counter_data_base = runtime_slot_size + global_data_bytes
+    (*nc).global_bss_total = module.global_bss_total
+    var gi: i64 = 0
+    while gi < module.global_count && gi < 256 {
+        (*nc).global_bss_offsets[gi as usize] = module.global_bss_offsets[gi as usize]
+        gi = gi + 1
+    }
     (*nc).descriptor_data_offset = -1
     (*nc).descriptor_count = 0
     (*nc).gc_state_data_offset = -1
@@ -3927,7 +3952,7 @@ pub fn compile_module_streaming_begin_into(nc: &! NativeCompiler, module: &IrMod
     (*nc).safepoint_count = 0
     (*nc).deopt_point_count = 0
     var module_data = (*nc).data
-    module_data.len = runtime_slot_size + (module.global_count * 8) + (module.prof_counter_count * 8)
+    module_data.len = runtime_slot_size + global_data_bytes + (module.prof_counter_count * 8)
     (*nc).data = module_data
 }
 
@@ -4046,6 +4071,15 @@ fn apply_relocations_into(nc: &! NativeCompiler, rodata_file_offset: i64, data_f
             let counter_va = data_file_offset + data_off
             let disp32_data = counter_va - next_ip
             nc_patch_u32_le(nc, patch_offset, disp32_data)
+        } else if kind_code == 5 && native_v2_reloc_is_rip_disp_patch(nc, patch_offset) {
+            let global_id = target_index
+            if global_id >= 0 && global_id < 256 {
+                let text_file_offset3 = 4096
+                let next_ip2 = text_file_offset3 + patch_offset + 4
+                let global_va = data_file_offset + runtime_context_global_slot_size() + (*nc).global_bss_offsets[global_id as usize]
+                let disp32_global = global_va - next_ip2
+                nc_patch_u32_le(nc, patch_offset, disp32_global)
+            }
         }
 
         i = i + 1
@@ -5421,7 +5455,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             if global_id < 0 { return false }
             let load_pos = (*nc).code.len
             nc_emit_mov_rax_rip_disp32(nc, 0)
-            nc_add_data_section_reloc(nc, load_pos + 3, runtime_context_global_slot_size() + (global_id * 8))
+            nc_add_data_section_reloc(nc, load_pos + 3, native_v2_global_data_offset(nc, global_id))
             nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
         } else if instr_op == IrOpcode::IrGlobalStore {
             let global_id = (*func).instrs[i as usize].field_idx
@@ -5429,7 +5463,54 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
             let store_pos = (*nc).code.len
             nc_emit_mov_rip_disp32_rax(nc, 0)
-            nc_add_data_section_reloc(nc, store_pos + 3, runtime_context_global_slot_size() + (global_id * 8))
+            nc_add_data_section_reloc(nc, store_pos + 3, native_v2_global_data_offset(nc, global_id))
+        } else if instr_op == IrOpcode::IrGlobalAddr {
+            let global_id = (*func).instrs[i as usize].imm_i64
+            if global_id < 0 { return false }
+            let lea_pos = (*nc).code.len
+            nc_emit_lea_rax_rip_disp32(nc, 0)
+            nc_add_global_bss_reloc(nc, lea_pos + 3, global_id)
+            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+        } else if instr_op == IrOpcode::IrPtrLoad {
+            let base = (*func).instrs[i as usize].src1
+            let dst = (*func).instrs[i as usize].dst
+            if base < 0 || dst < 0 { return false }
+            nc_core_load_temp_to_rax(nc, base)
+            nc_emit_mov_reg_reg(nc, 2, 0)
+            nc_emit_mov_reg_imm(nc, 3, 0)
+            nc_emit_load_rax_mem_rdx_rbx8(nc)
+            nc_core_store_rax_to_temp(nc, dst)
+        } else if instr_op == IrOpcode::IrPtrStore {
+            let base = (*func).instrs[i as usize].src1
+            let val = (*func).instrs[i as usize].imm_i64
+            if base < 0 || val < 0 { return false }
+            nc_core_load_temp_to_rax(nc, base)
+            nc_emit_mov_reg_reg(nc, 2, 0)
+            nc_emit_mov_reg_imm(nc, 3, 0)
+            nc_core_load_temp_to_rax(nc, val)
+            nc_emit_store_rax_mem_rdx_rbx8(nc)
+        } else if instr_op == IrOpcode::IrPtrElemLoad {
+            let base = (*func).instrs[i as usize].src1
+            let idx = (*func).instrs[i as usize].src2
+            let dst = (*func).instrs[i as usize].dst
+            if base < 0 || idx < 0 || dst < 0 { return false }
+            nc_core_load_temp_to_rax(nc, base)
+            nc_emit_mov_reg_reg(nc, 2, 0)
+            nc_core_load_temp_to_rax(nc, idx)
+            nc_emit_mov_reg_reg(nc, 3, 0)
+            nc_emit_load_rax_mem_rdx_rbx8(nc)
+            nc_core_store_rax_to_temp(nc, dst)
+        } else if instr_op == IrOpcode::IrPtrElemStore {
+            let base = (*func).instrs[i as usize].src1
+            let idx = (*func).instrs[i as usize].src2
+            let val = (*func).instrs[i as usize].imm_i64
+            if base < 0 || idx < 0 || val < 0 { return false }
+            nc_core_load_temp_to_rax(nc, base)
+            nc_emit_mov_reg_reg(nc, 2, 0)
+            nc_core_load_temp_to_rax(nc, idx)
+            nc_emit_mov_reg_reg(nc, 3, 0)
+            nc_core_load_temp_to_rax(nc, val)
+            nc_emit_store_rax_mem_rdx_rbx8(nc)
         } else if instr_op == IrOpcode::IrAlloc {
             if !nc_core_emit_alloc_into(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].imm_i64) {
                 return false
@@ -5815,6 +5896,11 @@ fn native_v2_func_has_global_access(func: IrFunction) -> bool with Mut, Panic, D
         let op = func.instrs[i as usize].op
         if op == IrOpcode::IrGlobalLoad { return true }
         if op == IrOpcode::IrGlobalStore { return true }
+        if op == IrOpcode::IrGlobalAddr { return true }
+        if op == IrOpcode::IrPtrLoad { return true }
+        if op == IrOpcode::IrPtrStore { return true }
+        if op == IrOpcode::IrPtrElemLoad { return true }
+        if op == IrOpcode::IrPtrElemStore { return true }
         i = i + 1
     }
     false
@@ -5941,7 +6027,14 @@ pub fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string
     (*nc).fn_count = module.fn_count
     (*nc).runtime_context_slot_offset = 0
     let runtime_slot_size = runtime_context_global_slot_size()
-    (*nc).prof_counter_data_base = runtime_slot_size + (module.global_count * 8)
+    let global_data_bytes = native_v2_module_global_data_bytes(module)
+    (*nc).prof_counter_data_base = runtime_slot_size + global_data_bytes
+    (*nc).global_bss_total = module.global_bss_total
+    var gi: i64 = 0
+    while gi < module.global_count && gi < 256 {
+        (*nc).global_bss_offsets[gi as usize] = module.global_bss_offsets[gi as usize]
+        gi = gi + 1
+    }
     (*nc).descriptor_data_offset = -1
     (*nc).descriptor_count = 0
     (*nc).gc_state_data_offset = -1
@@ -5951,7 +6044,7 @@ pub fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string
     (*nc).safepoint_count = 0
     (*nc).deopt_point_count = 0
     var module_data = (*nc).data
-    module_data.len = runtime_slot_size + (module.global_count * 8) + (module.prof_counter_count * 8)
+    module_data.len = runtime_slot_size + global_data_bytes + (module.prof_counter_count * 8)
     (*nc).data = module_data
 
     let built = native_v2_build_machine_module(module, true)
@@ -7571,7 +7664,7 @@ fn compile_to_elf_v2(module: &IrModule, base_addr: i64) -> NativeCompileResult w
         return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + err)
     }
     var final_data = nc.data
-    let min_preview_data_len = runtime_context_global_slot_size() + (module.global_count * 8)
+    let min_preview_data_len = runtime_context_global_slot_size() + native_v2_module_global_data_bytes(module)
     if final_data.len < min_preview_data_len {
         final_data.len = min_preview_data_len
         nc.data = final_data
