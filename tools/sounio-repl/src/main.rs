@@ -81,6 +81,7 @@ impl rustyline::highlight::Highlighter for ReplHelper {
 struct Repl {
     compiler_path: PathBuf,
     session: Session,
+    tmp_prefix: String,
     tmp_counter: u64,
     show_timing: bool,
     history_file: PathBuf,
@@ -171,10 +172,19 @@ impl Repl {
         let _ = std::fs::create_dir_all(&data_dir);
         let history_file = data_dir.join("history");
         let session_file = data_dir.join("session.sio");
+        let tmp_prefix = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
 
         let mut repl = Repl {
             compiler_path,
             session: Session::new(),
+            tmp_prefix,
             tmp_counter: 0,
             show_timing: false,
             history_file,
@@ -191,7 +201,10 @@ impl Repl {
     }
 
     fn tmp_path(&mut self, suffix: &str) -> PathBuf {
-        let path = PathBuf::from(format!("/tmp/sounio-repl-{}-{}", self.tmp_counter, suffix));
+        let path = PathBuf::from(format!(
+            "/tmp/sounio-repl-{}-{}-{}",
+            self.tmp_prefix, self.tmp_counter, suffix
+        ));
         self.tmp_counter += 1;
         path
     }

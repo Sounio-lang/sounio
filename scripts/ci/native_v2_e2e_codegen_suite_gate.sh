@@ -13,6 +13,7 @@
 #   call5      -> exit 31          SysV register args through r8
 #   call6      -> exit 63          SysV register args through r9
 #   call7      -> exit 127         SysV stack arg[6]
+#   call7-sparse -> exit 127      IrInstr.call_args, not consecutive vregs
 #   control    -> exit 1           conditional branch TAKEN + label
 #   control-ft -> exit 7           conditional branch NOT taken (fall-through)
 #   arith      -> exit 42          OpSub + OpDiv ((100-16)/2)
@@ -112,6 +113,7 @@ emit_and_check 84  "multicall"  --native-v2-emit-multicall
 emit_and_check 31  "call5"      --native-v2-emit-call5
 emit_and_check 63  "call6"      --native-v2-emit-call6
 emit_and_check 127 "call7"      --native-v2-emit-call7
+emit_and_check 127 "call7-sparse" --native-v2-emit-call7-sparse
 emit_and_check 1   "control"    --native-v2-emit-control
 emit_and_check 7   "control-ft" --native-v2-emit-control-ft
 emit_and_check 42  "arith"      --native-v2-emit-arith
@@ -121,5 +123,5 @@ if [[ "$FAILED" -ne 0 ]]; then
     exit 5
 fi
 
-echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/multicall/call5/call6/call7/control/control-ft/arith (IR->ELF->exit)"
+echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/multicall/call5/call6/call7/call7-sparse/control/control-ft/arith (IR->ELF->exit)"
 exit 0

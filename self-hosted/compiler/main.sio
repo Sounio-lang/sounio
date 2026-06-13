@@ -3159,6 +3159,27 @@ fn run_native_v2_emit_call7(args: ArgList, flag_index: i64) with IO, Mut, Panic,
     print("\n")
 }
 
+// Sparse 7-arg call witness: arguments live in non-consecutive vregs.
+// Proves native-v2 core call emission uses IrInstr.call_args, not src1+i.
+fn run_native_v2_emit_call7_sparse(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("native-v2-emit-call7-sparse: usage --native-v2-emit-call7-sparse <out_path>")
+    }
+    let out_path = arg_list_get(args, flag_index + 1)
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let module = compiler_main_make_native_v2_call7_sparse_module()
+    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=call7-sparse rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=call7-sparse path=")
+    print(out_path)
+    print("\n")
+}
+
 // Control fall-through witness: --native-v2-emit-control-ft <out_path>. cond=0 -> exit 7.
 // Proves branch_true does NOT jump when the condition is false (branch-not-taken path).
 fn run_native_v2_emit_control_ft(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
@@ -7066,6 +7087,70 @@ fn compiler_main_make_native_v2_call7_module() -> IrModule with Mut, Panic, Div,
     let args7 = Some(Box::new(ir_reg_list_append(ir_reg_list_append(ir_reg_list_append(ir_reg_list_append(ir_reg_list_append(ir_reg_list_append(ir_reg_list_single(0), 1), 2), 3), 4), 5), 6)))
     main_fn.instrs[7] = ir_call(7, 0, add7_name, args7, 7)
     main_fn.instrs[8] = ir_return(7)
+    main_fn.instr_count = 9
+    module.functions[1] = main_fn
+
+    module.fn_count = 2
+    module
+}
+
+// Sparse 7-arg call witness: add7 receives vregs [0,2,4,6,8,10,12].
+// This catches regressions where call emission assumes consecutive arg vregs.
+fn compiler_main_make_native_v2_call7_sparse_module() -> IrModule with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+
+    let add7_name = ir_name_from_bytes(97, 100, 100, 55, 4)
+    var add7_fn = ir_empty_function()
+    add7_fn.name = add7_name
+    add7_fn.param_count = 7
+    add7_fn.param_regs[0] = 0
+    add7_fn.param_regs[1] = 1
+    add7_fn.param_regs[2] = 2
+    add7_fn.param_regs[3] = 3
+    add7_fn.param_regs[4] = 4
+    add7_fn.param_regs[5] = 5
+    add7_fn.param_regs[6] = 6
+    add7_fn.reg_count = 13
+    add7_fn.instrs[0] = ir_binop(7, 0, BinaryOp::OpAdd, 1)
+    add7_fn.instrs[1] = ir_binop(8, 7, BinaryOp::OpAdd, 2)
+    add7_fn.instrs[2] = ir_binop(9, 8, BinaryOp::OpAdd, 3)
+    add7_fn.instrs[3] = ir_binop(10, 9, BinaryOp::OpAdd, 4)
+    add7_fn.instrs[4] = ir_binop(11, 10, BinaryOp::OpAdd, 5)
+    add7_fn.instrs[5] = ir_binop(12, 11, BinaryOp::OpAdd, 6)
+    add7_fn.instrs[6] = ir_return(12)
+    add7_fn.instr_count = 7
+    module.functions[0] = add7_fn
+
+    let main_name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    var main_fn = ir_empty_function()
+    main_fn.name = main_name
+    main_fn.param_count = 0
+    main_fn.reg_count = 14
+    main_fn.instrs[0] = ir_load_imm(0, 1)
+    main_fn.instrs[1] = ir_load_imm(2, 2)
+    main_fn.instrs[2] = ir_load_imm(4, 4)
+    main_fn.instrs[3] = ir_load_imm(6, 8)
+    main_fn.instrs[4] = ir_load_imm(8, 16)
+    main_fn.instrs[5] = ir_load_imm(10, 32)
+    main_fn.instrs[6] = ir_load_imm(12, 64)
+    let arg12 = Some(Box::new(ir_reg_list_single(12)))
+    let arg10 = Some(Box::new(ir_reg_list_cons(10, arg12)))
+    let arg8 = Some(Box::new(ir_reg_list_cons(8, arg10)))
+    let arg6 = Some(Box::new(ir_reg_list_cons(6, arg8)))
+    let arg4 = Some(Box::new(ir_reg_list_cons(4, arg6)))
+    let arg2 = Some(Box::new(ir_reg_list_cons(2, arg4)))
+    let args7 = Some(Box::new(ir_reg_list_cons(0, arg2)))
+    var call = ir_instr_new(IrOpcode::IrCall)
+    call.dst = 13
+    call.fn_id = 0
+    call.name = add7_name
+    call.src1 = 0
+    call.src2 = 2
+    call.imm_flags = 7707
+    call.call_args = args7
+    call.arg_count = 7
+    main_fn.instrs[7] = call
+    main_fn.instrs[8] = ir_return(13)
     main_fn.instr_count = 9
     module.functions[1] = main_fn
 
@@ -27636,6 +27721,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-emit-call7" {
             run_native_v2_emit_call7(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-call7-sparse" {
+            run_native_v2_emit_call7_sparse(args, arg_idx)
             return
         } else if mode == "--native-v2-emit-strlen" {
             run_native_v2_emit_strlen(args, arg_idx)
