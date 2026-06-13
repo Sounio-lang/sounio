@@ -142,6 +142,23 @@ pub struct VizWorkbenchSessionTimeline {
     pub timeline_hash: i64,
 }
 
+pub struct VizWorkbenchSessionArchive {
+    pub valid: bool,
+    pub session_hash: i64,
+    pub project_hash: i64,
+    pub timeline_hash: i64,
+    pub diff_hash: i64,
+    pub selected_frame: i64,
+    pub frame_count: i64,
+    pub final_time_ms: i64,
+    pub final_frame_hash: i64,
+    pub final_audit_hash: i64,
+    pub selected_time_ms: i64,
+    pub selected_frame_hash: i64,
+    pub selected_audit_hash: i64,
+    pub archive_hash: i64,
+}
+
 pub struct VizWorkbenchProjectStore {
     pub project: VizSceneProject,
     pub history: VizSceneHistory,
@@ -236,6 +253,25 @@ pub fn viz_workbench_session_timeline_empty() -> VizWorkbenchSessionTimeline {
         selected_frame_delta: 0,
         selected_audit_delta: 0,
         timeline_hash: 0,
+    }
+}
+
+pub fn viz_workbench_session_archive_empty() -> VizWorkbenchSessionArchive {
+    VizWorkbenchSessionArchive {
+        valid: false,
+        session_hash: 0,
+        project_hash: 0,
+        timeline_hash: 0,
+        diff_hash: 0,
+        selected_frame: 0,
+        frame_count: 0,
+        final_time_ms: 0,
+        final_frame_hash: 0,
+        final_audit_hash: 0,
+        selected_time_ms: 0,
+        selected_frame_hash: 0,
+        selected_audit_hash: 0,
+        archive_hash: 0,
     }
 }
 
@@ -1246,6 +1282,92 @@ pub fn viz_workbench_replay_to_frame(
     timeline
 }
 
+pub fn viz_workbench_session_archive_hash(archive: &VizWorkbenchSessionArchive) -> i64 with Mut {
+    var h: i64 = 307
+    h = h * 131 + archive.session_hash
+    h = h * 131 + archive.project_hash
+    h = h * 131 + archive.timeline_hash
+    h = h * 131 + archive.diff_hash
+    h = h * 131 + archive.selected_frame
+    h = h * 131 + archive.frame_count
+    h = h * 131 + archive.final_time_ms
+    h = h * 131 + archive.final_frame_hash
+    h = h * 131 + archive.final_audit_hash
+    h = h * 131 + archive.selected_time_ms
+    h = h * 131 + archive.selected_frame_hash
+    h = h * 131 + archive.selected_audit_hash
+    h
+}
+
+pub fn viz_workbench_session_archive_build(
+    session: &VizWorkbenchReplaySession,
+    project: &VizSceneProject,
+    timeline: &VizWorkbenchSessionTimeline,
+    diff: &VizWorkbenchProjectDiff,
+) -> VizWorkbenchSessionArchive with Mut {
+    if !timeline.valid { return viz_workbench_session_archive_empty() }
+    if !viz_scene_project_verify(project) { return viz_workbench_session_archive_empty() }
+    if session.frame_count <= 0 || session.frame_count > 33 { return viz_workbench_session_archive_empty() }
+    if session.step_count < 0 || session.step_count > 32 { return viz_workbench_session_archive_empty() }
+    if session.frame_count != session.step_count + 1 { return viz_workbench_session_archive_empty() }
+    let session_hash = viz_workbench_replay_session_hash(session)
+    if project.replay_signature != session_hash { return viz_workbench_session_archive_empty() }
+    if project.final_frame_hash != session.final_frame_hash { return viz_workbench_session_archive_empty() }
+    if project.final_audit_hash != session.final_audit_hash { return viz_workbench_session_archive_empty() }
+    let final_time = session.times_ms[(session.frame_count - 1) as usize]
+    if project.final_time_ms != final_time { return viz_workbench_session_archive_empty() }
+    if timeline.frame_count != session.frame_count { return viz_workbench_session_archive_empty() }
+    if timeline.selected_frame < 0 || timeline.selected_frame >= session.frame_count { return viz_workbench_session_archive_empty() }
+    if timeline.selected_time_ms != session.times_ms[timeline.selected_frame as usize] { return viz_workbench_session_archive_empty() }
+    if timeline.selected_frame_hash != session.frame_hashes[timeline.selected_frame as usize] { return viz_workbench_session_archive_empty() }
+    if timeline.selected_audit_hash != session.audit_hashes[timeline.selected_frame as usize] { return viz_workbench_session_archive_empty() }
+    var diff_hash = 0
+    if diff.valid { diff_hash = diff.diff_hash }
+    var archive = VizWorkbenchSessionArchive {
+        valid: true,
+        session_hash: session_hash,
+        project_hash: project.project_hash,
+        timeline_hash: timeline.timeline_hash,
+        diff_hash: diff_hash,
+        selected_frame: timeline.selected_frame,
+        frame_count: session.frame_count,
+        final_time_ms: final_time,
+        final_frame_hash: session.final_frame_hash,
+        final_audit_hash: session.final_audit_hash,
+        selected_time_ms: timeline.selected_time_ms,
+        selected_frame_hash: timeline.selected_frame_hash,
+        selected_audit_hash: timeline.selected_audit_hash,
+        archive_hash: 0,
+    }
+    archive.archive_hash = viz_workbench_session_archive_hash(&archive)
+    archive
+}
+
+pub fn viz_workbench_session_archive_verify(
+    archive: &VizWorkbenchSessionArchive,
+    session: &VizWorkbenchReplaySession,
+    project: &VizSceneProject,
+    timeline: &VizWorkbenchSessionTimeline,
+    diff: &VizWorkbenchProjectDiff,
+) -> bool with Mut {
+    if !archive.valid { return false }
+    let rebuilt = viz_workbench_session_archive_build(session, project, timeline, diff)
+    if !rebuilt.valid { return false }
+    archive.archive_hash == rebuilt.archive_hash &&
+        archive.session_hash == rebuilt.session_hash &&
+        archive.project_hash == rebuilt.project_hash &&
+        archive.timeline_hash == rebuilt.timeline_hash &&
+        archive.diff_hash == rebuilt.diff_hash &&
+        archive.selected_frame == rebuilt.selected_frame &&
+        archive.frame_count == rebuilt.frame_count &&
+        archive.final_time_ms == rebuilt.final_time_ms &&
+        archive.final_frame_hash == rebuilt.final_frame_hash &&
+        archive.final_audit_hash == rebuilt.final_audit_hash &&
+        archive.selected_time_ms == rebuilt.selected_time_ms &&
+        archive.selected_frame_hash == rebuilt.selected_frame_hash &&
+        archive.selected_audit_hash == rebuilt.selected_audit_hash
+}
+
 pub fn viz_workbench_project_capture(
     project: &!VizSceneProject,
     scene: &VizScene,
@@ -1739,6 +1861,38 @@ pub fn viz_workbench_replay_emit_html_archive(session: &VizWorkbenchReplaySessio
     } else {
         viz_workbench_print_i64(0)
     }
+    print(" -->\n")
+}
+
+pub fn viz_workbench_session_archive_emit(archive: &VizWorkbenchSessionArchive) with IO, Mut, Div {
+    print("<!-- workbench-session-archive valid=")
+    if archive.valid { print("1") } else { print("0") }
+    print(" archive-hash=")
+    viz_workbench_print_i64(archive.archive_hash)
+    print(" session-hash=")
+    viz_workbench_print_i64(archive.session_hash)
+    print(" project-hash=")
+    viz_workbench_print_i64(archive.project_hash)
+    print(" timeline-hash=")
+    viz_workbench_print_i64(archive.timeline_hash)
+    print(" diff-hash=")
+    viz_workbench_print_i64(archive.diff_hash)
+    print(" selected-frame=")
+    viz_workbench_print_i64(archive.selected_frame)
+    print(" frames=")
+    viz_workbench_print_i64(archive.frame_count)
+    print(" selected-time-ms=")
+    viz_workbench_print_i64(archive.selected_time_ms)
+    print(" final-time-ms=")
+    viz_workbench_print_i64(archive.final_time_ms)
+    print(" selected-frame-hash=")
+    viz_workbench_print_i64(archive.selected_frame_hash)
+    print(" final-frame-hash=")
+    viz_workbench_print_i64(archive.final_frame_hash)
+    print(" selected-audit-hash=")
+    viz_workbench_print_i64(archive.selected_audit_hash)
+    print(" final-audit-hash=")
+    viz_workbench_print_i64(archive.final_audit_hash)
     print(" -->\n")
 }
 

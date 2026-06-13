@@ -139,6 +139,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Workbench replay sessions can be inspected as Sounio-owned frame timelines and replayed to selected frames.",
     ),
     Evidence(
+        "workbench-session-archive",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchSessionArchive",
+            "viz_workbench_session_archive_build",
+            "viz_workbench_session_archive_verify",
+            "viz_workbench_session_archive_emit",
+        ),
+        "Workbench replay sessions, timeline frames, visual projects, and A/B diffs can be bundled as a Sounio-owned archive.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -418,6 +430,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_session_timeline",
         detail="Workbench replay session timeline navigation proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-session-archive-run",
+        "label",
+        "viz_workbench_session_archive",
+        detail="Workbench session timeline archive proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",

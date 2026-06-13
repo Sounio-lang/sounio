@@ -238,6 +238,22 @@ VIZ_WORKBENCH_SESSION_TIMELINE_PASS
 
 The test records a Workbench replay session, derives a Sounio-owned `VizWorkbenchSessionTimeline`, reconstructs both an intermediate frame and the clamped final frame in fresh scenes, and proves selected frame/time/hash/delta state through native Visual IR timeline controls.
 
+## Workbench Session Archive Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_session_archive.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_SESSION_ARCHIVE_PASS
+```
+
+The test records a Workbench replay session, captures a Visual Project Format envelope, computes an A/B project diff, derives a selected timeline frame, and bundles all of those Sounio-owned hashes into `VizWorkbenchSessionArchive` with verify and passive export surfaces.
+
 ## Workbench Project Controls Proof
 
 Run:
