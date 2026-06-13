@@ -122,6 +122,11 @@ set +e
 MADAROS_THIN_EXPR_ARGS_RC=$?
 set -e
 [[ "$MADAROS_THIN_EXPR_ARGS_RC" -eq 7 ]] || fail "Madaros thin imported expr-args call expected exit 7, got $MADAROS_THIN_EXPR_ARGS_RC"
+set +e
+./bin/madaros run tests/multimodule/thin_five_literal_args_main.sio
+MADAROS_THIN_FIVE_ARGS_RC=$?
+set -e
+[[ "$MADAROS_THIN_FIVE_ARGS_RC" -eq 31 ]] || fail "Madaros thin imported five-arg call expected exit 31, got $MADAROS_THIN_FIVE_ARGS_RC"
 for witness in \
   tests/multimodule/thin_parenthesized_local_args_main.sio \
   tests/multimodule/thin_typed_var_args_main.sio \
