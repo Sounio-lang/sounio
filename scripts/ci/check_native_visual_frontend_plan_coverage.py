@@ -339,6 +339,7 @@ REQUIRED: tuple[Evidence, ...] = (
         (
             "struct VizWorkbenchExperimentExportPacket",
             "viz_workbench_experiment_export_packet_build",
+            "viz_workbench_experiment_export_packet_capture",
             "viz_workbench_experiment_export_packet_verify",
             "viz_workbench_experiment_export_packet_emit",
         ),
