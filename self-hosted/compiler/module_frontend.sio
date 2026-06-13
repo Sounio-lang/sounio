@@ -3123,6 +3123,9 @@ fn module_frontend_source_param_plus_offset(data: string, start: i64, end: i64, 
     if !off.0 {
         return (false, 0)
     }
+    if off.1 > 127 {
+        return (false, 0)
+    }
     i = module_frontend_source_skip_digits(data, i, e)
     i = module_frontend_source_skip_ws(data, i, e)
     if i != e {
@@ -3175,6 +3178,147 @@ fn module_frontend_source_call_two_param_offsets_packed(data: string, start: i64
         }
     }
     (true, (left_value * 4294967296) + right.1)
+}
+
+fn module_frontend_source_param_or_local_plus_offset(data: string, start: i64, end: i64, param: Name, local: Name, has_local: bool) -> (bool, i64) with Mut, Panic, Div {
+    var s = module_frontend_source_skip_ws(data, start, end)
+    var e = end
+    while e > s {
+        let tail = data[(e - 1) as usize]
+        if tail == (32 as i8) || tail == (9 as i8) || tail == (10 as i8) || tail == (13 as i8) {
+            e = e - 1
+        } else {
+            break
+        }
+    }
+    if s >= e {
+        return (false, 0)
+    }
+    if data[s as usize] == (40 as i8) {
+        let close = module_frontend_source_paren_close(data, s, e)
+        if close == e - 1 {
+            return module_frontend_source_param_or_local_plus_offset(data, s + 1, close, param, local, has_local)
+        }
+    }
+    let name = module_frontend_source_ident_at(data, s, e)
+    if name.len <= 0 {
+        return (false, 0)
+    }
+    var mode: i64 = 0
+    if ir_name_eq(name, param) {
+        mode = 0
+    } else if has_local && ir_name_eq(name, local) {
+        mode = 1
+    } else {
+        return (false, 0)
+    }
+    var i = module_frontend_source_skip_ws(data, s + name.len, e)
+    if i >= e {
+        return (true, mode * 256)
+    }
+    if data[i as usize] != (43 as i8) {
+        return (false, 0)
+    }
+    i = module_frontend_source_skip_ws(data, i + 1, e)
+    let off = module_frontend_source_int_at(data, i, e)
+    if !off.0 {
+        return (false, 0)
+    }
+    if off.1 > 127 {
+        return (false, 0)
+    }
+    i = module_frontend_source_skip_digits(data, i, e)
+    i = module_frontend_source_skip_ws(data, i, e)
+    if i != e {
+        return (false, 0)
+    }
+    (true, (mode * 256) + off.1)
+}
+
+fn module_frontend_source_call_two_runtime_refs_packed(data: string, start: i64, end: i64, param: Name, local: Name, local_off: i64) -> (bool, i64) with Mut, Panic, Div {
+    var open = module_frontend_source_skip_ws(data, start, end)
+    if open >= end || data[open as usize] != (40 as i8) {
+        return (false, 0)
+    }
+    let close = module_frontend_source_paren_close(data, open, end)
+    if close < 0 {
+        return (false, 0)
+    }
+    var comma: i64 = 0 - 1
+    var depth: i64 = 0
+    var i = open + 1
+    while i < close {
+        let ch = data[i as usize]
+        if ch == (40 as i8) {
+            depth = depth + 1
+        } else if ch == (41 as i8) {
+            depth = depth - 1
+        } else if ch == (44 as i8) && depth == 0 {
+            comma = i
+            i = close
+        }
+        i = i + 1
+    }
+    if comma < 0 {
+        return (false, 0)
+    }
+    let left = module_frontend_source_param_or_local_plus_offset(data, open + 1, comma, param, local, true)
+    if !left.0 {
+        return (false, 0)
+    }
+    let left_value = left.1
+    let right = module_frontend_source_param_or_local_plus_offset(data, comma + 1, close, param, local, true)
+    if !right.0 {
+        return (false, 0)
+    }
+    let after = module_frontend_source_skip_ws(data, close + 1, end)
+    if after < end {
+        let tail = data[after as usize]
+        if tail != (59 as i8) && tail != (10 as i8) && tail != (13 as i8) && tail != (125 as i8) {
+            return (false, 0)
+        }
+    }
+    let arg0_mode = left_value >> 8
+    let arg0_off = left_value & 255
+    let arg1_mode = right.1 >> 8
+    let arg1_off = right.1 & 255
+    (true, (local_off * 16777216) + (arg0_mode * 1048576) + (arg0_off * 4096) + (arg1_mode * 256) + arg1_off)
+}
+
+fn module_frontend_source_body_one_local_runtime_call_packed(data: string, body: i64, end: i64, size: i64, param: Name, target: Name) -> (bool, i64) with Mut, Panic, Div {
+    var pos = module_frontend_source_skip_ws(data, body, end)
+    if !module_frontend_source_is_let_at(data, pos, end) && !module_frontend_source_is_var_at(data, pos, end) {
+        return (false, 0)
+    }
+    var name_pos = module_frontend_source_skip_ws(data, pos + 4, end)
+    let local_name = module_frontend_source_ident_at(data, name_pos, end)
+    if local_name.len <= 0 {
+        return (false, 0)
+    }
+    var rhs_pos = module_frontend_source_skip_ws(data, name_pos + local_name.len, end)
+    if rhs_pos < end && data[rhs_pos as usize] == (58 as i8) {
+        while rhs_pos < end && data[rhs_pos as usize] != (61 as i8) {
+            rhs_pos = rhs_pos + 1
+        }
+    }
+    rhs_pos = module_frontend_source_skip_ws(data, rhs_pos, end)
+    if rhs_pos >= end || data[rhs_pos as usize] != (61 as i8) {
+        return (false, 0)
+    }
+    let local_expr_start = module_frontend_source_skip_ws(data, rhs_pos + 1, end)
+    let local_expr_end = module_frontend_source_line_end(data, local_expr_start, end)
+    let local_offset = module_frontend_source_param_plus_offset(data, local_expr_start, local_expr_end, param)
+    if !local_offset.0 {
+        return (false, 0)
+    }
+    pos = module_frontend_source_after_line(data, local_expr_end, end)
+    let expr_start = module_frontend_source_strip_return_prefix(data, pos, end)
+    let expr_end = module_frontend_source_line_end(data, expr_start, end)
+    let callee = module_frontend_source_ident_at(data, expr_start, expr_end)
+    if callee.len <= 0 || !ir_name_eq(callee, target) {
+        return (false, 0)
+    }
+    module_frontend_source_call_two_runtime_refs_packed(data, expr_start + callee.len, expr_end, param, local_name, local_offset.1)
 }
 
 fn module_frontend_lookup_source_locals4_i64_values(name: Name, local0_name: Name, local1_name: Name, local2_name: Name, local3_name: Name, value0: i64, value1: i64, value2: i64, value3: i64, has_local0: bool, has_local1: bool, has_local2: bool, has_local3: bool) -> (bool, i64) with Mut, Panic, Div {
@@ -3603,6 +3747,14 @@ fn module_frontend_imported_simple_global_push_fn(
         let body_end_for_param = module_frontend_source_body_end(data, body, size)
         let final_callee_for_param = module_frontend_source_body_final_call_callee(data, body, body_end_for_param, size)
         if param_name.len > 0 && final_callee_for_param.len > 0 {
+            let local_runtime_args = module_frontend_source_body_one_local_runtime_call_packed(data, body, body_end_for_param, size, param_name, final_callee_for_param)
+            if local_runtime_args.0 {
+                MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 26
+                MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize] = module_frontend_name_hash(final_callee_for_param)
+                MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = local_runtime_args.1
+                MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT = idx + 1
+                return
+            }
             let expr_start_for_param = module_frontend_source_strip_return_prefix(data, module_frontend_source_skip_ws(data, body, body_end_for_param), body_end_for_param)
             let expr_end_for_param = module_frontend_source_line_end(data, expr_start_for_param, body_end_for_param)
             let runtime_args = module_frontend_source_call_two_param_offsets_packed(data, expr_start_for_param + final_callee_for_param.len, expr_end_for_param, param_name)
