@@ -321,6 +321,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment package slots, active package, notebook archives, selected frame, timeline hashes, and package/render/audit deltas are bound into one native cockpit state.",
     ),
     Evidence(
+        "workbench-experiment-cockpit-playback",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentCockpitPlayback",
+            "viz_workbench_handle_experiment_cockpit_playback_event",
+            "viz_workbench_experiment_cockpit_playback_verify",
+            "viz_workbench_experiment_cockpit_playback_emit",
+        ),
+        "Experiment cockpit playback controls step active, baseline, and compare timelines with native Visual IR time buttons and verified frame/time/hash state.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -690,6 +702,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_experiment_timeline_cockpit",
         detail="Workbench experiment timeline cockpit proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-experiment-cockpit-playback-run",
+        "label",
+        "viz_workbench_experiment_cockpit_playback",
+        detail="Workbench experiment cockpit playback proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",
