@@ -147,6 +147,11 @@ set +e
 MADAROS_THIN_RUNTIME_MIXED_SEVEN_ARGS_RC=$?
 set -e
 [[ "$MADAROS_THIN_RUNTIME_MIXED_SEVEN_ARGS_RC" -eq 31 ]] || fail "Madaros mixed runtime/literal imported seven-arg call expected exit 31, got $MADAROS_THIN_RUNTIME_MIXED_SEVEN_ARGS_RC"
+set +e
+./bin/madaros run tests/multimodule/thin_runtime_local_mixed_seven_main.sio
+MADAROS_THIN_RUNTIME_LOCAL_MIXED_SEVEN_ARGS_RC=$?
+set -e
+[[ "$MADAROS_THIN_RUNTIME_LOCAL_MIXED_SEVEN_ARGS_RC" -eq 50 ]] || fail "Madaros local/runtime/literal imported seven-arg call expected exit 50, got $MADAROS_THIN_RUNTIME_LOCAL_MIXED_SEVEN_ARGS_RC"
 for witness in \
   tests/multimodule/thin_parenthesized_local_args_main.sio \
   tests/multimodule/thin_typed_var_args_main.sio \
