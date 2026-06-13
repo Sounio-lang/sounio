@@ -1,0 +1,45 @@
+//@ run-pass
+//@ description: reading an inline-Option field of a struct (a64 aggregate-branch parity with x86)
+//
+// Regression guard: the a64 postfix field-read used to omit type_is_option_inline
+// from its aggregate-detection, so reading a struct field of type Option<T> took
+// the scalar (single-word load) branch instead of leaving a pointer to the 2-slot
+// Option. The subsequent `if let Some(..)` then dereferenced a bad base and
+// SIGSEGV'd. x86 always handled this; this exercises the a64 path.
+
+struct Holder { o: Option<i64>, z: i64 }
+struct Tail { a: i64, o: Option<i64> }
+
+fn main() -> i32 with IO, Mut, Panic {
+    var fail: i64 = 0
+
+    // Option field at offset 0, followed by a scalar (the original crash shape).
+    let h = Holder { o: Some(7), z: 9 }
+    if h.z != 9 { print("z FAIL\n"); fail = fail + 1 }
+    if let Some(x) = h.o {
+        if x == 7 { print("opt-first PASS\n") } else { print("opt-first FAIL (value)\n"); fail = fail + 1 }
+    } else {
+        print("opt-first FAIL (branch)\n"); fail = fail + 1
+    }
+
+    // Option field at a non-zero offset (after a scalar).
+    let t = Tail { a: 5, o: Some(8) }
+    if t.a != 5 { print("a FAIL\n"); fail = fail + 1 }
+    if let Some(y) = t.o {
+        if y == 8 { print("opt-tail PASS\n") } else { print("opt-tail FAIL (value)\n"); fail = fail + 1 }
+    } else {
+        print("opt-tail FAIL (branch)\n"); fail = fail + 1
+    }
+
+    // None must not enter the Some branch, and the neighbouring field stays intact.
+    let n = Holder { o: None, z: 4 }
+    if let Some(_) = n.o {
+        print("none FAIL (entered Some)\n"); fail = fail + 1
+    } else {
+        if n.z == 4 { print("none PASS\n") } else { print("none FAIL (z)\n"); fail = fail + 1 }
+    }
+
+    if fail == 0 { print("option_struct_field_read: ALL PASS\n"); return 0 }
+    print("option_struct_field_read: SOME FAIL\n")
+    return 1 as i32
+}

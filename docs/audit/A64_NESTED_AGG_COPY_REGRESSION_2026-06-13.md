@@ -64,7 +64,11 @@ pre-`47c1a4246` `dst_start - (nslots - 1)` form.
 
 - `_diag_sobol` SIGILL is **pre-existing** (fails on a5ab too) — a different bug
   (field after a `[f64;5000]` array + huge by-value SRET), NOT covered by this fix.
-- a64 field-**read** aggregate-detection (lean_single ~30409, ~30445) is missing
+- a64 field-**read** aggregate-detection (lean_single ~30409, ~30445) was missing
   `type_is_option_inline(EXPR_TY, EXPR_TY_HASH)` that the x86 path (~14675,
-  ~14711) has. Option-only; latent; left as a separate follow-up to keep this
-  commit atomic.
+  ~14711) has — so reading a struct field of type `Option<T>` took the scalar
+  (single-word) branch instead of leaving a pointer to the 2-slot Option, and the
+  following `if let Some(..)` SIGSEGV'd. **RESOLVED in a follow-up commit** (added
+  the predicate to both a64 read paths; regression test
+  `tests/run-pass/option_struct_field_read.sio`). Was Option-only and orthogonal
+  to the copy anchor, so kept as a separate atomic commit.
