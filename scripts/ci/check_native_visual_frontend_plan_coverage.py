@@ -201,6 +201,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Notebook baseline and comparison sessions can be scrubbed at arbitrary frames with timeline, frame, and audit deltas.",
     ),
     Evidence(
+        "workbench-experiment-diff-overlay",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentDiffOverlay",
+            "viz_workbench_experiment_diff_overlay_apply",
+            "viz_workbench_experiment_diff_overlay_verify",
+            "viz_workbench_experiment_diff_overlay_emit",
+        ),
+        "Experiment diff player state can be applied to native Visual IR controls as a visible and auditable overlay.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -510,6 +522,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_experiment_diff_player",
         detail="Workbench experiment diff player proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-experiment-diff-overlay-run",
+        "label",
+        "viz_workbench_experiment_diff_overlay",
+        detail="Workbench experiment diff overlay proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",

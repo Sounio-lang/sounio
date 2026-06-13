@@ -316,7 +316,7 @@ Expected output:
 VIZ_WORKBENCH_EXPERIMENT_DIFF_PLAYER_PASS
 ```
 
-The test records baseline and comparison Workbench runs, builds a notebook, scrubs both sessions at a shared early frame and at a late baseline/comparison frame pair, verifies timeline hashes, frame hashes, audit hashes, time deltas, hash distances, and emits passive `workbench-experiment-diff-player` metadata before static HTML/SVG export.
+The test records baseline and comparison Workbench runs, builds a notebook, scrubs both sessions at a shared early frame and at a late baseline/comparison frame pair, verifies timeline hashes, frame hashes, audit hashes, time deltas, hash distances, applies a `VizWorkbenchExperimentDiffOverlay` onto the comparison scene, proves the overlay changes the Canvas frame hash, and emits passive `workbench-experiment-diff-player` and `workbench-experiment-diff-overlay` metadata before static HTML/SVG export.
 
 ## Workbench Project Controls Proof
 
