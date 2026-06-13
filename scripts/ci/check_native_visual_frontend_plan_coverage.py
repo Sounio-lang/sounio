@@ -536,6 +536,22 @@ REQUIRED: tuple[Evidence, ...] = (
         "Multiple sealed evidence packages can be gathered into a native observatory that compares selected events, rendered frame hashes, scene audit hashes, and proves zero aggregate frame/browser drift.",
     ),
     Evidence(
+        "workbench-experiment-evidence-observatory-cockpit",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "VizWorkbenchExperimentEvidenceObservatoryCockpit",
+            "viz_workbench_experiment_evidence_observatory_cockpit_apply",
+            "viz_workbench_experiment_evidence_observatory_cockpit_verify",
+            "viz_workbench_handle_experiment_evidence_observatory_cockpit_event",
+            "viz_workbench_experiment_evidence_observatory_cockpit_emit",
+            "baseline_package",
+            "compare_package",
+            "total_browser_drift",
+        ),
+        "The sealed evidence observatory is projected into native Visual IR controls with selected/baseline/compare navigation, passive cockpit metadata, and zero aggregate drift checks.",
+    ),
+    Evidence(
         "workbench-experiment-import-replay-zero-drift",
         "contains",
         "tests/run-pass/viz_workbench_experiment_diff_player.sio",
