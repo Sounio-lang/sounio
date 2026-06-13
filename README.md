@@ -279,6 +279,8 @@ The Sounio language server (`bin/sounio-lsp`) ships with the checkout and is the
 | `formal/` | Lean 4 proofs (epistemic type invariants) |
 | `tests/` | `run-pass/`, `compile-fail/`, `ui/`, `stdlib/` |
 
+**Compiler identity:** `bin/souc` is the checked Stage0 bootstrap compiler (`lean_single.sio`). The Stage1 modular compiler built from `self-hosted/compiler/main.sio` is **Madaros**; build it with `make build-madaros` and invoke it via `bin/madaros`.
+
 ---
 
 ## Design Principles

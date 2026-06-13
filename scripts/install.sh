@@ -6,11 +6,12 @@
 #
 # Usage:
 #   bash scripts/install.sh [--prefix DIR] [--target TRIPLE] [--force]
-#                           [--no-stdlib] [--symlink-souc]
+#                           [--no-stdlib] [--symlink-souc] [--with-madaros]
 #
 # Defaults:
 #   --prefix     $HOME/.local
 #   --target     auto-detected from `uname -s/-m`
+#   --with-madaros  also install the Stage1 modular compiler (Madaros)
 #
 # Layout produced under <prefix>:
 #   <prefix>/bin/souc                    (launcher; PATH-friendly)
@@ -32,6 +33,7 @@ TARGET=""
 FORCE=0
 COPY_STDLIB=1
 SYMLINK_SOUC=0
+WITH_MADAROS=0
 
 print_usage() {
   sed -n '2,25p' "$0"
@@ -46,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --force)         FORCE=1; shift;;
     --no-stdlib)     COPY_STDLIB=0; shift;;
     --symlink-souc)  SYMLINK_SOUC=1; shift;;
+    --with-madaros)  WITH_MADAROS=1; shift;;
     -h|--help)       print_usage; exit 0;;
     *)
       echo "error: unknown argument: $1" >&2
@@ -118,6 +121,7 @@ echo "  target:  $TARGET"
 echo "  binary:  $ART_BIN -> $BIN_DIR/souc-self-hosted-$TARGET"
 echo "  stdlib:  $(du -sh stdlib | awk '{print $1}') -> $LIB_STDLIB  (copy: $COPY_STDLIB)"
 echo "  doc:     $DOC_DIR"
+echo "  madaros: $WITH_MADAROS"
 echo
 
 mkdir -p "$BIN_DIR" "$LIB_ROOT" "$LIB_SCRIPTS" "$DOC_DIR"
@@ -136,6 +140,7 @@ esac
 
 # ------------------------------------------------------------------ copy support libs
 install -m 0644 "$ROOT_DIR/scripts/lib/resolve_souc.sh"      "$LIB_SCRIPTS/"
+install -m 0644 "$ROOT_DIR/scripts/lib/resolve_madaros.sh"   "$LIB_SCRIPTS/"
 install -m 0644 "$ROOT_DIR/scripts/lib/macos_codesign.sh"    "$LIB_SCRIPTS/"
 
 # ------------------------------------------------------------------ install launcher
@@ -153,7 +158,22 @@ install -m 0755 "$ROOT_DIR/bin/souc" "$BIN_DIR/souc"
 # $ROOT_DIR/scripts/lib/macos_codesign.sh path resolves.
 mkdir -p "$PREFIX/scripts/lib"
 ln -sfn "$LIB_SCRIPTS/resolve_souc.sh"   "$PREFIX/scripts/lib/resolve_souc.sh"
+ln -sfn "$LIB_SCRIPTS/resolve_madaros.sh" "$PREFIX/scripts/lib/resolve_madaros.sh"
 ln -sfn "$LIB_SCRIPTS/macos_codesign.sh" "$PREFIX/scripts/lib/macos_codesign.sh"
+
+# ------------------------------------------------------------------ Madaros (optional)
+if [[ "$WITH_MADAROS" -eq 1 ]]; then
+  MADAROS_ART="$ROOT_DIR/artifacts/self-hosted/madaros"
+  if [[ -x "$MADAROS_ART" ]]; then
+    MADAROS_DEST_DIR="$PREFIX/artifacts/self-hosted"
+    mkdir -p "$MADAROS_DEST_DIR"
+    install -m 0755 "$MADAROS_ART" "$MADAROS_DEST_DIR/madaros"
+    install -m 0755 "$ROOT_DIR/bin/madaros" "$BIN_DIR/madaros"
+    echo "  ok  installed Madaros -> $BIN_DIR/madaros"
+  else
+    echo "  WARN  --with-madaros requested but $MADAROS_ART not found; run make build-madaros first" >&2
+  fi
+fi
 
 # ------------------------------------------------------------------ stdlib
 if [[ "$COPY_STDLIB" -eq 1 ]]; then
@@ -202,6 +222,6 @@ Next steps:
   souc check examples/hello.sio   # if running from this checkout
 
 Uninstall:
-  rm -f $BIN_DIR/souc $BIN_DIR/souc-self-hosted-$TARGET $BIN_DIR/souc-linux-x86_64
-  rm -rf $LIB_ROOT $DOC_DIR $PREFIX/stdlib $PREFIX/scripts/lib $PREFIX/tools/repl.sh
+  rm -f $BIN_DIR/souc $BIN_DIR/souc-self-hosted-$TARGET $BIN_DIR/souc-linux-x86_64 $BIN_DIR/madaros
+  rm -rf $LIB_ROOT $DOC_DIR $PREFIX/stdlib $PREFIX/scripts/lib $PREFIX/tools/repl.sh $PREFIX/artifacts
 EOF

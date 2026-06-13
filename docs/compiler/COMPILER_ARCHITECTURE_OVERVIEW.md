@@ -18,6 +18,8 @@ There are two views you need to hold at the same time:
 - implementation view: learn the compiler from `self-hosted/`
 - public behavior view: validate claims against the checked compiler artifact under `artifacts/omega/`
 
+Sounio has two compiler artifacts. `bin/souc` is the Stage0 bootstrap compiler (`self-hosted/compiler/lean_single.sio`). The Stage1 modular compiler, built from `self-hosted/compiler/main.sio`, is **Madaros**. Madaros is the serious-compiler lane where new parser, checker, IR, and backend semantics land first. Build it with `make build-madaros` and invoke it as `bin/madaros`.
+
 The checked artifacts used by the docs are:
 
 ```bash

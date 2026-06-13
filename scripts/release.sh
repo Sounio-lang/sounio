@@ -67,6 +67,10 @@ Extract and add to PATH:
     souc --version
     souc info
 
+Optional Madaros (Stage1 modular compiler):
+    # if the build machine has Madaros built:
+    # ./sounio-$VERSION-$TARGET/bin/madaros --version
+
 Documentation:
     share/doc/sounio/INSTALL.md
     share/doc/sounio/KNOWN_LIMITATIONS.md

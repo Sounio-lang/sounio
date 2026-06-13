@@ -149,9 +149,10 @@ Do not hardcode ad hoc compiler routing if a repo resolver already exists.
 
 ### Canonical resolution path
 Use:
-- `scripts/lib/resolve_souc.sh`
+- `scripts/lib/resolve_souc.sh` for the Stage0 bootstrap compiler (`bin/souc`).
+- `scripts/lib/resolve_madaros.sh` for the Stage1 modular compiler (`bin/madaros`).
 
-as the canonical compiler-resolution logic unless the task explicitly targets another resolver for cleanup or compatibility reasons.
+Use these as the canonical compiler-resolution logic unless the task explicitly targets another resolver for cleanup or compatibility reasons.
 
 ### Test harness
 Use:

@@ -41,8 +41,10 @@ GPU owner, estado do Slurm e OrangeFS. Não adivinhe o mapa — leia o whereami.
 
 ## 4. Compilador
 
-- Wrapper canônico: `bin/souc` (resolve `bin/souc-linux-x86_64`).
+- Wrapper canônico Stage0: `bin/souc` (resolve `bin/souc-linux-x86_64`).
+- Compilador modular Stage1: `bin/madaros`, construído via `make build-madaros` a partir de `self-hosted/compiler/main.sio`.
 - `$SOUC check <arquivo>.sio` / `$SOUC compile <src> -o <out>`.
+- Para o modular: `bin/madaros check <arquivo>.sio` / `bin/madaros compile <src> -o <out>`.
 
 ## 5. Cluster
 

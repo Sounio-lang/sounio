@@ -21,7 +21,7 @@ Stage0 is `self-hosted/compiler/lean_single.sio`.
 
 Stage0 is the frozen bootstrap and recovery compiler. Its job is fixed-point proof, disaster recovery, release archaeology, and compatibility comparison. It is allowed to receive narrow bug fixes, but it is not the home for new language semantics.
 
-Stage1 is the modular compiler lane:
+Stage1 is the modular compiler lane, branded **Madaros**:
 
 - `self-hosted/compiler/lean.sio`
 - `self-hosted/compiler/lean_frontend.sio`
@@ -35,7 +35,7 @@ Stage1 is the modular compiler lane:
 - `self-hosted/ir/`
 - `self-hosted/native/`
 
-Stage1 is the serious compiler. New parser, resolver, typechecker, diagnostic, IR, and backend semantics must land here first, or land with a same-commit parity witness proving that Stage1 is not behind Stage0.
+Stage1 — Madaros — is the serious compiler. New parser, resolver, typechecker, diagnostic, IR, and backend semantics must land here first, or land with a same-commit parity witness proving that Stage1 is not behind Stage0.
 
 Stage2 is the promoted default compiler after parity gates prove that Stage1 can replace Stage0 as the normal developer path. Stage2 may still use Stage0 as an oracle, but not as the default implementation surface.
 

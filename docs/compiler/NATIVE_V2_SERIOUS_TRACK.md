@@ -52,8 +52,9 @@ Hello from self-hosted Sounio!
 ## What Is Self-Hosted
 
 Self-hosted today means the native-v2 driver and backend repair live in Sounio
-source and are executed by the current Sounio compiler. The generated artifact
-is a standalone x86-64 Linux ELF.
+source and are executed by the current Sounio compiler — Madaros, the Stage1
+modular compiler built from `self-hosted/compiler/main.sio`. The generated
+artifact is a standalone x86-64 Linux ELF.
 
 This is not yet a fixed-point native compiler that compiles the full Sounio
 compiler into itself. The fixed-point/bootstrap lane remains separate and must

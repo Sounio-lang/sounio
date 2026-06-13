@@ -67,7 +67,7 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 | **Hypercomplex NN (broad)** | `hypercomplex.nn = prototype` | Research/prototype unless a named gate covers the exact behavior. |
 | **Direct-driver execution at scale** | `direct_driver = prototype` | Large-surface direct-driver execution is a maturity frontier. |
 | **Windows target** | `platform.windows = prototype` | PE/COFF lane wired; not stable. |
-| **`binary.source` (modular self-hosted tree)** | `prototype` | `lean_single.sio` remains the checked binary source until parity gates prove a swap. See "Multi-Module Bundle Gap" below. |
+| **`binary.source` (Madaros / modular self-hosted tree)** | `prototype` | The Stage1 modular compiler (`self-hosted/compiler/main.sio`) is branded Madaros. `lean_single.sio` remains the checked binary source until parity gates prove a swap. See "Multi-Module Bundle Gap" below. |
 
 ### Active Known Bugs / Architectural Gaps
 

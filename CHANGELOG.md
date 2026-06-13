@@ -2,6 +2,17 @@
 
 All notable changes to the Sounio programming language and compiler are documented in this file. Sounio follows semantic versioning and this changelog is maintained for each release.
 
+## [Unreleased] — Madaros
+
+### Added
+
+- **Madaros** — official name for the Stage1 modular Sounio compiler built from `self-hosted/compiler/main.sio`.
+  - Corrected compiler banner identity from `Madares` to `Madaros`.
+  - Added `make build-madaros` target and `scripts/ci/build_modular_madaros.sh`.
+  - Added `bin/madaros` subcommand wrapper (`check`, `run`, `compile -o`, `info`, `--version`).
+  - Added `scripts/lib/resolve_madaros.sh` for modular compiler resolution.
+  - Updated native-v2 codegen gates to prefer the canonical Madaros binary.
+
 ## [2.0.0] - 2026-04-01
 
 ### Release — Epistemic Gradual Compilation

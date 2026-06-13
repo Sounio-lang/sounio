@@ -40,6 +40,15 @@ trap 'rm -rf "$WORK"' EXIT
 BOOTSTRAP_SOUC="${SOUNIO_BOOTSTRAP_SOUC:-./bin/souc}"
 MODULAR_SOUC="${SOUNIO_MODULAR_SOUC:-}"
 
+# Prefer the canonical Madaros wrapper/raw ELF if available.
+if [[ -z "$MODULAR_SOUC" ]]; then
+    if [[ -x "$ROOT_DIR/bin/madaros" ]]; then
+        MODULAR_SOUC="$ROOT_DIR/bin/madaros"
+    elif [[ -x "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; then
+        MODULAR_SOUC="$ROOT_DIR/artifacts/self-hosted/madaros"
+    fi
+fi
+
 if [[ -z "$MODULAR_SOUC" ]]; then
     echo "[gate] building modular compiler from self-hosted/compiler/main.sio (bootstrap=$BOOTSTRAP_SOUC)"
     MODULAR_SOUC="$WORK/mc.elf"

@@ -94,9 +94,10 @@ $SOUC compile file.sio -o output.elf      # emit named ELF binary
 $SOUC info                                # compiler status
 
 # Bootstrap chain
-make build    # boot4 → gen1 → gen2 → gen3, verifies gen2 == gen3
-make clean    # remove generated stages
-make check    # type-check compiler + CI gates
+make build          # boot4 → gen1 → gen2 → gen3, verifies gen2 == gen3
+make build-madaros  # build the Stage1 modular compiler (Madaros) into artifacts/self-hosted/madaros
+make clean          # remove generated stages
+make check          # type-check compiler + CI gates
 ```
 
 Testing:
