@@ -213,6 +213,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment diff player state can be applied to native Visual IR controls as a visible and auditable overlay.",
     ),
     Evidence(
+        "workbench-experiment-diff-artifact",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentDiffArtifact",
+            "viz_workbench_experiment_diff_artifact_build",
+            "viz_workbench_experiment_diff_artifact_verify",
+            "viz_workbench_experiment_diff_artifact_emit",
+        ),
+        "Notebook diff player and overlay state can be packaged with scene audit and rendered frame hashes as a portable experiment artifact.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -528,6 +540,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_experiment_diff_overlay",
         detail="Workbench experiment diff overlay proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-experiment-diff-artifact-run",
+        "label",
+        "viz_workbench_experiment_diff_artifact",
+        detail="Workbench experiment diff artifact proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",
