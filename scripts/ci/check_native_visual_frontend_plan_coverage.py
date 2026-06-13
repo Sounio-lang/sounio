@@ -490,6 +490,21 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment flight-recorder events can be selected and projected back into native Visual IR with expected browser/frame hashes and passive export metadata.",
     ),
     Evidence(
+        "workbench-experiment-flight-recorder-timeline",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "VizWorkbenchExperimentFlightRecorderTimeline",
+            "viz_workbench_experiment_flight_recorder_timeline_apply",
+            "viz_workbench_experiment_flight_recorder_timeline_verify",
+            "viz_workbench_handle_experiment_flight_recorder_timeline_event",
+            "key_action_count",
+            "mouse_action_count",
+            "current_expected_frame_hash",
+        ),
+        "Experiment flight-recorder seek state is navigable through native timeline controls, preserving selected-event state, action counters, and expected frame hashes.",
+    ),
+    Evidence(
         "workbench-experiment-import-replay-zero-drift",
         "contains",
         "tests/run-pass/viz_workbench_experiment_diff_player.sio",
