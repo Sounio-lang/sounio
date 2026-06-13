@@ -70,10 +70,14 @@ TEXT_BASE="${3:-${DETECTED:-$DEFAULT_BASE}}"
 python3 - "$TEXT_BASE" <<'PY' > "$SYMS"
 import sys
 base = int(sys.argv[1], 16)
-off = name = None
+import re
+off = None
 for line in open("/tmp/arm64host-fnmap.txt"):
     line = line.rstrip("\n")
-    if line.startswith(" off="): off = int(line.split("=",1)[1])
+    m = re.match(r"^fnmap fn=\d+ off=(\d+) name=(.+)$", line)   # 1-line format
+    if m:
+        print(f"{m.group(2)}\t{hex(base+int(m.group(1)))}"); continue
+    if line.startswith(" off="): off = int(line.split("=",1)[1])  # 3-line format
     elif line.startswith(" name=") and off is not None:
         print(f"{line.split('=',1)[1]}\t{hex(base+off)}"); off = None
 PY
