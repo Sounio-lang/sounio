@@ -2686,11 +2686,11 @@ fn multimodule_ir_counts_error(msg: string) -> MultiModuleIrCountsResult {
     }
 }
 
-struct ModuleFrontendLowerBoxResult {
-    ok: bool,
-    module: Option<Box<IrModule>>,
-    error_msg: string,
-    patch_stats: IrValidatedPatchStats,
+pub struct ModuleFrontendLowerBoxResult {
+    pub ok: bool,
+    pub module: Option<Box<IrModule>>,
+    pub error_msg: string,
+    pub patch_stats: IrValidatedPatchStats,
 }
 
 fn module_frontend_lower_box_error(msg: string) -> ModuleFrontendLowerBoxResult {
@@ -2821,6 +2821,37 @@ fn module_frontend_lower_program_box_traced(
     trace.lowered_modules = trace.lowered_modules + 1
     trace.last_stage = "lower_bodies_done"
     module_frontend_lower_box_ok(module, ir_empty_validated_patch_stats())
+}
+
+pub fn bridge_lower_single_module_box(main_path: string, trace: &! LoadMultimoduleIrTrace) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
+    // Mirror load_multimodule_lower_program_traced EXACTLY (single load_module_file,
+    // no extra large Program locals, no separate typecheck) so this fn's frame
+    // matches the proven-good one. Return the body Box<IrModule> directly instead
+    // of materializing a by-value IrModule.
+    let prog_lower = load_module_file(main_path)
+    let main_parse_errors = parser_last_error_count()
+    if main_parse_errors > 0 {
+        print("Parse failed during IR lowering for module 0: ")
+        print_int(main_parse_errors)
+        print(" errors\n")
+        return module_frontend_lower_box_error("parse_failed")
+    }
+    let epistemic = ir_empty_epistemic_section()
+    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&prog_lower, epistemic)
+    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+        return module_frontend_lower_box_error("ir_summary_failed")
+    }
+    var summary_val = (*summary_result.summary)
+    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
+        &prog_lower,
+        &summary_val,
+        epistemic
+    )
+    if body_result.had_error {
+        return module_frontend_lower_box_error("ir_bodies_failed")
+    }
+    parser_reset_last_errors()
+    module_frontend_lower_box_ok(body_result.module, body_result.patch_stats)
 }
 
 fn load_multimodule_lower_program_traced(
