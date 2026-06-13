@@ -53,13 +53,13 @@ if [[ "$MADAROS_RC" -ne 0 ]]; then
   cat /tmp/native_aggregate_abi_madaros.build.log >&2
   fail "Madaros imported aggregate expected exit 0, got $MADAROS_RC"
 fi
-if ! grep -q 'falling back to full modular IR' /tmp/native_aggregate_abi_madaros.build.log; then
+if ! grep -q 'falling back to full IR path' /tmp/native_aggregate_abi_madaros.build.log; then
   cat /tmp/native_aggregate_abi_madaros.build.log >&2
   fail "Madaros imported aggregate did not exercise the full modular IR fallback"
 fi
-if ! grep -q 'falling back to stage0 full compiler' /tmp/native_aggregate_abi_madaros.build.log; then
+if grep -q 'falling back to stage0 full compiler' /tmp/native_aggregate_abi_madaros.build.log; then
   cat /tmp/native_aggregate_abi_madaros.build.log >&2
-  fail "Madaros imported aggregate fallback classification did not reach the stage0 rescue path"
+  fail "Madaros imported aggregate used the stage0 rescue path"
 fi
 
 echo "NATIVE_AGGREGATE_ABI_PASS"
