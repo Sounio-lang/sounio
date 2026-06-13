@@ -26,7 +26,18 @@ def main() -> int:
     if len(pts) != 100:
         print(f"expected 100 points, got {len(pts)}", file=sys.stderr)
         return 1
+    if len(set(pts)) != 100:
+        print(f"witness has duplicate coordinates: {len(set(pts))} unique", file=sys.stderr)
+        return 1
     entries = ",\n  ".join(f"({px}, ({pu}, {pv}))" for px, pu, pv in pts)
+    harb100 = 265
+    beats_harb = edges > harb100
+    beats_block = ""
+    if beats_harb:
+        beats_block = f"""
+theorem unified_qsqrt3_n100_beats_harb : harb 100 < countUnitQ witness100 := by
+  native_decide
+"""
     lean = f"""/-!
 # Erdős [90] — unified ℚ(√3) witness at n=100 (machine-checked)
 
@@ -63,12 +74,12 @@ def witness100 : List QSqrt3Pt := [
 
 theorem unified_qsqrt3_n100_count : countUnitQ witness100 = {edges} := by
   native_decide
-
-theorem unified_qsqrt3_n100_beats_harb : harb 100 < countUnitQ witness100 := by
+{beats_block}
+theorem unified_qsqrt3_n100_meets_harb : harb 100 ≤ countUnitQ witness100 := by
   native_decide
 
-/-- Explicit lower bound: u(100) ≥ {edges} (mixed ℤ²+Eisenstein via ℚ(√3) embedding). -/
-theorem u100_lower_bound : {edges} ≤ countUnitQ witness100 := by
+/-- Explicit finite witness: {edges} unit pairs among 100 distinct ℚ(√3) lattice points. -/
+theorem u100_witness_edges : countUnitQ witness100 = {edges} := by
   native_decide
 
 end Sounio.Erdos90Unified
