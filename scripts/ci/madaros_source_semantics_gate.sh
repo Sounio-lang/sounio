@@ -92,6 +92,16 @@ fn main() -> i64 {
 }
 SRC
 
+write_case local_param_add7_stack_call 127 <<'SRC'
+fn add7(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {
+    return a + b + c + d + e + f + g
+}
+
+fn main() -> i64 {
+    return add7(1, 2, 4, 8, 16, 32, 64)
+}
+SRC
+
 run_case() {
   local name="$1"
   local src="$TMP_DIR/$name.sio"
@@ -127,6 +137,7 @@ run_case bool_cmp
 run_case local_param_call
 run_case local_param_const_call
 run_case local_param_add6_call
+run_case local_param_add7_stack_call
 
 echo "[madaros-source-semantics] running raw_compile_alias"
 RAW_BIN="$TMP_DIR/raw_compile_alias.elf"

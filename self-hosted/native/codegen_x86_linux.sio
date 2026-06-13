@@ -5005,6 +5005,15 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         }
         sp_i = sp_i + 1
     }
+    while sp_i < func.param_count {
+        let sp_vreg = func.param_regs[sp_i as usize]
+        if sp_vreg >= 0 {
+            let sp_stack_disp = 16 + ((sp_i - 6) * 8)
+            c.code = emit_load_rbp_disp32_rax(c.code, sp_stack_disp)
+            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(sp_vreg))
+        }
+        sp_i = sp_i + 1
+    }
 
     // --- native_v2_emit_machine_function (inlined, no &!) ---
     let fn_offset = c.fn_offsets[fn_index as usize]
@@ -5406,11 +5415,29 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
         } else if instr_op == IrOpcode::IrCall {
             let call_instr = (*func).instrs[i as usize]
             let argc = call_instr.arg_count
-            if argc > 6 {
+            if argc > 8 {
                 return false
             }
+            let reg_cap: i64 = 6
+            var stack_argc = argc - reg_cap
+            if stack_argc < 0 {
+                stack_argc = 0
+            }
+            var padded = false
+            if (stack_argc % 2) != 0 {
+                (*nc).code = emit_sub_rsp_8((*nc).code)
+                padded = true
+            }
+            var stack_i = argc - 1
+            while stack_i >= reg_cap {
+                let stack_arg_reg = call_instr.src1 + stack_i
+                if stack_arg_reg < 0 { return false }
+                nc_emit_load_rbp_disp32_reg(nc, 0, ir_slot_offset(stack_arg_reg))
+                nc_emit_push_rax(nc)
+                stack_i = stack_i - 1
+            }
             var ai: i64 = 0
-            while ai < argc {
+            while ai < argc && ai < reg_cap {
                 var arg_reg = call_instr.src1 + ai
                 if ai == 1 && call_instr.src2 >= 0 {
                     arg_reg = call_instr.src2
@@ -5423,6 +5450,12 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             let call_pos = (*nc).code.len
             nc_emit_call_rel32_placeholder(nc)
             nc_add_call_reloc(nc, call_pos + 1, call_instr.fn_id)
+            if stack_argc > 0 {
+                (*nc).code = emit_add_rsp_imm32((*nc).code, stack_argc * 8)
+            }
+            if padded {
+                nc_emit_add_rsp_8(nc)
+            }
             if call_instr.dst >= 0 {
                 nc_core_store_rax_to_temp(nc, call_instr.dst)
             }
@@ -5597,16 +5630,38 @@ fn nc_emit_store_rbp_disp32_reg(nc: &! NativeCompiler, reg: i64, disp: i64) with
     nc_emit_u32_le(nc, disp)
 }
 
-// Pass up to 6 args from consecutive vregs into SysV param regs.
+// Pass consecutive vregs into SysV param regs; args beyond 6 use stack slots.
 pub fn native_v2_core_emit_call_argc_into(nc: &! NativeCompiler, dst: i64, fn_id: i64, arg0: i64, argc: i64) with Mut, Panic, Div {
+    let reg_cap: i64 = 6
+    var stack_argc = argc - reg_cap
+    if stack_argc < 0 {
+        stack_argc = 0
+    }
+    var padded = false
+    if (stack_argc % 2) != 0 {
+        (*nc).code = emit_sub_rsp_8((*nc).code)
+        padded = true
+    }
+    var stack_i = argc - 1
+    while stack_i >= reg_cap {
+        nc_emit_load_rbp_disp32_reg(nc, 0, ir_slot_offset(arg0 + stack_i))
+        nc_emit_push_rax(nc)
+        stack_i = stack_i - 1
+    }
     var ai: i64 = 0
-    while ai < argc && ai < 6 {
+    while ai < argc && ai < reg_cap {
         nc_emit_load_rbp_disp32_reg(nc, param_reg(ai), ir_slot_offset(arg0 + ai))
         ai = ai + 1
     }
     let call_pos = (*nc).code.len
     nc_emit_call_rel32_placeholder(nc)
     nc_add_call_reloc(nc, call_pos + 1, fn_id)
+    if stack_argc > 0 {
+        (*nc).code = emit_add_rsp_imm32((*nc).code, stack_argc * 8)
+    }
+    if padded {
+        nc_emit_add_rsp_8(nc)
+    }
     if dst >= 0 {
         nc_core_store_rax_to_temp(nc, dst)
     }
@@ -5914,6 +5969,15 @@ fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction) with Mut, Panic,
         }
         i = i + 1
     }
+    while i < func.param_count {
+        let vreg = func.param_regs[i as usize]
+        if vreg >= 0 {
+            let stk_disp = 16 + ((i - 6) * 8)
+            (*nc).code = emit_load_rbp_disp32_rax((*nc).code, stk_disp)
+            (*nc).code = emit_store_rax_rbp_disp32((*nc).code, ir_slot_offset(vreg))
+        }
+        i = i + 1
+    }
 }
 
 fn spill_ir_params_ref_mut(nc: &! NativeCompiler, func: &IrFunction) with Mut, Panic, Div {
@@ -5924,6 +5988,15 @@ fn spill_ir_params_ref_mut(nc: &! NativeCompiler, func: &IrFunction) with Mut, P
             let preg = param_reg(i)
             let offset = ir_slot_offset(vreg)
             (*nc).code = emit_store_reg_rbp_disp32((*nc).code, offset, preg)
+        }
+        i = i + 1
+    }
+    while i < (*func).param_count {
+        let vreg = (*func).param_regs[i as usize]
+        if vreg >= 0 {
+            let stk_disp = 16 + ((i - 6) * 8)
+            nc_emit_load_rbp_disp32_rax(nc, stk_disp)
+            nc_core_store_rax_to_temp(nc, vreg)
         }
         i = i + 1
     }
