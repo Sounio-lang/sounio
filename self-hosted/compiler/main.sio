@@ -27,6 +27,7 @@ use check::ownership::*
 use check::lint::*
 use check::layout::*
 use io::file_write::*
+use io::env::{read_env}
 use native::encode::*
 use native::elf::*
 use native::reloc::*
@@ -1566,6 +1567,8 @@ fn compiler_ir_ser_opcode_tag(op: IrOpcode) -> i64 {
         IrOpcode::IrProfCounter => 34,
         IrOpcode::IrHandleBegin => 35,
         IrOpcode::IrHandleEnd => 36,
+        IrOpcode::IrGlobalLoad => 37,
+        IrOpcode::IrGlobalStore => 38,
         _ => -1,
     }
 }
@@ -2772,6 +2775,31 @@ fn run_native_v2_emit_wide(args: ArgList, flag_index: i64, kind: i64) with IO, M
 // zero-fill init ([0;N] is the codegen-safe array-fill form).
 var NV2_MARKER_BUF: [i8; 4] = [0; 4]
 
+fn native_v2_trace_global_ops(module: &IrModule) with IO, Mut, Panic, Div {
+    if !str_eq(read_env("SOUNIO_NATIVE_V2_GLOBAL_TRACE"), "1") {
+        return
+    }
+    var global_ops: i64 = 0
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        let func = (*module).functions[fi as usize]
+        var ii: i64 = 0
+        while ii < func.instr_count {
+            let op = func.instrs[ii as usize].op
+            if op == IrOpcode::IrGlobalLoad || op == IrOpcode::IrGlobalStore {
+                global_ops = global_ops + 1
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+    print("native_v2_global_trace: globals=")
+    print_int((*module).global_count)
+    print(" global_ops=")
+    print_int(global_ops)
+    print("\n")
+}
+
 // Bridge: real .sio SOURCE → front-half → HEAP-BOXED IrModule → native-v2 → ELF.
 // Routes through bridge_lower_single_module_box, whose result embeds the module as
 // an Option<Box<IrModule>> (a POINTER), so the front-half result is NEVER returned
@@ -2803,6 +2831,7 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     match box_result.module {
         Some(module_box) => {
             let lowered = *module_box
+            native_v2_trace_global_ops(&lowered)
             write_file("/tmp/nv2_m2_after_copy", &! NV2_MARKER_BUF, 1)
             write_file("/tmp/nv2_m3_before_backend", &! NV2_MARKER_BUF, 1)
             let rc = compile_native_v2_preview_to_file(&lowered, spec, out_path)
