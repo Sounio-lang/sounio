@@ -333,6 +333,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment cockpit playback controls step active, baseline, and compare timelines with native Visual IR time buttons and verified frame/time/hash state.",
     ),
     Evidence(
+        "workbench-experiment-export-packet",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentExportPacket",
+            "viz_workbench_experiment_export_packet_build",
+            "viz_workbench_experiment_export_packet_verify",
+            "viz_workbench_experiment_export_packet_emit",
+        ),
+        "Experiment package, restore proof, package store, cockpit, playback, export frame, and scene audit are bound into one shareable native lab packet.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -708,6 +720,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_experiment_cockpit_playback",
         detail="Workbench experiment cockpit playback proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-experiment-export-packet-run",
+        "label",
+        "viz_workbench_experiment_export_packet",
+        detail="Workbench experiment export packet proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",
