@@ -1,0 +1,51 @@
+//@ run-pass
+//@ description: d-separation (Bayes-ball) correctness across the three canonical
+//@ structures — chain, collider, confounder. Regression guard for the collider
+//@ inversion bug (conditioning must BLOCK a chain/fork but OPEN a collider).
+
+use causal::base::*
+
+// returns 1 on failure, 0 on success (so main can sum)
+fn expect(label: &[u8; 64], got: bool, want: bool) -> i32 with IO {
+    if got == want { return 0 }
+    println("FAIL")
+    return 1
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var fails: i32 = 0
+    var none: [i32; 32] = [0; 32]
+    var lab: [u8; 64] = [0; 64]
+
+    // ── Chain  X(0) -> M(1) -> Y(2) ──
+    var chain = cg_new(3)
+    cg_add_edge(&!chain, 0, 1)
+    cg_add_edge(&!chain, 1, 2)
+    var zm: [i32; 32] = [0; 32]
+    zm[0] = 1
+    fails = fails + expect(&lab, cat_d_separated(&chain, 0, 2, &none, 0), false) // open
+    fails = fails + expect(&lab, cat_d_separated(&chain, 0, 2, &zm, 1), true)    // mediator blocks
+
+    // ── Collider  X(0) -> C(2) <- Y(1) ──
+    var coll = cg_new(3)
+    cg_add_edge(&!coll, 0, 2)
+    cg_add_edge(&!coll, 1, 2)
+    var zc: [i32; 32] = [0; 32]
+    zc[0] = 2
+    fails = fails + expect(&lab, cat_d_separated(&coll, 0, 1, &none, 0), true)   // collider blocks
+    fails = fails + expect(&lab, cat_d_separated(&coll, 0, 1, &zc, 1), false)    // conditioning OPENS
+
+    // ── Confounder  X(0) <- C(2) -> Y(1) ──
+    var conf = cg_new(3)
+    cg_add_edge(&!conf, 2, 0)
+    cg_add_edge(&!conf, 2, 1)
+    fails = fails + expect(&lab, cat_d_separated(&conf, 0, 1, &none, 0), false)  // confounded
+    fails = fails + expect(&lab, cat_d_separated(&conf, 0, 1, &zc, 1), true)     // adjust closes backdoor
+
+    if fails == 0 {
+        println("ALL PASS: d-separation canonical (chain/collider/confounder)")
+        return 0
+    }
+    println("d-separation regression FAILED")
+    return 1
+}
