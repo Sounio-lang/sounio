@@ -139,6 +139,28 @@ run_case local_param_const_call
 run_case local_param_add6_call
 run_case local_param_add7_stack_call
 
+echo "[madaros-source-semantics] running global_struct_array_record_storage"
+GLOBAL_STRUCT_SRC="tests/native-v2/global_struct_array_record_storage_witness.sio"
+GLOBAL_STRUCT_BIN="$TMP_DIR/global_struct_array_record_storage.elf"
+GLOBAL_STRUCT_LOG="$TMP_DIR/global_struct_array_record_storage.compile.log"
+"$MADAROS" compile "$GLOBAL_STRUCT_SRC" -o "$GLOBAL_STRUCT_BIN" >"$GLOBAL_STRUCT_LOG" 2>&1 || {
+  cat "$GLOBAL_STRUCT_LOG" >&2
+  fail "global_struct_array_record_storage compile failed"
+}
+[[ -s "$GLOBAL_STRUCT_BIN" ]] || {
+  cat "$GLOBAL_STRUCT_LOG" >&2
+  fail "global_struct_array_record_storage did not produce an ELF"
+}
+chmod +x "$GLOBAL_STRUCT_BIN"
+set +e
+"$GLOBAL_STRUCT_BIN"
+GLOBAL_STRUCT_RC=$?
+set -e
+[[ "$GLOBAL_STRUCT_RC" -eq 42 ]] || {
+  cat "$GLOBAL_STRUCT_LOG" >&2
+  fail "global_struct_array_record_storage expected exit 42, got $GLOBAL_STRUCT_RC"
+}
+
 echo "[madaros-source-semantics] running raw_compile_alias"
 RAW_BIN="$TMP_DIR/raw_compile_alias.elf"
 RAW_LOG="$TMP_DIR/raw_compile_alias.compile.log"

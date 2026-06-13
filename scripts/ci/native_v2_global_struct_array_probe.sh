@@ -71,6 +71,28 @@ else
   grep -aE 'error\[|undeclared variable|type_check_failed' "$TMP_DIR/madaros_global_scalar.log" || true
 fi
 
+MADAROS_STRUCT_ELF="$TMP_DIR/madaros_global_struct_array.elf"
+set +e
+"$MADAROS" compile "$SRC" -o "$MADAROS_STRUCT_ELF" >"$TMP_DIR/madaros_global_struct_array.log" 2>&1
+madaros_struct_compile_rc=$?
+set -e
+
+if [[ "$madaros_struct_compile_rc" -eq 0 && -s "$MADAROS_STRUCT_ELF" ]]; then
+  chmod +x "$MADAROS_STRUCT_ELF"
+  set +e
+  "$MADAROS_STRUCT_ELF"
+  madaros_struct_rc=$?
+  set -e
+  if [[ "$madaros_struct_rc" -eq 42 ]]; then
+    echo "[native-v2-global-struct-array] Madaros global struct array: PASS"
+  else
+    echo "[native-v2-global-struct-array] Madaros global struct array: BLOCKED rc=$madaros_struct_rc"
+  fi
+else
+  echo "[native-v2-global-struct-array] Madaros global struct array: BLOCKED compile_rc=$madaros_struct_compile_rc"
+  grep -aE 'error\[|typecheck|failed' "$TMP_DIR/madaros_global_struct_array.log" || true
+fi
+
 # Then probe the lower-level native compiler path, which accepts the global
 # aggregate source today but mis-emits the global array-of-struct write/read.
 RAW_ELF="$TMP_DIR/global_struct_array.elf"

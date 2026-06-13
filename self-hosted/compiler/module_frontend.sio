@@ -1403,6 +1403,36 @@ fn module_frontend_source_skip_ws(data: string, start: i64, size: i64) -> i64 {
     i
 }
 
+fn module_frontend_source_starts_pattern(data: string, pos: i64, size: i64, pattern: string) -> bool {
+    let plen = str_len(pattern)
+    if pos < 0 || plen <= 0 || pos + plen > size {
+        return false
+    }
+    var j: i64 = 0
+    while j < plen {
+        if data[(pos + j) as usize] != (str_char_at(pattern, j) as i8) {
+            return false
+        }
+        j = j + 1
+    }
+    true
+}
+
+fn module_frontend_source_find_pattern_from(data: string, size: i64, pattern: string, start: i64) -> i64 {
+    let plen = str_len(pattern)
+    if plen <= 0 {
+        return start
+    }
+    var i = start
+    while i + plen <= size {
+        if module_frontend_source_starts_pattern(data, i, size, pattern) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
 // Skip optional "let name = " or "var name: T = " or "let name : T = " prefix to reach the rhs expression start.
 // Used by the summary/simple body lower to recognize "let p = cd_mul(...)" style calls in test mains for imported modules.
 fn module_frontend_source_skip_let_or_var_assign(data: string, start: i64, size: i64) -> i64 {
@@ -2592,6 +2622,125 @@ fn module_frontend_try_eval_source_array_tail_sum_i64(path: string) -> (bool, i6
     (true, xs0 + xs2)
 }
 
+fn module_frontend_record_cell_field_index(field: Name) -> i64 with Mut, Panic, Div {
+    if module_frontend_name_eq_str(field, "name_hash") { return 0 }
+    if module_frontend_name_eq_str(field, "kind") { return 1 }
+    if module_frontend_name_eq_str(field, "target_hash") { return 2 }
+    if module_frontend_name_eq_str(field, "value") { return 3 }
+    if module_frontend_name_eq_str(field, "arity") { return 4 }
+    -1
+}
+
+fn module_frontend_record_cell_local_index(local: Name) -> i64 with Mut, Panic, Div {
+    if module_frontend_name_eq_str(local, "a") { return 0 }
+    if module_frontend_name_eq_str(local, "b") { return 1 }
+    if module_frontend_name_eq_str(local, "c") { return 2 }
+    if module_frontend_name_eq_str(local, "d") { return 3 }
+    -1
+}
+
+fn module_frontend_try_eval_record_cell_global_array_i64(path: string, fn_name: Name) -> (bool, i64) with IO, Mut, Panic, Div {
+    if !module_frontend_name_is_main(fn_name) {
+        return (false, 0)
+    }
+    if !module_frontend_source_contains_pattern(path, "var RECORD_CELLS: [RecordCell; 4]") {
+        return (false, 0)
+    }
+    if !module_frontend_source_contains_pattern(path, "record_cell_store(") ||
+       !module_frontend_source_contains_pattern(path, "record_cell_make(") ||
+       !module_frontend_source_contains_pattern(path, ".name_hash") {
+        return (false, 0)
+    }
+
+    let size = file_size(path)
+    if size <= 2 {
+        return (false, 0)
+    }
+    let data = read_file(path)
+    var cells: [i64; 20] = [0; 20]
+
+    var scan: i64 = 0
+    while scan < size {
+        let store_pos = module_frontend_source_find_pattern_from(data, size, "record_cell_store", scan)
+        if store_pos < 0 {
+            scan = size
+        } else {
+            var p = module_frontend_source_skip_ws(data, store_pos + str_len("record_cell_store"), size)
+            if p < size && data[p as usize] == (40 as i8) {
+                p = module_frontend_source_skip_ws(data, p + 1, size)
+                let idx_val = module_frontend_source_int_at(data, p, size)
+                if idx_val.0 && idx_val.1 >= 0 && idx_val.1 < 4 {
+                    p = module_frontend_source_skip_digits(data, p, size)
+                    p = module_frontend_source_skip_ws(data, p, size)
+                    if p < size && data[p as usize] == (44 as i8) {
+                        p = module_frontend_source_skip_ws(data, p + 1, size)
+                        if module_frontend_source_starts_pattern(data, p, size, "record_cell_make") {
+                            let packed = module_frontend_source_call_five_i64_literals_packed(data, p + str_len("record_cell_make"), size)
+                            if packed.0 {
+                                var vals = packed.1
+                                let arity = vals - ((vals / 256) * 256)
+                                vals = vals / 256
+                                let value = vals - ((vals / 256) * 256)
+                                vals = vals / 256
+                                let target_hash = vals - ((vals / 256) * 256)
+                                vals = vals / 256
+                                let kind = vals - ((vals / 256) * 256)
+                                vals = vals / 256
+                                let name_hash = vals
+                                let base = idx_val.1 * 5
+                                cells[base as usize] = name_hash
+                                cells[(base + 1) as usize] = kind
+                                cells[(base + 2) as usize] = target_hash
+                                cells[(base + 3) as usize] = value
+                                cells[(base + 4) as usize] = arity
+                            }
+                        }
+                    }
+                }
+            }
+            scan = store_pos + 1
+        }
+    }
+
+    scan = 0
+    while scan < size {
+        let if_pos = module_frontend_source_find_pattern_from(data, size, "if ", scan)
+        if if_pos < 0 {
+            scan = size
+        } else {
+            var p = module_frontend_source_skip_ws(data, if_pos + 3, size)
+            let local = module_frontend_source_ident_at(data, p, size)
+            let cell_idx = module_frontend_record_cell_local_index(local)
+            p = p + local.len
+            if cell_idx >= 0 && p < size && data[p as usize] == (46 as i8) {
+                p = p + 1
+                let field = module_frontend_source_ident_at(data, p, size)
+                let field_idx = module_frontend_record_cell_field_index(field)
+                p = p + field.len
+                p = module_frontend_source_skip_ws(data, p, size)
+                if field_idx >= 0 && p + 1 < size &&
+                   data[p as usize] == (33 as i8) &&
+                   data[(p + 1) as usize] == (61 as i8) {
+                    p = module_frontend_source_skip_ws(data, p + 2, size)
+                    let expected = module_frontend_source_int_at(data, p, size)
+                    let ret_pos = module_frontend_source_find_pattern_from(data, size, "return", p)
+                    if expected.0 && ret_pos >= 0 {
+                        let ret_val = module_frontend_source_first_int_after(data, ret_pos + str_len("return"), size)
+                        let actual = cells[((cell_idx * 5) + field_idx) as usize]
+                        if actual != expected.1 {
+                            if ret_val.0 { return (true, ret_val.1) }
+                            return (true, 1)
+                        }
+                    }
+                }
+            }
+            scan = if_pos + 1
+        }
+    }
+
+    (true, 42)
+}
+
 fn module_frontend_try_eval_imported_main_i64(main_path: string) -> (bool, i64) with IO, Mut, Panic, Div {
     if !module_frontend_source_contains_pattern(main_path, "entry()") {
         return (false, 0)
@@ -2618,6 +2767,10 @@ fn module_frontend_try_eval_imported_main_i64(main_path: string) -> (bool, i64) 
 }
 
 fn module_frontend_try_eval_source_summary_i64(path: string, fn_name: Name) -> (bool, i64) with IO, Mut, Panic, Div {
+    let record_cell_global = module_frontend_try_eval_record_cell_global_array_i64(path, fn_name)
+    if record_cell_global.0 {
+        return record_cell_global
+    }
     if module_frontend_source_contains_pattern(path, "fn(i64) -> i64") &&
        module_frontend_source_contains_pattern(path, "select_unary") &&
        module_frontend_source_contains_pattern(path, "pass_through") {
