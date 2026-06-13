@@ -70,6 +70,28 @@ These two explain the Mac's null-pointer SIGSEGV cluster, the wrong-value exits
 affected program's correctness hinges on f64/array type tracking inside the
 arm64 host's codegen.
 
+## Mechanism pinned to: local-variable LOAD → `mov x0,#0`
+
+Further narrowing (all via the arm64-linux host under qemu):
+
+- `println(5)` (no local) → arm64 host **correct** (`5`).
+- `let a: i64 = 5; println(a)` → arm64 host wrong (`0`); **not f64-specific** —
+  any *use* of a local var breaks; an *unused* local is fine.
+- Diffing x86-host vs arm64-host emission for `let a:i64=5; println(a)`: the
+  arm64 host emits **`mov x0, #0`** at every site where the x86 host emits
+  `sub x9, x29, #off; ldr x0, [x9]` (a local-variable load). The store side is
+  correct; only the **load** is replaced by a zero. f64 comparisons likewise
+  degrade to integer `cmp` (EXPR_IS_F64 lost), and f64 array store/subscript to
+  `mov x0,#0`.
+
+So the arm64 host's **variable-load lowering takes a zero/undefined branch**.
+`var_find` and `name_eq`'s var path are **byte-identical to a5ab**, so this is
+HEAD's a64 backend miscompiling the (stable) variable-load function — not a
+source change to the lookup itself. The exact a64 defect (why `var_find`/the
+load decision yields the zero branch at runtime in the arm64 host) is not yet
+pinned; it needs symbol-level gdb on the arm64-linux host compiling the
+`let a=5; println(a)` repro.
+
 ## Status / next step
 
 Root **localized to a class** (arm64 host mis-tracks f64/array types), **not yet
