@@ -125,7 +125,8 @@ for witness in \
   tests/multimodule/thin_return_call_main.sio \
   tests/multimodule/thin_four_locals_main.sio \
   tests/multimodule/thin_runtime_param_main.sio \
-  tests/multimodule/thin_runtime_param_offsets_main.sio
+  tests/multimodule/thin_runtime_param_offsets_main.sio \
+  tests/multimodule/thin_runtime_param_subtarget_main.sio
 do
   set +e
   ./bin/madaros run "$witness"
