@@ -496,9 +496,13 @@ lean_lib «SounioSunflower» where
 @[default_target]
 lean_lib «SounioErdos90PlanarLowerBound» where
 
--- Erdős [90] mixed ℤ²+Eisenstein witness at n=100 via ℚ(√3) embedding (u(100) ≥ 318).
+-- Erdős [90] mixed ℤ²+Eisenstein witness at n=100 via ℚ(√3) embedding (u(100) ≥ 265, deduped).
 @[default_target]
 lean_lib «SounioErdos90UnifiedQsqrt3Witness» where
+
+-- Erdős [90] full 10×10 ℤ² grid witness at n=100 (u(100) ≥ 288, unit²=5).
+@[default_target]
+lean_lib «SounioErdos90GridWitness» where
 
 -- Erdős [90] unit-distance count spectrum on the 168/ZD structure (7-vertex probe):
 -- associator lever beats linear (max 12 vs 9, 6 vs 2 distinct counts) + interleaved-
