@@ -39,6 +39,8 @@ Generated from `stdlib/research/erdos90_subset400_export.sio`.
 Seed={seed}, winR={win_r}, unit²={unit_n}. Not a claim of global optimality.
 -/
 
+set_option maxHeartbeats 1000000
+
 namespace Sounio.Erdos90Subset400
 
 def gridUnitSq (n : Nat) (p q : Int × Int) : Int :=

@@ -52,6 +52,8 @@ Generated from `stdlib/research/erdos90_grid_export.sio` via
 `(dx)²+(dy)² = {unit_n}.
 -/
 
+set_option maxHeartbeats 1000000
+
 namespace Sounio.Erdos90Grid
 
 def gridUnitSq (n : Nat) (p q : Int × Int) : Int :=

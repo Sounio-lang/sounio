@@ -47,6 +47,8 @@ physical `(px/2, (pu + pv·√3)/2)`. Unit edge iff `(dpx)²+(dpu)²+3·(dpv)² 
 and `(dpu)·(dpv) = 0`.
 -/
 
+set_option maxHeartbeats 1000000
+
 namespace Sounio.Erdos90Unified
 
 def QSqrt3Pt := Int × (Int × Int)

@@ -57,6 +57,8 @@ Generated from `stdlib/research/erdos90_subset_export.sio` via
 Honest finite witness only — not a claim of global optimality.
 -/
 
+set_option maxHeartbeats 1000000
+
 namespace Sounio.Erdos90Subset
 
 def gridUnitSq (n : Nat) (p q : Int × Int) : Int :=

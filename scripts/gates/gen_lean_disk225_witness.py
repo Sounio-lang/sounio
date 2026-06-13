@@ -37,6 +37,8 @@ Generated from `stdlib/research/erdos90_disk225_export.sio`.
 Disk rr={rr}, unit²={unit_n}. Full compact disk (not k-subset). Below subset witness 856.
 -/
 
+set_option maxHeartbeats 1000000
+
 namespace Sounio.Erdos90Disk225
 
 def gridUnitSq (n : Nat) (p q : Int × Int) : Int :=

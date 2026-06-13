@@ -43,6 +43,8 @@ Generated from `stdlib/research/erdos90_grid144_export.sio`. Full 12×12 grid in
 unit edge iff `(dx)²+(dy)² = {unit_n}.
 -/
 
+set_option maxHeartbeats 1000000
+
 namespace Sounio.Erdos90Grid144
 
 def gridUnitSq (n : Nat) (p q : Int × Int) : Int :=

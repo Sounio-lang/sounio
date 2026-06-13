@@ -576,9 +576,51 @@ lean_lib «SounioErdos90Subset361Witness» where
 @[default_target]
 lean_lib «SounioErdos90Grid400Witness» where
 
--- Erdős [90] ℤ² subset at n=400 (u(400) ≥ 1732, unit²=25, seed 2000003).
+-- Erdős [90] ℤ² subset at n=400 (u(400) ≥ 1735, unit²=25, seed 314159).
 @[default_target]
 lean_lib «SounioErdos90Subset400Witness» where
+
+-- Erdős [90] ladder rungs n=441..625 (18×18..25×25 grid + subset, N=25).
+@[default_target]
+lean_lib «SounioErdos90Grid441Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset441Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid484Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset484Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid529Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset529Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid576Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset576Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid625Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset625Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid676Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset676Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid729Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset729Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid784Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset784Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid841Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset841Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid900Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset900Witness» where
 
 -- Erdős [90] unit-distance count spectrum on the 168/ZD structure (7-vertex probe):
 -- associator lever beats linear (max 12 vs 9, 6 vs 2 distinct counts) + interleaved-

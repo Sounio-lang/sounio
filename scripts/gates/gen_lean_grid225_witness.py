@@ -34,6 +34,8 @@ def main() -> int:
 Generated from `stdlib/research/erdos90_grid225_export.sio`. Full 15×15 grid; unit²={unit_n}.
 -/
 
+set_option maxHeartbeats 1000000
+
 namespace Sounio.Erdos90Grid225
 
 def gridUnitSq (n : Nat) (p q : Int × Int) : Int :=
