@@ -14,7 +14,7 @@ Expected output:
 === Native Visual Frontend Gate: PASS ===
 ```
 
-This gate is the one-command proof surface for the native Visual IR lane. It validates `scripts/ci/native_visual_frontend_gate.manifest.tsv`, checks original-plan coverage through `scripts/ci/check_native_visual_frontend_plan_coverage.py`, checks the core `viz::sci` and Workbench modules, runs headless Canvas/HTML/physchem/interaction/replay proofs, compile-gates the visual demos including the native window lab, and runs the headless demos that do not require `DISPLAY`.
+This gate is the one-command proof surface for the native Visual IR lane. It validates `scripts/ci/native_visual_frontend_gate.manifest.tsv`, checks original-plan coverage through `scripts/ci/check_native_visual_frontend_plan_coverage.py`, checks the core `viz::sci` and Workbench modules, runs headless Canvas/HTML/physchem/interaction/replay proofs, checks passive no-JavaScript HTML/SVG export output, compile-gates the visual demos including the native window lab, and runs the headless demos that do not require `DISPLAY`.
 
 ## Headless Proof
 
@@ -63,6 +63,22 @@ VIZ_HTML_STATIC_PASS
 ```
 
 The test emits static SVG/HTML for a line chart, heatmap cells, molecule glyph, scalar-field heatmap cells, vector-field arrows, trajectory path with a scene-time cursor, spectrum trace, and mesh glyph.
+
+## Passive HTML Export Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/check_viz_html_passive_export.sh
+```
+
+Expected output:
+
+```text
+VIZ_HTML_PASSIVE_EXPORT_PASS
+```
+
+The checker runs the real HTML/SVG-emitting Sounio tests, requires passive Visual IR identity and audit markers, and rejects active browser tokens such as `<script`, `javascript:`, event-handler attributes, `href=`, `iframe`, `object`, and `embed`.
 
 ## Chart Builders Proof
 

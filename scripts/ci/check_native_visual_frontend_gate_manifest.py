@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 
 
-VALID_MODES = {"check", "run", "compile"}
+VALID_MODES = {"check", "run", "compile", "script"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,12 +35,13 @@ def main() -> int:
 
     errors: list[str] = []
     labels: set[str] = set()
-    counts = {"check": 0, "run": 0, "compile": 0}
+    counts = {"check": 0, "run": 0, "compile": 0, "script": 0}
     required_labels = {
         "viz_headless",
         "viz_workbench_roundtrip",
         "viz_workbench_replay_session",
         "viz_workbench_replay_html_archive",
+        "viz_html_passive_export",
         "viz_workbench_demo_run",
     }
 
@@ -86,6 +87,8 @@ def main() -> int:
         errors.append("manifest must contain at least 3 compile entries")
     if counts["check"] < 2:
         errors.append("manifest must contain at least 2 check entries")
+    if counts["script"] < 1:
+        errors.append("manifest must contain at least 1 script entry")
 
     if errors:
         for err in errors:
@@ -94,7 +97,7 @@ def main() -> int:
 
     print(
         "native_visual_frontend_gate_manifest: PASS "
-        f"check={counts['check']} run={counts['run']} compile={counts['compile']}"
+        f"check={counts['check']} run={counts['run']} compile={counts['compile']} script={counts['script']}"
     )
     return 0
 

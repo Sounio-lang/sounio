@@ -49,6 +49,14 @@ compile_file() {
   echo "[native-viz-gate] PASS ${label}"
 }
 
+script_file() {
+  local label="$1"
+  local src="$2"
+  echo "[native-viz-gate] script ${src}"
+  "${ROOT_DIR}/${src}"
+  echo "[native-viz-gate] PASS ${label}"
+}
+
 echo "=== Native Visual Frontend Gate ==="
 echo "[native-viz-gate] souc=${SOUC}"
 echo "[native-viz-gate] stdlib=${SOUNIO_STDLIB_PATH}"
@@ -78,6 +86,9 @@ while IFS=$'\t' read -r mode label path marker; do
       ;;
     run)
       run_expect "$label" "$path" "$marker"
+      ;;
+    script)
+      script_file "$label" "$path"
       ;;
     *)
       echo "error: ${MANIFEST}: unknown mode '${mode}' for ${label}" >&2

@@ -27,7 +27,7 @@ The canonical headless acceptance gate for this lane is:
 SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/native_visual_frontend_gate.sh
 ```
 
-It checks the module surface, Canvas renderer, static HTML/SVG export, physico-chemistry nodes, Workbench interaction, replay sessions, timeline playback, demo compile/run surfaces, and the native window lab compile surface without requiring `DISPLAY`.
+It checks the module surface, Canvas renderer, static HTML/SVG export, passive no-JavaScript HTML/SVG export output, physico-chemistry nodes, Workbench interaction, replay sessions, timeline playback, demo compile/run surfaces, and the native window lab compile surface without requiring `DISPLAY`.
 
 The gate reads `scripts/ci/native_visual_frontend_gate.manifest.tsv`, validates it with `scripts/ci/check_native_visual_frontend_gate_manifest.py`, and checks original-plan coverage with `scripts/ci/check_native_visual_frontend_plan_coverage.py`, so the accepted proof surface is explicit, reviewable, and tied to the native frontend plan rather than only to the easiest passing demos.
 
@@ -38,6 +38,7 @@ The gate reads `scripts/ci/native_visual_frontend_gate.manifest.tsv`, validates 
 - Fixed rectangles plus a simple row/column layout pass over contiguous node ranges; no flexbox.
 - CPU Canvas is the primary renderer.
 - HTML/SVG is static export only. It serializes Visual IR geometry and simple glyphs; no JavaScript owns model state.
+- `scripts/ci/check_viz_html_passive_export.sh` runs the real HTML/SVG-emitting Sounio programs and rejects active browser tokens such as `<script`, `javascript:`, event-handler attributes, `href=`, `iframe`, `object`, and `embed`.
 - Scalar fields keep their Sounio `ScalarField2D` payload and mirror values into heatmap storage for renderer-friendly export.
 - Vector fields keep their Sounio `VectorField2D` payload and mirror components into renderer-friendly vector slots with explicit row/column metadata.
 - Trajectories keep their Sounio `Trajectory3D` payload and mirror path coordinates into renderer-friendly trajectory slots.

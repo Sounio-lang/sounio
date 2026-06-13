@@ -76,6 +76,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Static HTML/SVG export is a second renderer over the same IR.",
     ),
     Evidence(
+        "html-svg-passive-export-checker",
+        "contains",
+        "scripts/ci/check_viz_html_passive_export.sh",
+        (
+            "VIZ_HTML_PASSIVE_EXPORT_PASS",
+            "<[[:space:]]*script",
+            "javascript[[:space:]]*:",
+            "[[:space:]]on[a-z0-9_-]+[[:space:]]*=",
+        ),
+        "Static HTML/SVG export is checked as passive markup with no active browser semantics.",
+    ),
+    Evidence(
         "native-controls",
         "contains",
         "stdlib/viz/ir.sio",
@@ -607,6 +619,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_html_static",
         detail="Static HTML/SVG proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-html-passive-export-script",
+        "label",
+        "viz_html_passive_export",
+        detail="Passive HTML/SVG export proof is in the canonical gate.",
     ),
     Evidence(
         "gate-physchem-run",
