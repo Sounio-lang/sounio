@@ -187,7 +187,7 @@ bash scripts/ci/native_v2_compile_imported_source_gate.sh
 echo "[project-spine] 14/15 Madaros launcher imported native-v2"
 bash scripts/ci/madaros_launcher_imported_native_v2_gate.sh
 
-echo "[project-spine] 15/15 imported modular IR lowering gate"
+echo "[project-spine] 15/15 public Madaros imported body lowering"
 bash scripts/ci/native_v2_imported_body_lowering_gate.sh
 
 echo "PROJECT_SPINE_PASS"

@@ -21,8 +21,7 @@ _sounio_resolve_madaros_raw_bin() {
     "${MADAROS_RAW_BIN:-}" \
     "${SOUNIO_MADAROS_BIN:-}" \
     "$_SOUNIO_MADAROS_ROOT_DIR/artifacts/self-hosted/madaros" \
-    "$_SOUNIO_MADAROS_ROOT_DIR/bin/madaros-linux-x86_64" \
-    "$_SOUNIO_MADAROS_ROOT_DIR/bin/souc-modular"; do
+    "$_SOUNIO_MADAROS_ROOT_DIR/bin/madaros-linux-x86_64"; do
     if [[ -n "$cand" && -x "$cand" ]] && ! _sounio_madaros_is_wrapper "$cand"; then
       echo "$cand"
       return 0
@@ -49,7 +48,7 @@ MADAROS_BIN="$(_sounio_resolve_madaros_bin 2>/dev/null || true)"
 sounio_require_madaros_raw() {
   if [[ -z "${MADAROS_RAW_BIN:-}" || ! -x "$MADAROS_RAW_BIN" ]]; then
     echo "error: Madaros raw ELF not found" >&2
-    echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, artifacts/self-hosted/madaros, bin/madaros-linux-x86_64, bin/souc-modular" >&2
+    echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, artifacts/self-hosted/madaros, bin/madaros-linux-x86_64" >&2
     return 1
   fi
 }

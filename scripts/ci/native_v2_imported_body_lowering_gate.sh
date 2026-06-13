@@ -17,16 +17,9 @@ case "$(uname -m 2>/dev/null || echo unknown)" in
     ;;
 esac
 
-if [[ -n "${SOUC_BIN:-}" && "$SOUC_BIN" != "$ROOT_DIR"/* ]]; then
-  echo "[native-v2-imported-body-lowering] ignoring external SOUC_BIN outside this worktree: $SOUC_BIN"
-  unset SOUC_BIN
-fi
-
-source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
-sounio_require_souc
-
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
+MADAROS="${MADAROS_LAUNCHER:-$ROOT_DIR/bin/madaros}"
 OUT_DIR="${SOUNIO_NATIVE_V2_IMPORTED_BODY_LOWERING_DIR:-$(mktemp -d /tmp/sounio-native-v2-imported-body-lowering.XXXXXX)}"
 LOG_DIR="$OUT_DIR/logs"
 ARTIFACT_DIR="$OUT_DIR/artifacts"
@@ -34,7 +27,12 @@ SUMMARY_JSON="$ARTIFACT_DIR/native_v2_imported_body_lowering.v1.json"
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 
-echo "[native-v2-imported-body-lowering] souc=$SOUC_BIN"
+[[ -x "$MADAROS" ]] || {
+  echo "[native-v2-imported-body-lowering] FAIL: Madaros launcher is not executable: $MADAROS" >&2
+  exit 1
+}
+
+echo "[native-v2-imported-body-lowering] madaros=$MADAROS"
 echo "[native-v2-imported-body-lowering] out=$OUT_DIR"
 
 if grep -R -q 'SOUNIO_IMPORTED_HOF_ABI_V1' \
@@ -71,18 +69,8 @@ run_case() {
     exit 1
   fi
 
-  run_log "${name}.ir_summary" \
-    bash scripts/lib/run_selfhost_fresh.sh "$SOUC_BIN" self-hosted/compiler/lean.sio -- --ir-summary "$program"
-
-  if ! grep -q "Merged IR: ${expected_functions}" "$LOG_DIR/${name}.ir_summary.log" ||
-     ! grep -q "souc-lean ir-summary: functions=${expected_functions}" "$LOG_DIR/${name}.ir_summary.log"; then
-    echo "[native-v2-imported-body-lowering] FAIL: $name IR summary did not prove ${expected_functions}-function imported handoff" >&2
-    cat "$LOG_DIR/${name}.ir_summary.log" >&2 || true
-    exit 1
-  fi
-
   run_log "${name}.native_compile" \
-    bash scripts/lib/run_selfhost_fresh.sh "$SOUC_BIN" self-hosted/compiler/lean.sio -- --native-compile "$program" -o "$elf"
+    "$MADAROS" --native-v2-compile "$program" -o "$elf"
 
   if grep -q 'native_prebundle:' "$LOG_DIR/${name}.native_compile.log"; then
     echo "[native-v2-imported-body-lowering] FAIL: $name used native_prebundle" >&2
@@ -90,16 +78,21 @@ run_case() {
     exit 1
   fi
 
-  if ! grep -q 'module_native_driver: imported source uses modular IR path' "$LOG_DIR/${name}.native_compile.log" ||
-     ! grep -q 'module_native_driver: imported source uses compact modular IR table path' "$LOG_DIR/${name}.native_compile.log" ||
-     ! grep -q "Merged IR: ${expected_functions}" "$LOG_DIR/${name}.native_compile.log"; then
-    echo "[native-v2-imported-body-lowering] FAIL: $name native compile did not use imported compact modular IR path" >&2
+  if grep -q 'module_native_driver: imported source uses compact modular IR table path' "$LOG_DIR/${name}.native_compile.log"; then
+    echo "[native-v2-imported-body-lowering] FAIL: $name went through compact imported emitter" >&2
     cat "$LOG_DIR/${name}.native_compile.log" >&2 || true
     exit 1
   fi
 
-  if grep -q 'falling back to full IR path' "$LOG_DIR/${name}.native_compile.log"; then
-    echo "[native-v2-imported-body-lowering] FAIL: $name compact imported path fell back to full IR" >&2
+  if grep -q 'falling back' "$LOG_DIR/${name}.native_compile.log"; then
+    echo "[native-v2-imported-body-lowering] FAIL: $name fell back from native-v2" >&2
+    cat "$LOG_DIR/${name}.native_compile.log" >&2 || true
+    exit 1
+  fi
+
+  if ! grep -q "Merged IR: ${expected_functions}" "$LOG_DIR/${name}.native_compile.log" ||
+     ! grep -q 'native_v2_compile: emitted path=' "$LOG_DIR/${name}.native_compile.log"; then
+    echo "[native-v2-imported-body-lowering] FAIL: $name native compile did not prove public Madaros native-v2 imported lowering" >&2
     cat "$LOG_DIR/${name}.native_compile.log" >&2 || true
     exit 1
   fi
@@ -163,21 +156,21 @@ ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   --string "artifact_dir=$OUT_DIR" \
   --int    "case_count=$case_count" \
   --raw-json "cases=$CASES_JSON" \
-  --string "compiler_entrypoint=self-hosted/compiler/lean.sio" \
-  --string "compiler_resolved=$SOUC_BIN" \
+  --string "compiler_entrypoint=bin/madaros --native-v2-compile" \
+  --string "compiler_resolved=$MADAROS" \
   --int    "fail_count=0" \
   --string "fallback_path=none" \
   --string "generated_at_utc=$ts" \
   --string "host_callback=none" \
-  --string "imported_body_lowering=compact_imported_body_lowering_v1_no_source_marker" \
+  --string "imported_body_lowering=madaros_public_native_v2_imported_body_lowering_v1" \
   --bool   "imported_prebundle_native=false" \
   --int    "pass_count=$case_count" \
-  --string "schema=sounio.native_v2_imported_body_lowering.v1" \
+  --string "schema=sounio.madaros_imported_body_lowering.v1" \
   --string "scope=i64 imported summaries, small struct returns, named fn refs, fn-typed params/returns, no captures" \
   --int    "source_markers=0" \
   --string "status=pass" \
   --string "target=x86_64-linux" \
   > "$SUMMARY_JSON"
 
-echo "[native-v2-imported-body-lowering] PASS: imported body lowering v1 covers core, HOF, and mixed witnesses"
+echo "[native-v2-imported-body-lowering] PASS: public Madaros native-v2 imported body lowering covers core, HOF, and mixed witnesses"
 echo "[native-v2-imported-body-lowering] summary=$SUMMARY_JSON"
