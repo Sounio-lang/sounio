@@ -418,6 +418,20 @@ REQUIRED: tuple[Evidence, ...] = (
         "Shareable native lab packets can be sequenced into a fixed-capacity Sounio-owned ledger with packet/payload/frame/audit deltas and passive HTML/SVG metadata.",
     ),
     Evidence(
+        "workbench-experiment-packet-ledger-replay",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentPacketLedgerReplayReport",
+            "viz_workbench_experiment_packet_ledger_replay_report_build_pair",
+            "viz_workbench_experiment_packet_ledger_replay_report_verify",
+            "viz_workbench_experiment_packet_ledger_replay_report_emit",
+            "final_frame_hash_delta",
+            "final_audit_hash_delta",
+        ),
+        "Experiment packet ledgers can be bound to first/last packets and the final import replay report, proving the sequence closes with zero frame and audit drift.",
+    ),
+    Evidence(
         "workbench-experiment-import-replay-zero-drift",
         "contains",
         "tests/run-pass/viz_workbench_experiment_diff_player.sio",

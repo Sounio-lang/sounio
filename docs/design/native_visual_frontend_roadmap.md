@@ -142,6 +142,7 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `VizWorkbenchExperimentPacketLedger` sequences shareable experiment packets into fixed-capacity Sounio-owned evidence with packet, payload-stamp, frame, and scene-audit hashes per entry.
 - `viz_workbench_experiment_packet_ledger_add` records deltas between consecutive packets, while `viz_workbench_experiment_packet_ledger_verify` checks count bounds, nonzero evidence, last-entry mirrors, per-domain deltas, and the deterministic ledger hash.
 - `viz_workbench_experiment_packet_ledger_emit` adds passive ledger metadata to static HTML/SVG exports, and `tests/run-pass/viz_workbench_experiment_diff_player.sio` proves a two-packet playback sequence with nonzero packet-hash delta.
+- `VizWorkbenchExperimentPacketLedgerReplayReport` binds the ledger to first/last packets plus the final import replay report, proving the packet chain closes with zero final Canvas-frame and scene-audit drift while retaining total packet/payload/frame/audit deltas.
 
 ## V1.8j: Canonical Headless Visual Gate
 
