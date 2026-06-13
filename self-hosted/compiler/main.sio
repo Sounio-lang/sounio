@@ -22,7 +22,7 @@ use check::refinement::*
 use check::units::*
 use check::env::*
 use check::traits::*
-use check::mod::{check_program, check_program_epistemic_into}
+use check::mod::{check_program, check_program_epistemic_into, check_modules_verdict_boot4}
 use check::ownership::*
 use check::lint::*
 use check::layout::*
@@ -49,8 +49,8 @@ use resolve::scope::*
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
 use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace}
-use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult}
-use module_parse::{ImportList, load_module_file, extract_imports_from_ast}
+use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult, module_frontend_import_files_from_source, ImportPathList}
+use module_parse::{ImportList, load_module_file, extract_imports_from_ast, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
@@ -1820,13 +1820,70 @@ fn run_check_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Allo
         panic("check failed")
     }
 
-    let frontend_result = preflight_multimodule_frontend(source_path)
-    let parse_errors = parser_last_error_count()
-    if frontend_result.ok && parse_errors == 0 {
+    if !module_frontend_file_maybe_has_use(source_path) {
+        // Single-module real typecheck.
+        let main_prog = load_module_file(source_path)
+        if parser_last_error_count() > 0 {
+            panic("check failed")
+        }
+        let verdict = module_frontend_check_items_with_source_context(main_prog.items, source_path)
+        if verdict == 0 {
+            println(compiler_check_ok_message())
+            return
+        }
+        panic("check failed")
+    }
+
+    // Multi-module: load transitive deps, resolve imports against exports, then
+    // typecheck all modules together so cross-module visibility (E175-E177) is
+    // enforced against the real defining_module of each item.
+    var programs: [Program; 256] = [Program { module_path: empty_path(), items: None }; 256]
+    var paths: [string; 256] = [""; 256]
+    var loaded: i64 = 0
+    programs[0] = load_module_file(source_path)
+    paths[0] = source_path
+    loaded = 1
+    var visited: [string; 256] = [""; 256]
+    var visited_count: i64 = 1
+    visited[0] = source_path
+    var work_front: i64 = 0
+
+    while work_front < loaded && loaded < 256 {
+        let imports = module_frontend_import_files_from_source(paths[work_front])
+        work_front = work_front + 1
+        var i: i64 = 0
+        while i < imports.count && loaded < 256 {
+            let file_path = imports.paths[i]
+            var already = false
+            var v: i64 = 0
+            while v < visited_count && v < 256 {
+                if str_eq(visited[v], file_path) {
+                    already = true
+                }
+                v = v + 1
+            }
+            if !already && file_exists(file_path) {
+                visited[visited_count] = file_path
+                visited_count = visited_count + 1
+                programs[loaded] = load_module_file(file_path)
+                paths[loaded] = file_path
+                loaded = loaded + 1
+            }
+            i = i + 1
+        }
+    }
+
+    print("run_check_mode: about to check ")
+    print_int(loaded)
+    print(" modules\n")
+    let verdict = check_modules_verdict_boot4(&! programs, loaded)
+    print("run_check_mode: verdict=")
+    print_int(verdict)
+    print("\n")
+    if verdict == 0 {
         println(compiler_check_ok_message())
         return
     }
-    compiler_print_ir_preflight_failure(frontend_result.error_msg)
     panic("check failed")
 }
 
