@@ -508,6 +508,10 @@ lean_lib «SounioErdos90GridWitness» where
 @[default_target]
 lean_lib «SounioErdos90SubsetWitness» where
 
+-- Erdős [90] full 12×12 ℤ² grid witness at n=144 (u(144) ≥ 456, unit²=25).
+@[default_target]
+lean_lib «SounioErdos90Grid144Witness» where
+
 -- Erdős [90] unit-distance count spectrum on the 168/ZD structure (7-vertex probe):
 -- associator lever beats linear (max 12 vs 9, 6 vs 2 distinct counts) + interleaved-
 -- star count-growth (gap 6<20<26). See docs/research/erdos-90-168-spectrum-note.md
