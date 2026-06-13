@@ -50,6 +50,10 @@ run_case() {
     cat "$log" >&2
     fail "$name used native prebundle"
   fi
+  if grep -q 'falling back' "$log"; then
+    cat "$log" >&2
+    fail "$name fell back from native-v2"
+  fi
 
   [[ -s "$elf" ]] || {
     cat "$log" >&2

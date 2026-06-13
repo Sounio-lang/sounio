@@ -49,7 +49,7 @@ run_case() {
     cat "$log" >&2
     fail "$name went through compact imported emitter"
   fi
-  if grep -q 'falling back to full IR path' "$log"; then
+  if grep -q 'falling back' "$log"; then
     cat "$log" >&2
     fail "$name used imported native fallback"
   fi
@@ -88,7 +88,7 @@ run_exit_case() {
     cat "$log" >&2
     fail "$name went through compact imported emitter"
   fi
-  if grep -q 'falling back to full IR path' "$log"; then
+  if grep -q 'falling back' "$log"; then
     cat "$log" >&2
     fail "$name used imported native fallback"
   fi
@@ -131,7 +131,7 @@ run_stdout_case() {
     cat "$log" >&2
     fail "$name went through compact imported emitter"
   fi
-  if grep -q 'falling back to full IR path' "$log"; then
+  if grep -q 'falling back' "$log"; then
     cat "$log" >&2
     fail "$name used imported native fallback"
   fi

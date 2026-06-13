@@ -19,8 +19,7 @@ resolve_madaros_raw() {
     "${MADAROS_RAW_BIN:-}" \
     "${SOUNIO_MADAROS_BIN:-}" \
     "$ROOT_DIR/artifacts/self-hosted/madaros" \
-    "$ROOT_DIR/bin/madaros-linux-x86_64" \
-    "$ROOT_DIR/bin/souc-modular"; do
+    "$ROOT_DIR/bin/madaros-linux-x86_64"; do
     if [[ -n "$cand" && -x "$cand" ]] && ! _is_wrapper "$cand"; then
       printf '%s\n' "$cand"
       return 0
@@ -28,28 +27,12 @@ resolve_madaros_raw() {
   done
 
   echo "error: madaros: no modular compiler raw ELF found" >&2
-  echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, artifacts/self-hosted/madaros, bin/madaros-linux-x86_64, bin/souc-modular" >&2
+  echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, artifacts/self-hosted/madaros, bin/madaros-linux-x86_64" >&2
   echo "  run: make build-madaros" >&2
   return 127
 }
 
 RAW_MADAROS="$(resolve_madaros_raw)"
-
-resolve_madaros_imports_raw() {
-  local cand
-  for cand in \
-    "${MADAROS_IMPORTS_RAW_BIN:-}" \
-    "$ROOT_DIR/bin/madaros-imports-linux-x86_64" \
-    "$RAW_MADAROS"; do
-    if [[ -n "$cand" && -x "$cand" ]] && ! _is_wrapper "$cand"; then
-      printf '%s\n' "$cand"
-      return 0
-    fi
-  done
-  return 1
-}
-
-RAW_MADAROS_IMPORTS="$(resolve_madaros_imports_raw)"
 
 usage() {
   cat <<USAGE
@@ -66,16 +49,13 @@ Usage:
 
 Environment:
   MADAROS_RAW_BIN=<path>       override raw Madaros ELF
-  MADAROS_IMPORTS_RAW_BIN=<path> override legacy imported-module native driver ELF
   SOUNIO_MADAROS_BIN=<path>    override raw Madaros ELF
-  SOUNIO_MADAROS_LEGACY_NATIVE_COMPILE=1 use the legacy --native-compile import route
 USAGE
 }
 
 info() {
   echo "launcher: $0"
   echo "madaros:  $RAW_MADAROS"
-  echo "imports:  $RAW_MADAROS_IMPORTS"
   echo "stdlib:   ${SOUNIO_STDLIB_PATH:-<unset>}"
 }
 
@@ -96,7 +76,7 @@ madaros_compile_native_v2() {
   chmod +x "$out"
 }
 
-madaros_compile_native_v2_or_imported_fallback() {
+madaros_compile_native_v2_checked() {
   local src="$1"
   local out="$2"
   shift 2
@@ -114,81 +94,11 @@ madaros_compile_native_v2_or_imported_fallback() {
     return 0
   fi
 
-  if source_uses_imports "$src"; then
-    if [[ -n "$log" ]]; then
-      printf '%s\n' "$log" >&2
-    fi
-    echo "madaros: native-v2 imported path failed; falling back to legacy imported native path" >&2
-    madaros_compile_native_imported "$src" "$out" "$@"
-    return $?
-  fi
-
   if [[ -n "$log" ]]; then
     printf '%s\n' "$log"
   fi
   echo "typecheck: failed" >&2
   return 1
-}
-
-madaros_compile_native_imported() {
-  local src="$1"
-  local out="$2"
-  shift 2
-  rm -f "$out"
-  local rc
-  set +e
-  "$RAW_MADAROS_IMPORTS" --native-compile "$src" -o "$out" "$@"
-  rc=$?
-  set -e
-  if [[ $rc -eq 0 && -s "$out" ]]; then
-    chmod +x "$out"
-    return 0
-  fi
-
-  if [[ "$RAW_MADAROS_IMPORTS" != "$RAW_MADAROS" ]]; then
-    echo "madaros: compact imported native path failed; falling back to full modular IR" >&2
-    rm -f "$out"
-    set +e
-    "$RAW_MADAROS" --native-compile "$src" -o "$out" "$@"
-    rc=$?
-    set -e
-    if [[ $rc -eq 0 && -s "$out" ]]; then
-      chmod +x "$out"
-      return 0
-    fi
-  fi
-
-  echo "typecheck: failed" >&2
-  return 1
-}
-
-source_uses_imports() {
-  local src="$1"
-  grep -Eq '^[[:space:]]*use[[:space:]]+[A-Za-z0-9_:]+' "$src"
-}
-
-madaros_compile_positional() {
-  local src="$1"
-  local out="$2"
-  shift 2
-  rm -f "$out"
-  local log rc
-  set +e
-  log="$("$RAW_MADAROS" "$src" "$out" "$@" 2>&1)"
-  rc=$?
-  set -e
-  if [[ $rc -ne 0 ]] || [[ ! -s "$out" ]] || ! grep -qF "compile: fns=" <<<"$log"; then
-    printf '%s\n' "$log"
-    if ! grep -qF "typecheck: failed" <<<"$log"; then
-      printf 'typecheck: failed\n'
-    fi
-    rm -f "$out"
-    return 1
-  fi
-  chmod +x "$out"
-  if [[ "${SOUNIO_MADAROS_VERBOSE:-0}" == "1" && -n "$log" ]]; then
-    printf '%s\n' "$log" >&2
-  fi
 }
 
 madaros_compile() {
@@ -198,13 +108,12 @@ madaros_compile() {
   local ident
   ident="$("$RAW_MADAROS" --version 2>&1 || true)"
   if [[ "$ident" == *"Madaros"* || "$ident" == *"Madares"* ]]; then
-    if [[ "${SOUNIO_MADAROS_LEGACY_NATIVE_COMPILE:-0}" == "1" ]]; then
-      madaros_compile_native_imported "$src" "$out" "$@"
-    else
-      madaros_compile_native_v2_or_imported_fallback "$src" "$out" "$@"
-    fi
+    madaros_compile_native_v2_checked "$src" "$out" "$@"
   else
-    madaros_compile_positional "$src" "$out" "$@"
+    printf '%s\n' "$ident" >&2
+    echo "madaros: raw compiler is not Madaros/Madares; refusing positional compatibility compile" >&2
+    echo "typecheck: failed" >&2
+    return 1
   fi
 }
 
@@ -335,10 +244,6 @@ cmd_check() {
   fi
   if [[ -n "$candidate" ]]; then
     shift
-  fi
-  if source_uses_imports "$src"; then
-    "$RAW_MADAROS_IMPORTS" --check "$src" "$@"
-    exit "$?"
   fi
   local tmp
   tmp="$(mktemp /tmp/madaros-check-XXXXXX.elf)"

@@ -61,14 +61,9 @@ if grep -q 'module_native_driver: imported source uses compact modular IR table 
   cat /tmp/native_aggregate_abi_madaros.build.log >&2
   fail "Madaros imported aggregate used the compact imported path"
 fi
-if grep -q 'falling back to full IR path' /tmp/native_aggregate_abi_madaros.build.log ||
-   grep -q 'falling back to legacy imported native path' /tmp/native_aggregate_abi_madaros.build.log; then
+if grep -q 'falling back' /tmp/native_aggregate_abi_madaros.build.log; then
   cat /tmp/native_aggregate_abi_madaros.build.log >&2
   fail "Madaros imported aggregate fell back from native-v2"
-fi
-if grep -q 'falling back to stage0 full compiler' /tmp/native_aggregate_abi_madaros.build.log; then
-  cat /tmp/native_aggregate_abi_madaros.build.log >&2
-  fail "Madaros imported aggregate used the stage0 rescue path"
 fi
 
 echo "NATIVE_AGGREGATE_ABI_PASS"

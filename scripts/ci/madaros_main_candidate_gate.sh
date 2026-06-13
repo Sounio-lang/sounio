@@ -20,7 +20,7 @@ fail() {
 
 [[ -x "$CANDIDATE" ]] || fail "candidate is not executable: $CANDIDATE"
 
-echo "[madaros-main-candidate] 1/5 identity"
+echo "[madaros-main-candidate] 1/7 identity"
 IDENTITY_OUT="$("$CANDIDATE" --version 2>&1)" || fail "candidate --version failed"
 [[ "$IDENTITY_OUT" == *"Madares"* || "$IDENTITY_OUT" == *"Madaros"* ]] || {
   printf '%s\n' "$IDENTITY_OUT" >&2
@@ -33,7 +33,7 @@ fn main() -> i64 {
 }
 SRC
 
-echo "[madaros-main-candidate] 2/5 source native-v2 returns 42"
+echo "[madaros-main-candidate] 2/7 source native-v2 returns 42"
 "$CANDIDATE" --native-v2-compile "$TMP_DIR/native_v2_42.sio" -o "$TMP_DIR/native_v2_42.elf" >/tmp/madaros_main_candidate_native_v2.log 2>&1 || {
   cat /tmp/madaros_main_candidate_native_v2.log >&2
   fail "candidate --native-v2-compile failed"
@@ -52,10 +52,30 @@ set -e
   fail "candidate native-v2 source ELF expected exit 42, got $NATIVE_V2_RC"
 }
 
-echo "[madaros-main-candidate] 3/5 source body semantics"
+echo "[madaros-main-candidate] 3/7 source body semantics"
 MADAROS_RAW_BIN="$CANDIDATE" bash scripts/ci/madaros_source_semantics_gate.sh
 
-echo "[madaros-main-candidate] 4/5 backend native-v2 scalar returns 42"
+echo "[madaros-main-candidate] 4/7 raw native-v2 preview smoke"
+"$CANDIDATE" --native-v2-preview-smoke >/tmp/madaros_main_candidate_preview_smoke.log 2>&1 || {
+  cat /tmp/madaros_main_candidate_preview_smoke.log >&2
+  fail "candidate --native-v2-preview-smoke failed"
+}
+grep -q 'native_v2_preview_smoke: ok' /tmp/madaros_main_candidate_preview_smoke.log || {
+  cat /tmp/madaros_main_candidate_preview_smoke.log >&2
+  fail "candidate preview smoke did not report ok"
+}
+
+echo "[madaros-main-candidate] 5/7 raw native-v2 GC retry smoke"
+"$CANDIDATE" --native-v2-gc-retry-smoke >/tmp/madaros_main_candidate_gc_retry_smoke.log 2>&1 || {
+  cat /tmp/madaros_main_candidate_gc_retry_smoke.log >&2
+  fail "candidate --native-v2-gc-retry-smoke failed"
+}
+grep -q 'native_v2_gc_retry_smoke: ok' /tmp/madaros_main_candidate_gc_retry_smoke.log || {
+  cat /tmp/madaros_main_candidate_gc_retry_smoke.log >&2
+  fail "candidate GC retry smoke did not report ok"
+}
+
+echo "[madaros-main-candidate] 6/7 backend native-v2 scalar returns 42"
 "$CANDIDATE" --native-v2-emit-scalar 42 "$TMP_DIR/emit_scalar_42.elf" >/tmp/madaros_main_candidate_emit_scalar.log 2>&1 || {
   cat /tmp/madaros_main_candidate_emit_scalar.log >&2
   fail "candidate --native-v2-emit-scalar failed"
@@ -74,7 +94,7 @@ set -e
   fail "candidate emit-scalar ELF expected exit 42, got $EMIT_RC"
 }
 
-echo "[madaros-main-candidate] 5/5 imported aggregate native-v2"
+echo "[madaros-main-candidate] 7/7 imported aggregate native-v2"
 "$CANDIDATE" --native-v2-compile tests/multimodule/abi_name_many_args_main.sio -o "$TMP_DIR/imported_aggregate.elf" >/tmp/madaros_main_candidate_imports.log 2>&1 || {
   cat /tmp/madaros_main_candidate_imports.log >&2
   fail "candidate --native-v2-compile aggregate failed"
