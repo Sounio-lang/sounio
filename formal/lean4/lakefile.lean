@@ -532,7 +532,7 @@ lean_lib «SounioErdos90Subset196Witness» where
 @[default_target]
 lean_lib «SounioErdos90Grid225Witness» where
 
--- Erdős [90] ℤ² subset at n=225 (u(225) ≥ 852, unit²=25, seed 8000019).
+-- Erdős [90] ℤ² subset at n=225 (u(225) ≥ 856, unit²=25, seed 2000003).
 @[default_target]
 lean_lib «SounioErdos90Subset225Witness» where
 

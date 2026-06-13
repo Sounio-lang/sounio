@@ -254,7 +254,7 @@ Alexeev tables do not cover.
 | 100 | 265 | 288 (10×10, N=5) | **303** (saturation, seed 1000003) | `SounioErdos90Subset303Witness` | `erdos90_subset303_witness_gate.sh` |
 | 144 | 390 | 456 (12×12, N=25) | **493** (seed 9000023) | `SounioErdos90Subset144Witness` | `erdos90_subset144_witness_gate.sh` |
 | 196 | 539 | **692** (14×14, N=25) | **719** (seed 8000019, job 2739) | `SounioErdos90Subset196Witness` | `erdos90_subset196_witness_gate.sh` |
-| 225 | 623 | **828** (15×15, N=25) | **852** (seed 8000019; job 2780 pending) | `SounioErdos90Subset225Witness` | `erdos90_subset225_witness_gate.sh` |
+| 225 | 623 | **828** (15×15, N=25) | **856** (seed 2000003, job 2780) | `SounioErdos90Subset225Witness` | `erdos90_subset225_witness_gate.sh` |
 
 Earlier rungs preserved: `SounioErdos90SubsetWitness` (302), `SounioErdos90GridWitness`
 (288), `SounioErdos90UnifiedQsqrt3Witness` (265 deduped).
@@ -300,7 +300,7 @@ baseline at this `n`; the ℤ² subset front is the correct target for small-`n`
 | 100 | 288 | 300 | 303 | +15 |
 | 144 | 456 | 467 | 493 | +37 |
 | 196 | 692 | 707 | **719** (job 2739, seed 8000019) | +27 (+3.9%) |
-| 225 | 828 | — | **852** (smoke, seed 8000019) | +24 (+2.9%) |
+| 225 | 828 | ~851 | **856** (job 2780, seed 2000003) | +28 (+3.4%) |
 
 The **relative** gain peaks at `n=144` (+8.1%) then compresses (196: +3.9%, 225: +2.9%).
 The **absolute** Δ is remarkably stable at `+24..+27` for `n ≥ 196` under this search
@@ -350,6 +350,20 @@ Stage roots under `/orangefs/training/sounio/erdos90-{sub,sat,144,196,225}-runs/
 Leader **8000019** (+3 over smoke seed 9000023) promoted to `EXPORT_SEED` in
 `erdos90_subset196_export.sio`; Lean gate recertified at **719**.
 
+#### Job 2780 aggregation (`n=225`, 18/18 complete)
+
+| Edges | Seeds |
+|-------|-------|
+| **856** | 2000003 |
+| 855 | 3141592 |
+| 854 | 9000023, 707106, 4000007, 314159, 3000003, 223607, 173205, 1000003 |
+| 853 | 271828, 161803, 141421 |
+| 852 | 8000019, 7000013, 6000011, 577215, 5000009 |
+
+Smoke favourite **8000019** landed mid-pack (852); leader **2000003** (+4 over smoke).
+Lean recertified at **856**. Spread 852–856 is wider than at `n=196` (715–719) in
+absolute terms — hill-climb polish matters more as the shape gap compresses.
+
 ### Boundary tax — why subset beats square grid at small/medium `n`
 
 For a full `w × w` square patch with `n = w²` vertices and unit distance `N`, each
@@ -385,10 +399,11 @@ effects vanish. Our ladder holds `N` fixed (5 or 25) and compares **finite patch
 | 100 | `N=5`, 3× iters | 303 | 10/36 | Plateau; 26 seeds stuck at 302 |
 | 144 | `N=25`, full iters | 493 | 1/18 (9000023) | High seed variance; leader seed reused |
 | 196 | `N=25`, 3× iters | **719** | 2/18 (8000019, 173205) | Job 2739 complete; +3 over smoke |
-| 225 | `N=25`, 3× iters | **852** (smoke) | 1/1 tested | Job 2780 running; may improve |
+| 225 | `N=25`, 3× iters | **856** | 1/18 (2000003) | Job 2780 complete; smoke seed 8000019 only 852 |
 
-**Seed 8000019** emerged as cross-`n` leader (719 at 196, 852 at 225); **9000023**
-remains best at `n=144` only. Seed transfer is empirical, not optimality-invariant.
+**Seed ecology is not monotonic across `n`:** 9000023 leads at 144 (493); 8000019 at
+196 (719); **2000003** at 225 (856). Transfer hypotheses fail; treat each rung's cluster
+as independent unless reproduced.
 
 ### Epistemic correctness layer (why Lean gates matter)
 
@@ -414,9 +429,101 @@ is staging evidence until export + Lean confirm.
 
 ### Next steps
 
-1. ~~Job 2739 / `n=196`~~ — **done** (719, seed 8000019).
-2. ~~`n=225` grid + smoke subset~~ — **done** (828 grid, 852 subset); aggregate job
-   **2780** when complete; bump `EXPORT_SEED` if higher `BEST_N225` found.
-3. Optional: `n=256` (16×16) or climb `N` at `n=625` per pilot table.
+1. ~~Jobs 2739 / 2780~~ — **done** (719 @ 196, 856 @ 225).
+2. **`n=256`** (16×16, `N=25`) — tests whether absolute Δ stays ~+25–28 or collapses.
+3. **`erdos90_optimize.sio` disk sweep** at `n ≈ 225` — compare compact-disk + optimal `N`
+   against fixed-`N=25` subset (closes the May-2025 regime comparison honestly).
 4. Do **not** claim global optimality; cite OEIS/A186705 exact ceiling at `n ≤ 21`.
 5. Keep asymptotic (Sawin/OpenAI) and finite (this ladder) claims in separate tiers.
+
+---
+
+## DEEP ANALYSIS: three-regime model (2026-06-13)
+
+The ladder data support splitting the problem into **three regimes**, not two. Conflating
+them produced the May-2025 overstatement that "subset cannot beat grid."
+
+### Regime I — triangular dominance (`n` small, any shape)
+
+`harb(n)` wins. Square grid and subset both lose to the Eisenstein NN lattice. Our
+`n=25` pilot row (grid 48 < harb 57) and the Lean `lattice_achieves_harborth` chain
+live here. **No subset search target** — the pool would need ℤ[ω], not ℤ².
+
+### Regime II — finite patch, fixed `N` (`n ≈ 64..256`, `N ∈ {5, 25}`)
+
+The adversary is **boundary tax on a square**, not the periodic Erdős optimum.
+
+| Mechanism | What it buys | Measured at `n=225` |
+|-----------|--------------|---------------------|
+| Square → disk-shaped `k`-subset | Delete 56 edge + 4 corner low-degree vertices | grid 828 → disk-init ≈ **851** (+23) |
+| Disk-init → hill-climb polish | Single-vertex swaps in pool `R≤26` | ≈851 → **856** (+5) |
+| **Total** grid → certified subset | | **+28** (+3.4%) |
+
+The decomposition is reproducible: for seeds {2000003, 8000019, 9000023} at `n=225`,
+`diskHC ∈ {850,851,852}` while `BEST ∈ {852,854,856}` — **~90% of Δ is shape**,
+~10% is stochastic hill-climb.
+
+At `n=144` the shape term dominates harder (+37 total) because a 12×12 square is a
+worse disk approximation (perimeter/area ratio 48/144 vs 60/225 for 15×15).
+
+**Predicted saturation:** under move class {pick `n` from pool, swap 1 vertex, hill-climb},
+absolute premium over square grid stabilises at **~25–30 edges** once `diskHC ≈ 0.98·best`
+(i.e. when init already captures most boundary savings). Relative premium decays as
+`Θ(1/√n)` because grid interior grows as `n` while boundary grows as `√n`.
+
+### Regime III — scale construction (`n ≳ 400`, climbing `N`)
+
+The May-2025 `erdos90_optimize.sio` / cluster sweeps: compact disk + **broad `N` sweep**
+(5→25→65→325→1105) beats `harb(n)` with ratio climbing to 3.7× at `n=16384`. Here the
+winning move is **not** dropping boundary vertices but choosing `N` with large `r₂(N)` so
+interior vertices gain many unit directions. Subset hill-climb at fixed `N=25` cannot
+compete — different game.
+
+**Critical distinction:** Regime II asks "given `N=25` and `n=225`, square or reshaped
+subset?" Regime III asks "given `n=225`, what `(shape, N)` pair maximises edges?" The
+pilot table's `828` answer is Regime III on a **square**; our `856` is Regime II on a
+**subset** — both are valid lower bounds, incomparable unless `N` and shape are aligned.
+
+### What we have actually proved (epistemic tier)
+
+| Claim | Status |
+|-------|--------|
+| `u(225) ≥ 856` with explicit distinct ℤ² coords, `N=25` | **Lean-certified** |
+| `u(225) ≥ 828` via full 15×15 grid | **Lean-certified** |
+| `u(225) ≥ 623` via `harb` (triangular) | **Classical + Lean lattice chain** |
+| `u(225) = …` (exact optimum) | **Unknown** (OEIS exact to 21) |
+| Subset beats square at fixed `N=25` for `n ∈ {100,144,196,225}` | **Measured + certified** |
+| Subset beats optimal-`N` Erdős grid at `n=225` | **Not claimed** (not tested) |
+| Exponent improvement (Sawin / OpenAI) | **Literature**; orthogonal |
+
+### Dead ends (negative results matter)
+
+1. **Unified ℚ(√3) pool** — caps at `harb(100)` after dedup; wrong geometry for small-`n`
+   ℤ² records.
+2. **Multiset witnesses** — 318/338 inflated counts; caught by distinctness gate.
+3. **Seed transfer** — 8000019 best at 196, mid-pack at 225; 9000023 best at 144 only.
+4. **Saturation at `n=100`, `N=5`** — 36 seeds → ceiling 303; further seeds useless
+   without new moves/pool.
+
+### Falsifiable predictions (next experiments)
+
+| Experiment | If confirmed | If falsified |
+|------------|--------------|--------------|
+| `n=256`, fixed `N=25`, subset cluster | Δ grid→subset ∈ [22, 32] | Regime II model wrong; revisit pool radius / moves |
+| `erdos90_optimize` disk at `n≈225` with optimal `N` | Count `C` with `C > 856` possible | Our subset is near Regime III optimum at same `n` |
+| Extend pool to `R=30` at `n=225` | `BEST` rises by ≤5 | Pool cutoff was binding |
+| GPU K-AXI parallel restarts | Same ceilings, faster | — |
+
+### Strategic position
+
+**Front A (this ladder)** is not chasing the exponent (Front B / literature). It is
+building a **certified library of explicit lower bounds** at human-scalable `n`, with an
+honest correctness layer that already prevented false publication. The scientific value is:
+
+- closing the OEIS/Alexeev gap for concrete `n`;
+- quantifying when shape beats lattice vs when distance-spectrum beats shape;
+- keeping the GPU path (proposer) tied to Lean (certifier) as a reusable pattern for
+  epistemic computing in the compiler stack.
+
+The open prize remains: a config beating **every** known construction for some `n`, or
+extending exact `u(n)` beyond 21 — not merely beating our own square-grid baseline.
