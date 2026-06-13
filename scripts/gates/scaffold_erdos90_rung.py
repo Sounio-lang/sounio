@@ -16,6 +16,7 @@ RUNGS = [
     (784, 28, 3688),
     (841, 29, 3992),
     (900, 30, 4308),
+    (961, 31, 4636),
 ]
 
 
@@ -33,8 +34,12 @@ def replace_n(text: str, n: int, w: int, grid: int) -> str:
         ("build_grid(20)", f"build_grid({w})"),
         ("if GN < 400", f"if GN < {n}"),
         ("if WN < 400", f"if WN < {n}"),
+        ("WN < 400", f"WN < {n}"),
         ("[i64; 400]", f"[i64; {n}]"),
+        ("[0; 400]", f"[0; {n}]"),
+        ("track_best_n400", f"track_best_n{n}"),
         ("erdos90-400-runs", f"erdos90-{n}-runs"),
+        ("erdos90-400-", f"erdos90-{n}-"),
         ("subset400", f"subset{n}"),
         ("grid400", f"grid{n}"),
         ("e90_400", f"e90_{n}"),
@@ -46,6 +51,9 @@ def replace_n(text: str, n: int, w: int, grid: int) -> str:
         ("Subset400", f"Subset{n}"),
         ("at n=400", f"at n={n}"),
         ("n=400", f"n={n}"),
+        ("u(400)", f"u({n})"),
+        ("harb 400", f"harb {n}"),
+        (": 1688 <", f": {grid} <"),
         ("TARGET_N: i64 = 400", f"TARGET_N: i64 = {n}"),
         ("expected 400 points", f"expected {n} points"),
         ("len(pts) != 400", f"len(pts) != {n}"),
@@ -79,7 +87,11 @@ def scaffold(n: int, w: int, grid: int) -> None:
             ROOT / "stdlib/research"
         )
         dst = dst_dir / dst_name
-        dst.write_text(replace_n(src.read_text(), n, w, grid))
+        text = replace_n(src.read_text(), n, w, grid)
+        if dst_name.endswith(".py"):
+            hb = max(1_000_000, n * 2200)
+            text = text.replace("maxHeartbeats 1000000", f"maxHeartbeats {hb}")
+        dst.write_text(text)
         if dst_name.endswith(".sh") or dst_name.endswith(".py"):
             dst.chmod(0o755)
 
