@@ -5404,25 +5404,27 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 return false
             }
         } else if instr_op == IrOpcode::IrCall {
-            let argc = (*func).instrs[i as usize].arg_count
-            if argc > 2 {
+            let call_instr = (*func).instrs[i as usize]
+            let argc = call_instr.arg_count
+            if argc > 6 {
                 return false
             }
-            if argc > 0 {
-                let arg0 = (*func).instrs[i as usize].src1
-                if arg0 < 0 { return false }
-                nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(arg0))
-            }
-            if argc > 1 {
-                let arg1 = (*func).instrs[i as usize].src2
-                if arg1 < 0 { return false }
-                nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(arg1))
+            var ai: i64 = 0
+            while ai < argc {
+                var arg_reg = call_instr.src1 + ai
+                if ai == 1 && call_instr.src2 >= 0 {
+                    arg_reg = call_instr.src2
+                }
+                let preg = param_reg(ai)
+                if arg_reg < 0 || preg < 0 { return false }
+                nc_emit_load_rbp_disp32_reg(nc, preg, ir_slot_offset(arg_reg))
+                ai = ai + 1
             }
             let call_pos = (*nc).code.len
             nc_emit_call_rel32_placeholder(nc)
-            nc_add_call_reloc(nc, call_pos + 1, (*func).instrs[i as usize].fn_id)
-            if (*func).instrs[i as usize].dst >= 0 {
-                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            nc_add_call_reloc(nc, call_pos + 1, call_instr.fn_id)
+            if call_instr.dst >= 0 {
+                nc_core_store_rax_to_temp(nc, call_instr.dst)
             }
         } else if instr_op == IrOpcode::IrReturn {
             nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
@@ -5574,25 +5576,34 @@ pub fn native_v2_core_emit_return_into(nc: &! NativeCompiler, src: i64) with Mut
 }
 
 fn nc_emit_load_rbp_disp32_reg(nc: &! NativeCompiler, reg: i64, disp: i64) with Mut, Panic, Div {
-    nc_emit_byte(nc, 0x48)
+    if reg >= 8 {
+        nc_emit_byte(nc, 0x4c)
+    } else {
+        nc_emit_byte(nc, 0x48)
+    }
     nc_emit_byte(nc, 0x8b)
-    nc_emit_byte(nc, 0x80 | (reg * 8) | 5)
+    nc_emit_byte(nc, 0x80 | ((reg % 8) * 8) | 5)
     nc_emit_u32_le(nc, disp)
 }
 
 fn nc_emit_store_rbp_disp32_reg(nc: &! NativeCompiler, reg: i64, disp: i64) with Mut, Panic, Div {
-    nc_emit_byte(nc, 0x48)
+    if reg >= 8 {
+        nc_emit_byte(nc, 0x4c)
+    } else {
+        nc_emit_byte(nc, 0x48)
+    }
     nc_emit_byte(nc, 0x89)
-    nc_emit_byte(nc, 0x80 | (reg * 8) | 5)
+    nc_emit_byte(nc, 0x80 | ((reg % 8) * 8) | 5)
     nc_emit_u32_le(nc, disp)
 }
 
-// Pass up to 4 args from consecutive vregs into SysV param regs (rdi/rsi/rdx/rcx)
+// Pass up to 6 args from consecutive vregs into SysV param regs.
 pub fn native_v2_core_emit_call_argc_into(nc: &! NativeCompiler, dst: i64, fn_id: i64, arg0: i64, argc: i64) with Mut, Panic, Div {
-    if argc >= 1 { nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(arg0)) }
-    if argc >= 2 { nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(arg0 + 1)) }
-    if argc >= 3 { nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(arg0 + 2)) }
-    if argc >= 4 { nc_emit_load_rbp_disp32_reg(nc, 1, ir_slot_offset(arg0 + 3)) }
+    var ai: i64 = 0
+    while ai < argc && ai < 6 {
+        nc_emit_load_rbp_disp32_reg(nc, param_reg(ai), ir_slot_offset(arg0 + ai))
+        ai = ai + 1
+    }
     let call_pos = (*nc).code.len
     nc_emit_call_rel32_placeholder(nc)
     nc_add_call_reloc(nc, call_pos + 1, fn_id)

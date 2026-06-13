@@ -10,6 +10,8 @@
 #   scalar(N)  -> exit N           value fidelity across the byte range
 #   call       -> exit 6           params + single call + arithmetic (3*2)
 #   multicall  -> exit 84          chained calls + 2-param fns (add(10,32);mul(_,2))
+#   call5      -> exit 31          SysV register args through r8
+#   call6      -> exit 63          SysV register args through r9
 #   control    -> exit 1           conditional branch TAKEN + label
 #   control-ft -> exit 7           conditional branch NOT taken (fall-through)
 #   arith      -> exit 42          OpSub + OpDiv ((100-16)/2)
@@ -106,6 +108,8 @@ emit_and_check 255 "scalar255" --native-v2-emit-scalar 255
 # Shapes.
 emit_and_check 6   "call"       --native-v2-emit-call
 emit_and_check 84  "multicall"  --native-v2-emit-multicall
+emit_and_check 31  "call5"      --native-v2-emit-call5
+emit_and_check 63  "call6"      --native-v2-emit-call6
 emit_and_check 1   "control"    --native-v2-emit-control
 emit_and_check 7   "control-ft" --native-v2-emit-control-ft
 emit_and_check 42  "arith"      --native-v2-emit-arith
@@ -115,5 +119,5 @@ if [[ "$FAILED" -ne 0 ]]; then
     exit 5
 fi
 
-echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/multicall/control/control-ft/arith (IR->ELF->exit)"
+echo "[gate] PASS: modular native-v2 backend emits correct executables across scalar/call/multicall/call5/call6/control/control-ft/arith (IR->ELF->exit)"
 exit 0

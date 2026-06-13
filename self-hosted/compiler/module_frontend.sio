@@ -2553,6 +2553,33 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
     let body_end = module_frontend_source_body_end(data, body, size)
     let param0 = module_frontend_source_fn_first_param_name(data, fn_pos, size)
     let param1 = module_frontend_source_fn_second_param_name(data, fn_pos, size)
+    if body_end >= 0 {
+        let expr_end_for_chain = module_frontend_source_line_end(data, expr, body_end)
+        let add_chain_count = module_frontend_source_expr_param_add_chain_count(data, expr, expr_end_for_chain, fn_pos, size)
+        if add_chain_count > 1 {
+            func.param_count = add_chain_count
+            var param_i: i64 = 0
+            while param_i < add_chain_count {
+                func.param_regs[param_i as usize] = param_i
+                param_i = param_i + 1
+            }
+            func.reg_count = (add_chain_count * 2) + 1
+            var instr_i: i64 = 0
+            var rhs_i: i64 = 1
+            var acc_reg: i64 = 0
+            var next_reg = add_chain_count
+            while rhs_i < add_chain_count {
+                func.instrs[instr_i as usize] = ir_binop(next_reg, acc_reg, BinaryOp::OpAdd, rhs_i)
+                acc_reg = next_reg
+                next_reg = next_reg + 1
+                instr_i = instr_i + 1
+                rhs_i = rhs_i + 1
+            }
+            func.instrs[instr_i as usize] = ir_return(acc_reg)
+            func.instr_count = instr_i + 1
+            return func
+        }
+    }
     if body_end >= 0 && param0.len > 0 && param1.len > 0 {
         let expr_end = module_frontend_source_line_end(data, expr, body_end)
         let binop = module_frontend_source_expr_two_params_binop(data, expr, expr_end, param0, param1)
@@ -2576,6 +2603,29 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
     let direct_expr = module_frontend_source_strip_return_prefix(data, expr, direct_end)
     let direct_callee = module_frontend_source_ident_at(data, direct_expr, direct_end)
     if direct_callee.len > 0 {
+        let direct_argc = module_frontend_source_call_i64_literal_count(data, direct_expr + direct_callee.len, direct_end)
+        if direct_argc > 2 && direct_argc <= 6 {
+            func.reg_count = direct_argc + 1
+            var arg_i: i64 = 0
+            while arg_i < direct_argc {
+                let arg_value = module_frontend_source_call_i64_literal_at(data, direct_expr + direct_callee.len, direct_end, arg_i)
+                if !arg_value.0 {
+                    return func
+                }
+                func.instrs[arg_i as usize] = ir_load_imm(arg_i, arg_value.1)
+                arg_i = arg_i + 1
+            }
+            var args = ir_reg_list_single(0)
+            var list_i: i64 = 1
+            while list_i < direct_argc {
+                args = ir_reg_list_append(args, list_i)
+                list_i = list_i + 1
+            }
+            func.instrs[direct_argc as usize] = ir_call(direct_argc, 0 - 1, direct_callee, Some(Box::new(args)), direct_argc)
+            func.instrs[(direct_argc + 1) as usize] = ir_return(direct_argc)
+            func.instr_count = direct_argc + 2
+            return func
+        }
         let direct_two_args = module_frontend_source_call_two_i64_literals_packed(data, direct_expr + direct_callee.len, direct_end)
         if direct_two_args.0 {
             let direct_left_arg = direct_two_args.1 / 4294967296
@@ -2640,6 +2690,29 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
         }
     }
     if callee.len > 0 {
+        let argc = module_frontend_source_call_i64_literal_count(data, expr2 + callee.len, size)
+        if argc > 2 && argc <= 6 {
+            func.reg_count = argc + 1
+            var arg_i: i64 = 0
+            while arg_i < argc {
+                let arg_value = module_frontend_source_call_i64_literal_at(data, expr2 + callee.len, size, arg_i)
+                if !arg_value.0 {
+                    return func
+                }
+                func.instrs[arg_i as usize] = ir_load_imm(arg_i, arg_value.1)
+                arg_i = arg_i + 1
+            }
+            var args = ir_reg_list_single(0)
+            var list_i: i64 = 1
+            while list_i < argc {
+                args = ir_reg_list_append(args, list_i)
+                list_i = list_i + 1
+            }
+            func.instrs[argc as usize] = ir_call(argc, 0 - 1, callee, Some(Box::new(args)), argc)
+            func.instrs[(argc + 1) as usize] = ir_return(argc)
+            func.instr_count = argc + 2
+            return func
+        }
         let two_args = module_frontend_source_call_two_i64_literals_packed(data, expr2 + callee.len, size)
         if two_args.0 {
             let left_arg = two_args.1 / 4294967296
@@ -3157,6 +3230,69 @@ fn module_frontend_source_call_one_i64_literal(data: string, start: i64, end: i6
     (true, arg.1)
 }
 
+fn module_frontend_source_call_i64_literal_count(data: string, start: i64, end: i64) -> i64 with Mut, Panic, Div {
+    var i = module_frontend_source_skip_ws(data, start, end)
+    if i >= end || data[i as usize] != (40 as i8) {
+        return 0
+    }
+    i = module_frontend_source_skip_ws(data, i + 1, end)
+    if i < end && data[i as usize] == (41 as i8) {
+        return 0
+    }
+    var count: i64 = 0
+    var done = false
+    while i < end && done == false && count < 64 {
+        let arg = module_frontend_source_int_at(data, i, end)
+        if !arg.0 {
+            return 0
+        }
+        count = count + 1
+        i = module_frontend_source_skip_digits(data, i, end)
+        i = module_frontend_source_skip_ws(data, i, end)
+        if i < end && data[i as usize] == (44 as i8) {
+            i = module_frontend_source_skip_ws(data, i + 1, end)
+        } else if i < end && data[i as usize] == (41 as i8) {
+            done = true
+        } else {
+            return 0
+        }
+    }
+    if done {
+        return count
+    }
+    0
+}
+
+fn module_frontend_source_call_i64_literal_at(data: string, start: i64, end: i64, target_idx: i64) -> (bool, i64) with Mut, Panic, Div {
+    var i = module_frontend_source_skip_ws(data, start, end)
+    if i >= end || data[i as usize] != (40 as i8) {
+        return (false, 0)
+    }
+    i = module_frontend_source_skip_ws(data, i + 1, end)
+    var idx: i64 = 0
+    var done = false
+    while i < end && done == false {
+        let arg = module_frontend_source_int_at(data, i, end)
+        if !arg.0 {
+            return (false, 0)
+        }
+        if idx == target_idx {
+            return (true, arg.1)
+        }
+        idx = idx + 1
+        i = module_frontend_source_skip_digits(data, i, end)
+        i = module_frontend_source_skip_ws(data, i, end)
+        if i < end && data[i as usize] == (44 as i8) {
+            i = module_frontend_source_skip_ws(data, i + 1, end)
+        } else if i < end && data[i as usize] == (41 as i8) {
+            done = true
+        } else {
+            return (false, 0)
+        }
+    }
+    (false, 0)
+}
+
 fn module_frontend_source_fn_first_param_name(data: string, fn_pos: i64, size: i64) -> Name with Mut, Panic, Div {
     var empty = Name { buf: [0; 128], len: 0 }
     var i = fn_pos
@@ -3189,6 +3325,77 @@ fn module_frontend_source_fn_second_param_name(data: string, fn_pos: i64, size: 
     module_frontend_source_ident_at(data, i, size)
 }
 
+fn module_frontend_source_fn_param_count(data: string, fn_pos: i64, size: i64) -> i64 with Mut, Panic, Div {
+    var i = fn_pos
+    while i < size && data[i as usize] != (40 as i8) {
+        i = i + 1
+    }
+    if i >= size {
+        return 0
+    }
+    i = module_frontend_source_skip_ws(data, i + 1, size)
+    if i < size && data[i as usize] == (41 as i8) {
+        return 0
+    }
+    var count: i64 = 0
+    var done = false
+    while i < size && done == false && count < 64 {
+        let pname = module_frontend_source_ident_at(data, i, size)
+        if pname.len <= 0 {
+            return 0
+        }
+        count = count + 1
+        i = module_frontend_source_skip_ws(data, i + pname.len, size)
+        while i < size && data[i as usize] != (44 as i8) && data[i as usize] != (41 as i8) {
+            i = i + 1
+        }
+        if i < size && data[i as usize] == (44 as i8) {
+            i = module_frontend_source_skip_ws(data, i + 1, size)
+        } else if i < size && data[i as usize] == (41 as i8) {
+            done = true
+        } else {
+            return 0
+        }
+    }
+    count
+}
+
+fn module_frontend_source_fn_param_name_at(data: string, fn_pos: i64, size: i64, target_idx: i64) -> Name with Mut, Panic, Div {
+    var empty = Name { buf: [0; 128], len: 0 }
+    var i = fn_pos
+    while i < size && data[i as usize] != (40 as i8) {
+        i = i + 1
+    }
+    if i >= size {
+        return empty
+    }
+    i = module_frontend_source_skip_ws(data, i + 1, size)
+    var idx: i64 = 0
+    var done = false
+    while i < size && done == false {
+        let pname = module_frontend_source_ident_at(data, i, size)
+        if pname.len <= 0 {
+            return empty
+        }
+        if idx == target_idx {
+            return pname
+        }
+        idx = idx + 1
+        i = module_frontend_source_skip_ws(data, i + pname.len, size)
+        while i < size && data[i as usize] != (44 as i8) && data[i as usize] != (41 as i8) {
+            i = i + 1
+        }
+        if i < size && data[i as usize] == (44 as i8) {
+            i = module_frontend_source_skip_ws(data, i + 1, size)
+        } else if i < size && data[i as usize] == (41 as i8) {
+            done = true
+        } else {
+            return empty
+        }
+    }
+    empty
+}
+
 fn module_frontend_source_fn_two_param_binop_kind(data: string, size: i64, fn_name: Name) -> i64 with Mut, Panic, Div {
     let fn_pos = module_frontend_source_find_fn(data, size, fn_name)
     if fn_pos < 0 {
@@ -3212,6 +3419,46 @@ fn module_frontend_source_fn_two_param_binop_kind(data: string, size: i64, fn_na
     let binop = module_frontend_source_expr_two_params_binop(data, expr, expr_end, param0, param1)
     if binop.0 {
         return binop.1
+    }
+    0
+}
+
+fn module_frontend_source_expr_param_add_chain_count(data: string, start: i64, end: i64, fn_pos: i64, size: i64) -> i64 with Mut, Panic, Div {
+    let count = module_frontend_source_fn_param_count(data, fn_pos, size)
+    if count <= 1 || count > 6 {
+        return 0
+    }
+    var s = module_frontend_source_strip_return_prefix(data, start, end)
+    var e = end
+    while e > s {
+        let tail = data[(e - 1) as usize]
+        if tail == (32 as i8) || tail == (9 as i8) || tail == (10 as i8) || tail == (13 as i8) || tail == (59 as i8) || tail == (125 as i8) {
+            e = e - 1
+        } else {
+            break
+        }
+    }
+    var idx: i64 = 0
+    var pos = s
+    while idx < count {
+        pos = module_frontend_source_skip_ws(data, pos, e)
+        let actual = module_frontend_source_ident_at(data, pos, e)
+        let expected = module_frontend_source_fn_param_name_at(data, fn_pos, size, idx)
+        if actual.len <= 0 || expected.len <= 0 || !ir_name_eq(actual, expected) {
+            return 0
+        }
+        pos = module_frontend_source_skip_ws(data, pos + actual.len, e)
+        if idx + 1 < count {
+            if pos >= e || data[pos as usize] != (43 as i8) {
+                return 0
+            }
+            pos = pos + 1
+        }
+        idx = idx + 1
+    }
+    pos = module_frontend_source_skip_ws(data, pos, e)
+    if pos == e {
+        return count
     }
     0
 }
