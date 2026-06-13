@@ -255,6 +255,7 @@ Alexeev tables do not cover.
 | 144 | 390 | 456 (12×12, N=25) | **493** (seed 9000023) | `SounioErdos90Subset144Witness` | `erdos90_subset144_witness_gate.sh` |
 | 196 | 539 | **692** (14×14, N=25) | **719** (seed 8000019, job 2739) | `SounioErdos90Subset196Witness` | `erdos90_subset196_witness_gate.sh` |
 | 225 | 623 | **828** (15×15, N=25) | **856** (seed 2000003, job 2780) | `SounioErdos90Subset225Witness` | `erdos90_subset225_witness_gate.sh` |
+| 256 | 712 | **976** (16×16, N=25) | **1007** (seed 2000003; job 2819 pending) | `SounioErdos90Subset256Witness` | `erdos90_subset256_witness_gate.sh` |
 
 Earlier rungs preserved: `SounioErdos90SubsetWitness` (302), `SounioErdos90GridWitness`
 (288), `SounioErdos90UnifiedQsqrt3Witness` (265 deduped).
@@ -301,6 +302,7 @@ baseline at this `n`; the ℤ² subset front is the correct target for small-`n`
 | 144 | 456 | 467 | 493 | +37 |
 | 196 | 692 | 707 | **719** (job 2739, seed 8000019) | +27 (+3.9%) |
 | 225 | 828 | ~851 | **856** (job 2780, seed 2000003) | +28 (+3.4%) |
+| 256 | 976 | ~996 | **1007** (smoke, seed 2000003) | +31 (+3.2%) |
 
 The **relative** gain peaks at `n=144` (+8.1%) then compresses (196: +3.9%, 225: +2.9%).
 The **absolute** Δ is remarkably stable at `+24..+27` for `n ≥ 196` under this search
@@ -333,9 +335,10 @@ published false records.
 | `erdos90-sat-20260613T153818-1010187` | 2679 | `n=100` saturation → 302/303 |
 | `erdos90-144-20260613T153818-1010197` | 2625 | `n=144` subset → 486–493 |
 | `erdos90-196-20260613T161738-1043947` | **2739** (18 seeds) | `n=196` subset → **719** (8000019, 173205) |
-| `erdos90-225-20260613T164143-1062825` | **2780** (18 seeds) | `n=225` subset vs grid 828 |
+| `erdos90-225-20260613T164143-1062825` | **2780** (18 seeds) | `n=225` subset → **856** (2000003) |
+| `erdos90-256-20260613T165554-1072360` | **2819** (18 seeds) | `n=256` subset vs grid 976 |
 
-Stage roots under `/orangefs/training/sounio/erdos90-{sub,sat,144,196,225}-runs/`.
+Stage roots under `/orangefs/training/sounio/erdos90-{sub,sat,144,196,225,256}-runs/`.
 
 #### Job 2739 aggregation (`n=196`, 18/18 complete)
 
@@ -427,14 +430,26 @@ is staging evidence until export + Lean confirm.
 | `submit_subset{196,225}_array.sh` | 18-seed OrangeFS arrays |
 | `erdos90_{grid,subset}{196,225}_witness_gate.sh` | Export → Lean certify |
 
+### Regime III comparison at matched `n` (`erdos90_disk225_compare.sio`)
+
+At **equal cardinality** `n ≈ 225`, compact disk + optimal `N` from the standard sweep:
+
+| `rr` | `n` | `bestN` | `count` | vs grid 828 | vs subset 856 |
+|------|-----|---------|---------|-------------|---------------|
+| 68–71 | 221 | 25 | 832 | beats | below |
+| 72 | 225 | 25 | **848** | beats | **below** |
+
+**Conclusion:** Regime II subset (`856`) beats Regime III **full disk** at the same `n`
+when both use the swept `N` list (best is still `N=25` here). The May-2025 regime split
+is not "disk always wins" — it is **climbing `N` + large `n`** that wins. Subset reshaping
+in a larger pool strictly dominates a full disk at `n=225`.
+
 ### Next steps
 
-1. ~~Jobs 2739 / 2780~~ — **done** (719 @ 196, 856 @ 225).
-2. **`n=256`** (16×16, `N=25`) — tests whether absolute Δ stays ~+25–28 or collapses.
-3. **`erdos90_optimize.sio` disk sweep** at `n ≈ 225` — compare compact-disk + optimal `N`
-   against fixed-`N=25` subset (closes the May-2025 regime comparison honestly).
-4. Do **not** claim global optimality; cite OEIS/A186705 exact ceiling at `n ≤ 21`.
-5. Keep asymptotic (Sawin/OpenAI) and finite (this ladder) claims in separate tiers.
+1. ~~Jobs 2739 / 2780 / `n=256` smoke~~ — **done** (719, 856, 1007); aggregate **2819**.
+2. Optional: `n=289` (17×17) or export disk witness at `rr=72` (`n=225`, count=848) to Lean.
+3. Do **not** claim global optimality; cite OEIS/A186705 exact ceiling at `n ≤ 21`.
+4. Keep asymptotic (Sawin/OpenAI) and finite (this ladder) claims in separate tiers.
 
 ---
 
@@ -509,8 +524,8 @@ pilot table's `828` answer is Regime III on a **square**; our `856` is Regime II
 
 | Experiment | If confirmed | If falsified |
 |------------|--------------|--------------|
-| `n=256`, fixed `N=25`, subset cluster | Δ grid→subset ∈ [22, 32] | Regime II model wrong; revisit pool radius / moves |
-| `erdos90_optimize` disk at `n≈225` with optimal `N` | Count `C` with `C > 856` possible | Our subset is near Regime III optimum at same `n` |
+| `n=256`, fixed `N=25`, subset cluster | Δ grid→subset ∈ [22, 32] | **Confirmed** smoke: +31 (1007 vs 976) |
+| `erdos90_disk225_compare` disk at `n≈225` with optimal `N` | Count `C` with `C > 856` possible | **Falsified**: best disk count **848** < subset **856** |
 | Extend pool to `R=30` at `n=225` | `BEST` rises by ≤5 | Pool cutoff was binding |
 | GPU K-AXI parallel restarts | Same ceilings, faster | — |
 
