@@ -4,6 +4,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# macOS kills unsigned Mach-O binaries with SIGKILL (exit 137). Source the ad-hoc
+# codesign helper so every emitted binary is signed before it is run; without this
+# the runtime-proof summary reports 0/N on macOS regardless of compiler correctness.
+MACOS_CODESIGN_HELPER="$ROOT_DIR/scripts/lib/macos_codesign.sh"
+if [[ -f "$MACOS_CODESIGN_HELPER" ]]; then
+  # shellcheck source=/dev/null
+  source "$MACOS_CODESIGN_HELPER"
+fi
+
 SOUC_NATIVE="${SOUC_NATIVE:-$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64}"
 MANIFEST_PATH="${MANIFEST_PATH:-tests/selfhost/native_runtime/manifest.tsv}"
 WORK_DIR="${WORK_DIR:-/tmp/sounio-selfhost-native-runtime-proof}"
@@ -140,6 +149,9 @@ run_case() {
   fi
 
   chmod +x "$elf_path"
+  if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
+    sounio_ad_hoc_codesign "$elf_path"
+  fi
 
   set +e
   run_with_timeout "$TIMEOUT_SECS" "$elf_path" >"$run_stdout" 2>"$run_stderr"
