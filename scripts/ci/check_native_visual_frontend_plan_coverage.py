@@ -261,6 +261,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment artifact libraries can be driven by native Workbench events to update selected, baseline, and comparison artifacts.",
     ),
     Evidence(
+        "workbench-experiment-package",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentPackage",
+            "viz_workbench_experiment_package_build",
+            "viz_workbench_experiment_package_verify",
+            "viz_workbench_experiment_package_emit",
+        ),
+        "Notebook, artifact library, browser, compare mode, scene audit, and rendered frame hashes can be packaged as one reproducible Workbench experiment.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -600,6 +612,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_experiment_compare_mode",
         detail="Workbench experiment comparison mode proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-experiment-package-run",
+        "label",
+        "viz_workbench_experiment_package",
+        detail="Workbench experiment package proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",
