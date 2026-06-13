@@ -14,7 +14,7 @@ Expected output:
 === Native Visual Frontend Gate: PASS ===
 ```
 
-This gate is the one-command proof surface for the native Visual IR lane. It validates `scripts/ci/native_visual_frontend_gate.manifest.tsv`, checks original-plan coverage through `scripts/ci/check_native_visual_frontend_plan_coverage.py`, checks the core `viz::sci` and Workbench modules, runs headless Canvas/HTML/physchem/interaction/replay proofs, compile-gates the visual demos, and runs the headless demos that do not require `DISPLAY`.
+This gate is the one-command proof surface for the native Visual IR lane. It validates `scripts/ci/native_visual_frontend_gate.manifest.tsv`, checks original-plan coverage through `scripts/ci/check_native_visual_frontend_plan_coverage.py`, checks the core `viz::sci` and Workbench modules, runs headless Canvas/HTML/physchem/interaction/replay proofs, compile-gates the visual demos including the native window lab, and runs the headless demos that do not require `DISPLAY`.
 
 ## Headless Proof
 
@@ -768,7 +768,7 @@ Compile:
 SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh compile examples/viz_lab/main.sio -o /tmp/viz_lab.elf
 ```
 
-The lab currently proves the shared scene model with `viz_app` event handling and Canvas rendering, then prints `VIZ_LAB_READY`. Opening a real window remains optional manual work for the next phase.
+The lab proves the shared scene model with `viz_app` event handling and Canvas rendering, then prints `VIZ_LAB_READY`. The native window lab is compile-gated in the canonical manifest and can be run manually when `DISPLAY` is available.
 
 ## Native Window Lab
 
@@ -778,7 +778,7 @@ Compile:
 SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh compile examples/viz_lab_window/main.sio -o /tmp/viz_lab_window.elf
 ```
 
-The window lab uses `viz_window_step` to pump `display::Window` events into `VizApp`/`VizScene` and present Canvas frames. It is compile-gated for CI and intended for manual runs when `DISPLAY` is available.
+The window lab uses `viz_window_step` to pump `display::Window` events into `VizApp`/`VizScene` and present Canvas frames. CI compiles it as the native window contract and manual runs can open it when `DISPLAY` is available.
 
 ## Physchem Demo
 

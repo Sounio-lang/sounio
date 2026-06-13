@@ -501,11 +501,11 @@ REQUIRED: tuple[Evidence, ...] = (
         "Headless lab demo composes plot, molecule, field, 3D, and controls.",
     ),
     Evidence(
-        "optional-window-demo",
+        "native-window-demo",
         "contains",
         "examples/viz_lab_window/main.sio",
         ("window_open", "viz_window_step", "VIZ_CONTROL_TABS"),
-        "Optional native window demo uses the same Visual IR app path.",
+        "Native window demo uses the same Visual IR app path.",
     ),
     Evidence(
         "physchem-demo",
@@ -762,7 +762,7 @@ REQUIRED: tuple[Evidence, ...] = (
         "gate-demo-compiles",
         "labels",
         "",
-        ("viz_hello_demo", "viz_lab_demo", "viz_physchem_demo", "viz_workbench_demo"),
+        ("viz_hello_demo", "viz_lab_demo", "viz_lab_window_demo", "viz_physchem_demo", "viz_workbench_demo"),
         "Demo compile gates are present.",
     ),
     Evidence(

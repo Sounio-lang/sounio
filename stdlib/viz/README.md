@@ -10,7 +10,7 @@ The v1 architecture is:
 - `viz::viz_app`: headless-testable app runner for Event -> Visual IR -> Canvas frames.
 - `viz::viz_replay`: deterministic event replay over `VizApp`, `VizScene`, Canvas rendering, and frame hashes.
 - `viz::inspector`: native Canvas inspector panel for Visual IR identity and interaction state.
-- `viz::viz_window`: optional native `display::Window` bridge for manual event-loop demos.
+- `viz::viz_window`: native `display::Window` bridge for Visual IR event-loop demos.
 - `viz::audit`: shared state hashes used by replay, inspector, HTML/export audits, and headless tests.
 - `viz::molecule_editor`: atom-level molecule hit-testing, selection, and mutation helpers over `VizScene`.
 - `viz::authoring`: typed molecule authoring transactions, checked constraints, replay traces, and proof-hash certificates over `VizScene`.
@@ -27,7 +27,7 @@ The canonical headless acceptance gate for this lane is:
 SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/native_visual_frontend_gate.sh
 ```
 
-It checks the module surface, Canvas renderer, static HTML/SVG export, physico-chemistry nodes, Workbench interaction, replay sessions, timeline playback, and demo compile/run surfaces without requiring `DISPLAY`.
+It checks the module surface, Canvas renderer, static HTML/SVG export, physico-chemistry nodes, Workbench interaction, replay sessions, timeline playback, demo compile/run surfaces, and the native window lab compile surface without requiring `DISPLAY`.
 
 The gate reads `scripts/ci/native_visual_frontend_gate.manifest.tsv`, validates it with `scripts/ci/check_native_visual_frontend_gate_manifest.py`, and checks original-plan coverage with `scripts/ci/check_native_visual_frontend_plan_coverage.py`, so the accepted proof surface is explicit, reviewable, and tied to the native frontend plan rather than only to the easiest passing demos.
 
@@ -82,7 +82,7 @@ The gate reads `scripts/ci/native_visual_frontend_gate.manifest.tsv`, validates 
 - Mesh slots keep their `Tri3D` payload and a primitive-array mirror for Canvas, audit, and HTML/SVG renderers. The mirror avoids fragile cross-module array-of-struct reads while preserving the Sounio-owned Visual IR as the semantic source.
 - Labels and text controls use fixed `[i8; 64]` buffers in the Visual IR. Canvas renders them with `display::font`; HTML/SVG escapes XML-sensitive ASCII before export.
 - Native frontend builders cover button, slider, toggle, tabs, legend, tooltip, text viewport, and plot viewport nodes over the same control reducer machinery.
-- `display::event::Event` can be reduced directly into `VizScene` for headless tests and future native window loops.
-- Native windows are an optional layer over the same app runner; CI proofs stay headless.
+- `display::event::Event` can be reduced directly into `VizScene` for headless tests and native window loops.
+- Native windows use the same app runner as headless proofs; CI compile-gates the window lab while runtime proofs stay headless.
 - `render::renderer3d` remains a CPU Canvas renderer. Its v1.1 path adds Blinn-Phong specular shading and antialiased triangle edge lines while keeping 3D scene meaning in Sounio data.
 - GPU rendering is deferred until general compiler GPU backend wiring is ready.
