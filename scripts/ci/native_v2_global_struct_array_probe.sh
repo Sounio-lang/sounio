@@ -37,6 +37,28 @@ var X: i64 = 0
 fn main() -> i64 with Mut { X = 42; return X }
 SRC
 
+RAW_SCALAR_ELF="$TMP_DIR/raw_global_scalar.elf"
+set +e
+"$SOUC_NATIVE" "$TMP_DIR/global_scalar.sio" "$RAW_SCALAR_ELF" >"$TMP_DIR/raw_global_scalar.log" 2>&1
+raw_scalar_compile_rc=$?
+set -e
+
+if [[ "$raw_scalar_compile_rc" -eq 0 && -s "$RAW_SCALAR_ELF" ]]; then
+  chmod +x "$RAW_SCALAR_ELF"
+  set +e
+  "$RAW_SCALAR_ELF"
+  raw_scalar_rc=$?
+  set -e
+  if [[ "$raw_scalar_rc" -eq 42 ]]; then
+    echo "[native-v2-global-struct-array] raw native source globals: PASS"
+  else
+    echo "[native-v2-global-struct-array] raw native source globals: BLOCKED rc=$raw_scalar_rc"
+  fi
+else
+  echo "[native-v2-global-struct-array] raw native source globals: BLOCKED compile_rc=$raw_scalar_compile_rc"
+  grep -aE 'error\[|typecheck|failed' "$TMP_DIR/raw_global_scalar.log" || true
+fi
+
 set +e
 "$MADAROS" run "$TMP_DIR/global_scalar.sio" >"$TMP_DIR/madaros_global_scalar.log" 2>&1
 madaros_rc=$?
