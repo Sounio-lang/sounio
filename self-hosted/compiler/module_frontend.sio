@@ -23,6 +23,7 @@ var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES: [i64; 64] = [0; 64]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS: [i64; 64] = [0; 64]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES: [i64; 64] = [0; 64]
 var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES: [i64; 64] = [0; 64]
+var MODULE_FRONTEND_IMPORTED_SIMPLE_FN_ARITIES: [i64; 64] = [0; 64]
 
 fn module_frontend_import_is_ident_ch(c: i8) -> bool {
     (c >= 65 as i8 && c <= 90 as i8) ||
@@ -3230,7 +3231,7 @@ fn module_frontend_source_call_one_i64_literal(data: string, start: i64, end: i6
     (true, arg.1)
 }
 
-fn module_frontend_source_call_five_i64_literals_packed(data: string, start: i64, end: i64) -> (bool, i64) with Mut, Panic, Div {
+fn module_frontend_source_call_i64_literals_packed(data: string, start: i64, end: i64, max_count: i64) -> (bool, i64) with Mut, Panic, Div {
     var i = module_frontend_source_skip_ws(data, start, end)
     if i >= end || data[i as usize] != (40 as i8) {
         return (false, 0)
@@ -3239,7 +3240,7 @@ fn module_frontend_source_call_five_i64_literals_packed(data: string, start: i64
     var count: i64 = 0
     var pack: i64 = 0
     var done = false
-    while i < end && !done && count < 5 {
+    while i < end && !done && count < max_count {
         let arg = module_frontend_source_int_at(data, i, end)
         if !arg.0 || arg.1 < 0 || arg.1 > 255 {
             return (false, 0)
@@ -3256,8 +3257,16 @@ fn module_frontend_source_call_five_i64_literals_packed(data: string, start: i64
             return (false, 0)
         }
     }
-    if done && count == 5 {
-        return (true, pack)
+    if done && count > 0 {
+        return (true, (pack * 8) + count)
+    }
+    (false, 0)
+}
+
+fn module_frontend_source_call_five_i64_literals_packed(data: string, start: i64, end: i64) -> (bool, i64) with Mut, Panic, Div {
+    let args = module_frontend_source_call_i64_literals_packed(data, start, end, 6)
+    if args.0 && (args.1 & 7) == 5 {
+        return (true, args.1 / 8)
     }
     (false, 0)
 }
@@ -4170,6 +4179,7 @@ fn module_frontend_imported_simple_global_reset() with Mut, Panic {
         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[i as usize] = 0
         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[i as usize] = 0
         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[i as usize] = 0
+        MODULE_FRONTEND_IMPORTED_SIMPLE_FN_ARITIES[i as usize] = 0
         i = i + 1
     }
 }
@@ -4190,6 +4200,7 @@ fn module_frontend_imported_simple_global_push_fn(
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 2
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize] = 0
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = 0
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_ARITIES[idx as usize] = 0
 
     if module_frontend_name_is_main(fn_name) &&
        module_frontend_source_contains_pattern(path, "select_unary(0)") &&
@@ -4338,9 +4349,10 @@ fn module_frontend_imported_simple_global_push_fn(
         let expr_for_add_chain = module_frontend_source_skip_ws(data, body_for_add_chain, end_for_add_chain)
         let expr_end_for_add_chain = module_frontend_source_line_end(data, expr_for_add_chain, end_for_add_chain)
         let add_chain_count = module_frontend_source_expr_param_add_chain_count(data, expr_for_add_chain, expr_end_for_add_chain, fn_pos, size)
-        if add_chain_count == 5 {
+        if add_chain_count >= 1 && add_chain_count <= 6 {
             MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 28
-            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = 5
+            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = add_chain_count
+            MODULE_FRONTEND_IMPORTED_SIMPLE_FN_ARITIES[idx as usize] = add_chain_count
             MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT = idx + 1
             return
         }
@@ -4422,11 +4434,12 @@ fn module_frontend_imported_simple_global_push_fn(
                             MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize] = module_frontend_name_hash(callee)
                             MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = two_args.1
                         } else {
-                            let five_args = module_frontend_source_call_five_i64_literals_packed(data, expr2 + callee.len, size)
-                            if five_args.0 {
+                            let literal_args = module_frontend_source_call_i64_literals_packed(data, expr2 + callee.len, size, 6)
+                            if literal_args.0 {
                                 MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 29
                                 MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize] = module_frontend_name_hash(callee)
-                                MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = five_args.1
+                                MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = literal_args.1 / 8
+                                MODULE_FRONTEND_IMPORTED_SIMPLE_FN_ARITIES[idx as usize] = literal_args.1 & 7
                             } else {
                                 let one_arg = module_frontend_source_call_one_i64_literal(data, expr2 + callee.len, size)
                                 if one_arg.0 {
@@ -4559,6 +4572,10 @@ pub fn imported_simple_ir_global_fn_target_hash(idx: i64) -> i64 with Panic {
 
 pub fn imported_simple_ir_global_fn_value(idx: i64) -> i64 with Panic {
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize]
+}
+
+pub fn imported_simple_ir_global_fn_arity(idx: i64) -> i64 with Panic {
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_ARITIES[idx as usize]
 }
 
 pub fn module_frontend_algebra_law_self_test() -> i64 with Mut, Div, Panic {
