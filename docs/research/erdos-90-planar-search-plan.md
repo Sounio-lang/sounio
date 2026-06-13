@@ -253,7 +253,8 @@ Alexeev tables do not cover.
 |-----|-----------|------------------|-------------------|-------------|------|
 | 100 | 265 | 288 (10×10, N=5) | **303** (saturation, seed 1000003) | `SounioErdos90Subset303Witness` | `erdos90_subset303_witness_gate.sh` |
 | 144 | 390 | 456 (12×12, N=25) | **493** (seed 9000023) | `SounioErdos90Subset144Witness` | `erdos90_subset144_witness_gate.sh` |
-| 196 | 539 | **692** (14×14, N=25) | **716** (seed 9000023; cluster 2739 may improve) | `SounioErdos90Subset196Witness` | `erdos90_subset196_witness_gate.sh` |
+| 196 | 539 | **692** (14×14, N=25) | **719** (seed 8000019, job 2739) | `SounioErdos90Subset196Witness` | `erdos90_subset196_witness_gate.sh` |
+| 225 | 623 | **828** (15×15, N=25) | **852** (seed 8000019; job 2780 pending) | `SounioErdos90Subset225Witness` | `erdos90_subset225_witness_gate.sh` |
 
 Earlier rungs preserved: `SounioErdos90SubsetWitness` (302), `SounioErdos90GridWitness`
 (288), `SounioErdos90UnifiedQsqrt3Witness` (265 deduped).
@@ -298,11 +299,13 @@ baseline at this `n`; the ℤ² subset front is the correct target for small-`n`
 |-----|------|----------------------|----------------|---------------|
 | 100 | 288 | 300 | 303 | +15 |
 | 144 | 456 | 467 | 493 | +37 |
-| 196 | 692 | 707 | **716** (smoke, seed 9000023) | +24 (+3.5%) |
+| 196 | 692 | 707 | **719** (job 2739, seed 8000019) | +27 (+3.9%) |
+| 225 | 828 | — | **852** (smoke, seed 8000019) | +24 (+2.9%) |
 
-The **relative** gain grows with `n` in this sample (100: +5.2%, 144: +8.1%), while the
-**absolute** gain also widens. Subset search buys more at medium `n` where the square
-patch is a worse approximation of the optimal shape.
+The **relative** gain peaks at `n=144` (+8.1%) then compresses (196: +3.9%, 225: +2.9%).
+The **absolute** Δ is remarkably stable at `+24..+27` for `n ≥ 196` under this search
+class — subset reshaping buys a near-constant edge premium over the square patch even as
+the pilot-table crossover (`grid beats harb` at `n=225`) is reached.
 
 ### Two-front research model (deeper framing)
 
@@ -329,9 +332,23 @@ published false records.
 | `erdos90-sub-20260613T145654-970979` | 2583 | `n=100` subset → 301–302 |
 | `erdos90-sat-20260613T153818-1010187` | 2679 | `n=100` saturation → 302/303 |
 | `erdos90-144-20260613T153818-1010197` | 2625 | `n=144` subset → 486–493 |
-| `erdos90-196-20260613T161738-1043947` | **2739** (18 seeds) | `n=196` subset vs grid 692 |
+| `erdos90-196-20260613T161738-1043947` | **2739** (18 seeds) | `n=196` subset → **719** (8000019, 173205) |
+| `erdos90-225-20260613T164143-1062825` | **2780** (18 seeds) | `n=225` subset vs grid 828 |
 
-Stage roots under `/orangefs/training/sounio/erdos90-{sub,sat,144,196}-runs/`.
+Stage roots under `/orangefs/training/sounio/erdos90-{sub,sat,144,196,225}-runs/`.
+
+#### Job 2739 aggregation (`n=196`, 18/18 complete)
+
+| Edges | Seeds |
+|-------|-------|
+| **719** | 8000019, 173205 |
+| 718 | 707106, 577215, 3000003, 271828 |
+| 717 | 6000011, 5000009, 4000007, 3141592, 314159 |
+| 716 | 9000023, 7000013, 223607, 2000003, 141421, 1000003 |
+| 715 | 161803 |
+
+Leader **8000019** (+3 over smoke seed 9000023) promoted to `EXPORT_SEED` in
+`erdos90_subset196_export.sio`; Lean gate recertified at **719**.
 
 ### Boundary tax — why subset beats square grid at small/medium `n`
 
@@ -349,13 +366,13 @@ Quantitative sketch at fixed `N = 25` (edges per vertex capped at 12 in ℤ²):
 | 10×10 (`n=100`) | 4 | 32 | 64 | 288 |
 | 12×12 (`n=144`) | 4 | 40 | 100 | 456 |
 | 14×14 (`n=196`) | 4 | 48 | 144 | 692 |
+| 15×15 (`n=225`) | 4 | 56 | 169 | 828 |
 
 The **fraction of deficient vertices** is `O(1/√n)` but the **absolute** boundary
-deficit grows (`48` edge vertices at `n=196` vs `32` at `n=100`). Subset hill-climb
-exploits this by reshaping toward a disk-like vertex set; measured Δ grows from `+15`
-at `n=100` to `+37` at `n=144` (8.1% relative). At `n=196` smoke runs suggest
-`≈708` (`+16`, +2.3% relative) — the relative gain **compresses** as the square
-patch becomes a better disk approximation, even while absolute Δ may stay flat.
+deficit grows (`56` edge vertices at `n=225`). Subset hill-climb reshapes toward a
+disk-like vertex set; measured Δ peaks at `n=144` (+37) then stabilises at `+24..+27`
+for `n ∈ {196, 225}` — the relative gain compresses (+2.9% at 225) even though subset
+still beats the square grid at the pilot crossover point.
 
 This is **not** a contradiction of the May 2025 conclusion: that sweep climbed `N`
 with `n` and compared against the **periodic Erdős grid optimum**, where boundary
@@ -367,11 +384,11 @@ effects vanish. Our ladder holds `N` fixed (5 or 25) and compares **finite patch
 |-----|--------------|------------|---------------|----------------|
 | 100 | `N=5`, 3× iters | 303 | 10/36 | Plateau; 26 seeds stuck at 302 |
 | 144 | `N=25`, full iters | 493 | 1/18 (9000023) | High seed variance; leader seed reused |
-| 196 | `N=25`, 3× iters | **716** (smoke) | 1/1 tested | Cluster 2739 may find higher; smoke already +24 over grid |
+| 196 | `N=25`, 3× iters | **719** | 2/18 (8000019, 173205) | Job 2739 complete; +3 over smoke |
+| 225 | `N=25`, 3× iters | **852** (smoke) | 1/1 tested | Job 2780 running; may improve |
 
-**Seed 9000023** is the recurring leader at `n=144`; it is included in the `n=196`
-array as a transfer hypothesis (good RNG trajectory in the same pool geometry), not
-because optimality is seed-invariant.
+**Seed 8000019** emerged as cross-`n` leader (719 at 196, 852 at 225); **9000023**
+remains best at `n=144` only. Seed transfer is empirical, not optimality-invariant.
 
 ### Epistemic correctness layer (why Lean gates matter)
 
@@ -386,24 +403,20 @@ The export pipeline enforces three independent checks before publication:
 A record is **certified** only when the gate script is green; cluster stdout alone
 is staging evidence until export + Lean confirm.
 
-### Infrastructure added for `n = 196`
+### Infrastructure (`n = 196` and `n = 225`)
 
 | Artifact | Role |
 |----------|------|
-| `erdos90_grid196_export.sio` | Full 14×14 grid → Lean (`u(196) ≥ 692`) |
-| `erdos90_subset196_cluster.sio` | Slurm array kernel (`BEST_N196`) |
-| `erdos90_subset196_export.sio` | Replay winning seed → coordinate witness |
-| `submit_subset196_array.sh` | 18-seed array → OrangeFS staging |
-| `erdos90_grid196_witness_gate.sh` | Grid gate (green) |
-| `erdos90_subset196_witness_gate.sh` | Subset gate (awaits `MIN_EDGES > 692`) |
+| `erdos90_grid{196,225}_export.sio` | Full square grid → Lean |
+| `erdos90_subset{196,225}_{cluster,export}.sio` | Slurm kernel + replay witness |
+| `submit_subset{196,225}_array.sh` | 18-seed OrangeFS arrays |
+| `erdos90_{grid,subset}{196,225}_witness_gate.sh` | Export → Lean certify |
 
 ### Next steps
 
-1. ~~`n = 196` subset certify~~ — **done** (`SounioErdos90Subset196Witness`, 716 edges,
-   seed 9000023). Re-run job 2739 aggregation if OrangeFS logs become available; update
-   `EXPORT_SEED` only if a higher `BEST_N196` appears.
-2. Optional: `n = 225` (15×15, `N = 25`) — first pilot-scale grid crossover point in
-   the original table (`828 > 623`); subset relative gain may shrink further (+3.5% at
-   `n = 196` vs +8.1% at `n = 144`).
-3. Do **not** claim global optimality; cite OEIS/A186705 exact ceiling at `n ≤ 21`.
-4. Keep asymptotic (Sawin/OpenAI) and finite (this ladder) claims in separate tiers.
+1. ~~Job 2739 / `n=196`~~ — **done** (719, seed 8000019).
+2. ~~`n=225` grid + smoke subset~~ — **done** (828 grid, 852 subset); aggregate job
+   **2780** when complete; bump `EXPORT_SEED` if higher `BEST_N225` found.
+3. Optional: `n=256` (16×16) or climb `N` at `n=625` per pilot table.
+4. Do **not** claim global optimality; cite OEIS/A186705 exact ceiling at `n ≤ 21`.
+5. Keep asymptotic (Sawin/OpenAI) and finite (this ladder) claims in separate tiers.
