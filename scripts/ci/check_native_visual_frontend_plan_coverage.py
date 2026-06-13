@@ -505,6 +505,21 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment flight-recorder seek state is navigable through native timeline controls, preserving selected-event state, action counters, and expected frame hashes.",
     ),
     Evidence(
+        "workbench-experiment-flight-recorder-evidence-package",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "VizWorkbenchExperimentFlightRecorderEvidencePackage",
+            "viz_workbench_experiment_flight_recorder_evidence_package_build",
+            "viz_workbench_experiment_flight_recorder_evidence_package_verify",
+            "viz_workbench_experiment_flight_recorder_evidence_package_emit",
+            "rendered_frame_hash",
+            "frame_hash_delta",
+            "browser_hash_delta",
+        ),
+        "Experiment flight-recorder timeline state can be sealed into a passive evidence package binding recorder, seek, timeline, rendered frame, audit hash, and zero frame/browser drift.",
+    ),
+    Evidence(
         "workbench-experiment-import-replay-zero-drift",
         "contains",
         "tests/run-pass/viz_workbench_experiment_diff_player.sio",

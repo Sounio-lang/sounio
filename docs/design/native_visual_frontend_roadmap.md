@@ -148,6 +148,7 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `VizWorkbenchExperimentFlightRecorder` records packet-ledger navigation as fixed-capacity Sounio evidence: native event kind/key, selected packet index, browser hash, rendered frame hash, final scene-audit hash, and frame/audit deltas are bound into one recorder hash.
 - `VizWorkbenchExperimentFlightRecorderSeek` makes a recorded event inspectable again by projecting its selected packet, event kind/key, expected browser hash, and expected rendered frame hash back into native Visual IR controls with passive export metadata.
 - `VizWorkbenchExperimentFlightRecorderTimeline` adds native key/mouse navigation across recorded events, preserving selected-event state, action counters, seek hash, and expected frame hash while marking the app dirty for redraw.
+- `VizWorkbenchExperimentFlightRecorderEvidencePackage` seals recorder, seek, timeline, rendered frame hash, scene audit hash, and zero frame/browser drift into one passive shareable evidence envelope.
 
 ## V1.8j: Canonical Headless Visual Gate
 
