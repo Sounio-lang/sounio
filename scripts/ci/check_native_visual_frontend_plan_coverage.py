@@ -297,6 +297,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Multiple reproducible Workbench experiment packages can be saved into fixed slots, selected, compared, verified, and exported.",
     ),
     Evidence(
+        "workbench-experiment-package-store-controls",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "VIZ_WORKBENCH_TAG_EXPERIMENT_STORE_SAVE",
+            "viz_workbench_handle_experiment_package_store_event",
+            "viz_workbench_experiment_package_store_mark",
+            "viz_workbench_experiment_package_store_restore_active",
+        ),
+        "Experiment package slots are controlled by native Visual IR events for save, active, baseline, compare, restore, and delta markers.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -654,6 +666,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_experiment_package_store",
         detail="Workbench experiment package store proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-experiment-package-store-controls-run",
+        "label",
+        "viz_workbench_experiment_package_store_controls",
+        detail="Workbench experiment package store controls proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",
