@@ -109,6 +109,11 @@ set +e
 MADAROS_THIN_RC=$?
 set -e
 [[ "$MADAROS_THIN_RC" -eq 7 ]] || fail "Madaros thin imported call expected exit 7, got $MADAROS_THIN_RC"
+set +e
+./bin/madaros run tests/multimodule/thin_locals_main.sio
+MADAROS_THIN_LOCALS_RC=$?
+set -e
+[[ "$MADAROS_THIN_LOCALS_RC" -eq 7 ]] || fail "Madaros thin imported local-args call expected exit 7, got $MADAROS_THIN_LOCALS_RC"
 
 echo "[project-spine] 10/10 imported modular IR lowering gate"
 bash scripts/ci/native_v2_imported_body_lowering_gate.sh
