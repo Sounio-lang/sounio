@@ -51,21 +51,29 @@ Fix: restore `mov sp, x29` in both epilogues. Verified: new arm64 binary has 169
 epilogues using `mov sp, x29`, **zero** `add sp, sp, x9` (the only remaining
 `add sp,sp,x9` is `emit_drop_call_args_a64`, a post-call arg pop, not an epilogue).
 
-## Latent gap (not this crash, not fixed here)
+## Latent a64 merge-nop gap (hardening, fixed in a follow-up commit)
 
 The x86 backend emits a merge-point `nop` (`em(0x90)`) after an if-without-else
 (`8f0443a13`, line 20705) and after match arms (`998112bb8`, line 21689) so the
 implicit-return guard (`last word == ret → skip epilogue`) cannot misfire. The a64
-backend has **no** `0xD503201F` counterpart — and never did, including in the
-working baseline (so it does not discriminate the crash). Three a64 merge points
-lack the nop (workflow `wf_c68b673c-635`, Agent 3):
+backend had **no** `0xD503201F` counterpart — and never did, including in the
+working baseline (so it did not discriminate the crash; it was latent hardening).
 
-- if-without-else, after `patch_branch_a64(cbz_off, CL)` — ~line 31499
-- if-let without else, after `if il_cbz_off > 0 { patch_branch_a64(il_cbz_off, CL) }` — ~line 31431
-- match arms, after `while ai < arm_count { patch_branch_a64(match_ends[…], CL) }` — ~line 32038
+Ported the a64 nop (`em32(0xD503201F)`) to the three a64 merge points identified
+by workflow `wf_c68b673c-635` (Agent 3), each mirroring the x86 fix:
 
-With the frame-pointer restore now in place the guard is no longer the fault path,
-but porting these three a64 merge nops remains a latent-correctness follow-up.
+- if-without-else, after `patch_branch_a64(cbz_off, CL)` — ~line 31507
+- if-let without else, after `if il_cbz_off > 0 { patch_branch_a64(il_cbz_off, CL) }` — ~line 31434
+- match arms, after `while ai < arm_count { patch_branch_a64(match_ends[…], CL) }` — ~line 32050
+
+Verified: a probe with `if x>0 { return 1 } x+10` and a `0 => { return 100 } _ => 200`
+match emits the nop immediately before the `mov sp, x29` epilogue at each merge, and
+runs to the correct result (311). Only a64 emission changed, so the x86-target output
+is byte-identical and the bootstrap fixed point (gen2 == gen3) still holds.
+
+**Known mirror gap (not fixed):** the x86 *if-let* no-else merge (line 20573) also
+lacks its `em(0x90)` — the same latent defect on the x86 side. Left untouched to keep
+the working x86 bootstrap seed's x86-target output unchanged; tracked as follow-up.
 
 ## Rebuild chain (deterministic)
 
