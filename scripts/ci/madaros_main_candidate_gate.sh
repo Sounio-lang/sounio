@@ -22,7 +22,7 @@ fail() {
 [[ -x "$CANDIDATE" ]] || fail "candidate is not executable: $CANDIDATE"
 [[ -x "$IMPORTS" ]] || fail "imports candidate is not executable: $IMPORTS"
 
-echo "[madaros-main-candidate] 1/4 identity"
+echo "[madaros-main-candidate] 1/5 identity"
 IDENTITY_OUT="$("$CANDIDATE" --version 2>&1)" || fail "candidate --version failed"
 [[ "$IDENTITY_OUT" == *"Madares"* || "$IDENTITY_OUT" == *"Madaros"* ]] || {
   printf '%s\n' "$IDENTITY_OUT" >&2
@@ -35,7 +35,7 @@ fn main() -> i64 {
 }
 SRC
 
-echo "[madaros-main-candidate] 2/4 source native-v2 returns 42"
+echo "[madaros-main-candidate] 2/5 source native-v2 returns 42"
 "$CANDIDATE" --native-v2-compile "$TMP_DIR/native_v2_42.sio" -o "$TMP_DIR/native_v2_42.elf" >/tmp/madaros_main_candidate_native_v2.log 2>&1 || {
   cat /tmp/madaros_main_candidate_native_v2.log >&2
   fail "candidate --native-v2-compile failed"
@@ -54,7 +54,10 @@ set -e
   fail "candidate native-v2 source ELF expected exit 42, got $NATIVE_V2_RC"
 }
 
-echo "[madaros-main-candidate] 3/4 backend native-v2 scalar returns 42"
+echo "[madaros-main-candidate] 3/5 source body semantics"
+MADAROS_RAW_BIN="$CANDIDATE" bash scripts/ci/madaros_source_semantics_gate.sh
+
+echo "[madaros-main-candidate] 4/5 backend native-v2 scalar returns 42"
 "$CANDIDATE" --native-v2-emit-scalar 42 "$TMP_DIR/emit_scalar_42.elf" >/tmp/madaros_main_candidate_emit_scalar.log 2>&1 || {
   cat /tmp/madaros_main_candidate_emit_scalar.log >&2
   fail "candidate --native-v2-emit-scalar failed"
@@ -73,7 +76,7 @@ set -e
   fail "candidate emit-scalar ELF expected exit 42, got $EMIT_RC"
 }
 
-echo "[madaros-main-candidate] 4/4 imports full modular aggregate fallback"
+echo "[madaros-main-candidate] 5/5 imports full modular aggregate fallback"
 "$IMPORTS" --native-compile tests/multimodule/abi_name_many_args_main.sio -o "$TMP_DIR/imported_aggregate.elf" >/tmp/madaros_main_candidate_imports.log 2>&1 || {
   cat /tmp/madaros_main_candidate_imports.log >&2
   fail "imports candidate --native-compile aggregate failed"
