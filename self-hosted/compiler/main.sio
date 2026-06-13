@@ -50,7 +50,7 @@ use resolve::scope::*
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
 use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace}
-use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult}
+use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult, module_frontend_file_maybe_has_use}
 use module_parse::{ImportList, load_module_file, extract_imports_from_ast}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
@@ -1574,6 +1574,8 @@ fn compiler_ir_ser_opcode_tag(op: IrOpcode) -> i64 {
         IrOpcode::IrPtrStore => 41,
         IrOpcode::IrPtrElemLoad => 42,
         IrOpcode::IrPtrElemStore => 43,
+        IrOpcode::IrLoadFnRef => 44,
+        IrOpcode::IrCallIndirect => 45,
         _ => -1,
     }
 }
@@ -2810,13 +2812,9 @@ fn native_v2_trace_global_ops(module: &IrModule, force: bool) with IO, Mut, Pani
     print("\n")
 }
 
-// Bridge: real .sio SOURCE → front-half → HEAP-BOXED IrModule → native-v2 → ELF.
-// Routes through bridge_lower_single_module_box, whose result embeds the module as
-// an Option<Box<IrModule>> (a POINTER), so the front-half result is NEVER returned
-// by value with a large embedded IrModule — dodging the frame-sensitive SRET
-// large-struct-return crash chain (c634b38f). The boxed module is derefed into a
-// local and passed to the backend as a stable &IrModule. Marker files pin which
-// step (if any) still faults. Scope: single module / no imports (the wall's case).
+// Bridge: real .sio SOURCE → front-half → native-v2 → ELF. Imported sources use
+// the same multimodule preflight as --ir-dump; single-module sources keep the
+// boxed lowering path to avoid the historical frame-sensitive SRET crash chain.
 fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     let source_path = compiler_mode_source_arg(args, flag_index, "--native-v2-compile")
     // Output path resolution: `-o <out>` wins; otherwise honor a second
@@ -2828,6 +2826,30 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     if !compiler_preflight_source_input(source_path) {
         panic("native-v2-compile failed: source not readable")
     }
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    if module_frontend_file_maybe_has_use(source_path) {
+        let ir_result = compiler_preflight_ir_load(source_path)
+        write_file("/tmp/nv2_m1_after_lower", &! NV2_MARKER_BUF, 1)
+        if !ir_result.ok {
+            print("native_v2_compile: front-half failed: ")
+            compiler_print_errors(ir_result.errors)
+            panic("native-v2-compile failed: front-half errors")
+        }
+        native_v2_trace_global_ops(&ir_result.module, compiler_mode_has_flag(args, "--native-v2-global-trace"))
+        write_file("/tmp/nv2_m2_after_copy", &! NV2_MARKER_BUF, 1)
+        write_file("/tmp/nv2_m3_before_backend", &! NV2_MARKER_BUF, 1)
+        let rc = compile_native_v2_preview_to_file(&ir_result.module, spec, out_path)
+        if rc != 0 {
+            print("native_v2_compile: FAIL to_file rc=")
+            print_int(rc as i64)
+            print("\n")
+            return
+        }
+        print("native_v2_compile: emitted path=")
+        print(out_path)
+        print("\n")
+        return
+    }
     var trace = empty_load_multimodule_ir_trace()
     let box_result = bridge_lower_single_module_box(source_path, &! trace)
     write_file("/tmp/nv2_m1_after_lower", &! NV2_MARKER_BUF, 1)
@@ -2837,7 +2859,6 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
         print("\n")
         panic("native-v2-compile failed: front-half errors")
     }
-    let spec = native_resolve_target("x86_64-linux", "auto", true)
     match box_result.module {
         Some(module_box) => {
             let lowered = *module_box

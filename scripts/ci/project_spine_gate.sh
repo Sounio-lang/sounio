@@ -24,10 +24,10 @@ assert_contains() {
   fi
 }
 
-echo "[project-spine] 1/13 public runner baseline"
+echo "[project-spine] 1/14 public runner baseline"
 bash scripts/ci/real_language_runner_gate.sh
 
-echo "[project-spine] 2/13 checked example project"
+echo "[project-spine] 2/14 checked example project"
 ./bin/souc check examples/projects/hello_pkg
 HELLO_OUT="$(./bin/souc run examples/projects/hello_pkg 2>&1)"
 assert_contains "$HELLO_OUT" "42" "souc run examples/projects/hello_pkg"
@@ -38,7 +38,7 @@ BUILT_OUT="$(examples/projects/hello_pkg/target/hello_pkg 2>&1)"
 assert_contains "$BUILT_OUT" "42" "built hello_pkg ELF"
 rm -f examples/projects/hello_pkg/target/hello_pkg
 
-echo "[project-spine] 3/13 souc init project loop"
+echo "[project-spine] 3/14 souc init project loop"
 TMP_DIR="$(mktemp -d /tmp/sounio-project-spine.XXXXXX)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 (
@@ -54,7 +54,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
   assert_contains "$GEN_ELF_OUT" "42" "generated project built ELF"
 )
 
-echo "[project-spine] 4/13 missing import negative"
+echo "[project-spine] 4/14 missing import negative"
 NEG_LOG="$TMP_DIR/missing_import.log"
 set +e
 ./bin/souc check examples/projects/bad_missing_import >"$NEG_LOG" 2>&1
@@ -69,10 +69,10 @@ if ! grep -qE 'unreadable import|typecheck: failed|unknown identifier' "$NEG_LOG
   fail "missing import project did not emit an import/typecheck diagnostic"
 fi
 
-echo "[project-spine] 5/13 package import manifest gate"
+echo "[project-spine] 5/14 package import manifest gate"
 bash scripts/ci/package_import_science_gate.sh
 
-echo "[project-spine] 6/13 thin multimodule runtime"
+echo "[project-spine] 6/14 thin multimodule runtime"
 THIN_ELF="$TMP_DIR/thin_single.elf"
 ./bin/souc compile tests/multimodule/thin_single_main.sio -o "$THIN_ELF"
 set +e
@@ -81,7 +81,7 @@ THIN_RC=$?
 set -e
 [[ "$THIN_RC" -eq 7 ]] || fail "thin multimodule ELF expected exit 7, got $THIN_RC"
 
-echo "[project-spine] 7/13 Madaros identity and single-file native-v2"
+echo "[project-spine] 7/14 Madaros identity and single-file native-v2"
 bash scripts/gates/g6_madaros_identity.sh
 MADAROS_SRC="$TMP_DIR/madaros_single.sio"
 MADAROS_ELF="$TMP_DIR/madaros_single.elf"
@@ -93,13 +93,13 @@ MADAROS_RC=$?
 set -e
 [[ "$MADAROS_RC" -eq 42 ]] || fail "Madaros single-file ELF expected exit 42, got $MADAROS_RC"
 
-echo "[project-spine] 8/13 Madaros source body semantics"
+echo "[project-spine] 8/14 Madaros source body semantics"
 bash scripts/ci/madaros_source_semantics_gate.sh
 
-echo "[project-spine] 9/13 native-v2 global address + pointer aggregate"
+echo "[project-spine] 9/14 native-v2 global address + pointer aggregate"
 bash scripts/ci/native_v2_global_addr_ptr_gate.sh
 
-echo "[project-spine] 10/13 Madaros project import runtime"
+echo "[project-spine] 10/14 Madaros project import runtime"
 MADAROS_PROJECT_OUT="$(./bin/madaros run examples/projects/hello_pkg 2>&1)"
 assert_contains "$MADAROS_PROJECT_OUT" "42" "madaros run examples/projects/hello_pkg"
 rm -f examples/projects/hello_pkg/target/hello_pkg
@@ -109,7 +109,7 @@ MADAROS_PROJECT_BUILT_OUT="$(examples/projects/hello_pkg/target/hello_pkg 2>&1)"
 assert_contains "$MADAROS_PROJECT_BUILT_OUT" "42" "Madaros built hello_pkg ELF"
 rm -f examples/projects/hello_pkg/target/hello_pkg
 
-echo "[project-spine] 11/13 Madaros imported argument-call runtime"
+echo "[project-spine] 11/14 Madaros imported argument-call runtime"
 set +e
 ./bin/madaros run tests/multimodule/thin_single_main.sio
 MADAROS_THIN_RC=$?
@@ -178,10 +178,13 @@ do
   [[ "$MADAROS_THIN_MATRIX_RC" -eq 7 ]] || fail "Madaros imported arg matrix expected exit 7 for $witness, got $MADAROS_THIN_MATRIX_RC"
 done
 
-echo "[project-spine] 12/13 native aggregate ABI"
+echo "[project-spine] 12/14 native aggregate ABI"
 bash scripts/ci/native_aggregate_abi_gate.sh
 
-echo "[project-spine] 13/13 imported modular IR lowering gate"
+echo "[project-spine] 13/14 imported source native-v2 compile"
+bash scripts/ci/native_v2_compile_imported_source_gate.sh
+
+echo "[project-spine] 14/14 imported modular IR lowering gate"
 bash scripts/ci/native_v2_imported_body_lowering_gate.sh
 
 echo "PROJECT_SPINE_PASS"
