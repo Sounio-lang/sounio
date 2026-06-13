@@ -309,6 +309,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment package slots are controlled by native Visual IR events for save, active, baseline, compare, restore, and delta markers.",
     ),
     Evidence(
+        "workbench-experiment-timeline-cockpit",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentTimelineCockpit",
+            "viz_workbench_experiment_timeline_cockpit_build",
+            "viz_workbench_experiment_timeline_cockpit_verify",
+            "viz_workbench_experiment_timeline_cockpit_emit",
+        ),
+        "Experiment package slots, active package, notebook archives, selected frame, timeline hashes, and package/render/audit deltas are bound into one native cockpit state.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -672,6 +684,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_experiment_package_store_controls",
         detail="Workbench experiment package store controls proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-experiment-timeline-cockpit-run",
+        "label",
+        "viz_workbench_experiment_timeline_cockpit",
+        detail="Workbench experiment timeline cockpit proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",
