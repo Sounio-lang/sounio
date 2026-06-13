@@ -259,7 +259,8 @@ Alexeev tables do not cover.
 | 225-disk | 623 | 828 (grid) | **848** (compact disk `rr=72`, `N=25`) | `SounioErdos90Disk225Witness` | `erdos90_disk225_witness_gate.sh` |
 | 289 | 808 | **1136** (17×17, N=25) | **1170** (job 2857 saturation) | `SounioErdos90Subset289Witness` | `erdos90_subset289_witness_gate.sh` |
 | 324 | 909 | **1308** (18×18, N=25) | **1347** (seed 223607, job 2895) | `SounioErdos90Subset324Witness` | `erdos90_subset324_witness_gate.sh` |
-| 361 | 1017 | **1492** (19×19, N=25) | **1533** (seed 2000003; job 2933 pending) | `SounioErdos90Subset361Witness` | `erdos90_subset361_witness_gate.sh` |
+| 361 | 1017 | **1492** (19×19, N=25) | **1535** (seed 314159, job 2933) | `SounioErdos90Subset361Witness` | `erdos90_subset361_witness_gate.sh` |
+| 400 | 1130 | **1688** (20×20, N=25) | **1732** (seed 2000003; job 2971 pending) | `SounioErdos90Subset400Witness` | `erdos90_subset400_witness_gate.sh` |
 
 Earlier rungs preserved: `SounioErdos90SubsetWitness` (302), `SounioErdos90GridWitness`
 (288), `SounioErdos90UnifiedQsqrt3Witness` (265 deduped).
@@ -309,7 +310,8 @@ baseline at this `n`; the ℤ² subset front is the correct target for small-`n`
 | 256 | 976 | ~996 | **1007** (job 2819, saturated) | +31 (+3.2%) |
 | 289 | 1136 | ~1155 | **1170** (job 2857, saturated) | +34 (+3.0%) |
 | 324 | 1308 | ~1328 | **1347** (job 2895, seed 223607) | +39 (+3.0%) |
-| 361 | 1492 | ~1512 | **1533** (smoke, seed 2000003) | +41 (+2.7%) |
+| 361 | 1492 | ~1512 | **1535** (job 2933, seed 314159) | +43 (+2.9%) |
+| 400 | 1688 | ~1708 | **1732** (smoke, seed 2000003) | +44 (+2.6%) |
 
 The **relative** gain peaks at `n=144` (+8.1%) then compresses (196: +3.9%, 225: +2.9%).
 The **absolute** Δ is remarkably stable at `+24..+27` for `n ≥ 196` under this search
@@ -346,9 +348,21 @@ published false records.
 | `erdos90-256-20260613T165554-1072360` | **2819** (18 seeds) | `n=256` subset → **1007** (saturated) |
 | `erdos90-289-20260613T170050-1075697` | **2857** (18 seeds) | `n=289` subset → **1170** (saturated) |
 | `erdos90-324-20260613T170642-1079554` | **2895** (18 seeds) | `n=324` subset → **1347** (223607) |
-| `erdos90-361-20260613T171412-1084087` | **2933** (18 seeds) | `n=361` subset vs grid 1492 |
+| `erdos90-361-20260613T171412-1084087` | **2933** (18 seeds) | `n=361` subset → **1535** (314159) |
+| `erdos90-400-20260613T171715-1086597` | **2971** (18 seeds) | `n=400` subset vs grid 1688 |
 
-Stage roots under `/orangefs/training/sounio/erdos90-{sub,sat,144,196,225,256,289,324,361}-runs/`.
+Stage roots under `/orangefs/training/sounio/erdos90-{sub,sat,144,196,225,256,289,324,361,400}-runs/`.
+
+#### Job 2933 aggregation (`n=361`, 18/18 complete)
+
+| Edges | Seeds |
+|-------|-------|
+| **1535** | 314159 |
+| 1534 | 5000009, 161803, 141421 |
+| 1533 | 14 others (incl. 2000003, 223607) |
+| 1532 | 6000011, 577215 |
+
+Near-saturation: +2 over smoke; 14/18 at smoke value 1533.
 
 #### Job 2895 aggregation (`n=324`, 18/18 complete)
 
@@ -490,8 +504,8 @@ in a larger pool strictly dominates a full disk at `n=225`.
 
 ### Next steps
 
-1. ~~Job 2895 / `n=361` smoke~~ — **done** (1347 @ 324, subset 1533 @ 361); aggregate **2933**.
-2. Optional: `n=400` (20×20) or pool `R=30` at `n=361`.
+1. ~~Job 2933 / `n=400` smoke~~ — **done** (1535 @ 361, subset 1732 @ 400); aggregate **2971**.
+2. Optional: `n=441` (21×21) — last square before `n=625` pilot row.
 3. Do **not** claim global optimality; cite OEIS/A186705 exact ceiling at `n ≤ 21`.
 4. Keep asymptotic (Sawin/OpenAI) and finite (this ladder) claims in separate tiers.
 
