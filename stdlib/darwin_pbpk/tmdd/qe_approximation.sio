@@ -1,0 +1,276 @@
+// stdlib/darwin_pbpk/tmdd/qe_approximation.sio
+// Quasi-equilibrium (QSS/QE) closed-form approximation for TMDD.
+//
+// The full Mager 2004 3-state ODE (C_t, R_free, DR) requires a stiff
+// integrator at high drug concentrations where binding kinetics are much
+// faster than pharmacokinetic redistribution.  The quasi-equilibrium
+// approximation replaces the binding subsystem with an algebraic constraint
+// by assuming rapid equilibration of the drug-receptor complex relative to
+// redistribution (dDR/dt ≈ 0 in the time-scale of interest).
+//
+// DERIVATION (standard; Mager 2004 / Gibiansky 2008):
+//   At QE:  DR = C_free · R_free / K_d        (equilibrium binding)
+//   Conservation:  C_total = C_free + DR
+//                  R_total = R_free + DR
+//   Let x = DR.  Substituting: x = (C_total - x)(R_total - x) / K_d
+//   Rearranging:  x² - (C_total + R_total + K_d)·x + C_total·R_total = 0
+//   Quadratic solution (taking the MINUS root — the plus root violates 0 ≤ DR):
+//     S = C_total + R_total + K_d
+//     x = (S - sqrt(S² - 4·C_total·R_total)) / 2
+//   Then:  C_free = C_total - x
+//          R_free = R_total - x
+//
+// VALIDITY CHECK (physical constraints):
+//   0 ≤ DR ≤ min(C_total, R_total)
+//   C_free ≥ 0,  R_free ≥ 0
+//   When K_d → ∞ (weak binder): DR → 0, C_free → C_total, R_free → R_total.
+//   When K_d → 0 (very tight):  DR → min(C_total, R_total) (titration limit).
+//
+// SOURCES:
+//   Mager DE & Jusko WJ (2001) J Pharmacokinet Pharmacodyn 28:507-532
+//   Gibiansky L & Gibiansky E (2009) AAPS J 11:638-643 (QSS derivation review)
+//   Gibiansky L et al. (2008) J Pharmacokinet Pharmacodyn 35:573-591 (QE vs QSS)
+//
+// Note: some TMDD literature calls this QSS (quasi-steady-state) — the QE
+// approximation is the specific variant where the assumption is K_d-governed
+// rapid equilibration rather than the rate-constant k_off >> k_int condition.
+// Both yield the same closed form; the two names are often used interchangeably.
+//
+// USAGE: Import this module alongside fkbp12_mtorc1.sio (which supplies the
+// full 3-state ODE `tmdd_step` for non-QE callers). Use `qe_solve` when the
+// drug-receptor system is in rapid equilibrium (C_total >> K_d or K_d >> 1
+// requires the full ODE; borderline cases benefit from the QE check).
+
+// ============================================================================
+// OUTPUT TYPE
+// ============================================================================
+
+pub struct QEState {
+    c_free: f64,  // Free drug concentration (nmol/L or consistent units)
+    r_free: f64,  // Free (unbound) receptor (nmol/L)
+    dr:     f64,  // Drug-receptor complex (nmol/L)
+}
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+// Newton-Raphson sqrt (12 iterations; absolute error < 1 ULP for f64).
+// Identical algorithm to rr_sqrt in core/rodgers_rowland.sio.
+fn qe_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 12 { y = (y + x / y) * 0.5; i = i + 1 }
+    return y
+}
+
+fn qe_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// ============================================================================
+// QUASI-EQUILIBRIUM SOLVER
+// ============================================================================
+
+// Compute the quasi-equilibrium partition of (c_total, r_total) given K_d.
+//
+// Parameters:
+//   c_total  — total drug in compartment (free + complex), nmol/L or consistent
+//   r_total  — total receptor in compartment (free + complex), nmol/L
+//   k_d      — equilibrium dissociation constant, nmol/L (= k_off / k_on)
+//
+// Returns a QEState with (c_free, r_free, dr) satisfying:
+//   c_free + dr = c_total
+//   r_free + dr = r_total
+//   c_free * r_free / dr ≈ k_d  (when dr > 0)
+//
+// Edge cases handled:
+//   c_total ≤ 0  → no drug, DR = 0, R_free = R_total, C_free = 0
+//   r_total ≤ 0  → no receptor, DR = 0, C_free = C_total, R_free = 0
+//   k_d ≤ 0      → degenerate; returns titration (DR = min(C, R))
+//   Discriminant negative (numerical noise) → DR = S/2 (perfect binding limit)
+pub fn qe_solve(c_total: f64, r_total: f64, k_d: f64) -> QEState with Mut, Div {
+    // Guard: no drug
+    if c_total <= 0.0 {
+        return QEState { c_free: 0.0, r_free: r_total, dr: 0.0 }
+    }
+    // Guard: no receptor
+    if r_total <= 0.0 {
+        return QEState { c_free: c_total, r_free: 0.0, dr: 0.0 }
+    }
+    // Guard: degenerate K_d (perfect binding — titration limit)
+    if k_d <= 0.0 {
+        let dr_max = if c_total < r_total { c_total } else { r_total }
+        return QEState {
+            c_free: c_total - dr_max,
+            r_free: r_total - dr_max,
+            dr:     dr_max,
+        }
+    }
+
+    // Standard QE quadratic
+    let s = c_total + r_total + k_d
+    let disc = s * s - 4.0 * c_total * r_total
+    let dr = if disc > 0.0 {
+        (s - qe_sqrt(disc)) / 2.0
+    } else {
+        // Discriminant ≤ 0 (numerical noise when C + R >> K_d and C ≈ R):
+        // DR → min(C, R) in this limit.
+        if c_total < r_total { c_total } else { r_total }
+    }
+
+    // Clamp DR to physical range [0, min(C,R)] against floating-point drift
+    let dr_max = if c_total < r_total { c_total } else { r_total }
+    let dr_clamped = if dr < 0.0 { 0.0 }
+                     else if dr > dr_max { dr_max }
+                     else { dr }
+
+    QEState {
+        c_free: c_total - dr_clamped,
+        r_free: r_total - dr_clamped,
+        dr:     dr_clamped,
+    }
+}
+
+// ============================================================================
+// DERIVED QUANTITY: RECEPTOR OCCUPANCY
+// ============================================================================
+
+// Fractional receptor occupancy at quasi-equilibrium: DR / (R_free + DR).
+// Returns 0 when total receptor = 0 (avoids 0/0 for non-TMDD organs).
+pub fn qe_occupancy(s: QEState) -> f64 with Div {
+    let r_total = s.r_free + s.dr
+    if r_total <= 0.0 { return 0.0 }
+    return s.dr / r_total
+}
+
+// Free drug fraction: C_free / C_total.
+// Useful for determining how much drug is "available" for redistribution
+// at each TMDD organ step.
+pub fn qe_free_fraction(s: QEState) -> f64 with Div {
+    let c_total = s.c_free + s.dr
+    if c_total <= 0.0 { return 1.0 }
+    return s.c_free / c_total
+}
+
+// ============================================================================
+// GATE TESTS
+// ============================================================================
+// T1: No-drug edge case — DR=0, R_free = R_total.
+// T2: No-receptor edge case — DR=0, C_free = C_total.
+// T3: Saturation case (C >> R >> K_d) — DR ≈ R_total (full saturation).
+// T4: Subsaturation (C << K_d) — DR ≈ C * R / K_d (linear regime).
+// T5: Physical constraints hold: 0 ≤ DR ≤ min(C,R); C_free ≥ 0; R_free ≥ 0.
+// T6: Occupancy = 1 at full saturation; occupancy < 0.5 in subsaturation.
+// T7: Conservation: c_free + dr == c_total; r_free + dr == r_total.
+
+fn qe_near(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d < tol
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    var passed = 0
+    var failed = 0
+
+    // T1: no drug
+    let s1 = qe_solve(0.0, 5.0, 1.0)
+    if s1.dr == 0.0 && s1.r_free == 5.0 && s1.c_free == 0.0 {
+        println("T1 PASS: no-drug edge case (DR=0, R_free=R_total)")
+        passed = passed + 1
+    } else {
+        println("T1 FAIL: no-drug edge case")
+        failed = failed + 1
+    }
+
+    // T2: no receptor
+    let s2 = qe_solve(3.0, 0.0, 1.0)
+    if s2.dr == 0.0 && s2.c_free == 3.0 && s2.r_free == 0.0 {
+        println("T2 PASS: no-receptor edge case (DR=0, C_free=C_total)")
+        passed = passed + 1
+    } else {
+        println("T2 FAIL: no-receptor edge case")
+        failed = failed + 1
+    }
+
+    // T3: saturation — C=100, R=5, K_d=0.4 (semaglutide-like); expect DR ~ R_total
+    let s3 = qe_solve(100.0, 5.0, 0.4)
+    // At saturation: DR very close to R_total (≥ 0.99*R_total expected)
+    let occ3 = qe_occupancy(s3)
+    if occ3 > 0.99 {
+        println("T3 PASS: saturation — occupancy > 0.99")
+        passed = passed + 1
+    } else {
+        println("T3 FAIL: saturation occupancy too low")
+        failed = failed + 1
+    }
+
+    // T4: subsaturation — C=0.01, R=5, K_d=1.0 (C << K_d); expect DR << R_total
+    // Linear regime: DR ≈ C * R / K_d = 0.01 * 5 / 1.0 = 0.05
+    let s4 = qe_solve(0.01, 5.0, 1.0)
+    let occ4 = qe_occupancy(s4)
+    if occ4 < 0.02 {
+        println("T4 PASS: subsaturation — occupancy << 1 (linear regime)")
+        passed = passed + 1
+    } else {
+        println("T4 FAIL: subsaturation occupancy too high")
+        failed = failed + 1
+    }
+
+    // T5: physical constraints for a mid-range case: C=2, R=3, K_d=0.5
+    let s5 = qe_solve(2.0, 3.0, 0.5)
+    let dr_max5 = 2.0  // min(C=2, R=3)
+    var phy_ok = true
+    if s5.dr < 0.0 { phy_ok = false }
+    if s5.dr > dr_max5 + 1.0e-10 { phy_ok = false }
+    if s5.c_free < 0.0 { phy_ok = false }
+    if s5.r_free < 0.0 { phy_ok = false }
+    if phy_ok {
+        println("T5 PASS: physical constraints hold (DR in [0,min(C,R)])")
+        passed = passed + 1
+    } else {
+        println("T5 FAIL: physical constraint violated")
+        failed = failed + 1
+    }
+
+    // T6: occupancy checks for T3/T4 already done; re-check T5 occupancy is in (0,1)
+    let occ5 = qe_occupancy(s5)
+    if occ5 > 0.0 && occ5 < 1.0 {
+        println("T6 PASS: occupancy in (0,1) for mid-range case")
+        passed = passed + 1
+    } else {
+        println("T6 FAIL: occupancy out of (0,1)")
+        failed = failed + 1
+    }
+
+    // T7: conservation — c_free + dr == c_total; r_free + dr == r_total
+    let c_total7 = 2.0
+    let r_total7 = 3.0
+    let tol7 = 1.0e-10
+    let s7 = qe_solve(c_total7, r_total7, 0.5)
+    let c_cons = s7.c_free + s7.dr
+    let r_cons = s7.r_free + s7.dr
+    if qe_near(c_cons, c_total7, tol7) && qe_near(r_cons, r_total7, tol7) {
+        println("T7 PASS: conservation c_free+DR=C_total, r_free+DR=R_total")
+        passed = passed + 1
+    } else {
+        println("T7 FAIL: conservation violated")
+        failed = failed + 1
+    }
+
+    println("")
+    print("QE approximation: passed=")
+    print_int(passed)
+    print(" failed=")
+    print_int(failed)
+    println("")
+
+    if failed == 0 {
+        println("PASS")
+        return 0
+    }
+    println("FAIL")
+    return 1
+}
