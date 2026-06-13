@@ -4241,6 +4241,30 @@ fn checker_count_expr_list(opt: Option<Box<ExprList> >) -> i64 with Mut, Panic, 
     }
 }
 
+fn checker_expr_list_may_need_call_borrow_release(opt: Option<Box<ExprList> >) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        None => false
+        Some(list) => {
+            let arg_expr = (*list).head
+            if arg_expr.kind == ExprKind::ExprIdent {
+                return true
+            }
+            if arg_expr.kind == ExprKind::ExprUnary &&
+               (arg_expr.un_op == UnaryOp::OpRef || arg_expr.un_op == UnaryOp::OpRefMut) {
+                return true
+            }
+            checker_expr_list_may_need_call_borrow_release((*list).tail)
+        }
+    }
+}
+
+fn checker_release_call_arg_borrows_if_needed_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) with Mut, Panic, Div, Alloc, IO {
+    if !checker_expr_list_may_need_call_borrow_release(args) {
+        return
+    }
+    checker_release_call_arg_borrows_inplace(c, args, params, call_start_borrows)
+}
+
 fn checker_check_call_args_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, expected_count: i64, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     if expected_count >= 0 {
         let actual_count = checker_count_expr_list(args)
@@ -4302,7 +4326,7 @@ fn checker_check_slice_len_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry w
     if !is_ok && !is_error_or_unknown(arg_ty) {
         checker_report_error_at_inplace(c, e.span, 9, 0, 0, 0)
     }
-    checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+    checker_release_call_arg_borrows_if_needed_inplace(c, e.args, None, call_start_borrows)
     ty_i64()
 }
 
@@ -4413,12 +4437,12 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let call_start_borrows = (*c).borrows
         checker_check_call_args_inplace(c, e.args, sig.params, sig.param_count, e.span)
         checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
-        checker_release_call_arg_borrows_inplace(c, e.args, sig.params, call_start_borrows)
+        checker_release_call_arg_borrows_if_needed_inplace(c, e.args, sig.params, call_start_borrows)
         sig.return_type
     } else if is_error_or_unknown(callee_ty) {
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_if_needed_inplace(c, e.args, None, call_start_borrows)
         callee_ty
     } else {
         // Enum tuple-variant constructor (`Event::B(42)`): the callee path typed as
@@ -4430,13 +4454,13 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             let ei = (*c).enums.get(variant_enum_idx)
             let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_if_needed_inplace(c, e.args, None, call_start_borrows)
             return ty_named(ei.name)
         }
         checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_if_needed_inplace(c, e.args, None, call_start_borrows)
         ty_error()
     }
 }
@@ -4719,6 +4743,11 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
 }
 
 fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+    if param_ty.unit_id < 0 && arg_ty.unit_id < 0 &&
+       param_ty.kind != TypeKind::TyRef && param_ty.kind != TypeKind::TyRefMut &&
+       arg_ty.kind != TypeKind::TyRef && arg_ty.kind != TypeKind::TyRefMut {
+        return
+    }
     let expected_ty = call_ref_inner_or_self(param_ty)
     let provided_ty = call_ref_inner_or_self(arg_ty)
     if is_error_or_unknown(expected_ty) || is_error_or_unknown(provided_ty) {

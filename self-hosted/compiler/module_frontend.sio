@@ -2546,6 +2546,60 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
         return func
     }
 
+    let body_end = module_frontend_source_body_end(data, body, size)
+    let param0 = module_frontend_source_fn_first_param_name(data, fn_pos, size)
+    let param1 = module_frontend_source_fn_second_param_name(data, fn_pos, size)
+    if body_end >= 0 && param0.len > 0 && param1.len > 0 {
+        let expr_end = module_frontend_source_line_end(data, expr, body_end)
+        let binop = module_frontend_source_expr_two_params_binop(data, expr, expr_end, param0, param1)
+        if binop.0 {
+            func.param_count = 2
+            func.param_regs[0] = 0
+            func.param_regs[1] = 1
+            func.reg_count = 3
+            if binop.1 == 1 {
+                func.instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+            } else {
+                func.instrs[0] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+            }
+            func.instrs[1] = ir_return(2)
+            func.instr_count = 2
+            return func
+        }
+    }
+
+    let direct_end = if body_end >= 0 { body_end } else { size }
+    let direct_expr = module_frontend_source_strip_return_prefix(data, expr, direct_end)
+    let direct_callee = module_frontend_source_ident_at(data, direct_expr, direct_end)
+    if direct_callee.len > 0 {
+        let direct_two_args = module_frontend_source_call_two_i64_literals_packed(data, direct_expr + direct_callee.len, direct_end)
+        if direct_two_args.0 {
+            let direct_left_arg = direct_two_args.1 / 4294967296
+            let direct_right_arg = direct_two_args.1 - (direct_left_arg * 4294967296)
+            let direct_binop_kind = module_frontend_source_fn_two_param_binop_kind(data, size, direct_callee)
+            if direct_binop_kind > 0 {
+                func.reg_count = 3
+                func.instrs[0] = ir_load_imm(0, direct_left_arg)
+                func.instrs[1] = ir_load_imm(1, direct_right_arg)
+                if direct_binop_kind == 1 {
+                    func.instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+                } else {
+                    func.instrs[2] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+                }
+                func.instrs[3] = ir_return(2)
+                func.instr_count = 4
+                return func
+            }
+            func.reg_count = 3
+            func.instrs[0] = ir_load_imm(0, direct_left_arg)
+            func.instrs[1] = ir_load_imm(1, direct_right_arg)
+            func.instrs[2] = ir_call(2, 0 - 1, direct_callee, Some(Box::new(ir_reg_list_append(ir_reg_list_single(0), 1))), 2)
+            func.instrs[3] = ir_return(2)
+            func.instr_count = 4
+            return func
+        }
+    }
+
     let body_value = module_frontend_try_eval_source_fn_i64(data, size, func.name)
     if body_value.0 {
         return module_frontend_force_i64_return(func, body_value.1)
@@ -2567,8 +2621,9 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
     // Support common "let p = callee(...)" or "var x = callee" or direct callee by skipping let/var prefix to find the call ident.
     // This allows the summary IR for imported modules to recognize calls in test mains that do "let p = cd_mul(...)" etc.
     // (enables the modular path to produce non-empty IR for cross-module cases like the SRET cd_mul repro).
-    let expr2 = module_frontend_source_skip_let_or_var_assign(data, expr, size)
-    let callee = module_frontend_source_ident_at(data, expr2, size)
+    let expr2_raw = module_frontend_source_skip_let_or_var_assign(data, expr, direct_end)
+    let expr2 = module_frontend_source_strip_return_prefix(data, expr2_raw, direct_end)
+    let callee = module_frontend_source_ident_at(data, expr2, direct_end)
     if module_frontend_name_is_println(callee) || module_frontend_name_is_print_int(callee) {
         let printed = module_frontend_source_first_int_after(data, expr2 + callee.len, size)
         if printed.0 {
@@ -2581,10 +2636,23 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
         }
     }
     if callee.len > 0 {
-        func.instrs[0] = module_frontend_ir_named_call(0, callee)
-        func.instrs[1] = ir_return(0)
-        func.instr_count = 2
-        return func
+        let two_args = module_frontend_source_call_two_i64_literals_packed(data, expr2 + callee.len, size)
+        if two_args.0 {
+            let left_arg = two_args.1 / 4294967296
+            let right_arg = two_args.1 - (left_arg * 4294967296)
+            func.reg_count = 3
+            func.instrs[0] = ir_load_imm(0, left_arg)
+            func.instrs[1] = ir_load_imm(1, right_arg)
+            func.instrs[2] = ir_call(2, 0 - 1, callee, Some(Box::new(ir_reg_list_append(ir_reg_list_single(0), 1))), 2)
+            func.instrs[3] = ir_return(2)
+            func.instr_count = 4
+            return func
+        } else {
+            func.instrs[0] = module_frontend_ir_named_call(0, callee)
+            func.instrs[1] = ir_return(0)
+            func.instr_count = 2
+            return func
+        }
     }
 
     func.instrs[0] = ir_load_imm(0, 0)
@@ -2608,6 +2676,11 @@ fn module_frontend_lower_source_file_summary(path: string, module_index: i64, tr
             var func = ir_empty_function()
             func.name = module_frontend_source_fn_name(data, module_frontend_source_fn_name_start(data, i, size), size)
             func = module_frontend_lower_source_fn_body(path, data, i, size, func)
+            var param_i: i64 = 0
+            while param_i < func.param_count && param_i < 64 {
+                func.param_regs[param_i as usize] = param_i
+                param_i = param_i + 1
+            }
             module.functions[module.fn_count as usize] = func
             module.fn_count = module.fn_count + 1
         }
@@ -2929,11 +3002,12 @@ pub fn bridge_lower_single_module_box(
     }
     trace.typechecked_modules = 1
     trace.last_stage = "lower_single"
-    let lowered = module_frontend_lower_source_file_summary(source_path, 0, trace)
+    var lowered = module_frontend_lower_source_file_summary(source_path, 0, trace)
     if lowered.fn_count <= 0 {
         trace.last_stage = "lower_summary_error"
         return module_frontend_lower_box_error("ir_summary_failed")
     }
+    ir_module_resolve_named_calls(&! lowered)
     let result = module_frontend_lower_box_ok(Box::new(lowered), ir_empty_validated_patch_stats())
     if result.ok {
         trace.merged_modules = 1
@@ -3089,6 +3163,89 @@ fn module_frontend_source_fn_first_param_name(data: string, fn_pos: i64, size: i
     }
     i = module_frontend_source_skip_ws(data, i + 1, size)
     module_frontend_source_ident_at(data, i, size)
+}
+
+fn module_frontend_source_fn_second_param_name(data: string, fn_pos: i64, size: i64) -> Name with Mut, Panic, Div {
+    var empty = Name { buf: [0; 128], len: 0 }
+    var i = fn_pos
+    while i < size && data[i as usize] != (40 as i8) {
+        i = i + 1
+    }
+    if i >= size {
+        return empty
+    }
+    while i < size && data[i as usize] != (44 as i8) && data[i as usize] != (41 as i8) {
+        i = i + 1
+    }
+    if i >= size || data[i as usize] != (44 as i8) {
+        return empty
+    }
+    i = module_frontend_source_skip_ws(data, i + 1, size)
+    module_frontend_source_ident_at(data, i, size)
+}
+
+fn module_frontend_source_fn_two_param_binop_kind(data: string, size: i64, fn_name: Name) -> i64 with Mut, Panic, Div {
+    let fn_pos = module_frontend_source_find_fn(data, size, fn_name)
+    if fn_pos < 0 {
+        return 0
+    }
+    let body = module_frontend_source_body_start(data, fn_pos, size)
+    if body < 0 {
+        return 0
+    }
+    let body_end = module_frontend_source_body_end(data, body, size)
+    if body_end < 0 {
+        return 0
+    }
+    let param0 = module_frontend_source_fn_first_param_name(data, fn_pos, size)
+    let param1 = module_frontend_source_fn_second_param_name(data, fn_pos, size)
+    if param0.len <= 0 || param1.len <= 0 {
+        return 0
+    }
+    let expr = module_frontend_source_skip_ws(data, body, body_end)
+    let expr_end = module_frontend_source_line_end(data, expr, body_end)
+    let binop = module_frontend_source_expr_two_params_binop(data, expr, expr_end, param0, param1)
+    if binop.0 {
+        return binop.1
+    }
+    0
+}
+
+fn module_frontend_source_expr_two_params_binop(data: string, start: i64, end: i64, left_param: Name, right_param: Name) -> (bool, i64) with Mut, Panic, Div {
+    var s = module_frontend_source_strip_return_prefix(data, start, end)
+    var e = end
+    while e > s {
+        let tail = data[(e - 1) as usize]
+        if tail == (32 as i8) || tail == (9 as i8) || tail == (10 as i8) || tail == (13 as i8) || tail == (59 as i8) || tail == (125 as i8) {
+            e = e - 1
+        } else {
+            break
+        }
+    }
+    if s >= e {
+        return (false, 0)
+    }
+    let left = module_frontend_source_ident_at(data, s, e)
+    if left.len <= 0 || !ir_name_eq(left, left_param) {
+        return (false, 0)
+    }
+    var op_pos = module_frontend_source_skip_ws(data, s + left.len, e)
+    if op_pos >= e {
+        return (false, 0)
+    }
+    let op_ch = data[op_pos as usize]
+    if op_ch != (43 as i8) && op_ch != (45 as i8) {
+        return (false, 0)
+    }
+    let right_start = module_frontend_source_skip_ws(data, op_pos + 1, e)
+    let right = module_frontend_source_ident_at(data, right_start, e)
+    if right.len <= 0 || !ir_name_eq(right, right_param) {
+        return (false, 0)
+    }
+    if op_ch == (43 as i8) {
+        return (true, 1)
+    }
+    (true, 2)
 }
 
 fn module_frontend_source_param_plus_offset(data: string, start: i64, end: i64, param: Name) -> (bool, i64) with Mut, Panic, Div {

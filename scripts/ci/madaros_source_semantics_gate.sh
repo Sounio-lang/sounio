@@ -62,6 +62,16 @@ fn main() -> i64 {
 }
 SRC
 
+write_case local_param_call 42 <<'SRC'
+fn add(a: i64, b: i64) -> i64 {
+    return a + b
+}
+
+fn main() -> i64 {
+    return add(20, 22)
+}
+SRC
+
 run_case() {
   local name="$1"
   local src="$TMP_DIR/$name.sio"
@@ -94,6 +104,7 @@ run_case literal_body
 run_case let_call_if
 run_case while_var
 run_case bool_cmp
+run_case local_param_call
 
 echo "[madaros-source-semantics] running raw_compile_alias"
 RAW_BIN="$TMP_DIR/raw_compile_alias.elf"
