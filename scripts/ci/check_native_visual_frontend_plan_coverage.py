@@ -237,6 +237,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Multiple experiment diff artifacts can be indexed, selected, compared, verified, and exported as a fixed-capacity Workbench library.",
     ),
     Evidence(
+        "workbench-experiment-diff-library-browser",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentDiffLibraryBrowser",
+            "viz_workbench_experiment_diff_library_browser_apply",
+            "viz_workbench_experiment_diff_library_browser_verify",
+            "viz_workbench_experiment_diff_library_browser_emit",
+        ),
+        "Experiment diff artifact libraries can be browsed through native Visual IR controls with Canvas-visible selection and passive export metadata.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -564,6 +576,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_experiment_diff_library",
         detail="Workbench experiment diff library proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-experiment-diff-library-browser-run",
+        "label",
+        "viz_workbench_experiment_diff_library_browser",
+        detail="Workbench experiment diff library browser proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",
