@@ -3231,6 +3231,9 @@ fn ty_eq(k1: i64, h1: i64, k2: i64, h2: i64) -> bool with Panic, Div, Mut {
     // integer-typed parameters in older tests.
     if k1 == 1 && k2 == 7 { return true }
     if k1 == 1 && k2 == 9 { return true }
+    // Allow integer scalar (from tuple .0/.1 type-erasure) to fill enum/bool struct fields.
+    if k1 == 7 && k2 == 1 { return true }
+    if k1 == 4 && k2 == 1 { return true }
     // Knowledge<T> must not silently coerce to non-Knowledge types (or vice versa)
     if k1 != 0 && k2 == 0 && knowledge_hash_is(h2) { return false }
     if k1 == 0 && k2 != 0 && knowledge_hash_is(h1) { return false }
@@ -20089,6 +20092,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         if gi >= 0 {
             let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
             let esz = GL[(gi * 4 + 2) as usize]
+            let elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize])
+            let elem_hash = arr_hash_elem_hash(GL_TY_HASH[gi as usize])
             // rax = value, stack = index
             materialize_aggregate_array_element_x86(GL_TY_HASH[gi as usize])
             em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value)
@@ -20096,6 +20101,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             em(0x48); em(0xb8); em64(base)  // mov rax, base
             if esz == 8 {
                 em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+            } else if esz > 8 && elem_hash != 0 {
+                em(0x48); em(0x69); em(0xc9); em32(esz)  // imul rcx, rcx, esz
+                em(0x48); em(0x01); em(0xc8)  // add rax, rcx
+                emit_copy_agg_to_ptr_x86(elem_ty, elem_hash)
             } else {
                 em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl (byte store)
             }
@@ -20130,6 +20139,16 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 emit_load_var(lslot)  // load base ptr into rax
                 if is_arr_ty == 1 && lesiz == 8 {
                     em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+                } else if is_arr_ty == 1 && lesiz > 8 {
+                    let elem_ty = arr_hash_elem_ty(array_hash)
+                    let elem_hash = arr_hash_elem_hash(array_hash)
+                    if elem_hash != 0 {
+                        em(0x48); em(0x69); em(0xc9); em32(lesiz)  // imul rcx, rcx, lesiz
+                        em(0x48); em(0x01); em(0xc8)  // add rax, rcx
+                        emit_copy_agg_to_ptr_x86(elem_ty, elem_hash)
+                    } else {
+                        em(0x88); em(0x14); em(0x08)  // fallback byte store
+                    }
                 } else if is_arr_ty == 1 && lesiz == 1 {
                     em(0x88); em(0x14); em(0x08)  // mov [rax + rcx], dl
                 } else {
