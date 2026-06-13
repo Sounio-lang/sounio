@@ -273,6 +273,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Notebook, artifact library, browser, compare mode, scene audit, and rendered frame hashes can be packaged as one reproducible Workbench experiment.",
     ),
     Evidence(
+        "workbench-experiment-package-restore",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentPackageRestore",
+            "viz_workbench_experiment_package_restore",
+            "viz_workbench_experiment_package_restore_verify",
+            "viz_workbench_experiment_package_restore_emit",
+        ),
+        "Reproducible Workbench experiment packages can be restored into a fresh scene with library, browser, mode, frame, and audit hashes verified.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -618,6 +630,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_experiment_package",
         detail="Workbench experiment package proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-experiment-package-restore-run",
+        "label",
+        "viz_workbench_experiment_package_restore",
+        detail="Workbench experiment package restore proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",
