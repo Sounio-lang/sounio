@@ -152,6 +152,7 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `VizWorkbenchExperimentEvidenceObservatory` gathers multiple sealed evidence envelopes into a native comparison surface with selected-event deltas, rendered-frame hash deltas, scene-audit deltas, action totals, and zero aggregate frame/browser drift.
 - `VizWorkbenchExperimentEvidenceObservatoryCockpit` projects that comparison surface into native Visual IR controls, letting key/mouse input update selected, baseline, and compare evidence packages while preserving passive cockpit metadata.
 - `VizWorkbenchExperimentEvidenceCertificate` binds the observatory/cockpit state, rendered frame hash, scene audit hash, selection nodes, counters, and zero drift into a passive certificate that another run can import-verify.
+- `VizWorkbenchExperimentEvidenceBundleManifest` closes the passive evidence chain by binding that certificate to the packet ledger, ledger replay, import replay, export packet payload/domain stamps, and zero final drift in one Sounio-verifiable custody record.
 
 ## V1.8j: Canonical Headless Visual Gate
 

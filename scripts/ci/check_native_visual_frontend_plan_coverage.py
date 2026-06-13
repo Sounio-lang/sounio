@@ -569,6 +569,23 @@ REQUIRED: tuple[Evidence, ...] = (
         "Passive certificate binds observatory/cockpit/package selection, rendered frame, scene audit, counters, and zero drift for import-style verification.",
     ),
     Evidence(
+        "workbench-experiment-evidence-bundle-manifest",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "VizWorkbenchExperimentEvidenceBundleManifest",
+            "viz_workbench_experiment_evidence_bundle_manifest_build",
+            "viz_workbench_experiment_evidence_bundle_manifest_verify",
+            "viz_workbench_experiment_evidence_bundle_manifest_import_verify",
+            "viz_workbench_experiment_evidence_bundle_manifest_emit",
+            "payload_stamp_hash",
+            "ledger_replay_hash",
+            "final_frame_hash_delta",
+            "certificate_audit_hash_delta",
+        ),
+        "The final passive evidence bundle manifest binds certificate, ledger replay, import replay, export packet payload/domain stamps, and zero drift into one import-verifiable custody record.",
+    ),
+    Evidence(
         "workbench-experiment-import-replay-zero-drift",
         "contains",
         "tests/run-pass/viz_workbench_experiment_diff_player.sio",
