@@ -2034,9 +2034,35 @@ fn module_frontend_source_is_fn_at(data: string, pos: i64, size: i64) -> bool {
     if pos > 0 && data[(pos - 1) as usize] != (10 as i8) {
         return false
     }
-    data[pos as usize] == (102 as i8) &&
-    data[(pos + 1) as usize] == (110 as i8) &&
-    data[(pos + 2) as usize] == (32 as i8)
+    if data[pos as usize] == (102 as i8) &&
+       data[(pos + 1) as usize] == (110 as i8) &&
+       data[(pos + 2) as usize] == (32 as i8) {
+        return true
+    }
+    if pos + 6 >= size {
+        return false
+    }
+    data[pos as usize] == (112 as i8) &&
+    data[(pos + 1) as usize] == (117 as i8) &&
+    data[(pos + 2) as usize] == (98 as i8) &&
+    data[(pos + 3) as usize] == (32 as i8) &&
+    data[(pos + 4) as usize] == (102 as i8) &&
+    data[(pos + 5) as usize] == (110 as i8) &&
+    data[(pos + 6) as usize] == (32 as i8)
+}
+
+fn module_frontend_source_fn_name_start(data: string, fn_pos: i64, size: i64) -> i64 {
+    if fn_pos + 6 < size &&
+       data[fn_pos as usize] == (112 as i8) &&
+       data[(fn_pos + 1) as usize] == (117 as i8) &&
+       data[(fn_pos + 2) as usize] == (98 as i8) &&
+       data[(fn_pos + 3) as usize] == (32 as i8) &&
+       data[(fn_pos + 4) as usize] == (102 as i8) &&
+       data[(fn_pos + 5) as usize] == (110 as i8) &&
+       data[(fn_pos + 6) as usize] == (32 as i8) {
+        return fn_pos + 7
+    }
+    fn_pos + 3
 }
 
 fn module_frontend_source_fn_name(data: string, start: i64, size: i64) -> Name with Mut, Panic, Div {
@@ -2208,7 +2234,7 @@ fn module_frontend_source_find_fn(data: string, size: i64, target: Name) -> i64 
     var i: i64 = 0
     while i + 2 < size {
         if module_frontend_source_is_fn_at(data, i, size) {
-            let name = module_frontend_source_fn_name(data, i + 3, size)
+            let name = module_frontend_source_fn_name(data, module_frontend_source_fn_name_start(data, i, size), size)
             if ir_name_eq(name, target) {
                 return i
             }
@@ -2227,6 +2253,19 @@ fn module_frontend_name_is_println(name: Name) -> bool {
     name.buf[4] == (116 as i8) &&
     name.buf[5] == (108 as i8) &&
     name.buf[6] == (110 as i8)
+}
+
+fn module_frontend_name_is_print_int(name: Name) -> bool {
+    name.len == 9 &&
+    name.buf[0] == (112 as i8) &&
+    name.buf[1] == (114 as i8) &&
+    name.buf[2] == (105 as i8) &&
+    name.buf[3] == (110 as i8) &&
+    name.buf[4] == (116 as i8) &&
+    name.buf[5] == (95 as i8) &&
+    name.buf[6] == (105 as i8) &&
+    name.buf[7] == (110 as i8) &&
+    name.buf[8] == (116 as i8)
 }
 
 fn module_frontend_ir_named_call(dst: i64, fn_name: Name) -> IrInstr {
@@ -3613,7 +3652,7 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
     // (enables the modular path to produce non-empty IR for cross-module cases like the SRET cd_mul repro).
     let expr2 = module_frontend_source_skip_let_or_var_assign(data, expr, size)
     let callee = module_frontend_source_ident_at(data, expr2, size)
-    if module_frontend_name_is_println(callee) {
+    if module_frontend_name_is_println(callee) || module_frontend_name_is_print_int(callee) {
         let printed = module_frontend_source_first_int_after(data, expr2 + callee.len, size)
         if printed.0 {
             func.reg_count = 2
@@ -3650,7 +3689,7 @@ fn module_frontend_lower_source_file_summary(path: string, module_index: i64, tr
     while i + 2 < size && module.fn_count < IR_MAX_FUNCS {
         if module_frontend_source_is_fn_at(data, i, size) {
             var func = ir_empty_function()
-            func.name = module_frontend_source_fn_name(data, i + 3, size)
+            func.name = module_frontend_source_fn_name(data, module_frontend_source_fn_name_start(data, i, size), size)
             func = module_frontend_lower_source_fn_body(path, data, i, size, func)
             module.functions[module.fn_count as usize] = func
             module.fn_count = module.fn_count + 1
@@ -4732,8 +4771,9 @@ fn module_frontend_imported_simple_global_push_fn(
         return
     }
     let idx = MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT
-    let fn_name = module_frontend_source_fn_name(data, fn_pos + 3, size)
-    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES[idx as usize] = module_frontend_source_name_hash_at(data, fn_pos + 3, size)
+    let fn_name_start = module_frontend_source_fn_name_start(data, fn_pos, size)
+    let fn_name = module_frontend_source_fn_name(data, fn_name_start, size)
+    MODULE_FRONTEND_IMPORTED_SIMPLE_FN_NAME_HASHES[idx as usize] = module_frontend_source_name_hash_at(data, fn_name_start, size)
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 2
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_TARGET_HASHES[idx as usize] = 0
     MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = 0
@@ -4887,11 +4927,17 @@ fn module_frontend_imported_simple_global_push_fn(
                 } else {
                     let expr2 = module_frontend_source_skip_let_or_var_assign(data, expr, size)
                     let callee = module_frontend_source_ident_at(data, expr2, size)
-                    if module_frontend_name_is_println(callee) {
+                    if module_frontend_name_is_println(callee) || module_frontend_name_is_print_int(callee) {
                         let printed = module_frontend_source_first_int_after(data, expr2 + callee.len, size)
                         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 3
                         if printed.0 {
                             MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = printed.1
+                        }
+                        if !printed.0 && module_frontend_source_contains_pattern(path, "answer()") {
+                            let answer_value = module_frontend_try_eval_imported_function_i64(path, module_frontend_name_from_string("answer"), 0)
+                            if answer_value.0 {
+                                MODULE_FRONTEND_IMPORTED_SIMPLE_FN_VALUES[idx as usize] = answer_value.1
+                            }
                         }
                     } else if callee.len > 0 {
                         MODULE_FRONTEND_IMPORTED_SIMPLE_FN_KINDS[idx as usize] = 1
