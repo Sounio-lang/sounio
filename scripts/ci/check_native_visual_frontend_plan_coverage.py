@@ -520,6 +520,22 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment flight-recorder timeline state can be sealed into a passive evidence package binding recorder, seek, timeline, rendered frame, audit hash, and zero frame/browser drift.",
     ),
     Evidence(
+        "workbench-experiment-evidence-observatory",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "VizWorkbenchExperimentEvidenceObservatory",
+            "viz_workbench_experiment_evidence_observatory_add",
+            "viz_workbench_experiment_evidence_observatory_verify",
+            "viz_workbench_experiment_evidence_observatory_emit",
+            "selected_event_delta",
+            "rendered_frame_hash_delta",
+            "total_frame_drift",
+            "total_browser_drift",
+        ),
+        "Multiple sealed evidence packages can be gathered into a native observatory that compares selected events, rendered frame hashes, scene audit hashes, and proves zero aggregate frame/browser drift.",
+    ),
+    Evidence(
         "workbench-experiment-import-replay-zero-drift",
         "contains",
         "tests/run-pass/viz_workbench_experiment_diff_player.sio",
