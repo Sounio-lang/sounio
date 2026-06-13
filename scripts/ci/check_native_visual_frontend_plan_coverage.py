@@ -189,6 +189,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Notebook baseline and comparison archives can be replayed side by side with browser hashes and run-to-run frame/audit deltas.",
     ),
     Evidence(
+        "workbench-experiment-diff-player",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentDiffPlayer",
+            "viz_workbench_experiment_diff_player_select",
+            "viz_workbench_experiment_diff_player_verify",
+            "viz_workbench_experiment_diff_player_emit",
+        ),
+        "Notebook baseline and comparison sessions can be scrubbed at arbitrary frames with timeline, frame, and audit deltas.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -492,6 +504,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_notebook_compare_browser",
         detail="Workbench visual lab notebook compare browser proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-experiment-diff-player-run",
+        "label",
+        "viz_workbench_experiment_diff_player",
+        detail="Workbench experiment diff player proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",

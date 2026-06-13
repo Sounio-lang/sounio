@@ -302,6 +302,22 @@ VIZ_WORKBENCH_NOTEBOOK_COMPARE_BROWSER_PASS
 
 The test records baseline and comparison Workbench runs, builds a notebook, replays both selected archives into fresh scenes, verifies the individual browser hashes, verifies the side-by-side `VizWorkbenchNotebookCompareBrowser`, and emits passive metadata with baseline/comparison browser hashes plus frame and audit deltas.
 
+## Workbench Experiment Diff Player Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_experiment_diff_player.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_EXPERIMENT_DIFF_PLAYER_PASS
+```
+
+The test records baseline and comparison Workbench runs, builds a notebook, scrubs both sessions at a shared early frame and at a late baseline/comparison frame pair, verifies timeline hashes, frame hashes, audit hashes, time deltas, hash distances, and emits passive `workbench-experiment-diff-player` metadata before static HTML/SVG export.
+
 ## Workbench Project Controls Proof
 
 Run:
