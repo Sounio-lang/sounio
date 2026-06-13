@@ -146,6 +146,7 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `VizWorkbenchExperimentPacketLedgerBrowser` projects a selected packet-ledger entry back into native Visual IR controls, so Canvas and passive HTML/SVG exports show the selected packet hash plus packet, payload, frame, and audit deltas.
 - `viz_workbench_handle_experiment_packet_ledger_browser_event` makes that browser keyboard/mouse navigable, cycling selected packet-ledger entries while updating Sounio browser state and marking the native app dirty for redraw.
 - `VizWorkbenchExperimentFlightRecorder` records packet-ledger navigation as fixed-capacity Sounio evidence: native event kind/key, selected packet index, browser hash, rendered frame hash, final scene-audit hash, and frame/audit deltas are bound into one recorder hash.
+- `VizWorkbenchExperimentFlightRecorderSeek` makes a recorded event inspectable again by projecting its selected packet, event kind/key, expected browser hash, and expected rendered frame hash back into native Visual IR controls with passive export metadata.
 
 ## V1.8j: Canonical Headless Visual Gate
 

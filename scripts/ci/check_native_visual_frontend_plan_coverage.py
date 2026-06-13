@@ -475,6 +475,21 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment packet-ledger navigation is captured as a fixed-capacity native flight recorder with event kinds, selected packet indices, browser hashes, frame hashes, and final scene-audit binding.",
     ),
     Evidence(
+        "workbench-experiment-flight-recorder-seek",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "VizWorkbenchExperimentFlightRecorderSeek",
+            "viz_workbench_experiment_flight_recorder_seek_apply",
+            "viz_workbench_experiment_flight_recorder_seek_verify",
+            "viz_workbench_experiment_flight_recorder_seek_emit",
+            "expected_frame_hash",
+            "browser_hash_delta",
+            "selected_event",
+        ),
+        "Experiment flight-recorder events can be selected and projected back into native Visual IR with expected browser/frame hashes and passive export metadata.",
+    ),
+    Evidence(
         "workbench-experiment-import-replay-zero-drift",
         "contains",
         "tests/run-pass/viz_workbench_experiment_diff_player.sio",
