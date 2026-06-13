@@ -13,7 +13,7 @@
          test-knowledge-runtime-guard-native-lowering \
          test-knowledge-context-static \
          test-semantic-knowledge-spine \
-         build-madaros test-madaros-identity test-real-language-runner \
+         build-madaros test-madaros-identity test-real-language-runner test-project-spine \
          ops-guardrail-local ops-infra-up ops-strict-up ops-status \
          website-verified-snapshot
 
@@ -76,6 +76,9 @@ test-madaros-identity: ## Verify Madaros identifies as the Stage1 modular Sounio
 
 test-real-language-runner: ## Verify public souc CLI + REPL + optional Madaros path
 	@bash scripts/ci/real_language_runner_gate.sh
+
+test-project-spine: ## Verify sounio.toml project mode, imports, package gate, and Madaros
+	@bash scripts/ci/project_spine_gate.sh
 
 clean:               ## Remove generated ELF artifacts (gen1, gen2, gen3)
 	rm -f gen1.elf gen2.elf gen3.elf gen4.elf

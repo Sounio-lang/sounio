@@ -96,6 +96,10 @@ Usage:
   souc compile <file.sio> -o <out> [compiler flags...]
   souc build <file.sio> -o <out> [compiler flags...]
   souc repl [repl flags...]
+  souc init <name>
+  souc check [project-dir]
+  souc run [project-dir] [-- program args...]
+  souc build [project-dir] [-o <out>]
   souc info
   souc <file.sio> <out> [compiler flags...]
 
@@ -166,11 +170,143 @@ souc_compile() {
   fi
 }
 
-cmd_check() {
-  if [[ $# -lt 1 ]]; then
-    echo "error: check requires <file.sio>" >&2
-    usage >&2
+find_project_root() {
+  local start="${1:-$PWD}"
+  if [[ -f "$start" ]]; then
+    start="$(dirname "$start")"
+  fi
+  if [[ -d "$start" ]]; then
+    start="$(cd "$start" && pwd)"
+  else
+    return 1
+  fi
+  while [[ "$start" != "/" ]]; do
+    if [[ -f "$start/sounio.toml" ]]; then
+      printf '%s\n' "$start"
+      return 0
+    fi
+    start="$(dirname "$start")"
+  done
+  return 1
+}
+
+project_manifest_value() {
+  local root="$1"
+  local key="$2"
+  python3 - "$root/sounio.toml" "$key" <<'PY'
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    raise SystemExit(3)
+path, key = sys.argv[1], sys.argv[2]
+data = tomllib.loads(open(path, "rb").read().decode("utf-8"))
+if key == "package.name":
+    print(data.get("package", {}).get("name", "sounio-project"))
+elif key == "entry":
+    bins = data.get("bin", [])
+    if isinstance(bins, list) and bins:
+        value = bins[0].get("path", "")
+        if value:
+            print(value)
+            raise SystemExit(0)
+    value = data.get("project", {}).get("entry", "")
+    if value:
+        print(value)
+        raise SystemExit(0)
+    value = data.get("lib", {}).get("path", "")
+    if value and not (open(path, "rb").read().decode("utf-8").find("[[bin]]") >= 0):
+        print(value)
+        raise SystemExit(0)
+    print("src/main.sio")
+else:
+    raise SystemExit(2)
+PY
+}
+
+resolve_source_or_project() {
+  local candidate="${1:-}"
+  if [[ -n "$candidate" && -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  local root=""
+  if [[ -n "$candidate" && -d "$candidate" ]]; then
+    root="$(find_project_root "$candidate" || true)"
+  else
+    root="$(find_project_root "$PWD" || true)"
+  fi
+
+  if [[ -z "$root" ]]; then
+    return 1
+  fi
+
+  local entry
+  entry="$(project_manifest_value "$root" entry)"
+  if [[ ! -f "$root/$entry" ]]; then
+    echo "error: project entry not found: $root/$entry" >&2
+    return 1
+  fi
+  printf '%s\n' "$root/$entry"
+}
+
+project_default_output() {
+  local root="$1"
+  local name
+  name="$(project_manifest_value "$root" package.name)"
+  mkdir -p "$root/target"
+  printf '%s\n' "$root/target/$name"
+}
+
+cmd_init() {
+  if [[ $# -ne 1 ]]; then
+    echo "error: init requires <name>" >&2
     exit 2
+  fi
+  local name="$1"
+  if [[ -e "$name" ]]; then
+    echo "error: path already exists: $name" >&2
+    exit 1
+  fi
+  mkdir -p "$name/src"
+  cat >"$name/sounio.toml" <<EOF
+[package]
+name = "$name"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "$name"
+path = "src/main.sio"
+EOF
+  cat >"$name/src/greet.sio" <<'EOF'
+pub fn answer() -> i64 {
+    42
+}
+EOF
+  cat >"$name/src/main.sio" <<'EOF'
+use greet::{answer}
+
+fn main() -> i64 with IO {
+    print_int(answer())
+    print_char(10)
+    0
+}
+EOF
+  echo "Created Sounio project: $name"
+}
+
+cmd_check() {
+  if [[ $# -lt 1 || ( $# -eq 1 && -d "$1" ) ]]; then
+    local candidate="${1:-}"
+    local resolved
+    if ! resolved="$(resolve_source_or_project "$candidate")"; then
+      echo "error: check requires <file.sio> or a project with sounio.toml" >&2
+      usage >&2
+      exit 2
+    fi
+    set -- "$resolved"
   fi
   local src="$1"
   shift
@@ -186,10 +322,20 @@ cmd_check() {
 }
 
 cmd_run() {
-  if [[ $# -lt 1 ]]; then
-    echo "error: run requires <file.sio>" >&2
-    usage >&2
-    exit 2
+  if [[ $# -lt 1 || ( $# -ge 1 && -d "$1" ) ]]; then
+    local candidate=""
+    local rest=("$@")
+    if [[ $# -ge 1 && -d "$1" ]]; then
+      candidate="$1"
+      rest=("${@:2}")
+    fi
+    local resolved
+    if ! resolved="$(resolve_source_or_project "$candidate")"; then
+      echo "error: run requires <file.sio> or a project with sounio.toml" >&2
+      usage >&2
+      exit 2
+    fi
+    set -- "$resolved" "${rest[@]}"
   fi
   local src="$1"
   shift
@@ -227,12 +373,6 @@ cmd_run() {
 }
 
 cmd_compile() {
-  if [[ $# -lt 3 ]]; then
-    echo "error: compile requires <file.sio> -o <out>" >&2
-    usage >&2
-    exit 2
-  fi
-
   local src=""
   local out=""
   local args=()
@@ -258,8 +398,31 @@ cmd_compile() {
     esac
   done
 
-  if [[ -z "$src" || -z "$out" ]]; then
-    echo "error: compile requires <file.sio> -o <out>" >&2
+  if [[ -z "$src" ]]; then
+    if ! src="$(resolve_source_or_project "")"; then
+      echo "error: compile requires <file.sio> or a project with sounio.toml" >&2
+      usage >&2
+      exit 2
+    fi
+  elif [[ -d "$src" ]]; then
+    local root
+    root="$(find_project_root "$src")"
+    src="$(resolve_source_or_project "$root")"
+    if [[ -z "$out" ]]; then
+      out="$(project_default_output "$root")"
+    fi
+  fi
+
+  if [[ -z "$out" ]]; then
+    local root_for_out
+    root_for_out="$(find_project_root "$src" || true)"
+    if [[ -n "$root_for_out" ]]; then
+      out="$(project_default_output "$root_for_out")"
+    fi
+  fi
+
+  if [[ -z "$out" ]]; then
+    echo "error: compile requires -o <out> when not building a project" >&2
     usage >&2
     exit 2
   fi
@@ -291,6 +454,10 @@ case "$1" in
     ;;
   info)
     info
+    ;;
+  init)
+    shift
+    cmd_init "$@"
     ;;
   check)
     shift
