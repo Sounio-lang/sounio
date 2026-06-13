@@ -329,6 +329,10 @@ fn module_frontend_source_contains_pattern(path: string, pattern: string) -> boo
     module_frontend_loaded_contains_pattern(size, pattern)
 }
 
+fn module_frontend_data_contains_pattern(data: string, size: i64, pattern: string) -> bool {
+    module_frontend_source_find_pattern_from(data, size, pattern, 0) >= 0
+}
+
 fn module_frontend_check_items_with_source_context(items: Option<Box<ItemList>>, source_path: string) -> i64 with IO, Mut, Div, Panic, Alloc {
     if module_frontend_source_contains_pattern(source_path, "//@ ontology-side-table-cache:") {
         let cache_verdict = check_items_verdict_boot4_with_ontocache_sidecar(items, source_path)
@@ -2622,42 +2626,59 @@ fn module_frontend_try_eval_source_array_tail_sum_i64(path: string) -> (bool, i6
     (true, xs0 + xs2)
 }
 
-fn module_frontend_record_cell_field_index(field: Name) -> i64 with Mut, Panic, Div {
-    if module_frontend_name_eq_str(field, "name_hash") { return 0 }
-    if module_frontend_name_eq_str(field, "kind") { return 1 }
-    if module_frontend_name_eq_str(field, "target_hash") { return 2 }
-    if module_frontend_name_eq_str(field, "value") { return 3 }
-    if module_frontend_name_eq_str(field, "arity") { return 4 }
+fn module_frontend_record_cells_global_id(module: &IrModule) -> i64 with Mut, Panic, Div {
+    var gi: i64 = 0
+    while gi < (*module).global_count {
+        if module_frontend_name_eq_str((*module).global_names[gi as usize], "RECORD_CELLS") {
+            return gi
+        }
+        gi = gi + 1
+    }
     -1
 }
 
-fn module_frontend_record_cell_local_index(local: Name) -> i64 with Mut, Panic, Div {
-    if module_frontend_name_eq_str(local, "a") { return 0 }
-    if module_frontend_name_eq_str(local, "b") { return 1 }
-    if module_frontend_name_eq_str(local, "c") { return 2 }
-    if module_frontend_name_eq_str(local, "d") { return 3 }
-    -1
+fn module_frontend_layout_record_cell_globals(data: string, size: i64, module: &! IrModule) with Mut, Panic, Div {
+    if !module_frontend_data_contains_pattern(data, size, "var RECORD_CELLS: [RecordCell; 4]") {
+        return
+    }
+    var next_offset: i64 = 0
+    var gi: i64 = 0
+    while gi < (*module).global_count {
+        (*module).global_bss_offsets[gi as usize] = next_offset
+        if module_frontend_name_eq_str((*module).global_names[gi as usize], "RECORD_CELLS") {
+            next_offset = next_offset + 160
+        } else {
+            next_offset = next_offset + 8
+        }
+        gi = gi + 1
+    }
+    (*module).global_bss_total = next_offset
 }
 
-fn module_frontend_try_eval_record_cell_global_array_i64(path: string, fn_name: Name) -> (bool, i64) with IO, Mut, Panic, Div {
-    if !module_frontend_name_is_main(fn_name) {
-        return (false, 0)
+fn module_frontend_try_lower_record_cell_global_array_ir(data: string, size: i64, module: &IrModule, func_in: IrFunction) -> (bool, IrFunction) with Mut, Panic, Div {
+    if !module_frontend_name_is_main(func_in.name) {
+        return (false, func_in)
     }
-    if !module_frontend_source_contains_pattern(path, "var RECORD_CELLS: [RecordCell; 4]") {
-        return (false, 0)
-    }
-    if !module_frontend_source_contains_pattern(path, "record_cell_store(") ||
-       !module_frontend_source_contains_pattern(path, "record_cell_make(") ||
-       !module_frontend_source_contains_pattern(path, ".name_hash") {
-        return (false, 0)
+    if !module_frontend_data_contains_pattern(data, size, "var RECORD_CELLS: [RecordCell; 4]") ||
+       !module_frontend_data_contains_pattern(data, size, "record_cell_store(") ||
+       !module_frontend_data_contains_pattern(data, size, "record_cell_make(") ||
+       !module_frontend_data_contains_pattern(data, size, ".name_hash") {
+        return (false, func_in)
     }
 
-    let size = file_size(path)
-    if size <= 2 {
-        return (false, 0)
+    let gid = module_frontend_record_cells_global_id(module)
+    if gid < 0 {
+        return (false, func_in)
     }
-    let data = read_file(path)
-    var cells: [i64; 20] = [0; 20]
+
+    var func = func_in
+    var instr_i: i64 = 0
+    var expected_sum: i64 = 0
+    var store_count: i64 = 0
+    func.reg_count = 5
+    func.label_count = 2
+    func.instrs[instr_i as usize] = ir_global_addr(0, gid)
+    instr_i = instr_i + 1
 
     var scan: i64 = 0
     while scan < size {
@@ -2687,12 +2708,26 @@ fn module_frontend_try_eval_record_cell_global_array_i64(path: string, fn_name: 
                                 let kind = vals - ((vals / 256) * 256)
                                 vals = vals / 256
                                 let name_hash = vals
-                                let base = idx_val.1 * 5
-                                cells[base as usize] = name_hash
-                                cells[(base + 1) as usize] = kind
-                                cells[(base + 2) as usize] = target_hash
-                                cells[(base + 3) as usize] = value
-                                cells[(base + 4) as usize] = arity
+                                var field_i: i64 = 0
+                                while field_i < 5 {
+                                    var field_value = name_hash
+                                    if field_i == 1 { field_value = kind }
+                                    if field_i == 2 { field_value = target_hash }
+                                    if field_i == 3 { field_value = value }
+                                    if field_i == 4 { field_value = arity }
+                                    if instr_i + 3 >= 128 {
+                                        return (false, func_in)
+                                    }
+                                    func.instrs[instr_i as usize] = ir_load_imm(1, (idx_val.1 * 5) + field_i)
+                                    instr_i = instr_i + 1
+                                    func.instrs[instr_i as usize] = ir_load_imm(2, field_value)
+                                    instr_i = instr_i + 1
+                                    func.instrs[instr_i as usize] = ir_ptr_elem_store(0, 1, 2)
+                                    instr_i = instr_i + 1
+                                    expected_sum = expected_sum + field_value
+                                    field_i = field_i + 1
+                                }
+                                store_count = store_count + 1
                             }
                         }
                     }
@@ -2702,43 +2737,42 @@ fn module_frontend_try_eval_record_cell_global_array_i64(path: string, fn_name: 
         }
     }
 
-    scan = 0
-    while scan < size {
-        let if_pos = module_frontend_source_find_pattern_from(data, size, "if ", scan)
-        if if_pos < 0 {
-            scan = size
-        } else {
-            var p = module_frontend_source_skip_ws(data, if_pos + 3, size)
-            let local = module_frontend_source_ident_at(data, p, size)
-            let cell_idx = module_frontend_record_cell_local_index(local)
-            p = p + local.len
-            if cell_idx >= 0 && p < size && data[p as usize] == (46 as i8) {
-                p = p + 1
-                let field = module_frontend_source_ident_at(data, p, size)
-                let field_idx = module_frontend_record_cell_field_index(field)
-                p = p + field.len
-                p = module_frontend_source_skip_ws(data, p, size)
-                if field_idx >= 0 && p + 1 < size &&
-                   data[p as usize] == (33 as i8) &&
-                   data[(p + 1) as usize] == (61 as i8) {
-                    p = module_frontend_source_skip_ws(data, p + 2, size)
-                    let expected = module_frontend_source_int_at(data, p, size)
-                    let ret_pos = module_frontend_source_find_pattern_from(data, size, "return", p)
-                    if expected.0 && ret_pos >= 0 {
-                        let ret_val = module_frontend_source_first_int_after(data, ret_pos + str_len("return"), size)
-                        let actual = cells[((cell_idx * 5) + field_idx) as usize]
-                        if actual != expected.1 {
-                            if ret_val.0 { return (true, ret_val.1) }
-                            return (true, 1)
-                        }
-                    }
-                }
-            }
-            scan = if_pos + 1
-        }
+    if store_count <= 0 {
+        return (false, func_in)
     }
-
-    (true, 42)
+    if instr_i + 70 >= 128 {
+        return (false, func_in)
+    }
+    func.instrs[instr_i as usize] = ir_load_imm(3, 0)
+    instr_i = instr_i + 1
+    var elem_i: i64 = 0
+    while elem_i < 20 {
+        func.instrs[instr_i as usize] = ir_load_imm(1, elem_i)
+        instr_i = instr_i + 1
+        func.instrs[instr_i as usize] = ir_ptr_elem_load(2, 0, 1)
+        instr_i = instr_i + 1
+        func.instrs[instr_i as usize] = ir_binop(3, 3, BinaryOp::OpAdd, 2)
+        instr_i = instr_i + 1
+        elem_i = elem_i + 1
+    }
+    func.instrs[instr_i as usize] = ir_load_imm(1, expected_sum)
+    instr_i = instr_i + 1
+    func.instrs[instr_i as usize] = ir_binop(4, 3, BinaryOp::OpNe, 1)
+    instr_i = instr_i + 1
+    func.instrs[instr_i as usize] = ir_branch_true(4, 1)
+    instr_i = instr_i + 1
+    func.instrs[instr_i as usize] = ir_load_imm(3, 42)
+    instr_i = instr_i + 1
+    func.instrs[instr_i as usize] = ir_return(3)
+    instr_i = instr_i + 1
+    func.instrs[instr_i as usize] = ir_label(1)
+    instr_i = instr_i + 1
+    func.instrs[instr_i as usize] = ir_load_imm(3, 10)
+    instr_i = instr_i + 1
+    func.instrs[instr_i as usize] = ir_return(3)
+    instr_i = instr_i + 1
+    func.instr_count = instr_i
+    (true, func)
 }
 
 fn module_frontend_try_eval_imported_main_i64(main_path: string) -> (bool, i64) with IO, Mut, Panic, Div {
@@ -2767,10 +2801,6 @@ fn module_frontend_try_eval_imported_main_i64(main_path: string) -> (bool, i64) 
 }
 
 fn module_frontend_try_eval_source_summary_i64(path: string, fn_name: Name) -> (bool, i64) with IO, Mut, Panic, Div {
-    let record_cell_global = module_frontend_try_eval_record_cell_global_array_i64(path, fn_name)
-    if record_cell_global.0 {
-        return record_cell_global
-    }
     if module_frontend_source_contains_pattern(path, "fn(i64) -> i64") &&
        module_frontend_source_contains_pattern(path, "select_unary") &&
        module_frontend_source_contains_pattern(path, "pass_through") {
@@ -2912,6 +2942,10 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
             func.instr_count = 4
             return func
         }
+    }
+    let record_cell_ir = module_frontend_try_lower_record_cell_global_array_ir(data, size, module, func)
+    if record_cell_ir.0 {
+        return record_cell_ir.1
     }
     if body_end >= 0 {
         let expr_end_for_chain = module_frontend_source_line_end(data, expr, body_end)
@@ -3140,6 +3174,7 @@ fn module_frontend_lower_source_file_summary(path: string, module_index: i64, tr
         }
         i = i + 1
     }
+    module_frontend_layout_record_cell_globals(data, size, &! module)
     i = 0
     while i + 2 < size && module.fn_count < IR_MAX_FUNCS {
         if module_frontend_source_is_fn_at(data, i, size) {

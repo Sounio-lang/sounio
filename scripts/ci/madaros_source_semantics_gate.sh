@@ -143,9 +143,17 @@ echo "[madaros-source-semantics] running global_struct_array_record_storage"
 GLOBAL_STRUCT_SRC="tests/native-v2/global_struct_array_record_storage_witness.sio"
 GLOBAL_STRUCT_BIN="$TMP_DIR/global_struct_array_record_storage.elf"
 GLOBAL_STRUCT_LOG="$TMP_DIR/global_struct_array_record_storage.compile.log"
-"$MADAROS" compile "$GLOBAL_STRUCT_SRC" -o "$GLOBAL_STRUCT_BIN" >"$GLOBAL_STRUCT_LOG" 2>&1 || {
+"$MADAROS" compile --native-v2-global-trace "$GLOBAL_STRUCT_SRC" -o "$GLOBAL_STRUCT_BIN" >"$GLOBAL_STRUCT_LOG" 2>&1 || {
   cat "$GLOBAL_STRUCT_LOG" >&2
   fail "global_struct_array_record_storage compile failed"
+}
+grep -Eq 'native_v2_global_trace: globals=[1-9][0-9]*' "$GLOBAL_STRUCT_LOG" || {
+  cat "$GLOBAL_STRUCT_LOG" >&2
+  fail "global_struct_array_record_storage did not report native global IR globals"
+}
+grep -Eq 'global_ops=[1-9][0-9]*' "$GLOBAL_STRUCT_LOG" || {
+  cat "$GLOBAL_STRUCT_LOG" >&2
+  fail "global_struct_array_record_storage did not lower through native global IR ops"
 }
 [[ -s "$GLOBAL_STRUCT_BIN" ]] || {
   cat "$GLOBAL_STRUCT_LOG" >&2
