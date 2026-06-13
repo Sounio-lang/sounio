@@ -1,0 +1,271 @@
+// research::erdos90_unified_cluster — heavy unified ℚ(√3) sweep for Slurm array
+//
+// Edit CLUSTER_SEED per array task (sed) before compile. Self-contained static ELF.
+
+module research::erdos90_unified_cluster
+
+fn isqrt(n: i64) -> i64 with Mut {
+    if n < 0 { return 0 }
+    var r = 0
+    while (r + 1) * (r + 1) <= n { r = r + 1 }
+    return r
+}
+
+fn harb(n: i64) -> i64 with Mut {
+    let m = 12 * n - 3
+    let s = isqrt(m)
+    var c = s
+    if s * s < m { c = s + 1 }
+    return 3 * n - c
+}
+
+fn iabs(x: i64) -> i64 { if x < 0 { return 0 - x } else { return x } }
+
+fn hexdist(a: i64, b: i64) -> i64 {
+    return (iabs(a) + iabs(b) + iabs(a + b)) / 2
+}
+
+var PX: [i64; 1800] = [0; 1800]
+var PU: [i64; 1800] = [0; 1800]
+var PV: [i64; 1800] = [0; 1800]
+var PTAG: [i64; 1800] = [0; 1800]
+var PNORM: [i64; 1800] = [0; 1800]
+var PN: i64 = 0
+var NBR: [i64; 28800] = [0; 28800]
+var NDEG: [i64; 1800] = [0; 1800]
+var MEM: [i64; 1800] = [0; 1800]
+var RNG: i64 = 1
+var CLUSTER_SEED: i64 = 1234567
+
+fn rng_next() -> i64 with Mut {
+    RNG = (RNG * 16807) % 2147483647
+    if RNG < 0 { RNG = RNG + 2147483647 }
+    return RNG
+}
+
+fn unit_edge(i: i64, j: i64) -> i64 {
+    let dpx = PX[i as usize] - PX[j as usize]
+    let dpu = PU[i as usize] - PU[j as usize]
+    let dpv = PV[i as usize] - PV[j as usize]
+    if dpu * dpv != 0 { return 0 }
+    let sq = dpx * dpx + dpu * dpu + 3 * dpv * dpv
+    if sq == 4 { return 1 } else { return 0 }
+}
+
+fn build_pool(Rz: i64, Re: i64) with Mut {
+    PN = 0
+    var x = 0 - Rz
+    while x <= Rz {
+        var y = 0 - Rz
+        while y <= Rz {
+            if x * x + y * y <= Rz * Rz {
+                if PN < 1800 {
+                    PX[PN as usize] = 2 * x
+                    PU[PN as usize] = 2 * y
+                    PV[PN as usize] = 0
+                    PTAG[PN as usize] = 0
+                    PNORM[PN as usize] = x * x + y * y
+                    PN = PN + 1
+                }
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+    var a = 0 - Re
+    while a <= Re {
+        var b = 0 - Re
+        while b <= Re {
+            if hexdist(a, b) <= Re {
+                if PN < 1800 {
+                    PX[PN as usize] = 2 * a + b
+                    PU[PN as usize] = 0
+                    PV[PN as usize] = b
+                    PTAG[PN as usize] = 1
+                    PNORM[PN as usize] = hexdist(a, b)
+                    PN = PN + 1
+                }
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+fn build_nbrs() with Mut {
+    var i = 0
+    while i < PN {
+        var d = 0
+        var j = 0
+        while j < PN {
+            if j != i {
+                if unit_edge(i, j) == 1 {
+                    if d < 16 { NBR[(i * 16 + d) as usize] = j; d = d + 1 }
+                }
+            }
+            j = j + 1
+        }
+        NDEG[i as usize] = d
+        i = i + 1
+    }
+}
+
+fn mem_deg(i: i64) -> i64 with Mut {
+    var c = 0
+    var t = 0
+    let deg = NDEG[i as usize]
+    while t < deg {
+        let nb = NBR[(i * 16 + t) as usize]
+        if MEM[nb as usize] == 1 { c = c + 1 }
+        t = t + 1
+    }
+    return c
+}
+
+fn total_edges() -> i64 with Mut {
+    var s = 0
+    var i = 0
+    while i < PN {
+        if MEM[i as usize] == 1 { s = s + mem_deg(i) }
+        i = i + 1
+    }
+    return s / 2
+}
+
+fn clear_mem() with Mut {
+    var i = 0
+    while i < PN { MEM[i as usize] = 0; i = i + 1 }
+}
+
+fn init_disk(n: i64) with Mut {
+    clear_mem()
+    var picked = 0
+    var used: [i64; 1800] = [0; 1800]
+    while picked < n {
+        var best = 0 - 1
+        var bestNorm = 999999999
+        var i = 0
+        while i < PN {
+            if used[i as usize] == 0 {
+                if PNORM[i as usize] < bestNorm { bestNorm = PNORM[i as usize]; best = i }
+            }
+            i = i + 1
+        }
+        if best < 0 { picked = n } else {
+            used[best as usize] = 1
+            MEM[best as usize] = 1
+            picked = picked + 1
+        }
+    }
+}
+
+fn init_random(n: i64) with Mut {
+    clear_mem()
+    var picked = 0
+    while picked < n {
+        let r = rng_next() % PN
+        if MEM[r as usize] == 0 { MEM[r as usize] = 1; picked = picked + 1 }
+    }
+}
+
+fn hillclimb(iters: i64) -> i64 with Mut, Div {
+    var edges = total_edges()
+    var t = 0
+    while t < iters {
+        let m = rng_next() % PN
+        let c = rng_next() % PN
+        if MEM[m as usize] == 1 && MEM[c as usize] == 0 && m != c {
+            let dm = mem_deg(m)
+            var adj = 0
+            var u = 0
+            let dd = NDEG[m as usize]
+            while u < dd {
+                if NBR[(m * 16 + u) as usize] == c { adj = 1 }
+                u = u + 1
+            }
+            let dc = mem_deg(c)
+            let delta = dc - adj - dm
+            if delta > 0 {
+                MEM[m as usize] = 0
+                MEM[c as usize] = 1
+                edges = edges + delta
+            }
+        }
+        t = t + 1
+    }
+    return edges
+}
+
+fn count_cross_edges() -> i64 with Mut {
+    var c = 0
+    var i = 0
+    while i < PN {
+        if MEM[i as usize] == 1 {
+            var t = 0
+            let deg = NDEG[i as usize]
+            while t < deg {
+                let j = NBR[(i * 16 + t) as usize]
+                if MEM[j as usize] == 1 && j > i {
+                    if PTAG[i as usize] != PTAG[j as usize] { c = c + 1 }
+                }
+                t = t + 1
+            }
+        }
+        i = i + 1
+    }
+    return c
+}
+
+fn count_tags() -> i64 with Mut {
+    var z = 0
+    var e = 0
+    var i = 0
+    while i < PN {
+        if MEM[i as usize] == 1 {
+            if PTAG[i as usize] == 0 { z = z + 1 } else { e = e + 1 }
+        }
+        i = i + 1
+    }
+    return z * 1000 + e
+}
+
+fn run_one(Rz: i64, Re: i64, n: i64, restarts: i64, iters: i64) -> i64 with IO, Mut, Panic, Div {
+    build_pool(Rz, Re)
+    build_nbrs()
+    init_disk(n)
+    let diskc = hillclimb(iters)
+    var best = diskc
+    var s = 0
+    while s < restarts {
+        init_random(n)
+        let c = hillclimb(iters)
+        if c > best { best = c }
+        s = s + 1
+    }
+    let tags = count_tags()
+    let cross = count_cross_edges()
+    let h = harb(n)
+    print("seed="); print_int(CLUSTER_SEED)
+    print(" Rz="); print_int(Rz); print(" Re="); print_int(Re)
+    print(" n="); print_int(n); print(" pool="); print_int(PN)
+    print(" restarts="); print_int(restarts)
+    print(" selZ2="); print_int(tags / 1000); print(" selE="); print_int(tags % 1000)
+    print(" cross="); print_int(cross)
+    print(" diskHC="); print_int(diskc)
+    print(" bestHC="); print_int(best)
+    print(" harb="); print_int(h)
+    if best > h { print(" BEAT-HARB") } else { print(" harb-ok") }
+    if best > diskc { print(" SUBSET>DISK") } else { print(" disk-optimal") }
+    print("\n")
+    return best
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    RNG = CLUSTER_SEED
+    print("=== Erdos [90] unified Q(sqrt3) cluster task ===\n")
+    let _ = run_one(12, 12, 60, 15, 400000)
+    let _ = run_one(12, 12, 100, 25, 600000)
+    let _ = run_one(14, 14, 150, 20, 500000)
+    print("CLUSTER_DONE\n")
+    return 0
+}
