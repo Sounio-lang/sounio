@@ -151,6 +151,20 @@ REQUIRED: tuple[Evidence, ...] = (
         "Workbench replay sessions, timeline frames, visual projects, and A/B diffs can be bundled as a Sounio-owned archive.",
     ),
     Evidence(
+        "workbench-visual-notebook",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchNotebook",
+            "struct VizWorkbenchNotebookCompare",
+            "viz_workbench_notebook_add_archive",
+            "viz_workbench_notebook_compare",
+            "viz_workbench_notebook_verify",
+            "viz_workbench_notebook_emit",
+        ),
+        "Multiple session archives can be indexed, selected, compared, verified, and exported as a Sounio-owned visual lab notebook.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -436,6 +450,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_session_archive",
         detail="Workbench session timeline archive proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-notebook-run",
+        "label",
+        "viz_workbench_notebook",
+        detail="Workbench visual lab notebook proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",

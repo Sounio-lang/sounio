@@ -1,0 +1,194 @@
+// tests/run-pass/viz_workbench_notebook.sio - Workbench visual lab notebook proof
+//
+// Expected output includes:
+//   workbench-notebook
+//   VIZ_WORKBENCH_NOTEBOOK_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use display::event::{Event, EV_MOUSE_PRESS, MOUSE_LEFT}
+use viz::audit::{viz_audit_hash}
+use viz::ir::{viz_scene_new}
+use viz::molecule_editor::{viz_molecule_atom_count}
+use viz::snapshot::{
+    viz_scene_history_new, viz_scene_history_record,
+    viz_scene_package_new,
+    viz_scene_project_new, viz_scene_project_verify,
+}
+use viz::viz_app::{viz_app_new}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+use viz::workbench::{
+    VizWorkbenchReplayStep,
+    viz_workbench_build_scene,
+    viz_workbench_notebook_add_archive,
+    viz_workbench_notebook_compare,
+    viz_workbench_notebook_empty,
+    viz_workbench_notebook_emit,
+    viz_workbench_notebook_hash,
+    viz_workbench_notebook_select,
+    viz_workbench_notebook_verify,
+    viz_workbench_project_capture,
+    viz_workbench_project_diff_empty,
+    viz_workbench_replay_event,
+    viz_workbench_replay_record_session,
+    viz_workbench_replay_tick,
+    viz_workbench_session_archive_build,
+    viz_workbench_session_archive_emit,
+    viz_workbench_session_timeline_from_session,
+}
+
+fn ev(kind: i64, key: i64, x: i64, y: i64) -> Event {
+    Event { kind: kind, key: key, x: x, y: y, mods: 0 }
+}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn center_x(x: i64, w: i64) -> i64 {
+    x + w / 2
+}
+
+fn center_y(y: i64, h: i64) -> i64 {
+    y + h / 2
+}
+
+fn canvas_hash(c: &Canvas) -> i64 with Mut {
+    var h: i64 = 31
+    var i: i64 = 0
+    let n = c.width * c.height
+    while i < n {
+        h = h * 131 + read_i64(c.pixels, i)
+        i = i + 1
+    }
+    h
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene_a = viz_scene_new()
+    let ids_a = viz_workbench_build_scene(&!scene_a)
+    var app_a = viz_app_new(10, 13, 18)
+    var canvas_a = make_canvas(480, 320)
+
+    var steps_a: [VizWorkbenchReplayStep; 32] = [viz_workbench_replay_tick(0); 32]
+    let play_x_a = center_x(scene_a.nodes[ids_a.time_play as usize].layout.x, scene_a.nodes[ids_a.time_play as usize].layout.w)
+    let play_y_a = center_y(scene_a.nodes[ids_a.time_play as usize].layout.y, scene_a.nodes[ids_a.time_play as usize].layout.h)
+    let atom_tool_x_a = center_x(scene_a.nodes[ids_a.studio_atom as usize].layout.x, scene_a.nodes[ids_a.studio_atom as usize].layout.w)
+    let atom_tool_y_a = center_y(scene_a.nodes[ids_a.studio_atom as usize].layout.y, scene_a.nodes[ids_a.studio_atom as usize].layout.h)
+    let add_x_a = center_x(scene_a.nodes[ids_a.molecule as usize].layout.x, scene_a.nodes[ids_a.molecule as usize].layout.w)
+    let add_y_a = center_y(scene_a.nodes[ids_a.molecule as usize].layout.y, scene_a.nodes[ids_a.molecule as usize].layout.h) + 21
+
+    steps_a[0] = viz_workbench_replay_event(ev(EV_MOUSE_PRESS, MOUSE_LEFT, play_x_a, play_y_a))
+    steps_a[1] = viz_workbench_replay_tick(1000)
+    steps_a[2] = viz_workbench_replay_tick(1000)
+    steps_a[3] = viz_workbench_replay_event(ev(EV_MOUSE_PRESS, MOUSE_LEFT, atom_tool_x_a, atom_tool_y_a))
+    steps_a[4] = viz_workbench_replay_event(ev(EV_MOUSE_PRESS, MOUSE_LEFT, add_x_a, add_y_a))
+
+    let session_a = viz_workbench_replay_record_session(&!app_a, &!scene_a, &ids_a, &!canvas_a, &steps_a, 5)
+    assert(session_a.frame_count == 6)
+    assert(viz_molecule_atom_count(&scene_a, ids_a.molecule) == 4)
+
+    var history_a = viz_scene_history_new()
+    assert(viz_scene_history_record(&!history_a, &scene_a, 9201))
+    canvas_clear(&!canvas_a, app_a.bg_r, app_a.bg_g, app_a.bg_b)
+    viz_canvas_render_scene(&scene_a, &!canvas_a)
+    let export_hash_a = canvas_hash(&canvas_a)
+    assert(export_hash_a != 0)
+    var pkg_a = viz_scene_package_new()
+    var project_a = viz_scene_project_new()
+    viz_workbench_project_capture(&!project_a, &scene_a, &history_a, &!pkg_a, &session_a, export_hash_a)
+    assert(viz_scene_project_verify(&project_a))
+    let timeline_a = viz_workbench_session_timeline_from_session(&session_a, 3)
+    let empty_diff = viz_workbench_project_diff_empty()
+    let archive_a = viz_workbench_session_archive_build(&session_a, &project_a, &timeline_a, &empty_diff)
+    assert(archive_a.valid)
+
+    var scene_b = viz_scene_new()
+    let ids_b = viz_workbench_build_scene(&!scene_b)
+    var app_b = viz_app_new(10, 13, 18)
+    var canvas_b = make_canvas(480, 320)
+
+    var steps_b: [VizWorkbenchReplayStep; 32] = [viz_workbench_replay_tick(0); 32]
+    let play_x_b = center_x(scene_b.nodes[ids_b.time_play as usize].layout.x, scene_b.nodes[ids_b.time_play as usize].layout.w)
+    let play_y_b = center_y(scene_b.nodes[ids_b.time_play as usize].layout.y, scene_b.nodes[ids_b.time_play as usize].layout.h)
+    let atom_tool_x_b = center_x(scene_b.nodes[ids_b.studio_atom as usize].layout.x, scene_b.nodes[ids_b.studio_atom as usize].layout.w)
+    let atom_tool_y_b = center_y(scene_b.nodes[ids_b.studio_atom as usize].layout.y, scene_b.nodes[ids_b.studio_atom as usize].layout.h)
+    let add_x_b = center_x(scene_b.nodes[ids_b.molecule as usize].layout.x, scene_b.nodes[ids_b.molecule as usize].layout.w)
+    let add_y_b = center_y(scene_b.nodes[ids_b.molecule as usize].layout.y, scene_b.nodes[ids_b.molecule as usize].layout.h) + 21
+
+    steps_b[0] = viz_workbench_replay_event(ev(EV_MOUSE_PRESS, MOUSE_LEFT, play_x_b, play_y_b))
+    steps_b[1] = viz_workbench_replay_tick(1000)
+    steps_b[2] = viz_workbench_replay_tick(1000)
+    steps_b[3] = viz_workbench_replay_event(ev(EV_MOUSE_PRESS, MOUSE_LEFT, atom_tool_x_b, atom_tool_y_b))
+    steps_b[4] = viz_workbench_replay_event(ev(EV_MOUSE_PRESS, MOUSE_LEFT, add_x_b, add_y_b))
+    steps_b[5] = viz_workbench_replay_event(ev(EV_MOUSE_PRESS, MOUSE_LEFT, add_x_b + 8, add_y_b + 4))
+
+    let session_b = viz_workbench_replay_record_session(&!app_b, &!scene_b, &ids_b, &!canvas_b, &steps_b, 6)
+    assert(session_b.frame_count == 7)
+    assert(viz_molecule_atom_count(&scene_b, ids_b.molecule) == 5)
+
+    var history_b = viz_scene_history_new()
+    assert(viz_scene_history_record(&!history_b, &scene_b, 9202))
+    canvas_clear(&!canvas_b, app_b.bg_r, app_b.bg_g, app_b.bg_b)
+    viz_canvas_render_scene(&scene_b, &!canvas_b)
+    let export_hash_b = canvas_hash(&canvas_b)
+    assert(export_hash_b != 0)
+    var pkg_b = viz_scene_package_new()
+    var project_b = viz_scene_project_new()
+    viz_workbench_project_capture(&!project_b, &scene_b, &history_b, &!pkg_b, &session_b, export_hash_b)
+    assert(viz_scene_project_verify(&project_b))
+    let timeline_b = viz_workbench_session_timeline_from_session(&session_b, 5)
+    let archive_b = viz_workbench_session_archive_build(&session_b, &project_b, &timeline_b, &empty_diff)
+    assert(archive_b.valid)
+    assert(archive_b.archive_hash != archive_a.archive_hash)
+    assert(archive_b.session_hash != archive_a.session_hash)
+    assert(archive_b.project_hash != archive_a.project_hash)
+    assert(archive_b.final_frame_hash != archive_a.final_frame_hash)
+
+    var notebook = viz_workbench_notebook_empty()
+    assert(viz_workbench_notebook_add_archive(&!notebook, &archive_a))
+    assert(viz_workbench_notebook_add_archive(&!notebook, &archive_b))
+    assert(viz_workbench_notebook_select(&!notebook, 1, 0, 1))
+    assert(notebook.valid)
+    assert(notebook.archive_count == 2)
+    assert(notebook.archive_hashes[0] == archive_a.archive_hash)
+    assert(notebook.archive_hashes[1] == archive_b.archive_hash)
+    assert(notebook.session_hashes[0] == archive_a.session_hash)
+    assert(notebook.session_hashes[1] == archive_b.session_hash)
+    assert(notebook.project_hashes[0] == archive_a.project_hash)
+    assert(notebook.project_hashes[1] == archive_b.project_hash)
+    assert(notebook.timeline_hashes[0] == archive_a.timeline_hash)
+    assert(notebook.timeline_hashes[1] == archive_b.timeline_hash)
+    assert(notebook.selected_archive_hash == archive_b.archive_hash)
+    assert(notebook.baseline_archive_hash == archive_a.archive_hash)
+    assert(notebook.compare_archive_hash == archive_b.archive_hash)
+    assert(notebook.notebook_hash == viz_workbench_notebook_hash(&notebook))
+    let cmp_pre = viz_workbench_notebook_compare(&notebook)
+    assert(cmp_pre.valid)
+    assert(cmp_pre.compare_hash == notebook.compare_hash)
+    assert(viz_workbench_notebook_verify(&notebook))
+
+    let cmp = viz_workbench_notebook_compare(&notebook)
+    assert(cmp.valid)
+    assert(cmp.left_index == 0)
+    assert(cmp.right_index == 1)
+    assert(cmp.left_archive_hash == archive_a.archive_hash)
+    assert(cmp.right_archive_hash == archive_b.archive_hash)
+    assert(cmp.compare_hash == notebook.compare_hash)
+    assert(cmp.session_delta != 0)
+    assert(cmp.project_delta != 0)
+    assert(cmp.timeline_delta != 0)
+    assert(cmp.selected_frame_delta == 2)
+    assert(cmp.final_frame_delta != 0)
+    assert(cmp.final_audit_delta != 0)
+
+    viz_workbench_session_archive_emit(&archive_a)
+    viz_workbench_session_archive_emit(&archive_b)
+    viz_workbench_notebook_emit(&notebook)
+    viz_html_emit_scene(&scene_b, 480, 320)
+
+    heap_free(canvas_a.pixels as *mut i8)
+    heap_free(canvas_b.pixels as *mut i8)
+    println("VIZ_WORKBENCH_NOTEBOOK_PASS")
+}

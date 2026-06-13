@@ -254,6 +254,22 @@ VIZ_WORKBENCH_SESSION_ARCHIVE_PASS
 
 The test records a Workbench replay session, captures a Visual Project Format envelope, computes an A/B project diff, derives a selected timeline frame, and bundles all of those Sounio-owned hashes into `VizWorkbenchSessionArchive` with verify and passive export surfaces.
 
+## Workbench Visual Notebook Proof
+
+Run:
+
+```bash
+SOUNIO_STDLIB_PATH=./stdlib ./scripts/ci/souc-native-wrapper.sh run tests/run-pass/viz_workbench_notebook.sio
+```
+
+Expected output:
+
+```text
+VIZ_WORKBENCH_NOTEBOOK_PASS
+```
+
+The test records two different Workbench experiment runs, captures each as a Visual Project plus selected session archive, indexes both archives in `VizWorkbenchNotebook`, selects a baseline and comparison run, verifies notebook hashes and run-to-run deltas, emits a passive `workbench-notebook` HTML/SVG archive comment, and renders the compared scene without JavaScript or Python owning the scientific state.
+
 ## Workbench Project Controls Proof
 
 Run:
