@@ -350,6 +350,64 @@ pub fn ebfgs_compute_step_size(
 }
 
 // =============================================================================
+// Generic finite-difference gradient + monotone ascent (fn-ref-free driver)
+// =============================================================================
+
+pub fn epistemic_fd_gradient(
+    x: &EpistemicParams,
+    h: f64,
+    objective: fn(&EpistemicParams) -> f64,
+) -> EpistemicGradient with Mut, Div, Panic, Epistemic {
+    var g = egrad_zeros(x.n)
+    var k = 0
+    while k < x.n {
+        var xp = EpistemicParams { values: x.values, uncertainties: x.uncertainties, confidences: x.confidences, n: x.n }
+        var xm = EpistemicParams { values: x.values, uncertainties: x.uncertainties, confidences: x.confidences, n: x.n }
+        xp.values[k as usize] = x.values[k as usize] + h
+        xm.values[k as usize] = x.values[k as usize] - h
+        let fp = objective(&xp)
+        let fm = objective(&xm)
+        g.values[k as usize] = (fp - fm) / (2.0 * h)
+        g.uncertainties[k as usize] = h * h
+        g.confidences[k as usize] = 0.9
+        k = k + 1
+    }
+    return g
+}
+
+pub fn epistemic_ascent_maximize(
+    x: &EpistemicParams,
+    config: &EpistemicBFGSConfig,
+    objective: fn(&EpistemicParams) -> f64,
+) -> f64 with Mut, Div, Panic, Epistemic {
+    var state = EpistemicParams { values: x.values, uncertainties: x.uncertainties, confidences: x.confidences, n: x.n }
+    let h = 0.001
+    var it = 0
+    while it < config.max_iterations {
+        let g = epistemic_fd_gradient(&state, h, objective)
+        let gunc = egrad_unc_norm(&g)
+        let base = ebfgs_compute_step_size(gunc, config.alpha_init, config)
+        let f0 = objective(&state)
+        var alpha = base
+        var accepted = 0
+        var bt = 0
+        while bt < 9 && accepted == 0 {
+            var xt = EpistemicParams { values: state.values, uncertainties: state.uncertainties, confidences: state.confidences, n: state.n }
+            var k = 0
+            while k < state.n {
+                xt.values[k as usize] = state.values[k as usize] + alpha * g.values[k as usize]
+                k = k + 1
+            }
+            if objective(&xt) > f0 + 0.0000001 { state = xt; accepted = 1 }
+            else { alpha = alpha * 0.5 }
+            bt = bt + 1
+        }
+        if accepted == 0 { it = config.max_iterations } else { it = it + 1 }
+    }
+    return objective(&state)
+}
+
+// =============================================================================
 // Main Optimization Loop
 // =============================================================================
 

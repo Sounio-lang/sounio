@@ -1,0 +1,110 @@
+//@ run-pass
+//@ expect-stdout: erdos90_epistemic_tau_table: PASS
+
+// Roadmap item 5: τ-sensitivity table at fixed σ_coord=0.02 on the u(4)=5 rhombus.
+// Boolean count stays 5; certified count tracks the chosen tolerance τ.
+
+fn sqrtf(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 40 { r = 0.5 * (r + x / r); i = i + 1 }
+    return r
+}
+
+fn exp_approx(x: f64) -> f64 with Mut, Div {
+    if x < -40.0 { return 0.0 }
+    var n = 0; var t = x
+    while t > 0.5 { t = t - 1.0; n = n + 1 }
+    while t < -0.5 { t = t + 1.0; n = n - 1 }
+    var term = 1.0; var sum = 1.0; var k = 1
+    while k < 18 { term = term * t / (k as f64); sum = sum + term; k = k + 1 }
+    let e = 2.718281828459045; var p = 1.0; var i = 0
+    if n >= 0 { while i < n { p = p * e; i = i + 1 } } else { while i > n { p = p / e; i = i - 1 } }
+    return sum * p
+}
+
+fn erf_approx(x: f64) -> f64 with Mut, Div {
+    var s = 1.0; var z = x
+    if z < 0.0 { s = 0.0 - 1.0; z = 0.0 - z }
+    let t = 1.0 / (1.0 + 0.3275911 * z)
+    let poly = ((((1.061405429*t - 1.453152027)*t) + 1.421413741)*t - 0.284496736)*t + 0.254829592
+    return s * (1.0 - poly * t * exp_approx(0.0 - z * z))
+}
+
+fn phi(z: f64) -> f64 with Mut, Div { return 0.5 * (1.0 + erf_approx(z / 1.4142135623730951)) }
+
+fn conformance_prob(d2: f64, vd2: f64, tau: f64) -> f64 with Mut, Div {
+    let d = sqrtf(d2)
+    if d <= 0.0 { return 0.0 }
+    let sigma_d = sqrtf(vd2) / (2.0 * d)
+    if sigma_d <= 0.0 {
+        if (d - 1.0) < tau && (1.0 - d) < tau { return 1.0 } else { return 0.0 }
+    }
+    return phi((1.0 + tau - d) / sigma_d) - phi((1.0 - tau - d) / sigma_d)
+}
+
+fn dist2_gum(ax: Knowledge[f64], ay: Knowledge[f64],
+             bx: Knowledge[f64], by: Knowledge[f64]) -> f64 with Mut, Div, Epistemic {
+    let dx = ax.value - bx.value
+    let dy = ay.value - by.value
+    return dx * dx + dy * dy
+}
+
+fn pair_certified(ax: Knowledge[f64], ay: Knowledge[f64],
+                  bx: Knowledge[f64], by: Knowledge[f64],
+                  tau: f64, pstar: f64) -> i64 with Mut, Div, Epistemic {
+    let d2 = dist2_gum(ax, ay, bx, by)
+    let vd2 = variance_of(d2)
+    let d = sqrtf(d2)
+    let pc = conformance_prob(d2, vd2, tau)
+    var off = d - 1.0
+    if off < 0.0 { off = 0.0 - off }
+    var classical = 0
+    var certified = 0
+    if off < 0.15 { classical = 1 }
+    if pc >= pstar { certified = 1 }
+    return classical * 10 + certified
+}
+
+fn eval_tau(unc: f64, tau: f64, pstar: f64) -> i64 with IO, Mut, Div, Epistemic {
+    let p0x = measure(2.0, uncertainty: unc); let p0y = measure(2.0, uncertainty: unc)
+    let p1x = measure(3.0, uncertainty: unc); let p1y = measure(2.0, uncertainty: unc)
+    let p2x = measure(2.5, uncertainty: unc); let p2y = measure(2.8660254, uncertainty: unc)
+    let p3x = measure(2.5, uncertainty: unc); let p3y = measure(1.1339746, uncertainty: unc)
+    var classical = 0
+    var certified = 0
+    let a = pair_certified(p0x, p0y, p1x, p1y, tau, pstar)
+    classical = classical + a / 10; certified = certified + a % 10
+    let b = pair_certified(p0x, p0y, p2x, p2y, tau, pstar)
+    classical = classical + b / 10; certified = certified + b % 10
+    let c = pair_certified(p1x, p1y, p2x, p2y, tau, pstar)
+    classical = classical + c / 10; certified = certified + c % 10
+    let d = pair_certified(p0x, p0y, p3x, p3y, tau, pstar)
+    classical = classical + d / 10; certified = certified + d % 10
+    let e = pair_certified(p1x, p1y, p3x, p3y, tau, pstar)
+    classical = classical + e / 10; certified = certified + e % 10
+    print("tau="); print_f64(tau)
+    print("  classical="); print_int(classical)
+    print("  certified="); print_int(certified); print("\n")
+    if classical != 5 { return 0 }
+    return certified
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    let unc = 0.02
+    let pstar = 0.9
+    let c02 = eval_tau(unc, 0.02, pstar)
+    let c05 = eval_tau(unc, 0.05, pstar)
+    let c10 = eval_tau(unc, 0.10, pstar)
+    print("sigma="); print_f64(unc)
+    print("  certified: tau0.02="); print_int(c02)
+    print(" tau0.05="); print_int(c05)
+    print(" tau0.10="); print_int(c10); print("\n")
+    if c02 == 0 && c05 == 5 && c10 == 5 {
+        print("erdos90_epistemic_tau_table: PASS\n")
+        return 0
+    }
+    print("erdos90_epistemic_tau_table: FAIL\n")
+    return 1
+}
