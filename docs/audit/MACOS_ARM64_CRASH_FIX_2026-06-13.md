@@ -54,11 +54,18 @@ epilogues using `mov sp, x29`, **zero** `add sp, sp, x9` (the only remaining
 ## Latent gap (not this crash, not fixed here)
 
 The x86 backend emits a merge-point `nop` (`em(0x90)`) after an if-without-else
-(`8f0443a13`) and after match arms (`998112bb8`) so the implicit-return guard
-(`last word == ret → skip epilogue`) cannot misfire. The a64 backend has **no**
-`0xD503201F` counterpart at either merge — and never did, including in the working
-baseline. With the frame-pointer restore now in place the guard is no longer the
-fault path, but porting the a64 merge nops remains a latent-correctness follow-up.
+(`8f0443a13`, line 20705) and after match arms (`998112bb8`, line 21689) so the
+implicit-return guard (`last word == ret → skip epilogue`) cannot misfire. The a64
+backend has **no** `0xD503201F` counterpart — and never did, including in the
+working baseline (so it does not discriminate the crash). Three a64 merge points
+lack the nop (workflow `wf_c68b673c-635`, Agent 3):
+
+- if-without-else, after `patch_branch_a64(cbz_off, CL)` — ~line 31499
+- if-let without else, after `if il_cbz_off > 0 { patch_branch_a64(il_cbz_off, CL) }` — ~line 31431
+- match arms, after `while ai < arm_count { patch_branch_a64(match_ends[…], CL) }` — ~line 32038
+
+With the frame-pointer restore now in place the guard is no longer the fault path,
+but porting these three a64 merge nops remains a latent-correctness follow-up.
 
 ## Rebuild chain (deterministic)
 
