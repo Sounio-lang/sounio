@@ -377,6 +377,21 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment package, restore proof, package store, cockpit, playback, export frame, and scene audit are bound into one shareable native lab packet.",
     ),
     Evidence(
+        "workbench-experiment-export-packet-domain-stamps",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "node_stamp_hash",
+            "chart_stamp_hash",
+            "field_stamp_hash",
+            "molecule_stamp_hash",
+            "mesh_stamp_hash",
+            "payload_stamp_hash",
+            "viz_workbench_experiment_export_packet_capture_domain_stamps",
+        ),
+        "Shareable native lab packets expose compact domain stamps for scene nodes, chart/heatmap payloads, physchem fields, molecule payloads, mesh payloads, and the combined export payload.",
+    ),
+    Evidence(
         "workbench-experiment-import-replay",
         "contains",
         "stdlib/viz/workbench.sio",

@@ -131,6 +131,12 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_workbench_replay_emit_html_archive` emits a passive `workbench-replay-session` comment for static HTML/SVG exports, including step count, frame count, session signature, final frame hash, final audit hash, and final time.
 - `tests/run-pass/viz_workbench_replay_html_archive.sio` proves record -> verify -> archive comment -> static scene export parity: the archive final time, `viz-audit` scene time, timeline readout, and 3D mesh audit comments all agree on the same Sounio-owned replay state.
 
+## V1.8i.1: Experiment Packet Domain Stamps
+
+- `VizWorkbenchExperimentExportPacket` now carries compact domain stamps for scene nodes, chart/heatmap payloads, physchem field payloads, molecule payloads, mesh payloads, and the combined export payload.
+- `viz_workbench_experiment_export_packet_emit` serializes those stamps in the passive packet comment, so a static export can be reviewed by domain before a fresh Workbench import/replay verifies zero Canvas-frame and scene-audit drift.
+- `tests/run-pass/viz_workbench_experiment_diff_player.sio` proves the domain stamps are populated, packet-hashed, emitted, imported, and replayed without moving experiment semantics into JavaScript.
+
 ## V1.8j: Canonical Headless Visual Gate
 
 - `scripts/ci/native_visual_frontend_gate.sh` is the one-command proof surface for the native visual frontend lane.
