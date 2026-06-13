@@ -404,6 +404,20 @@ REQUIRED: tuple[Evidence, ...] = (
         "Shareable experiment packets can be imported into a fresh Workbench scene, replayed as Sounio data, and compared against exported frame/audit hashes.",
     ),
     Evidence(
+        "workbench-experiment-packet-ledger",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentPacketLedger",
+            "viz_workbench_experiment_packet_ledger_add",
+            "viz_workbench_experiment_packet_ledger_verify",
+            "viz_workbench_experiment_packet_ledger_emit",
+            "packet_hash_deltas",
+            "payload_stamp_deltas",
+        ),
+        "Shareable native lab packets can be sequenced into a fixed-capacity Sounio-owned ledger with packet/payload/frame/audit deltas and passive HTML/SVG metadata.",
+    ),
+    Evidence(
         "workbench-experiment-import-replay-zero-drift",
         "contains",
         "tests/run-pass/viz_workbench_experiment_diff_player.sio",

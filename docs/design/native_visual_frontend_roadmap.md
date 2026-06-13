@@ -137,6 +137,12 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_workbench_experiment_export_packet_emit` serializes those stamps in the passive packet comment, so a static export can be reviewed by domain before a fresh Workbench import/replay verifies zero Canvas-frame and scene-audit drift.
 - `tests/run-pass/viz_workbench_experiment_diff_player.sio` proves the domain stamps are populated, packet-hashed, emitted, imported, and replayed without moving experiment semantics into JavaScript.
 
+## V1.8i.2: Experiment Packet Ledger
+
+- `VizWorkbenchExperimentPacketLedger` sequences shareable experiment packets into fixed-capacity Sounio-owned evidence with packet, payload-stamp, frame, and scene-audit hashes per entry.
+- `viz_workbench_experiment_packet_ledger_add` records deltas between consecutive packets, while `viz_workbench_experiment_packet_ledger_verify` checks count bounds, nonzero evidence, last-entry mirrors, per-domain deltas, and the deterministic ledger hash.
+- `viz_workbench_experiment_packet_ledger_emit` adds passive ledger metadata to static HTML/SVG exports, and `tests/run-pass/viz_workbench_experiment_diff_player.sio` proves a two-packet playback sequence with nonzero packet-hash delta.
+
 ## V1.8j: Canonical Headless Visual Gate
 
 - `scripts/ci/native_visual_frontend_gate.sh` is the one-command proof surface for the native visual frontend lane.
