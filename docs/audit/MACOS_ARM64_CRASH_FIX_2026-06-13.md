@@ -1,13 +1,26 @@
 # macOS arm64 self-hosted compiler crash — root cause & fix (2026-06-13)
 
-Branch: `fix/silent-typecheck-diag` · Fixes at `c95690b2f` and `e55d11729`.
+Branch: `fix/silent-typecheck-diag` · Fixes at `c95690b2f`, `e55d11729`,
+`f32f11faa`, `fe4827b72`.
 
 ## Symptom
 
 The rebuilt `artifacts/self-hosted/souc-self-hosted-arm64-macos` crashed on macOS
 arm64 (Apple Silicon) on every input — 0/4 compile proof, 0/95 runtime proof —
-while the May-17 baseline (`a5ab12395`, 1,840,592 B) worked. Two distinct bugs
-were stacked; fixing the first unmasked the second.
+while the May-17 baseline (`a5ab12395`, 1,840,592 B) worked. Multiple distinct
+bugs were stacked; each fix unmasked the next. All four share one provenance
+pattern: a64-only codegen fixes silently dropped in cross-branch merge-conflict
+resolutions, while the x86 sibling kept the fix.
+
+| # | Bug | Fix | Surfaced by |
+|---|-----|-----|-------------|
+| 1 | FN_RET_TY_TOK splat init (`MOV X13,X0`→`X2`) | `c95690b2f` | first report (SIGSEGV) |
+| 2 | epilogue sp restore (`add sp,sp,x9`→`mov sp,x29`) | `e55d11729` | Mac round 1 (SIGBUS in compiler) |
+| 3 | a64 fall-through merge nops (latent hardening) | `f32f11faa` | workflow Agent 3 |
+| 4 | fn-type param not marked closure → emitted-binary fn-ref call doesn't untag | `fe4827b72` | Mac round 2 (SIGBUS in emitted binary) |
+
+Bugs 1–3 are in how the compiler itself runs; bug 4 is in the **code the compiler
+emits** for user programs that pass functions as parameters.
 
 ## Bug 1 — FN_RET_TY_TOK global init (fixed in `c95690b2f`)
 
@@ -75,31 +88,71 @@ is byte-identical and the bootstrap fixed point (gen2 == gen3) still holds.
 lacks its `em(0x90)` — the same latent defect on the x86 side. Left untouched to keep
 the working x86 bootstrap seed's x86-target output unchanged; tracked as follow-up.
 
+## Bug 4 — fn-type parameter not marked closure (fixed in `fe4827b72`)
+
+Surfaced by macOS arm64 hardware (round 2): the compiler now runs to completion
+and arm64 compile-proof is 4/4, but the **emitted** arm64 Mach-O SIGBUSed at
+runtime — `PC = 0x…255` (misaligned, bit 0 set), `x9 = tagged thunk pointer`.
+
+A fn-typed value is materialized as a TAGGED thunk pointer (`adr x0,thunk` +
+`orr x0,x0,#1`, bit 0 = fn-ref). The indirect-call dispatch picks one of two
+paths by `call_is_closure`:
+- Path A (`tbnz w0,#0; …; sub x9,x0,#1; blr x9`) — untags before branching;
+- Path B (`mov x9,x0; blr x9`) — branches verbatim.
+
+A tagged value reaching Path B jumps to an odd address → misaligned PC → SIGBUS.
+The a64 Pass-2 **parameter** scan failed to mark fn-type params (`SCAN_TY == 9`)
+as `VAR_IS_CLOSURE`, so a callee like `fn apply(f: fn(i64)->i64, v)` calling
+`f(v)` took Path B. The x86 param scan already had the marking ("fn-type
+parameters are always called with closure ABI"); the a64 line was dropped.
+
+Fix: restore `if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT-1)] = 1 }` in the a64
+param scan. Verified: `closure_fn_ref` now emits 6 `tbnz` untag dispatches (was
+0); `apply(inc,41)` → 42; only a64 emission changed (x86-target byte-identical).
+
+## Known separate issue — x86_64-macos cross-compile from an arm64 host
+
+The full acceptance gate also runs an **x86_64-macos** compile leg, which fails
+on the Mac with a controlled error (exit 1, `refined: N in 2 passes` diagnostics)
+and fail-fasts the gate before the arm64 runtime-proof phase. This is **not** one
+of the four fixes above and not caused by them: the *x86 host* compiler emits
+x86_64-macos Mach-O cleanly (verified on Linux), so it is an arm64-host-specific
+gap in the x86_64 emission path — orthogonal to the arm64-target work. Tracked
+separately; to verify the arm64 runtime in the meantime, bypass it (below).
+
 ## Rebuild chain (deterministic)
 
 ```
 fixed lean_single.sio
   → x86_64 seed                (souc-self-hosted-x86_64, gen2==gen3 fixed point ✓)
-  → arm64 cross-compile        (souc-self-hosted-arm64-macos, 1,900,644 B)
+  → arm64 cross-compile        (souc-self-hosted-arm64-macos, 1,917,028 B)
 ```
-arm64 sha256: `af598f49b99460063981ff499e937dbf7a3a756528b1a51a866780c7faf6a812`
+arm64 sha256: `80b46c56f827cc7e08b556b94d08c7c66e4f0c375eac2d3cf83a739506324e6d`
 
-## Mac verification (one round-trip)
+## Mac verification
 
 ```bash
 git fetch origin fix/silent-typecheck-diag && git checkout fix/silent-typecheck-diag && git pull
+shasum -a 256 artifacts/self-hosted/souc-self-hosted-arm64-macos
+#   expected: 80b46c56f827cc7e08b556b94d08c7c66e4f0c375eac2d3cf83a739506324e6d
 codesign --force -s - artifacts/self-hosted/souc-self-hosted-arm64-macos
 
-# Full acceptance gate
+# Decisive test for bug 4 — compiles AND RUNS emitted arm64 binaries (incl. closures):
 SOUC_NATIVE=artifacts/self-hosted/souc-self-hosted-arm64-macos \
-  bash scripts/selfhost/selfhost_native_acceptance_gate.sh
+  bash scripts/selfhost/selfhost_native_runtime_proof.sh ; echo "runtime-exit=$?"
 
-# If anything still faults, name the faulting epilogue with the frame diag:
-lldb --batch -s scripts/selfhost/macos_arm64_frame_diag.lldb \
-  -- artifacts/self-hosted/souc-self-hosted-arm64-macos \
-     tests/selfhost/native_runtime/expr_add_7_35.sio /tmp/out.macho --target aarch64-macos
+# arm64-only compile proof (skips the unrelated x86_64-macos leg):
+TARGETS=aarch64-macos \
+  SOUC_NATIVE=artifacts/self-hosted/souc-self-hosted-arm64-macos \
+  bash scripts/selfhost/selfhost_macos_compile_proof.sh
 ```
 
-A clean run prints `PROCESS COMPLETED WITHOUT FAULT`. A residual fault dumps
-`sp/fp/lr/pc/x9` + the 16 bytes at `[sp]` + backtrace, which names the exact
-function whose frame is mis-torn-down.
+Success = `SELFHOST_NATIVE_RUNTIME_PROOF_SUMMARY pass=95 … fail=0` (vs the prior
+SIGBUS on every emitted binary). If anything still faults, the frame diag still
+applies:
+
+```bash
+lldb --batch -s scripts/selfhost/macos_arm64_frame_diag.lldb \
+  -- artifacts/self-hosted/souc-self-hosted-arm64-macos \
+     tests/selfhost-driver-output/expr_add_7_35.sio /tmp/out.macho --target aarch64-macos
+```
