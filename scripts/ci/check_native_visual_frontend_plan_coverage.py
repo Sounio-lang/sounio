@@ -249,6 +249,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment diff artifact libraries can be browsed through native Visual IR controls with Canvas-visible selection and passive export metadata.",
     ),
     Evidence(
+        "workbench-experiment-compare-mode",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentCompareMode",
+            "viz_workbench_experiment_compare_mode_handle_event",
+            "viz_workbench_experiment_compare_mode_verify",
+            "viz_workbench_experiment_compare_mode_emit",
+        ),
+        "Experiment artifact libraries can be driven by native Workbench events to update selected, baseline, and comparison artifacts.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -582,6 +594,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_experiment_diff_library_browser",
         detail="Workbench experiment diff library browser proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-experiment-compare-mode-run",
+        "label",
+        "viz_workbench_experiment_compare_mode",
+        detail="Workbench experiment comparison mode proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",
