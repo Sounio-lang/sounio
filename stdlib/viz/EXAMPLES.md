@@ -30,7 +30,7 @@ Expected output:
 VIZ_HEADLESS_PASS
 ```
 
-The test renders axes, an antialiased line, a triangle, a heatmap, an epistemic band, a `physics::phonon_quantity::Lattice64` heatmap, a molecule node, and a Visual IR scene into a heap canvas.
+The test renders axes, an antialiased line, a triangle, a heatmap, an epistemic band, a `physics::phonon_quantity::Lattice64` heatmap, molecule atom and bond pixels, and a Visual IR scene into a heap canvas.
 
 ## Canvas Extension Proof
 

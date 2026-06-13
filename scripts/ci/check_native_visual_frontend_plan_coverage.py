@@ -69,6 +69,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Native CPU Canvas is the primary renderer.",
     ),
     Evidence(
+        "molecule-renderer-mirror",
+        "contains",
+        "stdlib/viz/ir.sio",
+        (
+            "molecule_atom_x: [f64; 256]",
+            "molecule_bond_a: [i64; 384]",
+            "molecule_bond_length: [f64; 384]",
+            "viz_scene_sync_molecule_mirror",
+        ),
+        "Molecule renderer and audit payloads have a fixed-capacity primitive mirror.",
+    ),
+    Evidence(
         "html-svg-renderer",
         "contains",
         "stdlib/viz/viz_html.sio",
@@ -554,6 +566,22 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_headless",
         detail="Headless proof is in the canonical gate.",
+    ),
+    Evidence(
+        "headless-pixel-assertions",
+        "contains",
+        "tests/run-pass/viz_headless.sio",
+        (
+            "axis_px",
+            "aa_px",
+            "hm_px",
+            "band_px",
+            "mol_inner_px",
+            "mol_bond_px",
+            "mol_no_bond_px",
+            "mesh_px",
+        ),
+        "Headless proof includes explicit axis, AA line, heatmap, uncertainty band, molecule atom/bond, and 3D mesh pixel probes.",
     ),
     Evidence(
         "gate-canvas-ext-run",

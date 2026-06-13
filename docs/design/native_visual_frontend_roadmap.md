@@ -63,6 +63,7 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - Checked authoring returns explicit reason codes for unsupported actions, invalid atoms, unknown unit, bond geometry, locked atom, radius range, and capacity. Rejected actions preserve before/after audit and atom hashes.
 - Authoring traces and certificates record before/after scene audit plus atom hashes for each frame. Verification is a Sounio function over the certificate data; no browser runtime owns molecule semantics.
 - `viz_audit_hash` includes molecule atom and bond payloads, so atom moves, radius/color edits, bond changes, and capacity mutations are visible to replay/export audit surfaces.
+- Molecule rendering and audit now use a fixed-capacity primitive atom/bond mirror on `VizScene`, preserving the `MoleculeViz` semantic payload while avoiding fragile renderer reads of large nested arrays across modules.
 - `tests/run-pass/viz_workbench_roundtrip.sio` proves typed action replay, checked constraints, certificate verification, Canvas pixels, and static HTML/SVG export from the same Workbench scene.
 
 ## V1.8: Native Molecule Studio
