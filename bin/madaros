@@ -96,6 +96,40 @@ madaros_compile_native_v2() {
   chmod +x "$out"
 }
 
+madaros_compile_native_v2_or_imported_fallback() {
+  local src="$1"
+  local out="$2"
+  shift 2
+  rm -f "$out"
+  local log rc
+  set +e
+  log="$("$RAW_MADAROS" --native-v2-compile "$src" -o "$out" "$@" 2>&1)"
+  rc=$?
+  set -e
+  if [[ $rc -eq 0 && -s "$out" ]]; then
+    if [[ -n "$log" ]]; then
+      printf '%s\n' "$log"
+    fi
+    chmod +x "$out"
+    return 0
+  fi
+
+  if source_uses_imports "$src"; then
+    if [[ -n "$log" ]]; then
+      printf '%s\n' "$log" >&2
+    fi
+    echo "madaros: native-v2 imported path failed; falling back to legacy imported native path" >&2
+    madaros_compile_native_imported "$src" "$out" "$@"
+    return $?
+  fi
+
+  if [[ -n "$log" ]]; then
+    printf '%s\n' "$log"
+  fi
+  echo "typecheck: failed" >&2
+  return 1
+}
+
 madaros_compile_native_imported() {
   local src="$1"
   local out="$2"
@@ -133,30 +167,6 @@ source_uses_imports() {
   grep -Eq '^[[:space:]]*use[[:space:]]+[A-Za-z0-9_:]+' "$src"
 }
 
-source_imports_native_v2_ready() {
-  local src="$1"
-  grep -Eq '^[[:space:]]*use[[:space:]]+import_(core_abi|hof_abi|body_lowering)::mod' "$src" ||
-    grep -Eq '^[[:space:]]*use[[:space:]]+greet::\{answer\}' "$src" ||
-    grep -Eq 'add_public\(3,[[:space:]]*4\)' "$src" ||
-    grep -Eq 'add_public\(x,[[:space:]]*y\)' "$src" ||
-    grep -Eq 'add_public\(base[[:space:]]*\+[[:space:]]*1,[[:space:]]*y\)' "$src" ||
-    grep -Eq 'add_public\(\(x[[:space:]]*-[[:space:]]*6\),[[:space:]]*\(x[[:space:]]*-[[:space:]]*7\)\)' "$src" ||
-    grep -Eq 'return[[:space:]]+add_public\(x,[[:space:]]*x[[:space:]]*\+[[:space:]]*1\)' "$src" ||
-    grep -Eq 'add_public\(c,[[:space:]]*d\)' "$src" ||
-    grep -Eq 'entry\(3\)' "$src" ||
-    grep -Eq 'pair_plus\(2\)' "$src" ||
-    grep -Eq 'pair_diff\(2\)' "$src" ||
-    grep -Eq 'pair_diff_local\(2\)' "$src" ||
-    grep -Eq 'pair_diff_chain\(2\)' "$src" ||
-    grep -Eq 'runtime_sum7\(1\)' "$src" ||
-    grep -Eq 'runtime_mixed_sum7\(1\)' "$src" ||
-    grep -Eq 'runtime_local_mixed_sum7\(1\)' "$src" ||
-    grep -Eq 'runtime_two_local_sum7\(1\)' "$src" ||
-    grep -Eq 'sum5_public\(1,[[:space:]]*2,[[:space:]]*4,[[:space:]]*8,[[:space:]]*16\)' "$src" ||
-    grep -Eq 'sum6_public\(1,[[:space:]]*2,[[:space:]]*4,[[:space:]]*8,[[:space:]]*16,[[:space:]]*32\)' "$src" ||
-    grep -Eq 'sum7_public\(1,[[:space:]]*2,[[:space:]]*4,[[:space:]]*8,[[:space:]]*16,[[:space:]]*32,[[:space:]]*64\)' "$src"
-}
-
 madaros_compile_positional() {
   local src="$1"
   local out="$2"
@@ -190,10 +200,8 @@ madaros_compile() {
   if [[ "$ident" == *"Madaros"* || "$ident" == *"Madares"* ]]; then
     if [[ "${SOUNIO_MADAROS_LEGACY_NATIVE_COMPILE:-0}" == "1" ]]; then
       madaros_compile_native_imported "$src" "$out" "$@"
-    elif source_uses_imports "$src" && ! source_imports_native_v2_ready "$src"; then
-      madaros_compile_native_imported "$src" "$out" "$@"
     else
-      madaros_compile_native_v2 "$src" "$out" "$@"
+      madaros_compile_native_v2_or_imported_fallback "$src" "$out" "$@"
     fi
   else
     madaros_compile_positional "$src" "$out" "$@"

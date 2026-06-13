@@ -38,7 +38,7 @@ if [[ "$DIAG_OUT" != *"a"* || "$DIAG_OUT" != *"b kind=7"* ]]; then
   fail "aggregate diagnostic did not report TokenKind::Fn as 7"
 fi
 
-echo "[native-aggregate-abi] 3/3 Madaros imported aggregate fallback"
+echo "[native-aggregate-abi] 3/3 Madaros imported aggregate native-v2"
 "$MADAROS" compile tests/multimodule/abi_name_many_args_main.sio -o "$TMP_DIR/madaros_imported_aggregate.elf" >/tmp/native_aggregate_abi_madaros.build.log 2>&1
 if [[ ! -s "$TMP_DIR/madaros_imported_aggregate.elf" ]]; then
   cat /tmp/native_aggregate_abi_madaros.build.log >&2
@@ -53,9 +53,18 @@ if [[ "$MADAROS_RC" -ne 0 ]]; then
   cat /tmp/native_aggregate_abi_madaros.build.log >&2
   fail "Madaros imported aggregate expected exit 0, got $MADAROS_RC"
 fi
-if ! grep -q 'falling back to full IR path' /tmp/native_aggregate_abi_madaros.build.log; then
+if ! grep -q 'native_v2_compile: emitted path=' /tmp/native_aggregate_abi_madaros.build.log; then
   cat /tmp/native_aggregate_abi_madaros.build.log >&2
-  fail "Madaros imported aggregate did not exercise the full modular IR fallback"
+  fail "Madaros imported aggregate did not exercise native-v2"
+fi
+if grep -q 'module_native_driver: imported source uses compact modular IR table path' /tmp/native_aggregate_abi_madaros.build.log; then
+  cat /tmp/native_aggregate_abi_madaros.build.log >&2
+  fail "Madaros imported aggregate used the compact imported path"
+fi
+if grep -q 'falling back to full IR path' /tmp/native_aggregate_abi_madaros.build.log ||
+   grep -q 'falling back to legacy imported native path' /tmp/native_aggregate_abi_madaros.build.log; then
+  cat /tmp/native_aggregate_abi_madaros.build.log >&2
+  fail "Madaros imported aggregate fell back from native-v2"
 fi
 if grep -q 'falling back to stage0 full compiler' /tmp/native_aggregate_abi_madaros.build.log; then
   cat /tmp/native_aggregate_abi_madaros.build.log >&2

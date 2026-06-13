@@ -10,7 +10,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 CANDIDATE="${MADAROS_CANDIDATE:-$ROOT_DIR/bin/madaros-linux-x86_64}"
-IMPORTS="${MADAROS_IMPORTS_CANDIDATE:-$ROOT_DIR/bin/madaros-imports-linux-x86_64}"
 TMP_DIR="$(mktemp -d /tmp/sounio-madaros-main-candidate.XXXXXX)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -20,7 +19,6 @@ fail() {
 }
 
 [[ -x "$CANDIDATE" ]] || fail "candidate is not executable: $CANDIDATE"
-[[ -x "$IMPORTS" ]] || fail "imports candidate is not executable: $IMPORTS"
 
 echo "[madaros-main-candidate] 1/5 identity"
 IDENTITY_OUT="$("$CANDIDATE" --version 2>&1)" || fail "candidate --version failed"
@@ -76,22 +74,23 @@ set -e
   fail "candidate emit-scalar ELF expected exit 42, got $EMIT_RC"
 }
 
-echo "[madaros-main-candidate] 5/5 imports full modular aggregate fallback"
-"$IMPORTS" --native-compile tests/multimodule/abi_name_many_args_main.sio -o "$TMP_DIR/imported_aggregate.elf" >/tmp/madaros_main_candidate_imports.log 2>&1 || {
+echo "[madaros-main-candidate] 5/5 imported aggregate native-v2"
+"$CANDIDATE" --native-v2-compile tests/multimodule/abi_name_many_args_main.sio -o "$TMP_DIR/imported_aggregate.elf" >/tmp/madaros_main_candidate_imports.log 2>&1 || {
   cat /tmp/madaros_main_candidate_imports.log >&2
-  fail "imports candidate --native-compile aggregate failed"
+  fail "candidate --native-v2-compile aggregate failed"
 }
 [[ -s "$TMP_DIR/imported_aggregate.elf" ]] || {
   cat /tmp/madaros_main_candidate_imports.log >&2
-  fail "imports candidate aggregate produced no ELF"
+  fail "candidate aggregate produced no ELF"
 }
-if ! grep -q 'falling back to full IR path' /tmp/madaros_main_candidate_imports.log; then
+if ! grep -q 'native_v2_compile: emitted path=' /tmp/madaros_main_candidate_imports.log; then
   cat /tmp/madaros_main_candidate_imports.log >&2
-  fail "imports candidate aggregate did not exercise full IR fallback"
+  fail "candidate aggregate did not exercise native-v2"
 fi
-if grep -q 'stage0 full compiler' /tmp/madaros_main_candidate_imports.log; then
+if grep -q 'falling back' /tmp/madaros_main_candidate_imports.log ||
+   grep -q 'module_native_driver: imported source uses compact modular IR table path' /tmp/madaros_main_candidate_imports.log; then
   cat /tmp/madaros_main_candidate_imports.log >&2
-  fail "imports candidate aggregate used stage0 rescue"
+  fail "candidate aggregate used fallback/compact imported path"
 fi
 chmod +x "$TMP_DIR/imported_aggregate.elf"
 set +e
@@ -100,7 +99,7 @@ AGG_RC=$?
 set -e
 [[ "$AGG_RC" -eq 0 ]] || {
   cat /tmp/madaros_main_candidate_imports.log >&2
-  fail "imports candidate aggregate expected exit 0, got $AGG_RC"
+  fail "candidate aggregate expected exit 0, got $AGG_RC"
 }
 
 echo "MADAROS_MAIN_CANDIDATE_PASS"
