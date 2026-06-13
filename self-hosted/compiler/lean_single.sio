@@ -2347,6 +2347,14 @@ fn patch_adr_a64(off: i64, target: i64, rd: i64) with Mut, Panic {
     em32_at(off, 0x10000000 | ((immlo & 0x3) << 29) | ((immhi & 0x7FFFF) << 5) | rd)
 }
 
+// ARM64 PC-relative address of a code-buffer target: adr rd, target
+fn emit_adr_local_a64(target: i64, rd: i64) with Mut {
+    let rel = target - CL
+    let immlo = rel & 0x3
+    let immhi = (rel >> 2) & 0x7FFFF
+    em32(0x10000000 | ((immlo & 0x3) << 29) | ((immhi & 0x7FFFF) << 5) | rd)
+}
+
 // ARM64 address-of variable: lea x0, [x29 - slot*8]
 fn emit_lea_var_a64(slot: i64) with Mut, Panic {
     let off = slot * 8
@@ -27982,15 +27990,68 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
     }
     // Closure stub
     if k == 45 || k == 31 {
+        var zero_param_closure_a: i64 = 0
+        if k == 31 { zero_param_closure_a = 1 }
         EP = EP + 1
-        if k == 45 {
+        CL_DEPTH = CL_DEPTH + 1
+        CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] = 0
+        let save_vc_a = VAR_COUNT
+        let save_ns_a = NEXT_SLOT
+        let save_ld_a = LOOP_DEPTH
+        let save_bc_a = BREAK_COUNT
+        let save_ret_ty_a = CURRENT_RET_TY
+        let save_ret_hash_a = CURRENT_RET_HASH
+        let save_sret_slot_a = CURRENT_SRET_SLOT
+        let save_a64_fpc = A64_FRAME_PATCH_COUNT
+        var svi_a: i64 = 0
+        while svi_a < save_vc_a {
+            CL_SAVE_NS[svi_a as usize] = VAR_NS[svi_a as usize]
+            CL_SAVE_NE[svi_a as usize] = VAR_NE[svi_a as usize]
+            CL_SAVE_SL[svi_a as usize] = VAR_SLOT[svi_a as usize]
+            CL_SAVE_LS[svi_a as usize] = VAR_LEN_SLOT[svi_a as usize]
+            CL_SAVE_AL[svi_a as usize] = VAR_ALEN[svi_a as usize]
+            CL_SAVE_ES[svi_a as usize] = VAR_ESIZ[svi_a as usize]
+            CL_SAVE_F64[svi_a as usize] = VAR_IS_F64[svi_a as usize]
+            CL_SAVE_ISCL[svi_a as usize] = VAR_IS_CLOSURE[svi_a as usize]
+            CL_SAVE_MUT[svi_a as usize] = VAR_MUT[svi_a as usize]
+            CL_SAVE_UNIT[svi_a as usize] = VAR_UNIT[svi_a as usize]
+            CL_SAVE_LINEAR[svi_a as usize] = VAR_LINEAR[svi_a as usize]
+            CL_SAVE_USED[svi_a as usize] = VAR_USED[svi_a as usize]
+            CL_SAVE_TY[svi_a as usize] = VAR_TY[svi_a as usize]
+            CL_SAVE_TH[svi_a as usize] = VAR_TY_HASH[svi_a as usize]
+            svi_a = svi_a + 1
+        }
+        VAR_COUNT = 0
+        NEXT_SLOT = 2
+        LOOP_DEPTH = 0
+        BREAK_COUNT = 0
+        CL_CAP_COUNT = 0
+        CURRENT_SRET_SLOT = 0
+        if zero_param_closure_a == 0 {
             while TK[EP as usize] != 45 && TK[EP as usize] != 0 {
                 if TK[EP as usize] == 3 {
+                    let pns_a = TS[EP as usize]
+                    let pne_a = TE[EP as usize]
+                    let pslot_a = var_add(pns_a, pne_a)
                     EP = EP + 1
                     if TK[EP as usize] == 43 {
                         EP = EP + 1
                         scan_type(EP)
+                        if pslot_a >= 0 {
+                            VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
+                            VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                            if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
+                            if SCAN_TY == 8 {
+                                VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
+                                VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                            }
+                        }
                         EP = SCAN_TY_NEXT
+                    } else {
+                        if pslot_a >= 0 {
+                            VAR_TY[(VAR_COUNT - 1) as usize] = 0
+                            VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0
+                        }
                     }
                 } else {
                     EP = EP + 1
@@ -28002,13 +28063,18 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 10 {
             EP = EP + 1
             scan_type(EP)
+            CURRENT_RET_TY = SCAN_TY
+            CURRENT_RET_HASH = SCAN_TY_HASH
             EP = SCAN_TY_NEXT
+        } else {
+            CURRENT_RET_TY = 0
+            CURRENT_RET_HASH = 0
         }
         if TK[EP as usize] == 38 {
             EP = EP + 1
-            // Gen 17 D2: skip effect list — handles Epistemic(N) parameterized effects
             while TK[EP as usize] == 3 || TK[EP as usize] == 28 {
                 if TK[EP as usize] == 3 {
+                    CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] = CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] | ety_parse_effect_name(TS[EP as usize], TE[EP as usize])
                     EP = EP + 1
                     if TK[EP as usize] == 6 {
                         EP = EP + 1
@@ -28018,13 +28084,166 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 } else { EP = EP + 1 }
             }
         }
+        let nparams_a = VAR_COUNT
+        CL_FNSIG_NPARAMS[(CL_DEPTH - 1) as usize] = nparams_a
+        var cl_pi_a: i64 = 0
+        while cl_pi_a < nparams_a {
+            CL_FNSIG_PARAM_TY[((CL_DEPTH - 1) * 16 + cl_pi_a) as usize] = VAR_TY[cl_pi_a as usize]
+            CL_FNSIG_PARAM_TH[((CL_DEPTH - 1) * 16 + cl_pi_a) as usize] = VAR_TY_HASH[cl_pi_a as usize]
+            cl_pi_a = cl_pi_a + 1
+        }
+        CL_FNSIG_RET_TY[(CL_DEPTH - 1) as usize] = CURRENT_RET_TY
+        CL_FNSIG_RET_HASH[(CL_DEPTH - 1) as usize] = CURRENT_RET_HASH
+        var ci_a: i64 = 0
+        while ci_a < save_vc_a {
+            let ons_a = CL_SAVE_NS[ci_a as usize]
+            let one_a = CL_SAVE_NE[ci_a as usize]
+            let outer_slot_a = CL_SAVE_SL[ci_a as usize]
+            let existing_a = var_find(ons_a, one_a)
+            if existing_a < 0 {
+                let cap_slot_a = var_add(ons_a, one_a)
+                if cap_slot_a >= 0 {
+                    let cap_vi_a = VAR_COUNT - 1
+                    VAR_LEN_SLOT[cap_vi_a as usize] = CL_SAVE_LS[ci_a as usize]
+                    VAR_ALEN[cap_vi_a as usize] = CL_SAVE_AL[ci_a as usize]
+                    VAR_ESIZ[cap_vi_a as usize] = CL_SAVE_ES[ci_a as usize]
+                    VAR_IS_F64[cap_vi_a as usize] = CL_SAVE_F64[ci_a as usize]
+                    VAR_IS_CLOSURE[cap_vi_a as usize] = CL_SAVE_ISCL[ci_a as usize]
+                    VAR_MUT[cap_vi_a as usize] = CL_SAVE_MUT[ci_a as usize]
+                    VAR_UNIT[cap_vi_a as usize] = CL_SAVE_UNIT[ci_a as usize]
+                    VAR_LINEAR[cap_vi_a as usize] = CL_SAVE_LINEAR[ci_a as usize]
+                    VAR_USED[cap_vi_a as usize] = CL_SAVE_USED[ci_a as usize]
+                    VAR_TY[cap_vi_a as usize] = CL_SAVE_TY[ci_a as usize]
+                    VAR_TY_HASH[cap_vi_a as usize] = CL_SAVE_TH[ci_a as usize]
+                    if CL_CAP_COUNT < local_cap() {
+                        CL_CAP_SLOT[CL_CAP_COUNT as usize] = outer_slot_a
+                        CL_CAP_COUNT = CL_CAP_COUNT + 1
+                    } else {
+                        note_limit_error(1)
+                    }
+                }
+            }
+            ci_a = ci_a + 1
+        }
+        let jmp_patch_a = CL
+        em32(0x14000000)
+        let cl_start_a = CL
+        em32(0xA9BF7BFD)
+        em32(0x910003FD)
+        emit_imm64_reg_a64_patchable(9)
+        em32(0xCB2963FF)
+        emit_store_incoming_arg_a64(0, 1)
+        var pstore_a: i64 = 0
+        while pstore_a < nparams_a {
+            emit_store_incoming_arg_a64(pstore_a + 1, 2 + pstore_a)
+            pstore_a = pstore_a + 1
+        }
+        var capi_a: i64 = 0
+        while capi_a < CL_CAP_COUNT {
+            emit_load_var_a64(1)
+            em32(0xF9400000 | ((capi_a + 1) << 10) | (0 << 5) | 0)
+            emit_store_var_a64(2 + nparams_a + capi_a)
+            capi_a = capi_a + 1
+        }
         if TK[EP as usize] == 8 {
             EP = EP + 1
-            var cd: i64 = 1
-            while EP < TC && cd > 0 { if TK[EP as usize] == 8 { cd = cd + 1 }; if TK[EP as usize] == 9 { cd = cd - 1 }; EP = EP + 1 }
-        } else { EP = EP + 1 }
-        em32(0xD2800000)
+            while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+            if TK[EP as usize] == 9 { EP = EP + 1 }
+        } else {
+            compile_or_a64()
+        }
+        var needs_cl_ep_a: i64 = 1
+        if CL >= 4 { if rd32_at(CL - 4) == 0xD65F03C0 { needs_cl_ep_a = 0 } }
+        if needs_cl_ep_a == 1 {
+            if CURRENT_RET_TY == 5 { em32(0xD2800000) }
+            else if LAST_STMT_HAS_VALUE == 0 && CURRENT_RET_TY != 0 { em32(0xD2800000) }
+            em32(0x910003BF)
+            em32(0xA8C17BFD)
+            em32(0xD65F03C0)
+        }
+        let cl_frame_sz_a = (NEXT_SLOT * 8 + 15) & 0xFFFFFFF0
+        if cl_frame_sz_a > max_frame_bytes() { tc_stack_frame_too_large(cl_frame_sz_a) }
+        var cl_fpi_a: i64 = save_a64_fpc
+        while cl_fpi_a < A64_FRAME_PATCH_COUNT {
+            patch_imm64_reg_a64(A64_FRAME_PATCH_OFF[cl_fpi_a as usize], A64_FRAME_PATCH_RD[cl_fpi_a as usize], cl_frame_sz_a)
+            cl_fpi_a = cl_fpi_a + 1
+        }
+        patch_branch_a64(jmp_patch_a, CL)
+        let saved_cap_count_a = CL_CAP_COUNT
+        VAR_COUNT = save_vc_a
+        NEXT_SLOT = save_ns_a
+        LOOP_DEPTH = save_ld_a
+        BREAK_COUNT = save_bc_a
+        CURRENT_RET_TY = save_ret_ty_a
+        CURRENT_RET_HASH = save_ret_hash_a
+        CURRENT_SRET_SLOT = save_sret_slot_a
+        A64_FRAME_PATCH_COUNT = save_a64_fpc
+        svi_a = 0
+        while svi_a < save_vc_a {
+            VAR_NS[svi_a as usize] = CL_SAVE_NS[svi_a as usize]
+            VAR_NE[svi_a as usize] = CL_SAVE_NE[svi_a as usize]
+            VAR_SLOT[svi_a as usize] = CL_SAVE_SL[svi_a as usize]
+            VAR_LEN_SLOT[svi_a as usize] = CL_SAVE_LS[svi_a as usize]
+            VAR_ALEN[svi_a as usize] = CL_SAVE_AL[svi_a as usize]
+            VAR_ESIZ[svi_a as usize] = CL_SAVE_ES[svi_a as usize]
+            VAR_IS_F64[svi_a as usize] = CL_SAVE_F64[svi_a as usize]
+            VAR_IS_CLOSURE[svi_a as usize] = CL_SAVE_ISCL[svi_a as usize]
+            VAR_MUT[svi_a as usize] = CL_SAVE_MUT[svi_a as usize]
+            VAR_UNIT[svi_a as usize] = CL_SAVE_UNIT[svi_a as usize]
+            VAR_LINEAR[svi_a as usize] = CL_SAVE_LINEAR[svi_a as usize]
+            VAR_USED[svi_a as usize] = CL_SAVE_USED[svi_a as usize]
+            VAR_TY[svi_a as usize] = CL_SAVE_TY[svi_a as usize]
+            VAR_TY_HASH[svi_a as usize] = CL_SAVE_TH[svi_a as usize]
+            svi_a = svi_a + 1
+        }
+        let struct_size_a = 1 + saved_cap_count_a
+        if saved_cap_count_a == 0 {
+            let struct_base_a = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + struct_size_a
+            let struct_top_a = struct_base_a + struct_size_a - 1
+            emit_adr_local_a64(cl_start_a, 0)
+            emit_store_var_a64(struct_top_a)
+            emit_lea_var_a64(struct_top_a)
+        } else {
+            emit_imm64_a64(struct_size_a * 8)
+            emit_heap_alloc_a64()
+            let heap_slot_a = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var_a64(heap_slot_a)
+            emit_load_var_a64(heap_slot_a)
+            em32(0xAA0003E9)
+            emit_adr_local_a64(cl_start_a, 0)
+            em32(0xF9000120)
+            var capj_a: i64 = 0
+            while capj_a < saved_cap_count_a {
+                emit_load_var_a64(CL_CAP_SLOT[capj_a as usize])
+                em32(0xAA0003EA)
+                emit_load_var_a64(heap_slot_a)
+                em32(0xAA0003E9)
+                em32(0xF9000000 | ((capj_a + 1) << 10) | (9 << 5) | 10)
+                capj_a = capj_a + 1
+            }
+            emit_load_var_a64(heap_slot_a)
+        }
+        CL_DEPTH = CL_DEPTH - 1
+        FNSIG_SCRATCH_ARITY = CL_FNSIG_NPARAMS[CL_DEPTH as usize]
+        FNSIG_SCRATCH_RET_TY = CL_FNSIG_RET_TY[CL_DEPTH as usize]
+        FNSIG_SCRATCH_RET_HASH = CL_FNSIG_RET_HASH[CL_DEPTH as usize]
+        FNSIG_SCRATCH_EFF = CL_FNSIG_EFF[CL_DEPTH as usize]
+        svi_a = 0
+        while svi_a < 16 {
+            if svi_a < FNSIG_SCRATCH_ARITY {
+                FNSIG_SCRATCH_PARAM_TY[svi_a as usize] = CL_FNSIG_PARAM_TY[(CL_DEPTH * 16 + svi_a) as usize]
+                FNSIG_SCRATCH_PARAM_HASH[svi_a as usize] = CL_FNSIG_PARAM_TH[(CL_DEPTH * 16 + svi_a) as usize]
+            } else {
+                FNSIG_SCRATCH_PARAM_TY[svi_a as usize] = 0
+                FNSIG_SCRATCH_PARAM_HASH[svi_a as usize] = 0
+            }
+            svi_a = svi_a + 1
+        }
+        EXPR_TY_HASH = fnsig_intern_scratch()
         EXPR_IS_F64 = 0
+        EXPR_TY = 9
         LAST_EXPR_IS_CLOSURE = 1
         return
     }
