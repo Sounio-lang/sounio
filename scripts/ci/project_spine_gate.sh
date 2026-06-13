@@ -137,7 +137,10 @@ do
   [[ "$MADAROS_THIN_MATRIX_RC" -eq 7 ]] || fail "Madaros imported arg matrix expected exit 7 for $witness, got $MADAROS_THIN_MATRIX_RC"
 done
 
-echo "[project-spine] 10/10 imported modular IR lowering gate"
+echo "[project-spine] 10/11 native aggregate ABI"
+bash scripts/ci/native_aggregate_abi_gate.sh
+
+echo "[project-spine] 11/11 imported modular IR lowering gate"
 bash scripts/ci/native_v2_imported_body_lowering_gate.sh
 
 echo "PROJECT_SPINE_PASS"
