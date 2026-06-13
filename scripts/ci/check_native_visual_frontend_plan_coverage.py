@@ -446,6 +446,20 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment packet ledgers can be projected back into native Visual IR controls, making selected packet hashes and packet/payload/frame/audit deltas visible in Canvas and passive HTML/SVG exports.",
     ),
     Evidence(
+        "workbench-experiment-packet-ledger-browser-events",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "viz_workbench_handle_experiment_packet_ledger_browser_event",
+            "EV_KEY_PRESS",
+            "KEY_RIGHT",
+            "KEY_LEFT",
+            "EV_MOUSE_PRESS",
+            "app.dirty = true",
+        ),
+        "Experiment packet-ledger browser selection is navigable through native key and mouse events, updating Sounio-owned browser state and marking the app dirty for redraw.",
+    ),
+    Evidence(
         "workbench-experiment-import-replay-zero-drift",
         "contains",
         "tests/run-pass/viz_workbench_experiment_diff_player.sio",

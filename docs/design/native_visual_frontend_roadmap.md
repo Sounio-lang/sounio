@@ -144,6 +144,7 @@ Sounio visualization is moving from chart helpers to a native visual frontend.
 - `viz_workbench_experiment_packet_ledger_emit` adds passive ledger metadata to static HTML/SVG exports, and `tests/run-pass/viz_workbench_experiment_diff_player.sio` proves a two-packet playback sequence with nonzero packet-hash delta.
 - `VizWorkbenchExperimentPacketLedgerReplayReport` binds the ledger to first/last packets plus the final import replay report, proving the packet chain closes with zero final Canvas-frame and scene-audit drift while retaining total packet/payload/frame/audit deltas.
 - `VizWorkbenchExperimentPacketLedgerBrowser` projects a selected packet-ledger entry back into native Visual IR controls, so Canvas and passive HTML/SVG exports show the selected packet hash plus packet, payload, frame, and audit deltas.
+- `viz_workbench_handle_experiment_packet_ledger_browser_event` makes that browser keyboard/mouse navigable, cycling selected packet-ledger entries while updating Sounio browser state and marking the native app dirty for redraw.
 
 ## V1.8j: Canonical Headless Visual Gate
 
