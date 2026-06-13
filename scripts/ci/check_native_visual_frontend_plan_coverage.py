@@ -345,6 +345,18 @@ REQUIRED: tuple[Evidence, ...] = (
         "Experiment package, restore proof, package store, cockpit, playback, export frame, and scene audit are bound into one shareable native lab packet.",
     ),
     Evidence(
+        "workbench-experiment-import-replay",
+        "contains",
+        "stdlib/viz/workbench.sio",
+        (
+            "struct VizWorkbenchExperimentImportReplayReport",
+            "viz_workbench_experiment_import_replay_report_build",
+            "viz_workbench_experiment_import_replay_report_verify",
+            "viz_workbench_experiment_import_replay_report_emit",
+        ),
+        "Shareable experiment packets can be imported into a fresh Workbench scene, replayed as Sounio data, and compared against exported frame/audit hashes with explicit drift deltas.",
+    ),
+    Evidence(
         "workbench-native-package-controls",
         "contains",
         "stdlib/viz/workbench.sio",
@@ -726,6 +738,12 @@ REQUIRED: tuple[Evidence, ...] = (
         "label",
         "viz_workbench_experiment_export_packet",
         detail="Workbench experiment export packet proof is in the canonical gate.",
+    ),
+    Evidence(
+        "gate-experiment-import-replay-run",
+        "label",
+        "viz_workbench_experiment_import_replay",
+        detail="Workbench experiment import/replay parity proof is in the canonical gate.",
     ),
     Evidence(
         "gate-demo-compiles",
