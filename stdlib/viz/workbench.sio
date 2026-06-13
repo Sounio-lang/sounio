@@ -580,6 +580,9 @@ pub struct VizWorkbenchExperimentExportPacket {
     pub node_style_font_scale: [i64; 64],
     pub stamped_molecules: [MoleculeViz; 4],
     pub stamped_molecule_count: i64,
+    pub molecule_atom_counts: [i64; 4],
+    pub molecule_bond_counts: [i64; 4],
+    pub molecule_snapshot_hashes: [i64; 4],
     pub stamped_nodes: [VizNode; 64],
     pub stamped_node_count: i64,
     pub stamped_series: [VizSeriesData; 8],
@@ -1191,6 +1194,9 @@ pub fn viz_workbench_experiment_export_packet_empty() -> VizWorkbenchExperimentE
         node_style_font_scale: [0; 64],
         stamped_molecules: [molecule_empty(); 4],
         stamped_molecule_count: 0,
+        molecule_atom_counts: [0; 4],
+        molecule_bond_counts: [0; 4],
+        molecule_snapshot_hashes: [0; 4],
         stamped_nodes: [viz_node_empty(); 64],
         stamped_node_count: 0,
         stamped_series: [viz_series_empty(); 8],
@@ -4521,6 +4527,19 @@ pub fn viz_workbench_handle_experiment_cockpit_playback_event(
     true
 }
 
+fn viz_workbench_experiment_export_packet_molecule_snapshot_hash(packet: &VizWorkbenchExperimentExportPacket, seed: i64) -> i64 with Mut {
+    var h: i64 = seed
+    h = h * 131 + packet.stamped_molecule_count
+    var mi: i64 = 0
+    while mi < packet.stamped_molecule_count && mi < 4 {
+        h = h * 131 + packet.molecule_atom_counts[mi as usize]
+        h = h * 131 + packet.molecule_bond_counts[mi as usize]
+        h = h * 131 + packet.molecule_snapshot_hashes[mi as usize]
+        mi = mi + 1
+    }
+    h
+}
+
 pub fn viz_workbench_experiment_export_packet_hash(packet: &VizWorkbenchExperimentExportPacket) -> i64 with Mut {
     var h: i64 = 991
     h = h * 131 + packet.package_hash
@@ -4561,7 +4580,6 @@ pub fn viz_workbench_experiment_export_packet_hash(packet: &VizWorkbenchExperime
     h = h * 131 + packet.molecule_reject_count
     h = h * 131 + packet.molecule_timeline_count
     h = h * 131 + packet.scene_stamp_hash
-    h = h * 131 + packet.stamped_molecule_count
     var i: i64 = 0
     while i < 64 {
         h = h * 131 + packet.node_value_millis[i as usize]
@@ -4578,37 +4596,7 @@ pub fn viz_workbench_experiment_export_packet_hash(packet: &VizWorkbenchExperime
         h = h * 131 + packet.node_style_font_scale[i as usize]
         i = i + 1
     }
-    var mi: i64 = 0
-    while mi < packet.stamped_molecule_count && mi < 4 {
-        let m = packet.stamped_molecules[mi as usize]
-        h = h * 131 + m.atom_count
-        h = h * 131 + m.bond_count
-        var ai: i64 = 0
-        while ai < m.atom_count && ai < 64 {
-            let a = m.atoms[ai as usize]
-            h = h * 131 + a.atomic_number
-            h = h * 131 + (a.x * 1000.0) as i64
-            h = h * 131 + (a.y * 1000.0) as i64
-            h = h * 131 + (a.z * 1000.0) as i64
-            h = h * 131 + (a.radius * 1000.0) as i64
-            h = h * 131 + a.r
-            h = h * 131 + a.g
-            h = h * 131 + a.b
-            ai = ai + 1
-        }
-        var bi: i64 = 0
-        while bi < m.bond_count && bi < 96 {
-            let b = m.bonds[bi as usize]
-            h = h * 131 + b.atom_a
-            h = h * 131 + b.atom_b
-            h = h * 131 + b.order
-            h = h * 131 + (b.length.value * 1000.0) as i64
-            h = h * 131 + (b.variance * 1000.0) as i64
-            bi = bi + 1
-        }
-        mi = mi + 1
-    }
-    h
+    viz_workbench_experiment_export_packet_molecule_snapshot_hash(packet, h)
 }
 
 pub fn viz_workbench_experiment_import_replay_report_hash(report: &VizWorkbenchExperimentImportReplayReport) -> i64 with Mut {
@@ -4687,15 +4675,36 @@ fn viz_workbench_experiment_export_packet_stamp_hash(packet: &VizWorkbenchExperi
         h = h * 131 + packet.node_style_font_scale[i as usize]
         i = i + 1
     }
-    h = h * 131 + packet.stamped_molecule_count
+    viz_workbench_experiment_export_packet_molecule_snapshot_hash(packet, h)
+}
+
+fn viz_workbench_experiment_export_packet_capture_molecule_snapshot(
+    packet: &!VizWorkbenchExperimentExportPacket,
+    scene: &VizScene,
+) with Mut {
+    var i: i64 = 0
+    while i < 4 {
+        packet.molecule_atom_counts[i as usize] = 0
+        packet.molecule_bond_counts[i as usize] = 0
+        packet.molecule_snapshot_hashes[i as usize] = 0
+        i = i + 1
+    }
     var mi: i64 = 0
-    while mi < packet.stamped_molecule_count && mi < 4 {
-        let m = packet.stamped_molecules[mi as usize]
-        h = h * 131 + m.atom_count
-        h = h * 131 + m.bond_count
+    while mi < scene.molecule_count && mi < 4 {
+        var atom_count = scene.molecules[mi as usize].atom_count
+        if atom_count < 0 { atom_count = 0 }
+        if atom_count > 64 { atom_count = 64 }
+        var bond_count = scene.molecules[mi as usize].bond_count
+        if bond_count < 0 { bond_count = 0 }
+        if bond_count > 96 { bond_count = 96 }
+        packet.molecule_atom_counts[mi as usize] = atom_count
+        packet.molecule_bond_counts[mi as usize] = bond_count
+        var h: i64 = 3037 + mi
+        h = h * 131 + atom_count
+        h = h * 131 + bond_count
         var ai: i64 = 0
-        while ai < m.atom_count && ai < 64 {
-            let a = m.atoms[ai as usize]
+        while ai < atom_count {
+            let a = scene.molecules[mi as usize].atoms[ai as usize]
             h = h * 131 + a.atomic_number
             h = h * 131 + (a.x * 1000.0) as i64
             h = h * 131 + (a.y * 1000.0) as i64
@@ -4707,18 +4716,19 @@ fn viz_workbench_experiment_export_packet_stamp_hash(packet: &VizWorkbenchExperi
             ai = ai + 1
         }
         var bi: i64 = 0
-        while bi < m.bond_count && bi < 96 {
-            let b = m.bonds[bi as usize]
+        while bi < bond_count {
+            let b = scene.molecules[mi as usize].bonds[bi as usize]
             h = h * 131 + b.atom_a
             h = h * 131 + b.atom_b
             h = h * 131 + b.order
             h = h * 131 + (b.length.value * 1000.0) as i64
+            h = h * 131 + (b.length.uncertainty * 1000.0) as i64
             h = h * 131 + (b.variance * 1000.0) as i64
             bi = bi + 1
         }
+        packet.molecule_snapshot_hashes[mi as usize] = h
         mi = mi + 1
     }
-    h
 }
 
 fn viz_workbench_experiment_export_packet_capture_scene_stamp(
@@ -4776,6 +4786,7 @@ fn viz_workbench_experiment_export_packet_capture_scene_stamp(
         packet.stamped_meshes[i as usize] = scene.meshes[i as usize]
         i = i + 1
     }
+    viz_workbench_experiment_export_packet_capture_molecule_snapshot(packet, scene)
     i = 0
     while i < 64 {
         if i < scene.node_count {
