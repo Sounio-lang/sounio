@@ -5,6 +5,7 @@
 // runnable for frontend probes without paying the heavy backend/global-init cost.
 
 use module_frontend::{
+    imported_simple_ir_global_fn_arg,
     imported_simple_ir_global_fn_arity,
     imported_simple_ir_global_fn_count,
     imported_simple_ir_global_fn_kind,
@@ -98,7 +99,20 @@ fn simple_driver_emit_add_arg_to_rax(buf: &![i8; 131072], pos: i64, arg_idx: i64
         simple_driver_put_u8(buf, pos + 2, 200)
         return 3
     }
+    if arg_idx == 6 {
+        simple_driver_put_u8(buf, pos, 72)
+        simple_driver_put_u8(buf, pos + 1, 3)
+        simple_driver_put_u8(buf, pos + 2, 68)
+        simple_driver_put_u8(buf, pos + 3, 36)
+        simple_driver_put_u8(buf, pos + 4, 8)
+        return 5
+    }
     0
+}
+
+fn simple_driver_emit_push_imm32(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic, Div {
+    simple_driver_put_u8(buf, pos, 104)
+    simple_driver_put_u32(buf, pos + 1, val)
 }
 
 fn simple_driver_put_u64(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic, Div {
@@ -200,6 +214,9 @@ fn simple_driver_fn_size(fi: i64) -> i64 with Panic {
         if arity >= 1 && arity <= 6 {
             return arity * 3 + 1
         }
+        if arity == 7 {
+            return 24
+        }
     }
     if kind == 29 {
         var arity = imported_simple_ir_global_fn_arity(fi)
@@ -214,6 +231,9 @@ fn simple_driver_fn_size(fi: i64) -> i64 with Panic {
         }
         if arity == 6 {
             return 38
+        }
+        if arity == 7 {
+            return 47
         }
     }
     -1
@@ -865,7 +885,7 @@ fn simple_driver_emit_fn(
         if arity <= 0 {
             arity = 5
         }
-        if arity <= 0 || arity > 6 {
+        if arity <= 0 || arity > 7 {
             return false
         }
         simple_driver_put_u8(bytes, off, 72)
@@ -906,14 +926,13 @@ fn simple_driver_emit_fn(
         if arity <= 0 {
             arity = 5
         }
-        if arity <= 0 || arity > 6 {
+        if arity <= 0 || arity > 7 {
             return false
         }
         var cur = off
         var arg_idx: i64 = 0
-        while arg_idx < arity {
-            let shift = (arity - 1 - arg_idx) * 8
-            let arg = (packed >> shift) & 255
+        while arg_idx < arity && arg_idx < 6 {
+            let arg = imported_simple_ir_global_fn_arg(fi, arg_idx)
             let wrote = simple_driver_emit_mov_imm32_arg(bytes, cur, arg_idx, arg)
             if wrote <= 0 {
                 return false
@@ -921,9 +940,23 @@ fn simple_driver_emit_fn(
             cur = cur + wrote
             arg_idx = arg_idx + 1
         }
+        var stack_arg: i64 = arity - 1
+        while stack_arg >= 6 {
+            simple_driver_emit_push_imm32(bytes, cur, imported_simple_ir_global_fn_arg(fi, stack_arg))
+            cur = cur + 5
+            stack_arg = stack_arg - 1
+        }
         simple_driver_put_u8(bytes, cur, 232)
         simple_driver_put_u32(bytes, cur + 1, target_off - (cur + 5))
-        simple_driver_put_u8(bytes, cur + 5, 195)
+        cur = cur + 5
+        if arity > 6 {
+            simple_driver_put_u8(bytes, cur, 72)
+            simple_driver_put_u8(bytes, cur + 1, 131)
+            simple_driver_put_u8(bytes, cur + 2, 196)
+            simple_driver_put_u8(bytes, cur + 3, (arity - 6) * 8)
+            cur = cur + 4
+        }
+        simple_driver_put_u8(bytes, cur, 195)
         return true
     }
     false
