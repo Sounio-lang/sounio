@@ -114,6 +114,23 @@ set +e
 MADAROS_THIN_LOCALS_RC=$?
 set -e
 [[ "$MADAROS_THIN_LOCALS_RC" -eq 7 ]] || fail "Madaros thin imported local-args call expected exit 7, got $MADAROS_THIN_LOCALS_RC"
+set +e
+./bin/madaros run tests/multimodule/thin_expr_args_main.sio
+MADAROS_THIN_EXPR_ARGS_RC=$?
+set -e
+[[ "$MADAROS_THIN_EXPR_ARGS_RC" -eq 7 ]] || fail "Madaros thin imported expr-args call expected exit 7, got $MADAROS_THIN_EXPR_ARGS_RC"
+for witness in \
+  tests/multimodule/thin_parenthesized_local_args_main.sio \
+  tests/multimodule/thin_typed_var_args_main.sio \
+  tests/multimodule/thin_return_call_main.sio \
+  tests/multimodule/thin_four_locals_main.sio
+do
+  set +e
+  ./bin/madaros run "$witness"
+  MADAROS_THIN_MATRIX_RC=$?
+  set -e
+  [[ "$MADAROS_THIN_MATRIX_RC" -eq 7 ]] || fail "Madaros imported arg matrix expected exit 7 for $witness, got $MADAROS_THIN_MATRIX_RC"
+done
 
 echo "[project-spine] 10/10 imported modular IR lowering gate"
 bash scripts/ci/native_v2_imported_body_lowering_gate.sh
