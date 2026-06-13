@@ -148,6 +148,12 @@ run_case imported_hof tests/selfhost/native_runtime/import_hof_abi_42.sio 6
 run_case imported_mixed tests/selfhost/native_runtime/import_body_lowering_42.sio 7
 run_stdout_case hello_pkg examples/projects/hello_pkg 42 2
 run_exit_case thin_single tests/multimodule/thin_single_main.sio 7 6
+run_exit_case thin_locals tests/multimodule/thin_locals_main.sio 7 6
+run_exit_case thin_expr_args tests/multimodule/thin_expr_args_main.sio 7 6
+run_exit_case thin_parenthesized_local_args tests/multimodule/thin_parenthesized_local_args_main.sio 7 6
+run_exit_case thin_typed_var_args tests/multimodule/thin_typed_var_args_main.sio 7 6
+run_exit_case thin_return_call tests/multimodule/thin_return_call_main.sio 7 6
+run_exit_case thin_four_locals tests/multimodule/thin_four_locals_main.sio 7 6
 run_exit_case thin_sum5 tests/multimodule/thin_five_literal_args_main.sio 31 6
 run_exit_case thin_sum6 tests/multimodule/thin_six_literal_args_main.sio 63 6
 run_exit_case thin_sum7 tests/multimodule/thin_seven_literal_args_main.sio 127 6
