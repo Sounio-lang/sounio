@@ -4853,6 +4853,15 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     if call_expr_is_builtin_print_char(e.left) {
         return checker_check_print_i64_expr_inplace(c, e)
     }
+    // Read-only GPU thread-index intrinsics (gpu_thread_id_*, gpu_block_id_*,
+    // gpu_block_dim_*, gpu_barrier, gpu_sync_threads): implicit kernel builtins
+    // with no user signature. Resolve their result type to u32 directly so the
+    // callee ident does not fall through to the unbound-identifier check (E137).
+    // The GPU backend lowers these by name to PTX sregs (%tid.x / %ctaid.x /
+    // %ntid.x, etc.); see hlir_to_gpu.sio / lower_to_ptx.sio.
+    if call_expr_is_gpu_builtin(e.left) {
+        return ty_u32()
+    }
     if call_expr_should_bridge_by_value(e) {
         return checker_check_expr_mut(c, e)
     }
@@ -10685,6 +10694,38 @@ fn call_expr_is_builtin_measure(opt: Option<Box<Expr> >) -> bool with Mut, Panic
                 return false
             }
             name_matches_str7((*expr).name, 109, 101, 97, 115, 117, 114, 101)
+        }
+        None => false
+    }
+}
+
+// Read-only GPU thread/block coordinate intrinsics. These are implicit
+// kernel-scope builtins with no user-declared signature, so the call checker
+// must recognise them by name and assign their result type (u32) directly —
+// otherwise the callee ident falls through to the unbound-identifier check
+// (E137) just as the name resolver would reject it without its allowlist.
+// MUST stay in sync with name_is_gpu_builtin() in self-hosted/resolve/resolve.sio
+// and token_is_gpu_builtin_name() in self-hosted/compiler/lean_single.sio.
+fn call_expr_is_gpu_builtin(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            let n = (*expr).name
+            if name_eq(n, make_name("gpu_thread_id_x")) { return true }
+            if name_eq(n, make_name("gpu_thread_id_y")) { return true }
+            if name_eq(n, make_name("gpu_thread_id_z")) { return true }
+            if name_eq(n, make_name("gpu_block_id_x")) { return true }
+            if name_eq(n, make_name("gpu_block_id_y")) { return true }
+            if name_eq(n, make_name("gpu_block_id_z")) { return true }
+            if name_eq(n, make_name("gpu_block_dim_x")) { return true }
+            if name_eq(n, make_name("gpu_block_dim_y")) { return true }
+            if name_eq(n, make_name("gpu_block_dim_z")) { return true }
+            if name_eq(n, make_name("gpu_barrier")) { return true }
+            if name_eq(n, make_name("gpu_barrier_sync")) { return true }
+            if name_eq(n, make_name("gpu_sync_threads")) { return true }
+            false
         }
         None => false
     }
