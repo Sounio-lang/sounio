@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.pbpk14-identifiability-2026-06-14
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.pbpk14-identifiability-2026-06-14
+-->
+
 # PBPK-14 structural identifiability from plasma (future-work / Contribution #2)
 
 **Date:** 2026-06-14
