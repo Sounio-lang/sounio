@@ -30,6 +30,11 @@ RUNGS = [
     (1764, 42, 9036),
     (1849, 43, 9508),
     (1936, 44, 9992),
+    (2025, 45, 10488),
+    (2116, 46, 10996),
+    (2209, 47, 11516),
+    (2304, 48, 12048),
+    (2401, 49, 12592),
 ]
 
 
@@ -77,6 +82,29 @@ def replace_n(text: str, n: int, w: int, grid: int) -> str:
     return text
 
 
+def scale_smoke_iters(text: str, n: int) -> str:
+    """Reduce hill-climb budget for large-n smoke exports (cluster keeps full iters)."""
+    full = (
+        "let _ = run_one(22, TARGET_NSQ, TARGET_N, 40, 800000)\n"
+        "    let _ = run_one(24, TARGET_NSQ, TARGET_N, 60, 1200000)\n"
+        "    let _ = run_one(26, TARGET_NSQ, TARGET_N, 60, 1200000)"
+    )
+    if n >= 2000:
+        lite = (
+            "let _ = run_one(24, TARGET_NSQ, TARGET_N, 12, 120000)\n"
+            "    let _ = run_one(26, TARGET_NSQ, TARGET_N, 16, 150000)"
+        )
+    elif n >= 1600:
+        lite = (
+            "let _ = run_one(22, TARGET_NSQ, TARGET_N, 32, 500000)\n"
+            "    let _ = run_one(24, TARGET_NSQ, TARGET_N, 48, 800000)\n"
+            "    let _ = run_one(26, TARGET_NSQ, TARGET_N, 48, 800000)"
+        )
+    else:
+        return text
+    return text.replace(full, lite)
+
+
 def scaffold(n: int, w: int, grid: int) -> None:
     wxw = f"{w}x{w}"
     # grid export already created for batch; ensure correct
@@ -101,9 +129,13 @@ def scaffold(n: int, w: int, grid: int) -> None:
         )
         dst = dst_dir / dst_name
         text = replace_n(src.read_text(), n, w, grid)
+        if dst_name.endswith("_export.sio"):
+            text = scale_smoke_iters(text, n)
         if dst_name.endswith(".py"):
             hb = max(1_000_000, n * 2200)
-            if n >= 1800:
+            if n >= 2000:
+                hb = max(hb, n * 5000)
+            elif n >= 1800:
                 hb = max(hb, n * 4000)
             elif n >= 1600:
                 hb = max(hb, n * 3000)
