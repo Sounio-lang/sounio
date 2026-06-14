@@ -4860,6 +4860,11 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // The GPU backend lowers these by name to PTX sregs (%tid.x / %ctaid.x /
     // %ntid.x, etc.); see hlir_to_gpu.sio / lower_to_ptx.sio.
     if call_expr_is_gpu_builtin(e.left) {
+        // Barriers (gpu_barrier, gpu_barrier_sync, gpu_sync_threads) are void
+        // side-effects; the thread-index/dim intrinsics return a u32 coordinate.
+        if call_expr_is_gpu_barrier(e.left) {
+            return ty_unit()
+        }
         return ty_u32()
     }
     if call_expr_should_bridge_by_value(e) {
@@ -10706,6 +10711,24 @@ fn call_expr_is_builtin_measure(opt: Option<Box<Expr> >) -> bool with Mut, Panic
 // (E137) just as the name resolver would reject it without its allowlist.
 // MUST stay in sync with name_is_gpu_builtin() in self-hosted/resolve/resolve.sio
 // and token_is_gpu_builtin_name() in self-hosted/compiler/lean_single.sio.
+// The subset of call_expr_is_gpu_builtin names that are VOID barriers (return
+// unit), as opposed to the thread-index/dim coordinate reads (return u32).
+fn call_expr_is_gpu_barrier(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            let n = (*expr).name
+            if name_eq(n, make_name("gpu_barrier")) { return true }
+            if name_eq(n, make_name("gpu_barrier_sync")) { return true }
+            if name_eq(n, make_name("gpu_sync_threads")) { return true }
+            false
+        }
+        None => false
+    }
+}
+
 fn call_expr_is_gpu_builtin(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
@@ -14496,8 +14519,11 @@ impl Checker {
                         ri = ri + 1
                     }
 
-                    // E072: Kernel must return unit type
-                    if ret_ty.kind != TypeKind::TyUnit {
+                    // E072: Kernel must return unit type. A missing return
+                    // annotation lowers to TyUnknown (lower_opt_return_type's
+                    // None case), which is implicitly unit for a void kernel —
+                    // accept it; only an EXPLICIT non-unit return type is an error.
+                    if ret_ty.kind != TypeKind::TyUnit && ret_ty.kind != TypeKind::TyUnknown {
                         c = c.report_error_at((*fd).span, 72, 0, 0, 0)
                     }
                 }
