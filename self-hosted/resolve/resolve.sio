@@ -52,6 +52,34 @@ fn resolver_with_modules(mods: ModuleRegistry) -> Resolver {
 }
 
 // ============================================================
+// GPU intrinsic allowlist
+// ============================================================
+//
+// Read-only GPU thread/block coordinate intrinsics are implicit kernel-scope
+// builtins: they are never bound in the symbol table, so name resolution must
+// recognise them by name before reporting an undefined-variable error. The
+// build-path GPU lowering keys purely on these names — hlir_to_gpu.sio maps
+// gpu_thread_id_* → GpuGetTid, gpu_block_id_* → GpuGetBid, gpu_block_dim_* →
+// GpuGetNtid, which lower_to_ptx.sio emits as %tid.{x,y,z} / %ctaid.{x,y,z} /
+// %ntid.{x,y,z}. This list MUST stay in sync with token_is_gpu_builtin_name()
+// in self-hosted/compiler/lean_single.sio (the PTX-eligibility allowlist).
+fn name_is_gpu_builtin(n: Name) -> bool with Mut, Panic, Div {
+    if name_eq(n, make_name("gpu_thread_id_x")) { return true }
+    if name_eq(n, make_name("gpu_thread_id_y")) { return true }
+    if name_eq(n, make_name("gpu_thread_id_z")) { return true }
+    if name_eq(n, make_name("gpu_block_id_x")) { return true }
+    if name_eq(n, make_name("gpu_block_id_y")) { return true }
+    if name_eq(n, make_name("gpu_block_id_z")) { return true }
+    if name_eq(n, make_name("gpu_block_dim_x")) { return true }
+    if name_eq(n, make_name("gpu_block_dim_y")) { return true }
+    if name_eq(n, make_name("gpu_block_dim_z")) { return true }
+    if name_eq(n, make_name("gpu_barrier")) { return true }
+    if name_eq(n, make_name("gpu_barrier_sync")) { return true }
+    if name_eq(n, make_name("gpu_sync_threads")) { return true }
+    false
+}
+
+// ============================================================
 // Core operations — define, lookup, scoping, errors
 // ============================================================
 
@@ -867,7 +895,16 @@ impl Resolver {
             ExprKind::ExprIdent => {
                 let found = self.lookup(e.name)
                 if found < 0 {
-                    self.report_error(e.span)
+                    // Allowlist read-only GPU thread-index intrinsics
+                    // (gpu_thread_id_x/y/z, gpu_block_id_x/y/z,
+                    //  gpu_block_dim_x/y/z, gpu_barrier, gpu_sync_threads).
+                    // These are implicit builtins, never bound in the symbol
+                    // table; the GPU backend lowers them to PTX sregs by name.
+                    if name_is_gpu_builtin(e.name) {
+                        self
+                    } else {
+                        self.report_error(e.span)
+                    }
                 } else {
                     self
                 }
