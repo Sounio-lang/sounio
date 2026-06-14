@@ -151,7 +151,9 @@ pass "IrWideMul schoolbook multiply (exit=1, not fake-i64 exit=0)"
 # 10. Wide-div witness: (15*2^64)/3 = 5*2^64 -> hi limb = 5.
 #    Fake-i64 would give 0 (div of lo limbs). Exit code MUST be 5.
 # ---------------------------------------------------------------------------
+set +e
 "$MADAROS" --native-v2-emit-wide-div "$WORK/wide_div.elf" >"$WORK/wide_div.log" 2>&1
+set -e
 expect_log_contains "wide-div rc=0" "$WORK/wide_div.log"
 [[ -s "$WORK/wide_div.elf" ]] || fail "wide-div did not produce ELF"
 chmod +x "$WORK/wide_div.elf"
@@ -162,7 +164,9 @@ pass "IrWideDiv single-limb divisor (exit=5, not fake-i64 exit=0)"
 # 11. Wide-mod witness: (2^64+1)%7 = 3.
 #    Fake-i64 would give 1 (1%7=1). Exit code MUST be 3.
 # ---------------------------------------------------------------------------
+set +e
 "$MADAROS" --native-v2-emit-wide-mod "$WORK/wide_mod.elf" >"$WORK/wide_mod.log" 2>&1
+set -e
 expect_log_contains "wide-mod rc=0" "$WORK/wide_mod.log"
 [[ -s "$WORK/wide_mod.elf" ]] || fail "wide-mod did not produce ELF"
 chmod +x "$WORK/wide_mod.elf"
@@ -173,7 +177,9 @@ pass "IrWideMod single-limb divisor (exit=3, not fake-i64 exit=1)"
 # 12. Wide-cmp witness: 2^64 < 2^65 -> 1 (hi limb decides).
 #    Fake-i64 would give 0 (lo limbs equal). Exit code MUST be 1.
 # ---------------------------------------------------------------------------
+set +e
 "$MADAROS" --native-v2-emit-wide-cmp "$WORK/wide_cmp.elf" >"$WORK/wide_cmp.log" 2>&1
+set -e
 expect_log_contains "wide-cmp rc=0" "$WORK/wide_cmp.log"
 [[ -s "$WORK/wide_cmp.elf" ]] || fail "wide-cmp did not produce ELF"
 chmod +x "$WORK/wide_cmp.elf"
@@ -195,7 +201,9 @@ pass "IrWideShrLimb limb-aligned shift (exit=1)"
 # 14. Wide-shr-unaligned witness: 2^100 >> 96 = 16 (funnel shift).
 #    Limb-aligned-only (>>64) would give 2^36; low-limb -> 0.
 # ---------------------------------------------------------------------------
+set +e
 "$MADAROS" --native-v2-emit-wide-shr-unaligned "$WORK/wide_shru.elf" >"$WORK/wide_shru.log" 2>&1
+set -e
 expect_log_contains "wide-shr-unaligned rc=0" "$WORK/wide_shru.log"
 [[ -s "$WORK/wide_shru.elf" ]] || fail "wide-shr-unaligned did not produce ELF"
 chmod +x "$WORK/wide_shru.elf"
@@ -206,7 +214,9 @@ pass "IrWideShr funnel shift (exit=16)"
 # 15. Wide-divfull witness: (5*2^64+105)/(2^64+1) = 5 (multi-limb divisor).
 #    Low-limb-only (div by D.lo=1) would give 105.
 # ---------------------------------------------------------------------------
+set +e
 "$MADAROS" --native-v2-emit-wide-divfull "$WORK/wide_df.elf" >"$WORK/wide_df.log" 2>&1
+set -e
 expect_log_contains "wide-divfull rc=0" "$WORK/wide_df.log"
 [[ -s "$WORK/wide_df.elf" ]] || fail "wide-divfull did not produce ELF"
 chmod +x "$WORK/wide_df.elf"
