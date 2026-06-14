@@ -2,31 +2,33 @@
 
 > **TL;DR:** Madaros is **green on `origin/main`** and is now the **default compiler**:
 > `bin/souc` routes to Madaros. If it looks broken to you, you are almost certainly
-> judging it from a **stale worktree** or a **prebuilt raw ELF compiled before the
-> fix**. Sync `main`, rebuild, run the gate — *then* talk.
+> judging it from a **stale worktree** or an **old raw ELF compiled before the
+> fix**. Sync `main`, use the checked prebuilt or rebuild, run the gate — *then* talk.
 
 ## Madaros is the default compiler (`bin/souc` → Madaros)
 
 `bin/souc` is now a thin CLI wrapper that routes `check`/`compile`/`run`/`--version`/
-`info` to Madaros (via `bin/madaros` → `artifacts/self-hosted/madaros`). The legacy
-single-file `lean_single` engine that `bin/souc` used to be is preserved as
-`bin/souc-lean-single-x86_64`.
+`info` to Madaros (via `bin/madaros` → `artifacts/self-hosted/madaros`, or the
+checked prebuilt `bin/madaros-linux-x86_64` when the local build artifact is
+absent). The legacy single-file `lean_single` engine that `bin/souc` used to be
+is preserved as `bin/souc-lean-single-x86_64`.
 
 - **Force the legacy engine:** `SOUNIO_SOUC_ENGINE=lean_single bin/souc <args>`.
 - **lean_single stays the bootstrap seed** (`make build`, `make build-madaros`) and the
   canonical fixed-point ELF — it is just no longer the default *user-facing* compiler.
-- If Madaros is not built yet, `bin/souc` falls back to lean_single with a stderr notice
-  (`make build-madaros` to get the default engine).
+- If the local build artifact is absent, `bin/souc` uses the checked prebuilt
+  `bin/madaros-linux-x86_64` first. It only falls back to lean_single if no
+  Madaros raw ELF is available.
 - *Madaros-builds-Madaros* (swapping the build seed to Madaros) is a **separate, larger
   milestone — not done here.** lean_single still compiles the bootstrap.
 
 ## Confirmed state
 
 - **Green since `17d1157be`** — `fix(madaros): remove raw check caveats from full gate`.
-  It **stays green as `main` advances**: re-verified at the current tip, which now
-  includes `051ddf9ae` (`fix(ir/opt+ssa+codegen): fix 7 bugs — tracking, use-count,
-  SSA rename/phi/dom, REX, code overflow`), `39f248f28` (deny-by-default visibility),
-  the `14f984e26` `bin/souc` rebuild, and the `4177613ca` checker-alloc fix.
+  It **stays green as `main` advances**: re-verified through `origin/main@9c5d09a21`,
+  which includes the wide-int lane (`17dbb9ce5`, `7b04ab15c`), the default
+  `bin/souc` -> Madaros wrapper lane (`8d5193a64`, `077361b28`), and the checked
+  prebuilt Madaros ELF (`42293db35`).
   Track `origin/main`, **not** a frozen SHA.
 - Madaros is the **Stage1 modular compiler** (`bin/madaros`,
   `scripts/ci/build_modular_madaros.sh`, `scripts/ci/madaros_full_gate.sh`).
@@ -37,6 +39,16 @@ single-file `lean_single` engine that `bin/souc` used to be is preserved as
 ```bash
 make madaros-full-gate     # builds Madaros from source, then runs the e2e gate
 ```
+
+The cheap coordination-contract gate is:
+
+```bash
+bash scripts/ci/madaros_operational_contract_gate.sh
+```
+
+It does not replace the compiler proof. It prevents drift in the committed agent
+instructions, `bin/souc` default-wrapper contract, `scripts/dev/e2e_gate.sh`, and
+`scripts/ci/madaros_full_gate.sh` coverage.
 
 Independently verified at `17d1157be` (fresh build from source, **not** a
 prebuilt artifact) — **10/10 PASS**:
@@ -70,13 +82,14 @@ MADAROS_RAW_BIN=artifacts/self-hosted/madaros bin/madaros check /tmp
 
 ## What stale state looks like (and why it lies)
 
-A `bin/madaros` launcher or a raw `artifacts/self-hosted/madaros` ELF that was
-**built before `17d1157be`** still carries the old behavior — that binary is
+A `bin/madaros` launcher or a local raw `artifacts/self-hosted/madaros` ELF that
+was **built before `17d1157be`** still carries the old behavior — that binary is
 **not evidence** about current `main`. Likewise, lanes under
 `/workspace/sounio-checker`, `/workspace/sounio-semcall-main`,
 `/workspace/sounio-project-spine`, etc. may hold old checker code or local edits.
 You cannot conclude "Madaros is broken" from any of those without first bringing
-in `17d1157be` and **rebuilding `artifacts/self-hosted/madaros`**.
+in `17d1157be` and either using the checked prebuilt `bin/madaros-linux-x86_64`
+or **rebuilding `artifacts/self-hosted/madaros`**.
 
 ## Sync before debugging
 
@@ -101,6 +114,7 @@ make madaros-full-gate
 
 ## One-line coordination phrase
 
-> Madaros is green on `origin/main@17d1157be`. Please sync/rebase before debugging
-> checker issues against it. The valid proof gate is `make madaros-full-gate`;
-> stale raw `artifacts/self-hosted/madaros` binaries are **not** evidence.
+> Madaros is green on `origin/main` and the green base begins at `17d1157be`.
+> Please sync/rebase before debugging checker issues against it. The valid proof
+> gate is `make madaros-full-gate`; stale raw `artifacts/self-hosted/madaros`
+> binaries are **not** evidence.
