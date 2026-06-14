@@ -2915,9 +2915,11 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             checker_push_const_scope_inplace(c)
             checker_bind_fn_params_inplace(c, (*fd).params)
             let body_ty = checker_check_block_inplace(c, (*fd).body)
+            let body_was_int_lit = (*c).last_literal_kind == 1
             if sig_id >= 0 {
                 let sig2 = (*c).fn_sigs.get(sig_id)
-                if !checker_types_compatible_inplace(c, body_ty, sig2.return_type) {
+                let ret_lit_narrow = checker_return_int_lit_narrows(body_was_int_lit, body_ty, sig2.return_type)
+                if !checker_types_compatible_inplace(c, body_ty, sig2.return_type) && !ret_lit_narrow {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
             }
@@ -2964,6 +2966,13 @@ fn checker_check_stmts_inplace(c: *mut Checker, opt: Option<Box<StmtList> >) -> 
     while true {
         match cursor {
             Some(list) => {
+                // Reset the int-literal flag before each stmt so that after the
+                // loop (*c).last_literal_kind reflects ONLY the block's tail
+                // statement — a bare `0` leaves it set, a non-literal tail (call,
+                // ident, binary) leaves it clear, never stale from an earlier
+                // statement's literal. The E008 return-narrow (checker_collect_fn_
+                // def_inplace) depends on this being the tail's literalness.
+                (*c).last_literal_kind = 0
                 last_ty = checker_check_stmt_inplace(c, (*list).head)
                 cursor = (*list).tail
             }
@@ -3016,8 +3025,11 @@ fn checker_check_opt_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >) -> T
 }
 
 fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    (*c).last_literal_kind = 0  // so the flag reflects ONLY this return value expr
     let val_ty = checker_check_opt_expr_inplace(c, e.left)
-    if !checker_types_compatible_inplace(c, val_ty, (*c).current_return_type) {
+    let val_was_int_lit = (*c).last_literal_kind == 1
+    let ret_lit_narrow = checker_return_int_lit_narrows(val_was_int_lit, val_ty, (*c).current_return_type)
+    if !checker_types_compatible_inplace(c, val_ty, (*c).current_return_type) && !ret_lit_narrow {
         checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
     }
     ty_never()
@@ -3228,6 +3240,21 @@ fn checker_narrow_literal_operand_ty(operand_ty: TypeEntry, operand_was_int_lit:
         return peer_ty
     }
     operand_ty
+}
+
+// E008: a bare integer literal used as a function body value or `return <lit>`
+// is typed i64 by default but narrows to a smaller declared integer return type
+// (i32/i8) — exactly the rule `let x: i32 = 0` already applies in
+// checker_check_let_stmt_inplace. `was_int_lit` is (*c).last_literal_kind == 1,
+// captured right after checking the value expr; both call sites first reset the
+// flag to 0 (the return site directly, the block site per-statement in
+// checker_check_stmts_inplace) so it is the value's OWN literalness, never stale
+// from an earlier literal. Keeps strict integer typing otherwise: only an i64
+// LITERAL narrows, never an i64-typed variable/call/binary expr.
+fn checker_return_int_lit_narrows(was_int_lit: bool, value_ty: TypeEntry, ret_ty: TypeEntry) -> bool {
+    was_int_lit
+        && value_ty.kind == TypeKind::TyI64
+        && (ret_ty.kind == TypeKind::TyI32 || ret_ty.kind == TypeKind::TyI8)
 }
 
 // *mut ExprBinary handler (split-and-bridge): check the OPERANDS in place — so a nested
