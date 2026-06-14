@@ -61,9 +61,17 @@ theorem graded_weakening (c c' : Nat) (h : c' ≤ c) : gradedSubtype c c' := h
     The result confidence is at most the minimum of c1, c2. -/
 theorem graded_app_rule (c1 c2 : Nat) (h1 : c1 ≤ 1000) (h2 : c2 ≤ 1000) :
     conf_product c1 c2 ≤ min c1 c2 := by
-  -- TODO: needs Nat division lemmas (mul_div_cancel, mul_div_cancel_left) from Mathlib.
-  -- Core Lean 4 does not provide these cancellation lemmas.
-  sorry
+  -- c1*c2/1000 ≤ min c1 c2: bound each side independently via Nat.div_le_of_le_mul.
+  -- For ≤ c1: c1*c2 ≤ c1*1000 = 1000*c1 (using c2 ≤ 1000).
+  -- For ≤ c2: c1*c2 ≤ 1000*c2 (using c1 ≤ 1000).
+  unfold conf_product
+  apply Nat.le_min.mpr
+  constructor
+  · apply Nat.div_le_of_le_mul
+    calc c1 * c2 ≤ c1 * 1000 := Nat.mul_le_mul_left _ h2
+      _ = 1000 * c1 := Nat.mul_comm _ _
+  · apply Nat.div_le_of_le_mul
+    exact Nat.mul_le_mul_right _ h1
 
 /-- Rule 4: Transitivity of subtyping -/
 theorem graded_trans (c1 c2 c3 : Nat) (h12 : gradedSubtype c1 c2) (h23 : gradedSubtype c2 c3) :
@@ -127,12 +135,18 @@ def conf_decay (base_conf : Nat) (age half_life : Nat) : Nat :=
 theorem conf_decay_nonincreasing (base : Nat) (half_life : Nat) (h : half_life > 0)
     (age1 age2 : Nat) (hle : age1 ≤ age2) :
     conf_decay base age2 half_life ≤ conf_decay base age1 half_life := by
-  -- TODO: Proof strategy: base / 2^(age2/hl) ≤ base / 2^(age1/hl)
-  -- because age1/hl ≤ age2/hl (Nat division is monotone), so 2^(age1/hl) ≤ 2^(age2/hl)
-  -- and dividing by a larger number gives a smaller result.
-  -- Core Lean 4 lacks Nat.div_le_div_left, Nat.pow_le_pow_right, Nat.div_le_div_right,
-  -- and Nat.pos_pow_of_pos. Needs Mathlib Nat lemmas.
-  sorry
+  -- base / 2^(age2/hl) ≤ base / 2^(age1/hl):
+  -- age1/hl ≤ age2/hl (Nat.div monotone) ⇒ 2^(age1/hl) ≤ 2^(age2/hl)
+  -- ⇒ dividing base by the larger power gives the smaller result.
+  -- All lemmas used are core Lean 4 (Nat.div_le_div_right / pow_le_pow_right /
+  -- div_le_div_left / two_pow_pos) — no Mathlib needed.
+  unfold conf_decay
+  have hne : ¬ (half_life = 0) := Nat.pos_iff_ne_zero.mp h
+  simp only [hne, if_false]
+  have hdiv : age1 / half_life ≤ age2 / half_life := Nat.div_le_div_right hle
+  have hpow : 2 ^ (age1 / half_life) ≤ 2 ^ (age2 / half_life) :=
+    Nat.pow_le_pow_right (by decide) hdiv
+  exact Nat.div_le_div_left hpow (Nat.two_pow_pos _)
 
 /-- A fresh measurement is maximally confident -/
 theorem conf_decay_fresh (base : Nat) (half_life : Nat) (h : half_life > 0) :

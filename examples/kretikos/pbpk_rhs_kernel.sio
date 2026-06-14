@@ -1,0 +1,67 @@
+// kretikos: profile=pbpk_rhs_linear
+//
+// Minimal kernel-legal core of POPULATION-PARALLEL PBPK.
+//
+// Population-parallel PBPK runs one virtual patient per GPU thread, each
+// integrating its own ODE state with its own parameters. This file isolates
+// the kernel-legal COMPUTE CORE of that scheme: a linear N-compartment PBPK
+// derivative dC = A * C, where A is the (flattened, row-major) rate matrix and
+// C is the per-patient concentration state vector.
+//
+// SCOPE (do not over-read): this is the 3-compartment linear RHS, verified to
+// pass `check` and emit PTX. It is NOT a full 14-compartment Tsit5 step, and it
+// does NOT yet index per-thread patient state — the GPU thread intrinsics
+// (gpu_thread_id_x, etc.) are outside the checked public kernel surface (see
+// docs/audit/GPU_PBPK14_POPULATION_PARALLEL_SCOPE_2026-06-14.md).
+//
+// Verified surface (souc-linux-x86_64-gpu, GPU profile):
+//   "$SOUC_GPU_BIN" check examples/kretikos/pbpk_rhs_kernel.sio
+//   "$SOUC_GPU_BIN" build examples/kretikos/pbpk_rhs_kernel.sio --backend gpu -o /tmp/pbpk_rhs.ptx
+//
+// Kernel-legal constructs used (all confirmed accepted by the checked GPU bin):
+//   - kernel fn ... with GPU, Panic, Div, Mut
+//   - f64 arithmetic and `let` bindings
+//   - fixed-size f64 arrays with indexed read/write (needs Panic = bounds check)
+//   - `while` loops with mutable accumulators (needs Div, Mut)
+
+// Linear PBPK RHS for n compartments: dC[i] = sum_j A[i*n + j] * C[j].
+//
+// `a` is the row-major flattened rate matrix (n*n), `c` is the state vector,
+// `dc` receives the derivative. For n=3 this is a 3-compartment linear model;
+// the loop structure scales directly to n=14 (the population-parallel target).
+kernel fn pbpk_rhs_linear(n: i64) with GPU, Panic, Div, Mut {
+    // Local per-thread state. In the population-parallel build these are read
+    // from per-patient global slices indexed by gpu_thread_id_x(); here they are
+    // local to keep the kernel inside the checked public surface.
+    let a = [
+        0.0 - 0.5, 0.1, 0.0,
+        0.5, 0.0 - 0.4, 0.2,
+        0.0, 0.3, 0.0 - 0.2,
+    ]
+    let c = [10.0, 0.0, 0.0]
+    let mut dc = [0.0, 0.0, 0.0]
+
+    let mut i = 0
+    while i < n {
+        let mut acc = 0.0
+        let mut j = 0
+        while j < n {
+            acc = acc + a[i * n + j] * c[j]
+            j = j + 1
+        }
+        dc[i] = acc
+        i = i + 1
+    }
+}
+
+// Explicit 3-compartment unrolled form (no loop) — the simplest kernel-legal
+// dC = A*C, kept as a second witness that the closed-form RHS also checks.
+kernel fn pbpk_rhs_3comp(c0: f64, c1: f64, c2: f64) with GPU {
+    let dc0 = 0.0 - 0.5 * c0 + 0.1 * c1
+    let dc1 = 0.5 * c0 - 0.4 * c1 + 0.2 * c2
+    let dc2 = 0.3 * c1 - 0.2 * c2
+}
+
+fn main() -> i32 with IO {
+    0
+}
