@@ -40,6 +40,10 @@ use io::env::{read_env}
 var NATIVE_ELF_BUF: [i8; 16777216] = [0; 16777216]
 // Write cursor — module-scope avoids &! i64 ref mutation issues in helper fns.
 var NATIVE_ELF_OFF: i64 = 0
+// Scratch IR functions for the sret witness. These are module-scope to avoid
+// putting IrFunction-sized temporaries on the Madaros runtime stack.
+var NV2_SRET_MAIN_FN: IrFunction = ir_empty_function()
+var NV2_SRET_MAKE_FN: IrFunction = ir_empty_function()
 
 // ============================================================================
 // Native dispatcher contracts (Sprint 1)
@@ -1479,6 +1483,13 @@ fn nc_emit_load_rax_mem_rbx_disp32(nc: &! NativeCompiler, disp: i64) with Mut, P
     nc_emit_u32_le(nc, disp)
 }
 
+fn nc_emit_load_rax_mem_rax_disp32(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x80)
+    nc_emit_u32_le(nc, disp)
+}
+
 fn nc_emit_store_rax_mem_rbx_disp32(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x89)
@@ -2170,10 +2181,22 @@ fn native_v2_resolve_handle_to_object_base_rax(nc: NativeCompiler) -> NativeComp
     var c = nc
     c.code = emit_mov_rbx_rax(c.code)
     c.code = emit_imul_rbx_rbx_imm8(c.code, native_v2_handle_entry_size())
+    c.code = emit_mov_reg_reg(c.code, 7, 3)
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_table_base())
+    c.code = emit_mov_reg_reg(c.code, 3, 7)
     c.code = emit_add_rax_rbx(c.code)
     c.code = emit_load_rax_mem_rax_disp32(c.code, native_v2_handle_entry_field_object_base())
     c
+}
+
+fn native_v2_resolve_handle_to_object_base_rax_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_rbx_rax(nc)
+    nc_emit_imul_rbx_rbx_imm8(nc, native_v2_handle_entry_size())
+    nc_emit_mov_reg_reg(nc, 7, 3)
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_table_base())
+    nc_emit_mov_reg_reg(nc, 3, 7)
+    nc_emit_add_rax_rbx(nc)
+    nc_emit_load_rax_mem_rax_disp32(nc, native_v2_handle_entry_field_object_base())
 }
 
 fn native_data_add_u64(st: StringTable, value: i64) -> StringTable with Mut, Panic, Div {
@@ -3072,6 +3095,33 @@ fn emit_builtin_str_concat(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     c.code = emit_pop_rbp(c.code)                         // 1
     c.code = emit_ret(c.code)                              // 1
     c
+}
+
+fn native_v2_persist_builtin_emit_into(nc: &! NativeCompiler, updated: NativeCompiler) with Mut, Panic, Div {
+    let new_len = updated.code.len
+    (*nc).code = updated.code
+    var code = (*nc).code
+    code.len = new_len
+    (*nc).code = code
+    var ri = 0
+    while ri < updated.relocs.count && ri < 4096 {
+        let entry = updated.relocs.entries[ri as usize]
+        if entry.kind.kind_code == 3 {
+            nc_add_data_section_reloc(nc, entry.offset, entry.target.target_index)
+        }
+        ri = ri + 1
+    }
+}
+
+fn emit_builtin_str_len_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_xor_rcx_rcx(nc)
+    (*nc).code = emit_cmp_byte_rdi_zero((*nc).code)
+    nc_emit_jz_rel8(nc, 8)
+    nc_emit_inc_rdi(nc)
+    nc_emit_inc_rcx(nc)
+    nc_emit_jmp_rel8(nc, -13)
+    nc_emit_mov_reg_reg(nc, 0, 1)
+    nc_emit_ret(nc)
 }
 
 // ============================================================================
@@ -4996,10 +5046,17 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
 
     // --- spill_ir_params (inlined, no &!) ---
     var sp_i = 0
-    while sp_i < func.param_count && sp_i < 6 {
+    let sp_sret_shift = if func.is_sret == 1 { 1 } else { 0 }
+    if sp_sret_shift == 1 {
+        let sp_dest_reg = func.sret_dest_reg
+        if sp_dest_reg >= 0 {
+            c.code = emit_store_reg_rbp_disp32(c.code, ir_slot_offset(sp_dest_reg), param_reg(0))
+        }
+    }
+    while sp_i < func.param_count && (sp_i + sp_sret_shift) < 6 {
         let sp_vreg = func.param_regs[sp_i as usize]
         if sp_vreg >= 0 {
-            let sp_preg = param_reg(sp_i)
+            let sp_preg = param_reg(sp_i + sp_sret_shift)
             let sp_offset = ir_slot_offset(sp_vreg)
             c.code = emit_store_reg_rbp_disp32(c.code, sp_offset, sp_preg)
         }
@@ -5325,6 +5382,30 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
     false
 }
 
+fn nc_core_call_arg_at(args: Option<Box<IrRegList>>, index: i64) -> i64 with Mut, Panic, Div {
+    if index < 0 {
+        return -1
+    }
+    match args {
+        Some(list) => {
+            if index == 0 {
+                return (*list).head
+            }
+            nc_core_call_arg_at((*list).tail, index - 1)
+        }
+        _ => -1,
+    }
+}
+
+fn nc_core_load_call_arg_into(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64, arg_index: i64, preg: i64) -> bool with Mut, Panic, Div {
+    let arg = nc_core_call_arg_at((*func).instrs[instr_index as usize].call_args, arg_index)
+    if arg < 0 {
+        return false
+    }
+    nc_emit_load_rbp_disp32_reg(nc, preg, ir_slot_offset(arg))
+    true
+}
+
 fn nc_core_emit_println_i64_literal_sentinel_into(nc: &! NativeCompiler, value: i64) -> bool with Mut, Panic, Div {
     if value < 0 || value > 999 {
         return false
@@ -5392,6 +5473,19 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_emit_lea_rax_rip_disp32(nc, 0)
             nc_add_rodata_reloc(nc, lea_pos + 3, str_offset)
             nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+        } else if instr_op == IrOpcode::IrFieldGet {
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            native_v2_resolve_handle_to_object_base_rax_into(nc)
+            nc_emit_mov_reg_imm(nc, 3, (*func).instrs[i as usize].field_idx + native_v2_object_header_size() / 8)
+            nc_emit_mov_rax_mem_rax_rbx8(nc)
+            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+        } else if instr_op == IrOpcode::IrFieldSet {
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            native_v2_resolve_handle_to_object_base_rax_into(nc)
+            nc_emit_mov_rdx_rax(nc)
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src2)
+            nc_emit_mov_reg_imm(nc, 3, (*func).instrs[i as usize].field_idx + native_v2_object_header_size() / 8)
+            nc_emit_store_rax_mem_rdx_rbx8(nc)
         } else if instr_op == IrOpcode::IrBinOp {
             if !nc_emit_core_binop(nc, func, i) {
                 return false
@@ -5405,18 +5499,57 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             }
         } else if instr_op == IrOpcode::IrCall {
             let argc = (*func).instrs[i as usize].arg_count
-            if argc > 2 {
+            if argc > 6 {
                 return false
             }
             if argc > 0 {
-                let arg0 = (*func).instrs[i as usize].src1
-                if arg0 < 0 { return false }
-                nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(arg0))
+                if !nc_core_load_call_arg_into(nc, func, i, 0, 7) { return false }
             }
             if argc > 1 {
-                let arg1 = (*func).instrs[i as usize].src2
-                if arg1 < 0 { return false }
-                nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(arg1))
+                if !nc_core_load_call_arg_into(nc, func, i, 1, 6) { return false }
+            }
+            if argc > 2 {
+                if !nc_core_load_call_arg_into(nc, func, i, 2, 2) { return false }
+            }
+            if argc > 3 {
+                if !nc_core_load_call_arg_into(nc, func, i, 3, 1) { return false }
+            }
+            if argc > 4 {
+                if !nc_core_load_call_arg_into(nc, func, i, 4, 8) { return false }
+            }
+            if argc > 5 {
+                if !nc_core_load_call_arg_into(nc, func, i, 5, 9) { return false }
+            }
+            let call_pos = (*nc).code.len
+            nc_emit_call_rel32_placeholder(nc)
+            nc_add_call_reloc(nc, call_pos + 1, (*func).instrs[i as usize].fn_id)
+            if (*func).instrs[i as usize].dst >= 0 {
+                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            }
+        } else if instr_op == IrOpcode::IrCallSret {
+            let argc = (*func).instrs[i as usize].arg_count
+            if argc > 5 {
+                return false
+            }
+            let dest_reg = (*func).instrs[i as usize].src1
+            if dest_reg < 0 { return false }
+            let first_arg = (*func).instrs[i as usize].field_idx
+            nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(dest_reg))
+            if argc > 0 {
+                if first_arg < 0 { return false }
+                nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(first_arg))
+            }
+            if argc > 1 {
+                nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(first_arg + 1))
+            }
+            if argc > 2 {
+                nc_emit_load_rbp_disp32_reg(nc, 1, ir_slot_offset(first_arg + 2))
+            }
+            if argc > 3 {
+                nc_emit_load_rbp_disp32_reg(nc, 8, ir_slot_offset(first_arg + 3))
+            }
+            if argc > 4 {
+                nc_emit_load_rbp_disp32_reg(nc, 9, ir_slot_offset(first_arg + 4))
             }
             let call_pos = (*nc).code.len
             nc_emit_call_rel32_placeholder(nc)
@@ -5425,6 +5558,11 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
             }
         } else if instr_op == IrOpcode::IrReturn {
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_emit_mov_rsp_rbp(nc)
+            nc_emit_pop_rbp(nc)
+            nc_emit_ret(nc)
+        } else if instr_op == IrOpcode::IrReturnSret {
             nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
             nc_emit_mov_rsp_rbp(nc)
             nc_emit_pop_rbp(nc)
@@ -5574,16 +5712,24 @@ pub fn native_v2_core_emit_return_into(nc: &! NativeCompiler, src: i64) with Mut
 }
 
 fn nc_emit_load_rbp_disp32_reg(nc: &! NativeCompiler, reg: i64, disp: i64) with Mut, Panic, Div {
-    nc_emit_byte(nc, 0x48)
+    if reg >= 8 {
+        nc_emit_byte(nc, 0x4c)
+    } else {
+        nc_emit_byte(nc, 0x48)
+    }
     nc_emit_byte(nc, 0x8b)
-    nc_emit_byte(nc, 0x80 | (reg * 8) | 5)
+    nc_emit_byte(nc, 0x80 | ((reg % 8) * 8) | 5)
     nc_emit_u32_le(nc, disp)
 }
 
 fn nc_emit_store_rbp_disp32_reg(nc: &! NativeCompiler, reg: i64, disp: i64) with Mut, Panic, Div {
-    nc_emit_byte(nc, 0x48)
+    if reg >= 8 {
+        nc_emit_byte(nc, 0x4c)
+    } else {
+        nc_emit_byte(nc, 0x48)
+    }
     nc_emit_byte(nc, 0x89)
-    nc_emit_byte(nc, 0x80 | (reg * 8) | 5)
+    nc_emit_byte(nc, 0x80 | ((reg % 8) * 8) | 5)
     nc_emit_u32_le(nc, disp)
 }
 
@@ -5645,6 +5791,14 @@ pub fn compile_ir_function_v2_from_ir_into(nc: &! NativeCompiler, func: &IrFunct
         let function_offset = (*nc).code.len
         native_compiler_set_fn_offset(nc, fn_index, function_offset)
         native_compiler_add_symbol_func_ref(nc, fn_index, func)
+        if builtin_id == 6 {
+            emit_builtin_str_len_into(nc)
+            return true
+        }
+        if builtin_id == 7 {
+            native_v2_persist_builtin_emit_into(nc, emit_builtin_str_eq((*nc)))
+            return true
+        }
         native_v2_emit_builtin_by_id_into(nc, builtin_id)
         return true
     }
@@ -5655,6 +5809,259 @@ pub fn compile_ir_function_v2_ref(nc: NativeCompiler, func: &IrFunction, machine
     var c = nc
     compile_ir_function_v2_into(&! c, func, machine_func, fn_index)
     c
+}
+
+fn native_v2_ir_alloc(dst: i64, type_id: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrAlloc)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: type_id,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn native_v2_ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: Name) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrFieldGet)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base_reg,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: field_name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn native_v2_ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: Name) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrFieldSet)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: base_reg,
+        src2: src,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: field_name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn native_v2_ir_return_sret(src: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrReturnSret)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: src,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn native_v2_ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, arg0: i64, explicit_arg_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrCallSret)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: dest_reg,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: fn_id,
+        field_idx: arg0,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: fn_name,
+        call_args: base.call_args,
+        arg_count: explicit_arg_count,
+    }
+}
+
+fn native_v2_fill_sret_main_fn(main_fn: &! IrFunction, plain_call: bool) with Mut, Panic, Div, Alloc {
+    (*main_fn).name.len = 4
+    (*main_fn).name.buf[0] = 109 as i8
+    (*main_fn).name.buf[1] = 97 as i8
+    (*main_fn).name.buf[2] = 105 as i8
+    (*main_fn).name.buf[3] = 110 as i8
+    (*main_fn).reg_count = 4
+    (*main_fn).instrs[0] = native_v2_ir_alloc(0, 64)
+    (*main_fn).instrs[1] = ir_load_imm(1, 7)
+    if plain_call {
+        (*main_fn).instrs[2] = ir_call(2, 1, ir_name_from_bytes(109, 97, 107, 101, 4), Some(Box::new(ir_reg_list_single(0))), 1)
+        (*main_fn).instrs[3] = native_v2_ir_field_get(3, 0, 1, ir_name_from_bytes(102, 49, 0, 0, 2))
+    } else {
+        (*main_fn).instrs[2] = native_v2_ir_call_sret(2, 0, ir_name_from_bytes(109, 97, 107, 101, 4), 1, 1, 1)
+        (*main_fn).instrs[3] = native_v2_ir_field_get(3, 2, 1, ir_name_from_bytes(102, 49, 0, 0, 2))
+    }
+    (*main_fn).instrs[4] = ir_return(3)
+    (*main_fn).instr_count = 5
+}
+
+fn native_v2_fill_sret_make_fn(make_fn: &! IrFunction) with Mut, Panic, Div {
+    (*make_fn).name.len = 4
+    (*make_fn).name.buf[0] = 109 as i8
+    (*make_fn).name.buf[1] = 97 as i8
+    (*make_fn).name.buf[2] = 107 as i8
+    (*make_fn).name.buf[3] = 101 as i8
+    (*make_fn).is_sret = 1
+    (*make_fn).sret_dest_reg = 0
+    (*make_fn).param_count = 1
+    (*make_fn).param_regs[0] = 1
+    (*make_fn).reg_count = 6
+    (*make_fn).instrs[0] = native_v2_ir_field_set(0, 0, 1, ir_name_from_bytes(102, 48, 0, 0, 2))
+    (*make_fn).instrs[1] = ir_load_imm(2, 2)
+    (*make_fn).instrs[2] = ir_binop(3, 1, BinaryOp::OpMul, 2)
+    (*make_fn).instrs[3] = native_v2_ir_field_set(0, 1, 3, ir_name_from_bytes(102, 49, 0, 0, 2))
+    (*make_fn).instrs[4] = ir_load_imm(4, 1)
+    (*make_fn).instrs[5] = ir_binop(5, 1, BinaryOp::OpAdd, 4)
+    (*make_fn).instrs[6] = native_v2_ir_field_set(0, 2, 5, ir_name_from_bytes(102, 50, 0, 0, 2))
+    (*make_fn).instrs[7] = native_v2_ir_return_sret(0)
+    (*make_fn).instr_count = 8
+}
+
+fn native_v2_emit_sret_witness_main_into(nc: &! NativeCompiler, plain_call: bool) -> bool with Mut, Panic, Div {
+    reset_function_state_mut(nc)
+    let function_offset = (*nc).code.len
+    native_compiler_set_fn_offset(nc, 0, function_offset)
+    let main_name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    native_compiler_add_symbol_name_ref(nc, 0, &main_name)
+
+    nc_emit_push_rbp(nc)
+    nc_emit_mov_rbp_rsp(nc)
+    nc_emit_sub_rsp_imm32(nc, 512)
+
+    if !nc_core_emit_alloc_into(nc, 0, 64) { return false }
+    native_v2_core_emit_load_imm_into(nc, 1, 7)
+
+    if plain_call {
+        nc_core_load_temp_to_rax(nc, 0)
+        nc_emit_mov_rdi_rax(nc)
+    } else {
+        nc_core_load_temp_to_rax(nc, 0)
+        nc_emit_mov_rdi_rax(nc)
+        nc_core_load_temp_to_rax(nc, 1)
+        nc_emit_mov_reg_reg(nc, 6, 0)
+    }
+
+    let call_pos = (*nc).code.len
+    nc_emit_call_rel32_placeholder(nc)
+    nc_add_call_reloc(nc, call_pos + 1, 1)
+    if !plain_call {
+        nc_core_store_rax_to_temp(nc, 2)
+        nc_core_load_temp_to_rax(nc, 2)
+    } else {
+        nc_core_load_temp_to_rax(nc, 0)
+    }
+    native_v2_resolve_handle_to_object_base_rax_into(nc)
+    nc_emit_mov_reg_imm(nc, 3, 1 + native_v2_object_header_size() / 8)
+    nc_emit_mov_rax_mem_rax_rbx8(nc)
+    nc_core_store_rax_to_temp(nc, 3)
+    native_v2_core_emit_return_into(nc, 3)
+    true
+}
+
+fn native_v2_emit_sret_witness_make_into(nc: &! NativeCompiler) -> bool with Mut, Panic, Div {
+    reset_function_state_mut(nc)
+    let function_offset = (*nc).code.len
+    native_compiler_set_fn_offset(nc, 1, function_offset)
+    let make_name = ir_name_from_bytes(109, 97, 107, 101, 4)
+    native_compiler_add_symbol_name_ref(nc, 1, &make_name)
+
+    nc_emit_push_rbp(nc)
+    nc_emit_mov_rbp_rsp(nc)
+    nc_emit_sub_rsp_imm32(nc, 512)
+    nc_emit_store_rbp_disp32_reg(nc, 7, ir_slot_offset(0))
+    nc_emit_store_rbp_disp32_reg(nc, 6, ir_slot_offset(1))
+
+    nc_core_load_temp_to_rax(nc, 0)
+    native_v2_resolve_handle_to_object_base_rax_into(nc)
+    nc_emit_mov_rdx_rax(nc)
+    nc_core_load_temp_to_rax(nc, 1)
+    nc_emit_mov_reg_imm(nc, 3, 0 + native_v2_object_header_size() / 8)
+    nc_emit_store_rax_mem_rdx_rbx8(nc)
+
+    native_v2_core_emit_load_imm_into(nc, 2, 2)
+    if !native_v2_core_emit_binop_code_into(nc, 3, 1, 3, 2) { return false }
+
+    nc_core_load_temp_to_rax(nc, 0)
+    native_v2_resolve_handle_to_object_base_rax_into(nc)
+    nc_emit_mov_rdx_rax(nc)
+    nc_core_load_temp_to_rax(nc, 3)
+    nc_emit_mov_reg_imm(nc, 3, 1 + native_v2_object_header_size() / 8)
+    nc_emit_store_rax_mem_rdx_rbx8(nc)
+
+    native_v2_core_emit_load_imm_into(nc, 4, 1)
+    if !native_v2_core_emit_binop_code_into(nc, 5, 1, 1, 4) { return false }
+
+    nc_core_load_temp_to_rax(nc, 0)
+    native_v2_resolve_handle_to_object_base_rax_into(nc)
+    nc_emit_mov_rdx_rax(nc)
+    nc_core_load_temp_to_rax(nc, 5)
+    nc_emit_mov_reg_imm(nc, 3, 2 + native_v2_object_header_size() / 8)
+    nc_emit_store_rax_mem_rdx_rbx8(nc)
+
+    native_v2_core_emit_return_into(nc, 0)
+    true
+}
+
+pub fn compile_native_v2_sret_witness_to_file(output_path: string, plain_call: bool) -> i32 with IO, Mut, Panic, Div, Alloc {
+    var nc = compiler_new()
+    compile_module_streaming_begin_count_into(&! nc, 2)
+
+    if !native_v2_emit_sret_witness_main_into(&! nc, plain_call) { return 12 }
+    if !native_v2_emit_sret_witness_make_into(&! nc) { return 12 }
+
+    var final_data = nc.data
+    if final_data.len < runtime_context_global_slot_size() {
+        final_data.len = runtime_context_global_slot_size()
+        nc.data = final_data
+    }
+    emit_entry_trampoline_split_into(&! nc, 0)
+    let text_file_offset = 4096
+    let reloc_rodata_off = align_page(text_file_offset + nc.code.len)
+    let reloc_eff_rodata = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
+    let reloc_data_off = align_page(reloc_rodata_off + reloc_eff_rodata)
+    apply_relocations_into(&! nc, reloc_rodata_off, reloc_data_off)
+    native_v2_write_min_elf64_to_file(output_path, &! nc, nc.entry_offset, 4194304)
 }
 
 // Map MachineOperand to a scheduler register ID for dependency tracking.
@@ -5894,12 +6301,19 @@ fn spill_ir_params(nc: NativeCompiler, func: IrFunction) -> NativeCompiler with 
 
 fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction) with Mut, Panic, Div {
     var i = 0
-    while i < func.param_count && i < 6 {
+    let sret_shift = if func.is_sret == 1 { 1 } else { 0 }
+    if sret_shift == 1 {
+        let dest_reg = func.sret_dest_reg
+        if dest_reg >= 0 {
+            nc_emit_store_rbp_disp32_reg(nc, param_reg(0), ir_slot_offset(dest_reg))
+        }
+    }
+    while i < func.param_count && (i + sret_shift) < 6 {
         let vreg = func.param_regs[i as usize]
         if vreg >= 0 {
-            let preg = param_reg(i)
+            let preg = param_reg(i + sret_shift)
             let offset = ir_slot_offset(vreg)
-            (*nc).code = emit_store_reg_rbp_disp32((*nc).code, offset, preg)
+            nc_emit_store_rbp_disp32_reg(nc, preg, offset)
         }
         i = i + 1
     }
@@ -5907,12 +6321,19 @@ fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction) with Mut, Panic,
 
 fn spill_ir_params_ref_mut(nc: &! NativeCompiler, func: &IrFunction) with Mut, Panic, Div {
     var i = 0
-    while i < (*func).param_count && i < 6 {
+    let sret_shift = if (*func).is_sret == 1 { 1 } else { 0 }
+    if sret_shift == 1 {
+        let dest_reg = (*func).sret_dest_reg
+        if dest_reg >= 0 {
+            nc_emit_store_rbp_disp32_reg(nc, param_reg(0), ir_slot_offset(dest_reg))
+        }
+    }
+    while i < (*func).param_count && (i + sret_shift) < 6 {
         let vreg = (*func).param_regs[i as usize]
         if vreg >= 0 {
-            let preg = param_reg(i)
+            let preg = param_reg(i + sret_shift)
             let offset = ir_slot_offset(vreg)
-            (*nc).code = emit_store_reg_rbp_disp32((*nc).code, offset, preg)
+            nc_emit_store_rbp_disp32_reg(nc, preg, offset)
         }
         i = i + 1
     }
@@ -7603,7 +8024,8 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         emit_entry_trampoline_split_into(&! nc, main_idx)
     }
     let patched_rodata_file_offset = align_page(text_file_offset + nc.code.len)
-    let patched_data_file_offset = align_page(patched_rodata_file_offset + nc.rodata.len)
+    let reloc_eff_rodata = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
+    let patched_data_file_offset = align_page(patched_rodata_file_offset + reloc_eff_rodata)
     apply_relocations_into(&! nc, patched_rodata_file_offset, patched_data_file_offset)
     let entry = trampoline_offset(nc)
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)

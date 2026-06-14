@@ -15,6 +15,8 @@
 # Layout produced under <prefix>:
 #   <prefix>/bin/souc                    (launcher; PATH-friendly)
 #   <prefix>/bin/souc-self-hosted-<host> (native compiler binary)
+#   <prefix>/bin/madaros                 (Stage1 modular compiler launcher, when built)
+#   <prefix>/bin/madaros-linux-x86_64    (Stage1 modular compiler ELF, when built)
 #   <prefix>/lib/sounio/stdlib/...       (stdlib tree)
 #   <prefix>/lib/sounio/scripts/lib/...  (resolver + helpers used by launcher)
 #   <prefix>/share/doc/sounio/...        (INSTALL.md, KNOWN_LIMITATIONS.md)
@@ -91,6 +93,7 @@ case "$TARGET" in
     ;;
   *) echo "error: unrecognised --target $TARGET" >&2; exit 2;;
 esac
+MADAROS_ART_BIN="$ROOT_DIR/artifacts/self-hosted/madaros"
 
 if [[ ! -x "$ART_BIN" ]]; then
   echo "error: missing artifact: $ART_BIN" >&2
@@ -116,6 +119,11 @@ echo "Sounio install plan:"
 echo "  prefix:  $PREFIX"
 echo "  target:  $TARGET"
 echo "  binary:  $ART_BIN -> $BIN_DIR/souc-self-hosted-$TARGET"
+if [[ -x "$MADAROS_ART_BIN" ]]; then
+  echo "  madaros: $MADAROS_ART_BIN -> $BIN_DIR/madaros-linux-x86_64"
+else
+  echo "  madaros: <not built; run make build-madaros to include Stage1>"
+fi
 echo "  stdlib:  $(du -sh stdlib | awk '{print $1}') -> $LIB_STDLIB  (copy: $COPY_STDLIB)"
 echo "  doc:     $DOC_DIR"
 echo
@@ -148,6 +156,11 @@ install -m 0644 "$ROOT_DIR/scripts/lib/macos_codesign.sh"    "$LIB_SCRIPTS/"
 # We symlink top-level $PREFIX/stdlib and $PREFIX/scripts to the canonical
 # lib/ locations so the launcher's relative lookups resolve cleanly.
 install -m 0755 "$ROOT_DIR/bin/souc" "$BIN_DIR/souc"
+
+if [[ -x "$MADAROS_ART_BIN" ]]; then
+  install -m 0755 "$ROOT_DIR/bin/madaros" "$BIN_DIR/madaros"
+  install -m 0755 "$MADAROS_ART_BIN" "$BIN_DIR/madaros-linux-x86_64"
+fi
 
 # Mirror scripts/lib at $PREFIX/scripts/lib so launcher's
 # $ROOT_DIR/scripts/lib/macos_codesign.sh path resolves.
@@ -191,6 +204,13 @@ if "$BIN_DIR/souc" --version 2>/dev/null; then
 else
   echo "  WARN  souc --version returned non-zero"
 fi
+if [[ -x "$BIN_DIR/madaros" ]]; then
+  if "$BIN_DIR/madaros" --version 2>/dev/null; then
+    echo "  ok  madaros --version"
+  else
+    echo "  WARN  madaros --version returned non-zero"
+  fi
+fi
 
 cat <<EOF
 
@@ -199,9 +219,10 @@ Next steps:
   export SOUNIO_STDLIB_PATH="$LIB_STDLIB"
   souc --version
   souc info
+  madaros --version       # if make build-madaros was run before install
   souc check examples/hello.sio   # if running from this checkout
 
 Uninstall:
-  rm -f $BIN_DIR/souc $BIN_DIR/souc-self-hosted-$TARGET $BIN_DIR/souc-linux-x86_64
+  rm -f $BIN_DIR/souc $BIN_DIR/souc-self-hosted-$TARGET $BIN_DIR/souc-linux-x86_64 $BIN_DIR/madaros $BIN_DIR/madaros-linux-x86_64
   rm -rf $LIB_ROOT $DOC_DIR $PREFIX/stdlib $PREFIX/scripts/lib $PREFIX/tools/repl.sh
 EOF

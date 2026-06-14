@@ -70,6 +70,10 @@ build-madaros:       ## Build the Stage1 modular compiler (Madaros)
 	@echo "→ Building Madaros (Stage1 modular compiler)"
 	bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
 
+madaros-full-gate: build-madaros ## Build Madaros, then run the Stage1 end-to-end gate
+	@echo "→ Running Madaros full-functioning gate"
+	bash scripts/ci/madaros_full_gate.sh
+
 clean:               ## Remove generated ELF artifacts (gen1, gen2, gen3)
 	rm -f gen1.elf gen2.elf gen3.elf gen4.elf
 	@echo "✓ Cleaned generated artifacts"

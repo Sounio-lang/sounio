@@ -66,6 +66,7 @@ Extract and add to PATH:
     export SOUNIO_STDLIB_PATH="\$PWD/sounio-$VERSION-$TARGET/lib/sounio/stdlib"
     souc --version
     souc info
+    madaros --version
 
 Documentation:
     share/doc/sounio/INSTALL.md
@@ -94,3 +95,6 @@ TMP_VERIFY="$(mktemp -d)"
 trap 'rm -rf "$STAGE_DIR" "$TMP_VERIFY"' EXIT
 tar -xzf "$ARCHIVE" -C "$TMP_VERIFY"
 "$TMP_VERIFY/sounio-$VERSION-$TARGET/bin/souc" --version
+if [[ -x "$TMP_VERIFY/sounio-$VERSION-$TARGET/bin/madaros" ]]; then
+  "$TMP_VERIFY/sounio-$VERSION-$TARGET/bin/madaros" --version
+fi
