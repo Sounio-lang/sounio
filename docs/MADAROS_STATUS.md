@@ -6,7 +6,10 @@
 
 ## Confirmed state
 
-- **`origin/main = 17d1157be`** — `fix(madaros): remove raw check caveats from full gate`
+- **Green since `17d1157be`** — `fix(madaros): remove raw check caveats from full gate`.
+  It **stays green as `main` advances**: re-verified at the current tip, which now
+  includes `4177613ca` (`fix(check): free 16MB Checker allocation on every return
+  path in mod.sio`). Track `origin/main`, **not** a frozen SHA.
 - Madaros is the **Stage1 modular compiler** (`bin/madaros`,
   `scripts/ci/build_modular_madaros.sh`, `scripts/ci/madaros_full_gate.sh`).
   It is distinct from `souc` (the lean_single monolith), which still ships.
@@ -31,6 +34,9 @@ PASS: source run
 PASS: native-v2 ABI/backend witnesses
 PASS: package manager self-test
 ```
+
+Re-verified at the current tip (fresh build from source through `4177613ca`) —
+same result, all checks PASS. The green state is not tip-fragile.
 
 The previously-dangerous bad-input case is fixed on **both** paths (clean error,
 `rc=1`, **no SIGSEGV**):
