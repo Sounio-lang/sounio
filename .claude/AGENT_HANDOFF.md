@@ -1,8 +1,8 @@
 # Claude Code Agent Handoff
 
-> **⚠️ MADAROS STATUS (current):** Madaros is green on `origin/main@17d1157be`.
+> **⚠️ MADAROS STATUS (current):** Madaros is green on `origin/main`.
 > Do not judge checker issues from stale worktrees or prebuilt raw artifacts.
-> See `artifacts/kimi-briefing/MADAROS_MAIN_GREEN_HANDOFF.md` for sync/rebuild
+> See [`docs/MADAROS_STATUS.md`](../docs/MADAROS_STATUS.md) for sync/rebuild
 > instructions and the valid proof gate (`make madaros-full-gate`).
 
 > **⚠️ WORKSPACE STABILITY (2026-05-29).** The pod was recycled twice by the k8s
