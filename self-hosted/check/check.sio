@@ -987,6 +987,9 @@ fn checker_exit_type_expr_mut(c: *mut Checker) with Mut {
     if (*c).type_depth > 0 {
         (*c).type_depth = (*c).type_depth - 1
     }
+    if (*c).complexity_budget > 0 {
+        (*c).complexity_budget = (*c).complexity_budget - 1
+    }
 }
 
 fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry with Mut, Panic, Div, Alloc {
@@ -1272,7 +1275,7 @@ fn checker_lower_fn_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry wi
         defining_module: empty_path(),
     }
     let sig_id = (*c).fn_sigs.count
-    if sig_id >= 64 {
+    if sig_id >= 4096 {
         checker_note_type_error_mut(c)
         return ty_error()
     }
@@ -2506,13 +2509,13 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
             // FnSigTable by value (one of the large-aggregate copies the *mut
             // conversion eliminates).
             let sig_id = (*c).fn_sigs.count
-            if sig_id < 64 {
+            if sig_id < 4096 {
                 (*c).fn_sigs.entries[sig_id as usize] = sig
                 (*c).fn_sigs.count = sig_id + 1
             }
             // In-place env bind mirrors TypeEnv::bind (avoids copying the 32KB TypeEnv).
             let benv_idx = (*c).env.count
-            if benv_idx < 128 {
+            if benv_idx < 4096 {
                 (*c).env.bindings[benv_idx as usize] = TypeBinding {
                     name: name,
                     ty: ty_fn(sig_id),
@@ -2525,6 +2528,146 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
         }
         None => {}
     }
+}
+
+fn checker_collect_global_item_inplace(c: *mut Checker, name: Name) with Mut, Panic, Div {
+    let benv_idx = (*c).env.count
+    if benv_idx < 4096 {
+        (*c).env.bindings[benv_idx as usize] = TypeBinding {
+            name: name,
+            ty: ty_unknown(),
+            is_mutable: true,
+            scope_depth: (*c).env.scope_depth,
+        }
+        (*c).env.count = benv_idx + 1
+    }
+    checker_const_int_bind_unknown_inplace(c, name)
+}
+
+fn checker_env_has_binding_inplace(c: *mut Checker, name: Name) -> bool with Mut, Panic, Div {
+    var i = (*c).env.count - 1
+    while i >= 0 {
+        if name_eq((*c).env.bindings[i as usize].name, name) {
+            return true
+        }
+        i = i - 1
+    }
+    false
+}
+
+fn checker_bind_import_unknown_with_mutability_inplace(c: *mut Checker, name: Name, is_mutable: bool) with Mut, Panic, Div {
+    if name.len <= 0 {
+        return
+    }
+    var i = (*c).env.count - 1
+    while i >= 0 {
+        if name_eq((*c).env.bindings[i as usize].name, name) {
+            if is_mutable {
+                (*c).env.bindings[i as usize].is_mutable = true
+            }
+            return
+        }
+        i = i - 1
+    }
+    let benv_idx = (*c).env.count
+    if benv_idx < 4096 {
+        (*c).env.bindings[benv_idx as usize] = TypeBinding {
+            name: name,
+            ty: ty_unknown(),
+            is_mutable: is_mutable,
+            scope_depth: (*c).env.scope_depth,
+        }
+        (*c).env.count = benv_idx + 1
+    }
+    checker_const_int_bind_unknown_inplace(c, name)
+}
+
+fn checker_bind_import_unknown_inplace(c: *mut Checker, name: Name) with Mut, Panic, Div {
+    checker_bind_import_unknown_with_mutability_inplace(c, name, false)
+}
+
+fn checker_bind_import_mutable_unknown_inplace(c: *mut Checker, name: Name) with Mut, Panic, Div {
+    checker_bind_import_unknown_with_mutability_inplace(c, name, true)
+}
+
+fn checker_collect_import_item_list_inplace(c: *mut Checker, opt: Option<Box<ImportItemList> >) with Mut, Panic, Div {
+    var cursor = opt
+    while true {
+        match cursor {
+            Some(node) => {
+                checker_bind_import_unknown_inplace(c, (*node).head)
+                cursor = (*node).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_string_list_head_eq(sl: StringList, text: string) -> bool with Mut, Panic, Div {
+    let len = str_len(text)
+    if sl.head_len != len {
+        return false
+    }
+    var i: i64 = 0
+    while i < len {
+        if sl.head_buf[i as usize] != (str_char_at(text, i) as i8) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn checker_path_first_two_eq(path: AstPath, first: string, second: string) -> bool with Mut, Panic, Div {
+    if path.seg_count < 2 {
+        return false
+    }
+    if !checker_string_list_head_eq(path.segments, first) {
+        return false
+    }
+    match path.segments.tail {
+        Some(rest) => checker_string_list_head_eq(*rest, second)
+        None => false
+    }
+}
+
+fn checker_collect_known_module_backing_imports_inplace(c: *mut Checker, path: AstPath) with Mut, Panic, Div {
+    // The boot4/raw checker currently type-checks modules with a shared symbol
+    // table but without a full import namespace. Keep the stopgap narrow:
+    // native-v2 imports scalar bootstrap stores directly from a few modules.
+    if checker_path_first_two_eq(path, "lexer", "cursor") {
+        checker_bind_import_mutable_unknown_inplace(c, make_name("CURSOR_SOURCE"))
+        checker_bind_import_mutable_unknown_inplace(c, make_name("CURSOR_SOURCE_LEN"))
+    }
+    if checker_path_first_two_eq(path, "parser", "parser") {
+        checker_bind_import_mutable_unknown_inplace(c, make_name("PT_KIND_CODE"))
+        checker_bind_import_mutable_unknown_inplace(c, make_name("PT_START"))
+        checker_bind_import_mutable_unknown_inplace(c, make_name("PT_END"))
+        checker_bind_import_mutable_unknown_inplace(c, make_name("PT_INT_VALUE"))
+    }
+    if checker_path_first_two_eq(path, "io", "file_write") {
+        checker_bind_import_unknown_inplace(c, make_name("io_write_meg_binary"))
+        checker_bind_import_unknown_inplace(c, make_name("io_make_executable"))
+    }
+}
+
+fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div {
+    checker_collect_import_item_list_inplace(c, item.use_items)
+    checker_collect_known_module_backing_imports_inplace(c, item.use_path)
+}
+
+fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Div {
+    checker_bind_import_unknown_inplace(c, make_name("arg_count"))
+    checker_bind_import_unknown_inplace(c, make_name("get_arg"))
+    checker_bind_import_unknown_inplace(c, make_name("str_len"))
+    checker_bind_import_unknown_inplace(c, make_name("str_char_at"))
+    checker_bind_import_unknown_inplace(c, make_name("str_eq"))
+    checker_bind_import_unknown_inplace(c, make_name("file_size"))
+    checker_bind_import_unknown_inplace(c, make_name("read_file"))
+    checker_bind_import_unknown_inplace(c, make_name("write_file"))
+    checker_bind_import_unknown_inplace(c, make_name("print"))
+    checker_bind_import_unknown_inplace(c, make_name("print_int"))
+    checker_bind_import_unknown_inplace(c, make_name("print_char"))
 }
 
 // *mut declaration collectors — port of the by-value collect_struct_def /
@@ -2635,18 +2778,24 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
     // checker_check_if_expr_inplace — no 8MB self SRET), and i64==enum compares are accepted
     // (C-style, matching canonical). See docs/audit/g1_wip/ENUM_PATH_TYPING_DESIGN_2026-06-01.md.
     if item.kind == ItemKind::ItemFn {
-        checker_collect_fn_def_inplace(c, item.fn_def, item.visibility, (*c).current_module)
+        match item.fn_def {
+            Some(fd) => checker_collect_fn_def_inplace(c, Some(fd), item.visibility, (*c).current_module)
+            None => checker_collect_global_item_inplace(c, item.name)
+        }
     } else if item.kind == ItemKind::ItemStruct {
         checker_collect_struct_def_inplace(c, item.name, item.struct_def, item.visibility, (*c).current_module)
     } else if item.kind == ItemKind::ItemEnum {
         checker_collect_enum_def_inplace(c, item.name, item.enum_def, item.visibility, (*c).current_module)
+    } else if item.kind == ItemKind::ItemUse {
+        checker_collect_use_item_inplace(c, item)
     } else {
-        // ItemUse / ItemSession / impl / typealias / policy / … — not yet collected by the
+        // ItemSession / impl / typealias / policy / … — not yet collected by the
         // *mut spine (no-op, same as before). *mut collectors pending.
     }
 }
 
 fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    checker_collect_runtime_builtins_inplace(c)
     var cursor = items
     while true {
         match cursor {
@@ -5101,11 +5250,19 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
 fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     let expected_ty = call_ref_inner_or_self(param_ty)
     let provided_ty = call_ref_inner_or_self(arg_ty)
-    if is_error_or_unknown(expected_ty) || is_error_or_unknown(provided_ty) {
+    let expected_unit = expected_ty.unit_id
+    let provided_unit = provided_ty.unit_id
+    if expected_unit < 0 || provided_unit < 0 {
         return
     }
-    if expected_ty.unit_id >= 0 && provided_ty.unit_id >= 0 && expected_ty.unit_id != provided_ty.unit_id {
-        let t = (*c).report_unit_call_mismatch(call_span, provided_ty.unit_id, expected_ty.unit_id)
+    if expected_ty.kind == TypeKind::TyError || expected_ty.kind == TypeKind::TyUnknown || expected_ty.kind == TypeKind::TyNever {
+        return
+    }
+    if provided_ty.kind == TypeKind::TyError || provided_ty.kind == TypeKind::TyUnknown || provided_ty.kind == TypeKind::TyNever {
+        return
+    }
+    if expected_unit != provided_unit {
+        let t = (*c).report_unit_call_mismatch(call_span, provided_unit, expected_unit)
         checker_store_from_value(c, t)
         return
     }
