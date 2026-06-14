@@ -124,8 +124,32 @@ expect_exit 1 "$WORK/wide_add4.elf"
 pass "IrWideAdd 4-limb carry chain (exit=1, not fake-i64 exit=0)"
 
 # ---------------------------------------------------------------------------
+# 8. Wide-sub witness: i128 (hi=2,lo=0) - (hi=0,lo=1) -> borrow -> hi=1.
+#    Fake-i64 would give 2. Exit code MUST be 1.
+# ---------------------------------------------------------------------------
+"$MADAROS" --native-v2-emit-wide-sub "$WORK/wide_sub.elf" >"$WORK/wide_sub.log" 2>&1
+expect_log_contains "wide-sub rc=0" "$WORK/wide_sub.log"
+[[ -s "$WORK/wide_sub.elf" ]] || fail "wide-sub did not produce ELF"
+file "$WORK/wide_sub.elf" | grep -Fq "ELF 64-bit" || fail "wide-sub not ELF64"
+chmod +x "$WORK/wide_sub.elf"
+expect_exit 1 "$WORK/wide_sub.elf"
+pass "IrWideSub borrow chain (exit=1, not fake-i64 exit=2)"
+
+# ---------------------------------------------------------------------------
+# 9. Wide-mul witness: i128 2^32 * 2^32 = 2^64 -> lo=0, hi=1.
+#    Fake-i64 (single mul) would give 0. Exit code MUST be 1.
+# ---------------------------------------------------------------------------
+"$MADAROS" --native-v2-emit-wide-mul "$WORK/wide_mul.elf" >"$WORK/wide_mul.log" 2>&1
+expect_log_contains "wide-mul rc=0" "$WORK/wide_mul.log"
+[[ -s "$WORK/wide_mul.elf" ]] || fail "wide-mul did not produce ELF"
+file "$WORK/wide_mul.elf" | grep -Fq "ELF 64-bit" || fail "wide-mul not ELF64"
+chmod +x "$WORK/wide_mul.elf"
+expect_exit 1 "$WORK/wide_mul.elf"
+pass "IrWideMul schoolbook multiply (exit=1, not fake-i64 exit=0)"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
-echo "[wide-int] PASS: type identity, type safety, casts, i128/i256 compile, IrWideAdd witness"
-echo "[wide-int] NOTE: IrWideSub/Mul/Div/Mod/Shr/Cmp not yet codegen-supported"
+echo "[wide-int] PASS: type identity, type safety, casts, i128/i256 compile, IrWideAdd/Sub/Mul witnesses"
+echo "[wide-int] NOTE: IrWideDiv/Mod/Shr/Cmp not yet codegen-supported"
 echo "[wide-int] NOTE: source-level wide arithmetic lowering not yet implemented"
