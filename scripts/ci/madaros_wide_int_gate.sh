@@ -148,8 +148,85 @@ expect_exit 1 "$WORK/wide_mul.elf"
 pass "IrWideMul schoolbook multiply (exit=1, not fake-i64 exit=0)"
 
 # ---------------------------------------------------------------------------
+# 10. Wide-div witness: (15*2^64)/3 = 5*2^64 -> hi limb = 5.
+#    Fake-i64 would give 0 (div of lo limbs). Exit code MUST be 5.
+# ---------------------------------------------------------------------------
+"$MADAROS" --native-v2-emit-wide-div "$WORK/wide_div.elf" >"$WORK/wide_div.log" 2>&1
+expect_log_contains "wide-div rc=0" "$WORK/wide_div.log"
+[[ -s "$WORK/wide_div.elf" ]] || fail "wide-div did not produce ELF"
+chmod +x "$WORK/wide_div.elf"
+expect_exit 5 "$WORK/wide_div.elf"
+pass "IrWideDiv single-limb divisor (exit=5, not fake-i64 exit=0)"
+
+# ---------------------------------------------------------------------------
+# 11. Wide-mod witness: (2^64+1)%7 = 3.
+#    Fake-i64 would give 1 (1%7=1). Exit code MUST be 3.
+# ---------------------------------------------------------------------------
+"$MADAROS" --native-v2-emit-wide-mod "$WORK/wide_mod.elf" >"$WORK/wide_mod.log" 2>&1
+expect_log_contains "wide-mod rc=0" "$WORK/wide_mod.log"
+[[ -s "$WORK/wide_mod.elf" ]] || fail "wide-mod did not produce ELF"
+chmod +x "$WORK/wide_mod.elf"
+expect_exit 3 "$WORK/wide_mod.elf"
+pass "IrWideMod single-limb divisor (exit=3, not fake-i64 exit=1)"
+
+# ---------------------------------------------------------------------------
+# 12. Wide-cmp witness: 2^64 < 2^65 -> 1 (hi limb decides).
+#    Fake-i64 would give 0 (lo limbs equal). Exit code MUST be 1.
+# ---------------------------------------------------------------------------
+"$MADAROS" --native-v2-emit-wide-cmp "$WORK/wide_cmp.elf" >"$WORK/wide_cmp.log" 2>&1
+expect_log_contains "wide-cmp rc=0" "$WORK/wide_cmp.log"
+[[ -s "$WORK/wide_cmp.elf" ]] || fail "wide-cmp did not produce ELF"
+chmod +x "$WORK/wide_cmp.elf"
+expect_exit 1 "$WORK/wide_cmp.elf"
+pass "IrWideCmp unsigned multi-limb comparison (exit=1, not fake-i64 exit=0)"
+
+# ---------------------------------------------------------------------------
+# 13. Wide-shr witness: (2^32*2^32)>>64 = 1 (mul+shr_limb combo).
+#    Broken shr would return 0. Exit code MUST be 1.
+# ---------------------------------------------------------------------------
+"$MADAROS" --native-v2-emit-wide-shr "$WORK/wide_shr.elf" >"$WORK/wide_shr.log" 2>&1
+expect_log_contains "wide-shr rc=0" "$WORK/wide_shr.log"
+[[ -s "$WORK/wide_shr.elf" ]] || fail "wide-shr did not produce ELF"
+chmod +x "$WORK/wide_shr.elf"
+expect_exit 1 "$WORK/wide_shr.elf"
+pass "IrWideShrLimb limb-aligned shift (exit=1)"
+
+# ---------------------------------------------------------------------------
+# 14. Wide-shr-unaligned witness: 2^100 >> 96 = 16 (funnel shift).
+#    Limb-aligned-only (>>64) would give 2^36; low-limb -> 0.
+# ---------------------------------------------------------------------------
+"$MADAROS" --native-v2-emit-wide-shr-unaligned "$WORK/wide_shru.elf" >"$WORK/wide_shru.log" 2>&1
+expect_log_contains "wide-shr-unaligned rc=0" "$WORK/wide_shru.log"
+[[ -s "$WORK/wide_shru.elf" ]] || fail "wide-shr-unaligned did not produce ELF"
+chmod +x "$WORK/wide_shru.elf"
+expect_exit 16 "$WORK/wide_shru.elf"
+pass "IrWideShr funnel shift (exit=16)"
+
+# ---------------------------------------------------------------------------
+# 15. Wide-divfull witness: (5*2^64+105)/(2^64+1) = 5 (multi-limb divisor).
+#    Low-limb-only (div by D.lo=1) would give 105.
+# ---------------------------------------------------------------------------
+"$MADAROS" --native-v2-emit-wide-divfull "$WORK/wide_df.elf" >"$WORK/wide_df.log" 2>&1
+expect_log_contains "wide-divfull rc=0" "$WORK/wide_df.log"
+[[ -s "$WORK/wide_df.elf" ]] || fail "wide-divfull did not produce ELF"
+chmod +x "$WORK/wide_df.elf"
+expect_exit 5 "$WORK/wide_df.elf"
+pass "IrWideDivFull multi-limb binary long division (exit=5, not 105)"
+
+# ---------------------------------------------------------------------------
+# 16. Wide-modfull witness: (7*2^64+200)%(2^64+1) = 193 (multi-limb divisor).
+#    Low-limb-only (% D.lo=1) would give 0.
+# ---------------------------------------------------------------------------
+"$MADAROS" --native-v2-emit-wide-modfull "$WORK/wide_mf.elf" >"$WORK/wide_mf.log" 2>&1
+expect_log_contains "wide-modfull rc=0" "$WORK/wide_mf.log"
+[[ -s "$WORK/wide_mf.elf" ]] || fail "wide-modfull did not produce ELF"
+chmod +x "$WORK/wide_mf.elf"
+expect_exit 193 "$WORK/wide_mf.elf"
+pass "IrWideModFull multi-limb binary long division remainder (exit=193, not 0)"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
-echo "[wide-int] PASS: type identity, type safety, casts, i128/i256 compile, IrWideAdd/Sub/Mul witnesses"
-echo "[wide-int] NOTE: IrWideDiv/Mod/Shr/Cmp not yet codegen-supported"
+echo "[wide-int] PASS: type identity, type safety, casts, i128/i256 compile"
+echo "[wide-int] PASS: IrWideAdd/Sub/Mul/Shr/Div/Mod/Cmp/DivFull/ModFull witnesses"
 echo "[wide-int] NOTE: source-level wide arithmetic lowering not yet implemented"
