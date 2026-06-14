@@ -163,9 +163,7 @@ fn lowerer_new() -> Lowerer with Alloc {
 
 fn lowerer_new_with_epistemic(epistemic: IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lowerer_new()
-    var module = *lo.module
-    module.epistemic = epistemic
-    lo.module = Box::new(module)
+    (*lo.module).epistemic = epistemic
     // Sprint 116: pre-register Knowledge<f64> layout
     lo.struct_layouts = Box::new(ir_register_knowledge_layout(*lo.struct_layouts))
     lo
@@ -211,6 +209,43 @@ fn lower_ordered_diag_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_LOWER_ORDERED_TRACE"), "1")
 }
 
+fn ir_normalize_string_literal_name(n: Name) -> Name {
+    var out = ir_empty_name()
+    var start: i64 = 0
+    var end = n.len
+    if n.len >= 2 && n.buf[0] == 34 as i8 && n.buf[(n.len - 1) as usize] == 34 as i8 {
+        start = 1
+        end = n.len - 1
+    }
+    var i = start
+    while i < end && out.len < 128 {
+        let ch = n.buf[i as usize]
+        if ch == 92 as i8 && i + 1 < end {
+            let nxt = n.buf[(i + 1) as usize]
+            if nxt == 110 as i8 {
+                out.buf[out.len as usize] = 10 as i8
+            } else if nxt == 116 as i8 {
+                out.buf[out.len as usize] = 9 as i8
+            } else if nxt == 114 as i8 {
+                out.buf[out.len as usize] = 13 as i8
+            } else if nxt == 34 as i8 {
+                out.buf[out.len as usize] = 34 as i8
+            } else if nxt == 92 as i8 {
+                out.buf[out.len as usize] = 92 as i8
+            } else {
+                out.buf[out.len as usize] = nxt
+            }
+            out.len = out.len + 1
+            i = i + 2
+        } else {
+            out.buf[out.len as usize] = ch
+            out.len = out.len + 1
+            i = i + 1
+        }
+    }
+    out
+}
+
 pub fn ir_empty_program_summary() -> IrProgramSummary {
     IrProgramSummary {
         module: Box::new(ir_empty_module()),
@@ -240,31 +275,28 @@ fn ir_program_summary_from_lowerer(lo: Lowerer) -> IrProgramSummary {
 
 fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lo_in
-    var seed_val = (*summary.module)
-    let seed = &seed_val
-    var module = ir_empty_module()
-    module.epistemic = (*lo.module).epistemic
-    module.fn_count = seed.fn_count
-    module.string_count = 0
-    module.prof_counter_count = seed.prof_counter_count
+    var module_box = lo.module
+    (*module_box).fn_count = (*summary.module).fn_count
+    (*module_box).string_count = 0
+    (*module_box).prof_counter_count = (*summary.module).prof_counter_count
 
     var i: i64 = 0
-    while i < seed.prof_counter_count && i < 64 {
-        module.prof_counters[i as usize] = seed.prof_counters[i as usize]
+    while i < (*summary.module).prof_counter_count && i < 64 {
+        (*module_box).prof_counters[i as usize] = (*summary.module).prof_counters[i as usize]
         i = i + 1
     }
 
     i = 0
-    while i < seed.fn_count && i < 1024 {
+    while i < (*summary.module).fn_count && i < 1024 {
         var func = ir_empty_function()
-        func.name = seed.functions[i as usize].name
-        func.param_count = seed.functions[i as usize].param_count
-        func.compile_strategy = seed.functions[i as usize].compile_strategy
-        func.prof_counter_id = seed.functions[i as usize].prof_counter_id
-        module.functions[i as usize] = func
+        func.name = (*summary.module).functions[i as usize].name
+        func.param_count = (*summary.module).functions[i as usize].param_count
+        func.compile_strategy = (*summary.module).functions[i as usize].compile_strategy
+        func.prof_counter_id = (*summary.module).functions[i as usize].prof_counter_id
+        (*module_box).functions[i as usize] = func
         i = i + 1
     }
-    lo.module = Box::new(module)
+    lo.module = module_box
     lo
 }
 
@@ -302,9 +334,7 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
 
 fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lowerer_new()
-    var module = *lo.module
-    module.epistemic = epistemic
-    lo.module = Box::new(module)
+    (*lo.module).epistemic = epistemic
     lo = lowerer_seed_module_from_summary(lo, summary)
     lo = lowerer_seed_metadata_from_summary(lo, summary)
     lo.probe_mode = summary.probe_mode
@@ -313,15 +343,14 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: IrEpi
 
 fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistemic: IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lowerer_new()
-    var module = ir_empty_module()
-    module.epistemic = epistemic
-    module.fn_count = summary.module.fn_count
-    module.string_count = 0
-    module.prof_counter_count = summary.module.prof_counter_count
+    (*lo.module).epistemic = epistemic
+    (*lo.module).fn_count = summary.module.fn_count
+    (*lo.module).string_count = 0
+    (*lo.module).prof_counter_count = summary.module.prof_counter_count
 
     var i: i64 = 0
     while i < summary.module.prof_counter_count && i < 64 {
-        module.prof_counters[i as usize] = summary.module.prof_counters[i as usize]
+        (*lo.module).prof_counters[i as usize] = summary.module.prof_counters[i as usize]
         i = i + 1
     }
 
@@ -332,10 +361,9 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
         func.param_count = summary.module.functions[i as usize].param_count
         func.compile_strategy = summary.module.functions[i as usize].compile_strategy
         func.prof_counter_id = summary.module.functions[i as usize].prof_counter_id
-        module.functions[i as usize] = func
+        (*lo.module).functions[i as usize] = func
         i = i + 1
     }
-    lo.module = Box::new(module)
     lo.enum_variants = Box::new(summary.enum_variants)
     lo.struct_layouts = Box::new(summary.struct_layouts)
     lo.probe_mode = summary.probe_mode
@@ -425,24 +453,28 @@ fn lowerer_compute_strategy_from_ast_ref(
 }
 
 fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Panic, Div {
+    var module_box = (*lo).module
     var i: i64 = 0
-    while i < (*(*lo).module).fn_count {
-        if ir_name_eq((*(*lo).module).functions[i as usize].name, name) {
+    while i < (*module_box).fn_count {
+        if ir_name_eq((*module_box).functions[i as usize].name, name) {
+            (*lo).module = module_box
             return i
         }
         i = i + 1
     }
 
-    if (*(*lo).module).fn_count >= IR_MAX_FUNCS {
+    if (*module_box).fn_count >= IR_MAX_FUNCS {
+        (*lo).module = module_box
         lowerer_mark_error(lo)
         return -1
     }
 
-    let idx = (*(*lo).module).fn_count
-    var new_fn = ir_empty_function()
-    new_fn.name = name
-    (*(*lo).module).functions[idx as usize] = new_fn
-    (*(*lo).module).fn_count = idx + 1
+    let idx = (*module_box).fn_count
+    var fn_slot = (*module_box).functions[idx as usize]
+    fn_slot.name = name
+    (*module_box).functions[idx as usize] = fn_slot
+    (*module_box).fn_count = idx + 1
+    (*lo).module = module_box
     idx
 }
 
@@ -616,7 +648,34 @@ fn lowerer_preseed_program_items_mut(
                         let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                         match *fn_def_opt_ref {
                             Some(fd) => {
-                                lowerer_preseed_fn_signature_mut(lo, name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                                let fn_id_sig = lowerer_find_or_add_fn_id_mut(lo, name)
+                                if fn_id_sig >= 0 {
+                                    let strategy_sig = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
+                                    var module_box_sig = (*lo).module
+                                    var fn_slot_sig = (*module_box_sig).functions[fn_id_sig as usize]
+                                    fn_slot_sig.compile_strategy = strategy_sig
+                                    fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
+                                    if strategy_sig == IR_STRATEGY_INSTRUMENTED {
+                                        fn_slot_sig.param_count = fn_slot_sig.param_count + 1
+                                        if fn_slot_sig.prof_counter_id < 0 {
+                                            let ctr_idx_sig = (*module_box_sig).prof_counter_count
+                                            if ctr_idx_sig < 64 {
+                                                (*module_box_sig).prof_counters[ctr_idx_sig as usize] = IrProfCounterInfo {
+                                                    fn_id: fn_id_sig,
+                                                    fn_name: name,
+                                                    counter_id: ctr_idx_sig,
+                                                }
+                                                (*module_box_sig).prof_counter_count = ctr_idx_sig + 1
+                                                fn_slot_sig.prof_counter_id = ctr_idx_sig
+                                            } else {
+                                                lo.error_count = lo.error_count + 1
+                                                lo.had_error = true
+                                            }
+                                        }
+                                    }
+                                    (*module_box_sig).functions[fn_id_sig as usize] = fn_slot_sig
+                                    (*lo).module = module_box_sig
+                                }
                                 // Sprint 108/109: set strategy for extern/export fns
                                 let fn_id_ps = lowerer_find_or_add_fn_id_mut(lo, name)
                                 if fn_id_ps >= 0 {
@@ -1591,9 +1650,9 @@ impl Lowerer {
     fn flush_current_func(self) -> Lowerer with Mut, Panic, Div {
         var lo = self
         if lo.current_func_loaded && lo.current_fn >= 0 && lo.current_fn < lo.module.fn_count {
-            var module = *lo.module
-            module.functions[lo.current_fn as usize] = *lo.current_func
-            lo.module = Box::new(module)
+            var module_box = lo.module
+            (*module_box).functions[lo.current_fn as usize] = *lo.current_func
+            lo.module = module_box
         }
         lo.current_func_loaded = false
         lo
@@ -2570,14 +2629,14 @@ impl Lowerer {
 
     fn intern_string(self, n: Name) -> (Lowerer, i64) with Mut, Panic, Div {
         var i: i64 = 0
-        while i < self.module.string_count {
-            if ir_name_eq(self.module.string_table[i], n) {
+        while i < (*self.module).string_count {
+            if ir_name_eq((*self.module).string_table[i as usize], n) {
                 return (self, i)
             }
             i = i + 1
         }
         var lo = self
-        if lo.module.string_count < IR_MAX_STRINGS {
+        if (*lo.module).string_count < IR_MAX_STRINGS {
             let idx = (*lo.module).string_count
             (*lo.module).string_table[idx as usize] = n
             (*lo.module).string_count = idx + 1
@@ -3806,9 +3865,8 @@ impl Lowerer {
     }
 
     fn lower_fn_item_ref(self, name: Name, fd: &FnDef) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        let pair = self.find_or_add_fn_id(name)
-        var lo = pair.0
-        let fn_id = pair.1
+        var lo = self
+        let fn_id = lowerer_find_or_add_fn_id_mut(&! lo, name)
         if fn_id < 0 {
             return lo.report_error()
         }
@@ -3962,9 +4020,43 @@ impl Lowerer {
         var lo = self
         if lower_live_diag_enabled() { print("lower_live: block_begin\n") }
         lo.scope_depth = lo.scope_depth + 1
-        let pair = lo.lower_stmt_list(blk.stmts)
-        lo = pair.0
-        let reg = pair.1
+        var current = &blk.stmts
+        var reg = IR_INVALID_REG
+        var saw_stmt = false
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    let pair = if stmt_ref.kind == StmtKind::StmtLet {
+                        lo.lower_let_stmt_ref(stmt_ref, false)
+                    } else if stmt_ref.kind == StmtKind::StmtVar {
+                        lo.lower_let_stmt_ref(stmt_ref, true)
+                    } else if stmt_ref.kind == StmtKind::StmtExpr {
+                        let expr_opt_ref = &stmt_ref.expr
+                        match *expr_opt_ref {
+                            Some(expr_box) => {
+                                lo.lower_expr_ref(&(*expr_box))
+                            }
+                            _ => {
+                                lo.emit_unit()
+                            }
+                        }
+                    } else {
+                        lo.lower_assign_stmt_ref(stmt_ref)
+                    }
+                    lo = pair.0
+                    reg = pair.1
+                    saw_stmt = true
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        if !saw_stmt {
+            let unit_pair = lo.emit_unit()
+            lo = unit_pair.0
+            reg = unit_pair.1
+        }
         if lo.scope_depth > 0 {
             lo.scope_depth = lo.scope_depth - 1
         }
@@ -5290,13 +5382,14 @@ impl Lowerer {
             let lo2 = lo.emit(ir_load_bool(reg, false))
             (lo2, reg)
         } else if e.kind == ExprKind::ExprStringLit {
-            let pair_idx = self.intern_string(e.name)
+            let lit_name = ir_normalize_string_literal_name(e.name)
+            let pair_idx = self.intern_string(lit_name)
             let lo1 = pair_idx.0
             let idx = pair_idx.1
             let pair_reg = lo1.fresh_reg()
             let lo2 = pair_reg.0
             let reg = pair_reg.1
-            let lo3 = lo2.emit(ir_load_string(reg, idx, e.name))
+            let lo3 = lo2.emit(ir_load_string(reg, idx, lit_name))
             (lo3, reg)
         } else if e.kind == ExprKind::ExprCharLit {
             let pair = self.fresh_reg()
@@ -5395,10 +5488,23 @@ impl Lowerer {
                 }
             }
         } else if e.kind == ExprKind::ExprCall {
-            let callee_opt: Option<Box<Expr>> = e.left
-            let callee_name = match callee_opt {
+            let callee_opt_ref = &e.left
+            let callee_name = match *callee_opt_ref {
                 Some(c) => self.expr_to_callee_name_ref(&(*c)),
                 None => ir_empty_name(),
+            }
+            if name_eq(callee_name, make_name("print")) || name_eq(callee_name, make_name("print_int")) || name_eq(callee_name, make_name("print_char")) {
+                var lo_builtin = self
+                let fn_id_builtin = lowerer_find_or_add_fn_id_mut(&! lo_builtin, callee_name)
+                let pair_args_builtin: LowerExprArgsResult = lo_builtin.lower_expr_args_ref(&e.args)
+                let lo_args_builtin = pair_args_builtin.lowerer
+                let args_builtin: Option<Box<IrRegList>> = if pair_args_builtin.count <= 0 { None } else { Some(Box::new(pair_args_builtin.regs)) }
+                let argc_builtin = pair_args_builtin.count
+                let pair_dst_builtin = lo_args_builtin.fresh_reg()
+                let lo_dst_builtin = pair_dst_builtin.0
+                let dst_builtin = pair_dst_builtin.1
+                let lo_call_builtin = lo_dst_builtin.emit(ir_call(dst_builtin, fn_id_builtin, callee_name, args_builtin, argc_builtin))
+                return (lo_call_builtin, dst_builtin)
             }
             // Special case: Some(x) — identity (Option = nullable pointer)
             if ir_name_is_some(callee_name) {
@@ -5497,9 +5603,8 @@ impl Lowerer {
                 let lo3_i = lo2_i.emit(ir_call_indirect(dst_i, callee_local_reg, args_i, argc_i))
                 return (lo3_i, dst_i)
             }
-            let pair_fn = self.find_or_add_fn_id(callee_name)
-            let lo1 = pair_fn.0
-            let fn_id = pair_fn.1
+            var lo1 = self
+            let fn_id = lowerer_find_or_add_fn_id_mut(&! lo1, callee_name)
             if lo1.ir_name_is_knowledge_kaxi_publish(callee_name) {
                 // Parser canonicalizes hardware_publish(value, KAXI::op) into this intrinsic with
                 // 2 arguments. Lowering expands only this canonical form to the runtime
@@ -6177,11 +6282,11 @@ pub fn lower_program_to_ir(prog: Program) -> IrLowerResult with Mut, Panic, Div,
 }
 
 fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic: IrEpistemicSection) -> IrProgramSummaryBoxResult with Mut, Panic, Div, Alloc, IO {
-    let lo = lowerer_new_with_epistemic(epistemic)
-    let lo2 = lo.preseed_program_items_ref(&prog.items, ir_empty_name())
-    let error_count = lo2.error_count
-    let had_error = lo2.had_error
-    let inner = ir_program_summary_from_lowerer(lo2)
+    var lo = lowerer_new_with_epistemic(epistemic)
+    lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
+    let error_count = lo.error_count
+    let had_error = lo.had_error
+    let inner = ir_program_summary_from_lowerer(lo)
     IrProgramSummaryBoxResult {
         summary: Box::new(inner),
         error_count: error_count,
