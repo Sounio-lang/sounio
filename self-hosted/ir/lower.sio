@@ -4042,6 +4042,7 @@ impl Lowerer {
         var lo = self
         if lower_live_diag_enabled() { print("lower_live: block_begin\n") }
         lo.scope_depth = lo.scope_depth + 1
+        let saved_local_count = lo.locals.count
         var current = &blk.stmts
         var reg = IR_INVALID_REG
         var saw_stmt = false
@@ -4082,6 +4083,7 @@ impl Lowerer {
         if lo.scope_depth > 0 {
             lo.scope_depth = lo.scope_depth - 1
         }
+        lo.locals.count = saved_local_count
         if lower_live_diag_enabled() {
             print("lower_live: block_end reg=")
             print_int(reg)
@@ -4231,8 +4233,24 @@ impl Lowerer {
     fn lower_assign_stmt_ref(self, s: &Stmt) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_rhs = self.lower_opt_expr_ref(&s.expr)
         var lo = pair_rhs.0
-        let rhs = pair_rhs.1
+        var rhs = pair_rhs.1
         let target_opt: Option<Box<Expr>> = s.target
+
+        if s.assign_op != AssignOp::AssignEq {
+            let old_pair = lo.lower_opt_expr_ref(&target_opt)
+            lo = old_pair.0
+            let old_val = old_pair.1
+            let bin_op = if s.assign_op == AssignOp::AssignAdd {
+                BinaryOp::OpAdd
+            } else {
+                BinaryOp::OpSub
+            }
+            let pair_dst = lo.fresh_reg()
+            lo = pair_dst.0
+            let compound_reg = pair_dst.1
+            lo = lo.emit(ir_binop(compound_reg, old_val, bin_op, rhs))
+            rhs = compound_reg
+        }
 
         match target_opt {
             Some(target_expr) => {
@@ -4303,8 +4321,10 @@ impl Lowerer {
                     lo = pair_head.0
                     if reg_count < 64 {
                         regs[reg_count as usize] = pair_head.1
+                        reg_count = reg_count + 1
+                    } else {
+                        break
                     }
-                    reg_count = reg_count + 1
                     current = &(*list).tail
                 }
                 _ => break
@@ -5980,11 +6000,17 @@ impl Lowerer {
             n.buf[10] = (48 + suffix / 10) as i8
             n.buf[11] = (48 + suffix % 10) as i8
             n.len = 12
-        } else {
+        } else if suffix < 1000 {
             n.buf[10] = (48 + suffix / 100) as i8
             n.buf[11] = (48 + (suffix / 10) % 10) as i8
             n.buf[12] = (48 + suffix % 10) as i8
             n.len = 13
+        } else {
+            n.buf[10] = (48 + suffix / 1000) as i8
+            n.buf[11] = (48 + (suffix / 100) % 10) as i8
+            n.buf[12] = (48 + (suffix / 10) % 10) as i8
+            n.buf[13] = (48 + suffix % 10) as i8
+            n.len = 14
         }
         n
     }
@@ -6113,8 +6139,8 @@ fn ir_reg_list_prepend(reg: i64, args: Option<Box<IrRegList>>) -> Option<Box<IrR
 
 fn ir_call_needs_validated_patch(
     fn_count: i64,
-    callee_strategies: [i64; 256],
-    callee_param_counts: [i64; 256],
+    callee_strategies: [i64; 1400],
+    callee_param_counts: [i64; 1400],
     instr: IrInstr
 ) -> bool with Mut, Panic, Div {
     if instr.op != IrOpcode::IrCall { return false }
@@ -6135,7 +6161,7 @@ fn ir_function_has_opcode(func: IrFunction, op: IrOpcode) -> bool with Mut, Pani
 }
 
 fn ir_function_insert_instr_front(func: &! IrFunction, instr: IrInstr) -> bool with Mut, Panic, Div {
-    if func.instr_count >= 4095 {
+    if func.instr_count >= 127 {
         return false
     }
     var i = func.instr_count
@@ -6159,8 +6185,8 @@ fn ir_patch_validated_call_instr(instr: &! IrInstr, validated_reg: i64) with Mut
 
 fn ir_patch_validated_calls_in_function(
     fn_count: i64,
-    callee_strategies: [i64; 256],
-    callee_param_counts: [i64; 256],
+    callee_strategies: [i64; 1400],
+    callee_param_counts: [i64; 1400],
     func: &! IrFunction,
     stats: &! IrValidatedPatchStats
 ) with Mut, Panic, Div, Alloc {
@@ -6216,8 +6242,8 @@ fn ir_patch_validated_calls_in_function(
 }
 
 fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with Mut, Panic, Div, Alloc {
-    var callee_strategies: [i64; 256] = [IR_STRATEGY_STANDARD; 256]
-    var callee_param_counts: [i64; 256] = [0; 256]
+    var callee_strategies: [i64; 1400] = [IR_STRATEGY_STANDARD; 1400]
+    var callee_param_counts: [i64; 1400] = [0; 1400]
     var stats = ir_empty_validated_patch_stats()
     var i: i64 = 0
     while i < module.fn_count {
