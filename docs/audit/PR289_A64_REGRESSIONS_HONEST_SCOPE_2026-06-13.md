@@ -65,7 +65,7 @@ Opus adversarial verdicts on the 5 most delicate codegen commits:
 | `b52fd2233` nested-agg copy anchor | dst_start anchor correct | **SOUND** — proven against the x86 oracle slot-for-slot |
 | `e55d11729` epilogue `mov sp,x29` | sp restored without corruption | **SOUND** — x29-reserved-as-frame-pointer invariant verified |
 | `71a55a936` >7-arg closure convention | reg/stack placement correct | **SOUND** — no refutation found, composes with 47fe1588e |
-| `184ecd6d1` f64 `fcmp d0,d1` fix | f64 comparisons correct | **UNSOUND (unmasks real bug)** — see below |
+| `184ecd6d1` f64 `fcmp d0,d1` fix | f64 comparisons correct | **fix correct; static finding it unmasks an a64-only latent bug** — see below |
 | `fcbf1ac98` closure-stub restore | matches x86 semantics | **UNSOUND (pre-existing edge case)** — see below |
 
 **`184ecd6d1` — newly-observable real bug (recommended follow-up, NOT a blocker on the
@@ -75,7 +75,10 @@ computes `a<=b`) where it should use `hi` (`0x9A9F97E0`, `a>b`). Under the old b
 `fcmp d1,d1` the flags were always EQUAL so `f64_gt` always returned `1`; with real
 flags it now returns `a<=b` — systematically wrong for `.gt()`/`f64_gt` method-form
 calls on a64. The operator-form `>` is correct (uses `hi`); only the method builtin is
-affected. Requires a SLURM rebuild to verify, so deferred to follow-up, not fixed here.
+affected. This is a **static-analysis finding** (the verifier could not build/execute);
+it requires a SLURM rebuild to confirm and to land a fix, so it is deferred to follow-up.
+Note it is **a64-only** — the qualification demos run on `bin/souc-linux-x86_64`, so this
+does not threaten the defense track.
 
 **`fcbf1ac98` — pre-existing edge case, re-landed verbatim (not introduced by this PR):**
 annotated-braceless closures (e.g. `|x| -> i64 x + 1`) emit a spurious `mov x0,#0` in
