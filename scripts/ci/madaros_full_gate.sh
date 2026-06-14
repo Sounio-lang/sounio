@@ -79,6 +79,8 @@ pass "public check CLI"
 expect_log_contains "check: OK" "$WORK/raw_empty.log"
 expect_exit 1 "$RAW_MADAROS" --check "$WORK/missing.sio" >"$WORK/raw_missing.log" 2>&1
 expect_log_contains "could not read input file" "$WORK/raw_missing.log"
+expect_exit 1 "$RAW_MADAROS" --check /tmp >"$WORK/raw_tmp_dir.log" 2>&1
+expect_log_contains "could not read input file" "$WORK/raw_tmp_dir.log"
 pass "raw check CLI"
 
 "$MADAROS" check tests/multimodule/visibility_struct_pub_main.sio >"$WORK/visibility_struct_pub.log" 2>&1
@@ -98,6 +100,8 @@ pass "multimodule visibility diagnostics"
 
 expect_exit 1 "$MADAROS" check "$WORK/missing.sio" >"$WORK/missing.log" 2>&1
 expect_log_contains "could not read input file" "$WORK/missing.log"
+expect_exit 1 env MADAROS_RAW_BIN="$RAW_MADAROS" "$MADAROS" check /tmp >"$WORK/wrapper_tmp_dir.log" 2>&1
+expect_log_contains "could not read input file" "$WORK/wrapper_tmp_dir.log"
 pass "missing input diagnostic"
 
 "$MADAROS" build "$WORK/run0.sio" -o "$WORK/run0.elf" >"$WORK/build.log" 2>&1
