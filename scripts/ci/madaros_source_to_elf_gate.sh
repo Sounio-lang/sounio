@@ -57,7 +57,7 @@ assert_elf_x86_64() {
   fi
 }
 
-printf 'case_id\tprogram\texpected_exit\tactual_exit\tclaim_class\tsha256\tstatus\n' >"$RESULTS_TSV"
+printf 'case_id\tmode\tprogram\texpected_exit\tactual_exit\tclaim_class\tsha256\tstatus\n' >"$RESULTS_TSV"
 
 while IFS=$'\t' read -r case_id program_path expected_exit claim_class; do
   if [[ -z "${case_id:-}" || "$case_id" == \#* ]]; then
@@ -71,10 +71,14 @@ while IFS=$'\t' read -r case_id program_path expected_exit claim_class; do
 
   check_log="$LOG_DIR/$case_id.check.log"
   trace_log="$LOG_DIR/$case_id.trace.log"
-  compile_log="$LOG_DIR/$case_id.compile.log"
-  stdout_log="$LOG_DIR/$case_id.stdout"
-  stderr_log="$LOG_DIR/$case_id.stderr"
-  out_bin="$BIN_DIR/$case_id"
+  normal_compile_log="$LOG_DIR/$case_id.normal.compile.log"
+  normal_stdout_log="$LOG_DIR/$case_id.normal.stdout"
+  normal_stderr_log="$LOG_DIR/$case_id.normal.stderr"
+  normal_bin="$BIN_DIR/$case_id.normal"
+  nv2_compile_log="$LOG_DIR/$case_id.native_v2.compile.log"
+  nv2_stdout_log="$LOG_DIR/$case_id.native_v2.stdout"
+  nv2_stderr_log="$LOG_DIR/$case_id.native_v2.stderr"
+  nv2_bin="$BIN_DIR/$case_id.native_v2"
 
   if ! "$MADAROS_BIN" --check "$program_path" >"$check_log" 2>&1; then
     echo "[madaros-source-elf] FAIL: check failed for $case_id" >&2
@@ -88,36 +92,66 @@ while IFS=$'\t' read -r case_id program_path expected_exit claim_class; do
     exit 1
   fi
 
-  if ! "$MADAROS_BIN" --native-v2-compile "$program_path" -o "$out_bin" >"$compile_log" 2>&1; then
-    echo "[madaros-source-elf] FAIL: compile failed for $case_id" >&2
-    tail -n 80 "$compile_log" >&2 || true
+  if ! "$MADAROS_BIN" "$program_path" -o "$normal_bin" >"$normal_compile_log" 2>&1; then
+    echo "[madaros-source-elf] FAIL: normal compile failed for $case_id" >&2
+    tail -n 80 "$normal_compile_log" >&2 || true
     exit 1
   fi
 
-  chmod +x "$out_bin" 2>/dev/null || true
-  assert_elf_x86_64 "$out_bin" "$case_id"
+  chmod +x "$normal_bin" 2>/dev/null || true
+  assert_elf_x86_64 "$normal_bin" "$case_id.normal"
 
   set +e
-  "$out_bin" >"$stdout_log" 2>"$stderr_log"
-  actual_exit=$?
+  "$normal_bin" >"$normal_stdout_log" 2>"$normal_stderr_log"
+  normal_exit=$?
   set -e
 
-  status="ok"
-  if [[ "$actual_exit" != "$expected_exit" ]]; then
-    status="exit_mismatch"
+  normal_status="ok"
+  if [[ "$normal_exit" != "$expected_exit" ]]; then
+    normal_status="exit_mismatch"
   fi
 
-  sha="$(portable_sha256 "$out_bin")"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$case_id" "$program_path" "$expected_exit" "$actual_exit" "$claim_class" "$sha" "$status" \
+  normal_sha="$(portable_sha256 "$normal_bin")"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$case_id" "normal" "$program_path" "$expected_exit" "$normal_exit" "$claim_class" "$normal_sha" "$normal_status" \
     >>"$RESULTS_TSV"
 
-  if [[ "$status" != "ok" ]]; then
-    echo "[madaros-source-elf] FAIL: $case_id expected_exit=$expected_exit actual_exit=$actual_exit" >&2
-    tail -n 80 "$compile_log" >&2 || true
+  if [[ "$normal_status" != "ok" ]]; then
+    echo "[madaros-source-elf] FAIL: $case_id normal expected_exit=$expected_exit actual_exit=$normal_exit" >&2
+    tail -n 80 "$normal_compile_log" >&2 || true
+    exit 1
+  fi
+
+  if ! "$MADAROS_BIN" --native-v2-compile "$program_path" -o "$nv2_bin" >"$nv2_compile_log" 2>&1; then
+    echo "[madaros-source-elf] FAIL: native-v2 compile failed for $case_id" >&2
+    tail -n 80 "$nv2_compile_log" >&2 || true
+    exit 1
+  fi
+
+  chmod +x "$nv2_bin" 2>/dev/null || true
+  assert_elf_x86_64 "$nv2_bin" "$case_id.native_v2"
+
+  set +e
+  "$nv2_bin" >"$nv2_stdout_log" 2>"$nv2_stderr_log"
+  nv2_exit=$?
+  set -e
+
+  nv2_status="ok"
+  if [[ "$nv2_exit" != "$expected_exit" ]]; then
+    nv2_status="exit_mismatch"
+  fi
+
+  nv2_sha="$(portable_sha256 "$nv2_bin")"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$case_id" "native_v2" "$program_path" "$expected_exit" "$nv2_exit" "$claim_class" "$nv2_sha" "$nv2_status" \
+    >>"$RESULTS_TSV"
+
+  if [[ "$nv2_status" != "ok" ]]; then
+    echo "[madaros-source-elf] FAIL: $case_id native_v2 expected_exit=$expected_exit actual_exit=$nv2_exit" >&2
+    tail -n 80 "$nv2_compile_log" >&2 || true
     exit 1
   fi
 done <"$MANIFEST_PATH"
 
-echo "[madaros-source-elf] PASS: check, trace, compile, ELF execution, and exit-code semantics"
+echo "[madaros-source-elf] PASS: check, trace, normal/native-v2 compile, ELF execution, and exit-code semantics"
 echo "[madaros-source-elf] results=$RESULTS_TSV"

@@ -1598,6 +1598,11 @@ fn nc_emit_call_rel32_placeholder(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_u32_le(nc, 0)
 }
 
+fn nc_emit_call_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xff)
+    nc_emit_byte(nc, 0xd0)
+}
+
 fn nc_emit_mov_rdi_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_mov_reg_reg(nc, 7, 0)
 }
@@ -4088,6 +4093,13 @@ fn apply_relocations_into(nc: &! NativeCompiler, rodata_file_offset: i64, data_f
             let counter_va = data_file_offset + data_off
             let disp32_data = counter_va - next_ip
             nc_patch_u32_le(nc, patch_offset, disp32_data)
+        } else if kind_code == 4 && native_v2_reloc_is_rip_disp_patch(nc, patch_offset) {
+            let target_idx = target_index
+            if target_idx >= 0 && target_idx < (*nc).fn_count {
+                let fn_off = (*nc).fn_offsets[target_idx as usize]
+                let disp32_fn = fn_off - (patch_offset + 4)
+                nc_patch_u32_le(nc, patch_offset, disp32_fn)
+            }
         }
 
         i = i + 1
@@ -5585,6 +5597,34 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             let jnz_pos = (*nc).code.len
             nc_emit_jnz_rel32(nc)
             nc_add_label_patch(nc, jnz_pos + 2, (*func).instrs[i as usize].label_id)
+        } else if instr_op == IrOpcode::IrLoadFnRef {
+            let lea_pos = (*nc).code.len
+            nc_emit_lea_rax_rip_disp32(nc, 0)
+            nc_add_flat_reloc(nc, lea_pos + 3, 4, 1, (*func).instrs[i as usize].fn_id)
+            if (*func).instrs[i as usize].dst >= 0 {
+                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            }
+        } else if instr_op == IrOpcode::IrCallIndirect {
+            let argc = (*func).instrs[i as usize].arg_count
+            if argc > 2 {
+                return false
+            }
+            let arg_pair = ir_reg_list_first_two((*func).instrs[i as usize].call_args)
+            if argc > 0 {
+                if arg_pair.0 < 0 { return false }
+                nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(arg_pair.0))
+            }
+            if argc > 1 {
+                if arg_pair.1 < 0 { return false }
+                nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(arg_pair.1))
+            }
+            let fnref_reg = (*func).instrs[i as usize].src1
+            if fnref_reg < 0 { return false }
+            nc_core_load_temp_to_rax(nc, fnref_reg)
+            nc_emit_call_rax(nc)
+            if (*func).instrs[i as usize].dst >= 0 {
+                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            }
         } else if instr_op == IrOpcode::IrNop {
             // no-op
         } else if instr_op == IrOpcode::IrWideAdd {
