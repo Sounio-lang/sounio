@@ -5609,6 +5609,28 @@ fn mono_find_inst(gi: i64, is_st: i64, tys: i64, tye: i64) -> i64 with Panic, Mu
     return -1
 }
 
+// Find-or-register a single-type-param struct specialization (gi = GEN_ST index,
+// concrete type range [tys,tye) in SRC). Appends a struct mono if new; returns its
+// MONO index, or -1 on capacity overflow. Used by the fn-instantiation rewrite loop
+// to collapse `Struct<T>` references inside a generic fn body into `Struct_<ty>`.
+fn mono_register_struct(gi: i64, tys: i64, tye: i64) -> i64 with Panic, Mut {
+    let existing = mono_find_inst(gi, 1, tys, tye)
+    if existing >= 0 { return existing }
+    if MONO_COUNT >= 128 { return -1 }
+    let mi = MONO_COUNT
+    MONO_GEN[mi as usize] = gi
+    MONO_TY_S[mi as usize] = tys
+    MONO_TY_E[mi as usize] = tye
+    MONO_TY2_S[mi as usize] = 0
+    MONO_TY2_E[mi as usize] = 0
+    MONO_IS_ST[mi as usize] = 1
+    let ms = mono_mangle(GEN_ST_NS[gi as usize], GEN_ST_NE[gi as usize], tys, tye)
+    MAN_BUF_S[mi as usize] = ms
+    MAN_BUF_E[mi as usize] = SRC_LEN
+    MONO_COUNT = MONO_COUNT + 1
+    return mi
+}
+
 // For generic fn gi, find the index of the param whose type is directly T (not first).
 // Scans param list starting from the > token. Returns that param index, or -1.
 fn mono_t_param_idx(gi: i64) -> i64 with Panic, Mut {
@@ -24174,6 +24196,35 @@ fn mono_pass() with IO, Mut, Panic, Div {
                 if TK[m_ti as usize] == 24 { m_ti = m_ti + 1 }
                 m_skip = 1
                 continue
+            }
+            // Collapse `GenStruct < TYPE >` references inside a generic *fn* body into a
+            // single `GenStruct_<ty>` token, registering the struct specialization so it
+            // gets emitted + re-scanned into ST. TYPE is the fn's own param T → use the
+            // concrete instantiation type [m_tys,m_tye); otherwise a literal type (e.g.
+            // a hardcoded Box<i64>) → use the inner token's own range. Single-param only.
+            if m_is_st == 0 && m_tk == 3 && m_ti + 2 < m_be && TK[(m_ti + 1) as usize] == 23 && TK[(m_ti + 2) as usize] == 3 && m_ti + 3 < m_be && TK[(m_ti + 3) as usize] == 24 {
+                var cs_gi: i64 = 0
+                var cs_hit: i64 = -1
+                while cs_gi < GEN_ST_COUNT && cs_hit < 0 {
+                    if name_eq(m_tts, m_tte, GEN_ST_NS[cs_gi as usize], GEN_ST_NE[cs_gi as usize]) { cs_hit = cs_gi }
+                    cs_gi = cs_gi + 1
+                }
+                if cs_hit >= 0 {
+                    var cs_tys: i64 = TS[(m_ti + 2) as usize]
+                    var cs_tye: i64 = TE[(m_ti + 2) as usize]
+                    if name_eq(cs_tys, cs_tye, m_tps, m_tpe) { cs_tys = m_tys; cs_tye = m_tye }
+                    let cs_mi = mono_register_struct(cs_hit, cs_tys, cs_tye)
+                    if cs_mi >= 0 {
+                        TK[TC as usize] = 3
+                        TS[TC as usize] = MAN_BUF_S[cs_mi as usize]
+                        TE[TC as usize] = MAN_BUF_E[cs_mi as usize]
+                        TV[TC as usize] = 0
+                        TL[TC as usize] = TL[m_ti as usize]
+                        TC = TC + 1
+                        m_ti = m_ti + 4
+                        continue
+                    }
+                }
             }
             if m_tk == 3 && name_eq(m_tts, m_tte, m_gns, m_gne) {
                 TK[TC as usize] = 3
