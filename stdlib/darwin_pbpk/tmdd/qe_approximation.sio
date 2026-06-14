@@ -1,0 +1,134 @@
+//@ run-pass
+//@ expect-stdout: PASS
+
+// stdlib/darwin_pbpk/tmdd/qe_approximation.sio
+// ----------------------------------------------------------------------------
+// PBPK28 TMDD module: Quasi-Equilibrium (QE) approximation of target-mediated
+// drug disposition.
+//
+// The full TMDD model (Mager & Jusko 2001) carries free drug C, free target R
+// and complex RC with an explicit, FAST binding reaction (k_on·C·R − k_off·RC).
+// That fast reaction makes the system STIFF — the kernel in
+// tmdd/fkbp12_mtorc1.sio and tmdd/glp1r.sio integrates it with a
+// Newton-linearized implicit Crank-Nicolson step to stay stable.
+//
+// The QE (rapid-binding) approximation (Mager & Krzyzanski 2005; Gibiansky
+// et al. 2008) assumes the binding reaction is instantaneously at equilibrium,
+//   C * R = Kd * RC,
+// which removes the fast mode entirely: the complex is an ALGEBRAIC function of
+// the total drug and total target, so the remaining (slow) dynamics integrate
+// without a stiff solver. This complements the model-form/stiff-integrator work
+// — QE trades a stiff ODE for a closed-form partition.
+//
+// Closed form. With total drug C_tot = C + RC and total target R_tot = R + RC,
+// the equilibrium C·R = Kd·RC gives the quadratic
+//   C^2 + C·(Kd + R_tot − C_tot) − Kd·C_tot = 0,
+// whose physical (non-negative) root is
+//   C = 0.5 · [ (C_tot − R_tot − Kd) + sqrt((C_tot − R_tot − Kd)^2 + 4·Kd·C_tot) ].
+// Then RC = C_tot − C and free target R = R_tot − RC.
+//
+// EVIDENCE ε per input class (literature evidence-quality, dimensionless f64):
+//   C_tot   ε=0.90  dose / assay derived — well constrained
+//   Kd      ε=0.70  in-vitro binding (SPR/radioligand) — moderate, assay-dependent
+//   R_total ε=0.50  target expression / receptor density in vivo — weakest input
+//
+// References: Mager DE & Jusko WJ (2001) J Pharmacokinet Pharmacodyn 28:507-532;
+//             Mager DE & Krzyzanski W (2005) Pharm Res 22:1589-1596 (QE/QSS);
+//             Gibiansky L et al. (2008) J Pharmacokinet Pharmacodyn 35:573-591.
+//
+// Author: Demetrios Chiuratto Agourakis
+
+// Heron/Newton square root (self-contained; avoids an intrinsic dependency).
+fn qe_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i = 0
+    while i < 40 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+// Free drug concentration at quasi-equilibrium (the physical quadratic root).
+pub fn qe_free_drug(c_tot: f64, r_tot: f64, kd: f64) -> f64 with Mut, Div {
+    let b = c_tot - r_tot - kd
+    let disc = b * b + 4.0 * kd * c_tot
+    0.5 * (b + qe_sqrt(disc))
+}
+
+// Drug-target complex (bound drug) at quasi-equilibrium.
+pub fn qe_complex(c_tot: f64, r_tot: f64, kd: f64) -> f64 with Mut, Div {
+    c_tot - qe_free_drug(c_tot, r_tot, kd)
+}
+
+// Free (unbound) target at quasi-equilibrium.
+pub fn qe_free_target(c_tot: f64, r_tot: f64, kd: f64) -> f64 with Mut, Div {
+    r_tot - qe_complex(c_tot, r_tot, kd)
+}
+
+// Fraction of target occupied by drug (receptor occupancy) at QE.
+pub fn qe_target_occupancy(c_tot: f64, r_tot: f64, kd: f64) -> f64 with Mut, Div {
+    if r_tot <= 0.0 { return 0.0 }
+    qe_complex(c_tot, r_tot, kd) / r_tot
+}
+
+// Evidence ε per input class.
+pub fn qe_eps_ctot() -> f64    { return 0.90 }  // dose/assay
+pub fn qe_eps_kd() -> f64      { return 0.70 }  // in-vitro binding
+pub fn qe_eps_rtotal() -> f64  { return 0.50 }  // target density in vivo (weakest)
+
+// ============================================================================
+// Self-test (plain f64 — Madaros + lean_single safe)
+// ============================================================================
+
+fn qe_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+    let c_tot = 100.0
+    let r_tot = 50.0
+    let kd = 1.0
+
+    let cf = qe_free_drug(c_tot, r_tot, kd)
+    let rc = qe_complex(c_tot, r_tot, kd)
+    let rf = qe_free_target(c_tot, r_tot, kd)
+
+    // T1 — binding reduces free drug below total, and free drug is non-negative.
+    if cf > 0.0 {
+        if cf < c_tot {
+            println("T1 PASS: 0 < free drug < total drug (binding sequesters drug)")
+        } else { println("T1 FAIL: free drug >= total"); fails = fails + 1 }
+    } else { println("T1 FAIL: free drug <= 0"); fails = fails + 1 }
+
+    // T2 — drug mass balance: free + complex == total.
+    if qe_abs((cf + rc) - c_tot) < 0.000001 {
+        println("T2 PASS: free + complex = total (drug mass balance)")
+    } else { println("T2 FAIL: drug mass balance"); fails = fails + 1 }
+
+    // T3 — target mass balance + non-negativity: free target = r_tot - complex >= 0.
+    if rf >= 0.0 {
+        if qe_abs((rf + rc) - r_tot) < 0.000001 {
+            println("T3 PASS: free target + complex = total target (>= 0)")
+        } else { println("T3 FAIL: target mass balance"); fails = fails + 1 }
+    } else { println("T3 FAIL: negative free target"); fails = fails + 1 }
+
+    // T4 — weak-binding limit: as Kd -> large, free drug -> total drug.
+    let cf_weak = qe_free_drug(c_tot, r_tot, 1000000.0)
+    if qe_abs(cf_weak - c_tot) < 0.2 {
+        println("T4 PASS: Kd -> infinity recovers free drug = total (no binding)")
+    } else { println("T4 FAIL: weak-binding limit"); fails = fails + 1 }
+
+    // T5 — saturation limit: c_tot >> r_tot, Kd small -> complex -> r_tot (target saturated).
+    let rc_sat = qe_complex(10000.0, 50.0, 1.0)
+    if qe_abs(rc_sat - 50.0) < 0.5 {
+        println("T5 PASS: excess drug saturates target (complex -> R_total)")
+    } else { println("T5 FAIL: saturation limit"); fails = fails + 1 }
+
+    // T6 — evidence ε ordering: R_total is the weakest input class.
+    if qe_eps_rtotal() < qe_eps_kd() {
+        if qe_eps_kd() < qe_eps_ctot() {
+            println("T6 PASS: ε ordering R_total < Kd < C_tot (honest ceiling = R_total)")
+        } else { println("T6 FAIL: ε ordering (Kd/Ctot)"); fails = fails + 1 }
+    } else { println("T6 FAIL: ε ordering (Rtotal/Kd)"); fails = fails + 1 }
+
+    if fails == 0 { println("PASS"); return 0 }
+    println("FAIL"); return 1
+}
