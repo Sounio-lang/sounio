@@ -74,6 +74,10 @@ madaros-full-gate: build-madaros ## Build Madaros, then run the Stage1 end-to-en
 	@echo "→ Running Madaros full-functioning gate"
 	bash scripts/ci/madaros_full_gate.sh
 
+madaros-wide-int-gate: ## Run the wide-integer (i128/i256) experimental gate
+	@echo "→ Running Madaros wide-integer gate"
+	bash scripts/ci/madaros_wide_int_gate.sh
+
 clean:               ## Remove generated ELF artifacts (gen1, gen2, gen3)
 	rm -f gen1.elf gen2.elf gen3.elf gen4.elf
 	@echo "✓ Cleaned generated artifacts"
