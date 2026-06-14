@@ -1,4 +1,5 @@
 .PHONY: build check test test-stdlib clean fmt install help lint lint-fix lint-docs \
+         madaros-language-reality-gate \
          docs-gen generated-ontology test-generated-ontology \
          test-generated-ontology-manifest test-generated-ontology-fresh \
          test-ontology-bundle-directive-native-scan \
@@ -77,6 +78,10 @@ madaros-full-gate: build-madaros ## Build Madaros, then run the Stage1 end-to-en
 madaros-wide-int-gate: ## Run the wide-integer (i128/i256) experimental gate
 	@echo "→ Running Madaros wide-integer gate"
 	bash scripts/ci/madaros_wide_int_gate.sh
+
+madaros-language-reality-gate: build-madaros ## Run the Madaros source-to-ELF language reality gate
+	@echo "→ Running Madaros language reality gate"
+	bash scripts/ci/madaros_language_reality_gate.sh
 
 clean:               ## Remove generated ELF artifacts (gen1, gen2, gen3)
 	rm -f gen1.elf gen2.elf gen3.elf gen4.elf
