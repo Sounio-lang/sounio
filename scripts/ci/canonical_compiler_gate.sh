@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # scripts/ci/canonical_compiler_gate.sh
 #
-# THE canonical-compiler gate. There is exactly ONE official Sounio compiler:
+# THE canonical lean_single fixed-point gate. The canonical lean_single
+# bootstrap ELF must be the byte-identical self-hosting fixed point of:
 #
-#     bin/souc  ==  the byte-identical self-hosting fixed point of
 #                   self-hosted/compiler/lean_single.sio
 #
+# NOTE (2026-06-14): bin/souc is now the DEFAULT-COMPILER WRAPPER that routes to
+# Madaros — it is no longer the lean_single ELF. The lean_single ELF is preserved
+# as bin/souc-lean-single-x86_64 and remains the bootstrap seed and the fixed
+# point this gate validates. Override the checked binary with SOUNIO_CANONICAL_SOUC.
 # Everything else (the Rust seed at artifacts/omega/souc-bin/, stray mc*.elf,
-# per-worktree bin/souc copies, /workspace/mc-build/* builds) is NON-canonical:
-# a cold-bootstrap seed, a scratch build, or drift. Agents MUST use bin/souc.
+# scratch builds) is NON-canonical: a cold-bootstrap seed, a scratch build, or drift.
 #
 # Unlike scripts/ci/lean_single_fixed_point_gate.sh (which only WARNs when the
 # shipped binary is out of sync — the gap that let bin/souc silently go stale,
@@ -27,9 +30,12 @@ if [[ "$(uname -s 2>/dev/null||echo x)" != "Linux" || "$(uname -m 2>/dev/null||e
   echo "[canonical-compiler] SKIP: x86-64 Linux-only gate" >&2; exit 0
 fi
 
-SOUC="${SOUNIO_CANONICAL_SOUC:-$ROOT_DIR/bin/souc}"
+# Default to the preserved lean_single ELF (bin/souc is now the Madaros wrapper).
+SOUC_DEFAULT="$ROOT_DIR/bin/souc-lean-single-x86_64"
+[[ -x "$SOUC_DEFAULT" ]] || SOUC_DEFAULT="$ROOT_DIR/bin/souc-linux-x86_64"
+SOUC="${SOUNIO_CANONICAL_SOUC:-$SOUC_DEFAULT}"
 SRC="self-hosted/compiler/lean_single.sio"
-[[ -x "$SOUC" ]] || { echo "[canonical-compiler] FAIL: no executable bin/souc at $SOUC"; exit 1; }
+[[ -x "$SOUC" ]] || { echo "[canonical-compiler] FAIL: no executable lean_single ELF at $SOUC"; exit 1; }
 
 WORK="$(mktemp -d /tmp/sounio-canonical.XXXXXX)"; trap 'rm -rf "$WORK"' EXIT
 ulimit -s 1048576 2>/dev/null || true

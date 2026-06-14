@@ -23,17 +23,23 @@ cd "$ROOT_DIR"
 
 OUT="${1:-$ROOT_DIR/artifacts/self-hosted/madaros}"
 
-# Resolve seed compiler. Prefer explicit env, then checked-in artifacts.
+# Resolve seed compiler. The seed MUST be the lean_single bootstrap ELF — never
+# the bin/souc wrapper (a #!-script that now routes to Madaros). Seeding from the
+# wrapper would make Madaros build itself: an unverified self-host fixed point,
+# out of scope here. The `#!` guard skips any wrapper script; the lean_single ELF
+# is preferred explicitly.
 resolve_seed() {
     local cand
-    for cand in "${SOUC_BIN:-}" "${SOUNIO_SOUC_BIN:-}" "$ROOT_DIR/bin/souc" "$ROOT_DIR/bin/souc-linux-x86_64"; do
-        if [[ -n "$cand" && -x "$cand" ]]; then
+    for cand in "${SOUC_BIN:-}" "${SOUNIO_SOUC_BIN:-}" \
+                "$ROOT_DIR/bin/souc-lean-single-x86_64" "$ROOT_DIR/bin/souc-linux-x86_64" \
+                "$ROOT_DIR/bin/souc"; do
+        if [[ -n "$cand" && -x "$cand" && "$(head -c2 "$cand" 2>/dev/null)" != '#!' ]]; then
             echo "$cand"
             return 0
         fi
     done
-    echo "error: build_modular_madaros: no seed compiler found" >&2
-    echo "  tried: SOUC_BIN, SOUNIO_SOUC_BIN, $ROOT_DIR/bin/souc, $ROOT_DIR/bin/souc-linux-x86_64" >&2
+    echo "error: build_modular_madaros: no lean_single seed ELF found" >&2
+    echo "  tried (ELF only): SOUC_BIN, SOUNIO_SOUC_BIN, $ROOT_DIR/bin/souc-lean-single-x86_64, $ROOT_DIR/bin/souc-linux-x86_64, $ROOT_DIR/bin/souc" >&2
     return 1
 }
 
