@@ -1,8 +1,24 @@
 # Madaros Status — coordination note for the fleet
 
-> **TL;DR:** Madaros is **green on `origin/main`**. If it looks broken to you, you
-> are almost certainly judging it from a **stale worktree** or a **prebuilt raw
-> ELF compiled before the fix**. Sync `main`, rebuild, run the gate — *then* talk.
+> **TL;DR:** Madaros is **green on `origin/main`** and is now the **default compiler**:
+> `bin/souc` routes to Madaros. If it looks broken to you, you are almost certainly
+> judging it from a **stale worktree** or a **prebuilt raw ELF compiled before the
+> fix**. Sync `main`, rebuild, run the gate — *then* talk.
+
+## Madaros is the default compiler (`bin/souc` → Madaros)
+
+`bin/souc` is now a thin CLI wrapper that routes `check`/`compile`/`run`/`--version`/
+`info` to Madaros (via `bin/madaros` → `artifacts/self-hosted/madaros`). The legacy
+single-file `lean_single` engine that `bin/souc` used to be is preserved as
+`bin/souc-lean-single-x86_64`.
+
+- **Force the legacy engine:** `SOUNIO_SOUC_ENGINE=lean_single bin/souc <args>`.
+- **lean_single stays the bootstrap seed** (`make build`, `make build-madaros`) and the
+  canonical fixed-point ELF — it is just no longer the default *user-facing* compiler.
+- If Madaros is not built yet, `bin/souc` falls back to lean_single with a stderr notice
+  (`make build-madaros` to get the default engine).
+- *Madaros-builds-Madaros* (swapping the build seed to Madaros) is a **separate, larger
+  milestone — not done here.** lean_single still compiles the bootstrap.
 
 ## Confirmed state
 
