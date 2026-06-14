@@ -657,6 +657,26 @@ lean_lib «SounioErdos90Subset1444Witness» where
 lean_lib «SounioErdos90Grid1521Witness» where
 @[default_target]
 lean_lib «SounioErdos90Subset1521Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1600Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1600Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1681Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1681Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1764Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1764Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1849Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1849Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1936Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1936Witness» where
 
 -- Erdős [90] unit-distance count spectrum on the 168/ZD structure (7-vertex probe):
 -- associator lever beats linear (max 12 vs 9, 6 vs 2 distinct counts) + interleaved-

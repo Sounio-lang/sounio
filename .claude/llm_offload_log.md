@@ -2107,3 +2107,8 @@ more edge constraints → fewer valid colorings → CDCL converges faster. This 
 | 2026-06-14 | math-review | xai/grok-4-1-fast-reasoning | SounioErdos90Grid1369Witness.lean; SounioErdos90Subset1369Witness.lean | PASS-WIRING | n=1369 grid u≥6856 + subset u≥6977; Grok no extra math content; gates green. |
 | 2026-06-14 | math-review | xai/grok-4-1-fast-reasoning | SounioErdos90Grid1444Witness.lean; SounioErdos90Subset1444Witness.lean | PASS | n=1444 grid u≥7268 + subset u≥7396; gates green. |
 | 2026-06-14 | math-review | xai/grok-4-1-fast-reasoning | SounioErdos90Grid1521Witness.lean; SounioErdos90Subset1521Witness.lean | PASS | n=1521 grid u≥7692 + subset u≥7819; gates green. |
+| 2026-06-14 | math-review | xai/grok-4-1-fast-reasoning | SounioErdos90Grid1600Witness.lean; SounioErdos90Subset1600Witness.lean | PASS | n=1600 grid u≥8128 + subset u≥8262; gates green. |
+| 2026-06-14 | math-review | xai/grok-4-1-fast-reasoning | SounioErdos90Grid1681Witness.lean; SounioErdos90Subset1681Witness.lean | PASS | n=1681 grid u≥8576 + subset u≥8716; gates green. |
+| 2026-06-14 | math-review | xai/grok-4-1-fast-reasoning | SounioErdos90Grid1764Witness.lean; SounioErdos90Subset1764Witness.lean | PASS | n=1764 grid u≥9036 + subset u≥9177; gates green. |
+| 2026-06-14 | math-review | xai/grok-4-1-fast-reasoning | SounioErdos90Grid1849Witness.lean; SounioErdos90Subset1849Witness.lean | PASS | n=1849 grid u≥9508 + subset u≥9651; gates green. |
+| 2026-06-14 | math-review | xai/grok-4-1-fast-reasoning | SounioErdos90Grid1936Witness.lean; SounioErdos90Subset1936Witness.lean | PASS | n=1936 grid u≥9992 + subset u≥10139; maxHeartbeats 7744000; gates green. |

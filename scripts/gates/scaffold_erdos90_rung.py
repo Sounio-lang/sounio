@@ -25,6 +25,11 @@ RUNGS = [
     (1369, 37, 6856),
     (1444, 38, 7268),
     (1521, 39, 7692),
+    (1600, 40, 8128),
+    (1681, 41, 8576),
+    (1764, 42, 9036),
+    (1849, 43, 9508),
+    (1936, 44, 9992),
 ]
 
 
@@ -98,6 +103,10 @@ def scaffold(n: int, w: int, grid: int) -> None:
         text = replace_n(src.read_text(), n, w, grid)
         if dst_name.endswith(".py"):
             hb = max(1_000_000, n * 2200)
+            if n >= 1800:
+                hb = max(hb, n * 4000)
+            elif n >= 1600:
+                hb = max(hb, n * 3000)
             text = text.replace("maxHeartbeats 1000000", f"maxHeartbeats {hb}")
         dst.write_text(text)
         if dst_name.endswith(".sh") or dst_name.endswith(".py"):
