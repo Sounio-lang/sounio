@@ -4540,6 +4540,27 @@ fn checker_check_print_i64_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry w
     ty_unit()
 }
 
+fn checker_check_print_string_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        None => {}
+    }
+    let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
+    if !is_error_or_unknown(arg_ty) && !checker_types_compatible_inplace(c, arg_ty, ty_string()) {
+        checker_report_mismatch_inplace(c, e.span, 9, ty_string(), arg_ty)
+    }
+    var effects: [i64; 8] = [0; 8]
+    effects[0] = 0
+    checker_check_callee_effects_inplace(c, e.span, effects, 1)
+    ty_unit()
+}
+
 fn checker_check_slice_len_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_arg = expr_list_head(e.args)
     let second_arg = expr_list_second(e.args)
@@ -4687,6 +4708,9 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     if call_expr_is_builtin_assert(e.left) {
         return checker_check_assert_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_print(e.left) {
+        return checker_check_print_string_expr_inplace(c, e)
     }
     if call_expr_is_builtin_print_int(e.left) {
         return checker_check_print_i64_expr_inplace(c, e)
@@ -10530,6 +10554,18 @@ fn call_expr_is_builtin_assert(opt: Option<Box<Expr> >) -> bool with Mut, Panic,
                 return false
             }
             name_matches_str6((*expr).name, 97, 115, 115, 101, 114, 116)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_print(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str5((*expr).name, 112, 114, 105, 110, 116)
         }
         None => false
     }
@@ -16836,6 +16872,29 @@ impl Checker {
         (c, ty_unit())
     }
 
+    fn check_print_string_builtin_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let first_arg = expr_list_head(e.args)
+        let second_arg = expr_list_second(e.args)
+        let first_pair = self.check_opt_expr(first_arg)
+        var c = first_pair.0
+        let arg_ty = first_pair.1
+        match first_arg {
+            None => c = c.report_error_at(e.span, 10, 0, 0, 0)
+            Some(_) => {}
+        }
+        match second_arg {
+            Some(_) => c = c.report_error_at(e.span, 10, 0, 0, 0)
+            None => {}
+        }
+        if !is_error_or_unknown(arg_ty) && !c.types_compatible_structural(arg_ty, ty_string()) {
+            c = c.report_mismatch(e.span, 9, ty_string(), arg_ty)
+        }
+        var effects: [i64; 8] = [0; 8]
+        effects[0] = 0
+        c = c.check_callee_effects(e.span, effects, 1)
+        (c, ty_unit())
+    }
+
     fn check_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         // Safety guard: ExprIndex nodes (e.right=Some) are occasionally dispatched here
         // due to a VM-level kind mismatch. ExprCall never sets e.right; ExprIndex always does.
@@ -16905,6 +16964,9 @@ impl Checker {
         }
         if call_expr_is_builtin_slice_len(e.left) {
             return self.check_slice_len_call_expr(e)
+        }
+        if call_expr_is_builtin_print(e.left) {
+            return self.check_print_string_builtin_expr(e)
         }
         if call_expr_is_builtin_print_int(e.left) {
             return self.check_print_i64_builtin_expr(e)
