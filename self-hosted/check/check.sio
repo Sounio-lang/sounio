@@ -1208,6 +1208,79 @@ fn checker_lower_ref_mut_type_mut(c: *mut Checker, opt: Option<Box<TypeExpr> >) 
     }
 }
 
+fn checker_lower_fn_type_params_mut(c: *mut Checker, tel: TypeExprList, idx: i64) -> MutParamsResult with Mut, Panic, Div, Alloc, IO {
+    let param_ty = checker_lower_type_expr_mut(c, tel.head)
+    var pname = Name { buf: [0; 128], len: 0 }
+    pname.buf[0] = 95   // '_'
+    pname.buf[1] = 112  // 'p'
+    pname.buf[2] = (48 + idx) as i8
+    pname.len = 3
+    let param_info = FnParamInfo { name: pname, ty: param_ty }
+    match tel.tail {
+        None => {
+            let pl = FnParamList { head: param_info, tail: None }
+            MutParamsResult { params: Some(Box::new(pl)), count: idx + 1 }
+        }
+        Some(rest) => {
+            let r = checker_lower_fn_type_params_mut(c, *rest, idx + 1)
+            let pl = FnParamList { head: param_info, tail: r.params }
+            MutParamsResult { params: Some(Box::new(pl)), count: r.count }
+        }
+    }
+}
+
+fn checker_lower_fn_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    var params: Option<Box<FnParamList> > = None
+    var param_count: i64 = 0
+    match te.type_args {
+        Some(tel) => {
+            let r = checker_lower_fn_type_params_mut(c, *tel, 0)
+            params = r.params
+            param_count = r.count
+        }
+        None => {}
+    }
+
+    var ret_ty = ty_unit()
+    match te.inner {
+        Some(inner_te) => {
+            ret_ty = checker_lower_type_expr_mut(c, *inner_te)
+        }
+        None => {}
+    }
+
+    let eff_pair = checker_extract_effects_mut(c, te.effects)
+    let sig = FnSig {
+        name: Name { buf: [0; 128], len: 0 },
+        params: params,
+        param_count: param_count,
+        return_type: ret_ty,
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: eff_pair.effects,
+        effect_count: eff_pair.count,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let sig_id = (*c).fn_sigs.count
+    if sig_id >= 64 {
+        checker_note_type_error_mut(c)
+        return ty_error()
+    }
+    (*c).fn_sigs.entries[sig_id as usize] = sig
+    (*c).fn_sigs.count = sig_id + 1
+    ty_fn(sig_id)
+}
+
 fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !checker_enter_type_expr_mut(c) {
         return ty_error()
@@ -1300,6 +1373,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
             let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
             if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_validated(inner_ty, -1.0) }
         }
+        TypeExprKind::TypeFn => checker_lower_fn_type_expr_mut(c, te)
         TypeExprKind::TypeArray => checker_lower_array_type_mut(c, te.inner, te.array_size)
         TypeExprKind::TypeReference => checker_lower_ref_type_mut(c, te.inner)
         TypeExprKind::TypeRefMut => checker_lower_ref_mut_type_mut(c, te.inner)
@@ -2691,7 +2765,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             let body_ty = checker_check_block_inplace(c, (*fd).body)
             if sig_id >= 0 {
                 let sig2 = (*c).fn_sigs.get(sig_id)
-                if !types_compatible(body_ty, sig2.return_type) {
+                if !checker_types_compatible_inplace(c, body_ty, sig2.return_type) {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
             }
@@ -2791,7 +2865,7 @@ fn checker_check_opt_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >) -> T
 
 fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let val_ty = checker_check_opt_expr_inplace(c, e.left)
-    if !types_compatible(val_ty, (*c).current_return_type) {
+    if !checker_types_compatible_inplace(c, val_ty, (*c).current_return_type) {
         checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
     }
     ty_never()
@@ -3221,7 +3295,7 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
         Some(else_e) => {
             let else_ty = checker_check_expr_inplace(c, *else_e)
             (*c).refine_cond_env = saved_cond_env
-            if !types_compatible(then_ty, else_ty) {
+            if !checker_types_compatible_inplace(c, then_ty, else_ty) {
                 checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
             }
             then_ty
@@ -3700,7 +3774,7 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     // Remaining arm: compare against the first arm's type (check_remaining_arms,
                     // code 18, span = this arm's span == (*list).head.span, expected = result_ty,
                     // got = arm_ty).
-                    if !types_compatible(arm_ty, result_ty) {
+                    if !checker_types_compatible_inplace(c, arm_ty, result_ty) {
                         checker_report_mismatch_inplace(c, arm.span, 18, result_ty, arm_ty)
                     }
                 }
@@ -4032,7 +4106,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         ret_ty
     }
     if ret_ty.kind != TypeKind::TyUnknown {
-        if !types_compatible(body_ty, ret_ty) {
+        if !checker_types_compatible_inplace(c, body_ty, ret_ty) {
             checker_report_mismatch_inplace(c, e.span, 8, ret_ty, body_ty)
         }
     }
@@ -4319,16 +4393,18 @@ fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_inf
     }
     let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
     if has_param_info {
-        if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
+        if !checker_call_arg_types_compatible_inplace(c, arg_expr, arg_ty, param_info.ty) {
             checker_report_mismatch_inplace(c, call_span, 9, param_info.ty, arg_ty)
         }
-        // Direct *mut void calls (no Checker locals — was bb/rb/kb/ub/ob, ~12MB+
-        // held across this fn's nested-call recursion → the stack overflow).
-        checker_check_call_arg_borrow_boundary_inplace(c, arg_expr, param_info.ty, call_span)
-        checker_check_call_arg_refinement_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
-        checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_info.ty, call_span)
-        checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
-        checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
+        if arg_ty.kind != TypeKind::TyFn && param_info.ty.kind != TypeKind::TyFn {
+            // Direct *mut void calls (no Checker locals — was bb/rb/kb/ub/ob, ~12MB+
+            // held across this fn's nested-call recursion → the stack overflow).
+            checker_check_call_arg_borrow_boundary_inplace(c, arg_expr, param_info.ty, call_span)
+            checker_check_call_arg_refinement_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
+            checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+            checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+            checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
+        }
     }
     if has_param_info &&
        arg_expr.kind == ExprKind::ExprIdent &&
@@ -4378,14 +4454,16 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
         }
         let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
         if has_param_info && !primitive_exact {
-            if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
+            if !checker_call_arg_types_compatible_inplace(c, arg_expr, arg_ty, param_info.ty) {
                 checker_report_mismatch_inplace(c, call_span, 9, param_info.ty, arg_ty)
             }
-            checker_check_call_arg_borrow_boundary_inplace(c, arg_expr, param_info.ty, call_span)
-            checker_check_call_arg_refinement_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
-            checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_info.ty, call_span)
-            checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
-            checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
+            if arg_ty.kind != TypeKind::TyFn && param_info.ty.kind != TypeKind::TyFn {
+                checker_check_call_arg_borrow_boundary_inplace(c, arg_expr, param_info.ty, call_span)
+                checker_check_call_arg_refinement_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
+                checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+                checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+                checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
+            }
         }
         if has_param_info &&
            arg_expr.kind == ExprKind::ExprIdent &&
@@ -4438,6 +4516,27 @@ fn checker_check_assert_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
         checker_report_mismatch_inplace(c, e.span, 174, ty_bool(), cond_ty)
     }
+    ty_unit()
+}
+
+fn checker_check_print_i64_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        None => {}
+    }
+    let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
+    if !is_error_or_unknown(arg_ty) && !checker_types_compatible_inplace(c, arg_ty, ty_i64()) {
+        checker_report_mismatch_inplace(c, e.span, 9, ty_i64(), arg_ty)
+    }
+    var effects: [i64; 8] = [0; 8]
+    effects[0] = 0
+    checker_check_callee_effects_inplace(c, e.span, effects, 1)
     ty_unit()
 }
 
@@ -4588,6 +4687,12 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     if call_expr_is_builtin_assert(e.left) {
         return checker_check_assert_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_print_int(e.left) {
+        return checker_check_print_i64_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_print_char(e.left) {
+        return checker_check_print_i64_expr_inplace(c, e)
     }
     if call_expr_should_bridge_by_value(e) {
         return checker_check_expr_mut(c, e)
@@ -5379,7 +5484,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         let init_enum = init_ty.kind == TypeKind::TyNamed && (*c).enums.find(init_ty.name) >= 0
         let ann_enum = ann_ty.kind == TypeKind::TyNamed && (*c).enums.find(ann_ty.name) >= 0
         let enum_int_ok = (init_enum && is_numeric_type(ann_ty)) || (is_numeric_type(init_ty) && ann_enum)
-        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow && !enum_int_ok {
+        if !checker_types_compatible_inplace(c, init_ty, ann_ty) && !int_lit_narrow && !enum_int_ok {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
@@ -5429,7 +5534,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         let int_lit_narrow = (*c).last_literal_kind == 1
             && init_ty.kind == TypeKind::TyI64
             && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-        if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
+        if !checker_types_compatible_inplace(c, init_ty, ann_ty) && !int_lit_narrow {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
         if ann_ty.kind == init_ty.kind
@@ -5495,7 +5600,7 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
             }
         }
     } else {
-        if !types_compatible(target_ty, val_ty) {
+        if !checker_types_compatible_inplace(c, target_ty, val_ty) {
             checker_report_mismatch_inplace(c, s.span, 2, target_ty, val_ty)
         }
     }
@@ -10430,6 +10535,30 @@ fn call_expr_is_builtin_assert(opt: Option<Box<Expr> >) -> bool with Mut, Panic,
     }
 }
 
+fn call_expr_is_builtin_print_int(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str9((*expr).name, 112, 114, 105, 110, 116, 95, 105, 110, 116)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_print_char(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str10((*expr).name, 112, 114, 105, 110, 116, 95, 99, 104, 97, 114)
+        }
+        None => false
+    }
+}
+
 fn call_expr_is_builtin_lift_knowledge(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
@@ -10750,6 +10879,153 @@ fn fn_param_list_handle_get(h: FnParamListHandle, idx: i64) -> FnParamInfo with 
         }
     }
     empty_fn_param_info()
+}
+
+fn checker_fn_sig_has_effect(sig: FnSig, effect_id: i64) -> bool with Panic, Div {
+    var i: i64 = 0
+    while i < sig.effect_count && i < 8 {
+        if sig.effects[i] == effect_id {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn checker_fn_sig_effects_compatible(a: FnSig, b: FnSig) -> bool with Panic, Div {
+    // Function values are compatible when the provided effect row is a subset
+    // of the expected effect row: a pure fn can flow to `fn ... with Panic`,
+    // but an effectful fn cannot flow to a pure fn slot.
+    var i: i64 = 0
+    while i < a.effect_count && i < 8 {
+        if !checker_fn_sig_has_effect(b, a.effects[i]) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn checker_fn_sig_params_compatible(a: FnSig, b: FnSig) -> bool with Mut, Panic, Div, Alloc {
+    if a.param_count != b.param_count {
+        return false
+    }
+    let ah = fn_param_list_handle(a.params)
+    let bh = fn_param_list_handle(b.params)
+    var i: i64 = 0
+    while i < a.param_count {
+        let ap = fn_param_list_handle_get(ah, i)
+        let bp = fn_param_list_handle_get(bh, i)
+        if !types_compatible(ap.ty, bp.ty) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn checker_fn_types_structurally_compatible_table(tbl: FnSigTable, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if a.kind != TypeKind::TyFn || b.kind != TypeKind::TyFn {
+        return false
+    }
+    if a.fn_sig_id == b.fn_sig_id {
+        return true
+    }
+    if a.fn_sig_id < 0 || b.fn_sig_id < 0 {
+        return false
+    }
+    if a.fn_sig_id >= tbl.count || b.fn_sig_id >= tbl.count {
+        return false
+    }
+    let asig = tbl.get(a.fn_sig_id)
+    let bsig = tbl.get(b.fn_sig_id)
+    if !types_compatible(asig.return_type, bsig.return_type) {
+        return false
+    }
+    if !checker_fn_sig_params_compatible(asig, bsig) {
+        return false
+    }
+    checker_fn_sig_effects_compatible(asig, bsig)
+}
+
+fn checker_types_compatible_table(tbl: FnSigTable, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if types_compatible(a, b) {
+        return true
+    }
+    checker_fn_types_structurally_compatible_table(tbl, a, b)
+}
+
+fn checker_call_arg_types_compatible_table(tbl: FnSigTable, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if checker_types_compatible_table(tbl, arg_ty, param_ty) {
+        return true
+    }
+    if param_ty.kind == TypeKind::TyRef && arg_ty.kind == TypeKind::TyRefMut {
+        return types_compatible_inner(arg_ty.inner, param_ty.inner)
+    }
+    if param_ty.kind == TypeKind::TySlice && arg_ty.kind == TypeKind::TySliceMut {
+        return types_compatible_inner(arg_ty.inner, param_ty.inner)
+    }
+    if slice_param_accepts_array_ref(arg_ty, param_ty) {
+        return true
+    }
+    if arg_expr.kind == ExprKind::ExprIdent &&
+       (param_ty.kind == TypeKind::TyRef || param_ty.kind == TypeKind::TyRefMut) {
+        return checker_types_compatible_table(tbl, arg_ty, call_ref_inner_or_self(param_ty))
+    }
+    false
+}
+
+fn checker_fn_types_structurally_compatible_inplace(c: *mut Checker, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    if a.kind != TypeKind::TyFn || b.kind != TypeKind::TyFn {
+        return false
+    }
+    if a.fn_sig_id == b.fn_sig_id {
+        return true
+    }
+    if a.fn_sig_id < 0 || b.fn_sig_id < 0 {
+        return false
+    }
+    if a.fn_sig_id >= (*c).fn_sigs.count || b.fn_sig_id >= (*c).fn_sigs.count {
+        return false
+    }
+    let ai = a.fn_sig_id
+    let bi = b.fn_sig_id
+    let asig = (*c).fn_sigs.get(ai)
+    let bsig = (*c).fn_sigs.get(bi)
+    if !types_compatible(asig.return_type, bsig.return_type) {
+        return false
+    }
+    if !checker_fn_sig_params_compatible(asig, bsig) {
+        return false
+    }
+    checker_fn_sig_effects_compatible(asig, bsig)
+}
+
+fn checker_types_compatible_inplace(c: *mut Checker, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    if types_compatible(a, b) {
+        return true
+    }
+    checker_fn_types_structurally_compatible_inplace(c, a, b)
+}
+
+fn checker_call_arg_types_compatible_inplace(c: *mut Checker, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    if checker_types_compatible_inplace(c, arg_ty, param_ty) {
+        return true
+    }
+    if param_ty.kind == TypeKind::TyRef && arg_ty.kind == TypeKind::TyRefMut {
+        return types_compatible_inner(arg_ty.inner, param_ty.inner)
+    }
+    if param_ty.kind == TypeKind::TySlice && arg_ty.kind == TypeKind::TySliceMut {
+        return types_compatible_inner(arg_ty.inner, param_ty.inner)
+    }
+    if slice_param_accepts_array_ref(arg_ty, param_ty) {
+        return true
+    }
+    if arg_expr.kind == ExprKind::ExprIdent &&
+       (param_ty.kind == TypeKind::TyRef || param_ty.kind == TypeKind::TyRefMut) {
+        return checker_types_compatible_inplace(c, arg_ty, call_ref_inner_or_self(param_ty))
+    }
+    false
 }
 
 fn expr_list_second(opt: Option<Box<ExprList> >) -> Option<Box<Expr> > with Alloc {
@@ -15145,7 +15421,7 @@ impl Checker {
                 // Check return type compatibility
                 if sig_id >= 0 {
                     let sig2 = c.fn_sigs.get(sig_id)
-                    if !types_compatible(body_ty, sig2.return_type) {
+                    if !c.types_compatible_structural(body_ty, sig2.return_type) {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
@@ -15255,7 +15531,7 @@ impl Checker {
                 let body_ty = pair.1
                 if sig_id >= 0 {
                     let sig2 = c.fn_sigs.get(sig_id)
-                    if !types_compatible(body_ty, sig2.return_type) {
+                    if !c.types_compatible_structural(body_ty, sig2.return_type) {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
@@ -15347,7 +15623,7 @@ impl Checker {
             let int_lit_narrow = c.last_literal_kind == 1
                 && init_ty.kind == TypeKind::TyI64
                 && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-            if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
+            if !c.types_compatible_structural(init_ty, ann_ty) && !int_lit_narrow {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             if ann_ty.kind == init_ty.kind
@@ -15399,7 +15675,7 @@ impl Checker {
             let int_lit_narrow = c.last_literal_kind == 1
                 && init_ty.kind == TypeKind::TyI64
                 && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-            if !types_compatible(init_ty, ann_ty) && !int_lit_narrow {
+            if !c.types_compatible_structural(init_ty, ann_ty) && !int_lit_narrow {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             if ann_ty.kind == init_ty.kind
@@ -15497,7 +15773,7 @@ impl Checker {
             }
         } else {
             // Simple assignment: check compatibility
-            if !types_compatible(target_ty, val_ty) {
+            if !c.types_compatible_structural(target_ty, val_ty) {
                 c = c.report_mismatch(s.span, 2, target_ty, val_ty)
             }
         }
@@ -16537,6 +16813,29 @@ impl Checker {
         (c, ty_i64())
     }
 
+    fn check_print_i64_builtin_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let first_arg = expr_list_head(e.args)
+        let second_arg = expr_list_second(e.args)
+        let first_pair = self.check_opt_expr(first_arg)
+        var c = first_pair.0
+        let arg_ty = first_pair.1
+        match first_arg {
+            None => c = c.report_error_at(e.span, 10, 0, 0, 0)
+            Some(_) => {}
+        }
+        match second_arg {
+            Some(_) => c = c.report_error_at(e.span, 10, 0, 0, 0)
+            None => {}
+        }
+        if !is_error_or_unknown(arg_ty) && !c.types_compatible_structural(arg_ty, ty_i64()) {
+            c = c.report_mismatch(e.span, 9, ty_i64(), arg_ty)
+        }
+        var effects: [i64; 8] = [0; 8]
+        effects[0] = 0
+        c = c.check_callee_effects(e.span, effects, 1)
+        (c, ty_unit())
+    }
+
     fn check_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         // Safety guard: ExprIndex nodes (e.right=Some) are occasionally dispatched here
         // due to a VM-level kind mismatch. ExprCall never sets e.right; ExprIndex always does.
@@ -16606,6 +16905,12 @@ impl Checker {
         }
         if call_expr_is_builtin_slice_len(e.left) {
             return self.check_slice_len_call_expr(e)
+        }
+        if call_expr_is_builtin_print_int(e.left) {
+            return self.check_print_i64_builtin_expr(e)
+        }
+        if call_expr_is_builtin_print_char(e.left) {
+            return self.check_print_i64_builtin_expr(e)
         }
         let witness_kind = call_expr_contest_witness_kind(e.left)
         if witness_kind >= 0 {
@@ -18916,6 +19221,14 @@ impl Checker {
         self.check_call_arg_ontology_boundary(arg_ty, param_ty, call_span)
     }
 
+    fn types_compatible_structural(self, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+        checker_types_compatible_table(self.fn_sigs, a, b)
+    }
+
+    fn call_arg_types_compatible_structural(self, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+        checker_call_arg_types_compatible_table(self.fn_sigs, arg_expr, arg_ty, param_ty)
+    }
+
     fn check_call_args_inner(self, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, idx: i64, expected_count: i64, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         match args {
             Some(arg_list) => {
@@ -18940,14 +19253,16 @@ impl Checker {
                 // Check against parameter type and boundary contracts
                 let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
                 if has_param_info {
-                    if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
+                    if !c.call_arg_types_compatible_structural(arg_expr, arg_ty, param_info.ty) {
                         c = c.report_mismatch(call_span, 9, param_info.ty, arg_ty)
                     }
-                    c = c.check_call_arg_borrow_boundary(arg_expr, param_info.ty, call_span)
-                    c = c.check_call_arg_refinement_boundary(arg_expr, arg_ty, param_info.ty, call_span)
-                    c = c.check_call_arg_knowledge_boundary(arg_ty, param_info.ty, call_span)
-                    c = c.check_call_arg_unit_boundary(arg_ty, param_info.ty, call_span)
-                    c = c.ontology_boundary_check_call_arg_contract(arg_ty, param_info.ty, call_span)
+                    if arg_ty.kind != TypeKind::TyFn && param_info.ty.kind != TypeKind::TyFn {
+                        c = c.check_call_arg_borrow_boundary(arg_expr, param_info.ty, call_span)
+                        c = c.check_call_arg_refinement_boundary(arg_expr, arg_ty, param_info.ty, call_span)
+                        c = c.check_call_arg_knowledge_boundary(arg_ty, param_info.ty, call_span)
+                        c = c.check_call_arg_unit_boundary(arg_ty, param_info.ty, call_span)
+                        c = c.ontology_boundary_check_call_arg_contract(arg_ty, param_info.ty, call_span)
+                    }
                 }
                 // Linear type consumption: if arg is linear and not implicitly borrowed, consume it
                 if has_param_info &&
@@ -19047,7 +19362,7 @@ impl Checker {
                 let else_ty = else_pair.1
                 // Restore after else branch
                 c.refine_cond_env = saved_cond_env
-                if !types_compatible(then_ty, else_ty) {
+                if !c.types_compatible_structural(then_ty, else_ty) {
                     c = c.report_mismatch(e.span, 7, then_ty, else_ty)
                 }
                 (c, then_ty)
@@ -19111,7 +19426,7 @@ impl Checker {
                 let pair = self.check_match_arm((*list).head, scrut_ty)
                 var c = pair.0
                 let arm_ty = pair.1
-                if !types_compatible(arm_ty, expected_ty) {
+                if !c.types_compatible_structural(arm_ty, expected_ty) {
                     c = c.report_mismatch((*list).head.span, 18, expected_ty, arm_ty)
                 }
                 c.check_remaining_arms((*list).tail, scrut_ty, expected_ty)
@@ -19298,7 +19613,7 @@ impl Checker {
         let pair = self.check_opt_expr(e.left)
         var c = pair.0
         let val_ty = pair.1
-        if !types_compatible(val_ty, c.current_return_type) {
+        if !c.types_compatible_structural(val_ty, c.current_return_type) {
             c = c.report_mismatch(e.span, 8, c.current_return_type, val_ty)
         }
         (c, ty_never())
@@ -19726,7 +20041,7 @@ impl Checker {
 
         // Check body type against return type if annotated
         if ret_ty.kind != TypeKind::TyUnknown {
-            if !types_compatible(body_ty, ret_ty) {
+            if !c.types_compatible_structural(body_ty, ret_ty) {
                 c = c.report_mismatch(e.span, 8, ret_ty, body_ty)
             }
         }
