@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 MADAROS="${MADAROS_BIN:-$ROOT_DIR/bin/madaros}"
+RAW_MADAROS="${MADAROS_RAW_BIN:-$ROOT_DIR/artifacts/self-hosted/madaros}"
 WORK="${SOUNIO_MADAROS_FULL_GATE_DIR:-$(mktemp -d /tmp/sounio-madaros-full.XXXXXX)}"
 KEEP_WORK="${SOUNIO_MADAROS_FULL_GATE_KEEP:-0}"
 
@@ -72,6 +73,13 @@ for src in "$WORK/empty.sio" "$WORK/nocallargs.sio" "$WORK/localcall.sio" "$WORK
   expect_log_contains "check: OK" "$WORK/check.log"
 done
 pass "public check CLI"
+
+[[ -x "$RAW_MADAROS" ]] || fail "missing raw Madaros ELF for raw check gate: $RAW_MADAROS"
+"$RAW_MADAROS" --check "$WORK/empty.sio" >"$WORK/raw_empty.log" 2>&1
+expect_log_contains "check: OK" "$WORK/raw_empty.log"
+expect_exit 1 "$RAW_MADAROS" --check "$WORK/missing.sio" >"$WORK/raw_missing.log" 2>&1
+expect_log_contains "could not read input file" "$WORK/raw_missing.log"
+pass "raw check CLI"
 
 "$MADAROS" check tests/multimodule/visibility_struct_pub_main.sio >"$WORK/visibility_struct_pub.log" 2>&1
 expect_log_contains "check: OK" "$WORK/visibility_struct_pub.log"
