@@ -66,6 +66,18 @@ fi
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 sounio_require_souc
 
+# If SOUC_BIN resolved to a raw ELF (not a shell script), route through the
+# subcommand wrapper so the harness can call `check`/`run`/`compile` correctly.
+if [[ "$(head -c 2 "$SOUC_BIN" 2>/dev/null)" != "#!" ]]; then
+    _NATIVE_WRAPPER="$ROOT_DIR/scripts/ci/souc-native-wrapper.sh"
+    if [[ -f "$_NATIVE_WRAPPER" ]]; then
+        export SOUNIO_SOUC_BIN="$SOUC_BIN"
+        SOUC_BIN="$_NATIVE_WRAPPER"
+        chmod +x "$_NATIVE_WRAPPER"
+    fi
+    unset _NATIVE_WRAPPER
+fi
+
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
 # Parse arguments
