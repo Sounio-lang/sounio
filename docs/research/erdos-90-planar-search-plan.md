@@ -275,6 +275,11 @@ Alexeev tables do not cover.
 | 1024 | 2961 | **4976** (32×32) | **5075** (smoke; job 3417) | `SounioErdos90Subset1024Witness` | `erdos90_subset1024_witness_gate.sh` |
 | 1089 | 3152 | **5328** (33×33) | **5432** (smoke; job 3454) | `SounioErdos90Subset1089Witness` | `erdos90_subset1089_witness_gate.sh` |
 | 1156 | 3350 | **5692** (34×34) | **5802** (smoke; job 3491) | `SounioErdos90Subset1156Witness` | `erdos90_subset1156_witness_gate.sh` |
+| 1225 | 3553 | **6068** (35×35) | **6182** (smoke; job 3528) | `SounioErdos90Subset1225Witness` | `erdos90_subset1225_witness_gate.sh` |
+| 1296 | 3763 | **6456** (36×36) | **6573** (smoke; job 3565) | `SounioErdos90Subset1296Witness` | `erdos90_subset1296_witness_gate.sh` |
+| 1369 | 3978 | **6856** (37×37) | **6977** (smoke; job 3602) | `SounioErdos90Subset1369Witness` | `erdos90_subset1369_witness_gate.sh` |
+| 1444 | 4200 | **7268** (38×38) | **7396** (smoke; job 3639) | `SounioErdos90Subset1444Witness` | `erdos90_subset1444_witness_gate.sh` |
+| 1521 | 4427 | **7692** (39×39) | **7819** (smoke; job 3676) | `SounioErdos90Subset1521Witness` | `erdos90_subset1521_witness_gate.sh` |
 
 Earlier rungs preserved: `SounioErdos90SubsetWitness` (302), `SounioErdos90GridWitness`
 (288), `SounioErdos90UnifiedQsqrt3Witness` (265 deduped).
@@ -340,6 +345,11 @@ baseline at this `n`; the ℤ² subset front is the correct target for small-`n`
 | 1024 | 4976 | ~4996 | **5075** (smoke) | +99 (+2.0%) |
 | 1089 | 5328 | ~5348 | **5432** (smoke) | +104 (+2.0%) |
 | 1156 | 5692 | ~5712 | **5802** (smoke) | +110 (+1.9%) |
+| 1225 | 6068 | ~6088 | **6182** (smoke) | +114 (+1.9%) |
+| 1296 | 6456 | ~6476 | **6573** (smoke) | +117 (+1.8%) |
+| 1369 | 6856 | ~6876 | **6977** (smoke) | +121 (+1.8%) |
+| 1444 | 7268 | ~7288 | **7396** (smoke) | +128 (+1.8%) |
+| 1521 | 7692 | ~7712 | **7819** (smoke) | +127 (+1.7%) |
 
 The **relative** gain peaks at `n=144` (+8.1%) then compresses (196: +3.9%, 225: +2.9%).
 The **absolute** Δ is remarkably stable at `+24..+27` for `n ≥ 196` under this search
@@ -392,6 +402,11 @@ published false records.
 | `erdos90-1024-*` | **3417** | `n=1024` smoke 5075 |
 | `erdos90-1089-*` | **3454** | `n=1089` smoke 5432 |
 | `erdos90-1156-*` | **3491** | `n=1156` smoke 5802 |
+| `erdos90-1225-*` | **3528** | `n=1225` smoke 6182 |
+| `erdos90-1296-*` | **3565** | `n=1296` smoke 6573 |
+| `erdos90-1369-*` | **3602** | `n=1369` smoke 6977 |
+| `erdos90-1444-*` | **3639** | `n=1444` smoke 7396 |
+| `erdos90-1521-*` | **3676** | `n=1521` smoke 7819 |
 
 Stage roots under `/orangefs/training/sounio/erdos90-*-runs/`.
 
@@ -558,9 +573,10 @@ in a larger pool strictly dominates a full disk at `n=225`.
 4. ~~`n=1024`~~ — **done** (smoke 5075); cluster job **3417**.
 5. ~~`n=1089`~~ — **done** (smoke 5432); cluster job **3454**.
 6. ~~`n=1156`~~ — **done** (smoke 5802); cluster job **3491**.
-7. Scaffold: `scripts/gates/scaffold_erdos90_rung.py` (through `n=1156`; token-safe replace).
-8. Optional: `n=1225` or Regime III `erdos90_optimize` at `n=1156` with climbing `N`.
-9. Do **not** claim global optimality; cite OEIS/A186705 exact ceiling at `n ≤ 21`.
+7. ~~`n=1225..1521` batch~~ — **done** (5 rungs); cluster jobs **3528–3676**.
+8. Scaffold: `scripts/gates/scaffold_erdos90_rung.py` (through `n=1521`; token-safe replace).
+9. Optional: `n=1600` or aggregate pending cluster arrays (441–1521).
+10. Do **not** claim global optimality; cite OEIS/A186705 exact ceiling at `n ≤ 21`.
 
 ---
 
