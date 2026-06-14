@@ -3014,8 +3014,17 @@ fn checker_check_opt_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >) -> T
 
 fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let val_ty = checker_check_opt_expr_inplace(c, e.left)
-    if !checker_types_compatible_inplace(c, val_ty, (*c).current_return_type) {
-        checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
+    match e.left {
+        Some(val_expr) => {
+            if !checker_contextual_expr_compatible(*val_expr, val_ty, (*c).current_return_type) {
+                checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
+            }
+        }
+        None => {
+            if !checker_types_compatible_inplace(c, val_ty, (*c).current_return_type) {
+                checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
+            }
+        }
     }
     ty_never()
 }
@@ -3874,8 +3883,8 @@ fn checker_check_index_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, 
     // base_pair = check_opt_expr(e.left); then idx_pair = c.check_opt_expr(e.right)).
     let base_ty = checker_check_opt_expr_inplace(c, e.left)
     let idx_ty = checker_check_opt_expr_inplace(c, e.right)
-    // Index must be i64 (E14). Non-returning: continues to the indexability check below.
-    if !is_error_or_unknown(idx_ty) && idx_ty.kind != TypeKind::TyI64 {
+    // Index must be an integer type (E14). Non-returning: continues to the indexability check below.
+    if !is_error_or_unknown(idx_ty) && !is_integer_type(idx_ty) {
         checker_report_error_at_inplace(c, e.span, 14, 0, 0, 0)
     }
     let elem_ty = indexable_elem_type(base_ty)
@@ -4061,7 +4070,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                                         } else {
                                             let field_ty = field_info_list_find(mono_si.fields, (*list).head.name)
                                             let val_init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                                            if !types_compatible(val_init_ty, field_ty) {
+                                            if !checker_contextual_expr_compatible((*list).head.value, val_init_ty, field_ty) {
                                                 checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, val_init_ty)
                                             }
                                         }
@@ -4097,7 +4106,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                         } else {
                             let field_ty = field_info_list_find(si.fields, (*list).head.name)
                             let init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                            if !types_compatible(init_ty, field_ty) {
+                            if !checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty) {
                                 checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
                             }
                         }
@@ -4141,7 +4150,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             } else {
                                 let field_ty = field_info_list_find(vfields, (*list).head.name)
                                 let init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                                if !types_compatible(init_ty, field_ty) {
+                                if !checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty) {
                                     checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
                                 }
                             }
@@ -4933,7 +4942,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         match idx_arg {
             Some(arg) => {
                 let idx_ty = checker_check_expr_inplace(c, *arg)
-                if !is_error_or_unknown(idx_ty) && idx_ty.kind != TypeKind::TyI64 {
+                if !is_error_or_unknown(idx_ty) && !is_integer_type(idx_ty) {
                     checker_report_error_at_inplace(c, e.span, 14, 0, 0, 0)
                 }
                 match extra_arg {
@@ -5776,8 +5785,17 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
             }
         }
     } else {
-        if !checker_types_compatible_inplace(c, target_ty, val_ty) {
-            checker_report_mismatch_inplace(c, s.span, 2, target_ty, val_ty)
+        match s.expr {
+            Some(val_expr) => {
+                if !checker_contextual_expr_compatible(*val_expr, val_ty, target_ty) {
+                    checker_report_mismatch_inplace(c, s.span, 2, target_ty, val_ty)
+                }
+            }
+            None => {
+                if !checker_types_compatible_inplace(c, target_ty, val_ty) {
+                    checker_report_mismatch_inplace(c, s.span, 2, target_ty, val_ty)
+                }
+            }
         }
     }
     checker_check_assign_mutability_inplace(c, s.target, s.span)
@@ -11167,6 +11185,9 @@ fn checker_call_arg_types_compatible_table(tbl: FnSigTable, arg_expr: Expr, arg_
     if checker_types_compatible_table(tbl, arg_ty, param_ty) {
         return true
     }
+    if checker_contextual_expr_compatible(arg_expr, arg_ty, param_ty) {
+        return true
+    }
     if param_ty.kind == TypeKind::TyRef && arg_ty.kind == TypeKind::TyRefMut {
         return types_compatible_inner(arg_ty.inner, param_ty.inner)
     }
@@ -11218,6 +11239,9 @@ fn checker_types_compatible_inplace(c: *mut Checker, a: TypeEntry, b: TypeEntry)
 
 fn checker_call_arg_types_compatible_inplace(c: *mut Checker, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
     if checker_types_compatible_inplace(c, arg_ty, param_ty) {
+        return true
+    }
+    if checker_contextual_expr_compatible(arg_expr, arg_ty, param_ty) {
         return true
     }
     if param_ty.kind == TypeKind::TyRef && arg_ty.kind == TypeKind::TyRefMut {
@@ -12021,8 +12045,89 @@ fn eval_const_int_opt_expr(c: Checker, opt: Option<Box<Expr> >) -> (i64, i64) wi
     }
 }
 
+fn checker_expr_is_int_literal_like(e: Expr) -> bool {
+    if e.kind == ExprKind::ExprIntLit {
+        return true
+    }
+    if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
+        match e.left {
+            Some(inner) => (*inner).kind == ExprKind::ExprIntLit
+            None => false
+        }
+    } else {
+        false
+    }
+}
+
+fn checker_expr_list_all_int_literals(opt: Option<Box<ExprList> >) -> bool {
+    var cur = opt
+    var done = false
+    while !done {
+        match cur {
+            Some(list) => {
+                if !checker_expr_is_int_literal_like((*list).head) {
+                    return false
+                }
+                cur = (*list).tail
+            }
+            None => {
+                done = true
+            }
+        }
+    }
+    true
+}
+
+fn checker_expected_accepts_int_literal(actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool {
+    actual_ty.kind == TypeKind::TyI64 && is_integer_type(expected_ty)
+}
+
+fn checker_array_sizes_compatible(actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool {
+    if actual_ty.array_size == -1 || expected_ty.array_size == -1 {
+        return true
+    }
+    actual_ty.array_size == expected_ty.array_size
+}
+
+fn checker_array_int_literal_compatible(e: Expr, actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if e.kind != ExprKind::ExprArrayLit {
+        return false
+    }
+    if actual_ty.kind != TypeKind::TyArray || expected_ty.kind != TypeKind::TyArray {
+        return false
+    }
+    if !checker_array_sizes_compatible(actual_ty, expected_ty) {
+        return false
+    }
+    match actual_ty.inner {
+        Some(actual_inner) => match expected_ty.inner {
+            Some(expected_inner) => {
+                if !checker_expected_accepts_int_literal(*actual_inner, *expected_inner) {
+                    return false
+                }
+                match e.left {
+                    Some(elem_box) => checker_expr_is_int_literal_like(*elem_box)
+                    None => checker_expr_list_all_int_literals(e.args)
+                }
+            }
+            None => false
+        }
+        None => false
+    }
+}
+
+fn checker_contextual_expr_compatible(expr: Expr, actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if types_compatible(actual_ty, expected_ty) {
+        return true
+    }
+    if checker_expr_is_int_literal_like(expr) && checker_expected_accepts_int_literal(actual_ty, expected_ty) {
+        return true
+    }
+    checker_array_int_literal_compatible(expr, actual_ty, expected_ty)
+}
+
 fn call_arg_types_compatible(arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
-    if types_compatible(arg_ty, param_ty) {
+    if checker_contextual_expr_compatible(arg_expr, arg_ty, param_ty) {
         return true
     }
     // Directional borrow boundary: &!T can flow to &T.
@@ -15981,8 +16086,17 @@ impl Checker {
             }
         } else {
             // Simple assignment: check compatibility
-            if !c.types_compatible_structural(target_ty, val_ty) {
-                c = c.report_mismatch(s.span, 2, target_ty, val_ty)
+            match s.expr {
+                Some(val_expr) => {
+                    if !checker_contextual_expr_compatible(*val_expr, val_ty, target_ty) {
+                        c = c.report_mismatch(s.span, 2, target_ty, val_ty)
+                    }
+                }
+                None => {
+                    if !c.types_compatible_structural(target_ty, val_ty) {
+                        c = c.report_mismatch(s.span, 2, target_ty, val_ty)
+                    }
+                }
             }
         }
         // Check mutability: if target is an ident, it must be mutable
@@ -17164,7 +17278,7 @@ impl Checker {
                     let idx_pair = c.check_expr(*arg)
                     c = idx_pair.0
                     let idx_ty = idx_pair.1
-                    if !is_error_or_unknown(idx_ty) && idx_ty.kind != TypeKind::TyI64 {
+                    if !is_error_or_unknown(idx_ty) && !is_integer_type(idx_ty) {
                         c = c.report_error_at(e.span, 14, 0, 0, 0)
                     }
                     match extra_arg {
@@ -19821,8 +19935,17 @@ impl Checker {
         let pair = self.check_opt_expr(e.left)
         var c = pair.0
         let val_ty = pair.1
-        if !c.types_compatible_structural(val_ty, c.current_return_type) {
-            c = c.report_mismatch(e.span, 8, c.current_return_type, val_ty)
+        match e.left {
+            Some(val_expr) => {
+                if !checker_contextual_expr_compatible(*val_expr, val_ty, c.current_return_type) {
+                    c = c.report_mismatch(e.span, 8, c.current_return_type, val_ty)
+                }
+            }
+            None => {
+                if !c.types_compatible_structural(val_ty, c.current_return_type) {
+                    c = c.report_mismatch(e.span, 8, c.current_return_type, val_ty)
+                }
+            }
         }
         (c, ty_never())
     }
@@ -19956,7 +20079,7 @@ impl Checker {
                 let pair = c.check_expr((*list).head.value)
                 c = pair.0
                 let init_ty = pair.1
-                if !types_compatible(init_ty, field_ty) {
+                if !checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty) {
                     c = c.report_mismatch((*list).head.value.span, 16, field_ty, init_ty)
                 }
                 c.check_struct_field_inits_with_type((*list).tail, si)

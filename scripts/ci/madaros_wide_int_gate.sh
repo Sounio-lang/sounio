@@ -46,6 +46,21 @@ expect_log_contains() {
   fi
 }
 
+source_42() {
+  local name="$1"
+  local src="$2"
+  local path="$WORK/${name}.sio"
+  local elf="$WORK/${name}.elf"
+  printf '%s\n' "$src" > "$path"
+  "$MADAROS" check "$path" >"$WORK/${name}_check.log" 2>&1
+  expect_log_contains "check: OK" "$WORK/${name}_check.log"
+  "$MADAROS" build "$path" -o "$elf" >"$WORK/${name}_build.log" 2>&1
+  [[ -s "$elf" ]] || fail "$name did not produce ELF"
+  chmod +x "$elf"
+  expect_exit 42 "$elf"
+  pass "$name source check/build/run exit=42"
+}
+
 mkdir -p "$WORK"
 printf '[wide-int] madaros=%s\n' "$MADAROS"
 printf '[wide-int] work=%s\n' "$WORK"
@@ -225,8 +240,18 @@ expect_exit 193 "$WORK/wide_mf.elf"
 pass "IrWideModFull multi-limb binary long division remainder (exit=193, not 0)"
 
 # ---------------------------------------------------------------------------
+# 17. Source-level wide arithmetic witnesses: lower real user syntax into
+#     IrWideAdd/Sub/Mul/Cmp, then build and run native ELFs.
+# ---------------------------------------------------------------------------
+source_42 "source_i128_mul_gt" 'fn main() -> i64 { let a: i128 = 4294967296 as i128; let b: i128 = 4294967296 as i128; let c: i128 = a * b; let z: i128 = 0 as i128; if c > z { return 42 } 1 }'
+source_42 "source_i256_mul_gt" 'fn main() -> i64 { let a: i256 = 4294967296 as i256; let b: i256 = 4294967296 as i256; let c: i256 = a * b; let z: i256 = 0 as i256; if c > z { return 42 } 1 }'
+source_42 "source_u128_mul_add_gt" 'fn main() -> i64 { let a: u128 = 4294967296 as u128; let b: u128 = 4294967296 as u128; let c: u128 = a * b; let d: u128 = c + c; if d > c { return 42 } 1 }'
+source_42 "source_u256_mul_add_ne" 'fn main() -> i64 { let a: u256 = 4294967296 as u256; let b: u256 = 4294967296 as u256; let c: u256 = a * b; let d: u256 = c + c; if d != c { return 42 } 1 }'
+source_42 "source_i128_sub_eq_zero" 'fn main() -> i64 { let a: i128 = 4294967296 as i128; let b: i128 = 4294967296 as i128; let c: i128 = a * b; let d: i128 = c - c; let z: i128 = 0 as i128; if d == z { return 42 } 1 }'
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "[wide-int] PASS: type identity, type safety, casts, i128/i256 compile"
 echo "[wide-int] PASS: IrWideAdd/Sub/Mul/Shr/Div/Mod/Cmp/DivFull/ModFull witnesses"
-echo "[wide-int] NOTE: source-level wide arithmetic lowering not yet implemented"
+echo "[wide-int] PASS: source-level i128/i256/u128/u256 add/sub/mul/cmp check/build/run"
