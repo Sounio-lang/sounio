@@ -468,8 +468,7 @@ pub struct CollectAlternativeCandidateMetricsResult {
     values: [f64; 8],
 }
 
-pub struct CollectAuditSectionsResult {
-    checker: Checker,
+pub struct CollectAuditSectionsSmallResult {
     info: AuditInfo,
     seen: [i64; 4],
 }
@@ -13947,6 +13946,122 @@ fn checker_lower_audit_target_type_ref(c: &! Checker, te: TypeExpr, span: Span) 
     }
 }
 
+fn checker_collect_audit_metrics_section_bridge(
+    c: *mut Checker,
+    section_name: Name,
+    opt: Option<Box<AuditFieldEntryList> >,
+    seed: AuditInfo,
+    seen_fields: [i64; 8]
+) -> AuditInfo with Mut, Panic, Div, Alloc, IO {
+    let pair = (*c).collect_audit_metrics_section(section_name, opt, seed, seen_fields)
+    checker_store_from_value(c, pair.checker)
+    pair.info
+}
+
+fn checker_collect_audit_mechanistic_section_bridge(
+    c: *mut Checker,
+    audit_name: Name,
+    section_name: Name,
+    opt: Option<Box<AuditFieldEntryList> >
+) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let pair = (*c).collect_audit_mechanistic_section(audit_name, section_name, opt)
+    checker_store_from_value(c, pair.checker)
+    pair.id
+}
+
+fn checker_collect_audit_counterexample_section_bridge(
+    c: *mut Checker,
+    audit_name: Name,
+    section_name: Name,
+    opt: Option<Box<AuditFieldEntryList> >
+) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let pair = (*c).collect_audit_counterexample_section(audit_name, section_name, opt)
+    checker_store_from_value(c, pair.checker)
+    pair.id
+}
+
+fn checker_collect_audit_posterior_weights_section_bridge(
+    c: *mut Checker,
+    audit_name: Name,
+    section_name: Name,
+    family: ModelFamilyInfo,
+    opt: Option<Box<AuditFieldEntryList> >
+) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let pair = (*c).collect_audit_posterior_weights_section(audit_name, section_name, family, opt)
+    checker_store_from_value(c, pair.checker)
+    pair.id
+}
+
+fn checker_collect_audit_sections_inplace(
+    c: *mut Checker,
+    audit_name: Name,
+    opt: Option<Box<AuditSectionList> >,
+    seed: AuditInfo,
+    section_seen: [i64; 4]
+) -> CollectAuditSectionsSmallResult with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(list) => {
+            let section = (*list).head
+            var info = seed
+            var seen = section_seen
+            let section_idx =
+                if section.kind == AuditSectionKind::AuditSectionMetrics { 0 }
+                else if section.kind == AuditSectionKind::AuditSectionMechanistic { 1 }
+                else if section.kind == AuditSectionKind::AuditSectionCounterexample { 2 }
+                else if section.kind == AuditSectionKind::AuditSectionPosteriorWeights { 3 }
+                else { -1 }
+
+            if section_idx < 0 {
+                let next = (*c).report_audit_unknown_or_duplicate_field(section.span, section.name, empty_name())
+                checker_store_from_value(c, next)
+            } else if seen[section_idx as usize] == 1 {
+                let next = (*c).report_audit_unknown_or_duplicate_field(section.span, section.name, empty_name())
+                checker_store_from_value(c, next)
+            } else {
+                seen[section_idx as usize] = 1
+                if section.kind == AuditSectionKind::AuditSectionMetrics {
+                    info = checker_collect_audit_metrics_section_bridge(c, section.name, section.fields, info, [0; 8])
+                } else if section.kind == AuditSectionKind::AuditSectionMechanistic {
+                    let section_id = checker_collect_audit_mechanistic_section_bridge(c, audit_name, section.name, section.fields)
+                    info.mechanistic_report_id = section_id
+                    if section_id >= 0 && section_id < (*c).mechanistic_reports.count {
+                        let report = (*c).mechanistic_reports.get(section_id)
+                        info.metric_known[CONTEST_METRIC_MECHANISTIC_DIVERGENCE as usize] = 1
+                        info.metric_values[CONTEST_METRIC_MECHANISTIC_DIVERGENCE as usize] = report.aggregate_divergence
+                    }
+                } else if section.kind == AuditSectionKind::AuditSectionCounterexample {
+                    let section_id = checker_collect_audit_counterexample_section_bridge(c, audit_name, section.name, section.fields)
+                    info.counterexample_id = section_id
+                    if section_id >= 0 {
+                        info.metric_known[CONTEST_METRIC_COUNTEREXAMPLE_PRESENT as usize] = 1
+                        info.metric_values[CONTEST_METRIC_COUNTEREXAMPLE_PRESENT as usize] = 1.0
+                    }
+                } else if section.kind == AuditSectionKind::AuditSectionPosteriorWeights {
+                    if info.family_id < 0 || info.family_id >= (*c).model_families.count {
+                        let next = (*c).report_audit_weights_family_mismatch(section.span, audit_name)
+                        checker_store_from_value(c, next)
+                    } else {
+                        let family = (*c).model_families.get(info.family_id)
+                        info.posterior_weights_id = checker_collect_audit_posterior_weights_section_bridge(c, audit_name, section.name, family, section.fields)
+                    }
+                }
+            }
+            checker_collect_audit_sections_inplace(c, audit_name, (*list).tail, info, seen)
+        }
+        None => CollectAuditSectionsSmallResult { info: seed, seen: section_seen }
+    }
+}
+
+fn checker_collect_audit_sections_ref(
+    c: &! Checker,
+    audit_name: Name,
+    opt: Option<Box<AuditSectionList> >,
+    seed: AuditInfo,
+    section_seen: [i64; 4]
+) -> CollectAuditSectionsSmallResult with Mut, Panic, Div, Alloc, IO {
+    checker_collect_audit_sections_inplace(c as *mut Checker, audit_name, opt, seed, section_seen)
+}
+
 // ============================================================
 // Pass 1: Collect top-level declarations
 // ============================================================
@@ -14769,8 +14884,7 @@ impl Checker {
                 info.family_id = family_id
                 info.policy_id = policy_id
 
-                let sec_pair = c.collect_audit_sections(name, (*ad).sections, info, [0; 4])
-                c = sec_pair.checker
+                let sec_pair = checker_collect_audit_sections_ref(&! c, name, (*ad).sections, info, [0; 4])
                 info = sec_pair.info
 
                 let add_result = c.audits.add(info)
@@ -14778,70 +14892,6 @@ impl Checker {
                 c
             }
             None => self
-        }
-    }
-
-    fn collect_audit_sections(
-        self,
-        audit_name: Name,
-        opt: Option<Box<AuditSectionList> >,
-        seed: AuditInfo,
-        section_seen: [i64; 4]
-    ) -> CollectAuditSectionsResult with Mut, Panic, Div, Alloc, IO {
-        match opt {
-            Some(list) => {
-                let section = (*list).head
-                var c = self
-                var info = seed
-                var seen = section_seen
-                let section_idx =
-                    if section.kind == AuditSectionKind::AuditSectionMetrics { 0 }
-                    else if section.kind == AuditSectionKind::AuditSectionMechanistic { 1 }
-                    else if section.kind == AuditSectionKind::AuditSectionCounterexample { 2 }
-                    else if section.kind == AuditSectionKind::AuditSectionPosteriorWeights { 3 }
-                    else { -1 }
-
-                if section_idx < 0 {
-                    c = c.report_audit_unknown_or_duplicate_field(section.span, section.name, empty_name())
-                } else if seen[section_idx as usize] == 1 {
-                    c = c.report_audit_unknown_or_duplicate_field(section.span, section.name, empty_name())
-                } else {
-                    seen[section_idx as usize] = 1
-                    if section.kind == AuditSectionKind::AuditSectionMetrics {
-                        let pair = c.collect_audit_metrics_section(section.name, section.fields, info, [0; 8])
-                        c = pair.checker
-                        info = pair.info
-                    } else if section.kind == AuditSectionKind::AuditSectionMechanistic {
-                        let pair = c.collect_audit_mechanistic_section(audit_name, section.name, section.fields)
-                        c = pair.checker
-                        info.mechanistic_report_id = pair.id
-                        if pair.id >= 0 && pair.id < c.mechanistic_reports.count {
-                            let report = c.mechanistic_reports.get(pair.id)
-                            info.metric_known[CONTEST_METRIC_MECHANISTIC_DIVERGENCE as usize] = 1
-                            info.metric_values[CONTEST_METRIC_MECHANISTIC_DIVERGENCE as usize] = report.aggregate_divergence
-                        }
-                    } else if section.kind == AuditSectionKind::AuditSectionCounterexample {
-                        let pair = c.collect_audit_counterexample_section(audit_name, section.name, section.fields)
-                        c = pair.checker
-                        info.counterexample_id = pair.id
-                        if pair.id >= 0 {
-                            info.metric_known[CONTEST_METRIC_COUNTEREXAMPLE_PRESENT as usize] = 1
-                            info.metric_values[CONTEST_METRIC_COUNTEREXAMPLE_PRESENT as usize] = 1.0
-                        }
-                    } else if section.kind == AuditSectionKind::AuditSectionPosteriorWeights {
-                        if info.family_id < 0 || info.family_id >= c.model_families.count {
-                            c = c.report_audit_weights_family_mismatch(section.span, audit_name)
-                        } else {
-                            let family = c.model_families.get(info.family_id)
-                            let pair = c.collect_audit_posterior_weights_section(audit_name, section.name, family, section.fields)
-                            c = pair.checker
-                            info.posterior_weights_id = pair.id
-                        }
-                    }
-                }
-                c.collect_audit_sections(audit_name, (*list).tail, info, seen)
-            }
-            None => CollectAuditSectionsResult { checker: self, info: seed, seen: section_seen }
         }
     }
 

@@ -10,7 +10,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-MAX_STACK_WARNINGS="${MADAROS_NO_CAVEATS_MAX_STACK_WARNINGS:-38}"
+MAX_STACK_WARNINGS="${MADAROS_NO_CAVEATS_MAX_STACK_WARNINGS:-37}"
 MAX_E001_DIAGNOSTICS="${MADAROS_NO_CAVEATS_MAX_E001_DIAGNOSTICS:-0}"
 OUT="${MADAROS_NO_CAVEATS_OUT:-$(mktemp /tmp/sounio-madaros-no-caveats.XXXXXX)}"
 LOG="${MADAROS_NO_CAVEATS_LOG:-$(mktemp /tmp/sounio-madaros-no-caveats-log.XXXXXX)}"
