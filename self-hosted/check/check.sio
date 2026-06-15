@@ -14067,6 +14067,129 @@ fn checker_collect_audit_sections_ref(
     checker_collect_audit_sections_inplace(c as *mut Checker, audit_name, opt, seed, section_seen)
 }
 
+fn ontology_role_decl_count_list(roles: Option<Box<OntologyRoleDeclList> >, target: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
+    match roles {
+        None => 0
+        Some(list) => {
+            let count_here = if name_eq((*list).head.name, target) { 1 } else { 0 }
+            count_here + ontology_role_decl_count_list((*list).tail, target)
+        }
+    }
+}
+
+fn checker_collect_ontology_kernel_add_axiom_bridge(c: *mut Checker, span: Span, axiom: OntologyAxiom) with Mut, Panic, Div, Alloc, IO {
+    let next = (*c).collect_ontology_kernel_add_axiom(span, axiom)
+    checker_store_from_value(c, next)
+}
+
+fn checker_collect_ontology_roles_inplace(c: *mut Checker, roles: Option<Box<OntologyRoleDeclList> >) with Mut, Panic, Div, Alloc, IO {
+    match roles {
+        None => {}
+        Some(list) => {
+            let decl = (*list).head
+            let duplicate_in_tail = ontology_role_decl_count_list((*list).tail, decl.name) > 0
+            let already_registered = ontology_kernel_find_property((*c).ontology_kernel, decl.name) >= 0
+
+            if !already_registered && ontology_kernel_can_add_property((*c).ontology_kernel) {
+                let pair = ontology_kernel_add_property((*c).ontology_kernel, decl.name)
+                (*c).ontology_kernel = pair.0
+            }
+
+            if already_registered || decl.duplicate_modifier_bits != 0 {
+                checker_report_error_at_inplace(c, decl.span, 159, 0, 0, 0)
+            }
+
+            checker_collect_ontology_roles_inplace(c, (*list).tail)
+
+            if already_registered || duplicate_in_tail || decl.duplicate_modifier_bits != 0 {
+                return
+            }
+
+            let prop_idx = ontology_kernel_find_property((*c).ontology_kernel, decl.name)
+            if prop_idx >= 0 {
+                if decl.has_domain {
+                    let domain_idx = ontology_kernel_find_class((*c).ontology_kernel, decl.domain_name)
+                    if domain_idx >= 0 {
+                        checker_collect_ontology_kernel_add_axiom_bridge(c, decl.span, OntologyAxiom {
+                            axiom_type: owl_object_property_domain(),
+                            subject_idx: prop_idx,
+                            object_idx: domain_idx,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    } else {
+                        checker_report_error_at_inplace(c, decl.span, 156, 0, 0, 0)
+                    }
+                }
+
+                if decl.has_range {
+                    let range_idx = ontology_kernel_find_class((*c).ontology_kernel, decl.range_name)
+                    if range_idx >= 0 {
+                        checker_collect_ontology_kernel_add_axiom_bridge(c, decl.span, OntologyAxiom {
+                            axiom_type: owl_object_property_range(),
+                            subject_idx: prop_idx,
+                            object_idx: range_idx,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    } else {
+                        checker_report_error_at_inplace(c, decl.span, 157, 0, 0, 0)
+                    }
+                }
+
+                if decl.has_inverse {
+                    let inverse_idx = ontology_kernel_find_property((*c).ontology_kernel, decl.inverse_name)
+                    if inverse_idx >= 0 {
+                        checker_collect_ontology_kernel_add_axiom_bridge(c, decl.span, OntologyAxiom {
+                            axiom_type: owl_inverse_object_properties(),
+                            subject_idx: prop_idx,
+                            object_idx: inverse_idx,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    } else {
+                        checker_report_error_at_inplace(c, decl.span, 158, 0, 0, 0)
+                    }
+                }
+
+                if decl.is_transitive {
+                    checker_collect_ontology_kernel_add_axiom_bridge(c, decl.span, OntologyAxiom {
+                        axiom_type: owl_transitive_property(),
+                        subject_idx: prop_idx,
+                        object_idx: -1,
+                        refinement_ref_id: -1,
+                        property_name: empty_name(),
+                        is_property_axiom: true,
+                    })
+                }
+                if decl.is_symmetric {
+                    checker_collect_ontology_kernel_add_axiom_bridge(c, decl.span, OntologyAxiom {
+                        axiom_type: owl_symmetric_property(),
+                        subject_idx: prop_idx,
+                        object_idx: -1,
+                        refinement_ref_id: -1,
+                        property_name: empty_name(),
+                        is_property_axiom: true,
+                    })
+                }
+                if decl.is_functional {
+                    checker_collect_ontology_kernel_add_axiom_bridge(c, decl.span, OntologyAxiom {
+                        axiom_type: owl_functional_property(),
+                        subject_idx: prop_idx,
+                        object_idx: -1,
+                        refinement_ref_id: -1,
+                        property_name: empty_name(),
+                        is_property_axiom: true,
+                    })
+                }
+            }
+        }
+    }
+}
+
 // ============================================================
 // Pass 1: Collect top-level declarations
 // ============================================================
@@ -15528,7 +15651,7 @@ impl Checker {
         c = c.collect_ontology_kernel_classes(classes, ont_name)
         c = c.collect_ontology_kernel_property_axioms_from_legacy(ont_name)
         c = c.collect_ontology_kernel_disjoints(disjoints)
-        c = c.collect_ontology_roles(roles)
+        checker_collect_ontology_roles_inplace(c as *mut Checker, roles)
         c.ontology_kernel = ontology_kernel_materialize(c.ontology_kernel)
         c.ontology_kernel.profile = ontology_kernel_check_profile(c.ontology_kernel)
         c
@@ -15771,117 +15894,6 @@ impl Checker {
             Some(list) => {
                 let count_here = if name_eq((*list).head.name, target) { 1 } else { 0 }
                 count_here + self.ontology_role_decl_count((*list).tail, target)
-            }
-        }
-    }
-
-    fn collect_ontology_roles(self, roles: Option<Box<OntologyRoleDeclList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
-        match roles {
-            None => self
-            Some(list) => {
-                var c = self
-                let decl = (*list).head
-                let duplicate_in_tail = c.ontology_role_decl_count((*list).tail, decl.name) > 0
-                let already_registered = ontology_kernel_find_property(c.ontology_kernel, decl.name) >= 0
-
-                if !already_registered && ontology_kernel_can_add_property(c.ontology_kernel) {
-                    let pair = ontology_kernel_add_property(c.ontology_kernel, decl.name)
-                    c.ontology_kernel = pair.0
-                }
-
-                if already_registered || decl.duplicate_modifier_bits != 0 {
-                    c = c.report_error_at(decl.span, 159, 0, 0, 0)
-                }
-
-                c = c.collect_ontology_roles((*list).tail)
-
-                if already_registered || duplicate_in_tail || decl.duplicate_modifier_bits != 0 {
-                    return c
-                }
-
-                let prop_idx = ontology_kernel_find_property(c.ontology_kernel, decl.name)
-                if prop_idx >= 0 {
-                    if decl.has_domain {
-                        let domain_idx = ontology_kernel_find_class(c.ontology_kernel, decl.domain_name)
-                        if domain_idx >= 0 {
-                            c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
-                                axiom_type: owl_object_property_domain(),
-                                subject_idx: prop_idx,
-                                object_idx: domain_idx,
-                                refinement_ref_id: -1,
-                                property_name: empty_name(),
-                                is_property_axiom: true,
-                            })
-                        } else {
-                            c = c.report_error_at(decl.span, 156, 0, 0, 0)
-                        }
-                    }
-
-                    if decl.has_range {
-                        let range_idx = ontology_kernel_find_class(c.ontology_kernel, decl.range_name)
-                        if range_idx >= 0 {
-                            c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
-                                axiom_type: owl_object_property_range(),
-                                subject_idx: prop_idx,
-                                object_idx: range_idx,
-                                refinement_ref_id: -1,
-                                property_name: empty_name(),
-                                is_property_axiom: true,
-                            })
-                        } else {
-                            c = c.report_error_at(decl.span, 157, 0, 0, 0)
-                        }
-                    }
-
-                    if decl.has_inverse {
-                        let inverse_idx = ontology_kernel_find_property(c.ontology_kernel, decl.inverse_name)
-                        if inverse_idx >= 0 {
-                            c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
-                                axiom_type: owl_inverse_object_properties(),
-                                subject_idx: prop_idx,
-                                object_idx: inverse_idx,
-                                refinement_ref_id: -1,
-                                property_name: empty_name(),
-                                is_property_axiom: true,
-                            })
-                        } else {
-                            c = c.report_error_at(decl.span, 158, 0, 0, 0)
-                        }
-                    }
-
-                    if decl.is_transitive {
-                        c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
-                            axiom_type: owl_transitive_property(),
-                            subject_idx: prop_idx,
-                            object_idx: -1,
-                            refinement_ref_id: -1,
-                            property_name: empty_name(),
-                            is_property_axiom: true,
-                        })
-                    }
-                    if decl.is_symmetric {
-                        c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
-                            axiom_type: owl_symmetric_property(),
-                            subject_idx: prop_idx,
-                            object_idx: -1,
-                            refinement_ref_id: -1,
-                            property_name: empty_name(),
-                            is_property_axiom: true,
-                        })
-                    }
-                    if decl.is_functional {
-                        c = c.collect_ontology_kernel_add_axiom(decl.span, OntologyAxiom {
-                            axiom_type: owl_functional_property(),
-                            subject_idx: prop_idx,
-                            object_idx: -1,
-                            refinement_ref_id: -1,
-                            property_name: empty_name(),
-                            is_property_axiom: true,
-                        })
-                    }
-                }
-
-                c
             }
         }
     }
