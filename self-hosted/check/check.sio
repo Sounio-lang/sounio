@@ -295,8 +295,7 @@ pub struct TypeParamBuf {
     count: i64,
 }
 // Result structs for check.sio batch C2 (converted from N-tuples)
-pub struct LowerAuditTargetTypeResult {
-    checker: Checker,
+pub struct LowerAuditTargetTypeSmallResult {
     ok: bool,
     ty: TypeEntry,
     family_id: i64,
@@ -13790,6 +13789,57 @@ fn lower_array_size(opt: Option<Box<Expr> >) -> i64 {
     }
 }
 
+fn checker_lower_audit_target_type_ref(c: &! Checker, te: TypeExpr, span: Span) -> LowerAuditTargetTypeSmallResult with Mut, Panic, Div, Alloc, IO {
+    if te.kind != TypeExprKind::TypeContest {
+        return LowerAuditTargetTypeSmallResult { ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
+    }
+    match te.type_args {
+        Some(args) => {
+            match (*args).tail {
+                Some(rest) => {
+                    match (*rest).tail {
+                        Some(last) => {
+                            match (*last).tail {
+                                Some(_) => LowerAuditTargetTypeSmallResult { ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
+                                None => {
+                                    let inner_pair = (*c).lower_type_expr((*args).head)
+                                    checker_store_from_value_ref(c, inner_pair.0)
+                                    let inner_ty = inner_pair.1
+
+                                    let family_pair = (*c).lower_type_expr((*rest).head)
+                                    checker_store_from_value_ref(c, family_pair.0)
+                                    let family_ty = family_pair.1
+
+                                    let policy_pair = (*c).lower_type_expr((*last).head)
+                                    checker_store_from_value_ref(c, policy_pair.0)
+                                    let policy_ty = policy_pair.1
+
+                                    if family_ty.kind != TypeKind::TyModelFamily
+                                        || policy_ty.kind != TypeKind::TyPolicy
+                                        || family_ty.epistemic_meta_id < 0
+                                        || policy_ty.epistemic_meta_id < 0 {
+                                        return LowerAuditTargetTypeSmallResult { ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
+                                    }
+                                    if !types_compatible(model_output_ty(family_ty), inner_ty)
+                                        || !types_compatible(knowledge_inner(policy_ty), inner_ty) {
+                                        let next = (*c).report_error_at(span, 58, 0, 0, 0)
+                                        checker_store_from_value_ref(c, next)
+                                        return LowerAuditTargetTypeSmallResult { ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
+                                    }
+                                    LowerAuditTargetTypeSmallResult { ok: true, ty: inner_ty, family_id: family_ty.epistemic_meta_id, policy_id: policy_ty.epistemic_meta_id }
+                                }
+                            }
+                        }
+                        None => LowerAuditTargetTypeSmallResult { ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
+                    }
+                }
+                None => LowerAuditTargetTypeSmallResult { ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
+            }
+        }
+        None => LowerAuditTargetTypeSmallResult { ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
+    }
+}
+
 // ============================================================
 // Pass 1: Collect top-level declarations
 // ============================================================
@@ -14591,58 +14641,11 @@ impl Checker {
         }
     }
 
-    fn lower_audit_target_type(self, te: TypeExpr, span: Span) -> LowerAuditTargetTypeResult with Mut, Panic, Div, Alloc, IO {
-        if te.kind != TypeExprKind::TypeContest {
-            return LowerAuditTargetTypeResult { checker: self, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
-        }
-        match te.type_args {
-            Some(args) => {
-                match (*args).tail {
-                    Some(rest) => {
-                        match (*rest).tail {
-                            Some(last) => {
-                                match (*last).tail {
-                                    Some(_) => LowerAuditTargetTypeResult { checker: self, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
-                                    None => {
-                                        let inner_pair = self.lower_type_expr((*args).head)
-                                        var c = inner_pair.0
-                                        let inner_ty = inner_pair.1
-                                        let family_pair = c.lower_type_expr((*rest).head)
-                                        c = family_pair.0
-                                        let family_ty = family_pair.1
-                                        let policy_pair = c.lower_type_expr((*last).head)
-                                        c = policy_pair.0
-                                        let policy_ty = policy_pair.1
-                                        if family_ty.kind != TypeKind::TyModelFamily
-                                            || policy_ty.kind != TypeKind::TyPolicy
-                                            || family_ty.epistemic_meta_id < 0
-                                            || policy_ty.epistemic_meta_id < 0 {
-                                            return LowerAuditTargetTypeResult { checker: c, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
-                                        }
-                                        if !types_compatible(model_output_ty(family_ty), inner_ty)
-                                            || !types_compatible(knowledge_inner(policy_ty), inner_ty) {
-                                            c = c.report_error_at(span, 58, 0, 0, 0)
-                                            return LowerAuditTargetTypeResult { checker: c, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
-                                        }
-                                        LowerAuditTargetTypeResult { checker: c, ok: true, ty: inner_ty, family_id: family_ty.epistemic_meta_id, policy_id: policy_ty.epistemic_meta_id }
-                                    }
-                                }
-                            }
-                            None => LowerAuditTargetTypeResult { checker: self, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
-                        }
-                    }
-                    None => LowerAuditTargetTypeResult { checker: self, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
-                }
-            }
-            None => LowerAuditTargetTypeResult { checker: self, ok: false, ty: ty_error(), family_id: -1, policy_id: -1 }
-        }
-    }
-
     fn collect_audit_def(self, name: Name, opt: Option<Box<AuditDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(ad) => {
-                let __r = self.lower_audit_target_type((*ad).target_type, (*ad).span)
-                var c = __r.checker
+                var c = self
+                let __r = checker_lower_audit_target_type_ref(&! c, (*ad).target_type, (*ad).span)
                 let ok = __r.ok
                 let target_inner_ty = __r.ty
                 let family_id = __r.family_id
