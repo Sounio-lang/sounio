@@ -1477,10 +1477,21 @@ fn hlir_bin_op_to_gpu_opcode(bin_op: i64) -> GpuOpcode {
     else { GpuOpcode::GpuAdd }
 }
 
-// Map a binary op tag to a GpuType (float ops → f32, int ops → i32 default).
+// Map a binary op tag to a GpuType.
+// IMPORTANT: the op-tag ranges interleave float-arith (7-11), int-logical (12-16),
+// int-compare Eq..Ge (17-22), float-compare FEq..FGe (23-28). The naive guard
+// [FAdd,FGe] swallowed integer comparisons into the float bucket (HlirOpLt=19 is
+// in [7,28]), so `i < n` was emitting setp.lt.f32 over %f. Classify explicitly.
+// This is the WIDTH source ONLY for comparisons, where the HlirInstr result type
+// is bool and therefore useless for operand width; arithmetic/logical instrs
+// instead take width from instr.ty.kind at the HLIR_OP_BINARY site below.
+// World A (check.sio: gpu thread/block intrinsics typed i64) ⇒ every integer
+// operand of a comparison in these kernels is i64, so int-compare → GpuI64.
 fn hlir_bin_op_type(bin_op: i64) -> GpuType {
-    if bin_op >= HlirOpFAdd && bin_op <= HlirOpFGe { GpuType::GpuF32 }
-    else { GpuType::GpuI32 }
+    if bin_op >= HlirOpFEq && bin_op <= HlirOpFGe { GpuType::GpuF32 }
+    else if bin_op >= HlirOpFAdd && bin_op <= HlirOpFNeg { GpuType::GpuF32 }
+    else if bin_op >= HlirOpEq && bin_op <= HlirOpGe { GpuType::GpuI64 }
+    else { GpuType::GpuI64 }
 }
 
 // Append a single GPU op to a GpuKernelIr. Returns the kernel with op appended.
@@ -1489,6 +1500,26 @@ fn gpu_kernel_append_op(kernel: GpuKernelIr, op: GpuOp) -> GpuKernelIr with Mut,
     if k.op_count < 1024 {
         k.ops[k.op_count as usize] = op
         k.op_count = k.op_count + 1
+    }
+    k
+}
+
+// Widen a 32-bit thread/block intrinsic result to i64 when the HLIR result type
+// is i64. Appends `cvt.u64.u32 %rd<reg>, %r<reg>` so the value's 64-bit register
+// bank is materialized for downstream i64 index arithmetic (World A: the GPU
+// thread/block-index intrinsics are typed i64 by the checker). The sreg read
+// itself stays mov.u32 (the special registers are genuinely 32-bit).
+fn gpu_widen_intrinsic_to_i64(kernel: GpuKernelIr, reg: i64, res_kind: HlirTypeKind) -> GpuKernelIr with Mut, Panic {
+    var k = kernel
+    if res_kind == HlirTypeKind::HlirTypeI64 || res_kind == HlirTypeKind::HlirTypeU64 {
+        var cvt = gpu_op_new()
+        cvt.opcode = GpuOpcode::GpuCvt
+        cvt.dst_reg = reg
+        cvt.src_reg = reg
+        cvt.dst_ty = GpuType::GpuU64
+        cvt.src_ty = GpuType::GpuU32
+        cvt.ty = GpuType::GpuU64
+        k = gpu_kernel_append_op(k, cvt)
     }
     k
 }
@@ -1504,7 +1535,17 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
         op.dst_reg = instr.result
         op.lhs_reg = instr.lhs
         op.rhs_reg = instr.rhs
-        op.ty = hlir_bin_op_type(instr.bin_op)
+        // Width source: for arithmetic/logical ops the HlirInstr result type IS
+        // the operand width, so use it (gives i64 for index math, f64 for
+        // vec_add_f64 — fixing the old hardcoded i32/f32). For comparisons the
+        // result type is bool, useless for width, so fall back to the op-tag map
+        // (int-compare → i64 over %rd, float-compare → f-width).
+        let is_compare = instr.bin_op >= HlirOpEq && instr.bin_op <= HlirOpFGe
+        if is_compare {
+            op.ty = hlir_bin_op_type(instr.bin_op)
+        } else {
+            op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        }
         k = gpu_kernel_append_op(k, op)
     } else if op_kind == HLIR_OP_LOAD {
         var op = gpu_op_new()
@@ -1577,18 +1618,21 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
             op.axis = 0
             op.ty = GpuType::GpuU32
             k = gpu_kernel_append_op(k, op)
+            k = gpu_widen_intrinsic_to_i64(k, instr.result, instr.ty.kind)
         } else if hlir_name_starts_with_gpu_block_id(cn) {
             op.opcode = GpuOpcode::GpuGetBid
             op.dst_reg = instr.result
             op.axis = 0
             op.ty = GpuType::GpuU32
             k = gpu_kernel_append_op(k, op)
+            k = gpu_widen_intrinsic_to_i64(k, instr.result, instr.ty.kind)
         } else if hlir_name_starts_with_gpu_block_dim(cn) {
             op.opcode = GpuOpcode::GpuGetNtid
             op.dst_reg = instr.result
             op.axis = 0
             op.ty = GpuType::GpuU32
             k = gpu_kernel_append_op(k, op)
+            k = gpu_widen_intrinsic_to_i64(k, instr.result, instr.ty.kind)
         }
         // Other calls: skip in MVP
     }
