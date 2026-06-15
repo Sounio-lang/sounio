@@ -1763,6 +1763,14 @@ fn nc_emit_cvttsd2si_rax_xmm0(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0xC0)
 }
 
+fn nc_emit_cvtsi2sd_xmm1_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x2A)
+    nc_emit_byte(nc, 0xC8)
+}
+
 fn nc_emit_movsd_rbp_disp8_xmm0(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
     nc_emit_byte(nc, 0xF2)
     nc_emit_byte(nc, 0x0F)
@@ -4385,186 +4393,164 @@ pub fn emit_builtin_cos_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 }
 
 // Sprint 118: print_f64 builtin — multiply-and-truncate f64 → stdout
-pub fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-
+pub fn emit_builtin_print_f64_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     // Store 1e6 constant in .rodata
-    c.rodata = data_section_add_f64(c.rodata, 0x4124680000000000)
-    let rodata_1e6_offset = c.rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x4124680000000000)
+    let rodata_1e6_offset = (*nc).rodata.last_offset
 
-    c.code = emit_push_rbp(c.code)
-    c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 64)
+    nc_emit_push_rbp(nc)
+    nc_emit_mov_rbp_rsp(nc)
+    nc_emit_sub_rsp_imm32(nc, 64)
 
     // rdi = f64 bit pattern
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
-    c.code = emit_movq_xmm0_rax(c.code)               // movq xmm0, rax
+    nc_emit_mov_reg_reg(nc, 0, 7)           // mov rax, rdi
+    nc_emit_movq_xmm0_rax(nc)               // movq xmm0, rax
 
     // Sign check: test rdi, rdi; jns skip_neg
-    c.code = emit_test_rdi_rdi(c.code)
-    let jns_pos = c.code.len
-    c.code = emit_jns_rel8(c.code, 0)                 // placeholder
+    nc_emit_test_rdi_rdi(nc)
+    let jns_pos = (*nc).code.len
+    nc_emit_jns_rel8(nc, 0)                 // placeholder
 
     // Negative path: emit '-'
-    var cb1 = c.code
-    cb1 = emit_byte(cb1, 0xc6)                         // mov byte [rbp-33], '-'
-    cb1 = emit_byte(cb1, 0x45)
-    cb1 = emit_byte(cb1, 0xdf)
-    cb1 = emit_byte(cb1, 0x2d)
-    c.code = cb1
-    var cb2 = c.code
-    cb2 = emit_byte(cb2, 0x48)                         // lea rsi, [rbp-33]
-    cb2 = emit_byte(cb2, 0x8d)
-    cb2 = emit_byte(cb2, 0x75)
-    cb2 = emit_byte(cb2, 0xdf)
-    c.code = cb2
-    c.code = emit_mov_reg_imm(c.code, 2, 1)           // mov rdx, 1
-    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
-    c = emit_write_syscall_for_target(c, c.target_os_id)
+    nc_emit_byte(nc, 0xc6)                         // mov byte [rbp-33], '-'
+    nc_emit_byte(nc, 0x45)
+    nc_emit_byte(nc, 0xdf)
+    nc_emit_byte(nc, 0x2d)
+    nc_emit_byte(nc, 0x48)                         // lea rsi, [rbp-33]
+    nc_emit_byte(nc, 0x8d)
+    nc_emit_byte(nc, 0x75)
+    nc_emit_byte(nc, 0xdf)
+    nc_emit_mov_reg_imm(nc, 2, 1)           // mov rdx, 1
+    emit_stdout_write_syscall_linux_into(nc)
 
     // Clear sign bit
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
-    c.code = emit_mov_reg_imm(c.code, 3, 0x7FFFFFFFFFFFFFFF)
-    c.code = emit_and_rax_rbx(c.code)
-    c.code = emit_mov_reg_reg(c.code, 7, 0)           // mov rdi, rax
-    c.code = emit_movq_xmm0_rax(c.code)
+    nc_emit_mov_reg_reg(nc, 0, 7)           // mov rax, rdi
+    nc_emit_mov_reg_imm(nc, 3, 0x7FFFFFFFFFFFFFFF)
+    nc_emit_and_rax_rbx(nc)
+    nc_emit_mov_reg_reg(nc, 7, 0)           // mov rdi, rax
+    nc_emit_movq_xmm0_rax(nc)
 
     // Patch jns displacement
-    let neg_block_len = c.code.len - (jns_pos + 2)
+    let neg_block_len = (*nc).code.len - (jns_pos + 2)
     if jns_pos + 1 < 65536 {
-        c.code.bytes[(jns_pos + 1) as usize] = low8(neg_block_len) as i8
+        (*nc).code.bytes[(jns_pos + 1) as usize] = low8(neg_block_len) as i8
     }
 
     // Integer part: cvttsd2si
-    c.code = emit_movq_rax_xmm0(c.code)
-    c.code = emit_store_rax_rbp_disp32(c.code, -48)   // save f64 bits
-    c.code = emit_movq_xmm0_rax(c.code)
-    c.code = emit_cvttsd2si_rax_xmm0(c.code)
-    c.code = emit_store_rax_rbp_disp32(c.code, -56)   // save int_part
+    nc_emit_movq_rax_xmm0(nc)
+    nc_emit_store_rax_rbp_disp32(nc, -48)   // save f64 bits
+    nc_emit_movq_xmm0_rax(nc)
+    nc_emit_cvttsd2si_rax_xmm0(nc)
+    nc_emit_store_rax_rbp_disp32(nc, -56)   // save int_part
 
     // itoa for integer part
-    c.code = emit_mov_reg_reg(c.code, 6, 5)           // mov rsi, rbp
-    c.code = emit_sub_rsi_imm8(c.code, 1)
-    c.code = emit_xor_rcx_rcx(c.code)
+    nc_emit_mov_reg_reg(nc, 6, 5)           // mov rsi, rbp
+    nc_emit_sub_rsi_imm8(nc, 1)
+    nc_emit_xor_rcx_rcx(nc)
 
-    c.code = emit_xor_rdx_rdx(c.code)
-    c.code = emit_mov_reg_imm(c.code, 3, 10)
-    c.code = emit_div_rbx(c.code)
-    c.code = emit_add_rdx_imm8(c.code, 48)
-    c.code = emit_mov_byte_mem_rsi_dl(c.code)
-    c.code = emit_dec_rsi(c.code)
-    c.code = emit_inc_rcx(c.code)
-    c.code = emit_test_rax_rax(c.code)
-    c.code = emit_jnz_rel8(c.code, -30)
+    nc_emit_xor_rdx_rdx(nc)
+    nc_emit_mov_reg_imm(nc, 3, 10)
+    nc_emit_div_rbx(nc)
+    nc_emit_add_rdx_imm8(nc, 48)
+    nc_emit_mov_byte_mem_rsi_dl(nc)
+    nc_emit_dec_rsi(nc)
+    nc_emit_inc_rcx(nc)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jnz_rel8(nc, -30)
 
-    c.code = emit_inc_rsi(c.code)
-    c.code = emit_mov_reg_reg(c.code, 2, 1)           // mov rdx, rcx
-    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
-    c = emit_write_syscall_for_target(c, c.target_os_id)
+    nc_emit_inc_rsi(nc)
+    nc_emit_mov_reg_reg(nc, 2, 1)           // mov rdx, rcx
+    emit_stdout_write_syscall_linux_into(nc)
 
     // Print '.'
-    var cb3 = c.code
-    cb3 = emit_byte(cb3, 0xc6)
-    cb3 = emit_byte(cb3, 0x45)
-    cb3 = emit_byte(cb3, 0xdf)
-    cb3 = emit_byte(cb3, 0x2e)
-    c.code = cb3
-    var cb4 = c.code
-    cb4 = emit_byte(cb4, 0x48)
-    cb4 = emit_byte(cb4, 0x8d)
-    cb4 = emit_byte(cb4, 0x75)
-    cb4 = emit_byte(cb4, 0xdf)
-    c.code = cb4
-    c.code = emit_mov_reg_imm(c.code, 2, 1)
-    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
-    c = emit_write_syscall_for_target(c, c.target_os_id)
+    nc_emit_byte(nc, 0xc6)
+    nc_emit_byte(nc, 0x45)
+    nc_emit_byte(nc, 0xdf)
+    nc_emit_byte(nc, 0x2e)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8d)
+    nc_emit_byte(nc, 0x75)
+    nc_emit_byte(nc, 0xdf)
+    nc_emit_mov_reg_imm(nc, 2, 1)
+    emit_stdout_write_syscall_linux_into(nc)
 
     // Fractional part
-    c.code = emit_load_rbp_disp32_rax(c.code, -48)
-    c.code = emit_movq_xmm0_rax(c.code)
-    c.code = emit_load_rbp_disp32_rax(c.code, -56)
-    // cvtsi2sd xmm1, rax (F2 48 0F 2A C8)
-    var cb5 = c.code
-    cb5 = emit_byte(cb5, 0xF2)
-    cb5 = emit_byte(cb5, 0x48)
-    cb5 = emit_byte(cb5, 0x0F)
-    cb5 = emit_byte(cb5, 0x2A)
-    cb5 = emit_byte(cb5, 0xC8)
-    c.code = cb5
+    nc_emit_load_rbp_disp32_rax(nc, -48)
+    nc_emit_movq_xmm0_rax(nc)
+    nc_emit_load_rbp_disp32_rax(nc, -56)
+    nc_emit_cvtsi2sd_xmm1_rax(nc)
 
-    c.code = emit_subsd_xmm0_xmm1(c.code)
+    nc_emit_subsd_xmm0_xmm1(nc)
 
     // Load 1e6 from .rodata
-    let movsd1_pos = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, movsd1_pos + 4, rodata_1e6_offset)
+    let movsd1_pos = (*nc).code.len
+    nc_emit_movsd_xmm1_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, movsd1_pos + 4, rodata_1e6_offset)
 
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_cvttsd2si_rax_xmm0(c.code)
+    nc_emit_mulsd_xmm0_xmm1(nc)
+    nc_emit_cvttsd2si_rax_xmm0(nc)
 
     // Ensure non-negative
-    c.code = emit_test_rax_rax(c.code)
-    c.code = emit_jns_rel8(c.code, 3)
-    c.code = emit_xor_rax_rax(c.code)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jns_rel8(nc, 3)
+    nc_emit_xor_rax_rax(nc)
 
     // 6-digit fixed-width itoa (unrolled)
-    c.code = emit_mov_reg_reg(c.code, 6, 5)           // mov rsi, rbp
-    c.code = emit_sub_rsi_imm8(c.code, 3)
+    nc_emit_mov_reg_reg(nc, 6, 5)           // mov rsi, rbp
+    nc_emit_sub_rsi_imm8(nc, 3)
 
     // iter 1
-    c.code = emit_xor_rdx_rdx(c.code)
-    c.code = emit_mov_reg_imm(c.code, 3, 10)
-    c.code = emit_div_rbx(c.code)
-    c.code = emit_add_rdx_imm8(c.code, 48)
-    c.code = emit_mov_byte_mem_rsi_dl(c.code)
-    c.code = emit_dec_rsi(c.code)
+    nc_emit_xor_rdx_rdx(nc)
+    nc_emit_mov_reg_imm(nc, 3, 10)
+    nc_emit_div_rbx(nc)
+    nc_emit_add_rdx_imm8(nc, 48)
+    nc_emit_mov_byte_mem_rsi_dl(nc)
+    nc_emit_dec_rsi(nc)
     // iter 2
-    c.code = emit_xor_rdx_rdx(c.code)
-    c.code = emit_mov_reg_imm(c.code, 3, 10)
-    c.code = emit_div_rbx(c.code)
-    c.code = emit_add_rdx_imm8(c.code, 48)
-    c.code = emit_mov_byte_mem_rsi_dl(c.code)
-    c.code = emit_dec_rsi(c.code)
+    nc_emit_xor_rdx_rdx(nc)
+    nc_emit_mov_reg_imm(nc, 3, 10)
+    nc_emit_div_rbx(nc)
+    nc_emit_add_rdx_imm8(nc, 48)
+    nc_emit_mov_byte_mem_rsi_dl(nc)
+    nc_emit_dec_rsi(nc)
     // iter 3
-    c.code = emit_xor_rdx_rdx(c.code)
-    c.code = emit_mov_reg_imm(c.code, 3, 10)
-    c.code = emit_div_rbx(c.code)
-    c.code = emit_add_rdx_imm8(c.code, 48)
-    c.code = emit_mov_byte_mem_rsi_dl(c.code)
-    c.code = emit_dec_rsi(c.code)
+    nc_emit_xor_rdx_rdx(nc)
+    nc_emit_mov_reg_imm(nc, 3, 10)
+    nc_emit_div_rbx(nc)
+    nc_emit_add_rdx_imm8(nc, 48)
+    nc_emit_mov_byte_mem_rsi_dl(nc)
+    nc_emit_dec_rsi(nc)
     // iter 4
-    c.code = emit_xor_rdx_rdx(c.code)
-    c.code = emit_mov_reg_imm(c.code, 3, 10)
-    c.code = emit_div_rbx(c.code)
-    c.code = emit_add_rdx_imm8(c.code, 48)
-    c.code = emit_mov_byte_mem_rsi_dl(c.code)
-    c.code = emit_dec_rsi(c.code)
+    nc_emit_xor_rdx_rdx(nc)
+    nc_emit_mov_reg_imm(nc, 3, 10)
+    nc_emit_div_rbx(nc)
+    nc_emit_add_rdx_imm8(nc, 48)
+    nc_emit_mov_byte_mem_rsi_dl(nc)
+    nc_emit_dec_rsi(nc)
     // iter 5
-    c.code = emit_xor_rdx_rdx(c.code)
-    c.code = emit_mov_reg_imm(c.code, 3, 10)
-    c.code = emit_div_rbx(c.code)
-    c.code = emit_add_rdx_imm8(c.code, 48)
-    c.code = emit_mov_byte_mem_rsi_dl(c.code)
-    c.code = emit_dec_rsi(c.code)
+    nc_emit_xor_rdx_rdx(nc)
+    nc_emit_mov_reg_imm(nc, 3, 10)
+    nc_emit_div_rbx(nc)
+    nc_emit_add_rdx_imm8(nc, 48)
+    nc_emit_mov_byte_mem_rsi_dl(nc)
+    nc_emit_dec_rsi(nc)
     // iter 6
-    c.code = emit_xor_rdx_rdx(c.code)
-    c.code = emit_mov_reg_imm(c.code, 3, 10)
-    c.code = emit_div_rbx(c.code)
-    c.code = emit_add_rdx_imm8(c.code, 48)
-    c.code = emit_mov_byte_mem_rsi_dl(c.code)
+    nc_emit_xor_rdx_rdx(nc)
+    nc_emit_mov_reg_imm(nc, 3, 10)
+    nc_emit_div_rbx(nc)
+    nc_emit_add_rdx_imm8(nc, 48)
+    nc_emit_mov_byte_mem_rsi_dl(nc)
 
     // sys_write 6 fractional digits
-    c.code = emit_mov_reg_reg(c.code, 6, 5)           // mov rsi, rbp
-    c.code = emit_sub_rsi_imm8(c.code, 8)
-    c.code = emit_mov_reg_imm(c.code, 2, 6)
-    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
-    c = emit_write_syscall_for_target(c, c.target_os_id)
+    nc_emit_mov_reg_reg(nc, 6, 5)           // mov rsi, rbp
+    nc_emit_sub_rsi_imm8(nc, 8)
+    nc_emit_mov_reg_imm(nc, 2, 6)
+    emit_stdout_write_syscall_linux_into(nc)
 
     // Epilogue
-    c.code = emit_mov_rsp_rbp(c.code)
-    c.code = emit_pop_rbp(c.code)
-    c.code = emit_ret(c.code)
-    c
+    nc_emit_mov_rsp_rbp(nc)
+    nc_emit_pop_rbp(nc)
+    nc_emit_ret(nc)
 }
 
 fn emit_builtin_file_size(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
@@ -4846,7 +4832,10 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
     if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
     if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
-    if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
+    if name_is_print_f64(func.name) {
+        emit_builtin_print_f64_into(&! c)
+        return c
+    }
     if name_is_exp(func.name) {
         emit_builtin_exp_into(&! c)
         return c
@@ -5624,7 +5613,7 @@ fn native_v2_emit_builtin_string_file_by_id_into(nc: &! NativeCompiler, builtin_
 
 fn native_v2_emit_builtin_float_base_by_id_into(nc: &! NativeCompiler, builtin_id: i64) with Mut, Panic, Div {
     if builtin_id == 14 { (*nc) = emit_builtin_sqrt((*nc)); return }
-    if builtin_id == 15 { (*nc) = emit_builtin_print_f64((*nc)); return }
+    if builtin_id == 15 { emit_builtin_print_f64_into(nc); return }
 }
 
 fn native_v2_emit_builtin_float_exp_log_by_id_into(nc: &! NativeCompiler, builtin_id: i64) with Mut, Panic, Div {
