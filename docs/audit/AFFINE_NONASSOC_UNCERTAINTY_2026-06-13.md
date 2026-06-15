@@ -61,7 +61,7 @@ A focused prior-art sweep (9 queries) places the boundary precisely:
 1. **[done]** Self-contained N=3 demonstrator, runs green.
 2. **Promote to a stdlib module** `stdlib/epistemic/affine_octonion.sio` — arena-backed (mirror `perturbation_graph.sio`'s flat-arena, bare-`&!`-deref discipline to avoid the large-boxed-struct codegen hazard), `NSYM` symbols, second-order remainder lumped into a fresh roundoff symbol with a documented magnitude bound.
 3. **Upgrade `PerturbGraph` to correlation-honest** — replace scalar `pvar[n]` with a noise-symbol row; the current independent combination becomes the special case of disjoint symbol sets. This retires the leaf-independence assumption in the live substrate.
-4. **N≥4 spread** — wire the associahedron/`pentagon_variance` work into the coefficient-spread term (the 5-association Catalan-C₃ enclosure).
+4. **[done 2026-06-15]** N≥4 spread — `examples/epistemic/affine_nonassoc_n4_demo.sio` wires the ε0-coefficient rows of all 5 affine parenthesizations of w·x·y·z into `pentagon_variance`. Claim 4: max component-wise diff (affine coeff row vs plain pentagon on w1,x0,y0,z0) = 0 machine-exact; variance = 0.96 (×1e6, genuinely non-associative non-Fano quad e1,e2,e4,e1). Claim 5: all-real quad → variance = 0 (reals associate). ALL CLAIMS VERIFIED by live run on 2026-06-15. `pentagon_variance` is the correct path-independent order-ambiguity measure when N>3.
 5. **Type-system framing** — surface `NonAssoc` (already an effect) as the carrier: a non-associative product *is* a variance-producing effect, and the affine form is its propagated witness. This is the PL-novel half.
 
 ## Why this is the right "big step"
