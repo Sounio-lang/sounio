@@ -2510,6 +2510,54 @@ fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expec
     print_error_note(code)
 }
 
+fn checker_report_missing_validation_policy_inplace(c: *mut Checker, span: Span) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    print("error[E074]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": validate_manifest(...) requires an explicit validation item\n")
+    print("   |\n   = help: declare `validation Name for T {}` and call validate_manifest(robust_value, Name)\n")
+    print("   = note: Robust<T> does not silently become Validated<T>\n")
+}
+
+fn checker_report_validation_target_mismatch_inplace(c: *mut Checker, span: Span, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    print("error[E075]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": validation policy target does not match the robust subject type\n")
+    print("\n   = validation target ")
+    print_type_name(expected)
+    print("\n   = robust subject ")
+    print_type_name(got)
+    print("\n   = help: use a validation item declared for the same T as Robust<T>\n")
+}
+
+fn checker_report_missing_robust_proof_inplace(c: *mut Checker, span: Span) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    print("error[E078]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": validate_manifest(...) requires a proof-carrying Robust<T> value\n")
+    print("   |\n   = help: use the result of prove_robust(contest_value, PolicyName) directly, instead of a bare Robust<T, Level, Scope> annotation\n")
+    print("   = note: this compiler slice now records auditable robustness proofs and refuses validation when the proof record is missing\n")
+}
+
 fn checker_report_mismatch_ref(c: &! Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
@@ -5038,7 +5086,6 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
         None => {}
     }
     if call_expr_is_builtin_prove_robust(e.left) { return true }
-    if call_expr_is_builtin_validate_manifest(e.left) { return true }
     if call_expr_is_builtin_admit_action(e.left) { return true }
     if call_expr_is_builtin_defer_action(e.left) { return true }
     if call_expr_is_builtin_deferral_reason(e.left) { return true }
@@ -5251,6 +5298,46 @@ fn checker_check_print_i64_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry w
     ty_unit()
 }
 
+fn checker_check_validate_manifest_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let robust_ty = checker_check_opt_expr_inplace(c, first_arg)
+    if robust_ty.kind != TypeKind::TyRobust {
+        checker_report_error_at_inplace(c, e.span, 63, 0, 0, 0)
+        return ty_error()
+    }
+    let validation_ty = checker_check_opt_expr_inplace(c, second_arg)
+    if validation_ty.kind != TypeKind::TyValidation {
+        checker_report_missing_validation_policy_inplace(c, e.span)
+        return ty_error()
+    }
+    let inner_ty = knowledge_inner(robust_ty)
+    if !types_compatible(inner_ty, knowledge_inner(validation_ty)) {
+        checker_report_validation_target_mismatch_inplace(c, e.span, knowledge_inner(validation_ty), inner_ty)
+        return ty_error()
+    }
+    if robust_ty.epistemic_meta_id < 0 || robust_ty.epistemic_meta_id >= (*c).robust_proofs.count {
+        checker_report_missing_robust_proof_inplace(c, e.span)
+        return ty_error()
+    }
+    let proof_info = (*c).robust_proofs.get(robust_ty.epistemic_meta_id)
+    let manifest_info = ValidatedManifestInfo {
+        span_start: e.span.start,
+        span_end: e.span.end,
+        audit_id: proof_info.audit_id,
+        robust_proof_id: robust_ty.epistemic_meta_id,
+        validation_id: validation_ty.epistemic_meta_id,
+        inner_ty: inner_ty,
+    }
+    let add_result = (*c).validated_manifests.add(manifest_info)
+    (*c).validated_manifests = add_result.0
+    ty_validated_with_policy(inner_ty, 0.0 - 1.0, add_result.1)
+}
+
+fn checker_check_validate_manifest_expr_ref(c: &! Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    checker_check_validate_manifest_expr_inplace(c as *mut Checker, e)
+}
+
 fn checker_check_slice_len_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_arg = expr_list_head(e.args)
     let second_arg = expr_list_second(e.args)
@@ -5407,6 +5494,9 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     if call_expr_is_builtin_print_char(e.left) {
         return checker_check_print_i64_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_validate_manifest(e.left) {
+        return checker_check_validate_manifest_expr_inplace(c, e)
     }
     // Read-only GPU thread-index intrinsics (gpu_thread_id_*, gpu_block_id_*,
     // gpu_block_dim_*, gpu_barrier, gpu_sync_threads): implicit kernel builtins
@@ -17209,7 +17299,9 @@ impl Checker {
             return self.check_prove_robust_expr(e)
         }
         if call_expr_is_builtin_validate_manifest(e.left) {
-            return self.check_validate_manifest_expr(e)
+            var c = self
+            let ty = checker_check_validate_manifest_expr_ref(&! c, e)
+            return (c, ty)
         }
         if call_expr_is_builtin_admit_action(e.left) {
             return self.check_admit_action_expr(e)
@@ -17573,50 +17665,6 @@ impl Checker {
         let add_result = c.robust_proofs.add(proof_info)
         c.robust_proofs = add_result.0
         (c, ty_robust(contest_inner, add_result.1, policy_info.level_id, policy_info.scope_id))
-    }
-
-    // validate_manifest(robust: Robust<T>) -> Validated<T>
-    // Terminal epistemic chain step: a Robust<T> that has been manifestly validated
-    // becomes Validated<T>. Policy satisfaction was proven at check time; this call
-    // serves as the explicit compile-time gate that produces the Validated<T> token.
-    fn check_validate_manifest_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-        let first_arg = expr_list_head(e.args)
-        let second_arg = expr_list_second(e.args)
-        let robust_pair = self.check_opt_expr(first_arg)
-        var c = robust_pair.0
-        let robust_ty = robust_pair.1
-        if robust_ty.kind != TypeKind::TyRobust {
-            c = c.report_error_at(e.span, 63, 0, 0, 0)
-            return (c, ty_error())
-        }
-        let validation_pair = c.check_opt_expr(second_arg)
-        c = validation_pair.0
-        let validation_ty = validation_pair.1
-        if validation_ty.kind != TypeKind::TyValidation {
-            c = c.report_missing_validation_policy(e.span)
-            return (c, ty_error())
-        }
-        let inner_ty = knowledge_inner(robust_ty)
-        if !types_compatible(inner_ty, knowledge_inner(validation_ty)) {
-            c = c.report_validation_target_mismatch(e.span, knowledge_inner(validation_ty), inner_ty)
-            return (c, ty_error())
-        }
-        if robust_ty.epistemic_meta_id < 0 || robust_ty.epistemic_meta_id >= c.robust_proofs.count {
-            c = c.report_missing_robust_proof(e.span)
-            return (c, ty_error())
-        }
-        let proof_info = c.robust_proofs.get(robust_ty.epistemic_meta_id)
-        let manifest_info = ValidatedManifestInfo {
-            span_start: e.span.start,
-            span_end: e.span.end,
-            audit_id: proof_info.audit_id,
-            robust_proof_id: robust_ty.epistemic_meta_id,
-            validation_id: validation_ty.epistemic_meta_id,
-            inner_ty: inner_ty,
-        }
-        let add_result = c.validated_manifests.add(manifest_info)
-        c.validated_manifests = add_result.0
-        (c, ty_validated_with_policy(inner_ty, 0.0 - 1.0, add_result.1))
     }
 
     fn check_decision_policy_requirements_against_proof(
