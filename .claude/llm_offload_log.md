@@ -2,7 +2,7 @@
 
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
-| 2026-06-15 | lean4-kernel | math-review | SounioPBoxSemantics.lean | WAIVED | All 4 ℚ-level theorems machine-checked by Lean 4 kernel itself (axioms: [propext, Classical.choice, Quot.sound] only — verified via #print axioms). Bridge theorems depend on 3 of 5 existing IEEE-754 spec axioms (no new math claims; existing axioms were xai-reviewed at Phase 1/1.5). The advisor (claude-opus-4) confirmed approach and trust-boundary design before implementation. No new monotonicity/sign/convexity claims; pure structural Rat algebra (Rat.add_le_add_right/left/Rat.le_trans) mirroring confirmed-compiling patterns from SounioFloatInstance.lean. Lean type-checker is the math reviewer for purely structural proofs. |
+| 2026-06-15 | xai | math-review | SounioPBoxSemantics.lean | OK | Grok 4.1 (grok-4-1-fast-reasoning): [OK] addR_* ℚ-model theorems — Rat.add_le_add_*/le_trans/add_nonneg directions and chaining correct. [OK] Bridge theorems (toRatPBox, wf_float_to_rat_*) — dependencies correctly isolated to 3 of 5 IEEE-754 axioms + explicit hvar_rat; no overclaim on zero preservation. [OK] Placeholder status accurately reported (Float-level `: True` theorems unchanged). No leaps, no hidden axioms, no incorrect monotonicity claims. Raw: /tmp/llm-offload-WQNrFM |
 | 2026-06-12 | deepseek+xai | fan-out raw external diff review | ABSTRACT_V2.md, CONFIDENCE_SEMANTICS.md, SOUNDNESS_DENOTATION.md, 168-dual-pathway-correction.md | OK | Generated docs governance metadata sync only; both reviewers found no substantive paper/research claim changes. Raw output: /tmp/llm-offload-KFmJXR |
 
 ## 2026-05-30: Multiquadratic faithfulness — irrationality core (no_rat_sqrt) + edge-level radical support
