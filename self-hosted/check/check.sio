@@ -15902,106 +15902,14 @@ impl Checker {
 
     fn check_let_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
-        c.last_literal_kind = 0  // reset before checking init expr
-        let ann_pair = c.lower_opt_type(s.ty)
-        c = ann_pair.0
-        let ann_ty = ann_pair.1
-        let init_pair = c.check_binding_init_expr(s.expr, ann_ty)
-        c = init_pair.0
-        let init_ty = init_pair.1
-        // Determine binding type: annotation if present, else init type
-        var bind_ty = init_ty
-        if ann_ty.kind != TypeKind::TyUnknown {
-            // Integer literal narrowing: literal 5 (i64) is compatible with i32/i8 annotations
-            let int_lit_narrow = c.last_literal_kind == 1
-                && init_ty.kind == TypeKind::TyI64
-                && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-            if !c.types_compatible_structural(init_ty, ann_ty) && !int_lit_narrow {
-                c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
-            }
-            if ann_ty.kind == init_ty.kind
-                && (((ann_ty.kind == TypeKind::TyContest) && ann_ty.epistemic_meta_id >= 0)
-                    || ((ann_ty.kind == TypeKind::TyRobust) && ann_ty.robustness_level_id >= 0 && ann_ty.robustness_scope_id >= 0)
-                    || ann_ty.kind == TypeKind::TyValidated
-                    || ann_ty.kind == TypeKind::TyAdmissible
-                    || ann_ty.kind == TypeKind::TyDeferred
-                    || ann_ty.kind == TypeKind::TyAcquisitionPlan
-                    || ann_ty.kind == TypeKind::TyRecoursePlan
-                    || ann_ty.kind == TypeKind::TyTransitionPlan
-                    || ann_ty.kind == TypeKind::TyObservedTransition
-                    || ann_ty.kind == TypeKind::TyRollbackCertificate
-                    || ann_ty.kind == TypeKind::TyAlternativeSet
-                    || ann_ty.kind == TypeKind::TyAlternativeOption) {
-                bind_ty = init_ty
-            } else {
-                bind_ty = ann_ty
-            }
-        }
-        // Validate refinement predicate on literal initializers
-        c = c.check_refinement_literal(s.span, bind_ty)
-        let const_pair = eval_const_int_opt_expr(c, s.expr)
-        let cur_env = c.env
-        c.env = cur_env.bind(s.name, bind_ty, false)
-        if const_pair.0 != 0 {
-            c = c.const_int_bind_value(s.name, const_pair.1)
-        } else {
-            c = c.const_int_bind_unknown(s.name)
-        }
-        // Track variable for borrow checking (linear if struct is declared linear)
-        let lin = c.is_linear_type(bind_ty)
-        c.borrows = c.borrows.track(s.name, lin)
-        (c, ty_unit())
+        let ty = checker_check_let_stmt_inplace(&! c, s)
+        (c, ty)
     }
 
     fn check_var_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
-        c.last_literal_kind = 0  // reset before checking init expr
-        let ann_pair = c.lower_opt_type(s.ty)
-        c = ann_pair.0
-        let ann_ty = ann_pair.1
-        let init_pair = c.check_binding_init_expr(s.expr, ann_ty)
-        c = init_pair.0
-        let init_ty = init_pair.1
-        var bind_ty = init_ty
-        if ann_ty.kind != TypeKind::TyUnknown {
-            // Integer literal narrowing: literal 5 (i64) is compatible with i32/i8 annotations
-            let int_lit_narrow = c.last_literal_kind == 1
-                && init_ty.kind == TypeKind::TyI64
-                && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-            if !c.types_compatible_structural(init_ty, ann_ty) && !int_lit_narrow {
-                c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
-            }
-            if ann_ty.kind == init_ty.kind
-                && (((ann_ty.kind == TypeKind::TyContest) && ann_ty.epistemic_meta_id >= 0)
-                    || ((ann_ty.kind == TypeKind::TyRobust) && ann_ty.robustness_level_id >= 0 && ann_ty.robustness_scope_id >= 0)
-                    || ann_ty.kind == TypeKind::TyValidated
-                    || ann_ty.kind == TypeKind::TyAdmissible
-                    || ann_ty.kind == TypeKind::TyDeferred
-                    || ann_ty.kind == TypeKind::TyAcquisitionPlan
-                    || ann_ty.kind == TypeKind::TyRecoursePlan
-                    || ann_ty.kind == TypeKind::TyTransitionPlan
-                    || ann_ty.kind == TypeKind::TyObservedTransition
-                    || ann_ty.kind == TypeKind::TyRollbackCertificate
-                    || ann_ty.kind == TypeKind::TyAlternativeSet
-                    || ann_ty.kind == TypeKind::TyAlternativeOption) {
-                bind_ty = init_ty
-            } else {
-                bind_ty = ann_ty
-            }
-        }
-        // Validate refinement predicate on literal initializers
-        c = c.check_refinement_literal(s.span, bind_ty)
-        let const_pair = eval_const_int_opt_expr(c, s.expr)
-        c.env = c.env.bind(s.name, bind_ty, true)
-        if const_pair.0 != 0 {
-            c = c.const_int_bind_value(s.name, const_pair.1)
-        } else {
-            c = c.const_int_bind_unknown(s.name)
-        }
-        // Track variable for borrow checking (linear if struct is declared linear)
-        let lin = c.is_linear_type(bind_ty)
-        c.borrows = c.borrows.track(s.name, lin)
-        (c, ty_unit())
+        let ty = checker_check_var_stmt_inplace(&! c, s)
+        (c, ty)
     }
 
     fn check_refinement_literal(self, span: Span, ty: TypeEntry) -> Checker with Mut, Panic, Div {
@@ -16050,51 +15958,8 @@ impl Checker {
 
     fn check_assign_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
-        let target_pair = c.check_opt_expr(s.target)
-        c = target_pair.0
-        let target_ty = target_pair.1
-        let val_pair = c.check_opt_expr(s.expr)
-        c = val_pair.0
-        let val_ty = val_pair.1
-        // Compound assignments (+=, -=, etc.) require numeric operands
-        if s.assign_op != AssignOp::AssignEq {
-            if !is_error_or_unknown(target_ty) && !is_error_or_unknown(val_ty) {
-                let compound_result = binary_result_type(compound_assign_to_binop(s.assign_op), target_ty, val_ty)
-                if compound_result.kind == TypeKind::TyError {
-                    c = c.report_mismatch(s.span, 21, target_ty, val_ty)
-                }
-            }
-        } else {
-            // Simple assignment: check compatibility
-            match s.expr {
-                Some(val_expr) => {
-                    if !checker_contextual_expr_compatible(*val_expr, val_ty, target_ty) {
-                        c = c.report_mismatch(s.span, 2, target_ty, val_ty)
-                    }
-                }
-                None => {
-                    if !c.types_compatible_structural(target_ty, val_ty) {
-                        c = c.report_mismatch(s.span, 2, target_ty, val_ty)
-                    }
-                }
-            }
-        }
-        // Check mutability: if target is an ident, it must be mutable
-        c = c.check_assign_mutability(s.target, s.span)
-        match s.target {
-            Some(target) => {
-                if (*target).kind == ExprKind::ExprIdent {
-                    let rhs_pair = eval_const_int_opt_expr(c, s.expr)
-                    if rhs_pair.0 != 0 {
-                        c = c.const_int_bind_value((*target).name, rhs_pair.1)
-                    } else {
-                        c = c.const_int_bind_unknown((*target).name)
-                    }
-                }
-            }
-            None => {}
-        }
-        (c, ty_unit())
+        let ty = checker_check_assign_stmt_inplace(&! c, s)
+        (c, ty)
     }
 
     fn check_assign_mutability(self, opt: Option<Box<Expr> >, span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
