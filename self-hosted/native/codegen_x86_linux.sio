@@ -3002,84 +3002,19 @@ fn emit_stat_syscall_for_target(nc: NativeCompiler, os_id: i64) -> NativeCompile
 
 fn emit_builtin_print_int(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    c.code = emit_push_rbp(c.code)
-    c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 32)
-
-    // --- Negative number handling ---
-    // test rdi, rdi; jns +27 (skip negative block to positive preamble)
-    c.code = emit_test_rdi_rdi(c.code)                 // 3 bytes
-    c.code = emit_jns_rel8(c.code, 27)                 // 2 bytes
-
-    // Negative path: negate rdi, set up buffer with '-', then jump past positive preamble
-    c.code = emit_neg_rdi(c.code)                      // 3 bytes
-    c.code = emit_mov_reg_reg(c.code, 6, 5)           // mov rsi, rbp  (3)
-    c.code = emit_sub_rsi_imm8(c.code, 1)             // sub rsi, 1    (4)
-    c.code = emit_xor_rcx_rcx(c.code)                 // xor rcx, rcx  (3)
-    c.code = emit_mov_byte_mem_rsi_imm8(c.code, 45)   // '-' at [rsi]  (3)
-    c.code = emit_dec_rsi(c.code)                      //               (3)
-    c.code = emit_inc_rcx(c.code)                      // count '-'     (3)
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi  (3)
-    c.code = emit_jmp_rel8(c.code, 13)                 // skip positive preamble (2)
-    // negative block total = 3+3+4+3+3+3+3+3+2 = 27 bytes
-
-    // Positive path: standard preamble (13 bytes)
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi  (3)
-    c.code = emit_mov_reg_reg(c.code, 6, 5)           // mov rsi, rbp  (3)
-    c.code = emit_sub_rsi_imm8(c.code, 1)             // sub rsi, 1    (4)
-    c.code = emit_xor_rcx_rcx(c.code)                 // xor rcx, rcx  (3)
-
-    // digit loop: 28 bytes body + 2 bytes jnz = 30 bytes total
-    c.code = emit_xor_rdx_rdx(c.code)                 // 3
-    c.code = emit_mov_reg_imm(c.code, 3, 10)          // 7
-    c.code = emit_div_rbx(c.code)                      // 3
-    c.code = emit_add_rdx_imm8(c.code, 48)            // 4
-    c.code = emit_mov_byte_mem_rsi_dl(c.code)          // 2
-    c.code = emit_dec_rsi(c.code)                      // 3
-    c.code = emit_inc_rcx(c.code)                      // 3
-    c.code = emit_test_rax_rax(c.code)                 // 3
-    c.code = emit_jnz_rel8(c.code, -30)               // 75 e2
-    c.code = emit_inc_rsi(c.code)
-    c.code = emit_mov_reg_reg(c.code, 2, 1)           // mov rdx, rcx
-    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
-    c = emit_write_syscall_for_target(c, c.target_os_id)
-    c.code = emit_mov_rsp_rbp(c.code)
-    c.code = emit_pop_rbp(c.code)
-    c.code = emit_ret(c.code)
+    emit_builtin_print_int_into(&! c)
     c
 }
 
 fn emit_builtin_print_char(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    c.code = emit_push_rdi(c.code)
-    c.code = emit_mov_rsi_rsp(c.code)
-    c.code = emit_mov_reg_imm(c.code, 2, 1)           // mov rdx, 1
-    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
-    c = emit_write_syscall_for_target(c, c.target_os_id)
-    c.code = emit_add_rsp_8(c.code)
-    c.code = emit_ret(c.code)
+    emit_builtin_print_char_into(&! c)
     c
 }
 
 fn emit_builtin_print_str(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    c.code = emit_push_rbp(c.code)
-    c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_mov_reg_reg(c.code, 6, 7)           // mov rsi, rdi
-    c.code = emit_xor_rcx_rcx(c.code)
-    // strlen loop: 16 bytes body
-    c.code = emit_movzx_rax_byte_rdi(c.code)          // 4
-    c.code = emit_test_al_al(c.code)                   // 2
-    c.code = emit_jz_rel8(c.code, 8)                   // 2 (skip 3+3+2)
-    c.code = emit_inc_rdi(c.code)                      // 3
-    c.code = emit_inc_rcx(c.code)                      // 3
-    c.code = emit_jmp_rel8(c.code, -16)                // 2
-    // done_scan:
-    c.code = emit_mov_reg_reg(c.code, 2, 1)           // mov rdx, rcx
-    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
-    c = emit_write_syscall_for_target(c, c.target_os_id)
-    c.code = emit_pop_rbp(c.code)
-    c.code = emit_ret(c.code)
+    emit_builtin_print_str_into(&! c)
     c
 }
 
@@ -3161,8 +3096,7 @@ fn emit_builtin_print_str_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // Returns argc stored in RuntimeContext memory.
 fn emit_builtin_get_arg_count(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    c = emit_load_runtime_context_field_rax(c, runtime_context_field_argc())
-    c.code = emit_ret(c.code)
+    emit_builtin_get_arg_count_into(&! c)
     c
 }
 
@@ -3170,13 +3104,7 @@ fn emit_builtin_get_arg_count(nc: NativeCompiler) -> NativeCompiler with Mut, Pa
 // Returns argv[n], where argv base pointer is stored in RuntimeContext.
 fn emit_builtin_get_arg(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    // rdi = n (index into argv)
-    c = emit_load_runtime_context_field_rax(c, runtime_context_field_argv_ptr())
-    // Now rax = argv pointer, rdi = n
-    // We need rax = [rax + rdi*8]
-    c.code = emit_mov_reg_reg(c.code, 3, 7)       // mov rbx, rdi (index n)
-    c.code = emit_mov_rax_mem_rax_rbx8(c.code)    // mov rax, [rax + rbx*8]
-    c.code = emit_ret(c.code)
+    emit_builtin_get_arg_into(&! c)
     c
 }
 
@@ -7037,11 +6965,11 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     native_compiler_set_fn_offset(nc, fn_index, function_offset)
     (*nc).symbols = symbol_data_add_name((*nc).symbols, fn_index, func.name.buf, func.name.len)
 
-    if name_is_print_int(func.name) { (*nc) = emit_builtin_print_int((*nc)); return }
-    if name_is_print_char(func.name) { (*nc) = emit_builtin_print_char((*nc)); return }
-    if name_is_print(func.name) { (*nc) = emit_builtin_print_str((*nc)); return }
-    if name_is_get_arg_count(func.name) { (*nc) = emit_builtin_get_arg_count((*nc)); return }
-    if name_is_get_arg(func.name) { (*nc) = emit_builtin_get_arg((*nc)); return }
+    if name_is_print_int(func.name) { emit_builtin_print_int_into(nc); return }
+    if name_is_print_char(func.name) { emit_builtin_print_char_into(nc); return }
+    if name_is_print(func.name) { emit_builtin_print_str_into(nc); return }
+    if name_is_get_arg_count(func.name) { emit_builtin_get_arg_count_into(nc); return }
+    if name_is_get_arg(func.name) { emit_builtin_get_arg_into(nc); return }
     if name_is_str_len(func.name) { (*nc) = emit_builtin_str_len((*nc)); return }
     if name_is_str_eq(func.name) { (*nc) = emit_builtin_str_eq((*nc)); return }
     if name_is_str_slice(func.name) { (*nc) = emit_builtin_str_slice((*nc)); return }
