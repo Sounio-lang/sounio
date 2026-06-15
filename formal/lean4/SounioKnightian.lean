@@ -122,13 +122,21 @@ theorem vacuous_widest_placeholder (p : PBox) (hp : WellFormed p) :
     True := by
   trivial
 
-/-- Addition closure: if both inputs are well-formed, so is the sum.
-    Standard real-arithmetic monotonicity. Proof deferred (would
-    require Float-as-real machinery). -/
-theorem add_well_formed (a b : PBox)
+/-- Addition preserves the **confidence-bound** conjunct of well-formedness
+    (DISCHARGED, `Nat`-only): if both inputs have `confidence ≤ 1000`, so does
+    `add a b` (whose confidence is `confDecay (minNat …)`). Named narrowly: this
+    is ONLY the `Nat` confidence conjunct — the `lo_mean ≤ hi_mean` and
+    `variance ≥ 0` conjuncts are `Float`-typed and need the axiom-bearing
+    Float↔Real lift (core Lean has no usable Float order/add-monotone lemma), so
+    full `WellFormed` closure stays future-work. Mathlib-free, no axiom/sorry. -/
+theorem add_confidence_bounded (a b : PBox)
     (ha : WellFormed a) (hb : WellFormed b) :
-    True := by
-  trivial
+    (add a b).confidence ≤ 1000 := by
+  obtain ⟨_, _, _⟩ := ha
+  obtain ⟨_, _, _⟩ := hb
+  show confDecay (minNat a.confidence b.confidence) ≤ 1000
+  unfold confDecay minNat
+  split <;> omega
 
 /-- Containment monotonicity: if `qa` dominates `a` and `qb` dominates `b`,
     then `add qa qb` dominates `add a b`. This is the operational
