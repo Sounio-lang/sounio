@@ -780,7 +780,7 @@ pub fn lower_ir_binop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with
         c.code = emit_pop_rbx(c.code)
 
         // Now rbx = LHS, rax = RHS
-        c = emit_binop_code(c, instr.bin_op)
+        emit_binop_code_into(&! c, instr.bin_op)
 
         // Store result (in rax) to dst slot/register
         if instr.dst >= 0 {
@@ -790,77 +790,172 @@ pub fn lower_ir_binop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with
     c
 }
 
-pub fn emit_binop_code(nc: NativeCompiler, op: BinaryOp) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+fn lr_emit_byte(nc: &! NativeCompiler, b: i64) with Mut, Panic, Div {
+    let len = (*nc).code.len
+    if len >= 0 && len < 65536 {
+        (*nc).code.bytes[len as usize] = low8(b) as i8
+        (*nc).code.len = len + 1
+    } else {
+        (*nc).code_overflow = true
+    }
+}
 
+fn lr_emit_mov_reg_reg(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic, Div {
+    lr_emit_byte(nc, 0x48)
+    lr_emit_byte(nc, 0x89)
+    lr_emit_byte(nc, modrm_rr(dst, src))
+}
+
+fn lr_emit_add_reg_reg(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic, Div {
+    lr_emit_byte(nc, 0x48)
+    lr_emit_byte(nc, 0x01)
+    lr_emit_byte(nc, modrm_rr(dst, src))
+}
+
+fn lr_emit_sub_reg_reg(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic, Div {
+    lr_emit_byte(nc, 0x48)
+    lr_emit_byte(nc, 0x29)
+    lr_emit_byte(nc, modrm_rr(dst, src))
+}
+
+fn lr_emit_imul_reg_reg(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic, Div {
+    lr_emit_byte(nc, 0x48)
+    lr_emit_byte(nc, 0x0f)
+    lr_emit_byte(nc, 0xaf)
+    lr_emit_byte(nc, 192 + dst * 8 + src)
+}
+
+fn lr_emit_cmp_rbx_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    lr_emit_byte(nc, 0x48)
+    lr_emit_byte(nc, 0x39)
+    lr_emit_byte(nc, 0xc3)
+}
+
+fn lr_emit_setcc_al(nc: &! NativeCompiler, cc: i64) with Mut, Panic, Div {
+    lr_emit_byte(nc, 0x0f)
+    lr_emit_byte(nc, cc)
+    lr_emit_byte(nc, 0xc0)
+}
+
+fn lr_emit_movzx_rax_al(nc: &! NativeCompiler) with Mut, Panic, Div {
+    lr_emit_byte(nc, 0x48)
+    lr_emit_byte(nc, 0x0f)
+    lr_emit_byte(nc, 0xb6)
+    lr_emit_byte(nc, 0xc0)
+}
+
+fn lr_emit_cqo(nc: &! NativeCompiler) with Mut, Panic, Div {
+    lr_emit_byte(nc, 0x48)
+    lr_emit_byte(nc, 0x99)
+}
+
+fn lr_emit_idiv_rcx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    lr_emit_byte(nc, 0x48)
+    lr_emit_byte(nc, 0xf7)
+    lr_emit_byte(nc, 0xf9)
+}
+
+fn lr_emit_alu_rax_rbx(nc: &! NativeCompiler, opcode: i64) with Mut, Panic, Div {
+    lr_emit_byte(nc, 0x48)
+    lr_emit_byte(nc, opcode)
+    lr_emit_byte(nc, 0xd8)
+}
+
+fn lr_emit_shift_rax_cl(nc: &! NativeCompiler, modrm: i64) with Mut, Panic, Div {
+    lr_emit_byte(nc, 0x48)
+    lr_emit_byte(nc, 0xd3)
+    lr_emit_byte(nc, modrm)
+}
+
+fn lr_emit_bool_common_prefix(nc: &! NativeCompiler) with Mut, Panic, Div {
+    lr_emit_byte(nc, 0x48)
+    lr_emit_byte(nc, 0x85)
+    lr_emit_byte(nc, 0xdb)
+    lr_emit_byte(nc, 0x0f)
+    lr_emit_byte(nc, 0x95)
+    lr_emit_byte(nc, 0xc1)
+    lr_emit_byte(nc, 0x48)
+    lr_emit_byte(nc, 0x85)
+    lr_emit_byte(nc, 0xc0)
+    lr_emit_byte(nc, 0x0f)
+    lr_emit_byte(nc, 0x95)
+    lr_emit_byte(nc, 0xc0)
+}
+
+fn lr_emit_bool_result(nc: &! NativeCompiler, opcode: i64) with Mut, Panic, Div {
+    lr_emit_bool_common_prefix(nc)
+    lr_emit_byte(nc, opcode)
+    lr_emit_byte(nc, 0xc8)
+    lr_emit_movzx_rax_al(nc)
+}
+
+pub fn emit_binop_code_into(nc: &! NativeCompiler, op: BinaryOp) with Mut, Panic, Div {
     if op == BinaryOp::OpAdd {
         // rax = rbx + rax
-        c.code = emit_add_reg_reg(c.code, 0, 3)    // add rax, rbx
+        lr_emit_add_reg_reg(nc, 0, 3)    // add rax, rbx
     } else if op == BinaryOp::OpSub {
         // rax = rbx - rax
-        c.code = emit_sub_reg_reg(c.code, 3, 0)    // sub rbx, rax
-        c.code = emit_mov_rax_rbx(c.code)           // mov rax, rbx
+        lr_emit_sub_reg_reg(nc, 3, 0)    // sub rbx, rax
+        lr_emit_mov_reg_reg(nc, 0, 3)    // mov rax, rbx
     } else if op == BinaryOp::OpMul {
         // rax = rbx * rax
-        c.code = emit_imul_reg_reg(c.code, 0, 3)   // imul rax, rbx
+        lr_emit_imul_reg_reg(nc, 0, 3)   // imul rax, rbx
     } else if op == BinaryOp::OpDiv {
         // rax = rbx / rax (signed)
-        c.code = emit_mov_rcx_rax(c.code)           // save divisor in rcx
-        c.code = emit_mov_rax_rbx(c.code)           // dividend in rax
-        c.code = emit_cqo(c.code)                   // sign-extend to rdx:rax
-        c.code = emit_idiv_rcx(c.code)              // rax = quotient
+        lr_emit_mov_reg_reg(nc, 1, 0)    // save divisor in rcx
+        lr_emit_mov_reg_reg(nc, 0, 3)    // dividend in rax
+        lr_emit_cqo(nc)
+        lr_emit_idiv_rcx(nc)
     } else if op == BinaryOp::OpRem {
         // rax = rbx % rax (signed remainder)
-        c.code = emit_mov_rcx_rax(c.code)
-        c.code = emit_mov_rax_rbx(c.code)
-        c.code = emit_cqo(c.code)
-        c.code = emit_idiv_rcx(c.code)
-        c.code = emit_mov_rax_rdx(c.code)           // remainder is in rdx
+        lr_emit_mov_reg_reg(nc, 1, 0)
+        lr_emit_mov_reg_reg(nc, 0, 3)
+        lr_emit_cqo(nc)
+        lr_emit_idiv_rcx(nc)
+        lr_emit_mov_reg_reg(nc, 0, 2)    // remainder is in rdx
     } else if op == BinaryOp::OpEq {
-        c.code = emit_cmp_rbx_rax(c.code)
-        c.code = emit_sete_al(c.code)
-        c.code = emit_movzx_rax_al(c.code)
+        lr_emit_cmp_rbx_rax(nc)
+        lr_emit_setcc_al(nc, 0x94)
+        lr_emit_movzx_rax_al(nc)
     } else if op == BinaryOp::OpNe {
-        c.code = emit_cmp_rbx_rax(c.code)
-        c.code = emit_setne_al(c.code)
-        c.code = emit_movzx_rax_al(c.code)
+        lr_emit_cmp_rbx_rax(nc)
+        lr_emit_setcc_al(nc, 0x95)
+        lr_emit_movzx_rax_al(nc)
     } else if op == BinaryOp::OpLt {
-        c.code = emit_cmp_rbx_rax(c.code)
-        c.code = emit_setl_al(c.code)
-        c.code = emit_movzx_rax_al(c.code)
+        lr_emit_cmp_rbx_rax(nc)
+        lr_emit_setcc_al(nc, 0x9c)
+        lr_emit_movzx_rax_al(nc)
     } else if op == BinaryOp::OpLe {
-        c.code = emit_cmp_rbx_rax(c.code)
-        c.code = emit_setle_al(c.code)
-        c.code = emit_movzx_rax_al(c.code)
+        lr_emit_cmp_rbx_rax(nc)
+        lr_emit_setcc_al(nc, 0x9e)
+        lr_emit_movzx_rax_al(nc)
     } else if op == BinaryOp::OpGt {
-        c.code = emit_cmp_rbx_rax(c.code)
-        c.code = emit_setg_al(c.code)
-        c.code = emit_movzx_rax_al(c.code)
+        lr_emit_cmp_rbx_rax(nc)
+        lr_emit_setcc_al(nc, 0x9f)
+        lr_emit_movzx_rax_al(nc)
     } else if op == BinaryOp::OpGe {
-        c.code = emit_cmp_rbx_rax(c.code)
-        c.code = emit_setge_al(c.code)
-        c.code = emit_movzx_rax_al(c.code)
+        lr_emit_cmp_rbx_rax(nc)
+        lr_emit_setcc_al(nc, 0x9d)
+        lr_emit_movzx_rax_al(nc)
     } else if op == BinaryOp::OpAnd {
-        c.code = emit_and_bool_rax_rbx(c.code)
+        lr_emit_bool_result(nc, 0x20)
     } else if op == BinaryOp::OpOr {
-        c.code = emit_or_bool_rax_rbx(c.code)
+        lr_emit_bool_result(nc, 0x08)
     } else if op == BinaryOp::OpBitAnd {
-        c.code = emit_and_rax_rbx(c.code)
+        lr_emit_alu_rax_rbx(nc, 0x21)
     } else if op == BinaryOp::OpBitOr {
-        c.code = emit_or_rax_rbx(c.code)
+        lr_emit_alu_rax_rbx(nc, 0x09)
     } else if op == BinaryOp::OpBitXor {
-        c.code = emit_xor_rax_rbx(c.code)
+        lr_emit_alu_rax_rbx(nc, 0x31)
     } else if op == BinaryOp::OpShl {
-        c.code = emit_mov_rcx_rax(c.code)
-        c.code = emit_mov_rax_rbx(c.code)
-        c.code = emit_shl_rax_cl(c.code)
+        lr_emit_mov_reg_reg(nc, 1, 0)
+        lr_emit_mov_reg_reg(nc, 0, 3)
+        lr_emit_shift_rax_cl(nc, 0xe0)
     } else if op == BinaryOp::OpShr {
-        c.code = emit_mov_rcx_rax(c.code)
-        c.code = emit_mov_rax_rbx(c.code)
-        c.code = emit_sar_rax_cl(c.code)
+        lr_emit_mov_reg_reg(nc, 1, 0)
+        lr_emit_mov_reg_reg(nc, 0, 3)
+        lr_emit_shift_rax_cl(nc, 0xf8)
     }
-
-    c
 }
 
 // ============================================================================
