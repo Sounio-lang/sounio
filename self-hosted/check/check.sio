@@ -1557,8 +1557,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
             if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_contest(inner_ty, -1) }
         }
         TypeExprKind::TypeRobust => {
-            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
-            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_robust(inner_ty, -1, -1, -1) }
+            checker_lower_robust_type_mut(c, te.type_args, te.span)
         }
         TypeExprKind::TypeValidated => {
             let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
@@ -1663,6 +1662,69 @@ fn checker_check_contest_expr_expected_mut(c: *mut Checker, e: Expr, expected_co
         (*c).contests = add_result.0
         ty_contest(knowledge_inner(expected_contest_ty), add_result.1)
     }
+}
+
+fn checker_robust_type_tag_from_type_expr(te: TypeExpr, is_level: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if te.kind != TypeExprKind::TypeNamed {
+        return -1
+    }
+    let name = checker_copy_string_list_to_name(te.path.segments)
+    if is_level {
+        robustness_level_id_from_name(name)
+    } else {
+        robustness_scope_id_from_name(name)
+    }
+}
+
+fn checker_lower_robust_type_mut(c: *mut Checker, opt: Option<Box<TypeExprList> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(args) => {
+            match (*args).tail {
+                None => {
+                    let inner_ty = checker_lower_type_expr_mut(c, (*args).head)
+                    if inner_ty.kind == TypeKind::TyError {
+                        ty_error()
+                    } else {
+                        ty_robust(inner_ty, -1, -1, -1)
+                    }
+                }
+                Some(rest) => {
+                    match (*rest).tail {
+                        Some(last) => {
+                            match (*last).tail {
+                                Some(_) => {
+                                    checker_report_error_at_inplace(c, span, 63, 0, 0, 0)
+                                    ty_error()
+                                }
+                                None => {
+                                    let inner_ty = checker_lower_type_expr_mut(c, (*args).head)
+                                    let level_id = checker_robust_type_tag_from_type_expr((*rest).head, true)
+                                    let scope_id = checker_robust_type_tag_from_type_expr((*last).head, false)
+                                    if level_id < 0 || scope_id < 0 {
+                                        checker_report_error_at_inplace(c, span, 63, 0, 0, 0)
+                                        return ty_error()
+                                    }
+                                    ty_robust(inner_ty, -1, level_id, scope_id)
+                                }
+                            }
+                        }
+                        None => {
+                            checker_report_error_at_inplace(c, span, 63, 0, 0, 0)
+                            ty_error()
+                        }
+                    }
+                }
+            }
+        }
+        None => {
+            checker_report_error_at_inplace(c, span, 63, 0, 0, 0)
+            ty_error()
+        }
+    }
+}
+
+fn checker_lower_robust_type_ref(c: &! Checker, opt: Option<Box<TypeExprList> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    checker_lower_robust_type_mut(c as *mut Checker, opt, span)
 }
 
 fn checker_check_contest_witness_names_mut(c: *mut Checker, witness_name: Name, contest_name: Name, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc {
@@ -12943,7 +13005,10 @@ impl Checker {
             TypeExprKind::TypeDecisionPolicy => c.lower_decision_policy_type(te.type_args, te.span)
             TypeExprKind::TypeDeferralPolicy => c.lower_deferral_policy_type(te.type_args, te.span)
             TypeExprKind::TypeContest => c.lower_contest_type(te.type_args, te.span)
-            TypeExprKind::TypeRobust => c.lower_robust_type(te.type_args, te.span)
+            TypeExprKind::TypeRobust => {
+                let robust_ty = checker_lower_robust_type_ref(&! c, te.type_args, te.span)
+                (c, robust_ty)
+            }
             TypeExprKind::TypeIntervention => c.lower_intervention_type(te.knowledge_info)
             TypeExprKind::TypeCounterfactual => c.lower_counterfactual_type(te.knowledge_info)
             TypeExprKind::TypeValidated => c.lower_validated_type(te.type_args, te.knowledge_info, te.span)
@@ -13278,18 +13343,6 @@ impl Checker {
         match opt {
             Some(te) => self.lower_type_expr(*te)
             None => (self, ty_unknown())
-        }
-    }
-
-    fn robust_type_tag_from_type_expr(self, te: TypeExpr, is_level: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
-        if te.kind != TypeExprKind::TypeNamed {
-            return -1
-        }
-        let name = checker_copy_string_list_to_name(te.path.segments)
-        if is_level {
-            robustness_level_id_from_name(name)
-        } else {
-            robustness_scope_id_from_name(name)
         }
     }
 
@@ -13668,46 +13721,6 @@ impl Checker {
                                         let add_result = c.contests.add(info)
                                         c.contests = add_result.0
                                         (c, ty_contest(inner_ty, add_result.1))
-                                    }
-                                }
-                            }
-                            None => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
-                        }
-                    }
-                }
-            }
-            None => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
-        }
-    }
-
-    fn lower_robust_type(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-        match opt {
-            Some(args) => {
-                match (*args).tail {
-                    None => {
-                        let pair = self.lower_type_expr((*args).head)
-                        if pair.1.kind == TypeKind::TyError {
-                            pair
-                        } else {
-                            (pair.0, ty_robust(pair.1, -1, -1, -1))
-                        }
-                    }
-                    Some(rest) => {
-                        match (*rest).tail {
-                            Some(last) => {
-                                match (*last).tail {
-                                    Some(_) => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
-                                    None => {
-                                        let inner_pair = self.lower_type_expr((*args).head)
-                                        var c = inner_pair.0
-                                        let inner_ty = inner_pair.1
-                                        let level_id = c.robust_type_tag_from_type_expr((*rest).head, true)
-                                        let scope_id = c.robust_type_tag_from_type_expr((*last).head, false)
-                                        if level_id < 0 || scope_id < 0 {
-                                            c = c.report_error_at(span, 63, 0, 0, 0)
-                                            return (c, ty_error())
-                                        }
-                                        (c, ty_robust(inner_ty, -1, level_id, scope_id))
                                     }
                                 }
                             }
