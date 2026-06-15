@@ -314,7 +314,8 @@ fn ir_program_summary_from_lowerer(lo: Lowerer) -> IrProgramSummary {
 fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lo_in
     var module_box = lo.module
-    (*module_box).fn_count = (*summary.module).fn_count
+    let sm_fn_count = (*summary.module).fn_count
+    (*module_box).fn_count = sm_fn_count
     (*module_box).string_count = 0
     (*module_box).prof_counter_count = (*summary.module).prof_counter_count
 
@@ -326,10 +327,11 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
 
     i = 0
     while i < (*summary.module).fn_count && i < 1024 {
+        let sm_strat = (*summary.module).functions[i as usize].compile_strategy
         var func = ir_empty_function()
         func.name = (*summary.module).functions[i as usize].name
         func.param_count = (*summary.module).functions[i as usize].param_count
-        func.compile_strategy = (*summary.module).functions[i as usize].compile_strategy
+        func.compile_strategy = sm_strat
         func.returns_float = (*summary.module).functions[i as usize].returns_float
         func.return_struct_name = (*summary.module).functions[i as usize].return_struct_name
         func.prof_counter_id = (*summary.module).functions[i as usize].prof_counter_id
@@ -676,6 +678,27 @@ fn lowerer_preseed_impl_method_summaries_mut(
     }
 }
 
+fn lower_typeexpr_byte_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Div {
+    match *ty_opt {
+        Some(ty) => {
+            if (*ty).kind == TypeExprKind::TypeArray {
+                let inner_size = lower_typeexpr_byte_size(&(*ty).inner)
+                match (*ty).array_size {
+                    Some(sz) => {
+                        if (*sz).kind == ExprKind::ExprIntLit {
+                            return inner_size * (*sz).int_val
+                        }
+                        return inner_size * 1024
+                    }
+                    _ => { return 8 }
+                }
+            }
+            return 8
+        }
+        _ => { return 8 }
+    }
+}
+
 fn lowerer_preseed_program_items_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>,
@@ -738,7 +761,19 @@ fn lowerer_preseed_program_items_mut(
                                     }
                                 }
                             }
-                            _ => {}
+                            _ => {
+                                let bss_fn_id = lowerer_find_or_add_fn_id_mut(lo, name)
+                                if bss_fn_id >= 0 {
+                                    var mbox2 = (*lo).module
+                                    var bss_slot = (*mbox2).functions[bss_fn_id as usize]
+                                    let bss_off = (*mbox2).export_count * 8
+                                    bss_slot.compile_strategy = 99
+                                    bss_slot.param_count = bss_off
+                                    (*mbox2).functions[bss_fn_id as usize] = bss_slot
+                                    (*mbox2).export_count = (*mbox2).export_count + 1
+                                    (*lo).module = mbox2
+                                }
+                            }
                         }
                     }
                 } else if kind == ItemKind::ItemStruct {
@@ -1140,11 +1175,22 @@ fn ir_fast_summary_preseed_items_seed_owned(
                     match item.fn_def {
                         Some(fd) => {
                             seed_value.module = ir_fast_summary_preseed_fn_signature_owned(seed_value.module, name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                                }
+                                _ => {
+                                    var bss_mod = seed_value.module
+                                    let bss_fid = bss_mod.fn_count
+                                    if bss_fid < IR_MAX_FUNCS {
+                                        bss_mod.functions[bss_fid as usize].name = name
+                                        bss_mod.functions[bss_fid as usize].compile_strategy = IR_STRATEGY_BSS_GLOBAL
+                                        bss_mod.functions[bss_fid as usize].param_count = bss_mod.export_count * 8
+                                        bss_mod.fn_count = bss_fid + 1
+                                        bss_mod.export_count = bss_mod.export_count + 1
+                                    }
+                                    seed_value.module = bss_mod
+                                }
+                            }
                         }
-                        _ => {}
-                    }
-                }
-            } else if kind == ItemKind::ItemStruct {
+                    } else if kind == ItemKind::ItemStruct {
                 match item.struct_def {
                     Some(sd) => {
                         seed_value.struct_layouts = ir_fast_summary_register_struct_fields_owned(seed_value.struct_layouts, name, (*sd).fields, 0)
@@ -1294,7 +1340,7 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         }
                                                     }
                                                 }
-                                                _ => {}
+                            _ => {}
                                             }
                                         }
                                         method_current = (*method_list).tail
@@ -4993,8 +5039,17 @@ impl Lowerer {
                 if (*target_expr).kind == ExprKind::ExprIdent {
                         let dst = lo.lookup_local((*target_expr).name)
                         if dst < 0 {
-                            lo = lo.report_error()
-                            (lo, rhs)
+                            let fn_lookup = lo.lookup_fn_by_name((*target_expr).name)
+                            lo = fn_lookup.0
+                            let bss_fn_id = fn_lookup.1
+                            if bss_fn_id >= 0 && bss_fn_id < lo.module.fn_count && lo.module.functions[bss_fn_id as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                                let bss_off = lo.module.functions[bss_fn_id as usize].param_count
+                                lo = lo.emit(ir_store_global(rhs, bss_off, (*target_expr).name))
+                                (lo, rhs)
+                            } else {
+                                lo = lo.report_error()
+                                (lo, rhs)
+                            }
                         } else {
                             lo = lo.emit(ir_copy(dst, rhs))
                             (lo, dst)
@@ -6741,16 +6796,25 @@ impl Lowerer {
             if src >= 0 {
                 (self, src)
             } else {
-                // Sprint 228: Check if this is a function name used as a first-class value
                 let fn_lookup = self.lookup_fn_by_name(e.name)
                 let lo_fn = fn_lookup.0
                 let fn_id = fn_lookup.1
-                if fn_id >= 0 {
-                    let ref_pair = lo_fn.fresh_reg()
-                    let lo2 = ref_pair.0
-                    let ref_reg = ref_pair.1
-                    let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
-                    (lo3, ref_reg)
+                if fn_id >= 0 && fn_id < lo_fn.module.fn_count {
+                    let fn_strategy = lo_fn.module.functions[fn_id as usize].compile_strategy
+                    if fn_strategy == IR_STRATEGY_BSS_GLOBAL {
+                        let bss_off = lo_fn.module.functions[fn_id as usize].param_count
+                        let ref_pair = lo_fn.fresh_reg()
+                        let lo2 = ref_pair.0
+                        let ref_reg = ref_pair.1
+                        let lo3 = lo2.emit(ir_load_global(ref_reg, bss_off, e.name))
+                        (lo3, ref_reg)
+                    } else {
+                        let ref_pair = lo_fn.fresh_reg()
+                        let lo2 = ref_pair.0
+                        let ref_reg = ref_pair.1
+                        let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
+                        (lo3, ref_reg)
+                    }
                 } else {
                     if lo_fn.probe_mode && lower_body_diag_enabled() {
                         print("lower_probe: ident_miss name=")

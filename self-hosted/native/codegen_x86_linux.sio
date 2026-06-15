@@ -7,7 +7,7 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, ir_name_eq}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
@@ -4600,10 +4600,13 @@ pub fn compile_module_streaming_finish(nc: NativeCompiler, module: &IrModule) ->
 fn compile_module(nc: NativeCompiler, module: &IrModule) -> NativeCompiler with Mut, Panic, Div, Alloc {
     var c = compile_module_streaming_begin(nc, module)
 
-    // Pass 1: Compile all functions
     var fi = 0
     while fi < module.fn_count {
-        c = compile_ir_function(c, module.functions[fi as usize], fi)
+        let fn_slot = module.functions[fi as usize]
+        if fn_slot.compile_strategy == 99 {
+            c.bss_total_size = c.bss_total_size + 8
+        }
+        c = compile_ir_function(c, fn_slot, fi)
         fi = fi + 1
     }
 
@@ -4791,10 +4794,10 @@ fn native_v2_machine_ra_instrs_into_ref(func: &MachineFunction, out: &! [RaSimpl
             out[count as usize] = native_v2_ra_simple(machine_instr_dst_value(instr), 0 - 1, 0 - 1)
             count = count + 1
         } else if instr.opcode == MIR_OP_STORE_STACK || instr.opcode == MIR_OP_CMP_ZERO || instr.opcode == MIR_OP_ARG_MOVE ||
-                  instr.opcode == MIR_OP_RET {
-            out[count as usize] = native_v2_ra_simple(0 - 1, machine_instr_src1_value(instr), 0 - 1)
-            count = count + 1
-        } else if instr.opcode == MIR_OP_MOVE || instr.opcode == MIR_OP_UNARY {
+                   instr.opcode == MIR_OP_RET || instr.opcode == MIR_OP_STORE_ABS {
+                   out[count as usize] = native_v2_ra_simple(0 - 1, machine_instr_src1_value(instr), 0 - 1)
+                   count = count + 1
+        } else if instr.opcode == MIR_OP_MOVE || instr.opcode == MIR_OP_UNARY || instr.opcode == MIR_OP_LOAD_ABS {
             out[count as usize] = native_v2_ra_simple(machine_instr_dst_value(instr), machine_instr_src1_value(instr), 0 - 1)
             count = count + 1
         } else if instr.opcode == MIR_OP_BINOP {
@@ -4970,6 +4973,19 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
     if instr.opcode == MIR_OP_STORE_STACK {
         c = native_v2_load_temp_to_rax(c, instr.src1.value)
         return native_v2_store_rax_to_stack_slot(c, instr.dst.value)
+    }
+
+    if instr.opcode == MIR_OP_LOAD_ABS {
+        c = native_v2_load_temp_to_rax(c, instr.src1.value)
+        c.code = emit_load_rax_mem_rax(c.code)
+        return native_v2_store_rax_to_temp(c, instr.dst.value)
+    }
+
+    if instr.opcode == MIR_OP_STORE_ABS {
+        c = native_v2_load_temp_to_rax(c, instr.src1.value)
+        c.code = emit_mov_reg_imm(c.code, 3, instr.src2.value)
+        c.code = emit_store_rax_mem_rbx_disp32(c.code, 0)
+        return c
     }
 
     if instr.opcode == MIR_OP_MOV_IMM {
@@ -6520,6 +6536,19 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 return false
             }
             nc_wide_longdiv_into(nc, lhs_v, rhs_v, dst_v, limbs, 1)
+        } else if instr_op == IrOpcode::IrLoadGlobal {
+            let bss_off = (*func).instrs[i as usize].imm_i64
+            let abs_addr = BSS_BASE_LINUX + bss_off
+            nc_emit_mov_rax_imm(nc, abs_addr)
+            (*nc).code = emit_load_rax_mem_rax((*nc).code)
+            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+        } else if instr_op == IrOpcode::IrStoreGlobal {
+            let bss_off = (*func).instrs[i as usize].imm_i64
+            let abs_addr = BSS_BASE_LINUX + bss_off
+            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_emit_mov_reg_imm(nc, 3, abs_addr)
+            nc_emit_store_rax_mem_rbx_disp32(nc, 0)
         } else {
             return false
         }
@@ -8833,7 +8862,17 @@ fn compile_to_elf_v2(module: &IrModule, base_addr: i64) -> NativeCompileResult w
         nc.data = final_data
     }
     let entry = trampoline_offset(nc)
-    let elf = finalize_elf64(nc.code, nc.rodata, final_data, entry, base_addr, nc.symbols, nc.fn_offsets, nc.fn_count)
+    var bss_total: i64 = 0
+    var bsi: i64 = 0
+    while bsi < (*module).fn_count {
+        var bss_fn_slot = (*module).functions[bsi as usize]
+        if bss_fn_slot.compile_strategy == 99 {
+            bss_total = bss_total + 8
+        }
+        bsi = bsi + 1
+    }
+    nc.bss_total_size = bss_total
+    let elf = finalize_elf64(nc.code, nc.rodata, final_data, entry, base_addr, nc.symbols, nc.fn_offsets, nc.fn_count, bss_total, BSS_BASE_LINUX)
     native_compile_result_ok_elf(elf.bytes, elf.len, FORMAT_ELF64())
 }
 
@@ -8888,6 +8927,7 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     var phnum: i64 = 2
     if rodata_len > 0 { phnum = phnum + 1 }
     if data_len > 0 { phnum = phnum + 1 }
+    if (*nc).bss_total_size > 0 { phnum = phnum + 1 }
 
     var file_len = text_offset + code_len
     if rodata_len > 0 {
@@ -8947,6 +8987,10 @@ fn native_v2_build_elf_image_into(bytes: &! [i8; 131072], nc: &! NativeCompiler,
     }
     if data_len > 0 {
         native_v2_file_emit_phdr(bytes, phoff, 1, 6, data_offset, data_vaddr, data_len, data_len, 4096)
+        phoff = phoff + 56
+    }
+    if (*nc).bss_total_size > 0 {
+        native_v2_file_emit_phdr(bytes, phoff, 1, 6, 0, 268435456, 0, (*nc).bss_total_size, 4096)
         phoff = phoff + 56
     }
     native_v2_file_emit_phdr(bytes, phoff, 0x6474e551, 6, 0, 0, 0, 0, 16)
@@ -9059,8 +9103,12 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     compile_module_streaming_begin_into(&! nc, module)
     var fi: i64 = 0
     var compile_ok = true
+    var bss_count: i64 = 0
     while fi < (*module).fn_count {
         let fn_body = (*module).functions[fi as usize]
+        if fn_body.compile_strategy == 99 {
+            bss_count = bss_count + 1
+        }
         if !compile_ir_function_v2_from_ir_into(&! nc, &fn_body, fi) {
             compile_ok = false
         }
@@ -9084,6 +9132,7 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     let patched_data_file_offset = align_page(patched_rodata_file_offset + patched_eff_rodata_len)
     apply_relocations_into(&! nc, patched_rodata_file_offset, patched_data_file_offset)
     let entry = trampoline_offset(nc)
+    nc.bss_total_size = bss_count * 8
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
 }
 
@@ -9270,6 +9319,7 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
     var phnum: i64 = 2
     if rodata_len > 0 { phnum = phnum + 1 }
     if actual_data_len > 0 { phnum = phnum + 1 }
+    if (*nc).bss_total_size > 0 { phnum = phnum + 1 }
 
     let entry_va = base_addr + text_offset + entry_offset
 
@@ -9335,6 +9385,19 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
         nc_elf_put_u64(data_va)
         nc_elf_put_u64(actual_data_len)
         nc_elf_put_u64(actual_data_len)
+        nc_elf_put_u64(4096)
+    }
+
+    // PT_LOAD bss (R+W, zero-init, no file data)
+    let bss_sz = (*nc).bss_total_size
+    if bss_sz > 0 {
+        nc_elf_put_u32(1)
+        nc_elf_put_u32(6)
+        nc_elf_put_u64(0)
+        nc_elf_put_u64(BSS_BASE_LINUX)
+        nc_elf_put_u64(BSS_BASE_LINUX)
+        nc_elf_put_u64(0)
+        nc_elf_put_u64(bss_sz)
         nc_elf_put_u64(4096)
     }
 
@@ -9437,7 +9500,14 @@ pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) 
 fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc = compile_module(nc, module)
-    finalize_compiled_elf(nc, base_addr)
+    let entry = trampoline_offset(nc)
+    var final_data = nc.data
+    let min_data_len = nc.prof_counter_data_base + (nc.prof_counter_count * 8)
+    if final_data.len < min_data_len {
+        final_data.len = min_data_len
+    }
+    let bss_total = module.export_count * 8
+    finalize_elf64(nc.code, nc.rodata, final_data, entry, base_addr, nc.symbols, nc.fn_offsets, nc.fn_count, bss_total, BSS_BASE_LINUX)
 }
 
 pub fn finalize_compiled_elf(nc: NativeCompiler, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
@@ -9447,7 +9517,7 @@ pub fn finalize_compiled_elf(nc: NativeCompiler, base_addr: i64) -> Elf64Binary 
     if final_data.len < min_data_len {
         final_data.len = min_data_len
     }
-    finalize_elf64(nc.code, nc.rodata, final_data, entry, base_addr, nc.symbols, nc.fn_offsets, nc.fn_count)
+    finalize_elf64(nc.code, nc.rodata, final_data, entry, base_addr, nc.symbols, nc.fn_offsets, nc.fn_count, 0, BSS_BASE_LINUX)
 }
 
 // ============================================================================
