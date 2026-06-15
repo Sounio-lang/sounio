@@ -1,0 +1,86 @@
+// Isolated verification of the gap-C register-width fix via the omega Rust
+// interpreter (which does NOT have the lean_single seed's large-by-value-struct
+// native miscompile). Builds a complete i64 index-bounds kernel and emits PTX
+// through the PRODUCTION gpu_lower_to_ptx (lower_to_ptx.sio, with gap C).
+// Run: souc run self-hosted/gpu/ptx_width_harness.sio
+// Signals: cvt.u64.u32 after each sreg read; setp.lt.s64 over %rd.
+
+use kernel_ir::*
+use ptx::*
+use lower_to_ptx::*
+
+fn append(k0: GpuKernelIr, op: GpuOp) -> GpuKernelIr with Mut, Panic, Div {
+    var k = k0
+    let c = k.op_count
+    if c < 1024 {
+        k.ops[c as usize] = op
+        k.op_count = c + 1
+    }
+    k
+}
+
+fn mk(oc: GpuOpcode, dst: i64, lhs: i64, rhs: i64, t: GpuType) -> GpuOp with Mut, Panic, Div {
+    var o = gpu_op_new()
+    o.opcode = oc
+    o.dst_reg = dst
+    o.lhs_reg = lhs
+    o.rhs_reg = rhs
+    o.ty = t
+    o
+}
+
+fn mk_intrin(oc: GpuOpcode, reg: i64) -> GpuOp with Mut, Panic, Div {
+    var o = gpu_op_new()
+    o.opcode = oc
+    o.dst_reg = reg
+    o.axis = 0
+    o.ty = GpuType::GpuU32
+    o
+}
+
+fn mk_cvt(reg: i64) -> GpuOp with Mut, Panic, Div {
+    var c = gpu_op_new()
+    c.opcode = GpuOpcode::GpuCvt
+    c.dst_reg = reg
+    c.src_reg = reg
+    c.dst_ty = GpuType::GpuU64
+    c.src_ty = GpuType::GpuU32
+    c.ty = GpuType::GpuU64
+    c
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var k = gpu_kernel_new()
+    k.kernel_name = ki_ir_name_from_bytes(118, 97, 100, 100, 4)  // "vadd"
+    var p = gpu_param_new()
+    p.name = ki_ir_name_from_bytes(110, 0, 0, 0, 1)  // "n"
+    p.ty = GpuType::GpuU64
+    k.params[0] = p
+    k.param_count = 1
+    k.max_reg_u32 = 4
+    k.max_reg_u64 = 8
+    k.max_reg_pred = 2
+
+    k = append(k, mk_intrin(GpuOpcode::GpuGetTid, 1))
+    k = append(k, mk_cvt(1))
+    k = append(k, mk_intrin(GpuOpcode::GpuGetBid, 2))
+    k = append(k, mk_cvt(2))
+    k = append(k, mk_intrin(GpuOpcode::GpuGetNtid, 3))
+    k = append(k, mk_cvt(3))
+    k = append(k, mk(GpuOpcode::GpuMul, 4, 2, 3, GpuType::GpuI64))
+    k = append(k, mk(GpuOpcode::GpuAdd, 5, 4, 1, GpuType::GpuI64))
+    var lp = gpu_op_new()
+    lp.opcode = GpuOpcode::GpuLoadParam
+    lp.dst_reg = 6
+    lp.param_idx = 0
+    lp.ty = GpuType::GpuU64
+    k = append(k, lp)
+    k = append(k, mk(GpuOpcode::GpuSetpLt, 1, 5, 6, GpuType::GpuI64))
+    var r = gpu_op_new()
+    r.opcode = GpuOpcode::GpuRet
+    k = append(k, r)
+
+    let buf = gpu_lower_to_ptx(k)
+    ptx_buf_print(buf)
+    0
+}
