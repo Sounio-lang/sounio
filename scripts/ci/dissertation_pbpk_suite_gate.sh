@@ -114,6 +114,7 @@ TESTS=(
   "pbpk28_sobol_pce           stdlib/darwin_pbpk/validation/pbpk28_sobol_pce.sio"
   "pbpk28_mc_cross_validation stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio"
   "pbpk28_mc_prior_family_sweep stdlib/darwin_pbpk/validation/pbpk28_mc_prior_family_sweep.sio"
+  "rapamycin_kaxi_fuse_prior    tests/run-pass/rapamycin_kaxi_fuse_prior.sio"
 )
 
 # Smoke entries: artifact-emitting demos (HTML, SVG, narrative reports).
@@ -147,11 +148,12 @@ TESTS_PENDING=(
 # merge commit and not yet restored. Listed here so the gate stays green while
 # the restoration workstream is tracked — NOT run (souc would fail to compile
 # them), merely registered so the pending item is visible in the summary.
-TESTS_PENDING_REGRESSION=(
-  # PENDING: Seq<T> subsystem regression (dropped by 5f1e397a2); K-AXI fusion
-  # witness pending Seq<T> restore.
-  "rapamycin_kaxi_fuse_prior    tests/run-pass/rapamycin_kaxi_fuse_prior.sio"
-)
+# RESOLVED 2026-06-15 (branch feat/seq-restore): Seq<T> (TY_SEQ=12, x86) restored
+# in lean_single.sio; rapamycin_kaxi_fuse_prior now runs and is promoted to TESTS
+# above (verified: 3-stage bootstrap fixed-point gen2==gen3, witness PASS,
+# sd_post==sd_expected). Seq-of-struct/borrow paths remain Tier-2 (see
+# tests/known_failures/hardened_diagnostics_full_suite.txt).
+TESTS_PENDING_REGRESSION=()
 
 fails=0
 pending=0
