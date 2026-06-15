@@ -7681,56 +7681,87 @@ fn emit_inline_itoa_fd(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Di
     c
 }
 
-// Emit the __prof_dump function: reads counters from .data, writes summary to stderr
-// Unrolled: one block per counter, no runtime loop variable needed
-pub fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeCompiler with Mut, Panic, Div {
+fn emit_prof_dump_stderr_counter_name_body(nc: NativeCompiler, ci: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    c.code = emit_push_rbp(c.code)
-    c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 48)    // stack buffer for itoa + immediate strings
+    let name_rodata_offset = c.prof_counter_names[ci as usize]
+    let lea_pos = c.code.len + 3     // disp32 is at byte 3 of LEA instruction
+    c.code = emit_lea_rax_rip_disp32(c.code, 0)  // placeholder disp32
+    c.relocs = add_rip_reloc(c.relocs, lea_pos, name_rodata_offset)
+    c.code = emit_mov_reg_reg(c.code, 6, 0)      // mov rsi, rax
+    c = emit_inline_strlen(c)                      // rcx = length, rsi preserved
+    c.code = emit_mov_reg_reg(c.code, 2, 1)      // mov rdx, rcx
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stderr_fd())
+    c.code = emit_mov_rax_imm(c.code, 1)          // sys_write
+    c.code = emit_syscall(c.code)
 
+    emit_prof_write_colon_sep(c)
+}
+
+fn emit_prof_dump_stderr_counter_value(nc: NativeCompiler, module: &IrModule, ci: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let counter_id = module.prof_counters[ci as usize].counter_id
+    let load_disp_pos = c.code.len + 3  // disp32 at byte 3 of MOV [rip+disp32]
+    c.code = emit_mov_rax_rip_disp32(c.code, 0)   // placeholder disp32
+    c.relocs = add_data_section_reloc(c.relocs, load_disp_pos, c.prof_counter_data_base + (counter_id * 8))
+    c.code = emit_mov_rdi_rax(c.code)              // rdi = counter value
+    c = emit_inline_itoa_stderr(c)                  // itoa + sys_write(2, ...)
+
+    emit_prof_write_newline(c)
+}
+
+fn emit_prof_dump_stderr_counter(nc: NativeCompiler, module: &IrModule, ci: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = emit_prof_write_prefix(nc)
+    c = emit_prof_dump_stderr_counter_name_body(c, ci)
+    emit_prof_dump_stderr_counter_value(c, module, ci)
+}
+
+fn emit_prof_dump_stderr(nc: NativeCompiler, module: &IrModule) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
     var ci = 0
     while ci < c.prof_counter_count {
-        // --- Write "[prof] " (7 bytes) from immediate stack construction ---
-        c = emit_prof_write_prefix(c)
-
-        // --- Write function name from .rodata ---
-        let name_rodata_offset = c.prof_counter_names[ci as usize]
-        let lea_pos = c.code.len + 3     // disp32 is at byte 3 of LEA instruction
-        c.code = emit_lea_rax_rip_disp32(c.code, 0)  // placeholder disp32
-        c.relocs = add_rip_reloc(c.relocs, lea_pos, name_rodata_offset)
-        // rax = pointer to name string in .rodata
-        c.code = emit_mov_reg_reg(c.code, 6, 0)      // mov rsi, rax
-        c = emit_inline_strlen(c)                      // rcx = length, rsi preserved
-        // sys_write(stderr_fd, rsi, rcx)
-        c.code = emit_mov_reg_reg(c.code, 2, 1)      // mov rdx, rcx
-        c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stderr_fd())
-        c.code = emit_mov_rax_imm(c.code, 1)          // sys_write
-        c.code = emit_syscall(c.code)
-
-        // --- Write ": " (2 bytes) from immediate stack construction ---
-        c = emit_prof_write_colon_sep(c)
-
-        // --- Load counter value from .data, itoa, write ---
-        let counter_id = module.prof_counters[ci as usize].counter_id
-        let load_disp_pos = c.code.len + 3  // disp32 at byte 3 of MOV [rip+disp32]
-        c.code = emit_mov_rax_rip_disp32(c.code, 0)   // placeholder disp32
-        c.relocs = add_data_section_reloc(c.relocs, load_disp_pos, c.prof_counter_data_base + (counter_id * 8))
-        // rax = counter value
-        c.code = emit_mov_rdi_rax(c.code)              // rdi = counter value
-        c = emit_inline_itoa_stderr(c)                  // itoa + sys_write(2, ...)
-
-        // --- Write "\n" (1 byte) ---
-        c = emit_prof_write_newline(c)
-
+        c = emit_prof_dump_stderr_counter(c, module, ci)
         ci = ci + 1
     }
+    c
+}
 
-    // Sprint 47: write .sprof file (persistent profile output)
-    // Save r12 for local file-descriptor scratch use.
+fn emit_prof_dump_sprof_counter_name(nc: NativeCompiler, fi: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let fn_rodata_offset = c.prof_counter_names[fi as usize]
+    let fn_lea_pos = c.code.len + 3
+    c.code = emit_lea_rax_rip_disp32(c.code, 0)  // placeholder
+    c.relocs = add_rip_reloc(c.relocs, fn_lea_pos, fn_rodata_offset)
+    c.code = emit_mov_reg_reg(c.code, 6, 0)      // mov rsi, rax
+    c = emit_inline_strlen(c)                      // rcx = length
+    c.code = emit_mov_reg_reg(c.code, 2, 1)      // mov rdx, rcx
+    c.code = emit_mov_rdi_r12(c.code)              // rdi = r12 (file fd)
+    c.code = emit_mov_rax_imm(c.code, 1)          // sys_write
+    c.code = emit_syscall(c.code)
+
+    emit_prof_write_space_to_fd(c)
+}
+
+fn emit_prof_dump_sprof_counter_value(nc: NativeCompiler, module: &IrModule, fi: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let file_counter_id = module.prof_counters[fi as usize].counter_id
+    let file_load_pos = c.code.len + 3
+    c.code = emit_mov_rax_rip_disp32(c.code, 0)   // placeholder
+    c.relocs = add_data_section_reloc(c.relocs, file_load_pos, c.prof_counter_data_base + (file_counter_id * 8))
+    c.code = emit_mov_rdi_rax(c.code)              // rdi = counter value
+    c = emit_inline_itoa_fd(c)                      // itoa + sys_write(r12, ...)
+
+    emit_prof_write_newline_to_fd(c)
+}
+
+fn emit_prof_dump_sprof_counter(nc: NativeCompiler, module: &IrModule, fi: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = emit_prof_dump_sprof_counter_name(nc, fi)
+    emit_prof_dump_sprof_counter_value(c, module, fi)
+}
+
+fn emit_prof_dump_sprof(nc: NativeCompiler, module: &IrModule) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
     c.code = emit_push_r12(c.code)
 
-    // sys_open("profile.sprof", O_WRONLY|O_CREAT|O_TRUNC=577, 0644=420)
     let sprof_lea_pos = c.code.len + 3
     c.code = emit_lea_rax_rip_disp32(c.code, 0)     // placeholder → .rodata "profile.sprof"
     c.relocs = add_rip_reloc(c.relocs, sprof_lea_pos, c.prof_sprof_name_offset)
@@ -7741,48 +7772,32 @@ pub fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeC
     c.code = emit_syscall(c.code)
     c.code = emit_mov_r12_rax(c.code)                // r12 = file fd
 
-    // Write "[sprof]\n" header to file
     c = emit_prof_write_sprof_header(c)
 
-    // Write per-counter lines: "fn_name count\n" to file
     var fi = 0
     while fi < c.prof_counter_count {
-        // --- Write function name from .rodata to file ---
-        let fn_rodata_offset = c.prof_counter_names[fi as usize]
-        let fn_lea_pos = c.code.len + 3
-        c.code = emit_lea_rax_rip_disp32(c.code, 0)  // placeholder
-        c.relocs = add_rip_reloc(c.relocs, fn_lea_pos, fn_rodata_offset)
-        c.code = emit_mov_reg_reg(c.code, 6, 0)      // mov rsi, rax
-        c = emit_inline_strlen(c)                      // rcx = length
-        c.code = emit_mov_reg_reg(c.code, 2, 1)      // mov rdx, rcx
-        c.code = emit_mov_rdi_r12(c.code)              // rdi = r12 (file fd)
-        c.code = emit_mov_rax_imm(c.code, 1)          // sys_write
-        c.code = emit_syscall(c.code)
-
-        // --- Write " " (space separator) to file ---
-        c = emit_prof_write_space_to_fd(c)
-
-        // --- Load counter value, itoa, write to file ---
-        let file_counter_id = module.prof_counters[fi as usize].counter_id
-        let file_load_pos = c.code.len + 3
-        c.code = emit_mov_rax_rip_disp32(c.code, 0)   // placeholder
-        c.relocs = add_data_section_reloc(c.relocs, file_load_pos, c.prof_counter_data_base + (file_counter_id * 8))
-        c.code = emit_mov_rdi_rax(c.code)              // rdi = counter value
-        c = emit_inline_itoa_fd(c)                      // itoa + sys_write(r12, ...)
-
-        // --- Write "\n" to file ---
-        c = emit_prof_write_newline_to_fd(c)
-
+        c = emit_prof_dump_sprof_counter(c, module, fi)
         fi = fi + 1
     }
 
-    // sys_close(r12)
     c.code = emit_mov_rdi_r12(c.code)                 // rdi = fd
     c.code = emit_mov_rax_imm(c.code, 3)              // rax = sys_close
     c.code = emit_syscall(c.code)
 
-    // Restore r12 after local file-descriptor use.
     c.code = emit_pop_r12(c.code)
+    c
+}
+
+// Emit the __prof_dump function: reads counters from .data, writes summary to stderr
+// and emits the persistent .sprof file.
+pub fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 48)    // stack buffer for itoa + immediate strings
+
+    c = emit_prof_dump_stderr(c, module)
+    c = emit_prof_dump_sprof(c, module)
 
     c.code = emit_mov_rsp_rbp(c.code)
     c.code = emit_pop_rbp(c.code)
