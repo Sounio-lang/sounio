@@ -6294,36 +6294,37 @@ fn checker_check_refinement_literal_inplace(c: *mut Checker, span: Span, ty: Typ
     (*c).last_literal_kind = 0
 }
 
-// Predicate: does this binding-init expr need the epistemic special handling in
-// check_binding_init_expr (Contest / lift_knowledge / AuditAttach / Path-TyNamed)?
-fn checker_binding_init_is_special(e: Expr, ann_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
-    if e.kind == ExprKind::ExprContest {
-        return true
+fn checker_check_lift_knowledge_expr_expected_inplace(c: *mut Checker, e: Expr, expected_contest_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let k_ty = checker_check_opt_expr_inplace(c, first_arg)
+    if k_ty.kind != TypeKind::TyKnowledge {
+        checker_report_error_at_inplace(c, e.span, 63, 0, 0, 0)
+        return ty_error()
     }
-    if e.kind == ExprKind::ExprCall && call_expr_is_builtin_lift_knowledge(e.left) {
-        return true
+    let inner_ty = knowledge_inner(k_ty)
+    let expected_inner = knowledge_inner(expected_contest_ty)
+    if !types_compatible(inner_ty, expected_inner) {
+        checker_report_mismatch_inplace(c, e.span, 1, expected_inner, inner_ty)
+        return ty_error()
     }
-    if e.kind == ExprKind::ExprAuditAttach {
-        return true
+    if expected_contest_ty.epistemic_meta_id >= 0 && expected_contest_ty.epistemic_meta_id < (*c).contests.count {
+        var info = (*c).contests.get(expected_contest_ty.epistemic_meta_id)
+        info = contest_info_attach_span(info, e.span)
+        (*c).contests.entries[expected_contest_ty.epistemic_meta_id as usize] = info
+        return ty_contest(expected_inner, expected_contest_ty.epistemic_meta_id)
     }
-    if e.kind == ExprKind::ExprPath && ann_ty.kind == TypeKind::TyNamed {
-        return true
-    }
-    false
+    expected_contest_ty
 }
 
-// Isolated by-value leaf for the epistemic special cases. ONE by-value call site
-// (the existing check_binding_init_expr method, which handles all four branches
-// internally) → exactly one 8MB SRET buffer, kept OUT of the hot frame. Never
-// reached by `let x = 1` (IntLit is not special), so it does not affect the gate.
-fn checker_check_binding_init_expr_bridge(c: *mut Checker, opt: Option<Box<Expr> >, ann_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    let pair = (*c).check_binding_init_expr(opt, ann_ty)
+fn checker_check_audit_attach_expr_expected_bridge(c: *mut Checker, e: Expr, expected_contest_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let pair = (*c).check_audit_attach_expr_expected(e, expected_contest_ty)
     checker_store_from_value(c, pair.0)
     pair.1
 }
 
 // *mut binding-init dispatch: simple exprs run on the *mut expr spine (which
-// handles IntLit inline and sets last_literal_*); epistemic cases bridge.
+// handles IntLit inline and sets last_literal_*); annotated epistemic cases use
+// narrower handlers so the old all-purpose by-value binding helper is not compiled.
 fn checker_check_binding_init_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >, ann_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(e) => {
@@ -6339,8 +6340,24 @@ fn checker_check_binding_init_expr_inplace(c: *mut Checker, opt: Option<Box<Expr
                 } else {
                     path_ty
                 }
-            } else if checker_binding_init_is_special(*e, ann_ty) {
-                checker_check_binding_init_expr_bridge(c, opt, ann_ty)
+            } else if (*e).kind == ExprKind::ExprContest {
+                if ann_ty.kind == TypeKind::TyContest {
+                    checker_check_contest_expr_expected_mut(c, *e, ann_ty)
+                } else {
+                    checker_check_expr_inplace(c, *e)
+                }
+            } else if (*e).kind == ExprKind::ExprCall && call_expr_is_builtin_lift_knowledge((*e).left) {
+                if ann_ty.kind == TypeKind::TyContest {
+                    checker_check_lift_knowledge_expr_expected_inplace(c, *e, ann_ty)
+                } else {
+                    checker_check_expr_inplace(c, *e)
+                }
+            } else if (*e).kind == ExprKind::ExprAuditAttach {
+                if ann_ty.kind == TypeKind::TyContest {
+                    checker_check_audit_attach_expr_expected_bridge(c, *e, ann_ty)
+                } else {
+                    checker_check_expr_inplace(c, *e)
+                }
             } else {
                 checker_check_expr_inplace(c, *e)
             }
@@ -16493,46 +16510,6 @@ impl Checker {
         }
     }
 
-    fn check_binding_init_expr(self, opt: Option<Box<Expr> >, ann_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-        match opt {
-            Some(e) => {
-                if (*e).kind == ExprKind::ExprContest {
-                    if ann_ty.kind == TypeKind::TyContest {
-                        self.check_contest_expr_expected(*e, ann_ty)
-                    } else {
-                        self.check_contest_expr_no_annotation(*e)
-                    }
-                } else if (*e).kind == ExprKind::ExprCall && call_expr_is_builtin_lift_knowledge((*e).left) {
-                    if ann_ty.kind == TypeKind::TyContest {
-                        self.check_lift_knowledge_expr_expected(*e, ann_ty)
-                    } else {
-                        self.check_expr(*e)
-                    }
-                } else if (*e).kind == ExprKind::ExprAuditAttach {
-                    if ann_ty.kind == TypeKind::TyContest {
-                        self.check_audit_attach_expr_expected(*e, ann_ty)
-                    } else {
-                        self.check_expr(*e)
-                    }
-                } else if (*e).kind == ExprKind::ExprPath && ann_ty.kind == TypeKind::TyNamed {
-                    // Bidirectional inference for enum variants: Option::None with
-                    // annotation Option<i32> → use the annotation type so generic
-                    // parameters are preserved.
-                    let path_pair = self.check_path_expr(*e)
-                    let c = path_pair.0
-                    let path_ty = path_pair.1
-                    if path_ty.kind == TypeKind::TyNamed && name_eq(path_ty.name, ann_ty.name) {
-                        (c, ann_ty)
-                    } else {
-                        (c, path_ty)
-                    }
-                } else {
-                    self.check_expr(*e)
-                }
-            }
-            None => (self, ty_unit())
-        }
-    }
 }
 
 // ============================================================
