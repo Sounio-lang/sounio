@@ -1725,6 +1725,13 @@ fn nc_emit_mulsd_xmm0_xmm1(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0xC1)
 }
 
+fn nc_emit_divsd_xmm0_xmm1(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2)
+    nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x5E)
+    nc_emit_byte(nc, 0xC1)
+}
+
 fn nc_emit_addsd_xmm0_xmm1(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0xF2)
     nc_emit_byte(nc, 0x0F)
@@ -2297,6 +2304,13 @@ fn nc_emit_cmovc_rax_rdx(nc: &! NativeCompiler) with Mut, Panic, Div {
 fn nc_emit_or_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x09)
+    nc_emit_byte(nc, 0xd8)
+}
+
+// and rax, rbx. 48 21 D8.
+fn nc_emit_and_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x21)
     nc_emit_byte(nc, 0xd8)
 }
 
@@ -4024,172 +4038,164 @@ pub fn emit_builtin_exp_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // Algorithm: log(x) = e*ln(2) + 2*f*(1 + f^2/3 + f^4/5 + f^6/7)
 // where e = exponent, m = mantissa in [1,2), f = (m-1)/(m+1)
 // Stack layout: [rbp-8]=input bits, [rbp-16]=e_f64, [rbp-24]=f, [rbp-32]=f^2
-pub fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn emit_builtin_log_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 
     // Store constants in .rodata
     // ln(2) = 0x3FE62E42FEFA39EF
-    c.rodata = data_section_add_f64(c.rodata, 0x3FE62E42FEFA39EF)
-    let ln2_off = c.rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3FE62E42FEFA39EF)
+    let ln2_off = (*nc).rodata.last_offset
     // 1.0 = 0x3FF0000000000000
-    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)
-    let one_off = c.rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3FF0000000000000)
+    let one_off = (*nc).rodata.last_offset
     // 2.0 = 0x4000000000000000
-    c.rodata = data_section_add_f64(c.rodata, 0x4000000000000000)
-    let two_off = c.rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x4000000000000000)
+    let two_off = (*nc).rodata.last_offset
     // 1/3 = 0x3FD5555555555555
-    c.rodata = data_section_add_f64(c.rodata, 0x3FD5555555555555)
-    let third_off = c.rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3FD5555555555555)
+    let third_off = (*nc).rodata.last_offset
     // 1/5 = 0x3FC999999999999A
-    c.rodata = data_section_add_f64(c.rodata, 0x3FC999999999999A)
-    let fifth_off = c.rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3FC999999999999A)
+    let fifth_off = (*nc).rodata.last_offset
     // 1/7 = 0x3FB2492492492492
-    c.rodata = data_section_add_f64(c.rodata, 0x3FB2492492492492)
-    let seventh_off = c.rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3FB2492492492492)
+    let seventh_off = (*nc).rodata.last_offset
 
-    c.code = emit_push_rbp(c.code)
-    c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 64)
+    nc_emit_push_rbp(nc)
+    nc_emit_mov_rbp_rsp(nc)
+    nc_emit_sub_rsp_imm32(nc, 64)
 
     // rdi = f64 bit pattern of x
-    c.code = emit_mov_reg_reg(c.code, 0, 7)       // mov rax, rdi
-    c.code = emit_store_rax_rbp_disp32(c.code, -8)  // [rbp-8] = input bits
+    nc_emit_mov_reg_reg(nc, 0, 7)       // mov rax, rdi
+    nc_emit_store_rax_rbp_disp32(nc, -8)  // [rbp-8] = input bits
 
     // Step 1: Extract biased exponent e = (bits >> 52) & 0x7FF
-    c.code = emit_mov_reg_imm(c.code, 1, 52)      // mov rcx, 52
+    nc_emit_mov_reg_imm(nc, 1, 52)      // mov rcx, 52
     // shr rax, cl: 48 D3 E8
-    var b1 = c.code
-    b1 = emit_byte(b1, 0x48)
-    b1 = emit_byte(b1, 0xD3)
-    b1 = emit_byte(b1, 0xE8)
-    c.code = b1
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xD3)
+    nc_emit_byte(nc, 0xE8)
     // and rax, 0x7FF: use rbx
-    c.code = emit_mov_reg_imm(c.code, 3, 0x7FF)   // mov rbx, 0x7FF
-    c.code = emit_and_rax_rbx(c.code)              // rax = biased exponent
+    nc_emit_mov_reg_imm(nc, 3, 0x7FF)   // mov rbx, 0x7FF
+    nc_emit_and_rax_rbx(nc)              // rax = biased exponent
 
     // e_unbiased = e - 1023
-    c.code = emit_mov_reg_imm(c.code, 3, 1023)    // mov rbx, 1023
+    nc_emit_mov_reg_imm(nc, 3, 1023)    // mov rbx, 1023
     // sub rax, rbx: 48 29 D8
-    var b2 = c.code
-    b2 = emit_byte(b2, 0x48)
-    b2 = emit_byte(b2, 0x29)
-    b2 = emit_byte(b2, 0xD8)
-    c.code = b2
+    nc_emit_sub_rax_rbx(nc)
     // Convert e_unbiased to f64
-    c.code = emit_cvtsi2sd_xmm0_rax(c.code)        // xmm0 = e_unbiased (f64)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)  // [rbp-16] = e_f64
+    nc_emit_cvtsi2sd_xmm0_rax(nc)        // xmm0 = e_unbiased (f64)
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -16)  // [rbp-16] = e_f64
 
     // Step 2: Extract mantissa m ∈ [1,2)
     // m_bits = (bits & 0x000FFFFFFFFFFFFF) | 0x3FF0000000000000
-    c.code = emit_load_rbp_disp32_rax(c.code, -8)   // rax = input bits
-    c.code = emit_mov_reg_imm(c.code, 3, 0x000FFFFFFFFFFFFF)
-    c.code = emit_and_rax_rbx(c.code)              // rax = mantissa bits only
-    c.code = emit_mov_reg_imm(c.code, 3, 0x3FF0000000000000)
-    c.code = emit_or_rax_rbx(c.code)               // rax = m in [1,2) bits
-    c.code = emit_movq_xmm0_rax(c.code)            // xmm0 = m
+    nc_emit_load_rbp_disp32_rax(nc, -8)   // rax = input bits
+    nc_emit_mov_reg_imm(nc, 3, 0x000FFFFFFFFFFFFF)
+    nc_emit_and_rax_rbx(nc)              // rax = mantissa bits only
+    nc_emit_mov_reg_imm(nc, 3, 0x3FF0000000000000)
+    nc_emit_or_rax_rbx(nc)               // rax = m in [1,2) bits
+    nc_emit_movq_xmm0_rax(nc)            // xmm0 = m
 
     // Step 3: f = (m - 1) / (m + 1)
     // Save m to [rbp-40]
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)  // [rbp-40] = m
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -40)  // [rbp-40] = m
     // xmm0 = m, load 1.0 into xmm1
-    let load_one1_pos = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_one1_pos + 4, one_off)
+    let load_one1_pos = (*nc).code.len
+    nc_emit_movsd_xmm1_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, load_one1_pos + 4, one_off)
     // m - 1 in xmm0
-    c.code = emit_subsd_xmm0_xmm1(c.code)         // xmm0 = m - 1
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -48)  // [rbp-48] = m - 1
+    nc_emit_subsd_xmm0_xmm1(nc)         // xmm0 = m - 1
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -48)  // [rbp-48] = m - 1
 
     // m + 1: reload m
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -40)  // xmm0 = m
-    let load_one2_pos = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_one2_pos + 4, one_off)
-    c.code = emit_addsd_xmm0_xmm1(c.code)         // xmm0 = m + 1
+    nc_emit_movsd_xmm0_rbp_disp8(nc, -40)  // xmm0 = m
+    let load_one2_pos = (*nc).code.len
+    nc_emit_movsd_xmm1_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, load_one2_pos + 4, one_off)
+    nc_emit_addsd_xmm0_xmm1(nc)         // xmm0 = m + 1
 
     // f = (m-1) / (m+1)
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -48) // save (m-1) to xmm1 via stack? No, swap:
+    nc_emit_movsd_rbp_disp8_xmm1(nc, -48) // save (m-1) to xmm1 via stack? No, swap:
     // xmm1 = m+1, xmm0 = m-1
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56)  // [rbp-56] = m+1
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)  // xmm0 = m-1
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -56)  // xmm1 = m+1
-    c.code = emit_divsd_xmm0_xmm1(c.code)          // xmm0 = f = (m-1)/(m+1)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)  // [rbp-24] = f
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -56)  // [rbp-56] = m+1
+    nc_emit_movsd_xmm0_rbp_disp8(nc, -48)  // xmm0 = m-1
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -56)  // xmm1 = m+1
+    nc_emit_divsd_xmm0_xmm1(nc)          // xmm0 = f = (m-1)/(m+1)
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -24)  // [rbp-24] = f
 
     // Step 4: f^2
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -24) // xmm1 = f (via store/load trick)
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24) // xmm0 = f
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24) // xmm1 = f
-    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^2
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)  // [rbp-32] = f^2
+    nc_emit_movsd_rbp_disp8_xmm1(nc, -24) // xmm1 = f (via store/load trick)
+    nc_emit_movsd_xmm0_rbp_disp8(nc, -24) // xmm0 = f
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -24) // xmm1 = f
+    nc_emit_mulsd_xmm0_xmm1(nc)          // xmm0 = f^2
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -32)  // [rbp-32] = f^2
 
     // Step 5: Series: log(m) = 2*f*(1 + f^2/3 + f^4/5 + f^6/7)
     // Compute f^4 = f^2 * f^2
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -32)  // xmm0 = f^2
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)  // xmm1 = f^2
-    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^4
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -48)  // [rbp-48] = f^4
+    nc_emit_movsd_xmm0_rbp_disp8(nc, -32)  // xmm0 = f^2
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -32)  // xmm1 = f^2
+    nc_emit_mulsd_xmm0_xmm1(nc)          // xmm0 = f^4
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -48)  // [rbp-48] = f^4
 
     // Compute f^6 = f^4 * f^2
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)  // xmm1 = f^2
-    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^6
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56)  // [rbp-56] = f^6
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -32)  // xmm1 = f^2
+    nc_emit_mulsd_xmm0_xmm1(nc)          // xmm0 = f^6
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -56)  // [rbp-56] = f^6
 
     // term4 = f^6 / 7
-    let load_seventh_pos = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_seventh_pos + 4, seventh_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^6 * (1/7)
+    let load_seventh_pos = (*nc).code.len
+    nc_emit_movsd_xmm1_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, load_seventh_pos + 4, seventh_off)
+    nc_emit_mulsd_xmm0_xmm1(nc)          // xmm0 = f^6 * (1/7)
 
     // + f^4 / 5
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -40)  // save partial to [rbp-40]
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)  // xmm0 = f^4
-    let load_fifth_pos = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_fifth_pos + 4, fifth_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^4 * (1/5)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)  // xmm1 = f^6/7
-    c.code = emit_addsd_xmm0_xmm1(c.code)          // xmm0 = f^4/5 + f^6/7
+    nc_emit_movsd_rbp_disp8_xmm1(nc, -40)  // save partial to [rbp-40]
+    nc_emit_movsd_xmm0_rbp_disp8(nc, -48)  // xmm0 = f^4
+    let load_fifth_pos = (*nc).code.len
+    nc_emit_movsd_xmm1_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, load_fifth_pos + 4, fifth_off)
+    nc_emit_mulsd_xmm0_xmm1(nc)          // xmm0 = f^4 * (1/5)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -40)  // xmm1 = f^6/7
+    nc_emit_addsd_xmm0_xmm1(nc)          // xmm0 = f^4/5 + f^6/7
 
     // + f^2 / 3
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)  // save partial
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -32)  // xmm0 = f^2
-    let load_third_pos = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_third_pos + 4, third_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^2 * (1/3)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)  // xmm1 = f^4/5 + f^6/7
-    c.code = emit_addsd_xmm0_xmm1(c.code)          // xmm0 = f^2/3 + f^4/5 + f^6/7
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -40)  // save partial
+    nc_emit_movsd_xmm0_rbp_disp8(nc, -32)  // xmm0 = f^2
+    let load_third_pos = (*nc).code.len
+    nc_emit_movsd_xmm1_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, load_third_pos + 4, third_off)
+    nc_emit_mulsd_xmm0_xmm1(nc)          // xmm0 = f^2 * (1/3)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -40)  // xmm1 = f^4/5 + f^6/7
+    nc_emit_addsd_xmm0_xmm1(nc)          // xmm0 = f^2/3 + f^4/5 + f^6/7
 
     // + 1.0
-    let load_one3_pos = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_one3_pos + 4, one_off)
-    c.code = emit_addsd_xmm0_xmm1(c.code)          // xmm0 = 1 + f^2/3 + f^4/5 + f^6/7
+    let load_one3_pos = (*nc).code.len
+    nc_emit_movsd_xmm1_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, load_one3_pos + 4, one_off)
+    nc_emit_addsd_xmm0_xmm1(nc)          // xmm0 = 1 + f^2/3 + f^4/5 + f^6/7
 
     // * 2 * f
-    let load_two_pos = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_two_pos + 4, two_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 *= 2
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)  // xmm1 = f
-    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = log(m)
+    let load_two_pos = (*nc).code.len
+    nc_emit_movsd_xmm1_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, load_two_pos + 4, two_off)
+    nc_emit_mulsd_xmm0_xmm1(nc)          // xmm0 *= 2
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -24)  // xmm1 = f
+    nc_emit_mulsd_xmm0_xmm1(nc)          // xmm0 = log(m)
 
     // Step 6: result = e * ln(2) + log(m)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)  // [rbp-40] = log(m)
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -16)  // xmm0 = e_f64
-    let load_ln2_pos = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_ln2_pos + 4, ln2_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = e * ln(2)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)  // xmm1 = log(m)
-    c.code = emit_addsd_xmm0_xmm1(c.code)          // xmm0 = e*ln2 + log(m)
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -40)  // [rbp-40] = log(m)
+    nc_emit_movsd_xmm0_rbp_disp8(nc, -16)  // xmm0 = e_f64
+    let load_ln2_pos = (*nc).code.len
+    nc_emit_movsd_xmm1_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, load_ln2_pos + 4, ln2_off)
+    nc_emit_mulsd_xmm0_xmm1(nc)          // xmm0 = e * ln(2)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -40)  // xmm1 = log(m)
+    nc_emit_addsd_xmm0_xmm1(nc)          // xmm0 = e*ln2 + log(m)
 
     // Return as bit pattern in rax
-    c.code = emit_movq_rax_xmm0(c.code)
-    c.code = emit_add_rsp_imm32(c.code, 64)
-    c.code = emit_pop_rbp(c.code)
-    c.code = emit_ret(c.code)
-    c
+    nc_emit_movq_rax_xmm0(nc)
+    nc_emit_add_rsp_imm32(nc, 64)
+    nc_emit_pop_rbp(nc)
+    nc_emit_ret(nc)
 }
 
 
@@ -4845,7 +4851,10 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
         emit_builtin_exp_into(&! c)
         return c
     }
-    if name_is_log(func.name) { return emit_builtin_log(c) }
+    if name_is_log(func.name) {
+        emit_builtin_log_into(&! c)
+        return c
+    }
     if name_is_sin(func.name) {
         emit_builtin_sin_into(&! c)
         return c
@@ -5620,7 +5629,7 @@ fn native_v2_emit_builtin_float_base_by_id_into(nc: &! NativeCompiler, builtin_i
 
 fn native_v2_emit_builtin_float_exp_log_by_id_into(nc: &! NativeCompiler, builtin_id: i64) with Mut, Panic, Div {
     if builtin_id == 16 { emit_builtin_exp_into(nc); return }
-    if builtin_id == 17 { (*nc) = emit_builtin_log((*nc)); return }
+    if builtin_id == 17 { emit_builtin_log_into(nc); return }
 }
 
 fn native_v2_emit_builtin_float_trig_by_id_into(nc: &! NativeCompiler, builtin_id: i64) with Mut, Panic, Div {
