@@ -1660,8 +1660,109 @@ fn nc_add_rodata_reloc(nc: &! NativeCompiler, patch_offset: i64, rodata_offset: 
     nc_add_flat_reloc(nc, patch_offset, 2, 0, rodata_offset)
 }
 
+fn nc_add_rip_reloc(nc: &! NativeCompiler, patch_offset: i64, rodata_offset: i64) with Mut, Panic, Div {
+    let idx = (*nc).relocs.count
+    if idx >= 0 && idx < 256 {
+        (*nc).relocs.entries[idx as usize] = Relocation {
+            offset: patch_offset,
+            target: reloc_target_data(rodata_offset),
+            kind: reloc_rip_rel32(),
+            flat_kind_code: 2,
+            flat_is_function: 0,
+            flat_target_index: rodata_offset,
+        }
+        (*nc).relocs.count = idx + 1
+    }
+}
+
 fn nc_add_data_section_reloc(nc: &! NativeCompiler, patch_offset: i64, data_offset: i64) with Mut, Panic, Div {
     nc_add_flat_reloc(nc, patch_offset, 3, 0, data_offset)
+}
+
+fn nc_emit_movsd_xmm1_rip_disp32(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2)
+    nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x10)
+    nc_emit_byte(nc, 0x0D)
+    nc_emit_u32_le(nc, disp)
+}
+
+fn nc_emit_movsd_xmm0_rip_disp32(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2)
+    nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x10)
+    nc_emit_byte(nc, 0x05)
+    nc_emit_u32_le(nc, disp)
+}
+
+fn nc_emit_movq_xmm0_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x66)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x6E)
+    nc_emit_byte(nc, 0xC0)
+}
+
+fn nc_emit_movq_rax_xmm0(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x66)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x7E)
+    nc_emit_byte(nc, 0xC0)
+}
+
+fn nc_emit_subsd_xmm0_xmm1(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2)
+    nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x5C)
+    nc_emit_byte(nc, 0xC1)
+}
+
+fn nc_emit_mulsd_xmm0_xmm1(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2)
+    nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x59)
+    nc_emit_byte(nc, 0xC1)
+}
+
+fn nc_emit_cvtsi2sd_xmm0_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x2A)
+    nc_emit_byte(nc, 0xC0)
+}
+
+fn nc_emit_cvtsd2si_rax_xmm0(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x2D)
+    nc_emit_byte(nc, 0xC0)
+}
+
+fn nc_emit_movsd_rbp_disp8_xmm0(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2)
+    nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x11)
+    nc_emit_byte(nc, 0x45)
+    nc_emit_byte(nc, low8(disp))
+}
+
+fn nc_emit_movsd_xmm0_rbp_disp8(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2)
+    nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x10)
+    nc_emit_byte(nc, 0x45)
+    nc_emit_byte(nc, low8(disp))
+}
+
+fn nc_emit_movsd_xmm1_rbp_disp8(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xF2)
+    nc_emit_byte(nc, 0x0F)
+    nc_emit_byte(nc, 0x10)
+    nc_emit_byte(nc, 0x4D)
+    nc_emit_byte(nc, low8(disp))
 }
 
 fn nc_emit_mov_rax_r15(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -4069,191 +4170,185 @@ pub fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, D
 // Algorithm: sin(x) ≈ x(1 - x²(1/6 - x²(1/120 - x²/5040)))
 // Range reduction: n = round(x/(2π)), r = x - n*2π
 // Stack layout: [rbp-8]=r, [rbp-16]=r², [rbp-24]=scratch
-pub fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-
+pub fn emit_builtin_sin_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     // .rodata constants
-    c.rodata = data_section_add_f64(c.rodata, 0x401921FB54442D18)   // 2π
-    let two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FC45F306DC9C883)   // 1/(2π)
-    let inv_two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // 1.0
-    let one_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FC5555555555555)   // 1/6
-    let c3_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3F81111111111111)   // 1/120
-    let c5_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3F2A01A01A01A01A)   // 1/5040
-    let c7_off = c.rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x401921FB54442D18)   // 2π
+    let two_pi_off = (*nc).rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3FC45F306DC9C883)   // 1/(2π)
+    let inv_two_pi_off = (*nc).rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3FF0000000000000)   // 1.0
+    let one_off = (*nc).rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3FC5555555555555)   // 1/6
+    let c3_off = (*nc).rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3F81111111111111)   // 1/120
+    let c5_off = (*nc).rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3F2A01A01A01A01A)   // 1/5040
+    let c7_off = (*nc).rodata.last_offset
 
-    c.code = emit_push_rbp(c.code)
-    c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 48)
+    nc_emit_push_rbp(nc)
+    nc_emit_mov_rbp_rsp(nc)
+    nc_emit_sub_rsp_imm32(nc, 48)
 
     // rdi = f64 bit pattern of x
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
-    c.code = emit_movq_xmm0_rax(c.code)               // xmm0 = x
+    nc_emit_mov_reg_reg(nc, 0, 7)           // mov rax, rdi
+    nc_emit_movq_xmm0_rax(nc)               // xmm0 = x
 
     // Step 1: Range reduction — n = round(x/(2π)), r = x - n*2π
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = x (save)
-    let sin_inv2pi = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_inv2pi + 4, inv_two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x/(2π)
-    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x/(2π))
-    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = n (as f64)
-    let sin_2pi = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_2pi + 4, two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n*2π
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -24)   // [rbp-24] = x (save)
+    let sin_inv2pi = (*nc).code.len
+    nc_emit_movsd_xmm1_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, sin_inv2pi + 4, inv_two_pi_off)
+    nc_emit_mulsd_xmm0_xmm1(nc)             // xmm0 = x/(2π)
+    nc_emit_cvtsd2si_rax_xmm0(nc)           // rax = round(x/(2π))
+    nc_emit_cvtsi2sd_xmm0_rax(nc)           // xmm0 = n (as f64)
+    let sin_2pi = (*nc).code.len
+    nc_emit_movsd_xmm1_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, sin_2pi + 4, two_pi_off)
+    nc_emit_mulsd_xmm0_xmm1(nc)             // xmm0 = n*2π
     // r = x - n*2π
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n*2π
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // xmm0 = x
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = n*2π
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = r = x - n*2π
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -32)   // [rbp-32] = n*2π
+    nc_emit_movsd_xmm0_rbp_disp8(nc, -24)   // xmm0 = x
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -32)   // xmm1 = n*2π
+    nc_emit_subsd_xmm0_xmm1(nc)             // xmm0 = r = x - n*2π
 
     // Store r and compute r²
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)    // [rbp-8] = r
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = r (copy for mul)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r²
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -8)    // [rbp-8] = r
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -24)   // [rbp-24] = r (copy for mul)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -24)   // xmm1 = r
+    nc_emit_mulsd_xmm0_xmm1(nc)             // xmm0 = r²
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -16)   // [rbp-16] = r²
 
     // Step 2: Horner — sin(x) = r * (1 - r²(1/6 - r²(1/120 - r²*1/5040)))
     // Innermost: s = 1/5040
-    let sin_c7 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c7 + 4, c7_off)
+    let sin_c7 = (*nc).code.len
+    nc_emit_movsd_xmm0_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, sin_c7 + 4, c7_off)
     // s = 1/120 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/5040
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_c5 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c5 + 4, c5_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²/5040
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/120 - r²/5040
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -16)   // xmm1 = r²
+    nc_emit_mulsd_xmm0_xmm1(nc)             // xmm0 = r²/5040
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -24)   // save
+    let sin_c5 = (*nc).code.len
+    nc_emit_movsd_xmm0_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, sin_c5 + 4, c5_off)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -24)   // xmm1 = r²/5040
+    nc_emit_subsd_xmm0_xmm1(nc)             // xmm0 = 1/120 - r²/5040
     // s = 1/6 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/120 - r²/5040)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_c3 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c3 + 4, c3_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/6 - r²*(...)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -16)   // xmm1 = r²
+    nc_emit_mulsd_xmm0_xmm1(nc)             // xmm0 = r²*(1/120 - r²/5040)
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -24)   // save
+    let sin_c3 = (*nc).code.len
+    nc_emit_movsd_xmm0_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, sin_c3 + 4, c3_off)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -24)   // xmm1 = r²*(...)
+    nc_emit_subsd_xmm0_xmm1(nc)             // xmm0 = 1/6 - r²*(...)
     // s = 1 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/6 - ...)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_one = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_one + 4, one_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1 - r²*(...)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -16)   // xmm1 = r²
+    nc_emit_mulsd_xmm0_xmm1(nc)             // xmm0 = r²*(1/6 - ...)
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -24)   // save
+    let sin_one = (*nc).code.len
+    nc_emit_movsd_xmm0_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, sin_one + 4, one_off)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -24)   // xmm1 = r²*(...)
+    nc_emit_subsd_xmm0_xmm1(nc)             // xmm0 = 1 - r²*(...)
     // result = r * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)    // xmm1 = r
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = sin(x)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -8)    // xmm1 = r
+    nc_emit_mulsd_xmm0_xmm1(nc)             // xmm0 = sin(x)
 
     // Return as bit pattern in rax
-    c.code = emit_movq_rax_xmm0(c.code)
-    c.code = emit_add_rsp_imm32(c.code, 48)
-    c.code = emit_pop_rbp(c.code)
-    c.code = emit_ret(c.code)
-    c
+    nc_emit_movq_rax_xmm0(nc)
+    nc_emit_add_rsp_imm32(nc, 48)
+    nc_emit_pop_rbp(nc)
+    nc_emit_ret(nc)
 }
 
 // Sprint 121: cos builtin — range reduction + degree-6 minimax polynomial
 // Algorithm: cos(x) ≈ 1 - x²(1/2 - x²(1/24 - x²/720))
 // Same range reduction as sin, same stack layout
-pub fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-
+pub fn emit_builtin_cos_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     // .rodata constants
-    c.rodata = data_section_add_f64(c.rodata, 0x401921FB54442D18)   // 2π
-    let cos_two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FC45F306DC9C883)   // 1/(2π)
-    let cos_inv_two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // 1.0
-    let cos_one_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000)   // 1/2
-    let cos_c2_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FA5555555555555)   // 1/24
-    let cos_c4_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3F56C16C16C16C17)   // 1/720
-    let cos_c6_off = c.rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x401921FB54442D18)   // 2π
+    let cos_two_pi_off = (*nc).rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3FC45F306DC9C883)   // 1/(2π)
+    let cos_inv_two_pi_off = (*nc).rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3FF0000000000000)   // 1.0
+    let cos_one_off = (*nc).rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3FE0000000000000)   // 1/2
+    let cos_c2_off = (*nc).rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3FA5555555555555)   // 1/24
+    let cos_c4_off = (*nc).rodata.last_offset
+    (*nc).rodata = data_section_add_f64((*nc).rodata, 0x3F56C16C16C16C17)   // 1/720
+    let cos_c6_off = (*nc).rodata.last_offset
 
-    c.code = emit_push_rbp(c.code)
-    c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 48)
+    nc_emit_push_rbp(nc)
+    nc_emit_mov_rbp_rsp(nc)
+    nc_emit_sub_rsp_imm32(nc, 48)
 
     // rdi = f64 bit pattern of x
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
-    c.code = emit_movq_xmm0_rax(c.code)               // xmm0 = x
+    nc_emit_mov_reg_reg(nc, 0, 7)           // mov rax, rdi
+    nc_emit_movq_xmm0_rax(nc)               // xmm0 = x
 
     // Step 1: Range reduction (same as sin)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = x
-    let cos_inv2pi = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_inv2pi + 4, cos_inv_two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x/(2π)
-    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x/(2π))
-    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = n
-    let cos_2pi = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_2pi + 4, cos_two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n*2π
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n*2π
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // xmm0 = x
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = n*2π
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = r
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -24)   // [rbp-24] = x
+    let cos_inv2pi = (*nc).code.len
+    nc_emit_movsd_xmm1_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, cos_inv2pi + 4, cos_inv_two_pi_off)
+    nc_emit_mulsd_xmm0_xmm1(nc)             // xmm0 = x/(2π)
+    nc_emit_cvtsd2si_rax_xmm0(nc)           // rax = round(x/(2π))
+    nc_emit_cvtsi2sd_xmm0_rax(nc)           // xmm0 = n
+    let cos_2pi = (*nc).code.len
+    nc_emit_movsd_xmm1_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, cos_2pi + 4, cos_two_pi_off)
+    nc_emit_mulsd_xmm0_xmm1(nc)             // xmm0 = n*2π
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -32)   // [rbp-32] = n*2π
+    nc_emit_movsd_xmm0_rbp_disp8(nc, -24)   // xmm0 = x
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -32)   // xmm1 = n*2π
+    nc_emit_subsd_xmm0_xmm1(nc)             // xmm0 = r
 
     // Compute r²
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)    // [rbp-8] = r
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // copy for mul
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r²
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -8)    // [rbp-8] = r
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -24)   // copy for mul
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -24)   // xmm1 = r
+    nc_emit_mulsd_xmm0_xmm1(nc)             // xmm0 = r²
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -16)   // [rbp-16] = r²
 
     // Step 2: Horner — cos(x) = 1 - r²(1/2 - r²(1/24 - r²/720))
     // Innermost: s = 1/720
-    let cos_c6 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c6 + 4, cos_c6_off)
+    let cos_c6 = (*nc).code.len
+    nc_emit_movsd_xmm0_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, cos_c6 + 4, cos_c6_off)
     // s = 1/24 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/720
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c4 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c4 + 4, cos_c4_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/24 - r²/720
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -16)   // xmm1 = r²
+    nc_emit_mulsd_xmm0_xmm1(nc)             // xmm0 = r²/720
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -24)   // save
+    let cos_c4 = (*nc).code.len
+    nc_emit_movsd_xmm0_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, cos_c4 + 4, cos_c4_off)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -24)
+    nc_emit_subsd_xmm0_xmm1(nc)             // xmm0 = 1/24 - r²/720
     // s = 1/2 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/24 - r²/720)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c2 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c2 + 4, cos_c2_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/2 - r²*(...)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -16)   // xmm1 = r²
+    nc_emit_mulsd_xmm0_xmm1(nc)             // xmm0 = r²*(1/24 - r²/720)
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -24)   // save
+    let cos_c2 = (*nc).code.len
+    nc_emit_movsd_xmm0_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, cos_c2 + 4, cos_c2_off)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -24)
+    nc_emit_subsd_xmm0_xmm1(nc)             // xmm0 = 1/2 - r²*(...)
     // result = 1 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/2 - ...)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_one = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_one + 4, cos_one_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = cos(x)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -16)   // xmm1 = r²
+    nc_emit_mulsd_xmm0_xmm1(nc)             // xmm0 = r²*(1/2 - ...)
+    nc_emit_movsd_rbp_disp8_xmm0(nc, -24)   // save
+    let cos_one = (*nc).code.len
+    nc_emit_movsd_xmm0_rip_disp32(nc, 0)
+    nc_add_rip_reloc(nc, cos_one + 4, cos_one_off)
+    nc_emit_movsd_xmm1_rbp_disp8(nc, -24)
+    nc_emit_subsd_xmm0_xmm1(nc)             // xmm0 = cos(x)
 
     // Return as bit pattern in rax
-    c.code = emit_movq_rax_xmm0(c.code)
-    c.code = emit_add_rsp_imm32(c.code, 48)
-    c.code = emit_pop_rbp(c.code)
-    c.code = emit_ret(c.code)
-    c
+    nc_emit_movq_rax_xmm0(nc)
+    nc_emit_add_rsp_imm32(nc, 48)
+    nc_emit_pop_rbp(nc)
+    nc_emit_ret(nc)
 }
 
 // Sprint 118: print_f64 builtin — multiply-and-truncate f64 → stdout
@@ -4721,8 +4816,14 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
     if name_is_exp(func.name) { return emit_builtin_exp(c) }
     if name_is_log(func.name) { return emit_builtin_log(c) }
-    if name_is_sin(func.name) { return emit_builtin_sin(c) }
-    if name_is_cos(func.name) { return emit_builtin_cos(c) }
+    if name_is_sin(func.name) {
+        emit_builtin_sin_into(&! c)
+        return c
+    }
+    if name_is_cos(func.name) {
+        emit_builtin_cos_into(&! c)
+        return c
+    }
 
     // Sprint 38: Set compile strategy from IR function metadata
     c.current_strategy = func.compile_strategy
@@ -5493,8 +5594,8 @@ fn native_v2_emit_builtin_float_exp_log_by_id_into(nc: &! NativeCompiler, builti
 }
 
 fn native_v2_emit_builtin_float_trig_by_id_into(nc: &! NativeCompiler, builtin_id: i64) with Mut, Panic, Div {
-    if builtin_id == 18 { (*nc) = emit_builtin_sin((*nc)); return }
-    if builtin_id == 19 { (*nc) = emit_builtin_cos((*nc)); return }
+    if builtin_id == 18 { emit_builtin_sin_into(nc); return }
+    if builtin_id == 19 { emit_builtin_cos_into(nc); return }
 }
 
 fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) with Mut, Panic, Div {
@@ -5625,19 +5726,19 @@ fn nc_core_field_is_float(nc: &NativeCompiler, base_reg: i64, field_idx: i64) ->
 fn nc_emit_core_float_binop_into(nc: &! NativeCompiler, op: BinaryOp) -> bool with Mut, Panic, Div {
     if op == BinaryOp::OpAdd {
         (*nc).code = emit_addsd_xmm0_xmm1((*nc).code)
-        (*nc).code = emit_movq_rax_xmm0((*nc).code)
+        nc_emit_movq_rax_xmm0(nc)
         return true
     } else if op == BinaryOp::OpSub {
-        (*nc).code = emit_subsd_xmm0_xmm1((*nc).code)
-        (*nc).code = emit_movq_rax_xmm0((*nc).code)
+        nc_emit_subsd_xmm0_xmm1(nc)
+        nc_emit_movq_rax_xmm0(nc)
         return true
     } else if op == BinaryOp::OpMul {
-        (*nc).code = emit_mulsd_xmm0_xmm1((*nc).code)
-        (*nc).code = emit_movq_rax_xmm0((*nc).code)
+        nc_emit_mulsd_xmm0_xmm1(nc)
+        nc_emit_movq_rax_xmm0(nc)
         return true
     } else if op == BinaryOp::OpDiv {
         (*nc).code = emit_divsd_xmm0_xmm1((*nc).code)
-        (*nc).code = emit_movq_rax_xmm0((*nc).code)
+        nc_emit_movq_rax_xmm0(nc)
         return true
     } else if op == BinaryOp::OpEq {
         (*nc).code = emit_ucomisd_xmm0_xmm1((*nc).code)
@@ -5841,23 +5942,23 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
     if lhs_is_float == 1 || rhs_is_float == 1 {
         nc_core_load_temp_to_rax(nc, lhs)
         if lhs_is_float == 1 {
-            (*nc).code = emit_movq_xmm0_rax((*nc).code)
+            nc_emit_movq_xmm0_rax(nc)
         } else {
-            (*nc).code = emit_cvtsi2sd_xmm0_rax((*nc).code)
+            nc_emit_cvtsi2sd_xmm0_rax(nc)
         }
 
         nc_core_load_temp_to_rax(nc, rhs)
         if rhs_is_float == 1 {
             (*nc).code = emit_movq_xmm1_rax((*nc).code)
         } else {
-            (*nc).code = emit_cvtsi2sd_xmm0_rax((*nc).code)
-            (*nc).code = emit_movq_rax_xmm0((*nc).code)
+            nc_emit_cvtsi2sd_xmm0_rax(nc)
+            nc_emit_movq_rax_xmm0(nc)
             (*nc).code = emit_movq_xmm1_rax((*nc).code)
             nc_core_load_temp_to_rax(nc, lhs)
             if lhs_is_float == 1 {
-                (*nc).code = emit_movq_xmm0_rax((*nc).code)
+                nc_emit_movq_xmm0_rax(nc)
             } else {
-                (*nc).code = emit_cvtsi2sd_xmm0_rax((*nc).code)
+                nc_emit_cvtsi2sd_xmm0_rax(nc)
             }
         }
 
@@ -6149,13 +6250,13 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
         } else if instr_op == IrOpcode::IrIntToFloat {
             nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
-            (*nc).code = emit_cvtsi2sd_xmm0_rax((*nc).code)
-            (*nc).code = emit_movq_rax_xmm0((*nc).code)
+            nc_emit_cvtsi2sd_xmm0_rax(nc)
+            nc_emit_movq_rax_xmm0(nc)
             nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
             nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
         } else if instr_op == IrOpcode::IrFloatToInt {
             nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
-            (*nc).code = emit_movq_xmm0_rax((*nc).code)
+            nc_emit_movq_xmm0_rax(nc)
             (*nc).code = emit_cvttsd2si_rax_xmm0((*nc).code)
             nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
             nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
