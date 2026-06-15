@@ -688,15 +688,15 @@ fn hlir_gpu_create_shadow(s: HlirToGpuState, blk: GpuBlockEntry, main_val: i64, 
 
     // Emit epsilon initialiser: eps = 0.0f
     let eps_init = gpu_op_imm_f(GpuOpcodeConst, GpuTypeF32, eps_val, 0.0 as f32)
-    b = gpu_block_add_op(b, eps_init)
+    gpu_block_add_op_ref(&! b, eps_init)
 
     // Emit valid initialiser: valid = 1 (true)
     let valid_init = gpu_op_imm_i(GpuOpcodeConst, GpuTypeBool, valid_val, 1)
-    b = gpu_block_add_op(b, valid_init)
+    gpu_block_add_op_ref(&! b, valid_init)
 
     // Emit prov initialiser: prov = 0
     let prov_init = gpu_op_imm_i(GpuOpcodeConst, GpuTypeI64, prov_val, 0)
-    b = gpu_block_add_op(b, prov_init)
+    gpu_block_add_op_ref(&! b, prov_init)
 
     // Record shadow
     if st.shadow_count < 8192 {
@@ -715,12 +715,9 @@ fn hlir_gpu_create_shadow(s: HlirToGpuState, blk: GpuBlockEntry, main_val: i64, 
 }
 
 // Emit quadrature uncertainty propagation for add/sub: eps_c = sqrt(eps_a^2 + eps_b^2)
-fn hlir_gpu_emit_shadow_add(s: HlirToGpuState, blk: GpuBlockEntry, result: i64, lhs: i64, rhs: i64) -> (HlirToGpuState, GpuBlockEntry) with Mut, Panic {
-    var st = s
-    var b = blk
-
-    let lhs_idx = hlir_gpu_find_shadow(st, lhs)
-    let rhs_idx = hlir_gpu_find_shadow(st, rhs)
+fn hlir_gpu_emit_shadow_add_ref(s: &! HlirToGpuState, blk: &! GpuBlockEntry, result: i64, lhs: i64, rhs: i64) with Mut, Panic {
+    let lhs_idx = hlir_gpu_find_shadow_ref(s, lhs)
+    let rhs_idx = hlir_gpu_find_shadow_ref(s, rhs)
 
     // Get shadow register IDs (fallback to -1 treated as 0 uncertainty)
     var eps_l: i64 = -1
@@ -731,68 +728,49 @@ fn hlir_gpu_emit_shadow_add(s: HlirToGpuState, blk: GpuBlockEntry, result: i64, 
     var prov_r: i64 = -1
 
     if lhs_idx >= 0 {
-        eps_l = st.epistemic_shadows[lhs_idx as usize].eps_value
-        valid_l = st.epistemic_shadows[lhs_idx as usize].valid_value
-        prov_l = st.epistemic_shadows[lhs_idx as usize].prov_value
+        eps_l = (*s).epistemic_shadows[lhs_idx as usize].eps_value
+        valid_l = (*s).epistemic_shadows[lhs_idx as usize].valid_value
+        prov_l = (*s).epistemic_shadows[lhs_idx as usize].prov_value
     }
     if rhs_idx >= 0 {
-        eps_r = st.epistemic_shadows[rhs_idx as usize].eps_value
-        valid_r = st.epistemic_shadows[rhs_idx as usize].valid_value
-        prov_r = st.epistemic_shadows[rhs_idx as usize].prov_value
+        eps_r = (*s).epistemic_shadows[rhs_idx as usize].eps_value
+        valid_r = (*s).epistemic_shadows[rhs_idx as usize].valid_value
+        prov_r = (*s).epistemic_shadows[rhs_idx as usize].prov_value
     }
 
     // Alloc temporaries
-    let sq_l_r = hlir_gpu_alloc_value(st)
-    st = sq_l_r.0
-    let sq_l = sq_l_r.1
-
-    let sq_r_r = hlir_gpu_alloc_value(st)
-    st = sq_r_r.0
-    let sq_r = sq_r_r.1
-
-    let sum_r = hlir_gpu_alloc_value(st)
-    st = sum_r.0
-    let sum = sum_r.1
-
-    let eps_res_r = hlir_gpu_alloc_value(st)
-    st = eps_res_r.0
-    let eps_res = eps_res_r.1
-
-    let valid_res_r = hlir_gpu_alloc_value(st)
-    st = valid_res_r.0
-    let valid_res = valid_res_r.1
-
-    let prov_res_r = hlir_gpu_alloc_value(st)
-    st = prov_res_r.0
-    let prov_res = prov_res_r.1
+    let sq_l = hlir_gpu_alloc_value_ref(s)
+    let sq_r = hlir_gpu_alloc_value_ref(s)
+    let sum = hlir_gpu_alloc_value_ref(s)
+    let eps_res = hlir_gpu_alloc_value_ref(s)
+    let valid_res = hlir_gpu_alloc_value_ref(s)
+    let prov_res = hlir_gpu_alloc_value_ref(s)
 
     // sq_l = eps_l * eps_l
-    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, GpuTypeF32, sq_l, eps_l, eps_l, -1))
+    gpu_block_add_op_ref(blk, gpu_op_make(GpuOpcodeMul, GpuTypeF32, sq_l, eps_l, eps_l, -1))
     // sq_r = eps_r * eps_r
-    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, GpuTypeF32, sq_r, eps_r, eps_r, -1))
+    gpu_block_add_op_ref(blk, gpu_op_make(GpuOpcodeMul, GpuTypeF32, sq_r, eps_r, eps_r, -1))
     // sum = sq_l + sq_r
-    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, GpuTypeF32, sum, sq_l, sq_r, -1))
+    gpu_block_add_op_ref(blk, gpu_op_make(GpuOpcodeAdd, GpuTypeF32, sum, sq_l, sq_r, -1))
     // eps_res = sqrt(sum)
-    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSqrt, GpuTypeF32, eps_res, sum, -1, -1))
+    gpu_block_add_op_ref(blk, gpu_op_make(GpuOpcodeSqrt, GpuTypeF32, eps_res, sum, -1, -1))
     // valid_res = valid_l AND valid_r
-    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_res, valid_l, valid_r, -1))
+    gpu_block_add_op_ref(blk, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_res, valid_l, valid_r, -1))
     // prov_res = prov_l OR prov_r (monotonic union)
-    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeOr, GpuTypeI64, prov_res, prov_l, prov_r, -1))
+    gpu_block_add_op_ref(blk, gpu_op_make(GpuOpcodeOr, GpuTypeI64, prov_res, prov_l, prov_r, -1))
 
     // Record new shadow for result
-    if st.shadow_count < 8192 {
-        let idx = st.shadow_count as usize
-        st.epistemic_shadows[idx] = EpistemicShadowEntry {
+    if (*s).shadow_count < 8192 {
+        let idx = (*s).shadow_count as usize
+        (*s).epistemic_shadows[idx] = EpistemicShadowEntry {
             hlir_value: -1,
             gpu_value: result,
             eps_value: eps_res,
             valid_value: valid_res,
             prov_value: prov_res,
         }
-        st.shadow_count = st.shadow_count + 1
+        (*s).shadow_count = (*s).shadow_count + 1
     }
-
-    (st, b)
 }
 
 // Emit first-order uncertainty propagation for mul: eps_c = |lhs|*eps_rhs + |rhs|*eps_lhs
@@ -1044,172 +1022,164 @@ fn hlir_lower_instr(s: HlirToGpuState, blk: GpuBlockEntry, op_tag: i64, type_tag
     if op_tag == HlirOpConst {
         // Emit integer or float constant depending on type
         if type_tag == HLIR_TY_F32 {
-            b = gpu_block_add_op(b, gpu_op_imm_f(GpuOpcodeConst, gpu_type, g_dst, imm_f))
+            gpu_block_add_op_ref(&! b, gpu_op_imm_f(GpuOpcodeConst, gpu_type, g_dst, imm_f))
         } else {
-            b = gpu_block_add_op(b, gpu_op_imm_i(GpuOpcodeConst, gpu_type, g_dst, imm_i))
+            gpu_block_add_op_ref(&! b, gpu_op_imm_i(GpuOpcodeConst, gpu_type, g_dst, imm_i))
         }
     } else if op_tag == HlirOpAdd {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeAdd, gpu_type, g_dst, g_src0, g_src1, -1))
         if st.epistemic_enabled {
-            let ep = hlir_gpu_emit_shadow_add(st, b, g_dst, g_src0, g_src1)
-            st = ep.0
-            b = ep.1
+            hlir_gpu_emit_shadow_add_ref(&! st, &! b, g_dst, g_src0, g_src1)
         }
     } else if op_tag == HlirOpFAdd {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeAdd, gpu_type, g_dst, g_src0, g_src1, -1))
         if st.epistemic_enabled {
-            let ep = hlir_gpu_emit_shadow_add(st, b, g_dst, g_src0, g_src1)
-            st = ep.0
-            b = ep.1
+            hlir_gpu_emit_shadow_add_ref(&! st, &! b, g_dst, g_src0, g_src1)
         }
     } else if op_tag == HlirOpSub {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSub, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSub, gpu_type, g_dst, g_src0, g_src1, -1))
         if st.epistemic_enabled {
             // Subtraction: errors still add in quadrature
-            let ep = hlir_gpu_emit_shadow_add(st, b, g_dst, g_src0, g_src1)
-            st = ep.0
-            b = ep.1
+            hlir_gpu_emit_shadow_add_ref(&! st, &! b, g_dst, g_src0, g_src1)
         }
     } else if op_tag == HlirOpFSub {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSub, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSub, gpu_type, g_dst, g_src0, g_src1, -1))
         if st.epistemic_enabled {
-            let ep = hlir_gpu_emit_shadow_add(st, b, g_dst, g_src0, g_src1)
-            st = ep.0
-            b = ep.1
+            hlir_gpu_emit_shadow_add_ref(&! st, &! b, g_dst, g_src0, g_src1)
         }
     } else if op_tag == HlirOpMul {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeMul, gpu_type, g_dst, g_src0, g_src1, -1))
         if st.epistemic_enabled {
             hlir_gpu_emit_shadow_mul_ref(&! st, &! b, g_dst, g_src0, g_src1, -1, -1)
         }
     } else if op_tag == HlirOpFMul {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeMul, gpu_type, g_dst, g_src0, g_src1, -1))
         if st.epistemic_enabled {
             hlir_gpu_emit_shadow_mul_ref(&! st, &! b, g_dst, g_src0, g_src1, -1, -1)
         }
     } else if op_tag == HlirOpDiv {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeDiv, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeDiv, gpu_type, g_dst, g_src0, g_src1, -1))
         if st.epistemic_enabled {
             hlir_gpu_emit_shadow_div_ref(&! st, &! b, g_dst, g_src0, g_src1)
         }
     } else if op_tag == HlirOpFDiv {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeDiv, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeDiv, gpu_type, g_dst, g_src0, g_src1, -1))
         if st.epistemic_enabled {
             hlir_gpu_emit_shadow_div_ref(&! st, &! b, g_dst, g_src0, g_src1)
         }
     } else if op_tag == HlirOpNeg {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeNeg, gpu_type, g_dst, g_src0, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeNeg, gpu_type, g_dst, g_src0, -1, -1))
     } else if op_tag == HlirOpFNeg {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeNeg, gpu_type, g_dst, g_src0, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeNeg, gpu_type, g_dst, g_src0, -1, -1))
     } else if op_tag == HlirOpRem {
         // Integer remainder; no direct GPU atomic — lower as sub(a, mul(div(a,b),b))
         // Emit as placeholder GpuOpcodeSub with available operands for now
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSub, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSub, gpu_type, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpAnd {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeAnd, gpu_type, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpOr {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeOr, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeOr, gpu_type, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpXor {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeXor, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeXor, gpu_type, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpShl {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeShl, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeShl, gpu_type, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpShr {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeShr, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeShr, gpu_type, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpEq {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpEq, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSetpEq, GpuTypeBool, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpNe {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpNe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSetpNe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpLt {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpLt, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSetpLt, GpuTypeBool, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpLe {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpLe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSetpLe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpGt {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpGt, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSetpGt, GpuTypeBool, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpGe {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpGe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSetpGe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpFEq {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpEq, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSetpEq, GpuTypeBool, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpFNe {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpNe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSetpNe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpFLt {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpLt, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSetpLt, GpuTypeBool, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpFLe {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpLe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSetpLe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpFGt {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpGt, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSetpGt, GpuTypeBool, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpFGe {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpGe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeSetpGe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpLoad {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeLoadGlobal, gpu_type, g_dst, g_src0, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeLoadGlobal, gpu_type, g_dst, g_src0, -1, -1))
     } else if op_tag == HlirOpStore {
         // Store: dst has no meaningful value — emit with dst_idx = -1
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeStoreGlobal, gpu_type, -1, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeStoreGlobal, gpu_type, -1, g_src0, g_src1, -1))
     } else if op_tag == HlirOpAlloca {
         // Local allocation: emit placeholder const 0 (address materialised by backend)
-        b = gpu_block_add_op(b, gpu_op_imm_i(GpuOpcodeConst, GpuTypePtr, g_dst, 0))
+        gpu_block_add_op_ref(&! b, gpu_op_imm_i(GpuOpcodeConst, GpuTypePtr, g_dst, 0))
     } else if op_tag == HlirOpGEP {
         // GetElementPtr: base + offset
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, GpuTypePtr, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeAdd, GpuTypePtr, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpCall {
         // Call cannot be lowered here (needs symbol name lookup in a later pass)
-        b = gpu_block_add_op(b, gpu_op_imm_i(GpuOpcodeConst, gpu_type, g_dst, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_imm_i(GpuOpcodeConst, gpu_type, g_dst, -1))
     } else if op_tag == HlirOpPhi {
         // Phi nodes: resolved by block structure — emit identity add(src0, 0) as placeholder
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, gpu_type, g_dst, g_src0, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeAdd, gpu_type, g_dst, g_src0, -1, -1))
     } else if op_tag == HlirOpSExt {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
     } else if op_tag == HlirOpZExt {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
     } else if op_tag == HlirOpTrunc {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
     } else if op_tag == HlirOpFpExt {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
     } else if op_tag == HlirOpFpTrunc {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
     } else if op_tag == HlirOpBitcast {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
     } else if op_tag == HlirOpSIToFP {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
     } else if op_tag == HlirOpFPToSI {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
     } else if op_tag == HlirOpSelect {
         // selp dst, src0, src1, pred_cond
         let op = gpu_op_make(GpuOpcodeSelp, gpu_type, g_dst, g_src0, g_src1, -1)
-        b = gpu_block_add_op(b, gpu_op_pred(op, g_src2))
+        gpu_block_add_op_ref(&! b, gpu_op_pred(op, g_src2))
     } else if op_tag == HlirOpFMA {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeFma, gpu_type, g_dst, g_src0, g_src1, g_src2))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeFma, gpu_type, g_dst, g_src0, g_src1, g_src2))
         if st.epistemic_enabled {
             hlir_gpu_emit_shadow_fma_ref(&! st, &! b, g_dst, g_src0, g_src1, g_src2)
         }
     } else if op_tag == HlirOpGetThreadId {
         let op = gpu_op_make(GpuOpcodeGetTid, gpu_type, g_dst, -1, -1, -1)
-        b = gpu_block_add_op(b, gpu_op_axis(op, axis))
+        gpu_block_add_op_ref(&! b, gpu_op_axis(op, axis))
     } else if op_tag == HlirOpGetBlockId {
         let op = gpu_op_make(GpuOpcodeGetBid, gpu_type, g_dst, -1, -1, -1)
-        b = gpu_block_add_op(b, gpu_op_axis(op, axis))
+        gpu_block_add_op_ref(&! b, gpu_op_axis(op, axis))
     } else if op_tag == HlirOpGetBlockDim {
         let op = gpu_op_make(GpuOpcodeGetNtid, gpu_type, g_dst, -1, -1, -1)
-        b = gpu_block_add_op(b, gpu_op_axis(op, axis))
+        gpu_block_add_op_ref(&! b, gpu_op_axis(op, axis))
     } else if op_tag == HlirOpGetGridDim {
         // No direct GPU IR for grid dim in this IR version — emit placeholder 0
-        b = gpu_block_add_op(b, gpu_op_imm_i(GpuOpcodeConst, gpu_type, g_dst, 0))
+        gpu_block_add_op_ref(&! b, gpu_op_imm_i(GpuOpcodeConst, gpu_type, g_dst, 0))
     } else if op_tag == HlirOpAtomicAdd {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAtomicAdd, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeAtomicAdd, gpu_type, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpAtomicSub {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAtomicSub, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeAtomicSub, gpu_type, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpAtomicMin {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAtomicMin, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeAtomicMin, gpu_type, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpAtomicMax {
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAtomicMax, gpu_type, g_dst, g_src0, g_src1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeAtomicMax, gpu_type, g_dst, g_src0, g_src1, -1))
     } else if op_tag == HlirOpSyncThreads {
         // Barrier sync has no destination; emit with dst -1
-        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeBarrierSync, gpu_type, -1, -1, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_make(GpuOpcodeBarrierSync, gpu_type, -1, -1, -1, -1))
     } else if op_tag == HlirOpSyncWarp {
         // Warp-level barrier (mask = 0xFFFFFFFF)
-        b = gpu_block_add_op(b, gpu_op_imm_i(GpuOpcodeBarrierSync, gpu_type, -1, -1))
+        gpu_block_add_op_ref(&! b, gpu_op_imm_i(GpuOpcodeBarrierSync, gpu_type, -1, -1))
     } else {
         // Unknown op — emit a const 0 placeholder to keep value numbering consistent
-        b = gpu_block_add_op(b, gpu_op_imm_i(GpuOpcodeConst, gpu_type, g_dst, 0))
+        gpu_block_add_op_ref(&! b, gpu_op_imm_i(GpuOpcodeConst, gpu_type, g_dst, 0))
     }
 
     (st, b)
@@ -1250,7 +1220,7 @@ fn hlir_gpu_emit_param_load(s: HlirToGpuState, blk: GpuBlockEntry, param_idx: i6
     let dst = dst_result.1
 
     let op = gpu_op_imm_i(GpuOpcodeLoadParam, type_tag, dst, param_idx)
-    b = gpu_block_add_op(b, op)
+    gpu_block_add_op_ref(&! b, op)
 
     (st, b, dst)
 }
