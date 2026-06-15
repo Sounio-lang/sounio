@@ -373,18 +373,6 @@ pub struct CheckTupleElemsResult {
     elems: Option<Box<TypeEntryList>>,
 }
 
-pub struct CollectClosureParamsResult {
-    checker: Checker,
-    params: Option<Box<FnParamList>>,
-    count: i64,
-}
-
-pub struct CollectClosureParamListResult {
-    checker: Checker,
-    list: FnParamList,
-    count: i64,
-}
-
 // Result structs for check.sio batch C1 (converted from N-tuples)
 pub struct LowerFnTypeParamsResult {
     checker: Checker,
@@ -4940,6 +4928,10 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     (*c).fn_sigs = add_result.0
     let sig_id = add_result.1
     ty_fn(sig_id)
+}
+
+fn checker_check_closure_expr_ref(c: &! Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    checker_check_closure_expr_inplace(c as *mut Checker, e)
 }
 
 // *mut transcription of check_method_call_with_base_ty (15287). The by-value version copied the
@@ -16632,7 +16624,10 @@ impl Checker {
             ExprKind::ExprRange => c.check_range_expr(e)
             ExprKind::ExprCast => c.check_cast_expr(e)
             ExprKind::ExprHandle => c.check_handle_expr(e)
-            ExprKind::ExprClosure => c.check_closure_expr(e)
+            ExprKind::ExprClosure => {
+                let closure_ty = checker_check_closure_expr_ref(&! c, e)
+                (c, closure_ty)
+            }
             ExprKind::ExprContest => c.check_contest_expr_no_annotation(e)
             ExprKind::ExprAuditAttach => c.check_audit_attach_expr(e)
             ExprKind::ExprForIn => c.check_for_in_expr(e)
@@ -20415,196 +20410,6 @@ impl Checker {
         (c, body_ty)
     }
 
-    // --------------------------------------------------------
-    // Closure expression checking with effect inference
-    // --------------------------------------------------------
-
-    fn check_closure_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-        var c = self
-
-        // Convert closure params to FnParamList for signature
-        let params_result = c.collect_closure_params(e.closure_params)
-        c = params_result.checker
-        let params = params_result.params
-        let param_count = params_result.count
-
-        // Lower return type annotation (if present) or use unknown
-        let ret_pair = c.lower_opt_closure_return(e.closure_return)
-        c = ret_pair.0
-        let ret_ty = ret_pair.1
-
-        // Save current effects, clear for inference
-        let saved_effects = c.current_effects
-        let saved_effect_count = c.current_effect_count
-        c.current_effects = [0; 8]
-        c.current_effect_count = 0
-
-        // Push scope for parameters
-        c.env = c.env.push_scope()
-        c.borrows = c.borrows.push_scope()
-        c = c.push_const_scope()
-
-        // Bind closure params in environment
-        c = c.bind_closure_params(e.closure_params)
-
-        // Check body expression
-        let body_pair = c.check_opt_expr(e.closure_body)
-        c = body_pair.0
-        let body_ty = body_pair.1
-
-        // Infer return type from body if not annotated
-        let inferred_ret_ty = if ret_ty.kind == TypeKind::TyUnknown {
-            body_ty
-        } else {
-            ret_ty
-        }
-
-        // Check body type against return type if annotated
-        if ret_ty.kind != TypeKind::TyUnknown {
-            if !c.types_compatible_structural(body_ty, ret_ty) {
-                c = c.report_mismatch(e.span, 8, ret_ty, body_ty)
-            }
-        }
-
-        // Get inferred effects from current_effects
-        var inferred_effects = c.current_effects
-        var inferred_effect_count = c.current_effect_count
-
-        // Pop scope
-        c = c.pop_const_scope()
-        c.borrows = c.borrows.pop_scope()
-        c.env = c.env.pop_scope()
-
-        // Restore outer effects context
-        c.current_effects = saved_effects
-        c.current_effect_count = saved_effect_count
-
-        // Sprint 231: Capture analysis — scan outer scope for linear + epistemic
-        var capture_linear = false
-        var capture_linear_count: i64 = 0
-        var capture_epsilon: f64 = 0.0 - 1.0
-        // Conservative: scan all bindings in the outer scope (below closure params)
-        // The closure scope was pushed above; outer bindings are those with
-        // scope_depth < current closure scope depth.
-        var ci: i64 = 0
-        let env_count = c.env.count
-        while ci < env_count {
-            let binding = c.env.bindings[ci as usize]
-            let binding_ty = binding.ty
-            if c.is_linear_type(binding_ty) {
-                capture_linear = true
-                capture_linear_count = capture_linear_count + 1
-            }
-            if binding_ty.kind == TypeKind::TyKnowledge {
-                let eps = binding_ty.knowledge_epsilon
-                if eps >= 0.0 {
-                    if capture_epsilon < 0.0 {
-                        capture_epsilon = eps
-                    } else {
-                        capture_epsilon = capture_epsilon + eps
-                    }
-                }
-            }
-            ci = ci + 1
-        }
-        // Sprint 231: Auto-inject Epistemic effect if Knowledge values captured
-        if capture_epsilon >= 0.0 {
-            var has_epistemic = false
-            var ei: i64 = 0
-            while ei < inferred_effect_count {
-                if inferred_effects[ei] == 8 { has_epistemic = true }
-                ei = ei + 1
-            }
-            if !has_epistemic && inferred_effect_count < 8 {
-                inferred_effects[inferred_effect_count] = 8
-                inferred_effect_count = inferred_effect_count + 1
-            }
-        }
-        // Create FnSig with inferred effects + capture metadata
-        let closure_sig = FnSig {
-            name: Name { buf: [0; 128], len: 0 },  // Anonymous closure
-            params: params,
-            param_count: param_count,
-            return_type: inferred_ret_ty,
-            is_method: false,
-            self_type_name: Name { buf: [0; 128], len: 0 },
-            self_type_entry: ty_unit(),
-            effects: inferred_effects,
-            effect_count: inferred_effect_count,
-            is_kernel: false,
-            is_epistemic_kernel: false,
-            is_linear_closure: capture_linear,
-            linear_capture_count: capture_linear_count,
-            epistemic_epsilon: capture_epsilon,
-            visibility_kind: VISIBILITY_PRIVATE,
-            defining_module_seg_count: c.current_module.seg_count,
-            defining_module_id: c.current_module_id,
-            visibility: visibility_private(),
-            defining_module: c.current_module,
-        }
-
-        // Add to fn_sigs table
-        let add_result = c.fn_sigs.add(closure_sig)
-        c.fn_sigs = add_result.0
-        let sig_id = add_result.1
-
-        (c, ty_fn(sig_id))
-    }
-
-    fn collect_closure_params(self, opt: Option<Box<ClosureParamList> >) -> CollectClosureParamsResult with Mut, Panic, Div, Alloc, IO {
-        match opt {
-            Some(pl) => {
-                let pair = self.collect_closure_param_list(*pl)
-                CollectClosureParamsResult { checker: pair.checker, params: Some(Box::new(pair.list)), count: pair.count }
-            }
-            None => CollectClosureParamsResult { checker: self, params: None, count: 0 }
-        }
-    }
-
-    fn collect_closure_param_list(self, pl: ClosureParamList) -> CollectClosureParamListResult with Mut, Panic, Div, Alloc, IO {
-        let pair = self.lower_type_expr(pl.head.ty)
-        var c = pair.0
-        let head_ty = pair.1
-        let head_param = FnParamInfo { name: pl.head.name, ty: head_ty }
-        let head_list = FnParamList { head: head_param, tail: None }
-        match pl.tail {
-            None => CollectClosureParamListResult { checker: c, list: head_list, count: 1 }
-            Some(rest) => {
-                let rest_result = c.collect_closure_param_list(*rest)
-                c = rest_result.checker
-                let rest_list = rest_result.list
-                let rest_count = rest_result.count
-                CollectClosureParamListResult { checker: c, list: FnParamList { head: head_param, tail: Some(Box::new(rest_list)) }, count: 1 + rest_count }
-            }
-        }
-    }
-
-    fn bind_closure_params(self, opt: Option<Box<ClosureParamList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
-        match opt {
-            Some(pl) => {
-                var c = self.bind_closure_param((*pl).head)
-                c.bind_closure_params((*pl).tail)
-            }
-            None => self
-        }
-    }
-
-    fn bind_closure_param(self, p: ClosureParam) -> Checker with Mut, Panic, Div, Alloc, IO {
-        var c = self
-        let pair = c.lower_type_expr(p.ty)
-        c = pair.0
-        let param_ty = pair.1
-        c.env = c.env.bind(p.name, param_ty, false)
-        c = c.const_int_bind_unknown(p.name)
-        c
-    }
-
-    fn lower_opt_closure_return(self, opt: Option<Box<TypeExpr> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-        match opt {
-            Some(te) => self.lower_type_expr(*te)
-            None => (self, ty_unknown())
-        }
-    }
 }
 
 // ============================================================
