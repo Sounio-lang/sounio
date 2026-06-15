@@ -34,12 +34,15 @@
 //   (delta_pct is normalized by c_pbpk14, NOT the reference — so it is NOT
 //    used as the residual fraction; we recompute from the two C columns.)
 //
-// GUM WIRING (stdlib/epistemic/roi.sio):
+// EPISTEMIC RISK LEDGER WIRING (stdlib/epistemic/roi.sio):
 //   risk_model_form(source, residual_fraction) → ModelRisk
-//     risk_bits = log2(1 + residual_fraction)
+//     risk_bits = log2(1 + residual_fraction)   [information-theoretic risk/
+//     debt accounting, Contrib. 2 — NOT a GUM standard-uncertainty/variance]
 //   ledger_add_risk(ledger, risk) accumulates risk_total_bits.
-//   Two risk terms (one per aggregation method) are added to ONE ledger;
-//   risk_total_bits = bits(resid1) + bits(resid2).
+//   The two aggregation methods are alternative ESTIMATES of the SAME model-
+//   form discrepancy, so they are NOT summed (that double-counts one source);
+//   the ledger holds ONE term (conservative peak-window) and the two methods
+//   bracket its magnitude as a sensitivity range.
 //
 // Reference model: 28-compartment literature PBPK (truth)
 // Reduced model:   14-compartment perfusion-limited well-stirred PBPK
@@ -384,81 +387,83 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     println("")
 
     // ------------------------------------------------------------------
-    // GUM WIRING — BOTH methods into ONE epistemic ledger
+    // EPISTEMIC RISK LEDGER (roi.sio) — ONE model-form term.
+    // The two aggregation methods are alternative ESTIMATES of the SAME
+    // model-form discrepancy, so they MUST NOT be summed (that would
+    // double-count one source). The ledger holds a single model-form risk
+    // (the conservative peak-window estimate); the two methods BRACKET its
+    // value as a sensitivity range. NOTE: roi.sio risk bits = log2(1+r) is
+    // the project's information-theoretic risk/debt accounting (Contrib. 2),
+    // NOT a GUM standard-uncertainty (variance) — distinct budgets.
     // ------------------------------------------------------------------
+    let risk_auc = risk_model_form(1401, resid_auc)    // estimate A (full-AUC)
+    let risk_peak = risk_model_form(1402, resid_peak)  // estimate B (peak t<=6h, conservative)
     var ledger = ledger_new()
-    // source ids: 1401 = AUC-weighted model-form, 1402 = peak-window model-form
-    let risk_auc = risk_model_form(1401, resid_auc)
-    let risk_peak = risk_model_form(1402, resid_peak)
-    ledger = ledger_add_risk(ledger, risk_auc)
-    ledger = ledger_add_risk(ledger, risk_peak)
+    ledger = ledger_add_risk(ledger, risk_peak)        // ONE term, conservative
 
     // ------------------------------------------------------------------
-    // TEST 5: risk_total_bits > 0 and equals the sum of both terms
+    // TEST 5: the ledger carries exactly ONE model-form risk term (> 0),
+    // equal to the conservative peak-window estimate (no double-count).
     // ------------------------------------------------------------------
-    println("TEST 5: GUM budget risk_total_bits > 0 (both terms represented)")
-    print("  bits(Method 1, AUC)       = "); println(risk_auc.risk_bits)
-    print("  bits(Method 2, peak t<=6h) = "); println(risk_peak.risk_bits)
-    print("  risk_total_bits            = "); println(ledger.risk_total_bits)
-    print("  risk_count                 = "); println(ledger.risk_count as i64)
-    let sum_bits = risk_auc.risk_bits + risk_peak.risk_bits
-    let consistent = mf_abs(ledger.risk_total_bits - sum_bits) < 1.0e-9
-    if ledger.risk_total_bits > 0.0 && ledger.risk_count == 2 && consistent {
-        println("  [PASS] risk_total_bits > 0, 2 terms, equals bits1 + bits2")
+    println("TEST 5: risk ledger has ONE model-form term > 0 (no double-count)")
+    print("  ledger risk_total_bits     = "); println(ledger.risk_total_bits)
+    print("  ledger risk_count          = "); println(ledger.risk_count as i64)
+    let one_term = mf_abs(ledger.risk_total_bits - risk_peak.risk_bits) < 1.0e-9
+    if ledger.risk_total_bits > 0.0 && ledger.risk_count == 1 && one_term {
+        println("  [PASS] single model-form term, = conservative (peak-window) estimate")
         passed = passed + 1
     } else {
-        println("  [FAIL] risk budget inconsistent")
+        println("  [FAIL] ledger inconsistent")
         failed = failed + 1
     }
     println("")
 
     // ------------------------------------------------------------------
-    // TEST 6: Order-of-magnitude stability across aggregation choice.
-    // HONESTY: the *value* is NOT invariant — full-AUC residual (2.80) is
-    // ~2.8x the peak-window residual (1.00) because the 14/28-comp
-    // divergence grows at later times. What IS robust is the EXISTENCE and
-    // ORDER OF MAGNITUDE of the GUM term: both methods yield a strictly
-    // positive, same-order (~1-2 bit) model-form risk. We assert bits are
-    // within 3x (log2 compresses the 2.8x residual spread to ~1.9x in bits).
+    // TEST 6: the two aggregation methods BRACKET the model-form risk.
+    // HONESTY: the value is NOT invariant — the AUC residual (~2.80) is
+    // ~2.8x the peak-window residual (~1.00) because the 14/28 divergence
+    // grows at later times (and the full-AUC integral includes late times
+    // where the models extrapolate beyond the data-validated window). Only
+    // the EXISTENCE of a non-negligible model-form term is method-stable;
+    // its magnitude spans the bracket [peak, AUC] = [~1.0, ~1.9] bits.
     // ------------------------------------------------------------------
-    println("TEST 6: GUM term same order of magnitude across aggregation (bits within 3x)")
-    let bmax = if risk_auc.risk_bits > risk_peak.risk_bits { risk_auc.risk_bits } else { risk_peak.risk_bits }
-    let bmin = if risk_auc.risk_bits < risk_peak.risk_bits { risk_auc.risk_bits } else { risk_peak.risk_bits }
-    var ratio: f64 = 0.0
-    if bmin > 1.0e-12 { ratio = bmax / bmin }
-    print("  bits ratio (max/min) = "); println(ratio)
-    if bmin > 0.0 && ratio < 3.0 {
-        println("  [PASS] both aggregation methods yield the same-order GUM term")
-        println("  NOTE: residual fractions differ ~2.8x (2.80 vs 1.00); only the")
-        println("  existence and order of magnitude (1-2 bits) are aggregation-robust")
+    println("TEST 6: two aggregations bracket the model-form risk (range, not invariance)")
+    let bhi = if risk_auc.risk_bits > risk_peak.risk_bits { risk_auc.risk_bits } else { risk_peak.risk_bits }
+    let blo = if risk_auc.risk_bits < risk_peak.risk_bits { risk_auc.risk_bits } else { risk_peak.risk_bits }
+    print("  model-form risk bracket    = ["); print(blo); print(", "); print(bhi); println("] bits")
+    if blo > 0.0 && bhi > blo {
+        println("  [PASS] both methods give a strictly positive term; value spans the bracket")
+        println("  NOTE: residual fractions differ ~2.8x (~2.80 vs ~1.00); the magnitude is")
+        println("  aggregation-DEPENDENT — only the existence of the term is method-stable")
         passed = passed + 1
     } else {
-        println("  [FAIL] aggregation methods disagree by > 3x")
+        println("  [FAIL] bracket degenerate")
         failed = failed + 1
     }
     println("")
 
     // ------------------------------------------------------------------
-    // THESIS-CITABLE SUMMARY
+    // THESIS-CITABLE SUMMARY (report both as a bracket; do NOT sum)
     // ------------------------------------------------------------------
     println("======================================================================")
-    println("  THESIS NUMBERS (cite these):")
-    println("    Method 1  AUC-weighted residual fraction  = ")
+    println("  THESIS NUMBERS (report as a sensitivity bracket; do NOT sum):")
+    println("    Method A  AUC-weighted residual fraction  = ")
     println(resid_auc)
-    println("    Method 2  peak-window (t<=6h) residual    = ")
+    println("    Method B  peak-window (t<=6h) residual    = ")
     println(resid_peak)
-    println("    GUM model-form risk, bits (Method 1)      = ")
+    println("    model-form risk bits (Method A, full-AUC) = ")
     println(risk_auc.risk_bits)
-    println("    GUM model-form risk, bits (Method 2)      = ")
+    println("    model-form risk bits (Method B, peak win) = ")
     println(risk_peak.risk_bits)
-    println("    risk_total_bits (both terms)              = ")
+    println("    ledger term (one, conservative = Method B)= ")
     println(ledger.risk_total_bits)
     println("======================================================================")
     print("  Passed: "); println(passed)
     print("  Failed: "); println(failed)
     if failed == 0 {
-        println("  ALL TESTS PASSED — model-form GUM term is same order of magnitude")
-        println("  (1-2 bits) under both aggregations; value differs ~2.8x (see TEST 6)")
+        println("  ALL TESTS PASSED — ONE model-form risk term; the two aggregations")
+        println("  bracket its magnitude [~1.0, ~1.9] bits (NOT summed; value is")
+        println("  aggregation-dependent, only its existence is method-stable)")
     } else {
         println("  SOME TESTS FAILED")
     }
