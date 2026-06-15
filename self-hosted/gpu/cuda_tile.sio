@@ -123,6 +123,10 @@ fn tile_id_alloc_new() -> TileIdAlloc {
     TileIdAlloc { next_id: 0 }
 }
 
+fn tile_id_alloc_next_id(a: TileIdAlloc) -> i64 {
+    a.next_id
+}
+
 fn tile_alloc_id(a: TileIdAlloc) -> (TileIdAlloc, i64) {
     let id = a.next_id
     let next = TileIdAlloc { next_id: id + 1 }
@@ -635,7 +639,7 @@ fn gpu_lower_to_cuda_tile(
     // 3. Emit iota for thread offset (always needed for load/store patterns)
     let (b3, a3, iota_id) = tile_emit_iota(buf, alloc, 128)
     buf = b3
-    alloc = a3
+    alloc.next_id = tile_id_alloc_next_id(a3)
 
     // Allocate SSA IDs for parameters (these map to %param0, %param1, ...)
     // In Tile IR the params are already named, so we track them in the reg map
@@ -645,7 +649,7 @@ fn gpu_lower_to_cuda_tile(
     while pi < param_count {
         if pi < 8 {
             let (ap, pid) = tile_alloc_id(alloc)
-            alloc = ap
+            alloc.next_id = tile_id_alloc_next_id(ap)
             param_ids[pi as usize] = pid
             // Note: these IDs are "virtual" — in the emitted text they correspond
             // to %param0, %param1, etc. The reg map tracks the association.
@@ -667,7 +671,7 @@ fn gpu_lower_to_cuda_tile(
                 // Emit get_tile_block_id
                 let (b, a, bx, by, bz) = tile_emit_get_block_id(buf, alloc)
                 buf = b
-                alloc = a
+                alloc.next_id = tile_id_alloc_next_id(a)
                 rmap = tile_reg_map_set(rmap, dst, bx)
             } else if opcode == CT_GPU_OP_ADD {
                 let a_id = tile_reg_map_get(rmap, src_a)
@@ -675,12 +679,12 @@ fn gpu_lower_to_cuda_tile(
                 if tag == CT_TAG_I32 {
                     let (b, a, res) = tile_emit_addi(buf, alloc, a_id, b_id)
                     buf = b
-                    alloc = a
+                    alloc.next_id = tile_id_alloc_next_id(a)
                     rmap = tile_reg_map_set(rmap, dst, res)
                 } else {
                     let (b, a, res) = tile_emit_addf(buf, alloc, a_id, b_id)
                     buf = b
-                    alloc = a
+                    alloc.next_id = tile_id_alloc_next_id(a)
                     rmap = tile_reg_map_set(rmap, dst, res)
                 }
             } else if opcode == CT_GPU_OP_SUB {
@@ -688,21 +692,21 @@ fn gpu_lower_to_cuda_tile(
                 let b_id = tile_reg_map_get(rmap, src_b)
                 let (b, a, res) = tile_emit_subf(buf, alloc, a_id, b_id)
                 buf = b
-                alloc = a
+                alloc.next_id = tile_id_alloc_next_id(a)
                 rmap = tile_reg_map_set(rmap, dst, res)
             } else if opcode == CT_GPU_OP_MUL {
                 let a_id = tile_reg_map_get(rmap, src_a)
                 let b_id = tile_reg_map_get(rmap, src_b)
                 let (b, a, res) = tile_emit_mulf(buf, alloc, a_id, b_id)
                 buf = b
-                alloc = a
+                alloc.next_id = tile_id_alloc_next_id(a)
                 rmap = tile_reg_map_set(rmap, dst, res)
             } else if opcode == CT_GPU_OP_DIV {
                 let a_id = tile_reg_map_get(rmap, src_a)
                 let b_id = tile_reg_map_get(rmap, src_b)
                 let (b, a, res) = tile_emit_divf(buf, alloc, a_id, b_id)
                 buf = b
-                alloc = a
+                alloc.next_id = tile_id_alloc_next_id(a)
                 rmap = tile_reg_map_set(rmap, dst, res)
             } else if opcode == CT_GPU_OP_LOAD_GLOBAL {
                 // src_a = param index for the pointer base
@@ -711,14 +715,14 @@ fn gpu_lower_to_cuda_tile(
                 // Use param_idx as a virtual param reference; emit load pattern
                 let (b, a, val_id, tok_id) = tile_emit_load_pattern(buf, alloc, param_idx, iota_id)
                 buf = b
-                alloc = a
+                alloc.next_id = tile_id_alloc_next_id(a)
                 rmap = tile_reg_map_set(rmap, dst, val_id)
             } else if opcode == CT_GPU_OP_STORE_GLOBAL {
                 // src_a = param index for the pointer base, src_b = value reg
                 let val_id = tile_reg_map_get(rmap, src_b)
                 let (b, a, tok_id) = tile_emit_store_pattern(buf, alloc, src_a, iota_id, val_id)
                 buf = b
-                alloc = a
+                alloc.next_id = tile_id_alloc_next_id(a)
             } else if opcode == CT_GPU_OP_FMA {
                 // FMA: dst = src_a * src_b + dst (accumulate)
                 let a_id = tile_reg_map_get(rmap, src_a)
@@ -726,7 +730,7 @@ fn gpu_lower_to_cuda_tile(
                 let acc_id = tile_reg_map_get(rmap, dst)
                 let (b, a, res) = tile_emit_fma(buf, alloc, a_id, b_id, acc_id)
                 buf = b
-                alloc = a
+                alloc.next_id = tile_id_alloc_next_id(a)
                 rmap = tile_reg_map_set(rmap, dst, res)
             } else if opcode == CT_GPU_OP_WMMA {
                 // WMMA -> mmaf
@@ -735,7 +739,7 @@ fn gpu_lower_to_cuda_tile(
                 let acc_id = tile_reg_map_get(rmap, dst)
                 let (b, a, res) = tile_emit_mmaf(buf, alloc, a_id, b_id, acc_id)
                 buf = b
-                alloc = a
+                alloc.next_id = tile_id_alloc_next_id(a)
                 rmap = tile_reg_map_set(rmap, dst, res)
             } else if opcode == CT_GPU_OP_MMA {
                 // MMA -> mmaf (same mapping as WMMA)
@@ -744,25 +748,25 @@ fn gpu_lower_to_cuda_tile(
                 let acc_id = tile_reg_map_get(rmap, dst)
                 let (b, a, res) = tile_emit_mmaf(buf, alloc, a_id, b_id, acc_id)
                 buf = b
-                alloc = a
+                alloc.next_id = tile_id_alloc_next_id(a)
                 rmap = tile_reg_map_set(rmap, dst, res)
             } else if opcode == CT_GPU_OP_SQRT {
                 let a_id = tile_reg_map_get(rmap, src_a)
                 let (b, a, res) = tile_emit_sqrt(buf, alloc, a_id)
                 buf = b
-                alloc = a
+                alloc.next_id = tile_id_alloc_next_id(a)
                 rmap = tile_reg_map_set(rmap, dst, res)
             } else if opcode == CT_GPU_OP_SIN {
                 let a_id = tile_reg_map_get(rmap, src_a)
                 let (b, a, res) = tile_emit_sin(buf, alloc, a_id)
                 buf = b
-                alloc = a
+                alloc.next_id = tile_id_alloc_next_id(a)
                 rmap = tile_reg_map_set(rmap, dst, res)
             } else if opcode == CT_GPU_OP_COS {
                 let a_id = tile_reg_map_get(rmap, src_a)
                 let (b, a, res) = tile_emit_cos(buf, alloc, a_id)
                 buf = b
-                alloc = a
+                alloc.next_id = tile_id_alloc_next_id(a)
                 rmap = tile_reg_map_set(rmap, dst, res)
             } else {
                 // Unknown opcode — emit comment

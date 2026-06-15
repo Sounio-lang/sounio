@@ -1128,7 +1128,7 @@ fn compiler_mode_source_arg(args: ArgList, flag_index: i64, mode_name: string) -
 // flag_index, or fallback if there are fewer than N+1 positionals. Lets the
 // source-compile modes accept `<src.sio> <out.elf>` (out as 2nd positional)
 // in addition to `-o <out>`, matching the documented `mc src.sio out.elf` form.
-fn compiler_mode_positional_arg(args: ArgList, flag_index: i64, which: i64, fallback: string) -> string with Mut, Panic, Div {
+fn compiler_mode_positional_arg_or(args: ArgList, flag_index: i64, which: i64, fallback: string) -> string with Mut, Panic, Div {
     var i: i64 = flag_index + 1
     var seen: i64 = 0
     while i < args.len {
@@ -2531,48 +2531,6 @@ fn run_native_v2_emit13() with IO, Mut, Panic, Div, Alloc {
     run_native_v2_emit_exit_code(13, "artifacts/omega/emit13.elf")
 }
 
-fn ir_return_sret(src: i64) -> IrInstr {
-    let base = ir_instr_new(IrOpcode::IrReturnSret)
-    IrInstr {
-        op: base.op,
-        dst: base.dst,
-        src1: src,
-        src2: base.src2,
-        imm_i64: base.imm_i64,
-        imm_f64: base.imm_f64,
-        label_id: base.label_id,
-        fn_id: base.fn_id,
-        field_idx: base.field_idx,
-        imm_flags: base.imm_flags,
-        bin_op: base.bin_op,
-        un_op: base.un_op,
-        name: base.name,
-        call_args: base.call_args,
-        arg_count: base.arg_count,
-    }
-}
-
-fn ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, arg0: i64, explicit_arg_count: i64) -> IrInstr {
-    let base = ir_instr_new(IrOpcode::IrCallSret)
-    IrInstr {
-        op: base.op,
-        dst: dst,
-        src1: dest_reg,
-        src2: base.src2,
-        imm_i64: base.imm_i64,
-        imm_f64: base.imm_f64,
-        label_id: base.label_id,
-        fn_id: fn_id,
-        field_idx: arg0,
-        imm_flags: base.imm_flags,
-        bin_op: base.bin_op,
-        un_op: base.un_op,
-        name: fn_name,
-        call_args: base.call_args,
-        arg_count: explicit_arg_count,
-    }
-}
-
 // --- Zig-style wide-int witnesses (hand-built IR -> ELF, exercise nc_wide_*_into).
 // Each returns the HIGH limb so the exit code DISTINGUISHES real N-limb from fake-i64.
 fn compiler_main_make_native_v2_wide_add4_module() -> IrModule with Mut, Panic, Div {
@@ -2835,7 +2793,7 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     // positional argument (`mc --native-v2-compile src.sio out.elf`); else a.out.
     // Previously the second positional was silently ignored and every compile
     // wrote a.out — the root of the "writes no file at the requested path" report.
-    let out_positional = compiler_mode_positional_arg(args, flag_index, 1, "a.out")
+    let out_positional = compiler_mode_positional_arg_or(args, flag_index, 1, "a.out")
     let out_path = compiler_mode_output_path(args, out_positional)
     if !compiler_preflight_source_input(source_path) {
         panic("native-v2-compile failed: source not readable")
@@ -7209,7 +7167,7 @@ fn compiler_main_fill_native_v2_sret_main_fn(main_fn: &! IrFunction) with Mut, P
     (*main_fn).reg_count = 4
     (*main_fn).instrs[0] = ir_alloc(0, 64)        // dest: 64B payload (8 i64 slots) >16B
     (*main_fn).instrs[1] = ir_load_imm(1, 7)      // v = 7
-    (*main_fn).instrs[2] = ir_call_sret(2, 0, ir_name_from_bytes(109, 97, 107, 101, 4), 1, 1, 1)
+    (*main_fn).instrs[2] = ir_call_sret(2, 1, ir_name_from_bytes(109, 97, 107, 101, 4), 0, 1, 1)
     (*main_fn).instrs[3] = ir_field_get(3, 2, 1, ir_name_from_bytes(102, 49, 0, 0, 2))  // b.f1
     (*main_fn).instrs[4] = ir_return(3)
     (*main_fn).instr_count = 5
@@ -14895,7 +14853,7 @@ fn compiler_main_test_bw_no_fold_plain_and() -> bool with Mut, Div, Panic {
 }
 
 // Sprint 162 Block BX: OR-XOR complement fold (T638-T643)
-fn compiler_main_test_bx_or_xor_comp_basic() -> bool with Mut, Div, Panic {
+fn bx0() -> bool with Mut, Div, Panic {
     // (r0 | 5) ^ 5 → r0 & ~5
     var instrs: [IrInstr; 128] = cp_empty_instrs()
     instrs[0 as usize] = ir_load_imm(1, 5)
@@ -14904,12 +14862,13 @@ fn compiler_main_test_bx_or_xor_comp_basic() -> bool with Mut, Div, Panic {
     instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)  // r4 = (r0|5)^5
     let func = cp_make_test_func(instrs, 4)
     let opt = opt_cleanup_function(func)
-    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
-        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitAnd
-        && opt.instrs[3 as usize].src1 == 0
+    if opt.instrs[3 as usize].op != IrOpcode::IrBinOp { return false }
+    if opt.instrs[3 as usize].bin_op != BinaryOp::OpBitAnd { return false }
+    if opt.instrs[3 as usize].src1 != 0 { return false }
+    return true
 }
 
-fn compiler_main_test_bx_or_xor_comp_comm() -> bool with Mut, Div, Panic {
+fn compiler_main_test_bx_comm() -> bool with Mut, Div, Panic {
     // 5 ^ (r0 | 5) → r0 & ~5 (commutative outer)
     var instrs: [IrInstr; 128] = cp_empty_instrs()
     instrs[0 as usize] = ir_load_imm(1, 5)
@@ -14918,12 +14877,13 @@ fn compiler_main_test_bx_or_xor_comp_comm() -> bool with Mut, Div, Panic {
     instrs[3 as usize] = ir_binop(4, 3, BinaryOp::OpBitXor, 2)  // r4 = 5^(r0|5)
     let func = cp_make_test_func(instrs, 4)
     let opt = opt_cleanup_function(func)
-    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
-        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitAnd
-        && opt.instrs[3 as usize].src1 == 0
+    let op_ok = opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+    let bin_ok = opt.instrs[3 as usize].bin_op == BinaryOp::OpBitAnd
+    let src_ok = opt.instrs[3 as usize].src1 == 0
+    op_ok && bin_ok && src_ok
 }
 
-fn compiler_main_test_bx_or_xor_comp_merged_const() -> bool with Mut, Div, Panic {
+fn compiler_main_test_bx_merged_const() -> bool with Mut, Div, Panic {
     // (r0 | 0xFF) ^ 0xFF → r0 & ~0xFF; ~0xFF = -256
     var instrs: [IrInstr; 128] = cp_empty_instrs()
     instrs[0 as usize] = ir_load_imm(1, 255)
@@ -14933,8 +14893,9 @@ fn compiler_main_test_bx_or_xor_comp_merged_const() -> bool with Mut, Div, Panic
     let func = cp_make_test_func(instrs, 4)
     let opt = opt_cleanup_function(func)
     // should rewrite to AND with ~255 = -256
-    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
-        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitAnd
+    let op_ok = opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+    let bin_ok = opt.instrs[3 as usize].bin_op == BinaryOp::OpBitAnd
+    op_ok && bin_ok
 }
 
 fn compiler_main_test_bx_no_fold_diff_const() -> bool with Mut, Div, Panic {
@@ -24977,15 +24938,15 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     } else { println("  FAIL: T637") }
 
     // Sprint 162 Block BX: OR-XOR complement fold (T638-T643)
-    if compiler_main_test_bx_or_xor_comp_basic() {
+    if bx0() {
         passed = passed + 1
         println("  T638 OK: Sprint 162 Block BX: (r0|5)^5->r0&~5")
     } else { println("  FAIL: T638") }
-    if compiler_main_test_bx_or_xor_comp_comm() {
+    if compiler_main_test_bx_comm() {
         passed = passed + 1
         println("  T639 OK: Sprint 162 Block BX: 5^(r0|5)->r0&~5 commutative")
     } else { println("  FAIL: T639") }
-    if compiler_main_test_bx_or_xor_comp_merged_const() {
+    if compiler_main_test_bx_merged_const() {
         passed = passed + 1
         println("  T640 OK: Sprint 162 Block BX: (r0|0xFF)^0xFF->r0&-256")
     } else { println("  FAIL: T640") }

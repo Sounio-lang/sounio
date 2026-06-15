@@ -230,6 +230,18 @@ struct EpistemicSpvTypes {
     glsl_import_id: i64,
 }
 
+struct ESpvEmitResult {
+    buf: ESpvBuf,
+    next_id: i64,
+    shadow: EpistemicShadowSpv,
+}
+
+struct ESpvTypesResult {
+    buf: ESpvBuf,
+    next_id: i64,
+    types: EpistemicSpvTypes,
+}
+
 fn espv_types_new() -> EpistemicSpvTypes {
     EpistemicSpvTypes {
         void_id: 0, bool_id: 0, f64_id: 0, u64_id: 0,
@@ -550,13 +562,13 @@ fn espv_emit_add(
     buf: ESpvBuf, ids: ESpvIdAlloc, types: EpistemicSpvTypes,
     a: EpistemicShadowSpv, b: EpistemicShadowSpv,
     is_sub: bool
-) -> (ESpvBuf, ESpvIdAlloc, EpistemicShadowSpv) with Mut, Panic {
+) -> ESpvEmitResult with Mut, Panic {
     var out = buf
     var alloc = ids
 
     // 1. Value: val_c = a.val +/- b.val
-    let (alloc1, val_c) = espv_alloc_id(alloc)
-    alloc = alloc1
+    let val_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     if is_sub {
         out = espv_emit_binary_op(out, ESPV_OP_FSUB, types.f64_id, val_c, a.val_id, b.val_id)
     } else {
@@ -565,90 +577,90 @@ fn espv_emit_add(
 
     // 2. Epsilon: e_c = sqrt(e_a^2 + e_b^2)
     // e_a^2
-    let (alloc2, eps_a_sq) = espv_alloc_id(alloc)
-    alloc = alloc2
+    let eps_a_sq = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, eps_a_sq, a.eps_id, a.eps_id)
 
     // e_b^2
-    let (alloc3, eps_b_sq) = espv_alloc_id(alloc)
-    alloc = alloc3
+    let eps_b_sq = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, eps_b_sq, b.eps_id, b.eps_id)
 
     // e_a^2 + e_b^2
-    let (alloc4, eps_sum_sq) = espv_alloc_id(alloc)
-    alloc = alloc4
+    let eps_sum_sq = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FADD, types.f64_id, eps_sum_sq, eps_a_sq, eps_b_sq)
 
     // sqrt(e_a^2 + e_b^2)
-    let (alloc5, eps_c) = espv_alloc_id(alloc)
-    alloc = alloc5
+    let eps_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_ext_inst_unary(out, types.f64_id, eps_c, types.glsl_import_id, GLSL_STD_SQRT, eps_sum_sq)
 
     // 3. Validity: valid_c = valid_a AND valid_b
-    let (alloc6, valid_c) = espv_alloc_id(alloc)
-    alloc = alloc6
+    let valid_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_LOGICAL_AND, types.bool_id, valid_c, a.valid_id, b.valid_id)
 
     // 4. Provenance: prov_c = prov_a OR prov_b (monotonic union)
-    let (alloc7, prov_c) = espv_alloc_id(alloc)
-    alloc = alloc7
+    let prov_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_BITWISE_OR, types.u64_id, prov_c, a.prov_id, b.prov_id)
 
     let shadow_c = espv_shadow_new(val_c, eps_c, valid_c, prov_c)
-    (out, alloc, shadow_c)
+    ESpvEmitResult { buf: out, next_id: alloc.next_id, shadow: shadow_c }
 }
 
 // Multiplicative propagation: e_c = |a|*e_b + |b|*e_a  [first-order]
 fn espv_emit_mul(
     buf: ESpvBuf, ids: ESpvIdAlloc, types: EpistemicSpvTypes,
     a: EpistemicShadowSpv, b: EpistemicShadowSpv
-) -> (ESpvBuf, ESpvIdAlloc, EpistemicShadowSpv) with Mut, Panic {
+) -> ESpvEmitResult with Mut, Panic {
     var out = buf
     var alloc = ids
 
     // 1. Value: val_c = a.val * b.val
-    let (alloc1, val_c) = espv_alloc_id(alloc)
-    alloc = alloc1
+    let val_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, val_c, a.val_id, b.val_id)
 
     // 2. Epsilon: |a| * e_b + |b| * e_a
     // |a|
-    let (alloc2, abs_a) = espv_alloc_id(alloc)
-    alloc = alloc2
+    let abs_a = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_ext_inst_unary(out, types.f64_id, abs_a, types.glsl_import_id, GLSL_STD_FABS, a.val_id)
 
     // |b|
-    let (alloc3, abs_b) = espv_alloc_id(alloc)
-    alloc = alloc3
+    let abs_b = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_ext_inst_unary(out, types.f64_id, abs_b, types.glsl_import_id, GLSL_STD_FABS, b.val_id)
 
     // |a| * e_b
-    let (alloc4, term1) = espv_alloc_id(alloc)
-    alloc = alloc4
+    let term1 = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, term1, abs_a, b.eps_id)
 
     // |b| * e_a
-    let (alloc5, term2) = espv_alloc_id(alloc)
-    alloc = alloc5
+    let term2 = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, term2, abs_b, a.eps_id)
 
     // |a|*e_b + |b|*e_a
-    let (alloc6, eps_c) = espv_alloc_id(alloc)
-    alloc = alloc6
+    let eps_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FADD, types.f64_id, eps_c, term1, term2)
 
     // 3. Validity
-    let (alloc7, valid_c) = espv_alloc_id(alloc)
-    alloc = alloc7
+    let valid_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_LOGICAL_AND, types.bool_id, valid_c, a.valid_id, b.valid_id)
 
     // 4. Provenance: prov_c = prov_a OR prov_b (monotonic union)
-    let (alloc8, prov_c) = espv_alloc_id(alloc)
-    alloc = alloc8
+    let prov_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_BITWISE_OR, types.u64_id, prov_c, a.prov_id, b.prov_id)
 
     let shadow_c = espv_shadow_new(val_c, eps_c, valid_c, prov_c)
-    (out, alloc, shadow_c)
+    ESpvEmitResult { buf: out, next_id: alloc.next_id, shadow: shadow_c }
 }
 
 // Division propagation: e_c = (|a|*e_b + |b|*e_a) / b^2  with near-zero guard
@@ -656,73 +668,73 @@ fn espv_emit_div(
     buf: ESpvBuf, ids: ESpvIdAlloc, types: EpistemicSpvTypes,
     a: EpistemicShadowSpv, b: EpistemicShadowSpv,
     near_zero_const_id: i64
-) -> (ESpvBuf, ESpvIdAlloc, EpistemicShadowSpv) with Mut, Panic {
+) -> ESpvEmitResult with Mut, Panic {
     var out = buf
     var alloc = ids
 
     // 1. Value: val_c = a.val / b.val
-    let (alloc1, val_c) = espv_alloc_id(alloc)
-    alloc = alloc1
+    let val_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FDIV, types.f64_id, val_c, a.val_id, b.val_id)
 
     // 2. Epsilon numerator: |a|*e_b + |b|*e_a
-    let (alloc2, abs_a) = espv_alloc_id(alloc)
-    alloc = alloc2
+    let abs_a = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_ext_inst_unary(out, types.f64_id, abs_a, types.glsl_import_id, GLSL_STD_FABS, a.val_id)
 
-    let (alloc3, abs_b) = espv_alloc_id(alloc)
-    alloc = alloc3
+    let abs_b = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_ext_inst_unary(out, types.f64_id, abs_b, types.glsl_import_id, GLSL_STD_FABS, b.val_id)
 
-    let (alloc4, term1) = espv_alloc_id(alloc)
-    alloc = alloc4
+    let term1 = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, term1, abs_a, b.eps_id)
 
-    let (alloc5, term2) = espv_alloc_id(alloc)
-    alloc = alloc5
+    let term2 = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, term2, abs_b, a.eps_id)
 
-    let (alloc6, numer) = espv_alloc_id(alloc)
-    alloc = alloc6
+    let numer = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FADD, types.f64_id, numer, term1, term2)
 
     // 3. Denominator: b^2
-    let (alloc7, b_sq) = espv_alloc_id(alloc)
-    alloc = alloc7
+    let b_sq = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, b_sq, b.val_id, b.val_id)
 
     // 4. Near-zero guard: if |b| < near_zero_threshold, use near_zero_threshold^2
     //    b_sq_safe = select(is_near_zero, near_zero_const, b_sq)
-    let (alloc8, is_near_zero) = espv_alloc_id(alloc)
-    alloc = alloc8
+    let is_near_zero = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FORD_LESS_THAN, types.bool_id, is_near_zero, abs_b, near_zero_const_id)
 
     // near_zero^2 for safe denominator
-    let (alloc9, nz_sq) = espv_alloc_id(alloc)
-    alloc = alloc9
+    let nz_sq = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, nz_sq, near_zero_const_id, near_zero_const_id)
 
-    let (alloc10, b_sq_safe) = espv_alloc_id(alloc)
-    alloc = alloc10
+    let b_sq_safe = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_select(out, types.f64_id, b_sq_safe, is_near_zero, nz_sq, b_sq)
 
     // 5. e_c = numerator / b_sq_safe
-    let (alloc11, eps_c) = espv_alloc_id(alloc)
-    alloc = alloc11
+    let eps_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FDIV, types.f64_id, eps_c, numer, b_sq_safe)
 
     // 6. Validity: AND + invalidate if near-zero
-    let (alloc12, valid_ab) = espv_alloc_id(alloc)
-    alloc = alloc12
+    let valid_ab = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_LOGICAL_AND, types.bool_id, valid_ab, a.valid_id, b.valid_id)
 
     // 7. Provenance: prov_c = prov_a OR prov_b (monotonic union)
-    let (alloc13, prov_c) = espv_alloc_id(alloc)
-    alloc = alloc13
+    let prov_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_BITWISE_OR, types.u64_id, prov_c, a.prov_id, b.prov_id)
 
     let shadow_c = espv_shadow_new(val_c, eps_c, valid_ab, prov_c)
-    (out, alloc, shadow_c)
+    ESpvEmitResult { buf: out, next_id: alloc.next_id, shadow: shadow_c }
 }
 
 // FMA propagation: e_c = sqrt((|a|*e_b + |b|*e_a)^2 + e_addend^2)
@@ -734,68 +746,68 @@ fn espv_emit_fma(
     var alloc = ids
 
     // 1. Value: val_c = a.val * b.val + addend.val
-    let (alloc1, mul_ab) = espv_alloc_id(alloc)
-    alloc = alloc1
+    let mul_ab = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, mul_ab, a.val_id, b.val_id)
 
-    let (alloc2, val_c) = espv_alloc_id(alloc)
-    alloc = alloc2
+    let val_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FADD, types.f64_id, val_c, mul_ab, addend.val_id)
 
     // 2. Epsilon for mul part: |a|*e_b + |b|*e_a
-    let (alloc3, abs_a) = espv_alloc_id(alloc)
-    alloc = alloc3
+    let abs_a = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_ext_inst_unary(out, types.f64_id, abs_a, types.glsl_import_id, GLSL_STD_FABS, a.val_id)
 
-    let (alloc4, abs_b) = espv_alloc_id(alloc)
-    alloc = alloc4
+    let abs_b = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_ext_inst_unary(out, types.f64_id, abs_b, types.glsl_import_id, GLSL_STD_FABS, b.val_id)
 
-    let (alloc5, t1) = espv_alloc_id(alloc)
-    alloc = alloc5
+    let t1 = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, t1, abs_a, b.eps_id)
 
-    let (alloc6, t2) = espv_alloc_id(alloc)
-    alloc = alloc6
+    let t2 = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, t2, abs_b, a.eps_id)
 
-    let (alloc7, eps_mul) = espv_alloc_id(alloc)
-    alloc = alloc7
+    let eps_mul = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FADD, types.f64_id, eps_mul, t1, t2)
 
     // 3. Combined: sqrt(eps_mul^2 + eps_addend^2)
-    let (alloc8, eps_mul_sq) = espv_alloc_id(alloc)
-    alloc = alloc8
+    let eps_mul_sq = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, eps_mul_sq, eps_mul, eps_mul)
 
-    let (alloc9, eps_add_sq) = espv_alloc_id(alloc)
-    alloc = alloc9
+    let eps_add_sq = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, eps_add_sq, addend.eps_id, addend.eps_id)
 
-    let (alloc10, eps_sum) = espv_alloc_id(alloc)
-    alloc = alloc10
+    let eps_sum = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_FADD, types.f64_id, eps_sum, eps_mul_sq, eps_add_sq)
 
-    let (alloc11, eps_c) = espv_alloc_id(alloc)
-    alloc = alloc11
+    let eps_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_ext_inst_unary(out, types.f64_id, eps_c, types.glsl_import_id, GLSL_STD_SQRT, eps_sum)
 
     // 4. Validity: AND all three
-    let (alloc12, v_ab) = espv_alloc_id(alloc)
-    alloc = alloc12
+    let v_ab = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_LOGICAL_AND, types.bool_id, v_ab, a.valid_id, b.valid_id)
 
-    let (alloc13, valid_c) = espv_alloc_id(alloc)
-    alloc = alloc13
+    let valid_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_LOGICAL_AND, types.bool_id, valid_c, v_ab, addend.valid_id)
 
     // 5. Provenance: OR all three (monotonic union)
-    let (alloc14, p_ab) = espv_alloc_id(alloc)
-    alloc = alloc14
+    let p_ab = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_BITWISE_OR, types.u64_id, p_ab, a.prov_id, b.prov_id)
 
-    let (alloc15, prov_c) = espv_alloc_id(alloc)
-    alloc = alloc15
+    let prov_c = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_binary_op(out, ESPV_OP_BITWISE_OR, types.u64_id, prov_c, p_ab, addend.prov_id)
 
     let shadow_c = espv_shadow_new(val_c, eps_c, valid_c, prov_c)
@@ -816,40 +828,40 @@ fn espv_emit_knowledge_load(
     var alloc = ids
 
     // AccessChain for val slot
-    let (alloc1, ptr_val) = espv_alloc_id(alloc)
-    alloc = alloc1
+    let ptr_val = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_access_chain(out, types.ptr_f64_storage_id, ptr_val, base_ptr_id, stride_const_ids[0 as usize])
 
-    let (alloc2, val_id) = espv_alloc_id(alloc)
-    alloc = alloc2
+    let val_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_load(out, types.f64_id, val_id, ptr_val)
 
     // AccessChain for eps slot
-    let (alloc3, ptr_eps) = espv_alloc_id(alloc)
-    alloc = alloc3
+    let ptr_eps = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_access_chain(out, types.ptr_f64_storage_id, ptr_eps, base_ptr_id, stride_const_ids[1 as usize])
 
-    let (alloc4, eps_id) = espv_alloc_id(alloc)
-    alloc = alloc4
+    let eps_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_load(out, types.f64_id, eps_id, ptr_eps)
 
     // For valid, we reuse f64 as bit carrier (SPIR-V has no direct bool in buffers)
     // The host packs valid as 1.0/0.0 f64
-    let (alloc5, ptr_valid) = espv_alloc_id(alloc)
-    alloc = alloc5
+    let ptr_valid = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_access_chain(out, types.ptr_f64_storage_id, ptr_valid, base_ptr_id, stride_const_ids[2 as usize])
 
-    let (alloc6, valid_f64) = espv_alloc_id(alloc)
-    alloc = alloc6
+    let valid_f64 = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_load(out, types.f64_id, valid_f64, ptr_valid)
 
     // Provenance is u64, but stored via f64 reinterpret for uniform buffer layout
-    let (alloc7, ptr_prov) = espv_alloc_id(alloc)
-    alloc = alloc7
+    let ptr_prov = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_access_chain(out, types.ptr_u64_storage_id, ptr_prov, base_ptr_id, stride_const_ids[3 as usize])
 
-    let (alloc8, prov_id) = espv_alloc_id(alloc)
-    alloc = alloc8
+    let prov_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_load(out, types.u64_id, prov_id, ptr_prov)
 
     // Use valid_f64 as a stand-in for the bool; the first use in AND will need
@@ -868,26 +880,26 @@ fn espv_emit_knowledge_store(
     var alloc = ids
 
     // Store val
-    let (alloc1, ptr_val) = espv_alloc_id(alloc)
-    alloc = alloc1
+    let ptr_val = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_access_chain(out, types.ptr_f64_storage_id, ptr_val, base_ptr_id, stride_const_ids[0 as usize])
     out = espv_emit_store(out, ptr_val, shadow.val_id)
 
     // Store eps
-    let (alloc2, ptr_eps) = espv_alloc_id(alloc)
-    alloc = alloc2
+    let ptr_eps = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_access_chain(out, types.ptr_f64_storage_id, ptr_eps, base_ptr_id, stride_const_ids[1 as usize])
     out = espv_emit_store(out, ptr_eps, shadow.eps_id)
 
     // Store valid
-    let (alloc3, ptr_valid) = espv_alloc_id(alloc)
-    alloc = alloc3
+    let ptr_valid = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_access_chain(out, types.ptr_f64_storage_id, ptr_valid, base_ptr_id, stride_const_ids[2 as usize])
     out = espv_emit_store(out, ptr_valid, shadow.valid_id)
 
     // Store prov
-    let (alloc4, ptr_prov) = espv_alloc_id(alloc)
-    alloc = alloc4
+    let ptr_prov = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_access_chain(out, types.ptr_u64_storage_id, ptr_prov, base_ptr_id, stride_const_ids[3 as usize])
     out = espv_emit_store(out, ptr_prov, shadow.prov_id)
 
@@ -900,60 +912,60 @@ fn espv_emit_knowledge_store(
 
 fn espv_allocate_types(
     buf: ESpvBuf, ids: ESpvIdAlloc
-) -> (ESpvBuf, ESpvIdAlloc, EpistemicSpvTypes) with Mut, Panic, Div {
+) -> ESpvTypesResult with Mut, Panic, Div {
     var out = buf
     var alloc = ids
     var types = espv_types_new()
 
     // OpTypeVoid
-    let (a1, void_id) = espv_alloc_id(alloc)
-    alloc = a1
+    let void_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_type_void(out, void_id)
     types.void_id = void_id
 
     // OpTypeBool
-    let (a2, bool_id) = espv_alloc_id(alloc)
-    alloc = a2
+    let bool_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_type_bool(out, bool_id)
     types.bool_id = bool_id
 
     // OpTypeFloat(64) — f64
-    let (a3, f64_id) = espv_alloc_id(alloc)
-    alloc = a3
+    let f64_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_type_float(out, f64_id, 64)
     types.f64_id = f64_id
 
     // OpTypeInt(64, unsigned) — u64
-    let (a4, u64_id) = espv_alloc_id(alloc)
-    alloc = a4
+    let u64_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_type_int(out, u64_id, 64, 0)
     types.u64_id = u64_id
 
     // OpTypePointer(StorageBuffer, f64)
-    let (a5, ptr_f64) = espv_alloc_id(alloc)
-    alloc = a5
+    let ptr_f64 = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_type_pointer(out, ptr_f64, ESPV_STORAGE_BUFFER, f64_id)
     types.ptr_f64_storage_id = ptr_f64
 
     // OpTypePointer(StorageBuffer, u64)
-    let (a6, ptr_u64) = espv_alloc_id(alloc)
-    alloc = a6
+    let ptr_u64 = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_type_pointer(out, ptr_u64, ESPV_STORAGE_BUFFER, u64_id)
     types.ptr_u64_storage_id = ptr_u64
 
     // OpTypeFunction(void)
-    let (a7, func_void) = espv_alloc_id(alloc)
-    alloc = a7
+    let func_void = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_type_function(out, func_void, void_id)
     types.func_void_id = func_void
 
     // OpExtInstImport "GLSL.std.450"
-    let (a8, glsl_id) = espv_alloc_id(alloc)
-    alloc = a8
+    let glsl_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     out = espv_emit_ext_inst_import(out, glsl_id, "GLSL.std.450")
     types.glsl_import_id = glsl_id
 
-    (out, alloc, types)
+    ESpvTypesResult { buf: out, next_id: alloc.next_id, types: types }
 }
 
 // ============================================================================
@@ -981,30 +993,31 @@ fn gpu_lower_to_epistemic_spirv(
     buf = espv_emit_memory_model(buf, ESPV_ADDR_LOGICAL, ESPV_MEM_GLSL450)
 
     // ---- Phase 3: Allocate types ----
-    let (buf2, alloc2, types) = espv_allocate_types(buf, alloc)
-    buf = buf2
-    alloc = alloc2
+    let types_result = espv_allocate_types(buf, alloc)
+    buf = types_result.buf
+    alloc.next_id = types_result.next_id
+    let types = types_result.types
 
     // ---- Phase 4: Allocate near-zero constant for div guard ----
     // 1e-30 as f64: low=0x00000000, high=0x39B4C6F9 (approx)
     // We use a simpler encoding: just a small positive f64
-    let (alloc_nz1, nz_const_id) = espv_alloc_id(alloc)
-    alloc = alloc_nz1
+    let nz_const_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
     buf = espv_emit_constant_f64(buf, types.f64_id, nz_const_id, 0, 968018937)
 
     // ---- Phase 5: Allocate function + label IDs ----
-    let (alloc_fn, func_id) = espv_alloc_id(alloc)
-    alloc = alloc_fn
-    let (alloc_lbl, label_id) = espv_alloc_id(alloc)
-    alloc = alloc_lbl
+    let func_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
+    let label_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
 
     // ---- Phase 6: Emit storage buffer variables + decorations ----
     var param_var_ids: [i64; 8] = [0; 8]
     var pi: i64 = 0
     while pi < param_count {
         if pi < 8 {
-            let (alloc_p, var_id) = espv_alloc_id(alloc)
-            alloc = alloc_p
+            let var_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
             buf = espv_emit_variable(buf, types.ptr_f64_storage_id, var_id, ESPV_STORAGE_BUFFER)
             buf = espv_emit_decorate(buf, var_id, ESPV_DECO_BINDING, pi)
             buf = espv_emit_decorate(buf, var_id, ESPV_DECO_DESCRIPTOR_SET, 0)
@@ -1043,14 +1056,14 @@ fn gpu_lower_to_epistemic_spirv(
     // dummy IDs so the emitters can reference them.
     var ri: i64 = 0
     while ri < 64 {
-        let (a_v, v_id) = espv_alloc_id(alloc)
-        alloc = a_v
-        let (a_e, e_id) = espv_alloc_id(alloc)
-        alloc = a_e
-        let (a_vl, vl_id) = espv_alloc_id(alloc)
-        alloc = a_vl
-        let (a_p, p_id) = espv_alloc_id(alloc)
-        alloc = a_p
+        let v_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
+        let e_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
+        let vl_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
+        let p_id = alloc.next_id
+    alloc.next_id = alloc.next_id + 1
         shadow_map = espv_shadow_map_insert(shadow_map, ri, espv_shadow_new(v_id, e_id, vl_id, p_id))
         ri = ri + 1
     }
@@ -1067,28 +1080,28 @@ fn gpu_lower_to_epistemic_spirv(
             let shadow_b = espv_shadow_map_lookup(shadow_map, src_b)
 
             if opc == ESPV_GPU_OP_ADD {
-                let (buf3, alloc3, shadow_c) = espv_emit_add(buf, alloc, types, shadow_a, shadow_b, false)
-                buf = buf3
-                alloc = alloc3
-                shadow_map = espv_shadow_map_insert(shadow_map, dst, shadow_c)
+                let add_result = espv_emit_add(buf, alloc, types, shadow_a, shadow_b, false)
+                buf = add_result.buf
+                alloc.next_id = add_result.next_id
+                shadow_map = espv_shadow_map_insert(shadow_map, dst, add_result.shadow)
             }
             if opc == ESPV_GPU_OP_SUB {
-                let (buf4, alloc4, shadow_c) = espv_emit_add(buf, alloc, types, shadow_a, shadow_b, true)
-                buf = buf4
-                alloc = alloc4
-                shadow_map = espv_shadow_map_insert(shadow_map, dst, shadow_c)
+                let sub_result = espv_emit_add(buf, alloc, types, shadow_a, shadow_b, true)
+                buf = sub_result.buf
+                alloc.next_id = sub_result.next_id
+                shadow_map = espv_shadow_map_insert(shadow_map, dst, sub_result.shadow)
             }
             if opc == ESPV_GPU_OP_MUL {
-                let (buf5, alloc5, shadow_c) = espv_emit_mul(buf, alloc, types, shadow_a, shadow_b)
-                buf = buf5
-                alloc = alloc5
-                shadow_map = espv_shadow_map_insert(shadow_map, dst, shadow_c)
+                let mul_result = espv_emit_mul(buf, alloc, types, shadow_a, shadow_b)
+                buf = mul_result.buf
+                alloc.next_id = mul_result.next_id
+                shadow_map = espv_shadow_map_insert(shadow_map, dst, mul_result.shadow)
             }
             if opc == ESPV_GPU_OP_DIV {
-                let (buf6, alloc6, shadow_c) = espv_emit_div(buf, alloc, types, shadow_a, shadow_b, nz_const_id)
-                buf = buf6
-                alloc = alloc6
-                shadow_map = espv_shadow_map_insert(shadow_map, dst, shadow_c)
+                let div_result = espv_emit_div(buf, alloc, types, shadow_a, shadow_b, nz_const_id)
+                buf = div_result.buf
+                alloc.next_id = div_result.next_id
+                shadow_map = espv_shadow_map_insert(shadow_map, dst, div_result.shadow)
             }
         }
         oi = oi + 1
@@ -1189,7 +1202,9 @@ fn espv_test_gum_add() -> bool with Mut, Panic {
     let a = espv_shadow_new(10, 11, 12, 13)
     let b = espv_shadow_new(20, 21, 22, 23)
 
-    let (buf2, alloc2, c) = espv_emit_add(buf, alloc, types, a, b, false)
+    let add_result = espv_emit_add(buf, alloc, types, a, b, false)
+    let buf2 = add_result.buf
+    let c = add_result.shadow
 
     // Result shadow should have non-zero IDs
     c.val_id > 0 && c.eps_id > 0 && c.valid_id > 0 && c.prov_id > 0 &&
@@ -1209,7 +1224,9 @@ fn espv_test_gum_mul() -> bool with Mut, Panic {
     let a = espv_shadow_new(10, 11, 12, 13)
     let b = espv_shadow_new(20, 21, 22, 23)
 
-    let (buf2, alloc2, c) = espv_emit_mul(buf, alloc, types, a, b)
+    let mul_result = espv_emit_mul(buf, alloc, types, a, b)
+    let buf2 = mul_result.buf
+    let c = mul_result.shadow
 
     c.val_id > 0 && c.eps_id > 0 && c.valid_id > 0 && c.prov_id > 0 &&
     buf2.word_count > 0
@@ -1227,7 +1244,9 @@ fn espv_test_gum_div() -> bool with Mut, Panic {
     let a = espv_shadow_new(10, 11, 12, 13)
     let b = espv_shadow_new(20, 21, 22, 23)
 
-    let (buf2, alloc2, c) = espv_emit_div(buf, alloc, types, a, b, 50)
+    let div_result = espv_emit_div(buf, alloc, types, a, b, 50)
+    let buf2 = div_result.buf
+    let c = div_result.shadow
 
     // Div emitter must produce near-zero guard (OpFOrdLessThan + OpSelect)
     c.val_id > 0 && c.eps_id > 0 && c.valid_id > 0 && c.prov_id > 0 &&
