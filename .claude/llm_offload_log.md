@@ -2,6 +2,7 @@
 
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
+| 2026-06-15 | xai/grok-4-1-fast-reasoning | math-review | self-hosted/gpu/epistemic_spirv.sio; scripts/ci/madaros_no_caveats_frontier_gate.sh | PASS | Converted `espv_emit_fma` to mutate `ESpvBuf` by reference through `espv_push_word_into`, `espv_emit_binary_op_into`, and `espv_emit_ext_inst_unary_into`; reviewer found no mathematical content changed, identical GUM FMA formula, identical SPIR-V word order, and unchanged validity/provenance propagation. Ratcheted no-caveats stack warning ceiling from 48 to 47. Raw: /tmp/llm-offload-V5qFlc/. |
 | 2026-06-12 | deepseek+xai | fan-out raw external diff review | ABSTRACT_V2.md, CONFIDENCE_SEMANTICS.md, SOUNDNESS_DENOTATION.md, 168-dual-pathway-correction.md | OK | Generated docs governance metadata sync only; both reviewers found no substantive paper/research claim changes. Raw output: /tmp/llm-offload-KFmJXR |
 
 ## 2026-05-30: Multiquadratic faithfulness — irrationality core (no_rat_sqrt) + edge-level radical support

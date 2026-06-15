@@ -143,6 +143,13 @@ fn espv_push_word(buf: ESpvBuf, w: i64) -> ESpvBuf with Mut, Panic {
     out
 }
 
+fn espv_push_word_into(buf: &! ESpvBuf, w: i64) with Mut, Panic {
+    if (*buf).word_count < 16384 {
+        (*buf).words[(*buf).word_count as usize] = w % 4294967296
+        (*buf).word_count = (*buf).word_count + 1
+    }
+}
+
 // Encode an instruction: word_count << 16 | opcode
 fn espv_encode_op(word_count: i64, opcode: i64) -> i64 {
     ((word_count % 65536) * 65536) + (opcode % 65536)
@@ -466,6 +473,14 @@ fn espv_emit_binary_op(buf: ESpvBuf, opcode: i64, type_id: i64, result_id: i64, 
     out
 }
 
+fn espv_emit_binary_op_into(buf: &! ESpvBuf, opcode: i64, type_id: i64, result_id: i64, op1: i64, op2: i64) with Mut, Panic {
+    espv_push_word_into(buf, espv_encode_op(5, opcode))
+    espv_push_word_into(buf, type_id)
+    espv_push_word_into(buf, result_id)
+    espv_push_word_into(buf, op1)
+    espv_push_word_into(buf, op2)
+}
+
 // Emit OpExtInst for GLSL.std.450 unary instructions (e.g., FAbs, Sqrt)
 fn espv_emit_ext_inst_unary(
     buf: ESpvBuf, type_id: i64, result_id: i64,
@@ -480,6 +495,18 @@ fn espv_emit_ext_inst_unary(
     out = espv_push_word(out, ext_opcode)
     out = espv_push_word(out, operand_id)
     out
+}
+
+fn espv_emit_ext_inst_unary_into(
+    buf: &! ESpvBuf, type_id: i64, result_id: i64,
+    import_id: i64, ext_opcode: i64, operand_id: i64
+) with Mut, Panic {
+    espv_push_word_into(buf, espv_encode_op(6, ESPV_OP_EXT_INST))
+    espv_push_word_into(buf, type_id)
+    espv_push_word_into(buf, result_id)
+    espv_push_word_into(buf, import_id)
+    espv_push_word_into(buf, ext_opcode)
+    espv_push_word_into(buf, operand_id)
 }
 
 // Emit OpSelect: word_count=6 (opcode, type, result, condition, true_val, false_val)
@@ -739,79 +766,78 @@ fn espv_emit_div(
 
 // FMA propagation: e_c = sqrt((|a|*e_b + |b|*e_a)^2 + e_addend^2)
 fn espv_emit_fma(
-    buf: ESpvBuf, ids: ESpvIdAlloc, types: EpistemicSpvTypes,
+    buf: &! ESpvBuf, ids: ESpvIdAlloc, types: EpistemicSpvTypes,
     a: EpistemicShadowSpv, b: EpistemicShadowSpv, addend: EpistemicShadowSpv
-) -> (ESpvBuf, ESpvIdAlloc, EpistemicShadowSpv) with Mut, Panic {
-    var out = buf
+) -> (ESpvIdAlloc, EpistemicShadowSpv) with Mut, Panic {
     var alloc = ids
 
     // 1. Value: val_c = a.val * b.val + addend.val
     let mul_ab = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, mul_ab, a.val_id, b.val_id)
+    espv_emit_binary_op_into(buf, ESPV_OP_FMUL, types.f64_id, mul_ab, a.val_id, b.val_id)
 
     let val_c = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_binary_op(out, ESPV_OP_FADD, types.f64_id, val_c, mul_ab, addend.val_id)
+    espv_emit_binary_op_into(buf, ESPV_OP_FADD, types.f64_id, val_c, mul_ab, addend.val_id)
 
     // 2. Epsilon for mul part: |a|*e_b + |b|*e_a
     let abs_a = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_ext_inst_unary(out, types.f64_id, abs_a, types.glsl_import_id, GLSL_STD_FABS, a.val_id)
+    espv_emit_ext_inst_unary_into(buf, types.f64_id, abs_a, types.glsl_import_id, GLSL_STD_FABS, a.val_id)
 
     let abs_b = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_ext_inst_unary(out, types.f64_id, abs_b, types.glsl_import_id, GLSL_STD_FABS, b.val_id)
+    espv_emit_ext_inst_unary_into(buf, types.f64_id, abs_b, types.glsl_import_id, GLSL_STD_FABS, b.val_id)
 
     let t1 = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, t1, abs_a, b.eps_id)
+    espv_emit_binary_op_into(buf, ESPV_OP_FMUL, types.f64_id, t1, abs_a, b.eps_id)
 
     let t2 = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, t2, abs_b, a.eps_id)
+    espv_emit_binary_op_into(buf, ESPV_OP_FMUL, types.f64_id, t2, abs_b, a.eps_id)
 
     let eps_mul = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_binary_op(out, ESPV_OP_FADD, types.f64_id, eps_mul, t1, t2)
+    espv_emit_binary_op_into(buf, ESPV_OP_FADD, types.f64_id, eps_mul, t1, t2)
 
     // 3. Combined: sqrt(eps_mul^2 + eps_addend^2)
     let eps_mul_sq = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, eps_mul_sq, eps_mul, eps_mul)
+    espv_emit_binary_op_into(buf, ESPV_OP_FMUL, types.f64_id, eps_mul_sq, eps_mul, eps_mul)
 
     let eps_add_sq = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_binary_op(out, ESPV_OP_FMUL, types.f64_id, eps_add_sq, addend.eps_id, addend.eps_id)
+    espv_emit_binary_op_into(buf, ESPV_OP_FMUL, types.f64_id, eps_add_sq, addend.eps_id, addend.eps_id)
 
     let eps_sum = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_binary_op(out, ESPV_OP_FADD, types.f64_id, eps_sum, eps_mul_sq, eps_add_sq)
+    espv_emit_binary_op_into(buf, ESPV_OP_FADD, types.f64_id, eps_sum, eps_mul_sq, eps_add_sq)
 
     let eps_c = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_ext_inst_unary(out, types.f64_id, eps_c, types.glsl_import_id, GLSL_STD_SQRT, eps_sum)
+    espv_emit_ext_inst_unary_into(buf, types.f64_id, eps_c, types.glsl_import_id, GLSL_STD_SQRT, eps_sum)
 
     // 4. Validity: AND all three
     let v_ab = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_binary_op(out, ESPV_OP_LOGICAL_AND, types.bool_id, v_ab, a.valid_id, b.valid_id)
+    espv_emit_binary_op_into(buf, ESPV_OP_LOGICAL_AND, types.bool_id, v_ab, a.valid_id, b.valid_id)
 
     let valid_c = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_binary_op(out, ESPV_OP_LOGICAL_AND, types.bool_id, valid_c, v_ab, addend.valid_id)
+    espv_emit_binary_op_into(buf, ESPV_OP_LOGICAL_AND, types.bool_id, valid_c, v_ab, addend.valid_id)
 
     // 5. Provenance: OR all three (monotonic union)
     let p_ab = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_binary_op(out, ESPV_OP_BITWISE_OR, types.u64_id, p_ab, a.prov_id, b.prov_id)
+    espv_emit_binary_op_into(buf, ESPV_OP_BITWISE_OR, types.u64_id, p_ab, a.prov_id, b.prov_id)
 
     let prov_c = alloc.next_id
     alloc.next_id = alloc.next_id + 1
-    out = espv_emit_binary_op(out, ESPV_OP_BITWISE_OR, types.u64_id, prov_c, p_ab, addend.prov_id)
+    espv_emit_binary_op_into(buf, ESPV_OP_BITWISE_OR, types.u64_id, prov_c, p_ab, addend.prov_id)
 
     let shadow_c = espv_shadow_new(val_c, eps_c, valid_c, prov_c)
-    (out, alloc, shadow_c)
+    (alloc, shadow_c)
 }
 
 // ============================================================================
