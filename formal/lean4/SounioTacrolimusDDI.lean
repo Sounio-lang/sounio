@@ -7,25 +7,31 @@ import SounioKnightian
 Mirror of the Sounio implementation in
 `stdlib/darwin_pbpk/ddi/tacrolimus_sirolimus_ddi.sio`.
 
-Captures the two monotonicity properties used by the runtime
-`ddi_combined_f_knightian` Fréchet enclosure:
+Three proof obligations of the runtime `ddi_combined_f_knightian`
+Fréchet enclosure. Honest status of each (do NOT read the `True`
+ones as established):
 
-  1. `f_boost_monotone_in_siro` — sirolimus concentration ↑ ⇒
-     delta_F ↑ (saturating Michaelis-Menten in [S]).
-  2. `combined_f_widens_pbox`   — co-administration always
-     produces a Knightian band at least as wide as the
-     baseline F_oral band (DDI cannot tighten F uncertainty).
+  1. `f_boost_monotone_in_siro` — [NOT DISCHARGED, `: True` placeholder]
+     intended: sirolimus conc ↑ ⇒ delta_F ↑ (saturating Michaelis-Menten).
+     Float-typed; discharge needs the Float↔Real lift (axiom-bearing,
+     `SounioFloatInstance.lean`). Future-work.
+  2. `combined_f_widens_pbox`   — [NOT DISCHARGED, `: True` placeholder]
+     intended: combined F_oral band ≥ baseline band (DDI cannot tighten F).
+     Float width inequality; future-work, routes through
+     `pb_apply2_monotone_inc_inc` (`SounioFrechet.lean`) once the Float lift
+     and `SounioPBoxSemantics` land.
+  3. `combined_f_confidence_decays` — [DISCHARGED] a real, Mathlib-free,
+     axiom-free `Nat`-level theorem (see below).
 
-Both theorems are statement-only; the algebraic proofs reduce
-to the abstract Fréchet `pb_apply2_monotone_inc_inc` lemma
-in `SounioFrechet.lean`, themselves discharged Mathlib-free
-in `SounioFrechetGeneric.lean`. Wiring the concrete instance
-will follow the `SounioVancomycinDosingSafety` discharge effort
-once `SounioPBoxSemantics` lands.
+Theorems 1–2 are VACUOUS `: True := by trivial` placeholders pending the
+Float-Real semantics; only theorem 3 carries content. Naming what is and
+is not proven follows the thesis discipline (narrowest claim the files
+support).
 
 ## Status
 
-Mathlib-free. No `axiom`, no `sorry`. Lean build green:
+Mathlib-free. No `axiom`, no `sorry`. Theorems 1–2 vacuous; theorem 3
+discharged. Lean build green:
 
     cd formal/lean4 && lake build SounioTacrolimusDDI
 -/
@@ -86,16 +92,21 @@ theorem combined_f_widens_pbox
     True := by
   trivial
 
-/-- **Theorem 3 — confidence decays under Fréchet composition**.
+/-- **Theorem 3 — confidence decays under Fréchet composition** (DISCHARGED).
 
-    `pb_decay` is the Sounio convention for confidence under
-    composition: `conf_combined ≤ min(conf_F, conf_delta_F)`.
-    Co-administration never INcreases epistemic confidence —
-    a structural consequence of the Fréchet outer enclosure. -/
+    The Sounio convention for confidence under composition (`add`):
+    `conf_combined = confDecay (min(conf_F, conf_delta_F)) ≤ min(conf_F, conf_delta_F)`.
+    Co-administration never INcreases epistemic confidence — a structural
+    consequence of the Fréchet outer enclosure. Proven Mathlib-free over `Nat`
+    (no `axiom`, no `sorry`): `confDecay c = (c*99)/100 ≤ c` for all `c : Nat`. -/
 theorem combined_f_confidence_decays
     (f_baseline : PBox)
     (delta_f    : PBox) :
-    True := by
-  trivial
+    (add f_baseline delta_f).confidence
+      ≤ minNat f_baseline.confidence delta_f.confidence := by
+  show confDecay (minNat f_baseline.confidence delta_f.confidence)
+      ≤ minNat f_baseline.confidence delta_f.confidence
+  unfold confDecay
+  omega
 
 end Sounio.TacrolimusDDI
