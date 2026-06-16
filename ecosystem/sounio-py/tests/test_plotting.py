@@ -19,15 +19,6 @@ import pytest
 # invoked (e.g. PYTHONPATH=python or plain python3 -m pytest).
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PYTHON_PKG = os.path.normpath(os.path.join(_HERE, "..", "python"))
-# Insert at front so python/sounio takes priority over the bare sounio/ stub
-# that sits in the package root (which lacks types.py).
-if _PYTHON_PKG not in sys.path:
-    sys.path.insert(0, _PYTHON_PKG)
-# Evict any already-cached sounio modules from an earlier (wrong) location
-# so they are re-imported from _PYTHON_PKG.
-_to_evict = [k for k in sys.modules if k == "sounio" or k.startswith("sounio.")]
-for _k in _to_evict:
-    del sys.modules[_k]
 
 
 # ---------------------------------------------------------------------------
@@ -58,19 +49,20 @@ def _build_mock_matplotlib():
 
 _fake_mpl, _fake_pyplot, _fake_mpl_colors = _build_mock_matplotlib()
 
-# Inject before any plotting import
-sys.modules.setdefault("matplotlib", _fake_mpl)
-sys.modules.setdefault("matplotlib.pyplot", _fake_pyplot)
-sys.modules.setdefault("matplotlib.colors", _fake_mpl_colors)
-
-# Also ensure plotly is absent so we can test the guard (unless really installed)
+# Instead of injecting into sys.modules, we'll patch the imported modules in sounio.integrations.plotting later.
+# We still ensure plotly is absent
 _plotly_real = sys.modules.get("plotly")
 _plotly_go_real = sys.modules.get("plotly.graph_objects")
-
 
 # Now safe to import plotting
 from sounio.knowledge import Knowledge
 from sounio.types import PKParameters
+import sounio.integrations.plotting
+
+# Patch the modules inside sounio.integrations.plotting
+sounio.integrations.plotting.matplotlib = _fake_mpl
+sounio.integrations.plotting.plt = _fake_pyplot
+sounio.integrations.plotting._HAS_MATPLOTLIB = True
 
 
 # ---------------------------------------------------------------------------

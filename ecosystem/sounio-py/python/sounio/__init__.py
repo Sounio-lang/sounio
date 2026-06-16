@@ -28,16 +28,30 @@ __author__ = "Sounio Team"
 # to the pure Python implementation.
 # ---------------------------------------------------------------------------
 
+# Try the Rust/PyO3 native extension first (fast, full GUM).
+# Fall back to pure-Python implementation when native is not built.
+_NATIVE_BACKEND = False
 try:
-    from ._sounio_native import Knowledge as _NativeKnowledge
+    from ._sounio_native import (  # type: ignore[import]
+        Knowledge as _NativeKnowledge,
+        measure as _native_measure,
+        confidence_gate as _native_confidence_gate,
+        GUMPropagation as _NativeGUMPropagation,
+        EpistemicResult as _NativeEpistemicResult,
+        SensitivityCoefficient,
+    )
     Knowledge = _NativeKnowledge
-    _NATIVE = True
+    measure = _native_measure
+    confidence_gate = _native_confidence_gate
+    GUMPropagation = _NativeGUMPropagation
+    EpistemicResult = _NativeEpistemicResult
+    _NATIVE_BACKEND = True
 except ImportError:
-    from .knowledge import Knowledge  # type: ignore[assignment]
-    _NATIVE = False
+    from ._knowledge import Knowledge, measure, confidence_gate  # type: ignore[assignment]
+    from ._epistemic import EpistemicResult, GUMPropagation      # type: ignore[assignment]
+    SensitivityCoefficient = None  # available after `maturin develop`
 
-# Always expose the pure-Python module so users can import it explicitly.
-from .knowledge import Knowledge as PureKnowledge  # noqa: F401
+from ._compile import compile as compile_sio, run as run_sio
 
 # ---------------------------------------------------------------------------
 # Provenance chain

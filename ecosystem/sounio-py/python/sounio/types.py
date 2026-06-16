@@ -185,6 +185,7 @@ class PipelineResult:
     molecules_passed: int
     pk_fitted: int
     simulation: Optional[SimulationResult] = None
+    knowledge_values: List[Knowledge] = field(default_factory=list)
     provenance_chain: List[str] = field(default_factory=list)
     stdout: str = ""
     exit_code: int = 0

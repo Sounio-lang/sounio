@@ -7,7 +7,6 @@ import sys
 import os
 import tempfile
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 
 from sounio.report import ReportBuilder
 from sounio.knowledge import Knowledge

@@ -10,7 +10,6 @@ import sys
 import tempfile
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 
 from sounio._executor import (
     SounioExecutor,
