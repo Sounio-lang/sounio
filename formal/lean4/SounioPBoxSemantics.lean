@@ -344,9 +344,11 @@ theorem wf_float_to_rat
 
     Proof: two applications of `Float.toRat_le_iff_finite` (axiom 3).
 
-    ⚠ TRUST BOUNDARY: axiom 3 (`Float.toRat_le_iff_finite`).
-    `#print axioms dominatesR_of_dominates` shows the 5 IEEE-754 axioms
-    plus the 4 BoundedOrderedCarrier axioms from SounioFloatInstance. -/
+    ⚠ TRUST BOUNDARY: exactly 3 of the 5 IEEE-754 axioms.
+    `#print axioms dominatesR_of_dominates` shows:
+    `[IsFiniteNormal, toRat, toRat_le_iff_finite]`.
+    The `mul_rne_bound` and `add_rne_bound` axioms are NOT needed here
+    because `addR` is pure ℚ and never called in this proof. -/
 theorem dominatesR_of_dominates
     (q p : Sounio.Knightian.PBox)
     (hqlo : Sounio.IEEE754.Float.IsFiniteNormal q.lo_mean)
@@ -386,8 +388,12 @@ theorem dominatesR_of_dominates
     `Float.add a b`. `toRat` does not commute with `Float.add`; the
     bridge only covers the rational images of the *input* PBoxes.
 
-    ⚠ TRUST BOUNDARY: 5 IEEE-754 axioms (via `dominatesR_of_dominates`).
-    The inner `addR_dominance_monotone` call is pure-ℚ (no axioms). -/
+    ⚠ TRUST BOUNDARY: 3 of the 5 IEEE-754 axioms + [propext, Classical.choice, Quot.sound].
+    `#print axioms add_dominance_monotone_rat` shows:
+    `[propext, Classical.choice, Quot.sound, IsFiniteNormal, toRat, toRat_le_iff_finite]`.
+    The `mul_rne_bound` and `add_rne_bound` axioms are not needed (addR is pure ℚ).
+    The inner `addR_dominance_monotone` call is pure-ℚ; propext/choice/Quot enter via
+    the `obtain` destructor in the two `dominatesR_of_dominates` calls. -/
 theorem add_dominance_monotone_rat
     (a b qa qb : Sounio.Knightian.PBox)
     (hqalo : Sounio.IEEE754.Float.IsFiniteNormal qa.lo_mean)
@@ -464,7 +470,8 @@ def BoundedWellFormedR (p : PBoxR) : Prop :=
     two inequalities that constitute `dominatesR vacuousR p`.
 
     `#print axioms vacuousR_dominates_bounded` shows only
-    `[propext, Classical.choice, Quot.sound]` — no axioms, no sorry. -/
+    `[propext, Quot.sound]` — pure ℚ obtain-pattern, no `Classical.choice`,
+    no axioms, no sorry. -/
 theorem vacuousR_dominates_bounded (p : PBoxR) (h : BoundedWellFormedR p) :
     dominatesR vacuousR p := by
   obtain ⟨_, hlo, hhi⟩ := h
@@ -524,5 +531,61 @@ theorem addR_width_ge_left
   rw [lhs_eq, rhs_eq]
   -- Now prove: a.hi + b.lo ≤ a.hi + b.hi  ↔  b.lo ≤ b.hi ✓
   exact (Rat.add_le_add_left).mpr hb_lo_le_hi
+
+-- ================================================================
+-- §8. Directional projection (for project_band_containment)
+-- ================================================================
+--
+-- `SounioKnightian.project_band_containment` states that a scalar
+-- projection `q` of a p-box preserves containment: if `point ∈ p`,
+-- then `q*point ∈ projectBand(p, q)`. The Float-level statement is
+-- `: True` because no Float order/mul lemmas exist in core Lean 4
+-- (import cycle with SounioPBoxSemantics also prevents restatement there).
+--
+-- Here we discharge the ℚ version: define `projectR` and `containsR`
+-- on `PBoxR`, then prove containment is preserved when `0 ≤ q`.
+-- The sign split (q < 0 case flips lo/hi) is handled by scoping to
+-- `0 ≤ q` — mirroring the runtime `pb_project_band` guard.
+
+/-- Containment predicate on `PBoxR`: the rational `point` lies in
+    the mean band `[lo, hi]`. -/
+def containsR (p : PBoxR) (point : Rat) : Prop :=
+  p.lo ≤ point ∧ point ≤ p.hi
+
+/-- Scalar projection of a `PBoxR` by nonneg `q`. Maps
+    `[lo, hi]` → `[q·lo, q·hi]` (band expands/contracts uniformly).
+    Mirrors the runtime `pb_project_band (p, q)` for `q ≥ 0`. -/
+def projectR (p : PBoxR) (q : Rat) : PBoxR :=
+  { lo  := q * p.lo
+    hi  := q * p.hi
+    var := q * p.var }
+
+/-- **REAL ℚ DISCHARGE** of `SounioKnightian.project_band_containment`.
+
+    For any nonneg scalar `q`, if `point` is contained in `p`'s band,
+    then `q * point` is contained in the projected band `projectR p q`:
+
+        containsR p point → 0 ≤ q → containsR (projectR p q) (q * point)
+
+    Proof: two applications of `Rat.mul_le_mul_of_nonneg_left` (q ≥ 0).
+
+    `#print axioms projectR_containment_rat` shows only
+    `[propext, Classical.choice, Quot.sound]` — pure ℚ, no axioms.
+
+    **STATUS of the Float-level theorem:** `SounioKnightian.project_band_containment`
+    remains `: True`. Float multiplication has no monotonicity lemma in core Lean 4
+    (no `Float.mul_le_iff_finite`); the bridge needs a future `mul_ord_bound` axiom.
+    Use this ℚ theorem in proofs that need the content. -/
+theorem projectR_containment_rat
+    (p : PBoxR) (q point : Rat)
+    (hq  : 0 ≤ q)
+    (hc  : containsR p point) :
+    containsR (projectR p q) (q * point) := by
+  obtain ⟨hlo, hhi⟩ := hc
+  constructor
+  · -- q * p.lo ≤ q * point   (from p.lo ≤ point and q ≥ 0)
+    exact Rat.mul_le_mul_of_nonneg_left hlo hq
+  · -- q * point ≤ q * p.hi   (from point ≤ p.hi and q ≥ 0)
+    exact Rat.mul_le_mul_of_nonneg_left hhi hq
 
 end Sounio.PBoxSemantics

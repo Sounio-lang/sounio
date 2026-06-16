@@ -162,7 +162,9 @@ theorem add_confidence_bounded (a b : PBox)
     `Sounio.PBoxSemantics.add_dominance_monotone_rat` in
     `SounioPBoxSemantics.lean`. That theorem is proven without sorry or
     native_decide, over the rational images `toRatPBox a ..` and rests
-    on the 5 IEEE-754 axioms + the pure-ℚ `addR_dominance_monotone`.
+    on exactly 3 of the 5 IEEE-754 axioms (`toRat`, `IsFiniteNormal`,
+    `toRat_le_iff_finite`) plus `[propext, Classical.choice, Quot.sound]`.
+    (`mul_rne_bound` and `add_rne_bound` are not needed since `addR` is pure ℚ.)
 
     WHY NOT HERE: `SounioPBoxSemantics.lean` imports this file, so
     restating the proof here using `PBoxR`/`toRatPBox`/`dominatesR`
@@ -190,7 +192,20 @@ theorem mul_variance_dominates (a b : PBox)
     HYPER_UNCERTAINTY_PARENTHESIZATION_REPORT.md "directional readout"
     observation: a real-part-like projection breaks the trace tie
     that obscures parenthesization preferences in the unprojected
-    p-box. -/
+    p-box.
+
+    **STATUS: `: True` placeholder — no Float mul-monotone lemma in core Lean 4.**
+
+    The genuine ℚ discharge is `Sounio.PBoxSemantics.projectR_containment_rat`
+    in `SounioPBoxSemantics.lean`. It proves: for `0 ≤ q : Rat` and
+    `containsR p point`, we have `containsR (projectR p q) (q * point)`.
+    Pure ℚ — no axioms, no sorry (`[propext, Classical.choice, Quot.sound]`).
+
+    WHY NOT HERE: `SounioPBoxSemantics.lean` imports this file (import cycle).
+    Additionally, there is no `Float.mul_le_iff_finite` axiom in the
+    IEEE-754 spec to bridge `Float` multiplication monotonicity. The Float-level
+    statement requires a future `mul_ord_bound` axiom (Phase 3 work).
+    Missing lemma: `Float.mul_le_iff_finite` (or `mul_ord_bound`). -/
 theorem project_band_containment (p : PBox) (q : Float)
     (point : Float)
     (h_contains : contains p point) :
