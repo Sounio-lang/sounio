@@ -103,6 +103,39 @@ Required before committing any patch:
 2. **Trace routing.** Determine which emitter the reproducer's overflowing function
    uses (6190 vs driver). Patch only the emitter actually on its path.
 
+## 4b. Validation attempt 2026-06-16 (SLURM 4212, r770) — BUG CONFIRMED REAL; fix UNVALIDATED (confounded)
+
+Run on the operator's read-only working-tree snapshot (front-half WIP **plus** the
+live-site frame fix already applied at 6190 & 7333). A/B = working tree as-is (V_fix)
+vs. the two live sites reverted to `sub rsp,512` (V_base).
+
+**Result — the frame A/B is CONFOUNDED, not a verdict:**
+- Both V_base and V_fix build a Madaros that emits a **core-dumping hello** and
+  **SIGSEGVs while compiling the reproducer** (rc=139, 0 front-half trace lines). The
+  fix is therefore **never exercised** (reproducer dies before codegen) and hello's
+  `main` uses 24 bytes (far below the 64-slot ceiling the fix changes) — so
+  `V_base ≡ V_fix` is *expected* and says nothing about the fix.
+- Cause is upstream of the fix: the **seed cannot self-build a working Madaros from
+  current source**. Source carries `E001` at `module_frontend.sio:3809/3829`
+  (`module_frontend_lower_program_box_traced(&programs[i], …)` arg-type mismatch),
+  present in **both clean main and the WIP** (the WIP does not touch those lines). The
+  seed tolerates it (rc=0) and emits a Madaros with a broken front-half.
+- Environment is fine: the known-good seed builds a `hello` that **runs** on the same
+  worker (`run_rc=0`). Per memory, Madaros was GREEN at `17d1157be` (2026-06-14), so
+  this is most likely a recent regression (candidate: `9e19da1a9` "bypass text-scanning
+  IR path", the module_frontend toucher) — *not* asserted, operator's domain.
+
+**The bug itself IS real** — reproduced on the era-matched backup working Madaros
+(`artifacts/self-hosted/madaros.backup.20260616`, pre-fix), exactly matching the
+original report: N=1 `trail=5` PASS; N=2 `trail=1`, N=4 `trail=15` (wrong); N=5 runtime
+SIGSEGV. Classic frame overflow: `main`'s slots grow with N past the 512-byte frame.
+
+**Conclusion:** the fix targets a genuine defect at the right (live) site, but it is
+**unvalidatable until the self-build regression is repaired** — there is no way to
+produce a *working* Madaros that also carries the fix from current source. The clean
+validation path is: rebuild at the last-known-green commit (`17d1157be`) with the
+live-site fix cherry-picked, then run §5 — an operator decision, not started here.
+
 ## 5. Validation gate (must pass before the fix is called validated)
 
 On a front-half-fixed substrate, via SLURM (`slurm-jobs/madaros-frame-fix/submit_gpu.sh`,
