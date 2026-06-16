@@ -117,7 +117,21 @@ theorem fromKnowledge_zero_gap (v var : Float) (c : Nat) :
     bound. The honest statement requires constraining the well-formedness
     invariant to a `Float` range strictly inside `[-1e18, 1e18]`, or
     moving to `ℝ` semantics. Statement currently trivialised to `True`
-    pending the semantic upgrade (math-review 2026-04-30). -/
+    pending the semantic upgrade (math-review 2026-04-30).
+
+    **STATUS: `: True` placeholder — statement is FALSE for unbounded WellFormed.**
+
+    The BOUNDED ℚ discharge is `Sounio.PBoxSemantics.vacuousR_dominates_bounded`
+    in `SounioPBoxSemantics.lean`. It proves: for any `PBoxR` satisfying
+    `BoundedWellFormedR` (i.e., `WellFormedR` plus `-10^18 ≤ lo ∧ hi ≤ 10^18`),
+    the ℚ-vacuous box `vacuousR` dominates it. This is near-tautological —
+    `BoundedWellFormedR` carries exactly those two inequalities.
+
+    Mutating `WellFormed` here to `BoundedWellFormed` was rejected because
+    it would ripple to `SounioVancomycinDosingSafety` and
+    `SounioTacrolimusDosingSafety` (see risk note in
+    `SounioPBoxSemantics §6`). Callers needing the bounded result should
+    import `SounioPBoxSemantics` directly. -/
 theorem vacuous_widest_placeholder (p : PBox) (hp : WellFormed p) :
     True := by
   trivial
@@ -140,7 +154,21 @@ theorem add_confidence_bounded (a b : PBox)
 
 /-- Containment monotonicity: if `qa` dominates `a` and `qb` dominates `b`,
     then `add qa qb` dominates `add a b`. This is the operational
-    soundness statement: "wider input bands yield wider output bands". -/
+    soundness statement: "wider input bands yield wider output bands".
+
+    **STATUS: `: True` placeholder — IMPORT CYCLE prevents in-place discharge.**
+
+    The genuine ℚ-backed discharge is
+    `Sounio.PBoxSemantics.add_dominance_monotone_rat` in
+    `SounioPBoxSemantics.lean`. That theorem is proven without sorry or
+    native_decide, over the rational images `toRatPBox a ..` and rests
+    on the 5 IEEE-754 axioms + the pure-ℚ `addR_dominance_monotone`.
+
+    WHY NOT HERE: `SounioPBoxSemantics.lean` imports this file, so
+    restating the proof here using `PBoxR`/`toRatPBox`/`dominatesR`
+    would create an import cycle. The `: True` placeholder stays;
+    cite `Sounio.PBoxSemantics.add_dominance_monotone_rat` in proofs
+    that actually need the content. -/
 theorem add_dominance_monotone
     (a b qa qb : PBox)
     (ha : dominates qa a) (hb : dominates qb b) :
