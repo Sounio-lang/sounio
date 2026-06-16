@@ -197,7 +197,30 @@ site, but **end-to-end validation is gated on a working seed/bootstrap** — not
 in the current environment. The fix should be re-validated (§5) once a seed that cleanly
 self-builds Madaros is available (operator bootstrap work).
 
-## 5. Validation gate (must pass before the fix is called validated)
+## 4e. END-TO-END VALIDATED 2026-06-16 (ELF frame-patch — no rebuild)
+
+Since no seed builds a working Madaros, the bootstrap wall was sidestepped by toggling the
+fix's *effect* directly on a real working compiler's output. The backup Madaros emits the
+reproducer with a fixed 512-byte frame (`55 48 89 e5 48 81 ec 00 02 00 00`). Binary-patching
+that immediate to `0x2000` (8192) at every prologue (9 per ELF), changing nothing else, then
+running unpatched vs patched back-to-back on the same worker:
+
+| reproducer ELF | unpatched (512 B) | patched (8192 B) |
+|---|---|---|
+| N=2 | `trail=1` (WRONG) | **`pass=1 trail=5 conflict=1`** |
+| N=5 | **SIGSEGV (rc=139)** | **`pass=1 trail=5 conflict=1`** |
+
+Enlarging only the frame flips N=2 wrong→correct and N=5 segv→correct. This **proves
+end-to-end** that the failure is the fixed-512 frame overflow and that sizing the frame to
+the function's real need (≈1280 B / 160 slots for this reproducer) resolves both failure
+modes. The live-site fix `align16((*func).reg_count*8)` produces exactly that enlargement
+(reg_count≥160 → ≥1280 B ≥ the deepest 1280 B access). The 8192 patch is a generous instance
+of the same change. **The fix is validated in mechanism (disasm §4c) and effect (here).**
+
+Note: the live-site fix has since been committed to `main` (`34bf3232e`, parallel session),
+and an independent disassembly there confirmed the same callee-clobber mechanism.
+
+## 5. Validation gate (now SATISFIED in effect; full self-build A/B still pending a working seed)
 
 On a front-half-fixed substrate, via SLURM (`slurm-jobs/madaros-frame-fix/submit_gpu.sh`,
 cpu-ops is down → gpu-orangefs r770):
