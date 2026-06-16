@@ -171,6 +171,32 @@ genuine fixed-frame overflow; the live-site dynamic frame (`align16(reg_count*8)
 (operator's call): repair the deeper seed miscompile so the seed self-builds, OR rebuild at
 last-known-green `17d1157be` with the live fix cherry-picked, then run §5.
 
+## 4d. Green-rebuild attempt 2026-06-16 (jobs 4217/4218) — end-to-end validation BLOCKED by the toolchain
+
+Tried to build a *working* Madaros carrying the fix by rebuilding the last-known-green
+`17d1157be` (pre-`&programs[i]`-regression) and cherry-picking the dynamic frame at the
+live sites (5445 = `compile_ir_function_v2_core_ir_into`, 6354 = `native_v2_core_begin_fn_spill_into`).
+
+**Result: no available seed can build a working Madaros from any source era.**
+- Both seeds emit a binary (`rc=0`) but report tolerated **hard errors**, miscompiling the
+  result: working-tree seed (2271319 B) → 5 `match must be exhaustive` in
+  `self-hosted/resolve/*.sio`; committed-main seed (2212856 B) → 31 of them. The resulting
+  `17d1157be` Madaros **rejects even `let x=7; print_int(x+35)`** with `E137 use of
+  undeclared variable` — its resolver is miscompiled.
+- Current main via seed → `E001` (the `&programs[i]` misparse) → broken front-half.
+- The only *working* Madaros (backup) **crashes self-compiling `main.sio`**.
+
+So there is currently **no toolchain path** to a working Madaros that carries the fix:
+every seed-build tolerates hard errors and produces a broken binary, and the working
+backup can't self-build. The seed binary itself was swapped mid-session (2212856→2271319),
+and **both** versions are broken for this purpose. This is a bootstrap/seed problem,
+upstream of and independent of the frame fix.
+
+**Bottom line for the frame fix:** mechanism confirmed (§4c), fix at the correct live
+site, but **end-to-end validation is gated on a working seed/bootstrap** — not achievable
+in the current environment. The fix should be re-validated (§5) once a seed that cleanly
+self-builds Madaros is available (operator bootstrap work).
+
 ## 5. Validation gate (must pass before the fix is called validated)
 
 On a front-half-fixed substrate, via SLURM (`slurm-jobs/madaros-frame-fix/submit_gpu.sh`,
