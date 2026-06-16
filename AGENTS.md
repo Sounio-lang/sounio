@@ -149,9 +149,16 @@ Do not hardcode ad hoc compiler routing if a repo resolver already exists.
 
 ### Canonical resolution path
 Use:
-- `scripts/lib/resolve_souc.sh`
+- `scripts/lib/resolve_souc.sh` for the public compiler entrypoint (`bin/souc`).
+- `scripts/lib/resolve_madaros.sh` for the Stage1 modular compiler (`bin/madaros`).
 
 as the canonical compiler-resolution logic unless the task explicitly targets another resolver for cleanup or compatibility reasons.
+
+`bin/souc` is currently a compatibility wrapper whose default engine is Madaros.
+The legacy lean_single engine remains the bootstrap seed and can be forced with
+`SOUNIO_SOUC_ENGINE=lean_single`. For fleet coordination and stale-worktree
+rules, read `docs/MADAROS_STATUS.md`; stale raw `artifacts/self-hosted/madaros`
+binaries are not evidence against current `origin/main`.
 
 ### Test harness
 Use:

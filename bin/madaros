@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# bin/madaros — launcher for the Madaros modular compiler raw ELF.
+#
+# Madaros is the Stage1 self-hosted compiler built from
+# self-hosted/compiler/main.sio. It is distinct from the Stage0 bootstrap
+# compiler (lean_single.sio) which is exposed as bin/souc.
+#
+# The raw modular compiler exposes backend-specific modes. This launcher adds a
+# small stable CLI for normal use and still passes raw modes through unchanged.
+#
+# Usage:
+#   madaros --version
+#   madaros info
+#   madaros check input.sio
+#   madaros build input.sio -o out.elf
+#   madaros run input.sio
+#   madaros pkg ...
+#
+# Environment:
+#   SOUNIO_STDLIB_PATH     — forwarded to the raw ELF unchanged
+#   MADAROS_RAW_BIN        — override the underlying modular raw ELF
+#   SOUNIO_MADAROS_BIN     — alias for MADAROS_RAW_BIN
+#
+# To obtain the raw ELF, run:
+#   make build-madaros
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Resolve the underlying modular raw ELF.
+# Resolution order:
+#   1. MADAROS_RAW_BIN / SOUNIO_MADAROS_BIN env var
+#   2. artifacts/self-hosted/madaros (built by make build-madaros)
+#   3. bin/madaros-linux-x86_64 (checked-in prebuilt)
+_resolve_modular_elf() {
+  local cand
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+    if [[ -n "$cand" && -x "$cand" && "$(head -c 2 "$cand" 2>/dev/null)" != "#!" ]]; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  echo "error: madaros: no modular compiler raw ELF found" >&2
+  echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, $ROOT_DIR/artifacts/self-hosted/madaros, $ROOT_DIR/bin/madaros-linux-x86_64" >&2
+  echo "  run: make build-madaros" >&2
+  return 1
+}
+
+if ! RAW_MADAROS="$(_resolve_modular_elf)"; then
+  exit 127
+fi
+
+usage() {
+  cat <<USAGE
+madaros — launcher for the Madaros modular compiler ($RAW_MADAROS)
+
+Usage:
+  madaros --version                     print compiler identity
+  madaros info                          print resolution path
+  madaros check <source.sio>            parse, resolve and typecheck
+  madaros build <source.sio> [-o OUT]   compile source to a native ELF
+  madaros compile <source.sio> [-o OUT] alias for build
+  madaros run <source.sio>              compile to a temp ELF and run it
+  madaros pkg <subcommand>...           package-manager commands
+  madaros <raw-compiler-args>...        pass through to the raw ELF
+
+Common modular-compiler modes:
+  madaros --check <source.sio>          raw check mode
+  madaros --native-v2-compile SRC OUT   raw source-to-ELF native-v2 path
+  madaros --native-v2-emit13            emit artifacts/omega/emit13.elf
+  madaros --native-v2-emit-scalar N     emit a scalar witness
+  madaros --version-json                emit version metadata
+  madaros pkg ...                       package manager commands
+
+Environment:
+  SOUNIO_STDLIB_PATH=<dir>     forwarded to raw ELF
+  MADAROS_RAW_BIN=<path>       override raw ELF
+  SOUNIO_MADAROS_BIN=<path>    override raw ELF (alias)
+USAGE
+}
+
+info() {
+  echo "wrapper:      $0"
+  echo "raw_elf:      $RAW_MADAROS"
+  echo "stdlib:       ${SOUNIO_STDLIB_PATH:-<unset>}"
+  local identity
+  identity="$("$RAW_MADAROS" /dev/null /dev/null 2>/dev/null)" || true
+  echo "identity:     $(echo "$identity" | head -n 1)"
+}
+
+version() {
+  local out
+  out="$("$RAW_MADAROS" /dev/null /dev/null 2>/dev/null)" || true
+  echo "$out" | head -n 1
+}
+
+_check_source_arg() {
+  local src="$1"
+  if [[ ! -e "$src" ]]; then
+    echo "error: at $src:0:0 - could not read input file" >&2
+    return 1
+  fi
+}
+
+_run_raw_check() {
+  local src="$1"
+  shift
+  _check_source_arg "$src"
+  if [[ ! -s "$src" ]]; then
+    local tmp_empty
+    tmp_empty="$(mktemp "${TMPDIR:-/tmp}/madaros-empty-check.XXXXXX.sio")"
+    printf '\n' > "$tmp_empty"
+    "$RAW_MADAROS" --check "$tmp_empty" "$@"
+    local rc=$?
+    rm -f "$tmp_empty"
+    return "$rc"
+  fi
+  "$RAW_MADAROS" --check "$src" "$@"
+}
+
+_parse_output_path() {
+  local fallback="$1"
+  shift
+  local out="$fallback"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: $1 requires a path" >&2
+          return 2
+        fi
+        out="$2"
+        shift 2
+        ;;
+      *)
+        echo "error: madaros build: unsupported option: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+  echo "$out"
+}
+
+_build_native_v2() {
+  local src="$1"
+  shift
+  _check_source_arg "$src"
+  if [[ ! -s "$src" ]]; then
+    echo "error: madaros build: source is empty: $src" >&2
+    return 1
+  fi
+  local out
+  out="$(_parse_output_path a.out "$@")"
+  mkdir -p "$(dirname "$out")"
+  rm -f "$out"
+  "$RAW_MADAROS" --native-v2-compile "$src" "$out"
+  if [[ ! -s "$out" ]]; then
+    echo "error: madaros build: compiler produced no ELF at $out" >&2
+    return 1
+  fi
+  chmod +x "$out"
+}
+
+_run_source() {
+  local src="$1"
+  shift
+  local tmp_dir out
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/madaros-run.XXXXXX")"
+  out="$tmp_dir/main.elf"
+  _build_native_v2 "$src" -o "$out"
+  "$out" "$@"
+  local rc=$?
+  rm -rf "$tmp_dir"
+  return "$rc"
+}
+
+# Parse subcommands.
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 0
+fi
+
+case "$1" in
+  --version|-V)
+    version
+    ;;
+  info)
+    info
+    ;;
+  check)
+    if [[ $# -lt 2 ]]; then
+      echo "error: madaros check: missing source file" >&2
+      exit 2
+    fi
+    _run_raw_check "$2" "${@:3}"
+    ;;
+  build|compile)
+    if [[ $# -lt 2 ]]; then
+      echo "error: madaros build: missing source file" >&2
+      exit 2
+    fi
+    _build_native_v2 "$2" "${@:3}"
+    ;;
+  run)
+    if [[ $# -lt 2 ]]; then
+      echo "error: madaros run: missing source file" >&2
+      exit 2
+    fi
+    _run_source "$2" "${@:3}"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    if [[ "$1" == "--check" && $# -ge 2 ]]; then
+      _run_raw_check "$2" "${@:3}"
+      exit $?
+    fi
+    # Pass everything through to the raw ELF unchanged.
+    "$RAW_MADAROS" "$@"
+    ;;
+esac

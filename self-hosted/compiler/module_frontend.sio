@@ -11,7 +11,7 @@ use io::env::{read_env}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_program_epistemic_into}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
-use module_parse::{extract_imports_from_ast, file_exists, load_module_file}
+use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
 
 fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1")
@@ -194,15 +194,16 @@ fn module_frontend_source_contains_pattern(path: string, pattern: string) -> boo
 }
 
 fn module_frontend_check_items_with_source_context(items: Option<Box<ItemList>>, source_path: string) -> i64 with IO, Mut, Div, Panic, Alloc {
+    let module_path = file_path_to_module_path(source_path)
     if module_frontend_source_contains_pattern(source_path, "//@ ontology-side-table-cache:") {
-        let cache_verdict = check_items_verdict_boot4_with_ontocache_sidecar(items, source_path)
+        let cache_verdict = check_items_verdict_boot4_with_ontocache_sidecar(items, source_path, module_path)
         if cache_verdict != 0 {
             return cache_verdict
         }
         return knowledge_context_validate_items_values_only(items)
     }
 
-    let verdict = check_items_verdict_boot4(items)
+    let verdict = check_items_verdict_boot4_with_module_path(items, module_path)
     if verdict != 0 {
         return verdict
     }
@@ -1032,7 +1033,7 @@ fn visited_contains(visited: [string; 256], count: i64, path: string) -> bool wi
     false
 }
 
-struct ImportPathList {
+pub struct ImportPathList {
     paths: [string; 256],
     count: i64,
 }
@@ -1125,7 +1126,7 @@ fn module_frontend_import_path_from_source(
     str_from_bytes(buf, pos)
 }
 
-fn module_frontend_import_files_from_source(path: string) -> ImportPathList with IO, Mut, Panic, Div {
+pub fn module_frontend_import_files_from_source(path: string) -> ImportPathList with IO, Mut, Panic, Div {
     var imports = import_path_list_empty()
     let n = module_frontend_load_import_file(path)
     if n <= 0 {
@@ -1853,6 +1854,264 @@ fn module_frontend_source_paren_close(data: string, open: i64, end: i64) -> i64 
     k - 1
 }
 
+fn module_frontend_source_trim_ws_end(data: string, start: i64, end: i64) -> i64 {
+    var k = end
+    while k > start {
+        let ch = data[(k - 1) as usize]
+        if ch == (32 as i8) || ch == (9 as i8) || ch == (10 as i8) || ch == (13 as i8) {
+            k = k - 1
+        } else {
+            return k
+        }
+    }
+    k
+}
+
+fn module_frontend_source_arg_count(data: string, start: i64, end: i64) -> i64 {
+    let first = module_frontend_source_skip_ws(data, start, end)
+    if first >= end {
+        return 0
+    }
+    var count: i64 = 1
+    var depth: i64 = 0
+    var i = first
+    while i < end {
+        let ch = data[i as usize]
+        if ch == (40 as i8) {
+            depth = depth + 1
+        } else if ch == (41 as i8) {
+            if depth > 0 {
+                depth = depth - 1
+            }
+        } else if ch == (44 as i8) && depth == 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+struct ModuleFrontendArgSpan {
+    ok: bool,
+    start: i64,
+    end: i64,
+}
+
+fn module_frontend_source_arg_span(data: string, start: i64, end: i64, target_idx: i64) -> ModuleFrontendArgSpan {
+    var idx: i64 = 0
+    var depth: i64 = 0
+    var arg_start = module_frontend_source_skip_ws(data, start, end)
+    var i = arg_start
+    while i < end {
+        let ch = data[i as usize]
+        if ch == (40 as i8) {
+            depth = depth + 1
+        } else if ch == (41 as i8) {
+            if depth > 0 {
+                depth = depth - 1
+            }
+        } else if ch == (44 as i8) && depth == 0 {
+            if idx == target_idx {
+                let arg_end = module_frontend_source_trim_ws_end(data, arg_start, i)
+                return ModuleFrontendArgSpan { ok: true, start: arg_start, end: arg_end }
+            }
+            idx = idx + 1
+            arg_start = module_frontend_source_skip_ws(data, i + 1, end)
+        }
+        i = i + 1
+    }
+    if idx == target_idx {
+        let final_end = module_frontend_source_trim_ws_end(data, arg_start, end)
+        return ModuleFrontendArgSpan { ok: arg_start < final_end, start: arg_start, end: final_end }
+    }
+    ModuleFrontendArgSpan { ok: false, start: 0, end: 0 }
+}
+
+fn module_frontend_source_fn_param_name(data: string, fn_pos: i64, size: i64, target_idx: i64) -> Name with Mut, Panic, Div {
+    var empty = Name { buf: [0; 128], len: 0 }
+    var open = fn_pos
+    while open < size && data[open as usize] != (40 as i8) {
+        open = open + 1
+    }
+    if open >= size {
+        return empty
+    }
+    var idx: i64 = 0
+    var depth: i64 = 0
+    var i = open + 1
+    while i < size {
+        i = module_frontend_source_skip_ws(data, i, size)
+        if i >= size || data[i as usize] == (41 as i8) {
+            return empty
+        }
+        let name = module_frontend_source_ident_at(data, i, size)
+        if name.len <= 0 {
+            return empty
+        }
+        if idx == target_idx {
+            return name
+        }
+        i = i + name.len
+        while i < size {
+            let ch = data[i as usize]
+            if ch == (40 as i8) {
+                depth = depth + 1
+            } else if ch == (41 as i8) {
+                if depth == 0 {
+                    return empty
+                }
+                depth = depth - 1
+            } else if ch == (44 as i8) && depth == 0 {
+                idx = idx + 1
+                i = i + 1
+                break
+            }
+            i = i + 1
+        }
+    }
+    empty
+}
+
+fn module_frontend_try_eval_source_fn_i64_one_arg(data: string, size: i64, fn_name: Name, arg0_value: i64, depth: i64) -> (bool, i64) with Mut, Panic, Div {
+    if depth > 16 {
+        return (false, 0)
+    }
+    let fn_pos = module_frontend_source_find_fn(data, size, fn_name)
+    if fn_pos < 0 {
+        return (false, 0)
+    }
+    let param0 = module_frontend_source_fn_param_name(data, fn_pos, size, 0)
+    if param0.len <= 0 {
+        return (false, 0)
+    }
+    let body = module_frontend_source_body_start(data, fn_pos, size)
+    if body < 0 {
+        return (false, 0)
+    }
+    let body_end = module_frontend_source_body_end(data, body, size)
+    let expr = module_frontend_source_strip_return_prefix(data, body, body_end)
+    let empty = Name { buf: [0; 128], len: 0 }
+    module_frontend_try_eval_source_expr_i64_with_locals4(data, expr, body_end, size, depth + 1, param0, arg0_value, true, empty, 0, false, empty, 0, false, empty, 0, false)
+}
+
+fn module_frontend_try_eval_source_fn_i64_two_numeric_args(data: string, size: i64, fn_name: Name, arg0_value: i64, arg1_value: i64, depth: i64) -> (bool, i64) with Mut, Panic, Div {
+    if depth > 16 {
+        return (false, 0)
+    }
+    let fn_pos = module_frontend_source_find_fn(data, size, fn_name)
+    if fn_pos < 0 {
+        return (false, 0)
+    }
+    let param0 = module_frontend_source_fn_param_name(data, fn_pos, size, 0)
+    let param1 = module_frontend_source_fn_param_name(data, fn_pos, size, 1)
+    if param0.len <= 0 || param1.len <= 0 {
+        return (false, 0)
+    }
+    let body = module_frontend_source_body_start(data, fn_pos, size)
+    if body < 0 {
+        return (false, 0)
+    }
+    let body_end = module_frontend_source_body_end(data, body, size)
+    let expr = module_frontend_source_strip_return_prefix(data, body, body_end)
+    let empty = Name { buf: [0; 128], len: 0 }
+    module_frontend_try_eval_source_expr_i64_with_locals4(data, expr, body_end, size, depth + 1, param0, arg0_value, true, param1, arg1_value, true, empty, 0, false, empty, 0, false)
+}
+
+fn module_frontend_try_eval_source_fn_i64_hof2(data: string, size: i64, fn_name: Name, arg0_fn: Name, arg1_value: i64, depth: i64) -> (bool, i64) with Mut, Panic, Div {
+    if depth > 16 {
+        return (false, 0)
+    }
+    let fn_pos = module_frontend_source_find_fn(data, size, fn_name)
+    if fn_pos < 0 {
+        return (false, 0)
+    }
+    let param0 = module_frontend_source_fn_param_name(data, fn_pos, size, 0)
+    let param1 = module_frontend_source_fn_param_name(data, fn_pos, size, 1)
+    if param0.len <= 0 || param1.len <= 0 {
+        return (false, 0)
+    }
+    let body = module_frontend_source_body_start(data, fn_pos, size)
+    if body < 0 {
+        return (false, 0)
+    }
+    let body_end = module_frontend_source_body_end(data, body, size)
+    let expr = module_frontend_source_strip_return_prefix(data, body, body_end)
+    let body_callee = module_frontend_source_ident_at(data, expr, body_end)
+    if !ir_name_eq(body_callee, param0) {
+        return (false, 0)
+    }
+    var open = module_frontend_source_skip_ws(data, expr + body_callee.len, body_end)
+    if open >= body_end || data[open as usize] != (40 as i8) {
+        return (false, 0)
+    }
+    let close = module_frontend_source_paren_close(data, open, body_end)
+    if close < 0 {
+        return (false, 0)
+    }
+    let arg_span = module_frontend_source_arg_span(data, open + 1, close, 0)
+    if !arg_span.ok {
+        return (false, 0)
+    }
+    let inner_arg = module_frontend_source_ident_at(data, arg_span.start, arg_span.end)
+    let inner_after = module_frontend_source_skip_ws(data, arg_span.start + inner_arg.len, arg_span.end)
+    if inner_arg.len <= 0 || inner_after != arg_span.end || !ir_name_eq(inner_arg, param1) {
+        return (false, 0)
+    }
+    module_frontend_try_eval_source_fn_i64_one_arg(data, size, arg0_fn, arg1_value, depth + 1)
+}
+
+fn module_frontend_try_eval_source_call_i64_with_locals4(data: string, size: i64, callee: Name, args_start: i64, args_end: i64, depth: i64, local0_name: Name, local0_value: i64, has_local0: bool, local1_name: Name, local1_value: i64, has_local1: bool, local2_name: Name, local2_value: i64, has_local2: bool, local3_name: Name, local3_value: i64, has_local3: bool) -> (bool, i64) with Mut, Panic, Div {
+    let argc = module_frontend_source_arg_count(data, args_start, args_end)
+    if argc == 0 {
+        let fn_pos = module_frontend_source_find_fn(data, size, callee)
+        if fn_pos < 0 {
+            return (false, 0)
+        }
+        let body = module_frontend_source_body_start(data, fn_pos, size)
+        if body < 0 {
+            return (false, 0)
+        }
+        let body_end = module_frontend_source_body_end(data, body, size)
+        return module_frontend_try_eval_source_body_i64(data, body, body_end, size, depth + 1)
+    }
+    if argc == 1 {
+        let arg0 = module_frontend_source_arg_span(data, args_start, args_end, 0)
+        if !arg0.ok {
+            return (false, 0)
+        }
+        let arg0_value = module_frontend_try_eval_source_expr_i64_with_locals4(data, arg0.start, arg0.end, size, depth + 1, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
+        if !arg0_value.0 {
+            return (false, 0)
+        }
+        return module_frontend_try_eval_source_fn_i64_one_arg(data, size, callee, arg0_value.1, depth + 1)
+    }
+    if argc == 2 {
+        let arg0 = module_frontend_source_arg_span(data, args_start, args_end, 0)
+        let arg1 = module_frontend_source_arg_span(data, args_start, args_end, 1)
+        if !arg0.ok || !arg1.ok {
+            return (false, 0)
+        }
+        let arg1_value = module_frontend_try_eval_source_expr_i64_with_locals4(data, arg1.start, arg1.end, size, depth + 1, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
+        if !arg1_value.0 {
+            return (false, 0)
+        }
+        let arg0_ident = module_frontend_source_ident_at(data, arg0.start, arg0.end)
+        let arg0_after = module_frontend_source_skip_ws(data, arg0.start + arg0_ident.len, arg0.end)
+        if arg0_ident.len > 0 && arg0_after == arg0.end && module_frontend_source_find_fn(data, size, arg0_ident) >= 0 {
+            let hof_value = module_frontend_try_eval_source_fn_i64_hof2(data, size, callee, arg0_ident, arg1_value.1, depth + 1)
+            if hof_value.0 {
+                return hof_value
+            }
+        }
+        let arg0_value = module_frontend_try_eval_source_expr_i64_with_locals4(data, arg0.start, arg0.end, size, depth + 1, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
+        if !arg0_value.0 {
+            return (false, 0)
+        }
+        return module_frontend_try_eval_source_fn_i64_two_numeric_args(data, size, callee, arg0_value.1, arg1_value.1, depth + 1)
+    }
+    (false, 0)
+}
+
 fn module_frontend_try_eval_source_expr_i64_with_locals4(data: string, start: i64, end: i64, size: i64, depth: i64, local0_name: Name, local0_value: i64, has_local0: bool, local1_name: Name, local1_value: i64, has_local1: bool, local2_name: Name, local2_value: i64, has_local2: bool, local3_name: Name, local3_value: i64, has_local3: bool) -> (bool, i64) with Mut, Panic, Div {
     if depth > 16 {
         return (false, 0)
@@ -2185,20 +2444,11 @@ fn module_frontend_try_eval_source_expr_i64_with_locals4(data: string, start: i6
             var j = i + callee.len
             j = module_frontend_source_skip_ws(data, j, end)
             if j < end && data[j as usize] == (40 as i8) {
-                j = module_frontend_source_skip_ws(data, j + 1, end)
-                if j >= end || data[j as usize] != (41 as i8) {
+                let call_close = module_frontend_source_paren_close(data, j, end)
+                if call_close < 0 {
                     return (false, 0)
                 }
-                let fn_pos = module_frontend_source_find_fn(data, size, callee)
-                if fn_pos < 0 {
-                    return (false, 0)
-                }
-                let body = module_frontend_source_body_start(data, fn_pos, size)
-                if body < 0 {
-                    return (false, 0)
-                }
-                let body_end = module_frontend_source_body_end(data, body, size)
-                let call_value = module_frontend_try_eval_source_body_i64(data, body, body_end, size, depth + 1)
+                let call_value = module_frontend_try_eval_source_call_i64_with_locals4(data, size, callee, j + 1, call_close, depth + 1, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
                 if !call_value.0 {
                     return (false, 0)
                 }
@@ -2220,7 +2470,7 @@ fn module_frontend_try_eval_source_expr_i64_with_locals4(data: string, start: i6
                 mul_op = 0
                 seen = true
                 expect_term = false
-                i = j + 1
+                i = call_close + 1
             } else {
                 let local_lookup = module_frontend_lookup_source_locals4_i64(callee, local0_name, local0_value, has_local0, local1_name, local1_value, has_local1, local2_name, local2_value, has_local2, local3_name, local3_value, has_local3)
                 if !local_lookup.0 {
@@ -2842,17 +3092,17 @@ fn module_frontend_lower_program_counts_traced(
 }
 
 fn module_frontend_lower_program_box_traced(
-    program: Program,
+    program: &Program,
     module_index: i64,
     trace: &! LoadMultimoduleIrTrace
 ) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
     trace.last_stage = "lower_summary"
     trace.last_module_index = module_index
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
-    var module = Box::new(ir_empty_module())
-    module = module_frontend_lower_items_into(program.items, module)
+    let epistemic = ir_empty_epistemic_section()
+    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(program, epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
-    if (*module).fn_count <= 0 {
+    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
         trace.last_stage = "lower_summary_error"
         return module_frontend_lower_box_error("ir_summary_failed")
     }
@@ -2860,12 +3110,25 @@ fn module_frontend_lower_program_box_traced(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    var summary_val = (*summary_result.summary)
+    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
+        program,
+        &summary_val,
+        epistemic
+    )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
+    if body_result.had_error {
+        trace.last_stage = "lower_bodies_error"
+        return module_frontend_lower_box_error("ir_bodies_failed")
+    }
 
     trace.body_lowered_modules = trace.body_lowered_modules + 1
     trace.lowered_modules = trace.lowered_modules + 1
+    trace.patched_functions = trace.patched_functions + body_result.patch_stats.patched_functions
+    trace.patched_calls = trace.patched_calls + body_result.patch_stats.patched_calls
+    trace.fallback_insertions = trace.fallback_insertions + body_result.patch_stats.fallback_insertions
     trace.last_stage = "lower_bodies_done"
-    module_frontend_lower_box_ok(module, ir_empty_validated_patch_stats())
+    module_frontend_lower_box_ok(body_result.module, body_result.patch_stats)
 }
 
 pub fn bridge_lower_single_module_box(
@@ -2890,13 +3153,42 @@ pub fn bridge_lower_single_module_box(
     }
     trace.typechecked_modules = 1
     trace.last_stage = "lower_single"
-    let lower_program = load_module_file(source_path)
-    let result = module_frontend_lower_program_box_traced(lower_program, 0, trace)
-    if result.ok {
-        trace.merged_modules = 1
-        trace.last_stage = "done"
+    let lowered = module_frontend_lower_program_box_traced(&program, 0, trace)
+    if !lowered.ok { return lowered }
+    trace.merged_modules = 1
+    trace.last_stage = "done"
+    lowered
+}
+
+pub fn bridge_lower_single_module_box(main_path: string, trace: &! LoadMultimoduleIrTrace) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
+    // Mirror load_multimodule_lower_program_traced EXACTLY (single load_module_file,
+    // no extra large Program locals, no separate typecheck) so this fn's frame
+    // matches the proven-good one. Return the body Box<IrModule> directly instead
+    // of materializing a by-value IrModule.
+    let prog_lower = load_module_file(main_path)
+    let main_parse_errors = parser_last_error_count()
+    if main_parse_errors > 0 {
+        print("Parse failed during IR lowering for module 0: ")
+        print_int(main_parse_errors)
+        print(" errors\n")
+        return module_frontend_lower_box_error("parse_failed")
     }
-    result
+    let epistemic = ir_empty_epistemic_section()
+    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&prog_lower, epistemic)
+    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+        return module_frontend_lower_box_error("ir_summary_failed")
+    }
+    var summary_val = (*summary_result.summary)
+    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
+        &prog_lower,
+        &summary_val,
+        epistemic
+    )
+    if body_result.had_error {
+        return module_frontend_lower_box_error("ir_bodies_failed")
+    }
+    parser_reset_last_errors()
+    module_frontend_lower_box_ok(body_result.module, body_result.patch_stats)
 }
 
 fn load_multimodule_lower_program_traced(
@@ -3536,7 +3828,7 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
     trace.last_module_index = 0
     trace.typechecked_modules = 1
     let seed_prog_lower = load_module_file(file_paths[0])
-    let seed_lower_result = module_frontend_lower_program_box_traced(seed_prog_lower, 0, trace)
+    let seed_lower_result = module_frontend_lower_program_box_traced(&seed_prog_lower, 0, trace)
     if !seed_lower_result.ok {
         print("IR lowering failed for module 0\n")
         return multimodule_ir_error("ir_lowering_failed")
@@ -3557,7 +3849,7 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         trace.last_module_index = i
         trace.typechecked_modules = trace.typechecked_modules + 1
         let prog_lower = load_module_file(file_paths[i])
-        let lower_result = module_frontend_lower_program_box_traced(prog_lower, i, trace)
+        let lower_result = module_frontend_lower_program_box_traced(&prog_lower, i, trace)
         if !lower_result.ok {
             print("IR lowering failed for module ")
             print_int(i)

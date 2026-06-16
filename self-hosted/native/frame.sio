@@ -200,6 +200,7 @@ pub var NC_V2_LABEL_OFFSETS: [i64; 256] = [0; 256]
 pub var NC_V2_LABEL_PATCH_OFFSETS: [i64; 256] = [0; 256]
 pub var NC_V2_LABEL_PATCH_IDS: [i64; 256] = [0; 256]
 pub var NC_V2_LABEL_PATCH_COUNT: i64 = 0
+pub var NC_V2_NEXT_CMP_LABEL: i64 = 210
 
 // ============================================================================
 // Compiler state
@@ -207,6 +208,7 @@ pub var NC_V2_LABEL_PATCH_COUNT: i64 = 0
 
 pub struct NativeCompiler {
     pub code: CodeBuffer,
+    pub code_overflow: bool,
     pub relocs: RelocationTable,
     pub flat_reloc_offsets: [i64; 4096],
     pub flat_reloc_kind_codes: [i64; 4096],
@@ -241,6 +243,9 @@ pub struct NativeCompiler {
 
     // Per-function: float register tracking (vreg index -> 1 if f64, 0 if i64)
     pub is_float_reg: [i64; 512],
+    pub field_float_base_regs: [i64; 256],
+    pub field_float_indices: [i64; 256],
+    pub field_float_count: i64,
 
     // Per-function: compile strategy (Sprint 38)
     // 0=standard, 1=aggressive, 2=precision_preserving, 3=instrumented,
@@ -297,6 +302,9 @@ pub struct NativeCompiler {
 
     // Target OS for conditional builtin code generation (0=unknown, 1=Linux, 2=macOS, 3=Windows)
     pub target_os_id: i64,
+
+    // BSS segment size (copied from IrModule before ELF write)
+    pub bss_total_size: i64,
 }
 
 pub fn compiler_new() -> NativeCompiler {
@@ -331,6 +339,7 @@ pub fn compiler_new() -> NativeCompiler {
     out.current_machine_spill_count = 0
     out.extern_relocs = extern_reloc_table_new()
     out.target_os_id = 0
+    out.bss_total_size = 0
     var i: i64 = 0
     while i < 256 {
         out.fn_offsets[i as usize] = -1
@@ -363,6 +372,13 @@ pub fn reset_function_state_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
     while j < 512 {
         (*nc).is_float_reg[j as usize] = 0
         j = j + 1
+    }
+    (*nc).field_float_count = 0
+    var fj = 0
+    while fj < 256 {
+        (*nc).field_float_base_regs[fj as usize] = -1
+        (*nc).field_float_indices[fj as usize] = -1
+        fj = fj + 1
     }
     (*nc).current_strategy = 0
     var ra = 0
@@ -502,12 +518,10 @@ pub fn patch_label_forwards_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
         let target = NC_V2_LABEL_OFFSETS[patch_lid as usize]
         if target >= 0 && patch_off >= 0 && label_patch_is_rel32_branch(nc, patch_off) {
             let rel = target - (patch_off + 4)
-            var code = (*nc).code
-            code.bytes[patch_off as usize] = low8(rel) as i8
-            code.bytes[(patch_off + 1) as usize] = low8(rel >> 8) as i8
-            code.bytes[(patch_off + 2) as usize] = low8(rel >> 16) as i8
-            code.bytes[(patch_off + 3) as usize] = low8(rel >> 24) as i8
-            (*nc).code = code
+            (*nc).code.bytes[patch_off as usize] = low8(rel) as i8
+            (*nc).code.bytes[(patch_off + 1) as usize] = low8(rel >> 8) as i8
+            (*nc).code.bytes[(patch_off + 2) as usize] = low8(rel >> 16) as i8
+            (*nc).code.bytes[(patch_off + 3) as usize] = low8(rel >> 24) as i8
         }
         i = i + 1
     }

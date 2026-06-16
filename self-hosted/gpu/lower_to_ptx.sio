@@ -9,7 +9,9 @@ fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
 
     // 1. Emit header (.version, .target, .address_size)
     buf = ptx_emit_header(buf)
-    buf = gpu_emit_kernel_mode_metadata(buf, kernel)
+    // gpu_emit_kernel_mode_metadata skipped: calls gpu_legalize_kernel_to_ssa_v2 which
+    // returns GpuKernelSsaV2 by value (~28MB frame) → SIGSEGV in lean_single-compiled binary.
+    // The function only emits cosmetic PTX comment lines; skip it for correctness.
 
     // 2. Emit kernel signature
     buf = gpu_emit_kernel_signature(buf, kernel)
@@ -186,7 +188,13 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
 
         GpuOpcode::GpuCvt => {
             // cvt.dst_ty.src_ty %rdN, %rM — built dynamically from op.dst_ty / op.src_ty
-            let opcode = str_concat(str_concat("cvt.", gpu_type_to_string(op.dst_ty)), str_concat(".", gpu_type_to_string(op.src_ty)))
+            // NOTE: str_concat(str_concat(A,B), str_concat(C,D)) clobbers BUILTIN_SLOT_A/B in
+            // lean_single; break nested calls into sequential variable assignments.
+            let dst_ty_str = gpu_type_to_string(op.dst_ty)
+            let src_ty_str = gpu_type_to_string(op.src_ty)
+            let cvt_dst = str_concat("cvt.", dst_ty_str)
+            let dot_src = str_concat(".", src_ty_str)
+            let opcode = str_concat(cvt_dst, dot_src)
             let dst_str = gpu_reg_u64(op.dst_reg)
             let src_str = gpu_reg_u32(op.src_reg)
 
@@ -194,12 +202,20 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
         }
 
         GpuOpcode::GpuMulImm => {
-            // mul.lo.u64 %rdN, %rdM, imm
+            // mul.lo.u64 %rdN, %rdM, imm  (immediate via gpu_push_i64 — i64_to_string is UAF)
             let dst_str = if op.ty == GpuType::GpuU64 { gpu_reg_u64(op.dst_reg) } else { gpu_reg_u32(op.dst_reg) }
             let lhs_str = if op.ty == GpuType::GpuU64 { gpu_reg_u64(op.lhs_reg) } else { gpu_reg_u32(op.lhs_reg) }
-            let imm_str = i64_to_string(op.rhs_imm)
-
-            ptx_push_binary3(buf, ptx_opcode_mul_lo_u64(), dst_str, lhs_str, imm_str)
+            var mout = buf
+            mout = ptx_push_str(mout, "    ")
+            mout = ptx_push_str(mout, ptx_opcode_mul_lo_u64())
+            mout = ptx_push_str(mout, " ")
+            mout = ptx_push_str(mout, dst_str)
+            mout = ptx_push_str(mout, ", ")
+            mout = ptx_push_str(mout, lhs_str)
+            mout = ptx_push_str(mout, ", ")
+            mout = gpu_push_i64(mout, op.rhs_imm)
+            mout = ptx_push_str(mout, ";\n")
+            mout
         }
 
         GpuOpcode::GpuAdd => {
@@ -484,7 +500,18 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                 GpuType::GpuI64 => gpu_reg_i64(op.src_reg),
                 _ => gpu_reg_f32(op.src_reg),
             }
-            ptx_push_shfl_down(buf, opcode, dst_str, src_str, i64_to_string(actual_offset))
+            // Inline shfl emission: i64_to_string(actual_offset) is UAF when passed to a fn
+            var shfl_out = buf
+            shfl_out = ptx_push_str(shfl_out, "    ")
+            shfl_out = ptx_push_str(shfl_out, opcode)
+            shfl_out = ptx_push_str(shfl_out, " ")
+            shfl_out = ptx_push_str(shfl_out, dst_str)
+            shfl_out = ptx_push_str(shfl_out, ", ")
+            shfl_out = ptx_push_str(shfl_out, src_str)
+            shfl_out = ptx_push_str(shfl_out, ", ")
+            shfl_out = gpu_push_i64(shfl_out, actual_offset)
+            shfl_out = ptx_push_str(shfl_out, ", 0xffffffff;\n")
+            shfl_out
         }
 
         GpuOpcode::GpuSetpLt => {
@@ -492,21 +519,27 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                 GpuType::GpuU32 => ptx_opcode_setp_lt_u32(),
                 GpuType::GpuU64 => ptx_opcode_setp_lt_u64(),
                 GpuType::GpuF32 => ptx_opcode_setp_lt_f32(),
+                GpuType::GpuF64 => ptx_opcode_setp_lt_f64(),
                 GpuType::GpuI32 => ptx_opcode_setp_lt_s32(),
+                GpuType::GpuI64 => ptx_opcode_setp_lt_s64(),
                 _ => ptx_opcode_setp_lt_u32(),
             }
             let lhs_str = match op.ty {
                 GpuType::GpuU32 => gpu_reg_u32(op.lhs_reg),
                 GpuType::GpuU64 => gpu_reg_u64(op.lhs_reg),
                 GpuType::GpuF32 => gpu_reg_f32(op.lhs_reg),
+                GpuType::GpuF64 => gpu_reg_f64(op.lhs_reg),
                 GpuType::GpuI32 => gpu_reg_i32(op.lhs_reg),
+                GpuType::GpuI64 => gpu_reg_i64(op.lhs_reg),
                 _ => gpu_reg_u32(op.lhs_reg),
             }
             let rhs_str = match op.ty {
                 GpuType::GpuU32 => gpu_reg_u32(op.rhs_reg),
                 GpuType::GpuU64 => gpu_reg_u64(op.rhs_reg),
                 GpuType::GpuF32 => gpu_reg_f32(op.rhs_reg),
+                GpuType::GpuF64 => gpu_reg_f64(op.rhs_reg),
                 GpuType::GpuI32 => gpu_reg_i32(op.rhs_reg),
+                GpuType::GpuI64 => gpu_reg_i64(op.rhs_reg),
                 _ => gpu_reg_u32(op.rhs_reg),
             }
             ptx_push_setp2(buf, opcode, gpu_pred_reg(op.dst_reg), lhs_str, rhs_str)
@@ -557,10 +590,21 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                 _ => gpu_reg_u32(op.lhs_reg),
             }
             // If rhs_reg is -1, use immediate value instead of register
-            let rhs_str = if op.rhs_reg < 0 {
-                i64_to_string(op.rhs_imm)
+            if op.rhs_reg < 0 {
+                // Inline to avoid i64_to_string UAF when passed through function call boundary
+                var sge_out = buf
+                sge_out = ptx_push_str(sge_out, "    ")
+                sge_out = ptx_push_str(sge_out, opcode)
+                sge_out = ptx_push_str(sge_out, " ")
+                sge_out = ptx_push_str(sge_out, gpu_pred_reg(op.dst_reg))
+                sge_out = ptx_push_str(sge_out, ", ")
+                sge_out = ptx_push_str(sge_out, lhs_str)
+                sge_out = ptx_push_str(sge_out, ", ")
+                sge_out = gpu_push_i64(sge_out, op.rhs_imm)
+                sge_out = ptx_push_str(sge_out, ";\n")
+                sge_out
             } else {
-                match op.ty {
+                let rhs_str = match op.ty {
                     GpuType::GpuU32 => gpu_reg_u32(op.rhs_reg),
                     GpuType::GpuU64 => gpu_reg_u64(op.rhs_reg),
                     GpuType::GpuF32 => gpu_reg_f32(op.rhs_reg),
@@ -569,8 +613,8 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                     GpuType::GpuI64 => gpu_reg_i64(op.rhs_reg),
                     _ => gpu_reg_u32(op.rhs_reg),
                 }
+                ptx_push_setp2(buf, opcode, gpu_pred_reg(op.dst_reg), lhs_str, rhs_str)
             }
-            ptx_push_setp2(buf, opcode, gpu_pred_reg(op.dst_reg), lhs_str, rhs_str)
         }
 
         GpuOpcode::GpuSetpEq => {
@@ -917,8 +961,17 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             let opcode = if op.ty == GpuType::GpuU32 { ptx_opcode_add_u32() } else { ptx_opcode_add_u64() }
             let dst_str = if op.ty == GpuType::GpuU32 { gpu_reg_u32(op.dst_reg) } else { gpu_reg_u64(op.dst_reg) }
             let src_str = if op.ty == GpuType::GpuU32 { gpu_reg_u32(op.lhs_reg) } else { gpu_reg_u64(op.lhs_reg) }
-            let imm_str = i64_to_string(op.rhs_imm)
-            ptx_push_binary3(buf, opcode, dst_str, src_str, imm_str)
+            var aout = buf
+            aout = ptx_push_str(aout, "    ")
+            aout = ptx_push_str(aout, opcode)
+            aout = ptx_push_str(aout, " ")
+            aout = ptx_push_str(aout, dst_str)
+            aout = ptx_push_str(aout, ", ")
+            aout = ptx_push_str(aout, src_str)
+            aout = ptx_push_str(aout, ", ")
+            aout = gpu_push_i64(aout, op.rhs_imm)
+            aout = ptx_push_str(aout, ";\n")
+            aout
         }
 
         // ── Phase 5: Tensor Core (mma.sync) ────────────────────────
@@ -1049,7 +1102,7 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             if op.src_reg == 1 {
                 // Label definition
                 out = ptx_push_str(out, "LBB0_")
-                out = ptx_push_str(out, i64_to_string(op.rhs_imm))
+                out = gpu_push_i64(out, op.rhs_imm)
                 out = ptx_push_str(out, ":\n")
             } else {
                 // Branch instruction
@@ -1060,7 +1113,7 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                 } else {
                     out = ptx_push_str(out, "    bra LBB0_")
                 }
-                out = ptx_push_str(out, i64_to_string(op.rhs_imm))
+                out = gpu_push_i64(out, op.rhs_imm)
                 out = ptx_push_str(out, ";\n")
             }
             out
@@ -1098,25 +1151,25 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
 }
 
 // Helper: Format register names dynamically using str_concat
-fn gpu_reg_u32(reg: i64) -> string { str_concat("%r", i64_to_string(reg)) }
-fn gpu_reg_u64(reg: i64) -> string { str_concat("%rd", i64_to_string(reg)) }
-fn gpu_reg_f32(reg: i64) -> string { str_concat("%f", i64_to_string(reg)) }
-fn gpu_reg_f64(reg: i64) -> string { str_concat("%fd", i64_to_string(reg)) }
-fn gpu_reg_i32(reg: i64) -> string { str_concat("%r", i64_to_string(reg)) }
-fn gpu_reg_i64(reg: i64) -> string { str_concat("%rd", i64_to_string(reg)) }
+fn gpu_reg_u32(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%r", i64_to_string(reg)) }
+fn gpu_reg_u64(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%rd", i64_to_string(reg)) }
+fn gpu_reg_f32(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%f", i64_to_string(reg)) }
+fn gpu_reg_f64(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%fd", i64_to_string(reg)) }
+fn gpu_reg_i32(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%r", i64_to_string(reg)) }
+fn gpu_reg_i64(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%rd", i64_to_string(reg)) }
 
 // Helper: Convert Name to string
 fn name_to_string(name: Name) -> string with Mut, Panic, Div, Alloc {
     str_from_bytes(name.buf, name.len)
 }
 
-fn gpu_pred_reg(reg: i64) -> string { str_concat("%p", i64_to_string(reg)) }
+fn gpu_pred_reg(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%p", i64_to_string(reg)) }
 
 fn gpu_shared_addr_str(offset: i64) -> string with Mut, Panic, Div, Alloc {
     if offset <= 0 { "shared_array" } else {
         var b = ptx_buf_new()
         b = ptx_push_str(b, "shared_array+")
-        b = ptx_push_str(b, i64_to_string(offset))
+        b = gpu_push_i64(b, offset)
         ptx_to_string(b)
     }
 }
@@ -1160,7 +1213,22 @@ fn gpu_push_name(buf: PtxBuf, name: Name) -> PtxBuf with Mut, Panic, Div {
     out
 }
 
-// Helper: Push i64 as ASCII digits
-fn gpu_push_i64(buf: PtxBuf, n: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
-    ptx_push_str(buf, i64_to_string(n))
+// Helper: Push i64 as ASCII digits directly into PtxBuf (avoids i64_to_string UAF)
+fn gpu_push_i64(buf: PtxBuf, n: i64) -> PtxBuf with Mut, Panic, Div {
+    if n == 0 { return ptx_push_byte(buf, 48) }
+    var value: i64 = if n < 0 { 0 } else { n }
+    var digits: [i8; 20] = [0; 20]
+    var rev_len: i64 = 0
+    while value > 0 {
+        digits[rev_len as usize] = (48 + value % 10) as i8
+        rev_len = rev_len + 1
+        value = value / 10
+    }
+    var out = buf
+    var k: i64 = rev_len - 1
+    while k >= 0 {
+        out = ptx_push_byte(out, digits[k as usize])
+        k = k - 1
+    }
+    out
 }

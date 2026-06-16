@@ -5,7 +5,7 @@
 module native::machine_ir
 
 use parser::ast::{Name, BinaryOp, UnaryOp, empty_name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX}
 
 pub let MIR_MAX_BLOCKS: i64 = 1
 pub let MIR_MAX_INSTRS: i64 = 512
@@ -65,6 +65,12 @@ pub let MIR_OP_FLOAT_BINOP: i64 = 123        // SSE2 arithmetic/compare on float
 pub let MIR_OP_INT_TO_FLOAT: i64 = 124       // CVTSI2SD: int stack slot → float stack slot
 pub let MIR_OP_FLOAT_TO_INT: i64 = 125       // CVTTSD2SI: float stack slot → int stack slot
 pub let MIR_OP_FLOAT_MOVE: i64 = 126         // float stack slot copy via xmm0
+
+pub let MIR_OP_LOAD_ABS: i64 = 127           // mov rax,[rax] — load from absolute addr in temp
+pub let MIR_OP_STORE_ABS: i64 = 128          // mov [rbx],rax — store to absolute addr
+
+pub let MIR_OP_PSEUDO_LOAD_GLOBAL: i64 = 20
+pub let MIR_OP_PSEUDO_STORE_GLOBAL: i64 = 21
 
 pub let MIR_OP_PSEUDO_LOAD_FLOAT: i64 = 17
 pub let MIR_OP_PSEUDO_INT_TO_FLOAT: i64 = 18
@@ -329,6 +335,8 @@ pub fn native_v2_supported_ir_opcode(op: IrOpcode) -> bool with Mut, Panic, Div 
     if op == IrOpcode::IrLoadFloat { return true }
     if op == IrOpcode::IrIntToFloat { return true }
     if op == IrOpcode::IrFloatToInt { return true }
+    if op == IrOpcode::IrLoadGlobal { return true }
+    if op == IrOpcode::IrStoreGlobal { return true }
     false
 }
 
@@ -541,6 +549,18 @@ pub fn native_v2_pseudo_from_ir(instr: IrInstr) -> MachineInstr with Alloc, Mut,
         mi.opcode = MIR_OP_PSEUDO_FLOAT_TO_INT
         mi.dst = machine_operand_stack_slot(instr.dst)
         mi.src1 = machine_operand_stack_slot(instr.src1)
+        return mi
+    }
+    if instr.op == IrOpcode::IrLoadGlobal {
+        mi.opcode = MIR_OP_PSEUDO_LOAD_GLOBAL
+        mi.dst = machine_operand_stack_slot(instr.dst)
+        mi.src1 = machine_operand_imm64(BSS_BASE_LINUX + instr.imm_i64)
+        return mi
+    }
+    if instr.op == IrOpcode::IrStoreGlobal {
+        mi.opcode = MIR_OP_PSEUDO_STORE_GLOBAL
+        mi.src1 = machine_operand_stack_slot(instr.src1)
+        mi.src2 = machine_operand_imm64(BSS_BASE_LINUX + instr.imm_i64)
         return mi
     }
     mi
@@ -1441,6 +1461,27 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < 256 {
                 out.is_float_slot[machine_instr_dst_value(instr) as usize] = 0
             }
+        } else if instr.opcode == MIR_OP_PSEUDO_LOAD_GLOBAL {
+            let addr_temp = out.temp_count
+            out.temp_count = addr_temp + 1
+            let val_temp = out.temp_count
+            out.temp_count = val_temp + 1
+            out = _emit_legal_byval(out, native_v2_make_mov_imm(addr_temp, machine_instr_src1_value(instr)))
+            var load_mi = machine_empty_instr()
+            load_mi.opcode = MIR_OP_LOAD_ABS
+            load_mi.dst = machine_operand_gpr64(val_temp)
+            load_mi.src1 = machine_operand_gpr64(addr_temp)
+            out = _emit_legal_byval(out, load_mi)
+            out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr), val_temp))
+        } else if instr.opcode == MIR_OP_PSEUDO_STORE_GLOBAL {
+            let val_temp = out.temp_count
+            out.temp_count = val_temp + 1
+            out = _emit_legal_byval(out, native_v2_make_load_stack(val_temp, machine_instr_src1_value(instr)))
+            var store_mi = machine_empty_instr()
+            store_mi.opcode = MIR_OP_STORE_ABS
+            store_mi.src1 = machine_operand_gpr64(val_temp)
+            store_mi.src2 = machine_operand_imm64(machine_instr_src2_value(instr))
+            out = _emit_legal_byval(out, store_mi)
         }
         i = i + 1
     }
@@ -1519,6 +1560,12 @@ pub fn native_v2_machine_instr_is_legal(instr: MachineInstr) -> bool with Mut, P
     }
     if instr.opcode == MIR_OP_LEA_STACK {
         return instr.dst.kind == MIR_OPERAND_GPR64 && instr.src1.kind == MIR_OPERAND_STACK_SLOT
+    }
+    if instr.opcode == MIR_OP_LOAD_ABS {
+        return instr.dst.kind == MIR_OPERAND_GPR64 && instr.src1.kind == MIR_OPERAND_GPR64
+    }
+    if instr.opcode == MIR_OP_STORE_ABS {
+        return instr.src1.kind == MIR_OPERAND_GPR64 && instr.src2.kind == MIR_OPERAND_IMM64
     }
     false
 }

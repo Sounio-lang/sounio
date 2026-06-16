@@ -1,5 +1,10 @@
 # Claude Code Agent Handoff
 
+> **⚠️ MADAROS STATUS (current):** Madaros is green on `origin/main`.
+> Do not judge checker issues from stale worktrees or prebuilt raw artifacts.
+> See [`docs/MADAROS_STATUS.md`](../docs/MADAROS_STATUS.md) for sync/rebuild
+> instructions and the valid proof gate (`make madaros-full-gate`).
+
 > **⚠️ WORKSPACE STABILITY (2026-05-29).** The pod was recycled twice by the k8s
 > liveness probe under CPU saturation — four agents were running directly on the
 > shared `/workspace/sounio` checkout, each firing a full `souc main.sio` bundle

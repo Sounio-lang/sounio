@@ -22,7 +22,7 @@ use check::refinement::*
 use check::units::*
 use check::env::*
 use check::traits::*
-use check::mod::{check_program, check_program_epistemic_into}
+use check::mod::{check_program, check_program_epistemic_into, check_modules_verdict_boot4}
 use check::ownership::*
 use check::lint::*
 use check::layout::*
@@ -49,8 +49,8 @@ use resolve::scope::*
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
 use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace}
-use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult}
-use module_parse::{ImportList, load_module_file, extract_imports_from_ast}
+use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult, module_frontend_import_files_from_source, ImportPathList}
+use module_parse::{ImportList, load_module_file, extract_imports_from_ast, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
@@ -301,7 +301,7 @@ fn run_probe_compile_capture(args: ArgList, flag_index: i64) with IO, Mut, Panic
     }
     let source_path = arg_list_get(args, flag_index + 1)
     var errors = compile_errors_new()
-    if file_size(source_path) <= 0 {
+    if !file_exists(source_path) {
         errors = compile_errors_push(errors, compile_format_error_at(source_path, 0, 0, "could not read input file"))
     } else {
         let incomplete_assign = compile_scan_incomplete_assignment(source_path)
@@ -1238,7 +1238,7 @@ fn compiler_print_ir_preflight_failure(reason: string) with IO, Mut, Panic, Div 
 }
 
 fn compiler_preflight_source_input(path: string) -> bool with IO, Mut, Panic, Div {
-    if file_size(path) <= 0 {
+    if !file_exists(path) {
         println(compile_format_error_at(path, 0, 0, "could not read input file"))
         return false
     }
@@ -1373,7 +1373,7 @@ fn compiler_preflight_render_ir_load(path: string) -> CompilerIrLoadResult with 
 }
 
 fn compiler_preflight_ir_load(path: string) -> CompilerIrLoadResult with IO, Mut, Panic, Div, Alloc {
-    if file_size(path) <= 0 {
+    if !file_exists(path) {
         var file_errors = compile_errors_new()
         file_errors = compile_errors_push(file_errors, compile_format_error_at(path, 0, 0, "could not read input file"))
         return compiler_ir_load_result_error(file_errors)
@@ -1566,6 +1566,8 @@ fn compiler_ir_ser_opcode_tag(op: IrOpcode) -> i64 {
         IrOpcode::IrProfCounter => 34,
         IrOpcode::IrHandleBegin => 35,
         IrOpcode::IrHandleEnd => 36,
+        IrOpcode::IrCallSret => 37,
+        IrOpcode::IrReturnSret => 38,
         _ => -1,
     }
 }
@@ -1820,13 +1822,70 @@ fn run_check_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Allo
         panic("check failed")
     }
 
-    let frontend_result = preflight_multimodule_frontend(source_path)
-    let parse_errors = parser_last_error_count()
-    if frontend_result.ok && parse_errors == 0 {
+    if !module_frontend_file_maybe_has_use(source_path) {
+        // Single-module real typecheck.
+        let main_prog = load_module_file(source_path)
+        if parser_last_error_count() > 0 {
+            panic("check failed")
+        }
+        let verdict = module_frontend_check_items_with_source_context(main_prog.items, source_path)
+        if verdict == 0 {
+            println(compiler_check_ok_message())
+            return
+        }
+        panic("check failed")
+    }
+
+    // Multi-module: load transitive deps, resolve imports against exports, then
+    // typecheck all modules together so cross-module visibility (E175-E177) is
+    // enforced against the real defining_module of each item.
+    var programs: [Program; 256] = [Program { module_path: empty_path(), items: None }; 256]
+    var paths: [string; 256] = [""; 256]
+    var loaded: i64 = 0
+    programs[0] = load_module_file(source_path)
+    paths[0] = source_path
+    loaded = 1
+    var visited: [string; 256] = [""; 256]
+    var visited_count: i64 = 1
+    visited[0] = source_path
+    var work_front: i64 = 0
+
+    while work_front < loaded && loaded < 256 {
+        let imports = module_frontend_import_files_from_source(paths[work_front])
+        work_front = work_front + 1
+        var i: i64 = 0
+        while i < imports.count && loaded < 256 {
+            let file_path = imports.paths[i]
+            var already = false
+            var v: i64 = 0
+            while v < visited_count && v < 256 {
+                if str_eq(visited[v], file_path) {
+                    already = true
+                }
+                v = v + 1
+            }
+            if !already && file_exists(file_path) {
+                visited[visited_count] = file_path
+                visited_count = visited_count + 1
+                programs[loaded] = load_module_file(file_path)
+                paths[loaded] = file_path
+                loaded = loaded + 1
+            }
+            i = i + 1
+        }
+    }
+
+    print("run_check_mode: about to check ")
+    print_int(loaded)
+    print(" modules\n")
+    let verdict = check_modules_verdict_boot4(&! programs, loaded)
+    print("run_check_mode: verdict=")
+    print_int(verdict)
+    print("\n")
+    if verdict == 0 {
         println(compiler_check_ok_message())
         return
     }
-    compiler_print_ir_preflight_failure(frontend_result.error_msg)
     panic("check failed")
 }
 
@@ -2472,59 +2531,46 @@ fn run_native_v2_emit13() with IO, Mut, Panic, Div, Alloc {
     run_native_v2_emit_exit_code(13, "artifacts/omega/emit13.elf")
 }
 
-fn compiler_main_wide_ir_not_wired() -> IrInstr with Panic {
-    panic("native wide IR witness opcode is not wired in the active IrOpcode set")
-    ir_instr_new(IrOpcode::IrNop)
-}
-
-fn ir_wide_add(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
-    compiler_main_wide_ir_not_wired()
-}
-
-fn ir_wide_sub(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
-    compiler_main_wide_ir_not_wired()
-}
-
-fn ir_wide_mul(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
-    compiler_main_wide_ir_not_wired()
-}
-
-fn ir_wide_shr_limb(dst: i64, src: i64, limbs: i64, limb_shift: i64) -> IrInstr with Panic {
-    compiler_main_wide_ir_not_wired()
-}
-
-fn ir_wide_div(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
-    compiler_main_wide_ir_not_wired()
-}
-
-fn ir_wide_mod(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
-    compiler_main_wide_ir_not_wired()
-}
-
-fn ir_wide_div_full(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
-    compiler_main_wide_ir_not_wired()
-}
-
-fn ir_wide_mod_full(dst: i64, lhs: i64, rhs: i64, limbs: i64) -> IrInstr with Panic {
-    compiler_main_wide_ir_not_wired()
-}
-
-fn ir_wide_cmp(dst: i64, lhs: i64, rhs: i64, limbs: i64, cmp_op: i64) -> IrInstr with Panic {
-    compiler_main_wide_ir_not_wired()
-}
-
-fn ir_wide_shr(dst: i64, src: i64, limbs: i64, shift_bits: i64) -> IrInstr with Panic {
-    compiler_main_wide_ir_not_wired()
-}
-
 fn ir_return_sret(src: i64) -> IrInstr {
-    ir_return(src)
+    let base = ir_instr_new(IrOpcode::IrReturnSret)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: src,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
 }
 
-fn ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, arg0: i64, explicit_arg_count: i64) -> IrInstr with Alloc {
-    let explicit_args = Some(Box::new(ir_reg_list_single(arg0)))
-    let args = Some(Box::new(ir_reg_list_cons(dest_reg, explicit_args)))
-    ir_call(dst, fn_id, fn_name, args, explicit_arg_count + 1)
+fn ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, arg0: i64, explicit_arg_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrCallSret)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: dest_reg,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: fn_id,
+        field_idx: arg0,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: fn_name,
+        call_args: base.call_args,
+        arg_count: explicit_arg_count,
+    }
 }
 
 // --- Zig-style wide-int witnesses (hand-built IR -> ELF, exercise nc_wide_*_into).
@@ -2726,6 +2772,10 @@ fn run_native_v2_emit_wide(args: ArgList, flag_index: i64, kind: i64) with IO, M
         let m = compiler_main_make_native_v2_wide_sub_module()
         let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
         print("wide-sub rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
+    } else if kind == 2 {
+        let m = compiler_main_make_native_v2_wide_mul_module()
+        let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
+        print("wide-mul rc="); print_int(rc as i64); print(" path="); print(out_path); print("\n")
     } else if kind == 3 {
         let m = compiler_main_make_native_v2_wide_shr_module()
         let rc = compile_native_v2_preview_to_file(&m, spec, out_path)
@@ -2802,10 +2852,9 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     let spec = native_resolve_target("x86_64-linux", "auto", true)
     match box_result.module {
         Some(module_box) => {
-            let lowered = *module_box
-            write_file("/tmp/nv2_m2_after_copy", &! NV2_MARKER_BUF, 1)
+            write_file("/tmp/nv2_m2_before_backend", &! NV2_MARKER_BUF, 1)
             write_file("/tmp/nv2_m3_before_backend", &! NV2_MARKER_BUF, 1)
-            let rc = compile_native_v2_preview_to_file(&lowered, spec, out_path)
+            let rc = compile_native_v2_preview_to_file(&(*module_box), spec, out_path)
             if rc != 0 {
                 print("native_v2_compile: FAIL to_file rc=")
                 print_int(rc as i64)
@@ -2820,6 +2869,70 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
             panic("native-v2-compile failed: no module produced")
         }
     }
+}
+
+fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO, Mut, Panic, Div, Alloc {
+    if opts.emit_manifest || opts.emit_ast || opts.emit_tokens {
+        return false
+    }
+    if str_len(opts.gpu_target) > 0 {
+        return false
+    }
+    if str_eq(opts.target, "llvm") || str_eq(opts.target, "wasm") {
+        return false
+    }
+    if !compiler_preflight_source_input(opts.input_file) {
+        return false
+    }
+
+    let incomplete_assign = compile_scan_incomplete_assignment(opts.input_file)
+    if incomplete_assign.0 >= 0 {
+        return false
+    }
+
+    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
+    let early_preflight_parse_errors = parser_last_error_count()
+    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
+        return false
+    }
+
+    let main_prog = load_module_file(opts.input_file)
+    let main_imports = extract_imports_from_ast(main_prog)
+    if main_imports.count > 0 {
+        return false
+    }
+
+    let requested_target_spec = native_resolve_target(opts.target, "auto", false)
+    if requested_target_spec.arch_id != ARCH_X86_64() || requested_target_spec.os_id != OS_LINUX() {
+        return false
+    }
+
+    var single_trace = empty_load_multimodule_ir_trace()
+    let boxed_result = bridge_lower_single_module_box(opts.input_file, &! single_trace)
+    if !boxed_result.ok {
+        print("Compilation failed!\n\nErrors:\n  ")
+        print(boxed_result.error_msg)
+        print("\n")
+        panic("compile failed")
+    }
+    match boxed_result.module {
+        Some(module_box) => {
+            let emit_spec = native_resolve_target("x86_64-linux", "auto", true)
+            let bridge_exit = compile_native_v2_preview_to_file(&(*module_box), emit_spec, opts.output_file)
+            if bridge_exit != 0 {
+                print("Compilation failed!\n\nErrors:\n  error: native-v2 bridge compilation failed\n")
+                panic("compile failed")
+            }
+            println("Compilation successful!")
+            println("   Output: " + opts.output_file)
+            return true
+        }
+        None => {
+            print("Compilation failed!\n\nErrors:\n  error: native-v2 bridge produced no module\n")
+            panic("compile failed")
+        }
+    }
+    false
 }
 
 // Parameterized scalar witness: --native-v2-emit-scalar <N> <out_path>.
@@ -2967,9 +3080,7 @@ fn run_native_v2_emit_sret(args: ArgList, flag_index: i64) with IO, Mut, Panic, 
         panic("native-v2-emit-sret: usage --native-v2-emit-sret <out_path>")
     }
     let out_path = arg_list_get(args, flag_index + 1)
-    let spec = native_resolve_target("x86_64-linux", "auto", true)
-    let module = compiler_main_make_native_v2_sret_module()
-    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    let rc = compile_native_v2_sret_witness_to_file(out_path, false)
     if rc != 0 {
         print("native_v2_emit_exit_code: FAIL to_file label=sret rc=")
         print_int(rc as i64)
@@ -3009,9 +3120,7 @@ fn run_native_v2_emit_sret_plaincall(args: ArgList, flag_index: i64) with IO, Mu
         panic("native-v2-emit-sret-plaincall: usage --native-v2-emit-sret-plaincall <out_path>")
     }
     let out_path = arg_list_get(args, flag_index + 1)
-    let spec = native_resolve_target("x86_64-linux", "auto", true)
-    let module = compiler_main_make_native_v2_sret_plaincall_module()
-    let rc = compile_native_v2_preview_to_file(&module, spec, out_path)
+    let rc = compile_native_v2_sret_witness_to_file(out_path, true)
     if rc != 0 {
         print("native_v2_emit_exit_code: FAIL to_file label=sret-plaincall rc=")
         print_int(rc as i64)
@@ -3184,6 +3293,9 @@ fn print_help() with IO {
     println("  --gpu-speculative      Uncertainty-threshold speculative skip guards")
     println("  --gpu-dag-schedule     Provenance-aware DAG topo-sort + stream coloring")
     println("  --debug-witnesses      Enable debug-mode witness enforcement (Sprint 28)")
+    println("  check <source.sio>     Run multimodule parse/resolve/typecheck preflight")
+    println("  build <source.sio> -o <file>  Compile source to native output")
+    println("  run <source.sio>       Compile source through the public run lane")
     println("  --check <source.sio>   Run multimodule parse/resolve/typecheck preflight")
     println("  --ir-dump <source.sio> Print IR byte/function/string summary")
     println("  --ir-roundtrip <source.sio>  Serialize + deserialize + reserialize IR")
@@ -4716,7 +4828,7 @@ fn compile_emit_manifest_json_from_source(path: string) -> CompileResult with IO
 // ============================================================================
 
 fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, Alloc {
-    if file_size(opts.input_file) <= 0 {
+    if !file_exists(opts.input_file) {
         var file_errors = compile_errors_new()
         file_errors = compile_errors_push(file_errors, compile_format_error_at(opts.input_file, 0, 0, "could not read input file"))
         return CompileResult {
@@ -6844,7 +6956,7 @@ fn compiler_main_make_native_v2_f64cmp_module(op: BinaryOp, lhs_is_nan: i64, lhs
 // f64-comparison witness driver: --native-v2-emit-f64cmp <case> <out_path>.
 // <case> selects op + operands; the emitted ELF's exit code is the raw 0/1 result.
 // Cases pair an ordered-true (exit 1), ordered-false (exit 0), and a NaN case
-// whose IEEE-correct result the gate asserts (unordered: <,<=,>,>=,== -> 0; != -> 1).
+// whose IEEE-correct result the gate asserts (unordered ops Lt/LtEq/Gt/GtEq/EqEq -> 0; Neq -> 1).
 fn run_native_v2_emit_f64cmp(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     if flag_index + 2 >= args.len {
         panic("native-v2-emit-f64cmp: usage --native-v2-emit-f64cmp <case> <out_path>")
@@ -7074,6 +7186,46 @@ fn compiler_main_make_native_v2_alloc_field_module() -> IrModule with Mut, Panic
     module
 }
 
+fn compiler_main_fill_native_v2_sret_make_fn(make_fn: &! IrFunction) with Mut, Panic, Div {
+    (*make_fn).name = ir_name_from_bytes(109, 97, 107, 101, 4)  // "make"
+    (*make_fn).is_sret = 1
+    (*make_fn).sret_dest_reg = 0    // hidden destination handle from rdi
+    (*make_fn).param_count = 1
+    (*make_fn).param_regs[0] = 1    // v (explicit) shifts to rsi
+    (*make_fn).reg_count = 6
+    (*make_fn).instrs[0] = ir_field_set(0, 0, 1, ir_name_from_bytes(102, 48, 0, 0, 2))
+    (*make_fn).instrs[1] = ir_load_imm(2, 2)
+    (*make_fn).instrs[2] = ir_binop(3, 1, BinaryOp::OpMul, 2)
+    (*make_fn).instrs[3] = ir_field_set(0, 1, 3, ir_name_from_bytes(102, 49, 0, 0, 2))
+    (*make_fn).instrs[4] = ir_load_imm(4, 1)
+    (*make_fn).instrs[5] = ir_binop(5, 1, BinaryOp::OpAdd, 4)
+    (*make_fn).instrs[6] = ir_field_set(0, 2, 5, ir_name_from_bytes(102, 50, 0, 0, 2))
+    (*make_fn).instrs[7] = ir_return_sret(0)
+    (*make_fn).instr_count = 8
+}
+
+fn compiler_main_fill_native_v2_sret_main_fn(main_fn: &! IrFunction) with Mut, Panic, Div {
+    (*main_fn).name = ir_name_from_bytes(109, 97, 105, 110, 4)  // "main"
+    (*main_fn).reg_count = 4
+    (*main_fn).instrs[0] = ir_alloc(0, 64)        // dest: 64B payload (8 i64 slots) >16B
+    (*main_fn).instrs[1] = ir_load_imm(1, 7)      // v = 7
+    (*main_fn).instrs[2] = ir_call_sret(2, 0, ir_name_from_bytes(109, 97, 107, 101, 4), 1, 1, 1)
+    (*main_fn).instrs[3] = ir_field_get(3, 2, 1, ir_name_from_bytes(102, 49, 0, 0, 2))  // b.f1
+    (*main_fn).instrs[4] = ir_return(3)
+    (*main_fn).instr_count = 5
+}
+
+fn compiler_main_fill_native_v2_sret_plain_main_fn(main_fn: &! IrFunction) with Mut, Panic, Div, Alloc {
+    (*main_fn).name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    (*main_fn).reg_count = 4
+    (*main_fn).instrs[0] = ir_alloc(0, 64)
+    (*main_fn).instrs[1] = ir_load_imm(1, 7)
+    (*main_fn).instrs[2] = ir_call(2, 1, ir_name_from_bytes(109, 97, 107, 101, 4), Some(Box::new(ir_reg_list_single(0))), 1)
+    (*main_fn).instrs[3] = ir_field_get(3, 0, 1, ir_name_from_bytes(102, 49, 0, 0, 2))  // dest.f1
+    (*main_fn).instrs[4] = ir_return(3)
+    (*main_fn).instr_count = 5
+}
+
 // Real SysV >16-byte by-value struct return (sret) witness.
 //   struct Big { f0: i64, f1: i64, f2: i64 }   (3 fields = 24B > 16B)
 //   fn make(v) -> Big { Big { f0: v, f1: v*2, f2: v+1 } }   (sret callee)
@@ -7088,92 +7240,156 @@ fn compiler_main_make_native_v2_alloc_field_module() -> IrModule with Mut, Panic
 fn compiler_main_make_native_v2_sret_module() -> IrModule with Mut, Panic, Div, Alloc {
     var module = ir_empty_module()
 
-    // fn make(v) -> Big  (is_sret: HIDDEN dest in rdi -> vreg0; explicit v shifts to rsi -> vreg1)
-    // make has ONE explicit param. The destination is NOT a declared param: it is the
-    // ABI-injected rdi sret pointer, spilled to sret_dest_reg by the is_sret prologue.
+    // fn make(v) -> Big  (is_sret: hidden dest in rdi -> vreg0; explicit v shifts to rsi -> vreg1)
+    // The destination is not a declared param: it is ABI-injected and spilled by
+    // the sret prologue into sret_dest_reg.
     // Called via a plain IrCall this very fn would read v from rdi (the dest handle) and
     // mis-fill the struct; only the sret convention puts v in rsi -> f1 = 14. That gap is
     // the discriminator (see compiler_main_make_native_v2_sret_plaincall_module below).
-    var make_fn = ir_empty_function()
-    make_fn.name = ir_name_from_bytes(109, 97, 107, 101, 4)  // "make"
-    make_fn.is_sret = 1
-    make_fn.sret_dest_reg = 0    // hidden destination handle (from rdi)
-    make_fn.param_count = 1
-    make_fn.param_regs[0] = 1    // v (explicit) shifts to rsi
-    make_fn.reg_count = 6
-    // f0 = v
-    make_fn.instrs[0] = ir_field_set(0, 0, 1, ir_name_from_bytes(102, 48, 0, 0, 2))
-    // f1 = v * 2
-    make_fn.instrs[1] = ir_load_imm(2, 2)
-    make_fn.instrs[2] = ir_binop(3, 1, BinaryOp::OpMul, 2)
-    make_fn.instrs[3] = ir_field_set(0, 1, 3, ir_name_from_bytes(102, 49, 0, 0, 2))
-    // f2 = v + 1
-    make_fn.instrs[4] = ir_load_imm(4, 1)
-    make_fn.instrs[5] = ir_binop(5, 1, BinaryOp::OpAdd, 4)
-    make_fn.instrs[6] = ir_field_set(0, 2, 5, ir_name_from_bytes(102, 50, 0, 0, 2))
-    // return the destination handle in rax (callee-side sret epilogue)
-    make_fn.instrs[7] = ir_return_sret(0)
-    make_fn.instr_count = 8
-    module.functions[0] = make_fn
+    module.functions[0].name.len = 4
+    module.functions[0].name.buf[0] = 109 as i8
+    module.functions[0].name.buf[1] = 97 as i8
+    module.functions[0].name.buf[2] = 105 as i8
+    module.functions[0].name.buf[3] = 110 as i8
+    module.functions[0].reg_count = 4
+    module.functions[0].instrs[0].op = IrOpcode::IrAlloc
+    module.functions[0].instrs[0].dst = 0
+    module.functions[0].instrs[0].imm_i64 = 64
+    module.functions[0].instrs[1].op = IrOpcode::IrLoadImm
+    module.functions[0].instrs[1].dst = 1
+    module.functions[0].instrs[1].imm_i64 = 7
+    module.functions[0].instrs[2].op = IrOpcode::IrCallSret
+    module.functions[0].instrs[2].dst = 2
+    module.functions[0].instrs[2].src1 = 0
+    module.functions[0].instrs[2].fn_id = 1
+    module.functions[0].instrs[2].field_idx = 1
+    module.functions[0].instrs[2].arg_count = 1
+    module.functions[0].instrs[3].op = IrOpcode::IrFieldGet
+    module.functions[0].instrs[3].dst = 3
+    module.functions[0].instrs[3].src1 = 2
+    module.functions[0].instrs[3].field_idx = 1
+    module.functions[0].instrs[4].op = IrOpcode::IrReturn
+    module.functions[0].instrs[4].src1 = 3
+    module.functions[0].instr_count = 5
 
-    // fn main() -> { dest = alloc Big; b = make_sret(dest, 7); return b.f1 }
-    var main_fn = ir_empty_function()
-    main_fn.name = ir_name_from_bytes(109, 97, 105, 110, 4)  // "main"
-    main_fn.reg_count = 4
-    main_fn.instrs[0] = ir_alloc(0, 64)        // dest: 64B payload (8 i64 slots) >16B
-    main_fn.instrs[1] = ir_load_imm(1, 7)      // v = 7
-    // sret call: dest (vreg0) -> rdi, v (vreg1) -> rsi; result handle -> vreg2
-    main_fn.instrs[2] = ir_call_sret(2, 0, make_fn.name, 0, 1, 1)
-    main_fn.instrs[3] = ir_field_get(3, 2, 1, ir_name_from_bytes(102, 49, 0, 0, 2))  // b.f1
-    main_fn.instrs[4] = ir_return(3)
-    main_fn.instr_count = 5
-    module.functions[1] = main_fn
+    module.functions[1].name.len = 4
+    module.functions[1].name.buf[0] = 109 as i8
+    module.functions[1].name.buf[1] = 97 as i8
+    module.functions[1].name.buf[2] = 107 as i8
+    module.functions[1].name.buf[3] = 101 as i8
+    module.functions[1].is_sret = 1
+    module.functions[1].sret_dest_reg = 0
+    module.functions[1].param_count = 1
+    module.functions[1].param_regs[0] = 1
+    module.functions[1].reg_count = 6
+    module.functions[1].instrs[0].op = IrOpcode::IrFieldSet
+    module.functions[1].instrs[0].src1 = 0
+    module.functions[1].instrs[0].src2 = 1
+    module.functions[1].instrs[0].field_idx = 0
+    module.functions[1].instrs[1].op = IrOpcode::IrLoadImm
+    module.functions[1].instrs[1].dst = 2
+    module.functions[1].instrs[1].imm_i64 = 2
+    module.functions[1].instrs[2].op = IrOpcode::IrBinOp
+    module.functions[1].instrs[2].dst = 3
+    module.functions[1].instrs[2].src1 = 1
+    module.functions[1].instrs[2].src2 = 2
+    module.functions[1].instrs[2].bin_op = BinaryOp::OpMul
+    module.functions[1].instrs[3].op = IrOpcode::IrFieldSet
+    module.functions[1].instrs[3].src1 = 0
+    module.functions[1].instrs[3].src2 = 3
+    module.functions[1].instrs[3].field_idx = 1
+    module.functions[1].instrs[4].op = IrOpcode::IrLoadImm
+    module.functions[1].instrs[4].dst = 4
+    module.functions[1].instrs[4].imm_i64 = 1
+    module.functions[1].instrs[5].op = IrOpcode::IrBinOp
+    module.functions[1].instrs[5].dst = 5
+    module.functions[1].instrs[5].src1 = 1
+    module.functions[1].instrs[5].src2 = 4
+    module.functions[1].instrs[5].bin_op = BinaryOp::OpAdd
+    module.functions[1].instrs[6].op = IrOpcode::IrFieldSet
+    module.functions[1].instrs[6].src1 = 0
+    module.functions[1].instrs[6].src2 = 5
+    module.functions[1].instrs[6].field_idx = 2
+    module.functions[1].instrs[7].op = IrOpcode::IrReturnSret
+    module.functions[1].instrs[7].src1 = 0
+    module.functions[1].instr_count = 8
 
     module.fn_count = 2
     module
 }
 
-// NEGATIVE discriminator for the sret path. Identical sret-callee `make` (is_sret=1,
-// reads its explicit param v from rsi because rdi is the hidden dest), but main invokes
-// it with a PLAIN IrCall passing a single arg v -> rdi. Under the sret prologue the
-// callee reads v from rsi (NOT rdi), so it sees a garbage/zero v and f1 != 14. This
-// proves the param shift is genuinely consumed: if IrCallSret were a renamed IrCall the
-// two modules would agree, but they DON'T. The gate asserts this exit is NOT 14.
-fn compiler_main_make_native_v2_sret_plaincall_module() -> IrModule with Mut, Panic, Div {
+// NEGATIVE discriminator for the sret path. Identical sret-callee, but main invokes it
+// with a PLAIN IrCall passing a single arg in rdi. The callee expects rdi to be the
+// hidden destination and explicit v in rsi, so f1 must differ from the IrCallSret witness.
+fn compiler_main_make_native_v2_sret_plaincall_module() -> IrModule with Mut, Panic, Div, Alloc {
     var module = ir_empty_module()
 
-    // Same sret-callee as compiler_main_make_native_v2_sret_module's make.
-    var make_fn = ir_empty_function()
-    make_fn.name = ir_name_from_bytes(109, 97, 107, 101, 4)  // "make"
-    make_fn.is_sret = 1
-    make_fn.sret_dest_reg = 0
-    make_fn.param_count = 1
-    make_fn.param_regs[0] = 1    // v expected in rsi (sret shift)
-    make_fn.reg_count = 6
-    make_fn.instrs[0] = ir_field_set(0, 0, 1, ir_name_from_bytes(102, 48, 0, 0, 2))
-    make_fn.instrs[1] = ir_load_imm(2, 2)
-    make_fn.instrs[2] = ir_binop(3, 1, BinaryOp::OpMul, 2)
-    make_fn.instrs[3] = ir_field_set(0, 1, 3, ir_name_from_bytes(102, 49, 0, 0, 2))
-    make_fn.instrs[4] = ir_load_imm(4, 1)
-    make_fn.instrs[5] = ir_binop(5, 1, BinaryOp::OpAdd, 4)
-    make_fn.instrs[6] = ir_field_set(0, 2, 5, ir_name_from_bytes(102, 50, 0, 0, 2))
-    make_fn.instrs[7] = ir_return_sret(0)
-    make_fn.instr_count = 8
-    module.functions[0] = make_fn
+    module.functions[0].name.len = 4
+    module.functions[0].name.buf[0] = 109 as i8
+    module.functions[0].name.buf[1] = 97 as i8
+    module.functions[0].name.buf[2] = 105 as i8
+    module.functions[0].name.buf[3] = 110 as i8
+    module.functions[0].reg_count = 4
+    module.functions[0].instrs[0].op = IrOpcode::IrAlloc
+    module.functions[0].instrs[0].dst = 0
+    module.functions[0].instrs[0].imm_i64 = 64
+    module.functions[0].instrs[1].op = IrOpcode::IrLoadImm
+    module.functions[0].instrs[1].dst = 1
+    module.functions[0].instrs[1].imm_i64 = 7
+    module.functions[0].instrs[2].op = IrOpcode::IrCall
+    module.functions[0].instrs[2].dst = 2
+    module.functions[0].instrs[2].fn_id = 1
+    module.functions[0].instrs[2].call_args = Some(Box::new(ir_reg_list_single(0)))
+    module.functions[0].instrs[2].arg_count = 1
+    module.functions[0].instrs[3].op = IrOpcode::IrFieldGet
+    module.functions[0].instrs[3].dst = 3
+    module.functions[0].instrs[3].src1 = 0
+    module.functions[0].instrs[3].field_idx = 1
+    module.functions[0].instrs[4].op = IrOpcode::IrReturn
+    module.functions[0].instrs[4].src1 = 3
+    module.functions[0].instr_count = 5
 
-    // main: PLAIN call passing the dest handle as the ONLY arg (-> rdi). The callee,
-    // expecting v in rsi, reads a different register -> f1 != 14.
-    var main_fn = ir_empty_function()
-    main_fn.name = ir_name_from_bytes(109, 97, 105, 110, 4)
-    main_fn.reg_count = 4
-    main_fn.instrs[0] = ir_alloc(0, 64)
-    main_fn.instrs[1] = ir_load_imm(1, 7)
-    // Plain IrCall, dest as single arg (rdi); v NOT placed in rsi.
-    main_fn.instrs[2] = ir_call(2, 0, make_fn.name, Some(Box::new(ir_reg_list_single(0))), 1)
-    main_fn.instrs[3] = ir_field_get(3, 0, 1, ir_name_from_bytes(102, 49, 0, 0, 2))  // dest.f1
-    main_fn.instrs[4] = ir_return(3)
-    main_fn.instr_count = 5
-    module.functions[1] = main_fn
+    module.functions[1].name.len = 4
+    module.functions[1].name.buf[0] = 109 as i8
+    module.functions[1].name.buf[1] = 97 as i8
+    module.functions[1].name.buf[2] = 107 as i8
+    module.functions[1].name.buf[3] = 101 as i8
+    module.functions[1].is_sret = 1
+    module.functions[1].sret_dest_reg = 0
+    module.functions[1].param_count = 1
+    module.functions[1].param_regs[0] = 1
+    module.functions[1].reg_count = 6
+    module.functions[1].instrs[0].op = IrOpcode::IrFieldSet
+    module.functions[1].instrs[0].src1 = 0
+    module.functions[1].instrs[0].src2 = 1
+    module.functions[1].instrs[0].field_idx = 0
+    module.functions[1].instrs[1].op = IrOpcode::IrLoadImm
+    module.functions[1].instrs[1].dst = 2
+    module.functions[1].instrs[1].imm_i64 = 2
+    module.functions[1].instrs[2].op = IrOpcode::IrBinOp
+    module.functions[1].instrs[2].dst = 3
+    module.functions[1].instrs[2].src1 = 1
+    module.functions[1].instrs[2].src2 = 2
+    module.functions[1].instrs[2].bin_op = BinaryOp::OpMul
+    module.functions[1].instrs[3].op = IrOpcode::IrFieldSet
+    module.functions[1].instrs[3].src1 = 0
+    module.functions[1].instrs[3].src2 = 3
+    module.functions[1].instrs[3].field_idx = 1
+    module.functions[1].instrs[4].op = IrOpcode::IrLoadImm
+    module.functions[1].instrs[4].dst = 4
+    module.functions[1].instrs[4].imm_i64 = 1
+    module.functions[1].instrs[5].op = IrOpcode::IrBinOp
+    module.functions[1].instrs[5].dst = 5
+    module.functions[1].instrs[5].src1 = 1
+    module.functions[1].instrs[5].src2 = 4
+    module.functions[1].instrs[5].bin_op = BinaryOp::OpAdd
+    module.functions[1].instrs[6].op = IrOpcode::IrFieldSet
+    module.functions[1].instrs[6].src1 = 0
+    module.functions[1].instrs[6].src2 = 5
+    module.functions[1].instrs[6].field_idx = 2
+    module.functions[1].instrs[7].op = IrOpcode::IrReturnSret
+    module.functions[1].instrs[7].src1 = 0
+    module.functions[1].instr_count = 8
 
     module.fn_count = 2
     module
@@ -27106,20 +27322,17 @@ fn run_gpu_compile_pipeline(
     // Load and parse
     let main_prog = load_module_file(input_path)
 
-    // Resolve
-    let resolve_result = resolve_program(main_prog)
-    if resolve_result.had_error {
-        print("GPU: resolve errors: ")
-        print_int(resolve_result.error_count)
-        print("\n")
-        return 1
-    }
-
-    // Type-check
-    let check_result = check_program(main_prog)
-    if check_result.had_error {
-        print("GPU: type errors: ")
-        print_int(check_result.error_count)
+    // Resolve + type-check via the INPLACE module frontend (the same path the
+    // working `--check` verb uses). The by-value resolve_program/check_program
+    // crash bin/souc on large-struct value movement (~760KB Resolver threaded
+    // through SRET self-by-value calls; triggered by the ExprIf arm). The
+    // inplace frontend does its own resolution + typecheck and returns a
+    // verdict (0 = OK). Downstream hlir_lower_module consumes only main_prog
+    // (the AST), so dropping the by-value results is behavior-preserving.
+    let frontend_verdict = module_frontend_check_items_with_source_context(main_prog.items, input_path)
+    if frontend_verdict != 0 {
+        print("GPU: frontend errors: ")
+        print_int(frontend_verdict)
         print("\n")
         return 1
     }
@@ -27424,6 +27637,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     println("the bare highland that does not negotiate with ill-formed code -- Sfakia, Crete")
     println("Horizon 3: self-hosted primary compiler.")
     println("")
+    if compiler_mode_has_flag(args, "--version") {
+        return
+    }
 
     var arg_idx: i64 = 0
     while arg_idx < args.len {
@@ -27440,8 +27656,14 @@ fn main() with IO, Mut, Panic, Div, Alloc {
         } else if mode == "ontology" {
             run_ontology_cli(args, arg_idx)
             return
-        } else if mode == "--check" {
+        } else if mode == "check" || mode == "--check" {
             run_check_mode(args, arg_idx)
+            return
+        } else if mode == "build" {
+            run_native_v2_compile_mode(args, arg_idx)
+            return
+        } else if mode == "run" {
+            run_native_v2_compile_mode(args, arg_idx)
             return
         } else if mode == "--ir-dump" {
             run_ir_dump_mode(args, arg_idx)
@@ -27505,14 +27727,19 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-emit-wide-div" {
             run_native_v2_emit_wide(args, arg_idx, 4)
+            return
         } else if mode == "--native-v2-emit-wide-mod" {
             run_native_v2_emit_wide(args, arg_idx, 5)
+            return
         } else if mode == "--native-v2-emit-wide-cmp" {
             run_native_v2_emit_wide(args, arg_idx, 6)
+            return
         } else if mode == "--native-v2-emit-wide-shr-unaligned" {
             run_native_v2_emit_wide(args, arg_idx, 7)
+            return
         } else if mode == "--native-v2-emit-wide-divfull" {
             run_native_v2_emit_wide(args, arg_idx, 8)
+            return
         } else if mode == "--native-v2-emit-wide-modfull" {
             run_native_v2_emit_wide(args, arg_idx, 9)
             return
@@ -27657,6 +27884,10 @@ fn main() with IO, Mut, Panic, Div, Alloc {
         let strict_label = if opts.gpu_strict_parity { "true" } else { "false" }
         println("  GPU Strict Parity: " + strict_label)
         println("")
+    }
+
+    if compiler_try_default_native_v2_single(opts) {
+        return
     }
 
     let result = compile(opts)

@@ -1,0 +1,94 @@
+name: Madaros Prebuilt Refresh
+
+# Keeps the checked-in Madaros default (bin/madaros-linux-x86_64) current with
+# self-hosted/compiler/main.sio. The binary is ~86 MB and git has no LFS, so this
+# runs on a WEEKLY schedule (and on-demand) rather than per push — bounded history
+# growth, ~one 86 MB blob per week at most, and only when the binary actually
+# changed. Triggers are schedule + manual dispatch only, so the commit-back never
+# re-triggers this workflow; the commit also carries [skip ci] so the binary bump
+# does not spin up the full CI suite.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: madaros-prebuilt-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Rebuild and commit bin/madaros-linux-x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Build Madaros (seed-decoupled)
+        run: |
+          export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+          # Seeds from the committed lean_single ELF (not the bin/souc wrapper).
+          # A build/infra failure here is a real problem -> fail the job (red).
+          make build-madaros
+          test -s artifacts/self-hosted/madaros
+
+      - name: Gate the built Madaros
+        id: gate
+        run: |
+          export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+          # A GATE failure means current main's Madaros is not shippable (often
+          # because main itself is broken) -> do NOT fail the job and do NOT
+          # commit; keep the last-good prebuilt. Only a green gate refreshes.
+          if bash scripts/ci/madaros_full_gate.sh; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Madaros full gate did not pass on current main — keeping the existing prebuilt bin/madaros-linux-x86_64 (no refresh)."
+          fi
+
+      - name: Install built Madaros as the checked-in prebuilt
+        if: steps.gate.outputs.passed == 'true'
+        run: |
+          cp artifacts/self-hosted/madaros bin/madaros-linux-x86_64
+          chmod +x bin/madaros-linux-x86_64
+
+      - name: Commit and push if the prebuilt changed
+        if: steps.gate.outputs.passed == 'true'
+        run: |
+          if git diff --quiet -- bin/madaros-linux-x86_64; then
+            echo "bin/madaros-linux-x86_64 is unchanged — nothing to commit."
+            exit 0
+          fi
+
+          SRC_REF="$(git rev-parse --short HEAD)"
+          BYTES="$(wc -c < bin/madaros-linux-x86_64)"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bin/madaros-linux-x86_64
+          git commit -m "build(madaros): refresh prebuilt bin/madaros-linux-x86_64 [skip ci]
+
+          Auto-rebuilt from ${SRC_REF} (make build-madaros) and passed the
+          Madaros full gate. Keeps the out-of-box Madaros default current with
+          self-hosted/compiler/main.sio. Binary size: ${BYTES} bytes."
+
+          # Land on the latest main (it may have advanced during the build).
+          # The binary is a generated artifact, so a rebase is normally clean.
+          for attempt in 1 2 3; do
+            git fetch origin main
+            if git rebase origin/main && git push origin HEAD:main; then
+              echo "Refreshed prebuilt pushed to main (attempt ${attempt})."
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            echo "push attempt ${attempt} failed; retrying after fetch…" >&2
+            sleep 5
+          done
+          echo "ERROR: could not push refreshed prebuilt after 3 attempts." >&2
+          exit 1

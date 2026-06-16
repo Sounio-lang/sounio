@@ -8,7 +8,7 @@ use check::types::{TypeEntry, empty_type_entry}
 // These caps gate what the self-hosted pipeline can lower and execute.
 // Keep them aligned with the fixed backing storage in IrModule/IrFunction so
 // the lowering path can use the capacity that is already physically allocated.
-pub let IR_MAX_FUNCS: i64 = 1400
+pub let IR_MAX_FUNCS: i64 = 2048
 pub let IR_MAX_STRINGS: i64 = 4096
 pub let IR_MAX_INSTRS: i64 = 128
 pub let IR_MAX_PARAMS: i64 = 64
@@ -56,6 +56,7 @@ let SOUNIO_ABI_VERSION: i64 = 1
 let SOUNIO_RUNTIME_VERSION_MAJOR: i64 = 1
 let SOUNIO_RUNTIME_VERSION_MINOR: i64 = 0
 let SOUNIO_RUNTIME_VERSION_PATCH: i64 = 0
+pub let IR_FLOAT_REG_MARKER_FLAG: i64 = 64064
 
 pub enum IrOpcode {
     IrLoadImm,
@@ -621,7 +622,28 @@ pub enum IrOpcode {
     //   Formal guarantee: QDeformClassical.lean  `q_deform_recovers_classical`
     //   Lowering at q=1: 1 VMULPD.  At q≠1: VMULPD + VSUBPD + scale + VFMADD231PD; ~4 EVEX
     IrQDeform,          // Door Ξ: a·_q b, q in imm_flags, unifies all prior Doors
-    IrWideAdd,          // N-limb carry-chain add: dst[0..L-1]=src1[0..L-1]+src2[0..L-1]; imm_i64=L
+
+    // SysV aggregate return (>16B) ABI.
+    // IrCallSret injects the hidden destination pointer/handle in rdi and shifts
+    // explicit integer args to rsi/rdx/rcx/r8/r9. IrReturnSret returns that handle.
+    IrCallSret,
+    IrReturnSret,
+    IrWideAdd,
+    IrWideSub,
+    IrWideMul,
+    IrWideShrLimb,
+    IrWideDiv,
+    IrWideMod,
+    IrWideCmp,
+    IrWideReject,
+    IrWideShr,
+    IrWideDivFull,
+    IrWideModFull,
+    // Global variable (BSS) load/store — absolute addressing at BSS_BASE + offset
+    //   imm_i64 = BSS byte offset (from BSS_BASE)
+    //   name    = global variable name (for debugging)
+    IrLoadGlobal,
+    IrStoreGlobal,
 }
 
 pub struct IrRegList {
@@ -686,8 +708,12 @@ pub struct IrFunction {
     pub param_count: i64,
     pub param_regs: [i64; 64],
     pub compile_strategy: i64,
+    pub returns_float: i64,        // 1 = declared return type is f64; used by native core value tracking
+    pub return_struct_name: Name,  // Named return type, used by native field layout recovery
     pub prof_counter_id: i64,
     pub hyper_algebra_kind: i64,  // -1 = absent/unknown, otherwise ALG_REAL..ALG_CLIFFORD
+    pub is_sret: i64,             // 1 = SysV sret: rdi is hidden dest; explicit params shift to rsi+
+    pub sret_dest_reg: i64,       // when is_sret==1: vreg receiving the hidden rdi destination
 }
 
 pub struct IrAlgebraInfo {
@@ -1906,7 +1932,7 @@ pub fn ir_empty_epistemic_section_boxed() -> Box<IrEpistemicSection> with Alloc,
 }
 
 pub struct IrModule {
-    pub functions: [IrFunction; 1400],
+    pub functions: [IrFunction; 2048],
     pub fn_count: i64,
     pub string_table: [Name; 4096],
     pub string_count: i64,
@@ -1960,6 +1986,7 @@ pub struct IrLowerResult {
 pub struct StructFieldEntry {
     name: Name,
     index: i64,
+    is_float: i64,
 }
 
 // Layout for one struct type: name + ordered fields
@@ -1976,7 +2003,7 @@ pub struct StructLayoutTable {
 }
 
 fn empty_struct_field_entry() -> StructFieldEntry {
-    StructFieldEntry { name: ir_empty_name(), index: 0 }
+    StructFieldEntry { name: ir_empty_name(), index: 0, is_float: 0 }
 }
 
 fn empty_struct_layout_entry() -> StructLayoutEntry {
@@ -2214,6 +2241,27 @@ pub fn ir_instr_new(op: IrOpcode) -> IrInstr {
 
 fn ir_nop() -> IrInstr {
     ir_instr_new(IrOpcode::IrNop)
+}
+
+pub fn ir_mark_float_reg(reg: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrNop)
+    IrInstr {
+        op: base.op,
+        dst: reg,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: IR_FLOAT_REG_MARKER_FLAG,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
 }
 
 fn ir_empty_instr() -> IrInstr {
@@ -3046,6 +3094,120 @@ fn ir_unaryop(dst: i64, op: UnaryOp, src: i64) -> IrInstr {
     }
 }
 
+// Zig-style fixed-width wide-int ops. dst/src1/src2 = BASE vreg of each operand;
+// limb k lives at vreg base+k (consecutive slots, limb 0 = least significant).
+// limb_count = ceil(N/64) for an iN/uN value.
+pub fn ir_wide_add(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideAdd)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_sub(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideSub)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_mul(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideMul)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_div(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideDiv)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_shr_limb(dst: i64, src: i64, limb_count: i64, shift_limbs: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideShrLimb)
+    IrInstr {
+        op: base.op, dst: dst, src1: src, src2: shift_limbs,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_mod(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideMod)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_cmp(dst: i64, src1: i64, src2: i64, limb_count: i64, cmp_op: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideCmp)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: cmp_op, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_shr(dst: i64, src: i64, limb_count: i64, shift_bits: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideShr)
+    IrInstr {
+        op: base.op, dst: dst, src1: src, src2: shift_bits,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_div_full(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideDivFull)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_mod_full(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideModFull)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_reject(dst: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideReject)
+    IrInstr {
+        op: base.op, dst: dst, src1: base.src1, src2: base.src2,
+        imm_i64: base.imm_i64, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+
 pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr {
     let pair_regs = ir_reg_list_first_two(args)
     let arg0 = pair_regs.0
@@ -3068,6 +3230,53 @@ pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>
         // Keep the full argument list. src1/src2 cache the first two for compatibility.
         call_args: args,
         arg_count: arg_count,
+    }
+}
+
+// Caller-side sret call. dest_reg = pre-allocated destination handle vreg (goes in rdi,
+// NOT counted in arg_count). first_arg = vreg of the first EXPLICIT arg (goes in rsi);
+// explicit args are dest contiguous vregs first_arg..first_arg+arg_count.
+pub fn ir_call_sret(dst: i64, fn_id: i64, fn_name: Name, dest_reg: i64, first_arg: i64, arg_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrCallSret)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: dest_reg,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: fn_id,
+        field_idx: first_arg,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: fn_name,
+        call_args: base.call_args,
+        arg_count: arg_count,
+    }
+}
+
+// Callee-side sret return. src = vreg holding the hidden destination handle (spilled
+// from rdi in the prologue); returned in rax with the standard epilogue.
+pub fn ir_return_sret(src: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrReturnSret)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: src,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
     }
 }
 
@@ -3264,14 +3473,18 @@ pub fn ir_empty_function() -> IrFunction {
         param_count: 0,
         param_regs: [IR_INVALID_REG; 64],
         compile_strategy: IR_STRATEGY_STANDARD,
+        returns_float: 0,
+        return_struct_name: ir_empty_name(),
         prof_counter_id: -1,
         hyper_algebra_kind: -1,
+        is_sret: 0,
+        sret_dest_reg: -1,
     }
 }
 
 pub fn ir_empty_module() -> IrModule {
     IrModule {
-        functions: [ir_empty_function(); 1400],
+        functions: [ir_empty_function(); 2048],
         fn_count: 0,
         string_table: [ir_empty_name(); 4096],
         string_count: 0,
@@ -3283,6 +3496,40 @@ pub fn ir_empty_module() -> IrModule {
         export_names: [ir_empty_name(); 64],
         export_count: 0,
     }
+}
+
+// ============================================================================
+// BSS global-variable tracking (mirrors lean_single GL table)
+// ============================================================================
+
+pub let BSS_MAX_GLOBALS: i64 = 128
+pub let BSS_BASE_LINUX: i64 = 0x10000000
+pub let IR_STRATEGY_BSS_GLOBAL: i64 = 99
+
+pub fn bss_name_hash(n: Name) -> i64 with Div {
+    var hash: i64 = 5381
+    var i = 0
+    while i < n.len {
+        hash = hash * 33 + (n.buf[i as usize] as i64)
+        i = i + 1
+    }
+    if hash < 0 { 0 - hash } else { hash }
+}
+
+pub fn ir_load_global(dst: i64, bss_offset: i64, name: Name) -> IrInstr with Mut, Panic {
+    var instr = ir_instr_new(IrOpcode::IrLoadGlobal)
+    instr.dst = dst
+    instr.imm_i64 = bss_offset
+    instr.name = name
+    instr
+}
+
+pub fn ir_store_global(src: i64, bss_offset: i64, name: Name) -> IrInstr with Mut, Panic {
+    var instr = ir_instr_new(IrOpcode::IrStoreGlobal)
+    instr.src1 = src
+    instr.imm_i64 = bss_offset
+    instr.name = name
+    instr
 }
 
 pub fn ir_call_extern(dst: i64, symbol: Name, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr with Mut, Panic {

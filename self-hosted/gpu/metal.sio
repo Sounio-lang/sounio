@@ -98,8 +98,33 @@ fn metal_buf_contains(buf: MetalBuf, needle: string) -> bool with Mut, Panic, Di
     false
 }
 
-fn metal_push_i64(buf: MetalBuf, n: i64) -> MetalBuf with Mut, Panic, Div, Alloc {
-    metal_push_str(buf, i64_to_string(n))
+fn metal_push_i64(buf: MetalBuf, n: i64) -> MetalBuf with Mut, Panic, Div {
+    if n == 0 { return metal_push_byte(buf, 48) }
+    var value: i64 = if n < 0 { 0 } else { n }
+    var digits: [i8; 20] = [0; 20]
+    var rev_len: i64 = 0
+    while value > 0 {
+        digits[rev_len as usize] = (48 + value % 10) as i8
+        rev_len = rev_len + 1
+        value = value / 10
+    }
+    var out = buf
+    var k: i64 = rev_len - 1
+    while k >= 0 {
+        out = metal_push_byte(out, digits[k as usize])
+        k = k - 1
+    }
+    out
+}
+
+fn metal_push_name(buf: MetalBuf, name: Name) -> MetalBuf with Mut, Panic {
+    var out = buf
+    var i: i64 = 0
+    while i < name.len {
+        out = metal_push_byte(out, name.buf[i as usize])
+        i = i + 1
+    }
+    out
 }
 
 fn metal_push_newline(buf: MetalBuf) -> MetalBuf with Mut, Panic {
@@ -116,8 +141,18 @@ fn metal_push_indent(buf: MetalBuf, depth: i64) -> MetalBuf with Mut, Panic, Div
     out
 }
 
-fn metal_to_string(buf: MetalBuf) -> string with Mut, Panic, Div, Alloc {
-    str_from_bytes(buf.data, buf.len)
+// Global output buffer for metal_to_string; avoids returning a dangling stack pointer
+// since str_from_bytes in lean_single returns the address of its first arg.
+pub var METAL_TO_STRING_BUF: [i8; 65536] = [0; 65536]
+
+fn metal_to_string(buf: MetalBuf) -> string with Mut, Panic {
+    var i: i64 = 0
+    while i < buf.len {
+        METAL_TO_STRING_BUF[i as usize] = buf.data[i as usize]
+        i = i + 1
+    }
+    METAL_TO_STRING_BUF[buf.len as usize] = 0
+    str_from_bytes(METAL_TO_STRING_BUF, buf.len)
 }
 
 // ============================================================================
@@ -226,7 +261,7 @@ fn metal_emit_header(buf: MetalBuf) -> MetalBuf with Mut, Panic, Div {
 fn metal_emit_kernel_signature(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf with Mut, Panic, Div, Alloc {
     var out = buf
     out = metal_push_str(out, "kernel void ")
-    out = metal_push_str(out, name_to_string(kernel.kernel_name))
+    out = metal_push_name(out, kernel.kernel_name)
     out = metal_push_str(out, "(\n")
 
     // Emit buffer parameters
@@ -236,7 +271,7 @@ fn metal_emit_kernel_signature(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf w
         out = metal_push_str(out, "    ")
         out = metal_push_str(out, gpu_type_to_msl_param(param.ty))
         out = metal_push_str(out, " ")
-        out = metal_push_str(out, name_to_string(param.name))
+        out = metal_push_name(out, param.name)
         out = metal_push_str(out, " [[buffer(")
         out = metal_push_i64(out, pi)
         out = metal_push_str(out, ")]]")
@@ -391,7 +426,7 @@ fn metal_reg_name(ty: GpuType, idx: i64) -> string with Mut, Panic, Div, Alloc {
     }
 }
 
-fn metal_kernel_uses_lane_exchange(kernel: GpuKernelIr) -> bool {
+fn metal_kernel_uses_lane_exchange(kernel: GpuKernelIr) -> bool with Mut {
     var i: i64 = 0
     while i < kernel.op_count {
         let opc = kernel.ops[i as usize].opcode
@@ -606,7 +641,7 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
         out = metal_push_str(out, " = (")
         out = metal_push_str(out, gpu_type_to_msl(op.ty))
         out = metal_push_str(out, ")(ulong)")
-        out = metal_push_str(out, name_to_string(param.name))
+        out = metal_push_name(out, param.name)
         out = metal_push_str(out, ";\n")
         return out
     }

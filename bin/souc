@@ -1,481 +1,106 @@
 #!/usr/bin/env bash
-# bin/souc - public Sounio CLI launcher.
+# bin/souc — default Sounio compiler entrypoint.
 #
-# The checked Stage0 compiler is the raw ELF at bin/souc-linux-x86_64.  That
-# raw compiler speaks the bootstrap positional ABI:
+# DEFAULT ENGINE: Madaros (the self-hosted *modular* compiler, built from
+# self-hosted/compiler/main.sio into artifacts/self-hosted/madaros). This is the
+# compiler people invoke for normal use ("MADAROS IS DEFAULT", 2026-06-14).
 #
-#   souc-linux-x86_64 <source.sio> <output.elf> [flags]
+# LEGACY ENGINE: lean_single — the single-file bootstrap codegen that bin/souc
+# USED to be, preserved as bin/souc-lean-single-x86_64. It remains the bootstrap
+# SEED (make build, build-madaros) and the canonical fixed-point ELF, but is no
+# longer the default user-facing compiler.
 #
-# This launcher is the human-facing language entrypoint.  It preserves the raw
-# ABI as a passthrough while exposing the documented command interface:
+# This is a thin CLI shim: it keeps the historical `souc check|compile|run|
+# --version|info` surface (657+ call sites) working while routing to Madaros via
+# bin/madaros, which already maps those verbs to the raw modular ELF.
 #
-#   souc --version
-#   souc check <file.sio>
-#   souc run <file.sio>
-#   souc compile <file.sio> -o <out>
-#   souc build <file.sio> -o <out>
-#   souc repl
+# Engine selection (in order):
+#   SOUNIO_SOUC_BIN=<elf>          -> exec that ELF directly (raw, lean_single CLI)
+#   SOUNIO_SOUC_ENGINE=lean_single -> force the legacy lean_single ELF
+#   (default)                      -> Madaros; if its raw ELF is not built, fall
+#                                     back to lean_single with a visible notice so
+#                                     no caller hard-breaks in an unbuilt checkout.
 #
-# Madaros, the Stage1 modular compiler, is intentionally separate at
-# bin/madaros.
-
+# Environment passthrough:
+#   SOUNIO_STDLIB_PATH   forwarded to whichever engine runs
+#   MADAROS_RAW_BIN / SOUNIO_MADAROS_BIN  override the Madaros raw ELF
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOST_OS="${SOUNIO_HOST_OS_OVERRIDE:-$(uname -s 2>/dev/null || echo unknown)}"
-HOST_ARCH="${SOUNIO_HOST_ARCH_OVERRIDE:-$(uname -m 2>/dev/null || echo unknown)}"
-WRAPPER_VERSION="${SOUNIO_SOUC_VERSION:-1.0.0-beta.6}"
 
-_is_wrapper() {
-  local path="$1"
-  [[ -f "$path" ]] && [[ "$(head -c 2 "$path" 2>/dev/null || true)" == "#!" ]]
-}
+# The preserved lean_single fixed-point ELF (escape hatch + fallback target).
+LEAN_SINGLE="$ROOT_DIR/bin/souc-lean-single-x86_64"
+[[ -x "$LEAN_SINGLE" ]] || LEAN_SINGLE="$ROOT_DIR/bin/souc-linux-x86_64"
 
-resolve_raw_souc() {
+_is_elf() { [[ -n "${1:-}" && -x "$1" && "$(head -c2 "$1" 2>/dev/null)" != '#!' ]]; }
+
+# Resolve the Madaros raw ELF, mirroring bin/madaros's resolution order.
+_resolve_madaros() {
   local cand
-  if [[ -n "${SOUNIO_SOUC_BIN:-}" && -x "${SOUNIO_SOUC_BIN:-}" ]] && ! _is_wrapper "$SOUNIO_SOUC_BIN"; then
-    printf '%s\n' "$SOUNIO_SOUC_BIN"
-    return 0
-  fi
-
-  for cand in \
-    "${SOUNIO_SOUC_RAW_BIN:-}" \
-    "${SOUC_NATIVE_BIN:-}" \
-    "$(resolve_host_binary 2>/dev/null || true)" \
-    "$ROOT_DIR/bin/souc-linux-x86_64" \
-    "$ROOT_DIR/bin/souc-native"; do
-    if [[ -n "$cand" && -x "$cand" ]] && ! _is_wrapper "$cand"; then
-      printf '%s\n' "$cand"
-      return 0
-    fi
-  done
-
-  echo "error: souc: no raw Stage0 compiler ELF found" >&2
-  echo "  host: $HOST_OS/$HOST_ARCH" >&2
-  echo "  tried: SOUNIO_SOUC_BIN, SOUNIO_SOUC_RAW_BIN, SOUC_NATIVE_BIN, host artifact, $ROOT_DIR/bin/souc-linux-x86_64, $ROOT_DIR/bin/souc-native" >&2
-  return 127
-}
-
-resolve_host_binary() {
-  case "$HOST_OS:$HOST_ARCH" in
-    Linux:x86_64|Linux:amd64)
-      printf '%s\n' "$ROOT_DIR/bin/souc-linux-x86_64"
-      ;;
-    Darwin:arm64|Darwin:aarch64)
-      printf '%s\n' "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-arm64-macos"
-      ;;
-    Darwin:x86_64|Darwin:amd64)
-      printf '%s\n' "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64-macos"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-resolve_host_target() {
-  case "$HOST_OS:$HOST_ARCH" in
-    Linux:x86_64|Linux:amd64) printf '%s\n' "x86_64-linux" ;;
-    Linux:arm64|Linux:aarch64) printf '%s\n' "aarch64-linux" ;;
-    Darwin:arm64|Darwin:aarch64) printf '%s\n' "aarch64-macos" ;;
-    Darwin:x86_64|Darwin:amd64) printf '%s\n' "x86_64-macos" ;;
-    *) return 1 ;;
-  esac
-}
-
-RAW_SOUC="$(resolve_raw_souc)"
-
-usage() {
-  cat <<USAGE
-souc - Sounio language launcher
-
-Usage:
-  souc --version
-  souc check <file.sio> [compiler flags...]
-  souc run <file.sio> [compiler flags...] [-- program args...]
-  souc compile <file.sio> -o <out> [compiler flags...]
-  souc build <file.sio> -o <out> [compiler flags...]
-  souc repl [repl flags...]
-  souc init <name>
-  souc check [project-dir]
-  souc run [project-dir] [-- program args...]
-  souc build [project-dir] [-o <out>]
-  souc info
-  souc <file.sio> <out> [compiler flags...]
-
-Compiler flags are forwarded to the raw Stage0 compiler.  Common flags include
---show-ast, --show-types, --r15-monitor, and --target <triple>.
-
-Madaros, the Stage1 modular compiler built from self-hosted/compiler/main.sio,
-is exposed separately as bin/madaros.
-USAGE
-}
-
-version() {
-  local git_desc
-  git_desc="$(git -C "$ROOT_DIR" describe --always --dirty --tags 2>/dev/null || true)"
-  if [[ -n "$git_desc" ]]; then
-    printf 'souc %s (%s)\n' "$WRAPPER_VERSION" "$git_desc"
-  else
-    printf 'souc %s\n' "$WRAPPER_VERSION"
-  fi
-  printf 'stage0: %s\n' "$RAW_SOUC"
-}
-
-info() {
-  local host_target
-  host_target="$(resolve_host_target 2>/dev/null || echo unknown)"
-  echo "launcher: $0"
-  echo "host_os:  $HOST_OS"
-  echo "host_arch:$HOST_ARCH"
-  echo "target:   $host_target"
-  echo "stage0:   $RAW_SOUC"
-  if [[ -x "$ROOT_DIR/bin/madaros" ]]; then
-    echo "madaros:  $ROOT_DIR/bin/madaros"
-  else
-    echo "madaros:  <not installed>"
-  fi
-  if [[ -x "$ROOT_DIR/bin/sounio-repl" ]]; then
-    echo "repl:     $ROOT_DIR/bin/sounio-repl"
-  else
-    echo "repl:     <not installed>"
-  fi
-  echo "stdlib:   ${SOUNIO_STDLIB_PATH:-<unset>}"
-}
-
-souc_compile() {
-  local src="$1"
-  local out="$2"
-  shift 2
-
-  rm -f "$out"
-  local log rc
-  set +e
-  log="$("$RAW_SOUC" "$src" "$out" "$@" 2>&1)"
-  rc=$?
-  set -e
-
-  if [[ $rc -ne 0 ]] || [[ ! -s "$out" ]] || ! grep -qF "compile: fns=" <<<"$log"; then
-    printf '%s\n' "$log"
-    if ! grep -qF "typecheck: failed" <<<"$log"; then
-      printf 'typecheck: failed\n'
-    fi
-    rm -f "$out"
-    return 1
-  fi
-
-  chmod +x "$out"
-  if [[ "${SOUNIO_SOUC_VERBOSE:-0}" == "1" && -n "$log" ]]; then
-    printf '%s\n' "$log" >&2
-  fi
-}
-
-find_project_root() {
-  local start="${1:-$PWD}"
-  if [[ -f "$start" ]]; then
-    start="$(dirname "$start")"
-  fi
-  if [[ -d "$start" ]]; then
-    start="$(cd "$start" && pwd)"
-  else
-    return 1
-  fi
-  while [[ "$start" != "/" ]]; do
-    if [[ -f "$start/sounio.toml" ]]; then
-      printf '%s\n' "$start"
-      return 0
-    fi
-    start="$(dirname "$start")"
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" \
+              "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+    if _is_elf "$cand"; then echo "$cand"; return 0; fi
   done
   return 1
 }
 
-project_manifest_value() {
-  local root="$1"
-  local key="$2"
-  python3 - "$root/sounio.toml" "$key" <<'PY'
-import sys
-try:
-    import tomllib
-except ModuleNotFoundError:
-    raise SystemExit(3)
-path, key = sys.argv[1], sys.argv[2]
-data = tomllib.loads(open(path, "rb").read().decode("utf-8"))
-if key == "package.name":
-    print(data.get("package", {}).get("name", "sounio-project"))
-elif key == "entry":
-    bins = data.get("bin", [])
-    if isinstance(bins, list) and bins:
-        value = bins[0].get("path", "")
-        if value:
-            print(value)
-            raise SystemExit(0)
-    value = data.get("project", {}).get("entry", "")
-    if value:
-        print(value)
-        raise SystemExit(0)
-    value = data.get("lib", {}).get("path", "")
-    if value and not (open(path, "rb").read().decode("utf-8").find("[[bin]]") >= 0):
-        print(value)
-        raise SystemExit(0)
-    print("src/main.sio")
-else:
-    raise SystemExit(2)
-PY
+# souc-flavoured help. The `check|compile|run <file.sio>` tokens are the repo-wide
+# capability-probe contract (scripts grep `souc --help` for `compile <file.sio>` /
+# `run <file.sio>` to decide between the verb CLI and the raw `SRC OUT` form). We
+# only print this when the Madaros engine is actually resolved — Madaros supports
+# the verbs, so the probe correctly selects the verb form. In the lean_single
+# fallback we delegate --help to the raw ELF (no verb tokens), so probes correctly
+# select the raw `SRC OUT` form that lean_single understands.
+_print_souc_help() {
+  cat <<'USAGE'
+souc — the Sounio compiler (default engine: Madaros)
+
+Usage:
+  souc --version                      print compiler identity
+  souc info                           print compiler status
+  souc check <file.sio>               parse, resolve and typecheck
+  souc compile <file.sio> [-o OUT]    compile <file.sio> to a native ELF
+  souc run <file.sio>                 run <file.sio> (compile to a temp ELF and execute)
+
+Engine selection:
+  SOUNIO_SOUC_ENGINE=lean_single      force the legacy lean_single engine (raw `souc SRC OUT`)
+  MADAROS_RAW_BIN=<elf>               override the Madaros raw ELF
+USAGE
 }
 
-resolve_source_or_project() {
-  local candidate="${1:-}"
-  if [[ -n "$candidate" && -f "$candidate" ]]; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-
-  local root=""
-  if [[ -n "$candidate" && -d "$candidate" ]]; then
-    root="$(find_project_root "$candidate" || true)"
-  else
-    root="$(find_project_root "$PWD" || true)"
-  fi
-
-  if [[ -z "$root" ]]; then
-    return 1
-  fi
-
-  local entry
-  entry="$(project_manifest_value "$root" entry)"
-  if [[ ! -f "$root/$entry" ]]; then
-    echo "error: project entry not found: $root/$entry" >&2
-    return 1
-  fi
-  printf '%s\n' "$root/$entry"
-}
-
-project_default_output() {
-  local root="$1"
-  local name
-  name="$(project_manifest_value "$root" package.name)"
-  mkdir -p "$root/target"
-  printf '%s\n' "$root/target/$name"
-}
-
-cmd_init() {
-  if [[ $# -ne 1 ]]; then
-    echo "error: init requires <name>" >&2
-    exit 2
-  fi
-  local name="$1"
-  if [[ -e "$name" ]]; then
-    echo "error: path already exists: $name" >&2
-    exit 1
-  fi
-  mkdir -p "$name/src"
-  cat >"$name/sounio.toml" <<EOF
-[package]
-name = "$name"
-version = "0.1.0"
-edition = "2026"
-
-[[bin]]
-name = "$name"
-path = "src/main.sio"
-EOF
-  cat >"$name/src/greet.sio" <<'EOF'
-pub fn answer() -> i64 {
-    42
-}
-EOF
-  cat >"$name/src/main.sio" <<'EOF'
-use greet::{answer}
-
-fn main() -> i64 with IO {
-    print_int(answer())
-    print_char(10)
-    0
-}
-EOF
-  echo "Created Sounio project: $name"
-}
-
-cmd_check() {
-  if [[ $# -lt 1 || ( $# -eq 1 && -d "$1" ) ]]; then
-    local candidate="${1:-}"
-    local resolved
-    if ! resolved="$(resolve_source_or_project "$candidate")"; then
-      echo "error: check requires <file.sio> or a project with sounio.toml" >&2
-      usage >&2
-      exit 2
-    fi
-    set -- "$resolved"
-  fi
-  local src="$1"
-  shift
-  local tmp
-  tmp="$(mktemp /tmp/sounio-check-XXXXXX.elf)"
-  local rc
-  set +e
-  souc_compile "$src" "$tmp" "$@"
-  rc=$?
-  set -e
-  rm -f "$tmp"
-  exit "$rc"
-}
-
-cmd_run() {
-  if [[ $# -lt 1 || ( $# -ge 1 && -d "$1" ) ]]; then
-    local candidate=""
-    local rest=("$@")
-    if [[ $# -ge 1 && -d "$1" ]]; then
-      candidate="$1"
-      rest=("${@:2}")
-    fi
-    local resolved
-    if ! resolved="$(resolve_source_or_project "$candidate")"; then
-      echo "error: run requires <file.sio> or a project with sounio.toml" >&2
-      usage >&2
-      exit 2
-    fi
-    set -- "$resolved" "${rest[@]}"
-  fi
-  local src="$1"
-  shift
-  local compiler_args=()
-  local program_args=()
-  while [[ $# -gt 0 ]]; do
-    if [[ "$1" == "--" ]]; then
-      shift
-      program_args=("$@")
-      break
-    fi
-    compiler_args+=("$1")
-    shift
-  done
-
-  local tmp rc
-  tmp="$(mktemp /tmp/sounio-run-XXXXXX.elf)"
-  SOUNIO_TMP_RUN="$tmp"
-  trap 'rm -f "${SOUNIO_TMP_RUN:-}"' EXIT
-  set +e
-  souc_compile "$src" "$tmp" "${compiler_args[@]}"
-  rc=$?
-  set -e
-  if [[ $rc -ne 0 ]]; then
-    exit "$rc"
-  fi
-
-  set +e
-  "$tmp" "${program_args[@]}"
-  rc=$?
-  set -e
-  rm -f "$tmp"
-  trap - EXIT
-  exit "$rc"
-}
-
-cmd_compile() {
-  local src=""
-  local out=""
-  local args=()
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -o)
-        shift
-        if [[ $# -lt 1 ]]; then
-          echo "error: -o requires an output path" >&2
-          exit 2
-        fi
-        out="$1"
-        shift
-        ;;
-      *)
-        if [[ -z "$src" && "$1" != -* ]]; then
-          src="$1"
-        else
-          args+=("$1")
-        fi
-        shift
-        ;;
-    esac
-  done
-
-  if [[ -z "$src" ]]; then
-    if ! src="$(resolve_source_or_project "")"; then
-      echo "error: compile requires <file.sio> or a project with sounio.toml" >&2
-      usage >&2
-      exit 2
-    fi
-  elif [[ -d "$src" ]]; then
-    local root
-    root="$(find_project_root "$src")"
-    src="$(resolve_source_or_project "$root")"
-    if [[ -z "$out" ]]; then
-      out="$(project_default_output "$root")"
-    fi
-  fi
-
-  if [[ -z "$out" ]]; then
-    local root_for_out
-    root_for_out="$(find_project_root "$src" || true)"
-    if [[ -n "$root_for_out" ]]; then
-      out="$(project_default_output "$root_for_out")"
-    fi
-  fi
-
-  if [[ -z "$out" ]]; then
-    echo "error: compile requires -o <out> when not building a project" >&2
-    usage >&2
-    exit 2
-  fi
-
-  souc_compile "$src" "$out" "${args[@]}"
-}
-
-cmd_repl() {
-  local repl="$ROOT_DIR/bin/sounio-repl"
-  if [[ ! -x "$repl" ]]; then
-    echo "error: souc repl requires $repl" >&2
-    echo "hint: build it with: cd tools/sounio-repl && cargo build --release" >&2
-    exit 127
-  fi
-  exec "$repl" --compiler "$RAW_SOUC" "$@"
-}
-
-if [[ $# -eq 0 ]]; then
-  usage
-  exit 0
+# 1) Explicit ELF override: honor it directly (raw lean_single-style CLI).
+if _is_elf "${SOUNIO_SOUC_BIN:-}"; then
+  exec "$SOUNIO_SOUC_BIN" "$@"
 fi
 
-case "$1" in
-  --version|-V)
-    version
-    ;;
-  -h|--help|help)
-    usage
-    ;;
-  info)
-    info
-    ;;
-  init)
-    shift
-    cmd_init "$@"
-    ;;
-  check)
-    shift
-    cmd_check "$@"
-    ;;
-  run)
-    shift
-    cmd_run "$@"
-    ;;
-  compile|build)
-    shift
-    cmd_compile "$@"
-    ;;
-  repl)
-    shift
-    cmd_repl "$@"
-    ;;
-  *)
-    exec "$RAW_SOUC" "$@"
+# 2) Forced legacy engine.
+case "${SOUNIO_SOUC_ENGINE:-madaros}" in
+  lean_single|lean-single|leansingle)
+    if [[ ! -x "$LEAN_SINGLE" ]]; then
+      echo "souc: SOUNIO_SOUC_ENGINE=lean_single but no lean_single ELF found at $LEAN_SINGLE" >&2
+      exit 127
+    fi
+    exec "$LEAN_SINGLE" "$@"
     ;;
 esac
+
+# 3) Default: Madaros (via bin/madaros, which maps the souc verbs to the raw ELF).
+if MADAROS_ELF="$(_resolve_madaros)"; then
+  # Advertise the souc verb CLI so capability-probing callers select the verb form
+  # (which Madaros supports) instead of the raw `SRC OUT` form (which it does not).
+  case "${1:-}" in
+    -h|--help|help) _print_souc_help; exit 0 ;;
+  esac
+  exec env MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" "$@"
+fi
+
+# 4) Madaros not built — do not hard-break callers; fall back to lean_single.
+if [[ -x "$LEAN_SINGLE" ]]; then
+  echo "souc: Madaros raw ELF not found (run 'make build-madaros') — falling back to the" >&2
+  echo "souc: legacy lean_single engine. Set SOUNIO_SOUC_ENGINE=lean_single to silence this." >&2
+  exec "$LEAN_SINGLE" "$@"
+fi
+
+echo "souc: no compiler engine available — build Madaros ('make build-madaros') or provide" >&2
+echo "souc: a lean_single ELF at $LEAN_SINGLE." >&2
+exit 127
