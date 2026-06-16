@@ -9524,6 +9524,28 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 }
             }
         }
+        // &obj.field[i] : the field chain left rax = address of a Seq field cell.
+        // Load the Seq pointer and borrow element i (heap ptr = &Inner for structs).
+        if inner_ty == 12 && TK[EP as usize] == 41 {
+            em(0x48); em(0x8b); em(0x00)   // mov rax, [rax]  (Seq ptr)
+            let fb_ps = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(fb_ps)
+            EP = EP + 1  // skip [
+            let fb_is = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            compile_or()  // index → rax
+            emit_store_var(fb_is)
+            if TK[EP as usize] == 42 { EP = EP + 1 }
+            emit_seq_get_slots_x86(fb_ps, fb_is)
+            let fb_in_ty = seq_hash_inner_ty(inner_hash)
+            let fb_in_hash = seq_hash_inner_hash(inner_hash)
+            EXPR_IS_F64 = 0
+            EXPR_TY = 10
+            if want_mut != 0 { EXPR_TY_HASH = ref_hash_make(fb_in_ty, fb_in_hash, 1) }
+            else { EXPR_TY_HASH = ref_hash_make(fb_in_ty, fb_in_hash, 0) }
+            return
+        }
         if inner_ty == 11 && box_hash_is(inner_hash) {
             em(0x48); em(0x8b); em(0x00)
             inner_ty = ptr_hash_inner_ty(inner_hash)
@@ -14112,6 +14134,25 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EXPR_TY = 1
                     EXPR_TY_HASH = 0
                     EXPR_IS_F64 = 0
+                }
+            } else if base_ty == 12 {
+                // Seq element read: rcx = Seq ptr, rdx = index → seq.get(index)
+                let sub_sgp = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                em(0x48); em(0x89); em(0xc8)   // mov rax, rcx (Seq ptr)
+                emit_store_var(sub_sgp)
+                let sub_sgi = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                em(0x48); em(0x89); em(0xd0)   // mov rax, rdx (index)
+                emit_store_var(sub_sgi)
+                emit_seq_get_slots_x86(sub_sgp, sub_sgi)
+                EXPR_IS_F64 = 0
+                if seq_hash_is(base_hash) {
+                    EXPR_TY = seq_hash_inner_ty(base_hash)
+                    EXPR_TY_HASH = seq_hash_inner_hash(base_hash)
+                } else {
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
                 }
             } else if type_is_slice_ref(base_ty, base_hash) {
                 let inner_hash = ref_hash_inner_hash(base_hash)
@@ -20635,6 +20676,23 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 16 { EP = EP + 1 }  // skip =
         em(0x50)  // push index
         compile_or()  // value in rax
+        // Seq<T> subscript store: seq[i] = v is sugar for seq.set(i, v) (local).
+        let seq_svi = var_find_idx(ns, ne)
+        if seq_svi >= 0 && VAR_TY[seq_svi as usize] == 12 {
+            let seq_vslot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(seq_vslot)         // value (rax) → slot
+            em(0x58)                           // pop rax (index)
+            let seq_islot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(seq_islot)
+            let seq_pslot = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_load_var(var_find(ns, ne))   // seq ptr
+            emit_store_var(seq_pslot)
+            emit_seq_set_slots_x86(seq_pslot, seq_islot, seq_vslot)
+            return
+        }
         let gi = gl_find(ns, ne)
         if gi >= 0 {
             let base = GL_BSS_BASE + GL[(gi * 4 + 1) as usize]
