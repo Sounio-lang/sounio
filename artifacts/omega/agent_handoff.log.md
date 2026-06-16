@@ -2583,3 +2583,274 @@ error: no main
 
 **Status.** The test implements the requested stiff case with MC, knightian (with apply2 on monotone readout segment + grid for non-mono), bridge usage for assert3, and the three asserts + prints. Offload notes addressed by safe mul + grid. Ready for review before high-dim or hyper. Only the specified files touched in this step.
 
+
+---
+
+agent: codex
+time_utc: 2026-06-16T01:58:00Z
+files:
+  - self-hosted/ir/ir.sio
+  - self-hosted/bootstrap/bootstrap_v0.sio
+  - self-hosted/gpu/kaxi_backend.sio
+  - artifacts/self-hosted/madaros
+  - examples/erdos/test_cube_sieve_skeleton.sh
+  - examples/erdos/AUDIT_STATUS_2026-06-15.md
+intent: |
+  Raise IR_MAX_INSTRS from 128 to 512 in the self-hosted compiler, rebuild
+  Madaros, and validate Erdos lane gates. Discovered that while Madaros now
+  compiles cube_sieve_skeleton.sio, the generated ELF has incorrect runtime
+  behaviour / segfaults, so Erdos gates remain on lean_single.
+checks:
+  - cd /workspace/sounio && SOUNIO_SOUC_ENGINE=lean_single bin/souc self-hosted/compiler/main.sio /tmp/madaros-repro.elf
+  - cd /workspace/sounio/examples/erdos && ./test_cube_sieve_skeleton.sh
+  - cd /workspace/sounio/examples/erdos && ./test_souc_sat_cube_units.sh
+  - cd /workspace/sounio/examples/erdos && ./test_cube_sieve_batch_manifest.sh
+  - cd /workspace/sounio/examples/erdos && ./test_cube_sieve_propagation_manifest.sh
+  - cd /workspace/sounio/examples/erdos && ./test_chi6_candidate_manifest_validator.sh
+  - cd /workspace/sounio && scripts/ci/canonical_compiler_gate.sh
+  - cd /workspace/sounio && scripts/ci/compiler_stage_contract_gate.sh
+notes: |
+  Compiler changes (already committed): IR_MAX_INSTRS=512, all [IrInstr; 128]
+  arrays updated to 512, kaxi_backend.sio borrow fix. Madaros self-compile
+  succeeds (lean_single seed). Madaros-compiled cube_sieve_skeleton.sio runs
+  but emits wrong propagation output (trail_len=10 vs 5, conflict_vertex=0 vs
+  5, no trail_step entries) and can segfault. canonical_compiler_gate fails
+  because bin/souc-lean-single-x86_64 and bin/souc-linux-x86_64 are not the
+  current fixed point of self-hosted/compiler/lean_single.sio.
+  compiler_stage_contract_gate fails with Madaros segfault/type_check_failed
+  on stage1 compiler sources. Erdos light gates all PASS with lean_single.
+commit: pending
+status: lock-released
+
+---
+
+agent: codex
+time_utc: 2026-06-16T02:15:00Z
+files:
+  - examples/erdos/reproducer_madaros_codegen_2026-06-16g.sio
+  - examples/erdos/reproducer_madaros_codegen_2026-06-16h.sio
+  - examples/erdos/AUDIT_STATUS_2026-06-15.md
+  - artifacts/self-hosted/madaros
+intent: |
+  Diagnose Madaros codegen divergence for cube_sieve_skeleton.sio. Found that
+  artifacts/self-hosted/madaros had disappeared and bin/madaros was falling back
+  to an older binary. Restored the ir512 build. Isolated a reproducible crash:
+  reproducer G segfaults only when 5 calls to emit_cube_assignment precede the
+  propagation loop; the same structure with noop4 does not crash.
+checks:
+  - MADAROS_RAW_BIN=artifacts/self-hosted/madaros-ir512-test bin/souc compile examples/erdos/cube_sieve_skeleton.sio -o /tmp/cube-madaros.elf && /tmp/cube-madaros.elf
+  - MADAROS_RAW_BIN=artifacts/self-hosted/madaros-ir512-test bin/souc compile examples/erdos/reproducer_madaros_codegen_2026-06-16g.sio -o /tmp/repro-g.elf && /tmp/repro-g.elf
+  - MADAROS_RAW_BIN=artifacts/self-hosted/madaros-ir512-test bin/souc compile examples/erdos/reproducer_madaros_codegen_2026-06-16h.sio -o /tmp/repro-h.elf && /tmp/repro-h.elf
+notes: |
+  Restored artifacts/self-hosted/madaros from madaros-ir512-test after noticing
+  bin/madaros was resolving to bin/madaros-linux-x86_64. Reproducer G isolates
+  the crash: 5 calls to emit_cube_assignment(?, ?, ?, k) before the propagation
+  loop cause SIGSEGV; replacing with noop4(?, ?, ?, k) does not. Rebuilders from
+  current working tree (with uncommitted changes in check.sio and
+  codegen_x86_linux.sio) segfault even more aggressively. Erdos lane remains on
+  lean_single. Handoff to compiler lane for stack-map / calling-convention
+  investigation.
+commit: pending
+status: lock-released
+
+---
+
+agent: codex
+lane: erdos-chi6-search / compiler-validation
+time_utc: 2026-06-16T15:52:49Z
+files:
+  - examples/erdos/AUDIT_STATUS_2026-06-15.md
+  - artifacts/omega/agent_handoff.log.md
+  - scripts/ci/compiler_stage_contract_gate.sh
+intent: |
+  Validate compiler and Erdos gates after compiler-lane changes. Update
+  validation script pattern and audit docs with results. Do not edit compiler
+  source.
+checks:
+  - bash scripts/ci/compiler_stage_contract_gate.sh (FAIL pass=9 known_blocker=1 fail=5)
+  - bash scripts/ci/canonical_compiler_gate.sh (FAIL: bin/souc not fixed-point)
+  - bash examples/erdos/test_cube_sieve_skeleton.sh (PASS)
+  - bash examples/erdos/test_souc_sat_cube_units.sh (PASS)
+  - bash examples/erdos/test_cube_sieve_batch_manifest.sh (PASS)
+  - bash examples/erdos/test_cube_sieve_propagation_manifest.sh (PASS)
+  - bash examples/erdos/test_chi6_candidate_manifest_validator.sh (PASS)
+  - ./bin/souc compile examples/erdos/reproducer_madaros_codegen_2026-06-16g.sio -o /tmp/repro-g.elf && /tmp/repro-g.elf (PASS; previously SIGSEGV)
+  - SOUC_ENGINE=madaros ./bin/souc compile examples/erdos/cube_sieve_skeleton.sio -o /tmp/cube-madaros.elf && /tmp/cube-madaros.elf (runs but output diverges: trail_len=10, conflict_vertex=0, no trail_step entries)
+notes: |
+  Reproducer G no longer segfaults under current artifacts/self-hosted/madaros,
+  but the full cube_sieve_skeleton.sio still emits incorrect propagation output
+  under Madaros. Erdos gates remain green on lean_single fallback.
+  compiler_stage_contract_gate.sh had a stale diagnostic regex for
+  assign-to-immut (expected old "assignment to immutable binding" / "typecheck:
+  failed" text); updated to also match current "cannot modify an immutable
+  binding" / "type_check_failed" output. Five compiler-stage failures remain,
+  all in Madaros stage1 typecheck/self-test (segfault rc=139 or typecheck
+  rc=1). canonical_compiler_gate.sh fails because bin/souc is not a fixed point
+  of lean_single.sio source.
+commit: pending
+status: lock-released
+blocker-open:
+  - BLK-20260616-erdos-madaros-codegen (B1, compiler-codegen, owner=compiler lane) — CLOSED por frame size fix
+  - BLK-20260616-madaros-rebuild-stack-overflow (B1, compiler-semantics/bootstrap-runtime, owner=compiler lane)
+  - BLK-20260616-madaros-stage1-typecheck-segfault (B1, compiler-semantics, owner=compiler lane)
+  - BLK-20260616-bin-souc-fixed-point (B1, bootstrap-runtime, owner=compiler lane / bootstrap maintainer)
+
+---
+
+agent: codex
+lane: compiler-codegen / madaros-frame
+files:
+  - self-hosted/native/codegen_x86_linux.sio
+  - examples/erdos/AUDIT_STATUS_2026-06-15.md
+  - artifacts/omega/agent_handoff.log.md
+intent: |
+  Extend the dynamic frame-size fix from commit 7fa3c3524 to the remaining
+  native-v2 core-IR function prologues that still used a fixed 512-byte frame.
+  Root cause of reproducer G SIGSEGV was stack corruption: main needed ~160 IR
+  slots (~1280 B) but only 512 B were allocated, so locals spilled over the
+  frame and corrupted the caller's stack. The control reproducer H had fewer
+  vregs and did not overflow.
+checks:
+  - ./bin/souc check self-hosted/native/codegen_x86_linux.sio (rc=0)
+  - ./bin/souc check self-hosted/compiler/native_compile_driver.sio (rc=0)
+  - ./bin/souc compile examples/erdos/reproducer_madaros_codegen_2026-06-16g.sio -o /tmp/repro-g.elf && /tmp/repro-g.elf (rc=0, output correct)
+  - ./bin/souc compile examples/erdos/reproducer_madaros_codegen_2026-06-16h.sio -o /tmp/repro-h.elf && /tmp/repro-h.elf (rc=0, no crash)
+  - ulimit -s unlimited && bash scripts/ci/build_modular_madaros.sh /tmp/madaros-rebuilt-after-fix.elf && MADAROS_RAW_BIN=/tmp/madaros-rebuilt-after-fix.elf bin/souc compile examples/erdos/reproducer_madaros_codegen_2026-06-16g.sio -o /tmp/repro-g-rebuilt.elf && /tmp/repro-g-rebuilt.elf (rc=0, output correct)
+notes: |
+  Changes are surgical: two additional sites in codegen_x86_linux.sio now use
+  `align16((*func).reg_count * 8)` instead of `nc_emit_sub_rsp_imm32(nc, 512)`:
+  `compile_ir_function_v2_core_ir_into` (~line 6190) and
+  `native_v2_core_begin_fn_spill_into` (~line 7330). Both follow the pattern
+  already established at `native_v2_core_begin_function_from_ir_into`.
+
+  Fresh rebuild of Madaros from current source still segfaults with default
+  stack size (8 MB) due to a ~4.4 MB compiler stack frame introduced by the
+  IR_MAX_INSTRS=512 increase. It works with `ulimit -s unlimited`. This is
+  classified as a separate blocker (BLK-20260616-madaros-rebuild-stack-overflow).
+
+  `artifacts/self-hosted/madaros` was briefly removed during rebuild tests and
+  restored from `/tmp/madaros-before-rebuild.elf`; it remains the operational
+  binary and was not replaced by the rebuild, which requires the stack-overflow
+  blocker to be resolved first.
+commit: pending
+status: lock-released
+blocker-closed:
+  - BLK-20260616-erdos-madaros-codegen / BLK-20260616-erdos-madaros-call-frame
+blocker-open:
+  - BLK-20260616-madaros-rebuild-stack-overflow (B1, compiler-semantics/bootstrap-runtime, owner=compiler lane)
+
+---
+
+agent: codex
+lane: compiler-codegen / madaros-bootstrap
+time_utc: 2026-06-16T16:30:00Z
+files:
+  - self-hosted/lexer/mod.sio
+  - self-hosted/gpu/kaxi_backend.sio
+  - self-hosted/compiler/module_frontend.sio
+  - examples/erdos/AUDIT_STATUS_2026-06-15.md
+  - artifacts/omega/agent_handoff.log.md
+  - artifacts/self-hosted/madaros-lean-v2.elf
+intent: |
+  Attempt to establish a Madaros self-compile fixed point. Cleaned up working-tree
+  corruption in module_frontend.sio, applied the lexer wildcard import and gpu
+  kaxi_assemble borrow fix, and tried rebuilding main.sio first with the current
+  operational Madaros ELF and then with a lean_single-built current-source Madaros.
+  Verified reproducer G now passes under the current-source build; cube_sieve_skeleton
+  compiles but still has incorrect runtime propagation output. Self-compile of
+  main.sio remains blocked by parser/global-state corruption during multi-module
+  lowering. Canonical binaries were not replaced.
+checks:
+  - git checkout HEAD -- self-hosted/compiler/module_frontend.sio
+  - edit self-hosted/lexer/mod.sio use lexer::cursor -> use lexer::cursor::*
+  - edit self-hosted/gpu/kaxi_backend.sio var asm_mut = asm; kaxi_assemble_ref(&!asm_mut)
+  - bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros-lean-v2.elf
+  - md5sum artifacts/self-hosted/madaros-lean-v2.elf # d74fbead5f5f4e3172a9935d67deeb55
+  - ulimit -s unlimited && ./artifacts/self-hosted/madaros self-hosted/compiler/main.sio -o /tmp/madaros-gen1-current.elf (produces 73 KB broken ELF)
+  - ulimit -s unlimited && ./artifacts/self-hosted/madaros-lean-v2.elf self-hosted/compiler/main.sio -o /tmp/madaros-gen1-lean.elf (SIGSEGV, parse error line 7)
+  - ulimit -s unlimited && ./artifacts/self-hosted/madaros-lean-v2.elf examples/erdos/reproducer_madaros_codegen_2026-06-16g.sio -o /tmp/repro-g-lean-ulimit.elf && /tmp/repro-g-lean-ulimit.elf (rc=0, output correct)
+  - ulimit -s unlimited && ./artifacts/self-hosted/madaros-lean-v2.elf examples/erdos/cube_sieve_skeleton.sio -o /tmp/cube-madaros-lean-ulimit.elf && /tmp/cube-madaros-lean-ulimit.elf (rc=0 compile, runtime still diverges)
+  - bash scripts/ci/madaros_full_gate.sh (PASS rc=0 with preserved operational binary)
+notes: |
+  The current operational artifacts/self-hosted/madaros (md5 7646c56c) predates the
+  text-scanning bypass and produces a 73 KB non-functional ELF when asked to compile
+  main.sio. A fresh lean_single-built binary from current source fixes reproducer G
+  (dynamic frame size) but cannot self-compile main.sio; it segfaults during
+  load_multimodule_ir with a parser token-kind corruption. cube_sieve_skeleton.sio
+  compiles under the fresh binary but still emits wrong propagation values, so the
+  Erdos lane must remain on lean_single. artifacts/self-hosted/madaros and
+  bin/madaros-linux-x86_64 were left unchanged; an untracked evidence build is at
+  artifacts/self-hosted/madaros-lean-v2.elf.
+commit: pending
+status: lock-released
+blocker-open:
+  - BLK-20260616-madaros-self-compile-fixed-point (B1, bootstrap-runtime, owner=compiler lane / bootstrap maintainer)
+  - BLK-20260616-madaros-cube-propagation-runtime (B1, compiler-codegen, owner=compiler lane)
+  - BLK-20260616-madaros-rebuild-stack-overflow (B1, compiler-semantics/bootstrap-runtime, owner=compiler lane)
+  - BLK-20260616-bin-souc-fixed-point (B1, bootstrap-runtime, owner=compiler lane / bootstrap maintainer)
+
+---
+
+agent: codex
+lane: erdos-chi6-search / compiler-codegen
+time_utc: 2026-06-16T16:46:00Z
+files:
+  - artifacts/self-hosted/madaros
+  - bin/madaros
+  - examples/erdos/AUDIT_STATUS_2026-06-15.md
+intent: |
+  Close BLK-20260616-madaros-cube-propagation-runtime.  The stale
+  artifacts/self-hosted/madaros binary lacked the dynamic frame-size fix in
+  self-hosted/native/codegen_x86_linux.sio; cube_sieve_skeleton.sio was
+  spilling locals beyond the fixed 512 B frame and the loop's callee frames
+  clobbered the dom[] array slots.  Replaced the binary with a fresh
+  lean_single-seed build from current source and added a `ulimit -s unlimited`
+  guard in bin/madaros so the rebuilt compiler (with ~4.4 MB frontend frames
+  after IR_MAX_INSTRS=512) does not segfault under the default 8 MB stack.
+checks:
+  - ./bin/souc compile examples/erdos/cube_sieve_skeleton.sio -o /tmp/cube.elf && /tmp/cube.elf (trail_len=5, conflict_vertex=5, final_domains=1,2,4,8,16,0, 5 trail_step rows)
+  - SOUC_ENGINE=madaros bash examples/erdos/test_cube_sieve_skeleton.sh (PASS)
+  - bash examples/erdos/test_cube_sieve_skeleton.sh (lean_single fallback still PASS)
+  - ./bin/souc compile examples/erdos/reproducer_madaros_codegen_2026-06-16g.sio -o /tmp/g.elf && /tmp/g.elf (PASS)
+  - MADAROS_RAW_BIN=artifacts/self-hosted/madaros-ir512-test ./bin/souc compile ... reproduces the old wrong output, confirming binary staleness
+commit: pending
+status: lock-released
+blocker-closed:
+  Blocker-ID: BLK-20260616-madaros-cube-propagation-runtime
+  closed: 2026-06-16 — stale binary replaced; dynamic frame-size fix now active
+blocker-mitigated:
+  Blocker-ID: BLK-20260616-madaros-rebuild-stack-overflow
+  mitigation: bin/madaros now raises the thread stack limit; underlying frontend frame bloat still needs reduction
+
+---
+
+agent: codex
+time_utc: 2026-06-16T17:15:00Z
+files:
+  - artifacts/self-hosted/madaros
+  - bin/madaros-linux-x86_64
+  - bin/souc-lean-single-x86_64
+  - examples/erdos/AUDIT_STATUS_2026-06-15.md
+intent: |
+  Refresh Madaros and canonical bootstrap binaries. Rebuilt Madaros from current
+  source; verified cube_sieve_skeleton.sio and all Erdos light gates pass with
+  default bin/souc (Madaros). Resynced bin/souc-lean-single-x86_64 to the
+  current fixed point of lean_single.sio so canonical_compiler_gate passes.
+checks:
+  - bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+  - ./bin/souc compile examples/erdos/cube_sieve_skeleton.sio -o /tmp/cube.elf && /tmp/cube.elf
+  - bash examples/erdos/test_cube_sieve_skeleton.sh
+  - bash examples/erdos/test_souc_sat_cube_units.sh
+  - bash examples/erdos/test_cube_sieve_batch_manifest.sh
+  - bash examples/erdos/test_cube_sieve_propagation_manifest.sh
+  - bash examples/erdos/test_chi6_candidate_manifest_validator.sh
+  - bash scripts/ci/canonical_compiler_gate.sh
+  - bash scripts/ci/compiler_stage_contract_gate.sh
+notes: |
+  Erdos lane is now green on the default Madaros engine. canonical_compiler_gate
+  passes after resyncing bin/souc-lean-single-x86_64. compiler_stage_contract_gate
+  still fails on Madaros stage1 check/run of lean.sio/lean_frontend.sio. Madaros
+  self-compile of main.sio still produces many type_check_failed errors. Next
+  compiler-lane milestone: make Madaros compile its own source.
+commit: pending
+status: lock-released

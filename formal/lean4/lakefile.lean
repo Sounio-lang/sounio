@@ -340,6 +340,11 @@ lean_lib «SounioDeGreyChi5Param» where
 -- re-checked under native_decide; `lake build SounioDeGreyChi5Real`).
 lean_lib «SounioDeGreyChi5Real» where
 
+-- χ(G529) = 5 EXACT: explicit proper 5-colouring of the de Grey unit-distance graph G529,
+-- paired with the SAT-leg proof that no 4-colouring exists (SounioSatG529.g529_not_colourable).
+-- Mathlib-free, no sorry. Build on demand with `lake build SounioDeGreyChi529Exact`.
+lean_lib «SounioDeGreyChi529Exact» where
+
 -- M1: Vancomycin-Knightian thrust — Approx × Causal × Knowledge composition
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where

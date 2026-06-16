@@ -203,7 +203,7 @@ required_grep \
 required_rejects_with_pattern \
   "diagnostic_assign_to_immut_rejects" \
   "B1_compile_fail_sentinel_rejected" \
-  "assignment to immutable binding|typecheck: failed|Mut" \
+  "assignment to immutable binding|cannot modify an immutable binding|typecheck: failed|type_check_failed|Mut" \
   "$SOUC_BIN" compile tests/ui/type/assign_to_immut.sio -o "$WORK_DIR/assign_to_immut.elf"
 
 required_cmd_ok \

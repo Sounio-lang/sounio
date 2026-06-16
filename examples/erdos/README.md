@@ -23,6 +23,21 @@ export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
 
 ---
 
+## New verified results (2026-06-16)
+
+Two new results are now formalised in Mathlib-free Lean 4:
+
+1. **`χ(G₅₂₉) = 5`** — exact chromatic number of the de Grey graph.
+   - Lean: `formal/lean4/SounioDeGreyChi529Exact.lean`
+   - Reproducer: `examples/erdos/gen_g529_5coloring.sh`
+2. **`u(15705) ≥ 176768`** — new explicit planar unit-distance lower bound.
+   - Witness: integer disk `x² + y² ≤ 5000` with squared unit distance `1105`.
+   - Lean: `formal/lean4/SounioErdos90PlanarLowerBound.lean`
+
+See `examples/erdos/RESULTS_2026-06-16.md` for details and `examples/erdos/AUDIT_STATUS_2026-06-15.md` §15 for the implementation trail.
+
+---
+
 ## Thread 1 — Hadwiger–Nelson / de Grey (Erdős #508): χ of the plane
 
 de Grey (2018, arXiv:1804.02385) gave the first 5-chromatic unit-distance graph,

@@ -79,4 +79,41 @@ theorem lattice_achieves_harborth :
     ((List.range 18).map (·+1)).all (fun n => countUnit (greedy 4 n) == harb n) = true := by
   native_decide
 
+/-! ## Erdős ℤ² compact-disk construction
+
+The CPU search (`stdlib/research/erdos90_optimize.sio`) finds that the compact
+disk of integer points with x²+y² ≤ 5000, using unit distance² = 1105, gives a
+large explicit lower bound. We certify the count here by pure integer
+computation in Lean core (`native_decide`). -/
+
+/-- All integer points inside the origin-centred disk of radius² = rr. -/
+def compactDiskZ2 (rr : Nat) : List (Int × Int) :=
+  let R : Int := isqrt rr
+  (List.range (2 * R.toNat + 1)).flatMap (fun i =>
+    (List.range (2 * R.toNat + 1)).filterMap (fun j =>
+      let x : Int := (Int.ofNat i) - R
+      let y : Int := (Int.ofNat j) - R
+      if x*x + y*y ≤ (Int.ofNat rr) then some (x, y) else none))
+
+/-- Count unordered pairs at squared Euclidean distance exactly `nsq`. -/
+def countUnitSq (pts : List (Int × Int)) (nsq : Nat) : Nat :=
+  ((pts.zipIdx).flatMap (fun (p, i) => (pts.zipIdx).filterMap (fun (q, j) =>
+    if i < j then
+      let dx := p.1 - q.1
+      let dy := p.2 - q.2
+      if dx*dx + dy*dy == (Int.ofNat nsq) then some (1 : Nat) else none
+    else none))).length
+
+/-- **New lower bound:** among the 15705 integer points with x²+y² ≤ 5000 there are
+    at least 176768 pairs at squared distance 1105, so u(15705) ≥ 176768. -/
+theorem erdos90_compact_disk_u15705 :
+    countUnitSq (compactDiskZ2 5000) 1105 ≥ 176768 := by
+  native_decide
+
+/-- **New lower bound:** among the 31417 integer points with x²+y² ≤ 10000 there are
+    at least 405648 pairs at squared distance 5525, so u(31417) ≥ 405648. -/
+theorem erdos90_compact_disk_u31417 :
+    countUnitSq (compactDiskZ2 10000) 5525 ≥ 405648 := by
+  native_decide
+
 end Sounio.Erdos90Planar

@@ -58,9 +58,11 @@ def qmulTerm (x y : QF) (i idx : Nat) : Int :=
 def qmulCoeff (x y : QF) (idx : Nat) : Int :=
   (List.range 16).foldl (fun acc i => acc + qmulTerm x y i idx) 0
 
+@[simp]
 theorem qadd_list_len (x y : QF) : (qadd x y).1.length = 16 := by
   simp [qadd, List.length_map, List.length_range]
 
+@[simp]
 theorem qmul_list_len (x y : QF) : (qmul x y).1.length = 16 := by
   simp [qmul, List.length_map, List.length_range]
 
