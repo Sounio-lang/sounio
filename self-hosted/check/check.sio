@@ -2673,6 +2673,11 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("print_int"))
     checker_bind_import_unknown_inplace(c, make_name("print_char"))
     checker_bind_import_unknown_inplace(c, make_name("println"))
+    // Standard enum constructors used like values/functions by user code.
+    checker_bind_import_unknown_inplace(c, make_name("Some"))
+    checker_bind_import_unknown_inplace(c, make_name("None"))
+    checker_bind_import_unknown_inplace(c, make_name("Ok"))
+    checker_bind_import_unknown_inplace(c, make_name("Err"))
     checker_bind_import_unknown_inplace(c, make_name("str_from_bytes"))
     checker_bind_import_unknown_inplace(c, make_name("str_slice"))
     checker_bind_import_unknown_inplace(c, make_name("str_to_int"))
@@ -2770,6 +2775,19 @@ fn checker_collect_variants_mut(c: *mut Checker, opt: Option<Box<VariantDefList>
     }
 }
 
+fn checker_bind_enum_variant_constructors_inplace(c: *mut Checker, variants: Option<Box<VariantInfoList>>) with Mut, Panic, Div {
+    var cur = variants
+    while true {
+        match cur {
+            Some(list) => {
+                checker_bind_import_unknown_inplace(c, (*list).head.name)
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
 fn checker_collect_enum_def_inplace(c: *mut Checker, name: Name, opt: Option<Box<EnumDef> >, visibility: Visibility, defining_module: AstPath) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(ed) => {
@@ -2784,6 +2802,7 @@ fn checker_collect_enum_def_inplace(c: *mut Checker, name: Name, opt: Option<Box
                 defining_module: defining_module,
             }
             (*c).enums = (*c).enums.add(info)
+            checker_bind_enum_variant_constructors_inplace(c, vr.variants)
         }
         None => {}
     }
@@ -2934,7 +2953,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             let body_ty = checker_check_block_inplace(c, (*fd).body)
             if sig_id >= 0 {
                 let sig2 = (*c).fn_sigs.get(sig_id)
-                if !checker_types_compatible_inplace(c, body_ty, sig2.return_type) {
+                if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
             }
@@ -12161,6 +12180,22 @@ fn checker_contextual_expr_compatible(expr: Expr, actual_ty: TypeEntry, expected
     checker_array_int_literal_compatible(expr, actual_ty, expected_ty)
 }
 
+// Function-body return compatibility: like contextual expr compatibility, but the body
+// expression is not directly available here. Use the checker's last_literal_kind to detect
+// that the final expression was an integer literal, so `fn f() -> i32 { 0 }` checks OK.
+fn checker_fn_body_return_compatible_inplace(c: *mut Checker, body_ty: TypeEntry, return_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    if checker_types_compatible_inplace(c, body_ty, return_ty) {
+        return true
+    }
+    let int_lit_narrow = (*c).last_literal_kind == 1
+        && body_ty.kind == TypeKind::TyI64
+        && is_integer_type(return_ty)
+    let body_enum = body_ty.kind == TypeKind::TyNamed && (*c).enums.find(body_ty.name) >= 0
+    let ret_enum = return_ty.kind == TypeKind::TyNamed && (*c).enums.find(return_ty.name) >= 0
+    let enum_int_ok = (body_enum && is_numeric_type(return_ty)) || (is_numeric_type(body_ty) && ret_enum)
+    int_lit_narrow || enum_int_ok
+}
+
 fn call_arg_types_compatible(arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     if checker_contextual_expr_compatible(arg_expr, arg_ty, param_ty) {
         return true
@@ -14798,6 +14833,22 @@ impl Checker {
     // Collect enum definition
     // --------------------------------------------------------
 
+    fn bind_enum_variant_constructors(self, variants: Option<Box<VariantInfoList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        var cur = variants
+        while true {
+            match cur {
+                Some(list) => {
+                    c.env = c.env.bind((*list).head.name, ty_unknown(), false)
+                    c = c.const_int_bind_unknown((*list).head.name)
+                    cur = (*list).tail
+                }
+                None => break
+            }
+        }
+        c
+    }
+
     fn collect_enum_def(self, name: Name, opt: Option<Box<EnumDef> >, visibility: Visibility, defining_module: AstPath) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(ed) => {
@@ -14815,6 +14866,7 @@ impl Checker {
                     defining_module: defining_module,
                 }
                 c.enums = c.enums.add(info)
+                c = c.bind_enum_variant_constructors(variants)
                 c
             }
             None => self
@@ -15766,10 +15818,19 @@ impl Checker {
                 let pair = c.check_block((*fd).body)
                 c = pair.0
                 let body_ty = pair.1
-                // Check return type compatibility
+                // Check return type compatibility (allow integer-literal narrowing and
+                // fieldless-enum↔int coercion, matching let/var assignment).
                 if sig_id >= 0 {
                     let sig2 = c.fn_sigs.get(sig_id)
-                    if !c.types_compatible_structural(body_ty, sig2.return_type) {
+                    let int_lit_narrow = c.last_literal_kind == 1
+                        && body_ty.kind == TypeKind::TyI64
+                        && is_integer_type(sig2.return_type)
+                    let body_enum = body_ty.kind == TypeKind::TyNamed && c.enums.find(body_ty.name) >= 0
+                    let ret_enum = sig2.return_type.kind == TypeKind::TyNamed && c.enums.find(sig2.return_type.name) >= 0
+                    let enum_int_ok = (body_enum && is_numeric_type(sig2.return_type))
+                        || (is_numeric_type(body_ty) && ret_enum)
+                    if !c.types_compatible_structural(body_ty, sig2.return_type)
+                        && !int_lit_narrow && !enum_int_ok {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
