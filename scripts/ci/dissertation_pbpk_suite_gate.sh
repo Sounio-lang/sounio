@@ -53,6 +53,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# Pin the Seq<T>-capable lean_single engine via a run/check shim: the K-AXI
+# fusion witness + seq_* tests need Seq<T>. `bin/souc` defaults to Madaros
+# (the user-facing engine since 2026-06-14), which does not yet carry Seq<T>
+# (restoring it in the modular compiler is a tracked follow-up). An externally
+# provided SOUC_BIN (CI override) still takes precedence.
+: "${SOUC_BIN:=$ROOT_DIR/scripts/ci/souc-seq-leansingle.sh}"
+export SOUC_BIN
+
 if [[ "${SOUNIO_DPS_GATE_SKIP:-0}" == "1" ]]; then
   echo "dissertation_pbpk_suite_gate: SKIPPED (SOUNIO_DPS_GATE_SKIP=1)"
   exit 0
