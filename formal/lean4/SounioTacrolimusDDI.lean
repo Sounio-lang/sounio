@@ -1,5 +1,6 @@
 -- formal/lean4/SounioTacrolimusDDI.lean
 import SounioKnightian
+import SounioPBoxSemantics
 
 /-!
 # Tacrolimus + Sirolimus DDI — Lean 4 Proof Obligation
@@ -57,10 +58,19 @@ def fBoost (p : DDIParams) (c_siro : Float) : Float :=
 /-- **Theorem 1 — saturating monotonicity in sirolimus concentration**.
 
     The Michaelis-Menten form is monotone non-decreasing in [S] on the
-    positive domain. Statement-only; proof reduces to
-    `Real.div_le_div_of_nonneg_right` combined with non-negativity of
-    `r_max`, deferred to the Float-Real lift currently under review
-    in `SounioFloatInstance.lean`. -/
+    positive domain. Statement-only at the Float level: the Float→ℚ
+    bridge covers only `add_rne_bound` and `mul_rne_bound`; there is
+    no `div_rne_bound` axiom, so the Float-level monotonicity for
+    `p.r_max * c_siro / (p.k_i + c_siro)` cannot be bridged directly.
+
+    **STATUS: Float-level statement remains `: True` (no div bridge axiom).**
+
+    The genuine ℚ content is discharged in the supporting lemma
+    `fBoostR_cross_mul_le` below (pure ℚ, no axioms). That lemma proves
+    the cross-multiplied form: `r·c1·(k+c2) ≤ r·c2·(k+c1)`, which is
+    the algebraic core of Michaelis-Menten monotonicity. The Float
+    division form would follow from a future `Float.div_rne_bound` axiom
+    (Phase 2 work). -/
 theorem f_boost_monotone_in_siro
     (p : DDIParams)
     (c1 c2 : Float)
@@ -70,6 +80,43 @@ theorem f_boost_monotone_in_siro
     (h_k    : 0 < p.k_i) :
     True := by
   trivial
+
+/-- **REAL ℚ THEOREM**: Michaelis-Menten cross-multiplication core.
+
+    For `0 ≤ r`, `0 < k`, `c1 ≤ c2`, the cross-multiplied form of
+    Michaelis-Menten monotonicity holds over ℚ:
+        r·c1·(k+c2) ≤ r·c2·(k+c1).
+
+    This is the arithmetic core of `fBoost` monotonicity:
+        r·c1/(k+c1) ≤ r·c2/(k+c2)  iff  r·c1·(k+c2) ≤ r·c2·(k+c1)
+    (when k+c1 > 0, k+c2 > 0). The cross-multiplied form avoids
+    `Rat.div` and the missing `div_rne_bound` axiom.
+
+    Proof: expand `mul_add`, then chain `mul_le_mul_of_nonneg_left`
+    (c1≤c2, r≥0) and `mul_le_mul_of_nonneg_right` (result, k>0),
+    plus the commutativity identity `r·c2·c1 = r·c1·c2`.
+
+    `#print axioms fBoostR_cross_mul_le` shows only
+    `[propext, Classical.choice, Quot.sound]` — pure ℚ, no axioms,
+    no sorry. -/
+theorem fBoostR_cross_mul_le
+    (r c1 c2 k : Rat)
+    (hr  : 0 ≤ r)
+    (hk  : 0 < k)
+    (hle : c1 ≤ c2) :
+    r * c1 * (k + c2) ≤ r * c2 * (k + c1) := by
+  -- Expand using mul_add
+  rw [Rat.mul_add (r * c1), Rat.mul_add (r * c2)]
+  -- Goal: r*c1*k + r*c1*c2 ≤ r*c2*k + r*c2*c1
+  -- Step 1: r*c1*k ≤ r*c2*k  (from c1≤c2, r≥0, k>0)
+  have h1 : r * c1 * k ≤ r * c2 * k :=
+    Rat.mul_le_mul_of_nonneg_right (Rat.mul_le_mul_of_nonneg_left hle hr) (Rat.le_of_lt hk)
+  -- Step 2: r*c2*c1 = r*c1*c2  (commutativity)
+  have h2 : r * c2 * c1 = r * c1 * c2 := by
+    rw [Rat.mul_assoc, Rat.mul_assoc, Rat.mul_comm c2 c1]
+  -- Step 3: combine via add_le_add_right
+  rw [h2]
+  exact (Rat.add_le_add_right).mpr h1
 
 /-- **Theorem 2 — combined-F PBox widens under DDI**.
 
@@ -81,8 +128,17 @@ theorem f_boost_monotone_in_siro
     bioavailability — it can only inflate it (the irreducible
     epistemic floor argument).
 
-    Statement-only; algebraic proof routes through
-    `pb_apply2_monotone_inc_inc` in `SounioFrechet.lean`. -/
+    **STATUS: Float-level statement remains `: True` (no Float div bridge).**
+
+    The genuine ℚ content is discharged in `addR_width_ge_left` in
+    `SounioPBoxSemantics.lean`: for any well-formed ℚ delta box `b`,
+    `widthR (addR a b) ≥ widthR a`. That theorem is pure ℚ (no axioms).
+
+    NOTE ON DOMINANCE vs. WIDTH: `dominatesR (addR a b) a` is FALSE
+    when `b.lo > 0` (positive delta shifts the band upward; the lower
+    bound of addR a b EXCEEDS a.lo, breaking the lower dominance
+    conjunct). Width is the correct "widens" invariant:
+    `widthR (addR a b) = widthR a + widthR b ≥ widthR a`. -/
 theorem combined_f_widens_pbox
     (f_baseline : PBox)
     (delta_f    : PBox)
@@ -91,6 +147,24 @@ theorem combined_f_widens_pbox
     (h_d_nn     : 0 ≤ delta_f.lo_mean) :
     True := by
   trivial
+
+/-- **REAL ℚ THEOREM**: combined-F width widens under DDI (ℚ-image version).
+
+    For any ℚ-model baseline box `a` and well-formed ℚ delta box `b`,
+    the width of `addR a b` is at least the width of `a`:
+        widthR a ≤ widthR (addR a b).
+
+    This is the ℚ content of `combined_f_widens_pbox`. The Float-level
+    theorem (above) cannot be bridged directly without a `div_rne_bound`
+    axiom, but the ℚ arithmetic core is here.
+
+    `#print axioms combined_f_widens_pbox_rat` shows only
+    `[propext, Classical.choice, Quot.sound]` — pure ℚ, no axioms. -/
+theorem combined_f_widens_pbox_rat
+    (a b : Sounio.PBoxSemantics.PBoxR)
+    (hb  : Sounio.PBoxSemantics.WellFormedR b) :
+    Sounio.PBoxSemantics.widthR a ≤ Sounio.PBoxSemantics.widthR (Sounio.PBoxSemantics.addR a b) :=
+  Sounio.PBoxSemantics.addR_width_ge_left a b hb
 
 /-- **Theorem 3 — confidence decays under Fréchet composition** (DISCHARGED).
 
