@@ -40,6 +40,7 @@ discharged. Lean build green:
 namespace Sounio.TacrolimusDDI
 
 open Sounio.Knightian
+open Sounio.IEEE754
 
 /-- Parameters of the P-gp competitive inhibition model. -/
 structure DDIParams where
@@ -58,19 +59,28 @@ def fBoost (p : DDIParams) (c_siro : Float) : Float :=
 /-- **Theorem 1 — saturating monotonicity in sirolimus concentration**.
 
     The Michaelis-Menten form is monotone non-decreasing in [S] on the
-    positive domain. Statement-only at the Float level: the Float→ℚ
-    bridge covers only `add_rne_bound` and `mul_rne_bound`; there is
-    no `div_rne_bound` axiom, so the Float-level monotonicity for
-    `p.r_max * c_siro / (p.k_i + c_siro)` cannot be bridged directly.
+    positive domain in EXACT (ℝ/ℚ) arithmetic.
 
-    **STATUS: Float-level statement remains `: True` (no div bridge axiom).**
+    **STATUS: Float-level exact monotonicity remains `: True` — and this
+    is NOT merely "a missing `div_rne_bound` axiom" (the earlier note was
+    wrong). The obstruction is deeper: `fBoost` is a ROUNDED COMPOSITION
+    `fl( fl(r·c) / fl(k+c) )`. A quotient of an independently-rounded
+    non-decreasing numerator and a non-decreasing denominator is NOT
+    universally monotone — it can dip sub-ulp where the denominator
+    rounds up to the next representable while the numerator does not
+    (near a binade boundary). So exact monotonicity of the rounded
+    `fBoost` is NOT guaranteed — it can fail sub-ulp near binade
+    boundaries (asserted on the structure of round-to-nearest; we do
+    not exhibit a concrete counterexample Float triple here). No single
+    rounding axiom discharges it. The honest Float-level result is
+    "monotone up to a bounded roundoff," whose proof composes the three
+    §2.1 bounds — left as future work.**
 
-    The genuine ℚ content is discharged in the supporting lemma
-    `fBoostR_cross_mul_le` below (pure ℚ, no axioms). That lemma proves
-    the cross-multiplied form: `r·c1·(k+c2) ≤ r·c2·(k+c1)`, which is
-    the algebraic core of Michaelis-Menten monotonicity. The Float
-    division form would follow from a future `Float.div_rne_bound` axiom
-    (Phase 2 work). -/
+    What IS now machine-checked at the Float level: `fBoost_final_div_rel_bound`
+    below — `div_rne_bound` (§6) bounds the relative error of `fBoost`'s
+    final division step. The genuine EXACT-arithmetic monotonicity content
+    is `fBoostR_cross_mul_le` (pure ℚ, no axioms): the cross-multiplied
+    form `r·c1·(k+c2) ≤ r·c2·(k+c1)`. -/
 theorem f_boost_monotone_in_siro
     (p : DDIParams)
     (c1 c2 : Float)
@@ -118,6 +128,40 @@ theorem fBoostR_cross_mul_le
   rw [h2]
   exact (Rat.add_le_add_right).mpr h1
 
+/-- **REAL Float-level theorem (uses `Float.div_rne_bound`)**: the final
+    division step of `fBoost` rounds within unit roundoff.
+
+    On the active branch (`¬ c ≤ 0`), `fBoost p c = (p.r_max * c) / (p.k_i + c)`
+    where the outer operation is a single IEEE-754 division. Hence its
+    `toRat` differs from the exact quotient of the (already-rounded)
+    numerator and denominator by at most `u · |·|`:
+
+        | fBoost.toRat − num.toRat / den.toRat | ≤ u · | num.toRat / den.toRat |
+
+    with `num = p.r_max * c`, `den = p.k_i + c`. This is the honest,
+    fully-bridged Float-level guarantee on `fBoost`'s last operation — it
+    does NOT claim monotonicity of the rounded composition (see the note
+    on `f_boost_monotone_in_siro`); it bounds one rounding step.
+
+    `#print axioms fBoost_final_div_rel_bound` shows exactly
+    `[Float.div_rne_bound]` (+ Lean core) — the §6 axiom is genuinely used. -/
+theorem fBoost_final_div_rel_bound
+    (p : DDIParams) (c : Float)
+    (h_active : ¬ (c ≤ 0))
+    (hn : Float.IsFiniteNormal (p.r_max * c))
+    (hd : Float.IsFiniteNormal (p.k_i + c))
+    (hq : Float.IsFiniteNormal (p.r_max * c / (p.k_i + c))) :
+    Float.toRat (fBoost p c)
+        - Float.toRat (p.r_max * c) / Float.toRat (p.k_i + c)
+      ≤ unit_roundoff * rat_abs (Float.toRat (p.r_max * c) / Float.toRat (p.k_i + c))
+    ∧
+    Float.toRat (p.r_max * c) / Float.toRat (p.k_i + c)
+        - Float.toRat (fBoost p c)
+      ≤ unit_roundoff * rat_abs (Float.toRat (p.r_max * c) / Float.toRat (p.k_i + c)) := by
+  unfold fBoost
+  rw [if_neg h_active]
+  exact Float.div_rne_bound hn hd hq
+
 /-- **Theorem 2 — combined-F PBox widens under DDI**.
 
     For any baseline F_oral PBox and any therapeutic sirolimus
@@ -128,7 +172,16 @@ theorem fBoostR_cross_mul_le
     bioavailability — it can only inflate it (the irreducible
     epistemic floor argument).
 
-    **STATUS: Float-level statement remains `: True` (no Float div bridge).**
+    **STATUS: Float-level statement remains `: True`. CORRECTION: this is
+    NOT a "div bridge" gap (the earlier note mis-grouped it with thm 1 —
+    there is no division here at all). The real obstruction: the Float
+    `add` (SounioKnightian.add) uses round-to-NEAREST `+` for both bounds,
+    NOT outward rounding (lo↓, hi↑). Under round-to-nearest, `width(add a b)`
+    can fall below `width a + width b` by up to the addition roundoff, so
+    EXACT width-widening does not hold at the Float level — only "widens up
+    to roundoff" (provable by composing `add_rne_bound`, future work). Were
+    `add` outward-rounded (interval-soundness discipline) it would discharge
+    exactly via `add_rne_bound` + `combined_f_widens_pbox_rat`.**
 
     The genuine ℚ content is discharged in `addR_width_ge_left` in
     `SounioPBoxSemantics.lean`: for any well-formed ℚ delta box `b`,

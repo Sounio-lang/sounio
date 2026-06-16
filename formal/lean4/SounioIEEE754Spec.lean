@@ -216,4 +216,37 @@ axiom Float.add_rne_bound :
     (Float.toRat a + Float.toRat b) - Float.toRat (a + b)
       ≤ unit_roundoff * rat_abs (Float.toRat a + Float.toRat b)
 
+-- ================================================================
+-- §6. Float.div_rne_bound — Higham §2.1 division.
+-- ================================================================
+
+/-- Higham 2002 §2.1 basic-operation model for binary64
+    division, restricted to finite-normal operands. Completes
+    the {mul, add, div} rounding triad (§4–§6).
+
+    For finite-normal `a`, `b` with `a / b` finite-normal:
+        |(a / b).toRat - a.toRat / b.toRat| ≤ u · |a.toRat / b.toRat|
+    where `u = 2⁻⁵³`. Same `fl(x op y) = (x op y)(1 + δ)`,
+    `|δ| ≤ u` model as §4/§5 — division is a §2.1 basic operation.
+
+    ⚠️ SCOPE: this is the **relative-error bound** on ONE rounded
+    division. It is NOT a monotonicity oracle: it does NOT imply
+    that a rounded *composition* such as `fl(fl(r·c)/fl(k+c))` is
+    monotone in `c` (independent rounding of a non-decreasing
+    numerator and denominator can dip sub-ulp near a binade
+    boundary). See `f_boost_monotone_in_siro` for that obstruction.
+
+    Source: Higham 2002 §2.1 eq. (2.4). Division `b ≠ 0` is
+    implied by `IsFiniteNormal (a / b)` (a finite-normal quotient
+    cannot arise from a zero divisor). -/
+axiom Float.div_rne_bound :
+  ∀ {a b : Float},
+    Float.IsFiniteNormal a → Float.IsFiniteNormal b →
+    Float.IsFiniteNormal (a / b) →
+    Float.toRat (a / b) - Float.toRat a / Float.toRat b
+      ≤ unit_roundoff * rat_abs (Float.toRat a / Float.toRat b)
+    ∧
+    Float.toRat a / Float.toRat b - Float.toRat (a / b)
+      ≤ unit_roundoff * rat_abs (Float.toRat a / Float.toRat b)
+
 end Sounio.IEEE754
