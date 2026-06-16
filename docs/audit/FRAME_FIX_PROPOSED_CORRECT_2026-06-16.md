@@ -136,6 +136,41 @@ produce a *working* Madaros that also carries the fix from current source. The c
 validation path is: rebuild at the last-known-green commit (`17d1157be`) with the
 live-site fix cherry-picked, then run §5 — an operator decision, not started here.
 
+## 4c. Update 2026-06-16 (jobs 4213/4215 + disasm) — mechanism CONFIRMED; end-to-end still blocked
+
+**#1 self-build regression — root-caused, partial fix found, but INSUFFICIENT.**
+The bootstrap seed `bin/souc-lean-single-x86_64` **misparses `&programs[i]`** (address-of
+array element) as a slice-borrow at `module_frontend.sio:3809/:3829` → the only 2 hard
+`E001` errors. A seed-compatible rewrite (copy element to a local, then `&local`) clears
+both (build `hard_errors=0`, job 4213). **But the seed-built Madaros is still broken** —
+emits a core-dumping hello and SIGSEGVs compiling the reproducer — so a *deeper* seed
+miscompile remains beyond the E001. The seed cannot build a working Madaros from current
+source; fully repairing that is open-ended (bootstrap/seed-codegen domain).
+
+**Working-compiler route also blocked.** The backup Madaros (works on small programs,
+reproduces the bug) **crashes self-compiling `main.sio`** (rc=139, job 4215). So there is
+currently *no* route to a working Madaros that also carries the fix → the end-to-end A/B
+(`pass=1 trail=5 conflict=1` with fix vs wrong-trail/segv without) **cannot be run yet**.
+
+**Bug mechanism CONFIRMED (disasm of backup-built reproducer ELFs).** Every function
+reserves a 512-byte frame (`sub $0x200`), but the reproducer addresses far deeper:
+
+| N | deepest `[rbp-N]` | #accesses > 512 B | runtime |
+|---|---|---|---|
+| 1 | 1152 B | 310 | survives (lucky) |
+| 4 | 1248 B | 338 | wrong trail |
+| 5 | **1280 B (=160 slots)** | 352 | SIGSEGV |
+
+The overflow exists at all N and **grows with N**, matching the severity escalation, and
+N=5's 1280 B / 160 slots matches the original commit's numeric claim exactly. So this is a
+genuine fixed-frame overflow; the live-site dynamic frame (`align16(reg_count*8)` at 6190/
+7333) is the right kind of fix and would cover the observed 1280 B.
+
+**Net:** fix is at the right site and addresses a *confirmed* overflow, but remains
+**end-to-end-unvalidated** until a working Madaros carrying it can be built. Remaining path
+(operator's call): repair the deeper seed miscompile so the seed self-builds, OR rebuild at
+last-known-green `17d1157be` with the live fix cherry-picked, then run §5.
+
 ## 5. Validation gate (must pass before the fix is called validated)
 
 On a front-half-fixed substrate, via SLURM (`slurm-jobs/madaros-frame-fix/submit_gpu.sh`,
