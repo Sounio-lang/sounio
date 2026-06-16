@@ -1190,10 +1190,14 @@ fn checker_lower_ref_like_type_mut(c: *mut Checker, inner_te: TypeExpr, is_mut_r
         }
     }
     let inner_ty = checker_lower_type_expr_mut(c, inner_te)
+    // inner_ty.name.buf[0..7] = first 8 chars of struct name (TypeEntry bytes 8-15 — SRET window).
+    // Look up the struct table now (while the full Checker is accessible) and encode the index
+    // in name.buf[0] so the field-access handler can find the struct without relying on name.len.
+    let struct_idx = (*c).structs.find_by_buf8(inner_ty.name.buf)
     if is_mut_ref {
-        ty_ref_mut(inner_ty)
+        ty_ref_mut_with_idx(inner_ty, struct_idx)
     } else {
-        ty_ref(inner_ty)
+        ty_ref_with_idx(inner_ty, struct_idx)
     }
 }
 
@@ -2668,6 +2672,17 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("print"))
     checker_bind_import_unknown_inplace(c, make_name("print_int"))
     checker_bind_import_unknown_inplace(c, make_name("print_char"))
+    checker_bind_import_unknown_inplace(c, make_name("println"))
+    checker_bind_import_unknown_inplace(c, make_name("str_from_bytes"))
+    checker_bind_import_unknown_inplace(c, make_name("str_slice"))
+    checker_bind_import_unknown_inplace(c, make_name("str_to_int"))
+    checker_bind_import_unknown_inplace(c, make_name("str_concat"))
+    checker_bind_import_unknown_inplace(c, make_name("panic"))
+    checker_bind_import_unknown_inplace(c, make_name("exit"))
+    checker_bind_import_unknown_inplace(c, make_name("variance_of"))
+    checker_bind_import_unknown_inplace(c, make_name("uncertainty_of"))
+    checker_bind_import_unknown_inplace(c, make_name("hessian_of"))
+    checker_bind_import_unknown_inplace(c, make_name("chain_to_knowledge_into"))
 }
 
 // *mut declaration collectors — port of the by-value collect_struct_def /
@@ -2675,24 +2690,29 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
 // Checker SRET copy that forced the `_ => {}` skip below. Fills (*c).structs /
 // (*c).enums so programs that USE structs/enums type-check. Modeled on the proven
 // checker_collect_fn_param_list_mut idiom (lowers types via checker_lower_type_expr_mut).
-fn checker_collect_field_def_list_mut(c: *mut Checker, fdl: FieldDefList) -> MutFieldListResult with Mut, Panic, Div, Alloc, IO {
+// Returns MutFieldsResult (boxed head + count) — NOT MutFieldListResult (FieldInfoList
+// by value ~368B). lean_single miscompiles SRET of large aggregates out of *mut fns
+// (value-move/SRET-return family, same root as the enum path fix at line 2735).
+// Mirror the enum path: box the node into a local, return a small {Option<Box>, i64}.
+fn checker_collect_field_def_list_mut(c: *mut Checker, fdl: FieldDefList) -> MutFieldsResult with Mut, Panic, Div, Alloc, IO {
     let head_ty = checker_lower_type_expr_mut(c, fdl.head.ty)
     let head_info = FieldInfo { name: fdl.head.name, ty: head_ty }
     match fdl.tail {
-        None => MutFieldListResult { list: FieldInfoList { head: head_info, tail: None }, count: 1 }
+        None => {
+            var flist = FieldInfoList { head: head_info, tail: None }
+            MutFieldsResult { fields: Some(Box::new(flist)), count: 1 }
+        }
         Some(rest) => {
             let r = checker_collect_field_def_list_mut(c, *rest)
-            MutFieldListResult { list: FieldInfoList { head: head_info, tail: Some(Box::new(r.list)) }, count: 1 + r.count }
+            var flist = FieldInfoList { head: head_info, tail: r.fields }
+            MutFieldsResult { fields: Some(Box::new(flist)), count: 1 + r.count }
         }
     }
 }
 
 fn checker_collect_field_defs_mut(c: *mut Checker, opt: Option<Box<FieldDefList> >) -> MutFieldsResult with Mut, Panic, Div, Alloc, IO {
     match opt {
-        Some(fdl) => {
-            let r = checker_collect_field_def_list_mut(c, *fdl)
-            MutFieldsResult { fields: Some(Box::new(r.list)), count: r.count }
-        }
+        Some(fdl) => checker_collect_field_def_list_mut(c, *fdl)
         None => MutFieldsResult { fields: None, count: 0 }
     }
 }
@@ -3859,6 +3879,21 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         } else {
             let elem = type_entry_list_get(base_ty.tuple_elems, idx)
             elem
+        }
+    } else if base_ty.kind == TypeKind::TyRef || base_ty.kind == TypeKind::TyRefMut {
+        // name.buf[0] (TypeEntry byte 8 — within the *mut SRET window) holds the struct_idx
+        // encoded by ty_ref_with_idx / ty_ref_mut_with_idx at signature-lowering time.
+        // -1 means "not a struct ref" (primitive, slice, etc.) → return ty_error() silently.
+        let struct_idx = base_ty.name.buf[0] as i64
+        if struct_idx >= 0 && struct_idx < (*c).structs.count {
+            let si = (*c).structs.get(struct_idx)
+            let field_ty = field_info_list_find(si.fields, e.name)
+            if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
+                checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+            }
+            field_ty
+        } else {
+            ty_error()
         }
     } else if is_error_or_unknown(base_ty) {
         base_ty
@@ -16826,6 +16861,24 @@ impl Checker {
             } else {
                 let elem = type_entry_list_get(base_ty.tuple_elems, idx)
                 (c, elem)
+            }
+        } else if base_ty.kind == TypeKind::TyRef || base_ty.kind == TypeKind::TyRefMut {
+            let inner = call_ref_inner_or_self(base_ty)
+            if inner.kind == TypeKind::TyNamed {
+                let struct_idx = c.structs.find(inner.name)
+                if struct_idx >= 0 {
+                    let si = c.structs.get(struct_idx)
+                    let field_ty = field_info_list_find(si.fields, e.name)
+                    if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
+                        c = c.report_error_at(e.span, 12, 0, 0, 0)
+                    }
+                    (c, field_ty)
+                } else {
+                    (c, ty_error())
+                }
+            } else {
+                c = c.report_error_at(e.span, 12, 0, 0, 0)
+                (c, ty_error())
             }
         } else if is_error_or_unknown(base_ty) {
             (c, base_ty)
