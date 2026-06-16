@@ -27,9 +27,10 @@ caller's stack. `ir_slot_offset(v) = -(v+1)*8` (frame.sio:426), so slot `v` live
 `[rbp-(v+1)*8]`; a function using vregs `0..N-1` needs at least `(N+1)*8` bytes.
 
 The **driver** per-function path (`compile_ufn_from_globals` → `drv_begin_function`:6776
-→ `drv_patch_frame_size`:5977) is already correct: it emits a placeholder and patches
-the frame to `align16((vreg_count+1)*8)`. The fix should make the live IR emitters do
-the same thing.
+→ `drv_patch_frame_size`:5977) computes the right *shape*: it emits a placeholder and
+patches the frame to `align16((vreg_count+1)*8)`. (Not observed in disasm — hello's
+`sub $0x200` came from the 6190 path, not the driver — and the §3 wide-int hazard is
+latent here too.) The fix should make the live IR emitters size frames the same way.
 
 ## 2. Proposed change
 
@@ -39,7 +40,7 @@ At the live IR emitter (primary: line 6190), replace:
     nc_emit_sub_rsp_imm32(nc, 512)
 ```
 
-with the proven driver formula:
+with a slot-derived frame, mirroring the driver's shape (with one slot of headroom):
 
 ```sounio
     let frame_sz = align16(((*func).reg_count + 1) * 8)
@@ -52,13 +53,18 @@ with the proven driver formula:
 sites (6926/6967/7330) only if they emit frames for real user functions (verify per
 site; witnesses may have fixed, known slot counts where 512 is deliberate).
 
-### Why NOT the reverted commit's formula
-`7fa3c3524` used `align16((*func).reg_count * 8)` — **missing the `+1`**. With the
-`-(v+1)*8` slot model, the deepest slot of a `reg_count`-vreg function is at
-`-reg_count*8`, so `reg_count*8` is exactly one slot too small (the byte at
-`[rbp-reg_count*8]` is the *last* valid byte, leaving no room — and any `align16`
-rounding that lands back on a multiple of 16 equal to `reg_count*8` gives a frame whose
-lowest address coincides with the deepest store). Use `(reg_count+1)*8`.
+### On the reverted commit's formula — it was location-wrong, not value-wrong
+`7fa3c3524` used `align16((*func).reg_count * 8)`. Deriving from the slot model
+`ir_slot_offset(v) = -(v+1)*8`: a function using vregs `0..reg_count-1` has its deepest
+slot at `-reg_count*8`, occupying `[rbp-reg_count*8, rbp-reg_count*8+8)`. A frame of
+`reg_count*8` sets `rsp = rbp-reg_count*8`, so that slot is `[rsp, rsp+8)` — **inside**
+the frame. So `reg_count*8` is *exactly sufficient* for plain vregs; the reverted
+formula's only fatal defect was being applied to **dead code**. Had it landed on the
+live emitter (6190) it would have fixed the plain-vreg overflow. The driver's `+1` is a
+slot of headroom, not a correctness requirement — keep it as cheap insurance, but the
+**real** residual under-allocation risk (for both `reg_count*8` and `(reg_count+1)*8`)
+is the wide-int scratch in §3, which is why a scan-for-true-max-slot fix (§3 option A)
+is the robust choice over any `reg_count`-derived constant.
 
 ### Why NOT `nc_min_frame_size`
 `nc_min_frame_size` (lower_ir.sio:133) belongs to the register-allocating path: it
