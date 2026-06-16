@@ -447,6 +447,14 @@ lean_lib «SounioIEEE754Spec» where
 @[default_target]
 lean_lib «SounioFloatInstance» where
 
+-- Stage 4 / Float-Real bridge: ℚ-backed epistemic model (PBoxR)
+-- with proven ℚ-level theorems (addR WellFormedR preservation,
+-- dominance monotonicity) + explicit Float-to-ℚ bridge function
+-- and theorem (5 IEEE-754 axioms + 1 zero_toRat axiom).
+-- Build: `lake build SounioPBoxSemantics`.
+@[default_target]
+lean_lib «SounioPBoxSemantics» where
+
 -- M4: Octonion homology functor — discrete G₂ naturality skeleton
 -- (Fano-permutation enumeration + naturality square + concrete
 -- decideable closure on the canonical basis embed)

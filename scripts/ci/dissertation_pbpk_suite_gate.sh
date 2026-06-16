@@ -53,6 +53,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# Pin the Seq<T>-capable lean_single engine via a run/check shim: the K-AXI
+# fusion witness + seq_* tests need Seq<T>. `bin/souc` defaults to Madaros
+# (the user-facing engine since 2026-06-14), which does not yet carry Seq<T>
+# (restoring it in the modular compiler is a tracked follow-up). An externally
+# provided SOUC_BIN (CI override) still takes precedence.
+: "${SOUC_BIN:=$ROOT_DIR/scripts/ci/souc-seq-leansingle.sh}"
+export SOUC_BIN
+
 if [[ "${SOUNIO_DPS_GATE_SKIP:-0}" == "1" ]]; then
   echo "dissertation_pbpk_suite_gate: SKIPPED (SOUNIO_DPS_GATE_SKIP=1)"
   exit 0
@@ -76,7 +84,6 @@ TESTS=(
   "rapamycin_epistemic_pbpk     tests/run-pass/rapamycin_epistemic_pbpk.sio"
   "rapamycin_epistemic_adaptive tests/run-pass/rapamycin_epistemic_adaptive.sio"
   "rapamycin_gum_vs_mc          tests/run-pass/rapamycin_gum_vs_mc.sio"
-  "rapamycin_kaxi_fuse_prior    tests/run-pass/rapamycin_kaxi_fuse_prior.sio"
   "biomaterial_release          stdlib/darwin_pbpk/release/biomaterial_release.sio"
   "rapamycin_clinical           stdlib/darwin_pbpk/validation/rapamycin_clinical.sio"
   "gum_vs_mc                    stdlib/darwin_pbpk/validation/gum_vs_mc.sio"
@@ -115,6 +122,7 @@ TESTS=(
   "pbpk28_sobol_pce           stdlib/darwin_pbpk/validation/pbpk28_sobol_pce.sio"
   "pbpk28_mc_cross_validation stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio"
   "pbpk28_mc_prior_family_sweep stdlib/darwin_pbpk/validation/pbpk28_mc_prior_family_sweep.sio"
+  "rapamycin_kaxi_fuse_prior    tests/run-pass/rapamycin_kaxi_fuse_prior.sio"
 )
 
 # Smoke entries: artifact-emitting demos (HTML, SVG, narrative reports).
@@ -143,6 +151,17 @@ TESTS_PENDING=(
   "pbpk28_rapamycin_clinical    stdlib/darwin_pbpk/validation/pbpk28_rapamycin_clinical.sio"
   "pbpk28_semaglutide_clinical  stdlib/darwin_pbpk/validation/pbpk28_semaglutide_clinical.sio"
 )
+
+# Regression-pending: tests whose required compiler subsystem was dropped by a
+# merge commit and not yet restored. Listed here so the gate stays green while
+# the restoration workstream is tracked — NOT run (souc would fail to compile
+# them), merely registered so the pending item is visible in the summary.
+# RESOLVED 2026-06-15 (branch feat/seq-restore): Seq<T> (TY_SEQ=12, x86) restored
+# in lean_single.sio; rapamycin_kaxi_fuse_prior now runs and is promoted to TESTS
+# above (verified: 3-stage bootstrap fixed-point gen2==gen3, witness PASS,
+# sd_post==sd_expected). Seq-of-struct/borrow paths remain Tier-2 (see
+# tests/known_failures/hardened_diagnostics_full_suite.txt).
+TESTS_PENDING_REGRESSION=()
 
 fails=0
 pending=0
@@ -283,7 +302,20 @@ for entry in "${TESTS_PENDING[@]}"; do
   fi
 done
 
-total=$((${#TESTS[@]} + ${#TESTS_SMOKE[@]} + ${#TESTS_PENDING[@]}))
+# Regression-pending loop: register without running souc (Seq<T> absent).
+for entry in "${TESTS_PENDING_REGRESSION[@]}"; do
+  name="${entry%% *}"
+  src="${entry##* }"
+
+  echo ""
+  echo "[$name] (regression-pending — compiler subsystem absent, not run)"
+  echo "  src=$src"
+  echo "  PENDING: Seq<T> subsystem regression (dropped by 5f1e397a2); K-AXI fusion witness pending Seq<T> restore"
+  pending=$((pending + 1))
+  results+=("PEND  $name  seq_subsystem_regression")
+done
+
+total=$((${#TESTS[@]} + ${#TESTS_SMOKE[@]} + ${#TESTS_PENDING[@]} + ${#TESTS_PENDING_REGRESSION[@]}))
 
 echo ""
 echo "=== Summary ==="
@@ -299,7 +331,7 @@ fi
 
 echo ""
 if [[ $pending -ne 0 ]]; then
-  echo "dissertation_pbpk_suite_gate: PASS ($((total - pending))/$total active; $pending clinical-validation module(s) PENDING — registered, awaiting observed data)"
+  echo "dissertation_pbpk_suite_gate: PASS ($((total - pending))/$total active; $pending item(s) PENDING — see summary for detail)"
 else
   echo "dissertation_pbpk_suite_gate: PASS ($total/$total PBPK tests + smoke demos)"
 fi
