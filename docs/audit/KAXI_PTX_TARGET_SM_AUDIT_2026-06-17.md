@@ -95,7 +95,48 @@ provisioned — either `SLURM_KUBECONFIG` (GitHub-hosted runner, only if the
 cluster API is reachable) or a self-hosted in-cluster runner. The `--wait` path
 was validated end-to-end (Slurm job 4311: ACCEPT=318/318, gate PASS).
 
+## Runtime differential — the 212 `rc=1` characterized (RESOLVED)
+
+The acceptance run reported `ACCEPT=318` but only 106 kernels launched `rc=0`
+under the gate's generic invocation; 212 returned `rc=1`. This follow-on
+determined whether those were real defects or invocation artifacts
+(`slurm-jobs/kaxi-ptxas-accept/run_jit_diag.sh`, Slurm job on
+gpuorangefs-r770-proxmox / L4):
+
+| Config | Invocation | Result |
+|--------|-----------|--------|
+| **A** (reproduce the gate) | `--threads 1 --mem-words 64` | 106 `launch_pass`, **212 `cuLaunchKernel_rejected`** |
+| **B** (per-mode buffers + ample mem) | mode flags + `--mem-words 4096` | **318 `launch_pass`, 0 fail** |
+
+Cross-tab: **all 212 A-failures clear in B; 0 still failing.** The `rc=1` was a
+launch-time **invocation/under-provisioning artifact**, not a kernel defect —
+the epistemic/gum/2c modes need their second buffer (`--epistemic`/`--gum`) and
+correct `--type`, which the gate's single-buffer generic launch didn't supply,
+so `cuLaunchKernel` rejected the arity/params. Given each mode its required
+buffers, every kernel launches cleanly. This retroactively confirms the PR's
+`rc=1` note as benign.
+
+**Compute differential (proves the path computes, not just loads).** For the
+arithmetic family, inputs were fed (`--init-mem 3.0`) and the printed output
+compared to a **PTX-derived** in-place self-op oracle (each kernel reads
+`mem[tid]` twice): add→2x, sub→0, mul→x², div→1, fma→x²+x.
+
+| input x=3 | add | sub | mul | div | fma |
+|-----------|-----|-----|-----|-----|-----|
+| expected  | 6   | 0   | 9   | 1   | 12  |
+| f32 / f64 | PASS | PASS | PASS | PASS | PASS |
+
+**10/10 PASS** (f32 + f64).
+
+Scope honesty: `launch_pass` / config-B = "ran without a CUDA error", **not**
+compute-correct. Only the 10 arithmetic kernels above are compute-checked here;
+compute-correctness of the pbpk/octonion/epistemic families is **not** asserted
+by this audit (their dedicated gates — lse8/sinkhorn/phase-* — cover specific
+kernels; not re-verified here). The differential set was kept deliberately
+small per the agreed scope.
+
 ### Follow-on
 - Recapture the May-28 goldens (`scripts/ci/kaxi_ptx_capture.sh`) to absorb the
   benign `%p<8>`→`%p<64>` drift once the in-flight source edits are built in.
   *(Done in this PR.)*
+- Runtime differential of the 212 `rc=1`. *(Done — see above; all artifacts.)*

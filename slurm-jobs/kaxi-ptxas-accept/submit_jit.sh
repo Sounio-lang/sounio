@@ -33,7 +33,9 @@ LOGIN_SELECTOR="${LOGIN_SELECTOR:-app.kubernetes.io/name=login}"
 RUN_ID="${RUN_ID:-kaxi-jit-accept-$(date -u +%Y%m%dT%H%M%S)-${BASHPID}}"
 STAGE_ROOT="/orangefs/training/sounio/kaxi-jit-accept/${RUN_ID}"
 STAGE_LOCAL="${STAGE_LOCAL:-/tmp/kaxi_ptx_stage}"
-RUNNER_SH="${SOUNIO_DIR}/slurm-jobs/kaxi-ptxas-accept/run_jit.sh"
+# Worker-side runner script (override to run a diagnostic instead of the gate).
+RUNNER_SH="${RUNNER_SH:-${SOUNIO_DIR}/slurm-jobs/kaxi-ptxas-accept/run_jit.sh}"
+RUNNER_BASE="$(basename "${RUNNER_SH}")"
 LOCAL_TARBALL="/tmp/${RUN_ID}.tgz"
 SBATCH_FILE="/tmp/${RUN_ID}.sbatch"
 JOB_MEM="${JOB_MEM:-4G}"
@@ -67,9 +69,9 @@ echo "login pod: ${LOGIN_POD}"
 
 "${KUBECTL_BIN}" -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "mkdir -p '${STAGE_ROOT}/results' '${STAGE_ROOT}/logs'"
 
-cp -f "${RUNNER_SH}" "${STAGE_LOCAL}/run_jit.sh"; chmod +x "${STAGE_LOCAL}/run_jit.sh"
+cp -f "${RUNNER_SH}" "${STAGE_LOCAL}/${RUNNER_BASE}"; chmod +x "${STAGE_LOCAL}/${RUNNER_BASE}"
 rm -f "${LOCAL_TARBALL}"
-tar -C "${STAGE_LOCAL}" -czf "${LOCAL_TARBALL}" ptx run_jit.sh kaxi_ptx_runner
+tar -C "${STAGE_LOCAL}" -czf "${LOCAL_TARBALL}" ptx "${RUNNER_BASE}" kaxi_ptx_runner
 tar -tzf "${LOCAL_TARBALL}" >/dev/null
 
 if ! "${KUBECTL_BIN}" -n "${NS}" cp "${LOCAL_TARBALL}" "${LOGIN_POD}:${STAGE_ROOT}/payload.tgz" >/dev/null 2>&1; then
@@ -103,12 +105,12 @@ exec > >(tee "${LOG_DIR}/job-${SLURM_JOB_ID}.log") 2>&1
 echo "=== kaxi driver-JIT acceptance — $(date) host=$(hostname) cuda_vis=${CUDA_VISIBLE_DEVICES:-unset} ==="
 command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L || true
 tar -xzf "${RUN_ROOT}/payload.tgz" -C "${LOCAL_ROOT}"
-chmod +x "${LOCAL_ROOT}/run_jit.sh" "${LOCAL_ROOT}/kaxi_ptx_runner"
+chmod +x "${LOCAL_ROOT}/RUNNER_BASE_PLACEHOLDER" "${LOCAL_ROOT}/kaxi_ptx_runner"
 cd "${LOCAL_ROOT}"
-bash "${LOCAL_ROOT}/run_jit.sh" "${LOCAL_ROOT}/ptx" "${RESULTS_DIR}" "${LOCAL_ROOT}/kaxi_ptx_runner"
+bash "${LOCAL_ROOT}/RUNNER_BASE_PLACEHOLDER" "${LOCAL_ROOT}/ptx" "${RESULTS_DIR}" "${LOCAL_ROOT}/kaxi_ptx_runner"
 rc=$?; echo "runner rc=$rc"; exit $rc
 SBATCH_BODY
-sed -i "s|RUN_ROOT_PLACEHOLDER|${STAGE_ROOT}|g" "${SBATCH_LOCAL}"
+sed -i "s|RUN_ROOT_PLACEHOLDER|${STAGE_ROOT}|g; s|RUNNER_BASE_PLACEHOLDER|${RUNNER_BASE}|g" "${SBATCH_LOCAL}"
 
 "${KUBECTL_BIN}" -n "${NS}" cp "${SBATCH_LOCAL}" "${LOGIN_POD}:${SBATCH_FILE}" >/dev/null 2>&1 || \
   cat "${SBATCH_LOCAL}" | "${KUBECTL_BIN}" -n "${NS}" exec -i "${LOGIN_POD}" -- sh -lc "cat > '${SBATCH_FILE}'"
