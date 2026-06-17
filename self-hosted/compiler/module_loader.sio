@@ -33,7 +33,7 @@ use native::frame::{compiler_new, NativeCompiler}
 use native::machine_ir::{native_v2_legalize_function, native_v2_lower_function_to_machine, MachineFunction}
 use native::elf::{Elf64Binary}
 use wasm::lower::{wasm_lower_module}
-use native::codegen::{ARCH_X86_64, compile_ir_function, compile_ir_function_v2, compile_module_streaming_begin, compile_module_streaming_finish, compile_native, finalize_compiled_elf, name_is_file_size, name_is_get_arg, name_is_get_arg_count, name_is_main, name_is_print, name_is_print_char, name_is_print_int, name_is_read_file, name_is_starts_with, name_is_str_concat, name_is_str_eq, name_is_str_len, name_is_str_slice, name_is_write_file, ERR_BACKEND_NOT_IMPLEMENTED, FORMAT_ELF64, NativeCompileResult, native_compile_result_error, native_compile_result_ok, native_matrix_mode_string, native_resolve_target, native_target_source_string, NativeTargetSpec, OS_LINUX, read_env}
+use native::codegen::{ARCH_X86_64, compile_ir_function, compile_ir_function_v2, compile_ir_function_v2_into, compile_module_streaming_begin, compile_module_streaming_begin_into, compile_module_streaming_finish, compile_module_streaming_finish_into, compile_native, finalize_compiled_elf, name_is_file_size, name_is_get_arg, name_is_get_arg_count, name_is_main, name_is_print, name_is_print_char, name_is_print_int, name_is_read_file, name_is_starts_with, name_is_str_concat, name_is_str_eq, name_is_str_len, name_is_str_slice, name_is_write_file, ERR_BACKEND_NOT_IMPLEMENTED, FORMAT_ELF64, NativeCompileResult, native_compile_result_error, native_compile_result_ok, native_matrix_mode_string, native_resolve_target, native_target_source_string, NativeTargetSpec, OS_LINUX, read_env}
 
 // ============================================================
 // Path conversion: AstPath segments → string
@@ -174,6 +174,103 @@ fn use_path_to_file_path(path: AstPath, prefix: string) -> string with Mut, Pani
         fp = fp + 4
     }
     buf_to_string(final_buf, fp)
+}
+
+fn buf_append_lit(buf: [i8; 512], pos: i64, lit: string) -> ([i8; 512], i64) with Mut, Panic, Div {
+    let n = str_len(lit)
+    var i: i64 = 0
+    var p = pos
+    var out = buf
+    while i < n && p < 500 {
+        out[p] = str_char_at(lit, i) as i8
+        p = p + 1
+        i = i + 1
+    }
+    (out, p)
+}
+
+fn string_list_seg_to_buf_mapped(sl: StringList, out: [i8; 512], pos: i64, map_underscore: bool) -> ([i8; 512], i64) with Mut, Panic, Div {
+    var buf = out
+    var p = pos
+    var i: i64 = 0
+    while i < sl.head_len && p < 500 {
+        var c = sl.head_buf[i]
+        if map_underscore && c == (95 as i8) {
+            c = 45 as i8
+        }
+        buf[p] = c
+        p = p + 1
+        i = i + 1
+    }
+    (buf, p)
+}
+
+fn use_path_to_package_file_path(path: AstPath) -> string with Mut, Panic, Div, Alloc {
+    if path.seg_count == 0 {
+        return ""
+    }
+    var buf: [i8; 512] = [0; 512]
+    var pos: i64 = 0
+    let p1 = buf_append_lit(buf, pos, "packages/")
+    buf = p1.0
+    pos = p1.1
+    let root_pair = string_list_seg_to_buf_mapped(path.segments, buf, pos, true)
+    buf = root_pair.0
+    pos = root_pair.1
+    let p2 = buf_append_lit(buf, pos, "/src")
+    buf = p2.0
+    pos = p2.1
+    match path.segments.tail {
+        None => {
+            let p3 = buf_append_lit(buf, pos, "/lib.sio")
+            buf_to_string(p3.0, p3.1)
+        }
+        Some(rest) => {
+            let path_pair = use_path_segs_to_buf(*rest, buf, pos)
+            var final_buf = path_pair.0
+            var fp = path_pair.1
+            if fp < 508 {
+                final_buf[fp] = 46 as i8
+                final_buf[fp + 1] = 115 as i8
+                final_buf[fp + 2] = 105 as i8
+                final_buf[fp + 3] = 111 as i8
+                fp = fp + 4
+            }
+            buf_to_string(final_buf, fp)
+        }
+    }
+}
+
+fn file_path_mod_fallback(path: string) -> string with Mut, Panic, Div {
+    let path_len = str_len(path)
+    if path_len < 5 {
+        return path
+    }
+    if str_char_at(path, path_len - 4) != 46 {
+        return path
+    }
+    let base = str_slice(path, 0, path_len - 4)
+    str_concat(str_concat(base, "/mod"), ".sio")
+}
+
+fn resolve_import_file_path(path: AstPath, cur_dir: string) -> string with IO, Mut, Panic, Div, Alloc {
+    let local = use_path_to_file_path(path, cur_dir)
+    if file_exists(local) {
+        return local
+    }
+    let stdlib = use_path_to_file_path(path, "stdlib")
+    if file_exists(stdlib) {
+        return stdlib
+    }
+    let pkg = use_path_to_package_file_path(path)
+    if file_exists(pkg) {
+        return pkg
+    }
+    let pkg_mod = file_path_mod_fallback(pkg)
+    if file_exists(pkg_mod) {
+        return pkg_mod
+    }
+    local
 }
 
 // Convert byte buffer to VM string using str_from_bytes builtin
@@ -1056,12 +1153,7 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
 
         i = 0
         while i < work_imports.count && loaded < 64 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
+            let file_path = resolve_import_file_path(work_imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
                 visited_paths[visited_count] = file_path
                 visited_count = visited_count + 1
@@ -1145,12 +1237,7 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         work_front = work_front + 1
         i = 0
         while i < work_imports.count && loaded < 64 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
+            let file_path = resolve_import_file_path(work_imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
                 visited_paths[visited_count] = file_path
                 visited_count = visited_count + 1
@@ -1293,12 +1380,7 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
         work_front = work_front + 1
         i = 0
         while i < work_imports.count && loaded < 64 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
+            let file_path = resolve_import_file_path(work_imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
                 visited_paths[visited_count] = file_path
                 visited_count = visited_count + 1
@@ -1425,12 +1507,7 @@ pub fn load_multimodule_epistemic_into(main_path: string, out: &! IrEpistemicSec
         work_front = work_front + 1
         i = 0
         while i < work_imports.count && loaded < 64 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
+            let file_path = resolve_import_file_path(work_imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
                 visited_paths[visited_count] = file_path
                 visited_count = visited_count + 1
@@ -1624,7 +1701,8 @@ fn compile_singlemodule_native_streaming_result_from_program(
         print("\n")
     }
 
-    var nc: NativeCompiler = compile_module_streaming_begin(compiler_new(), full_module)
+    var nc: NativeCompiler = compiler_new()
+    compile_module_streaming_begin_into(&!nc, full_module)
     var fi: i64 = 0
     while fi < (*full_module).fn_count {
         let fn_body = (*full_module).functions[fi as usize]
@@ -1641,11 +1719,11 @@ fn compile_singlemodule_native_streaming_result_from_program(
                 "streaming_native_v2_unsupported:" + legal.unsupported_detail
             )
         }
-        nc = compile_ir_function_v2(nc, fn_body, legal, fi)
+        compile_ir_function_v2_into(&!nc, &fn_body, &legal, fi)
         fi = fi + 1
     }
 
-    nc = compile_module_streaming_finish(nc, full_module)
+    compile_module_streaming_finish_into(&!nc, full_module)
     let elf: Elf64Binary = finalize_compiled_elf(nc, 4194304)
     thin_native_compile_result_from_elf(elf.bytes, elf.len, FORMAT_ELF64())
 }
@@ -2314,12 +2392,7 @@ fn thin_load_module_graph(main_path: string) -> ThinModuleGraph with IO, Mut, Pa
         work_front = work_front + 1
         var i: i64 = 0
         while i < imports.count && graph.count < 64 {
-            let file_path_local = use_path_to_file_path(imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
+            let file_path = resolve_import_file_path(imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
                 visited_paths[visited_count] = file_path
                 visited_count = visited_count + 1
@@ -3530,19 +3603,20 @@ pub fn compile_multimodule_native_advanced(
         if cache_stats {
             println("[thinlink] codegen start")
         }
-        var nc = compile_module_streaming_begin(compiler_new(), &final_module)
+        var nc = compiler_new()
+        compile_module_streaming_begin_into(&!nc, &final_module)
         gi = 0
         while gi < final_module.fn_count {
             let lowered = native_v2_lower_function_to_machine(built_functions[gi as usize])
             let legal = native_v2_legalize_function(lowered)
             if legal.supported {
-                nc = compile_ir_function_v2(nc, built_functions[gi as usize], legal, gi)
+                compile_ir_function_v2_into(&!nc, &built_functions[gi as usize], &legal, gi)
             } else {
                 nc = compile_ir_function(nc, built_functions[gi as usize], gi)
             }
             gi = gi + 1
         }
-        nc = compile_module_streaming_finish(nc, &final_module)
+        compile_module_streaming_finish_into(&!nc, &final_module)
         let elf = finalize_compiled_elf(nc, 4194304)
         final_result = thin_native_compile_result_from_wide(elf.bytes, elf.len, FORMAT_ELF64())
         if str_len(cache_dir) > 0 && thin_cache_mode_can_write(cache_mode) {
