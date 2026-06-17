@@ -503,6 +503,208 @@ lean_lib «SounioSunflower» where
 @[default_target]
 lean_lib «SounioErdos90PlanarLowerBound» where
 
+-- Erdős [90] mixed ℤ²+Eisenstein witness at n=100 via ℚ(√3) embedding (u(100) ≥ 265, deduped).
+@[default_target]
+lean_lib «SounioErdos90UnifiedQsqrt3Witness» where
+
+-- Erdős [90] full 10×10 ℤ² grid witness at n=100 (u(100) ≥ 288, unit²=5).
+@[default_target]
+lean_lib «SounioErdos90GridWitness» where
+
+-- Erdős [90] ℤ² subset-search witness at n=100 (u(100) ≥ 302, unit²=5, seed 1000003).
+@[default_target]
+lean_lib «SounioErdos90SubsetWitness» where
+
+-- Erdős [90] full 12×12 ℤ² grid witness at n=144 (u(144) ≥ 456, unit²=25).
+@[default_target]
+lean_lib «SounioErdos90Grid144Witness» where
+
+-- Erdős [90] ℤ² saturation subset at n=100 (u(100) ≥ 303, unit²=5).
+@[default_target]
+lean_lib «SounioErdos90Subset303Witness» where
+
+-- Erdős [90] ℤ² subset at n=144 (u(144) ≥ 493, unit²=25, seed 9000023).
+@[default_target]
+lean_lib «SounioErdos90Subset144Witness» where
+
+-- Erdős [90] full 14×14 ℤ² grid witness at n=196 (u(196) ≥ 692, unit²=25).
+@[default_target]
+lean_lib «SounioErdos90Grid196Witness» where
+
+-- Erdős [90] ℤ² subset at n=196 (u(196) ≥ 719, unit²=25, seed 8000019).
+@[default_target]
+lean_lib «SounioErdos90Subset196Witness» where
+
+-- Erdős [90] full 15×15 ℤ² grid witness at n=225 (u(225) ≥ 828, unit²=25).
+@[default_target]
+lean_lib «SounioErdos90Grid225Witness» where
+
+-- Erdős [90] ℤ² subset at n=225 (u(225) ≥ 856, unit²=25, seed 2000003).
+@[default_target]
+lean_lib «SounioErdos90Subset225Witness» where
+
+-- Erdős [90] full 16×16 ℤ² grid witness at n=256 (u(256) ≥ 976, unit²=25).
+@[default_target]
+lean_lib «SounioErdos90Grid256Witness» where
+
+-- Erdős [90] ℤ² subset at n=256 (u(256) ≥ 1007, unit²=25, seed 2000003).
+@[default_target]
+lean_lib «SounioErdos90Subset256Witness» where
+
+-- Erdős [90] compact ℤ² disk at n=225 (u(225) ≥ 848, rr=72, unit²=25).
+@[default_target]
+lean_lib «SounioErdos90Disk225Witness» where
+
+-- Erdős [90] full 17×17 ℤ² grid witness at n=289 (u(289) ≥ 1136, unit²=25).
+@[default_target]
+lean_lib «SounioErdos90Grid289Witness» where
+
+-- Erdős [90] ℤ² subset at n=289 (u(289) ≥ 1170, unit²=25, seed 2000003).
+@[default_target]
+lean_lib «SounioErdos90Subset289Witness» where
+
+-- Erdős [90] full 18×18 ℤ² grid witness at n=324 (u(324) ≥ 1308, unit²=25).
+@[default_target]
+lean_lib «SounioErdos90Grid324Witness» where
+
+-- Erdős [90] ℤ² subset at n=324 (u(324) ≥ 1347, unit²=25, seed 223607).
+@[default_target]
+lean_lib «SounioErdos90Subset324Witness» where
+
+-- Erdős [90] full 19×19 ℤ² grid witness at n=361 (u(361) ≥ 1492, unit²=25).
+@[default_target]
+lean_lib «SounioErdos90Grid361Witness» where
+
+-- Erdős [90] ℤ² subset at n=361 (u(361) ≥ 1535, unit²=25, seed 314159).
+@[default_target]
+lean_lib «SounioErdos90Subset361Witness» where
+
+-- Erdős [90] full 20×20 ℤ² grid witness at n=400 (u(400) ≥ 1688, unit²=25).
+@[default_target]
+lean_lib «SounioErdos90Grid400Witness» where
+
+-- Erdős [90] ℤ² subset at n=400 (u(400) ≥ 1735, unit²=25, seed 314159).
+@[default_target]
+lean_lib «SounioErdos90Subset400Witness» where
+
+-- Erdős [90] ladder rungs n=441..625 (18×18..25×25 grid + subset, N=25).
+@[default_target]
+lean_lib «SounioErdos90Grid441Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset441Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid484Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset484Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid529Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset529Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid576Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset576Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid625Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset625Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid676Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset676Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid729Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset729Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid784Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset784Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid841Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset841Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid900Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset900Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid961Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset961Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1024Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1024Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1089Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1089Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1156Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1156Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1225Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1225Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1296Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1296Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1369Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1369Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1444Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1444Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1521Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1521Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1600Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1600Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1681Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1681Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1764Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1764Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1849Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1849Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid1936Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset1936Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid2025Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset2025Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid2116Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset2116Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid2209Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset2209Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid2304Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset2304Witness» where
+@[default_target]
+lean_lib «SounioErdos90Grid2401Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset2401Witness» where
+
 -- Erdős [90] unit-distance count spectrum on the 168/ZD structure (7-vertex probe):
 -- associator lever beats linear (max 12 vs 9, 6 vs 2 distinct counts) + interleaved-
 -- star count-growth (gap 6<20<26). See docs/research/erdos-90-168-spectrum-note.md

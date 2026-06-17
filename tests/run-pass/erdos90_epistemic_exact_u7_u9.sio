@@ -1,0 +1,204 @@
+//@ run-pass
+//@ expect-stdout: erdos90_epistemic_exact_u7_u9: PASS
+
+// Roadmap item 4: compare epistemic-certified vs exact u(n) on n=7..9.
+// Exact reference: greedy triangular-lattice configs from
+// SounioErdos90PlanarLowerBound.lean (harb(n) pairs, native_decide).
+//   n=7 → 12   n=8 → 14   n=9 → 16
+//
+// Each vertex is measured once per eval (shared Knowledge across pairs), matching
+// stdlib/research/erdos90_epistemic.sio rhombus demo. Noisy σ=0.08 is calibrated
+// there: unit edges p_conform≈0.79 < p*=0.9 while boolean count stays exact.
+
+fn sqrtf(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 40 { r = 0.5 * (r + x / r); i = i + 1 }
+    return r
+}
+
+fn exp_approx(x: f64) -> f64 with Mut, Div {
+    if x < -40.0 { return 0.0 }
+    var n = 0; var t = x
+    while t > 0.5 { t = t - 1.0; n = n + 1 }
+    while t < -0.5 { t = t + 1.0; n = n - 1 }
+    var term = 1.0; var sum = 1.0; var k = 1
+    while k < 18 { term = term * t / (k as f64); sum = sum + term; k = k + 1 }
+    let e = 2.718281828459045; var p = 1.0; var i = 0
+    if n >= 0 { while i < n { p = p * e; i = i + 1 } } else { while i > n { p = p / e; i = i - 1 } }
+    return sum * p
+}
+
+fn erf_approx(x: f64) -> f64 with Mut, Div {
+    var s = 1.0; var z = x
+    if z < 0.0 { s = 0.0 - 1.0; z = 0.0 - z }
+    let t = 1.0 / (1.0 + 0.3275911 * z)
+    let poly = ((((1.061405429*t - 1.453152027)*t) + 1.421413741)*t - 0.284496736)*t + 0.254829592
+    return s * (1.0 - poly * t * exp_approx(0.0 - z * z))
+}
+
+fn phi(z: f64) -> f64 with Mut, Div { return 0.5 * (1.0 + erf_approx(z / 1.4142135623730951)) }
+
+fn conformance_prob(d2: f64, vd2: f64, tau: f64) -> f64 with Mut, Div {
+    let d = sqrtf(d2)
+    if d <= 0.0 { return 0.0 }
+    let sigma_d = sqrtf(vd2) / (2.0 * d)
+    if sigma_d <= 0.0 {
+        if (d - 1.0) < tau && (1.0 - d) < tau { return 1.0 } else { return 0.0 }
+    }
+    return phi((1.0 + tau - d) / sigma_d) - phi((1.0 - tau - d) / sigma_d)
+}
+
+fn lattice_x(a: i64, b: i64) -> f64 with Div { return (a as f64) + 0.5 * (b as f64) }
+fn lattice_y(b: i64) -> f64 with Div { return 0.8660254037844386 * (b as f64) }
+
+fn axial_d2(ia: i64, ib: i64, ja: i64, jb: i64) -> i64 {
+    let x = ia - ja
+    let y = ib - jb
+    return x * x + x * y + y * y
+}
+
+fn exact_unit_pairs(n: i64) -> i64 with Mut {
+    let a0 = 0; let b0 = 0
+    let a1 = 0 - 1; let b1 = 0
+    let a2 = 0 - 1; let b2 = 1
+    let a3 = 0; let b3 = 0 - 1
+    let a4 = 0; let b4 = 1
+    let a5 = 1; let b5 = 0 - 1
+    let a6 = 1; let b6 = 0
+    let a7 = 0 - 2; let b7 = 1
+    let a8 = 0 - 2; let b8 = 0
+    var cnt = 0
+    var i = 0
+    while i < n {
+        var j = i + 1
+        while j < n {
+            var ai = 0; var bi = 0; var aj = 0; var bj = 0
+            if i == 0 { ai = a0; bi = b0 } else if i == 1 { ai = a1; bi = b1 } else if i == 2 { ai = a2; bi = b2 }
+            else if i == 3 { ai = a3; bi = b3 } else if i == 4 { ai = a4; bi = b4 } else if i == 5 { ai = a5; bi = b5 }
+            else if i == 6 { ai = a6; bi = b6 } else if i == 7 { ai = a7; bi = b7 } else { ai = a8; bi = b8 }
+            if j == 0 { aj = a0; bj = b0 } else if j == 1 { aj = a1; bj = b1 } else if j == 2 { aj = a2; bj = b2 }
+            else if j == 3 { aj = a3; bj = b3 } else if j == 4 { aj = a4; bj = b4 } else if j == 5 { aj = a5; bj = b5 }
+            else if j == 6 { aj = a6; bj = b6 } else if j == 7 { aj = a7; bj = b7 } else { aj = a8; bj = b8 }
+            if axial_d2(ai, bi, aj, bj) == 1 { cnt = cnt + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return cnt
+}
+
+fn dist2_gum(ax: Knowledge[f64], ay: Knowledge[f64],
+             bx: Knowledge[f64], by: Knowledge[f64]) -> f64 with Mut, Div, Epistemic {
+    let dx = ax.value - bx.value
+    let dy = ay.value - by.value
+    return dx * dx + dy * dy
+}
+
+fn pick_x(idx: i64,
+          x0: Knowledge[f64], x1: Knowledge[f64], x2: Knowledge[f64],
+          x3: Knowledge[f64], x4: Knowledge[f64], x5: Knowledge[f64],
+          x6: Knowledge[f64], x7: Knowledge[f64], x8: Knowledge[f64]) -> Knowledge[f64] with Epistemic {
+    if idx == 0 { return x0 } else if idx == 1 { return x1 } else if idx == 2 { return x2 }
+    else if idx == 3 { return x3 } else if idx == 4 { return x4 } else if idx == 5 { return x5 }
+    else if idx == 6 { return x6 } else if idx == 7 { return x7 } else { return x8 }
+}
+
+fn pick_y(idx: i64,
+          y0: Knowledge[f64], y1: Knowledge[f64], y2: Knowledge[f64],
+          y3: Knowledge[f64], y4: Knowledge[f64], y5: Knowledge[f64],
+          y6: Knowledge[f64], y7: Knowledge[f64], y8: Knowledge[f64]) -> Knowledge[f64] with Epistemic {
+    if idx == 0 { return y0 } else if idx == 1 { return y1 } else if idx == 2 { return y2 }
+    else if idx == 3 { return y3 } else if idx == 4 { return y4 } else if idx == 5 { return y5 }
+    else if idx == 6 { return y6 } else if idx == 7 { return y7 } else { return y8 }
+}
+
+fn pair_epistemic(i: i64, j: i64, tau: f64, pstar: f64,
+                    x0: Knowledge[f64], x1: Knowledge[f64], x2: Knowledge[f64],
+                    x3: Knowledge[f64], x4: Knowledge[f64], x5: Knowledge[f64],
+                    x6: Knowledge[f64], x7: Knowledge[f64], x8: Knowledge[f64],
+                    y0: Knowledge[f64], y1: Knowledge[f64], y2: Knowledge[f64],
+                    y3: Knowledge[f64], y4: Knowledge[f64], y5: Knowledge[f64],
+                    y6: Knowledge[f64], y7: Knowledge[f64], y8: Knowledge[f64]) -> i64 with Mut, Div, Epistemic {
+    let ax = pick_x(i, x0, x1, x2, x3, x4, x5, x6, x7, x8)
+    let ay = pick_y(i, y0, y1, y2, y3, y4, y5, y6, y7, y8)
+    let bx = pick_x(j, x0, x1, x2, x3, x4, x5, x6, x7, x8)
+    let by = pick_y(j, y0, y1, y2, y3, y4, y5, y6, y7, y8)
+    let d2 = dist2_gum(ax, ay, bx, by)
+    let vd2 = variance_of(d2)
+    let d = sqrtf(d2)
+    let pc = conformance_prob(d2, vd2, tau)
+    var off = d - 1.0
+    if off < 0.0 { off = 0.0 - off }
+    var classical = 0
+    var certified = 0
+    if off < 0.15 { classical = 1 }
+    if pc >= pstar { certified = 1 }
+    return classical * 10 + certified
+}
+
+fn eval_n(n: i64, unc: f64, tau: f64, pstar: f64) -> i64 with IO, Mut, Div, Epistemic {
+    let exact = exact_unit_pairs(n)
+    let x0 = measure(lattice_x(0, 0), uncertainty: unc)
+    let y0 = measure(lattice_y(0), uncertainty: unc)
+    let x1 = measure(lattice_x(0 - 1, 0), uncertainty: unc)
+    let y1 = measure(lattice_y(0), uncertainty: unc)
+    let x2 = measure(lattice_x(0 - 1, 1), uncertainty: unc)
+    let y2 = measure(lattice_y(1), uncertainty: unc)
+    let x3 = measure(lattice_x(0, 0 - 1), uncertainty: unc)
+    let y3 = measure(lattice_y(0 - 1), uncertainty: unc)
+    let x4 = measure(lattice_x(0, 1), uncertainty: unc)
+    let y4 = measure(lattice_y(1), uncertainty: unc)
+    let x5 = measure(lattice_x(1, 0 - 1), uncertainty: unc)
+    let y5 = measure(lattice_y(0 - 1), uncertainty: unc)
+    let x6 = measure(lattice_x(1, 0), uncertainty: unc)
+    let y6 = measure(lattice_y(0), uncertainty: unc)
+    let x7 = measure(lattice_x(0 - 2, 1), uncertainty: unc)
+    let y7 = measure(lattice_y(1), uncertainty: unc)
+    let x8 = measure(lattice_x(0 - 2, 0), uncertainty: unc)
+    let y8 = measure(lattice_y(0), uncertainty: unc)
+    var classical = 0
+    var certified = 0
+    var i = 0
+    while i < n {
+        var j = i + 1
+        while j < n {
+            let packed = pair_epistemic(i, j, tau, pstar,
+                x0, x1, x2, x3, x4, x5, x6, x7, x8,
+                y0, y1, y2, y3, y4, y5, y6, y7, y8)
+            classical = classical + packed / 10
+            certified = certified + packed % 10
+            j = j + 1
+        }
+        i = i + 1
+    }
+    print("n="); print_int(n)
+    print("  exact="); print_int(exact)
+    print("  classical="); print_int(classical)
+    print("  certified="); print_int(certified)
+    print("  sigma="); print_f64(unc); print("\n")
+    if classical != exact { return 0 }
+    return certified
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    let tau = 0.1
+    let pstar = 0.9
+    let c7 = eval_n(7, 0.005, tau, pstar)
+    let c8 = eval_n(8, 0.005, tau, pstar)
+    let c9 = eval_n(9, 0.005, tau, pstar)
+    let n7 = eval_n(7, 0.08, tau, pstar)
+    let n8 = eval_n(8, 0.08, tau, pstar)
+    let n9 = eval_n(9, 0.08, tau, pstar)
+    print("precise certified: n7="); print_int(c7)
+    print(" n8="); print_int(c8); print(" n9="); print_int(c9); print("\n")
+    print("noisy certified:   n7="); print_int(n7)
+    print(" n8="); print_int(n8); print(" n9="); print_int(n9); print("\n")
+    if c7 == 12 && c8 == 14 && c9 == 16 && n7 < 12 && n8 < 14 && n9 < 16 {
+        print("erdos90_epistemic_exact_u7_u9: PASS\n")
+        return 0
+    }
+    print("erdos90_epistemic_exact_u7_u9: FAIL\n")
+    return 1
+}

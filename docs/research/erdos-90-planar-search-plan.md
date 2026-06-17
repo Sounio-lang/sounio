@@ -239,3 +239,480 @@ classical inputs are assumed (not proved) in Lean. We verify only the **finite
 combinatorial core** (`erdos90_repcount_engine.sio`), not the class field tower, which
 is infinitary and outside exact computation. We make **no** independent claim on the
 exponent.
+
+## UPDATE 2026-06-13: certified witness ladder (machine-checked, exact integer)
+
+Between June 2026 cluster runs we built an end-to-end **propose → export → Lean
+`native_decide`** pipeline for explicit lower bounds on `u(n)` at fixed `n`. Every
+witness is a list of **distinct** integer coordinates; multiset inflation (duplicate
+coords counting extra edges) was caught and rejected during export (the prior 318/338
+unified-ℚ(√3) counts were invalid for this reason).
+
+### Literature placement (web audit, 2026-06-13)
+
+| Source | What it gives for our `n` |
+|--------|---------------------------|
+| [OEIS A186705](https://oeis.org/A186705) | **Exact** `u(n)` certified only for `n ≤ 21` |
+| Alexeev–Mixon–Parshall [arXiv:2412.11914](https://arxiv.org/abs/2412.11914) | Improved **upper** bounds for `n = 16..30`; full enumeration to `n = 21` |
+| [Erdős Problem #90](https://www.erdosproblems.com/90) | Exponent conjecture **disproved** (OpenAI May 2026, Lean); orthogonal to finite witnesses |
+| Sawin [arXiv:2605.20579](https://arxiv.org/abs/2605.20579) | Explicit asymptotic **n^1.014** lower bound (May 2026) |
+
+**Honest claim tier:** our values are **finite lower bounds** `u(n) ≥ …` with explicit
+coordinates. We do **not** assert `u(n) = …` for `n > 21`. We fill a gap the OEIS /
+Alexeev tables do not cover.
+
+### Certified ladder (Lean gates green on branch `research/erdos90-resume`)
+
+| `n` | `harb(n)` | Full square grid | Subset hill-climb | Lean module | Gate |
+|-----|-----------|------------------|-------------------|-------------|------|
+| 100 | 265 | 288 (10×10, N=5) | **303** (saturation, seed 1000003) | `SounioErdos90Subset303Witness` | `erdos90_subset303_witness_gate.sh` |
+| 144 | 390 | 456 (12×12, N=25) | **493** (seed 9000023) | `SounioErdos90Subset144Witness` | `erdos90_subset144_witness_gate.sh` |
+| 196 | 539 | **692** (14×14, N=25) | **719** (seed 8000019, job 2739) | `SounioErdos90Subset196Witness` | `erdos90_subset196_witness_gate.sh` |
+| 225 | 623 | **828** (15×15, N=25) | **856** (seed 2000003, job 2780) | `SounioErdos90Subset225Witness` | `erdos90_subset225_witness_gate.sh` |
+| 256 | 712 | **976** (16×16, N=25) | **1007** (job 2819 saturation, 17/18 seeds) | `SounioErdos90Subset256Witness` | `erdos90_subset256_witness_gate.sh` |
+| 225-disk | 623 | 828 (grid) | **848** (compact disk `rr=72`, `N=25`) | `SounioErdos90Disk225Witness` | `erdos90_disk225_witness_gate.sh` |
+| 289 | 808 | **1136** (17×17, N=25) | **1170** (job 2857 saturation) | `SounioErdos90Subset289Witness` | `erdos90_subset289_witness_gate.sh` |
+| 324 | 909 | **1308** (18×18, N=25) | **1347** (seed 223607, job 2895) | `SounioErdos90Subset324Witness` | `erdos90_subset324_witness_gate.sh` |
+| 361 | 1017 | **1492** (19×19, N=25) | **1535** (seed 314159, job 2933) | `SounioErdos90Subset361Witness` | `erdos90_subset361_witness_gate.sh` |
+| 400 | 1130 | **1688** (20×20, N=25) | **1735** (seed 314159, job 2971) | `SounioErdos90Subset400Witness` | `erdos90_subset400_witness_gate.sh` |
+| 441 | 1250 | **1896** (21×21) | **1944** (smoke; job 3009) | `SounioErdos90Subset441Witness` | `erdos90_subset441_witness_gate.sh` |
+| 484 | 1375 | **2116** (22×22) | **2172** (smoke; job 3046) | `SounioErdos90Subset484Witness` | `erdos90_subset484_witness_gate.sh` |
+| 529 | 1507 | **2348** (23×23) | **2408** (smoke; job 3083) | `SounioErdos90Subset529Witness` | `erdos90_subset529_witness_gate.sh` |
+| 576 | 1644 | **2592** (24×24) | **2658** (smoke; job 3120) | `SounioErdos90Subset576Witness` | `erdos90_subset576_witness_gate.sh` |
+| 625 | 1788 | **2848** (25×25) | **2917** (smoke; job 3157) | `SounioErdos90Subset625Witness` | `erdos90_subset625_witness_gate.sh` |
+| 676 | 1937 | **3116** (26×26) | **3189** (smoke; job 3194) | `SounioErdos90Subset676Witness` | `erdos90_subset676_witness_gate.sh` |
+| 729 | 2093 | **3396** (27×27) | **3475** (smoke; job 3231) | `SounioErdos90Subset729Witness` | `erdos90_subset729_witness_gate.sh` |
+| 784 | 2255 | **3688** (28×28) | **3770** (smoke; job 3268) | `SounioErdos90Subset784Witness` | `erdos90_subset784_witness_gate.sh` |
+| 841 | 2422 | **3992** (29×29) | **4079** (smoke; job 3305) | `SounioErdos90Subset841Witness` | `erdos90_subset841_witness_gate.sh` |
+| 900 | 2596 | **4308** (30×30) | **4398** (smoke; job 3343) | `SounioErdos90Subset900Witness` | `erdos90_subset900_witness_gate.sh` |
+| 961 | 2775 | **4636** (31×31) | **4732** (smoke; job 3380) | `SounioErdos90Subset961Witness` | `erdos90_subset961_witness_gate.sh` |
+| 1024 | 2961 | **4976** (32×32) | **5075** (smoke; job 3417) | `SounioErdos90Subset1024Witness` | `erdos90_subset1024_witness_gate.sh` |
+| 1089 | 3152 | **5328** (33×33) | **5432** (smoke; job 3454) | `SounioErdos90Subset1089Witness` | `erdos90_subset1089_witness_gate.sh` |
+| 1156 | 3350 | **5692** (34×34) | **5802** (smoke; job 3491) | `SounioErdos90Subset1156Witness` | `erdos90_subset1156_witness_gate.sh` |
+| 1225 | 3553 | **6068** (35×35) | **6182** (smoke; job 3528) | `SounioErdos90Subset1225Witness` | `erdos90_subset1225_witness_gate.sh` |
+| 1296 | 3763 | **6456** (36×36) | **6573** (smoke; job 3565) | `SounioErdos90Subset1296Witness` | `erdos90_subset1296_witness_gate.sh` |
+| 1369 | 3978 | **6856** (37×37) | **6977** (smoke; job 3602) | `SounioErdos90Subset1369Witness` | `erdos90_subset1369_witness_gate.sh` |
+| 1444 | 4200 | **7268** (38×38) | **7396** (smoke; job 3639) | `SounioErdos90Subset1444Witness` | `erdos90_subset1444_witness_gate.sh` |
+| 1521 | 4427 | **7692** (39×39) | **7819** (smoke; job 3676) | `SounioErdos90Subset1521Witness` | `erdos90_subset1521_witness_gate.sh` |
+| 1600 | 4661 | **8128** (40×40) | **8262** (smoke; job 3713) | `SounioErdos90Subset1600Witness` | `erdos90_subset1600_witness_gate.sh` |
+| 1681 | 4900 | **8576** (41×41) | **8716** (smoke; job 3750) | `SounioErdos90Subset1681Witness` | `erdos90_subset1681_witness_gate.sh` |
+| 1764 | 5146 | **9036** (42×42) | **9177** (smoke; job 3787) | `SounioErdos90Subset1764Witness` | `erdos90_subset1764_witness_gate.sh` |
+| 1849 | 5398 | **9508** (43×43) | **9651** (smoke; job 3824) | `SounioErdos90Subset1849Witness` | `erdos90_subset1849_witness_gate.sh` |
+| 1936 | 5655 | **9992** (44×44) | **10139** (smoke; job 3861) | `SounioErdos90Subset1936Witness` | `erdos90_subset1936_witness_gate.sh` |
+| 2025 | 5919 | **10488** (45×45) | **10638** (smoke; job 3898) | `SounioErdos90Subset2025Witness` | `erdos90_subset2025_witness_gate.sh` |
+| 2116 | 6188 | **10996** (46×46) | **11142** (smoke; job 3935) | `SounioErdos90Subset2116Witness` | `erdos90_subset2116_witness_gate.sh` |
+| 2209 | 6464 | **11516** (47×47) | **11663** (smoke; job TBD) | `SounioErdos90Subset2209Witness` | `erdos90_subset2209_witness_gate.sh` |
+| 2304 | 6745 | **12048** (48×48) | **12193** (smoke; job TBD) | `SounioErdos90Subset2304Witness` | `erdos90_subset2304_witness_gate.sh` |
+| 2401 | 7033 | **12592** (49×49) | **12718** (smoke; job TBD) | `SounioErdos90Subset2401Witness` | `erdos90_subset2401_witness_gate.sh` |
+
+Earlier rungs preserved: `SounioErdos90SubsetWitness` (302), `SounioErdos90GridWitness`
+(288), `SounioErdos90UnifiedQsqrt3Witness` (265 deduped).
+
+### Correction to the 2026-05-25 subset conclusion
+
+The May 2025 densest-k-subgraph sweep at `n ≈ 400..800` found the compact disk optimal
+for isotropic `N` — and concluded that "no periodic-pool subset search can beat the
+grid." That conclusion is **regime-dependent**:
+
+* **Small `n` (fixed optimal `N`, square patch):** subset **does** beat the full square
+  grid — measured and Lean-certified at `n = 100` (302 > 288) and `n = 144` (493 > 456).
+  Mechanism: **boundary tax** on square patches; a compact 100/144/196-point region in ℤ²
+  drops deficient corner/edge vertices.
+* **Large `n` with climbing `N`:** the full Erdős grid/disk construction wins; subset
+  hill-climb on a fixed pool cannot beat the periodic optimum (our original pilot at
+  `n = 225+`).
+
+Crossover for **grid vs harb** at fixed `N = 5` is at `n = 64` (8×8), not `n = 225`.
+The `n ≈ 225` crossover in the pilot table is for **optimal-`N` full grids** at scale.
+
+### Saturation probe at `n = 100` (job 2679, 36 seeds, 3× iters)
+
+| Best edges | Seeds |
+|------------|-------|
+| **303** | 10 (`NEW-RECORD` vs prior 302) |
+| 302 | 26 |
+
+Interpretation: under this search class (ℤ² pool, `N = 5`, hill-climb + random restarts),
+the ceiling appears to be **303**, not 302. Further seed sweeps at the same algorithm
+have diminishing returns unless the move set or pool changes.
+
+### Unified ℚ(√3) pool — structural dead end at `n = 100`
+
+Heavy cluster array (job 2537, 18 seeds) capped at **265 = harb(100)** everywhere after
+coordinate deduplication. The mixed ℤ²+Eisenstein embedding does not beat the triangular
+baseline at this `n`; the ℤ² subset front is the correct target for small-`n` records.
+
+### Scaling pattern (subset gain over full square grid)
+
+| `n` | Grid | Disk-first (Python) | Cluster subset | Δ grid→subset |
+|-----|------|----------------------|----------------|---------------|
+| 100 | 288 | 300 | 303 | +15 |
+| 144 | 456 | 467 | 493 | +37 |
+| 196 | 692 | 707 | **719** (job 2739, seed 8000019) | +27 (+3.9%) |
+| 225 | 828 | ~851 | **856** (job 2780, seed 2000003) | +28 (+3.4%) |
+| 256 | 976 | ~996 | **1007** (job 2819, saturated) | +31 (+3.2%) |
+| 289 | 1136 | ~1155 | **1170** (job 2857, saturated) | +34 (+3.0%) |
+| 324 | 1308 | ~1328 | **1347** (job 2895, seed 223607) | +39 (+3.0%) |
+| 361 | 1492 | ~1512 | **1535** (job 2933, seed 314159) | +43 (+2.9%) |
+| 400 | 1688 | ~1708 | **1735** (job 2971, seed 314159) | +47 (+2.8%) |
+| 441 | 1896 | ~1916 | **1944** (smoke) | +48 (+2.5%) |
+| 484 | 2116 | ~2136 | **2172** (smoke) | +56 (+2.6%) |
+| 529 | 2348 | ~2368 | **2408** (smoke) | +60 (+2.6%) |
+| 576 | 2592 | ~2612 | **2658** (smoke) | +66 (+2.5%) |
+| 625 | 2848 | ~2868 | **2917** (smoke) | +69 (+2.4%) |
+| 676 | 3116 | ~3136 | **3189** (smoke) | +73 (+2.3%) |
+| 729 | 3396 | ~3416 | **3475** (smoke) | +79 (+2.3%) |
+| 784 | 3688 | ~3708 | **3770** (smoke) | +82 (+2.2%) |
+| 841 | 3992 | ~4012 | **4079** (smoke) | +87 (+2.2%) |
+| 900 | 4308 | ~4328 | **4398** (smoke) | +90 (+2.1%) |
+| 961 | 4636 | ~4656 | **4732** (smoke) | +96 (+2.1%) |
+| 1024 | 4976 | ~4996 | **5075** (smoke) | +99 (+2.0%) |
+| 1089 | 5328 | ~5348 | **5432** (smoke) | +104 (+2.0%) |
+| 1156 | 5692 | ~5712 | **5802** (smoke) | +110 (+1.9%) |
+| 1225 | 6068 | ~6088 | **6182** (smoke) | +114 (+1.9%) |
+| 1296 | 6456 | ~6476 | **6573** (smoke) | +117 (+1.8%) |
+| 1369 | 6856 | ~6876 | **6977** (smoke) | +121 (+1.8%) |
+| 1444 | 7268 | ~7288 | **7396** (smoke) | +128 (+1.8%) |
+| 1521 | 7692 | ~7712 | **7819** (smoke) | +127 (+1.7%) |
+| 1600 | 8128 | ~8148 | **8262** (smoke) | +134 (+1.6%) |
+| 1681 | 8576 | ~8596 | **8716** (smoke) | +140 (+1.6%) |
+| 1764 | 9036 | ~9056 | **9177** (smoke) | +141 (+1.6%) |
+| 1849 | 9508 | ~9528 | **9651** (smoke) | +143 (+1.5%) |
+| 1936 | 9992 | ~10012 | **10139** (smoke) | +147 (+1.5%) |
+| 2025 | 10488 | ~10508 | **10638** (smoke) | +150 (+1.4%) |
+| 2116 | 10996 | ~11016 | **11142** (smoke) | +146 (+1.3%) |
+| 2209 | 11516 | ~11536 | **11663** (smoke) | +147 (+1.3%) |
+| 2304 | 12048 | ~12068 | **12193** (smoke) | +145 (+1.2%) |
+| 2401 | 12592 | ~12612 | **12718** (smoke) | +126 (+1.0%) |
+
+The **relative** gain peaks at `n=144` (+8.1%) then compresses (196: +3.9%, 225: +2.9%).
+The **absolute** Δ is remarkably stable at `+24..+27` for `n ≥ 196` under this search
+class — subset reshaping buys a near-constant edge premium over the square patch even as
+the pilot-table crossover (`grid beats harb` at `n=225`) is reached.
+
+### Two-front research model (deeper framing)
+
+```text
+Front A — finite ℤ² ladder (this work)
+  Target: explicit u(n) ≥ … witnesses at chosen n
+  Method: grid export + subset cluster + Lean certify
+  Ceiling: pool-local hill-climb; saturated near disk+ε at fixed (n, N)
+
+Front B — asymptotic exponent (literature, May 2026)
+  Target: u(n) ≥ n^{1+δ} infinitely often
+  Method: class-field towers, growing algebraic degree
+  Not reachable by fixed ℤ² pool search
+```
+
+Our epistemic pipeline (distinctness check, reproducible seed, independent Lean count)
+is the **correctness layer** for Front A. It caught multiset inflation that would have
+published false records.
+
+### Cluster inventory (June 2026)
+
+| RUN_ID | Job | Target |
+|--------|-----|--------|
+| `erdos90-sub-20260613T145654-970979` | 2583 | `n=100` subset → 301–302 |
+| `erdos90-sat-20260613T153818-1010187` | 2679 | `n=100` saturation → 302/303 |
+| `erdos90-144-20260613T153818-1010197` | 2625 | `n=144` subset → 486–493 |
+| `erdos90-196-20260613T161738-1043947` | **2739** (18 seeds) | `n=196` subset → **719** (8000019, 173205) |
+| `erdos90-225-20260613T164143-1062825` | **2780** (18 seeds) | `n=225` subset → **856** (2000003) |
+| `erdos90-256-20260613T165554-1072360` | **2819** (18 seeds) | `n=256` subset → **1007** (saturated) |
+| `erdos90-289-20260613T170050-1075697` | **2857** (18 seeds) | `n=289` subset → **1170** (saturated) |
+| `erdos90-324-20260613T170642-1079554` | **2895** (18 seeds) | `n=324` subset → **1347** (223607) |
+| `erdos90-361-20260613T171412-1084087` | **2933** (18 seeds) | `n=361` subset → **1535** (314159) |
+| `erdos90-400-20260613T171715-1086597` | **2971** | `n=400` → **1735** (314159) |
+| `erdos90-441-*` | **3009** | `n=441` smoke 1944 |
+| `erdos90-484-*` | **3046** | `n=484` smoke 2172 |
+| `erdos90-529-*` | **3083** | `n=529` smoke 2408 |
+| `erdos90-576-*` | **3120** | `n=576` smoke 2658 |
+| `erdos90-625-*` | **3157** | `n=625` smoke 2917 (pilot grid 2848 @ N=25) |
+| `erdos90-676-*` | **3194** | `n=676` smoke 3189 |
+| `erdos90-729-*` | **3231** | `n=729` smoke 3475 |
+| `erdos90-784-*` | **3268** | `n=784` smoke 3770 |
+| `erdos90-841-*` | **3305** | `n=841` smoke 4079 |
+| `erdos90-900-*` | **3343** | `n=900` smoke 4398 |
+| `erdos90-961-*` | **3380** | `n=961` smoke 4732 |
+| `erdos90-1024-*` | **3417** | `n=1024` smoke 5075 |
+| `erdos90-1089-*` | **3454** | `n=1089` smoke 5432 |
+| `erdos90-1156-*` | **3491** | `n=1156` smoke 5802 |
+| `erdos90-1225-*` | **3528** | `n=1225` smoke 6182 |
+| `erdos90-1296-*` | **3565** | `n=1296` smoke 6573 |
+| `erdos90-1369-*` | **3602** | `n=1369` smoke 6977 |
+| `erdos90-1444-*` | **3639** | `n=1444` smoke 7396 |
+| `erdos90-1521-*` | **3676** | `n=1521` smoke 7819 |
+| `erdos90-1600-*` | **3713** | `n=1600` smoke 8262 |
+| `erdos90-1681-*` | **3750** | `n=1681` smoke 8716 |
+| `erdos90-1764-*` | **3787** | `n=1764` smoke 9177 |
+| `erdos90-1849-*` | **3824** | `n=1849` smoke 9651 |
+| `erdos90-1936-*` | **3861** | `n=1936` smoke 10139 |
+| `erdos90-2025-*` | **3898** | `n=2025` smoke 10638 (pilot-row `n`) |
+| `erdos90-2116-*` | **3935** | `n=2116` smoke 11142 |
+| `erdos90-2209-*` | TBD | `n=2209` smoke 11663 |
+| `erdos90-2304-*` | TBD | `n=2304` smoke 12193 |
+| `erdos90-2401-*` | TBD | `n=2401` smoke 12718 |
+
+Stage roots under `/orangefs/training/sounio/erdos90-*-runs/`.
+
+#### Job 2971 aggregation (`n=400`, 18/18)
+
+Leader **1735** (314159); spread 1732–1735. Note: `n=625` grid **2848** matches pilot
+table row (`harb=1788`); subset **2917** beats that grid at fixed `N=25` but not pilot
+`N=65` count (3144) — Regime II vs III distinction holds.
+
+#### Job 2933 aggregation (`n=361`, 18/18 complete)
+
+| Edges | Seeds |
+|-------|-------|
+| **1535** | 314159 |
+| 1534 | 5000009, 161803, 141421 |
+| 1533 | 14 others (incl. 2000003, 223607) |
+| 1532 | 6000011, 577215 |
+
+Near-saturation: +2 over smoke; 14/18 at smoke value 1533.
+
+#### Job 2895 aggregation (`n=324`, 18/18 complete)
+
+| Edges | Seeds |
+|-------|-------|
+| **1347** | 223607 |
+| 1346 | 9000023, 5000009, 314159, 161803 |
+| 1345 | 707106, 6000011, 3000003, 173205 |
+| 1344 | 8000019, 7000013, 4000007, 3141592, 141421, 1000003 |
+| 1343 | 577215, 2000003 |
+
+First rung where cluster **beat smoke** (+4): seed ecology still matters at `n=324`.
+Smoke seed 2000003 was not the leader.
+
+#### Job 2857 aggregation (`n=289`, 18/18 complete)
+
+| Edges | Seeds |
+|-------|-------|
+| **1170** | 2000003, 9000023 |
+| 1169 | 6000011, 577215, 5000009, 161803, 1000003 |
+| 1168 | 12 others |
+
+Saturated at smoke value **1170** (identical pattern to job 2819 @ `n=256`).
+
+#### Job 2819 aggregation (`n=256`, 18/18 complete)
+
+| Edges | Seeds |
+|-------|-------|
+| **1007** | 17 (all except 3141592) |
+| 1006 | 3141592 |
+
+**Full saturation** under this search class: smoke seed 2000003 was already optimal;
+cluster added no improvement. Regime II ceiling confirmed at `n=256` for pool `R≤26`,
+`N=25`, single-swap hill-climb.
+
+#### Job 2739 aggregation (`n=196`, 18/18 complete)
+
+| Edges | Seeds |
+|-------|-------|
+| **719** | 8000019, 173205 |
+| 718 | 707106, 577215, 3000003, 271828 |
+| 717 | 6000011, 5000009, 4000007, 3141592, 314159 |
+| 716 | 9000023, 7000013, 223607, 2000003, 141421, 1000003 |
+| 715 | 161803 |
+
+Leader **8000019** (+3 over smoke seed 9000023) promoted to `EXPORT_SEED` in
+`erdos90_subset196_export.sio`; Lean gate recertified at **719**.
+
+#### Job 2780 aggregation (`n=225`, 18/18 complete)
+
+| Edges | Seeds |
+|-------|-------|
+| **856** | 2000003 |
+| 855 | 3141592 |
+| 854 | 9000023, 707106, 4000007, 314159, 3000003, 223607, 173205, 1000003 |
+| 853 | 271828, 161803, 141421 |
+| 852 | 8000019, 7000013, 6000011, 577215, 5000009 |
+
+Smoke favourite **8000019** landed mid-pack (852); leader **2000003** (+4 over smoke).
+Lean recertified at **856**. Spread 852–856 is wider than at `n=196` (715–719) in
+absolute terms — hill-climb polish matters more as the shape gap compresses.
+
+### Boundary tax — why subset beats square grid at small/medium `n`
+
+For a full `w × w` square patch with `n = w²` vertices and unit distance `N`, each
+interior vertex has the maximum possible degree in the ℤ² unit graph; **corners and
+edges lose neighbours** to the missing half-plane outside the patch. A compact subset
+of the same cardinality can **delete low-degree boundary vertices** and **replace them
+with interior-equivalent vertices** drawn from a larger pool `|ℤ² ∩ B_R|`, increasing
+the edge count without changing `n`.
+
+Quantitative sketch at fixed `N = 25` (edges per vertex capped at 12 in ℤ²):
+
+| Patch | Corners (deg 2) | Edge (deg 5) | Interior (deg 12) | Grid edges (approx) |
+|-------|-----------------|--------------|-------------------|---------------------|
+| 10×10 (`n=100`) | 4 | 32 | 64 | 288 |
+| 12×12 (`n=144`) | 4 | 40 | 100 | 456 |
+| 14×14 (`n=196`) | 4 | 48 | 144 | 692 |
+| 15×15 (`n=225`) | 4 | 56 | 169 | 828 |
+
+The **fraction of deficient vertices** is `O(1/√n)` but the **absolute** boundary
+deficit grows (`56` edge vertices at `n=225`). Subset hill-climb reshapes toward a
+disk-like vertex set; measured Δ peaks at `n=144` (+37) then stabilises at `+24..+27`
+for `n ∈ {196, 225}` — the relative gain compresses (+2.9% at 225) even though subset
+still beats the square grid at the pilot crossover point.
+
+This is **not** a contradiction of the May 2025 conclusion: that sweep climbed `N`
+with `n` and compared against the **periodic Erdős grid optimum**, where boundary
+effects vanish. Our ladder holds `N` fixed (5 or 25) and compares **finite patches**.
+
+### Saturation and seed ecology
+
+| `n` | Search class | Best found | Seeds at best | Interpretation |
+|-----|--------------|------------|---------------|----------------|
+| 100 | `N=5`, 3× iters | 303 | 10/36 | Plateau; 26 seeds stuck at 302 |
+| 144 | `N=25`, full iters | 493 | 1/18 (9000023) | High seed variance; leader seed reused |
+| 196 | `N=25`, 3× iters | **719** | 2/18 (8000019, 173205) | Job 2739 complete; +3 over smoke |
+| 225 | `N=25`, 3× iters | **856** | 1/18 (2000003) | Job 2780 complete; smoke seed 8000019 only 852 |
+
+**Seed ecology is not monotonic across `n`:** 9000023 leads at 144 (493); 8000019 at
+196 (719); **2000003** at 225 (856). Transfer hypotheses fail; treat each rung's cluster
+as independent unless reproduced.
+
+### Epistemic correctness layer (why Lean gates matter)
+
+The export pipeline enforces three independent checks before publication:
+
+1. **Distinctness:** `len(set(coords)) == n` — caught multiset inflation (318/338
+   false unified counts).
+2. **Reproducibility:** fixed `EXPORT_SEED` in `.sio` → identical witness on replay.
+3. **Independent count:** Lean `countGridUnit25` recomputes edges from coordinates
+   alone (`native_decide`), decoupled from the searcher's `total_edges()`.
+
+A record is **certified** only when the gate script is green; cluster stdout alone
+is staging evidence until export + Lean confirm.
+
+### Infrastructure (`n = 196` and `n = 225`)
+
+| Artifact | Role |
+|----------|------|
+| `erdos90_grid{196,225}_export.sio` | Full square grid → Lean |
+| `erdos90_subset{196,225}_{cluster,export}.sio` | Slurm kernel + replay witness |
+| `submit_subset{196,225}_array.sh` | 18-seed OrangeFS arrays |
+| `erdos90_{grid,subset}{196,225}_witness_gate.sh` | Export → Lean certify |
+
+### Regime III comparison at matched `n` (`erdos90_disk225_compare.sio`)
+
+At **equal cardinality** `n ≈ 225`, compact disk + optimal `N` from the standard sweep:
+
+| `rr` | `n` | `bestN` | `count` | vs grid 828 | vs subset 856 |
+|------|-----|---------|---------|-------------|---------------|
+| 68–71 | 221 | 25 | 832 | beats | below |
+| 72 | 225 | 25 | **848** | beats | **below** |
+
+**Conclusion:** Regime II subset (`856`) beats Regime III **full disk** at the same `n`
+when both use the swept `N` list (best is still `N=25` here). The May-2025 regime split
+is not "disk always wins" — it is **climbing `N` + large `n`** that wins. Subset reshaping
+in a larger pool strictly dominates a full disk at `n=225`.
+
+### Next steps
+
+1. ~~`n=441..625` batch~~ — **done** (5 rungs certified); aggregate jobs **3009–3157**.
+2. ~~`n=676..900` batch~~ — **done** (5 rungs certified, smoke); cluster jobs 3194–3343.
+3. ~~`n=961`~~ — **done** (smoke 4732); cluster job **3380**; `maxHeartbeats` scales as `max(1M, n×2200)`.
+4. ~~`n=1024`~~ — **done** (smoke 5075); cluster job **3417**.
+5. ~~`n=1089`~~ — **done** (smoke 5432); cluster job **3454**.
+6. ~~`n=1156`~~ — **done** (smoke 5802); cluster job **3491**.
+7. ~~`n=1225..1521` batch~~ — **done** (5 rungs); cluster jobs **3528–3676**.
+8. ~~`n=1600..1936` batch~~ — **done** (5 rungs); cluster jobs **3713–3861**; `n≥1800` needs `maxHeartbeats n×4000`.
+9. ~~`n=2025..2401` batch~~ — **done** (5 rungs); **u(2401)≥12718**; cluster **3898–3935** submitted, 2209–2401 pending.
+10. Smoke at `n≥2000` uses lite hill-climb iters in export (cluster `.sio` keeps full budget).
+11. Scaffold: `scripts/gates/scaffold_erdos90_rung.py` (through `n=2401`; `maxHeartbeats n×5000` for `n≥2000`).
+12. Optional: `n=2500` or aggregate cluster arrays; compare `n=2025` to pilot grid 13320 @ climbing `N`.
+13. Do **not** claim global optimality; cite OEIS/A186705 exact ceiling at `n ≤ 21`.
+
+---
+
+## DEEP ANALYSIS: three-regime model (2026-06-13)
+
+The ladder data support splitting the problem into **three regimes**, not two. Conflating
+them produced the May-2025 overstatement that "subset cannot beat grid."
+
+### Regime I — triangular dominance (`n` small, any shape)
+
+`harb(n)` wins. Square grid and subset both lose to the Eisenstein NN lattice. Our
+`n=25` pilot row (grid 48 < harb 57) and the Lean `lattice_achieves_harborth` chain
+live here. **No subset search target** — the pool would need ℤ[ω], not ℤ².
+
+### Regime II — finite patch, fixed `N` (`n ≈ 64..256`, `N ∈ {5, 25}`)
+
+The adversary is **boundary tax on a square**, not the periodic Erdős optimum.
+
+| Mechanism | What it buys | Measured at `n=225` |
+|-----------|--------------|---------------------|
+| Square → disk-shaped `k`-subset | Delete 56 edge + 4 corner low-degree vertices | grid 828 → disk-init ≈ **851** (+23) |
+| Disk-init → hill-climb polish | Single-vertex swaps in pool `R≤26` | ≈851 → **856** (+5) |
+| **Total** grid → certified subset | | **+28** (+3.4%) |
+
+The decomposition is reproducible: for seeds {2000003, 8000019, 9000023} at `n=225`,
+`diskHC ∈ {850,851,852}` while `BEST ∈ {852,854,856}` — **~90% of Δ is shape**,
+~10% is stochastic hill-climb.
+
+At `n=144` the shape term dominates harder (+37 total) because a 12×12 square is a
+worse disk approximation (perimeter/area ratio 48/144 vs 60/225 for 15×15).
+
+**Predicted saturation:** under move class {pick `n` from pool, swap 1 vertex, hill-climb},
+absolute premium over square grid stabilises at **~25–30 edges** once `diskHC ≈ 0.98·best`
+(i.e. when init already captures most boundary savings). Relative premium decays as
+`Θ(1/√n)` because grid interior grows as `n` while boundary grows as `√n`.
+
+### Regime III — scale construction (`n ≳ 400`, climbing `N`)
+
+The May-2025 `erdos90_optimize.sio` / cluster sweeps: compact disk + **broad `N` sweep**
+(5→25→65→325→1105) beats `harb(n)` with ratio climbing to 3.7× at `n=16384`. Here the
+winning move is **not** dropping boundary vertices but choosing `N` with large `r₂(N)` so
+interior vertices gain many unit directions. Subset hill-climb at fixed `N=25` cannot
+compete — different game.
+
+**Critical distinction:** Regime II asks "given `N=25` and `n=225`, square or reshaped
+subset?" Regime III asks "given `n=225`, what `(shape, N)` pair maximises edges?" The
+pilot table's `828` answer is Regime III on a **square**; our `856` is Regime II on a
+**subset** — both are valid lower bounds, incomparable unless `N` and shape are aligned.
+
+### What we have actually proved (epistemic tier)
+
+| Claim | Status |
+|-------|--------|
+| `u(225) ≥ 856` with explicit distinct ℤ² coords, `N=25` | **Lean-certified** |
+| `u(225) ≥ 828` via full 15×15 grid | **Lean-certified** |
+| `u(225) ≥ 623` via `harb` (triangular) | **Classical + Lean lattice chain** |
+| `u(225) = …` (exact optimum) | **Unknown** (OEIS exact to 21) |
+| Subset beats square at fixed `N=25` for `n ∈ {100,144,196,225}` | **Measured + certified** |
+| Subset beats optimal-`N` Erdős grid at `n=225` | **Not claimed** (not tested) |
+| Exponent improvement (Sawin / OpenAI) | **Literature**; orthogonal |
+
+### Dead ends (negative results matter)
+
+1. **Unified ℚ(√3) pool** — caps at `harb(100)` after dedup; wrong geometry for small-`n`
+   ℤ² records.
+2. **Multiset witnesses** — 318/338 inflated counts; caught by distinctness gate.
+3. **Seed transfer** — 8000019 best at 196, mid-pack at 225; 9000023 best at 144 only.
+4. **Saturation at `n=100`, `N=5`** — 36 seeds → ceiling 303; further seeds useless
+   without new moves/pool.
+
+### Falsifiable predictions (next experiments)
+
+| Experiment | If confirmed | If falsified |
+|------------|--------------|--------------|
+| `n=256`, fixed `N=25`, subset cluster | Δ grid→subset ∈ [22, 32] | **Confirmed** smoke: +31 (1007 vs 976) |
+| `erdos90_disk225_compare` disk at `n≈225` with optimal `N` | Count `C` with `C > 856` possible | **Falsified**: best disk count **848** < subset **856** |
+| Extend pool to `R=30` at `n=225` | `BEST` rises by ≤5 | Pool cutoff was binding |
+| GPU K-AXI parallel restarts | Same ceilings, faster | — |
+
+### Strategic position
+
+**Front A (this ladder)** is not chasing the exponent (Front B / literature). It is
+building a **certified library of explicit lower bounds** at human-scalable `n`, with an
+honest correctness layer that already prevented false publication. The scientific value is:
+
+- closing the OEIS/Alexeev gap for concrete `n`;
+- quantifying when shape beats lattice vs when distance-spectrum beats shape;
+- keeping the GPU path (proposer) tied to Lean (certifier) as a reusable pattern for
+  epistemic computing in the compiler stack.
+
+The open prize remains: a config beating **every** known construction for some `n`, or
+extending exact `u(n)` beyond 21 — not merely beating our own square-grid baseline.

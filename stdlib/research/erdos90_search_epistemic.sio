@@ -1,19 +1,11 @@
 // research::erdos90_search_epistemic — epistemic continuous search pilot (capability demo)
 //
-// Exercises the "continuous frontier" the exact-lattice wall cannot: optimize 6 point
-// coordinates in R^2 to MAXIMIZE the smooth expected conformance-count
-//   f(X) = Σ_{i<j} p_conform(d_ij ; σ_d, τ)   (JCGM 106 conformance, smooth in X)
-// via gradient ascent that REUSES stdlib/optimize/epistemic_bfgs: its EpistemicParams /
-// EpistemicGradient types and its UNCERTAINTY-AWARE step rule ebfgs_compute_step_size
-// (which shrinks the step when the gradient's propagated uncertainty is high — the
-// genuinely epistemic ingredient). σ_d = √2·σ_coord by first-order GUM (2D, independent).
+// Maximizes the smooth expected conformance-count over 6 point coordinates via
+// stdlib/optimize/epistemic_bfgs::epistemic_ascent_maximize (parameterized objective).
+// σ_d uses the runtime GUM shadow path (variance_of) — reconciled in
+// tests/run-pass/erdos90_sigma_d_reconcile.sio (horizontal + diagonal cases).
 //
-// HONEST SCOPE: this maximizes a smooth epistemic SURROGATE of the unit-distance count over
-// continuous coordinates. It does NOT beat the Erdős grid and is NOT a u(n) result. It
-// demonstrates only that the epistemic layer makes the continuous search well-posed and
-// uncertainty-aware. NB the full BFGS driver epistemic_bfgs_quadratic hardcodes its
-// objective; parameterizing it over a fn-ref objective is a roadmap item, so we reuse its
-// primitives + step rule and run ascent rather than the driver.
+// HONEST SCOPE: smooth epistemic SURROGATE; NOT a u(n) bound; does NOT beat the grid.
 
 use optimize::epistemic_bfgs::*
 
@@ -36,23 +28,32 @@ fn erf_approx(x: f64) -> f64 with Mut, Div {
     return s*(1.0 - poly*t*exp_approx(0.0-z*z))
 }
 fn phi(z: f64) -> f64 with Mut, Div { return 0.5*(1.0+erf_approx(z/1.4142135623730951)) }
-fn pconf(d2: f64, sigma_d: f64, tau: f64) -> f64 with Mut, Div {
+
+fn pconf_d2(d2: f64, vd2: f64, tau: f64) -> f64 with Mut, Div {
     let d = sqrtf(d2); if d <= 0.0 { return 0.0 }
+    let sigma_d = sqrtf(vd2) / (2.0 * d)
     if sigma_d <= 0.0 { if (d-1.0) < tau && (1.0-d) < tau { return 1.0 } else { return 0.0 } }
     return phi((1.0+tau-d)/sigma_d) - phi((1.0-tau-d)/sigma_d)
 }
 
-// expected conformance count over 6 points stored as X[0..11] = (x0,y0,...,x5,y5)
-fn objective(x: &EpistemicParams, sigma_coord: f64, tau: f64) -> f64 with Mut, Div, Panic {
-    let sigma_d = 1.4142135623730951 * sigma_coord     // GUM: σ_d = √2 σ_coord (2D, indep)
+var SEARCH_SIGMA_COORD: f64 = 0.02
+var SEARCH_TAU: f64 = 0.1
+
+fn conformance_objective(x: &EpistemicParams) -> f64 with Mut, Div, Panic, Epistemic {
     var f = 0.0
     var i = 0
     while i < 6 {
         var j = i + 1
         while j < 6 {
-            let dx = x.values[(2*i) as usize] - x.values[(2*j) as usize]
-            let dy = x.values[(2*i+1) as usize] - x.values[(2*j+1) as usize]
-            f = f + pconf(dx*dx + dy*dy, sigma_d, tau)
+            let ax = measure(x.values[(2*i) as usize], uncertainty: SEARCH_SIGMA_COORD)
+            let ay = measure(x.values[(2*i+1) as usize], uncertainty: SEARCH_SIGMA_COORD)
+            let bx = measure(x.values[(2*j) as usize], uncertainty: SEARCH_SIGMA_COORD)
+            let by = measure(x.values[(2*j+1) as usize], uncertainty: SEARCH_SIGMA_COORD)
+            let dx = ax.value - bx.value
+            let dy = ay.value - by.value
+            let d2 = dx * dx + dy * dy
+            let vd2 = variance_of(d2)
+            f = f + pconf_d2(d2, vd2, SEARCH_TAU)
             j = j + 1
         }
         i = i + 1
@@ -60,68 +61,24 @@ fn objective(x: &EpistemicParams, sigma_coord: f64, tau: f64) -> f64 with Mut, D
     return f
 }
 
-// finite-difference gradient of `objective`, with per-component uncertainty from the
-// central-difference truncation estimate → an EpistemicGradient (reused stdlib type).
-fn fd_gradient(x: &EpistemicParams, sigma_coord: f64, tau: f64, h: f64) -> EpistemicGradient with Mut, Div, Panic {
-    var g = egrad_zeros(12)
-    var k = 0
-    while k < 12 {
-        var xp = EpistemicParams { values: x.values, uncertainties: x.uncertainties, confidences: x.confidences, n: x.n }
-        var xm = EpistemicParams { values: x.values, uncertainties: x.uncertainties, confidences: x.confidences, n: x.n }
-        xp.values[k as usize] = x.values[k as usize] + h
-        xm.values[k as usize] = x.values[k as usize] - h
-        let fp = objective(&xp, sigma_coord, tau)
-        let fm = objective(&xm, sigma_coord, tau)
-        g.values[k as usize] = (fp - fm) / (2.0 * h)
-        // uncertainty proxy: central-difference O(h²) truncation scale
-        g.uncertainties[k as usize] = h * h
-        g.confidences[k as usize] = 0.9
-        k = k + 1
-    }
-    return g
-}
-
-fn print_count(x: &EpistemicParams, sc: f64, tau: f64) with IO, Mut, Div, Panic {
-    print_f64(objective(x, sc, tau))
-}
-
-fn main() -> i32 with IO, Mut, Div, Panic {
-    let sigma_coord = 0.02
-    let tau = 0.1
-    // perturbed u(4)=5 rhombus + 2 extra points (6 total). Start away from optimum.
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    SEARCH_SIGMA_COORD = 0.02
+    SEARCH_TAU = 0.1
     var x = eparams_zeros(12)
-    x.values[0]=2.05;  x.values[1]=2.00          // p0
-    x.values[2]=2.95;  x.values[3]=2.05          // p1
-    x.values[4]=2.55;  x.values[5]=2.80          // p2 (perturbed)
-    x.values[6]=2.45;  x.values[7]=1.20          // p3 (perturbed)
-    x.values[8]=3.40;  x.values[9]=2.60          // p4 extra
-    x.values[10]=1.60; x.values[11]=2.60         // p5 extra
+    x.values[0]=2.05;  x.values[1]=2.00
+    x.values[2]=2.95;  x.values[3]=2.05
+    x.values[4]=2.55;  x.values[5]=2.80
+    x.values[6]=2.45;  x.values[7]=1.20
+    x.values[8]=3.40;  x.values[9]=2.60
+    x.values[10]=1.60; x.values[11]=2.60
     let config = epistemic_bfgs_config_default()
-    print("=== epistemic continuous search pilot (gradient ascent on conformance count) ===\n")
-    print("reuses stdlib/optimize EpistemicParams/Gradient + ebfgs_compute_step_size (epistemic step)\n")
-    print("initial expected conformance count = "); print_count(&x, sigma_coord, tau); print("\n")
-    var it = 0
-    while it < 200 {
-        let g = fd_gradient(&x, sigma_coord, tau, 0.001)
-        let gunc = egrad_unc_norm(&g)
-        // base step from the stdlib uncertainty-aware rule, then BACKTRACKING line search:
-        // accept only a step that increases the objective (guarantees monotone ascent).
-        let base = ebfgs_compute_step_size(gunc, 0.02, &config)
-        let f0 = objective(&x, sigma_coord, tau)
-        var alpha = base
-        var accepted = 0
-        var bt = 0
-        while bt < 9 && accepted == 0 {
-            var xt = EpistemicParams { values: x.values, uncertainties: x.uncertainties, confidences: x.confidences, n: x.n }
-            var k = 0
-            while k < 12 { xt.values[k as usize] = x.values[k as usize] + alpha * g.values[k as usize]; k = k + 1 }
-            if objective(&xt, sigma_coord, tau) > f0 + 0.0000001 { x = xt; accepted = 1 }
-            else { alpha = alpha * 0.5 }
-            bt = bt + 1
-        }
-        if accepted == 0 { it = 200 } else { it = it + 1 }   // stop at local maximum
-    }
-    print("final   expected conformance count = "); print_count(&x, sigma_coord, tau); print("\n")
-    print("(capability demo: smooth surrogate, uncertainty-aware step; not a u(n) bound, does not beat the grid)\n")
+    print("=== epistemic continuous search (epistemic_ascent_maximize + GUM sigma_d) ===\n")
+    print("initial expected conformance count = ")
+    print_f64(conformance_objective(&x))
+    print("\n")
+    let final = epistemic_ascent_maximize(&x, &config, conformance_objective)
+    print("final   expected conformance count = ")
+    print_f64(final)
+    print("\n(capability demo; not a u(n) bound)\n")
     return 0
 }
