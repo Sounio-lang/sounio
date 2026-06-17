@@ -8,7 +8,9 @@ use parser::mod::{count_items}
 use parser::parser::{parser_last_error_count, parser_reset_last_errors}
 use ir::ir::*
 use io::env::{read_env}
-use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_program_epistemic_into}
+use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata}
+use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace}
+use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
@@ -78,6 +80,86 @@ fn module_frontend_path_directory_slice(path: string) -> string with Mut, Panic,
         return "."
     }
     str_slice(path, 0, last_slash)
+}
+
+fn module_frontend_relpath_to_package_path(rel_path: string) -> string with Mut, Panic, Div {
+    let path_len = str_len(rel_path)
+    if path_len < 5 {
+        return ""
+    }
+    if str_char_at(rel_path, path_len - 4) != 46 ||
+       str_char_at(rel_path, path_len - 3) != 115 ||
+       str_char_at(rel_path, path_len - 2) != 105 ||
+       str_char_at(rel_path, path_len - 1) != 111 {
+        return ""
+    }
+
+    var slash_pos: i64 = 0 - 1
+    var i: i64 = 0
+    let stem_end = path_len - 4
+    while i < stem_end {
+        if str_char_at(rel_path, i) == 47 {
+            slash_pos = i
+            break
+        }
+        i = i + 1
+    }
+
+    var out = "packages/"
+    let root_end = if slash_pos >= 0 { slash_pos } else { stem_end }
+    i = 0
+    while i < root_end {
+        let c = str_char_at(rel_path, i)
+        if c == 95 {
+            out = str_concat(out, "-")
+        } else {
+            out = str_concat(out, module_frontend_import_byte_to_str(c as i8))
+        }
+        i = i + 1
+    }
+    out = str_concat(out, "/src")
+    if slash_pos >= 0 {
+        i = slash_pos
+        while i < path_len {
+            out = str_concat(out, module_frontend_import_byte_to_str(str_char_at(rel_path, i) as i8))
+            i = i + 1
+        }
+    } else {
+        out = str_concat(out, "/lib.sio")
+    }
+    out
+}
+
+fn module_frontend_file_path_mod_fallback(path: string) -> string with Mut, Panic, Div {
+    let path_len = str_len(path)
+    if path_len < 5 {
+        return path
+    }
+    if str_char_at(path, path_len - 4) != 46 {
+        return path
+    }
+    let base = str_slice(path, 0, path_len - 4)
+    str_concat(str_concat(base, "/mod"), ".sio")
+}
+
+fn module_frontend_resolve_import_relpath(rel_path: string, cur_dir: string) -> string with IO, Mut, Panic, Div {
+    let local_path = str_concat(str_concat(cur_dir, "/"), rel_path)
+    if file_exists(local_path) {
+        return local_path
+    }
+    let stdlib_path = str_concat("stdlib/", rel_path)
+    if file_exists(stdlib_path) {
+        return stdlib_path
+    }
+    let pkg_path = module_frontend_relpath_to_package_path(rel_path)
+    if str_len(pkg_path) > 0 && file_exists(pkg_path) {
+        return pkg_path
+    }
+    let pkg_mod = module_frontend_file_path_mod_fallback(pkg_path)
+    if str_len(pkg_mod) > 0 && file_exists(pkg_mod) {
+        return pkg_mod
+    }
+    local_path
 }
 
 fn module_frontend_extract_relpath_from_loaded(path_start: i64, line_end: i64) -> string with Mut, Panic {
@@ -333,6 +415,91 @@ fn use_path_to_file_path(path: AstPath, prefix: string) -> string with Mut, Pani
         fp = fp + 4
     }
     buf_to_string(final_buf, fp)
+}
+
+fn buf_append_lit(buf: [i8; 512], pos: i64, lit: string) -> ([i8; 512], i64) with Mut, Panic, Div {
+    let n = str_len(lit)
+    var i: i64 = 0
+    var p = pos
+    var out = buf
+    while i < n && p < 500 {
+        out[p] = str_char_at(lit, i) as i8
+        p = p + 1
+        i = i + 1
+    }
+    (out, p)
+}
+
+fn string_list_seg_to_buf_mapped(sl: StringList, out: [i8; 512], pos: i64, map_underscore: bool) -> ([i8; 512], i64) with Mut, Panic, Div {
+    var buf = out
+    var p = pos
+    var i: i64 = 0
+    while i < sl.head_len && p < 500 {
+        var c = sl.head_buf[i]
+        if map_underscore && c == (95 as i8) {
+            c = 45 as i8
+        }
+        buf[p] = c
+        p = p + 1
+        i = i + 1
+    }
+    (buf, p)
+}
+
+fn use_path_to_package_file_path(path: AstPath) -> string with Mut, Panic, Div, Alloc {
+    if path.seg_count == 0 {
+        return ""
+    }
+    var buf: [i8; 512] = [0; 512]
+    var pos: i64 = 0
+    let p1 = buf_append_lit(buf, pos, "packages/")
+    buf = p1.0
+    pos = p1.1
+    let root_pair = string_list_seg_to_buf_mapped(path.segments, buf, pos, true)
+    buf = root_pair.0
+    pos = root_pair.1
+    let p2 = buf_append_lit(buf, pos, "/src")
+    buf = p2.0
+    pos = p2.1
+    match path.segments.tail {
+        None => {
+            let p3 = buf_append_lit(buf, pos, "/lib.sio")
+            buf_to_string(p3.0, p3.1)
+        }
+        Some(rest) => {
+            let path_pair = use_path_segs_to_buf(*rest, buf, pos)
+            var final_buf = path_pair.0
+            var fp = path_pair.1
+            if fp < 508 {
+                final_buf[fp] = 46 as i8
+                final_buf[fp + 1] = 115 as i8
+                final_buf[fp + 2] = 105 as i8
+                final_buf[fp + 3] = 111 as i8
+                fp = fp + 4
+            }
+            buf_to_string(final_buf, fp)
+        }
+    }
+}
+
+fn resolve_import_file_path(path: AstPath, cur_dir: string) -> string with IO, Mut, Panic, Div, Alloc {
+    let local = use_path_to_file_path(path, cur_dir)
+    if file_exists(local) {
+        return local
+    }
+    let stdlib = use_path_to_file_path(path, "stdlib")
+    if file_exists(stdlib) {
+        return stdlib
+    }
+    let pkg = use_path_to_package_file_path(path)
+    if file_exists(pkg) {
+        return pkg
+    }
+    let pkg_mod = module_frontend_file_path_mod_fallback(pkg)
+    if str_len(pkg_mod) > 0 && file_exists(pkg_mod) {
+        return pkg_mod
+    }
+    local
 }
 
 // Convert byte buffer to VM string using str_from_bytes builtin
@@ -879,9 +1046,7 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
     var fi: i64 = 0
     while fi < src.fn_count && merged.fn_count < IR_MAX_FUNCS {
         var func = src.functions[fi]
-        // Preserve per-function strategy metadata across multimodule IR merges.
         func.compile_strategy = src.functions[fi].compile_strategy
-        // Adjust call targets: shift fn_id by fn_offset
         var ii: i64 = 0
         while ii < func.instr_count {
             if func.instrs[ii].op == IrOpcode::IrCall {
@@ -905,7 +1070,6 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
             )
             ii = ii + 1
         }
-        func.compile_strategy = src.functions[fi].compile_strategy
         merged.functions[merged.fn_count] = func
         merged.fn_count = merged.fn_count + 1
         fi = fi + 1
@@ -925,6 +1089,72 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
     merged
 }
 
+fn ir_merge_append_function_into_box(dst_box: &! Box<IrModule>, src: &IrModule, src_fi: i64) with Mut, Panic, Div {
+    if src_fi < 0 || src_fi >= (*src).fn_count || (*dst_box).fn_count >= IR_MAX_FUNCS {
+        return
+    }
+    let fn_offset = (*dst_box).fn_count
+    let contest_offset = (*dst_box).epistemic.contest_count
+    let robust_offset = (*dst_box).epistemic.robust_proof_count
+    let decision_offset = (*dst_box).epistemic.decision_certificate_count
+    let deferred_offset = (*dst_box).epistemic.deferred_certificate_count
+    let validated_offset = (*dst_box).epistemic.validated_manifest_count
+    let acquisition_plan_offset = (*dst_box).epistemic.acquisition_plan_count
+    let recourse_plan_offset = (*dst_box).epistemic.recourse_plan_count
+    let alternative_set_offset = (*dst_box).epistemic.alternative_set_count
+    let transition_plan_offset = (*dst_box).epistemic.transition_plan_count
+    let observed_transition_offset = (*dst_box).epistemic.observed_transition_count
+    let rollback_certificate_offset = (*dst_box).epistemic.rollback_certificate_count
+    var func = (*src).functions[src_fi as usize]
+    func.compile_strategy = (*src).functions[src_fi as usize].compile_strategy
+    var ii: i64 = 0
+    while ii < func.instr_count {
+        if func.instrs[ii as usize].op == IrOpcode::IrCall {
+            if func.instrs[ii as usize].fn_id >= 0 {
+                func.instrs[ii as usize].fn_id = func.instrs[ii as usize].fn_id + fn_offset
+            }
+        }
+        func.instrs[ii as usize] = ir_merge_adjust_epistemic_instr(
+            func.instrs[ii as usize],
+            contest_offset,
+            robust_offset,
+            decision_offset,
+            deferred_offset,
+            validated_offset,
+            acquisition_plan_offset,
+            recourse_plan_offset,
+            alternative_set_offset,
+            transition_plan_offset,
+            observed_transition_offset,
+            rollback_certificate_offset
+        )
+        ii = ii + 1
+    }
+    let dst_idx = (*dst_box).fn_count
+    (*dst_box).functions[dst_idx as usize] = func
+    ir_module_copy_function_instrs(&! (*dst_box), dst_idx, src, src_fi)
+    (*dst_box).fn_count = (*dst_box).fn_count + 1
+}
+
+// In-place merge: never copy the full destination IrModule onto the stack (SRET).
+fn ir_merge_modules_into_box(dst_box: &! Box<IrModule>, src: &IrModule) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < (*src).fn_count && (*dst_box).fn_count < IR_MAX_FUNCS {
+        ir_merge_append_function_into_box(dst_box, src, fi)
+        fi = fi + 1
+    }
+
+    var si: i64 = 0
+    while si < (*src).string_count && (*dst_box).string_count < IR_MAX_STRINGS {
+        (*dst_box).string_table[(*dst_box).string_count as usize] = (*src).string_table[si as usize]
+        (*dst_box).string_count = (*dst_box).string_count + 1
+        si = si + 1
+    }
+
+    (*dst_box).epistemic = ir_merge_epistemic_sections((*dst_box).epistemic, (*src).epistemic)
+    (*dst_box).algebras = ir_merge_algebra_tables((*dst_box).algebras, (*src).algebras)
+}
+
 // Resolve fn_id=-1 named calls (cross-module calls emitted by module_frontend_ir_named_call)
 // to their position in the merged module. Operates through &! to avoid large-local JIT writes.
 fn ir_module_resolve_named_calls(module: &! IrModule) with Mut, Div, Panic {
@@ -939,12 +1169,53 @@ fn ir_module_resolve_named_calls(module: &! IrModule) with Mut, Div, Panic {
                 while ji < (*module).fn_count {
                     if ir_name_eq((*module).functions[ji as usize].name, call_name) {
                         found_ji = ji
-                        ji = (*module).fn_count
                     }
                     ji = ji + 1
                 }
                 if found_ji >= 0 {
                     (*module).functions[fi as usize].instrs[ii as usize].fn_id = found_ji
+                }
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+}
+
+fn ir_module_best_fn_id_for_name_box(module_box: &! Box<IrModule>, call_name: Name) -> i64 with Div, Panic {
+    var ji: i64 = 0
+    var best_ji: i64 = 0 - 1
+    while ji < (*module_box).fn_count {
+        if ir_name_eq((*module_box).functions[ji as usize].name, call_name) {
+            if (*module_box).functions[ji as usize].instr_count > 0 {
+                best_ji = ji
+            }
+        }
+        ji = ji + 1
+    }
+    best_ji
+}
+
+fn ir_module_call_target_is_stub_box(module_box: &! Box<IrModule>, fn_id: i64) -> bool with Div, Panic {
+    if fn_id < 0 || fn_id >= (*module_box).fn_count {
+        return true
+    }
+    (*module_box).functions[fn_id as usize].instr_count <= 0
+}
+
+// Box-backed variant: never unbox IrModule onto the stack (SRET on science-sized merges).
+fn ir_module_resolve_named_calls_box(module_box: &! Box<IrModule>) with Mut, Div, Panic {
+    var fi: i64 = 0
+    while fi < (*module_box).fn_count {
+        var ii: i64 = 0
+        while ii < (*module_box).functions[fi as usize].instr_count {
+            if (*module_box).functions[fi as usize].instrs[ii as usize].op == IrOpcode::IrCall {
+                let call_name = (*module_box).functions[fi as usize].instrs[ii as usize].name
+                let call_fn_id = (*module_box).functions[fi as usize].instrs[ii as usize].fn_id
+                let best_ji = ir_module_best_fn_id_for_name_box(module_box, call_name)
+                if best_ji >= 0 &&
+                   (call_fn_id < 0 || ir_module_call_target_is_stub_box(module_box, call_fn_id)) {
+                    (*module_box).functions[fi as usize].instrs[ii as usize].fn_id = best_ji
                 }
             }
             ii = ii + 1
@@ -1175,12 +1446,7 @@ pub fn module_frontend_import_files_from_source(path: string) -> ImportPathList 
             if path_start >= 0 {
                 let rel_path = module_frontend_extract_relpath_from_loaded(path_start, line_end)
                 if str_len(rel_path) > 0 {
-                    let local_path = str_concat(str_concat(cur_dir, "/"), rel_path)
-                    let stdlib_path = str_concat("stdlib/", rel_path)
-                    var dep_path = local_path
-                    if !file_exists(local_path) {
-                        dep_path = stdlib_path
-                    }
+                    let dep_path = module_frontend_resolve_import_relpath(rel_path, cur_dir)
                     if file_exists(dep_path) && !import_path_list_contains(imports, dep_path) {
                         imports.paths[imports.count] = dep_path
                         imports.count = imports.count + 1
@@ -3099,8 +3365,8 @@ fn module_frontend_lower_program_box_traced(
     trace.last_stage = "lower_summary"
     trace.last_module_index = module_index
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
-    let epistemic = ir_empty_epistemic_section()
-    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(program, epistemic)
+    var epistemic = ir_empty_epistemic_section()
+    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(program, &epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
     if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
         trace.last_stage = "lower_summary_error"
@@ -3114,7 +3380,7 @@ fn module_frontend_lower_program_box_traced(
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
         program,
         &summary_val,
-        epistemic
+        &epistemic
     )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
     if body_result.had_error {
@@ -3131,22 +3397,156 @@ fn module_frontend_lower_program_box_traced(
     module_frontend_lower_box_ok(body_result.module, body_result.patch_stats)
 }
 
-pub fn bridge_lower_single_module_box(
-    source_path: string,
+fn module_frontend_populate_imported_programs(
+    main_path: string,
+    programs: &! [Program; 256],
     trace: &! LoadMultimoduleIrTrace
-) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
+) -> i64 with IO, Mut, Panic, Div, Alloc {
+    var file_paths: [string; 256] = [""; 256]
+    (*programs)[0] = load_module_file(main_path)
+    file_paths[0] = main_path
+    var loaded: i64 = 1
+    var visited_paths: [string; 256] = [""; 256]
+    var visited_count: i64 = 1
+    visited_paths[0] = main_path
+    var work_front: i64 = 0
+
+    trace.loaded_modules = 1
+    trace.last_stage = "load_main"
+    trace.last_module_index = 0
+
+    while work_front < loaded && loaded < 256 {
+        let work_imports = module_frontend_import_files_from_source(file_paths[work_front])
+        work_front = work_front + 1
+        var i: i64 = 0
+        while i < work_imports.count && loaded < 256 {
+            let file_path = work_imports.paths[i]
+            if !visited_contains(visited_paths, visited_count, file_path) && file_exists(file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                (*programs)[loaded] = load_module_file(file_path)
+                file_paths[loaded] = file_path
+                loaded = loaded + 1
+                trace.loaded_modules = loaded
+                trace.last_stage = "load_deps"
+                trace.last_module_index = loaded - 1
+            }
+            i = i + 1
+        }
+    }
+
+    trace.resolved_modules = loaded
+    loaded
+}
+
+pub fn module_frontend_check_imported_modules_verdict(main_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    var trace = empty_load_multimodule_ir_trace()
+    var programs: [Program; 256] = [mf_empty_program(); 256]
+    let loaded = module_frontend_populate_imported_programs(main_path, &! programs, &! trace)
+    if loaded <= 0 {
+        return 0
+    }
+    check_modules_verdict_boot4(&! programs, loaded)
+}
+
+fn module_frontend_lower_programs_array_boxed(
+    programs: &! [Program; 256],
+    loaded: i64,
+    trace: &! LoadMultimoduleIrTrace
+) -> ModuleFrontendLowerBoxResult with IO, Mut, Panic, Div, Alloc {
+    if loaded <= 0 {
+        return module_frontend_lower_box_error("no_modules_loaded")
+    }
+
+    trace.last_stage = "lower_summary"
+    trace.last_module_index = 0
+    print("lower_array: seed_begin\n")
+    let seed_prog_copy = (*programs)[0]
+    let seed_lower = module_frontend_lower_program_box_traced(&seed_prog_copy, 0, trace)
+    print("lower_array: seed_done\n")
+    if !seed_lower.ok {
+        return seed_lower
+    }
+    var merged_box = seed_lower.module
+    trace.merged_modules = 1
+
+    var i: i64 = 1
+    while i < loaded {
+        trace.last_module_index = i
+        print("lower_array: dep_begin ")
+        print_int(i)
+        print("\n")
+        let dep_prog_copy = (*programs)[i as usize]
+        let dep_lower = module_frontend_lower_program_box_traced(&dep_prog_copy, i, trace)
+        print("lower_array: dep_lower_done ")
+        print_int(i)
+        print("\n")
+        if !dep_lower.ok {
+            return dep_lower
+        }
+        match merged_box {
+            Some(acc_box) => {
+                match dep_lower.module {
+                    Some(dep_box) => {
+                        print("lower_array: merge_begin ")
+                        print_int(i)
+                        print("\n")
+                        ir_merge_modules_into_box(&! acc_box, &(*dep_box))
+                        print("lower_array: merge_done ")
+                        print_int(i)
+                        print("\n")
+                    }
+                    None => return module_frontend_lower_box_error("ir_lowering_failed")
+                }
+            }
+            None => return module_frontend_lower_box_error("ir_lowering_failed")
+        }
+        trace.merged_modules = trace.merged_modules + 1
+        i = i + 1
+    }
+
+    match merged_box {
+        Some(final_box) => {
+            trace.last_stage = "done"
+            module_frontend_lower_box_ok(final_box, ir_empty_validated_patch_stats())
+        }
+        None => module_frontend_lower_box_error("ir_lowering_failed")
+    }
+}
+
+fn bridge_lower_imported_modules_box(main_path: string, trace: &! LoadMultimoduleIrTrace) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
+    let ir_result = load_multimodule_ir_traced(main_path, trace)
+    if !ir_result.ok {
+        return module_frontend_lower_box_error(ir_result.error_msg)
+    }
+    if ir_result.module.fn_count <= 0 {
+        return module_frontend_lower_box_error("ir_lowering_failed")
+    }
+    trace.last_stage = "done"
+    module_frontend_lower_box_ok(Box::new(ir_result.module), ir_empty_validated_patch_stats())
+}
+
+pub fn bridge_lower_module_box(main_path: string, trace: &! LoadMultimoduleIrTrace) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
+    let imports = module_frontend_import_files_from_source(main_path)
+    if imports.count > 0 {
+        return bridge_lower_imported_modules_box(main_path, trace)
+    }
+    bridge_lower_single_module_box(main_path, trace)
+}
+
+pub fn bridge_lower_single_module_box(main_path: string, trace: &! LoadMultimoduleIrTrace) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
     trace.loaded_modules = 1
     trace.resolved_modules = 1
     trace.last_stage = "load_main"
     trace.last_module_index = 0
-    let program = load_module_file(source_path)
+    let program = load_module_file(main_path)
     let parse_errors = parser_last_error_count()
     if parse_errors > 0 {
         trace.last_stage = "parse_error"
         return module_frontend_lower_box_error("parse_failed")
     }
     trace.last_stage = "typecheck"
-    let verdict = module_frontend_check_items_with_source_context(program.items, source_path)
+    let verdict = module_frontend_check_items_with_source_context(program.items, main_path)
     if verdict != 0 {
         trace.last_stage = "typecheck_error"
         return module_frontend_lower_box_error("type_check_failed")
@@ -3154,41 +3554,264 @@ pub fn bridge_lower_single_module_box(
     trace.typechecked_modules = 1
     trace.last_stage = "lower_single"
     let lowered = module_frontend_lower_program_box_traced(&program, 0, trace)
-    if !lowered.ok { return lowered }
+    if !lowered.ok {
+        return lowered
+    }
     trace.merged_modules = 1
     trace.last_stage = "done"
     lowered
 }
 
-pub fn bridge_lower_single_module_box(main_path: string, trace: &! LoadMultimoduleIrTrace) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
-    // Mirror load_multimodule_lower_program_traced EXACTLY (single load_module_file,
-    // no extra large Program locals, no separate typecheck) so this fn's frame
-    // matches the proven-good one. Return the body Box<IrModule> directly instead
-    // of materializing a by-value IrModule.
-    let prog_lower = load_module_file(main_path)
-    let main_parse_errors = parser_last_error_count()
-    if main_parse_errors > 0 {
-        print("Parse failed during IR lowering for module 0: ")
-        print_int(main_parse_errors)
-        print(" errors\n")
-        return module_frontend_lower_box_error("parse_failed")
-    }
-    let epistemic = ir_empty_epistemic_section()
-    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&prog_lower, epistemic)
+fn module_frontend_lower_program_full_traced(
+    program: Program,
+    epistemic: IrEpistemicSection,
+    module_index: i64,
+    trace: &! LoadMultimoduleIrTrace
+) -> IrLowerResult with IO, Mut, Div, Panic, Alloc {
+    trace.last_stage = "lower_summary"
+    trace.last_module_index = module_index
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
+    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&program, &epistemic)
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
     if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
-        return module_frontend_lower_box_error("ir_summary_failed")
+        trace.last_stage = "lower_summary_error"
+        return IrLowerResult {
+            module: ir_empty_module(),
+            had_error: true,
+            error_count: summary_result.error_count,
+            patch_stats: ir_empty_validated_patch_stats(),
+        }
     }
+
+    trace.summary_seeded_modules = trace.summary_seeded_modules + 1
+    trace.last_stage = "lower_bodies"
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
     var summary_val = (*summary_result.summary)
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
-        &prog_lower,
+        &program,
         &summary_val,
-        epistemic
+        &epistemic
     )
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
     if body_result.had_error {
-        return module_frontend_lower_box_error("ir_bodies_failed")
+        trace.last_stage = "lower_bodies_error"
+        return IrLowerResult {
+            module: ir_empty_module(),
+            had_error: true,
+            error_count: 0,
+            patch_stats: ir_empty_validated_patch_stats(),
+        }
     }
+
+    trace.body_lowered_modules = trace.body_lowered_modules + 1
+    trace.lowered_modules = trace.lowered_modules + 1
+    trace.patched_functions = trace.patched_functions + body_result.patch_stats.patched_functions
+    trace.patched_calls = trace.patched_calls + body_result.patch_stats.patched_calls
+    trace.fallback_insertions = trace.fallback_insertions + body_result.patch_stats.fallback_insertions
+    trace.last_stage = "lower_bodies_done"
+    IrLowerResult {
+        module: *body_result.module,
+        had_error: false,
+        error_count: summary_result.error_count,
+        patch_stats: body_result.patch_stats,
+    }
+}
+
+fn module_frontend_merge_imported_into(
+    programs: &! [Program; 256],
+    loaded: i64,
+    trace: &! LoadMultimoduleIrTrace,
+    out_module: &! IrModule
+) -> bool with IO, Mut, Div, Panic, Alloc {
+    if loaded <= 0 {
+        return false
+    }
+
+    trace.last_stage = "typecheck"
+    let verdict = check_modules_verdict_boot4(programs, loaded)
+    if verdict != 0 {
+        print("Type check failed during imported IR merge\n")
+        return false
+    }
+    trace.typechecked_modules = loaded
+
+    // Per-module check_program_with_artifacts cannot see cross-module imports and
+    // either rejects (E137) or spins; multimodule verdict above is authoritative.
+    let lowered = module_frontend_lower_programs_array_boxed(programs, loaded, trace)
+    if !lowered.ok {
+        print("IR lowering failed during merge: ")
+        print(lowered.error_msg)
+        print("\n")
+        return false
+    }
+    match lowered.module {
+        Some(merged_box) => {
+            var merged_module = *merged_box
+            if merged_module.fn_count <= 0 {
+                print("IR lowering produced empty module\n")
+                return false
+            }
+            ir_module_resolve_named_calls(&! merged_module)
+            (*out_module) = merged_module
+            true
+        }
+        None => {
+            print("IR lowering failed during merge\n")
+            false
+        }
+    }
+}
+
+fn module_frontend_item_list_set_tail(list: &! Box<ItemList>, tail: Option<Box<ItemList>>) with Mut, Alloc {
+    match (*list).tail {
+        None => {
+            (*list).tail = tail
+        }
+        Some(child_box) => {
+            module_frontend_item_list_set_tail(&! child_box, tail)
+        }
+    }
+}
+
+fn module_frontend_append_item_lists(front: Option<Box<ItemList>>, back: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
+    match front {
+        None => back
+        Some(front_box) => {
+            module_frontend_item_list_set_tail(&! front_box, back)
+            Some(front_box)
+        }
+    }
+}
+
+fn module_frontend_concat_program_items(acc: Option<Box<ItemList>>, prog: Program) -> Option<Box<ItemList>> with Mut, Alloc {
+    module_frontend_append_item_lists(acc, prog.items)
+}
+
+fn module_frontend_flatten_imported_programs(programs: &! [Program; 256], loaded: i64) -> Program with Mut, Alloc {
+    var items: Option<Box<ItemList>> = None
+    var dep_i: i64 = 1
+    while dep_i < loaded {
+        items = module_frontend_concat_program_items(items, (*programs)[dep_i as usize])
+        dep_i = dep_i + 1
+    }
+    items = module_frontend_concat_program_items(items, (*programs)[0])
+    Program {
+        module_path: (*programs)[0].module_path,
+        items: items,
+    }
+}
+
+pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: string) -> i32 with IO, Mut, Div, Panic, Alloc {
     parser_reset_last_errors()
-    module_frontend_lower_box_ok(body_result.module, body_result.patch_stats)
+    print("imported_compile: begin\n")
+    var trace = empty_load_multimodule_ir_trace()
+    let main_prog = load_module_file(main_path)
+    if parser_last_error_count() > 0 {
+        print("Parse failed during imported compile\n")
+        return 1
+    }
+
+    var programs: [Program; 256] = [mf_empty_program(); 256]
+    var file_paths: [string; 256] = [""; 256]
+    programs[0] = main_prog
+    file_paths[0] = main_path
+    var loaded: i64 = 1
+    var visited_paths: [string; 256] = [""; 256]
+    var visited_count: i64 = 0
+    visited_paths[0] = main_path
+    visited_count = 1
+    var work_front: i64 = 0
+    var dep_i: i64 = 0
+    trace.loaded_modules = 1
+    trace.last_stage = "load_main"
+    trace.last_module_index = 0
+
+    while work_front < loaded && loaded < 256 {
+        let work_imports = module_frontend_import_files_from_source(file_paths[work_front])
+        work_front = work_front + 1
+        dep_i = 0
+        while dep_i < work_imports.count && loaded < 256 {
+            let file_path = work_imports.paths[dep_i]
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    programs[loaded] = load_module_file(file_path)
+                    file_paths[loaded] = file_path
+                    loaded = loaded + 1
+                    trace.loaded_modules = loaded
+                    trace.last_stage = "load_deps"
+                    trace.last_module_index = loaded - 1
+                }
+            }
+            dep_i = dep_i + 1
+        }
+    }
+
+    if loaded <= 0 {
+        print("Multi-module IR failed: no_modules_loaded\n")
+        return 1
+    }
+    trace.resolved_modules = loaded
+    print("imported_compile: loaded ")
+    print_int(loaded)
+    print(" modules\n")
+
+    trace.last_stage = "typecheck"
+    let verdict = check_modules_verdict_boot4(&! programs, loaded)
+    if verdict != 0 {
+        print("Type check failed during imported IR merge\n")
+        return 1
+    }
+    trace.typechecked_modules = loaded
+    print("imported_compile: typecheck ok\n")
+
+    trace.last_stage = "lower_merge"
+    print("imported_compile: lower_begin\n")
+    let lowered = module_frontend_lower_programs_array_boxed(&! programs, loaded, &! trace)
+    print("imported_compile: lower_done\n")
+    if !lowered.ok {
+        print("IR lowering failed during merge: ")
+        print(lowered.error_msg)
+        print("\n")
+        return 1
+    }
+
+    match lowered.module {
+        Some(module_box) => {
+            let fn_count = (*module_box).fn_count
+            trace.last_stage = "done"
+            trace.last_module_index = loaded - 1
+            trace.merged_modules = loaded
+            print("Merged IR: ")
+            print_int(fn_count)
+            print(" functions\n")
+            if fn_count <= 0 {
+                print("IR lowering produced empty module\n")
+                return 1
+            }
+            ir_module_resolve_named_calls_box(&! module_box)
+            parser_reset_last_errors()
+            let target_spec = native_resolve_target("native", "auto", false)
+            let write_rc = compile_native_v2_preview_to_file(&(*module_box), target_spec, output_path)
+            if write_rc != 0 {
+                print("Error: Failed to write native binary to ")
+                print(output_path)
+                print(" rc=")
+                print_int(write_rc)
+                print("\n")
+                return 1
+            }
+            print("Written to ")
+            print(output_path)
+            print("\n")
+            0
+        }
+        None => {
+            print("IR lowering failed during merge\n")
+            1
+        }
+    }
 }
 
 fn load_multimodule_lower_program_traced(
@@ -3200,7 +3823,7 @@ fn load_multimodule_lower_program_traced(
     trace.last_stage = "lower_summary"
     trace.last_module_index = module_index
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
-    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&program, epistemic)
+    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&program, &epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
     if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
         trace.last_stage = "lower_summary_error"
@@ -3214,7 +3837,7 @@ fn load_multimodule_lower_program_traced(
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
         &program,
         &summary_val,
-        epistemic
+        &epistemic
     )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
     if body_result.had_error {
@@ -3796,59 +4419,14 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         trace.resolved_modules = loaded
     }
 
-    // Step 6: Lower ALL modules to IR and merge.
-    // Seed the merge with module 0 to avoid expensive empty-module initialization.
     if loaded <= 0 {
         trace.last_stage = "empty"
         return multimodule_ir_error("no_modules_loaded")
     }
 
-    trace.last_stage = "typecheck_imported_summary"
-    trace.last_module_index = 0
-    trace.typechecked_modules = 1
-    let seed_prog_copy = programs[0]
-    let seed_lower_result = module_frontend_lower_program_box_traced(&seed_prog_copy, 0, trace)
-    if !seed_lower_result.ok {
-        print("IR lowering failed for module 0\n")
-        return multimodule_ir_error("ir_lowering_failed")
-    }
     var merged_module = ir_empty_module()
-    match seed_lower_result.module {
-        Some(module_box) => { merged_module = *module_box }
-        None => {
-            print("IR lowering failed for module 0\n")
-            return multimodule_ir_error("ir_lowering_failed")
-        }
-    }
-    trace.merged_modules = 1
-
-    i = 1
-    while i < loaded {
-        trace.last_stage = "typecheck_imported_summary"
-        trace.last_module_index = i
-        trace.typechecked_modules = trace.typechecked_modules + 1
-        let cur_prog_copy = programs[i]
-        let lower_result = module_frontend_lower_program_box_traced(&cur_prog_copy, i, trace)
-        if !lower_result.ok {
-            print("IR lowering failed for module ")
-            print_int(i)
-            print("\n")
-            return multimodule_ir_error("ir_lowering_failed")
-        }
-        var lowered_module = ir_empty_module()
-        match lower_result.module {
-            Some(module_box) => { lowered_module = *module_box }
-            None => {
-                print("IR lowering failed for module ")
-                print_int(i)
-                print("\n")
-                return multimodule_ir_error("ir_lowering_failed")
-            }
-        }
-        trace.last_stage = "merge"
-        merged_module = ir_merge_modules(merged_module, lowered_module)
-        trace.merged_modules = trace.merged_modules + 1
-        i = i + 1
+    if !module_frontend_merge_imported_into(&! programs, loaded, trace, &! merged_module) {
+        return multimodule_ir_error("ir_lowering_failed")
     }
 
     trace.last_stage = "done"
@@ -3862,7 +4440,6 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         return multimodule_ir_error("ir_lowering_empty_module")
     }
 
-    ir_module_resolve_named_calls(&! merged_module)
     parser_reset_last_errors()
     multimodule_ir_ok(merged_module)
 }
@@ -4201,12 +4778,7 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
         work_front = work_front + 1
         i = 0
         while i < work_imports.count && loaded < 256 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
+            let file_path = resolve_import_file_path(work_imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
                 visited_paths[visited_count] = file_path
                 visited_count = visited_count + 1
@@ -4332,12 +4904,7 @@ pub fn load_multimodule_epistemic_into(main_path: string, out: &! IrEpistemicSec
         work_front = work_front + 1
         i = 0
         while i < work_imports.count && loaded < 256 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
+            let file_path = resolve_import_file_path(work_imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
                 visited_paths[visited_count] = file_path
                 visited_count = visited_count + 1
