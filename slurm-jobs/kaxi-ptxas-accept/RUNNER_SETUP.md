@@ -35,48 +35,15 @@ SLURM worker. A small CPU pod is enough.
 
 ## Step 1 — RBAC: ServiceAccount + Role + RoleBinding
 
-```yaml
-# kaxi-ci-runner-rbac.yaml   (apply in the slurm-pilot namespace)
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: kaxi-ci-runner
-  namespace: slurm-pilot
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: kaxi-ci-runner
-  namespace: slurm-pilot
-rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list"]
-  - apiGroups: [""]
-    resources: ["pods/exec"]
-    verbs: ["create", "get"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: kaxi-ci-runner
-  namespace: slurm-pilot
-subjects:
-  - kind: ServiceAccount
-    name: kaxi-ci-runner
-    namespace: slurm-pilot
-roleRef:
-  kind: Role
-  name: kaxi-ci-runner
-  apiGroup: rbac.authorization.k8s.io
-```
+Apply the committed manifest (`runner/kaxi-ci-runner-rbac.yaml`):
 
 ```bash
-kubectl apply -f kaxi-ci-runner-rbac.yaml
+kubectl apply -f slurm-jobs/kaxi-ptxas-accept/runner/kaxi-ci-runner-rbac.yaml
 ```
 
-This is the least privilege the gate needs: exec into the login pod in one
-namespace. No cluster-wide rights, no node access.
+This is the least privilege the gate needs: `get`/`list` pods + `create`
+`pods/exec` in the `slurm-pilot` namespace only (exec into the login pod). No
+cluster-wide rights, no node access.
 
 ---
 
@@ -101,22 +68,12 @@ then pass it as `RUNNER_TOKEN` instead of `ACCESS_TOKEN`.)
 
 ## Step 3 — Runner image with kubectl + gcc
 
-The stock runner images don't ship `kubectl`/`gcc`. Bake a tiny image:
-
-```dockerfile
-# Dockerfile.kaxi-runner
-FROM myoung34/github-runner:latest
-USER root
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential curl ca-certificates git tar gzip \
-    && curl -fsSLo /usr/local/bin/kubectl \
-        "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
-    && chmod +x /usr/local/bin/kubectl \
-    && rm -rf /var/lib/apt/lists/*
-```
+The stock runner images don't ship `kubectl`/`gcc`. Build the committed image
+(`runner/Dockerfile.kaxi-runner`) and push it to your registry:
 
 ```bash
-docker build -f Dockerfile.kaxi-runner -t <your-registry>/kaxi-ci-runner:1 .
+docker build -f slurm-jobs/kaxi-ptxas-accept/runner/Dockerfile.kaxi-runner \
+  -t <your-registry>/kaxi-ci-runner:1 .
 docker push <your-registry>/kaxi-ci-runner:1
 ```
 
@@ -128,48 +85,13 @@ is faster and reproducible.)
 
 ## Step 4 — Deploy the runner
 
-```yaml
-# kaxi-ci-runner.yaml   (apply in slurm-pilot)
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: kaxi-ci-runner
-  namespace: slurm-pilot
-spec:
-  replicas: 1
-  selector:
-    matchLabels: { app: kaxi-ci-runner }
-  template:
-    metadata:
-      labels: { app: kaxi-ci-runner }
-    spec:
-      serviceAccountName: kaxi-ci-runner   # ← ambient in-cluster kubeconfig
-      containers:
-        - name: runner
-          image: <your-registry>/kaxi-ci-runner:1
-          env:
-            - name: REPO_URL
-              value: "https://github.com/OWNER/REPO"
-            - name: ACCESS_TOKEN
-              valueFrom:
-                secretKeyRef: { name: kaxi-ci-runner-gh, key: ACCESS_TOKEN }
-            - name: RUNNER_NAME
-              value: "kaxi-ci-runner"
-            - name: LABELS
-              value: "self-hosted,linux,x64,kaxi-slurm"   # ← unique label kaxi-slurm
-            - name: RUNNER_SCOPE
-              value: "repo"
-            - name: RUNNER_WORKDIR
-              value: "/tmp/runner-work"
-            - name: DISABLE_AUTO_UPDATE
-              value: "true"
-          resources:
-            requests: { cpu: "1", memory: "2Gi" }
-            limits:   { cpu: "2", memory: "4Gi" }
-```
+Edit `runner/kaxi-ci-runner.yaml` to set `image:` to the tag you pushed in
+Step 3 (placeholder `REPLACE_ME/kaxi-ci-runner:1`), then apply. `REPO_URL` is
+already set to `Sounio-lang/sounio` and `LABELS` already includes the unique
+`kaxi-slurm` label.
 
 ```bash
-kubectl apply -f kaxi-ci-runner.yaml
+kubectl apply -f slurm-jobs/kaxi-ptxas-accept/runner/kaxi-ci-runner.yaml
 kubectl -n slurm-pilot logs deploy/kaxi-ci-runner -f   # watch it register
 ```
 
