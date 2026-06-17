@@ -70,18 +70,24 @@ reg_count=148, this allocates 1184 bytes instead of 512.
 The same fix was applied to `native_v2_core_begin_fn_spill_into` (imported in
 native_compile_driver.sio but never called in current build paths).
 
-## SLURM validation note
+## SLURM validation — GREEN (job 4283, 2026-06-17)
 
-The SLURM harness (`slurm-jobs/madaros-frame-fix/submit.sh`) builds Madaros from
-`lean_single` (the Stage-0 bootstrap). `lean_single` has a known by-value-struct
-miscompile (c634b38f class) that causes the resulting Madaros binary to SIGSEGV
-when compiling programs with arrays+loops (e.g., the reproducer). The harness
-therefore cannot complete an end-to-end run. The disassembly validation above is
-the authoritative proof.
+```
+=== N=1: compile_rc=0  output: pass=1 trail=5 conflict=1  VERDICT: PASS
+=== N=2: compile_rc=0  output: pass=1 trail=5 conflict=1  VERDICT: PASS
+=== N=4: compile_rc=0  output: pass=1 trail=5 conflict=1  VERDICT: PASS
+=== N=5: compile_rc=0  output: pass=1 trail=5 conflict=1  VERDICT: PASS
+```
 
-A green SLURM run requires a Madaros built through the good-chain bootstrap
-(previous Madaros → current source), which is available as
-`artifacts/self-hosted/madaros` (watchdog-rebuilt after the fix landed).
+`lean_single` → Madaros (94517600B) → compile reproducer → run on `cpuops-t560-proxmox`.
+All four N variants pass end-to-end on the cluster.
+
+**Root cause of prior rc=139 failures:** Madaros's recursive expression-compiler has
+multi-MB stack frames (build warns "stack frame too large — use global arrays"). The
+reproducer's arrays+loops trigger deep recursion that exhausts the default 12.5 MB
+stack limit. This was misread as a `lean_single` miscompile. Fix: `ulimit -s unlimited`
+before invoking Madaros (added to submit.sh). The proper long-term remedy is moving
+large codegen scratch locals to globals.
 
 ## Caveats
 
