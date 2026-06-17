@@ -23,6 +23,7 @@ export default defineConfig({
           zh: 'zh-CN',
           ja: 'ja',
           es: 'es',
+          'zh-hk': 'zh-HK',
         },
       },
     }),
@@ -49,7 +50,7 @@ export default defineConfig({
 
   i18n: {
     defaultLocale: 'en',
-    locales: ['en', 'pt', 'el', 'zh', 'ja', 'es'],
+    locales: ['en', 'pt', 'el', 'zh', 'ja', 'es', 'zh-hk'],
     routing: {
       prefixDefaultLocale: false,
     },
@@ -68,5 +69,6 @@ export default defineConfig({
     '/zh/platform': { status: 308, destination: '/zh/language' },
     '/ja/platform': { status: 308, destination: '/ja/language' },
     '/es/platform': { status: 308, destination: '/es/language' },
+    '/zh-hk/platform': { status: 308, destination: '/zh-hk/language' },
   },
 });
