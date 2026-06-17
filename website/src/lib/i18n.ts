@@ -2,7 +2,7 @@
  * Internationalization utilities for Sounio website
  */
 
-export const locales = ['en', 'pt', 'el', 'zh', 'ja', 'es'] as const;
+export const locales = ['en', 'pt', 'el', 'zh', 'ja', 'es', 'zh-hk'] as const;
 export type Locale = (typeof locales)[number];
 
 export const localeNames: Record<Locale, string> = {
@@ -12,6 +12,7 @@ export const localeNames: Record<Locale, string> = {
   zh: '中文',
   ja: '日本語',
   es: 'Español',
+  'zh-hk': '香港粵語',
 };
 
 export const defaultLocale: Locale = 'en';
@@ -58,7 +59,7 @@ export function getLocaleFromUrl(url: URL): Locale {
  */
 export function getLocalizedPath(path: string, locale: Locale): string {
   // Remove any existing locale prefix
-  const cleanPath = path.replace(/^\/(en|pt|el|zh|ja|es)/, '');
+  const cleanPath = path.replace(/^\/(en|pt|el|zh-hk|zh|ja|es)/, '');
 
   // Don't prefix default locale
   if (locale === defaultLocale) {
@@ -115,6 +116,7 @@ export function ogLocaleTag(locale: Locale): string {
     zh: 'zh_CN',
     ja: 'ja',
     es: 'es',
+    'zh-hk': 'zh_HK',
   };
   return map[locale];
 }

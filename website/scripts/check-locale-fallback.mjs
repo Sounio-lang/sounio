@@ -3,7 +3,7 @@ import path from 'node:path';
 
 const root = path.resolve(process.cwd());
 
-const locales = ['pt', 'el', 'zh', 'ja', 'es'];
+const locales = ['pt', 'el', 'zh', 'ja', 'es', 'zh-hk'];
 // Marketing / shell pages: no translation banner (UI may still be localized)
 const shellRoutesNoBanner = ['/', '/language', '/science', '/packages', '/insights', '/about', '/releases'];
 // Long-form MDX: banner must appear for non-fully-localized locales
