@@ -50,7 +50,8 @@ belongs in **Git LFS**, not the main object store.
   `artifacts/` blobs). Removing these is a *coordinated, scheduled* operation
   (`git lfs migrate` / history rewrite + force-push across all branches and
   worktrees) — **not** an unsupervised hygiene change. Do not `filter-repo` ad
-  hoc; it breaks every outstanding branch and worktree.
+  hoc; it breaks every outstanding branch and worktree. Full coordinated
+  procedure: **[REPO_LFS_MIGRATION.md](REPO_LFS_MIGRATION.md)**.
 - **CI:** keep `main` green. Checks failing on `main` itself are tracked as
   issues; a PR that does not *add* failures relative to `main` is not blocked by
   pre-existing red, but the goal is zero red.
