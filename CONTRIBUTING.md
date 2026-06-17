@@ -159,6 +159,14 @@ Sounio enforces a pre-commit peer review audit by external AI engines on math, c
 
 ---
 
+## Repository hygiene
+
+Branch, worktree, and file-commit conventions (and why binaries don't belong in
+source history) live in **[docs/REPO_HYGIENE.md](docs/REPO_HYGIENE.md)**. Please
+read it before opening a PR.
+
+---
+
 ## License
 
 By contributing to Sounio, you agree that your contributions will be licensed under the **Apache License, Version 2.0** (with copyright assigned to Sounio Language Project).
