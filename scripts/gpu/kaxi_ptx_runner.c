@@ -55,6 +55,7 @@ typedef CUresult (*cuCtxCreate_t)(CUcontext *, unsigned int, CUdevice);
 typedef CUresult (*cuCtxDestroy_t)(CUcontext);
 typedef CUresult (*cuCtxSynchronize_t)(void);
 typedef CUresult (*cuModuleLoadData_t)(CUmodule *, const void *);
+typedef CUresult (*cuModuleLoadDataEx_t)(CUmodule *, const void *, unsigned int, int *, void **);
 typedef CUresult (*cuModuleGetFunction_t)(CUfunction *, CUmodule, const char *);
 typedef CUresult (*cuModuleUnload_t)(CUmodule);
 typedef CUresult (*cuLaunchKernel_t)(CUfunction, unsigned int, unsigned int, unsigned int,
@@ -281,6 +282,7 @@ int main(int argc, char **argv) {
     LOAD_SYM(cuCtxDestroy);
     LOAD_SYM(cuCtxSynchronize);
     LOAD_SYM(cuModuleLoadData);
+    LOAD_SYM(cuModuleLoadDataEx);
     LOAD_SYM(cuModuleGetFunction);
     LOAD_SYM(cuModuleUnload);
     LOAD_SYM(cuLaunchKernel);
@@ -313,8 +315,21 @@ int main(int argc, char **argv) {
     if (rc != 0) { emit_status("fail", "cuCtxCreate_failed", "cuCtxCreate", rc); free(img); return 1; }
 
     CUmodule mod;
-    rc = cuModuleLoadData(&mod, img);
-    if (rc != 0) { emit_status("fail", "cuModuleLoadData_rejected", "cuModuleLoadData", rc); cuCtxDestroy(ctx); free(img); return 1; }
+    // Try cuModuleLoadDataEx with JIT log to get detailed PTX errors.
+    enum { CU_JIT_ERROR_LOG_BUFFER = 5, CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES = 6, CU_JIT_TARGET = 8 };
+    char jit_log[8192];
+    void *opt_vals[3];
+    int opt_keys[3];
+    opt_keys[0] = CU_JIT_ERROR_LOG_BUFFER;        opt_vals[0] = jit_log;
+    opt_keys[1] = CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES; opt_vals[1] = (void *)(size_t)sizeof(jit_log);
+    opt_keys[2] = CU_JIT_TARGET;                  opt_vals[2] = (void *)(size_t)((cc_major << 4) | cc_minor);
+    jit_log[0] = '\0';
+    rc = cuModuleLoadDataEx(&mod, img, 3, opt_keys, opt_vals);
+    if (rc != 0) {
+        fprintf(stderr, "cuModuleLoadDataEx error log: %s\n", jit_log);
+        emit_status("fail", "cuModuleLoadData_rejected", "cuModuleLoadDataEx", rc);
+        cuCtxDestroy(ctx); free(img); return 1;
+    }
 
     CUfunction fn;
     rc = cuModuleGetFunction(&fn, mod, kname);
