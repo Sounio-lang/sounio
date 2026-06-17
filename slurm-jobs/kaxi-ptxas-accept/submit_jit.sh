@@ -17,6 +17,13 @@ set -euo pipefail
 #   kubectl -n slurm-pilot exec <login-pod> -- cat \
 #     /orangefs/training/sounio/kaxi-jit-accept/<RUN_ID>/results/summary.txt
 
+# --wait : after submitting, poll the queue and fetch/assert the result
+#          (exit 0 only on KAXI_JIT_ACCEPT_OK). Also honoured via WAIT=1.
+WAIT="${WAIT:-0}"
+for a in "$@"; do [[ "$a" == "--wait" ]] && WAIT=1; done
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-1800}"   # max seconds to wait for completion
+WAIT_POLL="${WAIT_POLL:-20}"           # seconds between polls
+
 NS="${NS:-slurm-pilot}"
 SOUNIO_DIR="${SOUNIO_DIR:-/workspace/sounio}"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
@@ -115,3 +122,36 @@ JOB_ID="$(printf '%s\n' "${SBATCH_OUTPUT}" | awk '/Submitted batch job/ {print $
 [[ -n "${JOB_ID}" ]] || { echo "failed to parse job id" >&2; exit 1; }
 echo; echo "RUN_ID=${RUN_ID}"; echo "JOB_ID=${JOB_ID}"; echo "STAGE_ROOT=${STAGE_ROOT}"; echo "LOGIN_POD=${LOGIN_POD}"
 echo; echo "# fetch:"; echo "kubectl -n ${NS} exec ${LOGIN_POD} -- cat ${STAGE_ROOT}/results/summary.txt"
+
+if [[ "${WAIT}" != "1" ]]; then
+  exit 0
+fi
+
+echo; echo "--- waiting for job ${JOB_ID} (timeout ${WAIT_TIMEOUT}s, poll ${WAIT_POLL}s) ---"
+elapsed=0
+while :; do
+  ST="$("${KUBECTL_BIN}" -n "${NS}" exec "${LOGIN_POD}" -- bash -lc \
+        "squeue -j '${JOB_ID}' -h -o '%T' 2>/dev/null" | tr -d '[:space:]')"
+  [[ -z "${ST}" ]] && { echo "job left the queue after ${elapsed}s"; break; }
+  echo "  t=${elapsed}s state=${ST}"
+  if [[ "${elapsed}" -ge "${WAIT_TIMEOUT}" ]]; then
+    echo "TIMEOUT waiting for job ${JOB_ID} after ${WAIT_TIMEOUT}s" >&2
+    "${KUBECTL_BIN}" -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "scancel '${JOB_ID}'" >/dev/null 2>&1 || true
+    exit 124
+  fi
+  sleep "${WAIT_POLL}"; elapsed=$((elapsed + WAIT_POLL))
+done
+
+echo; echo "=== summary ==="
+SUMMARY="$("${KUBECTL_BIN}" -n "${NS}" exec "${LOGIN_POD}" -- bash -lc \
+  "cat '${STAGE_ROOT}/results/summary.txt' 2>/dev/null || echo '(no summary produced)'")"
+echo "${SUMMARY}"
+echo "=== job log tail ==="
+"${KUBECTL_BIN}" -n "${NS}" exec "${LOGIN_POD}" -- bash -lc \
+  "tail -n 20 '${STAGE_ROOT}/logs/'job-*.log 2>/dev/null || true"
+
+if printf '%s\n' "${SUMMARY}" | grep -q "KAXI_JIT_ACCEPT_OK"; then
+  echo; echo "ACCEPTANCE GATE: PASS"; exit 0
+else
+  echo; echo "ACCEPTANCE GATE: FAIL" >&2; exit 1
+fi

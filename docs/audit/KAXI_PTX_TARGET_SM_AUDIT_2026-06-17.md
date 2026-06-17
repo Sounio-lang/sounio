@@ -82,9 +82,20 @@ the per-kernel output on ACCEPT), so whether each rc=1 is a verify-mismatch
 real launch error is uncharacterized. Characterizing it = a runtime
 differential with outputs kept + correct per-mode init — separate follow-on.
 
+### CI wiring (done)
+The byte-compare golden gate runs `--no-ptxas` and cannot catch invalid PTX, so
+real-hardware acceptance is wired as a **nightly** GitHub Actions job
+(`.github/workflows/kaxi-ptx-acceptance.yml`): it emits all kernels
+(`slurm-jobs/kaxi-ptxas-accept/emit_ptx.sh`), builds the driver-JIT runner, and
+runs `submit_jit.sh --wait` (submit → poll → fetch → assert
+`KAXI_JIT_ACCEPT_OK`). It is **not** per-PR blocking (needs the on-prem SLURM
+cluster) and is **opt-in** via repo variable `SOUNIO_ENABLE_KAXI_SLURM_GATE=1`,
+so it stays skipped (no false red/green) until the cluster-access prereqs are
+provisioned — either `SLURM_KUBECONFIG` (GitHub-hosted runner, only if the
+cluster API is reachable) or a self-hosted in-cluster runner. The `--wait` path
+was validated end-to-end (Slurm job 4311: ACCEPT=318/318, gate PASS).
+
 ### Follow-on
-- The byte-compare golden gate runs `--no-ptxas` and cannot catch invalid PTX;
-  acceptance is now covered by the driver-JIT job above. Consider wiring
-  `submit_jit.sh` into CI as the real acceptance gate.
 - Recapture the May-28 goldens (`scripts/ci/kaxi_ptx_capture.sh`) to absorb the
   benign `%p<8>`→`%p<64>` drift once the in-flight source edits are built in.
+  *(Done in this PR.)*
