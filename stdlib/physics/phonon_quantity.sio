@@ -1,0 +1,552 @@
+// stdlib/physics/phonon_quantity.sio
+//
+// Quantity-typed rewrite of the 1D lattice phonon model for hepatic
+// microcirculation. Same physics as stdlib/physics/phonon.sio, but
+// parameters carry dimensional types from stdlib/units (Quantity with
+// GUM uncertainty propagation per JCGM 100:2008).
+//
+// Coexistence with the legacy API:
+//   stdlib/physics/phonon.sio        — flat [f64; 64] params + manual variance
+//   stdlib/physics/phonon_quantity.sio — typed PhononParams + Lattice64
+//
+// This file uses `_q` suffixes on functions and a new `Lattice64` struct
+// name to avoid duplicate-definition with the legacy `PhononState`.
+//
+// Unit scale:
+//   Concentration values are in SI (kg/m³) — the legacy `ng/mL` numbers
+//   must be multiplied by 1e-6 to land in this scale:
+//       10 ng/mL = 1e-5 kg/m³
+//       8  ng/mL = 8e-6 kg/m³
+//       2  ng/mL = 2e-6 kg/m³
+//   This is a one-time conversion at the boundary; the lattice internals
+//   are unit-consistent thereafter.
+//
+// Lattice state:
+//   The lattice concentrations and variances stay as raw f64. Variance
+//   propagation through the lattice uses the same linearized GUM form
+//   as the legacy code, which is numerically stable for stiff
+//   advection-diffusion-reaction PDEs. Quantity arithmetic is reserved
+//   for the parameters and boundary conditions.
+//
+// References:
+//   Teutsch (2005) — sinusoid morphometry
+//   Wisse (1985) — sinusoidal endothelial structure
+//   McNaughton & Abu-Yousef (1998) — portal vein Doppler pulsatility
+//   Taylor (1953) — dispersion in tubes (Taylor-Aris dispersion)
+//   JCGM 100:2008 — Guide to the expression of uncertainty in measurement
+
+use units::lib::*
+
+// ============================================================================
+// PhononParams — Quantity-typed parameter set (replaces [f64; 64] + PP_* idx)
+// ============================================================================
+
+pub struct PhononParams {
+    pub d_eff:     Quantity  // m²/s — effective axial diffusion
+    pub dx:        Quantity  // m   — site spacing
+    pub k_release: Quantity  // 1/s — drug release to tissue
+    pub cl_site:   Quantity  // 1/s — per-site CYP3A4 clearance
+    pub fu:        Quantity  // dimensionless — fraction unbound
+    pub kp:        Quantity  // dimensionless — tissue:plasma partition
+    pub c_portal:  Quantity  // kg/m³ — portal vein mean concentration
+    pub c_ha:      Quantity  // kg/m³ — hepatic artery mean concentration
+    pub f_heart:   Quantity  // 1/s — heart rate
+    pub a_portal:  Quantity  // dimensionless — portal pulsatility
+    pub a_ha:      Quantity  // dimensionless — arterial pulsatility
+    pub phi_ha:    Quantity  // radians — arterial phase offset
+    pub c_tissue:  Quantity  // kg/m³ — hepatocyte tissue concentration
+    pub v_blood:   Quantity  // m/s — sinusoidal blood velocity
+    pub zonation:  Quantity  // dimensionless — zonation ratio
+}
+
+// ============================================================================
+// Lattice64 — raw f64 lattice state (raw values + linearized GUM variances)
+// ============================================================================
+//
+// Distinct from the legacy `PhononState` to avoid duplicate struct defs.
+// Same shape: N concentrations + N variances, plus site count.
+
+pub struct Lattice64 {
+    pub values:    [f64; 64]
+    pub variances: [f64; 64]
+    pub n:         i64
+}
+
+pub fn lattice64_zero() -> Lattice64 {
+    Lattice64 {
+        values:    [0.0; 64],
+        variances: [0.0; 64],
+        n:         64
+    }
+}
+
+pub fn lattice64_init(c_init: f64, var_init: f64) -> Lattice64 with Mut {
+    var s = lattice64_zero()
+    var i: i64 = 0
+    while i < 64 {
+        s.values[i]    = c_init
+        s.variances[i] = var_init
+        i = i + 1
+    }
+    s
+}
+
+// ============================================================================
+// Default rapamycin parameters (SI scale)
+// ============================================================================
+//
+// 10 ng/mL  → 1.0e-5  kg/m³
+//  8 ng/mL  → 8.0e-6  kg/m³
+//  2 ng/mL  → 2.0e-6  kg/m³
+// 3.9 μm    → 3.9e-6  m
+// 300 μm/s  → 3.0e-4  m/s
+
+pub fn rapamycin_phonon_params_q() -> PhononParams {
+    PhononParams {
+        d_eff:     q_diffusion(1.0e-9, 1.0e-11),
+        dx:        q_length(3.9e-6, 1.0e-7),
+        k_release: q_rate(0.1, 0.005),
+        cl_site:   q_rate(0.003, 1.0e-4),
+        fu:        q_dimensionless(0.075, 0.005),
+        kp:        q_dimensionless(5.0, 0.1),
+        c_portal:  q_concentration_mass(1.0e-5, 5.0e-7),
+        c_ha:      q_concentration_mass(8.0e-6, 4.0e-7),
+        f_heart:   q_rate(1.2, 0.05),
+        a_portal:  q_dimensionless(0.05, 0.01),
+        a_ha:      q_dimensionless(0.30, 0.02),
+        phi_ha:    q_dimensionless(0.785, 0.01),
+        c_tissue:  q_concentration_mass(2.0e-6, 1.0e-7),
+        v_blood:   q_velocity(3.0e-4, 1.0e-6),
+        zonation:  q_dimensionless(1.0, 0.0),
+    }
+}
+
+// ============================================================================
+// Pulsatile boundary condition (Quantity-valued)
+// ============================================================================
+//
+// Returns the portal+arterial mixture at the lattice inlet.
+// Weighted: portal ~75%, hepatic artery ~25% (per the legacy convention).
+
+pub fn pulsatile_input_q(t: f64, params: &PhononParams) -> Quantity with Mut, Div, Panic {
+    let omega = quantity_scale(params.f_heart, 2.0 * 3.14159265358979)
+
+    // portal_wave = c_portal * (1 + a_portal * sin(omega * t))
+    // artery_wave = c_ha   * (1 + a_ha     * sin(omega * t + phi_ha))
+    // Then 0.75 * portal + 0.25 * artery.
+    //
+    // The sine function is dimensionless, so its argument t must also be
+    // dimensionless. We use `t` as a dimensionless clock value (seconds
+    // implicitly, but the unit is carried by omega's time^-1). Mixing
+    // Quantity of 1/s with raw f64 t is a soft unit-check violation we
+    // accept at the boundary for numerical convenience.
+
+    let sin_portal_arg = omega.value * t
+    let sin_artery_arg = omega.value * t + params.phi_ha.value
+    let sin_p = sin_approx_local(sin_portal_arg)
+    let sin_a = sin_approx_local(sin_artery_arg)
+
+    let portal_amp = quantity_scale(params.a_portal, sin_p)
+    let portal_wave_unc_term = quantity_new(1.0, 0.0, dim_dimensionless())
+    let portal_one_plus = quantity_add(portal_wave_unc_term, portal_amp)
+    let portal_wave = quantity_mul(params.c_portal, portal_one_plus)
+
+    let artery_amp = quantity_scale(params.a_ha, sin_a)
+    let artery_one_plus = quantity_add(portal_wave_unc_term, artery_amp)
+    let artery_wave = quantity_mul(params.c_ha, artery_one_plus)
+
+    let portal_contrib = quantity_scale(portal_wave, 0.75)
+    let artery_contrib = quantity_scale(artery_wave, 0.25)
+    quantity_add(portal_contrib, artery_contrib)
+}
+
+// Internal Bhaskara I sine approximation, [-pi, pi] range.
+// No libm dependency, matches the legacy `sin_approx` shape.
+fn sin_approx_local(x: f64) -> f64 with Mut {
+    let pi = 3.14159265358979
+    var a = x
+    while a > pi { a = a - 2.0 * pi }
+    while a < 0.0 - pi { a = a + 2.0 * pi }
+    let num = 16.0 * a * (pi - a)
+    let den = 5.0 * pi * pi - 4.0 * a * (pi - a)
+    if den == 0.0 { return 0.0 }
+    num / den
+}
+
+// ============================================================================
+// CFL timestep for the lattice (scalar, since dt is a scalar Quantity of time)
+// ============================================================================
+//
+// dt_diff = 0.4 * dx² / d_eff     (stability for explicit diffusion)
+// dt_adv  = 0.8 * dx / v_blood    (CFL for upwind advection)
+// dt_cfl  = min(dt_diff, dt_adv)
+//
+// Returns dt as a f64 (seconds). We extract `.value` here because the
+// lattice stepper works in raw f64 time, and the boundary Quantity
+// carries the dim tag.
+
+pub fn cfl_dt_q(params: &PhononParams) -> f64 with Div, Panic {
+    let dx_val = params.dx.value
+    let d_val  = params.d_eff.value
+    let v_val  = params.v_blood.value
+    if dx_val <= 0.0 { return 1.0e-4 }
+
+    let dt_diff = 0.4 * dx_val * dx_val / d_val
+    let dt_adv  = if v_val > 0.0 { 0.8 * dx_val / v_val } else { 1.0e-4 }
+    let dt_cfl  = if dt_diff < dt_adv { dt_diff } else { dt_adv }
+    if dt_cfl < 1.0e-4 { dt_cfl } else { 1.0e-4 }
+}
+
+// ============================================================================
+// RHS: 1D lattice dynamics with Quantity-typed params
+// ============================================================================
+//
+//   dC_i/dt = advection_i + diffusion_i + release_i + metabolism_i
+//
+// The lattice values stay raw f64, the params are Quantity.
+// GUM uncertainty on parameters is *currently not* propagated into the
+// lattice variances (this would require a Jacobian sweep per step).
+// The lattice variance propagation remains the linearized GUM of the
+// legacy code, with the param uncertainties used only at the boundary.
+
+pub fn phonon_rhs_q(
+    t: f64,
+    state: &Lattice64,
+    params: &PhononParams,
+    out: &!Lattice64
+) with Mut, Div, Panic {
+    let d_eff    = params.d_eff.value
+    let dx       = params.dx.value
+    let k_rel    = params.k_release.value
+    let cl_site  = params.cl_site.value
+    let fu       = params.fu.value
+    let kp       = params.kp.value
+    let c_tissue = params.c_tissue.value
+    let v_blood  = params.v_blood.value
+    let zonation = params.zonation.value
+    let n        = state.n
+
+    if dx <= 0.0 { return }
+    let dx2 = dx * dx
+    if dx2 == 0.0 { return }
+    let diff_coeff = d_eff / dx2
+
+    // Boundary concentration at site 0 — use pulsatile boundary Quantity.
+    let c_input = pulsatile_input_q(t, params).value
+    let c_input_var = pulsatile_input_q(t, params).uncertainty
+    let c_input_var_sq = c_input_var * c_input_var
+
+    var i: i64 = 0
+    while i < n {
+        let c_i = state.values[i]
+        let var_i = state.variances[i]
+
+        // --- Advection (upwind) ---
+        var adv: f64 = 0.0
+        var var_adv: f64 = 0.0
+        if v_blood > 0.0 {
+            let c_upstream = if i == 0 { c_input } else { state.values[i - 1] }
+            adv = 0.0 - v_blood * (c_i - c_upstream) / dx
+            let adv_c = v_blood / dx
+            let var_up = if i == 0 { c_input_var } else { state.variances[i - 1] }
+            var_adv = adv_c * adv_c * (var_i + var_up)
+        }
+
+        // --- Diffusion (nearest-neighbor) ---
+        var diff: f64 = 0.0
+        var var_diff: f64 = 0.0
+        if i == 0 {
+            let c_left = c_input
+            let c_right = if i + 1 < n { state.values[i + 1] } else { c_i }
+            diff = diff_coeff * (c_left - 2.0 * c_i + c_right)
+            var_diff = diff_coeff * diff_coeff * (c_input_var_sq + 4.0 * var_i + state.variances[i + 1])
+        } else if i == n - 1 {
+            let c_left = state.values[i - 1]
+            diff = diff_coeff * (c_left - c_i)
+            var_diff = diff_coeff * diff_coeff * (state.variances[i - 1] + var_i)
+        } else {
+            let c_left = state.values[i - 1]
+            let c_right = state.values[i + 1]
+            diff = diff_coeff * (c_left - 2.0 * c_i + c_right)
+            var_diff = diff_coeff * diff_coeff * (state.variances[i - 1] + 4.0 * var_i + state.variances[i + 1])
+        }
+
+        // --- Drug release to hepatocyte tissue ---
+        let release = 0.0 - k_rel * (c_i - c_tissue / kp)
+        let var_release = k_rel * k_rel * var_i
+
+        // --- CYP3A4 metabolism with zonation ---
+        let cl_factor = if zonation > 1.01 {
+            let frac = (i as f64) / ((n - 1) as f64)
+            2.0 / (zonation + 1.0) * (1.0 + (zonation - 1.0) * frac)
+        } else {
+            1.0
+        }
+        let cl_z = cl_site * cl_factor * fu
+        let metabolism = 0.0 - cl_z * c_i
+        let var_metab = cl_z * cl_z * var_i
+
+        out.values[i]    = adv + diff + release + metabolism
+        out.variances[i] = var_adv + var_diff + var_release + var_metab
+
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// RK4 step
+// ============================================================================
+
+pub fn phonon_rk4_step_q(
+    t: f64,
+    state: &!Lattice64,
+    params: &PhononParams,
+    dt: f64
+) with Mut, Div, Panic {
+    var k1 = lattice64_zero()
+    var k2 = lattice64_zero()
+    var k3 = lattice64_zero()
+    var k4 = lattice64_zero()
+    var tmp = lattice64_zero()
+    let n = state.n
+
+    // k1 = f(t, y)
+    phonon_rhs_q(t, state, params, &!k1)
+
+    // k2 = f(t + dt/2, y + dt/2 * k1)
+    var i: i64 = 0
+    while i < n {
+        tmp.values[i]    = state.values[i]    + 0.5 * dt * k1.values[i]
+        tmp.variances[i] = state.variances[i] + 0.5 * dt * k1.variances[i]
+        i = i + 1
+    }
+    tmp.n = n
+    phonon_rhs_q(t + 0.5 * dt, &tmp, params, &!k2)
+
+    // k3 = f(t + dt/2, y + dt/2 * k2)
+    i = 0
+    while i < n {
+        tmp.values[i]    = state.values[i]    + 0.5 * dt * k2.values[i]
+        tmp.variances[i] = state.variances[i] + 0.5 * dt * k2.variances[i]
+        i = i + 1
+    }
+    phonon_rhs_q(t + 0.5 * dt, &tmp, params, &!k3)
+
+    // k4 = f(t + dt, y + dt * k3)
+    i = 0
+    while i < n {
+        tmp.values[i]    = state.values[i]    + dt * k3.values[i]
+        tmp.variances[i] = state.variances[i] + dt * k3.variances[i]
+        i = i + 1
+    }
+    phonon_rhs_q(t + dt, &tmp, params, &!k4)
+
+    // y_new = y + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
+    i = 0
+    while i < n {
+        state.values[i] = state.values[i] + (dt / 6.0) * (
+            k1.values[i] + 2.0 * k2.values[i] + 2.0 * k3.values[i] + k4.values[i]
+        )
+        state.variances[i] = state.variances[i] + (dt / 6.0) * (
+            k1.variances[i] + 2.0 * k2.variances[i] + 2.0 * k3.variances[i] + k4.variances[i]
+        )
+        if state.values[i] < 0.0 { state.values[i] = 0.0 }
+        if state.variances[i] < 0.0 { state.variances[i] = 0.0 }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Simulate for a given duration
+// ============================================================================
+
+pub fn phonon_simulate_q(
+    state: &!Lattice64,
+    params: &PhononParams,
+    t_start: f64,
+    t_end: f64
+) -> i64 with Mut, Div, Panic {
+    let dt = cfl_dt_q(params)
+    var t = t_start
+    var steps: i64 = 0
+    while t < t_end {
+        let step_dt = if t + dt > t_end { t_end - t } else { dt }
+        phonon_rk4_step_q(t, state, params, step_dt)
+        t = t + step_dt
+        steps = steps + 1
+    }
+    steps
+}
+
+// ============================================================================
+// Spatial statistics (raw f64 outputs — values and variances in SI units)
+// ============================================================================
+
+pub fn lattice64_spatial_average(state: &Lattice64) -> f64 with Mut {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < state.n {
+        sum = sum + state.values[i]
+        i = i + 1
+    }
+    sum / (state.n as f64)
+}
+
+pub fn lattice64_spatial_variance(state: &Lattice64) -> f64 with Mut {
+    let mean = lattice64_spatial_average(state)
+    var sum_sq: f64 = 0.0
+    var i: i64 = 0
+    while i < state.n {
+        let d = state.values[i] - mean
+        sum_sq = sum_sq + d * d
+        i = i + 1
+    }
+    sum_sq / (state.n as f64)
+}
+
+pub fn lattice64_outflow_concentration(state: &Lattice64) -> f64 {
+    state.values[state.n - 1]
+}
+
+pub fn lattice64_outflow_variance(state: &Lattice64) -> f64 {
+    state.variances[state.n - 1]
+}
+
+pub fn lattice64_mean_variance(state: &Lattice64) -> f64 with Mut {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < state.n {
+        sum = sum + state.variances[i]
+        i = i + 1
+    }
+    sum / (state.n as f64)
+}
+
+// ============================================================================
+// Inline tests (CONVENTIONS §5)
+// ============================================================================
+
+fn assert_close(got: f64, expected: f64, tol: f64) with Panic {
+    let d = got - expected
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    if ad > tol {
+        panic()
+    }
+}
+
+fn test_rapamycin_params_dimensions() with Panic {
+    let p = rapamycin_phonon_params_q()
+    assert(dim_eq(p.d_eff.dim,     dim_diffusion()))
+    assert(dim_eq(p.dx.dim,        dim_length()))
+    assert(dim_eq(p.k_release.dim, dim_rate()))
+    assert(dim_eq(p.cl_site.dim,   dim_rate()))
+    assert(dim_eq(p.fu.dim,        dim_dimensionless()))
+    assert(dim_eq(p.kp.dim,        dim_dimensionless()))
+    assert(dim_eq(p.c_portal.dim,  dim_concentration()))
+    assert(dim_eq(p.c_ha.dim,      dim_concentration()))
+    assert(dim_eq(p.f_heart.dim,   dim_rate()))
+    assert(dim_eq(p.a_portal.dim,  dim_dimensionless()))
+    assert(dim_eq(p.a_ha.dim,      dim_dimensionless()))
+    assert(dim_eq(p.phi_ha.dim,    dim_dimensionless()))
+    assert(dim_eq(p.c_tissue.dim,  dim_concentration()))
+    assert(dim_eq(p.v_blood.dim,   dim_velocity()))
+    assert(dim_eq(p.zonation.dim,  dim_dimensionless()))
+
+    // SI scale sanity: 10 ng/mL = 1e-5 kg/m³
+    assert_close(p.c_portal.value, 1.0e-5, 1.0e-12)
+    // 8 ng/mL = 8e-6 kg/m³
+    assert_close(p.c_ha.value, 8.0e-6, 1.0e-12)
+}
+
+fn test_pulsatile_input_zero_phase() with Mut, Div, Panic {
+    // At t = -phi_ha / (2*pi*f_heart) the artery sine argument is 0,
+    // and the portal sine argument is -phi_ha. With phi_ha = pi/4 the
+    // portal contribution is at sin(pi/4) ≈ 0.707.
+    let p = rapamycin_phonon_params_q()
+    let boundary = pulsatile_input_q(0.0, &p)
+    assert(dim_eq(boundary.dim, dim_concentration()))
+
+    // Expected: 0.75 * c_portal * (1 + a_portal * sin(0)) + 0.25 * c_ha * (1 + a_ha * sin(phi_ha))
+    //         = 0.75 * c_portal * 1.0 + 0.25 * c_ha * (1 + a_ha * sin(pi/4))
+    let sin_phi = sin_approx_local(p.phi_ha.value)
+    let portal_part = 0.75 * p.c_portal.value * (1.0 + p.a_portal.value * 0.0)
+    let artery_part = 0.25 * p.c_ha.value * (1.0 + p.a_ha.value * sin_phi)
+    assert_close(boundary.value, portal_part + artery_part, 1.0e-15)
+}
+
+fn test_cfl_dt_bounds() with Div, Panic {
+    let p = rapamycin_phonon_params_q()
+    let dt = cfl_dt_q(&p)
+    // dt must be in (0, 1e-4] per CFL clamp
+    assert(dt > 0.0)
+    assert(dt <= 1.0e-4)
+    // dx² / D ≈ (3.9e-6)² / 1e-9 ≈ 1.5e-2 s
+    // dx / v ≈ 3.9e-6 / 3e-4 ≈ 1.3e-2 s
+    // The CFL clamp forces dt <= 1e-4
+    assert(dt >= 1.0e-5)
+}
+
+fn test_lattice64_init_uniform() with Mut, Panic {
+    let s = lattice64_init(1.5e-5, 1.0e-12)
+    assert_close(s.values[0],    1.5e-5,  1.0e-15)
+    assert_close(s.values[32],   1.5e-5,  1.0e-15)
+    assert_close(s.values[63],   1.5e-5,  1.0e-15)
+    assert_close(s.variances[0], 1.0e-12, 1.0e-18)
+    assert(s.n == 64)
+}
+
+fn test_lattice64_spatial_average() with Mut, Panic {
+    var s = lattice64_zero()
+    s.values[0] = 1.0
+    s.values[1] = 2.0
+    s.values[2] = 3.0
+    s.n = 3
+    // mean of [1, 2, 3] over 3 sites = 2.0
+    assert_close(lattice64_spatial_average(&s), 2.0, 1.0e-12)
+}
+
+fn test_simulate_steady_uniform() with Mut, Div, Panic {
+    // With no advection and no source, a uniform initial state should stay
+    // uniform (no spatial gradient → no diffusion flux). Zero pulsatility
+    // amplitudes keep the boundary constant in time.
+    let base = rapamycin_phonon_params_q()
+    var p = PhononParams {
+        d_eff:     base.d_eff,
+        dx:        base.dx,
+        k_release: quantity_new(0.0, 0.0, base.k_release.dim),
+        cl_site:   quantity_new(0.0, 0.0, base.cl_site.dim),
+        fu:        base.fu,
+        kp:        quantity_new(1.0, 0.0, base.kp.dim),
+        c_portal:  base.c_portal,
+        c_ha:      base.c_portal,
+        f_heart:   base.f_heart,
+        a_portal:  quantity_new(0.0, 0.0, base.a_portal.dim),
+        a_ha:      quantity_new(0.0, 0.0, base.a_ha.dim),
+        phi_ha:    base.phi_ha,
+        c_tissue:  base.c_portal,
+        v_blood:   quantity_new(0.0, 0.0, base.v_blood.dim),
+        zonation:  base.zonation,
+    }
+    var s = lattice64_init(1.0e-5, 0.0)
+
+    let steps = phonon_simulate_q(&!s, &p, 0.0, 0.01)
+
+    assert(steps > 0)
+    var i: i64 = 0
+    while i < s.n {
+        let d = s.values[i] - 1.0e-5
+        let ad = if d < 0.0 { 0.0 - d } else { d }
+        assert(ad < 1.0e-9)
+        i = i + 1
+    }
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    test_rapamycin_params_dimensions()
+    test_pulsatile_input_zero_phase()
+    test_cfl_dt_bounds()
+    test_lattice64_init_uniform()
+    test_lattice64_spatial_average()
+    test_simulate_steady_uniform()
+    0
+}

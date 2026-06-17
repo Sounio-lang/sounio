@@ -6,8 +6,8 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 
-# Package tests import stdlib modules and/or packages/*. lean_single resolves
-# packages/ imports; Madaros default does not yet. Use lean_single for this gate.
+# Madaros resolves packages/ for check/load; compile+run still routes through
+# lean_single bundle until native-v2 multimodule lowering is stable.
 LEAN_SOUC="$ROOT_DIR/bin/souc-lean-single-x86_64"
 if [[ ! -x "$LEAN_SOUC" ]]; then
   LEAN_SOUC="$ROOT_DIR/bin/souc-linux-x86_64"
@@ -17,6 +17,12 @@ if [[ ! -x "$LEAN_SOUC" ]]; then
   exit 1
 fi
 SOUC_BIN="$LEAN_SOUC"
+MADAROS_SOUC="$SOUC_BIN"
+if [[ -x "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; then
+  MADAROS_SOUC="$ROOT_DIR/artifacts/self-hosted/madaros"
+elif [[ -x "$ROOT_DIR/bin/madaros-linux-x86_64" ]]; then
+  MADAROS_SOUC="$ROOT_DIR/bin/madaros-linux-x86_64"
+fi
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
@@ -58,7 +64,21 @@ run_package_test() {
 }
 
 printf '[package-import-science] souc=%s\n' "$SOUC_BIN"
+printf '[package-import-science] madaros=%s\n' "$MADAROS_SOUC"
 printf '[package-import-science] stdlib=%s\n' "$SOUNIO_STDLIB_PATH"
+
+printf '[package-import-science] madaros package-resolve probe: epistemic-core witness\n'
+MADAROS_CHECK_LOG="$OUT_DIR/madaros_epistemic_check.log"
+set +e
+"$MADAROS_SOUC" --check "$ROOT_DIR/tests/packages/package_import_science_witness.sio" >"$MADAROS_CHECK_LOG" 2>&1
+madaros_check_rc=$?
+set -e
+if ! grep -qF 'run_check_mode: about to check 2' "$MADAROS_CHECK_LOG"; then
+  cat "$MADAROS_CHECK_LOG" >&2
+  echo '[package-import-science] FAIL: Madaros did not load package dependency (expected 2 modules)' >&2
+  exit 1
+fi
+printf '[package-import-science] Madaros package-resolve probe: ok (2 modules loaded; check rc=%s)\n' "$madaros_check_rc"
 
 for MANIFEST in "${PACKAGES[@]}"; do
   TEST_LIST="$OUT_DIR/$(basename "$(dirname "$MANIFEST")")_tests.tsv"

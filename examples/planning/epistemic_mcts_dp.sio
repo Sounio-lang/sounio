@@ -1,0 +1,183 @@
+// examples/planning/epistemic_mcts_dp.sio
+//
+// Epistemic MCTS + DP hybrid planner demo (the "4" hybrid from suggest, now as example).
+//
+// This is the suggested first file from the SUGGESTED EXTENSION block in stdlib/epistemic/dp.sio.
+//
+// Demonstrates:
+// - Using robust DP (from epistemic::dp) for exact backups on small local models derived from
+//   Knightian p-box on vdp dynamics (re-uses logic from test_stiff_ode_knightian_mc.sio).
+// - MC rollouts via propagate for larger/unknown parts, wrapped in p-box outer.
+// - Simple PUCT selection with epistemic bonus.
+// - Final policy selection via Klibanoff CE + active EFE bridge for ambiguity aversion.
+// - Comparison: hybrid regret vs pure MC and pure robust VI on a small "planning" problem
+//   (2-action choice with continuation values from vdp under epistemic mu).
+//
+// The "problem" is abstract 2-action planning where continuation "values" are the max_abs_y or final_y
+// from vdp sim under uncertain mu (Knightian via pbox).
+//
+// Asserts lower robust regret for hybrid, and the klib lower pragmatic.
+//
+// Run with: ./bin/souc run examples/planning/epistemic_mcts_dp.sio
+// (or check)
+//
+// This is the concrete realization of "DP-style backups inside MCTS" for robust epistemic
+// planning on stiff systems.
+
+use epistemic::knowledge::{epistemic_new, Epistemic};
+use epistemic::propagate::monte_carlo;
+use epistemic::knightian::*;
+use epistemic::walley::*;
+use epistemic::klibanoff::{klibanoff_compose_with_active, kl_smooth_ce, kl_precise_ce};
+use epistemic::dp::{KnightianMDP, kmdp_new, kmdp_set_cont_pbox, robust_value_iteration};
+use epistemic::mcts_hybrid::{initial_arm_variance, puct_select_two_actions};
+
+fn k_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn k_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn k_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x; var i = 0; while i < 12 { y = 0.5 * (y + x / y); i = i + 1 }; y
+}
+
+// Reused vdp (from stiff test, for model generation)
+fn vdp_final_y(mu: f64, x0: f64, y0: f64, dt: f64, n_steps: i64) -> f64 with Mut, Div, Panic {
+    var x = x0; var y = y0; var i = 0;
+    while i < n_steps {
+        let dx = y; let dy = mu * (1.0 - x * x) * y - x;
+        x = x + dt * dx; y = y + dt * dy; i = i + 1;
+    }
+    y
+}
+
+fn build_pbox_from_vdp(mu_box: &PBox, x0: f64, y0: f64, dt: f64, n_steps: i64, n_grid: i64) -> PBox with Mut, Div, Panic {
+    let mlo = pb_lo_mean(mu_box); let mhi = pb_hi_mean(mu_box);
+    var minv: f64 = 1.0e30; var maxv: f64 = -1.0e30;
+    var i: i64 = 0;
+    while i < n_grid {
+        let frac = (i as f64) / ((n_grid-1) as f64);
+        let mu = mlo + frac * (mhi - mlo);
+        let v = vdp_final_y(mu, x0, y0, dt, n_steps);
+        if v < minv { minv = v; } if v > maxv { maxv = v; }
+        i = i + 1;
+    }
+    let vvar = pb_variance(mu_box) * 0.1;
+    pb_new(minv, maxv, vvar, pb_confidence(mu_box))
+}
+
+// The hybrid "search" function (simplified MCTS for the 2-action case, but structured for extension).
+// In real, would have tree nodes, full PUCT, recursion.
+// Here: stats for actions, "expand" uses DP or MC, selection via puct_epistemic (mcts_hybrid).
+fn epistemic_mcts_dp_hybrid(
+    mu_ep: Epistemic,
+    mu_box: &PBox,
+    dt: f64,
+    n_steps: i64,
+    n_grid: i64,
+    num_sims: i64,
+    use_dp_backup: bool
+) -> (f64, f64, f64) with Mut, Div, Panic {
+    let pbox_risky = build_pbox_from_vdp(mu_box, 0.5, 0.0, dt, n_steps, n_grid);
+    let pbox_safe = pb_from_knowledge(0.25, 0.01, 900);
+
+    var n0: f64 = 0.0
+    var w0: f64 = 0.0
+    var n1: f64 = 0.0
+    var w1: f64 = 0.0
+    var var0: f64 = initial_arm_variance()
+    var var1: f64 = initial_arm_variance()
+    let prior = 0.5
+    let c_puct = 1.4
+    let c_epistemic = 0.8
+
+    var sim: i64 = 0
+    while sim < num_sims {
+        let mean0 = if n0 > 0.0 { w0 / n0 } else { 0.0 }
+        let mean1 = if n1 > 0.0 { w1 / n1 } else { 0.0 }
+        let chosen = puct_select_two_actions(mean0, n0, var0, mean1, n1, var1, prior, c_puct, c_epistemic)
+
+        var val_est: f64 = 0.0
+        if chosen == 0 {
+            if use_dp_backup {
+                var local = kmdp_new(2, 2, 0.9)
+                kmdp_set_cont_pbox(&!local, 0, 0, pbox_risky)
+                kmdp_set_cont_pbox(&!local, 0, 1, pbox_safe)
+                kmdp_set_cont_pbox(&!local, 1, 0, pbox_safe)
+                kmdp_set_cont_pbox(&!local, 1, 1, pbox_safe)
+                let (vl, _) = robust_value_iteration(&local, 1e-6, 10)
+                val_est = vl[0]
+                var0 = pb_variance(&pbox_risky)
+            } else {
+                let mc = monte_carlo(mu_ep, |m: f64| -> f64 { vdp_final_y(m, 0.5, 0.0, dt, n_steps) }, 100)
+                val_est = mc.val()
+                var0 = mc.variance()
+            }
+            n0 = n0 + 1.0
+            w0 = w0 + val_est
+        } else {
+            if use_dp_backup {
+                var local = kmdp_new(2, 2, 0.9)
+                kmdp_set_cont_pbox(&!local, 0, 0, pbox_risky)
+                kmdp_set_cont_pbox(&!local, 0, 1, pbox_safe)
+                kmdp_set_cont_pbox(&!local, 1, 0, pbox_safe)
+                kmdp_set_cont_pbox(&!local, 1, 1, pbox_safe)
+                let (vl, _) = robust_value_iteration(&local, 1e-6, 10)
+                val_est = vl[0]
+                var1 = pb_variance(&pbox_safe)
+            } else {
+                let mc = monte_carlo(mu_ep, |m: f64| -> f64 { vdp_final_y(m, 0.5, 0.0, dt, n_steps) * 0.9 + 0.05 }, 100)
+                val_est = mc.val()
+                var1 = mc.variance()
+            }
+            n1 = n1 + 1.0
+            w1 = w1 + val_est
+        }
+        sim = sim + 1
+    }
+
+    let est0 = if n0 > 0.0 { w0 / n0 } else { 0.0 };
+    let est1 = if n1 > 0.0 { w1 / n1 } else { 0.0 };
+    let regret = k_abs( k_max(est0, est1) - 0.25 );
+    (est0, est1, regret)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let mu0 = 5.0; let mu_var = 0.25;
+    let mu_ep = epistemic_new(mu0, mu_var, 850);
+    let mu_box = pb_from_knowledge(mu0, mu_var, 850);
+    let dt = 0.02; let n_steps = 80; let n_grid = 7;
+    let num_sims = 50;
+
+    // Baselines and hybrid
+    let (_, _, mc_regret) = epistemic_mcts_dp_hybrid(mu_ep, &mu_box, dt, n_steps, n_grid, num_sims, false);
+    let (h0, h1, hybrid_regret) = epistemic_mcts_dp_hybrid(mu_ep, &mu_box, dt, n_steps, n_grid, num_sims, true);
+
+    // Pure VI for comparison (max lower from pboxes)
+    let pbox_r = build_pbox_from_vdp(&mu_box, 0.5, 0.0, dt, n_steps, n_grid);
+    let pbox_s = pb_from_knowledge(0.25, 0.01, 900);
+    let pure_vi_val = k_max( pb_lo_mean(&pbox_r), pb_lo_mean(&pbox_s) );
+    let pure_vi_regret = k_abs(pure_vi_val - 0.25);
+
+    let better_hybrid_mc = hybrid_regret < mc_regret - 0.001;
+    let hybrid_competitive = hybrid_regret <= pure_vi_regret + 0.01;
+
+    // Klib/bridge assert (ambiguity averse choice)
+    let current = epistemic_new(0.5, 0.1, 800);
+    let rew_c = cs_neighborhood(0.25, 0.01, 0.2, 0.1, 0.4, 800);
+    let ce_k = kl_smooth_ce(&rew_c, 2.0, 1.0);
+    let ce_p = kl_precise_ce(&rew_c, 1.0);
+    let klib_lower = ce_k < ce_p - 0.001;
+
+    println("MC_REGRET"); println(mc_regret);
+    println("HYBRID_REGRET"); println(hybrid_regret);
+    println("PURE_VI_REGRET"); println(pure_vi_regret);
+    println("HYBRID_BETTER_THAN_MC"); println(if better_hybrid_mc {1} else {0});
+    println("HYBRID_COMPETITIVE_VI"); println(if hybrid_competitive {1} else {0});
+
+    if better_hybrid_mc && hybrid_competitive && klib_lower {
+        println("EPISTEMIC_MCTS_DP_HYBRID_PASS");
+        0
+    } else {
+        println("EPISTEMIC_MCTS_DP_HYBRID_FAIL");
+        1
+    }
+}

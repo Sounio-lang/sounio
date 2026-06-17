@@ -1,0 +1,249 @@
+// stdlib/physics/pbpk_phonon_q.sio
+//
+// Quantity-typed coupling between the 1D phonon lattice and the PBPK-14
+// compartmental model. Same multiscale strategy as the legacy
+// stdlib/physics/pbpk_phonon.sio, but using PhononParams (Quantity) and
+// returning Quantity for the cycle-averaged outflow.
+//
+// Multi-scale strategy (unchanged from the legacy):
+//   PBPK runs at ~minutes timescale (14 compartments, well-stirred)
+//   Phonon lattice runs at ~milliseconds (64 sites in liver sinusoid)
+//
+// At each PBPK evaluation of the liver compartment:
+//   1. Set lattice boundary from PBPK portal + arterial concentrations
+//   2. Run the lattice for one cardiac cycle (~0.83s at 72 bpm)
+//   3. Average the outflow concentration and variance over the cycle
+//   4. Return: (cycle_avg_venous_C, cycle_avg_variance)
+//
+// The correction = phonon_outflow - well_stirred_outflow.
+// This quantifies the microcirculation discreteness effect.
+//
+// Unit handling:
+//   Inputs and outputs are Quantity in dim_concentration (kg/m³).
+//   Callers that work in ng/mL must convert at the boundary:
+//       1 ng/mL = 1e-6 kg/m³
+//   The lattice is unit-consistent thereafter.
+//
+// References:
+//   PBPK-14 rapamycin model (rapamycin_pbpk.sio)
+//   stdlib/physics/phonon_quantity.sio (this module's lattice backend)
+//   JCGM 100:2008 — GUM uncertainty propagation
+
+use physics::phonon_quantity::*
+use units::lib::*
+
+// ============================================================================
+// Cycle-averaged liver outflow concentration via the Quantity lattice
+// ============================================================================
+//
+// Runs the lattice for one cardiac cycle, averaging the outflow site
+// (last lattice site) over the cycle. Returns Quantity so the uncertainty
+// is carried by the type.
+
+pub fn phonon_liver_cycle_q(
+    c_portal: Quantity,       // kg/m³
+    c_arterial: Quantity,     // kg/m³
+    c_tissue: Quantity,       // kg/m³
+    base_params: &PhononParams,
+    lattice: &!Lattice64
+) -> Quantity with Mut, Div, Panic {
+    // Construct a copy of base_params with the supplied boundary values
+    // installed. The base geometry (dx, d_eff, k_release, etc.) is
+    // preserved; only the time-dependent boundary concentrations change.
+    var params: PhononParams = PhononParams {
+        d_eff:     base_params.d_eff,
+        dx:        base_params.dx,
+        k_release: base_params.k_release,
+        cl_site:   base_params.cl_site,
+        fu:        base_params.fu,
+        kp:        base_params.kp,
+        c_portal:  c_portal,
+        c_ha:      c_arterial,
+        f_heart:   base_params.f_heart,
+        a_portal:  base_params.a_portal,
+        a_ha:      base_params.a_ha,
+        phi_ha:    base_params.phi_ha,
+        c_tissue:  c_tissue,
+        v_blood:   base_params.v_blood,
+        zonation:  base_params.zonation,
+    }
+
+    // One cardiac cycle: t_cycle = 1 / f_heart
+    let f_heart = params.f_heart.value
+    let t_cycle = if f_heart > 0.0 { 1.0 / f_heart } else { 0.833 }
+
+    // CFL timestep
+    let dt = cfl_dt_q(&params)
+
+    // Accumulate outflow over the cycle
+    var outflow_sum: f64 = 0.0
+    var var_sum: f64 = 0.0
+    var n_samples: i64 = 0
+    var t: f64 = 0.0
+
+    while t < t_cycle {
+        let step_dt = if t + dt > t_cycle { t_cycle - t } else { dt }
+        phonon_rk4_step_q(t, lattice, &params, step_dt)
+        outflow_sum = outflow_sum + lattice.values[lattice.n - 1]
+        var_sum = var_sum + lattice.variances[lattice.n - 1]
+        n_samples = n_samples + 1
+        t = t + step_dt
+    }
+
+    if n_samples > 0 {
+        let avg_conc = outflow_sum / (n_samples as f64)
+        let avg_var  = var_sum / (n_samples as f64)
+        // Clamp negative variance to 0 (linearized GUM can produce
+        // tiny negatives due to FP round-off when concentrations are
+        // near zero), then take sqrt for the standard uncertainty.
+        let var_clamped = if avg_var > 0.0 { avg_var } else { 0.0 }
+        let u = sqrt_units_q(var_clamped)
+        // Sanity clamp: u must be >= 0
+        let u_safe = if u >= 0.0 { u } else { 0.0 }
+        quantity_new(avg_conc, u_safe, dim_concentration())
+    } else {
+        // No time advanced — fall back to the portal concentration as
+        // a sensible default (the boundary should dominate in that case).
+        c_portal
+    }
+}
+
+// ============================================================================
+// Internal sqrt helper (no libm dependency, matches stdlib/units shape)
+// ============================================================================
+
+fn sqrt_units_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// ============================================================================
+// The phonon correction (cycle-averaged outflow minus well-stirred estimate)
+// ============================================================================
+//
+//   c_venous_wellstirred = c_liver / Kp_liver
+//   c_venous_phonon      = cycle average of lattice outflow
+//   correction           = c_venous_phonon - c_venous_wellstirred
+//
+// `c_liver_wellstirred` is the total liver concentration from the
+// well-stirred PBPK compartment (in kg/m³), and `kp_liver` is the
+// tissue:plasma partition coefficient (dimensionless).
+
+pub fn phonon_correction_q(
+    c_liver_wellstirred: Quantity,   // kg/m³
+    kp_liver: Quantity,               // dimensionless
+    c_portal: Quantity,               // kg/m³
+    c_arterial: Quantity,             // kg/m³
+    phonon_params: &PhononParams,
+    lattice: &!Lattice64
+) -> Quantity with Mut, Div, Panic {
+    // Well-stirred venous concentration (must be dim_concentration).
+    let c_venous_ws = quantity_div(c_liver_wellstirred, kp_liver)
+
+    // Use the well-stirred value as the tissue estimate.
+    let c_venous_phonon = phonon_liver_cycle_q(
+        c_portal, c_arterial, c_liver_wellstirred, phonon_params, lattice
+    )
+
+    // Correction = phonon - well_stirred
+    quantity_sub(c_venous_phonon, c_venous_ws)
+}
+
+// ============================================================================
+// Initialize a Quantity lattice with uniform concentration and variance
+// ============================================================================
+//
+// Convenience wrapper for the lattice init pattern in PBPK callers.
+// The variance is stored as the variance (not the std uncertainty), so
+// callers should pass u² if they have a standard uncertainty.
+
+pub fn phonon_init_uniform_q(
+    state: &!Lattice64,
+    c_init: f64,        // kg/m³
+    var_init: f64       // (kg/m³)²
+) with Mut {
+    var i: i64 = 0
+    while i < 64 {
+        state.values[i] = c_init
+        state.variances[i] = var_init
+        i = i + 1
+    }
+    state.n = 64
+}
+
+// ============================================================================
+// Cycle-averaged outflow variance helper
+// ============================================================================
+//
+// Some PBPK callers want just the variance (not the std uncertainty) for
+// downstream aggregation. Returns the cycle-averaged variance at the
+// outflow site.
+
+pub fn phonon_liver_cycle_variance_q(
+    c_portal: Quantity,
+    c_arterial: Quantity,
+    c_tissue: Quantity,
+    base_params: &PhononParams,
+    lattice: &!Lattice64
+) -> f64 with Mut, Div, Panic {
+    let q = phonon_liver_cycle_q(c_portal, c_arterial, c_tissue, base_params, lattice)
+    q.uncertainty * q.uncertainty
+}
+
+// ============================================================================
+// Inline smoke tests (CONVENTIONS §5)
+// ============================================================================
+//
+// Mirrors the test pattern in stdlib/physics/phonon_quantity.sio.
+// Run via:  bin/souc stdlib/physics/pbpk_phonon_q.sio /tmp/out && /tmp/out
+
+fn test_liver_cycle_returns_concentration() with Mut, Div, Panic {
+    let base = rapamycin_phonon_params_q()
+    var s = lattice64_zero()
+    let c_portal   = q_concentration_mass(1.0e-5, 0.0)
+    let c_arterial = q_concentration_mass(8.0e-6, 0.0)
+    let c_tissue   = q_concentration_mass(2.0e-6, 0.0)
+    let out = phonon_liver_cycle_q(c_portal, c_arterial, c_tissue, &base, &!s)
+    assert(dim_eq(out.dim, dim_concentration()))
+    assert(out.value > 0.0)
+    assert(out.uncertainty >= 0.0)
+}
+
+fn test_init_uniform_q_sets_all_sites() with Mut, Panic {
+    var s = lattice64_zero()
+    phonon_init_uniform_q(&!s, 1.5e-5, 1.0e-12)
+    let v0 = s.values[0]
+    let v32 = s.values[32]
+    let v63 = s.values[63]
+    assert(v0 > 1.4999e-5 && v0 < 1.5001e-5)
+    assert(v32 > 1.4999e-5 && v32 < 1.5001e-5)
+    assert(v63 > 1.4999e-5 && v63 < 1.5001e-5)
+    assert(s.n == 64)
+}
+
+fn test_correction_returns_concentration() with Mut, Div, Panic {
+    let base = rapamycin_phonon_params_q()
+    var s = lattice64_zero()
+    let c_liver   = q_concentration_mass(2.0e-6, 0.0)
+    let kp        = q_dimensionless(5.0, 0.0)
+    let c_portal  = q_concentration_mass(1.0e-5, 0.0)
+    let c_ha      = q_concentration_mass(8.0e-6, 0.0)
+    let corr = phonon_correction_q(c_liver, kp, c_portal, c_ha, &base, &!s)
+    assert(dim_eq(corr.dim, dim_concentration()))
+    // Correction should be a finite, bounded quantity (< 1e-5 kg/m³).
+    let d = if corr.value < 0.0 { 0.0 - corr.value } else { corr.value }
+    assert(d < 1.0e-5)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    test_liver_cycle_returns_concentration()
+    test_init_uniform_q_sets_all_sites()
+    test_correction_returns_concentration()
+    0
+}

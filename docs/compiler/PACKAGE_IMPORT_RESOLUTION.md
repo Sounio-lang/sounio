@@ -2,7 +2,7 @@
 topic_id: repo.docs.compiler.package-import-resolution
 authority: repo_only
 audience: contributors
-last_validated: 2026-03-07
+last_validated: 2026-06-17
 validated_by: A4
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.package-import-resolution
 -->
@@ -28,3 +28,5 @@ bash scripts/ci/package_import_science_gate.sh
 ```
 
 That gate validates the `epistemic-core` manifest, runs the package tests listed in `sounio.toml`, runs a downstream scientific witness that imports `epistemic_core::*`, and checks that a missing package import fails without producing an executable.
+
+**Madaros (default `./bin/souc`)** resolves local `packages/` paths in `module_frontend_import_files_from_source` and the AST loader (`resolve_import_file_path`). The gate probes this by requiring `souc check` on the epistemic witness to load **2 modules**. End-to-end compile+run in the gate still uses **lean_single** until native-v2 multimodule lowering is stable.

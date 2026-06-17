@@ -1,0 +1,580 @@
+// stdlib/viz/authoring.sio - typed authoring transactions over Visual IR
+
+use viz::audit::{viz_audit_hash}
+use viz::ir::{VizScene}
+use viz::molecule_editor::{
+    viz_molecule_atom_hash, viz_molecule_select_atom,
+    viz_molecule_select_atom_at, viz_molecule_hit_atom, viz_molecule_nudge_selected_atom,
+    viz_molecule_set_selected_atom_radius, viz_molecule_set_selected_atom_color,
+    viz_molecule_set_atom_color,
+}
+
+pub const VIZ_AUTHOR_SELECT_ATOM: i64 = 1
+pub const VIZ_AUTHOR_SELECT_ATOM_AT: i64 = 2
+pub const VIZ_AUTHOR_NUDGE_SELECTED_ATOM: i64 = 3
+pub const VIZ_AUTHOR_SET_SELECTED_ATOM_RADIUS: i64 = 4
+pub const VIZ_AUTHOR_SET_SELECTED_ATOM_COLOR: i64 = 5
+pub const VIZ_AUTHOR_NUDGE_SELECTED_ATOM_UNITED: i64 = 6
+pub const VIZ_AUTHOR_SET_ATOM_COLOR: i64 = 7
+
+pub const VIZ_AUTHOR_UNIT_ANGSTROM: i64 = 1
+pub const VIZ_AUTHOR_UNIT_NANOMETER: i64 = 2
+
+pub const VIZ_AUTHOR_REASON_OK: i64 = 0
+pub const VIZ_AUTHOR_REASON_UNSUPPORTED_ACTION: i64 = 1
+pub const VIZ_AUTHOR_REASON_INVALID_ATOM: i64 = 2
+pub const VIZ_AUTHOR_REASON_UNKNOWN_UNIT: i64 = 3
+pub const VIZ_AUTHOR_REASON_BOND_GEOMETRY: i64 = 4
+pub const VIZ_AUTHOR_REASON_LOCKED_ATOM: i64 = 5
+pub const VIZ_AUTHOR_REASON_RADIUS_RANGE: i64 = 6
+
+pub struct VizMoleculeConstraint {
+    pub molecule_node: i64,
+    pub locked_atoms: [bool; 64],
+    pub min_bond_len: f64,
+    pub max_bond_len: f64,
+    pub min_radius: f64,
+    pub max_radius: f64,
+    pub hard_reject: bool,
+}
+
+pub struct VizAuthoringAction {
+    pub kind: i64,
+    pub molecule_node: i64,
+    pub atom_index: i64,
+    pub unit_code: i64,
+    pub px: i64,
+    pub py: i64,
+    pub dx: f64,
+    pub dy: f64,
+    pub dz: f64,
+    pub radius: f64,
+    pub r: i64,
+    pub g: i64,
+    pub b: i64,
+}
+
+pub struct VizAuthoringFrame {
+    pub action_kind: i64,
+    pub molecule_node: i64,
+    pub atom_index: i64,
+    pub changed: bool,
+    pub before_audit_hash: i64,
+    pub after_audit_hash: i64,
+    pub before_atom_hash: i64,
+    pub after_atom_hash: i64,
+    pub selected_atom_node: i64,
+    pub selected_atom_index: i64,
+}
+
+pub struct VizAuthoringTrace {
+    pub frames: [VizAuthoringFrame; 32],
+    pub count: i64,
+}
+
+pub struct VizAuthoringResult {
+    pub accepted: bool,
+    pub reason: i64,
+    pub action_kind: i64,
+    pub molecule_node: i64,
+    pub atom_index: i64,
+    pub before_audit_hash: i64,
+    pub after_audit_hash: i64,
+    pub before_atom_hash: i64,
+    pub after_atom_hash: i64,
+}
+
+pub struct VizCheckedAuthoringFrame {
+    pub result: VizAuthoringResult,
+}
+
+pub struct VizCheckedAuthoringTrace {
+    pub frames: [VizCheckedAuthoringFrame; 32],
+    pub count: i64,
+}
+
+pub struct VizAuthoringCertificate {
+    pub accepted: bool,
+    pub reason: i64,
+    pub action_kind: i64,
+    pub molecule_node: i64,
+    pub atom_index: i64,
+    pub before_audit_hash: i64,
+    pub after_audit_hash: i64,
+    pub before_atom_hash: i64,
+    pub after_atom_hash: i64,
+    pub unchanged_when_rejected: bool,
+    pub proof_hash: i64,
+}
+
+pub fn viz_molecule_constraint_default(molecule_node: i64) -> VizMoleculeConstraint {
+    VizMoleculeConstraint {
+        molecule_node: molecule_node,
+        locked_atoms: [false; 64],
+        min_bond_len: 0.4,
+        max_bond_len: 3.0,
+        min_radius: 0.2,
+        max_radius: 2.0,
+        hard_reject: true,
+    }
+}
+
+pub fn viz_molecule_constraint_lock_atom(c: &!VizMoleculeConstraint, atom_idx: i64) -> bool with Mut {
+    if atom_idx < 0 || atom_idx >= 64 { return false }
+    c.locked_atoms[atom_idx as usize] = true
+    true
+}
+
+pub fn viz_authoring_result_empty() -> VizAuthoringResult {
+    VizAuthoringResult {
+        accepted: false,
+        reason: VIZ_AUTHOR_REASON_UNSUPPORTED_ACTION,
+        action_kind: 0,
+        molecule_node: 0 - 1,
+        atom_index: 0 - 1,
+        before_audit_hash: 0,
+        after_audit_hash: 0,
+        before_atom_hash: 0,
+        after_atom_hash: 0,
+    }
+}
+
+pub fn viz_checked_authoring_frame_empty() -> VizCheckedAuthoringFrame {
+    VizCheckedAuthoringFrame { result: viz_authoring_result_empty() }
+}
+
+pub fn viz_checked_authoring_trace_new() -> VizCheckedAuthoringTrace {
+    VizCheckedAuthoringTrace { frames: [viz_checked_authoring_frame_empty(); 32], count: 0 }
+}
+
+pub fn viz_authoring_certificate_empty() -> VizAuthoringCertificate {
+    VizAuthoringCertificate {
+        accepted: false,
+        reason: VIZ_AUTHOR_REASON_UNSUPPORTED_ACTION,
+        action_kind: 0,
+        molecule_node: 0 - 1,
+        atom_index: 0 - 1,
+        before_audit_hash: 0,
+        after_audit_hash: 0,
+        before_atom_hash: 0,
+        after_atom_hash: 0,
+        unchanged_when_rejected: true,
+        proof_hash: 0,
+    }
+}
+
+pub fn viz_authoring_action_empty() -> VizAuthoringAction {
+    VizAuthoringAction {
+        kind: 0,
+        molecule_node: 0 - 1,
+        atom_index: 0 - 1,
+        unit_code: 0,
+        px: 0,
+        py: 0,
+        dx: 0.0,
+        dy: 0.0,
+        dz: 0.0,
+        radius: 0.0,
+        r: 0,
+        g: 0,
+        b: 0,
+    }
+}
+
+pub fn viz_authoring_frame_empty() -> VizAuthoringFrame {
+    VizAuthoringFrame {
+        action_kind: 0,
+        molecule_node: 0 - 1,
+        atom_index: 0 - 1,
+        changed: false,
+        before_audit_hash: 0,
+        after_audit_hash: 0,
+        before_atom_hash: 0,
+        after_atom_hash: 0,
+        selected_atom_node: 0 - 1,
+        selected_atom_index: 0 - 1,
+    }
+}
+
+pub fn viz_authoring_trace_new() -> VizAuthoringTrace {
+    VizAuthoringTrace { frames: [viz_authoring_frame_empty(); 32], count: 0 }
+}
+
+pub fn viz_author_select_atom(molecule_node: i64, atom_index: i64) -> VizAuthoringAction {
+    var a = viz_authoring_action_empty()
+    a.kind = VIZ_AUTHOR_SELECT_ATOM
+    a.molecule_node = molecule_node
+    a.atom_index = atom_index
+    a
+}
+
+pub fn viz_author_select_atom_at(molecule_node: i64, px: i64, py: i64) -> VizAuthoringAction {
+    var a = viz_authoring_action_empty()
+    a.kind = VIZ_AUTHOR_SELECT_ATOM_AT
+    a.molecule_node = molecule_node
+    a.px = px
+    a.py = py
+    a
+}
+
+pub fn viz_author_nudge_selected_atom(dx: f64, dy: f64, dz: f64) -> VizAuthoringAction {
+    var a = viz_authoring_action_empty()
+    a.kind = VIZ_AUTHOR_NUDGE_SELECTED_ATOM
+    a.dx = dx
+    a.dy = dy
+    a.dz = dz
+    a
+}
+
+pub fn viz_author_nudge_selected_atom_unit(dx: f64, dy: f64, dz: f64, unit_code: i64) -> VizAuthoringAction {
+    var a = viz_authoring_action_empty()
+    a.kind = VIZ_AUTHOR_NUDGE_SELECTED_ATOM_UNITED
+    a.unit_code = unit_code
+    a.dx = dx
+    a.dy = dy
+    a.dz = dz
+    a
+}
+
+pub fn viz_author_set_selected_atom_radius(radius: f64) -> VizAuthoringAction {
+    var a = viz_authoring_action_empty()
+    a.kind = VIZ_AUTHOR_SET_SELECTED_ATOM_RADIUS
+    a.radius = radius
+    a
+}
+
+pub fn viz_author_set_selected_atom_color(r: i64, g: i64, b: i64) -> VizAuthoringAction {
+    var a = viz_authoring_action_empty()
+    a.kind = VIZ_AUTHOR_SET_SELECTED_ATOM_COLOR
+    a.r = r
+    a.g = g
+    a.b = b
+    a
+}
+
+pub fn viz_author_set_atom_color(molecule_node: i64, atom_index: i64, r: i64, g: i64, b: i64) -> VizAuthoringAction {
+    var a = viz_authoring_action_empty()
+    a.kind = VIZ_AUTHOR_SET_ATOM_COLOR
+    a.molecule_node = molecule_node
+    a.atom_index = atom_index
+    a.r = r
+    a.g = g
+    a.b = b
+    a
+}
+
+fn viz_authoring_action_node(scene: &VizScene, action: &VizAuthoringAction) -> i64 {
+    if action.molecule_node >= 0 { return action.molecule_node }
+    scene.selected_atom_node
+}
+
+fn viz_authoring_action_atom(scene: &VizScene, action: &VizAuthoringAction) -> i64 {
+    if action.atom_index >= 0 { return action.atom_index }
+    scene.selected_atom_index
+}
+
+fn viz_authoring_unit_to_angstrom(v: f64, unit_code: i64) -> f64 {
+    if unit_code == VIZ_AUTHOR_UNIT_ANGSTROM { return v }
+    if unit_code == VIZ_AUTHOR_UNIT_NANOMETER { return v * 10.0 }
+    1.0e100
+}
+
+fn viz_authoring_selected_slot(scene: &VizScene) -> i64 {
+    let node = scene.selected_atom_node
+    if node < 0 || node >= scene.node_count { return 0 - 1 }
+    let n = scene.nodes[node as usize]
+    if n.data_slot < 0 || n.data_slot >= scene.molecule_count { return 0 - 1 }
+    n.data_slot
+}
+
+fn viz_authoring_node_slot(scene: &VizScene, node: i64) -> i64 {
+    if node < 0 || node >= scene.node_count { return 0 - 1 }
+    let n = scene.nodes[node as usize]
+    if n.data_slot < 0 || n.data_slot >= scene.molecule_count { return 0 - 1 }
+    n.data_slot
+}
+
+fn viz_authoring_bond_ok(scene: &VizScene, slot: i64, atom_idx: i64, nx: f64, ny: f64, nz: f64) -> bool {
+    var bond_count = scene.molecules[slot as usize].bond_count
+    if bond_count < 0 { bond_count = 0 }
+    if bond_count > 96 { bond_count = 96 }
+    var bi: i64 = 0
+    while bi < bond_count {
+        let b = scene.molecules[slot as usize].bonds[bi as usize]
+        if b.atom_a == atom_idx || b.atom_b == atom_idx {
+            let other_idx = if b.atom_a == atom_idx { b.atom_b } else { b.atom_a }
+            if other_idx < 0 || other_idx >= scene.molecules[slot as usize].atom_count { return false }
+            let other = scene.molecules[slot as usize].atoms[other_idx as usize]
+            let dx = nx - other.x
+            let dy = ny - other.y
+            let dz = nz - other.z
+            let d2 = dx * dx + dy * dy + dz * dz
+            if d2 < 0.16 { return false }
+            if d2 > 9.0 { return false }
+        }
+        bi = bi + 1
+    }
+    true
+}
+
+fn viz_authoring_bond_ok_with_constraint(scene: &VizScene, c: &VizMoleculeConstraint, slot: i64, atom_idx: i64, nx: f64, ny: f64, nz: f64) -> bool {
+    var bond_count = scene.molecules[slot as usize].bond_count
+    if bond_count < 0 { bond_count = 0 }
+    if bond_count > 96 { bond_count = 96 }
+    let min2 = c.min_bond_len * c.min_bond_len
+    let max2 = c.max_bond_len * c.max_bond_len
+    var bi: i64 = 0
+    while bi < bond_count {
+        let b = scene.molecules[slot as usize].bonds[bi as usize]
+        if b.atom_a == atom_idx || b.atom_b == atom_idx {
+            let other_idx = if b.atom_a == atom_idx { b.atom_b } else { b.atom_a }
+            if other_idx < 0 || other_idx >= scene.molecules[slot as usize].atom_count { return false }
+            let other = scene.molecules[slot as usize].atoms[other_idx as usize]
+            let dx = nx - other.x
+            let dy = ny - other.y
+            let dz = nz - other.z
+            let d2 = dx * dx + dy * dy + dz * dz
+            if d2 < min2 { return false }
+            if d2 > max2 { return false }
+        }
+        bi = bi + 1
+    }
+    true
+}
+
+pub fn viz_authoring_nudge_selected_atom_unit(scene: &!VizScene, dx: f64, dy: f64, dz: f64, unit_code: i64) -> bool with Mut {
+    if unit_code != VIZ_AUTHOR_UNIT_ANGSTROM && unit_code != VIZ_AUTHOR_UNIT_NANOMETER { return false }
+    let slot = viz_authoring_selected_slot(scene)
+    if slot < 0 { return false }
+    let atom_idx = scene.selected_atom_index
+    if atom_idx < 0 || atom_idx >= scene.molecules[slot as usize].atom_count { return false }
+    let atom = scene.molecules[slot as usize].atoms[atom_idx as usize]
+    let nx = atom.x + viz_authoring_unit_to_angstrom(dx, unit_code)
+    let ny = atom.y + viz_authoring_unit_to_angstrom(dy, unit_code)
+    let nz = atom.z + viz_authoring_unit_to_angstrom(dz, unit_code)
+    if !viz_authoring_bond_ok(scene, slot, atom_idx, nx, ny, nz) { return false }
+    viz_molecule_nudge_selected_atom(
+        scene,
+        viz_authoring_unit_to_angstrom(dx, unit_code),
+        viz_authoring_unit_to_angstrom(dy, unit_code),
+        viz_authoring_unit_to_angstrom(dz, unit_code)
+    )
+}
+
+pub fn viz_authoring_apply(scene: &!VizScene, action: VizAuthoringAction) -> bool with Mut {
+    if action.kind == VIZ_AUTHOR_SELECT_ATOM {
+        return viz_molecule_select_atom(scene, action.molecule_node, action.atom_index)
+    }
+    if action.kind == VIZ_AUTHOR_SELECT_ATOM_AT {
+        return viz_molecule_select_atom_at(scene, action.molecule_node, action.px, action.py) >= 0
+    }
+    if action.kind == VIZ_AUTHOR_NUDGE_SELECTED_ATOM {
+        return viz_molecule_nudge_selected_atom(scene, action.dx, action.dy, action.dz)
+    }
+    if action.kind == VIZ_AUTHOR_NUDGE_SELECTED_ATOM_UNITED {
+        return viz_authoring_nudge_selected_atom_unit(scene, action.dx, action.dy, action.dz, action.unit_code)
+    }
+    if action.kind == VIZ_AUTHOR_SET_SELECTED_ATOM_RADIUS {
+        return viz_molecule_set_selected_atom_radius(scene, action.radius)
+    }
+    if action.kind == VIZ_AUTHOR_SET_SELECTED_ATOM_COLOR {
+        return viz_molecule_set_selected_atom_color(scene, action.r, action.g, action.b)
+    }
+    if action.kind == VIZ_AUTHOR_SET_ATOM_COLOR {
+        return viz_molecule_set_atom_color(scene, action.molecule_node, action.atom_index, action.r, action.g, action.b)
+    }
+    false
+}
+
+fn viz_authoring_checked_atom(scene: &VizScene, action: &VizAuthoringAction) -> i64 with Mut {
+    if action.kind == VIZ_AUTHOR_SELECT_ATOM { return action.atom_index }
+    if action.kind == VIZ_AUTHOR_SELECT_ATOM_AT { return viz_molecule_hit_atom(scene, action.molecule_node, action.px, action.py) }
+    if action.atom_index >= 0 { return action.atom_index }
+    scene.selected_atom_index
+}
+
+fn viz_authoring_checked_node(scene: &VizScene, action: &VizAuthoringAction, constraint: &VizMoleculeConstraint) -> i64 {
+    if action.molecule_node >= 0 { return action.molecule_node }
+    if scene.selected_atom_node >= 0 { return scene.selected_atom_node }
+    constraint.molecule_node
+}
+
+fn viz_authoring_make_result(scene: &VizScene, action: &VizAuthoringAction, node: i64, atom: i64, accepted: bool, reason: i64, before_audit: i64, before_atom_hash: i64) -> VizAuthoringResult with Mut {
+    VizAuthoringResult {
+        accepted: accepted,
+        reason: reason,
+        action_kind: action.kind,
+        molecule_node: node,
+        atom_index: atom,
+        before_audit_hash: before_audit,
+        after_audit_hash: viz_audit_hash(scene),
+        before_atom_hash: before_atom_hash,
+        after_atom_hash: viz_molecule_atom_hash(scene, node, atom),
+    }
+}
+
+pub fn viz_authoring_apply_checked(scene: &!VizScene, constraint: &VizMoleculeConstraint, action: VizAuthoringAction) -> VizAuthoringResult with Mut {
+    let node = viz_authoring_checked_node(scene, &action, constraint)
+    let atom = viz_authoring_checked_atom(scene, &action)
+    let before_audit = viz_audit_hash(scene)
+    let before_atom_hash = viz_molecule_atom_hash(scene, node, atom)
+    let slot = viz_authoring_node_slot(scene, node)
+    if action.kind != VIZ_AUTHOR_SELECT_ATOM && action.kind != VIZ_AUTHOR_SELECT_ATOM_AT &&
+       action.kind != VIZ_AUTHOR_NUDGE_SELECTED_ATOM && action.kind != VIZ_AUTHOR_NUDGE_SELECTED_ATOM_UNITED &&
+       action.kind != VIZ_AUTHOR_SET_SELECTED_ATOM_RADIUS && action.kind != VIZ_AUTHOR_SET_SELECTED_ATOM_COLOR &&
+       action.kind != VIZ_AUTHOR_SET_ATOM_COLOR {
+        return viz_authoring_make_result(scene, &action, node, atom, false, VIZ_AUTHOR_REASON_UNSUPPORTED_ACTION, before_audit, before_atom_hash)
+    }
+    if slot < 0 || atom < 0 || atom >= scene.molecules[slot as usize].atom_count {
+        return viz_authoring_make_result(scene, &action, node, atom, false, VIZ_AUTHOR_REASON_INVALID_ATOM, before_audit, before_atom_hash)
+    }
+    if atom < 64 && constraint.locked_atoms[atom as usize] {
+        return viz_authoring_make_result(scene, &action, node, atom, false, VIZ_AUTHOR_REASON_LOCKED_ATOM, before_audit, before_atom_hash)
+    }
+    if action.kind == VIZ_AUTHOR_NUDGE_SELECTED_ATOM_UNITED {
+        if action.unit_code != VIZ_AUTHOR_UNIT_ANGSTROM && action.unit_code != VIZ_AUTHOR_UNIT_NANOMETER {
+            return viz_authoring_make_result(scene, &action, node, atom, false, VIZ_AUTHOR_REASON_UNKNOWN_UNIT, before_audit, before_atom_hash)
+        }
+        let current = scene.molecules[slot as usize].atoms[atom as usize]
+        let nx = current.x + viz_authoring_unit_to_angstrom(action.dx, action.unit_code)
+        let ny = current.y + viz_authoring_unit_to_angstrom(action.dy, action.unit_code)
+        let nz = current.z + viz_authoring_unit_to_angstrom(action.dz, action.unit_code)
+        if !viz_authoring_bond_ok_with_constraint(scene, constraint, slot, atom, nx, ny, nz) {
+            return viz_authoring_make_result(scene, &action, node, atom, false, VIZ_AUTHOR_REASON_BOND_GEOMETRY, before_audit, before_atom_hash)
+        }
+    }
+    if action.kind == VIZ_AUTHOR_SET_SELECTED_ATOM_RADIUS {
+        if action.radius < constraint.min_radius || action.radius > constraint.max_radius {
+            return viz_authoring_make_result(scene, &action, node, atom, false, VIZ_AUTHOR_REASON_RADIUS_RANGE, before_audit, before_atom_hash)
+        }
+    }
+    let changed = viz_authoring_apply(scene, action)
+    let reason = if changed { VIZ_AUTHOR_REASON_OK } else { VIZ_AUTHOR_REASON_INVALID_ATOM }
+    viz_authoring_make_result(scene, &action, node, atom, changed, reason, before_audit, before_atom_hash)
+}
+
+pub fn viz_authoring_trace_actions_checked(scene: &!VizScene, constraint: &VizMoleculeConstraint, actions: &[VizAuthoringAction; 32], count: i64) -> VizCheckedAuthoringTrace with Mut {
+    var trace = viz_checked_authoring_trace_new()
+    var i: i64 = 0
+    while i < count && i < 32 {
+        let result = viz_authoring_apply_checked(scene, constraint, actions[i as usize])
+        trace.frames[trace.count as usize] = VizCheckedAuthoringFrame { result: result }
+        trace.count = trace.count + 1
+        i = i + 1
+    }
+    trace
+}
+
+fn viz_authoring_bool_i64(v: bool) -> i64 {
+    if v { return 1 }
+    0
+}
+
+pub fn viz_authoring_certificate_hash(c: &VizAuthoringCertificate) -> i64 {
+    var h: i64 = 29
+    h = h * 131 + viz_authoring_bool_i64(c.accepted)
+    h = h * 131 + c.reason
+    h = h * 131 + c.action_kind
+    h = h * 131 + c.molecule_node
+    h = h * 131 + c.atom_index
+    h = h * 131 + c.before_audit_hash
+    h = h * 131 + c.after_audit_hash
+    h = h * 131 + c.before_atom_hash
+    h = h * 131 + c.after_atom_hash
+    h = h * 131 + viz_authoring_bool_i64(c.unchanged_when_rejected)
+    h
+}
+
+pub fn viz_authoring_certificate_from_result(result: &VizAuthoringResult) -> VizAuthoringCertificate {
+    var c = viz_authoring_certificate_empty()
+    c.accepted = result.accepted
+    c.reason = result.reason
+    c.action_kind = result.action_kind
+    c.molecule_node = result.molecule_node
+    c.atom_index = result.atom_index
+    c.before_audit_hash = result.before_audit_hash
+    c.after_audit_hash = result.after_audit_hash
+    c.before_atom_hash = result.before_atom_hash
+    c.after_atom_hash = result.after_atom_hash
+    c.unchanged_when_rejected = true
+    if !result.accepted {
+        c.unchanged_when_rejected = result.before_audit_hash == result.after_audit_hash &&
+            result.before_atom_hash == result.after_atom_hash
+    }
+    c.proof_hash = viz_authoring_certificate_hash(&c)
+    c
+}
+
+pub fn viz_authoring_verify_certificate(result: &VizAuthoringResult, cert: &VizAuthoringCertificate) -> bool {
+    if cert.accepted != result.accepted { return false }
+    if cert.reason != result.reason { return false }
+    if cert.action_kind != result.action_kind { return false }
+    if cert.molecule_node != result.molecule_node { return false }
+    if cert.atom_index != result.atom_index { return false }
+    if cert.before_audit_hash != result.before_audit_hash { return false }
+    if cert.after_audit_hash != result.after_audit_hash { return false }
+    if cert.before_atom_hash != result.before_atom_hash { return false }
+    if cert.after_atom_hash != result.after_atom_hash { return false }
+    if result.accepted && result.reason != VIZ_AUTHOR_REASON_OK { return false }
+    if !result.accepted && result.reason == VIZ_AUTHOR_REASON_OK { return false }
+    if !result.accepted && !cert.unchanged_when_rejected { return false }
+    viz_authoring_certificate_hash(cert) == cert.proof_hash
+}
+
+pub fn viz_authoring_checked_trace_certificate_hash(trace: &VizCheckedAuthoringTrace) -> i64 {
+    var h: i64 = 41
+    var i: i64 = 0
+    while i < trace.count && i < 32 {
+        let cert = viz_authoring_certificate_from_result(&trace.frames[i as usize].result)
+        h = h * 131 + cert.proof_hash
+        i = i + 1
+    }
+    h
+}
+
+pub fn viz_authoring_verify_checked_trace(trace: &VizCheckedAuthoringTrace) -> bool {
+    if trace.count < 0 || trace.count > 32 { return false }
+    var i: i64 = 0
+    while i < trace.count {
+        let cert = viz_authoring_certificate_from_result(&trace.frames[i as usize].result)
+        if !viz_authoring_verify_certificate(&trace.frames[i as usize].result, &cert) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn viz_authoring_record(trace: &!VizAuthoringTrace, scene: &VizScene, action: VizAuthoringAction, changed: bool, before_audit: i64, before_atom_hash: i64) with Mut {
+    if trace.count < 0 || trace.count >= 32 { return }
+    let idx = trace.count
+    let node = viz_authoring_action_node(scene, &action)
+    let atom = viz_authoring_action_atom(scene, &action)
+    trace.frames[idx as usize] = VizAuthoringFrame {
+        action_kind: action.kind,
+        molecule_node: node,
+        atom_index: atom,
+        changed: changed,
+        before_audit_hash: before_audit,
+        after_audit_hash: viz_audit_hash(scene),
+        before_atom_hash: before_atom_hash,
+        after_atom_hash: viz_molecule_atom_hash(scene, node, atom),
+        selected_atom_node: scene.selected_atom_node,
+        selected_atom_index: scene.selected_atom_index,
+    }
+    trace.count = trace.count + 1
+}
+
+pub fn viz_authoring_trace_actions(scene: &!VizScene, actions: &[VizAuthoringAction; 32], count: i64) -> VizAuthoringTrace with Mut {
+    var trace = viz_authoring_trace_new()
+    var i: i64 = 0
+    while i < count && i < 32 {
+        let action = actions[i as usize]
+        let node = viz_authoring_action_node(scene, &action)
+        let atom = viz_authoring_action_atom(scene, &action)
+        let before_audit = viz_audit_hash(scene)
+        let before_atom_hash = viz_molecule_atom_hash(scene, node, atom)
+        let changed = viz_authoring_apply(scene, action)
+        viz_authoring_record(&!trace, scene, action, changed, before_audit, before_atom_hash)
+        i = i + 1
+    }
+    trace
+}

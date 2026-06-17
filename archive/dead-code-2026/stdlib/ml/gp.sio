@@ -1,0 +1,280 @@
+// stdlib/ml/gp.sio
+// Gaussian Processes for Sounio ML
+//
+// GPs are naturally epistemic: every prediction has a posterior variance.
+// Uses fixed arrays. Max training size: 16 points, max dim: 4.
+
+fn gp_abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn gp_sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    return y
+}
+
+fn gp_exp_f64(x: f64) -> f64 {
+    if x > 20.0 { return gp_exp_f64(x / 2.0) * gp_exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / gp_exp_f64(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var i: i64 = 1
+    while i < 20 {
+        term = term * x / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+fn gp_log_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    var val = x
+    var k = 0.0
+    let e = 2.718281828459045
+    while val > e { val = val / e; k = k + 1.0 }
+    while val < 1.0 / e { val = val * e; k = k - 1.0 }
+    let u = (val - 1.0) / (val + 1.0)
+    let u2 = u * u
+    var sum = u
+    var term = u
+    term = term * u2; sum = sum + term / 3.0
+    term = term * u2; sum = sum + term / 5.0
+    term = term * u2; sum = sum + term / 7.0
+    term = term * u2; sum = sum + term / 9.0
+    term = term * u2; sum = sum + term / 11.0
+    return 2.0 * sum + k
+}
+
+// RBF kernel: k(x1, x2) = variance * exp(-0.5 * ||x1-x2||^2 / length_scale^2)
+fn kernel_rbf(x1: [f64; 4], x2: [f64; 4], d: i64, length_scale: f64, variance: f64) -> f64 {
+    var sum_sq = 0.0
+    var i: i64 = 0
+    while i < d {
+        let diff = x1[i] - x2[i]
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
+    }
+    return variance * gp_exp_f64(0.0 - 0.5 * sum_sq / (length_scale * length_scale))
+}
+
+struct KernelParams {
+    length_scale: f64,
+    variance: f64,
+}
+
+// GP prediction result
+struct GPPrediction {
+    mean: f64,
+    variance: f64,
+    conf_lo: f64,
+    conf_hi: f64,
+}
+
+// Compute kernel matrix K[n x n] for training data X[n x d]
+// X is flattened row-major, K output is flattened row-major
+fn gp_kernel_matrix(X: [f64; 64], n: i64, d: i64, params: KernelParams, K: &![f64; 256]) {
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = 0
+        while j < n {
+            var x1 = [0.0; 4]
+            var x2 = [0.0; 4]
+            var k: i64 = 0
+            while k < d {
+                x1[k] = X[i * d + k]
+                x2[k] = X[j * d + k]
+                k = k + 1
+            }
+            K[i * n + j] = kernel_rbf(x1, x2, d, params.length_scale, params.variance)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Cholesky decomposition: A = L * L^T (in-place, lower triangle)
+fn gp_cholesky(A: [f64; 256], n: i64, L: &![f64; 256]) {
+    // Zero out L
+    var idx: i64 = 0
+    while idx < n * n {
+        L[idx] = 0.0
+        idx = idx + 1
+    }
+
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = 0
+        while j <= i {
+            var sum = 0.0
+            var k: i64 = 0
+            while k < j {
+                sum = sum + L[i * n + k] * L[j * n + k]
+                k = k + 1
+            }
+            if i == j {
+                L[i * n + j] = gp_sqrt_f64(A[i * n + i] - sum)
+            } else {
+                let diag = L[j * n + j]
+                if diag > 0.0 {
+                    L[i * n + j] = (A[i * n + j] - sum) / diag
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Solve L * x = b where L is lower triangular
+fn gp_solve_lower(L: [f64; 256], b: [f64; 16], n: i64, x: &![f64; 16]) {
+    var i: i64 = 0
+    while i < n {
+        var sum = 0.0
+        var j: i64 = 0
+        while j < i {
+            sum = sum + L[i * n + j] * x[j]
+            j = j + 1
+        }
+        let diag = L[i * n + i]
+        if diag > 0.0 {
+            x[i] = (b[i] - sum) / diag
+        } else {
+            x[i] = 0.0
+        }
+        i = i + 1
+    }
+}
+
+// Solve L^T * x = b where L is lower triangular
+fn gp_solve_upper(L: [f64; 256], b: [f64; 16], n: i64, x: &![f64; 16]) {
+    var i = n - 1
+    while i >= 0 {
+        var sum = 0.0
+        var j = i + 1
+        while j < n {
+            sum = sum + L[j * n + i] * x[j]
+            j = j + 1
+        }
+        let diag = L[i * n + i]
+        if diag > 0.0 {
+            x[i] = (b[i] - sum) / diag
+        } else {
+            x[i] = 0.0
+        }
+        i = i - 1
+    }
+}
+
+// Dot product of two vectors
+fn gp_dot(a: [f64; 16], b: [f64; 16], n: i64) -> f64 {
+    var sum = 0.0
+    var i: i64 = 0
+    while i < n {
+        sum = sum + a[i] * b[i]
+        i = i + 1
+    }
+    return sum
+}
+
+// Fit GP: compute alpha = (K + noise*I)^{-1} * y via Cholesky
+// Returns alpha in out_alpha, L in out_L
+fn gp_fit(X: [f64; 64], y: [f64; 16], n: i64, d: i64, params: KernelParams, noise: f64,
+          out_alpha: &![f64; 16], out_L: &![f64; 256]) {
+    // Compute K
+    var K = [0.0; 256]
+    gp_kernel_matrix(X, n, d, params, &!K)
+
+    // K_noisy = K + noise * I
+    var i: i64 = 0
+    while i < n {
+        K[i * n + i] = K[i * n + i] + noise
+        i = i + 1
+    }
+
+    // Cholesky
+    gp_cholesky(K, n, out_L)
+
+    // Solve L * tmp = y
+    var tmp = [0.0; 16]
+    var L_copy = [0.0; 256]
+    var ci: i64 = 0
+    while ci < n * n {
+        L_copy[ci] = out_L[ci]
+        ci = ci + 1
+    }
+    gp_solve_lower(L_copy, y, n, &!tmp)
+
+    // Solve L^T * alpha = tmp
+    gp_solve_upper(L_copy, tmp, n, out_alpha)
+}
+
+// Predict at a single test point
+fn gp_predict(X_train: [f64; 64], n: i64, d: i64, params: KernelParams,
+              alpha: [f64; 16], L: [f64; 256], x_test: [f64; 4]) -> GPPrediction {
+    // k_star[i] = kernel(x_test, X_train[i])
+    var k_star = [0.0; 16]
+    var i: i64 = 0
+    while i < n {
+        var x_i = [0.0; 4]
+        var j: i64 = 0
+        while j < d {
+            x_i[j] = X_train[i * d + j]
+            j = j + 1
+        }
+        k_star[i] = kernel_rbf(x_test, x_i, d, params.length_scale, params.variance)
+        i = i + 1
+    }
+
+    // mean = k_star^T * alpha
+    let mean = gp_dot(k_star, alpha, n)
+
+    // variance = k(x*,x*) - v^T v where L*v = k_star
+    let k_ss = kernel_rbf(x_test, x_test, d, params.length_scale, params.variance)
+    var v = [0.0; 16]
+    gp_solve_lower(L, k_star, n, &!v)
+    let vtv = gp_dot(v, v, n)
+    var variance = k_ss - vtv
+    if variance < 0.0 { variance = 0.0 }
+
+    let std_dev = gp_sqrt_f64(variance)
+
+    GPPrediction {
+        mean: mean,
+        variance: variance,
+        conf_lo: mean - 1.96 * std_dev,
+        conf_hi: mean + 1.96 * std_dev,
+    }
+}
+
+// Log marginal likelihood
+fn gp_log_marginal_likelihood(y: [f64; 16], alpha: [f64; 16], L: [f64; 256], n: i64) -> f64 {
+    let pi = 3.141592653589793
+
+    // -0.5 * y^T * alpha
+    let term1 = 0.0 - 0.5 * gp_dot(y, alpha, n)
+
+    // -sum(log(diag(L)))
+    var log_det = 0.0
+    var i: i64 = 0
+    while i < n {
+        log_det = log_det + gp_log_f64(L[i * n + i])
+        i = i + 1
+    }
+    let term2 = 0.0 - log_det
+
+    // -n/2 * log(2*pi)
+    let term3 = 0.0 - 0.5 * (n as f64) * gp_log_f64(2.0 * pi)
+
+    return term1 + term2 + term3
+}

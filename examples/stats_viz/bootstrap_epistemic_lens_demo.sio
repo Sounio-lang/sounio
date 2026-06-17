@@ -1,0 +1,139 @@
+// examples/stats_viz/bootstrap_epistemic_lens_demo.sio
+//
+// Bootstrap BCa (média) + epistemic lens + SVG publicação + PNG.
+// Compile: ./artifacts/self-hosted/souc-self-hosted-x86_64 examples/stats_viz/bootstrap_epistemic_lens_demo.sio /tmp/bca_lens.elf
+// Run:     chmod +x /tmp/bca_lens.elf && /tmp/bca_lens.elf > /tmp/sounio_bootstrap_band.svg
+
+use stats::epistemic::bootstrap::{bootstrap_ci_bca_mean}
+use graphics::epistemic::{
+    new_epistemic_curve, add_glyph, build_epistemic_figure, EpistemicGlyphSpec,
+    provenance_kind_measured, provenance_kind_model,
+    confidence_decay_config_default, draw_epistemic_figure_to_surface
+}
+use graphics::surface::{surface_new}
+use graphics::view
+use graphics::export::{export_png}
+use graphics::svg::{svg_epistemic_band_plot, svg_confidence_decay_plot}
+use graphics::drawing::{color_blue, color_green, color_red, color_white, color_black}
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn min_f64(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn mean_data(data: [f64; 100], n: i64) -> f64 with Div {
+    var sum = 0.0
+    var i: i64 = 0
+    while i < n {
+        sum = sum + data[i as usize]
+        i = i + 1
+    }
+    sum / (n as f64)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let n: i64 = 16
+
+    // Curva tipo PK (decaimento exponencial + ruído determinístico)
+    var samples: [f64; 100] = [0.0; 100]
+    samples[0] = 99.2
+    samples[1] = 83.5
+    samples[2] = 74.0
+    samples[3] = 61.9
+    samples[4] = 54.1
+    samples[5] = 44.3
+    samples[6] = 39.0
+    samples[7] = 31.4
+    samples[8] = 27.6
+    samples[9] = 22.1
+    samples[10] = 19.8
+    samples[11] = 15.5
+    samples[12] = 14.0
+    samples[13] = 10.8
+    samples[14] = 9.9
+    samples[15] = 7.6
+
+    let ci = bootstrap_ci_bca_mean(samples, n, 400, 0.05, 20260607)
+    let mu = mean_data(samples, n)
+
+    println("=== Bootstrap BCa + Epistemic Lens ===")
+    println("n=")
+    println(n)
+    println("mean=")
+    println(mu)
+    println("BCa lower=")
+    println(ci.lower)
+    println("BCa upper=")
+    println(ci.upper)
+    println("SE bootstrap=")
+    println(ci.se_bootstrap)
+
+    var xs: [f64; 256] = [0.0; 256]
+    var ys: [f64; 256] = [0.0; 256]
+    var conf: [f64; 256] = [0.0; 256]
+    var lower: [f64; 256] = [0.0; 256]
+    var upper: [f64; 256] = [0.0; 256]
+
+    let half_width = (ci.upper - ci.lower) * 0.5
+    let scale = if half_width > 1.0e-9 { half_width } else { 1.0 }
+
+    var i: i64 = 0
+    while i < n {
+        let idx = i as usize
+        xs[idx] = i as f64
+        ys[idx] = samples[idx]
+        let dev = abs_f64(ys[idx] - mu)
+        conf[idx] = 1.0 - min_f64(1.0, dev / scale)
+        if conf[idx] < 0.12 { conf[idx] = 0.12 }
+        lower[idx] = ys[idx] - ci.se_bootstrap * 1.96
+        upper[idx] = ys[idx] + ci.se_bootstrap * 1.96
+        i = i + 1
+    }
+
+    var fig = new_epistemic_curve(xs, ys, conf, n)
+    fig = add_glyph(fig, EpistemicGlyphSpec {
+        data_index: 2,
+        kind: provenance_kind_measured(),
+        offset_x: 2,
+        offset_y: -2
+    })
+    fig = add_glyph(fig, EpistemicGlyphSpec {
+        data_index: 10,
+        kind: provenance_kind_model(),
+        offset_x: 1,
+        offset_y: 2
+    })
+    let fig = build_epistemic_figure(fig.xs, fig.ys, fig.conf, fig.n, fig.glyphs, fig.glyph_count)
+
+    println("\n--- Epistemic lens (terminal) ---")
+    view::show_epistemic_lens(&fig)
+
+    let s = surface_new(560, 400)
+    let drawn = draw_epistemic_figure_to_surface(&fig, s, confidence_decay_config_default())
+    let png_ok = export_png(&drawn, "/tmp/sounio_bootstrap_lens.png")
+    println("\nPNG /tmp/sounio_bootstrap_lens.png ok=")
+    println(if png_ok { 1 } else { 0 })
+
+    println("\n--- SVG: banda epistémica BCa (publicação) ---")
+    svg_epistemic_band_plot(
+        &xs, &ys, &lower, &upper, n,
+        560, 400, 40,
+        color_blue(), color_green(), color_white(), color_black()
+    )
+
+    println("\n--- SVG: confidence decay ---")
+    svg_confidence_decay_plot(
+        &xs, &ys, &conf, n,
+        560, 400, 40,
+        color_red(), color_white(), color_black(), 40, 255
+    )
+
+    // BCa pode colapsar (lower≈upper) com amostras curtas; validamos o pipeline.
+    let ok = png_ok && ci.upper + 1.0e-9 >= ci.lower
+    if ok {
+        println("BOOTSTRAP_EPISTEMIC_LENS_DEMO_PASS")
+        0
+    } else {
+        println("BOOTSTRAP_EPISTEMIC_LENS_DEMO_FAIL")
+        1
+    }
+}

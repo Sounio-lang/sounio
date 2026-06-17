@@ -1,0 +1,255 @@
+// self-hosted/gpu/test_erdos90_hc_smoke_warp.sio — warp-sim parity for Erdős90 HC smoke kernel.
+//
+// Builds the toy PN=25 disk-init image, runs kaxi_warp_exec on erdos90_hc_smoke K-AXI,
+// and checks per-thread edge counts vs the CPU hill-climb oracle (expected 8 on all lanes).
+
+use gpu::kaxi_backend::{KaxiWarpState, KaxiTxnStream, kaxi_warp_new, kaxi_warp_mem_set, kaxi_warp_mem_get, kaxi_warp_exec, kaxi_txn_stream_count}
+use gpu::erdos90_hc_smoke_emit::{kaxi_emit_erdos90_hc_smoke_build, kaxi_hc_smoke_assemble}
+
+let WARP_MAX_PN: i64 = 25
+let WARP_STRIDE: i64 = 8
+let WARP_THREADS: i64 = 8
+let WARP_TARGET_N: i64 = 9
+let WARP_NSQ: i64 = 5
+let WARP_POOL_R: i64 = 2
+let WARP_BASE_SEED: i64 = 314159
+let WARP_HC_ITERS: i64 = 1
+
+let WARP_HDR: i64 = 4
+let WARP_NDEG_OFF: i64 = 4
+let WARP_NBR_OFF: i64 = 29
+let WARP_MEM_OFF: i64 = 229
+let WARP_OUT_OFF: i64 = 429
+let WARP_MEM_WORDS: i64 = 437
+
+var WARP_PX: [i64; 64] = [0; 64]
+var WARP_PY: [i64; 64] = [0; 64]
+var WARP_PNORM: [i64; 64] = [0; 64]
+var WARP_PN: i64 = 0  // live point count (<= WARP_MAX_PN)
+var WARP_NBR: [i64; 512] = [0; 512]
+var WARP_NDEG: [i64; 64] = [0; 64]
+var WARP_MEM: [i64; 64] = [0; 64]
+var WARP_INIT: [i64; 512] = [0; 512]
+var WARP_CPU: [i64; 16] = [0; 16]
+
+fn warp_rng_next(rng: i64) -> i64 with Mut, Div {
+    var s = (rng * 16807) % 2147483647
+    if s < 0 { s = s + 2147483647 }
+    return s
+}
+
+fn warp_build_pool(R: i64) with Mut {
+    WARP_PN = 0
+    var x = 0 - R
+    while x <= R {
+        var y = 0 - R
+        while y <= R {
+            if WARP_PN < WARP_MAX_PN {
+                WARP_PX[WARP_PN as usize] = x
+                WARP_PY[WARP_PN as usize] = y
+                WARP_PNORM[WARP_PN as usize] = x * x + y * y
+                WARP_PN = WARP_PN + 1
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+}
+
+fn warp_build_nbrs(nsq: i64) with Mut {
+    var i = 0
+    while i < WARP_PN {
+        var d = 0
+        var j = 0
+        while j < WARP_PN {
+            if j != i {
+                let dx = WARP_PX[i as usize] - WARP_PX[j as usize]
+                let dy = WARP_PY[i as usize] - WARP_PY[j as usize]
+                if dx * dx + dy * dy == nsq {
+                    if d < WARP_STRIDE {
+                        WARP_NBR[(i * WARP_STRIDE + d) as usize] = j
+                        d = d + 1
+                    }
+                }
+            }
+            j = j + 1
+        }
+        WARP_NDEG[i as usize] = d
+        i = i + 1
+    }
+}
+
+fn warp_mem_deg(i: i64) -> i64 with Mut {
+    var c = 0
+    var t = 0
+    let d = WARP_NDEG[i as usize]
+    while t < d {
+        let nb = WARP_NBR[(i * WARP_STRIDE + t) as usize]
+        if WARP_MEM[nb as usize] == 1 { c = c + 1 }
+        t = t + 1
+    }
+    return c
+}
+
+fn warp_total_edges() -> i64 with Mut {
+    var s = 0
+    var i = 0
+    while i < WARP_PN {
+        if WARP_MEM[i as usize] == 1 { s = s + warp_mem_deg(i) }
+        i = i + 1
+    }
+    return s / 2
+}
+
+fn warp_clear_mem() with Mut {
+    var i = 0
+    while i < WARP_PN { WARP_MEM[i as usize] = 0; i = i + 1 }
+}
+
+fn warp_init_disk(n: i64) with Mut {
+    warp_clear_mem()
+    var picked = 0
+    var used: [i64; 64] = [0; 64]
+    while picked < n {
+        var best = 0 - 1
+        var bestNorm = 999999999
+        var i = 0
+        while i < WARP_PN {
+            if used[i as usize] == 0 {
+                if WARP_PNORM[i as usize] < bestNorm { bestNorm = WARP_PNORM[i as usize]; best = i }
+            }
+            i = i + 1
+        }
+        if best < 0 { picked = n } else {
+            used[best as usize] = 1
+            WARP_MEM[best as usize] = 1
+            picked = picked + 1
+        }
+    }
+}
+
+fn warp_hillclimb(rng_in: i64, iters: i64) -> i64 with Mut, Div {
+    var rng = rng_in
+    var edges = warp_total_edges()
+    var t = 0
+    while t < iters {
+        rng = warp_rng_next(rng)
+        let m = rng % WARP_PN
+        rng = warp_rng_next(rng)
+        let c = rng % WARP_PN
+        if WARP_MEM[m as usize] == 1 && WARP_MEM[c as usize] == 0 && m != c {
+            let dm = warp_mem_deg(m)
+            var adj = 0
+            var u = 0
+            let dd = WARP_NDEG[m as usize]
+            while u < dd {
+                if WARP_NBR[(m * WARP_STRIDE + u) as usize] == c { adj = 1 }
+                u = u + 1
+            }
+            let dc = warp_mem_deg(c)
+            let delta = dc - adj - dm
+            if delta > 0 {
+                WARP_MEM[m as usize] = 0
+                WARP_MEM[c as usize] = 1
+                edges = edges + delta
+            }
+        }
+        t = t + 1
+    }
+    return edges
+}
+
+fn warp_pack_header() with Mut {
+    WARP_INIT[0 as usize] = WARP_PN
+    WARP_INIT[1 as usize] = WARP_STRIDE
+    WARP_INIT[2 as usize] = WARP_HC_ITERS
+    WARP_INIT[3 as usize] = WARP_BASE_SEED
+    var i = 0
+    while i < WARP_PN {
+        WARP_INIT[(WARP_NDEG_OFF + i) as usize] = WARP_NDEG[i as usize]
+        i = i + 1
+    }
+    i = 0
+    while i < WARP_PN {
+        var d = 0
+        while d < WARP_STRIDE {
+            WARP_INIT[(WARP_NBR_OFF + i * WARP_STRIDE + d) as usize] = WARP_NBR[(i * WARP_STRIDE + d) as usize]
+            d = d + 1
+        }
+        i = i + 1
+    }
+}
+
+fn warp_pack_cpu_oracle() with Mut, Div {
+    var tid = 0
+    while tid < WARP_THREADS {
+        warp_init_disk(WARP_TARGET_N)
+        var i = 0
+        while i < WARP_PN {
+            WARP_INIT[(WARP_MEM_OFF + tid * WARP_PN + i) as usize] = WARP_MEM[i as usize]
+            i = i + 1
+        }
+        let seed = WARP_BASE_SEED + tid
+        WARP_CPU[tid as usize] = warp_hillclimb(seed, WARP_HC_ITERS)
+        WARP_INIT[(WARP_OUT_OFF + tid) as usize] = 0
+        tid = tid + 1
+    }
+}
+
+fn warp_load_init(state: KaxiWarpState) -> KaxiWarpState with Mut {
+    var s = state
+    var w = 0
+    while w < WARP_MEM_WORDS {
+        s = kaxi_warp_mem_set(s, w, WARP_INIT[w as usize])
+        w = w + 1
+    }
+    s
+}
+
+fn test_warp_parity() -> bool with IO, Mut, Panic, Div, Alloc {
+    warp_build_pool(WARP_POOL_R)
+    warp_build_nbrs(WARP_NSQ)
+    warp_pack_header()
+    warp_pack_cpu_oracle()
+
+    kaxi_emit_erdos90_hc_smoke_build()
+    let stream = kaxi_hc_smoke_assemble()
+    let ninstr = kaxi_txn_stream_count(stream)
+    if ninstr < 1000 {
+        print("WARP_FAIL stream_count=")
+        print_int(ninstr)
+        println("")
+        return false
+    }
+
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = warp_load_init(warp)
+    warp = kaxi_warp_exec(warp, stream)
+
+    var tid = 0
+    while tid < WARP_THREADS {
+        let got = kaxi_warp_mem_get(warp, WARP_OUT_OFF + tid)
+        let want = WARP_CPU[tid as usize]
+        if got != want {
+            print("WARP_MISMATCH tid=")
+            print_int(tid)
+            print(" got=")
+            print_int(got)
+            print(" want=")
+            print_int(want)
+            println("")
+            return false
+        }
+        tid = tid + 1
+    }
+    true
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    if test_warp_parity() {
+        println("PASS erdos90_hc_smoke_warp_parity")
+        return 0
+    }
+    println("FAIL erdos90_hc_smoke_warp_parity")
+    return 1
+}

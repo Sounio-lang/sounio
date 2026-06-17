@@ -1,0 +1,234 @@
+// research::erdos90_kaxi_hc_smoke — Option B: toy parallel HC oracle for K-AXI GPU smoke (n≤625 lane)
+//
+// Fixed smoke geometry: R=2 pool (PN=25), N=5 (|v−w|²=5), n=9 picked, 8 parallel seeds, 1 lite HC step.
+// CPU builds graph + disk init, runs per-thread HC, prints init image and per-thread edge counts.
+// Gate compares K-AXI warp sim / optional CUDA launch against this oracle.
+
+let SMOKE_PN: i64 = 25
+let SMOKE_MAXDEG: i64 = 8
+let SMOKE_NBR_STRIDE: i64 = 8
+let SMOKE_THREADS: i64 = 8
+let SMOKE_HC_ITERS: i64 = 1
+let SMOKE_TARGET_N: i64 = 9
+let SMOKE_NSQ: i64 = 5
+let SMOKE_POOL_R: i64 = 2
+let SMOKE_BASE_SEED: i64 = 314159
+
+let HDR_WORDS: i64 = 4
+let NDEG_OFF: i64 = 4
+let NBR_OFF: i64 = 29
+let MEM_OFF: i64 = 229
+let OUT_OFF: i64 = 429
+let SMOKE_MEM_WORDS: i64 = 437
+
+var PX: [i64; 64] = [0; 64]
+var PY: [i64; 64] = [0; 64]
+var PNORM: [i64; 64] = [0; 64]
+var PN: i64 = 0
+var NBR: [i64; 512] = [0; 512]
+var NDEG: [i64; 64] = [0; 64]
+var MEM: [i64; 64] = [0; 64]
+var INIT_IMG: [i64; 512] = [0; 512]
+var CPU_OUT: [i64; 16] = [0; 16]
+
+fn rng_next(rng: i64) -> i64 with Mut, Div {
+    var s = (rng * 16807) % 2147483647
+    if s < 0 { s = s + 2147483647 }
+    return s
+}
+
+fn build_pool(R: i64) with Mut {
+    PN = 0
+    var x = 0 - R
+    while x <= R {
+        var y = 0 - R
+        while y <= R {
+            if PN < SMOKE_PN {
+                PX[PN as usize] = x
+                PY[PN as usize] = y
+                PNORM[PN as usize] = x * x + y * y
+                PN = PN + 1
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+}
+
+fn build_nbrs(nsq: i64) with Mut {
+    var i = 0
+    while i < PN {
+        var d = 0
+        var j = 0
+        while j < PN {
+            if j != i {
+                let dx = PX[i as usize] - PX[j as usize]
+                let dy = PY[i as usize] - PY[j as usize]
+                if dx * dx + dy * dy == nsq {
+                    if d < SMOKE_MAXDEG { NBR[(i * SMOKE_NBR_STRIDE + d) as usize] = j; d = d + 1 }
+                }
+            }
+            j = j + 1
+        }
+        NDEG[i as usize] = d
+        i = i + 1
+    }
+}
+
+fn mem_deg_slot(i: i64) -> i64 with Mut {
+    var c = 0
+    var t = 0
+    let d = NDEG[i as usize]
+    while t < d {
+        let nb = NBR[(i * SMOKE_NBR_STRIDE + t) as usize]
+        if MEM[nb as usize] == 1 { c = c + 1 }
+        t = t + 1
+    }
+    return c
+}
+
+fn total_edges_slot() -> i64 with Mut {
+    var s = 0
+    var i = 0
+    while i < PN {
+        if MEM[i as usize] == 1 { s = s + mem_deg_slot(i) }
+        i = i + 1
+    }
+    return s / 2
+}
+
+fn clear_mem_slot() with Mut {
+    var i = 0
+    while i < PN { MEM[i as usize] = 0; i = i + 1 }
+}
+
+fn init_disk_slot(n: i64) with Mut {
+    clear_mem_slot()
+    var picked = 0
+    var used: [i64; 64] = [0; 64]
+    while picked < n {
+        var best = 0 - 1
+        var bestNorm = 999999999
+        var i = 0
+        while i < PN {
+            if used[i as usize] == 0 {
+                if PNORM[i as usize] < bestNorm { bestNorm = PNORM[i as usize]; best = i }
+            }
+            i = i + 1
+        }
+        if best < 0 { picked = n } else {
+            used[best as usize] = 1
+            MEM[best as usize] = 1
+            picked = picked + 1
+        }
+    }
+}
+
+fn hillclimb_slot(rng_in: i64, iters: i64) -> i64 with Mut, Div {
+    var rng = rng_in
+    var edges = total_edges_slot()
+    var t = 0
+    while t < iters {
+        rng = rng_next(rng)
+        let m = rng % PN
+        rng = rng_next(rng)
+        let c = rng % PN
+        if MEM[m as usize] == 1 && MEM[c as usize] == 0 && m != c {
+            let dm = mem_deg_slot(m)
+            var adj = 0
+            var u = 0
+            let dd = NDEG[m as usize]
+            while u < dd {
+                if NBR[(m * SMOKE_NBR_STRIDE + u) as usize] == c { adj = 1 }
+                u = u + 1
+            }
+            let dc = mem_deg_slot(c)
+            let delta = dc - adj - dm
+            if delta > 0 {
+                MEM[m as usize] = 0
+                MEM[c as usize] = 1
+                edges = edges + delta
+            }
+        }
+        t = t + 1
+    }
+    return edges
+}
+
+fn pack_graph_header() with Mut {
+    INIT_IMG[0 as usize] = PN
+    INIT_IMG[1 as usize] = SMOKE_NBR_STRIDE
+    INIT_IMG[2 as usize] = SMOKE_HC_ITERS
+    INIT_IMG[3 as usize] = SMOKE_BASE_SEED
+    var i = 0
+    while i < PN {
+        INIT_IMG[(NDEG_OFF + i) as usize] = NDEG[i as usize]
+        i = i + 1
+    }
+    i = 0
+    while i < PN {
+        var d = 0
+        while d < SMOKE_NBR_STRIDE {
+            INIT_IMG[(NBR_OFF + i * SMOKE_NBR_STRIDE + d) as usize] = NBR[(i * SMOKE_NBR_STRIDE + d) as usize]
+            d = d + 1
+        }
+        i = i + 1
+    }
+}
+
+fn run_cpu_oracle_and_pack() with IO, Mut, Div {
+    var tid = 0
+    var cpu_max = 0
+    while tid < SMOKE_THREADS {
+        init_disk_slot(SMOKE_TARGET_N)
+        var i = 0
+        while i < PN {
+            INIT_IMG[(MEM_OFF + tid * PN + i) as usize] = MEM[i as usize]
+            i = i + 1
+        }
+        let seed = SMOKE_BASE_SEED + tid
+        let edges = hillclimb_slot(seed, SMOKE_HC_ITERS)
+        CPU_OUT[tid as usize] = edges
+        if edges > cpu_max { cpu_max = edges }
+        INIT_IMG[(OUT_OFF + tid) as usize] = 0
+        tid = tid + 1
+    }
+    print("KAXI_SMOKE_CPU_MAX=")
+    print_int(cpu_max)
+    println("")
+    print("KAXI_SMOKE_CPU_EDGE_0 "); print_int(CPU_OUT[0 as usize]); println("")
+    print("KAXI_SMOKE_CPU_EDGE_1 "); print_int(CPU_OUT[1 as usize]); println("")
+    print("KAXI_SMOKE_CPU_EDGE_2 "); print_int(CPU_OUT[2 as usize]); println("")
+    print("KAXI_SMOKE_CPU_EDGE_3 "); print_int(CPU_OUT[3 as usize]); println("")
+    print("KAXI_SMOKE_CPU_EDGE_4 "); print_int(CPU_OUT[4 as usize]); println("")
+    print("KAXI_SMOKE_CPU_EDGE_5 "); print_int(CPU_OUT[5 as usize]); println("")
+    print("KAXI_SMOKE_CPU_EDGE_6 "); print_int(CPU_OUT[6 as usize]); println("")
+    print("KAXI_SMOKE_CPU_EDGE_7 "); print_int(CPU_OUT[7 as usize]); println("")
+}
+
+fn print_init_csv() with IO, Mut {
+    print("KAXI_SMOKE_MEM_WORDS=")
+    print_int(SMOKE_MEM_WORDS)
+    println("")
+    print("KAXI_SMOKE_INIT_CSV=")
+    var w = 0
+    while w < SMOKE_MEM_WORDS {
+        if w > 0 { print(",") }
+        print_int(INIT_IMG[w as usize])
+        w = w + 1
+    }
+    println("")
+}
+
+fn main() with IO, Mut, Panic, Div {
+    build_pool(SMOKE_POOL_R)
+    build_nbrs(SMOKE_NSQ)
+    pack_graph_header()
+    run_cpu_oracle_and_pack()
+    print_init_csv()
+    let written = write_file("init_mem.bin", &!INIT_IMG, SMOKE_MEM_WORDS * 8)
+    print("KAXI_SMOKE_INIT_BIN_BYTES=")
+    print_int(written)
+    println("")
+    println("KAXI_SMOKE_DONE")
+}

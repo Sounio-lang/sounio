@@ -81,10 +81,16 @@ theorem lattice_achieves_harborth :
 
 /-! ## Erdős ℤ² compact-disk construction
 
-The CPU search (`stdlib/research/erdos90_optimize.sio`) finds that the compact
-disk of integer points with x²+y² ≤ 5000, using unit distance² = 1105, gives a
-large explicit lower bound. We certify the count here by pure integer
-computation in Lean core (`native_decide`). -/
+The CPU search (`stdlib/research/erdos90_optimize.sio`) finds that compact
+integer disks give large explicit lower bounds for the unrestricted Erdős
+planar unit-distance function u(n).  For a disk radius² `rr` we count pairs of
+integer points at squared distance `nsq`; scaling the whole configuration by
+`1/√nsq` turns every counted pair into a Euclidean unit-distance pair, so the
+integer count is a valid lower bound for u(|disk|).  We certify the counts here
+by pure integer computation in Lean core (`native_decide`).
+
+Note: Harborth's bound `⌊3n−√(12n−3)⌋` applies to planar *matchstick graphs*;
+our scaled integer disks contain crossings and are not subject to it. -/
 
 /-- All integer points inside the origin-centred disk of radius² = rr. -/
 def compactDiskZ2 (rr : Nat) : List (Int × Int) :=

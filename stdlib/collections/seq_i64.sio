@@ -1,0 +1,123 @@
+// stdlib/collections/seq_i64.sio — Monomorphic growable i64 sequence.
+//
+// The "missing Vec" wall-opener: a self-contained, growable i64 sequence
+// backed by heap_alloc / heap_realloc (libc malloc/realloc underneath),
+// with element access via the read_i64 / write_i64 pointer builtins.
+//
+// This is the tractable, monomorphic slice of a future generic Seq<T>:
+// no generics, no type parameters — just a concrete i64 dynamic array that
+// actually grows (doubling capacity via realloc) and survives reallocation.
+//
+// API:
+//   var s = seqi64_new()                 // empty, cap 0 (no allocation yet)
+//   seqi64_push(&!s, 42)                 // append, growing on demand
+//   let x = seqi64_get(&s, 0)            // bounds-checked read (0 if OOB)
+//   let n = seqi64_len(&s)               // current length
+//   seqi64_free(&!s)                     // release the backing buffer
+//
+// IMPORTANT (realloc header invariant): the FIRST allocation must use
+// heap_alloc, never heap_realloc — heap_realloc reads an allocation header
+// 8 bytes before the pointer, so calling it on a null/initial pointer
+// corrupts memory. The cap==0 branch below enforces this.
+
+struct SeqI64 {
+    data: *mut i64,
+    len: i64,
+    cap: i64,
+}
+
+// Create an empty sequence. No heap allocation happens until the first push.
+fn seqi64_new() -> SeqI64 {
+    SeqI64 { data: 0 as *mut i64, len: 0, cap: 0 }
+}
+
+// Append `val`, doubling capacity (4, 8, 16, ...) when full.
+// Uses heap_alloc for the first block, heap_realloc to grow.
+fn seqi64_push(s: &! SeqI64, val: i64) with Alloc, Mut {
+    if s.len >= s.cap {
+        let new_cap = if s.cap == 0 { 4 } else { s.cap * 2 }
+        let new_bytes = new_cap * 8
+        if s.cap == 0 {
+            s.data = heap_alloc(new_bytes) as *mut i64
+        } else {
+            s.data = heap_realloc(s.data as *mut i8, new_bytes) as *mut i64
+        }
+        s.cap = new_cap
+    }
+    write_i64(s.data, s.len, val)
+    s.len = s.len + 1
+}
+
+// Bounds-checked read. Returns 0 when `idx` is out of range.
+fn seqi64_get(s: &SeqI64, idx: i64) -> i64 {
+    if idx >= 0 && idx < s.len {
+        return read_i64(s.data, idx)
+    }
+    return 0
+}
+
+// Current number of elements.
+fn seqi64_len(s: &SeqI64) -> i64 {
+    s.len
+}
+
+// Current backing-buffer capacity (in elements).
+fn seqi64_cap(s: &SeqI64) -> i64 {
+    s.cap
+}
+
+// Release the backing buffer and reset to the empty state.
+fn seqi64_free(s: &! SeqI64) with Alloc, Mut {
+    if s.cap > 0 {
+        heap_free(s.data as *mut i8)
+    }
+    s.data = 0 as *mut i64
+    s.len = 0
+    s.cap = 0
+}
+
+//@ run-pass
+// Self-test: push more than the initial capacity (4) to force at least one
+// doubling realloc (4 -> 8 -> 16), then read every element back and verify
+// the data survived reallocation. Prints PASS iff all 10 values round-trip.
+fn main() with Mut, Div, Panic, Alloc, IO {
+    var s = seqi64_new()
+
+    // Push 10 elements: crosses the 4->8 grow boundary (and 8->16).
+    // Value at index i is i*i + 7 so a stale/aliased buffer would mismatch.
+    var i: i64 = 0
+    while i < 10 {
+        seqi64_push(&!s, i * i + 7)
+        i = i + 1
+    }
+
+    // Length must reflect all pushes; capacity must have grown past 4.
+    var ok: i64 = 1
+    if seqi64_len(&s) != 10 {
+        ok = 0
+    }
+    if seqi64_cap(&s) < 10 {
+        ok = 0
+    }
+
+    // Read every element back and compare to its expected value.
+    // This is the load-bearing check: it proves the data survived realloc.
+    var j: i64 = 0
+    while j < 10 {
+        let expected = j * j + 7
+        if seqi64_get(&s, j) != expected {
+            ok = 0
+        }
+        j = j + 1
+    }
+
+    seqi64_free(&!s)
+
+    if ok == 1 {
+        print("PASS")
+        print("\n")
+    } else {
+        print("FAIL")
+        print("\n")
+    }
+}

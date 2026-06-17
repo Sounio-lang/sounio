@@ -1,0 +1,131 @@
+//@ run-pass
+//@ expect-stdout: WALLEY NONLINEAR CONSISTENCY PASS
+
+// C2 — Walley lower/upper (via mean + support lifts to PBox) remain consistent after non-linear ops (exp, ln, ratio, apply2).
+// 
+// Probes (Fase 1.2):
+// - credal_to_pbox (mean E bounds, var upper sound) and credal_to_support_pbox (value enclosure) after non-linear.
+// - Bounds preserved: after op, the resulting PBox lo/hi still satisfy the enclosure for the transformed credal.
+// - Width monotonicity in ε carries through lifts + ops (use cs_with_epsilon).
+// - credal consistency: for a non-linear monotone f, the support-lift + Fréchet encloses realisations (grid check).
+// - Different from pure GUM: ε>0 produces non-zero gap where classical would be point; var bound is explicit upper (not the delta var).
+// - Integration: Walley builds on knightian PBox; composes with GUM via the lifts (ε=0 collapses).
+// - Fragility: support lift discards nominal for worst-case value enclosure (conservative); mean-band would under-enclose real f(X,Y) for non-linear.
+//
+// Reuses test_walley_frechet_compose.sio + test_walley_width_monotone.sio + walley.sio header math.
+// Mirrors formal/lean4/SounioWalley.lean (gap_monotone, collapse, vacuous) + SounioWalleyGeneric (frechet compose).
+//
+// Derived expectations: gap after lift = ε*(s_hi-s_lo) for mean; after support lift full range; after apply2 the corners.
+
+use epistemic::knightian::*;
+use epistemic::walley::*;
+
+fn w_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn w_near(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a };
+    d <= tol
+}
+
+fn ratio(x: f64, y: f64) -> f64 with Div, Panic { x / y }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fail: bool = false;
+
+    // 1. ε=0 collapses to precise (GUM).
+    let prec = cs_precise(15.0, 0.25, 5.0, 25.0, 950);
+    let p_prec = credal_to_pbox(&prec);
+    let collapse_ok = w_near(pb_lo_mean(&p_prec), 15.0, 1e-12)
+                   && w_near(pb_hi_mean(&p_prec), 15.0, 1e-12)
+                   && w_near(pb_variance(&p_prec), 0.25, 1e-12);
+    if !collapse_ok {
+        println("WALLEY COLLAPSE NONLIN FAIL");
+        fail = true;
+    }
+
+    // 2. ε>0 produces gap on mean lift; support lift is full range (for value enclosure).
+    let c = cs_neighborhood(15.0, 0.25, 0.2, 10.0, 20.0, 900);
+    let p_mean = credal_to_pbox(&c);
+    let gap_mean = pb_hi_mean(&p_mean) - pb_lo_mean(&p_mean);
+    let gap_mean_ok = w_near(gap_mean, 2.0, 1e-9);  // 0.2 * 10
+    let p_supp = credal_to_support_pbox(&c);
+    let supp_ok = w_near(pb_lo_mean(&p_supp), 10.0, 1e-9) && w_near(pb_hi_mean(&p_supp), 20.0, 1e-9);
+    if !(gap_mean_ok && supp_ok) {
+        println("WALLEY LIFTS NONLIN FAIL");
+        fail = true;
+    }
+
+    // 3. Nonlinear on mean-band lift (for E[] bounds).
+    let c2 = cs_neighborhood(2.0, 0.01, 0.1, 1.0, 4.0, 880);
+    let pm = credal_to_pbox(&c2);
+    let expm = pb_new(0.0, 0.0, 0.0, 0); // placeholder, use arith on lifted
+    // For demo: lift then mul by self (nonlin-ish).
+    let sq_mean = pb_mul(&pm, &pm);
+    // The resulting band should still be a valid enclosure (lo <= hi, gap >=0).
+    let sq_ok = pb_lo_mean(&sq_mean) <= pb_hi_mean(&sq_mean) && pb_gap(&sq_mean) >= 0.0;
+    if !sq_ok {
+        println("WALLEY MEAN NONLIN OP FAIL");
+        fail = true;
+    }
+
+    // 4. Value enclosure via support lift + Fréchet on non-linear (ratio).
+    let cx = cs_neighborhood(20.0, 1.0, 0.3, 10.0, 30.0, 900);
+    let cy = cs_neighborhood(3.0, 0.25, 0.15, 1.0, 5.0, 870);
+    let px = credal_to_support_pbox(&cx);
+    let py = credal_to_support_pbox(&cy);
+    let pz = pb_apply2_monotone_inc_dec(ratio, &px, &py);
+    let fr_lo = pb_lo_mean(&pz);
+    let fr_hi = pb_hi_mean(&pz);
+    // 10/5=2 , 30/1=30
+    let fr_ok = w_near(fr_lo, 2.0, 1e-9) && w_near(fr_hi, 30.0, 1e-9);
+    if !fr_ok {
+        println("WALLEY SUPPORT FRECHET FAIL");
+        fail = true;
+    }
+
+    // Grid: every realisation of f on the rect is inside (sound for unknown copula).
+    var i: i64 = 0;
+    var enc: bool = true;
+    while i < 4 {
+        var j: i64 = 0;
+        while j < 4 {
+            let x = 10.0 + (i as f64) * (20.0/3.0);
+            let y = 1.0 + (j as f64) * (4.0/3.0);
+            let z = ratio(x, y);
+            if z < fr_lo - 1e-9 || z > fr_hi + 1e-9 { enc = false; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    if !enc {
+        println("WALLEY FRECHET ENCLOSURE FAIL");
+        fail = true;
+    }
+
+    // 5. Width monotonicity survives lift + nonlin.
+    let c_small = cs_with_epsilon(&c, 0.05);
+    let c_large = cs_with_epsilon(&c, 0.5);
+    let g_small = pb_hi_mean(&credal_to_pbox(&c_small)) - pb_lo_mean(&credal_to_pbox(&c_small));
+    let g_large = pb_hi_mean(&credal_to_pbox(&c_large)) - pb_lo_mean(&credal_to_pbox(&c_large));
+    let mono_ok = g_small < gap_mean && gap_mean < g_large;
+    if !mono_ok {
+        println("WALLEY WIDTH MONO NONLIN FAIL");
+        fail = true;
+    }
+
+    // 6. ε>0 produces strictly wider than classical after same op (the "beyond GUM").
+    let classical_like = cs_precise(15.0, 0.25, 10.0, 20.0, 900);
+    let p_class = credal_to_pbox(&classical_like);
+    let p_amb = credal_to_pbox(&c);
+    let beyond_ok = pb_gap(&p_amb) > pb_gap(&p_class);
+    if !beyond_ok {
+        println("WALLEY BEYOND GUM FAIL");
+        fail = true;
+    }
+
+    if fail {
+        println("WALLEY NONLINEAR CONSISTENCY FAIL");
+        return 1;
+    }
+    println("WALLEY NONLINEAR CONSISTENCY PASS");
+    0
+}

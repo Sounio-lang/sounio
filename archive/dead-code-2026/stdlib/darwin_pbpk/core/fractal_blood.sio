@@ -1,0 +1,132 @@
+// fractal_blood.sio — Fractal Blood Dynamics for PBPK
+// Implements CTRW framework for anomalous transport in vascular networks
+
+fn dpbpk_fb_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn dpbpk_fb_exp(x: f64) -> f64 {
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 20 { term = term * x / (i as f64); result = result + term; i = i + 1 }
+    result
+}
+
+fn dpbpk_fb_ln(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var v = x
+    var scale = 0.0
+    while v > 2.0 { v = v / 2.718281828; scale = scale + 1.0 }
+    while v < 0.5 { v = v * 2.718281828; scale = scale - 1.0 }
+    let y = (v - 1.0) / (v + 1.0)
+    let y2 = y * y
+    2.0 * y * (1.0 + y2 / 3.0 + y2 * y2 / 5.0 + y2 * y2 * y2 / 7.0) + scale
+}
+
+fn dpbpk_fb_pow(base: f64, exp_v: f64) -> f64 {
+    if base <= 0.0 { return 0.0 }
+    dpbpk_fb_exp(exp_v * dpbpk_fb_ln(base))
+}
+
+fn FRACTAL_DIMENSION() -> f64 { 2.7 }
+fn MURRAY_EXPONENT() -> f64 { 3.0 }
+fn BLOOD_VISCOSITY() -> f64 { 0.0035 }
+fn ANOMALOUS_EXPONENT_BLOOD() -> f64 { 0.85 }
+
+struct FractalParams {
+    fractal_dim: f64,
+    anomalous_exponent: f64,
+    spectral_dim: f64,
+    hurst_exponent: f64,
+}
+
+fn fractal_params_new(d_f: f64, alpha: f64) -> FractalParams {
+    FractalParams {
+        fractal_dim: d_f,
+        anomalous_exponent: alpha,
+        spectral_dim: 2.0 * d_f / (d_f + 2.0),
+        hurst_exponent: alpha / 2.0,
+    }
+}
+
+fn fractal_params_default() -> FractalParams {
+    fractal_params_new(FRACTAL_DIMENSION(), ANOMALOUS_EXPONENT_BLOOD())
+}
+
+struct VesselSegment {
+    radius: f64,
+    length: f64,
+    flow_rate: f64,
+    branching_level: i32,
+}
+
+// Gamma function approximation (Stirling)
+fn fb_gamma(x: f64) -> f64 with Div, Panic, Mut {
+    if x <= 0.0 { return 1.0 }
+    if x < 1.0 { return fb_gamma(x + 1.0) / x }
+    // Stirling: Gamma(x) ~ sqrt(2pi/x) * (x/e)^x
+    let pi = 3.14159265358979323846
+    let e = 2.71828182845904523536
+    dpbpk_fb_exp(0.5 * dpbpk_fb_ln(2.0 * pi / x) + x * dpbpk_fb_ln(x / e))
+}
+
+// Mittag-Leffler function E_alpha(z)
+fn mittag_leffler_approx(alpha: f64, z: f64) -> f64 with Div, Panic, Mut {
+    if alpha == 1.0 { return dpbpk_fb_exp(z) }
+    if dpbpk_fb_abs(z) < 0.0000000001 { return 1.0 }
+
+    var sum = 0.0
+    var term = 1.0
+    var k = 0
+    while k < 100 {
+        sum = sum + term
+        if dpbpk_fb_abs(term) < 0.0000000001 * dpbpk_fb_abs(sum) { return sum }
+        let g = fb_gamma(alpha * ((k + 1) as f64) + 1.0)
+        if g > 0.0 {
+            term = term * z / g
+        } else {
+            return sum
+        }
+        k = k + 1
+    }
+    sum
+}
+
+// Fractional concentration decay
+fn fractional_decay(c0: f64, lambda: f64, t: f64, alpha: f64) -> f64 with Div, Panic, Mut {
+    c0 * mittag_leffler_approx(alpha, 0.0 - lambda * dpbpk_fb_pow(t, alpha))
+}
+
+// Murray's law branching
+fn murray_child_radius(parent_radius: f64, n_children: i64) -> f64 {
+    if n_children <= 0 { return parent_radius }
+    let factor = dpbpk_fb_pow(n_children as f64, 0.0 - 1.0 / MURRAY_EXPONENT())
+    parent_radius * factor
+}
+
+// Anomalous dispersion coefficient
+fn anomalous_dispersion(d0: f64, t: f64, alpha: f64) -> f64 {
+    if t <= 0.0 { return d0 }
+    d0 * dpbpk_fb_pow(t, alpha - 1.0)
+}
+
+// Tests
+fn test_ml_exp_recovery() -> bool with Div, Panic, Mut {
+    let ml_val = mittag_leffler_approx(1.0, 1.0)
+    let exp_val = dpbpk_fb_exp(1.0)
+    dpbpk_fb_abs(ml_val - exp_val) < 0.001
+}
+
+fn test_ml_zero() -> bool with Div, Panic, Mut {
+    let val = mittag_leffler_approx(0.85, 0.0)
+    dpbpk_fb_abs(val - 1.0) < 0.001
+}
+
+fn test_fractional_decay_t0() -> bool with Div, Panic, Mut {
+    let val = fractional_decay(100.0, 0.1, 0.0, 0.85)
+    dpbpk_fb_abs(val - 100.0) < 0.001
+}
+
+fn test_murray_law() -> bool {
+    let child_r = murray_child_radius(1.0, 2)
+    child_r > 0.0 && child_r < 1.0
+}

@@ -1,0 +1,101 @@
+//@ run-pass
+//@ expect-stdout: DELTA MC LIMITS PASS
+
+// B — Hard limits of Delta method (linear approx) vs full Monte Carlo on same model.
+// 
+// Probes (Fase 2):
+// - High CV ratio (X/Y with var ~ mean^2): delta quotient underestimates or skews vs MC sample var.
+// - exp(high var): delta gives e^{2μ} σ² ; MC captures the skew and heavier tail; mean from MC may shift for finite samples.
+// - Direct side-by-side on identical f and inputs (same n large for MC).
+// - High "stiff" proxy: exp of large positive with variance (growth amplifies uncertainty asymmetrically).
+// - When ambiguity (large Knightian gap) dominates, classical delta on midpoint would miss the band width that pbox/Klib capture (cross with C).
+// 
+// Delta is cheap and good for low-CV near-linear; MC is "ground" (expensive, sample variance biased for small n).
+// No unscented in propagate (only delta + MC).
+// 
+// References: propagate.sio (monte_carlo_*, quotient, exp, propagate_fn_2d); test_smoke_e2e (delta usage).
+// Note: closures not used (Sounio lacks them in this context per LLM_PROGRAMMING_GUIDE); named fns defined before use.
+
+use epistemic::knowledge::{epistemic_new, Epistemic};
+use epistemic::propagate::{exp, quotient, monte_carlo, monte_carlo_2d, product};
+
+fn p_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn p_near(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a };
+    d <= tol
+}
+
+// Named f for MC callbacks (must be defined before main/callers)
+fn ratio_sample(a: f64, b: f64) -> f64 with Div, Panic { a / b }
+
+fn exp_sample(t: f64) -> f64 with Mut, Div, Panic {
+    // Safe range-reduced exp (same spirit as propagate internals)
+    if t > 10.0 { return 22026.465794806718 * exp_sample(t - 10.0) }
+    if t < -10.0 { return 0.00004539992976248485 * exp_sample(t + 10.0) }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 20 {
+        term = term * t / (i as f64)
+        result = result + term
+        i = i + 1
+    }
+    result
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fail: bool = false;
+
+    // 1. High-CV ratio: X=10 var=4 (CV=0.2), Y=2 var=1 (CV=0.5) — quotient delta vs MC n=5000.
+    let x = epistemic_new(10.0, 4.0, 900)
+    let y = epistemic_new(2.0, 1.0, 880)
+    let q_delta = quotient(x, y)
+    let q_mc = monte_carlo_2d(x, y, ratio_sample, 5000)
+
+    let ratio_var_delta = q_delta.variance()
+    let ratio_var_mc = q_mc.variance()
+    // MC often wider due to skew in ratio of Gaussians.
+    let ratio_limit_ok = p_abs(ratio_var_delta - ratio_var_mc) > 0.01 || ratio_var_mc > ratio_var_delta * 1.1
+    if !ratio_limit_ok {
+        println("DELTA MC RATIO LIMIT FAIL")
+        println(ratio_var_delta)
+        println(ratio_var_mc)
+        fail = true
+    }
+
+    // 2. exp(high var): delta vs MC.
+    let z = epistemic_new(1.0, 0.81, 850)  // mean 1, σ=0.9 high rel var
+    let e_delta = exp(z)
+    let e_mc = monte_carlo(z, exp_sample, 4000)
+    let exp_var_delta = e_delta.variance()
+    let exp_var_mc = e_mc.variance()
+    // Delta underestimates spread for exp(high-var) due to skew.
+    let exp_limit_ok = exp_var_mc > exp_var_delta * 1.05
+    if !exp_limit_ok {
+        println("DELTA MC EXP LIMIT FAIL")
+        println(exp_var_delta)
+        println(exp_var_mc)
+        fail = true
+    }
+
+    // 3. Stiff proxy: large positive with var (exp growth amplifies).
+    let drift = epistemic_new(2.5, 0.25, 900)
+    let stiff_delta = exp(drift)
+    let stiff_mc = monte_carlo(drift, exp_sample, 3000)
+    let stiff_ok = stiff_mc.variance() > 0.0 && p_abs(stiff_mc.val() - stiff_delta.val()) < 1.0
+    if !stiff_ok {
+        println("DELTA MC STIFF PROXY FAIL")
+        fail = true
+    }
+
+    // 4. Cross with C note (covered in C tests): when Knightian gap large, classical delta on a point estimate misses the ambiguity band.
+    // MC on a single "mid" value also under-states the full epistemic range captured by p-box/credal.
+    // No additional numeric here to avoid duplication; the knightian/walley tests already demonstrate the gap.
+
+    if fail {
+        println("DELTA MC LIMITS FAIL")
+        return 1
+    }
+    println("DELTA MC LIMITS PASS")
+    0
+}

@@ -1,0 +1,87 @@
+// examples/stats_viz/stats_release_showcase.sio
+//
+// Showcase integrado: Spearman + Holm + regressão + visualização terminal.
+// Compile: ./artifacts/self-hosted/souc-self-hosted-x86_64 examples/stats_viz/stats_release_showcase.sio /tmp/showcase.elf
+// Run:     chmod +x /tmp/showcase.elf && /tmp/showcase.elf
+
+use stats::inferential::{spearman_rho}
+use stats::multiple_testing::{holm_bonferroni}
+use stats::regression::linear::{linear_regression_new}
+use graphics::surface::{surface_new, surface_clear}
+use graphics::drawing::{color_white}
+use graphics::epistemic::{plot_epistemic_band_raster, epistemic_band_config_default}
+use graphics::view
+use graphics::export::{export_png}
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    println("=== Sounio Stats + Plot Release Showcase ===")
+
+    // 1) Correlação Spearman
+    var x: [f64; 100] = [0.0; 100]
+    var y: [f64; 100] = [0.0; 100]
+    var i: i64 = 0
+    while i < 12 {
+        x[i as usize] = i as f64
+        y[i as usize] = (i as f64) * 2.0 + 1.0
+        i = i + 1
+    }
+    let rho = spearman_rho(x, y, 12)
+    println("Spearman rho (monótona crescente)=")
+    println(rho)
+
+    // 2) Holm-Bonferroni (3 hipóteses)
+    var pvals: [f64; 100] = [0.0; 100]
+    pvals[0] = 0.008
+    pvals[1] = 0.035
+    pvals[2] = 0.220
+    var adj: [f64; 100] = [0.0; 100]
+    holm_bonferroni(pvals, 3, &!adj)
+    println("Holm adj p[0]=")
+    println(adj[0])
+    println("Holm adj p[1]=")
+    println(adj[1])
+
+    // 3) Regressão + banda epistémica (IC 95% aproximado nos resíduos)
+    let model = linear_regression_new()
+        .with_data(x, y, 12)
+        .fit_simple()
+
+    var xs_plot: [f64; 256] = [0.0; 256]
+    var center: [f64; 256] = [0.0; 256]
+    var lower: [f64; 256] = [0.0; 256]
+    var upper: [f64; 256] = [0.0; 256]
+    let n_plot: i64 = 12
+    i = 0
+    while i < n_plot {
+        xs_plot[i] = x[i as usize]
+        let yhat = model.coefficients[0] + model.coefficients[1] * x[i as usize]
+        let resid = y[i as usize] - yhat
+        center[i] = yhat
+        lower[i] = yhat - abs_f64(resid) - 0.5
+        upper[i] = yhat + abs_f64(resid) + 0.5
+        i = i + 1
+    }
+
+    var s = surface_new(320, 200)
+    s = surface_clear(s, color_white())
+    let cfg = epistemic_band_config_default()
+    s = plot_epistemic_band_raster(s, &xs_plot, &center, &lower, &upper, n_plot, cfg)
+
+    println("\n--- Visualização terminal (graphics::view) ---")
+    view::show(&s)
+
+    let png_ok = export_png(&s, "/tmp/sounio_stats_showcase_band.png")
+    println("\nPNG /tmp/sounio_stats_showcase_band.png ok=")
+    println(if png_ok { 1 } else { 0 })
+
+    let ok = abs_f64(rho - 1.0) < 0.01 && adj[0] < 0.05 && adj[1] > 0.05 && png_ok
+    if ok {
+        println("STATS_RELEASE_SHOWCASE_PASS")
+        0
+    } else {
+        println("STATS_RELEASE_SHOWCASE_FAIL")
+        1
+    }
+}

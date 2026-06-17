@@ -1,0 +1,73 @@
+/-
+Copyright (c) 2022 Mario Carneiro. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Mario Carneiro, Markus Himmel
+-/
+module
+
+prelude
+public import Init.Grind.Tactics
+import Init.Data.Bool
+
+public section
+
+set_option linter.missingDocs true
+
+/-- `PartialEquivBEq α` says that the `BEq` implementation is a
+partial equivalence relation, that is:
+* it is symmetric: `a == b → b == a`
+* it is transitive: `a == b → b == c → a == c`.
+-/
+class PartialEquivBEq (α) [BEq α] : Prop where
+  /-- Symmetry for `BEq`. If `a == b` then `b == a`. -/
+  symm : (a : α) == b → b == a
+  /-- Transitivity for `BEq`. If `a == b` and `b == c` then `a == c`. -/
+  trans : (a : α) == b → b == c → a == c
+
+instance [BEq α] [PartialEquivBEq α] : Std.Symm (α := α) (· == ·) where
+  symm _ _ h := PartialEquivBEq.symm h
+
+/-- `EquivBEq` says that the `BEq` implementation is an equivalence relation. -/
+class EquivBEq (α) [BEq α] : Prop extends PartialEquivBEq α, ReflBEq α
+
+theorem BEq.symm [BEq α] [Std.Symm (α := α) (· == ·)] {a b : α} : a == b → b == a :=
+  Std.Symm.symm a b (r := (· == ·))
+
+theorem BEq.comm [BEq α] [PartialEquivBEq α] {a b : α} : (a == b) = (b == a) :=
+  Bool.eq_iff_iff.2 ⟨BEq.symm, BEq.symm⟩
+
+theorem bne_eq [BEq α] {a b : α} : (a != b) = !(a == b) := rfl
+
+theorem bne_comm [BEq α] [PartialEquivBEq α] {a b : α} : (a != b) = (b != a) := by
+  rw [bne, BEq.comm, bne]
+
+theorem BEq.symm_false [BEq α] [PartialEquivBEq α] {a b : α} : (a == b) = false → (b == a) = false :=
+  BEq.comm (α := α) ▸ id
+
+theorem BEq.trans [BEq α] [PartialEquivBEq α] {a b c : α} : a == b → b == c → a == c :=
+  PartialEquivBEq.trans
+
+theorem BEq.congr_left [BEq α] [PartialEquivBEq α] {a b c : α} (h : a == b) :
+    (a == c) = (b == c) :=
+  Bool.eq_iff_iff.mpr ⟨BEq.trans (BEq.symm h), BEq.trans h⟩
+
+theorem BEq.congr_right [BEq α] [PartialEquivBEq α] {a b c : α} (h : b == c) :
+    (a == b) = (a == c) :=
+  Bool.eq_iff_iff.mpr ⟨fun h' => BEq.trans h' h, fun h' => BEq.trans h' (BEq.symm h)⟩
+
+theorem BEq.neq_of_neq_of_beq [BEq α] [PartialEquivBEq α] {a b c : α} :
+    (a == b) = false → b == c → (a == c) = false :=
+  fun h₁ h₂ => Bool.eq_false_iff.2 fun h₃ => Bool.eq_false_iff.1 h₁ (BEq.trans h₃ (BEq.symm h₂))
+
+theorem BEq.neq_of_beq_of_neq [BEq α] [PartialEquivBEq α] {a b c : α} :
+    a == b → (b == c) = false → (a == c) = false :=
+  fun h₁ h₂ => Bool.eq_false_iff.2 fun h₃ => Bool.eq_false_iff.1 h₂ (BEq.trans (BEq.symm h₁) h₃)
+
+instance (priority := low) [BEq α] [LawfulBEq α] : EquivBEq α where
+  symm h := beq_iff_eq.2 <| Eq.symm <| beq_iff_eq.1 h
+  trans hab hbc := beq_iff_eq.2 <| (beq_iff_eq.1 hab).trans <| beq_iff_eq.1 hbc
+
+theorem equivBEq_of_iff_apply_eq [BEq α] (f : α → β) (hf : ∀ a b, a == b ↔ f a = f b) : EquivBEq α where
+  rfl := by simp [hf]
+  symm := by simp [hf, eq_comm]
+  trans hab hbc := (hf _ _).2 (Eq.trans ((hf _ _).1 hab) ((hf _ _).1 hbc))

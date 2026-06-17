@@ -1,0 +1,80 @@
+//! Native Farkas SMT cert on max-|kappa| edge for SL expansion graph.
+use ot::swow_orc::*
+use ot::transport_exact::*
+use math::rational::*
+
+fn pint(x: i64) with IO, Mut, Div, Panic {
+    if x == 0 { print_char(48 as u8); return; }
+    var n = x; if n < 0 { print_char(45 as u8); n = 0 - n; }
+    var buf: [i64; 24] = [0; 24]; var k: i64 = 0;
+    while n > 0 { buf[k as usize] = n % 10; n = n / 10; k = k + 1; }
+    while k > 0 { k = k - 1; print_char((48 + buf[k as usize]) as u8); }
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    orc_load_csv("data/processed/expansion/slovenian_edges_FINAL.csv");
+    orc_build_lcc();
+    orc_compute_all_kappa();
+    let m = ORC_NEDGE;
+    // Find edge with max |kappa| = most negative kappa (all SL edges expected <0)
+    var best: i64 = 0
+    var bi: i64 = 0
+    while bi < m {
+        let k_cur = Rational { num: ORC_EK_N[bi as usize], den: ORC_EK_D[bi as usize] }
+        let k_best = Rational { num: ORC_EK_N[best as usize], den: ORC_EK_D[best as usize] }
+        if rat_cmp(k_cur, k_best) < 0 { best = bi }
+        bi = bi + 1
+    }
+    let u_lcc = ORC_EU[best as usize]
+    let v_lcc = ORC_EV[best as usize]
+    let u = orc_lcc_node(u_lcc)
+    let v = orc_lcc_node(v_lcc)
+    let kappa = orc_kappa_edge(u, v)
+    let ns = ORC_DEG[u as usize] + 1
+    let nd = ORC_DEG[v as usize] + 1
+    let D = OT_LAST_D
+    modi_duals(ns, nd)
+    var feasible: i64 = 1
+    var i: i64 = 0
+    while i < ns {
+        var j: i64 = 0
+        while j < nd {
+            let ui = Rational { num: DU_N[i as usize], den: DU_D[i as usize] }
+            let vj = Rational { num: DV_N[j as usize], den: DV_D[j as usize] }
+            let c  = Rational { num: OT_COST[(i*nd+j) as usize], den: 1 }
+            if rat_cmp(rat_add(ui, vj), c) > 0 { feasible = 0; }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if feasible != 1 { return 1; }
+    var obj = rat_zero()
+    i = 0
+    while i < ns {
+        let mu = rat_make(OT_SUPPLY[i as usize], D)
+        let ui = Rational { num: DU_N[i as usize], den: DU_D[i as usize] }
+        obj = rat_add(obj, rat_mul(mu, ui))
+        i = i + 1
+    }
+    var j: i64 = 0
+    while j < nd {
+        let nu = rat_make(OT_DEMAND[j as usize], D)
+        let vj = Rational { num: DV_N[j as usize], den: DV_D[j as usize] }
+        obj = rat_add(obj, rat_mul(nu, vj))
+        j = j + 1
+    }
+    // dual objective must equal W1 (strong duality)
+    let w1rat = Rational { num: ORC_LAST_W1_NUM, den: ORC_LAST_W1_DEN }
+    if rat_cmp(obj, w1rat) != 0 {
+        print("SMT_FAIL obj="); pint(obj.num); print("/"); pint(obj.den)
+        print(" W1="); pint(ORC_LAST_W1_NUM); print("/"); pint(ORC_LAST_W1_DEN); print("\n")
+        return 2
+    }
+    // kappa < 0 => W1 > 1 => UNSAT for cost <= 1
+    if rat_cmp(obj, rat_one()) <= 0 { return 4; }
+    print("SL max-|kappa| edge lcc_u="); pint(u_lcc); print(" lcc_v="); pint(v_lcc)
+    print(" kappa_n="); pint(kappa.num); print(" kappa_d="); pint(kappa.den)
+    print(" W1_n="); pint(ORC_LAST_W1_NUM); print(" W1_d="); pint(ORC_LAST_W1_DEN)
+    print(" UNSAT_CERTIFIED\n")
+    return 0
+}

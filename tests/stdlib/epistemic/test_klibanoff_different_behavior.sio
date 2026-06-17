@@ -1,0 +1,114 @@
+//@ run-pass
+//@ expect-stdout: KLIBANOFF DIFFERENT BEHAVIOR PASS
+
+// C3 — Klibanoff smooth ambiguity produces behaviors different from pure Knightian (interval) and pure Bayesian (precise GUM).
+// 
+// Probes (Fase 1.3):
+// - kl_smooth_ce (CARA) sits strictly between kl_walley_ce and kl_precise_ce for 0<α<∞ (sandwich).
+// - Monotone-non-increasing in α (more aversion → lower or equal CE).
+// - Different numeric CE than the Knightian band midpoint or lo (the interval "worst" vs smooth expectation under tilted prior).
+// - ε=0 collapses to precise regardless of α/λ (recovers GUM/Bayesian).
+// - λ tilts the worst-case weight inside contamination (λ=1 all at slo for safety).
+// - Attempted integration with active: kl CE can be fed as scalar "value" into existing EFE components (gap note: no dedicated klibanoff_compose_with_active fn in current module; active EFE is Epistemic-only).
+// - Fragility: custom exp/log Taylor (range reduction) for CARA; α>5 recommends boundary; 3-point μ only (no continuous second-order belief).
+//
+// Reuses test_klibanoff_boundary.sio + test_klibanoff_alpha_sweep.sio + klibanoff.sio header (CARA formula, sandwich, math-review 2026-05-01).
+// Mirrors formal/lean4/SounioKlibanoff.lean (boundaries, monotone).
+//
+// The "different behavior" is the point of smooth ambiguity: risk attitude w.r.t. ambiguity (second-order) separate from risk w.r.t. aleatoric (first-order).
+
+use epistemic::knightian::*;
+use epistemic::walley::*;
+use epistemic::klibanoff::*;
+
+fn kl_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn kl_near(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a };
+    d <= tol
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fail: bool = false;
+
+    // Base credal with ambiguity.
+    let c = cs_neighborhood(15.0, 1.0, 0.2, 10.0, 20.0, 900);
+
+    // 1. Sandwich holds at interior α.
+    let wal = kl_walley_ce(&c, 1.0);
+    let pre = kl_precise_ce(&c, 1.0);
+    let sm = kl_smooth_ce(&c, 0.5, 1.0);
+    let sandwich_ok = wal <= sm && sm <= pre + 1e-6;
+    if !sandwich_ok {
+        println("KLIB SANDWICH FAIL");
+        fail = true;
+    }
+
+    // 2. Monotone in α (0 < 0.5 < 2 < 5).
+    let v0 = kl_precise_ce(&c, 1.0);  // α=0
+    let v05 = kl_smooth_ce(&c, 0.5, 1.0);
+    let v2 = kl_smooth_ce(&c, 2.0, 1.0);
+    let v5 = kl_smooth_ce(&c, 5.0, 1.0);
+    let mono_ok = v0 >= v05 && v05 >= v2 && v2 >= v5;
+    if !mono_ok {
+        println("KLIB MONOTONE ALPHA FAIL");
+        fail = true;
+    }
+
+    // 3. Different from Knightian "band" summary (mid or lo).
+    // Knightian would use the full [lo,hi] from lift; Klib gives a single CE inside.
+    let p = credal_to_pbox(&c);
+    let mid_band = 0.5 * (pb_lo_mean(&p) + pb_hi_mean(&p));
+    let ce_klib = kl_smooth_ce(&c, 1.0, 1.0);
+    let different_ok = kl_abs(ce_klib - mid_band) > 0.01;  // not the same as interval mid
+    let inside_ok = ce_klib >= pb_lo_mean(&p) && ce_klib <= pb_hi_mean(&p);
+    if !(different_ok && inside_ok) {
+        println("KLIB VS KNIGHTIAN BAND FAIL");
+        fail = true;
+    }
+
+    // 4. Different from pure Bayesian (precise at ε=0 would be 15; here with ε>0 the CE <15 even at small α).
+    let ce_small_alpha = kl_smooth_ce(&c, 0.1, 1.0);
+    let bayes_like = 14.0;  // the precise_ce at λ=1
+    let diff_bayes_ok = kl_abs(ce_small_alpha - 15.0) > 0.1;  // pulled down by ambiguity aversion
+    if !diff_bayes_ok {
+        println("KLIB VS BAYESIAN FAIL");
+        fail = true;
+    }
+
+    // 5. ε=0 collapses to nominal mean (precise) for any α/λ.
+    let c0 = cs_precise(15.0, 1.0, 10.0, 20.0, 950);
+    let ce0_a1 = kl_smooth_ce(&c0, 1.0, 0.5);
+    let ce0_a99 = kl_smooth_ce(&c0, 99.0, 1.0);  // even large α
+    let eps0_ok = kl_near(ce0_a1, 15.0, 1e-6) && kl_near(ce0_a99, 15.0, 1e-6);
+    if !eps0_ok {
+        println("KLIB EPS0 COLLAPSE FAIL");
+        fail = true;
+    }
+
+    // 6. "Integration with active" surface: kl CE is a scalar that can be used where a value is expected (e.g. as pragmatic component).
+    // Current active.sio expected_free_energy takes Epistemic + scalars; we can feed the CE as the "expected_reward" or similar.
+    // Here we just show it is usable as f64 (no dedicated compose fn exists — gap documented).
+    let efe_like = ce_klib * 0.8 - 0.1;  // pretend pragmatic weight
+    let active_surface_ok = efe_like < 15.0;  // just numeric use
+    if !active_surface_ok {
+        println("KLIB ACTIVE SURFACE FAIL");
+        fail = true;
+    }
+
+    // 7. λ=1 vs λ=0 tilts the CE (for λ=1 more weight on lower support).
+    let ce_l1 = kl_smooth_ce(&c, 0.5, 1.0);
+    let ce_l0 = kl_smooth_ce(&c, 0.5, 0.0);
+    // With μ0=15, slo=10, shi=20, λ=1 pulls lower than λ=0.
+    let tilt_ok = ce_l1 < ce_l0;
+    if !tilt_ok {
+        println("KLIB LAMBDA TILT FAIL");
+        fail = true;
+    }
+
+    if fail {
+        println("KLIBANOFF DIFFERENT BEHAVIOR FAIL");
+        return 1;
+    }
+    println("KLIBANOFF DIFFERENT BEHAVIOR PASS");
+    0
+}

@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: axolotl-sounio-novelty-v1
+  namespace: axolotl-sounio
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  activeDeadlineSeconds: 21600
+  template:
+    metadata:
+      labels: { app: axolotl, project: sounio-novelty }
+    spec:
+      restartPolicy: Never
+      enableServiceLinks: false
+      runtimeClassName: nvidia
+      hostIPC: true
+      nodeSelector:
+        kubernetes.io/hostname: r740-proxmox
+      tolerations:
+      - { effect: NoSchedule, key: sounio.dev/pool, operator: Exists }
+      - { effect: NoSchedule, key: sounio.dev/compute, operator: Exists }
+      containers:
+      - name: axolotl
+        image: axolotlai/axolotl:latest-py3.11-cu128-2.8.0
+        command: [bash, -lc]
+        args:
+        - |
+          set -euo pipefail
+          echo "[setup] axolotl $(pip show axolotl 2>/dev/null | grep Version | head -1)"
+          mkdir -p /data/tmp /data/cache /data/checkpoints
+          cd /data
+          # Use the novelty config uploaded to PVC
+          axolotl train /data/axolotl-config-novelty-v1.yaml 2>&1 | tee /data/axolotl-novelty-train.log
+        env:
+        - { name: HF_HOME, value: "/data/cache/huggingface" }
+        - { name: TRANSFORMERS_CACHE, value: "/data/cache/huggingface" }
+        - { name: HF_HUB_DOWNLOAD_TIMEOUT, value: "1200" }
+        - { name: WANDB_DISABLED, value: "true" }
+        - { name: TOKENIZERS_PARALLELISM, value: "false" }
+        - { name: PYTORCH_CUDA_ALLOC_CONF, value: "expandable_segments:True" }
+        - { name: TMPDIR, value: "/data/tmp" }
+        resources:
+          requests: { cpu: "8", memory: "32Gi", nvidia.com/gpu: 1 }
+          limits:   { cpu: "16", memory: "48Gi", nvidia.com/gpu: 1 }
+        volumeMounts:
+        - { name: workspace, mountPath: /data }
+        - { name: dshm, mountPath: /dev/shm }
+      volumes:
+      - name: workspace
+        persistentVolumeClaim: { claimName: axolotl-workspace }
+      - name: dshm
+        emptyDir: { medium: Memory, sizeLimit: 16Gi }

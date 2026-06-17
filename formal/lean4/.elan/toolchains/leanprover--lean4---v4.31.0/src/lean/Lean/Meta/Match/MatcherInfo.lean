@@ -1,0 +1,201 @@
+/-
+Copyright (c) 2020 Microsoft Corporation. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Leonardo de Moura
+-/
+module
+
+prelude
+public import Lean.Meta.Basic
+
+public section
+
+namespace Lean.Meta
+namespace Match
+
+structure DiscrInfo where
+  /-- `some h` if the discriminant is annotated with `h:` -/
+  hName? : Option Name := none
+deriving Inhabited, Repr
+
+
+structure Overlaps where
+  map : Std.HashMap Nat (Std.TreeSet Nat) := {}
+deriving Inhabited, Repr
+
+def Overlaps.isEmpty (o : Overlaps) : Bool :=
+  o.map.isEmpty
+
+def Overlaps.insert (o : Overlaps) (overlapping overlapped : Nat) : Overlaps where
+  map := o.map.alter overlapped fun s? => some ((s?.getD {}).insert overlapping)
+
+def Overlaps.overlapping (o : Overlaps) (overlapped : Nat) : Array Nat :=
+  match o.map[overlapped]? with
+  | some s => s.toArray
+  | none   => #[]
+
+/--
+Information about the parameter structure for the alternative of a matcher or splitter.
+-/
+structure AltParamInfo where
+  /-- Actual fields (not including discr eqns) -/
+  numFields : Nat
+  /-- Overlap assumption (for splitters only) -/
+  numOverlaps : Nat
+  /-- Whether this alternative has an artificial `Unit` parameter -/
+  hasUnitThunk : Bool
+deriving Inhabited, Repr, BEq
+
+/--
+Information about the structure of a matcher declaration
+-/
+structure MatcherInfo where
+  /-- Number of parameters -/
+  numParams    : Nat
+  /-- Number of discriminants -/
+  numDiscrs    : Nat
+  /-- Parameter structure information for each alternative -/
+  altInfos     : Array AltParamInfo
+  /--
+  `uElimPos?` is `some pos` when the matcher can eliminate in different universe levels, and
+  `pos` is the position of the universe level parameter that specifies the elimination universe.
+  It is `none` if the matcher only eliminates into `Prop`.
+  -/
+  uElimPos?    : Option Nat
+  /--
+  `discrInfos[i] = { hName? := some h }` if the i-th discriminant was annotated with `h :`.
+  -/
+  discrInfos   : Array DiscrInfo
+  /--
+  (Conservative approximation of) which alternatives may overlap another.
+  -/
+  overlaps     : Overlaps
+deriving Inhabited, Repr
+
+@[expose] def MatcherInfo.numAlts (info : MatcherInfo) : Nat :=
+  info.altInfos.size
+
+def MatcherInfo.arity (info : MatcherInfo) : Nat :=
+  info.numParams + 1 + info.numDiscrs + info.numAlts
+
+def MatcherInfo.getFirstDiscrPos (info : MatcherInfo) : Nat :=
+  info.numParams + 1
+
+def MatcherInfo.getDiscrRange (info : MatcherInfo) : Std.Rco Nat :=
+  info.getFirstDiscrPos...(info.getFirstDiscrPos + info.numDiscrs)
+
+def MatcherInfo.getFirstAltPos (info : MatcherInfo) : Nat :=
+  info.numParams + 1 + info.numDiscrs
+
+def MatcherInfo.getAltRange (info : MatcherInfo) : Std.Rco Nat :=
+  info.getFirstAltPos...(info.getFirstAltPos + info.numAlts)
+
+def MatcherInfo.getMotivePos (info : MatcherInfo) : Nat :=
+  info.numParams
+
+def getNumEqsFromDiscrInfos (infos : Array DiscrInfo) : Nat := Id.run do
+  let mut r := 0
+  for info in infos do
+    if info.hName?.isSome then
+      r := r + 1
+  return r
+
+def MatcherInfo.getNumDiscrEqs (info : MatcherInfo) : Nat :=
+  getNumEqsFromDiscrInfos info.discrInfos
+
+def MatcherInfo.altNumParams (info : MatcherInfo) : Array Nat :=
+  info.altInfos.map fun {numFields, numOverlaps, hasUnitThunk} =>
+    numFields + numOverlaps + (if hasUnitThunk then 1 else 0) + info.getNumDiscrEqs
+
+
+namespace Extension
+
+structure Entry where
+  name : Name
+  info : MatcherInfo
+
+structure State where
+  map : SMap Name MatcherInfo := {}
+
+instance : Inhabited State := ⟨{}⟩
+
+def State.addEntry (s : State) (e : Entry) : State := { s with map  := s.map.insert e.name e.info }
+def State.switch (s : State) : State :=  { s with map := s.map.switch }
+
+builtin_initialize extension : SimplePersistentEnvExtension Entry State ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn    := State.addEntry
+    addImportedFn := fun es => (mkStateFromImportedEntries State.addEntry {} es).switch
+    asyncMode     := .async .mainEnv
+    exportEntriesFnEx? := some fun env _ entries =>
+      let all := entries.toArray
+      -- Do not export info for private defs at exported/server levels
+      let exported := all.filter ((env.setExporting true).contains (skipRealize := false) ·.name)
+      { exported, server := exported, «private» := all }
+  }
+
+def addMatcherInfo (env : Environment) (matcherName : Name) (info : MatcherInfo) : Environment :=
+  let _ : Inhabited Environment := ⟨env⟩
+  extension.addEntry (asyncDecl := matcherName) env { name := matcherName, info := info }
+
+def getMatcherInfo? (env : Environment) (declName : Name) : Option MatcherInfo := do
+  -- avoid blocking on async decls whose names look nothing like matchers
+  let .str _ s := declName.eraseMacroScopes | none
+  guard <| s.startsWith "match_"
+  (extension.getState (asyncDecl := declName) env).map.find? declName
+
+end Extension
+
+def addMatcherInfo [Monad m] [MonadEnv m] (matcherName : Name) (info : MatcherInfo) : m Unit :=
+  modifyEnv fun env => Extension.addMatcherInfo env matcherName info
+
+end Match
+
+export Match (MatcherInfo)
+
+def getMatcherInfoCore? (env : Environment) (declName : Name) : Option MatcherInfo :=
+  Match.Extension.getMatcherInfo? env declName
+
+def getMatcherInfo? [Monad m] [MonadEnv m] (declName : Name) : m (Option MatcherInfo) :=
+  return getMatcherInfoCore? (← getEnv) declName
+
+@[export lean_is_matcher]
+def isMatcherCore (env : Environment) (declName : Name) : Bool :=
+  getMatcherInfoCore? env declName |>.isSome
+
+def isMatcher [Monad m] [MonadEnv m] (declName : Name) : m Bool :=
+  return isMatcherCore (← getEnv) declName
+
+def isMatcherAppCore? (env : Environment) (e : Expr) : Option MatcherInfo :=
+  let fn := e.getAppFn
+  if fn.isConst then
+    if let some matcherInfo := getMatcherInfoCore? env fn.constName! then
+      if e.getAppNumArgs ≥ matcherInfo.arity then some matcherInfo else none
+    else
+      none
+  else
+    none
+
+def isMatcherAppCore (env : Environment) (e : Expr) : Bool :=
+  isMatcherAppCore? env e |>.isSome
+
+def isMatcherApp [Monad m] [MonadEnv m] (e : Expr) : m Bool :=
+  return isMatcherAppCore (← getEnv) e
+
+/--
+Tag extension for declarations that should be inlined like matchers during LCNF conversion,
+but are not matchers themselves (e.g. the `.het` auxiliaries from `mkCasesOnSameCtor`).
+-/
+builtin_initialize matcherLikeExt : TagDeclarationExtension ←
+  mkTagDeclarationExtension (asyncMode := .sync)
+
+def markMatcherLike (env : Environment) (declName : Name) : Environment :=
+  matcherLikeExt.tag env declName
+
+def isMatcherLikeCore (env : Environment) (declName : Name) : Bool :=
+  matcherLikeExt.isTagged env declName
+
+def isMatcherLike [Monad m] [MonadEnv m] (declName : Name) : m Bool :=
+  return isMatcherLikeCore (← getEnv) declName
+
+end Lean.Meta
