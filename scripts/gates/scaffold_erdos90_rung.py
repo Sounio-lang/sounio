@@ -35,6 +35,7 @@ RUNGS = [
     (2209, 47, 11516),
     (2304, 48, 12048),
     (2401, 49, 12592),
+    (2500, 50, 13148),
 ]
 
 
@@ -156,7 +157,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 MIN_EDGES="${{MIN_EDGES:-{grid}}}"
 
-"$SOUC" stdlib/research/erdos90_grid{n}_export.sio "$WORK/export.elf" >/dev/null
+SOUNIO_SOUC_ENGINE=lean_single "$SOUC" stdlib/research/erdos90_grid{n}_export.sio "$WORK/export.elf" >/dev/null
 chmod +x "$WORK/export.elf"
 "$WORK/export.elf" >"$WORK/witness.log" 2>&1
 grep -q "EXPORT_DONE" "$WORK/witness.log"
@@ -176,7 +177,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 MIN_EDGES="${{MIN_EDGES:-{grid + 1}}}"
 
-"$SOUC" stdlib/research/erdos90_subset{n}_export.sio "$WORK/export.elf" >/dev/null
+SOUNIO_SOUC_ENGINE=lean_single "$SOUC" stdlib/research/erdos90_subset{n}_export.sio "$WORK/export.elf" >/dev/null
 chmod +x "$WORK/export.elf"
 "$WORK/export.elf" >"$WORK/witness.log" 2>&1
 grep -q "EXPORT_DONE" "$WORK/witness.log"

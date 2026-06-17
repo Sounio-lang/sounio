@@ -704,6 +704,8 @@ lean_lib «SounioErdos90Subset2304Witness» where
 lean_lib «SounioErdos90Grid2401Witness» where
 @[default_target]
 lean_lib «SounioErdos90Subset2401Witness» where
+@[default_target]
+lean_lib «SounioErdos90Subset2500Witness» where
 
 -- Erdős [90] unit-distance count spectrum on the 168/ZD structure (7-vertex probe):
 -- associator lever beats linear (max 12 vs 9, 6 vs 2 distinct counts) + interleaved-
@@ -716,6 +718,11 @@ lean_lib «SounioErdos90UnitSpectrum» where
 -- (reaches 44 at 15 verts, 168 at 31), 3696 verified pathion ZD pairs.
 @[default_target]
 lean_lib «SounioErdos90PathionGrowth» where
+
+-- Erdős [90] pathion chromatic witness: first verified χ ≥ 3 associator-conflict
+-- graph in 32-D pathions, via an explicit triangle on {e₁,e₂,e₃} with c = e₁+e₁₈.
+@[default_target]
+lean_lib «SounioErdos90PathionChi3» where
 
 -- Slice D of the SOTA push: Lean soundness sketch of the
 -- epistemic-effect calculus. Backs the registered SOTA claim that
