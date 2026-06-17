@@ -318,6 +318,7 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
     (*module_box).fn_count = sm_fn_count
     (*module_box).string_count = 0
     (*module_box).prof_counter_count = (*summary.module).prof_counter_count
+    (*module_box).bss_total_size = (*summary.module).bss_total_size
 
     var i: i64 = 0
     while i < (*summary.module).prof_counter_count && i < 64 {
@@ -335,6 +336,7 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
         func.returns_float = (*summary.module).functions[i as usize].returns_float
         func.return_struct_name = (*summary.module).functions[i as usize].return_struct_name
         func.prof_counter_id = (*summary.module).functions[i as usize].prof_counter_id
+        func.bss_size = (*summary.module).functions[i as usize].bss_size
         (*module_box).functions[i as usize] = func
         i = i + 1
     }
@@ -389,6 +391,7 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
     (*lo.module).fn_count = summary.module.fn_count
     (*lo.module).string_count = 0
     (*lo.module).prof_counter_count = summary.module.prof_counter_count
+    (*lo.module).bss_total_size = summary.module.bss_total_size
 
     var i: i64 = 0
     while i < summary.module.prof_counter_count && i < 64 {
@@ -405,6 +408,7 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
         func.returns_float = summary.module.functions[i as usize].returns_float
         func.return_struct_name = summary.module.functions[i as usize].return_struct_name
         func.prof_counter_id = summary.module.functions[i as usize].prof_counter_id
+        func.bss_size = summary.module.functions[i as usize].bss_size
         (*lo.module).functions[i as usize] = func
         i = i + 1
     }
@@ -766,16 +770,19 @@ fn lowerer_preseed_program_items_mut(
                                 if bss_fn_id >= 0 {
                                     var mbox2 = (*lo).module
                                     var bss_slot = (*mbox2).functions[bss_fn_id as usize]
-                                    let bss_off = (*mbox2).export_count * 8
+                                    let bss_off = (*mbox2).bss_total_size
+                                    let bss_size = lower_typeexpr_byte_size(&head.type_alias_ty)
+                                    let aligned_size = ((bss_size + 7) / 8) * 8
                                     bss_slot.compile_strategy = 99
                                     bss_slot.param_count = bss_off
+                                    bss_slot.bss_size = bss_size
                                     let init_val = ast_lookup_global_var_init(name)
                                     if init_val != 0 {
                                         bss_slot.returns_float = 1
                                         bss_slot.prof_counter_id = init_val
                                     }
                                     (*mbox2).functions[bss_fn_id as usize] = bss_slot
-                                    (*mbox2).export_count = (*mbox2).export_count + 1
+                                    (*mbox2).bss_total_size = bss_off + aligned_size
                                     (*lo).module = mbox2
                                 }
                             }
@@ -1185,11 +1192,14 @@ fn ir_fast_summary_preseed_items_seed_owned(
                                     var bss_mod = seed_value.module
                                     let bss_fid = bss_mod.fn_count
                                     if bss_fid < IR_MAX_FUNCS {
+                                        let bss_size = lower_typeexpr_byte_size(&item.type_alias_ty)
+                                        let aligned_size = ((bss_size + 7) / 8) * 8
                                         bss_mod.functions[bss_fid as usize].name = name
                                         bss_mod.functions[bss_fid as usize].compile_strategy = IR_STRATEGY_BSS_GLOBAL
-                                        bss_mod.functions[bss_fid as usize].param_count = bss_mod.export_count * 8
+                                        bss_mod.functions[bss_fid as usize].param_count = bss_mod.bss_total_size
+                                        bss_mod.functions[bss_fid as usize].bss_size = bss_size
                                         bss_mod.fn_count = bss_fid + 1
-                                        bss_mod.export_count = bss_mod.export_count + 1
+                                        bss_mod.bss_total_size = bss_mod.bss_total_size + aligned_size
                                     }
                                     seed_value.module = bss_mod
                                 }
@@ -6194,6 +6204,33 @@ impl Lowerer {
             let lo_call_builtin = lo_dst_builtin.emit(ir_call(dst_builtin, fn_id_builtin, callee_name, args_builtin, argc_builtin))
             return (lo_call_builtin, dst_builtin)
         }
+        if name_eq(callee_name, make_name("println")) {
+            // Lower println(x) -> print(x); print_char('\n') so the native-v2 backend
+            // does not need a dedicated println builtin and so println works for any
+            // argument type that print accepts (primarily strings).
+            var lo_pl = self
+            let fn_id_print = lowerer_find_or_add_fn_id_mut(&! lo_pl, make_name("print"))
+            let pair_args_pl: LowerExprArgsResult = lo_pl.lower_expr_args_ref(&e.args)
+            let lo_args_pl = pair_args_pl.lowerer
+            let args_pl: Option<Box<IrRegList>> = if pair_args_pl.count <= 0 { None } else { Some(Box::new(pair_args_pl.regs)) }
+            let argc_pl = pair_args_pl.count
+            let pair_dst_pl = lo_args_pl.fresh_reg()
+            let lo_dst_pl = pair_dst_pl.0
+            let dst_pl = pair_dst_pl.1
+            let lo_call_pl = lo_dst_pl.emit(ir_call(dst_pl, fn_id_print, make_name("print"), args_pl, argc_pl))
+
+            let fn_id_print_char = lowerer_find_or_add_fn_id_mut(&! lo_call_pl, make_name("print_char"))
+            let pair_nl_reg = lo_call_pl.fresh_reg()
+            let lo_nl_reg = pair_nl_reg.0
+            let nl_reg = pair_nl_reg.1
+            let lo_load_nl = lo_nl_reg.emit(ir_load_imm(nl_reg, 10))
+            let nl_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(nl_reg)))
+            let pair_nl_dst = lo_load_nl.fresh_reg()
+            let lo_nl_dst = pair_nl_dst.0
+            let nl_dst = pair_nl_dst.1
+            let lo_call_nl = lo_nl_dst.emit(ir_call(nl_dst, fn_id_print_char, make_name("print_char"), nl_args, 1))
+            return (lo_call_nl, dst_pl)
+        }
         if ir_name_is_some(callee_name) {
             return self.lower_expr_args_first(&e.args)
         }
@@ -6808,10 +6845,16 @@ impl Lowerer {
                     let fn_strategy = lo_fn.module.functions[fn_id as usize].compile_strategy
                     if fn_strategy == IR_STRATEGY_BSS_GLOBAL {
                         let bss_off = lo_fn.module.functions[fn_id as usize].param_count
+                        let gsize = lo_fn.module.functions[fn_id as usize].bss_size
                         let ref_pair = lo_fn.fresh_reg()
                         let lo2 = ref_pair.0
                         let ref_reg = ref_pair.1
-                        let lo3 = lo2.emit(ir_load_global(ref_reg, bss_off, e.name))
+                        var lo3 = lo2
+                        if gsize > 8 {
+                            lo3 = lo2.emit(ir_load_imm(ref_reg, BSS_BASE_LINUX + bss_off))
+                        } else {
+                            lo3 = lo2.emit(ir_load_global(ref_reg, bss_off, e.name))
+                        }
                         (lo3, ref_reg)
                     } else {
                         let ref_pair = lo_fn.fresh_reg()
