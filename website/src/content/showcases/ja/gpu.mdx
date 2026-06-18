@@ -1,0 +1,120 @@
+---
+title: "Kretikos GPU コンパイラー"
+description: "チェック付きスレッドビルトイン、シリアル CPU フォールバック、ツリー内の PTX/CUBIN テンプレート、およびアートワートバンドルを含む GPU コンパイラーレーン。"
+domain: "gpu"
+icon: "🏛️"
+topic_id: "website.showcases.ja.gpu"
+authority: "website_only"
+audience: "researchers"
+last_validated: "2026-03-07"
+validated_by: "A6"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.showcases.ja.gpu"
+---
+# Kretikos GPU コンパイラー
+
+> **Scope note:** Kretikos は研究中の活性レーンです。このウェブサイトでは、クリニカルな薬理学（范コミシン εゲート、PBPK 論文デモ）が主な公開デモ面にあり、GPU ストアフロント機能ではありません。
+
+**Kretikos** (Κρητικός) = 克里ティス。クノッサスの迷宮を通る阿里アドネのスレッドのように、これは Sounio の GPU コンパイラーの仕事の名前のパスです：ソースレベルスレッドビルトイン、シリアル CPU フォールバック、ツリー内の PTX/CUBIN テンプレート、およびアートワートバンドル。
+
+## 経営者向け読み込み
+
+ほとんどの言語は GPU 野望に向かい、現在の境界を隠します。Kretikos はそれに反対します。それは、 bounded GPU サーフィスを第一-class 言語機能として公開し、それぞれの主張に対応する確認可能なアートワートまたはコマンドを結びつけます。- 今日はx軸のビルトイン関数のコンパイルを確認しました：`gpu_thread_id_x()`、`gpu_block_id_x()`、`gpu_block_dim_x()`、`gpu_sync_threads()`
+- y/zのビルトインのスペルは認識されます。ネイティブCPUフォールバックは決定論的なスタブを返します
+- `kretikos emit-ptx`を使用して、`self-hosted/gpu/ptx.sio`の内包された`self-hosted/gpu/ptx.sio`エミターを使用して、予定義されたPTXテンプレートが活き返ります
+- `kretikos emit-cubin`を使用して、`self-hosted/gpu/nvidia_bare.sio`の内包されたエミターを使用して、予定義されたCUBINテンプレートが活き返ります
+- 構造的なアートファイトボンドルは、`kretikos bundle`を使用して、PTX/CUBINハッシュと明示的な非主張を含むものが活き返ります
+- Kretikosは、小さなエミタードライバーをビルドするために、現在使用されている`bin/souc`/`souc-linux-x86_64`コンパイラに依存しています
+- CPUフォールバックパスは決定論的でシリアルです。パートペアルGPUシミュレータではありません
+- 後端ソースーPTXエミター、SPIR-V下げator、CUDAエルフ生成器ーーこれらは`self-hosted/gpu/`内に内包されています
+
+## Kretikosが証言すること
+
+科学ソフトウェアに认真な言語は、GPUの真実を黒箱のランタイムに委譲しないでくれなければなりません。Kretikosは、Sounioが行うことを示しています：- スレッドインデックスをソースレベルの構文で、ドライバーレベルの魔術ではなく公開する
+- 自分自体にホストされたコードから予定義されたPTXとCUBINアーティファクトテンプレートを出力する
+- 構文/ランタイムスモークテストのために決定論的にシリアルCPUフォールバックでカーネルを実行する
+- 実際の圧力の下でコンパイラ、ランタイム、記事の統合を保つ
+
+## ベアメタル構文
+
+```sio
+kernel fn vec_add(n: i64) with GPU {
+    let tid = gpu_thread_id_x()
+    let bid = gpu_block_id_x()
+    let bdim = gpu_block_dim_x()
+    let i = bid * bdim + tid
+    if i >= n { return }
+    // このスレッドが要素iを持つ
+}
+
+fn main() with GPU, IO {
+    let grid = (16, 1, 1)
+    let block = (64, 1, 1)
+    perform GPU.launch(vec_add, grid, block)(1024)
+    perform GPU.sync()
+}
+```
+
+今日の確認済みの公開形態: 1次元インデックス付きの決定論的CPUフォールバック。より広くy/zの下書きとより豊かなメモリサーフィスを含むものは別の進捗経路です。
+
+## 確認済みコマンド# シリアル CPUフォーバックによるコンパイルと実行（GPUハードウェアは必要ありません）
+souc examples/kernel_source_level.sio /tmp/kretikos_demo.elf
+/tmp/kretikos_demo.elf
+
+# 定義されたPTXテンプレートを出力（自分でホストされている、GPUが必要ありません）
+kretikos emit-ptx vec_add     -o /tmp/kretikos.ptx
+kretikos emit-ptx vec_sub     -o /tmp/kretikos.ptx
+kretikos emit-ptx vec_mul     -o /tmp/kretikos.ptx
+kretikos emit-ptx vec_div     -o /tmp/kretikos.ptx
+kretikos emit-ptx vec_add_f64 -o /tmp/kretikos.ptx
+kretikos emit-ptx fma         -o /tmp/kretikos.ptx
+kretikos emit-ptx fma_f64     -o /tmp/kretikos.ptx
+kretikos emit-ptx store_u32_const -o /tmp/kretikos.ptx
+
+# 定義されたMetal/MSLテンプレートを出力（自分でホストされている、macOSが必要ありません）
+kretikos emit-metal vec_add          -o /tmp/kretikos.metal
+kretikos emit-metal ossm_oct_step    -o /tmp/kretikos.metal
+kretikos emit-metal sedenion_cd_step -o /tmp/kretikos.metal
+
+# 定義されたvec_add_f32 CUBINテンプレートを出力
+kretikos emit-cubin vec_add_f32 -o /tmp/kretikos.cubin
+
+# ハッシュと境界情報を含む構造的アートワーフバンドルを出力
+kretikos bundle -o /tmp/kretikos-bundle
+
+# ホストがそれらのツールを提供している場合、オプション的なツールチェーン/ランタイムの検証を追加
+kretikos bundle -o /tmp/kretikos-validated-bundle --validate-toolchain --validate-runtime
+```# GPUアーティファクトを含むPTXのビルド (幅広いパターンサポート)
+`SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"`  
+`"$SOUC_GPU_BIN" build examples/kernel_source_level.sio --backend gpu -o /tmp/kretikos.ptx`
+
+## なぜこれが重要です
+
+GPU作業は言語マーケティングの終わりに行きます。イントリニックを描かれることやテンサーコアサポートの保証が容易ですが、自分自体のコンパイラー、 bounded GPU surface、および公開面向の記事の一致を維持するのは難しいです。実際のバグがスタックアラインメント、ランチパラメータ、およびPTXモジュールロードで浮き彫りしているときに一致することが困難です。
+
+Kretikosは、計算を加速するだけでなく、言語が後端アーティファクトに触れると誠実さが残るかどうかを示すために言語を迫します。
+
+## サポートレベル- チェックされたビルトイン: `gpu_thread_id_x`, `gpu_block_id_x`, `gpu_block_dim_x`, `gpu_sync_threads` — 自分から持っているコンパイラ
+- CPUフォールバックスタブ: y/z スレッド/ブロックIDが `0` を返す; y/z ブロック次元が `1` を返す
+- PTXテンプレート: `kretikos emit-ptx` で 6パターン (vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma) を伴う; `build --backend gpu` を介してより広がったPTX出力 (GPUアーチビタルチェック)
+- MSLテンプレート: `kretikos emit-metal` で 3パターン (vec_add, ossm_oct_step, sedenion_cd_step) を伴う、木内にある自分から持っているエミターから
+- CUBINテンプレート: `kretikos emit-cubin` (木内にある自分から持っているエミター)
+- アーチビタルバンドル: `kretikos bundle` はPTX+CUBINと`sounio.kretikos.bundle.v1`を出力する
+- オプション的な向上チェック: `--validate-toolchain` は `ptxas`/`nvdisasm` の証拠を記録し、`--validate-runtime` は非GPUホストでは `CUDA Driver API` の実行を試みる (正確な `not_run` 理由を伴う)
+
+## 境界
+
+このドキュメントは、Markdown/MDX形式の公式な日本語翻訳です。
+
+- ビルトインのチェック: `gpu_thread_id_x`, `gpu_block_id_x`, `gpu_block_dim_x`, `gpu_sync_threads` — 自分から持っているコンパイラ
+- CPUフォールバックスタブ: y/z スレッド/ブロックIDが `0` を返す; y/z ブロック次元が `1` を返す
+- PTXテンプレート: `kretikos emit-ptx` で 6パターン (vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma) を伴う; `build --backend gpu` を介してより広がったPTX出力 (GPUアーチビタルチェック)
+- MSLテンプレート: `kretikos emit-metal` で 3パターン (vec_add, ossm_oct_step, sedenion_cd_step) を伴う、木内にある自分から持っているエミターから
+- CUBINテンプレート: `kretikos emit-cubin` (木内にある自分から持っているエミター)
+- アーチビタルバンドル: `kretikos bundle`Kretikosは次のことを主張しません：
+- すべてのGPUバックエンドが生産環境に完全です。
+- 多次元カーネルがすべてのパターンに対してPTXを出力します（現在パターンにマッチされているものだけ）。
+- `gpu.alloc<T>()`や共有メモリ抽象化の公開表層がチェックされています。
+- CPUフォールバックは、パラレルGPUグリッドをシミュレートします。
+
+誠実な主張は幅が狭いので強力です：GPUコンパイラーが存在し、現在のKretikos CLIアーティファクトバンドルは任意のユーザーカーネル下げに対しては任意のテンプレートではなく、予定義されたテンプレートの表面です。
+ツールチェーンとランタイムの検証は選択されたテンプレートのみに適用されます。任意のユーザー書き込んだGPUカーネルの検証は行われません。

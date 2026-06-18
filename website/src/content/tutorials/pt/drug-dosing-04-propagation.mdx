@@ -1,0 +1,172 @@
+---
+title: "Propagação de Incertezas através do Modelo"
+description: "Assista a incertezas passar por uma cálculo farmacocinético completo"
+series: "drug-dosing"
+order: 4
+estimatedMinutes: 12
+prerequisites: ["drug-dosing-03-knowledge"]
+topic_id: "website.tutorials.pt.drug-dosing-04-propagation"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.pt.drug-dosing-04-propagation"
+---
+# Propagação de Incertezas através do Modelo
+
+Definimos nossos parâmetros farmacocinéticos com incertezas. Agora, vejamos como essa incertezas passa por um cálculo de doses completo — de medidas de pacientes até concentrações preditas de medicamento.
+
+## O Eixo Completo
+
+Um fluxo de trabalho farmacocinético clínico parece assim:
+
+1. **Medir** laboratórios de pacientes (creatina, peso) → entradas incrédulas
+2. **Estimar** parâmetros farmacocinéticos (limiar, volume) → incertezas derivadas
+3. **Prever** concentrações de medicamento (Cmax, Cmin) → incertezas compôndidas
+4. **Decidir** se a doses é segura → decisão limitada por confiança
+
+Em Sounio, cada etapa preserva e propaga automaticamente a incertezas.
+
+## Passo 1: Medidas de Pacientes
+
+```sio
+struct PatientLabs {
+    serum_creatinine: Knowledge<f64>,  // mg/dL
+    weight: Knowledge<f64>,            // kg
+    age: f64,                          // anos (do registro, exato)
+}
+
+fn measure_patient() -> PatientLabs {
+    PatientLabs {
+        serum_creatinine: measure(1.2, uncertainty: 0.06),  // CV de ensaio de 5%
+        weight: measure(70.0, uncertainty: 1.0),            // ±1 kg de precisão de escala
+        age: 65.0,
+    }
+}
+```
+
+## Passo 2: Estimar Parâmetros FarmacocinéticosA equação de Cockcroft-Gault estimada a limpeza de creatinina a partir dos laboratórios do paciente. Como os entradas são `Knowledge&lt;f64&gt;`, a saída leva automaticamente a propagação de incertidão:
+
+```sio
+fn estimate_clearance(labs: PatientLabs) -> Knowledge<f64> {
+    // CrCl (mL/min) = (140 - idade) × peso / (72 × SCr)
+    let numerador = (140.0 - labs.idade) * labs.peso
+    let denominador = 72.0 * labs.serum_creatinine
+    numerator / denominador
+}
+
+fn estimate_volume(labs: PatientLabs) -> Knowledge<f64> {
+    // Vd ≈ 0.7 L/kg × peso (com incertidão do modelo)
+    0.7 * labs.peso
+}
+```
+
+A estimativa de limpeza herda incertidão de tanto `peso` quanto `serum_creatinine`. A estimativa de volume herda incertidão de `peso`. Sounio calcula esses automaticamente.
+
+## Step 3: Prever Concentrações
+```sio
+fn prever_troca(cl: Conhecimento<f64>, vd: Conhecimento<f64>,
+                dose: f64, tau: f64) -> Conhecimento<f64> {
+    let ke = cl / vd                          // taxa de eliminação
+    let cmax = dose / vd                      // concentração máxima
+    let decay = exp_k(0.0 - ke * tau)         // exp(-ke × tau)
+    let acumulação = 1.0 / (1.0 - decay)   // fator de acumulação estacionária
+    cmax * decay * acumulação
+}
+```
+
+Cada operação compounding a incerteza. Até que chegamos à previsão do furacil, reflete a incerteza combinada de todas as medidas upstream.
+
+## Passo 4: Análise de Sensibilidade
+
+Qual medida contribui mais para a incerteza final? O Sounio pode descompor contribuições de variância:
+
+```sio
+struct ResultSensibilidade {
+    contribuição_scr: f64,     // fração de creatinina
+    contribuição_peso: f64,  // fração de peso
+    total_cv: f64,             // coeficiente de variabilidade total
+}
+```markdown
+# Análise de Sensibilidade
+
+## Introdução
+
+A função `analyze_sensitivity` calcula a contribuição da variação dos medicamentos entre diferentes variáveis dos pacientes. Ela fornece informações sobre como a variação dos medicamentos está distribuída entre as variáveis de claridade (CL) e dos volumes distribuídos (Vd), e como a variação dos medicamentos está relacionada à medida de SCr (Sérume Crênica).
+
+## Parâmetros
+
+- `labs`: Um objeto `PatientLabs` que contém os dados dos pacientes.
+- `dose`: A dosagem do medicamento em mg.
+- `tau`: O tempo de lag em horas.
+
+## Retorno
+
+- `SensitivityResult`: Um objeto contendo as contribuições da variação dos medicamentos entre a SCr e o peso do paciente, e a variância total.
+
+## Exemplo de Uso
+
+```rust
+fn analyze_sensitivity(labs: PatientLabs, dose: f64, tau: f64) -> SensitivityResult
+    with Mut, Panic, Div
+{
+    let cl = estimate_clearance(labs)
+    let vd = estimate_volume(labs)
+    let trough = predict_trough(cl, vd, dose, tau)
+
+    // Variância decomposição via análise sobol
+    let total_var = trough.uncertainty * trough.uncertainty
+
+    // Contribuição da SCr (por meio da claridade)
+    let scr_var = cl.uncertainty * cl.uncertainty
+    let scr_frac = scr_var / total_var
+
+    // Contribuição do peso (por meio de CL e Vd)
+    let wt_frac = 1.0 - scr_frac  // restante
+
+    SensitivityResult {
+        scr_contribution: scr_frac,
+        weight_contribution: wt_frac,
+        total_cv: trough.uncertainty / trough.value,
+    }
+}
+```
+
+Isso diz ao clínico: *"67% da sua incertidão de dosagem provêm da análise de SCr. Se deseja uma dosagem mais precisa, obtenha uma medida melhor de SCr (por exemplo, Cystatin C) em vez de uma escala mais precisa."*
+
+## Colocando Tudo Juntos
+``````sio
+fn main() -> i32 com IO, Mut, Panic, Div {
+    let labs = medir_paciente()
+    let cl = estimar_clarencia(labs)
+    let vd = estimar_volume(labs)
+
+    let dose = 1000.0   // 1g vancomycin
+    let tau = 12.0       // q12h
+
+    let trough = prever_trough(cl, vd, dose, tau)
+
+    print("Predito trough: ")
+    println(trough.valor)
+    print(" ± ")
+    println(trough.uncertainty)
+    print(" mg/L\n")
+
+    let sens = analisar_sensibilidade(labs, dose, tau)
+    print("Contribuição SCr: ")
+    println(sens.scr_contribuição)
+    print("Contribuição de peso: ")
+    println(sens.peso_contribuição)
+
+    0
+}
+```
+
+## Principais Aprendizagens
+
+- A incertezza propaga automaticamente por todas as operações aritméticas
+- A análise de sensibilidade revela quais medidas importam mais
+- O full pipeline (medir → estimar → prever → analisar) é tipado
+- Anotações de efeito garantem que cada operação potencialmente falhada seja declarada
+- Não é necessário usar fórmulas de propagação de erros manualmente — Sounio o faz
+```
