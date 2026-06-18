@@ -11,6 +11,7 @@
 #   kretikos run <source.sio>                   - native CPU fallback, serial thread IDs
 #   kretikos build <source.sio> [opts] -o <out>  - PTX via checked GPU artifact if present
 #   kretikos emit-ptx <pattern> -o <file.ptx>   - emit PTX template from in-tree emitter
+#   kretikos emit-hip <pattern> -o <file.hip.cpp> - emit HIP C++ template from in-tree emitter
 #   kretikos emit-metal <pattern> -o <file.metal> - emit MSL template from in-tree emitter
 #   kretikos emit-spirv <pattern> -o <file.spv>  - emit SPIR-V template from in-tree emitter
 #   kretikos emit-kaxi <pattern> -o <file.kaxi>  - emit K-AXI epistemic assembly template
@@ -811,6 +812,7 @@ case "$CMD" in
             echo "hint: 'kretikos run' executes a serial native CPU fallback" >&2
             echo "hint: 'kretikos emit-ptx <pattern> -o kernel.ptx' emits PTX for built-in patterns" >&2
             echo "hint: supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma, fma_f64" >&2
+            echo "hint: 'kretikos emit-hip vec_add_f32 -o kernel.hip.cpp' emits HIP C++ for AMD ROCm" >&2
             echo "hint: 'kretikos emit-metal <pattern> -o kernel.metal' emits MSL for built-in patterns" >&2
             echo "hint: supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check" >&2
             echo "hint: 'kretikos emit-spirv exit_only -o kernel.spv' emits a SPIR-V template" >&2
@@ -930,6 +932,86 @@ case "$CMD" in
             echo "kretikos: structural validation OK - PTX directives present"
         else
             echo "kretikos: structural validation failed - PTX markers missing" >&2
+            exit 1
+        fi
+        ;;
+
+    emit-hip)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emit_hip.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-emit-hip.XXXXXX")" || {
+            echo "error: failed to create temporary HIP driver directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        # Parse args: emit-hip <pattern> -o <file>
+        PATTERN=""
+        OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$PATTERN" ]]; then
+                        PATTERN="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -z "$PATTERN" ]]; then
+            echo "usage: kretikos emit-hip <pattern> -o <file.hip.cpp>" >&2
+            echo "" >&2
+            echo "Supported patterns:" >&2
+            echo "  vec_add_f32  - f32 vector addition (ROCm HIP target)" >&2
+            exit 1
+        fi
+
+        case "$PATTERN" in
+            vec_add_f32) ;;
+            *)
+                echo "error: unsupported HIP pattern '$PATTERN'" >&2
+                echo "supported HIP patterns: vec_add_f32" >&2
+                exit 1
+                ;;
+        esac
+
+        if [[ -z "$OUT" ]]; then
+            echo "error: -o <output> is required" >&2
+            exit 1
+        fi
+
+        ulimit -s unlimited 2>/dev/null || true
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile HIP emitter driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        "$DRIVER_ELF" "$PATTERN" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: HIP C++ template emitted - $OUT ($bytes bytes)"
+
+        # Structural validation. This is intentionally not a hipcc/runtime claim.
+        if grep -q "#include <hip/hip_runtime.h>" "$OUT" && grep -q "__global__" "$OUT" && grep -q "extern \"C\"" "$OUT" && grep -Eq "(blockIdx|threadIdx)" "$OUT"; then
+            echo "kretikos: structural validation OK - HIP C++ markers present"
+        else
+            echo "kretikos: structural validation failed - HIP C++ markers missing" >&2
             exit 1
         fi
         ;;
@@ -3828,6 +3910,8 @@ NF {
         echo ""
         echo "PTX templates:   self-hosted/gpu/ptx.sio  (live via 'emit-ptx <pattern>')"
         echo "Supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma, fma_f64, store_u32_const"
+        echo "HIP C++ templates: self-hosted/gpu/hip.sio, lower_to_hip.sio  (live via 'emit-hip <pattern>')"
+        echo "Supported HIP patterns: vec_add_f32"
         echo "MSL templates:   self-hosted/gpu/metal.sio  (live via 'emit-metal <pattern>')"
         echo "Supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check"
         echo "SPIR-V templates: self-hosted/gpu/spirv.sio  (live via 'emit-spirv <pattern>')"
@@ -3903,6 +3987,7 @@ NF {
         echo "  run <source.sio>                  Native CPU fallback, serial thread IDs"
         echo "  build <source.sio> [opts] -o <out>  Emit PTX via checked GPU artifact if present"
         echo "  emit-ptx <pattern> -o <file.ptx>  Emit PTX template from in-tree emitter"
+        echo "  emit-hip <pattern> -o <file.hip.cpp> Emit HIP C++ template from in-tree emitter (vec_add_f32)"
         echo "  emit-metal <pattern> -o <file.metal> Emit MSL template from in-tree emitter"
         echo "  emit-spirv <pattern> -o <file.spv> Emit SPIR-V template (exit_only, vec_add, epistemic_dual_output_f32, tid_kernel, self-check)"
         echo "  emit-kaxi <pattern> -o <file.kaxi> Emit K-AXI epistemic assembly (exit_only, vec_add, source_vec_*_f32, source_fma_f32, source_epistemic_dual_output_f32, epistemic_elementwise_f32, octonion_assoc, octonion_mul, octonion_associator, octonion_assoc_norm_sum, sedenion_mul, sedenion_sqr, sedenion_sqr_mb, sedenion_associator, self-check)"

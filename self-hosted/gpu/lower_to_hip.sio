@@ -1,0 +1,197 @@
+// self-hosted::gpu::lower_to_hip — GPU Kernel IR → HIP C++ lowering
+//
+// Phase-0 MVP: emits compilable HIP C++ for the simple elementwise kernels
+// produced by gpu_build_vec_add_ir and friends. The lowering is intentionally
+// explicit and defensive; it errors on unsupported opcodes rather than silently
+// producing wrong code.
+
+pub fn gpu_lower_to_hip(kernel: GpuKernelIr) -> HipBuf with Mut, Panic, Div, Alloc {
+    var buf = hip_buf_new()
+
+    // HIP header
+    buf = hip_push_str(buf, "#include <hip/hip_runtime.h>\n\n")
+
+    // Kernel signature
+    buf = hip_emit_kernel_signature(buf, kernel)
+
+    // Body
+    buf = hip_push_str(buf, "{\n")
+    buf = hip_emit_kernel_body(buf, kernel)
+    buf = hip_push_str(buf, "}\n")
+
+    buf
+}
+
+fn hip_type_to_cpp(ty: GpuType) -> string {
+    match ty {
+        GpuType::GpuF32 => "float",
+        GpuType::GpuF64 => "double",
+        GpuType::GpuI32 => "int",
+        GpuType::GpuU32 => "unsigned int",
+        GpuType::GpuI64 => "long long",
+        GpuType::GpuU64 => "unsigned long long",
+        GpuType::GpuPtr => "void*",
+        _ => "int",
+    }
+}
+
+fn hip_emit_kernel_signature(buf: HipBuf, kernel: GpuKernelIr) -> HipBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = hip_push_str(out, "extern \"C\" __global__ void ")
+    out = hip_push_str(out, gpu_kernel_name_to_string(kernel))
+    out = hip_push_str(out, "(")
+
+    var i: i64 = 0
+    while i < kernel.param_count {
+        let param = kernel.params[i as usize]
+        let ty_str = hip_type_to_cpp(param.ty)
+        if param.ty == GpuType::GpuPtr {
+            out = hip_push_str(out, "void* ")
+        } else {
+            out = hip_push_str(out, ty_str)
+            out = hip_push_str(out, " ")
+        }
+        out = hip_push_str(out, gpu_param_name_to_string(param))
+        if i < (kernel.param_count - 1) {
+            out = hip_push_str(out, ", ")
+        }
+        i = i + 1
+    }
+
+    out = hip_push_str(out, ")\n")
+    out
+}
+
+fn hip_emit_kernel_body(buf: HipBuf, kernel: GpuKernelIr) -> HipBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+
+    // Global thread id helper
+    out = hip_push_str(out, "    int tid = blockIdx.x * blockDim.x + threadIdx.x;\n")
+
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        out = hip_lower_op(out, op, kernel)
+        i = i + 1
+    }
+
+    out
+}
+
+fn hip_lower_op(buf: HipBuf, op: GpuOp, kernel: GpuKernelIr) -> HipBuf with Mut, Panic, Div, Alloc {
+    let opcode = op.opcode
+    match opcode {
+        GpuOpcode::GpuGetTid => {
+            // tid is already computed; assign to destination register.
+            var out = buf
+            out = hip_push_str(out, "    ")
+            out = hip_push_reg_decl(out, op.dst_reg, op.ty)
+            out = hip_push_str(out, " = tid;\n")
+            out
+        }
+
+        GpuOpcode::GpuCvt => {
+            var out = buf
+            out = hip_push_str(out, "    ")
+            out = hip_push_reg_decl(out, op.dst_reg, op.dst_ty)
+            out = hip_push_str(out, " = (")
+            out = hip_push_str(out, hip_type_to_cpp(op.dst_ty))
+            out = hip_push_str(out, ")")
+            out = hip_push_reg_ref(out, op.src_reg)
+            out = hip_push_str(out, ";\n")
+            out
+        }
+
+        GpuOpcode::GpuMulImm => {
+            var out = buf
+            out = hip_push_str(out, "    ")
+            out = hip_push_reg_decl(out, op.dst_reg, op.ty)
+            out = hip_push_str(out, " = ")
+            out = hip_push_reg_ref(out, op.lhs_reg)
+            out = hip_push_str(out, " * ")
+            out = hip_push_i64(out, op.rhs_imm)
+            out = hip_push_str(out, ";\n")
+            out
+        }
+
+        GpuOpcode::GpuLoadParam => {
+            var out = buf
+            let param = kernel.params[op.param_idx as usize]
+            out = hip_push_str(out, "    ")
+            out = hip_push_reg_decl(out, op.dst_reg, op.ty)
+            out = hip_push_str(out, " = ")
+            if param.ty == GpuType::GpuPtr {
+                out = hip_push_str(out, "(")
+                out = hip_push_str(out, hip_type_to_cpp(op.ty))
+                out = hip_push_str(out, ")")
+            }
+            out = hip_push_str(out, gpu_param_name_to_string(param))
+            out = hip_push_str(out, ";\n")
+            out
+        }
+
+        GpuOpcode::GpuAdd => {
+            var out = buf
+            out = hip_push_str(out, "    ")
+            out = hip_push_reg_decl(out, op.dst_reg, op.ty)
+            out = hip_push_str(out, " = ")
+            out = hip_push_reg_ref(out, op.lhs_reg)
+            out = hip_push_str(out, " + ")
+            out = hip_push_reg_ref(out, op.rhs_reg)
+            out = hip_push_str(out, ";\n")
+            out
+        }
+
+        GpuOpcode::GpuLoadGlobal => {
+            var out = buf
+            out = hip_push_str(out, "    ")
+            out = hip_push_reg_decl(out, op.dst_reg, op.ty)
+            out = hip_push_str(out, " = ((")
+            out = hip_push_str(out, hip_type_to_cpp(op.ty))
+            out = hip_push_str(out, "*)_r")
+            out = hip_push_i64(out, op.addr_reg)
+            out = hip_push_str(out, ")[0];\n")
+            out
+        }
+
+        GpuOpcode::GpuStoreGlobal => {
+            var out = buf
+            out = hip_push_str(out, "    ((")
+            out = hip_push_str(out, hip_type_to_cpp(op.ty))
+            out = hip_push_str(out, "*)_r")
+            out = hip_push_i64(out, op.addr_reg)
+            out = hip_push_str(out, ")[0] = ")
+            out = hip_push_reg_ref(out, op.src_reg)
+            out = hip_push_str(out, ";\n")
+            out
+        }
+
+        GpuOpcode::GpuRet => {
+            hip_push_str(buf, "    return;\n")
+        }
+
+        _ => {
+            var out = buf
+            out = hip_push_str(out, "    // unsupported opcode: ")
+            out = hip_push_i64(out, op.opcode as i64)
+            out = hip_push_str(out, "\n")
+            out
+        }
+    }
+}
+
+fn hip_push_reg_decl(buf: HipBuf, reg: i64, ty: GpuType) -> HipBuf with Mut, Panic, Div {
+    var out = buf
+    out = hip_push_str(out, hip_type_to_cpp(ty))
+    out = hip_push_str(out, " _r")
+    out = hip_push_i64(out, reg)
+    out
+}
+
+fn hip_push_reg_ref(buf: HipBuf, reg: i64) -> HipBuf with Mut, Panic, Div {
+    var out = buf
+    out = hip_push_str(out, "_r")
+    out = hip_push_i64(out, reg)
+    out
+}
+

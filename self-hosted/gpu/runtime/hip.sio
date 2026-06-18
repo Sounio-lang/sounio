@@ -1,0 +1,189 @@
+// self-hosted::gpu::runtime::hip — HIP Runtime API FFI bindings and safe wrappers
+//
+// Two-layer architecture:
+//   1. Raw extern "C" declarations for the AMD HIP runtime API (libamdhip64.so)
+//   2. Thin wrappers that mirror the cuda.sio convention so the GPU launch
+//      orchestration can be shared between CUDA and ROCm paths.
+//
+// All HIP handles (hipModule_t, hipFunction_t, hipStream_t) are opaque pointers
+// represented as i64. Device memory pointers (hipDeviceptr_t) are also i64.
+// Out-parameters use *const so the runtime can write through them.
+//
+// Error convention: HIP_SUCCESS = 0; all other values are error codes.
+//
+// Requires linking against the AMD HIP runtime library (-lamdhip64).
+
+// ============================================================================
+// HIP error and enum constants
+// ============================================================================
+
+let HIP_SUCCESS: i32 = 0
+
+// hipMemcpyKind
+let hipMemcpyHostToHost: i32     = 0
+let hipMemcpyHostToDevice: i32   = 1
+let hipMemcpyDeviceToHost: i32   = 2
+let hipMemcpyDeviceToDevice: i32 = 3
+
+// hipStreamCreate flags
+let hipStreamDefault: i32      = 0
+let hipStreamNonBlocking: i32  = 1
+
+// ============================================================================
+// Raw extern "C" declarations — HIP Runtime API
+// ============================================================================
+
+extern "C" {
+    fn hipInit(flags: i32) -> i32;
+}
+
+extern "C" {
+    fn hipGetDevice(device: *const i32) -> i32;
+    fn hipSetDevice(deviceId: i32) -> i32;
+    fn hipGetDeviceCount(count: *const i32) -> i32;
+    fn hipDeviceSynchronize() -> i32;
+}
+
+extern "C" {
+    fn hipStreamCreate(stream: *const i64, flags: i32) -> i32;
+    fn hipStreamDestroy(stream: i64) -> i32;
+    fn hipStreamSynchronize(stream: i64) -> i32;
+}
+
+extern "C" {
+    fn hipMalloc(ptr: *const i64, sizeBytes: i64) -> i32;
+    fn hipFree(ptr: i64) -> i32;
+    fn hipMemcpy(dst: i64, src: i64, sizeBytes: i64, kind: i32) -> i32;
+    fn hipMemset(dst: i64, value: i32, sizeBytes: i64) -> i32;
+}
+
+extern "C" {
+    fn hipModuleLoadData(module: *const i64, image: *const i8) -> i32;
+    fn hipModuleUnload(module: i64) -> i32;
+    fn hipModuleGetFunction(func: *const i64, module: i64, name: *const i8) -> i32;
+    fn hipModuleLaunchKernel(
+        f: i64,
+        gridDimX: i32, gridDimY: i32, gridDimZ: i32,
+        blockDimX: i32, blockDimY: i32, blockDimZ: i32,
+        sharedMemBytes: i32,
+        stream: i64,
+        kernelParams: *const i64,
+        extra: *const i64
+    ) -> i32;
+}
+
+// ============================================================================
+// Safe wrappers
+// ============================================================================
+
+pub fn hip_runtime_init() -> i32 {
+    hipInit(0)
+}
+
+pub fn hip_is_success(err: i32) -> bool {
+    err == HIP_SUCCESS
+}
+
+pub fn hip_device_count() -> i32 with Mut, Panic {
+    var count: i32 = 0
+    let err = hipGetDeviceCount(&count)
+    if err != HIP_SUCCESS {
+        return 0
+    }
+    count
+}
+
+pub fn hip_device_set(ordinal: i32) -> i32 {
+    hipSetDevice(ordinal)
+}
+
+pub fn hip_malloc(bytes: i64) -> i64 with Mut, Panic {
+    var ptr: i64 = 0
+    let err = hipMalloc(&ptr, bytes)
+    if err != HIP_SUCCESS {
+        return 0
+    }
+    ptr
+}
+
+pub fn hip_free(ptr: i64) -> i32 {
+    hipFree(ptr)
+}
+
+pub fn hip_memcpy_h2d(dst: i64, src: *const i8, bytes: i64) -> i32 {
+    hipMemcpy(dst, src as i64, bytes, hipMemcpyHostToDevice)
+}
+
+pub fn hip_memcpy_d2h(dst: *const i8, src: i64, bytes: i64) -> i32 {
+    hipMemcpy(dst as i64, src, bytes, hipMemcpyDeviceToHost)
+}
+
+pub fn hip_memcpy_d2d(dst: i64, src: i64, bytes: i64) -> i32 {
+    hipMemcpy(dst, src, bytes, hipMemcpyDeviceToDevice)
+}
+
+pub fn hip_memset(ptr: i64, value: i32, bytes: i64) -> i32 {
+    hipMemset(ptr, value, bytes)
+}
+
+pub fn hip_stream_create_default() -> i64 with Mut, Panic {
+    var stream: i64 = 0
+    let err = hipStreamCreate(&stream, hipStreamDefault)
+    if err != HIP_SUCCESS {
+        return 0
+    }
+    stream
+}
+
+pub fn hip_stream_destroy(stream: i64) -> i32 {
+    hipStreamDestroy(stream)
+}
+
+pub fn hip_stream_synchronize(stream: i64) -> i32 {
+    hipStreamSynchronize(stream)
+}
+
+pub fn hip_device_synchronize() -> i32 {
+    hipDeviceSynchronize()
+}
+
+pub fn hip_module_load_data(image: *const i8) -> i64 with Mut, Panic {
+    var module: i64 = 0
+    let err = hipModuleLoadData(&module, image)
+    if err != HIP_SUCCESS {
+        return 0
+    }
+    module
+}
+
+pub fn hip_module_unload(module: i64) -> i32 {
+    hipModuleUnload(module)
+}
+
+pub fn hip_module_get_function(module: i64, name: *const i8) -> i64 with Mut, Panic {
+    var func: i64 = 0
+    let err = hipModuleGetFunction(&func, module, name)
+    if err != HIP_SUCCESS {
+        return 0
+    }
+    func
+}
+
+pub fn hip_launch_kernel(
+    func: i64,
+    grid_x: i32, grid_y: i32, grid_z: i32,
+    block_x: i32, block_y: i32, block_z: i32,
+    shared_mem: i32,
+    stream: i64,
+    params: *const i64,
+    extra: *const i64
+) -> i32 {
+    hipModuleLaunchKernel(
+        func,
+        grid_x, grid_y, grid_z,
+        block_x, block_y, block_z,
+        shared_mem,
+        stream,
+        params, extra
+    )
+}

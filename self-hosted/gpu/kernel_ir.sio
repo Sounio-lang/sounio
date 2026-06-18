@@ -578,6 +578,29 @@ fn gpu_target_profile_rocm_gfx942() -> GpuTargetProfile with Mut, Panic, Div {
     }
 }
 
+fn gpu_target_profile_rocm_gfx1100() -> GpuTargetProfile with Mut, Panic, Div {
+    var arch = ki_ir_name_from_bytes(114, 111, 99, 109, 12)  // "rocm-gfx1100"
+    arch.buf[4] = 45   // '-'
+    arch.buf[5] = 103  // 'g'
+    arch.buf[6] = 102  // 'f'
+    arch.buf[7] = 120  // 'x'
+    arch.buf[8] = 49   // '1'
+    arch.buf[9] = 49   // '1'
+    arch.buf[10] = 48  // '0'
+    arch.buf[11] = 48  // '0'
+    GpuTargetProfile {
+        vendor: GpuTargetVendor::GpuVendorRocm,
+        arch: arch,
+        warp_width: 32,
+        wave_width: 32,
+        supports_tensor_core: true,
+        supports_async_copy: false,
+        supports_tf32: false,
+        supports_fp16: true,
+        memory_model: GpuTargetMemoryModel::GpuMemoryHsa,
+    }
+}
+
 fn gpu_target_profile_arch_string(profile: GpuTargetProfile) -> string with Mut, Panic, Div {
     str_from_bytes(profile.arch.buf, profile.arch.len)
 }
@@ -6003,5 +6026,79 @@ fn gpu_build_epistemic_wmma_backward_ir() -> GpuKernelIr with Mut, Panic, Div {
     k.max_reg_i32 = 0
     k.max_reg_i64 = 0
 
+    k
+}
+
+// Public accessors for private Name fields. These let backend emitters in
+// other modules (HIP, PTX, SPIR-V, Metal) print kernel/parameter names
+// without breaking Name's encapsulation.
+pub fn gpu_kernel_name_to_string(kernel: GpuKernelIr) -> string with Mut, Panic, Div, Alloc {
+    str_from_bytes(kernel.kernel_name.buf, kernel.kernel_name.len)
+}
+
+pub fn gpu_param_name_to_string(param: GpuParam) -> string with Mut, Panic, Div, Alloc {
+    str_from_bytes(param.name.buf, param.name.len)
+}
+
+// Test helper: minimal elementwise F32 vector-add kernel IR.
+// Used by backend smoke tests (HIP, PTX, SPIR-V, Metal) to exercise
+// code generation without requiring a full HLIR frontend compile.
+pub fn gpu_test_kernel_vec_add_f32() -> GpuKernelIr with Mut, Panic, Div {
+    var k = gpu_kernel_new()
+    k.kernel_name = ki_ir_name_from_str("vec_add_f32", 11)
+
+    k.params[0] = GpuParam { name: ki_ir_name_from_str("a", 1), ty: GpuType::GpuPtr }
+    k.params[1] = GpuParam { name: ki_ir_name_from_str("b", 1), ty: GpuType::GpuPtr }
+    k.params[2] = GpuParam { name: ki_ir_name_from_str("c", 1), ty: GpuType::GpuPtr }
+    k.params[3] = GpuParam { name: ki_ir_name_from_str("n", 1), ty: GpuType::GpuI64 }
+    k.param_count = 4
+
+    var op = gpu_op_default()
+
+    // r0_i64 = tid
+    op.opcode = GpuOpcode::GpuGetTid
+    op.dst_reg = 0
+    op.ty = GpuType::GpuI64
+    k.ops[0] = op
+
+    // r1_f32 = ((float*)a)[r0]
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuLoadGlobal
+    op.dst_reg = 1
+    op.addr_reg = 0
+    op.ty = GpuType::GpuF32
+    k.ops[1] = op
+
+    // r2_f32 = ((float*)b)[r0]
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuLoadGlobal
+    op.dst_reg = 2
+    op.addr_reg = 0
+    op.ty = GpuType::GpuF32
+    k.ops[2] = op
+
+    // r3_f32 = r1 + r2
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 3
+    op.lhs_reg = 1
+    op.rhs_reg = 2
+    op.ty = GpuType::GpuF32
+    k.ops[3] = op
+
+    // ((float*)c)[r0] = r3
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuStoreGlobal
+    op.addr_reg = 0
+    op.src_reg = 3
+    op.ty = GpuType::GpuF32
+    k.ops[4] = op
+
+    // return
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuRet
+    k.ops[5] = op
+
+    k.op_count = 6
     k
 }
