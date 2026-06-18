@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.madaros-status
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.madaros-status
+-->
+
 # Madaros Status — coordination note for the fleet
 
 > **TL;DR:** Madaros is **green on `origin/main`** and is now the **default compiler**:
