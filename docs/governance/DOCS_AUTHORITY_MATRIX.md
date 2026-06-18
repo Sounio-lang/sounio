@@ -76,6 +76,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.epistemic-demo-sweep-2026-06-02 | repo_only | docs/audit/EPISTEMIC_DEMO_SWEEP_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-nn-backward-e2e-2026-06-02 | repo_only | docs/audit/EPISTEMIC_NN_BACKWARD_E2E_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-self-application-audit-2026-06-03 | repo_only | docs/audit/EPISTEMIC_SELF_APPLICATION_AUDIT_2026-06-03.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.frame-fix-7fa3c3524-dead-code-2026-06-16 | repo_only | docs/audit/FRAME_FIX_7fa3c3524_DEAD_CODE_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.frame-fix-full-selfhosted-2026-06-16 | repo_only | docs/audit/FRAME_FIX_FULL_SELFHOSTED_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.frame-fix-validation-2026-06-16 | repo_only | docs/audit/FRAME_FIX_VALIDATION_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.g1-let-spine-crash-rootcause-2026-06-01 | repo_only | docs/audit/G1_LET_SPINE_CRASH_ROOTCAUSE_2026-06-01.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
