@@ -1,0 +1,87 @@
+---
+title: "Epistemic Computing 是怎样的一回事？"
+description: "了解 Sounio 如何追踪程序所知道的事 — 以及它不知道的事"
+series: "drug-dosing"
+order: 1
+estimatedMinutes: 8
+topic_id: "website.tutorials.zh-hk.drug-dosing-01-intro"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.zh-hk.drug-dosing-01-intro"
+---
+# Epistemic Computing 是怎样的一回事？
+
+科学中的每一个测量都带有不确定性。当药剂师测量病人的肌酐水平为 1.2 mg/dL 时，这个数值并不是精确的 — 这个检测方法有大约 5% 的变异系数。当医生处方 500 mg 的万古霉素时，实际的生物利用度剂量取决于病人的肾功能、体重和其他我们只知道大概的十几个因素。
+
+大多数编程语言都忽略了这一点。`float` 是一个 `float`，`1.2` 被当作精确到无限位的数字处理。Sounio 采取了不同的做法。
+
+## 知识 vs 数据
+
+在 Sounio 中，一个值可以带有 **epistemic metadata** — 关于我们对该值自信程度的信息。类型系统区分：
+
+- **数据**：一个原始数字 (`f64`, `i32`)
+- **知识**：一个数字加上其不确定性 (`Knowledge&lt;f64&gt;`)
+
+以下是区别：
+
+```sio
+// 原始数据 — 没有不确定性信息
+let creatinine: f64 = 1.2
+
+// 知识 — 值 + 标准不确定性
+let creatinine: Knowledge<f64> = measure(1.2, uncertainty: 0.06)
+```
+
+`measure` 函数创建了一个 `Knowledge&lt;f64&gt;` 值：最佳估计是 1.2，标准不确定性是 0.06（5% CV）。
+
+## 为什么这很重要？
+
+当你用 `Knowledge` 值进行计算时，不确定性 **自动传播**。如果你从肌酐计算药物清除，结果也带有不确定性 — 并且 Sounio 为你追踪它。
+
+```sio
+fn cockcroft_gault(age: f64, weight: Knowledge<f64>, scr: Knowledge<f64>) -> Knowledge<f64> {
+    // CrCl = (140 - age) * weight / (72 * SCr)
+    let numerator = (140.0 - age) * weight
+    let denominator = 72.0 * scr
+    numerator / denominator
+}
+```
+
+输出 `Knowledge&lt;f64&gt;` 自动反映了 `weight` 和 `scr` 的组合不确定性。不需要手动错误传播。
+
+## 影响：追踪副作用
+
+Sounio 也追踪 **效果** — 一个函数能做什么。如果一个函数从文件中读取，它必须声明 `with IO`。如果它分配内存，`with Alloc`。如果它能除以零，`with Div`。
+
+```sio
+fn safe_divide(a: f64, b: f64) -> f64 with Div {
+    a / b
+}
+
+fn greet(name: string) with IO {
+    print("Hello, ")
+    print(name)
+    print("\n")
+}
+```
+
+这不仅仅是文档 — 编译器 **强制执行**。没有 `with IO` 的函数不能调用 `print`。这意味着你可以查看任何函数签名并确切知道它可能做什么。
+
+## 你会建立的
+
+在接下来的四个课程中，你会建立一个完整的带有不确定性的药物剂量模型：
+
+1. **课程 2**：将 PK 参数（清除率、体积、半衰期）定义为结构体
+2. **课程 3**：使用 `Knowledge<T>` 建模不确定的病人测量值
+3. **课程 4**：通过药代动力学模型传播不确定性
+4. **课程 5**：有信心界限地做出临床决策
+
+到课程结束时，你将拥有一个程序，可以回答：*“给定这个病人不确定的实验室值，我们对 500 mg 剂量达到治疗水平有多大的信心？”*
+
+## 关键要点
+
+- Sounio 的 `Knowledge<T>` 类型追踪不确定性作为一个首要概念
+- 效果 (`with IO`, `with Div`, `with Mut`) 使副作用显式
+- 这些特性共同防止了静默传播错误的假设 — 科学计算中最危险的错误

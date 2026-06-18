@@ -1,0 +1,173 @@
+---
+title: "用置信区间作临床决策"
+description: "利用不确定性信息作出更安全的剂量决定"
+series: "drug-dosing"
+order: 5
+estimatedMinutes: 10
+prerequisites: ["drug-dosing-04-propagation"]
+topic_id: "website.tutorials.zh-hk.drug-dosing-05-decision"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.zh-hk.drug-dosing-05-decision"
+---
+# 用置信区间作临床决策
+
+我们现在有了一个预测的谷浓度，并带有不确定性。最后一步，也是最关键的，是利用这些信息作出临床决策。
+
+## 决策问题
+
+万古霉素有一个窄的治疗窗口：
+- **低于10 mg/L**: 亚治疗（感染未得到充分治疗）
+- **10–20 mg/L**: 治疗范围
+- **高于20 mg/L**: 有肾毒性风险
+
+我们的模型预测谷浓度为14.2 ± 4.8 mg/L。这个剂量安全吗？
+
+以14.2的预测值，传统的系统会说“是的，它在范围内。”但是4.8的不确定性意味着真正的谷浓度可能从约5到约24 mg/L之间，即从亚治疗到毒性。
+
+## 置信区间决策
+
+Sounio 允许你对 `Knowledge` 值提出概率问题：
+
+```sio
+struct DosingDecision {
+    recommendation: i32,    // 0 = 安全，1 = 增加剂量，2 = 减少剂量，3 = 禁忌
+    confidence: f64,        // 治疗范围的概率
+    risk_below: f64,        // 亚治疗的概率
+    risk_above: f64,        // 超治疗的概率
+}
+
+fn evaluate_dose(trough: Knowledge<f64>,
+                 lower: f64, upper: f64) -> DosingDecision
+    with Mut, Panic, Div
+{
+    // 计算在 [lower, upper] 中的概率
+    // 使用正态分布假设（中心极限定理）
+    let z_lower = (lower - trough.value) / trough.uncertainty
+    let z_upper = (upper - trough.value) / trough.uncertainty
+
+    let p_below = normal_cdf(z_lower)
+    let p_above = 1.0 - normal_cdf(z_upper)
+    let p_in_range = 1.0 - p_below - p_above
+
+    // 决策逻辑
+    let rec = if p_in_range > 0.80 {
+        0  // 安全：>80% 治疗概率
+    } else if p_below > p_above {
+        1  // 更可能是亚治疗 → 增加剂量
+    } else if p_above > 0.20 {
+        2  // >20% 毒性风险 → 减少剂量
+    } else {
+        3  // 高不确定性 → 在剂量前获取更多数据
+    }
+
+    DosingDecision {
+        recommendation: rec,
+        confidence: p_in_range,
+        risk_below: p_below,
+        risk_above: p_above,
+    }
+}
+```
+
+## 正态CDF近似
+
+为了概率计算，我们需要正态CDF。这里是Sounio 的泰勒级数近似：
+
+```sio
+fn normal_cdf(z: f64) -> f64 with Mut, Panic, Div {
+    // Abramowitz & Stegun 近似（7.1.26）
+    if z < 0.0 - 6.0 { return 0.0 }
+    if z > 6.0 { return 1.0 }
+
+    let abs_z = if z < 0.0 { 0.0 - z } else { z }
+    let t = 1.0 / (1.0 + 0.2316419 * abs_z)
+    let d = 0.3989422804014327  // 1/sqrt(2*pi)
+    let p = d * exp_approx(0.0 - abs_z * abs_z / 2.0)
+          * (t * (0.319381530
+          + t * (0.0 - 0.356563782
+          + t * (1.781477937
+          + t * (0.0 - 1.821255978
+          + t * 1.330274429)))))
+
+    if z >= 0.0 { 1.0 - p } else { p }
+}
+```
+
+## 作出决策
+
+```sio
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let labs = measure_patient()
+    let cl = estimate_clearance(labs)
+    let vd = estimate_volume(labs)
+
+    let dose = 1000.0
+    let tau = 12.0
+
+    let trough = predict_trough(cl, vd, dose, tau)
+    let decision = evaluate_dose(trough, 10.0, 20.0)
+
+    print("预测谷浓度: ")
+    println(trough.value)
+    print(" ± ")
+    println(trough.uncertainty)
+    print(" mg/L\n")
+
+    print("P(治疗): ")
+    println(decision.confidence)
+    print("P(亚治疗): ")
+    println(decision.risk_below)
+    print("P(超治疗): ")
+    println(decision.risk_above)
+    print("\n")
+
+    if decision.recommendation == 0 {
+        print("安全: 按当前剂量进行\n")
+    }
+    if decision.recommendation == 1 {
+        print("调整: 考虑增加剂量\n")
+    }
+    if decision.recommendation == 2 {
+        print("调整: 考虑减少剂量\n")
+    }
+    if decision.recommendation == 3 {
+        print("暂停: 在剂量前获取更多实验室数据\n")
+    }
+
+    0
+}
+```
+
+## Sounio 给你什么
+
+对比传统的做法：
+
+| 方法 | 输出 | 临床价值 |
+|----------|--------|---------------|
+| 电子表格 | "谷浓度 = 14.2 mg/L" | 假精度，没有风险评估 |
+| Python + uncertainties | 14.2 ± 4.8 (手动库) | 不确定性可见但未强制执行 |
+| **Sounio** | 14.2 ± 4.8, P(治疗) = 62% | 编译器强制执行，决策准备就绪 |
+
+关键区别：在Sounio 中，你**不能意外忽略不确定性**。类型系统确保每个消费 `Knowledge&lt;f64&gt;` 的函数都必须处理不确定性。如果你尝试使用 `trough.value` 而不考虑 `trough.uncertainty`，编译器会促使你解决它。
+
+## 恭喜！
+
+你已构建了一个完全不确定性意识药物剂量系统：
+
+1. **第1课**: 理解了认识论计算和为什么它很重要
+2. **第2课**: 使用类型化的结构体和效果构建了药代动力学模型
+3. **第3课**: 使用 `Knowledge<T>` 升级了不确定测量
+4. **第4课**: 在整个管道中传播不确定性
+5. **第5课**: 作出置信区间临床决策
+
+这种模式 — 测量、传播、置信区间决策 — 适用于任何科学领域：气候建模、结构工程、金融风险、流行病学。Sounio 使其成为语言原语，而不是事后考虑。
+
+## 下一步
+
+- 探索[效果系统参考](/learn/effects)以了解更多关于 `with IO, Mut, Div` 的信息
+- 阅读[单位测量](/learn/units)以了解维数分析
+- 查看[PK 不确定性测试套件](https://github.com/sounio-lang/sounio/blob/main/tests/run-pass/pk_uncertainty.sio)以获取完整实现
+- 尝试修改治疗窗口或不确定性值以查看决策如何变化

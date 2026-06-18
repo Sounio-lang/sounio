@@ -1,0 +1,124 @@
+---
+title: "信頼区間を伴う臨床決定"
+description: "確率情報を使って安全な薬量決定をする"
+series: "drug-dosing"
+order: 5
+estimatedMinutes: 10
+prerequisites: ["drug-dosing-04-propagation"]
+topic_id: "website.tutorials.ja.drug-dosing-05-decision"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.ja.drug-dosing-05-decision"
+---
+# 信頼区間を伴う臨床決定
+
+予測されたトラッフコンCENTリティには確率情報が付属しています。最終的でも重要なステップは、その情報を使って臨床決定をすることです。
+
+## 決定問題
+
+バンコミシンは狭い治療窓を持っています:
+- **10 mg/L未満**: 下治剤的（感染が適切に治療されていない）
+- **10–20 mg/L**: 治療効果の範囲
+- **20 mg/L以上**: 腎臓毒性のリスクがある
+
+モデルは、例えば14.2 ± 4.8 mg/LのトラッフコンCENTリティを予測します。この薬量は安全ですか？
+
+ポイント推定値が14.2であると、传统システムは「範囲内です」と言いますが、±4.8の確率情報は、本当のトラッフコンCENTリティが ~5 から ~24 mg/L の間にある可能性があることを意味します - これは下治剤的から毒犠効果の範囲全体を覆っています。
+
+## 信頼区間を伴う決定
+
+Sounioは、`Knowledge`値に関する確率問いを行うことができます。
+```sio
+構造体 `DosingDecision` を定義します。
+
+```sio
+struct DosingDecision {
+    recommendation: i32,    // 0 = safe, 1 = adjust up, 2 = adjust down, 3 = contraindicated
+    confidence: f64,        // 治療範囲内の確率
+    risk_below: f64,        // 下効効効率
+    risk_above: f64,        // 上効効効率
+}
+```
+
+関数 `evaluate_dose` を定義します。
+
+```sio
+fn evaluate_dose(trough: Knowledge&lt;f64&gt;,
+                 lower: f64, upper: f64) -> DosingDecision
+    with Mut, Panic, Div
+{
+    // Compute probability of being in [lower, upper]
+    // Using normal distribution assumption (CLT)
+    let z_lower = (lower - trough.value) / trough.uncertainty
+    let z_upper = (upper - trough.value) / trough.uncertainty
+
+    let p_below = normal_cdf(z_lower)
+    let p_above = 1.0 - normal_cdf(z_upper)
+    let p_in_range = 1.0 - p_below - p_above
+}
+```
+
+このドキュメントは、Markdown フォーマットをそのまま保持しながら、日本語に翻訳しました。この翻訳には、正しい日本語用語と表現を使用しています。
+
+このドキュメントの先頭にある YAML ブロックは、`title` と `description` のみを翻訳します。キーとして `topic_id` や `category` などは翻訳しません。
+
+このドキュメント内に含まれるコードブロック、ターミナルコマンド、関数名、または `code` 内のインラインコードスニペットは翻訳しません。
+
+この翻訳の結果として、翻訳されたドキュメントを返します。
+``````
+
+## The Normal CDF Approximation
+
+For the probability calculations, we need a normal CDF. Here's a Taylor series approximation suitable for Sounio:
+
+```sio
+fn normal_cdf(z: f64) -> f64 with Mut, Panic, Div {
+    // Abramowitz & Stegun approximation (7.1.26)
+    if z < 0.0 - 6.0 { return 0.0 }
+    if z > 6.0 { return 1.0 }
+```
+
+## Making the Decision
+
+```sio
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let labs = measure_patient()
+    let cl = estimate_clearance(labs)
+    let vd = estimate_volume(labs)
+
+    let dose = 1000.0
+    let tau = 12.0
+
+    let trough = predict_trough(cl, vd, dose, tau)
+    let decision = evaluate_dose(trough, 10.0, 20.0)
+
+    print("予測したトラウフ値: ")
+    println(trough.value)
+    print(" ± ")
+    println(trough.uncertainty)
+    print(" mg/L\n")|------|--------|
+| スプレッドシート | "Trough = 14.2 mg/L" | 精度のない値の表示、リスク評価なし |
+| Python + uncertainties | 14.2 ± 4.8 (手動ライブラリ) | 不確実性が表示されているが、強制的に適用されない |
+| **Sounio** | 14.2 ± 4.8, P(therapeutic) = 62% | コンパイラによって強制的に適用され、決定準備状態 |
+
+```# 重要な違い：Sounioでは、不确定性を**間違えて無視することはできません。
+タイプシステムにより、`Knowledge<f64>`を消費するすべての関数は、不确定性を処理する必要があることが確認されます。`trough.value`を使い出しながら`trough.uncertainty`を考慮しないと、コンパイラーがそれに対処するように促すでしょう。
+
+## おめでとうございます！
+
+不确定性を意識した薬量管理システムを完全に構築しました：
+
+1. **レッスン1**： epistemic computingとその重要さを理解しました
+2. **レッスン2**：タイプ付き構造体と効果を用いて薬代謝モデルを構築しました
+3. **レッスン3**：不确定な測定値のために`Knowledge<T>`を使い換えました
+4. **レッスン4**：パイプライン全体に不确定性を伝搬しました
+5. **レッスン5**：確信限界付き臨床決定を行いました
+
+このパターンは、気候モデリング、構造工学、金融リスク、流行病学のどれかに適用できます。Sounioはこれを言語の基本的な要素として、後の考えに加えているのではありません。
+
+## 次のステップ- [エフェクトシステム参照](/learn/effects)を参照して、`with IO, Mut, Div`についてもっと学びましょう。
+- 次元分析に関する情報を読みましょう。[単位の測定](/learn/units)
+- [PK的不確実性テスト套件](https://github.com/sounio-lang/sounio/blob/main/tests/run-pass/pk_uncertainty.sio)を参照して、完全な実装を見てください。
+- 治療ウィンドウや不確実性値を変更して、決定がどのように変わるか確認してみましょう。
