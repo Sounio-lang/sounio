@@ -2854,3 +2854,64 @@ notes: |
   compiler-lane milestone: make Madaros compile its own source.
 commit: pending
 status: lock-released
+
+---
+
+agent: claude
+time_utc: 2026-06-18T15:45:00Z
+files:
+  - self-hosted/compiler/module_frontend.sio
+  - self-hosted/compiler/module_native_driver.sio
+  - self-hosted/ir/lower.sio
+  - bin/madaros
+  - scripts/ci/madaros_multimodule_witness.sh
+  - tests/madaros/multimodule_witness/manifest.tsv
+intent: |
+  Multi-module compile path (compile_imported_to_file) SEGVs on cross-module
+  struct types. Diagnosis: each module's lowerer sees only its own Program's
+  items, so main's lowerer never registers PublicStruct's layout — field_idx
+  resolves via fallback hash → wrong offset → codegen SEGV. Fix: preseed
+  external struct layouts into main's lowerer in
+  lower_program_to_ir_summary_box_with_externs_ref, called from a new
+  module_frontend_lower_program_box_traced_with_externs wrapper.
+  CLAIM: lower.sio + module_frontend.sio + module_native_driver.sio in
+  worktree /workspace/sounio on branch fix/madaros-multimodule-struct-cross-module.
+checks:
+  - bash scripts/ci/madaros_multimodule_witness.sh (target: 5/5 PASS)
+  - bash scripts/ci/canonical_compiler_gate.sh (no regression)
+  - bash scripts/ci/compiler_stage_contract_gate.sh (no regression)
+commit: pending
+status: lock-open
+notes: |
+  IN FLIGHT. Other agents touching self-hosted/compiler/module_frontend.sio,
+  self-hosted/ir/lower.sio, or self-hosted/compiler/module_native_driver.sio
+  please coordinate before pushing. Build is heavy (95 MB madaros, ~2:45,
+  requires ulimit -v unlimited under env -i — workspace v-limit is 24GB).
+
+---
+
+agent: claude
+time_utc: 2026-06-18T16:00:00Z
+files:
+  - self-hosted/compiler/module_frontend.sio
+  - self-hosted/compiler/module_native_driver.sio
+  - self-hosted/ir/lower.sio
+  - bin/madaros
+  - scripts/ci/madaros_multimodule_witness.sh
+  - tests/madaros/multimodule_witness/manifest.tsv
+intent: |
+  CLOSE LOCK: multi-module SEGV fixed. Root cause: lean_single codegen bug
+  where `(*box_ref).field` reads garbage when box_ref is `&! Box<IrModule>`.
+  Two functions had this signature: ir_module_resolve_named_calls_box and
+  ir_merge_append_function_into_box. The first read garbage fn_count (29795
+  observed) causing OOB on the resolve loop; the second silently failed its
+  early `>=IR_MAX_FUNCS` check causing every cross-module fn append to no-op,
+  which produced ELFs with `Merged IR: 1` instead of 2 and missed bodies.
+  Fix: change ir_merge_append_function_into_box signature to `&! IrModule`,
+  pass `&!(*acc_box)` at the call site. For resolve, call the existing
+  non-box variant via `&!(*module_box)`. Also added struct-layout preseed
+  for cross-module imports so field_idx resolves correctly at lower time.
+checks:
+  - bash scripts/ci/madaros_multimodule_witness.sh = 5/5 PASS
+commit: pending
+status: lock-released

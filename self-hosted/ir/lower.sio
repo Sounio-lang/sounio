@@ -598,6 +598,65 @@ fn lowerer_register_enum_variants_mut(
     }
 }
 
+// Cross-module struct preseed: registers struct layouts from an external
+// module's items into this lowerer's struct_layouts table. Without this,
+// imported struct types (e.g. `use lib::{PublicStruct}` then `s.x`) fall
+// back to a first-byte-hash field_idx and codegen emits wrong offsets at
+// runtime.
+fn lowerer_preseed_external_struct_items_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head_owned = (*list).head
+                if head_owned.kind == ItemKind::ItemStruct {
+                    match head_owned.struct_def {
+                        Some(sd) => {
+                            // Inline registration: lowerer_register_struct_fields_mut
+                            // silently no-ops from this call site (suspected
+                            // lean_single handling of &(*box).field through
+                            // FieldDefList head). Build the layout entry directly.
+                            var sl_box = (*lo).struct_layouts
+                            let pre_count = (*sl_box).count
+                            if pre_count < 256 {
+                                var entry = empty_struct_layout_entry()
+                                entry.type_name = head_owned.name
+                                var fc: i64 = 0
+                                var fcur = (*sd).fields
+                                var keep_going = true
+                                while keep_going && fc < 64 {
+                                    match fcur {
+                                        Some(flist) => {
+                                            entry.fields[fc as usize] = StructFieldEntry {
+                                                name: (*flist).head.name,
+                                                index: fc,
+                                                is_float: 0,
+                                            }
+                                            fc = fc + 1
+                                            fcur = (*flist).tail
+                                        }
+                                        _ => { keep_going = false }
+                                    }
+                                }
+                                entry.field_count = fc
+                                (*sl_box).entries[pre_count as usize] = entry
+                                (*sl_box).count = pre_count + 1
+                                (*lo).struct_layouts = sl_box
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
 fn lowerer_register_struct_fields_mut(
     lo: &! Lowerer,
     type_name: Name,
@@ -7338,6 +7397,36 @@ pub fn lower_program_to_ir(prog: Program) -> IrLowerResult with Mut, Panic, Div,
 
 fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic: &IrEpistemicSection) -> IrProgramSummaryBoxResult with Mut, Panic, Div, Alloc, IO {
     var lo = lowerer_new_with_epistemic(epistemic)
+    lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
+    let error_count = lo.error_count
+    let had_error = lo.had_error
+    let inner = ir_program_summary_from_lowerer(lo)
+    IrProgramSummaryBoxResult {
+        summary: Box::new(inner),
+        error_count: error_count,
+        had_error: had_error,
+    }
+}
+
+// Multi-module variant: preseeds external struct layouts before lowering own
+// items, so cross-module `use lib::{PublicStruct}` then `s.x` resolves to the
+// right field_idx.
+fn lower_program_to_ir_summary_box_with_externs_ref(
+    prog: &Program,
+    programs: &[Program; 256],
+    program_count: i64,
+    self_index: i64,
+    epistemic: &IrEpistemicSection
+) -> IrProgramSummaryBoxResult with Mut, Panic, Div, Alloc, IO {
+    var lo = lowerer_new_with_epistemic(epistemic)
+    var i: i64 = 0
+    while i < program_count {
+        if i != self_index {
+            let ext_prog = (*programs)[i as usize]
+            lowerer_preseed_external_struct_items_mut(&! lo, &ext_prog.items)
+        }
+        i = i + 1
+    }
     lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
     let error_count = lo.error_count
     let had_error = lo.had_error
