@@ -1089,22 +1089,25 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
     merged
 }
 
-fn ir_merge_append_function_into_box(dst_box: &! Box<IrModule>, src: &IrModule, src_fi: i64) with Mut, Panic, Div {
-    if src_fi < 0 || src_fi >= (*src).fn_count || (*dst_box).fn_count >= IR_MAX_FUNCS {
+// Takes &! IrModule (not &! Box<IrModule>): the latter triggers a lean_single
+// codegen bug where (*box_ref).field reads garbage. Callers materialize the
+// IrModule reference via &! (*acc_box) at the call site.
+fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i64) with Mut, Panic, Div {
+    if src_fi < 0 || src_fi >= (*src).fn_count || (*dst).fn_count >= IR_MAX_FUNCS {
         return
     }
-    let fn_offset = (*dst_box).fn_count
-    let contest_offset = (*dst_box).epistemic.contest_count
-    let robust_offset = (*dst_box).epistemic.robust_proof_count
-    let decision_offset = (*dst_box).epistemic.decision_certificate_count
-    let deferred_offset = (*dst_box).epistemic.deferred_certificate_count
-    let validated_offset = (*dst_box).epistemic.validated_manifest_count
-    let acquisition_plan_offset = (*dst_box).epistemic.acquisition_plan_count
-    let recourse_plan_offset = (*dst_box).epistemic.recourse_plan_count
-    let alternative_set_offset = (*dst_box).epistemic.alternative_set_count
-    let transition_plan_offset = (*dst_box).epistemic.transition_plan_count
-    let observed_transition_offset = (*dst_box).epistemic.observed_transition_count
-    let rollback_certificate_offset = (*dst_box).epistemic.rollback_certificate_count
+    let fn_offset = (*dst).fn_count
+    let contest_offset = (*dst).epistemic.contest_count
+    let robust_offset = (*dst).epistemic.robust_proof_count
+    let decision_offset = (*dst).epistemic.decision_certificate_count
+    let deferred_offset = (*dst).epistemic.deferred_certificate_count
+    let validated_offset = (*dst).epistemic.validated_manifest_count
+    let acquisition_plan_offset = (*dst).epistemic.acquisition_plan_count
+    let recourse_plan_offset = (*dst).epistemic.recourse_plan_count
+    let alternative_set_offset = (*dst).epistemic.alternative_set_count
+    let transition_plan_offset = (*dst).epistemic.transition_plan_count
+    let observed_transition_offset = (*dst).epistemic.observed_transition_count
+    let rollback_certificate_offset = (*dst).epistemic.rollback_certificate_count
     var func = (*src).functions[src_fi as usize]
     func.compile_strategy = (*src).functions[src_fi as usize].compile_strategy
     var ii: i64 = 0
@@ -1130,17 +1133,16 @@ fn ir_merge_append_function_into_box(dst_box: &! Box<IrModule>, src: &IrModule, 
         )
         ii = ii + 1
     }
-    let dst_idx = (*dst_box).fn_count
-    (*dst_box).functions[dst_idx as usize] = func
-    ir_module_copy_function_instrs(&! (*dst_box), dst_idx, src, src_fi)
-    (*dst_box).fn_count = (*dst_box).fn_count + 1
+    let dst_idx = (*dst).fn_count
+    (*dst).functions[dst_idx as usize] = func
+    (*dst).fn_count = (*dst).fn_count + 1
 }
 
 // In-place merge: never copy the full destination IrModule onto the stack (SRET).
 fn ir_merge_modules_into_box(dst_box: &! Box<IrModule>, src: &IrModule) with Mut, Panic, Div {
     var fi: i64 = 0
     while fi < (*src).fn_count && (*dst_box).fn_count < IR_MAX_FUNCS {
-        ir_merge_append_function_into_box(dst_box, src, fi)
+        ir_merge_append_function_into_box(&! (*dst_box), src, fi)
         fi = fi + 1
     }
 
@@ -3397,6 +3399,51 @@ fn module_frontend_lower_program_box_traced(
     module_frontend_lower_box_ok(body_result.module, body_result.patch_stats)
 }
 
+// Multi-module variant: preseeds struct layouts from every program at index
+// != module_index into this program's lowerer so cross-module `use lib::Type`
+// then `s.field` lowers to the right field_idx.
+fn module_frontend_lower_program_box_traced_with_externs(
+    program: &Program,
+    programs: &[Program; 256],
+    program_count: i64,
+    module_index: i64,
+    trace: &! LoadMultimoduleIrTrace
+) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
+    trace.last_stage = "lower_summary"
+    trace.last_module_index = module_index
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
+    var epistemic = ir_empty_epistemic_section()
+    let summary_result = lower_program_to_ir_summary_box_with_externs_ref(program, programs, program_count, module_index, &epistemic)
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
+    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed")
+    }
+
+    trace.summary_seeded_modules = trace.summary_seeded_modules + 1
+    trace.last_stage = "lower_bodies"
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    var summary_val = (*summary_result.summary)
+    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
+        program,
+        &summary_val,
+        &epistemic
+    )
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
+    if body_result.had_error {
+        trace.last_stage = "lower_bodies_error"
+        return module_frontend_lower_box_error("ir_bodies_failed")
+    }
+
+    trace.body_lowered_modules = trace.body_lowered_modules + 1
+    trace.lowered_modules = trace.lowered_modules + 1
+    trace.patched_functions = trace.patched_functions + body_result.patch_stats.patched_functions
+    trace.patched_calls = trace.patched_calls + body_result.patch_stats.patched_calls
+    trace.fallback_insertions = trace.fallback_insertions + body_result.patch_stats.fallback_insertions
+    trace.last_stage = "lower_bodies_done"
+    module_frontend_lower_box_ok(body_result.module, body_result.patch_stats)
+}
+
 fn module_frontend_populate_imported_programs(
     main_path: string,
     programs: &! [Program; 256],
@@ -3462,7 +3509,8 @@ fn module_frontend_lower_programs_array_boxed(
     trace.last_module_index = 0
     print("lower_array: seed_begin\n")
     let seed_prog_copy = (*programs)[0]
-    let seed_lower = module_frontend_lower_program_box_traced(&seed_prog_copy, 0, trace)
+    let programs_ref: &[Program; 256] = programs
+    let seed_lower = module_frontend_lower_program_box_traced_with_externs(&seed_prog_copy, programs_ref, loaded, 0, trace)
     print("lower_array: seed_done\n")
     if !seed_lower.ok {
         return seed_lower
@@ -3491,7 +3539,35 @@ fn module_frontend_lower_programs_array_boxed(
                         print("lower_array: merge_begin ")
                         print_int(i)
                         print("\n")
-                        ir_merge_modules_into_box(&! acc_box, &(*dep_box))
+                        var mfi: i64 = 0
+                        while mfi < (*dep_box).fn_count && (*acc_box).fn_count < IR_MAX_FUNCS {
+                            let dep_ic = (*dep_box).functions[mfi as usize].instr_count
+                            var stub_idx: i64 = 0 - 1
+                            var sfi: i64 = 0
+                            while sfi < (*acc_box).fn_count {
+                                if ir_name_eq(
+                                    (*acc_box).functions[sfi as usize].name,
+                                    (*dep_box).functions[mfi as usize].name
+                                ) && (*acc_box).functions[sfi as usize].instr_count <= 0 {
+                                    stub_idx = sfi
+                                }
+                                sfi = sfi + 1
+                            }
+                            if stub_idx >= 0 && dep_ic > 0 {
+                                (*acc_box).functions[stub_idx as usize] = (*dep_box).functions[mfi as usize]
+                            } else {
+                                ir_merge_append_function_into_box(&! (*acc_box), &(*dep_box), mfi)
+                            }
+                            mfi = mfi + 1
+                        }
+                        var si: i64 = 0
+                        while si < (*dep_box).string_count && (*acc_box).string_count < IR_MAX_STRINGS {
+                            (*acc_box).string_table[(*acc_box).string_count as usize] = (*dep_box).string_table[si as usize]
+                            (*acc_box).string_count = (*acc_box).string_count + 1
+                            si = si + 1
+                        }
+                        (*acc_box).epistemic = ir_merge_epistemic_sections((*acc_box).epistemic, (*dep_box).epistemic)
+                        (*acc_box).algebras = ir_merge_algebra_tables((*acc_box).algebras, (*dep_box).algebras)
                         print("lower_array: merge_done ")
                         print_int(i)
                         print("\n")
@@ -3790,7 +3866,12 @@ pub fn module_frontend_compile_imported_to_file(main_path: string, output_path: 
                 print("IR lowering produced empty module\n")
                 return 1
             }
-            ir_module_resolve_named_calls_box(&! module_box)
+            // Use the &!IrModule variant (not _box). The Box-wrapped variant
+            // suffers from a lean_single codegen issue where (*module_box).field
+            // for module_box: &! Box<IrModule> reads garbage (observed: fn_count
+            // 1→29795 across the call boundary). Dereferencing the Box at the
+            // call site materializes a clean &!IrModule and bypasses the bug.
+            ir_module_resolve_named_calls(&! (*module_box))
             parser_reset_last_errors()
             let target_spec = native_resolve_target("native", "auto", false)
             let write_rc = compile_native_v2_preview_to_file(&(*module_box), target_spec, output_path)
