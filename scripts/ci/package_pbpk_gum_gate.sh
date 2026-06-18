@@ -5,11 +5,25 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
-sounio_require_souc
-if ! "$SOUC_BIN" --help 2>/dev/null | grep -q "run <file.sio>"; then
-  export SOUNIO_SOUC_BIN="$SOUC_BIN"
-  SOUC_BIN="$ROOT_DIR/scripts/ci/souc-native-wrapper.sh"
+
+# The PETAB baseline and PBPK/GUM workflow import stdlib + packages/* modules.
+# lean_single resolves those imports and enforces the full effect/ontology
+# surface; the Madaros default (bin/souc since 2026-06-14) does not yet — it
+# fails this workflow with a spurious "effect not declared (missing: GPU)"
+# during multimodule thin-link. Pin the raw ELF to lean_single, matching the
+# package import sub-gate (package_import_science_gate.sh). The raw lean_single
+# ELF only accepts the positional `SRC OUT` CLI, so route the souc `run`/`compile`
+# verbs this gate uses through souc-native-wrapper.sh. Override via SOUNIO_SOUC_BIN.
+LEAN_SOUC="${SOUNIO_SOUC_BIN:-$ROOT_DIR/bin/souc-lean-single-x86_64}"
+if [[ ! -x "$LEAN_SOUC" ]]; then
+  LEAN_SOUC="$ROOT_DIR/bin/souc-linux-x86_64"
 fi
+if [[ ! -x "$LEAN_SOUC" ]]; then
+  echo '[package-pbpk-gum] FAIL: lean_single compiler ELF not found' >&2
+  exit 1
+fi
+export SOUNIO_SOUC_BIN="$LEAN_SOUC"
+SOUC_BIN="$ROOT_DIR/scripts/ci/souc-native-wrapper.sh"
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
