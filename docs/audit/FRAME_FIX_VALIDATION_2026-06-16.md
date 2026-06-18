@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.frame-fix-validation-2026-06-16
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.frame-fix-validation-2026-06-16
+-->
+
 # Frame-Fix Validation — compile_ir_function_v2_core_ir_into
 **Date:** 2026-06-16  
 **Commit:** 34bf3232e (fix(check+codegen): int-literal narrowing, enum binding, dynamic frames, kaxi ref)  
