@@ -13,7 +13,7 @@ Builds the rebuilt/current-source ontology validation wrapper.
 
 Environment:
   SOUNIO_VALIDATION_BUILD_DIR     build workspace (default: /tmp/sounio-ontology-validation-build)
-  SOUNIO_VALIDATION_FALLBACK_SOUC fallback souc wrapper (default: ./bin/souc)
+  SOUNIO_VALIDATION_FALLBACK_SOUC fallback compile oracle (default: lean_single ELF)
   SOUNIO_VALIDATION_BOOT4_BIN     boot4 compiler path
 EOF
 }
@@ -50,7 +50,16 @@ CHECKER_WARNING_MUT_PROBE_BIN="$WORK_DIR/checker_warning_mut_probe.elf"
 CHECKER_WARNING_MUT_PROBE_LOG="$WORK_DIR/checker_warning_mut_probe.log"
 CHECKER_WARNING_MUT_PROBE_RUN_LOG="$WORK_DIR/checker_warning_mut_probe.run.log"
 BOOTSTRAP_LOG="$WORK_DIR/bootstrap.log"
-FALLBACK_SOUC="${SOUNIO_VALIDATION_FALLBACK_SOUC:-$ROOT_DIR/bin/souc}"
+# Default the fallback compile oracle to the lean_single fixed-point ELF rather
+# than bin/souc. As of 2026-06-14 bin/souc defaults to the Madaros engine, whose
+# in-place checker spine does not yet collect ItemOntology (check.sio:2832), so it
+# silently accepts ontology role/property/inverse axiom violations. lean_single
+# (check.sio by-value path) owns ontology validation, so it is the correct oracle
+# for this gate. Override via SOUNIO_VALIDATION_FALLBACK_SOUC. See memory:
+# project_madaros_ontology_gap. Tracking the Madaros gap closure as follow-up.
+DEFAULT_FALLBACK_SOUC="$ROOT_DIR/bin/souc-lean-single-x86_64"
+[[ -x "$DEFAULT_FALLBACK_SOUC" ]] || DEFAULT_FALLBACK_SOUC="$ROOT_DIR/bin/souc-linux-x86_64"
+FALLBACK_SOUC="${SOUNIO_VALIDATION_FALLBACK_SOUC:-$DEFAULT_FALLBACK_SOUC}"
 BOOT4_BIN="${SOUNIO_VALIDATION_BOOT4_BIN:-$ROOT_DIR/artifacts/bootstrap/boot4.elf}"
 
 mkdir -p "$WORK_DIR"
