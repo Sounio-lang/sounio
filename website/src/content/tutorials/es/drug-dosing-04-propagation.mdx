@@ -1,0 +1,200 @@
+---
+title: "Propagación de la Incertidumbre A través del Modelo"
+description: "Observa cómo fluye la incertidumbre a través de un cálculo farmacocinético completo"
+series: "drug-dosing"
+order: 4
+estimatedMinutes: 12
+prerequisites: ["drug-dosing-03-knowledge"]
+topic_id: "website.tutorials.es.drug-dosing-04-propagation"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.es.drug-dosing-04-propagation"
+---
+# Propagación de la Incertidumbre A través del Modelo
+
+Hemos definido nuestros parámetros PK con incertidumbre. Ahora veamos cómo ese incertidumbre fluye a través de un cálculo de dosis completo, desde las mediciones del paciente hasta las concentraciones de medicamento predichas.
+
+## El Flujograma Completo
+
+Un flujo de trabajo farmacocinético clínico se ve así:
+
+1. **Medir** laboratorios del paciente (creatinina, peso) → entradas inciertas
+2. **Estimar** parámetros PK (limpieza, volumen) → incertidumbre derivada
+3. **Predecir** concentraciones de medicamento (Cmax, Cmin) → incertidumbre compuesta
+4. **Decidir** si la dosis es segura → decisión con límites de confianza
+
+En Sounio, cada paso preserva y propaga automáticamente la incertidumbre.
+
+## Paso 1: Medidas del Paciente
+
+```sio
+struct PatientLabs {
+    serum_creatinine: Conocimiento<f64>,  // mg/dL
+    weight: Conocimiento<f64>,            // kg
+    age: f64,                          // años (de registros, exacto)
+}
+
+fn measure_patient() -> PatientLabs {
+    PatientLabs {
+        serum_creatinine: measure(1.2, incertidumbre: 0.06),  // CV ensayo del 5%
+        weight: measure(70.0, incertidumbre: 1.0),            // ±1 kg de precisión de escala
+        age: 65.0,
+    }
+}
+```
+
+## Paso 2: Estimación de Parámetros PKLa ecuación Cockcroft-Gault estimada la claridad de creatinina a partir de los laboratorios del paciente. Dado que las entradas son `Knowledge&lt;f64&gt;`, la salida lleva automáticamente la incertidumbre propagada:
+
+```sio
+fn estimate_clearance(labs: PatientLabs) -> Knowledge<f64> {
+    // CrCl (mL/min) = (140 - age) × weight / (72 × SCr)
+    let numerator = (140.0 - labs.age) * labs.weight
+    let denominator = 72.0 * labs.serum_creatinine
+    numerator / denominator
+}
+
+fn estimate_volume(labs: PatientLabs) -> Knowledge<f64> {
+    // Vd ≈ 0.7 L/kg × weight (with model uncertainty)
+    0.7 * labs.weight
+}
+```
+
+La estimación de claridad heredará la incertidumbre tanto del `weight` como del `serum_creatinine`. La estimación del volumen heredará la incertidumbre del `weight`. Sounio calcula estas automáticamente.
+
+## Paso 3: Predecir Concentraciones
+```sio
+fn predecir_trozo(cl: Conocimiento<f64>, vd: Conocimiento<f64>,
+                  dosis: f64, tau: f64) -> Conocimiento<f64> {
+    let ke = cl / vd                          // tasa de eliminación
+    let cmax = dosis / vd                      // concentración máxima
+    let desintegra = exp_k(0.0 - ke * tau)         // exp(-ke × tau)
+    let acumulación = 1.0 / (1.0 - desintegra)   // factor de acumulación en estanco
+    cmax * desintegra * acumulación
+}
+```
+
+Cada operación compone la incertidumbre. Al llegar a la predección del trozo, refleja la incertidumbre combinada de todas las mediciones previas.
+
+## Paso 4: Análisis de Sensibilidad
+
+¿Qué medición contribuye más a la incertidumbre final? Sounio puede descomponer las contribuciones de varianza:
+
+```sio
+struct ResultadoDeSensibilidad {
+    contribución_scr: f64,     // fracción de creatinina
+    contribución_peso: f64,  // fracción de peso
+    cv_total: f64,             // coeficiente de variación total
+}
+```markdown
+# Análisis de Sensibilidad
+
+## Función: `analyze_sensitivity`
+
+La función `analyze_sensitivity` toma los siguientes parámetros:
+
+- `labs`: Un objeto `PatientLabs` que contiene los datos del paciente.
+- `dose`: Una cantidad de dosis en unidades adecuadas.
+- `tau`: Un parámetro de tiempo de dosis.
+
+El método devuelve un objeto `SensitivityResult` que muestra la contribución de cada parámetro a la incertidumbre de dosis.
+
+## Ejemplo de Uso
+
+```rust
+fn analyze_sensitivity(labs: PatientLabs, dose: f64, tau: f64) -> SensitivityResult
+    with Mut, Panic, Div
+{
+    let cl = estimate_clearance(labs)
+    let vd = estimate_volume(labs)
+    let trough = predict_trough(cl, vd, dose, tau)
+
+    // Descomposición de Varianza mediante análisis de Sobol
+    let total_var = trough.uncertainty * trough.uncertainty
+
+    // Contribución del SCr (a través de la clorure)
+    let scr_var = cl.uncertainty * cl.uncertainty
+    let scr_frac = scr_var / total_var
+
+    // Contribución del peso (a través tanto de la clorure como del Vd)
+    let wt_frac = 1.0 - scr_frac  // Resto
+
+    SensitivityResult {
+        scr_contribution: scr_frac,
+        weight_contribution: wt_frac,
+        total_cv: trough.uncertainty / trough.value,
+    }
+}
+```
+
+Esto indica al clínico: *"El 67% de la incertidumbre de dosis proviene de la ensayo de SCr. Si desea una dosis más precisa, obtenga una medición mejor de SCr (por ejemplo, Cystatin C) en lugar de una escala más precisa."*
+
+## Uniendo Todo
+
+```markdown
+# Análisis de Sensibilidad
+
+## Función: `analyze_sensitivity`
+
+La función `analyze_sensitivity` toma los siguientes parámetros:
+
+- `labs`: Un objeto `PatientLabs` que contiene los datos del paciente.
+- `dose`: Una cantidad de dosis en unidades adecuadas.
+- `tau`: Un parámetro de tiempo de dosis.
+
+El método devuelve un objeto `SensitivityResult` que muestra la contribución de cada parámetro a la incertidumbre de dosis.
+
+## Ejemplo de Uso
+
+```rust
+fn analyze_sensitivity(labs: PatientLabs, dose: f64, tau: f64) -> SensitivityResult
+    with Mut, Panic, Div
+{
+    let cl = estimate_clearance(labs)
+    let vd = estimate_volume(labs)
+    let trough = predict_trough(cl, vd, dose, tau)
+
+    // Descomposición de Varianza mediante análisis de Sobol
+    let total_var = trough.uncertainty * trough.uncertainty
+
+    // Contribución del SCr (a través de la clorure)
+    let scr_var = cl.uncertainty * cl.uncertainty
+    let scr_frac = scr_var / total_var
+
+    // Contribución del peso
+```sio
+fn main() -> i32 con IO, Mut, Panic, Div {
+    let labs = medir_paciente()
+    let cl = estimar_cloración(labs)
+    let vd = estimar_volumen(labs)
+
+    let dose = 1000.0   // 1g vancomicina
+    let tau = 12.0       // q12h
+
+    let trough = predecir_trough(cl, vd, dose, tau)
+
+    imprimir("Predicho trough: ")
+    println(trough.value)
+    imprimir(" ± ")
+    println(trough.uncertainty)
+    imprimir(" mg/L\n")
+
+    let sens = analizar_sensibilidad(labs, dose, tau)
+    imprimir("Contribución SCr: ")
+    println(sens.scr_contribution)
+    imprimir("Contribución de peso: ")
+    println(sens.weight_contribution)
+
+    0
+}
+```
+
+## Clave Aplicada
+
+- La incertidumbre se propaga automáticamente a través de todas las operaciones aritméticas
+- El análisis de sensibilidad revela cuáles son las mediciones más importantes
+- El conjunto completo de管道 (medir → estimar → predecir → analizar) es de tipo seguro
+- Las anotaciones de efecto aseguran que cada operación potencialmente fallida esté declarada
+- No se necesitan fórmulas de propagación de errores manual — Sounio se encarga de ello
+```

@@ -115,7 +115,15 @@ async function run() {
   const blogResult = await validateSourceSet({
     sourceDir: 'src/content/blog',
     mapToDist: (rel) => {
-      const slug = stripExtAndIndex(rel);
+      const relPosix = toPosix(rel);
+      const parts = relPosix.split('/');
+      const locales = ['el', 'es', 'ja', 'pt', 'zh', 'zh-hk'];
+      if (parts.length > 1 && locales.includes(parts[0])) {
+        const locale = parts[0];
+        const slug = stripExtAndIndex(parts.slice(1).join('/'));
+        return slug.length > 0 ? `dist/${locale}/insights/${slug}/index.html` : `dist/${locale}/insights/index.html`;
+      }
+      const slug = stripExtAndIndex(relPosix);
       return slug.length > 0 ? `dist/insights/${slug}/index.html` : 'dist/insights/index.html';
     },
   });
@@ -123,7 +131,16 @@ async function run() {
   const showcaseResult = await validateSourceSet({
     sourceDir: 'src/content/showcases',
     mapToDist: (rel) => {
-      const slug = stripExtAndIndex(rel);
+      const relPosix = toPosix(rel);
+      const parts = relPosix.split('/');
+      const locales = ['el', 'es', 'ja', 'pt', 'zh', 'zh-hk'];
+      if (parts.length > 1 && locales.includes(parts[0])) {
+        // Locale-prefixed showcase: e.g. pt/causal.mdx -> dist/pt/science/causal/index.html
+        const locale = parts[0];
+        const slug = stripExtAndIndex(parts.slice(1).join('/'));
+        return slug.length > 0 ? `dist/${locale}/science/${slug}/index.html` : `dist/${locale}/science/index.html`;
+      }
+      const slug = stripExtAndIndex(relPosix);
       return slug.length > 0 ? `dist/science/${slug}/index.html` : 'dist/science/index.html';
     },
   });

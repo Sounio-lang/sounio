@@ -1,0 +1,155 @@
+---
+title: "模型中不确定性传播"
+description: "观看不确定性在完整的药代动力学计算中流动"
+series: "drug-dosing"
+order: 4
+estimatedMinutes: 12
+prerequisites: ["drug-dosing-03-knowledge"]
+topic_id: "website.tutorials.zh.drug-dosing-04-propagation"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.zh.drug-dosing-04-propagation"
+---
+# 模型中不确定性传播
+
+我们已经定义了具有不确定性的PK参数。现在让我们追踪不确定性如何流过整个剂量计算过程——从患者测量到预测的药物浓度。
+
+## 完整管道
+
+临床药代动力学工作流如下所示：
+
+1. **测量**患者实验室数据（肌酐，体重）→ 不确定输入
+2. **估计**PK参数（清除率，体积）→ 推导出的不确定性
+3. **预测**药物浓度（Cmax，Cmin）→ 复合不确定性
+4. **决定**剂量是否安全→ 置信限决策
+
+在Sounio中，每个步骤都自动保留和传播不确定性。
+
+## 步骤1：患者测量
+
+```sio
+struct PatientLabs {
+    serum_creatinine: Knowledge<f64>,  // mg/dL
+    weight: Knowledge<f64>,            // kg
+    age: f64,                          // years (from records, exact)
+}
+
+fn measure_patient() -> PatientLabs {
+    PatientLabs {
+        serum_creatinine: measure(1.2, uncertainty: 0.06),  // 5% assay CV
+        weight: measure(70.0, uncertainty: 1.0),            // ±1 kg 尺度精度
+        age: 65.0,
+    }
+}
+```
+
+## 步骤2：估计PK参数科克罗夫特-高尔特方程根据患者实验室数据估计肌酐清除率。由于输入为`Knowledge&lt;f64&gt;`，输出会自动继承传播的不确定性：
+
+```sio
+fn estimate_clearance(labs: PatientLabs) -> Knowledge<f64> {
+    // CrCl (mL/min) = (140 - age) × weight / (72 × SCr)
+    let numerator = (140.0 - labs.age) * labs.weight
+    let denominator = 72.0 * labs.serum_creatinine
+    numerator / denominator
+}
+
+fn estimate_volume(labs: PatientLabs) -> Knowledge<f64> {
+    // Vd ≈ 0.7 L/kg × weight (with model uncertainty)
+    0.7 * labs.weight
+}
+```
+
+清除率估计继承了`weight`和`serum_creatinine`的不确定性。体积估计继承了`weight`的不确定性。Sounio会自动计算这些。
+
+## 第三步：预测浓度
+```sio
+fn predict_trough(cl: Knowledge<f64>, vd: Knowledge<f64>,
+                  dose: f64, tau: f64) -> Knowledge<f64> {
+    let ke = cl / vd                          // 消除速率
+    let cmax = dose / vd                      // 峰值浓度
+    let decay = exp_k(0.0 - ke * tau)         // exp(-ke × tau)
+    let accumulation = 1.0 / (1.0 - decay)   // 稳态因子
+    cmax * decay * accumulation
+}
+```
+
+每个操作都累积了不确定性。当我们达到最低点预测时，它反映了所有上游测量不确定性的综合。
+
+## 步骤 4：敏感性分析
+
+哪个测量对最终不确定性贡献最大？Sounio 可以分解方差贡献：
+
+```sio
+struct SensitivityResult {
+    scr_contribution: f64,     // 来自肌酐的分数
+    weight_contribution: f64,  // 来自体重的分数
+    total_cv: f64,             // 总体变异系数
+}`之间）。仅翻译`title`和`description`值。不要翻译键如`topic_id`或`category`。
+5. 不要翻译任何代码块、终端命令、函数名或内联代码片段（`code`）。
+6. 仅返回翻译后的文档，不要添加任何对话前缀或后缀。
+
+```rust
+fn analyze_sensitivity(labs: PatientLabs, dose: f64, tau: f64) -> SensitivityResult
+    with Mut, Panic, Div
+{
+    let cl = estimate_clearance(labs)
+    let vd = estimate_volume(labs)
+    let trough = predict_trough(cl, vd, dose, tau)
+
+    // 通过Sobol式分析的方差分解
+    let total_var = trough.uncertainty * trough.uncertainty
+
+    // SCr通过清除率的影响
+    let scr_var = cl.uncertainty * cl.uncertainty
+    let scr_frac = scr_var / total_var
+
+    // 体重通过清除率和Vd的影响
+    let wt_frac = 1.0 - scr_frac  // 剩余部分
+
+    SensitivityResult {
+        scr_contribution: scr_frac,
+        weight_contribution: wt_frac,
+        total_cv: trough.uncertainty / trough.value,
+    }
+}
+```
+
+这告诉临床医生：*"67%的剂量不确定性来自于肌酐测定。如果你想获得更精确的剂量，请获取更好的肌酐测量（例如，半胱氨酸C）而不是更精确的秤。"*
+```sio
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let labs = measure_patient()
+    let cl = estimate_clearance(labs)
+    let vd = estimate_volume(labs)
+
+    let dose = 1000.0   // 1g vancomycin
+    let tau = 12.0       // q12h
+
+    let trough = predict_trough(cl, vd, dose, tau)
+
+    print("预测谷浓度: ")
+    println(trough.value)
+    print(" ± ")
+    println(trough.uncertainty)
+    print(" mg/L\n")
+
+    let sens = analyze_sensitivity(labs, dose, tau)
+    print("肌酐贡献: ")
+    println(sens.scr_contribution)
+    print("体重贡献: ")
+    println(sens.weight_contribution)
+
+    0
+}
+```
+
+## 关键要点
+
+- 不确定性自动通过所有算术运算传播
+- 敏感性分析揭示哪些测量最重要
+- 整个管道（测量 → 估计 → 预测 → 分析）是类型安全的
+- 效果注释确保每个可能失败的操作都被声明
+- 无需手动错误传播公式 — Sounio 处理它
+
+```

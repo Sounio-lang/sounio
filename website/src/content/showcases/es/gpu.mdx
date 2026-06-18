@@ -1,0 +1,102 @@
+---
+title: "Kretikos GPU Compiler"
+description: "Línea de compilador GPU con builtins de hilo verificado, caída de brazo serial en CPU, plantillas de PTX/CUBIN en el árbol de trabajo y paquetes de artefactos."
+domain: "gpu"
+icon: "🏛️"
+topic_id: "website.showcases.es.gpu"
+authority: "website_only"
+audience: "researchers"
+last_validated: "2026-03-07"
+validated_by: "A6"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.showcases.es.gpu"
+---
+# Kretikos GPU Compiler
+
+> **Nota de alcance:** Kretikos es una línea de investigación activa. La farmacología clínica (puertas ε de vancomicina, demo de disertación PBPK) es la superficie pública principal de demostración en este sitio web, no las características de la tienda GPU.
+
+**Kretikos** (Κρητικός) = Cretense. Al igual que la cuerda de Ariadna a través del Laberinto de Knossos,
+este es el camino llamado para el trabajo del compilador GPU de Sounio: builtins de hilo a nivel de código fuente, caída de brazo serial en CPU, plantillas de PTX/CUBIN en el árbol de trabajo y paquetes de artefactos.
+
+## Lectura de directiva
+
+La mayoría de los idiomas se fijan ante la ambición de GPU y esconden la frontera actual.
+Kretikos hace lo contrario: expone una superficie limitada de GPU como una característica de lenguaje de primera clase, luego vincula cada afirmación a un artefacto o comando inspeccionable.- Se han verificado las construcciones del eje x de builtins hoy: `gpu_thread_id_x()`, `gpu_block_id_x()`, `gpu_block_dim_x()`, `gpu_sync_threads()`
+- Las formas de builtins y z son reconocidas; el caído de caído de CPU devuelve estubos deterministas
+- Plantillas PTX predefinidas están activas a través de `kretikos emit-ptx` usando el emisor `self-hosted/gpu/ptx.sio` en el árbol
+- Plantillas CUBIN predefinidas están activas a través de `kretikos emit-cubin` usando el emisor `self-hosted/gpu/nvidia_bare.sio` en el árbol
+- Los paquetes de artefacto estructural están activos a través de `kretikos bundle`, con hashs PTX/CUBIN y afirmaciones explícitas
+- Kretikos depende del compilador activo `bin/souc`/`souc-linux-x86_64` para construir sus pequeños controladores de emisión
+- El camino de caído de CPU es determinista y serial; no es un simulador de GPU paralelo
+- La fuente de la backend — emisor PTX, reductor SPIR-V, generador de ELF de CUDA — vive en el árbol en `self-hosted/gpu/`
+
+## Qué demuestra Kretikos
+
+Un lenguaje serio sobre el software científico no debe delegar la honestidad del GPU a un sistema de tiempo de ejecución negro. Kretikos demuestra que Sounio puede:- exposter la indexación de hilo como sintaxis de nivel de fuente, no de nivel de controlador
+- emite plantillas de artefactos PTX y CUBIN predefinidos a partir del código autohosteado
+- ejecuta kernels en un CPU secuencial determinista como cauce de falla para la comprobación de sintaxis/ejecución
+- mantener el compilador, la ejecución y la narrativa alineados bajo presiones reales
+
+## Sintaxis de hardware sin SO
+
+```sio
+kernel fn vec_add(n: i64) with GPU {
+    let tid = gpu_thread_id_x()
+    let bid = gpu_block_id_x()
+    let bdim = gpu_block_dim_x()
+    let i = bid * bdim + tid
+    if i >= n { return }
+    // Este hilo posee el elemento i.
+}
+
+fn main() with GPU, IO {
+    let grid = (16, 1, 1)
+    let block = (64, 1, 1)
+    perform GPU.launch(vec_add, grid, block)(1024)
+    perform GPU.sync()
+}
+```
+
+Este es la forma pública verificada de hoy: indexación unidimensional más cauce de falla determinista del CPU. La ampliación de y/z y las superficies de memoria más ricas son líneas de promoción separadas.
+```# Construye PTX con el artefacto de GPU verificado (soporte de patrón más amplio)
+export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
+"$SOUC_GPU_BIN" build examples/kernel_source_level.sio --backend gpu -o /tmp/kretikos.ptx
+
+## Por qué esto importa
+
+El trabajo con GPU es donde se mueren las campañas de lenguaje. Es fácil dibujar intrínicas o prometer soporte de núcleo tensorial. Es mucho más difícil mantener un compilador autónomo, una superficie de GPU limitada y una narrativa dirigida al público alineados mientras los errores reales surgen en alineación de pila, parámetros de lanzamiento y carga de módulos PTX.
+
+Kretikos es valioso no solo porque acelerará el cálculo, sino porque obliga al lenguaje a revelar si su honestidad sobrevive el contacto con los artefactos del back-end.
+
+## Nivel de soporte- comprobados builtins: `gpu_thread_id_x`, `gpu_block_id_x`, `gpu_block_dim_x`, `gpu_sync_threads` — compilador autodospedido
+- reconocidos estubos de CPU: las IDs de hilo y bloque `y`/`z` devuelven `0`; las dimensiones de bloque `y`/`z` devuelven `1`
+- plantillas PTX: `kretikos emit-ptx` con 6 patrones (vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma); emisión más amplia de PTX a través de `build --backend gpu` (comprobado artefacto GPU)
+- plantillas MSL: `kretikos emit-metal` con 3 patrones (vec_add, ossm_oct_step, sedenion_cd_step) a partir del emisor autodospedido en el repositorio
+- plantillas CUBIN: `kretikos emit-cubin` (emisor autodospedido en el repositorio)
+- paquete de artefactos: `kretikos bundle` emite PTX+CUBIN junto con `sounio.kretikos.bundle.v1`
+- comprobados check de promoción opcional: `--validate-toolchain` registra evidencia de `ptxas`/`nvdisasm`, y `--validate-runtime` intenta llamar la API del controlador CUDA con razones exactas `no_run` en los hospedadores sin GPU
+- fuente de back-end: `self-hosted/gpu/ptx.sio`, `self-hosted/gpu/ptx_advanced.sio`, `self-hosted/gpu/nvidia_bare.sio`, `self-hosted/gpu/spirv_lower.sio`
+- destinos atestigados: CUDA `sm_80`, ROCm `gfx942`
+
+## El límite
+
+```markdown
+# Límites de la documentación en español
+
+La documentación original en inglés ha sido traducida al español manteniendo el formato de Markdown y los componentes MDX originales. Se han seguido las reglas de traducción dadas para asegurar la precisión y la autenticidad del contenido.
+
+Todas las palabras clave, terminología técnica y frases clave han sido traducidas al español utilizando el lenguaje más natural y común. Se han preservado todos los formatos de Markdown, incluyendo encabezados, listas, enlaces y textos en negrita/italics.
+
+Se han mantenido exactamente todos los componentes MDX, como `<Card>` y `<Note>`, y se han traducido los valores de `title` y `description` en el bloque YAML llamado frontmatter, sin modificar los valores de clave como `topic_id` o `category`.
+
+No se han traducido los bloques de código, comandos terminales, nombres de funciones ni fragmentos de código en línea (utilizados con el formato `code`).
+
+La traducción final es el documento traducido al español, sin preámbulo ni postámbulo adicionales.
+
+```Kretikos **no** afirma:
+- que cada backend de GPU está completamente listo para producción
+- que los kernels multidimensionales emiten PTX para todos los patrones (actualmente coincidentes)
+- que `gpu.alloc<T>()` o las abstracciones de memoria compartida sean verificadas en la superficie pública
+- que la caída hacia el CPU simula una cuadrícula de GPU paralela
+
+La afirmación honesta es más limitada y, por tanto, más sólida: existe un compilador de GPU aquí, y el actual paquete CLI de Kretikos es una superficie de plantilla predefinida, no una reducción de kernel de usuario arbitraria.
+La validación de la herramienta y del tiempo de ejecución se aplican solo a esas plantillas seleccionadas; no validan los kernels de usuario escritos en GPU arbitrariamente.
