@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.ppcr.sounio-ppcr-map
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ppcr.sounio-ppcr-map
+-->
+
 # Sounio × PPCR Capability Map
 
 **Scope:** map each PPCR competency to the actual Sounio artifact that implements it, with an honest maturity tag, a runnable entrypoint, and a confidence level. This map is the ground truth for everything that may be said to Prof. Felipe Fregni.

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.kaxi-ptx-target-sm-audit-2026-06-17
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.kaxi-ptx-target-sm-audit-2026-06-17
+-->
+
 # K-AXI → PTX emitter correctness audit — 2026-06-17
 
 Static, local audit of every `(pattern × mode)` PTX emitted by

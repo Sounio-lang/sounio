@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.ppcr.claims-ledger
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ppcr.claims-ledger
+-->
+
 # Claims Ledger — Sounio × PPCR for Prof. Felipe Fregni
 
 **Rule:** if a claim is not in this ledger as `VERIFIED`, do not send it or say it in the meeting.
