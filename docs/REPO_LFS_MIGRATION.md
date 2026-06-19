@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.repo-lfs-migration
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.repo-lfs-migration
+-->
+
 # Runbook: migrate large binaries out of git history (Git LFS)
 
 **Status: planned, not executed.** This is a *coordinated, scheduled* operation —
