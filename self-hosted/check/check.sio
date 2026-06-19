@@ -33,6 +33,7 @@ use check::ontology_side_table_cache::{
 }
 use parser::ast::*
 use ir::ir::*
+use io::env::{read_env}
 
 // ============================================================
 // Visibility / module-path helpers
@@ -2945,6 +2946,29 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
                 (*c).current_return_type = sig.return_type
                 (*c).current_effects = sig.effects
                 (*c).current_effect_count = sig.effect_count
+                // Codegen firewall (SOUNIO_CODEGEN_FIREWALL=1, build-mode): the compiler's
+                // own deterministic codegen path must stay free of stochastic effects, or the
+                // bit-identical bootstrap fixed-point (gen2==gen3) is no longer guaranteed.
+                // v1 catches DIRECT declaration of LLM(22)/Prob(7); transitive coverage (a
+                // codegen fn calling an LLM/Prob helper without declaring it) needs
+                // effects_enforcement_mode()==2 so callee effects bubble to the entry.
+                if codegen_firewall_active() {
+                    var fw_eff: i64 = 0 - 1
+                    if has_effect_id((*c).current_effects, (*c).current_effect_count, 22) {
+                        fw_eff = 22
+                    } else if has_effect_id((*c).current_effects, (*c).current_effect_count, 7) {
+                        fw_eff = 7
+                    }
+                    if fw_eff >= 0 {
+                        print("error[E035] at ")
+                        print_int((*fd).span.start)
+                        print(": codegen-path function declares forbidden effect (")
+                        print_effect_name(fw_eff)
+                        print(") on the deterministic codegen path\n")
+                        (*c).had_error = true
+                        (*c).error_count = (*c).error_count + 1
+                    }
+                }
             }
             (*c).multitest_count = 0
             (*c).multitest_corrected = false
@@ -3298,6 +3322,61 @@ fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
 }
 
 
+// Effect-enforcement toggle: 0 = off/dark, 1 = warn (shipped), 2 = error (full flip).
+// The whole effect system flips by editing this single literal to 2.
+fn effects_enforcement_mode() -> i64 {
+    1
+}
+
+// Codegen firewall (build-mode gate). Cache: 0 = unread, 1 = off, 2 = on.
+// Activated by SOUNIO_CODEGEN_FIREWALL=1 — set by `make build-madaros` (the compiler
+// self-compile), unset for ordinary user builds (so `LLM`/`Prob` flow freely in user
+// code). Read once per process; the env value is constant for a compile invocation.
+var CODEGEN_FIREWALL_CACHE: i64 = 0
+
+fn codegen_firewall_active() -> bool with IO, Mut, Div, Panic {
+    if CODEGEN_FIREWALL_CACHE == 0 {
+        let v = read_env("SOUNIO_CODEGEN_FIREWALL")
+        if str_eq(v, "1") {
+            CODEGEN_FIREWALL_CACHE = 2
+        } else {
+            CODEGEN_FIREWALL_CACHE = 1
+        }
+    }
+    CODEGEN_FIREWALL_CACHE == 2
+}
+
+// Effect-enforcement primitive (CHECK, not ADD): if the current function does not
+// DECLARE eff_id in its effect clause, emit per the toggle. Models the existing
+// call-effect guard — value-style report_effect_error + store-back to dodge the
+// by-value Checker SRET smash. Used by the source-tagging hooks
+// (print*->IO, '/'|'%'->Div, Box::new->Alloc).
+fn checker_require_effect_inplace(c: *mut Checker, span: Span, eff_id: i64) with Mut, IO, Panic, Div, Alloc {
+    if eff_id < 0 {
+        return
+    }
+    if has_effect_id((*c).current_effects, (*c).current_effect_count, eff_id) {
+        return
+    }
+    let mode = effects_enforcement_mode()
+    if mode == 0 {
+        return
+    }
+    if mode >= 2 {
+        var missing: [i64; 8] = [0; 8]
+        missing[0] = eff_id
+        let t = (*c).report_effect_error(span, missing, 1)
+        checker_store_from_value(c, t)
+        return
+    }
+    // warn mode (1): non-fatal W035, does NOT set had_error.
+    print("warning[W035] at ")
+    print_int(span.start)
+    print(": effect used but not declared (")
+    print_effect_name(eff_id)
+    print(")\n")
+}
+
 // *mut transcription of check_binary_with_operand_types (13983). Returns ONLY the TypeEntry
 // so the RECURSIVE checker_check_binary_expr_inplace no longer holds a 12MB (Checker,
 // TypeEntry) `pair` local across its operand recursion (that N-deep 12MB frame was the
@@ -3307,6 +3386,10 @@ fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
 fn checker_check_binary_op_types_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
     if is_error_or_unknown(left_ty) || is_error_or_unknown(right_ty) {
         return
+    }
+    // Source-tag Div: division/remainder require the Div effect to be declared.
+    if op == BinaryOp::OpDiv || op == BinaryOp::OpRem {
+        checker_require_effect_inplace(c, span, 4)
     }
     match op {
         BinaryOp::OpBitAnd => {
@@ -4910,6 +4993,39 @@ fn checker_enum_visible_inplace(c: *mut Checker, enum_idx: i64) -> bool with Mut
     )
 }
 
+// Source-tag recogniser: is the callee one of the output builtins (print family)?
+fn call_expr_is_output_builtin(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            let n = (*expr).name
+            if name_matches_str7(n, 112, 114, 105, 110, 116, 108, 110) { return true }              // println
+            if name_matches_str5(n, 112, 114, 105, 110, 116) { return true }                        // print
+            if name_matches_str9(n, 112, 114, 105, 110, 116, 95, 105, 110, 116) { return true }     // print_int
+            if name_matches_str10(n, 112, 114, 105, 110, 116, 95, 99, 104, 97, 114) { return true } // print_char
+            if name_matches_str9(n, 112, 114, 105, 110, 116, 95, 102, 54, 52) { return true }       // print_f64
+            false
+        }
+        None => false
+    }
+}
+
+// Source-tag recogniser: is the callee the Box::new path-expr (head segment "Box")?
+fn call_expr_is_box_new(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprPath {
+                return false
+            }
+            let head = checker_copy_string_list_to_name((*expr).path.segments)
+            name_matches_str3(head, 66, 111, 120)
+        }
+        None => false
+    }
+}
+
 fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // Intercept the common epistemic builtin measure() with an inplace handler before the
     // by-value bridge below (which SRET-smashes on the 164KB Checker return).
@@ -4939,6 +5055,13 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     if call_expr_should_bridge_by_value(e) {
         return checker_check_expr_mut(c, e)
+    }
+    // Source-tag IO/Alloc: output builtins require IO; Box::new requires Alloc.
+    if call_expr_is_output_builtin(e.left) {
+        checker_require_effect_inplace(c, e.span, 0)
+    }
+    if call_expr_is_box_new(e.left) {
+        checker_require_effect_inplace(c, e.span, 2)
     }
     // Preamble: multitest then hypothesis effects (shallow state, no sub-expr check).
     if multitest_effect_enabled((*c).current_effects, (*c).current_effect_count) {
@@ -15824,6 +15947,26 @@ impl Checker {
                     c.current_return_type = sig.return_type
                     c.current_effects = sig.effects
                     c.current_effect_count = sig.effect_count
+                    // Codegen firewall (value-style twin of checker_check_fn_item_inplace).
+                    // SOUNIO_CODEGEN_FIREWALL=1 forbids stochastic LLM(22)/Prob(7) on the
+                    // compiler's deterministic codegen path. v1: direct declaration only.
+                    if codegen_firewall_active() {
+                        var fw_eff: i64 = 0 - 1
+                        if has_effect_id(c.current_effects, c.current_effect_count, 22) {
+                            fw_eff = 22
+                        } else if has_effect_id(c.current_effects, c.current_effect_count, 7) {
+                            fw_eff = 7
+                        }
+                        if fw_eff >= 0 {
+                            print("error[E035] at ")
+                            print_int((*fd).span.start)
+                            print(": codegen-path function declares forbidden effect (")
+                            print_effect_name(fw_eff)
+                            print(") on the deterministic codegen path\n")
+                            c.had_error = true
+                            c.error_count = c.error_count + 1
+                        }
+                    }
                 }
                 c.multitest_count = 0
                 c.multitest_corrected = false
@@ -16540,6 +16683,21 @@ impl Checker {
     fn check_binary_op_types(self, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
         if is_error_or_unknown(left_ty) || is_error_or_unknown(right_ty) {
             return self
+        }
+        // Source-tag Div: division/remainder require the Div effect to be declared.
+        if op == BinaryOp::OpDiv || op == BinaryOp::OpRem {
+            if !has_effect_id(self.current_effects, self.current_effect_count, 4) {
+                let dmode = effects_enforcement_mode()
+                if dmode >= 2 {
+                    var missing_div: [i64; 8] = [0; 8]
+                    missing_div[0] = 4
+                    return self.report_effect_error(span, missing_div, 1)
+                } else if dmode == 1 {
+                    print("warning[W035] at ")
+                    print_int(span.start)
+                    print(": effect used but not declared (Div)\n")
+                }
+            }
         }
         match op {
             BinaryOp::OpBitAnd => {
@@ -17379,6 +17537,36 @@ impl Checker {
             return self.check_contest_witness_expr(e, witness_kind)
         }
         var c = self
+        // Source-tag IO/Alloc: output builtins require IO; Box::new requires Alloc.
+        // Mode-gated like the Div hook: 0=off, 1=warn (W035), 2=error (E035).
+        if call_expr_is_output_builtin(e.left) {
+            if !has_effect_id(c.current_effects, c.current_effect_count, 0) {
+                let iomode = effects_enforcement_mode()
+                if iomode >= 2 {
+                    var missing_io: [i64; 8] = [0; 8]
+                    missing_io[0] = 0
+                    c = c.report_effect_error(e.span, missing_io, 1)
+                } else if iomode == 1 {
+                    print("warning[W035] at ")
+                    print_int(e.span.start)
+                    print(": effect used but not declared (IO)\n")
+                }
+            }
+        }
+        if call_expr_is_box_new(e.left) {
+            if !has_effect_id(c.current_effects, c.current_effect_count, 2) {
+                let amode = effects_enforcement_mode()
+                if amode >= 2 {
+                    var missing_alloc: [i64; 8] = [0; 8]
+                    missing_alloc[0] = 2
+                    c = c.report_effect_error(e.span, missing_alloc, 1)
+                } else if amode == 1 {
+                    print("warning[W035] at ")
+                    print_int(e.span.start)
+                    print(": effect used but not declared (Alloc)\n")
+                }
+            }
+        }
         if multitest_effect_enabled(c.current_effects, c.current_effect_count) {
             let callee_name = multitest_call_name(e.left)
             if multitest_is_stat_test_name(callee_name) {
