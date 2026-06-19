@@ -1,0 +1,180 @@
+// stdlib/epistemic/affine_octonion.sio — correlation-honest affine octonion value
+//
+// AffOct is the affine-arithmetic upgrade of UncertainOct (uncertain_octonion.sio).
+// Where UncertainOct carries a single SCALAR variance and therefore must assume
+// its operands are INDEPENDENT, AffOct carries the value as an affine form
+//
+//     x = x0 + Σ_k  d_k · ε_k          (k = 0 .. NSYM-1)
+//
+// over a shared pool of scalar noise symbols ε_k ∈ [−1,1]. The coefficients
+// x0, d_k are octonion-valued ([f64;8]). Two values that were built from the
+// SAME symbol are correlated through it; a symbol that ends up with equal and
+// opposite coefficients cancels EXACTLY. Correlation is therefore structural —
+// carried by shared symbol identity — not approximated by a covariance matrix.
+// This is the realization of "independence is a lie" at the level of every
+// value: x − x has variance 0, not 2·Var(x).
+//
+// The one budget is   Var(x) = Σ_k ‖d_k‖²  +  rough,  where `rough` is a single
+// lumped, conservatively-INDEPENDENT bucket for the second-order product
+// remainder (standard affine arithmetic). HONESTY SCOPE: AffOct is
+// correlation-honest to FIRST ORDER; the second-order multiplicative remainder
+// is enclosed independently in `rough`, so independence re-enters at 2nd order
+// (this is the usual AA trade-off, stated so callers do not over-claim).
+//
+// NON-ASSOCIATIVITY is deliberately NOT handled here. A binary value type cannot
+// see a triple, so it cannot carry the order-ambiguity associator (proven to
+// live distributed across the symbol coefficients — see
+// docs/audit/AFFINE_NONASSOC_UNCERTAINTY_2026-06-13.md). The structural term
+// belongs to the perturbation DAG (perturbation_graph.sio), which has triple
+// identity; this module is the correlation-honest measurement layer beneath it.
+//
+// No new algebra: reuses the verified primitives in algebra::octonion.
+// Construction is ONLY via the exported aff_* functions (no cross-module struct
+// literal), and all combinators write through a bare &! out-param (the safe
+// deref-store path), mirroring perturbation_graph.sio.
+
+use algebra::octonion::{oct_mul, oct_norm_sq}
+
+// Number of shared noise symbols. Each independent error source is assigned a
+// distinct symbol index by the caller; shared indices encode correlation.
+// co holds NSYM octonion coefficients flattened: symbol k component c at co[k*8+c].
+pub struct AffOct {
+    c0:    [f64; 8],    // central octonion value
+    co:    [f64; 64],   // NSYM(=8) symbol coefficients, co[k*8 + c]
+    rough: f64,         // lumped INDEPENDENT 2nd-order/roundoff variance bucket
+}
+
+fn aff_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// A zeroed affine form (central 0, no symbols). The struct literal lives ONLY
+// here, so consumers never construct AffOct across a module boundary.
+pub fn aff_new() -> AffOct {
+    AffOct { c0: [0.0; 8], co: [0.0; 64], rough: 0.0 }
+}
+
+// An exactly-known octonion (zero uncertainty).
+pub fn aff_certain(out: &!AffOct, v: &[f64; 8]) with Mut {
+    var c: i64 = 0
+    while c < 8 { out.c0[c] = v[c]; c = c + 1 }
+    var i: i64 = 0
+    while i < 64 { out.co[i] = 0.0; i = i + 1 }
+    out.rough = 0.0
+}
+
+// A measured octonion: central value v, perturbed along octonion direction
+// `coeff` by noise symbol `sym`. ‖coeff‖² is this leaf's variance.
+pub fn aff_leaf(out: &!AffOct, v: &[f64; 8], sym: i64, coeff: &[f64; 8]) with Mut {
+    aff_certain(out, v)
+    var c: i64 = 0
+    while c < 8 { out.co[sym * 8 + c] = coeff[c]; c = c + 1 }
+}
+
+pub fn aff_get_sym(a: &AffOct, k: i64, out: &![f64; 8]) with Mut {
+    var c: i64 = 0
+    while c < 8 { out[c] = a.co[k * 8 + c]; c = c + 1 }
+}
+
+pub fn aff_central(a: &AffOct, out: &![f64; 8]) with Mut {
+    var c: i64 = 0
+    while c < 8 { out[c] = a.c0[c]; c = c + 1 }
+}
+
+// The one variance budget: Σ_k ‖d_k‖²  +  the independent roughness bucket.
+pub fn aff_variance(a: &AffOct) -> f64 with Mut {
+    var total: f64 = 0.0
+    var k: i64 = 0
+    while k < 8 {
+        var d: [f64; 8] = [0.0; 8]
+        aff_get_sym(a, k, &!d)
+        total = total + oct_norm_sq(&d)
+        k = k + 1
+    }
+    total + a.rough
+}
+
+pub fn aff_std(a: &AffOct) -> f64 with Mut, Div, Panic {
+    aff_sqrt(aff_variance(a))
+}
+
+// Total deviation rad(a) = Σ_k ‖d_k‖ — the affine "radius", used to bound the
+// second-order product remainder.
+fn aff_radius(a: &AffOct) -> f64 with Mut, Div, Panic {
+    var r: f64 = 0.0
+    var k: i64 = 0
+    while k < 8 {
+        var d: [f64; 8] = [0.0; 8]
+        aff_get_sym(a, k, &!d)
+        r = r + aff_sqrt(oct_norm_sq(&d))
+        k = k + 1
+    }
+    r
+}
+
+// x + y. Shared symbols ADD (correlation amplifies); opposite coefficients
+// cancel. rough buckets add (independent).
+pub fn aff_add(out: &!AffOct, a: &AffOct, b: &AffOct) with Mut {
+    var c: i64 = 0
+    while c < 8 { out.c0[c] = a.c0[c] + b.c0[c]; c = c + 1 }
+    var i: i64 = 0
+    while i < 64 { out.co[i] = a.co[i] + b.co[i]; i = i + 1 }
+    out.rough = a.rough + b.rough
+}
+
+// x − y. The exact-conditioning case: aff_sub(x, x) ⇒ every coefficient cancels
+// ⇒ variance 0 (zero covariance), where a scalar model is forced to report
+// Var(x)+Var(x).
+pub fn aff_sub(out: &!AffOct, a: &AffOct, b: &AffOct) with Mut {
+    var c: i64 = 0
+    while c < 8 { out.c0[c] = a.c0[c] - b.c0[c]; c = c + 1 }
+    var i: i64 = 0
+    while i < 64 { out.co[i] = a.co[i] - b.co[i]; i = i + 1 }
+    out.rough = a.rough + b.rough
+}
+
+// Binary octonion product, first-order correlation-honest. Octonion ORDER is
+// preserved (a on the left), so the product is non-commutative as it must be.
+//   central     :  a0 · b0
+//   ∂/∂ε_k      :  a0 · d_k(b)  +  d_k(a) · b0        (shared symbols tracked)
+//   2nd order   :  enclosed independently in rough, bounded by rad(a)·rad(b),
+//                  plus the norm-propagated input rough budgets.
+pub fn aff_mul(out: &!AffOct, a: &AffOct, b: &AffOct) with Mut, Div, Panic, NonAssoc {
+    var a0: [f64; 8] = [0.0; 8]
+    aff_central(a, &!a0)
+    var b0: [f64; 8] = [0.0; 8]
+    aff_central(b, &!b0)
+
+    var prod: [f64; 8] = [0.0; 8]
+    oct_mul(&a0, &b0, &!prod)
+    var c: i64 = 0
+    while c < 8 { out.c0[c] = prod[c]; c = c + 1 }
+
+    var k: i64 = 0
+    while k < 8 {
+        var da: [f64; 8] = [0.0; 8]
+        aff_get_sym(a, k, &!da)
+        var db: [f64; 8] = [0.0; 8]
+        aff_get_sym(b, k, &!db)
+        var t1: [f64; 8] = [0.0; 8]
+        oct_mul(&a0, &db, &!t1)
+        var t2: [f64; 8] = [0.0; 8]
+        oct_mul(&da, &b0, &!t2)
+        var cc: i64 = 0
+        while cc < 8 { out.co[k * 8 + cc] = t1[cc] + t2[cc]; cc = cc + 1 }
+        k = k + 1
+    }
+
+    // independent budgets: input roughness propagated through the norm rule,
+    // plus the fresh second-order remainder bound rad(a)·rad(b).
+    let na = oct_norm_sq(&a0)
+    let nb = oct_norm_sq(&b0)
+    let ra = aff_radius(a)
+    let rb = aff_radius(b)
+    let remainder = ra * rb
+    out.rough = nb * a.rough + na * b.rough + remainder * remainder
+}
