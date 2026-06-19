@@ -525,32 +525,20 @@ pub fn check_items_verdict_boot4_with_module_path(items: Option<Box<ItemList>>, 
 // each program's real module_path as current_module.  Returns 0=ok, 1=reject.
 // Ontology semantic verdict. The boot4/Madaros in-place checker spine
 // (checker_collect_item_inplace) does not collect ItemOntology, so ontology
-// role/property/inverse axiom violations (E156–E160) slip through. The full
-// by-value path (collect_items -> collect_ontology_def) does enforce them.
-// Run a focused by-value ontology-only collection over the item list on a fresh
-// checker and report a reject (1) if any ontology axiom error was raised.
-// Returns 0 when clean. This closes the gap without copying the main 164KB
-// in-place Checker (the fresh by-value checker mirrors check_program's own
-// collect path, which Madaros already executes).
+// role/property/inverse axiom violations (E156–E160) slip through. The by-value
+// collect_ontology_def path cannot be reused here: threading the ~164KB Checker
+// through its deep recursion is miscompiled by the native backend (the large-
+// struct copy bug the *mut spine exists to avoid), so its error state is lost.
+// Instead validate axioms in place over the parsed AST via
+// checker_validate_ontology_items_inplace (no large copies). Returns 1 on any
+// ontology axiom error, 0 when clean.
 pub fn check_items_ontology_verdict(items: Option<Box<ItemList>>) -> i64 with Mut, Panic, Div, Alloc, IO {
-    var checker = checker_new()
-    var cursor = items
-    while true {
-        match cursor {
-            Some(list) => {
-                let item = (*list).head
-                if item.kind == ItemKind::ItemOntology {
-                    checker = checker.collect_ontology_def(item.ontology_def)
-                }
-                cursor = (*list).tail
-            }
-            None => break
-        }
-    }
-    if checker.had_error || checker.error_count > 0 {
-        return 1
-    }
-    0
+    let checker_ptr = check_mod_alloc_checker()
+    checker_init_in_place(checker_ptr)
+    checker_validate_ontology_items_inplace(checker_ptr, items)
+    let bad = if (*checker_ptr).had_error || (*checker_ptr).error_count > 0 { 1 } else { 0 }
+    heap_free(checker_ptr as i64)
+    bad
 }
 
 pub fn check_modules_verdict_boot4(programs: &! [Program; 256], count: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
