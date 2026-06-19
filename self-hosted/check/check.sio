@@ -2862,6 +2862,179 @@ fn checker_check_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) w
     }
 }
 
+// ============================================================================
+// In-place ontology axiom validation (Madaros boot4 path).
+//
+// The by-value collect_ontology_def path loses its error state in Madaros: it
+// threads a ~164KB Checker through deep `c = c.method()` recursion, which the
+// native codegen miscompiles (the same large-struct copy bug the *mut spine
+// exists to avoid). These helpers validate ontology axioms directly on the
+// parsed AST lists (pointer-sized, no large copies) and report through
+// checker_report_error_at_inplace:
+//   E156 role domain class not found, E157 role range class not found,
+//   E158 inverse_of target role not found, E159 duplicate role declaration,
+//   E041 ontology subsumption could not be verified (child property weakens parent).
+// ============================================================================
+
+fn onto_class_list_has(classes: Option<Box<OntologyClassDeclList> >, target: Name) -> bool with Mut, Panic, Div {
+    var cur = classes
+    while true {
+        match cur {
+            Some(list) => {
+                if name_eq((*list).head.name, target) {
+                    return true
+                }
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
+    false
+}
+
+fn onto_role_list_has(roles: Option<Box<OntologyRoleDeclList> >, target: Name) -> bool with Mut, Panic, Div {
+    var cur = roles
+    while true {
+        match cur {
+            Some(list) => {
+                if name_eq((*list).head.name, target) {
+                    return true
+                }
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
+    false
+}
+
+fn onto_role_count_in_prefix(roles: Option<Box<OntologyRoleDeclList> >, k: i64, target: Name) -> i64 with Mut, Panic, Div {
+    var cur = roles
+    var j: i64 = 0
+    var n: i64 = 0
+    while j < k {
+        match cur {
+            Some(list) => {
+                if name_eq((*list).head.name, target) {
+                    n = n + 1
+                }
+                cur = (*list).tail
+            }
+            None => break
+        }
+        j = j + 1
+    }
+    n
+}
+
+fn onto_prop_pred(p: OntologyPropertyDecl) -> RefinementPred with Mut, Panic, Div {
+    RefinementPred {
+        op: p.pred_op,
+        var_name: p.name,
+        rhs_int: p.pred_rhs_int,
+        rhs_float: p.pred_rhs_float,
+        is_float: p.is_float,
+        left: None,
+        right: None,
+    }
+}
+
+fn checker_onto_check_roles_inplace(c: *mut Checker, roles: Option<Box<OntologyRoleDeclList> >, classes: Option<Box<OntologyClassDeclList> >) with Mut, Panic, Div, Alloc, IO {
+    var cur = roles
+    var k: i64 = 0
+    while true {
+        match cur {
+            Some(list) => {
+                let decl = (*list).head
+                let dup_before = onto_role_count_in_prefix(roles, k, decl.name)
+                if dup_before > 0 || decl.duplicate_modifier_bits != 0 {
+                    checker_report_error_at_inplace(c, decl.span, 159, 0, 0, 0)
+                } else {
+                    if decl.has_domain && !onto_class_list_has(classes, decl.domain_name) {
+                        checker_report_error_at_inplace(c, decl.span, 156, 0, 0, 0)
+                    }
+                    if decl.has_range && !onto_class_list_has(classes, decl.range_name) {
+                        checker_report_error_at_inplace(c, decl.span, 157, 0, 0, 0)
+                    }
+                    if decl.has_inverse && !onto_role_list_has(roles, decl.inverse_name) {
+                        checker_report_error_at_inplace(c, decl.span, 158, 0, 0, 0)
+                    }
+                }
+                cur = (*list).tail
+                k = k + 1
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_onto_check_weakening_inplace(c: *mut Checker, classes: Option<Box<OntologyClassDeclList> >) with Mut, Panic, Div, Alloc, IO {
+    var ci = classes
+    while true {
+        match ci {
+            Some(clist) => {
+                let cdecl = (*clist).head
+                var si: i64 = 0
+                while si < cdecl.superclass_count && si < 8 {
+                    let sname = cdecl.superclass_names[si as usize]
+                    var pi = classes
+                    while true {
+                        match pi {
+                            Some(plist) => {
+                                let pdecl = (*plist).head
+                                if name_eq(pdecl.name, sname) {
+                                    var a: i64 = 0
+                                    while a < cdecl.property_count && a < 8 {
+                                        let cp = cdecl.properties[a as usize]
+                                        var b: i64 = 0
+                                        while b < pdecl.property_count && b < 8 {
+                                            let pp = pdecl.properties[b as usize]
+                                            if name_eq(cp.name, pp.name) && cp.pred_op > 0 && pp.pred_op > 0 {
+                                                if !pred_implies(onto_prop_pred(cp), onto_prop_pred(pp)) {
+                                                    checker_report_error_at_inplace(c, cp.span, 41, 0, 0, 0)
+                                                }
+                                            }
+                                            b = b + 1
+                                        }
+                                        a = a + 1
+                                    }
+                                }
+                                pi = (*plist).tail
+                            }
+                            None => break
+                        }
+                    }
+                    si = si + 1
+                }
+                ci = (*clist).tail
+            }
+            None => break
+        }
+    }
+}
+
+pub fn checker_validate_ontology_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    var cur = items
+    while true {
+        match cur {
+            Some(list) => {
+                let item = (*list).head
+                if item.kind == ItemKind::ItemOntology {
+                    match item.ontology_def {
+                        Some(odef) => {
+                            checker_onto_check_roles_inplace(c, (*odef).roles, (*odef).classes)
+                            checker_onto_check_weakening_inplace(c, (*odef).classes)
+                        }
+                        None => {}
+                    }
+                }
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
 // *mut E042 emitter — mirrors report_multitest_correction_required (6140) but
 // mutates (*c) in place instead of copying the 8MB Checker by value.
 fn checker_report_multitest_correction_required_inplace(c: *mut Checker, span: Span, test_count: i64) with Mut, IO, Panic, Div {
