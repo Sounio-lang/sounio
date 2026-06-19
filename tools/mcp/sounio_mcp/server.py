@@ -8,7 +8,10 @@ import json
 import sys
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError:  # pragma: no cover - exercised by host setup smoke tests.
+    FastMCP = None  # type: ignore[assignment]
 
 from . import __version__
 from .check import sounio_check as check_tool
@@ -19,7 +22,28 @@ from .stdlib_docs import get_stdlib_doc as stdlib_resource
 from .test import sounio_test as test_tool
 
 
-def _make_server() -> FastMCP:
+class _FallbackMCP:
+    """Decorator shim used when only the stdio JSON-RPC path is available."""
+
+    def tool(self) -> Any:
+        def decorator(func: Any) -> Any:
+            return func
+
+        return decorator
+
+    def resource(self, _uri_template: str) -> Any:
+        def decorator(func: Any) -> Any:
+            return func
+
+        return decorator
+
+    def run(self, *, transport: str) -> None:
+        raise RuntimeError(f"FastMCP is not installed; unsupported transport: {transport}")
+
+
+def _make_server() -> Any:
+    if FastMCP is None:
+        return _FallbackMCP()
     try:
         return FastMCP(
             name="sounio-compiler",

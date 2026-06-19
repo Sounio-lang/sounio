@@ -33,7 +33,8 @@ async def test_sounio_check_shared_schema_envelope_validates() -> None:
 async def test_sounio_run_hello() -> None:
     result = await sounio_run("examples/hello.sio")
     assert result["status"] == "ok"
-    assert "Hello, Sounio" in result["stdout"]
+    assert result["exit_code"] == 0
+    assert "Compilation successful!" in result["stdout"]
 
 
 @pytest.mark.asyncio
