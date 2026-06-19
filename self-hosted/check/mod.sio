@@ -514,12 +514,45 @@ pub fn check_items_verdict_boot4_with_module_path(items: Option<Box<ItemList>>, 
         return 1
     }
     heap_free(checker_ptr as i64)
+    if check_items_ontology_verdict(items) != 0 {
+        return 1
+    }
     0
 }
 
 // Multi-module typecheck verdict: load all programs into a single checker so
 // cross-module names are resolvable, but perform the visibility check with
 // each program's real module_path as current_module.  Returns 0=ok, 1=reject.
+// Ontology semantic verdict. The boot4/Madaros in-place checker spine
+// (checker_collect_item_inplace) does not collect ItemOntology, so ontology
+// role/property/inverse axiom violations (E156–E160) slip through. The full
+// by-value path (collect_items -> collect_ontology_def) does enforce them.
+// Run a focused by-value ontology-only collection over the item list on a fresh
+// checker and report a reject (1) if any ontology axiom error was raised.
+// Returns 0 when clean. This closes the gap without copying the main 164KB
+// in-place Checker (the fresh by-value checker mirrors check_program's own
+// collect path, which Madaros already executes).
+pub fn check_items_ontology_verdict(items: Option<Box<ItemList>>) -> i64 with Mut, Panic, Div, Alloc, IO {
+    var checker = checker_new()
+    var cursor = items
+    while true {
+        match cursor {
+            Some(list) => {
+                let item = (*list).head
+                if item.kind == ItemKind::ItemOntology {
+                    checker = checker.collect_ontology_def(item.ontology_def)
+                }
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+    if checker.had_error || checker.error_count > 0 {
+        return 1
+    }
+    0
+}
+
 pub fn check_modules_verdict_boot4(programs: &! [Program; 256], count: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
     if count <= 0 {
         return 0
@@ -555,6 +588,15 @@ pub fn check_modules_verdict_boot4(programs: &! [Program; 256], count: i64) -> i
         return 1
     }
     heap_free(checker_ptr as i64)
+
+    // Ontology axiom validation per module (see check_items_ontology_verdict).
+    var k: i64 = 0
+    while k < count && k < 256 {
+        if check_items_ontology_verdict((*programs)[k as usize].items) != 0 {
+            return 1
+        }
+        k = k + 1
+    }
     0
 }
 
@@ -1536,6 +1578,10 @@ pub fn check_items_verdict_boot4_with_ontocache_sidecar(items: Option<Box<ItemLi
     checker_collect_items_mut(checker_ptr, items)
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
     if had_error == 1 {
+        heap_free(checker_ptr as i64)
+        return 1
+    }
+    if check_items_ontology_verdict(items) != 0 {
         heap_free(checker_ptr as i64)
         return 1
     }
