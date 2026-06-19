@@ -12,6 +12,11 @@ on:
   schedule:
     - cron: '0 6 * * 1'   # Mondays 06:00 UTC
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build Madaros from (default: main). Non-main refs are for verifying codegen fixes via the uploaded artifact before merge.'
+        required: false
+        default: main
 
 permissions:
   contents: write
@@ -28,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.event.inputs.ref || 'main' }}
 
       - name: Build Madaros (seed-decoupled)
         run: |
@@ -37,6 +42,18 @@ jobs:
           # A build/infra failure here is a real problem -> fail the job (red).
           make build-madaros
           test -s artifacts/self-hosted/madaros
+
+      # Always upload the freshly-built binary (even when the gate later fails and
+      # the prebuilt is not refreshed) so the build can be inspected/reproduced
+      # off-CI — the lean_single seed cannot compile main.sio in every workspace.
+      - name: Upload built Madaros for inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: madaros-built
+          path: artifacts/self-hosted/madaros
+          retention-days: 5
+          if-no-files-found: ignore
 
       - name: Gate the built Madaros
         id: gate
@@ -53,13 +70,13 @@ jobs:
           fi
 
       - name: Install built Madaros as the checked-in prebuilt
-        if: steps.gate.outputs.passed == 'true'
+        if: steps.gate.outputs.passed == 'true' && (github.event.inputs.ref || 'main') == 'main'
         run: |
           cp artifacts/self-hosted/madaros bin/madaros-linux-x86_64
           chmod +x bin/madaros-linux-x86_64
 
       - name: Commit and push if the prebuilt changed
-        if: steps.gate.outputs.passed == 'true'
+        if: steps.gate.outputs.passed == 'true' && (github.event.inputs.ref || 'main') == 'main'
         run: |
           if git diff --quiet -- bin/madaros-linux-x86_64; then
             echo "bin/madaros-linux-x86_64 is unchanged — nothing to commit."
