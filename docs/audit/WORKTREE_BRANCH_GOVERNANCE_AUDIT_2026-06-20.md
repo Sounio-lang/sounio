@@ -80,17 +80,21 @@ it explains the failure mode, but the current authoritative cleanup status is:
     `/workspace/sounio-madaros-source-elf-main`.
     Its local branch commits and dirty patch were preserved under
     `/workspace/sounio-worktree-archives/madaros-source-to-elf-main-20260620/`.
+  - The stale Scientific Workbench product/demo worktree was archived and
+    removed: `/workspace/sounio-scientific-workbench`. Its local branch commits,
+    dirty patch, and untracked example/gate files were preserved under
+    `/workspace/sounio-worktree-archives/scientific-workbench-20260620/`.
 - Post-cleanup inventory:
-  - raw TSV: `/tmp/sounio-worktree-audit-20260620-post-source-elf-retire.tsv`
-  - total worktrees: 74
-  - dirty worktrees: 57
+  - raw TSV: `/tmp/sounio-worktree-audit-20260620-post-scientific-workbench-retire.tsv`
+  - total worktrees: 73
+  - dirty worktrees: 56
   - prunable worktree records: 0
-  - dirty critical worktrees: 7
-  - critical-diff vs `origin/main`: 51
+  - dirty critical worktrees: 6
+  - critical-diff vs `origin/main`: 50
   - open PRs represented by current worktrees: 3
 
 The remaining blocker is therefore narrower: owner-by-owner disposition of the
-7 dirty critical worktrees. It is no longer a generic unclassified PR/prebuilt
+6 dirty critical worktrees. It is no longer a generic unclassified PR/prebuilt
 blocker.
 
 ## Post-#336 Resolution Plan
@@ -127,10 +131,10 @@ parked outside the Madaros production-readiness lane.
 3. Split compiler-core lanes from product/demo lanes.
 
    Product/showcase worktrees must not block compiler production-readiness:
-   `/workspace/sounio-language-showcase` and
-   `/workspace/sounio-scientific-workbench` need separate fresh non-compiler
-   PRs or archival. Clinical or external-facing artifacts still require the
-   repository offload policy before publication.
+   `/workspace/sounio-scientific-workbench` has now been archived and removed,
+   while `/workspace/sounio-language-showcase` still needs a separate fresh
+   non-compiler PR or archival. Clinical or external-facing artifacts still
+   require the repository offload policy before publication.
 
 4. Put every remaining compiler WIP behind an owner and a current-main replay.
 
@@ -278,7 +282,6 @@ per-worktree status/diff inspection.
 | `/workspace/sounio-codex` | branch `codex/calls-5-6-args`; no PR; stale against current `origin/main`; dirty compiler/native files plus untracked `native_v2_branch_gate.sh` and `native_v2_calls_arity_gate.sh` | stale local WIP with salvageable native-v2 calls/branch fixture bundle | Do not merge from this worktree. Create a fresh branch from `origin/main` and port only the fixture/gate bundle plus any still-failing minimal compiler patch, then run native-v2 focused gates. Otherwise archive patch and remove. |
 | `/workspace/sounio-language-reality-gate` | branch `codex/madaros-language-reality-gate`; upstream exists; no PR; dirty IR/native patch remains broad across `self-hosted/ir/*`, `self-hosted/native/*`, `render_native_compile_driver_lean.sio`, and `scripts/ci/madaros_wide_int_gate.sh` | active-or-stale high-risk compiler lane, not cleanup-safe | Requires owner decision. If active, replay into an isolated current-main worktree and split into IR, native, and gate commits. If inactive, archive patch before removal. |
 | `/workspace/sounio-language-showcase` | branch `codex/language-showcase`; no PR; stale product/example set plus three untracked CI gates | stale large showcase/foundry lane, not compiler-core | Salvage as one or more non-compiler PRs from current `origin/main`, with offload review if external-facing clinical/teaching artifacts are kept. Do not let this lane block compiler cleanup. |
-| `/workspace/sounio-scientific-workbench` | branch `codex/scientific-workbench`; no PR; untracked `examples/scientific_workbench/` plus `scripts/ci/scientific_workbench_e2e_gate.sh`; depends on native visual frontend gates in branch diff | stale scientific-workbench product lane | Salvage as a fresh non-compiler PR only if examples and gate still run on current main. Otherwise archive/remove. Do not mix with compiler production-readiness. |
 | `/workspace/sounio-sret` | branch `claude/sret-builtins`; no PR; stale local bundle includes `docs/audit/NATIVE_V2_SRET_BUILTINS_AUDIT_2026-06-06.md`, `tests/native_v2_sret_builtins/`, and `scripts/ci/native_v2_sret_builtins_gate.sh` | stale local SRET gate bundle with no commits ahead | Salvage bundle onto current main only if the SRET witness gap remains after the current Madaros gates. Otherwise archive patch and remove. |
 | `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b` | branch `worktree-agent-adc1cd8b9d52ba53b`; no PR; dirty native/compiler patch remains in `main.sio`, `codegen.sio`, `codegen_x86_linux.sio`, `lower_ir.sio`, and `suite.sio`; handoff identifies this as active Claude compiler lane | active Claude lane, do not touch | Coordinate with Claude. It must refresh against `02ad4473dcff9fd2b42b2135e47e17b43abbb304` before any merge candidate is considered. Codex must not edit these files concurrently. |
 
@@ -373,7 +376,7 @@ Blocker-ID: `GOV-WORKTREE-SPRAWL-20260620`
   - dirty critical worktrees either claimed, parked, or cleaned by owner
   - workflow/gate provenance emitted for Madaros builds
 - next action:
-  - classify each of the remaining 7 dirty critical worktrees by owner and
+  - classify each of the remaining 6 dirty critical worktrees by owner and
     action: salvage, close/remove, or active lane
   - evolve `scripts/dev/worktree_branch_audit.sh` into a failing governance gate
   - add durable Madaros build provenance artifacts/checks beyond the current
