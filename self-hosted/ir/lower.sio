@@ -579,13 +579,20 @@ fn lowerer_register_enum_variants_mut(
         match *current {
             Some(list) => {
                 if (*(*lo).enum_variants).count < 1024 {
-                    let idx = (*(*lo).enum_variants).count
-                    (*(*lo).enum_variants).entries[idx as usize] = EnumVariantEntry {
+                    // Extract the Box pointer to a local first, then store through it
+                    // once: the two-level nested store
+                    // `(*(*lo).enum_variants).entries[idx] = ...` is discarded by the
+                    // codegen (the documented two-level-nested-store miscompile), which
+                    // left enum_variants empty and broke all enum-variant uses. This
+                    // mirrors the working struct-layout registration idiom (var sl_box).
+                    var ev_box = (*lo).enum_variants
+                    let idx = (*ev_box).count
+                    (*ev_box).entries[idx as usize] = EnumVariantEntry {
                         enum_name: enum_name,
                         variant_name: (*list).head.name,
                         discriminant: disc,
                     }
-                    (*(*lo).enum_variants).count = idx + 1
+                    (*ev_box).count = idx + 1
                 } else {
                     lo.error_count = lo.error_count + 1
                     lo.had_error = true
@@ -1814,6 +1821,21 @@ fn lower_opt_type_is_array_of_f64(opt: &Option<Box<TypeExpr>>) -> bool with Mut,
     match *opt {
         Some(te) => lower_type_expr_is_array_of_f64(&(*te)),
         None => false,
+    }
+}
+
+// True iff the first call argument is an integer LITERAL (ExprIntLit). This is the
+// only argument form whose primitive type is unambiguously integer at lowering time
+// (the AST carries no inferred type on a general Expr — see struct Expr in parser/ast.sio).
+// Used to route println/print of an int literal to the print_int builtin (decimal
+// itoa+write) instead of the print/print_str builtin (strlen+write), which would
+// otherwise dereference the integer value as a char* and SIGSEGV. Non-literal int
+// arguments (variables, arithmetic) are NOT detected here and still use print_str;
+// fixing those requires threading checker type info into lowering.
+fn lower_call_first_arg_is_int_literal(args: &Option<Box<ExprList>>) -> bool with Mut, Panic, Div, Alloc {
+    match *args {
+        Some(list) => (*list).head.kind == ExprKind::ExprIntLit,
+        _ => false,
     }
 }
 
@@ -3241,8 +3263,15 @@ impl Lowerer {
     fn push_loop_labels(self, continue_label: i64, break_label: i64) -> Lowerer with Mut, Panic, Div {
         var lo = self
         if lo.loop_depth < 256 {
-            (*lo.loop_labels).continue_labels[lo.loop_depth as usize] = continue_label
-            (*lo.loop_labels).break_labels[lo.loop_depth as usize] = break_label
+            // Store through an extracted single-level Box pointer: the two-level
+            // nested stores `(*lo.loop_labels).break_labels[depth] = ...` are
+            // discarded by the codegen (the same two-level-nested-store miscompile
+            // that emptied enum_variants), so loop labels were never recorded and
+            // every break/continue then failed current_break/continue_label and
+            // reported an error (ir_bodies_failed) in both for and while loops.
+            var ll_box = lo.loop_labels
+            (*ll_box).continue_labels[lo.loop_depth as usize] = continue_label
+            (*ll_box).break_labels[lo.loop_depth as usize] = break_label
             lo.loop_depth = lo.loop_depth + 1
             lo
         } else {
@@ -3740,7 +3769,7 @@ impl Lowerer {
                         let enum_def_opt: Option<Box<EnumDef>> = head.enum_def
                         match enum_def_opt {
                             Some(ed) => {
-                                lo = lo.register_enum_variants_ref(name, &(*ed).variants, 0)
+                                lowerer_register_enum_variants_mut(&! lo, name, &(*ed).variants, 0)
                             }
                             _ => {}
                         }
@@ -3823,7 +3852,7 @@ impl Lowerer {
                         let enum_def_opt: Option<Box<EnumDef>> = head.enum_def
                         match enum_def_opt {
                             Some(ed) => {
-                                lo = lo.register_enum_variants_ref(name, &(*ed).variants, 0)
+                                lowerer_register_enum_variants_mut(&! lo, name, &(*ed).variants, 0)
                             }
                             _ => {}
                         }
@@ -4065,7 +4094,7 @@ impl Lowerer {
                     } else if kind == ItemKind::ItemEnum {
                         let enum_def_opt: Option<Box<EnumDef>> = head.enum_def
                         match enum_def_opt {
-                            Some(ed) => { lo = lo.register_enum_variants_ref(name, &(*ed).variants, 0) }
+                            Some(ed) => { lowerer_register_enum_variants_mut(&! lo, name, &(*ed).variants, 0) }
                             _ => {}
                         }
                     } else if kind == ItemKind::ItemImpl {
@@ -6255,8 +6284,12 @@ impl Lowerer {
             None => ir_empty_name(),
         }
         if name_eq(callee_name, make_name("print")) || name_eq(callee_name, make_name("print_int")) || name_eq(callee_name, make_name("print_char")) {
+            // Redirect bare print(<int literal>) to the print_int builtin: print
+            // (=print_str) treats its argument as a char* and would deref the integer
+            // value as a pointer. Explicit print_int / print_char are left untouched.
+            let print_builtin_name = if name_eq(callee_name, make_name("print")) && lower_call_first_arg_is_int_literal(&e.args) { make_name("print_int") } else { callee_name }
             var lo_builtin = self
-            let fn_id_builtin = lowerer_find_or_add_fn_id_mut(&! lo_builtin, callee_name)
+            let fn_id_builtin = lowerer_find_or_add_fn_id_mut(&! lo_builtin, print_builtin_name)
             let pair_args_builtin: LowerExprArgsResult = lo_builtin.lower_expr_args_ref(&e.args)
             let lo_args_builtin = pair_args_builtin.lowerer
             let args_builtin: Option<Box<IrRegList>> = if pair_args_builtin.count <= 0 { None } else { Some(Box::new(pair_args_builtin.regs)) }
@@ -6264,15 +6297,18 @@ impl Lowerer {
             let pair_dst_builtin = lo_args_builtin.fresh_reg()
             let lo_dst_builtin = pair_dst_builtin.0
             let dst_builtin = pair_dst_builtin.1
-            let lo_call_builtin = lo_dst_builtin.emit(ir_call(dst_builtin, fn_id_builtin, callee_name, args_builtin, argc_builtin))
+            let lo_call_builtin = lo_dst_builtin.emit(ir_call(dst_builtin, fn_id_builtin, print_builtin_name, args_builtin, argc_builtin))
             return (lo_call_builtin, dst_builtin)
         }
         if name_eq(callee_name, make_name("println")) {
-            // Lower println(x) -> print(x); print_char('\n') so the native-v2 backend
-            // does not need a dedicated println builtin and so println works for any
-            // argument type that print accepts (primarily strings).
+            // Lower println(x) -> print_kind(x); print_char('\n') so the native-v2
+            // backend does not need a dedicated println builtin. print_kind is print_int
+            // when x is an integer literal (decimal itoa+write) and otherwise print
+            // (=print_str, strlen+write). Routing an int literal to print_str would
+            // dereference the integer value as a char* and SIGSEGV.
+            let pl_print_name = if lower_call_first_arg_is_int_literal(&e.args) { make_name("print_int") } else { make_name("print") }
             var lo_pl = self
-            let fn_id_print = lowerer_find_or_add_fn_id_mut(&! lo_pl, make_name("print"))
+            let fn_id_print = lowerer_find_or_add_fn_id_mut(&! lo_pl, pl_print_name)
             let pair_args_pl: LowerExprArgsResult = lo_pl.lower_expr_args_ref(&e.args)
             let lo_args_pl = pair_args_pl.lowerer
             let args_pl: Option<Box<IrRegList>> = if pair_args_pl.count <= 0 { None } else { Some(Box::new(pair_args_pl.regs)) }
@@ -6280,7 +6316,7 @@ impl Lowerer {
             let pair_dst_pl = lo_args_pl.fresh_reg()
             let lo_dst_pl = pair_dst_pl.0
             let dst_pl = pair_dst_pl.1
-            var lo_call_pl = lo_dst_pl.emit(ir_call(dst_pl, fn_id_print, make_name("print"), args_pl, argc_pl))
+            var lo_call_pl = lo_dst_pl.emit(ir_call(dst_pl, fn_id_print, pl_print_name, args_pl, argc_pl))
 
             let fn_id_print_char = lowerer_find_or_add_fn_id_mut(&! lo_call_pl, make_name("print_char"))
             let pair_nl_reg = lo_call_pl.fresh_reg()
@@ -6730,6 +6766,89 @@ impl Lowerer {
         lo.emit_unit()
     }
 
+    fn lower_for_in_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Desugar `for i in start..end { body }` into the working while-loop IR:
+        //   i = start
+        //   l_top:  if !(i < end) goto l_end      // i <= end for inclusive ranges
+        //           body
+        //   l_cont: i = i + 1                      // continue target + fallthrough
+        //           goto l_top
+        //   l_end:
+        // Only integer range iterables (ExprRange) are supported; any other
+        // iterable reports an error rather than silently miscompiling.
+        let iter_opt: Option<Box<Expr>> = e.left
+        match iter_opt {
+            Some(iter_box) => {
+                if (*iter_box).kind != ExprKind::ExprRange {
+                    return (self.report_error(), IR_INVALID_REG)
+                }
+                // Half-open ranges (`for i in 0..`) have no end bound; the loop
+                // condition would compare against an invalid register. Reject rather
+                // than silently miscompile.
+                match (*iter_box).right {
+                    None => return (self.report_error(), IR_INVALID_REG),
+                    _ => {}
+                }
+                let pair_start = self.lower_opt_expr_ref(&(*iter_box).left)
+                var lo = pair_start.0
+                let start_reg = pair_start.1
+                let pair_iv = lo.fresh_reg()
+                lo = pair_iv.0
+                let iv = pair_iv.1
+                lo = lo.emit(ir_copy(iv, start_reg))
+                lo = lo.bind_local(e.name, iv, true)
+
+                let pair_end = lo.lower_opt_expr_ref(&(*iter_box).right)
+                lo = pair_end.0
+                let end_reg = pair_end.1
+
+                let pair_top = lo.fresh_label()
+                lo = pair_top.0
+                let l_top = pair_top.1
+                let pair_cont = lo.fresh_label()
+                lo = pair_cont.0
+                let l_cont = pair_cont.1
+                let pair_end_lbl = lo.fresh_label()
+                lo = pair_end_lbl.0
+                let l_end = pair_end_lbl.1
+
+                lo = lo.emit(ir_label(l_top))
+                let cmp_op = if (*iter_box).bin_op == BinaryOp::OpRangeInclusive { BinaryOp::OpLe } else { BinaryOp::OpLt }
+                let pair_cond = lo.fresh_reg()
+                lo = pair_cond.0
+                let cond = pair_cond.1
+                lo = lo.emit(ir_binop(cond, iv, cmp_op, end_reg))
+                lo = lo.emit(ir_branch_false(cond, l_end))
+
+                lo = lo.push_loop_labels(l_cont, l_end)
+                let for_block_opt: Option<Box<Block>> = e.block
+                match for_block_opt {
+                    Some(blk) => {
+                        let pair_body = lo.lower_block_ref(&(*blk))
+                        lo = pair_body.0
+                    }
+                    None => {}
+                }
+                lo = lo.pop_loop_labels()
+
+                lo = lo.emit(ir_label(l_cont))
+                let pair_one = lo.fresh_reg()
+                lo = pair_one.0
+                let one_reg = pair_one.1
+                lo = lo.emit(ir_load_imm(one_reg, 1))
+                let pair_next = lo.fresh_reg()
+                lo = pair_next.0
+                let next_reg = pair_next.1
+                lo = lo.emit(ir_binop(next_reg, iv, BinaryOp::OpAdd, one_reg))
+                lo = lo.emit(ir_copy(iv, next_reg))
+                lo = lo.emit(ir_jump(l_top))
+                lo = lo.emit(ir_label(l_end))
+                lo.emit_unit()
+            }
+            None => (self.report_error(), IR_INVALID_REG),
+        }
+    }
+
     fn lower_block_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let block_opt: Option<Box<Block>> = e.block
         match block_opt {
@@ -7013,6 +7132,8 @@ impl Lowerer {
             self.lower_while_expr_ref(e)
         } else if e.kind == ExprKind::ExprLoop {
             self.lower_loop_expr_ref(e)
+        } else if e.kind == ExprKind::ExprForIn {
+            self.lower_for_in_expr_ref(e)
         } else if e.kind == ExprKind::ExprBlock {
             self.lower_block_expr_ref(e)
         } else if e.kind == ExprKind::ExprReturn {
