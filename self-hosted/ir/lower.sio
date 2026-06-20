@@ -1566,9 +1566,7 @@ fn lowerer_lower_fn_item_mut(
     }
 
     if (*lo).current_func_loaded && (*lo).current_fn >= 0 && (*lo).current_fn < (*(*lo).module).fn_count {
-        var module = *(*lo).module
-        module.functions[(*lo).current_fn as usize] = *(*lo).current_func
-        (*lo).module = Box::new(module)
+        (*(*lo).module).functions[(*lo).current_fn as usize] = *(*lo).current_func
     }
     (*lo).current_func_loaded = false
     (*lo).current_fn = fn_id
@@ -1666,9 +1664,7 @@ fn lowerer_lower_fn_item_mut(
         (*lo).scope_depth = (*lo).scope_depth - 1
     }
     if (*lo).current_func_loaded && (*lo).current_fn >= 0 && (*lo).current_fn < (*(*lo).module).fn_count {
-        var module = *(*lo).module
-        module.functions[(*lo).current_fn as usize] = *(*lo).current_func
-        (*lo).module = Box::new(module)
+        (*(*lo).module).functions[(*lo).current_fn as usize] = *(*lo).current_func
     }
     (*lo).current_func_loaded = false
     (*lo).current_fn = IR_INVALID_FN
@@ -5063,9 +5059,16 @@ impl Lowerer {
                 if (*expr_box).kind == ExprKind::ExprStructLit {
                     lo = lo.bind_local_struct_type(s.name, ir_path_first_name((*expr_box).path))
                 } else if (*expr_box).kind == ExprKind::ExprCall {
-                    let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
-                    if ret_name.len > 0 {
-                        lo = lo.bind_local_struct_type(s.name, ret_name)
+                    let callee_opt_struct_ref = &(*expr_box).left
+                    let callee_struct_name = match *callee_opt_struct_ref {
+                        Some(c) => lo.expr_to_callee_name_ref(&(*c)),
+                        None => ir_empty_name(),
+                    }
+                    if !ir_name_is_box(callee_struct_name) {
+                        let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
+                        if ret_name.len > 0 {
+                            lo = lo.bind_local_struct_type(s.name, ret_name)
+                        }
                     }
                 }
             }
@@ -5601,13 +5604,14 @@ impl Lowerer {
     fn lower_box_new(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(list) => {
-                let pair_v = self.lower_expr_ref(&(*list).head)
-                var lo = pair_v.0
+                let pair_dst = self.fresh_reg()
+                var lo = pair_dst.0
+                let ptr_reg = pair_dst.1
+                let value_expr = (*list).head
+                let pair_v = lo.lower_expr_ref(&value_expr)
+                lo = pair_v.0
                 let val_reg = pair_v.1
                 // Allocate 8 bytes on heap
-                let pair_dst = lo.fresh_reg()
-                lo = pair_dst.0
-                let ptr_reg = pair_dst.1
                 lo = lo.emit(ir_alloc(ptr_reg, 8))
                 // Store value at ptr[0]
                 lo = lo.emit(ir_field_set(ptr_reg, 0, val_reg, ir_empty_name()))
@@ -6276,7 +6280,7 @@ impl Lowerer {
             let pair_dst_pl = lo_args_pl.fresh_reg()
             let lo_dst_pl = pair_dst_pl.0
             let dst_pl = pair_dst_pl.1
-            let lo_call_pl = lo_dst_pl.emit(ir_call(dst_pl, fn_id_print, make_name("print"), args_pl, argc_pl))
+            var lo_call_pl = lo_dst_pl.emit(ir_call(dst_pl, fn_id_print, make_name("print"), args_pl, argc_pl))
 
             let fn_id_print_char = lowerer_find_or_add_fn_id_mut(&! lo_call_pl, make_name("print_char"))
             let pair_nl_reg = lo_call_pl.fresh_reg()
@@ -7226,6 +7230,17 @@ fn ir_function_has_opcode(func: IrFunction, op: IrOpcode) -> bool with Mut, Pani
     false
 }
 
+fn ir_function_has_opcode_ref(func: &! IrFunction, op: IrOpcode) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < func.instr_count {
+        if func.instrs[i as usize].op == op {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
 fn ir_function_insert_instr_front(func: &! IrFunction, instr: IrInstr) -> bool with Mut, Panic, Div {
     if func.instr_count >= 127 {
         return false
@@ -7256,7 +7271,7 @@ fn ir_patch_validated_calls_in_function(
     func: &! IrFunction,
     stats: &! IrValidatedPatchStats
 ) with Mut, Panic, Div, Alloc {
-    if !ir_function_has_opcode(*func, IrOpcode::IrCall) {
+    if !ir_function_has_opcode_ref(func, IrOpcode::IrCall) {
         return
     }
 
@@ -7320,9 +7335,7 @@ fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with M
 
     i = 0
     while i < module.fn_count {
-        var func = module.functions[i as usize]
-        ir_patch_validated_calls_in_function(module.fn_count, callee_strategies, callee_param_counts, &! func, &! stats)
-        module.functions[i as usize] = func
+        ir_patch_validated_calls_in_function(module.fn_count, callee_strategies, callee_param_counts, &! module.functions[i as usize], &! stats)
         i = i + 1
     }
     stats
@@ -7401,8 +7414,13 @@ fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic:
     let error_count = lo.error_count
     let had_error = lo.had_error
     let inner = ir_program_summary_from_lowerer(lo)
+    var summary_box = Box::new(ir_empty_program_summary())
+    (*summary_box).module = inner.module
+    (*summary_box).enum_variants = inner.enum_variants
+    (*summary_box).struct_layouts = inner.struct_layouts
+    (*summary_box).probe_mode = inner.probe_mode
     IrProgramSummaryBoxResult {
-        summary: Box::new(inner),
+        summary: summary_box,
         error_count: error_count,
         had_error: had_error,
     }
@@ -7431,8 +7449,13 @@ fn lower_program_to_ir_summary_box_with_externs_ref(
     let error_count = lo.error_count
     let had_error = lo.had_error
     let inner = ir_program_summary_from_lowerer(lo)
+    var summary_box = Box::new(ir_empty_program_summary())
+    (*summary_box).module = inner.module
+    (*summary_box).enum_variants = inner.enum_variants
+    (*summary_box).struct_layouts = inner.struct_layouts
+    (*summary_box).probe_mode = inner.probe_mode
     IrProgramSummaryBoxResult {
-        summary: Box::new(inner),
+        summary: summary_box,
         error_count: error_count,
         had_error: had_error,
     }
@@ -7462,11 +7485,11 @@ fn lower_program_to_ir_summary_box_into_ref(
     out_error_count: &! i64,
     out_had_error: &! bool
 ) with Mut, Panic, Div, Alloc, IO {
-    let lo = lowerer_new_with_epistemic(&epistemic)
-    let lo2 = lo.preseed_program_items_ref(&prog.items, ir_empty_name())
-    let error_count = lo2.error_count
-    let had_error = lo2.had_error
-    let summary = ir_program_summary_from_lowerer(lo2)
+    var lo = lowerer_new_with_epistemic(&epistemic)
+    lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
+    let error_count = lo.error_count
+    let had_error = lo.had_error
+    let summary = ir_program_summary_from_lowerer(lo)
     (*out_fn_count) = (*summary.module).fn_count
     (*out_error_count) = error_count
     (*out_had_error) = had_error
@@ -7607,19 +7630,14 @@ fn lower_program_function_body_from_summary_flat_with_epistemic_ref(
     epistemic: IrEpistemicSection,
     fn_name: Name
 ) -> IrFunctionBodyResult with Mut, Panic, Div, Alloc, IO {
-    let lo = lowerer_new_from_program_summary_flat(summary, epistemic)
-    var lo2 = lo.lower_program_bodies_filtered_ref(&prog.items, fn_name)
-    var patch_stats = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
-        patch_stats = ir_patch_validated_calls(&! lo2.module)
-    }
+    let lowered = lower_program_bodies_from_summary_flat_with_epistemic_ref(prog, summary, epistemic)
 
     var func = ir_empty_function()
     var i: i64 = 0
-    while i < lo2.module.fn_count {
-        if ir_name_eq(lo2.module.functions[i as usize].name, fn_name) {
-            func = lo2.module.functions[i as usize]
-            i = lo2.module.fn_count
+    while i < (*lowered.module).fn_count {
+        if ir_name_eq((*lowered.module).functions[i as usize].name, fn_name) {
+            func = (*lowered.module).functions[i as usize]
+            i = (*lowered.module).fn_count
         } else {
             i = i + 1
         }
@@ -7627,9 +7645,9 @@ fn lower_program_function_body_from_summary_flat_with_epistemic_ref(
 
     IrFunctionBodyResult {
         func: func,
-        error_count: lo2.error_count,
-        had_error: lo2.had_error,
-        patch_stats: patch_stats,
+        error_count: lowered.error_count,
+        had_error: lowered.had_error,
+        patch_stats: lowered.patch_stats,
     }
 }
 
@@ -7693,9 +7711,6 @@ fn lower_program_bodies_from_summary_flat_with_epistemic_ref(
     let lo = lowerer_new_from_program_summary_flat(summary, epistemic)
     var lo2 = lo.lower_program_bodies_ref(&prog.items)
     var patch_stats = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
-        patch_stats = ir_patch_validated_calls(&! lo2.module)
-    }
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,

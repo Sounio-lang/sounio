@@ -105,7 +105,7 @@ expect_log_contains "could not read input file" "$WORK/wrapper_tmp_dir.log"
 pass "missing input diagnostic"
 
 "$MADAROS" build "$WORK/run0.sio" -o "$WORK/run0.elf" >"$WORK/build.log" 2>&1
-expect_log_contains "native_v2_compile: emitted path=$WORK/run0.elf" "$WORK/build.log"
+expect_log_contains "Written to $WORK/run0.elf" "$WORK/build.log"
 expect_elf_runs 0 "$WORK/run0.elf"
 pass "source build to native ELF"
 

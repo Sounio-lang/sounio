@@ -124,7 +124,7 @@ open(sys.argv[3], 'w').write(src.replace(single, calls, 1))
   echo "" | tee -a "\${RES}/SUMMARY.txt"
   echo "=== N=\${N}: compile ===>" | tee -a "\${RES}/SUMMARY.txt"
   ulimit -s unlimited
-  /usr/bin/timeout 60 "\${ROOT}/madaros.elf" build "\${SRC}" -o "\${ELF}" \
+  /usr/bin/timeout 60 "\${ROOT}/madaros.elf" "\${SRC}" -o "\${ELF}" \
     >> "\${RES}/compile_n\${N}.log" 2>&1
   CRC=\$?
   echo "  compile_rc=\${CRC}" | tee -a "\${RES}/SUMMARY.txt"
