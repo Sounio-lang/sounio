@@ -40,7 +40,7 @@ async def sounio_check(source_path: str) -> dict[str, Any]:
             "stderr": "",
         }
 
-    result = await run_command([souc, "check", "--json", source], timeout_sec=30)
+    result = await run_command([souc, "check", source, "--json"], timeout_sec=30)
     diagnostics = diagnostics_from_payload(result.stdout, result.stderr)
     if result.timed_out and not diagnostics:
         diagnostics = [
