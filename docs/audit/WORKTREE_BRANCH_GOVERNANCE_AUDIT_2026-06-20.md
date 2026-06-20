@@ -24,7 +24,8 @@ compiler artifacts, and PRs that overlap serialized files.
 This audit has been acted on. The original snapshot below is preserved because
 it explains the failure mode, but the current authoritative cleanup status is:
 
-- Current `origin/main`: `06fd5de4f7f2e5d7cebf1a4c244ce568657b8735`
+- Audit refresh baseline: `origin/main` at
+  `06fd5de4f7f2e5d7cebf1a4c244ce568657b8735`
 - #331 merged and production default refreshed:
   - #331 merge commit: `c5d0366d40490c18b927ef0d03cf98705697b6c2`
   - prebuilt refresh commit: `b73a11f5838f138f3d06b591f832e98d501214f3`
@@ -135,7 +136,7 @@ parked outside the Madaros production-readiness lane.
 
 2. Retire source-to-ELF stale lanes first.
 
-   #335 and #336 prove that current `origin/main` already passes the
+   #335 and #336 prove that the cleanup baseline already passes the
    source-to-ELF, enum, loop, and full Madaros gates. Therefore
    `/workspace/sounio-madaros-source-elf-main` is no longer an active fix lane
    and has been removed from the active worktree set. Its archived evidence is:
@@ -172,7 +173,7 @@ parked outside the Madaros production-readiness lane.
 5. Do not touch the active Claude compiler lane from Codex.
 
    `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b` remains an
-   active Claude-owned lane. It must refresh against
+   active Claude-owned lane. It must refresh at least against cleanup baseline
    `06fd5de4f7f2e5d7cebf1a4c244ce568657b8735` before review, but Codex must
    not edit its files concurrently.
 
