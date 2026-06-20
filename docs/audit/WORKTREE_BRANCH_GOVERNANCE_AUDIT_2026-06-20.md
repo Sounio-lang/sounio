@@ -19,12 +19,12 @@ The audit target is governance, not semantic correctness: identify where active
 compiler evidence can be confused by dirty worktrees, stale branches, duplicate
 compiler artifacts, and PRs that overlap serialized files.
 
-## Current Status After Follow-Through
+## Current Status After Post-#336 Follow-Through
 
 This audit has been acted on. The original snapshot below is preserved because
 it explains the failure mode, but the current authoritative cleanup status is:
 
-- Current `origin/main`: `b73a11f5838f138f3d06b591f832e98d501214f3`
+- Current `origin/main`: `02ad4473dcff9fd2b42b2135e47e17b43abbb304`
 - #331 merged and production default refreshed:
   - #331 merge commit: `c5d0366d40490c18b927ef0d03cf98705697b6c2`
   - prebuilt refresh commit: `b73a11f5838f138f3d06b591f832e98d501214f3`
@@ -37,6 +37,24 @@ it explains the failure mode, but the current authoritative cleanup status is:
     - Madaros prebuilt refresh `27880089845`: pass
   - Clean `origin/main` smoke through default `bin/madaros`:
     `madaros_enum_gate.sh`: pass; `madaros_loop_gate.sh`: pass.
+- #335 repaired the Madaros native-v2 source-to-ELF bridge:
+  - #335 merge commit: `6ac1fc041d0b4a08e712bdb4e972be8eb2d87f2f`
+  - branch fix commit: `44270a22e14da8fd2ebe468d60b9f4305483dd58`
+  - GitHub PR CI run `27882127595`: pass
+  - source-to-ELF gate on the built artifact: pass
+- The Madaros checked-in prebuilt was refreshed again after #335:
+  - refresh commit: `45ed56fa1e9cc01a5b119efbc4bf9e7d65289d0c`
+  - refreshed `bin/madaros-linux-x86_64` SHA256:
+    `506d24c47e6a735340b0f8ced2072fa1baf485bb8d65461857b5a8d5565b0cef`
+  - GitHub prebuilt refresh run `27882373784`: pass
+- #336 repaired the full gate for clean worktrees without local raw artifacts:
+  - #336 merge commit: `02ad4473dcff9fd2b42b2135e47e17b43abbb304`
+  - branch fix commit: `98167ef6797c0ec6487c3c1d94d54418c7b1ecbf`
+  - GitHub PR CI run `27882751094`: pass
+  - clean `origin/main` gates after #336:
+    `madaros_full_gate.sh`, `madaros_source_to_elf_gate.sh`,
+    `madaros_enum_gate.sh`, `madaros_loop_gate.sh`, and
+    `madaros_operational_contract_gate.sh`: pass.
 - Stale/conflicting compiler-adjacent PRs were quarantined with comments:
   - #232: <https://github.com/Sounio-lang/sounio/pull/232#issuecomment-4759602432>
   - #296: <https://github.com/Sounio-lang/sounio/pull/296#issuecomment-4759602426>
@@ -52,17 +70,82 @@ it explains the failure mode, but the current authoritative cleanup status is:
     `origin/main` were removed:
     `/workspace/sounio-madaros-operational-contract`,
     `/workspace/sounio-website-ll`.
+  - Four temporary clean Madaros proof/probe worktrees superseded by #335/#336
+    were removed:
+    `/tmp/sounio-madaros-d228-revert-probe`,
+    `/tmp/sounio-madaros-source-elf-fix`,
+    `/tmp/sounio-main-post335`,
+    `/tmp/sounio-madaros-hardening`.
 - Post-cleanup inventory:
-  - raw TSV: `/tmp/sounio-worktree-audit-after-clean-ancestors-20260620.tsv`
-  - total worktrees: 73
+  - raw TSV: `/tmp/sounio-worktree-audit-20260620-post336-after-tmp-clean.tsv`
+  - total worktrees: 75
   - dirty worktrees: 58
   - prunable worktree records: 0
   - dirty critical worktrees: 8
-  - critical-diff vs `origin/main`: 51
+  - critical-diff vs `origin/main`: 52
+  - open PRs represented by current worktrees: 3
 
 The remaining blocker is therefore narrower: owner-by-owner disposition of the
 8 dirty critical worktrees. It is no longer a generic unclassified PR/prebuilt
 blocker.
+
+## Post-#336 Resolution Plan
+
+This is the active plan for turning the audit into cleanup. It is intentionally
+ordered so that compiler truth stays stable while stale or product lanes are
+parked outside the Madaros production-readiness lane.
+
+1. Keep `origin/main` as the only Madaros production baseline.
+
+   Required evidence before any new compiler claim:
+
+   - clean worktree at the named `origin/main` SHA
+   - `env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN`
+     on all compiler gates
+   - `bin/madaros-linux-x86_64` SHA256 in the report
+   - `madaros_full_gate.sh` plus the focused gate for the touched surface
+
+2. Retire source-to-ELF stale lanes first.
+
+   #335 and #336 prove that current `origin/main` already passes the
+   source-to-ELF, enum, loop, and full Madaros gates. Therefore
+   `/workspace/sounio-madaros-source-elf-main` is no longer an active fix lane.
+   The only remaining action is to archive its local four-line
+   `module_frontend.sio` dirt and any still-useful test/gate notes, then remove
+   the worktree.
+
+3. Split compiler-core lanes from product/demo lanes.
+
+   Product/showcase worktrees must not block compiler production-readiness:
+   `/workspace/sounio-language-showcase` and
+   `/workspace/sounio-scientific-workbench` need separate fresh non-compiler
+   PRs or archival. Clinical or external-facing artifacts still require the
+   repository offload policy before publication.
+
+4. Put every remaining compiler WIP behind an owner and a current-main replay.
+
+   `/workspace/sounio-codex`, `/workspace/sounio-language-reality-gate`, and
+   `/workspace/sounio-sret` are not eligible for direct merge from their current
+   worktrees. Each must either:
+
+   - be replayed onto a fresh `origin/main` worktree with a minimal patch and
+     focused gates, or
+   - be archived as patch evidence and removed.
+
+5. Do not touch the active Claude compiler lane from Codex.
+
+   `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b` remains an
+   active Claude-owned lane. It must refresh against
+   `02ad4473dcff9fd2b42b2135e47e17b43abbb304` before review, but Codex must
+   not edit its files concurrently.
+
+6. Restore the primary checkout only after all salvage decisions are recorded.
+
+   `/workspace/sounio` is still dirty, behind `origin/main`, and contaminated by
+   environment variables that point compiler selection back to itself. It should
+   remain protected until its local `bin/madaros`, `machine_ir.sio`, handoff log,
+   and untracked audit files are either versioned from a fresh branch or archived
+   outside the live tree.
 
 ## Original Snapshot
 
@@ -173,22 +256,22 @@ These worktrees have uncommitted changes in critical compiler/CI paths:
 
 ## Critical Worktree Disposition Plan
 
-This table is the actionable cleanup plan after #331/#332 and the Madaros
-prebuilt refresh. It was derived from `origin/main` at
-`b73a11f5838f138f3d06b591f832e98d501214f3`, the audit TSV
-`/tmp/sounio-worktree-audit-critical-lanes-20260620.tsv`, and direct per-worktree
-status/diff inspection.
+This table is the actionable cleanup plan after #331/#332/#335/#336 and the
+Madaros prebuilt refreshes. It was refreshed from `origin/main` at
+`02ad4473dcff9fd2b42b2135e47e17b43abbb304`, the audit TSV
+`/tmp/sounio-worktree-audit-20260620-post336-after-tmp-clean.tsv`, and direct
+per-worktree status/diff inspection.
 
 | Worktree | Evidence | Classification | Required Action |
 |---|---|---|---|
-| `/workspace/sounio` | local `main` is 20 behind `origin/main`; dirty critical files are `artifacts/omega/agent_handoff.log.md`, `bin/madaros`, `self-hosted/native/machine_ir.sio`; `./sounio-whereami --quick` is missing in this stale checkout | protected primary surface, not evidence-clean | Do not reset. Reconcile only in an isolated branch/worktree: first stage/version the governance audit + handoff, then separately decide whether local `bin/madaros` and `machine_ir.sio` are salvageable or stale WIP. |
-| `/workspace/sounio-codex` | branch `codex/calls-5-6-args`; no PR; 340 behind and 0 ahead vs `origin/main`; dirty compiler/native patch `+142/-40`; untracked full fixture set: `examples/native/*call*`, `examples/native/branch_exit.sio`, `scripts/ci/native_v2_*_gate.sh`, `self-hosted/ci/native_v2_calls_arity_ir_driver.sio` | stale local WIP with salvageable native-v2 calls/branch fixture bundle | Do not merge from this worktree. If still desired, create a fresh branch from `origin/main` and port the full fixture+gate bundle plus the minimal compiler changes, then run native-v2 focused gates. Otherwise archive patch and remove. |
-| `/workspace/sounio-language-reality-gate` | branch `codex/madaros-language-reality-gate`; upstream exists; 141 behind and 3 ahead; no PR; dirty IR/native patch is large (`+1969/-480`) across `self-hosted/ir/*`, `self-hosted/native/*`, and `scripts/ci/madaros_wide_int_gate.sh` | active-or-stale high-risk compiler lane, not cleanup-safe | Requires owner decision. If active, rebase into an isolated current-main worktree and split into IR, native, and gate commits. If inactive, archive patch before removal. |
-| `/workspace/sounio-language-showcase` | branch `codex/language-showcase`; no PR; 306 behind and 60 ahead; untracked full product/example set under `docs/pitches/`, `examples/clinical_foundry/`, `examples/evidence_foundry/`, `examples/language_tour/`, plus three CI gates | stale large showcase/foundry lane, not compiler-core | Salvage as one or more non-compiler PRs from current `origin/main`, with offload review if external-facing clinical/teaching artifacts are kept. Do not let this lane block compiler cleanup. |
-| `/workspace/sounio-madaros-source-elf-main` | branch `codex/madaros-source-to-elf-main`; upstream incorrectly points at `origin/main`; 172 behind and 9 ahead; dirty critical change is only four lines in `module_frontend.sio`; branch diff touches source-to-ELF gates and compiler/IR/native files | potentially valuable but stale source-to-ELF lane | Owner should rebase/split. First test whether current `origin/main` already satisfies the source-to-ELF gate; if yes, archive/remove. If not, salvage the smallest patch only. |
-| `/workspace/sounio-scientific-workbench` | branch `codex/scientific-workbench`; no PR; 306 behind and 48 ahead; untracked `examples/scientific_workbench/` plus `scripts/ci/scientific_workbench_e2e_gate.sh`; depends on native visual frontend gates in branch diff | stale scientific-workbench product lane | Salvage as a fresh non-compiler PR only if examples and gate still run on current main. Otherwise archive/remove. Do not mix with compiler production-readiness. |
-| `/workspace/sounio-sret` | branch `claude/sret-builtins`; no PR; 340 behind and 0 ahead; full local bundle includes `docs/audit/NATIVE_V2_SRET_BUILTINS_AUDIT_2026-06-06.md`, `tests/native_v2_sret_builtins/`, and `scripts/ci/native_v2_sret_builtins_gate.sh` | stale local SRET gate bundle with no commits ahead | Salvage bundle onto current main only if the SRET witness gap is still relevant after #331/#332. Otherwise archive patch and remove. |
-| `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b` | branch `worktree-agent-adc1cd8b9d52ba53b`; no PR; 76 behind and 0 ahead; dirty native/compiler patch `+238/-234`; handoff identifies this as active Claude compiler lane | active Claude lane, do not touch | Coordinate with Claude. It must rebase/refresh against current `origin/main` before any merge candidate is considered. Codex should not edit these files concurrently. |
+| `/workspace/sounio` | local `main` is 27 behind `origin/main`; dirty critical files are `artifacts/omega/agent_handoff.log.md`, `bin/madaros`, `self-hosted/native/machine_ir.sio`; `./sounio-whereami --quick` is missing in this stale checkout; environment still points `SOUC_BIN` and `SOUNIO_STDLIB_PATH` back into this checkout | protected primary surface, not evidence-clean | Do not reset. Reconcile only in an isolated branch/worktree: first version the current governance plan, then separately decide whether local `bin/madaros` and `machine_ir.sio` are salvageable or stale WIP. |
+| `/workspace/sounio-codex` | branch `codex/calls-5-6-args`; no PR; stale against current `origin/main`; dirty compiler/native files plus untracked `native_v2_branch_gate.sh` and `native_v2_calls_arity_gate.sh` | stale local WIP with salvageable native-v2 calls/branch fixture bundle | Do not merge from this worktree. Create a fresh branch from `origin/main` and port only the fixture/gate bundle plus any still-failing minimal compiler patch, then run native-v2 focused gates. Otherwise archive patch and remove. |
+| `/workspace/sounio-language-reality-gate` | branch `codex/madaros-language-reality-gate`; upstream exists; no PR; dirty IR/native patch remains broad across `self-hosted/ir/*`, `self-hosted/native/*`, `render_native_compile_driver_lean.sio`, and `scripts/ci/madaros_wide_int_gate.sh` | active-or-stale high-risk compiler lane, not cleanup-safe | Requires owner decision. If active, replay into an isolated current-main worktree and split into IR, native, and gate commits. If inactive, archive patch before removal. |
+| `/workspace/sounio-language-showcase` | branch `codex/language-showcase`; no PR; stale product/example set plus three untracked CI gates | stale large showcase/foundry lane, not compiler-core | Salvage as one or more non-compiler PRs from current `origin/main`, with offload review if external-facing clinical/teaching artifacts are kept. Do not let this lane block compiler cleanup. |
+| `/workspace/sounio-madaros-source-elf-main` | branch `codex/madaros-source-to-elf-main`; upstream incorrectly points at `origin/main`; dirty critical change is only `self-hosted/compiler/module_frontend.sio`; #335/#336 now prove current source-to-ELF gates pass | superseded source-to-ELF lane | Archive local patch/evidence, then remove the worktree. Do not salvage into compiler production path unless a fresh clean-main gate reproduces a remaining source-to-ELF failure. |
+| `/workspace/sounio-scientific-workbench` | branch `codex/scientific-workbench`; no PR; untracked `examples/scientific_workbench/` plus `scripts/ci/scientific_workbench_e2e_gate.sh`; depends on native visual frontend gates in branch diff | stale scientific-workbench product lane | Salvage as a fresh non-compiler PR only if examples and gate still run on current main. Otherwise archive/remove. Do not mix with compiler production-readiness. |
+| `/workspace/sounio-sret` | branch `claude/sret-builtins`; no PR; stale local bundle includes `docs/audit/NATIVE_V2_SRET_BUILTINS_AUDIT_2026-06-06.md`, `tests/native_v2_sret_builtins/`, and `scripts/ci/native_v2_sret_builtins_gate.sh` | stale local SRET gate bundle with no commits ahead | Salvage bundle onto current main only if the SRET witness gap remains after the current Madaros gates. Otherwise archive patch and remove. |
+| `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b` | branch `worktree-agent-adc1cd8b9d52ba53b`; no PR; dirty native/compiler patch remains in `main.sio`, `codegen.sio`, `codegen_x86_linux.sio`, `lower_ir.sio`, and `suite.sio`; handoff identifies this as active Claude compiler lane | active Claude lane, do not touch | Coordinate with Claude. It must refresh against `02ad4473dcff9fd2b42b2135e47e17b43abbb304` before any merge candidate is considered. Codex must not edit these files concurrently. |
 
 The next governance gate should fail only after these dispositions are recorded
 as explicit lane states. Until then, these eight are not equivalent: some are
