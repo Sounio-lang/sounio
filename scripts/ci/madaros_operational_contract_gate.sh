@@ -39,6 +39,7 @@ require_executable bin/madaros
 require_file scripts/lib/resolve_madaros.sh
 require_file scripts/ci/build_modular_madaros.sh
 require_file scripts/ci/madaros_full_gate.sh
+require_file scripts/ci/madaros_source_to_elf_gate.sh
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git merge-base --is-ancestor "$GREEN_BASE" HEAD ||
@@ -71,6 +72,8 @@ require_grep 'error[E176' scripts/ci/madaros_full_gate.sh
 require_grep 'error[E177' scripts/ci/madaros_full_gate.sh
 require_grep '--native-v2-emit-sret' scripts/ci/madaros_full_gate.sh
 require_grep 'pkg self-test' scripts/ci/madaros_full_gate.sh
+require_grep 'madaros_source_to_elf_gate.sh' .github/workflows/madaros-prebuilt-refresh.yml
+require_grep 'source-to-ELF' .github/workflows/madaros-prebuilt-refresh.yml
 
 require_grep 'DEFAULT ENGINE: Madaros' bin/souc
 require_grep 'bin/madaros-linux-x86_64' bin/souc
