@@ -37,17 +37,20 @@ build_run() {
   local name="$1" expected="$2" src="$3"
   local sio="$WORK/$name.sio" elf="$WORK/$name.elf" log="$WORK/$name.log"
   printf '%s\n' "$src" > "$sio"
+  rm -f "$elf"
 
+  # Check ELF-produced (not a build-subcommand log marker): the production launcher
+  # path prints "Output:" while the raw build subcommand prints "emitted path=";
+  # both produce the ELF on success, and a compiler crash produces none.
   set +e
   "$MADAROS" build "$sio" -o "$elf" >"$log" 2>&1
   local crc=$?
   set -e
-  if ! grep -Fq "native_v2_compile: emitted path=$elf" "$log"; then
+  if [[ ! -s "$elf" ]]; then
     echo "[madaros-enum] build log tail for $name (rc=$crc):" >&2
     tail -n 20 "$log" >&2 || true
-    fail "$name: compiler did not emit an ELF (Root2 enum-registration regression?)"
+    fail "$name: compiler produced no ELF (Root2 enum-registration regression?)"
   fi
-  [[ -s "$elf" ]] || fail "$name: missing ELF $elf"
   chmod +x "$elf"
 
   set +e
