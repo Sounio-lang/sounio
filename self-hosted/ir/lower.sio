@@ -1817,6 +1817,21 @@ fn lower_opt_type_is_array_of_f64(opt: &Option<Box<TypeExpr>>) -> bool with Mut,
     }
 }
 
+// True iff the first call argument is an integer LITERAL (ExprIntLit). This is the
+// only argument form whose primitive type is unambiguously integer at lowering time
+// (the AST carries no inferred type on a general Expr — see struct Expr in parser/ast.sio).
+// Used to route println/print of an int literal to the print_int builtin (decimal
+// itoa+write) instead of the print/print_str builtin (strlen+write), which would
+// otherwise dereference the integer value as a char* and SIGSEGV. Non-literal int
+// arguments (variables, arithmetic) are NOT detected here and still use print_str;
+// fixing those requires threading checker type info into lowering.
+fn lower_call_first_arg_is_int_literal(args: &Option<Box<ExprList>>) -> bool with Mut, Panic, Div, Alloc {
+    match *args {
+        Some(list) => (*list).head.kind == ExprKind::ExprIntLit,
+        _ => false,
+    }
+}
+
 fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
     match *opt {
         Some(te) => {
@@ -6255,8 +6270,12 @@ impl Lowerer {
             None => ir_empty_name(),
         }
         if name_eq(callee_name, make_name("print")) || name_eq(callee_name, make_name("print_int")) || name_eq(callee_name, make_name("print_char")) {
+            // Redirect bare print(<int literal>) to the print_int builtin: print
+            // (=print_str) treats its argument as a char* and would deref the integer
+            // value as a pointer. Explicit print_int / print_char are left untouched.
+            let print_builtin_name = if name_eq(callee_name, make_name("print")) && lower_call_first_arg_is_int_literal(&e.args) { make_name("print_int") } else { callee_name }
             var lo_builtin = self
-            let fn_id_builtin = lowerer_find_or_add_fn_id_mut(&! lo_builtin, callee_name)
+            let fn_id_builtin = lowerer_find_or_add_fn_id_mut(&! lo_builtin, print_builtin_name)
             let pair_args_builtin: LowerExprArgsResult = lo_builtin.lower_expr_args_ref(&e.args)
             let lo_args_builtin = pair_args_builtin.lowerer
             let args_builtin: Option<Box<IrRegList>> = if pair_args_builtin.count <= 0 { None } else { Some(Box::new(pair_args_builtin.regs)) }
@@ -6264,15 +6283,18 @@ impl Lowerer {
             let pair_dst_builtin = lo_args_builtin.fresh_reg()
             let lo_dst_builtin = pair_dst_builtin.0
             let dst_builtin = pair_dst_builtin.1
-            let lo_call_builtin = lo_dst_builtin.emit(ir_call(dst_builtin, fn_id_builtin, callee_name, args_builtin, argc_builtin))
+            let lo_call_builtin = lo_dst_builtin.emit(ir_call(dst_builtin, fn_id_builtin, print_builtin_name, args_builtin, argc_builtin))
             return (lo_call_builtin, dst_builtin)
         }
         if name_eq(callee_name, make_name("println")) {
-            // Lower println(x) -> print(x); print_char('\n') so the native-v2 backend
-            // does not need a dedicated println builtin and so println works for any
-            // argument type that print accepts (primarily strings).
+            // Lower println(x) -> print_kind(x); print_char('\n') so the native-v2
+            // backend does not need a dedicated println builtin. print_kind is print_int
+            // when x is an integer literal (decimal itoa+write) and otherwise print
+            // (=print_str, strlen+write). Routing an int literal to print_str would
+            // dereference the integer value as a char* and SIGSEGV.
+            let pl_print_name = if lower_call_first_arg_is_int_literal(&e.args) { make_name("print_int") } else { make_name("print") }
             var lo_pl = self
-            let fn_id_print = lowerer_find_or_add_fn_id_mut(&! lo_pl, make_name("print"))
+            let fn_id_print = lowerer_find_or_add_fn_id_mut(&! lo_pl, pl_print_name)
             let pair_args_pl: LowerExprArgsResult = lo_pl.lower_expr_args_ref(&e.args)
             let lo_args_pl = pair_args_pl.lowerer
             let args_pl: Option<Box<IrRegList>> = if pair_args_pl.count <= 0 { None } else { Some(Box::new(pair_args_pl.regs)) }
@@ -6280,7 +6302,7 @@ impl Lowerer {
             let pair_dst_pl = lo_args_pl.fresh_reg()
             let lo_dst_pl = pair_dst_pl.0
             let dst_pl = pair_dst_pl.1
-            var lo_call_pl = lo_dst_pl.emit(ir_call(dst_pl, fn_id_print, make_name("print"), args_pl, argc_pl))
+            var lo_call_pl = lo_dst_pl.emit(ir_call(dst_pl, fn_id_print, pl_print_name, args_pl, argc_pl))
 
             let fn_id_print_char = lowerer_find_or_add_fn_id_mut(&! lo_call_pl, make_name("print_char"))
             let pair_nl_reg = lo_call_pl.fresh_reg()
