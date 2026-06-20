@@ -7,7 +7,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 MADAROS="${MADAROS_BIN:-$ROOT_DIR/bin/madaros}"
-RAW_MADAROS="${MADAROS_RAW_BIN:-$ROOT_DIR/artifacts/self-hosted/madaros}"
+RAW_MADAROS="${MADAROS_RAW_BIN:-}"
+if [[ -z "$RAW_MADAROS" ]]; then
+  if [[ -x "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; then
+    RAW_MADAROS="$ROOT_DIR/artifacts/self-hosted/madaros"
+  else
+    RAW_MADAROS="$ROOT_DIR/bin/madaros-linux-x86_64"
+  fi
+fi
 WORK="${SOUNIO_MADAROS_FULL_GATE_DIR:-$(mktemp -d /tmp/sounio-madaros-full.XXXXXX)}"
 KEEP_WORK="${SOUNIO_MADAROS_FULL_GATE_KEEP:-0}"
 
