@@ -5059,9 +5059,16 @@ impl Lowerer {
                 if (*expr_box).kind == ExprKind::ExprStructLit {
                     lo = lo.bind_local_struct_type(s.name, ir_path_first_name((*expr_box).path))
                 } else if (*expr_box).kind == ExprKind::ExprCall {
-                    let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
-                    if ret_name.len > 0 {
-                        lo = lo.bind_local_struct_type(s.name, ret_name)
+                    let callee_opt_struct_ref = &(*expr_box).left
+                    let callee_struct_name = match *callee_opt_struct_ref {
+                        Some(c) => lo.expr_to_callee_name_ref(&(*c)),
+                        None => ir_empty_name(),
+                    }
+                    if !ir_name_is_box(callee_struct_name) {
+                        let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
+                        if ret_name.len > 0 {
+                            lo = lo.bind_local_struct_type(s.name, ret_name)
+                        }
                     }
                 }
             }
@@ -5597,14 +5604,14 @@ impl Lowerer {
     fn lower_box_new(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(list) => {
+                let pair_dst = self.fresh_reg()
+                var lo = pair_dst.0
+                let ptr_reg = pair_dst.1
                 let value_expr = (*list).head
-                let pair_v = self.lower_expr_ref(&value_expr)
-                var lo = pair_v.0
+                let pair_v = lo.lower_expr_ref(&value_expr)
+                lo = pair_v.0
                 let val_reg = pair_v.1
                 // Allocate 8 bytes on heap
-                let pair_dst = lo.fresh_reg()
-                lo = pair_dst.0
-                let ptr_reg = pair_dst.1
                 lo = lo.emit(ir_alloc(ptr_reg, 8))
                 // Store value at ptr[0]
                 lo = lo.emit(ir_field_set(ptr_reg, 0, val_reg, ir_empty_name()))
@@ -7704,9 +7711,6 @@ fn lower_program_bodies_from_summary_flat_with_epistemic_ref(
     let lo = lowerer_new_from_program_summary_flat(summary, epistemic)
     var lo2 = lo.lower_program_bodies_ref(&prog.items)
     var patch_stats = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
-        patch_stats = ir_patch_validated_calls(&! lo2.module)
-    }
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
