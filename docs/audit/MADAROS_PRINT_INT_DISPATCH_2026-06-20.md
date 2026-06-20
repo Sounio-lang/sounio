@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-print-int-dispatch-2026-06-20
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-print-int-dispatch-2026-06-20
+-->
+
 # Madaros native_v2: `println`/`print` of an integer literal — fix (2026-06-20)
 
 Branch `fix/madaros-print-int-dispatch` off `origin/main` @ `659492156`.
