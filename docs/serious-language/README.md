@@ -27,6 +27,7 @@ The purpose is not to make every ambitious part of the repository sound finished
 | File | Purpose |
 |---|---|
 | [real-world-defensibility.md](real-world-defensibility.md) | Canonical real-life PL defensibility contract and first-user path. |
+| [command-center.md](command-center.md) | Operational board for serious-language cleanup, WIP triage, PR queue classes, and release packets. |
 | [readiness-ledger.md](readiness-ledger.md) | Claim-to-evidence ledger and allowed public wording. |
 | [compiler-maturity-snapshot.md](compiler-maturity-snapshot.md) | Current compiler contract, gaps, and serious-language worklist. |
 | [conformance-spine.md](conformance-spine.md) | Bounded executable bridge from claims to compiler behavior. |
