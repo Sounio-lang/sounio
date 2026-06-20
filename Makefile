@@ -78,6 +78,10 @@ madaros-wide-int-gate: ## Run the wide-integer (i128/i256) experimental gate
 	@echo "→ Running Madaros wide-integer gate"
 	bash scripts/ci/madaros_wide_int_gate.sh
 
+madaros-enum-gate:   ## Run the focused enum declaration + variant-use regression gate
+	@echo "→ Running Madaros enum regression gate"
+	bash scripts/ci/madaros_enum_gate.sh
+
 clean:               ## Remove generated ELF artifacts (gen1, gen2, gen3)
 	rm -f gen1.elf gen2.elf gen3.elf gen4.elf
 	@echo "✓ Cleaned generated artifacts"
