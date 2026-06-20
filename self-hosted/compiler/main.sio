@@ -2822,13 +2822,10 @@ fn run_native_v2_emit_wide(args: ArgList, flag_index: i64, kind: i64) with IO, M
 // zero-fill init ([0;N] is the codegen-safe array-fill form).
 var NV2_MARKER_BUF: [i8; 4] = [0; 4]
 
-// Bridge: real .sio SOURCE → front-half → HEAP-BOXED IrModule → native-v2 → ELF.
-// Routes through bridge_lower_single_module_box, whose result embeds the module as
-// an Option<Box<IrModule>> (a POINTER), so the front-half result is NEVER returned
-// by value with a large embedded IrModule — dodging the frame-sensitive SRET
-// large-struct-return crash chain (c634b38f). The boxed module is derefed into a
-// local and passed to the backend as a stable &IrModule. Marker files pin which
-// step (if any) still faults. Scope: single module / no imports (the wall's case).
+// Bridge: real .sio SOURCE -> multimodule front-half -> IrModule -> native-v2 -> ELF.
+// Keep this on load_multimodule_ir_traced, the same front-half exercised by
+// --probe-load-ir-trace. The older boxed single-module bridge is fragile in
+// native-built Madaros before the first crash marker on trivial programs.
 fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     let source_path = compiler_mode_source_arg(args, flag_index, "--native-v2-compile")
     // Output path resolution: `-o <out>` wins; otherwise honor a second
@@ -2841,34 +2838,30 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
         panic("native-v2-compile failed: source not readable")
     }
     var trace = empty_load_multimodule_ir_trace()
-    let box_result = bridge_lower_single_module_box(source_path, &! trace)
+    let ir_result = load_multimodule_ir_traced(source_path, &! trace)
     write_file("/tmp/nv2_m1_after_lower", &! NV2_MARKER_BUF, 1)
-    if !box_result.ok {
+    if !ir_result.ok {
         print("native_v2_compile: front-half failed: ")
-        print(box_result.error_msg)
+        print(ir_result.error_msg)
         print("\n")
         panic("native-v2-compile failed: front-half errors")
     }
-    let spec = native_resolve_target("x86_64-linux", "auto", true)
-    match box_result.module {
-        Some(module_box) => {
-            write_file("/tmp/nv2_m2_before_backend", &! NV2_MARKER_BUF, 1)
-            write_file("/tmp/nv2_m3_before_backend", &! NV2_MARKER_BUF, 1)
-            let rc = compile_native_v2_preview_to_file(&(*module_box), spec, out_path)
-            if rc != 0 {
-                print("native_v2_compile: FAIL to_file rc=")
-                print_int(rc as i64)
-                print("\n")
-                return
-            }
-            print("native_v2_compile: emitted path=")
-            print(out_path)
-            print("\n")
-        }
-        None => {
-            panic("native-v2-compile failed: no module produced")
-        }
+    if ir_result.module.fn_count <= 0 {
+        panic("native-v2-compile failed: no module produced")
     }
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    write_file("/tmp/nv2_m2_before_backend", &! NV2_MARKER_BUF, 1)
+    write_file("/tmp/nv2_m3_before_backend", &! NV2_MARKER_BUF, 1)
+    let rc = compile_native_v2_preview_to_file(&ir_result.module, spec, out_path)
+    if rc != 0 {
+        print("native_v2_compile: FAIL to_file rc=")
+        print_int(rc as i64)
+        print("\n")
+        return
+    }
+    print("native_v2_compile: emitted path=")
+    print(out_path)
+    print("\n")
 }
 
 fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO, Mut, Panic, Div, Alloc {
