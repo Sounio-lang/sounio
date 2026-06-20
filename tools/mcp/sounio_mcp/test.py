@@ -55,7 +55,7 @@ async def _run_one(souc: Path, path: Path) -> tuple[str, dict[str, Any] | None]:
     )
     check_only = "check-only" in ann
     if is_compile_fail or check_only:
-        result = await run_command([souc, "check", "--json", path], timeout_sec=30)
+        result = await run_command([souc, "check", path, "--json"], timeout_sec=30)
         diagnostics = diagnostics_from_payload(result.stdout, result.stderr)
         if is_compile_fail:
             expected = ann.get("error-pattern", [""])[0]

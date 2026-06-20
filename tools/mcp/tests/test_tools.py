@@ -23,17 +23,20 @@ async def test_sounio_check_reports_broken_fixture() -> None:
 
 @pytest.mark.asyncio
 async def test_sounio_check_shared_schema_envelope_validates() -> None:
+    from sounio_mcp.common import REPO_ROOT
+
     result = await sounio_check("tests/fixtures/broken_dose.sio")
-    with open("tools/shared/diagnostic_schema.json", encoding="utf-8") as handle:
+    schema_path = REPO_ROOT / "tools" / "shared" / "diagnostic_schema.json"
+    with open(schema_path, encoding="utf-8") as handle:
         schema = json.load(handle)
     Draft202012Validator(schema).validate(result["diagnostic_envelope"])
 
 
 @pytest.mark.asyncio
 async def test_sounio_run_hello() -> None:
-    result = await sounio_run("examples/hello.sio")
+    result = await sounio_run("tools/mcp/tests/fixtures/mcp_hello.sio")
     assert result["status"] == "ok"
-    assert "Hello, Sounio" in result["stdout"]
+    assert "MCP_HELLO_OK" in result["stdout"]
 
 
 @pytest.mark.asyncio
