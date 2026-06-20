@@ -6752,6 +6752,89 @@ impl Lowerer {
         lo.emit_unit()
     }
 
+    fn lower_for_in_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Desugar `for i in start..end { body }` into the working while-loop IR:
+        //   i = start
+        //   l_top:  if !(i < end) goto l_end      // i <= end for inclusive ranges
+        //           body
+        //   l_cont: i = i + 1                      // continue target + fallthrough
+        //           goto l_top
+        //   l_end:
+        // Only integer range iterables (ExprRange) are supported; any other
+        // iterable reports an error rather than silently miscompiling.
+        let iter_opt: Option<Box<Expr>> = e.left
+        match iter_opt {
+            Some(iter_box) => {
+                if (*iter_box).kind != ExprKind::ExprRange {
+                    return (self.report_error(), IR_INVALID_REG)
+                }
+                // Half-open ranges (`for i in 0..`) have no end bound; the loop
+                // condition would compare against an invalid register. Reject rather
+                // than silently miscompile.
+                match (*iter_box).right {
+                    None => return (self.report_error(), IR_INVALID_REG),
+                    _ => {}
+                }
+                let pair_start = self.lower_opt_expr_ref(&(*iter_box).left)
+                var lo = pair_start.0
+                let start_reg = pair_start.1
+                let pair_iv = lo.fresh_reg()
+                lo = pair_iv.0
+                let iv = pair_iv.1
+                lo = lo.emit(ir_copy(iv, start_reg))
+                lo = lo.bind_local(e.name, iv, true)
+
+                let pair_end = lo.lower_opt_expr_ref(&(*iter_box).right)
+                lo = pair_end.0
+                let end_reg = pair_end.1
+
+                let pair_top = lo.fresh_label()
+                lo = pair_top.0
+                let l_top = pair_top.1
+                let pair_cont = lo.fresh_label()
+                lo = pair_cont.0
+                let l_cont = pair_cont.1
+                let pair_end_lbl = lo.fresh_label()
+                lo = pair_end_lbl.0
+                let l_end = pair_end_lbl.1
+
+                lo = lo.emit(ir_label(l_top))
+                let cmp_op = if (*iter_box).bin_op == BinaryOp::OpRangeInclusive { BinaryOp::OpLe } else { BinaryOp::OpLt }
+                let pair_cond = lo.fresh_reg()
+                lo = pair_cond.0
+                let cond = pair_cond.1
+                lo = lo.emit(ir_binop(cond, iv, cmp_op, end_reg))
+                lo = lo.emit(ir_branch_false(cond, l_end))
+
+                lo = lo.push_loop_labels(l_cont, l_end)
+                let for_block_opt: Option<Box<Block>> = e.block
+                match for_block_opt {
+                    Some(blk) => {
+                        let pair_body = lo.lower_block_ref(&(*blk))
+                        lo = pair_body.0
+                    }
+                    None => {}
+                }
+                lo = lo.pop_loop_labels()
+
+                lo = lo.emit(ir_label(l_cont))
+                let pair_one = lo.fresh_reg()
+                lo = pair_one.0
+                let one_reg = pair_one.1
+                lo = lo.emit(ir_load_imm(one_reg, 1))
+                let pair_next = lo.fresh_reg()
+                lo = pair_next.0
+                let next_reg = pair_next.1
+                lo = lo.emit(ir_binop(next_reg, iv, BinaryOp::OpAdd, one_reg))
+                lo = lo.emit(ir_copy(iv, next_reg))
+                lo = lo.emit(ir_jump(l_top))
+                lo = lo.emit(ir_label(l_end))
+                lo.emit_unit()
+            }
+            None => (self.report_error(), IR_INVALID_REG),
+        }
+    }
+
     fn lower_block_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let block_opt: Option<Box<Block>> = e.block
         match block_opt {
@@ -7035,6 +7118,8 @@ impl Lowerer {
             self.lower_while_expr_ref(e)
         } else if e.kind == ExprKind::ExprLoop {
             self.lower_loop_expr_ref(e)
+        } else if e.kind == ExprKind::ExprForIn {
+            self.lower_for_in_expr_ref(e)
         } else if e.kind == ExprKind::ExprBlock {
             self.lower_block_expr_ref(e)
         } else if e.kind == ExprKind::ExprReturn {
