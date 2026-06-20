@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
-# Validate the native_v2_core_begin_function_from_ir_into dynamic-frame fix.
+# Validate that the &!-mutable-ref SRET fix eliminates the stack overflow
+# WITHOUT ulimit -s unlimited. This is the proof that the fix is proper
+# (not just a workaround).
 #
-# This job:
-#   1. Builds Madaros from the FIXED source using lean_single (bin/souc-lean-single-x86_64)
-#   2. Compiles reproducer_madaros_codegen_2026-06-16g.sio with N=1/N=2/N=4/N=5 emit_cube_assignment
-#      calls before the main loop, and runs each binary.
-#   3. Verifies that all variants produce: pass=1 trail=5 conflict=1
+# Changes being validated (commit 5b42e985b):
+#   - emit_and_bool_rax_rbx / emit_or_bool_rax_rbx: use emit_byte_mut internally
+#     (4.6 MB frame → ~256 KB)
+#   - lower_instr + 70 lower_* / emit_binop_code / emit_float_binop_code:
+#     converted to &! NativeCompiler with void return (20+ MB dispatch frame → ~0)
 #
-# Before the fix, N=2 gave wrong trail and N=5 crashed (SIGSEGV). The fix makes the frame
-# size dynamic: align16(func.reg_count * 8) instead of the hard-coded 512.
-#
-# Staging: tarball goes to OrangeFS (/orangefs/training/tmp/) which is visible from both
-# the login pod and the cpuops-t560-proxmox compute node.
-#
-# MUST be submitted via SLURM to avoid crashing the k8s pod (see 2026-06-08 incident).
+# Reproducer: N=1/2/4/5 emit_cube_assignment calls (N=5 SIGSEGVed without fix).
+# Expected all: pass=1 trail=5 conflict=1
 set -euo pipefail
 
 REPO="${REPO:-/workspace/sounio}"
@@ -24,9 +21,10 @@ ACCOUNT="${ACCOUNT:-omics}"
 QOS="${QOS:-cpuops}"
 JOB_MEM="${JOB_MEM:-20G}"
 JOB_CPUS="${JOB_CPUS:-2}"
-JOB_TIME="${JOB_TIME:-00:30:00}"
-RUN_ID="${RUN_ID:-madaros-frame-fix-$(date -u +%Y%m%dT%H%M%S)}"
+JOB_TIME="${JOB_TIME:-00:40:00}"
+RUN_ID="${RUN_ID:-madaros-stack-fix-$(date -u +%Y%m%dT%H%M%S)}"
 ORANGEFS_TMP="${ORANGEFS_TMP:-/orangefs/training/tmp}"
+WORKER_POD="${WORKER_POD:-}"
 
 test -x "${REPO}/bin/souc-lean-single-x86_64" || { echo "no lean_single at ${REPO}/bin/souc-lean-single-x86_64" >&2; exit 1; }
 
@@ -35,11 +33,8 @@ LOGIN_POD="$(${KUBECTL} -n "${NS}" get pods -l app.kubernetes.io/name=login \
 test -n "${LOGIN_POD}" || { echo "no login pod" >&2; exit 1; }
 echo "login pod: ${LOGIN_POD}"
 
-# Create OrangeFS tmp dir on the login pod
 ${KUBECTL} -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "mkdir -p '${ORANGEFS_TMP}'"
 
-# Package payload from committed HEAD (exclude WIP working-tree changes)
-# The reproducer is untracked so we append it separately.
 TARBALL="/tmp/${RUN_ID}.tgz"
 SBATCH="/tmp/${RUN_ID}.sbatch"
 SNAP="/tmp/${RUN_ID}-snap"
@@ -52,7 +47,6 @@ cp "${REPO}/examples/erdos/reproducer_madaros_codegen_2026-06-16g.sio" \
 tar -C "${SNAP}" -czf "${TARBALL}" .
 rm -rf "${SNAP}"
 
-# Stage tarball to login pod then move to OrangeFS
 echo "staging payload to OrangeFS ${ORANGEFS_TMP}/${RUN_ID}.tgz ..."
 ${KUBECTL} -n "${NS}" cp "${TARBALL}" "${LOGIN_POD}:/tmp/${RUN_ID}.tgz"
 ${KUBECTL} -n "${NS}" exec "${LOGIN_POD}" -- bash -lc \
@@ -80,6 +74,8 @@ RES="${ORANGEFS_TMP}/${RUN_ID}.result"
 rm -rf "\${ROOT}"; mkdir -p "\${REPO}" "\${RES}"
 
 echo "host=\$(hostname) job=\${SLURM_JOB_ID:-manual} mem=${JOB_MEM} cpus=${JOB_CPUS}" | tee "\${RES}/env.txt"
+# Show default stack limit — should remain 12.5 MB (NOT unlimited)
+echo "stack_limit=\$(ulimit -s) kB" | tee -a "\${RES}/env.txt"
 free -g | head -2 | tee -a "\${RES}/env.txt"
 
 echo "extracting payload from ${ORANGEFS_TMP}/${RUN_ID}.tgz ..."
@@ -89,9 +85,12 @@ cd "\${REPO}"
 
 # ── Step 1: rebuild Madaros from fixed source ──────────────────────────────────
 echo "[build] Madaros from fixed source ..." | tee "\${RES}/build.log"
-/usr/bin/timeout 1200 ./bin/souc-lean-single-x86_64 \
+# lean_single (the bootstrap binary) was NOT compiled with our &! refactor, so it
+# still has large-frame functions that need unlimited stack. Run in a subshell so
+# the ulimit does NOT propagate to the run_repro step (the actual test).
+( ulimit -s unlimited && /usr/bin/timeout 1800 ./bin/souc-lean-single-x86_64 \
   self-hosted/compiler/main.sio \
-  "\${ROOT}/madaros.elf" >> "\${RES}/build.log" 2>&1
+  "\${ROOT}/madaros.elf" ) >> "\${RES}/build.log" 2>&1
 BRC=\$?
 echo "MADAROS_BUILD_RC=\${BRC}" | tee -a "\${RES}/build.log"
 if [ \${BRC} -ne 0 ] || [ ! -s "\${ROOT}/madaros.elf" ]; then
@@ -103,7 +102,7 @@ chmod +x "\${ROOT}/madaros.elf"
 SIZE=\$(stat -c%s "\${ROOT}/madaros.elf" 2>/dev/null || echo "?")
 echo "madaros.elf size=\${SIZE}" | tee -a "\${RES}/build.log"
 
-# ── Helper: generate an N-call reproducer and run it ──────────────────────────
+# ── Helper: generate N-call reproducer and run it ─────────────────────────────
 run_repro() {
   local N="\$1"
   local SRC="\${ROOT}/repro_n\${N}.sio"
@@ -123,14 +122,14 @@ open(sys.argv[3], 'w').write(src.replace(single, calls, 1))
   local ELF="\${ROOT}/repro_n\${N}.elf"
   echo "" | tee -a "\${RES}/SUMMARY.txt"
   echo "=== N=\${N}: compile ===>" | tee -a "\${RES}/SUMMARY.txt"
-  ulimit -s unlimited
+  # NO ulimit -s unlimited — this is the key test
   /usr/bin/timeout 60 "\${ROOT}/madaros.elf" "\${SRC}" -o "\${ELF}" \
     >> "\${RES}/compile_n\${N}.log" 2>&1
   CRC=\$?
   echo "  compile_rc=\${CRC}" | tee -a "\${RES}/SUMMARY.txt"
   if [ \${CRC} -ne 0 ] || [ ! -s "\${ELF}" ]; then
     echo "  COMPILE_FAILED" | tee -a "\${RES}/SUMMARY.txt"
-    tail -5 "\${RES}/compile_n\${N}.log" | sed 's/^/  /' | tee -a "\${RES}/SUMMARY.txt"
+    tail -8 "\${RES}/compile_n\${N}.log" | sed 's/^/  /' | tee -a "\${RES}/SUMMARY.txt"
     return
   fi
   chmod +x "\${ELF}"
@@ -144,9 +143,10 @@ open(sys.argv[3], 'w').write(src.replace(single, calls, 1))
   fi
 }
 
-echo "=== Frame-fix validation ===" | tee "\${RES}/SUMMARY.txt"
+echo "=== Stack-fix validation (NO ulimit) ===" | tee "\${RES}/SUMMARY.txt"
 echo "Commit: \$(cd "\${REPO}" && git log --oneline -1 2>/dev/null || echo unknown)" | tee -a "\${RES}/SUMMARY.txt"
 echo "Madaros size: \${SIZE}" | tee -a "\${RES}/SUMMARY.txt"
+echo "Default stack limit: \$(ulimit -s) kB" | tee -a "\${RES}/SUMMARY.txt"
 
 run_repro 1
 run_repro 2
@@ -160,7 +160,13 @@ EOF
 
 REMOTE_SBATCH="${ORANGEFS_TMP}/${RUN_ID}.sbatch"
 ${KUBECTL} -n "${NS}" cp "${SBATCH}" "${LOGIN_POD}:${REMOTE_SBATCH}"
-echo "submitting ..."
-${KUBECTL} -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "sbatch '${REMOTE_SBATCH}'"
+
+if [ -n "${WORKER_POD}" ]; then
+  echo "submitting via WORKER_POD=${WORKER_POD} ..."
+  ${KUBECTL} -n "${NS}" exec "${WORKER_POD}" -- bash -lc "sbatch '${REMOTE_SBATCH}'"
+else
+  echo "submitting ..."
+  ${KUBECTL} -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "sbatch '${REMOTE_SBATCH}'"
+fi
 echo "RUN_ID=${RUN_ID}"
 rm -f "${TARBALL}" "${SBATCH}"
