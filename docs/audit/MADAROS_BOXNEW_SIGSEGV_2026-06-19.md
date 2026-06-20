@@ -12,6 +12,18 @@ Madaros rebuilds successfully on Slurm, but the freshly rebuilt raw compiler
 still SIGSEGVs compiling the frame-fix reproducer under the default 8192 kB
 stack limit.
 
+Slurm validation is now split by contract:
+- `slurm-jobs/madaros-frame-fix/submit_production_gate.sh` validates the
+  production launcher (`bin/madaros`) and its stack policy on the compute node.
+- `slurm-jobs/madaros-frame-fix/submit_stack_fix.sh` is a raw no-ulimit
+  diagnostic that tracks the remaining frame-size blocker.
+
+Production Slurm result:
+- `RUN_ID=madaros-production-gate-20260620T122325`, Slurm job `4319`.
+- Initial compute-node stack limit: `8192 kB`.
+- `bin/madaros build` compiled and ran N=1/N=2/N=4/N=5 reproducer variants.
+- Result: `PASS production launcher compiles and runs frame reproducer variants`.
+
 ## Symptom
 The prebuilt `bin/madaros-linux-x86_64` (v0.80.0, refreshed on main @ `659492156`,
 2026-06-19 14:43) **SIGSEGVs (rc=139) when compiling any source containing

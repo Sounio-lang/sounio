@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Validate that the &!-mutable-ref SRET fix eliminates the stack overflow
-# WITHOUT ulimit -s unlimited. This is the proof that the fix is proper
-# (not just a workaround).
+# Diagnostic no-ulimit validation for raw Madaros frame-size work.
+#
+# This intentionally bypasses bin/madaros and invokes the freshly rebuilt raw
+# ELF directly without raising the stack limit. Production users should be gated
+# by submit_production_gate.sh, because bin/madaros owns the current stack
+# policy. A failure here is a compiler-frame blocker, not automatically a
+# production launcher failure.
 #
 # Changes being validated (commit 5b42e985b):
 #   - emit_and_bool_rax_rbx / emit_or_bool_rax_rbx: use emit_byte_mut internally
@@ -74,7 +78,7 @@ RES="${ORANGEFS_TMP}/${RUN_ID}.result"
 rm -rf "\${ROOT}"; mkdir -p "\${REPO}" "\${RES}"
 
 echo "host=\$(hostname) job=\${SLURM_JOB_ID:-manual} mem=${JOB_MEM} cpus=${JOB_CPUS}" | tee "\${RES}/env.txt"
-# Show default stack limit — should remain 12.5 MB (NOT unlimited)
+# Show the cluster default stack limit. This diagnostic must not raise it.
 echo "stack_limit=\$(ulimit -s) kB" | tee -a "\${RES}/env.txt"
 free -g | head -2 | tee -a "\${RES}/env.txt"
 
