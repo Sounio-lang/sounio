@@ -18,17 +18,19 @@ The plan coordinates:
 
 - primary-checkout reconciliation,
 - the active Claude compiler lane,
-- Madaros Root 2/SRET/archive evidence,
+- Madaros source-to-ELF, Root 2/SRET, and archive evidence,
 - Slurm/foundry validation,
 - merge and release gates.
 
 Current baseline:
 
-- `origin/main`: `91551953cedefb780cba9fe7ebd61c8a8a5b301d`
-  (`Merge pull request #355 from Sounio-lang/codex/madaros-root2-gate-target`).
-- `main` CI run `27892902187`: success.
+- `origin/main`: `302d1bc9766f6e185775f8fb5869f23d66e1e297`
+  (`ci(governance): audit governance control surfaces (#365)`).
+- `main` CI run `27901532987`: success.
 - Canonical live blocker: GitHub issue #356.
 - Protected dirty primary checkout: `/workspace/sounio`.
+- `/workspace/sounio` is stale relative to `origin/main` and must not be used
+  as evidence for current `main` behavior until it is explicitly reconciled.
 - Current planning worktree: create a fresh isolated worktree from `origin/main`
   for each narrow readiness change.
 
@@ -64,6 +66,9 @@ Madaros is production-ready only when all of these are true:
 | Bucket D scripts | Raw local scripts are blocked from promotion | #351 plus post-merge `main` CI |
 | Root 2 operator gate | Acceptance probes are packaged but intentionally red while blocker is open | #354 plus post-merge `main` CI |
 | Root 2 target-worktree gate | Current `main` can run the gate against older active compiler lanes via `--root` | #355 plus post-merge `main` CI |
+| Root 2/BSS lowerer floor | BSS globals lower through the stable mut path; native_v2/build global witnesses are healthy | #362 plus post-merge `main` CI |
+| Open blocker probe | `scripts/ci/madaros_open_blockers_probe.sh` keeps known-open direct-call/BSS witnesses executable without promoting them to the source-to-ELF manifest | #363 plus post-merge `main` CI |
+| Governance control surfaces | Worktree audit treats agent contracts and governance scripts as critical surfaces | #365 plus post-merge `main` CI |
 
 ## Phase 0 — Freeze Source Of Truth
 
@@ -85,7 +90,7 @@ Actions:
 Gate:
 
 ```bash
-SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE='^(/workspace/sounio|/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b|<current-lane>)$' \
+SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE='^(/workspace/sounio|/workspace/sounio-effects|/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b|<current-lane>)$' \
   scripts/dev/worktree_branch_audit.sh --check
 ```
 
@@ -111,48 +116,61 @@ Claude-owned active compiler files:
 
 Actions:
 
-1. Claude continues the active Root 2/SRET compiler repair.
+1. Claude continues the active compiler/codegen repair.
 2. Codex may inspect and run read-only gates, but must not edit the owned files.
 3. Any proposed Codex compiler work must first become an
    `ownership-conflict` or ownership-transfer record.
-4. The archive-derived blocker remains:
+4. The active Claude lane must become check-clean before any source-to-ELF
+   blocker result from that lane is treated as semantic evidence. Read-only
+   checks on 2026-06-21 still returned `verdict=1` for:
+   - `self-hosted/native/lower_ir.sio`
+   - `self-hosted/native/codegen.sio`
+   - `self-hosted/native/codegen_x86_linux.sio`
+5. The old archive-derived Root 2/SRET blocker is superseded by current
+   source-to-ELF readiness blockers in #356. Keep Root 2/SRET gates as
+   regression guards, but do not treat them as the only production blocker.
+
+Current primary compiler blocker:
 
 ```text
-Blocker-ID: MADAROS-ROOT2-SRET-ARCHIVE-TRIAGE-2026-06-21
-Status: reproduced
+Blocker-ID: BLK-20260621-codex-source-elf-direct-call-arg
+Status: owned
 Severity: B1
 Class: compiler-semantics
-Owner: compiler lane
-Lane: Madaros Root 2/SRET/enum/method-call repair
+Owner: Claude compiler/codegen lane unless ownership transfers explicitly
+Lane: Madaros source-to-ELF direct-call argument ABI
 Canonical-Issue: https://github.com/Sounio-lang/sounio/issues/356
 Files-Owned: self-hosted/compiler/main.sio, self-hosted/native/codegen.sio, self-hosted/native/codegen_x86_linux.sio, self-hosted/native/lower_ir.sio, self-hosted/native/suite.sio
-Acceptance-Gate: scripts/ops/madaros_root2_acceptance_gate.sh --root <compiler-worktree> passes without --allow-fail from the branch that changes compiler code
-Evidence-Level: E1
-Next-Action: compiler owner closes native_v2_enum_match and sret_forwarding segfaults, then reruns the gate without --allow-fail before any PR
+Observed: call_arg_id_exit42 exits 0 in normal/native_v2/build on current evidence artifacts
+Expected: call_arg_id_exit42 exits 42 in normal/native_v2/build
+Acceptance-Gate: scripts/ci/madaros_source_to_elf_gate.sh direct_call passes and scripts/ci/madaros_open_blockers_probe.sh no longer reports the direct-call witness as still_open
+Evidence-Level: E4
+Next-Action: make the Claude lane check-clean, then inspect/fix the core source-to-ELF codegen path around parameter spill/load/store
 ```
 
 Exit:
 
-- One compiler owner, one write set, one acceptance gate.
+- One compiler owner, one write set, check-clean compiler files, and one
+  acceptance gate for the direct-call argument ABI blocker.
 
-## Phase 2 — Refresh Root 2 Evidence
+## Phase 2 — Close Current Source-To-ELF Blockers
 
 Owner: compiler lane.
 
 Actions:
 
-1. Rebuild or select the current branch compiler using canonical resolver
-   routing.
-2. Run fresh repros for:
-   - enum variant registration,
-   - method-call lowering,
-   - SRET/tail-array return,
-   - Root 2 function-count behavior.
-3. Record whether each failure is:
-   - fixed by the active Root 2/SRET patch,
-   - still failing as compiler semantics,
-   - a harness-routing issue,
-   - stale archive evidence.
+1. Do not start from archive notes. Start from `origin/main` and the current
+   #356 blocker records.
+2. Fix `BLK-20260621-codex-source-elf-direct-call-arg` first. It fails across
+   normal, native_v2, and build modes and blocks the official source-to-ELF
+   gate.
+3. Only after direct-call argument ABI passes, fix
+   `BLK-20260621-codex-source-elf-normal-bss`. Current evidence shows Root 2
+   global read/store is healthy in native_v2/build, while normal mode still
+   segfaults for global read.
+4. Keep failing witnesses out of `tests/madaros/source_to_elf/manifest.tsv`
+   until the open-blocker probe reports changed behavior and the blocker record
+   is updated or closed.
 
 Required command hygiene:
 
@@ -161,26 +179,33 @@ env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
   bash scripts/run_sio_test_suite.sh <focused-suite> --verbose
 ```
 
-Packaged operator gate:
+Known-open blocker probe:
+
+```bash
+env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
+  scripts/ci/madaros_open_blockers_probe.sh
+```
+
+Official source-to-ELF gate:
+
+```bash
+bash scripts/ci/madaros_source_to_elf_gate.sh
+```
+
+Legacy Root 2/SRET acceptance remains useful as a regression guard, but it is
+no longer the only production-readiness gate:
 
 ```bash
 scripts/ops/madaros_root2_acceptance_gate.sh
 ```
 
-From a current checkout, the same gate can target an older active compiler lane
-without copying files into that lane:
-
-```bash
-scripts/ops/madaros_root2_acceptance_gate.sh \
-  --root /workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b
-```
-
-Use `--allow-fail` only for diagnostic snapshots while the blocker is still
-open; a merge-ready compiler lane must run the gate without `--allow-fail`.
-
 Exit:
 
-- Archive notes are replaced by current evidence or explicitly closed as stale.
+- `call_arg_id_exit42` exits 42 in normal/native_v2/build.
+- `direct_call` passes in `scripts/ci/madaros_source_to_elf_gate.sh`.
+- `global_read_exit4` exits 4 in normal/native_v2/build.
+- The open-blocker probe is updated or removed because the witnesses no longer
+  match known-open behavior.
 
 ## Phase 3 — Land Compiler Repair
 
@@ -190,7 +215,8 @@ Actions:
 
 1. Keep the patch narrow to compiler/runtime surfaces needed for the failing
    repros.
-2. Add focused regression tests for the exact Root 2/SRET/enum/method cases.
+2. Add focused regression tests for the exact source-to-ELF direct-call
+   argument and normal-mode BSS cases.
 3. Run focused gates locally.
 4. Run source-bootstrap/native gates as required by the touched surfaces.
 5. Open one PR with the blocker record in the PR body.
@@ -201,7 +227,10 @@ Minimum local gates:
 env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
   bash scripts/run_sio_test_suite.sh <new-focused-tests> --verbose
 
-scripts/ops/madaros_root2_acceptance_gate.sh
+env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
+  scripts/ci/madaros_open_blockers_probe.sh
+
+bash scripts/ci/madaros_source_to_elf_gate.sh
 
 bash scripts/ci/build_native_souc.sh
 ```
@@ -213,7 +242,8 @@ Remote gate:
 
 Exit:
 
-- Root 2 blocker closed at E3/E4 or narrowed with a new blocker record.
+- Direct-call and normal-BSS blockers closed at E3/E4 or narrowed with new
+  blocker records.
 
 ## Phase 4 — Prove Madaros As Default Path
 
@@ -284,18 +314,27 @@ For the compiler owner:
 ```bash
 cd /workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b
 git status --short --branch
+
 env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
-  bash scripts/run_sio_test_suite.sh <enum-method-root2-focused-suite> --verbose
+  bin/souc check self-hosted/native/lower_ir.sio
+env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
+  bin/souc check self-hosted/native/codegen.sio
+env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
+  bin/souc check self-hosted/native/codegen_x86_linux.sio
+
+# After the lane is check-clean:
+env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
+  scripts/ci/madaros_open_blockers_probe.sh
 ```
 
 For Codex/integration:
 
 ```bash
-cd /tmp/sounio-madaros-production-plan
+cd /tmp/sounio-madaros-prod-plan
 git status --short --branch
 bash scripts/dev/check_docs_registry.sh
 bash scripts/dev/check_docs_consistency.sh
-SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE='^(/workspace/sounio|/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b|/tmp/sounio-madaros-production-plan)$' \
+SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE='^(/workspace/sounio|/workspace/sounio-effects|/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b|/tmp/sounio-madaros-prod-plan)$' \
   scripts/dev/worktree_branch_audit.sh --check
 ```
 
@@ -304,7 +343,7 @@ SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE='^(/workspace/sounio|/workspace/sounio/.cla
 Stop and create a blocker if:
 
 - a Codex lane needs to edit a Claude-owned compiler file,
-- Root 2/SRET acceptance diverges from canonical issue #356,
+- source-to-ELF blocker behavior diverges from canonical issue #356,
 - a gate passes only because of `SOUC_BIN`, `MADAROS_BIN`, or stdlib path
   contamination,
 - an archived Madaros note contradicts fresh current-branch evidence,
