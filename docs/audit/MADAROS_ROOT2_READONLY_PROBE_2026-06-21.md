@@ -203,9 +203,19 @@ git status --short --branch
 scripts/ops/madaros_root2_acceptance_gate.sh
 ```
 
+If the active compiler lane is on an older base that does not contain the gate,
+run it from a current checkout and target the lane explicitly:
+
+```bash
+cd /tmp/sounio-main-final
+scripts/ops/madaros_root2_acceptance_gate.sh \
+  --root /workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b
+```
+
 For diagnostics before the compiler fix is ready, use
-`scripts/ops/madaros_root2_acceptance_gate.sh --allow-fail --out-dir <dir>` to
-capture logs without converting the probe into a failed shell session.
+`scripts/ops/madaros_root2_acceptance_gate.sh --root <repo> --allow-fail
+--out-dir <dir>` to capture logs without converting the probe into a failed
+shell session.
 
 Self-test of the packaged gate on `origin/main` at `4e8a5b48b`:
 

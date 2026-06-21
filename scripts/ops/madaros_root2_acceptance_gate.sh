@@ -8,14 +8,13 @@
 set -u -o pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$ROOT_DIR" || exit 1
 
 ALLOW_FAIL=0
 OUT_DIR="${SOUNIO_MADAROS_ROOT2_GATE_DIR:-}"
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/ops/madaros_root2_acceptance_gate.sh [--allow-fail] [--out-dir DIR]
+Usage: scripts/ops/madaros_root2_acceptance_gate.sh [--allow-fail] [--out-dir DIR] [--root DIR]
 
 Runs the current Madaros Root2/SRET acceptance probes with SOUC/Madaros routing
 environment variables unset:
@@ -25,7 +24,9 @@ environment variables unset:
   3. scripts/run_sio_test_suite.sh sret_forwarding --verbose
 
 By default the script exits non-zero if any probe fails. Use --allow-fail for
-read-only diagnostic snapshots while the blocker is still open.
+read-only diagnostic snapshots while the blocker is still open. Use --root to
+run the gate from a current checkout against an older compiler worktree without
+copying this script into that worktree.
 USAGE
 }
 
@@ -36,7 +37,19 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --out-dir)
+      if [[ $# -lt 2 ]]; then
+        echo "[madaros-root2] --out-dir requires a directory" >&2
+        exit 2
+      fi
       OUT_DIR="$2"
+      shift 2
+      ;;
+    --root)
+      if [[ $# -lt 2 ]]; then
+        echo "[madaros-root2] --root requires a repository directory" >&2
+        exit 2
+      fi
+      ROOT_DIR="$2"
       shift 2
       ;;
     -h|--help)
@@ -50,6 +63,9 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+ROOT_DIR="$(cd "$ROOT_DIR" && pwd)" || exit 1
+cd "$ROOT_DIR" || exit 1
 
 if [[ -z "$OUT_DIR" ]]; then
   OUT_DIR="$(mktemp -d /tmp/sounio-madaros-root2-gate.XXXXXX)"
