@@ -276,11 +276,11 @@ print_lowering_handoff_summary() {
 
   echo "[madaros-open-blockers] lowering_handoff:"
   echo "  blocker=BLK-20260621-codex-source-elf-normal-bss"
-  echo "  owner=Claude compiler/codegen lane unless ownership transfers explicitly"
+  echo "  status=resolved_expected"
   echo "  observed[global_read_exit4]=rc=$read_rc last_lower_stage=$read_stage markers=$read_m1/$read_m2/$read_m3 log=$read_log"
   echo "  observed[global_store_exit7]=rc=$store_rc last_lower_stage=$store_stage markers=$store_m1/$store_m2/$store_m3 log=$store_log"
   echo "  target=standard module_frontend_lower body lowering before backend handoff"
-  echo "  acceptance=global_read_exit4 exits 4; global_store_exit7 exits 7; source-to-ELF gate green; blocker expectations updated"
+  echo "  acceptance=global_read_exit4 exits 4; global_store_exit7 exits 7; source-to-ELF gate green"
 }
 
 # Controls: user-function calls, with and without arguments, are no longer the
@@ -292,13 +292,11 @@ run_case "control" "call_arg_id_exit42" "$SRC_DIR/call_arg_id_exit42.sio" "norma
 run_case "control" "call_arg_id_exit42" "$SRC_DIR/call_arg_id_exit42.sio" "native_v2" "42"
 run_case "control" "call_arg_id_exit42" "$SRC_DIR/call_arg_id_exit42.sio" "build" "42"
 
-# BLK-20260621-codex-source-elf-normal-bss:
-# Current main segfaults in the raw Madaros compiler while compiling minimal
-# BSS-global read/store witnesses, before an ELF is produced.
-run_case "BLK-20260621-codex-source-elf-normal-bss" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "normal" "compile_rc_139"
-run_case "BLK-20260621-codex-source-elf-normal-bss" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "native_v2" "compile_rc_139"
-run_case "BLK-20260621-codex-source-elf-normal-bss" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "build" "compile_rc_139"
-run_case "BLK-20260621-codex-source-elf-normal-bss" "global_store_exit7" "$SRC_DIR/global_store_exit7.sio" "build" "compile_rc_139"
+# Resolved source-to-ELF witnesses for BLK-20260621-codex-source-elf-normal-bss.
+run_case "control" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "normal" "4"
+run_case "control" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "native_v2" "4"
+run_case "control" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "build" "4"
+run_case "control" "global_store_exit7" "$SRC_DIR/global_store_exit7.sio" "build" "7"
 
 # BLK-20260621-codex-madaros-build-segfault:
 # The promoted workspace currently segfaults while the lean_single seed compiles
