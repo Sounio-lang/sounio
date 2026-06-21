@@ -24,10 +24,12 @@ The plan coordinates:
 
 Current baseline:
 
-- `origin/main`: `51ebb2431abeb9b2047dee7856e7328cfee7953e`
-  (`test(madaros): refresh open blocker probe (#367)`).
-- `main` CI after #367: success in PR checks before merge; post-merge local
-  verification passed from a clean detached `origin/main` worktree.
+- `origin/main`: `1d0dc6baa52cf69f013778ec834f6cf6d28a1719`
+  (`test(madaros): track self-build blocker in open probe (#369)`).
+- `main` CI after #369: success.
+- `Madaros Prebuilt Refresh` on `1d0dc6baa`: remote seed-decoupled build and
+  `madaros_full_gate` succeeded. The promoted workspace local self-build still
+  segfaults and is tracked separately as a workspace parity blocker.
 - Canonical live blocker: GitHub issue #356.
 - Protected dirty primary checkout: `/workspace/sounio`.
 - `/workspace/sounio` is stale relative to `origin/main` and must not be used
@@ -68,7 +70,7 @@ Madaros is production-ready only when all of these are true:
 | Root 2 operator gate | Acceptance probes are packaged but intentionally red while blocker is open | #354 plus post-merge `main` CI |
 | Root 2 target-worktree gate | Current `main` can run the gate against older active compiler lanes via `--root` | #355 plus post-merge `main` CI |
 | Root 2/BSS lowerer floor | BSS globals lower through the stable mut path; native_v2/build global witnesses are healthy | #362 plus post-merge `main` CI |
-| Open blocker probe | `scripts/ci/madaros_open_blockers_probe.sh` keeps known-open direct-call, BSS, and self-build witnesses executable without promoting them to production manifests | #363/#367 plus post-merge `main` CI; self-build witness added after #368 |
+| Open blocker probe | `scripts/ci/madaros_open_blockers_probe.sh` keeps known-open direct-call, BSS, and local workspace self-build parity witnesses executable without promoting them to production manifests | #363/#367/#369 plus post-merge `main` CI |
 | Governance control surfaces | Worktree audit treats agent contracts and governance scripts as critical surfaces | #365 plus post-merge `main` CI |
 | Production readiness plan | Current-main readiness plan is committed and merged | #366 plus post-merge local verification |
 | Direct-call argument ABI | `call_arg_id_exit42` exits 42 in normal/native_v2/build and is now a regression control, not an open blocker | #367 plus post-merge local verification |
@@ -151,22 +153,23 @@ Evidence-Level: E3
 Next-Action: make the minimal top-level global read/write witnesses compile and run before returning to larger Root 2/SRET cases
 ```
 
-Current bootstrap production blocker:
+Current promoted-workspace parity blocker:
 
 ```text
 Blocker-ID: BLK-20260621-codex-madaros-build-segfault
-Status: reproduced
-Severity: B1
-Class: bootstrap-runtime
-Owner: Claude compiler/codegen lane unless ownership transfers explicitly
-Lane: Madaros Stage1 self-build / production-readiness bootstrap
+Status: classified
+Severity: B2
+Class: platform-resource
+Owner: integration shepherd / workspace-runtime lane unless compiler owner proves semantic root
+Lane: promoted workspace local self-build parity
 Canonical-Issue: https://github.com/Sounio-lang/sounio/issues/356
-Files-Owned: self-hosted/compiler/main.sio, self-hosted/native/codegen.sio, self-hosted/native/codegen_x86_linux.sio, self-hosted/native/lower_ir.sio, self-hosted/native/suite.sio
-Observed: scripts/ci/build_modular_madaros.sh segfaults with rc=139 while compiling self-hosted/compiler/main.sio
-Expected: artifacts/self-hosted/madaros is produced as an executable Madaros artifact
-Acceptance-Gate: env-clean scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros passes, followed by the applicable Madaros full/readiness gate
-Evidence-Level: E3
-Next-Action: make Stage1 self-build pass from current main, or explicitly split it from source-to-ELF readiness with a documented waiver
+Files-Owned: none by Codex
+Files-Read-Only: scripts/ci/build_modular_madaros.sh, scripts/dev/souc-build-lock.sh, self-hosted/compiler/main.sio
+Observed: clean promoted-workspace build exits rc=139 while GitHub Madaros Prebuilt Refresh build+gate succeeds on the same commit
+Expected: local promoted workspace build agrees with remote seed-decoupled build, or docs/gates explicitly mark local workspace self-build as non-authoritative for production readiness
+Acceptance-Gate: local build_modular_madaros.sh passes in a clean workspace worktree, or release/readiness docs classify GitHub prebuilt refresh as authoritative and local workspace self-build as a platform/parity blocker
+Evidence-Level: E4
+Next-Action: investigate workspace/runtime parity, not broad compiler bootstrap failure, unless a compiler owner proves a semantic root
 ```
 
 Exit:
@@ -188,9 +191,11 @@ Actions:
 3. Fix `BLK-20260621-codex-source-elf-normal-bss`. Current evidence shows raw
    Madaros compile segfault before ELF production for global read/store in
    normal/native_v2/build coverage.
-4. Fix or explicitly waive `BLK-20260621-codex-madaros-build-segfault` before
-   any production-ready claim. A prebuilt refresh artifact can be useful
-   diagnostic evidence, but it cannot prove local self-build readiness.
+4. Treat `BLK-20260621-codex-madaros-build-segfault` as a promoted-workspace
+   parity blocker. Current remote `Madaros Prebuilt Refresh` evidence proves
+   that the seed-decoupled build and `madaros_full_gate` can succeed on GitHub
+   for `1d0dc6baa`; current local workspace evidence still reproduces
+   `build_rc_139`.
 5. Keep failing witnesses out of `tests/madaros/source_to_elf/manifest.tsv`
    until the open-blocker probe reports changed behavior and the blocker record
    is updated or closed.
@@ -229,9 +234,11 @@ Exit:
 - `global_read_exit4` exits 4 in normal/native_v2/build.
 - `global_store_exit7` exits 7 at least in build mode, then in any broader
   source-to-ELF mode promoted by the compiler owner.
-- `scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros` produces
-  a usable executable artifact, or a human-approved waiver states why self-build
-  is outside the current production claim.
+- GitHub `Madaros Prebuilt Refresh` build+gate remains green for the production
+  build path.
+- The local workspace self-build parity blocker is either fixed, explicitly
+  scoped as non-authoritative for production readiness, or tracked outside the
+  compiler-semantics lane.
 - The open-blocker probe is updated or removed because the witnesses no longer
   match known-open behavior.
 
@@ -272,8 +279,8 @@ Exit:
 
 - Direct-call and normal-BSS blockers closed at E3/E4 or narrowed with new
   blocker records.
-- Stage1 self-build blocker closed, waived by the human author, or separated
-  into a non-production diagnostic lane.
+- Local workspace self-build parity blocker closed or explicitly separated from
+  the production build path with GitHub prebuilt refresh named as authoritative.
 
 ## Phase 4 — Prove Madaros As Default Path
 

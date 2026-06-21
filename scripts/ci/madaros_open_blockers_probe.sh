@@ -186,10 +186,10 @@ run_case "BLK-20260621-codex-source-elf-normal-bss" "global_read_exit4" "$SRC_DI
 run_case "BLK-20260621-codex-source-elf-normal-bss" "global_store_exit7" "$SRC_DIR/global_store_exit7.sio" "build" "compile_rc_139"
 
 # BLK-20260621-codex-madaros-build-segfault:
-# Current main segfaults while the lean_single seed compiles
-# self-hosted/compiler/main.sio into the modular Madaros artifact. This witness
-# keeps that production-readiness blocker executable without editing compiler
-# files owned by the active compiler lane.
+# The promoted workspace currently segfaults while the lean_single seed compiles
+# self-hosted/compiler/main.sio into a modular Madaros artifact. GitHub's
+# Madaros Prebuilt Refresh can build and gate the same commit, so this witness
+# tracks local workspace parity rather than a universal bootstrap failure.
 run_self_build_case "BLK-20260621-codex-madaros-build-segfault" "self_build_madaros" "build_rc_139"
 
 cat "$REPORT"
