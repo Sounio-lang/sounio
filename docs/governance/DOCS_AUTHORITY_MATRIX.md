@@ -116,6 +116,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.pbpk14-identifiability-2026-06-14 | repo_only | docs/audit/PBPK14_IDENTIFIABILITY_2026-06-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.pbpk14-modelform-stiff-repair-2026-06-14 | repo_only | docs/audit/PBPK14_MODELFORM_STIFF_REPAIR_2026-06-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.pl-adoption-audit-2026-05-27 | repo_only | docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.primary-checkout-reconciliation-plan-2026-06-21 | repo_only | docs/audit/PRIMARY_CHECKOUT_RECONCILIATION_PLAN_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r2-3-compiler-tuple-return-bug.dispatch | repo_only | docs/audit/r2_3_compiler_tuple_return_bug/DISPATCH.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r2-3-compiler-tuple-return-bug.fix.proposed-fix | repo_only | docs/audit/r2_3_compiler_tuple_return_bug/fix/PROPOSED_FIX.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r2-3-compiler-tuple-return-bug.r2-2-synthesis | repo_only | docs/audit/r2_3_compiler_tuple_return_bug/R2_2_SYNTHESIS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
