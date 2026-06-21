@@ -165,6 +165,9 @@ awk -F '\t' '
   NR > 1 {
     total++
     category[$7]++
+    if ($3 == "main" && $5 != "true" && $6 == "CONFLICTING") {
+      ready_conflicting_main_pr++
+    }
     if ($7 == "compiler_owner_overlap") {
       if ($5 == "true") {
         compiler_owner_overlap_draft++
@@ -180,6 +183,7 @@ awk -F '\t' '
     }
     printf " compiler_owner_overlap_draft=%d compiler_owner_overlap_ready=%d",
       compiler_owner_overlap_draft, compiler_owner_overlap_ready
+    printf " ready_conflicting_main_pr=%d", ready_conflicting_main_pr
     printf "\n"
   }
 ' "$OUT"
@@ -195,6 +199,10 @@ awk -F '\t' '
 ' "$OUT"
 
 if [[ "$CHECK_MODE" == "1" ]]; then
+  if awk -F '\t' 'NR > 1 && $3 == "main" && $5 != "true" && $6 == "CONFLICTING" { found = 1 } END { exit found ? 0 : 1 }' "$OUT"; then
+    echo "madaros PR resolution queue failed: ready conflicting main PR remains" >&2
+    exit 1
+  fi
   if awk -F '\t' 'NR > 1 && $7 == "compiler_owner_overlap" { found = 1 } END { exit found ? 0 : 1 }' "$OUT"; then
     echo "madaros PR resolution queue failed: compiler ownership overlap remains" >&2
     exit 1
