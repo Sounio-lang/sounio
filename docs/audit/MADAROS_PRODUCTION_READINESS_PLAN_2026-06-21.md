@@ -24,9 +24,10 @@ The plan coordinates:
 
 Current baseline:
 
-- `origin/main`: `302d1bc9766f6e185775f8fb5869f23d66e1e297`
-  (`ci(governance): audit governance control surfaces (#365)`).
-- `main` CI run `27901532987`: success.
+- `origin/main`: `51ebb2431abeb9b2047dee7856e7328cfee7953e`
+  (`test(madaros): refresh open blocker probe (#367)`).
+- `main` CI after #367: success in PR checks before merge; post-merge local
+  verification passed from a clean detached `origin/main` worktree.
 - Canonical live blocker: GitHub issue #356.
 - Protected dirty primary checkout: `/workspace/sounio`.
 - `/workspace/sounio` is stale relative to `origin/main` and must not be used
@@ -69,6 +70,8 @@ Madaros is production-ready only when all of these are true:
 | Root 2/BSS lowerer floor | BSS globals lower through the stable mut path; native_v2/build global witnesses are healthy | #362 plus post-merge `main` CI |
 | Open blocker probe | `scripts/ci/madaros_open_blockers_probe.sh` keeps known-open direct-call/BSS witnesses executable without promoting them to the source-to-ELF manifest | #363 plus post-merge `main` CI |
 | Governance control surfaces | Worktree audit treats agent contracts and governance scripts as critical surfaces | #365 plus post-merge `main` CI |
+| Production readiness plan | Current-main readiness plan is committed and merged | #366 plus post-merge local verification |
+| Direct-call argument ABI | `call_arg_id_exit42` exits 42 in normal/native_v2/build and is now a regression control, not an open blocker | #367 plus post-merge local verification |
 
 ## Phase 0 — Freeze Source Of Truth
 
@@ -130,28 +133,46 @@ Actions:
    source-to-ELF readiness blockers in #356. Keep Root 2/SRET gates as
    regression guards, but do not treat them as the only production blocker.
 
-Current primary compiler blocker:
+Current source-to-ELF compiler blocker:
 
 ```text
-Blocker-ID: BLK-20260621-codex-source-elf-direct-call-arg
-Status: owned
+Blocker-ID: BLK-20260621-codex-source-elf-normal-bss
+Status: classified
 Severity: B1
 Class: compiler-semantics
 Owner: Claude compiler/codegen lane unless ownership transfers explicitly
-Lane: Madaros source-to-ELF direct-call argument ABI
+Lane: Madaros source-to-ELF global/BSS lowering
 Canonical-Issue: https://github.com/Sounio-lang/sounio/issues/356
 Files-Owned: self-hosted/compiler/main.sio, self-hosted/native/codegen.sio, self-hosted/native/codegen_x86_linux.sio, self-hosted/native/lower_ir.sio, self-hosted/native/suite.sio
-Observed: call_arg_id_exit42 exits 0 in normal/native_v2/build on current evidence artifacts
-Expected: call_arg_id_exit42 exits 42 in normal/native_v2/build
-Acceptance-Gate: scripts/ci/madaros_source_to_elf_gate.sh direct_call passes and scripts/ci/madaros_open_blockers_probe.sh no longer reports the direct-call witness as still_open
-Evidence-Level: E4
-Next-Action: make the Claude lane check-clean, then inspect/fix the core source-to-ELF codegen path around parameter spill/load/store
+Observed: global_read_exit4 normal/native_v2/build => compile_rc_139; global_store_exit7 build => compile_rc_139
+Expected: global_read_exit4 exits 4 and global_store_exit7 exits 7 from emitted ELF, without raw Madaros compile segfault
+Acceptance-Gate: scripts/ci/madaros_open_blockers_probe.sh is updated from known-open to closed-BSS expectations and passes; scripts/ci/madaros_source_to_elf_gate.sh also passes
+Evidence-Level: E3
+Next-Action: make the minimal top-level global read/write witnesses compile and run before returning to larger Root 2/SRET cases
+```
+
+Current bootstrap production blocker:
+
+```text
+Blocker-ID: BLK-20260621-codex-madaros-build-segfault
+Status: reproduced
+Severity: B1
+Class: bootstrap-runtime
+Owner: Claude compiler/codegen lane unless ownership transfers explicitly
+Lane: Madaros Stage1 self-build / production-readiness bootstrap
+Canonical-Issue: https://github.com/Sounio-lang/sounio/issues/356
+Files-Owned: self-hosted/compiler/main.sio, self-hosted/native/codegen.sio, self-hosted/native/codegen_x86_linux.sio, self-hosted/native/lower_ir.sio, self-hosted/native/suite.sio
+Observed: scripts/ci/build_modular_madaros.sh segfaults with rc=139 while compiling self-hosted/compiler/main.sio
+Expected: artifacts/self-hosted/madaros is produced as an executable Madaros artifact
+Acceptance-Gate: env-clean scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros passes, followed by the applicable Madaros full/readiness gate
+Evidence-Level: E3
+Next-Action: make Stage1 self-build pass from current main, or explicitly split it from source-to-ELF readiness with a documented waiver
 ```
 
 Exit:
 
 - One compiler owner, one write set, check-clean compiler files, and one
-  acceptance gate for the direct-call argument ABI blocker.
+  acceptance gate for each active compiler/bootstrap blocker.
 
 ## Phase 2 — Close Current Source-To-ELF Blockers
 
@@ -161,14 +182,16 @@ Actions:
 
 1. Do not start from archive notes. Start from `origin/main` and the current
    #356 blocker records.
-2. Fix `BLK-20260621-codex-source-elf-direct-call-arg` first. It fails across
-   normal, native_v2, and build modes and blocks the official source-to-ELF
-   gate.
-3. Only after direct-call argument ABI passes, fix
-   `BLK-20260621-codex-source-elf-normal-bss`. Current evidence shows Root 2
-   global read/store is healthy in native_v2/build, while normal mode still
-   segfaults for global read.
-4. Keep failing witnesses out of `tests/madaros/source_to_elf/manifest.tsv`
+2. Treat `BLK-20260621-codex-source-elf-direct-call-arg` as closed by current
+   `main` evidence. It is now a passing control in
+   `scripts/ci/madaros_open_blockers_probe.sh`.
+3. Fix `BLK-20260621-codex-source-elf-normal-bss`. Current evidence shows raw
+   Madaros compile segfault before ELF production for global read/store in
+   normal/native_v2/build coverage.
+4. Fix or explicitly waive `BLK-20260621-codex-madaros-build-segfault` before
+   any production-ready claim. A prebuilt refresh artifact can be useful
+   diagnostic evidence, but it cannot prove local self-build readiness.
+5. Keep failing witnesses out of `tests/madaros/source_to_elf/manifest.tsv`
    until the open-blocker probe reports changed behavior and the blocker record
    is updated or closed.
 
@@ -204,6 +227,11 @@ Exit:
 - `call_arg_id_exit42` exits 42 in normal/native_v2/build.
 - `direct_call` passes in `scripts/ci/madaros_source_to_elf_gate.sh`.
 - `global_read_exit4` exits 4 in normal/native_v2/build.
+- `global_store_exit7` exits 7 at least in build mode, then in any broader
+  source-to-ELF mode promoted by the compiler owner.
+- `scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros` produces
+  a usable executable artifact, or a human-approved waiver states why self-build
+  is outside the current production claim.
 - The open-blocker probe is updated or removed because the witnesses no longer
   match known-open behavior.
 
@@ -215,8 +243,8 @@ Actions:
 
 1. Keep the patch narrow to compiler/runtime surfaces needed for the failing
    repros.
-2. Add focused regression tests for the exact source-to-ELF direct-call
-   argument and normal-mode BSS cases.
+2. Add focused regression tests for the exact source-to-ELF BSS/global read and
+   write cases. Keep direct-call argument as a regression control.
 3. Run focused gates locally.
 4. Run source-bootstrap/native gates as required by the touched surfaces.
 5. Open one PR with the blocker record in the PR body.
@@ -244,6 +272,8 @@ Exit:
 
 - Direct-call and normal-BSS blockers closed at E3/E4 or narrowed with new
   blocker records.
+- Stage1 self-build blocker closed, waived by the human author, or separated
+  into a non-production diagnostic lane.
 
 ## Phase 4 — Prove Madaros As Default Path
 
@@ -325,16 +355,19 @@ env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
 # After the lane is check-clean:
 env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
   scripts/ci/madaros_open_blockers_probe.sh
+
+env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
+  bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
 ```
 
 For Codex/integration:
 
 ```bash
-cd /tmp/sounio-madaros-prod-plan
+cd /tmp/sounio-bss-segfault-investigate
 git status --short --branch
 bash scripts/dev/check_docs_registry.sh
 bash scripts/dev/check_docs_consistency.sh
-SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE='^(/workspace/sounio|/workspace/sounio-effects|/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b|/tmp/sounio-madaros-prod-plan)$' \
+SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE='^(/workspace/sounio|/workspace/sounio-effects|/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b|/tmp/sounio-bss-segfault-investigate)$' \
   scripts/dev/worktree_branch_audit.sh --check
 ```
 
