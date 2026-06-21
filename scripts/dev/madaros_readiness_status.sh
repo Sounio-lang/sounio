@@ -298,6 +298,10 @@ Compiler owner:
   env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
     scripts/ci/madaros_open_blockers_probe.sh
 
+To localize the current BSS/global phase before editing compiler files:
+  env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
+    scripts/ci/madaros_open_blockers_probe.sh --diagnose-lowering
+
 After BSS/global behavior changes:
   update scripts/ci/madaros_open_blockers_probe.sh from known-open expectations to closed expectations
   bash scripts/ci/madaros_source_to_elf_gate.sh
