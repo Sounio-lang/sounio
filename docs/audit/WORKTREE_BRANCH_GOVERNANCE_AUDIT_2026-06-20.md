@@ -125,6 +125,67 @@ blocker; it is now specifically primary-checkout reconciliation plus Claude-lane
 coordination. The primary checkout is now evidence-preserved but intentionally
 not cleaned.
 
+## Post-#371 Refresh — 2026-06-21
+
+The audit remains active. A fresh current-main pass was run from clean worktree
+`/tmp/sounio-madaros-worktree-triage` at
+`c70075772db4265e4f14790c423711f9e6a02d63`.
+
+Commands:
+
+```bash
+SOUNIO_AUDIT_INCLUDE_PRS=1 \
+  scripts/dev/worktree_branch_audit.sh /tmp/sounio-worktree-audit-current.tsv
+
+gh pr list --repo Sounio-lang/sounio --state open --limit 40 \
+  --json number,title,headRefName,baseRefName,isDraft,mergeable,updatedAt,url
+```
+
+Current counts:
+
+- total worktrees: 72
+- dirty worktrees: 52
+- prunable worktree records: 0
+- dirty critical worktrees: 3
+- unallowed dirty critical worktrees under strict local check mode: 3
+- critical diffs versus `origin/main`: 49
+- open PRs represented by current worktrees: 2
+- open GitHub PRs: 8
+- open GitHub PRs conflicting with current `main`: 7
+
+Critical dirty worktrees requiring disposition:
+
+| Worktree | Branch | Status | Required disposition |
+|---|---|---|---|
+| `/workspace/sounio` | `main` | dirty, behind `origin/main` by 78 commits | Keep protected; do not use as production evidence; reconcile only from archive plus fresh `origin/main` worktree. |
+| `/workspace/sounio-effects` | `claude/effects-enforcement` | dirty, touches critical scripts/compiler surfaces versus `origin/main` | Treat as separate Claude/effects lane; do not mix into Madaros production readiness without owner handoff and current-main replay. |
+| `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b` | `worktree-agent-adc1cd8b9d52ba53b` | dirty active compiler/codegen lane | Keep Claude-owned; Codex may inspect only; must become check-clean before its compiler results are semantic evidence. |
+
+Open PR disposition for Madaros production readiness:
+
+| PR | Branch | Base | Mergeability | Disposition |
+|---|---|---|---|---|
+| #329 | `codex/pl-command-center` | `main` | conflicting, draft | Keep draft/reference-only until rebased onto current `main`; docs lane, not compiler evidence. |
+| #313 | `fix/native-codegen-sret-regression-v2` | `main` | conflicting | Treat as stale compiler/codegen lane; do not merge over active Claude compiler ownership without explicit transfer and current gates. |
+| #308 | `chore/repo-hygiene` | `main` | conflicting | Repo hygiene lane; keep out of Madaros production path until conflicts are resolved in a fresh worktree. |
+| #297 | `qual/pbpk28-tissue-composition` | `main` | conflicting | Scientific/PBPK lane; requires science/offload discipline and must not be used as compiler-readiness evidence. |
+| #287 | `feat/affine-octonion-correlation` | `main` | conflicting | Math/research lane; requires math/offload discipline and separate current-main replay. |
+| #241 | `nl-castle/native-orc-audit` | `main` | conflicting | Historical/research lane; reference only for Madaros readiness unless replayed on current `main`. |
+| #232 | `codegen/nested-mut-write-fix` | `main` | conflicting, draft | Stale broad compiler integration; keep quarantined unless ownership transfers and the patch is rebuilt from current `main`. |
+| #226 | `feat/erdos-straus-gpu-sieve` | `integration/sounio-dev-ready-base` | mergeable to non-main base | Not part of current `main` production readiness; handle separately against its integration base. |
+
+The next governance objective is not "delete every worktree." It is to reduce
+the Madaros production influence set to:
+
+1. clean `origin/main`,
+2. issue #356 blocker records,
+3. `scripts/ci/madaros_open_blockers_probe.sh`,
+4. `scripts/ci/madaros_source_to_elf_gate.sh`,
+5. one active compiler owner for the BSS/global blocker.
+
+Any PR or worktree outside that set is evidence only after a current-main replay
+and a named owner/gate.
+
 Follow-up governance gate:
 
 - `scripts/dev/worktree_branch_audit.sh --check` now fails when unallowed
