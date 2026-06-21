@@ -24,9 +24,10 @@ The plan coordinates:
 
 Current baseline:
 
-- `origin/main`: `1d0dc6baa52cf69f013778ec834f6cf6d28a1719`
-  (`test(madaros): track self-build blocker in open probe (#369)`).
-- `main` CI after #369: success.
+- `origin/main`: `2ee05cad48e435cbebf762940669d5218622657f`
+  (`Merge pull request #370 from Sounio-lang/codex/madaros-selfbuild-parity-docs`).
+- `main` CI after #370: success
+  (<https://github.com/Sounio-lang/sounio/actions/runs/27904628366>).
 - `Madaros Prebuilt Refresh` on `1d0dc6baa`: remote seed-decoupled build and
   `madaros_full_gate` succeeded. The promoted workspace local self-build still
   segfaults and is tracked separately as a workspace parity blocker.
@@ -40,6 +41,44 @@ Current baseline:
 The goal is not to make every old worktree disappear immediately. The goal is
 to ensure that only current, gated, ownership-clear work can influence Madaros
 production behavior.
+
+## Resolution Plan
+
+The audit resolves into this execution order:
+
+1. Keep `origin/main` as the only production baseline and keep `/workspace/sounio`
+   out of evidence while it is stale or dirty.
+2. Keep Codex and Claude write sets serialized. Codex owns governance, probes,
+   issue hygiene, and validation. Claude owns the active compiler/codegen lane
+   unless ownership transfers explicitly.
+3. Close `BLK-20260621-codex-source-elf-normal-bss` before returning to larger
+   Root 2/SRET witnesses. The first passing proof must be the minimal current
+   global read/write witnesses, not archived Root 2 notes.
+4. Treat `BLK-20260621-codex-madaros-build-segfault` as promoted-workspace
+   parity unless a compiler owner proves a semantic root. GitHub
+   `Madaros Prebuilt Refresh` remains the authoritative seed-decoupled
+   production build path while it is green.
+5. After the BSS/global blocker changes behavior, update
+   `scripts/ci/madaros_open_blockers_probe.sh` from known-open expectations to
+   closed expectations and only then promote the witnesses into the regular
+   source-to-ELF gate.
+6. Merge only after the focused local gates and post-merge `main` CI agree with
+   the blocker records.
+
+The next actionable compiler command for the owning compiler lane is:
+
+```bash
+env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
+  bash scripts/ci/madaros_open_blockers_probe.sh
+```
+
+The required BSS closure evidence is:
+
+- `global_read_exit4` exits `4` in `normal`, `native_v2`, and `build`.
+- `global_store_exit7` exits `7` at least in `build`, then in broader modes
+  only when the compiler owner promotes them.
+- `scripts/ci/madaros_source_to_elf_gate.sh` remains green.
+- `main` CI and the relevant Madaros remote build path remain green after merge.
 
 ## Production-Ready Definition
 
@@ -128,6 +167,7 @@ Actions:
 4. The active Claude lane must become check-clean before any source-to-ELF
    blocker result from that lane is treated as semantic evidence. Read-only
    checks on 2026-06-21 still returned `verdict=1` for:
+   - `self-hosted/compiler/main.sio`
    - `self-hosted/native/lower_ir.sio`
    - `self-hosted/native/codegen.sio`
    - `self-hosted/native/codegen_x86_linux.sio`
