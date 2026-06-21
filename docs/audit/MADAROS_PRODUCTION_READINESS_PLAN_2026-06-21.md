@@ -78,6 +78,12 @@ The next actionable integration command for Codex or the release shepherd is:
 scripts/dev/madaros_readiness_status.sh --strict
 ```
 
+To include the active Claude compiler lane's read-only check-clean threshold:
+
+```bash
+scripts/dev/madaros_readiness_status.sh --check-compiler-lane
+```
+
 The required BSS closure evidence is:
 
 - `global_read_exit4` exits `4` in `normal`, `native_v2`, and `build`.
@@ -119,7 +125,8 @@ Madaros is production-ready only when all of these are true:
 | Governance control surfaces | Worktree audit treats agent contracts and governance scripts as critical surfaces | #365 plus post-merge `main` CI |
 | Production readiness plan | Current-main readiness plan is committed and merged | #366 plus post-merge local verification |
 | Worktree disposition queue | Current worktree/branch/PR disposition queue is committed and merged | #372 plus post-merge `main` CI |
-| Readiness status command | `scripts/dev/madaros_readiness_status.sh` prints the current baseline, GitHub state, audit gate, blockers, and next gates | current branch pending merge |
+| Readiness status command | `scripts/dev/madaros_readiness_status.sh` prints the current baseline, GitHub state, audit gate, blockers, and next gates | #373 plus post-merge `main` CI |
+| Compiler-lane status command | `scripts/dev/madaros_readiness_status.sh --check-compiler-lane` inspects the active Claude lane and runs read-only check-clean probes with summarized logs | current branch pending merge |
 | Direct-call argument ABI | `call_arg_id_exit42` exits 42 in normal/native_v2/build and is now a regression control, not an open blocker | #367 plus post-merge local verification |
 
 ## Phase 0 — Freeze Source Of Truth
@@ -418,12 +425,13 @@ env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
 For Codex/integration:
 
 ```bash
-cd /tmp/sounio-madaros-next
+cd <current-readiness-worktree>
 git status --short --branch
 scripts/dev/madaros_readiness_status.sh --strict
+scripts/dev/madaros_readiness_status.sh --check-compiler-lane
 bash scripts/dev/check_docs_registry.sh
 bash scripts/dev/check_docs_consistency.sh
-SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE='^(/workspace/sounio|/workspace/sounio-effects|/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b|/tmp/sounio-madaros-next)$' \
+SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE='^(/workspace/sounio|/workspace/sounio-effects|/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b|<current-readiness-worktree>)$' \
   scripts/dev/worktree_branch_audit.sh --check
 ```
 
