@@ -17,9 +17,10 @@ change compiler source.
 
 Current production baseline:
 
-- `origin/main`: `4e8a5b48b1356b2c6ee061ef37c3a8065c06ca75`
-  (`Merge pull request #353 from Sounio-lang/codex/madaros-root2-readonly-probe`).
-- `main` CI run `27891934564`: success.
+- `origin/main`: `91551953cedefb780cba9fe7ebd61c8a8a5b301d`
+  (`Merge pull request #355 from Sounio-lang/codex/madaros-root2-gate-target`).
+- `main` CI run `27892902187`: success.
+- Canonical live blocker: GitHub issue #356.
 
 Read-only probed lane:
 
@@ -175,21 +176,22 @@ Severity: B1
 Class: compiler-semantics
 Owner: compiler lane
 Lane: Madaros Root 2/SRET/enum/method-call repair
+Canonical-Issue: https://github.com/Sounio-lang/sounio/issues/356
 Worktree: /workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b
 Branch: worktree-agent-adc1cd8b9d52ba53b
 Files-Owned: self-hosted/compiler/main.sio, self-hosted/native/codegen.sio, self-hosted/native/codegen_x86_linux.sio, self-hosted/native/lower_ir.sio, self-hosted/native/suite.sio
 Files-Read-Only: docs/audit/MADAROS_PRODUCTION_READINESS_PLAN_2026-06-21.md, scripts/ci/native_v2_enum_match_gate.sh, scripts/ci/madaros_operational_contract_gate.sh, scripts/run_sio_test_suite.sh, tests/run-pass/sret_forwarding_minimal.sio, tests/run-pass/sret_forwarding_cross_module_cd_mul.sio
 Do-Not-Touch: Claude-owned compiler files listed above unless ownership transfers
-Repro: env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN bash scripts/ci/native_v2_enum_match_gate.sh
+Repro: scripts/ops/madaros_root2_acceptance_gate.sh --root /workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b --allow-fail
 Observed: driver check passes, raw Madaros native-v2 compile path segfaults with exit 139
 Expected: enum native-v2 driver emits executable that prints 2 and exits 0
-Acceptance-Gate: native_v2_enum_match_gate.sh plus sret_forwarding_minimal and sret_forwarding_cross_module_cd_mul run-pass probes pass under environment-clean routing
+Acceptance-Gate: scripts/ops/madaros_root2_acceptance_gate.sh --root <compiler-worktree> passes without --allow-fail from the branch that changes compiler code
 Evidence-Level: E1
-Evidence: /tmp/sounio-native-v2-enum-match.JSe8FE/driver.check.log and /tmp/sounio-native-v2-enum-match.JSe8FE/enum_match.compile.log on the 2026-06-21 workspace
+Evidence: /tmp/sounio-root2-gate-root-option-main-91551953c on the 2026-06-21 workspace
 Fallback-Path: none
 Legacy-Kept: yes
 LLM-Offload: not-required
-Next-Action: compiler owner should decide whether the in-place lower/codegen rewrite is meant to close this; then rerun the same env-clean gate and SRET forwarding probes before any PR
+Next-Action: compiler owner should close the native_v2_enum_match and sret_forwarding segfaults, then rerun the root-targeted gate without --allow-fail before any PR
 ```
 
 ## Next Commands For Compiler Owner
