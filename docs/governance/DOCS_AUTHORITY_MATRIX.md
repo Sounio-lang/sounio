@@ -104,6 +104,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.g1-wip.verdict-parity-2026-06-02 | repo_only | docs/audit/g1_wip/VERDICT_PARITY_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.gpu-pipeline-sota-assessment-2026-05-30 | repo_only | docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.kaxi-ptx-target-sm-audit-2026-06-17 | repo_only | docs/audit/KAXI_PTX_TARGET_SM_AUDIT_2026-06-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-archive-triage-2026-06-21 | repo_only | docs/audit/MADAROS_ARCHIVE_TRIAGE_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-boxnew-sigsegv-2026-06-19 | repo_only | docs/audit/MADAROS_BOXNEW_SIGSEGV_2026-06-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-for-loop-lowering-2026-06-20 | repo_only | docs/audit/MADAROS_FOR_LOOP_LOWERING_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-print-int-dispatch-2026-06-20 | repo_only | docs/audit/MADAROS_PRINT_INT_DISPATCH_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

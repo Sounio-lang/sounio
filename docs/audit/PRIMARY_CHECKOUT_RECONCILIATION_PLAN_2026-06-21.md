@@ -28,8 +28,8 @@ protected `/workspace/sounio` checkout.
 
 ## Current Baseline
 
-- Current `origin/main`: `32ed3d3d71a94a6b328d2fff71395f8af7ed8c19`
-  (`Merge pull request #347 from Sounio-lang/codex/agents-ctx7-contract`).
+- Current `origin/main`: `044969dfe47bbb800bf868779b7e93f8b52981e0`
+  (`Merge pull request #349 from Sounio-lang/codex/hello-example-io`).
 - The primary archive was created from `/workspace/sounio` without destructive
   cleanup.
 - The MCP patch bucket from the primary archive is already represented on
@@ -39,6 +39,8 @@ protected `/workspace/sounio` checkout.
   documentation contract.
 - The worktree governance gate is resolved by #346 and runs in the `Contracts`
   CI job.
+- The `examples/hello.sio` bucket is resolved by #349; PR CI and post-merge
+  `main` CI both passed.
 
 ## Resolution Queue
 
@@ -64,9 +66,9 @@ state is local workspace state rather than a proven branch:
 
 | Item | Initial finding | Required gate |
 |---|---|---|
-| `examples/hello.sio` | changes hello from return-only to `println("Hello, Sounio")` with `with IO` | `env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN bash scripts/run_sio_test_suite.sh hello --verbose` |
-| `examples/erdos/reproducer_madaros_codegen_2026-06-16g.sio` | likely a debugging reproducer, not a general example | classify against current Madaros gates before adding |
-| `docs/audit/MADAROS_*.md` from archive | useful forensic notes, but several contradict newer fixed state | promote only after refresh against current `origin/main` and current binary SHA |
+| `examples/hello.sio` | resolved by #349 | `env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN bash scripts/run_sio_test_suite.sh hello --verbose`; PR CI and post-merge `main` CI passed |
+| `examples/erdos/reproducer_madaros_codegen_2026-06-16g.sio` | already identical on current `origin/main` | no PR; keep as already represented |
+| `docs/audit/MADAROS_*.md` from archive | classified by `docs/audit/MADAROS_ARCHIVE_TRIAGE_2026-06-21.md` | raw files are archive-only unless a compiler lane refreshes them against current binaries and gates |
 
 Exit criterion: one narrow PR per item or a written discard reason.
 
@@ -128,7 +130,10 @@ Codex must not write to Claude-owned compiler files during the same phase.
 
 1. Keep `origin/main` green and use it as the only production baseline.
 2. Resolve Bucket A by recording it as already done.
-3. Review Bucket B one item at a time, starting with `examples/hello.sio`.
+3. Review Bucket B one item at a time. `examples/hello.sio` is complete via
+   #349, the Erdos reproducer is already present on `origin/main`, and archived
+   Madaros notes are classified by
+   `docs/audit/MADAROS_ARCHIVE_TRIAGE_2026-06-21.md`.
 4. Mark Bucket C as archive-only unless a future source contract is created.
 5. Harden or discard Bucket D scripts; never commit them raw.
 6. Treat Bucket E as compiler work requiring a reproducer, a focused gate, and
