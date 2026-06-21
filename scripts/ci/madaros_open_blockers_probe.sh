@@ -4,6 +4,40 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+RUN_LOWERING_DIAGNOSTICS=0
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/ci/madaros_open_blockers_probe.sh [options]
+
+Reproduce known-open Madaros production blockers without promoting them into
+required-pass source-to-ELF manifests.
+
+Options:
+  --diagnose-lowering  also run a read-only frontend/body-lowering trace for
+                       the BSS/global witnesses and controls
+  -h, --help           show this help
+USAGE
+}
+
+while (($#)); do
+  case "$1" in
+    --diagnose-lowering)
+      RUN_LOWERING_DIAGNOSTICS=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
 source "$ROOT_DIR/scripts/lib/resolve_madaros.sh"
 sounio_require_madaros
 
@@ -12,6 +46,7 @@ SRC_DIR="$OUT_DIR/src"
 BIN_DIR="$OUT_DIR/bin"
 LOG_DIR="$OUT_DIR/logs"
 REPORT="$OUT_DIR/report.tsv"
+LOWERING_REPORT="$OUT_DIR/lowering_diagnostics.tsv"
 
 mkdir -p "$SRC_DIR" "$BIN_DIR" "$LOG_DIR"
 
@@ -168,6 +203,63 @@ run_self_build_case() {
     "$blocker_id" "$case_id" "self_build" "$expected_open_exit" "$actual_exit" "$status" >>"$REPORT"
 }
 
+marker_state() {
+  local path="$1"
+  if [[ -e "$path" ]]; then
+    echo "present"
+  else
+    echo "absent"
+  fi
+}
+
+run_lowering_diagnostic_case() {
+  local case_id="$1"
+  local src="$2"
+
+  local out_bin="$BIN_DIR/${case_id}.diagnose_lowering"
+  local log_path="$LOG_DIR/${case_id}.diagnose_lowering.log"
+  local marker_m1="/tmp/nv2_m1_after_lower"
+  local marker_m2="/tmp/nv2_m2_before_backend"
+  local marker_m3="/tmp/nv2_m3_before_backend"
+
+  rm -f "$marker_m1" "$marker_m2" "$marker_m3"
+
+  set +e
+  SOUNIO_MODULE_FRONTEND_LOWER_TRACE=1 \
+    "$MADAROS_BIN" --native-v2-compile "$src" "$out_bin" >"$log_path" 2>&1
+  local rc=$?
+  set -e
+
+  local last_lower_stage
+  last_lower_stage="$(
+    grep 'module_frontend_lower:' "$log_path" 2>/dev/null \
+      | tail -n 1 \
+      | sed 's/.*module_frontend_lower: //' \
+      || true
+  )"
+  [[ -n "$last_lower_stage" ]] || last_lower_stage="none"
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$case_id" \
+    "$rc" \
+    "$last_lower_stage" \
+    "$(marker_state "$marker_m1")" \
+    "$(marker_state "$marker_m2")" \
+    "$(marker_state "$marker_m3")" \
+    "$log_path" >>"$LOWERING_REPORT"
+}
+
+run_lowering_diagnostics() {
+  printf 'case_id\trc\tlast_lower_stage\tmarker_m1_after_lower\tmarker_m2_before_backend\tmarker_m3_before_backend\tlog\n' >"$LOWERING_REPORT"
+
+  run_lowering_diagnostic_case "call_arg_id_exit42" "$SRC_DIR/call_arg_id_exit42.sio"
+  run_lowering_diagnostic_case "global_read_exit4" "$SRC_DIR/global_read_exit4.sio"
+  run_lowering_diagnostic_case "global_store_exit7" "$SRC_DIR/global_store_exit7.sio"
+
+  echo "[madaros-open-blockers] lowering_diagnostics=$LOWERING_REPORT"
+  cat "$LOWERING_REPORT"
+}
+
 # Controls: user-function calls, with and without arguments, are no longer the
 # open source-to-ELF blocker.
 run_case "control" "call_noarg_exit42" "$SRC_DIR/call_noarg_exit42.sio" "normal" "42"
@@ -191,6 +283,10 @@ run_case "BLK-20260621-codex-source-elf-normal-bss" "global_store_exit7" "$SRC_D
 # Madaros Prebuilt Refresh can build and gate the same commit, so this witness
 # tracks local workspace parity rather than a universal bootstrap failure.
 run_self_build_case "BLK-20260621-codex-madaros-build-segfault" "self_build_madaros" "build_rc_139"
+
+if [[ "$RUN_LOWERING_DIAGNOSTICS" == "1" ]]; then
+  run_lowering_diagnostics
+fi
 
 cat "$REPORT"
 
