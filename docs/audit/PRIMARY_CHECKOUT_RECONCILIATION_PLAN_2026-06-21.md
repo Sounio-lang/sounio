@@ -41,6 +41,8 @@ protected `/workspace/sounio` checkout.
   CI job.
 - The `examples/hello.sio` bucket is resolved by #349; PR CI and post-merge
   `main` CI both passed.
+- The Madaros production-readiness execution plan is recorded in
+  `docs/audit/MADAROS_PRODUCTION_READINESS_PLAN_2026-06-21.md`.
 
 ## Resolution Queue
 
@@ -140,7 +142,9 @@ Codex must not write to Claude-owned compiler files during the same phase.
    disposition is recorded in
    `docs/audit/BUCKET_D_SCRIPT_HARDENING_2026-06-21.md`.
 6. Treat Bucket E as compiler work requiring a reproducer, a focused gate, and
-   explicit non-overlap with Claude's lane.
+   explicit non-overlap with Claude's lane. The production-readiness execution
+   sequence is recorded in
+   `docs/audit/MADAROS_PRODUCTION_READINESS_PLAN_2026-06-21.md`.
 7. After every PR, wait for CI and remove the temporary worktree/branch.
 
 ## Stop Rule
