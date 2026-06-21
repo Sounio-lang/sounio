@@ -24,10 +24,10 @@ The plan coordinates:
 
 Current baseline:
 
-- `origin/main`: `2ee05cad48e435cbebf762940669d5218622657f`
-  (`Merge pull request #370 from Sounio-lang/codex/madaros-selfbuild-parity-docs`).
-- `main` CI after #370: success
-  (<https://github.com/Sounio-lang/sounio/actions/runs/27904628366>).
+- `origin/main`: `c70075772db4265e4f14790c423711f9e6a02d63`
+  (`docs(madaros): add production blocker resolution plan`, #371).
+- `main` CI after #371: success
+  (<https://github.com/Sounio-lang/sounio/actions/runs/27905347997>).
 - `Madaros Prebuilt Refresh` on `1d0dc6baa`: remote seed-decoupled build and
   `madaros_full_gate` succeeded. The promoted workspace local self-build still
   segfaults and is tracked separately as a workspace parity blocker.
