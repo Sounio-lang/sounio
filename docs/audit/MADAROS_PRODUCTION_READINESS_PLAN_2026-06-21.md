@@ -68,7 +68,7 @@ Madaros is production-ready only when all of these are true:
 | Root 2 operator gate | Acceptance probes are packaged but intentionally red while blocker is open | #354 plus post-merge `main` CI |
 | Root 2 target-worktree gate | Current `main` can run the gate against older active compiler lanes via `--root` | #355 plus post-merge `main` CI |
 | Root 2/BSS lowerer floor | BSS globals lower through the stable mut path; native_v2/build global witnesses are healthy | #362 plus post-merge `main` CI |
-| Open blocker probe | `scripts/ci/madaros_open_blockers_probe.sh` keeps known-open direct-call/BSS witnesses executable without promoting them to the source-to-ELF manifest | #363 plus post-merge `main` CI |
+| Open blocker probe | `scripts/ci/madaros_open_blockers_probe.sh` keeps known-open direct-call, BSS, and self-build witnesses executable without promoting them to production manifests | #363/#367 plus post-merge `main` CI; self-build witness added after #368 |
 | Governance control surfaces | Worktree audit treats agent contracts and governance scripts as critical surfaces | #365 plus post-merge `main` CI |
 | Production readiness plan | Current-main readiness plan is committed and merged | #366 plus post-merge local verification |
 | Direct-call argument ABI | `call_arg_id_exit42` exits 42 in normal/native_v2/build and is now a regression control, not an open blocker | #367 plus post-merge local verification |
