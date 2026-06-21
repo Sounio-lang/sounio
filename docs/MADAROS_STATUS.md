@@ -44,13 +44,18 @@ is preserved as `bin/souc-lean-single-x86_64`.
 - Madaros is the **Stage1 modular compiler** (`bin/madaros`,
   `scripts/ci/build_modular_madaros.sh`, `scripts/ci/madaros_full_gate.sh`).
   It is distinct from `souc` (the lean_single monolith), which still ships.
-- As of `origin/main@b1f6bb1b7`, production readiness is governed by
+- As of `origin/main@0d714587f`, production readiness is governed by
   `docs/audit/MADAROS_PRODUCTION_READINESS_PLAN_2026-06-21.md` and issue #356.
   The known-open blocker probe still reproduces:
   - `BLK-20260621-codex-source-elf-normal-bss`: minimal global read/write
     source-to-ELF witnesses compile-segfault with `rc=139`.
   - `BLK-20260621-codex-madaros-build-segfault`: promoted-workspace local
     self-build still exits `build_rc_139`.
+- `scripts/dev/madaros_readiness_status.sh --check-compiler-lane` is the
+  current coordination command for checking the active Claude compiler lane
+  without taking write ownership. Its next-gate output includes the lowering
+  diagnostic command for the current BSS/global blocker:
+  `scripts/ci/madaros_open_blockers_probe.sh --diagnose-lowering`.
 
 Do not say "Madaros is production-ready" until those blocker records are closed
 or explicitly narrowed with new acceptance gates.
@@ -135,7 +140,10 @@ make madaros-full-gate
 
 ## One-line coordination phrase
 
-> Madaros is green on `origin/main` and the green base begins at `17d1157be`.
-> Please sync/rebase before debugging checker issues against it. The valid proof
-> gate is `make madaros-full-gate`; stale raw `artifacts/self-hosted/madaros`
-> binaries are **not** evidence.
+> Madaros is the default `bin/souc` compiler on current `origin/main`, but it is
+> **not production-ready yet**: issue #356 still tracks the source-to-ELF
+> BSS/global compile-segfault and promoted-workspace self-build parity blockers.
+> Please sync to current `origin/main`, avoid stale raw ELFs as evidence, and use
+> `scripts/dev/madaros_readiness_status.sh --check-compiler-lane` plus
+> `scripts/ci/madaros_open_blockers_probe.sh --diagnose-lowering` before
+> changing compiler-owned files.

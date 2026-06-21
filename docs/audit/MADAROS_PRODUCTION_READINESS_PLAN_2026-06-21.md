@@ -24,10 +24,10 @@ The plan coordinates:
 
 Current baseline:
 
-- `origin/main`: `b1f6bb1b70a73fd545d23f0326d91e6f960da89d`
-  (`tools(madaros): add compiler lane readiness probe`, #374).
-- `main` CI after #374: success
-  (<https://github.com/Sounio-lang/sounio/actions/runs/27907470086>).
+- `origin/main`: `0d714587f46af0529b9f85010d62583550bef66d`
+  (`tools(madaros): surface lowering diagnostics in readiness status`, #377).
+- `main` CI after #377: success
+  (<https://github.com/Sounio-lang/sounio/actions/runs/27909711839>).
 - `Madaros Prebuilt Refresh` on `1d0dc6baa`: remote seed-decoupled build and
   `madaros_full_gate` succeeded. The promoted workspace local self-build still
   segfaults and is tracked separately as a workspace parity blocker.
@@ -127,6 +127,7 @@ Madaros is production-ready only when all of these are true:
 | Worktree disposition queue | Current worktree/branch/PR disposition queue is committed and merged | #372 plus post-merge `main` CI |
 | Readiness status command | `scripts/dev/madaros_readiness_status.sh` prints the current baseline, GitHub state, audit gate, blockers, and next gates | #373 plus post-merge `main` CI |
 | Compiler-lane status command | `scripts/dev/madaros_readiness_status.sh --check-compiler-lane` inspects the active Claude lane and runs read-only check-clean probes with summarized logs | #374 plus post-merge `main` CI |
+| Lowering-diagnostic status pointer | `scripts/dev/madaros_readiness_status.sh` prints the `--diagnose-lowering` command needed before editing the BSS/global compiler path | #377 plus post-merge `main` CI |
 | Direct-call argument ABI | `call_arg_id_exit42` exits 42 in normal/native_v2/build and is now a regression control, not an open blocker | #367 plus post-merge local verification |
 
 ## Phase 0 — Freeze Source Of Truth
