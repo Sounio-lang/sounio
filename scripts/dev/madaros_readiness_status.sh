@@ -9,6 +9,7 @@ RUN_AUDIT=1
 RUN_OPEN_BLOCKERS=0
 RUN_SOURCE_TO_ELF=0
 CHECK_COMPILER_LANE=0
+CHECK_COMPILER_PR_OVERLAP=0
 COMPILER_LANE_PATH="${SOUNIO_MADAROS_COMPILER_LANE:-/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b}"
 REFRESH_GH=0
 STRICT=0
@@ -30,6 +31,9 @@ Options:
   --check-compiler-lane
                        inspect the active compiler lane and run read-only
                        check-clean probes for the Claude-owned compiler files
+  --check-compiler-pr-overlap
+                       inspect open PRs for overlap with Claude-owned compiler
+                       files and fail under --strict if any overlap exists
   --compiler-lane DIR  override active compiler lane path
   --run-open-blockers  run scripts/ci/madaros_open_blockers_probe.sh
   --run-source-to-elf  run scripts/ci/madaros_source_to_elf_gate.sh
@@ -50,6 +54,9 @@ while (($#)); do
       ;;
     --check-compiler-lane)
       CHECK_COMPILER_LANE=1
+      ;;
+    --check-compiler-pr-overlap)
+      CHECK_COMPILER_PR_OVERLAP=1
       ;;
     --compiler-lane)
       shift
@@ -211,6 +218,79 @@ run_compiler_lane_check() {
   return 0
 }
 
+run_compiler_pr_overlap_check() {
+  local overlap_count=0
+  local owned_files=(
+    self-hosted/compiler/main.sio
+    self-hosted/native/codegen.sio
+    self-hosted/native/codegen_x86_linux.sio
+    self-hosted/native/lower_ir.sio
+    self-hosted/native/suite.sio
+  )
+
+  if ! have gh; then
+    echo "status[compiler_pr_overlap]=unavailable gh_missing"
+    if [[ "$STRICT" == "1" ]]; then
+      return 1
+    fi
+    return 0
+  fi
+
+  echo "compiler_pr_overlap_owned_files:"
+  printf '  %s\n' "${owned_files[@]}"
+  echo "compiler_pr_overlap_prs:"
+
+  local pr_list
+  pr_list="$(gh pr list --repo "$REPO" --state open --limit 40 --json number --jq '.[].number' 2>/dev/null || true)"
+  if [[ -z "$pr_list" ]]; then
+    echo "  none"
+    echo "status[compiler_pr_overlap]=pass"
+    return 0
+  fi
+
+  local pr files overlap title url
+  while IFS= read -r pr; do
+    [[ -n "$pr" ]] || continue
+    files="$(
+      gh pr view "$pr" --repo "$REPO" --json files \
+        --jq '.files[].path' 2>/dev/null || true
+    )"
+    [[ -n "$files" ]] || continue
+
+    overlap="$(
+      printf '%s\n' "$files" | awk '
+        BEGIN {
+          owned["self-hosted/compiler/main.sio"] = 1
+          owned["self-hosted/native/codegen.sio"] = 1
+          owned["self-hosted/native/codegen_x86_linux.sio"] = 1
+          owned["self-hosted/native/lower_ir.sio"] = 1
+          owned["self-hosted/native/suite.sio"] = 1
+        }
+        owned[$0] { print }
+      ' | paste -sd ',' -
+    )"
+    [[ -n "$overlap" ]] || continue
+
+    title="$(gh pr view "$pr" --repo "$REPO" --json title --jq '.title' 2>/dev/null || echo unavailable)"
+    url="$(gh pr view "$pr" --repo "$REPO" --json url --jq '.url' 2>/dev/null || echo unavailable)"
+    echo "  pr=#$pr files=$overlap url=$url"
+    echo "    title=$title"
+    overlap_count=$((overlap_count + 1))
+  done <<<"$pr_list"
+
+  if [[ "$overlap_count" == "0" ]]; then
+    echo "  none"
+    echo "status[compiler_pr_overlap]=pass"
+    return 0
+  fi
+
+  echo "status[compiler_pr_overlap]=fail count=$overlap_count"
+  if [[ "$STRICT" == "1" ]]; then
+    return 1
+  fi
+  return 0
+}
+
 if [[ "$REFRESH_GH" == "1" ]]; then
   git fetch --prune origin
 fi
@@ -323,6 +403,11 @@ if [[ "$CHECK_COMPILER_LANE" == "1" ]]; then
   run_compiler_lane_check "$COMPILER_LANE_PATH"
 fi
 
+if [[ "$CHECK_COMPILER_PR_OVERLAP" == "1" ]]; then
+  section "Compiler PR Overlap"
+  run_compiler_pr_overlap_check
+fi
+
 section "Next Gates"
 cat <<'EOF'
 Compiler owner:
@@ -341,6 +426,7 @@ After BSS/global behavior changes:
 
 Integration shepherd:
   scripts/dev/madaros_readiness_status.sh --strict
+  scripts/dev/madaros_readiness_status.sh --check-compiler-pr-overlap
   scripts/dev/madaros_readiness_status.sh --production-ready
 EOF
 
