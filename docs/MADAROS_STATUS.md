@@ -9,10 +9,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.madaros-status
 
 # Madaros Status — coordination note for the fleet
 
-> **TL;DR:** Madaros is **green on `origin/main`** and is now the **default compiler**:
-> `bin/souc` routes to Madaros. If it looks broken to you, you are almost certainly
-> judging it from a **stale worktree** or an **old raw ELF compiled before the
-> fix**. Sync `main`, use the checked prebuilt or rebuild, run the gate — *then* talk.
+> **TL;DR:** Madaros is the **default compiler**: `bin/souc` routes to Madaros.
+> Do not treat stale worktrees or old raw ELFs as current evidence. Also do not
+> overclaim production readiness: current `origin/main` still tracks open
+> source-to-ELF/global-BSS and promoted-workspace self-build blockers in
+> GitHub issue #356. Sync `main`, use the checked prebuilt or rebuild, run the
+> named gate, and classify the result against the active blocker records.
 
 ## Madaros is the default compiler (`bin/souc` → Madaros)
 
@@ -33,8 +35,8 @@ is preserved as `bin/souc-lean-single-x86_64`.
 
 ## Confirmed state
 
-- **Green since `17d1157be`** — `fix(madaros): remove raw check caveats from full gate`.
-  It **stays green as `main` advances**: re-verified through `origin/main@9c5d09a21`,
+- **Operational baseline since `17d1157be`** — `fix(madaros): remove raw check caveats from full gate`.
+  The broad gate lineage was re-verified through `origin/main@9c5d09a21`,
   which includes the wide-int lane (`17dbb9ce5`, `7b04ab15c`), the default
   `bin/souc` -> Madaros wrapper lane (`8d5193a64`, `077361b28`), and the checked
   prebuilt Madaros ELF (`42293db35`).
@@ -42,6 +44,16 @@ is preserved as `bin/souc-lean-single-x86_64`.
 - Madaros is the **Stage1 modular compiler** (`bin/madaros`,
   `scripts/ci/build_modular_madaros.sh`, `scripts/ci/madaros_full_gate.sh`).
   It is distinct from `souc` (the lean_single monolith), which still ships.
+- As of `origin/main@b1f6bb1b7`, production readiness is governed by
+  `docs/audit/MADAROS_PRODUCTION_READINESS_PLAN_2026-06-21.md` and issue #356.
+  The known-open blocker probe still reproduces:
+  - `BLK-20260621-codex-source-elf-normal-bss`: minimal global read/write
+    source-to-ELF witnesses compile-segfault with `rc=139`.
+  - `BLK-20260621-codex-madaros-build-segfault`: promoted-workspace local
+    self-build still exits `build_rc_139`.
+
+Do not say "Madaros is production-ready" until those blocker records are closed
+or explicitly narrowed with new acceptance gates.
 
 ## The only valid proof gate
 
