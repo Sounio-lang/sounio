@@ -24,10 +24,10 @@ The plan coordinates:
 
 Current baseline:
 
-- `origin/main`: `a6c2e1f771505b4824908a185f6e1309f47e97b0`
-  (`Merge pull request #351 from Sounio-lang/codex/bucket-d-script-hardening`).
+- `origin/main`: `4e8a5b48b1356b2c6ee061ef37c3a8065c06ca75`
+  (`Merge pull request #353 from Sounio-lang/codex/madaros-root2-readonly-probe`).
 - Protected dirty primary checkout: `/workspace/sounio`.
-- Current planning worktree: `/tmp/sounio-madaros-production-plan`.
+- Current planning worktree: `/tmp/sounio-madaros-root2-operator-gate`.
 
 The goal is not to make every old worktree disappear immediately. The goal is
 to ensure that only current, gated, ownership-clear work can influence Madaros
@@ -155,6 +155,15 @@ env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
   bash scripts/run_sio_test_suite.sh <focused-suite> --verbose
 ```
 
+Packaged operator gate:
+
+```bash
+scripts/ops/madaros_root2_acceptance_gate.sh
+```
+
+Use `--allow-fail` only for diagnostic snapshots while the blocker is still
+open; a merge-ready compiler lane must run the gate without `--allow-fail`.
+
 Exit:
 
 - Archive notes are replaced by current evidence or explicitly closed as stale.
@@ -177,6 +186,8 @@ Minimum local gates:
 ```bash
 env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
   bash scripts/run_sio_test_suite.sh <new-focused-tests> --verbose
+
+scripts/ops/madaros_root2_acceptance_gate.sh
 
 bash scripts/ci/build_native_souc.sh
 ```
