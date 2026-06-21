@@ -125,6 +125,20 @@ blocker; it is now specifically primary-checkout reconciliation plus Claude-lane
 coordination. The primary checkout is now evidence-preserved but intentionally
 not cleaned.
 
+Follow-up governance gate:
+
+- `scripts/dev/worktree_branch_audit.sh --check` now fails when unallowed
+  critical dirty worktrees or prunable worktree records are present.
+- The CI `Contracts` job runs that gate in strict mode. Fresh CI clones should
+  have zero prunable records and zero unallowed dirty critical worktrees.
+- Local operation may temporarily allow known active lanes by setting
+  `SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE`, but that exception must name exact
+  worktree paths and keep `unallowed_critical_dirty=0`.
+- The current known active exceptions are the protected primary checkout and
+  the Claude-owned compiler lane:
+  - `/workspace/sounio`
+  - `/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b`
+
 ## Post-#336 Resolution Plan
 
 This is the active plan for turning the audit into cleanup. It is intentionally
@@ -200,6 +214,18 @@ parked outside the Madaros production-readiness lane.
    - workspace context hydration (`.beagle/context/**`)
    - audit/handoff notes and Slurm helper scripts
    - large generated data inventory (`data/processed/expansion`)
+
+7. Enforce the audit as a gate, not a report.
+
+   The audit script now supports `--check`. In check mode the default contract is:
+
+   - `SOUNIO_AUDIT_MAX_PRUNABLE=0`
+   - `SOUNIO_AUDIT_MAX_CRITICAL_DIRTY=0`
+   - no implicit allowance for dirty compiler/native/CI paths
+
+   Local operators may set `SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE` only for
+   explicitly claimed active lanes. The useful invariant is not "no work can be
+   dirty"; it is "no dirty critical worktree is invisible or ownerless."
 
 ## Original Snapshot
 
