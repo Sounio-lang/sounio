@@ -10,6 +10,7 @@ RUN_OPEN_BLOCKERS=0
 RUN_SOURCE_TO_ELF=0
 CHECK_COMPILER_LANE=0
 CHECK_COMPILER_PR_OVERLAP=0
+CHECK_PR_RESOLUTION_QUEUE=0
 IN_PRODUCTION_READY_CHECK=0
 COMPILER_LANE_PATH="${SOUNIO_MADAROS_COMPILER_LANE:-/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b}"
 REFRESH_GH=0
@@ -17,6 +18,7 @@ STRICT=0
 PRODUCTION_READY=0
 PRODUCTION_READY_FAILED=0
 COMPILER_PR_OVERLAP_FAILED=0
+PR_RESOLUTION_QUEUE_FAILED=0
 OPEN_BLOCKERS_FAILED=0
 OPEN_BLOCKERS_OUT_DIR=""
 OPEN_BLOCKERS_REPORT=""
@@ -43,6 +45,9 @@ Options:
   --check-compiler-pr-overlap
                        inspect open PRs for overlap with Claude-owned compiler
                        files and fail under --strict if any overlap exists
+  --check-pr-resolution-queue
+                       print the open PR resolution queue and fail under
+                       --strict if compiler ownership overlap remains
   --compiler-lane DIR  override active compiler lane path
   --run-open-blockers  run scripts/ci/madaros_open_blockers_probe.sh
   --run-source-to-elf  run scripts/ci/madaros_source_to_elf_gate.sh
@@ -67,6 +72,9 @@ while (($#)); do
       ;;
     --check-compiler-pr-overlap)
       CHECK_COMPILER_PR_OVERLAP=1
+      ;;
+    --check-pr-resolution-queue)
+      CHECK_PR_RESOLUTION_QUEUE=1
       ;;
     --compiler-lane)
       shift
@@ -349,6 +357,23 @@ run_open_blockers_probe() {
   return 0
 }
 
+run_pr_resolution_queue_check() {
+  local queue_failed=0
+
+  set +e
+  scripts/dev/madaros_pr_resolution_queue.sh --check
+  queue_failed=$?
+  set -e
+
+  if [[ "$queue_failed" != "0" ]]; then
+    PR_RESOLUTION_QUEUE_FAILED=1
+    if [[ "$STRICT" == "1" && "$IN_PRODUCTION_READY_CHECK" != "1" ]]; then
+      return "$queue_failed"
+    fi
+  fi
+  return 0
+}
+
 if [[ "$REFRESH_GH" == "1" ]]; then
   git fetch --prune origin
 fi
@@ -383,6 +408,7 @@ cat <<'EOF'
 3. scripts/ci/madaros_open_blockers_probe.sh
 4. scripts/ci/madaros_source_to_elf_gate.sh
 5. one active compiler owner for the BSS/global blocker
+6. scripts/dev/madaros_pr_resolution_queue.sh
 EOF
 
 section "Active Blockers"
@@ -464,11 +490,23 @@ if [[ "$CHECK_COMPILER_PR_OVERLAP" == "1" ]]; then
   run_compiler_pr_overlap_check
 fi
 
+if [[ "$CHECK_PR_RESOLUTION_QUEUE" == "1" ]]; then
+  section "PR Resolution Queue"
+  run_pr_resolution_queue_check
+fi
+
 if [[ "$PRODUCTION_READY" == "1" ]]; then
   if [[ "$CHECK_COMPILER_PR_OVERLAP" != "1" ]]; then
     section "Compiler PR Overlap"
     IN_PRODUCTION_READY_CHECK=1
     run_compiler_pr_overlap_check
+    IN_PRODUCTION_READY_CHECK=0
+  fi
+
+  if [[ "$CHECK_PR_RESOLUTION_QUEUE" != "1" ]]; then
+    section "PR Resolution Queue"
+    IN_PRODUCTION_READY_CHECK=1
+    run_pr_resolution_queue_check
     IN_PRODUCTION_READY_CHECK=0
   fi
 
@@ -482,9 +520,9 @@ if [[ "$PRODUCTION_READY" == "1" ]]; then
   echo "main_ci_conclusion=$MAIN_CI_CONCLUSION"
   echo "main_ci_head=$MAIN_CI_HEAD"
   echo "main_ci_url=$MAIN_CI_URL"
-  if [[ "$ISSUE_356_STATE" == "CLOSED" && "$COMPILER_PR_OVERLAP_FAILED" == "0" && "$OPEN_BLOCKERS_FAILED" == "0" && "$MAIN_CI_STATUS" == "completed" && "$MAIN_CI_CONCLUSION" == "success" && "$MAIN_CI_HEAD" == "$full_origin_main_sha" ]]; then
+  if [[ "$ISSUE_356_STATE" == "CLOSED" && "$COMPILER_PR_OVERLAP_FAILED" == "0" && "$PR_RESOLUTION_QUEUE_FAILED" == "0" && "$OPEN_BLOCKERS_FAILED" == "0" && "$MAIN_CI_STATUS" == "completed" && "$MAIN_CI_CONCLUSION" == "success" && "$MAIN_CI_HEAD" == "$full_origin_main_sha" ]]; then
     echo "status[production_ready]=pass"
-    echo "reason=issue_356_closed_no_compiler_pr_overlap_open_blockers_closed_and_current_main_ci_green"
+    echo "reason=issue_356_closed_no_compiler_pr_overlap_pr_queue_clear_open_blockers_closed_and_current_main_ci_green"
   else
     echo "status[production_ready]=fail"
     if [[ "$MAIN_CI_STATUS" != "completed" || "$MAIN_CI_CONCLUSION" != "success" || "$MAIN_CI_HEAD" != "$full_origin_main_sha" ]]; then
@@ -500,6 +538,10 @@ if [[ "$PRODUCTION_READY" == "1" ]]; then
     if [[ "$COMPILER_PR_OVERLAP_FAILED" != "0" ]]; then
       echo "reason=compiler_pr_overlap"
       echo "required=resolve open PR overlap with the active Claude compiler lane or transfer ownership explicitly"
+    fi
+    if [[ "$PR_RESOLUTION_QUEUE_FAILED" != "0" ]]; then
+      echo "reason=pr_resolution_queue_blocked"
+      echo "required=resolve the open PR disposition queue entries that overlap compiler ownership"
     fi
     if [[ "$OPEN_BLOCKERS_FAILED" != "0" ]]; then
       echo "reason=open_blockers_not_closed"
@@ -530,6 +572,7 @@ After BSS/global behavior changes:
 Integration shepherd:
   scripts/dev/madaros_readiness_status.sh --strict
   scripts/dev/madaros_readiness_status.sh --check-compiler-pr-overlap
+  scripts/dev/madaros_readiness_status.sh --check-pr-resolution-queue
   scripts/dev/madaros_readiness_status.sh --production-ready
 EOF
 
