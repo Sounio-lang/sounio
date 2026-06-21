@@ -178,7 +178,7 @@ awk -F '\t' '
 echo "resolution_queue:"
 awk -F '\t' '
   NR > 1 {
-    printf "- %s category=%s mergeable=%s action=%s url=%s\n", $1, $7, $6, $9, $10
+    printf "- %s category=%s draft=%s mergeable=%s action=%s url=%s\n", $1, $7, $5, $6, $9, $10
     if ($8 != "") {
       printf "  overlap=%s\n", $8
     }
