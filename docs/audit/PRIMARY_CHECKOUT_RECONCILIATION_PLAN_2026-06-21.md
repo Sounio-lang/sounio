@@ -98,8 +98,9 @@ The archived helper scripts are not production-ready as-is:
 | `scripts/translate_all_locales.sh` | hardcodes an internal Beagle service and writes logs in repo root | parameterize endpoint/model/output path and document that it is operator-only |
 | `slurm-jobs/madaros-frame-fix/*.sh` | operational Slurm helpers tied to a specific Madaros frame-fix lane | refresh against current foundry/Slurm contract before adding |
 
-Exit criterion: do not commit raw scripts. Promote only via a dedicated tooling
-PR with shell validation and an operator-facing contract.
+Exit criterion: `docs/audit/BUCKET_D_SCRIPT_HARDENING_2026-06-21.md` records
+the disposition. Do not commit raw scripts. Promote only via a dedicated
+tooling PR with shell validation and an operator-facing contract.
 
 ### Bucket E — Compiler-Adjacent High Risk
 
@@ -135,7 +136,9 @@ Codex must not write to Claude-owned compiler files during the same phase.
    Madaros notes are classified by
    `docs/audit/MADAROS_ARCHIVE_TRIAGE_2026-06-21.md`.
 4. Mark Bucket C as archive-only unless a future source contract is created.
-5. Harden or discard Bucket D scripts; never commit them raw.
+5. Harden or discard Bucket D scripts; never commit them raw. Current
+   disposition is recorded in
+   `docs/audit/BUCKET_D_SCRIPT_HARDENING_2026-06-21.md`.
 6. Treat Bucket E as compiler work requiring a reproducer, a focused gate, and
    explicit non-overlap with Claude's lane.
 7. After every PR, wait for CI and remove the temporary worktree/branch.
