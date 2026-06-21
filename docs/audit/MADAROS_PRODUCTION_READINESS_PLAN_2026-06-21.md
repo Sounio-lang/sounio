@@ -24,10 +24,10 @@ The plan coordinates:
 
 Current baseline:
 
-- `origin/main`: `c70075772db4265e4f14790c423711f9e6a02d63`
-  (`docs(madaros): add production blocker resolution plan`, #371).
-- `main` CI after #371: success
-  (<https://github.com/Sounio-lang/sounio/actions/runs/27905347997>).
+- `origin/main`: `2ec115e989ac5a58468623d6bd90a18b8207c492`
+  (`docs(madaros): record current worktree disposition queue`, #372).
+- `main` CI after #372: success
+  (<https://github.com/Sounio-lang/sounio/actions/runs/27906018387>).
 - `Madaros Prebuilt Refresh` on `1d0dc6baa`: remote seed-decoupled build and
   `madaros_full_gate` succeeded. The promoted workspace local self-build still
   segfaults and is tracked separately as a workspace parity blocker.
@@ -72,6 +72,12 @@ env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
   bash scripts/ci/madaros_open_blockers_probe.sh
 ```
 
+The next actionable integration command for Codex or the release shepherd is:
+
+```bash
+scripts/dev/madaros_readiness_status.sh --strict
+```
+
 The required BSS closure evidence is:
 
 - `global_read_exit4` exits `4` in `normal`, `native_v2`, and `build`.
@@ -112,6 +118,8 @@ Madaros is production-ready only when all of these are true:
 | Open blocker probe | `scripts/ci/madaros_open_blockers_probe.sh` keeps known-open direct-call, BSS, and local workspace self-build parity witnesses executable without promoting them to production manifests | #363/#367/#369 plus post-merge `main` CI |
 | Governance control surfaces | Worktree audit treats agent contracts and governance scripts as critical surfaces | #365 plus post-merge `main` CI |
 | Production readiness plan | Current-main readiness plan is committed and merged | #366 plus post-merge local verification |
+| Worktree disposition queue | Current worktree/branch/PR disposition queue is committed and merged | #372 plus post-merge `main` CI |
+| Readiness status command | `scripts/dev/madaros_readiness_status.sh` prints the current baseline, GitHub state, audit gate, blockers, and next gates | current branch pending merge |
 | Direct-call argument ABI | `call_arg_id_exit42` exits 42 in normal/native_v2/build and is now a regression control, not an open blocker | #367 plus post-merge local verification |
 
 ## Phase 0 — Freeze Source Of Truth
@@ -410,11 +418,12 @@ env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
 For Codex/integration:
 
 ```bash
-cd /tmp/sounio-bss-segfault-investigate
+cd /tmp/sounio-madaros-next
 git status --short --branch
+scripts/dev/madaros_readiness_status.sh --strict
 bash scripts/dev/check_docs_registry.sh
 bash scripts/dev/check_docs_consistency.sh
-SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE='^(/workspace/sounio|/workspace/sounio-effects|/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b|/tmp/sounio-bss-segfault-investigate)$' \
+SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE='^(/workspace/sounio|/workspace/sounio-effects|/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b|/tmp/sounio-madaros-next)$' \
   scripts/dev/worktree_branch_audit.sh --check
 ```
 
