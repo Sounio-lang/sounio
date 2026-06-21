@@ -10,11 +10,13 @@ RUN_OPEN_BLOCKERS=0
 RUN_SOURCE_TO_ELF=0
 CHECK_COMPILER_LANE=0
 CHECK_COMPILER_PR_OVERLAP=0
+IN_PRODUCTION_READY_CHECK=0
 COMPILER_LANE_PATH="${SOUNIO_MADAROS_COMPILER_LANE:-/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b}"
 REFRESH_GH=0
 STRICT=0
 PRODUCTION_READY=0
 PRODUCTION_READY_FAILED=0
+COMPILER_PR_OVERLAP_FAILED=0
 ISSUE_356_STATE="unknown"
 
 usage() {
@@ -230,7 +232,8 @@ run_compiler_pr_overlap_check() {
 
   if ! have gh; then
     echo "status[compiler_pr_overlap]=unavailable gh_missing"
-    if [[ "$STRICT" == "1" ]]; then
+    COMPILER_PR_OVERLAP_FAILED=1
+    if [[ "$STRICT" == "1" && "$IN_PRODUCTION_READY_CHECK" != "1" ]]; then
       return 1
     fi
     return 0
@@ -285,7 +288,8 @@ run_compiler_pr_overlap_check() {
   fi
 
   echo "status[compiler_pr_overlap]=fail count=$overlap_count"
-  if [[ "$STRICT" == "1" ]]; then
+  COMPILER_PR_OVERLAP_FAILED=1
+  if [[ "$STRICT" == "1" && "$IN_PRODUCTION_READY_CHECK" != "1" ]]; then
     return 1
   fi
   return 0
@@ -375,20 +379,6 @@ else
   echo "gh=missing"
 fi
 
-if [[ "$PRODUCTION_READY" == "1" ]]; then
-  section "Production Ready Verdict"
-  if [[ "$ISSUE_356_STATE" == "CLOSED" ]]; then
-    echo "status[production_ready]=pass"
-    echo "reason=issue_356_closed"
-  else
-    echo "status[production_ready]=fail"
-    echo "reason=issue_356_state_${ISSUE_356_STATE}"
-    echo "blocking_issue=https://github.com/Sounio-lang/sounio/issues/356"
-    echo "required=close or explicitly narrow BLK-20260621-codex-source-elf-normal-bss and BLK-20260621-codex-madaros-build-segfault"
-    PRODUCTION_READY_FAILED=1
-  fi
-fi
-
 if [[ "$RUN_AUDIT" == "1" ]]; then
   section "Worktree Audit"
   audit_allow_default="^(/workspace/sounio|/workspace/sounio-effects|/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b|$ROOT_DIR)$"
@@ -406,6 +396,33 @@ fi
 if [[ "$CHECK_COMPILER_PR_OVERLAP" == "1" ]]; then
   section "Compiler PR Overlap"
   run_compiler_pr_overlap_check
+fi
+
+if [[ "$PRODUCTION_READY" == "1" ]]; then
+  if [[ "$CHECK_COMPILER_PR_OVERLAP" != "1" ]]; then
+    section "Compiler PR Overlap"
+    IN_PRODUCTION_READY_CHECK=1
+    run_compiler_pr_overlap_check
+    IN_PRODUCTION_READY_CHECK=0
+  fi
+
+  section "Production Ready Verdict"
+  if [[ "$ISSUE_356_STATE" == "CLOSED" && "$COMPILER_PR_OVERLAP_FAILED" == "0" ]]; then
+    echo "status[production_ready]=pass"
+    echo "reason=issue_356_closed_and_no_compiler_pr_overlap"
+  else
+    echo "status[production_ready]=fail"
+    if [[ "$ISSUE_356_STATE" != "CLOSED" ]]; then
+      echo "reason=issue_356_state_${ISSUE_356_STATE}"
+      echo "blocking_issue=https://github.com/Sounio-lang/sounio/issues/356"
+      echo "required=close or explicitly narrow BLK-20260621-codex-source-elf-normal-bss and BLK-20260621-codex-madaros-build-segfault"
+    fi
+    if [[ "$COMPILER_PR_OVERLAP_FAILED" != "0" ]]; then
+      echo "reason=compiler_pr_overlap"
+      echo "required=resolve open PR overlap with the active Claude compiler lane or transfer ownership explicitly"
+    fi
+    PRODUCTION_READY_FAILED=1
+  fi
 fi
 
 section "Next Gates"
