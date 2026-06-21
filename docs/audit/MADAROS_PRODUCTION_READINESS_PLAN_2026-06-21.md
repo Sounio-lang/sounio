@@ -161,6 +161,14 @@ Packaged operator gate:
 scripts/ops/madaros_root2_acceptance_gate.sh
 ```
 
+From a current checkout, the same gate can target an older active compiler lane
+without copying files into that lane:
+
+```bash
+scripts/ops/madaros_root2_acceptance_gate.sh \
+  --root /workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b
+```
+
 Use `--allow-fail` only for diagnostic snapshots while the blocker is still
 open; a merge-ready compiler lane must run the gate without `--allow-fail`.
 
