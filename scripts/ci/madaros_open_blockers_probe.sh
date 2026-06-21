@@ -260,6 +260,29 @@ run_lowering_diagnostics() {
   cat "$LOWERING_REPORT"
 }
 
+print_lowering_handoff_summary() {
+  if [[ ! -s "$LOWERING_REPORT" ]]; then
+    return 0
+  fi
+
+  local read_row store_row
+  read_row="$(awk -F '\t' '$1 == "global_read_exit4" { print }' "$LOWERING_REPORT")"
+  store_row="$(awk -F '\t' '$1 == "global_store_exit7" { print }' "$LOWERING_REPORT")"
+
+  local read_rc read_stage read_m1 read_m2 read_m3 read_log
+  local store_rc store_stage store_m1 store_m2 store_m3 store_log
+  IFS=$'\t' read -r _ read_rc read_stage read_m1 read_m2 read_m3 read_log <<<"$read_row"
+  IFS=$'\t' read -r _ store_rc store_stage store_m1 store_m2 store_m3 store_log <<<"$store_row"
+
+  echo "[madaros-open-blockers] lowering_handoff:"
+  echo "  blocker=BLK-20260621-codex-source-elf-normal-bss"
+  echo "  owner=Claude compiler/codegen lane unless ownership transfers explicitly"
+  echo "  observed[global_read_exit4]=rc=$read_rc last_lower_stage=$read_stage markers=$read_m1/$read_m2/$read_m3 log=$read_log"
+  echo "  observed[global_store_exit7]=rc=$store_rc last_lower_stage=$store_stage markers=$store_m1/$store_m2/$store_m3 log=$store_log"
+  echo "  target=standard module_frontend_lower body lowering before backend handoff"
+  echo "  acceptance=global_read_exit4 exits 4; global_store_exit7 exits 7; source-to-ELF gate green; blocker expectations updated"
+}
+
 # Controls: user-function calls, with and without arguments, are no longer the
 # open source-to-ELF blocker.
 run_case "control" "call_noarg_exit42" "$SRC_DIR/call_noarg_exit42.sio" "normal" "42"
@@ -286,6 +309,7 @@ run_self_build_case "BLK-20260621-codex-madaros-build-segfault" "self_build_mada
 
 if [[ "$RUN_LOWERING_DIAGNOSTICS" == "1" ]]; then
   run_lowering_diagnostics
+  print_lowering_handoff_summary
 fi
 
 cat "$REPORT"
