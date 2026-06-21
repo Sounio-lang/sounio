@@ -35,6 +35,11 @@ Releases are **event-driven**, not calendar-driven. A release is cut when:
 
 There is no fixed cadence. Research languages evolve in bursts aligned with paper deadlines and sprint completions.
 
+Manual `Release Gate` runs may set `native-runtime-filter` to narrow the Apple
+Self-Host native runtime proof during blocker triage. Filtered runs are
+diagnostic evidence only; an unfiltered release gate is still required before a
+release can be considered ready.
+
 ## Release Checklist
 
 Before tagging a release:
