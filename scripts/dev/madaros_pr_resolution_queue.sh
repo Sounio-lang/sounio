@@ -165,12 +165,21 @@ awk -F '\t' '
   NR > 1 {
     total++
     category[$7]++
+    if ($7 == "compiler_owner_overlap") {
+      if ($5 == "true") {
+        compiler_owner_overlap_draft++
+      } else {
+        compiler_owner_overlap_ready++
+      }
+    }
   }
   END {
     printf "summary total=%d", total
     for (name in category) {
       printf " %s=%d", name, category[name]
     }
+    printf " compiler_owner_overlap_draft=%d compiler_owner_overlap_ready=%d",
+      compiler_owner_overlap_draft, compiler_owner_overlap_ready
     printf "\n"
   }
 ' "$OUT"
