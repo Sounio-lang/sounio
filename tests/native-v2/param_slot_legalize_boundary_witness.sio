@@ -1,0 +1,51 @@
+// Native-v2 parameter-slot legalize boundary witness.
+//
+// Legalization temps must start after IR vregs. If temp allocation restarts at
+// zero, MOV_IMM/LOAD_STACK temps reuse parameter slots and user-function
+// arguments are overwritten before return.
+
+use ir::ir::{ir_empty_function, ir_load_imm, ir_return}
+use native::machine_ir::{MIR_OP_MOV_IMM, MIR_OP_STORE_STACK, native_v2_lower_function_to_machine, native_v2_legalize_function}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    var func = ir_empty_function()
+    func.reg_count = 2
+    func.param_count = 1
+    func.param_regs[0] = 0
+    func.instrs[0] = ir_load_imm(1, 42)
+    func.instrs[1] = ir_return(0)
+    func.instr_count = 2
+
+    let lowered = native_v2_lower_function_to_machine(func)
+    if lowered.temp_count < func.reg_count {
+        print("lower temp_count below reg_count\n")
+        return 1
+    }
+
+    let legal = native_v2_legalize_function(lowered)
+    if legal.blocks[0].instr_count < 2 {
+        print("legal instr_count too small\n")
+        return 2
+    }
+
+    let mov = legal.blocks[0].instrs[0]
+    let store = legal.blocks[0].instrs[1]
+    if mov.opcode != MIR_OP_MOV_IMM {
+        print("expected first legal instr MOV_IMM\n")
+        return 3
+    }
+    if store.opcode != MIR_OP_STORE_STACK {
+        print("expected second legal instr STORE_STACK\n")
+        return 4
+    }
+    if mov.dst.value < func.reg_count {
+        print("legal temp overlaps IR vreg slot\n")
+        return 5
+    }
+    if store.dst.value != 1 || store.src1.value != mov.dst.value {
+        print("store does not move temp into IR dst slot\n")
+        return 6
+    }
+
+    0
+}
