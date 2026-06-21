@@ -427,12 +427,11 @@ if have gh; then
       --json databaseId,name,status,conclusion,headSha,url \
       --jq '
         [.[] | select(.name == "CI")][0]
-        | if . == null then empty else [.status, (.conclusion // ""), .headSha, .url] | @tsv end
+        | if . == null then empty else [.status, (if ((.conclusion // "") == "") then "none" else .conclusion end), .headSha, .url] | @tsv end
       ' 2>/dev/null || true
   )"
   if [[ -n "$main_ci_fields" ]]; then
     IFS=$'\t' read -r MAIN_CI_STATUS MAIN_CI_CONCLUSION MAIN_CI_HEAD MAIN_CI_URL <<<"$main_ci_fields"
-    [[ -n "$MAIN_CI_CONCLUSION" ]] || MAIN_CI_CONCLUSION="none"
   fi
 
   gh run list --repo "$REPO" --branch main --limit 10 \
