@@ -5245,6 +5245,11 @@ impl Lowerer {
                         if ret_name.len > 0 {
                             lo = lo.bind_local_struct_type(s.name, ret_name)
                         }
+                    } else {
+                        // `let b = Box::new(...)`: tag the local's struct-type slot with
+                        // "Box" so `*b` lowers to a field-0 read (box deref through the
+                        // handle) rather than a raw IrUnaryOp(OpDeref) pointer load.
+                        lo = lo.bind_local_struct_type(s.name, callee_struct_name)
                     }
                 }
             }
@@ -6765,13 +6770,36 @@ impl Lowerer {
     }
 
     fn lower_unary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // `*b` where b is a Box reads field 0 of the heap object (where lower_box_new
+        // stored the value via ir_field_set(ptr, 0, val)), so route Box deref to
+        // IrFieldGet(0) — codegen resolves the handle. IrUnaryOp(OpDeref) stays a raw
+        // pointer load for true references (&T), which are raw addresses, not handles.
+        let is_box_deref = if e.un_op == UnaryOp::OpDeref {
+            let opt_ref = &e.left
+            match *opt_ref {
+                Some(operand) => {
+                    if (*operand).kind == ExprKind::ExprIdent {
+                        ir_name_is_box(self.lookup_local_struct_type((*operand).name))
+                    } else {
+                        false
+                    }
+                }
+                None => false,
+            }
+        } else {
+            false
+        }
         let pair_s = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_s.0
         let src = pair_s.1
         let pair_d = lo1.fresh_reg()
         let lo2 = pair_d.0
         let dst = pair_d.1
-        let lo3 = lo2.emit(ir_unaryop(dst, e.un_op, src))
+        let lo3 = if is_box_deref {
+            lo2.emit(ir_field_get(dst, src, 0, ir_empty_name()))
+        } else {
+            lo2.emit(ir_unaryop(dst, e.un_op, src))
+        }
         (lo3, dst)
     }
 
