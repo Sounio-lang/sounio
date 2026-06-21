@@ -15,6 +15,9 @@ struct LowerLocalStack {
     array_elem_float: [i64; 4096],
     wide_bits: [i64; 4096],
     wide_signed: [i64; 4096],
+    global_bss_offsets: [i64; 4096],
+    global_bss_sizes: [i64; 4096],
+    is_global: [i64; 4096],
     count: i64,
 }
 
@@ -27,6 +30,9 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         array_elem_float: [0; 4096],
         wide_bits: [0; 4096],
         wide_signed: [0; 4096],
+        global_bss_offsets: [0; 4096],
+        global_bss_sizes: [0; 4096],
+        is_global: [0; 4096],
         count: 0,
     }
 }
@@ -277,6 +283,17 @@ fn lowerer_find_hyper_expr_id_for_span_ref(lo: &Lowerer, span: Span) -> i64 with
     while i < (*(*lo).module).epistemic.hyper_expr_count {
         let info = (*(*lo).module).epistemic.hyper_exprs[i as usize]
         if lower_span_matches_metadata((*lo).probe_mode, span, info.span_start, info.span_end) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn lowerer_lookup_fn_id_by_name_ref(lo: &Lowerer, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*(*lo).module).fn_count {
+        if ir_name_eq((*(*lo).module).functions[i as usize].name, name) {
             return i
         }
         i = i + 1
@@ -1466,9 +1483,30 @@ fn lowerer_bind_local_mut(
         (*(*lo).locals).array_elem_float[idx as usize] = 0
         (*(*lo).locals).wide_bits[idx as usize] = 0
         (*(*lo).locals).wide_signed[idx as usize] = 0
+        (*(*lo).locals).global_bss_offsets[idx as usize] = 0
+        (*(*lo).locals).global_bss_sizes[idx as usize] = 0
+        (*(*lo).locals).is_global[idx as usize] = 0
         (*(*lo).locals).count = idx + 1
     } else {
         lowerer_mark_error(lo)
+    }
+}
+
+fn lowerer_mark_local_global_mut(
+    lo: &! Lowerer,
+    name: Name,
+    bss_offset: i64,
+    bss_size: i64
+) with Mut, Alloc, Panic, Div {
+    var i = (*(*lo).locals).count - 1
+    while i >= 0 {
+        if (*(*lo).locals).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*lo).locals).names[i as usize], name) {
+            (*(*lo).locals).global_bss_offsets[i as usize] = bss_offset
+            (*(*lo).locals).global_bss_sizes[i as usize] = bss_size
+            (*(*lo).locals).is_global[i as usize] = 1
+            return
+        }
+        i = i - 1
     }
 }
 
@@ -1651,6 +1689,8 @@ fn lowerer_lower_fn_item_mut(
         print_int((*(*lo).current_func).param_count)
         print("\n")
     }
+
+    (*lo) = (*lo).preload_bss_globals_as_locals()
 
     let bpair = (*lo).lower_block_ref(&fd.body)
     (*lo) = bpair.0
@@ -2952,6 +2992,39 @@ impl Lowerer {
         IR_INVALID_REG
     }
 
+    fn lookup_local_is_global(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).is_global[i as usize] == 1
+            }
+            i = i - 1
+        }
+        false
+    }
+
+    fn lookup_local_global_bss_offset(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).global_bss_offsets[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    fn lookup_local_global_bss_size(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).global_bss_sizes[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
     fn lookup_local_struct_type(self, name: Name) -> Name with Mut, Panic, Div, Alloc {
         var i = (*self.locals).count - 1
         while i >= 0 {
@@ -3029,6 +3102,28 @@ impl Lowerer {
         0
     }
 
+    fn preload_bss_globals_as_locals(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < lo.module.fn_count && i < 2048 {
+            let g = lo.module.functions[i as usize]
+            if g.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                let pair = lo.fresh_reg()
+                lo = pair.0
+                let reg = pair.1
+                if g.bss_size > 8 {
+                    lo = lo.emit(ir_load_imm(reg, BSS_BASE_LINUX + g.param_count))
+                } else {
+                    lo = lo.emit(ir_load_global(reg, g.param_count, g.name))
+                }
+                lowerer_bind_local_mut(&! lo, g.name, reg, false)
+                lowerer_mark_local_global_mut(&! lo, g.name, g.param_count, g.bss_size)
+            }
+            i = i + 1
+        }
+        lo
+    }
+
     // Sprint 228: Look up a function by name in the module. Returns (Lowerer, fn_id) where
     // fn_id >= 0 if found, -1 if not a known function.
     fn lookup_fn_by_name(self, name: Name) -> (Lowerer, i64) with Mut, Panic, Div {
@@ -3061,8 +3156,7 @@ impl Lowerer {
                 } else {
                     return ir_empty_name()
                 }
-                let fn_lookup = self.lookup_fn_by_name(callee_name)
-                let fn_id = fn_lookup.1
+                let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 self.return_struct_name_for_fn_id(fn_id)
             }
             None => ir_empty_name(),
@@ -4835,6 +4929,7 @@ impl Lowerer {
             print(str_from_bytes(name.buf, name.len))
             print("\n")
         }
+        lo = lo.preload_bss_globals_as_locals()
         let bpair = lo.lower_block_ref(&fd.body)
         lo = bpair.0
         let result_reg = bpair.1
@@ -5145,9 +5240,7 @@ impl Lowerer {
                 if (*target_expr).kind == ExprKind::ExprIdent {
                         let dst = lo.lookup_local((*target_expr).name)
                         if dst < 0 {
-                            let fn_lookup = lo.lookup_fn_by_name((*target_expr).name)
-                            lo = fn_lookup.0
-                            let bss_fn_id = fn_lookup.1
+                            let bss_fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, (*target_expr).name)
                             if bss_fn_id >= 0 && bss_fn_id < lo.module.fn_count && lo.module.functions[bss_fn_id as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
                                 let bss_off = lo.module.functions[bss_fn_id as usize].param_count
                                 lo = lo.emit(ir_store_global(rhs, bss_off, (*target_expr).name))
@@ -5157,6 +5250,10 @@ impl Lowerer {
                                 (lo, rhs)
                             }
                         } else {
+                            if lo.lookup_local_is_global((*target_expr).name) {
+                                let bss_off_local = lo.lookup_local_global_bss_offset((*target_expr).name)
+                                lo = lo.emit(ir_store_global(rhs, bss_off_local, (*target_expr).name))
+                            }
                             lo = lo.emit(ir_copy(dst, rhs))
                             (lo, dst)
                         }
@@ -7020,15 +7117,13 @@ impl Lowerer {
             if src >= 0 {
                 (self, src)
             } else {
-                let fn_lookup = self.lookup_fn_by_name(e.name)
-                let lo_fn = fn_lookup.0
-                let fn_id = fn_lookup.1
-                if fn_id >= 0 && fn_id < lo_fn.module.fn_count {
-                    let fn_strategy = lo_fn.module.functions[fn_id as usize].compile_strategy
+                let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, e.name)
+                if fn_id >= 0 && fn_id < self.module.fn_count {
+                    let fn_strategy = self.module.functions[fn_id as usize].compile_strategy
                     if fn_strategy == IR_STRATEGY_BSS_GLOBAL {
-                        let bss_off = lo_fn.module.functions[fn_id as usize].param_count
-                        let gsize = lo_fn.module.functions[fn_id as usize].bss_size
-                        let ref_pair = lo_fn.fresh_reg()
+                        let bss_off = self.module.functions[fn_id as usize].param_count
+                        let gsize = self.module.functions[fn_id as usize].bss_size
+                        let ref_pair = self.fresh_reg()
                         let lo2 = ref_pair.0
                         let ref_reg = ref_pair.1
                         var lo3 = lo2
@@ -7039,23 +7134,23 @@ impl Lowerer {
                         }
                         (lo3, ref_reg)
                     } else {
-                        let ref_pair = lo_fn.fresh_reg()
+                        let ref_pair = self.fresh_reg()
                         let lo2 = ref_pair.0
                         let ref_reg = ref_pair.1
                         let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
                         (lo3, ref_reg)
                     }
                 } else {
-                    if lo_fn.probe_mode && lower_body_diag_enabled() {
+                    if self.probe_mode && lower_body_diag_enabled() {
                         print("lower_probe: ident_miss name=")
                         print(str_from_bytes(e.name.buf, e.name.len))
                         print(" scope=")
-                        print_int(lo_fn.scope_depth)
+                        print_int(self.scope_depth)
                         print(" local_count=")
-                        print_int(lo_fn.locals.count)
+                        print_int(self.locals.count)
                         print("\n")
                     }
-                    let loe = lo_fn.report_error()
+                    let loe = self.report_error()
                     loe.emit_unit()
                 }
             }
@@ -7098,17 +7193,15 @@ impl Lowerer {
                 (self, src)
             } else {
                 // Sprint 228: Check if this is a function name used as a first-class value
-                let fn_lookup = self.lookup_fn_by_name(n)
-                let lo_fn = fn_lookup.0
-                let fn_id = fn_lookup.1
+                let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, n)
                 if fn_id >= 0 {
-                    let ref_pair = lo_fn.fresh_reg()
+                    let ref_pair = self.fresh_reg()
                     let lo2 = ref_pair.0
                     let ref_reg = ref_pair.1
                     let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
                     (lo3, ref_reg)
                 } else {
-                    let loe = lo_fn.report_error()
+                    let loe = self.report_error()
                     loe.emit_unit()
                 }
             }
