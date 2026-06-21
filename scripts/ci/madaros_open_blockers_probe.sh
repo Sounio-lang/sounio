@@ -137,24 +137,22 @@ run_case() {
     "$blocker_id" "$case_id" "$mode" "$expected_open_exit" "$actual_exit" "$status" >>"$REPORT"
 }
 
-# Control: user-function calls without arguments are not the open ABI blocker.
+# Controls: user-function calls, with and without arguments, are no longer the
+# open source-to-ELF blocker.
 run_case "control" "call_noarg_exit42" "$SRC_DIR/call_noarg_exit42.sio" "normal" "42"
 run_case "control" "call_noarg_exit42" "$SRC_DIR/call_noarg_exit42.sio" "native_v2" "42"
 run_case "control" "call_noarg_exit42" "$SRC_DIR/call_noarg_exit42.sio" "build" "42"
-
-# BLK-20260621-codex-source-elf-direct-call-arg:
-# Calls with an i64 user-function argument currently compile but exit 0.
-run_case "BLK-20260621-codex-source-elf-direct-call-arg" "call_arg_id_exit42" "$SRC_DIR/call_arg_id_exit42.sio" "normal" "0"
-run_case "BLK-20260621-codex-source-elf-direct-call-arg" "call_arg_id_exit42" "$SRC_DIR/call_arg_id_exit42.sio" "native_v2" "0"
-run_case "BLK-20260621-codex-source-elf-direct-call-arg" "call_arg_id_exit42" "$SRC_DIR/call_arg_id_exit42.sio" "build" "0"
+run_case "control" "call_arg_id_exit42" "$SRC_DIR/call_arg_id_exit42.sio" "normal" "42"
+run_case "control" "call_arg_id_exit42" "$SRC_DIR/call_arg_id_exit42.sio" "native_v2" "42"
+run_case "control" "call_arg_id_exit42" "$SRC_DIR/call_arg_id_exit42.sio" "build" "42"
 
 # BLK-20260621-codex-source-elf-normal-bss:
-# Root2 BSS read/store are healthy in native_v2/build, but normal mode still
-# routes through the fallback emitter and segfaults for a BSS global read.
-run_case "BLK-20260621-codex-source-elf-normal-bss" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "normal" "139"
-run_case "BLK-20260621-codex-source-elf-normal-bss" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "native_v2" "4"
-run_case "BLK-20260621-codex-source-elf-normal-bss" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "build" "4"
-run_case "BLK-20260621-codex-source-elf-normal-bss" "global_store_exit7" "$SRC_DIR/global_store_exit7.sio" "build" "7"
+# Current main segfaults in the raw Madaros compiler while compiling minimal
+# BSS-global read/store witnesses, before an ELF is produced.
+run_case "BLK-20260621-codex-source-elf-normal-bss" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "normal" "compile_rc_139"
+run_case "BLK-20260621-codex-source-elf-normal-bss" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "native_v2" "compile_rc_139"
+run_case "BLK-20260621-codex-source-elf-normal-bss" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "build" "compile_rc_139"
+run_case "BLK-20260621-codex-source-elf-normal-bss" "global_store_exit7" "$SRC_DIR/global_store_exit7.sio" "build" "compile_rc_139"
 
 cat "$REPORT"
 
