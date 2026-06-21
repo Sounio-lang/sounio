@@ -137,6 +137,37 @@ run_case() {
     "$blocker_id" "$case_id" "$mode" "$expected_open_exit" "$actual_exit" "$status" >>"$REPORT"
 }
 
+run_self_build_case() {
+  local blocker_id="$1"
+  local case_id="$2"
+  local expected_open_exit="$3"
+
+  local build_dir="$OUT_DIR/self_build"
+  local out_bin="$build_dir/madaros"
+  local build_log="$LOG_DIR/${case_id}.build.log"
+
+  mkdir -p "$build_dir"
+
+  set +e
+  env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
+    bash scripts/ci/build_modular_madaros.sh "$out_bin" >"$build_log" 2>&1
+  local build_rc=$?
+  set -e
+
+  local actual_exit="build_rc_${build_rc}"
+  if [[ "$build_rc" -eq 0 && -x "$out_bin" ]]; then
+    actual_exit="build_rc_0"
+  fi
+
+  local status="still_open"
+  if [[ "$actual_exit" != "$expected_open_exit" ]]; then
+    status="changed"
+  fi
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$blocker_id" "$case_id" "self_build" "$expected_open_exit" "$actual_exit" "$status" >>"$REPORT"
+}
+
 # Controls: user-function calls, with and without arguments, are no longer the
 # open source-to-ELF blocker.
 run_case "control" "call_noarg_exit42" "$SRC_DIR/call_noarg_exit42.sio" "normal" "42"
@@ -153,6 +184,13 @@ run_case "BLK-20260621-codex-source-elf-normal-bss" "global_read_exit4" "$SRC_DI
 run_case "BLK-20260621-codex-source-elf-normal-bss" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "native_v2" "compile_rc_139"
 run_case "BLK-20260621-codex-source-elf-normal-bss" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "build" "compile_rc_139"
 run_case "BLK-20260621-codex-source-elf-normal-bss" "global_store_exit7" "$SRC_DIR/global_store_exit7.sio" "build" "compile_rc_139"
+
+# BLK-20260621-codex-madaros-build-segfault:
+# Current main segfaults while the lean_single seed compiles
+# self-hosted/compiler/main.sio into the modular Madaros artifact. This witness
+# keeps that production-readiness blocker executable without editing compiler
+# files owned by the active compiler lane.
+run_self_build_case "BLK-20260621-codex-madaros-build-segfault" "self_build_madaros" "build_rc_139"
 
 cat "$REPORT"
 
