@@ -18,6 +18,10 @@ PRODUCTION_READY=0
 PRODUCTION_READY_FAILED=0
 COMPILER_PR_OVERLAP_FAILED=0
 ISSUE_356_STATE="unknown"
+MAIN_CI_STATUS="unknown"
+MAIN_CI_CONCLUSION="unknown"
+MAIN_CI_HEAD="unknown"
+MAIN_CI_URL="unknown"
 
 usage() {
   cat <<'USAGE'
@@ -368,6 +372,19 @@ if have gh; then
       (.[] | "pr=#\(.number) mergeable=\(.mergeable) draft=\(.isDraft) base=\(.baseRefName) head=\(.headRefName) url=\(.url)")
     ' 2>/dev/null || echo "open_prs=unavailable"
 
+  main_ci_fields="$(
+    gh run list --repo "$REPO" --branch main --limit 10 \
+      --json databaseId,name,status,conclusion,headSha,url \
+      --jq '
+        [.[] | select(.name == "CI")][0]
+        | if . == null then empty else [.status, (.conclusion // ""), .headSha, .url] | @tsv end
+      ' 2>/dev/null || true
+  )"
+  if [[ -n "$main_ci_fields" ]]; then
+    IFS=$'\t' read -r MAIN_CI_STATUS MAIN_CI_CONCLUSION MAIN_CI_HEAD MAIN_CI_URL <<<"$main_ci_fields"
+    [[ -n "$MAIN_CI_CONCLUSION" ]] || MAIN_CI_CONCLUSION="none"
+  fi
+
   gh run list --repo "$REPO" --branch main --limit 10 \
     --json databaseId,name,status,conclusion,headSha,url \
     --jq '
@@ -407,11 +424,20 @@ if [[ "$PRODUCTION_READY" == "1" ]]; then
   fi
 
   section "Production Ready Verdict"
-  if [[ "$ISSUE_356_STATE" == "CLOSED" && "$COMPILER_PR_OVERLAP_FAILED" == "0" ]]; then
+  echo "main_ci_status=$MAIN_CI_STATUS"
+  echo "main_ci_conclusion=$MAIN_CI_CONCLUSION"
+  echo "main_ci_head=$MAIN_CI_HEAD"
+  echo "main_ci_url=$MAIN_CI_URL"
+  if [[ "$ISSUE_356_STATE" == "CLOSED" && "$COMPILER_PR_OVERLAP_FAILED" == "0" && "$MAIN_CI_STATUS" == "completed" && "$MAIN_CI_CONCLUSION" == "success" && "$MAIN_CI_HEAD" == "$full_origin_main_sha" ]]; then
     echo "status[production_ready]=pass"
-    echo "reason=issue_356_closed_and_no_compiler_pr_overlap"
+    echo "reason=issue_356_closed_no_compiler_pr_overlap_and_current_main_ci_green"
   else
     echo "status[production_ready]=fail"
+    if [[ "$MAIN_CI_STATUS" != "completed" || "$MAIN_CI_CONCLUSION" != "success" || "$MAIN_CI_HEAD" != "$full_origin_main_sha" ]]; then
+      echo "reason=main_ci_not_green_for_origin_main"
+      echo "origin_main_full=$full_origin_main_sha"
+      echo "required=latest main CI for current origin/main must be completed/success"
+    fi
     if [[ "$ISSUE_356_STATE" != "CLOSED" ]]; then
       echo "reason=issue_356_state_${ISSUE_356_STATE}"
       echo "blocking_issue=https://github.com/Sounio-lang/sounio/issues/356"
