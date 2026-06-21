@@ -24,10 +24,10 @@ The plan coordinates:
 
 Current baseline:
 
-- `origin/main`: `2ec115e989ac5a58468623d6bd90a18b8207c492`
-  (`docs(madaros): record current worktree disposition queue`, #372).
-- `main` CI after #372: success
-  (<https://github.com/Sounio-lang/sounio/actions/runs/27906018387>).
+- `origin/main`: `b1f6bb1b70a73fd545d23f0326d91e6f960da89d`
+  (`tools(madaros): add compiler lane readiness probe`, #374).
+- `main` CI after #374: success
+  (<https://github.com/Sounio-lang/sounio/actions/runs/27907470086>).
 - `Madaros Prebuilt Refresh` on `1d0dc6baa`: remote seed-decoupled build and
   `madaros_full_gate` succeeded. The promoted workspace local self-build still
   segfaults and is tracked separately as a workspace parity blocker.
@@ -35,8 +35,8 @@ Current baseline:
 - Protected dirty primary checkout: `/workspace/sounio`.
 - `/workspace/sounio` is stale relative to `origin/main` and must not be used
   as evidence for current `main` behavior until it is explicitly reconciled.
-- Current planning worktree: create a fresh isolated worktree from `origin/main`
-  for each narrow readiness change.
+- Current planning worktree rule: create a fresh isolated worktree from
+  `origin/main` for each narrow readiness change.
 
 The goal is not to make every old worktree disappear immediately. The goal is
 to ensure that only current, gated, ownership-clear work can influence Madaros
@@ -126,7 +126,7 @@ Madaros is production-ready only when all of these are true:
 | Production readiness plan | Current-main readiness plan is committed and merged | #366 plus post-merge local verification |
 | Worktree disposition queue | Current worktree/branch/PR disposition queue is committed and merged | #372 plus post-merge `main` CI |
 | Readiness status command | `scripts/dev/madaros_readiness_status.sh` prints the current baseline, GitHub state, audit gate, blockers, and next gates | #373 plus post-merge `main` CI |
-| Compiler-lane status command | `scripts/dev/madaros_readiness_status.sh --check-compiler-lane` inspects the active Claude lane and runs read-only check-clean probes with summarized logs | current branch pending merge |
+| Compiler-lane status command | `scripts/dev/madaros_readiness_status.sh --check-compiler-lane` inspects the active Claude lane and runs read-only check-clean probes with summarized logs | #374 plus post-merge `main` CI |
 | Direct-call argument ABI | `call_arg_id_exit42` exits 42 in normal/native_v2/build and is now a regression control, not an open blocker | #367 plus post-merge local verification |
 
 ## Phase 0 — Freeze Source Of Truth
@@ -205,7 +205,8 @@ Observed: global_read_exit4 normal/native_v2/build => compile_rc_139; global_sto
 Expected: global_read_exit4 exits 4 and global_store_exit7 exits 7 from emitted ELF, without raw Madaros compile segfault
 Acceptance-Gate: scripts/ci/madaros_open_blockers_probe.sh is updated from known-open to closed-BSS expectations and passes; scripts/ci/madaros_source_to_elf_gate.sh also passes
 Evidence-Level: E3
-Next-Action: make the minimal top-level global read/write witnesses compile and run before returning to larger Root 2/SRET cases
+Evidence: https://github.com/Sounio-lang/sounio/issues/356#issuecomment-4762337445
+Next-Action: inspect the standard source-to-ELF/native emission path after successful typecheck and merged-IR capture, especially global/BSS symbol allocation or emission
 ```
 
 Current promoted-workspace parity blocker:
@@ -254,6 +255,22 @@ Actions:
 5. Keep failing witnesses out of `tests/madaros/source_to_elf/manifest.tsv`
    until the open-blocker probe reports changed behavior and the blocker record
    is updated or closed.
+
+Current localization for the BSS/global blocker:
+
+- Direct raw-ELF execution of `bin/madaros-linux-x86_64` reproduces `rc=139`
+  for `global_read_exit4.sio` and `global_store_exit7.sio`; the wrapper is not
+  required to trigger the crash.
+- The raw-ELF runs reach `Type check complete for module 0` before crashing.
+- `--probe-frontend`, `--probe-compile-capture`, and the earlier
+  `--probe-load-ir-trace` path pass for the BSS witnesses.
+- `--probe-machine-ir` is not discriminating because it also fails for controls.
+- `--probe-native-streaming` is not authoritative for this blocker because it
+  follows a different probe path: it segfaults on a control and reports E137 on
+  globals even though the standard check/typecheck path succeeds.
+- Next code owner should inspect the standard source-to-ELF/native emission path
+  after typecheck / IR capture. Do not spend the first fix pass in parser,
+  typecheck, load-IR, or the native-streaming probe.
 
 Required command hygiene:
 
