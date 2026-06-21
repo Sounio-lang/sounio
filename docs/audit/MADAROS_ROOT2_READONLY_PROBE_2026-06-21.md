@@ -17,9 +17,9 @@ change compiler source.
 
 Current production baseline:
 
-- `origin/main`: `f9e186318d08dbcc1d25b8bdbe454d2eda43626f`
-  (`Merge pull request #352 from Sounio-lang/codex/madaros-production-plan`).
-- `main` CI run `27891359138`: success.
+- `origin/main`: `4e8a5b48b1356b2c6ee061ef37c3a8065c06ca75`
+  (`Merge pull request #353 from Sounio-lang/codex/madaros-root2-readonly-probe`).
+- `main` CI run `27891934564`: success.
 
 Read-only probed lane:
 
@@ -194,17 +194,36 @@ Next-Action: compiler owner should decide whether the in-place lower/codegen rew
 
 ## Next Commands For Compiler Owner
 
-Run from the Claude lane:
+Run the packaged operator gate from the Claude lane:
 
 ```bash
 cd /workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b
 git status --short --branch
 
-env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
-  bash scripts/ci/native_v2_enum_match_gate.sh
+scripts/ops/madaros_root2_acceptance_gate.sh
+```
 
-env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
-  bash scripts/run_sio_test_suite.sh sret_forwarding --verbose
+For diagnostics before the compiler fix is ready, use
+`scripts/ops/madaros_root2_acceptance_gate.sh --allow-fail --out-dir <dir>` to
+capture logs without converting the probe into a failed shell session.
+
+Self-test of the packaged gate on `origin/main` at `4e8a5b48b`:
+
+```bash
+scripts/ops/madaros_root2_acceptance_gate.sh \
+  --allow-fail \
+  --out-dir /tmp/sounio-root2-operator-gate-selftest
+```
+
+Result:
+
+```text
+madaros_operational_contract: PASS
+native_v2_enum_match: FAIL rc=139
+sret_forwarding: FAIL rc=1
+  sret_forwarding_minimal.sio: PASS
+  sret_forwarding_cross_module_cd_mul.sio: FAIL run exited 1
+  sret_forwarding_tuple_aggregate.sio: SKIP no-annotation
 ```
 
 If those remain red after the in-place rewrite, narrow with a debugger/core on
