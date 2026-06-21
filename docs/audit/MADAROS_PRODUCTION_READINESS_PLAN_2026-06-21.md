@@ -24,10 +24,13 @@ The plan coordinates:
 
 Current baseline:
 
-- `origin/main`: `4e8a5b48b1356b2c6ee061ef37c3a8065c06ca75`
-  (`Merge pull request #353 from Sounio-lang/codex/madaros-root2-readonly-probe`).
+- `origin/main`: `91551953cedefb780cba9fe7ebd61c8a8a5b301d`
+  (`Merge pull request #355 from Sounio-lang/codex/madaros-root2-gate-target`).
+- `main` CI run `27892902187`: success.
+- Canonical live blocker: GitHub issue #356.
 - Protected dirty primary checkout: `/workspace/sounio`.
-- Current planning worktree: `/tmp/sounio-madaros-root2-operator-gate`.
+- Current planning worktree: create a fresh isolated worktree from `origin/main`
+  for each narrow readiness change.
 
 The goal is not to make every old worktree disappear immediately. The goal is
 to ensure that only current, gated, ownership-clear work can influence Madaros
@@ -59,6 +62,8 @@ Madaros is production-ready only when all of these are true:
 | `examples/hello.sio` | Prints and exits cleanly | #349 plus post-merge `main` CI |
 | Archived Madaros docs | Raw notes are triaged, not promoted | #350 plus post-merge `main` CI |
 | Bucket D scripts | Raw local scripts are blocked from promotion | #351 plus post-merge `main` CI |
+| Root 2 operator gate | Acceptance probes are packaged but intentionally red while blocker is open | #354 plus post-merge `main` CI |
+| Root 2 target-worktree gate | Current `main` can run the gate against older active compiler lanes via `--root` | #355 plus post-merge `main` CI |
 
 ## Phase 0 — Freeze Source Of Truth
 
@@ -114,15 +119,16 @@ Actions:
 
 ```text
 Blocker-ID: MADAROS-ROOT2-SRET-ARCHIVE-TRIAGE-2026-06-21
-Status: classified
+Status: reproduced
 Severity: B1
 Class: compiler-semantics
 Owner: compiler lane
 Lane: Madaros Root 2/SRET/enum/method-call repair
+Canonical-Issue: https://github.com/Sounio-lang/sounio/issues/356
 Files-Owned: self-hosted/compiler/main.sio, self-hosted/native/codegen.sio, self-hosted/native/codegen_x86_linux.sio, self-hosted/native/lower_ir.sio, self-hosted/native/suite.sio
-Acceptance-Gate: fresh current-branch enum and method-call repros plus focused Madaros/native gate on the branch that changes compiler code
-Evidence-Level: E2
-Next-Action: rerun enum/method repros on the current compiler lane and decide whether the Root 2/SRET patch closes them
+Acceptance-Gate: scripts/ops/madaros_root2_acceptance_gate.sh --root <compiler-worktree> passes without --allow-fail from the branch that changes compiler code
+Evidence-Level: E1
+Next-Action: compiler owner closes native_v2_enum_match and sret_forwarding segfaults, then reruns the gate without --allow-fail before any PR
 ```
 
 Exit:
@@ -298,6 +304,7 @@ SOUNIO_AUDIT_ALLOW_CRITICAL_DIRTY_RE='^(/workspace/sounio|/workspace/sounio/.cla
 Stop and create a blocker if:
 
 - a Codex lane needs to edit a Claude-owned compiler file,
+- Root 2/SRET acceptance diverges from canonical issue #356,
 - a gate passes only because of `SOUC_BIN`, `MADAROS_BIN`, or stdlib path
   contamination,
 - an archived Madaros note contradicts fresh current-branch evidence,
