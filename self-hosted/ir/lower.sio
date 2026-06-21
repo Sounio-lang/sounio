@@ -15,6 +15,9 @@ struct LowerLocalStack {
     array_elem_float: [i64; 4096],
     wide_bits: [i64; 4096],
     wide_signed: [i64; 4096],
+    global_bss_offsets: [i64; 4096],
+    global_bss_sizes: [i64; 4096],
+    is_global: [i64; 4096],
     count: i64,
 }
 
@@ -27,6 +30,9 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         array_elem_float: [0; 4096],
         wide_bits: [0; 4096],
         wide_signed: [0; 4096],
+        global_bss_offsets: [0; 4096],
+        global_bss_sizes: [0; 4096],
+        is_global: [0; 4096],
         count: 0,
     }
 }
@@ -284,6 +290,17 @@ fn lowerer_find_hyper_expr_id_for_span_ref(lo: &Lowerer, span: Span) -> i64 with
     -1
 }
 
+fn lowerer_lookup_fn_id_by_name_ref(lo: &Lowerer, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*(*lo).module).fn_count {
+        if ir_name_eq((*(*lo).module).functions[i as usize].name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
 pub fn ir_empty_program_summary() -> IrProgramSummary {
     IrProgramSummary {
         module: Box::new(ir_empty_module()),
@@ -387,15 +404,16 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
 
 fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistemic: IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lowerer_new()
-    (*lo.module).epistemic = epistemic
-    (*lo.module).fn_count = summary.module.fn_count
-    (*lo.module).string_count = 0
-    (*lo.module).prof_counter_count = summary.module.prof_counter_count
-    (*lo.module).bss_total_size = summary.module.bss_total_size
+    var module_box = lo.module
+    (*module_box).epistemic = epistemic
+    (*module_box).fn_count = summary.module.fn_count
+    (*module_box).string_count = 0
+    (*module_box).prof_counter_count = summary.module.prof_counter_count
+    (*module_box).bss_total_size = summary.module.bss_total_size
 
     var i: i64 = 0
     while i < summary.module.prof_counter_count && i < 64 {
-        (*lo.module).prof_counters[i as usize] = summary.module.prof_counters[i as usize]
+        (*module_box).prof_counters[i as usize] = summary.module.prof_counters[i as usize]
         i = i + 1
     }
 
@@ -409,9 +427,10 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
         func.return_struct_name = summary.module.functions[i as usize].return_struct_name
         func.prof_counter_id = summary.module.functions[i as usize].prof_counter_id
         func.bss_size = summary.module.functions[i as usize].bss_size
-        (*lo.module).functions[i as usize] = func
+        (*module_box).functions[i as usize] = func
         i = i + 1
     }
+    lo.module = module_box
     lo.enum_variants = Box::new(summary.enum_variants)
     lo.struct_layouts = Box::new(summary.struct_layouts)
     lo.probe_mode = summary.probe_mode
@@ -524,6 +543,15 @@ fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Pa
     (*module_box).fn_count = idx + 1
     (*lo).module = module_box
     idx
+}
+
+fn lowerer_flush_current_func_mut(lo: &! Lowerer) with Mut, Panic, Div {
+    if (*lo).current_func_loaded && (*lo).current_fn >= 0 && (*lo).current_fn < (*(*lo).module).fn_count {
+        var module_box = (*lo).module
+        (*module_box).functions[(*lo).current_fn as usize] = *(*lo).current_func
+        (*lo).module = module_box
+    }
+    (*lo).current_func_loaded = false
 }
 
 fn lowerer_preseed_fn_signature_mut(
@@ -1260,10 +1288,17 @@ fn ir_fast_summary_preseed_items_seed_owned(
                                     if bss_fid < IR_MAX_FUNCS {
                                         let bss_size = lower_typeexpr_byte_size(&item.type_alias_ty)
                                         let aligned_size = ((bss_size + 7) / 8) * 8
-                                        bss_mod.functions[bss_fid as usize].name = name
-                                        bss_mod.functions[bss_fid as usize].compile_strategy = IR_STRATEGY_BSS_GLOBAL
-                                        bss_mod.functions[bss_fid as usize].param_count = bss_mod.bss_total_size
-                                        bss_mod.functions[bss_fid as usize].bss_size = bss_size
+                                        var bss_slot = ir_empty_function()
+                                        bss_slot.name = name
+                                        bss_slot.compile_strategy = IR_STRATEGY_BSS_GLOBAL
+                                        bss_slot.param_count = bss_mod.bss_total_size
+                                        bss_slot.bss_size = bss_size
+                                        let init_val = ast_lookup_global_var_init(name)
+                                        if init_val != 0 {
+                                            bss_slot.returns_float = 1
+                                            bss_slot.prof_counter_id = init_val
+                                        }
+                                        bss_mod.functions[bss_fid as usize] = bss_slot
                                         bss_mod.fn_count = bss_fid + 1
                                         bss_mod.bss_total_size = bss_mod.bss_total_size + aligned_size
                                     }
@@ -1355,7 +1390,26 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 }
                             }
                         }
-                        _ => {}
+                        _ => {
+                            let bss_fid = module.fn_count
+                            if bss_fid < IR_MAX_FUNCS {
+                                let bss_size = lower_typeexpr_byte_size(&item.type_alias_ty)
+                                let aligned_size = ((bss_size + 7) / 8) * 8
+                                var bss_slot = ir_empty_function()
+                                bss_slot.name = name
+                                bss_slot.compile_strategy = IR_STRATEGY_BSS_GLOBAL
+                                bss_slot.param_count = module.bss_total_size
+                                bss_slot.bss_size = bss_size
+                                let init_val = ast_lookup_global_var_init(name)
+                                if init_val != 0 {
+                                    bss_slot.returns_float = 1
+                                    bss_slot.prof_counter_id = init_val
+                                }
+                                module.functions[bss_fid as usize] = bss_slot
+                                module.fn_count = bss_fid + 1
+                                module.bss_total_size = module.bss_total_size + aligned_size
+                            }
+                        }
                     }
                 } else if kind == ItemKind::ItemStruct {
                     match item.struct_def {
@@ -1466,9 +1520,30 @@ fn lowerer_bind_local_mut(
         (*(*lo).locals).array_elem_float[idx as usize] = 0
         (*(*lo).locals).wide_bits[idx as usize] = 0
         (*(*lo).locals).wide_signed[idx as usize] = 0
+        (*(*lo).locals).global_bss_offsets[idx as usize] = 0
+        (*(*lo).locals).global_bss_sizes[idx as usize] = 0
+        (*(*lo).locals).is_global[idx as usize] = 0
         (*(*lo).locals).count = idx + 1
     } else {
         lowerer_mark_error(lo)
+    }
+}
+
+fn lowerer_mark_local_global_mut(
+    lo: &! Lowerer,
+    name: Name,
+    bss_offset: i64,
+    bss_size: i64
+) with Mut, Alloc, Panic, Div {
+    var i = (*(*lo).locals).count - 1
+    while i >= 0 {
+        if (*(*lo).locals).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*lo).locals).names[i as usize], name) {
+            (*(*lo).locals).global_bss_offsets[i as usize] = bss_offset
+            (*(*lo).locals).global_bss_sizes[i as usize] = bss_size
+            (*(*lo).locals).is_global[i as usize] = 1
+            return
+        }
+        i = i - 1
     }
 }
 
@@ -1505,13 +1580,15 @@ fn lowerer_lower_fn_params_mut(
                 if fn_id < 0 || fn_id >= (*(*lo).module).fn_count {
                     lowerer_mark_error(lo)
                 } else {
-                    if (*(*lo).current_func).param_count < IR_MAX_PARAMS {
-                        let param_count = (*(*lo).current_func).param_count
-                        (*(*lo).current_func).param_regs[param_count as usize] = preg
-                        (*(*lo).current_func).param_count = param_count + 1
+                    var current_func_box = (*lo).current_func
+                    if (*current_func_box).param_count < IR_MAX_PARAMS {
+                        let param_count = (*current_func_box).param_count
+                        (*current_func_box).param_regs[param_count as usize] = preg
+                        (*current_func_box).param_count = param_count + 1
+                        (*lo).current_func = current_func_box
                         if lower_live_diag_enabled() {
                             print("lower_live: param_count_now=")
-                            print_int((*(*lo).current_func).param_count)
+                            print_int((*current_func_box).param_count)
                             print("\n")
                         }
                     } else {
@@ -1520,10 +1597,12 @@ fn lowerer_lower_fn_params_mut(
                 }
 
                 if lower_type_expr_is_f64(&(*list).head.ty) {
-                    let instr_count = (*(*lo).current_func).instr_count
+                    var current_func_box2 = (*lo).current_func
+                    let instr_count = (*current_func_box2).instr_count
                     if instr_count < IR_MAX_INSTRS {
-                        (*(*lo).current_func).instrs[instr_count as usize] = ir_mark_float_reg(preg)
-                        (*(*lo).current_func).instr_count = instr_count + 1
+                        (*current_func_box2).instrs[instr_count as usize] = ir_mark_float_reg(preg)
+                        (*current_func_box2).instr_count = instr_count + 1
+                        (*lo).current_func = current_func_box2
                     } else {
                         lowerer_mark_error(lo)
                     }
@@ -1572,10 +1651,7 @@ fn lowerer_lower_fn_item_mut(
         print("\n")
     }
 
-    if (*lo).current_func_loaded && (*lo).current_fn >= 0 && (*lo).current_fn < (*(*lo).module).fn_count {
-        (*(*lo).module).functions[(*lo).current_fn as usize] = *(*lo).current_func
-    }
-    (*lo).current_func_loaded = false
+    lowerer_flush_current_func_mut(lo)
     (*lo).current_fn = fn_id
     var current_func = ir_empty_function()
     current_func.name = name
@@ -1652,6 +1728,8 @@ fn lowerer_lower_fn_item_mut(
         print("\n")
     }
 
+    (*lo) = (*lo).preload_bss_globals_as_locals()
+
     let bpair = (*lo).lower_block_ref(&fd.body)
     (*lo) = bpair.0
     let result_reg = bpair.1
@@ -1660,20 +1738,30 @@ fn lowerer_lower_fn_item_mut(
         print(str_from_bytes(name.buf, name.len))
         print(" result_reg=")
         print_int(result_reg)
+        print(" instrs_current=")
+        print_int((*(*lo).current_func).instr_count)
+        print(" regs_current=")
+        print_int((*(*lo).current_func).reg_count)
         print("\n")
     }
 
     if !(*lo).fn_ends_with_return() {
         (*lo) = (*lo).emit(ir_return(result_reg))
     }
+    if lower_live_diag_enabled() {
+        print("lower_live: fn_after_return_check name=")
+        print(str_from_bytes(name.buf, name.len))
+        print(" instrs_current=")
+        print_int((*(*lo).current_func).instr_count)
+        print(" regs_current=")
+        print_int((*(*lo).current_func).reg_count)
+        print("\n")
+    }
 
     if (*lo).scope_depth > 0 {
         (*lo).scope_depth = (*lo).scope_depth - 1
     }
-    if (*lo).current_func_loaded && (*lo).current_fn >= 0 && (*lo).current_fn < (*(*lo).module).fn_count {
-        (*(*lo).module).functions[(*lo).current_fn as usize] = *(*lo).current_func
-    }
-    (*lo).current_func_loaded = false
+    lowerer_flush_current_func_mut(lo)
     (*lo).current_fn = IR_INVALID_FN
     if lower_live_diag_enabled() {
         print("lower_live: fn_done name=")
@@ -1696,7 +1784,7 @@ fn lowerer_lower_impl_methods_mut(
                     let mangled = ir_mangle_method_name(type_name, item.name)
                     match item.fn_def {
                         Some(fd) => {
-                            (*lo) = (*lo).lower_fn_item_ref(mangled, &(*fd))
+                            lowerer_lower_fn_item_mut(lo, mangled, &(*fd))
                         }
                         _ => {}
                     }
@@ -1744,7 +1832,7 @@ fn lowerer_lower_program_items_mut(
                 if kind == ItemKind::ItemFn {
                     match item.fn_def {
                         Some(fd) => {
-                            (*lo) = (*lo).lower_fn_item_ref(name, &(*fd))
+                            lowerer_lower_fn_item_mut(lo, name, &(*fd))
                         }
                         _ => {}
                     }
@@ -2952,6 +3040,39 @@ impl Lowerer {
         IR_INVALID_REG
     }
 
+    fn lookup_local_is_global(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).is_global[i as usize] == 1
+            }
+            i = i - 1
+        }
+        false
+    }
+
+    fn lookup_local_global_bss_offset(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).global_bss_offsets[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    fn lookup_local_global_bss_size(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).global_bss_sizes[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
     fn lookup_local_struct_type(self, name: Name) -> Name with Mut, Panic, Div, Alloc {
         var i = (*self.locals).count - 1
         while i >= 0 {
@@ -3029,6 +3150,28 @@ impl Lowerer {
         0
     }
 
+    fn preload_bss_globals_as_locals(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < lo.module.fn_count && i < 2048 {
+            let g = lo.module.functions[i as usize]
+            if g.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                let pair = lo.fresh_reg()
+                lo = pair.0
+                let reg = pair.1
+                if g.bss_size > 8 {
+                    lo = lo.emit(ir_load_imm(reg, BSS_BASE_LINUX + g.param_count))
+                } else {
+                    lo = lo.emit(ir_load_global(reg, g.param_count, g.name))
+                }
+                lowerer_bind_local_mut(&! lo, g.name, reg, false)
+                lowerer_mark_local_global_mut(&! lo, g.name, g.param_count, g.bss_size)
+            }
+            i = i + 1
+        }
+        lo
+    }
+
     // Sprint 228: Look up a function by name in the module. Returns (Lowerer, fn_id) where
     // fn_id >= 0 if found, -1 if not a known function.
     fn lookup_fn_by_name(self, name: Name) -> (Lowerer, i64) with Mut, Panic, Div {
@@ -3061,8 +3204,7 @@ impl Lowerer {
                 } else {
                     return ir_empty_name()
                 }
-                let fn_lookup = self.lookup_fn_by_name(callee_name)
-                let fn_id = fn_lookup.1
+                let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 self.return_struct_name_for_fn_id(fn_id)
             }
             None => ir_empty_name(),
@@ -3082,10 +3224,10 @@ impl Lowerer {
             let loe = lo.report_error()
             return (loe, 0)
         }
-        var current_func = *lo.current_func
-        let reg = current_func.reg_count
-        current_func.reg_count = reg + 1
-        lo.current_func = Box::new(current_func)
+        var current_func_box = lo.current_func
+        let reg = (*current_func_box).reg_count
+        (*current_func_box).reg_count = reg + 1
+        lo.current_func = current_func_box
         (lo, reg)
     }
 
@@ -3098,10 +3240,10 @@ impl Lowerer {
             let loe = lo.report_error()
             return (loe, 0)
         }
-        var current_func = *lo.current_func
-        let reg = current_func.reg_count
-        current_func.reg_count = reg + limbs
-        lo.current_func = Box::new(current_func)
+        var current_func_box = lo.current_func
+        let reg = (*current_func_box).reg_count
+        (*current_func_box).reg_count = reg + limbs
+        lo.current_func = current_func_box
         (lo, reg)
     }
 
@@ -3159,10 +3301,10 @@ impl Lowerer {
             let loe = lo.report_error()
             return (loe, 0)
         }
-        var current_func = *lo.current_func
-        let label = current_func.label_count
-        current_func.label_count = label + 1
-        lo.current_func = Box::new(current_func)
+        var current_func_box = lo.current_func
+        let label = (*current_func_box).label_count
+        (*current_func_box).label_count = label + 1
+        lo.current_func = current_func_box
         (lo, label)
     }
 
@@ -3178,12 +3320,12 @@ impl Lowerer {
             }
             return lo.report_error()
         }
-        var current_func = *lo.current_func
-        let instr_count = current_func.instr_count
+        var current_func_box = lo.current_func
+        let instr_count = (*current_func_box).instr_count
         if instr_count < IR_MAX_INSTRS {
-            current_func.instrs[instr_count as usize] = instr
-            current_func.instr_count = instr_count + 1
-            lo.current_func = Box::new(current_func)
+            (*current_func_box).instrs[instr_count as usize] = instr
+            (*current_func_box).instr_count = instr_count + 1
+            lo.current_func = current_func_box
             lo
         } else {
             if lo.probe_mode {
@@ -3753,7 +3895,7 @@ impl Lowerer {
                                     print(str_from_bytes(name.buf, name.len))
                                     print("\n")
                                 }
-                                lo = lo.lower_fn_item_ref(name, &(*fd))
+                                lowerer_lower_fn_item_mut(&! lo, name, &(*fd))
                             }
                             _ => {}
                         }
@@ -3933,7 +4075,7 @@ impl Lowerer {
                         let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                         match *fn_def_opt_ref {
                             Some(fd) => {
-                                lo = lo.lower_fn_item_ref(name, &(*fd))
+                                lowerer_lower_fn_item_mut(&! lo, name, &(*fd))
                             }
                             _ => {}
                         }
@@ -4078,12 +4220,12 @@ impl Lowerer {
                     if kind == ItemKind::ItemFn {
                         if ir_name_eq(name, target_name) {
                             let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
-                            match *fn_def_opt_ref {
-                                Some(fd) => {
-                                    lo = lo.lower_fn_item_ref(name, &(*fd))
-                                }
-                                _ => {}
+                        match *fn_def_opt_ref {
+                            Some(fd) => {
+                                lowerer_lower_fn_item_mut(&! lo, name, &(*fd))
                             }
+                            _ => {}
+                        }
                         }
                     } else if kind == ItemKind::ItemStruct {
                         let struct_def_opt: Option<Box<StructDef>> = head.struct_def
@@ -4131,7 +4273,7 @@ impl Lowerer {
                             }
                             match (*list).head.fn_def {
                                 Some(fd) => {
-                                    lo = lo.lower_fn_item_ref(name, &(*fd))
+                                    lowerer_lower_fn_item_mut(&! lo, name, &(*fd))
                                 }
                                 _ => {}
                             }
@@ -4266,7 +4408,7 @@ impl Lowerer {
                         let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                         match *fn_def_opt_ref {
                             Some(fd) => {
-                                lo = lo.lower_fn_item_ref(mangled, &(*fd))
+                                lowerer_lower_fn_item_mut(&! lo, mangled, &(*fd))
                             }
                             _ => {}
                         }
@@ -4296,7 +4438,7 @@ impl Lowerer {
                             let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                             match *fn_def_opt_ref {
                                 Some(fd) => {
-                                    lo = lo.lower_fn_item_ref(mangled, &(*fd))
+                                    lowerer_lower_fn_item_mut(&! lo, mangled, &(*fd))
                                 }
                                 _ => {}
                             }
@@ -4835,6 +4977,7 @@ impl Lowerer {
             print(str_from_bytes(name.buf, name.len))
             print("\n")
         }
+        lo = lo.preload_bss_globals_as_locals()
         let bpair = lo.lower_block_ref(&fd.body)
         lo = bpair.0
         let result_reg = bpair.1
@@ -4874,9 +5017,13 @@ impl Lowerer {
     }
 
     fn lower_fn_item(self, name: Name, opt: Option<Box<FnDef>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
         match opt {
-            Some(fd) => self.lower_fn_item_ref(name, &(*fd)),
-            _ => self,
+            Some(fd) => {
+                lowerer_lower_fn_item_mut(&! lo, name, &(*fd))
+                lo
+            },
+            _ => lo,
         }
     }
 
@@ -5145,9 +5292,7 @@ impl Lowerer {
                 if (*target_expr).kind == ExprKind::ExprIdent {
                         let dst = lo.lookup_local((*target_expr).name)
                         if dst < 0 {
-                            let fn_lookup = lo.lookup_fn_by_name((*target_expr).name)
-                            lo = fn_lookup.0
-                            let bss_fn_id = fn_lookup.1
+                            let bss_fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, (*target_expr).name)
                             if bss_fn_id >= 0 && bss_fn_id < lo.module.fn_count && lo.module.functions[bss_fn_id as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
                                 let bss_off = lo.module.functions[bss_fn_id as usize].param_count
                                 lo = lo.emit(ir_store_global(rhs, bss_off, (*target_expr).name))
@@ -5157,6 +5302,10 @@ impl Lowerer {
                                 (lo, rhs)
                             }
                         } else {
+                            if lo.lookup_local_is_global((*target_expr).name) {
+                                let bss_off_local = lo.lookup_local_global_bss_offset((*target_expr).name)
+                                lo = lo.emit(ir_store_global(rhs, bss_off_local, (*target_expr).name))
+                            }
                             lo = lo.emit(ir_copy(dst, rhs))
                             (lo, dst)
                         }
@@ -7020,15 +7169,13 @@ impl Lowerer {
             if src >= 0 {
                 (self, src)
             } else {
-                let fn_lookup = self.lookup_fn_by_name(e.name)
-                let lo_fn = fn_lookup.0
-                let fn_id = fn_lookup.1
-                if fn_id >= 0 && fn_id < lo_fn.module.fn_count {
-                    let fn_strategy = lo_fn.module.functions[fn_id as usize].compile_strategy
+                let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, e.name)
+                if fn_id >= 0 && fn_id < self.module.fn_count {
+                    let fn_strategy = self.module.functions[fn_id as usize].compile_strategy
                     if fn_strategy == IR_STRATEGY_BSS_GLOBAL {
-                        let bss_off = lo_fn.module.functions[fn_id as usize].param_count
-                        let gsize = lo_fn.module.functions[fn_id as usize].bss_size
-                        let ref_pair = lo_fn.fresh_reg()
+                        let bss_off = self.module.functions[fn_id as usize].param_count
+                        let gsize = self.module.functions[fn_id as usize].bss_size
+                        let ref_pair = self.fresh_reg()
                         let lo2 = ref_pair.0
                         let ref_reg = ref_pair.1
                         var lo3 = lo2
@@ -7039,23 +7186,23 @@ impl Lowerer {
                         }
                         (lo3, ref_reg)
                     } else {
-                        let ref_pair = lo_fn.fresh_reg()
+                        let ref_pair = self.fresh_reg()
                         let lo2 = ref_pair.0
                         let ref_reg = ref_pair.1
                         let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
                         (lo3, ref_reg)
                     }
                 } else {
-                    if lo_fn.probe_mode && lower_body_diag_enabled() {
+                    if self.probe_mode && lower_body_diag_enabled() {
                         print("lower_probe: ident_miss name=")
                         print(str_from_bytes(e.name.buf, e.name.len))
                         print(" scope=")
-                        print_int(lo_fn.scope_depth)
+                        print_int(self.scope_depth)
                         print(" local_count=")
-                        print_int(lo_fn.locals.count)
+                        print_int(self.locals.count)
                         print("\n")
                     }
-                    let loe = lo_fn.report_error()
+                    let loe = self.report_error()
                     loe.emit_unit()
                 }
             }
@@ -7098,17 +7245,15 @@ impl Lowerer {
                 (self, src)
             } else {
                 // Sprint 228: Check if this is a function name used as a first-class value
-                let fn_lookup = self.lookup_fn_by_name(n)
-                let lo_fn = fn_lookup.0
-                let fn_id = fn_lookup.1
+                let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, n)
                 if fn_id >= 0 {
-                    let ref_pair = lo_fn.fresh_reg()
+                    let ref_pair = self.fresh_reg()
                     let lo2 = ref_pair.0
                     let ref_reg = ref_pair.1
                     let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
                     (lo3, ref_reg)
                 } else {
-                    let loe = lo_fn.report_error()
+                    let loe = self.report_error()
                     loe.emit_unit()
                 }
             }
