@@ -1052,6 +1052,41 @@ fn checker_lower_single_wrapper_arg_mut(c: *mut Checker, opt: Option<Box<TypeExp
     }
 }
 
+// In-place TypeNamed lowering, with Box<T> carrying its element type as `inner`.
+// The in-place spine otherwise drops type_args for named types, so a declared
+// `Box<T>` parameter lost T and `*b` reported E005. Here Box<T> lowers to
+// ty_named("Box") with inner=Some(T) (mirrors how &T carries its pointee), so
+// deref types as T. Every other named type — and bare/ill-arity `Box` — defers
+// to checker_lower_named_type_mut unchanged. type_args is taken by value into
+// this *mut helper exactly as checker_lower_single_wrapper_arg_mut does.
+fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_args: Option<Box<TypeExprList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let name = checker_copy_string_list_to_name(path.segments)
+    if name_matches_str3(name, 66, 111, 120) {
+        match type_args {
+            Some(args) => {
+                match (*args).tail {
+                    None => {
+                        let inner_ty = checker_lower_type_expr_mut(c, (*args).head)
+                        if inner_ty.kind == TypeKind::TyError {
+                            return ty_error()
+                        }
+                        var bte = ty_named(name)
+                        bte.inner = Some(Box::new(inner_ty))
+                        return bte
+                    }
+                    Some(_) => {
+                        return checker_lower_named_type_mut(c, path)
+                    }
+                }
+            }
+            None => {
+                return checker_lower_named_type_mut(c, path)
+            }
+        }
+    }
+    checker_lower_named_type_mut(c, path)
+}
+
 fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTypeInfo> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(info_box) => {
@@ -1294,7 +1329,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
     }
 
     let lowered = match te.kind {
-        TypeExprKind::TypeNamed => checker_lower_named_type_mut(c, te.path)
+        TypeExprKind::TypeNamed => checker_lower_named_type_with_args_mut(c, te.path, te.type_args)
         TypeExprKind::TypeUnit => ty_unit()
         TypeExprKind::TypeNever => ty_never()
         TypeExprKind::TypeInfer => ty_unknown()
@@ -12573,6 +12608,22 @@ impl Checker {
                     var te = ty_error()
                     te.kind = TypeKind::TyUnobserved
                     te.name = name
+                    te.inner = Some(Box::new(inner_ty))
+                    return (c, te)
+                }
+
+                // Box<T> — heap pointer wrapper. Carry the element type T as
+                // `inner` so deref (`*b`) of a declared `Box<T>` parameter types
+                // as T (via unary_result_type's OpDeref) instead of E005. kind
+                // stays TyNamed("Box"), so call-site matching is unchanged
+                // (Box::new(...) is TyUnknown and matches regardless), and this
+                // mirrors how `&T` carries its pointee via ty_ref.
+                if name_matches_str3(name, 66, 111, 120) {
+                    let inner_result = self.lower_type_expr_list(*args)
+                    let c = inner_result.0
+                    let inner_args = inner_result.1
+                    let inner_ty = inner_args.head
+                    var te = ty_named(name)
                     te.inner = Some(Box::new(inner_ty))
                     return (c, te)
                 }
