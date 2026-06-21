@@ -6458,29 +6458,27 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 }
             }
         } else if instr_op == IrOpcode::IrUnaryOp {
-            // Unary ops were never handled in the core_ir instruction loop, so any
-            // *b (deref), &x / &!x (ref), !b (not), or unary neg made
-            // compile_ir_function_v2_core_ir_into return false ->
-            // native_driver_function_codegen_failed. Emit them here.
+            // IrUnaryOp had no case in the core_ir loop, so *b / &x / !b / neg all
+            // returned false -> native_driver_function_codegen_failed. Box deref is
+            // now lowered to IrFieldGet(0) (the lowerer marks Box locals), so here we
+            // only see neg / not / and raw references. neg and not are pure value ops;
+            // raw references (&x / &!x / *raw_ptr of a true &T) are NOT yet supported
+            // in native_v2 — emitting lea/load for them produces code that crashes,
+            // so fail LOUDLY (codegen error) rather than ship a silent miscompile.
             let uop = (*func).instrs[i as usize].un_op
-            if uop == UnaryOp::OpRef || uop == UnaryOp::OpRefMut {
-                // &x / &!x: address of the operand's dedicated stack slot.
-                nc_emit_lea_rax_rbp_disp32(nc, ir_slot_offset((*func).instrs[i as usize].src1))
-            } else {
+            if uop == UnaryOp::OpNeg {
                 nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
-                if uop == UnaryOp::OpDeref {
-                    // Raw pointer deref for true references (&T). Box deref is lowered
-                    // to IrFieldGet(0) instead (the lowerer marks Box locals), because a
-                    // Box is a heap-object HANDLE, not a raw pointer.
-                    nc_emit_load_rax_mem_rax(nc)           // rax = *rax
-                } else if uop == UnaryOp::OpNeg {
-                    nc_emit_neg_rax(nc)                    // rax = -rax
-                } else if uop == UnaryOp::OpNot {
-                    (*nc).code = emit_not_bool_rax((*nc).code)
-                }
+                nc_emit_neg_rax(nc)
+                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+                nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+            } else if uop == UnaryOp::OpNot {
+                nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+                (*nc).code = emit_not_bool_rax((*nc).code)
+                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+                nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+            } else {
+                return false
             }
-            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-            nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
         } else if instr_op == IrOpcode::IrAlloc {
             if !nc_core_emit_alloc_into(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].imm_i64) {
                 return false
