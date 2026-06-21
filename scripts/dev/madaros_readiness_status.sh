@@ -570,6 +570,7 @@ After BSS/global behavior changes:
   post-merge main CI green
 
 Integration shepherd:
+  scripts/ci/madaros_blocker_contract_gate.sh
   scripts/dev/madaros_readiness_status.sh --strict
   scripts/dev/madaros_readiness_status.sh --check-compiler-pr-overlap
   scripts/dev/madaros_readiness_status.sh --check-pr-resolution-queue

@@ -200,13 +200,21 @@ Severity: B1
 Class: compiler-semantics
 Owner: Claude compiler/codegen lane unless ownership transfers explicitly
 Lane: Madaros source-to-ELF global/BSS lowering
+Worktree: /workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b
+Branch: worktree-agent-adc1cd8b9d52ba53b
 Canonical-Issue: https://github.com/Sounio-lang/sounio/issues/356
 Files-Owned: self-hosted/compiler/main.sio, self-hosted/native/codegen.sio, self-hosted/native/codegen_x86_linux.sio, self-hosted/native/lower_ir.sio, self-hosted/native/suite.sio
+Files-Read-Only: scripts/ci/madaros_open_blockers_probe.sh, scripts/ci/madaros_source_to_elf_gate.sh, scripts/dev/madaros_readiness_status.sh
+Do-Not-Touch: self-hosted/compiler/main.sio, self-hosted/native/codegen.sio, self-hosted/native/codegen_x86_linux.sio, self-hosted/native/lower_ir.sio, self-hosted/native/suite.sio unless ownership transfers explicitly
+Repro: env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN bash scripts/ci/madaros_open_blockers_probe.sh --diagnose-lowering
 Observed: global_read_exit4 normal/native_v2/build => compile_rc_139; global_store_exit7 build => compile_rc_139
 Expected: global_read_exit4 exits 4 and global_store_exit7 exits 7 from emitted ELF, without raw Madaros compile segfault
 Acceptance-Gate: scripts/ci/madaros_open_blockers_probe.sh is updated from known-open to closed-BSS expectations and passes; scripts/ci/madaros_source_to_elf_gate.sh also passes
 Evidence-Level: E3
 Evidence: https://github.com/Sounio-lang/sounio/issues/356#issuecomment-4762337445
+Fallback-Path: none
+Legacy-Kept: yes
+LLM-Offload: not-required
 Next-Action: inspect the standard source-to-ELF/native emission path after successful typecheck and merged-IR capture, especially global/BSS symbol allocation or emission
 ```
 
@@ -219,13 +227,21 @@ Severity: B2
 Class: platform-resource
 Owner: integration shepherd / workspace-runtime lane unless compiler owner proves semantic root
 Lane: promoted workspace local self-build parity
+Worktree: /workspace/sounio
+Branch: main
 Canonical-Issue: https://github.com/Sounio-lang/sounio/issues/356
 Files-Owned: none by Codex
 Files-Read-Only: scripts/ci/build_modular_madaros.sh, scripts/dev/souc-build-lock.sh, self-hosted/compiler/main.sio
+Do-Not-Touch: bin/madaros, bin/souc, self-hosted/compiler/main.sio unless a focused parity lane is opened
+Repro: env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN bash scripts/ci/build_modular_madaros.sh /tmp/sounio-madaros-self-build-check/madaros
 Observed: clean promoted-workspace build exits rc=139 while GitHub Madaros Prebuilt Refresh build+gate succeeds on the same commit
 Expected: local promoted workspace build agrees with remote seed-decoupled build, or docs/gates explicitly mark local workspace self-build as non-authoritative for production readiness
 Acceptance-Gate: local build_modular_madaros.sh passes in a clean workspace worktree, or release/readiness docs classify GitHub prebuilt refresh as authoritative and local workspace self-build as a platform/parity blocker
 Evidence-Level: E4
+Evidence: https://github.com/Sounio-lang/sounio/issues/356#issuecomment-4763092558
+Fallback-Path: GitHub Madaros Prebuilt Refresh remains authoritative while green because local promoted workspace self-build is classified as platform/parity
+Legacy-Kept: yes
+LLM-Offload: not-required
 Next-Action: investigate workspace/runtime parity, not broad compiler bootstrap failure, unless a compiler owner proves a semantic root
 ```
 
