@@ -17,6 +17,9 @@ STRICT=0
 PRODUCTION_READY=0
 PRODUCTION_READY_FAILED=0
 COMPILER_PR_OVERLAP_FAILED=0
+OPEN_BLOCKERS_FAILED=0
+OPEN_BLOCKERS_OUT_DIR=""
+OPEN_BLOCKERS_REPORT=""
 ISSUE_356_STATE="unknown"
 MAIN_CI_STATUS="unknown"
 MAIN_CI_CONCLUSION="unknown"
@@ -45,7 +48,8 @@ Options:
   --run-source-to-elf  run scripts/ci/madaros_source_to_elf_gate.sh
   --strict             exit nonzero if audit or optional gates fail
   --production-ready   exit nonzero if current blocker records still prevent
-                       saying Madaros is production-ready
+                       saying Madaros is production-ready; also runs the
+                       known-open blocker probe
   -h, --help           show this help
 USAGE
 }
@@ -299,6 +303,52 @@ run_compiler_pr_overlap_check() {
   return 0
 }
 
+run_open_blockers_probe() {
+  local out_dir="${SOUNIO_MADAROS_READINESS_OPEN_BLOCKERS_DIR:-$(mktemp -d /tmp/sounio-madaros-readiness-open-blockers.XXXXXX)}"
+  local log_path="$out_dir/probe.log"
+  local rc
+
+  OPEN_BLOCKERS_FAILED=0
+  OPEN_BLOCKERS_OUT_DIR="$out_dir"
+  OPEN_BLOCKERS_REPORT="$out_dir/report.tsv"
+
+  mkdir -p "$out_dir"
+  echo "open_blockers_out=$OPEN_BLOCKERS_OUT_DIR"
+  echo "+ env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN SOUNIO_MADAROS_OPEN_BLOCKERS_DIR=$out_dir scripts/ci/madaros_open_blockers_probe.sh"
+
+  set +e
+  env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
+    SOUNIO_MADAROS_OPEN_BLOCKERS_DIR="$out_dir" \
+    scripts/ci/madaros_open_blockers_probe.sh >"$log_path" 2>&1
+  rc=$?
+  set -e
+
+  cat "$log_path"
+  echo "open_blockers_report=$OPEN_BLOCKERS_REPORT"
+
+  if [[ "$rc" != "0" ]]; then
+    echo "status[open_blockers]=fail rc=$rc"
+    echo "reason=open_blockers_probe_changed_or_failed"
+    OPEN_BLOCKERS_FAILED=1
+  elif [[ ! -s "$OPEN_BLOCKERS_REPORT" ]]; then
+    echo "status[open_blockers]=fail"
+    echo "reason=open_blockers_report_missing"
+    OPEN_BLOCKERS_FAILED=1
+  elif awk -F '\t' 'NR > 1 && $6 == "still_open" { found = 1 } END { exit found ? 0 : 1 }' "$OPEN_BLOCKERS_REPORT"; then
+    echo "status[open_blockers]=fail"
+    echo "reason=open_blockers_still_open"
+    OPEN_BLOCKERS_FAILED=1
+  else
+    echo "status[open_blockers]=pass"
+    echo "reason=no_known_open_witnesses_reproduced"
+  fi
+
+  if [[ "$OPEN_BLOCKERS_FAILED" != "0" && "$STRICT" == "1" && "$IN_PRODUCTION_READY_CHECK" != "1" ]]; then
+    return 1
+  fi
+  return 0
+}
+
 if [[ "$REFRESH_GH" == "1" ]]; then
   git fetch --prune origin
 fi
@@ -423,14 +473,19 @@ if [[ "$PRODUCTION_READY" == "1" ]]; then
     IN_PRODUCTION_READY_CHECK=0
   fi
 
+  section "Open Blocker Probe"
+  IN_PRODUCTION_READY_CHECK=1
+  run_open_blockers_probe
+  IN_PRODUCTION_READY_CHECK=0
+
   section "Production Ready Verdict"
   echo "main_ci_status=$MAIN_CI_STATUS"
   echo "main_ci_conclusion=$MAIN_CI_CONCLUSION"
   echo "main_ci_head=$MAIN_CI_HEAD"
   echo "main_ci_url=$MAIN_CI_URL"
-  if [[ "$ISSUE_356_STATE" == "CLOSED" && "$COMPILER_PR_OVERLAP_FAILED" == "0" && "$MAIN_CI_STATUS" == "completed" && "$MAIN_CI_CONCLUSION" == "success" && "$MAIN_CI_HEAD" == "$full_origin_main_sha" ]]; then
+  if [[ "$ISSUE_356_STATE" == "CLOSED" && "$COMPILER_PR_OVERLAP_FAILED" == "0" && "$OPEN_BLOCKERS_FAILED" == "0" && "$MAIN_CI_STATUS" == "completed" && "$MAIN_CI_CONCLUSION" == "success" && "$MAIN_CI_HEAD" == "$full_origin_main_sha" ]]; then
     echo "status[production_ready]=pass"
-    echo "reason=issue_356_closed_no_compiler_pr_overlap_and_current_main_ci_green"
+    echo "reason=issue_356_closed_no_compiler_pr_overlap_open_blockers_closed_and_current_main_ci_green"
   else
     echo "status[production_ready]=fail"
     if [[ "$MAIN_CI_STATUS" != "completed" || "$MAIN_CI_CONCLUSION" != "success" || "$MAIN_CI_HEAD" != "$full_origin_main_sha" ]]; then
@@ -446,6 +501,12 @@ if [[ "$PRODUCTION_READY" == "1" ]]; then
     if [[ "$COMPILER_PR_OVERLAP_FAILED" != "0" ]]; then
       echo "reason=compiler_pr_overlap"
       echo "required=resolve open PR overlap with the active Claude compiler lane or transfer ownership explicitly"
+    fi
+    if [[ "$OPEN_BLOCKERS_FAILED" != "0" ]]; then
+      echo "reason=open_blockers_not_closed"
+      echo "open_blockers_report=$OPEN_BLOCKERS_REPORT"
+      echo "open_blockers_out=$OPEN_BLOCKERS_OUT_DIR"
+      echo "required=known-open blocker witnesses must stop reproducing, or expectations must be updated after the compiler fix"
     fi
     PRODUCTION_READY_FAILED=1
   fi
@@ -473,11 +534,9 @@ Integration shepherd:
   scripts/dev/madaros_readiness_status.sh --production-ready
 EOF
 
-if [[ "$RUN_OPEN_BLOCKERS" == "1" ]]; then
+if [[ "$RUN_OPEN_BLOCKERS" == "1" && "$PRODUCTION_READY" != "1" ]]; then
   section "Open Blocker Probe"
-  run_status_command open_blockers \
-    env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
-      scripts/ci/madaros_open_blockers_probe.sh
+  run_open_blockers_probe
 fi
 
 if [[ "$RUN_SOURCE_TO_ELF" == "1" ]]; then
