@@ -12,6 +12,9 @@ CHECK_COMPILER_LANE=0
 COMPILER_LANE_PATH="${SOUNIO_MADAROS_COMPILER_LANE:-/workspace/sounio/.claude/worktrees/agent-adc1cd8b9d52ba53b}"
 REFRESH_GH=0
 STRICT=0
+PRODUCTION_READY=0
+PRODUCTION_READY_FAILED=0
+ISSUE_356_STATE="unknown"
 
 usage() {
   cat <<'USAGE'
@@ -31,6 +34,8 @@ Options:
   --run-open-blockers  run scripts/ci/madaros_open_blockers_probe.sh
   --run-source-to-elf  run scripts/ci/madaros_source_to_elf_gate.sh
   --strict             exit nonzero if audit or optional gates fail
+  --production-ready   exit nonzero if current blocker records still prevent
+                       saying Madaros is production-ready
   -h, --help           show this help
 USAGE
 }
@@ -63,6 +68,10 @@ while (($#)); do
       ;;
     --strict)
       STRICT=1
+      ;;
+    --production-ready)
+      STRICT=1
+      PRODUCTION_READY=1
       ;;
     -h|--help)
       usage
@@ -253,10 +262,18 @@ EOF
 
 section "GitHub"
 if have gh; then
-  gh issue view 356 --repo "$REPO" \
-    --json state,title,url,updatedAt \
-    --jq '"issue_356_state=\(.state) updated_at=\(.updatedAt) url=\(.url) title=\(.title)"' \
-    2>/dev/null || echo "issue_356_state=unavailable"
+  issue_356_fields="$(
+    gh issue view 356 --repo "$REPO" \
+      --json state,title,url,updatedAt \
+      --jq '[.state, .updatedAt, .url, .title] | @tsv' \
+      2>/dev/null || true
+  )"
+  if [[ -n "$issue_356_fields" ]]; then
+    IFS=$'\t' read -r ISSUE_356_STATE issue_356_updated issue_356_url issue_356_title <<<"$issue_356_fields"
+    echo "issue_356_state=$ISSUE_356_STATE updated_at=$issue_356_updated url=$issue_356_url title=$issue_356_title"
+  else
+    echo "issue_356_state=unavailable"
+  fi
 
   gh pr list --repo "$REPO" --state open --limit 40 \
     --json number,title,headRefName,baseRefName,isDraft,mergeable,url \
@@ -276,6 +293,20 @@ if have gh; then
     ' 2>/dev/null || echo "runs=unavailable"
 else
   echo "gh=missing"
+fi
+
+if [[ "$PRODUCTION_READY" == "1" ]]; then
+  section "Production Ready Verdict"
+  if [[ "$ISSUE_356_STATE" == "CLOSED" ]]; then
+    echo "status[production_ready]=pass"
+    echo "reason=issue_356_closed"
+  else
+    echo "status[production_ready]=fail"
+    echo "reason=issue_356_state_${ISSUE_356_STATE}"
+    echo "blocking_issue=https://github.com/Sounio-lang/sounio/issues/356"
+    echo "required=close or explicitly narrow BLK-20260621-codex-source-elf-normal-bss and BLK-20260621-codex-madaros-build-segfault"
+    PRODUCTION_READY_FAILED=1
+  fi
 fi
 
 if [[ "$RUN_AUDIT" == "1" ]]; then
@@ -310,6 +341,7 @@ After BSS/global behavior changes:
 
 Integration shepherd:
   scripts/dev/madaros_readiness_status.sh --strict
+  scripts/dev/madaros_readiness_status.sh --production-ready
 EOF
 
 if [[ "$RUN_OPEN_BLOCKERS" == "1" ]]; then
@@ -324,4 +356,8 @@ if [[ "$RUN_SOURCE_TO_ELF" == "1" ]]; then
   run_status_command source_to_elf \
     env -u SOUC_BIN -u SOUNIO_STDLIB_PATH -u MADAROS_BIN -u SOUNIO_MADAROS_BIN \
       bash scripts/ci/madaros_source_to_elf_gate.sh
+fi
+
+if [[ "$PRODUCTION_READY" == "1" && "$PRODUCTION_READY_FAILED" != "0" ]]; then
+  exit 1
 fi
