@@ -195,6 +195,9 @@ run_self_build_case() {
   fi
 
   local status="still_open"
+  if [[ "$blocker_id" == "control" ]]; then
+    status="ok"
+  fi
   if [[ "$actual_exit" != "$expected_open_exit" ]]; then
     status="changed"
   fi
@@ -298,12 +301,9 @@ run_case "control" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "native_
 run_case "control" "global_read_exit4" "$SRC_DIR/global_read_exit4.sio" "build" "4"
 run_case "control" "global_store_exit7" "$SRC_DIR/global_store_exit7.sio" "build" "7"
 
-# BLK-20260621-codex-madaros-build-segfault:
-# The promoted workspace currently segfaults while the lean_single seed compiles
-# self-hosted/compiler/main.sio into a modular Madaros artifact. GitHub's
-# Madaros Prebuilt Refresh can build and gate the same commit, so this witness
-# tracks local workspace parity rather than a universal bootstrap failure.
-run_self_build_case "BLK-20260621-codex-madaros-build-segfault" "self_build_madaros" "build_rc_139"
+# Resolved workspace self-build witness for
+# BLK-20260621-codex-madaros-build-segfault.
+run_self_build_case "control" "self_build_madaros" "build_rc_0"
 
 if [[ "$RUN_LOWERING_DIAGNOSTICS" == "1" ]]; then
   run_lowering_diagnostics
@@ -317,5 +317,5 @@ if awk -F '\t' 'NR > 1 && $6 == "changed" { found = 1 } END { exit found ? 0 : 1
   exit 1
 fi
 
-echo "[madaros-open-blockers] PASS: known-open blocker witnesses are still reproducible"
+echo "[madaros-open-blockers] PASS: tracked blocker witnesses match expected status"
 echo "[madaros-open-blockers] report=$REPORT"
