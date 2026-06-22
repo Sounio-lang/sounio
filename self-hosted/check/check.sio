@@ -15,6 +15,7 @@ use check::traits::*
 use check::ownership::*
 use check::hyper::{check_hyper_binary}
 use check::compat::*
+use check::invariance::*
 use check::epistemic::*
 use check::effects::*
 use check::ontology_side_table_cache::{
@@ -1062,8 +1063,80 @@ fn checker_lower_single_wrapper_arg_mut(c: *mut Checker, opt: Option<Box<TypeExp
 // deref types as T. Every other named type — and bare/ill-arity `Box` — defers
 // to checker_lower_named_type_mut unchanged. type_args is taken by value into
 // this *mut helper exactly as checker_lower_single_wrapper_arg_mut does.
+// Feature B (Invariant<T,G>): map the group type-argument's name to its lattice rank
+// 1..4 (DiffInf<Diff1<BiLip<Homeo); 0 if it is not one of the four named groups.
+fn invariance_rank_from_group_name(n: Name) -> i64 with Panic, Div {
+    if name_matches_str7(n, 68, 105, 102, 102, 73, 110, 102) { return 1 }  // DiffInf
+    if name_matches_str5(n, 68, 105, 102, 102, 49) { return 2 }            // Diff1
+    if name_matches_str5(n, 66, 105, 76, 105, 112) { return 3 }            // BiLip
+    if name_matches_str5(n, 72, 111, 109, 101, 111) { return 4 }           // Homeo
+    0
+}
+
+// Feature B: an Invariant<T,G> type is lowered to TyNamed "Invariant<rank-digit>".
+// Recover the group rank 1..4 from such a type; 0 if it is not an Invariant type.
+fn invariant_group_rank_of_type(ty: TypeEntry) -> i64 with Panic, Div {
+    if ty.kind != TypeKind::TyNamed { return 0 }
+    let n = ty.name
+    if name_matches_str10(n, 73, 110, 118, 97, 114, 105, 97, 110, 116, 49) { return 1 }  // Invariant1
+    if name_matches_str10(n, 73, 110, 118, 97, 114, 105, 97, 110, 116, 50) { return 2 }  // Invariant2
+    if name_matches_str10(n, 73, 110, 118, 97, 114, 105, 97, 110, 116, 51) { return 3 }  // Invariant3
+    if name_matches_str10(n, 73, 110, 118, 97, 114, 105, 97, 110, 116, 52) { return 4 }  // Invariant4
+    0
+}
+
+// Feature B: build the mangled TyNamed for Invariant<T,G> from a group rank.
+fn invariant_named_type(rank: i64, inner_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div {
+    let nm = if rank == 1 { make_name("Invariant1") }
+        else if rank == 2 { make_name("Invariant2") }
+        else if rank == 3 { make_name("Invariant3") }
+        else { make_name("Invariant4") }
+    var bte = ty_named(nm)
+    bte.inner = Some(Box::new(inner_ty))
+    bte
+}
+
 fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_args: Option<Box<TypeExprList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let name = checker_copy_string_list_to_name(path.segments)
+    // Feature B: Invariant<T, G> — second type-arg G is one of the four named
+    // invariance groups; lower to TyNamed "Invariant<rank>" with inner = T.
+    if name_matches_str9(name, 73, 110, 118, 97, 114, 105, 97, 110, 116) {
+        match type_args {
+            Some(args) => {
+                match (*args).tail {
+                    Some(rest) => {
+                        match (*rest).tail {
+                            None => {
+                                let inner_ty = checker_lower_type_expr_mut(c, (*args).head)
+                                if inner_ty.kind == TypeKind::TyError {
+                                    return ty_error()
+                                }
+                                let g_name = checker_copy_string_list_to_name((*rest).head.path.segments)
+                                let rank = invariance_rank_from_group_name(g_name)
+                                if rank == 0 {
+                                    checker_note_type_error_mut(c)
+                                    return ty_error()
+                                }
+                                return invariant_named_type(rank, inner_ty)
+                            }
+                            Some(_) => {
+                                checker_note_type_error_mut(c)
+                                return ty_error()
+                            }
+                        }
+                    }
+                    None => {
+                        checker_note_type_error_mut(c)
+                        return ty_error()
+                    }
+                }
+            }
+            None => {
+                checker_note_type_error_mut(c)
+                return ty_error()
+            }
+        }
+    }
     if name_matches_str3(name, 66, 111, 120) {
         match type_args {
             Some(args) => {
@@ -3690,6 +3763,22 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         }
     }
     checker_check_binary_op_types_inplace(c, e.span, e.bin_op, left_ty, right_ty)
+    // Feature B: Invariant<T,G> comparability gate. Two invariant observables may be
+    // added/compared/ratioed only if the (conservative Homeo-default) frame relation
+    // lies in the intersection of their groups — i.e. both must be Homeo-group until a
+    // Lean frame-obligation is discharged. All lattice semantics live in check::invariance.
+    let inv_l = invariant_group_rank_of_type(left_ty)
+    let inv_r = invariant_group_rank_of_type(right_ty)
+    if inv_l > 0 && inv_r > 0 {
+        let inv_combine = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
+            || e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
+            || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
+            || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
+        if inv_combine && !invariant_comparable_default_ranks(inv_l, inv_r) {
+            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
+        }
+    }
     if !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !types_compatible(left_ty, right_ty) {
         let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
             || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem

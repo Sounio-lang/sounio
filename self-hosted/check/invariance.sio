@@ -102,15 +102,43 @@ pub fn frame_relation_class(reg: &FrameRegistry, frame_a: i64, frame_b: i64) -> 
     Group::Homeo  // unknown distinct-frame relation: conservative (most likely to reject)
 }
 
-// ── Integration / deferred (type-checker wiring) ─────────────────────────────
-// To enforce the comparability rule in the checker WITHOUT the 131-site TypeEntry
-// field churn, represent `Invariant<T, G>` via the existing name-mangling path
-// (mirror mangle_generic_name): lower it to a TyNamed whose name encodes G
-// (e.g. "Invariant$Diff1"), inner = T. Then in the binary-op compatibility site
-// (compat.sio / checker_finish_binary_units_inplace in check.sio), when both
-// operands are such TyNamed, decode ga, gb, look up the frame-relation class via
-// FrameRegistry, and reject the op unless frames_comparable(ga, gb, c). The frame
-// of a value is a value-level tag; for the first wiring, key on a per-binding frame
-// id threaded like unit_id. The "transform ∈ class" claim is emitted as a Lean
-// obligation (the FrameRegistry entry), discharged separately — held pending the
-// Lean-pipeline gap decision. This module is the decidable core that wiring calls.
+// ── Rank ↔ Group bridge (used by the checker wiring) ─────────────────────────
+// The checker encodes the group of an `Invariant<T,G>` as a rank digit 1..4 in the
+// mangled type name; these helpers keep ALL lattice semantics in this module so the
+// checker bridge never re-implements the comparability arithmetic.
+pub fn group_from_rank(r: i64) -> Group {
+    if r >= 4 { Group::Homeo }
+    else if r == 3 { Group::BiLip }
+    else if r == 2 { Group::Diff1 }
+    else { Group::DiffInf }
+}
+
+// Conservative comparability when no Lean frame-obligation is discharged: the
+// relating transform is taken as Homeo (purely topological), so two observables of
+// ranks ra, rb may be combined iff Homeo ∈ (Ga ∩ Gb) — i.e. iff BOTH are Homeo-group
+// (topological) invariants. Stronger-invariant observables (Lyapunov/Diff1,
+// Hausdorff-dim/BiLip) are rejected until the frame relation is proven smoother.
+pub fn invariant_comparable_default_ranks(ra: i64, rb: i64) -> bool {
+    frames_comparable(group_from_rank(ra), group_from_rank(rb), Group::Homeo)
+}
+
+// ── Integration (type-checker wiring — IMPLEMENTED in check.sio) ─────────────
+// The comparability rule is enforced in the checker WITHOUT the 131-site TypeEntry
+// field churn, via name-mangling:
+//   * check.sio `checker_lower_named_type_with_args_mut` recognises `Invariant<T, G>`
+//     (G one of the four group names) and lowers it to a TyNamed "Invariant<rank>"
+//     (rank 1..4 via `invariance_rank_from_group_name`), inner = T.
+//   * check.sio `checker_check_binary_with_operand_types_inplace` decodes both
+//     operands' ranks (`invariant_group_rank_of_type`) and, when both are Invariant,
+//     rejects +,-,*,/,%,==,!=,<,<=,>,>= unless `invariant_comparable_default_ranks`
+//     (i.e. `frames_comparable(ga, gb, Homeo)`) holds — error E004 "these types
+//     cannot be combined with this operator".
+// Verified (madaros built from this source, `madaros --check`): Diff1/Diff1,
+// Diff1/Homeo, BiLip/BiLip → reject; Homeo/Homeo → accept; non-Invariant code
+// unaffected (identical to baseline).
+//
+// STILL DEFERRED: a true value-level FrameId (the rule currently uses the
+// conservative Homeo default for ALL cross-value comparisons rather than consulting
+// FrameRegistry per value-frame), and emitting the "transform ∈ class" claim as a
+// discharged Lean obligation (export surface orphaned — held pending the gap
+// decision). FrameRegistry above is the table those obligations will populate.
