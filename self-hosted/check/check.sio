@@ -239,6 +239,7 @@ pub struct Checker {
     last_literal_int: i64,
     last_literal_float: f64,
     last_literal_kind: i64,   // 0=none, 1=int, 2=float
+    escape_provenance: i64,   // tail-expr escape provenance: 0=safe, 1=local ref escapes the frame
     loop_depth: i64,
     suppress_linear_consume_depth: i64,
     type_depth: i64,
@@ -735,6 +736,7 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         last_literal_int: 0,
         last_literal_float: 0.0,
         last_literal_kind: 0,
+        escape_provenance: 0,
         loop_depth: 0,
         suppress_linear_consume_depth: 0,
         type_depth: 0,
@@ -830,6 +832,7 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).last_literal_int = 0
     (*raw).last_literal_float = 0.0
     (*raw).last_literal_kind = 0
+    (*raw).escape_provenance = 0
     (*raw).loop_depth = 0
     (*raw).suppress_linear_consume_depth = 0
     (*raw).type_depth = 0
@@ -3164,12 +3167,18 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             (*c).borrows = (*c).borrows.push_scope()
             checker_push_const_scope_inplace(c)
             checker_bind_fn_params_inplace(c, (*fd).params)
+            (*c).escape_provenance = 0
             let body_ty = checker_check_block_inplace(c, (*fd).body)
             if sig_id >= 0 {
                 let sig2 = (*c).fn_sigs.get(sig_id)
                 if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
+            }
+            // Raw-reference escape: the body tail yields a reference rooted in a
+            // frame-local (e.g. `let r = &x; r` or `Holder { p: &x }`) → dangling.
+            if (*c).escape_provenance == 1 {
+                checker_report_error_at_inplace(c, (*fd).span, 91, 0, 0, 0)
             }
             if (*c).multitest_count > 1 && !(*c).multitest_corrected {
                 checker_report_multitest_correction_required_inplace(c, (*fd).span, (*c).multitest_count)
@@ -3208,6 +3217,75 @@ fn checker_check_block_inplace(c: *mut Checker, blk: Block) -> TypeEntry with Mu
     result_ty
 }
 
+// ============================================================
+// Escape provenance (raw-reference escape analysis)
+//
+// 0 = first-class: rooted in a reference parameter / global → outlives the frame.
+// 1 = LOCAL: rooted in a frame-bound let/var local → must NOT escape via return or
+// an escaping store. Propagated by the capture-calculus cv-taint rule (see
+// docs/audit/MADAROS_RAW_REFERENCE_CODEGEN_2026-06-21.md §7): cv(&x)=LOCAL iff x is a
+// frame-local; let r=e gives r the provenance of e; &self.f keeps the root (param)
+// provenance; a struct literal is tainted LOCAL if any field is.
+// ============================================================
+
+// Is the ROOT of a borrowed place a frame-bound local? Walks ident / field-access /
+// unary chains to the root variable and tests its borrow scope_depth (params live at
+// depth 1, body-locals at depth >= 2). Unknown roots → false (conservative: never a
+// false-reject; an unhandled escape would still hit the codegen loud-fail, not a
+// silent miscompile).
+fn checker_place_root_local(c: *mut Checker, place: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    if place.kind == ExprKind::ExprIdent {
+        (*c).borrows.scope_depth_of(place.name) >= 2
+    } else if place.kind == ExprKind::ExprFieldAccess {
+        let ptr = expr_opt_get(place.left)
+        if ptr == 0 as *mut Expr { return false }
+        checker_place_root_local(c, *ptr)
+    } else if place.kind == ExprKind::ExprUnary {
+        let ptr = expr_opt_get(place.left)
+        if ptr == 0 as *mut Expr { return false }
+        checker_place_root_local(c, *ptr)
+    } else {
+        false
+    }
+}
+
+fn checker_expr_provenance(c: *mut Checker, e: Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprUnary {
+        if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
+            let ptr = expr_opt_get(e.left)
+            if ptr == 0 as *mut Expr { return 0 }
+            if checker_place_root_local(c, *ptr) { 1 } else { 0 }
+        } else {
+            0
+        }
+    } else if e.kind == ExprKind::ExprIdent {
+        (*c).borrows.provenance_of(e.name)
+    } else if e.kind == ExprKind::ExprStructLit {
+        var prov = 0
+        var cur = e.fields
+        var guard = 0
+        while guard < 1024 {
+            guard = guard + 1
+            match cur {
+                Some(list) => {
+                    if checker_expr_provenance(c, (*list).head.value) == 1 { prov = 1 }
+                    cur = (*list).tail
+                }
+                None => break
+            }
+        }
+        prov
+    } else {
+        0
+    }
+}
+
+fn checker_expr_provenance_opt(c: *mut Checker, opt: Option<Box<Expr> >) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let ptr = expr_opt_get(opt)
+    if ptr == 0 as *mut Expr { return 0 }
+    checker_expr_provenance(c, *ptr)
+}
+
 fn checker_check_stmts_inplace(c: *mut Checker, opt: Option<Box<StmtList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     var cursor = opt
     var last_ty = ty_unit()
@@ -3215,6 +3293,19 @@ fn checker_check_stmts_inplace(c: *mut Checker, opt: Option<Box<StmtList> >) -> 
         match cursor {
             Some(list) => {
                 last_ty = checker_check_stmt_inplace(c, (*list).head)
+                // Capture the escape provenance of the block's TAIL expression
+                // (the value the block/function yields) while the AST is still live;
+                // the return-compatibility site only sees the TypeEntry.
+                match (*list).tail {
+                    None => {
+                        if (*list).head.kind == StmtKind::StmtExpr {
+                            (*c).escape_provenance = checker_expr_provenance_opt(c, (*list).head.expr)
+                        } else {
+                            (*c).escape_provenance = 0
+                        }
+                    }
+                    Some(_) => {}
+                }
                 cursor = (*list).tail
             }
             None => break
@@ -3271,6 +3362,11 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
         Some(val_expr) => {
             if !checker_contextual_expr_compatible(*val_expr, val_ty, (*c).current_return_type) {
                 checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
+            }
+            // Raw-reference escape: `return &local` / `return r` where r is rooted
+            // in a frame-local → dangling reference.
+            if checker_expr_provenance(c, *val_expr) == 1 {
+                checker_report_error_at_inplace(c, e.span, 91, 0, 0, 0)
             }
         }
         None => {
@@ -5981,6 +6077,8 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     // Track variable for borrow checking (linear if struct is declared linear)
     let lin = checker_is_linear_type_inplace(c, bind_ty)
     (*c).borrows = (*c).borrows.track(s.name, lin)
+    // Propagate escape provenance: `let r = &x` taints r LOCAL; `let r = &self.f` keeps it first-class.
+    (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
     ty_unit()
 }
 
@@ -6028,6 +6126,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     }
     let lin = checker_is_linear_type_inplace(c, bind_ty)
     (*c).borrows = (*c).borrows.track(s.name, lin)
+    (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
     ty_unit()
 }
 
@@ -9987,6 +10086,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 6 { print("conditions must be of type `bool`") }
     else if code == 7 { print("branches have incompatible types") }
     else if code == 8 { print("return value does not match function's declared return type") }
+    else if code == 91 { print("reference to a local variable escapes its scope") }
     else if code == 9 { print("argument type does not match parameter") }
     else if code == 10 { print("wrong number of arguments in this call") }
     // Member access (11-16)
