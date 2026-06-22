@@ -8592,6 +8592,37 @@ fn compiler_main_test_eg_small_sat_sub_self() -> bool with Mut, Div, Panic {
     pair2.1.op == EG_OP_CONST && pair2.1.value == 0
 }
 
+// Build the FADD chain (a+b)+c over `ctx` (by &! — no by-value struct return,
+// mirroring the proven test_eg_fano_*_inner pattern) and return the float-saturation
+// merge count. Distinct var ids 1,2,3 keep the leaves apart.
+fn compiler_eg_satf_fadd_chain_merges(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+    let a  = eg_small_add_var(ctx, 1)
+    let b  = eg_small_add_var(ctx, 2)
+    let c  = eg_small_add_var(ctx, 3)
+    let ab = eg_small_add_binop(ctx, EG_OP_FADD, a, b)     // a+b
+    let _o = eg_small_add_binop(ctx, EG_OP_FADD, ab, c)    // (a+b)+c
+    eg_small_saturate_float(ctx)
+}
+
+// T143b (Feature A-1): a default EgSmallContext is INEXACT, so float associativity
+// is FORBIDDEN — eg_small_saturate_float must perform zero reassociation merges on
+// the f64 chain (a+b)+c. This is the realizable substitute for the prompt's "f64
+// vs Rational" discrimination: f64-FADD-blocked vs integer-ADD-identity-allowed.
+fn compiler_main_test_eg_small_satf_blocks_inexact_default() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return compiler_eg_satf_fadd_chain_merges(&! ctx) == 0
+}
+
+// T143c (Feature A-1): when the producing context explicitly opts in to inexact
+// reassociation (the GUM-guided precision-preserving pass), float associativity
+// fires again — at least one merge on the same chain. Proves the gate does NOT
+// regress the Sprint 225 epistemic pass.
+fn compiler_main_test_eg_small_satf_allows_optin() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    ctx.allow_inexact_reassoc = true
+    return compiler_eg_satf_fadd_chain_merges(&! ctx) > 0
+}
+
 // T144: ocp_egraph_mini_pass skips when instr_count > 4 (returns func unchanged).
 fn compiler_main_test_ocp_mini_pass_skip() -> bool with Mut, Div, Panic {
     var instrs = cp_empty_instrs()
@@ -21370,9 +21401,25 @@ fn compiler_main_test_dz_no_fold_or_outer() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 1153
+    let total: i64 = 1155
 
     println("=== compiler/main.sio self-tests ===")
+
+    // Feature A-1 (run FIRST: a pre-existing crash downstream of T1201 on this WIP
+    // branch otherwise prevents these from being reached).
+    if compiler_main_test_eg_small_satf_blocks_inexact_default() {
+        println("  T143b OK: Feature A-1: default ctx blocks f64 FADD reassociation (0 merges)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T143b eg_small_satf blocks inexact by default")
+    }
+
+    if compiler_main_test_eg_small_satf_allows_optin() {
+        println("  T143c OK: Feature A-1: allow_inexact_reassoc opt-in still reassociates f64")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T143c eg_small_satf opt-in still reassociates")
+    }
 
     if compiler_main_test_char_from_i64_valid() {
         println("  T01 OK: char_from_i64 valid digits")
