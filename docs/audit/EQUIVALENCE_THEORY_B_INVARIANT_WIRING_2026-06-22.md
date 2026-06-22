@@ -36,6 +36,15 @@ Regression sweep: six existing files that fail on the new build fail with the **
 - **Known wart:** the error message shows the mangled `Invariant2`/`Invariant4` rather than `Invariant<f64, Diff1>`. Cosmetic; a pretty-printer mapping is a follow-up.
 - **No Lean obligation emitted/discharged** (the "transform ∈ class" claim) — export surface orphaned; held pending the per-gap decision.
 
+### Follow-up fix (same branch, `compat.sio`) — arithmetic ratio + inner-type soundness
+
+Adversarial review surfaced that the first wiring verified only comparison (`==`); the prompt's headline operation is a **ratio** (`/`). Two defects were found and fixed in `compat.sio` (one decoder, `compat_invariant_rank`, shared with the checker):
+
+1. **§4.4 ratio false-reject (fixed).** An opaque `TyNamed` is not numeric, so `binary_result_type` returned `ty_error()` for `+ - * /` on `Invariant` operands — `Invariant<f64,Homeo> / Invariant<f64,Homeo>` (the §4.4 entropy-ratio) would not type-check. `binary_result_type` now unwraps two `Invariant` operands to their inner `T` (the comparability gate still fires first in `check.sio` for the reject cases).
+2. **Inner-`T` erasure / over-acceptance (fixed).** `types_compatible` for `TyNamed` was `name_eq` only, so `Invariant<f64,G>` and `Invariant<i64,G>` (same mangled name) were wrongly compatible. It now also requires the inner `T` to match.
+
+Full verified matrix (madaros built from this source, `madaros --check`): `Homeo / Homeo` and `Homeo - Homeo` → **accept**; `Diff1 / Diff1` → **reject**; `Invariant<f64,Homeo> == Invariant<i64,Homeo>` → **reject** (inner mismatch); `Homeo == Homeo` and normal `f64 + f64` → **accept**. Regression sweep over 12 run-pass files: **0** differences vs the checked-in baseline (the `compat.sio` edits only trigger when **both** operands are `Invariant`-tagged). The "mangled `Invariant2` in the message" wart remains.
+
 ---
 
 ## PT — Resumo
