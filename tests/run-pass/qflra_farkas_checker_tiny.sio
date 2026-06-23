@@ -1,0 +1,136 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: Minimal integer Farkas UNSAT checker gate for QF_LRA certificates
+
+// Constraint rows:
+//   r0:  x + y <= 1
+//   r1: -x     <= 0
+//   r2:    -y  <= 0
+//   r3: -x - y <= -2
+//
+// Farkas vector y = [1, 0, 0, 1] is nonnegative, cancels both variables, and
+// yields 1 + (-2) = -1, proving UNSAT of the conjunction.
+
+fn coeff(row: i64, col: i64) -> i64 {
+    if row == 0 {
+        if col == 0 { return 1 }
+        if col == 1 { return 1 }
+        return 1
+    }
+    if row == 1 {
+        if col == 0 { return 0 - 1 }
+        if col == 1 { return 0 }
+        return 0
+    }
+    if row == 2 {
+        if col == 0 { return 0 }
+        if col == 1 { return 0 - 1 }
+        return 0
+    }
+    if col == 0 { return 0 - 1 }
+    if col == 1 { return 0 - 1 }
+    return 0 - 2
+}
+
+fn verify(y0: i64, y1: i64, y2: i64, y3: i64) -> i64 {
+    if y0 < 0 { return 0 }
+    if y1 < 0 { return 0 }
+    if y2 < 0 { return 0 }
+    if y3 < 0 { return 0 }
+
+    let sx = y0 * coeff(0, 0) + y1 * coeff(1, 0) + y2 * coeff(2, 0) + y3 * coeff(3, 0)
+    if sx != 0 { return 0 }
+
+    let sy = y0 * coeff(0, 1) + y1 * coeff(1, 1) + y2 * coeff(2, 1) + y3 * coeff(3, 1)
+    if sy != 0 { return 0 }
+
+    let sb = y0 * coeff(0, 2) + y1 * coeff(1, 2) + y2 * coeff(2, 2) + y3 * coeff(3, 2)
+    if sb < 0 { return 1 }
+    return 0
+}
+
+fn qflra_mix(acc: i64, value: i64, salt: i64) -> i64 {
+    return ((acc * 16777619) + value + salt) % 1000000007
+}
+
+fn formula_fingerprint() -> i64 {
+    var acc: i64 = 67
+    acc = qflra_mix(acc, 2, 809) // variable count
+    acc = qflra_mix(acc, 4, 809) // row count
+    var row: i64 = 0
+    while row < 4 {
+        var col: i64 = 0
+        while col < 3 {
+            acc = qflra_mix(acc, coeff(row, col), 809)
+            col = col + 1
+        }
+        row = row + 1
+    }
+    return acc
+}
+
+fn certificate_fingerprint(formula_fp: i64, y0: i64, y1: i64, y2: i64, y3: i64) -> i64 {
+    if formula_fp < 0 { return 0 - 1 }
+    if verify(y0, y1, y2, y3) == 0 { return 0 - 1 }
+
+    var acc: i64 = 71
+    acc = qflra_mix(acc, formula_fp, 853)
+    acc = qflra_mix(acc, 4, 853)
+    acc = qflra_mix(acc, y0, 853)
+    acc = qflra_mix(acc, y1, 853)
+    acc = qflra_mix(acc, y2, 853)
+    acc = qflra_mix(acc, y3, 853)
+    return acc
+}
+
+fn farkas_column_sum(col: i64, y0: i64, y1: i64, y2: i64, y3: i64) -> i64 {
+    return y0 * coeff(0, col) + y1 * coeff(1, col) + y2 * coeff(2, col) + y3 * coeff(3, col)
+}
+
+fn farkas_bundle_valid(formula_fp: i64, cert_fp: i64, sx: i64, sy: i64, sb: i64, proof_ok: i64) -> i64 {
+    if formula_fp != formula_fingerprint() { return 0 }
+    if cert_fp != certificate_fingerprint(formula_fp, 1, 0, 0, 1) { return 0 }
+    if sx != 0 { return 0 }
+    if sy != 0 { return 0 }
+    if sb >= 0 { return 0 }
+    if proof_ok != 1 { return 0 }
+    return 1
+}
+
+fn farkas_bundle_fingerprint(formula_fp: i64, cert_fp: i64, sx: i64, sy: i64, sb: i64, proof_ok: i64) -> i64 {
+    if farkas_bundle_valid(formula_fp, cert_fp, sx, sy, sb, proof_ok) == 0 { return 0 - 1 }
+
+    var acc: i64 = 79
+    acc = qflra_mix(acc, formula_fp, 907)
+    acc = qflra_mix(acc, cert_fp, 907)
+    acc = qflra_mix(acc, sx, 907)
+    acc = qflra_mix(acc, sy, 907)
+    acc = qflra_mix(acc, sb, 907)
+    acc = qflra_mix(acc, proof_ok, 907)
+    return acc
+}
+
+fn main() -> i64 {
+    let formula_fp: i64 = formula_fingerprint()
+    let cert_fp: i64 = certificate_fingerprint(formula_fp, 1, 0, 0, 1)
+    let sx: i64 = farkas_column_sum(0, 1, 0, 0, 1)
+    let sy: i64 = farkas_column_sum(1, 1, 0, 0, 1)
+    let sb: i64 = farkas_column_sum(2, 1, 0, 0, 1)
+
+    if verify(1, 0, 0, 1) != 1 { return 1 }
+    if verify(1, 0 - 1, 0, 1) != 0 { return 2 }
+    if verify(1, 1, 1, 0) != 0 { return 3 }
+    if verify(1, 0, 0, 0) != 0 { return 4 }
+    if formula_fp != 334817196 { return 5 }
+    if cert_fp != 152003092 { return 6 }
+    if sx != 0 { return 7 }
+    if sy != 0 { return 8 }
+    if sb != (0 - 1) { return 9 }
+    if farkas_bundle_valid(formula_fp, cert_fp, sx, sy, sb, 1) != 1 { return 10 }
+    if farkas_bundle_fingerprint(formula_fp, cert_fp, sx, sy, sb, 1) != 13244761 { return 11 }
+    if certificate_fingerprint(formula_fp, 1, 0, 0, 0) != (0 - 1) { return 12 }
+    if farkas_bundle_valid(formula_fp + 1, cert_fp, sx, sy, sb, 1) != 0 { return 13 }
+    if farkas_bundle_valid(formula_fp, cert_fp, sx + 1, sy, sb, 1) != 0 { return 14 }
+    if farkas_bundle_fingerprint(formula_fp, cert_fp, sx, sy, 0, 1) != (0 - 1) { return 15 }
+    return 0
+}

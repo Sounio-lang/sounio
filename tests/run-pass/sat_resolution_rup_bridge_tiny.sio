@@ -1,0 +1,233 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: Tiny bridge from explicit SAT resolution trace to RUP replay
+
+fn bridge_mix(acc: i64, value: i64, salt: i64) -> i64 with Mod {
+    return ((acc * 16777619) + value + salt) % 1000000007
+}
+
+fn lit_var(lit: i64) -> i64 {
+    if lit < 0 { return 0 - lit }
+    return lit
+}
+
+fn active_clause(id: i64, added5: i64, added6: i64) -> i64 {
+    if id == 1 { return 1 } // x OR y
+    if id == 2 { return 1 } // -x OR z
+    if id == 3 { return 1 } // -y
+    if id == 4 { return 1 } // -z
+    if id == 5 { return added5 } // y OR z
+    if id == 6 { return added6 } // z
+    return 0
+}
+
+fn clause_len(id: i64) -> i64 {
+    if id == 1 { return 2 }
+    if id == 2 { return 2 }
+    if id == 3 { return 1 }
+    if id == 4 { return 1 }
+    if id == 5 { return 2 }
+    if id == 6 { return 1 }
+    return 0 - 1
+}
+
+fn clause_lit(id: i64, pos: i64) -> i64 {
+    if id == 1 {
+        if pos == 0 { return 1 }
+        if pos == 1 { return 2 }
+    }
+    if id == 2 {
+        if pos == 0 { return 0 - 1 }
+        if pos == 1 { return 3 }
+    }
+    if id == 3 {
+        if pos == 0 { return 0 - 2 }
+    }
+    if id == 4 {
+        if pos == 0 { return 0 - 3 }
+    }
+    if id == 5 {
+        if pos == 0 { return 2 }
+        if pos == 1 { return 3 }
+    }
+    if id == 6 {
+        if pos == 0 { return 3 }
+    }
+    return 0
+}
+
+fn lit_value(lit: i64, ax: i64, ay: i64, az: i64) -> i64 {
+    var a: i64 = 0
+    let v = lit_var(lit)
+    if v == 1 { a = ax }
+    if v == 2 { a = ay }
+    if v == 3 { a = az }
+    if lit < 0 { return 0 - a }
+    return a
+}
+
+fn assign_marker(lit: i64) -> i64 {
+    if lit == 1 { return 11 }
+    if lit == (0 - 1) { return 12 }
+    if lit == 2 { return 21 }
+    if lit == (0 - 2) { return 22 }
+    if lit == 3 { return 31 }
+    if lit == (0 - 3) { return 32 }
+    return 0
+}
+
+fn apply_marker(marker: i64, ax: i64, ay: i64, az: i64) -> i64 {
+    var want: i64 = 0
+    var current: i64 = 0
+    if marker == 11 { want = 1; current = ax }
+    if marker == 12 { want = 0 - 1; current = ax }
+    if marker == 21 { want = 1; current = ay }
+    if marker == 22 { want = 0 - 1; current = ay }
+    if marker == 31 { want = 1; current = az }
+    if marker == 32 { want = 0 - 1; current = az }
+    if want == 0 { return 99 }
+    if current == 0 { return want }
+    if current == want { return current }
+    return 99
+}
+
+fn replay_clause(id: i64, ax: i64, ay: i64, az: i64, added5: i64, added6: i64) -> i64 {
+    if active_clause(id, added5, added6) == 0 { return 0 }
+    var sat: i64 = 0
+    var unassigned: i64 = 0
+    var last: i64 = 0
+    var i: i64 = 0
+    while i < clause_len(id) {
+        let lit = clause_lit(id, i)
+        let v = lit_value(lit, ax, ay, az)
+        if v == 1 { sat = 1 }
+        if v == 0 {
+            unassigned = unassigned + 1
+            last = lit
+        }
+        i = i + 1
+    }
+    if sat == 1 { return 1 }
+    if unassigned == 0 { return 2 }
+    if unassigned == 1 { return assign_marker(last) }
+    return 1
+}
+
+fn check_rup_y_or_z(h0: i64, h1: i64, hlen: i64) -> i64 {
+    if hlen != 2 { return 0 }
+    var ax: i64 = 0
+    var ay: i64 = 0 - 1
+    var az: i64 = 0 - 1
+    var step: i64 = 0
+    while step < hlen {
+        var id = h0
+        if step == 1 { id = h1 }
+        let r = replay_clause(id, ax, ay, az, 0, 0)
+        if r == 0 { return 0 }
+        if r == 2 { return 1 }
+        if r >= 10 {
+            let assigned = apply_marker(r, ax, ay, az)
+            if assigned == 99 { return 1 }
+            if r == 11 { ax = assigned }
+            if r == 12 { ax = assigned }
+            if r == 21 { ay = assigned }
+            if r == 22 { ay = assigned }
+            if r == 31 { az = assigned }
+            if r == 32 { az = assigned }
+        }
+        step = step + 1
+    }
+    return 0
+}
+
+fn check_rup_z(h0: i64, h1: i64, hlen: i64, added5: i64) -> i64 {
+    if hlen != 2 { return 0 }
+    var ax: i64 = 0
+    var ay: i64 = 0
+    var az: i64 = 0 - 1
+    var step: i64 = 0
+    while step < hlen {
+        var id = h0
+        if step == 1 { id = h1 }
+        let r = replay_clause(id, ax, ay, az, added5, 0)
+        if r == 0 { return 0 }
+        if r == 2 { return 1 }
+        if r >= 10 {
+            let assigned = apply_marker(r, ax, ay, az)
+            if assigned == 99 { return 1 }
+            if r == 11 { ax = assigned }
+            if r == 12 { ax = assigned }
+            if r == 21 { ay = assigned }
+            if r == 22 { ay = assigned }
+            if r == 31 { az = assigned }
+            if r == 32 { az = assigned }
+        }
+        step = step + 1
+    }
+    return 0
+}
+
+fn check_rup_empty(h0: i64, h1: i64, hlen: i64, added5: i64, added6: i64) -> i64 {
+    if hlen != 2 { return 0 }
+    var ax: i64 = 0
+    var ay: i64 = 0
+    var az: i64 = 0
+    var step: i64 = 0
+    while step < hlen {
+        var id = h0
+        if step == 1 { id = h1 }
+        let r = replay_clause(id, ax, ay, az, added5, added6)
+        if r == 0 { return 0 }
+        if r == 2 { return 1 }
+        if r >= 10 {
+            let assigned = apply_marker(r, ax, ay, az)
+            if assigned == 99 { return 1 }
+            if r == 11 { ax = assigned }
+            if r == 12 { ax = assigned }
+            if r == 21 { ay = assigned }
+            if r == 22 { ay = assigned }
+            if r == 31 { az = assigned }
+            if r == 32 { az = assigned }
+        }
+        step = step + 1
+    }
+    return 0
+}
+
+fn bridge_fingerprint(resolution_instance_fp: i64, resolution_cert_fp: i64,
+                      rup5_ok: i64, rup6_ok: i64, rup7_ok: i64) -> i64 with Mod {
+    if resolution_instance_fp != 829764719 { return 0 - 1 }
+    if resolution_cert_fp != 177576187 { return 0 - 1 }
+    if rup5_ok != 1 { return 0 - 1 }
+    if rup6_ok != 1 { return 0 - 1 }
+    if rup7_ok != 1 { return 0 - 1 }
+
+    var fp: i64 = 149
+    fp = bridge_mix(fp, resolution_instance_fp, 1361)
+    fp = bridge_mix(fp, resolution_cert_fp, 1361)
+    fp = bridge_mix(fp, 3, 1361)
+    fp = bridge_mix(fp, rup5_ok, 1361)
+    fp = bridge_mix(fp, rup6_ok, 1361)
+    fp = bridge_mix(fp, rup7_ok, 1361)
+    fp = bridge_mix(fp, 5, 1361)
+    fp = bridge_mix(fp, 6, 1361)
+    fp = bridge_mix(fp, 7, 1361)
+    return fp
+}
+
+fn main() -> i64 {
+    let rup5_ok = check_rup_y_or_z(1, 2, 2)
+    let rup6_ok = check_rup_z(3, 5, 2, 1)
+    let rup7_ok = check_rup_empty(6, 4, 2, 1, 1)
+    let bridge_fp = bridge_fingerprint(829764719, 177576187, rup5_ok, rup6_ok, rup7_ok)
+
+    if rup5_ok != 1 { return 1 }
+    if rup6_ok != 1 { return 2 }
+    if rup7_ok != 1 { return 3 }
+    if check_rup_y_or_z(1, 0, 1) != 0 { return 4 }
+    if check_rup_z(3, 5, 2, 0) != 0 { return 5 }
+    if check_rup_empty(6, 4, 2, 1, 0) != 0 { return 6 }
+    if bridge_fp != 759705343 { return 7 }
+    if bridge_fingerprint(829764719, 177576187, rup5_ok, 0, rup7_ok) != (0 - 1) { return 8 }
+    return 0
+}
