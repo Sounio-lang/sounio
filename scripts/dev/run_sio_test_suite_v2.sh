@@ -222,6 +222,11 @@ run_test() {
         case "$requires" in
             gpu) [[ -z "${SOUNIO_GPU_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:gpu\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
             llvm) [[ -z "${SOUNIO_LLVM_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:llvm\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
+            # `requires: madaros` — feature lives only in the modular Madaros compiler
+            # (check.sio), not in the lean_single bootstrap that builds the suite's
+            # stage2 binary. Skipped unless SOUNIO_MADAROS_AVAILABLE is set (a future
+            # Madaros-based test job sets it). Tracked: Madaros-official migration.
+            madaros) [[ -z "${SOUNIO_MADAROS_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:madaros\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
         esac
     fi
     
