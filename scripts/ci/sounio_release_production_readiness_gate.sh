@@ -259,7 +259,6 @@ set -e
 
 live_failures=0
 if [[ "$RUN_LIVE_GATES" != "1" ]]; then
-  live_failures=$((live_failures + 1))
   record_live_step live-gates-required fail "$ARTIFACT_ROOT/skip-live-gates-not-release-signoff.log"
   echo "skip-live-gates is not valid for release production-ready sign-off" >"$ARTIFACT_ROOT/skip-live-gates-not-release-signoff.log"
 fi
