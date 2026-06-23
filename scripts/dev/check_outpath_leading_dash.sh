@@ -13,10 +13,8 @@ cd "$ROOT_DIR"
 OUTPATH_LD_SCRIPTS=(
   scripts/ontology/build_dontology_ffi_importer.sh
   scripts/ci/build_modular_madaros.sh
+  scripts/ci/build_native_souc.sh
 )
-# NOTE: scripts/ci/build_native_souc.sh has the same shape but is a serialized
-# high-risk file (AGENTS.md never-edit-in-parallel list) and is intentionally
-# not edited/covered here; it is tracked as a finding for the compiler lane.
 
 BOGUS="-bogus-outpath-ld"
 failed=0
