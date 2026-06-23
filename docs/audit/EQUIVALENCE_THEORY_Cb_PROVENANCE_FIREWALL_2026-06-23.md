@@ -32,7 +32,7 @@ The last, deliberately isolated feature. A provenance DAG is read as a **causal 
 
 ### Honest accounting — "no claims X, delivers Y"
 
-- **Heuristic only; never a metric guarantee, never load-bearing.** The quasi-metric is an evidence-RANKING signal. The firewall gate enforces §6.2 mechanically; it is a script (not yet wired into a CI workflow file — wiring it is a one-line CI addition, deliberately left to the maintainer).
+- **Heuristic only; never a metric guarantee, never load-bearing.** The quasi-metric is an evidence-RANKING signal. The firewall gate enforces §6.2 mechanically and is wired into CI — it runs in the `contracts` job of `.github/workflows/ci.yml` (the `--demo` self-test then the real scan), so the isolation is enforced on every PR and push.
 - **Analogy, explicitly.** The module documents that imposing a Lorentzian/causal-set structure on a provenance graph is the *same trap* as imposing Lorentz invariance on a psychiatric state space (the prompt's own §6.1 / §8 flag). No manifoldlikeness or embeddability is claimed or checked.
 - **Verified under the seed** (the run-pass test passes there; the prebuilt madaros has the pre-existing by-value-struct codegen bug). `ProvDag` carries a 4096-bool adjacency array; queries take it by shared reference to avoid copies.
 
@@ -59,7 +59,7 @@ Gate no repositório: **PASS** (nenhum módulo crítico importa). Autodemo (`--d
 
 ### Prestação de contas honesta — "não prometer X e entregar Y"
 
-- **Apenas heurística; nunca garantia métrica, nunca carregadora.** Sinal de RANKING de evidência. O gate impõe §6.2 mecanicamente; é um script (ainda não conectado a um arquivo de workflow de CI — conexão de uma linha, deixada ao mantenedor).
+- **Apenas heurística; nunca garantia métrica, nunca carregadora.** Sinal de RANKING de evidência. O gate impõe §6.2 mecanicamente e está conectado à CI — roda no job `contracts` de `.github/workflows/ci.yml` (o autoteste `--demo` e depois a varredura real), de modo que o isolamento é imposto em todo PR e push.
 - **Analogia, explicitamente.** O módulo documenta que impor estrutura lorentziana/de conjunto causal a um grafo de proveniência é a *mesma armadilha* de impor invariância de Lorentz a um espaço de estados psiquiátrico. Nenhuma manifoldlikeness/embeddability é alegada ou verificada.
 - **Verificado sob o seed** (o teste passa lá; o madaros pré-compilado tem o bug pré-existente de struct por valor).
 
