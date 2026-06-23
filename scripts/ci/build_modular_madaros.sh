@@ -22,6 +22,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 OUT="${1:-$ROOT_DIR/artifacts/self-hosted/madaros}"
+if [[ "$OUT" == -* ]]; then
+    echo "error: output path must not start with '-': $OUT" >&2
+    exit 2
+fi
 
 # Resolve seed compiler. The seed MUST be the lean_single bootstrap ELF — never
 # the bin/souc wrapper (a #!-script that now routes to Madaros). Seeding from the
