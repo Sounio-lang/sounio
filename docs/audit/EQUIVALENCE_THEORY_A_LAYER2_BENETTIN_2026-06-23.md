@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.equivalence-theory-a-layer2-benettin-2026-06-23
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.equivalence-theory-a-layer2-benettin-2026-06-23
+-->
+
 # Equivalence Theory — A-layer-2 substrate: derived ODE-flow Lyapunov exponents (Benettin/QR)
 ## Teoria da Equivalência — substrato A-camada-2: expoentes de Lyapunov de fluxos derivados (Benettin/QR)
 
