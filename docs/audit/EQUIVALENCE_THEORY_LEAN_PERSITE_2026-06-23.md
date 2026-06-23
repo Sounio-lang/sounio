@@ -45,7 +45,7 @@ theorem obl_chaos : reassocAllowed true true true = false := by decide
 
 ### Honest accounting — "no claims X, delivers Y"
 
-- **Behaviour-neutral when not emitting.** The checker hooks only record into the side-table and are gated by `EQUIV_RECORDING`, which is `0` during normal `check`/`build`; `equiv_record_invariant`/`equiv_set_chaotic` return immediately. The reject diagnostics are unchanged (the demo still reports E004 for the rejected sites during emission — the recording happens regardless of the report). No baseline-diff sweep was run for this commit (the change is guarded and the demo confirms the checker still rejects/accepts correctly); the neutrality rests on the guard plus that evidence.
+- **Behaviour-neutral when not emitting.** The checker hooks only record into the side-table and are gated by `EQUIV_RECORDING`, which is `0` during normal `check`/`build`; `equiv_record_invariant`/`equiv_set_chaotic` return immediately. The reject diagnostics are unchanged (the demo still reports E004 for the rejected sites during emission — the recording happens regardless of the report). A baseline-diff sweep (65 non-feature files: 40 run-pass + 25 compile-fail) found **0 differences** vs the checked-in baseline, and all six Equivalence Theory tests behave correctly on the new build (the three compile-fail tests reject with exit 1, the three run-pass tests accept with exit 0) — confirming the change is behaviour-neutral for existing code while preserving correct feature behaviour.
 - **Per-module.** Recording fires for the compiled module's call-sites; imported modules' sites are captured when those modules are the emit target. The dedup is on `(groups, frame, outcome)`, so distinct configurations are kept and repeats collapsed.
 - **Proof-checking is by the project's Lean CI** (no `lean`/`lake` toolchain here); the obligation statements are confirmed true.
 
@@ -71,7 +71,7 @@ O demo emite exatamente os quatro locais Invariant distintos + obrigação de ca
 
 ### Prestação de contas honesta
 
-- **Neutro em comportamento quando não emite.** Os ganchos só registram na tabela, com gatilho `EQUIV_RECORDING` (`0` em `check`/`build` normais). Os diagnósticos de rejeição não mudam. Nenhuma varredura baseline-diff foi feita para este commit (a mudança é protegida por gatilho e o demo confirma que o verificador ainda rejeita/aceita corretamente).
+- **Neutro em comportamento quando não emite.** Os ganchos só registram na tabela, com gatilho `EQUIV_RECORDING` (`0` em `check`/`build` normais). Os diagnósticos de rejeição não mudam. Uma varredura baseline-diff (65 arquivos sem o recurso) encontrou **0 diferenças** vs o baseline, e os seis testes da Teoria da Equivalência comportam-se corretamente (os três compile-fail rejeitam com exit 1; os três run-pass aceitam com exit 0).
 - **Por módulo.** O registro dispara para os locais do módulo compilado; dedup por `(grupos, referencial, resultado)`.
 - **A verificação de prova é pela CI Lean do projeto** (sem toolchain local).
 
