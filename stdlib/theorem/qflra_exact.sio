@@ -21,6 +21,9 @@ let QF_MAXO:   i64 = 256       // original constraints (for Farkas multipliers)
 // current rows: coeff[c*STRIDE + j] (j in 0..nvars), rhs at j==nvars
 var QF_N: [i64; 135168] = [0; 135168]   // 4096*33
 var QF_D: [i64; 135168] = [1; 135168]
+// original rows, kept for independent Farkas certificate checking
+var QF_ORIG_N: [i64; 8448] = [0; 8448]       // 256*33
+var QF_ORIG_D: [i64; 8448] = [1; 8448]
 // Farkas multipliers: mul[c*MAXO + k] = amount of original row k in current row c
 var QF_MN: [i64; 1048576] = [0; 1048576]
 var QF_MD: [i64; 1048576] = [1; 1048576]
@@ -32,6 +35,8 @@ pub var QF_FARKAS_ROW: i64 = 0 - 1   // row index holding the contradiction (for
 
 fn qf_get(c: i64, j: i64) -> Rational { return Rational { num: QF_N[(c * QF_STRIDE + j) as usize], den: QF_D[(c * QF_STRIDE + j) as usize] }; }
 fn qf_set(c: i64, j: i64, r: Rational) with Mut, Panic { QF_N[(c * QF_STRIDE + j) as usize] = r.num; QF_D[(c * QF_STRIDE + j) as usize] = r.den; }
+fn qf_orig_get(c: i64, j: i64) -> Rational { return Rational { num: QF_ORIG_N[(c * QF_STRIDE + j) as usize], den: QF_ORIG_D[(c * QF_STRIDE + j) as usize] }; }
+fn qf_orig_set(c: i64, j: i64, r: Rational) with Mut, Panic { QF_ORIG_N[(c * QF_STRIDE + j) as usize] = r.num; QF_ORIG_D[(c * QF_STRIDE + j) as usize] = r.den; }
 fn qf_mget(c: i64, k: i64) -> Rational { return Rational { num: QF_MN[(c * QF_MAXO + k) as usize], den: QF_MD[(c * QF_MAXO + k) as usize] }; }
 fn qf_mset(c: i64, k: i64, r: Rational) with Mut, Panic { QF_MN[(c * QF_MAXO + k) as usize] = r.num; QF_MD[(c * QF_MAXO + k) as usize] = r.den; }
 
@@ -44,7 +49,7 @@ pub fn qf_reset(nvars: i64) with Mut, Panic {
 pub fn qf_new_row() -> i64 with Mut, Panic {
     let c = QF_NC
     var j: i64 = 0
-    while j <= QF_NV { qf_set(c, j, rat_zero()); j = j + 1; }
+    while j <= QF_NV { qf_set(c, j, rat_zero()); qf_orig_set(c, j, rat_zero()); j = j + 1; }
     // identity multiplier: this row IS original row QF_NO
     var k: i64 = 0
     while k < QF_MAXO { qf_mset(c, k, rat_zero()); k = k + 1; }
@@ -54,8 +59,21 @@ pub fn qf_new_row() -> i64 with Mut, Panic {
     return c
 }
 
-pub fn qf_set_coeff(c: i64, j: i64, num: i64, den: i64) with Mut, Div, Panic { qf_set(c, j, rat_make(num, den)); }
-pub fn qf_set_rhs(c: i64, num: i64, den: i64) with Mut, Div, Panic { qf_set(c, QF_NV, rat_make(num, den)); }
+pub fn qf_set_coeff(c: i64, j: i64, num: i64, den: i64) with Mut, Div, Panic {
+    let r = rat_make(num, den)
+    qf_set(c, j, r)
+    // Public input setter: FM-derived rows use qf_set directly and do not touch
+    // this original-input snapshot used by qf_verify_farkas_unsat().
+    qf_orig_set(c, j, r)
+}
+
+pub fn qf_set_rhs(c: i64, num: i64, den: i64) with Mut, Div, Panic {
+    let r = rat_make(num, den)
+    qf_set(c, QF_NV, r)
+    // Public input setter: FM-derived rows use qf_set directly and do not touch
+    // this original-input snapshot used by qf_verify_farkas_unsat().
+    qf_orig_set(c, QF_NV, r)
+}
 
 // Eliminate variable col across all current rows, tracking Farkas multipliers.
 fn qf_eliminate(col: i64) with Mut, Div, Panic {
@@ -145,3 +163,43 @@ pub fn qf_decide() -> i64 with Mut, Div, Panic {
 
 // Farkas multiplier y_k for original constraint k (valid after UNSAT).
 pub fn qf_farkas(k: i64) -> Rational with Mut, Panic { return qf_mget(QF_FARKAS_ROW, k); }
+
+// Independently check the extracted Farkas certificate against the original
+// input rows. Returns 1 iff y >= 0, y·A = 0, and y·b < 0 exactly over Q.
+pub fn qf_verify_farkas_unsat() -> i64 with Mut, Div, Panic {
+    if QF_UNSAT != 1 { return 0 }
+    if QF_FARKAS_ROW < 0 { return 0 }
+
+    var k: i64 = 0
+    while k < QF_NO {
+        let y = qf_farkas(k)
+        if rat_valid(y) == false { return 0 }
+        if y.num < 0 { return 0 }
+        k = k + 1
+    }
+
+    var j: i64 = 0
+    while j < QF_NV {
+        var acc = rat_zero()
+        k = 0
+        while k < QF_NO {
+            let term = rat_mul(qf_farkas(k), qf_orig_get(k, j))
+            acc = rat_add(acc, term)
+            if rat_valid(acc) == false { return 0 }
+            k = k + 1
+        }
+        if rat_is_zero(acc) == false { return 0 }
+        j = j + 1
+    }
+
+    var rhs = rat_zero()
+    k = 0
+    while k < QF_NO {
+        let term = rat_mul(qf_farkas(k), qf_orig_get(k, QF_NV))
+        rhs = rat_add(rhs, term)
+        if rat_valid(rhs) == false { return 0 }
+        k = k + 1
+    }
+    if rhs.num < 0 { return 1 }
+    return 0
+}
