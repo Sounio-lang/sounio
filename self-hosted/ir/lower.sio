@@ -1545,6 +1545,27 @@ fn lowerer_bind_local_mut(
     }
 }
 
+// *mut analogue of bind_local_struct_type: record a local/param's struct type so
+// `recv.method()` and `recv.field` resolve the receiver type. Single-level store through
+// the Box (safe under the by-value-aggregate miscompile). No-op for non-struct types.
+fn lowerer_bind_local_struct_type_mut(
+    lo: &! Lowerer,
+    name: Name,
+    type_name: Name
+) with Mut, Alloc, Panic, Div {
+    if type_name.len <= 0 { return }
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
+            (*locals_box).struct_types[i as usize] = type_name
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 fn lowerer_mark_local_global_mut(
     lo: &! Lowerer,
     name: Name,
@@ -1629,6 +1650,7 @@ fn lowerer_lower_fn_params_mut(
                 }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, preg, (*list).head.is_self_mut)
+                lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
                 if lower_type_expr_is_array_of_f64(&(*list).head.ty) {
                     (*lo) = (*lo).bind_local_array_elem_float((*list).head.name)
                 }
@@ -1963,6 +1985,19 @@ fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Pani
         }
         None => ir_empty_name(),
     }
+}
+
+// Struct-type name of a parameter, unwrapping `&T` / `&!T`. Used so a method body's
+// `self.method()` (and `param.method()`) can resolve the receiver's type — params were
+// previously bound with an empty struct_type, so `self.other()` hit the body-less-fn crash.
+fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*ty).kind == TypeExprKind::TypeNamed {
+        return ir_path_first_name((*ty).path)
+    }
+    if (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut {
+        return lower_opt_type_named_name(&(*ty).inner)
+    }
+    ir_empty_name()
 }
 
 fn lower_name_wide_int_bits(n: Name) -> i64 with Panic, Div {
@@ -4610,7 +4645,7 @@ impl Lowerer {
                         locals.names[idx as usize] = (*list).head.name
                         locals.regs[idx as usize] = preg
                         locals.depths[idx as usize] = lo.scope_depth
-                        locals.struct_types[idx as usize] = ir_empty_name()
+                        locals.struct_types[idx as usize] = lower_param_struct_type_name(&(*list).head.ty)
                         locals.array_elem_float[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
                         locals.wide_bits[idx as usize] = 0
                         locals.wide_signed[idx as usize] = 0
@@ -6938,7 +6973,27 @@ impl Lowerer {
         (lo3, dst)
     }
 
+    // Receiver struct type for a method call, when the receiver is a simple local
+    // (e.g. `c.method()` -> type of `c`). Used to mangle the call to the same name the
+    // impl method was registered under. Empty when the type can't be determined here.
+    fn lower_method_recv_type(self, left: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+        match *left {
+            Some(recv) => {
+                if (*recv).kind == ExprKind::ExprIdent {
+                    return self.lookup_local_struct_type((*recv).name)
+                }
+                ir_empty_name()
+            }
+            _ => ir_empty_name()
+        }
+    }
+
     fn lower_method_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Impl methods are lowered as mangled free functions (ir_mangle_method_name).
+        // A `recv.method()` call must resolve to that SAME mangled name; using the bare
+        // method name finds/creates a body-less fn -> codegen crash.
+        let recv_type = self.lower_method_recv_type(&e.left)
+        let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, e.name) } else { e.name }
         let pair_b = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_b.0
         let base_reg = pair_b.1
@@ -6947,7 +7002,7 @@ impl Lowerer {
         let arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
         let arg_count = pair_args.count
         let args2 = lo2.prepend_arg(base_reg, arg_list)
-        let pair_fn = lo2.find_or_add_fn_id(e.name)
+        let pair_fn = lo2.find_or_add_fn_id(call_name)
         let lo3 = pair_fn.0
         let fn_id = pair_fn.1
         let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args2, arg_count + 1)
@@ -6957,7 +7012,7 @@ impl Lowerer {
         let pair_d = lo4.fresh_reg()
         let lo5 = pair_d.0
         let dst = pair_d.1
-        var call_instr_m = ir_call(dst, fn_id, e.name, final_args, final_argc)
+        var call_instr_m = ir_call(dst, fn_id, call_name, final_args, final_argc)
         if fn_id >= 0 && fn_id < (*lo5.module).fn_count {
             if (*lo5.module).functions[fn_id as usize].returns_float == 1 {
                 call_instr_m.imm_flags = IR_FLOAT_REG_MARKER_FLAG
