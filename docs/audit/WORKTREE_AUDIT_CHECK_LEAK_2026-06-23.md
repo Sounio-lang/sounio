@@ -64,13 +64,17 @@ depended on it (legitimate inventories are written under `/tmp/...tsv`).
 
 ## Regression guard
 
-`scripts/dev/check_audit_out_invariant.sh` locks the invariant:
+`scripts/dev/check_outpath_invariant.sh` locks the invariant for the whole
+family of `[--check] [OUT.tsv]` output-path dev scripts — currently
+`scripts/dev/worktree_branch_audit.sh` and `scripts/dev/madaros_pr_resolution_queue.sh`
+(the latter already followed the safe parser pattern):
 
 1. the vulnerable `OUT="${1:-}"` form must not return;
 2. `--check` must remain a dedicated flag case;
 3. unknown `-*` tokens must be rejected;
-4. an unknown flag exits non-zero before any worktree scanning (fast, no full
-   audit run, not flaky against global worktree state).
+4. an unknown flag exits non-zero during arg parsing (fast, no network or full
+   scan, not flaky against global worktree state).
 
-Verified: the guard passes on `origin/main` and fails when run against
-`bc0513783~1:scripts/dev/worktree_branch_audit.sh`.
+Verified: the guard passes on `origin/main` and fails when either covered script
+is regressed (e.g. `bc0513783~1:scripts/dev/worktree_branch_audit.sh`, or removing
+the `--check)` case from the PR-resolution queue).
