@@ -174,6 +174,17 @@ pub fn effect_name_to_id(name_buf: [i8; 64], name_len: i64) -> i64 with Mut, Pan
         }
     }
 
+    // Chaotic (7 chars) — A-layer-2: the function integrates a vector field with a
+    // positive largest Lyapunov exponent (chaos-sensitivity manifest). The compiler
+    // refuses float reassociation on its integration path (e^{λt} amplification).
+    if name_len == 7 {
+        if name_buf[0] == 67 as i8 && name_buf[1] == 104 as i8 && name_buf[2] == 97 as i8
+           && name_buf[3] == 111 as i8 && name_buf[4] == 116 as i8 && name_buf[5] == 105 as i8
+           && name_buf[6] == 99 as i8 {  // "Chaotic"
+            return 22
+        }
+    }
+
     // Temporal (8 chars) — required alongside ZD by Revivable<T>.
     // Signals that surgical ops are reversible within a bounded window.
     if name_len == 8 {
@@ -329,4 +340,100 @@ pub fn merge_effects(a: [i64; 8], a_count: i64, b: [i64; 8], b_count: i64) -> ([
     }
 
     (result, result_count)
+}
+
+// ── Per-call-site Equivalence Theory obligation recording ────────────────────
+// During `madaros emit-lean-obligations`, the checker records each Invariant
+// comparison's concrete groups + frame relation and whether any Chaotic function was
+// seen; emit reads these to write one Lean obligation per distinct call-site
+// configuration (deduplicated). All decidable; discharged in formal/EquivalenceTheory.lean.
+var EQUIV_RECORDING: i64 = 0
+var EQUIV_OBL_COUNT: i64 = 0
+var EQUIV_OBL_L: [i64; 256] = [0; 256]    // left operand group rank 1..4
+var EQUIV_OBL_R: [i64; 256] = [0; 256]    // right operand group rank
+var EQUIV_OBL_SF: [i64; 256] = [0; 256]   // 1 = same frame
+var EQUIV_OBL_RES: [i64; 256] = [0; 256]  // 1 = comparable (accept), 0 = reject
+var EQUIV_CHAOTIC: i64 = 0
+
+pub fn equiv_begin_recording() with Mut, Panic, Div {
+    EQUIV_RECORDING = 1
+    EQUIV_OBL_COUNT = 0
+    EQUIV_CHAOTIC = 0
+}
+
+pub fn equiv_end_recording() with Mut, Panic, Div {
+    EQUIV_RECORDING = 0
+}
+
+pub fn equiv_set_chaotic() with Mut, Panic, Div {
+    if EQUIV_RECORDING == 1 { EQUIV_CHAOTIC = 1 }
+}
+
+pub fn equiv_record_invariant(rank_l: i64, rank_r: i64, same_frame: i64, comparable: i64) with Mut, Panic, Div {
+    if EQUIV_RECORDING == 0 { return }
+    if EQUIV_OBL_COUNT >= 256 { return }
+    var i: i64 = 0
+    while i < EQUIV_OBL_COUNT {
+        if EQUIV_OBL_L[i as usize] == rank_l && EQUIV_OBL_R[i as usize] == rank_r
+            && EQUIV_OBL_SF[i as usize] == same_frame && EQUIV_OBL_RES[i as usize] == comparable {
+            return
+        }
+        i = i + 1
+    }
+    let idx = EQUIV_OBL_COUNT
+    EQUIV_OBL_L[idx as usize] = rank_l
+    EQUIV_OBL_R[idx as usize] = rank_r
+    EQUIV_OBL_SF[idx as usize] = same_frame
+    EQUIV_OBL_RES[idx as usize] = comparable
+    EQUIV_OBL_COUNT = idx + 1
+}
+
+fn equiv_group_name(rank: i64) -> string {
+    if rank == 1 { "DiffInf" }
+    else if rank == 2 { "Diff1" }
+    else if rank == 3 { "BiLip" }
+    else { "Homeo" }
+}
+
+fn equiv_digit(d: i64) -> string {
+    if d == 0 { "0" } else if d == 1 { "1" } else if d == 2 { "2" } else if d == 3 { "3" }
+    else if d == 4 { "4" } else if d == 5 { "5" } else if d == 6 { "6" } else if d == 7 { "7" }
+    else if d == 8 { "8" } else { "9" }
+}
+
+fn equiv_itoa(n: i64) -> string with Mut, Panic, Div {
+    if n <= 0 { return "0" }
+    var x = n
+    var s = ""
+    while x > 0 {
+        s = equiv_digit(x % 10) + s
+        x = x / 10
+    }
+    s
+}
+
+// Build the obligation .lean body from the recorded sites. Mathlib-free; each obligation
+// references the discharged definitions in formal/EquivalenceTheory.lean.
+pub fn equiv_emit_body(src: string) -> string with Mut, Panic, Div {
+    var body = "-- Auto-emitted Equivalence Theory obligations (per call-site, Mathlib-free).\n"
+    body = body + "-- Source: " + src + "\n"
+    body = body + "-- Decidable obligations; discharged in formal/EquivalenceTheory.lean.\n"
+    body = body + "import EquivalenceTheory\nopen Sounio.EquivalenceTheory\n\n"
+    var i: i64 = 0
+    while i < EQUIV_OBL_COUNT {
+        let gl = equiv_group_name(EQUIV_OBL_L[i as usize])
+        let gr = equiv_group_name(EQUIV_OBL_R[i as usize])
+        let res = if EQUIV_OBL_RES[i as usize] == 1 { "true" } else { "false" }
+        body = body + "theorem obl_site_" + equiv_itoa(i) + " : "
+        if EQUIV_OBL_SF[i as usize] == 1 {
+            body = body + "framesComparable Group." + gl + " Group." + gr + " Group.DiffInf = " + res + " := by decide\n"
+        } else {
+            body = body + "comparableDefault Group." + gl + " Group." + gr + " = " + res + " := by decide\n"
+        }
+        i = i + 1
+    }
+    if EQUIV_CHAOTIC == 1 {
+        body = body + "theorem obl_chaos : reassocAllowed true true true = false := by decide\n"
+    }
+    body
 }

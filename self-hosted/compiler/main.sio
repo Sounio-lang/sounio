@@ -1816,6 +1816,64 @@ fn compiler_ir_roundtrip_non_ep_buffer(in_buf: &![i8; 131072], len: i64, out_buf
     compiler_ir_roundtrip_result(true, out_pos, fn_count, string_count)
 }
 
+// ── Equivalence Theory: auto-emit Lean obligations from a compile ────────────
+// `madaros emit-lean-obligations <src.sio> <out.lean>` reads the program, lexically
+// scans it for Equivalence Theory feature usage, and writes the corresponding Lean 4
+// obligations. They are decidable (`by decide`), Mathlib-free, and reference the
+// discharged proofs in formal/EquivalenceTheory.lean. The scan is lexical (whole-token
+// presence of the group names / `Invariant` / `Chaotic`) — documented, not full-checker.
+
+// Append a string to a fixed buffer (by-value, mirrors io_trace_append_string).
+fn lobl_append(buf: [i8; 65536], pos: i64, s: string) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    var i: i64 = 0
+    let n = str_len(s)
+    while i < n && p < 65536 {
+        out[p as usize] = str_char_at(s, i) as i8
+        p = p + 1
+        i = i + 1
+    }
+    (out, p)
+}
+
+fn run_emit_lean_obligations(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 2 >= args.len {
+        print("usage: emit-lean-obligations <src.sio> <out.lean>\n")
+        return
+    }
+    let src = arg_list_get(args, flag_index + 1)
+    let out = arg_list_get(args, flag_index + 2)
+    if !file_exists(src) {
+        print("emit-lean-obligations: cannot read ")
+        print(src)
+        print("\n")
+        return
+    }
+    // Run the checker with per-call-site obligation recording enabled, so each Invariant
+    // comparison's concrete groups + frame relation and each Chaotic function are captured
+    // precisely (not lexically). The checker hooks live in check::effects / check.sio.
+    equiv_begin_recording()
+    let prog = load_module_file(src)
+    let _verdict = module_frontend_check_items_with_source_context(prog.items, src)
+    equiv_end_recording()
+
+    let body = equiv_emit_body(src)
+
+    var buf: [i8; 65536] = [0; 65536]
+    let appended = lobl_append(buf, 0, body)
+    let okw = io_write_bytes_to_file(out, appended.0, appended.1)
+    if okw {
+        print("emit-lean-obligations: wrote ")
+        print(out)
+        print("\n")
+    } else {
+        print("emit-lean-obligations: failed to write ")
+        print(out)
+        print("\n")
+    }
+}
+
 fn run_check_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     let source_path = compiler_mode_source_arg(args, flag_index, "--check")
     if !compiler_preflight_source_input(source_path) {
@@ -8580,6 +8638,47 @@ fn compiler_main_test_eg_small_sat_sub_self() -> bool with Mut, Div, Panic {
     let ctx2 = compiler_eg_small_saturate(pair1.0)
     let pair2 = compiler_eg_small_extract(ctx2, pair1.1)
     pair2.1.op == EG_OP_CONST && pair2.1.value == 0
+}
+
+// Build the FADD chain (a+b)+c over `ctx` (by &! — no by-value struct return,
+// mirroring the proven test_eg_fano_*_inner pattern) and return the float-saturation
+// merge count. Distinct var ids 1,2,3 keep the leaves apart.
+fn compiler_eg_satf_fadd_chain_merges(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+    let a  = eg_small_add_var(ctx, 1)
+    let b  = eg_small_add_var(ctx, 2)
+    let c  = eg_small_add_var(ctx, 3)
+    let ab = eg_small_add_binop(ctx, EG_OP_FADD, a, b)     // a+b
+    let _o = eg_small_add_binop(ctx, EG_OP_FADD, ab, c)    // (a+b)+c
+    eg_small_saturate_float(ctx)
+}
+
+// T143b (Feature A-1): a default EgSmallContext is INEXACT, so float associativity
+// is FORBIDDEN — eg_small_saturate_float must perform zero reassociation merges on
+// the f64 chain (a+b)+c. This is the realizable substitute for the prompt's "f64
+// vs Rational" discrimination: f64-FADD-blocked vs integer-ADD-identity-allowed.
+fn compiler_main_test_eg_small_satf_blocks_inexact_default() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return compiler_eg_satf_fadd_chain_merges(&! ctx) == 0
+}
+
+// T143c (Feature A-1): when the producing context explicitly opts in to inexact
+// reassociation (the GUM-guided precision-preserving pass), float associativity
+// fires again — at least one merge on the same chain. Proves the gate does NOT
+// regress the Sprint 225 epistemic pass.
+fn compiler_main_test_eg_small_satf_allows_optin() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    ctx.allow_inexact_reassoc = true
+    return compiler_eg_satf_fadd_chain_merges(&! ctx) > 0
+}
+
+// T143d (Feature A-layer-2): even with the inexact-reassoc opt-in enabled, a CHAOTIC
+// context refuses all float reassociation — the chaos gate (e^{λt} amplification)
+// dominates the precision-preserving opt-in. 0 merges on the same chain.
+fn compiler_main_test_eg_small_satf_chaotic_blocks() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    ctx.allow_inexact_reassoc = true
+    ctx.chaotic = true
+    return compiler_eg_satf_fadd_chain_merges(&! ctx) == 0
 }
 
 // T144: ocp_egraph_mini_pass skips when instr_count > 4 (returns func unchanged).
@@ -21360,9 +21459,32 @@ fn compiler_main_test_dz_no_fold_or_outer() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 1153
+    let total: i64 = 1156
 
     println("=== compiler/main.sio self-tests ===")
+
+    // Feature A-1 (run FIRST: a pre-existing crash downstream of T1201 on this WIP
+    // branch otherwise prevents these from being reached).
+    if compiler_main_test_eg_small_satf_blocks_inexact_default() {
+        println("  T143b OK: Feature A-1: default ctx blocks f64 FADD reassociation (0 merges)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T143b eg_small_satf blocks inexact by default")
+    }
+
+    if compiler_main_test_eg_small_satf_allows_optin() {
+        println("  T143c OK: Feature A-1: allow_inexact_reassoc opt-in still reassociates f64")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T143c eg_small_satf opt-in still reassociates")
+    }
+
+    if compiler_main_test_eg_small_satf_chaotic_blocks() {
+        println("  T143d OK: Feature A-layer-2: chaotic ctx refuses reassociation even with opt-in")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T143d eg_small_satf chaotic should block reassociation")
+    }
 
     if compiler_main_test_char_from_i64_valid() {
         println("  T01 OK: char_from_i64 valid digits")
@@ -27649,6 +27771,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "check" || mode == "--check" {
             run_check_mode(args, arg_idx)
+            return
+        } else if mode == "emit-lean-obligations" || mode == "--emit-lean-obligations" {
+            run_emit_lean_obligations(args, arg_idx)
             return
         } else if mode == "build" {
             run_native_v2_compile_mode(args, arg_idx)

@@ -1,0 +1,233 @@
+// stdlib/math/lyapunov.sio — Largest Lyapunov exponent for 1-D maps (A-layer-2 substrate)
+//
+// The largest Lyapunov exponent λ of a 1-D map x_{n+1} = f(x_n) is
+//     λ = lim_{N→∞} (1/N) Σ_{n=0}^{N-1} ln |f'(x_n)|.
+// λ > 0 ⇒ sensitive dependence (chaos): a perturbation grows ~ e^{λn}. This is exactly
+// the amplification Feature A-layer-2 must budget for before permitting an f64
+// reassociation on a chaotic integration path. The values here are DERIVED (computed),
+// not retrofitted, and are checked against closed forms in tests/run-pass/lyapunov_*.
+//
+// NOTE (epistemic flag, per the design): using a Lyapunov exponent as a compiler
+// optimisation parameter is a CLAIM TO VERIFY, not an established practice. This module
+// provides the measurable substrate; the gate that consumes it is Feature A-layer-2.
+//
+// Self-contained (private ln) so it runs through the multimodule path with only public
+// cross-module calls.
+
+fn lyap_ln2() -> f64 { 0.6931471805599453 }
+
+fn lyap_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e_val = 0
+    while m >= 2.0 { m = m / 2.0; e_val = e_val + 1 }
+    while m < 0.5 { m = m * 2.0; e_val = e_val - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        let denom = (2 * k + 1) as f64
+        sum = sum + term / denom
+        k = k + 1
+    }
+    2.0 * sum + (e_val as f64) * lyap_ln2()
+}
+
+fn lyap_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// Largest Lyapunov exponent of the logistic map f(x) = r·x·(1-x), f'(x) = r·(1-2x).
+// Warmup discards the transient; the average of ln|f'| over the attractor estimates λ.
+// Closed forms for validation: r = 4 ⇒ λ = ln 2 (conjugate to the tent map); a periodic
+// window (e.g. r = 3.2) ⇒ λ < 0.
+pub fn lyap_logistic(r: f64) -> f64 with Mut, Div, Panic {
+    var x = 0.4
+    var w = 0
+    while w < 2000 { x = r * x * (1.0 - x); w = w + 1 }
+    var s = 0.0
+    var cnt = 0
+    var n = 0
+    while n < 200000 {
+        x = r * x * (1.0 - x)
+        let d = lyap_abs(r * (1.0 - 2.0 * x))
+        if d > 1.0e-12 { s = s + lyap_ln(d); cnt = cnt + 1 }
+        n = n + 1
+    }
+    if cnt == 0 { return 0.0 }
+    s / (cnt as f64)
+}
+
+// Tent map f(x) = μ·min(x, 1-x): |f'| = μ everywhere, so λ = ln μ exactly.
+pub fn lyap_tent(mu: f64) -> f64 with Mut, Div, Panic {
+    if mu <= 0.0 { return 0.0 - 1.0e30 }
+    lyap_ln(mu)
+}
+
+// A system is (numerically) chaotic when its largest Lyapunov exponent is positive.
+pub fn lyap_is_chaotic(lambda: f64) -> bool { lambda > 0.0 }
+
+// ── Largest Lyapunov exponent for maps and flows (Benettin / QR method) ──────
+// Benettin's method: integrate the trajectory together with a tangent (variational)
+// vector; renormalise the tangent each step and accumulate ln of its growth factor.
+// λ_max = (Σ ln‖δ‖) / T. For the LARGEST exponent a single tangent vector suffices
+// (the trivial 1-column QR). Maps multiply the tangent by the Jacobian per step; flows
+// integrate the linearised (variational) ODE alongside the state with RK4.
+
+fn lyap_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var v = x
+    var s = 1.0
+    while v < 1.0 { v = v * 4.0; s = s * 2.0 }
+    var y = v
+    var i = 0
+    while i < 30 { y = 0.5 * (y + v / y); i = i + 1 }
+    y / s
+}
+
+// Hénon map (x,y) → (1 - a·x² + y, b·x); Jacobian J = [[-2a·x, 1], [b, 0]].
+// Classic chaotic parameters a=1.4, b=0.3 give λ₁ ≈ 0.419.
+pub fn lyap_henon(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    var x = 0.1
+    var y = 0.1
+    var v0 = 1.0
+    var v1 = 0.0
+    var w = 0
+    while w < 2000 {
+        let nx = 1.0 - a * x * x + y
+        let ny = b * x
+        x = nx
+        y = ny
+        w = w + 1
+    }
+    var sumlog = 0.0
+    var n = 0
+    while n < 1000000 {
+        // tangent under the Jacobian at the current point, then advance the state
+        let nv0 = (0.0 - 2.0 * a * x) * v0 + v1
+        let nv1 = b * v0
+        let nx = 1.0 - a * x * x + y
+        let ny = b * x
+        x = nx
+        y = ny
+        let norm = lyap_sqrt(nv0 * nv0 + nv1 * nv1)
+        if norm > 0.0 {
+            sumlog = sumlog + lyap_ln(norm)
+            v0 = nv0 / norm
+            v1 = nv1 / norm
+        }
+        n = n + 1
+    }
+    sumlog / 1000000.0
+}
+
+// A 6-vector: the 3-D flow state (c0,c1,c2) plus its tangent (c3,c4,c5).
+struct Flow6 { c: [f64; 6] }
+
+// Combined state + variational derivative. sys: 0 = Lorenz (σ=10, ρ=28, β=8/3),
+// 1 = Rössler (a=b=0.2, c=5.7).
+fn flow_deriv(sys: i64, s: Flow6) -> Flow6 {
+    let x = s.c[0]
+    let y = s.c[1]
+    let z = s.c[2]
+    let dx = s.c[3]
+    let dy = s.c[4]
+    let dz = s.c[5]
+    var o: [f64; 6] = [0.0; 6]
+    if sys == 0 {
+        let sigma = 10.0
+        let rho = 28.0
+        let beta = 8.0 / 3.0
+        o[0] = sigma * (y - x)
+        o[1] = x * (rho - z) - y
+        o[2] = x * y - beta * z
+        o[3] = sigma * (dy - dx)
+        o[4] = (rho - z) * dx - dy - x * dz
+        o[5] = y * dx + x * dy - beta * dz
+    } else {
+        let a = 0.2
+        let b = 0.2
+        let cc = 5.7
+        o[0] = (0.0 - y) - z
+        o[1] = x + a * y
+        o[2] = b + z * (x - cc)
+        o[3] = (0.0 - dy) - dz
+        o[4] = dx + a * dy
+        o[5] = z * dx + (x - cc) * dz
+    }
+    Flow6 { c: o }
+}
+
+fn flow_axpy(s: Flow6, a: f64, k: Flow6) -> Flow6 {
+    var o: [f64; 6] = [0.0; 6]
+    var i = 0
+    while i < 6 {
+        o[i as usize] = s.c[i as usize] + a * k.c[i as usize]
+        i = i + 1
+    }
+    Flow6 { c: o }
+}
+
+fn flow_rk4(sys: i64, s: Flow6, dt: f64) -> Flow6 {
+    let k1 = flow_deriv(sys, s)
+    let k2 = flow_deriv(sys, flow_axpy(s, dt * 0.5, k1))
+    let k3 = flow_deriv(sys, flow_axpy(s, dt * 0.5, k2))
+    let k4 = flow_deriv(sys, flow_axpy(s, dt, k3))
+    var o: [f64; 6] = [0.0; 6]
+    var i = 0
+    while i < 6 {
+        o[i as usize] = s.c[i as usize]
+            + (dt / 6.0) * (k1.c[i as usize] + 2.0 * k2.c[i as usize] + 2.0 * k3.c[i as usize] + k4.c[i as usize])
+        i = i + 1
+    }
+    Flow6 { c: o }
+}
+
+// Minkowski/Euclidean norm of the tangent (c3,c4,c5).
+fn flow_tangent_norm(s: Flow6) -> f64 with Mut, Div, Panic {
+    lyap_sqrt(s.c[3] * s.c[3] + s.c[4] * s.c[4] + s.c[5] * s.c[5])
+}
+
+// Renormalise the tangent (c3,c4,c5) by 1/nrm, leaving the state untouched.
+fn flow_renorm_to(s: Flow6, nrm: f64) -> Flow6 {
+    var o: [f64; 6] = [0.0; 6]
+    o[0] = s.c[0]
+    o[1] = s.c[1]
+    o[2] = s.c[2]
+    o[3] = s.c[3] / nrm
+    o[4] = s.c[4] / nrm
+    o[5] = s.c[5] / nrm
+    Flow6 { c: o }
+}
+
+// Largest Lyapunov exponent of a 3-D flow via Benettin + RK4.
+pub fn lyap_flow_largest(sys: i64, dt: f64, warmup: i64, steps: i64) -> f64 with Mut, Div, Panic {
+    var s = Flow6 { c: [1.0, 1.0, 1.0, 1.0, 0.0, 0.0] }
+    var w = 0
+    while w < warmup {
+        s = flow_rk4(sys, s, dt)
+        let nrm = flow_tangent_norm(s)
+        if nrm > 0.0 { s = flow_renorm_to(s, nrm) }
+        w = w + 1
+    }
+    var sumlog = 0.0
+    var n = 0
+    while n < steps {
+        s = flow_rk4(sys, s, dt)
+        let nrm = flow_tangent_norm(s)
+        if nrm > 0.0 {
+            s = flow_renorm_to(s, nrm)
+            sumlog = sumlog + lyap_ln(nrm)
+        }
+        n = n + 1
+    }
+    sumlog / ((steps as f64) * dt)
+}
+
+// Classic Lorenz attractor (σ=10, ρ=28, β=8/3): λ₁ ≈ 0.906.
+pub fn lyap_lorenz() -> f64 with Mut, Div, Panic { lyap_flow_largest(0, 0.01, 5000, 200000) }
+
+// Classic Rössler attractor (a=b=0.2, c=5.7): λ₁ ≈ 0.071 (small ⇒ longer integration).
+pub fn lyap_rossler() -> f64 with Mut, Div, Panic { lyap_flow_largest(1, 0.01, 20000, 600000) }
