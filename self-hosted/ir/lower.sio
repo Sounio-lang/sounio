@@ -1228,12 +1228,18 @@ fn ir_fast_summary_register_struct_fields_owned(
             }
             let fc = table_value.entries[layout_idx as usize].field_count
             if fc < 64 {
-                table_value.entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                // Two-level nested store `table.entries[i].fields[fc] = …` is dropped by
+                // the lean_single by-value-aggregate miscompile, so the field never lands
+                // and field-index resolution later falls back to a name hash (OOB access).
+                // Build in a local entry, then assign it back once (single level).
+                var lay_entry = table_value.entries[layout_idx as usize]
+                lay_entry.fields[fc as usize] = StructFieldEntry {
                     name: (*list).head.name,
                     index: idx,
                     is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
                 }
-                table_value.entries[layout_idx as usize].field_count = fc + 1
+                lay_entry.field_count = fc + 1
+                table_value.entries[layout_idx as usize] = lay_entry
             }
             ir_fast_summary_register_struct_fields_owned(table_value, type_name, (*list).tail, idx + 1)
         }
@@ -3743,12 +3749,16 @@ impl Lowerer {
                 Some(list) => {
                     let fc = (*lo.struct_layouts).entries[layout_idx as usize].field_count
                     if fc < 64 {
-                        (*lo.struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                        // Single-level idiom: the two-level `(*box).entries[i].fields[fc] = …`
+                        // store is dropped by the lean_single by-value-aggregate miscompile.
+                        var lay_entry = (*lo.struct_layouts).entries[layout_idx as usize]
+                        lay_entry.fields[fc as usize] = StructFieldEntry {
                             name: (*list).head.name,
                             index: field_idx,
                             is_float: lower_struct_field_float_kind_ref(&(*list).head.value),
                         }
-                        (*lo.struct_layouts).entries[layout_idx as usize].field_count = fc + 1
+                        lay_entry.field_count = fc + 1
+                        (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
                     }
                     current = &(*list).tail
                     field_idx = field_idx + 1
@@ -3840,12 +3850,16 @@ impl Lowerer {
                 Some(list) => {
                     let fc = (*lo.struct_layouts).entries[layout_idx as usize].field_count
                     if fc < 64 {
-                        (*lo.struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                        // Single-level idiom: the two-level `(*box).entries[i].fields[fc] = …`
+                        // store is dropped by the lean_single by-value-aggregate miscompile.
+                        var lay_entry = (*lo.struct_layouts).entries[layout_idx as usize]
+                        lay_entry.fields[fc as usize] = StructFieldEntry {
                             name: (*list).head.name,
                             index: field_idx,
                             is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
                         }
-                        (*lo.struct_layouts).entries[layout_idx as usize].field_count = fc + 1
+                        lay_entry.field_count = fc + 1
+                        (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
                     }
                     current = &(*list).tail
                     field_idx = field_idx + 1
@@ -6684,6 +6698,34 @@ impl Lowerer {
             print(" field_array_float=")
             print_int(if field_array_elem_is_float { 1 } else { 0 })
             print("\n")
+        }
+        if str_eq(read_env("SOUNIO_DUMP_LAYOUTS"), "1") {
+            print("DUMP field=")
+            print(str_from_bytes(e.name.buf, e.name.len))
+            print(" idx=")
+            print_int(fidx)
+            print(" layouts.count=")
+            print_int((*self.struct_layouts).count)
+            print("\n")
+            var di: i64 = 0
+            while di < (*self.struct_layouts).count {
+                print("  [")
+                print_int(di)
+                print("] ")
+                print(str_from_bytes((*self.struct_layouts).entries[di as usize].type_name.buf, (*self.struct_layouts).entries[di as usize].type_name.len))
+                print(" fc=")
+                print_int((*self.struct_layouts).entries[di as usize].field_count)
+                var dj: i64 = 0
+                while dj < (*self.struct_layouts).entries[di as usize].field_count {
+                    print(" ")
+                    print(str_from_bytes((*self.struct_layouts).entries[di as usize].fields[dj as usize].name.buf, (*self.struct_layouts).entries[di as usize].fields[dj as usize].name.len))
+                    print(":")
+                    print_int((*self.struct_layouts).entries[di as usize].fields[dj as usize].index)
+                    dj = dj + 1
+                }
+                print("\n")
+                di = di + 1
+            }
         }
         let pair_b = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_b.0
