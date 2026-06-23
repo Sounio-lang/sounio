@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-struct-field-index-fallback-2026-06-23
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-struct-field-index-fallback-2026-06-23
+-->
+
 # Madaros by-value-struct "SIGSEGV" — root cause is struct field-index fallback (2026-06-23)
 
 *Branch:* investigation off `main` (madaros built from source, `artifacts/self-hosted/madaros-sret`)

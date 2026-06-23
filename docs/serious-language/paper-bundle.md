@@ -97,7 +97,7 @@ A bundle is conference-ready only when:
 Use this template in every external paper or slide deck:
 
 - Sounio is not yet a production-ready general-purpose language.
-- The checked Linux x86-64 lane is the default live-demo lane.
+- The checked Linux x86-64 lane is the default live-demo lane, invoked as `./bin/souc` (official route, Madaros-backed).
 - GPU/PTX support is not a broad runtime or performance claim unless a generated bundle includes the exact hardware run.
 - Hypercomplex neural-network work is not a complete training framework unless the cited gate proves that specific surface.
 - Ontology work does not imply federation-scale ontology support.

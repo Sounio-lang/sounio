@@ -43,7 +43,7 @@ Then show:
 - Linux x86-64 is the primary live-demo lane.
 - GPU, hypercomplex, ontology, and clinical surfaces are research or validated-research lanes with explicit evidence boundaries.
 - Some Lean modules are no-sorry/no-axiom; others retain `sorry` or explicit axioms and must be reported honestly.
-- The checked binary still depends on `lean_single.sio`; the modular compiler tree is not yet the binary source of truth.
+- The official public entry point remains `./bin/souc`, which routes to Madaros; the checked binary still depends on `lean_single.sio`, and the modular compiler tree is not yet the binary source of truth.
 
 ## What To Ask Sunil For
 

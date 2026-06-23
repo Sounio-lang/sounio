@@ -17,7 +17,7 @@ This snapshot states what Sounio needs to become legible as a serious programmin
 
 Sounio can already be presented as a serious research language because it has:
 
-- a checked compiler launcher: `bin/souc`;
+- an official checked compiler launcher: `bin/souc` (Madaros by default);
 - a host-selected Linux x86-64 self-hosted binary in this checkout;
 - working `check`, `compile`, `build`, `run`, `info`, and `version` compatibility commands;
 - a native compile/run path suitable for small live demos;

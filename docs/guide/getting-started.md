@@ -29,11 +29,13 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 "$SOUC_BIN" --version
 "$SOUC_BIN" info
 "$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/souc-madaros
 "$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
 ```
 
-In this repo snapshot, `bin/souc` is the conservative default for local work from the repository checkout. It selects the host artifact automatically, exposes compatibility commands for `check/run/compile/build`, and still supports the raw self-hosted compiler interface when you want explicit `<source> <output>` invocation.
+In this repo snapshot, `bin/souc` is the conservative local default and routes to **Madaros**.
+If you explicitly need the legacy bootstrap engine for compatibility checks, set `SOUNIO_SOUC_ENGINE=lean_single` on the command invocation.
+It selects the host artifact automatically, exposes compatibility commands for `check/run/compile/build`, and still supports the raw self-hosted compiler interface when you want explicit `<source> <output>` invocation.
 
 There is also a separate checked Linux `x86_64` GPU/JIT artifact for GPU-specific workflows:
 
@@ -52,11 +54,11 @@ scripts/omega/omega_resolve_souc_bin.sh --print-path --allow-local-fallback
 
 ## 2. Start With Conservative Artifact Smokes
 
-The most reliable way to validate the checked self-hosted artifact is to use the compatibility commands while still proving the compiler can rebuild itself.
+The most reliable way to validate the checked self-hosted artifact is to run compatibility smoke checks from `bin/souc`.
 
 ```bash
 "$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/souc-madaros-smoke
 "$SOUC_BIN" run self-hosted/compiler/native_print_f64_smoke.sio
 ```
 

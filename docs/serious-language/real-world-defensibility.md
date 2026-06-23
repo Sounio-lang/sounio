@@ -116,3 +116,7 @@ Sounio is defensible when a skeptical engineer can:
 6. distinguish stable language behavior from research lanes;
 7. verify that public docs are either evidence-closed or explicitly downgraded;
 8. inspect exact-line annotations for the highest-value public PL claims.
+
+### Compiler Identity for Defensibility Conversations
+
+For this repository's default public workflow, use `./bin/souc` as the official compiler entry point; it routes to the Madaros checked engine by default. The repo keeps a separate `lean_single` legacy compatibility path for explicit bootstrap/compatibility checks.
