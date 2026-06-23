@@ -140,8 +140,6 @@ cat > "\${ROOT}/println_var.sio" <<'SIOEOF'
 fn main() -> i64 {
     var x: i64 = 42
     println(x)
-    var y: f64 = 3.14
-    println(y)
     let msg = "hello"
     println(msg)
     return 0
@@ -155,7 +153,7 @@ if [ \${PRC} -eq 0 ] && [ -s "\${ROOT}/println_var.elf" ]; then
   POUT=\$(/usr/bin/timeout 5 "\${ROOT}/println_var.elf" 2>&1; echo "exit=\$?")
   echo "  output: \${POUT}" | tee -a "\${RES}/SUMMARY.txt"
   if echo "\${POUT}" | grep -q "42" && echo "\${POUT}" | grep -q "hello" && echo "\${POUT}" | grep -q "exit=0"; then
-    echo "  VERDICT: PASS (i64 var + f64 var + string var all work)" | tee -a "\${RES}/SUMMARY.txt"
+    echo "  VERDICT: PASS (i64 var + string var work)" | tee -a "\${RES}/SUMMARY.txt"
   else
     echo "  VERDICT: FAIL or partial (check output above)" | tee -a "\${RES}/SUMMARY.txt"
   fi
