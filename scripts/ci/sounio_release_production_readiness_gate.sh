@@ -147,6 +147,7 @@ if [[ "$RUN_LIVE_GATES" == "1" ]]; then
   run_live_step docs-registry bash "$ROOT_DIR/scripts/dev/check_docs_registry.sh"
   run_live_step docs-consistency bash "$ROOT_DIR/scripts/dev/check_docs_consistency.sh"
   run_live_step install-path bash "$ROOT_DIR/scripts/ci/install_path_gate.sh"
+  run_live_step package-local bash "$ROOT_DIR/scripts/ci/package_local_gate.sh"
   run_live_step serious-language-claim-closure env -u SOUC_BIN -u SOUNIO_STDLIB_PATH \
     bash "$ROOT_DIR/scripts/ci/serious_language_claim_closure_gate.sh"
   write_live_tsv
@@ -173,9 +174,13 @@ release_critical = {
     "binary.source": "checked binary still depends on lean_single as source; modular source-swap parity is not closed",
     "direct_driver": "large-surface direct-driver execution remains a maturity frontier",
     "stdlib.surface": "broad stdlib callability is explicitly downgraded",
-    "tooling.package": "package manager has no public registry launch/support contract",
     "tooling.editor": "formatter, REPL, and editor tooling are prototype surfaces",
 }
+# tooling.package is intentionally outside this broad release-critical set:
+# package-local is a required live gate, while public registry launch/support
+# remains explicitly downgraded and outside the release support contract.
+# tooling.editor remains release-critical because a broad production-ready
+# language/product claim still implies usable editor/repl/formatting surfaces.
 
 allowed_levels = {"stable", "validated_research"}
 allowed_closure = {"closed"}

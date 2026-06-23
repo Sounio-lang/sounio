@@ -1,10 +1,17 @@
-# Sounio Package Registry
+# Sounio Package Registry Prototype
 
-The official package registry for Sounio packages.
+## Prototype status
+
+This directory contains a registry design scaffold and local-development assets
+for Sounio packages. It is not a launched public service, and it must not be
+cited as evidence for a public package-registry support contract. Release
+readiness for package tooling is checked by `scripts/ci/package_local_gate.sh`,
+which proves the local package-manager scope and the public-registry downgrade.
 
 ## Overview
 
-The Sounio Package Registry is the central repository for discovering, publishing, and managing Sounio packages. It provides:
+The prototype registry design explores package discovery, publishing, and
+management. No public launch is committed. The target capabilities are:
 
 - **Package Discovery**: Search and browse packages by name, keywords, or category
 - **Version Management**: Semantic versioning with dependency resolution
@@ -17,41 +24,39 @@ The registry API is documented using OpenAPI 3.1. See `openapi.yaml` for the com
 
 ### Base URL
 
-- Production: `https://registry.sounio-lang.org/api/v1`
-- Staging: `https://staging-registry.sounio-lang.org/api/v1`
+- Local development: `http://localhost:8080/api/v1`
+- Production URL: TBD at launch
 
 ### Quick Start
+
+The commands below require `python3 scripts/dev/registry_serve.py --port 8080`
+or an equivalent local development server. They do not target a public service.
 
 #### Search for packages
 
 ```bash
-curl "https://registry.sounio-lang.org/api/v1/search?q=json"
+curl "http://localhost:8080/api/v1/search?q=json"
 ```
 
 #### Get package details
 
 ```bash
-curl "https://registry.sounio-lang.org/api/v1/packages/json"
+curl "http://localhost:8080/api/v1/packages/json"
 ```
 
 #### Download a package
 
 ```bash
-curl -O "https://registry.sounio-lang.org/api/v1/packages/json/versions/1.0.0/download"
+curl -O "http://localhost:8080/api/v1/packages/json/versions/1.0.0/download"
 ```
 
 ### Authentication
 
-Most write operations require authentication. Create an API token at https://registry.sounio-lang.org/settings/tokens
+Most future write operations will require authentication. Public token issuance
+is not available in this checkout.
 
-```bash
-# Using the sounio CLI
-sounio login
-
-# Using curl
-curl -H "Authorization: Bearer YOUR_TOKEN" \
-  https://registry.sounio-lang.org/api/v1/me
-```
+Future authenticated API shape is tracked in `openapi.yaml`; there is no public
+token service in this checkout.
 
 ## Publishing Packages
 
@@ -74,15 +79,11 @@ stdlib = "^1.0"
 
 ### 2. Login to the registry
 
-```bash
-sounio login
-```
+Future public-registry workflow; not available in this checkout.
 
 ### 3. Publish
 
-```bash
-sounio publish
-```
+Future public-registry workflow; not available in this checkout.
 
 ### Publishing Guidelines
 

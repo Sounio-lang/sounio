@@ -69,7 +69,7 @@ This ledger maps public-facing claims to evidence and safe wording. Use it befor
 | Claim | Level | Current evidence | Safe wording |
 |---|---|---|---|
 | Installation | `prototype` | `scripts/ci/install_path_gate.sh`; `INSTALL.md`; checked x86_64 artifacts | "Use the checked x86_64 repo-artifact install path for release validation; do not promise package-manager or broad cross-platform distribution." |
-| Package manager | `prototype` | `docs/compiler/KNOWN_LIMITATIONS.md` beta table | "The package manager has local-registry functionality; no public registry launch should be promised." |
+| Package manager | `prototype` | `scripts/ci/package_local_gate.sh`; `docs/compiler/KNOWN_LIMITATIONS.md` beta table | "The package manager has checked local command self-tests and a documented registry downgrade; no public registry launch should be promised." |
 | Website/docs | `prototype` | CI website job; docs registry checks | "Docs are extensive but must be filtered through the readiness ledger before external reuse." |
 | Paper bundle | `prototype` | `docs/serious-language/paper-bundle.md`; `scripts/paper/build_serious_language_bundle.sh` | "The paper bundle exists as a reproducibility scaffold; each generated bundle must be reviewed before submission." |
 
