@@ -17,6 +17,8 @@ It is not a complete language specification suite. It is the conference-safe see
 The spec/evidence matrix in `docs/serious-language/spec-evidence-matrix.v1.tsv` is the v1 seed map from tracked specification areas to evidence. `scripts/ci/serious_language_spec_drift_gate.sh` enforces that tracked executable spec rows cite live evidence, runs the bounded conformance gate, and verifies cited conformance cases pass.
 The public-claim registry in `docs/serious-language/public-claim-registry.v1.tsv`, doc-surface map in `docs/serious-language/doc-claim-surface.v1.tsv`, and exact-line annotations in `docs/serious-language/claim-line-annotations.v1.tsv` close the remaining loop: public repo docs must either cite closed evidence-backed claims or carry an explicit downgraded/internal/historical status through `scripts/ci/serious_language_claim_closure_gate.sh`.
 
+Current Madaros downgrades that were removed from the passing spine are recorded in `docs/serious-language/current-madaros-downgrades.md`; their non-passing rows remain machine-readable in `tests/conformance/manifest.v1.downgraded.tsv`.
+
 ## Entry Point
 
 Run the gate directly:
@@ -46,6 +48,11 @@ The gate writes:
 | `summary.v1.json` | JSON summary for paper-bundle ingestion. |
 | `logs/*.stdout` and `logs/*.stderr` | Raw compiler outputs per case. |
 
+The manifest column named `stderr_contains` is the diagnostic-text field.
+`diagnostic_stream` declares whether that diagnostic must appear on `stdout`,
+`stderr`, or `either`; current Madaros checker diagnostics in this spine are
+declared as `stdout`.
+
 Override inputs only deliberately:
 
 ```bash
@@ -63,16 +70,11 @@ Standalone runs default to `/tmp/sounio-serious-conformance-<timestamp>`. The co
 |---|---|---|---|
 | `core.syntax` | Core syntax, functions, structs, control flow | `docs/spec/LANGUAGE_SPECIFICATION.md` sections 2, 4, 5, 6 | `core-hello-check` |
 | `core.execution` | Linux x86-64 native compile/run | `docs/spec/LANGUAGE_SPECIFICATION.md` sections 4, 6 | `core-hello-run` |
-| `core.structs` | Core syntax, functions, structs, control flow | `docs/spec/LANGUAGE_SPECIFICATION.md` section 6.2 | `core-struct-run` |
 | `effects.subtyping` | Effects | `docs/spec/LANGUAGE_SPECIFICATION.md` section 7 | `effects-superset-run` |
 | `effects.diagnostics` | Effects | `docs/spec/LANGUAGE_SPECIFICATION.md` section 7 | `effects-missing-diagnostic` |
-| `epistemic.observe` | Epistemic `Knowledge` and GUM propagation | `docs/spec/LANGUAGE_SPECIFICATION.md` sections 3.9 and 7 | `observe-io-boundary` |
 | `modules.imports` | Modules/imports | `docs/spec/LANGUAGE_SPECIFICATION.md` section 6.7 | `modules-import-check` |
 | `generics.structs` | Traits and generics | `docs/spec/LANGUAGE_SPECIFICATION.md` sections 3.7 and 6.2 | `generics-struct-run` |
-| `generics.functions` | Traits and generics | `docs/spec/LANGUAGE_SPECIFICATION.md` sections 3.7 and 6.1 | `generics-multi-run` |
 | `ownership.borrowing` | Ownership and borrowing | `docs/spec/LANGUAGE_SPECIFICATION.md` section 8 | `ownership-release-check`, `ownership-conflict-diagnostic` |
-| `epistemic.gum` | Epistemic `Knowledge` and GUM propagation | `docs/spec/LANGUAGE_SPECIFICATION.md` sections 3.9 and 12.5 | `gum-compliance-run`, `gum-iso-budget-run` |
-| `epistemic.knowledge` | Epistemic `Knowledge` and GUM propagation | `docs/spec/LANGUAGE_SPECIFICATION.md` section 3.9 | `epistemic-bmi-run` |
 | `epistemic.boundary` | Epistemic `Knowledge` and GUM propagation | `docs/spec/LANGUAGE_SPECIFICATION.md` sections 3.9 and 7 | `knowledge-boundary-diagnostic`, `epistemic-effect-diagnostic` |
 
 ## Expansion Rules

@@ -32,7 +32,7 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 2
 fi
 
-expected_header=$'id\tmode\tsource\texpected_exit\tstdout_contains\tstderr_contains\tclaim_id'
+expected_header=$'id\tmode\tsource\texpected_exit\tstdout_contains\tstderr_contains\tdiagnostic_stream\tclaim_id'
 actual_header="$(head -n 1 "$MANIFEST")"
 actual_header="${actual_header%$'\r'}"
 if [[ "$actual_header" != "$expected_header" ]]; then
@@ -63,7 +63,7 @@ Generated at: $timestamp
 | stdlib_path | \`$SOUNIO_STDLIB_PATH\` |
 | souc_version | \`$souc_version\` |
 
-This gate is a bounded conformance spine. It checks selected stable and validated-research surfaces that are safe to cite from the serious-language readiness ledger. It is not a complete language specification suite.
+This gate is a bounded conformance spine. It checks selected stable and validated-research surfaces that are safe to cite from the serious-language readiness ledger. It is not a complete language specification suite. Diagnostic expectations are checked against the manifest-declared diagnostic stream.
 
 ## Cases
 
@@ -102,7 +102,8 @@ run_case() {
   local expected_exit="$4"
   local stdout_contains="$5"
   local stderr_contains="$6"
-  local claim_id="$7"
+  local diagnostic_stream="$7"
+  local claim_id="$8"
 
   local source_path="$ROOT_DIR/$source"
   local stdout_log="$LOG_DIR/$id.stdout"
@@ -187,12 +188,34 @@ run_case() {
   fi
 
   if [[ "$stderr_contains" != "-" && "$stderr_contains" != "" ]]; then
-    if ! grep -Fq -- "$stderr_contains" "$stderr_log"; then
+    local diagnostic_ok=0
+    case "$diagnostic_stream" in
+      stderr|-|"")
+        grep -Fq -- "$stderr_contains" "$stderr_log" && diagnostic_ok=1
+        ;;
+      stdout)
+        grep -Fq -- "$stderr_contains" "$stdout_log" && diagnostic_ok=1
+        ;;
+      either)
+        if grep -Fq -- "$stderr_contains" "$stderr_log" || grep -Fq -- "$stderr_contains" "$stdout_log"; then
+          diagnostic_ok=1
+        fi
+        ;;
+      *)
+        status="fail"
+        if [[ "$reason" == "ok" ]]; then
+          reason="unknown diagnostic stream"
+        else
+          reason="$reason; unknown diagnostic stream"
+        fi
+        ;;
+    esac
+    if [[ "$diagnostic_ok" -ne 1 ]]; then
       status="fail"
       if [[ "$reason" == "ok" ]]; then
-        reason="stderr missing expected text"
+        reason="diagnostic stream missing expected text"
       else
-        reason="$reason; stderr missing expected text"
+        reason="$reason; diagnostic stream missing expected text"
       fi
     fi
   fi
@@ -200,13 +223,13 @@ run_case() {
   append_summary_row "$id" "$mode" "$source" "$expected_exit" "$actual_exit" "$status" "$reason" "$claim_id" "$stdout_rel" "$stderr_rel"
 }
 
-while IFS=$'\t' read -r id mode source expected_exit stdout_contains stderr_contains claim_id || [[ -n "${id:-}" ]]; do
+while IFS=$'\t' read -r id mode source expected_exit stdout_contains stderr_contains diagnostic_stream claim_id || [[ -n "${id:-}" ]]; do
   [[ -z "${id:-}" || "$id" =~ ^# ]] && continue
   [[ "$id" == "id" ]] && continue
 
   total=$((total + 1))
   before_failures="$failed"
-  run_case "$id" "$mode" "$source" "$expected_exit" "$stdout_contains" "$stderr_contains" "$claim_id"
+  run_case "$id" "$mode" "$source" "$expected_exit" "$stdout_contains" "$stderr_contains" "$diagnostic_stream" "$claim_id"
   if tail -n 1 "$SUMMARY_TSV" | awk -F '\t' '{exit ($6 == "pass") ? 0 : 1}'; then
     passed=$((passed + 1))
   else
