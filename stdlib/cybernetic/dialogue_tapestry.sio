@@ -1,0 +1,121 @@
+//! stdlib/cybernetic/dialogue_tapestry.sio
+//!
+//! Dialogue Tapestry — the functor F over dyadic dialogue trajectories.
+//!
+//! F maps a dyadic conversational trajectory (a sequence of turns between
+//! two speakers) to a bit-exact 𝕊-valued telemetry of coherence,
+//! speaker-asymmetry, and dissociation. Each turn is lifted from an
+//! 8-component real embedding slice into a pure-imaginary unit octonion;
+//! downstream tasks compose these lifts via the octonion associator
+//! (coherence), the commutator (L/R speaker asymmetry), and the sedenion
+//! zero-divisor variety (dissociation), building on:
+//!   - cybernetic::psychiatry (patient_as_sedenion, zero_divisor_proximity)
+//!   - math::sedenion / gpu::sedenion_kernels (sed_associator)
+//!   - math::octonion / nn::octonion
+//!
+//! Authority boundary: this module is the *bit-exact algebra* of F. The
+//! ℝ^1024 → ℝ^8 projection that produces each turn's 8-component slice is
+//! NOT defined here — it is a fixed, seeded projection supplied by the
+//! caller (the Beagle telemetry pipeline, Phase B). This module only
+//! normalizes a given 8-slice into a pure-imaginary unit octonion.
+//!
+//! Task A1 scope: the turn lift (turn_to_octonion) plus the local
+//! helpers it depends on (oct_norm8, dt_approx_eq). Later tasks add
+//! coherence, lr_asymmetry, fano_mode, zd_proximity, and the full
+//! tapestry walk over a trajectory.
+
+// ============================================================================
+// HELPERS — local f64 primitives (mirrors the psychiatry.sio idiom)
+// ============================================================================
+
+/// Absolute value for f64.
+fn dt_abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+/// Square root for f64 via Newton iteration (Babylonian method).
+///
+/// Copied from psychiatry.sio's psychiatry_sqrt_f64 idiom: 8 fixed Newton
+/// steps from the seed y0 = x, which converges to full f64 precision for
+/// the magnitudes seen in normalized octonion embeddings. Kept local so
+/// this module is bit-exact and self-contained.
+fn dt_sqrt_f64(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+/// Approximate equality on f64: |a - b| < eps.
+pub fn dt_approx_eq(a: f64, b: f64, eps: f64) -> bool {
+    dt_abs_f64(a - b) < eps
+}
+
+// ============================================================================
+// OCTONION NORM — L2 over 8 components
+// ============================================================================
+
+/// L2 (Euclidean) norm of an 8-component octonion ‖o‖ = sqrt(Σ o[i]²).
+///
+/// Uses the local Newton-iteration sqrt so the result is bit-identical
+/// across runs (no platform libm dependence).
+pub fn oct_norm8(o: [f64; 8]) -> f64 with Mut, Div {
+    var sumsq: f64 = 0.0
+    var i = 0
+    while i < 8 {
+        sumsq = sumsq + o[i] * o[i]
+        i = i + 1
+    }
+    dt_sqrt_f64(sumsq)
+}
+
+// ============================================================================
+// TURN LIFT — ℝ^8 slice → pure-imaginary unit octonion
+// ============================================================================
+
+/// Lift an 8-component embedding slice into a normalized pure-imaginary octonion.
+///
+/// The functor F treats each dialogue turn as a point on the imaginary
+/// unit sphere of the octonions: the real part (index 0) is forced to 0.0
+/// and the imaginary part (indices 1..7) is L2-normalized to unit length.
+///
+/// Returns a NEW array; the input is not mutated. If the imaginary part has
+/// norm ≤ 0.001 (a degenerate / near-zero turn), the result is left as all
+/// zeros rather than dividing by a vanishing norm.
+///
+/// NOTE: the ℝ^1024 → ℝ^8 projection that produces `v` is a fixed, seeded
+/// projection supplied by the caller (Phase B); it is intentionally NOT
+/// performed here. This function only normalizes the given 8-slice.
+pub fn turn_to_octonion(v: [f64; 8]) -> [f64; 8] with Mut, Div, Panic {
+    var o: [f64; 8] = [0.0; 8]
+
+    // Norm of the imaginary part only (indices 1..7); the real part is dropped.
+    var imag_sq: f64 = 0.0
+    var i = 1
+    while i < 8 {
+        imag_sq = imag_sq + v[i] * v[i]
+        i = i + 1
+    }
+    let imag_norm = dt_sqrt_f64(imag_sq)
+
+    // Real part is forced to 0.0 (pure-imaginary octonion).
+    o[0] = 0.0
+
+    // Guard against degenerate turns: only normalize when the imaginary
+    // part is non-vanishing, otherwise leave the zeros in place.
+    if imag_norm > 0.001 {
+        i = 1
+        while i < 8 {
+            o[i] = v[i] / imag_norm
+            i = i + 1
+        }
+    }
+    o
+}
