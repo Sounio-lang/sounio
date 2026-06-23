@@ -1837,28 +1837,6 @@ fn lobl_append(buf: [i8; 65536], pos: i64, s: string) -> ([i8; 65536], i64) with
     (out, p)
 }
 
-// Whole-buffer ASCII substring search over the first `size` bytes.
-fn lobl_contains(buf: &[i8; 1048576], size: i64, needle: string) -> bool with Mut, Panic, Div {
-    let nlen = str_len(needle)
-    if nlen == 0 { return true }
-    if size < nlen { return false }
-    var i: i64 = 0
-    while i <= size - nlen {
-        var j: i64 = 0
-        var ok: bool = true
-        while j < nlen {
-            if (*buf)[(i + j) as usize] != (str_char_at(needle, j) as i8) {
-                ok = false
-                break
-            }
-            j = j + 1
-        }
-        if ok { return true }
-        i = i + 1
-    }
-    false
-}
-
 fn run_emit_lean_obligations(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     if flag_index + 2 >= args.len {
         print("usage: emit-lean-obligations <src.sio> <out.lean>\n")
@@ -1872,44 +1850,15 @@ fn run_emit_lean_obligations(args: ArgList, flag_index: i64) with IO, Mut, Panic
         print("\n")
         return
     }
-    let raw_size = file_size(src)
-    var size: i64 = raw_size
-    if size < 0 { size = 0 }
-    if size > 1048576 { size = 1048576 }
-    let data = read_file(src)
-    var src_buf: [i8; 1048576] = [0; 1048576]
-    var ci: i64 = 0
-    while ci < size {
-        src_buf[ci as usize] = data[ci as usize]
-        ci = ci + 1
-    }
+    // Run the checker with per-call-site obligation recording enabled, so each Invariant
+    // comparison's concrete groups + frame relation and each Chaotic function are captured
+    // precisely (not lexically). The checker hooks live in check::effects / check.sio.
+    equiv_begin_recording()
+    let prog = load_module_file(src)
+    let _verdict = module_frontend_check_items_with_source_context(prog.items, src)
+    equiv_end_recording()
 
-    let has_inv = lobl_contains(&src_buf, size, "Invariant")
-    let has_diffinf = lobl_contains(&src_buf, size, "DiffInf")
-    let has_diff1 = lobl_contains(&src_buf, size, "Diff1")
-    let has_bilip = lobl_contains(&src_buf, size, "BiLip")
-    let has_homeo = lobl_contains(&src_buf, size, "Homeo")
-    let has_chaotic = lobl_contains(&src_buf, size, "Chaotic")
-
-    var body = "-- Auto-emitted Equivalence Theory obligations (Mathlib-free).\n"
-    body = body + "-- Source: " + src + "\n"
-    body = body + "-- Decidable obligations; discharged in formal/EquivalenceTheory.lean.\n"
-    body = body + "import EquivalenceTheory\nopen Sounio.EquivalenceTheory\n\n"
-    if has_inv && has_diffinf {
-        body = body + "theorem obl_diffinf : comparableDefault Group.DiffInf Group.DiffInf = false := by decide\n"
-    }
-    if has_inv && has_diff1 {
-        body = body + "theorem obl_diff1 : comparableDefault Group.Diff1 Group.Diff1 = false := by decide\n"
-    }
-    if has_inv && has_bilip {
-        body = body + "theorem obl_bilip : comparableDefault Group.BiLip Group.BiLip = false := by decide\n"
-    }
-    if has_inv && has_homeo {
-        body = body + "theorem obl_homeo : comparableDefault Group.Homeo Group.Homeo = true := by decide\n"
-    }
-    if has_chaotic {
-        body = body + "theorem obl_chaos : reassocAllowed true true true = false := by decide\n"
-    }
+    let body = equiv_emit_body(src)
 
     var buf: [i8; 65536] = [0; 65536]
     let appended = lobl_append(buf, 0, body)
