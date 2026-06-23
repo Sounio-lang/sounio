@@ -98,6 +98,10 @@ bootstrap_via_boot4_chain() {
 
 LEAN="$ROOT_DIR/self-hosted/compiler/lean_single.sio"
 OUT="${1:-/tmp/souc-native}"
+if [[ "$OUT" == -* ]]; then
+    echo "error: output path must not start with '-': $OUT" >&2
+    exit 2
+fi
 FORCE_SOURCE_BOOTSTRAP="${SOUNIO_FORCE_SOURCE_BOOTSTRAP:-0}"
 LEAN_BYTES="$(portable_size "$LEAN")"
 BOOT4_DIRECT_SRC_CAP=1048576
