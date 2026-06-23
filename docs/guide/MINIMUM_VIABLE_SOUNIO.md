@@ -231,7 +231,7 @@ export SOUC_BIN="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 "$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/souc-next
 "$SOUC_BIN" run self-hosted/compiler/native_print_f64_smoke.sio
 "$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
 
@@ -241,6 +241,8 @@ bash scripts/stdlib_reliability_gate.sh
 bash scripts/ci/native_v2_epistemic_science_spine_gate.sh
 bash scripts/ci/native_v2_f64_ladder_gate.sh
 ```
+
+To explicitly exercise the legacy bootstrap compiler, set `SOUNIO_SOUC_ENGINE=lean_single` when invoking `bin/souc`.
 
 Then read:
 

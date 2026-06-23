@@ -81,3 +81,5 @@ This ledger maps public-facing claims to evidence and safe wording. Use it befor
 - GPU and hypercomplex work must be tied to exact hardware, command, and artifact outputs.
 - External-facing papers need `bin/llm-offload` review before submission.
 - Public PL claims must be present in `docs/serious-language/public-claim-registry.v1.tsv` or kept out of public support wording; high-value public claims should also appear in `docs/serious-language/claim-line-annotations.v1.tsv`.
+
+Operationally, the default external entry point is `bin/souc` (official) with Madaros as the active engine; teams should reference this route first for conferences, onboarding, and reproducibility scripts.

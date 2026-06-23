@@ -255,7 +255,7 @@ objdump -d -M intel /tmp/argv.exe | grep -A6 '<.text>:'   # movabs rax,0x1000000
 ```bash
 cd <worktree>
 bash scripts/ci/windows_pe_smoke_gate.sh          # 6/6 PASS (I/O primitives)
-./bin/souc compile self-hosted/compiler/lean_single.sio -o /tmp/souc.exe --target x86_64-windows
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile self-hosted/compiler/lean_single.sio -o /tmp/souc.exe --target x86_64-windows
 echo 'fn main() -> i64 { return 7 }' > /tmp/prog.sio
 WINEDEBUG=-all wine /tmp/souc.exe /tmp/prog.sio /tmp/prog.elf   # currently faults
 ```

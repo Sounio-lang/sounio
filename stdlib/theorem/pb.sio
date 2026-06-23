@@ -1,0 +1,591 @@
+//! stdlib/theorem/pb.sio
+//!
+//! Tiny pseudo-Boolean proof-checking helpers.
+//!
+//! This is a first checker-side PB layer, not an optimizer and not a SAT solver.
+//! It verifies bounded contradictions for three Boolean literals:
+//!
+//!   w0*x0 + w1*x1 + w2*x2 <= rhs
+//!   w0*x0 + w1*x1 + w2*x2 >= rhs
+//!
+//! Assignments use 0=false, 1=true, and -1=unknown. Unknowns are interpreted
+//! conservatively:
+//! - for <= contradiction, the minimum possible sum already exceeds rhs;
+//! - for >= contradiction, the maximum possible sum is still below rhs.
+//!
+//! It also checks small cutting-plane style proof steps:
+//! - coefficient saturation;
+//! - division by a positive integer with the sound rounding direction.
+//! - non-negative scaling and same-sense row addition.
+//! - forced-literal propagation for bounded rows.
+//! - named cardinality rows for exactly-one/at-most-one/at-most-two gates.
+//! - tiny minimization optimality certificates as objective lower-bound row plus
+//!   matching incumbent assignment.
+//!
+//! For Boolean variables and non-negative rhs, any coefficient larger than rhs
+//! can be replaced by rhs without weakening a `<=` constraint. For division,
+//! `<=` rows use floor division, while `>=` rows use ceil division.
+//! Scaling and addition are deliberately bounded to small non-negative `i64`
+//! rows so the checker does not accept arithmetic that could overflow.
+
+// `sense` is -1 for <= rows and +1 for >= rows.
+pub struct PbRow3 {
+    w0: i64,
+    w1: i64,
+    w2: i64,
+    rhs: i64,
+    sense: i64,
+}
+
+pub struct PbObjective3 {
+    c0: i64,
+    c1: i64,
+    c2: i64,
+}
+
+pub fn pb_sense_le() -> i64 {
+    return 0 - 1
+}
+
+pub fn pb_sense_ge() -> i64 {
+    return 1
+}
+
+pub fn pb_small_nonneg(x: i64) -> i64 {
+    if x < 0 { return 0 }
+    if x > 1000000000 { return 0 }
+    return 1
+}
+
+pub fn pb_bool_valid(x: i64) -> i64 {
+    if x == 0 { return 1 }
+    if x == 1 { return 1 }
+    if x == (0 - 1) { return 1 }
+    return 0
+}
+
+pub fn pb_row3(w0: i64, w1: i64, w2: i64, rhs: i64, sense: i64) -> PbRow3 {
+    return PbRow3 { w0: w0, w1: w1, w2: w2, rhs: rhs, sense: sense }
+}
+
+pub fn pb_objective3(c0: i64, c1: i64, c2: i64) -> PbObjective3 {
+    return PbObjective3 { c0: c0, c1: c1, c2: c2 }
+}
+
+pub fn pb_row_valid3(row: PbRow3) -> i64 {
+    if row.sense != pb_sense_le() {
+        if row.sense != pb_sense_ge() { return 0 }
+    }
+    if pb_small_nonneg(row.w0) == 0 { return 0 }
+    if pb_small_nonneg(row.w1) == 0 { return 0 }
+    if pb_small_nonneg(row.w2) == 0 { return 0 }
+    if pb_small_nonneg(row.rhs) == 0 { return 0 }
+    return 1
+}
+
+pub fn pb_objective_valid3(obj: PbObjective3) -> i64 {
+    if pb_small_nonneg(obj.c0) == 0 { return 0 }
+    if pb_small_nonneg(obj.c1) == 0 { return 0 }
+    if pb_small_nonneg(obj.c2) == 0 { return 0 }
+    return 1
+}
+
+pub fn pb_row_eq3(a: PbRow3, b: PbRow3) -> i64 {
+    if a.w0 != b.w0 { return 0 }
+    if a.w1 != b.w1 { return 0 }
+    if a.w2 != b.w2 { return 0 }
+    if a.rhs != b.rhs { return 0 }
+    if a.sense != b.sense { return 0 }
+    return 1
+}
+
+pub fn pb_assignment_value_valid3(x0: i64, x1: i64, x2: i64) -> i64 {
+    if x0 != 0 {
+        if x0 != 1 { return 0 }
+    }
+    if x1 != 0 {
+        if x1 != 1 { return 0 }
+    }
+    if x2 != 0 {
+        if x2 != 1 { return 0 }
+    }
+    return 1
+}
+
+pub fn pb_objective_value3(obj: PbObjective3, x0: i64, x1: i64, x2: i64) -> i64 {
+    if pb_objective_valid3(obj) == 0 { return 0 - 1 }
+    if pb_assignment_value_valid3(x0, x1, x2) == 0 { return 0 - 1 }
+    return obj.c0 * x0 + obj.c1 * x1 + obj.c2 * x2
+}
+
+pub fn pb_objective_lower_bound_row_matches3(obj: PbObjective3, row: PbRow3) -> i64 {
+    if pb_objective_valid3(obj) == 0 { return 0 }
+    if pb_row_valid3(row) == 0 { return 0 }
+    if row.sense != pb_sense_ge() { return 0 }
+    if row.w0 != obj.c0 { return 0 }
+    if row.w1 != obj.c1 { return 0 }
+    if row.w2 != obj.c2 { return 0 }
+    return 1
+}
+
+pub fn pb_check_min_objective_optimal3(obj: PbObjective3, lower_bound_row: PbRow3,
+                                       x0: i64, x1: i64, x2: i64) -> i64 {
+    if pb_objective_lower_bound_row_matches3(obj, lower_bound_row) == 0 { return 0 }
+    if pb_objective_value3(obj, x0, x1, x2) != lower_bound_row.rhs { return 0 }
+    return 1
+}
+
+pub fn pb_mix(acc: i64, value: i64, salt: i64) -> i64 with Mod {
+    return ((acc * 16777619) + value + salt) % 1000000007
+}
+
+pub fn pb_sense_code(sense: i64) -> i64 {
+    if sense == pb_sense_le() { return 1 }
+    if sense == pb_sense_ge() { return 2 }
+    return 0
+}
+
+pub fn pb_assignment_code(x: i64) -> i64 {
+    if x == 0 { return 1 }
+    if x == 1 { return 2 }
+    return 0
+}
+
+pub fn pb_row_fingerprint3(row: PbRow3) -> i64 with Mod {
+    if pb_row_valid3(row) == 0 { return 0 - 1 }
+    let sc = pb_sense_code(row.sense)
+    if sc == 0 { return 0 - 1 }
+    var fp: i64 = 83
+    fp = pb_mix(fp, row.w0, 941)
+    fp = pb_mix(fp, row.w1, 941)
+    fp = pb_mix(fp, row.w2, 941)
+    fp = pb_mix(fp, row.rhs, 941)
+    fp = pb_mix(fp, sc, 941)
+    return fp
+}
+
+pub fn pb_assignment_fingerprint3(x0: i64, x1: i64, x2: i64) -> i64 with Mod {
+    if pb_assignment_value_valid3(x0, x1, x2) == 0 { return 0 - 1 }
+    var fp: i64 = 89
+    fp = pb_mix(fp, pb_assignment_code(x0), 977)
+    fp = pb_mix(fp, pb_assignment_code(x1), 977)
+    fp = pb_mix(fp, pb_assignment_code(x2), 977)
+    return fp
+}
+
+pub fn pb_objective_fingerprint3(obj: PbObjective3) -> i64 with Mod {
+    if pb_objective_valid3(obj) == 0 { return 0 - 1 }
+    var fp: i64 = 109
+    fp = pb_mix(fp, obj.c0, 1217)
+    fp = pb_mix(fp, obj.c1, 1217)
+    fp = pb_mix(fp, obj.c2, 1217)
+    return fp
+}
+
+pub fn pb_min_objective_certificate_fingerprint3(obj: PbObjective3, lower_bound_row: PbRow3,
+                                                 x0: i64, x1: i64, x2: i64) -> i64 with Mod {
+    if pb_check_min_objective_optimal3(obj, lower_bound_row, x0, x1, x2) == 0 { return 0 - 1 }
+    let obj_fp = pb_objective_fingerprint3(obj)
+    let row_fp = pb_row_fingerprint3(lower_bound_row)
+    let assignment_fp = pb_assignment_fingerprint3(x0, x1, x2)
+    let value = pb_objective_value3(obj, x0, x1, x2)
+    var fp: i64 = 113
+    fp = pb_mix(fp, obj_fp, 1229)
+    fp = pb_mix(fp, row_fp, 1229)
+    fp = pb_mix(fp, assignment_fp, 1229)
+    fp = pb_mix(fp, value, 1229)
+    fp = pb_mix(fp, lower_bound_row.rhs, 1229)
+    return fp
+}
+
+pub fn pb_min_term(w: i64, x: i64) -> i64 {
+    if x == 1 { return w }
+    return 0
+}
+
+pub fn pb_max_term(w: i64, x: i64) -> i64 {
+    if x == 0 { return 0 }
+    return w
+}
+
+pub fn pb_min_sum3(w0: i64, x0: i64, w1: i64, x1: i64, w2: i64, x2: i64) -> i64 {
+    return pb_min_term(w0, x0) + pb_min_term(w1, x1) + pb_min_term(w2, x2)
+}
+
+pub fn pb_max_sum3(w0: i64, x0: i64, w1: i64, x1: i64, w2: i64, x2: i64) -> i64 {
+    return pb_max_term(w0, x0) + pb_max_term(w1, x1) + pb_max_term(w2, x2)
+}
+
+pub fn pb_check_le_contradiction3(w0: i64, x0: i64, w1: i64, x1: i64, w2: i64, x2: i64, rhs: i64) -> i64 {
+    if w0 < 0 { return 0 }
+    if w1 < 0 { return 0 }
+    if w2 < 0 { return 0 }
+    if pb_bool_valid(x0) == 0 { return 0 }
+    if pb_bool_valid(x1) == 0 { return 0 }
+    if pb_bool_valid(x2) == 0 { return 0 }
+    if pb_min_sum3(w0, x0, w1, x1, w2, x2) > rhs { return 1 }
+    return 0
+}
+
+pub fn pb_check_ge_contradiction3(w0: i64, x0: i64, w1: i64, x1: i64, w2: i64, x2: i64, rhs: i64) -> i64 {
+    if w0 < 0 { return 0 }
+    if w1 < 0 { return 0 }
+    if w2 < 0 { return 0 }
+    if pb_bool_valid(x0) == 0 { return 0 }
+    if pb_bool_valid(x1) == 0 { return 0 }
+    if pb_bool_valid(x2) == 0 { return 0 }
+    if pb_max_sum3(w0, x0, w1, x1, w2, x2) < rhs { return 1 }
+    return 0
+}
+
+pub fn pb_row_check_contradiction3(row: PbRow3, x0: i64, x1: i64, x2: i64) -> i64 {
+    if pb_row_valid3(row) == 0 { return 0 }
+    if row.sense == pb_sense_le() {
+        return pb_check_le_contradiction3(row.w0, x0, row.w1, x1, row.w2, x2, row.rhs)
+    }
+    return pb_check_ge_contradiction3(row.w0, x0, row.w1, x1, row.w2, x2, row.rhs)
+}
+
+pub fn pb_check_exactly_one_false_conflict3(x0: i64, x1: i64, x2: i64) -> i64 {
+    return pb_check_ge_contradiction3(1, x0, 1, x1, 1, x2, 1)
+}
+
+pub fn pb_check_at_most_one_true_conflict3(x0: i64, x1: i64, x2: i64) -> i64 {
+    return pb_check_le_contradiction3(1, x0, 1, x1, 1, x2, 1)
+}
+
+pub fn pb_card_at_most_two_row3() -> PbRow3 {
+    return pb_row3(1, 1, 1, 2, pb_sense_le())
+}
+
+pub fn pb_check_at_most_two_true_conflict3(x0: i64, x1: i64, x2: i64) -> i64 {
+    return pb_check_le_contradiction3(1, x0, 1, x1, 1, x2, 2)
+}
+
+pub fn pb_row_check_at_most_two_conflict3(row: PbRow3, x0: i64, x1: i64, x2: i64) -> i64 {
+    if pb_row_eq3(row, pb_card_at_most_two_row3()) == 0 { return 0 }
+    return pb_row_check_contradiction3(row, x0, x1, x2)
+}
+
+fn pb_lit_matches_one3(clause_lit: i64, lit_a: i64, lit_b: i64, lit_c: i64) -> i64 {
+    if clause_lit + lit_a == 0 { return 1 }
+    if clause_lit + lit_b == 0 { return 1 }
+    if clause_lit + lit_c == 0 { return 1 }
+    return 0
+}
+
+pub fn pb_card_at_most_two_clause_matches3(clause_lit0: i64, clause_lit1: i64, clause_lit2: i64,
+                                           lit_a: i64, lit_b: i64, lit_c: i64) -> i64 {
+    if lit_a <= 0 { return 0 }
+    if lit_b <= 0 { return 0 }
+    if lit_c <= 0 { return 0 }
+    if lit_a == lit_b { return 0 }
+    if lit_a == lit_c { return 0 }
+    if lit_b == lit_c { return 0 }
+    if clause_lit0 >= 0 { return 0 }
+    if clause_lit1 >= 0 { return 0 }
+    if clause_lit2 >= 0 { return 0 }
+    if clause_lit0 == clause_lit1 { return 0 }
+    if clause_lit0 == clause_lit2 { return 0 }
+    if clause_lit1 == clause_lit2 { return 0 }
+    if pb_lit_matches_one3(clause_lit0, lit_a, lit_b, lit_c) == 0 { return 0 }
+    if pb_lit_matches_one3(clause_lit1, lit_a, lit_b, lit_c) == 0 { return 0 }
+    if pb_lit_matches_one3(clause_lit2, lit_a, lit_b, lit_c) == 0 { return 0 }
+    return 1
+}
+
+pub fn pb_check_card_at_most_two_clause_conflict3(clause_lit0: i64, clause_lit1: i64, clause_lit2: i64,
+                                                 lit_a: i64, lit_b: i64, lit_c: i64,
+                                                 x0: i64, x1: i64, x2: i64) -> i64 {
+    if pb_card_at_most_two_clause_matches3(clause_lit0, clause_lit1, clause_lit2, lit_a, lit_b, lit_c) == 0 { return 0 }
+    return pb_check_at_most_two_true_conflict3(x0, x1, x2)
+}
+
+pub fn pb_row_check_card_at_most_two_clause_conflict3(row: PbRow3,
+                                                     clause_lit0: i64, clause_lit1: i64, clause_lit2: i64,
+                                                     lit_a: i64, lit_b: i64, lit_c: i64,
+                                                     x0: i64, x1: i64, x2: i64) -> i64 {
+    if pb_row_eq3(row, pb_card_at_most_two_row3()) == 0 { return 0 }
+    return pb_check_card_at_most_two_clause_conflict3(clause_lit0, clause_lit1, clause_lit2,
+                                                     lit_a, lit_b, lit_c, x0, x1, x2)
+}
+
+pub fn pb_valid_slot3(slot: i64) -> i64 {
+    if slot == 0 { return 1 }
+    if slot == 1 { return 1 }
+    if slot == 2 { return 1 }
+    return 0
+}
+
+pub fn pb_slot_unknown3(x0: i64, x1: i64, x2: i64, slot: i64) -> i64 {
+    if pb_valid_slot3(slot) == 0 { return 0 }
+    if slot == 0 { if x0 == (0 - 1) { return 1 } }
+    if slot == 1 { if x1 == (0 - 1) { return 1 } }
+    if slot == 2 { if x2 == (0 - 1) { return 1 } }
+    return 0
+}
+
+pub fn pb_weight_at3(w0: i64, w1: i64, w2: i64, slot: i64) -> i64 {
+    if slot == 0 { return w0 }
+    if slot == 1 { return w1 }
+    if slot == 2 { return w2 }
+    return 0 - 1
+}
+
+pub fn pb_check_le_forces_false3(w0: i64, x0: i64, w1: i64, x1: i64, w2: i64, x2: i64, rhs: i64, slot: i64) -> i64 {
+    if w0 < 0 { return 0 }
+    if w1 < 0 { return 0 }
+    if w2 < 0 { return 0 }
+    if pb_bool_valid(x0) == 0 { return 0 }
+    if pb_bool_valid(x1) == 0 { return 0 }
+    if pb_bool_valid(x2) == 0 { return 0 }
+    if pb_slot_unknown3(x0, x1, x2, slot) == 0 { return 0 }
+    if pb_min_sum3(w0, x0, w1, x1, w2, x2) + pb_weight_at3(w0, w1, w2, slot) > rhs { return 1 }
+    return 0
+}
+
+pub fn pb_check_ge_forces_true3(w0: i64, x0: i64, w1: i64, x1: i64, w2: i64, x2: i64, rhs: i64, slot: i64) -> i64 {
+    if w0 < 0 { return 0 }
+    if w1 < 0 { return 0 }
+    if w2 < 0 { return 0 }
+    if pb_bool_valid(x0) == 0 { return 0 }
+    if pb_bool_valid(x1) == 0 { return 0 }
+    if pb_bool_valid(x2) == 0 { return 0 }
+    if pb_slot_unknown3(x0, x1, x2, slot) == 0 { return 0 }
+    if pb_max_sum3(w0, x0, w1, x1, w2, x2) - pb_weight_at3(w0, w1, w2, slot) < rhs { return 1 }
+    return 0
+}
+
+pub fn pb_row_check_forces3(row: PbRow3, x0: i64, x1: i64, x2: i64, slot: i64, forced_value: i64) -> i64 {
+    if pb_row_valid3(row) == 0 { return 0 }
+    if forced_value != 0 {
+        if forced_value != 1 { return 0 }
+    }
+    if row.sense == pb_sense_le() {
+        if forced_value != 0 { return 0 }
+        return pb_check_le_forces_false3(row.w0, x0, row.w1, x1, row.w2, x2, row.rhs, slot)
+    }
+    if forced_value != 1 { return 0 }
+    return pb_check_ge_forces_true3(row.w0, x0, row.w1, x1, row.w2, x2, row.rhs, slot)
+}
+
+pub fn pb_saturate_coeff(w: i64, rhs: i64) -> i64 {
+    if w < 0 { return 0 - 1 }
+    if rhs < 0 { return 0 - 1 }
+    if w > rhs { return rhs }
+    return w
+}
+
+pub fn pb_check_saturation3(w0: i64, w1: i64, w2: i64, rhs: i64,
+                            s0: i64, s1: i64, s2: i64) -> i64 {
+    if rhs < 0 { return 0 }
+    if w0 < 0 { return 0 }
+    if w1 < 0 { return 0 }
+    if w2 < 0 { return 0 }
+    if s0 != pb_saturate_coeff(w0, rhs) { return 0 }
+    if s1 != pb_saturate_coeff(w1, rhs) { return 0 }
+    if s2 != pb_saturate_coeff(w2, rhs) { return 0 }
+    return 1
+}
+
+pub fn pb_row_check_saturation3(input: PbRow3, output: PbRow3) -> i64 {
+    if pb_row_valid3(input) == 0 { return 0 }
+    if pb_row_valid3(output) == 0 { return 0 }
+    if input.sense != pb_sense_le() { return 0 }
+    if output.sense != pb_sense_le() { return 0 }
+    if input.rhs != output.rhs { return 0 }
+    return pb_check_saturation3(input.w0, input.w1, input.w2, input.rhs,
+                                output.w0, output.w1, output.w2)
+}
+
+pub fn pb_floor_div_nonneg(n: i64, divisor: i64) -> i64 with Div {
+    if n < 0 { return 0 - 1 }
+    if divisor <= 0 { return 0 - 1 }
+    return n / divisor
+}
+
+pub fn pb_ceil_div_nonneg(n: i64, divisor: i64) -> i64 with Div {
+    if n < 0 { return 0 - 1 }
+    if divisor <= 0 { return 0 - 1 }
+    return (n + divisor - 1) / divisor
+}
+
+pub fn pb_check_divide_le3(w0: i64, w1: i64, w2: i64, rhs: i64, divisor: i64,
+                           q0: i64, q1: i64, q2: i64, qrhs: i64) -> i64 with Div {
+    if divisor <= 0 { return 0 }
+    if rhs < 0 { return 0 }
+    if w0 < 0 { return 0 }
+    if w1 < 0 { return 0 }
+    if w2 < 0 { return 0 }
+    if q0 != pb_floor_div_nonneg(w0, divisor) { return 0 }
+    if q1 != pb_floor_div_nonneg(w1, divisor) { return 0 }
+    if q2 != pb_floor_div_nonneg(w2, divisor) { return 0 }
+    if qrhs != pb_floor_div_nonneg(rhs, divisor) { return 0 }
+    return 1
+}
+
+pub fn pb_check_divide_ge3(w0: i64, w1: i64, w2: i64, rhs: i64, divisor: i64,
+                           q0: i64, q1: i64, q2: i64, qrhs: i64) -> i64 with Div {
+    if divisor <= 0 { return 0 }
+    if rhs < 0 { return 0 }
+    if w0 < 0 { return 0 }
+    if w1 < 0 { return 0 }
+    if w2 < 0 { return 0 }
+    if q0 != pb_ceil_div_nonneg(w0, divisor) { return 0 }
+    if q1 != pb_ceil_div_nonneg(w1, divisor) { return 0 }
+    if q2 != pb_ceil_div_nonneg(w2, divisor) { return 0 }
+    if qrhs != pb_ceil_div_nonneg(rhs, divisor) { return 0 }
+    return 1
+}
+
+pub fn pb_row_check_divide3(input: PbRow3, divisor: i64, output: PbRow3) -> i64 with Div {
+    if pb_row_valid3(input) == 0 { return 0 }
+    if pb_row_valid3(output) == 0 { return 0 }
+    if input.sense != output.sense { return 0 }
+    if input.sense == pb_sense_le() {
+        return pb_check_divide_le3(input.w0, input.w1, input.w2, input.rhs, divisor,
+                                   output.w0, output.w1, output.w2, output.rhs)
+    }
+    return pb_check_divide_ge3(input.w0, input.w1, input.w2, input.rhs, divisor,
+                               output.w0, output.w1, output.w2, output.rhs)
+}
+
+pub fn pb_check_scale3(w0: i64, w1: i64, w2: i64, rhs: i64, factor: i64,
+                       s0: i64, s1: i64, s2: i64, srhs: i64) -> i64 {
+    if pb_small_nonneg(factor) == 0 { return 0 }
+    if pb_small_nonneg(rhs) == 0 { return 0 }
+    if pb_small_nonneg(w0) == 0 { return 0 }
+    if pb_small_nonneg(w1) == 0 { return 0 }
+    if pb_small_nonneg(w2) == 0 { return 0 }
+    if pb_small_nonneg(s0) == 0 { return 0 }
+    if pb_small_nonneg(s1) == 0 { return 0 }
+    if pb_small_nonneg(s2) == 0 { return 0 }
+    if pb_small_nonneg(srhs) == 0 { return 0 }
+
+    if w0 * factor != s0 { return 0 }
+    if w1 * factor != s1 { return 0 }
+    if w2 * factor != s2 { return 0 }
+    if rhs * factor != srhs { return 0 }
+    return 1
+}
+
+pub fn pb_row_check_scale3(input: PbRow3, factor: i64, output: PbRow3) -> i64 {
+    if pb_row_valid3(input) == 0 { return 0 }
+    if pb_row_valid3(output) == 0 { return 0 }
+    if input.sense != output.sense { return 0 }
+    return pb_check_scale3(input.w0, input.w1, input.w2, input.rhs, factor,
+                           output.w0, output.w1, output.w2, output.rhs)
+}
+
+pub fn pb_check_add_coeffs3(a0: i64, a1: i64, a2: i64,
+                            b0: i64, b1: i64, b2: i64,
+                            c0: i64, c1: i64, c2: i64) -> i64 {
+    if pb_small_nonneg(a0) == 0 { return 0 }
+    if pb_small_nonneg(a1) == 0 { return 0 }
+    if pb_small_nonneg(a2) == 0 { return 0 }
+    if pb_small_nonneg(b0) == 0 { return 0 }
+    if pb_small_nonneg(b1) == 0 { return 0 }
+    if pb_small_nonneg(b2) == 0 { return 0 }
+    if pb_small_nonneg(c0) == 0 { return 0 }
+    if pb_small_nonneg(c1) == 0 { return 0 }
+    if pb_small_nonneg(c2) == 0 { return 0 }
+
+    if a0 + b0 != c0 { return 0 }
+    if a1 + b1 != c1 { return 0 }
+    if a2 + b2 != c2 { return 0 }
+    return 1
+}
+
+pub fn pb_check_add_rhs(arhs: i64, brhs: i64, crhs: i64) -> i64 {
+    if pb_small_nonneg(arhs) == 0 { return 0 }
+    if pb_small_nonneg(brhs) == 0 { return 0 }
+    if pb_small_nonneg(crhs) == 0 { return 0 }
+    if arhs + brhs != crhs { return 0 }
+    return 1
+}
+
+pub fn pb_row_check_add3(a: PbRow3, b: PbRow3, out: PbRow3) -> i64 {
+    if pb_row_valid3(a) == 0 { return 0 }
+    if pb_row_valid3(b) == 0 { return 0 }
+    if pb_row_valid3(out) == 0 { return 0 }
+    if a.sense != b.sense { return 0 }
+    if a.sense != out.sense { return 0 }
+    if pb_check_add_coeffs3(a.w0, a.w1, a.w2, b.w0, b.w1, b.w2,
+                            out.w0, out.w1, out.w2) == 0 { return 0 }
+    return pb_check_add_rhs(a.rhs, b.rhs, out.rhs)
+}
+
+pub fn pb_kernel_trace_propagation_fingerprint3(
+    format_version: i64,
+    input: PbRow3,
+    saturated: PbRow3,
+    divisor: i64,
+    divided: PbRow3,
+    addend: PbRow3,
+    summed: PbRow3,
+    x0: i64,
+    x1: i64,
+    x2: i64,
+    forced_slot: i64,
+    forced_value: i64,
+    trace_mask: i64) -> i64 with Div, Mod {
+    if format_version != 3 { return 0 - 1 }
+    if trace_mask != 31 { return 0 - 1 }
+    if pb_row_check_saturation3(input, saturated) == 0 { return 0 - 1 }
+    if pb_row_check_divide3(saturated, divisor, divided) == 0 { return 0 - 1 }
+    if pb_row_check_add3(divided, addend, summed) == 0 { return 0 - 1 }
+    if pb_row_check_forces3(summed, x0, x1, x2, forced_slot, forced_value) == 0 {
+        return 0 - 1
+    }
+
+    let input_fp = pb_row_fingerprint3(input)
+    let saturated_fp = pb_row_fingerprint3(saturated)
+    let divided_fp = pb_row_fingerprint3(divided)
+    let addend_fp = pb_row_fingerprint3(addend)
+    let summed_fp = pb_row_fingerprint3(summed)
+    let assignment_fp = pb_assignment_fingerprint3(x0, x1, x2)
+
+    var fp: i64 = 127
+    fp = pb_mix(fp, format_version, 2791)
+    fp = pb_mix(fp, input_fp, 2791)
+    fp = pb_mix(fp, saturated_fp, 2791)
+    fp = pb_mix(fp, divisor, 2791)
+    fp = pb_mix(fp, divided_fp, 2791)
+    fp = pb_mix(fp, addend_fp, 2791)
+    fp = pb_mix(fp, summed_fp, 2791)
+    fp = pb_mix(fp, assignment_fp, 2791)
+    fp = pb_mix(fp, forced_slot, 2791)
+    fp = pb_mix(fp, forced_value, 2791)
+    fp = pb_mix(fp, trace_mask, 2791)
+    return fp
+}
+
+pub fn pb_kernel_trace_propagation_audit_fingerprint3(
+    kernel_trace_fp: i64,
+    input_fp: i64,
+    saturated_fp: i64,
+    divided_fp: i64,
+    summed_fp: i64,
+    forced_slot: i64,
+    forced_value: i64,
+    trace_mask: i64) -> i64 with Mod {
+    if kernel_trace_fp != 478581235 { return 0 - 1 }
+    if input_fp != 307595342 { return 0 - 1 }
+    if saturated_fp != 760841099 { return 0 - 1 }
+    if divided_fp != 815489656 { return 0 - 1 }
+    if summed_fp != 234077207 { return 0 - 1 }
+    if forced_slot != 1 { return 0 - 1 }
+    if forced_value != 0 { return 0 - 1 }
+    if trace_mask != 31 { return 0 - 1 }
+
+    var fp: i64 = 139
+    fp = pb_mix(fp, kernel_trace_fp, 2801)
+    fp = pb_mix(fp, input_fp, 2801)
+    fp = pb_mix(fp, saturated_fp, 2801)
+    fp = pb_mix(fp, divided_fp, 2801)
+    fp = pb_mix(fp, summed_fp, 2801)
+    fp = pb_mix(fp, forced_slot, 2801)
+    fp = pb_mix(fp, forced_value, 2801)
+    fp = pb_mix(fp, trace_mask, 2801)
+    return fp
+}

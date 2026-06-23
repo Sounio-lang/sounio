@@ -1,0 +1,231 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: Scalar LRAT deletion/ID lifecycle proof-kernel smoke
+
+fn id_seen(id: i64, used1: i64, used2: i64, used3: i64, used4: i64, used5: i64) -> i64 {
+    if id == 1 { return used1 }
+    if id == 2 { return used2 }
+    if id == 3 { return used3 }
+    if id == 4 { return used4 }
+    if id == 5 { return used5 }
+    return 0
+}
+
+fn is_deleted(id: i64, deleted2: i64, deleted3: i64) -> i64 {
+    if id == 2 { return deleted2 }
+    if id == 3 { return deleted3 }
+    return 0
+}
+
+fn active_clause(id: i64, deleted2: i64, deleted3: i64, added4: i64, added5: i64) -> i64 {
+    if id == 1 { return 1 } // x OR y
+    if id == 2 {
+        if deleted2 == 0 { return 1 } // -x
+        return 0
+    }
+    if id == 3 {
+        if deleted3 == 0 { return 1 } // -y
+        return 0
+    }
+    if id == 4 { return added4 } // derived y
+    if id == 5 { return added5 } // derived empty clause
+    return 0
+}
+
+fn can_add_id(id: i64, used1: i64, used2: i64, used3: i64, used4: i64, used5: i64) -> i64 {
+    if id <= 0 { return 0 }
+    if id_seen(id, used1, used2, used3, used4, used5) == 1 { return 0 }
+    return 1
+}
+
+fn next_fresh_id(used1: i64, used2: i64, used3: i64, used4: i64, used5: i64) -> i64 {
+    if used5 == 1 { return 0 }
+    if used4 == 1 { return 5 }
+    if used3 == 1 { return 4 }
+    if used2 == 1 { return 3 }
+    if used1 == 1 { return 2 }
+    return 1
+}
+
+fn clause_lit(id: i64, pos: i64) -> i64 {
+    if id == 1 {
+        if pos == 0 { return 1 }
+        if pos == 1 { return 2 }
+    }
+    if id == 2 {
+        if pos == 0 { return 0 - 1 }
+    }
+    if id == 3 {
+        if pos == 0 { return 0 - 2 }
+    }
+    if id == 4 {
+        if pos == 0 { return 2 }
+    }
+    return 0
+}
+
+fn clause_len(id: i64) -> i64 {
+    if id == 1 { return 2 }
+    if id == 2 { return 1 }
+    if id == 3 { return 1 }
+    if id == 4 { return 1 }
+    if id == 5 { return 0 }
+    return 0 - 1
+}
+
+fn lit_var(lit: i64) -> i64 {
+    if lit < 0 { return 0 - lit }
+    return lit
+}
+
+fn lit_value(lit: i64, ax: i64, ay: i64) -> i64 {
+    let v = lit_var(lit)
+    var a: i64 = 0
+    if v == 1 { a = ax }
+    if v == 2 { a = ay }
+    if lit < 0 { return 0 - a }
+    return a
+}
+
+fn assign_lit(lit: i64, ax: i64, ay: i64) -> i64 {
+    let v = lit_var(lit)
+    var want: i64 = 1
+    if lit < 0 { want = 0 - 1 }
+    if v == 1 {
+        if ax == 0 { return want }
+        if ax == want { return ax }
+        return 99
+    }
+    if v == 2 {
+        if ay == 0 { return want }
+        if ay == want { return ay }
+        return 99
+    }
+    return 99
+}
+
+fn replay_clause(id: i64, ax: i64, ay: i64, deleted2: i64, deleted3: i64, added4: i64) -> i64 {
+    if active_clause(id, deleted2, deleted3, added4, 0) == 0 { return 0 }
+    let n = clause_len(id)
+    var sat: i64 = 0
+    var unassigned: i64 = 0
+    var last: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let lit = clause_lit(id, i)
+        let v = lit_value(lit, ax, ay)
+        if v == 1 { sat = 1 }
+        if v == 0 {
+            unassigned = unassigned + 1
+            last = lit
+        }
+        i = i + 1
+    }
+    if sat == 1 { return 1 }
+    if unassigned == 0 { return 2 }
+    if unassigned == 1 {
+        let v = lit_var(last)
+        if v == 1 {
+            if last > 0 { return 11 }
+            return 12
+        }
+        if v == 2 {
+            if last > 0 { return 21 }
+            return 22
+        }
+    }
+    return 1
+}
+
+fn apply_marker(marker: i64, ax: i64, ay: i64) -> i64 {
+    if marker == 11 { return assign_lit(1, ax, ay) }
+    if marker == 12 { return assign_lit(0 - 1, ax, ay) }
+    if marker == 21 { return assign_lit(2, ax, ay) }
+    if marker == 22 { return assign_lit(0 - 2, ax, ay) }
+    return 99
+}
+
+fn check_derive_y(h0: i64, h1: i64, hlen: i64, deleted2: i64, deleted3: i64) -> i64 {
+    if hlen < 0 { return 0 }
+    if hlen > 2 { return 0 }
+    var ax: i64 = 0
+    var ay: i64 = 0 - 1
+    var step: i64 = 0
+    while step < hlen {
+        var id = h0
+        if step == 1 { id = h1 }
+        let r = replay_clause(id, ax, ay, deleted2, deleted3, 0)
+        if r == 0 { return 0 }
+        if r == 2 { return 1 }
+        if r >= 10 {
+            let assigned = apply_marker(r, ax, ay)
+            if assigned == 99 { return 1 }
+            if r == 11 { ax = assigned }
+            if r == 12 { ax = assigned }
+            if r == 21 { ay = assigned }
+            if r == 22 { ay = assigned }
+        }
+        step = step + 1
+    }
+    return 0
+}
+
+fn check_empty_from_y(h0: i64, h1: i64, hlen: i64, deleted2: i64, deleted3: i64, added4: i64) -> i64 {
+    if hlen < 0 { return 0 }
+    if hlen > 2 { return 0 }
+    var ax: i64 = 0
+    var ay: i64 = 0
+    var step: i64 = 0
+    while step < hlen {
+        var id = h0
+        if step == 1 { id = h1 }
+        let r = replay_clause(id, ax, ay, deleted2, deleted3, added4)
+        if r == 0 { return 0 }
+        if r == 2 { return 1 }
+        if r >= 10 {
+            let assigned = apply_marker(r, ax, ay)
+            if assigned == 99 { return 1 }
+            if r == 11 { ax = assigned }
+            if r == 12 { ax = assigned }
+            if r == 21 { ay = assigned }
+            if r == 22 { ay = assigned }
+        }
+        step = step + 1
+    }
+    return 0
+}
+
+fn main() -> i64 {
+    let used1: i64 = 1
+    let used2: i64 = 1
+    let used3: i64 = 1
+    var used4: i64 = 0
+    var used5: i64 = 0
+
+    if next_fresh_id(used1, used2, used3, used4, used5) != 4 { return 1 }
+    if can_add_id(4, used1, used2, used3, used4, used5) != 1 { return 2 }
+    if can_add_id(2, used1, used2, used3, used4, used5) != 0 { return 3 }
+    if can_add_id(0, used1, used2, used3, used4, used5) != 0 { return 4 }
+
+    if check_derive_y(1, 2, 2, 0, 0) != 1 { return 10 }
+    if check_derive_y(1, 2, 2, 1, 0) != 0 { return 11 }
+
+    used4 = 1
+    if next_fresh_id(used1, used2, used3, used4, used5) != 5 { return 20 }
+    if can_add_id(4, used1, used2, used3, used4, used5) != 0 { return 21 }
+    if active_clause(4, 0, 0, used4, 0) != 1 { return 22 }
+
+    if check_empty_from_y(4, 3, 2, 0, 0, used4) != 1 { return 30 }
+    if check_empty_from_y(4, 3, 2, 0, 1, used4) != 0 { return 31 }
+    if check_empty_from_y(4, 3, 2, 0, 0, 0) != 0 { return 32 }
+
+    used5 = 1
+    if next_fresh_id(used1, used2, used3, used4, used5) != 0 { return 40 }
+    if id_seen(2, used1, used2, used3, used4, used5) != 1 { return 41 }
+    if is_deleted(2, 1, 0) != 1 { return 42 }
+    if is_deleted(3, 0, 1) != 1 { return 43 }
+    if is_deleted(4, 1, 1) != 0 { return 44 }
+    if active_clause(2, 1, 0, used4, used5) != 0 { return 45 }
+
+    return 0
+}
