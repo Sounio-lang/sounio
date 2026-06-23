@@ -1061,7 +1061,12 @@ fn checker_lower_single_wrapper_arg_mut(c: *mut Checker, opt: Option<Box<TypeExp
 // this *mut helper exactly as checker_lower_single_wrapper_arg_mut does.
 fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_args: Option<Box<TypeExprList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let name = checker_copy_string_list_to_name(path.segments)
-    if name_matches_str3(name, 66, 111, 120) {
+    // Carry the single type argument in .inner for Box<T> and Option<T>. Box was
+    // already handled (so `*b` on a Box<T> param types as T); Option<T> needs the
+    // same so that `match opt { Some(x) => ... }` can bind x to the payload type
+    // T (the PatEnum binder reads scrut_ty.inner). "Box"=66,111,120 ;
+    // "Option"=79,112,116,105,111,110. Other named types defer unchanged.
+    if name_matches_str3(name, 66, 111, 120) || name_matches_str6(name, 79, 112, 116, 105, 111, 110) {
         match type_args {
             Some(args) => {
                 match (*args).tail {
@@ -5685,7 +5690,15 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
         let lin = checker_is_linear_type_inplace(c, scrut_ty)
         (*c).borrows = (*c).borrows.track(pat.name, lin)
     } else if pat.kind == PatternKind::PatEnum {
-        checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
+        // Single-payload variant (e.g. Some(x) on Option<T>/Box<T>): the scrutinee
+        // carries the payload type in .inner (Box/Option lowering). Bind the payload
+        // sub-pattern to that inner type so (*x) / (*x).field type correctly. Fall
+        // back to scrut_ty when there is no inner (other enums — positional variant
+        // field types are not otherwise tracked).
+        match scrut_ty.inner {
+            Some(inner_box) => checker_bind_pattern_list_inplace(c, pat.sub_patterns, *inner_box)
+            None => checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
+        }
     } else if pat.kind == PatternKind::PatStruct {
         checker_bind_struct_pat_fields_inplace(c, pat.pat_fields, scrut_ty)
     } else if pat.kind == PatternKind::PatTuple {
