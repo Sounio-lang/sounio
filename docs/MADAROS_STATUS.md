@@ -10,11 +10,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.madaros-status
 # Madaros Status — coordination note for the fleet
 
 > **TL;DR:** Madaros is the **default compiler**: `bin/souc` routes to Madaros.
-> Do not treat stale worktrees or old raw ELFs as current evidence. Also do not
-> overclaim production readiness: current `origin/main` still tracks open
-> source-to-ELF/global-BSS and promoted-workspace self-build blockers in
-> GitHub issue #356. Sync `main`, use the checked prebuilt or rebuild, run the
-> named gate, and classify the result against the active blocker records.
+> The 2026-06-21 blocker cluster in GitHub issue #356 is closed on
+> `main@4c452498c`: source-to-ELF global/BSS witnesses are controls, #313 is
+> closed, and promoted-workspace self-build parity is green. Do not treat stale
+> worktrees or old raw ELFs as current evidence. Sync `main`, use the checked
+> prebuilt or rebuild, run the named gates, and classify any new failure against
+> current post-merge evidence rather than reopening the closed blocker set.
 
 ## Madaros is the default compiler (`bin/souc` → Madaros)
 
@@ -44,21 +45,24 @@ is preserved as `bin/souc-lean-single-x86_64`.
 - Madaros is the **Stage1 modular compiler** (`bin/madaros`,
   `scripts/ci/build_modular_madaros.sh`, `scripts/ci/madaros_full_gate.sh`).
   It is distinct from `souc` (the lean_single monolith), which still ships.
-- As of `origin/main@0d714587f`, production readiness is governed by
-  `docs/audit/MADAROS_PRODUCTION_READINESS_PLAN_2026-06-21.md` and issue #356.
-  The known-open blocker probe still reproduces:
+- As of `origin/main@4c452498c`, the blocker cluster governed by
+  `docs/audit/MADAROS_PRODUCTION_READINESS_PLAN_2026-06-21.md` and issue #356
+  is closed. The closeout record is
+  `docs/audit/MADAROS_POST_MERGE_CLOSEOUT_2026-06-22.md`.
   - `BLK-20260621-codex-source-elf-normal-bss`: minimal global read/write
-    source-to-ELF witnesses compile-segfault with `rc=139`.
+    source-to-ELF witnesses are regression controls.
   - `BLK-20260621-codex-madaros-build-segfault`: promoted-workspace local
-    self-build still exits `build_rc_139`.
+    self-build now exits `build_rc_0`.
+  - PR #313 is closed, satisfying the ownership disposition requirement.
 - `scripts/dev/madaros_readiness_status.sh --check-compiler-lane` is the
-  current coordination command for checking the active Claude compiler lane
-  without taking write ownership. Its next-gate output includes the lowering
-  diagnostic command for the current BSS/global blocker:
-  `scripts/ci/madaros_open_blockers_probe.sh --diagnose-lowering`.
+  current coordination command for checking active compiler lanes without
+  taking write ownership. `scripts/ci/madaros_open_blockers_probe.sh
+  --diagnose-lowering` now confirms closed expectations for the former
+  BSS/global and self-build witnesses.
 
-Do not say "Madaros is production-ready" until those blocker records are closed
-or explicitly narrowed with new acceptance gates.
+Do not say "Madaros is production-ready" merely because #356 is closed. Say the
+specific 2026-06-21 blocker cluster is closed, then use the production-ready
+definition below for any broader release claim.
 
 ## The only valid proof gate
 
@@ -140,10 +144,10 @@ make madaros-full-gate
 
 ## One-line coordination phrase
 
-> Madaros is the default `bin/souc` compiler on current `origin/main`, but it is
-> **not production-ready yet**: issue #356 still tracks the source-to-ELF
-> BSS/global compile-segfault and promoted-workspace self-build parity blockers.
-> Please sync to current `origin/main`, avoid stale raw ELFs as evidence, and use
-> `scripts/dev/madaros_readiness_status.sh --check-compiler-lane` plus
-> `scripts/ci/madaros_open_blockers_probe.sh --diagnose-lowering` before
-> changing compiler-owned files.
+> Madaros is the default `bin/souc` compiler on current `origin/main`, and the
+> 2026-06-21 #356 blocker cluster is closed on `main@4c452498c`: #313 is closed,
+> source-to-ELF BSS/global witnesses are controls, and promoted-workspace
+> self-build parity is green. Please sync to current `origin/main`, avoid stale
+> raw ELFs as evidence, and use `scripts/dev/madaros_readiness_status.sh
+> --check-compiler-lane` plus `scripts/ci/madaros_open_blockers_probe.sh
+> --diagnose-lowering` before changing compiler-owned files.

@@ -2923,11 +2923,6 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
 }
 
 fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO, Mut, Panic, Div, Alloc {
-    let _opts = opts
-    // The boxed single-module bridge still trips native-built Madaros on
-    // Box::new lowering. Let the regular multimodule native-v2 path compile
-    // until the bridge path has a dedicated green gate.
-    return false
     if opts.emit_manifest || opts.emit_ast || opts.emit_tokens {
         return false
     }
@@ -2963,35 +2958,30 @@ fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO,
         return false
     }
 
-    var single_trace = empty_load_multimodule_ir_trace()
-    let boxed_result = bridge_lower_single_module_box(opts.input_file, &! single_trace)
-    if !boxed_result.ok {
+    var trace = empty_load_multimodule_ir_trace()
+    let ir_result = load_multimodule_ir_traced(opts.input_file, &! trace)
+    if !ir_result.ok {
         print("Compilation failed!\n\nErrors:\n  ")
-        print(boxed_result.error_msg)
+        print(ir_result.error_msg)
         print("\n")
         panic("compile failed")
     }
-    match boxed_result.module {
-        Some(module_box) => {
-            let emit_spec = native_resolve_target("x86_64-linux", "auto", true)
-            let bridge_exit = compile_native_v2_preview_to_file(&(*module_box), emit_spec, opts.output_file)
-            if bridge_exit != 0 {
-                print("Compilation failed!\n\nErrors:\n  error: native-v2 bridge compilation failed\n")
-                panic("compile failed")
-            }
-            print("native_v2_compile: emitted path=")
-            print(opts.output_file)
-            print("\n")
-            println("Compilation successful!")
-            println("   Output: " + opts.output_file)
-            return true
-        }
-        None => {
-            print("Compilation failed!\n\nErrors:\n  error: native-v2 bridge produced no module\n")
-            panic("compile failed")
-        }
+    if ir_result.module.fn_count <= 0 {
+        print("Compilation failed!\n\nErrors:\n  error: native-v2 bridge produced no module\n")
+        panic("compile failed")
     }
-    false
+    let emit_spec = native_resolve_target("x86_64-linux", "auto", true)
+    let bridge_exit = compile_native_v2_preview_to_file(&ir_result.module, emit_spec, opts.output_file)
+    if bridge_exit != 0 {
+        print("Compilation failed!\n\nErrors:\n  error: native-v2 bridge compilation failed\n")
+        panic("compile failed")
+    }
+    print("Written to ")
+    print(opts.output_file)
+    print("\n")
+    println("Compilation successful!")
+    println("   Output: " + opts.output_file)
+    true
 }
 
 // Parameterized scalar witness: --native-v2-emit-scalar <N> <out_path>.

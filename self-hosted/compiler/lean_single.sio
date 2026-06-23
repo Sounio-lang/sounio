@@ -33823,6 +33823,25 @@ fn imp_path_hash(len: i64) -> i64 with Panic, Mut {
     return h
 }
 
+fn imp_path_loaded(len: i64) -> i64 with Panic, Mut {
+    let ph = imp_path_hash(len)
+    var di: i64 = 0
+    while di < IMP_COUNT {
+        if IMP_LOADED[di as usize] == ph && IMP_LOADED_LENS[di as usize] == len {
+            let off = IMP_LOADED_OFFS[di as usize]
+            var match_ok: i64 = 1
+            var mi: i64 = 0
+            while mi < len {
+                if IMP_LOADED_PATHS[(off + mi) as usize] != IMP_PATH[mi as usize] { match_ok = 0 }
+                mi = mi + 1
+            }
+            if match_ok == 1 { return 1 }
+        }
+        di = di + 1
+    }
+    0
+}
+
 fn print_imp_path() with IO, Mut, Panic {
     var i: i64 = 0
     while i < 4096 && IMP_PATH[i as usize] != 0 {
@@ -34387,6 +34406,12 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 raw_i = raw_i + 1
             }
             IMP_RAW_PATH[raw_len as usize] = 0
+            var raw_has_slash: i64 = 0
+            raw_i = 0
+            while raw_i < raw_len {
+                if IMP_RAW_PATH[raw_i as usize] == 47 { raw_has_slash = 1 }
+                raw_i = raw_i + 1
+            }
             var needs_base_dir: i64 = 1
             if fp_len > 0 && IMP_PATH[0 as usize] as i64 == 47 { needs_base_dir = 0 }
             if fp_len >= 7 {
@@ -34414,11 +34439,66 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 fp_len = BASE_DIR_LEN + 1 + fp_len
             }
             IMP_PATH[fp_len as usize] = 0  // null terminate
-            var raw = read_file(IMP_PATH)
-            var copy_len = str_len(raw)
-            var fsz: i64 = file_size(IMP_PATH)
+            var early_loaded: i64 = imp_path_loaded(fp_len)
+            if early_loaded == 0 && needs_base_dir == 1 {
+                IMP_PATH[0 as usize] = 115
+                IMP_PATH[1 as usize] = 101
+                IMP_PATH[2 as usize] = 108
+                IMP_PATH[3 as usize] = 102
+                IMP_PATH[4 as usize] = 45
+                IMP_PATH[5 as usize] = 104
+                IMP_PATH[6 as usize] = 111
+                IMP_PATH[7 as usize] = 115
+                IMP_PATH[8 as usize] = 116
+                IMP_PATH[9 as usize] = 101
+                IMP_PATH[10 as usize] = 100
+                IMP_PATH[11 as usize] = 47
+                raw_i = 0
+                while raw_i < raw_len {
+                    IMP_PATH[(12 + raw_i) as usize] = IMP_RAW_PATH[raw_i as usize]
+                    raw_i = raw_i + 1
+                }
+                fp_len = 12 + raw_len
+                IMP_PATH[fp_len as usize] = 0
+                early_loaded = imp_path_loaded(fp_len)
+            }
+            if early_loaded == 0 {
+                fp_len = raw_len
+                raw_i = 0
+                while raw_i < raw_len {
+                    IMP_PATH[raw_i as usize] = IMP_RAW_PATH[raw_i as usize]
+                    raw_i = raw_i + 1
+                }
+                if needs_base_dir == 1 && BASE_DIR_LEN > 0 {
+                    var restore_j: i64 = fp_len - 1
+                    while restore_j >= 0 {
+                        IMP_PATH[(BASE_DIR_LEN + 1 + restore_j) as usize] = IMP_PATH[restore_j as usize]
+                        restore_j = restore_j - 1
+                    }
+                    var restore_b: i64 = 0
+                    while restore_b < BASE_DIR_LEN {
+                        IMP_PATH[restore_b as usize] = BASE_DIR[restore_b as usize]
+                        restore_b = restore_b + 1
+                    }
+                    IMP_PATH[BASE_DIR_LEN as usize] = 47
+                    fp_len = BASE_DIR_LEN + 1 + fp_len
+                }
+                IMP_PATH[fp_len as usize] = 0
+            }
+            var raw = ""
+            var copy_len: i64 = 1
+            var fsz: i64 = 1
+            if early_loaded != 0 {
+                copy_len = 1
+                fsz = 1
+            }
+            if early_loaded == 0 {
+                raw = read_file(IMP_PATH)
+                copy_len = str_len(raw)
+                fsz = file_size(IMP_PATH)
+            }
             // mod.sio fallback for BASE_DIR path
-            if copy_len <= 0 {
+            if early_loaded == 0 && copy_len <= 0 && raw_has_slash == 0 {
                 var mfp: i64 = fp_len - 4
                 var mi: i64 = 0
                 while mi < mfp {
