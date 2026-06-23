@@ -545,10 +545,496 @@ fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Pa
     idx
 }
 
+fn lowerer_copy_instr_fields_mut(dst: &! IrInstr, src: &IrInstr) with Mut, Panic, Div {
+    dst.op = (*src).op
+    dst.dst = (*src).dst
+    dst.src1 = (*src).src1
+    dst.src2 = (*src).src2
+    dst.imm_i64 = (*src).imm_i64
+    dst.imm_f64 = (*src).imm_f64
+    dst.label_id = (*src).label_id
+    dst.fn_id = (*src).fn_id
+    dst.field_idx = (*src).field_idx
+    dst.imm_flags = (*src).imm_flags
+    dst.bin_op = (*src).bin_op
+    dst.un_op = (*src).un_op
+    dst.name = (*src).name
+    dst.call_args = (*src).call_args
+    dst.arg_count = (*src).arg_count
+}
+
+fn lowerer_lookup_local_ref(lo: &Lowerer, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    var i = (*(*lo).locals).count - 1
+    while i >= 0 {
+        if (*(*lo).locals).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*lo).locals).names[i as usize], name) {
+            return (*(*lo).locals).regs[i as usize]
+        }
+        i = i - 1
+    }
+    IR_INVALID_REG
+}
+
+fn lowerer_lookup_local_is_global_ref(lo: &Lowerer, name: Name) -> bool with Mut, Panic, Div, Alloc {
+    var i = (*(*lo).locals).count - 1
+    while i >= 0 {
+        if (*(*lo).locals).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*lo).locals).names[i as usize], name) {
+            return (*(*lo).locals).is_global[i as usize] == 1
+        }
+        i = i - 1
+    }
+    false
+}
+
+fn lowerer_lookup_local_global_bss_offset_ref(lo: &Lowerer, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    var i = (*(*lo).locals).count - 1
+    while i >= 0 {
+        if (*(*lo).locals).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*lo).locals).names[i as usize], name) {
+            return (*(*lo).locals).global_bss_offsets[i as usize]
+        }
+        i = i - 1
+    }
+    0
+}
+
+fn lowerer_opt_expr_local_reg_ref(lo: &Lowerer, expr_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+    match *expr_opt {
+        Some(expr_box) => {
+            if (*expr_box).kind == ExprKind::ExprIdent {
+                lowerer_lookup_local_ref(lo, (*expr_box).name)
+            } else {
+                IR_INVALID_REG
+            }
+        }
+        _ => IR_INVALID_REG,
+    }
+}
+
+fn lowerer_fresh_reg_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div, IO {
+    if (*lo).current_fn < 0 || (*lo).current_fn >= (*(*lo).module).fn_count {
+        lowerer_mark_error(lo)
+        return 0
+    }
+    var current_func_box = (*lo).current_func
+    let reg = (*current_func_box).reg_count
+    (*current_func_box).reg_count = reg + 1
+    (*lo).current_func = current_func_box
+    reg
+}
+
+fn lowerer_fresh_label_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div, IO {
+    if (*lo).current_fn < 0 || (*lo).current_fn >= (*(*lo).module).fn_count {
+        lowerer_mark_error(lo)
+        return 0
+    }
+    var current_func_box = (*lo).current_func
+    let label = (*current_func_box).label_count
+    (*current_func_box).label_count = label + 1
+    (*lo).current_func = current_func_box
+    label
+}
+
+fn lowerer_emit_mut(lo: &! Lowerer, instr: IrInstr) with Mut, Panic, Div, IO {
+    if (*lo).current_fn < 0 || (*lo).current_fn >= (*(*lo).module).fn_count {
+        lowerer_mark_error(lo)
+        return
+    }
+    var current_func_box = (*lo).current_func
+    let instr_count = (*current_func_box).instr_count
+    if instr_count < IR_MAX_INSTRS {
+        if lower_live_diag_enabled() && instr_count < 3 {
+            print("lower_live: emit_in fn=")
+            print(str_from_bytes((*current_func_box).name.buf, (*current_func_box).name.len))
+            print(" i=")
+            print_int(instr_count)
+            print(" dst=")
+            print_int(instr.dst)
+            print(" src1=")
+            print_int(instr.src1)
+            print(" src2=")
+            print_int(instr.src2)
+            print(" fn_id=")
+            print_int(instr.fn_id)
+            print(" field_idx=")
+            print_int(instr.field_idx)
+            print(" flags=")
+            print_int(instr.imm_flags)
+            print("\n")
+        }
+        var copied_instr_emit = ir_instr_new(instr.op)
+        copied_instr_emit.op = instr.op
+        copied_instr_emit.dst = instr.dst
+        copied_instr_emit.src1 = instr.src1
+        copied_instr_emit.src2 = instr.src2
+        copied_instr_emit.imm_i64 = instr.imm_i64
+        copied_instr_emit.imm_f64 = instr.imm_f64
+        copied_instr_emit.label_id = instr.label_id
+        copied_instr_emit.fn_id = instr.fn_id
+        copied_instr_emit.field_idx = instr.field_idx
+        copied_instr_emit.imm_flags = instr.imm_flags
+        copied_instr_emit.bin_op = instr.bin_op
+        copied_instr_emit.un_op = instr.un_op
+        copied_instr_emit.name = instr.name
+        copied_instr_emit.call_args = instr.call_args
+        copied_instr_emit.arg_count = instr.arg_count
+        (*current_func_box).instrs[instr_count as usize] = copied_instr_emit
+        (*current_func_box).instr_count = instr_count + 1
+        (*lo).current_func = current_func_box
+        if lower_live_diag_enabled() && instr_count < 3 {
+            print("lower_live: emit_stored fn=")
+            print(str_from_bytes((*current_func_box).name.buf, (*current_func_box).name.len))
+            print(" i=")
+            print_int(instr_count)
+            print(" dst=")
+            print_int((*current_func_box).instrs[instr_count as usize].dst)
+            print(" src1=")
+            print_int((*current_func_box).instrs[instr_count as usize].src1)
+            print(" src2=")
+            print_int((*current_func_box).instrs[instr_count as usize].src2)
+            print(" fn_id=")
+            print_int((*current_func_box).instrs[instr_count as usize].fn_id)
+            print(" field_idx=")
+            print_int((*current_func_box).instrs[instr_count as usize].field_idx)
+            print(" flags=")
+            print_int((*current_func_box).instrs[instr_count as usize].imm_flags)
+            print("\n")
+        }
+        if lower_live_diag_enabled() && instr_count < 3 {
+            print("lower_live: emit_after_store\n")
+        }
+    } else {
+        lowerer_mark_error(lo)
+    }
+}
+
+fn lowerer_preload_bss_globals_as_locals_mut(lo: &! Lowerer) with Mut, Panic, Div, Alloc, IO {
+    var module_box = (*lo).module
+    var i: i64 = 0
+    while i < (*module_box).fn_count && i < 2048 {
+        let g = (*module_box).functions[i as usize]
+        if g.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+            let reg = lowerer_fresh_reg_mut(lo)
+            if g.bss_size > 8 {
+                lowerer_emit_mut(lo, ir_load_imm(reg, BSS_BASE_LINUX + g.param_count))
+            } else {
+                lowerer_emit_mut(lo, ir_load_global(reg, g.param_count, g.name))
+            }
+            lowerer_bind_local_mut(lo, g.name, reg, false)
+            lowerer_mark_local_global_mut(lo, g.name, g.param_count, g.bss_size)
+            module_box = (*lo).module
+        }
+        i = i + 1
+    }
+    (*lo).module = module_box
+}
+
+fn lowerer_lower_opt_expr_ref_mut_simple(lo: &! Lowerer, expr_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc, IO {
+    match *expr_opt {
+        Some(expr_box) => lowerer_lower_expr_ref_mut_simple(lo, &(*expr_box)),
+        _ => IR_INVALID_REG,
+    }
+}
+
+fn lowerer_lower_expr_args_ref_mut_simple(lo: &! Lowerer, opt: &Option<Box<ExprList>>) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
+    var current = opt
+    var regs: [i64; 64] = [0; 64]
+    var reg_count: i64 = 0
+    while true {
+        match *current {
+            Some(list) => {
+                let arg_reg = lowerer_lower_expr_ref_mut_simple(lo, &(*list).head)
+                if arg_reg < 0 {
+                    let empty_bad = IrRegList { head: 0, tail: None }
+                    return LowerExprArgsResult { lowerer: (*lo), regs: empty_bad, count: -1 }
+                }
+                if reg_count < 64 {
+                    regs[reg_count as usize] = arg_reg
+                    reg_count = reg_count + 1
+                } else {
+                    break
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+    if reg_count <= 0 {
+        let empty = IrRegList { head: 0, tail: None }
+        LowerExprArgsResult { lowerer: (*lo), regs: empty, count: 0 }
+    } else {
+        var idx = reg_count - 1
+        var args = IrRegList { head: regs[idx as usize], tail: None }
+        while idx > 0 {
+            idx = idx - 1
+            args = IrRegList { head: regs[idx as usize], tail: Some(Box::new(args)) }
+        }
+        LowerExprArgsResult { lowerer: (*lo), regs: args, count: reg_count }
+    }
+}
+
+fn lowerer_lower_call_expr_ref_mut_simple(lo: &! Lowerer, e: &Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if (*e).kind != ExprKind::ExprCall {
+        return IR_INVALID_REG
+    }
+    match (*e).left {
+        Some(callee_expr) => {
+            if (*callee_expr).kind != ExprKind::ExprIdent {
+                return IR_INVALID_REG
+            }
+            let callee_name = (*callee_expr).name
+            let fn_id_call = lowerer_find_or_add_fn_id_mut(lo, callee_name)
+            if fn_id_call < 0 {
+                return IR_INVALID_REG
+            }
+            let pair_args_call = lowerer_lower_expr_args_ref_mut_simple(lo, &(*e).args)
+            if pair_args_call.count < 0 {
+                return IR_INVALID_REG
+            }
+            let args_call: Option<Box<IrRegList>> = if pair_args_call.count <= 0 { None } else { Some(Box::new(pair_args_call.regs)) }
+            let dst_call = lowerer_fresh_reg_mut(lo)
+            var call_instr = ir_call(dst_call, fn_id_call, callee_name, args_call, pair_args_call.count)
+            if fn_id_call >= 0 && fn_id_call < (*(*lo).module).fn_count {
+                if (*(*lo).module).functions[fn_id_call as usize].returns_float == 1 {
+                    call_instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                }
+            }
+            lowerer_emit_mut(lo, call_instr)
+            if call_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
+                lowerer_emit_mut(lo, ir_mark_float_reg(dst_call))
+            }
+            dst_call
+        }
+        _ => IR_INVALID_REG,
+    }
+}
+
+fn lowerer_lower_expr_ref_mut_simple(lo: &! Lowerer, e: &Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if (*e).kind == ExprKind::ExprIdent {
+        let local_reg = lowerer_lookup_local_ref(&(*lo), (*e).name)
+        if local_reg >= 0 {
+            return local_reg
+        }
+        let global_fn_id = lowerer_lookup_fn_id_by_name_ref(&(*lo), (*e).name)
+        if global_fn_id >= 0 && global_fn_id < (*(*lo).module).fn_count {
+            let global_func = (*(*lo).module).functions[global_fn_id as usize]
+            if global_func.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                let global_reg = lowerer_fresh_reg_mut(lo)
+                if global_func.bss_size > 8 {
+                    lowerer_emit_mut(lo, ir_load_imm(global_reg, BSS_BASE_LINUX + global_func.param_count))
+                } else {
+                    lowerer_emit_mut(lo, ir_load_global(global_reg, global_func.param_count, global_func.name))
+                }
+                lowerer_bind_local_mut(lo, (*e).name, global_reg, false)
+                lowerer_mark_local_global_mut(lo, (*e).name, global_func.param_count, global_func.bss_size)
+                return global_reg
+            }
+        }
+        return IR_INVALID_REG
+    }
+    if (*e).kind == ExprKind::ExprIntLit {
+        let reg = lowerer_fresh_reg_mut(lo)
+        lowerer_emit_mut(lo, ir_load_imm(reg, (*e).int_val))
+        return reg
+    }
+    if (*e).kind == ExprKind::ExprFloatLit {
+        let reg_f = lowerer_fresh_reg_mut(lo)
+        lowerer_emit_mut(lo, ir_load_imm(reg_f, f64_to_bits((*e).float_val)))
+        lowerer_emit_mut(lo, ir_mark_float_reg(reg_f))
+        return reg_f
+    }
+    if (*e).kind == ExprKind::ExprCast {
+        let src_reg = lowerer_lower_opt_expr_ref_mut_simple(lo, &(*e).left)
+        if src_reg < 0 {
+            return IR_INVALID_REG
+        }
+        let source_is_float = (*lo).opt_expr_result_is_float_ref(&(*e).left)
+        if lower_cast_type_is_f64(&(*e).cast_type) {
+            if source_is_float {
+                return src_reg
+            }
+            let dst_f = lowerer_fresh_reg_mut(lo)
+            lowerer_emit_mut(lo, ir_int_to_float(dst_f, src_reg))
+            return dst_f
+        }
+        if source_is_float || lower_opt_expr_has_float_source(&(*e).left) {
+            let dst_i = lowerer_fresh_reg_mut(lo)
+            lowerer_emit_mut(lo, ir_float_to_int(dst_i, src_reg))
+            return dst_i
+        }
+        return src_reg
+    }
+    if (*e).kind == ExprKind::ExprFieldAccess {
+        let base = lowerer_lower_opt_expr_ref_mut_simple(lo, &(*e).left)
+        if base < 0 {
+            return IR_INVALID_REG
+        }
+        let fidx = (*lo).field_idx_for_base_ref(&(*e).left, (*e).name)
+        let field_is_float = (*lo).field_is_float_for_base_ref(&(*e).left, (*e).name) || (*lo).field_is_float_by_name_simple((*e).name)
+        let field_array_elem_is_float = (*lo).field_array_elem_is_float_for_base_ref(&(*e).left, (*e).name)
+        let dst = lowerer_fresh_reg_mut(lo)
+        var instr = ir_field_get(dst, base, fidx, (*e).name)
+        if field_is_float || field_array_elem_is_float {
+            instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+        }
+        lowerer_emit_mut(lo, instr)
+        if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
+            lowerer_emit_mut(lo, ir_mark_float_reg(dst))
+        }
+        return dst
+    }
+    if (*e).kind == ExprKind::ExprIndex {
+        let index_elem_is_float_pre = (*lo).index_base_elem_is_float_ref(&(*e).left)
+        let base_idx = lowerer_lower_opt_expr_ref_mut_simple(lo, &(*e).left)
+        if base_idx < 0 {
+            return IR_INVALID_REG
+        }
+        let index_elem_is_float = index_elem_is_float_pre || (*lo).lookup_reg_array_elem_float(base_idx)
+        let idx_reg = lowerer_lower_opt_expr_ref_mut_simple(lo, &(*e).right)
+        if idx_reg < 0 {
+            return IR_INVALID_REG
+        }
+        let dst_idx = lowerer_fresh_reg_mut(lo)
+        var instr_idx = ir_index_get(dst_idx, base_idx, idx_reg)
+        if index_elem_is_float {
+            instr_idx.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+        }
+        lowerer_emit_mut(lo, instr_idx)
+        if index_elem_is_float {
+            lowerer_emit_mut(lo, ir_mark_float_reg(dst_idx))
+        }
+        return dst_idx
+    }
+    if (*e).kind == ExprKind::ExprIf {
+        let cond_if = lowerer_lower_opt_expr_ref_mut_simple(lo, &(*e).left)
+        if cond_if < 0 {
+            return IR_INVALID_REG
+        }
+        let l_else_if = lowerer_fresh_label_mut(lo)
+        let l_end_if = lowerer_fresh_label_mut(lo)
+        let res_if = lowerer_fresh_reg_mut(lo)
+        lowerer_emit_mut(lo, ir_branch_false(cond_if, l_else_if))
+
+        var then_reg_if = IR_INVALID_REG
+        match (*e).block {
+            Some(blk_if) => {
+                then_reg_if = lowerer_lower_block_ref_mut(lo, &(*blk_if))
+            }
+            _ => {
+                then_reg_if = lowerer_fresh_reg_mut(lo)
+                lowerer_emit_mut(lo, ir_load_imm(then_reg_if, 0))
+            }
+        }
+        if then_reg_if < 0 {
+            return IR_INVALID_REG
+        }
+        lowerer_emit_mut(lo, ir_copy(res_if, then_reg_if))
+        lowerer_emit_mut(lo, ir_jump(l_end_if))
+        lowerer_emit_mut(lo, ir_label(l_else_if))
+
+        var else_reg_if = IR_INVALID_REG
+        match (*e).else_expr {
+            Some(else_expr_if) => {
+                else_reg_if = lowerer_lower_expr_ref_mut_simple(lo, &(*else_expr_if))
+            }
+            _ => {
+                else_reg_if = lowerer_fresh_reg_mut(lo)
+                lowerer_emit_mut(lo, ir_load_imm(else_reg_if, 0))
+            }
+        }
+        if else_reg_if < 0 {
+            return IR_INVALID_REG
+        }
+        lowerer_emit_mut(lo, ir_copy(res_if, else_reg_if))
+        lowerer_emit_mut(lo, ir_label(l_end_if))
+        return res_if
+    }
+    if (*e).kind == ExprKind::ExprBinary {
+        let lhs_expr_is_float = (*lo).opt_expr_result_is_float_ref(&(*e).left)
+        let lhs = lowerer_lower_opt_expr_ref_mut_simple(lo, &(*e).left)
+        if lhs < 0 {
+            return IR_INVALID_REG
+        }
+        let rhs_expr_is_float = (*lo).opt_expr_result_is_float_ref(&(*e).right)
+        let rhs = lowerer_lower_opt_expr_ref_mut_simple(lo, &(*e).right)
+        if rhs < 0 {
+            return IR_INVALID_REG
+        }
+        let dst_b = lowerer_fresh_reg_mut(lo)
+        if lhs_expr_is_float {
+            lowerer_emit_mut(lo, ir_mark_float_reg(lhs))
+        }
+        if rhs_expr_is_float {
+            lowerer_emit_mut(lo, ir_mark_float_reg(rhs))
+        }
+        lowerer_emit_mut(lo, ir_binop(dst_b, lhs, (*e).bin_op, rhs))
+        if lower_live_diag_enabled() {
+            print("lower_live: mut_simple_binary_after_emit dst=")
+            print_int(dst_b)
+            print(" instrs_current=")
+            print_int((*(*lo).current_func).instr_count)
+            print(" regs_current=")
+            print_int((*(*lo).current_func).reg_count)
+            print("\n")
+        }
+        return dst_b
+    }
+    IR_INVALID_REG
+}
+
 fn lowerer_flush_current_func_mut(lo: &! Lowerer) with Mut, Panic, Div {
     if (*lo).current_func_loaded && (*lo).current_fn >= 0 && (*lo).current_fn < (*(*lo).module).fn_count {
         var module_box = (*lo).module
-        (*module_box).functions[(*lo).current_fn as usize] = *(*lo).current_func
+        let flush_idx = (*lo).current_fn
+        var current_func_box = (*lo).current_func
+        var current_func = (*current_func_box)
+        var flushed_func = (*module_box).functions[flush_idx as usize]
+        flushed_func.name = current_func.name
+        flushed_func.instr_count = current_func.instr_count
+        flushed_func.reg_count = current_func.reg_count
+        flushed_func.label_count = current_func.label_count
+        flushed_func.param_count = current_func.param_count
+        flushed_func.compile_strategy = current_func.compile_strategy
+        flushed_func.returns_float = current_func.returns_float
+        flushed_func.return_struct_name = current_func.return_struct_name
+        flushed_func.prof_counter_id = current_func.prof_counter_id
+        flushed_func.hyper_algebra_kind = current_func.hyper_algebra_kind
+        flushed_func.is_sret = current_func.is_sret
+        flushed_func.sret_dest_reg = current_func.sret_dest_reg
+        flushed_func.bss_size = current_func.bss_size
+        var pi: i64 = 0
+        while pi < 64 {
+            flushed_func.param_regs[pi as usize] = current_func.param_regs[pi as usize]
+            pi = pi + 1
+        }
+        var ii: i64 = 0
+        while ii < current_func.instr_count && ii < IR_MAX_INSTRS {
+            var source_instr = current_func.instrs[ii as usize]
+            var copied_instr = flushed_func.instrs[ii as usize]
+            lowerer_copy_instr_fields_mut(&! copied_instr, &source_instr)
+            flushed_func.instrs[ii as usize] = copied_instr
+            ii = ii + 1
+        }
+        if lower_live_diag_enabled() && current_func.instr_count > 0 {
+            print("lower_live: flush_mut_probe src0_dst=")
+            print_int(current_func.instrs[0].dst)
+            print(" local0_dst=")
+            print_int(flushed_func.instrs[0].dst)
+            print("\n")
+        }
+        (*module_box).functions[flush_idx as usize] = flushed_func
+        if lower_live_diag_enabled() && current_func.instr_count > 0 {
+            print("lower_live: flush_mut_probe module0_dst=")
+            print_int((*module_box).functions[flush_idx as usize].instrs[0].dst)
+            print("\n")
+        }
+        if lower_live_diag_enabled() {
+            print("lower_live: flush_mut fn=")
+            print(str_from_bytes(flushed_func.name.buf, flushed_func.name.len))
+            print(" instrs=")
+            print_int(flushed_func.instr_count)
+            print(" regs=")
+            print_int(flushed_func.reg_count)
+            print("\n")
+        }
         (*lo).module = module_box
     }
     (*lo).current_func_loaded = false
@@ -1556,8 +2042,8 @@ fn lowerer_fresh_reg_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
         lowerer_mark_error(lo)
         return 0
     }
-    var current_func_box = (*lo).current_func
-    let reg = (*current_func_box).reg_count
+        var current_func_box = (*lo).current_func
+        let reg = (*current_func_box).reg_count
     (*current_func_box).reg_count = reg + 1
     (*lo).current_func = current_func_box
     reg
@@ -1586,7 +2072,7 @@ fn lowerer_lower_fn_params_mut(
                 if fn_id < 0 || fn_id >= (*(*lo).module).fn_count {
                     lowerer_mark_error(lo)
                 } else {
-                    var current_func_box = (*lo).current_func
+        var current_func_box = (*lo).current_func
                     if (*current_func_box).param_count < IR_MAX_PARAMS {
                         let param_count = (*current_func_box).param_count
                         (*current_func_box).param_regs[param_count as usize] = preg
@@ -1625,6 +2111,274 @@ fn lowerer_lower_fn_params_mut(
     }
 }
 
+fn lowerer_lower_block_ref_mut(lo: &! Lowerer, blk: &Block) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if lower_live_diag_enabled() { print("lower_live: block_begin\n") }
+    (*lo).scope_depth = (*lo).scope_depth + 1
+    let saved_local_count = (*(*lo).locals).count
+    var current = &(*blk).stmts
+    var reg = IR_INVALID_REG
+    var saw_stmt = false
+    while true {
+        match *current {
+            Some(list) => {
+                let stmt_ref = &(*list).head
+                var reg_stmt = IR_INVALID_REG
+                var handled_stmt_mut = false
+                if (*stmt_ref).kind == StmtKind::StmtLet {
+                    let bind_name_let = (*stmt_ref).name
+                    var reg_let = IR_INVALID_REG
+                    match (*stmt_ref).expr {
+                        Some(expr_box_let) => {
+                            if (*expr_box_let).kind == ExprKind::ExprFieldAccess {
+                                let field_name_let = (*expr_box_let).name
+                                let base_let = lowerer_lower_opt_expr_ref_mut_simple(lo, &(*expr_box_let).left)
+                                if base_let >= 0 {
+                                    let fidx_let = (*lo).field_idx_for_base_ref(&(*expr_box_let).left, field_name_let)
+                                    let field_is_float_let = (*lo).field_is_float_for_base_ref(&(*expr_box_let).left, field_name_let) || (*lo).field_is_float_by_name_simple(field_name_let)
+                                    let field_array_elem_is_float_let = (*lo).field_array_elem_is_float_for_base_ref(&(*expr_box_let).left, field_name_let)
+                                    let mark_float_let = field_is_float_let || field_array_elem_is_float_let
+                                    let dst_let = lowerer_fresh_reg_mut(lo)
+                                    var instr_let = ir_field_get(dst_let, base_let, fidx_let, field_name_let)
+                                    if mark_float_let {
+                                        instr_let.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                                    }
+                                    lowerer_emit_mut(lo, instr_let)
+                                    if mark_float_let {
+                                        lowerer_emit_mut(lo, ir_mark_float_reg(dst_let))
+                                    }
+                                    lowerer_bind_local_mut(lo, bind_name_let, dst_let, false)
+                                    reg_let = dst_let
+                                    reg_stmt = dst_let
+                                    handled_stmt_mut = true
+                                }
+                            } else {
+                                reg_let = lowerer_lower_expr_ref_mut_simple(lo, &(*expr_box_let))
+                            }
+                        }
+                        _ => {
+                            reg_let = IR_INVALID_REG
+                        }
+                    }
+                    if reg_let >= 0 && !handled_stmt_mut {
+                        if lower_live_diag_enabled() {
+                            print("lower_live: let_after_expr instrs_current=")
+                            print_int((*(*lo).current_func).instr_count)
+                            print(" regs_current=")
+                            print_int((*(*lo).current_func).reg_count)
+                            print("\n")
+                        }
+                        lowerer_bind_local_mut(lo, (*stmt_ref).name, reg_let, false)
+                        if lower_live_diag_enabled() {
+                            print("lower_live: let_after_bind instrs_current=")
+                            print_int((*(*lo).current_func).instr_count)
+                            print(" regs_current=")
+                            print_int((*(*lo).current_func).reg_count)
+                            print("\n")
+                        }
+                        reg_stmt = reg_let
+                        handled_stmt_mut = true
+                    }
+                } else if (*stmt_ref).kind == StmtKind::StmtVar {
+                    var reg_var = IR_INVALID_REG
+                    match (*stmt_ref).expr {
+                        Some(expr_box_var) => {
+                            if (*expr_box_var).kind == ExprKind::ExprFieldAccess {
+                                let base_var = lowerer_lower_opt_expr_ref_mut_simple(lo, &(*expr_box_var).left)
+                                if base_var >= 0 {
+                                    let fidx_var = (*lo).field_idx_for_base_ref(&(*expr_box_var).left, (*expr_box_var).name)
+                                    let field_is_float_var = (*lo).field_is_float_for_base_ref(&(*expr_box_var).left, (*expr_box_var).name) || (*lo).field_is_float_by_name_simple((*expr_box_var).name)
+                                    let field_array_elem_is_float_var = (*lo).field_array_elem_is_float_for_base_ref(&(*expr_box_var).left, (*expr_box_var).name)
+                                    let mark_float_var = field_is_float_var || field_array_elem_is_float_var
+                                    let dst_var = lowerer_fresh_reg_mut(lo)
+                                    var instr_var = ir_field_get(dst_var, base_var, fidx_var, (*expr_box_var).name)
+                                    if mark_float_var {
+                                        instr_var.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                                    }
+                                    lowerer_emit_mut(lo, instr_var)
+                                    if mark_float_var {
+                                        lowerer_emit_mut(lo, ir_mark_float_reg(dst_var))
+                                    }
+                                    reg_var = dst_var
+                                }
+                            } else {
+                                reg_var = lowerer_lower_expr_ref_mut_simple(lo, &(*expr_box_var))
+                            }
+                        }
+                        _ => {
+                            reg_var = IR_INVALID_REG
+                        }
+                    }
+                    if reg_var >= 0 {
+                        if lower_live_diag_enabled() {
+                            print("lower_live: let_after_expr instrs_current=")
+                            print_int((*(*lo).current_func).instr_count)
+                            print(" regs_current=")
+                            print_int((*(*lo).current_func).reg_count)
+                            print("\n")
+                        }
+                        lowerer_bind_local_mut(lo, (*stmt_ref).name, reg_var, true)
+                        if lower_live_diag_enabled() {
+                            print("lower_live: let_after_bind instrs_current=")
+                            print_int((*(*lo).current_func).instr_count)
+                            print(" regs_current=")
+                            print_int((*(*lo).current_func).reg_count)
+                            print("\n")
+                        }
+                        reg_stmt = reg_var
+                        handled_stmt_mut = true
+                    }
+                } else if (*stmt_ref).kind == StmtKind::StmtExpr {
+                    let expr_opt_ref = &(*stmt_ref).expr
+                    match *expr_opt_ref {
+                        Some(expr_box) => {
+                            reg_stmt = lowerer_lower_expr_ref_mut_simple(lo, &(*expr_box))
+                            if reg_stmt < 0 && (*expr_box).kind == ExprKind::ExprCall {
+                                reg_stmt = lowerer_lower_call_expr_ref_mut_simple(lo, &(*expr_box))
+                            }
+                            if lower_live_diag_enabled() {
+                                print("lower_live: block_after_mut_expr_call reg=")
+                                print_int(reg_stmt)
+                                print(" instrs_current=")
+                                print_int((*(*lo).current_func).instr_count)
+                                print(" regs_current=")
+                                print_int((*(*lo).current_func).reg_count)
+                                print("\n")
+                            }
+                            handled_stmt_mut = true
+                        }
+                        _ => {
+                            handled_stmt_mut = false
+                        }
+                    }
+                } else if (*stmt_ref).kind == StmtKind::StmtAssign {
+                    var rhs_assign = lowerer_lower_opt_expr_ref_mut_simple(lo, &(*stmt_ref).expr)
+                    if (*stmt_ref).assign_op != AssignOp::AssignEq {
+                        let old_assign = lowerer_lower_opt_expr_ref_mut_simple(lo, &(*stmt_ref).target)
+                        if old_assign >= 0 && rhs_assign >= 0 {
+                            let op_assign = if (*stmt_ref).assign_op == AssignOp::AssignAdd {
+                                BinaryOp::OpAdd
+                            } else {
+                                BinaryOp::OpSub
+                            }
+                            let tmp_assign = lowerer_fresh_reg_mut(lo)
+                            lowerer_emit_mut(lo, ir_binop(tmp_assign, old_assign, op_assign, rhs_assign))
+                            rhs_assign = tmp_assign
+                        }
+                    }
+                    match (*stmt_ref).target {
+                        Some(target_expr_assign) => {
+                            if (*target_expr_assign).kind == ExprKind::ExprIdent && rhs_assign >= 0 {
+                                let dst_assign = lowerer_lookup_local_ref(&(*lo), (*target_expr_assign).name)
+                                if dst_assign < 0 {
+                                    let bss_fn_id_assign = lowerer_lookup_fn_id_by_name_ref(&(*lo), (*target_expr_assign).name)
+                                    if bss_fn_id_assign >= 0 && bss_fn_id_assign < (*(*lo).module).fn_count && (*(*lo).module).functions[bss_fn_id_assign as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                                        let bss_off_assign = (*(*lo).module).functions[bss_fn_id_assign as usize].param_count
+                                        lowerer_emit_mut(lo, ir_store_global(rhs_assign, bss_off_assign, (*target_expr_assign).name))
+                                        reg_stmt = rhs_assign
+                                        handled_stmt_mut = true
+                                    }
+                                } else {
+                                    if lowerer_lookup_local_is_global_ref(&(*lo), (*target_expr_assign).name) {
+                                        let bss_off_local_assign = lowerer_lookup_local_global_bss_offset_ref(&(*lo), (*target_expr_assign).name)
+                                        lowerer_emit_mut(lo, ir_store_global(rhs_assign, bss_off_local_assign, (*target_expr_assign).name))
+                                    }
+                                    lowerer_emit_mut(lo, ir_copy(dst_assign, rhs_assign))
+                                    reg_stmt = dst_assign
+                                    handled_stmt_mut = true
+                                }
+                            }
+                        }
+                        _ => {
+                            handled_stmt_mut = false
+                        }
+                    }
+                }
+                if handled_stmt_mut {
+                    reg = reg_stmt
+                } else {
+                    let pair = if (*stmt_ref).kind == StmtKind::StmtLet {
+                        (*lo).lower_let_stmt_ref(stmt_ref, false)
+                    } else if (*stmt_ref).kind == StmtKind::StmtVar {
+                        (*lo).lower_let_stmt_ref(stmt_ref, true)
+                    } else if (*stmt_ref).kind == StmtKind::StmtExpr {
+                        let expr_opt_ref2 = &(*stmt_ref).expr
+                        match *expr_opt_ref2 {
+                            Some(expr_box2) => {
+                                (*lo).lower_expr_ref(&(*expr_box2))
+                            }
+                            _ => {
+                                (*lo).emit_unit()
+                            }
+                        }
+                    } else {
+                        (*lo).lower_assign_stmt_ref(stmt_ref)
+                    }
+                    (*lo) = pair.0
+                    reg = pair.1
+                }
+                if lower_live_diag_enabled() {
+                    print("lower_live: block_after_stmt instrs_current=")
+                    print_int((*(*lo).current_func).instr_count)
+                    print(" regs_current=")
+                    print_int((*(*lo).current_func).reg_count)
+                    print("\n")
+                }
+                saw_stmt = true
+                match (*list).tail {
+                    Some(_) => {
+                        current = &(*list).tail
+                    }
+                    _ => {
+                        break
+                    },
+                }
+            }
+            _ => break
+        }
+    }
+    if lower_live_diag_enabled() { print("lower_live: block_after_loop\n") }
+    if !saw_stmt {
+        let unit_pair = (*lo).emit_unit()
+        (*lo) = unit_pair.0
+        reg = unit_pair.1
+    }
+    if (*lo).scope_depth > 0 {
+        (*lo).scope_depth = (*lo).scope_depth - 1
+    }
+    (*(*lo).locals).count = saved_local_count
+    if lower_live_diag_enabled() {
+        print("lower_live: block_end reg=")
+        print_int(reg)
+        print(" instrs_current=")
+        print_int((*(*lo).current_func).instr_count)
+        print("\n")
+    }
+    reg
+}
+
+fn lowerer_lower_let_stmt_ref_mut(lo: &! Lowerer, s: &Stmt, is_mut: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let reg = lowerer_lower_opt_expr_ref_mut_simple(lo, &(*s).expr)
+    if reg < 0 {
+        return IR_INVALID_REG
+    }
+    if lower_live_diag_enabled() {
+        print("lower_live: let_after_expr instrs_current=")
+        print_int((*(*lo).current_func).instr_count)
+        print(" regs_current=")
+        print_int((*(*lo).current_func).reg_count)
+        print("\n")
+    }
+    lowerer_bind_local_mut(lo, (*s).name, reg, is_mut)
+    if lower_live_diag_enabled() {
+        print("lower_live: let_after_bind instrs_current=")
+        print_int((*(*lo).current_func).instr_count)
+        print(" regs_current=")
+        print_int((*(*lo).current_func).reg_count)
+        print("\n")
+    }
+    reg
+}
+
 fn lowerer_lower_fn_item_mut(
     lo: &! Lowerer,
     name: Name,
@@ -1659,17 +2413,16 @@ fn lowerer_lower_fn_item_mut(
 
     lowerer_flush_current_func_mut(lo)
     (*lo).current_fn = fn_id
-    var current_func = ir_empty_function()
-    current_func.name = name
+    var current_func_box_new = Box::new(ir_empty_function())
+    (*current_func_box_new).name = name
     if fn_id >= 0 && fn_id < (*(*lo).module).fn_count {
-        let preserved = (*(*lo).module).functions[fn_id as usize]
-        current_func.name = preserved.name
-        current_func.compile_strategy = preserved.compile_strategy
-        current_func.returns_float = preserved.returns_float
-        current_func.return_struct_name = preserved.return_struct_name
-        current_func.prof_counter_id = preserved.prof_counter_id
+        (*current_func_box_new).name = (*(*lo).module).functions[fn_id as usize].name
+        (*current_func_box_new).compile_strategy = (*(*lo).module).functions[fn_id as usize].compile_strategy
+        (*current_func_box_new).returns_float = (*(*lo).module).functions[fn_id as usize].returns_float
+        (*current_func_box_new).return_struct_name = (*(*lo).module).functions[fn_id as usize].return_struct_name
+        (*current_func_box_new).prof_counter_id = (*(*lo).module).functions[fn_id as usize].prof_counter_id
     }
-    (*lo).current_func = Box::new(current_func)
+    (*lo).current_func = current_func_box_new
     (*lo).current_func_loaded = true
     (*lo).env = None
     var rst_locals = (*lo).locals
@@ -1688,7 +2441,10 @@ fn lowerer_lower_fn_item_mut(
         print("\n")
     }
 
-    let strategy = lowerer_compute_strategy_from_ast_ref(&fd.return_type, &fd.effects)
+    var strategy = (*(*lo).current_func).compile_strategy
+    if strategy < IR_STRATEGY_STANDARD || strategy > IR_STRATEGY_EXPORTED {
+        strategy = IR_STRATEGY_STANDARD
+    }
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_strategy name=")
         print(str_from_bytes(name.buf, name.len))
@@ -1740,11 +2496,7 @@ fn lowerer_lower_fn_item_mut(
         print("\n")
     }
 
-    (*lo) = (*lo).preload_bss_globals_as_locals()
-
-    let bpair = (*lo).lower_block_ref(&fd.body)
-    (*lo) = bpair.0
-    let result_reg = bpair.1
+    let result_reg = lowerer_lower_block_ref_mut(lo, &fd.body)
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_block name=")
         print(str_from_bytes(name.buf, name.len))
@@ -1757,8 +2509,15 @@ fn lowerer_lower_fn_item_mut(
         print("\n")
     }
 
-    if !(*lo).fn_ends_with_return() {
-        (*lo) = (*lo).emit(ir_return(result_reg))
+    var ends_with_return_m = false
+    var return_func_box_m = (*lo).current_func
+    let return_instr_count_m = (*return_func_box_m).instr_count
+    if return_instr_count_m > 0 {
+        ends_with_return_m = (*return_func_box_m).instrs[(return_instr_count_m - 1) as usize].op == IrOpcode::IrReturn
+    }
+    (*lo).current_func = return_func_box_m
+    if !ends_with_return_m {
+        lowerer_emit_mut(lo, ir_return(result_reg))
     }
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_return_check name=")
@@ -1871,6 +2630,57 @@ fn lowerer_lower_program_items_mut(
                     }
                 }
                 current = (*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+fn lowerer_lower_program_items_ref_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc, IO {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                let kind = head.kind
+                let name = head.name
+                if kind == ItemKind::ItemFn {
+                    let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
+                    match *fn_def_opt_ref {
+                        Some(fd) => {
+                            lowerer_lower_fn_item_mut(lo, name, &(*fd))
+                        }
+                        _ => {}
+                    }
+                } else if kind == ItemKind::ItemStruct {
+                    let struct_def_opt_ref: &Option<Box<StructDef>> = &head.struct_def
+                    match *struct_def_opt_ref {
+                        Some(sd) => {
+                            lowerer_register_struct_fields_mut(lo, name, &(*sd).fields, 0)
+                        }
+                        _ => {}
+                    }
+                } else if kind == ItemKind::ItemEnum {
+                    let enum_def_opt_ref: &Option<Box<EnumDef>> = &head.enum_def
+                    match *enum_def_opt_ref {
+                        Some(ed) => {
+                            lowerer_register_enum_variants_mut(lo, name, &(*ed).variants, 0)
+                        }
+                        _ => {}
+                    }
+                } else if kind == ItemKind::ItemImpl {
+                    let impl_def_opt_ref: &Option<Box<ImplDef>> = &head.impl_def
+                    match *impl_def_opt_ref {
+                        Some(id) => {
+                            lowerer_lower_impl_methods_mut(lo, name, (*id).methods)
+                        }
+                        _ => {}
+                    }
+                }
+                current = &(*list).tail
             }
             _ => break
         }
@@ -2101,7 +2911,58 @@ impl Lowerer {
         var lo = self
         if lo.current_func_loaded && lo.current_fn >= 0 && lo.current_fn < lo.module.fn_count {
             var module_box = lo.module
-            (*module_box).functions[lo.current_fn as usize] = *lo.current_func
+            let flush_idx = lo.current_fn
+            var current_func_box = lo.current_func
+            var current_func = (*current_func_box)
+            var flushed_func = (*module_box).functions[flush_idx as usize]
+            flushed_func.name = current_func.name
+            flushed_func.instr_count = current_func.instr_count
+            flushed_func.reg_count = current_func.reg_count
+            flushed_func.label_count = current_func.label_count
+            flushed_func.param_count = current_func.param_count
+            flushed_func.compile_strategy = current_func.compile_strategy
+            flushed_func.returns_float = current_func.returns_float
+            flushed_func.return_struct_name = current_func.return_struct_name
+            flushed_func.prof_counter_id = current_func.prof_counter_id
+            flushed_func.hyper_algebra_kind = current_func.hyper_algebra_kind
+            flushed_func.is_sret = current_func.is_sret
+            flushed_func.sret_dest_reg = current_func.sret_dest_reg
+            flushed_func.bss_size = current_func.bss_size
+            var pi: i64 = 0
+            while pi < 64 {
+                flushed_func.param_regs[pi as usize] = current_func.param_regs[pi as usize]
+                pi = pi + 1
+            }
+            var ii: i64 = 0
+            while ii < current_func.instr_count && ii < IR_MAX_INSTRS {
+                var source_instr = current_func.instrs[ii as usize]
+                var copied_instr = flushed_func.instrs[ii as usize]
+                lowerer_copy_instr_fields_mut(&! copied_instr, &source_instr)
+                flushed_func.instrs[ii as usize] = copied_instr
+                ii = ii + 1
+            }
+            if lower_live_diag_enabled() && current_func.instr_count > 0 {
+                print("lower_live: flush_value_probe src0_dst=")
+                print_int(current_func.instrs[0].dst)
+                print(" local0_dst=")
+                print_int(flushed_func.instrs[0].dst)
+                print("\n")
+            }
+            (*module_box).functions[flush_idx as usize] = flushed_func
+            if lower_live_diag_enabled() && current_func.instr_count > 0 {
+                print("lower_live: flush_value_probe module0_dst=")
+                print_int((*module_box).functions[flush_idx as usize].instrs[0].dst)
+                print("\n")
+            }
+            if lower_live_diag_enabled() {
+                print("lower_live: flush_value fn=")
+                print(str_from_bytes(flushed_func.name.buf, flushed_func.name.len))
+                print(" instrs=")
+                print_int(flushed_func.instr_count)
+                print(" regs=")
+                print_int(flushed_func.reg_count)
+                print("\n")
+            }
             lo.module = module_box
         }
         lo.current_func_loaded = false
@@ -3333,11 +4194,50 @@ impl Lowerer {
             return lo.report_error()
         }
         var current_func_box = lo.current_func
-        let instr_count = (*current_func_box).instr_count
+        var current_func = (*current_func_box)
+        let instr_count = current_func.instr_count
         if instr_count < IR_MAX_INSTRS {
-            (*current_func_box).instrs[instr_count as usize] = instr
-            (*current_func_box).instr_count = instr_count + 1
-            lo.current_func = current_func_box
+            if lower_live_diag_enabled() && instr_count < 3 {
+                print("lower_live: emit_in fn=")
+                print(str_from_bytes(current_func.name.buf, current_func.name.len))
+                print(" i=")
+                print_int(instr_count)
+                print(" dst=")
+                print_int(instr.dst)
+                print(" src1=")
+                print_int(instr.src1)
+                print(" src2=")
+                print_int(instr.src2)
+                print(" fn_id=")
+                print_int(instr.fn_id)
+                print(" field_idx=")
+                print_int(instr.field_idx)
+                print(" flags=")
+                print_int(instr.imm_flags)
+                print("\n")
+            }
+            current_func.instrs[instr_count as usize] = instr
+            current_func.instr_count = instr_count + 1
+            if lower_live_diag_enabled() && instr_count < 3 {
+                print("lower_live: emit_stored fn=")
+                print(str_from_bytes(current_func.name.buf, current_func.name.len))
+                print(" i=")
+                print_int(instr_count)
+                print(" dst=")
+                print_int(current_func.instrs[instr_count as usize].dst)
+                print(" src1=")
+                print_int(current_func.instrs[instr_count as usize].src1)
+                print(" src2=")
+                print_int(current_func.instrs[instr_count as usize].src2)
+                print(" fn_id=")
+                print_int(current_func.instrs[instr_count as usize].fn_id)
+                print(" field_idx=")
+                print_int(current_func.instrs[instr_count as usize].field_idx)
+                print(" flags=")
+                print_int(current_func.instrs[instr_count as usize].imm_flags)
+                print("\n")
+            }
+            lo.current_func = Box::new(current_func)
             lo
         } else {
             if lo.probe_mode {
@@ -5070,6 +5970,13 @@ impl Lowerer {
                     }
                     lo = pair.0
                     reg = pair.1
+                    if lower_live_diag_enabled() {
+                        print("lower_live: block_after_stmt instrs_current=")
+                        print_int(lo.current_func.instr_count)
+                        print(" regs_current=")
+                        print_int(lo.current_func.reg_count)
+                        print("\n")
+                    }
                     saw_stmt = true
                     current = &(*list).tail
                 }
@@ -5215,7 +6122,21 @@ impl Lowerer {
         let pair = self.lower_opt_expr_ref(&s.expr)
         var lo = pair.0
         let reg = pair.1
+        if lower_live_diag_enabled() {
+            print("lower_live: let_after_expr instrs_current=")
+            print_int(lo.current_func.instr_count)
+            print(" regs_current=")
+            print_int(lo.current_func.reg_count)
+            print("\n")
+        }
         lo = lo.bind_local(s.name, reg, is_mut)
+        if lower_live_diag_enabled() {
+            print("lower_live: let_after_bind instrs_current=")
+            print_int(lo.current_func.instr_count)
+            print(" regs_current=")
+            print_int(lo.current_func.reg_count)
+            print("\n")
+        }
         if lower_opt_type_is_array_of_f64(&s.ty) {
             lo = lo.bind_local_array_elem_float(s.name)
         } else {
@@ -6610,13 +7531,23 @@ impl Lowerer {
     fn lower_binary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let wide_bits = self.expr_wide_bits_ref(e)
         let lhs_expr_is_float = self.opt_expr_result_is_float_ref(&e.left)
-        let pair_l = self.lower_opt_expr_ref(&e.left)
-        let lo1 = pair_l.0
-        let lhs = pair_l.1
+        let lhs_local = lowerer_opt_expr_local_reg_ref(&self, &e.left)
+        var lo1 = self
+        var lhs = lhs_local
+        if lhs_local < 0 {
+            let pair_l = lo1.lower_opt_expr_ref(&e.left)
+            lo1 = pair_l.0
+            lhs = pair_l.1
+        }
         let rhs_expr_is_float = lo1.opt_expr_result_is_float_ref(&e.right)
-        let pair_r = lo1.lower_opt_expr_ref(&e.right)
-        let lo2 = pair_r.0
-        let rhs = pair_r.1
+        let rhs_local = lowerer_opt_expr_local_reg_ref(&lo1, &e.right)
+        var lo2 = lo1
+        var rhs = rhs_local
+        if rhs_local < 0 {
+            let pair_r = lo2.lower_opt_expr_ref(&e.right)
+            lo2 = pair_r.0
+            rhs = pair_r.1
+        }
         let cmp_op = lower_binary_op_to_wide_cmp(e.bin_op)
         let limbs = lower_wide_limb_count(wide_bits)
         let pair_d = if wide_bits > 64 && cmp_op < 0 { lo2.fresh_wide_reg(limbs) } else { lo2.fresh_reg() }
@@ -6848,9 +7779,17 @@ impl Lowerer {
     }
 
     fn lower_if_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if lower_live_diag_enabled() { print("lower_live: if_begin\n") }
         let pair_cond = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_cond.0
         let cond = pair_cond.1
+        if lower_live_diag_enabled() {
+            print("lower_live: if_after_cond cond=")
+            print_int(cond)
+            print(" instrs_current=")
+            print_int(lo1.current_func.instr_count)
+            print("\n")
+        }
 
         let pair_l_else = lo1.fresh_label()
         let lo2 = pair_l_else.0
@@ -6861,29 +7800,57 @@ impl Lowerer {
         let pair_res = lo3.fresh_reg()
         let lo4 = pair_res.0
         let res = pair_res.1
+        if lower_live_diag_enabled() {
+            print("lower_live: if_labels else=")
+            print_int(l_else)
+            print(" end=")
+            print_int(l_end)
+            print(" res=")
+            print_int(res)
+            print("\n")
+        }
 
         var lo = lo4.emit(ir_branch_false(cond, l_else))
+        if lower_live_diag_enabled() { print("lower_live: if_before_then\n") }
 
-        let then_block_opt: Option<Box<Block>> = e.block
-        let pair_then = match then_block_opt {
-            Some(blk) => lo.lower_block_ref(&(*blk)),
-            None => lo.emit_unit(),
+        let then_block_ref = &e.block
+        let then_reg = match *then_block_ref {
+            Some(blk) => lowerer_lower_block_ref_mut(&! lo, &(*blk)),
+            None => {
+                let unit_pair = lo.emit_unit()
+                lo = unit_pair.0
+                unit_pair.1
+            },
         }
-        lo = pair_then.0
-        let then_reg = pair_then.1
+        if lower_live_diag_enabled() {
+            print("lower_live: if_after_then reg=")
+            print_int(then_reg)
+            print(" instrs_current=")
+            print_int(lo.current_func.instr_count)
+            print("\n")
+        }
         lo = lo.emit(ir_copy(res, then_reg))
         lo = lo.emit(ir_jump(l_end))
         lo = lo.emit(ir_label(l_else))
+        if lower_live_diag_enabled() { print("lower_live: if_before_else\n") }
 
-        let else_expr_opt: Option<Box<Expr>> = e.else_expr
-        let pair_else = match else_expr_opt {
+        let else_expr_ref = &e.else_expr
+        let pair_else = match *else_expr_ref {
             Some(ee) => lo.lower_expr_ref(&(*ee)),
             None => lo.emit_unit(),
         }
         lo = pair_else.0
         let else_reg = pair_else.1
+        if lower_live_diag_enabled() {
+            print("lower_live: if_after_else reg=")
+            print_int(else_reg)
+            print(" instrs_current=")
+            print_int(lo.current_func.instr_count)
+            print("\n")
+        }
         lo = lo.emit(ir_copy(res, else_reg))
         lo = lo.emit(ir_label(l_end))
+        if lower_live_diag_enabled() { print("lower_live: if_end\n") }
         (lo, res)
     }
 
@@ -7132,6 +8099,34 @@ impl Lowerer {
     }
 
     fn lower_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if lower_live_diag_enabled() {
+            print("lower_live: expr_kind=")
+            if e.kind == ExprKind::ExprIntLit { print("int") }
+            else if e.kind == ExprKind::ExprFloatLit { print("float") }
+            else if e.kind == ExprKind::ExprBoolTrue { print("bool_true") }
+            else if e.kind == ExprKind::ExprBoolFalse { print("bool_false") }
+            else if e.kind == ExprKind::ExprStringLit { print("string") }
+            else if e.kind == ExprKind::ExprCharLit { print("char") }
+            else if e.kind == ExprKind::ExprIdent { print("ident") }
+            else if e.kind == ExprKind::ExprCall { print("call") }
+            else if e.kind == ExprKind::ExprBinary { print("binary") }
+            else if e.kind == ExprKind::ExprUnary { print("unary") }
+            else if e.kind == ExprKind::ExprFieldAccess { print("field") }
+            else if e.kind == ExprKind::ExprIndex { print("index") }
+            else if e.kind == ExprKind::ExprIf { print("if") }
+            else if e.kind == ExprKind::ExprWhile { print("while") }
+            else if e.kind == ExprKind::ExprReturn { print("return") }
+            else if e.kind == ExprKind::ExprBreak { print("break") }
+            else if e.kind == ExprKind::ExprContinue { print("continue") }
+            else if e.kind == ExprKind::ExprStructLit { print("struct_lit") }
+            else if e.kind == ExprKind::ExprArrayLit { print("array_lit") }
+            else if e.kind == ExprKind::ExprTupleLit { print("tuple_lit") }
+            else if e.kind == ExprKind::ExprBlock { print("block") }
+            else if e.kind == ExprKind::ExprLoop { print("loop") }
+            else if e.kind == ExprKind::ExprForIn { print("for_in") }
+            else { print("other") }
+            print("\n")
+        }
         if self.probe_mode && lower_body_diag_enabled() {
             print("lower_probe: expr_kind=")
             if e.kind == ExprKind::ExprIntLit { print("int") }
@@ -7521,6 +8516,7 @@ fn ir_call_needs_validated_patch(
 ) -> bool with Mut, Panic, Div {
     if instr.op != IrOpcode::IrCall { return false }
     if instr.fn_id < 0 || instr.fn_id >= fn_count { return false }
+    if instr.fn_id >= 2048 { return false }
     callee_strategies[instr.fn_id as usize] == IR_STRATEGY_INSTRUMENTED &&
     instr.arg_count + 1 == callee_param_counts[instr.fn_id as usize]
 }
@@ -7538,7 +8534,7 @@ fn ir_function_has_opcode(func: IrFunction, op: IrOpcode) -> bool with Mut, Pani
 
 fn ir_function_has_opcode_ref(func: &! IrFunction, op: IrOpcode) -> bool with Mut, Panic, Div {
     var i: i64 = 0
-    while i < func.instr_count {
+    while i < func.instr_count && i < IR_MAX_INSTRS {
         if func.instrs[i as usize].op == op {
             return true
         }
@@ -7586,7 +8582,7 @@ fn ir_patch_validated_calls_in_function(
     var shared_validated_reg = IR_INVALID_REG
 
     var scan_i: i64 = 0
-    while scan_i < func.instr_count {
+    while scan_i < func.instr_count && scan_i < IR_MAX_INSTRS {
         if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, func.instrs[scan_i as usize]) {
             needs_patch = true
             break
@@ -7608,7 +8604,7 @@ fn ir_patch_validated_calls_in_function(
     }
 
     var i: i64 = 0
-    while i < func.instr_count {
+    while i < func.instr_count && i < IR_MAX_INSTRS {
         if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, func.instrs[i as usize]) {
             let validated_reg = if func.compile_strategy == IR_STRATEGY_INSTRUMENTED {
                 func.param_regs[0]
@@ -7633,14 +8629,14 @@ fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with M
     var callee_param_counts: [i64; 2048] = [0; 2048]
     var stats = ir_empty_validated_patch_stats()
     var i: i64 = 0
-    while i < module.fn_count {
+    while i < module.fn_count && i < 2048 {
         callee_strategies[i as usize] = module.functions[i as usize].compile_strategy
         callee_param_counts[i as usize] = module.functions[i as usize].param_count
         i = i + 1
     }
 
     i = 0
-    while i < module.fn_count {
+    while i < module.fn_count && i < 2048 {
         ir_patch_validated_calls_in_function(module.fn_count, callee_strategies, callee_param_counts, &! module.functions[i as usize], &! stats)
         i = i + 1
     }
@@ -7732,12 +8728,38 @@ fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic:
     }
 }
 
+fn lower_items_to_ir_summary_box_with_epistemic_ref(items: &Option<Box<ItemList>>, epistemic: &IrEpistemicSection) -> IrProgramSummaryBoxResult with Mut, Panic, Div, Alloc, IO {
+    var lo = lowerer_new_with_epistemic(epistemic)
+    lowerer_preseed_program_items_mut(&! lo, items, ir_empty_name())
+    let error_count = lo.error_count
+    let had_error = lo.had_error
+    let inner = ir_program_summary_from_lowerer(lo)
+    var summary_box = Box::new(ir_empty_program_summary())
+    (*summary_box).module = inner.module
+    (*summary_box).enum_variants = inner.enum_variants
+    (*summary_box).struct_layouts = inner.struct_layouts
+    (*summary_box).probe_mode = inner.probe_mode
+    IrProgramSummaryBoxResult {
+        summary: summary_box,
+        error_count: error_count,
+        had_error: had_error,
+    }
+}
+
+pub struct IrProgramItemsSlot {
+    pub items: Option<Box<ItemList> >,
+}
+
+pub fn ir_empty_program_items_slot() -> IrProgramItemsSlot {
+    IrProgramItemsSlot { items: None }
+}
+
 // Multi-module variant: preseeds external struct layouts before lowering own
 // items, so cross-module `use lib::{PublicStruct}` then `s.x` resolves to the
 // right field_idx.
 fn lower_program_to_ir_summary_box_with_externs_ref(
     prog: &Program,
-    programs: &[Program; 256],
+    programs: &![Program; 256],
     program_count: i64,
     self_index: i64,
     epistemic: &IrEpistemicSection
@@ -7746,12 +8768,44 @@ fn lower_program_to_ir_summary_box_with_externs_ref(
     var i: i64 = 0
     while i < program_count {
         if i != self_index {
-            let ext_prog = (*programs)[i as usize]
-            lowerer_preseed_external_struct_items_mut(&! lo, &ext_prog.items)
+            let ext_items = (*programs)[i as usize].items
+            lowerer_preseed_external_struct_items_mut(&! lo, &ext_items)
         }
         i = i + 1
     }
     lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
+    let error_count = lo.error_count
+    let had_error = lo.had_error
+    let inner = ir_program_summary_from_lowerer(lo)
+    var summary_box = Box::new(ir_empty_program_summary())
+    (*summary_box).module = inner.module
+    (*summary_box).enum_variants = inner.enum_variants
+    (*summary_box).struct_layouts = inner.struct_layouts
+    (*summary_box).probe_mode = inner.probe_mode
+    IrProgramSummaryBoxResult {
+        summary: summary_box,
+        error_count: error_count,
+        had_error: had_error,
+    }
+}
+
+fn lower_items_to_ir_summary_box_with_externs_ref(
+    items: &Option<Box<ItemList>>,
+    program_items: &![IrProgramItemsSlot; 256],
+    program_count: i64,
+    self_index: i64,
+    epistemic: &IrEpistemicSection
+) -> IrProgramSummaryBoxResult with Mut, Panic, Div, Alloc, IO {
+    var lo = lowerer_new_with_epistemic(epistemic)
+    var i: i64 = 0
+    while i < program_count {
+        if i != self_index {
+            let ext_items = (*program_items)[i as usize].items
+            lowerer_preseed_external_struct_items_mut(&! lo, &ext_items)
+        }
+        i = i + 1
+    }
+    lowerer_preseed_program_items_mut(&! lo, items, ir_empty_name())
     let error_count = lo.error_count
     let had_error = lo.had_error
     let inner = ir_program_summary_from_lowerer(lo)
@@ -7995,8 +9049,82 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_ref(
     summary: &IrProgramSummary,
     epistemic: &IrEpistemicSection
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
-    let lo = lowerer_new_from_program_summary(summary, epistemic)
-    var lo2 = lo.lower_program_bodies_ref(&prog.items)
+    var lo2 = lowerer_new_from_program_summary(summary, epistemic)
+    lowerer_lower_program_items_ref_mut(&! lo2, &prog.items)
+    var patch_stats = ir_empty_validated_patch_stats()
+    if !lo2.had_error {
+        patch_stats = ir_patch_validated_calls(&! lo2.module)
+    }
+    IrLowerBoxResult {
+        module: lo2.module,
+        error_count: lo2.error_count,
+        had_error: lo2.had_error,
+        patch_stats: patch_stats,
+    }
+}
+
+fn lower_items_bodies_from_summary_with_epistemic_boxed_ref(
+    items: &Option<Box<ItemList>>,
+    summary: &IrProgramSummary,
+    epistemic: &IrEpistemicSection
+) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    var lo2 = lowerer_new_from_program_summary(summary, epistemic)
+    lowerer_lower_program_items_ref_mut(&! lo2, items)
+    var patch_stats = ir_empty_validated_patch_stats()
+    if !lo2.had_error {
+        patch_stats = ir_patch_validated_calls(&! lo2.module)
+    }
+    IrLowerBoxResult {
+        module: lo2.module,
+        error_count: lo2.error_count,
+        had_error: lo2.had_error,
+        patch_stats: patch_stats,
+    }
+}
+
+fn lower_program_bodies_for_names_from_summary_with_epistemic_boxed_ref(
+    prog: &Program,
+    summary: &IrProgramSummary,
+    epistemic: &IrEpistemicSection,
+    target_names: &[Name; 256],
+    target_count: i64
+) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    var lo2 = lowerer_new_from_program_summary(summary, epistemic)
+    var queue: [Name; 256] = [ir_empty_name(); 256]
+    var queued: [bool; 256] = [false; 256]
+    var queue_count: i64 = 0
+    var ti: i64 = 0
+    while ti < target_count && ti < 256 && queue_count < 256 {
+        let idx0 = lowerer_lookup_fn_id_by_name_ref(&lo2, (*target_names)[ti as usize])
+        if idx0 >= 0 && idx0 < 256 && !queued[idx0 as usize] {
+            queue[queue_count as usize] = (*target_names)[ti as usize]
+            queued[idx0 as usize] = true
+            queue_count = queue_count + 1
+        }
+        ti = ti + 1
+    }
+
+    var qi: i64 = 0
+    while qi < queue_count && qi < 256 {
+        let target_name = queue[qi as usize]
+        lo2 = lo2.lower_program_bodies_filtered_ref(&prog.items, target_name)
+        let lowered_idx = lowerer_lookup_fn_id_by_name_ref(&lo2, target_name)
+        if lowered_idx >= 0 && lowered_idx < (*lo2.module).fn_count {
+            var ii: i64 = 0
+            while ii < (*lo2.module).functions[lowered_idx as usize].instr_count && ii < IR_MAX_INSTRS && queue_count < 256 {
+                let instr = (*lo2.module).functions[lowered_idx as usize].instrs[ii as usize]
+                if instr.fn_id >= 0 && instr.fn_id < (*lo2.module).fn_count && instr.fn_id < 256 {
+                    if (instr.op == IrOpcode::IrCall || instr.op == IrOpcode::IrCallSret) && !queued[instr.fn_id as usize] {
+                        queue[queue_count as usize] = (*lo2.module).functions[instr.fn_id as usize].name
+                        queued[instr.fn_id as usize] = true
+                        queue_count = queue_count + 1
+                    }
+                }
+                ii = ii + 1
+            }
+        }
+        qi = qi + 1
+    }
     var patch_stats = ir_empty_validated_patch_stats()
     if !lo2.had_error {
         patch_stats = ir_patch_validated_calls(&! lo2.module)
@@ -8014,8 +9142,8 @@ fn lower_program_bodies_from_summary_flat_with_epistemic_ref(
     summary: &IrProgramSummaryFlat,
     epistemic: IrEpistemicSection
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
-    let lo = lowerer_new_from_program_summary_flat(summary, epistemic)
-    var lo2 = lo.lower_program_bodies_ref(&prog.items)
+    var lo2 = lowerer_new_from_program_summary_flat(summary, epistemic)
+    lowerer_lower_program_items_ref_mut(&! lo2, &prog.items)
     var patch_stats = ir_empty_validated_patch_stats()
     IrLowerBoxResult {
         module: lo2.module,
