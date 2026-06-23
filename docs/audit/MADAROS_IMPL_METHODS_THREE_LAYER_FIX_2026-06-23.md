@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-impl-methods-three-layer-fix-2026-06-23
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-impl-methods-three-layer-fix-2026-06-23
+-->
+
 # Madaros impl methods — working end-to-end (three-layer fix, 2026-06-23)
 
 *Branch:* `fix/madaros-impl-method-checker` (off `main`).
