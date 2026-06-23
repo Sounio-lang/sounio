@@ -370,6 +370,9 @@ fn ocp_epi_try_synthesize_observed_chain(
     // PRECISION_PRESERVING opt-in: this GUM-guided pass deliberately reassociates
     // inexact (f64) operands to extract the lower-uncertainty evaluation order.
     ctx.allow_inexact_reassoc = true
+    // A-layer-2: but on a `with Chaotic` path the chaos gate dominates and refuses all
+    // reassociation (e^{λt} amplification), overriding the opt-in above.
+    ctx.chaotic = func.compile_strategy == IR_STRATEGY_PRECISION_PRESERVING_CHAOTIC
 
     let class_inner_a = ocp_epi_add_leaf_class(
         &! ctx,
@@ -6795,10 +6798,12 @@ fn ocp_configure_small_context(ctx: &! EgSmallContext, func: IrFunction, algebra
 }
 
 fn ocp_egraph_epistemic_pass_with_algebras(func: IrFunction, algebras: IrAlgebraTable) -> IrFunction with Mut, Div, Panic {
-    // Guard: only precision-preserving functions. The local EgSmall contexts stay
-    // tiny regardless of function length because we only materialize the current
-    // observed-path rewrite window.
-    if func.compile_strategy != IR_STRATEGY_PRECISION_PRESERVING { return func }
+    // Guard: only precision-preserving functions (including the A-layer-2 chaotic
+    // variant — it still runs the pass, but its EgSmall context is flagged chaotic so
+    // eg_small_saturate_float refuses every reassociation). The local EgSmall contexts
+    // stay tiny because we only materialize the current observed-path rewrite window.
+    if func.compile_strategy != IR_STRATEGY_PRECISION_PRESERVING
+        && func.compile_strategy != IR_STRATEGY_PRECISION_PRESERVING_CHAOTIC { return func }
     let observed_regs = ocp_collect_observed_regs(func)
     var def_at: [i64; 256] = [-1; 256]
 
@@ -6953,6 +6958,8 @@ fn ocp_egraph_epistemic_pass_with_algebras(func: IrFunction, algebras: IrAlgebra
                     ocp_configure_small_context(&! ctx, func, algebras)
                     // PRECISION_PRESERVING opt-in: GUM-guided inexact (f64) reassociation.
                     ctx.allow_inexact_reassoc = true
+                    // A-layer-2: chaos gate dominates the opt-in on a `with Chaotic` path.
+                    ctx.chaotic = func.compile_strategy == IR_STRATEGY_PRECISION_PRESERVING_CHAOTIC
                     let src = ocp_epi_eg_rewrite_inner(&! ctx, float_op, s1, s2, unc1, unc2, lhs_observed, rhs_observed)
                     if src >= 0 {
                         var result = func
