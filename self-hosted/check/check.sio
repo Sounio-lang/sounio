@@ -1090,6 +1090,27 @@ fn invariant_named_type(rank: i64, inner_ty: TypeEntry) -> TypeEntry with Mut, P
     bte
 }
 
+// Feature B (FrameId): Invariant<T,G,F> lowers to TyNamed "Invariant<rank>$<frame>",
+// inner = T. The frame name lets two same-group invariants in the SAME frame be
+// compared (identity transform), while different/absent frames fall back to the
+// conservative cross-frame rule. Mirrors the rank/frame decode in compat.sio.
+fn invariant_framed_named_type(rank: i64, frame: Name, inner_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div {
+    var nm = make_name("Invariant0")     // 10-char base; overwrite the digit, then append
+    nm.buf[9] = (48 + rank) as i8        // rank digit '1'..'4'
+    nm.buf[10] = 36 as i8                // '$'
+    var i: i64 = 0
+    while i < frame.len && (11 + i) < 128 {
+        nm.buf[(11 + i) as usize] = frame.buf[i as usize]
+        i = i + 1
+    }
+    var newlen = 11 + frame.len
+    if newlen > 128 { newlen = 128 }
+    nm.len = newlen
+    var bte = ty_named(nm)
+    bte.inner = Some(Box::new(inner_ty))
+    bte
+}
+
 fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_args: Option<Box<TypeExprList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let name = checker_copy_string_list_to_name(path.segments)
     // Feature B: Invariant<T, G> — second type-arg G is one of the four named
@@ -1113,9 +1134,28 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
                                 }
                                 return invariant_named_type(rank, inner_ty)
                             }
-                            Some(_) => {
-                                checker_note_type_error_mut(c)
-                                return ty_error()
+                            Some(third) => {
+                                match (*third).tail {
+                                    None => {
+                                        // 3 args: Invariant<T, G, F>
+                                        let inner_ty = checker_lower_type_expr_mut(c, (*args).head)
+                                        if inner_ty.kind == TypeKind::TyError {
+                                            return ty_error()
+                                        }
+                                        let g_name = checker_copy_string_list_to_name((*rest).head.path.segments)
+                                        let rank = invariance_rank_from_group_name(g_name)
+                                        if rank == 0 {
+                                            checker_note_type_error_mut(c)
+                                            return ty_error()
+                                        }
+                                        let f_name = checker_copy_string_list_to_name((*third).head.path.segments)
+                                        return invariant_framed_named_type(rank, f_name, inner_ty)
+                                    }
+                                    Some(_) => {
+                                        checker_note_type_error_mut(c)
+                                        return ty_error()
+                                    }
+                                }
                             }
                         }
                     }
@@ -3769,7 +3809,11 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             || e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
             || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
             || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
-        if inv_combine && !invariant_comparable_default_ranks(inv_l, inv_r) {
+        // Same frame (Invariant<T,G,F> with matching F) ⇒ the relating transform is the
+        // identity (DiffInf ∈ every group) ⇒ comparable at any group. Otherwise fall
+        // back to the conservative cross-frame default (only Homeo-group comparable).
+        let same_frame = compat_invariant_same_frame(left_ty, right_ty)
+        if inv_combine && !same_frame && !invariant_comparable_default_ranks(inv_l, inv_r) {
             checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
         }
     }
@@ -7346,6 +7390,14 @@ fn checker_export_ir_epistemic_into_local(checker: &Checker, ep: &! IrEpistemicS
 // Type pretty-printing for diagnostics
 // ============================================================
 
+// Feature B: print a group rank 1..4 as its source-level name.
+fn print_invariance_group_name(rank: i64) with IO, Mut, Panic, Div {
+    if rank == 1 { print("DiffInf") }
+    else if rank == 2 { print("Diff1") }
+    else if rank == 3 { print("BiLip") }
+    else { print("Homeo") }
+}
+
 fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
     match ty.kind {
         TypeKind::TyI8 => print("i8")
@@ -7363,10 +7415,32 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
         TypeKind::TyString => print("string")
         TypeKind::TyChar => print("char")
         TypeKind::TyNamed => {
-            var i: i64 = 0
-            while i < ty.name.len {
-                print_char(ty.name.buf[i] as i64)
-                i = i + 1
+            // Feature B: pretty-print the mangled Invariant carrier as the user wrote it —
+            // Invariant<T, Group[, Frame]> — instead of the internal "Invariant<rank>$F".
+            let inv_rank = compat_invariant_rank(ty)
+            if inv_rank > 0 {
+                print("Invariant<")
+                match ty.inner {
+                    Some(inn) => print_type_name(*inn)
+                    None => print("?")
+                }
+                print(", ")
+                print_invariance_group_name(inv_rank)
+                if ty.name.len > 11 {
+                    print(", ")
+                    var k: i64 = 11
+                    while k < ty.name.len {
+                        print_char(ty.name.buf[k] as i64)
+                        k = k + 1
+                    }
+                }
+                print(">")
+            } else {
+                var i: i64 = 0
+                while i < ty.name.len {
+                    print_char(ty.name.buf[i] as i64)
+                    i = i + 1
+                }
             }
         }
         TypeKind::TyArray => {

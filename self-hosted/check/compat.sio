@@ -7,27 +7,53 @@
 // Type compatibility — must be symmetric
 // ============================================================
 
-// Feature B: an Invariant<T,G> type is lowered (in check.sio) to a TyNamed whose
-// name is "Invariant<rank>" (rank 1..4 = DiffInf<Diff1<BiLip<Homeo). Decode that rank
-// here (raw bytes, so this stays above types_compatible with no forward reference);
-// returns 0 for any other type. Used so Invariant arithmetic/comparison resolves on
-// the inner T and so the inner T is not erased from compatibility.
+// Feature B: an Invariant<T,G> type is lowered (in check.sio) to a TyNamed whose name
+// is "Invariant<rank>" (rank 1..4 = DiffInf<Diff1<BiLip<Homeo), optionally followed by
+// "$<frame>" for the 3-arg Invariant<T,G,F>. Decode that rank here (raw bytes, so this
+// stays above types_compatible with no forward reference); returns 0 for any other
+// type. Used so Invariant arithmetic/comparison resolves on the inner T and so the
+// inner T is not erased from compatibility.
+fn compat_invariant_name_prefix(n: Name) -> bool with Panic, Div {
+    if n.len < 10 { return false }
+    if (n.buf[0] as i64) != 73 { return false }    // I
+    if (n.buf[1] as i64) != 110 { return false }   // n
+    if (n.buf[2] as i64) != 118 { return false }   // v
+    if (n.buf[3] as i64) != 97 { return false }    // a
+    if (n.buf[4] as i64) != 114 { return false }   // r
+    if (n.buf[5] as i64) != 105 { return false }   // i
+    if (n.buf[6] as i64) != 97 { return false }    // a
+    if (n.buf[7] as i64) != 110 { return false }   // n
+    if (n.buf[8] as i64) != 116 { return false }   // t
+    // a frame suffix, if any, must start with '$' at position 10
+    if n.len > 10 && (n.buf[10] as i64) != 36 { return false }
+    true
+}
+
 pub fn compat_invariant_rank(ty: TypeEntry) -> i64 with Panic, Div {
     if ty.kind != TypeKind::TyNamed { return 0 }
     let n = ty.name
-    if n.len != 10 { return 0 }
-    if (n.buf[0] as i64) != 73 { return 0 }    // I
-    if (n.buf[1] as i64) != 110 { return 0 }   // n
-    if (n.buf[2] as i64) != 118 { return 0 }   // v
-    if (n.buf[3] as i64) != 97 { return 0 }    // a
-    if (n.buf[4] as i64) != 114 { return 0 }   // r
-    if (n.buf[5] as i64) != 105 { return 0 }   // i
-    if (n.buf[6] as i64) != 97 { return 0 }    // a
-    if (n.buf[7] as i64) != 110 { return 0 }   // n
-    if (n.buf[8] as i64) != 116 { return 0 }   // t
+    if !compat_invariant_name_prefix(n) { return 0 }
     let d = n.buf[9] as i64
     if d >= 49 && d <= 52 { return d - 48 }
     0
+}
+
+// Two Invariant types share a frame iff BOTH carry a frame suffix ("$<frame>") and the
+// suffixes are identical. A frameless Invariant (2-arg Invariant<T,G>) is treated as an
+// unknown, distinct frame, so it never matches anything — the binop gate then falls
+// back to the conservative cross-frame rule.
+pub fn compat_invariant_same_frame(a: TypeEntry, b: TypeEntry) -> bool with Panic, Div {
+    if compat_invariant_rank(a) == 0 || compat_invariant_rank(b) == 0 { return false }
+    let na = a.name
+    let nb = b.name
+    if na.len <= 11 || nb.len <= 11 { return false }   // no (or empty) frame on one side
+    if na.len != nb.len { return false }
+    var i: i64 = 11
+    while i < na.len {
+        if (na.buf[i as usize] as i64) != (nb.buf[i as usize] as i64) { return false }
+        i = i + 1
+    }
+    true
 }
 
 pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
@@ -94,11 +120,17 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
 
     // Named types: names must match
     if a.kind == TypeKind::TyNamed && b.kind == TypeKind::TyNamed {
-        // Feature B: Invariant<T,G> mangles G into the name but carries T in `inner`.
-        // Name equality alone would erase T (Invariant<f64,G> ≡ Invariant<i64,G>), so
-        // require the inner T to match too. Closes that over-acceptance hole.
-        if compat_invariant_rank(a) > 0 && compat_invariant_rank(b) > 0 {
-            if !name_eq(a.name, b.name) { return false }
+        // Feature B: Invariant<T,G[,F]> mangles G (and an optional frame F) into the
+        // name but carries T in `inner`. Compatibility is by GROUP RANK + inner T — NOT
+        // the full mangled name: the FRAME is deliberately ignored here so two same-group
+        // invariants in different frames stay "compatible", and the binop comparability
+        // gate (check.sio) decides accept/reject from the frame relation. Comparing rank
+        // (not name) also keeps the inner T from being erased (Invariant<f64,G> ≠
+        // Invariant<i64,G>).
+        let ra = compat_invariant_rank(a)
+        let rb = compat_invariant_rank(b)
+        if ra > 0 && rb > 0 {
+            if ra != rb { return false }   // different invariance group → incompatible
             match a.inner {
                 Some(ai) => match b.inner {
                     Some(bi) => return types_compatible(*ai, *bi),
