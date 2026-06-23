@@ -18,6 +18,8 @@ struct LowerLocalStack {
     global_bss_offsets: [i64; 4096],
     global_bss_sizes: [i64; 4096],
     is_global: [i64; 4096],
+    // 0=other 1=int 2=float; used by println dispatch to avoid routing i64/f64 vars through print_str
+    scalar_kind: [i64; 4096],
     count: i64,
 }
 
@@ -33,6 +35,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         global_bss_offsets: [0; 4096],
         global_bss_sizes: [0; 4096],
         is_global: [0; 4096],
+        scalar_kind: [0; 4096],
         count: 0,
     }
 }
@@ -1228,12 +1231,18 @@ fn ir_fast_summary_register_struct_fields_owned(
             }
             let fc = table_value.entries[layout_idx as usize].field_count
             if fc < 64 {
-                table_value.entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                // Two-level nested store `table.entries[i].fields[fc] = …` is dropped by
+                // the lean_single by-value-aggregate miscompile, so the field never lands
+                // and field-index resolution later falls back to a name hash (OOB access).
+                // Build in a local entry, then assign it back once (single level).
+                var lay_entry = table_value.entries[layout_idx as usize]
+                lay_entry.fields[fc as usize] = StructFieldEntry {
                     name: (*list).head.name,
                     index: idx,
                     is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
                 }
-                table_value.entries[layout_idx as usize].field_count = fc + 1
+                lay_entry.field_count = fc + 1
+                table_value.entries[layout_idx as usize] = lay_entry
             }
             ir_fast_summary_register_struct_fields_owned(table_value, type_name, (*list).tail, idx + 1)
         }
@@ -3112,6 +3121,55 @@ impl Lowerer {
         false
     }
 
+    fn bind_local_scalar_kind(self, name: Name, kind: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                stk.scalar_kind[i as usize] = kind
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_scalar_kind(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).scalar_kind[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // Returns the print builtin name for println's first argument: print_f64 for f64
+    // literals/variables, print_int for i64 literals/variables, print for everything else
+    // (strings, structs, etc.). Keeps print as the safe fallback so println(string_var)
+    // is not regressed.
+    fn println_dispatch_name(self, args: &Option<Box<ExprList>>) -> Name with Mut, Panic, Div, Alloc {
+        match *args {
+            Some(list) => {
+                let hk = (*list).head.kind
+                if hk == ExprKind::ExprIntLit {
+                    make_name("print_int")
+                } else if hk == ExprKind::ExprFloatLit {
+                    make_name("print_f64")
+                } else if hk == ExprKind::ExprIdent {
+                    let sk = self.lookup_local_scalar_kind((*list).head.name)
+                    if sk == 2 { make_name("print_f64") } else if sk == 1 { make_name("print_int") } else { make_name("print") }
+                } else {
+                    make_name("print")
+                }
+            }
+            _ => make_name("print"),
+        }
+    }
+
     fn bind_reg_array_elem_float(self, reg: i64) -> Lowerer with Mut, Panic, Div {
         var lo = self
         if reg < 0 {
@@ -3743,12 +3801,16 @@ impl Lowerer {
                 Some(list) => {
                     let fc = (*lo.struct_layouts).entries[layout_idx as usize].field_count
                     if fc < 64 {
-                        (*lo.struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                        // Single-level idiom: the two-level `(*box).entries[i].fields[fc] = …`
+                        // store is dropped by the lean_single by-value-aggregate miscompile.
+                        var lay_entry = (*lo.struct_layouts).entries[layout_idx as usize]
+                        lay_entry.fields[fc as usize] = StructFieldEntry {
                             name: (*list).head.name,
                             index: field_idx,
                             is_float: lower_struct_field_float_kind_ref(&(*list).head.value),
                         }
-                        (*lo.struct_layouts).entries[layout_idx as usize].field_count = fc + 1
+                        lay_entry.field_count = fc + 1
+                        (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
                     }
                     current = &(*list).tail
                     field_idx = field_idx + 1
@@ -3840,12 +3902,16 @@ impl Lowerer {
                 Some(list) => {
                     let fc = (*lo.struct_layouts).entries[layout_idx as usize].field_count
                     if fc < 64 {
-                        (*lo.struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                        // Single-level idiom: the two-level `(*box).entries[i].fields[fc] = …`
+                        // store is dropped by the lean_single by-value-aggregate miscompile.
+                        var lay_entry = (*lo.struct_layouts).entries[layout_idx as usize]
+                        lay_entry.fields[fc as usize] = StructFieldEntry {
                             name: (*list).head.name,
                             index: field_idx,
                             is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else { 0 },
                         }
-                        (*lo.struct_layouts).entries[layout_idx as usize].field_count = fc + 1
+                        lay_entry.field_count = fc + 1
+                        (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
                     }
                     current = &(*list).tail
                     field_idx = field_idx + 1
@@ -5233,6 +5299,20 @@ impl Lowerer {
                 _ => {}
             }
         }
+        if lower_opt_type_is_f64(&s.ty) {
+            lo = lo.bind_local_scalar_kind(s.name, 2)
+        } else {
+            match s.expr {
+                Some(expr_box_sk) => {
+                    if (*expr_box_sk).kind == ExprKind::ExprFloatLit {
+                        lo = lo.bind_local_scalar_kind(s.name, 2)
+                    } else if (*expr_box_sk).kind == ExprKind::ExprIntLit {
+                        lo = lo.bind_local_scalar_kind(s.name, 1)
+                    }
+                }
+                _ => {}
+            }
+        }
         let annotated_wide_bits = lower_opt_type_wide_bits(&s.ty)
         if annotated_wide_bits > 64 {
             lo = lo.bind_local_wide_type(s.name, annotated_wide_bits, lower_opt_type_wide_signed(&s.ty))
@@ -6472,12 +6552,13 @@ impl Lowerer {
             return (lo_call_builtin, dst_builtin)
         }
         if name_eq(callee_name, make_name("println")) {
-            // Lower println(x) -> print_kind(x); print_char('\n') so the native-v2
-            // backend does not need a dedicated println builtin. print_kind is print_int
-            // when x is an integer literal (decimal itoa+write) and otherwise print
-            // (=print_str, strlen+write). Routing an int literal to print_str would
-            // dereference the integer value as a char* and SIGSEGV.
-            let pl_print_name = if lower_call_first_arg_is_int_literal(&e.args) { make_name("print_int") } else { make_name("print") }
+            // Lower println(x) -> print_kind(x); print_char('\n'). Dispatch rules:
+            //   int literal / i64 var  → print_int   (itoa+write)
+            //   float literal / f64 var → print_f64   (dtoa+write)
+            //   anything else          → print        (strlen+write, safe fallback for strings)
+            // print_str treats its argument as a char*; routing a numeric value to it
+            // causes a SIGSEGV. The scalar_kind table tracks annotated i64/f64 locals.
+            let pl_print_name = self.println_dispatch_name(&e.args)
             var lo_pl = self
             let fn_id_print = lowerer_find_or_add_fn_id_mut(&! lo_pl, pl_print_name)
             let pair_args_pl: LowerExprArgsResult = lo_pl.lower_expr_args_ref(&e.args)
@@ -6684,6 +6765,34 @@ impl Lowerer {
             print(" field_array_float=")
             print_int(if field_array_elem_is_float { 1 } else { 0 })
             print("\n")
+        }
+        if str_eq(read_env("SOUNIO_DUMP_LAYOUTS"), "1") {
+            print("DUMP field=")
+            print(str_from_bytes(e.name.buf, e.name.len))
+            print(" idx=")
+            print_int(fidx)
+            print(" layouts.count=")
+            print_int((*self.struct_layouts).count)
+            print("\n")
+            var di: i64 = 0
+            while di < (*self.struct_layouts).count {
+                print("  [")
+                print_int(di)
+                print("] ")
+                print(str_from_bytes((*self.struct_layouts).entries[di as usize].type_name.buf, (*self.struct_layouts).entries[di as usize].type_name.len))
+                print(" fc=")
+                print_int((*self.struct_layouts).entries[di as usize].field_count)
+                var dj: i64 = 0
+                while dj < (*self.struct_layouts).entries[di as usize].field_count {
+                    print(" ")
+                    print(str_from_bytes((*self.struct_layouts).entries[di as usize].fields[dj as usize].name.buf, (*self.struct_layouts).entries[di as usize].fields[dj as usize].name.len))
+                    print(":")
+                    print_int((*self.struct_layouts).entries[di as usize].fields[dj as usize].index)
+                    dj = dj + 1
+                }
+                print("\n")
+                di = di + 1
+            }
         }
         let pair_b = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_b.0
