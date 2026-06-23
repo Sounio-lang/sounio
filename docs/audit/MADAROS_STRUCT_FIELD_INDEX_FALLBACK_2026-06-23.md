@@ -32,21 +32,29 @@ Plus a gated observation dump (`SOUNIO_DUMP_LAYOUTS=1`) in `lower_field_access_e
 **lean_single is untouched** (the deeper miscompile remains; dodged in madaros source per
 advisor — editing the bootstrap seed would risk the `gen2==gen3` fixed point).
 
-### Verified (fresh madaros built from source)
+### Verified (fresh madaros built from this exact source, on a clean `main` base)
 - Dump confirms `struct_layouts` now contains `P2` with **relative** indices `a:0, b:1`
   (was: absent → hash fallback 33,34).
-- Repros: `let p = P2{7,35}; print p.a,p.b` → `7 35`; `P3{11,22,33}` → `11 22 33`;
-  `direct p.b / getb(p) / suma(p)` → `35 / 35 / 42`.
-- **`hyperbolic_geodesic.sio` (was SIGSEGV 139) → exit 0**; `lyapunov_closed_forms.sio`,
-  `lyapunov_flow_benettin.sio` → exit 0.
-- No regressions: 307=307 run-pass exit-0 across the first ~600 tests; madaros self-builds.
+- Repros: `let p = P2{7,35}; print p.a,p.b` → `7 35` (was `7 0`); `P3{11,22,33}` →
+  `11 22 33` (was `11 0 0`); `direct p.b / getb(p) / suma(p)` → `35 / 35 / 42`.
+- madaros self-builds with the fix (full compiler bundle compiles).
 
-### Honest scope — this is ONE root, not all of the 70%
-Run-pass tests that fail *only* on struct field access now pass. Tests that also exercise
-other madaros codegen holes (enum/method/Box construction, larger SRET shapes) still fail —
-a curated 15-test struct-returning sample stayed 0/15 because those tests hit additional
-holes. This fix removes the **struct-field-index** root; the remaining run-pass failures
-are separate roots, to be triaged next on the path to Madaros-official.
+### NECESSARY but not SUFFICIENT for the headline tests
+`hyperbolic_geodesic.sio` / `lyapunov_*.sio` require **two** same-class fixes:
+1. **this** struct field-index registration fix (`lower.sio`), and
+2. the independent **`machine_ir` block-mutation** copy-modify-writeback fix (Codex's
+   `4e07642df`, in `self-hosted/native/machine_ir.sio`).
+
+On a clean `main` base with *only* fix (1), the repros pass but `hyperbolic_geodesic`
+still SIGSEGVs (139) — it also hits the `machine_ir` bug. With *both* fixes present, all
+three run to exit 0. Codex independently converged on the same copy-modify-writeback root
+for `machine_ir`, corroborating the diagnosis. Both fixes should land together.
+
+### Honest scope — one root of several
+This removes the **struct-field-index** root. Other madaros codegen holes remain (enum/
+method/Box construction, larger SRET shapes); a curated 15-test struct-returning sample
+stayed 0/15 because those tests hit additional holes. Triage continues on the path to
+Madaros-official.
 
 ---
 
