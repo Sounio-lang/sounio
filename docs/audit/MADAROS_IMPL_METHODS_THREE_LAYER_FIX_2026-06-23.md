@@ -18,6 +18,7 @@ work end-to-end:
 | 1. Parser | `impl C { fn … }` SIGSEGV at parse | `parse_impl_item` called `parse_fn_item(false, false)` — the **bool `false` was passed for the `visibility: Visibility` struct param** (ABI mismatch; built only because the type error is a non-fatal warning) | pass `visibility_private()` |
 | 2. Checker | `obj.method()` → **E011** (method not found) | the `*mut` collect spine **no-op'd `impl`** (method sigs never registered) | add `checker_collect_impl_item_bridge` and wire `ItemImpl` into `checker_collect_item_inplace` (mirrors the existing check bridge) |
 | 3. Codegen | type-checks, then SIGSEGV at lowering | `lower_method_call_expr_ref` resolved the call by the **bare** method name, but impl methods are lowered as **mangled** free fns (`ir_mangle_method_name`) → call to a body-less fn | derive the receiver's struct type and look up the **mangled** name |
+| 3b. Receiver type | `self.method()` / `param.method()` SIGSEGV (layer-3 crash) | function **params were bound with an empty `struct_type`** (both the functional `lower_fn_params_ref` and the `*mut lowerer_lower_fn_params_mut`), so the receiver type was unknown for `self`/struct params → bare-name fallback | register each param's struct type at binding (`lower_param_struct_type_name`, unwrapping `&`/`&!`; `*mut` setter `lowerer_bind_local_struct_type_mut`) |
 
 Note layer 1's exit-139 was briefly confounded with ROOT 1's stack overflow (testing the
 raw binary without `ulimit`); with `ulimit -s unlimited` (which `bin/madaros` sets) the
@@ -35,16 +36,21 @@ layers separate cleanly.
 ## Verified (madaros built from this exact source)
 
 - `impl C { fn m() {} }` → `--check` OK (was SIGSEGV).
-- `c.five() → 5`; `c.get()/c.add() → 40 42`; `method1 (c.get()) → 42`;
+- Local receiver: `c.five() → 5`; `c.get()/c.add() → 40 42`; `method1 → 42`;
   nested `a.plus(a.val()) → 200`.
-- No regression in the non-method paths (changes are gated to impl/method/method-call);
-  free fns and enums still compile and run; madaros self-builds.
+- **`self.method()`** (sibling call `a.twice() → 42`) and **`param.method()`**
+  (`relay(x).get() → 99`) — both were SIGSEGV before the param-struct-type fix.
+- No regression: the param-struct-type change (the only broad one — it touches all params)
+  is **measured neutral** — identical 32/60 run-pass exit-0 on `madaros` with vs without it,
+  zero changed tests. The other three changes are gated to impl/method/method-call code
+  paths (unreachable from non-method programs). madaros self-builds.
 
 ## Honest scope
 
-- Receiver-type resolution in layer 3 handles the common **local-receiver** case
-  (`c.method()`, `self.method()` via `lookup_local_struct_type`); method calls on arbitrary
-  sub-expressions (e.g. `f().method()`) fall back to the bare name and are out of scope here.
+- Receiver-type resolution handles **local / `self` / struct-param** receivers
+  (via the now-registered param/local struct types). Method calls on arbitrary
+  sub-expression results (e.g. `f().method()`) fall back to the bare name and are out of
+  scope here.
 - Independent of (and composes with) the struct-field-index fix #413 — `self.<field>` on a
   by-ref receiver already worked; local struct-field reads still need #413.
 
