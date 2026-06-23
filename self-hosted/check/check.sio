@@ -3224,6 +3224,102 @@ fn checker_check_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div,
     }
 }
 
+// Loud-failure guard for oversized by-value frames (#187). lean_single warns
+// when a function frame exceeds max_frame_bytes(); the Madaros/boot4 spine had
+// no equivalent, so e.g. an 18 MB TiledSurface passed/returned by value
+// SIGSEGV'd silently at runtime. These helpers size a by-value aggregate
+// TypeEntry and warn when a param or return exceeds the budget.
+fn large_frame_warn_bytes() -> i64 { return 4194304 }
+
+fn checker_type_byte_size_inplace(c: *mut Checker, ty: TypeEntry, depth: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if depth > 32 {
+        return 0
+    }
+    if is_error_or_unknown(ty) {
+        return 0
+    }
+    if ty.kind == TypeKind::TyArray {
+        var elem_sz: i64 = 8
+        match ty.inner {
+            Some(e) => { elem_sz = checker_type_byte_size_inplace(c, *e, depth + 1) }
+            None => {}
+        }
+        return ty.array_size * elem_sz
+    }
+    if ty.kind == TypeKind::TyRef || ty.kind == TypeKind::TyRefMut {
+        return 8
+    }
+    if ty.kind == TypeKind::TyNamed {
+        // Box<T> is a pointer (8); recursing into its inner would over-count.
+        if name_matches_str3(ty.name, 66, 111, 120) {
+            return 8
+        }
+        let sidx = (*c).structs.find(ty.name)
+        if sidx >= 0 {
+            let si = (*c).structs.get(sidx)
+            return checker_fieldlist_byte_size_inplace(c, si.fields, depth + 1)
+        }
+        // Enums / opaque named types: conservative pointer-sized estimate.
+        return 8
+    }
+    if ty.kind == TypeKind::TyI8 || ty.kind == TypeKind::TyU8 || ty.kind == TypeKind::TyBool {
+        return 1
+    }
+    if ty.kind == TypeKind::TyI32 || ty.kind == TypeKind::TyU32 || ty.kind == TypeKind::TyF32 {
+        return 4
+    }
+    // i64 / f64 / u64 / pointers / default.
+    return 8
+}
+
+fn checker_fieldlist_byte_size_inplace(c: *mut Checker, opt: Option<Box<FieldInfoList> >, depth: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
+    var cur = opt
+    var total: i64 = 0
+    while true {
+        match cur {
+            Some(list) => {
+                total = total + checker_type_byte_size_inplace(c, (*list).head.ty, depth)
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
+    total
+}
+
+fn checker_warn_large_by_value_inplace(c: *mut Checker, fn_name: Name, role: i64, bytes: i64) with Mut, IO, Panic, Div {
+    (*c).warning_count = (*c).warning_count + 1
+    print("warning: stack frame too large (")
+    print_int(bytes)
+    print(" bytes) — ")
+    if role == 0 {
+        print("return of fn ")
+    } else {
+        print("by-value parameter of fn ")
+    }
+    print_name_value(fn_name)
+    print(" — consider passing by &!/reference or using heap/global storage\n")
+}
+
+fn checker_warn_large_params_inplace(c: *mut Checker, fn_name: Name, opt: Option<Box<ParamList> >) with Mut, Panic, Div, Alloc, IO {
+    var cur = opt
+    while true {
+        match cur {
+            Some(pl) => {
+                if !(*pl).head.is_self {
+                    let pty = checker_lower_type_expr_mut(c, (*pl).head.ty)
+                    let psz = checker_type_byte_size_inplace(c, pty, 0)
+                    if psz > large_frame_warn_bytes() {
+                        checker_warn_large_by_value_inplace(c, fn_name, 1, psz)
+                    }
+                }
+                cur = (*pl).tail
+            }
+            None => break
+        }
+    }
+}
+
 fn checker_bind_fn_param_inplace(c: *mut Checker, p: Param) with Mut, Panic, Div, Alloc, IO {
     if p.is_self {
         (*c).env = (*c).env.bind(p.name, (*c).current_impl_type, p.is_self_mut)
@@ -3274,7 +3370,14 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
                 (*c).current_effect_count = sig.effect_count
                 // Per-call-site recording: note a `with Chaotic` (effect id 22) function.
                 if has_effect_id(sig.effects, sig.effect_count, 22) { equiv_set_chaotic() }
+                // Loud-failure guard (#187): warn on oversized by-value return.
+                let ret_sz = checker_type_byte_size_inplace(c, sig.return_type, 0)
+                if ret_sz > large_frame_warn_bytes() {
+                    checker_warn_large_by_value_inplace(c, (*fd).name, 0, ret_sz)
+                }
             }
+            // Loud-failure guard (#187): warn on oversized by-value parameters.
+            checker_warn_large_params_inplace(c, (*fd).name, (*fd).params)
             (*c).multitest_count = 0
             (*c).multitest_corrected = false
             (*c).env = (*c).env.push_scope()
