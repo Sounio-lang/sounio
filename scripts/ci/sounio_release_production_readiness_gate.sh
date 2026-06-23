@@ -146,6 +146,7 @@ if [[ "$RUN_LIVE_GATES" == "1" ]]; then
     bash "$ROOT_DIR/scripts/dev/madaros_readiness_status.sh" --no-audit --production-ready
   run_live_step docs-registry bash "$ROOT_DIR/scripts/dev/check_docs_registry.sh"
   run_live_step docs-consistency bash "$ROOT_DIR/scripts/dev/check_docs_consistency.sh"
+  run_live_step install-path bash "$ROOT_DIR/scripts/ci/install_path_gate.sh"
   run_live_step serious-language-claim-closure env -u SOUC_BIN -u SOUNIO_STDLIB_PATH \
     bash "$ROOT_DIR/scripts/ci/serious_language_claim_closure_gate.sh"
   write_live_tsv
@@ -174,7 +175,6 @@ release_critical = {
     "stdlib.surface": "broad stdlib callability is explicitly downgraded",
     "tooling.package": "package manager has no public registry launch/support contract",
     "tooling.editor": "formatter, REPL, and editor tooling are prototype surfaces",
-    "install": "installation is repo-artifact based, not a broad supported distribution path",
     "website.docs": "docs are extensive but not yet filtered into a release-grade public support contract",
 }
 
@@ -259,11 +259,17 @@ classification_rc=$?
 set -e
 
 live_failures=0
+if [[ "$RUN_LIVE_GATES" != "1" ]]; then
+  live_failures=$((live_failures + 1))
+  record_live_step live-gates-required fail "$ARTIFACT_ROOT/skip-live-gates-not-release-signoff.log"
+  echo "skip-live-gates is not valid for release production-ready sign-off" >"$ARTIFACT_ROOT/skip-live-gates-not-release-signoff.log"
+fi
 for status in "${LIVE_STATUSES[@]}"; do
   if [[ "$status" != "pass" ]]; then
     live_failures=$((live_failures + 1))
   fi
 done
+write_live_tsv
 
 echo "live_gates=$LIVE_TSV"
 echo "summary=$SUMMARY_JSON"

@@ -60,6 +60,7 @@ done
 # Resolve repository root from this script's location.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/lib/elf_utils.sh"
 
 # ------------------------------------------------------------------ host
 HOST_OS="${SOUNIO_HOST_OS_OVERRIDE:-$(uname -s)}"
@@ -93,7 +94,18 @@ case "$TARGET" in
     ;;
   *) echo "error: unrecognised --target $TARGET" >&2; exit 2;;
 esac
-MADAROS_ART_BIN="$ROOT_DIR/artifacts/self-hosted/madaros"
+MADAROS_ART_BIN=""
+has_madaros_artifact() {
+  sounio_is_elf_binary "$MADAROS_ART_BIN"
+}
+if [[ "$TARGET" == "x86_64" ]]; then
+  for cand in "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+    if sounio_is_elf_binary "$cand"; then
+      MADAROS_ART_BIN="$cand"
+      break
+    fi
+  done
+fi
 
 if [[ ! -x "$ART_BIN" ]]; then
   echo "error: missing artifact: $ART_BIN" >&2
@@ -119,10 +131,10 @@ echo "Sounio install plan:"
 echo "  prefix:  $PREFIX"
 echo "  target:  $TARGET"
 echo "  binary:  $ART_BIN -> $BIN_DIR/souc-self-hosted-$TARGET"
-if [[ -x "$MADAROS_ART_BIN" ]]; then
+if has_madaros_artifact; then
   echo "  madaros: $MADAROS_ART_BIN -> $BIN_DIR/madaros-linux-x86_64"
 else
-  echo "  madaros: <not built; run make build-madaros to include Stage1>"
+  echo "  madaros: <not available for target $TARGET in this snapshot>"
 fi
 echo "  stdlib:  $(du -sh stdlib | awk '{print $1}') -> $LIB_STDLIB  (copy: $COPY_STDLIB)"
 echo "  doc:     $DOC_DIR"
@@ -157,7 +169,7 @@ install -m 0644 "$ROOT_DIR/scripts/lib/macos_codesign.sh"    "$LIB_SCRIPTS/"
 # lib/ locations so the launcher's relative lookups resolve cleanly.
 install -m 0755 "$ROOT_DIR/bin/souc" "$BIN_DIR/souc"
 
-if [[ -x "$MADAROS_ART_BIN" ]]; then
+if has_madaros_artifact; then
   install -m 0755 "$ROOT_DIR/bin/madaros" "$BIN_DIR/madaros"
   install -m 0755 "$MADAROS_ART_BIN" "$BIN_DIR/madaros-linux-x86_64"
 fi
