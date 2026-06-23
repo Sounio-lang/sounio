@@ -51,7 +51,7 @@ This ledger maps public-facing claims to evidence and safe wording. Use it befor
 | Ownership and borrowing | `validated research` | `docs/compiler/KNOWN_LIMITATIONS.md`; run/compile-fail coverage | "Ownership and borrowing are implemented for the checked examples; avoid broad Rust-equivalence claims." |
 | Traits and generics | `prototype` | `docs/compiler/KNOWN_LIMITATIONS.md` turbofish/generic notes | "Generics and trait syntax exist in constrained forms; they are not a full mature trait ecosystem." |
 | Modules/imports | `validated research` | `docs/guide/MINIMUM_VIABLE_SOUNIO.md`; module resolver docs | "Imports work for active module surfaces; not every path under `stdlib/` is callable." |
-| Formatter, REPL, LSP | `prototype` | `docs/compiler/KNOWN_LIMITATIONS.md` beta/stability tables | "Tooling exists, but conference demos should not depend on editor polish." |
+| Formatter, REPL, LSP | `prototype` | `scripts/ci/editor_local_gate.sh`; `docs/compiler/KNOWN_LIMITATIONS.md` beta/stability tables | "Formatter and REPL have checked local gates; LSP and editor polish remain prototype surfaces." |
 
 ## Scientific, Formal, And Research Claims
 
