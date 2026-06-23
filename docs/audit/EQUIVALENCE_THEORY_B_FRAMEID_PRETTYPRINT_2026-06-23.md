@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.equivalence-theory-b-frameid-prettyprint-2026-06-23
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.equivalence-theory-b-frameid-prettyprint-2026-06-23
+-->
+
 # Equivalence Theory — Feature B follow-ups: value-level FrameId + error pretty-printer
 ## Teoria da Equivalência — sequências do Recurso B: FrameId em nível de valor + impressão amigável de erros
 
