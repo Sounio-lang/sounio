@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.equivalence-theory-ca-geometric-carriers-2026-06-23
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.equivalence-theory-ca-geometric-carriers-2026-06-23
+-->
+
 # Equivalence Theory — Feature C-a: geometric carriers (`Tensor<Hyperbolic<κ>>`)
 ## Teoria da Equivalência — Recurso C-a: portadores geométricos (`Tensor<Hyperbolic<κ>>`)
 

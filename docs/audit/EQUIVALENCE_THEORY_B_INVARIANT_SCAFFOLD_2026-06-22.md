@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.equivalence-theory-b-invariant-scaffold-2026-06-22
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.equivalence-theory-b-invariant-scaffold-2026-06-22
+-->
+
 # Equivalence Theory — Feature B scaffold: `Invariant<T, G>` decidable core
 ## Teoria da Equivalência — Recurso B (scaffold): núcleo decidível de `Invariant<T, G>`
 
