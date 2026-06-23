@@ -1877,6 +1877,57 @@ fn lowerer_lower_program_items_mut(
     }
 }
 
+fn lowerer_lower_program_items_ref_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc, IO {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                let kind = head.kind
+                let name = head.name
+                if kind == ItemKind::ItemFn {
+                    let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
+                    match *fn_def_opt_ref {
+                        Some(fd) => {
+                            lowerer_lower_fn_item_mut(lo, name, &(*fd))
+                        }
+                        _ => {}
+                    }
+                } else if kind == ItemKind::ItemStruct {
+                    let struct_def_opt_ref: &Option<Box<StructDef>> = &head.struct_def
+                    match *struct_def_opt_ref {
+                        Some(sd) => {
+                            lowerer_register_struct_fields_mut(lo, name, &(*sd).fields, 0)
+                        }
+                        _ => {}
+                    }
+                } else if kind == ItemKind::ItemEnum {
+                    let enum_def_opt_ref: &Option<Box<EnumDef>> = &head.enum_def
+                    match *enum_def_opt_ref {
+                        Some(ed) => {
+                            lowerer_register_enum_variants_mut(lo, name, &(*ed).variants, 0)
+                        }
+                        _ => {}
+                    }
+                } else if kind == ItemKind::ItemImpl {
+                    let impl_def_opt_ref: &Option<Box<ImplDef>> = &head.impl_def
+                    match *impl_def_opt_ref {
+                        Some(id) => {
+                            lowerer_lower_impl_methods_mut(lo, name, (*id).methods)
+                        }
+                        _ => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
 // Sprint 87: helpers for ExprCast type-aware lowering
 fn lower_cast_type_is_f64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
     match *ct {
@@ -7521,6 +7572,7 @@ fn ir_call_needs_validated_patch(
 ) -> bool with Mut, Panic, Div {
     if instr.op != IrOpcode::IrCall { return false }
     if instr.fn_id < 0 || instr.fn_id >= fn_count { return false }
+    if instr.fn_id >= 2048 { return false }
     callee_strategies[instr.fn_id as usize] == IR_STRATEGY_INSTRUMENTED &&
     instr.arg_count + 1 == callee_param_counts[instr.fn_id as usize]
 }
@@ -7538,7 +7590,7 @@ fn ir_function_has_opcode(func: IrFunction, op: IrOpcode) -> bool with Mut, Pani
 
 fn ir_function_has_opcode_ref(func: &! IrFunction, op: IrOpcode) -> bool with Mut, Panic, Div {
     var i: i64 = 0
-    while i < func.instr_count {
+    while i < func.instr_count && i < IR_MAX_INSTRS {
         if func.instrs[i as usize].op == op {
             return true
         }
@@ -7586,7 +7638,7 @@ fn ir_patch_validated_calls_in_function(
     var shared_validated_reg = IR_INVALID_REG
 
     var scan_i: i64 = 0
-    while scan_i < func.instr_count {
+    while scan_i < func.instr_count && scan_i < IR_MAX_INSTRS {
         if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, func.instrs[scan_i as usize]) {
             needs_patch = true
             break
@@ -7608,7 +7660,7 @@ fn ir_patch_validated_calls_in_function(
     }
 
     var i: i64 = 0
-    while i < func.instr_count {
+    while i < func.instr_count && i < IR_MAX_INSTRS {
         if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, func.instrs[i as usize]) {
             let validated_reg = if func.compile_strategy == IR_STRATEGY_INSTRUMENTED {
                 func.param_regs[0]
@@ -7633,14 +7685,14 @@ fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with M
     var callee_param_counts: [i64; 2048] = [0; 2048]
     var stats = ir_empty_validated_patch_stats()
     var i: i64 = 0
-    while i < module.fn_count {
+    while i < module.fn_count && i < 2048 {
         callee_strategies[i as usize] = module.functions[i as usize].compile_strategy
         callee_param_counts[i as usize] = module.functions[i as usize].param_count
         i = i + 1
     }
 
     i = 0
-    while i < module.fn_count {
+    while i < module.fn_count && i < 2048 {
         ir_patch_validated_calls_in_function(module.fn_count, callee_strategies, callee_param_counts, &! module.functions[i as usize], &! stats)
         i = i + 1
     }
@@ -7995,8 +8047,8 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_ref(
     summary: &IrProgramSummary,
     epistemic: &IrEpistemicSection
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
-    let lo = lowerer_new_from_program_summary(summary, epistemic)
-    var lo2 = lo.lower_program_bodies_ref(&prog.items)
+    var lo2 = lowerer_new_from_program_summary(summary, epistemic)
+    lowerer_lower_program_items_ref_mut(&! lo2, &prog.items)
     var patch_stats = ir_empty_validated_patch_stats()
     if !lo2.had_error {
         patch_stats = ir_patch_validated_calls(&! lo2.module)
@@ -8014,8 +8066,8 @@ fn lower_program_bodies_from_summary_flat_with_epistemic_ref(
     summary: &IrProgramSummaryFlat,
     epistemic: IrEpistemicSection
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
-    let lo = lowerer_new_from_program_summary_flat(summary, epistemic)
-    var lo2 = lo.lower_program_bodies_ref(&prog.items)
+    var lo2 = lowerer_new_from_program_summary_flat(summary, epistemic)
+    lowerer_lower_program_items_ref_mut(&! lo2, &prog.items)
     var patch_stats = ir_empty_validated_patch_stats()
     IrLowerBoxResult {
         module: lo2.module,
