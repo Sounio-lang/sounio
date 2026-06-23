@@ -175,7 +175,6 @@ release_critical = {
     "stdlib.surface": "broad stdlib callability is explicitly downgraded",
     "tooling.package": "package manager has no public registry launch/support contract",
     "tooling.editor": "formatter, REPL, and editor tooling are prototype surfaces",
-    "website.docs": "docs are extensive but not yet filtered into a release-grade public support contract",
 }
 
 allowed_levels = {"stable", "validated_research"}
