@@ -6828,7 +6828,27 @@ impl Lowerer {
         (lo3, dst)
     }
 
+    // Receiver struct type for a method call, when the receiver is a simple local
+    // (e.g. `c.method()` -> type of `c`). Used to mangle the call to the same name the
+    // impl method was registered under. Empty when the type can't be determined here.
+    fn lower_method_recv_type(self, left: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+        match *left {
+            Some(recv) => {
+                if (*recv).kind == ExprKind::ExprIdent {
+                    return self.lookup_local_struct_type((*recv).name)
+                }
+                ir_empty_name()
+            }
+            _ => ir_empty_name()
+        }
+    }
+
     fn lower_method_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Impl methods are lowered as mangled free functions (ir_mangle_method_name).
+        // A `recv.method()` call must resolve to that SAME mangled name; using the bare
+        // method name finds/creates a body-less fn -> codegen crash.
+        let recv_type = self.lower_method_recv_type(&e.left)
+        let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, e.name) } else { e.name }
         let pair_b = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_b.0
         let base_reg = pair_b.1
@@ -6837,7 +6857,7 @@ impl Lowerer {
         let arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
         let arg_count = pair_args.count
         let args2 = lo2.prepend_arg(base_reg, arg_list)
-        let pair_fn = lo2.find_or_add_fn_id(e.name)
+        let pair_fn = lo2.find_or_add_fn_id(call_name)
         let lo3 = pair_fn.0
         let fn_id = pair_fn.1
         let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args2, arg_count + 1)
@@ -6847,7 +6867,7 @@ impl Lowerer {
         let pair_d = lo4.fresh_reg()
         let lo5 = pair_d.0
         let dst = pair_d.1
-        var call_instr_m = ir_call(dst, fn_id, e.name, final_args, final_argc)
+        var call_instr_m = ir_call(dst, fn_id, call_name, final_args, final_argc)
         if fn_id >= 0 && fn_id < (*lo5.module).fn_count {
             if (*lo5.module).functions[fn_id as usize].returns_float == 1 {
                 call_instr_m.imm_flags = IR_FLOAT_REG_MARKER_FLAG
