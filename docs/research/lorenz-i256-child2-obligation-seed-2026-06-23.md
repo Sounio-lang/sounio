@@ -1,11 +1,16 @@
 <!-- docs:meta
 topic_id: repo.docs.research.lorenz-i256-child2-obligation-seed-2026-06-23
-authority: research
+authority: historical
 audience: researchers
-last_validated: 2026-06-23
-validated_by: Codex
-source_of_truth: docs/research/lorenz-i256-child2-obligation-seed-2026-06-23.md
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.lorenz-i256-child2-obligation-seed-2026-06-23
 -->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
 
 # Lorenz i256 Child-2 Obligation Seed
 
