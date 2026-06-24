@@ -26,3 +26,17 @@ git -C "$ROOT" config merge.governance-regen.driver \
 
 echo "Installed git merge driver: governance-regen"
 echo "  selects: docs/governance/{DOCS_ACCEPTANCE_REPORT.md,DOCS_AUTHORITY_MATRIX.md,topic-registry.v1.json}"
+
+# post-merge hook: the driver runs mid-merge and can leave the generated
+# governance files stale, so regenerate them from the fully-merged tree after
+# the merge completes. Installed into the per-worktree hooks dir.
+HOOKS_DIR="$(git -C "$ROOT" rev-parse --git-path hooks)"
+mkdir -p "$HOOKS_DIR"
+if [[ -e "$HOOKS_DIR/post-merge" ]] && ! grep -q "regenerate governance metadata" "$HOOKS_DIR/post-merge" 2>/dev/null; then
+    echo "WARNING: $HOOKS_DIR/post-merge already exists and is not ours; leaving it untouched." >&2
+    echo "  Append the body of scripts/dev/git-hooks/post-merge manually if desired." >&2
+else
+    cp "$ROOT/scripts/dev/git-hooks/post-merge" "$HOOKS_DIR/post-merge"
+    chmod +x "$HOOKS_DIR/post-merge"
+    echo "Installed git hook: post-merge (regenerates governance metadata)"
+fi
