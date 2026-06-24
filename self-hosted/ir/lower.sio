@@ -5515,6 +5515,13 @@ impl Lowerer {
                         // handle) rather than a raw IrUnaryOp(OpDeref) pointer load.
                         lo = lo.bind_local_struct_type(s.name, callee_struct_name)
                     }
+                } else if (*expr_box).kind == ExprKind::ExprIdent {
+                    // `let b = nx`: propagate the source variable's struct type (e.g. a Box
+                    // bound from `Some(nx)`) so `*b` / field access on b resolve correctly.
+                    let src_st = lo.lookup_local_struct_type((*expr_box).name)
+                    if src_st.len > 0 {
+                        lo = lo.bind_local_struct_type(s.name, src_st)
+                    }
                 }
             }
             _ => {}
@@ -5932,24 +5939,48 @@ impl Lowerer {
     }
 
     // Lower a single match arm: test pattern, conditionally execute body
+    // If the arm has an `if <cond>` guard, evaluate it (pattern variables are already bound)
+    // and fall through to l_skip (treat as a non-match) when the guard is false.
+    fn lower_arm_guard(self, guard: &Option<Box<Expr> >, l_skip: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match *guard {
+            Some(g) => {
+                let pair = self.lower_expr_ref(&(*g))
+                var lo = pair.0
+                lo.emit(ir_branch_false(pair.1, l_skip))
+            }
+            _ => self,
+        }
+    }
+
     fn lower_match_arm_ref(self, scrut: i64, res: i64, l_end: i64, arm: &MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         let pat = &arm.pattern
         if pat.kind == PatternKind::PatWildcard {
-            // Wildcard always matches — evaluate body unconditionally
-            let pair = self.lower_expr_ref(&arm.body)
-            var lo = pair.0
-            let body_reg = pair.1
-            lo = lo.emit(ir_copy(res, body_reg))
-            lo = lo.emit(ir_jump(l_end))
-            lo
-        } else if pat.kind == PatternKind::PatBinding {
-            // Binding always matches — bind scrutinee to name, evaluate body
-            var lo = self.bind_local(pat.name, scrut, pat.is_mut)
+            // Wildcard matches the pattern unconditionally; an `if` guard can still reject it,
+            // so allocate l_skip (dead when there is no guard).
+            let pair_l = self.fresh_label()
+            var lo = pair_l.0
+            let l_skip = pair_l.1
+            lo = lo.lower_arm_guard(&arm.guard, l_skip)
             let pair = lo.lower_expr_ref(&arm.body)
             lo = pair.0
             let body_reg = pair.1
             lo = lo.emit(ir_copy(res, body_reg))
             lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
+            lo
+        } else if pat.kind == PatternKind::PatBinding {
+            // Binding matches the pattern; bind the scrutinee, then a guard may reject it.
+            var lo = self.bind_local(pat.name, scrut, pat.is_mut)
+            let pair_l = lo.fresh_label()
+            lo = pair_l.0
+            let l_skip = pair_l.1
+            lo = lo.lower_arm_guard(&arm.guard, l_skip)
+            let pair = lo.lower_expr_ref(&arm.body)
+            lo = pair.0
+            let body_reg = pair.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
             lo
         } else if pat.kind == PatternKind::PatEnum {
             let variant_name = ir_path_last_name(pat.path)
@@ -5965,6 +5996,7 @@ impl Lowerer {
                 lo = lo.emit(ir_branch_false(scrut, l_skip))
                 // Bind the inner pattern (first sub_pattern) to scrutinee value
                 lo = lo.bind_match_sub_pattern(scrut, pat.sub_patterns)
+                lo = lo.lower_arm_guard(&arm.guard, l_skip)
                 let pair_b = lo.lower_expr_ref(&arm.body)
                 lo = pair_b.0
                 let body_reg = pair_b.1
@@ -5979,6 +6011,7 @@ impl Lowerer {
                 let l_skip = pair_l.1
                 // Branch if scrutinee != 0 (skip this arm)
                 lo = lo.emit(ir_branch_true(scrut, l_skip))
+                lo = lo.lower_arm_guard(&arm.guard, l_skip)
                 let pair_b = lo.lower_expr_ref(&arm.body)
                 lo = pair_b.0
                 let body_reg = pair_b.1
@@ -6002,6 +6035,7 @@ impl Lowerer {
                     let cmp_reg = pair_cmp.1
                     lo = lo.emit(ir_binop(cmp_reg, scrut, BinaryOp::OpEq, disc_reg))
                     lo = lo.emit(ir_branch_false(cmp_reg, l_skip))
+                    lo = lo.lower_arm_guard(&arm.guard, l_skip)
                     let pair_b = lo.lower_expr_ref(&arm.body)
                     lo = pair_b.0
                     let body_reg = pair_b.1
@@ -6028,6 +6062,7 @@ impl Lowerer {
             let cmp_reg = pair_cmp.1
             lo = lo.emit(ir_binop(cmp_reg, scrut, BinaryOp::OpEq, lit_reg))
             lo = lo.emit(ir_branch_false(cmp_reg, l_skip))
+            lo = lo.lower_arm_guard(&arm.guard, l_skip)
             let pair_b = lo.lower_expr_ref(&arm.body)
             lo = pair_b.0
             let body_reg = pair_b.1
@@ -6040,6 +6075,7 @@ impl Lowerer {
             var lo = pair_l.0
             let l_skip = pair_l.1
             lo = lo.emit(ir_branch_false(scrut, l_skip))
+            lo = lo.lower_arm_guard(&arm.guard, l_skip)
             let pair_b = lo.lower_expr_ref(&arm.body)
             lo = pair_b.0
             let body_reg = pair_b.1
@@ -6052,6 +6088,7 @@ impl Lowerer {
             var lo = pair_l.0
             let l_skip = pair_l.1
             lo = lo.emit(ir_branch_true(scrut, l_skip))
+            lo = lo.lower_arm_guard(&arm.guard, l_skip)
             let pair_b = lo.lower_expr_ref(&arm.body)
             lo = pair_b.0
             let body_reg = pair_b.1
@@ -6713,7 +6750,15 @@ impl Lowerer {
             Some(list) => {
                 let inner = (*list).head
                 if inner.kind == PatternKind::PatBinding {
-                    self.bind_local(inner.name, scrut, inner.is_mut)
+                    var lo = self.bind_local(inner.name, scrut, inner.is_mut)
+                    // The payload of `Some(nx)` on an Option<Box<T>> is a Box handle, so mark
+                    // the bound variable as a Box: `*nx` then lowers to the box-handle deref
+                    // (IrFieldGet 0) instead of raw-dereferencing the handle (which crashed —
+                    // the recursive-data root). Safe for non-Box payloads: marking only
+                    // changes how `*nx` lowers, and deref/field-access of a non-Box payload
+                    // (e.g. Option<i64>) is not valid code anyway.
+                    lo = lo.bind_local_struct_type(inner.name, make_name("Box"))
+                    lo
                 } else if inner.kind == PatternKind::PatWildcard {
                     // _ inside Some(_) — no binding needed
                     self
